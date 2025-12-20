@@ -638,10 +638,10 @@
   // usa un proxy (Cloud Function / server) se il file diventa accessibile dall'esterno.
   // Qui lasciamo una configurazione semplice (ok per rete interna/kiosk).
   const ELEVENLABS_API_KEY  = "sk_ac50f19d8de7f171a14cd8fdc50c12ce4f95342a8c753422"; // <-- incolla qui la tua API key ElevenLabs
-  const ELEVENLABS_VOICE_ID = "Xb7hH8MSUJpSbSDYk0k2"; // <-- cambia con la tua voce (Voice ID)
+  const ELEVENLABS_VOICE_ID = "21m00Tcm4TlvDq8ikWAM"; // <-- cambia con la tua voce (Voice ID)
 
   // Modello consigliato per latenza bassa (docs): eleven_flash_v2_5
-  const ELEVENLABS_MODEL_ID = "eleven_flash_v2_5";
+  const ELEVENLABS_MODEL_ID = "eleven_v3";
 
 // ===== BOOT BAR (0-100%) =====
 // Non tocca cloud/sheet/firebase: è solo overlay UI.
@@ -840,51 +840,59 @@ const Boot = (() => {
   // Non tocca dinamismi / sheet / firebase: è solo audio UI.
   let _cueCtx = null;
   function playCue(kind){
-    // Se il browser blocca l'audio, fallisce in modo "silenzioso"
-    return new Promise((resolve) => {
-      try{
-        const AC = window.AudioContext || window.webkitAudioContext;
-        if(!AC) return resolve();
+  // Suono "elegante" a volume medio-alto (chime a due note).
+  // Fail-silent in caso di blocchi autoplay.
+  return new Promise((resolve) => {
+    try{
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if(!AC) return resolve();
 
-        if(!_cueCtx) _cueCtx = new AC();
+      if(!_cueCtx) _cueCtx = new AC();
+      if(_cueCtx.state === "suspended"){
+        _cueCtx.resume().catch(()=>{});
+      }
 
-        // se è "suspended" (autoplay policy), prova a riprendere
-        if(_cueCtx.state === "suspended"){
-          _cueCtx.resume().catch(()=>{});
-        }
+      // Start: salita morbida / End: discesa morbida
+      const notes = (kind === "end")
+        ? [{f: 988, d: 120}, {f: 740, d: 140}]
+        : [{f: 740, d: 110}, {f: 988, d: 120}];
 
-        const spec = (kind === "end")
-          ? { freq: 660, dur: 140 }
-          : { freq: 880, dur: 120 }; // start
+      const base = _cueCtx.currentTime;
+      const peak = 0.70; // medio-alto (0..1). Alza/abbassa qui.
 
-        const t0 = _cueCtx.currentTime;
+      let offset = 0;
+      for(const n of notes){
+        const t0 = base + offset;
+        const dur = n.d / 1000;
+
         const osc = _cueCtx.createOscillator();
         const gain = _cueCtx.createGain();
 
         osc.type = "sine";
-        osc.frequency.setValueAtTime(spec.freq, t0);
+        osc.frequency.setValueAtTime(n.f, t0);
 
-        // Envelope morbido (niente "click")
+        // Envelope elegante (attacco rapido, decadimento morbido)
         gain.gain.setValueAtTime(0.0001, t0);
-        gain.gain.exponentialRampToValueAtTime(0.12, t0 + 0.01);
-        gain.gain.exponentialRampToValueAtTime(0.0001, t0 + (spec.dur/1000));
+        gain.gain.exponentialRampToValueAtTime(peak, t0 + 0.012);
+        gain.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
 
         osc.connect(gain);
         gain.connect(_cueCtx.destination);
 
         osc.start(t0);
-        osc.stop(t0 + (spec.dur/1000) + 0.02);
+        osc.stop(t0 + dur + 0.03);
 
-        const ms = spec.dur + 30;
-        setTimeout(() => {
-          try{ osc.disconnect(); gain.disconnect(); }catch(_){}
-          resolve();
-        }, ms);
-      }catch(_){
-        resolve();
+        offset += dur + 0.015; // micro-pausa tra le note
       }
-    });
-  }
+
+      const totalMs = notes.reduce((a,n)=>a+n.d,0) + 70;
+      setTimeout(resolve, totalMs);
+    }catch(_){
+      resolve();
+    }
+  });
+}
+
 
   async function speak(text){
     const msg = String(text || "").trim();
@@ -993,21 +1001,21 @@ const Boot = (() => {
     completed: [
       "Operazione completata. Registrati {QTY} pezzi: {LABEL}.",
       "Confermato. {QTY} pezzi completati per {LABEL}.",
-      "OK produzione. {LABEL}: {QTY} pezzi registrati.",
+      "Avanzamento acquisito dal sistema. {LABEL}: {QTY} pezzi registrati.",
       "Lotto chiuso. {QTY} pezzi segnati su {LABEL}.",
       "Avanzamento registrato. {LABEL} completato: {QTY} pezzi."
     ],
     next: [
       "Prossimo prodotto in coda: {NEXT}.",
-      "Ora passa al prossimo: {NEXT}.",
-      "In arrivo il prossimo prodotto: {NEXT}.",
+      "Linea pronta. Avvio sul prossimo prodotto: {NEXT}.",
+      "Coda produzione attiva. Prossimo articolo: {NEXT}.",
       "Successivo da fare: {NEXT}."
     ],
     close: [
       "Buon lavoro.",
-      "Procedi.",
-      "Vai così.",
-      "Avanti tutta."
+      "Operatività confermata.",
+      "Linea stabile. Proseguire.",
+      "Avanzamento attivo."
     ],
     noNext: [
       "Coda completata. Buon lavoro.",
@@ -1054,7 +1062,7 @@ const Boot = (() => {
     open: [
       "Sistema avviato.",
       "Avvio completato.",
-      "Interfaccia pronta.",
+      "Pannello attivo. Sistema in funzione.",
       "Sistema operativo. Pannello attivo.",
       "Sistema online."
     ],
