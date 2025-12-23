@@ -615,6 +615,59 @@
       .mobileOnly{ display:block; }
     }
 
+    /* Login debug */
+    #loginDebug{
+      position: fixed;
+      bottom: 12px;
+      right: 12px;
+      width: min(360px, calc(100% - 24px));
+      border-radius: 16px;
+      background: #0b1220;
+      color: #eaf7ff;
+      border:1px solid rgba(53,242,255,.28);
+      box-shadow: 0 18px 38px rgba(0,0,0,.32);
+      z-index: 10030;
+      font-size: 13px;
+      display:none;
+      overflow:hidden;
+    }
+    #loginDebug .hd{
+      padding:10px 12px;
+      font-weight:900;
+      letter-spacing:.04em;
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      border-bottom:1px solid rgba(255,255,255,.12);
+      background:linear-gradient(90deg, rgba(53,242,255,.16), rgba(53,242,255,.04));
+    }
+    #loginDebug .bd{
+      padding:10px 12px;
+      display:flex;
+      flex-direction:column;
+      gap:6px;
+      max-height: 60vh;
+      overflow:auto;
+    }
+    #loginDebug .row{
+      display:flex;
+      align-items:flex-start;
+      gap:8px;
+    }
+    #loginDebug .k{ width:48%; color:#8ad5ff; font-weight:800; }
+    #loginDebug .v{ flex:1; color:#f8fbff; word-break:break-word; }
+    #loginDebug .pill{
+      display:inline-flex;
+      align-items:center;
+      gap:6px;
+      padding:6px 10px;
+      border-radius:12px;
+      font-weight:800;
+    }
+    #loginDebug .pill.ok{ background:rgba(46,204,113,.16); color:#a7f5c9; border:1px solid rgba(46,204,113,.38); }
+    #loginDebug .pill.bad{ background:rgba(255,77,79,.16); color:#ffc8c8; border:1px solid rgba(255,77,79,.36); }
+    #loginDebug .pill.warn{ background:rgba(255,149,0,.12); color:#ffd9a1; border:1px solid rgba(255,149,0,.32); }
+
 </style>
 </head>
 <body>
@@ -639,6 +692,14 @@
       <div class="ah">Accesso operatore</div>
       <div class="ab" id="authBody"></div>
     </div>
+  </div>
+
+  <div id="loginDebug" aria-live="polite">
+    <div class="hd">
+      <div>LOGIN DEBUG</div>
+      <div id="loginDebugBadge" class="pill warn">INIZIALIZZAZIONE</div>
+    </div>
+    <div class="bd" id="loginDebugBody"></div>
   </div>
 
 
@@ -915,6 +976,9 @@
     messagingSenderId: "537555699968",
     appId: "1:537555699968:web:4d04cb9596b67bfb0e4be5"
   };
+  const INLINE_GOOGLE_CLIENT_ID = (window.GC_GOOGLE_CLIENT_ID || document.querySelector('meta[name="google-signin-client_id"]')?.content || "").trim();
+  const FALLBACK_GOOGLE_CLIENT_ID = "537555699968-4d04cb9596b67bfb0e4be5.apps.googleusercontent.com";
+  const DEBUG_MODE = new URLSearchParams(location.search).get("debug") === "1";
 
   const OPERATORS = ["Hassan","Ahmed","Muhammed","Mustapha","Youssef"];
   const NON_PERTINENT_CODES = new Set(["mast250viri","mast500viri","codmast250viri","codmast500viri"]);
@@ -943,6 +1007,27 @@
       api: null,
     },
   };
+  const authDebug = {
+    enabled: DEBUG_MODE,
+    scriptStatus: "pending",
+    scriptError: "",
+    googleObj: false,
+    clientId: INLINE_GOOGLE_CLIENT_ID || FALLBACK_GOOGLE_CLIENT_ID || "",
+    callbackCalled: false,
+    credentialReceived: false,
+    decodedEmail: "",
+    decodedPayload: null,
+    whitelist: "",
+    whitelistReason: "",
+    firebaseSignIn: "",
+    lastError: "",
+    lastRejection: "",
+    callbackTs: null,
+    scriptTs: null
+  };
+  let resolvedClientId = authDebug.clientId;
+  let gsiInitPromise = null;
+  let authStateUnsub = null;
 
   // ===============================
   // UTILS
@@ -982,6 +1067,78 @@
   }
   function isMobile(){
     return window.matchMedia("(max-width: 979px)").matches || /Android|iPhone|iPad|iPod/i.test(navigator.userAgent||"");
+  }
+  function maskClientId(id){
+    if(!id) return "—";
+    const t = id.trim();
+    if(t.length <= 8) return t;
+    return `${t.slice(0,4)}…${t.slice(-4)}`;
+  }
+  function escapeHtml(str){
+    return (str||"").toString().replace(/[&<>"']/g, s=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[s]));
+  }
+  function decodeJwt(token){
+    if(!token || typeof token !== "string") return null;
+    const parts = token.split(".");
+    if(parts.length < 2) return null;
+    try{
+      const payload = parts[1]
+        .replace(/-/g,"+")
+        .replace(/_/g,"/");
+      const pad = payload.length % 4;
+      const norm = payload + (pad ? "=".repeat(4-pad) : "");
+      const json = atob(norm);
+      return JSON.parse(json);
+    }catch(_e){
+      return null;
+    }
+  }
+  function formatErr(err){
+    if(!err) return "";
+    if(typeof err === "string") return err;
+    return err.message || err.toString() || "";
+  }
+  function renderLoginDebug(){
+    if(!authDebug.enabled) return;
+    const panel = $("loginDebug");
+    if(!panel) return;
+    panel.style.display = "block";
+    const rows = [
+      ["Script GSI", authDebug.scriptStatus === "ok" ? `<span class="pill ok">OK</span>` : authDebug.scriptStatus === "fail" ? `<span class="pill bad">FAIL</span>` : `<span class="pill warn">ATTESA</span>`],
+      ["window.google.accounts.id", authDebug.googleObj ? `<span class="pill ok">YES</span>` : `<span class="pill bad">NO</span>`],
+      ["client_id", authDebug.clientId ? `<span class="pill ok">YES</span> <span>${escapeHtml(maskClientId(authDebug.clientId))}</span>` : `<span class="pill bad">NO</span>`],
+      ["callback chiamata", authDebug.callbackCalled ? `<span class="pill ok">YES</span>` : `<span class="pill warn">NO</span>`],
+      ["email token", authDebug.decodedEmail ? escapeHtml(authDebug.decodedEmail) : "—"],
+      ["esito whitelist", authDebug.whitelist ? escapeHtml(authDebug.whitelist + (authDebug.whitelistReason ? ` (${authDebug.whitelistReason})` : "")) : "—"],
+      ["firebase signin", authDebug.firebaseSignIn || "—"],
+      ["ultimo errore", escapeHtml(authDebug.lastError || authDebug.lastRejection || authDebug.scriptError || "—")]
+    ];
+    const body = rows.map(([k,v])=>`<div class="row"><div class="k">${k}</div><div class="v">${v}</div></div>`).join("");
+    $("loginDebugBody").innerHTML = body;
+    const badge = $("loginDebugBadge");
+    if(badge){
+      if(authDebug.whitelist?.toLowerCase().includes("autorizzato")){
+        badge.className = "pill ok";
+        badge.textContent = "OK";
+      }else if(authDebug.lastError || authDebug.scriptStatus === "fail"){
+        badge.className = "pill bad";
+        badge.textContent = "ERRORE";
+      }else{
+        badge.className = "pill warn";
+        badge.textContent = "IN ATTESA";
+      }
+    }
+  }
+  window.addEventListener("error", (ev)=>{
+    authDebug.lastError = formatErr(ev.error || ev.message || ev);
+    renderLoginDebug();
+  });
+  window.addEventListener("unhandledrejection", (ev)=>{
+    authDebug.lastRejection = formatErr(ev.reason || ev);
+    renderLoginDebug();
+  });
+  if(authDebug.enabled){
+    setTimeout(()=>renderLoginDebug(), 0);
   }
 
   // ===============================
@@ -1402,6 +1559,87 @@ function showAuthGate(){
     $("authGate").classList.remove("show");
     unlockBody();
   }
+  async function fullLogout(email=""){
+    try{
+      if(window.google && google.accounts && google.accounts.id && email){
+        google.accounts.id.revoke(email, ()=>{});
+      }
+    }catch(_e){}
+    try{ await state.firebase.authApi?.signOut?.(state.firebase.auth); }catch(_e){}
+    state.user = null;
+    state.operator = null;
+    $("hdrUser").textContent = "—";
+    setOperationalDisabled(true);
+  }
+  async function resolveGoogleClientId(){
+    if(resolvedClientId) return resolvedClientId;
+    const inline = (INLINE_GOOGLE_CLIENT_ID || "").trim();
+    if(inline){
+      resolvedClientId = inline;
+      authDebug.clientId = inline;
+      renderLoginDebug();
+      return resolvedClientId;
+    }
+    try{
+      const res = await fetch(`https://www.googleapis.com/identitytoolkit/v3/relyingparty/getProjectConfig?key=${firebaseConfig.apiKey}`, {
+        method: "POST",
+        headers: { "Content-Type":"application/json" },
+        body: JSON.stringify({ projectId: firebaseConfig.projectId })
+      });
+      if(res.ok){
+        const data = await res.json();
+        const cid = (data?.clientId || (data?.clientIds||[])[0] || "").trim();
+        if(cid){
+          resolvedClientId = cid;
+          authDebug.clientId = cid;
+          renderLoginDebug();
+          return resolvedClientId;
+        }
+      }else{
+        authDebug.scriptError = `Config fetch ${res.status}`;
+      }
+    }catch(err){
+      authDebug.scriptError = formatErr(err);
+    }
+    resolvedClientId = FALLBACK_GOOGLE_CLIENT_ID || "";
+    authDebug.clientId = resolvedClientId;
+    renderLoginDebug();
+    return resolvedClientId;
+  }
+  function loadGsiScript(){
+    if(gsiInitPromise) return gsiInitPromise;
+    gsiInitPromise = new Promise((resolve, reject)=>{
+      const existing = document.querySelector("script[data-gsi]");
+      if(existing && authDebug.scriptStatus === "ok"){
+        resolve();
+        return;
+      }
+      const s = document.createElement("script");
+      s.src = "https://accounts.google.com/gsi/client";
+      s.async = true;
+      s.defer = true;
+      s.dataset.gsi = "1";
+      s.onload = ()=>{
+        authDebug.scriptStatus = "ok";
+        authDebug.scriptTs = Date.now();
+        authDebug.googleObj = !!(window.google && google.accounts && google.accounts.id);
+        renderLoginDebug();
+        resolve();
+      };
+      s.onerror = ()=>{
+        authDebug.scriptStatus = "fail";
+        authDebug.scriptError = "Script GSI non caricato";
+        renderLoginDebug();
+        gsiInitPromise = null;
+        reject(new Error("GSI load failed"));
+      };
+      document.head.appendChild(s);
+      authDebug.scriptStatus = "loading";
+      authDebug.scriptTs = Date.now();
+      renderLoginDebug();
+    });
+    return gsiInitPromise;
+  }
   async function getAccessByEmail(email){
     const e = String(email||"").trim().toLowerCase();
     if(!e) return null;
@@ -1428,7 +1666,7 @@ function showAuthGate(){
       <div class="muted">Se serve, chiedi all’amministrazione di abilitare la tua email.</div>
     `;
     $("btnLogout").onclick = async () => {
-      try{ await state.firebase.authApi.signOut(state.firebase.auth); }catch(e){}
+      await fullLogout(email||"");
       renderAuthLogin("");
     };
     setOperationalDisabled(true);
@@ -1444,36 +1682,15 @@ function showAuthGate(){
       <div class="muted">${msg || "Accedi con Google. L’accesso è consentito solo alle email autorizzate."}</div>
       <div style="height:12px"></div>
 
-      <button class="btn good" id="btnGoogle" style="width:100%;">Accedi con Google</button>
+      <div id="gsiBtnContainer" style="display:flex;justify-content:center;"></div>
       <div style="height:8px"></div>
-      <button class="btn ghost" id="btnGoogleFallback" style="width:100%;">Se il login non parte, riprova qui</button>
+      <button class="btn ghost" id="btnGoogleFallback" style="width:100%;">Riprova caricamento login</button>
       <div style="height:12px"></div>
-      <div class="muted">Non è previsto l’accesso con email/password o altri metodi. Il login usa il flusso di redirect Google (nessun popup).</div>
+      <div class="muted">Non è previsto l’accesso con email/password o altri metodi. Il login usa Google Identity Services.</div>
     `;
 
-    const startRedirect = async (label="standard") => {
-      const authApi = state.firebase.authApi;
-      const auth = state.firebase.auth;
-      if(!authApi || !auth){
-        state.lastAuthErrorMsg = "Autenticazione non disponibile. Riprova tra poco.";
-        renderAuthLogin(state.lastAuthErrorMsg);
-        return;
-      }
-      const prov = new authApi.GoogleAuthProvider();
-      prov.setCustomParameters({ prompt: "select_account" });
-      state.lastAuthErrorMsg = "";
-      try{
-        await authApi.signInWithRedirect(auth, prov);
-      }catch(err){
-        console.warn(`Google redirect error (${label})`, err);
-        state.lastAuthErrorMsg = humanAuthErr(err);
-        showToast("Accesso", state.lastAuthErrorMsg);
-        renderAuthLogin(state.lastAuthErrorMsg);
-      }
-    };
-
-    b.querySelector("#btnGoogle").onclick = ()=>startRedirect("primary");
-    b.querySelector("#btnGoogleFallback").onclick = ()=>startRedirect("fallback");
+    initGoogleIdentity(true);
+    b.querySelector("#btnGoogleFallback").onclick = ()=>initGoogleIdentity(true);
   }
 
   async function upsertUserProfile(user, fields){
@@ -1493,71 +1710,158 @@ function showAuthGate(){
     return snap.exists() ? (snap.data()||{}) : null;
   }
 
+  async function handleGsiCredential(response, authApi, auth){
+    authDebug.callbackCalled = true;
+    authDebug.credentialReceived = !!response?.credential;
+    authDebug.callbackTs = Date.now();
+    renderLoginDebug();
+    if(!response || !response.credential){
+      authDebug.lastError = "Callback senza credential";
+      renderLoginDebug();
+      renderAuthLogin("Credenziali Google non ricevute. Riprova.");
+      return;
+    }
+    const payload = decodeJwt(response.credential);
+    authDebug.decodedPayload = payload;
+    const email = (payload?.email || payload?.email_verified || "").toLowerCase();
+    authDebug.decodedEmail = email;
+    if(!email){
+      authDebug.lastError = "Email non presente nel token";
+      renderLoginDebug();
+      renderAuthDenied("", "Email non disponibile nel token Google.");
+      await fullLogout("");
+      return;
+    }
+
+    const operatorName = OPERATOR_WHITELIST[email] || "";
+    const isAdmin = ADMIN_EMAILS.has(email);
+    const allowed = !!(operatorName || isAdmin);
+    authDebug.whitelist = allowed ? "autorizzato" : "non autorizzato";
+    authDebug.whitelistReason = allowed ? (isAdmin ? "admin" : "operatore whitelist") : "Email non in whitelist";
+    renderLoginDebug();
+
+    if(!allowed){
+      renderAuthDenied(email, "Email non presente in whitelist.");
+      await fullLogout(email);
+      return;
+    }
+
+    try{
+      const cred = authApi.GoogleAuthProvider.credential(response.credential);
+      const res = await authApi.signInWithCredential(auth, cred);
+      authDebug.firebaseSignIn = "OK";
+      const user = res?.user;
+      const fullName = (isAdmin ? (user?.displayName||operatorName||email) : (operatorName || user?.displayName || email));
+      const roleLabel = isAdmin ? "Admin" : "Operatore";
+      state.user = { uid: user?.uid || email, fullName, email: user?.email || email, isAdmin };
+      state.operator = fullName;
+      $("hdrUser").textContent = `${roleLabel}: ${fullName}`;
+      setOperationalDisabled(false);
+      hideAuthGate();
+      renderHome();
+      renderLoginDebug();
+    }catch(err){
+      console.warn("GSI -> Firebase signIn error", err);
+      authDebug.firebaseSignIn = "ERRORE";
+      authDebug.lastError = formatErr(err);
+      renderLoginDebug();
+      renderAuthLogin(humanAuthErr(err));
+    }
+  }
+
+  async function initGoogleIdentity(forcePrompt=false){
+    const authApi = state.firebase.authApi;
+    const auth = state.firebase.auth;
+    if(!authApi || !auth){
+      state.lastAuthErrorMsg = "Autenticazione non disponibile. Riprova tra poco.";
+      renderAuthLogin(state.lastAuthErrorMsg);
+      return;
+    }
+    try{
+      await loadGsiScript();
+      const clientId = await resolveGoogleClientId();
+      if(!clientId){
+        authDebug.lastError = "client_id mancante";
+        renderLoginDebug();
+        renderAuthLogin("Configurazione Google mancante (client_id).");
+        return;
+      }
+      authDebug.googleObj = !!(window.google && google.accounts && google.accounts.id);
+      renderLoginDebug();
+      if(!authDebug.googleObj){
+        throw new Error("google.accounts.id non disponibile");
+      }
+      google.accounts.id.initialize({
+        client_id: clientId,
+        callback: (resp)=>handleGsiCredential(resp, authApi, auth),
+        ux_mode: "popup",
+        use_fedcm_for_prompt: true,
+        auto_select: false,
+        cancel_on_tap_outside: true
+      });
+      const container = $("gsiBtnContainer");
+      if(container){
+        container.innerHTML = "";
+        google.accounts.id.renderButton(container, { theme:"outline", size:"large", text:"continue_with", type:"standard", shape:"pill" });
+      }
+      if(forcePrompt){
+        try{ google.accounts.id.prompt(); }catch(_e){}
+      }
+    }catch(err){
+      authDebug.lastError = formatErr(err);
+      renderLoginDebug();
+      console.warn("initGoogleIdentity error", err);
+      const readable = authDebug.lastError || "Errore caricamento Google Identity.";
+      try{
+        const muted = document.querySelector("#authBody .muted");
+        if(muted){ muted.textContent = `Login Google non disponibile: ${readable}`; }
+      }catch(_e){}
+      try{ showToast("Login Google", readable); }catch(_e){}
+    }
+  }
+
   async function ensureAuthFlow(){
     // chiamata dopo init firebase
     const authApi = state.firebase.authApi;
     const auth = state.firebase.auth;
 
-    // Gestisci redirect result (mostra errori)
-    try{
-      await authApi.getRedirectResult(auth);
-    }catch(e){
-      console.warn("getRedirectResult error", e);
-      state.lastAuthErrorMsg = humanAuthErr(e);
-    }
-authApi.onAuthStateChanged(auth, async(user)=>{
+    if(authStateUnsub){ authStateUnsub(); authStateUnsub = null; }
+    authStateUnsub = authApi.onAuthStateChanged(auth, async(user)=>{
       if(!user){
         state.user = null;
         state.operator = null;
         $("hdrUser").textContent = "—";
         setOperationalDisabled(true);
+        authDebug.whitelist = "";
+        authDebug.whitelistReason = "";
+        authDebug.decodedEmail = "";
+        authDebug.decodedPayload = null;
+        authDebug.callbackCalled = false;
+        authDebug.credentialReceived = false;
+        authDebug.firebaseSignIn = "";
         const msg = state.lastAuthErrorMsg || "";
         state.lastAuthErrorMsg = "";
         renderAuthLogin(msg);
+        renderLoginDebug();
         return;
       }
-
-      // Sessione valida 7 giorni per dispositivo (dopo scade e richiede nuovo accesso)
-      try{
-        const MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
-        const KEY_TS = "GC_AUTH_TS";
-        const KEY_EMAIL = "GC_AUTH_EMAIL";
-        const email = (user.email || "").toLowerCase();
-        const prevEmail = (localStorage.getItem(KEY_EMAIL) || "").toLowerCase();
-        const ts = parseInt(localStorage.getItem(KEY_TS) || "0", 10);
-        const now = Date.now();
-
-        if(prevEmail && prevEmail !== email){
-          // utente diverso: reset finestra
-          localStorage.setItem(KEY_EMAIL, email);
-          localStorage.setItem(KEY_TS, String(now));
-        }else if(ts && (now - ts) > MAX_AGE_MS){
-          // scaduta
-          localStorage.removeItem(KEY_TS);
-          localStorage.removeItem(KEY_EMAIL);
-          state.lastAuthErrorMsg = "Sessione scaduta (7 giorni). Accedi di nuovo.";
-          await authApi.signOut(auth);
-          return;
-        }else if(!ts){
-          // prima volta
-          localStorage.setItem(KEY_EMAIL, email);
-          localStorage.setItem(KEY_TS, String(now));
-        }
-      }catch(_e){}
 
       const email = (user.email||"").toLowerCase();
       if(!email){
         renderAuthDenied("", "Account Google senza email visibile.");
-        await authApi.signOut(auth);
+        await fullLogout("");
         return;
       }
       const operatorName = OPERATOR_WHITELIST[email] || "";
       const isAdmin = ADMIN_EMAILS.has(email);
       if(!operatorName && !isAdmin){
         renderAuthDenied(email, "Email non presente in whitelist.");
-        await authApi.signOut(auth);
+        await fullLogout(email);
         return;
       }
+      authDebug.decodedEmail = email;
+      authDebug.whitelist = "autorizzato";
+      authDebug.whitelistReason = isAdmin ? "admin (sessione Firebase)" : "operatore whitelist (sessione Firebase)";
       const fullName = (isAdmin ? (user.displayName||operatorName||email) : operatorName) || (user.displayName||email);
       const roleLabel = isAdmin ? "Admin" : "Operatore";
 
@@ -1567,7 +1871,10 @@ authApi.onAuthStateChanged(auth, async(user)=>{
       setOperationalDisabled(false);
       hideAuthGate();
       renderHome();
+      renderLoginDebug();
     });
+
+    await initGoogleIdentity(true);
   }
 
 
@@ -1879,10 +2186,6 @@ authApi.onAuthStateChanged(auth, async(user)=>{
     return { partial, full };
   }
 
-
-function escapeHtml(s){
-  return String(s==null?"":s).replace(/[&<>"']/g, (c)=>({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;" }[c]));
-}
 
 function tsFromId(id){
   try{
