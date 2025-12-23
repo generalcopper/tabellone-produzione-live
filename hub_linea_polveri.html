@@ -976,6 +976,7 @@
     messagingSenderId: "537555699968",
     appId: "1:537555699968:web:4d04cb9596b67bfb0e4be5"
   };
+  const PRIMARY_GOOGLE_CLIENT_ID = "537555699968-4d04cb9596b67bfb0e4be5.apps.googleusercontent.com";
   const INLINE_GOOGLE_CLIENT_ID = (window.GC_GOOGLE_CLIENT_ID || document.querySelector('meta[name="google-signin-client_id"]')?.content || "").trim();
   const FALLBACK_GOOGLE_CLIENT_ID = "537555699968-4d04cb9596b67bfb0e4be5.apps.googleusercontent.com";
   const DEBUG_MODE = new URLSearchParams(location.search).get("debug") === "1";
@@ -1006,6 +1007,11 @@
       db: null,
       api: null,
     },
+    authUi: {
+      status: "idle",
+      detail: "In attesa di login.",
+      blockReason: "",
+    }
   };
   const authDebug = {
     enabled: DEBUG_MODE,
@@ -1023,11 +1029,17 @@
     lastError: "",
     lastRejection: "",
     callbackTs: null,
-    scriptTs: null
+    scriptTs: null,
+    endpoints: [],
+    clientIdSource: "",
+    promptOngoing: false
   };
   let resolvedClientId = authDebug.clientId;
   let gsiInitPromise = null;
   let authStateUnsub = null;
+  let gsiFlowLock = null;
+  let gsiPromptActive = false;
+  let gsiPromptedOnce = false;
 
   // ===============================
   // UTILS
@@ -1093,6 +1105,42 @@
       return null;
     }
   }
+  function validateClientId(id){
+    const v = (id||"").trim();
+    const patternOk = /\.apps\.googleusercontent\.com$/.test(v);
+    const projectOk = v.startsWith(`${firebaseConfig.messagingSenderId}-`);
+    if(v && patternOk && projectOk) return { ok:true, reason:"" };
+    if(!v) return { ok:false, reason:"client_id mancante" };
+    if(!patternOk) return { ok:false, reason:"client_id non Google" };
+    if(!projectOk) return { ok:false, reason:"client_id di altro progetto" };
+    return { ok:false, reason:"client_id non valido" };
+  }
+  function logAuthEvent(label, status){
+    try{
+      const ts = fmtTime(new Date());
+      authDebug.endpoints = [{ label, status, ts }, ...(authDebug.endpoints||[])].slice(0, 8);
+      renderLoginDebug();
+    }catch(_e){}
+  }
+  function setLoginStatus(status, detail=""){
+    state.authUi.status = status;
+    state.authUi.detail = detail || ({
+      idle: "In attesa di login.",
+      pending: "Login in corso…",
+      waiting: "In attesa di login Google…",
+      ready: "Accedi con Google.",
+      error: "Login non riuscito.",
+      blocked: "Login disabilitato."
+    }[status] || "In attesa di login.");
+    const el = $("loginStatusLine");
+    if(el) el.textContent = state.authUi.detail;
+  }
+  function blockLogin(reason){
+    state.authUi.blockReason = reason || "Login disabilitato.";
+    setLoginStatus("blocked", state.authUi.blockReason);
+    authDebug.lastError = reason;
+    renderLoginDebug();
+  }
   function formatErr(err){
     if(!err) return "";
     if(typeof err === "string") return err;
@@ -1107,12 +1155,18 @@
       ["Script GSI", authDebug.scriptStatus === "ok" ? `<span class="pill ok">OK</span>` : authDebug.scriptStatus === "fail" ? `<span class="pill bad">FAIL</span>` : `<span class="pill warn">ATTESA</span>`],
       ["window.google.accounts.id", authDebug.googleObj ? `<span class="pill ok">YES</span>` : `<span class="pill bad">NO</span>`],
       ["client_id", authDebug.clientId ? `<span class="pill ok">YES</span> <span>${escapeHtml(maskClientId(authDebug.clientId))}</span>` : `<span class="pill bad">NO</span>`],
+      ["fonte client_id", authDebug.clientIdSource ? escapeHtml(authDebug.clientIdSource) : "—"],
+      ["stato UI login", escapeHtml(`${state.authUi.status||"idle"}${state.authUi.detail?` · ${state.authUi.detail}`:""}`)],
+      ["blocco login", state.authUi.blockReason ? `<span class="pill bad">${escapeHtml(state.authUi.blockReason)}</span>` : "—"],
       ["callback chiamata", authDebug.callbackCalled ? `<span class="pill ok">YES</span>` : `<span class="pill warn">NO</span>`],
       ["email token", authDebug.decodedEmail ? escapeHtml(authDebug.decodedEmail) : "—"],
       ["esito whitelist", authDebug.whitelist ? escapeHtml(authDebug.whitelist + (authDebug.whitelistReason ? ` (${authDebug.whitelistReason})` : "")) : "—"],
       ["firebase signin", authDebug.firebaseSignIn || "—"],
       ["ultimo errore", escapeHtml(authDebug.lastError || authDebug.lastRejection || authDebug.scriptError || "—")]
     ];
+    if(authDebug.endpoints?.length){
+      rows.push(["endpoint", authDebug.endpoints.map(e=>`${escapeHtml(e.label||"")} · ${escapeHtml(e.status||"")} (${escapeHtml(e.ts||"")})`).join("<br/>")]);
+    }
     const body = rows.map(([k,v])=>`<div class="row"><div class="k">${k}</div><div class="v">${v}</div></div>`).join("");
     $("loginDebugBody").innerHTML = body;
     const badge = $("loginDebugBadge");
@@ -1570,41 +1624,40 @@ function showAuthGate(){
     state.operator = null;
     $("hdrUser").textContent = "—";
     setOperationalDisabled(true);
+    setLoginStatus("idle", "In attesa di login.");
+    gsiPromptedOnce = false;
   }
   async function resolveGoogleClientId(){
     if(resolvedClientId) return resolvedClientId;
-    const inline = (INLINE_GOOGLE_CLIENT_ID || "").trim();
-    if(inline){
-      resolvedClientId = inline;
-      authDebug.clientId = inline;
-      renderLoginDebug();
-      return resolvedClientId;
-    }
-    try{
-      const res = await fetch(`https://www.googleapis.com/identitytoolkit/v3/relyingparty/getProjectConfig?key=${firebaseConfig.apiKey}`, {
-        method: "POST",
-        headers: { "Content-Type":"application/json" },
-        body: JSON.stringify({ projectId: firebaseConfig.projectId })
-      });
-      if(res.ok){
-        const data = await res.json();
-        const cid = (data?.clientId || (data?.clientIds||[])[0] || "").trim();
-        if(cid){
-          resolvedClientId = cid;
-          authDebug.clientId = cid;
-          renderLoginDebug();
-          return resolvedClientId;
-        }
-      }else{
-        authDebug.scriptError = `Config fetch ${res.status}`;
+    const sources = [
+      { label:"window.GC_GOOGLE_CLIENT_ID", getter:()=>window.GC_GOOGLE_CLIENT_ID },
+      { label:"localStorage.GC_GOOGLE_CLIENT_ID", getter:()=>{ try{return localStorage.getItem("GC_GOOGLE_CLIENT_ID");}catch(_e){ return ""; } } },
+      { label:"meta[google-signin-client_id]", getter:()=>document.querySelector('meta[name="google-signin-client_id"]')?.content },
+      { label:"PRIMARY_GOOGLE_CLIENT_ID", getter:()=>PRIMARY_GOOGLE_CLIENT_ID },
+      { label:"FALLBACK_GOOGLE_CLIENT_ID", getter:()=>FALLBACK_GOOGLE_CLIENT_ID },
+    ];
+    for(const src of sources){
+      const candidate = (src.getter?.() || "").trim();
+      if(!candidate){
+        logAuthEvent(src.label, "assente");
+        continue;
       }
-    }catch(err){
-      authDebug.scriptError = formatErr(err);
+      const check = validateClientId(candidate);
+      if(check.ok){
+        resolvedClientId = candidate;
+        state.authUi.blockReason = "";
+        authDebug.clientId = candidate;
+        authDebug.clientIdSource = src.label;
+        renderLoginDebug();
+        logAuthEvent(src.label, "OK");
+        return resolvedClientId;
+      } else {
+        logAuthEvent(src.label, check.reason || "client_id non valido");
+      }
     }
-    resolvedClientId = FALLBACK_GOOGLE_CLIENT_ID || "";
-    authDebug.clientId = resolvedClientId;
-    renderLoginDebug();
-    return resolvedClientId;
+    blockLogin("Configurazione Google mancante (client_id).");
+    renderAuthLogin("Configurazione Google mancante (client_id).");
+    return "";
   }
   function loadGsiScript(){
     if(gsiInitPromise) return gsiInitPromise;
@@ -1623,6 +1676,7 @@ function showAuthGate(){
         authDebug.scriptStatus = "ok";
         authDebug.scriptTs = Date.now();
         authDebug.googleObj = !!(window.google && google.accounts && google.accounts.id);
+        logAuthEvent("GSI client", "caricato");
         renderLoginDebug();
         resolve();
       };
@@ -1631,6 +1685,7 @@ function showAuthGate(){
         authDebug.scriptError = "Script GSI non caricato";
         renderLoginDebug();
         gsiInitPromise = null;
+        logAuthEvent("GSI client", "errore caricamento");
         reject(new Error("GSI load failed"));
       };
       document.head.appendChild(s);
@@ -1653,6 +1708,7 @@ function showAuthGate(){
 
   function renderAuthDenied(email, reason=""){
     showAuthGate();
+    setLoginStatus("error", reason || "Accesso non autorizzato.");
     const b = $("authBody");
     b.innerHTML = `
       <div class="stepTitle">Accesso non abilitato</div>
@@ -1677,20 +1733,35 @@ function showAuthGate(){
   function renderAuthLogin(msg=""){
     showAuthGate();
     const b = $("authBody");
+    const blocked = !!state.authUi.blockReason;
+    const banner = blocked ? `
+      <div class="warnBanner" role="alert">
+        <div class="icon">⚠️</div>
+        <div class="txt">
+          <div class="t">Login disabilitato</div>
+          <div class="s">${escapeHtml(state.authUi.blockReason)}</div>
+        </div>
+      </div>
+      <div style="height:12px"></div>
+    ` : "";
     b.innerHTML = `
       <div class="stepTitle">Accesso richiesto</div>
       <div class="muted">${msg || "Accedi con Google. L’accesso è consentito solo alle email autorizzate."}</div>
+      <div style="height:10px"></div>
+      <div class="muted" id="loginStatusLine">${escapeHtml(state.authUi.detail || "In attesa di login.")}</div>
       <div style="height:12px"></div>
-
-      <div id="gsiBtnContainer" style="display:flex;justify-content:center;"></div>
+      ${banner}
+      <div id="gsiBtnContainer" style="display:flex;justify-content:center;${blocked?'opacity:.35;pointer-events:none;filter:grayscale(1);':''}"></div>
       <div style="height:8px"></div>
-      <button class="btn ghost" id="btnGoogleFallback" style="width:100%;">Riprova caricamento login</button>
+      <button class="btn ghost" id="btnGoogleFallback" style="width:100%;${blocked?' opacity:.65;pointer-events:none;':''}" ${blocked?'disabled':''}>Riprova caricamento login</button>
       <div style="height:12px"></div>
       <div class="muted">Non è previsto l’accesso con email/password o altri metodi. Il login usa Google Identity Services.</div>
     `;
 
-    initGoogleIdentity(true);
-    b.querySelector("#btnGoogleFallback").onclick = ()=>initGoogleIdentity(true);
+    if(!blocked){
+      startGoogleIdentity(true, "renderAuthLogin");
+      b.querySelector("#btnGoogleFallback").onclick = ()=>startGoogleIdentity(true, "manual-retry");
+    }
   }
 
   async function upsertUserProfile(user, fields){
@@ -1711,6 +1782,10 @@ function showAuthGate(){
   }
 
   async function handleGsiCredential(response, authApi, auth){
+    gsiPromptActive = false;
+    authDebug.promptOngoing = false;
+    setLoginStatus("pending", "Verifica credenziale…");
+    logAuthEvent("FedCM prompt", "callback");
     authDebug.callbackCalled = true;
     authDebug.credentialReceived = !!response?.credential;
     authDebug.callbackTs = Date.now();
@@ -1718,6 +1793,7 @@ function showAuthGate(){
     if(!response || !response.credential){
       authDebug.lastError = "Callback senza credential";
       renderLoginDebug();
+      setLoginStatus("error", "Credenziali Google non ricevute.");
       renderAuthLogin("Credenziali Google non ricevute. Riprova.");
       return;
     }
@@ -1728,6 +1804,7 @@ function showAuthGate(){
     if(!email){
       authDebug.lastError = "Email non presente nel token";
       renderLoginDebug();
+      setLoginStatus("error", "Email non presente nel token.");
       renderAuthDenied("", "Email non disponibile nel token Google.");
       await fullLogout("");
       return;
@@ -1741,6 +1818,7 @@ function showAuthGate(){
     renderLoginDebug();
 
     if(!allowed){
+      setLoginStatus("error", "Email non autorizzata.");
       renderAuthDenied(email, "Email non presente in whitelist.");
       await fullLogout(email);
       return;
@@ -1757,6 +1835,8 @@ function showAuthGate(){
       state.operator = fullName;
       $("hdrUser").textContent = `${roleLabel}: ${fullName}`;
       setOperationalDisabled(false);
+      setLoginStatus("ready", "Login completato.");
+      logAuthEvent("Firebase signIn", "OK");
       hideAuthGate();
       renderHome();
       renderLoginDebug();
@@ -1765,27 +1845,32 @@ function showAuthGate(){
       authDebug.firebaseSignIn = "ERRORE";
       authDebug.lastError = formatErr(err);
       renderLoginDebug();
+      setLoginStatus("error", humanAuthErr(err));
+      logAuthEvent("Firebase signIn", humanAuthErr(err));
       renderAuthLogin(humanAuthErr(err));
     }
   }
 
-  async function initGoogleIdentity(forcePrompt=false){
+  async function startGoogleIdentity(forcePrompt=false, reason=""){
+    if(state.authUi.blockReason){
+      setLoginStatus("blocked", state.authUi.blockReason);
+      return;
+    }
+    const allowPrompt = forcePrompt && (!gsiPromptedOnce || reason === "manual-retry");
     const authApi = state.firebase.authApi;
     const auth = state.firebase.auth;
     if(!authApi || !auth){
       state.lastAuthErrorMsg = "Autenticazione non disponibile. Riprova tra poco.";
+      setLoginStatus("error", state.lastAuthErrorMsg);
       renderAuthLogin(state.lastAuthErrorMsg);
       return;
     }
-    try{
+    if(gsiFlowLock) return gsiFlowLock;
+    gsiFlowLock = (async()=>{
+      setLoginStatus("pending", forcePrompt ? "Login in corso…" : "Preparazione login…");
       await loadGsiScript();
       const clientId = await resolveGoogleClientId();
-      if(!clientId){
-        authDebug.lastError = "client_id mancante";
-        renderLoginDebug();
-        renderAuthLogin("Configurazione Google mancante (client_id).");
-        return;
-      }
+      if(!clientId) return;
       authDebug.googleObj = !!(window.google && google.accounts && google.accounts.id);
       renderLoginDebug();
       if(!authDebug.googleObj){
@@ -1799,25 +1884,68 @@ function showAuthGate(){
         auto_select: false,
         cancel_on_tap_outside: true
       });
+      authDebug.promptOngoing = false;
       const container = $("gsiBtnContainer");
       if(container){
         container.innerHTML = "";
         google.accounts.id.renderButton(container, { theme:"outline", size:"large", text:"continue_with", type:"standard", shape:"pill" });
       }
-      if(forcePrompt){
-        try{ google.accounts.id.prompt(); }catch(_e){}
+      setLoginStatus("ready", "Accedi con Google.");
+      if(allowPrompt && !gsiPromptActive){
+        try{
+          try{ google.accounts.id.cancel(); }catch(_e){}
+          gsiPromptActive = true;
+          gsiPromptedOnce = true;
+          authDebug.promptOngoing = true;
+          setLoginStatus("waiting", "In attesa di login Google…");
+          google.accounts.id.prompt((notification)=>{
+            gsiPromptActive = false;
+            authDebug.promptOngoing = false;
+            renderLoginDebug();
+            if(notification?.isNotDisplayed?.()){
+              const reason = notification.getNotDisplayedReason?.() || "Richiesta non mostrata";
+              authDebug.lastError = reason;
+              setLoginStatus("error", `Login non disponibile: ${reason}`);
+              logAuthEvent("FedCM prompt", reason);
+            }
+            if(notification?.isSkippedMoment?.()){
+              const reason = notification.getSkippedReason?.() || "Richiesta annullata";
+              authDebug.lastError = reason;
+              setLoginStatus("error", `Login annullato: ${reason}`);
+              logAuthEvent("FedCM prompt", reason);
+            }
+            if(notification?.isDismissedMoment?.()){
+              const reason = notification.getDismissedReason?.() || "Richiesta chiusa";
+              authDebug.lastError = reason;
+              setLoginStatus("idle", "Login annullato. Riprova.");
+              logAuthEvent("FedCM prompt", reason);
+            }
+          });
+          logAuthEvent("FedCM prompt", "avviato");
+        }catch(_e){
+          gsiPromptActive = false;
+          authDebug.promptOngoing = false;
+          throw _e;
+        }
       }
-    }catch(err){
+    })().catch(err=>{
+      gsiPromptActive = false;
+      authDebug.promptOngoing = false;
       authDebug.lastError = formatErr(err);
+      setLoginStatus("error", `Login fallito: ${authDebug.lastError}`);
       renderLoginDebug();
-      console.warn("initGoogleIdentity error", err);
+      console.warn("startGoogleIdentity error", err);
       const readable = authDebug.lastError || "Errore caricamento Google Identity.";
       try{
         const muted = document.querySelector("#authBody .muted");
         if(muted){ muted.textContent = `Login Google non disponibile: ${readable}`; }
       }catch(_e){}
       try{ showToast("Login Google", readable); }catch(_e){}
-    }
+    }).finally(()=>{
+      gsiFlowLock = null;
+      renderLoginDebug();
+    });
+    return gsiFlowLock;
   }
 
   async function ensureAuthFlow(){
@@ -1832,6 +1960,7 @@ function showAuthGate(){
         state.operator = null;
         $("hdrUser").textContent = "—";
         setOperationalDisabled(true);
+        setLoginStatus("idle", "In attesa di login.");
         authDebug.whitelist = "";
         authDebug.whitelistReason = "";
         authDebug.decodedEmail = "";
@@ -1869,12 +1998,13 @@ function showAuthGate(){
       state.operator = fullName;
       $("hdrUser").textContent = `${roleLabel}: ${fullName}`;
       setOperationalDisabled(false);
+      setLoginStatus("ready", "Sessione attiva.");
       hideAuthGate();
       renderHome();
       renderLoginDebug();
     });
 
-    await initGoogleIdentity(true);
+    await startGoogleIdentity(true, "auth-state");
   }
 
 
