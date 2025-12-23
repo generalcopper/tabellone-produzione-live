@@ -1368,6 +1368,32 @@
   // ===============================
   const USERS_COL = "powderUsers";
   // const ACCESS_COL removed (using USERS_COL allowlist)
+  // Whitelist operatori (solo Google Sign-In, no email manuale)
+  const OPERATOR_WHITELIST = {
+    "mouhamedmowafa@gmail.com": "Mouhamed Mowafa",
+    "guizardi.fabiano@gmail.com": "Fabiano Guizardi",
+    "lahmarhassan360@gmail.com": "Hassan Lahmar",
+    "matteo.ambrosi77@gmail.com": "Matteo Ambrosi",
+    "mustaphatouray328@gmail.com": "Mustapha Touray",
+    "abdellatifmorsli313@gmail.com": "Abdellatif Morsli",
+    "elhachimiahemad@gmail.com": "Ahmed Elhachimi",
+    "soufianemn10it@gmail.com": "Soufiane"
+  }; // Estensibile aggiungendo nuove coppie email->nome
+  const ADMIN_EMAILS = new Set([
+    // Admin esistenti: mantieni qui eventuali email con permessi completi
+    "matteo@generalcoppersrl.com"
+  ]);
+
+  function setOperationalDisabled(disabled){
+    const ids = ["btnGoProd","btnPartialOpen","prodStrip","btnCallMatteo","btnOpenStats","btnSendIssue","btnRefreshMobile"];
+    ids.forEach(id=>{
+      const el = $(id);
+      if(!el) return;
+      el.disabled = disabled;
+      el.style.opacity = disabled ? ".5" : "";
+      el.style.pointerEvents = disabled ? "none" : "";
+    });
+  }
 function showAuthGate(){
     $("authGate").classList.add("show");
     lockBody();
@@ -1405,6 +1431,7 @@ function showAuthGate(){
       try{ await state.firebase.authApi.signOut(state.firebase.auth); }catch(e){}
       renderAuthLogin("");
     };
+    setOperationalDisabled(true);
   }
 
 
@@ -1414,41 +1441,12 @@ function showAuthGate(){
     const b = $("authBody");
     b.innerHTML = `
       <div class="stepTitle">Accesso richiesto</div>
-      <div class="muted">${msg || "Accedi per iniziare. Se la tua email non è autorizzata, contatta un amministratore."}</div>
+      <div class="muted">${msg || "Accedi con Google. L’accesso è consentito solo alle email autorizzate."}</div>
       <div style="height:12px"></div>
 
       <button class="btn good" id="btnGoogle" style="width:100%;">Accedi con Google</button>
-      <div style="height:10px"></div>
-
-      <div class="divider"></div>
-      <div class="stepTitle" style="font-size:16px; margin-top:0;">Oppure con email</div>
-
-      <div class="authRow">
-        <div class="field">
-          <label>Nome</label>
-          <input id="authName" autocomplete="given-name" placeholder="Nome" />
-        </div>
-        <div class="field">
-          <label>Cognome</label>
-          <input id="authSurname" autocomplete="family-name" placeholder="Cognome" />
-        </div>
-      </div>
-      <div class="field">
-        <label>Email</label>
-        <input id="authEmail" type="email" autocomplete="email" placeholder="nome@azienda.it" />
-      </div>
-      <div class="field">
-        <label>Password</label>
-        <input id="authPass" type="password" autocomplete="current-password" placeholder="Password" />
-      </div>
-
-      <div class="row2">
-        <button class="btn" id="btnEmailLogin">Accedi</button>
-        <button class="btn ghost" id="btnEmailSignup">Crea account</button>
-      </div>
-
       <div style="height:12px"></div>
-      <div class="muted">Nota: la pagina resta sempre in italiano.</div>
+      <div class="muted">Non è previsto l’accesso con email/password o altri metodi.</div>
     `;
 
     b.querySelector("#btnGoogle").onclick = async()=>{
@@ -1476,41 +1474,6 @@ function showAuthGate(){
         }
         state.lastAuthErrorMsg = msg;
         showToast("Accesso", msg);
-      }
-    };
-
-    b.querySelector("#btnEmailLogin").onclick = async()=>{
-      const email = b.querySelector("#authEmail").value.trim();
-      const pass  = b.querySelector("#authPass").value;
-      if(!email || !pass){
-        showToast("Accesso", "Inserisci email e password.");
-        return;
-      }
-      try{
-        const authApi = state.firebase.authApi;
-        await authApi.signInWithEmailAndPassword(state.firebase.auth, email, pass);
-      }catch(err){
-        console.warn(err);
-        showToast("Accesso", "Credenziali non valide o account inesistente.");
-      }
-    };
-
-    b.querySelector("#btnEmailSignup").onclick = async()=>{
-      const name = b.querySelector("#authName").value.trim();
-      const sur  = b.querySelector("#authSurname").value.trim();
-      const email = b.querySelector("#authEmail").value.trim();
-      const pass  = b.querySelector("#authPass").value;
-      if(!name || !sur || !email || !pass){
-        showToast("Registrazione", "Compila nome, cognome, email e password.");
-        return;
-      }
-      try{
-        const authApi = state.firebase.authApi;
-        const cred = await authApi.createUserWithEmailAndPassword(state.firebase.auth, email, pass);
-        await upsertUserProfile(cred.user, { fullName: `${name} ${sur}`, name, surname: sur, email });
-      }catch(err){
-        console.warn(err);
-        showToast("Registrazione", "Impossibile creare l’account (email già usata o password debole).");
       }
     };
   }
@@ -1549,6 +1512,7 @@ authApi.onAuthStateChanged(auth, async(user)=>{
         state.user = null;
         state.operator = null;
         $("hdrUser").textContent = "—";
+        setOperationalDisabled(true);
         const msg = state.lastAuthErrorMsg || "";
         state.lastAuthErrorMsg = "";
         renderAuthLogin(msg);
@@ -1583,34 +1547,26 @@ authApi.onAuthStateChanged(auth, async(user)=>{
         }
       }catch(_e){}
 
-      // profilo
-      let profile = await loadUserProfile(user.uid);
-      if(!profile){
-        const dn = (user.displayName||"").trim();
-        profile = { fullName: dn || user.email || "" , email: user.email||"" };
-        await upsertUserProfile(user, profile);
-      } else {
-        // assicurati fullName
-        if(!profile.fullName){
-          const dn = (user.displayName||"").trim();
-          profile.fullName = dn || user.email || "";
-          await upsertUserProfile(user, { fullName: profile.fullName, email: user.email||"" });
-        }
-      }
-      // allowlist email
-      const access = await getAccessByEmail(user.email||"");
-      if(!access || access.enabled === false){
-        renderAuthDenied(user.email||"", access && access.enabled===false ? "Accesso disabilitato." : "Email non presente in elenco autorizzati.");
+      const email = (user.email||"").toLowerCase();
+      if(!email){
+        renderAuthDenied("", "Account Google senza email visibile.");
+        await authApi.signOut(auth);
         return;
       }
+      const operatorName = OPERATOR_WHITELIST[email] || "";
+      const isAdmin = ADMIN_EMAILS.has(email);
+      if(!operatorName && !isAdmin){
+        renderAuthDenied(email, "Email non presente in whitelist.");
+        await authApi.signOut(auth);
+        return;
+      }
+      const fullName = (isAdmin ? (user.displayName||operatorName||email) : operatorName) || (user.displayName||email);
+      const roleLabel = isAdmin ? "Admin" : "Operatore";
 
-
-      // usa displayName da allowlist se presente (coerente per reparto)
-      if(access && access.displayName){ profile.fullName = access.displayName; }
-
-      state.user = { uid: user.uid, fullName: profile.fullName, email: (user.email||profile.email||""), isAdmin: Boolean(access && access.isAdmin) };
-      state.operator = state.user.fullName;
-      $("hdrUser").textContent = state.user.fullName;
+      state.user = { uid: user.uid, fullName, email: user.email||email, isAdmin };
+      state.operator = fullName;
+      $("hdrUser").textContent = `${roleLabel}: ${fullName}`;
+      setOperationalDisabled(false);
       hideAuthGate();
       renderHome();
     });
