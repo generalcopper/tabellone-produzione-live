@@ -1445,37 +1445,35 @@ function showAuthGate(){
       <div style="height:12px"></div>
 
       <button class="btn good" id="btnGoogle" style="width:100%;">Accedi con Google</button>
+      <div style="height:8px"></div>
+      <button class="btn ghost" id="btnGoogleFallback" style="width:100%;">Se il login non parte, riprova qui</button>
       <div style="height:12px"></div>
-      <div class="muted">Non è previsto l’accesso con email/password o altri metodi.</div>
+      <div class="muted">Non è previsto l’accesso con email/password o altri metodi. Il login usa il flusso di redirect Google (nessun popup).</div>
     `;
 
-    b.querySelector("#btnGoogle").onclick = async()=>{
+    const startRedirect = async (label="standard") => {
       const authApi = state.firebase.authApi;
       const auth = state.firebase.auth;
+      if(!authApi || !auth){
+        state.lastAuthErrorMsg = "Autenticazione non disponibile. Riprova tra poco.";
+        renderAuthLogin(state.lastAuthErrorMsg);
+        return;
+      }
       const prov = new authApi.GoogleAuthProvider();
+      prov.setCustomParameters({ prompt: "select_account" });
       state.lastAuthErrorMsg = "";
-      // Provo popup (più veloce). Se bloccato, fallback su redirect (più stabile su mobile).
       try{
-        await authApi.signInWithPopup(auth, prov);
+        await authApi.signInWithRedirect(auth, prov);
       }catch(err){
-        console.warn("Google popup error", err);
-        const msg = humanAuthErr(err);
-        if((err && err.code==="auth/popup-blocked") || (err && err.code==="auth/operation-not-supported-in-this-environment")){
-          showToast("Accesso", msg);
-          try{
-            await authApi.signInWithRedirect(auth, prov);
-            return;
-          }catch(err2){
-            console.warn("Google redirect error", err2);
-            state.lastAuthErrorMsg = humanAuthErr(err2);
-            renderAuthLogin(state.lastAuthErrorMsg);
-            return;
-          }
-        }
-        state.lastAuthErrorMsg = msg;
-        showToast("Accesso", msg);
+        console.warn(`Google redirect error (${label})`, err);
+        state.lastAuthErrorMsg = humanAuthErr(err);
+        showToast("Accesso", state.lastAuthErrorMsg);
+        renderAuthLogin(state.lastAuthErrorMsg);
       }
     };
+
+    b.querySelector("#btnGoogle").onclick = ()=>startRedirect("primary");
+    b.querySelector("#btnGoogleFallback").onclick = ()=>startRedirect("fallback");
   }
 
   async function upsertUserProfile(user, fields){
