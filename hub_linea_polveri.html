@@ -1521,6 +1521,42 @@
     }
     return null;
   }
+  function resolveQtyKg(ctx={}){ // CODEX: sorgente di verità qty -> kg
+    const qty = parseItNumber(ctx.qty ?? ctx.quantity);
+    if(!Number.isFinite(qty) || qty<=0) return 0;
+
+    const umCandidates = [ctx.um, ctx.uom, ctx.unitaMisura, ctx.unit, ctx.measure];
+    const rawUm = umCandidates.find(u => u!=null && String(u).trim()!=="") || "";
+    const upperUm = rawUm.toString().toUpperCase().replace(/\./g,"");
+    const hasPieces = /\b(PZ|PZS|PCS?|PCE|PEZ|PEZZ[IO]?|NR|SAC|SACCO|SACCHI|SACCHETTO|SACCHETTI|SACCH)\b/.test(upperUm);
+    const hasKg = /\bKG\b/.test(upperUm);
+    const isKg = hasKg && !hasPieces;
+    const isPieces = hasPieces;
+
+    let packKg = ctx.packKg;
+    if(!(Number.isFinite(packKg) && packKg>0)){
+      const descTxt = ctx.desc || ctx.description || "";
+      const detected = detectPackKg(descTxt);
+      if(Number.isFinite(detected) && detected>0){
+        packKg = detected;
+      } else if(rawUm || descTxt){
+        const combo = detectPackKg(`${descTxt} ${rawUm}`.trim());
+        if(Number.isFinite(combo) && combo>0) packKg = combo;
+      }
+    }
+    const packVal = Number(packKg);
+    const hasPack = Number.isFinite(packVal) && packVal>0;
+
+    if(isKg) return qty;
+    if(isPieces){
+      if(hasPack) return qty * packVal;
+      return qty;
+    }
+    // Anti-inflazione: se ambiguo non moltiplicare
+    return qty;
+  }
+  window.__resolveQtyKg = resolveQtyKg;
+  window.__detectPackKg = detectPackKg;
   function detectAlertLine(desc){
     const s = norm(desc);
     if(!s) return null;
@@ -1704,13 +1740,7 @@
         const packKg = detectPackKg(desc);
         const material = powder ? materialOf(desc, code) : "altro";
 
-        const lineKg = (() => {
-          if(!powder || alertInfo) return 0;
-          if(norm(um)==="kg" || /\bkg\b/.test(norm(um))) return qty;
-          if(packKg!=null && qty>0) return qty * packKg;
-          if(packKg!=null) return qty*packKg;
-          return 0;
-        })();
+        const lineKg = (!powder || alertInfo) ? 0 : resolveQtyKg({ qty, um, packKg, desc });
 
         const lineKey = `${number}|${i}|${(norm(code)||norm(desc).slice(0,24))}`;
 
@@ -2482,20 +2512,21 @@ authApi.onAuthStateChanged(auth, async(user)=>{
 
   function estimateLineKg(line){
     if(!line) return 0;
-    const qtyParsed = parseItNumber(line.qty);
     const packParsed = resolvePackKgForLine(line);
-    const um = norm(line.um||"");
-    let lineKg = 0;
-    if(isUnitKg(um) && qtyParsed>0){
-      lineKg = qtyParsed;
-    } else if(qtyParsed>0 && Number.isFinite(packParsed) && packParsed>0){
-      lineKg = qtyParsed * packParsed;
-    } else if(Number.isFinite(line.lineKg) && line.lineKg>0){
-      lineKg = Number(line.lineKg);
-    }
-    if(!Number.isFinite(lineKg)) lineKg = 0;
-    if(lineKg===0 && isBagOrPieceUnit(um) && !Number.isFinite(packParsed)) return 0;
-    return lineKg;
+    const lineKg = resolveQtyKg({
+      qty: line.qty,
+      um: line.um,
+      uom: line.uom,
+      unitaMisura: line.unitaMisura,
+      unit: line.unit,
+      measure: line.measure,
+      packKg: packParsed,
+      desc: line.desc || ""
+    });
+    if(Number.isFinite(lineKg) && lineKg>0) return lineKg;
+    const fallback = Number(line.lineKg);
+    if(Number.isFinite(fallback) && fallback>0) return fallback;
+    return 0;
   }
 
   function computeVisiblePowderSummary(orders){ // UI-FIX: kg-totali
@@ -2732,12 +2763,18 @@ authApi.onAuthStateChanged(auth, async(user)=>{
     return resolvePackKgForLine(line);
   }
   function magResolveQtyKg(line){ // CODEX: kg rimanenti realistici per Statistiche/Magazzino
-    const qty = parseItNumber(line.qty);
-    const packKg = magDetectPackKg(line);
-    const lineKg = Number(line.lineKg);
-    const um = norm(line.um||"");
-    if(isUnitKg(um) && Number.isFinite(qty) && qty>0) return qty;
-    if(Number.isFinite(qty) && qty>0 && Number.isFinite(packKg) && packKg>0) return qty * packKg;
+    const kg = resolveQtyKg({
+      qty: line?.qty,
+      um: line?.um,
+      uom: line?.uom,
+      unitaMisura: line?.unitaMisura,
+      unit: line?.unit,
+      measure: line?.measure,
+      packKg: magDetectPackKg(line),
+      desc: line?.desc || ""
+    });
+    if(Number.isFinite(kg) && kg>0) return kg;
+    const lineKg = Number(line?.lineKg);
     if(Number.isFinite(lineKg) && lineKg>0) return lineKg;
     return 0;
   }
