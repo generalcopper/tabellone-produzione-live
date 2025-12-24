@@ -6,6 +6,12 @@
   <meta name="google" content="notranslate"/>
   <meta http-equiv="Content-Language" content="it"/>
   <meta name="color-scheme" content="light"/>
+  <!-- PWA / Standalone -->
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="theme-color" content="#0b0f14">
+  <link rel="manifest" href="/tabellone-produzione-live/manifest.webmanifest">
   <!-- // UI-FIX: anticache --><meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
   <!-- // UI-FIX: anticache --><meta http-equiv="Pragma" content="no-cache" />
   <!-- // UI-FIX: anticache --><meta http-equiv="Expires" content="0" />
@@ -83,9 +89,9 @@
     @media (max-width: 720px){
       header { flex-direction: column; align-items:flex-start; }
       .statusRow { justify-content:flex-start; }
-      .title { flex-direction:column; align-items:center; text-align:center; width:100%; }
-      .titleWrap{ width:100%; text-align:center; align-items:center; }
-      .subtitle{ text-align:center; }
+      .title { flex-direction:column; align-items:flex-start; text-align:left; width:100%; }
+      .titleWrap{ width:100%; text-align:left; align-items:flex-start; }
+      .subtitle{ text-align:left; }
     }
 
     .statusRow {
@@ -1696,44 +1702,17 @@ function showAuthGate(){
     const b = $("authBody");
     b.innerHTML = `
       <div class="stepTitle">Accesso richiesto</div>
-      <div class="muted">${msg || "Accedi per iniziare. Se la tua email non è autorizzata, contatta un amministratore."}</div>
+      <div class="muted">${msg || "Accedi con il tuo account Google aziendale autorizzato."}</div>
       <div style="height:12px"></div>
 
       <button class="btn good" id="btnGoogle" style="width:100%;">Accedi con Google</button>
-      <div style="height:10px"></div>
 
-      <div class="divider"></div>
-      <div class="stepTitle" style="font-size:16px; margin-top:0;">Oppure con email</div>
-
-      <div class="authRow">
-        <div class="field">
-          <label>Nome</label>
-          <input id="authName" autocomplete="given-name" placeholder="Nome" />
-        </div>
-        <div class="field">
-          <label>Cognome</label>
-          <input id="authSurname" autocomplete="family-name" placeholder="Cognome" />
-        </div>
-      </div>
-      <div class="field">
-        <label>Email</label>
-        <input id="authEmail" type="email" autocomplete="email" placeholder="nome@azienda.it" />
-      </div>
-      <div class="field">
-        <label>Password</label>
-        <input id="authPass" type="password" autocomplete="current-password" placeholder="Password" />
-      </div>
-
-      <div class="row2">
-        <button class="btn" id="btnEmailLogin">Accedi</button>
-        <button class="btn ghost" id="btnEmailSignup">Crea account</button>
-      </div>
-
-      <div style="height:12px"></div>
-      <div class="muted">Nota: la pagina resta sempre in italiano.</div>
+      <div style="height:14px"></div>
+      <div class="muted">L’accesso via email/password è disattivato: usa solo Google.</div>
     `;
 
-    b.querySelector("#btnGoogle").onclick = async()=>{
+    const googleBtn = b.querySelector("#btnGoogle");
+    googleBtn.onclick = async()=>{
       const authApi = state.firebase.authApi;
       const auth = state.firebase.auth;
       const prov = new authApi.GoogleAuthProvider();
@@ -1758,41 +1737,6 @@ function showAuthGate(){
         }
         state.lastAuthErrorMsg = msg;
         showToast("Accesso", msg);
-      }
-    };
-
-    b.querySelector("#btnEmailLogin").onclick = async()=>{
-      const email = b.querySelector("#authEmail").value.trim();
-      const pass  = b.querySelector("#authPass").value;
-      if(!email || !pass){
-        showToast("Accesso", "Inserisci email e password.");
-        return;
-      }
-      try{
-        const authApi = state.firebase.authApi;
-        await authApi.signInWithEmailAndPassword(state.firebase.auth, email, pass);
-      }catch(err){
-        console.warn(err);
-        showToast("Accesso", "Credenziali non valide o account inesistente.");
-      }
-    };
-
-    b.querySelector("#btnEmailSignup").onclick = async()=>{
-      const name = b.querySelector("#authName").value.trim();
-      const sur  = b.querySelector("#authSurname").value.trim();
-      const email = b.querySelector("#authEmail").value.trim();
-      const pass  = b.querySelector("#authPass").value;
-      if(!name || !sur || !email || !pass){
-        showToast("Registrazione", "Compila nome, cognome, email e password.");
-        return;
-      }
-      try{
-        const authApi = state.firebase.authApi;
-        const cred = await authApi.createUserWithEmailAndPassword(state.firebase.auth, email, pass);
-        await upsertUserProfile(cred.user, { fullName: `${name} ${sur}`, name, surname: sur, email });
-      }catch(err){
-        console.warn(err);
-        showToast("Registrazione", "Impossibile creare l’account (email già usata o password debole).");
       }
     };
   }
@@ -1998,27 +1942,6 @@ authApi.onAuthStateChanged(auth, async(user)=>{
     const id = `${Date.now()}_${Math.random().toString(16).slice(2)}`;
     await fs.setDoc(fs.doc(db, "powderProdHistory", id), { ...entry, id, at: nowIso() });
     return id;
-  }
-
-  async function clearCompletedHistory(){
-    if(!state.firebase.ok || !(state.user && state.user.isAdmin)) return;
-    if(!confirm("Eliminare tutti gli ordini conclusi?")) return;
-    if(!confirm("Conferma finale: l’operazione è irreversibile.")) return;
-    try{
-      const fs = state.firebase.api;
-      const db = state.firebase.db;
-      const snap = await fs.getDocs(fs.collection(db, "powderProdHistory"));
-      for(const d of snap.docs){
-        await fs.deleteDoc(d.ref);
-      }
-      state.history = [];
-      renderCompletedSection();
-      renderStats();
-      showToast("Cancellati", "Ordini conclusi rimossi.");
-    }catch(err){
-      console.warn(err);
-      showToast("Errore", "Impossibile cancellare i conclusi.");
-    }
   }
 
   async function addAbort(entry){
@@ -3044,6 +2967,57 @@ function renderHome(){
   // ===============================
   // PRODUCTION MODAL FLOW
   // ===============================
+// ==============================
+// EURO / IT MONEY PARSER (fix fatturato)
+// ==============================
+function parseItMoney(v){
+  if(v==null) return 0;
+  let s = String(v).trim();
+  if(!s) return 0;
+  // keep digits, dot, comma, minus
+  s = s.replace(/[^\d,.\-]/g, "");
+  if(!s) return 0;
+  const hasComma = s.includes(",");
+  const hasDot = s.includes(".");
+  if(hasComma && hasDot){
+    // assume dots are thousand sep and comma is decimal
+    s = s.replace(/\./g, "").replace(",", ".");
+  }else if(hasComma && !hasDot){
+    // comma decimal
+    s = s.replace(",", ".");
+  }else{
+    // dot decimal or integer -> keep
+  }
+  const n = Number(s);
+  return Number.isFinite(n) ? n : 0;
+}
+
+// FIX: se esiste extractDocTotal, forza parsing robusto (senza cambiare logiche fetch)
+// (override safe: stessa firma, solo parsing)
+function extractDocTotal(xmlOrRow){
+  try{
+    // support: string XML, object row, number
+    if(typeof xmlOrRow === "number") return xmlOrRow;
+    if(typeof xmlOrRow === "string"){
+      // prova a trovare un totale in XML (tag comuni)
+      const s = xmlOrRow;
+      const m =
+        s.match(/<TotaleDocumento>([^<]+)<\/TotaleDocumento>/i) ||
+        s.match(/<Totale>([^<]+)<\/Totale>/i) ||
+        s.match(/<ImportoTotale>([^<]+)<\/ImportoTotale>/i) ||
+        s.match(/<DocTotal>([^<]+)<\/DocTotal>/i);
+      if(m && m[1]!=null) return parseItMoney(m[1]);
+      return parseItMoney(s);
+    }
+    if(typeof xmlOrRow === "object" && xmlOrRow){
+      const cand =
+        xmlOrRow.totaleDocumento ?? xmlOrRow.totale ?? xmlOrRow.importoTotale ?? xmlOrRow.docTotal ?? xmlOrRow.total;
+      return parseItMoney(cand);
+    }
+  }catch(_e){}
+  return 0;
+}
+
   function openProdModal(){
     if(!state.user){
       renderAuthLogin("Per iniziare un ordine devi prima accedere con un account autorizzato.");
@@ -3064,924 +3038,1315 @@ function renderHome(){
   }
 
   function renderPartialOrdersList(){
-    const body = $("partialBody");
-    if(!body) return;
-    let partial = [];
-    try{ partial = computePartialOrders().partial || []; }catch(_e){ partial = []; }
-    const partialSet = new Set(partial.map(p=>String(p.orderNo||p.number||"")));
-    const { baseOrders } = buildOrderViews({ applyRoleVisibility:false, includeHidden:true });
-    const rows = baseOrders.filter(o=>partialSet.has(String(o.orderNo||o.number||"")));
-    if(!rows.length){
-      body.innerHTML = `<div class="muted">Nessun ordine parzialmente concluso.</div>`;
-      return;
-    }
-    body.innerHTML = `<div class="list" id="partialList"></div>`;
-    const list = body.querySelector("#partialList");
-    rows.forEach(o=>{
-      const done = o.partialInfo?.done || 0;
-      const total = o.partialInfo?.total || (done + (o.lines?.length||0));
-      const div = document.createElement("div");
-      div.className = "item pressCard";
-      div.innerHTML = `
+  const body = $("partialBody");
+  if(!body) return;
+
+  let partial = [];
+  try{ partial = computePartialOrders().partial || []; }catch(_e){ partial = []; }
+
+  if(!partial.length){
+    body.innerHTML = `<div class="muted">Nessun ordine parzialmente concluso.</div>`;
+    return;
+  }
+
+  const isAdmin = Boolean(state.user && state.user.isAdmin);
+
+  // Admin può vedere anche quelli “fuori finestra”, operatori solo quelli visibili
+  const views = buildOrderViews({ applyRoleVisibility: !isAdmin, includeHidden: isAdmin });
+  const allOrders = isAdmin ? views.baseOrders : views.orders;
+
+  const map = new Map();
+  for(const o of allOrders){
+    const k = String(o.orderNo || o.number || "").trim();
+    if(k) map.set(k, o);
+  }
+
+  const rows = partial
+    .map(p => ({ p, o: map.get(String(p.orderNo||"").trim()) }))
+    .filter(x => x.o);
+
+  body.innerHTML = `
+    <div class="stepTitle">Ordini parziali (${rows.length})</div>
+    <div class="muted">Tocca un ordine per aprirlo in Produzione e chiudere le righe rimanenti.</div>
+    <div style="height:10px"></div>
+    <div class="list" id="partialList"></div>
+  `;
+
+  const list = body.querySelector("#partialList");
+  for(const {p,o} of rows){
+    const div = document.createElement("div");
+    div.className = "item pressCard";
+    div.innerHTML = `
+      <div class="top">
+        <div>
+          <div class="name">Ordine n. ${escapeHtml(o.orderNo)} · ${escapeHtml(o.customer||"Cliente")}</div>
+          <div class="sub">${escapeHtml(String(p.done))} su ${escapeHtml(String(p.total))} righe concluse · Conclusione: <b>${escapeHtml(o.conclusion||"—")}</b></div>
+        </div>
+        <div class="badge">Apri</div>
+      </div>
+    `;
+    div.onclick = ()=>{
+      state.forceOrderNo = o.orderNo;
+      closePartialModal();
+      openProdModal();
+    };
+    list.appendChild(div);
+  }
+}
+
+function openPartialModal(){
+  $("partialModal").classList.add("show");
+  lockBody();
+  renderPartialOrdersList();
+}
+function closePartialModal(){
+  $("partialModal").classList.remove("show");
+  unlockBody();
+}
+
+// =======================================
+// ACTION SHEET (Conclusi) stile Apple
+// =======================================
+function ensureActionSheet(){
+  if(document.getElementById("actionSheet")) return;
+  const wrap = document.createElement("div");
+  wrap.id = "actionSheet";
+  wrap.className = "overlay";
+  wrap.setAttribute("role","dialog");
+  wrap.setAttribute("aria-modal","true");
+  wrap.innerHTML = `
+    <div class="sheet" style="max-height:70vh;">
+      <div class="shd">
+        <div class="h">Conclusi</div>
+        <button class="x" id="asClose" aria-label="Chiudi">×</button>
+      </div>
+      <div class="sbd" id="asBody"></div>
+    </div>
+  `;
+  document.body.appendChild(wrap);
+
+  wrap.addEventListener("click",(e)=>{
+    if(e.target === wrap) closeActionSheet();
+  });
+  wrap.querySelector("#asClose").onclick = closeActionSheet;
+}
+
+function openActionSheet(){
+  ensureActionSheet();
+  const modal = document.getElementById("actionSheet");
+  const body = document.getElementById("asBody");
+  const isAdmin = Boolean(state.user && state.user.isAdmin);
+
+  body.innerHTML = `
+    <div class="list">
+      <div class="item pressCard" id="asOpenReg">
         <div class="top">
           <div>
-            <div class="name">${escapeHtml(o.customer||"Cliente")} · Ordine ${escapeHtml(o.orderNo||o.number||"")}</div>
-            <div class="sub">Conclusione prevista: <b>${escapeHtml(o.conclusion||"—")}</b></div>
-            <div class="muted" style="margin-top:6px;">Righe concluse: ${done}/${total} · Kg: ${Math.round(o.totalKg||0)}</div>
+            <div class="name">Apri registro conclusi</div>
+            <div class="sub">Elenco con dettagli produzioni concluse (mese corrente).</div>
           </div>
-          <div class="badge" style="border-color:var(--warn); color:var(--warn);">Parziale</div>
-        </div>`;
-      div.onclick = ()=>{
-        $("partialModal").classList.remove("show");
-        unlockBody();
-        openProdModal();
-        setTimeout(()=>renderOrderDetail(o), 60);
-      };
-      list.appendChild(div);
-    });
-  }
+          <div class="badge">Apri</div>
+        </div>
+      </div>
 
-  function renderProdStepOperator(){
-    // (disattivato) operatore già identificato da accesso
-    renderProdStepOrders();
-  }
-
-  function renderProdStepOrders(){
-    $("prodModalTitle").textContent = "Produzione · Ordini";
-    const body = $("prodModalBody");
-    const { orders, baseOrders } = buildOrderViews();
-    orders.sort((a,b)=>{
-      const ra = a.priorityInfo?.priority==="today" ? 0 : a.priorityInfo?.priority==="scheduled" ? 1 : 2;
-      const rb = b.priorityInfo?.priority==="today" ? 0 : b.priorityInfo?.priority==="scheduled" ? 1 : 2;
-      return ra - rb;
-    });
-    const isDesktop = window.matchMedia("(min-width: 980px)").matches;
-    const isAdmin = Boolean(state.user && state.user.isAdmin);
-    let planMessageHtml = "";
-    if(isDesktop){
-      const windowOrders = baseOrders.filter(o=>o.daysAway==null || o.daysAway<=3);
-      const listHtml = windowOrders.slice(0,8).map(o=>`<li>${escapeHtml(o.customer||"Cliente")} · Ord. ${escapeHtml(o.orderNo||o.number||"—")}${o.conclusion?` · ${escapeHtml(o.conclusion)}`:""}</li>`).join("") || `<li>Nessuna data pianificata disponibile.</li>`;
-      const headline = isAdmin ? "Vista admin" : `Ci sono ${baseOrders.length} ordini da fare.`;
-      const subtitle = isAdmin
-        ? "Sono mostrati gli ordini pianificati entro 3 giorni, come per gli operatori."
-        : `In base alla pianificazione, puoi andare in produzione con questi ${windowOrders.length} ordini:`;
-      planMessageHtml = `<div class="planMessage"><div class="headline">${headline}</div><div class="muted">${subtitle}</div><ul>${listHtml}</ul></div>`; // CODEX: messaggio finestra 3 giorni per desktop
-    }
-    body.innerHTML = `
-      <div class="stepTitle">Ordini disponibili</div>
-      <div class="muted">Operatore: <b>${state.user?.fullName || "—"}</b>. Tocca un cliente: vedrai gli ordini separati per numero.</div>
-      ${planMessageHtml}
-      <div style="height:10px"></div>
-      <div class="list" id="orderList"></div>
-    `;
-
-    const list = body.querySelector("#orderList");
-    if(!orders.length){
-      const windowHasOrders = baseOrders.some(o=>o.daysAway==null || o.daysAway<=3);
-      const emptyMsg = (isDesktop && baseOrders.length && !windowHasOrders)
-        ? "Nessun ordine pianificato entro i prossimi 3 giorni."
-        : "Nessun ordine disponibile (attendi sincronizzazione).";
-      list.innerHTML = `<div class="muted">${emptyMsg}</div>
-        <div style="height:10px"></div>
-        <button class="btn" id="btnRetry" style="width:100%;">Riprova sincronizzazione</button>`;
-      body.querySelector("#btnRetry").onclick = async()=>{
-        body.querySelector("#btnRetry").textContent = "Sincronizzo…";
-        await syncOrders(false);
-        renderProdStepOrders();
-      };
-      return;
-    }
-
-    const byCust = new Map();
-    for(const o of orders){
-      const key = o.customer || "Cliente";
-      if(!byCust.has(key)) byCust.set(key, []);
-      byCust.get(key).push(o);
-    }
-
-    for(const [cust, arr] of byCust.entries()){
-      const sec = document.createElement("div");
-      sec.className = "item";
-      sec.innerHTML = `<div class="top"><div><div class="name">${cust}</div><div class="sub">${arr.length} ordini</div></div><div class="badge">Apri</div></div>`;
-      sec.style.cursor = "pointer";
-      sec.onclick = ()=>{ renderCustomerOrders(cust, arr); };
-      list.appendChild(sec);
-    }
-  }
-
-  function renderCustomerOrders(cust, orders){
-    $("prodModalTitle").textContent = `Produzione · ${cust}`;
-    const body = $("prodModalBody");
-    body.innerHTML = `
-      <div class="stepTitle">Ordini per ${cust}</div>
-      <div class="muted">Ordini separati per numero. Apri un ordine per vedere le righe.</div>
-      <div style="height:10px"></div>
-      <div class="list" id="custOrders"></div>
-      <div style="height:12px"></div>
-      <button class="btn ghost" id="btnBackOrders" style="width:100%;">← Torna alla lista clienti</button>
-    `;
-    body.querySelector("#btnBackOrders").onclick = renderProdStepOrders;
-
-    const list = body.querySelector("#custOrders");
-    for(const o of orders){
-      const div = document.createElement("div");
-      div.className = "item";
-      div.style.cursor = "pointer";
-      const totalQty = o.lines.reduce((a,l)=>a + Number(l.qty||0), 0);
-      const priority = o.priorityInfo?.priority || "normal";
-      const badgeText = priority==="today" ? "Priorità" : o.partialInfo ? "Parziale" : "Apri";
-      const alertTag = (o.alerts&&o.alerts.length) ? `<div class="muted" style="margin-top:6px;">Avvisi: ${o.alerts.length}</div>` : "";
-      div.innerHTML = `
+      ${isAdmin ? `
+      <div class="item pressCard" id="asClearAll" style="border-color: rgba(255,59,48,.22); background: rgba(255,59,48,.06);">
         <div class="top">
           <div>
-            <div class="name">Ordine n. ${o.orderNo || o.number}</div>
-            <div class="sub">Righe: ${o.lines.length} · Quantità: ${formatQtyWithKg(totalQty, "kg")} · Conclusione: ${o.conclusion||"—"}</div>
-            ${o.partialInfo ? `<div class="muted" style="margin-top:6px;">Ordine parzialmente concluso (${o.partialInfo.done}/${o.partialInfo.total}).</div>`:""}
-            ${o.priorityInfo?.reason ? `<div class="muted" style="margin-top:6px;">${escapeHtml(o.priorityInfo.reason)}</div>`:""}
-            ${alertTag}
+            <div class="name" style="color:#8a1f1a;">Cancella tutti conclusi</div>
+            <div class="sub">Solo admin. Doppia conferma.</div>
           </div>
-          <div class="badge">${badgeText}</div>
-        </div>`;
-      div.onclick = ()=>renderOrderDetail(o);
-      list.appendChild(div);
-    }
-  }
-
-  function renderOrderDetail(order){
-    const orderNo = order.orderNo || order.number;
-    $("prodModalTitle").textContent = `Ordine n. ${orderNo}`;
-    const body = $("prodModalBody");
-    const lines = order.lines || [];
-    const selectableLines = lines.filter(l=>l.status!=="active");
-    const alerts = order.alerts || [];
-    const alertHtml = alerts.length ? `<div style="display:flex; flex-direction:column; gap:8px; margin:10px 0 6px;">${alerts.map(a=>{
-      const palette = alertPalette(a.alertInfo?.color);
-      const style = `background:${palette.bg};border-color:${palette.border};color:${palette.color};${palette.shadow?`box-shadow:${palette.shadow};`:``}`;
-      return `<div class="alertBanner" style="${style}"><div class="label">${escapeHtml(a.desc||a.alertInfo?.label||"Avviso operativo")}</div><div class="hint">Avviso operativo</div></div>`;
-    }).join("")}</div>` : "";
-    body.innerHTML = `
-      <div class="stepTitle">${order.customer}</div>
-      <div class="muted">Seleziona le righe da produrre, poi avvia. (Seleziona tutto = ordine completo)</div>
-      ${order.partialInfo ? `<div class="warnBanner" style="margin:10px 0 6px;">
-        <div class="icon">ℹ️</div>
-        <div class="txt">
-          <div class="t">Ordine parzialmente concluso</div>
-          <div class="s">Restano ${order.partialInfo.total - order.partialInfo.done} righe da completare.</div>
+          <div class="badge" style="border-color: rgba(255,59,48,.4); color:#8a1f1a;">Admin</div>
         </div>
       </div>` : ``}
-      ${alertHtml}
-      ${order.conclusion ? `<div class="muted" style="margin:6px 0 8px; font-weight:800;">Conclusione prevista: <b>${escapeHtml(order.conclusion)}</b></div>`:""}
-      <div style="height:10px"></div>
-      <div class="row2">
-        <button class="btn" id="btnSelAll">Seleziona tutto</button>
-        <button class="btn ghost" id="btnClrAll">Deseleziona</button>
-      </div>
-      <div style="height:10px"></div>
-      <div class="list" id="lineList"></div>
-      <div style="height:12px"></div>
-      <button class="btn good" id="btnStartProd" style="width:100%;">INIZIA PRODUZIONE</button>
-      <div style="height:10px"></div>
-      <button class="btn ghost" id="btnBackCust" style="width:100%;">← Torna agli ordini cliente</button>
-    `;
 
-    const selected = new Set();
-    const lineList = body.querySelector("#lineList");
-
-    function rerenderLines(){
-      lineList.innerHTML = "";
-      lines.forEach((l)=>{
-        const id = l.lineKey;
-        const div = document.createElement("div");
-        div.className = "item";
-        const checked = selected.has(id);
-        const isBlocked = l.status === "active";
-        div.style.cursor = isBlocked ? "not-allowed" : "pointer";
-        div.style.borderColor = checked ? "rgba(46,123,255,.55)" : "rgba(255,255,255,.08)";
-        div.style.background = checked ? "rgba(46,123,255,.16)" : "rgba(0,0,0,.06)";
-        const isWhiteBag = isWhiteBagRow(l); // CODEX: sostituisce la riga con banner sacchetto bianco
-        if(isWhiteBag){
-          div.innerHTML = renderWhiteBagBanner({ selectable: !isBlocked, checked, badgeText: isBlocked ? "Bloccato" : "" });
-        } else {
-          const qtyLabel = formatQtyWithKg(l.qty, l.um);
-          div.innerHTML = `
-            <div class="top">
-              <div>
-                <div class="name">${l.desc}</div>
-                <div class="sub" style="font-size:13px; font-weight:900;">Quantità: <span style="font-size:15px;">${qtyLabel}</span></div>
-                ${l.code?`<div class="muted" style="margin-top:6px;">Cod: <b>${l.code}</b></div>`:""}
-                ${l.conclusion ? `<div class="muted" style="margin-top:6px;">Conclusione prevista: ${escapeHtml(l.conclusion)}</div>`:""}
-                ${isBlocked ? `<div class="muted" style="margin-top:6px; font-weight:800;">In produzione da ${escapeHtml(l.activeOp||"operatore")} · riapri la produzione in corso.</div>` : ""}
-              </div>
-              <div class="badge">${checked ? "✓" : (isBlocked ? "Bloccato" : "Seleziona")}</div>
-            </div>
-          `;
-        }
-        if(!isBlocked){
-          div.onclick = ()=>{
-            if(selected.has(id)) selected.delete(id); else selected.add(id);
-            state.prodModalTouched = true;
-            rerenderLines();
-          };
-        } else {
-          div.onclick = ()=> showToast("In produzione", `Riga già avviata da ${l.activeOp||"un operatore"}.`);
-        }
-        lineList.appendChild(div);
-      });
-      body.querySelector("#btnStartProd").disabled = selected.size===0;
-      body.querySelector("#btnStartProd").style.opacity = selected.size===0 ? ".6" : "1";
-    }
-
-    body.querySelector("#btnSelAll").onclick = ()=>{
-      lines.filter(l=>l.status!=="active").forEach(l=>selected.add(l.lineKey));
-      state.prodModalTouched = true;
-      rerenderLines();
-    };
-    body.querySelector("#btnClrAll").onclick = ()=>{
-      selected.clear();
-      state.prodModalTouched = true;
-      rerenderLines();
-    };
-      body.querySelector("#btnBackCust").onclick = ()=>{
-        const custOrders = buildOrderViews().orders.filter(o=>o.customer===order.customer);
-        renderCustomerOrders(order.customer, custOrders);
-      };
-
-      body.querySelector("#btnStartProd").onclick = async()=>{
-      if(!selected.size) return;
-      const isFullOrderStart = (selected.size === selectableLines.length);
-      const selectedLines = lines.filter(l=>selected.has(l.lineKey));
-      const prod = {
-        operator: (state.user?.fullName || state.operator || 'Operatore'),
-        customer: order.customer,
-        orderNo,
-        conclusion: order.conclusion || "",
-        totalKg: order.totalKg || 0,
-        selectedLineKeys: selectedLines.map(l=>l.lineKey),
-        isFullOrderStart,
-        startedAt: nowIso(),
-        active: true
-      };
-        await upsertActiveProduction(prod);
-        state.startedThisSession = true;
-
-        const machineHint = machineHintFromLines(selectedLines);
-        // UI-FIX: voice-machine-both
-        const machineMsg =
-          machineHint === "both" ? " Utilizzare sia macchina grande che macchina piccola per fare questo ordine."
-          : machineHint === "small" ? " Utilizzare macchina piccola per fare questo ordine."
-          : " Utilizzare macchina grande."; // CODEX: prompt vocale macchina grande/piccola
-        speak(`Ordine: operatore ${(state.user?.fullName||state.operator||'Operatore')} ha avviato ordine ${orderNo} del cliente ${order.customer}.${machineMsg}`);
-
-        $("prodModal").classList.remove("show");
-        unlockBody();
-        showToast("Produzione avviata", `Operatore ${state.operator} · Ordine n. ${orderNo} · ${Math.round(order.totalKg||0)} kg`);
-      };
-
-    rerenderLines();
-  }
-
-  // ===============================
-  // RUNNING MODAL
-  // ===============================
-  function openRunningModal(){
-    $("runningModal").classList.add("show");
-    lockBody();
-    renderRunning();
-  }
-
-  function renderRunning(){
-    const body = $("runningBody");
-    const active = state.activeProductions || [];
-    if(!active.length){
-      body.innerHTML = `<div class="muted">Nessuna produzione attiva al momento.</div>`;
-      return;
-    }
-    body.innerHTML = `<div class="stepTitle">Attività in corso</div><div class="muted">Apri per vedere dettagli e concludere la produzione.</div><div style="height:10px"></div><div class="list" id="runList"></div>`;
-    const list = body.querySelector("#runList");
-
-    active
-      .sort((a,b)=> (new Date(a.startedAt||0)) - (new Date(b.startedAt||0)))
-      .forEach(p=>{
-        const elapsedMin = p.startedAt ? Math.floor((Date.now() - new Date(p.startedAt).getTime())/60000) : 0;
-        const ratio = prodRatio(p);
-        const hue = Math.max(0, 120 - (120 * Math.min(1,ratio)));
-        const div = document.createElement("div");
-        div.className = "item";
-        div.style.cursor = "pointer";
-        div.style.borderColor = `hsla(${hue}, 80%, 55%, .35)`;
-        div.style.background = `hsla(${hue}, 80%, 45%, .14)`;
-        div.innerHTML = `
-          <div class="top">
-            <div>
-              <div class="name">${p.operator||"Operatore"} · Ordine n. ${p.orderNo||"—"}</div>
-              <div class="sub">${p.customer||"Cliente"} · ${Math.round(Number(p.totalKg||0))} kg · In corso da ${elapsedMin} min · Conclusione: ${p.conclusion||"—"}</div>
-            </div>
-            <div class="badge">Apri</div>
+      <div class="item pressCard" id="asCloseBtn">
+        <div class="top">
+          <div>
+            <div class="name">Chiudi</div>
+            <div class="sub">Torna all’hub.</div>
           </div>
-        `;
-        div.onclick = ()=>renderRunningDetail(p);
-        list.appendChild(div);
-      });
+          <div class="badge">OK</div>
+        </div>
+      </div>
+    </div>
+  `;
+
+  body.querySelector("#asOpenReg").onclick = ()=>{ closeActionSheet(); openHistModalSafe(); };
+  body.querySelector("#asCloseBtn").onclick = closeActionSheet;
+  if(isAdmin){
+    body.querySelector("#asClearAll").onclick = async()=>{ closeActionSheet(); await clearCompletedHistory(); };
   }
 
-  function renderRunningDetail(p){
-    const body = $("runningBody");
-    const order = state.powderOrders.find(o=>o.number===p.orderNo && o.customer===p.customer) || null;
-    const selected = new Set(p.selectedLineKeys || []);
-    const toConclude = new Set(selected);
-    const producedKg = new Map();
+  modal.classList.add("show");
+  lockBody();
+}
+function closeActionSheet(){
+  const modal = document.getElementById("actionSheet");
+  if(!modal) return;
+  modal.classList.remove("show");
+  unlockBody();
+}
 
-    const availableLines = order ? order.lines.filter(l=>selected.has(l.lineKey)) : [];
-    const alerts = order?.alerts || [];
-    const alertHtml = alerts.length ? `<div style="display:flex; flex-direction:column; gap:8px; margin:10px 0 6px;">${alerts.map(a=>{
-      const palette = alertPalette(a.alertInfo?.color);
-      const style = `background:${palette.bg};border-color:${palette.border};color:${palette.color};${palette.shadow?`box-shadow:${palette.shadow};`:``}`;
-      return `<div class="alertBanner" style="${style}"><div class="label">${escapeHtml(a.desc||a.alertInfo?.label||"Avviso operativo")}</div><div class="hint">Avviso operativo</div></div>`;
-    }).join("")}</div>` : "";
-    body.innerHTML = `
-      <div class="stepTitle">${p.operator||"Operatore"} · Ordine n. ${p.orderNo}</div>
-      <div class="muted">${p.customer} · Seleziona cosa stai concludendo, poi premi “Ho concluso la produzione”.</div>
-      ${alertHtml}
+// =======================================
+// CONCLUSI: apri modal storico (safe)
+// =======================================
+function openHistModalSafe(){
+  // preferisci eventuale funzione già presente
+  try{
+    if(typeof openHistModal === "function"){ openHistModal(); return; }
+  }catch(_e){}
+
+  const m = $("histModal");
+  if(!m){ showToast("Conclusi", "Modale storico non trovata."); return; }
+  m.classList.add("show");
+  lockBody();
+
+  // prova a renderizzare con funzioni già presenti (non tocco fetch)
+  try{
+    if(typeof renderHistoryModal === "function") renderHistoryModal();
+    else if(typeof renderHistory === "function") renderHistory();
+    else if(typeof renderCompletedSection === "function") renderCompletedSection();
+  }catch(_e){}
+}
+
+// =======================================
+// CONCLUSI: clear mese corrente (admin + doppia conferma)
+// =======================================
+async function clearCompletedHistory(){
+  const isAdmin = Boolean(state.user && state.user.isAdmin);
+  if(!isAdmin){ showToast("Permessi", "Solo admin."); return; }
+  const ok1 = confirm("Cancellare TUTTI gli ordini conclusi del mese corrente?");
+  if(!ok1) return;
+  const ok2 = confirm("Conferma finale: questa azione è IRREVERSIBILE.");
+  if(!ok2) return;
+
+  if(!state.firebase || !state.firebase.ok){
+    showToast("Offline", "Firebase non disponibile.");
+    return;
+  }
+
+  const mk = (typeof monthKeyRome==="function") ? monthKeyRome() : "";
+  const fs = state.firebase.api;
+  const db = state.firebase.db;
+
+  // prova a capire la collection da funzioni già presenti
+  const colName =
+    (typeof HISTORY_COL!=="undefined" && HISTORY_COL) ? HISTORY_COL :
+    (typeof COMPLETED_COL!=="undefined" && COMPLETED_COL) ? COMPLETED_COL :
+    "powderHistory";
+
+  try{
+    // query per monthKey se disponibile, altrimenti elimina local-only
+    if(mk){
+      const q = fs.query(fs.collection(db, colName), fs.where("monthKey","==", mk));
+      const snap = await fs.getDocs(q);
+      const batch = fs.writeBatch(db);
+      let n = 0;
+      snap.forEach(doc=>{
+        batch.delete(doc.ref);
+        n++;
+      });
+      if(n){
+        await batch.commit();
+      }
+    }
+  }catch(err){
+    console.warn("clearCompletedHistory err", err);
+    // fallback: niente delete remoto se query non supportata
+  }
+
+  // local state (mese corrente)
+  try{
+    if(Array.isArray(state.history) && typeof historyMonthOf==="function"){
+      const mk2 = (typeof monthKeyRome==="function") ? monthKeyRome() : "";
+      state.history = state.history.filter(h => historyMonthOf(h) !== mk2);
+    }
+  }catch(_e){}
+
+  try{ if(typeof renderCompletedSection==="function") renderCompletedSection(); }catch(_e){}
+  try{ if(typeof renderStats==="function") renderStats(); }catch(_e){}
+  try{ if(typeof updateHeaderMonthStats==="function") updateHeaderMonthStats(); }catch(_e){}
+
+  showToast("Conclusi", "Cancellati (mese corrente).");
+}
+
+// =======================================
+// MENSILE: helper + filtro conclusi/statistiche
+// =======================================
+function monthKeyRome(d=new Date()){
+  const dt = new Date(d.toLocaleString("en-US", { timeZone:"Europe/Rome" }));
+  const y = dt.getFullYear();
+  const m = String(dt.getMonth()+1).padStart(2,"0");
+  return `${y}-${m}`;
+}
+function historyMonthOf(h){
+  if(!h) return "";
+  if(h.monthKey) return String(h.monthKey);
+  const at = h.at || h.createdAt || h.id || "";
+  try{
+    const dt = at ? new Date(at) : new Date();
+    if(String(dt) !== "Invalid Date") return monthKeyRome(dt);
+  }catch(_e){}
+  return monthKeyRome(new Date());
+}
+function historyForCurrentMonth(){
+  const mk = monthKeyRome();
+  return (state.history||[]).filter(h => historyMonthOf(h) === mk);
+}
+
+// Override: buildUniqueCompletedHistory (mese corrente)
+function buildUniqueCompletedHistory(){
+  const hist = historyForCurrentMonth().slice();
+  hist.sort((a,b)=> tsFromId(b.id||b.at||0) - tsFromId(a.id||a.at||0));
+
+  const map = new Map();
+  for(const h of hist){
+    if(!h) continue;
+    const orderNo = String(h.orderNo ?? "").trim();
+    const customer = String(h.customer ?? "").trim();
+    if(!orderNo && !customer) continue;
+
+    const key = `${orderNo}|${customer}`.toLowerCase();
+    if(!map.has(key)) map.set(key, h);
+  }
+  return Array.from(map.values());
+}
+
+// Patch: renderStats (mese corrente)
+function renderStats(){
+  const list = $("statsList");
+  const isDesktop = window.matchMedia("(min-width: 980px)").matches;
+  if(!isDesktop){
+    list.innerHTML = `<div class="muted">Apri da desktop per vedere le statistiche.</div>`;
+    $("statsBadge").textContent = "—";
+    return;
+  }
+
+  const hist = historyForCurrentMonth().filter(x=>x && x.operator);
+  if(!hist.length){
+    list.innerHTML = `<div class="muted">Nessun dato storico disponibile per il mese corrente.</div>`;
+    $("statsBadge").textContent = "0";
+    return;
+  }
+
+  const agg = new Map();
+  for(const h of hist){
+    const op = h.operator;
+    const kg = Number(h.kg||0);
+    const ms = Number(h.durationMs||0);
+    const a = agg.get(op) || { kg:0, ms:0, n:0 };
+    a.kg += kg; a.ms += ms; a.n += 1;
+    agg.set(op, a);
+  }
+
+  const rows = Array.from(agg.entries()).map(([op,a])=>{
+    const hours = a.ms/3600000;
+    const speed = hours>0 ? (a.kg/hours) : 0;
+    return { op, ...a, speed };
+  }).sort((x,y)=>y.kg-x.kg);
+
+  $("statsBadge").textContent = String(rows.length);
+  list.innerHTML = "";
+  for(const r of rows){
+    const div = document.createElement("div");
+    div.className = "item";
+    div.innerHTML = `
+      <div class="top">
+        <div>
+          <div class="name">${escapeHtml(r.op)}</div>
+          <div class="sub">${r.n} produzioni · Velocità media: ${Math.round(r.speed)} kg/h</div>
+        </div>
+        <div class="badge">${Math.round(r.kg)} kg</div>
+      </div>`;
+    list.appendChild(div);
+  }
+
+  // Box admin: lascia com’è già (se esiste sopra), non duplicare qui
+}
+
+// =======================================
+// HEADER: “Questo mese: X kg · Y ordini”
+// =======================================
+function ensureHeaderMonthEl(){
+  const sub = document.querySelector(".subtitle");
+  if(!sub) return null;
+  // costruisci una riga unica: "Benvenuto <operatore> · Questo mese: X kg · Y ordini"
+  let wrap = document.getElementById("hdrSubWrap");
+  if(!wrap){
+    sub.textContent = "";
+    wrap = document.createElement("span");
+    wrap.id = "hdrSubWrap";
+    wrap.style.display = "inline-flex";
+    wrap.style.flexWrap = "wrap";
+    wrap.style.gap = "6px";
+    wrap.style.alignItems = "baseline";
+    sub.appendChild(wrap);
+
+    const a = document.createElement("span");
+    a.id = "hdrWelcome";
+    a.style.fontWeight = "800";
+    a.textContent = "Benvenuto";
+    wrap.appendChild(a);
+
+    const b = document.createElement("span");
+    b.id = "hdrOpName";
+    b.style.fontWeight = "900";
+    b.textContent = "Operatore";
+    wrap.appendChild(b);
+
+    const c = document.createElement("span");
+    c.id = "hdrMonthStats";
+    c.style.fontWeight = "800";
+    c.style.color = "rgba(0,0,0,.62)";
+    c.textContent = "· Questo mese: —";
+    wrap.appendChild(c);
+  }
+  return document.getElementById("hdrMonthStats");
+}
+function updateHeaderMonthStats(){
+  const el = ensureHeaderMonthEl();
+  if(!el) return;
+  const opNameEl = document.getElementById("hdrOpName");
+  const opName = (state.operator || state.user?.fullName || "Operatore").trim();
+  if(opNameEl) opNameEl.textContent = opName || "Operatore";
+
+  const me = String(opName || "").toLowerCase();
+  if(!me){
+    el.textContent = "· Questo mese: —";
+    return;
+  }
+  const hist = historyForCurrentMonth().filter(h => String(h.operator||"").toLowerCase() === me);
+  const kg = Math.round(hist.reduce((a,h)=>a + (Number(h.kg||0)||0), 0));
+  const orders = hist.length;
+  el.textContent = `· Questo mese: ${kg.toLocaleString("it-IT")} kg · ${orders} ordini`;
+}
+
+// =======================================
+// ALERT BANNERS (righe ** / sacchi / bobine)
+// =======================================
+function parseStarBanner(desc){
+  const raw = String(desc||"").replace(/\*/g,"").trim();
+  if(!raw) return null;
+  const info = detectAlertLine(raw);
+  if(info) return { label: raw, kind: info.color };
+  // fallback colore “neutro”
+  return { label: raw, kind: "other" };
+}
+
+function renderAlertBannerHtml(label, kind){
+  const p = alertPalette(kind);
+  const bg = p.bg || "rgba(0,0,0,.05)";
+  const bd = p.border || "rgba(0,0,0,.12)";
+  const col = p.color || "#1c1c1e";
+  const sh = p.shadow || "0 12px 26px rgba(0,0,0,.06)";
+  return `
+    <div class="alertBanner pressCard" style="background:${bg}; border-color:${bd}; color:${col}; box-shadow:${sh};">
+      <div class="label">${escapeHtml(label)}</div>
+      <div class="hint">Avviso</div>
+    </div>
+  `;
+}
+
+// =======================================
+// PRODUZIONE: flow completo (ordini → righe → start)
+// =======================================
+function isLineStarred(line){
+  const d = String(line?.desc||"");
+  return d.includes("**");
+}
+function lineKgReal(line){
+  // qty è già KG reali (richiesta Ludovico): non moltiplicare per packKg
+  return magResolveQtyKg(line);
+}
+
+function renderProdStepOrders(){
+  const body = $("prodModalBody");
+  if(!body) return;
+
+  const isAdmin = Boolean(state.user && state.user.isAdmin);
+  state.adminOrderView = state.adminOrderView || "window"; // window=3 giorni, all=tutti
+
+  const viewAll = isAdmin && state.adminOrderView === "all";
+  const views = buildOrderViews({
+    applyRoleVisibility: !(isAdmin && viewAll),
+    includeHidden: (isAdmin && viewAll)
+  });
+
+  const orders = (isAdmin && viewAll) ? views.baseOrders : views.orders;
+
+  // Pre-open ordine se arrivo dai parziali
+  if(state.forceOrderNo){
+    const target = orders.find(o => String(o.orderNo||"") === String(state.forceOrderNo));
+    if(target){
+      state.forceOrderNo = null;
+      state.selectedOrder = target;
+      renderProdStepLines(target);
+      return;
+    }
+    // se non presente nella vista corrente, admin forza vista “all”
+    if(isAdmin && !viewAll){
+      state.adminOrderView = "all";
+      renderProdStepOrders();
+      return;
+    }
+  }
+
+  const me = state.user?.fullName || state.operator || "Operatore";
+  if(!state.operator) state.operator = me;
+
+  // ordering: prima in produzione, poi parziali, poi per data/conclusione
+  const active = state.activeProductions || [];
+  const activeOrders = new Set(active.map(p=>String(p.orderNo||"").trim()).filter(Boolean));
+
+  let partialSet = new Set();
+  try{ partialSet = new Set((computePartialOrders().partial||[]).map(p=>String(p.orderNo))); }catch(_e){}
+
+  const sortKey = (o)=>{
+    const on = String(o.orderNo||"");
+    const inProd = activeOrders.has(on) ? 0 : 1;
+    const isPar = partialSet.has(on) ? 0 : 1;
+    const days = (o.daysAway==null ? 99 : o.daysAway);
+    return `${inProd}${isPar}${String(days).padStart(3,"0")}|${norm(o.customer||"")}|${on}`;
+  };
+
+  const ord = orders.slice().sort((a,b)=>sortKey(a).localeCompare(sortKey(b)));
+
+  body.innerHTML = `
+    <div class="stepTitle">Produzione</div>
+    <div class="muted">Operatore: <b>${escapeHtml(state.operator)}</b></div>
+    <div style="height:10px"></div>
+
+    <div class="row2" style="margin-bottom:10px;">
+      <button class="btn" id="btnOpChange">Cambia operatore</button>
+      ${isAdmin ? `<button class="btn" id="btnAdminToggle">${state.adminOrderView==="all" ? "Vista: Tutti" : "Vista: 3 giorni"}</button>` : `<button class="btn ghost" id="btnAdminToggle" disabled style="opacity:.5;">Vista: reparto</button>`}
+    </div>
+
+    <div class="planMessage">
+      <div class="headline">Seleziona un ordine</div>
+      <ul>
+        <li>Tap sull’ordine → selezione righe → avvio produzione.</li>
+        <li>Righe con <b>**</b> diventano banner (non selezionabili).</li>
+        <li>KG = quantità reale da produrre.</li>
+      </ul>
+    </div>
+
+    <div class="list" id="orderList"></div>
+    <div class="muted" style="margin-top:10px;">Ordini visibili: <b>${ord.length}</b>${isAdmin?` · Totali (XML): <b>${views.baseOrders.length}</b>`:""}</div>
+  `;
+
+  body.querySelector("#btnOpChange").onclick = ()=> renderOperatorPicker();
+
+  const toggle = body.querySelector("#btnAdminToggle");
+  if(isAdmin && toggle){
+    toggle.onclick = ()=>{
+      state.adminOrderView = (state.adminOrderView==="all") ? "window" : "all";
+      renderProdStepOrders();
+    };
+  }
+
+  const list = body.querySelector("#orderList");
+  if(!ord.length){
+    list.innerHTML = `<div class="muted">Nessun ordine disponibile.</div>`;
+    return;
+  }
+
+  for(const o of ord){
+    const on = String(o.orderNo||"");
+    const inProd = activeOrders.has(on);
+    const isPar = partialSet.has(on);
+
+    const badge = inProd ? "In produzione" : (isPar ? "Parziale" : "Da fare");
+    const badgeStyle = inProd
+      ? `border-color: rgba(52,199,89,.5); color: var(--good);`
+      : (isPar ? `border-color: rgba(255,159,10,.55); color: var(--warn);` : ``);
+
+    const meta = [];
+    if(o.conclusion) meta.push(`Conclusione: <b>${escapeHtml(o.conclusion)}</b>`);
+    if(o.totalKg!=null) meta.push(`Totale: <b>${Math.round(o.totalKg).toLocaleString("it-IT")}</b> kg`);
+    if(o.daysAway!=null && o.daysAway!==99) meta.push(`Giorni: <b>${escapeHtml(String(o.daysAway))}</b>`);
+
+    const div = document.createElement("div");
+    div.className = "item pressCard";
+    div.innerHTML = `
+      <div class="top">
+        <div>
+          <div class="name">${escapeHtml(o.customer||"Cliente")} · Ordine n. ${escapeHtml(on)}</div>
+          <div class="sub">${meta.join(" · ") || "—"}</div>
+        </div>
+        <div class="badge" style="${badgeStyle}">${badge}</div>
+      </div>
+    `;
+    div.onclick = ()=>{
+      state.selectedOrder = o;
+      renderProdStepLines(o);
+    };
+    list.appendChild(div);
+  }
+}
+
+function renderOperatorPicker(){
+  const body = $("prodModalBody");
+  const current = state.operator || (state.user?.fullName || "Operatore");
+
+  const ops = Array.from(new Set([current, ...(OPERATORS||[]), (state.user?.fullName||"")].filter(Boolean)));
+  body.innerHTML = `
+    <div class="stepTitle">Seleziona operatore</div>
+    <div class="muted">Serve per registrare statistiche e conclusioni.</div>
+    <div class="radioRow" id="opList"></div>
+    <div style="height:12px"></div>
+    <button class="btn" id="opBack" style="width:100%;">Indietro</button>
+  `;
+
+  const list = body.querySelector("#opList");
+  for(const name of ops){
+    const id = `op_${norm(name).replace(/\s+/g,"_")}`;
+    const row = document.createElement("label");
+    row.className = "radio pressCard";
+    row.setAttribute("for", id);
+    row.innerHTML = `
+      <input type="radio" name="opSel" id="${id}" ${name===current ? "checked":""}/>
+      <span>${escapeHtml(name)}</span>
+    `;
+    row.onclick = ()=>{
+      state.operator = name;
+      renderProdStepOrders();
+    };
+    list.appendChild(row);
+  }
+
+  body.querySelector("#opBack").onclick = renderProdStepOrders;
+}
+
+function renderProdStepLines(order){
+  const body = $("prodModalBody");
+  const isAdmin = Boolean(state.user && state.user.isAdmin);
+
+  const allLines = Array.isArray(order.lines) ? order.lines.slice() : [];
+  const starred = allLines.filter(isLineStarred);
+  const normalLines = allLines.filter(l => !isLineStarred(l));
+
+  state.selectedLineKeys = state.selectedLineKeys || new Set();
+  state.selectedLineKeys.clear();
+
+  const titleMeta = [];
+  if(order.conclusion) titleMeta.push(`Conclusione: <b>${escapeHtml(order.conclusion)}</b>`);
+  titleMeta.push(`Righe: <b>${normalLines.length}</b>`);
+
+  body.innerHTML = `
+    <div class="row2" style="margin-bottom:10px;">
+      <button class="btn" id="btnBackOrders">← Ordini</button>
+      <button class="btn" id="btnSelectAll">Seleziona tutto</button>
+    </div>
+
+    <div class="stepTitle">Ordine n. ${escapeHtml(order.orderNo||"—")} · ${escapeHtml(order.customer||"Cliente")}</div>
+    <div class="muted">${titleMeta.join(" · ")}</div>
+
+    <div style="height:10px"></div>
+
+    ${order.alerts && order.alerts.length ? `
+      <div class="muted" style="margin-bottom:8px;">Avvisi operativi</div>
+      <div class="list" id="alertList">${order.alerts.map(a=>renderAlertBannerHtml(a.alertInfo?.label || a.desc || "Avviso", a.alertInfo?.color || "other")).join("")}</div>
       <div style="height:10px"></div>
-      <div class="row2">
-        <button class="btn" id="btnSelAllRun">Seleziona tutto</button>
-        <button class="btn ghost" id="btnClrAllRun">Deseleziona</button>
+    ` : ``}
+
+    ${starred.length ? `
+      <div class="muted" style="margin-bottom:8px;">Avvisi (da righe **)</div>
+      <div class="list" id="starList">${starred.map(l=>{ const b=parseStarBanner(l.desc); return b?renderAlertBannerHtml(b.label, b.kind):""; }).join("")}</div>
+      <div style="height:10px"></div>
+    ` : ``}
+
+    <div class="muted" style="margin-bottom:8px;">Seleziona righe da produrre</div>
+    <div class="list" id="lineList"></div>
+
+    <div style="height:12px"></div>
+
+    <div class="k" style="border-radius:18px;">
+      <div class="t">Totale selezionato (kg)</div>
+      <div class="v" id="selKg">0</div>
+      <div class="muted" style="margin-top:6px;">I kg sono reali (non moltiplicati per sacchi).</div>
+    </div>
+
+    <div style="height:12px"></div>
+    <button class="btn good" id="btnStartProd" style="width:100%; font-size:16px; padding:16px; border-radius:18px;">INIZIA PRODUZIONE</button>
+    <div style="height:8px"></div>
+    <div class="muted">Solo admin può annullare una produzione già avviata.</div>
+  `;
+
+  body.querySelector("#btnBackOrders").onclick = renderProdStepOrders;
+
+  const list = body.querySelector("#lineList");
+  const selKgEl = body.querySelector("#selKg");
+
+  const updateSel = ()=>{
+    let kg = 0;
+    for(const l of normalLines){
+      if(state.selectedLineKeys.has(String(l.lineKey))){
+        kg += lineKgReal(l);
+      }
+    }
+    selKgEl.textContent = Math.round(kg).toLocaleString("it-IT");
+  };
+
+  const toggleLine = (l)=>{
+    const k = String(l.lineKey||"");
+    if(!k) return;
+    if(state.selectedLineKeys.has(k)) state.selectedLineKeys.delete(k);
+    else state.selectedLineKeys.add(k);
+    updateSel();
+    renderLineChecks();
+  };
+
+  const renderLineChecks = ()=>{
+    // aggiorna badge selezione
+    for(const el of list.querySelectorAll("[data-linekey]")){
+      const k = el.getAttribute("data-linekey");
+      const checked = state.selectedLineKeys.has(k);
+      const badge = el.querySelector(".badge");
+      if(badge) badge.textContent = checked ? "✓" : "Seleziona";
+      if(checked) el.style.background = "rgba(10,132,255,.06)";
+      else el.style.background = "rgba(0,0,0,.03)";
+    }
+  };
+
+  for(const l of normalLines){
+    const kg = lineKgReal(l);
+    const div = document.createElement("div");
+    div.className = "item pressCard";
+    div.setAttribute("data-linekey", String(l.lineKey||""));
+    div.innerHTML = `
+      <div class="top">
+        <div>
+          <div class="name">${escapeHtml(l.desc||"")}</div>
+          <div class="sub">Codice: <b>${escapeHtml(l.code||"—")}</b> · ${escapeHtml(formatQtyWithKg(l.qty, l.um||"kg"))}</div>
+        </div>
+        <div class="badge"><b style="font-variant-numeric: tabular-nums;">${Math.round(kg)}</b> kg</div>
+      </div>
+      <div class="muted" style="margin-top:8px; font-size:12px;">Tap per selezionare</div>
+    `;
+    div.onclick = ()=> toggleLine(l);
+    list.appendChild(div);
+  }
+
+  body.querySelector("#btnSelectAll").onclick = ()=>{
+    const allSelected = normalLines.every(l=>state.selectedLineKeys.has(String(l.lineKey||"")));
+    state.selectedLineKeys.clear();
+    if(!allSelected){
+      for(const l of normalLines){
+        if(l.lineKey) state.selectedLineKeys.add(String(l.lineKey));
+      }
+    }
+    updateSel();
+    renderLineChecks();
+  };
+
+  body.querySelector("#btnStartProd").onclick = async()=>{
+    const keys = Array.from(state.selectedLineKeys || []);
+    if(!keys.length){
+      showToast("Selezione", "Seleziona almeno una riga.");
+      return;
+    }
+    const operator = state.operator || state.user?.fullName || "Operatore";
+    await startProduction(order, operator, keys);
+  };
+
+  updateSel();
+  renderLineChecks();
+}
+
+async function startProduction(order, operator, selectedKeys){
+  try{
+    if(!state.firebase.ok){
+      showToast("Produzione", "Firebase non disponibile (offline).");
+      return;
+    }
+    const selectedLines = (order.lines||[]).filter(l=>selectedKeys.includes(String(l.lineKey)));
+    const perLine = selectedLines.map(l=>({
+      lineKey: String(l.lineKey||""),
+      code: l.code||"",
+      desc: l.desc||"",
+      qty: l.qty,
+      um: l.um||"",
+      plannedKg: lineKgReal(l),
+      producedKg: null
+    }));
+    const totalKg = perLine.reduce((a,x)=>a + (Number(x.plannedKg)||0), 0);
+
+    const prod = {
+      orderNo: order.orderNo || order.number || "",
+      customer: order.customer || "",
+      operator,
+      operatorUid: state.user?.uid || "",
+      selectedLineKeys: selectedKeys,
+      perLine,
+      totalKg,
+      startedAt: nowIso(),
+      active: true,
+      monthKey: monthKeyRome()
+    };
+
+    const id = await upsertActiveProduction(prod);
+    showToast("Produzione avviata", `Ordine ${prod.orderNo} · ${Math.round(totalKg)} kg`);
+    speak(`Produzione avviata. Ordine ${prod.orderNo}.`);
+
+    closeProdModalRequest();
+    openRunningModal(id);
+  }catch(err){
+    console.warn(err);
+    showToast("Errore", "Impossibile avviare la produzione.");
+  }
+}
+
+// =======================================
+// RUNNING MODAL (dettagli + conclude/annulla)
+// =======================================
+function openRunningModal(focusProdId=null){
+  $("runningModal").classList.add("show");
+  lockBody();
+  state.focusProdId = focusProdId || null;
+  renderRunningModal();
+}
+function closeRunningModal(){
+  $("runningModal").classList.remove("show");
+  unlockBody();
+  state.focusProdId = null;
+}
+
+function renderRunningModal(){
+  const body = $("runningBody");
+  if(!body) return;
+
+  const active = (state.activeProductions||[]).filter(p=>p && p.active);
+  const isAdmin = Boolean(state.user && state.user.isAdmin);
+  const me = (state.user?.fullName || state.operator || "").toLowerCase();
+
+  if(!active.length){
+    body.innerHTML = `<div class="muted">Nessuna produzione attiva.</div>`;
+    return;
+  }
+
+  // ordina: prima quella in focus, poi le mie, poi le altre
+  const score = (p)=>{
+    const id = String(p.id||"");
+    const op = String(p.operator||"").toLowerCase();
+    if(state.focusProdId && id===String(state.focusProdId)) return 0;
+    if(me && op===me) return 1;
+    return 2;
+  };
+  const rows = active.slice().sort((a,b)=>score(a)-score(b));
+
+  body.innerHTML = `
+    <div class="stepTitle">Produzioni attive (${rows.length})</div>
+    <div class="muted">Apri una produzione per concludere (solo la tua o admin).</div>
+    <div style="height:10px"></div>
+    <div class="list" id="runList"></div>
+  `;
+
+  const list = body.querySelector("#runList");
+
+  for(const p of rows){
+    const id = String(p.id||"");
+    const op = p.operator || "Operatore";
+    const orderNo = p.orderNo || "—";
+    const customer = p.customer || "";
+    const started = p.startedAt ? fmtDateTime(p.startedAt) : "—";
+    const totalKg = Math.round(Number(p.totalKg||0)||0);
+
+    const mine = me && String(op).toLowerCase()===me;
+    const canEdit = mine || isAdmin;
+
+    const div = document.createElement("div");
+    div.className = "item pressCard";
+    div.innerHTML = `
+      <div class="top">
+        <div>
+          <div class="name">Ordine n. ${escapeHtml(orderNo)} ${customer?`· ${escapeHtml(customer)}`:""}</div>
+          <div class="sub">${escapeHtml(op)} · Avviata: <b>${escapeHtml(started)}</b> · Totale: <b>${totalKg}</b> kg</div>
+        </div>
+        <div class="badge">${canEdit ? "Apri" : "Solo lettura"}</div>
+      </div>
+    `;
+    div.onclick = ()=> openRunningDetail(id);
+    list.appendChild(div);
+  }
+}
+
+function openRunningDetail(prodId){
+  const body = $("runningBody");
+  const p = (state.activeProductions||[]).find(x=>String(x.id||"")===String(prodId));
+  if(!p){
+    renderRunningModal();
+    return;
+  }
+
+  const isAdmin = Boolean(state.user && state.user.isAdmin);
+  const me = (state.user?.fullName || state.operator || "").toLowerCase();
+  const mine = me && String(p.operator||"").toLowerCase()===me;
+  const canEdit = mine || isAdmin;
+
+  const perLine = Array.isArray(p.perLine) ? p.perLine.slice() : [];
+  state._prodDraft = state._prodDraft || {};
+  state._prodDraft[prodId] = state._prodDraft[prodId] || {};
+  const draft = state._prodDraft[prodId];
+
+  // init draft with plannedKg
+  for(const l of perLine){
+    const k = String(l.lineKey||"");
+    if(!k) continue;
+    if(draft[k]==null){
+      const v = (l.producedKg!=null) ? Number(l.producedKg) : Number(l.plannedKg||0);
+      draft[k] = Number.isFinite(v) ? v : 0;
+    }
+  }
+
+  body.innerHTML = `
+    <div class="row2" style="margin-bottom:10px;">
+      <button class="btn" id="runBack">← Elenco</button>
+      <button class="btn ghost" id="runClose">Chiudi</button>
+    </div>
+
+    <div class="stepTitle">Ordine n. ${escapeHtml(p.orderNo||"—")} ${p.customer?`· ${escapeHtml(p.customer)}`:""}</div>
+    <div class="muted">Operatore: <b>${escapeHtml(p.operator||"—")}</b> · Avviata: <b>${escapeHtml(p.startedAt?fmtDateTime(p.startedAt):"—")}</b></div>
+
+    <div style="height:12px"></div>
+
+    <div class="muted" style="margin-bottom:8px;">Inserisci i kg prodotti per riga</div>
+    <div class="list" id="runLines"></div>
+
+    <div style="height:12px"></div>
+    <div class="k" style="border-radius:18px;">
+      <div class="t">Totale prodotti (kg)</div>
+      <div class="v" id="runTotKg">—</div>
+      <div class="muted" style="margin-top:6px;">Questo valore finisce nelle statistiche mensili.</div>
+    </div>
+
+    <div style="height:12px"></div>
+
+    <div class="row2">
+      <button class="btn good" id="btnConcludeNow" ${canEdit ? "" : "disabled"} style="opacity:${canEdit?1:.55};">Concludi</button>
+      <button class="btn bad" id="btnAbortNow" ${isAdmin ? "" : "disabled"} style="opacity:${isAdmin?1:.45};">Annulla</button>
+    </div>
+
+    <div style="height:10px"></div>
+    <div class="muted">${canEdit ? "Concludi → firma e registrazione." : "Solo l’operatore o un admin può concludere."}</div>
+  `;
+
+  body.querySelector("#runBack").onclick = renderRunningModal;
+  body.querySelector("#runClose").onclick = closeRunningModal;
+
+  const runLines = body.querySelector("#runLines");
+
+  for(const l of perLine){
+    const k = String(l.lineKey||"");
+    const planned = Number(l.plannedKg||0)||0;
+
+    const row = document.createElement("div");
+    row.className = "item";
+    row.innerHTML = `
+      <div class="top">
+        <div>
+          <div class="name">${escapeHtml(l.desc||"")}</div>
+          <div class="sub">Pianificati: <b>${Math.round(planned)}</b> kg</div>
+        </div>
+        <div class="badge">${escapeHtml(l.code||"—")}</div>
       </div>
       <div style="height:10px"></div>
-      <div class="list" id="runLines"></div>
-      <div style="height:12px"></div>
-      <button class="btn good" id="btnConclude" style="width:100%;">HO CONCLUSO LA PRODUZIONE</button>
-      <div style="height:10px"></div>
-      <button class="btn bad" id="btnCancelProd" style="width:100%;">Annulla produzione in corso</button>
-      <div style="height:10px"></div>
-      <button class="btn ghost" id="btnBackRun" style="width:100%;">← Torna a elenco produzioni</button>
+      <div class="field" style="margin:0;">
+        <label>Kg prodotti</label>
+        <input ${canEdit ? "" : "disabled"} data-linekey="${escapeHtml(k)}" type="number" inputmode="decimal" step="0.01" min="0"
+               value="${escapeHtml(String(draft[k]??planned))}" style="font-weight:900;"/>
+      </div>
     `;
+    runLines.appendChild(row);
+  }
 
-    const runLines = body.querySelector("#runLines");
-    function rerender(){
-      runLines.innerHTML = "";
-      for(const l of availableLines){
-        const checked = toConclude.has(l.lineKey);
-        const div = document.createElement("div");
-        div.className = "item";
-        const lineConclusion = l.conclusion || (order?.conclusion || "");
-        div.style.cursor = "pointer";
-        div.style.borderColor = checked ? "rgba(46,123,255,.55)" : "rgba(255,255,255,.08)";
-        div.style.background = checked ? "rgba(46,123,255,.16)" : "rgba(0,0,0,.16)";
-        const isWhiteBag = isWhiteBagRow(l); // CODEX: riga solo banner se sacchetto bianco
-        if(isWhiteBag){
-          div.innerHTML = renderWhiteBagBanner({ selectable: true, checked });
-        } else {
-          const qtyLabel = formatQtyWithKg(l.qty, l.um);
-          div.innerHTML = `
-            <div class="top">
-              <div>
-                <div class="name">${l.desc}</div>
-                <div class="sub">Quantità: ${qtyLabel} · Cod: ${l.code||"—"}${lineConclusion?` · Conclusione: ${lineConclusion}`:""}</div>
-                <div style="margin-top:8px; display:flex; gap:10px; align-items:center;">
-                  <div class="muted" style="font-size:12px; font-weight:900; min-width:150px;">Quantità prodotta (kg, opzionale)</div>
-                  <input class="kgInput" data-k="${l.lineKey}" type="number" inputmode="decimal" step="0.1" placeholder="auto" style="flex:1; padding:10px 10px; border-radius:12px; border:1px solid var(--stroke); background: rgba(0,0,0,.02); font-weight:900;"/>
-                </div>
-              </div>
-              <div class="badge">${checked ? "✓" : "Seleziona"}</div>
-            </div>`;
-          const inp = div.querySelector(".kgInput");
-          if(inp){
-            const prev = producedKg.get(l.lineKey);
-            if(prev!=null) inp.value = prev;
-            inp.addEventListener("click", (e)=>e.stopPropagation());
-            inp.addEventListener("touchstart", (e)=>e.stopPropagation(), {passive:true});
-            inp.addEventListener("input", ()=>{ producedKg.set(l.lineKey, inp.value); });
-          }
-        }
+  const calcTot = ()=>{
+    let tot = 0;
+    for(const [k,v] of Object.entries(draft)){
+      const n = Number(v);
+      if(Number.isFinite(n)) tot += n;
+    }
+    body.querySelector("#runTotKg").textContent = Math.round(tot).toLocaleString("it-IT");
+    return tot;
+  };
 
-        div.onclick = ()=>{
-          if(toConclude.has(l.lineKey)) toConclude.delete(l.lineKey); else toConclude.add(l.lineKey);
-          rerender();
-        };
-        runLines.appendChild(div);
-      }
-      $("btnConclude").disabled = toConclude.size===0;
-      $("btnConclude").style.opacity = toConclude.size===0 ? ".6" : "1";
+  runLines.querySelectorAll("input[data-linekey]").forEach(inp=>{
+    inp.addEventListener("input", ()=>{
+      const k = inp.getAttribute("data-linekey");
+      const n = Number(String(inp.value).replace(",","."));
+      draft[k] = Number.isFinite(n) ? n : 0;
+      calcTot();
+    });
+  });
+
+  calcTot();
+
+  body.querySelector("#btnConcludeNow").onclick = ()=>{
+    if(!canEdit) return;
+    const tot = calcTot();
+    if(tot <= 0){
+      showToast("Concludi", "Inserisci almeno 1 kg prodotto.");
+      return;
+    }
+    openSignForProduction(p, draft, tot);
+  };
+
+  body.querySelector("#btnAbortNow").onclick = async()=>{
+    if(!isAdmin) return;
+    const ok = confirm("Annullare questa produzione?");
+    if(!ok) return;
+    await abortProduction(p);
+  };
+}
+
+async function abortProduction(p){
+  try{
+    await closeActiveProduction(p.id, { aborted:true, abortedBy: state.user?.fullName || "admin" });
+    await addAbort({
+      monthKey: monthKeyRome(),
+      orderNo: p.orderNo||"",
+      customer: p.customer||"",
+      operator: p.operator||"",
+      reason: "Annullata da admin"
+    });
+    showCancelBanner(`Ordine ${p.orderNo||""} annullato da admin.`);
+    speak("Produzione annullata.");
+    showToast("Annullata", `Produzione annullata (Ordine ${p.orderNo||""}).`);
+    closeRunningModal();
+  }catch(err){
+    console.warn(err);
+    showToast("Errore", "Impossibile annullare la produzione.");
+  }
+}
+
+// =======================================
+// FIRMA: nome operatore + checkbox + canvas
+// =======================================
+let _sig = { drawing:false, empty:true, last:null };
+
+function initSignaturePad(){
+  const canvas = $("signCanvas");
+  if(!canvas) return;
+  const ctx = canvas.getContext("2d");
+
+  const resize = ()=>{
+    const rect = canvas.getBoundingClientRect();
+    const dpr = Math.max(1, window.devicePixelRatio || 1);
+    canvas.width = Math.floor(rect.width * dpr);
+    canvas.height = Math.floor(rect.height * dpr);
+    ctx.setTransform(dpr,0,0,dpr,0,0);
+    ctx.lineWidth = 2.2;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.strokeStyle = "#111";
+    ctx.fillStyle = "#fff";
+    ctx.fillRect(0,0,rect.width,rect.height);
+    _sig.empty = true;
+  };
+
+  resize();
+  window.addEventListener("resize", ()=>{ if($("signModal").classList.contains("show")) resize(); }, { passive:true });
+
+  const pos = (e)=>{
+    const r = canvas.getBoundingClientRect();
+    const x = (e.clientX ?? (e.touches && e.touches[0]?.clientX) ?? 0) - r.left;
+    const y = (e.clientY ?? (e.touches && e.touches[0]?.clientY) ?? 0) - r.top;
+    return { x, y };
+  };
+
+  const start = (e)=>{
+    e.preventDefault();
+    _sig.drawing = true;
+    const p = pos(e);
+    _sig.last = p;
+  };
+  const move = (e)=>{
+    if(!_sig.drawing) return;
+    e.preventDefault();
+    const p = pos(e);
+    const last = _sig.last || p;
+    ctx.beginPath();
+    ctx.moveTo(last.x, last.y);
+    ctx.lineTo(p.x, p.y);
+    ctx.stroke();
+    _sig.last = p;
+    _sig.empty = false;
+  };
+  const end = (e)=>{
+    if(!_sig.drawing) return;
+    e.preventDefault();
+    _sig.drawing = false;
+    _sig.last = null;
+  };
+
+  canvas.onpointerdown = start;
+  canvas.onpointermove = move;
+  canvas.onpointerup = end;
+  canvas.onpointercancel = end;
+
+  // iOS fallback
+  canvas.ontouchstart = start;
+  canvas.ontouchmove = move;
+  canvas.ontouchend = end;
+}
+
+function clearSignature(){
+  const canvas = $("signCanvas");
+  if(!canvas) return;
+  const ctx = canvas.getContext("2d");
+  const r = canvas.getBoundingClientRect();
+  ctx.clearRect(0,0,r.width,r.height);
+  ctx.fillStyle = "#fff";
+  ctx.fillRect(0,0,r.width,r.height);
+  _sig.empty = true;
+}
+
+function openSignForProduction(prod, draftMap, totalKg){
+  state._pendingSign = { prod, draftMap, totalKg };
+
+  // inject nome operatore field (se non c’è già)
+  const modal = $("signModal");
+  const sbd = modal.querySelector(".sbd");
+  if(!document.getElementById("signNameField")){
+    const box = document.createElement("div");
+    box.id = "signNameField";
+    box.innerHTML = `
+      <div style="height:10px"></div>
+      <div class="field">
+        <label>Nome operatore</label>
+        <input id="signOperatorName" placeholder="Nome operatore" style="font-weight:900;" />
+      </div>
+    `;
+    // inseriscilo sopra checkbox
+    const check = document.getElementById("signCheck")?.parentElement;
+    if(check) sbd.insertBefore(box, check);
+  }
+
+  $("signOperatorName").value = (state.operator || state.user?.fullName || prod.operator || "").trim();
+
+  $("signContext").innerHTML = `
+    Ordine <b>${escapeHtml(prod.orderNo||"—")}</b> · ${escapeHtml(prod.customer||"Cliente")}<br/>
+    Totale prodotti: <b>${Math.round(totalKg).toLocaleString("it-IT")}</b> kg
+  `;
+
+  $("signCheck").checked = false;
+  clearSignature();
+
+  $("signModal").classList.add("show");
+  lockBody();
+  requestAnimationFrame(()=> initSignaturePad());
+}
+
+function closeSignModal(){
+  $("signModal").classList.remove("show");
+  unlockBody();
+  state._pendingSign = null;
+}
+
+async function finalizeProduction(){
+  try{
+    const pending = state._pendingSign;
+    if(!pending) return;
+
+    const operatorName = String($("signOperatorName")?.value || "").trim();
+    if(!operatorName){
+      showToast("Firma", "Inserisci il nome operatore.");
+      return;
+    }
+    if(!$("signCheck").checked){
+      showToast("Firma", "Conferma la dichiarazione.");
+      return;
+    }
+    if(_sig.empty){
+      showToast("Firma", "Firma mancante.");
+      return;
     }
 
-    body.querySelector("#btnSelAllRun").onclick = ()=>{
-      for(const k of selected) toConclude.add(k);
-      rerender();
-    };
-    body.querySelector("#btnClrAllRun").onclick = ()=>{
-      toConclude.clear();
-      rerender();
-    };
-    body.querySelector("#btnBackRun").onclick = renderRunning;
+    const canvas = $("signCanvas");
+    const signature = canvas.toDataURL("image/png");
 
-    const canCancel = Boolean(state.user && state.user.isAdmin);
-    if(!canCancel){
-      body.querySelector("#btnCancelProd").style.display = "none";
-    } else {
-      body.querySelector("#btnCancelProd").onclick = async()=>{
-        if(!confirm("Sei sicuro che vuoi annullare la produzione in corso?")) return;
-        await closeActiveProduction(p.id, { cancelled:true });
-        showToast("Produzione annullata", `Ordine n. ${p.orderNo} · ${p.customer}`);
-        showCancelBanner(`Ordine n. ${p.orderNo} · ${p.customer}`);
-        setTimeout(()=>hideCancelBanner(), 6500);
-        renderRunning();
-        renderHome();
+    const { prod, draftMap, totalKg } = pending;
+
+    const perLine = (Array.isArray(prod.perLine) ? prod.perLine : []).map(l=>{
+      const k = String(l.lineKey||"");
+      const produced = Number(draftMap[k] ?? l.plannedKg ?? 0);
+      return {
+        ...l,
+        producedKg: Number.isFinite(produced) ? produced : 0,
+        operator: operatorName
       };
-    }
+    });
 
-    body.querySelector("#btnConclude").onclick = async()=>{
-      if(!toConclude.size) return;
+    const startedAt = prod.startedAt ? new Date(prod.startedAt).getTime() : Date.now();
+    const durationMs = Math.max(1, Date.now() - startedAt);
 
-      const allStarted = toConclude.size === selected.size;
-      const askConfirm = Boolean(p.isFullOrderStart) && allStarted;
-      if(askConfirm && !confirm("Stai concludendo l’intero ordine. Confermi?")) return;
+    // chiudi attiva
+    await closeActiveProduction(prod.id, { active:false, concludedAt: nowIso(), concludedBy: operatorName });
 
-      const startedAtMs = p.startedAt ? new Date(p.startedAt).getTime() : Date.now();
-      const durationMs = Date.now() - startedAtMs;
-
-      // calcolo kg + dettagli righe
-      let kg = 0;
-      const perLine = [];
-      if(order){
-        const m = new Map(order.lines.map(l=>[l.lineKey,l]));
-        for(const k of toConclude){
-          const l = m.get(k);
-          if(!l) continue;
-          const raw = producedKg.get(k);
-          const val = raw!=null && String(raw).trim()!=="" ? Number(String(raw).replace(",", ".")) : NaN;
-          const fallback = Number(l.qty||0);
-          const prodVal = Number.isFinite(val) ? val : (Number.isFinite(fallback) ? fallback : (l.lineKg||0));
-          kg += prodVal;
-          perLine.push({
-            lineKey: k,
-            desc: l.desc,
-            code: l.code || "",
-            plannedKg: Number(l.lineKg||0),
-            producedKg: Number(prodVal||0),
-            qty: l.qty,
-            um: l.um || ""
-          });
-        }
-      } else {
-        kg = Number(p.totalKg||0);
-      }
-
-      const ctx = `${p.customer} · Ordine n. ${p.orderNo} · ${Math.round(kg)} kg`;
-      openSignModal(ctx, async(signatureDataUrl)=>{
-        await closeActiveProduction(p.id, { concluded:true });
-
-        const entry = {
-          operator: (state.user?.fullName || p.operator || "Operatore"),
-          operatorUid: state.user?.uid || "",
-          customer: p.customer,
-          orderNo: p.orderNo,
-          kg,
-          durationMs,
-          startedAt: p.startedAt || nowIso(),
-          endedAt: nowIso(),
-          concludedLineKeys: Array.from(toConclude),
-          totalKgOrder: Number(p.totalKg||0),
-          perLine,
-          signature: signatureDataUrl,
-          statementAccepted: true
-        };
-
-        const newId = await addHistory(entry);
-        const withId = { ...entry, id: newId || `${Date.now()}_${Math.random().toString(16).slice(2)}`, at: nowIso() };
-        state.history = [...(state.history||[]), withId];
-        try{ renderCompletedSection(); }catch(_e){}
-        state.activeProductions = (state.activeProductions||[]).filter(x=>x.id!==p.id);
-        renderHome();
-
-        // aggiorna classifica kg (aggregato)
-        try{
-          await bumpOperatorKg(state.user?.uid || "", state.user?.fullName || p.operator || "Operatore", kg);
-        }catch(_e){}
-
-        speak(`Ordine concluso da ${(state.user?.fullName||p.operator||"Operatore")} · ordine ${p.orderNo} · cliente ${p.customer}`);
-
-        showToast("Produzione conclusa", `Operatore ${(state.user?.fullName||p.operator||"Operatore")} · Ordine n. ${p.orderNo} · ${Math.round(kg)} kg`);
-        showToast("Ordine concluso", `Ordine n. ${p.orderNo} registrato tra i conclusi.`, 2200);
-        renderRunning();
-      });
+    // storico (mensile)
+    const entry = {
+      monthKey: monthKeyRome(),
+      orderNo: prod.orderNo||"",
+      customer: prod.customer||"",
+      operator: operatorName,
+      kg: totalKg,
+      durationMs,
+      perLine,
+      concludedLineKeys: Array.isArray(prod.selectedLineKeys) ? prod.selectedLineKeys : [],
+      signature
     };
+    const hid = await addHistory(entry);
 
-    rerender();
-  }
+    // stats operatore (mensili: usiamo collection operatorStats ma la UI filtra mese; ok)
+    await bumpOperatorKg(state.user?.uid || prod.operatorUid || "", operatorName, totalKg);
 
-  function openPartialModal(){
-    $("partialModal").classList.add("show");
-    lockBody();
-    renderPartialOrdersList();
-  }
-  function closePartialModal(){
-    $("partialModal").classList.remove("show");
-    unlockBody();
-  }
-
-  
-  // ===============================
-  // SIGNATURE PAD
-  // ===============================
-  const sig = { canvas:null, ctx:null, drawing:false, empty:true, last:{x:0,y:0}, dpr:1 };
-  function sigInit(){
-    if(sig.canvas){ sig.resize?.(); return; }
-    sig.canvas = $("signCanvas");
-    sig.canvas.style.touchAction = "none";
-    sig.canvas.style.pointerEvents = "auto";
-    sig.ctx = sig.canvas.getContext("2d");
-    sig.ctx.lineCap = "round";
-    sig.ctx.lineJoin = "round";
-    sig.ctx.lineWidth = 3.2;
-    sig.ctx.strokeStyle = "#000";
-
-    function resize(){
-      const rect = sig.canvas.getBoundingClientRect();
-      sig.dpr = Math.max(1, window.devicePixelRatio || 1);
-      sig.canvas.width = Math.floor(rect.width * sig.dpr);
-      sig.canvas.height = Math.floor(rect.height * sig.dpr);
-      sig.ctx.setTransform(sig.dpr,0,0,sig.dpr,0,0);
-      sig.ctx.clearRect(0,0,rect.width,rect.height);
-      sig.empty = true;
-    }
-    sig.resize = resize;
-    resize();
-    window.addEventListener("resize", resize);
-
-    function pos(e){
-      const rect = sig.canvas.getBoundingClientRect();
-      const p = (e.touches && e.touches[0]) ? e.touches[0] : e;
-      return { x: p.clientX - rect.left, y: p.clientY - rect.top };
-    }
-    function down(e){
-      e.preventDefault();
-      sig.drawing = true;
-      const p = pos(e);
-      sig.last = p;
-    }
-    function move(e){
-      if(!sig.drawing) return;
-      e.preventDefault();
-      const p = pos(e);
-      sig.ctx.beginPath();
-      sig.ctx.moveTo(sig.last.x, sig.last.y);
-      sig.ctx.lineTo(p.x, p.y);
-      sig.ctx.stroke();
-      sig.last = p;
-      sig.empty = false;
-    }
-    function up(e){
-      if(!sig.drawing) return;
-      e.preventDefault();
-      sig.drawing = false;
-    }
-
-    sig.canvas.addEventListener("pointerdown", down);
-    sig.canvas.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", up);
-    sig.canvas.addEventListener("touchstart", down, {passive:false});
-    sig.canvas.addEventListener("touchmove", move, {passive:false});
-    window.addEventListener("touchend", up, {passive:false});
-  }
-
-  function sigClear(){
-    if(!sig.canvas) return;
-    const rect = sig.canvas.getBoundingClientRect();
-    sig.ctx.clearRect(0,0,rect.width,rect.height);
-    sig.empty = true;
-  }
-
-  function openSignModal(contextText, onOk){
-    sigInit();
-    $("signCheck").checked = false;
-    $("signContext").textContent = contextText;
-    sigClear();
-    $("signModal").classList.add("show");
-    lockBody();
-    requestAnimationFrame(()=> sig.resize?.()); // CODEX: forza ridimensionamento firma quando visibile
-
-    const close = ()=>{
-      $("signModal").classList.remove("show");
-      unlockBody();
-      $("signOk").onclick = null;
-    };
-
-    $("signClose").onclick = close;
-    $("signClear").onclick = ()=>sigClear();
-    $("signOk").onclick = ()=>{
-      if(!$("signCheck").checked){
-        showToast("Conferma richiesta", "Spunta la dichiarazione prima di concludere.");
-        return;
+    // notifica locale (se permesso)
+    try{
+      if("Notification" in window && Notification.permission === "granted"){
+        new Notification("Produzione conclusa", { body: `Ordine ${prod.orderNo||""} · ${Math.round(totalKg)} kg`, silent:false });
       }
-      if(sig.empty){
-        showToast("Firma richiesta", "Inserisci la firma prima di concludere.");
-        return;
-      }
-      const dataUrl = sig.canvas.toDataURL("image/png");
-      close();
-      onOk(dataUrl);
-    };
+    }catch(_e){}
+
+    showToast("Conclusa", `Ordine ${prod.orderNo||""} registrato.`);
+    speak("Produzione conclusa.");
+
+    // update UI immediato (oltre a snapshot)
+    state.history = Array.isArray(state.history) ? [ { id: hid, ...entry, at: nowIso() }, ...state.history ] : state.history;
+    try{ renderCompletedSection(); }catch(_e){}
+    try{ updateHeaderMonthStats(); }catch(_e){}
+
+    closeSignModal();
+    closeRunningModal();
+  }catch(err){
+    console.warn(err);
+    showToast("Errore", "Impossibile concludere la produzione.");
   }
+}
 
+// =======================================
+// EVENTI UI / AUTO REFRESH / HOME actions
+// =======================================
+function hookUI(){
+  // Close buttons
+  $("cancelBannerClose")?.addEventListener("click", hideCancelBanner);
+  $("histClose")?.addEventListener("click", ()=>{ $("histModal").classList.remove("show"); unlockBody(); });
+  $("notifClose")?.addEventListener("click", closeNotifModal);
+  $("prodModalClose")?.addEventListener("click", closeProdModalRequest);
+  $("runningClose")?.addEventListener("click", closeRunningModal);
+  $("partialClose")?.addEventListener("click", closePartialModal);
+  $("signClose")?.addEventListener("click", closeSignModal);
+  $("signClear")?.addEventListener("click", clearSignature);
+  $("signOk")?.addEventListener("click", finalizeProduction);
 
-  // ===============================
-  // HOME interactions
-  // ===============================
-  $("btnGoProd").addEventListener("click", ()=> handlePrimaryCta());
-  try{
-    const pb = $("partialBanner");
-    pb?.addEventListener("click", ()=> openPartialModal());
-    pb?.addEventListener("keydown", (e)=>{ if(e.key==="Enter"||e.key===" "){ e.preventDefault(); openPartialModal(); } });
-  }catch(_e){}
-  try{ $("partialClose").addEventListener("click", ()=> closePartialModal()); }catch(_e){}
-  try{ $("partialModal").addEventListener("click", (e)=>{ if(e.target===$("partialModal")) closePartialModal(); }); }catch(_e){}
-  $("prodStrip").addEventListener("click", ()=> openRunningModal());
-  try{ $("cancelBannerClose").addEventListener("click", ()=> hideCancelBanner()); }catch(_e){}
+  // overlay click outside
+  ["histModal","notifModal","prodModal","runningModal","partialModal","signModal"].forEach(id=>{
+    const el = $(id);
+    if(!el) return;
+    el.addEventListener("click",(e)=>{
+      if(e.target !== el) return;
+      if(id==="prodModal") closeProdModalRequest();
+      else if(id==="runningModal") closeRunningModal();
+      else if(id==="partialModal") closePartialModal();
+      else if(id==="signModal") closeSignModal();
+      else if(id==="notifModal") closeNotifModal();
+      else if(id==="histModal"){ el.classList.remove("show"); unlockBody(); }
+    });
+  });
 
-  $("prodModalClose").addEventListener("click", ()=> closeProdModalRequest());
-  $("runningClose").addEventListener("click", ()=> { $("runningModal").classList.remove("show"); unlockBody(); });
+  // CTA principali
+  $("btnGoProd")?.addEventListener("click", handlePrimaryCta);
+  $("prodStrip")?.addEventListener("click", ()=> openRunningModal());
 
-  // History modal
-  try{
-    $("histClose").addEventListener("click", ()=>{ $("histModal").classList.remove("show"); unlockBody(); });
-    $("histModal").addEventListener("click", (e)=>{ if(e.target===$("histModal")){ $("histModal").classList.remove("show"); unlockBody(); } });
-  }catch(_e){}
+  // Parziali banner click
+  $("partialBanner")?.addEventListener("click", ()=> openPartialModal());
+  $("partialBanner")?.addEventListener("keydown", (e)=>{ if(e.key==="Enter"||e.key===" "){ e.preventDefault(); openPartialModal(); } });
 
-  // UI-FIX: notifiche
-  try{
-    const btn = $("pillNotif");
-    if(btn) btn.addEventListener("click", openNotifModal);
+  // Statistiche: scroll to card
+  $("btnOpenStats")?.addEventListener("click", ()=>{
+    const c = $("statsCard");
+    if(c) c.scrollIntoView({ behavior:"smooth", block:"start" });
+  });
 
-    const x = $("notifClose");
-    if(x) x.addEventListener("click", closeNotifModal);
+  // Chiama Matteo (placeholder: modifica numero se vuoi)
+  $("btnCallMatteo")?.addEventListener("click", ()=>{
+    const tel = localStorage.getItem("MATTEO_TEL") || "";
+    if(tel){
+      window.location.href = `tel:${tel}`;
+    } else {
+      showToast("Chiama Matteo", "Imposta MATTEO_TEL in localStorage (es: +39333...).");
+    }
+  });
 
-    const ov = $("notifModal");
-    if(ov) ov.addEventListener("click", (e)=>{ if(e.target===ov) closeNotifModal(); });
-  }catch(_e){}
+  // Conclusi pill → action sheet
+  $("pillNotif")?.addEventListener("click", openActionSheet);
 
-  // Fatturato reveal
-  $("fatValue").addEventListener("click", ()=>{
+  // Fatturato: tap mobile per reveal
+  $("fatValue")?.addEventListener("click", ()=>{
+    const isDesk = window.matchMedia("(min-width: 980px)").matches;
+    if(isDesk) return;
     const el = $("fatValue");
-    const isDesktop = window.matchMedia("(min-width: 980px)").matches;
-    if(isDesktop){
-      el.classList.add("reveal");
-      updateFatturatoUI(); // CODEX: fatturato sempre visibile su desktop
-      return;
-    }
-    el.classList.toggle("reveal");
+    el.classList.add("reveal");
+    el.classList.remove("blur");
     updateFatturatoUI();
+    setTimeout(()=>{ el.classList.remove("reveal"); el.classList.add("blur"); updateFatturatoUI(); }, 12000);
   });
 
-  // Call Matteo (numero fisso)
-  const MATTEO_TEL = "+393516709334";
-  $("btnCallMatteo").addEventListener("click", ()=>{
-    window.location.href = `tel:${MATTEO_TEL}`;
-  });
-
-  // Stats helper
-  $("btnOpenStats").addEventListener("click", ()=>{
-    showToast("Statistiche", "Apri da desktop per vedere la classifica completa.");
-    window.scrollTo({ top: document.body.scrollHeight, behavior:"smooth" });
-  });
-
-  // Issues (registrazione interna)
-  $("btnSendIssue").addEventListener("click", async()=>{
-    const txt = $("issueText").value.trim();
-    if(!txt){
-      showToast("Segnalazione", "Scrivi il problema prima di inviare.");
-      return;
-    }
-    if(!state.user){
-      renderAuthLogin("Per inviare una segnalazione è necessario accedere.");
-      return;
-    }
-    const op = state.user.fullName || "Operatore";
-    const payload = {
-      operator: op,
-      operatorUid: state.user.uid,
-      text: txt,
-      when: fmtDateTime(Date.now()),
-      kind: "problema_macchina_o_prodotto",
-      url: location.href,
-      ua: navigator.userAgent
+  // Segnala problema
+  $("btnSendIssue")?.addEventListener("click", async()=>{
+    const t = String($("issueText")?.value || "").trim();
+    if(!t){ showToast("Segnalazione", "Scrivi un messaggio."); return; }
+    const me = state.user?.fullName || state.operator || "Operatore";
+    // contesto: se ho una produzione attiva mia, aggancio ordine
+    const active = (state.activeProductions||[]).find(p=>String(p.operator||"").toLowerCase()===String(me).toLowerCase());
+    const entry = {
+      monthKey: monthKeyRome(),
+      text: t,
+      operator: me,
+      orderNo: active?.orderNo || "",
+      customer: active?.customer || ""
     };
-    await addIssue(payload);
+    await addIssue(entry);
     $("issueText").value = "";
-    showToast("Segnalazione registrata", "Ok. La segnalazione è stata salvata. Per urgenze: usa “Chiama Matteo”.", 3200);
+    showToast("Inviata", "Segnalazione registrata.");
   });
 
+  // Auto refresh su mobile (no pulsante in home)
+  window.addEventListener("focus", ()=>debounceRefresh("focus"), { passive:true });
   document.addEventListener("visibilitychange", ()=>{
     if(!document.hidden) debounceRefresh("focus");
-  });
-  window.addEventListener("focus", ()=> debounceRefresh("focus"));
-  window.addEventListener("pageshow", (e)=>{
-    if(e.persisted || !document.hidden) debounceRefresh("pageshow");
-  });
-  try{ window.matchMedia("(min-width: 980px)").addEventListener("change", ()=> updateFatturatoUI()); }catch(_e){}
+  }, { passive:true });
+  window.addEventListener("pageshow", ()=>debounceRefresh("pageshow"), { passive:true });
 
-  document.documentElement.setAttribute("translate","no");
-  document.body.setAttribute("translate","no");
+  // Aggiorna header mensile quando arriva storico
+  updateHeaderMonthStats();
+}
 
+// =======================================
+// FIX CSS mobile header a sinistra (fallback)
+// (Codex deve comunque sistemare nel CSS, ma metto anche un fallback JS)
+// =======================================
+function forceMobileHeaderLeft(){
+  if(!window.matchMedia("(max-width: 720px)").matches) return;
+  try{
+    const tw = document.querySelector(".titleWrap");
+    const t = document.querySelector(".title");
+    const s = document.querySelector(".subtitle");
+    if(tw){ tw.style.alignItems = "flex-start"; tw.style.textAlign = "left"; }
+    if(t){ t.style.alignItems = "flex-start"; t.style.textAlign = "left"; }
+    if(s){ s.style.textAlign = "left"; }
+  }catch(_e){}
+}
 
-  // Blocca zoom (mobile/Android)
-  document.addEventListener("gesturestart", (e)=>e.preventDefault(), {passive:false});
-  document.addEventListener("gesturechange", (e)=>e.preventDefault(), {passive:false});
-  document.addEventListener("gestureend", (e)=>e.preventDefault(), {passive:false});
-  document.addEventListener("wheel", (e)=>{ if(e.ctrlKey) e.preventDefault(); }, {passive:false});
+// =======================================
+// STARTUP
+// =======================================
+document.addEventListener("DOMContentLoaded", ()=>{
+  hookUI();
+  forceMobileHeaderLeft();
+  try{ ensureHeaderMonthEl(); }catch(_e){}
+  boot();
+});
 
-  // ===============================
-  // PUSH (PWA + FCM Web Push)
-  // ===============================
-  function isIOS(){
-    return /iphone|ipad|ipod/i.test(navigator.userAgent || "");
-  }
-  function isStandalone(){
-    // iOS: navigator.standalone; others: display-mode
-    return (window.navigator.standalone === true) || window.matchMedia("(display-mode: standalone)").matches;
-  }
-
-  function updatePushPill(){
-    const dot = $("#dotPush");
-    const txt = $("#txtPush");
-    if(!dot || !txt) return;
-
-    const perm = (typeof Notification !== "undefined") ? Notification.permission : "unsupported";
-    state.push.permission = perm;
-
-    if(!state.push.supported){
-      dot.className = "dot";
-      txt.textContent = "Notifiche: non supportate";
-      return;
-    }
-    if(perm !== "granted"){
-      dot.className = "dot";
-      txt.textContent = "Notifiche: disattive";
-      return;
-    }
-    dot.className = "dot ok";
-    txt.textContent = "Notifiche: attive";
-  }
-
-  async function registerPushSW(){
-    if(!("serviceWorker" in navigator)) throw new Error("Service worker non supportati");
-    // Scope: cartella attuale (/tabellone-produzione-live/)
-    const swUrl = new URL("firebase-messaging-sw.js", location.href).toString();
-    const reg = await navigator.serviceWorker.register(swUrl, { scope: "./" });
-    return reg;
-  }
-
-  async function savePushToken(token){
-    if(!state.firebase.ok) return;
-    const fs = state.firebase.api;
-    const db = state.firebase.db;
-    const u = state.user || {};
-    const id = await tokenDocId(token);
-    const ref = fs.doc(db, "powderPushTokens", id);
-    await fs.setDoc(ref, {
-      token,
-      uid: u.uid || "",
-      email: u.email || "",
-      displayName: u.fullName || u.displayName || "",
-      role: (u.isAdmin ? "admin" : "operator"),
-      line: "polveri",
-      userAgent: navigator.userAgent || "",
-      platform: isIOS() ? "ios" : /android/i.test(navigator.userAgent||"") ? "android" : "desktop",
-      enabled: true,
-      lastSeenAt: fs.serverTimestamp(),
-      createdAt: fs.serverTimestamp()
-    }, { merge:true });
-  }
-
-  async function deletePushToken(token){
-    if(!state.firebase.ok) return;
-    const fs = state.firebase.api;
-    const db = state.firebase.db;
-    const id = await tokenDocId(token);
-    try{ await fs.deleteDoc(fs.doc(db, "powderPushTokens", id)); }catch(_e){}
-  }
-
-  async function tokenDocId(token){
-    // doc id robusto e corto (sha256)
-    const enc = new TextEncoder().encode(token);
-    const hash = await crypto.subtle.digest("SHA-256", enc);
-    return Array.from(new Uint8Array(hash)).map(b=>b.toString(16).padStart(2,"0")).join("");
-  }
-
-  async function pushEnableFlow(){
-    if(!state.push.supported){
-      showToast("Notifiche non supportate", "Questo browser/dispositivo non supporta le push per questa app.");
-      return;
-    }
-
-    const perm = await Notification.requestPermission();
-    state.push.permission = perm;
-
-    if(perm !== "granted"){
-      showToast("Notifiche non abilitate", "Permesso negato o non concesso.");
-      updatePushPill();
-      return;
-    }
-
-    try{
-      const fm = state.firebase.msgApi;
-      const messaging = state.firebase.messaging;
-      const swReg = await registerPushSW();
-
-      const token = await fm.getToken(messaging, {
-        vapidKey: FCM_VAPID_KEY,
-        serviceWorkerRegistration: swReg
-      });
-
-      if(!token){
-        showToast("Errore notifiche", "Token non generato. Controlla VAPID key in Firebase Console.");
-        updatePushPill();
-        return;
-      }
-
-      state.push.token = token;
-      state.push.enabled = true;
-
-      await savePushToken(token);
-
-      // Foreground messages → toast
-      try{
-        fm.onMessage(messaging, (payload)=>{
-          const title = payload?.notification?.title || "Aggiornamento";
-          const body = payload?.notification?.body || "";
-          showToast(title, body || "Nuova notifica");
-          try{ beep(); }catch(_e){}
-        });
-      }catch(_e){}
-
-      updatePushPill();
-      showToast("Notifiche attive", "Perfetto: questo dispositivo riceverà notifiche anche ad app chiusa.");
-    }catch(err){
-      console.warn(err);
-      showToast("Errore notifiche", String(err?.message || err));
-      updatePushPill();
-    }
-  }
-
-  async function pushDisableFlow(){
-    try{
-      const perm = Notification.permission;
-      if(perm !== "granted"){
-        showToast("Già disattive", "Su questo dispositivo le push non risultano attive.");
-        updatePushPill();
-        return;
-      }
-
-      const fm = state.firebase.msgApi;
-      const messaging = state.firebase.messaging;
-
-      // Recupera token corrente (serve per delete lato client)
-      const swReg = await registerPushSW();
-      const token = await fm.getToken(messaging, { vapidKey: FCM_VAPID_KEY, serviceWorkerRegistration: swReg }).catch(()=>null);
-
-      if(token){
-        await fm.deleteToken(messaging).catch(()=>{});
-        await deletePushToken(token);
-      }
-
-      state.push.token = "";
-      state.push.enabled = false;
-
-      updatePushPill();
-      showToast("Notifiche disattivate", "Ok, questo dispositivo non riceverà più push.");
-    }catch(err){
-      console.warn(err);
-      showToast("Errore", "Impossibile disattivare le notifiche su questo dispositivo.");
-    }
-  }
-
-  function wirePushUI(){
-    const btn = $("#pillPush");
-    if(btn){
-      btn.addEventListener("click", async()=>{
-        // toggle
-        if(typeof Notification === "undefined"){
-          showToast("Non supportato", "Questo browser non supporta le notifiche.");
-          return;
-        }
-        const perm = Notification.permission;
-        if(perm === "granted"){
-          const ok = confirm("Vuoi DISATTIVARE le notifiche push su questo dispositivo?");
-          if(ok) await pushDisableFlow();
-        } else {
-          await pushEnableFlow();
-        }
-      });
-    }
-  }
-
-
-
-
-// start
-  await boot();
-  try{ wirePushUI(); updatePushPill(); }catch(_e){}
-
-  </script>
+</script>
 </body>
 </html>
