@@ -105,6 +105,20 @@
       align-items:center;
       white-space:nowrap;
     }
+    .pillBadge{
+      display:none;
+      min-width: 18px;
+      height: 18px;
+      padding: 0 6px;
+      border-radius: 999px;
+      background: var(--bad);
+      color: #fff;
+      font-weight: 900;
+      font-size: 11px;
+      align-items:center;
+      justify-content:center;
+      line-height:1;
+    }
     .dot {
       width:10px; height:10px; border-radius:999px;
       background: rgba(255,255,255,.25);
@@ -367,6 +381,18 @@
       font-weight: 700;
       word-break: break-word;
     }
+    .notifList{ display:flex; flex-direction:column; gap:8px; }
+    .notifItem{
+      border:1px solid var(--stroke);
+      background:#fff;
+      border-radius:14px;
+      padding:10px 12px;
+    }
+    .notifItem.unread{ border-color: rgba(46,123,255,.38); box-shadow: 0 8px 18px rgba(46,123,255,.12); }
+    .notifTitle{ font-weight: 950; font-size: 14px; letter-spacing:.01em; }
+    .notifBody{ margin-top:6px; color: var(--muted); font-weight:800; font-size:13px; }
+    .notifMeta{ margin-top:8px; font-size:11px; color: var(--muted); display:flex; gap:8px; flex-wrap:wrap; }
+    .notifEmpty{ color: var(--muted); font-weight:800; }
     .badge {
       padding: 7px 10px;
       border-radius: 999px;
@@ -880,7 +906,11 @@
         <div class="pill" id="pillOnline"><span class="dot" id="dotOnline"></span><span id="txtOnline">Stato: avvio</span></div>
         <div class="pill"><span class="dot ok"></span><span id="txtXmlTime">Ordini: in sincronizzazione…</span></div>
       
-        <button class="pill pillBtn" id="pillPush" type="button" title="Attiva/Disattiva notifiche push"><span class="dot" id="dotPush"></span><span id="txtPush">Notifiche: —</span></button>
+        <button class="pill pillBtn" id="pillPush" type="button" title="Centro notifiche e push">
+          <span class="dot" id="dotPush"></span>
+          <span id="txtPush">Notifiche</span>
+          <span class="pillBadge" id="pillPushBadge">0</span>
+        </button>
       </div>
     </header>
     <div class="grid">
@@ -926,6 +956,11 @@
               <div class="t">Kg totali</div>
               <div class="v" id="kPowderKg">—</div>
               <div class="muted" id="kPowderMeta" style="margin-top:4px; font-size:12px;">Calcolato su 0 righe visibili</div> <!-- // UI-FIX: kg-totali -->
+            </div>
+            <div class="k">
+              <div class="t">Etichette (stima)</div>
+              <div class="v" id="kPowderLabels">—</div>
+              <div class="muted" id="kPowderLabelsMeta" style="margin-top:4px; font-size:12px;">Pack riconosciuto: nessuno</div>
             </div>
           </div>
 
@@ -1008,6 +1043,47 @@
   </div>
 
   
+  <!-- Notifications modal -->
+  <div id="notifModal" class="overlay" role="dialog" aria-modal="true">
+    <div class="sheet">
+      <div class="shd">
+        <div class="titleCol">
+          <div class="h">Centro notifiche</div>
+          <div class="muted" id="notifSub">Push, messaggi interni e registro.</div>
+        </div>
+        <button class="x" id="notifClose" aria-label="Chiudi">×</button>
+      </div>
+      <div class="sbd" id="notifBody">
+        <div class="stepTitle">Inbox</div>
+        <div class="muted" id="notifStatus">Caricamento notifiche…</div>
+        <div style="height:8px"></div>
+        <div id="notifUnavailable" class="alertBanner" style="display:none;">
+          <div class="label">Centro notifiche non disponibile (permessi o connessione).</div>
+          <div class="hint">Nessun blocco: l’app continua a funzionare.</div>
+        </div>
+        <div id="notifList" class="notifList"></div>
+        <div class="notifEmpty" id="notifEmpty" style="display:none;">Nessuna notifica disponibile.</div>
+        <div style="height:12px"></div>
+        <div class="row2">
+          <button class="btn ghost" id="btnNotifCompleted" style="width:100%;">Registro conclusi</button>
+          <button class="btn" id="btnTogglePush" style="width:100%;">Gestisci push</button>
+        </div>
+        <div style="height:12px"></div>
+        <div id="notifAdminBox" style="display:none;">
+          <div class="stepTitle">Invia notifica (admin)</div>
+          <div class="muted">Messaggio a tutti gli operatori linea polveri (push o inbox). Richiede permessi Firestore.</div>
+          <div style="height:8px"></div>
+          <input type="text" id="notifTitle" placeholder="Titolo (es. Aggiornamento impianto)" style="width:100%; padding:12px; border-radius:14px; border:1px solid var(--stroke); font-weight:900;"/>
+          <div style="height:8px"></div>
+          <textarea id="notifBodyInput" placeholder="Testo notifica" style="width:100%; padding:12px; border-radius:14px; border:1px solid var(--stroke); min-height:90px; font-weight:800;"></textarea>
+          <div style="height:8px"></div>
+          <button class="btn good" id="btnSendNotif" style="width:100%;">Invia a tutti</button>
+          <div class="muted" id="notifAdminFeedback" style="margin-top:6px;"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- History detail modal -->
   <div id="histModal" class="overlay" role="dialog" aria-modal="true">
     <div class="sheet">
@@ -1128,6 +1204,9 @@
   const ISSUE_EMAIL_ENABLED = false; // metti true quando l'estensione è installata
   const ISSUE_EMAIL_TO = "matteo@generalcoppersrl.com";
   const FAT_VALUE_KEY = "FATTURATO_EUR_CACHE";
+  const NOTIF_READ_KEY = "POLVERI_NOTIF_READ_V1";
+  const NOTIF_COLLECTION = "powderNotifications";
+  const NOTIF_LIMIT = 40;
 
 
   const OPERATORS = ["Hassan","Ahmed","Muhammed","Mustapha","Youssef"];
@@ -1182,6 +1261,7 @@
     powderOrders: [],
     activeProductions: [],
     history: [],
+    historyReady: false,
     user: null,
     operator: null,
     selectedLines: new Map(), // CODEX: selezione multi-ordine persistente
@@ -1193,6 +1273,8 @@
       db: null,
       api: null,
     },
+    notifications: { inbox: [], ready:false, unavailable:false, error:"" },
+    notifUnsub: null,
     push: { supported:false, permission:'default', token:'', enabled:false },
   };
 
@@ -1291,8 +1373,19 @@
     return (node && node.textContent ? node.textContent : "").trim();
   }
   function parseCurrencyValue(raw){
-    const s = (raw==null?"":String(raw)).replace(/\s+/g,"").replace(/\./g,"").replace(",",".");
-    const n = Number(s);
+    if(Number.isFinite(raw)) return Number(raw);
+    const strRaw = raw==null ? "" : String(raw).trim();
+    if(!strRaw) return null;
+    const compact = strRaw.replace(/\s+/g,"");
+    const itPattern = /^-?\d{1,3}(?:\.\d{3})*(?:,\d+)?$/;
+    const commaDecimal = /^-?\d+(?:,\d+)?$/;
+    let normalized = compact;
+    if(itPattern.test(compact) || commaDecimal.test(compact)){
+      normalized = compact.replace(/\./g,"").replace(",", ".");
+    } else {
+      normalized = compact.replace(/,/g,"");
+    }
+    const n = Number(normalized);
     return Number.isFinite(n) ? n : null;
   }
   function parseItNumber(raw){ // UI-FIX: kg-totali
@@ -1404,13 +1497,28 @@
   // XML -> Orders (snello)
   // ===============================
   function detectPackKg(desc){
-    const s = norm(desc).replace(/,/g,".");
-    let m = s.match(/(\d+(?:\.\d+)?)\s*kg\b/);
-    if(m) return parseFloat(m[1]);
-    m = s.match(/\bkg\s*(\d+(?:\.\d+)?)\b/);
-    if(m) return parseFloat(m[1]);
-    m = s.match(/(\d+(?:\.\d+)?)\s*(?:gr|g)\b/);
-    if(m) return parseFloat(m[1]) / 1000;
+    const s = norm(desc||"").replace(/,/g,".");
+    if(!s) return null;
+    const kgAhead = s.match(/(\d+(?:\.\d+)?)[x\-\s]*kg\b/);
+    if(kgAhead){
+      const v = parseFloat(kgAhead[1]);
+      if(Number.isFinite(v) && v>0) return v;
+    }
+    const kgAfter = s.match(/\bkg[x\-\s]*(\d+(?:\.\d+)?)/);
+    if(kgAfter){
+      const v = parseFloat(kgAfter[1]);
+      if(Number.isFinite(v) && v>0) return v;
+    }
+    const kgNear = s.match(/(\d+(?:\.\d+)?)[\s]*(?:kg|chilogrammi)\b/);
+    if(kgNear){
+      const v = parseFloat(kgNear[1]);
+      if(Number.isFinite(v) && v>0) return v;
+    }
+    const gMatch = s.match(/(\d+(?:\.\d+)?)[x\-\s]*(?:gr|g|grammi)\b/);
+    if(gMatch){
+      const v = parseFloat(gMatch[1]);
+      if(Number.isFinite(v) && v>0) return v/1000;
+    }
     return null;
   }
   function detectAlertLine(desc){
@@ -1911,6 +2019,16 @@ function showAuthGate(){
     }
 authApi.onAuthStateChanged(auth, async(user)=>{
       if(!user){
+        state.historyReady = false;
+        state.history = [];
+        if(state.notifUnsub){
+          try{ state.notifUnsub(); }catch(_e){}
+          state.notifUnsub = null;
+        }
+        state.notifications = { inbox: [], ready:false, unavailable:false, error:"" };
+        updateNotificationBadge();
+        renderNotifCenter();
+        renderHeaderKpis();
         state.user = null;
         state.operator = null;
         $("hdrUser").textContent = "—";
@@ -1976,6 +2094,9 @@ authApi.onAuthStateChanged(auth, async(user)=>{
       state.user = { uid: user.uid, fullName: profile.fullName, email: (user.email||profile.email||""), isAdmin: Boolean(access && access.isAdmin) };
       state.operator = state.user.fullName;
       $("hdrUser").textContent = state.user.fullName;
+      renderHeaderKpis();
+      try{ await initNotificationsInbox(); }catch(_e){ state.notifications.unavailable = true; renderNotifCenter(); }
+      renderNotifCenter();
       hideAuthGate();
       renderHome();
     });
@@ -2044,7 +2165,9 @@ authApi.onAuthStateChanged(auth, async(user)=>{
           const hist = [];
           snap.forEach(doc=>hist.push({ id: doc.id, ...doc.data() }));
           state.history = hist;
+          state.historyReady = true;
           renderStats();
+          renderHeaderKpis();
           try{ renderCompletedSection(); }catch(_e){}
           try{ renderPartialBanner && renderPartialBanner(); }catch(_e){}
         });
@@ -2053,6 +2176,9 @@ authApi.onAuthStateChanged(auth, async(user)=>{
     } catch(err) {
       console.warn("Firebase init failed:", err);
       state.firebase.ok = false;
+      state.notifications.unavailable = true;
+      renderNotifCenter();
+      updateNotificationBadge();
       renderHome();
       renderAuthLogin("Connessione Firebase non disponibile. Verifica rete o contatta il responsabile.");
     }
@@ -2095,8 +2221,10 @@ authApi.onAuthStateChanged(auth, async(user)=>{
         await fs.deleteDoc(d.ref);
       }
       state.history = [];
+      state.historyReady = true;
       renderCompletedSection();
       renderStats();
+      renderHeaderKpis();
       showToast("Cancellati", "Ordini conclusi rimossi.");
     }catch(err){
       console.warn(err);
@@ -2334,13 +2462,31 @@ authApi.onAuthStateChanged(auth, async(user)=>{
     return { orders, baseOrders, concluded, activeMap, partialMap, fullMap };
   }
 
+  function resolvePackKgForLine(line){
+    const direct = Number(line?.packKg);
+    if(Number.isFinite(direct) && direct>0) return direct;
+    const fromDesc = detectPackKg(line?.desc || "");
+    if(Number.isFinite(fromDesc) && fromDesc>0) return fromDesc;
+    const fromCombo = detectPackKg(`${line?.desc||""} ${line?.um||""}`);
+    if(Number.isFinite(fromCombo) && fromCombo>0) return fromCombo;
+    return null;
+  }
+  function isUnitKg(um){
+    const u = norm(um||"");
+    return (u==="kg") || /\bkg\b/.test(u);
+  }
+  function isBagOrPieceUnit(um){
+    const u = norm(um||"");
+    return /\b(sac|sacco|sacchi|sacchetto|sacchetti)\b/.test(u) || /\b(pz|pez|pezzi|pezzo)\b/.test(u);
+  }
+
   function estimateLineKg(line){
     if(!line) return 0;
     const qtyParsed = parseItNumber(line.qty);
-    const packParsed = Number.isFinite(line.packKg) ? Number(line.packKg) : parseItNumber(line.packKg);
+    const packParsed = resolvePackKgForLine(line);
     const um = norm(line.um||"");
     let lineKg = 0;
-    if((um==="kg" || /\bkg\b/.test(um)) && qtyParsed>0){
+    if(isUnitKg(um) && qtyParsed>0){
       lineKg = qtyParsed;
     } else if(qtyParsed>0 && Number.isFinite(packParsed) && packParsed>0){
       lineKg = qtyParsed * packParsed;
@@ -2348,6 +2494,7 @@ authApi.onAuthStateChanged(auth, async(user)=>{
       lineKg = Number(line.lineKg);
     }
     if(!Number.isFinite(lineKg)) lineKg = 0;
+    if(lineKg===0 && isBagOrPieceUnit(um) && !Number.isFinite(packParsed)) return 0;
     return lineKg;
   }
 
@@ -2357,13 +2504,20 @@ authApi.onAuthStateChanged(auth, async(user)=>{
       for(const l of (o.lines||[])){ lines.push(l); }
     }
     let totalKg = 0;
+    let totalLabels = 0;
+    let hasLabelData = false;
     const samples = [];
     for(const l of lines){
       const lineKg = estimateLineKg(l);
-      totalKg += lineKg;
+      if(Number.isFinite(lineKg)) totalKg += lineKg;
+      const packKg = resolvePackKgForLine(l);
+      if(Number.isFinite(packKg) && packKg>0 && Number.isFinite(lineKg) && lineKg>0){
+        totalLabels += (lineKg / packKg);
+        hasLabelData = true;
+      }
       if(samples.length < 5) samples.push({ rawQty: l.qty, parsedQty: parseItNumber(l.qty) });
     }
-    return { totalKg, lineCount: lines.length, samples };
+    return { totalKg, lineCount: lines.length, samples, labels: hasLabelData ? totalLabels : null };
   }
 
   function buildMagazzinoData(){
@@ -2447,8 +2601,9 @@ authApi.onAuthStateChanged(auth, async(user)=>{
     let tot = 0;
     let found = false;
     for(const d of (docs||[])){
-      const num = parseCurrencyValue(d?.totalDoc);
-      if(num!=null){
+      const raw = d?.totalDoc;
+      const num = Number.isFinite(raw) ? Number(raw) : parseCurrencyValue(raw);
+      if(Number.isFinite(num)){
         tot += num;
         found = true;
       }
@@ -2468,11 +2623,11 @@ authApi.onAuthStateChanged(auth, async(user)=>{
       }
       const el = $("fatValue");
       if(el && el.dataset && el.dataset.value){
-        const n = Number(el.dataset.value);
-        if(Number.isFinite(n)) return n;
+        const n = parseCurrencyValue(el.dataset.value);
+        if(n!=null) return n;
       }
-      const saved = Number(localStorage.getItem(FAT_VALUE_KEY) || "");
-      if(Number.isFinite(saved)) return saved;
+      const saved = parseCurrencyValue(localStorage.getItem(FAT_VALUE_KEY));
+      if(saved!=null) return saved;
     }catch(_e){}
     return null;
   }
@@ -2482,14 +2637,15 @@ authApi.onAuthStateChanged(auth, async(user)=>{
     if(!el) return;
     const isDesktop = window.matchMedia("(min-width: 980px)").matches;
     const val = resolveFatturatoValue();
-    state.fatturatoLordo = val;
-    if(val!=null){
-      el.dataset.value = String(val);
-      try{ localStorage.setItem(FAT_VALUE_KEY, String(val)); }catch(_e){}
+    const numericVal = Number.isFinite(val) ? Number(val) : parseCurrencyValue(val);
+    state.fatturatoLordo = numericVal;
+    if(numericVal!=null){
+      el.dataset.value = String(numericVal);
+      try{ localStorage.setItem(FAT_VALUE_KEY, String(numericVal)); }catch(_e){}
     } else {
       delete el.dataset.value;
     }
-    const formatted = val!=null ? new Intl.NumberFormat("it-IT", { style:"currency", currency:"EUR" }).format(val) : "Dati non disponibili";
+    const formatted = numericVal!=null ? new Intl.NumberFormat("it-IT", { style:"currency", currency:"EUR" }).format(numericVal) : "Dati non disponibili";
     if(isDesktop){
       el.classList.add("reveal");
       el.classList.remove("blur");
@@ -2573,23 +2729,17 @@ authApi.onAuthStateChanged(auth, async(user)=>{
     return norm(name).replace(/\bkg\b/g," ").replace(/\b\d+(?:[\.,]\d+)?\b/g," ").replace(/\s+/g," ").trim();
   }
   function magDetectPackKg(line){
-    const direct = Number(line.packKg);
-    if(Number.isFinite(direct) && direct>0) return direct;
-    const fromDesc = detectPackKg(line.desc || "");
-    if(Number.isFinite(fromDesc) && fromDesc>0) return fromDesc;
-    const fromCombo = detectPackKg(`${line.desc||""} ${line.um||""}`);
-    if(Number.isFinite(fromCombo) && fromCombo>0) return fromCombo;
-    return null;
+    return resolvePackKgForLine(line);
   }
   function magResolveQtyKg(line){ // CODEX: kg rimanenti realistici per Statistiche/Magazzino
-    const qty = Number(line.qty||0);
+    const qty = parseItNumber(line.qty);
     const packKg = magDetectPackKg(line);
     const lineKg = Number(line.lineKg);
     const um = norm(line.um||"");
-    if((um==="kg" || /\bkg\b/.test(um)) && Number.isFinite(qty) && qty>0) return qty;
+    if(isUnitKg(um) && Number.isFinite(qty) && qty>0) return qty;
     if(Number.isFinite(qty) && qty>0 && Number.isFinite(packKg) && packKg>0) return qty * packKg;
     if(Number.isFinite(lineKg) && lineKg>0) return lineKg;
-    return Number.isFinite(qty) && qty>0 ? qty : 0;
+    return 0;
   }
   function magFindPackEntry(packs, packKg){
     if(!packs || packKg==null) return null;
@@ -2790,6 +2940,17 @@ function renderHome(){
     }
     const kPowderMeta = $("kPowderMeta"); // UI-FIX: kg-totali
     if(kPowderMeta) kPowderMeta.textContent = `Calcolato su ${kgSummary.lineCount} righe visibili`; // UI-FIX: kg-totali
+    const kPowderLabelsEl = $("kPowderLabels");
+    const kPowderLabelsMeta = $("kPowderLabelsMeta");
+    if(kPowderLabelsEl){
+      if(Number.isFinite(kgSummary.labels)){
+        kPowderLabelsEl.textContent = Math.round(kgSummary.labels).toLocaleString("it-IT");
+        if(kPowderLabelsMeta) kPowderLabelsMeta.textContent = "Calcolo su formati sacco riconosciuti";
+      } else {
+        kPowderLabelsEl.textContent = "—";
+        if(kPowderLabelsMeta) kPowderLabelsMeta.textContent = "Pack non rilevato: etichette non stimate";
+      }
+    }
     const pOrders = state.powderOrders || [];
     $("badgeCounts").textContent = `${pOrders.length} ordini`;
 
@@ -2850,6 +3011,7 @@ function renderHome(){
     }catch(_e){}
 
     renderStats();
+    renderHeaderKpis();
     renderMagazzino(); // CODEX: re-render magazzino dopo gli stessi filtri degli ordini
   }
 
@@ -3041,6 +3203,249 @@ function renderHome(){
     }).join("");
 
     body.innerHTML = `<div class="magGrid">${panoHtml}<div class="magBox"><div class="magTitle">Dettaglio per cliente/ordine</div>${detailHtml}</div></div>`;
+  }
+
+  function renderHeaderKpis(){
+    const kgEl = $("hdrMonthKg");
+    const ordEl = $("hdrMonthOrders");
+    if(!kgEl || !ordEl) return;
+    let kgTxt = "—";
+    let ordTxt = "—";
+    try{
+      if(state.user && state.historyReady){
+        const hist = Array.isArray(state.history) ? state.history : [];
+        const now = new Date();
+        const y = now.getFullYear();
+        const m = now.getMonth();
+        const nameKey = norm(state.user.fullName||"");
+        const filtered = hist.filter(h=>{
+          const rawDate = h?.startedAt || h?.endedAt || h?.at;
+          if(!rawDate) return false;
+          const dt = new Date(rawDate);
+          if(!Number.isFinite(dt.getTime())) return false;
+          if(dt.getFullYear()!==y || dt.getMonth()!==m) return false;
+          if(h.operatorUid && state.user.uid) return h.operatorUid === state.user.uid;
+          if(nameKey) return norm(h.operator||"") === nameKey;
+          return false;
+        });
+        if(filtered.length){
+          const totKg = filtered.reduce((a,h)=>{
+            const v = Number(h.kg);
+            return Number.isFinite(v) ? a + v : a;
+          }, 0);
+          kgTxt = Number.isFinite(totKg) ? Math.round(totKg).toLocaleString("it-IT") : "—";
+          ordTxt = String(filtered.length);
+        } else {
+          kgTxt = "0";
+          ordTxt = "0";
+        }
+      }
+    }catch(_e){}
+    kgEl.textContent = kgTxt;
+    ordEl.textContent = ordTxt;
+  }
+
+  // ===============================
+  // NOTIFICATIONS (inbox + badge)
+  // ===============================
+  let notifReadCache = null;
+  function getNotifReadSet(){
+    if(notifReadCache instanceof Set) return notifReadCache;
+    try{
+      const raw = localStorage.getItem(NOTIF_READ_KEY) || "[]";
+      const arr = JSON.parse(raw);
+      notifReadCache = new Set(Array.isArray(arr) ? arr.filter(Boolean) : []);
+    }catch(_e){
+      notifReadCache = new Set();
+    }
+    return notifReadCache;
+  }
+  function saveNotifReadSet(set){
+    try{ localStorage.setItem(NOTIF_READ_KEY, JSON.stringify(Array.from(set||[]))); }catch(_e){}
+    notifReadCache = set instanceof Set ? set : new Set();
+  }
+  function markNotificationsRead(ids){
+    if(!ids || !ids.length) return;
+    const set = getNotifReadSet();
+    let changed = false;
+    for(const id of ids){
+      if(id && !set.has(id)){
+        set.add(id);
+        changed = true;
+      }
+    }
+    if(changed) saveNotifReadSet(set);
+  }
+  function markAllNotificationsRead(){
+    const ids = (state.notifications?.inbox || []).map(n=>n.id).filter(Boolean);
+    markNotificationsRead(ids);
+    updateNotificationBadge();
+  }
+  function notifUnreadCount(){
+    const set = getNotifReadSet();
+    const inbox = (state.notifications && Array.isArray(state.notifications.inbox)) ? state.notifications.inbox : [];
+    let n = 0;
+    for(const it of inbox){
+      if(it && it.id && !set.has(it.id)) n++;
+    }
+    return n;
+  }
+  function updateNotificationBadge(){
+    const badge = $("pillPushBadge");
+    if(!badge) return;
+    const unread = notifUnreadCount();
+    if(unread>0){
+      badge.textContent = unread>99 ? "99+" : String(unread);
+      badge.style.display = "inline-flex";
+    } else {
+      badge.style.display = "none";
+    }
+  }
+  function renderNotifCenter(){
+    const list = $("notifList");
+    const empty = $("notifEmpty");
+    const status = $("notifStatus");
+    const unavailable = $("notifUnavailable");
+    const adminBox = $("notifAdminBox");
+    const toggleBtn = $("btnTogglePush");
+    const sub = $("notifSub");
+    if(adminBox) adminBox.style.display = state.user && state.user.isAdmin ? "block" : "none";
+    const notifs = (state.notifications && Array.isArray(state.notifications.inbox)) ? state.notifications.inbox : [];
+    const isUnavailable = Boolean(state.notifications?.unavailable || !state.firebase.ok);
+    if(unavailable) unavailable.style.display = isUnavailable ? "flex" : "none";
+    if(sub) sub.textContent = isUnavailable ? "UI non disponibile (permessi Firebase)." : "Push, messaggi interni e registro.";
+    if(status){
+      if(isUnavailable){
+        status.textContent = "Centro notifiche non disponibile (permessi o connessione).";
+      } else if(state.notifications?.ready){
+        status.textContent = notifs.length ? `${notifs.length} notifiche recenti` : "Nessuna notifica recente";
+      } else {
+        status.textContent = "Caricamento notifiche…";
+      }
+    }
+    if(list){
+      list.innerHTML = "";
+      if(!isUnavailable && notifs.length){
+        const readSet = getNotifReadSet();
+        const frag = document.createDocumentFragment();
+        for(const n of notifs){
+          const div = document.createElement("div");
+          const isUnread = n?.id && !readSet.has(n.id);
+          div.className = `notifItem${isUnread ? " unread" : ""}`;
+          let dateTxt = "—";
+          try{
+            const raw = n?.createdAt;
+            const dt = raw && typeof raw.toDate==="function" ? raw.toDate() : raw ? new Date(raw) : null;
+            if(dt && Number.isFinite(dt.getTime())) dateTxt = fmtDateTime(dt);
+          }catch(_e){}
+          const creator = n?.createdBy ? ` · Da ${escapeHtml(n.createdBy)}` : "";
+          div.innerHTML = `
+            <div class="notifTitle">${escapeHtml(n?.title || "Aggiornamento")}</div>
+            <div class="notifBody">${escapeHtml(n?.body || "")}</div>
+            <div class="notifMeta"><span>${escapeHtml(dateTxt)}</span>${creator?`<span>${creator}</span>`:""}</div>`;
+          frag.appendChild(div);
+        }
+        list.appendChild(frag);
+      }
+      if(empty) empty.style.display = (!isUnavailable && state.notifications?.ready && !notifs.length) ? "block" : "none";
+    }
+    if(toggleBtn){
+      const perm = (typeof Notification !== "undefined") ? Notification.permission : "unsupported";
+      toggleBtn.textContent = perm === "granted" ? "Disattiva push" : "Attiva push";
+    }
+    updateNotificationBadge();
+  }
+  async function initNotificationsInbox(){
+    if(!state.firebase.ok) return;
+    const fs = state.firebase.api;
+    const db = state.firebase.db;
+    if(state.notifUnsub){
+      try{ state.notifUnsub(); }catch(_e){}
+      state.notifUnsub = null;
+    }
+    try{
+      const q = fs.query(
+        fs.collection(db, NOTIF_COLLECTION),
+        fs.orderBy("createdAt","desc"),
+        fs.limit(NOTIF_LIMIT)
+      );
+      state.notifications.ready = false;
+      state.notifications.unavailable = false;
+      state.notifUnsub = fs.onSnapshot(q, (snap)=>{
+        const arr = [];
+        snap.forEach(doc=>arr.push({ id: doc.id, ...doc.data() }));
+        state.notifications.inbox = arr;
+        state.notifications.ready = true;
+        state.notifications.unavailable = false;
+        renderNotifCenter();
+        updateNotificationBadge();
+      }, (err)=>{
+        console.warn("notif snapshot err", err);
+        state.notifications.unavailable = true;
+        state.notifications.ready = true;
+        state.notifications.error = err?.code || String(err);
+        renderNotifCenter();
+      });
+    }catch(err){
+      console.warn("init notifications failed", err);
+      state.notifications.unavailable = true;
+      state.notifications.ready = true;
+      state.notifications.error = err?.code || String(err);
+      renderNotifCenter();
+    }
+  }
+  async function sendAdminNotification(title, body){
+    if(!state.firebase.ok) throw new Error("Firebase non disponibile");
+    const fs = state.firebase.api;
+    const db = state.firebase.db;
+    const col = fs.collection(db, NOTIF_COLLECTION);
+    await fs.addDoc(col, {
+      title: title || "Aggiornamento",
+      body: body || "",
+      line: "polveri",
+      createdAt: fs.serverTimestamp(),
+      createdBy: state.user?.fullName || "Admin",
+      createdByUid: state.user?.uid || ""
+    });
+  }
+  function openNotifModal(){
+    const modal = $("notifModal");
+    if(!modal) return;
+    modal.classList.add("show");
+    lockBody();
+    renderNotifCenter();
+    markAllNotificationsRead();
+  }
+  function closeNotifModal(){
+    const modal = $("notifModal");
+    if(!modal) return;
+    modal.classList.remove("show");
+    unlockBody();
+    updateNotificationBadge();
+  }
+  function focusCompletedFromNotif(){
+    closeNotifModal();
+    const card = $("completedCard");
+    if(card){
+      card.scrollIntoView({ behavior:"smooth", block:"start" });
+      card.classList.add("pressCard");
+      setTimeout(()=>card.classList.remove("pressCard"), 1200);
+    }
+  }
+  async function togglePushFromCenter(){
+    if(typeof Notification === "undefined"){
+      showToast("Non supportato", "Questo browser non supporta le notifiche.");
+      return;
+    }
+    const perm = Notification.permission;
+    if(perm === "granted"){
+      const ok = confirm("Vuoi DISATTIVARE le notifiche push su questo dispositivo?");
+      if(ok) await pushDisableFlow();
+    } else {
+      await pushEnableFlow();
+    }
+    renderNotifCenter();
+    updatePushPill();
   }
 
   // ===============================
@@ -3622,10 +4027,12 @@ function renderHome(){
         const newId = await addHistory(entry);
         const withId = { ...entry, id: newId || `${Date.now()}_${Math.random().toString(16).slice(2)}`, at: nowIso() };
         state.history = [...(state.history||[]), withId];
+        state.historyReady = true;
         try{ renderCompletedSection(); }catch(_e){}
         state.activeProductions = (state.activeProductions||[]).filter(x=>x.id!==p.id);
         try{ state.partialOrders = computePartialOrders().partial; }catch(_e){}
         renderHome();
+        renderHeaderKpis();
 
         // aggiorna classifica kg (aggregato)
         try{
@@ -3779,6 +4186,40 @@ function renderHome(){
   try{
     $("histClose").addEventListener("click", ()=>{ $("histModal").classList.remove("show"); unlockBody(); });
     $("histModal").addEventListener("click", (e)=>{ if(e.target===$("histModal")){ $("histModal").classList.remove("show"); unlockBody(); } });
+  }catch(_e){}
+  try{
+    $("notifClose").addEventListener("click", ()=> closeNotifModal());
+    $("notifModal").addEventListener("click", (e)=>{ if(e.target===$("notifModal")) closeNotifModal(); });
+  }catch(_e){}
+  try{ $("btnNotifCompleted").addEventListener("click", ()=> focusCompletedFromNotif()); }catch(_e){}
+  try{ $("btnTogglePush").addEventListener("click", ()=> togglePushFromCenter()); }catch(_e){}
+  try{
+    $("btnSendNotif").addEventListener("click", async()=>{
+      const fb = $("notifAdminFeedback");
+      if(!(state.user && state.user.isAdmin)){
+        showToast("Solo admin", "Non hai i permessi per inviare notifiche.");
+        if(fb) fb.textContent = "Permesso mancante.";
+        return;
+      }
+      const title = ($("notifTitle")?.value || "").trim();
+      const body = ($("notifBodyInput")?.value || "").trim();
+      if(!title || !body){
+        showToast("Testo mancante", "Inserisci titolo e testo della notifica.");
+        if(fb) fb.textContent = "Titolo e testo obbligatori.";
+        return;
+      }
+      if(fb) fb.textContent = "Invio…";
+      try{
+        await sendAdminNotification(title, body);
+        if(fb) fb.textContent = "Notifica inviata.";
+        const bodyEl = $("notifBodyInput");
+        if(bodyEl) bodyEl.value = "";
+      }catch(err){
+        console.warn("send notif error", err);
+        if(fb) fb.textContent = "Invio non riuscito (permessi o rete).";
+        showToast("Invio non riuscito", "Controlla i permessi Firestore o la rete.");
+      }
+    });
   }catch(_e){}
 
   // Fatturato reveal
@@ -4019,19 +4460,8 @@ function renderHome(){
   function wirePushUI(){
     const btn = $("#pillPush");
     if(btn){
-      btn.addEventListener("click", async()=>{
-        // toggle
-        if(typeof Notification === "undefined"){
-          showToast("Non supportato", "Questo browser non supporta le notifiche.");
-          return;
-        }
-        const perm = Notification.permission;
-        if(perm === "granted"){
-          const ok = confirm("Vuoi DISATTIVARE le notifiche push su questo dispositivo?");
-          if(ok) await pushDisableFlow();
-        } else {
-          await pushEnableFlow();
-        }
+      btn.addEventListener("click", ()=>{
+        openNotifModal();
       });
     }
   }
@@ -4041,7 +4471,7 @@ function renderHome(){
 
 // start
   await boot();
-  try{ wirePushUI(); updatePushPill(); }catch(_e){}
+  try{ wirePushUI(); updatePushPill(); renderNotifCenter(); updateNotificationBadge(); }catch(_e){}
 
   </script>
 </body>
