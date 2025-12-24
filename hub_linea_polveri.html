@@ -321,6 +321,25 @@
     .btn.ghost { background: transparent; border-color: var(--stroke); }
     .btn.ghost:hover { background: rgba(0,0,0,.04); border-color: rgba(0,0,0,.10); }
     .btn.ghost:active { background: rgba(0,0,0,.06); border-color: rgba(0,0,0,.12); }
+    .btn.isBusy{
+      pointer-events:none;
+      opacity: .7;
+    }
+    .btn .miniSpinner{
+      display:none;
+      width:14px;
+      height:14px;
+      border-radius:999px;
+      border:2px solid rgba(0,0,0,.18);
+      border-top-color: currentColor;
+      animation: spin .8s linear infinite;
+      margin-right:8px;
+    }
+    .btn.good .miniSpinner{ border-color: rgba(32,201,151,.25); border-top-color: rgba(32,201,151,.95); }
+    .btn.bad .miniSpinner{ border-color: rgba(255,77,79,.25); border-top-color: rgba(255,77,79,.90); }
+    .btn.isBusy .miniSpinner{ display:inline-block; }
+    .btn .btnLabel{ vertical-align:middle; }
+    @keyframes spin{ to { transform: rotate(360deg); } }
 
     .bigStrip {
       border-radius: 18px;
@@ -1568,6 +1587,9 @@
   globalThis.__ALLOW_KEYS__ = (globalThis.__ALLOW_KEYS__ instanceof Set) ? globalThis.__ALLOW_KEYS__ : new Set();
   globalThis.__ALLOW_META__ = globalThis.__ALLOW_META__ || { updatedAt:null, updatedBy:"", lastError:"", lastSyncTs:null };
   globalThis.__ALLOWLIST_LISTENER_STARTED__ = Boolean(globalThis.__ALLOWLIST_LISTENER_STARTED__);
+  globalThis.__CONCLUDE_INFLIGHT__ = (globalThis.__CONCLUDE_INFLIGHT__ instanceof Map) ? globalThis.__CONCLUDE_INFLIGHT__ : new Map();
+  globalThis.__CONCLUDE_RECENT__ = (globalThis.__CONCLUDE_RECENT__ instanceof Map) ? globalThis.__CONCLUDE_RECENT__ : new Map();
+  globalThis.__CONCLUDE_HANDLER_BOUND__ = Boolean(globalThis.__CONCLUDE_HANDLER_BOUND__);
 
   // ===============================
   // UTILS
@@ -1830,6 +1852,54 @@
     const dateLabel = stableNorm(order.conclusion || order.date || order.deliveryDate || "");
     const payload = [customer, product, qtyLabel, dateLabel].filter(Boolean).join("|") || "ordine";
     return `o_${djb2HashBase36(payload)}`;
+  }
+  function getConcludedLineKeysForOrder(orderNo){
+    const set = new Set();
+    if(!orderNo) return set;
+    for(const h of (state.history||[])){
+      if(!h || !h.orderNo || String(h.orderNo)!==String(orderNo)) continue;
+      const arr = Array.isArray(h.concludedLineKeys) ? h.concludedLineKeys : [];
+      for(const k of arr){ if(k) set.add(String(k)); }
+    }
+    return set;
+  }
+  function bindSingleClick(el, handler, key="default"){
+    if(!el || typeof handler!=="function") return;
+    const storeKey = "__handlers";
+    el[storeKey] = el[storeKey] || {};
+    const prev = el[storeKey][key];
+    if(prev){
+      el.removeEventListener("click", prev);
+    }
+    el[storeKey][key] = handler;
+    el.addEventListener("click", handler);
+    globalThis.__CONCLUDE_HANDLER_BOUND__ = true;
+  }
+  function setBtnBusyState(btn, state="idle", opts={}){
+    if(!btn) return;
+    const baseLabel = btn.dataset.baseLabel || btn.textContent.trim() || "Concludi";
+    btn.dataset.baseLabel = baseLabel;
+    if(state==="busy"){
+      btn.classList.add("isBusy");
+      btn.disabled = true;
+      btn.setAttribute("aria-disabled","true");
+      const busyLabel = opts.busyLabel || "Conclusione…";
+      btn.innerHTML = `<span class="miniSpinner"></span><span class="btnLabel">${busyLabel}</span>`;
+      return;
+    }
+    if(state==="done"){
+      btn.classList.add("isBusy");
+      btn.disabled = true;
+      btn.setAttribute("aria-disabled","true");
+      const doneLabel = opts.doneLabel || "Concluso";
+      btn.innerHTML = `<span class="btnLabel">${doneLabel}</span>`;
+      return;
+    }
+    btn.classList.remove("isBusy");
+    btn.disabled = opts.disabled || false;
+    if(btn.disabled) btn.setAttribute("aria-disabled","true"); else btn.removeAttribute("aria-disabled");
+    const idleLabel = opts.idleLabel || baseLabel;
+    btn.innerHTML = `<span class="btnLabel">${idleLabel}</span>`;
   }
   async function fetchWithTimeout(url, ms=15000, opts={}){
     const ctrl = new AbortController();
@@ -2782,6 +2852,31 @@ function showAuthGate(){
     const fs = state.firebase.api;
     const db = state.firebase.db;
     await fs.setDoc(fs.doc(db, "powderProductions", id), { active:false, closedAt: nowIso(), ...payload }, { merge:true });
+  }
+  async function markConclusionOnce(orderKey, payload={}){
+    if(!state.firebase.ok || !orderKey) return { already:false };
+    const fs = state.firebase.api;
+    const db = state.firebase.db;
+    const ref = fs.doc(db, "powderProdConclusions", orderKey);
+    try{
+      return await fs.runTransaction(db, async(tx)=>{
+        const snap = await tx.get(ref);
+        const existing = snap.exists() ? (snap.data()||{}) : {};
+        const already = Boolean(existing && (existing.status==="concluded" || existing.concludedAt));
+        if(already) return { already:true, data: existing };
+        const data = {
+          ...payload,
+          orderKey,
+          status: "concluded",
+          concludedAt: fs.serverTimestamp ? fs.serverTimestamp() : nowIso()
+        };
+        tx.set(ref, data, { merge:true });
+        return { already:false, data };
+      });
+    }catch(err){
+      console.warn("markConclusionOnce failed", err);
+      return { already:false, error: err };
+    }
   }
 
   async function addHistory(entry){
@@ -5054,11 +5149,17 @@ function renderHome(){
   function renderRunningDetail(p){
     const body = $("runningBody");
     const order = state.powderOrders.find(o=>o.number===p.orderNo && o.customer===p.customer) || null;
+    const orderKey = stableKey(order || p || {});
     const selected = new Set(p.selectedLineKeys || []);
     const toConclude = new Set(selected);
     const producedKg = new Map();
+    const concludedLineKeys = getConcludedLineKeysForOrder(p.orderNo);
+    for(const k of Array.from(toConclude)){
+      if(concludedLineKeys.has(String(k))) toConclude.delete(k);
+    }
 
     const availableLines = order ? order.lines.filter(l=>selected.has(l.lineKey)) : [];
+    const allLinesConcluded = Boolean(availableLines.length && availableLines.every(l=>concludedLineKeys.has(String(l.lineKey))));
     const alerts = order?.alerts || [];
     const alertHtml = alerts.length ? `<div style="display:flex; flex-direction:column; gap:8px; margin:10px 0 6px;">${alerts.map(a=>{
       const palette = alertPalette(a.alertInfo?.color);
@@ -5085,18 +5186,44 @@ function renderHome(){
     `;
 
     const runLines = body.querySelector("#runLines");
+    const btnConclude = body.querySelector("#btnConclude");
+    setBtnBusyState(btnConclude, "idle", { idleLabel: "HO CONCLUSO LA PRODUZIONE", disabled: allLinesConcluded || toConclude.size===0 });
+    if(allLinesConcluded){
+      btnConclude.classList.add("isBusy");
+      btnConclude.setAttribute("aria-disabled","true");
+      btnConclude.disabled = true;
+      btnConclude.innerHTML = `<span class="btnLabel">Già concluso</span>`;
+    }
+    function updateConcludeAvailability(){
+      if(!btnConclude) return;
+      if(btnConclude.classList.contains("isBusy")) return;
+      const disabled = toConclude.size===0 || allLinesConcluded;
+      btnConclude.disabled = disabled;
+      btnConclude.setAttribute("aria-disabled", disabled ? "true" : "false");
+      btnConclude.style.opacity = disabled ? ".6" : "1";
+    }
     function rerender(){
       runLines.innerHTML = "";
       for(const l of availableLines){
+        const lineKeyStr = String(l.lineKey);
         const checked = toConclude.has(l.lineKey);
+        const isConcluded = concludedLineKeys.has(lineKeyStr);
         const div = document.createElement("div");
-        div.className = `item pressCard selectableLine${checked ? " selected" : ""}`;
+        div.className = `item pressCard selectableLine${checked ? " selected" : ""}${isConcluded ? " disabled" : ""}`;
         const lineConclusion = l.conclusion || (order?.conclusion || "");
         div.style.cursor = "pointer";
         div.style.borderColor = checked ? "rgba(46,123,255,.55)" : "rgba(255,255,255,.12)";
+        if(isConcluded){
+          div.style.opacity = ".55";
+          div.style.pointerEvents = "none";
+        }
         const isWhiteBag = isWhiteBagRow(l); // CODEX: riga solo banner se sacchetto bianco
+        const badgeLabel = isConcluded ? "Già conclusa" : (checked ? "✓" : "Seleziona");
         if(isWhiteBag){
-          div.innerHTML = renderWhiteBagBanner({ selectable: true, checked });
+          div.innerHTML = renderWhiteBagBanner({ selectable: !isConcluded, checked });
+          if(isConcluded){
+            div.innerHTML += `<div class="badge" style="margin-top:8px;">${badgeLabel}</div>`;
+          }
         } else {
           const qtyLabel = formatQtyWithKg(l.qty, l.um);
           div.innerHTML = `
@@ -5109,7 +5236,7 @@ function renderHome(){
                   <input class="kgInput" data-k="${l.lineKey}" type="number" inputmode="decimal" step="0.1" placeholder="auto" style="flex:1; padding:10px 10px; border-radius:12px; border:1px solid var(--stroke); background: rgba(0,0,0,.02); font-weight:900;"/>
                 </div>
               </div>
-              <div class="badge">${checked ? "✓" : "Seleziona"}</div>
+              <div class="badge">${badgeLabel}</div>
             </div>`;
           const inp = div.querySelector(".kgInput");
           if(inp){
@@ -5122,13 +5249,13 @@ function renderHome(){
         }
 
         div.onclick = ()=>{
+          if(isConcluded) return;
           if(toConclude.has(l.lineKey)) toConclude.delete(l.lineKey); else toConclude.add(l.lineKey);
           rerender();
         };
         runLines.appendChild(div);
       }
-      $("btnConclude").disabled = toConclude.size===0;
-      $("btnConclude").style.opacity = toConclude.size===0 ? ".6" : "1";
+      updateConcludeAvailability();
     }
 
     body.querySelector("#btnSelAllRun").onclick = ()=>{
@@ -5156,12 +5283,37 @@ function renderHome(){
       };
     }
 
-    body.querySelector("#btnConclude").onclick = async()=>{
-      if(!toConclude.size) return;
+    bindSingleClick(btnConclude, async()=>{
+      if(!toConclude.size){
+        if(allLinesConcluded) showToast("Ordine già concluso", "Questo ordine risulta già chiuso.");
+        return;
+      }
 
       const allStarted = toConclude.size === selected.size;
       const askConfirm = Boolean(p.isFullOrderStart) && allStarted;
       if(askConfirm && !confirm("Stai concludendo l’intero ordine. Confermi?")) return;
+
+      const inflight = globalThis.__CONCLUDE_INFLIGHT__;
+      const recent = globalThis.__CONCLUDE_RECENT__;
+      const now = Date.now();
+      if(inflight.get(orderKey) === true){
+        showToast("Conclusione in corso", "Attendi il completamento.");
+        return;
+      }
+      const lastTs = recent.get(orderKey) || 0;
+      if(now - lastTs < 2500){
+        showToast("Azione già inviata", "Riprova tra qualche secondo.");
+        return;
+      }
+      let lockReleased = false;
+      const releaseLock = ()=>{
+        if(lockReleased) return;
+        lockReleased = true;
+        inflight.set(orderKey, false);
+      };
+      inflight.set(orderKey, true);
+      recent.set(orderKey, now);
+      setBtnBusyState(btnConclude, "busy", { busyLabel: "Conclusione…" });
 
       const startedAtMs = p.startedAt ? new Date(p.startedAt).getTime() : Date.now();
       const durationMs = Date.now() - startedAtMs;
@@ -5193,48 +5345,81 @@ function renderHome(){
         kg = Number(p.totalKg||0);
       }
 
+      const resetBtn = ()=>{
+        setBtnBusyState(btnConclude, "idle", { idleLabel: "HO CONCLUSO LA PRODUZIONE", disabled: toConclude.size===0 || allLinesConcluded });
+        updateConcludeAvailability();
+      };
       const ctx = `${p.customer} · Ordine n. ${p.orderNo} · ${Math.round(kg)} kg`;
       openSignModal(ctx, async(signatureDataUrl)=>{
-        await closeActiveProduction(p.id, { concluded:true });
-
-        const entry = {
-          operator: (state.user?.fullName || p.operator || "Operatore"),
-          operatorUid: state.user?.uid || "",
-          customer: p.customer,
-          orderNo: p.orderNo,
-          kg,
-          durationMs,
-          startedAt: p.startedAt || nowIso(),
-          endedAt: nowIso(),
-          concludedLineKeys: Array.from(toConclude),
-          totalKgOrder: Number(p.totalKg||0),
-          perLine,
-          signature: signatureDataUrl,
-          statementAccepted: true
-        };
-
-        const newId = await addHistory(entry);
-        const withId = { ...entry, id: newId || `${Date.now()}_${Math.random().toString(16).slice(2)}`, at: nowIso() };
-        state.history = [...(state.history||[]), withId];
-        state.historyReady = true;
-        try{ renderCompletedSection(); }catch(_e){}
-        state.activeProductions = (state.activeProductions||[]).filter(x=>x.id!==p.id);
-        try{ state.partialOrders = computePartialOrders().partial; }catch(_e){}
-        renderHome();
-        renderHeaderKpis();
-
-        // aggiorna classifica kg (aggregato)
         try{
-          await bumpOperatorKg(state.user?.uid || "", state.user?.fullName || p.operator || "Operatore", kg);
-        }catch(_e){}
+          const conclusionCheck = await markConclusionOnce(orderKey, {
+            orderNo: p.orderNo,
+            customer: p.customer,
+            operator: state.user?.fullName || p.operator || "Operatore",
+            productionId: p.id || ""
+          });
+          if(conclusionCheck?.already){
+            setBtnBusyState(btnConclude, "done", { doneLabel: "Concluso" });
+            showToast("Ordine già concluso", "Questa produzione risulta già registrata.");
+            try{ await closeActiveProduction(p.id, { concluded:true }); }catch(_e){}
+            state.activeProductions = (state.activeProductions||[]).filter(x=>x.id!==p.id);
+            renderRunning();
+            renderHome();
+            renderHeaderKpis();
+            return;
+          }
 
-        speak(`Ordine concluso da ${(state.user?.fullName||p.operator||"Operatore")} · ordine ${p.orderNo} · cliente ${p.customer}`);
+          await closeActiveProduction(p.id, { concluded:true });
 
-        showToast("Produzione conclusa", `Operatore ${(state.user?.fullName||p.operator||"Operatore")} · Ordine n. ${p.orderNo} · ${Math.round(kg)} kg`);
-        showToast("Ordine concluso", `Ordine n. ${p.orderNo} registrato tra i conclusi.`, 2200);
-        renderRunning();
+          const entry = {
+            operator: (state.user?.fullName || p.operator || "Operatore"),
+            operatorUid: state.user?.uid || "",
+            customer: p.customer,
+            orderNo: p.orderNo,
+            kg,
+            durationMs,
+            startedAt: p.startedAt || nowIso(),
+            endedAt: nowIso(),
+            concludedLineKeys: Array.from(toConclude),
+            totalKgOrder: Number(p.totalKg||0),
+            perLine,
+            signature: signatureDataUrl,
+            statementAccepted: true
+          };
+
+          const newId = await addHistory(entry);
+          const withId = { ...entry, id: newId || `${Date.now()}_${Math.random().toString(16).slice(2)}`, at: nowIso() };
+          state.history = [...(state.history||[]), withId];
+          state.historyReady = true;
+          try{ renderCompletedSection(); }catch(_e){}
+          state.activeProductions = (state.activeProductions||[]).filter(x=>x.id!==p.id);
+          try{ state.partialOrders = computePartialOrders().partial; }catch(_e){}
+          renderHome();
+          renderHeaderKpis();
+
+          // aggiorna classifica kg (aggregato)
+          try{
+            await bumpOperatorKg(state.user?.uid || "", state.user?.fullName || p.operator || "Operatore", kg);
+          }catch(_e){}
+
+          speak(`Ordine concluso da ${(state.user?.fullName||p.operator||"Operatore")} · ordine ${p.orderNo} · cliente ${p.customer}`);
+
+          showToast("Produzione conclusa", `Operatore ${(state.user?.fullName||p.operator||"Operatore")} · Ordine n. ${p.orderNo} · ${Math.round(kg)} kg`);
+          showToast("Ordine concluso", `Ordine n. ${p.orderNo} registrato tra i conclusi.`, 2200);
+          setBtnBusyState(btnConclude, "done", { doneLabel: "Concluso" });
+          renderRunning();
+        }catch(err){
+          console.error("conclude failed", err);
+          showToast("Errore di conclusione", (err && err.message) ? err.message : "Riprova tra poco.");
+          resetBtn();
+        }finally{
+          releaseLock();
+        }
+      }, ()=>{
+        resetBtn();
+        releaseLock();
       });
-    };
+    }, "conclude");
 
     rerender();
   }
@@ -5321,7 +5506,7 @@ function renderHome(){
     sig.empty = true;
   }
 
-  function openSignModal(contextText, onOk){
+  function openSignModal(contextText, onOk, onCancel){
     sigInit();
     $("signCheck").checked = false;
     $("signContext").textContent = contextText;
@@ -5330,13 +5515,16 @@ function renderHome(){
     lockBody();
     requestAnimationFrame(()=> sig.resize?.()); // CODEX: forza ridimensionamento firma quando visibile
 
-    const close = ()=>{
+    const close = (reason)=>{
       $("signModal").classList.remove("show");
       unlockBody();
       $("signOk").onclick = null;
+      if(reason==="cancel" && typeof onCancel==="function"){
+        try{ onCancel(); }catch(_e){}
+      }
     };
 
-    $("signClose").onclick = close;
+    $("signClose").onclick = ()=>close("cancel");
     $("signClear").onclick = ()=>sigClear();
     $("signOk").onclick = ()=>{
       if(!$("signCheck").checked){
@@ -5348,7 +5536,7 @@ function renderHome(){
         return;
       }
       const dataUrl = sig.canvas.toDataURL("image/png");
-      close();
+      close("ok");
       onOk(dataUrl);
     };
   }
