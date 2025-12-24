@@ -145,6 +145,12 @@
     .dot.ok { background: var(--good); }
     .dot.warn { background: var(--warn); }
     .dot.bad { background: var(--bad); }
+    .pillQuiet{
+      background: rgba(0,0,0,.04);
+      border-color: rgba(0,0,0,.08);
+      color: var(--muted);
+      padding: 6px 9px;
+    }
 
     .grid {
       display:grid;
@@ -875,44 +881,6 @@
     font-weight: 900;
     cursor:pointer;
   }
-  .loaderOverlay{
-    position: fixed;
-    inset: 0;
-    z-index: 90;
-    display:flex;
-    align-items:flex-start;
-    justify-content:center;
-    padding: 18px;
-    pointer-events: none;
-  }
-  .loaderOverlay .card{
-    margin-top: 14px;
-    min-width: min(440px, 100%);
-    max-width: 520px;
-    border-radius: 20px;
-    border:1px solid var(--stroke);
-    background: rgba(255,255,255,.92);
-    backdrop-filter: blur(10px);
-    box-shadow: 0 18px 46px rgba(0,0,0,.16);
-    padding: 14px 16px;
-    pointer-events: auto;
-    display:flex;
-    flex-direction:column;
-    gap:6px;
-  }
-  .loaderOverlay .title{ font-weight: 950; letter-spacing:.01em; }
-  .loaderOverlay .status{ color: var(--muted); font-weight: 800; font-size: 13px; }
-  .loaderOverlay .hint{ font-size: 12px; color: var(--muted); font-weight: 800; display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
-  .loaderOverlay .hint button{
-    border:none;
-    background: rgba(10,132,255,.14);
-    color: #0a3a7d;
-    font-weight: 900;
-    padding: 6px 10px;
-    border-radius: 999px;
-    cursor:pointer;
-  }
-    .loaderOverlay .status[data-kind="error"]{ color: #8a1f1a; }
     .chunkyList{ content-visibility: auto; contain-intrinsic-size: 800px 2000px; }
     @media (max-width: 640px){
       .hideOnMobile{ display:none !important; }
@@ -962,16 +930,6 @@
     </div>
     <button class="closeBtn" id="cancelBannerClose" type="button">Chiudi</button>
   </div>
-  <div id="loaderOverlay" class="loaderOverlay">
-    <div class="card">
-      <div class="title">Caricamento dati…</div>
-      <div class="status" id="loaderStatus">Connessione…</div>
-      <div class="hint" id="loaderHint" style="display:none;">
-        <span id="loaderHintText">Connessione instabile. Riprovo…</span>
-        <button id="loaderRetryBtn" type="button">Riprova ora</button>
-      </div>
-    </div>
-  </div>
 
   <div class="wrap">
     <header>
@@ -988,6 +946,7 @@
       <div class="statusRow">
         <div class="pill" id="pillOnline"><span class="dot" id="dotOnline"></span><span id="txtOnline">Stato: avvio</span></div>
         <div class="pill"><span class="dot ok"></span><span id="txtXmlTime">Ordini: in sincronizzazione…</span></div>
+        <div class="pill pillQuiet" id="pillSync" style="display:none;"><span class="dot warn" id="dotSync"></span><span id="txtSync">Aggiornamento…</span></div>
       
         <button class="pill pillBtn" id="pillPush" type="button" title="Centro notifiche e push">
           <span class="dot" id="dotPush"></span>
@@ -1366,11 +1325,9 @@
   // ===============================
   const $ = (id)=>document.getElementById(id);
   const loader = {
-    el: $("loaderOverlay"),
-    status: $("loaderStatus"),
-    hint: $("loaderHint"),
-    hintText: $("loaderHintText"),
-    retryBtn: $("loaderRetryBtn"),
+    indicator: $("pillSync"),
+    indicatorText: $("txtSync"),
+    indicatorDot: $("dotSync"),
     firstRenderDone: false,
     inError: false
   };
@@ -1398,22 +1355,22 @@
     listEl.appendChild(frag);
   }
 
-  function showLoader(statusText="Connessione…", opts={}){
-    if(!loader.el || loader.firstRenderDone && !loader.inError) return;
-    loader.el.style.display = "flex";
-    if(loader.status){
-      loader.status.textContent = statusText || "Caricamento…";
-      loader.status.dataset.kind = opts.kind || "";
+  function showLoader(statusText="Aggiornamento…", opts={}){
+    loader.inError = opts.kind === "error";
+    const el = loader.indicator;
+    if(!el) return;
+    el.style.display = "flex";
+    if(loader.indicatorText){
+      loader.indicatorText.textContent = statusText || "Aggiornamento…";
     }
-    if(loader.hint){
-      const hasHint = Boolean(opts.hint);
-      loader.hint.style.display = hasHint ? "flex" : "none";
-      if(hasHint && loader.hintText) loader.hintText.textContent = opts.hint;
+    if(loader.indicatorDot){
+      loader.indicatorDot.className = "dot";
+      loader.indicatorDot.classList.add(loader.inError ? "bad" : "warn");
     }
   }
   function hideLoader(){
-    if(!loader.el) return;
-    loader.el.style.display = "none";
+    const el = loader.indicator;
+    if(el) el.style.display = "none";
     loader.inError = false;
   }
   function markFirstRenderDone(){
@@ -1423,7 +1380,7 @@
   }
   function showLoaderError(msg){
     loader.inError = true;
-    showLoader(msg || "Connessione instabile. Riprovo…", { kind:"error", hint: "Connessione instabile. Riprovo…" });
+    showLoader(msg || "Connessione instabile. Riprovo…", { kind:"error" });
   }
   function resetSyncBackoff(){
     syncBackoffMs = 0;
@@ -1630,6 +1587,12 @@
     if(msg) bootMsg.textContent = msg;
   }
   async function boot(){
+    if(globalThis.__BOOT_DONE__){
+      const startup = $("startup");
+      if(startup) startup.style.display = "none";
+      return;
+    }
+    globalThis.__BOOT_DONE__ = true;
     // Boot super smooth: UI sempre pronta, sync in parallelo (mai blocco al 90%)
     bootSet(10, "AVVIO: inizializzazione interfaccia…");
     await new Promise(r=>setTimeout(r, 220));
@@ -1931,9 +1894,8 @@
   async function syncOrders(isBoot=false, reason="manual"){
     try {
       setOnlinePill("warn", "Stato: sincronizzazione…");
-      if(!loader.firstRenderDone){
-        showLoader("Connessione…");
-      }
+      const isFirstPass = !loader.firstRenderDone;
+      showLoader(isFirstPass ? "Connessione…" : "Aggiornamento…");
       if(isBoot) bootSet(40, "DOWNLOAD: ordini in corso…");
 
       const res = await fetchWithTimeout(XML_PROXY_CFG.proxyUrl, 16000, { cache:"no-store" });
@@ -1947,7 +1909,7 @@
       state.lastFetchAt = Date.now();
       localStorage.setItem(XML_PROXY_CFG.cacheKey, JSON.stringify({ at: state.lastFetchAt, xml: xmlText, modifiedTime: state.xmlModifiedTime }));
 
-      showLoader("Parsing…");
+      showLoader(isFirstPass ? "Parsing…" : "Aggiornamento…");
       state.docs = await parseEasyfattXml(xmlText);
       state.fatturatoLordo = computeFatturatoLordo(state.docs); // CODEX: calcolo fatturato lordo da XML
 
@@ -1961,7 +1923,7 @@
       }
       state.powderOrders = powderDocs;
 
-      showLoader("Rendering 1/3…");
+      showLoader(isFirstPass ? "Rendering 1/3…" : "Aggiornamento…");
       renderHome();
       setOnlinePill("ok", "Stato: online");
       if(isBoot) bootSet(62, "OK: ordini aggiornati");
@@ -4880,17 +4842,8 @@ function renderHome(){
   }
 
   async function startHub(){
-    if(globalThis.__HUB_POLVERI_BOOTED__){
-      return;
-    }
-    globalThis.__HUB_POLVERI_BOOTED__ = true;
-
-    if(loader.retryBtn){
-      loader.retryBtn.addEventListener("click", ()=>{
-        resetSyncBackoff();
-        queuedSyncOrders(false, "overlay_retry");
-      });
-    }
+    if(globalThis.__HUB_BOOTED__) return;
+    globalThis.__HUB_BOOTED__ = true;
 
     try{ statsDesktopMq.addEventListener("change", relocateStatsCard); }catch(_e){ try{ statsDesktopMq.addListener(relocateStatsCard); }catch(_e2){} }
     relocateStatsCard();
