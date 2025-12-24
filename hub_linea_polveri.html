@@ -389,6 +389,30 @@
       transform: scale(.99);
       box-shadow: 0 12px 32px rgba(0,0,0,.14);
     }
+    .selectableLine{
+      position: relative;
+      overflow:hidden;
+    }
+    .selectableLine::after{
+      content:"";
+      position:absolute;
+      inset:-1px;
+      border-radius:16px;
+      background: linear-gradient(180deg, rgba(46,123,255,.08), rgba(46,123,255,.02));
+      opacity:0;
+      transition: opacity .16s ease, transform .16s ease;
+      z-index:0;
+    }
+    .selectableLine.selected{
+      border-color: rgba(46,123,255,.55);
+      box-shadow: 0 14px 30px rgba(46,123,255,.18);
+      background: rgba(46,123,255,.10);
+    }
+    .selectableLine.selected::after{
+      opacity:1;
+    }
+    .selectableLine .top,
+    .selectableLine .whiteBagBanner{ position:relative; z-index:1; }
     .magGrid{
       display:grid;
       grid-template-columns: 1fr;
@@ -510,6 +534,28 @@
       text-transform: uppercase;
       opacity: .9;
     }
+    .sheet .shd .titleCol{
+      display:flex;
+      flex-direction:column;
+      gap:6px;
+      align-items:flex-start;
+      min-width:0;
+      flex:1;
+    }
+    .selCounter{
+      display:inline-flex;
+      align-items:center;
+      gap:6px;
+      padding:6px 10px;
+      border-radius:999px;
+      border:1px solid rgba(46,123,255,.28);
+      background: rgba(46,123,255,.08);
+      color:#0a3a7d;
+      font-size:12px;
+      font-weight:900;
+      white-space:nowrap;
+    }
+    .selCounter strong{ font-size:13px; }
     .sheet .shd .x {
       width: 40px; height: 40px;
       border-radius: 14px;
@@ -986,7 +1032,10 @@
   <div id="prodModal" class="overlay" role="dialog" aria-modal="true">
     <div class="sheet">
       <div class="shd">
-        <div class="h" id="prodModalTitle">Produzione</div>
+        <div class="titleCol">
+          <div class="h" id="prodModalTitle">Produzione</div>
+          <div class="selCounter" id="selectionCounter" style="display:none;">0 righe selezionate</div>
+        </div>
         <button class="x" id="prodModalClose" aria-label="Chiudi">×</button>
       </div>
       <div class="sbd" id="prodModalBody"></div>
@@ -1135,6 +1184,7 @@
     history: [],
     user: null,
     operator: null,
+    selectedLines: new Map(), // CODEX: selezione multi-ordine persistente
     prodModalOpenedAt: 0,
     startedThisSession: false,
     prodModalTouched: false,
@@ -1164,6 +1214,75 @@
     const mo = String(dt.getMonth()+1).padStart(2,"0");
     const yy = dt.getFullYear();
     return `${dd}/${mo}/${yy} ${fmtTime(dt)}`;
+  }
+  function ensureSelectionState(){
+    if(!(state.selectedLines instanceof Map)) state.selectedLines = new Map();
+    return state.selectedLines;
+  }
+  function makeSelectionKey(order, line){
+    const on = order?.orderNo || order?.number || "";
+    const cust = order?.customer || "";
+    const lk = line?.lineKey || line?.lineID || line?.id || "";
+    return `${on}__${cust}__${lk}`;
+  }
+  function selectionCount(){
+    return ensureSelectionState().size;
+  }
+  function updateSelectionCounter(){
+    const counter = $("selectionCounter");
+    if(!counter) return;
+    const n = selectionCount();
+    if(n>0){
+      counter.style.display = "inline-flex";
+      counter.innerHTML = `<strong>${n}</strong> righe selezionate`;
+    } else {
+      counter.style.display = "none";
+    }
+  }
+  function clearSelectionForOrder(order){
+    const sel = ensureSelectionState();
+    const keys = Array.from(sel.keys());
+    for(const k of keys){
+      const v = sel.get(k);
+      if(v && String(v.orderNo||v.number||"") === String(order?.orderNo||order?.number||"") && String(v.customer||"") === String(order?.customer||"")){
+        sel.delete(k);
+      }
+    }
+  }
+  function pruneSelectionAgainstOrders(baseOrders){
+    const sel = ensureSelectionState();
+    if(!sel.size) return;
+    const allowed = new Set();
+    for(const o of (baseOrders||[])){
+      for(const l of (o.lines||[])){
+        if(!l || l.status==="active") continue;
+        allowed.add(makeSelectionKey(o, l));
+      }
+    }
+    for(const k of Array.from(sel.keys())){
+      if(!allowed.has(k)) sel.delete(k);
+    }
+    updateSelectionCounter();
+  }
+  function selectedEntriesForOrder(order){
+    const out = [];
+    const on = String(order?.orderNo||order?.number||"");
+    const cust = String(order?.customer||"");
+    for(const v of ensureSelectionState().values()){
+      if(String(v.orderNo||v.number||"")===on && String(v.customer||"")===cust) out.push(v);
+    }
+    return out;
+  }
+  function groupSelectionByOrder(){
+    const groups = new Map();
+    for(const v of ensureSelectionState().values()){
+      const on = String(v.orderNo||v.number||"");
+      const cust = String(v.customer||"");
+      const key = `${on}__${cust}`;
+      if(!groups.has(key)) groups.set(key, { orderNo:on, customer:cust, lines:[] });
+      groups.get(key).lines.push(v);
+    }
+    return groups;
   }
   function norm(s){
     return (s||"").toString().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"").trim();
@@ -1344,6 +1463,9 @@
       if(typeof v === "string" && v.includes("**")) return true;
     }
     return false;
+  }
+  function isNonProductionLine(row){
+    return isWhiteBagRow(row);
   }
   // CODEX: riposizionamento Statistiche su desktop (colonna sinistra)
   const statsDesktopMq = window.matchMedia("(min-width: 1024px)");
@@ -2108,14 +2230,26 @@ authApi.onAuthStateChanged(auth, async(user)=>{
     for(const o of orders){
       const on = String(o.orderNo || o.number || "");
       if(!on) continue;
-      const keys = (o.lines||[]).map(l=>l.lineKey).filter(Boolean).map(String);
-      if(!keys.length) continue;
+      let autoDone = 0;
+      const keys = [];
+      for(const l of (o.lines||[])){
+        if(isNonProductionLine(l)){
+          autoDone++;
+          continue;
+        }
+        const lk = String(l.lineKey||"");
+        if(lk) keys.push(lk);
+      }
+      const total = keys.length + autoDone;
+      if(total<=0) continue;
       const doneSet = completedByOrder.get(on) || new Set();
-      let doneCount = 0;
-      for(const k of keys){ if(doneSet.has(k)) doneCount++; }
-      const remaining = keys.length - doneCount;
-      if(doneCount>0 && remaining>0) partial.push({ orderNo:on, customer:o.customer||"", done:doneCount, total:keys.length });
-      else if(doneCount>0 && remaining<=0) full.push({ orderNo:on, customer:o.customer||"", done:doneCount, total:keys.length });
+      let doneReal = 0;
+      for(const k of keys){ if(doneSet.has(k)) doneReal++; }
+      const concludedTotal = doneReal + autoDone;
+      const remaining = total - concludedTotal;
+      const hasRealProgress = doneReal>0;
+      if(hasRealProgress && remaining>0) partial.push({ orderNo:on, customer:o.customer||"", done:concludedTotal, total });
+      else if(concludedTotal>0 && remaining<=0) full.push({ orderNo:on, customer:o.customer||"", done:concludedTotal, total });
     }
     return { partial, full };
   }
@@ -2158,18 +2292,26 @@ authApi.onAuthStateChanged(auth, async(user)=>{
       const orderNo = o.orderNo || o.number || "";
       const note = getOrderNote(o);
       const priorityInfo = computePriorityFromNote(note);
+      let autoDone = 0;
       const lines = (o.lines||[]).map(l=>{
+        if(isNonProductionLine(l)){
+          autoDone++;
+          return null;
+        }
         const key = String(l.lineKey||"");
         const activeProd = activeMap.get(key) || null;
         const status = concluded.has(key) ? "done" : activeProd ? "active" : "idle";
         return { ...l, status, activeProd, activeOp: activeProd?.operator || activeProd?.operatorName || "", conclusion: l.conclusion || o.conclusion || "" };
-      }).filter(l=>l.status !== "done");
+      }).filter(Boolean).filter(l=>l.status !== "done");
       const alerts = Array.isArray(o.alerts) ? o.alerts : [];
-      if(!lines.length && !alerts.length) continue;
+      if(!lines.length){
+        if(autoDone>0) continue;
+        if(!alerts.length) continue;
+      }
 
       const planDate = priorityInfo.date || extractDateFromText(note);
       const daysAway = planDate ? diffDaysFromNow(planDate) : null;
-      const baseOrder = { ...o, orderNo, lines, alerts, partialInfo: partialMap.get(String(orderNo)) || null, isCompleted: fullMap.has(String(orderNo)), note, priorityInfo, planDate, daysAway };
+      const baseOrder = { ...o, orderNo, lines, alerts, autoDone, totalLines: lines.length + autoDone, partialInfo: partialMap.get(String(orderNo)) || null, isCompleted: fullMap.has(String(orderNo)), note, priorityInfo, planDate, daysAway };
       baseOrders.push(baseOrder);
 
       let visible = true;
@@ -2192,6 +2334,23 @@ authApi.onAuthStateChanged(auth, async(user)=>{
     return { orders, baseOrders, concluded, activeMap, partialMap, fullMap };
   }
 
+  function estimateLineKg(line){
+    if(!line) return 0;
+    const qtyParsed = parseItNumber(line.qty);
+    const packParsed = Number.isFinite(line.packKg) ? Number(line.packKg) : parseItNumber(line.packKg);
+    const um = norm(line.um||"");
+    let lineKg = 0;
+    if((um==="kg" || /\bkg\b/.test(um)) && qtyParsed>0){
+      lineKg = qtyParsed;
+    } else if(qtyParsed>0 && Number.isFinite(packParsed) && packParsed>0){
+      lineKg = qtyParsed * packParsed;
+    } else if(Number.isFinite(line.lineKg) && line.lineKg>0){
+      lineKg = Number(line.lineKg);
+    }
+    if(!Number.isFinite(lineKg)) lineKg = 0;
+    return lineKg;
+  }
+
   function computeVisiblePowderSummary(orders){ // UI-FIX: kg-totali
     const lines = [];
     for(const o of (orders||[])){
@@ -2200,20 +2359,9 @@ authApi.onAuthStateChanged(auth, async(user)=>{
     let totalKg = 0;
     const samples = [];
     for(const l of lines){
-      const qtyParsed = parseItNumber(l.qty);
-      const packParsed = Number.isFinite(l.packKg) ? Number(l.packKg) : parseItNumber(l.packKg);
-      const um = norm(l.um||"");
-      let lineKg = 0;
-      if((um==="kg" || /\bkg\b/.test(um)) && qtyParsed>0){
-        lineKg = qtyParsed;
-      } else if(qtyParsed>0 && Number.isFinite(packParsed) && packParsed>0){
-        lineKg = qtyParsed * packParsed;
-      } else if(Number.isFinite(l.lineKg) && l.lineKg>0){
-        lineKg = Number(l.lineKg);
-      }
-      if(!Number.isFinite(lineKg)) lineKg = 0;
+      const lineKg = estimateLineKg(l);
       totalKg += lineKg;
-      if(samples.length < 5) samples.push({ rawQty: l.qty, parsedQty: qtyParsed });
+      if(samples.length < 5) samples.push({ rawQty: l.qty, parsedQty: parseItNumber(l.qty) });
     }
     return { totalKg, lineCount: lines.length, samples };
   }
@@ -2627,7 +2775,10 @@ function renderHome(){
     relocateStatsCard(); // CODEX: forza Statistiche sotto Operatività su desktop
     try{ const el=$('homeWelcome'); if(el && state.user){ el.textContent = `Benvenuto, ${state.user.fullName}`; } }catch(e){}
 
-    const visibleOrders = buildOrderViews().orders; // UI-FIX: kg-totali
+    const views = buildOrderViews();
+    pruneSelectionAgainstOrders(views.baseOrders);
+    updateSelectionCounter();
+    const visibleOrders = views.orders; // UI-FIX: kg-totali
     const kgSummary = computeVisiblePowderSummary(visibleOrders); // UI-FIX: kg-totali
     $("kPowderLines").textContent = kgSummary.lineCount ? kgSummary.lineCount.toString() : "0"; // UI-FIX: kg-totali
     const kPowderKgEl = $("kPowderKg");
@@ -2905,6 +3056,7 @@ function renderHome(){
     state.prodModalTouched = false;
     $("prodModal").classList.add("show");
     lockBody();
+    updateSelectionCounter();
     renderProdStepOrders();
   }
 
@@ -2930,7 +3082,7 @@ function renderHome(){
     const list = body.querySelector("#partialList");
     rows.forEach(o=>{
       const done = o.partialInfo?.done || 0;
-      const total = o.partialInfo?.total || (done + (o.lines?.length||0));
+      const total = o.partialInfo?.total || (done + (o.lines?.length||0) + (o.autoDone||0));
       const div = document.createElement("div");
       div.className = "item pressCard";
       div.innerHTML = `
@@ -2952,6 +3104,59 @@ function renderHome(){
     });
   }
 
+  async function startSelectedProductions(contextOrder){
+    const { baseOrders } = buildOrderViews({ applyRoleVisibility:false, includeHidden:true });
+    pruneSelectionAgainstOrders(baseOrders);
+    const groups = groupSelectionByOrder();
+    updateSelectionCounter();
+    if(!groups.size){
+      showToast("Seleziona righe", "Non hai selezionato righe da avviare.");
+      return;
+    }
+    const opName = (state.user?.fullName || state.operator || 'Operatore');
+    const baseMap = new Map(baseOrders.map(o=>[`${o.orderNo||o.number||""}__${o.customer||""}`, o]));
+    let launched = 0;
+    let totalLines = 0;
+    for(const [key, group] of groups.entries()){
+      const base = baseMap.get(key);
+      if(!base) continue;
+      const availableLines = (base.lines||[]).filter(l=>l.status!=="active");
+      const selectedKeys = new Set((group.lines||[]).map(l=>String(l.lineKey||"")));
+      const selectedLines = availableLines.filter(l=>selectedKeys.has(String(l.lineKey||"")));
+      if(!selectedLines.length) continue;
+      const isFullOrderStart = availableLines.length>0 && availableLines.every(l=>selectedKeys.has(String(l.lineKey||"")));
+      const totalKg = selectedLines.reduce((a,l)=>a + estimateLineKg(l), 0) || base.totalKg || 0;
+      const prod = {
+        operator: opName,
+        customer: base.customer,
+        orderNo: base.orderNo || base.number,
+        conclusion: base.conclusion || "",
+        totalKg,
+        selectedLineKeys: selectedLines.map(l=>l.lineKey),
+        isFullOrderStart,
+        startedAt: nowIso(),
+        active: true
+      };
+      await upsertActiveProduction(prod);
+      const machineHint = machineHintFromLines(selectedLines);
+      const machineMsg = machineHint==="small" ? " Utilizzare macchina piccola per fare questo ordine." : " Utilizzare macchina grande.";
+      speak(`Ordine: operatore ${opName} ha avviato ordine ${prod.orderNo} del cliente ${prod.customer}.${machineMsg}`);
+      launched++;
+      totalLines += selectedLines.length;
+    }
+    if(!launched){
+      showToast("Selezione non valida", "Seleziona righe non già in produzione.");
+      return;
+    }
+    state.startedThisSession = true;
+    ensureSelectionState().clear();
+    updateSelectionCounter();
+    $("prodModal").classList.remove("show");
+    unlockBody();
+    const targetOrder = contextOrder ? `Ordine n. ${contextOrder.orderNo||contextOrder.number||""}` : "Ordini selezionati";
+    showToast("Produzione avviata", `${targetOrder} · ${launched} ordini · ${totalLines} righe`);
+  }
+
   function renderProdStepOperator(){
     // (disattivato) operatore già identificato da accesso
     renderProdStepOrders();
@@ -2961,6 +3166,8 @@ function renderHome(){
     $("prodModalTitle").textContent = "Produzione · Ordini";
     const body = $("prodModalBody");
     const { orders, baseOrders } = buildOrderViews();
+    pruneSelectionAgainstOrders(baseOrders);
+    updateSelectionCounter();
     orders.sort((a,b)=>{
       const ra = a.priorityInfo?.priority==="today" ? 0 : a.priorityInfo?.priority==="scheduled" ? 1 : 2;
       const rb = b.priorityInfo?.priority==="today" ? 0 : b.priorityInfo?.priority==="scheduled" ? 1 : 2;
@@ -3042,6 +3249,8 @@ function renderHome(){
       const priority = o.priorityInfo?.priority || "normal";
       const badgeText = priority==="today" ? "Priorità" : o.partialInfo ? "Parziale" : "Apri";
       const alertTag = (o.alerts&&o.alerts.length) ? `<div class="muted" style="margin-top:6px;">Avvisi: ${o.alerts.length}</div>` : "";
+      const selectedCount = selectedEntriesForOrder(o).length;
+      const selectionTag = selectedCount ? `<div class="muted" style="margin-top:6px; color:rgba(10,58,125,.92); font-weight:900;">Righe selezionate: ${selectedCount}</div>` : "";
       div.innerHTML = `
         <div class="top">
           <div>
@@ -3050,6 +3259,7 @@ function renderHome(){
             ${o.partialInfo ? `<div class="muted" style="margin-top:6px;">Ordine parzialmente concluso (${o.partialInfo.done}/${o.partialInfo.total}).</div>`:""}
             ${o.priorityInfo?.reason ? `<div class="muted" style="margin-top:6px;">${escapeHtml(o.priorityInfo.reason)}</div>`:""}
             ${alertTag}
+            ${selectionTag}
           </div>
           <div class="badge">${badgeText}</div>
         </div>`;
@@ -3063,7 +3273,6 @@ function renderHome(){
     $("prodModalTitle").textContent = `Ordine n. ${orderNo}`;
     const body = $("prodModalBody");
     const lines = order.lines || [];
-    const selectableLines = lines.filter(l=>l.status!=="active");
     const alerts = order.alerts || [];
     const alertHtml = alerts.length ? `<div style="display:flex; flex-direction:column; gap:8px; margin:10px 0 6px;">${alerts.map(a=>{
       const palette = alertPalette(a.alertInfo?.color);
@@ -3095,62 +3304,101 @@ function renderHome(){
       <button class="btn ghost" id="btnBackCust" style="width:100%;">← Torna agli ordini cliente</button>
     `;
 
-    const selected = new Set();
+    const globalSelection = ensureSelectionState();
+    const selected = new Set(selectedEntriesForOrder(order).map(x=>String(x.lineKey)));
     const lineList = body.querySelector("#lineList");
 
     function rerenderLines(){
+      selected.clear();
+      selectedEntriesForOrder(order).forEach(x=>selected.add(String(x.lineKey)));
       lineList.innerHTML = "";
       lines.forEach((l)=>{
         const id = l.lineKey;
+        const selectionKey = makeSelectionKey(order, l);
         const div = document.createElement("div");
-        div.className = "item";
-        const checked = selected.has(id);
+        const checked = selected.has(id) || globalSelection.has(selectionKey);
         const isBlocked = l.status === "active";
+        div.className = `item pressCard selectableLine${checked ? " selected" : ""}`;
         div.style.cursor = isBlocked ? "not-allowed" : "pointer";
-        div.style.borderColor = checked ? "rgba(46,123,255,.55)" : "rgba(255,255,255,.08)";
-        div.style.background = checked ? "rgba(46,123,255,.16)" : "rgba(0,0,0,.06)";
-        const isWhiteBag = isWhiteBagRow(l); // CODEX: sostituisce la riga con banner sacchetto bianco
-        if(isWhiteBag){
-          div.innerHTML = renderWhiteBagBanner({ selectable: !isBlocked, checked, badgeText: isBlocked ? "Bloccato" : "" });
-        } else {
-          const qtyLabel = formatQtyWithKg(l.qty, l.um);
-          div.innerHTML = `
-            <div class="top">
-              <div>
-                <div class="name">${l.desc}</div>
-                <div class="sub" style="font-size:13px; font-weight:900;">Quantità: <span style="font-size:15px;">${qtyLabel}</span></div>
-                ${l.code?`<div class="muted" style="margin-top:6px;">Cod: <b>${l.code}</b></div>`:""}
-                ${l.conclusion ? `<div class="muted" style="margin-top:6px;">Conclusione prevista: ${escapeHtml(l.conclusion)}</div>`:""}
-                ${isBlocked ? `<div class="muted" style="margin-top:6px; font-weight:800;">In produzione da ${escapeHtml(l.activeOp||"operatore")} · riapri la produzione in corso.</div>` : ""}
-              </div>
-              <div class="badge">${checked ? "✓" : (isBlocked ? "Bloccato" : "Seleziona")}</div>
+        const qtyLabel = formatQtyWithKg(l.qty, l.um);
+        div.innerHTML = `
+          <div class="top">
+            <div>
+              <div class="name">${l.desc}</div>
+              <div class="sub" style="font-size:13px; font-weight:900;">Quantità: <span style="font-size:15px;">${qtyLabel}</span></div>
+              ${l.code?`<div class="muted" style="margin-top:6px;">Cod: <b>${l.code}</b></div>`:""}
+              ${l.conclusion ? `<div class="muted" style="margin-top:6px;">Conclusione prevista: ${escapeHtml(l.conclusion)}</div>`:""}
+              ${isBlocked ? `<div class="muted" style="margin-top:6px; font-weight:800;">In produzione da ${escapeHtml(l.activeOp||"operatore")} · riapri la produzione in corso.</div>` : ""}
             </div>
-          `;
-        }
+            <div class="badge">${checked ? "✓" : (isBlocked ? "Bloccato" : "Seleziona")}</div>
+          </div>
+        `;
         if(!isBlocked){
           div.onclick = ()=>{
-            if(selected.has(id)) selected.delete(id); else selected.add(id);
+            const meta = {
+              orderNo,
+              customer: order.customer,
+              lineKey: l.lineKey,
+              desc: l.desc,
+              qty: l.qty,
+              um: l.um,
+              packKg: l.packKg,
+              lineKg: l.lineKg,
+              conclusion: l.conclusion || order.conclusion || "",
+              orderConclusion: order.conclusion || "",
+              totalKg: order.totalKg || 0
+            };
+            if(selected.has(id) || globalSelection.has(selectionKey)){
+              selected.delete(id);
+              globalSelection.delete(selectionKey);
+            } else {
+              selected.add(id);
+              globalSelection.set(selectionKey, meta);
+            }
             state.prodModalTouched = true;
             rerenderLines();
+            updateSelectionCounter();
           };
         } else {
           div.onclick = ()=> showToast("In produzione", `Riga già avviata da ${l.activeOp||"un operatore"}.`);
         }
         lineList.appendChild(div);
       });
-      body.querySelector("#btnStartProd").disabled = selected.size===0;
-      body.querySelector("#btnStartProd").style.opacity = selected.size===0 ? ".6" : "1";
+      const totalSelected = selectionCount();
+      const startBtn = body.querySelector("#btnStartProd");
+      startBtn.disabled = totalSelected===0;
+      startBtn.style.opacity = totalSelected===0 ? ".6" : "1";
+      startBtn.textContent = totalSelected>0 ? `INIZIA PRODUZIONE (${totalSelected})` : "INIZIA PRODUZIONE";
     }
 
     body.querySelector("#btnSelAll").onclick = ()=>{
-      lines.filter(l=>l.status!=="active").forEach(l=>selected.add(l.lineKey));
+      lines.filter(l=>l.status!=="active").forEach(l=>{
+        selected.add(l.lineKey);
+        const key = makeSelectionKey(order, l);
+        globalSelection.set(key, {
+          orderNo,
+          customer: order.customer,
+          lineKey: l.lineKey,
+          desc: l.desc,
+          qty: l.qty,
+          um: l.um,
+          packKg: l.packKg,
+          lineKg: l.lineKg,
+          conclusion: l.conclusion || order.conclusion || "",
+          orderConclusion: order.conclusion || "",
+          totalKg: order.totalKg || 0
+        });
+      });
       state.prodModalTouched = true;
       rerenderLines();
+      updateSelectionCounter();
     };
     body.querySelector("#btnClrAll").onclick = ()=>{
+      clearSelectionForOrder(order);
       selected.clear();
       state.prodModalTouched = true;
       rerenderLines();
+      updateSelectionCounter();
     };
       body.querySelector("#btnBackCust").onclick = ()=>{
         const custOrders = buildOrderViews().orders.filter(o=>o.customer===order.customer);
@@ -3158,30 +3406,8 @@ function renderHome(){
       };
 
       body.querySelector("#btnStartProd").onclick = async()=>{
-      if(!selected.size) return;
-      const isFullOrderStart = (selected.size === selectableLines.length);
-      const selectedLines = lines.filter(l=>selected.has(l.lineKey));
-      const prod = {
-        operator: (state.user?.fullName || state.operator || 'Operatore'),
-        customer: order.customer,
-        orderNo,
-        conclusion: order.conclusion || "",
-        totalKg: order.totalKg || 0,
-        selectedLineKeys: selectedLines.map(l=>l.lineKey),
-        isFullOrderStart,
-        startedAt: nowIso(),
-        active: true
-      };
-        await upsertActiveProduction(prod);
-        state.startedThisSession = true;
-
-        const machineHint = machineHintFromLines(selectedLines);
-        const machineMsg = machineHint==="small" ? " Utilizzare macchina piccola per fare questo ordine." : " Utilizzare macchina grande."; // CODEX: prompt vocale macchina grande/piccola
-        speak(`Ordine: operatore ${(state.user?.fullName||state.operator||'Operatore')} ha avviato ordine ${orderNo} del cliente ${order.customer}.${machineMsg}`);
-
-        $("prodModal").classList.remove("show");
-        unlockBody();
-        showToast("Produzione avviata", `Operatore ${state.operator} · Ordine n. ${orderNo} · ${Math.round(order.totalKg||0)} kg`);
+      if(selectionCount()===0) return;
+      await startSelectedProductions(order);
       };
 
     rerenderLines();
@@ -3270,11 +3496,10 @@ function renderHome(){
       for(const l of availableLines){
         const checked = toConclude.has(l.lineKey);
         const div = document.createElement("div");
-        div.className = "item";
+        div.className = `item pressCard selectableLine${checked ? " selected" : ""}`;
         const lineConclusion = l.conclusion || (order?.conclusion || "");
         div.style.cursor = "pointer";
-        div.style.borderColor = checked ? "rgba(46,123,255,.55)" : "rgba(255,255,255,.08)";
-        div.style.background = checked ? "rgba(46,123,255,.16)" : "rgba(0,0,0,.16)";
+        div.style.borderColor = checked ? "rgba(46,123,255,.55)" : "rgba(255,255,255,.12)";
         const isWhiteBag = isWhiteBagRow(l); // CODEX: riga solo banner se sacchetto bianco
         if(isWhiteBag){
           div.innerHTML = renderWhiteBagBanner({ selectable: true, checked });
@@ -3399,6 +3624,7 @@ function renderHome(){
         state.history = [...(state.history||[]), withId];
         try{ renderCompletedSection(); }catch(_e){}
         state.activeProductions = (state.activeProductions||[]).filter(x=>x.id!==p.id);
+        try{ state.partialOrders = computePartialOrders().partial; }catch(_e){}
         renderHome();
 
         // aggiorna classifica kg (aggregato)
