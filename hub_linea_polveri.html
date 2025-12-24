@@ -321,6 +321,22 @@
     .btn.ghost { background: transparent; border-color: var(--stroke); }
     .btn.ghost:hover { background: rgba(0,0,0,.04); border-color: rgba(0,0,0,.10); }
     .btn.ghost:active { background: rgba(0,0,0,.06); border-color: rgba(0,0,0,.12); }
+    .btn.isBusy, .primaryBtn.isBusy{
+      pointer-events:none;
+      opacity: .75;
+      filter: saturate(.9);
+    }
+    .miniSpinner{
+      width:16px; height:16px;
+      border-radius:999px;
+      border: 2px solid rgba(0,0,0,.15);
+      border-top-color: rgba(0,0,0,.45);
+      display:inline-block;
+      animation: spin .85s linear infinite;
+      vertical-align: middle;
+      margin-right: 8px;
+    }
+    .btn.good .miniSpinner{ border-color: rgba(255,255,255,.45); border-top-color: #fff; }
 
     .bigStrip {
       border-radius: 18px;
@@ -1516,6 +1532,9 @@
   };
   globalThis.__MOBILE_ALLOW_KEYS__ = globalThis.__MOBILE_ALLOW_KEYS__ || new Set();
   globalThis.__ALLOWLIST_LISTEN_STARTED__ = Boolean(globalThis.__ALLOWLIST_LISTEN_STARTED__);
+  globalThis.__CONCLUDE_INFLIGHT__ = globalThis.__CONCLUDE_INFLIGHT__ || new Map();
+  globalThis.__CONCLUDE_RECENT__ = globalThis.__CONCLUDE_RECENT__ || new Map();
+  globalThis.__CONCLUDE_HANDLER_BOUND__ = Boolean(globalThis.__CONCLUDE_HANDLER_BOUND__);
 
   // ===============================
   // UTILS
@@ -2703,13 +2722,41 @@ function showAuthGate(){
     await fs.setDoc(fs.doc(db, "powderProductions", id), { active:false, closedAt: nowIso(), ...payload }, { merge:true });
   }
 
-  async function addHistory(entry){
-    if(!state.firebase.ok) return;
+  async function addHistory(entry, opts={}){
+    if(!state.firebase.ok) return { id:null, already:false, data:null };
     const fs = state.firebase.api;
     const db = state.firebase.db;
-    const id = `${Date.now()}_${Math.random().toString(16).slice(2)}`;
-    await fs.setDoc(fs.doc(db, "powderProdHistory", id), { ...entry, id, at: nowIso() });
-    return id;
+    const docId = opts.idempotencyKey || entry.idempotencyKey || entry.id || `${Date.now()}_${Math.random().toString(16).slice(2)}`;
+    const ref = fs.doc(db, "powderProdHistory", docId);
+    const basePayload = { ...entry, id: docId, at: nowIso() };
+    try{
+      const res = await fs.runTransaction(db, async(tx)=>{
+        const snap = await tx.get(ref);
+        const existing = snap.exists() ? (snap.data()||{}) : null;
+        const prevLines = Array.isArray(existing?.concludedLineKeys) ? existing.concludedLineKeys.map(String) : [];
+        const nextLines = Array.isArray(basePayload.concludedLineKeys) ? basePayload.concludedLineKeys.map(String) : [];
+        const mergedLines = Array.from(new Set([...prevLines, ...nextLines]));
+        const hasNewLines = mergedLines.length > prevLines.length;
+        const alreadyConcluded = Boolean(existing && (existing.concluded || existing.concludedAt) && !hasNewLines);
+        if(alreadyConcluded){
+          return { id: docId, already:true, data: existing };
+        }
+        const payload = {
+          ...existing,
+          ...basePayload,
+          concludedLineKeys: mergedLines,
+          concluded: true,
+          concludedAt: existing?.concludedAt || (fs.serverTimestamp ? fs.serverTimestamp() : basePayload.at)
+        };
+        tx.set(ref, payload, { merge:true });
+        return { id: docId, already:false, data: payload };
+      });
+      return res || { id: docId, already:false, data: basePayload };
+    }catch(err){
+      console.warn("addHistory error", err);
+      try{ await fs.setDoc(ref, basePayload, { merge:true }); }catch(_e){}
+      return { id: docId, already:false, data: basePayload };
+    }
   }
 
   function mobileAllowlistDoc(fs, db){
@@ -4897,6 +4944,89 @@ function renderHome(){
     `;
 
     const runLines = body.querySelector("#runLines");
+    const concludeBtn = body.querySelector("#btnConclude");
+    const concludeKey = stableKey(order || { orderNo: p.orderNo, number: p.orderNo, customer: p.customer, id: p.id || p.orderNo });
+    const concludeInflight = globalThis.__CONCLUDE_INFLIGHT__;
+    const concludeRecent = globalThis.__CONCLUDE_RECENT__;
+    let concludeUiState = "idle";
+    const concludeLabelDefault = concludeBtn ? concludeBtn.textContent : "";
+
+    function concludedLinesForOrder(orderNo){
+      const set = new Set();
+      for(const h of (state.history||[])){
+        if(String(h?.orderNo||"") !== String(orderNo||"")) continue;
+        const arr = Array.isArray(h.concludedLineKeys) ? h.concludedLineKeys : [];
+        for(const k of arr){ if(k!=null) set.add(String(k)); }
+      }
+      return set;
+    }
+
+    function isOrderAlreadyClosed(){
+      if(!order || !order.lines || !order.lines.length) return false;
+      const concludedSet = concludedLinesForOrder(order.orderNo || order.number || p.orderNo);
+      for(const l of order.lines){
+        if(isNonProductionLine(l)) continue;
+        if(!concludedSet.has(String(l.lineKey||""))) return false;
+      }
+      return true;
+    }
+
+    function isSelectionAlreadyClosed(){
+      if(!toConclude.size) return false;
+      const concludedSet = concludedLinesForOrder(p.orderNo);
+      for(const k of toConclude){
+        if(!concludedSet.has(String(k))) return false;
+      }
+      return true;
+    }
+
+    function setConcludeBtn(mode="idle"){
+      if(!concludeBtn) return;
+      if(mode==="busy"){
+        concludeUiState = "busy";
+        concludeBtn.classList.add("isBusy");
+        concludeBtn.setAttribute("aria-disabled","true");
+        concludeBtn.disabled = true;
+        concludeBtn.innerHTML = `<span class="miniSpinner" aria-hidden="true"></span><span>Conclusione…</span>`;
+        return;
+      }
+      if(mode==="done"){
+        concludeUiState = "done";
+        concludeBtn.classList.add("isBusy");
+        concludeBtn.setAttribute("aria-disabled","true");
+        concludeBtn.disabled = true;
+        concludeBtn.textContent = "Concluso";
+        concludeBtn.style.opacity = "1";
+        return;
+      }
+      concludeUiState = "idle";
+      concludeBtn.classList.remove("isBusy");
+      concludeBtn.removeAttribute("aria-disabled");
+      concludeBtn.disabled = toConclude.size===0;
+      concludeBtn.style.opacity = toConclude.size===0 ? ".6" : "1";
+      concludeBtn.textContent = concludeLabelDefault || "HO CONCLUSO LA PRODUZIONE";
+    }
+
+    function updateConcludeAvailability(){
+      if(concludeUiState !== "idle") return;
+      setConcludeBtn("idle");
+    }
+
+    function blockIfAlreadyDone(showMsg=true){
+      const already = isOrderAlreadyClosed() || isSelectionAlreadyClosed();
+      if(already){
+        setConcludeBtn("done");
+        if(showMsg) showToast("Ordine già concluso", "L’ordine risulta già chiuso. Nessuna azione necessaria.");
+      }
+      return already;
+    }
+
+    async function requestSignature(contextText){
+      return new Promise((resolve, reject)=>{
+        openSignModal(contextText, (dataUrl)=>resolve(dataUrl), ()=>reject(new Error("SIGN_CANCELLED")));
+      });
+    }
+
     function rerender(){
       runLines.innerHTML = "";
       for(const l of availableLines){
@@ -4939,8 +5069,7 @@ function renderHome(){
         };
         runLines.appendChild(div);
       }
-      $("btnConclude").disabled = toConclude.size===0;
-      $("btnConclude").style.opacity = toConclude.size===0 ? ".6" : "1";
+      updateConcludeAvailability();
     }
 
     body.querySelector("#btnSelAllRun").onclick = ()=>{
@@ -4968,12 +5097,30 @@ function renderHome(){
       };
     }
 
+    if(concludeBtn){
+      globalThis.__CONCLUDE_HANDLER_BOUND__ = true;
+    }
+
     body.querySelector("#btnConclude").onclick = async()=>{
       if(!toConclude.size) return;
+      if(blockIfAlreadyDone()) return;
 
+      const nowTs = Date.now();
+      if(concludeInflight.get(concludeKey) === true){
+        showToast("Conclusione in corso", "Attendi il completamento dell’operazione.");
+        return;
+      }
+      const lastTs = concludeRecent.get(concludeKey) || 0;
+      if(nowTs - lastTs < 2500){
+        showToast("Conclusione recente", "Operazione ignorata per evitare duplicati ravvicinati.");
+        return;
+      }
       const allStarted = toConclude.size === selected.size;
       const askConfirm = Boolean(p.isFullOrderStart) && allStarted;
       if(askConfirm && !confirm("Stai concludendo l’intero ordine. Confermi?")) return;
+
+      concludeInflight.set(concludeKey, true);
+      concludeRecent.set(concludeKey, nowTs);
 
       const startedAtMs = p.startedAt ? new Date(p.startedAt).getTime() : Date.now();
       const durationMs = Date.now() - startedAtMs;
@@ -5006,7 +5153,9 @@ function renderHome(){
       }
 
       const ctx = `${p.customer} · Ordine n. ${p.orderNo} · ${Math.round(kg)} kg`;
-      openSignModal(ctx, async(signatureDataUrl)=>{
+      try{
+        setConcludeBtn("busy");
+        const signatureDataUrl = await requestSignature(ctx);
         await closeActiveProduction(p.id, { concluded:true });
 
         const entry = {
@@ -5022,33 +5171,56 @@ function renderHome(){
           totalKgOrder: Number(p.totalKg||0),
           perLine,
           signature: signatureDataUrl,
-          statementAccepted: true
+          statementAccepted: true,
+          idempotencyKey: concludeKey
         };
 
-        const newId = await addHistory(entry);
-        const withId = { ...entry, id: newId || `${Date.now()}_${Math.random().toString(16).slice(2)}`, at: nowIso() };
-        state.history = [...(state.history||[]), withId];
+        const histRes = await addHistory(entry, { idempotencyKey: concludeKey });
+        const alreadyRecorded = Boolean(histRes?.already);
+        const histId = histRes?.id || `${Date.now()}_${Math.random().toString(16).slice(2)}`;
+        const withId = { ...(histRes?.data || entry), id: histId, at: (histRes?.data?.at || nowIso()) };
+        if(!(state.history||[]).some(h=>h.id===withId.id)){
+          state.history = [...(state.history||[]), withId];
+        }
         state.historyReady = true;
         try{ renderCompletedSection(); }catch(_e){}
         state.activeProductions = (state.activeProductions||[]).filter(x=>x.id!==p.id);
         try{ state.partialOrders = computePartialOrders().partial; }catch(_e){}
         renderHome();
         renderHeaderKpis();
+        setConcludeBtn("done");
 
         // aggiorna classifica kg (aggregato)
-        try{
-          await bumpOperatorKg(state.user?.uid || "", state.user?.fullName || p.operator || "Operatore", kg);
-        }catch(_e){}
+        if(!alreadyRecorded){
+          try{
+            await bumpOperatorKg(state.user?.uid || "", state.user?.fullName || p.operator || "Operatore", kg);
+          }catch(_e){}
 
-        speak(`Ordine concluso da ${(state.user?.fullName||p.operator||"Operatore")} · ordine ${p.orderNo} · cliente ${p.customer}`);
+          speak(`Ordine concluso da ${(state.user?.fullName||p.operator||"Operatore")} · ordine ${p.orderNo} · cliente ${p.customer}`);
 
-        showToast("Produzione conclusa", `Operatore ${(state.user?.fullName||p.operator||"Operatore")} · Ordine n. ${p.orderNo} · ${Math.round(kg)} kg`);
-        showToast("Ordine concluso", `Ordine n. ${p.orderNo} registrato tra i conclusi.`, 2200);
+          showToast("Produzione conclusa", `Operatore ${(state.user?.fullName||p.operator||"Operatore")} · Ordine n. ${p.orderNo} · ${Math.round(kg)} kg`);
+          showToast("Ordine concluso", `Ordine n. ${p.orderNo} registrato tra i conclusi.`, 2200);
+        } else {
+          showToast("Ordine già concluso", "Registro già presente: nessuna duplicazione effettuata.");
+        }
         renderRunning();
-      });
+      }catch(err){
+        const msg = String(err?.message||"");
+        if(msg === "SIGN_CANCELLED"){
+          // utente ha chiuso la firma: sblocca UI senza spam
+          setConcludeBtn("idle");
+        } else {
+          console.warn("conclude error", err);
+          setConcludeBtn("idle");
+          showToast("Errore conclusione", "Salvataggio non riuscito. Controlla rete o permessi e riprova.");
+        }
+      }finally{
+        concludeInflight.set(concludeKey, false);
+      }
     };
 
     rerender();
+    blockIfAlreadyDone(false);
   }
 
   function openPartialModal(){
@@ -5133,7 +5305,7 @@ function renderHome(){
     sig.empty = true;
   }
 
-  function openSignModal(contextText, onOk){
+  function openSignModal(contextText, onOk, onCancel){
     sigInit();
     $("signCheck").checked = false;
     $("signContext").textContent = contextText;
@@ -5142,13 +5314,16 @@ function renderHome(){
     lockBody();
     requestAnimationFrame(()=> sig.resize?.()); // CODEX: forza ridimensionamento firma quando visibile
 
-    const close = ()=>{
+    const close = (reason="close")=>{
       $("signModal").classList.remove("show");
       unlockBody();
       $("signOk").onclick = null;
+      if(reason==="cancel" && typeof onCancel==="function"){
+        try{ onCancel(); }catch(_e){}
+      }
     };
 
-    $("signClose").onclick = close;
+    $("signClose").onclick = ()=>close("cancel");
     $("signClear").onclick = ()=>sigClear();
     $("signOk").onclick = ()=>{
       if(!$("signCheck").checked){
@@ -5160,7 +5335,7 @@ function renderHome(){
         return;
       }
       const dataUrl = sig.canvas.toDataURL("image/png");
-      close();
+      close("ok");
       onOk(dataUrl);
     };
   }
