@@ -2305,9 +2305,28 @@ authApi.onAuthStateChanged(auth, async(user)=>{
   // ===============================
   // ===== Google AI Voice (Web Speech API / Chrome "Google" voices) =====
   let _googleVoice = null;
+  globalThis.__ttsLastMode = 'none';
+  globalThis.__ttsLastError = '';
 
   async function playCue(){ /* no-op */ }
   function stopTTS(){ /* no-op */ }
+
+  function _isDesktopVoiceAllowed(){
+    try{
+      // Heuristics: desktop = hover + pointer fine + viewport abbastanza grande
+      const mm = (q) => window.matchMedia && window.matchMedia(q).matches;
+      const fine = mm('(pointer: fine)') && mm('(hover: hover)');
+      const wide = Math.max(window.innerWidth || 0, document.documentElement.clientWidth || 0) >= 900;
+
+      // Hard-block common mobile/tablet UAs (Android/iOS/iPad)
+      const ua = (navigator.userAgent || '').toLowerCase();
+      const mobileUA = /android|iphone|ipod|ipad|iemobile|mobile|tablet/.test(ua);
+
+      return fine && wide && !mobileUA;
+    }catch(_){
+      return false;
+    }
+  }
 
   let _ttsRetryTimer = null;
   function scheduleTTSRetry(msg){
@@ -2351,10 +2370,21 @@ authApi.onAuthStateChanged(auth, async(user)=>{
   }
 
   async function speak(text){
+    if(!_isDesktopVoiceAllowed()){
+      globalThis.__ttsLastMode = 'disabled';
+      globalThis.__ttsLastError = '';
+      return;
+    }
+
     const msg = String(text || "").trim();
-    if(!msg) return;
+    if(!msg){
+      globalThis.__ttsLastMode = 'none';
+      globalThis.__ttsLastError = '';
+      return;
+    }
 
     const safeMsg = (msg.length > 520) ? (msg.slice(0, 520).trim() + "…") : msg;
+    globalThis.__ttsLastError = '';
 
     try{ await playCue("start"); }catch(_){}
 
@@ -2362,9 +2392,13 @@ authApi.onAuthStateChanged(auth, async(user)=>{
     try{ if("speechSynthesis" in window) window.speechSynthesis.cancel(); }catch(_){}
 
     try{
-      if(!("speechSynthesis" in window)) return;
+      if(!("speechSynthesis" in window)){
+        globalThis.__ttsLastMode = 'none';
+        return;
+      }
 
       _ensureGoogleVoice();
+      globalThis.__ttsLastMode = 'webspeech';
 
       const u = new SpeechSynthesisUtterance(safeMsg);
       u.lang = "it-IT";
@@ -2385,6 +2419,8 @@ authApi.onAuthStateChanged(auth, async(user)=>{
 
       window.speechSynthesis.speak(u);
     }catch(e){
+      globalThis.__ttsLastMode = globalThis.__ttsLastMode || 'webspeech';
+      globalThis.__ttsLastError = (e && e.message) ? String(e.message) : String(e || "");
       console.log("TTS (Google/WebSpeech) error:", e);
       try{ playCue("end"); }catch(_){ }
     }
