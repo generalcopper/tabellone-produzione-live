@@ -1637,6 +1637,12 @@
   globalThis.__ALLOW_KEYS__ = (globalThis.__ALLOW_KEYS__ instanceof Set) ? globalThis.__ALLOW_KEYS__ : new Set();
   globalThis.__ALLOW_META__ = globalThis.__ALLOW_META__ || { updatedAt:null, updatedBy:"", lastError:"", lastSyncTs:null };
   globalThis.__ALLOWLIST_LISTEN_STARTED__ = Boolean(globalThis.__ALLOWLIST_LISTEN_STARTED__);
+  let __allowCommitted = new Set(globalThis.__ALLOW_KEYS__ || []);
+  let __allowDraft = new Set(__allowCommitted);
+  let __allowDraftDirty = false;
+  let __adminAllOrders = [];
+  let __adminOrderKeySet = new Set();
+  state.mobileAllowSelection = __allowDraft;
 
   // ===============================
   // UTILS
@@ -2911,26 +2917,24 @@ function showAuthGate(){
     return "—";
   }
   function ensureAllowSelectionSet(){
-    if(!(state.mobileAllowSelection instanceof Set)){
-      const base = (globalThis.__ALLOW_KEYS__ instanceof Set) ? globalThis.__ALLOW_KEYS__ : new Set();
-      state.mobileAllowSelection = new Set(Array.from(base));
-    }
-    return state.mobileAllowSelection;
+    if(!(__allowDraft instanceof Set)) __allowDraft = new Set();
+    state.mobileAllowSelection = __allowDraft;
+    return __allowDraft;
   }
   function refreshAllowDirtyFlag(){
     const selection = ensureAllowSelectionSet();
-    const remote = (state.mobileAllowlist?.keys instanceof Set) ? state.mobileAllowlist.keys : new Set();
-    if(selection.size !== remote.size){
-      state.mobileAllowDirty = true;
-      return;
-    }
-    for(const k of selection){
-      if(!remote.has(k)){
-        state.mobileAllowDirty = true;
-        return;
+    const remote = (__allowCommitted instanceof Set) ? __allowCommitted : new Set();
+    let dirty = selection.size !== remote.size;
+    if(!dirty){
+      for(const k of selection){
+        if(!remote.has(k)){
+          dirty = true;
+          break;
+        }
       }
     }
-    state.mobileAllowDirty = false;
+    state.mobileAllowDirty = dirty;
+    __allowDraftDirty = dirty;
   }
   let __allowRenderTimer = null;
   function scheduleAllowlistRender(){
@@ -2963,7 +2967,8 @@ function showAuthGate(){
         const data = snap.exists() ? (snap.data()||{}) : {};
         const keysArr = Array.isArray(data.keys) ? data.keys.filter(Boolean).map(String) : [];
         const allowSet = new Set(keysArr);
-        globalThis.__ALLOW_KEYS__ = new Set(keysArr);
+        __allowCommitted = allowSet;
+        globalThis.__ALLOW_KEYS__ = new Set(allowSet);
         globalThis.__ALLOW_META__ = {
           updatedAt: data.updatedAt || null,
           updatedBy: data.updatedBy || "",
@@ -2982,8 +2987,13 @@ function showAuthGate(){
           lastSyncTs: Date.now(),
           pendingRender: false
         };
-        state.mobileAllowSelection = new Set(allowSet);
-        state.mobileAllowDirty = false;
+        if(!__allowDraftDirty){
+          __allowDraft = new Set(__allowCommitted);
+          state.mobileAllowSelection = __allowDraft;
+        } else {
+          ensureAllowSelectionSet();
+        }
+        refreshAllowDirtyFlag();
         state.mobileAllowSaveState = "idle";
         scheduleAllowlistRender();
       }, (err)=>{
@@ -3039,11 +3049,20 @@ function showAuthGate(){
         updatedAt: fs.serverTimestamp(),
         updatedBy: state.user.email || state.user.fullName || ""
       }, { merge:true });
+      __allowCommitted = new Set(keys);
+      __allowDraft = new Set(keys);
+      __allowDraftDirty = false;
+      state.mobileAllowSelection = __allowDraft;
+      state.mobileAllowlist.keys = new Set(__allowCommitted);
+      state.mobileAllowlist.allowAll = false;
+      state.mobileAllowlist.docExists = true;
       state.mobileAllowSaveState = "idle";
       state.mobileAllowDirty = false;
       state.mobileAllowlist.error = "";
       state.mobileAllowlist.lastError = "";
+      globalThis.__ALLOW_KEYS__ = new Set(__allowCommitted);
       globalThis.__ALLOW_META__ = { ...(globalThis.__ALLOW_META__||{}), lastError:"" };
+      refreshAllowDirtyFlag();
       showToast("Salvato ✅", "Ordini inviati a mobile aggiornati.");
     }catch(err){
       console.warn("save allowlist error", err);
@@ -3676,6 +3695,44 @@ function showAuthGate(){
     return { totals, orderDetails };
   }
 
+  function renderAdminMobileSendList(allOrders, searchText){
+    const list = $("mobileAllowList");
+    const orders = Array.isArray(allOrders) ? allOrders : [];
+    const term = norm(searchText || "");
+    const filteredOrders = term ? orders.filter(o=>{
+      const probe = `${o.customer||""} ${o.orderNo||o.number||""} ${o.conclusion||""} ${(o.lines&&o.lines[0]?.desc)||""}`;
+      return norm(probe).includes(term);
+    }) : orders;
+    if(!list) return { filteredOrders };
+    list.innerHTML = "";
+    if(!filteredOrders.length){
+      list.innerHTML = `<div class="muted">Nessun ordine trovato</div>`;
+      return { filteredOrders };
+    }
+    const frag = document.createDocumentFragment();
+    for(const o of filteredOrders){
+      const key = o.__k || getOrderKey(o);
+      const checked = ensureAllowSelectionSet().has(key);
+      const line = (o.lines && o.lines[0]) || {};
+      const qtyLabel = formatQtyWithKg(line.qty, line.um);
+      const row = document.createElement("div");
+      row.className = "mobileSendRow";
+      if(checked) row.classList.add("selected");
+      row.dataset.k = key;
+      row.innerHTML = `
+        <div class="info">
+          <div class="name">${escapeHtml(o.customer||"Cliente")} · Ord. ${escapeHtml(o.orderNo||o.number||"—")}</div>
+          <div class="meta">${escapeHtml(line.desc||"Prodotto")} · ${escapeHtml(qtyLabel)}${o.conclusion?` · Consegna: ${escapeHtml(o.conclusion)}`:""}</div>
+        </div>
+        <div class="mobileSendToggle" role="switch" aria-checked="${checked ? "true" : "false"}">
+          <div class="knob"></div>
+        </div>`;
+      frag.appendChild(row);
+    }
+    list.appendChild(frag);
+    return { filteredOrders };
+  }
+
   function renderMobileAllowPanel(baseOrders, orderKeySet){
     const panel = $("mobileAllowPanel");
     const isAdminDesktop = Boolean(state.user && state.user.isAdmin && !isMobile());
@@ -3684,20 +3741,21 @@ function showAuthGate(){
     if(!isAdminDesktop) return;
 
     const ordersList = Array.isArray(baseOrders) ? baseOrders : [];
+    __adminAllOrders = ordersList;
+    __adminOrderKeySet = (orderKeySet instanceof Set) ? orderKeySet : new Set((ordersList||[]).map(o=>o?.__k || getOrderKey(o)));
     const selection = ensureAllowSelectionSet();
     const allowInfo = state.mobileAllowlist || {};
-    const allowKeySet = (globalThis.__ALLOW_KEYS__ instanceof Set) ? globalThis.__ALLOW_KEYS__ : new Set();
-    const orderKeySetLocal = (orderKeySet instanceof Set) ? orderKeySet : new Set((ordersList||[]).map(o=>o?.__k || getOrderKey(o)));
+    const allowKeySet = (__allowCommitted instanceof Set) ? __allowCommitted : new Set();
     let matchCount = 0;
     for(const k of allowKeySet){
-      if(orderKeySetLocal.has(k)) matchCount++;
+      if(__adminOrderKeySet.has(k)) matchCount++;
     }
     const totalOrders = ordersList.length;
     const selectionCount = selection.size;
+    const committedCount = allowKeySet.size;
     const updatedTxt = fmtAllowlistTs(allowInfo.updatedAt);
-    const docCount = allowKeySet.size;
     const updatedLabel = allowInfo.ready
-      ? (allowInfo.allowAll ? "Filtro disattivo: salva per limitare gli ordini." : `Aggiornato ${updatedTxt}${allowInfo.updatedBy ? ` · ${allowInfo.updatedBy}` : ""} · ${docCount} ordini live`)
+      ? (allowInfo.allowAll ? "Filtro disattivo: salva per limitare gli ordini." : `Aggiornato ${updatedTxt}${allowInfo.updatedBy ? ` · ${allowInfo.updatedBy}` : ""} · ${committedCount} ordini live`)
       : "Sincronizzazione in corso…";
     const lastErrorTxt = allowInfo.lastError || allowInfo.error || (globalThis.__ALLOW_META__||{}).lastError || "";
     const updByEl = $("mobileAllowUpdatedBy");
@@ -3708,7 +3766,7 @@ function showAuthGate(){
     const totEl = $("mobileAllowTotal");
     if(totEl) totEl.textContent = String(totalOrders);
     const sentEl = $("mobileAllowSent");
-    if(sentEl) sentEl.textContent = String(selectionCount || allowKeySet.size);
+    if(sentEl) sentEl.textContent = String(selectionCount);
     const matchEl = $("mobileAllowMatch");
     if(matchEl) matchEl.textContent = String(matchCount);
 
@@ -3761,59 +3819,28 @@ function showAuthGate(){
       }
       searchInput.oninput = (e)=>{
         state.mobileAllowSearchTerm = e.target.value || "";
-        renderMobileAllowPanel(ordersList, orderKeySetLocal);
+        renderMobileAllowPanel(__adminAllOrders, __adminOrderKeySet);
       };
     }
-    const term = norm(state.mobileAllowSearchTerm || "");
-    const filteredOrders = term ? ordersList.filter(o=>{
-      const probe = `${o.customer||""} ${o.orderNo||o.number||""} ${o.conclusion||""} ${(o.lines&&o.lines[0]?.desc)||""}`;
-      return norm(probe).includes(term);
-    }) : ordersList;
-
+    const { filteredOrders } = renderAdminMobileSendList(ordersList, state.mobileAllowSearchTerm || "");
     const list = $("mobileAllowList");
-    if(list){
-      list.innerHTML = "";
-      if(!filteredOrders.length){
-        list.innerHTML = `<div class="muted">Nessun ordine corrisponde alla ricerca.</div>`;
-      } else {
-        const frag = document.createDocumentFragment();
-        for(const o of filteredOrders){
-          const key = o.__k || getOrderKey(o);
-          const checked = selection.has(key);
-          const line = (o.lines && o.lines[0]) || {};
-          const qtyLabel = formatQtyWithKg(line.qty, line.um);
-          const row = document.createElement("div");
-          row.className = "mobileSendRow";
-          if(checked) row.classList.add("selected");
-          row.dataset.key = key;
-          row.innerHTML = `
-            <div class="info">
-              <div class="name">${escapeHtml(o.customer||"Cliente")} · Ord. ${escapeHtml(o.orderNo||o.number||"—")}</div>
-              <div class="meta">${escapeHtml(line.desc||"Prodotto")} · ${escapeHtml(qtyLabel)}${o.conclusion?` · Consegna: ${escapeHtml(o.conclusion)}`:""}</div>
-            </div>
-            <div class="mobileSendToggle" role="switch" aria-checked="${checked ? "true" : "false"}">
-              <div class="knob"></div>
-            </div>`;
-          frag.appendChild(row);
-        }
-        list.appendChild(frag);
-      }
-      if(!list.dataset.bound){
-        list.dataset.bound = "1";
-        list.addEventListener("click", (e)=>{
-          if(e.target.closest("input") || e.target.closest("button") || e.target.closest("textarea")) return;
-          const row = e.target.closest(".mobileSendRow");
-          if(!row) return;
-          const key = row.dataset.key;
-          if(!key) return;
-          const set = ensureAllowSelectionSet();
-          const next = !set.has(key);
-          if(next) set.add(key); else set.delete(key);
-          state.mobileAllowDirty = true;
-          refreshAllowDirtyFlag();
-          renderMobileAllowPanel(ordersList, orderKeySetLocal);
-        });
-      }
+    if(list && !list.dataset.bound){
+      list.dataset.bound = "1";
+      list.addEventListener("click", (e)=>{
+        if(e.target.closest("input") || e.target.closest("button") || e.target.closest("textarea")) return;
+        const row = e.target.closest(".mobileSendRow");
+        if(!row) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const key = row.dataset.k;
+        if(!key) return;
+        const set = ensureAllowSelectionSet();
+        const next = !set.has(key);
+        if(next) set.add(key); else set.delete(key);
+        __allowDraftDirty = true;
+        refreshAllowDirtyFlag();
+        renderMobileAllowPanel(__adminAllOrders, __adminOrderKeySet);
+      });
     }
 
     const selectAllBtn = $("btnAllowSelectAll");
@@ -3821,11 +3848,12 @@ function showAuthGate(){
       selectAllBtn.onclick = ()=>{
         const set = ensureAllowSelectionSet();
         for(const o of filteredOrders){
-          set.add(o.__k || getOrderKey(o));
+          const key = o.__k || getOrderKey(o);
+          if(key) set.add(key);
         }
-        state.mobileAllowDirty = true;
+        __allowDraftDirty = true;
         refreshAllowDirtyFlag();
-        renderMobileAllowPanel(ordersList, orderKeySetLocal);
+        renderMobileAllowPanel(__adminAllOrders, __adminOrderKeySet);
       };
     }
     const clearBtn = $("btnAllowClear");
@@ -3833,11 +3861,12 @@ function showAuthGate(){
       clearBtn.onclick = ()=>{
         const set = ensureAllowSelectionSet();
         for(const o of filteredOrders){
-          set.delete(o.__k || getOrderKey(o));
+          const key = o.__k || getOrderKey(o);
+          if(key) set.delete(key);
         }
-        state.mobileAllowDirty = true;
+        __allowDraftDirty = true;
         refreshAllowDirtyFlag();
-        renderMobileAllowPanel(ordersList, orderKeySetLocal);
+        renderMobileAllowPanel(__adminAllOrders, __adminOrderKeySet);
       };
     }
     const saveBtn = $("btnSaveMobileAllow");
