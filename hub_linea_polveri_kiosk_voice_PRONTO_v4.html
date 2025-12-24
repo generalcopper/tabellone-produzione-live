@@ -1,0 +1,601 @@
+<!doctype html>
+<html lang="it" translate="no">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
+  <meta name="color-scheme" content="dark"/>
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"/>
+  <meta http-equiv="Pragma" content="no-cache"/>
+  <meta http-equiv="Expires" content="0"/>
+  <title>Hub Linea Polveri — Kiosk Voice</title>
+  <style>
+    html,body{height:100%; margin:0; background:#000; color:#9aa4b2; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;}
+    /* Pagina “vuota”: solo diagnostica minima, invisibile in modalità kiosk */
+    #status{position:fixed; left:12px; bottom:10px; font-size:12px; opacity:.55; user-select:none;}
+    #status b{color:#e5e7eb;}
+    .hidden{display:none !important;}
+  </style>
+</head>
+<body>
+<script type="module">
+/**
+ * HUB LINEA POLVERI — KIOSK VOICE
+ * - Nessuna UI operativa: questa pagina serve solo a “parlare”.
+ * - Sincronizzazione realtime via Firestore:
+ *    - powderProductions (avvio produzione)
+ *    - powderProdHistory (ordine concluso)
+ * - Benvenuto automatico all’avvio + ogni weekday alle 08:00.
+ *
+ * NOTE AUTOPLAY (Chrome):
+ * Avvia Chrome con: --autoplay-policy=no-user-gesture-required
+ */
+
+//////////////////////
+// CONFIG
+//////////////////////
+
+// 1) Google AI Voice (Gemini TTS) via tuo proxy (Cloud Run / Cloud Function)
+const GEMINI_TTS_PROXY_URL = "https://geminitts-zxiqbo2osa-ew.a.run.app"; // <- già pronto
+const GEMINI_VOICE_NAME = "Kore"; // puoi cambiare (es: "Puck", "Aoede", ecc.)
+
+// 2) Firebase (stesso progetto dell’Hub)
+const FIREBASE_IMPORT_APP  = "https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js";
+const FIREBASE_IMPORT_AUTH = "https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js";
+const FIREBASE_IMPORT_FS   = "https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyBiyB4pilnPpVj8vImD4PI6LF2_RtyDnv4",
+  authDomain: "tabellone-produzione-liv-e313e.firebaseapp.com",
+  projectId: "tabellone-produzione-liv-e313e",
+  storageBucket: "tabellone-produzione-liv-e313e.firebasestorage.app",
+  messagingSenderId: "537555699968",
+  appId: "1:537555699968:web:4d04cb9596b67bfb0e4be5"
+};
+
+const USERS_COL = "powderUsers";
+const COL_PRODUCTIONS = "powderProductions";
+const COL_HISTORY     = "powderProdHistory";
+
+// 3) Ordini “entro 3 giorni” (benvenuto)
+const XML_PROXY_URL = "https://script.google.com/macros/s/AKfycbzQEYEOPDlhVx6bS-Se8-L21AUtW1RbjsJyjIMvm_7nNoCj0R2DBa7LcsAE8xccxdcz/exec";
+const UPCOMING_DAYS = 3;
+
+// 4) Scheduling
+const DAILY_HOUR = 8;
+const DAILY_MIN  = 0;
+
+// 5) Stile frasi
+const PHRASE = {
+  // Stile “azienda”: chiaro, calmo, essenziale.
+  welcome: (n) => `Benvenuti in Hub Linea Polveri. Ordini programmati nei prossimi ${UPCOMING_DAYS} giorni: ${n}.`,
+  // Darija (arabo marocchino) – rispettoso
+  ar_ma: () => `الله يعاونكم. نهاركم مبارك وخدمتكم موفقة.`,
+  start: (op, orderNo, customer) => `Produzione avviata. Operatore ${op}. Ordine ${orderNo}. Cliente ${customer}. Buon lavoro.`,
+  done:  (op, customer) => `Produzione completata. Operatore ${op}. Cliente ${customer}. Apri l’Hub e passa al prossimo ordine.`
+};
+
+// 6) Persistenza anti-doppioni (riavvii kiosk)
+const LS = {
+  lastStartAt: "KIOSK_LAST_START_AT_V1",
+  lastHistAt:  "KIOSK_LAST_HIST_AT_V1",
+  audioOk:     "KIOSK_AUDIO_UNLOCKED_V1"
+};
+
+//////////////////////
+// Utils
+//////////////////////
+const $ = (id)=>document.getElementById(id);
+function setStatus(msg){ try{ console.log("[kiosk]", msg); }catch(_e){} }
+
+function isWeekday(d){
+  const day = d.getDay(); // 0 dom, 6 sab
+  return day >= 1 && day <= 5;
+}
+function pad2(n){ return String(n).padStart(2,"0"); }
+function nowIso(){
+  const d = new Date();
+  return `${d.getFullYear()}-${pad2(d.getMonth()+1)}-${pad2(d.getDate())}T${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
+}
+function parseDateFlexible(s){
+  const t = String(s||"").trim();
+  if(!t) return null;
+
+  // ISO o ISO-like
+  const iso = Date.parse(t);
+  if(Number.isFinite(iso)) return new Date(iso);
+
+  // dd/mm/yyyy
+  const m = t.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\s+(\d{1,2}):(\d{2}))?$/);
+  if(m){
+    const dd = Number(m[1]), mm = Number(m[2])-1, yyyy = Number(m[3]);
+    const hh = Number(m[4]||0), min = Number(m[5]||0);
+    const d = new Date(yyyy, mm, dd, hh, min, 0);
+    if(Number.isFinite(d.getTime())) return d;
+  }
+  return null;
+}
+
+async function fetchJsonWithTimeout(url, ms=12000){
+  const ctrl = new AbortController();
+  const t = setTimeout(()=>ctrl.abort(), ms);
+  try{
+    const r = await fetch(url, { cache:"no-store", signal: ctrl.signal });
+    if(!r.ok) throw new Error(`HTTP ${r.status}`);
+    return await r.json();
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+// Fetch helper: accetta sia JSON (es. {xml:"..."}) sia testo/XML puro
+async function fetchXmlTextWithTimeout(url, ms=12000){
+  const ctrl = new AbortController();
+  const t = setTimeout(()=>ctrl.abort(), ms);
+  try{
+    const r = await fetch(url, { cache:"no-store", signal: ctrl.signal });
+    if(!r.ok) throw new Error(`HTTP ${r.status}`);
+    const ct = (r.headers.get("content-type") || "").toLowerCase();
+    const raw = await r.text();
+
+    // Se è JSON, prova a estrarre il campo xml (o alternative)
+    if(ct.includes("application/json") || raw.trim().startsWith("{")){
+      try{
+        const j = JSON.parse(raw);
+        const xml = j?.xml || j?.data?.xml || j?.payload?.xml || "";
+        if(xml) return xml;
+      }catch(_){}
+    }
+
+    // Altrimenti assumiamo XML/testo
+    return raw;
+  }finally{
+    clearTimeout(t);
+  }
+}
+
+
+//////////////////////
+// TTS (Gemini proxy + fallback WebSpeech)
+//////////////////////
+let audioQueue = Promise.resolve();
+let audioUnlocked = false;
+
+async function unlockAudio(){
+  if(audioUnlocked) return true;
+
+  // Nota: Chrome può bloccare l’audio all’avvio senza gesto utente.
+  // In modalità kiosk usa il flag:
+  // --autoplay-policy=no-user-gesture-required
+  // Qui facciamo solo un "prime" silenzioso (non WebAudio) per ridurre blocchi.
+  try{
+    const a = new Audio();
+    a.muted = true;
+    a.playsInline = true;
+    a.src = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YQAAAAA=";
+    await a.play().catch(()=>{});
+    a.pause();
+  }catch(_e){}
+
+  audioUnlocked = true;
+  try{ localStorage.setItem(LS.audioOk,"1"); }catch(_e){}
+  return true;
+}
+
+
+function pickGoogleVoice(){
+  try{
+    if(!("speechSynthesis" in window)) return null;
+    const voices = window.speechSynthesis.getVoices() || [];
+    if(!voices.length) return null;
+
+    const it = voices.filter(v => /it/i.test(v.lang || ""));
+    // Preferisci voci “Google”
+    const google = it.find(v => /google/i.test(v.name || "")) || it.find(v => /google/i.test(v.voiceURI || ""));
+    return google || it[0] || voices[0] || null;
+  }catch(_e){ return null; }
+}
+
+async function speakWebSpeech(text){
+  return new Promise((resolve)=>{
+    try{
+      if(!("speechSynthesis" in window)) return resolve(false);
+      const u = new SpeechSynthesisUtterance(String(text||""));
+      u.lang = "it-IT";
+      const v = pickGoogleVoice();
+      if(v) u.voice = v;
+      u.rate = 1.02;
+      u.pitch = 1.0;
+      u.onend = ()=>resolve(true);
+      u.onerror = ()=>resolve(false);
+      window.speechSynthesis.cancel();
+      window.speechSynthesis.speak(u);
+    }catch(_e){
+      resolve(false);
+    }
+  });
+}
+
+async function speakGemini(text){
+  const payload = { text: String(text||""), voice: GEMINI_VOICE_NAME };
+  const r = await fetch(GEMINI_TTS_PROXY_URL, {
+    method:"POST",
+    headers:{ "Content-Type":"application/json" },
+    body: JSON.stringify(payload)
+  });
+  if(!r.ok) throw new Error(`TTS HTTP ${r.status}`);
+  const blob = await r.blob(); // audio/wav
+  const url = URL.createObjectURL(blob);
+
+  return new Promise((resolve, reject)=>{
+    const a = new Audio(url);
+    a.preload = "auto";
+    a.onended = ()=>{ URL.revokeObjectURL(url); resolve(true); };
+    a.onerror = (e)=>{ URL.revokeObjectURL(url); reject(e); };
+    a.play().catch((e)=>{ URL.revokeObjectURL(url); reject(e); });
+  });
+}
+
+function speak(text){
+  const msg = String(text||"").trim();
+  if(!msg) return;
+
+  audioQueue = audioQueue.then(async()=>{
+    await unlockAudio();
+    if(GEMINI_TTS_PROXY_URL){
+      try{
+        await speakGemini(msg);
+        return;
+      }catch(e){
+        console.warn("Gemini TTS failed, fallback WebSpeech:", e);
+      }
+    }
+    await speakWebSpeech(msg);
+  });
+}
+
+//////////////////////
+// Orders count (next 3 days)
+//////////////////////
+function safeText(node){ return (node && node.textContent) ? String(node.textContent).trim() : ""; }
+
+function detectAlertLine(desc){
+  const s = String(desc||"").trim();
+  // linee operative tipo "**SACCO BLU", "**BOBINA ROSSA" ecc.
+  if(s.startsWith("**")) return true;
+  if(/^\s*(sacco|bobina)\b/i.test(s)) return true; // tollerante
+  return false;
+}
+
+function isPowderRow({ code, desc, um }){
+  const d = String(desc||"").toLowerCase();
+  const c = String(code||"").toLowerCase();
+  const u = String(um||"").toLowerCase();
+
+  if(detectAlertLine(desc)) return false;
+
+  // UM già in kg
+  if(/\bkg\b/.test(u)) return true;
+
+  // Pattern "25 kg", "5kg", "1000 KG"
+  if(/\b\d+(?:[.,]\d+)?\s*kg\b/.test(d)) return true;
+
+  // Keyword tipiche polveri
+  if(/\b(caolin|caolino|zeolit|zeolite|zolfo|sulfur|diatomit|diatomite|perlite|bentonite|vermiculite)\b/.test(d)) return true;
+  if(/\b(caolin|caolino|zeolit|zeolite|zolfo|sulfur|diatomit|diatomite|perlite|bentonite|vermiculite)\b/.test(c)) return true;
+
+  return false;
+}
+
+async function countUpcomingPowderOrders(){
+  try{
+    const xmlText = await fetchXmlTextWithTimeout(XML_PROXY_URL, 12000);
+    if(!xmlText) return 0;
+
+    const parser = new DOMParser();
+    const xmlDoc = parser.parseFromString(xmlText, "text/xml");
+    const docs = Array.from(xmlDoc.getElementsByTagName("Document"));
+
+    const now = new Date();
+    const end = new Date(now.getTime() + UPCOMING_DAYS * 24*60*60*1000);
+
+    let count = 0;
+
+    for(const d of docs){
+      const customer = safeText(d.getElementsByTagName("CustomerName")[0]) || "";
+      const number   = safeText(d.getElementsByTagName("Number")[0]) || "";
+      const conclusion =
+        safeText(d.getElementsByTagName("ExpectedConclusion")[0]) ||
+        safeText(d.getElementsByTagName("ExpectedDeliveryDate")[0]) ||
+        safeText(d.getElementsByTagName("DeliveryDate")[0]) ||
+        safeText(d.getElementsByTagName("Date")[0]) || "";
+
+      const due = parseDateFlexible(conclusion);
+      if(!due) continue;
+
+      if(due < now) continue;
+      if(due > end) continue;
+
+      // almeno una riga “polveri”
+      const rows = Array.from(d.getElementsByTagName("Row"));
+      let hasPowder = false;
+      for(const r of rows){
+        const code = safeText(r.getElementsByTagName("Code")[0]) || "";
+        const desc = safeText(r.getElementsByTagName("Description")[0]) || safeText(r.getElementsByTagName("Name")[0]) || "";
+        const um   = safeText(r.getElementsByTagName("UM")[0]) || safeText(r.getElementsByTagName("Unit")[0]) || "";
+        if(isPowderRow({ code, desc, um })){
+          hasPowder = true;
+          break;
+        }
+      }
+      if(hasPowder){
+        count++;
+      }
+    }
+
+    return count;
+  }catch(e){
+    console.warn("countUpcomingPowderOrders failed:", e);
+    return 0;
+  }
+}
+
+// Alias per compatibilità (vecchio nome)
+async function fetchUpcomingOrdersCount(){
+  return await countUpcomingPowderOrders();
+}
+
+async function announceWelcome(){
+  try{
+    const n = await (fetchUpcomingOrdersCount?.() ?? Promise.resolve(0)).catch(()=>0);
+    // Sequenza: IT -> AR (breve) per dare tono “kiosk”
+    await speak(PHRASE.welcome(n));
+    await speak(PHRASE.ar_ma());
+  }catch(e){
+    console.warn("announceWelcome failed:", e);
+  }
+}
+
+//////////////////////
+// Firebase realtime
+//////////////////////
+const state = {
+  firebase: { ok:false, api:null, db:null, auth:null, authApi:null },
+  user: null
+};
+
+async function initFirebase(){
+  const timeoutMs = 7000;
+  const t = new Promise((_,rej)=>setTimeout(()=>rej(new Error("firebase timeout")), timeoutMs));
+
+  const apiPromise = (async()=>{
+    const { initializeApp } = await import(FIREBASE_IMPORT_APP);
+    const authApi = await import(FIREBASE_IMPORT_AUTH);
+    const fs = await import(FIREBASE_IMPORT_FS);
+
+    const app = initializeApp(firebaseConfig);
+    const auth = authApi.getAuth(app);
+    const db = fs.getFirestore(app);
+
+    state.firebase = { ok:true, api:fs, db, auth, authApi };
+    return true;
+  })();
+
+  return await Promise.race([apiPromise, t]);
+}
+
+async function getAccessByEmail(email){
+  const e = String(email||"").trim().toLowerCase();
+  if(!e || !state.firebase.ok) return null;
+  const fs = state.firebase.api;
+  const db = state.firebase.db;
+  const ref = fs.doc(db, USERS_COL, e);
+  const snap = await fs.getDoc(ref);
+  return snap.exists() ? (snap.data()||null) : null;
+}
+
+function humanAuthErr(e){
+  const msg = String(e?.message || e || "");
+  if(/popup|blocked/i.test(msg)) return "Popup bloccato: abilita popup o usa redirect.";
+  return msg || "Errore di autenticazione.";
+}
+
+async function ensureAuth(){
+  const authApi = state.firebase.authApi;
+  const auth = state.firebase.auth;
+
+  // prova a completare un redirect precedente
+  try{ await authApi.getRedirectResult(auth); }catch(_e){}
+
+  return new Promise((resolve)=>{
+    authApi.onAuthStateChanged(auth, async(user)=>{
+      if(!user){
+        // se non loggato, tenta redirect (una sola volta)
+        try{
+          setStatus("Login richiesto (setup iniziale).", true);
+          const provider = new authApi.GoogleAuthProvider();
+          // NOTE: su kiosk, fai il login una volta e poi resta salvato nel profilo di Chrome.
+          await authApi.signInWithRedirect(auth, provider);
+        }catch(e){
+          console.warn("signInWithRedirect failed:", e);
+          setStatus("Login Google non riuscito: "+humanAuthErr(e), true);
+        }
+        return;
+      }
+
+      // allowlist
+      const access = await getAccessByEmail(user.email||"");
+      if(!access || access.enabled === false){
+        setStatus("Accesso negato per: "+(user.email||""), true);
+        console.warn("Access denied for kiosk:", user.email, access);
+        return;
+      }
+
+      state.user = { uid:user.uid, email:user.email||"", fullName:(access.displayName || user.displayName || user.email || "").trim() };
+      setStatus("Connesso: "+state.user.fullName, false);
+      resolve(true);
+    });
+  });
+}
+
+function readLastIso(key){
+  try{ return String(localStorage.getItem(key)||"").trim(); }catch(_e){ return ""; }
+}
+function writeLastIso(key, iso){
+  try{ localStorage.setItem(key, String(iso||"")); }catch(_e){}
+}
+
+async function startRealtimeListeners(){
+  const fs = state.firebase.api;
+  const db = state.firebase.db;
+
+  // ---- 1) START: nuove produzioni attive
+  let prodBoot = true;
+  let lastStartAt = readLastIso(LS.lastStartAt);
+
+  const qProd = fs.query(
+    fs.collection(db, COL_PRODUCTIONS),
+    fs.where("active", "==", true)
+  );
+
+  fs.onSnapshot(qProd, (snap)=>{
+    if(prodBoot){
+      // inizializzazione: non annunciare quelle già in corso
+      let max = lastStartAt;
+      snap.forEach(doc=>{
+        const d = doc.data()||{};
+        const at = String(d.startedAt || "");
+        if(at && (!max || at > max)) max = at;
+      });
+      if(max) writeLastIso(LS.lastStartAt, max);
+      prodBoot = false;
+      return;
+    }
+
+    for(const ch of snap.docChanges()){
+      if(ch.type !== "added") continue;
+      const d = ch.doc.data() || {};
+      const startedAt = String(d.startedAt || "");
+      if(startedAt && lastStartAt && startedAt <= lastStartAt) continue;
+
+      const op = (d.operator || d.operatorName || d.op || "Operatore").toString().trim();
+      const orderNo = (d.orderNo || d.number || d.order || "—").toString().trim();
+      const customer = (d.customer || d.customerName || "Cliente").toString().trim();
+
+      speak(PHRASE.start(op, orderNo, customer));
+
+      if(startedAt){
+        lastStartAt = startedAt;
+        writeLastIso(LS.lastStartAt, startedAt);
+      }
+    }
+  });
+
+  // ---- 2) DONE: nuovi record in history
+  let histBoot = true;
+  let lastHistAt = readLastIso(LS.lastHistAt);
+
+  const qHist = fs.query(
+    fs.collection(db, COL_HISTORY),
+    fs.orderBy("at", "desc"),
+    fs.limit(10)
+  );
+
+  fs.onSnapshot(qHist, (snap)=>{
+    if(histBoot){
+      // prende il più recente senza annunciare
+      let max = lastHistAt;
+      snap.forEach(doc=>{
+        const d = doc.data()||{};
+        const at = String(d.at || d.endedAt || "");
+        if(at && (!max || at > max)) max = at;
+      });
+      if(max) writeLastIso(LS.lastHistAt, max);
+      histBoot = false;
+      return;
+    }
+
+    for(const ch of snap.docChanges()){
+      if(ch.type !== "added") continue;
+      const d = ch.doc.data() || {};
+      const at = String(d.at || d.endedAt || "");
+      if(at && lastHistAt && at <= lastHistAt) continue;
+
+      const op = (d.operator || d.operatorName || "Operatore").toString().trim();
+      const customer = (d.customer || d.customerName || "Cliente").toString().trim();
+
+      speak(PHRASE.done(op, customer));
+
+      if(at){
+        lastHistAt = at;
+        writeLastIso(LS.lastHistAt, at);
+      }
+    }
+  });
+}
+
+//////////////////////
+// Scheduling: weekday 08:00
+//////////////////////
+function msUntilNextWeekdayTime(hour, minute){
+  const now = new Date();
+  let d = new Date(now.getTime());
+  d.setSeconds(0); d.setMilliseconds(0);
+  d.setHours(hour, minute, 0, 0);
+
+  // se oggi non va bene o è già passato, vai al giorno dopo
+  if(d <= now || !isWeekday(d)){
+    do{
+      d = new Date(d.getTime() + 24*60*60*1000);
+      d.setHours(hour, minute, 0, 0);
+    }while(!isWeekday(d));
+  }
+
+  return Math.max(1000, d.getTime() - now.getTime());
+}
+
+function scheduleDailyAnnouncements(){
+  const delay = msUntilNextWeekdayTime(DAILY_HOUR, DAILY_MIN);
+  console.log("[kiosk] next daily announcement in", Math.round(delay/1000), "sec");
+  setTimeout(async()=>{
+    try{
+      await announceWelcome();
+    }finally{
+      // rischedula sempre
+      scheduleDailyAnnouncements();
+    }
+  }, delay);
+}
+
+//////////////////////
+// Boot
+//////////////////////
+(async function boot(){
+  try{
+    // Sblocca audio subito (best effort)
+    try{
+      if(localStorage.getItem(LS.audioOk)==="1") audioUnlocked = true;
+    }catch(_e){}
+    await unlockAudio();
+
+    // Benvenuto immediato
+    await announceWelcome();
+
+    // Firebase realtime
+    await initFirebase();
+    await ensureAuth();
+    await startRealtimeListeners();
+
+    // Scheduling 08:00 lun-ven
+    scheduleDailyAnnouncements();
+
+    console.log("[kiosk] ready", nowIso());
+  }catch(e){
+    console.error("[kiosk] boot error:", e);
+    setStatus("Errore: " + (e?.message || String(e)), true);
+    // Retry soft
+    setTimeout(()=>location.reload(), 15000);
+  }
+})();
+</script>
+</body>
+</html>
