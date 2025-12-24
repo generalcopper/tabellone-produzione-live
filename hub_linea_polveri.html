@@ -1082,32 +1082,33 @@
 
   const OPERATORS = ["Hassan","Ahmed","Muhammed","Mustapha","Youssef"];
   const NON_PERTINENT_CODES = new Set(["mast250viri","mast500viri","codmast250viri","codmast500viri"]);
+  // CODEX: Distinta base magazzino (default per sacchi 5kg/1kg, valida per tutti i prodotti)
+  const MAGAZZINO_DEFAULT_PACKS = {
+    5: {
+      prodottoKgPerBag: 5,
+      bobine: { "Bobina blu f830": { perBag: 20, unit:"g" } },
+      etichettePerBag: 1,
+      scatole: { "Scatola americana | 20 kg": 0.25 },
+      divisori: { "Divisorio Z": 0.25 },
+      altri: {}
+    },
+    1: {
+      prodottoKgPerBag: 1,
+      bobine: { "Bobina blu f480": { perBag: 10, unit:"g" } },
+      etichettePerBag: 1,
+      scatole: { "Scatola americana | 20 kg": 0.05 },
+      divisori: { "Divisorio Croce texo": 0.05 },
+      altri: {}
+    }
+  };
   const MAGAZZINO_BOM = { // CODEX: Distinta base estendibile per calcolo magazzino (desktop)
+    defaultByPackKg: MAGAZZINO_DEFAULT_PACKS, // CODEX: fallback per qualsiasi prodotto (match per formato sacco)
     byCode: {
       // Esempio: "CODICE": { packs: { 5: { prodottoKgPerBag:5, bobine:{ "tipo":{perBag:20, unit:"g"} }, etichettePerBag:1, scatole:{ "model":0.2 }, divisori:{ "tipo":0.1 }, altri:{ "nome":0.1 } } } }
     },
     byName: {
       // Nome normalizzato senza peso → packKg → componenti per singolo sacco/confezione
-      "ossicloruro di rame 50%": {
-        packs: {
-          5: {
-            prodottoKgPerBag: 5,
-            bobine: { "Bobina blu f830": { perBag: 20, unit:"g" } },
-            etichettePerBag: 1,
-            scatole: { "Scatola americana model type 20 kg": 0.25 },
-            divisori: { "Divisorio Z": 0.25 },
-            altri: {}
-          },
-          1: {
-            prodottoKgPerBag: 1,
-            bobine: { "Bobina blu f480": { perBag: 10, unit:"g" } },
-            etichettePerBag: 1,
-            scatole: { "Scatola americana model type 20 kg": 0.05 },
-            divisori: { "Divisorio Croce texo": 0.05 },
-            altri: {}
-          }
-        }
-      }
+      "ossicloruro di rame 50%": { packs: MAGAZZINO_DEFAULT_PACKS }
     }
   };
 
@@ -2186,22 +2187,26 @@ authApi.onAuthStateChanged(auth, async(user)=>{
       const comp = { productKg:0, bobine:new Map(), etichette:0, scatole:new Map(), divisori:new Map(), altri:new Map(), nonConfig:[], warnings:[] };
       const status = o.lines.some(l=>l.status==="active") ? "in_produzione" : (o.partialInfo ? "parziale" : "da_fare");
       for(const l of (o.lines||[])){
-        const qtyKg = Number(l.qty||0);
-        if(Number.isFinite(qtyKg) && qtyKg>0){
-          comp.productKg += qtyKg;
-          totals.productKg += qtyKg;
+        const qtyKgRimanenti = magResolveQtyKg(l); // CODEX: kg residui per Statistiche/Magazzino
+        if(Number.isFinite(qtyKgRimanenti) && qtyKgRimanenti>0){
+          comp.productKg += qtyKgRimanenti;
+          totals.productKg += qtyKgRimanenti;
         }
         const packKg = magDetectPackKg(l);
-        const bom = magMatchBom(l, packKg);
+        const { bom, source } = magMatchBom(l, packKg) || {};
+        const unsupportedPack = (source==="pack_unsupported");
         if(!packKg || packKg<=0 || !bom){
-          comp.nonConfig.push({ desc:l.desc, customer:o.customer, orderNo:o.orderNo||o.number, qtyKg, packKg, code:l.code||"" });
-          totals.nonConfig.push({ desc:l.desc, customer:o.customer, orderNo:o.orderNo||o.number, qtyKg, packKg, code:l.code||"" });
+          const note = unsupportedPack ? "Non configurato (packKg non supportato)" : "";
+          const nc = { desc:l.desc, customer:o.customer, orderNo:o.orderNo||o.number, qtyKg:qtyKgRimanenti, packKg, code:l.code||"", note };
+          comp.nonConfig.push(nc);
+          totals.nonConfig.push(nc);
           continue;
         }
-        const bags = Number(packKg) ? (qtyKg/packKg) : 0;
+        const bags = Number(packKg) ? (qtyKgRimanenti/packKg) : 0;
         if(!Number.isFinite(bags) || bags<=0){
-          comp.nonConfig.push({ desc:l.desc, customer:o.customer, orderNo:o.orderNo||o.number, qtyKg, packKg, code:l.code||"" });
-          totals.nonConfig.push({ desc:l.desc, customer:o.customer, orderNo:o.orderNo||o.number, qtyKg, packKg, code:l.code||"" });
+          const nc = { desc:l.desc, customer:o.customer, orderNo:o.orderNo||o.number, qtyKg:qtyKgRimanenti, packKg, code:l.code||"" };
+          comp.nonConfig.push(nc);
+          totals.nonConfig.push(nc);
           continue;
         }
         if(Math.abs(bags - Math.round(bags)) > 0.01){
@@ -2389,6 +2394,16 @@ authApi.onAuthStateChanged(auth, async(user)=>{
     if(Number.isFinite(fromCombo) && fromCombo>0) return fromCombo;
     return null;
   }
+  function magResolveQtyKg(line){ // CODEX: kg rimanenti realistici per Statistiche/Magazzino
+    const qty = Number(line.qty||0);
+    const packKg = magDetectPackKg(line);
+    const lineKg = Number(line.lineKg);
+    const um = norm(line.um||"");
+    if((um==="kg" || /\bkg\b/.test(um)) && Number.isFinite(qty) && qty>0) return qty;
+    if(Number.isFinite(qty) && qty>0 && Number.isFinite(packKg) && packKg>0) return qty * packKg;
+    if(Number.isFinite(lineKg) && lineKg>0) return lineKg;
+    return Number.isFinite(qty) && qty>0 ? qty : 0;
+  }
   function magFindPackEntry(packs, packKg){
     if(!packs || packKg==null) return null;
     if(packs[packKg]) return packs[packKg];
@@ -2398,16 +2413,20 @@ authApi.onAuthStateChanged(auth, async(user)=>{
   }
   function magMatchBom(line, packKg){
     const codeKey = norm(line.code||"").replace(/\s+/g,"");
+    const normalizedPack = Number(packKg);
     if(codeKey && MAGAZZINO_BOM.byCode[codeKey]){
       const entry = magFindPackEntry(MAGAZZINO_BOM.byCode[codeKey].packs, packKg);
-      if(entry) return entry;
+      if(entry) return { bom: entry, source:"code" };
     }
     const nameKey = magNormalizeName(line.desc||"");
     if(nameKey && MAGAZZINO_BOM.byName[nameKey]){
       const entry = magFindPackEntry(MAGAZZINO_BOM.byName[nameKey].packs, packKg);
-      if(entry) return entry;
+      if(entry) return { bom: entry, source:"name" };
     }
-    return null;
+    const defaultEntry = magFindPackEntry(MAGAZZINO_BOM.defaultByPackKg, packKg);
+    if(defaultEntry) return { bom: defaultEntry, source:"default" };
+    if(Number.isFinite(normalizedPack)) return { bom:null, source:"pack_unsupported" };
+    return { bom:null, source:"not_found" };
   }
   function magFmtKg(val){
     const n = Number(val||0);
@@ -2417,11 +2436,7 @@ authApi.onAuthStateChanged(auth, async(user)=>{
   function magFmtGram(val){
     const n = Number(val||0);
     if(!Number.isFinite(n)) return "—";
-    if(n>=1000){
-      const kg = n/1000;
-      return `${kg.toFixed(2).replace(/\.0+$/,"").replace(/(\.\d*[1-9])0+$/,"$1")} kg`;
-    }
-    const g = n%1===0 ? n.toFixed(0) : n.toFixed(1);
+    const g = n%1===0 ? n.toFixed(0) : n.toFixed(1); // CODEX: bobine in grammi con max 1 decimale
     return `${g.replace(/\.0$/,"")} g`;
   }
   function magFmtFraction(val){
@@ -2776,7 +2791,7 @@ function renderHome(){
 
     const nonCfgList = totals.nonConfig.slice(0,6).map(nc=>`
       <div class="magRow">
-        <div class="l">${escapeHtml(nc.customer||"Cliente")} · Ord. ${escapeHtml(nc.orderNo||"—")}<div class="s">${escapeHtml(nc.desc||"Prodotto")}</div></div>
+        <div class="l">${escapeHtml(nc.customer||"Cliente")} · Ord. ${escapeHtml(nc.orderNo||"—")}<div class="s">${escapeHtml(nc.desc||"Prodotto")}${nc.note?` · ${escapeHtml(nc.note)}`:""}</div></div>
         <div class="v">${magFmtKg(nc.qtyKg||0)}${nc.packKg?` · ${nc.packKg} kg`:``}</div>
       </div>
     `).join("");
@@ -2811,7 +2826,7 @@ function renderHome(){
       if(comp.divisori.size) compBlocks.push(`<div class="magRow"><div class="l">Divisori</div><div class="v">${magFmtFraction(Array.from(comp.divisori.values()).reduce((a,x)=>a+x,0))} pz</div></div>${renderMap(comp.divisori, (v)=>`${magFmtFraction(v)} pz`)}`);
       if(comp.altri.size) compBlocks.push(`<div class="magRow"><div class="l">Altri</div><div class="v">${magFmtFraction(Array.from(comp.altri.values()).reduce((a,x)=>a+x,0))} pz</div></div>${renderMap(comp.altri, (v)=>`${magFmtFraction(v)} pz`)}`);
       const ncHtml = comp.nonConfig.length ? `<div class="magRow"><div class="l">Distinta non configurata per:</div><div class="v">${comp.nonConfig.length}</div></div>` +
-        comp.nonConfig.map(nc=>`<div class="magRow"><div class="l">${escapeHtml(nc.desc||"Prodotto")}<div class="s">Ord. ${escapeHtml(nc.orderNo||"—")} ${nc.packKg?`· ${nc.packKg} kg`:``}</div></div><div class="v">${magFmtKg(nc.qtyKg||0)}</div></div>`).join("") : "";
+        comp.nonConfig.map(nc=>`<div class="magRow"><div class="l">${escapeHtml(nc.desc||"Prodotto")}<div class="s">Ord. ${escapeHtml(nc.orderNo||"—")} ${nc.packKg?`· ${nc.packKg} kg`:``}${nc.note?` · ${escapeHtml(nc.note)}`:""}</div></div><div class="v">${magFmtKg(nc.qtyKg||0)}</div></div>`).join("") : "";
       const warnHtml = comp.warnings.length ? `<div class="magRow" style="border-style:dashed;"><div class="l">Attenzione sacchi</div><div class="v" style="color:var(--warn);">${comp.warnings.length}</div></div><div class="muted" style="margin-top:6px;">${comp.warnings.map(w=>`• ${escapeHtml(w)}`).join("<br/>")}</div>` : "";
       return `<div class="item pressCard" style="background:#fff; border-color:rgba(0,0,0,.06);">
         <div class="top" style="gap:12px;">
