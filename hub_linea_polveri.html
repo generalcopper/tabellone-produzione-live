@@ -6,6 +6,9 @@
   <meta name="google" content="notranslate"/>
   <meta http-equiv="Content-Language" content="it"/>
   <meta name="color-scheme" content="light"/>
+  <!-- // UI-FIX: anticache --><meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+  <!-- // UI-FIX: anticache --><meta http-equiv="Pragma" content="no-cache" />
+  <!-- // UI-FIX: anticache --><meta http-equiv="Expires" content="0" />
   <title>Hub Linea Polveri</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 64 64%27%3E%3Crect width=%2764%27 height=%2764%27 rx=%2716%27 fill=%27%232e7bff%27/%3E%3Cpath d=%27M22 43c0-11 8-20 20-20h2v6h-2c-8 0-14 6-14 14v2h-6v-2z%27 fill=%27white%27/%3E%3Cpath d=%27M40 33a6 6 0 1 1 0-12h2v6h-2a0 0 0 0 0 0 0 0 0 0 0 0 0 6z%27 fill=%27white%27 opacity=%270.9%27/%3E%3C/svg%3E">
   <style>
@@ -861,6 +864,7 @@
             <div class="k">
               <div class="t">Kg totali</div>
               <div class="v" id="kPowderKg">—</div>
+              <div class="muted" id="kPowderMeta" style="margin-top:4px; font-size:12px;">Calcolato su 0 righe visibili</div> <!-- // UI-FIX: kg-totali -->
             </div>
           </div>
 
@@ -1033,22 +1037,6 @@
 
 
   <!-- Reason modal -->
-  <div id="reasonModal" class="overlay" role="dialog" aria-modal="true">
-    <div class="sheet">
-      <div class="shd">
-        <div class="h">Motivazione richiesta</div>
-        <button class="x" id="reasonClose" aria-label="Chiudi">×</button>
-      </div>
-      <div class="sbd">
-        <div class="stepTitle">Perché non sei entrato in produzione?</div>
-        <div class="muted">Prima di uscire, inserisci una breve motivazione (obbligatoria).</div>
-        <div style="height:10px"></div>
-        <textarea id="reasonText" placeholder="Scrivi qui le motivazioni…"></textarea>
-        <div style="height:10px"></div>
-        <button class="btn good" id="reasonSend" style="width:100%;">Conferma e chiudi</button>
-      </div>
-    </div>
-  </div>
 
 <script type="module">
   // ===============================
@@ -1112,6 +1100,13 @@
     }
   };
 
+  // UI-FIX: anticache
+  try{
+    if("serviceWorker" in navigator){
+      navigator.serviceWorker.getRegistrations().then(rs=>rs.forEach(r=>r.unregister())).catch(()=>{});
+    }
+  }catch(_e){}
+
   // ===============================
   // STATE
   // ===============================
@@ -1167,6 +1162,11 @@
     const s = (raw==null?"":String(raw)).replace(/\s+/g,"").replace(/\./g,"").replace(",",".");
     const n = Number(s);
     return Number.isFinite(n) ? n : null;
+  }
+  function parseItNumber(raw){ // UI-FIX: kg-totali
+    const s = (raw==null ? "" : String(raw)).replace(/\./g,"").replace(",",".").replace(/\s+/g,"");
+    const n = Number(s);
+    return Number.isFinite(n) ? n : 0;
   }
   function formatQtyWithKg(qty, um="kg"){
     const qtyTxt = `${qty ?? 0}`;
@@ -2179,6 +2179,32 @@ authApi.onAuthStateChanged(auth, async(user)=>{
     return { orders, baseOrders, concluded, activeMap, partialMap, fullMap };
   }
 
+  function computeVisiblePowderSummary(orders){ // UI-FIX: kg-totali
+    const lines = [];
+    for(const o of (orders||[])){
+      for(const l of (o.lines||[])){ lines.push(l); }
+    }
+    let totalKg = 0;
+    const samples = [];
+    for(const l of lines){
+      const qtyParsed = parseItNumber(l.qty);
+      const packParsed = Number.isFinite(l.packKg) ? Number(l.packKg) : parseItNumber(l.packKg);
+      const um = norm(l.um||"");
+      let lineKg = 0;
+      if((um==="kg" || /\bkg\b/.test(um)) && qtyParsed>0){
+        lineKg = qtyParsed;
+      } else if(qtyParsed>0 && Number.isFinite(packParsed) && packParsed>0){
+        lineKg = qtyParsed * packParsed;
+      } else if(Number.isFinite(l.lineKg) && l.lineKg>0){
+        lineKg = Number(l.lineKg);
+      }
+      if(!Number.isFinite(lineKg)) lineKg = 0;
+      totalKg += lineKg;
+      if(samples.length < 5) samples.push({ rawQty: l.qty, parsedQty: qtyParsed });
+    }
+    return { totalKg, lineCount: lines.length, samples };
+  }
+
   function buildMagazzinoData(){
     const { orders } = buildOrderViews();
     const totals = { productKg:0, bobine:new Map(), etichette:0, scatole:new Map(), divisori:new Map(), altri:new Map(), nonConfig:[], warnings:[] };
@@ -2588,11 +2614,19 @@ function renderHome(){
     relocateStatsCard(); // CODEX: forza Statistiche sotto Operatività su desktop
     try{ const el=$('homeWelcome'); if(el && state.user){ el.textContent = `Benvenuto, ${state.user.fullName}`; } }catch(e){}
 
+    const visibleOrders = buildOrderViews().orders; // UI-FIX: kg-totali
+    const kgSummary = computeVisiblePowderSummary(visibleOrders); // UI-FIX: kg-totali
+    $("kPowderLines").textContent = kgSummary.lineCount ? kgSummary.lineCount.toString() : "0"; // UI-FIX: kg-totali
+    const kPowderKgEl = $("kPowderKg");
+    if(!Number.isFinite(kgSummary.totalKg) || kgSummary.totalKg>50000){
+      kPowderKgEl.textContent = "Dati non disponibili"; // UI-FIX: kg-totali
+      console.log("UI-FIX: kg-totali debug", { lineCount: kgSummary.lineCount, samples: kgSummary.samples, totalKg: kgSummary.totalKg }); // UI-FIX: kg-totali
+    } else {
+      kPowderKgEl.textContent = Math.round(kgSummary.totalKg).toLocaleString("it-IT"); // UI-FIX: kg-totali
+    }
+    const kPowderMeta = $("kPowderMeta"); // UI-FIX: kg-totali
+    if(kPowderMeta) kPowderMeta.textContent = `Calcolato su ${kgSummary.lineCount} righe visibili`; // UI-FIX: kg-totali
     const pOrders = state.powderOrders || [];
-    const pLines = pOrders.reduce((a,o)=>a + (o.lines?.length||0), 0);
-    const pKg = pOrders.reduce((a,o)=>a + (o.totalKg||0), 0);
-    $("kPowderLines").textContent = pLines ? pLines.toString() : "0";
-    $("kPowderKg").textContent = pKg ? `${Math.round(pKg)}` : "0";
     $("badgeCounts").textContent = `${pOrders.length} ordini`;
 
     let txt = "Ordini: ";
@@ -2862,14 +2896,7 @@ function renderHome(){
   }
 
   function closeProdModalRequest(){
-    const elapsed = Date.now() - state.prodModalOpenedAt;
-    if(elapsed >= 2000 && !state.startedThisSession){
-      $("reasonModal").classList.add("show");
-      $("prodModal").classList.remove("show");
-      unlockBody();
-      // resta bloccato (un'altra overlay è aperta)
-      return;
-    }
+    // UI-FIX: remove-motivazione
     $("prodModal").classList.remove("show");
     unlockBody();
   }
@@ -3514,23 +3541,6 @@ function renderHome(){
     $("histClose").addEventListener("click", ()=>{ $("histModal").classList.remove("show"); unlockBody(); });
     $("histModal").addEventListener("click", (e)=>{ if(e.target===$("histModal")){ $("histModal").classList.remove("show"); unlockBody(); } });
   }catch(_e){}
-
-
-  // Reason modal: no close without reason
-  $("reasonClose").addEventListener("click", ()=>{ $("reasonModal").classList.remove("show"); unlockBody(); });
-  $("reasonSend").addEventListener("click", async()=>{
-    const txt = $("reasonText").value.trim();
-    if(!txt){
-      showToast("Motivazione", "Inserisci una motivazione per uscire.");
-      return;
-    }
-    const elapsed = Date.now() - state.prodModalOpenedAt;
-    await addAbort({ operator: state.operator || null, reason: txt, elapsedMs: elapsed, device: navigator.userAgent });
-    $("reasonText").value = "";
-    $("reasonModal").classList.remove("show");
-    unlockBody();
-    showToast("Operazione non avviata", "Per iniziare un ordine entra in Produzione, seleziona le righe e premi INIZIA PRODUZIONE.");
-  });
 
   // Fatturato reveal
   $("fatValue").addEventListener("click", ()=>{
