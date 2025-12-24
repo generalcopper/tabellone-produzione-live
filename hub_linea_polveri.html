@@ -2303,60 +2303,94 @@ authApi.onAuthStateChanged(auth, async(user)=>{
 
 // VOICE (Google voice only)
   // ===============================
-  const GEMINI_TTS_ENDPOINT = localStorage.getItem("GEMINI_TTS_ENDPOINT") || "";
-  async function speak(text){
+  // ===== Google AI Voice (Web Speech API / Chrome "Google" voices) =====
+  let _googleVoice = null;
+
+  async function playCue(){ /* no-op */ }
+  function stopTTS(){ /* no-op */ }
+
+  let _ttsRetryTimer = null;
+  function scheduleTTSRetry(msg){
+    if(_ttsRetryTimer) return;
+    _ttsRetryTimer = setTimeout(()=>{
+      _ttsRetryTimer = null;
+      try{ speak(msg); }catch(_){}
+    }, 360);
+  }
+
+  function _pickGoogleVoice(){
     try{
-      if(!text) return;
+      if(!("speechSynthesis" in window)) return null;
+      const voices = window.speechSynthesis.getVoices() || [];
+      if(!voices.length) return null;
 
-      // 1) Se configurato un endpoint TTS (Gemini/Google) uso audio reale
-      if(GEMINI_TTS_ENDPOINT){
-        const res = await fetch(GEMINI_TTS_ENDPOINT, {
-          method: "POST",
-          headers: { "Content-Type":"application/json" },
-          body: JSON.stringify({ text, lang: "it-IT" })
-        });
+      const norm = (s)=> String(s||"").toLowerCase();
+      const isIt = (v)=> norm(v.lang).startsWith("it");
+      const isGoogle = (v)=> norm(v.name).includes("google");
 
-        if(res.ok){
-          const ct = (res.headers.get("content-type")||"").toLowerCase();
-
-          let blob;
-          if(ct.includes("audio/")){
-            blob = await res.blob();
-          } else {
-            // fallback: json { audioBase64, mime }
-            const j = await res.json().catch(()=>null);
-            if(j && j.audioBase64){
-              const bin = atob(j.audioBase64);
-              const arr = new Uint8Array(bin.length);
-              for(let i=0;i<bin.length;i++) arr[i] = bin.charCodeAt(i);
-              blob = new Blob([arr], { type: j.mime || "audio/mpeg" });
-            }
-          }
-          if(blob){
-            const url = URL.createObjectURL(blob);
-            const a = new Audio(url);
-            a.onended = ()=>URL.revokeObjectURL(url);
-            await a.play().catch(()=>{});
-            return;
-          }
-        }
-      }
-
-      // 2) Fallback: Web Speech (dipende dal device)
-      if(!("speechSynthesis" in window)) return;
-      window.speechSynthesis.cancel();
-      const u = new SpeechSynthesisUtterance(text);
-      u.lang = "it-IT";
-      const voices = window.speechSynthesis.getVoices();
-      const v = voices.find(x=>/Google/i.test(x.name) && /it/i.test(x.lang)) || voices.find(x=>/it/i.test(x.lang)) || null;
-      if(v) u.voice = v;
-      window.speechSynthesis.cancel();
-      window.speechSynthesis.speak(u);
-    }catch(err){
-      console.warn("speak error", err);
+      return voices.find(v => isIt(v) && isGoogle(v))
+          || voices.find(v => isIt(v))
+          || voices.find(v => isGoogle(v))
+          || voices[0];
+    }catch(_){
+      return null;
     }
   }
-  window.speechSynthesis?.addEventListener?.("voiceschanged", ()=>{});
+
+  function _ensureGoogleVoice(){
+    if(_googleVoice) return;
+    _googleVoice = _pickGoogleVoice();
+  }
+
+  if("speechSynthesis" in window){
+    try{ _googleVoice = _pickGoogleVoice(); }catch(_){}
+    try{
+      window.speechSynthesis.onvoiceschanged = () => { try{ _googleVoice = _pickGoogleVoice(); }catch(_){ } };
+    }catch(_){}
+    setTimeout(() => { try{ _googleVoice = _pickGoogleVoice(); }catch(_){ } }, 0);
+  }
+
+  async function speak(text){
+    const msg = String(text || "").trim();
+    if(!msg) return;
+
+    const safeMsg = (msg.length > 520) ? (msg.slice(0, 520).trim() + "…") : msg;
+
+    try{ await playCue("start"); }catch(_){}
+
+    try{ stopTTS(); }catch(_){}
+    try{ if("speechSynthesis" in window) window.speechSynthesis.cancel(); }catch(_){}
+
+    try{
+      if(!("speechSynthesis" in window)) return;
+
+      _ensureGoogleVoice();
+
+      const u = new SpeechSynthesisUtterance(safeMsg);
+      u.lang = "it-IT";
+      u.rate = 0.92;
+      u.pitch = 0.90;
+
+      if(_googleVoice) u.voice = _googleVoice;
+
+      u.onend = () => { try{ playCue("end"); }catch(_){ } };
+      u.onerror = (ev) => {
+        try{ playCue("end"); }catch(_){ }
+        const err = (ev && ev.error) ? String(ev.error) : "";
+        const autoplayBlocked = /not-allowed|gesture|autoplay/i.test(err);
+        if(autoplayBlocked){
+          scheduleTTSRetry(safeMsg);
+        }
+      };
+
+      window.speechSynthesis.speak(u);
+    }catch(e){
+      console.log("TTS (Google/WebSpeech) error:", e);
+      try{ playCue("end"); }catch(_){ }
+    }
+  }
+  globalThis.speak = speak;
+  globalThis._pickGoogleVoice = _pickGoogleVoice;
 
   // ===============================
   // RENDER
