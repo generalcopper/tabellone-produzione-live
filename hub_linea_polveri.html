@@ -360,6 +360,17 @@
     .btn.good { background: rgba(32,201,151,.16); border-color: rgba(32,201,151,.35); }
     .btn.good:hover { background: rgba(32,201,151,.18); border-color: rgba(32,201,151,.38); }
     .btn.good:active { background: rgba(32,201,151,.20); border-color: rgba(32,201,151,.40); }
+    .btn.isBusy{ pointer-events:none; opacity:.82; cursor:default; }
+    .btn.isBusy .btnLabel{ display:inline-flex; align-items:center; justify-content:center; gap:10px; }
+    .btn.isBusy .miniSpinner{
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      border: 2px solid rgba(0,0,0,.14);
+      border-top-color: rgba(0,0,0,.7);
+      animation: spin .75s linear infinite;
+      display:inline-block;
+    }
     .btn.bad { background: rgba(255,77,79,.14); border-color: rgba(255,77,79,.35); }
     .btn.bad:hover { background: rgba(255,77,79,.16); border-color: rgba(255,77,79,.38); }
     .btn.bad:active { background: rgba(255,77,79,.18); border-color: rgba(255,77,79,.40); }
@@ -1637,6 +1648,9 @@
   globalThis.__ALLOW_KEYS__ = (globalThis.__ALLOW_KEYS__ instanceof Set) ? globalThis.__ALLOW_KEYS__ : new Set();
   globalThis.__ALLOW_META__ = globalThis.__ALLOW_META__ || { updatedAt:null, updatedBy:"", lastError:"", lastSyncTs:null };
   globalThis.__ALLOWLIST_LISTEN_STARTED__ = Boolean(globalThis.__ALLOWLIST_LISTEN_STARTED__);
+  globalThis.__CONCLUDE_INFLIGHT__ = (globalThis.__CONCLUDE_INFLIGHT__ instanceof Map) ? globalThis.__CONCLUDE_INFLIGHT__ : new Map();
+  globalThis.__CONCLUDE_RECENT__ = (globalThis.__CONCLUDE_RECENT__ instanceof Map) ? globalThis.__CONCLUDE_RECENT__ : new Map();
+  globalThis.__CONCLUDE_HANDLER_BOUND__ = Boolean(globalThis.__CONCLUDE_HANDLER_BOUND__);
 
   // ===============================
   // UTILS
@@ -2892,11 +2906,30 @@ function showAuthGate(){
   }
 
   async function addHistory(entry){
+    const orderKey = entry.orderKey || null;
     if(!state.firebase.ok) return;
     const fs = state.firebase.api;
     const db = state.firebase.db;
+    if(orderKey){
+      try{
+        const ref = fs.doc(db, "powderProdHistory", orderKey);
+        const id = await fs.runTransaction(db, async(tx)=>{
+          const snap = await tx.get(ref);
+          if(snap.exists()){
+            const data = snap.data();
+            if(data?.concludedAt || data?.endedAt){
+              return data?.id || orderKey;
+            }
+          }
+          const payload = { ...entry, id: orderKey, at: nowIso(), concludedAt: entry.endedAt || nowIso() };
+          tx.set(ref, payload, { merge:true });
+          return orderKey;
+        });
+        return id;
+      }catch(_e){}
+    }
     const id = `${Date.now()}_${Math.random().toString(16).slice(2)}`;
-    await fs.setDoc(fs.doc(db, "powderProdHistory", id), { ...entry, id, at: nowIso() });
+    await fs.setDoc(fs.doc(db, "powderProdHistory", id), { ...entry, id, at: nowIso(), concludedAt: entry.endedAt || nowIso() });
     return id;
   }
 
@@ -5226,6 +5259,14 @@ function renderHome(){
       }
       $("btnConclude").disabled = toConclude.size===0;
       $("btnConclude").style.opacity = toConclude.size===0 ? ".6" : "1";
+      const btn = $("btnConclude");
+      if(btn && btn.classList.contains("isBusy")){
+        btn.disabled = true;
+        btn.setAttribute("aria-disabled","true");
+        btn.style.opacity = ".82";
+      } else if(btn){
+        btn.removeAttribute("aria-disabled");
+      }
     }
 
     body.querySelector("#btnSelAllRun").onclick = ()=>{
@@ -5237,6 +5278,7 @@ function renderHome(){
       rerender();
     };
     body.querySelector("#btnBackRun").onclick = renderRunning;
+    const orderKey = order ? getOrderKey(order) : stableKey({ orderNo:p.orderNo, number:p.orderNo, id:p.id||p.orderNo, customer:p.customer });
 
     const canCancel = Boolean(state.user && state.user.isAdmin);
     if(!canCancel){
@@ -5253,85 +5295,168 @@ function renderHome(){
       };
     }
 
-    body.querySelector("#btnConclude").onclick = async()=>{
-      if(!toConclude.size) return;
+    const concludeBtn = body.querySelector("#btnConclude");
+    const inflightMap = globalThis.__CONCLUDE_INFLIGHT__;
+    const recentMap = globalThis.__CONCLUDE_RECENT__;
 
-      const allStarted = toConclude.size === selected.size;
-      const askConfirm = Boolean(p.isFullOrderStart) && allStarted;
-      if(askConfirm && !confirm("Stai concludendo l’intero ordine. Confermi?")) return;
-
-      const startedAtMs = p.startedAt ? new Date(p.startedAt).getTime() : Date.now();
-      const durationMs = Date.now() - startedAtMs;
-
-      // calcolo kg + dettagli righe
-      let kg = 0;
-      const perLine = [];
-      if(order){
-        const m = new Map(order.lines.map(l=>[l.lineKey,l]));
-        for(const k of toConclude){
-          const l = m.get(k);
-          if(!l) continue;
-          const raw = producedKg.get(k);
-          const val = raw!=null && String(raw).trim()!=="" ? Number(String(raw).replace(",", ".")) : NaN;
-          const fallback = Number(l.qty||0);
-          const prodVal = Number.isFinite(val) ? val : (Number.isFinite(fallback) ? fallback : (l.lineKg||0));
-          kg += prodVal;
-          perLine.push({
-            lineKey: k,
-            desc: l.desc,
-            code: l.code || "",
-            plannedKg: Number(l.lineKg||0),
-            producedKg: Number(prodVal||0),
-            qty: l.qty,
-            um: l.um || ""
-          });
-        }
-      } else {
-        kg = Number(p.totalKg||0);
+    const setConcludeBusy = (isBusy, label="Conclusione…")=>{
+      if(!concludeBtn) return;
+      if(!concludeBtn.dataset.defaultLabel){
+        concludeBtn.dataset.defaultLabel = concludeBtn.textContent || "HO CONCLUSO LA PRODUZIONE";
       }
-
-      const ctx = `${p.customer} · Ordine n. ${p.orderNo} · ${Math.round(kg)} kg`;
-      openSignModal(ctx, async(signatureDataUrl)=>{
-        await closeActiveProduction(p.id, { concluded:true });
-
-        const entry = {
-          operator: (state.user?.fullName || p.operator || "Operatore"),
-          operatorUid: state.user?.uid || "",
-          customer: p.customer,
-          orderNo: p.orderNo,
-          kg,
-          durationMs,
-          startedAt: p.startedAt || nowIso(),
-          endedAt: nowIso(),
-          concludedLineKeys: Array.from(toConclude),
-          totalKgOrder: Number(p.totalKg||0),
-          perLine,
-          signature: signatureDataUrl,
-          statementAccepted: true
-        };
-
-        const newId = await addHistory(entry);
-        const withId = { ...entry, id: newId || `${Date.now()}_${Math.random().toString(16).slice(2)}`, at: nowIso() };
-        state.history = [...(state.history||[]), withId];
-        state.historyReady = true;
-        try{ renderCompletedSection(); }catch(_e){}
-        state.activeProductions = (state.activeProductions||[]).filter(x=>x.id!==p.id);
-        try{ state.partialOrders = computePartialOrders().partial; }catch(_e){}
-        renderHome();
-        renderHeaderKpis();
-
-        // aggiorna classifica kg (aggregato)
-        try{
-          await bumpOperatorKg(state.user?.uid || "", state.user?.fullName || p.operator || "Operatore", kg);
-        }catch(_e){}
-
-        speak(`Ordine concluso da ${(state.user?.fullName||p.operator||"Operatore")} · ordine ${p.orderNo} · cliente ${p.customer}`);
-
-        showToast("Produzione conclusa", `Operatore ${(state.user?.fullName||p.operator||"Operatore")} · Ordine n. ${p.orderNo} · ${Math.round(kg)} kg`);
-        showToast("Ordine concluso", `Ordine n. ${p.orderNo} registrato tra i conclusi.`, 2200);
-        renderRunning();
-      });
+      if(isBusy){
+        concludeBtn.classList.add("isBusy");
+        concludeBtn.setAttribute("aria-disabled","true");
+        concludeBtn.disabled = true;
+        concludeBtn.innerHTML = `<span class="btnLabel"><span class="miniSpinner" aria-hidden="true"></span>${label}</span>`;
+      } else {
+        concludeBtn.classList.remove("isBusy");
+        concludeBtn.removeAttribute("aria-disabled");
+        concludeBtn.disabled = toConclude.size===0;
+        concludeBtn.innerHTML = concludeBtn.dataset.defaultLabel;
+        concludeBtn.style.opacity = concludeBtn.disabled ? ".6" : "1";
+      }
     };
+    const markConcludeCompleted = ()=>{
+      if(!concludeBtn) return;
+      concludeBtn.classList.add("isBusy");
+      concludeBtn.disabled = true;
+      concludeBtn.setAttribute("aria-disabled","true");
+      concludeBtn.innerHTML = `<span class="btnLabel">Concluso</span>`;
+      concludeBtn.style.opacity = ".92";
+    };
+    const isOrderAlreadyConcluded = async()=>{
+      if(!state.firebase.ok || !orderKey) return false;
+      try{
+        const fs = state.firebase.api;
+        const db = state.firebase.db;
+        const snap = await fs.getDoc(fs.doc(db, "powderProdHistory", orderKey));
+        return snap.exists();
+      }catch(_e){
+        return false;
+      }
+    };
+
+    if(concludeBtn && !concludeBtn.__handlerBound){
+      concludeBtn.__handlerBound = true;
+      globalThis.__CONCLUDE_HANDLER_BOUND__ = true;
+      concludeBtn.addEventListener("click", async()=>{
+        if(!toConclude.size) return;
+
+        const now = Date.now();
+        if(inflightMap.get(orderKey) === true) return;
+        if(now - (recentMap.get(orderKey)||0) < 2500) return;
+        inflightMap.set(orderKey, true);
+        recentMap.set(orderKey, now);
+        let concluded = false;
+        try{
+          setConcludeBusy(true, "Conclusione…");
+
+          if(await isOrderAlreadyConcluded()){
+            markConcludeCompleted();
+            showToast("Ordine già concluso", `Ordine n. ${p.orderNo} · ${p.customer}`);
+            concluded = true;
+            return;
+          }
+
+          const allStarted = toConclude.size === selected.size;
+          const askConfirm = Boolean(p.isFullOrderStart) && allStarted;
+          if(askConfirm && !confirm("Stai concludendo l’intero ordine. Confermi?")) return;
+
+          const startedAtMs = p.startedAt ? new Date(p.startedAt).getTime() : Date.now();
+          const durationMs = Date.now() - startedAtMs;
+
+          // calcolo kg + dettagli righe
+          let kg = 0;
+          const perLine = [];
+          if(order){
+            const m = new Map(order.lines.map(l=>[l.lineKey,l]));
+            for(const k of toConclude){
+              const l = m.get(k);
+              if(!l) continue;
+              const raw = producedKg.get(k);
+              const val = raw!=null && String(raw).trim()!=="" ? Number(String(raw).replace(",", ".")) : NaN;
+              const fallback = Number(l.qty||0);
+              const prodVal = Number.isFinite(val) ? val : (Number.isFinite(fallback) ? fallback : (l.lineKg||0));
+              kg += prodVal;
+              perLine.push({
+                lineKey: k,
+                desc: l.desc,
+                code: l.code || "",
+                plannedKg: Number(l.lineKg||0),
+                producedKg: Number(prodVal||0),
+                qty: l.qty,
+                um: l.um || ""
+              });
+            }
+          } else {
+            kg = Number(p.totalKg||0);
+          }
+
+          const ctx = `${p.customer} · Ordine n. ${p.orderNo} · ${Math.round(kg)} kg`;
+          const concludedOk = await new Promise((resolve)=>{
+            openSignModal(ctx, async(signatureDataUrl)=>{
+              await closeActiveProduction(p.id, { concluded:true });
+
+              const entry = {
+                orderKey,
+                operator: (state.user?.fullName || p.operator || "Operatore"),
+                operatorUid: state.user?.uid || "",
+                customer: p.customer,
+                orderNo: p.orderNo,
+                kg,
+                durationMs,
+                startedAt: p.startedAt || nowIso(),
+                endedAt: nowIso(),
+                concludedLineKeys: Array.from(toConclude),
+                totalKgOrder: Number(p.totalKg||0),
+                perLine,
+                signature: signatureDataUrl,
+                statementAccepted: true
+              };
+
+              const newId = await addHistory(entry);
+              const withId = { ...entry, id: newId || `${Date.now()}_${Math.random().toString(16).slice(2)}`, at: nowIso() };
+              state.history = [...(state.history||[]), withId];
+              state.historyReady = true;
+              try{ renderCompletedSection(); }catch(_e){}
+              state.activeProductions = (state.activeProductions||[]).filter(x=>x.id!==p.id);
+              try{ state.partialOrders = computePartialOrders().partial; }catch(_e){}
+              renderHome();
+              renderHeaderKpis();
+
+              // aggiorna classifica kg (aggregato)
+              try{
+                await bumpOperatorKg(state.user?.uid || "", state.user?.fullName || p.operator || "Operatore", kg);
+              }catch(_e){}
+
+              speak(`Ordine concluso da ${(state.user?.fullName||p.operator||"Operatore")} · ordine ${p.orderNo} · cliente ${p.customer}`);
+
+              showToast("Produzione conclusa", `Operatore ${(state.user?.fullName||p.operator||"Operatore")} · Ordine n. ${p.orderNo} · ${Math.round(kg)} kg`);
+              showToast("Ordine concluso", `Ordine n. ${p.orderNo} registrato tra i conclusi.`, 2200);
+              renderRunning();
+              markConcludeCompleted();
+              concludeBtn.blur?.();
+              resolve(true);
+            }, ()=>resolve(false));
+          });
+          concluded = Boolean(concludedOk);
+        } catch(err){
+          console.error("Errore conclusione", err);
+          showToast("Errore conclusione", "Riprova tra poco o verifica la connessione.");
+        } finally{
+          inflightMap.set(orderKey, false);
+          if(!concluded){
+            setConcludeBusy(false, concludeBtn?.dataset?.defaultLabel || "HO CONCLUSO LA PRODUZIONE");
+          }
+        }
+      });
+      (async()=>{
+        if(await isOrderAlreadyConcluded()){
+          markConcludeCompleted();
+        }
+      })();
+    }
 
     rerender();
   }
@@ -5418,7 +5543,7 @@ function renderHome(){
     sig.empty = true;
   }
 
-  function openSignModal(contextText, onOk){
+  function openSignModal(contextText, onOk, onCancel){
     sigInit();
     $("signCheck").checked = false;
     $("signContext").textContent = contextText;
@@ -5427,13 +5552,19 @@ function renderHome(){
     lockBody();
     requestAnimationFrame(()=> sig.resize?.()); // CODEX: forza ridimensionamento firma quando visibile
 
-    const close = ()=>{
+    let handled = false;
+    const close = (wasCancelled=false)=>{
+      if(handled) return;
+      handled = true;
       $("signModal").classList.remove("show");
       unlockBody();
       $("signOk").onclick = null;
+      if(wasCancelled && typeof onCancel==="function"){
+        onCancel();
+      }
     };
 
-    $("signClose").onclick = close;
+    $("signClose").onclick = ()=>close(true);
     $("signClear").onclick = ()=>sigClear();
     $("signOk").onclick = ()=>{
       if(!$("signCheck").checked){
