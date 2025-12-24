@@ -1631,7 +1631,6 @@
       }
     }
   }
-  try{ statsDesktopMq.addEventListener("change", relocateStatsCard); }catch(_e){ try{ statsDesktopMq.addListener(relocateStatsCard); }catch(_e2){} }
   relocateStatsCard();
   // CODEX: render helper per banner sacchetto bianco
   function renderWhiteBagBanner(opts={}){
@@ -2035,6 +2034,105 @@ function showAuthGate(){
     return snap.exists() ? (snap.data()||{}) : null;
   }
 
+  let __fsUnsub = null;
+  let __fsRetryT = null;
+  let __fsBackoffMs = 1500;
+  const __fsBackoffMax = 60000;
+  let __fsLastErrLog = 0;
+  let __fsVisT = null;
+  let __fsLifecycleBound = false;
+
+  function __fsStopListen(){
+    if(__fsUnsub){
+      try{ __fsUnsub(); }catch(_e){}
+      __fsUnsub = null;
+    }
+    if(__fsRetryT){
+      clearTimeout(__fsRetryT);
+      __fsRetryT = null;
+    }
+  }
+
+  function __fsStartListen(){
+    if(__fsUnsub) return;
+    if(__fsRetryT){ clearTimeout(__fsRetryT); __fsRetryT = null; }
+    if(!state.firebase.ok || !state.user) return;
+    const fs = state.firebase.api;
+    const db = state.firebase.db;
+    if(!fs || !db) return;
+    try{
+      const col = fs.collection(db, "powderProductions");
+      const hcol = fs.collection(db, "powderProdHistory");
+      const unsubs = [];
+
+      const onErr = (err)=>{
+        const now = Date.now();
+        if(!__fsLastErrLog || (now - __fsLastErrLog) > 10000){
+          console.warn("onSnapshot error", err);
+          __fsLastErrLog = now;
+        }
+        __fsStopListen();
+        if(navigator.onLine === false) return;
+        __fsBackoffMs = Math.min(__fsBackoffMax, __fsBackoffMs * 2);
+        const jitter = Math.floor(Math.random() * 251);
+        __fsRetryT = setTimeout(()=>{ __fsRetryT = null; __fsStartListen(); }, __fsBackoffMs + jitter);
+      };
+
+      const activeNext = (snap)=>{
+        const arr = [];
+        snap.forEach(doc=>arr.push({ id: doc.id, ...doc.data() }));
+        state.activeProductions = arr.filter(x=>x && x.active);
+        renderHome();
+        __fsBackoffMs = 1500;
+      };
+
+      const histNext = (snap)=>{
+        const hist = [];
+        snap.forEach(doc=>hist.push({ id: doc.id, ...doc.data() }));
+        state.history = hist;
+        state.historyReady = true;
+        renderStats();
+        renderHeaderKpis();
+        try{ renderCompletedSection(); }catch(_e){}
+        try{ renderPartialBanner && renderPartialBanner(); }catch(_e){}
+        __fsBackoffMs = 1500;
+      };
+
+      unsubs.push(fs.onSnapshot(col, activeNext, onErr));
+      try {
+        unsubs.push(fs.onSnapshot(hcol, histNext, onErr));
+      } catch(_e) {}
+
+      __fsUnsub = ()=>{
+        for(const u of unsubs){
+          try{ u && u(); }catch(_e){}
+        }
+        __fsUnsub = null;
+      };
+    }catch(err){
+      const now = Date.now();
+      if(!__fsLastErrLog || (now - __fsLastErrLog) > 10000){
+        console.warn("snapshot start failed", err);
+        __fsLastErrLog = now;
+      }
+    }
+  }
+
+  function __fsBindLifecycle(){
+    if(__fsLifecycleBound) return;
+    __fsLifecycleBound = true;
+    document.addEventListener("visibilitychange", ()=>{
+      if(document.visibilityState === "hidden"){
+        __fsStopListen();
+      } else {
+        if(__fsVisT){ clearTimeout(__fsVisT); }
+        __fsVisT = setTimeout(()=>{ __fsVisT = null; __fsStartListen(); }, 300);
+      }
+    });
+    window.addEventListener("online", ()=>{ __fsBackoffMs = 1500; __fsStartListen(); });
+    window.addEventListener("offline", ()=>{ __fsStopListen(); });
+  }
+
   async function ensureAuthFlow(){
     // chiamata dopo init firebase
     const authApi = state.firebase.authApi;
@@ -2047,7 +2145,10 @@ function showAuthGate(){
       console.warn("getRedirectResult error", e);
       state.lastAuthErrorMsg = humanAuthErr(e);
     }
-authApi.onAuthStateChanged(auth, async(user)=>{
+    authApi.onAuthStateChanged(auth, async(user)=>{
+      if(!user){
+        __fsStopListen();
+      }
       if(!user){
         state.historyReady = false;
         state.history = [];
@@ -2129,6 +2230,7 @@ authApi.onAuthStateChanged(auth, async(user)=>{
       renderNotifCenter();
       hideAuthGate();
       renderHome();
+      __fsStartListen();
     });
   }
 
@@ -2147,8 +2249,10 @@ authApi.onAuthStateChanged(auth, async(user)=>{
         const fa = await import(FIREBASE_IMPORT_AUTH);
         const fm = await import(FIREBASE_IMPORT_MSG);
 
+        try{ fs.setLogLevel && fs.setLogLevel("error"); }catch(_e){}
+
         const app = initializeApp(firebaseConfig);
-        const db = fs.getFirestore(app);
+        const db = fs.initializeFirestore(app, { experimentalAutoDetectLongPolling: true, useFetchStreams: false });
         const auth = fa.getAuth(app);
         let messaging = null;
 
@@ -2171,37 +2275,8 @@ authApi.onAuthStateChanged(auth, async(user)=>{
 
       // Auth flow gate
       await ensureAuthFlow();
-
-      const fs = state.firebase.api;
-      const db = state.firebase.db;
-
-      // Live productions
-      const col = fs.collection(db, "powderProductions");
-      fs.onSnapshot(col, (snap)=>{
-        const arr = [];
-        snap.forEach(doc=>arr.push({ id: doc.id, ...doc.data() }));
-        state.activeProductions = arr.filter(x=>x && x.active);
-        renderHome();
-      }, (err)=>{
-        console.warn("onSnapshot error", err);
-        state.firebase.ok = false;
-        renderHome();
-      });
-
-      // History for stats + "ordini conclusi"
-      try {
-        const hcol = fs.collection(db, "powderProdHistory");
-        fs.onSnapshot(hcol, (snap)=>{
-          const hist = [];
-          snap.forEach(doc=>hist.push({ id: doc.id, ...doc.data() }));
-          state.history = hist;
-          state.historyReady = true;
-          renderStats();
-          renderHeaderKpis();
-          try{ renderCompletedSection(); }catch(_e){}
-          try{ renderPartialBanner && renderPartialBanner(); }catch(_e){}
-        });
-      } catch(_e) {}
+      __fsBindLifecycle();
+      __fsStartListen();
 
     } catch(err) {
       console.warn("Firebase init failed:", err);
@@ -3187,7 +3262,6 @@ function renderHome(){
     const kPowderKgEl = $("kPowderKg");
     if(!Number.isFinite(kgSummary.totalKg) || kgSummary.totalKg>50000){
       kPowderKgEl.textContent = "Dati non disponibili"; // UI-FIX: kg-totali
-      console.log("UI-FIX: kg-totali debug", { lineCount: kgSummary.lineCount, samples: kgSummary.samples, totalKg: kgSummary.totalKg }); // UI-FIX: kg-totali
     } else {
       kPowderKgEl.textContent = Math.round(kgSummary.totalKg).toLocaleString("it-IT"); // UI-FIX: kg-totali
     }
@@ -4419,133 +4493,6 @@ function renderHome(){
 
 
   // ===============================
-  // HOME interactions
-  // ===============================
-  $("btnGoProd").addEventListener("click", ()=> handlePrimaryCta());
-  try{
-    const pb = $("partialBanner");
-    pb?.addEventListener("click", ()=> openPartialModal());
-    pb?.addEventListener("keydown", (e)=>{ if(e.key==="Enter"||e.key===" "){ e.preventDefault(); openPartialModal(); } });
-  }catch(_e){}
-  try{ $("partialClose").addEventListener("click", ()=> closePartialModal()); }catch(_e){}
-  try{ $("partialModal").addEventListener("click", (e)=>{ if(e.target===$("partialModal")) closePartialModal(); }); }catch(_e){}
-  $("prodStrip").addEventListener("click", ()=> openRunningModal());
-  try{ $("cancelBannerClose").addEventListener("click", ()=> hideCancelBanner()); }catch(_e){}
-
-  $("prodModalClose").addEventListener("click", ()=> closeProdModalRequest());
-  $("runningClose").addEventListener("click", ()=> { $("runningModal").classList.remove("show"); unlockBody(); });
-
-  // History modal
-  try{
-    $("histClose").addEventListener("click", ()=>{ $("histModal").classList.remove("show"); unlockBody(); });
-    $("histModal").addEventListener("click", (e)=>{ if(e.target===$("histModal")){ $("histModal").classList.remove("show"); unlockBody(); } });
-  }catch(_e){}
-  try{
-    $("notifClose").addEventListener("click", ()=> closeNotifModal());
-    $("notifModal").addEventListener("click", (e)=>{ if(e.target===$("notifModal")) closeNotifModal(); });
-  }catch(_e){}
-  try{ $("btnNotifCompleted").addEventListener("click", ()=> focusCompletedFromNotif()); }catch(_e){}
-  try{ $("btnTogglePush").addEventListener("click", ()=> togglePushFromCenter()); }catch(_e){}
-  try{
-    $("btnSendNotif").addEventListener("click", async()=>{
-      const fb = $("notifAdminFeedback");
-      if(!(state.user && state.user.isAdmin)){
-        showToast("Solo admin", "Non hai i permessi per inviare notifiche.");
-        if(fb) fb.textContent = "Permesso mancante.";
-        return;
-      }
-      const title = ($("notifTitle")?.value || "").trim();
-      const body = ($("notifBodyInput")?.value || "").trim();
-      if(!title || !body){
-        showToast("Testo mancante", "Inserisci titolo e testo della notifica.");
-        if(fb) fb.textContent = "Titolo e testo obbligatori.";
-        return;
-      }
-      if(fb) fb.textContent = "Invio…";
-      try{
-        await sendAdminNotification(title, body);
-        if(fb) fb.textContent = "Notifica inviata.";
-        const bodyEl = $("notifBodyInput");
-        if(bodyEl) bodyEl.value = "";
-      }catch(err){
-        console.warn("send notif error", err);
-        if(fb) fb.textContent = "Invio non riuscito (permessi o rete).";
-        showToast("Invio non riuscito", "Controlla i permessi Firestore o la rete.");
-      }
-    });
-  }catch(_e){}
-
-  // Fatturato reveal
-  $("fatValue").addEventListener("click", ()=>{
-    const el = $("fatValue");
-    const isDesktop = window.matchMedia("(min-width: 980px)").matches;
-    if(isDesktop){
-      el.classList.add("reveal");
-      updateFatturatoUI(); // CODEX: fatturato sempre visibile su desktop
-      return;
-    }
-    el.classList.toggle("reveal");
-    updateFatturatoUI();
-  });
-
-  // Call Matteo (numero fisso)
-  const MATTEO_TEL = "+393516709334";
-  $("btnCallMatteo").addEventListener("click", ()=>{
-    window.location.href = `tel:${MATTEO_TEL}`;
-  });
-
-  // Stats helper
-  $("btnOpenStats").addEventListener("click", ()=>{
-    showToast("Statistiche", "Apri da desktop per vedere la classifica completa.");
-    window.scrollTo({ top: document.body.scrollHeight, behavior:"smooth" });
-  });
-
-  // Issues (registrazione interna)
-  $("btnSendIssue").addEventListener("click", async()=>{
-    const txt = $("issueText").value.trim();
-    if(!txt){
-      showToast("Segnalazione", "Scrivi il problema prima di inviare.");
-      return;
-    }
-    if(!state.user){
-      renderAuthLogin("Per inviare una segnalazione è necessario accedere.");
-      return;
-    }
-    const op = state.user.fullName || "Operatore";
-    const payload = {
-      operator: op,
-      operatorUid: state.user.uid,
-      text: txt,
-      when: fmtDateTime(Date.now()),
-      kind: "problema_macchina_o_prodotto",
-      url: location.href,
-      ua: navigator.userAgent
-    };
-    await addIssue(payload);
-    $("issueText").value = "";
-    showToast("Segnalazione registrata", "Ok. La segnalazione è stata salvata. Per urgenze: usa “Chiama Matteo”.", 3200);
-  });
-
-  document.addEventListener("visibilitychange", ()=>{
-    if(!document.hidden) debounceRefresh("focus");
-  });
-  window.addEventListener("focus", ()=> debounceRefresh("focus"));
-  window.addEventListener("pageshow", (e)=>{
-    if(e.persisted || !document.hidden) debounceRefresh("pageshow");
-  });
-  try{ window.matchMedia("(min-width: 980px)").addEventListener("change", ()=> updateFatturatoUI()); }catch(_e){}
-
-  document.documentElement.setAttribute("translate","no");
-  document.body.setAttribute("translate","no");
-
-
-  // Blocca zoom (mobile/Android)
-  document.addEventListener("gesturestart", (e)=>e.preventDefault(), {passive:false});
-  document.addEventListener("gesturechange", (e)=>e.preventDefault(), {passive:false});
-  document.addEventListener("gestureend", (e)=>e.preventDefault(), {passive:false});
-  document.addEventListener("wheel", (e)=>{ if(e.ctrlKey) e.preventDefault(); }, {passive:false});
-
-  // ===============================
   // PUSH (PWA + FCM Web Push)
   // ===============================
   function isIOS(){
@@ -4719,12 +4666,150 @@ function renderHome(){
     }
   }
 
+  async function startHub(){
+    if(globalThis.__HUB_POLVERI_BOOTED__){
+      return;
+    }
+    globalThis.__HUB_POLVERI_BOOTED__ = true;
+
+    try{ statsDesktopMq.addEventListener("change", relocateStatsCard); }catch(_e){ try{ statsDesktopMq.addListener(relocateStatsCard); }catch(_e2){} }
+    relocateStatsCard();
+
+    // ===============================
+    // HOME interactions
+    // ===============================
+    $("btnGoProd").addEventListener("click", ()=> handlePrimaryCta());
+    try{
+      const pb = $("partialBanner");
+      pb?.addEventListener("click", ()=> openPartialModal());
+      pb?.addEventListener("keydown", (e)=>{ if(e.key==="Enter"||e.key===" "){ e.preventDefault(); openPartialModal(); } });
+    }catch(_e){}
+    try{ $("partialClose").addEventListener("click", ()=> closePartialModal()); }catch(_e){}
+    try{ $("partialModal").addEventListener("click", (e)=>{ if(e.target===$("partialModal")) closePartialModal(); }); }catch(_e){}
+    $("prodStrip").addEventListener("click", ()=> openRunningModal());
+    try{ $("cancelBannerClose").addEventListener("click", ()=> hideCancelBanner()); }catch(_e){}
+
+    $("prodModalClose").addEventListener("click", ()=> closeProdModalRequest());
+    $("runningClose").addEventListener("click", ()=> { $("runningModal").classList.remove("show"); unlockBody(); });
+
+    // History modal
+    try{
+      $("histClose").addEventListener("click", ()=>{ $("histModal").classList.remove("show"); unlockBody(); });
+      $("histModal").addEventListener("click", (e)=>{ if(e.target===$("histModal")){ $("histModal").classList.remove("show"); unlockBody(); } });
+    }catch(_e){}
+    try{
+      $("notifClose").addEventListener("click", ()=> closeNotifModal());
+      $("notifModal").addEventListener("click", (e)=>{ if(e.target===$("notifModal")) closeNotifModal(); });
+    }catch(_e){}
+    try{ $("btnNotifCompleted").addEventListener("click", ()=> focusCompletedFromNotif()); }catch(_e){}
+    try{ $("btnTogglePush").addEventListener("click", ()=> togglePushFromCenter()); }catch(_e){}
+    try{
+      $("btnSendNotif").addEventListener("click", async()=>{
+        const fb = $("notifAdminFeedback");
+        if(!(state.user && state.user.isAdmin)){
+          showToast("Solo admin", "Non hai i permessi per inviare notifiche.");
+          if(fb) fb.textContent = "Permesso mancante.";
+          return;
+        }
+        const title = ($("notifTitle")?.value || "").trim();
+        const body = ($("notifBodyInput")?.value || "").trim();
+        if(!title || !body){
+          showToast("Testo mancante", "Inserisci titolo e testo della notifica.");
+          if(fb) fb.textContent = "Titolo e testo obbligatori.";
+          return;
+        }
+        if(fb) fb.textContent = "Invio…";
+        try{
+          await sendAdminNotification(title, body);
+          if(fb) fb.textContent = "Notifica inviata.";
+          const bodyEl = $("notifBodyInput");
+          if(bodyEl) bodyEl.value = "";
+        }catch(err){
+          console.warn("send notif error", err);
+          if(fb) fb.textContent = "Invio non riuscito (permessi o rete).";
+          showToast("Invio non riuscito", "Controlla i permessi Firestore o la rete.");
+        }
+      });
+    }catch(_e){}
+
+    // Fatturato reveal
+    $("fatValue").addEventListener("click", ()=>{
+      const el = $("fatValue");
+      const isDesktop = window.matchMedia("(min-width: 980px)").matches;
+      if(isDesktop){
+        el.classList.add("reveal");
+        updateFatturatoUI(); // CODEX: fatturato sempre visibile su desktop
+        return;
+      }
+      el.classList.toggle("reveal");
+      updateFatturatoUI();
+    });
+
+    // Call Matteo (numero fisso)
+    const MATTEO_TEL = "+393516709334";
+    $("btnCallMatteo").addEventListener("click", ()=>{
+      window.location.href = `tel:${MATTEO_TEL}`;
+    });
+
+    // Stats helper
+    $("btnOpenStats").addEventListener("click", ()=>{
+      showToast("Statistiche", "Apri da desktop per vedere la classifica completa.");
+      window.scrollTo({ top: document.body.scrollHeight, behavior:"smooth" });
+    });
+
+    // Issues (registrazione interna)
+    $("btnSendIssue").addEventListener("click", async()=>{
+      const txt = $("issueText").value.trim();
+      if(!txt){
+        showToast("Segnalazione", "Scrivi il problema prima di inviare.");
+        return;
+      }
+      if(!state.user){
+        renderAuthLogin("Per inviare una segnalazione è necessario accedere.");
+        return;
+      }
+      const op = state.user.fullName || "Operatore";
+      const payload = {
+        operator: op,
+        operatorUid: state.user.uid,
+        text: txt,
+        when: fmtDateTime(Date.now()),
+        kind: "problema_macchina_o_prodotto",
+        url: location.href,
+        ua: navigator.userAgent
+      };
+      await addIssue(payload);
+      $("issueText").value = "";
+      showToast("Segnalazione registrata", "Ok. La segnalazione è stata salvata. Per urgenze: usa “Chiama Matteo”.", 3200);
+    });
+
+    document.addEventListener("visibilitychange", ()=>{
+      if(!document.hidden) debounceRefresh("focus");
+    });
+    window.addEventListener("focus", ()=> debounceRefresh("focus"));
+    window.addEventListener("pageshow", (e)=>{
+      if(e.persisted || !document.hidden) debounceRefresh("pageshow");
+    });
+    try{ window.matchMedia("(min-width: 980px)").addEventListener("change", ()=> updateFatturatoUI()); }catch(_e){}
+
+    document.documentElement.setAttribute("translate","no");
+    document.body.setAttribute("translate","no");
+
+    // Blocca zoom (mobile/Android)
+    document.addEventListener("gesturestart", (e)=>e.preventDefault(), {passive:false});
+    document.addEventListener("gesturechange", (e)=>e.preventDefault(), {passive:false});
+    document.addEventListener("gestureend", (e)=>e.preventDefault(), {passive:false});
+    document.addEventListener("wheel", (e)=>{ if(e.ctrlKey) e.preventDefault(); }, {passive:false});
+
+    await boot();
+    try{ wirePushUI(); updatePushPill(); renderNotifCenter(); updateNotificationBadge(); }catch(_e){}
+  }
+
 
 
 
 // start
-  await boot();
-  try{ wirePushUI(); updatePushPill(); renderNotifCenter(); updateNotificationBadge(); }catch(_e){}
+  await startHub();
 
   </script>
 </body>
