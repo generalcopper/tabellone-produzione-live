@@ -1816,6 +1816,67 @@
     font-weight: 900;
     cursor:pointer;
   }
+  #topAlertBanner{
+    position: fixed;
+    left: 10px;
+    right: 10px;
+    top: calc(env(safe-area-inset-top, 0px));
+    z-index: 1200;
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 14px 16px;
+    border-radius: 18px;
+    background: rgba(255,255,255,.86);
+    backdrop-filter: blur(18px);
+    box-shadow: 0 24px 50px rgba(0,0,0,.18);
+    border: 1px solid rgba(255,255,255,.6);
+    color: rgba(12,16,26,.92);
+    max-height: 40vh;
+    overflow: auto;
+  }
+  #topAlertBanner .topAlertText{
+    flex: 1;
+    min-width: 0;
+    word-break: break-word;
+    font-weight: 900;
+    letter-spacing: .01em;
+  }
+  #topAlertBanner .topAlertClose{
+    border: none;
+    background: rgba(0,0,0,.06);
+    border-radius: 12px;
+    padding: 8px 10px;
+    font-weight: 900;
+    cursor: pointer;
+    flex: 0 0 auto;
+  }
+  #topAlertSpacer{
+    width: 100%;
+  }
+  .lastAlertBox{
+    margin-top: 10px;
+    padding: 10px 12px;
+    border-radius: 14px;
+    border: 1px solid rgba(0,0,0,.08);
+    background: rgba(255,255,255,.9);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.6);
+    opacity: .88;
+    font-size: 13px;
+    line-height: 1.35;
+    word-break: break-word;
+  }
+  .lastAlertLabel{
+    font-weight: 900;
+    letter-spacing: .01em;
+    color: rgba(12,16,26,.82);
+    margin-bottom: 4px;
+  }
+  .lastAlertText{
+    font-weight: 800;
+    color: rgba(12,16,26,.9);
+    white-space: pre-wrap;
+  }
   .chunkyList{ content-visibility: auto; contain-intrinsic-size: 800px 2000px; }
   @media (max-width: 640px){
     .hideOnMobile{ display:none !important; }
@@ -4170,6 +4231,28 @@ html.deskScrolled .wrap{
             </div>
           </div>
 
+          <div class="card adminOnly" id="alertAdminCard" style="display:none;">
+            <div class="hd">
+              <h2>Avviso operatori</h2>
+              <div class="badge" id="alertAdminStatus">—</div>
+            </div>
+            <div class="bd">
+              <div class="muted">Banner prioritario per gli operatori linea polveri.</div>
+              <div style="height:8px"></div>
+              <textarea id="alertMessageInput" placeholder="Testo avviso (mostrato agli operatori)" style="width:100%; padding:12px; border-radius:14px; border:1px solid var(--stroke); min-height:90px; font-weight:800;"></textarea>
+              <div style="height:8px"></div>
+              <div class="row2">
+                <input id="alertExpireInput" type="number" min="0" step="1" inputmode="numeric" placeholder="Durata minuti (0 = nessuna scadenza)" style="width:100%; padding:12px; border-radius:14px; border:1px solid var(--stroke); font-weight:900;">
+                <button class="btn good" id="btnSendAlert" type="button" style="width:100%;">Invia avviso</button>
+              </div>
+              <div class="muted" id="alertFeedback" style="margin-top:6px;"></div>
+              <div id="adminLastAlert" class="lastAlertBox" style="display:none">
+                <div class="lastAlertLabel">Ultimo avviso inviato</div>
+                <div class="lastAlertText" id="adminLastAlertText"></div>
+              </div>
+            </div>
+          </div>
+
           <div id="statsCardAnchor" style="display:none;" aria-hidden="true"></div>
           <div id="statsProduzione" style="position:relative; top:-6px;" aria-hidden="true"></div>
           <div class="card adminOnly" miniCard id="statsProdCard">
@@ -4398,6 +4481,8 @@ html.deskScrolled .wrap{
   const NOTIF_LIMIT = 40;
   const ALLOW_PATH = { col: "hub_config", doc: "hub_linea_polveri_mobile_allowlist" };
   const ALLOW_DOC_PATH = `${ALLOW_PATH.col}/${ALLOW_PATH.doc}`;
+  const ALERT_DOC_PATH = { col:"hub_alerts", doc:"active" };
+  const ALERT_DISMISS_LS_KEY = "dismissedAlertId";
   const MAG_FILTERS_KEY = "gc_magazzino_filters_v1";
   const OP_RANK_SORT_KEY = "gc_op_rank_sort_v1";
 
@@ -4479,6 +4564,8 @@ html.deskScrolled .wrap{
     notifications: { inbox: [], ready:false, unavailable:false, error:"" },
     notifUnsub: null,
     push: { supported:false, permission:'default', token:'', enabled:false },
+    alerts: { unsub:null, data:null },
+    alertSaving: false,
   };
   globalThis.__ALLOW_KEYS__ = (globalThis.__ALLOW_KEYS__ instanceof Set) ? globalThis.__ALLOW_KEYS__ : new Set();
   globalThis.__ALLOW_META__ = globalThis.__ALLOW_META__ || { updatedAt:null, updatedBy:"", lastError:"", lastSyncTs:null };
@@ -5065,6 +5152,7 @@ html.deskScrolled .wrap{
     const isAdmin = Boolean(state.user && state.user.isAdmin);
     document.body.classList.toggle("role-admin", isAdmin);
     document.body.classList.toggle("role-operator", !isAdmin);
+    renderAlertAdminUI();
   }
   const ADMIN_ANCHOR_TOKENS = ["admin", "mobilesendcard", "desktopsummarycard", "notifadminbox"];
   function guardAdminAccessOnMobile(){
@@ -5348,6 +5436,175 @@ html.deskScrolled .wrap{
     if(!b) return;
     b.classList.remove("show");
     setBannerOffset(0);
+  }
+
+  // ===============================
+  // ALERT BANNER (operatori)
+  // ===============================
+  function alertDoc(fs, db){
+    return fs.doc(db, ALERT_DOC_PATH.col, ALERT_DOC_PATH.doc);
+  }
+  function parseAlertExpiry(raw){
+    if(!raw) return 0;
+    if(typeof raw.toDate === "function"){
+      try{
+        const dt = raw.toDate();
+        const ms = dt?.getTime?.();
+        return Number.isFinite(ms) ? ms : 0;
+      }catch(_e){}
+    }
+    if(raw instanceof Date){
+      const ms = raw.getTime();
+      return Number.isFinite(ms) ? ms : 0;
+    }
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : 0;
+  }
+  function normalizeAlertSnap(snap){
+    const data = snap?.exists?.() ? (snap.data() || {}) : {};
+    const message = (data?.message || "").trim();
+    const expiresAt = parseAlertExpiry(data?.expiresAt);
+    const ok = Boolean(message && (!expiresAt || Date.now() < expiresAt));
+    return {
+      ok,
+      message,
+      id: data?.id ?? "",
+      expiresAt,
+      raw: data
+    };
+  }
+  function shouldDismissAlert(id){
+    const key = String(id ?? "");
+    if(!key) return false;
+    try{
+      return localStorage.getItem(ALERT_DISMISS_LS_KEY) === key;
+    }catch(_e){
+      return false;
+    }
+  }
+  function recordDismissedAlert(id){
+    const key = String(id ?? "");
+    if(!key) return;
+    try{
+      localStorage.setItem(ALERT_DISMISS_LS_KEY, key);
+    }catch(_e){}
+  }
+  function ensureTopAlertElements(){
+    let banner = $("topAlertBanner");
+    let text = $("topAlertText");
+    let closeBtn = $("topAlertClose");
+    if(!banner){
+      banner = document.createElement("div");
+      banner.id = "topAlertBanner";
+      text = document.createElement("div");
+      text.className = "topAlertText";
+      text.id = "topAlertText";
+      closeBtn = document.createElement("button");
+      closeBtn.id = "topAlertClose";
+      closeBtn.type = "button";
+      closeBtn.className = "topAlertClose";
+      closeBtn.textContent = "Chiudi";
+      banner.appendChild(text);
+      banner.appendChild(closeBtn);
+      document.body.appendChild(banner);
+    }
+    let spacer = $("topAlertSpacer");
+    if(!spacer){
+      spacer = document.createElement("div");
+      spacer.id = "topAlertSpacer";
+    }
+    const wrap = document.querySelector(".wrap");
+    const header = wrap?.querySelector("header.headerRow");
+    if(wrap && header){
+      if(spacer.parentElement !== wrap || spacer.nextElementSibling !== header){
+        wrap.insertBefore(spacer, header);
+      }
+    } else if(!spacer.parentElement){
+      document.body.insertBefore(spacer, document.body.firstChild);
+    }
+    return { banner, text, closeBtn, spacer };
+  }
+  function syncAlertSpacerHeight(){
+    const banner = $("topAlertBanner");
+    const spacer = $("topAlertSpacer");
+    if(spacer && spacer.isConnected && banner){
+      const h = banner.getBoundingClientRect().height || 0;
+      spacer.style.height = `${h}px`;
+      setBannerOffset(h);
+      return;
+    }
+    const cancel = $("cancelBanner");
+    if(cancel && cancel.classList.contains("show")){
+      const h = cancel.getBoundingClientRect().height || 0;
+      setBannerOffset(h);
+      return;
+    }
+    setBannerOffset(0);
+  }
+  function removeOperatorAlertDom(){
+    const banner = $("topAlertBanner");
+    if(banner) banner.remove();
+    const spacer = $("topAlertSpacer");
+    if(spacer) spacer.remove();
+    syncAlertSpacerHeight();
+  }
+  function renderAdminLastAlert(message){
+    const box = $("adminLastAlert");
+    const text = $("adminLastAlertText");
+    const isAdmin = Boolean(state.user && state.user.isAdmin);
+    if(!box || !text){
+      return;
+    }
+    if(isAdmin && message){
+      box.style.display = "block";
+      text.textContent = message;
+    } else {
+      box.style.display = "none";
+      text.textContent = "";
+    }
+  }
+  function renderAlertAdminUI(){
+    const card = $("alertAdminCard");
+    const badge = $("alertAdminStatus");
+    const isAdmin = Boolean(state.user && state.user.isAdmin);
+    const data = state.alerts?.data || null;
+    const ok = Boolean(isAdmin && data && data.ok);
+    if(card){
+      card.style.display = isAdmin ? "block" : "none";
+    }
+    if(badge){
+      badge.textContent = ok ? "Avviso attivo" : "Nessun avviso";
+    }
+    renderAdminLastAlert(ok ? data?.message || "" : "");
+  }
+  function showOperatorAlertBanner(message, id){
+    const { banner, text, closeBtn } = ensureTopAlertElements();
+    banner.dataset.alertId = String(id ?? "");
+    text.textContent = message;
+    if(closeBtn){
+      closeBtn.onclick = ()=> dismissOperatorAlert(id);
+    }
+    requestAnimationFrame(()=> syncAlertSpacerHeight());
+  }
+  function dismissOperatorAlert(id){
+    recordDismissedAlert(id);
+    removeOperatorAlertDom();
+  }
+  function handleAlertSnapshot(snap){
+    const info = normalizeAlertSnap(snap);
+    state.alerts.data = info;
+    renderAlertAdminUI();
+    const isAdmin = Boolean(state.user && state.user.isAdmin);
+    if(isAdmin){
+      removeOperatorAlertDom();
+      return;
+    }
+    const dismissed = shouldDismissAlert(info.id);
+    if(!info.ok || dismissed){
+      removeOperatorAlertDom();
+      return;
+    }
+    showOperatorAlertBanner(info.message, info.id);
   }
 
   // ===============================
@@ -6170,6 +6427,7 @@ function showAuthGate(){
     try{
       const col = fs.collection(db, "powderProductions");
       const hcol = fs.collection(db, "powderProdHistory");
+      const alertRef = alertDoc(fs, db);
       const unsubs = [];
 
       const onErr = (err)=>{
@@ -6211,11 +6469,19 @@ function showAuthGate(){
       try {
         unsubs.push(fs.onSnapshot(hcol, histNext, onErr));
       } catch(_e) {}
+      try {
+        const alertUnsub = fs.onSnapshot(alertRef, handleAlertSnapshot, onErr);
+        unsubs.push(alertUnsub);
+        state.alerts.unsub = alertUnsub;
+      } catch(_e) {
+        state.alerts.unsub = null;
+      }
 
       __fsUnsub = ()=>{
         for(const u of unsubs){
           try{ u && u(); }catch(_e){}
         }
+        state.alerts.unsub = null;
         __fsUnsub = null;
       };
     }catch(err){
@@ -6244,6 +6510,10 @@ function showAuthGate(){
 
   function resetAuthDependentState(){
     __fsStopListen();
+    state.alerts = { unsub:null, data:null };
+    state.alertSaving = false;
+    removeOperatorAlertDom();
+    renderAlertAdminUI();
     state.historyReady = false;
     state.history = [];
     if(state.notifUnsub){
@@ -6448,6 +6718,15 @@ function showAuthGate(){
     const id = `${Date.now()}_${Math.random().toString(16).slice(2)}`;
     await fs.setDoc(fs.doc(db, "powderProdHistory", id), { ...entry, id, at: nowIso(), concludedAt: entry.endedAt || nowIso() });
     return id;
+  }
+  async function saveOperatorAlert(message, expiresAt=0){
+    if(!state.firebase.ok) throw new Error("Firebase non disponibile");
+    const fs = state.firebase.api;
+    const db = state.firebase.db;
+    const id = `${Date.now()}`;
+    const payload = { id, message, createdAt: Date.now(), expiresAt: Number(expiresAt||0) };
+    await fs.setDoc(alertDoc(fs, db), payload, { merge:true });
+    return payload;
   }
 
   function mobileAllowlistDoc(fs, db){
@@ -10359,8 +10638,10 @@ function renderHome(){
     window.addEventListener("resize", updateKioskAdminMode);
     window.addEventListener("resize", scheduleDesktopStackUpdate);
     window.addEventListener("resize", handleDesktopResize);
+    window.addEventListener("resize", syncAlertSpacerHeight);
     window.addEventListener("orientationchange", handleDesktopResize);
     window.addEventListener("orientationchange", updateKioskAdminMode);
+    window.addEventListener("orientationchange", syncAlertSpacerHeight);
     try{ kioskAspectMq && kioskAspectMq.addEventListener("change", updateKioskAdminMode); }catch(_e){ try{ kioskAspectMq && kioskAspectMq.addListener(updateKioskAdminMode); }catch(_e2){} }
     wireStatsClearAction();
 
@@ -10455,6 +10736,44 @@ function renderHome(){
       $("btnMobileStats")?.addEventListener("click", (e)=>{
         e.preventDefault();
         scrollToStatsSection();
+      });
+    }catch(_e){}
+
+    // Avviso operatori (banner)
+    try{
+      $("btnSendAlert")?.addEventListener("click", async()=>{
+        const fb = $("alertFeedback");
+        const isAdmin = Boolean(state.user && state.user.isAdmin);
+        if(!isAdmin){
+          showToast("Solo admin", "Non hai i permessi per inviare avvisi.");
+          if(fb) fb.textContent = "Permesso mancante.";
+          return;
+        }
+        const msgEl = $("alertMessageInput");
+        const expEl = $("alertExpireInput");
+        const message = (msgEl?.value || "").trim();
+        const expRaw = Number(expEl?.value || 0);
+        const expMinutes = Number.isFinite(expRaw) ? Math.max(0, expRaw) : 0;
+        const expiresAt = expMinutes > 0 ? Date.now() + (expMinutes * 60 * 1000) : 0;
+        if(!message){
+          showToast("Testo mancante", "Inserisci il messaggio dell’avviso.");
+          if(fb) fb.textContent = "Testo avviso obbligatorio.";
+          return;
+        }
+        if(state.alertSaving) return;
+        state.alertSaving = true;
+        if(fb) fb.textContent = "Invio…";
+        try{
+          await saveOperatorAlert(message, expiresAt);
+          if(fb) fb.textContent = "Avviso inviato.";
+          if(msgEl) msgEl.value = "";
+        }catch(err){
+          console.warn("send alert error", err);
+          if(fb) fb.textContent = "Invio non riuscito (permessi o rete).";
+          showToast("Invio non riuscito", "Controlla permessi Firestore o la rete.");
+        }finally{
+          state.alertSaving = false;
+        }
       });
     }catch(_e){}
 
