@@ -4095,6 +4095,11 @@
       const v = parseFloat(gMatch[1]);
       if(Number.isFinite(v) && v>0) return v/1000;
     }
+    const packFromBag = s.match(/\b(sacchi|sacchetti|sacco|sacchetto)\s*(?:da\s*)?(\d+(?:\.\d+)?)/);
+    if(packFromBag){
+      const v = parseFloat(packFromBag[2]);
+      if(Number.isFinite(v) && v>0) return v;
+    }
     return null;
   }
   function resolveQtyKg(ctx={}){ // CODEX: sorgente di verità qty -> kg
@@ -5922,48 +5927,11 @@ function showAuthGate(){
     return 0;
   }
 
-  const DEFAULT_CAPACITY_F480 = 1000;
-  const DEFAULT_CAPACITY_F830 = 1000;
-  const BOBINA_FORMAT_RULES = [
-    { re: /\bF830\b|\b830\b/i, type: "F830" },
-    { re: /\bF480\b|\b480\b/i, type: "F480" },
-  ];
-  function readCap(key, def){
+  const DEFAULT_BOBINA_GR_F480 = 10000;
+  const DEFAULT_BOBINA_GR_F830 = 10000;
+  function readBobinaGr(key, def){
     const n = parseInt(localStorage.getItem(key)||"", 10);
-    return Number.isFinite(n) && n>=50 && n<=20000 ? n : def;
-  }
-  function detectBobinaType(line){
-    const tryMatch = (val)=>{
-      if(val==null) return null;
-      const str = String(val||"");
-      for(const rule of BOBINA_FORMAT_RULES){
-        if(rule.re.test(str)) return rule.type;
-      }
-      return null;
-    };
-    const explicitFields = [
-      line?.labelFormat, line?.labelType, line?.bobina, line?.bobinaTipo, line?.bobinaFormat, line?.bobinaFormato,
-      line?.formatoBobina, line?.formatoEtichetta, line?.etichettaFormato, line?.formato, line?.format,
-      line?.width, line?.larghezza, line?.printer, line?.stampante
-    ];
-    for(const val of explicitFields){
-      const t = tryMatch(val);
-      if(t) return { type:t, matched:true };
-    }
-    const fallbackFields = [line?.desc, line?.note, line?.notes, line?.itemDesc, line?.material, line?.imballaggio];
-    for(const val of fallbackFields){
-      const t = tryMatch(val);
-      if(t) return { type:t, matched:true };
-    }
-    return { type:"F480", matched:false };
-  }
-  function estimateLineLabels(line){
-    const lineKg = estimateLineKg(line);
-    const packKg = resolvePackKgForLine(line);
-    if(Number.isFinite(packKg) && packKg>0 && Number.isFinite(lineKg) && lineKg>0){
-      return lineKg / packKg;
-    }
-    return null;
+    return Number.isFinite(n) && n>=500 && n<=50000 ? n : def;
   }
 
   function computeVisiblePowderSummary(orders){ // UI-FIX: kg-totali
@@ -5972,41 +5940,45 @@ function showAuthGate(){
       for(const l of (o.lines||[])){ lines.push(l); }
     }
     let totalKg = 0;
-    let totalLabels = 0;
-    let hasLabelData = false;
-    const capF480 = readCap("gc_bobina_capacity_f480_v1", DEFAULT_CAPACITY_F480);
-    const capF830 = readCap("gc_bobina_capacity_f830_v1", DEFAULT_CAPACITY_F830);
-    let labelsF480 = 0;
-    let labelsF830 = 0;
-    let labelsUnknown = 0;
+    let kgTot1kg = 0;
+    let kgTot5kg = 0;
+    let kgUnknown = 0;
+    const capF480 = readBobinaGr("gc_bobina_gr_f480_v1", DEFAULT_BOBINA_GR_F480);
+    const capF830 = readBobinaGr("gc_bobina_gr_f830_v1", DEFAULT_BOBINA_GR_F830);
     const samples = [];
     for(const l of lines){
       const lineKg = estimateLineKg(l);
       if(Number.isFinite(lineKg)) totalKg += lineKg;
-      const labelsForRow = estimateLineLabels(l);
-      if(Number.isFinite(labelsForRow) && labelsForRow>=0){
-        totalLabels += labelsForRow;
-        hasLabelData = true;
-        const { type, matched } = detectBobinaType(l);
-        if(type === "F830"){
-          labelsF830 += labelsForRow;
+      const pack = resolvePackKgForLine(l);
+      if(Number.isFinite(lineKg) && lineKg>0){
+        if(pack===1){
+          kgTot1kg += lineKg;
+        } else if(pack===5){
+          kgTot5kg += lineKg;
         } else {
-          labelsF480 += labelsForRow;
-          if(!matched) labelsUnknown += labelsForRow;
+          kgUnknown += lineKg;
         }
       }
       if(samples.length < 5) samples.push({ rawQty: l.qty, parsedQty: parseItNumber(l.qty) });
     }
-    const bobine = hasLabelData ? {
-      labelsF480,
-      labelsF830,
-      labelsUnknown,
+    const filmF480Gr = kgTot1kg * 10;
+    const filmF830Gr = kgTot5kg * 4;
+    const capF480Valid = Number.isFinite(capF480) && capF480>0;
+    const capF830Valid = Number.isFinite(capF830) && capF830>0;
+    const bobineF480 = capF480Valid ? Math.ceil(filmF480Gr / capF480) : null;
+    const bobineF830 = capF830Valid ? Math.ceil(filmF830Gr / capF830) : null;
+    const bobine = {
+      kgTot1kg,
+      kgTot5kg,
+      kgUnknown,
+      filmF480Gr,
+      filmF830Gr,
       capF480,
       capF830,
-      bobineF480: Math.ceil(labelsF480 / capF480) || 0,
-      bobineF830: Math.ceil(labelsF830 / capF830) || 0
-    } : null;
-    return { totalKg, lineCount: lines.length, samples, labels: hasLabelData ? totalLabels : null, bobine };
+      bobineF480,
+      bobineF830
+    };
+    return { totalKg, lineCount: lines.length, samples, labels: null, bobine };
   }
 
   function defaultMagazzinoFilters(){
@@ -6901,17 +6873,33 @@ function renderHome(){
     const kBobineF830 = $("kBobineF830");
     const kBobineF480Meta = $("kBobineF480Meta");
     const kBobineF830Meta = $("kBobineF830Meta");
-    const fmt = (n)=> Number.isFinite(n) ? Math.max(0, Math.round(n)).toLocaleString("it-IT") : "0";
+    const fmtInt = (n)=> Number.isFinite(n) ? Math.max(0, Math.round(n)).toLocaleString("it-IT") : "0";
+    const fmtGram = (n)=>{
+      const num = Number(n||0);
+      if(!Number.isFinite(num)) return "—";
+      const rounded = Math.round(num*10)/10;
+      return `${rounded.toLocaleString("it-IT")} g`;
+    };
+    const fmtKg = (n)=>{
+      const num = Number(n||0);
+      if(!Number.isFinite(num)) return "0";
+      return num.toLocaleString("it-IT", { maximumFractionDigits: 3 });
+    };
     if(kBobineF480 && kBobineF830){
       if(bobine){
-        kBobineF480.textContent = fmt(bobine.bobineF480);
-        kBobineF830.textContent = fmt(bobine.bobineF830);
-        if(kBobineF480Meta) kBobineF480Meta.textContent = `≈ ${fmt(bobine.labelsF480)} etichette · 1 bobina = ${fmt(bobine.capF480)} etichette`;
-        if(kBobineF830Meta) kBobineF830Meta.textContent = `≈ ${fmt(bobine.labelsF830)} etichette · 1 bobina = ${fmt(bobine.capF830)} etichette`;
-        if(state.user?.isAdmin && bobine.labelsUnknown>0){
-          const extra = ` · Non classificati: ${fmt(bobine.labelsUnknown)} etichette`;
-          if(kBobineF480Meta) kBobineF480Meta.textContent += extra;
-          if(kBobineF830Meta) kBobineF830Meta.textContent += extra;
+        const capF480Valid = Number.isFinite(bobine.capF480) && bobine.capF480>0;
+        const capF830Valid = Number.isFinite(bobine.capF830) && bobine.capF830>0;
+        kBobineF480.textContent = capF480Valid && bobine.bobineF480!=null ? fmtInt(bobine.bobineF480) : "—";
+        kBobineF830.textContent = capF830Valid && bobine.bobineF830!=null ? fmtInt(bobine.bobineF830) : "—";
+        if(kBobineF480Meta){
+          kBobineF480Meta.textContent = capF480Valid
+            ? `Film: ${fmtGram(bobine.filmF480Gr)} • Kg: ${fmtKg(bobine.kgTot1kg)} · 1 bobina = ${fmtGram(bobine.capF480)}`
+            : "Capacità bobina non configurata";
+        }
+        if(kBobineF830Meta){
+          kBobineF830Meta.textContent = capF830Valid
+            ? `Film: ${fmtGram(bobine.filmF830Gr)} • Kg: ${fmtKg(bobine.kgTot5kg)} · 1 bobina = ${fmtGram(bobine.capF830)}`
+            : "Capacità bobina non configurata";
         }
       } else {
         kBobineF480.textContent = "—";
