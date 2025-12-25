@@ -3851,6 +3851,7 @@ html.deskScrolled .wrap{
                 <div class="muted" id="kBobineF830Meta" style="margin-top:4px; font-size:12px;">Stima non disponibile</div>
               </div>
             </div>
+            <div class="muted" id="kBobineUnknown" style="margin-top:6px; font-size:12px; display:none;">Non classificati: — kg</div>
 
           </div>
         </div>
@@ -5162,33 +5163,47 @@ html.deskScrolled .wrap{
   // ===============================
   // XML -> Orders (snello)
   // ===============================
+  function normalizePackValue(val, opts={}){
+    const n = Number(val);
+    if(!Number.isFinite(n)) return null;
+    const allowed = [0.5, 1, 5, 10];
+    for(const a of allowed){
+      if(Math.abs(n - a) < 0.011) return a;
+    }
+    if(opts.strict) return null;
+    return n>0 ? n : null;
+  }
   function detectPackKg(desc){
     const s = norm(desc||"").replace(/,/g,".");
     if(!s) return null;
+    const patterns = [
+      { kg:10, re:/\b10\s?kg\b|\bsacco\s?10\b|\bsacchi\s?da\s?10\b/ },
+      { kg:5, re:/\b5\s?kg\b|\bsacco\s?5\b|\bsacchi\s?da\s?5\b/ },
+      { kg:1, re:/\b1\s?kg\b|\bsacchetto\s?1\b|\bsacchetti\s?da\s?1\b/ },
+      { kg:0.5, re:/\b0[.,]5\s?kg\b|\b500\s?g\b|\b0[.,]5kg\b|\bsacchetto\s?500\b/ }
+    ];
+    for(const { kg, re } of patterns){
+      if(re.test(s)) return kg;
+    }
     const kgAhead = s.match(/(\d+(?:\.\d+)?)[x\-\s]*kg\b/);
     if(kgAhead){
-      const v = parseFloat(kgAhead[1]);
-      if(Number.isFinite(v) && v>0) return v;
+      const v = normalizePackValue(parseFloat(kgAhead[1]));
+      if(v!=null) return v;
     }
     const kgAfter = s.match(/\bkg[x\-\s]*(\d+(?:\.\d+)?)/);
     if(kgAfter){
-      const v = parseFloat(kgAfter[1]);
-      if(Number.isFinite(v) && v>0) return v;
-    }
-    const kgNear = s.match(/(\d+(?:\.\d+)?)[\s]*(?:kg|chilogrammi)\b/);
-    if(kgNear){
-      const v = parseFloat(kgNear[1]);
-      if(Number.isFinite(v) && v>0) return v;
+      const v = normalizePackValue(parseFloat(kgAfter[1]));
+      if(v!=null) return v;
     }
     const gMatch = s.match(/(\d+(?:\.\d+)?)[x\-\s]*(?:gr|g|grammi)\b/);
     if(gMatch){
-      const v = parseFloat(gMatch[1]);
-      if(Number.isFinite(v) && v>0) return v/1000;
+      const v = normalizePackValue(parseFloat(gMatch[1])/1000);
+      if(v!=null) return v;
     }
     const packFromBag = s.match(/\b(sacchi|sacchetti|sacco|sacchetto)\s*(?:da\s*)?(\d+(?:\.\d+)?)/);
     if(packFromBag){
-      const v = parseFloat(packFromBag[2]);
-      if(Number.isFinite(v) && v>0) return v;
+      const v = normalizePackValue(parseFloat(packFromBag[2]));
+      if(v!=null) return v;
     }
     return null;
   }
@@ -6983,12 +6998,29 @@ function showAuthGate(){
   }
 
   function resolvePackKgForLine(line){
-    const direct = Number(line?.packKg);
-    if(Number.isFinite(direct) && direct>0) return direct;
-    const fromDesc = detectPackKg(line?.desc || "");
-    if(Number.isFinite(fromDesc) && fromDesc>0) return fromDesc;
-    const fromCombo = detectPackKg(`${line?.desc||""} ${line?.um||""}`);
-    if(Number.isFinite(fromCombo) && fromCombo>0) return fromCombo;
+    const parsePackField = (val)=>{
+      if(val==null) return null;
+      const str = String(val).replace(/,/g,".").trim();
+      if(!str) return null;
+      const parsed = parseFloat(str);
+      return normalizePackValue(parsed);
+    };
+    const fieldCandidates = [
+      line?.packKg, line?.packkg, line?.formatoKg, line?.formato, line?.sizeKg, line?.size,
+      line?.pack, line?.packaging, line?.packSize, line?.formatoConfezione
+    ];
+    for(const f of fieldCandidates){
+      const parsed = parsePackField(f);
+      if(parsed!=null) return parsed;
+    }
+    const textCandidates = [
+      line?.packKgLabel, line?.formatoLabel, line?.desc, line?.prodotto, line?.product, line?.note, line?.variant, line?.variante,
+      `${line?.desc||""} ${line?.um||""}`
+    ];
+    for(const t of textCandidates){
+      const detected = detectPackKg(t||"");
+      if(detected!=null) return detected;
+    }
     return null;
   }
   function isUnitKg(um){
@@ -7019,54 +7051,54 @@ function showAuthGate(){
     return 0;
   }
 
-  const DEFAULT_BOBINA_GR_F480 = 10000;
-  const DEFAULT_BOBINA_GR_F830 = 10000;
-  function readBobinaGr(key, def){
-    const n = parseInt(localStorage.getItem(key)||"", 10);
-    return Number.isFinite(n) && n>=500 && n<=50000 ? n : def;
-  }
-
   function computeVisiblePowderSummary(orders){ // UI-FIX: kg-totali
     const lines = [];
     for(const o of (orders||[])){
       for(const l of (o.lines||[])){ lines.push(l); }
     }
     let totalKg = 0;
-    let kgTot1kg = 0;
-    let kgTot5kg = 0;
+    let kg0_5 = 0;
+    let kg1 = 0;
+    let kg5 = 0;
+    let kg10 = 0;
     let kgUnknown = 0;
-    const capF480 = readBobinaGr("gc_bobina_gr_f480_v1", DEFAULT_BOBINA_GR_F480);
-    const capF830 = readBobinaGr("gc_bobina_gr_f830_v1", DEFAULT_BOBINA_GR_F830);
     const samples = [];
     for(const l of lines){
       const lineKg = estimateLineKg(l);
       if(Number.isFinite(lineKg)) totalKg += lineKg;
       const pack = resolvePackKgForLine(l);
       if(Number.isFinite(lineKg) && lineKg>0){
-        if(pack===1){
-          kgTot1kg += lineKg;
-        } else if(pack===5){
-          kgTot5kg += lineKg;
+        const normalizedPack = normalizePackValue(pack, { strict:true });
+        if(normalizedPack===0.5){
+          kg0_5 += lineKg;
+        } else if(normalizedPack===1){
+          kg1 += lineKg;
+        } else if(normalizedPack===5){
+          kg5 += lineKg;
+        } else if(normalizedPack===10){
+          kg10 += lineKg;
         } else {
           kgUnknown += lineKg;
         }
       }
       if(samples.length < 5) samples.push({ rawQty: l.qty, parsedQty: parseItNumber(l.qty) });
     }
-    const filmF480Gr = kgTot1kg * 10;
-    const filmF830Gr = kgTot5kg * 4;
-    const capF480Valid = Number.isFinite(capF480) && capF480>0;
-    const capF830Valid = Number.isFinite(capF830) && capF830>0;
-    const bobineF480 = capF480Valid ? Math.ceil(filmF480Gr / capF480) : null;
-    const bobineF830 = capF830Valid ? Math.ceil(filmF830Gr / capF830) : null;
+    const kgTotF480 = kg0_5 + kg1;
+    const kgTotF830 = kg5 + kg10;
+    const filmF480Gr = Math.round(kgTotF480 * 10);
+    const filmF830Gr = Math.round(kgTotF830 * 4);
+    const bobineF480 = Math.ceil(filmF480Gr / 25000);
+    const bobineF830 = Math.ceil(filmF830Gr / 40000);
     const bobine = {
-      kgTot1kg,
-      kgTot5kg,
+      kg0_5,
+      kg1,
+      kg5,
+      kg10,
+      kgTotF480,
+      kgTotF830,
       kgUnknown,
       filmF480Gr,
       filmF830Gr,
-      capF480,
-      capF830,
       bobineF480,
       bobineF830
     };
@@ -7965,39 +7997,51 @@ function renderHome(){
     const kBobineF830 = $("kBobineF830");
     const kBobineF480Meta = $("kBobineF480Meta");
     const kBobineF830Meta = $("kBobineF830Meta");
+    const kBobineUnknown = $("kBobineUnknown");
     const fmtInt = (n)=> Number.isFinite(n) ? Math.max(0, Math.round(n)).toLocaleString("it-IT") : "0";
-    const fmtGram = (n)=>{
-      const num = Number(n||0);
-      if(!Number.isFinite(num)) return "—";
-      const rounded = Math.round(num*10)/10;
-      return `${rounded.toLocaleString("it-IT")} g`;
-    };
     const fmtKg = (n)=>{
       const num = Number(n||0);
       if(!Number.isFinite(num)) return "0";
-      return num.toLocaleString("it-IT", { maximumFractionDigits: 3 });
+      return num.toLocaleString("it-IT", { minimumFractionDigits: 0, maximumFractionDigits: 1 });
+    };
+    const fmtFilm = (n)=>{
+      const num = Number(n||0);
+      if(!Number.isFinite(num)) return "0";
+      return Math.round(num).toLocaleString("it-IT");
     };
     if(kBobineF480 && kBobineF830){
       if(bobine){
-        const capF480Valid = Number.isFinite(bobine.capF480) && bobine.capF480>0;
-        const capF830Valid = Number.isFinite(bobine.capF830) && bobine.capF830>0;
+        const capF480Valid = Number.isFinite(bobine.bobineF480);
+        const capF830Valid = Number.isFinite(bobine.bobineF830);
         kBobineF480.textContent = capF480Valid && bobine.bobineF480!=null ? fmtInt(bobine.bobineF480) : "—";
         kBobineF830.textContent = capF830Valid && bobine.bobineF830!=null ? fmtInt(bobine.bobineF830) : "—";
         if(kBobineF480Meta){
-          kBobineF480Meta.textContent = capF480Valid
-            ? `Film: ${fmtGram(bobine.filmF480Gr)} • Kg: ${fmtKg(bobine.kgTot1kg)} · 1 bobina = ${fmtGram(bobine.capF480)}`
-            : "Capacità bobina non configurata";
+          kBobineF480Meta.textContent = capF480Valid ? "" : "Stima non disponibile";
+          if(capF480Valid){
+            kBobineF480Meta.innerHTML = `Kg 0,5: ${fmtKg(bobine.kg0_5)} • Kg 1: ${fmtKg(bobine.kg1)}<br>Tot F480: ${fmtKg(bobine.kgTotF480)} kg<br>Film: ${fmtFilm(bobine.filmF480Gr)} g • Bobina: 25 kg`;
+          }
         }
         if(kBobineF830Meta){
-          kBobineF830Meta.textContent = capF830Valid
-            ? `Film: ${fmtGram(bobine.filmF830Gr)} • Kg: ${fmtKg(bobine.kgTot5kg)} · 1 bobina = ${fmtGram(bobine.capF830)}`
-            : "Capacità bobina non configurata";
+          kBobineF830Meta.textContent = capF830Valid ? "" : "Stima non disponibile";
+          if(capF830Valid){
+            kBobineF830Meta.innerHTML = `Kg 5: ${fmtKg(bobine.kg5)} • Kg 10: ${fmtKg(bobine.kg10)}<br>Tot F830: ${fmtKg(bobine.kgTotF830)} kg<br>Film: ${fmtFilm(bobine.filmF830Gr)} g • Bobina: 40 kg`;
+          }
+        }
+        if(kBobineUnknown){
+          const unknown = Number(bobine.kgUnknown||0);
+          if(unknown>0){
+            kBobineUnknown.style.display = "block";
+            kBobineUnknown.textContent = `Non classificati: ${fmtKg(unknown)} kg`;
+          } else {
+            kBobineUnknown.style.display = "none";
+          }
         }
       } else {
         kBobineF480.textContent = "—";
         kBobineF830.textContent = "—";
         if(kBobineF480Meta) kBobineF480Meta.textContent = "Stima non disponibile";
         if(kBobineF830Meta) kBobineF830Meta.textContent = "Stima non disponibile";
+        if(kBobineUnknown) kBobineUnknown.style.display = "none";
       }
     }
     const pOrders = state.powderOrders || [];
