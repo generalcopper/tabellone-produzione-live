@@ -153,6 +153,13 @@
     }
     .mobileStatsLink:active{ transform: translateY(1px); box-shadow: 0 8px 16px rgba(10,132,255,.14); }
     .mobileStatsLink:focus-visible{ outline:2px solid rgba(10,132,255,.28); outline-offset:2px; }
+    @media (max-width: 820px){
+      body.role-operator #desktopSummaryCard,
+      body.role-operator .adminPanel,
+      body.role-operator #notifAdminBox{
+        display:none !important;
+      }
+    }
     @media (max-width: 720px){
       header.headerRow { gap:10px; padding-top: calc(6px + var(--safe-top)); min-height: 64px; }
       .title { flex-direction:column; align-items:flex-start; text-align:left; width:auto; }
@@ -3634,6 +3641,39 @@
     const legacyWidth = typeof window !== "undefined" ? (window.innerWidth <= 900) : false;
     return Boolean((mq && mq.matches) || uaMobile || legacyWidth);
   }
+  function applyRoleClasses(){
+    const isAdmin = Boolean(state.user && state.user.isAdmin);
+    document.body.classList.toggle("role-admin", isAdmin);
+    document.body.classList.toggle("role-operator", !isAdmin);
+  }
+  const ADMIN_ANCHOR_TOKENS = ["admin", "mobilesendcard", "desktopsummarycard", "notifadminbox"];
+  function guardAdminAccessOnMobile(){
+    if(!isMobile()) return;
+    const isAdmin = Boolean(state.user && state.user.isAdmin);
+    if(isAdmin) return;
+    const hash = (typeof location !== "undefined" ? (location.hash||"") : "").toLowerCase();
+    if(!hash) return;
+    const shouldGuard = ADMIN_ANCHOR_TOKENS.some(tok=> hash.includes(tok));
+    if(!shouldGuard) return;
+    showToast("Sezione disponibile solo per admin", "Sezione disponibile solo per admin");
+    try{ history.replaceState(null, document.title, location.pathname + location.search); }catch(_e){}
+    try{
+      const home = document.querySelector(".wrap") || document.body;
+      if(home && typeof home.scrollIntoView==="function"){
+        home.scrollIntoView({ behavior:"smooth", block:"start" });
+      } else {
+        window.scrollTo({ top:0, behavior:"smooth" });
+      }
+    }catch(_e){
+      try{ window.scrollTo({ top:0, behavior:"smooth" }); }catch(_e2){}
+    }
+  }
+  let adminHashGuardBound = false;
+  function bindAdminHashGuard(){
+    if(adminHashGuardBound) return;
+    window.addEventListener("hashchange", guardAdminAccessOnMobile);
+    adminHashGuardBound = true;
+  }
   function debounce(fn, wait=150){
     let t = null;
     return (...args)=>{
@@ -4775,6 +4815,7 @@ function showAuthGate(){
     renderHeaderKpis();
     state.user = null;
     state.operator = null;
+    applyRoleClasses();
     updateKioskAdminMode();
     $("hdrUser").textContent = "—";
   }
@@ -4854,6 +4895,9 @@ function showAuthGate(){
       state.user = { uid: user.uid, fullName: profile.fullName, email: (user.email||profile.email||""), isAdmin: Boolean(access && access.isAdmin) };
       state.operator = state.user.fullName;
       $("hdrUser").textContent = state.user.fullName;
+      applyRoleClasses();
+      guardAdminAccessOnMobile();
+      bindAdminHashGuard();
       try{ await loadGlobalStats(); }catch(_e){ applyGlobalStats(getGlobalStatsData(), state.globalStats?.source||"local"); }
       renderHeaderKpis();
       updateKioskAdminMode();
