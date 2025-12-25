@@ -1037,6 +1037,87 @@
       color:rgba(0,0,0,.82);
     }
     .magBadge{ background: rgba(0,0,0,.06); border-radius:12px; padding:3px 8px; font-size:11px; font-weight:900; }
+    .magFilterBar{
+      display:flex;
+      flex-wrap:wrap;
+      gap:10px;
+      align-items:flex-end;
+      margin: 2px 0 10px;
+    }
+    .magFilterField{
+      display:flex;
+      flex-direction:column;
+      gap:6px;
+      min-width:0;
+      flex:1 1 180px;
+    }
+    .magFilterLabel{
+      font-size:11px;
+      font-weight:900;
+      color: var(--muted);
+      letter-spacing:.06em;
+      text-transform: uppercase;
+    }
+    .magFilterInput{
+      width:100%;
+      padding: 11px 12px;
+      border-radius: 12px;
+      border: 1px solid var(--stroke);
+      background: #fff;
+      font-weight: 850;
+      color: rgba(0,0,0,.86);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,.8);
+    }
+    .magFilterInput:focus-visible{ outline:2px solid rgba(10,132,255,.25); outline-offset:2px; }
+    .magFilterActions{
+      display:flex;
+      align-items:center;
+      gap:8px;
+      flex:0 0 auto;
+      min-width:0;
+      flex-wrap:wrap;
+    }
+    .magResultBadge{
+      display:inline-flex;
+      align-items:center;
+      gap:6px;
+      padding:8px 10px;
+      border-radius:12px;
+      background: rgba(0,0,0,.05);
+      border:1px solid var(--stroke);
+      font-weight:900;
+      font-size:12px;
+      white-space:nowrap;
+    }
+    .magFilterChips{
+      display:flex;
+      flex-wrap:wrap;
+      gap:8px;
+      margin-top: 2px;
+    }
+    .magChip{
+      display:inline-flex;
+      align-items:center;
+      gap:6px;
+      padding:8px 10px;
+      border-radius:12px;
+      background: rgba(10,132,255,.10);
+      border:1px solid rgba(10,132,255,.28);
+      color: rgba(0,0,0,.88);
+      font-weight:900;
+      font-size:12px;
+      cursor:pointer;
+    }
+    .magChip .x{
+      font-weight:1000;
+      opacity:.8;
+      line-height:1;
+    }
+    @media (max-width: 1180px){
+      .magFilterBar{ flex-direction:column; align-items:stretch; }
+      .magFilterActions{ justify-content:flex-start; }
+      .magFilterField{ flex:1 1 auto; }
+    }
     .signaturePad{ touch-action: none; background:#fff; }
     .whOverview{
       display:flex;
@@ -2723,6 +2804,7 @@
   const NOTIF_LIMIT = 40;
   const ALLOW_PATH = { col: "hub_config", doc: "hub_linea_polveri_mobile_allowlist" };
   const ALLOW_DOC_PATH = `${ALLOW_PATH.col}/${ALLOW_PATH.doc}`;
+  const MAG_FILTERS_KEY = "gc_magazzino_filters_v1";
 
 
   const OPERATORS = ["Hassan","Ahmed","Muhammed","Mustapha","Youssef"];
@@ -2790,6 +2872,7 @@
       db: null,
       api: null,
     },
+    magFilters: loadMagazzinoFilters(),
     magazzinoOverview: [],
     magazzinoDetailLookup: new Map(),
     mobileAllowlist: { ready:false, keys:new Set(), updatedAt:null, updatedBy:"", allowAll:true, docExists:false, error:"", lastError:"", lastSyncTs:null, pendingRender:false },
@@ -5356,6 +5439,152 @@ function showAuthGate(){
     return { totalKg, lineCount: lines.length, samples, labels: hasLabelData ? totalLabels : null };
   }
 
+  function defaultMagazzinoFilters(){
+    return { customer:"", orderQuery:"", item:"" };
+  }
+  function loadMagazzinoFilters(){
+    try{
+      const raw = localStorage.getItem(MAG_FILTERS_KEY);
+      const parsed = raw ? JSON.parse(raw) : {};
+      return { ...defaultMagazzinoFilters(), ...(parsed && typeof parsed==="object" ? parsed : {}) };
+    }catch(_e){
+      return defaultMagazzinoFilters();
+    }
+  }
+  function saveMagazzinoFilters(filters){
+    try{ localStorage.setItem(MAG_FILTERS_KEY, JSON.stringify(filters||defaultMagazzinoFilters())); }catch(_e){}
+  }
+  function setMagazzinoFilters(next){
+    state.magFilters = { ...defaultMagazzinoFilters(), ...(state.magFilters||{}), ...(next||{}) };
+    saveMagazzinoFilters(state.magFilters);
+  }
+  function resetMagazzinoFilters(){
+    state.magFilters = defaultMagazzinoFilters();
+    saveMagazzinoFilters(state.magFilters);
+  }
+  function collectMagazzinoItemLabels(detail){
+    const labels = [];
+    const push = (val)=>{
+      if(val==null) return;
+      const txt = String(val).trim();
+      if(txt) labels.push(txt);
+    };
+    const order = detail?.order || {};
+    for(const l of (order.lines||[])){
+      push(l.imballaggio); push(l.imballo); push(l.articolo); push(l.item); push(l.imballaggi); push(l.desc); push(l.code);
+    }
+    const comp = detail?.comp || {};
+    if(Number(comp.productKg)) push("Prodotto da completare");
+    comp?.bobine?.forEach?.((_,label)=> push(label));
+    if(Number(comp.etichette)) push("Etichette");
+    comp?.scatole?.forEach?.((_,label)=> push(label));
+    comp?.divisori?.forEach?.((_,label)=> push(label));
+    comp?.altri?.forEach?.((_,label)=> push(label));
+    if((comp.nonConfig||[]).length) push("Non configurati");
+    return labels;
+  }
+  function collectMagazzinoOptions(orderDetails){
+    const customers = new Map();
+    const items = new Map();
+    const push = (map, label)=>{
+      const normVal = stableNorm(label);
+      if(!normVal || map.has(normVal)) return;
+      map.set(normVal, String(label).trim());
+    };
+    for(const detail of (orderDetails||[])){
+      const order = detail?.order || {};
+      const customerRaw = order.customer || order.cliente || order.customerName || order.ragioneSociale || "";
+      push(customers, customerRaw);
+      const labels = collectMagazzinoItemLabels(detail);
+      for(const lbl of labels){ push(items, lbl); }
+    }
+    const toArr = (map)=> Array.from(map.values()).sort((a,b)=> a.localeCompare(b,"it",{ sensitivity:"base" }));
+    return { customers: toArr(customers), items: toArr(items) };
+  }
+  function collectMagazzinoItemNorms(detail){
+    const set = new Set();
+    for(const lbl of collectMagazzinoItemLabels(detail)){
+      const n = stableNorm(lbl);
+      if(n) set.add(n);
+    }
+    return set;
+  }
+  function aggregateMagazzinoTotalsFromDetails(orderDetails){
+    const totals = { productKg:0, bobine:new Map(), etichette:0, scatole:new Map(), divisori:new Map(), altri:new Map(), nonConfig:[], warnings:[] };
+    for(const { comp } of (orderDetails||[])){
+      const c = comp || {};
+      totals.productKg += Number(c.productKg||0);
+      c?.bobine?.forEach?.((qty,label)=> magAddToMap(totals.bobine, label, qty));
+      totals.etichette += Number(c.etichette||0);
+      c?.scatole?.forEach?.((qty,label)=> magAddToMap(totals.scatole, label, qty));
+      c?.divisori?.forEach?.((qty,label)=> magAddToMap(totals.divisori, label, qty));
+      c?.altri?.forEach?.((qty,label)=> magAddToMap(totals.altri, label, qty));
+      if(Array.isArray(c.nonConfig)) totals.nonConfig.push(...c.nonConfig);
+      if(Array.isArray(c.warnings)) totals.warnings.push(...c.warnings);
+    }
+    return totals;
+  }
+  function applyMagazzinoFilters(orderDetails, filters){
+    const base = Array.isArray(orderDetails) ? orderDetails : [];
+    const applied = { ...defaultMagazzinoFilters(), ...(filters||{}) };
+    const custFilter = stableNorm(applied.customer);
+    const orderFilter = stableNorm(applied.orderQuery);
+    const itemFilter = stableNorm(applied.item);
+    const filtered = [];
+    for(const detail of base){
+      const order = detail?.order || {};
+      const customerRaw = order.customer || order.cliente || order.customerName || order.ragioneSociale || "";
+      const customerNorm = stableNorm(customerRaw);
+      if(custFilter){
+        if(customerNorm!==custFilter && !customerNorm.includes(custFilter)) continue;
+      }
+      if(orderFilter){
+        const orderTokens = stableNorm([order.orderNo, order.number, order.docNumber, order.id, order.orderId, order.numero, order.codiceOrdine].filter(Boolean).join(" "));
+        const lineTokens = stableNorm((order.lines||[]).map(l=>`${l.code||""} ${l.desc||""} ${l.orderNo||""}`).join(" "));
+        const probe = `${orderTokens} ${lineTokens}`.trim();
+        if(!probe || !probe.includes(orderFilter)) continue;
+      }
+      if(itemFilter){
+        const itemNorms = collectMagazzinoItemNorms(detail);
+        let ok = false;
+        for(const n of itemNorms){
+          if(n===itemFilter || n.includes(itemFilter)){ ok=true; break; }
+        }
+        if(!ok) continue;
+      }
+      filtered.push(detail);
+    }
+    const totals = aggregateMagazzinoTotalsFromDetails(filtered);
+    return { filteredOrders: filtered, filteredTotals: totals, applied };
+  }
+  const handleMagOrderInput = debounce((value)=>{
+    setMagazzinoFilters({ orderQuery: value||"" });
+    renderMagazzino();
+  }, 200);
+  function renderMagFilterChips(container, filters){
+    if(!container) return;
+    const chips = [];
+    const f = { ...defaultMagazzinoFilters(), ...(filters||{}) };
+    const push = (key, label, value)=>{
+      if(!value) return;
+      chips.push(`<button class="magChip" data-key="${key}" type="button">${escapeHtml(label)}: ${escapeHtml(value)} <span class="x" aria-hidden="true">×</span></button>`);
+    };
+    push("customer", "Cliente", f.customer);
+    push("orderQuery", "Ordine", f.orderQuery);
+    push("item", "Articolo", f.item);
+    container.innerHTML = chips.join("");
+    container.style.display = chips.length ? "flex" : "none";
+    if(!chips.length) return;
+    container.querySelectorAll(".magChip").forEach(chip=>{
+      chip.addEventListener("click", ()=>{
+        const key = chip.dataset.key;
+        if(!key) return;
+        setMagazzinoFilters({ [key]: "" });
+        renderMagazzino();
+      });
+    });
+  }
+
   function buildMagazzinoData(){
     const { orders } = buildOrderViews();
     const totals = { productKg:0, bobine:new Map(), etichette:0, scatole:new Map(), divisori:new Map(), altri:new Map(), nonConfig:[], warnings:[] };
@@ -6381,23 +6610,23 @@ function renderHome(){
     }
 
     const { totals, orderDetails } = buildMagazzinoData();
-    const detailLookup = buildMagazzinoDetailLookup(orderDetails);
-    const overviewItems = buildMagazzinoOverview(totals);
+    const filters = state.magFilters || defaultMagazzinoFilters();
+    const { filteredOrders, filteredTotals, applied } = applyMagazzinoFilters(orderDetails, filters);
+    const options = collectMagazzinoOptions(orderDetails);
+    const sortedDetails = filteredOrders.slice().sort((a,b)=>`${a.order.customer||""}`.localeCompare(`${b.order.customer||""}`) || `${a.order.orderNo||a.order.number||""}`.localeCompare(`${b.order.orderNo||b.order.number||""}`));
+    const detailLookup = buildMagazzinoDetailLookup(sortedDetails);
+    const overviewItems = buildMagazzinoOverview(filteredTotals);
     state.magazzinoDetailLookup = detailLookup;
     state.magazzinoOverview = overviewItems;
     const TOP_LIMIT = 12;
     const visibleItems = overviewItems.slice(0, TOP_LIMIT);
     const needsSeeAll = overviewItems.length > visibleItems.length;
-    orderDetails.sort((a,b)=>`${a.order.customer||""}`.localeCompare(`${b.order.customer||""}`) || `${a.order.orderNo||a.order.number||""}`.localeCompare(`${b.order.orderNo||b.order.number||""}`));
-    badge.textContent = `${orderDetails.length || 0}`;
-    if(!orderDetails.length){
-      body.innerHTML = `<div class="muted">Nessun ordine disponibile.</div>`;
-      return;
-    }
+    badge.textContent = `${sortedDetails.length || 0}`;
+    badge.title = `Ordini filtrati: ${sortedDetails.length} / Totale: ${orderDetails.length}`;
 
     const kpisHtml = (()=>{
       const updatedTxt = state.xmlModifiedTime || (state.lastFetchAt ? fmtDateTime(state.lastFetchAt) : "—");
-      const critCount = (totals.warnings?.length||0) + (totals.nonConfig?.length||0);
+      const critCount = (filteredTotals.warnings?.length||0) + (filteredTotals.nonConfig?.length||0);
       return `<div class="whKpiRow">
         <div class="whKpi"><span class="v">${overviewItems.length || 0}</span><span>Articoli monitorati</span></div>
         <div class="whKpi"><span class="v">${critCount}</span><span>Criticità</span></div>
@@ -6413,16 +6642,43 @@ function renderHome(){
           </div>
           <div class="whOverviewVal">${formatWhQty(it)}</div>
         </button>`).join("")
-      : `<div class="muted">Nessun dato magazzino disponibile.</div>`;
+      : `<div class="muted">${orderDetails.length ? "Nessun ordine corrisponde ai filtri." : "Nessun ordine disponibile."}</div>`;
     const seeAllHtml = "";
     const critAlert = (()=>{
       const crit = [];
-      if((totals.warnings||[]).length) crit.push(`<div class="badge" style="background:rgba(255,159,10,.14); border-color:rgba(255,159,10,.3);">Solleciti sacchi: ${totals.warnings.length}</div>`);
-      if((totals.nonConfig||[]).length) crit.push(`<div class="badge" style="background:rgba(255,149,0,.12); border-color:rgba(255,149,0,.3);">Distinte mancanti: ${totals.nonConfig.length}</div>`);
+      if((filteredTotals.warnings||[]).length) crit.push(`<div class="badge" style="background:rgba(255,159,10,.14); border-color:rgba(255,159,10,.3);">Solleciti sacchi: ${filteredTotals.warnings.length}</div>`);
+      if((filteredTotals.nonConfig||[]).length) crit.push(`<div class="badge" style="background:rgba(255,149,0,.12); border-color:rgba(255,149,0,.3);">Distinte mancanti: ${filteredTotals.nonConfig.length}</div>`);
       return crit.join("");
     })();
+    const hasFilters = Boolean(applied.customer || applied.orderQuery || applied.item);
+    const filterBarHtml = `<div class="magFilterBar">
+      <div class="magFilterField">
+        <label class="magFilterLabel" for="magFilterCustomer">Cliente</label>
+        <select id="magFilterCustomer" class="magFilterInput">
+          <option value="">Tutti</option>
+          ${options.customers.map(c=>`<option value="${escapeHtml(c)}"${stableNorm(c)===stableNorm(applied.customer)?" selected":""}>${escapeHtml(c)}</option>`).join("")}
+        </select>
+      </div>
+      <div class="magFilterField">
+        <label class="magFilterLabel" for="magFilterOrder">Ordine</label>
+        <input id="magFilterOrder" class="magFilterInput" type="search" placeholder="Cerca ordine…" value="${escapeHtml(applied.orderQuery||"")}" autocomplete="off" inputmode="search" />
+      </div>
+      <div class="magFilterField">
+        <label class="magFilterLabel" for="magFilterItem">Articolo (imballaggio)</label>
+        <select id="magFilterItem" class="magFilterInput">
+          <option value="">Tutti</option>
+          ${options.items.map(i=>`<option value="${escapeHtml(i)}"${stableNorm(i)===stableNorm(applied.item)?" selected":""}>${escapeHtml(i)}</option>`).join("")}
+        </select>
+      </div>
+      <div class="magFilterActions">
+        <div class="magResultBadge" id="magResultBadge">Risultati: ${overviewItems.length} · Ordini: ${sortedDetails.length}</div>
+        <button class="btn ghost" id="magFiltersReset" type="button"${hasFilters ? "" : " style=\"opacity:.8;\""}>Pulisci filtri</button>
+      </div>
+    </div>
+    <div class="magFilterChips" id="magFilterChips"></div>`;
     body.innerHTML = `<div class="magSimple">
       <div class="magTitle">Panoramica magazzino</div>
+      ${filterBarHtml}
       ${kpisHtml}
       ${critAlert?`<div class="whCritRow">${critAlert}</div>`:""}
       <div id="whOverview" class="whOverview rowsScroll">${overviewHtml}${seeAllHtml}</div>
@@ -6446,6 +6702,37 @@ function renderHome(){
         const wrap = $("whOverview");
         if(wrap) wrap.scrollTo({ top:0, behavior:"smooth" });
       });
+    }
+    const customerSelect = $("magFilterCustomer");
+    if(customerSelect){
+      customerSelect.onchange = (e)=>{
+        setMagazzinoFilters({ customer: e.target.value || "" });
+        renderMagazzino();
+      };
+    }
+    const orderInput = $("magFilterOrder");
+    if(orderInput){
+      orderInput.value = applied.orderQuery || "";
+      orderInput.oninput = (e)=> handleMagOrderInput(e.target.value || "");
+    }
+    const itemSelect = $("magFilterItem");
+    if(itemSelect){
+      itemSelect.onchange = (e)=>{
+        setMagazzinoFilters({ item: e.target.value || "" });
+        renderMagazzino();
+      };
+    }
+    const resetBtn = $("magFiltersReset");
+    if(resetBtn){
+      resetBtn.addEventListener("click", ()=>{
+        resetMagazzinoFilters();
+        renderMagazzino();
+      });
+    }
+    renderMagFilterChips($("magFilterChips"), applied);
+    const resultBadge = $("magResultBadge");
+    if(resultBadge){
+      resultBadge.textContent = `Risultati: ${overviewItems.length} · Ordini: ${sortedDetails.length}`;
     }
   }
 
