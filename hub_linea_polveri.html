@@ -2766,9 +2766,14 @@
                 <div class="muted" id="kPowderMeta" style="margin-top:4px; font-size:12px;">Calcolato su 0 righe visibili</div> <!-- // UI-FIX: kg-totali -->
               </div>
               <div class="k">
-                <div class="t">Etichette (stima)</div>
-                <div class="v" id="kPowderLabels">—</div>
-                <div class="muted" id="kPowderLabelsMeta" style="margin-top:4px; font-size:12px;">Pack riconosciuto: nessuno</div>
+                <div class="t">Bobine F480 (stima)</div>
+                <div class="v" id="kBobineF480">—</div>
+                <div class="muted" id="kBobineF480Meta" style="margin-top:4px; font-size:12px;">Stima non disponibile</div>
+              </div>
+              <div class="k">
+                <div class="t">Bobine F830 (stima)</div>
+                <div class="v" id="kBobineF830">—</div>
+                <div class="muted" id="kBobineF830Meta" style="margin-top:4px; font-size:12px;">Stima non disponibile</div>
               </div>
             </div>
 
@@ -5925,6 +5930,50 @@ function showAuthGate(){
     return 0;
   }
 
+  const DEFAULT_CAPACITY_F480 = 1000;
+  const DEFAULT_CAPACITY_F830 = 1000;
+  const BOBINA_FORMAT_RULES = [
+    { re: /\bF830\b|\b830\b/i, type: "F830" },
+    { re: /\bF480\b|\b480\b/i, type: "F480" },
+  ];
+  function readCap(key, def){
+    const n = parseInt(localStorage.getItem(key)||"", 10);
+    return Number.isFinite(n) && n>=50 && n<=20000 ? n : def;
+  }
+  function detectBobinaType(line){
+    const tryMatch = (val)=>{
+      if(val==null) return null;
+      const str = String(val||"");
+      for(const rule of BOBINA_FORMAT_RULES){
+        if(rule.re.test(str)) return rule.type;
+      }
+      return null;
+    };
+    const explicitFields = [
+      line?.labelFormat, line?.labelType, line?.bobina, line?.bobinaTipo, line?.bobinaFormat, line?.bobinaFormato,
+      line?.formatoBobina, line?.formatoEtichetta, line?.etichettaFormato, line?.formato, line?.format,
+      line?.width, line?.larghezza, line?.printer, line?.stampante
+    ];
+    for(const val of explicitFields){
+      const t = tryMatch(val);
+      if(t) return { type:t, matched:true };
+    }
+    const fallbackFields = [line?.desc, line?.note, line?.notes, line?.itemDesc, line?.material, line?.imballaggio];
+    for(const val of fallbackFields){
+      const t = tryMatch(val);
+      if(t) return { type:t, matched:true };
+    }
+    return { type:"F480", matched:false };
+  }
+  function estimateLineLabels(line){
+    const lineKg = estimateLineKg(line);
+    const packKg = resolvePackKgForLine(line);
+    if(Number.isFinite(packKg) && packKg>0 && Number.isFinite(lineKg) && lineKg>0){
+      return lineKg / packKg;
+    }
+    return null;
+  }
+
   function computeVisiblePowderSummary(orders){ // UI-FIX: kg-totali
     const lines = [];
     for(const o of (orders||[])){
@@ -5933,18 +5982,39 @@ function showAuthGate(){
     let totalKg = 0;
     let totalLabels = 0;
     let hasLabelData = false;
+    const capF480 = readCap("gc_bobina_capacity_f480_v1", DEFAULT_CAPACITY_F480);
+    const capF830 = readCap("gc_bobina_capacity_f830_v1", DEFAULT_CAPACITY_F830);
+    let labelsF480 = 0;
+    let labelsF830 = 0;
+    let labelsUnknown = 0;
     const samples = [];
     for(const l of lines){
       const lineKg = estimateLineKg(l);
       if(Number.isFinite(lineKg)) totalKg += lineKg;
-      const packKg = resolvePackKgForLine(l);
-      if(Number.isFinite(packKg) && packKg>0 && Number.isFinite(lineKg) && lineKg>0){
-        totalLabels += (lineKg / packKg);
+      const labelsForRow = estimateLineLabels(l);
+      if(Number.isFinite(labelsForRow) && labelsForRow>=0){
+        totalLabels += labelsForRow;
         hasLabelData = true;
+        const { type, matched } = detectBobinaType(l);
+        if(type === "F830"){
+          labelsF830 += labelsForRow;
+        } else {
+          labelsF480 += labelsForRow;
+          if(!matched) labelsUnknown += labelsForRow;
+        }
       }
       if(samples.length < 5) samples.push({ rawQty: l.qty, parsedQty: parseItNumber(l.qty) });
     }
-    return { totalKg, lineCount: lines.length, samples, labels: hasLabelData ? totalLabels : null };
+    const bobine = hasLabelData ? {
+      labelsF480,
+      labelsF830,
+      labelsUnknown,
+      capF480,
+      capF830,
+      bobineF480: Math.ceil(labelsF480 / capF480) || 0,
+      bobineF830: Math.ceil(labelsF830 / capF830) || 0
+    } : null;
+    return { totalKg, lineCount: lines.length, samples, labels: hasLabelData ? totalLabels : null, bobine };
   }
 
   function defaultMagazzinoFilters(){
@@ -6831,15 +6901,28 @@ function renderHome(){
     setHomeKgTotali(kgSummary.totalKg); // UI-FIX: kg-totali
     const kPowderMeta = $("kPowderMeta"); // UI-FIX: kg-totali
     if(kPowderMeta) kPowderMeta.textContent = `Calcolato su ${kgSummary.lineCount} righe visibili`; // UI-FIX: kg-totali
-    const kPowderLabelsEl = $("kPowderLabels");
-    const kPowderLabelsMeta = $("kPowderLabelsMeta");
-    if(kPowderLabelsEl){
-      if(Number.isFinite(kgSummary.labels)){
-        kPowderLabelsEl.textContent = Math.round(kgSummary.labels).toLocaleString("it-IT");
-        if(kPowderLabelsMeta) kPowderLabelsMeta.textContent = "Calcolo su formati sacco riconosciuti";
+    const bobine = kgSummary.bobine;
+    const kBobineF480 = $("kBobineF480");
+    const kBobineF830 = $("kBobineF830");
+    const kBobineF480Meta = $("kBobineF480Meta");
+    const kBobineF830Meta = $("kBobineF830Meta");
+    const fmt = (n)=> Number.isFinite(n) ? Math.max(0, Math.round(n)).toLocaleString("it-IT") : "0";
+    if(kBobineF480 && kBobineF830){
+      if(bobine){
+        kBobineF480.textContent = fmt(bobine.bobineF480);
+        kBobineF830.textContent = fmt(bobine.bobineF830);
+        if(kBobineF480Meta) kBobineF480Meta.textContent = `≈ ${fmt(bobine.labelsF480)} etichette · 1 bobina = ${fmt(bobine.capF480)} etichette`;
+        if(kBobineF830Meta) kBobineF830Meta.textContent = `≈ ${fmt(bobine.labelsF830)} etichette · 1 bobina = ${fmt(bobine.capF830)} etichette`;
+        if(state.user?.isAdmin && bobine.labelsUnknown>0){
+          const extra = ` · Non classificati: ${fmt(bobine.labelsUnknown)} etichette`;
+          if(kBobineF480Meta) kBobineF480Meta.textContent += extra;
+          if(kBobineF830Meta) kBobineF830Meta.textContent += extra;
+        }
       } else {
-        kPowderLabelsEl.textContent = "—";
-        if(kPowderLabelsMeta) kPowderLabelsMeta.textContent = "Pack non rilevato: etichette non stimate";
+        kBobineF480.textContent = "—";
+        kBobineF830.textContent = "—";
+        if(kBobineF480Meta) kBobineF480Meta.textContent = "Stima non disponibile";
+        if(kBobineF830Meta) kBobineF830Meta.textContent = "Stima non disponibile";
       }
     }
     const pOrders = state.powderOrders || [];
