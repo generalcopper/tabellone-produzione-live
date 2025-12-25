@@ -1979,6 +1979,7 @@
     activeProductions: [],
     history: [],
     historyReady: false,
+    globalStats: { ready:false, data:{ concludedCountTotal:0, concludedKgTotal:0, updatedAt:null, updatedBy:"" }, source:"init", error:"" },
     user: null,
     operator: null,
     selectedLines: new Map(), // CODEX: selezione multi-ordine persistente
@@ -2008,6 +2009,8 @@
   globalThis.__CONCLUDE_INFLIGHT__ = (globalThis.__CONCLUDE_INFLIGHT__ instanceof Map) ? globalThis.__CONCLUDE_INFLIGHT__ : new Map();
   globalThis.__CONCLUDE_RECENT__ = (globalThis.__CONCLUDE_RECENT__ instanceof Map) ? globalThis.__CONCLUDE_RECENT__ : new Map();
   globalThis.__CONCLUDE_HANDLER_BOUND__ = Boolean(globalThis.__CONCLUDE_HANDLER_BOUND__);
+  globalThis.__GLOBAL_STATS__ = (globalThis.__GLOBAL_STATS__ && typeof globalThis.__GLOBAL_STATS__==="object") ? globalThis.__GLOBAL_STATS__ : { concludedCountTotal:0, concludedKgTotal:0, updatedAt:null, updatedBy:"" };
+  globalThis.__GLOBAL_STATS_READY__ = Boolean(globalThis.__GLOBAL_STATS_READY__);
   let __allOrdersCache = [];
   let __allOrdersKeySet = new Set();
   globalThis.__allowCommitted = (globalThis.__allowCommitted instanceof Set) ? globalThis.__allowCommitted : new Set(Array.from(globalThis.__ALLOW_KEYS__||[]));
@@ -2029,6 +2032,8 @@
     }
   }
   cleanupLegacyAllowlistCaches();
+  const GLOBAL_STATS_LOCAL_KEY = "hub_linea_polveri_global_stats_v1";
+  const GLOBAL_STATS_PATH = { col: "hub_config", doc: "hub_linea_polveri_global_stats" };
 
   // ===============================
   // UTILS
@@ -2063,6 +2068,104 @@
       }
     }
     listEl.appendChild(frag);
+  }
+  const emptyGlobalStats = ()=>({ concludedCountTotal:0, concludedKgTotal:0, updatedAt:null, updatedBy:"" });
+  function readLocalGlobalStats(){
+    try{
+      if(typeof localStorage==="undefined") return null;
+      const raw = localStorage.getItem(GLOBAL_STATS_LOCAL_KEY);
+      if(!raw) return null;
+      const parsed = JSON.parse(raw);
+      if(parsed && typeof parsed==="object") return parsed;
+    }catch(_e){}
+    return null;
+  }
+  function persistLocalGlobalStats(stats){
+    try{
+      if(typeof localStorage==="undefined") return;
+      localStorage.setItem(GLOBAL_STATS_LOCAL_KEY, JSON.stringify(stats));
+    }catch(_e){}
+  }
+  function getGlobalStatsData(){
+    if(!(globalThis.__GLOBAL_STATS__ && typeof globalThis.__GLOBAL_STATS__==="object")){
+      globalThis.__GLOBAL_STATS__ = emptyGlobalStats();
+    }
+    if(!state.globalStats){
+      state.globalStats = { ready:false, data: emptyGlobalStats(), source:"init", error:"" };
+    }
+    return globalThis.__GLOBAL_STATS__;
+  }
+  function applyGlobalStats(stats, source="local"){
+    const merged = { ...emptyGlobalStats(), ...(stats||{}) };
+    globalThis.__GLOBAL_STATS__ = merged;
+    globalThis.__GLOBAL_STATS_READY__ = true;
+    state.globalStats = { ...(state.globalStats||{}), data: merged, ready:true, source, error:"" };
+    persistLocalGlobalStats(merged);
+    return merged;
+  }
+  async function loadGlobalStats(){
+    let stats = emptyGlobalStats();
+    let source = "init";
+    const local = readLocalGlobalStats();
+    if(local){
+      stats = { ...stats, ...local };
+      source = "localstorage";
+    }
+    if(state.firebase?.ok){
+      try{
+        const fs = state.firebase.api;
+        const db = state.firebase.db;
+        const snap = await fs.getDoc(fs.doc(db, GLOBAL_STATS_PATH.col, GLOBAL_STATS_PATH.doc));
+        if(snap.exists()){
+          const data = snap.data() || {};
+          stats = {
+            ...stats,
+            concludedCountTotal: Number(data.concludedCountTotal||0),
+            concludedKgTotal: Number(data.concludedKgTotal||0),
+            updatedAt: data.updatedAt || data.concludedAt || data.at || null,
+            updatedBy: data.updatedBy || data.user || ""
+          };
+          source = "firestore";
+        }
+      }catch(err){
+        console.warn("load global stats failed", err);
+        state.globalStats = { ...(state.globalStats||{}), error: String(err?.message||err||"") };
+      }
+    }
+    const applied = applyGlobalStats(stats, source);
+    renderGlobalStatsSummary();
+    return applied;
+  }
+  async function saveGlobalStats(stats){
+    const merged = applyGlobalStats(stats, state.globalStats?.source || "local");
+    if(state.firebase?.ok){
+      try{
+        const fs = state.firebase.api;
+        const db = state.firebase.db;
+        await fs.setDoc(fs.doc(db, GLOBAL_STATS_PATH.col, GLOBAL_STATS_PATH.doc), {
+          concludedCountTotal: Number(merged.concludedCountTotal||0),
+          concludedKgTotal: Number(merged.concludedKgTotal||0),
+          updatedAt: fs.serverTimestamp(),
+          updatedBy: state.user?.email || state.user?.fullName || ""
+        }, { merge:true });
+        state.globalStats = { ...(state.globalStats||{}), source:"firestore", error:"" };
+      }catch(err){
+        console.warn("persist global stats failed", err);
+        state.globalStats = { ...(state.globalStats||{}), error: String(err?.message||err||"") };
+      }
+    }
+    renderGlobalStatsSummary();
+    return merged;
+  }
+  async function bumpGlobalStats(deltaCount=0, deltaKg=0){
+    const cur = getGlobalStatsData();
+    const next = {
+      concludedCountTotal: Number(cur.concludedCountTotal||0) + Number(deltaCount||0),
+      concludedKgTotal: Number(cur.concludedKgTotal||0) + Number(deltaKg||0),
+      updatedAt: nowIso(),
+      updatedBy: state.user?.email || state.user?.fullName || ""
+    };
+    return saveGlobalStats(next);
   }
 
   function showLoader(statusText="Aggiornamento…", opts={}){
@@ -3231,6 +3334,7 @@ function showAuthGate(){
       state.user = { uid: user.uid, fullName: profile.fullName, email: (user.email||profile.email||""), isAdmin: Boolean(access && access.isAdmin) };
       state.operator = state.user.fullName;
       $("hdrUser").textContent = state.user.fullName;
+      try{ await loadGlobalStats(); }catch(_e){ applyGlobalStats(getGlobalStatsData(), state.globalStats?.source||"local"); }
       renderHeaderKpis();
       updateKioskAdminMode();
       try{ await initNotificationsInbox(); }catch(_e){ state.notifications.unavailable = true; renderNotifCenter(); }
@@ -4963,14 +5067,52 @@ function renderHome(){
     });
   }
 
+  function renderGlobalStatsSummary(){
+    const list = $("statsList");
+    const badge = $("statsBadge");
+    if(!badge) return;
+    const stats = getGlobalStatsData();
+    const fmtCount = (n)=> Number.isFinite(n) ? Math.max(0, Math.round(n)).toLocaleString("it-IT") : "—";
+    const fmtKg = (n)=> Number.isFinite(n) ? `${Math.round(Math.max(0, Number(n)||0)).toLocaleString("it-IT")} kg` : "—";
+    badge.textContent = fmtCount(stats.concludedCountTotal);
+    if(!list || !list.parentElement) return;
+    let summary = document.getElementById("globalStatsSummary");
+    if(!summary){
+      summary = document.createElement("div");
+      summary.id = "globalStatsSummary";
+      summary.style.padding = "12px";
+      summary.style.margin = "0 0 12px";
+      summary.style.borderRadius = "14px";
+      summary.style.border = "1px solid var(--stroke)";
+      summary.style.background = "rgba(0,0,0,.02)";
+      list.parentElement.insertBefore(summary, list);
+    }
+    summary.innerHTML = `
+      <div class="stepTitle" style="margin:0 0 6px 0;">Statistiche globali</div>
+      <div class="muted" style="margin-bottom:8px;">Cumulativo totale, indipendente dai record eliminati.</div>
+      <div style="display:flex; align-items:center; justify-content:space-between; font-weight:800;">
+        <div class="muted" style="font-weight:800;">Ordini conclusi</div>
+        <div>${fmtCount(stats.concludedCountTotal)}</div>
+      </div>
+      <div style="display:flex; align-items:center; justify-content:space-between; margin-top:8px; font-weight:800;">
+        <div class="muted" style="font-weight:800;">Kg totali</div>
+        <div>${fmtKg(stats.concludedKgTotal)}</div>
+      </div>
+    `;
+  }
+
   function renderStats(){
     const list = $("statsList");
     const isDesktop = window.matchMedia("(min-width: 980px)").matches;
+    const statsData = getGlobalStatsData();
+    const badgeEl = $("statsBadge");
+    const badgeValue = Number.isFinite(statsData.concludedCountTotal||0) ? Math.max(0, Math.round(statsData.concludedCountTotal||0)).toString() : "—";
+    if(badgeEl) badgeEl.textContent = badgeValue;
     if(!isDesktop){
       list.innerHTML = `<div class="muted">Apri da desktop per vedere le statistiche.</div>`;
-      $("statsBadge").textContent = "—";
       return;
     }
+    renderGlobalStatsSummary();
 
     // Admin (solo desktop): reset storico
     try{
@@ -5015,7 +5157,6 @@ function renderHome(){
     const hist = (state.history||[]).filter(x=>x && x.operator);
     if(!hist.length){
       list.innerHTML = `<div class="muted">Nessun dato storico disponibile (in attesa delle prime produzioni).</div>`;
-      $("statsBadge").textContent = "0";
       return;
     }
     const agg = new Map();
@@ -5033,7 +5174,6 @@ function renderHome(){
       return { op, ...a, speed };
     }).sort((x,y)=>y.kg-x.kg);
 
-    $("statsBadge").textContent = String(rows.length);
     list.innerHTML = "";
     for(const r of rows){
       const div = document.createElement("div");
@@ -6038,6 +6178,7 @@ function renderHome(){
               const withId = { ...entry, id: newId || `${Date.now()}_${Math.random().toString(16).slice(2)}`, at: nowIso() };
               state.history = [...(state.history||[]), withId];
               state.historyReady = true;
+              try{ await bumpGlobalStats(1, kg); }catch(_e){}
               try{ renderCompletedSection(); }catch(_e){}
               state.activeProductions = (state.activeProductions||[]).filter(x=>x.id!==p.id);
               try{ state.partialOrders = computePartialOrders().partial; }catch(_e){}
