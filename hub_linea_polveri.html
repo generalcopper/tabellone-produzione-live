@@ -1127,6 +1127,33 @@
       box-shadow: 0 24px 70px rgba(0,0,0,.18);
       overflow:hidden;
     }
+    .authLoader{
+      position: fixed;
+      top: calc(12px + var(--safe-top));
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 10010;
+      display: none;
+      align-items:center;
+      gap: 10px;
+      padding: 10px 14px;
+      border-radius: 14px;
+      background: rgba(0,0,0,.88);
+      color: #ffffff;
+      font-weight: 800;
+      letter-spacing: -0.01em;
+      box-shadow: 0 16px 44px rgba(0,0,0,.24);
+      pointer-events: none;
+    }
+    .authLoader .dot{
+      width: 10px;
+      height: 10px;
+      border-radius: 999px;
+      background: #34c759;
+      box-shadow: 0 0 0 0 rgba(52,199,89,.4);
+      animation: pulse 1.6s infinite;
+    }
+    .authLoader.show{ display:flex; }
     .authCard .ah{
       padding: 16px 16px 12px;
       font-weight: 1000;
@@ -1187,6 +1214,7 @@
   .pillBtn:active{transform:scale(.98)}
   .pillBtn:focus{outline:2px solid rgba(255,255,255,.18); outline-offset:2px}
   @keyframes spin{to{transform:rotate(360deg)}}
+  @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(52,199,89,.35);}70%{box-shadow:0 0 0 10px rgba(52,199,89,0);}100%{box-shadow:0 0 0 0 rgba(52,199,89,0);}}
 
   /* Top system banners */
   .topBanner{
@@ -1669,6 +1697,11 @@
     </div>
   </div>
 
+  <div id="authLoader" class="authLoader" role="status" aria-live="polite">
+    <div class="dot" aria-hidden="true"></div>
+    <div class="txt">Verifica accesso…</div>
+  </div>
+
   
   <!-- Auth gate -->
   <div id="authGate" role="dialog" aria-modal="true">
@@ -2060,6 +2093,10 @@
   };
   // Web Push (FCM): incolla qui la *Public key* (VAPID) da Firebase Console → Project settings → Cloud Messaging → Web Push certificates
   const FCM_VAPID_KEY = "PASTE_PUBLIC_VAPID_KEY_HERE";
+  const AUTH_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+  const LS_AUTH_OK = "hub_auth_ok_ts_v1";
+  const LS_AUTH_EMAIL = "hub_auth_last_email_v1";
+  const RESTORE_TIMEOUT_MS = 6000;
 
   // Email su segnalazione problemi (richiede Firebase Extension: firestore-send-email)
   const ISSUE_EMAIL_ENABLED = false; // metti true quando l'estensione è installata
@@ -2157,6 +2194,11 @@
   globalThis.__CONCLUDE_HANDLER_BOUND__ = Boolean(globalThis.__CONCLUDE_HANDLER_BOUND__);
   globalThis.__GLOBAL_STATS__ = (globalThis.__GLOBAL_STATS__ && typeof globalThis.__GLOBAL_STATS__==="object") ? globalThis.__GLOBAL_STATS__ : { concludedCountTotal:0, concludedKgTotal:0, updatedAt:null, updatedBy:"" };
   globalThis.__GLOBAL_STATS_READY__ = Boolean(globalThis.__GLOBAL_STATS_READY__);
+  globalThis.__RESTORE_TIMER__ = globalThis.__RESTORE_TIMER__ || null;
+  globalThis.__AUTH_LISTENER_BOUND__ = Boolean(globalThis.__AUTH_LISTENER_BOUND__);
+  globalThis.__AUTH_RESUME_BOUND__ = Boolean(globalThis.__AUTH_RESUME_BOUND__);
+  let authGateState = "unknown";
+  let restoreExpireHandler = null;
   let __allOrdersCache = [];
   let __allOrdersKeySet = new Set();
   globalThis.__allowCommitted = (globalThis.__allowCommitted instanceof Set) ? globalThis.__allowCommitted : new Set(Array.from(globalThis.__ALLOW_KEYS__||[]));
@@ -3145,12 +3187,106 @@
   const USERS_COL = "powderUsers";
   // const ACCESS_COL removed (using USERS_COL allowlist)
 function showAuthGate(){
+    hideAuthLoader();
     $("authGate").classList.add("show");
     lockBody();
   }
   function hideAuthGate(){
     $("authGate").classList.remove("show");
     unlockBody();
+  }
+  function recentAuthOkWithinTTL(){
+    try{
+      const ts = parseInt(localStorage.getItem(LS_AUTH_OK) || "0", 10);
+      if(!Number.isFinite(ts) || ts<=0) return false;
+      return (Date.now() - ts) < AUTH_TTL_MS;
+    }catch(_e){ return false; }
+  }
+  function markAuthOk(email=""){
+    try{
+      localStorage.setItem(LS_AUTH_OK, String(Date.now()));
+      if(email) localStorage.setItem(LS_AUTH_EMAIL, String(email));
+    }catch(_e){}
+  }
+  function clearAuthOk(){
+    try{ localStorage.removeItem(LS_AUTH_OK); }catch(_e){}
+    try{ localStorage.removeItem(LS_AUTH_EMAIL); }catch(_e){}
+  }
+  function setAuthGateState(next){
+    authGateState = next;
+  }
+  function showAppShell(){
+    const wrap = document.querySelector(".wrap");
+    if(wrap){
+      wrap.style.visibility = "visible";
+      wrap.style.pointerEvents = "auto";
+    }
+  }
+  function showApp(){
+    showAppShell();
+    hideLogin();
+    hideAuthLoader();
+  }
+  function showAuthLoader(msg="Verifica accesso…"){
+    const el = $("authLoader");
+    if(!el) return;
+    const txt = el.querySelector(".txt");
+    if(txt) txt.textContent = msg;
+    el.classList.add("show");
+  }
+  function hideAuthLoader(){
+    const el = $("authLoader");
+    if(el) el.classList.remove("show");
+  }
+  function hideLogin(){
+    hideAuthGate();
+  }
+  function showLogin(msg=""){
+    setAuthGateState("signed_out");
+    hideAuthLoader();
+    renderAuthLogin(msg);
+  }
+  function clearRestoreTimeout(){
+    if(globalThis.__RESTORE_TIMER__){
+      clearTimeout(globalThis.__RESTORE_TIMER__);
+      globalThis.__RESTORE_TIMER__ = null;
+    }
+    restoreExpireHandler = null;
+  }
+  function startOrKeepRestoreTimeout(onExpire){
+    if(typeof onExpire === "function"){
+      restoreExpireHandler = onExpire;
+    }
+    if(globalThis.__RESTORE_TIMER__) return;
+    globalThis.__RESTORE_TIMER__ = setTimeout(()=>{
+      globalThis.__RESTORE_TIMER__ = null;
+      const auth = state.firebase?.auth;
+      if(auth && auth.currentUser){
+        setAuthGateState("signed_in");
+        hideAuthLoader();
+        hideLogin();
+        return;
+      }
+      if(typeof restoreExpireHandler === "function"){
+        restoreExpireHandler();
+      }
+    }, RESTORE_TIMEOUT_MS);
+  }
+  function enterRestoringMode(message="Ripristino sessione…"){
+    setAuthGateState("restoring");
+    showAppShell();
+    hideLogin();
+    showAuthLoader(message);
+  }
+  function primeAuthGateUi(){
+    if(isMobile() && recentAuthOkWithinTTL()){
+      enterRestoringMode("Ripristino sessione…");
+      return;
+    }
+    setAuthGateState("unknown");
+    showAppShell();
+    hideLogin();
+    showAuthLoader("Verifica accesso…");
   }
   async function getAccessByEmail(email){
     const e = String(email||"").trim().toLowerCase();
@@ -3164,6 +3300,8 @@ function showAuthGate(){
   }
 
   function renderAuthDenied(email, reason=""){
+    setAuthGateState("signed_out");
+    hideAuthLoader();
     showAuthGate();
     const b = $("authBody");
     b.innerHTML = `
@@ -3186,6 +3324,8 @@ function showAuthGate(){
 
 
   function renderAuthLogin(msg=""){
+    setAuthGateState("signed_out");
+    hideAuthLoader();
     showAuthGate();
     const b = $("authBody");
     b.innerHTML = `
@@ -3407,10 +3547,38 @@ function showAuthGate(){
     window.addEventListener("offline", ()=>{ __fsStopListen(); });
   }
 
+  function resetAuthDependentState(){
+    __fsStopListen();
+    state.historyReady = false;
+    state.history = [];
+    if(state.notifUnsub){
+      try{ state.notifUnsub(); }catch(_e){}
+      state.notifUnsub = null;
+    }
+    state.notifications = { inbox: [], ready:false, unavailable:false, error:"" };
+    updateNotificationBadge();
+    renderNotifCenter();
+    renderHeaderKpis();
+    state.user = null;
+    state.operator = null;
+    updateKioskAdminMode();
+    $("hdrUser").textContent = "—";
+  }
+  function enterSignedOut(msg=""){
+    clearRestoreTimeout();
+    clearAuthOk();
+    setAuthGateState("signed_out");
+    hideAuthLoader();
+    resetAuthDependentState();
+    renderAuthLogin(msg);
+  }
+
   async function ensureAuthFlow(){
     // chiamata dopo init firebase
     const authApi = state.firebase.authApi;
     const auth = state.firebase.auth;
+
+    primeAuthGateUi();
 
     // Gestisci redirect result (mostra errori)
     try{
@@ -3419,58 +3587,28 @@ function showAuthGate(){
       console.warn("getRedirectResult error", e);
       state.lastAuthErrorMsg = humanAuthErr(e);
     }
+    if(globalThis.__AUTH_LISTENER_BOUND__) return;
+    globalThis.__AUTH_LISTENER_BOUND__ = true;
     authApi.onAuthStateChanged(auth, async(user)=>{
+      clearRestoreTimeout();
       if(!user){
         __fsStopListen();
       }
       if(!user){
-        state.historyReady = false;
-        state.history = [];
-        if(state.notifUnsub){
-          try{ state.notifUnsub(); }catch(_e){}
-          state.notifUnsub = null;
-        }
-        state.notifications = { inbox: [], ready:false, unavailable:false, error:"" };
-        updateNotificationBadge();
-        renderNotifCenter();
-        renderHeaderKpis();
-        state.user = null;
-        state.operator = null;
-        updateKioskAdminMode();
-        $("hdrUser").textContent = "—";
         const msg = state.lastAuthErrorMsg || "";
         state.lastAuthErrorMsg = "";
-        renderAuthLogin(msg);
+        if(isMobile() && recentAuthOkWithinTTL()){
+          enterRestoringMode("Ripristino sessione…");
+          startOrKeepRestoreTimeout(()=> enterSignedOut(msg));
+          return;
+        }
+        enterSignedOut(msg);
         return;
       }
 
-      // Sessione valida 7 giorni per dispositivo (dopo scade e richiede nuovo accesso)
-      try{
-        const MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
-        const KEY_TS = "GC_AUTH_TS";
-        const KEY_EMAIL = "GC_AUTH_EMAIL";
-        const email = (user.email || "").toLowerCase();
-        const prevEmail = (localStorage.getItem(KEY_EMAIL) || "").toLowerCase();
-        const ts = parseInt(localStorage.getItem(KEY_TS) || "0", 10);
-        const now = Date.now();
-
-        if(prevEmail && prevEmail !== email){
-          // utente diverso: reset finestra
-          localStorage.setItem(KEY_EMAIL, email);
-          localStorage.setItem(KEY_TS, String(now));
-        }else if(ts && (now - ts) > MAX_AGE_MS){
-          // scaduta
-          localStorage.removeItem(KEY_TS);
-          localStorage.removeItem(KEY_EMAIL);
-          state.lastAuthErrorMsg = "Sessione scaduta (7 giorni). Accedi di nuovo.";
-          await authApi.signOut(auth);
-          return;
-        }else if(!ts){
-          // prima volta
-          localStorage.setItem(KEY_EMAIL, email);
-          localStorage.setItem(KEY_TS, String(now));
-        }
-      }catch(_e){}
+      setAuthGateState("signed_in");
+      showApp();
+      markAuthOk(user.email || "");
 
       // profilo
       let profile = await loadUserProfile(user.uid);
@@ -3489,6 +3627,8 @@ function showAuthGate(){
       // allowlist email
       const access = await getAccessByEmail(user.email||"");
       if(!access || access.enabled === false){
+        clearAuthOk();
+        resetAuthDependentState();
         renderAuthDenied(user.email||"", access && access.enabled===false ? "Accesso disabilitato." : "Email non presente in elenco autorizzati.");
         return;
       }
@@ -3506,10 +3646,29 @@ function showAuthGate(){
       try{ await initNotificationsInbox(); }catch(_e){ state.notifications.unavailable = true; renderNotifCenter(); }
       renderNotifCenter();
       hideAuthGate();
+      hideAuthLoader();
       renderHome();
       ensureAllowlistListener();
       __fsStartListen();
     });
+  }
+  function handleAuthResume(){
+    if(!isMobile()) return;
+    if(authGateState === "signed_out") return;
+    if(!recentAuthOkWithinTTL()) return;
+    if(!state.firebase?.auth) return;
+    enterRestoringMode("Ripristino sessione…");
+    startOrKeepRestoreTimeout(()=> enterSignedOut(""));
+  }
+  function wireAuthResumeHandlers(){
+    if(globalThis.__AUTH_RESUME_BOUND__) return;
+    globalThis.__AUTH_RESUME_BOUND__ = true;
+    const resume = ()=> handleAuthResume();
+    window.addEventListener("pageshow", resume);
+    document.addEventListener("visibilitychange", ()=>{
+      if(document.visibilityState === "visible") resume();
+    });
+    window.addEventListener("focus", resume);
   }
 
 
@@ -6685,6 +6844,9 @@ function renderHome(){
   async function startHub(){
     if(globalThis.__HUB_BOOTED__) return;
     globalThis.__HUB_BOOTED__ = true;
+
+    primeAuthGateUi();
+    wireAuthResumeHandlers();
 
     try{ statsDesktopMq.addEventListener("change", relocateStatsCard); }catch(_e){ try{ statsDesktopMq.addListener(relocateStatsCard); }catch(_e2){} }
     relocateStatsCard();
