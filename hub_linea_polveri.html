@@ -1480,7 +1480,10 @@
             <div class="adminList" id="mobileAllowList"></div>
             <div class="mobileSendFooter">
               <div class="saveBadge" id="mobileAllowFeedback">Stato: —</div>
-              <button class="btn" id="btnSaveMobileAllow" style="width:200px; max-width:100%;">Salva invio</button>
+              <div class="row2" style="gap:10px; width:100%; justify-content:flex-end;">
+                <button class="btn ghost" id="btnResetMobileAllow" style="min-width:140px; width:auto;">Azzera invio</button>
+                <button class="btn" id="btnSaveMobileAllow" style="width:200px; max-width:100%;">Salva invio</button>
+              </div>
             </div>
           </div>
 
@@ -1768,6 +1771,18 @@
     }
   }catch(_e){}
 
+  // CODEX: cleanup legacy allowlist cache (in-memory only)
+  try{
+    if(!globalThis.__ALLOWLIST_CLEANED__){
+      globalThis.__ALLOWLIST_CLEANED__ = true;
+      const legacyKeys = ["allowKeys","mobileAllowlist","hub_allowlist"];
+      for(const k of legacyKeys){
+        try{ localStorage.removeItem(k); }catch(_e){}
+        try{ sessionStorage.removeItem(k); }catch(_e){}
+      }
+    }
+  }catch(_e){}
+
   // ===============================
   // STATE
   // ===============================
@@ -1803,6 +1818,7 @@
     push: { supported:false, permission:'default', token:'', enabled:false },
   };
   globalThis.__ALLOW_KEYS__ = (globalThis.__ALLOW_KEYS__ instanceof Set) ? globalThis.__ALLOW_KEYS__ : new Set();
+  globalThis.__ALLOW_LOADED__ = Boolean(globalThis.__ALLOW_LOADED__);
   globalThis.__ALLOW_META__ = globalThis.__ALLOW_META__ || { updatedAt:null, updatedBy:"", lastError:"", lastSyncTs:null };
   globalThis.__ALLOWLIST_LISTEN_STARTED__ = Boolean(globalThis.__ALLOWLIST_LISTEN_STARTED__);
   globalThis.__CONCLUDE_INFLIGHT__ = (globalThis.__CONCLUDE_INFLIGHT__ instanceof Map) ? globalThis.__CONCLUDE_INFLIGHT__ : new Map();
@@ -3156,6 +3172,7 @@ function showAuthGate(){
     globalThis.__allowDraftDirty = dirty;
   }
   let __allowRenderTimer = null;
+  let __allowResetTimer = null;
   function scheduleAllowlistRender(){
     if(!state.powderOrders || !state.powderOrders.length){
       state.mobileAllowlist.pendingRender = true;
@@ -3172,6 +3189,50 @@ function showAuthGate(){
       scheduleAllowlistRender();
     }
   }
+  function setAllowResetBtnState(armed){
+    const btn = $("btnResetMobileAllow");
+    if(!btn) return;
+    btn.textContent = armed ? "Conferma azzera" : "Azzera invio";
+    btn.classList.toggle("bad", armed);
+    btn.classList.toggle("ghost", !armed);
+  }
+  async function performResetAllowlist(){
+    const btn = $("btnResetMobileAllow");
+    if(btn){
+      btn.dataset.armed = "";
+      setAllowResetBtnState(false);
+    }
+    const draft = ensureAllowDraftSet();
+    draft.clear();
+    refreshAllowDirtyFlag();
+    state.mobileAllowDirty = true;
+    state.mobileAllowlist.keys = new Set();
+    state.mobileAllowlist.ready = true;
+    state.mobileAllowSelection = new Set();
+    globalThis.__allowDraft = draft;
+    globalThis.__ALLOW_KEYS__ = new Set(draft);
+    globalThis.__ALLOW_LOADED__ = true;
+    renderMobileAllowPanel(__allOrdersCache||[], __allOrdersKeySet||new Set());
+    await saveMobileAllowlist();
+  }
+  function handleResetAllowClick(){
+    const btn = $("btnResetMobileAllow");
+    if(!btn) return;
+    const armed = btn.dataset.armed === "1";
+    if(armed){
+      if(__allowResetTimer){ clearTimeout(__allowResetTimer); __allowResetTimer = null; }
+      performResetAllowlist();
+      return;
+    }
+    btn.dataset.armed = "1";
+    setAllowResetBtnState(true);
+    if(__allowResetTimer){ clearTimeout(__allowResetTimer); }
+    __allowResetTimer = setTimeout(()=>{
+      btn.dataset.armed = "";
+      setAllowResetBtnState(false);
+      __allowResetTimer = null;
+    }, 3000);
+  }
   let __allowUnsub = null;
   async function ensureAllowlistListener(){
     if(globalThis.__ALLOWLIST_LISTEN_STARTED__) return;
@@ -3186,6 +3247,7 @@ function showAuthGate(){
         const data = snap.exists() ? (snap.data()||{}) : {};
         const keysArr = Array.isArray(data.keys) ? data.keys.filter(Boolean).map(String) : [];
         const allowSet = new Set(keysArr);
+        globalThis.__ALLOW_LOADED__ = true;
         globalThis.__ALLOW_KEYS__ = new Set(keysArr);
         globalThis.__allowCommitted = new Set(keysArr);
         if(!globalThis.__allowDraftDirty){
@@ -3217,6 +3279,7 @@ function showAuthGate(){
         console.warn("allowlist snapshot error", err);
         const code = err?.code || "";
         const message = err?.message || String(err);
+        globalThis.__ALLOW_LOADED__ = true;
         globalThis.__ALLOW_META__ = {
           ...(globalThis.__ALLOW_META__||{}),
           lastError: code ? `${code}: ${message}` : message,
@@ -3233,6 +3296,7 @@ function showAuthGate(){
       console.warn("allowlist listen failed", err);
       const code = err?.code || "";
       const message = err?.message || String(err);
+      globalThis.__ALLOW_LOADED__ = true;
       globalThis.__ALLOW_META__ = {
         ...(globalThis.__ALLOW_META__||{}),
         lastError: code ? `${code}: ${message}` : message,
@@ -3266,11 +3330,13 @@ function showAuthGate(){
         updatedAt: fs.serverTimestamp(),
         updatedBy: state.user.email || state.user.fullName || ""
       }, { merge:true });
+      globalThis.__ALLOW_LOADED__ = true;
       state.mobileAllowSaveState = "idle";
       state.mobileAllowDirty = false;
       state.mobileAllowlist.error = "";
       state.mobileAllowlist.lastError = "";
       state.mobileAllowlist.keys = new Set(keys);
+      state.mobileAllowlist.ready = true;
       state.mobileAllowSelection = new Set(keys);
       globalThis.__allowCommitted = new Set(keys);
       globalThis.__ALLOW_KEYS__ = new Set(keys);
@@ -3713,9 +3779,12 @@ function showAuthGate(){
     const isDesktop = window.matchMedia("(min-width: 980px)").matches;
     const isAdmin = Boolean(state.user && state.user.isAdmin);
     const isMobileView = isMobile();
+    const allowLoaded = globalThis.__ALLOW_LOADED__ === true;
     const allowInfo = state.mobileAllowlist || {};
     const allowKeySet = (globalThis.__ALLOW_KEYS__ instanceof Set) ? globalThis.__ALLOW_KEYS__ : new Set();
-    const allowFilterActive = Boolean(!isAdmin && isMobileView && allowInfo.ready && !allowInfo.allowAll);
+    const mobileStrict = Boolean(isMobileView && !isAdmin);
+    const allowFilterActive = Boolean(mobileStrict && allowLoaded);
+    const mobileAllowLoading = Boolean(mobileStrict && !allowLoaded);
 
     const orders = [];
     const baseOrders = [];
@@ -3743,7 +3812,7 @@ function showAuthGate(){
 
       const planDate = priorityInfo.date || extractDateFromText(note);
       const daysAway = planDate ? diffDaysFromNow(planDate) : null;
-      const k = getOrderKey(o);
+      const k = o.__k || getOrderKey(o);
       const baseOrder = { ...o, orderNo, lines, alerts, autoDone, totalLines: lines.length + autoDone, partialInfo: partialMap.get(String(orderNo)) || null, isCompleted: fullMap.has(String(orderNo)), note, priorityInfo, planDate, daysAway };
       baseOrder.__k = k;
       baseOrder.stableKey = k;
@@ -3763,7 +3832,9 @@ function showAuthGate(){
           visible = priorityInfo.visible !== false;
         }
       }
-      if(visible && allowFilterActive){
+      if(mobileAllowLoading){
+        visible = false;
+      } else if(visible && allowFilterActive){
         visible = allowKeySet.has(k);
       }
       if(!visible && !includeHidden) continue;
@@ -3910,7 +3981,10 @@ function showAuthGate(){
   }
 
   function updateMobileAllowUi(ordersList, orderKeySet){
+    const allowLoaded = globalThis.__ALLOW_LOADED__ === true;
     const allowInfo = state.mobileAllowlist || {};
+    allowInfo.ready = allowLoaded || allowInfo.ready;
+    state.mobileAllowlist.ready = allowInfo.ready;
     const committed = ensureAllowCommittedSet();
     const draft = ensureAllowDraftSet();
     const orderKeySetLocal = (orderKeySet instanceof Set) ? orderKeySet : new Set((ordersList||[]).map(o=>o?.__k || getOrderKey(o)));
@@ -4109,6 +4183,17 @@ function showAuthGate(){
     if(saveBtn){
       saveBtn.disabled = status==="saving";
       saveBtn.onclick = ()=> saveMobileAllowlist();
+    }
+    const resetBtn = $("btnResetMobileAllow");
+    if(resetBtn){
+      resetBtn.disabled = status==="saving";
+      if(resetBtn.dataset.bound !== "1"){
+        resetBtn.dataset.bound = "1";
+        resetBtn.onclick = handleResetAllowClick;
+      }
+      if(resetBtn.dataset.armed !== "1"){
+        setAllowResetBtnState(false);
+      }
     }
   }
 
@@ -4473,9 +4558,9 @@ function renderHome(){
     const badgeEl = $("badgeCounts");
     if(badgeEl){
       const isAdmin = Boolean(state.user && state.user.isAdmin);
-      const allowInfo = state.mobileAllowlist || {};
+      const allowLoaded = globalThis.__ALLOW_LOADED__ === true;
       const mobileView = isMobile();
-      if(mobileView && !isAdmin && !allowInfo.ready){
+      if(mobileView && !isAdmin && !allowLoaded){
         badgeEl.textContent = "— ordini";
       } else {
         const count = (mobileView && !isAdmin) ? visibleOrders.length : pOrders.length;
@@ -4490,9 +4575,12 @@ function renderHome(){
       mobileInfo.style.display = showMobileInfo ? "block" : "none";
       if(showMobileInfo){
         const allowInfo = state.mobileAllowlist || {};
+        const allowLoaded = globalThis.__ALLOW_LOADED__ === true;
         const count = visibleOrders.length;
         const docMissing = allowInfo.ready && allowInfo.allowAll;
-        if(docMissing){
+        if(!allowLoaded){
+          mobileInfo.textContent = "Caricamento assegnazioni…";
+        } else if(docMissing){
           mobileInfo.textContent = "Assegnazioni non configurate";
         } else if(allowInfo.ready && !allowInfo.allowAll && count===0){
           mobileInfo.textContent = "Nessun ordine assegnato dall’admin";
