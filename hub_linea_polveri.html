@@ -2565,6 +2565,89 @@
     const legacyWidth = typeof window !== "undefined" ? (window.innerWidth <= 900) : false;
     return Boolean((mq && mq.matches) || uaMobile || legacyWidth);
   }
+  globalThis.__MOBILE_AUDIO__ = globalThis.__MOBILE_AUDIO__ || { unlocked:false, ctx:null, lastBeepAt:0, toastShown:false };
+  globalThis.__MOBILE_EVENTS__ = globalThis.__MOBILE_EVENTS__ || { prevPartialCount:null, prevProdKey:null, prevAlertKey:null };
+  function unlockMobileAudio(){
+    if(!isMobile()) return;
+    const s = globalThis.__MOBILE_AUDIO__;
+    if(s.unlocked) return;
+    try{
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if(!AC) return;
+      s.ctx = s.ctx || new AC();
+      if(s.ctx.state === "suspended") s.ctx.resume();
+      s.unlocked = true;
+    }catch(e){}
+  }
+  window.addEventListener("pointerdown", unlockMobileAudio, { once:true, passive:true });
+  window.addEventListener("touchstart", unlockMobileAudio, { once:true, passive:true });
+  function mobileChime(kind){
+    if(!isMobile()) return;
+    const s = globalThis.__MOBILE_AUDIO__;
+    const now = Date.now();
+    if(now - s.lastBeepAt < 6500) return;
+    s.lastBeepAt = now;
+
+    if(navigator.vibrate) navigator.vibrate(kind==="partial" ? [40,40,60] : [30,30,30]);
+
+    if(!s.unlocked || !s.ctx){
+      if(!s.toastShown){
+        s.toastShown = true;
+        showToast("Audio attivo dopo il primo tap", "Tocca una volta per abilitare il trillo.", 2000);
+        setTimeout(()=>{ s.toastShown = false; }, 4000);
+      }
+      return;
+    }
+    try{
+      const ctx = s.ctx;
+      const o = ctx.createOscillator();
+      const g = ctx.createGain();
+      o.type = "sine";
+      const t0 = ctx.currentTime;
+      const A = 0.0001;
+
+      g.gain.setValueAtTime(A, t0);
+      g.gain.exponentialRampToValueAtTime(0.18, t0+0.02);
+      g.gain.exponentialRampToValueAtTime(A, t0+0.18);
+
+      o.frequency.setValueAtTime(kind==="partial" ? 880 : 740, t0);
+      if(kind==="partial"){
+        g.gain.setValueAtTime(A, t0+0.20);
+        g.gain.exponentialRampToValueAtTime(0.16, t0+0.22);
+        g.gain.exponentialRampToValueAtTime(A, t0+0.36);
+      }
+
+      o.connect(g); g.connect(ctx.destination);
+      o.start(t0);
+      o.stop(t0 + (kind==="partial" ? 0.40 : 0.20));
+    }catch(e){}
+  }
+  function checkMobileEvents({ partialCount=0, prodKey=null, alertKey=null }={}){
+    if(!isMobile()) return;
+    const snap = globalThis.__MOBILE_EVENTS__;
+    if(snap.prevPartialCount !== null && partialCount > snap.prevPartialCount){
+      mobileChime("partial");
+    }
+    snap.prevPartialCount = partialCount;
+
+    if(prodKey){
+      if(snap.prevProdKey !== null && prodKey !== snap.prevProdKey){
+        mobileChime("event");
+      }
+      snap.prevProdKey = prodKey;
+    } else {
+      snap.prevProdKey = prodKey;
+    }
+
+    if(alertKey){
+      if(snap.prevAlertKey !== null && alertKey !== snap.prevAlertKey){
+        mobileChime("event");
+      }
+      snap.prevAlertKey = alertKey;
+    } else {
+      snap.prevAlertKey = alertKey;
+    }
+  }
   function isKioskViewport(){
     const wide = typeof window !== "undefined" ? (window.innerWidth >= 1200) : false;
     const aspectOk = kioskAspectMq ? kioskAspectMq.matches : false;
@@ -5264,6 +5347,9 @@ function renderHome(){
     if(!loader.firstRenderDone){
       showLoader("Rendering 2/3…");
     }
+    let partialCount = 0;
+    let prodKey = null;
+    let alertKey = null;
     relocateStatsCard(); // CODEX: forza Statistiche sotto Operatività su desktop
     try{ const el=$('homeWelcome'); if(el && state.user){ el.textContent = `Benvenuto, ${state.user.fullName}`; } }catch(e){}
 
@@ -5302,6 +5388,15 @@ function renderHome(){
         badgeEl.textContent = `${count} ${noun}`;
       }
     }
+    const alertOrder = pOrders.find(o=>Array.isArray(o.alerts) && o.alerts.length);
+    if(alertOrder){
+      const a = (alertOrder.alerts || [])[0] || {};
+      const label = (a.desc || a.alertInfo?.label || "").trim();
+      const orderId = alertOrder.number || alertOrder.orderNo || "";
+      const customer = alertOrder.customer || "";
+      const base = [orderId, label || customer].filter(Boolean).join("|");
+      alertKey = base ? base.slice(0,160) : null;
+    }
     renderMobileAllowPanel(views.baseOrders, views.orderKeySet);
     const mobileInfo = $("mobileAllowInfo");
     if(mobileInfo){
@@ -5339,6 +5434,7 @@ function renderHome(){
     // Banner ordini parzialmente conclusi (globale)
     try{
       const { partial } = computePartialOrders();
+      partialCount = partial.length;
       state.partialOrders = partial;
       const b = $("partialBanner");
       if(b){
@@ -5366,7 +5462,9 @@ function renderHome(){
       strip.style.display = "block";
       $("prodCount").textContent = String(active.length);
       const parts = active.slice(0,6).map(p=>`${p.operator||"Operatore"}: ${p.customer||"Cliente"} · Ordine n. ${p.orderNo||"—"}`);
-      $("prodMarquee").textContent = parts.join("   •   ") + (active.length>6 ? "   •   ..." : "");
+      const marqueeTxt = parts.join("   •   ") + (active.length>6 ? "   •   ..." : "");
+      $("prodMarquee").textContent = marqueeTxt;
+      prodKey = `${active.length}|${marqueeTxt}`.slice(0,160);
       const ratios = active.map(p=>prodRatio(p));
       const r = ratios.length ? Math.max(...ratios) : 0;
       const hue = Math.max(0, 120 - (120 * Math.min(1,r)));
@@ -5374,6 +5472,7 @@ function renderHome(){
       strip.style.borderColor = `hsla(${hue}, 80%, 55%, .35)`;
     } else {
       strip.style.display = "none";
+      prodKey = null;
     }
     try{
       const btn = $("btnGoProd");
@@ -5388,6 +5487,9 @@ function renderHome(){
     renderStats();
     renderHeaderKpis();
     renderMagazzino(); // CODEX: re-render magazzino dopo gli stessi filtri degli ordini
+    if(isMobile()){
+      checkMobileEvents({ partialCount, prodKey, alertKey });
+    }
     if(!loader.firstRenderDone){
       showLoader("Rendering 3/3…");
     }
