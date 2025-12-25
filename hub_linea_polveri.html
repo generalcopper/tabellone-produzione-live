@@ -3003,6 +3003,28 @@
   const GLOBAL_STATS_LOCAL_KEY = "hub_linea_polveri_global_stats_v1";
   const GLOBAL_STATS_PATH = { col: "hub_config", doc: "hub_linea_polveri_global_stats" };
   const STATS_CLEAR_TS_KEY = "hub_linea_polveri_stats_clear_ts";
+  const PROD_HISTORY_RESET_KEY = "gc_prod_history_reset_ts_v1";
+  const LEGACY_STATS_KEYS = [
+    "powderProdHistory",
+    "powderProdHistoryCache",
+    "powderProdStats",
+    "powderProdStats_v1",
+    "powder_stats_cache",
+    "powder_stats_history",
+    "powder_stats_history_v1",
+    "powder_history",
+    "prod_history",
+    "ordiniConclusi",
+    "statsHistory",
+    "statsHistoryCache",
+    "hub_linea_polveri_history"
+  ];
+  const LEGACY_STATS_PREFIXES = [
+    "powderStats_",
+    "powderProdHistory_",
+    "powderProdStats_",
+    "hub_prod_stats_"
+  ];
 
   // ===============================
   // UTILS
@@ -3137,60 +3159,71 @@
     return saveGlobalStats(next);
   }
   function getStatsClearTs(){
-    const tryGet = (store)=>{
+    const tryGet = (store, key=STATS_CLEAR_TS_KEY)=>{
       try{
         if(store && typeof store.getItem==="function"){
-          const raw = store.getItem(STATS_CLEAR_TS_KEY);
+          const raw = store.getItem(key);
           if(raw!=null) return raw;
         }
       }catch(_e){}
       return null;
     };
     const raw = tryGet(localStorage) ?? tryGet(sessionStorage) ?? (globalThis.__STATS_CLEAR_TS__!=null ? String(globalThis.__STATS_CLEAR_TS__) : null);
-    const ts = parseInt(raw || "0", 10);
+    const resetRaw = tryGet(localStorage, PROD_HISTORY_RESET_KEY) ?? tryGet(sessionStorage, PROD_HISTORY_RESET_KEY);
+    const ts = Math.max(parseInt(raw || "0", 10), parseInt(resetRaw || "0", 10));
     return Number.isFinite(ts) ? ts : 0;
   }
   function setStatsClearTs(ts){
     globalThis.__STATS_CLEAR_TS__ = ts;
     try{ localStorage?.setItem(STATS_CLEAR_TS_KEY, String(ts)); }catch(_e){}
     try{ sessionStorage?.setItem(STATS_CLEAR_TS_KEY, String(ts)); }catch(_e){}
+    try{ localStorage?.setItem(PROD_HISTORY_RESET_KEY, String(ts)); }catch(_e){}
+    try{ sessionStorage?.setItem(PROD_HISTORY_RESET_KEY, String(ts)); }catch(_e){}
   }
   function purgeLocalStatsStorage(){
-    const keys = [GLOBAL_STATS_LOCAL_KEY];
-    const prefixes = ["hub_linea_polveri_global_stats_", "hub_linea_polveri_stats_"];
+    const keys = [GLOBAL_STATS_LOCAL_KEY, ...LEGACY_STATS_KEYS];
+    const prefixes = ["hub_linea_polveri_global_stats_", "hub_linea_polveri_stats_", ...LEGACY_STATS_PREFIXES];
     const stores = [];
     try{ if(typeof localStorage!=="undefined") stores.push(localStorage); }catch(_e){}
     try{ if(typeof sessionStorage!=="undefined") stores.push(sessionStorage); }catch(_e){}
+    let removed = 0;
     for(const store of stores){
       try{
         const toRemove = new Set();
         for(let i=0;i<store.length;i++){
           const k = store.key(i);
           if(!k) continue;
+          if(k === PROD_HISTORY_RESET_KEY) continue;
           if(keys.includes(k) || prefixes.some(p=>k.startsWith(p))){
             toRemove.add(k);
           }
         }
-        toRemove.forEach(k=>{ try{ store.removeItem(k); }catch(_e){} });
+        toRemove.forEach(k=>{ try{ store.removeItem(k); removed += 1; }catch(_e){} });
       }catch(_e){}
     }
+    return { removedKeys: removed, stores: stores.length };
   }
   function getStatsHistoryEntries(){
     const hist = (state.history||[]).filter(x=>x && x.operator);
     const clearAfter = getStatsClearTs();
     if(!clearAfter) return hist;
-    return hist.filter((x)=> tsFromId(x.id||x.at||0) >= clearAfter);
+    return hist.filter((x)=> tsFromId(x.id||x.at||0) > clearAfter);
   }
-  function clearLocalStatsHistory(){
+  function clearProdStatsHistoryHard(){
     const ts = Date.now();
     setStatsClearTs(ts);
-    purgeLocalStatsStorage();
+    const { removedKeys, stores } = purgeLocalStatsStorage();
+    state.history = [];
+    state.historyReady = true;
+    const empty = emptyGlobalStats();
+    applyGlobalStats(empty, "cleared");
     renderGlobalStatsSummary();
     renderStats();
     try{ renderHeaderKpis(); }catch(_e){}
     try{ renderCompletedSection(); }catch(_e){}
     const fb = document.getElementById("statsClearFeedback");
     if(fb) fb.textContent = "Dati storici eliminati";
+    try{ console.info(`[stats-reset] cleared history caches: ${removedKeys} key(s) across ${stores} storage(s) @${ts}`); }catch(_e){}
     showToast("Dati storici eliminati", "Statistiche azzerate su questo dispositivo.");
   }
 
@@ -4469,7 +4502,9 @@ function showAuthGate(){
       const histNext = (snap)=>{
         const hist = [];
         snap.forEach(doc=>hist.push({ id: doc.id, ...doc.data() }));
-        state.history = hist;
+        const resetAfter = getStatsClearTs();
+        const filtered = resetAfter ? hist.filter(h=> tsFromId(h.id||h.at||0) > resetAfter) : hist;
+        state.history = filtered;
         state.historyReady = true;
         renderStats();
         renderHeaderKpis();
@@ -6733,7 +6768,7 @@ function renderHome(){
       }
       const msg = "Confermi eliminazione dati storici? Questa azione non è reversibile.";
       if(!confirm(msg)) return;
-      clearLocalStatsHistory();
+      clearProdStatsHistoryHard();
     });
   }
 
