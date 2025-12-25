@@ -2895,6 +2895,7 @@
   globalThis.__CONCLUDE_HANDLER_BOUND__ = Boolean(globalThis.__CONCLUDE_HANDLER_BOUND__);
   globalThis.__GLOBAL_STATS__ = (globalThis.__GLOBAL_STATS__ && typeof globalThis.__GLOBAL_STATS__==="object") ? globalThis.__GLOBAL_STATS__ : { concludedCountTotal:0, concludedKgTotal:0, updatedAt:null, updatedBy:"" };
   globalThis.__GLOBAL_STATS_READY__ = Boolean(globalThis.__GLOBAL_STATS_READY__);
+  globalThis.__STATS_CLEAR_TS__ = Number(globalThis.__STATS_CLEAR_TS__||0);
   globalThis.__RESTORE_TIMER__ = globalThis.__RESTORE_TIMER__ || null;
   globalThis.__AUTH_LISTENER_BOUND__ = Boolean(globalThis.__AUTH_LISTENER_BOUND__);
   globalThis.__AUTH_RESUME_BOUND__ = Boolean(globalThis.__AUTH_RESUME_BOUND__);
@@ -2923,6 +2924,7 @@
   cleanupLegacyAllowlistCaches();
   const GLOBAL_STATS_LOCAL_KEY = "hub_linea_polveri_global_stats_v1";
   const GLOBAL_STATS_PATH = { col: "hub_config", doc: "hub_linea_polveri_global_stats" };
+  const STATS_CLEAR_TS_KEY = "hub_linea_polveri_stats_clear_ts";
 
   // ===============================
   // UTILS
@@ -3055,6 +3057,63 @@
       updatedBy: state.user?.email || state.user?.fullName || ""
     };
     return saveGlobalStats(next);
+  }
+  function getStatsClearTs(){
+    const tryGet = (store)=>{
+      try{
+        if(store && typeof store.getItem==="function"){
+          const raw = store.getItem(STATS_CLEAR_TS_KEY);
+          if(raw!=null) return raw;
+        }
+      }catch(_e){}
+      return null;
+    };
+    const raw = tryGet(localStorage) ?? tryGet(sessionStorage) ?? (globalThis.__STATS_CLEAR_TS__!=null ? String(globalThis.__STATS_CLEAR_TS__) : null);
+    const ts = parseInt(raw || "0", 10);
+    return Number.isFinite(ts) ? ts : 0;
+  }
+  function setStatsClearTs(ts){
+    globalThis.__STATS_CLEAR_TS__ = ts;
+    try{ localStorage?.setItem(STATS_CLEAR_TS_KEY, String(ts)); }catch(_e){}
+    try{ sessionStorage?.setItem(STATS_CLEAR_TS_KEY, String(ts)); }catch(_e){}
+  }
+  function purgeLocalStatsStorage(){
+    const keys = [GLOBAL_STATS_LOCAL_KEY];
+    const prefixes = ["hub_linea_polveri_global_stats_", "hub_linea_polveri_stats_"];
+    const stores = [];
+    try{ if(typeof localStorage!=="undefined") stores.push(localStorage); }catch(_e){}
+    try{ if(typeof sessionStorage!=="undefined") stores.push(sessionStorage); }catch(_e){}
+    for(const store of stores){
+      try{
+        const toRemove = new Set();
+        for(let i=0;i<store.length;i++){
+          const k = store.key(i);
+          if(!k) continue;
+          if(keys.includes(k) || prefixes.some(p=>k.startsWith(p))){
+            toRemove.add(k);
+          }
+        }
+        toRemove.forEach(k=>{ try{ store.removeItem(k); }catch(_e){} });
+      }catch(_e){}
+    }
+  }
+  function getStatsHistoryEntries(){
+    const hist = (state.history||[]).filter(x=>x && x.operator);
+    const clearAfter = getStatsClearTs();
+    if(!clearAfter) return hist;
+    return hist.filter((x)=> tsFromId(x.id||x.at||0) >= clearAfter);
+  }
+  function clearLocalStatsHistory(){
+    const ts = Date.now();
+    setStatsClearTs(ts);
+    purgeLocalStatsStorage();
+    renderGlobalStatsSummary();
+    renderStats();
+    try{ renderHeaderKpis(); }catch(_e){}
+    try{ renderCompletedSection(); }catch(_e){}
+    const fb = document.getElementById("statsClearFeedback");
+    if(fb) fb.textContent = "Dati storici eliminati";
+    showToast("Dati storici eliminati", "Statistiche azzerate su questo dispositivo.");
   }
 
   function showLoader(statusText="Aggiornamento…", opts={}){
@@ -6475,7 +6534,14 @@ function renderHome(){
     const list = $("statsList");
     const badge = $("statsBadge");
     if(!badge) return;
-    const stats = getGlobalStatsData();
+    const clearedAt = getStatsClearTs();
+    const statsHist = clearedAt ? getStatsHistoryEntries() : [];
+    const stats = clearedAt ? {
+      concludedCountTotal: statsHist.length,
+      concludedKgTotal: statsHist.reduce((a,h)=>a + Number(h.kg||0), 0),
+      updatedAt: null,
+      updatedBy: ""
+    } : getGlobalStatsData();
     const fmtCount = (n)=> Number.isFinite(n) ? Math.max(0, Math.round(n)).toLocaleString("it-IT") : "—";
     const fmtKg = (n)=> Number.isFinite(n) ? `${Math.round(Math.max(0, Number(n)||0)).toLocaleString("it-IT")} kg` : "—";
     badge.textContent = fmtCount(stats.concludedCountTotal);
@@ -6491,9 +6557,10 @@ function renderHome(){
       summary.style.background = "rgba(0,0,0,.02)";
       list.parentElement.insertBefore(summary, list);
     }
+    const desc = clearedAt ? "Dati storici eliminati su questo dispositivo." : "Cumulativo totale, indipendente dai record eliminati.";
     summary.innerHTML = `
       <div class="stepTitle" style="margin:0 0 6px 0;">Statistiche globali</div>
-      <div class="muted" style="margin-bottom:8px;">Cumulativo totale, indipendente dai record eliminati.</div>
+      <div class="muted" style="margin-bottom:8px;">${desc}</div>
       <div style="display:flex; align-items:center; justify-content:space-between; font-weight:800;">
         <div class="muted" style="font-weight:800;">Ordini conclusi</div>
         <div>${fmtCount(stats.concludedCountTotal)}</div>
@@ -6508,9 +6575,9 @@ function renderHome(){
   function renderStats(){
     const list = $("statsList");
     const canSeeStats = Boolean((state.user && state.user.isAdmin) || window.matchMedia("(min-width: 980px)").matches);
-    const statsData = getGlobalStatsData();
+    const statsHist = getStatsHistoryEntries();
     const badgeEl = $("statsBadge");
-    const badgeValue = Number.isFinite(statsData.concludedCountTotal||0) ? Math.max(0, Math.round(statsData.concludedCountTotal||0)).toString() : "—";
+    const badgeValue = statsHist.length ? Math.max(0, Math.round(statsHist.length||0)).toString() : "0";
     if(badgeEl) badgeEl.textContent = badgeValue;
     if(!canSeeStats){
       list.innerHTML = `<div class="muted">Statistiche complete riservate agli amministratori.</div>`;
@@ -6531,36 +6598,19 @@ function renderHome(){
             <div class="divider"></div>
             <div class="stepTitle" style="font-size:14px; margin-top:0;">Admin</div>
             <button class="btn bad" id="btnClearHistory" style="width:100%;">Elimina dati storici</button>
-            <div class="muted" style="margin-top:8px;">Attenzione: operazione irreversibile.</div>
+            <div class="muted" id="statsClearFeedback" style="margin-top:8px;">Attenzione: operazione irreversibile.</div>
           `;
           list.parentElement.appendChild(box);
-          box.querySelector("#btnClearHistory").onclick = async()=>{
-            if(!confirm("Eliminare TUTTI i dati storici di produzione?")) return;
-            if(!confirm("Conferma finale: questa operazione è irreversibile.")) return;
-            try{
-              const fs = state.firebase.api;
-              const db = state.firebase.db;
-              const cols = ["powderProdHistory","operatorStats"];
-              for(const c of cols){
-                const snap = await fs.getDocs(fs.collection(db, c));
-                for(const d of snap.docs){
-                  await fs.deleteDoc(d.ref);
-                }
-              }
-              showToast("Storico eliminato", "Dati storici rimossi.");
-            }catch(err){
-              console.warn(err);
-              showToast("Errore", "Impossibile eliminare lo storico.");
-            }
-          };
         }
       } else {
         if(box) box.remove();
       }
     }catch(_e){}
-    const hist = (state.history||[]).filter(x=>x && x.operator);
+    const hist = statsHist;
+    const cleared = getStatsClearTs();
     if(!hist.length){
-      list.innerHTML = `<div class="muted">Nessun dato storico disponibile (in attesa delle prime produzioni).</div>`;
+      const clearedMsg = cleared ? `<div class="muted" style="margin-top:6px;">Dati storici eliminati su questo dispositivo.</div>` : "";
+      list.innerHTML = `<div class="muted">Nessun dato storico disponibile (in attesa delle prime produzioni).</div>${clearedMsg}`;
       return;
     }
     const agg = new Map();
@@ -6590,8 +6640,23 @@ function renderHome(){
           </div>
           <div class="badge">${Math.round(r.kg)} kg</div>
         </div>`;
-      list.appendChild(div);
+        list.appendChild(div);
     }
+  }
+  function wireStatsClearAction(){
+    if(globalThis.__STATS_CLEAR_HANDLER_BOUND__) return;
+    globalThis.__STATS_CLEAR_HANDLER_BOUND__ = true;
+    document.addEventListener("click", (e)=>{
+      const btn = e.target?.closest("#btnClearHistory");
+      if(!btn) return;
+      if(!(state.user && state.user.isAdmin)){
+        showToast("Accesso limitato", "Solo gli amministratori possono azzerare le statistiche.");
+        return;
+      }
+      const msg = "Confermi eliminazione dati storici? Questa azione non è reversibile.";
+      if(!confirm(msg)) return;
+      clearLocalStatsHistory();
+    });
   }
 
   function renderMagazzino(){
@@ -8066,6 +8131,7 @@ function renderHome(){
     window.addEventListener("orientationchange", handleDesktopResize);
     window.addEventListener("orientationchange", updateKioskAdminMode);
     try{ kioskAspectMq && kioskAspectMq.addEventListener("change", updateKioskAdminMode); }catch(_e){ try{ kioskAspectMq && kioskAspectMq.addListener(updateKioskAdminMode); }catch(_e2){} }
+    wireStatsClearAction();
 
     // ===============================
     // HOME interactions
