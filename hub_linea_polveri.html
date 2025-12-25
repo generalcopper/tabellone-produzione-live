@@ -113,6 +113,46 @@
       color: var(--muted);
       font-weight: 600;
     }
+    .mobileWelcomeWrap{
+      display:none;
+      gap:8px;
+      margin-top: 6px;
+      width:100%;
+      max-width: 100%;
+    }
+    .mobileWelcome{
+      font-size: 13px;
+      line-height: 1.4;
+      color: var(--muted);
+      font-weight: 700;
+      background: rgba(0,0,0,.03);
+      border: 1px solid var(--stroke);
+      border-radius: 14px;
+      padding: 10px 12px;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,.7);
+    }
+    .mobileWelcome .highlight{ color: var(--text); font-weight: 800; }
+    .mobileWelcome .kpi{ color: var(--text); font-weight: 900; }
+    .mobileStatsLink{
+      display:inline-flex;
+      align-items:center;
+      justify-content:center;
+      gap:6px;
+      align-self:flex-start;
+      border:none;
+      border-radius: 999px;
+      padding: 10px 14px;
+      background: rgba(10,132,255,.12);
+      color: #0a84ff;
+      font-weight: 900;
+      font-size: 13px;
+      letter-spacing: .01em;
+      box-shadow: 0 10px 18px rgba(10,132,255,.16);
+      cursor:pointer;
+      transition: transform .12s ease, box-shadow .16s ease;
+    }
+    .mobileStatsLink:active{ transform: translateY(1px); box-shadow: 0 8px 16px rgba(10,132,255,.14); }
+    .mobileStatsLink:focus-visible{ outline:2px solid rgba(10,132,255,.28); outline-offset:2px; }
     @media (max-width: 720px){
       header.headerRow { gap:10px; padding-top: calc(6px + var(--safe-top)); min-height: 64px; }
       .title { flex-direction:column; align-items:flex-start; text-align:left; width:auto; }
@@ -170,6 +210,7 @@
         min-width: 0;
         width:auto;
       }
+      .mobileWelcomeWrap{ display:flex; flex-direction:column; }
       .statusRow .pill,
       .statusRow .pillQuiet,
       .statusRow #pillPush,
@@ -208,6 +249,7 @@
       .brandLogo{ width: 72px; height: 72px; transform: translateY(-2px); }
       .title{ font-size: 38px; line-height: 0.9; }
       .subtitle{ font-size: 13px; line-height: 1.2; }
+      .mobileWelcomeWrap{ display:flex; flex-direction:column; }
       .statusRow{ gap: 8px; }
       #headerTicker,
       .headerTicker,
@@ -2421,6 +2463,10 @@
             <span class="titleLine accent">Polveri</span>
           </div>
           <div class="subtitle">Benvenuto operatore <b id="hdrUser">—</b>, questo mese hai prodotto <span id="hdrMonthKg">—</span> kg e hai concluso <span id="hdrMonthOrders">—</span> ordini.</div>
+          <div class="mobileWelcomeWrap" id="mobileWelcomeWrap">
+            <div class="mobileWelcome" id="mobileWelcome">Benvenuto operatore <span class="highlight">—</span>, questo mese hai prodotto <span class="kpi">—</span> kg e hai concluso <span class="kpi">—</span> ordini.</div>
+            <button class="mobileStatsLink" id="btnMobileStats" type="button">Vai a statistiche</button>
+          </div>
         </div>
       </div>
       <div class="statusRow actions">
@@ -2597,6 +2643,7 @@
         </div>
 
         <div id="statsCardAnchor" style="display:none;" aria-hidden="true"></div>
+        <div id="statsProduzione" style="position:relative; top:-6px;" aria-hidden="true"></div>
         <div class="card" miniCard id="statsProdCard">
           <div class="hd">
             <h2>Statistiche produzione</h2>
@@ -6863,48 +6910,105 @@ function renderHome(){
     unlockBody();
   }
 
+  function getOperatorName(){
+    const fromState = (state.user?.fullName || "").trim();
+    if(fromState) return fromState;
+    const authUser = state.firebase?.auth?.currentUser;
+    const dn = (authUser?.displayName || "").trim();
+    if(dn) return dn;
+    const email = (state.user?.email || authUser?.email || "").trim();
+    if(email && email.includes("@")){
+      const [beforeAt] = email.split("@");
+      if(beforeAt) return beforeAt;
+    }
+    return "Operatore";
+  }
+
+  function formatMonthlyKg(kg){
+    const safe = Math.max(0, Number(kg) || 0);
+    const rounded = Math.round(safe * 10) / 10;
+    const hasDecimal = Math.abs(Math.round(rounded * 10) % 10) !== 0;
+    return new Intl.NumberFormat("it-IT", { minimumFractionDigits: hasDecimal ? 1 : 0, maximumFractionDigits: 1 }).format(rounded);
+  }
+
+  function formatMonthlyOrders(n){
+    const val = Math.max(0, Math.round(Number(n) || 0));
+    return val.toLocaleString("it-IT");
+  }
+
+  function getMonthlyKpiFromExistingStats(){
+    const hist = getStatsHistoryEntries();
+    const now = new Date();
+    const y = now.getFullYear();
+    const m = now.getMonth();
+    const nameKey = norm(getOperatorName() || "");
+    const uid = state.user?.uid || "";
+    const filtered = hist.filter(h=>{
+      const rawDate = h?.startedAt || h?.endedAt || h?.at;
+      if(!rawDate) return false;
+      const dt = new Date(rawDate);
+      if(!Number.isFinite(dt.getTime())) return false;
+      if(dt.getFullYear()!==y || dt.getMonth()!==m) return false;
+      if(uid && h.operatorUid) return h.operatorUid === uid;
+      if(nameKey) return norm(h.operator||"") === nameKey;
+      return false;
+    });
+    if(!filtered.length) return { kg:0, orders:0 };
+    const totKg = filtered.reduce((a,h)=>{
+      const v = Number(h.kg);
+      return Number.isFinite(v) ? a + v : a;
+    }, 0);
+    return {
+      kg: Number.isFinite(totKg) ? totKg : 0,
+      orders: filtered.length
+    };
+  }
+
+  function renderMobileWelcome(){
+    const box = $("mobileWelcome");
+    if(!box) return;
+    const name = escapeHtml(getOperatorName() || "Operatore");
+    const { kg, orders } = getMonthlyKpiFromExistingStats();
+    const kgTxt = formatMonthlyKg(kg);
+    const ordTxt = formatMonthlyOrders(orders);
+    box.innerHTML = `Benvenuto operatore <span class="highlight">${name}</span>, questo mese hai prodotto <span class="kpi">${kgTxt}</span> kg e hai concluso <span class="kpi">${ordTxt}</span> ordini.`;
+  }
+
+  function scrollToStatsSection(){
+    const target = document.getElementById("statsProduzione") || document.getElementById("statsProdCard") || document.getElementById("statsCardAnchor");
+    if(target){
+      const nextCard = target.nextElementSibling && target.nextElementSibling.classList?.contains("card") ? target.nextElementSibling : null;
+      const el = target.closest(".card") || nextCard || target;
+      try{
+        el.scrollIntoView({ behavior:"smooth", block:"start" });
+      }catch(_e){
+        const rect = el.getBoundingClientRect();
+        const top = rect.top + window.pageYOffset - 12;
+        window.scrollTo({ top, behavior:"smooth" });
+      }
+      return;
+    }
+    window.scrollTo({ top: document.body.scrollHeight, behavior:"smooth" });
+  }
+
   function renderHeaderKpis(){
     const kgEl = $("hdrMonthKg");
     const ordEl = $("hdrMonthOrders");
     const deskKgEl = $("deskMonthKg");
     const deskOrdEl = $("deskMonthOrders");
     if(!kgEl || !ordEl) return;
-    let kgTxt = "—";
-    let ordTxt = "—";
+    let kgTxt = "0";
+    let ordTxt = "0";
     try{
-      if(state.user && state.historyReady){
-        const hist = Array.isArray(state.history) ? state.history : [];
-        const now = new Date();
-        const y = now.getFullYear();
-        const m = now.getMonth();
-        const nameKey = norm(state.user.fullName||"");
-        const filtered = hist.filter(h=>{
-          const rawDate = h?.startedAt || h?.endedAt || h?.at;
-          if(!rawDate) return false;
-          const dt = new Date(rawDate);
-          if(!Number.isFinite(dt.getTime())) return false;
-          if(dt.getFullYear()!==y || dt.getMonth()!==m) return false;
-          if(h.operatorUid && state.user.uid) return h.operatorUid === state.user.uid;
-          if(nameKey) return norm(h.operator||"") === nameKey;
-          return false;
-        });
-        if(filtered.length){
-          const totKg = filtered.reduce((a,h)=>{
-            const v = Number(h.kg);
-            return Number.isFinite(v) ? a + v : a;
-          }, 0);
-          kgTxt = Number.isFinite(totKg) ? Math.round(totKg).toLocaleString("it-IT") : "—";
-          ordTxt = String(filtered.length);
-        } else {
-          kgTxt = "0";
-          ordTxt = "0";
-        }
-      }
+      const { kg, orders } = getMonthlyKpiFromExistingStats();
+      kgTxt = formatMonthlyKg(kg);
+      ordTxt = formatMonthlyOrders(orders);
     }catch(_e){}
     kgEl.textContent = kgTxt;
     ordEl.textContent = ordTxt;
     if(deskKgEl) deskKgEl.textContent = kgTxt;
     if(deskOrdEl) deskOrdEl.textContent = ordTxt;
+    renderMobileWelcome();
   }
 
   // ===============================
@@ -8230,6 +8334,12 @@ function renderHome(){
       showToast("Statistiche", "Sezione statistiche completa in fondo alla pagina.");
       window.scrollTo({ top: document.body.scrollHeight, behavior:"smooth" });
     });
+    try{
+      $("btnMobileStats")?.addEventListener("click", (e)=>{
+        e.preventDefault();
+        scrollToStatsSection();
+      });
+    }catch(_e){}
 
     // Issues (registrazione interna)
     $("btnSendIssue").addEventListener("click", async()=>{
