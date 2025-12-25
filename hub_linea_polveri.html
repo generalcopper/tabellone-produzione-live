@@ -1372,6 +1372,16 @@
     }
     .modalTitle{ font-size:15px; font-weight:1000; letter-spacing:.01em; }
     .modalSub{ font-size:12px; color:var(--muted); margin-top:4px; }
+    .calcHint, .modalCalc{
+      margin-top: 4px;
+      font-size: 12px;
+      line-height: 1.2;
+      color: var(--muted);
+      font-weight: 600;
+      opacity: .95;
+      max-width: 100%;
+      word-break: break-word;
+    }
     .modalClose{
       border:none;
       background: rgba(0,0,0,.06);
@@ -4133,6 +4143,7 @@ html.deskScrolled .wrap{
         <div>
           <div class="modalTitle" id="whModalTitle">Dettaglio magazzino</div>
           <div class="modalSub" id="whModalSub">—</div>
+          <div class="modalCalc" id="whModalCalc" style="display:none"></div>
         </div>
         <button class="modalClose" id="whModalClose" aria-label="Chiudi">×</button>
       </div>
@@ -7499,6 +7510,16 @@ function showAuthGate(){
     return { totals, orderDetails };
   }
   const WH_MODAL_ALL_KEY = "__wh_all__";
+  const warehouseCalcHints = {
+    "prodotto da completare": "Somma kg di tutti gli ordini non conclusi",
+    "kg totali residui": "Kg residui = kg da produrre − kg già prodotti",
+    "etichette totali": "Pezzi stimati = numero sacchi totali (1 etichetta per sacco)",
+    "scatola americana": "Pezzi stimati = kg ÷ 20",
+    "divisorio croce texo": "Pezzi stimati = sacchi per scatola (1 divisorio per scatola)",
+    "divisorio z": "Pezzi stimati = sacchi per scatola (1 divisorio per scatola)",
+    "bobina blu f480": "Stima bobine = etichette ÷ resa bobina (F480)",
+    "bobina f830": "Stima bobine = etichette ÷ resa bobina (F830)"
+  };
   function buildMagazzinoDetailLookup(orderDetails){
     const map = new Map();
     const push = (key, entry)=>{
@@ -8614,14 +8635,18 @@ function renderHome(){
       </div>`;
     })();
     const overviewHtml = visibleItems.length
-      ? visibleItems.map(it=>`
+      ? visibleItems.map(it=>{
+        const hint = getWhCalcHint(it.label, it);
+        return `
         <button class="whOverviewRow rowPress" data-key="${escapeHtml(it.key)}" type="button">
           <div style="flex:1; min-width:0;">
             <div class="whOverviewName">${escapeHtml(it.label)}</div>
             ${it.subtitle ? `<div class="whOverviewSub">${escapeHtml(it.subtitle)}</div>`:""}
+            <div class="calcHint">(${escapeHtml(hint)})</div>
           </div>
           <div class="whOverviewVal">${formatWhQty(it)}</div>
-        </button>`).join("")
+        </button>`;
+      }).join("")
       : `<div class="muted">${orderDetails.length ? "Nessun ordine corrisponde ai filtri." : "Nessun ordine disponibile."}</div>`;
     const seeAllHtml = "";
     const critAlert = (()=>{
@@ -8716,11 +8741,27 @@ function renderHome(){
     }
   }
 
+  function normalizeWhTitle(titleText){
+    return `${titleText||""}`.split("|")[0].trim().toLowerCase().replace(/\s+/g," ");
+  }
+  function getWhCalcHint(titleText, itemObj){
+    if(itemObj && itemObj.calcHint) return `${itemObj.calcHint}`;
+    const baseTitle = normalizeWhTitle(titleText);
+    if(baseTitle && warehouseCalcHints[baseTitle]) return warehouseCalcHints[baseTitle];
+    return "Giacenza: carichi − consumi";
+  }
+
   function renderWhModalContent(key){
     const modalTitle = $("whModalTitle");
     const modalSub = $("whModalSub");
+    const modalCalc = $("whModalCalc");
     const modalBody = $("whModalBody");
-    if(!modalTitle || !modalSub || !modalBody) return;
+    if(!modalTitle || !modalSub || !modalBody || !modalCalc) return;
+    const renderCalcHint = (titleText, itemObj)=>{
+      const hint = getWhCalcHint(titleText, itemObj);
+      modalCalc.textContent = `(${hint})`;
+      modalCalc.style.display = "";
+    };
     const overview = Array.isArray(state.magazzinoOverview) ? state.magazzinoOverview : [];
     const lookup = (state.magazzinoDetailLookup instanceof Map) ? state.magazzinoDetailLookup : new Map();
     const renderSection = (item)=>{
@@ -8742,6 +8783,7 @@ function renderHome(){
     if(key === WH_MODAL_ALL_KEY){
       modalTitle.textContent = "Dettaglio magazzino";
       modalSub.textContent = "Elenco completo articoli e ordini";
+      renderCalcHint(modalTitle.textContent, null);
       modalBody.innerHTML = overview.length ? overview.map(renderSection).join("") : `<div class="muted">Nessun dato disponibile.</div>`;
       return;
     }
@@ -8749,6 +8791,7 @@ function renderHome(){
     const item = overview.find(it=>it.key===key);
     modalTitle.textContent = item?.label || "Dettaglio articolo";
     modalSub.textContent = item?.subtitle || "Ripartizione per cliente/ordine";
+    renderCalcHint(modalTitle.textContent, item);
     modalBody.innerHTML = renderSection(item || { key, label:"Articolo", subtitle:"" });
   }
 
