@@ -1498,6 +1498,10 @@
               <div class="adminList" id="mobileAllowList"></div>
               <div class="mobileSendFooter">
                 <div class="saveBadge" id="mobileAllowFeedback">Stato: —</div>
+                <div class="row2" style="flex:1; min-width:0; align-items:center; gap:8px;">
+                  <button class="btn ghost" id="btnResetMobileAllow" style="width:100%;">Reset invio mobile</button>
+                  <div class="saveBadge" id="mobileAllowResetStatus" style="min-width:170px;">Pronto al reset</div>
+                </div>
                 <button class="btn" id="btnSaveMobileAllow" style="width:200px; max-width:100%;">Salva invio</button>
               </div>
             </div>
@@ -1817,6 +1821,7 @@
     mobileAllowDirty: false,
     mobileAllowSaveState: "idle",
     mobileAllowSearchTerm: "",
+    mobileAllowReset: { confirm:false, status:"idle", lastError:"" },
     notifications: { inbox: [], ready:false, unavailable:false, error:"" },
     notifUnsub: null,
     push: { supported:false, permission:'default', token:'', enabled:false },
@@ -1824,6 +1829,8 @@
   globalThis.__ALLOW_KEYS__ = (globalThis.__ALLOW_KEYS__ instanceof Set) ? globalThis.__ALLOW_KEYS__ : new Set();
   globalThis.__ALLOW_META__ = globalThis.__ALLOW_META__ || { updatedAt:null, updatedBy:"", lastError:"", lastSyncTs:null };
   globalThis.__ALLOWLIST_LISTEN_STARTED__ = Boolean(globalThis.__ALLOWLIST_LISTEN_STARTED__);
+  globalThis.__ALLOWLIST_CACHE_CLEANED__ = Boolean(globalThis.__ALLOWLIST_CACHE_CLEANED__);
+  globalThis.__ALLOW_LOADED__ = Boolean(globalThis.__ALLOW_LOADED__);
   globalThis.__CONCLUDE_INFLIGHT__ = (globalThis.__CONCLUDE_INFLIGHT__ instanceof Map) ? globalThis.__CONCLUDE_INFLIGHT__ : new Map();
   globalThis.__CONCLUDE_RECENT__ = (globalThis.__CONCLUDE_RECENT__ instanceof Map) ? globalThis.__CONCLUDE_RECENT__ : new Map();
   globalThis.__CONCLUDE_HANDLER_BOUND__ = Boolean(globalThis.__CONCLUDE_HANDLER_BOUND__);
@@ -1832,6 +1839,22 @@
   globalThis.__allowCommitted = (globalThis.__allowCommitted instanceof Set) ? globalThis.__allowCommitted : new Set(Array.from(globalThis.__ALLOW_KEYS__||[]));
   globalThis.__allowDraft = (globalThis.__allowDraft instanceof Set) ? globalThis.__allowDraft : new Set(globalThis.__allowCommitted);
   globalThis.__allowDraftDirty = Boolean(globalThis.__allowDraftDirty);
+  const LEGACY_ALLOW_CACHE_KEYS = ["allowKeys","mobileAllowlist","hub_allowlist","mobileSendKeys","assignedOrders"];
+  function cleanupLegacyAllowlistCaches(){
+    if(globalThis.__ALLOWLIST_CACHE_CLEANED__) return;
+    globalThis.__ALLOWLIST_CACHE_CLEANED__ = true;
+    const stores = [];
+    try{ if(typeof localStorage!=="undefined") stores.push(localStorage); }catch(_e){}
+    try{ if(typeof sessionStorage!=="undefined") stores.push(sessionStorage); }catch(_e){}
+    for(const store of stores){
+      try{
+        for(const k of LEGACY_ALLOW_CACHE_KEYS){
+          store.removeItem(k);
+        }
+      }catch(_e){}
+    }
+  }
+  cleanupLegacyAllowlistCaches();
 
   // ===============================
   // UTILS
@@ -3175,6 +3198,7 @@ function showAuthGate(){
     globalThis.__allowDraftDirty = dirty;
   }
   let __allowRenderTimer = null;
+  let __allowResetTimer = null;
   function scheduleAllowlistRender(){
     if(!state.powderOrders || !state.powderOrders.length){
       state.mobileAllowlist.pendingRender = true;
@@ -3205,6 +3229,7 @@ function showAuthGate(){
         const data = snap.exists() ? (snap.data()||{}) : {};
         const keysArr = Array.isArray(data.keys) ? data.keys.filter(Boolean).map(String) : [];
         const allowSet = new Set(keysArr);
+        globalThis.__ALLOW_LOADED__ = true;
         globalThis.__ALLOW_KEYS__ = new Set(keysArr);
         globalThis.__allowCommitted = new Set(keysArr);
         if(!globalThis.__allowDraftDirty){
@@ -3221,7 +3246,7 @@ function showAuthGate(){
           keys: allowSet,
           updatedAt: data.updatedAt || null,
           updatedBy: data.updatedBy || "",
-          allowAll: !snap.exists(),
+          allowAll: Boolean(data.allowAll) && snap.exists(),
           docExists: snap.exists(),
           error: "",
           lastError: "",
@@ -3236,6 +3261,12 @@ function showAuthGate(){
         console.warn("allowlist snapshot error", err);
         const code = err?.code || "";
         const message = err?.message || String(err);
+        globalThis.__ALLOW_LOADED__ = true;
+        globalThis.__ALLOW_KEYS__ = new Set();
+        globalThis.__allowCommitted = new Set();
+        if(!globalThis.__allowDraftDirty){
+          globalThis.__allowDraft = new Set();
+        }
         globalThis.__ALLOW_META__ = {
           ...(globalThis.__ALLOW_META__||{}),
           lastError: code ? `${code}: ${message}` : message,
@@ -3245,6 +3276,11 @@ function showAuthGate(){
         state.mobileAllowlist.lastError = code || message;
         state.mobileAllowlist.lastSyncTs = Date.now();
         state.mobileAllowlist.ready = true;
+        state.mobileAllowlist.keys = new Set();
+        state.mobileAllowlist.docExists = false;
+        state.mobileAllowlist.allowAll = false;
+        state.mobileAllowSelection = new Set();
+        state.mobileAllowDirty = false;
         state.mobileAllowSaveState = "error";
         renderHome();
       });
@@ -3252,6 +3288,12 @@ function showAuthGate(){
       console.warn("allowlist listen failed", err);
       const code = err?.code || "";
       const message = err?.message || String(err);
+      globalThis.__ALLOW_LOADED__ = true;
+      globalThis.__ALLOW_KEYS__ = new Set();
+      globalThis.__allowCommitted = new Set();
+      if(!globalThis.__allowDraftDirty){
+        globalThis.__allowDraft = new Set();
+      }
       globalThis.__ALLOW_META__ = {
         ...(globalThis.__ALLOW_META__||{}),
         lastError: code ? `${code}: ${message}` : message,
@@ -3261,8 +3303,91 @@ function showAuthGate(){
       state.mobileAllowlist.lastError = code || message;
       state.mobileAllowlist.lastSyncTs = Date.now();
       state.mobileAllowlist.ready = true;
+      state.mobileAllowlist.keys = new Set();
+      state.mobileAllowlist.docExists = false;
+      state.mobileAllowlist.allowAll = false;
+      state.mobileAllowSelection = new Set();
+      state.mobileAllowDirty = false;
       state.mobileAllowSaveState = "error";
     }
+  }
+  function resetAllowlistInMemory(meta={}){
+    globalThis.__ALLOW_LOADED__ = true;
+    globalThis.__ALLOW_KEYS__ = new Set();
+    globalThis.__allowCommitted = new Set();
+    globalThis.__allowDraft = new Set();
+    globalThis.__allowDraftDirty = false;
+    state.mobileAllowlist = {
+      ...(state.mobileAllowlist||{}),
+      ready: true,
+      keys: new Set(),
+      updatedAt: meta.updatedAt || null,
+      updatedBy: meta.updatedBy || "",
+      allowAll: false,
+      docExists: meta.docExists !== false,
+      error: "",
+      lastError: "",
+      lastSyncTs: Date.now(),
+      pendingRender: false
+    };
+    state.mobileAllowSelection = new Set();
+    state.mobileAllowDirty = false;
+    state.mobileAllowSaveState = "idle";
+    globalThis.__ALLOW_META__ = { ...(globalThis.__ALLOW_META__||{}), updatedBy: meta.updatedBy || "", lastError: "", lastSyncTs: Date.now() };
+  }
+  function handleMobileAllowResetClick(){
+    if(state.mobileAllowReset?.status === "saving") return;
+    if(state.mobileAllowReset?.confirm){
+      performMobileAllowReset();
+      return;
+    }
+    state.mobileAllowReset = { ...(state.mobileAllowReset||{}), confirm:true };
+    if(__allowResetTimer) clearTimeout(__allowResetTimer);
+    renderMobileAllowPanel(__allOrdersCache, __allOrdersKeySet);
+    __allowResetTimer = setTimeout(()=>{
+      state.mobileAllowReset = { ...(state.mobileAllowReset||{}), confirm:false };
+      renderMobileAllowPanel(__allOrdersCache, __allOrdersKeySet);
+    }, 3000);
+  }
+  async function performMobileAllowReset(){
+    if(!(state.user && state.user.isAdmin)){
+      state.mobileAllowReset = { confirm:false, status:"error", lastError:"permission-denied" };
+      renderMobileAllowPanel(__allOrdersCache, __allOrdersKeySet);
+      return;
+    }
+    if(!state.firebase.ok){
+      state.mobileAllowReset = { confirm:false, status:"error", lastError:"firebase-offline" };
+      renderMobileAllowPanel(__allOrdersCache, __allOrdersKeySet);
+      return;
+    }
+    const fs = state.firebase.api;
+    const db = state.firebase.db;
+    const ref = mobileAllowlistDoc(fs, db);
+    cleanupLegacyAllowlistCaches();
+    state.mobileAllowReset = { confirm:false, status:"saving", lastError:"" };
+    renderMobileAllowPanel(__allOrdersCache, __allOrdersKeySet);
+    try{
+      await fs.setDoc(ref, {
+        keys: [],
+        updatedAt: fs.serverTimestamp(),
+        updatedBy: state.user.email || state.user.fullName || ""
+      }, { merge:true });
+      resetAllowlistInMemory({ updatedBy: state.user.email || state.user.fullName || "", docExists:true });
+      state.mobileAllowReset = { confirm:false, status:"success", lastError:"" };
+      refreshAllowDirtyFlag();
+      setTimeout(()=> renderHome(), 100);
+    }catch(err){
+      console.warn("reset allowlist error", err);
+      const code = err?.code || "";
+      const msg = err?.message || String(err);
+      const friendly = code ? code : msg;
+      state.mobileAllowReset = { confirm:false, status:"error", lastError:friendly || "errore" };
+    }
+    if(__allowResetTimer){
+      clearTimeout(__allowResetTimer);
+      __allowResetTimer = null;
+    }
+    renderMobileAllowPanel(__allOrdersCache, __allOrdersKeySet);
   }
   async function saveMobileAllowlist(){
     if(!(state.user && state.user.isAdmin)){
@@ -3734,7 +3859,9 @@ function showAuthGate(){
     const isMobileView = isMobile();
     const allowInfo = state.mobileAllowlist || {};
     const allowKeySet = (globalThis.__ALLOW_KEYS__ instanceof Set) ? globalThis.__ALLOW_KEYS__ : new Set();
-    const allowFilterActive = Boolean(!isAdmin && isMobileView && allowInfo.ready && !allowInfo.allowAll);
+    const allowLoaded = Boolean(globalThis.__ALLOW_LOADED__);
+    const allowFilterActive = Boolean(!isAdmin && isMobileView && allowLoaded);
+    const allowGuardActive = Boolean(!isAdmin && isMobileView && !allowLoaded);
 
     const orders = [];
     const baseOrders = [];
@@ -3784,6 +3911,8 @@ function showAuthGate(){
       }
       if(visible && allowFilterActive){
         visible = allowKeySet.has(k);
+      } else if(allowGuardActive){
+        visible = false;
       }
       if(!visible && !includeHidden) continue;
       orders.push(baseOrder);
@@ -3938,11 +4067,12 @@ function showAuthGate(){
       if(orderKeySetLocal.has(k)) matchCount++;
     }
     const totalOrders = Array.isArray(ordersList) ? ordersList.length : 0;
-    const selectionCount = draft.size;
+    const selectionCount = committed.size;
     const updatedTxt = fmtAllowlistTs(allowInfo.updatedAt);
     const docCount = committed.size;
+    const docMissing = allowInfo.ready && !allowInfo.docExists;
     const updatedLabel = allowInfo.ready
-      ? (allowInfo.allowAll ? "Filtro disattivo: salva per limitare gli ordini." : `Aggiornato ${updatedTxt}${allowInfo.updatedBy ? ` · ${allowInfo.updatedBy}` : ""} · ${docCount} ordini live`)
+      ? (docMissing ? "Nessuna assegnazione salvata: filtro vuoto." : (allowInfo.allowAll ? "Filtro disattivo: salva per limitare gli ordini." : `Aggiornato ${updatedTxt}${allowInfo.updatedBy ? ` · ${allowInfo.updatedBy}` : ""} · ${docCount} ordini live`))
       : "Sincronizzazione in corso…";
     const lastErrorTxt = allowInfo.lastError || allowInfo.error || (globalThis.__ALLOW_META__||{}).lastError || "";
     const updByEl = $("mobileAllowUpdatedBy");
@@ -3972,6 +4102,8 @@ function showAuthGate(){
       } else if(status==="error" || hasError){
         statusEl.textContent = "Errore";
         statusEl.classList.add("error");
+      } else if(docMissing){
+        statusEl.textContent = "Vuoto";
       } else if(allowInfo.allowAll){
         statusEl.textContent = "Filtro off";
       } else if(state.mobileAllowDirty){
@@ -3992,6 +4124,8 @@ function showAuthGate(){
         feedback.textContent = `Salvataggio non consentito${lastErrorTxt ? ` · ${lastErrorTxt}` : ""}`;
       } else if(state.mobileAllowDirty){
         feedback.textContent = "Modifiche locali non salvate.";
+      } else if(docMissing){
+        feedback.textContent = "Assegnazioni vuote: nessun ordine inviato.";
       } else {
         feedback.classList.add("live");
         const modeTxt = allowInfo.allowAll ? "Filtro disattivo." : "Filtro attivo.";
@@ -4039,7 +4173,7 @@ function showAuthGate(){
     return { filteredOrders: filtered, total: source.length };
   }
 
-  function renderMobileAllowPanel(baseOrders, orderKeySet){
+  function renderMobileAllowPanel(baseOrders=__allOrdersCache, orderKeySet=__allOrdersKeySet){
     const panel = $("mobileAllowPanel");
     const isAdminDesktop = Boolean(state.user && state.user.isAdmin && !isMobile());
     if(!panel) return;
@@ -4053,6 +4187,8 @@ function showAuthGate(){
 
     updateMobileAllowUi(ordersList, orderKeySetLocal);
     const status = state.mobileAllowSaveState;
+    const resetState = state.mobileAllowReset || {};
+    const resetConfirm = Boolean(resetState.confirm);
 
     const searchInput = $("mobileAllowSearch");
     if(searchInput){
@@ -4128,6 +4264,33 @@ function showAuthGate(){
     if(saveBtn){
       saveBtn.disabled = status==="saving";
       saveBtn.onclick = ()=> saveMobileAllowlist();
+    }
+    const resetBtn = $("btnResetMobileAllow");
+    if(resetBtn){
+      const saving = resetState.status === "saving";
+      resetBtn.textContent = resetConfirm ? "Conferma reset" : "Reset invio mobile";
+      resetBtn.disabled = saving;
+      if(!resetBtn.dataset.bound){
+        resetBtn.dataset.bound = "1";
+        resetBtn.onclick = ()=> handleMobileAllowResetClick();
+      }
+    }
+    const resetBadge = $("mobileAllowResetStatus");
+    if(resetBadge){
+      resetBadge.className = "saveBadge";
+      const statusTxt = resetState.status || "idle";
+      if(statusTxt === "success"){
+        resetBadge.classList.add("live");
+        resetBadge.textContent = "Reset completato ✅";
+      } else if(statusTxt === "error"){
+        resetBadge.classList.add("error");
+        const err = resetState.lastError || "";
+        resetBadge.textContent = `Reset non consentito${err ? ` (${err})` : ""}`;
+      } else if(statusTxt === "saving"){
+        resetBadge.textContent = "Reset in corso…";
+      } else {
+        resetBadge.textContent = resetConfirm ? "Premi ancora per confermare" : "Pronto al reset";
+      }
     }
   }
 
@@ -4493,8 +4656,9 @@ function renderHome(){
     if(badgeEl){
       const isAdmin = Boolean(state.user && state.user.isAdmin);
       const allowInfo = state.mobileAllowlist || {};
+      const allowLoaded = Boolean(globalThis.__ALLOW_LOADED__);
       const mobileView = isMobile();
-      if(mobileView && !isAdmin && !allowInfo.ready){
+      if(mobileView && !isAdmin && !allowLoaded){
         badgeEl.textContent = "— ordini";
       } else {
         const count = (mobileView && !isAdmin) ? visibleOrders.length : pOrders.length;
@@ -4509,11 +4673,12 @@ function renderHome(){
       mobileInfo.style.display = showMobileInfo ? "block" : "none";
       if(showMobileInfo){
         const allowInfo = state.mobileAllowlist || {};
+        const allowLoaded = Boolean(globalThis.__ALLOW_LOADED__);
         const count = visibleOrders.length;
-        const docMissing = allowInfo.ready && allowInfo.allowAll;
+        const docMissing = allowLoaded && !allowInfo.docExists;
         if(docMissing){
           mobileInfo.textContent = "Assegnazioni non configurate";
-        } else if(allowInfo.ready && !allowInfo.allowAll && count===0){
+        } else if(allowLoaded && count===0){
           mobileInfo.textContent = "Nessun ordine assegnato dall’admin";
         } else {
           mobileInfo.innerHTML = `Ordini assegnati: <span id=\"mobileAllowCount\">${count}</span><span id=\"mobileAllowMsg\" style=\"margin-left:6px; color:var(--muted); font-weight:800;\"></span>`;
@@ -4521,7 +4686,7 @@ function renderHome(){
           const msgEl = $("mobileAllowMsg");
           if(countEl) countEl.textContent = String(count);
           if(msgEl) msgEl.textContent = "";
-          if(allowInfo.ready && !allowInfo.allowAll && count===0 && msgEl){
+          if(allowLoaded && count===0 && msgEl){
             msgEl.textContent = "Assegnazioni attive: nessun ordine";
           }
         }
