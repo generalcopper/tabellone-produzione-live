@@ -3896,8 +3896,8 @@ html.deskScrolled .wrap{
           <div class="hd">
             <h2 class="cardTitle">Ordini conclusi</h2>
             <div class="cardTopActions adminOnly">
-              <button class="miniBtn" data-action="print" data-target="#completedCard">Stampa</button>
-              <button class="miniBtn" data-action="share" data-target="#completedCard">Condividi</button>
+              <button type="button" class="miniBtn" data-action="print" data-target="#completedCard">Stampa</button>
+              <button type="button" class="miniBtn" data-action="share" data-target="#completedCard">Condividi</button>
             </div>
             <div class="badge" id="completedBadge">0</div>
           </div>
@@ -3914,8 +3914,8 @@ html.deskScrolled .wrap{
           <div class="hd">
             <h2 class="cardTitle">Gestione magazzino</h2>
             <div class="cardTopActions adminOnly">
-              <button class="miniBtn" data-action="print" data-target="#warehouseCard">Stampa</button>
-              <button class="miniBtn" data-action="share" data-target="#warehouseCard">Condividi</button>
+              <button type="button" class="miniBtn" data-action="print" data-target="#warehouseCard">Stampa</button>
+              <button type="button" class="miniBtn" data-action="share" data-target="#warehouseCard">Condividi</button>
             </div>
             <div class="badge" id="warehouseBadge">—</div>
           </div>
@@ -4110,8 +4110,8 @@ html.deskScrolled .wrap{
           <div class="sub" id="histSub">—</div>
         </div>
         <div class="modalTopActions adminOnly">
-          <button class="miniBtn" data-action="print" data-target="#histModalSheet">Stampa</button>
-          <button class="miniBtn" data-action="share" data-target="#histModalSheet">Condividi</button>
+          <button type="button" class="miniBtn" data-action="print" data-target="#histModalSheet">Stampa</button>
+          <button type="button" class="miniBtn" data-action="share" data-target="#histModalSheet">Condividi</button>
         </div>
         <button class="x" id="histClose" aria-label="Chiudi">×</button>
       </div>
@@ -9969,19 +9969,31 @@ function renderHome(){
   function _getAllInlineStylesText(){
     return Array.from(document.querySelectorAll("style")).map(s=> s.textContent || "").join("\n");
   }
-  function _openPrintWindow({ title, html, extraCssText } = {}){
-    const w = window.open("", "_blank", "noopener,noreferrer,width=980,height=720");
-    if(!w){
-      try{ showToast("Stampa bloccata", "Consenti i popup per stampare."); }catch(_e){}
-      return;
-    }
-    const safeTitle = title ? String(title) : "Report";
-    const css = extraCssText || "";
-    w.document.write(`<html><head><title>${safeTitle}</title><style>${css}</style></head><body>${html||""}</body></html>`);
-    w.document.close();
-    w.focus();
-    try{ w.print(); }catch(_e){}
-    setTimeout(()=>{ try{ w.close(); }catch(_e){} }, 250);
+  function _escapeHtml(s){
+    return String(s||"").replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+  }
+
+  function _printNodeInIframe(targetEl, title){
+    const cssText = _getAllInlineStylesText ? _getAllInlineStylesText() : "";
+    const frame = document.createElement("iframe");
+    frame.setAttribute("aria-hidden","true");
+    frame.style.position="fixed";
+    frame.style.right="0";
+    frame.style.bottom="0";
+    frame.style.width="0";
+    frame.style.height="0";
+    frame.style.border="0";
+    const html = `<!doctype html><html><head><meta charset="utf-8">
+      <title>${_escapeHtml(title||"Stampa")}</title>
+      <style>${cssText}</style>
+    </head><body>${targetEl.outerHTML}</body></html>`;
+
+    frame.srcdoc = html;
+    frame.onload = () => {
+      try{ frame.contentWindow.focus(); frame.contentWindow.print(); }catch(_){}
+      setTimeout(()=>frame.remove(), 600);
+    };
+    document.body.appendChild(frame);
   }
   async function _shareText({ title, text } = {}){
     const safeTitle = title || document.title || "Report";
@@ -10013,21 +10025,26 @@ function renderHome(){
   document.addEventListener("click", async (e)=>{
     const btn = e.target.closest("button[data-action]");
     if(!btn) return;
+    e.preventDefault(); e.stopPropagation();
+
     const isAdmin = Boolean(state && state.user && state.user.isAdmin);
     if(!isAdmin) return;
-    const targetSel = btn.dataset.target;
-    if(!targetSel) return;
-    const targetEl = document.querySelector(targetSel);
+
+    const targetEl = document.querySelector(btn.dataset.target);
     if(!targetEl) return;
+
     const stamp = new Date().toLocaleString("it-IT");
-    const title = (targetEl.querySelector(".cardTitle, .title, h2, h3")?.innerText || document.title || "Report").trim();
-    const text = _extractVisibleText(targetEl);
-    const payload = `${title}\n${stamp}\n\n${text}`;
+    const title = (targetEl.querySelector(".cardTitle, .title, h2, h3")?.innerText || "Report").trim();
+
     if(btn.dataset.action === "print"){
-      const stylesText = _getAllInlineStylesText();
-      _openPrintWindow({ title, html: targetEl.outerHTML, extraCssText: stylesText });
-    } else if(btn.dataset.action === "share"){
-      await _shareText({ title, text: payload });
+      _printNodeInIframe(targetEl, title);
+      return;
+    }
+
+    if(btn.dataset.action === "share"){
+      const text = _extractVisibleText(targetEl);
+      await _shareText({ title, text: `${title}\n${stamp}\n\n${text}` });
+      return;
     }
   });
 
