@@ -3754,6 +3754,40 @@ html.deskScrolled .wrap{
   display:none !important;
 }
 
+/* iPhone-like step transitions */
+.modalStepWrap{
+  position: relative;
+  overflow: hidden;
+  height: auto;
+  transition: height 240ms cubic-bezier(.2,.8,.2,1);
+}
+
+.modalStep{
+  opacity: 0;
+  transform: translate3d(18px,0,0) scale(.99);
+  transition: transform 240ms cubic-bezier(.2,.8,.2,1), opacity 240ms cubic-bezier(.2,.8,.2,1);
+  will-change: transform, opacity;
+  pointer-events: none;
+}
+
+.modalStep.isActive{
+  opacity: 1;
+  transform: translate3d(0,0,0) scale(1);
+  pointer-events: auto;
+}
+
+/* direction */
+.modalStep.isEnterNext{ transform: translate3d(18px,0,0) scale(.99); opacity: 0; }
+.modalStep.isExitNext { transform: translate3d(-18px,0,0) scale(.99); opacity: 0; }
+
+.modalStep.isEnterPrev{ transform: translate3d(-18px,0,0) scale(.99); opacity: 0; }
+.modalStep.isExitPrev { transform: translate3d(18px,0,0) scale(.99); opacity: 0; }
+
+@media (prefers-reduced-motion: reduce){
+  .modalStepWrap{ transition:none !important; }
+  .modalStep{ transition:none !important; }
+}
+
 </style>
 
   <link rel="manifest" href="/tabellone-produzione-live/manifest.webmanifest">
@@ -4135,7 +4169,9 @@ html.deskScrolled .wrap{
         </div>
         <button class="x" id="prodModalClose" aria-label="Chiudi">×</button>
       </div>
-      <div class="sbd" id="prodModalBody"></div>
+      <div class="sbd">
+        <div class="modalStepWrap" id="prodModalBody"></div>
+      </div>
     </div>
   </div>
 
@@ -4412,6 +4448,36 @@ html.deskScrolled .wrap{
       }
     }
     listEl.appendChild(frag);
+  }
+  function _msSwapStep(wrapEl, fromEl, toEl, dir /* 'next'|'prev' */){
+    if(!wrapEl || !fromEl || !toEl || fromEl===toEl) return;
+
+    // set wrapper height to avoid jump
+    const fromH = fromEl.offsetHeight;
+    wrapEl.style.height = fromH + "px";
+
+    // prep entering
+    toEl.classList.add("isActive");
+    toEl.classList.add(dir === "next" ? "isEnterNext" : "isEnterPrev");
+
+    // force reflow
+    void toEl.offsetWidth;
+
+    // animate out + in
+    fromEl.classList.add(dir === "next" ? "isExitNext" : "isExitPrev");
+    toEl.classList.remove(dir === "next" ? "isEnterNext" : "isEnterPrev");
+
+    // animate wrapper height to new
+    const toH = toEl.offsetHeight;
+    wrapEl.style.height = toH + "px";
+
+    // cleanup
+    const done = () => {
+      fromEl.classList.remove("isActive","isExitNext","isExitPrev");
+      wrapEl.style.height = "auto";
+      fromEl.removeEventListener("transitionend", done);
+    };
+    fromEl.addEventListener("transitionend", done);
   }
   const emptyGlobalStats = ()=>({ concludedCountTotal:0, concludedKgTotal:0, updatedAt:null, updatedBy:"" });
   function readLocalGlobalStats(){
@@ -8971,6 +9037,37 @@ function renderHome(){
     $("prodModal").classList.remove("show");
     unlockBody();
   }
+  function ensureProdModalStep(stepKey){
+    const wrap = $("prodModalBody");
+    if(!wrap) return { wrap:null, step:null };
+    wrap.classList.add("modalStepWrap");
+    let step = wrap.querySelector(`.modalStep[data-step="${stepKey}"]`);
+    if(!step){
+      step = document.createElement("div");
+      step.className = "modalStep";
+      step.dataset.step = stepKey;
+      wrap.appendChild(step);
+    }
+    step.classList.remove("isEnterNext","isEnterPrev","isExitNext","isExitPrev");
+    return { wrap, step };
+  }
+  function activateProdModalStep(stepEl, dir="next"){
+    const wrap = $("prodModalBody");
+    if(!wrap || !stepEl) return;
+    wrap.classList.add("modalStepWrap");
+    const active = wrap.querySelector(".modalStep.isActive");
+    if(active === stepEl){
+      wrap.style.height = "auto";
+      stepEl.classList.add("isActive");
+      return;
+    }
+    if(!active){
+      stepEl.classList.add("isActive");
+      wrap.style.height = "auto";
+      return;
+    }
+    _msSwapStep(wrap, active, stepEl, dir === "prev" ? "prev" : "next");
+  }
 
   function renderPartialOrdersList(){
     const body = $("partialBody");
@@ -9069,9 +9166,10 @@ function renderHome(){
     renderProdStepOrders();
   }
 
-  async function renderProdStepOrders(){
+  async function renderProdStepOrders(dir="next"){
     $("prodModalTitle").textContent = "Produzione · Ordini";
-    const body = $("prodModalBody");
+    const { step: body } = ensureProdModalStep("orders");
+    if(!body) return;
     const { orders, baseOrders } = buildOrderViews();
     pruneSelectionAgainstOrders(baseOrders);
     updateSelectionCounter();
@@ -9113,8 +9211,9 @@ function renderHome(){
       body.querySelector("#btnRetry").onclick = async()=>{
         body.querySelector("#btnRetry").textContent = "Sincronizzo…";
         await queuedSyncOrders(false, "manual_retry");
-        renderProdStepOrders();
+        renderProdStepOrders("next");
       };
+      activateProdModalStep(body, dir);
       return;
     }
 
@@ -9134,11 +9233,13 @@ function renderHome(){
       sec.onclick = ()=>{ renderCustomerOrders(cust, arr); };
       return sec;
     }, 120);
+    activateProdModalStep(body, dir);
   }
 
-  async function renderCustomerOrders(cust, orders){
+  async function renderCustomerOrders(cust, orders, dir="next"){
     $("prodModalTitle").textContent = `Produzione · ${cust}`;
-    const body = $("prodModalBody");
+    const { step: body } = ensureProdModalStep("customer");
+    if(!body) return;
     body.innerHTML = `
       <div class="stepTitle">Ordini per ${cust}</div>
       <div class="muted">Ordini separati per numero. Apri un ordine per vedere le righe.</div>
@@ -9147,7 +9248,7 @@ function renderHome(){
       <div style="height:12px"></div>
       <button class="btn ghost" id="btnBackOrders" style="width:100%;">← Torna alla lista clienti</button>
     `;
-    body.querySelector("#btnBackOrders").onclick = renderProdStepOrders;
+    body.querySelector("#btnBackOrders").onclick = ()=>renderProdStepOrders("prev");
 
     const list = body.querySelector("#custOrders");
     list.classList.add("chunkyList");
@@ -9176,12 +9277,14 @@ function renderHome(){
       div.onclick = ()=>renderOrderDetail(o);
       return div;
     }, 120);
+    activateProdModalStep(body, dir);
   }
 
-  function renderOrderDetail(order){
+  function renderOrderDetail(order, dir="next"){
     const orderNo = order.orderNo || order.number;
     $("prodModalTitle").textContent = `Ordine n. ${orderNo}`;
-    const body = $("prodModalBody");
+    const { step: body } = ensureProdModalStep("detail");
+    if(!body) return;
     const lines = order.lines || [];
     const alerts = order.alerts || [];
     const alertHtml = alerts.length ? `<div style="display:flex; flex-direction:column; gap:8px; margin:10px 0 6px;">${alerts.map(a=>{
@@ -9320,17 +9423,18 @@ function renderHome(){
       rerenderLines();
       updateSelectionCounter();
     };
-      body.querySelector("#btnBackCust").onclick = ()=>{
-        const custOrders = buildOrderViews().orders.filter(o=>o.customer===order.customer);
-        renderCustomerOrders(order.customer, custOrders);
-      };
+    body.querySelector("#btnBackCust").onclick = ()=>{
+      const custOrders = buildOrderViews().orders.filter(o=>o.customer===order.customer);
+      renderCustomerOrders(order.customer, custOrders, "prev");
+    };
 
-      body.querySelector("#btnStartProd").onclick = async()=>{
+    body.querySelector("#btnStartProd").onclick = async()=>{
       if(selectionCount()===0) return;
       await startSelectedProductions(order);
-      };
+    };
 
     rerenderLines();
+    activateProdModalStep(body, dir);
   }
 
   // ===============================
