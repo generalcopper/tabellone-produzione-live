@@ -1480,7 +1480,10 @@
             <div class="adminList" id="mobileAllowList"></div>
             <div class="mobileSendFooter">
               <div class="saveBadge" id="mobileAllowFeedback">Stato: —</div>
-              <button class="btn" id="btnSaveMobileAllow" style="width:200px; max-width:100%;">Salva invio</button>
+              <div class="row2" style="gap:8px; align-items:center;">
+                <button class="btn ghost" id="btnAllowReset" style="min-width:150px;">Azzera invio</button>
+                <button class="btn" id="btnSaveMobileAllow" style="width:200px; max-width:100%;">Salva invio</button>
+              </div>
             </div>
           </div>
 
@@ -1793,7 +1796,7 @@
       db: null,
       api: null,
     },
-    mobileAllowlist: { ready:false, keys:new Set(), updatedAt:null, updatedBy:"", allowAll:true, docExists:false, error:"", lastError:"", lastSyncTs:null, pendingRender:false },
+    mobileAllowlist: { ready:false, keys:new Set(), updatedAt:null, updatedBy:"", allowAll:false, docExists:false, error:"", lastError:"", lastSyncTs:null, pendingRender:false },
     mobileAllowSelection: new Set(),
     mobileAllowDirty: false,
     mobileAllowSaveState: "idle",
@@ -1802,6 +1805,7 @@
     notifUnsub: null,
     push: { supported:false, permission:'default', token:'', enabled:false },
   };
+  globalThis.__ALLOW_LOADED__ = Boolean(globalThis.__ALLOW_LOADED__);
   globalThis.__ALLOW_KEYS__ = (globalThis.__ALLOW_KEYS__ instanceof Set) ? globalThis.__ALLOW_KEYS__ : new Set();
   globalThis.__ALLOW_META__ = globalThis.__ALLOW_META__ || { updatedAt:null, updatedBy:"", lastError:"", lastSyncTs:null };
   globalThis.__ALLOWLIST_LISTEN_STARTED__ = Boolean(globalThis.__ALLOWLIST_LISTEN_STARTED__);
@@ -1813,6 +1817,17 @@
   globalThis.__allowCommitted = (globalThis.__allowCommitted instanceof Set) ? globalThis.__allowCommitted : new Set(Array.from(globalThis.__ALLOW_KEYS__||[]));
   globalThis.__allowDraft = (globalThis.__allowDraft instanceof Set) ? globalThis.__allowDraft : new Set(globalThis.__allowCommitted);
   globalThis.__allowDraftDirty = Boolean(globalThis.__allowDraftDirty);
+  globalThis.__ALLOWLIST_CLEANED__ = Boolean(globalThis.__ALLOWLIST_CLEANED__);
+  if(!globalThis.__ALLOWLIST_CLEANED__){
+    try{
+      const legacyAllowKeys = ["allowKeys", "mobileAllowlist", "hub_allowlist", "hubAllowlist", "mobileAllowKeys", "allowKeysCache"];
+      legacyAllowKeys.forEach(k=>{
+        try{ localStorage.removeItem(k); }catch(_e){}
+        try{ sessionStorage.removeItem(k); }catch(_e){}
+      });
+    }catch(_e){}
+    globalThis.__ALLOWLIST_CLEANED__ = true;
+  }
 
   // ===============================
   // UTILS
@@ -3172,6 +3187,8 @@ function showAuthGate(){
       scheduleAllowlistRender();
     }
   }
+  let __allowResetTimer = null;
+  let __allowResetArmed = false;
   let __allowUnsub = null;
   async function ensureAllowlistListener(){
     if(globalThis.__ALLOWLIST_LISTEN_STARTED__) return;
@@ -3185,6 +3202,7 @@ function showAuthGate(){
       __allowUnsub = fs.onSnapshot(ref, (snap)=>{
         const data = snap.exists() ? (snap.data()||{}) : {};
         const keysArr = Array.isArray(data.keys) ? data.keys.filter(Boolean).map(String) : [];
+        globalThis.__ALLOW_LOADED__ = true;
         const allowSet = new Set(keysArr);
         globalThis.__ALLOW_KEYS__ = new Set(keysArr);
         globalThis.__allowCommitted = new Set(keysArr);
@@ -3202,7 +3220,7 @@ function showAuthGate(){
           keys: allowSet,
           updatedAt: data.updatedAt || null,
           updatedBy: data.updatedBy || "",
-          allowAll: !snap.exists(),
+          allowAll: false,
           docExists: snap.exists(),
           error: "",
           lastError: "",
@@ -3217,6 +3235,7 @@ function showAuthGate(){
         console.warn("allowlist snapshot error", err);
         const code = err?.code || "";
         const message = err?.message || String(err);
+        globalThis.__ALLOW_LOADED__ = true;
         globalThis.__ALLOW_META__ = {
           ...(globalThis.__ALLOW_META__||{}),
           lastError: code ? `${code}: ${message}` : message,
@@ -3226,6 +3245,8 @@ function showAuthGate(){
         state.mobileAllowlist.lastError = code || message;
         state.mobileAllowlist.lastSyncTs = Date.now();
         state.mobileAllowlist.ready = true;
+        state.mobileAllowlist.docExists = Boolean(state.mobileAllowlist.docExists);
+        state.mobileAllowlist.allowAll = false;
         state.mobileAllowSaveState = "error";
         renderHome();
       });
@@ -3233,6 +3254,7 @@ function showAuthGate(){
       console.warn("allowlist listen failed", err);
       const code = err?.code || "";
       const message = err?.message || String(err);
+      globalThis.__ALLOW_LOADED__ = true;
       globalThis.__ALLOW_META__ = {
         ...(globalThis.__ALLOW_META__||{}),
         lastError: code ? `${code}: ${message}` : message,
@@ -3242,6 +3264,8 @@ function showAuthGate(){
       state.mobileAllowlist.lastError = code || message;
       state.mobileAllowlist.lastSyncTs = Date.now();
       state.mobileAllowlist.ready = true;
+      state.mobileAllowlist.docExists = Boolean(state.mobileAllowlist.docExists);
+      state.mobileAllowlist.allowAll = false;
       state.mobileAllowSaveState = "error";
     }
   }
@@ -3266,6 +3290,7 @@ function showAuthGate(){
         updatedAt: fs.serverTimestamp(),
         updatedBy: state.user.email || state.user.fullName || ""
       }, { merge:true });
+      globalThis.__ALLOW_LOADED__ = true;
       state.mobileAllowSaveState = "idle";
       state.mobileAllowDirty = false;
       state.mobileAllowlist.error = "";
@@ -3277,6 +3302,9 @@ function showAuthGate(){
       globalThis.__allowDraft = new Set(keys);
       globalThis.__allowDraftDirty = false;
       globalThis.__ALLOW_META__ = { ...(globalThis.__ALLOW_META__||{}), lastError:"" };
+      state.mobileAllowlist.ready = true;
+      state.mobileAllowlist.docExists = true;
+      state.mobileAllowlist.allowAll = false;
       showToast("Salvato ✅", "Ordini inviati a mobile aggiornati.");
     }catch(err){
       console.warn("save allowlist error", err);
@@ -3289,6 +3317,84 @@ function showAuthGate(){
       globalThis.__ALLOW_META__ = { ...(globalThis.__ALLOW_META__||{}), lastError: friendly };
       showToast("Salvataggio bloccato", `${friendly || "Errore sconosciuto"}. Controlla le regole Firestore.`);
     }
+    renderHome();
+  }
+  function resetAllowResetBtn(btn){
+    if(btn){
+      btn.textContent = "Azzera invio";
+      btn.classList.remove("live");
+    }
+  }
+  function armAllowReset(btn){
+    __allowResetArmed = true;
+    if(btn){
+      btn.textContent = "Conferma azzera";
+      btn.classList.add("live");
+    }
+    if(__allowResetTimer) clearTimeout(__allowResetTimer);
+    __allowResetTimer = setTimeout(()=>{
+      __allowResetArmed = false;
+      __allowResetTimer = null;
+      resetAllowResetBtn(btn);
+    }, 3000);
+  }
+  async function resetMobileAllowlist(btn){
+    if(!(state.user && state.user.isAdmin)){
+      showToast("Solo admin", "Non hai i permessi per inviare ordini al mobile.");
+      return;
+    }
+    if(!state.firebase.ok){
+      showToast("Connessione mancante", "Firebase non disponibile.");
+      return;
+    }
+    const fs = state.firebase.api;
+    const db = state.firebase.db;
+    const ref = mobileAllowlistDoc(fs, db);
+    state.mobileAllowSaveState = "saving";
+    renderHome();
+    try{
+      await fs.setDoc(ref, {
+        keys: [],
+        updatedAt: fs.serverTimestamp(),
+        updatedBy: state.user.email || state.user.fullName || ""
+      }, { merge:true });
+      globalThis.__ALLOW_LOADED__ = true;
+      globalThis.__ALLOW_KEYS__ = new Set();
+      globalThis.__allowCommitted = new Set();
+      globalThis.__allowDraft = new Set();
+      globalThis.__allowDraftDirty = false;
+      state.mobileAllowDirty = false;
+      state.mobileAllowlist.error = "";
+      state.mobileAllowlist.lastError = "";
+      state.mobileAllowlist.keys = new Set();
+      state.mobileAllowSelection = new Set();
+      state.mobileAllowlist.updatedAt = new Date();
+      state.mobileAllowlist.updatedBy = state.user.email || state.user.fullName || "";
+      state.mobileAllowlist.docExists = true;
+      state.mobileAllowlist.ready = true;
+      state.mobileAllowlist.allowAll = false;
+      state.mobileAllowlist.lastSyncTs = Date.now();
+      state.mobileAllowlist.pendingRender = false;
+      state.mobileAllowSaveState = "idle";
+      globalThis.__ALLOW_META__ = { ...(globalThis.__ALLOW_META__||{}), lastError:"" };
+      showToast("Invio azzerato", "Nessun ordine inviato al mobile.");
+    }catch(err){
+      console.warn("reset allowlist error", err);
+      state.mobileAllowSaveState = "error";
+      const code = err?.code || "";
+      const msg = err?.message || String(err);
+      const friendly = code ? `${code}` : msg;
+      state.mobileAllowlist.error = friendly;
+      state.mobileAllowlist.lastError = friendly;
+      globalThis.__ALLOW_META__ = { ...(globalThis.__ALLOW_META__||{}), lastError: friendly };
+      showToast("Salvataggio bloccato", `${friendly || "Errore sconosciuto"}. Controlla le regole Firestore.`);
+    }
+    __allowResetArmed = false;
+    if(__allowResetTimer){
+      clearTimeout(__allowResetTimer);
+      __allowResetTimer = null;
+    }
+    resetAllowResetBtn(btn);
     renderHome();
   }
 
@@ -3713,9 +3819,9 @@ function showAuthGate(){
     const isDesktop = window.matchMedia("(min-width: 980px)").matches;
     const isAdmin = Boolean(state.user && state.user.isAdmin);
     const isMobileView = isMobile();
-    const allowInfo = state.mobileAllowlist || {};
     const allowKeySet = (globalThis.__ALLOW_KEYS__ instanceof Set) ? globalThis.__ALLOW_KEYS__ : new Set();
-    const allowFilterActive = Boolean(!isAdmin && isMobileView && allowInfo.ready && !allowInfo.allowAll);
+    const allowLoaded = Boolean(globalThis.__ALLOW_LOADED__);
+    const mobileStrict = Boolean(!isAdmin && isMobileView);
 
     const orders = [];
     const baseOrders = [];
@@ -3743,7 +3849,15 @@ function showAuthGate(){
 
       const planDate = priorityInfo.date || extractDateFromText(note);
       const daysAway = planDate ? diffDaysFromNow(planDate) : null;
-      const k = getOrderKey(o);
+      let k = o.__k || o.stableKey;
+      if(!k){
+        k = stableKey(o);
+        try{
+          Object.defineProperty(o, "__k", { value:k, writable:false, enumerable:false });
+        }catch(_e){
+          o.__k = k;
+        }
+      }
       const baseOrder = { ...o, orderNo, lines, alerts, autoDone, totalLines: lines.length + autoDone, partialInfo: partialMap.get(String(orderNo)) || null, isCompleted: fullMap.has(String(orderNo)), note, priorityInfo, planDate, daysAway };
       baseOrder.__k = k;
       baseOrder.stableKey = k;
@@ -3763,8 +3877,12 @@ function showAuthGate(){
           visible = priorityInfo.visible !== false;
         }
       }
-      if(visible && allowFilterActive){
-        visible = allowKeySet.has(k);
+      if(mobileStrict){
+        if(!allowLoaded){
+          visible = false;
+        } else {
+          visible = visible && allowKeySet.has(k);
+        }
       }
       if(!visible && !includeHidden) continue;
       orders.push(baseOrder);
@@ -3911,6 +4029,9 @@ function showAuthGate(){
 
   function updateMobileAllowUi(ordersList, orderKeySet){
     const allowInfo = state.mobileAllowlist || {};
+    const allowLoaded = Boolean(globalThis.__ALLOW_LOADED__);
+    const ready = allowLoaded || allowInfo.ready;
+    const docExists = Boolean(allowInfo.docExists);
     const committed = ensureAllowCommittedSet();
     const draft = ensureAllowDraftSet();
     const orderKeySetLocal = (orderKeySet instanceof Set) ? orderKeySet : new Set((ordersList||[]).map(o=>o?.__k || getOrderKey(o)));
@@ -3922,8 +4043,8 @@ function showAuthGate(){
     const selectionCount = draft.size;
     const updatedTxt = fmtAllowlistTs(allowInfo.updatedAt);
     const docCount = committed.size;
-    const updatedLabel = allowInfo.ready
-      ? (allowInfo.allowAll ? "Filtro disattivo: salva per limitare gli ordini." : `Aggiornato ${updatedTxt}${allowInfo.updatedBy ? ` · ${allowInfo.updatedBy}` : ""} · ${docCount} ordini live`)
+    const updatedLabel = ready
+      ? (docExists ? `Aggiornato ${updatedTxt}${allowInfo.updatedBy ? ` · ${allowInfo.updatedBy}` : ""} · ${docCount} ordini live` : "Nessun invio configurato: salva per limitare gli ordini.")
       : "Sincronizzazione in corso…";
     const lastErrorTxt = allowInfo.lastError || allowInfo.error || (globalThis.__ALLOW_META__||{}).lastError || "";
     const updByEl = $("mobileAllowUpdatedBy");
@@ -3945,7 +4066,7 @@ function showAuthGate(){
     const hasError = Boolean(lastErrorTxt);
     if(statusEl){
       statusEl.className = "statusBadge";
-      if(!allowInfo.ready){
+      if(!ready){
         statusEl.textContent = "Sync…";
       } else if(status==="saving"){
         statusEl.textContent = "Salvataggio…";
@@ -3953,8 +4074,6 @@ function showAuthGate(){
       } else if(status==="error" || hasError){
         statusEl.textContent = "Errore";
         statusEl.classList.add("error");
-      } else if(allowInfo.allowAll){
-        statusEl.textContent = "Filtro off";
       } else if(state.mobileAllowDirty){
         statusEl.textContent = "Da salvare";
       } else {
@@ -3964,19 +4083,20 @@ function showAuthGate(){
     }
     if(feedback){
       feedback.className = "saveBadge";
-      if(!allowInfo.ready){
+      if(!ready){
         feedback.textContent = "Stato: caricamento allowlist…";
       } else if(status==="saving"){
         feedback.textContent = "Salvataggio in corso…";
       } else if(status==="error" || hasError){
         feedback.classList.add("error");
         feedback.textContent = `Salvataggio non consentito${lastErrorTxt ? ` · ${lastErrorTxt}` : ""}`;
+      } else if(!docExists){
+        feedback.textContent = "Nessun ordine ancora inviato.";
       } else if(state.mobileAllowDirty){
         feedback.textContent = "Modifiche locali non salvate.";
       } else {
         feedback.classList.add("live");
-        const modeTxt = allowInfo.allowAll ? "Filtro disattivo." : "Filtro attivo.";
-        feedback.textContent = `${modeTxt} Match: ${matchCount}/${totalOrders}`;
+        feedback.textContent = `Filtro attivo. Match: ${matchCount}/${totalOrders}`;
       }
     }
   }
@@ -4103,6 +4223,18 @@ function showAuthGate(){
         const res = renderAdminMobileSendList(list?.__allOrders || ordersList, state.mobileAllowSearchTerm || "");
         if(list) list.__filteredOrders = res.filteredOrders;
         updateMobileAllowUi(list?.__allOrders || ordersList, list?.__orderKeySet || orderKeySetLocal);
+      };
+    }
+    const resetBtn = $("btnAllowReset");
+    if(resetBtn){
+      resetBtn.disabled = status==="saving";
+      resetBtn.textContent = __allowResetArmed ? "Conferma azzera" : "Azzera invio";
+      resetBtn.onclick = ()=>{
+        if(__allowResetArmed){
+          resetMobileAllowlist(resetBtn);
+        } else {
+          armAllowReset(resetBtn);
+        }
       };
     }
     const saveBtn = $("btnSaveMobileAllow");
@@ -4473,9 +4605,9 @@ function renderHome(){
     const badgeEl = $("badgeCounts");
     if(badgeEl){
       const isAdmin = Boolean(state.user && state.user.isAdmin);
-      const allowInfo = state.mobileAllowlist || {};
+      const allowLoaded = Boolean(globalThis.__ALLOW_LOADED__);
       const mobileView = isMobile();
-      if(mobileView && !isAdmin && !allowInfo.ready){
+      if(mobileView && !isAdmin && !allowLoaded){
         badgeEl.textContent = "— ordini";
       } else {
         const count = (mobileView && !isAdmin) ? visibleOrders.length : pOrders.length;
@@ -4490,11 +4622,14 @@ function renderHome(){
       mobileInfo.style.display = showMobileInfo ? "block" : "none";
       if(showMobileInfo){
         const allowInfo = state.mobileAllowlist || {};
+        const allowLoaded = Boolean(globalThis.__ALLOW_LOADED__);
         const count = visibleOrders.length;
-        const docMissing = allowInfo.ready && allowInfo.allowAll;
-        if(docMissing){
+        const docMissing = allowLoaded && !allowInfo.docExists;
+        if(!allowLoaded){
+          mobileInfo.textContent = "Caricamento assegnazioni…";
+        } else if(docMissing){
           mobileInfo.textContent = "Assegnazioni non configurate";
-        } else if(allowInfo.ready && !allowInfo.allowAll && count===0){
+        } else if(count===0){
           mobileInfo.textContent = "Nessun ordine assegnato dall’admin";
         } else {
           mobileInfo.innerHTML = `Ordini assegnati: <span id=\"mobileAllowCount\">${count}</span><span id=\"mobileAllowMsg\" style=\"margin-left:6px; color:var(--muted); font-weight:800;\"></span>`;
@@ -4502,7 +4637,7 @@ function renderHome(){
           const msgEl = $("mobileAllowMsg");
           if(countEl) countEl.textContent = String(count);
           if(msgEl) msgEl.textContent = "";
-          if(allowInfo.ready && !allowInfo.allowAll && count===0 && msgEl){
+          if(allowLoaded && count===0 && msgEl){
             msgEl.textContent = "Assegnazioni attive: nessun ordine";
           }
         }
