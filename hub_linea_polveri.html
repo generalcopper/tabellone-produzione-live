@@ -1659,6 +1659,11 @@
   globalThis.__CONCLUDE_INFLIGHT__ = (globalThis.__CONCLUDE_INFLIGHT__ instanceof Map) ? globalThis.__CONCLUDE_INFLIGHT__ : new Map();
   globalThis.__CONCLUDE_RECENT__ = (globalThis.__CONCLUDE_RECENT__ instanceof Map) ? globalThis.__CONCLUDE_RECENT__ : new Map();
   globalThis.__CONCLUDE_HANDLER_BOUND__ = Boolean(globalThis.__CONCLUDE_HANDLER_BOUND__);
+  let __allOrdersCache = [];
+  let __allOrdersKeySet = new Set();
+  globalThis.__allowCommitted = (globalThis.__allowCommitted instanceof Set) ? globalThis.__allowCommitted : new Set(Array.from(globalThis.__ALLOW_KEYS__||[]));
+  globalThis.__allowDraft = (globalThis.__allowDraft instanceof Set) ? globalThis.__allowDraft : new Set(globalThis.__allowCommitted);
+  globalThis.__allowDraftDirty = Boolean(globalThis.__allowDraftDirty);
 
   // ===============================
   // UTILS
@@ -2951,27 +2956,42 @@ function showAuthGate(){
     }catch(_e){}
     return "—";
   }
-  function ensureAllowSelectionSet(){
-    if(!(state.mobileAllowSelection instanceof Set)){
+  function ensureAllowCommittedSet(){
+    if(!(globalThis.__allowCommitted instanceof Set)){
       const base = (globalThis.__ALLOW_KEYS__ instanceof Set) ? globalThis.__ALLOW_KEYS__ : new Set();
-      state.mobileAllowSelection = new Set(Array.from(base));
+      globalThis.__allowCommitted = new Set(Array.from(base));
     }
-    return state.mobileAllowSelection;
+    return globalThis.__allowCommitted;
+  }
+  function ensureAllowDraftSet(){
+    if(!(globalThis.__allowDraft instanceof Set)){
+      const committed = ensureAllowCommittedSet();
+      globalThis.__allowDraft = new Set(Array.from(committed));
+    }
+    return globalThis.__allowDraft;
   }
   function refreshAllowDirtyFlag(){
-    const selection = ensureAllowSelectionSet();
-    const remote = (state.mobileAllowlist?.keys instanceof Set) ? state.mobileAllowlist.keys : new Set();
-    if(selection.size !== remote.size){
-      state.mobileAllowDirty = true;
-      return;
-    }
-    for(const k of selection){
-      if(!remote.has(k)){
-        state.mobileAllowDirty = true;
-        return;
+    const draft = ensureAllowDraftSet();
+    const committed = ensureAllowCommittedSet();
+    let dirty = draft.size !== committed.size;
+    if(!dirty){
+      for(const k of draft){
+        if(!committed.has(k)){
+          dirty = true;
+          break;
+        }
+      }
+      if(!dirty){
+        for(const k of committed){
+          if(!draft.has(k)){
+            dirty = true;
+            break;
+          }
+        }
       }
     }
-    state.mobileAllowDirty = false;
+    state.mobileAllowDirty = dirty;
+    globalThis.__allowDraftDirty = dirty;
   }
   let __allowRenderTimer = null;
   function scheduleAllowlistRender(){
@@ -3005,6 +3025,10 @@ function showAuthGate(){
         const keysArr = Array.isArray(data.keys) ? data.keys.filter(Boolean).map(String) : [];
         const allowSet = new Set(keysArr);
         globalThis.__ALLOW_KEYS__ = new Set(keysArr);
+        globalThis.__allowCommitted = new Set(keysArr);
+        if(!globalThis.__allowDraftDirty){
+          globalThis.__allowDraft = new Set(allowSet);
+        }
         globalThis.__ALLOW_META__ = {
           updatedAt: data.updatedAt || null,
           updatedBy: data.updatedBy || "",
@@ -3023,8 +3047,8 @@ function showAuthGate(){
           lastSyncTs: Date.now(),
           pendingRender: false
         };
-        state.mobileAllowSelection = new Set(allowSet);
-        state.mobileAllowDirty = false;
+        state.mobileAllowSelection = new Set(globalThis.__allowDraft);
+        refreshAllowDirtyFlag();
         state.mobileAllowSaveState = "idle";
         scheduleAllowlistRender();
       }, (err)=>{
@@ -3071,7 +3095,7 @@ function showAuthGate(){
     const fs = state.firebase.api;
     const db = state.firebase.db;
     const ref = mobileAllowlistDoc(fs, db);
-    const keys = Array.from(ensureAllowSelectionSet());
+    const keys = Array.from(ensureAllowDraftSet());
     state.mobileAllowSaveState = "saving";
     renderHome();
     try{
@@ -3084,6 +3108,12 @@ function showAuthGate(){
       state.mobileAllowDirty = false;
       state.mobileAllowlist.error = "";
       state.mobileAllowlist.lastError = "";
+      state.mobileAllowlist.keys = new Set(keys);
+      state.mobileAllowSelection = new Set(keys);
+      globalThis.__allowCommitted = new Set(keys);
+      globalThis.__ALLOW_KEYS__ = new Set(keys);
+      globalThis.__allowDraft = new Set(keys);
+      globalThis.__allowDraftDirty = false;
       globalThis.__ALLOW_META__ = { ...(globalThis.__ALLOW_META__||{}), lastError:"" };
       showToast("Salvato ✅", "Ordini inviati a mobile aggiornati.");
     }catch(err){
@@ -3717,26 +3747,19 @@ function showAuthGate(){
     return { totals, orderDetails };
   }
 
-  function renderMobileAllowPanel(baseOrders, orderKeySet){
-    const panel = $("mobileAllowPanel");
-    const isAdminDesktop = Boolean(state.user && state.user.isAdmin && !isMobile());
-    if(!panel) return;
-    panel.style.display = isAdminDesktop ? "block" : "none";
-    if(!isAdminDesktop) return;
-
-    const ordersList = Array.isArray(baseOrders) ? baseOrders : [];
-    const selection = ensureAllowSelectionSet();
+  function updateMobileAllowUi(ordersList, orderKeySet){
     const allowInfo = state.mobileAllowlist || {};
-    const allowKeySet = (globalThis.__ALLOW_KEYS__ instanceof Set) ? globalThis.__ALLOW_KEYS__ : new Set();
+    const committed = ensureAllowCommittedSet();
+    const draft = ensureAllowDraftSet();
     const orderKeySetLocal = (orderKeySet instanceof Set) ? orderKeySet : new Set((ordersList||[]).map(o=>o?.__k || getOrderKey(o)));
     let matchCount = 0;
-    for(const k of allowKeySet){
+    for(const k of committed){
       if(orderKeySetLocal.has(k)) matchCount++;
     }
-    const totalOrders = ordersList.length;
-    const selectionCount = selection.size;
+    const totalOrders = Array.isArray(ordersList) ? ordersList.length : 0;
+    const selectionCount = draft.size;
     const updatedTxt = fmtAllowlistTs(allowInfo.updatedAt);
-    const docCount = allowKeySet.size;
+    const docCount = committed.size;
     const updatedLabel = allowInfo.ready
       ? (allowInfo.allowAll ? "Filtro disattivo: salva per limitare gli ordini." : `Aggiornato ${updatedTxt}${allowInfo.updatedBy ? ` · ${allowInfo.updatedBy}` : ""} · ${docCount} ordini live`)
       : "Sincronizzazione in corso…";
@@ -3749,7 +3772,7 @@ function showAuthGate(){
     const totEl = $("mobileAllowTotal");
     if(totEl) totEl.textContent = String(totalOrders);
     const sentEl = $("mobileAllowSent");
-    if(sentEl) sentEl.textContent = String(selectionCount || allowKeySet.size);
+    if(sentEl) sentEl.textContent = String(selectionCount);
     const matchEl = $("mobileAllowMatch");
     if(matchEl) matchEl.textContent = String(matchCount);
 
@@ -3794,6 +3817,61 @@ function showAuthGate(){
         feedback.textContent = `${modeTxt} Match: ${matchCount}/${totalOrders}`;
       }
     }
+  }
+
+  function renderAdminMobileSendList(allOrders, searchText){
+    const list = $("mobileAllowList");
+    const source = Array.isArray(allOrders) ? allOrders : [];
+    const term = norm(searchText || "");
+    const filtered = term ? source.filter(o=>{
+      const probe = `${o.customer||""} ${o.orderNo||o.number||""} ${o.conclusion||""} ${(o.lines&&o.lines[0]?.desc)||""}`;
+      return norm(probe).includes(term);
+    }) : source;
+    if(!list) return { filteredOrders: filtered, total: source.length };
+    list.innerHTML = "";
+    if(!filtered.length){
+      list.innerHTML = `<div class="muted">Nessun ordine trovato.</div>`;
+      return { filteredOrders: [], total: source.length };
+    }
+    const draft = ensureAllowDraftSet();
+    const frag = document.createDocumentFragment();
+    for(const o of filtered){
+      const key = o.__k || o.stableKey || getOrderKey(o);
+      const checked = draft.has(key);
+      const line = (o.lines && o.lines[0]) || {};
+      const qtyLabel = formatQtyWithKg(line.qty, line.um);
+      const row = document.createElement("div");
+      row.className = "mobileSendRow";
+      if(checked) row.classList.add("selected");
+      row.dataset.k = key;
+      row.innerHTML = `
+        <div class="info">
+          <div class="name">${escapeHtml(o.customer||"Cliente")} · Ord. ${escapeHtml(o.orderNo||o.number||"—")}</div>
+          <div class="meta">${escapeHtml(line.desc||"Prodotto")} · ${escapeHtml(qtyLabel)}${o.conclusion?` · Consegna: ${escapeHtml(o.conclusion)}`:""}</div>
+        </div>
+        <div class="mobileSendToggle" role="switch" aria-checked="${checked ? "true" : "false"}">
+          <div class="knob"></div>
+        </div>`;
+      frag.appendChild(row);
+    }
+    list.appendChild(frag);
+    return { filteredOrders: filtered, total: source.length };
+  }
+
+  function renderMobileAllowPanel(baseOrders, orderKeySet){
+    const panel = $("mobileAllowPanel");
+    const isAdminDesktop = Boolean(state.user && state.user.isAdmin && !isMobile());
+    if(!panel) return;
+    panel.style.display = isAdminDesktop ? "block" : "none";
+    if(!isAdminDesktop) return;
+
+    const ordersList = Array.isArray(baseOrders) ? baseOrders : (__allOrdersCache||[]);
+    const orderKeySetLocal = (orderKeySet instanceof Set) ? orderKeySet : (__allOrdersKeySet instanceof Set ? __allOrdersKeySet : new Set((ordersList||[]).map(o=>o?.__k || getOrderKey(o))));
+    __allOrdersCache = Array.isArray(ordersList) ? [...ordersList] : [];
+    __allOrdersKeySet = new Set(orderKeySetLocal);
+
+    updateMobileAllowUi(ordersList, orderKeySetLocal);
+    const status = state.mobileAllowSaveState;
 
     const searchInput = $("mobileAllowSearch");
     if(searchInput){
@@ -3805,54 +3883,34 @@ function showAuthGate(){
         renderMobileAllowPanel(ordersList, orderKeySetLocal);
       };
     }
-    const term = norm(state.mobileAllowSearchTerm || "");
-    const filteredOrders = term ? ordersList.filter(o=>{
-      const probe = `${o.customer||""} ${o.orderNo||o.number||""} ${o.conclusion||""} ${(o.lines&&o.lines[0]?.desc)||""}`;
-      return norm(probe).includes(term);
-    }) : ordersList;
 
     const list = $("mobileAllowList");
+    const { filteredOrders } = renderAdminMobileSendList(ordersList, state.mobileAllowSearchTerm || "");
     if(list){
-      list.innerHTML = "";
-      if(!filteredOrders.length){
-        list.innerHTML = `<div class="muted">Nessun ordine corrisponde alla ricerca.</div>`;
-      } else {
-        const frag = document.createDocumentFragment();
-        for(const o of filteredOrders){
-          const key = o.__k || getOrderKey(o);
-          const checked = selection.has(key);
-          const line = (o.lines && o.lines[0]) || {};
-          const qtyLabel = formatQtyWithKg(line.qty, line.um);
-          const row = document.createElement("div");
-          row.className = "mobileSendRow";
-          if(checked) row.classList.add("selected");
-          row.dataset.key = key;
-          row.innerHTML = `
-            <div class="info">
-              <div class="name">${escapeHtml(o.customer||"Cliente")} · Ord. ${escapeHtml(o.orderNo||o.number||"—")}</div>
-              <div class="meta">${escapeHtml(line.desc||"Prodotto")} · ${escapeHtml(qtyLabel)}${o.conclusion?` · Consegna: ${escapeHtml(o.conclusion)}`:""}</div>
-            </div>
-            <div class="mobileSendToggle" role="switch" aria-checked="${checked ? "true" : "false"}">
-              <div class="knob"></div>
-            </div>`;
-          frag.appendChild(row);
-        }
-        list.appendChild(frag);
-      }
+      list.__filteredOrders = filteredOrders;
+      list.__allOrders = ordersList;
+      list.__orderKeySet = orderKeySetLocal;
+    }
+    if(list){
       if(!list.dataset.bound){
         list.dataset.bound = "1";
         list.addEventListener("click", (e)=>{
+          if(e.target.closest("#mobileAllowPanel")){ e.preventDefault(); e.stopPropagation(); }
           if(e.target.closest("input") || e.target.closest("button") || e.target.closest("textarea")) return;
           const row = e.target.closest(".mobileSendRow");
           if(!row) return;
-          const key = row.dataset.key;
+          const key = row.dataset.k;
           if(!key) return;
-          const set = ensureAllowSelectionSet();
-          const next = !set.has(key);
-          if(next) set.add(key); else set.delete(key);
-          state.mobileAllowDirty = true;
+          e.preventDefault();
+          e.stopPropagation();
+          const draft = ensureAllowDraftSet();
+          const next = !draft.has(key);
+          if(next) draft.add(key); else draft.delete(key);
           refreshAllowDirtyFlag();
-          renderMobileAllowPanel(ordersList, orderKeySetLocal);
+          row.classList.toggle("selected", next);
+          const toggle = row.querySelector(".mobileSendToggle");
+          if(toggle) toggle.setAttribute("aria-checked", next ? "true" : "false");
+          updateMobileAllowUi(list.__allOrders || ordersList, list.__orderKeySet || orderKeySetLocal);
         });
       }
     }
@@ -3860,25 +3918,29 @@ function showAuthGate(){
     const selectAllBtn = $("btnAllowSelectAll");
     if(selectAllBtn){
       selectAllBtn.onclick = ()=>{
-        const set = ensureAllowSelectionSet();
-        for(const o of filteredOrders){
-          set.add(o.__k || getOrderKey(o));
+        const set = ensureAllowDraftSet();
+        const filtered = (list && Array.isArray(list.__filteredOrders)) ? list.__filteredOrders : filteredOrders;
+        for(const o of filtered){
+          set.add(o.__k || o.stableKey || getOrderKey(o));
         }
-        state.mobileAllowDirty = true;
         refreshAllowDirtyFlag();
-        renderMobileAllowPanel(ordersList, orderKeySetLocal);
+        const res = renderAdminMobileSendList(list?.__allOrders || ordersList, state.mobileAllowSearchTerm || "");
+        if(list) list.__filteredOrders = res.filteredOrders;
+        updateMobileAllowUi(list?.__allOrders || ordersList, list?.__orderKeySet || orderKeySetLocal);
       };
     }
     const clearBtn = $("btnAllowClear");
     if(clearBtn){
       clearBtn.onclick = ()=>{
-        const set = ensureAllowSelectionSet();
-        for(const o of filteredOrders){
-          set.delete(o.__k || getOrderKey(o));
+        const set = ensureAllowDraftSet();
+        const filtered = (list && Array.isArray(list.__filteredOrders)) ? list.__filteredOrders : filteredOrders;
+        for(const o of filtered){
+          set.delete(o.__k || o.stableKey || getOrderKey(o));
         }
-        state.mobileAllowDirty = true;
         refreshAllowDirtyFlag();
-        renderMobileAllowPanel(ordersList, orderKeySetLocal);
+        const res = renderAdminMobileSendList(list?.__allOrders || ordersList, state.mobileAllowSearchTerm || "");
+        if(list) list.__filteredOrders = res.filteredOrders;
+        updateMobileAllowUi(list?.__allOrders || ordersList, list?.__orderKeySet || orderKeySetLocal);
       };
     }
     const saveBtn = $("btnSaveMobileAllow");
