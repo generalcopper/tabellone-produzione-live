@@ -1372,6 +1372,16 @@
     }
     .modalTitle{ font-size:15px; font-weight:1000; letter-spacing:.01em; }
     .modalSub{ font-size:12px; color:var(--muted); margin-top:4px; }
+    .modalCalc{
+      margin-top: 4px;
+      font-size: 12px;
+      line-height: 1.2;
+      color: var(--muted);
+      font-weight: 600;
+      opacity: .95;
+      max-width: 100%;
+      word-break: break-word;
+    }
     .modalClose{
       border:none;
       background: rgba(0,0,0,.06);
@@ -4133,6 +4143,7 @@ html.deskScrolled .wrap{
         <div>
           <div class="modalTitle" id="whModalTitle">Dettaglio magazzino</div>
           <div class="modalSub" id="whModalSub">—</div>
+          <div class="modalCalc" id="whModalCalc" style="display:none"></div>
         </div>
         <button class="modalClose" id="whModalClose" aria-label="Chiudi">×</button>
       </div>
@@ -8716,11 +8727,54 @@ function renderHome(){
     }
   }
 
+  function buildWarehouseCalcHint(titleText, itemObj){
+    const title = `${titleText||""}`;
+    const m = title.match(/(?:\|\s*)?(\d+(?:[.,]\d+)?)\s*kg\b/i);
+    const capKg = m ? parseFloat(m[1].replace(",", ".")) : null;
+    const normalizeKg = (val)=>{
+      if(!Number.isFinite(val) || val<=0) return null;
+      const rounded = val % 1 === 0 ? val.toFixed(0) : val.toFixed(2);
+      return rounded.replace(/\.0+$/,"").replace(/\.([1-9]*)0+$/,".$1");
+    };
+    const extractKgFromObj = ()=>{
+      if(!itemObj || typeof itemObj !== "object") return null;
+      const candidates = ["unitKg","pesoKg","capacityKg","gramsPerUnit","grammiPerPezzo","packKg","kgPerUnit","kg","unitWeight","weightKg"];
+      for(const key of candidates){
+        if(!(key in itemObj)) continue;
+        const raw = itemObj[key];
+        const num = Number(raw);
+        if(!Number.isFinite(num) || num<=0) continue;
+        const lower = key.toLowerCase();
+        const isGram = lower.includes("gram") || lower.includes("gper");
+        const kgVal = isGram ? num/1000 : num;
+        if(Number.isFinite(kgVal) && kgVal>0) return kgVal;
+      }
+      return null;
+    };
+    const kgPerUnit = Number.isFinite(capKg) && capKg>0 ? capKg : extractKgFromObj();
+    if(Number.isFinite(kgPerUnit) && kgPerUnit>0){
+      const kgTxt = normalizeKg(kgPerUnit) || kgPerUnit;
+      return `1 pz = ${kgTxt} kg • Stima pezzi: kg ÷ ${kgTxt}`;
+    }
+    return "Giacenza: carichi − consumi";
+  }
+
   function renderWhModalContent(key){
     const modalTitle = $("whModalTitle");
     const modalSub = $("whModalSub");
+    const modalCalc = $("whModalCalc");
     const modalBody = $("whModalBody");
-    if(!modalTitle || !modalSub || !modalBody) return;
+    if(!modalTitle || !modalSub || !modalBody || !modalCalc) return;
+    const renderCalcHint = (titleText, itemObj)=>{
+      const hint = buildWarehouseCalcHint(titleText, itemObj);
+      if(hint){
+        modalCalc.textContent = `(${hint})`;
+        modalCalc.style.display = "";
+      } else {
+        modalCalc.textContent = "";
+        modalCalc.style.display = "none";
+      }
+    };
     const overview = Array.isArray(state.magazzinoOverview) ? state.magazzinoOverview : [];
     const lookup = (state.magazzinoDetailLookup instanceof Map) ? state.magazzinoDetailLookup : new Map();
     const renderSection = (item)=>{
@@ -8742,6 +8796,8 @@ function renderHome(){
     if(key === WH_MODAL_ALL_KEY){
       modalTitle.textContent = "Dettaglio magazzino";
       modalSub.textContent = "Elenco completo articoli e ordini";
+      modalCalc.textContent = "";
+      modalCalc.style.display = "none";
       modalBody.innerHTML = overview.length ? overview.map(renderSection).join("") : `<div class="muted">Nessun dato disponibile.</div>`;
       return;
     }
@@ -8749,6 +8805,7 @@ function renderHome(){
     const item = overview.find(it=>it.key===key);
     modalTitle.textContent = item?.label || "Dettaglio articolo";
     modalSub.textContent = item?.subtitle || "Ripartizione per cliente/ordine";
+    renderCalcHint(modalTitle.textContent, item);
     modalBody.innerHTML = renderSection(item || { key, label:"Articolo", subtitle:"" });
   }
 
