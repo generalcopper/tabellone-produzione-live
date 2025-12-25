@@ -806,16 +806,19 @@
     .planMessage .headline{ font-weight: 950; letter-spacing:.01em; }
     .planMessage ul{ margin: 10px 0 0 18px; color: var(--muted); font-weight:800; padding-left: 12px; }
     .planMessage li{ margin-bottom: 6px; }
+    .cardTopActions, .modalTopActions{ display:flex; gap:8px; align-items:center; }
+    .cardTopActions{ margin-left:auto; }
     .miniBtn{
-      border:none;
-      border-radius:14px;
-      padding:10px 12px;
-      background: rgba(255,149,0,.88);
-      color:white;
-      font-weight: 900;
-      letter-spacing:.01em;
+      border:1px solid var(--stroke);
+      background: rgba(255,255,255,.06);
+      color: var(--text);
+      padding: 8px 10px;
+      border-radius: 12px;
+      font-weight: 700;
+      font-size: 12px;
+      line-height: 1;
       cursor:pointer;
-      box-shadow: 0 10px 18px rgba(255,149,0,.22);
+      -webkit-tap-highlight-color: transparent;
       white-space:nowrap;
     }
     .miniBtn:active{ transform: translateY(1px); }
@@ -3858,7 +3861,11 @@ html.deskScrolled .wrap{
 
         <div class="card" id="completedCard">
           <div class="hd">
-            <h2>Ordini conclusi</h2>
+            <h2 class="cardTitle">Ordini conclusi</h2>
+            <div class="cardTopActions adminOnly">
+              <button class="miniBtn" data-action="print" data-target="#completedCard">Stampa</button>
+              <button class="miniBtn" data-action="share" data-target="#completedCard">Condividi</button>
+            </div>
             <div class="badge" id="completedBadge">0</div>
           </div>
           <div class="bd">
@@ -3872,7 +3879,11 @@ html.deskScrolled .wrap{
         <div id="warehouseAnchor" style="display:none;" aria-hidden="true"></div>
         <div class="card" id="warehouseCard" style="display:none;">
           <div class="hd">
-            <h2>Gestione magazzino</h2>
+            <h2 class="cardTitle">Gestione magazzino</h2>
+            <div class="cardTopActions adminOnly">
+              <button class="miniBtn" data-action="print" data-target="#warehouseCard">Stampa</button>
+              <button class="miniBtn" data-action="share" data-target="#warehouseCard">Condividi</button>
+            </div>
             <div class="badge" id="warehouseBadge">—</div>
           </div>
           <div class="bd">
@@ -4059,11 +4070,15 @@ html.deskScrolled .wrap{
 
   <!-- History detail modal -->
   <div id="histModal" class="overlay" role="dialog" aria-modal="true">
-    <div class="sheet">
+    <div class="sheet" id="histModalSheet">
       <div class="shd">
-        <div>
-          <div class="h" id="histTitle">Dettaglio produzione</div>
+        <div class="titleCol" id="histModalHeader">
+          <div class="h cardTitle" id="histTitle">Dettaglio produzione</div>
           <div class="sub" id="histSub">—</div>
+        </div>
+        <div class="modalTopActions adminOnly">
+          <button class="miniBtn" data-action="print" data-target="#histModalSheet">Stampa</button>
+          <button class="miniBtn" data-action="share" data-target="#histModalSheet">Condividi</button>
         </div>
         <button class="x" id="histClose" aria-label="Chiudi">×</button>
       </div>
@@ -9912,6 +9927,76 @@ function renderHome(){
       });
     }
   }
+
+  // UI helpers: print/share (UI-only, no Google/Firebase logic)
+  function _extractVisibleText(el){
+    if(!el) return "";
+    return (el.innerText||"").replace(/\s+\n/g,"\n").replace(/\n{3,}/g,"\n\n").trim();
+  }
+  function _getAllInlineStylesText(){
+    return Array.from(document.querySelectorAll("style")).map(s=> s.textContent || "").join("\n");
+  }
+  function _openPrintWindow({ title, html, extraCssText } = {}){
+    const w = window.open("", "_blank", "noopener,noreferrer,width=980,height=720");
+    if(!w){
+      try{ showToast("Stampa bloccata", "Consenti i popup per stampare."); }catch(_e){}
+      return;
+    }
+    const safeTitle = title ? String(title) : "Report";
+    const css = extraCssText || "";
+    w.document.write(`<html><head><title>${safeTitle}</title><style>${css}</style></head><body>${html||""}</body></html>`);
+    w.document.close();
+    w.focus();
+    try{ w.print(); }catch(_e){}
+    setTimeout(()=>{ try{ w.close(); }catch(_e){} }, 250);
+  }
+  async function _shareText({ title, text } = {}){
+    const safeTitle = title || document.title || "Report";
+    const safeText = text || "";
+    if(navigator.share){
+      await navigator.share({ title: safeTitle, text: safeText });
+      return;
+    }
+    try{
+      if(navigator.clipboard && navigator.clipboard.writeText){
+        await navigator.clipboard.writeText(safeText);
+      } else {
+        const ta = document.createElement("textarea");
+        ta.value = safeText;
+        ta.setAttribute("readonly","");
+        ta.style.position = "absolute";
+        ta.style.left = "-9999px";
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand("copy");
+        ta.remove();
+      }
+      try{ showToast("Copiato", "Testo condiviso copiato negli appunti."); }catch(_e){ alert("Copiato"); }
+    }catch(_e){
+      try{ showToast("Condivisione non riuscita", "Impossibile condividere il testo."); }catch(_e2){}
+    }
+  }
+
+  document.addEventListener("click", async (e)=>{
+    const btn = e.target.closest("button[data-action]");
+    if(!btn) return;
+    const isAdmin = Boolean(state && state.user && state.user.isAdmin);
+    if(!isAdmin) return;
+    const targetSel = btn.dataset.target;
+    if(!targetSel) return;
+    const targetEl = document.querySelector(targetSel);
+    if(!targetEl) return;
+    const stamp = new Date().toLocaleString("it-IT");
+    const title = (targetEl.querySelector(".cardTitle, .title, h2, h3")?.innerText || document.title || "Report").trim();
+    const text = _extractVisibleText(targetEl);
+    const payload = `${title}\n${stamp}\n\n${text}`;
+    if(btn.dataset.action === "print"){
+      const stylesText = _getAllInlineStylesText();
+      _openPrintWindow({ title, html: targetEl.outerHTML, extraCssText: stylesText });
+    } else if(btn.dataset.action === "share"){
+      await _shareText({ title, text: payload });
+    }
+  });
 
   async function startHub(){
     if(globalThis.__HUB_BOOTED__) return;
