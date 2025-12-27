@@ -609,7 +609,7 @@
       <div class="payflowStatus"><div class="payHint" id="payslipStatusLine">Routing pronto: collega i PDF e invia.</div></div>
       <div class="payslipStep isActive" id="payslipStepUpload" data-step="upload">
         <div class="stepTitle">Step 1 · Carica e riconosci</div>
-        <div class="payslipUpload" id="payslipDropArea" role="button" tabindex="0"><div class="t">Trascina le buste paga</div><div class="s">PDF singoli o multipli: ChatGPT divide e legge ogni pagina.</div><div class="chipRow"><span class="payChip">PDF</span><span class="payChip">Riconoscimento GPT</span><span class="payChip">Split per pagina</span></div><input id="payslipFileInput" type="file" accept=".pdf,image/*" multiple style="display:none;"></div>
+        <div class="payslipUpload" id="payslipDropArea" role="button" tabindex="0"><div class="t">Trascina le buste paga</div><div class="s">PDF singoli o multipli (o foto): il sistema legge nome, data documento e importo netto.</div><div class="chipRow"><span class="payChip">PDF</span><span class="payChip">Riconoscimento GPT</span><span class="payChip">Split per pagina</span></div><input id="payslipFileInput" type="file" accept=".pdf,image/*" multiple style="display:none;"></div>
         <div class="paySection"><div class="stepTitle" style="font-size:16px;">Upload in coda</div><div class="payList" id="payslipUploadList"></div></div>
         <div class="paySection"><div class="stepTitle" style="font-size:16px;">Dati estratti per foglio</div><div class="payHint">Ogni pagina viene letta e normalizzata prima del match.</div><div class="payList tight" id="payslipExtractList"></div></div>
         <div class="payStepActions"><div class="spacer"></div><button class="btn actionPrimary" id="payslipGoMatch" type="button">Vai ai match</button></div>
@@ -2481,26 +2481,6 @@ document.body.appendChild(banner);
     };
     for (const k in map){ if(code.includes(k)) return map[k]; }
     return "Errore accesso. Controlla rete e riprova.";
-  }
-
-  function humanErr(err){
-    try{
-      if(!err) return "Errore sconosciuto.";
-      if(typeof err === "string") return err;
-      if(err.name === "AbortError") return "Operazione annullata.";
-      const code = (err.code||"").toString();
-      const msg = (err.message||"").toString() || (""+err);
-      const raw = (err.rawText||"").toString();
-      const joined = [code, msg, raw].filter(Boolean).join(" · ").trim();
-      if(/permission-denied/i.test(code) || /permission.?denied/i.test(joined)) return "Permesso negato (Firestore Rules).";
-      if(/unauth/i.test(code) || /unauth/i.test(joined)) return "Non autorizzato. Verifica accesso e permessi.";
-      if(/not-?found/i.test(code) || /404/.test(joined)) return "Risorsa non trovata.";
-      if(/failed to fetch|networkerror|load resource/i.test(joined.toLowerCase())) return "Connessione/CORS: server non raggiungibile.";
-      if(/http\s*\d{3}/i.test(joined)) return joined;
-      return joined || "Errore sconosciuto.";
-    }catch(_e){
-      return "Errore sconosciuto.";
-    }
   }
 
 
@@ -8052,7 +8032,30 @@ Linea: polveri`, null); }catch(_e){}
     return { month:null, year:null, monthKey:"" };
   }
 
-  function _parseMoneyToNumber(any){
+  
+  function _monthKeyFromIso(iso){
+    const m = String(iso||"").trim().match(/^(20\d{2})-(0[1-9]|1[0-2])-/);
+    return m ? `${m[1]}-${m[2]}` : "";
+  }
+
+  function _parseDateToISO(any){
+    const s = String(any||"").trim();
+    if(!s) return "";
+    // 2025-12-27 / 2025/12/27 / 2025.12.27
+    let m = s.match(/\b(20\d{2})[-\/.](0[1-9]|1[0-2])[-\/.](0[1-9]|[12]\d|3[01])\b/);
+    if(m) return `${m[1]}-${m[2]}-${m[3]}`;
+    // 27/12/2025 / 27-12-2025
+    m = s.match(/\b(0[1-9]|[12]\d|3[01])[-\/.](0[1-9]|1[0-2])[-\/.](20\d{2})\b/);
+    if(m) return `${m[3]}-${m[2]}-${m[1]}`;
+    // mese-anno -> primo giorno del mese
+    m = s.match(/\b(20\d{2})[-\/.](0[1-9]|1[0-2])\b/);
+    if(m) return `${m[1]}-${m[2]}-01`;
+    m = s.match(/\b(0[1-9]|1[0-2])[-\/.](20\d{2})\b/);
+    if(m) return `${m[2]}-${m[1]}-01`;
+    return "";
+  }
+
+function _parseMoneyToNumber(any){
     const s = String(any||"").trim();
     if(!s) return null;
     // accetta 1.234,56 o 1234.56
@@ -8083,6 +8086,24 @@ Linea: polveri`, null); }catch(_e){}
     return btoa(binary);
   }
 
+  function _stripExt(name=""){
+    return String(name||"").replace(/\.[^/.]+$/,"");
+  }
+  function isPdfFile(file){
+    const t = String(file?.type||"").toLowerCase();
+    return !!file && (t === "application/pdf" || /\.pdf$/i.test(String(file?.name||"")));
+  }
+  function isImageFile(file){
+    const t = String(file?.type||"").toLowerCase();
+    return !!file && (t.startsWith("image/") || /\.(png|jpe?g|webp|heic|heif)$/i.test(String(file?.name||"")));
+  }
+  function _kindOfFile(file){
+    if(isPdfFile(file)) return "pdf";
+    if(isImageFile(file)) return "image";
+    return "pdf";
+  }
+
+
   async function _fetchJsonSafe(res){
     const ct = (res.headers.get("content-type")||"").toLowerCase();
     if(ct.includes("application/json")){
@@ -8092,14 +8113,20 @@ Linea: polveri`, null); }catch(_e){}
     try{ return JSON.parse(txt); }catch(_e){ return { rawText: txt }; }
   }
 
-  async function callPayrollExtractPdf(bytesU8, fileName="payroll.pdf", signal){
-    const base = (PAYROLL_EXTRACT_URL || "").trim().replace(/\/$/,"");
-    const url = base.endsWith("/v2") ? base : (base + "/v2");
+  
+  async function callPayrollExtractFile(bytesU8, fileName="file.bin", mimeType="application/pdf", signal){
+    const base = PAYROLL_EXTRACT_URL.replace(/\/$/,"");
+    const urlCandidates = [
+      base + "/v2/extract",
+      base + "/v2",
+      base + "/extract",
+      base
+    ];
 
-    const token = await (async()=>{
+    const idToken = (async()=>{
       try{
         const u = state.firebase?.auth?.currentUser;
-        if(u && u.getIdToken) return await u.getIdToken();
+        if(u && u.getIdToken) return await u.getIdToken(true);
       }catch(_e){}
       return "";
     })();
@@ -8112,89 +8139,63 @@ Linea: polveri`, null); }catch(_e){}
       return { ctrl, cleanup: ()=>{ clearTimeout(t); try{ signal && signal.removeEventListener("abort", onAbort); }catch(_e){} } };
     };
 
-    const authHeaders = {};
-    if(token) authHeaders["Authorization"] = `Bearer ${token}`;
+    const token = await idToken;
+    const mt = String(mimeType||"application/octet-stream");
+    const isPdf = mt.toLowerCase() === "application/pdf" || /\.pdf$/i.test(String(fileName||""));
+    const u8 = (bytesU8 instanceof Uint8Array) ? bytesU8 : new Uint8Array(bytesU8);
 
-    const blob = new Blob([bytesU8], { type:"application/pdf" });
-
-    let lastErr = "";
-
-    // 1) multipart/form-data (campo principale: "pdf"; fallback: "file")
-    for(const fieldName of ["pdf","file"]){
-      const { ctrl, cleanup } = makeSignal();
-      try{
-        const fd = new FormData();
-        fd.append(fieldName, blob, fileName);
-        fd.append("fileName", fileName);
-
-        const res = await fetch(url, {
-          method:"POST",
-          body: fd,
-          headers: authHeaders,
-          signal: ctrl.signal,
-          mode: "cors",
-          cache: "no-store",
-          credentials: "omit",
-        });
-
-        const payload = await _fetchJsonSafe(res).catch(async()=>{
-          const t = await res.text().catch(()=> "");
-          return { rawText: t };
-        });
-
-        cleanup();
-
-        if(res.ok) return payload;
-
-        const msg = (payload && (payload.error||payload.message||payload.rawText)) ? String(payload.error||payload.message||payload.rawText) : "";
-        lastErr = `HTTP ${res.status}${msg?` · ${msg.slice(0,220)}`:""}`;
-
-        // Multer tipico: "Unexpected field" -> prova l'altro nome
-        if(res.status===400 && /unexpected field/i.test(lastErr)) continue;
-
-      }catch(err){
-        cleanup();
-        lastErr = humanErr(err);
+    for(const url of urlCandidates){
+      // 1) multipart/form-data
+      {
+        const { ctrl, cleanup } = makeSignal();
+        try{
+          const fd = new FormData();
+          fd.append("file", new Blob([u8], { type: mt }), fileName);
+          fd.append("mimeType", mt);
+          fd.append("mode","v2");
+          fd.append("want","pages");
+          fd.append("fields","employee,documentDate,netPay");
+          fd.append("lang","it");
+          const headers = {};
+          if(token) headers["Authorization"] = `Bearer ${token}`;
+          const res = await fetch(url, { method:"POST", body: fd, headers, signal: ctrl.signal });
+          cleanup();
+          if(res.ok) return await _fetchJsonSafe(res);
+        }catch(_e){
+          cleanup();
+        }
+      }
+      // 2) JSON base64 fallback
+      {
+        const { ctrl, cleanup } = makeSignal();
+        try{
+          const b64 = _u8ToBase64(u8);
+          const headers = { "Content-Type":"application/json" };
+          if(token) headers["Authorization"] = `Bearer ${token}`;
+          const body = {
+            fileName,
+            mimeType: mt,
+            mode:"v2",
+            want:"pages",
+            fields: ["employee","documentDate","netPay"],
+            lang: "it",
+            fileBase64: b64
+          };
+          if(isPdf) body.pdfBase64 = b64;
+          if(!isPdf) body.imageBase64 = b64;
+          const res = await fetch(url, { method:"POST", headers, body: JSON.stringify(body), signal: ctrl.signal });
+          cleanup();
+          if(res.ok) return await _fetchJsonSafe(res);
+        }catch(_e){
+          cleanup();
+        }
       }
     }
+    throw new Error("payrollExtract non raggiungibile o risposta non valida");
+  }
 
-    // 2) JSON base64 fallback
-    {
-      const { ctrl, cleanup } = makeSignal();
-      try{
-        const b64 = _u8ToBase64(new Uint8Array(bytesU8));
-        const headers = { "Content-Type":"application/json", ...authHeaders };
-        const body = { fileName, pdfBase64: b64, base64: b64 };
-
-        const res = await fetch(url, {
-          method:"POST",
-          headers,
-          body: JSON.stringify(body),
-          signal: ctrl.signal,
-          mode: "cors",
-          cache: "no-store",
-          credentials: "omit",
-        });
-
-        const payload = await _fetchJsonSafe(res).catch(async()=>{
-          const t = await res.text().catch(()=> "");
-          return { rawText: t };
-        });
-
-        cleanup();
-
-        if(res.ok) return payload;
-
-        const msg = (payload && (payload.error||payload.message||payload.rawText)) ? String(payload.error||payload.message||payload.rawText) : "";
-        lastErr = `HTTP ${res.status}${msg?` · ${msg.slice(0,220)}`:""}`;
-
-      }catch(err){
-        cleanup();
-        lastErr = humanErr(err);
-      }
-    }
-
-    throw new Error(`payrollExtract: ${lastErr || "risposta non valida"}`);
+  async function callPayrollExtractPdf(bytesU8, fileName="payroll.pdf", signal){
+    return await callPayrollExtractFile(bytesU8, fileName, "application/pdf", signal);
   }
 
 
@@ -8221,16 +8222,29 @@ Linea: polveri`, null); }catch(_e){}
     const pickPeriod = (o)=> (o?.monthKey||o?.periodKey||o?.period||o?.meseAnno||o?.monthYear||o?.month||o?.payPeriod||"");
     const pickAmount = (o)=> (o?.netPayText||o?.netPay||o?.net||o?.netto||o?.amount||o?.importoNetto||o?.importo||"");
     const pickConf = (o)=> (o?.confidence||o?.conf||o?.score||null);
+    const pickDocDate = (o)=> (o?.documentDate||o?.docDate||o?.date||o?.dataDocumento||o?.data||o?.issuedAt||o?.payDate||"");
 
     const tryPushDoc = (o, pagesArr)=>{
       const employee = String(pickEmployee(o)||"").trim();
       const period = pickPeriod(o);
-      const { month, year, monthKey } = _parseMonthKey(period);
+      let { month, year, monthKey } = _parseMonthKey(period);
+      const docDateRaw = pickDocDate(o);
+      const docDateIso = _parseDateToISO(docDateRaw);
+      if(!monthKey && docDateIso){
+        const mk = _monthKeyFromIso(docDateIso);
+        if(mk){
+          monthKey = mk;
+          const yy = Number(mk.slice(0,4));
+          const mm = Number(mk.slice(5,7));
+          if(Number.isFinite(mm)) month = mm;
+          if(Number.isFinite(yy)) year = yy;
+        }
+      }
       const amount = _parseMoneyToNumber(pickAmount(o));
       const confidence = Number.isFinite(Number(pickConf(o))) ? Number(pickConf(o)) : null;
       if(!employee && !monthKey && amount==null) return;
       const pages = Array.isArray(pagesArr) ? pagesArr : [];
-      docs.push({ employee, month, year, monthKey, amount, confidence, pages, raw:o });
+      docs.push({ employee, month, year, monthKey, docDateIso, amount, confidence, pages, raw:o });
     };
 
     if(Array.isArray(json?.documents)){
@@ -8259,10 +8273,22 @@ Linea: polveri`, null); }catch(_e){}
         const safeIdx = Number.isFinite(pageIdx) ? pageIdx : idx;
         const employee = String(pickEmployee(p)||"").trim();
         const period = pickPeriod(p);
-        const { month, year, monthKey } = _parseMonthKey(period);
+        let { month, year, monthKey } = _parseMonthKey(period);
+        const docDateRaw = pickDocDate(p);
+        const docDateIso = _parseDateToISO(docDateRaw);
+        if(!monthKey && docDateIso){
+          const mk = _monthKeyFromIso(docDateIso);
+          if(mk){
+            monthKey = mk;
+            const yy = Number(mk.slice(0,4));
+            const mm = Number(mk.slice(5,7));
+            if(Number.isFinite(mm)) month = mm;
+            if(Number.isFinite(yy)) year = yy;
+          }
+        }
         const amount = _parseMoneyToNumber(pickAmount(p));
         const confidence = Number.isFinite(Number(pickConf(p))) ? Number(pickConf(p)) : null;
-        docs.push({ employee, month, year, monthKey, amount, confidence, pages:[safeIdx], raw:p });
+        docs.push({ employee, month, year, monthKey, docDateIso, amount, confidence, pages:[safeIdx], raw:p });
       });
 
       // raggruppa per employee+monthKey (se presenti)
@@ -8404,13 +8430,133 @@ Linea: polveri`, null); }catch(_e){}
     }
   }
 
-  async function analyzePayslipUploads(){
+  
+  async function rasterizeFileToJpegBytes(file){
+    // Converte qualsiasi immagine in JPEG via canvas (utile per webp/heic dove embed diretto può fallire)
+    try{
+      const blob = file instanceof Blob ? file : new Blob([file]);
+      let bmp = null;
+      try{
+        if("createImageBitmap" in window){
+          bmp = await createImageBitmap(blob);
+        }
+      }catch(_e){ bmp = null; }
+
+      let w = 0, h = 0, draw = null;
+      if(bmp){
+        w = bmp.width; h = bmp.height;
+        draw = (ctx)=> ctx.drawImage(bmp, 0, 0);
+      }else{
+        const url = URL.createObjectURL(blob);
+        const img = await new Promise((resolve, reject)=>{
+          const im = new Image();
+          im.onload = ()=> resolve(im);
+          im.onerror = (e)=> reject(e);
+          im.src = url;
+        });
+        URL.revokeObjectURL(url);
+        w = img.naturalWidth || img.width;
+        h = img.naturalHeight || img.height;
+        draw = (ctx)=> ctx.drawImage(img, 0, 0, w, h);
+      }
+
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, w|0);
+      canvas.height = Math.max(1, h|0);
+      const ctx = canvas.getContext("2d");
+      draw(ctx);
+
+      const outBlob = await new Promise((resolve)=> canvas.toBlob(resolve, "image/jpeg", 0.92));
+      if(!outBlob) throw new Error("Impossibile convertire immagine in JPEG");
+      return new Uint8Array(await outBlob.arrayBuffer());
+    }catch(e){
+      throw e;
+    }
+  }
+
+  async function imageFileToPdfBytes(file){
+    const { PDFDocument } = window.PDFLib || {};
+    if(!PDFDocument) throw new Error("PDFLib non disponibile");
+
+    const t = String(file?.type||"").toLowerCase();
+    if(t === "application/pdf") return new Uint8Array(await file.arrayBuffer());
+
+    const pdfDoc = await PDFDocument.create();
+
+    let imgBytesU8 = null;
+    let embedFn = "jpg";
+
+    if(t.includes("png")){
+      imgBytesU8 = new Uint8Array(await file.arrayBuffer());
+      embedFn = "png";
+    }else if(t.includes("jpeg") || t.includes("jpg")){
+      imgBytesU8 = new Uint8Array(await file.arrayBuffer());
+      embedFn = "jpg";
+    }else{
+      imgBytesU8 = await rasterizeFileToJpegBytes(file);
+      embedFn = "jpg";
+    }
+
+    const img = embedFn==="png" ? await pdfDoc.embedPng(imgBytesU8) : await pdfDoc.embedJpg(imgBytesU8);
+    const page = pdfDoc.addPage([img.width, img.height]);
+    page.drawImage(img, { x:0, y:0, width: img.width, height: img.height });
+
+    return await pdfDoc.save();
+  }
+
+  async function extractPdfDocsPerPage(fileArrayBuffer, fileName, pagesTotal){
+    const all = [];
+    const base = _stripExt(fileName || "payslip");
+    const total = Math.max(1, Number(pagesTotal)||1);
+
+    for(let i=0;i<total;i++){
+      const onePdfBytes = await splitPdfByPages(fileArrayBuffer, [i]);
+      let json = null;
+      try{
+        json = await callPayrollExtractFile(onePdfBytes, `${base}_p${i+1}.pdf`, "application/pdf", null);
+      }catch(_e){
+        continue;
+      }
+      let docs = normalizePayrollExtractResponse(json, 1) || [];
+      docs = docs.map(d=>{
+        d.pages = [i];
+        if(!Array.isArray(d.pages) || !d.pages.length) d.pages = [i];
+        return d;
+      });
+      docs.forEach(d=> all.push(d));
+    }
+
+    if(!all.length) return [];
+
+    // merge per (nome + mese) e unisci pagine consecutive
+    const merged = new Map();
+    for(const d of all){
+      const emp = _normStr(d.employee || "");
+      const mk = String(d.monthKey || "");
+      const key = `${emp}|${mk}`;
+      if(!merged.has(key)){
+        merged.set(key, { ...d, pages: [...(d.pages||[])] });
+      }else{
+        const g = merged.get(key);
+        if(g.amount==null && d.amount!=null) g.amount = d.amount;
+        if(!g.docDateIso && d.docDateIso) g.docDateIso = d.docDateIso;
+        g.pages.push(...(d.pages||[]));
+        g.pages = Array.from(new Set(g.pages)).sort((a,b)=>a-b);
+      }
+    }
+
+    const out = Array.from(merged.values()).filter(d=> (d.employee||"").trim() || d.monthKey || d.amount!=null);
+    out.sort((a,b)=> (Math.min(...(a.pages||[0])) - Math.min(...(b.pages||[0]))));
+    return out;
+  }
+
+async function analyzePayslipUploads(){
     if(!state.user?.isAdmin) return;
     if(!state.firebase.ok) return;
 
     const uploads = state.payslips.uploads || [];
     if(!uploads.length){
-      setPayslipStatus("idle", "Carica un PDF per iniziare.");
+      setPayslipStatus("idle", "Carica un PDF o un'immagine per iniziare.");
       return;
     }
 
@@ -8432,25 +8578,59 @@ Linea: polveri`, null); }catch(_e){}
       try{
         const ab = await up.file.arrayBuffer();
         up.arrayBuffer = ab;
-        // prova backend su PDF intero
-        const json = await callPayrollExtractPdf(ab, up.name, null);
-        const pagesTotal = Number(json?.pagesTotal || json?.pageCount || json?.numPages || 0) || null;
 
-        // se backend non dà pageCount, lo calcolo con PDFLib (leggero)
-        let effectivePages = pagesTotal;
-        if(!effectivePages){
+        const kind = up.kind || _kindOfFile(up.file);
+        up.kind = kind;
+        const mimeType = up.mimeType || (up.file?.type || (kind==="pdf" ? "application/pdf" : "image/*"));
+        up.mimeType = mimeType;
+
+        // page count
+        let effectivePages = 1;
+        if(kind === "pdf"){
           try{
             const { PDFDocument } = window.PDFLib || {};
             if(PDFDocument){
               const doc = await PDFDocument.load(ab);
-              effectivePages = doc.getPageCount();
+              effectivePages = doc.getPageCount() || 1;
             }
-          }catch(_e){}
+          }catch(_e){ effectivePages = 1; }
         }
-        effectivePages = effectivePages || 1;
         up.pagesTotal = effectivePages;
 
-        const docs = normalizePayrollExtractResponse(json, effectivePages);
+        // prova router sul file intero
+        let json = null;
+        try{
+          json = await callPayrollExtractFile(ab, up.name, mimeType, null);
+        }catch(errWhole){
+          if(kind === "image"){
+            // fallback: incapsula immagine in un PDF e riprova (utile se il backend accetta solo PDF)
+            const pdfFromImage = await imageFileToPdfBytes(up.file);
+            json = await callPayrollExtractFile(pdfFromImage, _stripExt(up.name) + ".pdf", "application/pdf", null);
+          }else{
+            throw errWhole;
+          }
+        }
+
+        let docs = normalizePayrollExtractResponse(json, effectivePages) || [];
+
+        // se single-page e manca pages -> assume pagina 0
+        if(effectivePages === 1){
+          docs = docs.map(d=>{
+            if(!Array.isArray(d.pages) || !d.pages.length) d.pages = [0];
+            return d;
+          });
+        }else{
+          const hasPages = docs.some(d=>Array.isArray(d.pages) && d.pages.length);
+          if(!hasPages){
+            // fallback robusto: estrazione pagina-per-pagina
+            docs = await extractPdfDocsPerPage(ab, up.name, effectivePages);
+          }
+        }
+
+        if(!docs.length){
+          throw new Error("Nessun dato riconosciuto (nome, data documento, importo netto).");
+        }
+
         up.docs = docs;
         up.status = "ok";
 
@@ -8484,6 +8664,7 @@ Linea: polveri`, null); }catch(_e){}
         employee: employee || (match.displayName||""),
         month, year, monthKey,
         amount: d.amount,
+        docDateIso: d.docDateIso || "",
         confidence: d.confidence,
         pages: Array.isArray(d.pages) ? d.pages : [],
         uid: match.uid || "",
@@ -8504,6 +8685,7 @@ Linea: polveri`, null); }catch(_e){}
         const g = merged.get(k);
         g.pages.push(...(m.pages||[]));
         if(g.amount==null && m.amount!=null) g.amount = m.amount;
+        if(!g.docDateIso && m.docDateIso) g.docDateIso = m.docDateIso;
         if(!g.employee && m.employee) g.employee = m.employee;
       }
     }
@@ -8584,6 +8766,8 @@ Linea: polveri`, null); }catch(_e){}
           emailLower: m.emailLower || "",
           employee: String(m.employee||m.displayName||"").trim(),
           monthKey: m.monthKey,
+          docDateIso: m.docDateIso || "",
+          docDateText: m.docDateIso ? fmtDateIt(m.docDateIso) : "",
           month: m.month || null,
           year: m.year || null,
           netPayCents: amountCents,
@@ -8705,7 +8889,7 @@ Linea: polveri`, null); }catch(_e){}
     const list = $("payslipUploadList");
     if(list){
       if(!uploads.length){
-        list.innerHTML = '<div class="payEmpty">Carica PDF unici o multipli: li separiamo noi.</div>';
+        list.innerHTML = '<div class="payEmpty">Carica PDF unici o multipli (o foto): li separiamo e leggiamo noi.</div>';
       }else{
         list.innerHTML = uploads.map(u=>{
           const badgeTone = (u.status==="error") ? "bad" : (u.status==="processing" ? "warn" : "ok");
@@ -8734,14 +8918,14 @@ Linea: polveri`, null); }catch(_e){}
           extracted.push(`<div class="payRow">
             <div>
               <div class="name">${who}</div>
-              <div class="meta">${period} · ${amount} · ${pages||0} pag</div>
+              <div class="meta">${(d.docDateIso?("Data "+fmtDateIt(d.docDateIso)):period)} · Netto ${amount} · ${pages||0} pag</div>
             </div>
             <div class="badge" data-tone="${badgeTone}">${pages?`Pagine ${pages}`:"In attesa"}</div>
           </div>`);
         });
       });
       if(!uploads.length){
-        extractList.innerHTML = '<div class="payEmpty">Carica un PDF per vedere il riconoscimento GPT.</div>';
+        extractList.innerHTML = '<div class="payEmpty">Carica un PDF o una foto per vedere il riconoscimento GPT.</div>';
       }else if(!extracted.length){
         extractList.innerHTML = '<div class="payEmpty">Analisi in corso…</div>';
       }else{
@@ -8761,7 +8945,7 @@ Linea: polveri`, null); }catch(_e){}
           const ok = Boolean(m.deliverable);
           const tone = ok ? "ok" : "warn";
           const who = m.uid ? escapeHtml(m.employee||m.displayName||"") : `${escapeHtml(m.employee||"")}`;
-          const sub = `${escapeHtml(m.uploadName||"")} · ${fmtMonthYear(m.month, m.year)} · ${m.amount!=null?fmtEuro(Number(m.amount)):"€ —"} · ${m.pagesCount||m.pages?.length||0} pag`;
+          const sub = `${escapeHtml(m.uploadName||"")} · ${m.docDateIso?("Data "+fmtDateIt(m.docDateIso)):fmtMonthYear(m.month, m.year)} · Netto ${m.amount!=null?fmtEuro(Number(m.amount)):"€ —"} · ${m.pagesCount||m.pages?.length||0} pag`;
           const right = ok ? "Consegna" : escapeHtml(m.reason || "Non consegnabile");
           return `<div class="payRow">
             <div>
@@ -8887,9 +9071,9 @@ Linea: polveri`, null); }catch(_e){}
 
       if(inp){
         inp.onchange = async()=>{
-          const files = Array.from(inp.files||[]).filter(f=>f && (f.type==="application/pdf" || /\.pdf$/i.test(f.name)));
+          const files = Array.from(inp.files||[]).filter(f=>f && (isPdfFile(f) || isImageFile(f)));
           if(!files.length){
-            showToast("Upload", "Seleziona almeno un PDF.");
+            showToast("Upload", "Seleziona almeno un PDF o un'immagine.");
             return;
           }
           state.payslips.uploads = files.map(f=>({
@@ -8897,6 +9081,8 @@ Linea: polveri`, null); }catch(_e){}
             name: f.name,
             size: f.size||0,
             file: f,
+            kind: _kindOfFile(f),
+            mimeType: (f.type || (_kindOfFile(f)==="pdf"?"application/pdf":"image/*")),
             status: "queued",
             docs: [],
             pagesTotal: 0,
@@ -8918,9 +9104,9 @@ Linea: polveri`, null); }catch(_e){}
         drop.addEventListener("drop", async(e)=>{
           e.preventDefault();
           drop.classList.remove("isDrag");
-          const files = Array.from(e.dataTransfer?.files||[]).filter(f=>f && (f.type==="application/pdf" || /\.pdf$/i.test(f.name)));
+          const files = Array.from(e.dataTransfer?.files||[]).filter(f=>f && (isPdfFile(f) || isImageFile(f)));
           if(!files.length){
-            showToast("Upload", "Trascina un PDF.");
+            showToast("Upload", "Trascina un PDF o un'immagine.");
             return;
           }
           inp.files = e.dataTransfer.files;
@@ -9202,6 +9388,16 @@ $("btnCallMatteo").addEventListener("click", ()=>{
   function onScroll(){
     try{ syncAlertSpacerHeight(); }catch(_e){}
   }
+
+  function fmtDateIt(iso){
+    if(!iso) return "";
+    const s = String(iso||"").trim();
+    // accetta anche "YYYY-MM-DD"
+    const m = s.match(/^(20\d{2})-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/);
+    if(m) return `${m[3]}/${m[2]}/${m[1]}`;
+    return s;
+  }
+
   /* UI-DESKTOP: header scroll-hide removed */
 window.addEventListener("resize", onScroll, {passive:true});
   window.addEventListener("pageshow", onScroll, {passive:true});
