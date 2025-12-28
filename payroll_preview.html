@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Anteprima PDF busta paga</title>
+  <style>
+    :root{
+      --bg:#ffffff;
+      --ink:#0f172a;
+      --muted:rgba(15,23,42,.64);
+      --stroke:rgba(15,23,42,.12);
+      --glass:rgba(255,255,255,.72);
+      --shadow:0 18px 45px rgba(15,23,42,.14);
+      --r:18px;
+      --font:"Avenir Next","Avenir","SF Pro Display",-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    }
+    *{box-sizing:border-box}
+    html,body{height:100%}
+    body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--font)}
+    .wrap{max-width:1100px;margin:0 auto;padding:18px}
+    .top{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:12px}
+    .title{font-size:20px;font-weight:900;letter-spacing:-.02em}
+    .sub{font-size:12px;color:var(--muted);margin-top:6px}
+    .pillRow{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
+    .pill{padding:7px 10px;border:1px solid var(--stroke);border-radius:999px;background:rgba(0,0,0,.02);font-size:12px;color:var(--muted);font-weight:800}
+    .btnRow{display:flex;gap:10px;flex-wrap:wrap;justify-content:flex-end}
+    .btn{border:1px solid var(--stroke);background:rgba(255,255,255,.9);border-radius:999px;padding:10px 14px;font-weight:900;cursor:pointer;box-shadow:0 10px 22px rgba(15,23,42,.08)}
+    .btn:active{transform:translateY(1px)}
+    .card{border:1px solid var(--stroke);background:var(--glass);border-radius:var(--r);box-shadow:var(--shadow);overflow:hidden}
+    .frame{width:100%;height:78vh;border:0;display:block;background:#fff}
+    .empty{padding:22px}
+    .empty h2{margin:0 0 6px 0;font-size:16px}
+    .empty p{margin:0;color:var(--muted);line-height:1.5}
+    @media (max-width:740px){
+      .frame{height:76vh}
+      .btnRow{justify-content:flex-start}
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="top">
+      <div>
+        <div class="title" id="tTitle">Anteprima PDF</div>
+        <div class="sub" id="tSub">—</div>
+        <div class="pillRow" id="pillRow" style="display:none"></div>
+      </div>
+      <div class="btnRow">
+        <button class="btn" id="btnPrint" type="button">Stampa</button>
+        <button class="btn" id="btnClose" type="button">Chiudi</button>
+      </div>
+    </div>
+
+    <div class="card" id="card">
+      <iframe class="frame" id="pdfFrame" title="Anteprima PDF"></iframe>
+      <div class="empty" id="empty" style="display:none">
+        <h2>Anteprima non disponibile</h2>
+        <p>Questa pagina legge i dati dalla memoria del browser. Torna alla lista e riapri la riga con le pagine assegnate.</p>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    function base64ToBytes(b64){
+      const bin = atob(String(b64||""));
+      const len = bin.length;
+      const u8 = new Uint8Array(len);
+      for(let i=0;i<len;i++) u8[i]=bin.charCodeAt(i);
+      return u8;
+    }
+    function getToken(){
+      const h = (location.hash||"").replace(/^#/, "");
+      return h ? decodeURIComponent(h) : "";
+    }
+    function safe(v){ return String(v||"").trim(); }
+
+    const token = getToken();
+    const key = token ? ("PAYROLL_PREVIEW:" + token) : "";
+    let payload = null;
+    try{
+      payload = key ? JSON.parse(localStorage.getItem(key) || "null") : null;
+    }catch(_e){ payload = null; }
+
+    const tTitle = document.getElementById("tTitle");
+    const tSub = document.getElementById("tSub");
+    const pillRow = document.getElementById("pillRow");
+    const pdfFrame = document.getElementById("pdfFrame");
+    const empty = document.getElementById("empty");
+
+    function showEmpty(){
+      pdfFrame.style.display = "none";
+      empty.style.display = "block";
+      tSub.textContent = "—";
+      pillRow.style.display = "none";
+    }
+
+    if(!payload || !payload.pdfBase64){
+      showEmpty();
+    }else{
+      const name = safe(payload.displayName) || safe(payload.fiscalCode) || "Documento";
+      const pages = Array.isArray(payload.pageNos) ? payload.pageNos.join(", ") : "";
+      const month = safe(payload.monthKey);
+      const amount = safe(payload.amountText);
+      const file = safe(payload.sourceFileName);
+
+      tTitle.textContent = name;
+      tSub.textContent = [file ? ("File: " + file) : "", pages ? ("Pagine: " + pages) : ""].filter(Boolean).join(" · ");
+
+      const pills = [];
+      if(month) pills.push("Data/Mese: " + month);
+      if(amount) pills.push("Importo: " + amount);
+      if(pages) pills.push("Pagine assegnate: " + pages);
+
+      pillRow.innerHTML = pills.map(t=>`<span class="pill">${t.replace(/</g,"&lt;")}</span>`).join("");
+      pillRow.style.display = pills.length ? "flex" : "none";
+
+      try{
+        const bytes = base64ToBytes(payload.pdfBase64);
+        const blob = new Blob([bytes], {type:"application/pdf"});
+        const url = URL.createObjectURL(blob);
+        pdfFrame.src = url;
+        pdfFrame.style.display = "block";
+        empty.style.display = "none";
+
+        window.addEventListener("beforeunload", ()=>{ try{ URL.revokeObjectURL(url); }catch(_e){} });
+      }catch(err){
+        console.warn("preview decode", err);
+        showEmpty();
+      }
+    }
+
+    document.getElementById("btnClose").addEventListener("click", ()=> window.close());
+    document.getElementById("btnPrint").addEventListener("click", ()=>{
+      try{
+        const w = pdfFrame.contentWindow;
+        if(w) w.focus();
+        if(w) w.print();
+      }catch(_e){}
+    });
+  </script>
+</body>
+</html>
