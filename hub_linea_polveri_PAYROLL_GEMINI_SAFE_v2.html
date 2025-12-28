@@ -8426,11 +8426,11 @@ function Ii() {
       n = e.errorReason ? "tone-bad" : t.fullName && t.monthKey && t.netPayText ? "tone-ok" : "tone-warn",
       o = e.errorReason ? "ERRORE" : t.fullName && t.monthKey && t.netPayText ? "OK" : "CAMPI MANCANTI",
       i = String(e.rawText || "").slice(0, 180).replace(/\s+/g, " ").trim();
-    return `<tr><td>${e.pageIndex}</td><td>${Ao(t.fullName||"—")}</td><td>${Ao(t.fiscalCode||"—")}</td><td>${Ao(t.monthKey||"—")}</td><td>${Ao(t.netPayText||"—")}</td><td>${null!=e.confidence?(100*e.confidence).toFixed(0)+"%":"—"}</td><td><div class="snippet">${Ao(i)}</div></td><td><span class="badgeTone ${n}">${o}</span></td></tr>`
+    return `<tr><td>${e.pageIndex+1}</td><td>${Ao(t.fullName||"—")}</td><td>${Ao(t.fiscalCode||"—")}</td><td>${Ao(t.monthKey||"—")}</td><td>${Ao(t.netPayText||"—")}</td><td>${null!=e.confidence?(100*e.confidence).toFixed(0)+"%":"—"}</td><td><div class="snippet">${Ao(i)}</div></td><td><span class="badgeTone ${n}">${o}</span></td></tr>`
   }).join("");
   t.innerHTML = "<tr><th>#</th><th>Nome</th><th>Codice fiscale</th><th>Mese</th><th>Netto</th><th>Conf.</th><th>Snippet</th><th>Stato</th></tr>" + i;
   const a = e.filter(e => !e.fields || !e.fields.monthKey || !e.fields.netPayText);
-  n && (n.style.display = a.length ? "block" : "none", o && (o.textContent = a.map(e => e.pageIndex).join(", ")));
+  n && (n.style.display = a.length ? "block" : "none", o && (o.textContent = a.map(e => e.pageIndex+1).join(", ")));
   const r = U("payrollPreviewMeta");
   r && (r.textContent = `${e.length} pagine dal file`);
   const s = U("payrollPreviewBadge");
@@ -8444,7 +8444,8 @@ function payrollNotesHtml(row){
   if(row.missingMonth) notes.push('<span class="payrollBadgeError">⚠️ Data/Mese obbligatoria</span>');
   if(row.missingEmail) notes.push('<span class="payrollBadgeError">⚠️ Email obbligatoria/valida</span>');
   const pages = Array.isArray(row.pages) ? row.pages.length : 0;
-  notes.push(`<span class="payrollInfo">${pages} pagine</span>`);
+  const pageList = Array.isArray(row.pageNos) && row.pageNos.length ? row.pageNos.join(", ") : (row.pages||[]).map(p=>p.pageIndex+1).join(", ");
+  notes.push(`<span class="payrollInfo">Pagine: ${pages}${pageList ? ` (${pageList})` : ""}</span>`);
   return notes.join("<br/>");
 }
 
@@ -8453,6 +8454,8 @@ function refreshGroupedValidation(){
   const btn = U("btnPayrollSend");
   const banner = U("payrollConflictBanner");
   const summary = U("payrollMatchSummary");
+  const conflictPages = N.payroll?.admin?.match?.conflictPages || [];
+  const unassignedPages = N.payroll?.admin?.match?.unassignedPages || [];
   const messages = [];
   rows.forEach(r=>{
     r.missingEmail = !isValidEmail(r.email);
@@ -8465,19 +8468,23 @@ function refreshGroupedValidation(){
     if(r.missingMonth) messages.push(`Data/mese mancante per pagine ${r.pages?.map(p=>p.pageIndex+1).join(", ")||""}`);
     if(r.conflict) messages.push(`Conflitto su ${r.displayName||r.fiscalCode||r.key}`);
   });
+  if(conflictPages.length) messages.push(`Pagine in conflitto: ${conflictPages.map(p=>p+1).join(", ")}`);
+  if(unassignedPages.length) messages.push(`Pagine non assegnate: ${unassignedPages.map(p=>p+1).join(", ")}`);
   if(btn) btn.disabled = !(rows.length && messages.length===0);
   if(banner){
     banner.style.display = messages.length ? "block" : "none";
     banner.textContent = messages.join(" · ");
   }
   if(summary){
-    const totalPages = rows.reduce((a,r)=>a+(r.pages?.length||0),0);
+    const totalPages = rows.reduce((a,r)=>a+(r.pageNos?.length||r.pages?.length||0),0);
     summary.textContent = `${rows.length} righe · ${totalPages} pagine`;
   }
 }
 
 function buildGroupedRows(){
   const pages = N.payroll?.admin?.gemini?.pages || [];
+  const docs = N.payroll?.admin?.gemini?.docs || [];
+  const totalPages = N.payroll?.admin?.gemini?.totalPages || 0;
   const dirEntries = N.payroll?.directory?.entries || [];
   const existing = new Map((N.payroll?.admin?.groupedRows||[]).map(r=>[r.key,r]));
   const dirByFiscal = new Map();
@@ -8491,33 +8498,56 @@ function buildGroupedRows(){
       dirByName.get(nameNorm).push(e);
     }
   });
+  const items = (docs && docs.length) ? docs : pages.map(p=>({
+    ...p,
+    pageIndices: [p.pageIndex],
+    fullName: p.fields?.fullName || "",
+    fiscalCode: p.fields?.fiscalCode || "",
+    documentDate: p.fields?.monthKey || "",
+    netPayText: p.fields?.netPayText || "",
+    netPayCents: p.fields?.netPayCents ?? null
+  }));
+  const fallbackNameCounts = new Map();
+  items.forEach(item=>{
+    const fiscalCode = normalizeFiscalCode(item.fiscalCode || item.fields?.fiscalCode || item.fields?.codiceFiscale || item.fields?.taxCode || "");
+    if(fiscalCode) return;
+    const nameNorm = normalizeNameStrict(item.fullName || item.fields?.fullName || "");
+    if(!nameNorm) return;
+    fallbackNameCounts.set(nameNorm, (fallbackNameCounts.get(nameNorm)||0)+1);
+  });
+  const pageOwners = new Map();
+  const conflictPages = new Set();
   const groups = new Map();
-  pages.forEach(p=>{
-    const fields = p.fields || {};
-    const fullName = (fields.fullName || "").trim();
-    const fiscalCode = normalizeFiscalCode(fields.fiscalCode || fields.codiceFiscale || fields.taxCode || "");
-    const monthKey = normalizeMonthKey(fields.monthKey || fields.documentDate || "");
-    const netPayText = fields.netPayText || "";
-    const netPayCents = fields.netPayCents ?? null;
+  items.forEach((item, idx)=>{
+    const fields = item.fields || {};
+    const fullName = (item.fullName || fields.fullName || "").trim();
+    const fiscalCodeRaw = item.fiscalCode || fields.fiscalCode || fields.codiceFiscale || fields.taxCode || "";
+    const fiscalCode = normalizeFiscalCode(fiscalCodeRaw);
+    const monthKey = normalizeMonthKey(item.documentDate || item.monthKey || fields.monthKey || fields.documentDate || "");
+    const netPayText = item.netPayText || fields.netPayText || "";
+    const netPayCents = item.netPayCents ?? fields.netPayCents ?? null;
     const nameNorm = normalizeNameStrict(fullName || "");
-    const key = `${fiscalCode || nameNorm || `page-${p.pageIndex}`}__${monthKey || "missing"}`;
-    const prev = existing.get(key);
-    let row = groups.get(key);
+    const employeeKey = fiscalCode ? `cf:${fiscalCode.toLowerCase()}` : (nameNorm ? `name:${nameNorm}` : `anon:${idx}`);
+    const prev = existing.get(employeeKey);
+    let row = groups.get(employeeKey);
+    const dirCandidates = fiscalCode ? (dirByFiscal.get(fiscalCode) ? [dirByFiscal.get(fiscalCode)] : []) : (nameNorm ? (dirByName.get(nameNorm)||[]) : []);
+    const dirMatch = dirCandidates[0];
     if(!row){
-      const dirCandidates = fiscalCode ? (dirByFiscal.get(fiscalCode) ? [dirByFiscal.get(fiscalCode)] : []) : (nameNorm ? (dirByName.get(nameNorm)||[]) : []);
-      const dirMatch = dirCandidates[0];
       const emailLower = (prev?.email || dirMatch?.emailLower || "").toLowerCase();
       row = {
-        key,
+        key: employeeKey,
         displayName: prev?.displayName || fullName || dirMatch?.displayName || dirMatch?.fullName || "",
         fiscalCode: prev?.fiscalCode || fiscalCode || dirMatch?.fiscalCode || "",
         monthKey: prev?.monthKey || monthKey || "",
+        documentDate: prev?.documentDate || monthKey || "",
         netPayText: prev?.netPayText || netPayText,
         netPayCents: prev?.netPayCents ?? netPayCents ?? null,
         email: emailLower || "",
         emailLocked: prev?.emailLocked ?? Boolean(dirMatch && emailLower),
         emailSource: prev?.emailSource || (dirMatch ? (fiscalCode ? "directory-cf" : "directory-name") : ""),
         pages: [],
+        pageNos: [],
+        sources: [],
         warning: "",
         conflict: false,
         missingMonth: false,
@@ -8525,36 +8555,72 @@ function buildGroupedRows(){
         dirCandidatesCount: dirCandidates.length
       };
     }
-    row.pages.push({ pageIndex: p.pageIndex, rawText: p.rawText || "", monthKey, netPayText, netPayCents, fields });
+    const pageIndices = Array.from(new Set((item.pageIndices||[]).filter(v=>Number.isFinite(v)).map(v=>Math.max(0,Math.round(v))))).sort((a,b)=>a-b);
+    pageIndices.forEach(pi=>{
+      const owner = pageOwners.get(pi);
+      if(owner && owner!==employeeKey){
+        conflictPages.add(pi);
+      }else{
+        pageOwners.set(pi, employeeKey);
+      }
+    });
+    row.pages.push(...pageIndices.map(pi=>({pageIndex: pi, monthKey, netPayText, netPayCents, fields})));
+    row.sources.push(item);
     if(!row.netPayText && netPayText) row.netPayText = netPayText;
     if(null == row.netPayCents && null != netPayCents) row.netPayCents = netPayCents;
     if(!row.monthKey && monthKey) row.monthKey = monthKey;
+    if(!row.documentDate && monthKey) row.documentDate = monthKey;
     if(!row.fiscalCode && fiscalCode) row.fiscalCode = fiscalCode;
     if(!row.displayName && fullName) row.displayName = fullName;
-    groups.set(key, row);
+    row.dirCandidatesCount = dirCandidates.length || row.dirCandidatesCount;
+    groups.set(employeeKey, row);
   });
   const rows = Array.from(groups.values()).map(r=>{
     const fiscalNorm = normalizeFiscalCode(r.fiscalCode);
     const nameNorm = normalizeNameStrict(r.displayName || "");
+    const uniquePages = Array.from(new Set(r.pages.map(p=>p.pageIndex))).filter(pi=>!conflictPages.has(pi)).sort((a,b)=>a-b);
+    r.pages = uniquePages.map(pi=>({pageIndex: pi}));
+    r.pageNos = uniquePages.map(pi=>pi+1);
+    const monthValues = Array.from(new Set((r.sources||[]).map(src=>normalizeMonthKey(src.documentDate || src.monthKey || src.fields?.monthKey || "")))).filter(Boolean);
+    if(!r.monthKey && monthValues[0]) r.monthKey = monthValues[0];
+    let warning = fiscalNorm ? "" : "CF mancante: raggruppo per nome";
+    if(monthValues.length > 1) warning = warning ? `${warning}; date multiple rilevate` : "Date multiple rilevate";
     if(!r.email){
       const dirMatch = fiscalNorm ? dirByFiscal.get(fiscalNorm) : (nameNorm ? (dirByName.get(nameNorm)||[])[0] : null);
       if(dirMatch?.emailLower){ r.email = dirMatch.emailLower; r.emailLocked = true; r.emailSource = r.emailSource || "directory-auto"; }
     }
-    r.warning = fiscalNorm ? "" : "CF mancante: raggruppo per nome";
-    r.conflict = (!fiscalNorm && r.dirCandidatesCount > 1) || r.conflict;
+    r.warning = warning;
+    const nameCollision = !fiscalNorm && nameNorm && (fallbackNameCounts.get(nameNorm)||0) > 1;
+    r.conflict = nameCollision || (!fiscalNorm && r.dirCandidatesCount > 1) || r.conflict || uniquePages.some(pi=>conflictPages.has(pi)) || uniquePages.length===0;
     r.missingMonth = !r.monthKey;
     r.missingEmail = !isValidEmail(r.email);
     return r;
   });
+  const assignedPages = Array.from(pageOwners.entries()).filter(([pi])=>!conflictPages.has(pi)).map(([pi])=>pi);
+  const unassignedPages = totalPages ? Array.from({length: totalPages}, (_v,i)=>i).filter(pi=>!assignedPages.includes(pi) && !conflictPages.has(pi)) : [];
   N.payroll.admin.groupedRows = rows;
   N.payroll.admin.match = {
     pages,
     grouped: rows,
-    unmatched: [],
+    unmatched: unassignedPages,
     matchedCount: rows.length,
     ambiguousCount: rows.filter(r=>r.conflict).length,
-    unmatchedCount: 0
+    unmatchedCount: unassignedPages.length,
+    conflictPages: Array.from(conflictPages).sort((a,b)=>a-b),
+    unassignedPages
   };
+  try{
+    const logRows = rows.map(r=>({
+      fullName: r.displayName || "",
+      fiscalCode: r.fiscalCode || "",
+      pageCount: r.pageNos?.length || r.pages?.length || 0,
+      pageNos: r.pageNos || [],
+      documentDate: r.documentDate || r.monthKey || ""
+    }));
+    console.table(logRows);
+    if(N.payroll?.admin?.match?.conflictPages?.length) console.warn("Pagine in conflitto", N.payroll.admin.match.conflictPages.map(p=>p+1));
+    if(unassignedPages.length) console.warn("Pagine non assegnate", unassignedPages.map(p=>p+1));
+  }catch(_e){}
 }
 
 function updateGroupedRowField(key, field, value){
@@ -8606,6 +8672,7 @@ function Pi() {
   if (t) {
     t.innerHTML = rows.length ? rows.map(r=>{
       const pagesCount = Array.isArray(r.pages) ? r.pages.length : 0;
+      const pageText = r.pageNos?.length ? r.pageNos.join(", ") : (r.pages||[]).map(p=>p.pageIndex+1).join(", ");
       const monthBadge = r.monthKey ? `<span class="badgeTone tone-ok">${Ao(r.monthKey)}</span>` : '<span class="badgeTone tone-bad">Obbligatoria</span>';
       const emailLockedTag = r.emailLocked ? '<span class="payrollLockTag">Directory</span>' : '';
       return `<tr data-row="${Ao(r.key)}">
@@ -8614,7 +8681,7 @@ function Pi() {
         <td>${monthBadge}</td>
         <td>${Ao(r.netPayText||"—")}</td>
         <td><div class="payrollInlineCell"><input class="payrollInlineInput" data-payroll-field="email" data-key="${Ao(r.key)}" value="${Ao(r.email||"")}" placeholder="nome@azienda.it" ${r.emailLocked?"disabled":""}><button class="miniBtn" type="button" data-payroll-email-action="${r.emailLocked?"unlock":"save"}" data-key="${Ao(r.key)}">${r.emailLocked?"Modifica":"Salva"}</button>${emailLockedTag}</div></td>
-        <td><button class="payrollBtn ghost" data-payroll-open-pages="${Ao(r.key)}" type="button">Apri (${pagesCount})</button></td>
+        <td><div class="payrollInlineCell"><span class="badgeTone tone-ok">Pagine: ${pagesCount}</span> <span class="pcHint" style="font-weight:800">${Ao(pageText||"—")}</span></div><button class="payrollBtn ghost" data-payroll-open-pages="${Ao(r.key)}" type="button">Apri PDF</button></td>
         <td data-row-note="${Ao(r.key)}">${payrollNotesHtml(r)}</td>
       </tr>`;
     }).join("") : '<tr><td colspan="7" class="muted">Nessuna pagina rilevata.</td></tr>';
@@ -8666,7 +8733,8 @@ async function openPayrollPages(key){
     const modal = U("payrollPagesModal");
     if(frame) frame.src = `${row.previewUrl}#toolbar=0&navpanes=0`;
     title && (title.textContent = row.displayName || row.fiscalCode || "Pagine busta paga");
-    meta && (meta.textContent = `Pagine: ${row.pages.map(p=>p.pageIndex+1).join(", ")} · Mese ${row.monthKey||"—"}`);
+    const pageList = row.pageNos?.length ? row.pageNos.join(", ") : row.pages.map(p=>p.pageIndex+1).join(", ");
+    meta && (meta.textContent = `Pagine: ${pageList} · Mese ${row.monthKey||"—"}`);
     if(modal){ modal.style.display="flex"; }
     if(N.payroll?.admin) N.payroll.admin.previewRowKey = row.key;
   }catch(err){
@@ -9104,7 +9172,9 @@ async function Vi() {
   Di("extracting"), e.gemini = {
     loading: !0,
     error: "",
-    pages: []
+    pages: [],
+    docs: [],
+    totalPages: 0
   };
   const n = U("payrollAdminStatus"), dbg = U("payrollGeminiDebug"), t0 = performance.now();
   n && (n.textContent = "Analisi…");
@@ -9118,6 +9188,11 @@ async function Vi() {
   try {
     const o = await t.arrayBuffer();
     e.originalPdfBytes = o, e.sourceFileName = t.name || "";
+    try{
+      const lib = await __payrollGetPDFLib();
+      const srcPdf = await lib.PDFDocument.load(o);
+      e.gemini.totalPages = typeof srcPdf.getPageCount==="function" ? srcPdf.getPageCount() : (srcPdf?.getPageIndices?.()?.length||0);
+    }catch(_e){ e.gemini.totalPages = 0; }
     try {
       const t = await crypto.subtle.digest("SHA-256", o);
       e.sourceFileHash = Array.from(new Uint8Array(t)).map(e => e.toString(16).padStart(2, "0")).join("")
@@ -9168,42 +9243,78 @@ async function Vi() {
     try{ c = JSON.parse(raw); }catch(_e){ throw new Error("Risposta non valida dal servizio di estrazione"); }
     dbg && (dbg.textContent = `Estrazione HTTP 200 · ${Math.round(performance.now() - t0)}ms`);
     const d = Array.isArray(c.documents) ? c.documents : [];
-    let u = null;
-    const m = [];
-    for (let e = 0; e < d.length; e++) {
-      const t = d[e] || {};
-      const rawText = String(t.rawText || t.text || "").trim();
-      let n = String(t.fullName || "").trim(),
-        o = normalizeMonthKey(t.documentDate || t.monthKey || ""),
-        i = null != t.netPayCents ? t.netPayCents : null,
-        s = String(t.netPayText || "").trim(),
-        l = String(t.fiscalCode || t.codiceFiscale || t.taxCode || "").replace(/\s+/g,"").toUpperCase();
-      s || null == i || (s = r(i));
-      if ((!n || !o || !l) && u) {
-        n || (n = u.fullName || ""), o || (o = u.monthKey || ""), l || (l = u.fiscalCode || ""), null == i && null != u.netPayCents && (i = u.netPayCents), s || (s = u.netPayText || "")
+    const normalizePageList = (val)=>{
+      if(Array.isArray(val)) return val;
+      if(typeof val==="number" && Number.isFinite(val)) return [val];
+      if(typeof val==="string"){
+        const parts = val.split(/[,;\s]+/).map(v=>Number(v)).filter(v=>Number.isFinite(v));
+        if(parts.length) return parts;
       }
-      const c = {
-        pageIndex: e,
+      return [];
+    };
+    const toZeroBasedPages = (arr)=>{
+      const unique = Array.from(new Set((arr||[]).map(v=>Number(v)).filter(v=>Number.isFinite(v)).map(v=>Math.round(v))));
+      if(!unique.length) return [];
+      const hasZero = unique.some(v=>v===0);
+      const min = Math.min(...unique);
+      const max = Math.max(...unique);
+      const assumeOneBased = !hasZero && min>=1 && (!e.gemini.totalPages || max<=e.gemini.totalPages);
+      return Array.from(new Set(unique.map(v=>assumeOneBased ? v-1 : v))).filter(v=>v>=0).sort((a,b)=>a-b);
+    };
+    const docs = [];
+    const pagesFlat = [];
+    for (let iDoc = 0; iDoc < d.length; iDoc++) {
+      const t = d[iDoc] || {};
+      const rawText = String(t.rawText || t.text || "").trim();
+      const fullName = String(t.fullName || "").trim();
+      const fiscalCode = String(t.fiscalCode || t.codiceFiscale || t.taxCode || "").replace(/\s+/g,"").toUpperCase();
+      const monthKey = normalizeMonthKey(t.documentDate || t.monthKey || "");
+      const netPayCents = t.netPayCents ?? null;
+      let netPayText = String(t.netPayText || "").trim();
+      netPayText || null==netPayCents || (netPayText = r(netPayCents));
+      const pageIndicesRaw = normalizePageList(t.pageNos || t.pageIndices || t.pages || t.pageIndex);
+      let pageIndices = toZeroBasedPages(pageIndicesRaw);
+      if(!pageIndices.length && Number.isFinite(t.pageIndex)) pageIndices = toZeroBasedPages([t.pageIndex]);
+      if(!pageIndices.length) pageIndices = [iDoc];
+      const doc = {
+        docIndex: iDoc,
         rawText,
-        confidence: null,
+        confidence: t.confidence ?? null,
         fields: {
-          fullName: n,
-          monthKey: o,
-          fiscalCode: l,
-          netPayText: s,
-          netPayCents: i
-        }
+          fullName,
+          monthKey,
+          fiscalCode,
+          netPayText,
+          netPayCents
+        },
+        fullName,
+        fiscalCode,
+        documentDate: monthKey,
+        netPayText,
+        netPayCents,
+        pageIndices,
+        pageNosOriginal: pageIndicesRaw
       };
-      (n && o) && (u = {
-        fullName: n,
-        monthKey: o,
-        fiscalCode: l,
-        netPayText: s,
-        netPayCents: i
+      docs.push(doc);
+      pageIndices.forEach(pi=>{
+        pagesFlat.push({
+          pageIndex: pi,
+          rawText,
+          confidence: doc.confidence,
+          fields: {
+            fullName,
+            monthKey,
+            fiscalCode,
+            netPayText,
+            netPayCents
+          },
+          sourceDocIndex: iDoc
+        });
       });
-      m.push(c)
     }
-    e.gemini.pages = m, n && (n.textContent = `PREVIEW (${m.length})`), dbg && (dbg.textContent = `Estrazione OK · pagine ${m.length} · ${Math.round(performance.now() - t0)}ms`), setProgress(100, "Analisi completata"), buildGroupedRows(), Ii(), Pi(), Di("match")
+    e.gemini.docs = docs;
+    e.gemini.pages = pagesFlat;
+    n && (n.textContent = `PREVIEW (${pagesFlat.length})`), dbg && (dbg.textContent = `Estrazione OK · pagine ${pagesFlat.length} · ${Math.round(performance.now() - t0)}ms`), setProgress(100, "Analisi completata"), buildGroupedRows(), Ii(), Pi(), Di("match")
   } catch (t) {
     e.gemini.error = t?.message || String(t), dbg && (dbg.textContent = `Estrazione ERRORE · ${Math.round(performance.now() - t0)}ms
 ${e.gemini.error}`), console.warn("payroll extract error", t), Ve("Estrazione fallita", e.gemini.error), setProgress(0, "Errore"), Di("idle")
