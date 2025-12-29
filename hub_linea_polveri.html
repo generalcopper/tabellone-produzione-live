@@ -4359,8 +4359,8 @@ let profile = await loadUserProfile(user.uid);
     const allowInfo = state.mobileAllowlist || {};
     const allowKeySet = (globalThis.__ALLOW_KEYS__ instanceof Set) ? globalThis.__ALLOW_KEYS__ : new Set();
     const allowLoaded = Boolean(globalThis.__ALLOW_LOADED__);
-    const allowFilterActive = Boolean(!isAdmin && isMobileView && allowLoaded);
-    const allowGuardActive = Boolean(!isAdmin && isMobileView && !allowLoaded);
+    const allowFilterActive = Boolean(!isAdmin && allowLoaded);
+    const allowGuardActive = Boolean(!isAdmin && !allowLoaded);
 
     const meOp = (state.user?.fullName || state.operator || "");
 
@@ -4401,18 +4401,15 @@ let profile = await loadUserProfile(user.uid);
 
       let visible = true;
       if(applyRoleVisibility){
-        if(isDesktop){
-          if(isAdmin){
-            visible = true;
-          } else {
-            const beyondWindow = Boolean(planDate && daysAway!=null && daysAway>3);
-            visible = !beyondWindow;
-          }
+        // Admin: vede sempre tutti gli ordini (desktop + mobile).
+        // Operatori: la visibilità è gestita dall’assegnazione/“invio ordini” (allowlist).
+        if(isAdmin){
+          visible = true;
         } else {
-          visible = priorityInfo.visible !== false;
+          visible = true;
         }
       }
-      if(visible && allowFilterActive){
+      if(allowFilterActive){
         visible = allowKeySet.has(k);
       } else if(allowGuardActive){
         visible = false;
@@ -5547,13 +5544,17 @@ function renderHome(){
     const badgeEl = $("badgeCounts");
     if(badgeEl){
       const isAdmin = Boolean(state.user && state.user.isAdmin);
-      const allowInfo = state.mobileAllowlist || {};
       const allowLoaded = Boolean(globalThis.__ALLOW_LOADED__);
-      const mobileView = isMobile();
-      if(mobileView && !isAdmin && !allowLoaded){
-        badgeEl.textContent = "— ordini";
+      if(!isAdmin){
+        if(!allowLoaded){
+          badgeEl.textContent = "— ordini";
+        } else {
+          const count = visibleOrders.length;
+          const noun = count === 1 ? "ordine" : "ordini";
+          badgeEl.textContent = `${count} ${noun}`;
+        }
       } else {
-        const count = (mobileView && !isAdmin) ? visibleOrders.length : pOrders.length;
+        const count = pOrders.length;
         const noun = count === 1 ? "ordine" : "ordini";
         badgeEl.textContent = `${count} ${noun}`;
       }
@@ -7107,11 +7108,18 @@ Linea: polveri`, null); }catch(_e){}
     let planMessageHtml = "";
     if(isDesktop){
       if(isAdmin){
-        planMessageHtml = `<div class="planMessage"><div class="headline">Vista admin</div><div class="muted">Tutti gli ordini (anche oltre 3 giorni) sono visibili per la pianificazione.</div></div>`;
+        planMessageHtml = `<div class="planMessage"><div class="headline">Vista admin</div><div class="muted">Tutti gli ordini sono visibili per la pianificazione.</div></div>`;
       } else {
-        const windowOrders = baseOrders.filter(o=>o.daysAway==null || o.daysAway<=3);
-        const listHtml = windowOrders.slice(0,8).map(o=>`<li>${escapeHtml(o.customer||"Cliente")} · Ord. ${escapeHtml(o.orderNo||o.number||"—")}${o.conclusion?` · ${escapeHtml(o.conclusion)}`:""}</li>`).join("") || `<li>Nessuna data pianificata disponibile.</li>`;
-        planMessageHtml = `<div class="planMessage"><div class="headline">Ci sono ${baseOrders.length} ordini da fare. In base alla pianificazione, puoi andare in produzione con questi ${windowOrders.length} ordini:</div><ul>${listHtml}</ul></div>`;
+        const allowLoaded = Boolean(globalThis.__ALLOW_LOADED__);
+        const allowInfo = state.mobileAllowlist || {};
+        if(!allowLoaded){
+          planMessageHtml = `<div class="planMessage"><div class="headline">Carico gli ordini inviati…</div><div class="muted">Attendi la sincronizzazione delle assegnazioni dall’admin.</div></div>`;
+        } else if(!allowInfo.docExists){
+          planMessageHtml = `<div class="planMessage"><div class="headline">Assegnazioni non configurate</div><div class="muted">Chiedi all’admin di inviare gli ordini (pannello “Invio ordini a mobile”).</div></div>`;
+        } else {
+          const listHtml = orders.slice(0,8).map(o=>`<li>${escapeHtml(o.customer||"Cliente")} · Ord. ${escapeHtml(o.orderNo||o.number||"—")}${o.conclusion?` · ${escapeHtml(o.conclusion)}`:""}</li>`).join("") || `<li>Nessun ordine inviato.</li>`;
+          planMessageHtml = `<div class="planMessage"><div class="headline">Ordini inviati dall’admin: ${orders.length}</div><ul>${listHtml}</ul></div>`;
+        }
       }
     }
     body.innerHTML = `
@@ -7125,10 +7133,18 @@ Linea: polveri`, null); }catch(_e){}
     const list = body.querySelector("#orderList");
     list.classList.add("chunkyList");
     if(!orders.length){
-      const windowHasOrders = baseOrders.some(o=>o.daysAway==null || o.daysAway<=3);
-      const emptyMsg = (isDesktop && !isAdmin && baseOrders.length && !windowHasOrders)
-        ? "Nessun ordine pianificato entro i prossimi 3 giorni."
-        : "Nessun ordine disponibile (attendi sincronizzazione).";
+      const allowLoaded = Boolean(globalThis.__ALLOW_LOADED__);
+      const allowInfo = state.mobileAllowlist || {};
+      let emptyMsg = "Nessun ordine disponibile (attendi sincronizzazione).";
+      if(!isAdmin){
+        if(!allowLoaded){
+          emptyMsg = "Carico gli ordini inviati dall’admin…";
+        } else if(!allowInfo.docExists){
+          emptyMsg = "Assegnazioni non configurate: chiedi all’admin di inviare gli ordini.";
+        } else {
+          emptyMsg = "Nessun ordine inviato dall’admin.";
+        }
+      }
       list.innerHTML = `<div class="muted">${emptyMsg}</div>
         <div style="height:10px"></div>
         <button class="btn" id="btnRetry" style="width:100%;">Riprova sincronizzazione</button>`;
