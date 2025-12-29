@@ -477,6 +477,7 @@
   .payrollBtn.ghost{background:rgba(255,255,255,.6);border-color:rgba(12,16,26,.08)}
   .payrollBtn.bad{background:rgba(255,77,79,.14);border-color:rgba(255,77,79,.35);color:#b00020}
   .payrollBtn:active{transform:translateY(1px)}
+  .payrollBtn[disabled]{opacity:.55;cursor:not-allowed}
   .payrollOverlay{position:fixed;inset:0;z-index:10000;display:none;align-items:flex-start;justify-content:center;padding:26px;backdrop-filter:blur(18px);background:radial-gradient(120% 120% at 12% 8%,rgba(10,132,255,.18),transparent),radial-gradient(120% 120% at 90% 8%,rgba(52,199,89,.12),transparent),rgba(6,10,18,.46);overflow-y:auto;scroll-behavior:smooth}
   .payrollOverlay.show{display:flex}
   .payrollSheet{width:min(1260px,96vw);max-height:calc(100vh - 52px);min-height:640px;background:linear-gradient(160deg,rgba(255,255,255,.96),rgba(237,243,255,.94));border-radius:32px;padding:26px;display:flex;flex-direction:column;gap:16px;box-shadow:0 28px 70px rgba(6,12,24,.35);overflow:hidden;position:relative;overflow-y:auto}
@@ -9071,8 +9072,22 @@ function Ri() {
 async function Ki() {
   const e = N.payroll.userView,
     t = e.docs.find(t => t.monthKey === e.selectedMonth) || e.docs[0];
+  const preview = U("payrollUserPreview"),
+    btnOpen = U("btnPayrollOpenPdf"),
+    btnShare = U("btnPayrollShare"),
+    btnPrint = U("btnPayrollPrint"),
+    frame = U("payrollUserPdfFrame");
+  const setActionsState = ready => {
+    [btnOpen, btnShare, btnPrint].forEach(b => {
+      if (!b) return;
+      b.style.display = "";
+      b.disabled = !ready;
+    });
+    preview && (preview.style.display = "");
+  };
   if (!t) {
     const e = U("payrollUserNet");
+    setActionsState(!1);
     return void(e && (e.textContent = "Nessuna busta paga"))
   }
   e.selectedMonth = t.monthKey;
@@ -9093,19 +9108,25 @@ async function Ki() {
   const r = U("payrollUserDate");
   r && (r.textContent = t.updatedAt ? "Aggiornato" : "Caricato");
   renderPayrollChart();
-  const s = U("payrollUserPdfFrame");
-  if (s) try {
+  let pdfUrl = "";
+  try {
     const n = N.firebase.storageApi,
       o = N.firebase.storage;
-    if (!n || !o) return s.src = "", void(e.currentUrl = "");
-    if (t.storagePath) {
-      const o = await n.getDownloadURL(n.ref(N.firebase.storage, t.storagePath));
-      const cleaned = o.includes("#") ? o : `${o}#toolbar=0&navpanes=0&scrollbar=0`;
-      s.src = cleaned, e.currentUrl = cleaned
-    } else s.src = "", e.currentUrl = ""
+    if (n && o && t.storagePath) {
+      pdfUrl = await n.getDownloadURL(n.ref(N.firebase.storage, t.storagePath)) || ""
+    }
   } catch (e) {
-    console.warn("load payroll pdf", e), s.src = ""
+    console.warn("load payroll pdf", e)
   }
+  if (!pdfUrl) {
+    pdfUrl = t.url || t.downloadUrl || t.link || ""
+  }
+  const cleaned = pdfUrl ? (pdfUrl.includes("#") ? pdfUrl : `${pdfUrl}#toolbar=0&navpanes=0&scrollbar=0`) : "";
+  if (frame) try {
+    frame.src = cleaned || ""
+  } catch (_e) {}
+  e.currentUrl = cleaned || "";
+  setActionsState(Boolean(cleaned))
 }
 
 function renderPayrollChart(){
@@ -9661,8 +9682,8 @@ U("payrollAdminClose")?.addEventListener("click", () => {
     onSignedIn,
     onSignedOut,
     setExtractEndpoint,
-    openUser: ()=>{ try{ Hi(); }catch(_e){} },
-    openAdmin: ()=>{ try{ Ui(); }catch(_e){} },
+    openUser: async ()=>{ try{ await Fi(); Hi(); }catch(_e){} },
+    openAdmin: async ()=>{ try{ if(N.user && N.user.isAdmin){ await zi(); qi(); }else Ve("Solo admin","Funzione riservata."); }catch(_e){} },
     reset: ()=>{ try{ ji(); }catch(_e){} },
   };
 })();
@@ -9674,7 +9695,7 @@ U("payrollAdminClose")?.addEventListener("click", () => {
 
 <div id="payrollAdminModal" class="payrollOverlay" role="dialog" aria-modal="true" style="display:none"><div class="payrollSheet"><div class="payrollTop"><div class="payrollTitleWrap"><div class="payrollSub">Area Paghe · ambiente aziendale</div><div class="payrollTitle">Upload buste paga</div><div class="payrollSub">Flusso unico: PDF → controllo → match → invio</div><div class="payrollBadgeRow"><span class="payrollPill" id="payrollAdminStepLabel">In attesa</span><span class="payrollPill" id="payrollAdminFileLabel">Nessun documento</span><span class="payrollPill" id="payrollAdminMatchLabel">Match in attesa</span><div class="payrollTabRow"><button class="payrollTab active" id="payrollTabUpload" type="button">Upload</button><button class="payrollTab" id="payrollTabDirectory" type="button">Dipendenti</button></div></div></div><button class="payrollClose" id="payrollAdminClose" aria-label="Chiudi">×</button></div><div class="payrollSteps"><div class="payrollPane" id="payrollStepIdle"><div class="payrollGrid"><div><div class="dropArea" id="payrollDrop"><div class="pcTitle" style="font-size:18px">Carica e analizza</div><div class="pcSub">Trascina il PDF o usa il pulsante: parte subito l'upload con barra reale.</div><div class="uploadActions"><button class="payrollBtn primary" id="btnPayrollUpload" type="button">Carica e analizza</button><button class="payrollBtn ghost" id="btnPayrollReset" type="button">Cancella</button><button class="payrollBtn ghost" id="btnPayrollDeleteLast" type="button">Elimina ultimo inviato</button><button class="payrollBtn ghost bad" id="btnPayrollDeleteAll" type="button">Elimina tutti i documenti</button></div><div class="progressShell" id="payrollProgress"><div class="progressLabel" id="payrollProgressLabel">Pronto</div><div class="progressBar"><div class="progressFill" id="payrollProgressFill"></div></div></div><div class="miniHint" id="payrollIdleHint">Stato: inattivo.</div><div class="pcHint" id="payrollDeleteFeedback" style="color:var(--bad)"></div><input type="file" id="payrollFileInput" accept="application/pdf" style="display:none"></div></div><div class="payrollPane" style="margin:0"><div class="pcTitle" style="font-size:16px">Workflow ordinato</div><div class="pcHint">Preview obbligatoria, match controllato, invio tracciato.</div><ul class="pcHint" style="padding-left:18px;margin:10px 0 0 0;line-height:1.5"><li>La barra mostra il caricamento reale.</li><li>Preview prima del match per validare il PDF.</li><li>Dipendenti gestiti nella sezione dedicata.</li></ul></div></div></div><div class="payrollPane" id="payrollDirectoryPane" style="display:none"><div class="pcHead" style="padding:0"><div><div class="pcTitle">Dipendenti (Admin)</div><div class="pcSub">Whitelist live per match e invio sicuro.</div></div><div class="payrollPill" id="payrollDirectoryCount">0 dipendenti</div></div><div class="payrollDirectory"><div class="dirActions"><button class="pillBtn primary" id="btnToggleDirForm" type="button">Aggiungi dipendente</button><div class="pcHint" id="dirFeedback"></div><div class="pcHint" id="payrollDirectoryError" style="display:none;color:var(--bad);margin-top:8px"></div></div><div class="directoryForm" id="dirForm"><div class="row2"><div class="field"><label>Codice fiscale *</label><input id="dirCfInput" list="dirCfSuggestions" placeholder="ES. RSSMRA80A01H501U"></div><div class="field"><label>Email *</label><input id="dirEmailInput" list="dirEmailSuggestions" placeholder="nome@azienda.it"></div><div class="field"><label>Nome</label><input id="dirFirstNameInput" placeholder="Nome (opzionale)"></div><div class="field"><label>Cognome</label><input id="dirLastNameInput" placeholder="Cognome (opzionale)"></div></div><div class="pcActionRow"><button class="payrollBtn primary" id="btnSaveDirectory" type="button">Salva dipendente</button><button class="payrollBtn ghost" id="btnPayrollReloadUsers" type="button">Ricarica lista</button></div></div><datalist id="dirCfSuggestions"></datalist><datalist id="dirEmailSuggestions"></datalist><div class="rowsScroll" style="max-height:220px;overflow:auto;margin-top:4px;"><table class="table"><thead><tr><th>Nome</th><th>Codice fiscale</th><th>Email</th><th>Stato</th><th>Azioni</th></tr></thead><tbody id="payrollDirectoryBody"></tbody></table></div></div></div><div class="payrollPane" id="payrollStepExtract" style="display:none;align-items:center;justify-content:center;text-align:center"><div class="pcTitle" style="font-size:18px">Estrazione in corso…</div><div class="pcHint">Il sistema sta elaborando il PDF.</div></div><div class="payrollPane" id="payrollStepPreview" style="display:none"><div class="pcHead" style="padding:0"><div><div class="pcTitle">Risultato estrazione</div><div class="pcSub" id="payrollPreviewMeta">Pagine rilevate.</div></div><div class="pillGroup"><span class="payrollPill" id="payrollPreviewBadge">OK</span></div></div><div class="rowsScroll" style="max-height:360px;overflow:auto"><table class="table" id="payrollPreviewTable"></table></div><div class="pcHint" id="payrollMissingPages" style="display:none">Pagine con campi mancanti: <span id="payrollMissingList"></span></div><div class="pcActionRow"><button class="payrollBtn primary" id="btnPayrollMatch" type="button">Match</button> <button class="payrollBtn ghost" id="btnPayrollRetry" type="button">Riestrai</button> <button class="payrollBtn ghost" id="btnPayrollReset2" type="button">Reset</button></div></div><div class="payrollPane" id="payrollStepMatch" style="display:none"><div class="pcHead" style="padding:0"><div><div class="pcTitle">Lista dipendenti</div><div class="pcSub">Righe raggruppate per codice fiscale (fallback nome con warning).</div></div><div class="pillGroup"><span class="payrollPill" id="payrollMatchSummary">0 righe</span></div></div><div class="payrollGroupedHint" id="payrollConflictBanner" style="display:none"></div><div class="rowsScroll" style="max-height:360px;overflow:auto"><table class="table payrollGroupedTable" id="payrollGroupedTable"><thead><tr><th>Nome Cognome</th><th>Codice Fiscale</th><th>Data/Mese</th><th>Importo Netto</th><th>Email</th><th>PDF riferimenti</th><th>Note</th></tr></thead><tbody id="payrollGroupedBody"></tbody></table></div><div class="pcActionRow"><button class="payrollBtn primary" id="btnPayrollSend" type="button">Invia</button> <button class="payrollBtn ghost" id="btnPayrollBackPreview" type="button">Indietro</button> <button class="payrollBtn ghost" id="btnPayrollReset3" type="button">Reset</button></div></div><div class="payrollPane" id="payrollStepSending" style="display:none"><div class="pcTitle">Invio in corso…</div><div class="pcHint" id="payrollSendSummary">Preparazione PDF utenti e scrittura Firestore.</div></div></div></div></div>
 
-<div id="payrollPagesModal" class="payrollOverlay" role="dialog" aria-modal="true" style="display:none"><div class="payrollSheet" style="max-width:980px;"><div class="payrollTop"><div class="payrollTitleWrap"><div class="payrollSub">Anteprima PDF raggruppata</div><div class="payrollTitle" id="payrollPagesTitle">Pagine selezionate</div></div><button class="payrollClose" id="payrollPagesClose" aria-label="Chiudi">×</button></div><div class="payrollPane" style="min-height:0;"><div class="pcHint" id="payrollPagesMeta"></div><iframe id="payrollPagesFrame" class="payrollModalFrame" title="Anteprima pagine stipendio"></iframe></div></div></div><div id="payrollUserModal" class="payrollOverlay" role="dialog" aria-modal="true" style="display:none"><div class="payrollSheet"><div class="payrollTop"><div class="payrollTitleWrap"><div class="payrollSub">Ambiente aziendale · dati protetti</div><div class="payrollTitle" id="payrollUserTitle">Le tue buste paga</div><div class="payrollBadgeRow"><span class="payrollPill" id="payrollUserMonthBadge">—</span><span class="payrollPill" id="payrollUserAmountBadge">—</span></div></div><button class="payrollClose" id="payrollUserClose" aria-label="Chiudi">×</button></div><div class="payrollPane"><div class="payrollHeroGreeting"><div class="eyebrow">Performance salariale</div><div class="headline" id="payrollGreeting">Ciao, —</div><div class="lede" id="payrollGreetingSub">Grazie per il tuo contributo.</div></div><div class="payrollSearch"><div class="payrollInlineField" style="min-width:200px"><label class="pcSub" for="payrollMonthSelect">Mese</label> <select id="payrollMonthSelect" class="payrollSelect"></select></div><div class="payrollInlineField" style="min-width:200px"><label class="pcSub" for="payrollSearchInput">Filtra mesi</label><input id="payrollSearchInput" type="search" placeholder="Cerca mese o nome"></div></div><div class="payrollGlassRow"><div class="payrollNonAdminCard payrollGlass"><div class="payrollNonAdminHeader"><div><div class="pcTitle" id="payrollUserNet">—</div><div class="pcSub" id="payrollUserDocMeta">Documento: —</div></div><div class="payrollBadgeSmall" id="payrollUserDate">Aggiornato —</div></div><div class="payrollNonAdminActions"><div class="pcHint">Apri il PDF originale in una pagina separata per stampa e condivisione.</div><div class="payrollActionButtons"><button class="payrollBtn primary" id="btnPayrollOpenPdf" type="button">Apri PDF in nuova pagina</button><button class="payrollBtn ghost" id="btnPayrollPrint" type="button">Stampa</button> <button class="payrollBtn ghost" id="btnPayrollShare" type="button">Condividi</button></div></div></div><div class="payrollChartCard"><div class="pcHead" style="padding:0; align-items:flex-start;"><div><div class="pcTitle" style="font-size:16px">Andamento mensile</div><div class="pcSub">Istogramma netto negli ultimi mesi</div></div></div><div class="payrollChart" id="payrollChart"></div></div></div><div class="payrollPdfPreview"><div class="payrollPreviewHint">Anteprima veloce (usa “Apri PDF in nuova pagina” per strumenti di stampa e condivisione).</div><iframe id="payrollUserPdfFrame" title="Busta paga" style="width:100%;border:0;background:#fff"></iframe></div></div></div></div>
+<div id="payrollPagesModal" class="payrollOverlay" role="dialog" aria-modal="true" style="display:none"><div class="payrollSheet" style="max-width:980px;"><div class="payrollTop"><div class="payrollTitleWrap"><div class="payrollSub">Anteprima PDF raggruppata</div><div class="payrollTitle" id="payrollPagesTitle">Pagine selezionate</div></div><button class="payrollClose" id="payrollPagesClose" aria-label="Chiudi">×</button></div><div class="payrollPane" style="min-height:0;"><div class="pcHint" id="payrollPagesMeta"></div><iframe id="payrollPagesFrame" class="payrollModalFrame" title="Anteprima pagine stipendio"></iframe></div></div></div><div id="payrollUserModal" class="payrollOverlay" role="dialog" aria-modal="true" style="display:none"><div class="payrollSheet"><div class="payrollTop"><div class="payrollTitleWrap"><div class="payrollSub">Ambiente aziendale · dati protetti</div><div class="payrollTitle" id="payrollUserTitle">Le tue buste paga</div><div class="payrollBadgeRow"><span class="payrollPill" id="payrollUserMonthBadge">—</span><span class="payrollPill" id="payrollUserAmountBadge">—</span></div></div><button class="payrollClose" id="payrollUserClose" aria-label="Chiudi">×</button></div><div class="payrollPane"><div class="payrollHeroGreeting"><div class="eyebrow">Performance salariale</div><div class="headline" id="payrollGreeting">Ciao, —</div><div class="lede" id="payrollGreetingSub">Grazie per il tuo contributo.</div></div><div class="payrollSearch"><div class="payrollInlineField" style="min-width:200px"><label class="pcSub" for="payrollMonthSelect">Mese</label> <select id="payrollMonthSelect" class="payrollSelect"></select></div><div class="payrollInlineField" style="min-width:200px"><label class="pcSub" for="payrollSearchInput">Filtra mesi</label><input id="payrollSearchInput" type="search" placeholder="Cerca mese o nome"></div></div><div class="payrollGlassRow"><div class="payrollNonAdminCard payrollGlass"><div class="payrollNonAdminHeader"><div><div class="pcTitle" id="payrollUserNet">—</div><div class="pcSub" id="payrollUserDocMeta">Documento: —</div></div><div class="payrollBadgeSmall" id="payrollUserDate">Aggiornato —</div></div><div class="payrollNonAdminActions"><div class="pcHint">Apri il PDF originale in una pagina separata per stampa e condivisione.</div><div class="payrollActionButtons"><button class="payrollBtn primary" id="btnPayrollOpenPdf" type="button">Apri PDF in nuova pagina</button><button class="payrollBtn ghost" id="btnPayrollPrint" type="button">Stampa</button> <button class="payrollBtn ghost" id="btnPayrollShare" type="button">Condividi</button></div></div></div><div class="payrollChartCard"><div class="pcHead" style="padding:0; align-items:flex-start;"><div><div class="pcTitle" style="font-size:16px">Andamento mensile</div><div class="pcSub">Istogramma netto negli ultimi mesi</div></div></div><div class="payrollChart" id="payrollChart"></div></div></div><div class="payrollPdfPreview" id="payrollUserPreview"><div class="payrollPreviewHint">Anteprima veloce (usa “Apri PDF in nuova pagina” per strumenti di stampa e condivisione).</div><iframe id="payrollUserPdfFrame" title="Busta paga" style="width:100%;border:0;background:#fff"></iframe></div></div></div></div>
 <script>
 /* UI-only: collassa il titolo header quando si scrolla (desktop), senza toccare logiche Google/Firebase */
 (function(){
