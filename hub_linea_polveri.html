@@ -494,7 +494,11 @@
   const AUTH_TTL_MS = 7 * 24 * 60 * 60 * 1000;
   const LS_AUTH_OK = "hub_auth_ok_ts_v1";
   const LS_AUTH_EMAIL = "hub_auth_last_email_v1";
-  const RESTORE_TIMEOUT_MS = 6000;
+  const RESTORE_TIMEOUT_MS = (()=>{ 
+    const ua = (navigator.userAgent || "").toLowerCase();
+    const isIOS = /iphone|ipad|ipod/.test(ua) || (/macintosh/.test(ua) && (navigator.maxTouchPoints||0)>1);
+    return isIOS ? 18000 : 9000;
+  })();
 
 
   const ISSUE_EMAIL_ENABLED = false;
@@ -1213,14 +1217,14 @@
   function isMobile(){
     const mq = typeof window !== "undefined" && window.matchMedia ? window.matchMedia("(max-width: 640px)") : { matches:false };
     const ua = (navigator.userAgent || navigator.vendor || "").toLowerCase();
-    const uaMobile = /(android|iphone|ipad|ipod|mobile|iemobile|opera mini)/.test(ua);
+    const uaMobile = /\b(android|iphone|ipad|ipod|mobile|iemobile|opera mini)\b/.test(ua);
     const legacyWidth = typeof window !== "undefined" ? (window.innerWidth <= 900) : false;
     return Boolean((mq && mq.matches) || uaMobile || legacyWidth);
   }
   function isMobileAuth(){
     // Auth should not depend on window width (desktop narrow windows can trigger "mobile restore" loops).
     const ua = (navigator.userAgent || navigator.vendor || "").toLowerCase();
-    const uaMobile = /(android|iphone|ipad|ipod|mobile|iemobile|opera mini)/.test(ua);
+    const uaMobile = /\b(android|iphone|ipad|ipod|mobile|iemobile|opera mini)\b/.test(ua);
     const ipadAsMac = /macintosh/.test(ua) && (navigator.maxTouchPoints || 0) > 1;
     return Boolean(uaMobile || ipadAsMac);
   }
@@ -2329,6 +2333,28 @@ function showAuthGate(){
     try{ localStorage.removeItem(LS_AUTH_OK); }catch(_e){}
     try{ localStorage.removeItem(LS_AUTH_EMAIL); }catch(_e){}
   }
+
+  const SS_AUTH_REDIRECT = "AUTH_REDIRECT_PENDING_TS";
+  const AUTH_REDIRECT_TTL_MS = 2 * 60 * 1000;
+
+  function setAuthRedirectPending(){
+    try{ sessionStorage.setItem(SS_AUTH_REDIRECT, String(Date.now())); }catch(_e){}
+  }
+  function getAuthRedirectPendingTs(){
+    try{
+      const ts = parseInt(sessionStorage.getItem(SS_AUTH_REDIRECT) || "0", 10);
+      if(!Number.isFinite(ts) || ts<=0) return 0;
+      if((Date.now() - ts) > AUTH_REDIRECT_TTL_MS){
+        try{ sessionStorage.removeItem(SS_AUTH_REDIRECT); }catch(_e){}
+        return 0;
+      }
+      return ts;
+    }catch(_e){ return 0; }
+  }
+  function clearAuthRedirectPending(){
+    try{ sessionStorage.removeItem(SS_AUTH_REDIRECT); }catch(_e){}
+  }
+
   function setAuthGateState(next){
     authGateState = next;
   }
@@ -2501,10 +2527,20 @@ function showAuthGate(){
       try{ await setBestAuthPersistence(authApi, auth); }catch(_e){}
 
       const ua = (navigator.userAgent||"").toLowerCase();
-      const preferRedirect = /iphone|ipad|ipod|android/.test(ua) || (navigator.maxTouchPoints||0)>1 && /macintosh/.test(ua);
+      const isIOS = /iphone|ipad|ipod/.test(ua) || (/macintosh/.test(ua) && (navigator.maxTouchPoints||0)>1);
+      const isStandalone = (window.matchMedia && window.matchMedia("(display-mode: standalone)").matches) || (navigator.standalone === true);
+
+      // iOS Safari (non-standalone) is often more reliable with popup than redirect.
+      const preferPopup = isIOS && !isStandalone;
+      const preferRedirect = !preferPopup && (/android/.test(ua) || isStandalone || isIOS);
 
       try{
+        if(preferPopup){
+          await authApi.signInWithPopup(auth, prov);
+          return;
+        }
         if(preferRedirect){
+          setAuthRedirectPending();
           await authApi.signInWithRedirect(auth, prov);
           return;
         }
@@ -2518,6 +2554,7 @@ function showAuthGate(){
         if(code==="auth/popup-blocked" || code==="auth/operation-not-supported-in-this-environment"){
           showToast("Accesso", msg);
           try{
+            setAuthRedirectPending();
             await authApi.signInWithRedirect(auth, prov);
             return;
           }catch(err2){
@@ -3005,12 +3042,17 @@ function showAuthGate(){
     primeAuthGateUi();
 
 
+    const __rp = getAuthRedirectPendingTs();
+    if(__rp){
+      enterRestoringMode("Completamento accesso Google…");
+    }
     try{
       await authApi.getRedirectResult(auth);
     }catch(e){
       console.warn("getRedirectResult error", e);
       state.lastAuthErrorMsg = humanAuthErr(e);
     }
+    if(__rp) clearAuthRedirectPending();
     if(globalThis.__AUTH_LISTENER_BOUND__) return;
     globalThis.__AUTH_LISTENER_BOUND__ = true;
     authApi.onAuthStateChanged(auth, async(user)=>{
@@ -3022,6 +3064,19 @@ function showAuthGate(){
       if(!user){
         const msg = state.lastAuthErrorMsg || "";
         state.lastAuthErrorMsg = "";
+
+        // After Google redirect (especially on iOS), auth state may take a few seconds to hydrate.
+        // Avoid bouncing back to the login screen while the redirect is completing.
+        const __redir = getAuthRedirectPendingTs();
+        if(__redir){
+          enterRestoringMode("Completamento accesso Google…");
+          startOrKeepRestoreTimeout(()=>{
+            clearAuthRedirectPending();
+            enterSignedOut(msg || "Accesso non completato. Riprova.");
+          });
+          return;
+        }
+
         if(isMobileAuth() && recentAuthOkWithinTTL()){
           enterRestoringMode("Ripristino sessione…");
           startOrKeepRestoreTimeout(()=> enterSignedOut(msg));
@@ -3036,7 +3091,9 @@ function showAuthGate(){
       markAuthOk(user.email || "");
 
 
-      let profile = await loadUserProfile(user.uid);
+      
+      clearAuthRedirectPending();
+let profile = await loadUserProfile(user.uid);
       if(!profile){
         const dn = (user.displayName||"").trim();
         profile = { fullName: dn || user.email || "" , email: user.email||"" };
@@ -3049,8 +3106,28 @@ function showAuthGate(){
           await upsertUserProfile(user, { fullName: profile.fullName, email: user.email||"" });
         }
       }
+      let access = null;
+      try{
+        access = await getAccessByEmail(user.email||"");
+      }catch(e){
+        console.warn("Allowlist fetch error", e);
+        // Keep the user signed in but block the app until we can verify permissions.
+        showAuthGate();
+        hideAuthLoader();
+        const b = $("authBody");
+        b.innerHTML = `
+          <div class="stepTitle">Connessione o permessi</div>
+          <div class="muted">Non riesco a verificare i permessi di accesso (rete instabile o regole Firebase). Riprova.</div>
+          <div style="height:14px"></div>
+          <button id="btnRetryAccess" class="btn good" style="width:100%;">Riprova</button>
+          <div style="height:10px"></div>
+          <button id="btnLogout" class="btn ghost" style="width:100%;">Esci</button>
+        `;
+        $("btnRetryAccess").onclick = ()=> { try{ location.reload(); }catch(_e){} };
+        $("btnLogout").onclick = async()=> { try{ await state.firebase.authApi.signOut(state.firebase.auth); }catch(_e){} };
+        return;
+      }
 
-      const access = await getAccessByEmail(user.email||"");
       if(!access || access.enabled === false){
         clearAuthOk();
         resetAuthDependentState();
@@ -3105,11 +3182,15 @@ function showAuthGate(){
   async function setBestAuthPersistence(authApi, auth){
     // Try the most durable persistence first, with safe fallbacks.
     // This prevents "login works, then I land back on login" loops on some browsers.
-    const attempts = [
-      authApi.indexedDBLocalPersistence,
-      authApi.browserLocalPersistence,
-      authApi.browserSessionPersistence
-    ].filter(Boolean);
+    const ua = (navigator.userAgent || "").toLowerCase();
+    const isIOS = /iphone|ipad|ipod/.test(ua) || (/macintosh/.test(ua) && (navigator.maxTouchPoints||0)>1);
+    const isStandalone = (window.matchMedia && window.matchMedia("(display-mode: standalone)").matches) || (navigator.standalone === true);
+
+    // iOS standalone can be picky: session persistence is often the most reliable.
+    const attempts = (isIOS && isStandalone)
+      ? [authApi.browserSessionPersistence, authApi.browserLocalPersistence, authApi.indexedDBLocalPersistence]
+      : [authApi.indexedDBLocalPersistence, authApi.browserLocalPersistence, authApi.browserSessionPersistence]
+    .filter(Boolean);
 
     for(const p of attempts){
       try{
