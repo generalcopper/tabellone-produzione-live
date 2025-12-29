@@ -1,0 +1,280 @@
+<!doctype html>
+<html lang="it" translate="no">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>Accesso Google</title>
+  <style>
+    :root{
+      color-scheme: light;
+      --bg: #ffffff;
+      --fg: #0b0b0b;
+      --muted:#6b6b6b;
+      --line: rgba(0,0,0,.08);
+      --shadow: 0 10px 30px rgba(0,0,0,.08);
+      --r: 18px;
+    }
+    html,body{height:100%;}
+    body{
+      margin:0;
+      font-family: ui-sans-serif, system-ui, -apple-system, "Avenir Next", "Avenir", "SF Pro Display", "Segoe UI", Roboto, Helvetica, Arial;
+      background: radial-gradient(900px 900px at 12% 8%, rgba(0,122,255,.10), transparent 60%),
+                  radial-gradient(900px 900px at 88% 12%, rgba(52,199,89,.10), transparent 55%),
+                  var(--bg);
+      color: var(--fg);
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      padding: 22px;
+    }
+    .card{
+      width:min(520px, 100%);
+      border: 1px solid var(--line);
+      border-radius: var(--r);
+      box-shadow: var(--shadow);
+      background: rgba(255,255,255,.88);
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+      padding: 22px;
+    }
+    h1{margin:0 0 6px; font-size: 22px; letter-spacing: .2px;}
+    p{margin:0; color: var(--muted); line-height: 1.35;}
+    .row{display:flex; gap:10px; margin-top:16px; flex-wrap:wrap;}
+    .btn{
+      appearance:none; border:1px solid var(--line);
+      background:#fff; color:var(--fg);
+      border-radius: 14px;
+      padding: 12px 14px;
+      font-weight: 700;
+      cursor:pointer;
+      display:inline-flex; align-items:center; gap:10px;
+      transition: transform .08s ease, box-shadow .12s ease, opacity .12s ease;
+      user-select:none;
+    }
+    .btn:active{transform: scale(.98);}
+    .btn[disabled]{opacity:.55; cursor:not-allowed;}
+    .btn.primary{
+      border-color: rgba(0,122,255,.25);
+      box-shadow: 0 10px 25px rgba(0,122,255,.10);
+    }
+    .pill{
+      display:inline-flex; align-items:center; gap:8px;
+      padding: 8px 10px;
+      border:1px solid var(--line);
+      border-radius: 999px;
+      color: var(--muted);
+      font-size: 13px;
+      margin-top: 14px;
+      background: rgba(255,255,255,.7);
+    }
+    .spinner{
+      width:14px;height:14px;border-radius:999px;
+      border:2px solid rgba(0,0,0,.12);
+      border-top-color: rgba(0,0,0,.45);
+      animation: spin .8s linear infinite;
+      display:none;
+    }
+    .busy .spinner{display:inline-block;}
+    @keyframes spin{to{transform:rotate(360deg)}}
+    .hint{margin-top:12px; font-size: 13px; color: var(--muted);}
+    .small{font-size:12px;color:var(--muted); margin-top:10px}
+    code{background: rgba(0,0,0,.04); padding:2px 6px; border-radius:8px; border:1px solid var(--line)}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Accesso</h1>
+    <p>Questa pagina gestisce solo il login Google e poi ti rimanda automaticamente all’hub.</p>
+
+    <div class="row">
+      <button id="btnGoogle" class="btn primary">
+        <span class="spinner" aria-hidden="true"></span>
+        <span>Accedi con Google</span>
+      </button>
+
+      <button id="btnLogout" class="btn" style="display:none;">
+        <span>Esci</span>
+      </button>
+    </div>
+
+    <div id="status" class="pill" aria-live="polite">
+      <span id="dot">●</span>
+      <span id="msg">Pronto.</span>
+    </div>
+
+    <div id="iosHint" class="hint" style="display:none;">
+      Se sei in <b>Web App iOS</b> (aggiunta alla Home) e il popup non parte, userò automaticamente il <b>redirect</b> (più stabile).
+    </div>
+
+    <div class="small">Tip: se vuoi forzare il cambio account, premi <b>Esci</b> e poi rifai <b>Accedi</b> (Google mostrerà la selezione account).</div>
+  </div>
+
+<script type="module">
+  const firebaseConfig = {
+    apiKey: "AIzaSyBiyB4pilnPpVj8vImD4PI6LF2_RtyDnv4",
+    authDomain: "tabellone-produzione-liv-e313e.firebaseapp.com",
+    projectId: "tabellone-produzione-liv-e313e",
+    storageBucket: "tabellone-produzione-liv-e313e.firebasestorage.app",
+    messagingSenderId: "537555699968",
+    appId: "1:537555699968:web:4d04cb9596b67bfb0e4be5"
+  };
+
+  const FIREBASE_IMPORT_APP  = "https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js";
+  const FIREBASE_IMPORT_AUTH = "https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js";
+
+  const LS_AUTH_OK = "hub_auth_ok_ts_v1";
+  const LS_AUTH_EMAIL = "hub_auth_last_email_v1";
+  const LS_AUTH_NEXT = "hub_auth_next_v1";
+  const LS_AUTH_PENDING = "hub_auth_pending_ts_v1";
+
+  const $ = (q)=>document.querySelector(q);
+  const btn = $("#btnGoogle");
+  const btnLogout = $("#btnLogout");
+  const status = $("#status");
+  const msg = $("#msg");
+
+  function setStatus(t){ msg.textContent = t; }
+  function setBusy(on){
+    if(on){ btn.disabled = true; status.classList.add("busy"); }
+    else { btn.disabled = false; status.classList.remove("busy"); }
+  }
+
+  const ua = (navigator.userAgent||"").toLowerCase();
+  const isIOS = /iphone|ipad|ipod/.test(ua) || (/macintosh/.test(ua) && (navigator.maxTouchPoints||0)>1);
+  const isStandalone = (window.matchMedia && window.matchMedia("(display-mode: standalone)").matches) || (navigator.standalone === true);
+  if(isIOS && isStandalone) $("#iosHint").style.display = "block";
+
+  const params = new URLSearchParams(location.search);
+  const next = params.get("next") || localStorage.getItem(LS_AUTH_NEXT) || "hub_linea_polveri.html";
+  localStorage.setItem(LS_AUTH_NEXT, next);
+
+  function goNext(){
+    // evita loop verso auth stessa
+    try{
+      if(next.includes("auth_google.html")) { location.href = "hub_linea_polveri.html"; return; }
+    }catch(_e){}
+    location.href = next;
+  }
+
+  function humanErr(e){
+    const c = (e && (e.code || e.message) || "").toString();
+    if(c.includes("popup-blocked")) return "Popup bloccato: passo al redirect…";
+    if(c.includes("cancelled") || c.includes("canceled")) return "Operazione annullata.";
+    if(c.includes("network")) return "Problema di rete. Riprova.";
+    if(c.includes("unauthorized-domain")) return "Dominio non autorizzato in Firebase Auth.";
+    return "Errore accesso. Riprova.";
+  }
+
+  const { initializeApp } = await import(FIREBASE_IMPORT_APP);
+  const authApi = await import(FIREBASE_IMPORT_AUTH);
+
+  const app = initializeApp(firebaseConfig);
+  const auth = authApi.getAuth(app);
+
+  // Persistence: prova la più “duratura” possibile.
+  try{
+    await authApi.setPersistence(auth, authApi.indexedDBLocalPersistence);
+  }catch(_e1){
+    try{ await authApi.setPersistence(auth, authApi.browserLocalPersistence); }
+    catch(_e2){ try{ await authApi.setPersistence(auth, authApi.browserSessionPersistence); }catch(_e3){} }
+  }
+
+  // Se rientriamo da redirect, proviamo a chiudere il giro subito.
+  try{
+    setStatus("Verifico accesso…");
+    const red = await authApi.getRedirectResult(auth);
+    if(red && red.user){
+      localStorage.setItem(LS_AUTH_OK, String(Date.now()));
+      if(red.user.email) localStorage.setItem(LS_AUTH_EMAIL, red.user.email);
+      setStatus("Accesso completato. Ti rimando all’hub…");
+      goNext();
+      // stop
+    }
+  }catch(err){
+    // non bloccare: spesso getRedirectResult fallisce se non c'è redirect in corso
+    console.warn("getRedirectResult", err);
+  }
+
+  authApi.onAuthStateChanged(auth, (user)=>{
+    if(user){
+      localStorage.setItem(LS_AUTH_OK, String(Date.now()));
+      if(user.email) localStorage.setItem(LS_AUTH_EMAIL, user.email);
+      btnLogout.style.display = "inline-flex";
+      setStatus("Sei già loggato. Ti rimando all’hub…");
+      // piccolo delay per far vedere stato (anche su iOS)
+      setTimeout(goNext, 250);
+    }else{
+      btnLogout.style.display = "none";
+      setStatus("Pronto. Premi “Accedi con Google”.");
+      setBusy(false);
+    }
+  });
+
+  btnLogout.onclick = async()=>{
+    try{
+      setBusy(true);
+      setStatus("Uscita…");
+      await authApi.signOut(auth);
+      localStorage.removeItem(LS_AUTH_OK);
+      localStorage.removeItem(LS_AUTH_EMAIL);
+      setStatus("Sei uscito. Ora puoi scegliere un altro account.");
+    }catch(err){
+      console.warn(err);
+      setStatus("Impossibile uscire. Riprova.");
+    }finally{
+      setBusy(false);
+    }
+  };
+
+  async function doRedirect(provider){
+    localStorage.setItem(LS_AUTH_PENDING, String(Date.now()));
+    setStatus("Redirect a Google…");
+    await authApi.signInWithRedirect(auth, provider);
+  }
+
+  async function tryPopup(provider){
+    // In Web App iOS spesso i popup sono instabili: proviamo comunque, poi fallback.
+    try{
+      const res = await authApi.signInWithPopup(auth, provider);
+      if(res && res.user){
+        localStorage.setItem(LS_AUTH_OK, String(Date.now()));
+        if(res.user.email) localStorage.setItem(LS_AUTH_EMAIL, res.user.email);
+        setStatus("Accesso completato. Ti rimando all’hub…");
+        goNext();
+        return true;
+      }
+      return false;
+    }catch(err){
+      console.warn("popup error", err);
+      setStatus(humanErr(err));
+      return false;
+    }
+  }
+
+  btn.onclick = async()=>{
+    setBusy(true);
+    setStatus("Apertura Google…");
+
+    const provider = new authApi.GoogleAuthProvider();
+    try{ provider.setCustomParameters({ prompt: "select_account" }); }catch(_e){}
+
+    // Se siamo in standalone iOS, spesso il redirect è più affidabile.
+    const preferRedirect = isIOS && isStandalone;
+
+    try{
+      if(!preferRedirect){
+        const ok = await tryPopup(provider);
+        if(ok) return;
+      }
+      await doRedirect(provider);
+    }catch(err){
+      console.warn("sign-in error", err);
+      setStatus(humanErr(err));
+      setBusy(false);
+    }
+  };
+</script>
+</body>
+</html>
