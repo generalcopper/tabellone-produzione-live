@@ -2007,6 +2007,15 @@ function renderUploadHistory(){
           N.payroll.admin.uploadHistory = hist;
           renderUploadHistory();
         }catch(err){
+          const msg = String(err?.message || err || "").toLowerCase();
+          if(err?.code === "permission-denied" || msg.includes("insufficient permissions") || msg.includes("missing or insufficient permissions")){
+            // Regole Firestore: lettura non consentita → non sporcare la console e non rompere la UI
+            N.payroll = N.payroll || {};
+            N.payroll.admin = N.payroll.admin || {};
+            N.payroll.admin.uploadHistory = [];
+            renderUploadHistory();
+            return;
+          }
           console.warn("history load", err);
         }
       }
@@ -2322,6 +2331,14 @@ function renderUploadHistory(){
             console.warn("sentCounts cap reached", read);
           }
         }catch(err){
+          const msg = String(err?.message || err || "").toLowerCase();
+          if(err?.code === "permission-denied" || msg.includes("insufficient permissions") || msg.includes("missing or insufficient permissions")){
+            N.payroll = N.payroll || {};
+            N.payroll.admin = N.payroll.admin || {};
+            N.payroll.admin.sentCounts = {};
+            renderDirectoryUI();
+            return;
+          }
           console.warn("sentCounts load", err);
         }
       }
@@ -2388,8 +2405,14 @@ function renderUploadHistory(){
           });
           state.absences.list = list;
         }catch(err){
-          console.warn("absence load", err);
-          Ve("Assenze non caricate", err?.message || String(err));
+          const msg = String(err?.message || err || "").toLowerCase();
+          if(err?.code === "permission-denied" || msg.includes("insufficient permissions") || msg.includes("missing or insufficient permissions")){
+            // Regole Firestore: lettura non consentita → UI pulita
+            state.absences.list = [];
+          }else{
+            console.warn("absence load", err);
+            Ve("Assenze non caricate", err?.message || String(err));
+          }
         }finally{
           state.absences.loading = false;
           renderAbsenceAdminList();
@@ -2885,8 +2908,6 @@ async function Yi() {
       async function openAdminModalFlow(targetPane){
         if(!(N.user && N.user.isAdmin)){ Ve("Solo admin", "Funzione riservata."); return; }
         await zi();
-        await loadUploadHistory();
-        await loadAbsenceRequests();
         toggleAdminModal(true, targetPane || "adminArea");
       }
 
@@ -3405,6 +3426,108 @@ function buildSafePdfName(base){
         });
       }
 
+      // === Payroll: helpers mancanti (fix ReferenceError) ===
+      function formatPayrollMonthLabel(monthKey){
+        const mk = normalizeMonthKey(monthKey) || String(monthKey||"").trim();
+        const m = mk.match(/^(\d{4})-(\d{2})$/);
+        if(!m) return mk || "—";
+        const y = Number(m[1]);
+        const mm = Number(m[2]);
+        try{
+          const d = new Date(y, mm-1, 1);
+          const fmt = new Intl.DateTimeFormat("it-IT", { month:"long", year:"numeric" });
+          const s = fmt.format(d);
+          return s ? (s.charAt(0).toUpperCase() + s.slice(1)) : mk;
+        }catch(_e){}
+        return `${m[2]}/${m[1]}`;
+      }
+
+      function renderPayrollUserList(){
+        const list = U("payrollUserList");
+        const badge = U("payrollUserMonthBadge");
+        const meta = U("payrollUserMeta");
+
+        const docsRaw = (N.payroll?.userView?.docs || []);
+        const docs = Array.isArray(docsRaw) ? docsRaw.slice() : [];
+        const selected = normalizeMonthKey(N.payroll?.userView?.selectedMonth || "");
+
+        if(badge){
+          badge.textContent = selected ? formatPayrollMonthLabel(selected) : "Seleziona un mese";
+        }
+        if(meta){
+          meta.textContent = docs.length ? `${docs.length} mesi disponibili` : "Nessuna busta paga trovata";
+        }
+        if(!list) return;
+
+        if(!docs.length){
+          list.innerHTML = '<div class="pcHint">Nessun mese disponibile.</div>';
+          return;
+        }
+
+        // Unico per monthKey (se ci sono duplicati teniamo l'ultimo)
+        const byMonth = {};
+        docs.forEach(d=>{
+          const mk = normalizeMonthKey(d?.monthKey || d?.month || "");
+          if(!mk) return;
+          const prev = byMonth[mk];
+          const prevTs = prev?.updatedAtClient || prev?.updatedAt || 0;
+          const curTs = d?.updatedAtClient || d?.updatedAt || 0;
+          if(!prev || curTs >= prevTs) byMonth[mk] = d;
+        });
+
+        const items = Object.keys(byMonth)
+          .sort((a,b)=> String(b).localeCompare(String(a)))
+          .map(k=>({ monthKey:k, ...byMonth[k] }));
+
+        list.innerHTML = items.map(item=>{
+          const mk = normalizeMonthKey(item.monthKey || "");
+          const isSel = !!(selected && mk === selected);
+          const amount = item.netPayText ? String(item.netPayText) : "";
+          const pages = (item.pagesCount != null) ? `${item.pagesCount}p` : "";
+          const sub = [amount, pages].filter(Boolean).join(" · ");
+          const hasPdf = !!(item.downloadUrl || item.url || item.pdfUrl);
+          const openBtn = hasPdf ? `<button class="miniBtn" type="button" data-payroll-open-month="${Ao(mk)}">Apri</button>`
+                                : `<span class="pcHint">Nessun PDF</span>`;
+          return `
+            <div class="payrollUserRow ${isSel ? "active":""}" data-payroll-select-month="${Ao(mk)}">
+              <div style="min-width:0">
+                <div class="pcTitle" style="font-size:15px;margin:0">${Ao(formatPayrollMonthLabel(mk))}</div>
+                <div class="pcSub">${Ao(sub || "—")}</div>
+              </div>
+              <div>${openBtn}</div>
+            </div>
+          `;
+        }).join("");
+
+        // Event delegation (bind una sola volta)
+        if(!list.__bound){
+          list.__bound = true;
+          list.addEventListener("click", (ev)=>{
+            const open = ev.target?.closest?.("[data-payroll-open-month]");
+            if(open){
+              const mk = open.getAttribute("data-payroll-open-month") || "";
+              if(mk){
+                N.payroll = N.payroll || {};
+                N.payroll.userView = N.payroll.userView || {};
+                N.payroll.userView.selectedMonth = mk;
+                Ri();
+                try{ openPayrollPreviewPage(); }catch(_e){}
+              }
+              return;
+            }
+            const row = ev.target?.closest?.("[data-payroll-select-month]");
+            if(row){
+              const mk = row.getAttribute("data-payroll-select-month") || "";
+              N.payroll = N.payroll || {};
+              N.payroll.userView = N.payroll.userView || {};
+              N.payroll.userView.selectedMonth = mk;
+              Ri();
+            }
+          });
+        }
+      }
+
+
       function Ri(){
         const view = N.payroll?.userView || {};
         const docs = view.docs || [];
@@ -3703,10 +3826,10 @@ function buildSafePdfName(base){
         try{ Oi(); }catch(_e){}
         try{ Fi(); }catch(_e){}
         try{ startPayrollUserDocsWatch(); }catch(_e){}
-        try{ if(N.user?.isAdmin){ startPayrollDirectoryWatch(); loadUploadHistory(); } }catch(_e){}
+        try{ if(N.user?.isAdmin){ startPayrollDirectoryWatch(); } }catch(_e){}
         try{ if(N.user?.isAdmin || N.user?.isWhitelisted !== false) startPayrollUserDocsWatch(); else { N.payroll.userView = N.payroll.userView || {}; N.payroll.userView.error = "Non sei abilitato alle buste paga."; N.payroll.userView.ready = false; Oi(); } }catch(_e){}
         try{ if(N.user?.isAdmin) zi(); }catch(_e){}
-        try{ if(N.user?.isAdmin) loadAbsenceRequests(); }catch(_e){}
+        try{ /* absences load: lazy */ }catch(_e){}
       }
 
       function onSignedOut(){
