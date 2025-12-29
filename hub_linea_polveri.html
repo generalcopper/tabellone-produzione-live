@@ -689,7 +689,9 @@
   const RESTORE_TIMEOUT_MS = (()=>{ 
     const ua = (navigator.userAgent || "").toLowerCase();
     const isIOS = /iphone|ipad|ipod/.test(ua) || (/macintosh/.test(ua) && (navigator.maxTouchPoints||0)>1);
-    return isIOS ? 18000 : 9000;
+    // iOS (specie in modalità Web App/standalone) può impiegare parecchio a ripristinare lo stato auth.
+    // Un timeout più generoso evita rimbalzi al login durante l’hydration dopo redirect/popup.
+    return isIOS ? 35000 : 12000;
   })();
 
 
@@ -2526,17 +2528,28 @@ function showAuthGate(){
   }
 
   const SS_AUTH_REDIRECT = "AUTH_REDIRECT_PENDING_TS";
-  const AUTH_REDIRECT_TTL_MS = 2 * 60 * 1000;
+  const LS_AUTH_REDIRECT = "AUTH_REDIRECT_PENDING_TS_LS";
+  const AUTH_REDIRECT_TTL_MS = 12 * 60 * 1000;
 
   function setAuthRedirectPending(){
-    try{ sessionStorage.setItem(SS_AUTH_REDIRECT, String(Date.now())); }catch(_e){}
+    const v = String(Date.now());
+    try{ sessionStorage.setItem(SS_AUTH_REDIRECT, v); }catch(_e){}
+    // Su iOS (specie Web App) sessionStorage può “saltare” tra redirect: teniamo un backup su localStorage.
+    try{ localStorage.setItem(LS_AUTH_REDIRECT, v); }catch(_e){}
   }
   function getAuthRedirectPendingTs(){
     try{
-      const ts = parseInt(sessionStorage.getItem(SS_AUTH_REDIRECT) || "0", 10);
-      if(!Number.isFinite(ts) || ts<=0) return 0;
+      const read = (store, key)=>{
+        try{
+          const ts = parseInt(store.getItem(key) || "0", 10);
+          return (Number.isFinite(ts) && ts>0) ? ts : 0;
+        }catch(_e){ return 0; }
+      };
+      let ts = read(sessionStorage, SS_AUTH_REDIRECT);
+      if(!ts) ts = read(localStorage, LS_AUTH_REDIRECT);
+      if(!ts) return 0;
       if((Date.now() - ts) > AUTH_REDIRECT_TTL_MS){
-        try{ sessionStorage.removeItem(SS_AUTH_REDIRECT); }catch(_e){}
+        clearAuthRedirectPending();
         return 0;
       }
       return ts;
@@ -2544,6 +2557,8 @@ function showAuthGate(){
   }
   function clearAuthRedirectPending(){
     try{ sessionStorage.removeItem(SS_AUTH_REDIRECT); }catch(_e){}
+    try{ localStorage.removeItem(LS_AUTH_REDIRECT); }catch(_e){}
+  }
   }
 
   function setAuthGateState(next){
@@ -2707,55 +2722,65 @@ function showAuthGate(){
       const auth = state.firebase.auth;
       const btn = b.querySelector("#btnGoogle");
       const prov = new authApi.GoogleAuthProvider();
-      // Always force account chooser to avoid silent reuse of a wrong account.
+
+      // Evita riuso silenzioso di un account sbagliato.
       try{ prov.setCustomParameters({ prompt: "select_account" }); }catch(_e){}
 
       state.lastAuthErrorMsg = "";
       if(btn){ btn.disabled = true; btn.classList.add("isBusy"); }
       showAuthLoader("Apertura Google…");
 
-      // Make persistence as robust as possible (some browsers/contexts drop it otherwise).
-      try{ await setBestAuthPersistence(authApi, auth); }catch(_e){}
-
       const ua = (navigator.userAgent||"").toLowerCase();
       const isIOS = /iphone|ipad|ipod/.test(ua) || (/macintosh/.test(ua) && (navigator.maxTouchPoints||0)>1);
       const isStandalone = (window.matchMedia && window.matchMedia("(display-mode: standalone)").matches) || (navigator.standalone === true);
+      const isAndroid = /android/.test(ua);
 
-      // iOS Safari (non-standalone) is often more reliable with popup than redirect.
-      const preferPopup = isIOS && !isStandalone;
-      const preferRedirect = !preferPopup && (/android/.test(ua) || isStandalone || isIOS);
+      // iOS (specie Web App/standalone) è più stabile col popup: il redirect può perdere stato e far ripetere la verifica.
+      const popupFirst = isIOS;
+      const redirectFirst = !popupFirst && (isAndroid || isStandalone);
+
+      let redirecting = false;
+
+      // IMPORTANT: evitare await “pesanti” prima del popup, altrimenti iOS lo blocca come non user-initiated.
+      const tryPopup = async()=>{
+        try{
+          await authApi.signInWithPopup(auth, prov);
+          return true;
+        }catch(err){
+          const code = (err && err.code) ? String(err.code) : "";
+          if(code==="auth/popup-blocked" || code==="auth/operation-not-supported-in-this-environment"){
+            return false;
+          }
+          throw err;
+        }
+      };
+
+      const doRedirect = async()=>{
+        redirecting = true;
+        try{ await setBestAuthPersistence(authApi, auth); }catch(_e){}
+        setAuthRedirectPending();
+        await authApi.signInWithRedirect(auth, prov);
+      };
 
       try{
-        if(preferPopup){
-          await authApi.signInWithPopup(auth, prov);
+        if(redirectFirst){
+          await doRedirect();
           return;
         }
-        if(preferRedirect){
-          setAuthRedirectPending();
-          await authApi.signInWithRedirect(auth, prov);
-          return;
-        }
-        await authApi.signInWithPopup(auth, prov);
+
+        const ok = await tryPopup();
+        if(ok) return;
+
+        // Popup non disponibile → redirect
+        await doRedirect();
+        return;
+
       }catch(err){
         console.warn("Google sign-in error", err);
-        const msg = humanAuthErr(err);
-
-        // Popup blocked / unsupported → redirect fallback
-        const code = (err && err.code) ? String(err.code) : "";
-        if(code==="auth/popup-blocked" || code==="auth/operation-not-supported-in-this-environment"){
-          showToast("Accesso", msg);
-          try{
-            setAuthRedirectPending();
-            await authApi.signInWithRedirect(auth, prov);
-            return;
-          }catch(err2){
-            console.warn("Google redirect error", err2);
-            state.lastAuthErrorMsg = humanAuthErr(err2);
-          }
-        }else{
-          state.lastAuthErrorMsg = msg;
-        }
+        state.lastAuthErrorMsg = humanAuthErr(err);
       }finally{
+        // Se stiamo reindirizzando, non “sblocchiamo” la UI: evitiamo doppio click / loop.
+        if(redirecting) return;
         if(btn){ btn.disabled = false; btn.classList.remove("isBusy"); }
         hideAuthLoader();
         if(state.lastAuthErrorMsg){ renderAuthLogin(state.lastAuthErrorMsg); }
@@ -3355,6 +3380,8 @@ let profile = await loadUserProfile(user.uid);
     if(authGateState === "signed_out") return;
     if(!recentAuthOkWithinTTL()) return;
     if(!state.firebase?.auth) return;
+    // Se l’utente è già presente, evitiamo di “sfarfallare” verso la schermata di ripristino.
+    if(state.firebase.auth.currentUser) return;
     enterRestoringMode("Ripristino sessione…");
     startOrKeepRestoreTimeout(()=> enterSignedOut(""));
   }
@@ -3377,11 +3404,12 @@ let profile = await loadUserProfile(user.uid);
     const isIOS = /iphone|ipad|ipod/.test(ua) || (/macintosh/.test(ua) && (navigator.maxTouchPoints||0)>1);
     const isStandalone = (window.matchMedia && window.matchMedia("(display-mode: standalone)").matches) || (navigator.standalone === true);
 
-    // iOS standalone can be picky: session persistence is often the most reliable.
-    const attempts = (isIOS && isStandalone)
-      ? [authApi.browserSessionPersistence, authApi.browserLocalPersistence, authApi.indexedDBLocalPersistence]
+    // In iOS Web App vogliamo stabilità tra riaperture: proviamo prima persistenze durature,
+    // poi facciamo fallback a session se necessario.
+    const attempts = ((isIOS && isStandalone)
+      ? [authApi.indexedDBLocalPersistence, authApi.browserLocalPersistence, authApi.browserSessionPersistence]
       : [authApi.indexedDBLocalPersistence, authApi.browserLocalPersistence, authApi.browserSessionPersistence]
-    .filter(Boolean);
+    ).filter(Boolean);
 
     for(const p of attempts){
       try{
