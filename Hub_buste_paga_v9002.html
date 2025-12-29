@@ -1086,7 +1086,10 @@
             months: [],
             loading: !1,
             emailLower: prevUserView.emailLower || ""
-          },
+          ,
+              unsub: prevUserView.unsub || null,
+              live: !!prevUserView.live,
+              _watchEmail: prevUserView._watchEmail || ""},
           directory: {
             entries: Array.isArray(prevDir.entries) ? prevDir.entries : [],
             ready: !!prevDir.ready,
@@ -2351,7 +2354,66 @@ function renderUploadHistory(){
 
 
       function initPayrollSendUI(rows){
-        const ui = N.payroll.admin.sendUI = { total: rows.length, done: 0, items: [], byKey: {} };
+        stopPayrollSendDocWatches();
+        const ui = N.payroll.admin.sendUI = { total: rows.le
+
+      function stopPayrollSendDocWatches(){
+        try{
+          const ui = N.payroll?.admin?.sendUI;
+          const m = ui?.deliveryUnsubs || {};
+          Object.keys(m).forEach(k=>{ try{ m[k] && m[k](); }catch(_e){} });
+          if(ui) ui.deliveryUnsubs = {};
+        }catch(_e){}
+      }
+
+      function watchPayrollDocDelivery(sendKey, docId){
+        try{
+          if(!(N.firebase?.ok) || !docId) return;
+          const ui = N.payroll?.admin?.sendUI;
+          if(!ui) return;
+          ui.deliveryUnsubs = ui.deliveryUnsubs || {};
+          if(ui.deliveryUnsubs[sendKey]) return;
+
+          const api = N.firebase.api;
+          const db = N.firebase.db;
+          const ref = api.doc(db, COL_PAYROLL_DOCS, docId);
+          let unsub = null;
+          unsub = api.onSnapshot(ref, snap=>{
+            if(snap.exists()){
+              setPayrollSendRowStatus(sendKey, "live", "arrivato");
+              try{ unsub && unsub(); }catch(_e){}
+              delete ui.deliveryUnsubs[sendKey];
+            }
+          }, err=>{
+            if(err?.code !== "permission-denied") console.warn("payroll delivery watch", err);
+            try{ unsub && unsub(); }catch(_e){}
+            delete ui.deliveryUnsubs[sendKey];
+          });
+          ui.deliveryUnsubs[sendKey] = unsub;
+        }catch(_e){}
+      }
+
+      function updatePayrollSendMatchSummary(){
+        const ui = N.payroll?.admin?.sendUI;
+        const el = U("payrollSendSummary");
+        if(!ui || !el) return;
+        const items = ui.items || [];
+        const total = items.length || ui.total || 0;
+        const delivered = items.filter(it=>it.status==="live").length;
+        const ok = items.filter(it=>it.status==="ok").length;
+        const run = items.filter(it=>it.status==="run").length;
+        const err = items.filter(it=>it.status==="err").length;
+        const queued = items.filter(it=>it.status==="queue").length;
+
+        const head = ui.finalStatus ? `Esito: ${ui.finalStatus} · ` : "";
+        let msg = `${head}Match live: ${delivered}/${total} arrivati`;
+        if(run) msg += ` · In invio: ${run}`;
+        if(queued) msg += ` · In coda: ${queued}`;
+        if(ok && ok>delivered) msg += ` · Scritti: ${ok}`;
+        if(err) msg += ` · Errori: ${err}`;
+        el.textContent = msg;
+      }
+ngth, done: 0, items: [], byKey: {}, deliveryUnsubs: {}, finalStatus: "" };
         ui.items = (rows||[]).map(r=>{
           const email = normalizeEmail(r.emailLower || r.email || r.id || "");
           const key = r.key || `${email}_${r.monthKey || ""}`;
@@ -2369,6 +2431,7 @@ function renderUploadHistory(){
 
         setPayrollSendProgress(0, ui.total, "0%");
         renderPayrollSendList();
+        updatePayrollSendMatchSummary();
       }
 
       function setPayrollSendProgress(done, total, label){
@@ -2381,6 +2444,7 @@ function renderUploadHistory(){
         if(lab) lab.textContent = label || (pct + "%");
         const counter = U("payrollSendCounter"); 
         if(counter) counter.textContent = `${done}/${total}`;
+        updatePayrollSendMatchSummary();
       }
 
       function setPayrollSendRowStatus(key, status, detail){
@@ -2392,6 +2456,7 @@ function renderUploadHistory(){
           item.detail = detail || "";
         }
         renderPayrollSendList();
+        updatePayrollSendMatchSummary();
       }
 
       function renderPayrollSendList(){
@@ -2399,8 +2464,8 @@ function renderUploadHistory(){
         const ui = N.payroll?.admin?.sendUI;
         if(!list || !ui) return;
         list.innerHTML = (ui.items||[]).map(it=>{
-          const cls = it.status==="ok" ? "ok" : it.status==="err" ? "err" : it.status==="run" ? "run" : "";
-          const label = it.status==="ok" ? "OK" : it.status==="err" ? "Errore" : it.status==="run" ? "Invio…" : "In coda";
+          const cls = it.status==="live" ? "ok" : it.status==="ok" ? "ok" : it.status==="err" ? "err" : it.status==="run" ? "run" : "";
+          const label = it.status==="live" ? "Arrivato" : it.status==="ok" ? "Scritto" : it.status==="err" ? "Errore" : it.status==="run" ? "Invio…" : "In coda";
           const det = it.detail ? " · " + Ao(it.detail) : "";
           return `<div class="sendItem">
             <div class="sendLeft">
@@ -2496,7 +2561,8 @@ async function Yi() {
             }catch(_e){}
 
             done++;
-            setPayrollSendRowStatus(sendKey, "ok");
+            setPayrollSendRowStatus(sendKey, "ok", "scritto");
+            watchPayrollDocDelivery(sendKey, docId);
             setPayrollSendProgress(done, total);
             await nextFrame();
           }
@@ -2528,8 +2594,9 @@ async function Yi() {
           console.warn("payroll send error", err), summary.status = err?.message || String(err), Ve("Errore invio", summary.status)
         }
         e.sendSummary = summary;
-        const o = U("payrollSendSummary");
-        o && (o.textContent = `Esito: ${summary.status||"—"} · Righe ${summary.matched}`);
+        const ui = N.payroll?.admin?.sendUI;
+        if(ui) ui.finalStatus = summary.status || "—";
+        updatePayrollSendMatchSummary();
         const title = U("payrollSendTitle");
         if(title) title.textContent = summary.status === "ok" ? "Invio completato" : "Invio terminato";
         const doneBtn = U("btnPayrollSendDone");
@@ -2960,6 +3027,10 @@ const payrollDirAutofill = () => {
         const view = N.payroll.userView = N.payroll.userView || {};
         const emailLower = (view.emailLower || N.user?.emailLower || "").toLowerCase();
         if(!emailLower) return;
+        // Se è già attiva la modalità live (onSnapshot), evita doppio fetch.
+        if(view.live && view.unsub && view._watchEmail === emailLower){
+          return;
+        }
         view.loading = true;
         view.error = "";
         try{
@@ -3001,6 +3072,90 @@ const payrollDirAutofill = () => {
         }
       }
 
+      function stopPayrollUserDocsWatch(){
+        try{
+          const view = N.payroll?.userView;
+          if(view?.unsub){ try{ view.unsub(); }catch(_e){} }
+          if(view){
+            view.unsub = null;
+            view.live = false;
+            view._watchEmail = "";
+          }
+        }catch(_e){}
+      }
+
+      function startPayrollUserDocsWatch(){
+        if(!(N.firebase?.ok)) return;
+        const view = N.payroll.userView = N.payroll.userView || {};
+        const emailLower = (view.emailLower || N.user?.emailLower || "").toLowerCase();
+        if(!emailLower) return;
+
+        // evita doppio listener
+        if(view.live && view.unsub && view._watchEmail === emailLower) return;
+
+        stopPayrollUserDocsWatch();
+        view.loading = true;
+        view.error = "";
+        view._watchEmail = emailLower;
+
+        try{
+          const api = N.firebase.api;
+          const db = N.firebase.db;
+          const q = api.query(api.collection(db, COL_PAYROLL_DOCS), api.where("emailLower","==",emailLower), api.limit(200));
+          view.unsub = api.onSnapshot(q, snap=>{
+            try{
+              const docs = [];
+              snap?.forEach(doc=>{
+                const d = doc.data() || {};
+                docs.push({
+                  docId: doc.id,
+                  monthKey: d.monthKey || "",
+                  netPayText: d.netPayText || "",
+                  netPayCents: d.netPayCents || null,
+                  downloadUrl: d.downloadUrl || "",
+                  updatedAt: d.updatedAt?.toDate ? d.updatedAt.toDate().toLocaleString("it-IT") : "",
+                  fileName: d.sourceFileName || "",
+                  fullName: d.fullName || "",
+                  fiscalCode: d.fiscalCode || "",
+                  openedAt: d.openedAt || null
+                });
+              });
+              docs.sort((a,b)=> (b.monthKey||"").localeCompare(a.monthKey||""));
+
+              const prevSel = view.selectedMonth || "";
+              view.docs = docs;
+              view.months = docs.map(d=>d.monthKey).filter(Boolean);
+              view.filteredMonths = view.searchTerm ? (view.months||[]).filter(m=>String(m||"").toLowerCase().includes((view.searchTerm||"").toLowerCase())) : view.months;
+              view.selectedMonth = (prevSel && (view.filteredMonths||[]).includes(prevSel)) ? prevSel : (view.filteredMonths[0] || view.months[0] || "");
+
+              view.ready = true;
+              view.error = "";
+              view.live = true;
+              view.loading = false;
+              Ri();
+              Oi();
+            }catch(err){
+              console.warn("payroll user watch parse", err);
+            }
+          }, err=>{
+            if(err?.code !== "permission-denied") console.warn("payroll user watch", err);
+            view.error = err?.message || "Errore caricamento.";
+            view.ready = false;
+            view.live = false;
+            view.loading = false;
+            Oi();
+          });
+        }catch(err){
+          console.warn("payroll user watch init", err);
+          view.error = err?.message || "Errore caricamento.";
+          view.ready = false;
+          view.loading = false;
+          view.live = false;
+          Oi();
+        }
+      }
+
+
       function onSignedIn(){
         try{ D(); }catch(_e){}
         try{
@@ -3011,12 +3166,15 @@ const payrollDirAutofill = () => {
         }catch(_e){}
         try{ Oi(); }catch(_e){}
         try{ if(N.user?.isAdmin){ startPayrollDirectoryWatch(); loadUploadHistory(); } }catch(_e){}
-        try{ if(N.user?.isAdmin || N.user?.isWhitelisted !== false) Fi(); else { N.payroll.userView = N.payroll.userView || {}; N.payroll.userView.error = "Non sei abilitato alle buste paga."; N.payroll.userView.ready = false; Oi(); } }catch(_e){}
+        try{ if(N.user?.isAdmin || N.user?.isWhitelisted !== false) startPayrollUserDocsWatch(); else { N.payroll.userView = N.payroll.userView || {}; N.payroll.userView.error = "Non sei abilitato alle buste paga."; N.payroll.userView.ready = false; Oi(); } }catch(_e){}
         try{ if(N.user?.isAdmin) zi(); }catch(_e){}
         try{ if(N.user?.isAdmin) loadAbsenceRequests(); }catch(_e){}
       }
 
       function onSignedOut(){
+        try{ stopPayrollUserDocsWatch(); }catch(_e){}
+        try{ N.payroll?.directory?.unsub && N.payroll.directory.unsub(); }catch(_e){}
+        try{ stopPayrollSendDocWatches && stopPayrollSendDocWatches(); }catch(_e){}
         try{ D(); }catch(_e){}
         try{ Oi(); }catch(_e){}
         try{ state.absences = { list:[], filters:{ status:"", type:"", search:"" }, loading:false }; renderAbsenceAdminList(); }catch(_e){}
