@@ -206,6 +206,47 @@
       -webkit-overflow-scrolling:touch;
     }
 
+
+/* PDF Preview (user + admin) */
+.pdfPreviewOverlay{
+  position:fixed; inset:0;
+  background:rgba(0,0,0,.45);
+  backdrop-filter:saturate(160%) blur(14px);
+  display:none; align-items:center; justify-content:center;
+  z-index:9999;
+}
+.pdfPreviewOverlay[aria-hidden="false"]{ display:flex; }
+.pdfPreviewShell{
+  width:min(1120px, 96vw);
+  height:min(92vh, 920px);
+  background:rgba(255,255,255,.92);
+  border:1px solid rgba(0,0,0,.08);
+  border-radius:22px;
+  box-shadow:0 30px 90px rgba(0,0,0,.24);
+  overflow:hidden;
+  display:flex; flex-direction:column;
+}
+.pdfPreviewHeader{
+  padding:14px 14px 10px;
+  display:flex; align-items:flex-start; justify-content:space-between;
+  gap:10px;
+  border-bottom:1px solid rgba(0,0,0,.08);
+  background:linear-gradient(180deg, rgba(255,255,255,.98), rgba(255,255,255,.86));
+}
+.pdfPreviewHeader .pcTitle{ font-size:16px; }
+.pdfPreviewHeader .pcSub{ font-size:12px; opacity:.78; margin-top:2px; }
+.pdfPreviewActions{ display:flex; align-items:center; gap:8px; flex-wrap:wrap; justify-content:flex-end; }
+.pdfPreviewBody{ flex:1; background:#fff; }
+.pdfPreviewFrame{
+  width:100%; height:100%;
+  border:0;
+  background:#fff;
+}
+@media (max-width:720px){
+  .pdfPreviewShell{ width:96vw; height:92vh; border-radius:18px; }
+  .pdfPreviewHeader{ padding:12px; }
+}
+
 </style>
   <style id="payrollStyles">
     .payrollCard{position:relative;overflow:hidden;border-radius:22px;padding:18px;border:1px solid rgba(15,23,42,.06);background:#fff;box-shadow:0 18px 42px rgba(15,23,42,.12);display:flex;flex-direction:column;gap:12px}
@@ -536,7 +577,9 @@
           <span class="heroChip">Distribuzione sicura</span>
         </div>
       </div>
-      <div class="heroGrid">
+    </section>
+
+    <div class="heroGrid">
         <article class="payrollNonAdminCard payrollGlass heroPanel">
           <div class="heroPanelHeader">
             <div class="heroPanelTitle">
@@ -578,7 +621,7 @@
           </div>
         </article>
       </div>
-    </section>
+
 
     <div class="adminModalOverlay" id="adminModal" aria-hidden="true">
       <div class="adminModalShell">
@@ -1386,6 +1429,7 @@ function __payrollLoadScript(src){
       }
 
       
+      
       async function openPayrollPages(key){
         try{
           const row = (N.payroll?.admin?.groupedRows || []).find(r=>r.key===key);
@@ -1393,24 +1437,24 @@ function __payrollLoadScript(src){
           if(!N.payroll?.admin?.originalPdfBytes) throw new Error("PDF origine mancante.");
           const pages = (row.pages||[]).map(p=>p.pageIndex);
           if(!pages.length) throw new Error("Nessuna pagina assegnata.");
+
           const bytes = await xi(N.payroll.admin.originalPdfBytes, pages);
-          const b64 = bytesToBase64(bytes);
-          if(!b64) throw new Error("Impossibile preparare l’anteprima.");
-          const token = "ppv_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2,8);
-          const payload = {
-            v: 1,
-            createdAt: Date.now(),
-            sourceFileName: N.payroll?.admin?.sourceFileName || "",
-            rowKey: row.key,
-            displayName: row.displayName || "",
-            fiscalCode: row.fiscalCode || "",
-            monthKey: row.monthKey || "",
-            amountText: row.amountText || row.netPayText || "",
-            pageNos: (row.pageNos||[]).length ? row.pageNos : pages.map(p=>p+1),
-            pdfBase64: b64
-          };
-          try{ localStorage.setItem("PAYROLL_PREVIEW:" + token, JSON.stringify(payload)); }catch(_e){}
-          window.open("payroll_preview.html#" + encodeURIComponent(token), "_blank", "noopener,noreferrer");
+          if(!bytes || !bytes.byteLength) throw new Error("Impossibile preparare l’anteprima.");
+
+          const blob = new Blob([bytes], { type:"application/pdf" });
+          const objUrl = URL.createObjectURL(blob);
+
+          const pageLabel = (row.pageNos && row.pageNos.length) ? row.pageNos.join(", ") : pages.map(p=>p+1).join(", ");
+          const title = `Anteprima · ${row.displayName || row.fiscalCode || row.email || "PDF"}`;
+          const sub = `${row.monthKey || "—"} · pagine ${pageLabel}`;
+
+          showPdfPreview({
+            title,
+            sub,
+            srcUrl: objUrl,
+            fileName: buildSafePdfName(`${row.displayName || row.fiscalCode || "busta_paga"} ${row.monthKey || ""}`),
+            markOpenedVia: null
+          });
         }catch(err){
           console.warn("openPayrollPages", err);
           Ve("Anteprima non disponibile", err?.message || String(err));
@@ -2525,6 +2569,48 @@ async function Yi() {
       U("btnPayrollPreviewPage")?.addEventListener("click", () => openPayrollPreviewPage());
       U("btnPayrollOpenPdf")?.addEventListener("click", () => openPayrollPdfWindow());
       U("btnPayrollPrint")?.addEventListener("click", () => { const e = N.payroll.userView.currentUrl; if (!e) return void Ve("PDF non pronto", "Seleziona un mese disponibile."); const t = window.open(e, "_blank"); try { t?.print() } catch (e) {} });
+      // PDF preview overlay buttons
+      U("btnPdfPreviewClose")?.addEventListener("click", ()=> closePdfPreview());
+      U("pdfPreviewOverlay")?.addEventListener("click", (evt)=>{ if(evt.target?.id === "pdfPreviewOverlay") closePdfPreview(); });
+      U("btnPdfPreviewOpenNew")?.addEventListener("click", ()=>{
+        const u = N.ui?.pdfPreview?.directUrl;
+        if(!u) return;
+        window.open(u, "_blank", "noopener,noreferrer");
+      });
+      U("btnPdfPreviewDownload")?.addEventListener("click", ()=>{
+        const u = N.ui?.pdfPreview?.directUrl;
+        if(!u) return;
+        const a = document.createElement("a");
+        a.href = u;
+        a.download = N.ui?.pdfPreview?.fileName || "busta_paga.pdf";
+        a.rel = "noopener";
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+      });
+      U("btnPdfPreviewPrint")?.addEventListener("click", ()=>{
+        const frame = U("pdfPreviewFrame");
+        const u = N.ui?.pdfPreview?.directUrl;
+        try{
+          if(frame?.contentWindow){
+            frame.contentWindow.focus();
+            frame.contentWindow.print();
+            return;
+          }
+        }catch(_e){}
+        if(u){
+          const w = window.open(u, "_blank");
+          try{ w?.print?.(); }catch(_e){}
+        }
+      });
+
+      document.addEventListener("keydown", (e)=>{
+        if(e.key === "Escape"){
+          const ov = U("pdfPreviewOverlay");
+          if(ov && ov.getAttribute("aria-hidden")==="false") closePdfPreview();
+        }
+      });
+
       U("btnPayrollShare")?.addEventListener("click", async () => { const e = N.payroll.userView.currentUrl; if (e) try { navigator.share ? await navigator.share({ title: "Busta paga", url: e }) : navigator.clipboard && (await navigator.clipboard.writeText(e), Ve("Link copiato", "URL copiato negli appunti.")) } catch (e) { Ve("Condivisione non riuscita", "Riprovare.") } else Ve("PDF non pronto", "Seleziona un mese disponibile.") });
       U("btnLaunchAdmin")?.addEventListener("click", ()=>openAdminModalFlow());
       U("btnLaunchAdminAbsences")?.addEventListener("click", ()=>{
@@ -2860,24 +2946,106 @@ const payrollDirAutofill = () => {
         }catch(err){ console.warn("persistRowToDirectory", err); Ve("Salvataggio non riuscito", err?.message || String(err)); }
       }
 
-      async function openPayrollPdfWindow(){
+      
+      
+      // PDF Preview overlay (same file, no external preview page)
+      function showPdfPreview({ title, sub, srcUrl, fileName, markOpenedVia } = {}){
+        const overlay = U("pdfPreviewOverlay");
+        const frame = U("pdfPreviewFrame");
+        const t = U("pdfPreviewTitle");
+        const s = U("pdfPreviewSub");
+        if(!overlay || !frame) return;
+
+        N.ui = N.ui || {};
+        N.ui.pdfPreview = N.ui.pdfPreview || { objectUrl:"", directUrl:"", fileName:"" };
+
+        const nextUrl = (srcUrl || "");
+        const isBlob = typeof nextUrl === "string" && nextUrl.startsWith("blob:");
+
+        // cleanup old object URL (only if different)
+        try{
+          if(N.ui.pdfPreview.objectUrl && N.ui.pdfPreview.objectUrl !== nextUrl){
+            URL.revokeObjectURL(N.ui.pdfPreview.objectUrl);
+          }
+        }catch(_e){}
+
+        N.ui.pdfPreview.objectUrl = isBlob ? nextUrl : "";
+        N.ui.pdfPreview.directUrl = nextUrl;
+        N.ui.pdfPreview.fileName = fileName || "busta_paga.pdf";
+        N.ui.pdfPreview.title = title || "Anteprima PDF";
+        N.ui.pdfPreview.sub = sub || "—";
+
+        if(t) t.textContent = N.ui.pdfPreview.title;
+        if(s) s.textContent = N.ui.pdfPreview.sub;
+
+        // set iframe src (remote URL or blob URL)
+        try{ frame.src = N.ui.pdfPreview.directUrl || "about:blank"; }catch(_e){}
+
+        overlay.setAttribute("aria-hidden","false");
+        document.body.classList.add("modalOpen");
+
+        try{
+          if(markOpenedVia) markPayrollDocOpened(markOpenedVia);
+        }catch(_e){}
+      }
+
+      function closePdfPreview(){
+        const overlay = U("pdfPreviewOverlay");
+        const frame = U("pdfPreviewFrame");
+        if(!overlay || !frame) return;
+        overlay.setAttribute("aria-hidden","true");
+        document.body.classList.remove("modalOpen");
+        try{ frame.src = "about:blank"; }catch(_e){}
+        try{
+          if(N.ui?.pdfPreview?.objectUrl){
+            URL.revokeObjectURL(N.ui.pdfPreview.objectUrl);
+          }
+        }catch(_e){}
+        try{
+          if(N.ui?.pdfPreview){
+            N.ui.pdfPreview.objectUrl = "";
+            N.ui.pdfPreview.directUrl = "";
+          }
+        }catch(_e){}
+      }
+
+      function buildSafePdfName(base){
+        const clean = String(base||"busta_paga").trim()
+          .replace(/[\/:*?"<>|]+/g," ")
+          .replace(/\s+/g," ")
+          .slice(0, 80);
+        return (clean || "busta_paga") + ".pdf";
+      }
+
+async function openPayrollPdfWindow(){
         const url = N.payroll?.userView?.currentUrl;
         if(!url){ Ve("PDF non pronto","Seleziona un mese disponibile."); return; }
         markPayrollDocOpened("pdf");
         window.open(url, "_blank");
       }
 
+      
       function openPayrollPreviewPage(){
-        const url = N.payroll?.userView?.currentUrl;
+        const view = N.payroll?.userView || {};
+        const url = view.currentUrl;
         if(!url){ Ve("PDF non pronto","Seleziona un mese disponibile."); return; }
-        try{
-          sessionStorage.setItem("payrollPreviewUrl", url);
-          sessionStorage.setItem("payrollPreviewName", getDisplayNameFromUser());
-        }catch(_e){}
-        markPayrollDocOpened("preview");
-        window.location.href = "payroll_preview.html";
-      }
 
+        const docs = view.docs || [];
+        const current = docs.find(d=>d.monthKey===view.selectedMonth) || docs[0] || {};
+        const month = current.monthKey || view.selectedMonth || "—";
+        const amount = current.netPayText || "";
+        const title = `Busta paga · ${getDisplayNameFromUser()}`;
+        const sub = `${month}${amount ? " · " + amount : ""}`;
+
+        const fnameBase = `${getDisplayNameFromUser()} ${month}`.trim();
+        showPdfPreview({
+          title,
+          sub,
+          srcUrl: url,
+          fileName: buildSafePdfName(fnameBase),
+          markOpenedVia: "preview"
+        });
+      }
       function Ri(){
         const view = N.payroll?.userView || {};
         const docs = view.docs || [];
@@ -3232,5 +3400,27 @@ document.getElementById("btnSignIn").onclick = async ()=>{
     updateAuthUI();
     initFirebase();
   </script>
+
+  <!-- PDF preview overlay (dipendente + admin) -->
+  <div class="pdfPreviewOverlay" id="pdfPreviewOverlay" aria-hidden="true">
+    <div class="pdfPreviewShell" role="dialog" aria-modal="true" aria-label="Anteprima PDF">
+      <div class="pdfPreviewHeader">
+        <div style="min-width:0">
+          <div class="pcTitle" id="pdfPreviewTitle">Anteprima PDF</div>
+          <div class="pcSub" id="pdfPreviewSub">—</div>
+        </div>
+        <div class="pdfPreviewActions">
+          <button class="pillBtn" id="btnPdfPreviewOpenNew" type="button">Apri</button>
+          <button class="pillBtn" id="btnPdfPreviewDownload" type="button">Scarica</button>
+          <button class="pillBtn" id="btnPdfPreviewPrint" type="button">Stampa</button>
+          <button class="pillBtn danger" id="btnPdfPreviewClose" type="button">Chiudi</button>
+        </div>
+      </div>
+      <div class="pdfPreviewBody">
+        <iframe class="pdfPreviewFrame" id="pdfPreviewFrame" title="PDF preview"></iframe>
+      </div>
+    </div>
+  </div>
+
 </body>
 </html>
