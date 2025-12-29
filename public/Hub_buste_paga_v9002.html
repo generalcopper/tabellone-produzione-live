@@ -2183,6 +2183,21 @@ function renderUploadHistory(){
           }
         }
 
+        // Se la LIST è vuota, prova comunque indice/local (utile quando scriviamo solo su index)
+        if(!rawLogs.length){
+          try{
+            const idxSnap = await api.getDoc(api.doc(db, "payrollSendLogIndex", "global"));
+            if(idxSnap?.exists()){
+              const d = idxSnap.data() || {};
+              if(Array.isArray(d.logs)) rawLogs = d.logs.slice();
+              source = "index";
+            }
+          }catch(_e){}
+          if(!rawLogs.length){
+            try{ rawLogs = readLocalSendLogs() || []; source = "local"; }catch(_e){}
+          }
+        }
+
         // Normalizza
         const logs = [];
         const docKeys = new Set();
@@ -2194,18 +2209,23 @@ function renderUploadHistory(){
           const docKey = i.payrollDocId || i.docKey || (emailLower && monthKey ? `${emailLower}_${monthKey}` : "");
           if(docKey) docKeys.add(docKey);
 
-          const sentAtText =
-            i.sentAt?.toDate ? i.sentAt.toDate().toLocaleString("it-IT") :
-            (i.sentAtISO ? new Date(i.sentAtISO).toLocaleString("it-IT") :
-            (i.sentAtClient ? new Date(i.sentAtClient).toLocaleString("it-IT") : ""));
+          const sentAtDate =
+            (i.sentAt?.toDate ? i.sentAt.toDate() :
+            (i.sentAtClient ? new Date(i.sentAtClient) :
+            (i.sentAtISO ? new Date(i.sentAtISO) : null)));
 
-          const stableId = i.id || `${i.sentAtClient||Date.now()}_${emailLower||"?"}_${monthKey||"?"}_${idx}`;
+          const stableId = String(
+            i.id ||
+            i.eventKey ||
+            `${(i.sentAtClient || (i.sentAtISO ? Date.parse(i.sentAtISO) : 0) || 0)}_${emailLower||"?"}_${monthKey||"?"}_${docKey||"?"}`
+          );
           validIds.add(stableId);
 
           logs.push({
             id: stableId,
-            sentAt: sentAtText,
+            sentAt: sentAtDate || null,
             sentAtClient: i.sentAtClient || null,
+            sentAtISO: i.sentAtISO || (sentAtDate ? sentAtDate.toISOString() : ""),
             emailLower,
             monthKey,
             fullName: i.fullName || "",
@@ -2268,15 +2288,56 @@ function renderUploadHistory(){
       }
       async function deleteSelectedSendLogs(){
         try{
-          if(!(N.firebase?.ok && N.user?.isAdmin)) return;
-          const api = N.firebase.api, db = N.firebase.db;
           const sel = N.payroll?.admin?.sendLogSelection || {};
           const ids = Object.keys(sel).filter(k=>sel[k]);
           if(!ids.length) return;
-          for(const id of ids){
-            try{ await api.deleteDoc(api.doc(db, COL_PAYROLL_SEND_LOGS, id)); }catch(_e){}
+
+          // 1) Local storage (sempre)
+          try{
+            const key = "payroll_send_logs_local_v1";
+            const arr = readLocalSendLogs() || [];
+            const keep = (arr||[]).filter((e)=>{
+              const em = (e.emailLower || e.email || "").toLowerCase();
+              const mk = e.monthKey || "";
+              const dk = e.payrollDocId || e.docKey || (em && mk ? `${em}_${mk}` : "");
+              const sentKey = e.sentAtClient || (e.sentAtISO ? Date.parse(e.sentAtISO) : 0) || 0;
+              const stable = String(e.id || e.eventKey || `${sentKey}_${em||"?"}_${mk||"?"}_${dk||"?"}`);
+              return !ids.includes(stable);
+            });
+            localStorage.setItem(key, JSON.stringify(keep.slice(0, 200)));
+          }catch(_e){}
+
+          // 2) Fallback index doc (best-effort)
+          if(N.firebase?.ok){
+            try{
+              const api = N.firebase.api, db = N.firebase.db;
+              const ref = api.doc(db, "payrollSendLogIndex", "global");
+              const snap = await api.getDoc(ref);
+              if(snap?.exists()){
+                const d = snap.data() || {};
+                let logs = Array.isArray(d.logs) ? d.logs.slice() : [];
+                logs = logs.filter((e)=>{
+                  const em = (e.emailLower || e.email || "").toLowerCase();
+                  const mk = e.monthKey || "";
+                  const dk = e.payrollDocId || e.docKey || (em && mk ? `${em}_${mk}` : "");
+                  const sentKey = e.sentAtClient || (e.sentAtISO ? Date.parse(e.sentAtISO) : 0) || 0;
+                  const stable = String(e.id || e.eventKey || `${sentKey}_${em||"?"}_${mk||"?"}_${dk||"?"}`);
+                  return !ids.includes(stable);
+                });
+                await api.setDoc(ref, { logs, updatedAt: api.serverTimestamp(), updatedAtClient: Date.now() }, { merge: true });
+              }
+            }catch(_e){}
           }
-          N.payroll.admin.sendLogSelection = {};
+
+          // 3) Collection logs (se consentito)
+          if(N.firebase?.ok && N.user?.isAdmin){
+            const api = N.firebase.api, db = N.firebase.db;
+            for(const id of ids){
+              try{ await api.deleteDoc(api.doc(db, COL_PAYROLL_SEND_LOGS, id)); }catch(_e){}
+            }
+          }
+
+          if(N.payroll?.admin) N.payroll.admin.sendLogSelection = {};
           await loadPayrollSendLogs();
           Ve("Eliminati","Log invii eliminati.");
         }catch(err){
@@ -2992,6 +3053,64 @@ async function Yi() {
       U("adminModal")?.addEventListener("click", evt=>{ if(evt.target===evt.currentTarget) toggleAdminModal(false); });
       U("btnCloseSendLogModal")?.addEventListener("click", ()=>toggleSendLogModal(false));
       U("sendLogModal")?.addEventListener("click", evt=>{ if(evt.target===evt.currentTarget) toggleSendLogModal(false); });
+
+      // Storico invii (send logs): selezione righe + pulsanti
+      const bindSendLogList = (el)=>{
+        if(!el || el.dataset.sendlogBound) return;
+        el.dataset.sendlogBound = "1";
+
+        el.addEventListener("change", (evt)=>{
+          const t = evt.target;
+          if(!(t && t.matches('input[data-sendlog-check]'))) return;
+          const id = t.getAttribute("data-sendlog-check") || "";
+          if(!id) return;
+          N.payroll = N.payroll || {};
+          N.payroll.admin = N.payroll.admin || {};
+          N.payroll.admin.sendLogSelection = N.payroll.admin.sendLogSelection || {};
+          N.payroll.admin.sendLogSelection[id] = !!t.checked;
+          renderPayrollSendLogs();
+        });
+
+        el.addEventListener("click", (evt)=>{
+          const row = evt.target.closest(".sendLogItem");
+          if(!row) return;
+          if(evt.target.closest('input[data-sendlog-check]')) return;
+          const id = row.getAttribute("data-sendlog-id") || "";
+          if(!id) return;
+          N.payroll = N.payroll || {};
+          N.payroll.admin = N.payroll.admin || {};
+          const sel = N.payroll.admin.sendLogSelection = N.payroll.admin.sendLogSelection || {};
+          sel[id] = !sel[id];
+          renderPayrollSendLogs();
+        });
+      };
+      bindSendLogList(U("payrollSendLogList"));
+      bindSendLogList(U("sendLogModalList"));
+
+      const selectAllSendLogs = ()=>{
+        const logs = N.payroll?.admin?.sendLogs || [];
+        N.payroll = N.payroll || {};
+        N.payroll.admin = N.payroll.admin || {};
+        const sel = N.payroll.admin.sendLogSelection = {};
+        logs.forEach(l=>{ if(l?.id) sel[l.id] = true; });
+        renderPayrollSendLogs();
+      };
+      const clearSendLogsSelection = ()=>{
+        N.payroll = N.payroll || {};
+        N.payroll.admin = N.payroll.admin || {};
+        N.payroll.admin.sendLogSelection = {};
+        renderPayrollSendLogs();
+      };
+
+      U("btnSendLogReload")?.addEventListener("click", ()=>{ loadPayrollSendLogs(); });
+      U("btnSendLogSelectAll")?.addEventListener("click", ()=>{ selectAllSendLogs(); });
+      U("btnSendLogClearSel")?.addEventListener("click", ()=>{ clearSendLogsSelection(); });
+      U("btnSendLogDeleteSel")?.addEventListener("click", ()=>{ deleteSelectedSendLogs(); });
+
+      U("btnSendLogModalSelectAll")?.addEventListener("click", ()=>{ selectAllSendLogs(); });
+      U("btnSendLogModalClearSel")?.addEventListener("click", ()=>{ clearSendLogsSelection(); });
+      U("btnSendLogModalDeleteSel")?.addEventListener("click", ()=>{ deleteSelectedSendLogs(); });
+
       U("btnSubmitAbsence")?.addEventListener("click", ()=>submitAbsenceRequest());
       U("absenceFilterStatus")?.addEventListener("change", evt=>{ state.absences.filters = state.absences.filters || {}; state.absences.filters.status = evt.target.value; renderAbsenceAdminList(); });
       U("absenceFilterType")?.addEventListener("change", evt=>{ state.absences.filters = state.absences.filters || {}; state.absences.filters.type = evt.target.value; renderAbsenceAdminList(); });
