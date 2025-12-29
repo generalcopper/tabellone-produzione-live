@@ -1213,9 +1213,16 @@
   function isMobile(){
     const mq = typeof window !== "undefined" && window.matchMedia ? window.matchMedia("(max-width: 640px)") : { matches:false };
     const ua = (navigator.userAgent || navigator.vendor || "").toLowerCase();
-    const uaMobile = /\b(android|iphone|ipad|ipod|mobile|iemobile|opera mini)\b/.test(ua);
+    const uaMobile = /(android|iphone|ipad|ipod|mobile|iemobile|opera mini)/.test(ua);
     const legacyWidth = typeof window !== "undefined" ? (window.innerWidth <= 900) : false;
     return Boolean((mq && mq.matches) || uaMobile || legacyWidth);
+  }
+  function isMobileAuth(){
+    // Auth should not depend on window width (desktop narrow windows can trigger "mobile restore" loops).
+    const ua = (navigator.userAgent || navigator.vendor || "").toLowerCase();
+    const uaMobile = /(android|iphone|ipad|ipod|mobile|iemobile|opera mini)/.test(ua);
+    const ipadAsMac = /macintosh/.test(ua) && (navigator.maxTouchPoints || 0) > 1;
+    return Boolean(uaMobile || ipadAsMac);
   }
   function applyRoleClasses(){
     const isAdmin = Boolean(state.user && state.user.isAdmin);
@@ -2391,7 +2398,7 @@ function showAuthGate(){
     showAuthLoader(message);
   }
   function primeAuthGateUi(){
-    if(isMobile() && recentAuthOkWithinTTL()){
+    if(isMobileAuth() && recentAuthOkWithinTTL()){
       enterRestoringMode("Ripristino sessione…");
       return;
     }
@@ -2481,15 +2488,34 @@ function showAuthGate(){
     b.querySelector("#btnGoogle").onclick = async()=>{
       const authApi = state.firebase.authApi;
       const auth = state.firebase.auth;
+      const btn = b.querySelector("#btnGoogle");
       const prov = new authApi.GoogleAuthProvider();
+      // Always force account chooser to avoid silent reuse of a wrong account.
+      try{ prov.setCustomParameters({ prompt: "select_account" }); }catch(_e){}
+
       state.lastAuthErrorMsg = "";
+      if(btn){ btn.disabled = true; btn.classList.add("isBusy"); }
+      showAuthLoader("Apertura Google…");
+
+      // Make persistence as robust as possible (some browsers/contexts drop it otherwise).
+      try{ await setBestAuthPersistence(authApi, auth); }catch(_e){}
+
+      const ua = (navigator.userAgent||"").toLowerCase();
+      const preferRedirect = /iphone|ipad|ipod|android/.test(ua) || (navigator.maxTouchPoints||0)>1 && /macintosh/.test(ua);
 
       try{
+        if(preferRedirect){
+          await authApi.signInWithRedirect(auth, prov);
+          return;
+        }
         await authApi.signInWithPopup(auth, prov);
       }catch(err){
-        console.warn("Google popup error", err);
+        console.warn("Google sign-in error", err);
         const msg = humanAuthErr(err);
-        if((err && err.code==="auth/popup-blocked") || (err && err.code==="auth/operation-not-supported-in-this-environment")){
+
+        // Popup blocked / unsupported → redirect fallback
+        const code = (err && err.code) ? String(err.code) : "";
+        if(code==="auth/popup-blocked" || code==="auth/operation-not-supported-in-this-environment"){
           showToast("Accesso", msg);
           try{
             await authApi.signInWithRedirect(auth, prov);
@@ -2497,12 +2523,14 @@ function showAuthGate(){
           }catch(err2){
             console.warn("Google redirect error", err2);
             state.lastAuthErrorMsg = humanAuthErr(err2);
-            renderAuthLogin(state.lastAuthErrorMsg);
-            return;
           }
+        }else{
+          state.lastAuthErrorMsg = msg;
         }
-        state.lastAuthErrorMsg = msg;
-        showToast("Accesso", msg);
+      }finally{
+        if(btn){ btn.disabled = false; btn.classList.remove("isBusy"); }
+        hideAuthLoader();
+        if(state.lastAuthErrorMsg){ renderAuthLogin(state.lastAuthErrorMsg); }
       }
     };
 
@@ -2994,7 +3022,7 @@ function showAuthGate(){
       if(!user){
         const msg = state.lastAuthErrorMsg || "";
         state.lastAuthErrorMsg = "";
-        if(isMobile() && recentAuthOkWithinTTL()){
+        if(isMobileAuth() && recentAuthOkWithinTTL()){
           enterRestoringMode("Ripristino sessione…");
           startOrKeepRestoreTimeout(()=> enterSignedOut(msg));
           return;
@@ -3055,7 +3083,7 @@ function showAuthGate(){
     });
   }
   function handleAuthResume(){
-    if(!isMobile()) return;
+    if(!isMobileAuth()) return;
     if(authGateState === "signed_out") return;
     if(!recentAuthOkWithinTTL()) return;
     if(!state.firebase?.auth) return;
@@ -3072,6 +3100,26 @@ function showAuthGate(){
     });
     window.addEventListener("focus", resume);
   }
+
+
+  async function setBestAuthPersistence(authApi, auth){
+    // Try the most durable persistence first, with safe fallbacks.
+    // This prevents "login works, then I land back on login" loops on some browsers.
+    const attempts = [
+      authApi.indexedDBLocalPersistence,
+      authApi.browserLocalPersistence,
+      authApi.browserSessionPersistence
+    ].filter(Boolean);
+
+    for(const p of attempts){
+      try{
+        await authApi.setPersistence(auth, p);
+        return true;
+      }catch(_e){}
+    }
+    return false;
+  }
+
 
 
   async function initLiveSync(){
@@ -3097,7 +3145,7 @@ function showAuthGate(){
         let messaging = null;
         try{ if(fst && fst.getStorage){ storage = fst.getStorage(app); } }catch(e){ console.warn("getStorage failed", e); }
 
-        try { await fa.setPersistence(auth, fa.browserLocalPersistence); } catch(_e){}
+        try{ await setBestAuthPersistence(fa, auth); }catch(_e){}
 
         state.firebase.ok = true;
         state.firebase.db = db;
