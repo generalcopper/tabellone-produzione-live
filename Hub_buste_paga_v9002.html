@@ -365,6 +365,8 @@
     .adminModalShell{width:min(1200px,96vw);background:#f9fbff;border-radius:26px;border:1px solid rgba(255,255,255,.6);box-shadow:0 26px 80px rgba(0,0,0,.2);overflow:hidden;display:flex;flex-direction:column;gap:14px;max-height:90vh}
     .adminModalHeader{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:16px 18px;border-bottom:1px solid rgba(0,0,0,.05);background:linear-gradient(120deg,rgba(255,255,255,.96),rgba(240,245,255,.92))}
     .adminModalBody{padding:6px 16px 18px;overflow-y:auto}
+    #sendLogModal .adminModalShell{width:min(980px,96vw);max-height:86vh}
+    #sendLogModal .adminModalBody{max-height:calc(86vh - 72px)}
     .adminModalBar{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
     .adminModalClose{border:1px solid var(--stroke);background:#fff;border-radius:14px;padding:10px 12px;font-weight:850;cursor:pointer;box-shadow:var(--shadow-soft)}
     .adminLauncherCard{display:flex;flex-direction:column;gap:10px}
@@ -649,10 +651,26 @@
             <button class="btn primary" id="btnOpenPayrollAdmin" type="button">Apri area admin</button>
           </div>
         </article>
+        <article class="heroPanel adminOnly">
+          <div class="heroPanelHeader">
+            <div class="heroPanelTitle">
+              <div class="heroChip accent" style="align-self:flex-start">Storico</div>
+              <div class="pcTitle">Storico invii</div>
+              <div class="pcSub" id="sendLogCardMeta">Log inviati ai dipendenti</div>
+            </div>
+          </div>
+          <div class="pcBody">
+            <div class="pcHint">Consulta rapidamente i log degli invii per vedere chi ha ricevuto cosa e quando.</div>
+            <div class="pcHint">Lo storico è separato dal flusso di upload per un accesso rapido.</div>
+          </div>
+          <div class="heroActions compact">
+            <button class="btn" id="btnOpenSendLogModal" type="button">Apri storico invii</button>
+          </div>
+        </article>
       </div>
 
 
-    <div class="adminModalOverlay" id="adminModal" aria-hidden="true">
+  <div class="adminModalOverlay" id="adminModal" aria-hidden="true">
       <div class="adminModalShell">
         <div class="adminModalHeader">
           <div class="adminModalBar">
@@ -913,12 +931,45 @@
                 <div class="uploadHistoryList" id="payrollSendLogList" style="margin-top:10px;max-height:100%;overflow:auto"></div>
 
                 <div class="pcActionRow" style="margin-top:12px">
-                  <button class="payrollBtn ghost" id="btnSendLogBack" type="button">Indietro</button>
-                </div>
-              </div>
+              <button class="payrollBtn ghost" id="btnSendLogBack" type="button">Indietro</button>
+            </div>
+          </div>
 
 </section>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="adminModalOverlay" id="sendLogModal" aria-hidden="true">
+    <div class="adminModalShell">
+      <div class="adminModalHeader">
+        <div class="adminModalBar">
+          <div class="pcTitle" style="margin:0">Storico invii</div>
+          <div class="pcSub" id="sendLogModalMeta">Caricamento…</div>
+        </div>
+        <div class="adminModalBar">
+          <button class="headerBtn backBtn" id="btnCloseSendLogModal" type="button">Chiudi</button>
+        </div>
+      </div>
+      <div class="adminModalBody">
+        <div class="pcHead" style="padding:0">
+          <div>
+            <div class="pcTitle" style="font-size:16px;margin:0">Log invii buste paga</div>
+            <div class="pcSub">Visualizza destinatari, mese e timestamp</div>
+          </div>
+          <div class="pcPills">
+            <button class="pillBtn" id="btnSendLogModalReload" type="button">Aggiorna</button>
+          </div>
+        </div>
+
+        <div class="historyActions" style="margin-top:12px">
+          <button class="pillBtn" id="btnSendLogModalSelectAll" type="button">Seleziona tutto</button>
+          <button class="pillBtn" id="btnSendLogModalClearSel" type="button">Pulisci</button>
+          <button class="pillBtn danger" id="btnSendLogModalDeleteSel" type="button" disabled>Elimina selezionati</button>
+        </div>
+
+        <div class="uploadHistoryList" id="sendLogModalList" style="margin-top:10px;max-height:100%;overflow:auto"></div>
       </div>
     </div>
   </div>
@@ -1000,16 +1051,32 @@
       updateGreetingUI();
     }
 
+    function updateModalOpenState(){
+      try{
+        const adminOpen = document.getElementById("adminModal")?.classList.contains("show");
+        const logOpen = document.getElementById("sendLogModal")?.classList.contains("show");
+        document.body.classList.toggle("admin-modal-open", !!(adminOpen || logOpen));
+      }catch(_e){}
+    }
+
     function toggleAdminModal(show, focusId){
       const modal = document.getElementById("adminModal");
       if(!modal) return;
       modal.classList.toggle("show", !!show);
       modal.setAttribute("aria-hidden", show ? "false" : "true");
-      document.body.classList.toggle("admin-modal-open", !!show);
+      updateModalOpenState();
       if(show && focusId){
         const target = document.getElementById(focusId);
         target && target.scrollIntoView({ behavior:"smooth", block:"start" });
       }
+    }
+
+    function toggleSendLogModal(show){
+      const modal = document.getElementById("sendLogModal");
+      if(!modal) return;
+      modal.classList.toggle("show", !!show);
+      modal.setAttribute("aria-hidden", show ? "false" : "true");
+      updateModalOpenState();
     }
 
     // Payroll module (estratto dal hub originale)
@@ -1049,7 +1116,10 @@
               uploadHistory: [],
               historySelection: {},
               sentCounts: {},
-              sendUI: null
+              sendUI: null,
+              sendLogs: prev.admin?.sendLogs || [],
+              sendLogSelection: prev.admin?.sendLogSelection || {},
+              openedByDocKey: prev.admin?.openedByDocKey || {}
             },
           userView: {
             docs: [],
@@ -1836,26 +1906,17 @@ function renderUploadHistory(){
       }
 
       function renderPayrollSendLogs(){
-        const list = U("payrollSendLogList");
-        const meta = U("payrollSendLogMeta");
         const logs = N.payroll?.admin?.sendLogs || [];
         const openedMap = N.payroll?.admin?.openedByDocKey || {};
         const sel = (N.payroll?.admin?.sendLogSelection) || {};
         const selCount = Object.values(sel).filter(Boolean).length;
 
-        const btnDel = U("btnSendLogDeleteSel");
-        if(btnDel) btnDel.disabled = selCount === 0;
-
-        if(meta){
-          meta.textContent = logs.length ? `Ultimi ${logs.length} invii` : "Nessun invio";
-          if(selCount) meta.textContent += ` · Selezionati: ${selCount}`;
-        }
-        if(!list) return;
-
-        if(!logs.length){
-          list.innerHTML = '<div class="pcHint">Ancora nessun invio.</div>';
-          return;
-        }
+        const targets = [
+          { list: U("payrollSendLogList"), meta: U("payrollSendLogMeta"), deleteBtn: U("btnSendLogDeleteSel") },
+          { list: U("sendLogModalList"), meta: U("sendLogModalMeta"), deleteBtn: U("btnSendLogModalDeleteSel") }
+        ];
+        const cardMeta = U("sendLogCardMeta");
+        if(cardMeta) cardMeta.textContent = logs.length ? `Ultimi ${logs.length} invii registrati` : "Nessun invio registrato";
 
         const fmt = (ts)=>{
           try{
@@ -1866,7 +1927,20 @@ function renderUploadHistory(){
           return "";
         };
 
-        list.innerHTML = logs.map(item=>{
+        targets.forEach(target=>{
+          if(target?.deleteBtn) target.deleteBtn.disabled = selCount === 0;
+          if(target?.meta){
+            target.meta.textContent = logs.length ? `Ultimi ${logs.length} invii` : "Nessun invio";
+            if(selCount) target.meta.textContent += ` · Selezionati: ${selCount}`;
+          }
+          if(!target?.list) return;
+
+          if(!logs.length){
+            target.list.innerHTML = '<div class="pcHint">Ancora nessun invio.</div>';
+            return;
+          }
+
+          target.list.innerHTML = logs.map(item=>{
           const checked = !!sel[item.id];
           const opened = openedMap[item.docKey] || {};
           const openedAt = opened.openedAt || null;
@@ -1904,6 +1978,7 @@ function renderUploadHistory(){
             </div>
           </div>`;
         }).join("");
+        });
       }
 
       async function loadPayrollSendLogs(){
@@ -1933,6 +2008,11 @@ function renderUploadHistory(){
             if(x.docKey) docKeys.add(x.docKey);
           });
           N.payroll.admin.sendLogs = logs;
+          const validIds = new Set(logs.map(l=>l.id).filter(Boolean));
+          const cleanedSelection = {};
+          const currentSel = N.payroll.admin.sendLogSelection || {};
+          Object.keys(currentSel).forEach(id=>{ if(validIds.has(id) && currentSel[id]) cleanedSelection[id] = true; });
+          N.payroll.admin.sendLogSelection = cleanedSelection;
 
           // prefetch openedAt per payrollDocs (join leggero)
           const openedByDocKey = {};
@@ -2593,6 +2673,12 @@ async function Yi() {
         toggleAdminModal(true, targetPane || "adminArea");
       }
 
+      async function openSendLogModal(){
+        if(!(N.user && N.user.isAdmin)){ Ve("Solo admin", "Funzione riservata."); return; }
+        await loadPayrollSendLogs();
+        toggleSendLogModal(true);
+      }
+
       const bindPayrollBtn=(selector,handler)=>{document.addEventListener("click",async evt=>{const btn=evt.target?.closest?.(selector);if(!btn)return;try{await handler(evt);}catch(e){console.warn("payroll btn error",e);}});};
 
       U("btnGoBack")?.addEventListener("click", ()=>{ if(window.history.length>1){ window.history.back(); } else { window.location.href = "index.html"; } });
@@ -2600,6 +2686,7 @@ async function Yi() {
       U("btnHeaderPayrollAdmin")?.addEventListener("click", async () => { await openAdminModalFlow(); });
       bindPayrollBtn("#btnOpenPayrollUser", async () => { await Fi().catch(e=>{console.warn("payroll user load error",e);try{Ve("Buste paga","Impossibile caricare (permessi o rete).");}catch(_){}}); scrollToSection("userArea"); });
       bindPayrollBtn("#btnOpenPayrollAdmin", async () => { await openAdminModalFlow(); });
+      bindPayrollBtn("#btnOpenSendLogModal", async () => { await openSendLogModal(); });
       U("btnPayrollPreviewPage")?.addEventListener("click", () => openPayrollPreviewPage());
       U("btnPayrollUserReload")?.addEventListener("click", async ()=>{ try{ await Fi(); }catch(_e){} try{ startPayrollUserDocsWatch(); }catch(_e){} });
       U("btnPayrollOpenPdf")?.addEventListener("click", () => openPayrollPdfWindow());
@@ -2643,6 +2730,8 @@ async function Yi() {
         if(e.key === "Escape"){
           const ov = U("pdfPreviewOverlay");
           if(ov && ov.getAttribute("aria-hidden")==="false") closePdfPreview();
+          const logModal = U("sendLogModal");
+          if(logModal?.classList?.contains("show")) toggleSendLogModal(false);
         }
       });
 
@@ -2655,6 +2744,8 @@ async function Yi() {
       U("btnCloseAdmin")?.addEventListener("click", ()=>toggleAdminModal(false));
       U("btnAdminBack")?.addEventListener("click", ()=>toggleAdminModal(false));
       U("adminModal")?.addEventListener("click", evt=>{ if(evt.target===evt.currentTarget) toggleAdminModal(false); });
+      U("btnCloseSendLogModal")?.addEventListener("click", ()=>toggleSendLogModal(false));
+      U("sendLogModal")?.addEventListener("click", evt=>{ if(evt.target===evt.currentTarget) toggleSendLogModal(false); });
       U("btnSubmitAbsence")?.addEventListener("click", ()=>submitAbsenceRequest());
       U("absenceFilterStatus")?.addEventListener("change", evt=>{ state.absences.filters = state.absences.filters || {}; state.absences.filters.status = evt.target.value; renderAbsenceAdminList(); });
       U("absenceFilterType")?.addEventListener("change", evt=>{ state.absences.filters = state.absences.filters || {}; state.absences.filters.type = evt.target.value; renderAbsenceAdminList(); });
@@ -2844,10 +2935,10 @@ btnDirSaveEdits && (btnDirSaveEdits.onclick = async ()=>{
           renderPayrollSendLogs();
         }
       });
-      U("btnSendLogReload")?.addEventListener("click", ()=>loadPayrollSendLogs());
-      U("btnSendLogSelectAll")?.addEventListener("click", sendLogSelectAll);
-      U("btnSendLogClearSel")?.addEventListener("click", sendLogClearSelection);
-      U("btnSendLogDeleteSel")?.addEventListener("click", deleteSelectedSendLogs);
+      ["btnSendLogReload","btnSendLogModalReload"].forEach(id=>U(id)?.addEventListener("click", ()=>loadPayrollSendLogs()));
+      ["btnSendLogSelectAll","btnSendLogModalSelectAll"].forEach(id=>U(id)?.addEventListener("click", sendLogSelectAll));
+      ["btnSendLogClearSel","btnSendLogModalClearSel"].forEach(id=>U(id)?.addEventListener("click", sendLogClearSelection));
+      ["btnSendLogDeleteSel","btnSendLogModalDeleteSel"].forEach(id=>U(id)?.addEventListener("click", deleteSelectedSendLogs));
       U("btnSendLogBack")?.addEventListener("click", ()=>Di("match"));
 
 
