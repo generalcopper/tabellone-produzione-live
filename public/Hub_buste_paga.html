@@ -1310,7 +1310,24 @@ function toggleSendLogModal(show){
       const Ao = (s)=>String(s??"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#39;");
       const Ve = (title, body)=>{ try{ showToast(String(title||"Info"), String(body||"")); }catch(_e){ alert(String(title||"Info")+"\\n\\n"+String(body||"")); } };
 
-      const COL_POWDER_USERS="powderUsers",COL_PAYROLL_DIRECTORY="payrollDirectory",COL_PAYROLL_DOCS="payrollDocs",COL_PAYROLL_SEND_LOGS="payrollSendLogs",COL_ABSENCE_REQUESTS="absenceRequests";
+      const COL_POWDER_USERS="powderUsers",COL_PAYROLL_DIRECTORY="payrollDirectory",COL_PAYROLL_DOCS="payrollDocs",COL_PAYROLL_DOCS_LEGACY="payrolls",COL_PAYROLL_SEND_LOGS="payrollSendLogs",COL_ABSENCE_REQUESTS="absenceRequests";
+      const PAYROLL_DOC_COLS=[COL_PAYROLL_DOCS,COL_PAYROLL_DOCS_LEGACY];
+
+      async function tryGetPayrollDocSnap(api, db, id){
+        for(const col of PAYROLL_DOC_COLS){
+          try{ const s = await api.getDoc(api.doc(db, col, id)); if(s && s.exists()) return { snap: s, col }; }catch(_e){}
+        }
+        return { snap: null, col: null };
+      }
+
+      async function trySetPayrollDoc(api, db, id, data, opts){
+        let wrote=false, lastErr=null;
+        for(const col of PAYROLL_DOC_COLS){
+          try{ await api.setDoc(api.doc(db, col, id), data, opts); wrote=true; return { col }; }catch(e){ lastErr=e; }
+        }
+        if(!wrote) throw lastErr || new Error("Impossibile salvare payroll doc");
+        return { col: null };
+      }
 
       function D() {
         const prev = N.payroll || {};
@@ -1546,16 +1563,21 @@ function __payrollLoadScript(src){
         return { path: a, url: await o.getDownloadURL(s.ref) }
       }
 
-      async function ki(e) {
-        const t = N.firebase.api, n = N.firebase.db;
-        const o = e.docId || `${e.emailLower}_${e.monthKey}`;
-        const i = t.doc(n, "payrollDocs", o);
+            async function ki(e) {
+        const api = N.firebase.api, db = N.firebase.db;
+        const id = e.docId || `${e.emailLower}_${e.monthKey}`;
+
         // Non sovrascrivere campi sensibili con stringhe vuote (es. uid)
         const payload = { ...e };
         if(payload.uid === "" || payload.uid === null || typeof payload.uid === "undefined") delete payload.uid;
         if(payload.storagePath === "" || payload.storagePath === null || typeof payload.storagePath === "undefined") delete payload.storagePath;
-        await t.setDoc(i, { ...payload, updatedAt: t.serverTimestamp(), createdAt: payload.createdAt || t.serverTimestamp() }, { merge: !0 })
+
+        const data = { ...payload, updatedAt: api.serverTimestamp(), createdAt: payload.createdAt || api.serverTimestamp() };
+
+        // Compatibilità: prova prima payrollDocs, poi payrolls
+        await trySetPayrollDoc(api, db, id, data, { merge: true });
       }
+
 
       // === Payroll Index (fallback quando le query Firestore sono bloccate dalle regole) ===
       function getRecentMonthKeys(count=36){
@@ -2045,18 +2067,29 @@ async function saveDirectoryEntry() {
         const view = N.payroll?.userView || {};
         const docs = view.docs || [];
         if(!docs.length) return;
-        const email = view.emailLower || N.user?.emailLower || "";
+        const email = (view.emailLower || N.user?.emailLower || "").toLowerCase();
         const api = N.firebase.api;
         const db = N.firebase.db;
+        const cols = (typeof PAYROLL_DOC_COLS!=="undefined" ? PAYROLL_DOC_COLS : [COL_PAYROLL_DOCS, COL_PAYROLL_DOCS_LEGACY].filter(Boolean));
         try{
           if(mode==="all"){
-            const q = api.query(api.collection(db, COL_PAYROLL_DOCS), api.where("emailLower","==",email));
-            const snap = await api.getDocs(q);
-            for(const d of snap.docs || []){ await api.deleteDoc(d.ref); }
+            for(const col of cols){
+              try{
+                const q = api.query(api.collection(db, col), api.where("emailLower","==",email));
+                const snap = await api.getDocs(q);
+                for(const d of snap.docs || []){ await api.deleteDoc(d.ref); }
+              }catch(err){
+                if(err?.code !== "permission-denied") console.warn("deletePayrollDocs list", col, err);
+              }
+            }
             Ve("Documenti eliminati","Tutti i documenti per il profilo corrente sono stati rimossi.");
           }else{
             const last = docs[0];
-            if(last?.docId) await api.deleteDoc(api.doc(db, COL_PAYROLL_DOCS, last.docId));
+            if(last?.docId){
+              for(const col of cols){
+                try{ await api.deleteDoc(api.doc(db, col, last.docId)); }catch(_e){}
+              }
+            }
             Ve("Eliminato","Ultimo documento rimosso.");
           }
           await Fi();
@@ -2065,6 +2098,7 @@ async function saveDirectoryEntry() {
           Ve("Errore eliminazione", err?.message || String(err));
         }
       }
+
 
       
 function Pi(){
@@ -2235,8 +2269,15 @@ function renderUploadHistory(){
           const docKey = N.payroll?.userView?.currentDocKey;
           if(!docKey) return;
           const api = N.firebase.api, db = N.firebase.db;
-          const ref = api.doc(db, COL_PAYROLL_DOCS, docKey);
-          await api.setDoc(ref, {
+
+          // prova a scrivere sul doc reale (payrollDocs o payrolls)
+          let col = (typeof PAYROLL_DOC_COLS!=="undefined" ? PAYROLL_DOC_COLS[0] : "payrollDocs");
+          try{
+            const found = await tryGetPayrollDocSnap(api, db, docKey);
+            if(found?.col) col = found.col;
+          }catch(_e){}
+
+          await api.setDoc(api.doc(db, col, docKey), {
             openedAt: api.serverTimestamp(),
             openedByUid: N.user?.uid || "",
             openedByEmail: (N.user?.email || "").toLowerCase(),
@@ -2246,6 +2287,7 @@ function renderUploadHistory(){
           console.warn("markPayrollDocOpened", err);
         }
       }
+
 
       function renderPayrollSendLogs(){
         const logs = N.payroll?.admin?.sendLogs || [];
@@ -2434,10 +2476,9 @@ function renderUploadHistory(){
         const keys = Array.from(docKeys).slice(0, 120);
         for(const k of keys){
           try{
-            const ref = api.doc(db, COL_PAYROLL_DOCS, k);
-            const gd = await api.getDoc(ref);
-            if(gd.exists()){
-              const d = gd.data() || {};
+            const found = await tryGetPayrollDocSnap(api, db, k);
+            if(found?.snap && found.snap.exists()){
+              const d = found.snap.data() || {};
               openedByDocKey[k] = { openedAt: d.openedAt || null };
             }
           }catch(_e){}
@@ -2556,39 +2597,45 @@ function renderUploadHistory(){
       }
 
       async function loadPayrollSentCounts(){
-        if(!(N.firebase?.ok && N.user?.isAdmin)) return;
+        if(!(N.firebase?.ok)) return;
+        if(!(N.user && N.user.isAdmin)) return;
         try{
           const api = N.firebase.api, db = N.firebase.db;
-          // Best effort: per ora leggiamo fino a 5000 record (in genere sono pochissimi: 1-3 docs per dipendente/mese)
-          const CAP = 5000;
-          const q = api.query(api.collection(db, COL_PAYROLL_DOCS), api.limit(CAP));
-          const snap = await api.getDocs(q);
+          const CAP = 8000;
+          const cols = (typeof PAYROLL_DOC_COLS!=="undefined" ? PAYROLL_DOC_COLS : ["payrollDocs","payrolls"]);
+          const seen = {}; // emailLower -> Set(monthKey/docId)
+
+          for(const col of cols){
+            try{
+              const q = api.query(api.collection(db, col), api.limit(CAP));
+              const snap = await api.getDocs(q);
+              snap?.forEach(doc=>{
+                const d = doc.data() || {};
+                const email = String(d.emailLower || "").toLowerCase();
+                if(!email) return;
+                const mk = String(d.monthKey || "").trim();
+                if(!seen[email]) seen[email] = new Set();
+                seen[email].add(mk || doc.id);
+              });
+            }catch(err){
+              if(err?.code !== "permission-denied"){
+                console.warn("sent counts load", err);
+              }
+            }
+          }
+
           const counts = {};
-          let read = 0;
-          snap?.forEach(doc=>{
-            read++;
-            const d = doc.data() || {};
-            const em = normalizeEmail(d.emailLower || d.email || "");
-            if(em) counts[em] = (counts[em] || 0) + 1;
-          });
+          for(const email of Object.keys(seen)){
+            counts[email] = seen[email].size;
+          }
+
           N.payroll.admin.sentCounts = counts;
-          renderDirectoryUI();
-          // Se siamo al cap, è possibile che lo storico sia più grande: in quel caso i conteggi potrebbero essere sottostimati
-          if(read >= CAP){
-            console.warn("sentCounts cap reached", read);
-          }
+          try{ renderPayrollUserList && renderPayrollUserList(); }catch(_e){}
         }catch(err){
-          const msg = String(err?.message || err || "").toLowerCase();
-          if(err?.code === "permission-denied" || msg.includes("insufficient permissions") || msg.includes("missing or insufficient permissions")){
-            N.payroll = N.payroll || {};
-            N.payroll.admin = N.payroll.admin || {};
-            N.payroll.admin.sentCounts = {};
-            renderDirectoryUI();
-            return;
-          }
-          console.warn("sentCounts load", err);
+          if(err?.code !== "permission-denied") console.warn("sent counts load outer", err);
         }
       }
+
 
 
 
@@ -2926,22 +2973,51 @@ function renderUploadHistory(){
 
           const api = N.firebase.api;
           const db = N.firebase.db;
-          const ref = api.doc(db, COL_PAYROLL_DOCS, docId);
-          let unsub = null;
-          unsub = api.onSnapshot(ref, snap=>{
-            if(snap.exists()){
-              setPayrollSendRowStatus(sendKey, "live", "arrivato");
-              try{ unsub && unsub(); }catch(_e){}
-              delete ui.deliveryUnsubs[sendKey];
-            }
-          }, err=>{
-            if(err?.code !== "permission-denied") console.warn("payroll delivery watch", err);
-            try{ unsub && unsub(); }catch(_e){}
-            delete ui.deliveryUnsubs[sendKey];
-          });
-          ui.deliveryUnsubs[sendKey] = unsub;
+          const cols = (typeof PAYROLL_DOC_COLS!=="undefined" ? PAYROLL_DOC_COLS : [COL_PAYROLL_DOCS, COL_PAYROLL_DOCS_LEGACY].filter(Boolean));
+
+          let done = false;
+          const unsubs = [];
+          const cleanup = ()=>{
+            if(done) return;
+            done = true;
+            try{ unsubs.forEach(fn=>{ try{ fn && fn(); }catch(_e){} }); }catch(_e){}
+            try{ delete ui.deliveryUnsubs[sendKey]; }catch(_e){}
+          };
+
+          // Fallback: se non riceviamo eventi (es. permessi), non lasciare la UI bloccata
+          const timer = setTimeout(()=>{
+            if(done) return;
+            try{ setPayrollSendRowStatus(sendKey, "ok", "scritto"); }catch(_e){}
+            cleanup();
+          }, 8000);
+
+          for(const col of cols){
+            try{
+              const ref = api.doc(db, col, docId);
+              const unsub = api.onSnapshot(ref, snap=>{
+                if(done) return;
+                if(snap.exists()){
+                  clearTimeout(timer);
+                  setPayrollSendRowStatus(sendKey, "live", "arrivato");
+                  cleanup();
+                }
+              }, err=>{
+                if(err?.code !== "permission-denied") console.warn("payroll delivery watch", err);
+                clearTimeout(timer);
+                // permission-denied: consideriamo comunque scritto
+                if(err?.code === "permission-denied"){
+                  try{ setPayrollSendRowStatus(sendKey, "ok", "scritto"); }catch(_e){}
+                }
+                cleanup();
+              });
+              unsubs.push(unsub);
+            }catch(_e){}
+          }
+
+          ui.deliveryUnsubs[sendKey] = cleanup;
         }catch(_e){}
       }
+
 
       function updatePayrollSendMatchSummary(){
         const ui = N.payroll?.admin?.sendUI;
@@ -3025,11 +3101,19 @@ async function Yi() {
             setPayrollSendProgress(done, total, `Inviando ${done+1}/${total}`);
             await nextFrame();
             let s = null;
-            try {
-              const q = o.query(o.collection(i,"payrollDocs"), o.where("emailLower","==",emailLower), o.where("monthKey","==",row.monthKey), o.limit(1));
-              const snap = await o.getDocs(q);
-              s = snap.docs?.[0] || null;
-            } catch (_err) {}
+            let sCol = null;
+            try{
+              const cols = (typeof PAYROLL_DOC_COLS!=="undefined" ? PAYROLL_DOC_COLS : ["payrollDocs","payrolls"]);
+              for(const col of cols){
+                try{
+                  const q = o.query(o.collection(i,col), o.where("emailLower","==",emailLower), o.where("monthKey","==",row.monthKey), o.limit(1));
+                  const snap = await o.getDocs(q);
+                  const d0 = snap.docs?.[0] || null;
+                  if(d0){ s = d0; sCol = col; break; }
+                }catch(_e){}
+              }
+            }catch(_err){}
+
             const existingData = s?.data ? s.data() : (s && typeof s.get === "function" ? s.data() : null);
             const existingId = s?.id || baseId;
             const sameHash = existingData && existingData.sourceFileHash === e.sourceFileHash;
@@ -3900,207 +3984,179 @@ function buildSafePdfName(base){
       }
 
 
-      async function Fi() {
-        if(!(N.firebase?.ok)) return;
-        const view = N.payroll.userView = N.payroll.userView || {};
-        const emailLower = (view.emailLower || N.user?.emailLower || "").toLowerCase();
-        if(!emailLower) return;
+            async function Fi() {
+              const view = N.payroll.userView = N.payroll.userView || {};
+              // reset
+              try{ if(view.unsub){ view.unsub(); } }catch(_e){}
+              view.unsub = null;
 
-        // Se è già attiva la modalità live per questa mail, evita doppio lavoro
-        if(view.live && view.unsub && view._watchEmail === emailLower) return;
-
-        // reset listener precedente
-        try{ view.unsub && view.unsub(); }catch(_e){}
-        view.unsub = null;
-        view.live = false;
-        view._watchEmail = emailLower;
-
-        view.loading = true;
-        view.error = "";
-
-        const api = N.firebase.api;
-        const db = N.firebase.db;
-
-        const mapDoc = (docSnap)=>{
-          const d = docSnap.data() || {};
-          return {
-            docId: docSnap.id,
-            monthKey: d.monthKey || "",
-            netPayText: d.netPayText || "",
-            netPayCents: (typeof d.netPayCents === "number" ? d.netPayCents : (d.netPayCents ?? null)),
-            downloadUrl: d.downloadUrl || d.pdfUrl || d.url || "",
-            updatedAt: d.updatedAt?.toDate ? d.updatedAt.toDate().toLocaleString("it-IT") : "",
-            fileName: d.sourceFileName || d.fileName || "",
-            fullName: d.fullName || "",
-            fiscalCode: d.fiscalCode || "",
-            openedAt: d.openedAt || null
-          };
-        };
-
-        const applyDocs = (docs)=>{
-          const prevSel = view.selectedMonth || "";
-          docs = (docs || []).filter(Boolean);
-          docs.sort((a,b)=> (b.monthKey||"").localeCompare(a.monthKey||""));
-          view.docs = docs;
-          view.months = docs.map(d=>d.monthKey).filter(Boolean);
-          view.filteredMonths = view.searchTerm ? (view.months || []).filter(m=> String(m||"").toLowerCase().includes((view.searchTerm||"").toLowerCase())) : view.months;
-          view.selectedMonth = (prevSel && (view.filteredMonths||[]).includes(prevSel)) ? prevSel : (view.filteredMonths[0] || view.months[0] || "");
-          view.ready = true;
-          view.error = "";
-          Ri();
-          Oi();
-        };
-
-        try{
-          // 1) PROVA "LIST" (query). Se le regole Firestore bloccano LIST, qui arriviamo a permission-denied.
-          const q = api.query(api.collection(db, COL_PAYROLL_DOCS), api.where("emailLower","==",emailLower), api.limit(200));
-          const snap = await api.getDocs(q);
-          const docs = [];
-          snap?.forEach(doc=> docs.push(mapDoc(doc)));
-          applyDocs(docs);
-
-          // Live via query (se consentito)
-          try{
-            view.unsub = api.onSnapshot(q, ss=>{
-              try{
-                const liveDocs = [];
-                ss?.forEach(doc=> liveDocs.push(mapDoc(doc)));
-                applyDocs(liveDocs);
-                view.live = true;
-              }catch(err){
-                console.warn("payroll user watch parse", err);
-              }
-            }, err=>{
-              console.warn("payroll user watch err", err);
-            });
-            view.live = true;
-          }catch(_e){}
-        }catch(err){
-          // 2) FALLBACK: nessuna LIST -> usa INDEX doc + (se serve) GET dei singoli payrollDocs
-          if(err?.code !== "permission-denied"){
-            console.warn("payroll user fetch", err);
-          }
-          let loaded = false;
-
-          // 2a) payrollIndex/{emailLower}
-          try{
-            const idxRef = api.doc(db, "payrollIndex", emailLower);
-            const idxSnap = await api.getDoc(idxRef);
-            if(idxSnap?.exists()){
-              const idx = idxSnap.data() || {};
-              const docsByMonth = (idx.docsByMonth && typeof idx.docsByMonth === "object") ? idx.docsByMonth : {};
-              const docs = [];
-              for(const mk of Object.keys(docsByMonth||{})){
-                const x = docsByMonth[mk] || {};
-                docs.push({
-                  docId: x.docId || `${emailLower}_${mk}`,
-                  monthKey: mk,
-                  netPayText: x.netPayText || "",
-                  netPayCents: (typeof x.netPayCents === "number" ? x.netPayCents : (x.netPayCents ?? null)),
-                  downloadUrl: x.downloadUrl || "",
-                  fileName: x.fileName || "",
-                  updatedAt: x.updatedAt || ""
-                });
+              if(!(N.firebase && N.firebase.ok)){
+                view.loading = false;
+                view.ready = true;
+                view.error = "Firebase non pronto.";
+                renderPayrollUserView();
+                return;
               }
 
-              // completa dati mancanti facendo GET sui doc reali (no LIST)
-              for(const d of docs){
-                if(!d.downloadUrl || !d.updatedAt || !d.fileName){
-                  try{
-                    const ds = await api.getDoc(api.doc(db, COL_PAYROLL_DOCS, d.docId));
-                    if(ds.exists()){
-                      const full = mapDoc(ds);
-                      d.netPayText = d.netPayText || full.netPayText;
-                      d.netPayCents = (d.netPayCents ?? full.netPayCents);
-                      d.downloadUrl = d.downloadUrl || full.downloadUrl;
-                      d.fileName = d.fileName || full.fileName;
-                      d.updatedAt = d.updatedAt || full.updatedAt;
-                      d.openedAt = full.openedAt || null;
-                      d.fullName = full.fullName || "";
-                      d.fiscalCode = full.fiscalCode || "";
-                    }
-                  }catch(_e){}
+              view.loading = true;
+              view.ready = false;
+              view.error = "";
+              renderPayrollUserView();
+
+              const api = N.firebase.api, db = N.firebase.db;
+              const emailLower = normalizeEmail(view.emailLower || N.user?.emailLower || (N.user?.email || "").toLowerCase());
+              view.emailLower = emailLower;
+
+              if(!emailLower){
+                view.loading = false;
+                view.ready = true;
+                view.error = "Email utente non valida.";
+                renderPayrollUserView();
+                return;
+              }
+
+              const cols = (typeof PAYROLL_DOC_COLS!=="undefined" ? PAYROLL_DOC_COLS : [COL_PAYROLL_DOCS, COL_PAYROLL_DOCS_LEGACY].filter(Boolean));
+
+              const mapDoc = (docSnap, col) => {
+                const d = docSnap.data() || {};
+                const mk = normalizeMonthKey(d.monthKey || "");
+                let updatedAtMs = 0;
+                try{
+                  const ts = d.updatedAt;
+                  if(ts && typeof ts.toMillis === "function") updatedAtMs = ts.toMillis();
+                  else if(ts && typeof ts.seconds === "number") updatedAtMs = ts.seconds * 1000;
+                }catch(_e){}
+                return {
+                  docId: docSnap.id,
+                  monthKey: mk || "",
+                  netPayText: d.netPayText || "",
+                  netPayCents: typeof d.netPayCents === "number" ? d.netPayCents : null,
+                  fileName: d.fileName || d.sourceFileName || "busta_paga.pdf",
+                  pagesCount: Array.isArray(d.pageIndices) ? d.pageIndices.length : (d.pagesCount ?? null),
+                  downloadUrl: d.downloadUrl || d.pdfUrl || d.url || "",
+                  storagePath: d.storagePath || "",
+                  updatedAtMs,
+                  updatedAt: (()=>{ try{ return d.updatedAt?.toDate ? d.updatedAt.toDate().toLocaleString("it-IT") : ""; }catch(_e){ return ""; } })(),
+                  _col: col || ""
+                };
+              };
+
+              const dedupeByMonth = (docs) => {
+                const best = {};
+                for(const d of (docs || [])){
+                  const mk = d.monthKey || "";
+                  if(!mk) continue;
+                  if(!best[mk]){ best[mk] = d; continue; }
+                  const cur = best[mk];
+                  const score = (x)=> (x.updatedAtMs || 0) + (x.downloadUrl ? 1e13 : 0);
+                  if(score(d) > score(cur)) best[mk] = d;
+                }
+                return Object.values(best).sort((a,b)=> String(b.monthKey).localeCompare(String(a.monthKey)));
+              };
+
+              const applyDocs = (rawDocs) => {
+                const docs = dedupeByMonth(rawDocs || []);
+                view.docs = docs;
+                view.months = docs.map(d=>d.monthKey);
+                const current = normalizeMonthKey(view.selectedMonth || "");
+                if(!current || !view.months.includes(current)) view.selectedMonth = view.months[0] || "";
+                const sel = docs.find(d=>d.monthKey === view.selectedMonth) || null;
+                view.currentUrl = sel?.downloadUrl || "";
+                view.currentDocKey = sel?.docId || "";
+                view.currentCol = sel?._col || "";
+                view.netPayText = sel?.netPayText || "";
+                view.updatedAtText = sel?.updatedAt || "";
+                view.pagesCount = sel?.pagesCount ?? null;
+                view.fileName = sel?.fileName || "busta_paga.pdf";
+                view.error = docs.length ? "" : "Nessuna busta paga trovata per questo utente.";
+              };
+
+              let usedCol = null;
+              let watchQuery = null;
+              let docsFound = [];
+
+              // 1) Prova LIST/QUERY su payrollDocs e payrolls
+              for(const col of cols){
+                try{
+                  const q = api.query(api.collection(db, col), api.where("emailLower","==",emailLower), api.limit(200));
+                  const snap = await api.getDocs(q);
+                  const docs = [];
+                  snap?.forEach(ds=> docs.push(mapDoc(ds, col)));
+                  if(docs.length){
+                    usedCol = col;
+                    watchQuery = q;
+                    docsFound = docs;
+                    break;
+                  }
+                  // conserva almeno il primo query per watch
+                  if(!watchQuery){ usedCol = col; watchQuery = q; }
+                }catch(err){
+                  if(err?.code !== "permission-denied") console.warn("payroll user list", col, err);
                 }
               }
 
-              applyDocs(docs);
-              loaded = true;
-
-              // Live via INDEX doc (no LIST)
-              try{
-                view.unsub = api.onSnapshot(idxRef, async ss=>{
-                  try{
-                    if(!ss.exists()){ applyDocs([]); return; }
-                    const idx2 = ss.data() || {};
-                    const dbm = (idx2.docsByMonth && typeof idx2.docsByMonth === "object") ? idx2.docsByMonth : {};
-                    const docs2 = [];
-                    for(const mk of Object.keys(dbm||{})){
-                      const x = dbm[mk] || {};
-                      docs2.push({
-                        docId: x.docId || `${emailLower}_${mk}`,
-                        monthKey: mk,
-                        netPayText: x.netPayText || "",
-                        netPayCents: (typeof x.netPayCents === "number" ? x.netPayCents : (x.netPayCents ?? null)),
-                        downloadUrl: x.downloadUrl || "",
-                        fileName: x.fileName || "",
-                        updatedAt: x.updatedAt || ""
-                      });
-                    }
-                    // se manca url, prova GET doc
-                    for(const d of docs2){
-                      if(!d.downloadUrl){
-                        try{
-                          const ds = await api.getDoc(api.doc(db, COL_PAYROLL_DOCS, d.docId));
-                          if(ds.exists()){
-                            const full = mapDoc(ds);
-                            d.downloadUrl = d.downloadUrl || full.downloadUrl;
-                            d.fileName = d.fileName || full.fileName;
-                            d.updatedAt = d.updatedAt || full.updatedAt;
-                            d.openedAt = full.openedAt || null;
-                            d.fullName = full.fullName || "";
-                            d.fiscalCode = full.fiscalCode || "";
-                            d.netPayText = d.netPayText || full.netPayText;
-                            d.netPayCents = (d.netPayCents ?? full.netPayCents);
-                          }
-                        }catch(_e){}
+              // 2) Se vuoto, prova INDEX + GET singoli docId
+              if(!docsFound.length){
+                try{
+                  const idxRef = api.doc(db, "payrollIndex", emailLower);
+                  const idxSnap = await api.getDoc(idxRef);
+                  if(idxSnap?.exists()){
+                    const idx = idxSnap.data() || {};
+                    const months = Array.isArray(idx.months) ? idx.months : [];
+                    const docsByMonth = (idx.docsByMonth && typeof idx.docsByMonth === "object") ? idx.docsByMonth : {};
+                    const ids = months.slice(0, 24).map(m=> docsByMonth[m]?.docId || `${emailLower}_${m}`).filter(Boolean);
+                    const out = [];
+                    for(const id of ids){
+                      const found = await tryGetPayrollDocSnap(api, db, id);
+                      if(found?.snap && found.snap.exists()){
+                        out.push(mapDoc(found.snap, found.col));
                       }
                     }
-                    applyDocs(docs2);
-                    view.live = true;
-                  }catch(_e){}
-                });
-                view.live = true;
-              }catch(_e){}
-            }
-          }catch(_e){}
-
-          // 2b) Scansione ultimi mesi: GET su docId deterministici (no LIST)
-          if(!loaded){
-            const docs = [];
-            const months = getRecentMonthKeys(36);
-            for(const mk of months){
-              const id = `${emailLower}_${mk}`;
-              try{
-                const ds = await api.getDoc(api.doc(db, COL_PAYROLL_DOCS, id));
-                if(ds.exists()){
-                  docs.push(mapDoc(ds));
+                    if(out.length) docsFound = out;
+                  }
+                }catch(err){
+                  if(err?.code !== "permission-denied") console.warn("payroll index fallback", err);
                 }
-              }catch(_e){}
-            }
-            applyDocs(docs);
-            loaded = true;
-          }
+              }
 
-          if(!loaded){
-            view.ready = true;
-            view.error = "Nessun documento trovato.";
-            Ri();
-            Oi();
-          }
-        }finally{
-          view.loading = false;
-        }
-      }
+              // 3) Ultimo tentativo: scan ultimi 36 mesi con docId deterministico
+              if(!docsFound.length){
+                try{
+                  const keys = getRecentMonthKeys(36).map(m=>`${emailLower}_${m}`);
+                  const out = [];
+                  for(const id of keys){
+                    const found = await tryGetPayrollDocSnap(api, db, id);
+                    if(found?.snap && found.snap.exists()){
+                      out.push(mapDoc(found.snap, found.col));
+                    }
+                  }
+                  if(out.length) docsFound = out;
+                }catch(_e){}
+              }
+
+              applyDocs(docsFound);
+              view.loading = false;
+              view.ready = true;
+              renderPayrollUserView();
+
+              // 4) Live watch (solo se abbiamo un query valido)
+              if(watchQuery){
+                try{
+                  view.unsub = api.onSnapshot(watchQuery, snap=>{
+                    try{
+                      const docs = [];
+                      snap?.forEach(ds=> docs.push(mapDoc(ds, usedCol)));
+                      applyDocs(docs);
+                      renderPayrollUserView();
+                    }catch(err){ console.warn("payroll user watch parse", err); }
+                  }, err=>{
+                    if(err?.code !== "permission-denied") console.warn("payroll user watch", err);
+                  });
+                }catch(err){
+                  if(err?.code !== "permission-denied") console.warn("payroll user watch start", err);
+                }
+              }
+            }
 
       function stopPayrollUserDocsWatch(){
         try{
