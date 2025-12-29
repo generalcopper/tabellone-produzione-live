@@ -1,6 +1,18 @@
 <!doctype html>
 <html lang="it" translate="no">
 <head>
+<script id="__CANONICAL_HTML_SLASH__">
+/* Canonicalizza URL: evita /file.html/ che su GitHub Pages può rompere cache/auth */
+(function(){
+  try{
+    const u = new URL(location.href);
+    if(u.pathname.endsWith(".html/")){
+      u.pathname = u.pathname.slice(0, -1);
+      location.replace(u.toString());
+    }
+  }catch(_e){}
+})();
+</script>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover"/>
   <meta name="google" content="notranslate"/>
@@ -986,6 +998,7 @@
 
     const state = {
       user: null,
+      authGateState: "unknown",
       firebase: { ok:false, app:null, auth:null, db:null, api:null, storage:null, storageApi:null },
       payroll: {},
       absences: { list:[], filters:{ status:"", type:"", search:"" }, loading:false }
@@ -1023,7 +1036,7 @@
           const userNameEl = document.getElementById("userName");
           if(userNameEl) userNameEl.textContent = name;
         }else{
-          heroSubtitle.textContent = "Se non sei già autenticato, torna al Hub Polveri e fai accesso lì.";
+          heroSubtitle.textContent = (state.authGateState==="restoring") ? "Verifica accesso…" : "Se non sei già autenticato, torna al Hub Polveri e fai accesso lì.";
         }
       }
       if(payrollGreeting) payrollGreeting.textContent = `Ciao, ${name}.`;
@@ -1048,8 +1061,13 @@
       }else{
         pill?.classList.remove("ok");
         dot?.classList.remove("ok");
-        if(status) status.textContent = "Accesso non attivo";
-        if(hint) hint.textContent = "Apri dal Hub Polveri per continuare (niente login qui).";
+        if(state.authGateState==="restoring"){
+          if(status) status.textContent = "Verifica accesso…";
+          if(hint) hint.textContent = "Sto ripristinando la sessione (su iOS può volerci qualche secondo).";
+        }else{
+          if(status) status.textContent = "Accesso non attivo";
+          if(hint) hint.textContent = "Apri dal Hub Polveri per continuare (niente login qui).";
+        }
       }
       if(absenceBadge) absenceBadge.textContent = isAuthed ? "Pronto a inviare" : "Apri dal Hub Polveri";
       document.body.classList.toggle("role-admin", !!state.user?.isAdmin);
@@ -3995,7 +4013,23 @@ function buildSafePdfName(base){
         const auth = authMod.getAuth(app);
 
         // Mantieni l'accesso tra pagine/redirect (stesso dominio) + supporto popup bloccati
-        try{ await authMod.setPersistence(auth, authMod.browserLocalPersistence); }catch(e){ console.warn('auth persistence', e); }
+        async function setBestAuthPersistence(authApi, auth){
+          // Prova prima le persistenze più durature (riduce i loop di login su iOS Web App)
+          const ua = (navigator.userAgent || "").toLowerCase();
+          const isIOS = /iphone|ipad|ipod/.test(ua) || (/macintosh/.test(ua) && (navigator.maxTouchPoints||0)>1);
+          const isStandalone = (window.matchMedia && window.matchMedia("(display-mode: standalone)").matches) || (navigator.standalone === true);
+
+          const attempts = ((isIOS && isStandalone)
+            ? [authApi.browserLocalPersistence, authApi.indexedDBLocalPersistence, authApi.browserSessionPersistence]
+            : [authApi.indexedDBLocalPersistence, authApi.browserLocalPersistence, authApi.browserSessionPersistence]
+          ).filter(Boolean);
+
+          for(const p of attempts){
+            try{ await authApi.setPersistence(auth, p); return true; }catch(_e){}
+          }
+          return false;
+        }
+        try{ await setBestAuthPersistence(authMod, auth); }catch(e){ console.warn('auth persistence', e); }
         try{ await authMod.getRedirectResult(auth); }catch(e){ console.warn('redirect result', e); }
 
         const provider = new authMod.GoogleAuthProvider();
@@ -4077,14 +4111,116 @@ function buildSafePdfName(base){
 
 
         // Login/Logout rimossi: l’autenticazione avviene nel Hub Polveri (pagina di origine del redirect).
-        // Se arrivi qui senza sessione attiva, ti rimando al punto di accesso “stabile”.
-        const HUB_POLVERI_URL = "index.html";
+        // Qui facciamo solo "gate": se la sessione esiste entri, altrimenti torni al punto di accesso stabile.
+        const AUTH_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+        const LS_AUTH_OK = "hub_auth_ok_ts_v1";
+        const LS_AUTH_EMAIL = "hub_auth_last_email_v1";
+        const RESTORE_TIMEOUT_MS = (()=>{ 
+          const ua = (navigator.userAgent || "").toLowerCase();
+          const isIOS = /iphone|ipad|ipod/.test(ua) || (/macintosh/.test(ua) && (navigator.maxTouchPoints||0)>1);
+          // iOS (specie Web App/standalone) può impiegare parecchio a ripristinare la sessione auth.
+          return isIOS ? 35000 : 12000;
+        })();
+
+        function isMobileAuth(){
+          const ua = (navigator.userAgent || navigator.vendor || "").toLowerCase();
+          const uaMobile = /(android|iphone|ipad|ipod|mobile|iemobile|opera mini)/.test(ua);
+          const ipadAsMac = /macintosh/.test(ua) && (navigator.maxTouchPoints || 0) > 1;
+          return Boolean(uaMobile || ipadAsMac);
+        }
+        function recentAuthOkWithinTTL(){
+          try{
+            const ts = parseInt(localStorage.getItem(LS_AUTH_OK) || "0", 10);
+            if(!Number.isFinite(ts) || ts<=0) return false;
+            return (Date.now() - ts) < AUTH_TTL_MS;
+          }catch(_e){ return false; }
+        }
+        function markAuthOk(email=""){
+          try{
+            localStorage.setItem(LS_AUTH_OK, String(Date.now()));
+            if(email) localStorage.setItem(LS_AUTH_EMAIL, String(email));
+          }catch(_e){}
+        }
+
+        const HUB_POLVERI_URL = new URL("hub_linea_polveri.html", location.href).toString();
+
+        // iOS WebApp: evita che "Indietro" ti riporti su accounts.google.com dopo un login via redirect.
+        (function trapBackToHub(){
+          const ref = String(document.referrer || "");
+          const shouldTrap = (!ref) || ref.includes("accounts.google.") || ref.includes("firebaseapp.com") || ref.includes("hub_linea_polveri");
+          if(!shouldTrap) return;
+          try{
+            if(!history.state || !history.state.__gcBackTrap){
+              history.replaceState({__gcBackTrap:true, step:0}, "", location.href);
+              history.pushState({__gcBackTrap:true, step:1}, "", location.href);
+            }
+            window.addEventListener("popstate", (e)=>{
+              if(e.state && e.state.__gcBackTrap){
+                location.replace(HUB_POLVERI_URL);
+              }
+            });
+          }catch(_e){}
+        })();
+
         function redirectToHubPolveri(reason){
           try{ if(reason) showToast("Accesso richiesto", reason, 2200); }catch(_e){}
           try{ window.location.replace(HUB_POLVERI_URL); }
           catch(_e){ window.location.href = HUB_POLVERI_URL; }
         }
 
+        function clearRestoreTimeout(){
+          if(globalThis.__BUSTE_RESTORE_T__){
+            clearTimeout(globalThis.__BUSTE_RESTORE_T__);
+            globalThis.__BUSTE_RESTORE_T__ = null;
+          }
+        }
+        function startOrKeepRestoreTimeout(onExpire){
+          if(globalThis.__BUSTE_RESTORE_T__) return;
+          globalThis.__BUSTE_RESTORE_T__ = setTimeout(()=>{
+            globalThis.__BUSTE_RESTORE_T__ = null;
+            try{
+              if(auth && auth.currentUser) return;
+            }catch(_e){}
+            if(typeof onExpire === "function") onExpire();
+          }, RESTORE_TIMEOUT_MS);
+        }
+        function enterRestoringMode(message="Ripristino sessione…"){
+          state.authGateState = "restoring";
+          updateAuthUI();
+          try{ if(message) showToast("Accesso", message, 1200); }catch(_e){}
+        }
+        function enterSignedOut(message=""){
+          state.authGateState = "signed_out";
+          updateAuthUI();
+          // non mostriamo toast qui: lo fa redirectToHubPolveri quando serve
+        }
+        function enterSignedIn(){
+          state.authGateState = "signed_in";
+          updateAuthUI();
+        }
+        function handleAuthResume(){
+          if(!isMobileAuth()) return;
+          if(state.authGateState === "signed_out") return;
+          if(!recentAuthOkWithinTTL()) return;
+          if(auth && auth.currentUser) return;
+          enterRestoringMode("Ripristino sessione…");
+          startOrKeepRestoreTimeout(()=> redirectToHubPolveri("Sessione non attiva. Apri il Hub Polveri e fai accesso lì."));
+        }
+        function wireAuthResumeHandlers(){
+          if(globalThis.__BUSTE_AUTH_RESUME_BOUND__) return;
+          globalThis.__BUSTE_AUTH_RESUME_BOUND__ = true;
+          const resume = ()=> handleAuthResume();
+          window.addEventListener("pageshow", resume);
+          document.addEventListener("visibilitychange", ()=>{ if(document.visibilityState === "visible") resume(); });
+          window.addEventListener("focus", resume);
+        }
+        wireAuthResumeHandlers();
+
+        // Prime UI: su mobile/iOS se eri loggato di recente, aspetta l'hydration prima di buttarti fuori
+        if(isMobileAuth() && recentAuthOkWithinTTL() && !auth.currentUser){
+          enterRestoringMode("Ripristino sessione…");
+          startOrKeepRestoreTimeout(()=> redirectToHubPolveri("Sessione non attiva. Apri il Hub Polveri e fai accesso lì."));
+        }
 
         authMod.onAuthStateChanged(auth, async user=>{
           if(user){
@@ -4096,6 +4232,9 @@ function buildSafePdfName(base){
               isAdmin: false,
               isWhitelisted: null
             };
+            try{ clearRestoreTimeout(); }catch(_e){}
+            try{ markAuthOk(user.email || \"\"); }catch(_e){}
+            state.authGateState = \"signed_in\";
             updateAuthUI();
             await resolveUserRole(user);
             updateAuthUI();
@@ -4103,14 +4242,20 @@ function buildSafePdfName(base){
           
           }else{
             state.user = null;
-            updateAuthUI();
             Payroll.onSignedOut();
-            // Niente login qui: se non esiste già una sessione (da Hub Polveri), torna al punto di accesso.
-            setTimeout(()=>{
-              try{
-                if(!auth.currentUser) redirectToHubPolveri("Sessione non attiva. Apri il Hub Polveri e fai accesso lì.");
-              }catch(_e){}
-            }, 250);
+
+            if(isMobileAuth() && recentAuthOkWithinTTL()){
+              enterRestoringMode("Ripristino sessione…");
+              startOrKeepRestoreTimeout(()=> redirectToHubPolveri("Sessione non attiva. Apri il Hub Polveri e fai accesso lì."));
+            }else{
+              clearRestoreTimeout();
+              enterSignedOut();
+              setTimeout(()=>{
+                try{
+                  if(!auth.currentUser) redirectToHubPolveri("Sessione non attiva. Apri il Hub Polveri e fai accesso lì.");
+                }catch(_e){}
+              }, 150);
+            }
           }
         });
 }catch(err){
