@@ -1361,9 +1361,109 @@ function __payrollLoadScript(src){
       }
 
       async function ki(e) {
-        const t = N.firebase.api, n = N.firebase.db, o = e.docId || `${e.emailLower}_${e.monthKey}`, i = t.doc(n, "payrollDocs", o);
-        await t.setDoc(i, { ...e, updatedAt: t.serverTimestamp(), createdAt: e.createdAt || t.serverTimestamp() }, { merge: !0 })
+        const t = N.firebase.api, n = N.firebase.db;
+        const o = e.docId || `${e.emailLower}_${e.monthKey}`;
+        const i = t.doc(n, "payrollDocs", o);
+        // Non sovrascrivere campi sensibili con stringhe vuote (es. uid)
+        const payload = { ...e };
+        if(payload.uid === "" || payload.uid === null || typeof payload.uid === "undefined") delete payload.uid;
+        if(payload.storagePath === "" || payload.storagePath === null || typeof payload.storagePath === "undefined") delete payload.storagePath;
+        await t.setDoc(i, { ...payload, updatedAt: t.serverTimestamp(), createdAt: payload.createdAt || t.serverTimestamp() }, { merge: !0 })
       }
+
+      // === Payroll Index (fallback quando le query Firestore sono bloccate dalle regole) ===
+      function getRecentMonthKeys(count=36){
+        const out = [];
+        const now = new Date();
+        let y = now.getFullYear();
+        let m = now.getMonth() + 1; // 1..12
+        for(let i=0;i<count;i++){
+          out.push(`${y}-${String(m).padStart(2,"0")}`);
+          m--;
+          if(m<=0){ m=12; y--; }
+        }
+        return out;
+      }
+
+      async function upsertPayrollIndex(info){
+        try{
+          if(!(N.firebase?.ok)) return;
+          const api = N.firebase.api, db = N.firebase.db;
+          const emailLower = String(info?.emailLower||"").toLowerCase();
+          const monthKey = normalizeMonthKey(info?.monthKey||"") || String(info?.monthKey||"").trim();
+          if(!emailLower || !monthKey) return;
+
+          const ref = api.doc(db, "payrollIndex", emailLower);
+          let prev = {};
+          try{
+            const snap = await api.getDoc(ref);
+            if(snap?.exists()) prev = snap.data() || {};
+          }catch(_e){}
+
+          const months = Array.isArray(prev.months) ? prev.months.slice() : [];
+          if(!months.includes(monthKey)) months.push(monthKey);
+          months.sort((a,b)=> String(b).localeCompare(String(a)));
+
+          const docsByMonth = (prev.docsByMonth && typeof prev.docsByMonth === "object") ? { ...prev.docsByMonth } : {};
+          docsByMonth[monthKey] = {
+            docId: info.docId || `${emailLower}_${monthKey}`,
+            monthKey,
+            netPayText: info.netPayText || "",
+            netPayCents: (typeof info.netPayCents === "number" ? info.netPayCents : (info.netPayCents ?? null)),
+            downloadUrl: info.downloadUrl || "",
+            fileName: info.fileName || info.sourceFileName || "",
+            pagesCount: info.pagesCount ?? null,
+            lastSentAtClient: Date.now(),
+            lastSentBy: info.adminEmail || N.user?.email || ""
+          };
+
+          await api.setDoc(ref, {
+            emailLower,
+            months,
+            docsByMonth,
+            updatedAt: api.serverTimestamp(),
+            updatedAtClient: Date.now()
+          }, { merge: true });
+        }catch(err){
+          console.warn("payroll index upsert", err);
+        }
+      }
+
+      function appendLocalSendLog(evt){
+        try{
+          const key = "payroll_send_logs_local_v1";
+          const arr = JSON.parse(localStorage.getItem(key) || "[]");
+          arr.unshift(evt);
+          localStorage.setItem(key, JSON.stringify(arr.slice(0, 200)));
+        }catch(_e){}
+      }
+      function readLocalSendLogs(){
+        try{
+          const key = "payroll_send_logs_local_v1";
+          return JSON.parse(localStorage.getItem(key) || "[]");
+        }catch(_e){ return []; }
+      }
+      async function upsertSendLogIndex(evt){
+        try{
+          if(!(N.firebase?.ok)) return;
+          const api = N.firebase.api, db = N.firebase.db;
+          const ref = api.doc(db, "payrollSendLogIndex", "global");
+          let logs = [];
+          try{
+            const snap = await api.getDoc(ref);
+            if(snap?.exists()){
+              const d = snap.data() || {};
+              logs = Array.isArray(d.logs) ? d.logs.slice() : [];
+            }
+          }catch(_e){}
+          logs.unshift(evt);
+          logs = logs.slice(0, 200);
+          await api.setDoc(ref, { logs, updatedAt: api.serverTimestamp(), updatedAtClient: Date.now() }, { merge: true });
+        }catch(err){
+          console.warn("send log index upsert", err);
+        }
+      }
+
 
       function Ei(e) {
         const t = String(e || ""), n = t.match(/\\b(20[0-9]{2})[-/.](0[1-9]|1[0-2])\\b/), o = n ? `${n[1]}-${n[2]}` : null, i = t.match(/(?:netto|paga|compenso)[^0-9]{0,12}([0-9]{1,3}(?:[.][0-9]{3})*(?:,[0-9]{2})?)/i) || t.match(/([0-9]{1,3}(?:[.][0-9]{3})*(?:,[0-9]{2}))\\s*(?:€|euro|eur)/i), a = i ? i[1] : null, r = t.match(/\\b([A-Z]{6}[A-Z0-9]{2}[A-Z][A-Z0-9]{2}[A-Z][A-Z0-9]{3}[A-Z])\\b/i), s = r ? r[1].toUpperCase() : null;
@@ -1913,12 +2013,24 @@ function renderUploadHistory(){
 
       async function logPayrollSendEvent(payload){
         try{
+          const evt = {
+            ...payload,
+            adminEmail: payload?.adminEmail || N.user?.email || "",
+            adminUid: payload?.adminUid || N.user?.uid || "",
+            sentAtClient: Date.now(),
+            sentAtISO: new Date().toISOString()
+          };
+          // Sempre: salva in locale + tenta indice (fallback se le regole bloccano LIST)
+          try{ appendLocalSendLog(evt); }catch(_e){}
+          try{ upsertSendLogIndex(evt); }catch(_e){}
+
+          // Best-effort: log classico su collection (se consentito)
           if(!(N.firebase?.ok && N.user?.isAdmin)) return;
           const api = N.firebase.api, db = N.firebase.db;
-          const col = api.collection(db, COL_PAYROLL_SEND_LOGS);
-          await api.addDoc(col, { ...payload, sentAt: api.serverTimestamp() });
+          const ref = api.collection(db, COL_PAYROLL_SEND_LOGS);
+          await api.addDoc(ref, { ...payload, sentAt: api.serverTimestamp(), createdAt: api.serverTimestamp() });
         }catch(err){
-          console.warn("payroll send log add", err);
+          console.warn("payroll send log write", err);
         }
       }
 
@@ -2021,93 +2133,110 @@ function renderUploadHistory(){
         if(!(N.firebase?.ok && N.user?.isAdmin)) return;
         N.payroll = N.payroll || {};
         N.payroll.admin = N.payroll.admin || {};
-        if(N.payroll.admin._sendLogPermDenied){
-          renderPayrollSendLogs();
-          return;
-        }
+        const api = N.firebase.api, db = N.firebase.db;
+
+        let rawLogs = [];
+        let source = "query";
+
+        // 1) prova query classica (LIST)
         try{
-          const api = N.firebase.api, db = N.firebase.db;
           const q = api.query(api.collection(db, COL_PAYROLL_SEND_LOGS), api.orderBy("sentAt","desc"), api.limit(200));
           const snap = await api.getDocs(q);
-
-          const logs = [];
-          const docKeys = new Set();
           snap?.forEach(d=>{
             const x = d.data() || {};
-            logs.push({
-              id: d.id,
-              docKey: x.docKey || x.payrollDocKey || "",
-              payrollDocId: x.payrollDocId || x.docId || "",
-              emailLower: x.emailLower || "",
-              fullName: x.fullName || "",
-              fiscalCode: x.fiscalCode || "",
-              monthKey: x.monthKey || "",
-              pagesCount: typeof x.pagesCount==="number" ? x.pagesCount : (Array.isArray(x.pageIndices) ? x.pageIndices.length : null),
-              netPayText: x.netPayText || "",
-              sentAt: x.sentAt || null,
-              adminEmail: x.adminEmail || "",
-              adminUid: x.adminUid || ""
-            });
-            if(x.docKey) docKeys.add(x.docKey);
+            rawLogs.push({ id: d.id, ...x });
           });
-
-          N.payroll.admin.sendLogs = logs;
-
-          const validIds = new Set(logs.map(l=>l.id).filter(Boolean));
-          const cleanedSelection = {};
-          const currentSel = N.payroll.admin.sendLogSelection || {};
-          Object.keys(currentSel).forEach(id=>{ if(validIds.has(id) && currentSel[id]) cleanedSelection[id] = true; });
-          N.payroll.admin.sendLogSelection = cleanedSelection;
-
-          // prefetch openedAt per payrollDocs (join leggero)
-          const openedByDocKey = {};
-          const keys = Array.from(docKeys).slice(0, 120);
-          for(const k of keys){
-            try{
-              const ref = api.doc(db, COL_PAYROLL_DOCS, k);
-              const gd = await api.getDoc(ref);
-              if(gd.exists()){
-                const d = gd.data() || {};
-                openedByDocKey[k] = { openedAt: d.openedAt || null };
-              }
-            }catch(_e){}
-          }
-          N.payroll.admin.openedByDocKey = openedByDocKey;
-
-          // Meta UI
-          const metaTxt = logs.length ? `Totale log: ${logs.length}` : "Nessun log.";
-          const metaA = U("payrollSendLogMeta");
-          const metaB = U("sendLogCardMeta");
-          if(metaA) metaA.textContent = metaTxt;
-          if(metaB) metaB.textContent = metaTxt;
-
-          renderPayrollSendLogs();
         }catch(err){
-          console.warn("payroll send logs load", err);
-          const perm = (err?.code === "permission-denied") || /permission/i.test(String(err?.message||""));
-          if(perm){
-            N.payroll.admin._sendLogPermDenied = true;
-            N.payroll.admin.sendLogs = [];
-            N.payroll.admin.openedByDocKey = {};
-            const msg = "Permessi mancanti su Firestore per lo storico invii.";
-            const metaA = U("payrollSendLogMeta");
-            const metaB = U("sendLogCardMeta");
-            if(metaA) metaA.textContent = msg;
-            if(metaB) metaB.textContent = msg;
-
-            // Disattiva i reload per evitare spam in console
-            ["btnSendLogReload","btnSendLogModalReload"].forEach(id=>{ const b=U(id); if(b) b.disabled = true; });
-
-            // Nascondi il pulsante rapido (la funzione non è disponibile con le regole attuali)
-            const openBtn = U("btnOpenSendLogModal");
-            if(openBtn) openBtn.style.display = "none";
-
-            Ve("Storico invii non disponibile", msg);
-          }else{
-            Ve("Errore storico invii", err?.message || String(err));
+          source = "fallback";
+          if(err?.code !== "permission-denied"){
+            console.warn("payroll send logs load", err);
           }
-          renderPayrollSendLogs();
+          // 2) fallback: indice doc noto (GET)
+          try{
+            const idxSnap = await api.getDoc(api.doc(db, "payrollSendLogIndex", "global"));
+            if(idxSnap?.exists()){
+              const d = idxSnap.data() || {};
+              if(Array.isArray(d.logs)) rawLogs = d.logs.slice();
+              source = "index";
+            }
+          }catch(_e){}
+          // 3) fallback finale: localStorage
+          if(!rawLogs.length){
+            try{ rawLogs = readLocalSendLogs() || []; source = "local"; }catch(_e){}
+          }
         }
+
+        // Normalizza
+        const logs = [];
+        const docKeys = new Set();
+        const validIds = new Set();
+
+        (rawLogs || []).forEach((i, idx)=>{
+          const emailLower = (i.emailLower || "").toLowerCase();
+          const monthKey = i.monthKey || "";
+          const docKey = i.payrollDocId || i.docKey || (emailLower && monthKey ? `${emailLower}_${monthKey}` : "");
+          if(docKey) docKeys.add(docKey);
+
+          const sentAtText =
+            i.sentAt?.toDate ? i.sentAt.toDate().toLocaleString("it-IT") :
+            (i.sentAtISO ? new Date(i.sentAtISO).toLocaleString("it-IT") :
+            (i.sentAtClient ? new Date(i.sentAtClient).toLocaleString("it-IT") : ""));
+
+          const stableId = i.id || `${i.sentAtClient||Date.now()}_${emailLower||"?"}_${monthKey||"?"}_${idx}`;
+          validIds.add(stableId);
+
+          logs.push({
+            id: stableId,
+            sentAt: sentAtText,
+            sentAtClient: i.sentAtClient || null,
+            emailLower,
+            monthKey,
+            fullName: i.fullName || "",
+            netPayText: i.netPayText || "",
+            netPayCents: i.netPayCents || null,
+            pagesCount: i.pagesCount || 0,
+            docKey,
+            payrollDocId: i.payrollDocId || "",
+            adminEmail: i.adminEmail || "",
+            status: i.status || ""
+          });
+        });
+
+        // Ordina (preferisci client time se manca server time in fallback)
+        logs.sort((a,b)=> (b.sentAtClient||0) - (a.sentAtClient||0));
+
+        N.payroll.admin.sendLogs = logs;
+        N.payroll.admin._sendLogSource = source;
+
+        // Mantieni selezione valida
+        const cleanedSelection = {};
+        const currentSel = N.payroll.admin.sendLogSelection || {};
+        Object.keys(currentSel).forEach(id=>{ if(validIds.has(id) && currentSel[id]) cleanedSelection[id] = true; });
+        N.payroll.admin.sendLogSelection = cleanedSelection;
+
+        // prefetch openedAt per payrollDocs (join via GET docId)
+        const openedByDocKey = {};
+        const keys = Array.from(docKeys).slice(0, 120);
+        for(const k of keys){
+          try{
+            const ref = api.doc(db, COL_PAYROLL_DOCS, k);
+            const gd = await api.getDoc(ref);
+            if(gd.exists()){
+              const d = gd.data() || {};
+              openedByDocKey[k] = { openedAt: d.openedAt || null };
+            }
+          }catch(_e){}
+        }
+        N.payroll.admin.openedByDocKey = openedByDocKey;
+
+        // Meta UI
+        const metaTxt = logs.length ? `Totale log: ${logs.length} (fonte: ${source})` : `Nessun log. (fonte: ${source})`;
+        const metaA = U("payrollSendLogMeta");
+        const metaB = U("sendLogCardMeta");
+        if(metaA) metaA.textContent = metaTxt;
+        if(metaB) metaB.textContent = metaTxt;
+
+        renderPayrollSendLogs();
       }
 
       function sendLogSelectAll(){
@@ -2655,7 +2784,7 @@ async function Yi() {
             await withTimeout(ki({
               docId,
               emailLower,
-              uid: "",
+              uid: (N.user && N.user.emailLower===emailLower ? N.user.uid : ""),
               fullName: row.displayName || row.fiscalCode || "",
               fiscalCode: row.fiscalCode || "",
               monthKey: row.monthKey,
@@ -2669,6 +2798,21 @@ async function Yi() {
               pageIndices,
               matchScore: row.matchScore || 0
             }), 60000, "Timeout invio");
+            try{
+              await upsertPayrollIndex({
+                emailLower,
+                monthKey: row.monthKey,
+                docId,
+                netPayText: row.netPayText || "",
+                netPayCents: (typeof row.netPayCents === "number" ? row.netPayCents : (row.netPayCents ?? null)),
+                downloadUrl: uploaded.url || existingData?.downloadUrl || "",
+                fileName: e.sourceFileName || "",
+                pagesCount: (pageIndices||[]).length,
+                adminEmail: N.user?.email || "",
+                adminUid: N.user?.uid || ""
+              });
+            }catch(_e){}
+
             try{
               await logPayrollSendEvent({
                 docKey: `${emailLower}_${row.monthKey}`,
@@ -3333,46 +3477,198 @@ function buildSafePdfName(base){
         const view = N.payroll.userView = N.payroll.userView || {};
         const emailLower = (view.emailLower || N.user?.emailLower || "").toLowerCase();
         if(!emailLower) return;
-        // Se è già attiva la modalità live (onSnapshot), evita doppio fetch.
-        if(view.live && view.unsub && view._watchEmail === emailLower){
-          return;
-        }
+
+        // Se è già attiva la modalità live per questa mail, evita doppio lavoro
+        if(view.live && view.unsub && view._watchEmail === emailLower) return;
+
+        // reset listener precedente
+        try{ view.unsub && view.unsub(); }catch(_e){}
+        view.unsub = null;
+        view.live = false;
+        view._watchEmail = emailLower;
+
         view.loading = true;
         view.error = "";
-        try{
-          const api = N.firebase.api;
-          const db = N.firebase.db;
-          const q = api.query(api.collection(db, COL_PAYROLL_DOCS), api.where("emailLower","==",emailLower), api.limit(200));
-          const snap = await api.getDocs(q);
-          const docs = [];
-          snap?.forEach(doc=>{
-            const d = doc.data() || {};
-            docs.push({
-              docId: doc.id,
-              monthKey: d.monthKey || "",
-              netPayText: d.netPayText || "",
-              netPayCents: d.netPayCents || null,
-              downloadUrl: d.downloadUrl || d.pdfUrl || d.url || "",
-              updatedAt: d.updatedAt?.toDate ? d.updatedAt.toDate().toLocaleString("it-IT") : "",
-              fileName: d.sourceFileName || "",
-              fullName: d.fullName || "",
-              fiscalCode: d.fiscalCode || ""
-            });
-          });
+
+        const api = N.firebase.api;
+        const db = N.firebase.db;
+
+        const mapDoc = (docSnap)=>{
+          const d = docSnap.data() || {};
+          return {
+            docId: docSnap.id,
+            monthKey: d.monthKey || "",
+            netPayText: d.netPayText || "",
+            netPayCents: (typeof d.netPayCents === "number" ? d.netPayCents : (d.netPayCents ?? null)),
+            downloadUrl: d.downloadUrl || d.pdfUrl || d.url || "",
+            updatedAt: d.updatedAt?.toDate ? d.updatedAt.toDate().toLocaleString("it-IT") : "",
+            fileName: d.sourceFileName || d.fileName || "",
+            fullName: d.fullName || "",
+            fiscalCode: d.fiscalCode || "",
+            openedAt: d.openedAt || null
+          };
+        };
+
+        const applyDocs = (docs)=>{
+          const prevSel = view.selectedMonth || "";
+          docs = (docs || []).filter(Boolean);
           docs.sort((a,b)=> (b.monthKey||"").localeCompare(a.monthKey||""));
           view.docs = docs;
           view.months = docs.map(d=>d.monthKey).filter(Boolean);
-          view.filteredMonths = view.searchTerm ? (view.months||[]).filter(m=>String(m||"").toLowerCase().includes(view.searchTerm||"")) : view.months;
-          view.selectedMonth = view.filteredMonths[0] || view.months[0] || "";
+          view.filteredMonths = view.searchTerm ? (view.months || []).filter(m=> String(m||"").toLowerCase().includes((view.searchTerm||"").toLowerCase())) : view.months;
+          view.selectedMonth = (prevSel && (view.filteredMonths||[]).includes(prevSel)) ? prevSel : (view.filteredMonths[0] || view.months[0] || "");
           view.ready = true;
           view.error = "";
           Ri();
           Oi();
+        };
+
+        try{
+          // 1) PROVA "LIST" (query). Se le regole Firestore bloccano LIST, qui arriviamo a permission-denied.
+          const q = api.query(api.collection(db, COL_PAYROLL_DOCS), api.where("emailLower","==",emailLower), api.limit(200));
+          const snap = await api.getDocs(q);
+          const docs = [];
+          snap?.forEach(doc=> docs.push(mapDoc(doc)));
+          applyDocs(docs);
+
+          // Live via query (se consentito)
+          try{
+            view.unsub = api.onSnapshot(q, ss=>{
+              try{
+                const liveDocs = [];
+                ss?.forEach(doc=> liveDocs.push(mapDoc(doc)));
+                applyDocs(liveDocs);
+                view.live = true;
+              }catch(err){
+                console.warn("payroll user watch parse", err);
+              }
+            }, err=>{
+              console.warn("payroll user watch err", err);
+            });
+            view.live = true;
+          }catch(_e){}
         }catch(err){
-          console.warn("payroll user fetch", err);
-          view.error = err?.message || "Errore caricamento.";
-          view.ready = false;
-          Oi();
+          // 2) FALLBACK: nessuna LIST -> usa INDEX doc + (se serve) GET dei singoli payrollDocs
+          if(err?.code !== "permission-denied"){
+            console.warn("payroll user fetch", err);
+          }
+          let loaded = false;
+
+          // 2a) payrollIndex/{emailLower}
+          try{
+            const idxRef = api.doc(db, "payrollIndex", emailLower);
+            const idxSnap = await api.getDoc(idxRef);
+            if(idxSnap?.exists()){
+              const idx = idxSnap.data() || {};
+              const docsByMonth = (idx.docsByMonth && typeof idx.docsByMonth === "object") ? idx.docsByMonth : {};
+              const docs = [];
+              for(const mk of Object.keys(docsByMonth||{})){
+                const x = docsByMonth[mk] || {};
+                docs.push({
+                  docId: x.docId || `${emailLower}_${mk}`,
+                  monthKey: mk,
+                  netPayText: x.netPayText || "",
+                  netPayCents: (typeof x.netPayCents === "number" ? x.netPayCents : (x.netPayCents ?? null)),
+                  downloadUrl: x.downloadUrl || "",
+                  fileName: x.fileName || "",
+                  updatedAt: x.updatedAt || ""
+                });
+              }
+
+              // completa dati mancanti facendo GET sui doc reali (no LIST)
+              for(const d of docs){
+                if(!d.downloadUrl || !d.updatedAt || !d.fileName){
+                  try{
+                    const ds = await api.getDoc(api.doc(db, COL_PAYROLL_DOCS, d.docId));
+                    if(ds.exists()){
+                      const full = mapDoc(ds);
+                      d.netPayText = d.netPayText || full.netPayText;
+                      d.netPayCents = (d.netPayCents ?? full.netPayCents);
+                      d.downloadUrl = d.downloadUrl || full.downloadUrl;
+                      d.fileName = d.fileName || full.fileName;
+                      d.updatedAt = d.updatedAt || full.updatedAt;
+                      d.openedAt = full.openedAt || null;
+                      d.fullName = full.fullName || "";
+                      d.fiscalCode = full.fiscalCode || "";
+                    }
+                  }catch(_e){}
+                }
+              }
+
+              applyDocs(docs);
+              loaded = true;
+
+              // Live via INDEX doc (no LIST)
+              try{
+                view.unsub = api.onSnapshot(idxRef, async ss=>{
+                  try{
+                    if(!ss.exists()){ applyDocs([]); return; }
+                    const idx2 = ss.data() || {};
+                    const dbm = (idx2.docsByMonth && typeof idx2.docsByMonth === "object") ? idx2.docsByMonth : {};
+                    const docs2 = [];
+                    for(const mk of Object.keys(dbm||{})){
+                      const x = dbm[mk] || {};
+                      docs2.push({
+                        docId: x.docId || `${emailLower}_${mk}`,
+                        monthKey: mk,
+                        netPayText: x.netPayText || "",
+                        netPayCents: (typeof x.netPayCents === "number" ? x.netPayCents : (x.netPayCents ?? null)),
+                        downloadUrl: x.downloadUrl || "",
+                        fileName: x.fileName || "",
+                        updatedAt: x.updatedAt || ""
+                      });
+                    }
+                    // se manca url, prova GET doc
+                    for(const d of docs2){
+                      if(!d.downloadUrl){
+                        try{
+                          const ds = await api.getDoc(api.doc(db, COL_PAYROLL_DOCS, d.docId));
+                          if(ds.exists()){
+                            const full = mapDoc(ds);
+                            d.downloadUrl = d.downloadUrl || full.downloadUrl;
+                            d.fileName = d.fileName || full.fileName;
+                            d.updatedAt = d.updatedAt || full.updatedAt;
+                            d.openedAt = full.openedAt || null;
+                            d.fullName = full.fullName || "";
+                            d.fiscalCode = full.fiscalCode || "";
+                            d.netPayText = d.netPayText || full.netPayText;
+                            d.netPayCents = (d.netPayCents ?? full.netPayCents);
+                          }
+                        }catch(_e){}
+                      }
+                    }
+                    applyDocs(docs2);
+                    view.live = true;
+                  }catch(_e){}
+                });
+                view.live = true;
+              }catch(_e){}
+            }
+          }catch(_e){}
+
+          // 2b) Scansione ultimi mesi: GET su docId deterministici (no LIST)
+          if(!loaded){
+            const docs = [];
+            const months = getRecentMonthKeys(36);
+            for(const mk of months){
+              const id = `${emailLower}_${mk}`;
+              try{
+                const ds = await api.getDoc(api.doc(db, COL_PAYROLL_DOCS, id));
+                if(ds.exists()){
+                  docs.push(mapDoc(ds));
+                }
+              }catch(_e){}
+            }
+            applyDocs(docs);
+            loaded = true;
+          }
+
+          if(!loaded){
+            view.ready = true;
+            view.error = "Nessun documento trovato.";
+            Ri();
+            Oi();
+          }
         }finally{
           view.loading = false;
         }
@@ -3391,74 +3687,8 @@ function buildSafePdfName(base){
       }
 
       function startPayrollUserDocsWatch(){
-        if(!(N.firebase?.ok)) return;
-        const view = N.payroll.userView = N.payroll.userView || {};
-        const emailLower = (view.emailLower || N.user?.emailLower || "").toLowerCase();
-        if(!emailLower) return;
-
-        // evita doppio listener
-        if(view.live && view.unsub && view._watchEmail === emailLower) return;
-
-        stopPayrollUserDocsWatch();
-        view.loading = true;
-        view.error = "";
-        view._watchEmail = emailLower;
-
-        try{
-          const api = N.firebase.api;
-          const db = N.firebase.db;
-          const q = api.query(api.collection(db, COL_PAYROLL_DOCS), api.where("emailLower","==",emailLower), api.limit(200));
-          view.unsub = api.onSnapshot(q, snap=>{
-            try{
-              const docs = [];
-              snap?.forEach(doc=>{
-                const d = doc.data() || {};
-                docs.push({
-                  docId: doc.id,
-                  monthKey: d.monthKey || "",
-                  netPayText: d.netPayText || "",
-                  netPayCents: d.netPayCents || null,
-                  downloadUrl: d.downloadUrl || d.pdfUrl || d.url || "",
-                  updatedAt: d.updatedAt?.toDate ? d.updatedAt.toDate().toLocaleString("it-IT") : "",
-                  fileName: d.sourceFileName || "",
-                  fullName: d.fullName || "",
-                  fiscalCode: d.fiscalCode || "",
-                  openedAt: d.openedAt || null
-                });
-              });
-              docs.sort((a,b)=> (b.monthKey||"").localeCompare(a.monthKey||""));
-
-              const prevSel = view.selectedMonth || "";
-              view.docs = docs;
-              view.months = docs.map(d=>d.monthKey).filter(Boolean);
-              view.filteredMonths = view.searchTerm ? (view.months||[]).filter(m=>String(m||"").toLowerCase().includes((view.searchTerm||"").toLowerCase())) : view.months;
-              view.selectedMonth = (prevSel && (view.filteredMonths||[]).includes(prevSel)) ? prevSel : (view.filteredMonths[0] || view.months[0] || "");
-
-              view.ready = true;
-              view.error = "";
-              view.live = true;
-              view.loading = false;
-              Ri();
-              Oi();
-            }catch(err){
-              console.warn("payroll user watch parse", err);
-            }
-          }, err=>{
-            if(err?.code !== "permission-denied") console.warn("payroll user watch", err);
-            view.error = err?.message || "Errore caricamento.";
-            view.ready = false;
-            view.live = false;
-            view.loading = false;
-            Oi();
-          });
-        }catch(err){
-          console.warn("payroll user watch init", err);
-          view.error = err?.message || "Errore caricamento.";
-          view.ready = false;
-          view.loading = false;
-          view.live = false;
-          Oi();
-        }
+        // Delegato a Fi(): gestisce sia query che fallback (no LIST)
+        try{ Fi(); }catch(_e){}
       }
 
 
