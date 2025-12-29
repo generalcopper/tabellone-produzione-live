@@ -247,6 +247,21 @@
   .pdfPreviewHeader{ padding:12px; }
 }
 
+
+    /* === Payroll Dipendente: selezione mesi + lista documenti === */
+    .payrollUserControls{margin-top:12px;display:flex;flex-direction:column;gap:10px;}
+    .payrollUserControlRow{display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;}
+    .payrollUserLabel{font-size:12px;font-weight:850;opacity:.75;margin:0 0 6px 2px;}
+    .payrollUserSelect{width:100%;min-width:220px;padding:10px 12px;border-radius:14px;border:1px solid rgba(0,0,0,.12);background:rgba(255,255,255,.9);font-weight:800;}
+    .payrollUserSelect:focus{outline:none;box-shadow:0 0 0 4px rgba(10,132,255,.18);border-color:rgba(10,132,255,.45);}
+    .payrollUserList{display:flex;flex-direction:column;gap:8px;max-height:240px;overflow:auto;padding-right:4px;-webkit-overflow-scrolling:touch;}
+    .payrollUserRow{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 12px;border:1px solid rgba(0,0,0,.08);border-radius:16px;background:rgba(255,255,255,.80);cursor:pointer;}
+    .payrollUserRowMain{min-width:0;flex:1;}
+    .payrollUserRowTitle{font-weight:900;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+    .payrollUserRowSub{font-size:12px;opacity:.75;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+    .payrollUserRowAction{flex:0 0 auto;}
+    .payrollUserError{margin-top:4px;font-size:12px;color:rgba(175,0,0,.92);font-weight:800;display:none;}
+
 </style>
   <style id="payrollStyles">
     .payrollCard{position:relative;overflow:hidden;border-radius:22px;padding:18px;border:1px solid rgba(15,23,42,.06);background:#fff;box-shadow:0 18px 42px rgba(15,23,42,.12);display:flex;flex-direction:column;gap:12px}
@@ -600,6 +615,20 @@
             <div class="payrollBadgeSmall" id="payrollUserDate">Aggiornato —</div>
           </div>
           <div class="pcHint heroHint" id="payrollGreetingSub">Accedi per aprire la tua busta paga.</div>
+          <div class="payrollUserControls" id="payrollUserControls">
+            <div class="payrollUserControlRow">
+              <div style="flex:1;min-width:220px">
+                <div class="payrollUserLabel">Mese</div>
+                <select id="payrollMonthSelect" class="payrollUserSelect" disabled>
+                  <option value="">Nessun mese disponibile</option>
+                </select>
+              </div>
+              <button class="payrollBtn ghost" id="btnPayrollUserReload" type="button">Aggiorna</button>
+            </div>
+            <div class="payrollUserList" id="payrollUserList"></div>
+            <div class="payrollUserError" id="payrollUserError"></div>
+          </div>
+
           <div class="payrollActionButtons">
             <button class="payrollBtn primary" id="btnPayrollPreviewPage" type="button">Visualizza la tua busta paga</button>
           </div>
@@ -1443,6 +1472,11 @@ function __payrollLoadScript(src){
 
           const blob = new Blob([bytes], { type:"application/pdf" });
           const objUrl = URL.createObjectURL(blob);
+
+          // track object URL so we can revoke it on close
+          N.ui = N.ui || {};
+          N.ui.pdfPreview = N.ui.pdfPreview || {};
+          N.ui.pdfPreview.objectUrl = objUrl;
 
           const pageLabel = (row.pageNos && row.pageNos.length) ? row.pageNos.join(", ") : pages.map(p=>p+1).join(", ");
           const title = `Anteprima · ${row.displayName || row.fiscalCode || row.email || "PDF"}`;
@@ -2567,6 +2601,7 @@ async function Yi() {
       bindPayrollBtn("#btnOpenPayrollUser", async () => { await Fi().catch(e=>{console.warn("payroll user load error",e);try{Ve("Buste paga","Impossibile caricare (permessi o rete).");}catch(_){}}); scrollToSection("userArea"); });
       bindPayrollBtn("#btnOpenPayrollAdmin", async () => { await openAdminModalFlow(); });
       U("btnPayrollPreviewPage")?.addEventListener("click", () => openPayrollPreviewPage());
+      U("btnPayrollUserReload")?.addEventListener("click", async ()=>{ try{ await Fi(); }catch(_e){} try{ startPayrollUserDocsWatch(); }catch(_e){} });
       U("btnPayrollOpenPdf")?.addEventListener("click", () => openPayrollPdfWindow());
       U("btnPayrollPrint")?.addEventListener("click", () => { const e = N.payroll.userView.currentUrl; if (!e) return void Ve("PDF non pronto", "Seleziona un mese disponibile."); const t = window.open(e, "_blank"); try { t?.print() } catch (e) {} });
       // PDF preview overlay buttons
@@ -2947,8 +2982,7 @@ const payrollDirAutofill = () => {
       }
 
       
-      
-      // PDF Preview overlay (same file, no external preview page)
+      // PDF Preview overlay (same file, no #)
       function showPdfPreview({ title, sub, srcUrl, fileName, markOpenedVia } = {}){
         const overlay = U("pdfPreviewOverlay");
         const frame = U("pdfPreviewFrame");
@@ -2959,18 +2993,15 @@ const payrollDirAutofill = () => {
         N.ui = N.ui || {};
         N.ui.pdfPreview = N.ui.pdfPreview || { objectUrl:"", directUrl:"", fileName:"" };
 
-        const nextUrl = (srcUrl || "");
-        const isBlob = typeof nextUrl === "string" && nextUrl.startsWith("blob:");
-
-        // cleanup old object URL (only if different)
+        // cleanup old object URL
         try{
-          if(N.ui.pdfPreview.objectUrl && N.ui.pdfPreview.objectUrl !== nextUrl){
+          if(N.ui.pdfPreview.objectUrl){
             URL.revokeObjectURL(N.ui.pdfPreview.objectUrl);
           }
         }catch(_e){}
 
-        N.ui.pdfPreview.objectUrl = isBlob ? nextUrl : "";
-        N.ui.pdfPreview.directUrl = nextUrl;
+        N.ui.pdfPreview.objectUrl = "";
+        N.ui.pdfPreview.directUrl = srcUrl || "";
         N.ui.pdfPreview.fileName = fileName || "busta_paga.pdf";
         N.ui.pdfPreview.title = title || "Anteprima PDF";
         N.ui.pdfPreview.sub = sub || "—";
@@ -2979,7 +3010,7 @@ const payrollDirAutofill = () => {
         if(s) s.textContent = N.ui.pdfPreview.sub;
 
         // set iframe src (remote URL or blob URL)
-        try{ frame.src = N.ui.pdfPreview.directUrl || "about:blank"; }catch(_e){}
+        try{ frame.src = N.ui.pdfPreview.directUrl || ""; }catch(_e){}
 
         overlay.setAttribute("aria-hidden","false");
         document.body.classList.add("modalOpen");
@@ -3017,17 +3048,19 @@ const payrollDirAutofill = () => {
         return (clean || "busta_paga") + ".pdf";
       }
 
-async function openPayrollPdfWindow(){
-        const url = N.payroll?.userView?.currentUrl;
+      async function openPayrollPdfWindow(){
+        const view = N.payroll?.userView = N.payroll?.userView || {};
+        if(!view.currentUrl){ try{ await Fi(); }catch(_e){} }
+        const url = view.currentUrl || "";
         if(!url){ Ve("PDF non pronto","Seleziona un mese disponibile."); return; }
         markPayrollDocOpened("pdf");
         window.open(url, "_blank");
       }
 
-      
-      function openPayrollPreviewPage(){
-        const view = N.payroll?.userView || {};
-        const url = view.currentUrl;
+      async function openPayrollPreviewPage(){
+        const view = N.payroll?.userView = N.payroll?.userView || {};
+        if(!view.currentUrl){ try{ await Fi(); }catch(_e){} }
+        const url = view.currentUrl || "";
         if(!url){ Ve("PDF non pronto","Seleziona un mese disponibile."); return; }
 
         const docs = view.docs || [];
@@ -3035,7 +3068,7 @@ async function openPayrollPdfWindow(){
         const month = current.monthKey || view.selectedMonth || "—";
         const amount = current.netPayText || "";
         const title = `Busta paga · ${getDisplayNameFromUser()}`;
-        const sub = `${month}${amount ? " · " + amount : ""}`;
+        const sub = `${formatPayrollMonthLabel(month)}${amount ? " · " + amount : ""}`;
 
         const fnameBase = `${getDisplayNameFromUser()} ${month}`.trim();
         showPdfPreview({
@@ -3046,49 +3079,73 @@ async function openPayrollPdfWindow(){
           markOpenedVia: "preview"
         });
       }
+
       function Ri(){
         const view = N.payroll?.userView || {};
         const docs = view.docs || [];
         const select = U("payrollMonthSelect");
-        const chart = U("payrollChart");
         const badgeMonth = U("payrollUserMonthBadge");
         const badgeAmount = U("payrollUserAmountBadge");
-        const greeting = U("payrollGreeting");
         const greetingSub = U("payrollGreetingSub");
         const net = U("payrollUserNet");
         const meta = U("payrollUserDocMeta");
         const date = U("payrollUserDate");
+        const errBox = U("payrollUserError");
+
         const filtered = view.searchTerm ? (view.filteredMonths || []) : (view.months || []);
-        if(select){
-          select.innerHTML = filtered.map(m=>`<option value="${Ao(m)}">${Ao(m)}</option>`).join("");
-          if(view.selectedMonth && filtered.includes(view.selectedMonth)){
-            select.value = view.selectedMonth;
-          }else{
-            view.selectedMonth = filtered[0] || "";
-            select.value = view.selectedMonth || "";
-          }
-          select.onchange = ()=>{ view.selectedMonth = select.value; Ri(); };
+        const options = (filtered && filtered.length) ? filtered : (view.months || []);
+
+        if(errBox){
+          const msg = String(view.error||"").trim();
+          errBox.style.display = msg ? "block" : "none";
+          errBox.textContent = msg || "";
         }
-        const current = docs.find(d=>d.monthKey===view.selectedMonth) || docs[0];
+
+        if(select){
+          if(!docs.length){
+            select.innerHTML = `<option value="">Nessun mese disponibile</option>`;
+            select.disabled = true;
+          }else{
+            if(!view.selectedMonth || !options.includes(view.selectedMonth)){
+              view.selectedMonth = options[0] || docs[0]?.monthKey || "";
+            }
+            const listMonths = (options.length ? options : docs.map(d=>d.monthKey)).filter(Boolean);
+            select.innerHTML = listMonths.map(m=> {
+              const label = formatPayrollMonthLabel(m);
+              const sel = (m===view.selectedMonth) ? " selected" : "";
+              return `<option value="${Ao(m)}"${sel}>${Ao(label)}</option>`;
+            }).join("");
+            select.disabled = false;
+            select.value = view.selectedMonth || "";
+            select.onchange = ()=>{ view.selectedMonth = select.value; Ri(); };
+          }
+        }
+
+        const current = docs.find(d=>d.monthKey===view.selectedMonth) || docs[0] || null;
         if(current){
-          badgeMonth && (badgeMonth.textContent = current.monthKey || "—");
+          const label = formatPayrollMonthLabel(current.monthKey || "");
+          badgeMonth && (badgeMonth.textContent = label || current.monthKey || "—");
           badgeAmount && (badgeAmount.textContent = current.netPayText || "—");
-          greeting && (greeting.textContent = `Ciao, ${getDisplayNameFromUser()}.`);
-          greetingSub && (greetingSub.textContent = "Grazie per il tuo contributo: le tue buste sono pronte.");
           net && (net.textContent = current.netPayText || "—");
-          meta && (meta.textContent = `Documento: ${current.fileName||"—"}`);
+          const file = current.fileName || "";
+          meta && (meta.textContent = file ? `Documento: ${file}` : `Documento: ${label || current.monthKey || "—"}`);
           date && (date.textContent = current.updatedAt || "Aggiornato —");
+          greetingSub && (greetingSub.textContent = "Seleziona un mese e apri il PDF.");
           view.currentUrl = current.downloadUrl || "";
           view.currentDocKey = current.docId || "";
         }else{
           badgeMonth && (badgeMonth.textContent = "—");
           badgeAmount && (badgeAmount.textContent = "—");
+          net && (net.textContent = "—");
+          meta && (meta.textContent = "Documento: —");
+          date && (date.textContent = "Aggiornato —");
           view.currentUrl = "";
-          greeting && (greeting.textContent = `Ciao, ${getDisplayNameFromUser()}.`);
-          greetingSub && (greetingSub.textContent = "Seleziona un mese disponibile o attendi la pubblicazione della busta paga.");
+          greetingSub && (greetingSub.textContent = "Nessun documento disponibile. Se sei admin, carica e invia. Se sei dipendente, attendi la pubblicazione.");
         }
-        if(chart){ chart.textContent = docs.length ? "Storico pronto" : "Nessun dato"; }
+
+        renderPayrollUserList();
       }
+
 
       async function Fi() {
         if(!(N.firebase?.ok)) return;
@@ -3114,7 +3171,7 @@ async function openPayrollPdfWindow(){
               monthKey: d.monthKey || "",
               netPayText: d.netPayText || "",
               netPayCents: d.netPayCents || null,
-              downloadUrl: d.downloadUrl || "",
+              downloadUrl: d.downloadUrl || d.pdfUrl || d.url || "",
               updatedAt: d.updatedAt?.toDate ? d.updatedAt.toDate().toLocaleString("it-IT") : "",
               fileName: d.sourceFileName || "",
               fullName: d.fullName || "",
@@ -3180,7 +3237,7 @@ async function openPayrollPdfWindow(){
                   monthKey: d.monthKey || "",
                   netPayText: d.netPayText || "",
                   netPayCents: d.netPayCents || null,
-                  downloadUrl: d.downloadUrl || "",
+                  downloadUrl: d.downloadUrl || d.pdfUrl || d.url || "",
                   updatedAt: d.updatedAt?.toDate ? d.updatedAt.toDate().toLocaleString("it-IT") : "",
                   fileName: d.sourceFileName || "",
                   fullName: d.fullName || "",
@@ -3233,6 +3290,8 @@ async function openPayrollPdfWindow(){
           N.payroll.userView.emailLower = N.user?.emailLower || N.payroll.userView.emailLower || "";
         }catch(_e){}
         try{ Oi(); }catch(_e){}
+        try{ Fi(); }catch(_e){}
+        try{ startPayrollUserDocsWatch(); }catch(_e){}
         try{ if(N.user?.isAdmin){ startPayrollDirectoryWatch(); loadUploadHistory(); } }catch(_e){}
         try{ if(N.user?.isAdmin || N.user?.isWhitelisted !== false) startPayrollUserDocsWatch(); else { N.payroll.userView = N.payroll.userView || {}; N.payroll.userView.error = "Non sei abilitato alle buste paga."; N.payroll.userView.ready = false; Oi(); } }catch(_e){}
         try{ if(N.user?.isAdmin) zi(); }catch(_e){}
