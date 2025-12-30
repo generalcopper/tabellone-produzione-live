@@ -795,27 +795,18 @@
         const key = (state.settings.ocrKey || "").trim();
         if (key) headers["X-OCR-KEY"] = key;
 
-        // Il proxy spesso non espone /health: facciamo un ping "leggero"
-        // 1) proviamo OPTIONS (tipico preflight) sull’endpoint OCR
-        // 2) se fallisce, proviamo una GET su /health solo come fallback
-        let ok = false;
-        try {
-          const r1 = await fetch(url, { method: "OPTIONS", headers });
-          ok = r1 && (r1.ok || r1.status === 204);
-        } catch (_) {}
+        // Ping senza preflight “artificiale”:
+        // inviamo una POST con FormData vuota. Se il proxy risponde 400 “Missing file”,
+        // significa comunque che è raggiungibile e CORS è ok.
+        const fd = new FormData();
+        const r = await fetch(url, { method: "POST", headers, body: fd });
 
-        if (!ok) {
-          const base = url.replace(/\/__sandbox\/ocr-image(\/)?$/i, "");
-          const healthUrl = base.endsWith("/") ? (base + "health") : (base + "/health");
-          const r2 = await fetch(healthUrl, { method: "GET", headers });
-          ok = r2 && r2.ok;
-        }
-
-        if (ok) {
-          setOcrPill("ok", "OCR: pronto");
+        if (r.ok || r.status === 400) {
+          setOcrPill("ok", "OCR: collegato");
           return true;
         }
-        setOcrPill("warn", "OCR: risposta anomala");
+
+        setOcrPill("warn", `OCR: risposta ${r.status}`);
         return false;
       } catch (e) {
         setOcrPill("bad", "OCR: non raggiungibile");
