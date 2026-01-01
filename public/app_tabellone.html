@@ -4,8 +4,8 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>LINEA LIQUIDI AUTOMATICA</title>
-  <link rel="icon" href="favicon.png" type="image/png">
-<link rel="apple-touch-icon" href="apple-touch-icon.png">
+  <link rel="icon" type="image/png" href="./logo%20tabellone.png">
+<link rel="apple-touch-icon" sizes="180x180" href="./logo%20tabellone.png">
 
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
   <meta http-equiv="Pragma" content="no-cache" />
@@ -2384,6 +2384,7 @@ async function playCue(kind){
   function serverNowMs(){ return Date.now() + _serverOffsetMs; }
 
   async function syncServerOffset(){
+    if(window.__OFFLINE_ONLY) return;
     try{
       const pingRef = doc(db, "producedDays", LINE_BUCKET, "meta", "ping");
       await setDoc(pingRef, { ts: serverTimestamp() }, { merge:true });
@@ -2395,7 +2396,7 @@ async function playCue(kind){
         _serverOffsetMs = serverMs - tRecv;
       }
     }catch(e){
-      console.log("syncServerOffset error:", e);
+      _handleFsListenerError("syncServerOffset", e);
     }
   }
 
@@ -2416,7 +2417,7 @@ async function playCue(kind){
       const cred = await signInAnonymously(auth);
       return cred.user;
     }catch(e){
-      console.warn("Accesso anonimo non disponibile (kiosk):", e);
+      /* accesso anonimo non disponibile (kiosk) */
       return null;
     }
   }
@@ -2444,16 +2445,8 @@ async function playCue(kind){
   }
 
 
-  // Se fai login dopo un errore permessi, riagganciamo gli snapshot automaticamente
-  try{
-    onAuthStateChanged(auth, (u) => {
-      if(u){
-                try{ initFirestoreRealtime(); }catch(_){}
-        try{ initWipStateRealtime(); }catch(_){}
-        try{ syncServerOffset(); }catch(_){}
-      }
-    });
-  }catch(_){}
+    // (Kiosk) Nessun login manuale: nessun onAuthStateChanged.
+
 
 
 
@@ -2555,6 +2548,7 @@ async function playCue(kind){
   let _unsubState = null;
 
   function initWipStateRealtime(){
+    if(window.__OFFLINE_ONLY) return;
     try{ if(_unsubState) _unsubState(); }catch(_){}
     _unsubState = onSnapshot(stateDoc, (snap) => {
       const v = snap.data() || {};
@@ -2571,6 +2565,7 @@ async function playCue(kind){
 
 
   async function ensureWipStateInitialized(firstActiveKey){
+    if(window.__OFFLINE_ONLY) return;
     if(_wipInitDone) return;
     if(!firstActiveKey) return;
     _wipInitDone = true;
@@ -2801,7 +2796,63 @@ async function playCue(kind){
   }
 
 
+  function _markProducedLocal(key, qty, label, announce, meta){
+    try{
+      const it = { key, qty, label };
+
+      if(meta && Number.isFinite(meta.durationMs)){
+        it.durationMs = Math.max(0, Math.floor(meta.durationMs));
+      }
+      if(meta && Number.isFinite(meta.startedAtMs)){
+        it.startedAtMs = Math.floor(meta.startedAtMs);
+      }
+      if(meta && meta.signatureDataUrl){
+        it.signatureDataUrl = String(meta.signatureDataUrl);
+      }
+      if(meta && meta.signatureBy){
+        it.signatureBy = String(meta.signatureBy);
+      }
+      if(meta && Number.isFinite(meta.signatureClientMs)){
+        it.signatureClientMs = Math.floor(meta.signatureClientMs);
+      }
+
+      // per calcolo lotto/ordine cronologico anche offline
+      it.completedAtClientMs = (meta && Number.isFinite(meta.completedAtClientMs))
+        ? Math.floor(meta.completedAtClientMs)
+        : Date.now();
+
+      if(announce && announce.text){
+        it.announceText = String(announce.text);
+        it.announceBy = announce.by || DEVICE_ID;
+        it.announceClientMs = announce.clientMs || Date.now();
+      }
+
+      producedCloud.set(key, it);
+      saveProducedBackupNow();
+      renderProducedFromCloud();
+      applyForcedStatuses();
+      updateAllWipTimers();
+      try{ MobileUI.updateFromProduced(); }catch(_){}
+    }catch(_){}
+  }
+
+  function _unmarkProducedLocal(key){
+    try{
+      producedCloud.delete(key);
+      saveProducedBackupNow();
+      renderProducedFromCloud();
+      applyForcedStatuses();
+      updateAllWipTimers();
+      try{ MobileUI.updateFromProduced(); }catch(_){}
+    }catch(_){}
+  }
+
   function markProducedCloud(key, qty, label, announce, meta){
+    if(window.__OFFLINE_ONLY){
+      _markProducedLocal(key, qty, label, announce, meta);
+      return Promise.resolve();
+    }
+
     const id = keyToDocId(key);
     const payload = { key, qty, label, ts: serverTimestamp() };
 
@@ -2820,6 +2871,7 @@ async function playCue(kind){
     if(meta && Number.isFinite(meta.signatureClientMs)){
       payload.signatureClientMs = Math.floor(meta.signatureClientMs);
     }
+
     payload.completedAt = serverTimestamp();
     payload.completedAtClientMs = Date.now();
 
@@ -2829,12 +2881,31 @@ async function playCue(kind){
       payload.announceClientMs = announce.clientMs || Date.now();
     }
 
-    return setDoc(doc(producedCol, id), payload, { merge: true });
+    return setDoc(doc(producedCol, id), payload, { merge: true }).catch((e) => {
+      if(_isPermDenied(e)){
+        _handleFsListenerError("writeProduced", e);
+        _markProducedLocal(key, qty, label, announce, meta);
+        return;
+      }
+      throw e;
+    });
   }
 
   function unmarkProducedCloud(key){
+    if(window.__OFFLINE_ONLY){
+      _unmarkProducedLocal(key);
+      return Promise.resolve();
+    }
+
     const id = keyToDocId(key);
-    return deleteDoc(doc(producedCol, id));
+    return deleteDoc(doc(producedCol, id)).catch((e) => {
+      if(_isPermDenied(e)){
+        _handleFsListenerError("deleteProduced", e);
+        _unmarkProducedLocal(key);
+        return;
+      }
+      throw e;
+    });
   }
 
   function escapeHtml(str){
@@ -2946,7 +3017,6 @@ async function playCue(kind){
   }
 
   let _unsubProduced = null;
-  let _fsLastPermWarn = 0;
 
   function _isPermDenied(err){
     try{
@@ -2956,39 +3026,40 @@ async function playCue(kind){
     }catch(_){ return false; }
   }
 
+  // Anti-spam + fallback kiosk: se Firestore nega i permessi, passiamo in SOLO LOCALE e stacchiamo i listener.
+  let _fsDeniedLock = false;
+  const _fsLogged = new Set();
+
   function _handleFsListenerError(scope, err){
-    console.log(scope + " snapshot error:", err);
     if(window.__OFFLINE_ONLY) return;
 
     if(_isPermDenied(err)){
-      const now = Date.now();
-      if(now - _fsLastPermWarn > 1500){
-        _fsLastPermWarn = now;
-        try{ setCloudStatus('offline','permessi'); }catch(_){}
-      }
+      if(_fsDeniedLock) return;
+      _fsDeniedLock = true;
 
-      // recovery soft (kiosk): prova accesso anonimo e riaggancia gli snapshot
-      (async ()=>{
-        try{
-          const u = await ensureAuthSoft();
-          if(u){
-            try{ initFirestoreRealtime(); }catch(_){}
-            try{ initWipStateRealtime(); }catch(_){}
-            try{ syncServerOffset(); }catch(_){}
-            return;
-          }
-        }catch(_){}
+      try{
+        console.warn("Firestore: permessi mancanti. Modalità SOLO LOCALE (kiosk).", { scope, code: err?.code });
+      }catch(_){}
 
-        // fallback: modalità locale (non blocca il kiosk)
-        window.__OFFLINE_ONLY = true;
-        try{ setCloudStatus('offline','solo locale'); }catch(_){}
-        try{ loadProducedBackupNow(); }catch(_){}
-      })();
+      window.__OFFLINE_ONLY = true;
+      try{ setCloudStatus('offline','solo locale'); }catch(_){}
+      try{ if(_unsubProduced) _unsubProduced(); }catch(_){}
+      try{ if(_unsubState) _unsubState(); }catch(_){}
+      try{ if(window.__syncOffsetTimer) clearInterval(window.__syncOffsetTimer); }catch(_){}
+      try{ loadProducedBackupNow(); }catch(_){}
+      return;
     }
+
+    // Log una volta per evitare centinaia di righe in console
+    const sig = scope + "::" + String((err && (err.code || err.message)) || "error");
+    if(_fsLogged.has(sig)) return;
+    _fsLogged.add(sig);
+    try{ console.warn(scope + " Firestore error:", err); }catch(_){}
   }
 
 
   function initFirestoreRealtime(){
+    if(window.__OFFLINE_ONLY) return;
     let firstSnap = true;
 
     try{ if(_unsubProduced) _unsubProduced(); }catch(_){}
@@ -3053,10 +3124,15 @@ async function playCue(kind){
     try{ setCloudStatus('loading','Connessione…'); }catch(_){ }
     try{ await ensureAuthSoft(); }catch(_){}
     try{ await migrateLegacyTodayToStable(); }catch(_){}
-    initFirestoreRealtime();
-    syncServerOffset();
-    setInterval(syncServerOffset, 5 * 60 * 1000);
-    initWipStateRealtime();
+    try{ initFirestoreRealtime(); }catch(_){}
+    try{ syncServerOffset(); }catch(_){}
+    if(!window.__OFFLINE_ONLY){
+      window.__syncOffsetTimer = setInterval(syncServerOffset, 5 * 60 * 1000);
+      try{ initWipStateRealtime(); }catch(_){}
+    }else{
+      try{ setCloudStatus('offline','solo locale'); }catch(_){}
+      try{ loadProducedBackupNow(); }catch(_){}
+    }
     setInterval(updateAllWipTimers, 250);
   })();
 
@@ -3178,7 +3254,7 @@ async function playCue(kind){
           updatedBy: DEVICE_ID,
           updatedClientMs: Date.now()
         }, { merge:true });
-      }catch(e){ console.log('set stateDoc error:', e); }
+      }catch(e){ _handleFsListenerError('stateDocWrite', e); }
 
       try{
         producedCloud.set(pendingKey, { key: pendingKey, qty, label, ts: null });
@@ -3403,7 +3479,7 @@ async function playCue(kind){
           updatedBy: DEVICE_ID,
           updatedClientMs: Date.now()
         }, { merge:true });
-      }catch(e){ console.log('set stateDoc error (mobile sign):', e); }
+      }catch(e){ _handleFsListenerError('stateDocWrite', e); }
 
       // aggiorna subito UI locale
       try{
