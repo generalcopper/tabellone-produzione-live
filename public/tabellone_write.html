@@ -165,6 +165,20 @@
       border:1px solid var(--line);
       background: var(--row);
     }
+    /* Reorder (long‑press) */
+    .qItem.canReorder{cursor:grab;}
+    .qItem.canReorder:active{cursor:grabbing;}
+    .qItem.placeholder{
+      border:2px dashed rgba(10,102,255,.35);
+      background: rgba(10,102,255,.06);
+    }
+    .qItem.dragging{
+      background:#ffffff;
+      box-shadow: 0 18px 45px rgba(15,23,42,.18);
+      transform: scale(1.02);
+    }
+    body.dragging{user-select:none;}
+
     .qMain{min-width:0}
     .qTitle{font-weight:950; font-size:14px; margin:0; white-space:normal; line-height:1.25;}
     .qMeta{
@@ -322,6 +336,7 @@ Se scrivi solo testo, lo salvo come prodotto e lo mando comunque."></textarea>
             <div>
               <h2>Coda kiosk (live)</h2>
               <p>Quello che vedi qui è quello che il kiosk vede. Puoi completare (elimina solo Admin).</p>
+              <p class="reorderTip">Suggerimento: tieni premuto su una riga per spostarla su/giù e cambiare la priorità.</p>
             </div>
             <div class="small" id="meInfo"></div>
           </div>
@@ -375,7 +390,7 @@ Se scrivi solo testo, lo salvo come prodotto e lo mando comunque."></textarea>
   import { initializeApp } from "https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js";
   import {
     getFirestore, collection, doc, getDoc, getDocs, setDoc, deleteDoc, onSnapshot,
-    serverTimestamp, writeBatch, query, orderBy
+    serverTimestamp, writeBatch, query, orderBy, Timestamp
   } from "https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js";
   import {
     getAuth, setPersistence, browserLocalPersistence,
@@ -446,6 +461,8 @@ Se scrivi solo testo, lo salvo come prodotto e lo mando comunque."></textarea>
   let isAdmin = false;
   let pendingComplete = null; // {id, job}
   let lastDoneItems = [];
+  let lastQueueItems = [];
+  let lastQueueById = new Map();
 
   function setCloud(state, detail=""){
     cloudChip.classList.remove("ok","bad");
@@ -725,6 +742,8 @@ Se scrivi solo testo, lo salvo come prodotto e lo mando comunque."></textarea>
         rawLine: it.rawLine || "",
         createdAt: serverTimestamp(),
         createdAtMs: Date.now(),
+        createdAtOrig: serverTimestamp(),
+        createdAtOrigMs: Date.now(),
         createdByUid: currentUser?.uid || null,
         createdByEmail: currentUser?.email || null
       };
@@ -818,13 +837,244 @@ Se scrivi solo testo, lo salvo come prodotto e lo mando comunque."></textarea>
     setTimeout(()=>{ try{ URL.revokeObjectURL(url); }catch(_){} }, 60000);
   }
 
+
+  // --- RIORDINO CODA (long press) ---
+  // Long-press su una riga in coda → trascina su/giù per cambiare priorità (persistente su Firestore)
+  let dragCtx = null;
+
+  function getXY(e){
+    if(e && e.touches && e.touches[0]) return { x: e.touches[0].clientX, y: e.touches[0].clientY };
+    return { x: e?.clientX ?? 0, y: e?.clientY ?? 0 };
+  }
+
+  function bindQueueReorder(el){
+    if(!el) return;
+
+    let timer = null;
+    let sx = 0, sy = 0;
+
+    const cancel = () => { if(timer){ clearTimeout(timer); timer = null; } };
+
+    const onDown = (e) => {
+      // niente drag se parto da un bottone
+      if(e?.target && e.target.closest && e.target.closest("button")) return;
+      if(e?.button !== undefined && e.button !== 0) return;
+
+      const p = getXY(e);
+      sx = p.x; sy = p.y;
+
+      cancel();
+      timer = setTimeout(() => {
+        cancel();
+        beginDrag(el, p.x, p.y);
+      }, 360);
+    };
+
+    const onMove = (e) => {
+      if(!timer) return;
+      const p = getXY(e);
+      if(Math.abs(p.y - sy) > 10 || Math.abs(p.x - sx) > 10) cancel(); // l'utente sta scrollando
+    };
+
+    const onUp = () => cancel();
+
+    el.addEventListener("pointerdown", onDown);
+    el.addEventListener("pointermove", onMove);
+    el.addEventListener("pointerup", onUp);
+    el.addEventListener("pointercancel", onUp);
+    el.addEventListener("contextmenu", (e)=>{ e.preventDefault(); });
+  }
+
+  function beginDrag(originalEl, startX, startY){
+    if(dragCtx) return;
+
+    const id = originalEl?.dataset?.id;
+    if(!id) return;
+
+    const rect = originalEl.getBoundingClientRect();
+
+    const ph = document.createElement("div");
+    ph.className = "qItem placeholder";
+    ph.style.height = rect.height + "px";
+    ph.dataset.placeholder = "1";
+
+    // placeholder al posto della riga
+    queueEl.insertBefore(ph, originalEl);
+
+    // porta la riga in overlay
+    originalEl.classList.add("dragging");
+    document.body.classList.add("dragging");
+    const _prevTouchAction = document.body.style.touchAction;
+    document.body.style.touchAction = "none";
+
+    const offsetY = startY - rect.top;
+
+    originalEl.style.position = "fixed";
+    originalEl.style.left = rect.left + "px";
+    originalEl.style.top = rect.top + "px";
+    originalEl.style.width = rect.width + "px";
+    originalEl.style.zIndex = "9999";
+    originalEl.style.pointerEvents = "none";
+
+    document.body.appendChild(originalEl);
+
+    dragCtx = {
+      id,
+      el: originalEl,
+      placeholder: ph,
+      offsetY,
+      moved: false,
+      startOrder: (lastQueueItems || []).map(x => x.id),
+      lockLeft: rect.left,
+      width: rect.width
+    };
+
+    try{ navigator.vibrate && navigator.vibrate(10); }catch(_){}
+
+    const onMove = (e) => {
+      if(!dragCtx) return;
+      e.preventDefault();
+
+      const p = getXY(e);
+
+      // segui dito (solo verticale, più stabile)
+      const top = p.y - dragCtx.offsetY;
+      dragCtx.el.style.top = top + "px";
+      dragCtx.el.style.left = dragCtx.lockLeft + "px";
+      dragCtx.el.style.width = dragCtx.width + "px";
+
+      // auto-scroll vicino ai bordi
+      const edge = 80;
+      if(p.y < edge) window.scrollBy(0, -10);
+      else if(p.y > window.innerHeight - edge) window.scrollBy(0, 10);
+
+      const hit = document.elementFromPoint(p.x, p.y);
+      const target = hit && hit.closest ? hit.closest("#queue .qItem") : null;
+
+      if(!target) return;
+      if(target.dataset.placeholder === "1") return;
+
+      const tRect = target.getBoundingClientRect();
+      const before = p.y < (tRect.top + tRect.height / 2);
+
+      if(before){
+        if(dragCtx.placeholder !== target.previousSibling){
+          queueEl.insertBefore(dragCtx.placeholder, target);
+          dragCtx.moved = true;
+        }
+      }else{
+        if(target.nextSibling !== dragCtx.placeholder){
+          queueEl.insertBefore(dragCtx.placeholder, target.nextSibling);
+          dragCtx.moved = true;
+        }
+      }
+    };
+
+    const end = async (e) => {
+      if(!dragCtx) return;
+      e?.preventDefault?.();
+
+      document.removeEventListener("pointermove", onMove);
+      document.removeEventListener("pointerup", end);
+      document.removeEventListener("pointercancel", end);
+
+      const { el, placeholder, startOrder } = dragCtx;
+
+      // rimetto la riga dentro
+      el.style.position = "";
+      el.style.left = "";
+      el.style.top = "";
+      el.style.width = "";
+      el.style.zIndex = "";
+      el.style.pointerEvents = "";
+      el.classList.remove("dragging");
+      document.body.classList.remove("dragging");
+      document.body.style.touchAction = _prevTouchAction;
+
+      queueEl.insertBefore(el, placeholder);
+      placeholder.remove();
+
+      const ids = Array.from(queueEl.querySelectorAll(".qItem"))
+        .map(x => x.dataset.id)
+        .filter(Boolean);
+
+      const changed = ids.join("|") !== (startOrder || []).join("|");
+
+      dragCtx = null;
+
+      if(changed){
+        await persistQueueOrder(ids);
+      }
+    };
+
+    document.addEventListener("pointermove", onMove, { passive:false });
+    document.addEventListener("pointerup", end, { passive:false });
+    document.addEventListener("pointercancel", end, { passive:false });
+  }
+
+  async function persistQueueOrder(ids){
+    if(!ids || ids.length < 2) return;
+
+    try{
+      setCloud("loading","riordino…");
+
+      const oldIds = (lastQueueItems || []).map(x => x.id);
+      if(ids.join("|") === oldIds.join("|")){
+        setCloud("ok");
+        return;
+      }
+
+      // base = valore più piccolo attuale (così non “sposto” tutto nel futuro)
+      const msList = (lastQueueItems || [])
+        .map(it => Number(it.createdAtMs || 0))
+        .filter(n => Number.isFinite(n) && n > 0);
+
+      let base = msList.length ? Math.min(...msList) : (Date.now() - ids.length - 10);
+      if(!Number.isFinite(base)) base = Date.now() - ids.length - 10;
+
+      const batch = writeBatch(db);
+      const nowMs = Date.now();
+
+      ids.forEach((id, idx) => {
+        const it = lastQueueById.get(id) || {};
+        const newMs = base + idx;
+
+        const update = {
+          createdAt: Timestamp.fromMillis(newMs),  // usato per l'ordinamento (kiosk incluso)
+          createdAtMs: newMs,
+          orderUpdatedAt: serverTimestamp(),
+          orderUpdatedAtMs: nowMs,
+          orderUpdatedByUid: currentUser?.uid || null,
+          orderUpdatedByEmail: currentUser?.email || null
+        };
+
+        // preservo il "vero" creato la prima volta (se manca)
+        if(!it.hasOrig){
+          const origMs = Number(it.createdAtMs || newMs);
+          update.createdAtOrig = Timestamp.fromMillis(origMs);
+          update.createdAtOrigMs = origMs;
+        }
+
+        batch.set(doc(queueCol, id), update, { merge:true });
+      });
+
+      await batch.commit();
+      setCloud("ok");
+    }catch(e){
+      console.warn("persistQueueOrder error:", e);
+      setCloud("bad", e?.code || "error");
+      alert("Errore riordino: " + (e?.message || e?.code || "unknown"));
+    }
+  }
+
   function renderQueue(items){
     queueEl.innerHTML = "";
     emptyQueue.classList.toggle("hide", items.length !== 0);
 
     for(const it of items){
       const div = document.createElement("div");
-      div.className = "qItem";
+      div.className = "qItem canReorder";
+      div.dataset.id = it.id;
 
       const title = (it.product || "—") + (it.format ? (" • " + it.format) : "");
       const qty = (it.qty || "") ? `${it.qty} ${it.unit||""}`.trim() : "—";
@@ -840,7 +1090,7 @@ Se scrivi solo testo, lo salvo come prodotto e lo mando comunque."></textarea>
             <span class="sep">•</span>
             <span><b>Stato:</b> ${escapeHtml(st)}</span>
             <span class="sep">•</span>
-            <span><b>Creato:</b> ${escapeHtml(fmtWhen(it.createdAtMs))}</span>
+            <span><b>Creato:</b> ${escapeHtml(fmtWhen(it.createdAtOrigMs || it.createdAtMs))}</span>
           </div>
         </div>
         <div class="qBtns">
@@ -867,6 +1117,7 @@ Se scrivi solo testo, lo salvo come prodotto e lo mando comunque."></textarea>
       }
 
       queueEl.appendChild(div);
+      bindQueueReorder(div);
     }
   }
 
@@ -948,6 +1199,8 @@ Se scrivi solo testo, lo salvo come prodotto e lo mando comunque."></textarea>
       snap.forEach(d => {
         const v = d.data() || {};
         const createdAtMs = (v.createdAt && v.createdAt.toMillis) ? v.createdAt.toMillis() : (v.createdAtMs || 0);
+        const createdAtOrigMs = (v.createdAtOrig && v.createdAtOrig.toMillis) ? v.createdAtOrig.toMillis() : (v.createdAtOrigMs || createdAtMs);
+        const hasOrig = !!(v.createdAtOrig || v.createdAtOrigMs);
         items.push({
           id: d.id,
           product: (v.product || v.label || v.rawLine || "").toString().trim(),
@@ -955,9 +1208,13 @@ Se scrivi solo testo, lo salvo come prodotto e lo mando comunque."></textarea>
           unit: (v.unit || "").toString().trim(),
           format: (v.format || "").toString().trim(),
           status: (v.status || "DA PRODURRE").toString().trim(),
-          createdAtMs
+          createdAtMs,
+          createdAtOrigMs,
+          hasOrig
         });
       });
+      lastQueueItems = items;
+      lastQueueById = new Map(items.map(it => [it.id, it]));
       renderQueue(items);
       setCloud("ok");
     }, (err) => {
@@ -986,6 +1243,8 @@ Se scrivi solo testo, lo salvo come prodotto e lo mando comunque."></textarea>
         rawLine: j.rawLine || "",
         createdAt: serverTimestamp(),
         createdAtMs: Date.now(),
+        createdAtOrig: serverTimestamp(),
+        createdAtOrigMs: Date.now(),
         createdByUid: currentUser?.uid || null,
         createdByEmail: currentUser?.email || null
       };
