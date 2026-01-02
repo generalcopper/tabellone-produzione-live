@@ -813,12 +813,12 @@ body.modalOpen{ overflow:hidden; }
 <div class="authTop">
 <div aria-hidden="true" class="authLogo">GC</div>
 <div>
-<div class="authTitle">Accesso richiesto</div>
-<div class="authSub">Entra con Google per aprire il portale aziendale.</div>
+<div class="authTitle">Verifica accesso…</div>
+<div class="authSub">Ripristino sessione in corso.</div>
 </div>
 </div>
 <div class="authActions">
-<button class="primaryBtn" id="btnGoogle" type="button">
+<button class="primaryBtn" id="btnGoogle" type="button" style="display:none">
 <span aria-hidden="true" class="gIcon">
 <svg height="18" viewbox="0 0 24 24" width="18">
 <path d="M12 10.2v3.9h5.5c-.2 1.3-1.5 3.9-5.5 3.9-3.3 0-6-2.7-6-6s2.7-6 6-6c1.9 0 3.2.8 3.9 1.5l2.7-2.6C17 3.2 14.7 2 12 2 6.5 2 2 6.5 2 12s4.5 10 10 10c5.8 0 9.6-4.1 9.6-9.8 0-.7-.1-1.2-.2-1.8H12z" fill="#EA4335"></path>
@@ -897,6 +897,12 @@ const $ = (id)=>document.getElementById(id);
 
 const overlay = $("authOverlay");
 const authMsg = $("authMsg");
+const authTitleEl = document.querySelector(".authTitle");
+const authSubEl = document.querySelector(".authSub");
+function setOverlayText(t, s){
+  if(authTitleEl) authTitleEl.textContent = t || "";
+  if(authSubEl) authSubEl.textContent = s || "";
+}
 const btnGoogle = $("btnGoogle");
 const btnReload = $("btnReload");
 const btnSignOutOverlay = $("btnSignOutOverlay");
@@ -941,9 +947,10 @@ function showOverlayState(state){
 }
 
 // Stato iniziale: pagina chiusa finché non sappiamo se l'utente è già loggato
-lockPage(true);
-showOverlayState("login");
-setMsg("");
+  lockPage(true);
+  showOverlayState("loading");
+  setOverlayText("Verifica accesso…", "Ripristino sessione in corso.");
+  setMsg("");
 
 // Init Firebase (dynamic import, come negli altri hub)
 let app, auth, db, authMod, fsMod;
@@ -1006,8 +1013,9 @@ const providerInit = async ()=>{
         }
       }
       console.error(err);
-      setMsg("Non riesco ad aprire l'accesso Google. Controlla popup/cookie e riprova.");
-      showOverlayState("error");
+      setOverlayText("Errore accesso", "Controlla popup/cookie e riprova.");
+        setMsg("Non riesco ad aprire l'accesso Google. Controlla popup/cookie e riprova.");
+        showOverlayState("error");
     }
   }
 
@@ -1061,29 +1069,8 @@ const providerInit = async ()=>{
     }
   }
 
-  async function maybeSilentReauth(){
-    // Tentativo massimo 1 volta per caricamento pagina (evita loop)
-    if(storage.sget("gc_silent_tried") === "1") return;
-    storage.sset("gc_silent_tried", "1");
-
-    // Solo se in passato avevi già fatto login qui
-    if(storage.get("gc_hadLogin") !== "1") return;
-
-    // Solo dove la persistenza tende a "ballare" (iOS / standalone)
-    if(!preferRedirect) return;
-
-    const hint = storage.get("gc_lastEmail") || "";
-    const params = hint ? { prompt: "none", login_hint: hint } : { prompt: "none" };
-    setProviderParams(params);
-
-    try{
-      // Se l'utente è ancora loggato su Google, rientra senza chiedere nulla
-      await authMod.signInWithRedirect(auth, googleProvider);
-    }catch(e){
-      // Se non è possibile (cookie/consenso), l'utente userà il bottone
-      console.warn("Silent reauth failed:", e);
-    }
-  }
+  // Silent reauth DISABILITATO: su iOS può mostrare per un istante la schermata Google.
+  // Se la persistenza funziona (ed ora è impostata), non serve.
 
   // Auth listener
   authMod.onAuthStateChanged(auth, async (user)=>{
@@ -1091,12 +1078,9 @@ const providerInit = async ()=>{
       if(userNameEl) userNameEl.textContent = "—";
       if(statusEl) statusEl.textContent = "Non connesso";
       lockPage(true);
+      setOverlayText("Accesso richiesto", "Entra con Google per aprire il portale aziendale.");
       showOverlayState("login");
       setMsg("");
-
-      // 🔁 Se iOS ha "dimenticato" la sessione, prova a rientrare in modo silenzioso
-      // (in caso non riesca, resta il bottone)
-      maybeSilentReauth();
       return;
     }
 
@@ -1114,6 +1098,7 @@ const providerInit = async ()=>{
 
     if(!role.isMember){
       lockPage(true);
+      setOverlayText("Accesso non autorizzato", "Il tuo account non è abilitato per questo portale.");
       showOverlayState("noaccess");
       setMsg("Accesso non autorizzato per questo account. Contatta l’amministratore.");
       document.querySelectorAll("[data-admin-only]").forEach(el=>el.style.display="none");
@@ -1133,6 +1118,7 @@ const providerInit = async ()=>{
 
 providerInit().catch((e)=>{
   console.error(e);
+  setOverlayText("Errore", "Ricarica la pagina o riprova.");
   setMsg("Errore di inizializzazione. Ricarica la pagina.");
   showOverlayState("error");
 });
