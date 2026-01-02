@@ -64,6 +64,22 @@
       color:var(--ink);
     }
 
+
+    /* Anti-selezione / anti-copia (mobile) */
+    html, body{
+      -webkit-touch-callout: none;
+      -webkit-user-select: none;
+      user-select: none;
+    }
+    /* niente highlight blu su tap */
+    *{ -webkit-tap-highlight-color: transparent; }
+    /* Lascia selezionabile solo dove serve (input/textarea) */
+    input, textarea, [contenteditable="true"]{
+      -webkit-user-select: text;
+      user-select: text;
+    }
+
+
     .wrap{max-width:1100px; margin:0 auto; padding:16px 14px 40px;}
     .top{
       display:flex; align-items:center; justify-content:space-between;
@@ -184,6 +200,7 @@
       margin-top: 10px;
     }
     .qItem{
+      will-change: transform;
       display:grid;
       grid-template-columns: 1fr auto;
       gap:10px;
@@ -1133,11 +1150,27 @@ Se scrivi solo testo, lo salvo come prodotto e lo mando comunque."></textarea>
   }
 
   function renderQueue(items){
-    queueEl.innerHTML = "";
+    const firstRects = captureRects(queueEl);
+
+    // mappa elementi esistenti (per non rimbindare gli handler e per animare i movimenti)
+    const existing = new Map();
+    for(const el of Array.from(queueEl.children)){
+      const id = el?.dataset?.id;
+      if(id) existing.set(id, el);
+    }
+
     emptyQueue.classList.toggle("hide", items.length !== 0);
 
+    const frag = document.createDocumentFragment();
+
     for(const it of items){
-      const div = document.createElement("div");
+      let div = existing.get(it.id);
+
+      const isNew = !div;
+      if(!div){
+        div = document.createElement("div");
+      }
+
       div.className = "qItem canReorder";
       div.dataset.id = it.id;
 
@@ -1181,19 +1214,47 @@ Se scrivi solo testo, lo salvo come prodotto e lo mando comunque."></textarea>
         });
       }
 
-      queueEl.appendChild(div);
-      bindQueueReorder(div);
+      // bind reorder UNA volta sola per elemento
+      if(isNew && !div.dataset.reorderBound){
+        bindQueueReorder(div);
+        div.dataset.reorderBound = "1";
+      }else if(!div.dataset.reorderBound){
+        // sicurezza: nel caso arrivi da vecchia versione
+        bindQueueReorder(div);
+        div.dataset.reorderBound = "1";
+      }
+
+      frag.appendChild(div);
     }
+
+    queueEl.replaceChildren(frag);
+
+    requestAnimationFrame(() => playFLIP(queueEl, firstRects));
   }
 
     function renderDone(items){
     if(!doneEl) return;
-    doneEl.innerHTML = "";
+
+    const firstRects = captureRects(doneEl);
+
+    const existing = new Map();
+    for(const el of Array.from(doneEl.children)){
+      const id = el?.dataset?.id;
+      if(id) existing.set(id, el);
+    }
+
     emptyDone?.classList.toggle("hide", items.length !== 0);
 
+    const frag = document.createDocumentFragment();
+
     for(const it of items){
-      const div = document.createElement("div");
+      let div = existing.get(it.id);
+      if(!div){
+        div = document.createElement("div");
+      }
+
       div.className = "qItem";
+      div.dataset.id = it.id;
 
       const title = (it.product || it.label || "—") + (it.format ? (" • " + it.format) : "");
       const qty = (it.qty || "") ? `${it.qty} ${it.unit||""}`.trim() : "—";
@@ -1217,9 +1278,12 @@ Se scrivi solo testo, lo salvo come prodotto e lo mando comunque."></textarea>
       const undoBtn = div.querySelector(".undoBtn");
       undoBtn?.addEventListener("click", () => undoCompletato(it));
 
-
-      doneEl.appendChild(div);
+      frag.appendChild(div);
     }
+
+    doneEl.replaceChildren(frag);
+
+    requestAnimationFrame(() => playFLIP(doneEl, firstRects));
   }
 
   let _unsubDone = null;
