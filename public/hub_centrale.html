@@ -902,22 +902,36 @@ const btnReload = $("btnReload");
 const btnSignOutOverlay = $("btnSignOutOverlay");
 const btnSignOut = $("btnSignOut");
 
-
 const userNameEl = $("userName");
 const statusEl = document.querySelector(".status span:last-child");
 
+const storage = {
+  get(k){ try{ return localStorage.getItem(k); }catch(_e){ return null; } },
+  set(k,v){ try{ localStorage.setItem(k, String(v)); }catch(_e){} },
+  del(k){ try{ localStorage.removeItem(k); }catch(_e){} },
+  sget(k){ try{ return sessionStorage.getItem(k); }catch(_e){ return null; } },
+  sset(k,v){ try{ sessionStorage.setItem(k, String(v)); }catch(_e){} },
+};
+
+function isIOS(){
+  // iPadOS 13+ reports as MacIntel
+  const ua = navigator.userAgent || "";
+  const iOS = /iPad|iPhone|iPod/i.test(ua);
+  const iPadOS = (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+  return iOS || iPadOS;
+}
+function isStandalone(){
+  try{
+    return (window.matchMedia && window.matchMedia("(display-mode: standalone)").matches) || !!window.navigator.standalone;
+  }catch(_e){ return false; }
+}
+const preferRedirect = isIOS() || isStandalone();
+
 function lockPage(lock){
   document.body.classList.toggle("locked", !!lock);
-  if(lock){
-    overlay.hidden = false;
-  }else{
-    overlay.hidden = true;
-  }
+  overlay.hidden = !lock;
 }
-
-function setMsg(msg){
-  authMsg.textContent = msg || "";
-}
+function setMsg(msg){ authMsg.textContent = msg || ""; }
 
 function showOverlayState(state){
   // state: "login" | "error" | "noaccess"
@@ -926,18 +940,14 @@ function showOverlayState(state){
   btnSignOutOverlay.style.display = (state === "noaccess") ? "" : "none";
 }
 
-
-
-
-
-
-
+// Stato iniziale: pagina chiusa finché non sappiamo se l'utente è già loggato
 lockPage(true);
 showOverlayState("login");
 setMsg("");
 
 // Init Firebase (dynamic import, come negli altri hub)
 let app, auth, db, authMod, fsMod;
+
 const providerInit = async ()=>{
   const [{ initializeApp }, _authMod, _fsMod] = await Promise.all([
     import("https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js"),
@@ -948,25 +958,46 @@ const providerInit = async ()=>{
   fsMod = _fsMod;
 
   app = initializeApp(firebaseConfig);
-  auth = authMod.getAuth(app);
-  db = fsMod.getFirestore(app);
 
+  // ✅ Persistenza "vera" (su iOS è fondamentale impostarla all'avvio)
   try{
-    await authMod.setPersistence(auth, authMod.browserLocalPersistence);
-  }catch(_e){}
+    auth = authMod.initializeAuth(app, {
+      persistence: [authMod.indexedDBLocalPersistence, authMod.browserLocalPersistence],
+      popupRedirectResolver: authMod.browserPopupRedirectResolver,
+    });
+  }catch(e){
+    auth = authMod.getAuth(app);
+    // best-effort: prova a forzare persistenza (se disponibile)
+    try{ await authMod.setPersistence(auth, authMod.indexedDBLocalPersistence); }catch(_e){}
+    try{ await authMod.setPersistence(auth, authMod.browserLocalPersistence); }catch(_e){}
+  }
+
+  db = fsMod.getFirestore(app);
+  try{ authMod.useDeviceLanguage?.(auth); }catch(_e){}
 
   const googleProvider = new authMod.GoogleAuthProvider();
-  try{ googleProvider.setCustomParameters({ prompt: "select_account" }); }catch(_e){}
 
-  async function signInWithGoogle(){
+  function setProviderParams(params){
+    try{ googleProvider.setCustomParameters(params || {}); }catch(_e){}
+  }
+
+  async function signInInteractive(){
     setMsg("");
     showOverlayState("login");
+
+    // Interattivo: mostra selezione account (utile se hai più Google)
+    setProviderParams({ prompt: "select_account" });
+
     try{
+      if(preferRedirect){
+        await authMod.signInWithRedirect(auth, googleProvider);
+        return;
+      }
       await authMod.signInWithPopup(auth, googleProvider);
     }catch(err){
       const code = err?.code || "";
-      // fallback redirect se popup bloccato
-      if(code === "auth/popup-blocked" || code === "auth/cancelled-popup-request"){
+      // fallback redirect se popup bloccato/non supportato
+      if(code === "auth/popup-blocked" || code === "auth/cancelled-popup-request" || code === "auth/operation-not-supported-in-this-environment"){
         try{
           await authMod.signInWithRedirect(auth, googleProvider);
           return;
@@ -980,13 +1011,14 @@ const providerInit = async ()=>{
     }
   }
 
-  btnGoogle?.addEventListener("click", signInWithGoogle);
+  btnGoogle?.addEventListener("click", signInInteractive);
   btnReload?.addEventListener("click", ()=>location.reload());
-
 
   // Sign out
   async function doSignOut(){
     try{ await authMod.signOut(auth); }catch(_e){}
+    storage.del("gc_lastEmail");
+    storage.del("gc_hadLogin");
   }
   btnSignOut?.addEventListener("click", doSignOut);
   btnSignOutOverlay?.addEventListener("click", doSignOut);
@@ -1001,7 +1033,6 @@ const providerInit = async ()=>{
       if(data.enabled === false) return null;
       return data;
     }catch(e){
-      // permessi o rete
       console.warn("getAccess error", e);
       return null;
     }
@@ -1019,31 +1050,72 @@ const providerInit = async ()=>{
     return { isMember:true, isAdmin: data.isAdmin === true };
   }
 
+  // ✅ IMPORTANTISSIMO: processa subito eventuale redirect (iOS a volte ripristina la sessione solo così)
+  try{
+    await authMod.getRedirectResult(auth);
+  }catch(e){
+    // errori "normali" da ignorare
+    const code = e?.code || "";
+    if(code && !["auth/no-auth-event", "auth/redirect-cancelled-by-user"].includes(code)){
+      console.warn("getRedirectResult error:", e);
+    }
+  }
+
+  async function maybeSilentReauth(){
+    // Tentativo massimo 1 volta per caricamento pagina (evita loop)
+    if(storage.sget("gc_silent_tried") === "1") return;
+    storage.sset("gc_silent_tried", "1");
+
+    // Solo se in passato avevi già fatto login qui
+    if(storage.get("gc_hadLogin") !== "1") return;
+
+    // Solo dove la persistenza tende a "ballare" (iOS / standalone)
+    if(!preferRedirect) return;
+
+    const hint = storage.get("gc_lastEmail") || "";
+    const params = hint ? { prompt: "none", login_hint: hint } : { prompt: "none" };
+    setProviderParams(params);
+
+    try{
+      // Se l'utente è ancora loggato su Google, rientra senza chiedere nulla
+      await authMod.signInWithRedirect(auth, googleProvider);
+    }catch(e){
+      // Se non è possibile (cookie/consenso), l'utente userà il bottone
+      console.warn("Silent reauth failed:", e);
+    }
+  }
+
   // Auth listener
   authMod.onAuthStateChanged(auth, async (user)=>{
     if(!user){
-      // not signed in
       if(userNameEl) userNameEl.textContent = "—";
       if(statusEl) statusEl.textContent = "Non connesso";
       lockPage(true);
       showOverlayState("login");
       setMsg("");
+
+      // 🔁 Se iOS ha "dimenticato" la sessione, prova a rientrare in modo silenzioso
+      // (in caso non riesca, resta il bottone)
+      maybeSilentReauth();
       return;
     }
 
-    // Signed in: check role
+    // Signed in
     const displayName = user.displayName || user.email || "Utente";
     if(userNameEl) userNameEl.textContent = displayName;
     if(statusEl) statusEl.textContent = "Connesso";
 
+    // Salva un hint per rientri silenziosi (iOS)
+    storage.set("gc_hadLogin", "1");
+    if(user.email) storage.set("gc_lastEmail", String(user.email).toLowerCase());
+
+    // Check role
     const role = await resolveRole(user);
 
     if(!role.isMember){
-      // Signed in but not authorized
       lockPage(true);
       showOverlayState("noaccess");
       setMsg("Accesso non autorizzato per questo account. Contatta l’amministratore.");
-      // Nascondi anche eventuali tile admin
       document.querySelectorAll("[data-admin-only]").forEach(el=>el.style.display="none");
       return;
     }
@@ -1052,15 +1124,11 @@ const providerInit = async ()=>{
     lockPage(false);
     setMsg("");
 
-
     // Admin-only tile
     document.querySelectorAll("[data-admin-only]").forEach(el=>{
       el.style.display = role.isAdmin ? "" : "none";
     });
   });
-
-  // Se siamo arrivati da redirect login
-  try{ await authMod.getRedirectResult(auth); }catch(_e){}
 };
 
 providerInit().catch((e)=>{
