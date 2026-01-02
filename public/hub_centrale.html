@@ -806,19 +806,48 @@ button.tile{
 body.modalOpen{ overflow:hidden; }
 
 #btnGoogle{ background:#fff !important; }
+
+/* --- Auth boot: no flash on iOS back/multitasking --- */
+.bootSpinner{
+  position:fixed;
+  inset:0;
+  display:none;
+  align-items:center;
+  justify-content:center;
+  background:#fff;
+  z-index:9998;
+}
+.bootSpinner .spin{
+  width:38px;
+  height:38px;
+  border-radius:999px;
+  border:3px solid rgba(0,0,0,.12);
+  border-top-color:rgba(0,0,0,.55);
+  animation:spin .9s linear infinite;
+}
+@keyframes spin{ to{ transform:rotate(360deg);} }
+
+.authOverlay[hidden]{ display:none !important; }
+
+/* Nascondi UI app finché Auth non è risolto, senza mostrare popup */
+body.authPending .wrap,
+body.authPending footer{ opacity:0; pointer-events:none; }
+body.showSpinner .bootSpinner{ display:flex; }
+
 </style>
 </head>
-<body class="locked"><div aria-label="Accesso" aria-modal="true" class="authOverlay" id="authOverlay" role="dialog">
+<body class="authPending">
+<div id="bootSpinner" class="bootSpinner" aria-hidden="true"><div class="spin"></div></div><div aria-label="Accesso" aria-modal="true" class="authOverlay" id="authOverlay" role="dialog" hidden>
 <div class="authCard">
 <div class="authTop">
 <div aria-hidden="true" class="authLogo">GC</div>
 <div>
-<div class="authTitle">Verifica accesso…</div>
-<div class="authSub">Ripristino sessione in corso.</div>
+<div class="authTitle">Accesso richiesto</div>
+<div class="authSub">Entra con Google per aprire il portale aziendale.</div>
 </div>
 </div>
 <div class="authActions">
-<button class="primaryBtn" id="btnGoogle" type="button" style="display:none">
+<button class="primaryBtn" id="btnGoogle" type="button">
 <span aria-hidden="true" class="gIcon">
 <svg height="18" viewbox="0 0 24 24" width="18">
 <path d="M12 10.2v3.9h5.5c-.2 1.3-1.5 3.9-5.5 3.9-3.3 0-6-2.7-6-6s2.7-6 6-6c1.9 0 3.2.8 3.9 1.5l2.7-2.6C17 3.2 14.7 2 12 2 6.5 2 2 6.5 2 12s4.5 10 10 10c5.8 0 9.6-4.1 9.6-9.8 0-.7-.1-1.2-.2-1.8H12z" fill="#EA4335"></path>
@@ -897,47 +926,64 @@ const $ = (id)=>document.getElementById(id);
 
 const overlay = $("authOverlay");
 const authMsg = $("authMsg");
-const authTitleEl = document.querySelector(".authTitle");
-const authSubEl = document.querySelector(".authSub");
-function setOverlayText(t, s){
-  if(authTitleEl) authTitleEl.textContent = t || "";
-  if(authSubEl) authSubEl.textContent = s || "";
-}
 const btnGoogle = $("btnGoogle");
 const btnReload = $("btnReload");
 const btnSignOutOverlay = $("btnSignOutOverlay");
 const btnSignOut = $("btnSignOut");
 
+
 const userNameEl = $("userName");
 const statusEl = document.querySelector(".status span:last-child");
 
-const storage = {
-  get(k){ try{ return localStorage.getItem(k); }catch(_e){ return null; } },
-  set(k,v){ try{ localStorage.setItem(k, String(v)); }catch(_e){} },
-  del(k){ try{ localStorage.removeItem(k); }catch(_e){} },
-  sget(k){ try{ return sessionStorage.getItem(k); }catch(_e){ return null; } },
-  sset(k,v){ try{ sessionStorage.setItem(k, String(v)); }catch(_e){} },
-};
+// Avvio: niente flash. Mostra al massimo la rotellina se il check dura.
+setPending(true);
 
-function isIOS(){
-  // iPadOS 13+ reports as MacIntel
-  const ua = navigator.userAgent || "";
-  const iOS = /iPad|iPhone|iPod/i.test(ua);
-  const iPadOS = (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
-  return iOS || iPadOS;
-}
-function isStandalone(){
-  try{
-    return (window.matchMedia && window.matchMedia("(display-mode: standalone)").matches) || !!window.navigator.standalone;
-  }catch(_e){ return false; }
-}
-const preferRedirect = isIOS() || isStandalone();
+// Failsafe: se qualcosa va storto (iOS cache/redirect), non lasciare schermo bianco
+setTimeout(()=>{
+  if(document.body.classList.contains("authPending")){
+    try{
+      setPending(false);
+      lockPage(true, true);
+      showOverlayState("error");
+      setMsg("Non riesco a verificare la sessione. Ricarica la pagina.");
+    }catch(_e){}
+  }
+}, 8000);
 
-function lockPage(lock){
+
+
+function lockPage(lock, showOverlay=true){
   document.body.classList.toggle("locked", !!lock);
-  overlay.hidden = !lock;
+  if(lock){
+    overlay.hidden = !showOverlay;
+  }else{
+    overlay.hidden = true;
+  }
 }
-function setMsg(msg){ authMsg.textContent = msg || ""; }
+
+let _spinnerTimer = null;
+function setPending(pending){
+  document.body.classList.toggle("authPending", !!pending);
+  if(pending){
+    // blocca l'app ma NON mostrare nessun popup
+    lockPage(true, false);
+    document.body.classList.remove("showSpinner");
+    clearTimeout(_spinnerTimer);
+    _spinnerTimer = setTimeout(()=>{
+      if(document.body.classList.contains("authPending")){
+        document.body.classList.add("showSpinner");
+      }
+    }, 250);
+  }else{
+    clearTimeout(_spinnerTimer);
+    document.body.classList.remove("showSpinner");
+  }
+}
+let __loginGateTimer = null;
+
+function setMsg(msg){
+  authMsg.textContent = msg || "";
+}
 
 function showOverlayState(state){
   // state: "login" | "error" | "noaccess"
@@ -946,15 +992,18 @@ function showOverlayState(state){
   btnSignOutOverlay.style.display = (state === "noaccess") ? "" : "none";
 }
 
-// Stato iniziale: pagina chiusa finché non sappiamo se l'utente è già loggato
-  lockPage(true);
-  showOverlayState("loading");
-  setOverlayText("Verifica accesso…", "Ripristino sessione in corso.");
-  setMsg("");
+
+
+
+
+
+
+lockPage(true);
+showOverlayState("login");
+setMsg("");
 
 // Init Firebase (dynamic import, come negli altri hub)
 let app, auth, db, authMod, fsMod;
-
 const providerInit = async ()=>{
   const [{ initializeApp }, _authMod, _fsMod] = await Promise.all([
     import("https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js"),
@@ -965,46 +1014,25 @@ const providerInit = async ()=>{
   fsMod = _fsMod;
 
   app = initializeApp(firebaseConfig);
-
-  // ✅ Persistenza "vera" (su iOS è fondamentale impostarla all'avvio)
-  try{
-    auth = authMod.initializeAuth(app, {
-      persistence: [authMod.indexedDBLocalPersistence, authMod.browserLocalPersistence],
-      popupRedirectResolver: authMod.browserPopupRedirectResolver,
-    });
-  }catch(e){
-    auth = authMod.getAuth(app);
-    // best-effort: prova a forzare persistenza (se disponibile)
-    try{ await authMod.setPersistence(auth, authMod.indexedDBLocalPersistence); }catch(_e){}
-    try{ await authMod.setPersistence(auth, authMod.browserLocalPersistence); }catch(_e){}
-  }
-
+  auth = authMod.getAuth(app);
   db = fsMod.getFirestore(app);
-  try{ authMod.useDeviceLanguage?.(auth); }catch(_e){}
+
+  try{
+    await authMod.setPersistence(auth, authMod.browserLocalPersistence);
+  }catch(_e){}
 
   const googleProvider = new authMod.GoogleAuthProvider();
+  try{ googleProvider.setCustomParameters({ prompt: "select_account" }); }catch(_e){}
 
-  function setProviderParams(params){
-    try{ googleProvider.setCustomParameters(params || {}); }catch(_e){}
-  }
-
-  async function signInInteractive(){
+  async function signInWithGoogle(){
     setMsg("");
     showOverlayState("login");
-
-    // Interattivo: mostra selezione account (utile se hai più Google)
-    setProviderParams({ prompt: "select_account" });
-
     try{
-      if(preferRedirect){
-        await authMod.signInWithRedirect(auth, googleProvider);
-        return;
-      }
       await authMod.signInWithPopup(auth, googleProvider);
     }catch(err){
       const code = err?.code || "";
-      // fallback redirect se popup bloccato/non supportato
-      if(code === "auth/popup-blocked" || code === "auth/cancelled-popup-request" || code === "auth/operation-not-supported-in-this-environment"){
+      // fallback redirect se popup bloccato
+      if(code === "auth/popup-blocked" || code === "auth/cancelled-popup-request"){
         try{
           await authMod.signInWithRedirect(auth, googleProvider);
           return;
@@ -1013,20 +1041,18 @@ const providerInit = async ()=>{
         }
       }
       console.error(err);
-      setOverlayText("Errore accesso", "Controlla popup/cookie e riprova.");
-        setMsg("Non riesco ad aprire l'accesso Google. Controlla popup/cookie e riprova.");
-        showOverlayState("error");
+      setMsg("Non riesco ad aprire l'accesso Google. Controlla popup/cookie e riprova.");
+      showOverlayState("error");
     }
   }
 
-  btnGoogle?.addEventListener("click", signInInteractive);
+  btnGoogle?.addEventListener("click", signInWithGoogle);
   btnReload?.addEventListener("click", ()=>location.reload());
+
 
   // Sign out
   async function doSignOut(){
     try{ await authMod.signOut(auth); }catch(_e){}
-    storage.del("gc_lastEmail");
-    storage.del("gc_hadLogin");
   }
   btnSignOut?.addEventListener("click", doSignOut);
   btnSignOutOverlay?.addEventListener("click", doSignOut);
@@ -1041,6 +1067,7 @@ const providerInit = async ()=>{
       if(data.enabled === false) return null;
       return data;
     }catch(e){
+      // permessi o rete
       console.warn("getAccess error", e);
       return null;
     }
@@ -1058,49 +1085,57 @@ const providerInit = async ()=>{
     return { isMember:true, isAdmin: data.isAdmin === true };
   }
 
-  // ✅ IMPORTANTISSIMO: processa subito eventuale redirect (iOS a volte ripristina la sessione solo così)
-  try{
-    await authMod.getRedirectResult(auth);
-  }catch(e){
-    // errori "normali" da ignorare
-    const code = e?.code || "";
-    if(code && !["auth/no-auth-event", "auth/redirect-cancelled-by-user"].includes(code)){
-      console.warn("getRedirectResult error:", e);
-    }
-  }
+  // Se siamo arrivati da redirect login (anti-flash) — inizializza PRIMA del listener
+  window.__gc_redirectDone = false;
+  window.__gc_redirectPromise = (async()=>{
+    try{ await authMod.getRedirectResult(auth); }catch(_e){}
+  })().finally(()=>{ window.__gc_redirectDone = true; });
 
-  // Silent reauth DISABILITATO: su iOS può mostrare per un istante la schermata Google.
-  // Se la persistenza funziona (ed ora è impostata), non serve.
-
-  // Auth listener
+// Auth listener
   authMod.onAuthStateChanged(auth, async (user)=>{
     if(!user){
+      // non mostrare subito il popup Google: evita flash su iOS (back/multitasking)
       if(userNameEl) userNameEl.textContent = "—";
       if(statusEl) statusEl.textContent = "Non connesso";
-      lockPage(true);
-      setOverlayText("Accesso richiesto", "Entra con Google per aprire il portale aziendale.");
-      showOverlayState("login");
-      setMsg("");
+
+      setPending(true);
+
+      const showLogin = ()=>{
+        clearTimeout(__loginGateTimer);
+        __loginGateTimer = setTimeout(()=>{
+          if(!auth.currentUser){
+            setPending(false);
+            lockPage(true, true);
+            showOverlayState("login");
+            setMsg("");
+          }
+        }, 350);
+      };
+
+      if(window.__gc_redirectDone === false && window.__gc_redirectPromise){
+        window.__gc_redirectPromise.finally(showLogin);
+      }else{
+        showLogin();
+      }
       return;
     }
 
-    // Signed in
+    // Signed in: ok, mostra l'app
+    clearTimeout(__loginGateTimer);
+    setPending(false);
+// Signed in: check role
     const displayName = user.displayName || user.email || "Utente";
     if(userNameEl) userNameEl.textContent = displayName;
     if(statusEl) statusEl.textContent = "Connesso";
 
-    // Salva un hint per rientri silenziosi (iOS)
-    storage.set("gc_hadLogin", "1");
-    if(user.email) storage.set("gc_lastEmail", String(user.email).toLowerCase());
-
-    // Check role
     const role = await resolveRole(user);
 
     if(!role.isMember){
+      // Signed in but not authorized
       lockPage(true);
-      setOverlayText("Accesso non autorizzato", "Il tuo account non è abilitato per questo portale.");
       showOverlayState("noaccess");
       setMsg("Accesso non autorizzato per questo account. Contatta l’amministratore.");
+      // Nascondi anche eventuali tile admin
       document.querySelectorAll("[data-admin-only]").forEach(el=>el.style.display="none");
       return;
     }
@@ -1109,16 +1144,19 @@ const providerInit = async ()=>{
     lockPage(false);
     setMsg("");
 
+
     // Admin-only tile
     document.querySelectorAll("[data-admin-only]").forEach(el=>{
       el.style.display = role.isAdmin ? "" : "none";
     });
   });
+
+  
 };
 
 providerInit().catch((e)=>{
+  try{ setPending(false); }catch(_e){}
   console.error(e);
-  setOverlayText("Errore", "Ricarica la pagina o riprova.");
   setMsg("Errore di inizializzazione. Ricarica la pagina.");
   showOverlayState("error");
 });
