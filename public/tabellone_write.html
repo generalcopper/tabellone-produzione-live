@@ -210,13 +210,13 @@
       background: var(--row);
     }
     /* Reorder (long‑press) */
-    .qItem.canReorder{cursor:grab;}
+    .qItem.canReorder{cursor:grab; touch-action: pan-y;}
     .qItem.canReorder:active{cursor:grabbing;}
     .qItem.placeholder{
       border:2px dashed rgba(10,102,255,.35);
       background: rgba(10,102,255,.06);
     }
-    .qItem.dragging{
+    .qItem.dragging{touch-action: none; 
       background:#ffffff;
       box-shadow: 0 18px 45px rgba(15,23,42,.18);
       transform: scale(1.02);
@@ -988,42 +988,85 @@ Se scrivi solo testo, lo salvo come prodotto e lo mando comunque."></textarea>
   function bindQueueReorder(el){
     if(!el) return;
 
+    const LONG_PRESS_MS = 340;
+    const CANCEL_PX = 14;
+
     let timer = null;
     let sx = 0, sy = 0;
 
-    const cancel = () => { if(timer){ clearTimeout(timer); timer = null; } };
+    const isTouchDevice = (("ontouchstart" in window) || (navigator.maxTouchPoints || 0) > 0);
 
-    const onDown = (e) => {
-      // niente drag se parto da un bottone
-      if(e?.target && e.target.closest && e.target.closest("button")) return;
+    const cancel = () => {
+      if(timer){ clearTimeout(timer); timer = null; }
+    };
+
+    const shouldIgnore = (e) => {
+      const t = e?.target;
+      return !!(t && t.closest && t.closest("button, a, input, textarea, select, label"));
+    };
+
+    const arm = (x, y, fromTouch) => {
+      cancel();
+      timer = setTimeout(() => {
+        timer = null;
+        beginDrag(el, x, y, !!fromTouch);
+      }, LONG_PRESS_MS);
+    };
+
+    // --- Pointer (desktop / pen). Su touch preferiamo i touch events per stabilità iOS.
+    const onPointerDown = (e) => {
+      if(isTouchDevice && e?.pointerType === "touch") return; // evita doppio trigger
+      if(shouldIgnore(e)) return;
       if(e?.button !== undefined && e.button !== 0) return;
 
       const p = getXY(e);
       sx = p.x; sy = p.y;
-
-      cancel();
-      timer = setTimeout(() => {
-        cancel();
-        beginDrag(el, p.x, p.y);
-      }, 360);
+      arm(p.x, p.y, false);
     };
 
-    const onMove = (e) => {
+    const onPointerMove = (e) => {
       if(!timer) return;
       const p = getXY(e);
-      if(Math.abs(p.y - sy) > 10 || Math.abs(p.x - sx) > 10) cancel(); // l'utente sta scrollando
+      if(Math.hypot(p.x - sx, p.y - sy) > CANCEL_PX) cancel(); // stai scrollando / trascinando
     };
 
-    const onUp = () => cancel();
+    const onPointerUp = () => cancel();
 
-    el.addEventListener("pointerdown", onDown);
-    el.addEventListener("pointermove", onMove);
-    el.addEventListener("pointerup", onUp);
-    el.addEventListener("pointercancel", onUp);
+    // --- Touch (mobile)
+    const onTouchStart = (e) => {
+      if(shouldIgnore(e)) return;
+      if(!e.touches || e.touches.length !== 1) return;
+
+      const t = e.touches[0];
+      sx = t.clientX; sy = t.clientY;
+      arm(sx, sy, true);
+    };
+
+    const onTouchMove = (e) => {
+      if(!timer) return;
+      if(!e.touches || e.touches.length !== 1) return;
+
+      const t = e.touches[0];
+      if(Math.hypot(t.clientX - sx, t.clientY - sy) > CANCEL_PX) cancel();
+    };
+
+    const onTouchEnd = () => cancel();
+
+    // bind
+    el.addEventListener("pointerdown", onPointerDown);
+    el.addEventListener("pointermove", onPointerMove);
+    el.addEventListener("pointerup", onPointerUp);
+    el.addEventListener("pointercancel", onPointerUp);
+
+    el.addEventListener("touchstart", onTouchStart, { passive:true });
+    el.addEventListener("touchmove", onTouchMove, { passive:true });
+    el.addEventListener("touchend", onTouchEnd);
+    el.addEventListener("touchcancel", onTouchEnd);
+
     el.addEventListener("contextmenu", (e)=>{ e.preventDefault(); });
   }
 
-  function beginDrag(originalEl, startX, startY){
+  function beginDrag(originalEl, startX, startY, fromTouch=false){
     if(dragCtx) return;
 
     const id = originalEl?.dataset?.id;
@@ -1048,8 +1091,8 @@ Se scrivi solo testo, lo salvo come prodotto e lo mando comunque."></textarea>
     const offsetY = startY - rect.top;
 
     originalEl.style.position = "fixed";
+    originalEl.style.top = (startY - offsetY) + "px";
     originalEl.style.left = rect.left + "px";
-    originalEl.style.top = rect.top + "px";
     originalEl.style.width = rect.width + "px";
     originalEl.style.zIndex = "9999";
     originalEl.style.pointerEvents = "none";
@@ -1064,14 +1107,16 @@ Se scrivi solo testo, lo salvo come prodotto e lo mando comunque."></textarea>
       moved: false,
       startOrder: (lastQueueItems || []).map(x => x.id),
       lockLeft: rect.left,
-      width: rect.width
+      width: rect.width,
+      _prevTouchAction,
+      fromTouch: !!fromTouch
     };
 
     try{ navigator.vibrate && navigator.vibrate(10); }catch(_){}
 
     const onMove = (e) => {
       if(!dragCtx) return;
-      e.preventDefault();
+      e.preventDefault?.();
 
       const p = getXY(e);
 
@@ -1082,9 +1127,9 @@ Se scrivi solo testo, lo salvo come prodotto e lo mando comunque."></textarea>
       dragCtx.el.style.width = dragCtx.width + "px";
 
       // auto-scroll vicino ai bordi
-      const edge = 80;
-      if(p.y < edge) window.scrollBy(0, -10);
-      else if(p.y > window.innerHeight - edge) window.scrollBy(0, 10);
+      const edge = 84;
+      if(p.y < edge) window.scrollBy(0, -12);
+      else if(p.y > window.innerHeight - edge) window.scrollBy(0, 12);
 
       const hit = document.elementFromPoint(p.x, p.y);
       const target = hit && hit.closest ? hit.closest("#queue .qItem") : null;
@@ -1095,15 +1140,20 @@ Se scrivi solo testo, lo salvo come prodotto e lo mando comunque."></textarea>
       const tRect = target.getBoundingClientRect();
       const before = p.y < (tRect.top + tRect.height / 2);
 
+      // sposta placeholder + animazione FLIP “live”
       if(before){
         if(dragCtx.placeholder !== target.previousSibling){
+          const first = captureRects(queueEl);
           queueEl.insertBefore(dragCtx.placeholder, target);
           dragCtx.moved = true;
+          playFLIP(queueEl, first, 160);
         }
       }else{
         if(target.nextSibling !== dragCtx.placeholder){
+          const first = captureRects(queueEl);
           queueEl.insertBefore(dragCtx.placeholder, target.nextSibling);
           dragCtx.moved = true;
+          playFLIP(queueEl, first, 160);
         }
       }
     };
@@ -1115,6 +1165,10 @@ Se scrivi solo testo, lo salvo come prodotto e lo mando comunque."></textarea>
       document.removeEventListener("pointermove", onMove);
       document.removeEventListener("pointerup", end);
       document.removeEventListener("pointercancel", end);
+
+      document.removeEventListener("touchmove", onMove);
+      document.removeEventListener("touchend", end);
+      document.removeEventListener("touchcancel", end);
 
       const { el, placeholder, startOrder } = dragCtx;
 
@@ -1129,8 +1183,11 @@ Se scrivi solo testo, lo salvo come prodotto e lo mando comunque."></textarea>
       document.body.classList.remove("dragging");
       document.body.style.touchAction = _prevTouchAction;
 
+      // piccolo FLIP anche al drop
+      const first = captureRects(queueEl);
       queueEl.insertBefore(el, placeholder);
       placeholder.remove();
+      playFLIP(queueEl, first, 170);
 
       const ids = Array.from(queueEl.querySelectorAll(".qItem"))
         .map(x => x.dataset.id)
@@ -1148,6 +1205,13 @@ Se scrivi solo testo, lo salvo come prodotto e lo mando comunque."></textarea>
     document.addEventListener("pointermove", onMove, { passive:false });
     document.addEventListener("pointerup", end, { passive:false });
     document.addEventListener("pointercancel", end, { passive:false });
+
+    // iOS / touch: aggiungo anche touchmove per avere trascinamento affidabile in PWA
+    if(fromTouch || !(window.PointerEvent)){
+      document.addEventListener("touchmove", onMove, { passive:false });
+      document.addEventListener("touchend", end, { passive:false });
+      document.addEventListener("touchcancel", end, { passive:false });
+    }
   }
 
   async function persistQueueOrder(ids){
