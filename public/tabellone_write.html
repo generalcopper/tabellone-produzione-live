@@ -102,6 +102,7 @@
     @media (max-width: 920px){ .grid{grid-template-columns:1fr;} }
     .grid.onecol{grid-template-columns:1fr !important;}
     .grid.onecol #compileCard{display:none !important;}
+    .col{display:flex; flex-direction:column; gap:14px;}
 
     .card{
       background: var(--card);
@@ -220,8 +221,7 @@
         <div id="cloudChip" class="chip"><span class="dot"></span><span id="cloudTxt">CLOUD: …</span></div>
         <button id="signBtn" class="btn">Accedi con Google</button>
         <button id="outBtn" class="btn ghost hide">Esci</button>
-        <button id="clearDoneBtn" class="btn sm red hide">Svuota completati</button>
-      </div>
+</div>
     </div>
 
     <div id="lockedCard" class="card" style="margin-top:14px;">
@@ -268,18 +268,36 @@ Se scrivi solo testo, lo salvo come prodotto e lo mando comunque."></textarea>
         </div>
       </div>
 
-      <!-- RIGHT: coda live -->
-      <div class="card">
-        <div class="cardHd">
-          <div>
-            <h2>Coda kiosk (live)</h2>
-            <p>Quello che vedi qui è quello che il kiosk vede. Puoi completare (elimina solo Admin).</p>
+            <!-- RIGHT: coda live + completati -->
+      <div class="col">
+        <div class="card">
+          <div class="cardHd">
+            <div>
+              <h2>Coda kiosk (live)</h2>
+              <p>Quello che vedi qui è quello che il kiosk vede. Puoi completare (elimina solo Admin).</p>
+            </div>
+            <div class="small" id="meInfo"></div>
           </div>
-          <div class="small" id="meInfo"></div>
+          <div class="cardBd">
+            <div id="queue" class="queue"></div>
+            <div id="emptyQueue" class="hint" style="margin-top:10px;">Nessuna riga in coda.</div>
+          </div>
         </div>
-        <div class="cardBd">
-          <div id="queue" class="queue"></div>
-          <div id="emptyQueue" class="hint" style="margin-top:10px;">Nessuna riga in coda.</div>
+
+        <div class="card" id="doneCard">
+          <div class="cardHd">
+            <div>
+              <h2>Completati (live)</h2>
+              <p>Storico dei completati per questa linea. (Svuota solo Admin)</p>
+            </div>
+            <div class="small">
+              <button id="clearDoneBtn" class="btn sm red hide">Svuota completati</button>
+            </div>
+          </div>
+          <div class="cardBd">
+            <div id="doneList" class="queue"></div>
+            <div id="emptyDone" class="hint" style="margin-top:10px;">Nessun completato.</div>
+          </div>
         </div>
       </div>
     </div>
@@ -351,6 +369,9 @@ Se scrivi solo testo, lo salvo come prodotto e lo mando comunque."></textarea>
 
   const queueEl   = document.getElementById("queue");
   const emptyQueue= document.getElementById("emptyQueue");
+
+  const doneEl    = document.getElementById("doneList");
+  const emptyDone = document.getElementById("emptyDone");
 
   const qtyModal  = document.getElementById("qtyModal");
   const mTitle    = document.getElementById("mTitle");
@@ -671,6 +692,64 @@ Se scrivi solo testo, lo salvo come prodotto e lo mando comunque."></textarea>
     }
   }
 
+    function renderDone(items){
+    if(!doneEl) return;
+    doneEl.innerHTML = "";
+    emptyDone?.classList.toggle("hide", items.length !== 0);
+
+    for(const it of items){
+      const div = document.createElement("div");
+      div.className = "qItem";
+
+      const title = (it.product || it.label || "—") + (it.format ? (" • " + it.format) : "");
+      const qty = (it.qty || "") ? `${it.qty} ${it.unit||""}`.trim() : "—";
+      const who = (it.completedByName || it.completedByEmail || "").trim();
+
+      div.innerHTML = `
+        <div class="qMain">
+          <p class="qTitle">${escapeHtml(title)}</p>
+          <div class="qMeta">
+            <span class="tag">QTY: <b>${escapeHtml(qty)}</b></span>
+            <span class="tag">COMPLETATO: <b>${escapeHtml(fmtWhen(it.completedAtMs))}</b></span>
+            ${who ? `<span class="tag">DA: <b>${escapeHtml(who)}</b></span>` : ``}
+          </div>
+        </div>
+      `;
+
+      doneEl.appendChild(div);
+    }
+  }
+
+  let _unsubDone = null;
+
+  function startDoneWatch(){
+    if(!doneEl) return;
+    try{ if(_unsubDone) _unsubDone(); }catch(_){}
+    const q = query(producedCol, orderBy("completedAt","desc"));
+    _unsubDone = onSnapshot(q, (snap) => {
+      const items = [];
+      snap.forEach(d => {
+        const v = d.data() || {};
+        const completedAtMs = (v.completedAt && v.completedAt.toMillis) ? v.completedAt.toMillis() : (v.completedAtClientMs || 0);
+        items.push({
+          id: d.id,
+          label: (v.label || "").toString().trim(),
+          product: (v.product || v.label || "").toString().trim(),
+          format: (v.format || "").toString().trim(),
+          qty: (v.qty || "").toString().trim(),
+          unit: (v.unit || "").toString().trim(),
+          completedAtMs,
+          completedByName: (v.completedByName || "").toString().trim(),
+          completedByEmail: (v.completedByEmail || "").toString().trim(),
+        });
+      });
+      renderDone(items);
+    }, (err) => {
+      console.warn("done snapshot error:", err);
+      // non blocchiamo l'app: il resto può funzionare comunque
+    });
+  }
+
   let _unsubQueue = null;
 
   function startQueueWatch(){
@@ -786,6 +865,7 @@ Se scrivi solo testo, lo salvo come prodotto e lo mando comunque."></textarea>
 
     setCloud("loading","sync…");
     startQueueWatch();
+    startDoneWatch();
   });
 
 </script>
