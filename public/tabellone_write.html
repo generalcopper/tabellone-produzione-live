@@ -635,6 +635,44 @@ Se scrivi solo testo, lo salvo come prodotto e lo mando comunque."></textarea>
     }catch(_){}
   }
 
+  // --- SSO seamless da Hub Centrale (no prompt): tenta 1 volta per sessione ---
+  const SILENT_KEY = "gc_tabellone_write_silent_once";
+  async function maybeSilentSignIn(){
+    try{ if(sessionStorage.getItem(SILENT_KEY)) return false; }catch(_){}
+    let fromHub = false;
+
+    // query param (opzionale): ?from=hub oppure ?fromHub=1
+    try{
+      const sp = new URLSearchParams(location.search);
+      if(sp.get("from") === "hub" || sp.get("from") === "hubcentrale" || sp.has("fromHub")) fromHub = true;
+    }catch(_){}
+
+    // referrer (se apri da Hub Centrale)
+    try{
+      const ref = document.referrer ? new URL(document.referrer) : null;
+      if(ref && ref.origin === location.origin){
+        const s = (ref.pathname + ref.search + ref.hash).toLowerCase();
+        if(s.includes("hub") && s.includes("centrale")) fromHub = true;
+      }
+    }catch(_){}
+
+    if(!fromHub) return false;
+
+    try{ sessionStorage.setItem(SILENT_KEY, "1"); }catch(_){}
+
+    try{
+      const prov = new GoogleAuthProvider();
+      prov.setCustomParameters({ prompt: "none" }); // se c'è già una sessione Google, non chiede nulla
+      setCloud("loading","login…");
+      await signInWithRedirect(auth, prov);
+      return true; // redirect avviato
+    }catch(e){
+      console.warn("silent sign-in failed:", e);
+      return false;
+    }
+  }
+
+
   function showLocked(locked){
     lockedCard.classList.toggle("hide", !locked);
     mainGrid.classList.toggle("hide", locked);
@@ -1314,6 +1352,8 @@ Se scrivi solo testo, lo salvo come prodotto e lo mando comunque."></textarea>
   });
 
   // auth state
+  setCloud("loading","accesso…");
+  await ensurePersistence();
   await handleRedirect();
   onAuthStateChanged(auth, async (u) => {
     currentUser = u || null;
@@ -1323,6 +1363,12 @@ Se scrivi solo testo, lo salvo come prodotto e lo mando comunque."></textarea>
       isAdmin = false;
       applyRoleUI();
       meInfo.textContent = "";
+
+      // Se arrivi da Hub Centrale e hai già una sessione Google attiva,
+      // provo a farti entrare senza chiedere di scegliere l'account.
+      const redirected = await maybeSilentSignIn();
+      if(redirected) return;
+
       showLocked(true);
       setCloud("bad","login");
       return;
