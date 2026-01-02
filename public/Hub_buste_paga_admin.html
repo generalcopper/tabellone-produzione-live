@@ -24,7 +24,7 @@ Aggiornamento mobile iOS (2024-06-xx):
 <meta name="mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-<meta name="apple-mobile-web-app-title" content="Hub Centrale" />
+<meta name="apple-mobile-web-app-title" content="Buste paga" />
 <link rel="apple-touch-icon" href="./icons/icon-180.png" />
 <meta name="format-detection" content="telephone=no" />
   
@@ -633,6 +633,69 @@ Aggiornamento mobile iOS (2024-06-xx):
       animation:authSpin .9s linear infinite;
     }
     @keyframes authSpin{ from{transform:rotate(0deg)} to{transform:rotate(360deg)} }
+
+
+/* === Pending (ripristino sessione) — overlay SOLO spinner, zero login === */
+.pendingOverlay{
+  position:fixed; inset:0;
+  background:rgba(0,0,0,.22);
+  backdrop-filter:saturate(160%) blur(16px);
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  padding:calc(18px + var(--safe-top)) calc(14px + var(--safe-right)) calc(18px + var(--safe-bot)) calc(14px + var(--safe-left));
+  z-index:9997; /* sotto authOverlay */
+  opacity:0; transform:translateY(10px);
+  transition:opacity .28s ease, transform .28s ease;
+  pointer-events:none;
+  overscroll-behavior:contain;
+}
+.pendingOverlay[aria-hidden="false"]{opacity:1;transform:translateY(0);pointer-events:auto;}
+.pendingShell{
+  width:min(520px, 96vw);
+  background:rgba(255,255,255,.92);
+  border:1px solid rgba(0,0,0,.10);
+  border-radius:22px;
+  box-shadow:0 30px 90px rgba(0,0,0,.20);
+  padding:18px 16px;
+  display:flex;
+  flex-direction:column;
+  gap:10px;
+}
+.pendingRow{display:flex;align-items:center;gap:14px}
+.pendingTitle{font-size:18px;font-weight:920;letter-spacing:-.02em}
+.pendingSub{font-size:14px;color:var(--muted);line-height:1.35}
+.pendingHint{font-size:12px;color:rgba(45,52,68,.92);line-height:1.35;margin-top:2px}
+
+/* iOS-like spinner (12 bars) */
+.iosSpinner12{
+  width:44px;height:44px; position:relative; flex:0 0 auto;
+  filter:drop-shadow(0 10px 20px rgba(10,132,255,.12));
+}
+.iosSpinner12 span{
+  position:absolute; left:50%; top:50%;
+  width:4px; height:11px;
+  margin-left:-2px; margin-top:-20px;
+  border-radius:999px;
+  background:rgba(10,132,255,.92);
+  transform-origin:2px 20px;
+  animation:iosFade 1.0s linear infinite;
+}
+
+.iosSpinner12 span:nth-child(1){transform:rotate(0deg);opacity:0.250;animation-delay:-1.000s;}
+.iosSpinner12 span:nth-child(2){transform:rotate(30deg);opacity:0.296;animation-delay:-0.917s;}
+.iosSpinner12 span:nth-child(3){transform:rotate(60deg);opacity:0.342;animation-delay:-0.833s;}
+.iosSpinner12 span:nth-child(4){transform:rotate(90deg);opacity:0.388;animation-delay:-0.750s;}
+.iosSpinner12 span:nth-child(5){transform:rotate(120deg);opacity:0.433;animation-delay:-0.667s;}
+.iosSpinner12 span:nth-child(6){transform:rotate(150deg);opacity:0.479;animation-delay:-0.583s;}
+.iosSpinner12 span:nth-child(7){transform:rotate(180deg);opacity:0.525;animation-delay:-0.500s;}
+.iosSpinner12 span:nth-child(8){transform:rotate(210deg);opacity:0.571;animation-delay:-0.417s;}
+.iosSpinner12 span:nth-child(9){transform:rotate(240deg);opacity:0.617;animation-delay:-0.333s;}
+.iosSpinner12 span:nth-child(10){transform:rotate(270deg);opacity:0.663;animation-delay:-0.250s;}
+.iosSpinner12 span:nth-child(11){transform:rotate(300deg);opacity:0.708;animation-delay:-0.167s;}
+.iosSpinner12 span:nth-child(12){transform:rotate(330deg);opacity:0.754;animation-delay:-0.083s;}
+@keyframes iosFade{0%{opacity:1}100%{opacity:.25}}
+
 
 
 
@@ -1929,6 +1992,24 @@ Aggiornamento mobile iOS (2024-06-xx):
   </div>
 
 
+
+  <!-- Pending overlay (ripristino sessione) -->
+  <div class="pendingOverlay" id="pendingOverlay" aria-hidden="true">
+    <div class="pendingShell" role="dialog" aria-modal="true" aria-label="Ripristino sessione">
+      <div class="pendingRow">
+        <div class="iosSpinner12" aria-hidden="true">
+          <span></span><span></span><span></span><span></span><span></span><span></span>
+          <span></span><span></span><span></span><span></span><span></span><span></span>
+        </div>
+        <div style="min-width:0">
+          <div class="pendingTitle">Ripristino sessione</div>
+          <div class="pendingSub" id="pendingMessage">Sto verificando l’accesso…</div>
+          <div class="pendingHint">Se hai già effettuato l’accesso, ti basta attendere un attimo.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Auth overlay (Google Sign-In) -->
   <div class="authOverlay" id="authOverlay" aria-hidden="true">
     <div class="authShell" role="dialog" aria-modal="true" aria-label="Accesso">
@@ -2130,11 +2211,21 @@ if(payrollGreeting) payrollGreeting.textContent = `Ciao, ${name}.`;
       // "Esci" sempre in fondo (solo quando autenticato)
       if(btnLogoutBottom) btnLogoutBottom.style.display = isAuthed ? "" : "none";
 
-      // Auth overlay: MOSTRA SOLO quando siamo certi che l'utente è fuori (niente popup in restoring/unknown)
-      const shouldShowOverlay = (!isAuthed && hydrated && gate === "signed_out");
+      // Pending overlay: in modalità app, mentre ripristina la sessione mostriamo SOLO la rotellina (zero login)
+      const shouldShowPending = (!isAuthed && (!hydrated || gate === "restoring" || gate === "unknown"));
+      togglePendingOverlay(shouldShowPending);
+
+      // Auth overlay: MOSTRA SOLO quando siamo certi che l'utente è fuori (mai durante restoring)
+      const shouldShowOverlay = (!shouldShowPending && !isAuthed && hydrated && gate === "signed_out");
       toggleAuthOverlay(shouldShowOverlay);
 
-      const ovMsg = document.getElementById("authOverlayMessage");
+      const pendingMsgEl = document.getElementById("pendingMessage");
+      if(pendingMsgEl){
+        const gate2 = state.authGateState || "unknown";
+        pendingMsgEl.textContent = (gate2==="restoring" ? "Ripristino sessione…" : "Sto verificando l’accesso…");
+      }
+
+            const ovMsg = document.getElementById("authOverlayMessage");
       const ovSpin = document.getElementById("authOverlaySpinner");
       const ovBtn = document.getElementById("btnGoogleLoginOverlay");
       if(shouldShowOverlay){
@@ -2159,10 +2250,19 @@ updateGreetingUI();
         const logOpen = document.getElementById("sendLogModal")?.classList.contains("show");
         const pdfOpen = document.getElementById("pdfPreviewOverlay")?.getAttribute("aria-hidden") === "false";
         const authOpen = document.getElementById("authOverlay")?.getAttribute("aria-hidden") === "false";
-        const anyOpen = !!(adminOpen || logOpen || pdfOpen || authOpen);
+        const pendingOpen = document.getElementById("pendingOverlay")?.getAttribute("aria-hidden") === "false";
+        const anyOpen = !!(adminOpen || logOpen || pdfOpen || authOpen || pendingOpen);
         document.body.classList.toggle("admin-modal-open", anyOpen);
         syncBodyScrollLock();
       }catch(_e){}
+    }
+
+
+    function togglePendingOverlay(show){
+      const ov = document.getElementById("pendingOverlay");
+      if(!ov) return;
+      ov.setAttribute("aria-hidden", show ? "false" : "true");
+      updateModalOpenState();
     }
 
     function toggleAuthOverlay(show){
@@ -5197,15 +5297,22 @@ function buildSafePdfName(base){
 
         // Mantieni l'accesso tra pagine/redirect (stesso dominio) + supporto popup bloccati
         async function setBestAuthPersistence(authApi, auth){
-          // Prova a impostare la persistenza migliore disponibile (in base al supporto del browser).
-          const attempts = [
-            authApi.indexedDBLocalPersistence,
-            authApi.browserLocalPersistence,
-            authApi.browserSessionPersistence
-          ].filter(Boolean);
+          // In modalità app (iOS standalone) evitiamo browserSessionPersistence: può "spostare" la sessione in sessionStorage
+          // e far perdere l'accesso alle altre pagine. Preferiamo sempre persistenze "local".
+          const ua = String(navigator.userAgent || "").toLowerCase();
+          const isIOS = /iphone|ipad|ipod/.test(ua) || (navigator.platform==="MacIntel" && (navigator.maxTouchPoints||0) > 1);
+          const isStandalone = (window.matchMedia && window.matchMedia("(display-mode: standalone)").matches) || (navigator.standalone === true);
 
+          const preferred = (isIOS && isStandalone)
+            ? [authApi.browserLocalPersistence, authApi.indexedDBLocalPersistence]
+            : [authApi.indexedDBLocalPersistence, authApi.browserLocalPersistence];
+
+          const attempts = preferred.filter(Boolean);
           for(const p of attempts){
-            try{ await authApi.setPersistence(auth, p); return true; }catch(_e){}
+            try{
+              await authApi.setPersistence(auth, p);
+              return true;
+            }catch(_e){}
           }
           return false;
         }
@@ -5247,10 +5354,21 @@ function buildSafePdfName(base){
         const googleProvider = new authMod.GoogleAuthProvider();
         try{ googleProvider.setCustomParameters({ prompt: "select_account" }); }catch(_e){}
 
+        const __ua = String(navigator.userAgent || "").toLowerCase();
+        const __isIOS = /iphone|ipad|ipod/.test(__ua) || (navigator.platform==="MacIntel" && (navigator.maxTouchPoints||0) > 1);
+        const __isStandalone = (window.matchMedia && window.matchMedia("(display-mode: standalone)").matches) || (navigator.standalone === true);
+        const __preferRedirect = (__isIOS && __isStandalone);
+
         async function signInWithGoogle(){
           try{
             // Best-effort: persistenza (aiuta a mantenere la sessione tra pagine/refresh)
             try{ await setBestAuthPersistence(authMod, auth); }catch(_e){}
+
+            // In modalità app iOS: usa redirect diretto (più stabile, niente popup "flash")
+            if(__preferRedirect){
+              await authMod.signInWithRedirect(auth, googleProvider);
+              return;
+            }
 
             // Popup first, fallback to redirect se necessario (popup bloccato / non supportato)
             try{
