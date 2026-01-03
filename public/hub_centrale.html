@@ -1022,7 +1022,13 @@ const providerInit = async ()=>{
   fsMod = _fsMod;
 
   app = initializeApp(firebaseConfig);
-  auth = authMod.getAuth(app);
+  // Auth init con persistenze in ordine (più stabile su iOS/PWA)
+  try{
+    const pers = [authMod.indexedDBLocalPersistence, authMod.browserLocalPersistence, authMod.browserSessionPersistence].filter(Boolean);
+    auth = authMod.initializeAuth(app, { persistence: pers });
+  }catch(_e){
+    auth = authMod.getAuth(app);
+  }
   db = fsMod.getFirestore(app);
 
   // Prova a impostare la persistenza migliore disponibile (aiuta moltissimo su iOS/PWA)
@@ -1091,6 +1097,9 @@ const providerInit = async ()=>{
   const isIOS = /iPad|iPhone|iPod/i.test(ua) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
   const isStandalone = (window.matchMedia && window.matchMedia("(display-mode: standalone)").matches) || (navigator.standalone === true);
   const preferRedirect = isIOS || isStandalone;
+  // Grace period: in iOS/PWA la sessione può riapparire con qualche secondo di ritardo.
+  // Finché siamo nel grace, mostriamo SOLO la rotellina (niente bottone Google che lampeggia).
+  const RESTORE_GRACE_MS = (isIOS || isStandalone) ? 3200 : 1400;
 
   async function signInWithGoogle(){
     setMsg("");
@@ -1143,6 +1152,25 @@ const providerInit = async ()=>{
   // Anti-flash: evita il bottone Google che appare/sparisce su iOS mentre la sessione si ripristina
   let __loginRevealTimer = null;
 
+  function startRestoreGrace(){
+    showOverlayState("checking");
+    setSpin("Verifica sessione…");
+    // Non mostrare subito il bottone Google: su iOS/PWA la sessione può riprendersi con ritardo.
+    if(__loginRevealTimer) clearTimeout(__loginRevealTimer);
+    __loginRevealTimer = setTimeout(()=>{
+      try{
+        if(!auth.currentUser){
+          showOverlayState("login");
+          setSpin("");
+        }
+      }catch(_e){
+        showOverlayState("login");
+        setSpin("");
+      }
+    }, RESTORE_GRACE_MS);
+  }
+
+
   // helper: leggi access doc (uid o emailLower)
   async function getAccess(docId){
     try{
@@ -1174,12 +1202,10 @@ const providerInit = async ()=>{
   // Auth listener
   authMod.onAuthStateChanged(auth, async (user)=>{
     if(!user){
-      // not signed in: prima "checking", poi mostra login (anti-flash iOS/PWA)
+      // non signed in: su iOS/PWA la sessione può riprendersi con ritardo
       if(userNameEl) userNameEl.textContent = "—";
       if(statusEl) statusEl.textContent = "Non connesso";
       lockPage(true);
-      showOverlayState("checking");
-      setSpin("Verifica sessione…");
       setMsg("");
 
       // Se era partito un login via redirect e non è andato a buon fine, proponi reset
@@ -1192,18 +1218,7 @@ const providerInit = async ()=>{
         }
       }catch(_e){}
 
-      if(__loginRevealTimer) clearTimeout(__loginRevealTimer);
-      __loginRevealTimer = setTimeout(()=>{
-        try{
-          if(!auth.currentUser){
-            showOverlayState("login");
-            setSpin("");
-          }
-        }catch(_e){
-          showOverlayState("login");
-          setSpin("");
-        }
-      }, 650);
+      startRestoreGrace();
       return;
     }
 
