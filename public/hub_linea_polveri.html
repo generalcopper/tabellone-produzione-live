@@ -808,6 +808,222 @@
     }
   }
 
+  // ===== Email helpers =====
+  function emailEsc(s){
+    return String(s==null?"":s)
+      .replace(/&/g,"&amp;")
+      .replace(/</g,"&lt;")
+      .replace(/>/g,"&gt;")
+      .replace(/"/g,"&quot;")
+      .replace(/'/g,"&#39;");
+  }
+  function emailTryNum(x){
+    const n = Number(String(x??"").replace(",", "."));
+    return Number.isFinite(n) ? n : null;
+  }
+  function emailFmtDateIso(iso){
+    try{
+      const d = new Date(iso);
+      if(!Number.isFinite(d.getTime())) return iso || "—";
+      return d.toLocaleString("it-IT", { dateStyle:"short", timeStyle:"short" });
+    }catch(_e){
+      return iso || "—";
+    }
+  }
+  function emailLinePlanned(line, fallbackUnit){
+    const u = displayUm(line?.um || fallbackUnit || "");
+    const q = (()=>{
+      const a = emailTryNum(line?.plannedQty);
+      if(a!=null) return a;
+      const b = emailTryNum(line?.plannedKg);
+      if(b!=null) return b;
+      const c = emailTryNum(line?.qty);
+      if(c!=null) return c;
+      return 0;
+    })();
+    return formatQtyWithKg(q, u);
+  }
+  function emailLineProduced(line, fallbackUnit){
+    const u = displayUm(line?.um || fallbackUnit || "");
+    const q = (()=>{
+      const a = emailTryNum(line?.producedQty);
+      if(a!=null) return a;
+      const b = emailTryNum(line?.producedKg);
+      if(b!=null) return b;
+      return 0;
+    })();
+    return formatQtyWithKg(q, u);
+  }
+
+  // Upload signature to Firebase Storage (optional, improves email visibility vs. data URL)
+  async function uploadSignatureDataUrl(dataUrl, meta={}){
+    try{
+      const api = state.firebase?.storageApi;
+      const storage = state.firebase?.storage;
+      if(!api || !storage) return { url:"", path:"" };
+      const raw = String(dataUrl||"");
+      if(!raw.startsWith("data:image/")) return { url:"", path:"" };
+
+      const safe = (s)=>String(s||"").replace(/[^\w\-]+/g,"_").replace(/_+/g,"_").slice(0,60);
+      const day = new Date().toISOString().slice(0,10).replace(/-/g,"");
+      const orderNoSafe = safe(meta.orderNo || "ordine");
+      const uidSafe = safe(meta.uid || "");
+      const ts = Date.now();
+      const storagePath = `polveri/signatures/${day}/${orderNoSafe}_${ts}${uidSafe?("_"+uidSafe):""}.png`;
+
+      const r = api.ref(storage, storagePath);
+      if(typeof api.uploadString === "function"){
+        await api.uploadString(r, raw, "data_url");
+      } else if(typeof api.uploadBytes === "function"){
+        // fallback: dataUrl -> blob
+        const parts = raw.split(",");
+        if(parts.length<2) return { url:"", path:"" };
+        const m = (parts[0]||"").match(/data:(.*?);base64/i);
+        const mime = (m && m[1]) ? m[1] : "image/png";
+        const bin = atob(parts[1]);
+        const u8 = new Uint8Array(bin.length);
+        for(let i=0;i<bin.length;i++) u8[i] = bin.charCodeAt(i);
+        await api.uploadBytes(r, new Blob([u8], { type:mime }), { contentType:mime });
+      } else {
+        return { url:"", path:"" };
+      }
+      const url = await api.getDownloadURL(r);
+      return { url: url || "", path: storagePath };
+    }catch(e){
+      console.warn("uploadSignatureDataUrl error", e);
+      return { url:"", path:"" };
+    }
+  }
+
+  function buildConcludedEmail(entry, extra={}){
+    const orderNo = entry?.orderNo || "—";
+    const customer = entry?.customer || "—";
+    const operator = entry?.operator || entry?.operatorName || "Operatore";
+    const unit = displayUm(entry?.unit || extra?.orderUnit || "");
+
+    const startedAt = emailFmtDateIso(entry?.startedAt);
+    const endedAt = emailFmtDateIso(entry?.endedAt);
+    const durMin = (()=>{ const ms = Number(entry?.durationMs||0); return Number.isFinite(ms)&&ms>0 ? Math.max(1, Math.round(ms/60000)) : null; })();
+
+    const concludedNow = Number(extra?.concludedNow ?? (Array.isArray(entry?.perLine) ? entry.perLine.length : 0)) || 0;
+    const totalLines = (extra?.totalLines!=null ? Number(extra.totalLines) : null);
+    const isFull = Boolean(extra?.isFullOrder) || (totalLines!=null && concludedNow>0 && concludedNow>=totalLines);
+
+    const subject = `[Hub Polveri] ${isFull ? "Ordine concluso" : "Chiusura parziale"} ${orderNo} • ${customer}`;
+
+    const qtyOrderXml = (extra?.orderQtyXml!=null ? formatQtyWithKg(Number(extra.orderQtyXml||0), displayUm(extra.orderUnit||unit)) : null);
+    const qtySelection = (entry?.totalKgOrder!=null ? formatQtyWithKg(Number(entry.totalKgOrder||0), unit) : null);
+    const qtyProduced = formatQtyWithKg(Number(entry?.kg||0), unit);
+
+    const conclPrev = (extra?.conclusion || "").trim();
+
+    const perLine = Array.isArray(entry?.perLine) ? entry.perLine : [];
+    const linesText = perLine.length ? perLine.map((l)=>{
+      const name = (l?.desc || "Riga").toString().trim();
+      const code = (l?.code || "").toString().trim();
+      const planned = emailLinePlanned(l, unit);
+      const produced = emailLineProduced(l, unit);
+      return `- ${name}${code?` (Cod: ${code})`:``} · Pianificato: ${planned} · Prodotto: ${produced}`;
+    }).join("\n") : "—";
+
+    const signatureSrc = (entry?.signatureUrl || entry?.signature || "");
+    const signatureInfo = signatureSrc ? "Acquisita" : "Non presente";
+
+    const text = [
+      `Linea: polveri`,
+      `Stato: ${isFull ? "ORDINE COMPLETO" : "CHIUSURA PARZIALE"}`,
+      `Ordine: ${orderNo}`,
+      `Cliente: ${customer}`,
+      `Operatore: ${operator}`,
+      conclPrev ? `Conclusione prevista: ${conclPrev}` : "",
+      `Inizio: ${startedAt}`,
+      `Fine: ${endedAt}`,
+      durMin!=null ? `Durata: ${durMin} min` : "",
+      `Righe concluse (questa chiusura): ${concludedNow}${totalLines!=null?`/${totalLines}`:""}`,
+      qtyOrderXml ? `Quantità ordine (XML): ${qtyOrderXml}` : "",
+      qtySelection ? `Quantità avviata (produzione): ${qtySelection}` : "",
+      `Quantità prodotta (questa chiusura): ${qtyProduced}`,
+      "",
+      "Dettaglio righe concluse:",
+      linesText,
+      "",
+      `Firma: ${signatureInfo}`,
+      (signatureSrc && /^https?:\/\//i.test(signatureSrc)) ? `Firma (link): ${signatureSrc}` : ""
+    ].filter(Boolean).join("\n");
+
+    const rowsHtml = perLine.length ? perLine.map(l=>{
+      const name = emailEsc(l?.desc || "—");
+      const code = emailEsc(l?.code || "");
+      const planned = emailEsc(emailLinePlanned(l, unit));
+      const produced = emailEsc(emailLineProduced(l, unit));
+      return `
+        <tr>
+          <td style="padding:10px 8px; border-top:1px solid #e6e6e6;"><div style="font-weight:700;">${name}</div></td>
+          <td style="padding:10px 8px; border-top:1px solid #e6e6e6; white-space:nowrap;">${code||"—"}</td>
+          <td style="padding:10px 8px; border-top:1px solid #e6e6e6; white-space:nowrap;">${planned}</td>
+          <td style="padding:10px 8px; border-top:1px solid #e6e6e6; white-space:nowrap;"><b>${produced}</b></td>
+        </tr>`;
+    }).join("") : `<tr><td colspan="4" style="padding:10px 8px; border-top:1px solid #e6e6e6; color:#555;">Nessun dettaglio righe disponibile.</td></tr>`;
+
+    const sigBlock = signatureSrc ? `
+      <div style="margin-top:18px;">
+        <div style="font-weight:800; margin-bottom:8px;">Firma operatore</div>
+        <div style="display:inline-block; padding:10px; border:1px solid #e0e0e0; border-radius:14px; background:#fff;">
+          <img src="${signatureSrc}" alt="Firma" style="display:block; max-width:520px; width:100%; height:auto;"/>
+        </div>
+        ${(/^https?:\/\//i.test(signatureSrc)) ? `<div style="font-size:12px; color:#555; margin-top:8px;">Se non vedi l’immagine, apri: <a href="${signatureSrc}" target="_blank" rel="noreferrer">Apri firma</a></div>` : `<div style="font-size:12px; color:#555; margin-top:8px;">Se non vedi l’immagine, apri lo storico nel Hub.</div>`}
+      </div>` : `
+      <div style="margin-top:18px; font-size:13px; color:#555;">
+        <b>Firma operatore:</b> non presente
+      </div>`;
+
+    const html = `
+      <div style="font-family:-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Arial; font-size:14px; color:#111; line-height:1.35;">
+        <div style="font-size:18px; font-weight:900; margin:0 0 10px;">${isFull ? "Ordine concluso" : "Chiusura parziale"} · Linea polveri</div>
+        <div style="padding:12px; border:1px solid #e6e6e6; border-radius:16px; background:#fafafa;">
+          <table style="width:100%; border-collapse:collapse;">
+            <tr><td style="padding:6px 0; color:#555;">Ordine</td><td style="padding:6px 0; font-weight:800;">${emailEsc(orderNo)}</td></tr>
+            <tr><td style="padding:6px 0; color:#555;">Cliente</td><td style="padding:6px 0; font-weight:800;">${emailEsc(customer)}</td></tr>
+            <tr><td style="padding:6px 0; color:#555;">Operatore</td><td style="padding:6px 0; font-weight:800;">${emailEsc(operator)}</td></tr>
+            ${conclPrev?`<tr><td style="padding:6px 0; color:#555;">Conclusione prevista</td><td style="padding:6px 0; font-weight:800;">${emailEsc(conclPrev)}</td></tr>`:""}
+            <tr><td style="padding:6px 0; color:#555;">Inizio</td><td style="padding:6px 0;">${emailEsc(startedAt)}</td></tr>
+            <tr><td style="padding:6px 0; color:#555;">Fine</td><td style="padding:6px 0;">${emailEsc(endedAt)}</td></tr>
+            ${durMin!=null?`<tr><td style="padding:6px 0; color:#555;">Durata</td><td style="padding:6px 0;"><b>${durMin} min</b></td></tr>`:""}
+            <tr><td style="padding:6px 0; color:#555;">Righe concluse (questa chiusura)</td><td style="padding:6px 0;"><b>${concludedNow}${totalLines!=null?`/${totalLines}`:""}</b></td></tr>
+            ${qtyOrderXml?`<tr><td style="padding:6px 0; color:#555;">Quantità ordine (XML)</td><td style="padding:6px 0;"><b>${emailEsc(qtyOrderXml)}</b></td></tr>`:""}
+            ${qtySelection?`<tr><td style="padding:6px 0; color:#555;">Quantità avviata (produzione)</td><td style="padding:6px 0;"><b>${emailEsc(qtySelection)}</b></td></tr>`:""}
+            <tr><td style="padding:6px 0; color:#555;">Quantità prodotta (questa chiusura)</td><td style="padding:6px 0;"><b>${emailEsc(qtyProduced)}</b></td></tr>
+          </table>
+        </div>
+
+        <div style="height:14px;"></div>
+        <div style="font-weight:900; margin:0 0 6px;">Righe concluse in questa chiusura</div>
+        <table style="width:100%; border-collapse:collapse; border:1px solid #e6e6e6; border-radius:14px; overflow:hidden;">
+          <thead>
+            <tr style="background:#f3f3f3;">
+              <th style="text-align:left; padding:10px 8px; font-size:12px; color:#444;">Prodotto</th>
+              <th style="text-align:left; padding:10px 8px; font-size:12px; color:#444;">Codice</th>
+              <th style="text-align:left; padding:10px 8px; font-size:12px; color:#444;">Pianificato</th>
+              <th style="text-align:left; padding:10px 8px; font-size:12px; color:#444;">Prodotto</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rowsHtml}
+          </tbody>
+        </table>
+
+        ${sigBlock}
+
+        <div style="margin-top:18px; font-size:12px; color:#666;">
+          Messaggio generato automaticamente da Hub Polveri.
+        </div>
+      </div>`;
+
+    return { subject, text, html };
+  }
+  // ===== End email helpers =====
+
+
   const NOTIF_LIMIT = 40;
   const ALLOW_PATH = { col: "hub_config", doc: "hub_linea_polveri_mobile_allowlist" };
   const ALLOW_DOC_PATH = `${ALLOW_PATH.col}/${ALLOW_PATH.doc}`;
@@ -1455,12 +1671,39 @@
     const formatted = formatKg(valueKg);
     el.textContent = formatted!=null ? `${formatted} kg` : "—";
   }
-  function formatQtyWithKg(qty, um="kg"){
-    const qtyTxt = `${qty ?? 0}`;
-    const hasKg = /\bkg\b/i.test(um||"");
-    const cleanUm = (um||"").trim();
-    if(hasKg) return `${qtyTxt} kg`;
-    return cleanUm ? `${qtyTxt} ${cleanUm} · kg` : `${qtyTxt} kg`;
+  function displayUm(um){
+    const raw = (um==null ? "" : String(um)).trim();
+    if(!raw) return "";
+    const noDots = raw.replace(/\./g,"").trim();
+    const low = noDots.toLowerCase();
+    if(low === "kg") return "kg";
+    if(low === "pz") return "pz";
+    if(low === "lt") return "lt";
+    if(low === "l") return "l";
+    if(low === "ml") return "ml";
+    if(low === "g" || low === "gr") return "g";
+    return noDots;
+  }
+  function formatQtyWithKg(qty, um=""){
+    const val = Number(qty);
+    const safe = Number.isFinite(val) ? val : (qty ?? 0);
+    const qtyTxt = `${safe}`;
+    const unit = displayUm(um);
+    if(!unit) return `${qtyTxt}`;
+    return `${qtyTxt} ${unit}`;
+  }
+
+  function inferOrderUm(lines){
+    // Use the unit exactly from Easyfatt XML when it's consistent for the whole order.
+    // If units are mixed (rare), return empty string to avoid wrong labels.
+    const set = new Set();
+    for(const l of (lines||[])){
+      const uRaw = (l && (l.um || l.uom || l.unitaMisura || l.unit || l.measure)) || "";
+      const u = displayUm(uRaw);
+      if(u) set.add(u);
+      if(set.size > 1) return "";
+    }
+    return set.size === 1 ? Array.from(set)[0] : "";
   }
   async function copyKeyToClipboard(text){
     if(!text) return;
@@ -5498,7 +5741,8 @@ function openHistModal(id){
     </div>
   `).join("") : `<div class="muted">Nessun dettaglio righe disponibile.</div>`;
 
-  const sig = h.signature ? `<div style="margin-top:14px;"><div class="muted" style="margin-bottom:6px;">Firma</div><img src="${h.signature}" alt="Firma" style="width:100%; max-width:520px; border:1px solid var(--stroke); border-radius:14px; background:#fff;"></div>` : "";
+  const sigSrc = (h.signatureUrl || h.signature || "");
+  const sig = sigSrc ? `<div style="margin-top:14px;"><div class="muted" style="margin-bottom:6px;">Firma</div><img src="${sigSrc}" alt="Firma" style="width:100%; max-width:520px; border:1px solid var(--stroke); border-radius:14px; background:#fff;"></div>` : "";
 
   body.innerHTML = `
     <div class="muted">Stato: <b>${escapeHtml((()=>{ try{ const {partial,full}=computePartialOrders(); const ps=new Set(partial.map(x=>String(x.orderNo))); const fs=new Set(full.map(x=>String(x.orderNo))); if(fs.has(orderNo)) return "Ordine concluso"; if(ps.has(orderNo)) return "Ordine parzialmente concluso"; }catch(_e){} return "Storico"; })())}</b></div>
@@ -7683,9 +7927,18 @@ Linea: polveri`, null); }catch(_e){}
             kg = Number(p.totalKg||0);
           }
 
-          const ctx = `${p.customer} · Ordine n. ${p.orderNo} · ${Math.round(kg)} kg`;
+          const unit = inferOrderUm(perLine.length ? perLine : (order?.lines||[])) || "";
+
+          const ctx = `${p.customer} · Ordine n. ${p.orderNo} · ${formatQtyWithKg(kg, unit)}`;
           const concludedOk = await new Promise((resolve)=>{
             openSignModal(ctx, async(signatureDataUrl)=>{
+              let sigUrl = "";
+              let sigPath = "";
+              try{
+                const up = await uploadSignatureDataUrl(signatureDataUrl, { orderNo: p.orderNo, uid: state.user?.uid || "" });
+                sigUrl = up.url || "";
+                sigPath = up.path || "";
+              }catch(_e){}
               await closeActiveProduction(p.id, { concluded:true });
 
               const entry = {
@@ -7694,6 +7947,7 @@ Linea: polveri`, null); }catch(_e){}
                 operatorUid: state.user?.uid || "",
                 customer: p.customer,
                 orderNo: p.orderNo,
+                unit,
                 kg,
                 durationMs,
                 startedAt: p.startedAt || nowIso(),
@@ -7702,31 +7956,31 @@ Linea: polveri`, null); }catch(_e){}
                 totalKgOrder: Number(p.totalKg||0),
                 perLine,
                 signature: signatureDataUrl,
+                signatureUrl: sigUrl,
+                signaturePath: sigPath,
                 statementAccepted: true
               };
 
               const newId = await addHistory(entry);
               const withId = { ...entry, id: newId || `${Date.now()}_${Math.random().toString(16).slice(2)}`, at: nowIso() };
 
-              try{
-                const subj = `[Hub Polveri] Ordine concluso ${entry.orderNo||""} • ${entry.customer||""}`;
-                const txt = [
-                  `Ordine: ${entry.orderNo||"—"}`,
-                  `Cliente: ${entry.customer||"—"}`,
-                  `Operatore: ${entry.operator||state.user?.fullName||"—"}`,
-                  `Inizio: ${entry.startedAt||"—"}`,
-                  `Fine: ${entry.endedAt||"—"}`,
-                  `Totale ordine (kg): ${Number(entry.totalKgOrder||0).toFixed(2)}`,
-                  `Kg prodotto (questa chiusura): ${Number(entry.kg||0).toFixed(2)}`,
-                  `Linea: polveri`,
-                  `Firma: ${entry.signature ? "Acquisita su hub (storico produzione)" : "Non presente"}`
-                ].join("\n");
-                const htmlSig = entry.signature ? `
-                  <div style="font-family: -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Arial; font-size:14px; color:#111;">
-                    <div style="font-weight:800; margin-bottom:6px;">Firma operatore</div>
-                    <img src="${entry.signature}" alt="Firma" style="max-width:320px; width:100%; border:1px solid rgba(0,0,0,.12); border-radius:12px;"/>
-                  </div>` : null;
-                await enqueueMatteoEmail(subj, txt, htmlSig);}catch(_e){}
+                            try{
+                              const orderLines = (order?.lines||[]).filter(l=>!isNonProductionLine(l));
+                              const orderQtyXml = orderLines.reduce((a,l)=>a + parseItNumber(l.qty), 0);
+                              const orderUnit = inferOrderUm(orderLines) || entry.unit || "";
+                              const totalLines = orderLines.length || null;
+              
+                              const email = buildConcludedEmail(entry, {
+                                conclusion: (p.conclusion || order?.conclusion || ""),
+                                orderQtyXml,
+                                orderUnit,
+                                totalLines,
+                                concludedNow: (Array.isArray(entry.perLine) ? entry.perLine.length : 0),
+                                isFullOrder: Boolean(askConfirm)
+                              });
+              
+                              await enqueueMatteoEmail(email.subject, email.text, email.html);
+                            }catch(_e){}
               try{
                 await addActionLog({
                   type: "close",
@@ -7734,7 +7988,7 @@ Linea: polveri`, null); }catch(_e){}
                   description: `Ordine n. ${entry.orderNo} · ${entry.customer}`,
                   orderNo: entry.orderNo,
                   customer: entry.customer,
-                  meta: `${toConclude.size} righe · ${Math.round(kg||0)} kg`,
+                  meta: `${toConclude.size} righe · ${formatQtyWithKg(Math.round(kg||0), unit || "kg")}`,
                   extra: { durationMs }
                 });
               }catch(_e){}
@@ -7755,7 +8009,7 @@ Linea: polveri`, null); }catch(_e){}
 
               speak(`Ordine concluso da ${(state.user?.fullName||p.operator||"Operatore")} · ordine ${p.orderNo} · cliente ${p.customer}`);
 
-              showToast("Produzione conclusa", `Operatore ${(state.user?.fullName||p.operator||"Operatore")} · Ordine n. ${p.orderNo} · ${Math.round(kg)} kg`);
+              showToast("Produzione conclusa", `Operatore ${(state.user?.fullName||p.operator||"Operatore")} · Ordine n. ${p.orderNo} · ${formatQtyWithKg(kg, unit)}`);
               showToast("Ordine concluso", `Ordine n. ${p.orderNo} registrato tra i conclusi.`, 2200);
               renderRunning();
               markConcludeCompleted();
