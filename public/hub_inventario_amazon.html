@@ -191,6 +191,13 @@
       text-shadow: 0 10px 22px rgba(0,0,0,.18);
       box-shadow: 0 16px 36px rgba(255,153,0,.20), 0 10px 22px rgba(15,23,42,.06);
     }
+
+    .btn.danger{
+      background: rgba(220,38,38,.10);
+      border-color: rgba(220,38,38,.25);
+      color: rgba(220,38,38,.95);
+      box-shadow: 0 16px 36px rgba(220,38,38,.10), 0 10px 22px rgba(15,23,42,.06);
+    }
     .btn.big{
       padding: 16px 18px;
       border-radius: 20px;
@@ -1016,6 +1023,30 @@ Tip:
     </div>
   </div>
 
+
+  <!-- SHEET DETTAGLI ARTICOLO -->
+  <div class="sheet" id="sheetProductDetails" aria-hidden="true">
+    <div class="sheetCard" role="dialog" aria-modal="true" aria-label="Dettagli articolo">
+      <div class="sheetTop">
+        <div style="min-width:0">
+          <p class="sheetTitle">Dettagli articolo</p>
+          <div class="sheetSub" id="productDetailsSub">—</div>
+        </div>
+        <button class="btn" id="btnCloseProductDetails" type="button">Chiudi</button>
+      </div>
+
+      <div class="sheetBody">
+        <div class="hint" id="productDetailsHint">—</div>
+
+        <div class="sheetScroll">
+          <div id="productDetailsContent"></div>
+        </div>
+
+        <div class="rowActions" id="productDetailsActions"></div>
+      </div>
+    </div>
+  </div>
+
   <!-- SHEET PICK SKU (per campo libero) -->
   <div class="sheet" id="sheetSkuPick" aria-hidden="true">
     <div class="sheetCard" role="dialog" aria-modal="true" aria-label="Seleziona prodotto">
@@ -1076,7 +1107,7 @@ Tip:
         carica: { file:null, lines:[], busy:false, workflow:null },
         scarica: { file:null, lines:[], busy:false, workflow:null }
       },
-      ui: { sheet:null, sheetStack:[], wfOpen:false, flowId:null, flowSearch:"", productsSearch:"", productEditSku:null, caricaMode:"pdf", skuPick:{ lineIdx:null, q:"" } },
+      ui: { sheet:null, sheetStack:[], wfOpen:false, flowId:null, flowSearch:"", productsSearch:"", productEditSku:null, productDetailsSku:null, caricaMode:"pdf", skuPick:{ lineIdx:null, q:"" } },
       manual: { carica:{ text:"", lines:[], busy:false } }
     };
 
@@ -1092,14 +1123,37 @@ Tip:
       try{
         const t = String(rawText||"");
         if(!t || !sku) return "";
-        const re = new RegExp(`SKU\\s*:?\\s*${escapeRegex(sku)}`, "i");
+
+        const re = new RegExp(`\\bSKU\\s*:?\\s*${escapeRegex(sku)}\\b`, "i");
         const m = re.exec(t);
         if(!m) return "";
-        const start = Math.max(0, m.index - 360);
+
+        // finestra più ampia: i titoli spesso sono su più righe e possono stare "lontani" dallo SKU
+        const start = Math.max(0, m.index - 1200);
         const chunk = t.slice(start, m.index);
-        const lines = chunk.split(/[\r\n]+/).map(x=>x.trim()).filter(Boolean);
-        const tail = lines.slice(-6);
-        const guess = squashWhitespace(tail.join(" "));
+
+        const NOISE_RE = /(invia(?:to)? ad amazon|visualizza introduzione|amazon seller central|nuovo seller central|flusso di lavoro|passaggio\\b|dashboard|inventario\\b|spedizioni\\b|notifiche\\b|gestisci i tuoi ordini|pagamenti\\b|tax\\b|stato dell'account|maggiori info|maggiori informazioni|preferenze di visualizzazione|dettagli dell'imballaggio|commento\\b|aiuto\\b|scarica l'app|pagina\\b|©)/i;
+        const FIELD_RE = /(sku\\s*:|asin\\s*:|tipo\\s+di\\s+stoccaggio|unit[àa]\\s+per\\s+pacco|preparazione|etichettatura|pronto\\s+per\\s+la\\s+spedizione|pacchi\\s*:|unit[àa]\\s*:)/i;
+
+        const lines = chunk.split(/[\\r\\n]+/).map(x=>x.trim()).filter(Boolean);
+
+        const filtered = lines.filter(x=>{
+          if(!x || x.length < 4) return false;
+          if(NOISE_RE.test(x)) return false;
+          if(FIELD_RE.test(x)) return false;
+          return true;
+        });
+
+        // prendiamo le ultime righe "buone" (di solito è il titolo prodotto)
+        const tail = filtered.slice(-10);
+        let guess = squashWhitespace(tail.join(" "));
+
+        // pulizia finale nel caso qualche etichetta sia "in-line"
+        guess = guess
+          .replace(/invia(?:to)? ad amazon|visualizza introduzione|amazon seller central|nuovo seller central|flusso di lavoro|passaggio\\b|dashboard|inventario\\b|spedizioni\\b|notifiche\\b|gestisci i tuoi ordini|pagamenti\\b|tax\\b|stato dell'account|maggiori info|maggiori informazioni|preferenze di visualizzazione|dettagli dell'imballaggio|commento\\b|aiuto\\b|scarica l'app|pagina\\b|©/ig, "")
+          .replace(/\\s+/g, " ")
+          .trim();
+
         return guess;
       }catch(_e){
         return "";
@@ -1109,39 +1163,68 @@ Tip:
         function repairTitles(lines, rawText){
           // Il backend ormai restituisce titoli completi: qui facciamo solo pulizia e (se serve)
           // proviamo a "ricostruire" un titolo troncato usando il rawText del PDF (best-effort).
+
+          const UI_NOISE_INLINE_RE = /(invia(?:to)? ad amazon|visualizza introduzione|amazon seller central|nuovo seller central|flusso di lavoro|passaggio\b|dashboard|inventario\b|spedizioni\b|notifiche\b|gestisci i tuoi ordini|pagamenti\b|tax\b|stato dell'account|maggiori info|maggiori informazioni|preferenze di visualizzazione|dettagli dell'imballaggio|commento\b|aiuto\b|scarica l'app|pagina\b|©)/ig;
+
+          const cleanTitle = (val)=>{
+            let t = squashWhitespace(val || "");
+            if(!t) return "";
+            // ripulisci rumore UI tipico del PDF
+            t = t.replace(/\bPronto per la spedizione\b/ig, "");
+            t = t.replace(/venditore\s*-\s*stampa\s*etichette/ig, "");
+            t = t.replace(/stampa\s*etichette/ig, "");
+            t = t.replace(/venditore\s*-/ig, "");
+            // a volte il PDF mette header/menù dentro il "titolo": li eliminiamo
+            t = t.replace(UI_NOISE_INLINE_RE, "");
+            t = t.replace(/\s+/g, " ").trim();
+            t = t.replace(/^-+\s*/g, "").trim();
+            return t;
+          };
+
+          const isBadTitle = (val)=>{
+            const t = squashWhitespace(val || "");
+            if(!t) return true;
+            if(t.length < 8) return true;
+            // casi tipici: al posto del titolo arriva "Invia ad Amazon" / header vari
+            if(t.length < 40 && /(invia(?:to)? ad amazon|amazon seller central|flusso di lavoro|passaggio\b|dashboard|inventario\b)/i.test(t)) return true;
+            return false;
+          };
+
           let out = (lines||[]).map((l0)=>{
             const l = { ...l0 };
-            let t = squashWhitespace(l.title || "");
-            if(t){
-              // ripulisci rumore UI tipico del PDF
-              t = t.replace(/\bPronto per la spedizione\b/ig, "");
-              t = t.replace(/venditore\s*-\s*stampa\s*etichette/ig, "");
-              t = t.replace(/stampa\s*etichette/ig, "");
-              t = t.replace(/venditore\s*-/ig, "");
-              t = t.replace(/\s+/g, " ").trim();
-              t = t.replace(/^-+\s*/g, "").trim();
-            }
-            l.title = t;
+            l.title = cleanTitle(l.title);
             return l;
           });
 
           if(rawText){
             out = out.map(l=>{
-              if(!l.sku || !l.title) return l;
-              const guess = guessTitleFromRaw(rawText, l.sku);
+              if(!l.sku) return l;
+
+              const guessRaw = guessTitleFromRaw(rawText, l.sku);
+              const guess = cleanTitle(guessRaw);
               if(!guess) return l;
 
               // Evita di "sporcare" i titoli con etichette/step UI del PDF
-              if(/pronto per la spedizione|venditore|stampa etichette/i.test(guess)) return l;
+              if(/pronto per la spedizione|venditore|stampa etichette|invia(?:to)? ad amazon|flusso di lavoro|passaggio\b/i.test(guess)) return l;
+
+              // Se il titolo corrente è vuoto/rumore → usa direttamente il guess
+              if(isBadTitle(l.title)){
+                return { ...l, title: guess };
+              }
 
               // Se il guess termina col titolo corrente ma è più lungo → il titolo corrente è probabilmente "tagliato"
               if(guess.length > l.title.length + 8 && guess.toLowerCase().endsWith(l.title.toLowerCase())){
                 return { ...l, title: guess };
               }
+
+              // Se il titolo è sospettosamente corto e il guess è molto più informativo
+              if(l.title.length < 16 && guess.length >= l.title.length + 20){
+                return { ...l, title: guess };
+              }
+
               return l;
             });
           }
-          
 
           return out;
         }
@@ -2369,6 +2452,7 @@ function currentInv(){
       if(kind==="scarica") return $("sheetScarica");
       if(kind==="flow") return $("sheetFlow");
       if(kind==="products") return $("sheetProducts");
+      if(kind==="productDetails") return $("sheetProductDetails");
       if(kind==="skuPick") return $("sheetSkuPick");
       return null;
     }
@@ -3024,7 +3108,317 @@ function currentInv(){
       try{ inp?.focus(); }catch(_e){}
     }
 
-    function renderProductsSheet(){
+    
+    // --- Dettagli articolo (sheet) ---
+    function openProductDetailsSheet(sku){
+      const s = toSkuId(sku||"");
+      if(!s) return;
+      state.ui.productDetailsSku = s;
+      renderProductDetailsSheet();
+      openSheet("productDetails", { stack:true });
+    }
+
+    function getProductBySku(loc, sku){
+      const inv = state.inventory[loc];
+      if(!inv) return null;
+      const s = toSkuId(sku||"");
+      return (inv.items||[]).find(x => toSkuId(x.sku) === s) || null;
+    }
+
+    function renderProductDetailsSheet(){
+      const loc = state.route.loc;
+      const sku = toSkuId(state.ui.productDetailsSku||"");
+
+      const sub = $("productDetailsSub");
+      const hint = $("productDetailsHint");
+      const content = $("productDetailsContent");
+      const actions = $("productDetailsActions");
+
+      if(sub) sub.textContent = (sku && loc) ? `${sku} • ${prettyLoc(loc)}` : "—";
+      if(!hint || !content || !actions) return;
+
+      if(!loc || !sku){
+        hint.textContent = "Seleziona un prodotto dall’elenco per vedere i dettagli.";
+        content.innerHTML = "";
+        actions.innerHTML = "";
+        return;
+      }
+
+      const item = getProductBySku(loc, sku);
+      if(!item){
+        hint.textContent = "Prodotto non trovato in questo magazzino (potrebbe essere stato spostato o eliminato).";
+        content.innerHTML = "";
+        actions.innerHTML = "";
+        return;
+      }
+
+      const isAdmin = !!state.user?.isAdmin;
+
+      const rawTitle = squashWhitespace(item.title || "");
+      const titleMain = rawTitle || "(senza nome)";
+      const qty = Math.max(0, parseQty(item.qty) || 0);
+
+      const meta = parseTitleMeta(rawTitle);
+      const metaSmall = buildMetaSmall(meta);
+      const metaHtml = metaSmall ? `<div class="rowMeta">${escapeHtml(metaSmall)}</div>` : ``;
+
+      const when = item.updatedAtClient ? new Date(item.updatedAtClient).toLocaleString("it-IT") : "";
+      const by = item.updatedBy ? String(item.updatedBy) : "";
+
+      hint.textContent = isAdmin
+        ? "Qui puoi modificare i dettagli e spostare l’articolo tra magazzini."
+        : "Dettagli in sola lettura. Modifica/sposta/elimina: solo Admin.";
+
+      content.innerHTML = `
+        <div class="row editRow">
+          <div class="rowMain">
+            <p class="rowTitle">${escapeHtml(titleMain)}</p>
+            <div class="rowSub"><span class="mono">${escapeHtml(sku)}</span> • Magazzino: <b>${escapeHtml(prettyLoc(loc))}</b></div>
+            ${metaHtml}
+            ${(when || by) ? `<div class="hint">Ultimo update: ${escapeHtml(when || "—")}${by ? ` • ${escapeHtml(by)}` : ""}</div>` : ``}
+          </div>
+
+          <div class="editGrid" style="margin-top:12px">
+            <div class="field">
+              <label class="fieldLabel">SKU</label>
+              <input class="input mono" data-field="sku" value="${escapeHtml(sku)}" ${isAdmin ? "" : "disabled"} />
+            </div>
+            <div class="field">
+              <label class="fieldLabel">Quantità</label>
+              <input class="input" inputmode="numeric" data-field="qty" value="${escapeHtml(String(qty))}" ${isAdmin ? "" : "disabled"} />
+            </div>
+            <div class="field" style="grid-column: 1 / -1;">
+              <label class="fieldLabel">Nome prodotto</label>
+              <input class="input" data-field="title" value="${escapeHtml(titleMain)}" ${isAdmin ? "" : "disabled"} />
+            </div>
+          </div>
+        </div>
+      `;
+
+      actions.innerHTML = `
+        <button class="btn primary" data-action="pdSave" ${isAdmin ? "" : "disabled"}>Salva</button>
+        <button class="btn" data-action="pdMove" data-to="cerea" ${(isAdmin && loc!=="cerea") ? "" : "disabled"}>Sposta in Cerea</button>
+        <button class="btn" data-action="pdMove" data-to="concamarise" ${(isAdmin && loc!=="concamarise") ? "" : "disabled"}>Sposta in Concamarise</button>
+        <button class="btn danger" data-action="pdDelete" ${isAdmin ? "" : "disabled"}>Elimina</button>
+      `;
+    }
+
+    function readProductDetailsFields(){
+      const wrap = $("productDetailsContent");
+      const skuEl = wrap?.querySelector?.('[data-field="sku"]');
+      const qtyEl = wrap?.querySelector?.('[data-field="qty"]');
+      const titleEl = wrap?.querySelector?.('[data-field="title"]');
+
+      const sku = toSkuId(skuEl?.value || "");
+      const title = squashWhitespace(titleEl?.value || "");
+      const qty = Math.max(0, parseQty(qtyEl?.value || 0) || 0);
+
+      return { sku, title, qty };
+    }
+
+    async function saveProductFromDetails(){
+      const loc = state.route.loc;
+      if(!loc) return;
+
+      if(!state.user?.isAdmin){
+        showToast("Permessi", "Solo Admin può modificare.", 2200);
+        return;
+      }
+
+      const oldSku = toSkuId(state.ui.productDetailsSku||"");
+      const { sku, title, qty } = readProductDetailsFields();
+
+      if(!oldSku){
+        showToast("Errore", "SKU non valido.", 2200);
+        return;
+      }
+      if(!sku){
+        showToast("Errore", "Inserisci uno SKU valido.", 2200);
+        return;
+      }
+
+      const api = state.firebase.api;
+      const db = state.firebase.db;
+
+      const oldRef = api.doc(db, COL_ROOT, loc, SUB_ITEMS, oldSku);
+      const newRef = api.doc(db, COL_ROOT, loc, SUB_ITEMS, sku);
+
+      const oldP = api.doc(db, COL_PRODUCTS, oldSku);
+      const newP = api.doc(db, COL_PRODUCTS, sku);
+
+      try{
+        await api.runTransaction(db, async (tx)=>{
+          const sOld = await tx.get(oldRef);
+          if(!sOld.exists()) throw new Error("Prodotto non trovato.");
+          if(sku!==oldSku){
+            const sNew = await tx.get(newRef);
+            if(sNew.exists()) throw new Error("SKU già esistente.");
+          }
+
+          const nowClient = Date.now();
+          const baseData = {
+            sku,
+            title: title || "",
+            titleNorm: normalizeText(title || sku),
+            qty,
+            updatedAt: api.serverTimestamp(),
+            updatedAtClient: nowClient,
+            updatedBy: state.user.email || "",
+            location: loc
+          };
+
+          if(sku===oldSku){
+            tx.set(oldRef, baseData, { merge:true });
+          }else{
+            tx.set(newRef, baseData, { merge:true });
+            tx.delete(oldRef);
+          }
+
+          // anagrafica globale (best effort ma in tx)
+          const pData = {
+            sku,
+            title: title || "",
+            titleNorm: normalizeText(title || sku),
+            lastSeenAt: api.serverTimestamp(),
+            lastSeenAtClient: nowClient,
+            lastSeenBy: state.user.email || "",
+            lastSeenLocation: loc,
+            lastSeenKind: "manual_edit",
+            seenCount: api.increment(1)
+          };
+
+          if(sku===oldSku){
+            tx.set(oldP, pData, { merge:true });
+          }else{
+            const pNewSnap = await tx.get(newP);
+            if(pNewSnap.exists()) throw new Error("SKU già esistente (anagrafica).");
+            tx.set(newP, pData, { merge:true });
+            tx.delete(oldP);
+          }
+        });
+
+        showToast("Salvato", "Prodotto aggiornato.", 1400);
+        state.ui.productDetailsSku = sku;
+        state.ui.productEditSku = null;
+        renderProductDetailsSheet();
+        renderProductsSheet();
+        renderInventoryList();
+      }catch(err){
+        console.error(err);
+        showToast("Errore", String(err?.message || err).slice(0, 200), 2800);
+      }
+    }
+
+    async function deleteProductFromDetails(){
+      const sku = toSkuId(state.ui.productDetailsSku||"");
+      if(!sku) return;
+      await deleteProductSku(sku);
+      // se va a buon fine, chiudi (best effort)
+      closeSheet("productDetails");
+      state.ui.productDetailsSku = null;
+    }
+
+    async function moveProductFromDetails(toLoc){
+      const fromLoc = state.route.loc;
+      if(!fromLoc) return;
+
+      if(!state.user?.isAdmin){
+        showToast("Permessi", "Solo Admin può spostare.", 2200);
+        return;
+      }
+
+      const dst = String(toLoc||"").toLowerCase();
+      if(!(dst==="cerea" || dst==="concamarise")){
+        showToast("Errore", "Magazzino destinazione non valido.", 2200);
+        return;
+      }
+      if(dst===fromLoc){
+        showToast("Info", "È già in questo magazzino.", 1800);
+        return;
+      }
+
+      const oldSku = toSkuId(state.ui.productDetailsSku||"");
+      const { sku:newSku, title, qty } = readProductDetailsFields();
+
+      if(!oldSku){
+        showToast("Errore", "SKU non valido.", 2200);
+        return;
+      }
+      if(!newSku){
+        showToast("Errore", "Inserisci uno SKU valido.", 2200);
+        return;
+      }
+
+      const ok = confirm(`Spostare ${oldSku} da ${prettyLoc(fromLoc)} a ${prettyLoc(dst)}?\n\nOperazione: sposta (non duplica).`);
+      if(!ok) return;
+
+      const api = state.firebase.api;
+      const db = state.firebase.db;
+
+      const fromRef = api.doc(db, COL_ROOT, fromLoc, SUB_ITEMS, oldSku);
+      const toRef = api.doc(db, COL_ROOT, dst, SUB_ITEMS, newSku);
+
+      const oldP = api.doc(db, COL_PRODUCTS, oldSku);
+      const newP = api.doc(db, COL_PRODUCTS, newSku);
+
+      try{
+        await api.runTransaction(db, async (tx)=>{
+          const sFrom = await tx.get(fromRef);
+          if(!sFrom.exists()) throw new Error("Prodotto non trovato.");
+
+          const sTo = await tx.get(toRef);
+          if(sTo.exists()) throw new Error("Nella destinazione esiste già questo SKU.");
+
+          const nowClient = Date.now();
+          const baseData = {
+            sku: newSku,
+            title: title || "",
+            titleNorm: normalizeText(title || newSku),
+            qty,
+            updatedAt: api.serverTimestamp(),
+            updatedAtClient: nowClient,
+            updatedBy: state.user.email || "",
+            location: dst
+          };
+
+          tx.set(toRef, baseData, { merge:true });
+          tx.delete(fromRef);
+
+          // aggiorna anagrafica globale
+          const pData = {
+            sku: newSku,
+            title: title || "",
+            titleNorm: normalizeText(title || newSku),
+            lastSeenAt: api.serverTimestamp(),
+            lastSeenAtClient: nowClient,
+            lastSeenBy: state.user.email || "",
+            lastSeenLocation: dst,
+            lastSeenKind: "move",
+            seenCount: api.increment(1)
+          };
+
+          if(newSku===oldSku){
+            tx.set(oldP, pData, { merge:true });
+          }else{
+            const pNewSnap = await tx.get(newP);
+            if(pNewSnap.exists()) throw new Error("SKU già esistente (anagrafica).");
+            tx.set(newP, pData, { merge:true });
+            tx.delete(oldP);
+          }
+        });
+
+        showToast("Spostato", `Articolo spostato in ${prettyLoc(dst)}.`, 1800);
+        state.ui.productDetailsSku = null;
+        state.ui.productEditSku = null;
+        closeSheet("productDetails");
+        renderProductsSheet();
+        renderInventoryList();
+      }catch(err){
+        console.error(err);
+        showToast("Errore", String(err?.message || err).slice(0, 200), 2800);
+      }
+    }
+function renderProductsSheet(){
       const list = $("productsList");
       const hint = $("productsHint");
       if(!list || !hint) return;
@@ -3087,7 +3481,7 @@ function currentInv(){
           }
 
           return `
-            <div class="row" data-sku="${escapeHtml(sku)}">
+            <div class="row" role="button" tabindex="0" data-sku="${escapeHtml(sku)}" data-action="openProductDetails">
               <div class="rowMain">
                 <p class="rowTitle">${titleMain}</p>
                 <div class="rowSub"><span class="mono">${escapeHtml(sku)}</span>${metaHtml ? " • " + metaHtml : ""}</div>
@@ -3553,6 +3947,18 @@ showToast("Operazione completata", `${kind==="carica" ? "Carico" : "Scarico"} ap
       $("btnCloseProducts")?.addEventListener("click", ()=> closeSheet("products"));
       $("sheetProducts")?.addEventListener("click", (e)=>{ if(e.target?.id==="sheetProducts") closeSheet("products"); });
 
+      $("btnCloseProductDetails")?.addEventListener("click", ()=>{ state.ui.productDetailsSku = null; closeSheet("productDetails"); });
+      $("sheetProductDetails")?.addEventListener("click", (e)=>{ if(e.target?.id==="sheetProductDetails"){ state.ui.productDetailsSku = null; closeSheet("productDetails"); } });
+
+      $("productDetailsActions")?.addEventListener("click", (e)=>{
+        const aSave = e.target?.closest?.("[data-action='pdSave']");
+        const aDelete = e.target?.closest?.("[data-action='pdDelete']");
+        const aMove = e.target?.closest?.("[data-action='pdMove']");
+        if(aSave){ saveProductFromDetails(); return; }
+        if(aDelete){ deleteProductFromDetails(); return; }
+        if(aMove){ moveProductFromDetails(aMove.getAttribute("data-to") || ""); return; }
+      });
+
       $("btnCloseSkuPick")?.addEventListener("click", ()=> closeSheet("skuPick"));
       $("sheetSkuPick")?.addEventListener("click", (e)=>{ if(e.target?.id==="sheetSkuPick") closeSheet("skuPick"); });
 
@@ -3638,6 +4044,23 @@ showToast("Operazione completata", `${kind==="carica" ? "Carico" : "Scarico"} ap
           deleteProductSku(sku);
           return;
         }
+
+        // tap su riga => dettagli (se non stai cliccando un bottone)
+        if(row.getAttribute("data-action")==="openProductDetails"){
+          const sku = row.getAttribute("data-sku") || "";
+          openProductDetailsSheet(sku);
+          return;
+        }
+      });
+
+
+      $("productsList")?.addEventListener("keydown", (e)=>{
+        if(e.key!=="Enter" && e.key!==" ") return;
+        const row = e.target?.closest?.(".row");
+        if(!row) return;
+        if(row.getAttribute("data-action")!=="openProductDetails") return;
+        e.preventDefault();
+        openProductDetailsSheet(row.getAttribute("data-sku") || "");
       });
 
       // KPI click: apri lista prodotti
