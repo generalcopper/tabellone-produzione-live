@@ -278,6 +278,17 @@
       text-transform: uppercase;
     }
 
+    .warehouse.amazonTile{
+      background: linear-gradient(180deg, rgba(255,153,0,.96), rgba(240,138,0,.96));
+      border-color: rgba(255,153,0,.55);
+      box-shadow: 0 22px 58px rgba(255,153,0,.16), 0 18px 44px rgba(15,23,42,.10);
+    }
+    .warehouse.amazonTile .warehouseName{
+      color:#fff;
+      text-shadow: 0 10px 22px rgba(0,0,0,.18);
+    }
+
+
     /* Location */
     .crumb{
       display:flex; align-items:center; gap:10px; min-width:0;
@@ -611,10 +622,10 @@
         </div>
         <div class="cardBody">
           <div class="homeGrid">
-            <button class="warehouse" id="btnEnterCerea" type="button">
+            <button class="warehouse amazonTile" id="btnEnterCerea" type="button">
               <div class="warehouseName">Inventario AMZ Cerea</div>
             </button>
-            <button class="warehouse" id="btnEnterConcamarise" type="button">
+            <button class="warehouse amazonTile" id="btnEnterConcamarise" type="button">
               <div class="warehouseName">Inventario AMZ Concamarise</div>
             </button>
           </div>
@@ -660,6 +671,27 @@
           </div>
 
           <div class="hint" id="invMeta">—</div>
+
+          <div class="divider"></div>
+          <div style="display:flex; align-items:flex-start; justify-content:space-between; gap:10px; flex-wrap:wrap">
+            <div style="min-width:0">
+              <div class="cardTitle">Flussi recenti</div>
+              <div class="cardSub">Apri un flusso per vedere le righe estratte. Le eliminazioni/annullamenti sono disponibili solo per Admin.</div>
+            </div>
+            <button class="btn" id="btnFlowsRefresh" type="button">Aggiorna flussi</button>
+          </div>
+
+          <div class="hint" id="flowHint">—</div>
+          <div class="list" id="flowList"></div>
+
+          <div class="divider"></div>
+          <div style="display:flex; align-items:flex-start; justify-content:space-between; gap:10px; flex-wrap:wrap">
+            <div style="min-width:0">
+              <div class="cardTitle">Inventario</div>
+              <div class="cardSub">Le righe appaiono solo dopo una ricerca (SKU o nome).</div>
+            </div>
+          </div>
+
           <div class="list" id="invList"></div>
         </div>
       </div>
@@ -735,6 +767,38 @@
     </div>
   </div>
 
+  
+  <!-- SHEET FLUSSO (dettaglio righe) -->
+  <div class="sheet" id="sheetFlow" aria-hidden="true">
+    <div class="sheetCard" role="dialog" aria-modal="true" aria-label="Dettaglio flusso">
+      <div class="sheetTop">
+        <div style="min-width:0">
+          <p class="sheetTitle" id="flowTitle">Flusso</p>
+          <div class="sheetSub" id="flowSub">—</div>
+        </div>
+        <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap; justify-content:flex-end">
+          <button class="btn small" id="btnFlowUndo" type="button" style="display:none">Annulla</button>
+          <button class="btn small" id="btnFlowDelete" type="button" style="display:none">Elimina</button>
+          <button class="btn" id="btnCloseFlow" type="button">Chiudi</button>
+        </div>
+      </div>
+
+      <div class="sheetBody">
+        <div class="sheetControls">
+          <input class="input" id="flowSearch" placeholder="Cerca nel flusso (SKU o nome)…" />
+          <button class="btn" id="btnFlowRefresh" type="button">Aggiorna</button>
+        </div>
+
+        <div class="hint" id="flowHintDetails">—</div>
+
+        <div class="sheetScroll">
+          <div class="list" id="flowLines"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+
   <!-- Toast -->
   <div class="toast" id="toast" aria-live="polite" aria-atomic="true">
     <div class="toastCard">
@@ -789,11 +853,15 @@
         cerea: { unsub:null, items:[], meta:{ count:0, lastUpdatedAt:null } },
         concamarise: { unsub:null, items:[], meta:{ count:0, lastUpdatedAt:null } }
       },
+      logs: {
+        cerea: { unsub:null, flows:[], meta:{ count:0 } },
+        concamarise: { unsub:null, flows:[], meta:{ count:0 } }
+      },
       flows: {
         carica: { file:null, lines:[], busy:false, workflow:null },
         scarica: { file:null, lines:[], busy:false, workflow:null }
       },
-      ui: { sheet:null, wfOpen:false }
+      ui: { sheet:null, wfOpen:false, flowId:null, flowSearch:"" }
     };
 
     // --- utilities ---
@@ -943,6 +1011,7 @@
     const COL_ROOT = "amzInventory";
     const SUB_ITEMS = "items";
     const SUB_LOGS = "logs";
+    const COL_PRODUCTS = "amzInventoryProducts"; // anagrafica prodotti (globale)
 
     // --- PDF workflow parsing ---
     function parseWorkflowFromText(text){
@@ -1105,6 +1174,7 @@
             orderBy: fsMod.orderBy,
             limit: fsMod.limit,
             onSnapshot: fsMod.onSnapshot,
+            deleteDoc: fsMod.deleteDoc,
             writeBatch: fsMod.writeBatch,
             increment: fsMod.increment,
           }
@@ -1279,6 +1349,7 @@
     function startAllRealtime(){
       startRealtimeFor("cerea");
       startRealtimeFor("concamarise");
+      startAllLogs();
     }
 
     function stopAllRealtime(){
@@ -1288,6 +1359,7 @@
         state.inventory[loc].items = [];
         state.inventory[loc].meta = { count:0, lastUpdatedAt:null };
       }
+      stopAllLogs();
       renderInventoryList();
     }
 
@@ -1336,7 +1408,403 @@
       });
     }
 
-    function currentInv(){
+    
+    // --- realtime flows (logs) ---
+    function startAllLogs(){
+      startLogsFor("cerea");
+      startLogsFor("concamarise");
+    }
+
+    function stopAllLogs(){
+      for(const loc of ["cerea","concamarise"]){
+        try{ state.logs[loc].unsub && state.logs[loc].unsub(); }catch(_e){}
+        state.logs[loc].unsub = null;
+        state.logs[loc].flows = [];
+        state.logs[loc].meta = { count:0 };
+      }
+      if(state.route.view==="location") renderFlowsList();
+    }
+
+    function startLogsFor(loc){
+      if(!state.firebase.ok || !state.user?.isWhitelisted) return;
+      const lg = state.logs[loc];
+      if(lg.unsub) return;
+
+      const api = state.firebase.api;
+      const db = state.firebase.db;
+
+      const colRef = api.collection(db, COL_ROOT, loc, SUB_LOGS);
+      const q = api.query(colRef, api.orderBy("appliedAtClient","desc"), api.limit(25));
+      lg.unsub = api.onSnapshot(q, (snap)=>{
+        const flows = [];
+        snap.forEach(docSnap=>{
+          const d = docSnap.data() || {};
+          flows.push({
+            id: docSnap.id,
+            kind: d.kind || "",
+            location: d.location || loc,
+            fileName: d.fileName || "",
+            appliedAtClient: (typeof d.appliedAtClient==="number") ? d.appliedAtClient : 0,
+            appliedBy: d.appliedBy || "",
+            totalLines: Number.isFinite(d.totalLines) ? d.totalLines : (Array.isArray(d.lines)? d.lines.length : 0),
+            totalPieces: Number.isFinite(d.totalPieces) ? d.totalPieces : 0,
+            workflow: d.workflow || null,
+            voided: d.voided === true,
+            voidedAtClient: (typeof d.voidedAtClient==="number") ? d.voidedAtClient : 0,
+            voidedBy: d.voidedBy || "",
+            lines: Array.isArray(d.lines) ? d.lines : []
+          });
+        });
+        lg.flows = flows;
+        lg.meta.count = flows.length;
+
+        if(state.route.view==="location" && state.route.loc===loc){
+          renderFlowsList();
+          // keep details updated if open
+          if(state.ui.sheet==="flow" && state.ui.flowId){
+            renderFlowDetails();
+          }
+        }
+      }, (err)=>{
+        console.warn("logs watch error", err);
+        showToast("Errore flussi", err?.message || String(err));
+      });
+    }
+
+    function currentLogs(){
+      const loc = state.route.loc;
+      if(!loc) return { flows:[], meta:{ count:0 } };
+      return state.logs[loc] || { flows:[], meta:{ count:0 } };
+    }
+
+    function fmtDate(ts){
+      if(!ts) return "—";
+      try{ return new Date(ts).toLocaleString("it-IT"); }catch(_e){ return "—"; }
+    }
+
+    function flowDisplayName(flow){
+      const wfId = flow?.workflow?.id || "";
+      if(wfId) return wfId;
+      const fn = String(flow?.fileName || "").trim();
+      if(fn) return fn;
+      return flow?.id ? flow.id.slice(0, 8) : "—";
+    }
+
+    function renderFlowsList(){
+      const list = $("flowList");
+      const hint = $("flowHint");
+      if(!list || !hint) return;
+
+      if(!state.user?.isWhitelisted){
+        hint.textContent = "Accedi per visualizzare i flussi.";
+        list.innerHTML = "";
+        return;
+      }
+
+      const lg = currentLogs();
+      const flows = lg.flows || [];
+      hint.textContent = flows.length
+        ? `${flows.length} flussi mostrati (ultimi 25).`
+        : "Nessun flusso registrato. Dopo un Carica/Scarica qui trovi lo storico.";
+
+      if(!flows.length){
+        list.innerHTML = "";
+        return;
+      }
+
+      const rows = flows.map(f=>{
+        const kindLabel = (f.kind==="carica") ? "Carica" : (f.kind==="scarica" ? "Scarica" : "Flusso");
+        const name = escapeHtml(flowDisplayName(f));
+        const time = fmtDate(f.appliedAtClient);
+        const file = escapeHtml(f.fileName || "");
+        const pieces = (f.totalPieces || 0);
+        const lines = (f.totalLines || (Array.isArray(f.lines)? f.lines.length : 0) || 0);
+        const voided = f.voided ? `<span class="badge warn">Annullato</span>` : ``;
+        const metaParts = [];
+        metaParts.push(time);
+        if(file) metaParts.push(file);
+        if(pieces) metaParts.push(`${pieces} pz`);
+        if(lines) metaParts.push(`${lines} righe`);
+        const meta = metaParts.join(" • ");
+
+        const adminBtn = state.user?.isAdmin ? `
+          <button class="btn small" data-action="deleteFlow" data-flowid="${escapeHtml(f.id)}" type="button">Elimina</button>
+        ` : ``;
+
+        return `
+          <div class="folderRow" data-action="openFlow" data-flowid="${escapeHtml(f.id)}" role="button" tabindex="0" aria-label="Apri flusso">
+            <div class="folderLeft">
+              <div class="folderTitle">${kindLabel} • ${name} ${voided}</div>
+              <div class="folderMeta">${meta}</div>
+            </div>
+            <div style="display:flex; align-items:center; gap:8px; flex:0 0 auto;">
+              ${adminBtn}
+              <div class="chev">›</div>
+            </div>
+          </div>
+        `;
+      }).join("");
+
+      list.innerHTML = rows;
+    }
+
+    function openFlow(flowId){
+      const loc = state.route.loc;
+      if(!loc) return;
+      const flow = (state.logs[loc]?.flows || []).find(f=>f.id===flowId) || null;
+      if(!flow){
+        showToast("Flusso non trovato", "Riprova tra un attimo.");
+        return;
+      }
+      state.ui.flowId = flowId;
+      state.ui.flowSearch = "";
+      if($("flowSearch")) $("flowSearch").value = "";
+      openSheet("flow");
+      renderFlowDetails();
+    }
+
+    function getOpenFlow(){
+      const loc = state.route.loc;
+      const id = state.ui.flowId;
+      if(!loc || !id) return null;
+      return (state.logs[loc]?.flows || []).find(f=>f.id===id) || null;
+    }
+
+    function renderFlowDetails(){
+      const flow = getOpenFlow();
+      const titleEl = $("flowTitle");
+      const subEl = $("flowSub");
+      const hintEl = $("flowHintDetails");
+      const listEl = $("flowLines");
+      const btnUndo = $("btnFlowUndo");
+      const btnDel = $("btnFlowDelete");
+
+      if(btnUndo) btnUndo.style.display = state.user?.isAdmin ? "" : "none";
+      if(btnDel) btnDel.style.display = state.user?.isAdmin ? "" : "none";
+
+      if(!flow){
+        if(titleEl) titleEl.textContent = "Flusso";
+        if(subEl) subEl.textContent = "—";
+        if(hintEl) hintEl.textContent = "Seleziona un flusso dallo storico.";
+        if(listEl) listEl.innerHTML = "";
+        return;
+      }
+
+      const kindLabel = (flow.kind==="carica") ? "Carica" : (flow.kind==="scarica" ? "Scarica" : "Flusso");
+      const name = flowDisplayName(flow);
+      const time = fmtDate(flow.appliedAtClient);
+      if(titleEl) titleEl.textContent = `${kindLabel} • ${name}`;
+      if(subEl) subEl.textContent = `${time}${flow.appliedBy ? ` • ${flow.appliedBy}` : ""}${flow.voided ? " • ANNULLATO" : ""}`;
+
+      const q = normalizeText(state.ui.flowSearch || $("flowSearch")?.value || "");
+      const allLines = Array.isArray(flow.lines) ? flow.lines : [];
+      let lines = allLines;
+      if(q){
+        lines = allLines.filter(l=>{
+          const s = normalizeText(`${l?.sku || ""} ${l?.title || ""}`);
+          return s.includes(q);
+        });
+      }
+
+      const effSign = (flow.kind==="scarica") ? "−" : "+";
+      const effWord = (flow.kind==="scarica") ? "scarico" : "carico";
+      if(hintEl){
+        hintEl.textContent = q
+          ? `Righe: ${lines.length}/${allLines.length} • Effetto inventario: ${effWord} (${effSign} quantità)`
+          : `Righe: ${allLines.length} • Effetto inventario: ${effWord} (${effSign} quantità)`;
+      }
+
+      if(!listEl) return;
+      if(!allLines.length){
+        listEl.innerHTML = `<div class="hint">Nessuna riga nel flusso.</div>`;
+        return;
+      }
+      if(!lines.length){
+        listEl.innerHTML = `<div class="hint">Nessuna riga trovata per questa ricerca.</div>`;
+        return;
+      }
+
+      const isAdmin = !!state.user?.isAdmin;
+      const rows = lines.map(l=>{
+        const sku = String(l?.sku || "").trim();
+        const title = String(l?.title || "").trim();
+        const qtyN = Math.max(0, parseQty(l?.qty || 0));
+        const badge = `<span class="badge ${flow.kind==="scarica" ? "warn" : "ok"}">${effSign}${qtyN}</span>`;
+        const delBtn = isAdmin && !flow.voided ? `<button class="btn small" data-action="removeLine" data-sku="${escapeHtml(sku)}" type="button">Elimina riga</button>` : ``;
+
+        return `
+          <div class="row">
+            <div style="min-width:0">
+              <div class="rowTitle">${escapeHtml(title || sku || "—")}</div>
+              <div class="rowMeta">${escapeHtml(sku || "—")}</div>
+            </div>
+            <div style="display:flex; flex-direction:column; align-items:flex-end; gap:8px">
+              ${badge}
+              ${delBtn}
+            </div>
+          </div>
+        `;
+      }).join("");
+
+      listEl.innerHTML = rows;
+    }
+
+    async function adjustInventoryWithLines(loc, kind, lines, direction){
+      // direction: +1 = applica, -1 = annulla (inverte l'effetto)
+      const api = state.firebase.api;
+      const db = state.firebase.db;
+      if(!api || !db) throw new Error("Firebase non inizializzato.");
+      if(!loc) throw new Error("Location mancante.");
+      if(!Array.isArray(lines) || !lines.length) return;
+
+      const base = (kind==="scarica") ? -1 : 1;
+      const mult = base * (Number(direction) || 0);
+
+      const nowClient = Date.now();
+      const who = state.user?.emailLower || state.user?.email || "";
+
+      // Batch limits
+      const CHUNK = 450;
+      for(let i=0; i<lines.length; i+=CHUNK){
+        const chunk = lines.slice(i, i+CHUNK);
+        const batch = api.writeBatch(db);
+
+        for(const l of chunk){
+          const sku = String(l?.sku || "").trim();
+          if(!sku) continue;
+          const title = String(l?.title || "").trim();
+          const qty = parseQty(l?.qty || 0);
+          if(!qty) continue;
+
+          const delta = mult * qty;
+          const docRef = api.doc(db, COL_ROOT, loc, SUB_ITEMS, sku);
+          batch.set(docRef, {
+            sku,
+            title: title || sku,
+            titleNorm: normalizeText(title || sku),
+            qty: api.increment(delta),
+            location: loc,
+            updatedAt: api.serverTimestamp(),
+            updatedAtClient: nowClient,
+            updatedBy: who
+          }, { merge:true });
+        }
+
+        await batch.commit();
+      }
+    }
+
+    async function handleUndoFlow(flowId){
+      if(!state.user?.isAdmin) return;
+      const loc = state.route.loc;
+      const flow = (state.logs[loc]?.flows || []).find(f=>f.id===flowId) || null;
+      if(!flow) { showToast("Flusso non trovato", "Riprova."); return; }
+      if(flow.voided){ showToast("Già annullato", "Questo flusso risulta già annullato."); return; }
+
+      const ok = confirm("Annullare questo flusso?\n\nRipristino automatico dell'inventario e marcatura come ANNULLATO nello storico.");
+      if(!ok) return;
+
+      try{
+        showToast("Operazione in corso", "Sto annullando il flusso…");
+        await adjustInventoryWithLines(loc, flow.kind, flow.lines || [], -1);
+
+        const api = state.firebase.api;
+        const db = state.firebase.db;
+        const logRef = api.doc(db, COL_ROOT, loc, SUB_LOGS, flowId);
+        await api.updateDoc(logRef, {
+          voided: true,
+          voidedAtClient: Date.now(),
+          voidedAt: api.serverTimestamp(),
+          voidedBy: state.user?.emailLower || state.user?.email || ""
+        });
+
+        showToast("Flusso annullato", "Inventario ripristinato.");
+      }catch(err){
+        console.warn("undo flow error", err);
+        showToast("Errore", err?.message || String(err));
+      }
+    }
+
+    async function handleDeleteFlow(flowId, { fromList=false } = {}){
+      if(!state.user?.isAdmin) return;
+      const loc = state.route.loc;
+      const flow = (state.logs[loc]?.flows || []).find(f=>f.id===flowId) || null;
+      if(!flow) { showToast("Flusso non trovato", "Riprova."); return; }
+
+      const ok = confirm("Eliminare questo flusso?\n\nOperazione sicura: ripristina l'inventario (inverte il flusso) e poi rimuove lo storico.");
+      if(!ok) return;
+
+      try{
+        showToast("Operazione in corso", "Sto eliminando il flusso…");
+        if(!flow.voided){
+          await adjustInventoryWithLines(loc, flow.kind, flow.lines || [], -1);
+        }
+        const api = state.firebase.api;
+        const db = state.firebase.db;
+        const logRef = api.doc(db, COL_ROOT, loc, SUB_LOGS, flowId);
+        await api.deleteDoc(logRef);
+
+        // close details if we deleted the open one
+        if(state.ui.flowId===flowId){
+          state.ui.flowId = null;
+          state.ui.flowSearch = "";
+          if(state.ui.sheet==="flow") closeSheet("flow");
+        }
+
+        showToast("Flusso eliminato", "Inventario ripristinato e storico rimosso.");
+        if(!fromList) renderFlowsList();
+      }catch(err){
+        console.warn("delete flow error", err);
+        showToast("Errore", err?.message || String(err));
+      }
+    }
+
+    async function handleRemoveLineFromFlow(sku){
+      if(!state.user?.isAdmin) return;
+      const loc = state.route.loc;
+      const flow = getOpenFlow();
+      if(!loc || !flow) return;
+      if(flow.voided){
+        showToast("Flusso annullato", "Non puoi modificare un flusso già annullato.");
+        return;
+      }
+      const lines = Array.isArray(flow.lines) ? flow.lines : [];
+      const line = lines.find(l=> String(l?.sku||"").trim()===sku) || null;
+      if(!line){
+        showToast("Riga non trovata", "Riprova.");
+        return;
+      }
+
+      const ok = confirm(`Eliminare la riga ${sku}?\n\nRipristino automatico dell'inventario (inverte solo questa riga) e rimozione dal flusso.`);
+      if(!ok) return;
+
+      try{
+        showToast("Operazione in corso", "Sto eliminando la riga…");
+        await adjustInventoryWithLines(loc, flow.kind, [line], -1);
+
+        const newLines = lines.filter(l=> String(l?.sku||"").trim()!==sku);
+        const totalPieces = newLines.reduce((s,l)=> s + parseQty(l?.qty || 0), 0);
+
+        const api = state.firebase.api;
+        const db = state.firebase.db;
+        const logRef = api.doc(db, COL_ROOT, loc, SUB_LOGS, flow.id);
+        await api.updateDoc(logRef, {
+          lines: newLines,
+          totalLines: newLines.length,
+          totalPieces: totalPieces,
+          updatedAtClient: Date.now(),
+          updatedAt: api.serverTimestamp(),
+          updatedBy: state.user?.emailLower || state.user?.email || ""
+        });
+
+        showToast("Riga eliminata", "Inventario ripristinato.");
+      }catch(err){
+        console.warn("remove line error", err);
+        showToast("Errore", err?.message || String(err));
+      }
+    }
+
+function currentInv(){
       const loc = state.route.loc;
       if(!loc) return { items:[], meta:{count:0,lastUpdatedAt:null} };
       return state.inventory[loc] || { items:[], meta:{count:0,lastUpdatedAt:null} };
@@ -1364,17 +1832,19 @@
       }
 
       const inv = currentInv();
-      const s = normalizeText($("invSearch")?.value || "");
-      let items = inv.items || [];
+      const sRaw = ($("invSearch")?.value || "");
+      const s = normalizeText(sRaw);
+      const allItems = inv.items || [];
+      let items = [];
       if(s){
-        items = items.filter(it=>{
+        items = allItems.filter(it=>{
           const key = `${it.sku} ${it.title} ${it.titleNorm}`;
           return normalizeText(key).includes(s);
         });
       }
 
       const skuCount = inv.meta.count || 0;
-      const piecesTotal = (inv.items || []).reduce((a,it)=> a + (Number.isFinite(it.qty) ? it.qty : 0), 0);
+      const piecesTotal = allItems.reduce((a,it)=> a + (Number.isFinite(it.qty) ? it.qty : 0), 0);
       const shown = items.length;
       const last = inv.meta.lastUpdatedAt ? inv.meta.lastUpdatedAt.toLocaleString("it-IT") : "—";
 
@@ -1383,10 +1853,17 @@
       if(kUpdated) kUpdated.textContent = `Ultimo aggiornamento: ${last}`;
       if(kShown) kShown.textContent = `Mostrati: ${shown}`;
 
-      meta.textContent = `Articoli: ${skuCount} • Pezzi totali: ${piecesTotal} • Mostrati: ${shown}`;
+      meta.textContent = s
+        ? `Articoli: ${skuCount} • Pezzi totali: ${piecesTotal} • Risultati: ${shown}`
+        : `Articoli: ${skuCount} • Pezzi totali: ${piecesTotal}. Cerca (SKU o nome) per vedere le righe, oppure apri un flusso recente.`;
+
+      if(!s){
+        list.innerHTML = `<div class="hint">Usa la barra di ricerca qui sopra per visualizzare le righe dell’inventario. In alternativa, apri un flusso recente.</div>`;
+        return;
+      }
 
       if(!items.length){
-        list.innerHTML = `<div class="hint">Nessun articolo da mostrare.</div>`;
+        list.innerHTML = `<div class="hint">Nessun risultato per questa ricerca.</div>`;
         return;
       }
 
@@ -1410,8 +1887,15 @@
     }
 
     // --- Sheets ---
+    function sheetEl(kind){
+      if(kind==="carica") return $("sheetCarica");
+      if(kind==="scarica") return $("sheetScarica");
+      if(kind==="flow") return $("sheetFlow");
+      return null;
+    }
+
     function openSheet(kind){
-      const sheet = (kind==="carica") ? $("sheetCarica") : $("sheetScarica");
+      const sheet = sheetEl(kind);
       if(!sheet) return;
       state.ui.sheet = kind;
 
@@ -1423,7 +1907,7 @@
       document.body.style.overflow = "hidden";
     }
     function closeSheet(kind){
-      const sheet = (kind==="carica") ? $("sheetCarica") : $("sheetScarica");
+      const sheet = sheetEl(kind);
       if(!sheet) return;
       sheet.classList.remove("show");
       sheet.setAttribute("aria-hidden","true");
@@ -1595,6 +2079,35 @@
         }
 
         // log (best effort)
+        
+        // anagrafica prodotti (globale) — aggiornata sempre, sia per Carica che per Scarica
+        try{
+          const CHUNK_P = 450;
+          for(let i=0;i<aggregated.length;i+=CHUNK_P){
+            const part = aggregated.slice(i, i+CHUNK_P);
+            const batchP = api.writeBatch(db);
+            for(const it of part){
+              const sku = toSkuId(it.sku);
+              if(!sku) continue;
+              const title = String(it.title||"").trim() || sku;
+              const refP = api.doc(db, COL_PRODUCTS, sku);
+              batchP.set(refP, {
+                sku,
+                title,
+                titleNorm: normalizeText(title),
+                lastSeenAt: api.serverTimestamp(),
+                lastSeenAtClient: tsClient,
+                lastSeenBy: state.user?.emailLower || state.user?.email || "",
+                lastSeenLocation: loc,
+                lastSeenKind: kind,
+                seenCount: api.increment(1)
+              }, { merge:true });
+            }
+            await batchP.commit();
+          }
+        }catch(_e){}
+
+
         try{
           const logRef = api.collection(db, COL_ROOT, loc, SUB_LOGS);
           const totalPieces = aggregated.reduce((a,x)=> a + (Math.abs(parseQty(x.qty)||0)), 0);
@@ -1624,6 +2137,7 @@
 
         renderFlowList(kind);
         renderInventoryList();
+        renderFlowsList();
         if(kind==="carica") closeSheet("carica");
         if(kind==="scarica") closeSheet("scarica");
       }catch(err){
@@ -1717,9 +2231,11 @@
       $("locTitle").textContent = `Inventario AMZ • ${prettyLoc(loc)}`;
       setView("location");
       renderInventoryList();
+      renderFlowsList();
       renderFlowList("carica");
       renderFlowList("scarica");
       startRealtimeFor(loc);
+      startLogsFor(loc);
     }
 
     // --- bind ---
@@ -1765,6 +2281,74 @@
         renderFlowList("scarica");
       });
 
+
+      // Flussi (storico)
+      $("btnFlowsRefresh")?.addEventListener("click", ()=>{
+        renderFlowsList();
+      });
+
+      $("flowList")?.addEventListener("click", async (e)=>{
+        const actEl = e.target?.closest?.("[data-action]");
+        const action = actEl?.getAttribute?.("data-action") || "";
+        const flowId = actEl?.getAttribute?.("data-flowid") || actEl?.closest?.("[data-flowid]")?.getAttribute?.("data-flowid") || "";
+        if(!flowId) return;
+
+        if(action==="deleteFlow"){
+          e.preventDefault(); e.stopPropagation();
+          await handleDeleteFlow(flowId, { fromList:true });
+          return;
+        }
+
+        // open flow (row click)
+        const row = e.target?.closest?.("[data-action='openFlow']");
+        if(row){
+          e.preventDefault();
+          openFlow(flowId);
+        }
+      });
+
+      $("flowList")?.addEventListener("keydown", (e)=>{
+        if(e.key!=="Enter" && e.key!==" ") return;
+        const row = e.target?.closest?.("[data-action='openFlow']");
+        if(!row) return;
+        const flowId = row.getAttribute("data-flowid") || "";
+        if(!flowId) return;
+        e.preventDefault();
+        openFlow(flowId);
+      });
+
+      // Sheet flusso
+      $("btnCloseFlow")?.addEventListener("click", ()=> closeSheet("flow"));
+      $("sheetFlow")?.addEventListener("click", (e)=>{ if(e.target?.id==="sheetFlow") closeSheet("flow"); });
+      $("flowSearch")?.addEventListener("input", ()=>{
+        state.ui.flowSearch = $("flowSearch")?.value || "";
+        renderFlowDetails();
+      });
+      $("btnFlowRefresh")?.addEventListener("click", ()=> renderFlowDetails());
+
+      $("btnFlowUndo")?.addEventListener("click", async ()=>{
+        if(!state.user?.isAdmin) return;
+        const id = state.ui.flowId;
+        if(!id) return;
+        await handleUndoFlow(id);
+      });
+      $("btnFlowDelete")?.addEventListener("click", async ()=>{
+        if(!state.user?.isAdmin) return;
+        const id = state.ui.flowId;
+        if(!id) return;
+        await handleDeleteFlow(id, { fromList:false });
+      });
+
+      $("flowLines")?.addEventListener("click", async (e)=>{
+        const btn = e.target?.closest?.("[data-action='removeLine']");
+        if(!btn) return;
+        if(!state.user?.isAdmin) return;
+        const sku = btn.getAttribute("data-sku") || "";
+        if(!sku) return;
+        e.preventDefault(); e.stopPropagation();
+        await handleRemoveLineFromFlow(sku);
+      });
+
       bindWorkflowToggle();
     }
 
@@ -1780,6 +2364,7 @@
   <!--
     Firestore data model:
       amzInventory/{loc}/items/{SKU} { sku, title, titleNorm, qty, updatedAt, updatedAtClient, updatedBy, location }
+      amzInventoryProducts/{SKU} { sku, title, titleNorm, lastSeenAt, lastSeenAtClient, lastSeenBy, lastSeenLocation, lastSeenKind, seenCount }
       amzInventory/{loc}/logs/{autoId} { kind, location, fileName, appliedAt, appliedBy, totalLines, totalPieces, workflow?, lines[] }
 
     Whitelist:
