@@ -3551,13 +3551,21 @@ function renderUploadHistory(){
 
       async function logPayrollSendEvent(payload){
         try{
+          const emailLower = String(payload?.emailLower || payload?.email || "").toLowerCase();
+          const monthKey = String(payload?.monthKey || "");
+          const rand = Math.random().toString(36).slice(2,7);
+          const eventKey = String(`${Date.now()}_${rand}_${emailLower}_${monthKey}`).replace(/[\/]/g,"_");
+
           const evt = {
             ...payload,
             adminEmail: payload?.adminEmail || N.user?.email || "",
             adminUid: payload?.adminUid || N.user?.uid || "",
+            adminName: payload?.adminName || N.user?.displayName || "",
+            eventKey,
             sentAtClient: Date.now(),
             sentAtISO: new Date().toISOString()
           };
+
           // Sempre: salva in locale + tenta indice (fallback se le regole bloccano LIST)
           try{ appendLocalSendLog(evt); }catch(_e){}
           try{ upsertSendLogIndex(evt); }catch(_e){}
@@ -3565,8 +3573,11 @@ function renderUploadHistory(){
           // Best-effort: log classico su collection (se consentito)
           if(!(N.firebase?.ok && N.user?.isAdmin)) return;
           const api = N.firebase.api, db = N.firebase.db;
-          const ref = api.collection(db, COL_PAYROLL_SEND_LOGS);
-          await api.addDoc(ref, { ...payload, sentAt: api.serverTimestamp(), createdAt: api.serverTimestamp() });
+          await api.setDoc(
+            api.doc(db, COL_PAYROLL_SEND_LOGS, eventKey),
+            { ...evt, sentAt: api.serverTimestamp(), createdAt: api.serverTimestamp() },
+            { merge: true }
+          );
         }catch(err){
           console.warn("payroll send log write", err);
         }
@@ -3600,6 +3611,8 @@ function renderUploadHistory(){
 
       function renderPayrollSendLogs(){
         const logs = N.payroll?.admin?.sendLogs || [];
+        const source = String(N.payroll?.admin?._sendLogSource || "");
+        const readOnly = source.startsWith("reconstruct");
         const openedMap = N.payroll?.admin?.openedByDocKey || {};
         const sel = (N.payroll?.admin?.sendLogSelection) || {};
         const selCount = Object.values(sel).filter(Boolean).length;
@@ -3621,9 +3634,10 @@ function renderUploadHistory(){
         };
 
         targets.forEach(target=>{
-          if(target?.deleteBtn) target.deleteBtn.disabled = selCount === 0;
+          if(target?.deleteBtn) target.deleteBtn.disabled = readOnly || (selCount === 0);
           if(target?.meta){
             target.meta.textContent = logs.length ? `Ultimi ${logs.length} invii` : "Nessun invio";
+            if(readOnly) target.meta.textContent += " · Solo lettura";
             if(selCount) target.meta.textContent += ` · Selezionati: ${selCount}`;
           }
           if(!target?.list) return;
@@ -3657,7 +3671,7 @@ function renderUploadHistory(){
 
           return `<div class="uploadHistoryItem sendLogItem" data-sendlog-id="${Ao(item.id||"")}">
             <div class="historyCheck">
-              <input class="historyCk" type="checkbox" data-sendlog-check="${Ao(item.id||"")}" ${checked ? "checked" : ""}>
+              <input class="historyCk" type="checkbox" data-sendlog-check="${Ao(item.id||"")}" ${checked ? "checked" : ""} ${readOnly || item.readonly ? "disabled" : ""}>
             </div>
             <div class="uploadHistoryMeta" style="min-width:0">
               <div class="uploadHistoryTitle">${Ao(title)}</div>
@@ -3666,6 +3680,7 @@ function renderUploadHistory(){
               <div>${Ao(fmt(item.sentAt) || "")}</div>
             </div>
             <div class="uploadHistoryBadges">
+              ${ (readOnly || item.readonly) ? '<span class="pillTone">Solo lettura</span>' : '' }
               <span class="pillTone ${statusClass}">${openedLabel}</span>
               <span class="pillTone">${Ao(item.adminEmail || "")}</span>
             </div>
@@ -3727,6 +3742,49 @@ function renderUploadHistory(){
           }
         }
 
+        // 4) Ricostruzione (solo lettura): se non esistono log, prova a derivarli dai documenti payrollDocs
+        if(!rawLogs.length){
+          try{
+            const cols = (typeof PAYROLL_DOC_COLS!=="undefined" ? PAYROLL_DOC_COLS : ["payrollDocs","payrolls"]);
+            for(const col of cols){
+              try{
+                const q2 = api.query(api.collection(db, col), api.orderBy("updatedAt","desc"), api.limit(120));
+                const snap2 = await api.getDocs(q2);
+                const tmp = [];
+                snap2?.forEach(d=>{
+                  const x = d.data() || {};
+                  if(!x.emailLower || !x.monthKey) return;
+                  if(!(x.downloadUrl || x.storagePath)) return;
+                  tmp.push({
+                    _reconstructed: true,
+                    payrollDocId: d.id,
+                    docKey: d.id,
+                    sentAt: x.updatedAt || x.createdAt || null,
+                    sentAtClient: x.updatedAtClient || x.createdAtClient || null,
+                    emailLower: String(x.emailLower||"").toLowerCase(),
+                    monthKey: x.monthKey || "",
+                    fullName: x.fullName || "",
+                    fiscalCode: x.fiscalCode || "",
+                    netPayText: x.netPayText || "",
+                    netPayCents: x.netPayCents ?? null,
+                    pageIndices: x.pageIndices || [],
+                    pagesCount: x.pagesCount ?? (Array.isArray(x.pageIndices) ? x.pageIndices.length : 0),
+                    adminEmail: x.adminEmail || "",
+                    lastSentBy: x.adminEmail || "",
+                    status: "reconstructed"
+                  });
+                });
+                if(tmp.length){
+                  rawLogs = tmp;
+                  source = "reconstruct:" + col;
+                  break;
+                }
+              }catch(_e){}
+            }
+          }catch(_e){}
+        }
+
+
         // Normalizza
         const logs = [];
         const docKeys = new Set();
@@ -3743,27 +3801,30 @@ function renderUploadHistory(){
             (i.sentAtClient ? new Date(i.sentAtClient) :
             (i.sentAtISO ? new Date(i.sentAtISO) : null)));
 
+          const sentAtMs = (typeof i.sentAtClient === "number" && i.sentAtClient) ? i.sentAtClient :
+            (sentAtDate instanceof Date ? sentAtDate.getTime() : (i.sentAtISO ? Date.parse(i.sentAtISO) : 0)) || 0;
+
           const stableId = String(
-            i.id ||
-            i.eventKey ||
-            `${(i.sentAtClient || (i.sentAtISO ? Date.parse(i.sentAtISO) : 0) || 0)}_${emailLower||"?"}_${monthKey||"?"}_${docKey||"?"}`
+            i._reconstructed ? (`recon_${docKey||emailLower||"?"}_${monthKey||"?"}_${idx}`) :
+            (i.id || i.eventKey || `${sentAtMs}_${emailLower||"?"}_${monthKey||"?"}_${docKey||"?"}`)
           );
           validIds.add(stableId);
 
           logs.push({
             id: stableId,
             sentAt: sentAtDate || null,
-            sentAtClient: i.sentAtClient || null,
+            sentAtClient: sentAtMs || null,
             sentAtISO: i.sentAtISO || (sentAtDate ? sentAtDate.toISOString() : ""),
             emailLower,
             monthKey,
             fullName: i.fullName || "",
             netPayText: i.netPayText || "",
             netPayCents: i.netPayCents || null,
-            pagesCount: i.pagesCount || 0,
+            pagesCount: (typeof i.pagesCount === "number" ? i.pagesCount : (Array.isArray(i.pageIndices) ? i.pageIndices.length : 0)),
+            readonly: !!i._reconstructed,
             docKey,
             payrollDocId: i.payrollDocId || "",
-            adminEmail: i.adminEmail || "",
+            adminEmail: i.adminEmail || i.lastSentBy || "",
             status: i.status || ""
           });
         });
@@ -3795,7 +3856,8 @@ function renderUploadHistory(){
         N.payroll.admin.openedByDocKey = openedByDocKey;
 
         // Meta UI
-        const metaTxt = logs.length ? `Totale log: ${logs.length} (fonte: ${source})` : `Nessun log. (fonte: ${source})`;
+        const ro = String(source||"").startsWith("reconstruct") ? " · solo lettura" : "";
+        const metaTxt = logs.length ? `Totale log: ${logs.length} (fonte: ${source})${ro}` : `Nessun log. (fonte: ${source})${ro}`;
         const metaA = U("payrollSendLogMeta");
         const metaB = U("sendLogCardMeta");
         if(metaA) metaA.textContent = metaTxt;
@@ -3816,6 +3878,11 @@ function renderUploadHistory(){
       }
       async function deleteSelectedSendLogs(){
         try{
+          const source = String(N.payroll?.admin?._sendLogSource || "");
+          if(source.startsWith("reconstruct")){
+            try{ Ve("Storico invii", "Modalità sola lettura: i log sono stati ricostruiti dai documenti. Per eliminare, serve il log vero."); }catch(_e){}
+            return;
+          }
           const sel = N.payroll?.admin?.sendLogSelection || {};
           const ids = Object.keys(sel).filter(k=>sel[k]);
           if(!ids.length) return;
@@ -4500,8 +4567,12 @@ async function Yi() {
               sourceFileName: e.sourceFileName,
               sourceFileHash: e.sourceFileHash,
               pageIndices,
-              matchScore: row.matchScore || 0
-            }), 60000, "Timeout invio");
+              matchScore: row.matchScore || 0,
+              adminEmail: N.user?.email || "",
+              adminUid: N.user?.uid || "",
+              adminName: N.user?.displayName || ""
+            }
+            ), 60000, "Timeout invio");
             try{
               await upsertPayrollIndex({
                 emailLower,
