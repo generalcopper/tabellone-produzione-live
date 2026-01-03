@@ -187,7 +187,8 @@
     .btn.amazon{
       background: linear-gradient(180deg, rgba(255,153,0,.96), rgba(240,138,0,.96));
       border-color: rgba(255,153,0,.35);
-      color: rgba(35,47,62,.96);
+      color: #fff;
+      text-shadow: 0 10px 22px rgba(0,0,0,.18);
       box-shadow: 0 16px 36px rgba(255,153,0,.20), 0 10px 22px rgba(15,23,42,.06);
     }
     .btn.big{
@@ -919,6 +920,9 @@
           const guess = guessTitleFromRaw(rawText, l.sku);
           if(!guess) return l;
 
+          // Evita di "sporcare" i titoli con etichette/step UI del PDF
+          if(/pronto per la spedizione|venditore|stampa etichette/i.test(guess)) return l;
+
           // Se il guess termina col titolo corrente ma è più lungo → il titolo corrente è "tagliato"
           if(guess.length > l.title.length + 8 && guess.toLowerCase().endsWith(l.title.toLowerCase())){
             return { ...l, title: guess };
@@ -1138,7 +1142,7 @@
       }
 
       box.style.display = "";
-      title.textContent = wf.id ? `ID flusso di lavoro: ${wf.id}` : "Flusso di lavoro";
+      title.textContent = (wf.label || (wf.id ? `ID flusso di lavoro: ${wf.id}` : "Flusso di lavoro"));
       const parts = [];
       if(wf.id) parts.push("ID: " + wf.id);
       if(wf.created) parts.push("Creato: " + wf.created);
@@ -1509,6 +1513,8 @@
             totalLines: Number.isFinite(d.totalLines) ? d.totalLines : (Array.isArray(d.lines)? d.lines.length : 0),
             totalPieces: Number.isFinite(d.totalPieces) ? d.totalPieces : 0,
             workflow: d.workflow || null,
+            workflowId: d.workflowId || ((d.workflow && d.workflow.id) ? d.workflow.id : ""),
+            workflowLabel: d.workflowLabel || ((d.workflow && d.workflow.label) ? d.workflow.label : ""),
             voided: d.voided === true,
             voidedAtClient: (typeof d.voidedAtClient==="number") ? d.voidedAtClient : 0,
             voidedBy: d.voidedBy || "",
@@ -1543,10 +1549,15 @@
     }
 
     function flowDisplayName(flow){
-      const wfId = flow?.workflow?.id || "";
+      const label = (flow && flow.workflow && flow.workflow.label) ? String(flow.workflow.label) : String(flow?.workflowLabel || "");
+      if(label) return label;
+
+      const wfId = (flow && flow.workflow && flow.workflow.id) ? String(flow.workflow.id) : "";
       if(wfId) return `ID flusso di lavoro: ${wfId}`;
+
       const fn = String(flow?.fileName || "").trim();
       if(fn) return fn;
+
       return flow?.id ? flow.id.slice(0, 8) : "—";
     }
 
@@ -2008,8 +2019,13 @@ function currentInv(){
         raw: x
       }));
       const rawText = String(json.rawText || json.text || json.fullText || "");
+
+      const meta = (json && typeof json==="object" && json.meta && typeof json.meta==="object") ? json.meta : {};
+      const flowId = String(meta.flowId || json.flowId || "");
+      const flowLabel = String(meta.flowLabel || (flowId ? ("ID flusso di lavoro: " + flowId) : ""));
+
       lines = repairTitles(lines, rawText);
-      return { lines, raw: json, rawText };
+      return { lines, raw: json, rawText, flowId, flowLabel };
     }
 
     function renderFlowList(kind){
@@ -2169,9 +2185,15 @@ function currentInv(){
 
 
         try{
-          const logRef = api.collection(db, COL_ROOT, loc, SUB_LOGS);
+          const logCol = api.collection(db, COL_ROOT, loc, SUB_LOGS);
           const totalPieces = aggregated.reduce((a,x)=> a + (Math.abs(parseQty(x.qty)||0)), 0);
-          await api.addDoc(logRef, {
+
+          const workflowId = (flow.workflow && flow.workflow.id) ? String(flow.workflow.id) : "";
+          const workflowLabel = (flow.workflow && flow.workflow.label)
+            ? String(flow.workflow.label)
+            : (workflowId ? ("ID flusso di lavoro: " + workflowId) : "");
+
+          const logData = {
             kind,
             location: loc,
             fileName: flow.file?.name || "",
@@ -2181,12 +2203,25 @@ function currentInv(){
             endpoint: DEFAULT_EXTRACT_ENDPOINT,
             totalLines: aggregated.length,
             totalPieces,
-            workflow: (kind==="scarica") ? (flow.workflow || null) : null,
+            workflow: flow.workflow || null,
+            workflowId: workflowId || null,
+            workflowLabel: workflowLabel || null,
             lines: aggregated.slice(0, 800).map(x=>({ sku:x.sku, title:x.title||"", qty: Math.abs(parseQty(x.qty)||0) }))
-          });
-        }catch(_e){}
+          };
 
-        showToast("Operazione completata", `${kind==="carica" ? "Carico" : "Scarico"} applicato su ${prettyLoc(loc)}.`);
+          if(workflowId){
+            const docRef = api.doc(db, COL_ROOT, loc, SUB_LOGS, workflowId);
+            const snap = await api.getDoc(docRef).catch(()=>null);
+            const exists = !!(snap && typeof snap.exists === "function" && snap.exists());
+            if(exists){
+              await api.addDoc(logCol, logData);
+            }else{
+              await api.setDoc(docRef, logData);
+            }
+          }else{
+            await api.addDoc(logCol, logData);
+          }
+        }catch(_e){}showToast("Operazione completata", `${kind==="carica" ? "Carico" : "Scarico"} applicato su ${prettyLoc(loc)}.`);
 
         // reset flow UI
         flow.file = null;
@@ -2251,11 +2286,24 @@ function currentInv(){
 
         flow.lines = res.lines || [];
 
+        const metaFlowId = String(res.flowId || "");
+        const metaFlowLabel = String(res.flowLabel || (metaFlowId ? ("ID flusso di lavoro: " + metaFlowId) : ""));
+
         if(kind==="scarica"){
           const wfText = parseWorkflowFromText(res.rawText || "");
           const wfPdf = await wfPromise.catch(()=>null);
-          flow.workflow = wfPdf || wfText || null;
+
+          let wf = wfPdf || wfText || null;
+          if(metaFlowId){
+            wf = Object.assign({}, (wf||{}), { id: metaFlowId, label: metaFlowLabel });
+          }else if(wf && wf.id && !wf.label){
+            wf.label = "ID flusso di lavoro: " + wf.id;
+          }
+          flow.workflow = wf;
+
           renderWorkflowBox();
+        }else{
+          flow.workflow = metaFlowId ? { id: metaFlowId, label: metaFlowLabel } : null;
         }
 
         renderFlowList(kind);
@@ -2331,6 +2379,7 @@ function currentInv(){
       $("caricaPdf")?.addEventListener("change", ()=>{
         state.flows.carica.file = $("caricaPdf")?.files?.[0] || null;
         state.flows.carica.lines = [];
+        state.flows.carica.workflow = null;
         renderFlowList("carica");
       });
       $("scaricaPdf")?.addEventListener("change", ()=>{
