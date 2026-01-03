@@ -572,11 +572,11 @@
     }
     .folderRow:active{ transform: scale(.995); }
     .folderLeft{ min-width:0; }
-    .folderTitle{ font-weight: 1000; font-size: 14px; letter-spacing:-.01em; }
+    .folderTitle{ font-weight: 1000; font-size: 14px; letter-spacing:-.01em; overflow-wrap:anywhere; word-break: break-word; }
     .folderMeta{ margin-top:4px; font-size: 12px; color: rgba(15,23,42,.62); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width: 72vw; }
     .chev{ font-weight:1000; color: rgba(15,23,42,.72); }
 
-    .mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+    .mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; overflow-wrap:anywhere; word-break: break-all; }
     .muted{ color: var(--muted); }
 
     /* view switching */
@@ -868,6 +868,67 @@
     const $ = (id)=> document.getElementById(id);
     const clamp = (n, a, b)=> Math.max(a, Math.min(b, n));
 
+    // Normalizza spazi (PDF spesso spezza su più righe)
+    const squashWhitespace = (s)=> String(s||"").replace(/\s+/g, " ").trim();
+    const escapeRegex = (s)=> String(s||"").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+    function guessTitleFromRaw(rawText, sku){
+      try{
+        const t = String(rawText||"");
+        if(!t || !sku) return "";
+        const re = new RegExp(`SKU\\s*:?\\s*${escapeRegex(sku)}`, "i");
+        const m = re.exec(t);
+        if(!m) return "";
+        const start = Math.max(0, m.index - 360);
+        const chunk = t.slice(start, m.index);
+        const lines = chunk.split(/[\r\n]+/).map(x=>x.trim()).filter(Boolean);
+        const tail = lines.slice(-6);
+        const guess = squashWhitespace(tail.join(" "));
+        return guess;
+      }catch(_e){
+        return "";
+      }
+    }
+
+    function repairTitles(lines, rawText){
+      let out = [];
+      let prefix = "";
+      for(const l0 of (lines||[])){
+        const l = { ...l0, title: squashWhitespace(l0.title) };
+        const hasSku = !!l.sku;
+        const hasTitle = !!l.title;
+        const qtyOk = Number.isFinite(l.qty) && l.qty!==0;
+
+        // Riga "orfana": tipicamente un pezzo di nome senza SKU/quantità
+        const orphan = !hasSku && hasTitle && !qtyOk;
+        if(orphan){
+          prefix = prefix ? (prefix + " " + l.title) : l.title;
+          continue;
+        }
+
+        if(prefix && hasTitle){
+          l.title = squashWhitespace(prefix + " " + l.title);
+          prefix = "";
+        }
+        out.push(l);
+      }
+
+      if(rawText){
+        out = out.map(l=>{
+          if(!l.sku || !l.title) return l;
+          const guess = guessTitleFromRaw(rawText, l.sku);
+          if(!guess) return l;
+
+          // Se il guess termina col titolo corrente ma è più lungo → il titolo corrente è "tagliato"
+          if(guess.length > l.title.length + 8 && guess.toLowerCase().endsWith(l.title.toLowerCase())){
+            return { ...l, title: guess };
+          }
+          return l;
+        });
+      }
+      return out;
+    }
+
     // App height (iOS)
     const updateAppHeight = ()=>{
       try{
@@ -1077,8 +1138,7 @@
       }
 
       box.style.display = "";
-      const short = wf.id ? wf.id.slice(0, 10) + "…" : "—";
-      title.textContent = wf.id ? `Flusso di lavoro: ${short}` : "Flusso di lavoro";
+      title.textContent = wf.id ? `ID flusso di lavoro: ${wf.id}` : "Flusso di lavoro";
       const parts = [];
       if(wf.id) parts.push("ID: " + wf.id);
       if(wf.created) parts.push("Creato: " + wf.created);
@@ -1484,7 +1544,7 @@
 
     function flowDisplayName(flow){
       const wfId = flow?.workflow?.id || "";
-      if(wfId) return wfId;
+      if(wfId) return `ID flusso di lavoro: ${wfId}`;
       const fn = String(flow?.fileName || "").trim();
       if(fn) return fn;
       return flow?.id ? flow.id.slice(0, 8) : "—";
@@ -1939,16 +1999,16 @@ function currentInv(){
       if(!json) throw new Error("Risposta backend non valida (JSON).");
 
       const items = Array.isArray(json.items) ? json.items : (Array.isArray(json.lines) ? json.lines : []);
-      const lines = items.map((x, idx)=>({
+      let lines = items.map((x, idx)=>({
         idx,
         sku: toSkuId(x.sku || x.SKU || x.codice || x.code || ""),
-        title: String(x.title || x.name || x.prodotto || x.description || "").trim(),
+        title: squashWhitespace(x.title || x.name || x.prodotto || x.description || ""),
         qty: parseQty(x.qty ?? x.quantity ?? x.qta ?? x.qta_pz ?? x.pz ?? x.pieces),
         confidence: (typeof x.confidence==="number") ? x.confidence : null,
         raw: x
       }));
-
       const rawText = String(json.rawText || json.text || json.fullText || "");
+      lines = repairTitles(lines, rawText);
       return { lines, raw: json, rawText };
     }
 
@@ -2089,7 +2149,7 @@ function currentInv(){
             for(const it of part){
               const sku = toSkuId(it.sku);
               if(!sku) continue;
-              const title = String(it.title||"").trim() || sku;
+              const title = squashWhitespace(it.title||"") || sku;
               const refP = api.doc(db, COL_PRODUCTS, sku);
               batchP.set(refP, {
                 sku,
