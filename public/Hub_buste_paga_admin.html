@@ -3200,12 +3200,6 @@ function __payrollLoadScript(src){
 
           const blob = new Blob([bytes], { type:"application/pdf" });
           const objUrl = URL.createObjectURL(blob);
-
-          // track object URL so we can revoke it on close
-          N.ui = N.ui || {};
-          N.ui.pdfPreview = N.ui.pdfPreview || {};
-          N.ui.pdfPreview.objectUrl = objUrl;
-
           const pageLabel = (row.pageNos && row.pageNos.length) ? row.pageNos.join(", ") : pages.map(p=>p+1).join(", ");
           const title = `Anteprima · ${row.displayName || row.fiscalCode || row.email || "PDF"}`;
           const sub = `${row.monthKey || "—"} · pagine ${pageLabel}`;
@@ -5068,15 +5062,18 @@ function showPdfPreview({ title, sub, srcUrl, fileName, markOpenedVia } = {}){
         N.ui = N.ui || {};
         N.ui.pdfPreview = N.ui.pdfPreview || { objectUrl:"", directUrl:"", fileName:"" };
 
-        // cleanup old object URL
+        const nextUrl = srcUrl || "";
+        const prevObjUrl = N.ui.pdfPreview.objectUrl || "";
+
+        // cleanup old object URL (evita di revocare quello che stiamo per mostrare)
         try{
-          if(N.ui.pdfPreview.objectUrl){
-            URL.revokeObjectURL(N.ui.pdfPreview.objectUrl);
+          if(prevObjUrl && prevObjUrl !== nextUrl){
+            URL.revokeObjectURL(prevObjUrl);
           }
         }catch(_e){}
 
-        N.ui.pdfPreview.objectUrl = "";
-        N.ui.pdfPreview.directUrl = srcUrl || "";
+        N.ui.pdfPreview.directUrl = nextUrl;
+        N.ui.pdfPreview.objectUrl = (nextUrl && String(nextUrl).startsWith("blob:")) ? nextUrl : "";
         N.ui.pdfPreview.fileName = fileName || "busta_paga.pdf";
         N.ui.pdfPreview.title = title || "Anteprima PDF";
         N.ui.pdfPreview.sub = sub || "—";
@@ -5084,8 +5081,12 @@ function showPdfPreview({ title, sub, srcUrl, fileName, markOpenedVia } = {}){
         if(t) t.textContent = N.ui.pdfPreview.title;
         if(s) s.textContent = N.ui.pdfPreview.sub;
 
-        // set iframe src (remote URL or blob URL)
-        try{ frame.src = N.ui.pdfPreview.directUrl || ""; }catch(_e){}
+        // set iframe src (remote URL o blob URL) — forza refresh (evita contenuti “bloccati”)
+        try{ frame.src = "about:blank"; }catch(_e){}
+        try{
+          const u = N.ui.pdfPreview.directUrl || "";
+          setTimeout(()=>{ try{ frame.src = u; }catch(_e){} }, 0);
+        }catch(_e){}
 
         overlay.setAttribute("aria-hidden","false");
         document.body.classList.add("modalOpen");
