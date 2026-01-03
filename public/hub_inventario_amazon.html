@@ -730,7 +730,29 @@
     /* view switching */
     [data-view]{ display:none; }
     [data-view].show{ display:block; }
-  </style>
+  
+/* --- Home actions (Scarica + Sottoscorta) --- */
+.homeActions{
+  display:flex;
+  flex-direction:column;
+  gap:10px;
+  margin-top:12px;
+}
+.homeActions .btn{
+  width:100%;
+}
+.btn.withPill{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:12px;
+}
+.homeActions .pill{
+  min-width:38px;
+  text-align:center;
+}
+
+</style>
 </head>
 
 <body>
@@ -775,6 +797,14 @@
             </button>
             <button class="warehouse amazonTile" id="btnEnterConcamarise" type="button">
               <div class="warehouseName">Inventario AMZ Concamarise</div>
+            </button>
+          </div>
+
+          <div class="homeActions">
+            <button class="btn amazon big" id="btnHomeScarica" type="button">Scarica (Match PDF)</button>
+            <button class="btn big withPill" id="btnHomeSottoscorta" type="button">
+              <span>Sottoscorta</span>
+              <span class="pill" id="homeLowStockBadge">—</span>
             </button>
           </div>
         </div>
@@ -1096,6 +1126,27 @@ Tip:
     </div>
   </div>
 
+
+  <!-- SHEET SOTTOSCORTA (HOME) -->
+  <div class="sheet" id="sheetHomeLowStock" aria-hidden="true">
+    <div class="sheetCard" role="dialog" aria-modal="true" aria-label="Sottoscorta">
+      <div class="sheetTop">
+        <div style="min-width:0">
+          <p class="sheetTitle">Sottoscorta</p>
+          <div class="sheetSub" id="homeLowStockSub">Prodotti sotto scorta in Cerea e Concamarise.</div>
+        </div>
+        <button class="btn" id="btnCloseHomeLowStock" type="button">Chiudi</button>
+      </div>
+
+      <div class="sheetBody">
+        <div class="hint" id="homeLowStockHint">—</div>
+        <div class="sheetScroll">
+          <div id="homeLowStockList"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
 <script type="module">
     // === Firebase config ===
     const firebaseConfig = {
@@ -1131,7 +1182,7 @@ Tip:
         carica: { file:null, lines:[], busy:false, workflow:null },
         scarica: { file:null, lines:[], busy:false, workflow:null }
       },
-      ui: { sheet:null, sheetStack:[], wfOpen:false, flowId:null, flowSearch:"", productsSearch:"", productEditSku:null, productDetailsSku:null, caricaMode:"pdf", skuPick:{ lineIdx:null, q:"" } },
+      ui: { sheet:null, scaricaFromHome:false, sheetStack:[], wfOpen:false, flowId:null, flowSearch:"", productsSearch:"", productEditSku:null, productDetailsSku:null, caricaMode:"pdf", skuPick:{ lineIdx:null, q:"" } },
       manual: { carica:{ text:"", lines:[], busy:false } }
     };
 
@@ -1532,7 +1583,7 @@ Tip:
       return fnv1aHex(s);
     }
 
-    async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
+    async function computeFlowDocId({ kind, loc, file, aggregated, workflowId, signatureLoc }){
       const wf = String(workflowId || "").trim();
       if(wf) return wf;
 
@@ -1544,7 +1595,8 @@ Tip:
         .map(x=> `${toSkuId(x.sku||"")}:${Math.abs(parseQty(x.qty)||0)}`)
         .join(",");
 
-      const base = `${loc}|${fileSig}|${linesSig}`;
+      const locSig = (signatureLoc!=null) ? String(signatureLoc) : String(loc);
+      const base = `${kind}|${locSig}|${fileSig}|${linesSig}`;
       const hex = await stableHashHex(base);
 
       // docId corto ma sufficiente (evita nomi enormi)
@@ -1943,6 +1995,8 @@ Tip:
         inv.items = arr;
         inv.meta.count = arr.length;
         inv.meta.lastUpdatedAt = last ? new Date(last) : null;
+
+        updateHomeLowStockBadge();
 
         if(state.route.view==="location" && state.route.loc===loc){
           renderInventoryList();
@@ -2408,6 +2462,98 @@ function currentInv(){
       list.innerHTML = rows.join("");
     }
 
+
+    function computeLowStockFor(loc){
+      const inv = state.inventory[loc] || { items:[] };
+      return (inv.items||[]).filter(it=> Number.isFinite(it.qty) && it.qty < 100);
+    }
+
+    function computeHomeLowStockCount(){
+      const a = computeLowStockFor("concamarise").length;
+      const b = computeLowStockFor("cerea").length;
+      return a + b;
+    }
+
+    function updateHomeLowStockBadge(){
+      const badge = $("homeLowStockBadge");
+      if(!badge) return;
+      if(!state.user?.isWhitelisted){
+        badge.textContent = "—";
+        return;
+      }
+      const n = computeHomeLowStockCount();
+      badge.textContent = String(n);
+    }
+
+    function renderHomeLowStockSheet(){
+      const hint = $("homeLowStockHint");
+      const list = $("homeLowStockList");
+      const sub = $("homeLowStockSub");
+      if(!hint || !list || !sub) return;
+
+      if(!state.user?.isWhitelisted){
+        hint.textContent = "Accedi per vedere la sotto-scorta.";
+        list.innerHTML = "";
+        return;
+      }
+
+      const lowCon = computeLowStockFor("concamarise");
+      const lowCer = computeLowStockFor("cerea");
+      const total = lowCon.length + lowCer.length;
+
+      sub.textContent = `Totale sotto scorta: ${total} (Concamarise ${lowCon.length} • Cerea ${lowCer.length})`;
+      hint.textContent = total ? "Tocca una riga per aprire l’anagrafica nel magazzino corretto." : "Nessun prodotto sotto scorta.";
+
+      function rowsFor(loc, arr){
+        if(!arr.length) return `<div class="hint">Nessun prodotto sotto scorta in ${prettyLoc(loc)}.</div>`;
+        const rows = arr
+          .slice()
+          .sort((a,b)=> (a.qty||0) - (b.qty||0))
+          .map(it=>{
+            const sku = escapeHtml(toSkuId(it.sku||it.id||""));
+            const meta = parseTitleMeta(it.title || "");
+            const titleMain = meta.main ? escapeHtml(meta.main) : (it.title ? escapeHtml(it.title) : "<span class='muted'>(senza nome)</span>");
+            const qty = Number.isFinite(it.qty) ? it.qty : 0;
+            const badgeClass = qty>0 ? "warn" : "bad";
+            return `
+              <div class="row" role="button" tabindex="0" data-action="homeLowOpen" data-loc="${escapeHtml(loc)}" data-sku="${sku}">
+                <div class="rowMain">
+                  <p class="rowTitle">${titleMain}</p>
+                  <div class="rowSub"><span class="mono">${sku}</span></div>
+                </div>
+                <div class="badge ${badgeClass}">${qty}</div>
+              </div>`;
+          });
+        return `<div class="list">${rows.join("")}</div>`;
+      }
+
+      list.innerHTML = `
+        <div class="miniCard" style="margin-bottom:12px">
+          <div class="miniTop">
+            <div style="min-width:0">
+              <div class="miniTitle">Concamarise</div>
+              <div class="miniSub">Prodotti con giacenza &lt; 100 pz.</div>
+            </div>
+            <div class="pill">${lowCon.length}</div>
+          </div>
+          ${rowsFor("concamarise", lowCon)}
+        </div>
+
+        <div class="miniCard">
+          <div class="miniTop">
+            <div style="min-width:0">
+              <div class="miniTitle">Cerea</div>
+              <div class="miniSub">Prodotti con giacenza &lt; 100 pz.</div>
+            </div>
+            <div class="pill">${lowCer.length}</div>
+          </div>
+          ${rowsFor("cerea", lowCer)}
+        </div>
+      `;
+    }
+
+
+
     // --- inventory render ---
     function renderInventoryList(){
       const list = $("invList");
@@ -2501,6 +2647,7 @@ function currentInv(){
       if(kind==="products") return $("sheetProducts");
       if(kind==="productDetails") return $("sheetProductDetails");
       if(kind==="skuPick") return $("sheetSkuPick");
+      if(kind==="homeLowStock") return $("sheetHomeLowStock");
       return null;
     }
 
@@ -3749,13 +3896,194 @@ function renderProductsSheet(){
     }
 
 
+
+    async function resolveSavedLocationMap(skus){
+      const api = state.firebase.api;
+      const db = state.firebase.db;
+      const out = new Map();
+      const uniq = Array.from(new Set((skus||[]).map(s=>toSkuId(s)).filter(Boolean)));
+
+      // Limita concorrenza (stabilità + meno picchi)
+      const CONC = 18;
+      for(let i=0;i<uniq.length;i+=CONC){
+        const slice = uniq.slice(i, i+CONC);
+        await Promise.all(slice.map(async (sku)=>{
+          try{
+            const snap = await api.getDoc(api.doc(db, COL_PRODUCTS, sku));
+            let loc = "";
+            if(snap?.exists?.()){
+              const d = snap.data() || {};
+              loc = String(d.lastSeenLocation || d.location || "").toLowerCase().trim();
+            }
+            if(loc!=="cerea" && loc!=="concamarise") loc = "concamarise";
+            out.set(sku, loc);
+          }catch(_e){
+            out.set(sku, "concamarise");
+          }
+        }));
+      }
+      return out;
+    }
+
+    async function applyScaricaFromHome({ flow, aggregated, wfId, wfLabel, tsClient }){
+      const api = state.firebase.api;
+      const db = state.firebase.db;
+
+      const skuList = aggregated.map(x=>toSkuId(x.sku||"")).filter(Boolean);
+      const locMap = await resolveSavedLocationMap(skuList);
+
+      const byLoc = { concamarise: [], cerea: [] };
+      for(const it of aggregated){
+        const sku = toSkuId(it.sku||"");
+        if(!sku) continue;
+        const target = locMap.get(sku) || "concamarise";
+        (byLoc[target] || byLoc.concamarise).push(it);
+      }
+
+      const any = byLoc.concamarise.length + byLoc.cerea.length;
+      if(!any) throw new Error("Nessuna riga valida");
+
+      // docId deterministico "globale" (blocca doppio upload anche se cambiano le assegnazioni)
+      const flowDocId = await computeFlowDocId({
+        kind: "scarica",
+        loc: "home",
+        signatureLoc: "home",
+        file: flow.file,
+        aggregated,
+        workflowId: wfId
+      });
+
+      const logRefCon = api.doc(db, COL_ROOT, "concamarise", SUB_LOGS, flowDocId);
+      const logRefCer = api.doc(db, COL_ROOT, "cerea", SUB_LOGS, flowDocId);
+
+      // pre-check duplicati: se esiste in uno dei due → blocco tutto
+      const [snapCon, snapCer] = await Promise.all([api.getDoc(logRefCon), api.getDoc(logRefCer)]);
+      if((snapCon && snapCon.exists && snapCon.exists()) || (snapCer && snapCer.exists && snapCer.exists())){
+        const err = new Error("DUP_FLOW");
+        throw err;
+      }
+
+      // 1) Riserva log PENDING per i magazzini che saranno toccati
+      const touchedLocs = [];
+      for(const loc of ["concamarise","cerea"]){
+        if(!(byLoc[loc] && byLoc[loc].length)) continue;
+        touchedLocs.push(loc);
+      }
+
+      for(const loc of touchedLocs){
+        const logRef = api.doc(db, COL_ROOT, loc, SUB_LOGS, flowDocId);
+        const part = byLoc[loc];
+        const totalPieces = part.reduce((a,x)=> a + (Math.abs(parseQty(x.qty)||0)), 0);
+
+        await api.runTransaction(db, async (tx)=>{
+          const snap = await tx.get(logRef);
+          if(snap.exists()) throw new Error("DUP_FLOW");
+          tx.set(logRef, {
+            kind: "scarica",
+            location: loc,
+            fileName: flow.file?.name || "",
+            appliedAt: api.serverTimestamp(),
+            appliedAtClient: tsClient,
+            appliedBy: state.user.email || "",
+            status: "PENDING",
+            totalLines: part.length,
+            totalPieces,
+            lines: part.slice(0, 800).map(x=>({ sku:x.sku, title:x.title||"", qty: Math.abs(parseQty(x.qty)||0) })),
+            workflow: flow.workflow || null,
+            workflowId: wfId || null,
+            workflowLabel: wfLabel || null
+          });
+        });
+      }
+
+      // 2) Applica delta su items + aggiorna anagrafica
+      const deltaSign = -1;
+      const CHUNK = 450;
+      for(const loc of touchedLocs){
+        let committedBatchesLoc = 0;
+        const part = byLoc[loc];
+        const chunks = [];
+        for(let i=0;i<part.length;i+=CHUNK){
+          chunks.push(part.slice(i, i+CHUNK));
+        }
+
+        // items
+        for(const chunk of chunks){
+          const batch = api.writeBatch(db);
+          for(const it of chunk){
+            const sku = toSkuId(it.sku);
+            const title = String(it.title||"").trim();
+            const delta = deltaSign * Math.abs(parseQty(it.qty) || 0);
+            const ref = api.doc(db, COL_ROOT, loc, SUB_ITEMS, sku);
+            batch.set(ref, {
+              sku,
+              title: title || "",
+              titleNorm: normalizeText(title || sku),
+              qty: api.increment(delta),
+              updatedAt: api.serverTimestamp(),
+              updatedAtClient: tsClient,
+              updatedBy: state.user.email || "",
+              location: loc
+            }, { merge:true });
+          }
+          await batch.commit();
+          committedBatchesLoc++;
+        }
+
+        // anagrafica globale (best effort)
+        try{
+          const pChunks = [];
+          for(let i=0;i<part.length;i+=CHUNK){
+            pChunks.push(part.slice(i, i+CHUNK));
+          }
+          for(const chunk of pChunks){
+            const batchP = api.writeBatch(db);
+            for(const it of chunk){
+              const sku = toSkuId(it.sku);
+              const title = String(it.title||"").trim();
+              batchP.set(api.doc(db, COL_PRODUCTS, sku), {
+                sku,
+                title: title || "",
+                titleNorm: normalizeText(title || sku),
+                lastSeenAt: api.serverTimestamp(),
+                lastSeenAtClient: tsClient,
+                lastSeenBy: state.user?.emailLower || state.user?.email || "",
+                lastSeenLocation: loc,
+                lastSeenKind: "scarica",
+                seenCount: api.increment(1)
+              }, { merge:true });
+            }
+            await batchP.commit();
+          }
+        }catch(_e){}
+
+        // finalizza log DONE
+        try{
+          const logRef = api.doc(db, COL_ROOT, loc, SUB_LOGS, flowDocId);
+          await api.updateDoc(logRef, {
+            status: "DONE",
+            committedBatches: committedBatchesLoc,
+            doneAt: api.serverTimestamp(),
+            doneAtClient: Date.now()
+          });
+        }catch(_e){}
+      }
+
+      return {
+        byLoc: {
+          concamarise: { lines: byLoc.concamarise.length, pieces: byLoc.concamarise.reduce((a,x)=>a + Math.abs(parseQty(x.qty)||0),0) },
+          cerea: { lines: byLoc.cerea.length, pieces: byLoc.cerea.reduce((a,x)=>a + Math.abs(parseQty(x.qty)||0),0) }
+        }
+      };
+    }
+
 async function applyFlow(kind){
       const flow = state.flows[kind];
       const loc = state.route.loc;
       if(!state.user?.isWhitelisted) return showToast("Non autorizzato","Accedi con un account abilitato.");
       if(!state.firebase.ok) return showToast("Firebase non pronto","Ricarica la pagina.");
       if(!flow.file) return showToast("PDF mancante","Carica un file prima.");
-      if(!loc) return showToast("Magazzino mancante","Torna alla home e rientra.");
+      if(!loc && !(kind==="scarica" && state.ui.scaricaFromHome)) return showToast("Magazzino mancante","Torna alla home e rientra.");
 
       const lines = (flow.lines||[]).filter(l=>l.sku && Number.isFinite(l.qty) && l.qty!==0);
       const invalid = (flow.lines||[]).filter(l=>!l.sku || !Number.isFinite(l.qty) || l.qty===0);
@@ -3789,6 +4117,30 @@ async function applyFlow(kind){
         : (wfId ? ("ID flusso di lavoro: " + wfId) : "");
 
       const flowDocId = await computeFlowDocId({ kind, loc, file: flow.file, aggregated, workflowId: wfId });
+      // Home mode (scarica): smista per magazzino usando lastSeenLocation (default concamarise)
+      if(kind==="scarica" && !loc && state.ui.scaricaFromHome){
+        const summary = await applyScaricaFromHome({ flow, aggregated, wfId, wfLabel, tsClient });
+
+        showToast(
+          "Operazione completata",
+          `Scarico applicato: Concamarise ${summary.byLoc.concamarise.lines} righe • Cerea ${summary.byLoc.cerea.lines} righe.`
+        );
+
+        // reset flow UI
+        flow.file = null;
+        flow.lines = [];
+        flow.workflow = null;
+        if($(kind + "Pdf")) $(kind + "Pdf").value = "";
+        state.ui.wfOpen = false;
+
+        renderFlowList(kind);
+        renderInventoryList();
+        renderFlowsList();
+        state.ui.scaricaFromHome = false;
+        closeSheet("scarica");
+        return;
+      }
+
       const logRef = api.doc(db, COL_ROOT, loc, SUB_LOGS, flowDocId);
 
       const totalPieces = aggregated.reduce((a,x)=> a + (Math.abs(parseQty(x.qty)||0)), 0);
@@ -4056,15 +4408,38 @@ showToast("Operazione completata", `${kind==="carica" ? "Carico" : "Scarico"} ap
       $("btnEnterCerea")?.addEventListener("click", ()=> enterLocation("cerea"));
       $("btnEnterConcamarise")?.addEventListener("click", ()=> enterLocation("concamarise"));
 
+
+
+      $("btnHomeScarica")?.addEventListener("click", ()=>{
+        if(!state.user?.isWhitelisted){
+          showToast("Accesso richiesto","Accedi con un account abilitato.");
+          return;
+        }
+        state.route.loc = null;
+        state.ui.scaricaFromHome = true;
+        openSheet("scarica");
+      });
+
+      $("btnHomeSottoscorta")?.addEventListener("click", ()=>{
+        if(!state.user?.isWhitelisted){
+          showToast("Accesso richiesto","Accedi con un account abilitato.");
+          return;
+        }
+        renderHomeLowStockSheet();
+        openSheet("homeLowStock");
+      });
+
+      $("btnCloseHomeLowStock")?.addEventListener("click", ()=> closeSheet("homeLowStock"));
+
       $("btnBackHome")?.addEventListener("click", ()=>{
         state.route.loc = null;
         setView("home");
       });
 
       $("btnOpenCarica")?.addEventListener("click", ()=> { openSheet("carica"); setCaricaMode(state.ui.caricaMode || "pdf"); });
-      $("btnOpenScarica")?.addEventListener("click", ()=> openSheet("scarica"));
+      $("btnOpenScarica")?.addEventListener("click", ()=> { state.ui.scaricaFromHome = false; openSheet("scarica"); });
       $("btnCloseCarica")?.addEventListener("click", ()=> closeSheet("carica"));
-      $("btnCloseScarica")?.addEventListener("click", ()=> closeSheet("scarica"));
+      $("btnCloseScarica")?.addEventListener("click", ()=> { state.ui.scaricaFromHome = false; closeSheet("scarica"); });
 
       // click outside card closes
       $("sheetCarica")?.addEventListener("click", (e)=>{ if(e.target?.id==="sheetCarica") closeSheet("carica"); });
@@ -4219,6 +4594,32 @@ showToast("Operazione completata", `${kind==="carica" ? "Carico" : "Scarico"} ap
       }
 
 
+      // Home low stock click: apri anagrafica nel magazzino corretto
+      const homeLow = $("homeLowStockList");
+      if(homeLow){
+        homeLow.addEventListener("click", (e)=>{
+          const row = e.target?.closest?.("[data-action='homeLowOpen']");
+          if(!row) return;
+          const sku = row.getAttribute("data-sku") || "";
+          const loc = row.getAttribute("data-loc") || "";
+          closeSheet("homeLowStock");
+          enterLocation(loc);
+          openProductsSheet(sku);
+        });
+        homeLow.addEventListener("keydown", (e)=>{
+          if(e.key!=="Enter" && e.key!==" ") return;
+          const row = e.target?.closest?.("[data-action='homeLowOpen']");
+          if(!row) return;
+          e.preventDefault();
+          const sku = row.getAttribute("data-sku") || "";
+          const loc = row.getAttribute("data-loc") || "";
+          closeSheet("homeLowStock");
+          enterLocation(loc);
+          openProductsSheet(sku);
+        });
+      }
+
+
       $("invSearch")?.addEventListener("input", ()=> renderInventoryList());
       $("btnInvRefresh")?.addEventListener("click", ()=>{
         renderInventoryList();
@@ -4320,6 +4721,7 @@ showToast("Operazione completata", `${kind==="carica" ? "Carico" : "Scarico"} ap
     renderInventoryList();
     renderFlowList("carica");
     renderFlowList("scarica");
+    updateHomeLowStockBadge();
     bindUI();
     initFirebase();
   </script>
