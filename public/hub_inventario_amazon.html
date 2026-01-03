@@ -452,6 +452,30 @@
     @media(max-width:720px){
       .editGrid{ grid-template-columns:1fr; }
     }
+
+    /* Product details: compact + mobile-friendly */
+    .detailsWrap{ display:flex; flex-direction:column; gap:10px; }
+    .detailsHeader .rowTitle{ margin-bottom:2px; }
+    .detailsMetaLine{ font-size:12px; color: var(--muted); line-height:1.35; margin-top:4px; }
+    .detailsGrid{
+      display:grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      width:100%;
+      margin-top:10px;
+    }
+    @media(max-width:720px){
+      .detailsGrid{ grid-template-columns:1fr; }
+    }
+    /* make inputs less "giant" only inside details sheet */
+    #sheetProductDetails .input{
+      padding: 10px 10px;
+      border-radius: 14px;
+      box-shadow: 0 6px 14px rgba(15,23,42,.04);
+    }
+    #sheetProductDetails .fieldLabel{ margin-bottom:4px; }
+    #sheetProductDetails .hint{ margin-top:6px; }
+    #sheetProductDetails .row.editRow{ padding:14px; }
     .fieldLabel{ display:block; font-size:12px; color:var(--muted); margin-bottom:6px; }
     .field{ display:flex; flex-direction:column; }
     .row.editRow{ flex-direction:column; align-items:stretch; }
@@ -1119,40 +1143,67 @@ Tip:
     const squashWhitespace = (s)=> String(s||"").replace(/\s+/g, " ").trim();
     const escapeRegex = (s)=> String(s||"").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
+    
     function guessTitleFromRaw(rawText, sku){
       try{
         const t = String(rawText||"");
-        if(!t || !sku) return "";
+        const s = String(sku||"").trim();
+        if(!t || !s) return "";
 
-        const re = new RegExp(`\\bSKU\\s*:?\\s*${escapeRegex(sku)}\\b`, "i");
-        const m = re.exec(t);
-        if(!m) return "";
+        // 1) prova match classico "SKU: <sku>"
+        let m = null;
+        let pos = -1;
+        try{
+          const reSku = new RegExp(`SKU\\s*:?\\s*${escapeRegex(s)}`, "i");
+          m = reSku.exec(t);
+          if(m) pos = m.index;
+        }catch(_e){}
 
-        // finestra più ampia: i titoli spesso sono su più righe e possono stare "lontani" dallo SKU
-        const start = Math.max(0, m.index - 1200);
-        const chunk = t.slice(start, m.index);
+        // 2) fallback: match diretto dello SKU nel testo (senza "SKU:")
+        if(pos < 0){
+          try{
+            const rePlain = new RegExp(`(^|[^A-Z0-9])${escapeRegex(s)}([^A-Z0-9]|$)`, "i");
+            m = rePlain.exec(t);
+            if(m) pos = m.index;
+          }catch(_e){}
+        }
 
-        const NOISE_RE = /(invia(?:to)? ad amazon|visualizza introduzione|amazon seller central|nuovo seller central|flusso di lavoro|passaggio\\b|dashboard|inventario\\b|spedizioni\\b|notifiche\\b|gestisci i tuoi ordini|pagamenti\\b|tax\\b|stato dell'account|maggiori info|maggiori informazioni|preferenze di visualizzazione|dettagli dell'imballaggio|commento\\b|aiuto\\b|scarica l'app|pagina\\b|©)/i;
-        const FIELD_RE = /(sku\\s*:|asin\\s*:|tipo\\s+di\\s+stoccaggio|unit[àa]\\s+per\\s+pacco|preparazione|etichettatura|pronto\\s+per\\s+la\\s+spedizione|pacchi\\s*:|unit[àa]\\s*:)/i;
+        if(pos < 0) return "";
 
-        const lines = chunk.split(/[\\r\\n]+/).map(x=>x.trim()).filter(Boolean);
+        const start = Math.max(0, pos - 2000);
+        const chunk = t.slice(start, pos);
 
-        const filtered = lines.filter(x=>{
-          if(!x || x.length < 4) return false;
-          if(NOISE_RE.test(x)) return false;
-          if(FIELD_RE.test(x)) return false;
-          return true;
-        });
+        const rawLines = chunk.split(/[\r\n]+/).map(x=> squashWhitespace(x)).filter(Boolean);
 
-        // prendiamo le ultime righe "buone" (di solito è il titolo prodotto)
-        const tail = filtered.slice(-10);
-        let guess = squashWhitespace(tail.join(" "));
+        // Rumore tipico delle stampe Seller Central / step UI
+        const stopBoundary = /(amazon\s+seller\s+central|©|https?:\/\/|\b\d+\s*\/\s*\d+\b|commento|indicatore\s+di\s+capacità|altri\s+dettagli|pronto\s+per\s+la\s+spedizione|venditore|stampa\s*etichette|preparazione|codice\s+a\s+barre|\basin\b|\bsku\b|tipo\s+di\s+stoccaggio|unità\s+per\s+pacco|\bpacchi\b|\bunità\b|logistica\s+di\s+amazon|dimensione\s+standard|fuori\s+misura)/i;
 
-        // pulizia finale nel caso qualche etichetta sia "in-line"
-        guess = guess
-          .replace(/invia(?:to)? ad amazon|visualizza introduzione|amazon seller central|nuovo seller central|flusso di lavoro|passaggio\\b|dashboard|inventario\\b|spedizioni\\b|notifiche\\b|gestisci i tuoi ordini|pagamenti\\b|tax\\b|stato dell'account|maggiori info|maggiori informazioni|preferenze di visualizzazione|dettagli dell'imballaggio|commento\\b|aiuto\\b|scarica l'app|pagina\\b|©/ig, "")
-          .replace(/\\s+/g, " ")
-          .trim();
+        const picked = [];
+        let totalLen = 0;
+
+        for(let i = rawLines.length - 1; i >= 0; i--){
+          const line = rawLines[i];
+          if(!line) continue;
+
+          if(stopBoundary.test(line)){
+            if(picked.length) break;
+            continue;
+          }
+
+          picked.push(line);
+          totalLen += line.length + 1;
+
+          if(totalLen > 180 || picked.length >= 6) break;
+        }
+
+        picked.reverse();
+        let guess = squashWhitespace(picked.join(" "));
+
+        // rimuovi SKU dal guess (se presente)
+        try{
+          const reRm = new RegExp(escapeRegex(s), "ig");
+          guess = guess.replace(reRm, "").trim();
+        }catch(_e){}
 
         return guess;
       }catch(_e){
@@ -1160,71 +1211,67 @@ Tip:
       }
     }
 
+
+        
         function repairTitles(lines, rawText){
-          // Il backend ormai restituisce titoli completi: qui facciamo solo pulizia e (se serve)
-          // proviamo a "ricostruire" un titolo troncato usando il rawText del PDF (best-effort).
+          // Pulizia titoli + ricostruzione best-effort dal rawText (utile quando il PDF contiene header tipo data/“Invia ad Amazon”)
+          const tRaw = String(rawText || "");
 
-          const UI_NOISE_INLINE_RE = /(invia(?:to)? ad amazon|visualizza introduzione|amazon seller central|nuovo seller central|flusso di lavoro|passaggio\b|dashboard|inventario\b|spedizioni\b|notifiche\b|gestisci i tuoi ordini|pagamenti\b|tax\b|stato dell'account|maggiori info|maggiori informazioni|preferenze di visualizzazione|dettagli dell'imballaggio|commento\b|aiuto\b|scarica l'app|pagina\b|©)/ig;
-
-          const cleanTitle = (val)=>{
-            let t = squashWhitespace(val || "");
-            if(!t) return "";
-            // ripulisci rumore UI tipico del PDF
-            t = t.replace(/\bPronto per la spedizione\b/ig, "");
-            t = t.replace(/venditore\s*-\s*stampa\s*etichette/ig, "");
-            t = t.replace(/stampa\s*etichette/ig, "");
-            t = t.replace(/venditore\s*-/ig, "");
-            // a volte il PDF mette header/menù dentro il "titolo": li eliminiamo
-            t = t.replace(UI_NOISE_INLINE_RE, "");
-            t = t.replace(/\s+/g, " ").trim();
-            t = t.replace(/^-+\s*/g, "").trim();
-            return t;
-          };
-
-          const isBadTitle = (val)=>{
-            const t = squashWhitespace(val || "");
-            if(!t) return true;
-            if(t.length < 8) return true;
-            // casi tipici: al posto del titolo arriva "Invia ad Amazon" / header vari
-            if(t.length < 40 && /(invia(?:to)? ad amazon|amazon seller central|flusso di lavoro|passaggio\b|dashboard|inventario\b)/i.test(t)) return true;
-            return false;
-          };
+          // Pattern tipici che NON sono nomi prodotto
+          const badTitleRe = /^\s*(\d{2}\/\d{2}\/\d{2},\s*\d{2}:\d{2}\s*\|\s*amazon)\s*$/i;
+          const uiNoiseRe = /(amazon\s+seller\s+central|\b(inv(?:ia|iato)\s+ad\s+amazon)\b|https?:\/\/)/i;
 
           let out = (lines||[]).map((l0)=>{
             const l = { ...l0 };
-            l.title = cleanTitle(l.title);
-            return l;
-          });
 
-          if(rawText){
-            out = out.map(l=>{
-              if(!l.sku) return l;
+            const sku = toSkuId(l.sku || "");
+            let t = squashWhitespace(l.title || "");
 
-              const guessRaw = guessTitleFromRaw(rawText, l.sku);
-              const guess = cleanTitle(guessRaw);
-              if(!guess) return l;
+            if(t){
+              // ripulisci rumore UI tipico del PDF
+              t = t.replace(/\bPronto per la spedizione\b/ig, "");
+              t = t.replace(/venditore\s*-\s*stampa\s*etichette/ig, "");
+              t = t.replace(/stampa\s*etichette/ig, "");
+              t = t.replace(/venditore\s*-/ig, "");
+
+              // rumore specifico Seller Central / header
+              t = t.replace(/Amazon\s+Seller\s+Central/ig, "");
+              t = t.replace(/\bInvia\s+ad\s+Amazon\b/ig, "");
+              t = t.replace(/\bInviato\s+ad\s+Amazon\b/ig, "");
+              t = t.replace(/\b\d{2}\/\d{2}\/\d{2},\s*\d{2}:\d{2}\b/g, "");
+
+              // rifiniture
+              t = t.replace(/\s+/g, " ").trim();
+              t = t.replace(/^[\|\-–•]+\s*/g, "").trim();
+              t = t.replace(/[\|\-–•]+\s*$/g, "").trim();
+            }
+
+            // Se il titolo è "spazzatura" (es. data | Amazon) oppure vuoto → prova a ricostruire dal rawText
+            const looksBad = !t || badTitleRe.test(t) || uiNoiseRe.test(t) || /^amazon\s*$/i.test(t);
+            if(looksBad && sku && tRaw){
+              const guess = squashWhitespace(guessTitleFromRaw(tRaw, sku));
 
               // Evita di "sporcare" i titoli con etichette/step UI del PDF
-              if(/pronto per la spedizione|venditore|stampa etichette|invia(?:to)? ad amazon|flusso di lavoro|passaggio\b/i.test(guess)) return l;
-
-              // Se il titolo corrente è vuoto/rumore → usa direttamente il guess
-              if(isBadTitle(l.title)){
-                return { ...l, title: guess };
+              if(guess && !uiNoiseRe.test(guess) && !/pronto per la spedizione|venditore|stampa etichette/i.test(guess)){
+                l.title = guess;
+                return l;
               }
+            }
 
-              // Se il guess termina col titolo corrente ma è più lungo → il titolo corrente è probabilmente "tagliato"
-              if(guess.length > l.title.length + 8 && guess.toLowerCase().endsWith(l.title.toLowerCase())){
-                return { ...l, title: guess };
+            // Se ho un titolo normale, ma il rawText contiene una versione più completa, preferiscila (best-effort)
+            if(t && sku && tRaw){
+              const guess = squashWhitespace(guessTitleFromRaw(tRaw, sku));
+              if(guess && !uiNoiseRe.test(guess) && !/pronto per la spedizione|venditore|stampa etichette/i.test(guess)){
+                if(guess.length > t.length + 8 && guess.toLowerCase().includes(t.toLowerCase())){
+                  l.title = guess;
+                  return l;
+                }
               }
+            }
 
-              // Se il titolo è sospettosamente corto e il guess è molto più informativo
-              if(l.title.length < 16 && guess.length >= l.title.length + 20){
-                return { ...l, title: guess };
-              }
-
-              return l;
-            });
-          }
+            l.title = t;
+            return l;
+          });
 
           return out;
         }
@@ -3171,25 +3218,32 @@ function currentInv(){
 
       content.innerHTML = `
         <div class="row editRow">
-          <div class="rowMain">
-            <p class="rowTitle">${escapeHtml(titleMain)}</p>
-            <div class="rowSub"><span class="mono">${escapeHtml(sku)}</span> • Magazzino: <b>${escapeHtml(prettyLoc(loc))}</b></div>
-            ${metaHtml}
-            ${(when || by) ? `<div class="hint">Ultimo update: ${escapeHtml(when || "—")}${by ? ` • ${escapeHtml(by)}` : ""}</div>` : ``}
-          </div>
+          <div class="rowMain detailsWrap">
+            <div class="detailsHeader">
+              <p class="rowTitle">${escapeHtml(titleMain)}</p>
+              <div class="rowSub"><span class="mono">${escapeHtml(sku)}</span> • Magazzino: <b>${escapeHtml(prettyLoc(loc))}</b></div>
+              ${metaHtml}
+              ${(when || by) ? `<div class="detailsMetaLine">Ultimo update: <b>${escapeHtml(when || "—")}</b>${by ? ` • ${escapeHtml(by)}` : ""}</div>` : ``}
+            </div>
 
-          <div class="editGrid" style="margin-top:12px">
-            <div class="field">
-              <label class="fieldLabel">SKU</label>
-              <input class="input mono" data-field="sku" value="${escapeHtml(sku)}" ${isAdmin ? "" : "disabled"} />
-            </div>
-            <div class="field">
-              <label class="fieldLabel">Quantità</label>
-              <input class="input" inputmode="numeric" data-field="qty" value="${escapeHtml(String(qty))}" ${isAdmin ? "" : "disabled"} />
-            </div>
-            <div class="field" style="grid-column: 1 / -1;">
-              <label class="fieldLabel">Nome prodotto</label>
-              <input class="input" data-field="title" value="${escapeHtml(titleMain)}" ${isAdmin ? "" : "disabled"} />
+            <div class="detailsGrid">
+              <div class="field">
+                <label class="fieldLabel">SKU</label>
+                <input class="input mono" data-field="sku" value="${escapeHtml(sku)}" ${isAdmin ? "" : "disabled"} />
+              </div>
+              <div class="field">
+                <label class="fieldLabel">Quantità (pz)</label>
+                <input class="input" inputmode="numeric" data-field="qty" value="${escapeHtml(String(qty))}" ${isAdmin ? "" : "disabled"} />
+              </div>
+              <div class="field" style="grid-column: 1 / -1;">
+                <label class="fieldLabel">Nome prodotto</label>
+                <input class="input" data-field="title" value="${escapeHtml(titleMain)}" ${isAdmin ? "" : "disabled"} />
+              </div>
+              <div class="field">
+                <label class="fieldLabel">Pezzi da spostare</label>
+                <input class="input" inputmode="numeric" data-field="moveQty" value="${escapeHtml(String(qty))}" ${isAdmin ? "" : "disabled"} />
+                <div class="hint">Lascia uguale alla quantità per spostare tutto. Puoi ridurre per trasferire solo una parte.</div>
+              </div>
             </div>
           </div>
         </div>
@@ -3208,12 +3262,16 @@ function currentInv(){
       const skuEl = wrap?.querySelector?.('[data-field="sku"]');
       const qtyEl = wrap?.querySelector?.('[data-field="qty"]');
       const titleEl = wrap?.querySelector?.('[data-field="title"]');
+      const moveQtyEl = wrap?.querySelector?.('[data-field="moveQty"]');
 
       const sku = toSkuId(skuEl?.value || "");
       const title = squashWhitespace(titleEl?.value || "");
       const qty = Math.max(0, parseQty(qtyEl?.value || 0) || 0);
 
-      return { sku, title, qty };
+      // Se non presente, default: sposta tutta la quantità attuale
+      const moveQty = Math.max(0, parseQty(moveQtyEl?.value || qty) || 0);
+
+      return { sku, title, qty, moveQty };
     }
 
     async function saveProductFromDetails(){
@@ -3338,7 +3396,7 @@ function currentInv(){
       }
 
       const oldSku = toSkuId(state.ui.productDetailsSku||"");
-      const { sku:newSku, title, qty } = readProductDetailsFields();
+      const { sku:newSku, title, moveQty } = readProductDetailsFields();
 
       if(!oldSku){
         showToast("Errore", "SKU non valido.", 2200);
@@ -3349,68 +3407,136 @@ function currentInv(){
         return;
       }
 
-      const ok = confirm(`Spostare ${oldSku} da ${prettyLoc(fromLoc)} a ${prettyLoc(dst)}?\n\nOperazione: sposta (non duplica).`);
+      // Per evitare casi ambigui: cambio SKU -> prima salva, poi sposta
+      if(newSku !== oldSku){
+        showToast("Info", "Per cambiare SKU, prima premi Salva. Poi puoi spostare.", 2600);
+        return;
+      }
+
+      const qtyToMove = Math.max(0, moveQty || 0);
+      if(!qtyToMove){
+        showToast("Errore", "Inserisci i pezzi da spostare.", 2200);
+        return;
+      }
+
+      const ok = confirm(
+        `Spostare ${qtyToMove} pz di ${oldSku} da ${prettyLoc(fromLoc)} a ${prettyLoc(dst)}?
+
+` +
+        `Se sposti meno dei pezzi disponibili, nel magazzino di partenza resterà la differenza.`
+      );
       if(!ok) return;
 
       const api = state.firebase.api;
       const db = state.firebase.db;
 
       const fromRef = api.doc(db, COL_ROOT, fromLoc, SUB_ITEMS, oldSku);
-      const toRef = api.doc(db, COL_ROOT, dst, SUB_ITEMS, newSku);
-
-      const oldP = api.doc(db, COL_PRODUCTS, oldSku);
-      const newP = api.doc(db, COL_PRODUCTS, newSku);
+      const toRef   = api.doc(db, COL_ROOT, dst,     SUB_ITEMS, oldSku);
 
       try{
-        await api.runTransaction(db, async (tx)=>{
+        const res = await api.runTransaction(db, async (tx)=>{
           const sFrom = await tx.get(fromRef);
           if(!sFrom.exists()) throw new Error("Prodotto non trovato.");
 
-          const sTo = await tx.get(toRef);
-          if(sTo.exists()) throw new Error("Nella destinazione esiste già questo SKU.");
+          const fromData = sFrom.data() || {};
+          const fromQty = Math.max(0, parseQty(fromData.qty) || 0);
 
+          if(qtyToMove > fromQty){
+            throw new Error(`Pezzi disponibili: ${fromQty}.`);
+          }
+
+          const finalTitle = squashWhitespace(title || fromData.title || "") || "";
           const nowClient = Date.now();
-          const baseData = {
-            sku: newSku,
-            title: title || "",
-            titleNorm: normalizeText(title || newSku),
-            qty,
+          const titleNorm = normalizeText(finalTitle || oldSku);
+
+          const sTo = await tx.get(toRef);
+          const toPrev = sTo.exists() ? Math.max(0, parseQty((sTo.data()||{}).qty) || 0) : 0;
+          const toNewQty = toPrev + qtyToMove;
+
+          const toData = {
+            sku: oldSku,
+            title: finalTitle,
+            titleNorm,
+            qty: toNewQty,
             updatedAt: api.serverTimestamp(),
             updatedAtClient: nowClient,
             updatedBy: state.user.email || "",
             location: dst
           };
 
-          tx.set(toRef, baseData, { merge:true });
-          tx.delete(fromRef);
+          if(sTo.exists()){
+            tx.update(toRef, toData);
+          }else{
+            tx.set(toRef, toData, { merge:true });
+          }
+
+          const remaining = fromQty - qtyToMove;
+
+          if(remaining <= 0){
+            tx.delete(fromRef);
+          }else{
+            tx.update(fromRef, {
+              title: finalTitle,
+              titleNorm,
+              qty: remaining,
+              updatedAt: api.serverTimestamp(),
+              updatedAtClient: nowClient,
+              updatedBy: state.user.email || "",
+              location: fromLoc
+            });
+          }
 
           // aggiorna anagrafica globale
+          const pRef = api.doc(db, COL_PRODUCTS, oldSku);
           const pData = {
-            sku: newSku,
-            title: title || "",
-            titleNorm: normalizeText(title || newSku),
+            sku: oldSku,
+            title: finalTitle,
+            titleNorm,
             lastSeenAt: api.serverTimestamp(),
             lastSeenAtClient: nowClient,
             lastSeenBy: state.user.email || "",
             lastSeenLocation: dst,
             lastSeenKind: "move",
-            seenCount: api.increment(1)
+            seenCount: api.increment(1),
+            updatedAtClient: nowClient
           };
+          tx.set(pRef, pData, { merge:true });
 
-          if(newSku===oldSku){
-            tx.set(oldP, pData, { merge:true });
-          }else{
-            const pNewSnap = await tx.get(newP);
-            if(pNewSnap.exists()) throw new Error("SKU già esistente (anagrafica).");
-            tx.set(newP, pData, { merge:true });
-            tx.delete(oldP);
-          }
+          return { remaining, moved: qtyToMove, fromQty, toQty: toNewQty, title: finalTitle, nowClient };
         });
 
-        showToast("Spostato", `Articolo spostato in ${prettyLoc(dst)}.`, 1800);
-        state.ui.productDetailsSku = null;
-        state.ui.productEditSku = null;
-        closeSheet("productDetails");
+        // Aggiorna stato locale (UI reattiva, senza aspettare snapshot)
+        try{
+          const fromArr = state.inventory?.[fromLoc]?.items || [];
+          const iFrom = fromArr.findIndex(x=> toSkuId(x?.sku||"")===oldSku);
+          if(iFrom>=0){
+            if(res.remaining<=0){
+              fromArr.splice(iFrom, 1);
+            }else{
+              fromArr[iFrom] = { ...fromArr[iFrom], title: res.title, titleNorm: normalizeText(res.title || oldSku), qty: res.remaining, updatedAtClient: res.nowClient, updatedBy: state.user.email||"" };
+            }
+          }
+
+          const toArr = state.inventory?.[dst]?.items || [];
+          const iTo = toArr.findIndex(x=> toSkuId(x?.sku||"")===oldSku);
+          if(iTo>=0){
+            toArr[iTo] = { ...toArr[iTo], title: res.title, titleNorm: normalizeText(res.title || oldSku), qty: res.toQty, updatedAtClient: res.nowClient, updatedBy: state.user.email||"" };
+          }else{
+            toArr.push({ sku: oldSku, title: res.title, titleNorm: normalizeText(res.title || oldSku), qty: res.toQty, updatedAtClient: res.nowClient, updatedBy: state.user.email||"", location: dst });
+          }
+        }catch(e){ /* no-op */ }
+
+        if(res.remaining > 0){
+          showToast("Spostati", `${res.moved} pz in ${prettyLoc(dst)}. Rimangono ${res.remaining} pz in ${prettyLoc(fromLoc)}.`, 2600);
+          // Resta aperto: aggiorna campi (se già aggiornato dai listener, tanto meglio)
+          renderProductDetailsSheet();
+        }else{
+          showToast("Spostato", `${res.moved} pz spostati in ${prettyLoc(dst)}.`, 2000);
+          state.ui.productDetailsSku = null;
+          state.ui.productEditSku = null;
+          closeSheet("productDetails");
+        }
+
         renderProductsSheet();
         renderInventoryList();
       }catch(err){
@@ -3418,6 +3544,9 @@ function currentInv(){
         showToast("Errore", String(err?.message || err).slice(0, 200), 2800);
       }
     }
+
+
+
 function renderProductsSheet(){
       const list = $("productsList");
       const hint = $("productsHint");
@@ -3488,8 +3617,7 @@ function renderProductsSheet(){
               </div>
               <div class="rowActions">
                 <div class="badge ${badgeClass}">${qty}</div>
-                <button class="btn small" type="button" data-action="editProduct" ${!isAdmin ? "disabled":""}>Modifica</button>
-                <button class="btn small" type="button" data-action="deleteProduct" ${!isAdmin ? "disabled":""}>Elimina</button>
+                <div class="chev">›</div>
               </div>
             </div>`;
         });
