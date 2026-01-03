@@ -110,6 +110,22 @@
   .authLoader .loaderSub{font-size:13.5px}
 }
 
+
+  .packBadge{
+    display:inline-flex;
+    align-items:center;
+    padding:2px 8px;
+    margin-left:8px;
+    border-radius:999px;
+    font-size:11px;
+    font-weight:800;
+    line-height:1;
+    border:1px solid rgba(0,0,0,.08);
+    background: rgba(255, 193, 7, 0.18);
+    color: rgba(88, 67, 0, 0.95);
+    vertical-align:middle;
+    white-space:nowrap;
+  }
 </style>
 
   <style>
@@ -2538,6 +2554,50 @@ document.body.appendChild(banner);
     return false;
   }
 
+
+  // --- Packaging / consumo interno ---
+  // Queste righe devono essere VISIBILI negli "Ordini da concludere" e non devono finire in "Non configurati".
+  // Normalizzazione robusta: case-insensitive, spazi, virgole/punti, formati 0,5/0.5, e "x/X".
+  const PACKAGING_INTERNAL_KEYWORDS = [
+    "sacchetto","sacco","scatola","cartone","etichetta","etichette",
+    "nastro","film","pellicola","bobina","stretch","estensibile",
+    "reggia","fascetta","pallet","bancale","angolare","divisorio","separatore",
+    "imballo","imballaggio"
+  ];
+
+  const POWDER_MATERIAL_HINT_RE = /\b(ossicloruro|poltiglia|caolino|zeolite|zolfo|rame|solfato|idrossido|tribasico|diatomite|agroblumagic|corrobor|concime)\b/;
+
+  function normalizeItemNameForMatch(name){
+    let s = String(name || "").toLowerCase();
+    try { s = s.normalize("NFD").replace(/[\u0300-\u036f]/g, ""); } catch(e){}
+    // 0,5 -> 0.5 (e in generale virgole -> punti, tipico nei nomi packaging)
+    s = s.replace(/,/g, ".");
+    // simbolo moltiplicazione
+    s = s.replace(/×/g, "x");
+    // normalizza "0.5X40" / "0,5 x 40" -> "0.5 x 40"
+    s = s.replace(/(\d+(?:\.\d+)?)\s*x\s*(\d+(?:\.\d+)?)/g, "$1 x $2");
+    // trim + collapse spazi
+    s = s.replace(/\s+/g, " ").trim();
+    return s;
+  }
+
+  function isPackagingInternalDesc(desc, code="", um=""){
+    const s = normalizeItemNameForMatch(desc);
+    if(!s) return false;
+
+    // Evita falsi positivi: se sembra chiaramente un prodotto polvere (rame, zolfo, ecc.) non è packaging.
+    if(POWDER_MATERIAL_HINT_RE.test(s)) return false;
+
+    const hasKg = /\bkg\b/.test(s);
+    const hasMultX = /(\d+(?:\.\d+)?)\s*x\s*(\d+(?:\.\d+)?)/.test(s);
+
+    // Regola esplicita richiesta
+    if(s.includes("sacchetto") && hasKg && hasMultX) return true;
+
+    // Regola generale per packaging/consumo interno
+    return PACKAGING_INTERNAL_KEYWORDS.some(k => s.includes(k));
+  }
+
   function materialOf(desc, code=""){
     const s = norm(desc);
     const c = norm(code);
@@ -2600,7 +2660,8 @@ document.body.appendChild(banner);
         if(!Number.isFinite(qty)) qty = 0;
 
         const alertInfo = detectAlertLine(desc);
-        const powder = alertInfo ? false : isPowderLine(code, desc, um);
+        const packagingInternal = (!alertInfo) && isPackagingInternalDesc(desc, code, um);
+        const powder = alertInfo ? false : (isPowderLine(code, desc, um) || packagingInternal);
         const packKg = detectPackKg(desc);
         const material = powder ? materialOf(desc, code) : "altro";
 
@@ -2615,6 +2676,7 @@ document.body.appendChild(banner);
           um,
           qty,
           powder,
+          packagingInternal,
           packKg,
           lineKg,
           material,
@@ -5002,6 +5064,23 @@ function hideLogin(){
       comp.linesTotal=0; comp.linesOk=0; comp.linesWarn=0; comp.linesNonConfig=0;
       const status = o.lines.some(l=>l.status==="active") ? "in_produzione" : (o.partialInfo ? "parziale" : "da_fare");
       for(const l of (o.lines||[])){
+        // Articoli di packaging/consumo interno: non richiedono distinta (BOM) e non devono finire in "Non configurati"
+        if(l && l.packagingInternal){
+          const rawQty = parseItNumber(l.qty);
+          if(Number.isFinite(rawQty) && rawQty > 0){
+            const uRaw = (l.um || l.uom || l.unitaMisura || l.unit || l.measure || "");
+            if(isPieces(uRaw)){
+              magAddToMap(comp.altri, l.desc, rawQty);
+              magAddToMap(totals.altri, l.desc, rawQty);
+            } else {
+              const uDisp = displayUm(uRaw) || String(uRaw || "").trim();
+              const label = uDisp ? `${l.desc} (${uDisp})` : l.desc;
+              magAddToMap(comp.altri, label, rawQty);
+              magAddToMap(totals.altri, label, rawQty);
+            }
+          }
+          continue;
+        }
         const qtyKgRimanenti = magResolveQtyKg(l);
         const considerLine = (Number.isFinite(qtyKgRimanenti) && qtyKgRimanenti>0);
         if(considerLine){ comp.linesTotal++; totals.linesTotal++; }
@@ -7564,10 +7643,11 @@ Linea: polveri`, null); }catch(_e){}
         div.className = `item pressCard selectableLine${checked ? " selected" : ""}`;
         div.style.cursor = isBlocked ? "not-allowed" : "pointer";
         const qtyLabel = formatQtyWithKg(l.qty, l.um);
+        const packTag = l.packagingInternal ? '<span class="packBadge">Packaging/Interno</span>' : '';
         div.innerHTML = `
           <div class="top">
             <div>
-              <div class="name">${l.desc}</div>
+              <div class="name">${l.desc}${packTag ? " " + packTag : ""}</div>
               <div class="sub" style="font-size:13px; font-weight:900;">Quantità: <span style="font-size:15px;">${qtyLabel}</span></div>
               ${l.code?`<div class="muted" style="margin-top:6px;">Cod: <b>${l.code}</b></div>`:""}
               ${l.conclusion ? `<div class="muted" style="margin-top:6px;">Conclusione prevista: ${escapeHtml(l.conclusion)}</div>`:""}
@@ -7756,10 +7836,11 @@ Linea: polveri`, null); }catch(_e){}
           div.innerHTML = renderWhiteBagBanner({ selectable: true, checked });
         } else {
           const qtyLabel = formatQtyWithKg(l.qty, l.um);
+          const packTag = l.packagingInternal ? '<span class="packBadge">Packaging/Interno</span>' : '';
           div.innerHTML = `
             <div class="top">
               <div>
-                <div class="name">${l.desc}</div>
+                <div class="name">${l.desc}${packTag ? " " + packTag : ""}</div>
                 <div class="sub">Quantità: ${qtyLabel} · Cod: ${l.code||"—"}${lineConclusion?` · Conclusione: ${lineConclusion}`:""}</div>
                 <div style="margin-top:8px; display:flex; gap:10px; align-items:center;">
                   <div class="muted" style="font-size:12px; font-weight:900; min-width:150px;">Quantità prodotta (kg, opzionale)</div>
