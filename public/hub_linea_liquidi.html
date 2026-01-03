@@ -5510,14 +5510,18 @@ function renderCompletedSection(){
     const customer = h.customer || "";
     const operator = h.operator || h.operatorName || (h.userName||"") || "Operatore";
     const at = h.at ? fmtDateTime(h.at) : "";
-    const kg = (()=>{
+    const unit = displayUm(h.unit || (()=>{ try{ return inferOrderUm(Array.isArray(h.perLine)?h.perLine:[]); }catch(_e){} return ""; })() || "");
+
+    const qty = (()=>{
       try{
         if(Array.isArray(h.perLine) && h.perLine.length){
-          return Math.round(h.perLine.reduce((a,x)=>a + (Number(x.producedKg||0)||0), 0));
+          return h.perLine.reduce((a,x)=>a + (Number(x.producedKg||0)||0), 0);
         }
+        if(h.kg!=null) return Number(h.kg)||0;
       }catch(_e){}
       return null;
     })();
+    const qtyTxt = qty!=null ? formatQtyWithKg(qty, unit) : null;
 
     let status = "Produzione registrata";
     if(fullSet.has(orderNo)) status = "Ordine concluso";
@@ -5532,7 +5536,7 @@ function renderCompletedSection(){
           <div class="completedMeta">
             <div><b>${escapeHtml(operator)}</b></div>
             ${at?`<div class="kv">${escapeHtml(at)}</div>`:""}
-            ${kg!=null?`<div class="kv"><b>${kg}</b> flaconi</div>`:""}
+            ${qtyTxt!=null?`<div class="kv"><b>${escapeHtml(qtyTxt)}</b></div>`:""}
             <div>${escapeHtml(status)}</div>
           </div>
         </div>
@@ -5556,12 +5560,18 @@ function openHistModal(id){
 
   const body = $("histBody");
   const lines = Array.isArray(h.perLine) ? h.perLine : [];
+  const fmtHistQty = (val, um)=>{
+    if(val==null) return "—";
+    const n = Number(String(val).replace(",", "."));
+    if(!Number.isFinite(n)) return "—";
+    return formatQtyWithKg(n, um || "");
+  };
   const lineHtml = lines.length ? lines.map(l=>`
     <div class="item" style="margin-bottom:10px;">
       <div class="top">
         <div>
           <div class="name">${escapeHtml(l.desc||"")}</div>
-          <div class="muted">Pianificati: <b>${escapeHtml(String(l.plannedKg??"—"))}</b> kg · Prodotti: <b>${escapeHtml(String(l.producedKg??"—"))}</b> flaconi</div>
+          <div class="muted">Pianificati: <b>${escapeHtml(fmtHistQty((l.plannedQty??l.plannedKg??l.qty), l.um))}</b> · Prodotti: <b>${escapeHtml(fmtHistQty((l.producedQty??l.producedKg), l.um))}</b></div>
         </div>
         <div class="badge">${escapeHtml(String(l.qty??""))} ${escapeHtml(String(l.um??""))}</div>
       </div>
@@ -7260,7 +7270,7 @@ Linea: liquidi`, null); }catch(_e){}
           <div>
             <div class="name ellipsis" title="${escapeHtml(o.customer||"Cliente")} · Ordine ${escapeHtml(o.orderNo||o.number||"")}">${escapeHtml(o.customer||"Cliente")} · Ordine ${escapeHtml(o.orderNo||o.number||"")}</div>
             <div class="sub">Conclusione prevista: <b>${escapeHtml(o.conclusion||"—")}</b></div>
-            <div class="muted" style="margin-top:6px;">Righe concluse: ${done}/${total} · Flaconi: ${Math.round(o.totalKg||0)}</div>
+            <div class="muted" style="margin-top:6px;">Righe concluse: ${done}/${total} · Quantità: ${escapeHtml(formatQtyWithKg(Number(o.totalKg||0), inferOrderUm(o.lines||[])||""))}</div>
           </div>
           <div class="badge" style="border-color:var(--warn); color:var(--warn);">Parziale</div>
         </div>`;
@@ -7315,7 +7325,7 @@ Linea: liquidi`, null); }catch(_e){}
           description: `Ordine n. ${prod.orderNo} · ${prod.customer}`,
           orderNo: prod.orderNo,
           customer: prod.customer,
-          meta: `${selectedLines.length} righe · ${Math.round(totalKg||0)} pz`
+          meta: `${selectedLines.length} righe · ${formatQtyWithKg(totalKg||0, inferOrderUm(selectedLines)||"")}`
         });
       }catch(_e){}
       
@@ -7327,7 +7337,7 @@ Linea: liquidi`, null); }catch(_e){}
           `Operatore: ${opName||state.user?.fullName||"—"}`,
           `Inizio: ${prod.startedAt||nowIso()}`,
           `Righe avviate: ${selectedLines.length}`,
-          `Flaconi stimati: ${Math.round(Number(totalKg||0))}`,
+          `Quantità stimata: ${formatQtyWithKg(Number(totalKg||0), inferOrderUm(selectedLines)||"")}`,
           `Ordine completo: ${isFullOrderStart ? "Sì" : "No"}`,
           `Linea: liquidi`
         ].join("\n");
@@ -7890,7 +7900,8 @@ Linea: liquidi`, null); }catch(_e){}
             kg = Number(p.totalKg||0);
           }
 
-          const ctx = `${p.customer} · Ordine n. ${p.orderNo} · ${Math.round(kg)} kg`;
+          const unit = inferOrderUm(perLine.length ? perLine : (order?.lines||[])) || "";
+          const ctx = `${p.customer} · Ordine n. ${p.orderNo} · ${formatQtyWithKg(kg, unit)}`;
           const concludedOk = await new Promise((resolve)=>{
             openSignModal(ctx, async(signatureDataUrl)=>{
               await closeActiveProduction(p.id, { concluded:true });
@@ -7901,6 +7912,7 @@ Linea: liquidi`, null); }catch(_e){}
                 operatorUid: state.user?.uid || "",
                 customer: p.customer,
                 orderNo: p.orderNo,
+                unit,
                 kg,
                 durationMs,
                 startedAt: p.startedAt || nowIso(),
@@ -7923,8 +7935,8 @@ Linea: liquidi`, null); }catch(_e){}
                   `Operatore: ${entry.operator||state.user?.fullName||"—"}`,
                   `Inizio: ${entry.startedAt||"—"}`,
                   `Fine: ${entry.endedAt||"—"}`,
-                  `Totale ordine (kg): ${Number(entry.totalKgOrder||0).toFixed(2)}`,
-                  `Kg prodotto (questa chiusura): ${Number(entry.kg||0).toFixed(2)}`,
+                  `Quantità ordine: ${formatQtyWithKg(Number(entry.totalKgOrder||0), entry.unit||"")}`,
+                  `Quantità prodotta (questa chiusura): ${formatQtyWithKg(Number(entry.kg||0), entry.unit||"")}`,
                   `Linea: liquidi`,
                   `Firma: ${entry.signature ? "Acquisita su hub (storico produzione)" : "Non presente"}`
                 ].join("\n");
@@ -7962,7 +7974,7 @@ Linea: liquidi`, null); }catch(_e){}
 
               speak(`Ordine concluso da ${(state.user?.fullName||p.operator||"Operatore")} · ordine ${p.orderNo} · cliente ${p.customer}`);
 
-              showToast("Produzione conclusa", `Operatore ${(state.user?.fullName||p.operator||"Operatore")} · Ordine n. ${p.orderNo} · ${Math.round(kg)} kg`);
+              showToast("Produzione conclusa", `Operatore ${(state.user?.fullName||p.operator||"Operatore")} · Ordine n. ${p.orderNo} · ${formatQtyWithKg(kg, unit)}`);
               showToast("Ordine concluso", `Ordine n. ${p.orderNo} registrato tra i conclusi.`, 2200);
               renderRunning();
               markConcludeCompleted();
