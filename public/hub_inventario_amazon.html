@@ -891,52 +891,46 @@
       }
     }
 
-    function repairTitles(lines, rawText){
-      // Ora ci fidiamo del backend (titoli già completi). Qui facciamo SOLO pulizia anti-UI.
-      return (lines||[]).map((l0)=>{
-        const l = { ...l0 };
-        let t = squashWhitespace(l.title || "");
-        if(t){
-          t = t.replace(/\bPronto per la spedizione\b/ig, "");
-          t = t.replace(/venditore\s*-\s*stampa\s*etichette/ig, "");
-          t = t.replace(/stampa\s*etichette/ig, "");
-          t = t.replace(/venditore\s*-/ig, "");
-          t = t.replace(/\s+/g, " ").trim();
-          t = t.replace(/^-+\s*/g, "").trim();
-        }
-        l.title = t;
-        return l;
-      });
-    }
+        function repairTitles(lines, rawText){
+          // Il backend ormai restituisce titoli completi: qui facciamo solo pulizia e (se serve)
+          // proviamo a "ricostruire" un titolo troncato usando il rawText del PDF (best-effort).
+          let out = (lines||[]).map((l0)=>{
+            const l = { ...l0 };
+            let t = squashWhitespace(l.title || "");
+            if(t){
+              // ripulisci rumore UI tipico del PDF
+              t = t.replace(/\bPronto per la spedizione\b/ig, "");
+              t = t.replace(/venditore\s*-\s*stampa\s*etichette/ig, "");
+              t = t.replace(/stampa\s*etichette/ig, "");
+              t = t.replace(/venditore\s*-/ig, "");
+              t = t.replace(/\s+/g, " ").trim();
+              t = t.replace(/^-+\s*/g, "").trim();
+            }
+            l.title = t;
+            return l;
+          });
 
+          if(rawText){
+            out = out.map(l=>{
+              if(!l.sku || !l.title) return l;
+              const guess = guessTitleFromRaw(rawText, l.sku);
+              if(!guess) return l;
 
-        if(prefix && hasTitle){
-          l.title = squashWhitespace(prefix + " " + l.title);
-          prefix = "";
-        }
-        out.push(l);
-      }
+              // Evita di "sporcare" i titoli con etichette/step UI del PDF
+              if(/pronto per la spedizione|venditore|stampa etichette/i.test(guess)) return l;
 
-      if(rawText){
-        out = out.map(l=>{
-          if(!l.sku || !l.title) return l;
-          const guess = guessTitleFromRaw(rawText, l.sku);
-          if(!guess) return l;
-
-          // Evita di "sporcare" i titoli con etichette/step UI del PDF
-          if(/pronto per la spedizione|venditore|stampa etichette/i.test(guess)) return l;
-
-          // Se il guess termina col titolo corrente ma è più lungo → il titolo corrente è "tagliato"
-          if(guess.length > l.title.length + 8 && guess.toLowerCase().endsWith(l.title.toLowerCase())){
-            return { ...l, title: guess };
+              // Se il guess termina col titolo corrente ma è più lungo → il titolo corrente è probabilmente "tagliato"
+              if(guess.length > l.title.length + 8 && guess.toLowerCase().endsWith(l.title.toLowerCase())){
+                return { ...l, title: guess };
+              }
+              return l;
+            });
           }
-          return l;
-        });
-      }
-      return out;
-    }
+          return out;
+        }
 
-    // App height (iOS)
+        // App height (iOS)
+
     const updateAppHeight = ()=>{
       try{
         const h = Math.max(window.innerHeight || 0, document.documentElement?.clientHeight || 0);
