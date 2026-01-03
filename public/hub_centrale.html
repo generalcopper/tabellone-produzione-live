@@ -12,7 +12,7 @@
 <meta name="mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-<meta name="apple-mobile-web-app-title" content="Buste paga" />
+<meta name="apple-mobile-web-app-title" content="Hub Centrale" />
 <link rel="apple-touch-icon" href="./icons/icon-180.png" />
 <meta name="format-detection" content="telephone=no" />
   
@@ -33,7 +33,7 @@
   <meta name="google" content="notranslate"/>
   <meta http-equiv="Content-Language" content="it"/>
   <meta name="color-scheme" content="light"/>
-  <title>Hub Buste Paga</title>
+  <title>Hub Centrale</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 64 64%27%3E%3Crect width=%2764%27 height=%2764%27 rx=%2716%27 fill=%27%232e7bff%27/%3E%3Cpath d=%27M22 43c0-11 8-20 20-20h2v6h-2c-8 0-14 6-14 14v2h-6v-2z%27 fill=%27white%27/%3E%3Cpath d=%27M40 33a6 6 0 1 1 0-12h2v6h-2a0 0 0 0 0 0 0 0 0 0 0 0 0 6z%27 fill=%27white%27 opacity=%270.9%27/%3E%3C/svg%3E">
     
 <style>
@@ -1314,12 +1314,75 @@ setMsg("");
 
 // Init Firebase (dynamic import, come negli altri hub)
 let app, auth, db, authMod, fsMod;
+let googleProvider = null;
+let preferRedirect = false;
+
+// --- iOS / PWA detection (anti-loop + UX stabile) ---
+function isIOSDevice(){
+  const ua = navigator.userAgent || "";
+  const iOS = /iPad|iPhone|iPod/i.test(ua);
+  const iPadOS13Plus = (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+  return iOS || iPadOS13Plus;
+}
+function isStandaloneMode(){
+  return (window.matchMedia && window.matchMedia("(display-mode: standalone)").matches) || (navigator.standalone === true);
+}
+function isIOSPWA(){
+  return isIOSDevice() && isStandaloneMode();
+}
+
+// --- Auth persistence (fondamentale su iOS PWA) ---
+async function setupAuthPersistence(){
+  if(!authMod || !auth) return;
+  try{
+    // migliore in generale
+    await authMod.setPersistence(auth, authMod.indexedDBLocalPersistence);
+    return;
+  }catch(_e1){}
+  try{
+    await authMod.setPersistence(auth, authMod.browserLocalPersistence);
+    return;
+  }catch(_e2){}
+  try{
+    await authMod.setPersistence(auth, authMod.inMemoryPersistence);
+  }catch(_e3){}
+}
+
+// --- Redirect handler UNA volta (anti-loop) ---
+let _redirectHandled = false;
+async function handleGoogleRedirectOnce(){
+  if(_redirectHandled) return;
+  _redirectHandled = true;
+
+  const pending = sessionStorage.getItem("__google_redirect_pending__") === "1";
+
+  try{
+    if(pending){
+      showOverlayState("working");
+      setSpin("Verifica accesso…");
+    }
+    // Consuma/chiude eventuale redirect (se non c'è, ritorna null)
+    await authMod.getRedirectResult(auth);
+  }catch(err){
+    console.error(err);
+    if(pending){
+      setMsg("Accesso Google non completato. Riprova.");
+      showOverlayState("error");
+    }
+  }finally{
+    if(pending){
+      sessionStorage.removeItem("__google_redirect_pending__");
+    }
+  }
+}
+
 const providerInit = async ()=>{
   const [{ initializeApp }, _authMod, _fsMod] = await Promise.all([
     import("https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js"),
     import("https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js"),
     import("https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js"),
   ]);
+
   authMod = _authMod;
   fsMod = _fsMod;
 
@@ -1327,146 +1390,77 @@ const providerInit = async ()=>{
   auth = authMod.getAuth(app);
   db = fsMod.getFirestore(app);
 
-  try{
-    await authMod.setPersistence(auth, authMod.browserLocalPersistence);
-  }catch(_e){}
-
-  const googleProvider = new authMod.GoogleAuthProvider();
+  // Provider Google
+  googleProvider = new authMod.GoogleAuthProvider();
   try{ googleProvider.setCustomParameters({ prompt: "select_account" }); }catch(_e){}
 
-  const ua = navigator.userAgent || "";
-  const isIOS = /iPad|iPhone|iPod/i.test(ua) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
-  const isStandalone = (window.matchMedia && window.matchMedia("(display-mode: standalone)").matches) || (navigator.standalone === true);
-  const preferRedirect = isIOS || isStandalone;
+  // In PWA (iOS e spesso anche altre standalone) il popup è instabile: usa redirect
+  preferRedirect = isIOSPWA() || isStandaloneMode();
 
-/* =========================
-   iOS PWA + Google Auth FIX
-   (anti-loop + persistenza)
-   ========================= */
+  // Stabilizza persistenza prima di qualsiasi cosa
+  await setupAuthPersistence();
 
-// --- Helpers iOS/PWA ---
-function isIOS(){
-  return /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
-}
-function isStandalone(){
-  return window.matchMedia?.("(display-mode: standalone)")?.matches || window.navigator.standalone === true;
-}
-function isIOSPWA(){
-  return isIOS() && isStandalone();
-}
+  // Se siamo tornati da redirect, consumalo PRIMA del listener (evita flash/loop)
+  const hadRedirectPendingAtBoot = sessionStorage.getItem("__google_redirect_pending__") === "1";
+  await handleGoogleRedirectOnce();
 
-// --- Persistenza auth (fondamentale su iOS PWA) ---
-async function setupAuthPersistence(){
-  try{
-    await authMod.setPersistence(auth, authMod.indexedDBLocalPersistence);
-  }catch(e1){
-    try{
-      await authMod.setPersistence(auth, authMod.browserLocalPersistence);
-    }catch(e2){
-      await authMod.setPersistence(auth, authMod.inMemoryPersistence);
-    }
-  }
-}
-
-// --- Gestione redirect UNA volta (anti-loop) ---
-let _redirectHandled = false;
-
-async function handleGoogleRedirectOnce(){
-  if(_redirectHandled) return;
-  _redirectHandled = true;
-
-  const pending = sessionStorage.getItem("__google_redirect_pending__");
-  if(!pending) return;
-
-  try{
+  // --- Sign in Google (anti-loop) ---
+  async function signInWithGoogle(){
+    setMsg("");
     showOverlayState("working");
-    setSpin("Verifica accesso…");
+    setSpin("Apertura accesso Google…");
 
-    // Consuma il redirect (può tornare null, è ok)
-    await authMod.getRedirectResult(auth);
+    try{
+      // se già loggato, evita rimbalzi
+      if(auth.currentUser){
+        showOverlayState("checking");
+        setSpin("Sessione attiva…");
+        return;
+      }
 
-  }catch(err){
-    console.error(err);
-    setMsg("Accesso Google non completato. Riprova.");
-    showOverlayState("error");
-  }finally{
-    sessionStorage.removeItem("__google_redirect_pending__");
-  }
-}
+      const forceRedirect = preferRedirect || isIOSPWA();
 
-// --- SIGN IN (sostituisci la tua con questa) ---
-async function signInWithGoogle(){
-  setMsg("");
-  showOverlayState("working");
-  setSpin("Apertura accesso Google…");
-
-  try{
-    // Se già loggato, stop immediato
-    if(auth.currentUser){
-      showOverlayState("ok");
-      return;
-    }
-
-    // iOS PWA => redirect molto più stabile del popup
-    const forceRedirect = preferRedirect || isIOSPWA();
-
-    if(forceRedirect){
-      sessionStorage.setItem("__google_redirect_pending__", "1");
-      await authMod.signInWithRedirect(auth, googleProvider);
-      return;
-    }
-
-    await authMod.signInWithPopup(auth, googleProvider);
-
-  }catch(err){
-    const code = err?.code || "";
-    console.error(err);
-
-    // Fallback redirect se popup non supportato/bloccato
-    if(
-      code === "auth/popup-blocked" ||
-      code === "auth/cancelled-popup-request" ||
-      code === "auth/operation-not-supported-in-this-environment"
-    ){
-      try{
+      if(forceRedirect){
         sessionStorage.setItem("__google_redirect_pending__", "1");
         await authMod.signInWithRedirect(auth, googleProvider);
         return;
-      }catch(e2){
-        console.error(e2);
       }
+
+      await authMod.signInWithPopup(auth, googleProvider);
+
+    }catch(err){
+      const code = err?.code || "";
+      console.error(err);
+
+      // fallback redirect se popup bloccato / ambiente iOS
+      if(
+        code === "auth/popup-blocked" ||
+        code === "auth/cancelled-popup-request" ||
+        code === "auth/operation-not-supported-in-this-environment"
+      ){
+        try{
+          sessionStorage.setItem("__google_redirect_pending__", "1");
+          await authMod.signInWithRedirect(auth, googleProvider);
+          return;
+        }catch(e2){
+          console.error(e2);
+        }
+      }
+
+      // chiuso dall'utente: non trattarlo come errore grave
+      if(code === "auth/popup-closed-by-user"){
+        setMsg("Accesso annullato.");
+        showOverlayState("login");
+        return;
+      }
+
+      setMsg("Non riesco ad aprire l'accesso Google. Riprova.");
+      showOverlayState("error");
     }
-
-    // Popup chiuso dall’utente: non è errore “grave”
-    if(code === "auth/popup-closed-by-user"){
-      setMsg("Accesso annullato.");
-      showOverlayState("idle");
-      return;
-    }
-
-    setMsg("Non riesco ad aprire l'accesso Google. Riprova.");
-    showOverlayState("error");
   }
-}
-
-// --- BOOT minimo (metti qui dentro la tua init se già ce l’hai) ---
-(async function authBoot(){
-  try{
-    await setupAuthPersistence();
-    await handleGoogleRedirectOnce();
-  }catch(e){
-    console.error(e);
-  }
-})();
-
-
-
-
-
 
   btnGoogle?.addEventListener("click", signInWithGoogle);
   btnReload?.addEventListener("click", ()=>location.reload());
-
 
   // Sign out
   async function doSignOut(){
@@ -1485,7 +1479,6 @@ async function signInWithGoogle(){
       if(data.enabled === false) return null;
       return data;
     }catch(e){
-      // permessi o rete
       console.warn("getAccess error", e);
       return null;
     }
@@ -1503,28 +1496,72 @@ async function signInWithGoogle(){
     return { isMember:true, isAdmin: data.isAdmin === true };
   }
 
-  // Auth listener
+  // Auth listener (stabile: evita flash login al ritorno redirect / iOS PWA)
+  let firstAuthEvent = true;
+  let graceTimer = null;
+
   authMod.onAuthStateChanged(auth, async (user)=>{
     currentUser = user || null;
+
+    // cleanup timer
+    if(graceTimer){
+      clearTimeout(graceTimer);
+      graceTimer = null;
+    }
+
     if(!user){
-      // not signed in
+      // Primo evento in iOS PWA / ritorno redirect: aspetta un attimo prima di mostrare login
+      if(firstAuthEvent && (hadRedirectPendingAtBoot || isIOSPWA())){
+        lockPage(true);
+        showOverlayState("working");
+        setSpin("Completamento accesso…");
+        setMsg("");
+
+        graceTimer = setTimeout(()=>{
+          if(!auth.currentUser){
+            if(userNameEl) userNameEl.textContent = "—";
+            if(statusEl) statusEl.textContent = "Non connesso";
+            lockPage(true);
+            showOverlayState("login");
+            setMsg("");
+          }
+        }, 650);
+
+        firstAuthEvent = false;
+        return;
+      }
+
+      // not signed in (normale)
       if(userNameEl) userNameEl.textContent = "—";
       if(statusEl) statusEl.textContent = "Non connesso";
       lockPage(true);
       showOverlayState("login");
       setMsg("");
+      firstAuthEvent = false;
       return;
     }
+
+    firstAuthEvent = false;
 
     // Signed in: check role
     lockPage(true);
     showOverlayState("checking");
     setSpin("Verifica permessi…");
+
     const displayName = user.displayName || user.email || "Utente";
     if(userNameEl) userNameEl.textContent = displayName;
     if(statusEl) statusEl.textContent = "Connesso";
 
-    const role = await resolveRole(user);
+    let role;
+    try{
+      role = await resolveRole(user);
+    }catch(err){
+      console.error(err);
+      lockPage(true);
+      showOverlayState("error");
+      setMsg("Errore verifica permessi. Ricarica la pagina.");
+      return;
+    }
 
     if(!role.isMember){
       // Signed in but not authorized
@@ -1532,7 +1569,6 @@ async function signInWithGoogle(){
       lockPage(true);
       showOverlayState("noaccess");
       setMsg("Accesso non autorizzato per questo account. Contatta l’amministratore.");
-      // Nascondi anche eventuali tile admin
       document.querySelectorAll("[data-admin-only]").forEach(el=>el.style.display="none");
       return;
     }
@@ -1541,15 +1577,11 @@ async function signInWithGoogle(){
     lockPage(false);
     setMsg("");
 
-
     // Admin-only tile
     document.querySelectorAll("[data-admin-only]").forEach(el=>{
       el.style.display = role.isAdmin ? "" : "none";
     });
   });
-
-  // Se siamo arrivati da redirect login
-  try{ await authMod.getRedirectResult(auth); }catch(_e){}
 };
 
 providerInit().catch((e)=>{
