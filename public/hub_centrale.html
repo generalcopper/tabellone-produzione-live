@@ -1339,37 +1339,62 @@ const providerInit = async ()=>{
   const isStandalone = (window.matchMedia && window.matchMedia("(display-mode: standalone)").matches) || (navigator.standalone === true);
   const preferRedirect = isIOS || isStandalone;
 
-  async function signInWithGoogle(){
-    setMsg("");
-    showOverlayState("working");
-    setSpin("Apertura accesso Google…");
+async function signInWithGoogle(){
+  setMsg("");
+  showOverlayState("working");
+  setSpin("Apertura accesso Google…");
 
-    try{
-      if(preferRedirect){
+  try{
+    // Se già loggato, stop immediato (evita rimbalzi)
+    if(auth.currentUser){
+      showOverlayState("ok");
+      return;
+    }
+
+    const forceRedirect = preferRedirect || isIOSPWA();
+
+    if(forceRedirect){
+      // Flag anti-loop: ci dice che stiamo tornando da un redirect avviato da noi
+      sessionStorage.setItem("__google_redirect_pending__", "1");
+      await authMod.signInWithRedirect(auth, googleProvider);
+      return; // su redirect qui non prosegue mai
+    }
+
+    await authMod.signInWithPopup(auth, googleProvider);
+
+  }catch(err){
+    const code = err?.code || "";
+    console.error(err);
+
+    // Se popup non va (iOS/ambienti strani), fallback a redirect
+    if(
+      code === "auth/popup-blocked" ||
+      code === "auth/cancelled-popup-request" ||
+      code === "auth/operation-not-supported-in-this-environment"
+    ){
+      try{
+        sessionStorage.setItem("__google_redirect_pending__", "1");
         await authMod.signInWithRedirect(auth, googleProvider);
         return;
+      }catch(e2){
+        console.error(e2);
       }
-      await authMod.signInWithPopup(auth, googleProvider);
-    }catch(err){
-      const code = err?.code || "";
-      // fallback redirect se popup bloccato / ambiente iOS
-      if(
-        code === "auth/popup-blocked" ||
-        code === "auth/cancelled-popup-request" ||
-        code === "auth/operation-not-supported-in-this-environment"
-      ){
-        try{
-          await authMod.signInWithRedirect(auth, googleProvider);
-          return;
-        }catch(e2){
-          console.error(e2);
-        }
-      }
-      console.error(err);
-      setMsg("Non riesco ad aprire l'accesso Google. Riprova.");
-      showOverlayState("error");
     }
+
+    // Se l’utente chiude il popup, non trattarlo come errore “grave”
+    if(code === "auth/popup-closed-by-user"){
+      setMsg("Accesso annullato.");
+      showOverlayState("idle");
+      return;
+    }
+
+    setMsg("Non riesco ad aprire l'accesso Google. Riprova.");
+    showOverlayState("error");
   }
+}
+
+
+
 
 
   btnGoogle?.addEventListener("click", signInWithGoogle);
