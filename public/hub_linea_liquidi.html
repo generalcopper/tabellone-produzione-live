@@ -1425,6 +1425,48 @@
   function safeText(node){
     return (node && node.textContent ? node.textContent : "").trim();
   }
+
+  function xmlGetTextCI(node, names){
+    // Case-insensitive XML tag/attribute lookup (Easyfatt export can vary in casing)
+    if(!node) return "";
+    const wanted = new Set((names||[]).map(n => String(n||"").toLowerCase()).filter(Boolean));
+
+    // Attributes first (rare but safe)
+    if(node.getAttribute){
+      for(const key of wanted){
+        const a =
+          node.getAttribute(key) ||
+          node.getAttribute(key.toUpperCase()) ||
+          node.getAttribute(key[0]?.toUpperCase() + key.slice(1));
+        if(a!=null && String(a).trim()) return String(a).trim();
+      }
+    }
+
+    // Descendants (namespace/casing tolerant via localName/nodeName)
+    if(node.getElementsByTagName){
+      const all = node.getElementsByTagName("*");
+      for(const el of all){
+        const nm = (el.localName || el.nodeName || "").toLowerCase();
+        if(wanted.has(nm)){
+          const t = safeText(el);
+          if(t) return t;
+        }
+      }
+    }
+
+    // Direct children fallback
+    if(node.children){
+      for(const el of Array.from(node.children)){
+        const nm = (el.localName || el.nodeName || "").toLowerCase();
+        if(wanted.has(nm)){
+          const t = safeText(el);
+          if(t) return t;
+        }
+      }
+    }
+
+    return "";
+  }
   function parseCurrencyValue(raw){
     if(Number.isFinite(raw)) return Number(raw);
     const strRaw = raw==null ? "" : String(raw).trim();
@@ -1475,6 +1517,19 @@
     const unit = displayUm(um);
     if(!unit) return `${qtyTxt}`;
     return `${qtyTxt} ${unit}`;
+  }
+
+  function inferOrderUm(lines){
+    // Use the unit exactly from Easyfatt XML when it's consistent for the whole order.
+    // If units are mixed (rare), return empty string to avoid wrong labels.
+    const set = new Set();
+    for(const l of (lines||[])){
+      const uRaw = (l && (l.um || l.uom || l.unitaMisura || l.unit || l.measure)) || "";
+      const u = displayUm(uRaw);
+      if(u) set.add(u);
+      if(set.size > 1) return "";
+    }
+    return set.size === 1 ? Array.from(set)[0] : "";
   }
   async function copyKeyToClipboard(text){
     if(!text) return;
@@ -2370,7 +2425,7 @@ document.body.appendChild(banner);
         const r = rows[i];
         const code = safeText(r.getElementsByTagName("Code")[0]) || "";
         const desc = safeText(r.getElementsByTagName("Description")[0]) || safeText(r.getElementsByTagName("Name")[0]) || "";
-        const um = safeText(r.getElementsByTagName("UM")[0]) || safeText(r.getElementsByTagName("Unit")[0]) || "";
+        const um = xmlGetTextCI(r, ["um","unit","uom","unitofmeasure","unitmeasure","unitamisura","unita_misura"]) || "";
         let qty = safeText(r.getElementsByTagName("Qty")[0]) || safeText(r.getElementsByTagName("Quantity")[0]) || "0";
         qty = parseFloat(qty.replace(",","."));
         if(!Number.isFinite(qty)) qty = 0;
@@ -7402,7 +7457,7 @@ Linea: liquidi`, null); }catch(_e){}
         <div class="top">
           <div>
             <div class="name">Ordine n. ${o.orderNo || o.number}</div>
-            <div class="sub">Righe: ${o.lines.length} · Quantità: ${formatQtyWithKg(totalQty, "pz")} · Conclusione: ${o.conclusion||"—"}</div>
+            <div class="sub">Righe: ${o.lines.length} · Quantità: ${formatQtyWithKg(totalQty, inferOrderUm(o.lines))} · Conclusione: ${o.conclusion||"—"}</div>
             ${o.partialInfo ? `<div class="muted" style="margin-top:6px;">Ordine parzialmente concluso (${o.partialInfo.done}/${o.partialInfo.total}).</div>`:""}
             ${o.priorityInfo?.reason ? `<div class="muted" style="margin-top:6px;">${escapeHtml(o.priorityInfo.reason)}</div>`:""}
             ${alertTag}
