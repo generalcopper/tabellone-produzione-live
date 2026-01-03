@@ -6426,6 +6426,7 @@ function renderHome(){
     }
 
     const { orderDetails } = buildMagazzinoData();
+    state._magazzinoOrderDetails = orderDetails;
 
     const updatedTxt = state.xmlModifiedTime || (state.lastFetchAt ? fmtDateTime(state.lastFetchAt) : "—");
 
@@ -6486,6 +6487,131 @@ function renderHome(){
     }
   }
 
+  
+  // --- Export TXT: Magazzino → Non configurati ---
+  function _tsvClean(v){
+    return String(v==null ? "" : v).replace(/\t/g," ").replace(/\r?\n/g," ").replace(/\s\s+/g," ").trim();
+  }
+  function _downloadTextFile(filename, text){
+    try{
+      const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename || "export.txt";
+      a.rel = "noopener";
+      a.style.display = "none";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(()=>{ try{ URL.revokeObjectURL(url); }catch(_){} }, 1000);
+    }catch(e){
+      console.error("downloadTextFile error", e);
+      alert("Impossibile creare il file di testo.");
+    }
+  }
+  function getMagazzinoNonConfigSnapshot(){
+    let orderDetails = [];
+    try{
+      if(state && Array.isArray(state._magazzinoOrderDetails)){
+        orderDetails = state._magazzinoOrderDetails;
+      }else{
+        orderDetails = (buildMagazzinoData().orderDetails || []);
+      }
+    }catch(_e){
+      orderDetails = [];
+    }
+    const filters = (state && state.magFilters) ? state.magFilters : defaultMagazzinoFilters();
+    const res = applyMagazzinoFilters(orderDetails, filters);
+    const rows = (res && res.filteredTotals && Array.isArray(res.filteredTotals.nonConfig)) ? res.filteredTotals.nonConfig.slice() : [];
+    return { rows, filters: res?.applied || filters };
+  }
+  function exportMagazzinoNonConfigTxt(){
+    const snap = getMagazzinoNonConfigSnapshot();
+    const rows = Array.isArray(snap.rows) ? snap.rows : [];
+    if(!rows.length){
+      try{ showToast("Non configurati", "Nessun prodotto non configurato.", 2400); }catch(_){}
+      return;
+    }
+
+    const cleaned = rows.map(r=>({
+      desc: String(r?.desc || ""),
+      customer: String(r?.customer || ""),
+      orderNo: String(r?.orderNo || r?.order || r?.number || ""),
+      code: String(r?.code || ""),
+      packKg: r?.packKg,
+      qtyKg: r?.qtyKg
+    }));
+
+    const toNum = (x)=>{ const n = Number(x); return Number.isFinite(n) ? n : 0; };
+
+    cleaned.sort((a,b)=>{
+      const ad = stableNorm(a.desc), bd = stableNorm(b.desc);
+      if(ad !== bd) return ad.localeCompare(bd, "it", { numeric:true, sensitivity:"base" });
+      const ap = toNum(a.packKg), bp = toNum(b.packKg);
+      if(ap !== bp) return ap - bp;
+      const ac = stableNorm(a.code), bc = stableNorm(b.code);
+      if(ac !== bc) return ac.localeCompare(bc, "it", { numeric:true, sensitivity:"base" });
+      const ao = stableNorm(a.orderNo), bo = stableNorm(b.orderNo);
+      if(ao !== bo) return ao.localeCompare(bo, "it", { numeric:true, sensitivity:"base" });
+      return stableNorm(a.customer).localeCompare(stableNorm(b.customer), "it", { numeric:true, sensitivity:"base" });
+    });
+
+    const groups = new Map();
+    for(const r of cleaned){
+      const key = `${stableNorm(r.desc)}|${toNum(r.packKg)}|${stableNorm(r.code)}`;
+      const g = groups.get(key) || { desc:r.desc, packKg:toNum(r.packKg)||"", code:r.code, kg:0, rows:0, orders:new Set(), customers:new Set() };
+      g.kg += toNum(r.qtyKg);
+      g.rows += 1;
+      if(r.orderNo) g.orders.add(r.orderNo);
+      if(r.customer) g.customers.add(r.customer);
+      groups.set(key, g);
+    }
+    const groupArr = Array.from(groups.values());
+    groupArr.sort((a,b)=>{
+      const ad = stableNorm(a.desc), bd = stableNorm(b.desc);
+      if(ad !== bd) return ad.localeCompare(bd, "it", { numeric:true, sensitivity:"base" });
+      const ap = toNum(a.packKg), bp = toNum(b.packKg);
+      if(ap !== bp) return ap - bp;
+      const ac = stableNorm(a.code), bc = stableNorm(b.code);
+      if(ac !== bc) return ac.localeCompare(bc, "it", { numeric:true, sensitivity:"base" });
+      return 0;
+    });
+
+    const now = new Date();
+    const stamp = `${now.getFullYear()}${String(now.getMonth()+1).padStart(2,"0")}${String(now.getDate()).padStart(2,"0")}_${String(now.getHours()).padStart(2,"0")}${String(now.getMinutes()).padStart(2,"0")}`;
+    const filename = `magazzino_non_configurati_${stamp}.txt`;
+
+    const f = snap.filters || {};
+    const filterLine = `Filtri: cliente=${_tsvClean(f.customer || "Tutti")} | ordine=${_tsvClean(f.order || "Tutti")} | articolo=${_tsvClean(f.item || "Tutti")}`;
+
+    const lines = [];
+    lines.push("MAGAZZINO - NON CONFIGURATI");
+    lines.push(filterLine);
+    lines.push("");
+
+    lines.push("RIEPILOGO (raggruppato)");
+    lines.push("DESCRIZIONE\tKG/SACCO\tCODICE\tKG_TOT\tRIGHE\tORDINI_UNICI\tCLIENTI_UNICI");
+    for(const g of groupArr){
+      const pack = g.packKg ? magFmtFraction(toNum(g.packKg)) : "";
+      const kgTot = magFmtFraction(toNum(g.kg));
+      lines.push(`${_tsvClean(g.desc)}\t${pack}\t${_tsvClean(g.code)}\t${kgTot}\t${g.rows}\t${g.orders.size}\t${g.customers.size}`);
+    }
+
+    lines.push("");
+    lines.push("DETTAGLIO (per riga ordine)");
+    lines.push("CLIENTE\tORDINE\tCODICE\tDESCRIZIONE\tKG/SACCO\tKG_RESIDUI");
+    for(const r of cleaned){
+      const pack = r.packKg ? magFmtFraction(toNum(r.packKg)) : "";
+      const kg = magFmtFraction(toNum(r.qtyKg));
+      lines.push(`${_tsvClean(r.customer)}\t${_tsvClean(r.orderNo)}\t${_tsvClean(r.code)}\t${_tsvClean(r.desc)}\t${pack}\t${kg}`);
+    }
+
+    _downloadTextFile(filename, lines.join("\n"));
+    try{ showToast("Download", `Creato ${filename} (${cleaned.length} righe)`, 2600); }catch(_){}
+  }
+
+
   function renderWhModalContent(key){
     const modalTitle = $("whModalTitle");
     const modalSub = $("whModalSub");
@@ -6532,7 +6658,19 @@ function renderHome(){
     modalTitle.textContent = item?.label || "Dettaglio articolo";
     modalSub.textContent = item?.subtitle || "Ripartizione per cliente/ordine";
     renderCalcHint(modalTitle.textContent, item);
-    modalBody.innerHTML = renderSection(item || { key, label:"Articolo", subtitle:"" });
+    const baseHtml = renderSection(item || { key, label:"Articolo", subtitle:"" });
+    const isNonConfig = Boolean(item && String(item.key||"").startsWith("nonconfig|"));
+    if(isNonConfig){
+      const expHtml = `<div style="margin-bottom:10px;display:flex;gap:10px;flex-wrap:wrap;">
+        <button class="btn" id="btnNonConfigExportTxt" style="flex:1 1 220px;">Scarica TXT (colonne)</button>
+        <div class="muted" style="flex:2 1 260px;font-size:12px;align-self:center;line-height:1.2;">File TSV: incolla in Excel per avere le colonne.</div>
+      </div>`;
+      modalBody.innerHTML = expHtml + baseHtml;
+      const btn = $("btnNonConfigExportTxt");
+      if(btn) btn.onclick = ()=> exportMagazzinoNonConfigTxt();
+    }else{
+      modalBody.innerHTML = baseHtml;
+    }
   }
 
   function openWhModal(key){
