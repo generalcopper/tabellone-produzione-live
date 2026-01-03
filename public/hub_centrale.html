@@ -1112,30 +1112,59 @@ const providerInit = async ()=>{
     // marker per diagnosi/recupero redirect
     markLoginStart();
 
-    try{
-      // Popup first (più "app-like"), fallback a redirect se bloccato/non supportato
+    // iOS / modalità app: niente popup (instabile). Redirect diretto.
+    if(preferRedirect){
       try{
-        await authMod.signInWithPopup(auth, googleProvider);
-        clearLoginFlag();
-        return;
+        setSpin("Reindirizzamento a Google…");
+        await authMod.signInWithRedirect(auth, googleProvider);
+        return; // naviga via redirect
       }catch(err){
+        console.error(err);
+        clearLoginFlag();
         const code = String(err?.code || "");
-        const msg = String(err?.message || "").toLowerCase();
-        const popupIssue = code.includes("popup") || msg.includes("popup");
-        const notSupported = code.includes("operation-not-supported-in-this-environment") || code.includes("web-storage-unsupported");
-        if(popupIssue || notSupported){
+        setMsg("Non riesco ad avviare l’accesso Google" + (code ? " ("+code+")" : "") + ". Premi Ripristina accesso e riprova.");
+        showOverlayState("error");
+        return;
+      }
+    }
+
+    // Desktop: popup + fallback a redirect
+    try{
+      await authMod.signInWithPopup(auth, googleProvider);
+      clearLoginFlag();
+      return;
+    }catch(err){
+      const code = String(err?.code || "");
+      const msg = String(err?.message || "").toLowerCase();
+      const popupRelated =
+        code.includes("popup") ||
+        code.includes("cancelled-popup-request") ||
+        code.includes("operation-not-supported-in-this-environment") ||
+        code.includes("web-storage-unsupported") ||
+        msg.includes("popup") ||
+        msg.includes("blocked");
+
+      if(popupRelated){
+        try{
+          setSpin("Reindirizzamento a Google…");
           await authMod.signInWithRedirect(auth, googleProvider);
           return;
+        }catch(err2){
+          console.error(err2);
+          clearLoginFlag();
+          const code2 = String(err2?.code || "");
+          setMsg("Non riesco ad avviare l’accesso Google" + (code2 ? " ("+code2+")" : "") + ". Premi Ripristina accesso e riprova.");
+          showOverlayState("error");
+          return;
         }
-        throw err;
       }
-    }catch(err){
+
       console.error(err);
-      setMsg("Non riesco ad aprire l'accesso Google. Premi Ripristina accesso oppure riprova.");
+      clearLoginFlag();
+      setMsg("Errore durante l’accesso" + (code ? " ("+code+")" : "") + ". Premi Ripristina accesso e riprova.");
       showOverlayState("error");
     }
   }
-
 
   btnGoogle?.addEventListener("click", signInWithGoogle);
   btnReload?.addEventListener("click", ()=>location.reload());
@@ -1273,9 +1302,9 @@ try{
 }catch(e){
   const code = String(e?.code || "");
   // Se il redirect si è "incastrato" (tipico iOS/PWA), guida al reset
-  if(code.includes("redirect") || code.includes("web-storage-unsupported")){
+  if(code){
     console.warn("redirect result", e);
-    setMsg("Problema durante l’accesso. Premi Ripristina accesso e riprova.");
+    setMsg("Problema durante l’accesso" + (code ? " ("+code+")" : "") + ". Premi Ripristina accesso e riprova.");
     showOverlayState("login");
   }
 }
