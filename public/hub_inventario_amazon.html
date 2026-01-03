@@ -11,7 +11,7 @@
 <meta name="mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-<meta name="apple-mobile-web-app-title" content="Hub Centrale" />
+<meta name="apple-mobile-web-app-title" content="Hub Inventario Amazon" />
 <link rel="apple-touch-icon" href="./icons/icon-180.png" />
 <meta name="format-detection" content="telephone=no" />
 
@@ -857,17 +857,28 @@
 
     // auth overlay
     function toggleAuthOverlay(show){
-      const ov = $("authOverlay");
-      if(!ov) return;
-      ov.setAttribute("aria-hidden", show ? "false" : "true");
-      const sp = $("authOverlaySpinner");
-      if(sp) sp.style.display = (state.authGateState === "restoring" || !state.firebase.ok) ? "block" : "none";
-      const msg = $("authOverlayMessage");
-      if(msg){
-        const m = state.authGateMessage || (state.authGateState==="restoring" ? "Ripristino sessione…" : "Accedi con Google per continuare.");
-        msg.textContent = m;
-      }
-    }
+  const ov = $("authOverlay");
+  if(!ov) return;
+
+  // show overlay only when requested; content inside changes based on authGateState
+  ov.setAttribute("aria-hidden", show ? "false" : "true");
+
+  const sp = $("authOverlaySpinner");
+  const btn = $("btnGoogleLoginOverlay");
+  const msg = $("authOverlayMessage");
+
+  const isRestoring = (state.authGateState === "restoring" || !state.firebase.ok);
+
+  if(sp) sp.style.display = isRestoring ? "block" : "none";
+  if(btn) btn.style.display = isRestoring ? "none" : "inline-flex";
+
+  if(msg){
+    const m =
+      state.authGateMessage ||
+      (isRestoring ? "Ripristino sessione…" : "Accedi con Google per continuare.");
+    msg.textContent = m;
+  }
+}
 
     function setView(view){
       state.route.view = view;
@@ -1003,18 +1014,31 @@
         const app = initializeApp(firebaseConfig);
         const auth = authMod.getAuth(app);
 
+// iOS/PWA (standalone): popup spesso instabile → preferisci redirect per una sessione davvero persistente
+const __UA = navigator.userAgent || "";
+const __IS_APPLE_MOBILE = /iPad|iPhone|iPod/.test(__UA) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+const __IS_STANDALONE = (window.matchMedia && window.matchMedia("(display-mode: standalone)").matches) || (navigator.standalone === true);
+const __FORCE_REDIRECT = __IS_APPLE_MOBILE || __IS_STANDALONE;
+
         // best persistence (like Payroll)
         async function setBestAuthPersistence(){
-          const attempts = [
-            authMod.indexedDBLocalPersistence,
-            authMod.browserLocalPersistence,
-            authMod.browserSessionPersistence
-          ].filter(Boolean);
-          for(const p of attempts){
-            try{ await authMod.setPersistence(auth, p); return true; }catch(_e){}
-          }
-          return false;
-        }
+  // iOS/PWA: evita session persistence (è la causa tipica di "mi richiede l'accesso di nuovo" tornando indietro)
+  const ua = navigator.userAgent || "";
+  const isAppleMobile = /iPad|iPhone|iPod/.test(ua) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+  const candidates = (isAppleMobile
+    ? [authMod.browserLocalPersistence, authMod.indexedDBLocalPersistence]
+    : [authMod.indexedDBLocalPersistence, authMod.browserLocalPersistence]
+  ).filter(Boolean);
+
+  for(const p of candidates){
+    try{
+      await authMod.setPersistence(auth, p);
+      return true;
+    }catch(_e){}
+  }
+  // se fallisce, non forziamo browserSessionPersistence: meglio "default" che perdere la sessione tra pagine
+  return false;
+}
         try{ await setBestAuthPersistence(); }catch(_e){}
 
         const db = fsMod.getFirestore(app);
@@ -1048,29 +1072,50 @@
         try{ googleProvider.setCustomParameters({ prompt:"select_account" }); }catch(_e){}
 
         async function signInWithGoogle(){
-          try{
-            try{ await setBestAuthPersistence(); }catch(_e){}
-            try{
-              await authMod.signInWithPopup(auth, googleProvider);
-              return;
-            }catch(err){
-              const code = String(err?.code || "");
-              const msg = String(err?.message || "").toLowerCase();
-              const popupIssue = code.includes("popup") || msg.includes("popup");
-              const notSupported = code.includes("operation-not-supported-in-this-environment") || code.includes("web-storage-unsupported");
-              if(popupIssue || notSupported){
-                await authMod.signInWithRedirect(auth, googleProvider);
-                return;
-              }
-              throw err;
-            }
-          }catch(err){
-            console.warn("google login", err);
-            showToast("Accesso non riuscito", err?.message || String(err));
-          }
-        }
+  try{
+    // UI: mostra spinner "iOS style" mentre apriamo la login
+    state.authGateState = "restoring";
+    state.authGateMessage = "Apertura accesso Google…";
+    syncHeaderSub();
+    toggleAuthOverlay(true);
 
-        async function signOutGoogle(){
+    try{ await setBestAuthPersistence(); }catch(_e){}
+
+    // Parametri provider: chiedi account solo quando l'utente clicca "Accedi"
+    try{ googleProvider.setCustomParameters({ prompt:"select_account" }); }catch(_e){}
+
+    // In iOS/PWA il popup può autenticare in un contesto separato (Safari) e NON persistire: redirect è molto più stabile.
+    if(__FORCE_REDIRECT){
+      await authMod.signInWithRedirect(auth, googleProvider);
+      return;
+    }
+
+    // Desktop/Android: prova popup, fallback su redirect
+    try{
+      await authMod.signInWithPopup(auth, googleProvider);
+      return;
+    }catch(err){
+      const code = String(err?.code || "");
+      const msg = String(err?.message || "").toLowerCase();
+      const popupIssue = code.includes("popup") || msg.includes("popup");
+      const notSupported = code.includes("operation-not-supported-in-this-environment") || code.includes("web-storage-unsupported");
+      if(popupIssue || notSupported){
+        await authMod.signInWithRedirect(auth, googleProvider);
+        return;
+      }
+      throw err;
+    }
+  }catch(err){
+    console.warn("google login", err);
+    state.authGateState = "signed_out";
+    state.authGateMessage = "Accesso non riuscito. Riprova.";
+    syncHeaderSub();
+    toggleAuthOverlay(true);
+    showToast("Accesso non riuscito", err?.message || String(err));
+  }
+}
+
+async function signOutGoogle(){
           try{ await authMod.signOut(auth); }
           catch(err){
             console.warn("logout", err);
@@ -1089,44 +1134,64 @@
         // auth state
         state.authGateState = "restoring";
         state.authGateMessage = "Ripristino sessione…";
-        toggleAuthOverlay(true);
+        const __hadSession = (()=>{ try{ return localStorage.getItem("amz_inventory_last_authed_v1")==="1"; }catch(_e){ return false; } })();
+        // Se eri già loggato mostro solo la rotellina (niente popup fastidiosi).
+        toggleAuthOverlay(__hadSession);
         syncHeaderSub();
 
-        authMod.onAuthStateChanged(auth, async user=>{
-          if(user){
-            state.user = {
-              uid: user.uid,
-              email: user.email || "",
-              emailLower: (user.email||"").toLowerCase(),
-              displayName: user.displayName || user.email || "Utente",
-              isAdmin: false,
-              isWhitelisted: null
-            };
-            state.authGateState = "signed_in";
-            state.authGateMessage = "";
-            await resolveUserRole(user);
-            syncHeaderSub();
-            toggleAuthOverlay(false);
+        let __authNullTimer = null;
 
-            if(state.user.isWhitelisted){
-              startAllRealtime();
-              setView("home");
-            }else{
-              // logged but not allowed
-              stopAllRealtime();
-              setView("home");
-              showToast("Account non abilitato", "Contatta l'admin per l'accesso a questo hub.");
-            }
-          }else{
-            state.user = null;
-            stopAllRealtime();
-            state.authGateState = "signed_out";
-            state.authGateMessage = "Sessione non attiva. Accedi con Google per continuare.";
-            syncHeaderSub();
-            toggleAuthOverlay(true);
-            setView("home");
-          }
-        });
+authMod.onAuthStateChanged(auth, async user=>{
+  // Nota: su iOS/PWA a volte il ripristino della sessione impiega qualche istante.
+  // Evitiamo "flash" di overlay/login: se arriva null durante restoring, aspettiamo un attimo prima di dichiarare signed_out.
+  if(user){
+    if(__authNullTimer){ clearTimeout(__authNullTimer); __authNullTimer = null; }
+
+    state.user = {
+      uid: user.uid,
+      email: user.email || "",
+      emailLower: (user.email||"").toLowerCase(),
+      displayName: user.displayName || user.email || "Utente",
+      isAdmin: false,
+      isWhitelisted: null
+    };
+    state.authGateState = "signed_in";
+    state.authGateMessage = "";
+    await resolveUserRole(user);
+    syncHeaderSub();
+    toggleAuthOverlay(false);
+
+    if(state.user.isWhitelisted){
+      startAllRealtime();
+      setView("home");
+    }else{
+      // logged but not allowed
+      stopAllRealtime();
+      setView("home");
+      showToast("Account non abilitato", "Contatta l'admin per l'accesso a questo hub.");
+    }
+    try{ localStorage.setItem("amz_inventory_last_authed_v1", "1"); }catch(_e){}
+    return;
+  }
+
+  const finalizeSignedOut = ()=>{
+    state.user = null;
+    stopAllRealtime();
+    state.authGateState = "signed_out";
+    state.authGateMessage = "Sessione non attiva. Accedi con Google per continuare.";
+    syncHeaderSub();
+    toggleAuthOverlay(true);
+    setView("home");
+  };
+
+  if(state.authGateState === "restoring"){
+    if(__authNullTimer) clearTimeout(__authNullTimer);
+    __authNullTimer = setTimeout(finalizeSignedOut, 1200);
+  }else{
+    finalizeSignedOut();
+  }
+});
+
 
       }catch(err){
         console.error("Firebase init error", err);
