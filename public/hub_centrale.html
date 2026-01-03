@@ -1339,25 +1339,81 @@ const providerInit = async ()=>{
   const isStandalone = (window.matchMedia && window.matchMedia("(display-mode: standalone)").matches) || (navigator.standalone === true);
   const preferRedirect = isIOS || isStandalone;
 
+/* =========================
+   iOS PWA + Google Auth FIX
+   (anti-loop + persistenza)
+   ========================= */
+
+// --- Helpers iOS/PWA ---
+function isIOS(){
+  return /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
+}
+function isStandalone(){
+  return window.matchMedia?.("(display-mode: standalone)")?.matches || window.navigator.standalone === true;
+}
+function isIOSPWA(){
+  return isIOS() && isStandalone();
+}
+
+// --- Persistenza auth (fondamentale su iOS PWA) ---
+async function setupAuthPersistence(){
+  try{
+    await authMod.setPersistence(auth, authMod.indexedDBLocalPersistence);
+  }catch(e1){
+    try{
+      await authMod.setPersistence(auth, authMod.browserLocalPersistence);
+    }catch(e2){
+      await authMod.setPersistence(auth, authMod.inMemoryPersistence);
+    }
+  }
+}
+
+// --- Gestione redirect UNA volta (anti-loop) ---
+let _redirectHandled = false;
+
+async function handleGoogleRedirectOnce(){
+  if(_redirectHandled) return;
+  _redirectHandled = true;
+
+  const pending = sessionStorage.getItem("__google_redirect_pending__");
+  if(!pending) return;
+
+  try{
+    showOverlayState("working");
+    setSpin("Verifica accesso…");
+
+    // Consuma il redirect (può tornare null, è ok)
+    await authMod.getRedirectResult(auth);
+
+  }catch(err){
+    console.error(err);
+    setMsg("Accesso Google non completato. Riprova.");
+    showOverlayState("error");
+  }finally{
+    sessionStorage.removeItem("__google_redirect_pending__");
+  }
+}
+
+// --- SIGN IN (sostituisci la tua con questa) ---
 async function signInWithGoogle(){
   setMsg("");
   showOverlayState("working");
   setSpin("Apertura accesso Google…");
 
   try{
-    // Se già loggato, stop immediato (evita rimbalzi)
+    // Se già loggato, stop immediato
     if(auth.currentUser){
       showOverlayState("ok");
       return;
     }
 
+    // iOS PWA => redirect molto più stabile del popup
     const forceRedirect = preferRedirect || isIOSPWA();
 
     if(forceRedirect){
-      // Flag anti-loop: ci dice che stiamo tornando da un redirect avviato da noi
       sessionStorage.setItem("__google_redirect_pending__", "1");
       await authMod.signInWithRedirect(auth, googleProvider);
-      return; // su redirect qui non prosegue mai
+      return;
     }
 
     await authMod.signInWithPopup(auth, googleProvider);
@@ -1366,7 +1422,7 @@ async function signInWithGoogle(){
     const code = err?.code || "";
     console.error(err);
 
-    // Se popup non va (iOS/ambienti strani), fallback a redirect
+    // Fallback redirect se popup non supportato/bloccato
     if(
       code === "auth/popup-blocked" ||
       code === "auth/cancelled-popup-request" ||
@@ -1381,7 +1437,7 @@ async function signInWithGoogle(){
       }
     }
 
-    // Se l’utente chiude il popup, non trattarlo come errore “grave”
+    // Popup chiuso dall’utente: non è errore “grave”
     if(code === "auth/popup-closed-by-user"){
       setMsg("Accesso annullato.");
       showOverlayState("idle");
@@ -1392,6 +1448,17 @@ async function signInWithGoogle(){
     showOverlayState("error");
   }
 }
+
+// --- BOOT minimo (metti qui dentro la tua init se già ce l’hai) ---
+(async function authBoot(){
+  try{
+    await setupAuthPersistence();
+    await handleGoogleRedirectOnce();
+  }catch(e){
+    console.error(e);
+  }
+})();
+
 
 
 
