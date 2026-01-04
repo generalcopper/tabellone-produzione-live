@@ -1087,6 +1087,14 @@
   const NON_PERTINENT_CODES = new Set(["mast250viri","mast500viri","codmast250viri","codmast500viri"]);
 
   const MAGAZZINO_DEFAULT_PACKS = {
+    10: {
+      prodottoKgPerBag: 10,
+      bobine: { "Bobina blu f830": { perBag: 40, unit:"g" } },
+      etichettePerBag: 1,
+      scatole: { "Scatola americana | 20 kg": 0.5 },
+      divisori: { "Divisorio Z": 0.5 },
+      altri: {}
+    },
     5: {
       prodottoKgPerBag: 5,
       bobine: { "Bobina blu f830": { perBag: 20, unit:"g" } },
@@ -1101,6 +1109,14 @@
       etichettePerBag: 1,
       scatole: { "Scatola americana | 20 kg": 0.05 },
       divisori: { "Divisorio Croce texo": 0.05 },
+      altri: {}
+    },
+    0.5: {
+      prodottoKgPerBag: 0.5,
+      bobine: { "Bobina blu f480": { perBag: 5, unit:"g" } },
+      etichettePerBag: 1,
+      scatole: { "Scatola americana | 20 kg": 0.025 },
+      divisori: { "Divisorio Croce texo": 0.025 },
       altri: {}
     }
   };
@@ -2755,6 +2771,16 @@ document.body.appendChild(banner);
     "imballo","imballaggio"
   ];
 
+  // Sottoinsieme "forte": se presente, l'articolo è quasi certamente un imballo (anche se nel nome compare "kg").
+  // Serve per non sbagliare con prodotti venduti al pz ma con peso nel nome.
+  const PACKAGING_INTERNAL_STRICT_KEYWORDS = [
+    "scatola","cartone","divisorio","separatore",
+    "etichetta","etichette",
+    "bobina","film","pellicola","stretch","estensibile",
+    "nastro","reggia","pallet","bancale","angolare",
+    "imballo","imballaggio"
+  ];
+
   const POWDER_MATERIAL_HINT_RE = /\b(ossicloruro|poltiglia|caolino|zeolite|zolfo|rame|solfato|idrossido|tribasico|diatomite|agroblumagic|corrobor|concime)\b/;
 
   function normalizeItemNameForMatch(name){
@@ -2780,12 +2806,19 @@ document.body.appendChild(banner);
 
     const u = String(um||"").toLowerCase().replace(/\./g,"").trim();
     const isPiecesUm = /\b(pz|pzs|pcs?|pce|pez|nr|pezzi)\b/.test(u);
-
     const hasKg = /\bkg\b/.test(s);
 
-    // Se è venduto "a pezzi" ma nel nome c'è il peso (es. 0,5 kg / 1 kg / 5 kg), trattalo come PRODOTTO e non packaging.
-    // Esempi tipici: "0,5 kg venduto al pz", "SACCHETTO 0,5 kg", ecc.
-    if(isPiecesUm && hasKg) return false;
+    // Indicatori tipici di articoli di imballo: "x 40", "x40", "pack 40", ecc.
+    const hasMultiplier = /\b\d+(?:\.\d+)?\s*x\s*\d+(?:\.\d+)?\b/.test(s) || /\bx\d+\b/.test(s) || /\bpack\s*\d+\b/.test(s);
+
+    // Se è venduto al pz ma nel nome c'è il peso:
+    // - se è chiaramente un imballo -> packaging
+    // - altrimenti trattalo come PRODOTTO (es. "Orgunika 0,5 kg" venduto al pz)
+    if(isPiecesUm && hasKg){
+      const isStrict = PACKAGING_INTERNAL_STRICT_KEYWORDS.some(k => s.includes(k)) || hasMultiplier;
+      if(!isStrict) return false;
+      return true;
+    }
 
     // Regola generale per packaging/consumo interno
     return PACKAGING_INTERNAL_KEYWORDS.some(k => s.includes(k));
@@ -5280,9 +5313,32 @@ function hideLogin(){
           const rawQty = parseItNumber(l.qty);
           if(Number.isFinite(rawQty) && rawQty > 0){
             const uRaw = String((l.qtyUnitRaw ?? l.um ?? l.uom ?? l.unitaMisura ?? l.unit ?? l.measure ?? "")).trim();
-            const label = uRaw ? `${l.desc} (${uRaw})` : l.desc;
-            magAddToMap(comp.altri, label, rawQty);
-            magAddToMap(totals.altri, label, rawQty);
+            const uNorm = uRaw.toLowerCase().replace(/\./g,"").trim();
+            const isPiecesUm = /\b(pz|pzs|pcs?|pce|pez|nr|pezzi)\b/.test(uNorm);
+
+            const descTxt = String(l.desc || "Articolo interno").trim();
+            const label = uRaw ? `${descTxt} (${uRaw})` : descTxt;
+            const s = normalizeItemNameForMatch(descTxt);
+
+            // Prova a dividerlo per tipologia (scatole/divisori/etichette). Se non è chiaro → "Altri".
+            if(isPiecesUm){
+              if(/\b(etichetta|etichette)\b/.test(s)){
+                comp.etichette += rawQty;
+                totals.etichette += rawQty;
+              }else if(/\b(divisorio|separatore)\b/.test(s)){
+                magAddToMap(comp.divisori, descTxt, rawQty);
+                magAddToMap(totals.divisori, descTxt, rawQty);
+              }else if(/\b(scatola|cartone)\b/.test(s)){
+                magAddToMap(comp.scatole, descTxt, rawQty);
+                magAddToMap(totals.scatole, descTxt, rawQty);
+              }else{
+                magAddToMap(comp.altri, label, rawQty);
+                magAddToMap(totals.altri, label, rawQty);
+              }
+            }else{
+              magAddToMap(comp.altri, label, rawQty);
+              magAddToMap(totals.altri, label, rawQty);
+            }
           }
           continue;
         }
@@ -5302,10 +5358,15 @@ function hideLogin(){
         const isPiecesUm = /\b(pz|pzs|pcs?|pce|pez|nr|pezzi)\b/.test(uNorm);
         const isHalfKgPiecePack = isPiecesUm && Number.isFinite(Number(packKg)) && Math.abs(Number(packKg)-0.5) < 0.011;
 
-        // Venduto a KG/G: includilo in produzione anche senza BOM/pack (es. BIG BAG 500 kg venduto al kg)
+        // Venduto a KG/G: includilo sempre in produzione.
+        // Se abbiamo packKg + BOM, calcola anche imballi (sacchi/etichette/scatole/divisori) usando i kg rimanenti.
+        // Se non abbiamo BOM/pack, lo consideriamo comunque OK (es. BIG BAG venduto al kg).
         if(isWeightUnit){
-          if(considerLine){ comp.linesOk++; totals.linesOk++; }
-          continue;
+          if(!packKg || packKg<=0 || !bom){
+            if(considerLine){ comp.linesOk++; totals.linesOk++; }
+            continue;
+          }
+          // Se packKg + BOM esistono, prosegui: calcolo sacchi/materiale come per le righe a PZ.
         }
         // 0,5 kg venduto al PZ: includilo anche se la BOM per quel pack non è configurata
         if(isHalfKgPiecePack && !bom){
