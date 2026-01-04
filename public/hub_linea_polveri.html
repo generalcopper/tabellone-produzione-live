@@ -2772,11 +2772,14 @@ document.body.appendChild(banner);
     // Evita falsi positivi: se sembra chiaramente un prodotto polvere (rame, zolfo, ecc.) non è packaging.
     if(POWDER_MATERIAL_HINT_RE.test(s)) return false;
 
-    const hasKg = /\bkg\b/.test(s);
-    const hasMultX = /(\d+(?:\.\d+)?)\s*x\s*(\d+(?:\.\d+)?)/.test(s);
+    const u = String(um||"").toLowerCase().replace(/\./g,"").trim();
+    const isPiecesUm = /\b(pz|pzs|pcs?|pce|pez|nr|pezzi)\b/.test(u);
 
-    // Regola esplicita richiesta
-    if(s.includes("sacchetto") && hasKg && hasMultX) return true;
+    const hasKg = /\bkg\b/.test(s);
+
+    // Se è venduto "a pezzi" ma nel nome c'è il peso (es. 0,5 kg / 1 kg / 5 kg), trattalo come PRODOTTO e non packaging.
+    // Esempi tipici: "0,5 kg venduto al pz", "SACCHETTO 0,5 kg", ecc.
+    if(isPiecesUm && hasKg) return false;
 
     // Regola generale per packaging/consumo interno
     return PACKAGING_INTERNAL_KEYWORDS.some(k => s.includes(k));
@@ -5274,6 +5277,23 @@ function hideLogin(){
         const packKg = magDetectPackKg(l);
         const { bom, source } = magMatchBom(l, packKg) || {};
         const unsupportedPack = (source==="pack_unsupported");
+        const uRawForLine = String((l.qtyUnitRaw ?? l.um ?? l.uom ?? l.unitaMisura ?? l.unit ?? l.measure ?? "")).trim();
+        const uNorm = uRawForLine.toLowerCase().replace(/\./g,"");
+        const isWeightUnit = (uNorm === "kg" || uNorm === "g");
+        const isPiecesUm = /\b(pz|pzs|pcs?|pce|pez|nr|pezzi)\b/.test(uNorm);
+        const isHalfKgPiecePack = isPiecesUm && Number.isFinite(Number(packKg)) && Math.abs(Number(packKg)-0.5) < 0.011;
+
+        // Venduto a KG/G: includilo in produzione anche senza BOM/pack (es. BIG BAG 500 kg venduto al kg)
+        if(isWeightUnit){
+          if(considerLine){ comp.linesOk++; totals.linesOk++; }
+          continue;
+        }
+        // 0,5 kg venduto al PZ: includilo anche se la BOM per quel pack non è configurata
+        if(isHalfKgPiecePack && !bom){
+          if(considerLine){ comp.linesOk++; totals.linesOk++; }
+          continue;
+        }
+
         if(!packKg || packKg<=0 || !bom){
           const note = unsupportedPack ? "Non configurato (packKg non supportato)" : "";
           const nc = { desc:l.desc, customer:o.customer, orderNo:o.orderNo||o.number, qtyKg:qtyKgRimanenti, packKg, code:l.code||"", note };
