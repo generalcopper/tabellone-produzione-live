@@ -1371,6 +1371,7 @@
             </div>
             <div class="list compact" id="homeLowStockList"></div>
             <div class="hint" id="homeLowStockHint" style="margin-top:10px"></div>
+            <div class="hint" id="homeLowStockMailLog" style="margin-top:6px; opacity:.85"></div>
           </div>
         </div>
       </div>
@@ -2314,7 +2315,136 @@ Tip:
       return fnv1aHex(s);
     }
 
-    async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
+    
+    // --- Auto email sotto-scorta (Firestore Trigger Email) ---
+    const __LS_LOWMAIL_HASH = "amz_inventory_lowmail_hash_v1";
+    const __LS_LOWMAIL_AT = "amz_inventory_lowmail_at_v1";
+    const __LS_LOWMAIL_ID = "amz_inventory_lowmail_docid_v1";
+
+    function __lsGet(k){ try{ return localStorage.getItem(k); }catch(_e){ return null; } }
+    function __lsSet(k,v){ try{ localStorage.setItem(k, String(v)); }catch(_e){} }
+
+    function __fmtQty(q){
+      const n = Number(q);
+      return Number.isFinite(n) ? String(Math.round(n*1000)/1000) : "0";
+    }
+
+    function __buildLowStockEmailPayload(items){
+      const lines = (items||[]).map((it, idx)=>{
+        const loc = prettyLoc(it.loc || "");
+        const sku = toSkuId(it.sku || "");
+        const title = String(it.title || "").trim() || "(senza nome)";
+        const qty = __fmtQty(it.qty);
+        return `${idx+1}) [${loc}] ${sku} — ${title} — ${qty} pz`;
+      });
+
+      const total = lines.length;
+      const head = [
+        "Procedere con produzione.",
+        "",
+        `Totale righe sotto scorta: ${total}`,
+        "",
+        "Dettagli:",
+        ...lines
+      ].join("\n");
+
+      const htmlRows = lines.map(l=>`<li style="margin:0 0 6px 0">${escapeHtml(l)}</li>`).join("");
+      const htmlBody = `
+        <div style="font-family: -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Arial; line-height:1.45">
+          <p style="margin:0 0 10px 0"><b>Procedere con produzione.</b></p>
+          <p style="margin:0 0 10px 0">Totale righe sotto scorta: <b>${total}</b></p>
+          <div style="margin:10px 0 0 0">
+            <div style="font-weight:600; margin:0 0 6px 0">Dettagli</div>
+            <ol style="margin:0; padding-left:18px">${htmlRows}</ol>
+          </div>
+        </div>
+      `;
+
+      const subject = `Sotto scorta: procedere con produzione (${total} righe)`;
+      return { subject, text: head, html: htmlBody, total };
+    }
+
+    async function __enqueueLowStockEmailIfNeeded(items){
+      try{
+        const mailLog = $("homeLowStockMailLog");
+        if(!state.user?.isWhitelisted){
+          if(mailLog) mailLog.textContent = "";
+          return;
+        }
+        const fb = state.firebase;
+        if(!fb?.ok || !fb.db || !fb.api?.addDoc){
+          if(mailLog) mailLog.textContent = "";
+          return;
+        }
+
+        const list = (items||[]).slice().map(it=>({
+          loc: String(it.loc||""),
+          sku: String(toSkuId(it.sku||"")||""),
+          qty: Number.isFinite(it.qty) ? Number(it.qty) : null
+        })).sort((a,b)=>{
+          if(a.loc!==b.loc) return a.loc.localeCompare(b.loc);
+          if(a.sku!==b.sku) return a.sku.localeCompare(b.sku);
+          return (a.qty||0) - (b.qty||0);
+        });
+
+        const fingerprint = await stableHashHex(JSON.stringify(list));
+        const lastHash = __lsGet(__LS_LOWMAIL_HASH);
+        const lastAt = Number(__lsGet(__LS_LOWMAIL_AT) || 0);
+        const lastId = __lsGet(__LS_LOWMAIL_ID);
+
+        // cooldown anti-spam (10 minuti) + invio solo se cambia lo stato
+        const now = Date.now();
+        const cooldownOk = (now - lastAt) > (10 * 60 * 1000);
+        const changed = fingerprint && fingerprint !== lastHash;
+
+        if(!items || !items.length){
+          if(mailLog) mailLog.textContent = "";
+          return;
+        }
+
+        if(!changed || !cooldownOk){
+          if(mailLog && lastAt){
+            mailLog.textContent = `Email automatica già inviata/accodata alle ${fmtDate(lastAt)} (stesso stato).`;
+          }else if(mailLog){
+            mailLog.textContent = "";
+          }
+          return;
+        }
+
+        const payload = __buildLowStockEmailPayload(items);
+        const { collection, addDoc, serverTimestamp } = fb.api;
+
+        const docRef = await addDoc(collection(fb.db, "email"), {
+          to: ["matteo@generalcoppersrl.com"],
+          message: {
+            subject: payload.subject,
+            text: payload.text,
+            html: payload.html
+          },
+          createdAt: serverTimestamp(),
+          meta: {
+            kind: "auto_low_stock",
+            total: payload.total,
+            hash: fingerprint
+          }
+        });
+
+        __lsSet(__LS_LOWMAIL_HASH, fingerprint);
+        __lsSet(__LS_LOWMAIL_AT, now);
+        __lsSet(__LS_LOWMAIL_ID, docRef?.id || "");
+
+        if(mailLog) mailLog.textContent = `Email automatica accodata alle ${fmtDate(now)} • ${payload.total} righe.`;
+      }catch(err){
+        // non bloccare la UI
+        try{
+          const mailLog = $("homeLowStockMailLog");
+          if(mailLog) mailLog.textContent = "Email automatica: errore in invio (controlla connessione).";
+        }catch(_e){}
+        console.warn("auto low-stock email error:", err);
+      }
+    }
+
+async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
       const wf = String(workflowId || "").trim();
       if(wf) return wf;
 
@@ -3369,6 +3499,10 @@ function currentInv(){
 
         out.sort((x,y)=> (x.qty||0) - (y.qty||0));
         lowCount.textContent = fmtN(out.length);
+
+        // Auto email: se esistono righe sotto scorta, crea un documento in Firestore/email
+        void __enqueueLowStockEmailIfNeeded(out);
+
 
         if(!out.length){
           lowList.innerHTML = `<div class="hint">Nessun articolo sotto scorta 🎯</div>`;
