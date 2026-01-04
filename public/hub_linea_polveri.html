@@ -1816,6 +1816,47 @@
     return firstRaw || "";
   }
 
+
+// Render order quantity summary using ONLY the unit(s) from Easyfatt XML.
+// If an order has mixed units (e.g. kg + pz), it will show multiple sums: "120 kg · 40 pz".
+function renderQtySummaryByUnit(lines){
+  const acc = new Map(); // key -> { unitRaw, sum }
+  for(const l of (lines||[])){
+    if(!l) continue;
+    const unitRaw = String((l.qtyUnitRaw ?? l.um ?? l.uom ?? l.unitaMisura ?? l.unit ?? l.measure ?? "") || "").trim();
+    const key = unitKey(unitRaw) || (unitRaw ? unitRaw.replace(/\./g,"").trim().toLowerCase() : "");
+    // Prefer already-parsed numeric value from XML
+    let n = NaN;
+    if(l.qtyValue!=null) n = Number(l.qtyValue);
+    else if(l.qty!=null) n = Number(l.qty);
+    if(!Number.isFinite(n)){
+      // Fallback: parse string format (e.g. "7.000,5")
+      try{ n = parseItNumber(String(l.qtyValueTextRaw ?? l.qtyTextRaw ?? l.qty ?? "")); }catch(_e){ n = NaN; }
+    }
+    if(!Number.isFinite(n) || n===0) continue;
+
+    const prev = acc.get(key) || { unitRaw: unitRaw, sum: 0 };
+    if(!prev.unitRaw && unitRaw) prev.unitRaw = unitRaw;
+    prev.sum += n;
+    acc.set(key, prev);
+  }
+  if(!acc.size) return "0";
+
+  const entries = Array.from(acc.entries());
+  const rank = (k)=> (k==="kg" ? 0 : (k==="pz" ? 1 : 2));
+  entries.sort((a,b)=>{
+    const ra = rank(a[0]), rb = rank(b[0]);
+    if(ra!==rb) return ra-rb;
+    return String(a[0]).localeCompare(String(b[0]));
+  });
+
+  return entries.map(([k,v])=>{
+    const u = v.unitRaw || "";
+    return renderQty(v.sum, u);
+  }).join(" · ");
+}
+
+
   async function copyKeyToClipboard(text){
     if(!text) return;
     try{
@@ -7657,7 +7698,7 @@ Linea: polveri`, null); }catch(_e){}
       const div = document.createElement("div");
       div.className = "item";
       div.style.cursor = "pointer";
-      const totalQty = o.lines.reduce((a,l)=>a + Number(l.qty||0), 0);
+      const qtySummary = renderQtySummaryByUnit(o.lines);
       const priority = o.priorityInfo?.priority || "normal";
       const badgeText = priority==="today" ? "Priorità" : o.partialInfo ? "Parziale" : "Apri";
       const alertTag = (o.alerts&&o.alerts.length) ? `<div class="muted" style="margin-top:6px;">Avvisi: ${o.alerts.length}</div>` : "";
@@ -7667,7 +7708,7 @@ Linea: polveri`, null); }catch(_e){}
         <div class="top">
           <div>
             <div class="name">Ordine n. ${o.orderNo || o.number}</div>
-            <div class="sub">Righe: ${o.lines.length} · Quantità: ${renderQty(totalQty, inferOrderUm(o.lines))} · Conclusione: ${o.conclusion||"—"}</div>
+            <div class="sub">Righe: ${o.lines.length} · Quantità: ${escapeHtml(qtySummary)} · Conclusione: ${o.conclusion||"—"}</div>
             ${o.partialInfo ? `<div class="muted" style="margin-top:6px;">Ordine parzialmente concluso (${o.partialInfo.done}/${o.partialInfo.total}).</div>`:""}
             ${o.priorityInfo?.reason ? `<div class="muted" style="margin-top:6px;">${escapeHtml(o.priorityInfo.reason)}</div>`:""}
             ${alertTag}
