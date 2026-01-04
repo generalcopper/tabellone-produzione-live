@@ -847,20 +847,22 @@
     }
   }
   function emailLinePlanned(line, fallbackUnit){
-    const u = displayUm(line?.um || fallbackUnit || "");
+    const unit = String((line?.qtyUnitRaw ?? line?.um ?? fallbackUnit ?? "")).trim();
     const q = (()=>{
       const a = emailTryNum(line?.plannedQty);
       if(a!=null) return a;
       const b = emailTryNum(line?.plannedKg);
       if(b!=null) return b;
-      const c = emailTryNum(line?.qty);
+      const c = emailTryNum(line?.qtyValue);
       if(c!=null) return c;
+      const d = emailTryNum(line?.qty);
+      if(d!=null) return d;
       return 0;
     })();
-    return formatQtyWithKg(q, u);
+    return renderQty({ qtyValue: q, qtyUnitRaw: unit, qtyTextRaw: (line?.qtyTextRaw||"") });
   }
   function emailLineProduced(line, fallbackUnit){
-    const u = displayUm(line?.um || fallbackUnit || "");
+    const unit = String((line?.qtyUnitRaw ?? line?.um ?? fallbackUnit ?? "")).trim();
     const q = (()=>{
       const a = emailTryNum(line?.producedQty);
       if(a!=null) return a;
@@ -868,7 +870,7 @@
       if(b!=null) return b;
       return 0;
     })();
-    return formatQtyWithKg(q, u);
+    return renderQty({ qtyValue: q, qtyUnitRaw: unit });
   }
 
   // Upload signature to Firebase Storage (optional, improves email visibility vs. data URL)
@@ -915,7 +917,7 @@
     const orderNo = entry?.orderNo || "—";
     const customer = entry?.customer || "—";
     const operator = entry?.operator || entry?.operatorName || "Operatore";
-    const unit = displayUm(entry?.unit || extra?.orderUnit || "");
+    const unit = String(entry?.unit || extra?.orderUnit || "").trim();
 
     const startedAt = emailFmtDateIso(entry?.startedAt);
     const endedAt = emailFmtDateIso(entry?.endedAt);
@@ -927,9 +929,9 @@
 
     const subject = `[Hub Polveri] ${isFull ? "Ordine concluso" : "Chiusura parziale"} ${orderNo} • ${customer}`;
 
-    const qtyOrderXml = (extra?.orderQtyXml!=null ? formatQtyWithKg(Number(extra.orderQtyXml||0), displayUm(extra.orderUnit||unit)) : null);
-    const qtySelection = (entry?.totalKgOrder!=null ? formatQtyWithKg(Number(entry.totalKgOrder||0), unit) : null);
-    const qtyProduced = formatQtyWithKg(Number(entry?.kg||0), unit);
+    const qtyOrderXml = (extra?.orderQtyXml!=null ? renderQty(Number(extra.orderQtyXml||0), String(extra.orderUnit||unit||"").trim()) : null);
+    const qtySelection = (entry?.totalKgOrder!=null ? renderQty(Number(entry.totalKgOrder||0), "kg") : null);
+    const qtyProduced = renderQty(Number(entry?.kg||0), unit);
 
     const conclPrev = (extra?.conclusion || "").trim();
 
@@ -957,7 +959,7 @@
       durMin!=null ? `Durata: ${durMin} min` : "",
       `Righe concluse (questa chiusura): ${concludedNow}${totalLines!=null?`/${totalLines}`:""}`,
       qtyOrderXml ? `Quantità ordine (XML): ${qtyOrderXml}` : "",
-      qtySelection ? `Quantità avviata (produzione): ${qtySelection}` : "",
+      qtySelection ? `Kg avviati (produzione): ${qtySelection}` : "",
       `Quantità prodotta (questa chiusura): ${qtyProduced}`,
       "",
       "Dettaglio righe concluse:",
@@ -1007,7 +1009,7 @@
             ${durMin!=null?`<tr><td style="padding:6px 0; color:#555;">Durata</td><td style="padding:6px 0;"><b>${durMin} min</b></td></tr>`:""}
             <tr><td style="padding:6px 0; color:#555;">Righe concluse (questa chiusura)</td><td style="padding:6px 0;"><b>${concludedNow}${totalLines!=null?`/${totalLines}`:""}</b></td></tr>
             ${qtyOrderXml?`<tr><td style="padding:6px 0; color:#555;">Quantità ordine (XML)</td><td style="padding:6px 0;"><b>${emailEsc(qtyOrderXml)}</b></td></tr>`:""}
-            ${qtySelection?`<tr><td style="padding:6px 0; color:#555;">Quantità avviata (produzione)</td><td style="padding:6px 0;"><b>${emailEsc(qtySelection)}</b></td></tr>`:""}
+            ${qtySelection?`<tr><td style="padding:6px 0; color:#555;">Kg avviati (produzione)</td><td style="padding:6px 0;"><b>${emailEsc(qtySelection)}</b></td></tr>`:""}
             <tr><td style="padding:6px 0; color:#555;">Quantità prodotta (questa chiusura)</td><td style="padding:6px 0;"><b>${emailEsc(qtyProduced)}</b></td></tr>
           </table>
         </div>
@@ -1674,6 +1676,7 @@
     return Number.isFinite(n) ? n : null;
   }
   function parseItNumber(raw){
+    if(typeof raw === "number") return Number.isFinite(raw) ? raw : 0;
     const s = (raw==null ? "" : String(raw)).replace(/\./g,"").replace(",",".").replace(/\s+/g,"");
     const n = Number(s);
     return Number.isFinite(n) ? n : 0;
@@ -1688,6 +1691,7 @@
     el.textContent = formatted!=null ? `${formatted} kg` : "—";
   }
   function displayUm(um){
+    // Internal normalizer (do NOT use for rendering quantities from XML).
     const raw = (um==null ? "" : String(um)).trim();
     if(!raw) return "";
     const noDots = raw.replace(/\./g,"").trim();
@@ -1700,25 +1704,117 @@
     if(low === "g" || low === "gr") return "g";
     return noDots;
   }
+
+  function unitKey(um){
+    const raw = (um==null ? "" : String(um)).trim();
+    if(!raw) return "";
+    const noDots = raw.replace(/\./g,"").trim().toLowerCase();
+    if(!noDots) return "";
+    if(noDots === "pz" || noDots === "pezzo" || noDots === "pezzi" || noDots === "pc" || noDots === "pcs") return "pz";
+    return noDots;
+  }
+
+  function isPieces(um){
+    return unitKey(um) === "pz";
+  }
+
+  // Parse quantity fields as they appear in Easyfatt XML (no inventions).
+  function parseQtyFromXml(qtyRaw, umRaw){
+    const qtyS = (qtyRaw==null ? "" : String(qtyRaw)).trim();
+    const umS = (umRaw==null ? "" : String(umRaw)).trim();
+
+    let qtyTextRaw = "";
+    let qtyValueTextRaw = "";
+    let qtyValue = 0;
+
+    if(qtyS){
+      const hasLetters = /[a-zA-Z]/.test(qtyS);
+      if(hasLetters){
+        qtyTextRaw = qtyS; // keep exactly as in XML if it already includes unit
+        const m = qtyS.match(/[-+]?\s*[\d\.,]+/);
+        qtyValue = m ? parseItNumber(m[0]) : 0;
+      } else {
+        qtyValueTextRaw = qtyS; // preserve original numeric formatting if needed
+        qtyValue = parseItNumber(qtyS);
+      }
+    }
+
+    return { qtyValue, qtyUnitRaw: umS, qtyTextRaw, qtyValueTextRaw };
+  }
+
+  function fmtQtyValueForDisplay(v){
+    if(v==null) return "0";
+    if(typeof v === "string") return v.trim();
+    const n = Number(v);
+    if(Number.isFinite(n)){
+      if(Number.isInteger(n)) return String(Math.trunc(n));
+      // Keep JS default formatting (no locale/thousands to avoid "inventions").
+      return String(n);
+    }
+    return String(v).trim();
+  }
+
+  // Single quantity renderer used across the UI, PDF/email, details, summaries.
+  // Rules:
+  // - If qtyTextRaw exists and not empty -> show it
+  // - else if qtyUnitRaw exists -> show "<qty> <qtyUnitRaw>"
+  // - else show only qty
+  function renderQty(arg1, unitMaybe=""){
+    // Object form
+    if(arg1 && typeof arg1 === "object" && !Array.isArray(arg1)){
+      const qtyTextRaw = (arg1.qtyTextRaw ?? arg1.qtyText ?? "").toString().trim();
+      if(qtyTextRaw) return qtyTextRaw;
+
+      const unit = (arg1.qtyUnitRaw ?? arg1.um ?? arg1.unit ?? unitMaybe ?? "").toString().trim();
+
+      let valTxt = "";
+      const rawTxt = (arg1.qtyValueTextRaw ?? "").toString().trim();
+      if(rawTxt){
+        valTxt = rawTxt;
+      } else if(arg1.qtyValue!=null){
+        valTxt = fmtQtyValueForDisplay(arg1.qtyValue);
+      } else if(arg1.qty!=null){
+        valTxt = fmtQtyValueForDisplay(arg1.qty);
+      } else {
+        valTxt = "0";
+      }
+
+      if(unit) return `${valTxt} ${unit}`;
+      return valTxt;
+    }
+
+    // (qty, unit) form
+    const unit = (unitMaybe==null ? "" : String(unitMaybe)).trim();
+    const valTxt = fmtQtyValueForDisplay(arg1);
+    if(unit) return `${valTxt} ${unit}`;
+    return valTxt;
+  }
+
+  // Backward compatible alias (internally uses renderQty, no unit fallback).
   function formatQtyWithKg(qty, um=""){
-    const val = Number(qty);
-    const safe = Number.isFinite(val) ? val : (qty ?? 0);
-    const qtyTxt = `${safe}`;
-    const unit = displayUm(um);
-    if(!unit) return `${qtyTxt}`;
-    return `${qtyTxt} ${unit}`;
+    return renderQty(qty, um);
   }
 
   function inferOrderUm(lines){
     // Use the unit exactly from Easyfatt XML when it's consistent for the whole order.
     // If units are mixed (rare), return empty string to avoid wrong labels.
-    const set = new Set();
+    let k = null;
+    let firstRaw = "";
     for(const l of (lines||[])){
-      const uRaw = (l && (l.um || l.uom || l.unitaMisura || l.unit || l.measure)) || "";
-      const u = displayUm(uRaw);
-      if(u) set.add(u);
-      if(set.size > 1) return "";
+      const uRaw = (l && (l.qtyUnitRaw ?? l.um ?? l.uom ?? l.unitaMisura ?? l.unit ?? l.measure)) || "";
+      const u = String(uRaw||"").trim();
+      if(!u) continue;
+      const key = unitKey(u);
+      if(!key) continue;
+      if(k==null){
+        k = key;
+        firstRaw = u;
+      } else if(key !== k){
+        return "";
+      }
     }
+    return firstRaw || "";
+  }
     return set.size === 1 ? Array.from(set)[0] : "";
   }
   async function copyKeyToClipboard(text){
@@ -2654,10 +2750,11 @@ document.body.appendChild(banner);
         const r = rows[i];
         const code = safeText(r.getElementsByTagName("Code")[0]) || "";
         const desc = safeText(r.getElementsByTagName("Description")[0]) || safeText(r.getElementsByTagName("Name")[0]) || "";
-        const um = safeText(r.getElementsByTagName("UM")[0]) || safeText(r.getElementsByTagName("Unit")[0]) || "";
-        let qty = safeText(r.getElementsByTagName("Qty")[0]) || safeText(r.getElementsByTagName("Quantity")[0]) || "0";
-        qty = parseFloat(qty.replace(",","."));
-        if(!Number.isFinite(qty)) qty = 0;
+        const umRaw = safeText(r.getElementsByTagName("UM")[0]) || safeText(r.getElementsByTagName("Unit")[0]) || "";
+        const qtyRaw = safeText(r.getElementsByTagName("Qty")[0]) || safeText(r.getElementsByTagName("Quantity")[0]) || "0";
+        const qtyParsed = parseQtyFromXml(qtyRaw, umRaw);
+        const um = qtyParsed.qtyUnitRaw;
+        const qty = qtyParsed.qtyValue;
 
         const alertInfo = detectAlertLine(desc);
         const packagingInternal = (!alertInfo) && isPackagingInternalDesc(desc, code, um);
@@ -2675,6 +2772,10 @@ document.body.appendChild(banner);
           desc: cleanShort(desc),
           um,
           qty,
+          qtyValue: qtyParsed.qtyValue,
+          qtyUnitRaw: qtyParsed.qtyUnitRaw,
+          qtyTextRaw: qtyParsed.qtyTextRaw,
+          qtyValueTextRaw: qtyParsed.qtyValueTextRaw,
           powder,
           packagingInternal,
           packKg,
@@ -5068,16 +5169,10 @@ function hideLogin(){
         if(l && l.packagingInternal){
           const rawQty = parseItNumber(l.qty);
           if(Number.isFinite(rawQty) && rawQty > 0){
-            const uRaw = (l.um || l.uom || l.unitaMisura || l.unit || l.measure || "");
-            if(isPieces(uRaw)){
-              magAddToMap(comp.altri, l.desc, rawQty);
-              magAddToMap(totals.altri, l.desc, rawQty);
-            } else {
-              const uDisp = displayUm(uRaw) || String(uRaw || "").trim();
-              const label = uDisp ? `${l.desc} (${uDisp})` : l.desc;
-              magAddToMap(comp.altri, label, rawQty);
-              magAddToMap(totals.altri, label, rawQty);
-            }
+            const uRaw = String((l.qtyUnitRaw ?? l.um ?? l.uom ?? l.unitaMisura ?? l.unit ?? l.measure ?? "")).trim();
+            const label = uRaw ? `${l.desc} (${uRaw})` : l.desc;
+            magAddToMap(comp.altri, label, rawQty);
+            magAddToMap(totals.altri, label, rawQty);
           }
           continue;
         }
@@ -5358,7 +5453,7 @@ function hideLogin(){
       const key = o.__k || o.stableKey || getOrderKey(o);
       const checked = draft.has(key);
       const line = (o.lines && o.lines[0]) || {};
-      const qtyLabel = formatQtyWithKg(line.qty, line.um);
+      const qtyLabel = renderQty(line);
       const row = document.createElement("div");
       row.className = "mobileSendRow";
       if(checked) row.classList.add("selected");
@@ -5783,7 +5878,7 @@ function renderCompletedSection(){
           <div class="completedMeta">
             <div><b>${escapeHtml(operator)}</b></div>
             ${at?`<div class="kv">${escapeHtml(at)}</div>`:""}
-            ${kg!=null?`<div class="kv"><b>${kg}</b> kg</div>`:""}
+            ${kg!=null?`<div class="kv"><b>${escapeHtml(renderQty({qtyValue:kg, qtyUnitRaw:h.unit}))}</b></div>`:""}
             <div>${escapeHtml(status)}</div>
           </div>
         </div>
@@ -5812,9 +5907,9 @@ function openHistModal(id){
       <div class="top">
         <div>
           <div class="name">${escapeHtml(l.desc||"")}</div>
-          <div class="muted">Pianificati: <b>${escapeHtml(String(l.plannedKg??"—"))}</b> kg · Prodotti: <b>${escapeHtml(String(l.producedKg??"—"))}</b> kg</div>
+          <div class="muted">Pianificati: <b>${escapeHtml(renderQty({qtyValue:l.qty, qtyUnitRaw:l.um, qtyTextRaw:(l.qtyTextRaw||"")}))}</b> · Prodotti: <b>${escapeHtml(renderQty({qtyValue:l.producedKg, qtyUnitRaw:l.um}))}</b></div>
         </div>
-        <div class="badge">${escapeHtml(String(l.qty??""))} ${escapeHtml(String(l.um??""))}</div>
+        <div class="badge">${escapeHtml(renderQty({qtyValue:l.qty, qtyUnitRaw:l.um, qtyTextRaw:(l.qtyTextRaw||"")}))}</div>
       </div>
       ${l.code?`<div class="muted" style="margin-top:6px;">Codice: <b>${escapeHtml(String(l.code))}</b></div>`:""}
     </div>
@@ -7573,7 +7668,7 @@ Linea: polveri`, null); }catch(_e){}
         <div class="top">
           <div>
             <div class="name">Ordine n. ${o.orderNo || o.number}</div>
-            <div class="sub">Righe: ${o.lines.length} · Quantità: ${formatQtyWithKg(totalQty, "kg")} · Conclusione: ${o.conclusion||"—"}</div>
+            <div class="sub">Righe: ${o.lines.length} · Quantità: ${renderQty(totalQty, inferOrderUm(o.lines))} · Conclusione: ${o.conclusion||"—"}</div>
             ${o.partialInfo ? `<div class="muted" style="margin-top:6px;">Ordine parzialmente concluso (${o.partialInfo.done}/${o.partialInfo.total}).</div>`:""}
             ${o.priorityInfo?.reason ? `<div class="muted" style="margin-top:6px;">${escapeHtml(o.priorityInfo.reason)}</div>`:""}
             ${alertTag}
@@ -7642,7 +7737,7 @@ Linea: polveri`, null); }catch(_e){}
         const isBlocked = isActive && !isMineActive;
         div.className = `item pressCard selectableLine${checked ? " selected" : ""}`;
         div.style.cursor = isBlocked ? "not-allowed" : "pointer";
-        const qtyLabel = formatQtyWithKg(l.qty, l.um);
+        const qtyLabel = renderQty(l);
         const packTag = l.packagingInternal ? '<span class="packBadge">Packaging/Interno</span>' : '';
         div.innerHTML = `
           <div class="top">
@@ -7835,7 +7930,7 @@ Linea: polveri`, null); }catch(_e){}
         if(isWhiteBag){
           div.innerHTML = renderWhiteBagBanner({ selectable: true, checked });
         } else {
-          const qtyLabel = formatQtyWithKg(l.qty, l.um);
+          const qtyLabel = renderQty(l);
           const packTag = l.packagingInternal ? '<span class="packBadge">Packaging/Interno</span>' : '';
           div.innerHTML = `
             <div class="top">
@@ -7843,7 +7938,7 @@ Linea: polveri`, null); }catch(_e){}
                 <div class="name">${l.desc}${packTag ? " " + packTag : ""}</div>
                 <div class="sub">Quantità: ${qtyLabel} · Cod: ${l.code||"—"}${lineConclusion?` · Conclusione: ${lineConclusion}`:""}</div>
                 <div style="margin-top:8px; display:flex; gap:10px; align-items:center;">
-                  <div class="muted" style="font-size:12px; font-weight:900; min-width:150px;">Quantità prodotta (kg, opzionale)</div>
+                  <div class="muted" style="font-size:12px; font-weight:900; min-width:150px;">Quantità prodotta (opzionale)</div>
                   <input class="kgInput" data-k="${l.lineKey}" type="number" inputmode="decimal" step="0.1" placeholder="auto" style="flex:1; padding:10px 10px; border-radius:12px; border:1px solid var(--stroke); background: rgba(0,0,0,.02); font-weight:900;"/>
                 </div>
               </div>
@@ -8069,7 +8164,7 @@ Linea: polveri`, null); }catch(_e){}
                   description: `Ordine n. ${entry.orderNo} · ${entry.customer}`,
                   orderNo: entry.orderNo,
                   customer: entry.customer,
-                  meta: `${toConclude.size} righe · ${formatQtyWithKg(Math.round(kg||0), unit || "kg")}`,
+                  meta: `${toConclude.size} righe · ${renderQty(Math.round(kg||0), unit)}`,
                   extra: { durationMs }
                 });
               }catch(_e){}
