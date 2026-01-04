@@ -403,17 +403,17 @@
     }
 
     .tile:active{
-      transform: translateY(2px) scale(.985);
+      transform: translateY(2px) scale(.98);
       filter:saturate(1.12) brightness(.985);
-      box-shadow:0 8px 18px rgba(15,23,42,.10);
+      box-shadow:0 7px 16px rgba(15,23,42,.12);
     }
     .tile:active::after{opacity:0;}
 
     /* iOS press effect: ensure consistent feedback (Safari sometimes misses :active) */
     .tile.is-pressed{
-      transform: translateY(2px) scale(.985);
+      transform: translateY(2px) scale(.98);
       filter:saturate(1.12) brightness(.985);
-      box-shadow:0 8px 18px rgba(15,23,42,.10);
+      box-shadow:0 7px 16px rgba(15,23,42,.12);
     }
     .tile.is-pressed::after{opacity:0;}
 
@@ -1085,14 +1085,15 @@ body.showSpinner .bootSpinner{ display:flex; }
   fill:none;
   stroke-linecap:round;
   stroke-linejoin:round;
+  filter:none;
 }
 
 /* Pressing iOS: consistent across Safari + desktop */
 .tile:active,
 .tile.is-pressed{
-  transform: translateY(2px) scale(.985);
+  transform: translateY(2px) scale(.98);
   filter:saturate(1.12) brightness(.985);
-  box-shadow:0 9px 20px rgba(15,23,42,.16);
+  box-shadow:0 7px 16px rgba(15,23,42,.14);
 }
 .tile:active::after,
 .tile.is-pressed::after{ opacity:0; }
@@ -1865,7 +1866,7 @@ providerInit().catch((e)=>{
 })();
 
 
-/* iOS: effetto "pressing" + hold (stile iOS) sulle tile */
+/* iOS: effetto "pressing" (hold) sulle tile — stabile su Safari/Chrome */
 (function(){
   try{
     var tiles = Array.prototype.slice.call(document.querySelectorAll('.tile'));
@@ -1882,80 +1883,72 @@ providerInit().catch((e)=>{
       }catch(_e){ return false; }
     }
 
-    function add(el){ if(el && el.classList && !isDisabled(el)) el.classList.add(CLS); }
-    function rm(el){ if(el && el.classList) el.classList.remove(CLS); }
+    function add(el){
+      try{ if(el && el.classList && !isDisabled(el)) el.classList.add(CLS); }catch(_e){}
+    }
+    function rm(el){
+      try{ if(el && el.classList) el.classList.remove(CLS); }catch(_e){}
+    }
+
+    function within(el, x, y){
+      try{
+        var r = el.getBoundingClientRect();
+        return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
+      }catch(_e){ return true; }
+    }
 
     tiles.forEach(function(t){
-      // Touch (iOS) — resta premuto finché il dito è giù
-      var activeTouchId = null;
-      var raf = 0;
+      var active = false;
 
-      function within(x, y){
-        var r = t.getBoundingClientRect();
-        return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
+      function start(e){
+        if(isDisabled(t)) return;
+        active = true;
+        add(t);
+        // pointer capture (desktop + iOS modern)
+        try{
+          if(e && e.pointerId != null && t.setPointerCapture) t.setPointerCapture(e.pointerId);
+        }catch(_e){}
       }
 
-      t.addEventListener('touchstart', function(e){
-        if(isDisabled(t)) return;
+      function end(e){
+        active = false;
+        rm(t);
         try{
-          if(!e.changedTouches || !e.changedTouches.length) return;
-          activeTouchId = e.changedTouches[0].identifier;
-          add(t);
+          if(e && e.pointerId != null && t.releasePointerCapture) t.releasePointerCapture(e.pointerId);
+        }catch(_e){}
+      }
+
+      // Pointer events (preferito)
+      t.addEventListener('pointerdown', start);
+      t.addEventListener('pointerup', end);
+      t.addEventListener('pointercancel', end);
+      t.addEventListener('pointerleave', end);
+
+      // Mouse fallback (vecchi browser)
+      t.addEventListener('mousedown', start);
+      t.addEventListener('mouseup', end);
+      t.addEventListener('mouseleave', end);
+
+      // Touch fallback
+      t.addEventListener('touchstart', function(){ start({}); }, { passive:true });
+      t.addEventListener('touchend', function(){ end({}); }, { passive:true });
+      t.addEventListener('touchcancel', function(){ end({}); }, { passive:true });
+
+      // Se trascini il dito fuori dal tile, annulla l'effetto (iOS)
+      t.addEventListener('touchmove', function(e){
+        if(!active) return;
+        try{
+          var touch = (e.touches && e.touches[0]) ? e.touches[0] : null;
+          if(!touch) return;
+          if(within(t, touch.clientX, touch.clientY)) add(t); else rm(t);
         }catch(_e){}
       }, { passive:true });
 
-      t.addEventListener('touchmove', function(e){
-        if(activeTouchId == null) return;
-        if(raf) return;
-        raf = requestAnimationFrame(function(){
-          raf = 0;
-          try{
-            var touches = e.touches || [];
-            for(var i=0;i<touches.length;i++){
-              if(touches[i].identifier === activeTouchId){
-                var x = touches[i].clientX, y = touches[i].clientY;
-                if(within(x,y)) add(t); else rm(t);
-                return;
-              }
-            }
-            rm(t);
-          }catch(_e){}
-        });
-      }, { passive:true });
-
-      t.addEventListener('touchend', function(){
-        activeTouchId = null;
-        rm(t);
-      }, { passive:true });
-
-      t.addEventListener('touchcancel', function(){
-        activeTouchId = null;
-        rm(t);
-      }, { passive:true });
-
-      // Pointer (desktop / modern browsers) — usa pointer capture per l'hold
-      t.addEventListener('pointerdown', function(e){
-        if(isDisabled(t)) return;
-        add(t);
-        try{ t.setPointerCapture(e.pointerId); }catch(_e){}
-      });
-
-      t.addEventListener('pointerup', function(e){
-        rm(t);
-        try{ t.releasePointerCapture(e.pointerId); }catch(_e){}
-      });
-
-      t.addEventListener('pointercancel', function(e){
-        rm(t);
-        try{ t.releasePointerCapture(e.pointerId); }catch(_e){}
-      });
-
-      t.addEventListener('pointerleave', function(){ rm(t); });
-
       // Safety
-      t.addEventListener('blur', function(){ rm(t); });
+      t.addEventListener('blur', function(){ end({}); });
     });
 
+    window.addEventListener('blur', function(){ tiles.forEach(rm); }, { passive:true });
     document.addEventListener('visibilitychange', function(){
       if(document.hidden) tiles.forEach(rm);
     });
