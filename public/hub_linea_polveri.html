@@ -3425,7 +3425,7 @@ function hideLogin(){
         snap.forEach(doc=>hist.push({ id: doc.id, ...doc.data() }));
         const resetAfter = getStatsClearTs();
         const filtered = resetAfter ? hist.filter(h=> tsFromId(h.id||h.at||0) > resetAfter) : hist;
-        state.history = filtered;
+        state.history = dedupeHistory(filtered);
         state.historyReady = true;
         renderStats();
         renderHeaderKpis();
@@ -5916,6 +5916,73 @@ function tsFromId(id){
   }catch(_e){ return 0; }
 }
 
+function _normHistoryKeys(arr){
+  try{
+    return (Array.isArray(arr) ? arr : []).map(x=>String(x||"").trim()).filter(Boolean).sort().join("|");
+  }catch(_e){
+    return "";
+  }
+}
+
+function _histFingerprint(h){
+  try{
+    const ok = String(h?.orderKey || "").trim();
+    const on = String(h?.orderNo || h?.number || "").trim();
+    const cust = String(h?.customer || "").trim();
+    const keyPart = ok || `${on}__${cust}`;
+    const keys = _normHistoryKeys(h?.concludedLineKeys);
+    const ended = String(h?.endedAt || h?.at || "").trim();
+    const minute = ended ? ended.slice(0,16) : ""; // yyyy-mm-ddThh:mm
+    return `${keyPart}::${keys}::${minute}`;
+  }catch(_e){
+    return "";
+  }
+}
+
+function _histScore(h){
+  let s = 0;
+  try{
+    if(h?.signatureUrl || h?.signature) s += 4;
+    if(Array.isArray(h?.perLine) && h.perLine.length) s += 3;
+    if(h?.endedAt) s += 1;
+    if(h?.operatorUid) s += 1;
+    if(h?.durationMs!=null) s += 1;
+  }catch(_e){}
+  return s;
+}
+
+function _pickBetterHist(a,b){
+  const sa = _histScore(a);
+  const sb = _histScore(b);
+  return sb >= sa ? b : a;
+}
+
+function dedupeHistory(arr){
+  const list = (Array.isArray(arr) ? arr : []).filter(Boolean);
+
+  // 1) dedupe by id (keep merged)
+  const byId = new Map();
+  const noId = [];
+  for(const h of list){
+    const id = String(h?.id || "").trim();
+    if(!id){ noId.push(h); continue; }
+    const prev = byId.get(id);
+    byId.set(id, prev ? ({ ...prev, ...h }) : h);
+  }
+  const merged = [...byId.values(), ...noId];
+
+  // 2) dedupe by fingerprint (helps with accidental double submit / local duplicates)
+  const byFp = new Map();
+  const noFp = [];
+  for(const h of merged){
+    const fp = _histFingerprint(h);
+    if(!fp){ noFp.push(h); continue; }
+    const prev = byFp.get(fp);
+    byFp.set(fp, prev ? _pickBetterHist(prev, h) : h);
+  }
+  return [...byFp.values(), ...noFp];
+}
+
 function renderCompletedSection(){
   const list = $("completedList");
   const empty = $("completedEmpty");
@@ -8305,7 +8372,7 @@ Linea: polveri`, null); }catch(_e){}
                 });
               }catch(_e){}
 
-              state.history = [...(state.history||[]), withId];
+              state.history = dedupeHistory([...(state.history||[]), withId]);
               state.historyReady = true;
               try{ await bumpGlobalStats(1, kg); }catch(_e){}
               try{ renderCompletedSection(); }catch(_e){}
