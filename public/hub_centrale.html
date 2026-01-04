@@ -380,6 +380,10 @@
       text-decoration:none;
       transition: transform .16s cubic-bezier(.22,.61,.36,1), box-shadow .18s ease, filter .18s ease, outline-color .18s ease;
       will-change:transform;
+      touch-action: manipulation;
+      -webkit-tap-highlight-color: transparent;
+      -webkit-touch-callout: none;
+      -webkit-user-select: none;
       user-select:none;
       animation: tilePop 520ms cubic-bezier(.18,.89,.32,1.28) both;
       animation-delay: calc(var(--i, 0) * 70ms);
@@ -1861,7 +1865,7 @@ providerInit().catch((e)=>{
 })();
 
 
-/* iOS: effetto "pressing" consistente sulle icone (anche quando :active non scatta) */
+/* iOS: effetto "pressing" + hold (stile iOS) sulle tile */
 (function(){
   try{
     var tiles = Array.prototype.slice.call(document.querySelectorAll('.tile'));
@@ -1869,19 +1873,83 @@ providerInit().catch((e)=>{
 
     var CLS = 'is-pressed';
 
-    function add(el){ if(el && el.classList) el.classList.add(CLS); }
+    function isDisabled(el){
+      try{
+        if(!el) return true;
+        if(el.classList && el.classList.contains('is-disabled')) return true;
+        var aria = el.getAttribute ? el.getAttribute('aria-disabled') : null;
+        return aria === 'true';
+      }catch(_e){ return false; }
+    }
+
+    function add(el){ if(el && el.classList && !isDisabled(el)) el.classList.add(CLS); }
     function rm(el){ if(el && el.classList) el.classList.remove(CLS); }
 
     tiles.forEach(function(t){
-      // Touch (iOS)
-      t.addEventListener('touchstart', function(){ add(t); }, { passive:true });
-      t.addEventListener('touchend', function(){ rm(t); }, { passive:true });
-      t.addEventListener('touchcancel', function(){ rm(t); }, { passive:true });
+      // Touch (iOS) — resta premuto finché il dito è giù
+      var activeTouchId = null;
+      var raf = 0;
 
-      // Pointer (desktop / modern browsers)
-      t.addEventListener('pointerdown', function(){ add(t); });
-      t.addEventListener('pointerup', function(){ rm(t); });
-      t.addEventListener('pointercancel', function(){ rm(t); });
+      function within(x, y){
+        var r = t.getBoundingClientRect();
+        return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
+      }
+
+      t.addEventListener('touchstart', function(e){
+        if(isDisabled(t)) return;
+        try{
+          if(!e.changedTouches || !e.changedTouches.length) return;
+          activeTouchId = e.changedTouches[0].identifier;
+          add(t);
+        }catch(_e){}
+      }, { passive:true });
+
+      t.addEventListener('touchmove', function(e){
+        if(activeTouchId == null) return;
+        if(raf) return;
+        raf = requestAnimationFrame(function(){
+          raf = 0;
+          try{
+            var touches = e.touches || [];
+            for(var i=0;i<touches.length;i++){
+              if(touches[i].identifier === activeTouchId){
+                var x = touches[i].clientX, y = touches[i].clientY;
+                if(within(x,y)) add(t); else rm(t);
+                return;
+              }
+            }
+            rm(t);
+          }catch(_e){}
+        });
+      }, { passive:true });
+
+      t.addEventListener('touchend', function(){
+        activeTouchId = null;
+        rm(t);
+      }, { passive:true });
+
+      t.addEventListener('touchcancel', function(){
+        activeTouchId = null;
+        rm(t);
+      }, { passive:true });
+
+      // Pointer (desktop / modern browsers) — usa pointer capture per l'hold
+      t.addEventListener('pointerdown', function(e){
+        if(isDisabled(t)) return;
+        add(t);
+        try{ t.setPointerCapture(e.pointerId); }catch(_e){}
+      });
+
+      t.addEventListener('pointerup', function(e){
+        rm(t);
+        try{ t.releasePointerCapture(e.pointerId); }catch(_e){}
+      });
+
+      t.addEventListener('pointercancel', function(e){
+        rm(t);
+        try{ t.releasePointerCapture(e.pointerId); }catch(_e){}
+      });
+
       t.addEventListener('pointerleave', function(){ rm(t); });
 
       // Safety
