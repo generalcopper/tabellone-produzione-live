@@ -834,8 +834,8 @@
       .replace(/'/g,"&#39;");
   }
   function emailTryNum(x){
-    const n = Number(String(x??"").replace(",", "."));
-    return Number.isFinite(n) ? n : null;
+    const n = parseCurrencyValue(x);
+    return (n!=null && Number.isFinite(n)) ? n : null;
   }
   function emailFmtDateIso(iso){
     try{
@@ -859,17 +859,49 @@
       if(d!=null) return d;
       return 0;
     })();
-    return renderQty({ qtyValue: q, qtyUnitRaw: unit, qtyTextRaw: (line?.qtyTextRaw||"") });
+    return renderQty({ qtyValue: q, qtyUnitRaw: unit, qtyTextRaw: (line?.qtyTextRaw||""), qtyValueTextRaw: (line?.qtyValueTextRaw||"") });
   }
   function emailLineProduced(line, fallbackUnit){
     const unit = String((line?.qtyUnitRaw ?? line?.um ?? fallbackUnit ?? "")).trim();
-    const q = (()=>{
+
+    const produced = (()=>{
       const a = emailTryNum(line?.producedQty);
       if(a!=null) return a;
       const b = emailTryNum(line?.producedKg);
       if(b!=null) return b;
+      return null;
+    })();
+
+    const plannedNum = (()=>{
+      const a = emailTryNum(line?.qtyValue);
+      if(a!=null) return a;
+      const b = emailTryNum(line?.qty);
+      if(b!=null) return b;
+      const c = emailTryNum(line?.plannedQty);
+      if(c!=null) return c;
+      const d = emailTryNum(line?.plannedKg);
+      if(d!=null) return d;
+      const e = emailTryNum(line?.qtyValueTextRaw);
+      if(e!=null) return e;
+      const f = emailTryNum(line?.qtyTextRaw);
+      if(f!=null) return f;
       return 0;
     })();
+
+    const hasManual = Boolean(line && (line.producedProvided===true || (line.producedInputRaw!=null && String(line.producedInputRaw).trim()!=="")));
+
+    // If produced looks empty/0 but planned is > 0, show planned (this avoids "0 kg" lines caused by parsing/autofill).
+    if(!hasManual && (produced==null || produced===0) && plannedNum>0){
+      return emailLinePlanned(line, fallbackUnit);
+    }
+
+    const q = produced!=null ? produced : 0;
+    const rawTxt = (line?.producedTextRaw ?? line?.producedInputRaw ?? "").toString().trim();
+    if(rawTxt && hasManual){
+      if(/[a-zA-Z]/.test(rawTxt)) return rawTxt;
+      return renderQty({ qtyValueTextRaw: rawTxt, qtyValue: q, qtyUnitRaw: unit });
+    }
+
     return renderQty({ qtyValue: q, qtyUnitRaw: unit });
   }
 
@@ -8135,9 +8167,31 @@ Linea: polveri`, null); }catch(_e){}
               const l = m.get(k);
               if(!l) continue;
               const raw = producedKg.get(k);
-              const val = raw!=null && String(raw).trim()!=="" ? Number(String(raw).replace(",", ".")) : NaN;
-              const fallback = Number(l.qty||0);
-              const prodVal = Number.isFinite(val) ? val : (Number.isFinite(fallback) ? fallback : (l.lineKg||0));
+              const rawS = raw!=null ? String(raw).trim() : "";
+              const parsed = rawS ? parseCurrencyValue(rawS) : null;
+
+              // Default: use the quantity planned in XML (already parsed as number when possible)
+              const fallbackQty = (()=>{
+                if(typeof l.qty === "number" && Number.isFinite(l.qty)) return l.qty;
+                const a = parseCurrencyValue(l.qty);
+                if(a!=null) return a;
+                const b = parseCurrencyValue(l.qtyValueTextRaw);
+                if(b!=null) return b;
+                const c = parseCurrencyValue(l.qtyTextRaw);
+                if(c!=null) return c;
+                return 0;
+              })();
+
+              // If user inserted a manual value, use it only if it's a positive finite number.
+              let prodVal = (parsed!=null && parsed>0) ? parsed : fallbackQty;
+
+              // Last resort: fall back to computed lineKg (when available)
+              if(!Number.isFinite(prodVal) || prodVal<=0){
+                const lk = Number(l.lineKg);
+                if(Number.isFinite(lk) && lk>0) prodVal = lk;
+                else prodVal = 0;
+              }
+
               kg += prodVal;
               perLine.push({
                 lineKey: k,
@@ -8146,7 +8200,13 @@ Linea: polveri`, null); }catch(_e){}
                 plannedKg: Number(l.lineKg||0),
                 producedKg: Number(prodVal||0),
                 qty: l.qty,
-                um: l.um || ""
+                um: l.um || "",
+                qtyUnitRaw: (l.qtyUnitRaw ?? l.um ?? ""),
+                qtyTextRaw: (l.qtyTextRaw || ""),
+                qtyValueTextRaw: (l.qtyValueTextRaw || ""),
+                qtyValue: (l.qtyValue!=null ? l.qtyValue : l.qty),
+                producedInputRaw: rawS,
+                producedProvided: Boolean(rawS)
               });
             }
           } else {
