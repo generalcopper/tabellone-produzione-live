@@ -1741,8 +1741,8 @@ Tip:
       firebase: { ok:false, app:null, auth:null, db:null, api:null, authApi:null },
       route: { view:"home", loc:null },
       inventory: {
-        cerea: { unsub:null, items:[], meta:{ count:0, lastUpdatedAt:null } },
-        concamarise: { unsub:null, items:[], meta:{ count:0, lastUpdatedAt:null } }
+        cerea: { unsub:null, items:[], meta:{ count:0, lastUpdatedAt:null, loaded:false } },
+        concamarise: { unsub:null, items:[], meta:{ count:0, lastUpdatedAt:null, loaded:false } }
       },
       logs: {
         cerea: { unsub:null, flows:[], meta:{ count:0 } },
@@ -2320,6 +2320,8 @@ Tip:
     const __LS_LOWMAIL_HASH = "amz_inventory_lowmail_hash_v1";
     const __LS_LOWMAIL_AT = "amz_inventory_lowmail_at_v1";
     const __LS_LOWMAIL_ID = "amz_inventory_lowmail_docid_v1";
+    const __LS_LOWMAIL_LOCK = "amz_inventory_lowmail_lock_v1";
+    const __LS_LOWMAIL_LOCK_HASH = "amz_inventory_lowmail_lock_hash_v1";
 
     function __lsGet(k){ try{ return localStorage.getItem(k); }catch(_e){ return null; } }
     function __lsSet(k,v){ try{ localStorage.setItem(k, String(v)); }catch(_e){} }
@@ -2468,6 +2470,13 @@ Tip:
           return;
         }
 
+        // invia SOLO quando entrambi i magazzini (Cerea + Concamarise) hanno ricevuto almeno uno snapshot
+        const __bothReady = !!(state.inventory?.cerea?.meta?.loaded && state.inventory?.concamarise?.meta?.loaded);
+        if(!__bothReady){
+          if(mailLog) mailLog.textContent = "Email automatica: in attesa sync completo (Cerea + Concamarise)…";
+          return;
+        }
+
         if(!changed || !cooldownOk){
           if(mailLog && lastAt){
             mailLog.textContent = `Email automatica già inviata/accodata alle ${fmtDate(lastAt)} (stesso stato).`;
@@ -2476,6 +2485,16 @@ Tip:
           }
           return;
         }
+
+        // lock anti-doppio invio (multi-tab / doppie render)
+        const lockAt = Number(__lsGet(__LS_LOWMAIL_LOCK) || 0);
+        const lockHash = String(__lsGet(__LS_LOWMAIL_LOCK_HASH) || "");
+        if(lockAt && (now - lockAt) < (90 * 1000) && lockHash === fingerprint){
+          if(mailLog) mailLog.textContent = "Email automatica: invio già in corso…";
+          return;
+        }
+        __lsSet(__LS_LOWMAIL_LOCK, now);
+        __lsSet(__LS_LOWMAIL_LOCK_HASH, fingerprint);
 
         const payload = __buildLowStockEmailPayload(items);
         const { collection, addDoc, serverTimestamp } = fb.api;
@@ -2499,8 +2518,14 @@ Tip:
         __lsSet(__LS_LOWMAIL_AT, now);
         __lsSet(__LS_LOWMAIL_ID, docRef?.id || "");
 
+        // rilascio lock
+        __lsSet(__LS_LOWMAIL_LOCK, 0);
+        __lsSet(__LS_LOWMAIL_LOCK_HASH, "");
+
         if(mailLog) mailLog.textContent = `Email automatica accodata alle ${fmtDate(now)} • ${payload.total} righe.`;
       }catch(err){
+        // rilascio lock (in caso di errore)
+        try{ __lsSet(__LS_LOWMAIL_LOCK, 0); __lsSet(__LS_LOWMAIL_LOCK_HASH, ""); }catch(_e){}
         // non bloccare la UI
         try{
           const mailLog = $("homeLowStockMailLog");
@@ -2881,7 +2906,7 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
         try{ state.inventory[loc].unsub && state.inventory[loc].unsub(); }catch(_e){}
         state.inventory[loc].unsub = null;
         state.inventory[loc].items = [];
-        state.inventory[loc].meta = { count:0, lastUpdatedAt:null };
+        state.inventory[loc].meta = { count:0, lastUpdatedAt:null, loaded:false };
       }
       stopAllLogs();
       if(state.route.view==="location") renderInventoryList();
@@ -2925,6 +2950,7 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
         inv.items = arr;
         inv.meta.count = arr.length;
         inv.meta.lastUpdatedAt = last ? new Date(last) : null;
+        inv.meta.loaded = true;
 
         if(state.route.view==="location" && state.route.loc===loc){
           renderInventoryList();
