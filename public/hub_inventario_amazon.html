@@ -2330,37 +2330,103 @@ Tip:
     }
 
     function __buildLowStockEmailPayload(items){
-      const lines = (items||[]).map((it, idx)=>{
-        const loc = prettyLoc(it.loc || "");
-        const sku = toSkuId(it.sku || "");
-        const title = String(it.title || "").trim() || "(senza nome)";
-        const qty = __fmtQty(it.qty);
-        return `${idx+1}) [${loc}] ${sku} — ${title} — ${qty} pz`;
+      const rows = (items||[])
+        .slice()
+        .map(it=>{
+          const meta = parseTitleMeta(it.title || "");
+          const main = (meta && meta.main) ? String(meta.main).trim() : String(it.title||"").trim();
+          const product = main || "(senza nome)";
+          const qty = __fmtQty(it.qty);
+          return { product, qty };
+        })
+        .sort((a,b)=>{
+          const qa = Number(a.qty);
+          const qb = Number(b.qty);
+          if(Number.isFinite(qa) && Number.isFinite(qb) && qa !== qb) return qa - qb;
+          return String(a.product||"").localeCompare(String(b.product||""));
+        });
+
+      const total = rows.length;
+      const stamp = (typeof fmtDate==="function") ? fmtDate(Date.now()) : (new Date().toLocaleString("it-IT"));
+
+      // --- TEXT (plain) ---
+      const maxLen = Math.min(42, rows.reduce((m,r)=> Math.max(m, String(r.product||"").length), 0) || 18);
+      const headerLine = `${"Prodotto".padEnd(maxLen, " ")}  |  Scorta`;
+      const sepLine = `${"-".repeat(maxLen)}--|--------`;
+      const textLines = rows.map(r=>{
+        const p = String(r.product||"");
+        const name = (p.length>maxLen) ? (p.slice(0, Math.max(0, maxLen-1)) + "…") : p;
+        return `${name.padEnd(maxLen, " ")}  |  ${String(r.qty)}`;
       });
 
-      const total = lines.length;
       const head = [
-        "Procedere con produzione.",
+        "Amazon — Alert sotto scorta inventario",
+        `Generato: ${stamp}`,
+        "Azione: avviare produzione / riordino.",
+        "Soglia: < 100 pz",
+        `Totale prodotti: ${total}`,
         "",
-        `Totale righe sotto scorta: ${total}`,
-        "",
-        "Dettagli:",
-        ...lines
+        headerLine,
+        sepLine,
+        ...textLines
       ].join("\n");
 
-      const htmlRows = lines.map(l=>`<li style="margin:0 0 6px 0">${escapeHtml(l)}</li>`).join("");
+      // --- HTML (table) ---
+      const htmlRows = rows.map(r=>`
+        <tr>
+          <td style="padding:10px 12px; border-bottom:1px solid #e9eef2; vertical-align:top; font-size:14px; color:#111">
+            ${escapeHtml(String(r.product||""))}
+          </td>
+          <td style="padding:10px 12px; border-bottom:1px solid #e9eef2; vertical-align:top; text-align:right; white-space:nowrap; font-size:14px; font-weight:700; color:#111">
+            ${escapeHtml(String(r.qty))}
+          </td>
+        </tr>
+      `).join("");
+
       const htmlBody = `
-        <div style="font-family: -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Arial; line-height:1.45">
-          <p style="margin:0 0 10px 0"><b>Procedere con produzione.</b></p>
-          <p style="margin:0 0 10px 0">Totale righe sotto scorta: <b>${total}</b></p>
-          <div style="margin:10px 0 0 0">
-            <div style="font-weight:600; margin:0 0 6px 0">Dettagli</div>
-            <ol style="margin:0; padding-left:18px">${htmlRows}</ol>
+        <div style="font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Arial; line-height:1.45; background:#ffffff; padding:0; margin:0">
+          <div style="max-width:680px; margin:0 auto; border:1px solid #e9eef2; border-radius:14px; overflow:hidden">
+            <div style="padding:16px 18px; background:#f6f7f8; border-bottom:1px solid #e9eef2">
+              <div style="font-size:16px; font-weight:800; margin:0 0 4px 0">Amazon • Alert sotto scorta</div>
+              <div style="font-size:13px; color:#556; margin:0">
+                Generato: <b>${escapeHtml(stamp)}</b> • Soglia: <b>&lt; 100 pz</b> • Prodotti: <b>${total}</b>
+              </div>
+            </div>
+
+            <div style="padding:14px 18px">
+              <p style="margin:0 0 12px 0; font-size:14px">
+                Azione consigliata: <b>avviare produzione / riordino</b>.
+              </p>
+
+              <table style="width:100%; border-collapse:collapse; border:1px solid #e9eef2; border-radius:12px; overflow:hidden">
+                <thead>
+                  <tr>
+                    <th style="text-align:left; padding:10px 12px; font-size:12px; letter-spacing:.04em; text-transform:uppercase; color:#556; background:#fbfcfd; border-bottom:1px solid #e9eef2">
+                      Prodotto
+                    </th>
+                    <th style="text-align:right; padding:10px 12px; font-size:12px; letter-spacing:.04em; text-transform:uppercase; color:#556; background:#fbfcfd; border-bottom:1px solid #e9eef2; white-space:nowrap">
+                      Scorta
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${htmlRows || `
+                    <tr>
+                      <td colspan="2" style="padding:12px; font-size:14px; color:#556">Nessun prodotto sotto soglia 🎯</td>
+                    </tr>
+                  `}
+                </tbody>
+              </table>
+
+              <div style="margin-top:12px; font-size:12px; color:#667">
+                Nota: righe generate automaticamente dall'hub inventario Amazon.
+              </div>
+            </div>
           </div>
         </div>
       `;
 
-      const subject = `Sotto scorta: procedere con produzione (${total} righe)`;
+      const subject = `Amazon — Sotto scorta inventario (${total} prodotti)`;
       return { subject, text: head, html: htmlBody, total };
     }
 
