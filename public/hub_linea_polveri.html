@@ -1815,8 +1815,7 @@
     }
     return firstRaw || "";
   }
-    return set.size === 1 ? Array.from(set)[0] : "";
-  }
+
   async function copyKeyToClipboard(text){
     if(!text) return;
     try{
@@ -8363,11 +8362,17 @@ Linea: polveri`, null); }catch(_e){}
   }
 
   async function registerPushSW(){
-    if(!("serviceWorker" in navigator)) throw new Error("Service worker non supportati");
-
-    const swUrl = new URL("firebase-messaging-sw.js", location.href).toString();
-    const reg = await navigator.serviceWorker.register(swUrl, { scope: "./" });
-    return reg;
+    // SW opzionale: se non esiste il file, non registrare nulla (zero errori/rumore console).
+    try{
+      if(!("serviceWorker" in navigator)) return null;
+      const swUrl = new URL("firebase-messaging-sw.js", location.href).toString();
+      const probe = await fetch(swUrl, { method:"GET", cache:"no-store" }).catch(()=>null);
+      if(!probe || !probe.ok) return null;
+      const reg = await navigator.serviceWorker.register(swUrl, { scope: "./" }).catch(()=>null);
+      return reg || null;
+    }catch(_e){
+      return null;
+    }
   }
 
   async function savePushToken(token){
@@ -8427,6 +8432,12 @@ Linea: polveri`, null); }catch(_e){}
       const messaging = state.firebase.messaging;
       const swReg = await registerPushSW();
 
+      if(!swReg){
+        showToast("Notifiche non disponibili", "Service worker non presente (file mancante).");
+        updatePushPill();
+        return;
+      }
+
       const token = await fm.getToken(messaging, {
         vapidKey: FCM_VAPID_KEY,
         serviceWorkerRegistration: swReg
@@ -8476,7 +8487,7 @@ Linea: polveri`, null); }catch(_e){}
 
 
       const swReg = await registerPushSW();
-      const token = await fm.getToken(messaging, { vapidKey: FCM_VAPID_KEY, serviceWorkerRegistration: swReg }).catch(()=>null);
+      const token = swReg ? await fm.getToken(messaging, { vapidKey: FCM_VAPID_KEY, serviceWorkerRegistration: swReg }).catch(()=>null) : null;
 
       if(token){
         await fm.deleteToken(messaging).catch(()=>{});
