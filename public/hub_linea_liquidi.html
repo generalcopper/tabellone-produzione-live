@@ -2374,6 +2374,9 @@ document.body.appendChild(banner);
     }, 12000);
 
     try{
+      // Warm start: render immediato da cache (poi sync in background)
+      try{ warmStartOrdersFromCache(); }catch(_e){}
+
       // Avvio sync (in parallelo) senza forzare show/hide della rotella
       try{ queuedSyncOrders(true, "boot"); }catch(_e){}
       await initLiveSync();
@@ -2679,7 +2682,118 @@ document.body.appendChild(banner);
     return outDocs;
   }
 
-  async function syncOrders(isBoot=false, reason="manual"){
+  
+  /* =========================
+     WARM START — cache per caricamento quasi immediato
+     (Dopo auth: render immediato da cache, poi sync in background)
+  ========================= */
+  const PARSED_ORDERS_CACHE_KEY = "HUB_LIQUIDI_PARSED_ORDERS_V1";
+  const PARSED_ORDERS_CACHE_VER = 1;
+
+  function _readParsedOrdersCache(){
+    try{
+      const raw = localStorage.getItem(PARSED_ORDERS_CACHE_KEY);
+      if(!raw) return null;
+      const j = JSON.parse(raw);
+      if(!j || j.v !== PARSED_ORDERS_CACHE_VER) return null;
+      if(!Array.isArray(j.powderOrders)) return null;
+      return j;
+    }catch(_e){ return null; }
+  }
+
+  function _writeParsedOrdersCache(){
+    try{
+      const payload = {
+        v: PARSED_ORDERS_CACHE_VER,
+        at: Date.now(),
+        xmlModifiedTime: state.xmlModifiedTime || null,
+        lastFetchAt: state.lastFetchAt || null,
+        fatturatoLordo: (state.fatturatoLordo ?? null),
+        powderOrders: Array.isArray(state.powderOrders) ? state.powderOrders : [],
+      };
+      localStorage.setItem(PARSED_ORDERS_CACHE_KEY, JSON.stringify(payload));
+    }catch(_e){}
+  }
+
+  function _applyParsedOrdersCache(j){
+    if(!j) return false;
+    try{
+      state.powderOrders = Array.isArray(j.powderOrders) ? j.powderOrders : [];
+      state.xmlModifiedTime = j.xmlModifiedTime || state.xmlModifiedTime || null;
+      state.lastFetchAt = j.lastFetchAt || state.lastFetchAt || null;
+      if(j.fatturatoLordo !== undefined) state.fatturatoLordo = j.fatturatoLordo;
+      flushAllowlistPendingRender();
+      return true;
+    }catch(_e){ return false; }
+  }
+
+  function warmStartOrdersFromCache(){
+    // IMPORTANT: esegui solo dopo accesso (evita leak dati da localStorage)
+    try{
+      if(loader.firstRenderDone) return false;
+      if(!state.user || !state.user.uid) return false;
+      if(authGateState !== "signed_in" && authGateState !== "restoring") return false;
+
+      const parsed = _readParsedOrdersCache();
+      if(parsed && _applyParsedOrdersCache(parsed)){
+        try{ renderHome(); }catch(_e){}
+        requestAnimationFrame(()=> markFirstRenderDone());
+        return true;
+      }
+
+      // Fallback: XML cache (locale). Se presente, parsiamo async e rendiamo appena pronto.
+      const cached = localStorage.getItem(XML_PROXY_CFG.cacheKey);
+      if(!cached) return false;
+      let c = null;
+      try{ c = JSON.parse(cached); }catch(_e){ return false; }
+      const xml = c?.xml;
+      if(!xml || typeof xml !== "string") return false;
+
+      state.lastFetchAt = c.at || null;
+      state.xmlModifiedTime = c.modifiedTime || null;
+
+      (async()=>{
+        try{
+          state.docs = await parseEasyfattXml(xml);
+          state.fatturatoLordo = computeFatturatoLordo(state.docs);
+
+          const powderDocs = [];
+          for(const d of state.docs){
+            const pLines = d.lines.filter(x=>x.powder);
+            if(!pLines.length) continue;
+            const totalKg = pLines.reduce((a,x)=>a + (Number(x.qty)||0), 0);
+            const alertLines = d.lines.filter(x=>x.alertInfo);
+            powderDocs.push({
+              customer: d.customer,
+              number: d.number,
+              date: d.date,
+              dueDate: d.dueDate,
+              conclusion: d.conclusion,
+              lines: pLines,
+              alerts: alertLines,
+              totalKg
+            });
+          }
+          state.powderOrders = powderDocs;
+          try{ _writeParsedOrdersCache(); }catch(_e){}
+          flushAllowlistPendingRender();
+          try{ renderHome(); }catch(_e){}
+          if(!loader.firstRenderDone) requestAnimationFrame(()=> markFirstRenderDone());
+          try{ _writeParsedOrdersCache(); }catch(_e){}
+        }catch(_e){}
+      })();
+
+      return true;
+    }catch(_e){
+      return false;
+    }
+  }
+  /* =========================
+     END WARM START
+  ========================= */
+
+
+async function syncOrders(isBoot=false, reason="manual"){
     try {
       setOnlinePill("warn", "Stato: sincronizzazione…");
       const isFirstPass = !loader.firstRenderDone;
@@ -2693,11 +2807,35 @@ document.body.appendChild(banner);
       const xmlText = j?.xml;
       if(!xmlText || typeof xmlText !== "string") throw new Error("XML mancante");
 
-      state.xmlModifiedTime = j?.modifiedTime || null;
-      state.lastFetchAt = Date.now();
-      localStorage.setItem(XML_PROXY_CFG.cacheKey, JSON.stringify({ at: state.lastFetchAt, xml: xmlText, modifiedTime: state.xmlModifiedTime }));
+      const prevMod = state.xmlModifiedTime || null;
+      const nextMod = j?.modifiedTime || null;
 
-      showLoader(isFirstPass ? "Parsing…" : "Aggiornamento…");
+      // Aggiorna cache XML (sempre) per avere fallback offline
+      state.xmlModifiedTime = nextMod || null;
+      state.lastFetchAt = Date.now();
+      try{
+        localStorage.setItem(
+          XML_PROXY_CFG.cacheKey,
+          JSON.stringify({ at: state.lastFetchAt, xml: xmlText, modifiedTime: state.xmlModifiedTime })
+        );
+      }catch(_e){}
+
+      // Se l'XML non è cambiato, evitiamo parsing + rebuild (molto più veloce)
+      const hasDataAlready = Array.isArray(state.powderOrders) && state.powderOrders.length;
+      const sameMod = (prevMod && nextMod && String(prevMod) === String(nextMod));
+      if(sameMod && hasDataAlready){
+        setOnlinePill("ok", "Stato: online");
+        if(isBoot) bootSet(62, "OK: ordini già aggiornati");
+        loader.inError = false;
+        if(!loader.firstRenderDone){
+          requestAnimationFrame(()=> markFirstRenderDone());
+        }
+        hideLoader();
+        resetSyncBackoff();
+        return;
+      }
+
+showLoader(isFirstPass ? "Parsing…" : "Aggiornamento…");
       state.docs = await parseEasyfattXml(xmlText);
       state.fatturatoLordo = computeFatturatoLordo(state.docs);
 
@@ -2710,6 +2848,7 @@ document.body.appendChild(banner);
         powderDocs.push({ customer: d.customer, number: d.number, orderNo: d.number, conclusion: d.conclusion, lines: pLines, alerts: alertLines, totalKg });
       }
       state.powderOrders = powderDocs;
+      try{ _writeParsedOrdersCache(); }catch(_e){}
       flushAllowlistPendingRender();
 
       showLoader("Aggiornamento…");
@@ -2727,6 +2866,22 @@ document.body.appendChild(banner);
     } catch(err) {
       console.warn("syncOrders failed", err);
       showLoaderError("Connessione instabile. Riprovo…");
+
+      // Fast fallback: cache già parsata (evita parsing XML)
+      try{
+        const parsed = _readParsedOrdersCache();
+        if(parsed && _applyParsedOrdersCache(parsed)){
+          renderHome();
+          setOnlinePill("bad", "Stato: offline (cache)");
+          if(isBoot) bootSet(55, "Connessione lenta… uso cache locale");
+          if(!loader.firstRenderDone){
+            requestAnimationFrame(()=> markFirstRenderDone());
+          }
+          scheduleSyncRetry();
+          return;
+        }
+      }catch(_e){}
+
       const cached = localStorage.getItem(XML_PROXY_CFG.cacheKey);
       if(cached){
         try {
@@ -3654,6 +3809,7 @@ function hideLogin(){
       state.user = { uid: user.uid, fullName: profile.fullName, email: (user.email||profile.email||""), emailLower: String((user.email||profile.email||"")).toLowerCase(), isAdmin: Boolean(access && access.isAdmin) };
       state.operator = state.user.fullName;
       $("hdrUser").textContent = state.user.fullName;
+      try{ warmStartOrdersFromCache(); }catch(_e){}
       try{ await logAppOpenOncePerSession(); }catch(_e){}
       applyRoleClasses();
       guardAdminAccessOnMobile();
