@@ -2044,6 +2044,49 @@ flex-direction: column !important;
   overflow: visible !important;
 }
 </style>
+
+<style id="payrollExtractUx">
+  /* Payroll — Estrazione: spinner “pulito” (senza riquadro) + frasi dinamiche */
+  #adminModal #payrollStepExtract .progressShell{
+    border: 0 !important;
+    background: transparent !important;
+    box-shadow: none !important;
+    padding: 0 !important;
+    margin-top: 14px !important;
+  }
+  #adminModal #payrollStepExtract .progressSpinRow{
+    flex-direction: column !important;
+    align-items: center !important;
+    justify-content: center !important;
+    gap: 12px !important;
+    padding: 0 !important;
+  }
+  #adminModal #payrollStepExtract .iosSpinner12{
+    width: 56px !important;
+    height: 56px !important;
+  }
+  #adminModal #payrollStepExtract .progressLabel{
+    text-align: center !important;
+    padding: 0 !important;
+    background: transparent !important;
+  }
+  #adminModal #payrollStepExtract #payrollProgressLabelExtract{
+    font-size: 14px !important;
+    font-weight: 900 !important;
+    letter-spacing: -0.01em !important;
+    color: rgba(12,16,26,.80) !important;
+  }
+  #adminModal #payrollStepExtract #payrollBusyRotator{
+    margin-top: 10px;
+    font-size: 13px;
+    font-weight: 850;
+    color: rgba(12,16,26,.56);
+    text-align: center;
+    min-height: 18px;
+    transition: opacity .25s ease;
+    padding: 0 10px;
+  }
+</style>
 </head>
 <body>
   <div id="toast" role="status" aria-live="polite">
@@ -2300,7 +2343,9 @@ flex-direction: column !important;
                   </div>
                   <div class="progressBar" aria-hidden="true" style="display:none"><div class="progressFill active" id="payrollProgressFillExtract"></div></div>
                 </div>
-              </div>
+              
+                <div id="payrollBusyRotator"></div>
+</div>
 
               <div class="payrollPane" id="payrollStepPreview" style="display:none">
                 <div class="pcHead" style="padding:0">
@@ -3455,9 +3500,63 @@ function Bi() {
         u && u.classList.toggle("active", uploadSteps.includes(e));
         c && c.classList.toggle("active", "directory"===e);
         w && w.classList.toggle("active", workflowSteps.includes(e) || (!uploadSteps.includes(e) && "directory"!==e));
+        if(e==="extracting"){ startPayrollBusyRotator(); } else { stopPayrollBusyRotator(); }
       }
 
-      
+      const __payrollBusyPhrases = [
+        "Attendere prego…",
+        "Lavorazione in corso…",
+        "Stiamo verificando i dati: grazie per la pazienza.",
+        "Controlli automatici e sicurezza in esecuzione.",
+        "Prepariamo il match delle righe…",
+        "Quasi fatto: non chiudere la pagina."
+      ];
+
+      function startPayrollBusyRotator(){
+        try{
+          const a = N.payroll?.admin; if(!a) return;
+          a.__busyRot = a.__busyRot || { timer:null, t2:null, idx:0 };
+          const rot = U("payrollBusyRotator");
+          if(!rot) return;
+
+          stopPayrollBusyRotator();
+          a.__busyRot.idx = 0;
+          rot.textContent = __payrollBusyPhrases[0];
+          rot.style.opacity = "1";
+
+          a.__busyRot.timer = setInterval(()=>{
+            try{
+              const st = N.payroll?.admin?.step;
+              if(st !== "extracting"){ stopPayrollBusyRotator(); return; }
+              const next = (a.__busyRot.idx + 1) % __payrollBusyPhrases.length;
+              a.__busyRot.idx = next;
+              rot.style.opacity = "0";
+              a.__busyRot.t2 = setTimeout(()=>{
+                rot.textContent = __payrollBusyPhrases[next];
+                rot.style.opacity = "1";
+              }, 180);
+            }catch(_e){}
+          }, 1700);
+        }catch(_e){}
+      }
+
+      function stopPayrollBusyRotator(){
+        try{
+          const a = N.payroll?.admin;
+          if(a && a.__busyRot){
+            try{ a.__busyRot.timer && clearInterval(a.__busyRot.timer); }catch(_e){}
+            try{ a.__busyRot.t2 && clearTimeout(a.__busyRot.t2); }catch(_e){}
+            a.__busyRot.timer = null;
+            a.__busyRot.t2 = null;
+          }
+          const rot = U("payrollBusyRotator");
+          if(rot){
+            rot.textContent = "";
+            rot.style.opacity = "1";
+          }
+        }catch(_e){}
+      }
+
 function renderDirectoryUI(){
   const entries = N.payroll?.directory?.entries || [];
   const tbody = U("payrollDirectoryBody");
@@ -4551,6 +4650,7 @@ function renderUploadHistory(){
           if(!(N.firebase?.ok) || !docId) return;
           const ui = N.payroll?.admin?.sendUI;
           if(!ui) return;
+
           ui.deliveryUnsubs = ui.deliveryUnsubs || {};
           if(ui.deliveryUnsubs[sendKey]) return;
 
@@ -4567,9 +4667,8 @@ function renderUploadHistory(){
             try{ delete ui.deliveryUnsubs[sendKey]; }catch(_e){}
           };
 
-          // Fallback: se non riceviamo eventi (es. permessi), non lasciare la UI bloccata
+          // fallback: se non posso leggere lo stato, non blocco l’invio
           const timer = setTimeout(()=>{
-            if(done) return;
             try{ setPayrollSendRowStatus(sendKey, "ok", "scritto"); }catch(_e){}
             cleanup();
           }, 8000);
@@ -4580,16 +4679,17 @@ function renderUploadHistory(){
               const unsub = api.onSnapshot(ref, snap=>{
                 if(done) return;
                 if(snap.exists()){
-                  clearTimeout(timer);
+                  try{ clearTimeout(timer); }catch(_e){}
                   setPayrollSendRowStatus(sendKey, "live", "arrivato");
                   cleanup();
                 }
               }, err=>{
-                if(err?.code !== "permission-denied") console.warn("payroll delivery watch", err);
-                clearTimeout(timer);
-                // permission-denied: consideriamo comunque scritto
+                if(done) return;
+                try{ clearTimeout(timer); }catch(_e){}
                 if(err?.code === "permission-denied"){
                   try{ setPayrollSendRowStatus(sendKey, "ok", "scritto"); }catch(_e){}
+                }else{
+                  try{ setPayrollSendRowStatus(sendKey, "ok", "stato non disponibile"); }catch(_e){}
                 }
                 cleanup();
               });
@@ -4597,13 +4697,16 @@ function renderUploadHistory(){
             }catch(_e){}
           }
 
-
+          ui.deliveryUnsubs[sendKey] = cleanup;
+        }catch(_e){}
+      }
 
       function watchPayrollMailDelivery(sendKey, mailDocId){
         try{
           if(!(N.firebase?.ok) || !mailDocId) return;
           const ui = N.payroll?.admin?.sendUI;
           if(!ui) return;
+
           ui.mailUnsubs = ui.mailUnsubs || {};
           if(ui.mailUnsubs[sendKey]) return;
 
@@ -4611,27 +4714,22 @@ function renderUploadHistory(){
           const db = N.firebase.db;
 
           let done = false;
+          let unsub = null;
+
           const cleanup = ()=>{
             if(done) return;
             done = true;
-            try{ ui.mailUnsubs[sendKey] && ui.mailUnsubs[sendKey](); }catch(_e){}
             try{ delete ui.mailUnsubs[sendKey]; }catch(_e){}
           };
 
-          // Se non abbiamo permessi per leggere lo stato, non bloccare la UI
           const timer = setTimeout(()=>{
-            if(done) return;
-            // Non chiudere il watch: la mail potrebbe impiegare più tempo (es. allegati / SMTP lento)
-            try{
-              const it = ui.byKey?.[sendKey];
-              const st = it?.mailStatus || "queue";
-              const det = it?.mailDetail || "in lavorazione";
-              setPayrollSendRowMailStatus(sendKey, st, det);
-            }catch(_e){}
+            try{ setPayrollSendRowMailStatus(sendKey, "queue", "stato non disponibile"); }catch(_e){}
+            try{ unsub && unsub(); }catch(_e){}
+            cleanup();
           }, 60000);
 
           const ref = api.doc(db, COL_EMAIL, mailDocId);
-          const unsub = api.onSnapshot(ref, snap=>{
+          unsub = api.onSnapshot(ref, snap=>{
             if(done) return;
             if(!snap.exists()) return;
             const d = snap.data() || {};
@@ -4641,49 +4739,40 @@ function renderUploadHistory(){
               setPayrollSendRowMailStatus(sendKey, "queue", "in coda");
               return;
             }
-
-            clearTimeout(timer);
-
-            if(st === "PENDING"){
-              setPayrollSendRowMailStatus(sendKey, "queue", "in coda");
-              return;
-            }
             if(st === "PROCESSING"){
               setPayrollSendRowMailStatus(sendKey, "run", "in invio");
               return;
             }
             if(st === "SUCCESS"){
               setPayrollSendRowMailStatus(sendKey, "ok", "andata a buon fine");
+              try{ clearTimeout(timer); }catch(_e){}
+              try{ unsub && unsub(); }catch(_e){}
               cleanup();
               return;
             }
             if(st === "ERROR"){
               const err = (d?.delivery?.error || "errore");
               setPayrollSendRowMailStatus(sendKey, "err", err);
+              try{ clearTimeout(timer); }catch(_e){}
+              try{ unsub && unsub(); }catch(_e){}
               cleanup();
               return;
             }
-
-            // stati non previsti
-            setPayrollSendRowMailStatus(sendKey, "run", st);
           }, err=>{
-            clearTimeout(timer);
-            if(err?.code !== "permission-denied") console.warn("payroll mail watch", err);
+            console.warn("watchPayrollMailDelivery watch", err);
             if(err?.code === "permission-denied"){
               try{ setPayrollSendRowMailStatus(sendKey, "queue", "stato non disponibile"); }catch(_e){}
             }else{
               try{ setPayrollSendRowMailStatus(sendKey, "err", err?.message || String(err)); }catch(_e){}
             }
+            try{ clearTimeout(timer); }catch(_e){}
+            try{ unsub && unsub(); }catch(_e){}
             cleanup();
           });
 
-          ui.mailUnsubs[sendKey] = unsub;
+          ui.mailUnsubs[sendKey] = ()=>{ try{ clearTimeout(timer); }catch(_e){}; try{ unsub && unsub(); }catch(_e){}; cleanup(); };
         }catch(_e){}
       }
-          ui.deliveryUnsubs[sendKey] = cleanup;
-        }catch(_e){}
-      }
-
 
       function updatePayrollSendMatchSummary(){
         const ui = N.payroll?.admin?.sendUI;
