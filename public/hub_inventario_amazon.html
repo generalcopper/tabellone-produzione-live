@@ -897,6 +897,25 @@
       border-radius: 18px;
       padding: 12px;
     }
+    /* Fix scroll liste dentro SHEET CARICA (PDF + Campo libero) */
+    #sheetCarica .sheetBody{ min-height:0; }
+    #sheetCarica #caricaPanePdf,
+    #sheetCarica #caricaPaneText{
+      flex: 1 1 auto;
+      min-height: 0;
+      display:flex;
+      flex-direction:column;
+      gap:12px;
+    }
+    #sheetCarica #caricaPanePdf .sheetScroll,
+    #sheetCarica #caricaPaneText .sheetScroll{
+      flex: 1 1 auto;
+      min-height: 0;
+      overflow:auto;
+      -webkit-overflow-scrolling: touch;
+      overscroll-behavior: contain;
+    }
+
 
     .folderRow{
       border:1px solid rgba(15,23,42,.10);
@@ -1215,6 +1234,21 @@
       color: rgba(15,23,42,.28);
       margin: 0 2px;
     }
+
+    /* HOME - button flussi */
+    .homeBottomTools{
+      margin-top: 10px;
+      display:flex;
+      justify-content:flex-end;
+      align-items:center;
+      gap:10px;
+    }
+    #homeFlowsSection.focusPulse{
+      outline: 2px solid rgba(255,153,0,.32);
+      outline-offset: 2px;
+      border-radius: 14px;
+    }
+
 </style>
 </head>
 
@@ -1434,7 +1468,7 @@
 
 
           <div class="divider"></div>
-          <div style="display:flex; align-items:flex-start; justify-content:space-between; gap:10px; flex-wrap:wrap">
+          <div style="display:flex; align-items:flex-start; justify-content:space-between; gap:10px; flex-wrap:wrap" id="homeFlowsSection">
             <div style="min-width:0">
               <div class="cardTitle">Flussi recenti</div>
               <div class="cardSub">Apri un flusso per vedere le righe estratte. Le eliminazioni/annullamenti sono disponibili solo per Admin.</div>
@@ -1453,7 +1487,11 @@
           </div>
 
           <div class="list" id="invList"></div>
-        </div>
+        
+          <div class="homeBottomTools">
+            <button class="btn ghost small" id="btnHomeFlows" type="button" title="Vai ai flussi">Flussi</button>
+          </div>
+</div>
       </div>
     </div>
   </div>
@@ -4008,8 +4046,8 @@ function closeSheet(kind){
       let qty = 0;
       let namePart = raw;
 
-      const tail = raw.match(/(?:-|–|—|:)\s*(\d[\d\.\,]*)\s*(pz|pcs|pezzi|pc|unit|units)?\s*$/i) ||
-                   raw.match(/\b(\d[\d\.\,]*)\s*(pz|pcs|pezzi|pc|unit|units)\b/i);
+      const tail = raw.match(/(?:-|–|—|:)\s*(\d[\d\.\,]*)\s*(pz|pcs|pezzi|pc|unit|units)?\s*\.?\s*$/i) ||
+                   raw.match(/\b(\d[\d\.\,]*)\s*(pz|pcs|pezzi|pc|unit|units)\b\.?/i);
       if(tail){
         const num = String(tail[1]||"").replace(/\./g,"").replace(/,/g,".");
         qty = parseQty(num);
@@ -4029,8 +4067,13 @@ function closeSheet(kind){
       const skuToken = raw.match(/\b([A-Za-z0-9]{2,}(?:-[A-Za-z0-9]{2,}){1,})\b/);
       if(skuToken) skuGuess = toSkuId(skuToken[1]);
 
-      // pulizia nome
-      namePart = namePart.replace(/\s*[-–—]\s*$/,"").trim();
+      // pulizia nome (rimuovi separatori residui come ":" e punteggiatura finale)
+      namePart = namePart
+        .replace(/\s*[-–—:]\s*$/,"")
+        .replace(/[,:;]+\s*$/g,"")
+        .replace(/[\.\s]+$/g,"")
+        .trim();
+
       return { raw, name: namePart, qty: qty||0, skuGuess };
     }
 
@@ -4130,6 +4173,7 @@ function closeSheet(kind){
     function bestInventoryMatch(name, skuGuess){
       const idx = getInvIndexForMatch();
 
+      // 1) se c'è uno SKU in chiaro, usa quello (se presente in almeno una location)
       const g = toSkuId(skuGuess||"");
       if(g){
         const inConca = idx.mapConca.has(g);
@@ -4141,15 +4185,14 @@ function closeSheet(kind){
         }
       }
 
+      // 2) match per nome (fuzzy), deduplicato per SKU (evita falsi "abbinamento non sicuro" quando lo stesso SKU è in entrambe le location)
       const q = normalizeText(name||"");
       if(!q) return null;
 
       const qTokens = tokenizeForMatch(q);
       const qNums = (q.match(/\d+/g) || []);
 
-      let best = null;
-      let second = null;
-
+      const bestBySku = new Map(); // sku -> { sku, title, score }
       for(const row of idx.all){
         const it = row.it;
         const sku = row.sku;
@@ -4159,15 +4202,20 @@ function closeSheet(kind){
 
         let score = 0;
 
+        // match "contenuto" (utile quando la query è una frase intera)
         if(tNorm.includes(q)) score += 2.2;
+
+        // match inverse (query include titolo breve)
         if(q.includes(normalizeText(title))) score += 1.4;
 
+        // token overlap (normalizzato sulla query: query corta non viene penalizzata)
         const tTokens = tokenizeForMatch(tNorm);
         if(qTokens.length){
           const tSet = new Set(tTokens);
           let inter = 0;
           for(const t of qTokens) if(tSet.has(t)) inter++;
           score += (inter / Math.max(2, qTokens.length)) * 2.0;
+          if(inter >= qTokens.length && qTokens.length >= 2) score += 0.35;
         }
 
         // numeri (500, 750, 20, 1kg, ecc.)
@@ -4175,25 +4223,28 @@ function closeSheet(kind){
           const tNums = new Set(tNorm.match(/\d+/g) || []);
           let nInter = 0;
           for(const n of qNums) if(tNums.has(n)) nInter++;
-          score += Math.min(1.0, nInter * 0.25);
+          score += Math.min(1.2, nInter * 0.35);
+          if(nInter >= qNums.length && qNums.length) score += 0.25;
         }
 
         // piccolo boost se compare una parola lunga identica
         if(qTokens.some(t=> t.length>=6 && tNorm.includes(t))) score += 0.4;
 
-        const cand = { sku, title, loc: row.loc, score };
-        if(!best || cand.score > best.score){
-          second = best;
-          best = cand;
-        }else if(!second || cand.score > second.score){
-          second = cand;
+        const prev = bestBySku.get(sku);
+        if(!prev || score > prev.score){
+          bestBySku.set(sku, { sku, title, score });
         }
       }
+
+      const ranked = Array.from(bestBySku.values()).sort((a,b)=> b.score - a.score);
+      const best = ranked[0] || null;
+      const second = ranked[1] || null;
 
       if(!best || best.score < 0.55) return null;
 
       const ambiguous = !!(second && (best.score - second.score) < 0.18);
-      return { sku: best.sku, title: best.title, loc: best.loc, score: best.score, ambiguous };
+      const loc = resolveLocForSkuAny(best.sku, state.route?.loc || "", idx);
+      return { sku: best.sku, title: best.title || "", loc, score: best.score, ambiguous };
     }
 
 
@@ -5883,6 +5934,15 @@ async function applyFlow(kind){
       });
       $("btnHomeScarica")?.addEventListener("click", ()=>{
         openSheet("scarica");
+      });
+
+      $("btnHomeFlows")?.addEventListener("click", ()=>{
+        const el = $("homeFlowsSection");
+        if(!el) return;
+        el.scrollIntoView({ behavior: "smooth", block: "start" });
+        // highlight breve per orientarsi
+        el.classList.add("focusPulse");
+        window.setTimeout(()=> el.classList.remove("focusPulse"), 900);
       });
 
       $("btnBackHome")?.addEventListener("click", ()=>{
