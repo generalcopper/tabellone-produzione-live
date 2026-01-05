@@ -1,10 +1,9 @@
 <!doctype html>
 <html lang="it" translate="no">
 <head>
-  <link rel="stylesheet" href="/public/app.css?v=20260105a">
-<script src="/public/app.js?v=20260105a" defer></script>
 
-
+  <link rel="stylesheet" href="./public1/app.css">
+<script src="./public1/app.js" defer></script>
   
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
@@ -4017,15 +4016,111 @@ function closeSheet(kind){
       return { raw, name: namePart, qty: qty||0, skuGuess };
     }
 
-    function bestInventoryMatch(name, skuGuess){
-      const inv = currentInv();
-      const all = inv.items || [];
+    function getInvIndexForMatch(){
+      state.cache = state.cache || {};
+      const cInv = state.inventory?.concamarise || { items:[], meta:{} };
+      const rInv = state.inventory?.cerea || { items:[], meta:{} };
 
-      const skuSet = new Set(all.map(x=> toSkuId(x.sku||x.id||"")).filter(Boolean));
+      const cCount = (cInv?.meta && Number.isFinite(cInv.meta.count)) ? cInv.meta.count : (Array.isArray(cInv.items) ? cInv.items.length : 0);
+      const rCount = (rInv?.meta && Number.isFinite(rInv.meta.count)) ? rInv.meta.count : (Array.isArray(rInv.items) ? rInv.items.length : 0);
+
+      const cTs = (cInv?.meta && Number.isFinite(cInv.meta.lastUpdatedAtClient)) ? cInv.meta.lastUpdatedAtClient : 0;
+      const rTs = (rInv?.meta && Number.isFinite(rInv.meta.lastUpdatedAtClient)) ? rInv.meta.lastUpdatedAtClient : 0;
+
+      const key = `${cCount}|${cTs}|${rCount}|${rTs}`;
+      if(state.cache.invIndexForMatch?.key === key) return state.cache.invIndexForMatch;
+
+      const invConca = Array.isArray(cInv.items) ? cInv.items : [];
+      const invCerea = Array.isArray(rInv.items) ? rInv.items : [];
+
+      const mapConca = new Map();
+      for(const it of invConca){
+        const s = toSkuId(it.sku||it.id||"");
+        if(!s) continue;
+        if(!mapConca.has(s)) mapConca.set(s, it);
+      }
+      const mapCerea = new Map();
+      for(const it of invCerea){
+        const s = toSkuId(it.sku||it.id||"");
+        if(!s) continue;
+        if(!mapCerea.has(s)) mapCerea.set(s, it);
+      }
+
+      // lista unica per matching testuale
+      const all = [];
+      for(const it of invConca){
+        const s = toSkuId(it.sku||it.id||"");
+        if(!s) continue;
+        all.push({ loc:"concamarise", it, sku:s });
+      }
+      for(const it of invCerea){
+        const s = toSkuId(it.sku||it.id||"");
+        if(!s) continue;
+        all.push({ loc:"cerea", it, sku:s });
+      }
+
+      const idx = { key, invConca, invCerea, mapConca, mapCerea, all };
+      state.cache.invIndexForMatch = idx;
+      return idx;
+    }
+
+    function resolveLocForSkuAny(sku, locHint, idx){
+      const i = idx || getInvIndexForMatch();
+      const s = toSkuId(sku||"");
+      if(!s) return (locHint==="cerea" || locHint==="concamarise") ? locHint : "concamarise";
+
+      const inConca = i.mapConca.has(s);
+      const inCerea = i.mapCerea.has(s);
+
+      if(inConca && !inCerea) return "concamarise";
+      if(inCerea && !inConca) return "cerea";
+
+      // presente su entrambe: prova hint -> qty -> default concamarise
+      if(inConca && inCerea){
+        if(locHint==="cerea" || locHint==="concamarise") return locHint;
+
+        const qa = Number.isFinite(i.mapConca.get(s)?.qty) ? i.mapConca.get(s).qty : 0;
+        const qb = Number.isFinite(i.mapCerea.get(s)?.qty) ? i.mapCerea.get(s).qty : 0;
+
+        if(qa===0 && qb!==0) return "cerea";
+        return "concamarise";
+      }
+
+      // non presente in nessuno: fallback su hint o concamarise
+      return (locHint==="cerea" || locHint==="concamarise") ? locHint : "concamarise";
+    }
+
+    function getItemBySkuAny(sku, locHint){
+      const idx = getInvIndexForMatch();
+      const s = toSkuId(sku||"");
+      if(!s) return null;
+
+      const target = resolveLocForSkuAny(s, locHint, idx);
+      if(target==="cerea"){
+        const it = idx.mapCerea.get(s) || idx.mapConca.get(s) || null;
+        if(!it) return null;
+        const loc = idx.mapCerea.has(s) ? "cerea" : "concamarise";
+        return { it, loc };
+      }else{
+        const it = idx.mapConca.get(s) || idx.mapCerea.get(s) || null;
+        if(!it) return null;
+        const loc = idx.mapConca.has(s) ? "concamarise" : "cerea";
+        return { it, loc };
+      }
+    }
+
+    function bestInventoryMatch(name, skuGuess){
+      const idx = getInvIndexForMatch();
+
       const g = toSkuId(skuGuess||"");
-      if(g && skuSet.has(g)){
-        const it = all.find(x=> toSkuId(x.sku||x.id||"")===g) || null;
-        if(it) return { sku: toSkuId(it.sku||it.id||g), title: it.title||"", score: 9, ambiguous:false };
+      if(g){
+        const inConca = idx.mapConca.has(g);
+        const inCerea = idx.mapCerea.has(g);
+        if(inConca || inCerea){
+          const loc = resolveLocForSkuAny(g, state.route?.loc || "", idx);
+          const it = (loc==="cerea" ? idx.mapCerea.get(g) : idx.mapConca.get(g)) || idx.mapConca.get(g) || idx.mapCerea.get(g) || null;
+          return { sku: g, title: it?.title || "", loc, score: 9, ambiguous: false };
+        }
       }
 
       const q = normalizeText(name||"");
@@ -4037,8 +4132,9 @@ function closeSheet(kind){
       let best = null;
       let second = null;
 
-      for(const it of all){
-        const sku = toSkuId(it.sku||it.id||"");
+      for(const row of idx.all){
+        const it = row.it;
+        const sku = row.sku;
         const title = String(it.title||"");
         const tNorm = normalizeText(`${sku} ${title} ${it.titleNorm||""}`);
         if(!tNorm) continue;
@@ -4067,7 +4163,7 @@ function closeSheet(kind){
         // piccolo boost se compare una parola lunga identica
         if(qTokens.some(t=> t.length>=6 && tNorm.includes(t))) score += 0.4;
 
-        const cand = { sku, title, score };
+        const cand = { sku, title, loc: row.loc, score };
         if(!best || cand.score > best.score){
           second = best;
           best = cand;
@@ -4079,8 +4175,9 @@ function closeSheet(kind){
       if(!best || best.score < 0.55) return null;
 
       const ambiguous = !!(second && (best.score - second.score) < 0.18);
-      return { sku: best.sku, title: best.title, score: best.score, ambiguous };
+      return { sku: best.sku, title: best.title, loc: best.loc, score: best.score, ambiguous };
     }
+
 
     function buildManualCaricaLines(){
       const t = String($("caricaText")?.value || state.manual.carica.text || "");
@@ -4103,7 +4200,8 @@ function closeSheet(kind){
           qty: parsed.qty||0,
           sku,
           title,
-          ambiguous: !!match?.ambiguous
+          ambiguous: !!match?.ambiguous,
+          loc: match?.loc || ""
         });
       }
 
@@ -4138,12 +4236,11 @@ function closeSheet(kind){
       const hint = $("skuPickHint");
       if(!list || !hint) return;
 
-      const inv = currentInv();
-      const all = inv.items || [];
+      const idx = getInvIndexForMatch();
       const q = normalizeText(String($("skuPickSearch")?.value || state.ui.skuPick?.q || ""));
       const filtered = q
-        ? all.filter(it=> normalizeText(`${it.sku} ${it.title} ${it.titleNorm}`).includes(q))
-        : all;
+        ? idx.all.filter(row => normalizeText(`${row.sku} ${row.it?.title||""} ${row.it?.titleNorm||""} ${row.loc}`).includes(q))
+        : idx.all;
 
       hint.textContent = `Prodotti: ${filtered.length}${q ? " • filtro attivo" : ""}`;
 
@@ -4152,19 +4249,21 @@ function closeSheet(kind){
         return;
       }
 
-      const rows = filtered.slice(0, 300).map(it=>{
+      const rows = filtered.slice(0, 350).map(row=>{
+        const it = row.it || {};
         const meta = parseTitleMeta(it.title || "");
         const titleMain = meta.main ? escapeHtml(meta.main) : (it.title ? escapeHtml(it.title) : "<span class='muted'>(senza nome)</span>");
         const metaSmall = buildMetaSmall(meta);
-        const sku = escapeHtml(toSkuId(it.sku||it.id||""));
+        const sku = escapeHtml(toSkuId(row.sku||it.sku||it.id||""));
         const qty = Number.isFinite(it.qty) ? it.qty : 0;
         const badgeClass = qty>0 ? "ok" : (qty===0 ? "warn" : "bad");
         const metaHtml = metaSmall ? `<div class="rowMeta">${escapeHtml(metaSmall)}</div>` : "";
+        const locLab = escapeHtml(prettyLoc(row.loc));
         return `
-          <div class="row" role="button" tabindex="0" data-sku="${sku}" data-action="pickSkuFromList">
+          <div class="row" role="button" tabindex="0" data-sku="${sku}" data-loc="${escapeHtml(row.loc)}" data-action="pickSkuFromList">
             <div class="rowMain">
               <p class="rowTitle">${titleMain}</p>
-              <div class="rowSub"><span class="mono">${sku}</span>${metaHtml ? " • " + metaHtml : ""}</div>
+              <div class="rowSub"><span class="mono">${sku}</span> • <span class="muted">${locLab}</span>${metaHtml ? " • " + metaHtml : ""}</div>
             </div>
             <div class="badge ${badgeClass}">${qty}</div>
           </div>`;
@@ -4173,22 +4272,31 @@ function closeSheet(kind){
       list.innerHTML = rows.join("");
     }
 
-    function applySkuPick(sku){
+    function applySkuPick(sku, locOverride){
       const lineIdx = state.ui.skuPick?.lineIdx;
       if(lineIdx==null) return;
 
-      const inv = currentInv();
-      const it = (inv.items||[]).find(x=> toSkuId(x.sku||x.id||"")===toSkuId(sku));
+      const s = toSkuId(sku||"");
+      if(!s) return;
+
+      const idx = getInvIndexForMatch();
+      const locHint = (locOverride==="cerea" || locOverride==="concamarise") ? locOverride : (state.route?.loc || "");
+      const loc = resolveLocForSkuAny(s, locHint, idx);
+
+      const it = (loc==="cerea" ? idx.mapCerea.get(s) : idx.mapConca.get(s)) || idx.mapConca.get(s) || idx.mapCerea.get(s) || null;
+
       const line = state.manual.carica.lines.find(x=> x.idx===lineIdx);
       if(!line) return;
 
-      line.sku = toSkuId(sku);
+      line.sku = s;
+      line.loc = (loc==="cerea" || loc==="concamarise") ? loc : "";
       line.title = it?.title || line.title || "";
       line.ambiguous = false;
 
       closeSheet("skuPick");
       renderManualCaricaList();
     }
+
 
     function renderManualCaricaList(){
       const list = $("caricaTextList");
@@ -4242,9 +4350,10 @@ function closeSheet(kind){
       btnApply.disabled = !canApply || state.manual.carica.busy;
     }
 
+    
     async function applyManualCarica(){
-      const loc = state.route.loc;
-      if(!loc) return;
+      const locHint = state.route?.loc || "";
+
       if(!state.user?.isWhitelisted){
         showToast("Accesso richiesto", "Accedi per poter caricare.", 2200);
         return;
@@ -4257,18 +4366,41 @@ function closeSheet(kind){
         return;
       }
 
-      // Aggrega per SKU
-      const aggMap = new Map();
+      const idx = getInvIndexForMatch();
+
+      // Aggrega per SKU e per location (Concamarise/Cerea)
+      const buckets = {
+        concamarise: new Map(),
+        cerea: new Map()
+      };
+
       for(const l of lines){
         const sku = toSkuId(l.sku||"");
         const qty = Math.abs(parseQty(l.qty)||0);
         if(!sku || !qty) continue;
-        const prev = aggMap.get(sku) || { sku, title: l.title || "", qty:0 };
+
+        const locFromLine = (l.loc==="cerea" || l.loc==="concamarise") ? l.loc : "";
+        const loc = locFromLine || resolveLocForSkuAny(sku, locHint, idx);
+        const bucket = (loc==="cerea") ? buckets.cerea : buckets.concamarise;
+
+        const prev = bucket.get(sku) || { sku, title: l.title || "", qty: 0 };
         prev.qty += qty;
         if(!prev.title && l.title) prev.title = l.title;
-        aggMap.set(sku, prev);
+        bucket.set(sku, prev);
       }
-      const aggregated = Array.from(aggMap.values()).filter(x=> x.sku && x.qty);
+
+      const plans = [];
+      for(const loc of ["concamarise", "cerea"]){
+        const aggregated = Array.from(buckets[loc].values()).filter(x=> x.sku && x.qty);
+        if(!aggregated.length) continue;
+        const totalPieces = aggregated.reduce((a,x)=> a + (Math.abs(parseQty(x.qty)||0)), 0);
+        plans.push({ loc, aggregated, totalPieces, flowDocId:"", logRef:null, committedBatches:0, reserved:false, done:false });
+      }
+
+      if(!plans.length){
+        showToast("Niente da applicare", "Non ho trovato righe applicabili.", 2200);
+        return;
+      }
 
       const api = state.firebase.api;
       const db = state.firebase.db;
@@ -4276,18 +4408,10 @@ function closeSheet(kind){
       const tsClient = Date.now();
       const deltaSign = 1;
 
-      const flowDocId = await computeFlowDocId({ kind:"carica", loc, file:null, aggregated, workflowId:null });
-      const logRef = api.doc(db, COL_ROOT, loc, SUB_LOGS, flowDocId);
-
-      const totalPieces = aggregated.reduce((a,x)=> a + (Math.abs(parseQty(x.qty)||0)), 0);
-
-      let committedBatches = 0;
-      let reservedLog = false;
-
-      const chunks = [];
-      const CHUNK = 450;
-      for(let i=0;i<aggregated.length;i+=CHUNK){
-        chunks.push(aggregated.slice(i, i+CHUNK));
+      // calcola docId e ref per ogni location
+      for(const p of plans){
+        p.flowDocId = await computeFlowDocId({ kind:"carica", loc: p.loc, file:null, aggregated: p.aggregated, workflowId:null });
+        p.logRef = api.doc(db, COL_ROOT, p.loc, SUB_LOGS, p.flowDocId);
       }
 
       state.manual.carica.busy = true;
@@ -4298,93 +4422,110 @@ function closeSheet(kind){
       if(btnClear) btnClear.disabled = true;
 
       try{
-        // riserva log (anti-doppio)
+        // riserva log (anti-doppio) per TUTTE le location in una singola transazione
         try{
           await api.runTransaction(db, async (tx)=>{
-            const snap = await tx.get(logRef);
-            if(snap.exists()) throw new Error("DUP_FLOW");
-            tx.set(logRef, {
-              kind: "carica",
-              location: loc,
-              fileName: "MANUAL",
-              appliedAt: api.serverTimestamp(),
-              appliedAtClient: tsClient,
-              appliedBy: state.user.email || "",
-              status: "PENDING",
-              totalLines: aggregated.length,
-              totalPieces,
-              lines: aggregated.slice(0, 800).map(x=>({ sku:x.sku, title:x.title||"", qty: Math.abs(parseQty(x.qty)||0) })),
-              workflow: null,
-              workflowId: null,
-              workflowLabel: null
-            });
+            for(const p of plans){
+              const snap = await tx.get(p.logRef);
+              if(snap.exists()) throw new Error("DUP_FLOW");
+            }
+            for(const p of plans){
+              tx.set(p.logRef, {
+                kind: "carica",
+                location: p.loc,
+                fileName: "MANUAL",
+                appliedAt: api.serverTimestamp(),
+                appliedAtClient: tsClient,
+                appliedBy: state.user.email || "",
+                status: "PENDING",
+                totalLines: p.aggregated.length,
+                totalPieces: p.totalPieces,
+                lines: p.aggregated.slice(0, 800).map(x=>({ sku:x.sku, title:x.title||"", qty: Math.abs(parseQty(x.qty)||0) })),
+                workflow: null,
+                workflowId: null,
+                workflowLabel: null
+              });
+              p.reserved = true;
+            }
           });
-          reservedLog = true;
         }catch(err){
           const msg = String(err?.message || "");
           if(msg.includes("DUP_FLOW")){
-            showToast("Duplicato bloccato", "Questo flusso risulta già registrato. Non posso applicarlo due volte.", 2600);
+            showToast("Duplicato bloccato", "Questo carico risulta già registrato. Non posso applicarlo due volte.", 2600);
             return;
           }
           throw err;
         }
 
-        for(const part of chunks){
-          const batch = api.writeBatch(db);
-          for(const it of part){
-            const sku = toSkuId(it.sku);
-            const title = String(it.title||"").trim();
-            const delta = deltaSign * Math.abs(parseQty(it.qty) || 0);
-            const ref = api.doc(db, COL_ROOT, loc, SUB_ITEMS, sku);
-            batch.set(ref, {
-              sku,
-              title: title || "",
-              titleNorm: normalizeText(title || sku),
-              qty: api.increment(delta),
-              updatedAt: api.serverTimestamp(),
-              updatedAtClient: tsClient,
-              updatedBy: state.user.email || "",
-              location: loc
-            }, { merge:true });
-          }
-          await batch.commit();
-          committedBatches++;
-        }
+        // applica per location
+        for(const p of plans){
+          const aggregated = p.aggregated;
 
-        // anagrafica prodotti globale (best effort)
-        try{
-          const CHUNK_P = 450;
-          for(let i=0;i<aggregated.length;i+=CHUNK_P){
-            const part = aggregated.slice(i, i+CHUNK_P);
-            const batchP = api.writeBatch(db);
+          const chunks = [];
+          const CHUNK = 450;
+          for(let i=0;i<aggregated.length;i+=CHUNK){
+            chunks.push(aggregated.slice(i, i+CHUNK));
+          }
+
+          for(const part of chunks){
+            const batch = api.writeBatch(db);
             for(const it of part){
               const sku = toSkuId(it.sku);
               const title = String(it.title||"").trim();
-              const refP = api.doc(db, COL_PRODUCTS, sku);
-              batchP.set(refP, {
+              const delta = deltaSign * Math.abs(parseQty(it.qty) || 0);
+              const ref = api.doc(db, COL_ROOT, p.loc, SUB_ITEMS, sku);
+              batch.set(ref, {
                 sku,
                 title: title || "",
                 titleNorm: normalizeText(title || sku),
-                lastSeenAt: api.serverTimestamp(),
-                lastSeenAtClient: tsClient,
-                lastSeenBy: state.user.email || "",
-                lastSeenLocation: loc,
-                lastSeenKind: "carica",
-                seenCount: api.increment(1)
+                qty: api.increment(delta),
+                updatedAt: api.serverTimestamp(),
+                updatedAtClient: tsClient,
+                updatedBy: state.user.email || "",
+                location: p.loc
               }, { merge:true });
             }
-            await batchP.commit();
+            await batch.commit();
+            p.committedBatches++;
           }
-        }catch(_e){}
 
-        // completa log
-        await api.updateDoc(logRef, {
-          status: "DONE",
-          doneAt: api.serverTimestamp(),
-          doneAtClient: Date.now()
-        });
+          // anagrafica prodotti globale (best effort)
+          try{
+            const CHUNK_P = 450;
+            for(let i=0;i<aggregated.length;i+=CHUNK_P){
+              const part = aggregated.slice(i, i+CHUNK_P);
+              const batchP = api.writeBatch(db);
+              for(const it of part){
+                const sku = toSkuId(it.sku);
+                const title = String(it.title||"").trim();
+                const refP = api.doc(db, COL_PRODUCTS, sku);
+                batchP.set(refP, {
+                  sku,
+                  title: title || "",
+                  titleNorm: normalizeText(title || sku),
+                  lastSeenAt: api.serverTimestamp(),
+                  lastSeenAtClient: tsClient,
+                  lastSeenBy: state.user.email || "",
+                  lastSeenLocation: p.loc,
+                  lastSeenKind: "carica",
+                  seenCount: api.increment(1)
+                }, { merge:true });
+              }
+              await batchP.commit();
+            }
+          }catch(_e){}
 
-        showToast("Carico applicato", `Aggiornati ${aggregated.length} SKU • +${totalPieces} pz`, 2200);
+          await api.updateDoc(p.logRef, {
+            status: "DONE",
+            doneAt: api.serverTimestamp(),
+            doneAtClient: Date.now()
+          });
+          p.done = true;
+        }
+
+        // toast riepilogo
+        const parts = plans.map(p=> `${prettyLoc(p.loc)}: +${p.totalPieces} pz`);
+        showToast("Carico applicato", `Aggiornati ${parts.join(" • ")}`, 2400);
 
         // reset campo
         state.manual.carica.text = "";
@@ -4397,18 +4538,28 @@ function closeSheet(kind){
         const msg = String(err?.message || err);
         console.error(err);
 
-        if(reservedLog && committedBatches===0){
-          try{ await api.deleteDoc(logRef); }catch(_e){}
-        }else if(reservedLog){
-          try{
-            await api.updateDoc(logRef, {
-              status: "ERROR",
-              error: msg.slice(0, 400),
-              errorAt: api.serverTimestamp(),
-              errorAtClient: Date.now()
-            });
-          }catch(_e){}
+        for(const p of plans){
+          if(!p.reserved) continue;
+
+          // se non ha committato nulla, prova a cancellare il log
+          if(p.committedBatches===0 && !p.done){
+            try{ await api.deleteDoc(p.logRef); }catch(_e){}
+            continue;
+          }
+
+          // altrimenti marca errore
+          if(!p.done){
+            try{
+              await api.updateDoc(p.logRef, {
+                status: "ERROR",
+                error: msg.slice(0, 400),
+                errorAt: api.serverTimestamp(),
+                errorAtClient: Date.now()
+              });
+            }catch(_e){}
+          }
         }
+
         showToast("Errore", msg.slice(0, 180) || "Errore inatteso.", 3200);
       }finally{
         state.manual.carica.busy = false;
@@ -4416,6 +4567,7 @@ function closeSheet(kind){
         renderManualCaricaList();
       }
     }
+
 
 
     // --- Articoli: sheet (modifica / elimina) ---
@@ -5825,7 +5977,8 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
         const row = e.target?.closest?.("[data-action='pickSkuFromList']");
         if(row){
           const sku = row.getAttribute("data-sku") || "";
-          if(sku) applySkuPick(sku);
+          const loc = row.getAttribute("data-loc") || "";
+          if(sku) applySkuPick(sku, loc);
         }
       });
       $("skuPickList")?.addEventListener("keydown", (e)=>{
@@ -5834,7 +5987,8 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
         if(!row) return;
         e.preventDefault();
         const sku = row.getAttribute("data-sku") || "";
-        if(sku) applySkuPick(sku);
+        const loc = row.getAttribute("data-loc") || "";
+        if(sku) applySkuPick(sku, loc);
       });
 
       // Articoli: search + azioni
