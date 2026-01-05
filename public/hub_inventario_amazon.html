@@ -1860,7 +1860,11 @@ Tip:
       ui: { sheet:null, sheetStack:[], sottoscortaLoc:null, wfOpen:false, flowId:null, flowSearch:"", productsSearch:"", productEditSku:null, productDetailsSku:null, productDetailsEditMode:false, caricaMode:"pdf", flowsModalLoc:"concamarise", skuPick:{ lineIdx:null, q:"" } },
       manual: { carica:{ text:"", lines:[], busy:false } },
 
-      movements: { unsub: null, sku: null, items: [], error: "" }
+      movements: { unsub: null, sku: null, items: [], error: "" },
+
+      mail: {
+        lowStock: { unsub:null, meta:null, error:"", emailDocId:"", emailDoc:null, emailDocError:"", emailDocBusy:false }
+      }
 
     };
 
@@ -2582,7 +2586,27 @@ ${textLines.join("\n")}
       `;
 
       const subject = `Amazon — Sotto scorta inventario (Cerea + Concamarise) • ${total} prodotti`;
-      return { subject, text: head, html: htmlBody, total };
+
+      // preview leggero per log UI (evita documenti troppo grossi)
+      const previewConca = (concamarise || []).slice(0, 250).map(it=>{
+        const sku = toSkuId(it.sku || "");
+        const m = parseTitleMeta(it.title || "");
+        const title = (m.main || it.title || sku || "").slice(0, 120);
+        const qty = Number.isFinite(it.qty) ? Math.round(it.qty) : 0;
+        return { sku, title, qty };
+      });
+      const previewCerea = (cerea || []).slice(0, 250).map(it=>{
+        const sku = toSkuId(it.sku || "");
+        const m = parseTitleMeta(it.title || "");
+        const title = (m.main || it.title || sku || "").slice(0, 120);
+        const qty = Number.isFinite(it.qty) ? Math.round(it.qty) : 0;
+        return { sku, title, qty };
+      });
+
+      const counts = { concamarise: (concamarise || []).length, cerea: (cerea || []).length };
+      const preview = { concamarise: previewConca, cerea: previewCerea };
+
+      return { subject, text: head, html: htmlBody, total, counts, preview };
     }
 
         async function __enqueueLowStockEmailIfNeeded(items, { reason="" } = {}){
@@ -2651,9 +2675,7 @@ ${textLines.join("\n")}
         const api = fb.api;
         const db = fb.db;
 
-        const META_COL = "amzInventoryMeta";
-        const META_DOC = "lowStockEmailState";
-        const metaRef = api.doc(db, META_COL, META_DOC);
+        const metaRef = api.doc(db, COL_META, DOC_LOWSTOCK_EMAIL_STATE);
 
         // docId deterministico: evita duplicati assoluti anche senza meta
         const emailDocId = "auto_low_stock_" + String(fingerprint).slice(0, 24);
@@ -2679,12 +2701,17 @@ ${textLines.join("\n")}
                 html: payload.html
               },
               createdAt: api.serverTimestamp(),
-              meta: {
-                kind: "auto_low_stock",
+              createdAtClient: now,
+              kind: "auto_low_stock",
+              lowStock: {
                 total: payload.total,
+                counts: payload.counts || null,
+                preview: payload.preview || null,
                 hash: fingerprint,
                 reason: String(reason||"")
-              }
+              },
+              createdBy: state.user?.emailLower || state.user?.email || "",
+              locations: ["cerea","concamarise"]
             });
             enqueued = true;
           }
@@ -2692,6 +2719,9 @@ ${textLines.join("\n")}
           tx.set(metaRef, {
             hash: fingerprint,
             total: payload.total,
+            counts: payload.counts || null,
+            preview: payload.preview || null,
+            emailDocId: emailDocId,
             sentAt: api.serverTimestamp(),
             sentAtClient: now,
             sentBy: state.user?.emailLower || state.user?.email || "",
@@ -2789,6 +2819,9 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
 
 
     // --- Firestore paths ---
+    const COL_META = "amzInventoryMeta";
+    const DOC_LOWSTOCK_EMAIL_STATE = "lowStockEmailState";
+    
     const COL_ROOT = "amzInventory";
     const SUB_ITEMS = "items";
     const SUB_LOGS = "logs";
@@ -3132,6 +3165,7 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
       startRealtimeFor("cerea");
       startRealtimeFor("concamarise");
       startAllLogs();
+      startLowStockEmailMetaWatch();
     }
 
     function stopAllRealtime(){
@@ -3142,6 +3176,15 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
         state.inventory[loc].meta = { count:0, lastUpdatedAt:null, loaded:false };
       }
       stopAllLogs();
+      stopLowStockEmailMetaWatch();
+      if(state.mail && state.mail.lowStock){
+        state.mail.lowStock.meta = null;
+        state.mail.lowStock.error = "";
+        state.mail.lowStock.emailDocId = "";
+        state.mail.lowStock.emailDoc = null;
+        state.mail.lowStock.emailDocError = "";
+        state.mail.lowStock.emailDocBusy = false;
+      }
       if(state.route.view==="location") renderInventoryList();
       if(state.route.view==="home") renderHomeDashboard();
       if(state.ui.sheet==="sottoscorta") renderSottoscortaSheet();
@@ -3205,7 +3248,256 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
 
     
     // --- realtime flows (logs) ---
-    function startAllLogs(){
+    
+
+    // --- low-stock email meta watch (log ultimo invio) ---
+    function startLowStockEmailMetaWatch(){
+      try{
+        if(!state.firebase.ok || !state.user?.isWhitelisted) return;
+        if(state.mail?.lowStock?.unsub) return;
+
+        const api = state.firebase.api;
+        const db = state.firebase.db;
+        const ref = api.doc(db, COL_META, DOC_LOWSTOCK_EMAIL_STATE);
+
+        state.mail.lowStock.unsub = api.onSnapshot(ref, (snap)=>{
+          const next = snap.exists() ? snap.data() : null;
+          const prevHash = state.mail.lowStock.meta && state.mail.lowStock.meta.hash ? String(state.mail.lowStock.meta.hash) : "";
+          const nextHash = next && next.hash ? String(next.hash) : "";
+
+          state.mail.lowStock.meta = next;
+
+          if(prevHash && nextHash && prevHash !== nextHash){
+            state.mail.lowStock.emailDocId = "";
+            state.mail.lowStock.emailDoc = null;
+            state.mail.lowStock.emailDocError = "";
+            state.mail.lowStock.emailDocBusy = false;
+          }
+          state.mail.lowStock.error = "";
+          if(state.route.view === "home") renderHomeLowStockMailLog();
+        }, (err)=>{
+          state.mail.lowStock.meta = null;
+          state.mail.lowStock.error = err?.message || String(err);
+          if(state.route.view === "home") renderHomeLowStockMailLog();
+        });
+      }catch(err){
+        try{
+          state.mail.lowStock.meta = null;
+          state.mail.lowStock.error = err?.message || String(err);
+        }catch(_e){}
+      }
+    }
+
+    function stopLowStockEmailMetaWatch(){
+      try{ state.mail?.lowStock?.unsub && state.mail.lowStock.unsub(); }catch(_e){}
+      try{ if(state.mail?.lowStock) state.mail.lowStock.unsub = null; }catch(_e){}
+    }
+
+    function __fmtTsAny(ts){
+      try{
+        if(!ts) return "—";
+        if(ts instanceof Date) return fmtDate(ts);
+        if(typeof ts === "number") return fmtDate(new Date(ts));
+        if(ts.toDate) return fmtDate(ts.toDate());
+        if(typeof ts.seconds === "number") return fmtDate(new Date(ts.seconds * 1000));
+        return "—";
+      }catch(_e){ return "—"; }
+    }
+
+
+
+    function __parseLowStockPreviewFromText(txt){
+      const out = { concamarise: [], cerea: [] };
+      if(!txt) return out;
+      const lines = String(txt).split(/\r?\n/);
+      let section = null;
+
+      for(const raw of lines){
+        const line = String(raw||"").trim();
+        if(!line) continue;
+
+        if(/^CONCAMARISE\b/i.test(line)){ section = "concamarise"; continue; }
+        if(/^CEREA\b/i.test(line)){ section = "cerea"; continue; }
+
+        if(line.startsWith("•")){
+          if(!section) continue;
+          const s = line.replace(/^•\s*/, "");
+          let title = s;
+          let qty = 0;
+
+          const parts = s.split("—");
+          if(parts.length >= 2){
+            title = parts[0].trim();
+            const rest = parts.slice(1).join("—");
+            const m = rest.match(/(-?\d+(?:[\.,]\d+)?)/);
+            qty = m ? parseFloat(m[1].replace(",", ".")) : 0;
+          }else{
+            const m = s.match(/^(.*)\s+(\d+(?:[\.,]\d+)?)\s*pz\b/i);
+            if(m){
+              title = m[1].trim();
+              qty = parseFloat(m[2].replace(",", "."));
+            }
+          }
+
+          out[section].push({
+            sku: "",
+            title: String(title||"").slice(0, 120),
+            qty: Number.isFinite(qty) ? qty : 0
+          });
+        }
+      }
+
+      return out;
+    }
+
+    async function __loadLowStockEmailDocIfNeeded(meta){
+      try{
+        if(!state.firebase.ok) return;
+        if(!meta) return;
+
+        const api = state.firebase.api;
+        const db = state.firebase.db;
+
+        const hash = meta.hash ? String(meta.hash) : "";
+        if(!hash) return;
+
+        const docId = meta.emailDocId ? String(meta.emailDocId) : ("auto_low_stock_" + hash.slice(0, 24));
+        if(!docId) return;
+
+        // già caricato / in errore per lo stesso docId
+        if(state.mail.lowStock.emailDocId === docId && (state.mail.lowStock.emailDoc || state.mail.lowStock.emailDocError)) return;
+        if(state.mail.lowStock.emailDocBusy) return;
+
+        state.mail.lowStock.emailDocBusy = true;
+        state.mail.lowStock.emailDocId = docId;
+        state.mail.lowStock.emailDoc = null;
+        state.mail.lowStock.emailDocError = "";
+
+        const ref = api.doc(db, "email", docId);
+        const snap = await api.getDoc(ref);
+
+        if(snap.exists()){
+          state.mail.lowStock.emailDoc = snap.data();
+        }else{
+          state.mail.lowStock.emailDoc = null;
+          state.mail.lowStock.emailDocError = "Documento email non trovato (forse non creato o regole).";
+        }
+      }catch(err){
+        state.mail.lowStock.emailDoc = null;
+        state.mail.lowStock.emailDocError = err?.message || String(err);
+      }finally{
+        state.mail.lowStock.emailDocBusy = false;
+        if(state.route.view === "home") renderHomeLowStockMailLog();
+      }
+    }
+
+    function renderHomeLowStockMailLog(){
+      const el = $("homeLowStockMailLog");
+      if(!el) return;
+
+      if(!state.user?.isWhitelisted){
+        el.textContent = "";
+        return;
+      }
+
+      const err = state.mail?.lowStock?.error;
+      if(err){
+        el.innerHTML = `<span class="muted">Log email sotto scorta: errore (${escapeHtml(err)})</span>`;
+        return;
+      }
+
+      const meta = state.mail?.lowStock?.meta;
+      if(!meta){
+        el.innerHTML = `<span class="muted">Log email sotto scorta: nessun invio registrato.</span>`;
+        return;
+      }
+
+      const sentAt = meta.sentAt || meta.updatedAt || meta.lastSentAt || meta.sentAtClient || null;
+      const dt = __fmtTsAny(sentAt);
+      const total = Number.isFinite(meta.total) ? meta.total : (Number.isFinite(meta.lastTotal) ? meta.lastTotal : null);
+
+      const counts = meta.counts || meta.lastCounts || null;
+      const pv = meta.preview || meta.lastPreview || null;
+      const cN = (counts && Number.isFinite(counts.concamarise)) ? counts.concamarise : (pv && Array.isArray(pv.concamarise) ? pv.concamarise.length : null);
+      const rN = (counts && Number.isFinite(counts.cerea)) ? counts.cerea : (pv && Array.isArray(pv.cerea) ? pv.cerea.length : null);
+
+      const reason = meta.reason ? String(meta.reason) : "";
+      const who = meta.sentBy ? String(meta.sentBy) : "";
+      const docId = meta.emailDocId ? String(meta.emailDocId) : "";
+      const hash = meta.hash ? String(meta.hash) : "";
+      const hashShort = hash ? hash.slice(0, 10) : "";
+
+      let header = `Ultima mail sotto scorta: <b>${escapeHtml(dt)}</b>`;
+      if(total!=null) header += ` • Totale <b>${escapeHtml(String(total))}</b>`;
+      if(cN!=null || rN!=null) header += ` • Concamarise ${escapeHtml(String(cN ?? "—"))} / Cerea ${escapeHtml(String(rN ?? "—"))}`;
+      if(reason) header += ` • trigger: <span class="mono">${escapeHtml(reason)}</span>`;
+      if(hashShort) header += ` • hash ${escapeHtml(hashShort)}`;
+      if(who) header += ` • da: <span class="mono">${escapeHtml(who)}</span>`;
+      if(docId) header += ` • doc: <span class="mono">${escapeHtml(docId)}</span>`;
+
+      el.innerHTML = header;
+
+      // preview: prima dal meta, poi (fallback) dal documento email
+      let preview = pv;
+
+      if(!preview){
+        const d = state.mail?.lowStock?.emailDoc || null;
+        preview = d?.lowStock?.preview || d?.preview || d?.meta?.preview || null;
+        if(!preview && d?.message?.text){
+          preview = __parseLowStockPreviewFromText(d.message.text);
+        }
+      }
+
+      const havePreview = preview && (Array.isArray(preview.concamarise) || Array.isArray(preview.cerea));
+
+      if(!havePreview){
+        // fallback: prova a caricare il doc email dell’ultimo invio (utile dopo refresh)
+        const busy = !!state.mail?.lowStock?.emailDocBusy;
+        const docErr = state.mail?.lowStock?.emailDocError || "";
+
+        if(busy){
+          el.innerHTML += `<div class="hint" style="margin-top:6px">Caricamento dettagli ultimo invio…</div>`;
+        }else if(meta.hash){
+          __loadLowStockEmailDocIfNeeded(meta);
+          el.innerHTML += `<div class="hint" style="margin-top:6px">Caricamento dettagli ultimo invio…</div>`;
+        }
+
+        if(docErr){
+          el.innerHTML += `<div class="hint" style="margin-top:6px">Dettagli email: ${escapeHtml(docErr)}</div>`;
+        }
+        return;
+      }
+
+      const renderList = (locLabel, arr)=>{
+        const list = (arr||[]).slice(0, 120).map(it=>{
+          const title = escapeHtml(String(it.title||"").trim() || "(senza nome)");
+          const sku = escapeHtml(toSkuId(it.sku||""));
+          const qty = Number.isFinite(it.qty) ? it.qty : 0;
+          return `<div class="row" style="padding:8px 10px; border-top:1px solid rgba(0,0,0,.06);">
+            <div class="rowMain">
+              <p class="rowTitle" style="font-size:13px">${title}</p>
+              <div class="rowSub"><span class="mono">${sku}</span> · <span class="muted">${escapeHtml(locLabel)}</span></div>
+            </div>
+            <div class="badge warn">${escapeHtml(String(qty))}</div>
+          </div>`;
+        }).join("");
+        return `<div style="margin-top:10px">
+          <div class="miniSub" style="margin:6px 0 6px">${escapeHtml(locLabel)}</div>
+          <div class="list compact" style="border:1px solid rgba(0,0,0,.06)">${list || `<div class="hint">—</div>`}</div>
+        </div>`;
+      };
+
+      el.innerHTML += `
+        <details style="margin-top:8px">
+          <summary style="cursor:pointer">Vedi righe inviate (snapshot)</summary>
+          ${renderList("Concamarise", preview.concamarise)}
+          ${renderList("Cerea", preview.cerea)}
+          <div class="hint" style="margin-top:8px">Nota: questa è la lista fotografata al momento dell’invio.</div>
+        </details>
+      `;
+    }
+
+function startAllLogs(){
       startLogsFor("cerea");
       startLogsFor("concamarise");
     }
@@ -3930,6 +4222,7 @@ function currentInv(){
         if(!out.length){
           lowList.innerHTML = `<div class="hint">Nessun articolo sotto scorta 🎯</div>`;
           if(lowHint) lowHint.textContent = "";
+          renderHomeLowStockMailLog();
           return;
         }
 
@@ -3953,6 +4246,9 @@ function currentInv(){
         lowList.innerHTML = rows.join("");
         if(lowHint) lowHint.textContent = "Tocca una riga per aprire i dettagli articolo.";
       }
+
+      // log ultimo invio mail sotto scorta (da meta Firestore)
+      renderHomeLowStockMailLog();
     }
 
     // --- inventory render ---
