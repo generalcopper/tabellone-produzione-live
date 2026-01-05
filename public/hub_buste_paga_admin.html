@@ -2818,7 +2818,7 @@ function toggleSendLogModal(show){
       const Ao = (s)=>String(s??"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#39;");
       const Ve = (title, body)=>{ try{ showToast(String(title||"Info"), String(body||"")); }catch(_e){ alert(String(title||"Info")+"\\n\\n"+String(body||"")); } };
 
-      const COL_POWDER_USERS="powderUsers",COL_PAYROLL_DIRECTORY="payrollDirectory",COL_PAYROLL_DOCS="payrollDocs",COL_PAYROLL_DOCS_LEGACY="payrolls",COL_PAYROLL_SEND_LOGS="payrollSendLogs",COL_ABSENCE_REQUESTS="absenceRequests";
+      const COL_POWDER_USERS="powderUsers",COL_PAYROLL_DIRECTORY="payrollDirectory",COL_PAYROLL_DOCS="payrollDocs",COL_PAYROLL_DOCS_LEGACY="payrolls",COL_PAYROLL_SEND_LOGS="payrollSendLogs",COL_EMAIL="email",COL_ABSENCE_REQUESTS="absenceRequests";
       const PAYROLL_DOC_COLS=[COL_PAYROLL_DOCS,COL_PAYROLL_DOCS_LEGACY];
 
       async function tryGetPayrollDocSnap(api, db, id){
@@ -4512,11 +4512,11 @@ function renderUploadHistory(){
 
       function initPayrollSendUI(rows){
         stopPayrollSendDocWatches();
-        const ui = N.payroll.admin.sendUI = { total: rows.length, done: 0, items: [], byKey: {}, deliveryUnsubs: {}, finalStatus: "" };
+        const ui = N.payroll.admin.sendUI = { total: rows.length, done: 0, items: [], byKey: {}, deliveryUnsubs: {}, mailUnsubs: {}, finalStatus: "" };
         ui.items = (rows||[]).map(r=>{
           const email = normalizeEmail(r.emailLower || r.email || r.id || "");
           const key = r.key || `${email}_${r.monthKey || ""}`;
-          const item = { key, name: r.displayName || r.fullName || email || "—", email, status: "queue", detail: "" };
+          const item = { key, name: r.displayName || r.fullName || email || "—", email, status: "queue", detail: "", mailStatus: "idle", mailDetail: "" };
           ui.byKey[key] = item;
           return item;
         });
@@ -4538,7 +4538,11 @@ function renderUploadHistory(){
           const ui = N.payroll?.admin?.sendUI;
           const m = ui?.deliveryUnsubs || {};
           Object.keys(m).forEach(k=>{ try{ m[k] && m[k](); }catch(_e){} });
-          if(ui) ui.deliveryUnsubs = {};
+
+          const mm = ui?.mailUnsubs || {};
+          Object.keys(mm).forEach(k=>{ try{ mm[k] && mm[k](); }catch(_e){} });
+
+          if(ui){ ui.deliveryUnsubs = {}; ui.mailUnsubs = {}; }
         }catch(_e){}
       }
 
@@ -4593,6 +4597,89 @@ function renderUploadHistory(){
             }catch(_e){}
           }
 
+
+
+      function watchPayrollMailDelivery(sendKey, mailDocId){
+        try{
+          if(!(N.firebase?.ok) || !mailDocId) return;
+          const ui = N.payroll?.admin?.sendUI;
+          if(!ui) return;
+          ui.mailUnsubs = ui.mailUnsubs || {};
+          if(ui.mailUnsubs[sendKey]) return;
+
+          const api = N.firebase.api;
+          const db = N.firebase.db;
+
+          let done = false;
+          const cleanup = ()=>{
+            if(done) return;
+            done = true;
+            try{ ui.mailUnsubs[sendKey] && ui.mailUnsubs[sendKey](); }catch(_e){}
+            try{ delete ui.mailUnsubs[sendKey]; }catch(_e){}
+          };
+
+          // Se non abbiamo permessi per leggere lo stato, non bloccare la UI
+          const timer = setTimeout(()=>{
+            if(done) return;
+            // Non chiudere il watch: la mail potrebbe impiegare più tempo (es. allegati / SMTP lento)
+            try{
+              const it = ui.byKey?.[sendKey];
+              const st = it?.mailStatus || "queue";
+              const det = it?.mailDetail || "in lavorazione";
+              setPayrollSendRowMailStatus(sendKey, st, det);
+            }catch(_e){}
+          }, 60000);
+
+          const ref = api.doc(db, COL_EMAIL, mailDocId);
+          const unsub = api.onSnapshot(ref, snap=>{
+            if(done) return;
+            if(!snap.exists()) return;
+            const d = snap.data() || {};
+            const st = String(d?.delivery?.state || "").toUpperCase();
+
+            if(!st){
+              setPayrollSendRowMailStatus(sendKey, "queue", "in coda");
+              return;
+            }
+
+            clearTimeout(timer);
+
+            if(st === "PENDING"){
+              setPayrollSendRowMailStatus(sendKey, "queue", "in coda");
+              return;
+            }
+            if(st === "PROCESSING"){
+              setPayrollSendRowMailStatus(sendKey, "run", "in invio");
+              return;
+            }
+            if(st === "SUCCESS"){
+              setPayrollSendRowMailStatus(sendKey, "ok", "andata a buon fine");
+              cleanup();
+              return;
+            }
+            if(st === "ERROR"){
+              const err = (d?.delivery?.error || "errore");
+              setPayrollSendRowMailStatus(sendKey, "err", err);
+              cleanup();
+              return;
+            }
+
+            // stati non previsti
+            setPayrollSendRowMailStatus(sendKey, "run", st);
+          }, err=>{
+            clearTimeout(timer);
+            if(err?.code !== "permission-denied") console.warn("payroll mail watch", err);
+            if(err?.code === "permission-denied"){
+              try{ setPayrollSendRowMailStatus(sendKey, "queue", "stato non disponibile"); }catch(_e){}
+            }else{
+              try{ setPayrollSendRowMailStatus(sendKey, "err", err?.message || String(err)); }catch(_e){}
+            }
+            cleanup();
+          });
+
+          ui.mailUnsubs[sendKey] = unsub;
+        }catch(_e){}
+      }
           ui.deliveryUnsubs[sendKey] = cleanup;
         }catch(_e){}
       }
@@ -4604,11 +4691,17 @@ function renderUploadHistory(){
         if(!ui || !el) return;
         const items = ui.items || [];
         const total = items.length || ui.total || 0;
+
         const delivered = items.filter(it=>it.status==="live").length;
         const ok = items.filter(it=>it.status==="ok").length;
         const run = items.filter(it=>it.status==="run").length;
         const err = items.filter(it=>it.status==="err").length;
         const queued = items.filter(it=>it.status==="queue").length;
+
+        const mailOk = items.filter(it=>it.mailStatus==="ok").length;
+        const mailRun = items.filter(it=>it.mailStatus==="run" || it.mailStatus==="processing").length;
+        const mailErr = items.filter(it=>it.mailStatus==="err").length;
+        const mailQueued = items.filter(it=>it.mailStatus==="queue" || it.mailStatus==="pending").length;
 
         const head = ui.finalStatus ? `Esito: ${ui.finalStatus} · ` : "";
         let msg = `${head}Match live: ${delivered}/${total} arrivati`;
@@ -4616,6 +4709,14 @@ function renderUploadHistory(){
         if(queued) msg += ` · In coda: ${queued}`;
         if(ok && ok>delivered) msg += ` · Scritti: ${ok}`;
         if(err) msg += ` · Errori: ${err}`;
+
+        if(mailOk || mailRun || mailErr || mailQueued){
+          msg += ` · Mail: ${mailOk} ok`;
+          if(mailRun) msg += `, ${mailRun} in invio`;
+          if(mailQueued) msg += `, ${mailQueued} in coda`;
+          if(mailErr) msg += `, ${mailErr} errori`;
+        }
+
         el.textContent = msg;
       }
 
@@ -4644,23 +4745,84 @@ function renderUploadHistory(){
         updatePayrollSendMatchSummary();
       }
 
+      function setPayrollSendRowMailStatus(key, status, detail){
+        const ui = N.payroll?.admin?.sendUI;
+        if(!ui) return;
+        const item = ui.byKey?.[key];
+        if(item){
+          item.mailStatus = status;
+          item.mailDetail = detail || "";
+        }
+        renderPayrollSendList();
+        updatePayrollSendMatchSummary();
+      }
+
       function renderPayrollSendList(){
         const list = U("payrollSendList");
         const ui = N.payroll?.admin?.sendUI;
         if(!list || !ui) return;
         list.innerHTML = (ui.items||[]).map(it=>{
-          const cls = it.status==="live" ? "ok" : it.status==="ok" ? "ok" : it.status==="err" ? "err" : it.status==="run" ? "run" : "";
+          const docCls = it.status==="err" ? "err" : (it.status==="run" ? "run" : (it.status==="live" || it.status==="ok") ? "ok" : "");
+          const mailCls = it.mailStatus==="err" ? "err" : (it.mailStatus==="run" ? "run" : (it.mailStatus==="ok") ? "ok" : "");
+          const cls = (docCls==="err" || mailCls==="err") ? "err" : (docCls==="run" || mailCls==="run") ? "run" : (docCls==="ok" || mailCls==="ok") ? "ok" : "";
+
           const label = it.status==="live" ? "Arrivato" : it.status==="ok" ? "Scritto" : it.status==="err" ? "Errore" : it.status==="run" ? "Invio…" : "In coda";
           const det = it.detail ? " · " + Ao(it.detail) : "";
+
+          const mailLabel = it.mailStatus==="ok" ? "Mail OK"
+            : it.mailStatus==="err" ? "Mail errore"
+            : it.mailStatus==="run" ? "Mail…"
+            : it.mailStatus==="queue" ? "Mail in coda"
+            : it.mailStatus==="idle" ? "" : "";
+
+          let mailDet = "";
+          if(it.mailDetail){
+            const d = Ao(it.mailDetail);
+            if(it.mailStatus==="err") mailDet = ": " + d;
+            else if(it.mailStatus!=="ok") mailDet = " (" + d + ")";
+          }
+          const mailPart = mailLabel ? (" · " + mailLabel + mailDet) : "";
+
           return `<div class="sendItem">
             <div class="sendLeft">
               <div class="sendName">${Ao(it.name)}</div>
               <div class="sendEmail">${Ao(it.email||"")}</div>
             </div>
-            <div class="sendStatus ${cls}">${label}${det}</div>
+            <div class="sendStatus ${cls}">${label}${det}${mailPart}</div>
           </div>`;
         }).join("");
       }
+
+      function buildPayrollEmailDoc({ toEmail, fullName, monthKey, netPayText, downloadUrl, fileName, payrollDocId, storagePath }){
+        const monthLabel = formatPayrollMonthLabel(monthKey);
+        const who = String(fullName || "").trim() || String(toEmail || "").trim() || "—";
+        const amount = (netPayText && String(netPayText).trim()) ? String(netPayText).trim() : "";
+        const subj = `Busta paga · ${monthLabel}`;
+
+        const text = `Ciao ${who},\n\nin allegato trovi la busta paga di ${monthLabel}${amount ? " ("+amount+")" : ""}.\n\nSe hai bisogno, rispondi a questa email.\n\n— Ufficio Amministrazione`;
+        const html = `<p>Ciao ${Ao(who)},</p><p>in allegato trovi la busta paga di <b>${Ao(monthLabel)}</b>${amount ? " (<b>"+Ao(amount)+"</b>)" : ""}.</p><p>Se hai bisogno, rispondi a questa email.</p><p style="color:#6b7280">— Ufficio Amministrazione</p>`;
+
+        const url = String(downloadUrl || "").trim();
+        const attachments = url ? [{ filename: fileName || "busta_paga.pdf", path: url, contentType: "application/pdf" }] : [];
+
+        return {
+          to: [String(toEmail || "").trim()].filter(Boolean),
+          message: {
+            subject: subj,
+            text,
+            html,
+            attachments
+          },
+          payroll: {
+            payrollDocId: payrollDocId || "",
+            storagePath: storagePath || "",
+            monthKey: monthKey || "",
+            emailLower: String(toEmail || "").trim().toLowerCase()
+          },
+          createdAt: N.firebase?.api?.serverTimestamp ? N.firebase.api.serverTimestamp() : null
+        };
+      }
+
 
 async function Yi() {
         const e = N.payroll.admin;
@@ -4712,6 +4874,7 @@ async function Yi() {
           for (const row of rows) {
             const o = N.firebase.api, i = N.firebase.db, emailLower = (row.email || "").toLowerCase(), baseId = `${emailLower}_${row.monthKey}`, sendKey = row.key || baseId;
             setPayrollSendRowStatus(sendKey, "run");
+            setPayrollSendRowMailStatus(sendKey, "idle");
             setPayrollSendProgress(done, total, `Inviando ${done+1}/${total}`);
             await nextFrame();
             let s = null;
@@ -4808,6 +4971,37 @@ async function Yi() {
             }catch(_e){}
 
             await _ensureDir(row, emailLower);
+
+            // Invio email con PDF allegato (Trigger Email extension)
+            try{
+              const dl = (uploaded.url || existingData?.downloadUrl || "").trim();
+              if(!dl) throw new Error("downloadUrl mancante");
+              const fnameBase = `${row.displayName || row.fiscalCode || emailLower} ${row.monthKey}`.trim();
+              const attachmentName = buildSafePdfName(fnameBase);
+              const mailDocId = `payrollMail_${docId}_${Date.now()}`;
+              const mailDoc = buildPayrollEmailDoc({
+                toEmail: emailLower,
+                fullName: row.displayName || row.fiscalCode || "",
+                monthKey: row.monthKey,
+                netPayText: row.netPayText || "",
+                downloadUrl: dl,
+                fileName: attachmentName,
+                payrollDocId: docId,
+                storagePath: uploaded.path || existingData?.storagePath || ""
+              });
+
+              setPayrollSendRowMailStatus(sendKey, "queue", "in coda");
+              await withTimeout(
+                N.firebase.api.setDoc(N.firebase.api.doc(N.firebase.db, COL_EMAIL, mailDocId), mailDoc, { merge: false }),
+                20000,
+                "Timeout invio mail"
+              );
+              watchPayrollMailDelivery(sendKey, mailDocId);
+            }catch(err){
+              console.warn("payroll email enqueue", err);
+              setPayrollSendRowMailStatus(sendKey, "err", err?.message || String(err));
+            }
+
 
             done++;
             setPayrollSendRowStatus(sendKey, "ok", "scritto");
