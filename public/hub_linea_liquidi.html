@@ -1525,7 +1525,7 @@
     loader.inError = false;
   }
   function gateReady(){
-    return !!(loader.firstRenderDone && state.historyReady);
+    return !!(loader.firstRenderDone);
   }
   function maybeHideGate(){
     if(authGateState !== "signed_in" && authGateState !== "restoring") return;
@@ -2359,32 +2359,28 @@ document.body.appendChild(banner);
 
   function bootSet(_p, _msg){ /* boot overlay rimosso */ }
   async function boot(){
-    // Unico loader overlay (rotella): evita “flash a 0” e rimuove doppi riquadri.
+    // Unico loader overlay (rotella): gestito da primeAuthGateUi/showApp + bootMark() (niente “doppio caricamento”).
     if(globalThis.__BOOT_DONE__){
       try{ maybeHideGate(); }catch(_e){}
       return;
     }
     globalThis.__BOOT_DONE__ = true;
 
-    // Mostra la rotella solo quando siamo dentro app (sessione in ripristino o già attiva).
-    const inApp = (authGateState === "signed_in" || authGateState === "restoring");
-    if(inApp){
-      showAuthLoader("Caricamento dati…", "Sto sincronizzando ordini e statistiche.");
-      // Hard-timeout di sicurezza: se qualcosa va storto non resta bloccato.
-      setTimeout(()=>{ try{ hideAuthLoader(); }catch(_e){} }, 12000);
-    }
+    // Hard-timeout di sicurezza: se qualcosa va storto non resta bloccato.
+    const hardT = setTimeout(()=>{
+      try{
+        if(!gateReady()) hideAuthLoader();
+      }catch(_e){}
+    }, 12000);
 
-    // Avvio sync (non blocca l’UI più del necessario)
-    const ordersPromise = queuedSyncOrders(true, "boot");
-    const livePromise   = initLiveSync();
-
-    // Aspetta un minimo per avere dati “realmente utili”, poi lascia che maybeHideGate faccia il resto.
     try{
-      await Promise.race([ordersPromise, new Promise(r=>setTimeout(r, 1800))]);
-      if(inApp) showAuthLoader("Caricamento dati…", "Sto finalizzando…");
-      await Promise.race([livePromise, new Promise(r=>setTimeout(r, 700))]);
-    }catch(_e){}
-    try{ maybeHideGate(); }catch(_e){}
+      // Avvio sync (in parallelo) senza forzare show/hide della rotella
+      try{ queuedSyncOrders(true, "boot"); }catch(_e){}
+      await initLiveSync();
+    }catch(_e){} finally{
+      clearTimeout(hardT);
+      try{ maybeHideGate(); }catch(_e){}
+    }
   }
 
 
@@ -2920,14 +2916,14 @@ function showAuthGate(){
   function bootFinish(){
     if(state.__bootFinished) return;
     state.__bootFinished = true;
-    hideAuthLoader();
+    try{ maybeHideGate(); }catch(_e){}
   }
 
 function showApp(){
     showAppShell();
     hideLogin();
-    // Non mostrare l'interfaccia a "zero": la rotella resta finché arrivano i primi snapshot.
-    if(!state.__bootFinished){
+    // Rotella: resta finché il primo render dati è pronto (evita flash e “doppio caricamento”).
+    if(!gateReady()){
       showAuthLoader("Caricamento…","Sto sincronizzando i dati.");
     }else{
       hideAuthLoader();
@@ -3668,7 +3664,6 @@ function hideLogin(){
       try{ await initNotificationsInbox(); }catch(_e){ state.notifications.unavailable = true; renderNotifCenter(); }
       renderNotifCenter();
       hideAuthGate();
-      hideAuthLoader();
       renderHome();
       try{ Payroll.onSignedIn(); }catch(_e){}
       ensureAllowlistListener();
