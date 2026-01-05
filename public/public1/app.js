@@ -104,4 +104,106 @@
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) clearActive();
   });
+
+
+  // --- Desktop-only "Back to Hub" button (injected) ---
+  const HUB_KEY = "gc_hub_home_url";
+
+  function isHubHomePage() {
+    try {
+      const p = String(location.pathname || "").toLowerCase();
+      if (p.includes("hub_centrale")) return true;
+      const t = String(document.title || "").toLowerCase();
+      if (t.includes("hub centrale")) return true;
+      return false;
+    } catch (_e) {
+      return false;
+    }
+  }
+
+  function rememberHubHomeUrl() {
+    try { sessionStorage.setItem(HUB_KEY, location.href); } catch (_e) {}
+  }
+
+  // If we're on Hub Centrale, remember its URL (so subpages can always come back).
+  if (isHubHomePage()) {
+    rememberHubHomeUrl();
+    // Also refresh the stored value on any navigation click from the hub.
+    document.addEventListener("click", (e) => {
+      const a = e.target && e.target.closest ? e.target.closest("a[href]") : null;
+      if (!a) return;
+      rememberHubHomeUrl();
+    }, { capture: true, passive: true });
+  }
+
+  function isDesktop() {
+    try {
+      return !!(window.matchMedia && window.matchMedia("(hover:hover) and (pointer:fine)").matches);
+    } catch (_e) {
+      return false;
+    }
+  }
+
+  function getHubUrl() {
+    // 1) Best: sessionStorage (set when leaving Hub Centrale)
+    try {
+      const stored = sessionStorage.getItem(HUB_KEY);
+      if (stored) return stored;
+    } catch (_e) {}
+
+    // 2) Fallback: assume hub is in the same folder as current page
+    try {
+      const path = String(location.pathname || "/");
+      const dir = path.slice(0, path.lastIndexOf("/") + 1);
+      return new URL(dir + "hub_centrale.html", location.origin).toString();
+    } catch (_e) {}
+
+    // 3) Last resort
+    return "hub_centrale.html";
+  }
+
+  function shouldSkipBackBtn() {
+    try {
+      if (!document.body) return true;
+      if (document.body.classList.contains("locked")) return true;
+      if (document.body.classList.contains("authPending")) return true;
+      const ov = document.getElementById("authOverlay");
+      if (ov && ov.hidden === false) return true;
+    } catch (_e) {}
+    return false;
+  }
+
+  function injectBackBtn() {
+    try {
+      if (!isDesktop()) return;
+      if (isHubHomePage()) return;
+      if (shouldSkipBackBtn()) return;
+      if (document.querySelector(".gc-back-btn")) return;
+
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "gc-back-btn";
+      btn.setAttribute("data-press", "");
+      btn.setAttribute("aria-label", "Torna al Hub Centrale");
+      btn.innerHTML =
+        '<svg viewBox="0 0 24 24" aria-hidden="true">' +
+          '<path d="M15 18l-6-6 6-6"></path>' +
+          '<path d="M9 12h12"></path>' +
+        '</svg>' +
+        '<span>Hub Centrale</span>';
+
+      btn.addEventListener("click", () => {
+        try { location.href = getHubUrl(); } catch (_e) {}
+      });
+
+      document.body.appendChild(btn);
+    } catch (_e) {}
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", injectBackBtn, { once: true });
+  } else {
+    injectBackBtn();
+  }
+
 })();
