@@ -4466,6 +4466,10 @@ function closeSheet(kind){
       const qTokens = tokenizeForMatch(q);
       const qNums = (q.match(/\d+/g) || []);
 
+
+      // hint dimensione (ml/lt): distingue varianti 500ml vs 1 litro
+      const qWants1L = /\b1\s*(?:lt|l|litro|litri)\b/.test(q) || /\b1l\b/.test(q) || /\b1000\b/.test(q);
+      const qWants500 = /\b500\b/.test(q) && !qWants1L;
       const petHints = ["cani","gatti","pulci","zecche","zanzare","animali","urine","disabituante","odori","odore","repellente"];
       const qHasPet = petHints.some(w=> q.includes(w));
 
@@ -4510,6 +4514,17 @@ function closeSheet(kind){
         // piccolo boost se compare una parola lunga identica
         if(qTokens.some(t=> t.length>=6 && tNorm.includes(t))) score += 0.4;
 
+
+        // dimensione (1 litro vs 500ml): se la query lo specifica, spingi la variante corretta
+        const tHas1L = /\b1\s*(?:lt|l|litro|litri)\b/.test(tNorm) || /\b1l\b/.test(tNorm) || /\b1000\b/.test(tNorm);
+        const tHas500 = /\b500\b/.test(tNorm);
+        if(qWants1L){
+          if(tHas1L) score += 0.65;
+          if(tHas500) score -= 0.95;
+        }else if(qWants500){
+          if(tHas500) score += 0.55;
+          if(tHas1L) score -= 0.55;
+        }
         // se la query NON parla di cani/gatti/pulci/zecche ecc, penalizzo i titoli che lo fanno
         // (utile per distinguere "Neem spray 500" concentrato vs versione per cani/gatti)
         const tHasPet = petHints.some(w=> tNorm.includes(w));
@@ -4562,6 +4577,21 @@ function closeSheet(kind){
           ambiguous: !!match?.ambiguous,
           loc: match?.loc || ""
         });
+      }
+
+      // ogni riga deve rappresentare un prodotto: vieta doppioni di SKU
+      {
+        const used = new Set();
+        for(const l of out){
+          const s = toSkuId(l.sku||"");
+          if(!s) continue;
+          if(used.has(s)){
+            l.ambiguous = true;
+            l.ambReason = "dup";
+          }else if(!l.ambiguous){
+            used.add(s);
+          }
+        }
       }
 
       state.manual.carica.lines = out;
@@ -4647,11 +4677,18 @@ function closeSheet(kind){
       const line = state.manual.carica.lines.find(x=> x.idx===lineIdx);
       if(!line) return;
 
+
+      // evita SKU duplicati: ogni riga = un prodotto
+      const already = state.manual.carica.lines.find(x=> x.idx!==lineIdx && toSkuId(x.sku||"")===s);
+      if(already){
+        showToast("SKU già usato", "Questo prodotto è già presente in un\x27altra riga. Elimina la riga duplicata o scegli un altro SKU.", 2600);
+        return;
+      }
       line.sku = s;
       line.loc = (loc==="cerea" || loc==="concamarise") ? loc : "";
       line.title = it?.title || line.title || "";
       line.ambiguous = false;
-
+      line.ambReason = "";
       closeSheet("skuPick");
       renderManualCaricaList();
     }
@@ -4684,7 +4721,9 @@ function closeSheet(kind){
         const titleShown = l.title ? escapeHtml(parseTitleMeta(l.title).main || l.title) : escapeHtml(l.name || l.raw);
         const skuShown = l.sku ? escapeHtml(l.sku) : "<span class='muted'>(SKU?)</span>";
         const qtyShown = l.qty ? escapeHtml(String(Math.abs(parseQty(l.qty)||0))) : "<span class='muted'>(q.tà?)</span>";
-        const msg = l.ambiguous ? `<span class="muted">Abbinamento non sicuro • </span>` : "";
+        const msg = l.ambiguous
+          ? `<span class="muted">${(l.ambReason==="dup") ? "SKU duplicato" : "Abbinamento non sicuro"} • </span>`
+          : "";
         const actionBtn = (!l.sku || l.ambiguous)
           ? `<button class="btn small" type="button" data-action="openSkuPick" data-idx="${l.idx}">Scegli SKU</button>`
           : "";
