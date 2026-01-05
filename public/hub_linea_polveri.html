@@ -4835,44 +4835,164 @@ function hideLogin(){
   }
 
 
-  function computePartialOrders(){
+  
+  // === Production progress (supports partial quantities per line) ===
+  function getLinePlannedQtyFromXmlLine(line){
+    try{
+      if(line==null) return 0;
+      if(line.qtyValue!=null && Number.isFinite(Number(line.qtyValue))) return Number(line.qtyValue);
+      if(line.qty!=null && Number.isFinite(Number(line.qty))) return Number(line.qty);
+      const a = parseCurrencyValue(line.qtyValueTextRaw);
+      if(a!=null) return a;
+      const b = parseCurrencyValue(line.qtyTextRaw);
+      if(b!=null) return b;
+      const c = parseCurrencyValue(line.qty);
+      if(c!=null) return c;
+      return 0;
+    }catch(_e){ return 0; }
+  }
+
+  function computeHistoryLineProductionMaps(hist){
+    const producedByLineKey = new Map();   // lineKey -> produced qty (in line's unit)
+    const assumeFullLineKeys = new Set();  // legacy history without perLine -> treat as fully done
+    const orderNoWithHistory = new Set();
+
+    for(const h of (hist||[])){
+      try{
+        if(h && h.orderNo!=null) orderNoWithHistory.add(String(h.orderNo));
+        const concluded = Array.isArray(h?.concludedLineKeys) ? h.concludedLineKeys : [];
+        if(!concluded.length) continue;
+
+        const per = Array.isArray(h?.perLine) ? h.perLine : [];
+        const perMap = new Map();
+        for(const pl of per){
+          const k = (pl && pl.lineKey!=null) ? String(pl.lineKey) : "";
+          if(k) perMap.set(k, pl);
+        }
+
+        for(const lk of concluded){
+          const key = lk!=null ? String(lk) : "";
+          if(!key) continue;
+
+          const pl = perMap.get(key);
+          if(!pl){
+            assumeFullLineKeys.add(key);
+            continue;
+          }
+
+          const plannedNum = (()=>{
+            for(const v of [pl.qtyValue, pl.qty, pl.plannedQty, pl.plannedKg, pl.qtyValueTextRaw, pl.qtyTextRaw]){
+              const n = parseCurrencyValue(v);
+              if(n!=null) return n;
+            }
+            return 0;
+          })();
+
+          const hasManual = Boolean(pl && (pl.producedProvided===true || (pl.producedInputRaw!=null && String(pl.producedInputRaw).trim()!=="")));
+          let prodNum = null;
+          for(const v of [pl.producedQty, pl.producedKg, pl.produced, pl.qtyProduced]){
+            const n = parseCurrencyValue(v);
+            if(n!=null){ prodNum = n; break; }
+          }
+
+          // Backward compatible: if produced is missing/0 and user didn't insert a manual value, assume full planned
+          if(!hasManual && (prodNum==null || prodNum===0) && plannedNum>0){
+            prodNum = plannedNum;
+          }
+
+          if(!(Number.isFinite(prodNum) && prodNum>0)) prodNum = 0;
+          producedByLineKey.set(key, (producedByLineKey.get(key)||0) + prodNum);
+        }
+      }catch(_e){}
+    }
+
+    return { producedByLineKey, assumeFullLineKeys, orderNoWithHistory };
+  }
+
+  function producedSoFarForLineKey(lineKey, plannedQty, maps){
+    const key = String(lineKey||"");
+    if(!key || !maps) return 0;
+
+    let p = maps.producedByLineKey?.get(key);
+    if(p==null && maps.assumeFullLineKeys?.has(key)) p = plannedQty;
+
+    p = Number(p||0);
+    if(!Number.isFinite(p) || p<0) p = 0;
+
+    if(Number.isFinite(plannedQty) && plannedQty>0 && p>plannedQty) p = plannedQty;
+    return p;
+  }
+
+  function computeRemainingViewLine(line, maps){
+    const planned = getLinePlannedQtyFromXmlLine(line);
+    const produced = producedSoFarForLineKey(line?.lineKey, planned, maps);
+    const remaining = Math.max(0, planned - produced);
+
+    const ratio = (Number.isFinite(planned) && planned>0) ? (remaining/planned) : 1;
+    let remLineKg = Number(line?.lineKg||0);
+    if(Number.isFinite(remLineKg) && remLineKg>0 && Number.isFinite(ratio)){
+      remLineKg = remLineKg * ratio;
+    }
+
+    // Ensure renderQty uses remaining numeric value (ignore any XML raw text)
+    return {
+      ...line,
+      qty: remaining,
+      qtyValue: remaining,
+      qtyTextRaw: "",
+      qtyValueTextRaw: "",
+      lineKg: (Number.isFinite(remLineKg) ? remLineKg : 0),
+      __plannedQtyOriginal: planned,
+      __producedQtySoFar: produced,
+      __remainingQty: remaining
+    };
+  }
+
+function computePartialOrders(){
     const orders = state.powderOrders || [];
     const hist = state.history || [];
-    const completedByOrder = new Map();
-    for(const h of hist){
-      if(!h || !h.orderNo) continue;
-      const on = String(h.orderNo);
-      const arr = Array.isArray(h.concludedLineKeys) ? h.concludedLineKeys : [];
-      if(!completedByOrder.has(on)) completedByOrder.set(on, new Set());
-      const set = completedByOrder.get(on);
-      for(const k of arr){ if(k) set.add(String(k)); }
-    }
+    const maps = computeHistoryLineProductionMaps(hist);
     const partial = [];
     const full = [];
+    const EPS = 1e-6;
+
     for(const o of orders){
       const on = String(o.orderNo || o.number || "");
       if(!on) continue;
+
       let autoDone = 0;
-      const keys = [];
+      let totalProdLines = 0;
+      let doneReal = 0;
+
+      // Progress can exist even if no line is fully completed (e.g. produced 900/1000)
+      let hasProgress = maps.orderNoWithHistory.has(on);
+
       for(const l of (o.lines||[])){
         if(isNonProductionLine(l)){
           autoDone++;
           continue;
         }
-        const lk = String(l.lineKey||"");
-        if(lk) keys.push(lk);
+
+        const planned = getLinePlannedQtyFromXmlLine(l);
+        const produced = producedSoFarForLineKey(l.lineKey, planned, maps);
+        const remaining = Math.max(0, planned - produced);
+
+        if(produced > EPS) hasProgress = true;
+        if(remaining <= EPS) doneReal++;
+
+        totalProdLines++;
       }
-      const total = keys.length + autoDone;
+
+      const total = totalProdLines + autoDone;
       if(total<=0) continue;
-      const doneSet = completedByOrder.get(on) || new Set();
-      let doneReal = 0;
-      for(const k of keys){ if(doneSet.has(k)) doneReal++; }
+
       const concludedTotal = doneReal + autoDone;
-      const remaining = total - concludedTotal;
-      const hasRealProgress = doneReal>0;
-      if(hasRealProgress && remaining>0) partial.push({ orderNo:on, customer:o.customer||"", done:concludedTotal, total });
-      else if(concludedTotal>0 && remaining<=0) full.push({ orderNo:on, customer:o.customer||"", done:concludedTotal, total });
+      const remainingLines = total - concludedTotal;
+
+      if(hasProgress && remainingLines>0) partial.push({ orderNo:on, customer:o.customer||"", done:concludedTotal, total });
+      else if(hasProgress && remainingLines<=0 && concludedTotal>0) full.push({ orderNo:on, customer:o.customer||"", done:concludedTotal, total });
     }
+
     return { partial, full };
   }
 
@@ -4912,11 +5032,8 @@ function hideLogin(){
 
     const applyRoleVisibility = options.applyRoleVisibility !== false;
     const includeHidden = options.includeHidden === true;
-    const concluded = new Set();
-    for(const h of (state.history||[])){
-      if(!h || !Array.isArray(h.concludedLineKeys)) continue;
-      for(const k of h.concludedLineKeys){ if(k) concluded.add(String(k)); }
-    }
+    const prodMaps = computeHistoryLineProductionMaps(state.history||[]);
+    const concluded = new Set(); // fully completed lineKey (based on produced vs planned)
     const activeMap = new Map();
     for(const p of (state.activeProductions||[])){
       const keys = Array.isArray(p.selectedLineKeys) ? p.selectedLineKeys : [];
@@ -4955,11 +5072,19 @@ function hideLogin(){
           return null;
         }
         const key = String(l.lineKey||"");
+        if(!key) return null;
+
+        const viewLine = computeRemainingViewLine(l, prodMaps);
+        const remaining = Number(viewLine.__remainingQty||0);
+        const isDone = remaining <= 1e-6;
+
+        if(isDone) concluded.add(key);
+
         const activeProd = activeMap.get(key) || null;
-        const status = concluded.has(key) ? "done" : activeProd ? "active" : "idle";
+        const status = isDone ? "done" : activeProd ? "active" : "idle";
         const activeOp = activeProd?.operator || activeProd?.operatorName || "";
         const activeIsMe = Boolean(activeProd && sameOperator(activeOp, meOp));
-        return { ...l, status, activeProd, activeOp, activeIsMe, conclusion: l.conclusion || o.conclusion || "" };
+        return { ...viewLine, status, activeProd, activeOp, activeIsMe, conclusion: l.conclusion || o.conclusion || "" };
       }).filter(Boolean).filter(l=>l.status !== "done");
       const alerts = Array.isArray(o.alerts) ? o.alerts : [];
       if(!lines.length){
@@ -7722,6 +7847,8 @@ Linea: polveri`, null); }catch(_e){}
     rows.forEach(o=>{
       const done = o.partialInfo?.done || 0;
       const total = o.partialInfo?.total || (done + (o.lines?.length||0) + (o.autoDone||0));
+      const remainingSummary = renderQtySummaryByUnit(o.lines||[]);
+      const remainingKg = Math.round((o.lines||[]).reduce((a,l)=>a + (Number(l.lineKg||0)||0), 0));
       const div = document.createElement("div");
       div.className = "item pressCard rowPress";
       div.innerHTML = `
@@ -7729,7 +7856,7 @@ Linea: polveri`, null); }catch(_e){}
           <div>
             <div class="name ellipsis" title="${escapeHtml(o.customer||"Cliente")} · Ordine ${escapeHtml(o.orderNo||o.number||"")}">${escapeHtml(o.customer||"Cliente")} · Ordine ${escapeHtml(o.orderNo||o.number||"")}</div>
             <div class="sub">Conclusione prevista: <b>${escapeHtml(o.conclusion||"—")}</b></div>
-            <div class="muted" style="margin-top:6px;">Righe concluse: ${done}/${total} · Kg: ${Math.round(o.totalKg||0)}</div>
+            <div class="muted" style="margin-top:6px;">Rimanenza: <b>${escapeHtml(remainingSummary||"—")}</b> · Kg rimanenti: ${remainingKg} · Righe concluse: ${done}/${total}</div>
           </div>
           <div class="badge" style="border-color:var(--warn); color:var(--warn);">Parziale</div>
         </div>`;
@@ -7996,12 +8123,18 @@ Linea: polveri`, null); }catch(_e){}
         div.className = `item pressCard selectableLine${checked ? " selected" : ""}`;
         div.style.cursor = isBlocked ? "not-allowed" : "pointer";
         const qtyLabel = renderQty(l);
+        const unitRaw = l.qtyUnitRaw || l.um || "";
+        const plannedLabel = (Number(l.__plannedQtyOriginal||0)>0) ? renderQty({ qtyValue:l.__plannedQtyOriginal, qtyUnitRaw: unitRaw }) : "";
+        const producedLabel = (Number(l.__producedQtySoFar||0)>0) ? renderQty({ qtyValue:l.__producedQtySoFar, qtyUnitRaw: unitRaw }) : "";
+        const hasPartial = (Number(l.__producedQtySoFar||0) > 0 && Number(l.__remainingQty||0) > 0 && Number(l.__plannedQtyOriginal||0) > 0);
+        const qtyTitle = hasPartial ? "Rimanenza" : "Quantità";
         const packTag = l.packagingInternal ? '<span class="packBadge">Packaging/Interno</span>' : '';
         div.innerHTML = `
           <div class="top">
             <div>
               <div class="name">${l.desc}${packTag ? " " + packTag : ""}</div>
-              <div class="sub" style="font-size:13px; font-weight:900;">Quantità: <span style="font-size:15px;">${qtyLabel}</span></div>
+              <div class="sub" style="font-size:13px; font-weight:900;">${qtyTitle}: <span style="font-size:15px;">${qtyLabel}</span></div>
+              ${hasPartial ? `<div class="muted" style="margin-top:4px;">Prodotti: <b>${producedLabel}</b> / ${plannedLabel}</div>` : ""}
               ${l.code?`<div class="muted" style="margin-top:6px;">Cod: <b>${l.code}</b></div>`:""}
               ${l.conclusion ? `<div class="muted" style="margin-top:6px;">Conclusione prevista: ${escapeHtml(l.conclusion)}</div>`:""}
               ${isActive ? `<div class="muted" style="margin-top:6px; font-weight:800;">In produzione da ${escapeHtml(isMineActive ? "te" : (l.activeOp||"operatore"))} · ${isMineActive ? "tocca per riaprire." : "riapri la produzione in corso."}</div>` : ""}
@@ -8148,7 +8281,8 @@ Linea: polveri`, null); }catch(_e){}
     const toConclude = new Set(selected);
     const producedKg = new Map();
 
-    const availableLines = order ? order.lines.filter(l=>selected.has(l.lineKey)) : [];
+    const maps = computeHistoryLineProductionMaps(state.history||[]);
+    const availableLines = order ? order.lines.filter(l=>selected.has(l.lineKey)).map(l=>computeRemainingViewLine(l, maps)) : [];
     const alerts = order?.alerts || [];
     const alertHtml = alerts.length ? `<div style="display:flex; flex-direction:column; gap:8px; margin:10px 0 6px;">${alerts.map(a=>{
       const palette = alertPalette(a.alertInfo?.color);
@@ -8189,12 +8323,18 @@ Linea: polveri`, null); }catch(_e){}
           div.innerHTML = renderWhiteBagBanner({ selectable: true, checked });
         } else {
           const qtyLabel = renderQty(l);
+          const unitRaw = l.qtyUnitRaw || l.um || "";
+          const plannedLabel = (Number(l.__plannedQtyOriginal||0)>0) ? renderQty({ qtyValue:l.__plannedQtyOriginal, qtyUnitRaw: unitRaw }) : "";
+          const producedLabelSoFar = (Number(l.__producedQtySoFar||0)>0) ? renderQty({ qtyValue:l.__producedQtySoFar, qtyUnitRaw: unitRaw }) : "";
+          const hasPartial = (Number(l.__producedQtySoFar||0) > 0 && Number(l.__remainingQty||0) > 0 && Number(l.__plannedQtyOriginal||0) > 0);
+          const qtyTitle = hasPartial ? "Rimanenza" : "Quantità";
           const packTag = l.packagingInternal ? '<span class="packBadge">Packaging/Interno</span>' : '';
           div.innerHTML = `
             <div class="top">
               <div>
                 <div class="name">${l.desc}${packTag ? " " + packTag : ""}</div>
-                <div class="sub">Quantità: ${qtyLabel} · Cod: ${l.code||"—"}${lineConclusion?` · Conclusione: ${lineConclusion}`:""}</div>
+                <div class="sub">${qtyTitle}: ${qtyLabel} · Cod: ${l.code||"—"}${lineConclusion?` · Conclusione: ${lineConclusion}`:""}</div>
+                ${hasPartial ? `<div class="muted" style="margin-top:6px;">Prodotti finora: <b>${producedLabelSoFar}</b> / ${plannedLabel}</div>` : ""}
                 <div style="margin-top:8px; display:flex; gap:10px; align-items:center;">
                   <div class="muted" style="font-size:12px; font-weight:900; min-width:150px;">Quantità prodotta (opzionale)</div>
                   <input class="kgInput" data-k="${l.lineKey}" type="number" inputmode="decimal" step="0.1" placeholder="auto" style="flex:1; padding:10px 10px; border-radius:12px; border:1px solid var(--stroke); background: rgba(0,0,0,.02); font-weight:900;"/>
