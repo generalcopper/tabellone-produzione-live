@@ -709,6 +709,94 @@
     .badge.warn{ background: rgba(245,158,11,.10); border-color: rgba(245,158,11,.22); color: rgba(180,83,9,.98); }
     .badge.bad{ background: rgba(239,68,68,.10); border-color: rgba(239,68,68,.20); color: rgba(220,38,38,.95); }
 
+
+    /* --- Tabelle incolonnate (modali: sotto-scorta / anagrafica / upload) --- */
+    .gridTable{
+      --col-sku: 118px;
+      --col-qty: 86px;
+      --col-extra: 108px;
+      border:1px solid rgba(15,23,42,.10);
+      background: rgba(255,255,255,.98);
+      border-radius: 14px;
+      overflow:hidden;
+    }
+    .gridTable .row{
+      border:0;
+      background: transparent;
+      border-radius:0;
+      padding: 10px 12px;
+      align-items:center;
+    }
+    .gridTable .row + .row{
+      border-top:1px solid rgba(15,23,42,.08);
+    }
+
+    .gridTable .row.gridHead{
+      background: rgba(15,23,42,.03);
+      font-size: 12px;
+      font-weight: 750;
+      color: rgba(15,23,42,.62);
+      text-transform: uppercase;
+      letter-spacing: .06em;
+      padding: 9px 12px;
+    }
+    .gridTable .row.gridHead{ cursor: default; }
+    .gridTable .row.gridHead:hover{ background: rgba(15,23,42,.03); }
+    .gridTable .row.gridHead.gridRow{ min-height: auto; }
+
+    .gridTable .row.gridRow{
+      display:grid;
+      gap: 10px;
+      grid-template-columns: var(--col-sku) 1fr var(--col-qty);
+      min-height: 44px;
+    }
+    .gridTable.cols4 .row.gridRow,
+    .gridTable.cols4 .row.gridHead{
+      display:grid;
+      gap: 10px;
+      grid-template-columns: var(--col-sku) 1fr var(--col-qty) var(--col-extra);
+    }
+    .gridTable .row[role="button"]{ cursor:pointer; }
+    .gridTable .row[role="button"]:hover{ background: rgba(15,23,42,.015); }
+
+    .gridCell{ min-width:0; }
+    .gridSku{
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      font-size: 12.5px;
+      color: rgba(15,23,42,.86);
+      white-space:nowrap;
+      overflow:hidden;
+      text-overflow:ellipsis;
+    }
+    .gridProdMain{
+      font-weight: 650;
+      font-size: 14px;
+      color: rgba(15,23,42,.92);
+      white-space:nowrap;
+      overflow:hidden;
+      text-overflow:ellipsis;
+      line-height: 1.2;
+    }
+    .gridProdSub{
+      margin-top: 2px;
+      font-size: 12px;
+      color: rgba(15,23,42,.60);
+      white-space:nowrap;
+      overflow:hidden;
+      text-overflow:ellipsis;
+    }
+    .gridRight{ text-align:right; }
+    .gridTable .badge{ justify-self:end; }
+
+    @media(max-width:420px){
+      .gridTable{ --col-sku: 98px; --col-qty: 72px; --col-extra: 96px; }
+    }
+    @media(min-width:720px){
+      .gridTable{ --col-sku: 160px; --col-qty: 96px; --col-extra: 130px; }
+      .gridTable .row.gridRow{ padding: 11px 14px; }
+      .gridTable .row.gridHead{ padding: 10px 14px; }
+    }
+
     /* Toast */
     .toast{
       position: fixed;
@@ -2677,62 +2765,62 @@ ${textLines.join("\n")}
 
         const metaRef = api.doc(db, COL_META, DOC_LOWSTOCK_EMAIL_STATE);
 
-// docRef con ID random: evita read/update su /email (regole create-only)
-const emailRef = api.doc(api.collection(db, "email"));
-const emailDocId = emailRef.id;
+        // docId deterministico: evita duplicati assoluti anche senza meta
+        const emailDocId = "auto_low_stock_" + String(fingerprint).slice(0, 24);
+        const emailRef = api.doc(db, "email", emailDocId);
 
-let enqueued = false;
+        let enqueued = false;
 
-await api.runTransaction(db, async (tx)=>{
-  const metaSnap = await tx.get(metaRef);
-  const prevHash = metaSnap?.exists?.() ? String((metaSnap.data()||{}).hash || "") : "";
-  if(prevHash === fingerprint){
-    // stesso stato: niente invio
-    return;
-  }
+        await api.runTransaction(db, async (tx)=>{
+          const metaSnap = await tx.get(metaRef);
+          const prevHash = metaSnap?.exists?.() ? String((metaSnap.data()||{}).hash || "") : "";
+          if(prevHash === fingerprint){
+            // stesso stato: niente invio
+            return;
+          }
 
-  // crea sempre un nuovo doc email (id random) SOLO quando cambia il sotto-scorta
-  tx.set(emailRef, {
-    to: ["matteo@generalcoppersrl.com"],
-    message: {
-      subject: payload.subject,
-      text: payload.text,
-      html: payload.html
-    },
-    createdAt: api.serverTimestamp(),
-    createdAtClient: now,
-    kind: "auto_low_stock",
-    lowStock: {
-      total: payload.total,
-      counts: payload.counts || null,
-      preview: payload.preview || null,
-      hash: fingerprint,
-      reason: String(reason||"")
-    },
-    createdBy: state.user?.emailLower || state.user?.email || "",
-    locations: ["cerea","concamarise"]
-  });
+          const emSnap = await tx.get(emailRef);
+          if(!emSnap.exists()){
+            tx.set(emailRef, {
+              to: ["matteo@generalcoppersrl.com"],
+              message: {
+                subject: payload.subject,
+                text: payload.text,
+                html: payload.html
+              },
+              createdAt: api.serverTimestamp(),
+              createdAtClient: now,
+              kind: "auto_low_stock",
+              lowStock: {
+                total: payload.total,
+                counts: payload.counts || null,
+                preview: payload.preview || null,
+                hash: fingerprint,
+                reason: String(reason||"")
+              },
+              createdBy: state.user?.emailLower || state.user?.email || "",
+              locations: ["cerea","concamarise"]
+            });
+            enqueued = true;
+          }
 
-  enqueued = true;
-
-  tx.set(metaRef, {
-    hash: fingerprint,
-    total: payload.total,
-    counts: payload.counts || null,
-    preview: payload.preview || null,
-    emailDocId: emailDocId,
-    sentAt: api.serverTimestamp(),
-    sentAtClient: now,
-    sentBy: state.user?.emailLower || state.user?.email || "",
-    reason: String(reason||"")
-  }, { merge:true });
-});
-
+          tx.set(metaRef, {
+            hash: fingerprint,
+            total: payload.total,
+            counts: payload.counts || null,
+            preview: payload.preview || null,
+            emailDocId: emailDocId,
+            sentAt: api.serverTimestamp(),
+            sentAtClient: now,
+            sentBy: state.user?.emailLower || state.user?.email || "",
+            reason: String(reason||"")
+          }, { merge:true });
+        });
 
         // memo locale (solo UI)
         __lsSet(__LS_LOWMAIL_HASH, fingerprint);
         __lsSet(__LS_LOWMAIL_AT, now);
-        if(enqueued){ __lsSet(__LS_LOWMAIL_ID, emailDocId); }
+        __lsSet(__LS_LOWMAIL_ID, emailDocId);
 
         // rilascio lock
         __lsSet(__LS_LOWMAIL_LOCK, 0);
@@ -3451,7 +3539,20 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
       const havePreview = preview && (Array.isArray(preview.concamarise) || Array.isArray(preview.cerea));
 
       if(!havePreview){
-        el.innerHTML += `<div class="hint" style="margin-top:6px">Dettagli righe inviate non disponibili (nessuna preview salvata nell’ultimo invio). Appena cambia il sotto scorta, la prossima mail salverà automaticamente lo snapshot qui.</div>`;
+        // fallback: prova a caricare il doc email dell’ultimo invio (utile dopo refresh)
+        const busy = !!state.mail?.lowStock?.emailDocBusy;
+        const docErr = state.mail?.lowStock?.emailDocError || "";
+
+        if(busy){
+          el.innerHTML += `<div class="hint" style="margin-top:6px">Caricamento dettagli ultimo invio…</div>`;
+        }else if(meta.hash){
+          __loadLowStockEmailDocIfNeeded(meta);
+          el.innerHTML += `<div class="hint" style="margin-top:6px">Caricamento dettagli ultimo invio…</div>`;
+        }
+
+        if(docErr){
+          el.innerHTML += `<div class="hint" style="margin-top:6px">Dettagli email: ${escapeHtml(docErr)}</div>`;
+        }
         return;
       }
 
@@ -3798,6 +3899,17 @@ function startAllLogs(){
       }
 
       const isAdmin = !!state.user?.isAdmin;
+      const showActions = isAdmin && !flow.voided;
+      const colsClass = showActions ? "cols4" : "cols3";
+
+      const tableHead = `
+        <div class="row gridHead gridRow">
+          <div class="gridCell">SKU</div>
+          <div class="gridCell">Prodotto</div>
+          <div class="gridCell gridRight">Q.tà</div>
+          ${showActions ? `<div class="gridCell gridRight">Azioni</div>` : ``}
+        </div>`;
+
       const rows = lines.map(l=>{
         const sku = String(l?.sku || "").trim();
         const title = String(l?.title || "").trim();
@@ -3807,23 +3919,22 @@ function startAllLogs(){
         const skuShow = sku || tmeta.skuInTitle || "";
         const qtyN = Math.max(0, parseQty(l?.qty || 0));
         const badge = `<span class="badge ${flow.kind==="scarica" ? "warn" : "ok"}">${effSign}${qtyN}</span>`;
-        const delBtn = isAdmin && !flow.voided ? `<button class="btn small" data-action="removeLine" data-sku="${escapeHtml(sku)}" type="button">Elimina riga</button>` : ``;
+        const delBtn = showActions ? `<button class="btn small danger" data-action="removeLine" data-sku="${escapeHtml(skuShow)}" type="button">Elimina</button>` : ``;
 
         return `
-          <div class="row">
-            <div style="min-width:0">
-              <div class="rowTitle">${escapeHtml(titleMain || skuShow || "—")}</div>
-              <div class="rowMeta">${escapeHtml(skuShow || "—")}${metaSmall ? ` • ${escapeHtml(metaSmall)}` : ``}</div>
+          <div class="row gridRow">
+            <div class="gridCell gridSku">${escapeHtml(skuShow || "—")}</div>
+            <div class="gridCell">
+              <div class="gridProdMain">${escapeHtml(titleMain || skuShow || "—")}</div>
+              <div class="gridProdSub">${metaSmall ? escapeHtml(metaSmall) : "&nbsp;"}</div>
             </div>
-            <div style="display:flex; flex-direction:column; align-items:flex-end; gap:8px">
-              ${badge}
-              ${delBtn}
-            </div>
+            <div class="gridCell gridRight">${badge}</div>
+            ${showActions ? `<div class="gridCell gridRight">${delBtn}</div>` : ``}
           </div>
         `;
       }).join("");
 
-      listEl.innerHTML = rows;
+      listEl.innerHTML = `<div class="gridTable ${colsClass}">${tableHead}${rows}</div>`;
     }
 
     async function adjustInventoryWithLines(loc, kind, lines, direction){
@@ -4085,6 +4196,13 @@ function currentInv(){
         return;
       }
 
+      const tableHead = `
+        <div class="row gridHead gridRow">
+          <div class="gridCell">SKU</div>
+          <div class="gridCell">Prodotto</div>
+          <div class="gridCell gridRight">Q.tà</div>
+        </div>`;
+
       const rows = out.slice(0, 600).map(it=>{
         const meta = parseTitleMeta(it.title || "");
         const titleMain = meta.main ? escapeHtml(meta.main) : (it.title ? escapeHtml(it.title) : "<span class='muted'>(senza nome)</span>");
@@ -4092,17 +4210,20 @@ function currentInv(){
         const qty = Number.isFinite(it.qty) ? it.qty : 0;
         const badgeClass = qty>0 ? (qty<100 ? "warn" : "ok") : "bad";
         const locLabel = escapeHtml(prettyLoc(it.loc));
+
         return `
-          <div class="row" role="button" tabindex="0" data-sku="${sku}" data-loc="${it.loc}" data-action="openSottoscortaItem">
-            <div class="rowMain">
-              <p class="rowTitle">${titleMain}</p>
-              <div class="rowSub"><span class="mono">${sku}</span> · <span class="muted">${locLabel}</span></div>
+          <div class="row gridRow" role="button" tabindex="0"
+               data-sku="${sku}" data-loc="${escapeHtml(it.loc||"")}" data-action="openSottoscortaItem">
+            <div class="gridCell gridSku">${sku}</div>
+            <div class="gridCell">
+              <div class="gridProdMain">${titleMain}</div>
+              <div class="gridProdSub">${locLabel}</div>
             </div>
-            <div class="badge ${badgeClass}">${qty}</div>
+            <div class="gridCell gridRight"><span class="badge ${badgeClass}">${qty}</span></div>
           </div>`;
       });
 
-      list.innerHTML = rows.join("");
+      list.innerHTML = `<div class="gridTable cols3">${tableHead}${rows.join("")}</div>`;
     }
 
 
@@ -4533,28 +4654,39 @@ function closeSheet(kind){
           (bad.length ? " (Correggi le righe incomplete e riprova.)" : "");
       }
 
+      const tableHead = `
+        <div class="row gridHead gridRow">
+          <div class="gridCell">SKU</div>
+          <div class="gridCell">Prodotto</div>
+          <div class="gridCell gridRight">Q.tà</div>
+          <div class="gridCell gridRight">Stato</div>
+        </div>`;
+
       const rows = lines.slice(0, 300).map(l=>{
-        const ok = !!(l.sku && Number.isFinite(l.qty) && l.qty!==0);
-        const badge = ok ? `<span class="badge ok">OK</span>` : `<span class="badge bad">ERRORE</span>`;
+        const ok = !!l.sku && Number.isFinite(l.qty) && l.qty!==0;
         const meta = parseTitleMeta(l.title || "");
         const titleMain = meta.main ? escapeHtml(meta.main) : (l.title ? escapeHtml(l.title) : "<span class='muted'>(senza nome)</span>");
         const metaSmall = buildMetaSmall(meta);
-        const sku = l.sku ? escapeHtml(l.sku) : "<span class='muted'>(SKU mancante)</span>";
-        const qty = Number.isFinite(l.qty) ? l.qty : "<span class='muted'>(q.tà mancante)</span>";
-        const metaHtml = metaSmall ? `<div class="rowMeta">${escapeHtml(metaSmall)}</div>` : ``;
+        const sku = l.sku ? escapeHtml(l.sku) : "<span class='muted'>(SKU?)</span>";
+        const qtyN = Number.isFinite(l.qty) ? Math.abs(parseQty(l.qty)||0) : 0;
+        const qtyShown = ok ? String(qtyN) : "—";
+        const sub = metaSmall ? escapeHtml(metaSmall) : "";
+        const status = ok ? `<span class="badge ok">OK</span>` : `<span class="badge bad">ERRORE</span>`;
+
         return `
-          <div class="row">
-            <div class="rowMain">
-              <p class="rowTitle">${titleMain}</p>
-              <div class="rowSub"><span class="mono">${sku}</span> • Q.tà: <b>${qty}</b></div>
-              ${metaHtml}
+          <div class="row gridRow">
+            <div class="gridCell gridSku">${sku}</div>
+            <div class="gridCell">
+              <div class="gridProdMain">${titleMain}</div>
+              <div class="gridProdSub">${sub || "&nbsp;"}</div>
             </div>
-            ${badge}
+            <div class="gridCell gridRight"><span class="badge ${ok ? "ok" : "bad"}">${qtyShown}</span></div>
+            <div class="gridCell gridRight">${status}</div>
           </div>
         `;
       }).join("");
 
-      list.innerHTML = rows + (lines.length>300 ? `<div class="hint">Mostrate le prime 300 righe.</div>` : "");
+      list.innerHTML = `<div class="gridTable cols4">${tableHead}${rows}</div>` + (lines.length>300 ? `<div class="hint">Mostrate le prime 300 righe.</div>` : "");
       if(kind==="scarica"){ renderWorkflowBox(); }
     }
 
@@ -4934,27 +5066,37 @@ function closeSheet(kind){
         return;
       }
 
+      const tableHead = `
+        <div class="row gridHead gridRow">
+          <div class="gridCell">SKU</div>
+          <div class="gridCell">Prodotto</div>
+          <div class="gridCell gridRight">Q.tà</div>
+        </div>`;
+
       const rows = filtered.slice(0, 350).map(row=>{
         const it = row.it || {};
         const meta = parseTitleMeta(it.title || "");
         const titleMain = meta.main ? escapeHtml(meta.main) : (it.title ? escapeHtml(it.title) : "<span class='muted'>(senza nome)</span>");
         const metaSmall = buildMetaSmall(meta);
-        const sku = escapeHtml(toSkuId(row.sku||it.sku||it.id||""));
-        const qty = Number.isFinite(it.qty) ? it.qty : 0;
-        const badgeClass = qty>0 ? "ok" : (qty===0 ? "warn" : "bad");
-        const metaHtml = metaSmall ? `<div class="rowMeta">${escapeHtml(metaSmall)}</div>` : "";
-        const locLab = escapeHtml(prettyLoc(row.loc));
+        const sku = escapeHtml(toSkuId(row.sku || it.sku || ""));
+        const qty = Number.isFinite(row.qty) ? row.qty : (Number.isFinite(it.qty) ? it.qty : 0);
+        const badgeClass = qty>=100 ? "ok" : (qty>0 ? "warn" : "bad");
+        const locLab = escapeHtml(prettyLoc(row.loc || it.loc || ""));
+        const sub = `${locLab}${metaSmall ? " • " + escapeHtml(metaSmall) : ""}`;
+
         return `
-          <div class="row" role="button" tabindex="0" data-sku="${sku}" data-loc="${escapeHtml(row.loc)}" data-action="pickSkuFromList">
-            <div class="rowMain">
-              <p class="rowTitle">${titleMain}</p>
-              <div class="rowSub"><span class="mono">${sku}</span> • <span class="muted">${locLab}</span>${metaHtml ? " • " + metaHtml : ""}</div>
+          <div class="row gridRow" role="button" tabindex="0"
+               data-sku="${sku}" data-loc="${escapeHtml(row.loc||"")}" data-action="pickSkuFromList">
+            <div class="gridCell gridSku">${sku}</div>
+            <div class="gridCell">
+              <div class="gridProdMain">${titleMain}</div>
+              <div class="gridProdSub">${sub}</div>
             </div>
-            <div class="badge ${badgeClass}">${qty}</div>
+            <div class="gridCell gridRight"><span class="badge ${badgeClass}">${qty}</span></div>
           </div>`;
       });
 
-      list.innerHTML = rows.join("");
+      list.innerHTML = `<div class="gridTable cols3">${tableHead}${rows.join("")}</div>`;
     }
 
     function applySkuPick(sku, locOverride){
@@ -5010,34 +5152,47 @@ function closeSheet(kind){
 
       hint.innerHTML = `Righe: <b>${lines.length}</b> • OK: <b>${lines.length - missing.length}</b>${uncertain.length ? ` • Da verificare: <b>${uncertain.length}</b>` : ""}`;
 
+      const tableHead = `
+        <div class="row gridHead gridRow">
+          <div class="gridCell">SKU</div>
+          <div class="gridCell">Prodotto</div>
+          <div class="gridCell gridRight">Q.tà</div>
+          <div class="gridCell gridRight">Stato</div>
+        </div>`;
+
       const rows = lines.map(l=>{
         const ok = !!l.sku && !!l.qty && !l.ambiguous;
         const badgeClass = ok ? "ok" : (l.sku && l.qty ? "warn" : "bad");
 
         const titleShown = l.title ? escapeHtml(parseTitleMeta(l.title).main || l.title) : escapeHtml(l.name || l.raw);
         const skuShown = l.sku ? escapeHtml(l.sku) : "<span class='muted'>(SKU?)</span>";
-        const qtyShown = l.qty ? escapeHtml(String(Math.abs(parseQty(l.qty)||0))) : "<span class='muted'>(q.tà?)</span>";
-        const msg = l.ambiguous
-          ? `<span class="muted">${(l.ambReason==="dup") ? "SKU duplicato" : "Abbinamento non sicuro"} • </span>`
-          : "";
+        const qtyVal = l.qty ? Math.abs(parseQty(l.qty)||0) : null;
+
+        const msgTxt = l.ambiguous
+          ? ((l.ambReason==="dup") ? "SKU duplicato" : "Abbinamento non sicuro")
+          : (!l.sku ? "SKU mancante" : (!l.qty ? "Quantità mancante" : ""));
+
         const actionBtn = (!l.sku || l.ambiguous)
           ? `<button class="btn small" type="button" data-action="openSkuPick" data-idx="${l.idx}">Scegli SKU</button>`
           : "";
 
+        const statusCell = actionBtn
+          ? actionBtn
+          : `<span class="badge ${badgeClass}">${ok ? "OK" : "CHECK"}</span>`;
+
         return `
-          <div class="row" data-idx="${l.idx}">
-            <div class="rowMain">
-              <p class="rowTitle">${titleShown}</p>
-              <div class="rowSub">${msg}<span class="mono">${skuShown}</span> • <b>${qtyShown}</b> pz</div>
+          <div class="row gridRow" data-idx="${l.idx}">
+            <div class="gridCell gridSku">${skuShown}</div>
+            <div class="gridCell">
+              <div class="gridProdMain">${titleShown}</div>
+              <div class="gridProdSub">${msgTxt ? escapeHtml(msgTxt) : "&nbsp;"}</div>
             </div>
-            <div class="rowActions">
-              ${actionBtn}
-              <div class="badge ${badgeClass}">${l.qty ? Math.abs(parseQty(l.qty)||0) : "—"}</div>
-            </div>
+            <div class="gridCell gridRight"><span class="badge ${badgeClass}">${qtyVal!=null ? qtyVal : "—"}</span></div>
+            <div class="gridCell gridRight">${statusCell}</div>
           </div>`;
       });
 
-      list.innerHTML = rows.join("");
+      list.innerHTML = `<div class="gridTable cols4">${tableHead}${rows.join("")}</div>`;
 
       // abilita applica solo se tutte OK (sku + qty) e nessuna ambigua
       const canApply = lines.every(l=> !!l.sku && !!l.qty && !l.ambiguous);
@@ -6008,6 +6163,14 @@ function renderProductsSheet(){
 
       const editingSku = state.ui.productEditSku ? toSkuId(state.ui.productEditSku) : null;
 
+      let editHtml = "";
+      const tableHead = `
+        <div class="row gridHead gridRow">
+          <div class="gridCell">SKU</div>
+          <div class="gridCell">Prodotto</div>
+          <div class="gridCell gridRight">Q.tà</div>
+        </div>`;
+
       const rows = filtered
         .slice(0, 600)
         .sort((a,b)=> String(a.sku||"").localeCompare(String(b.sku||"")))
@@ -6017,11 +6180,10 @@ function renderProductsSheet(){
           const meta = parseTitleMeta(it.title || "");
           const titleMain = meta.main ? escapeHtml(meta.main) : (it.title ? escapeHtml(it.title) : "<span class='muted'>(senza nome)</span>");
           const metaSmall = buildMetaSmall(meta);
-          const metaHtml = metaSmall ? `<div class="rowMeta">${escapeHtml(metaSmall)}</div>` : "";
           const badgeClass = qty>=100 ? "ok" : (qty>0 ? "warn" : "bad");
 
           if(editingSku && editingSku===sku){
-            return `
+            editHtml = `
               <div class="row editRow" data-sku="${escapeHtml(sku)}">
                 <div class="editGrid">
                   <label class="field">
@@ -6046,22 +6208,23 @@ function renderProductsSheet(){
 
                 <div class="hint" style="margin-top:8px">Attenzione: cambiare SKU è una correzione “forte” (può rendere meno leggibili gli storici). Usalo solo quando serve.</div>
               </div>`;
+            return "";
           }
 
           return `
-            <div class="row" role="button" tabindex="0" data-sku="${escapeHtml(sku)}" data-action="openProductDetails">
-              <div class="rowMain">
-                <p class="rowTitle">${titleMain}</p>
-                <div class="rowSub"><span class="mono">${escapeHtml(sku)}</span>${metaHtml ? " • " + metaHtml : ""}</div>
+            <div class="row gridRow" role="button" tabindex="0" data-sku="${escapeHtml(sku)}" data-action="openProductDetails">
+              <div class="gridCell gridSku">${escapeHtml(sku)}</div>
+              <div class="gridCell">
+                <div class="gridProdMain">${titleMain}</div>
+                <div class="gridProdSub">${metaSmall ? escapeHtml(metaSmall) : "&nbsp;"}</div>
               </div>
-              <div class="rowActions">
-                <div class="badge ${badgeClass}">${qty}</div>
-                <div class="chev">›</div>
-              </div>
+              <div class="gridCell gridRight"><span class="badge ${badgeClass}">${qty}</span></div>
             </div>`;
-        });
+        })
+        .filter(Boolean);
 
-      list.innerHTML = rows.join("");
+      const tableHtml = rows.length ? `<div class="gridTable cols3">${tableHead}${rows.join("")}</div>` : "";
+      list.innerHTML = (editHtml || "") + tableHtml;
     }
 
     async function saveProductFromRow(row){
