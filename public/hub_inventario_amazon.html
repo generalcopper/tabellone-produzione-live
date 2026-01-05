@@ -1249,6 +1249,40 @@
       border-radius: 14px;
     }
 
+
+    /* HOME - Flussi FAB (bottom center) */
+    .homeFlowsFabWrap{
+      position: fixed;
+      left: 50%;
+      transform: translateX(-50%);
+      bottom: calc(14px + env(safe-area-inset-bottom));
+      z-index: 80;
+      pointer-events: none;
+    }
+    .homeFlowsFab{
+      pointer-events: auto;
+      display:inline-flex;
+      align-items:center;
+      justify-content:center;
+      gap:10px;
+      padding: 10px 14px;
+      border-radius: 999px;
+      background: #1d4ed8;
+      color: #fff;
+      border: 1px solid rgba(255,255,255,.18);
+      box-shadow: 0 10px 24px rgba(15,23,42,.18);
+      font-weight: 750;
+      font-size: 13px;
+      letter-spacing: -.01em;
+      line-height: 1;
+      cursor:pointer;
+      user-select: none;
+      -webkit-tap-highlight-color: transparent;
+      will-change: transform;
+    }
+    .homeFlowsFab svg{ width: 18px; height: 18px; display:block; }
+    .homeFlowsFab:active{ transform: translateY(1px) scale(.985); }
+
 </style>
 </head>
 
@@ -1410,7 +1444,20 @@
             <div class="list compact" id="homeLowStockList"></div>
             <div class="hint" id="homeLowStockHint" style="margin-top:10px"></div>
             <div class="hint" id="homeLowStockMailLog" style="margin-top:6px; opacity:.85"></div>
+
           </div>
+          <div class="homeFlowsFabWrap" aria-hidden="false">
+            <button class="homeFlowsFab" id="btnHomeFlowsModal" type="button" aria-label="Apri flussi">
+              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path d="M8 5v12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                <path d="M5 8l3-3 3 3" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                <path d="M16 19V7" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                <path d="M13 16l3 3 3-3" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+              <span>Flussi</span>
+            </button>
+          </div>
+
         </div>
       </div>
     </div>
@@ -1495,6 +1542,34 @@
       </div>
     </div>
   </div>
+
+
+  <!-- SHEET FLOWS (HOME) -->
+  <div class="sheet" id="sheetFlows" aria-hidden="true">
+    <div class="sheetCard" role="dialog" aria-modal="true" aria-label="Flussi">
+      <div class="sheetTop">
+        <div style="min-width:0">
+          <p class="sheetTitle">Flussi</p>
+          <div class="sheetSub">Storico carico/scarico. Seleziona un magazzino, apri un flusso per vedere le righe. Elimina disponibile solo per Admin.</div>
+        </div>
+        <button class="btn" id="btnCloseFlows" type="button">Chiudi</button>
+      </div>
+
+      <div class="sheetBody">
+        <div class="seg" role="tablist" aria-label="Magazzino flussi">
+          <button class="segBtn active" id="btnFlowsLocConcamarise" type="button" role="tab" aria-selected="true">Concamarise</button>
+          <button class="segBtn" id="btnFlowsLocCerea" type="button" role="tab" aria-selected="false">Cerea</button>
+        </div>
+
+        <div class="hint" id="flowsModalHint">—</div>
+
+        <div class="sheetScroll">
+          <div class="list" id="flowsModalList"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
 
   <!-- SHEET CARICA -->
   <div class="sheet" id="sheetCarica" aria-hidden="true">
@@ -1794,7 +1869,7 @@ Tip:
         carica: { file:null, lines:[], busy:false, workflow:null },
         scarica: { file:null, lines:[], busy:false, workflow:null }
       },
-      ui: { sheet:null, sheetStack:[], sottoscortaLoc:null, wfOpen:false, flowId:null, flowSearch:"", productsSearch:"", productEditSku:null, productDetailsSku:null, productDetailsEditMode:false, caricaMode:"pdf", skuPick:{ lineIdx:null, q:"" } },
+      ui: { sheet:null, sheetStack:[], sottoscortaLoc:null, wfOpen:false, flowId:null, flowSearch:"", productsSearch:"", productEditSku:null, productDetailsSku:null, productDetailsEditMode:false, caricaMode:"pdf", flowsModalLoc:"concamarise", skuPick:{ lineIdx:null, q:"" } },
       manual: { carica:{ text:"", lines:[], busy:false } },
 
       movements: { unsub: null, sku: null, items: [], error: "" }
@@ -3089,6 +3164,11 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
             renderFlowDetails();
           }
         }
+
+        // aggiorna anche la modale flussi (HOME)
+        if(state.ui.sheet==="flows" && (state.ui.flowsModalLoc===loc)){
+          renderFlowsModal();
+        }
       }, (err)=>{
         console.warn("logs watch error", err);
         showToast("Errore flussi", err?.message || String(err));
@@ -3162,6 +3242,93 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
 
         return `
           <div class="folderRow" data-action="openFlow" data-flowid="${escapeHtml(f.id)}" role="button" tabindex="0" aria-label="Apri flusso">
+            <div class="folderLeft">
+              <div class="folderTitle">${kindLabel} • ${name} ${voided}</div>
+              <div class="folderMeta">${meta}</div>
+            </div>
+            <div style="display:flex; align-items:center; gap:8px; flex:0 0 auto;">
+              ${adminBtn}
+              <div class="chev">›</div>
+            </div>
+          </div>
+        `;
+      }).join("");
+
+      list.innerHTML = rows;
+    }
+
+
+    // === Modale Flussi (HOME) ===
+    function setFlowsModalLoc(loc){
+      const v = (loc==="cerea" || loc==="concamarise") ? loc : "concamarise";
+      state.ui.flowsModalLoc = v;
+
+      const bConca = $("btnFlowsLocConcamarise");
+      const bCerea = $("btnFlowsLocCerea");
+
+      if(bConca){
+        const on = v==="concamarise";
+        bConca.classList.toggle("active", on);
+        bConca.setAttribute("aria-selected", on ? "true" : "false");
+      }
+      if(bCerea){
+        const on = v==="cerea";
+        bCerea.classList.toggle("active", on);
+        bCerea.setAttribute("aria-selected", on ? "true" : "false");
+      }
+
+      renderFlowsModal();
+    }
+
+    function renderFlowsModal(){
+      const list = $("flowsModalList");
+      const hint = $("flowsModalHint");
+      if(!list || !hint) return;
+
+      if(!state.user?.isWhitelisted){
+        hint.textContent = "Accedi per visualizzare i flussi.";
+        list.innerHTML = "";
+        return;
+      }
+
+      const loc = (state.ui.flowsModalLoc==="cerea" || state.ui.flowsModalLoc==="concamarise")
+        ? state.ui.flowsModalLoc
+        : "concamarise";
+
+      const lg = state.logs[loc] || { flows:[] };
+      const flows = lg.flows || [];
+
+      hint.textContent = flows.length
+        ? `${flows.length} flussi mostrati • ${prettyLoc(loc)} (ultimi 25).`
+        : `Nessun flusso registrato in ${prettyLoc(loc)}. Dopo un Carica/Scarica qui trovi lo storico.`;
+
+      if(!flows.length){
+        list.innerHTML = "";
+        return;
+      }
+
+      const rows = flows.map(f=>{
+        const kindLabel = (f.kind==="carica") ? "Carica" : (f.kind==="scarica" ? "Scarica" : "Flusso");
+        const name = escapeHtml(flowDisplayName(f));
+        const time = fmtDate(f.appliedAtClient);
+        const file = escapeHtml(f.fileName || "");
+        const pieces = (f.totalPieces || 0);
+        const lines = (f.totalLines || (Array.isArray(f.lines)? f.lines.length : 0) || 0);
+        const voided = f.voided ? `<span class="badge warn">Annullato</span>` : ``;
+
+        const metaParts = [];
+        metaParts.push(time);
+        if(file) metaParts.push(file);
+        if(pieces) metaParts.push(`${pieces} pz`);
+        if(lines) metaParts.push(`${lines} righe`);
+        const meta = metaParts.join(" • ");
+
+        const adminBtn = state.user?.isAdmin ? `
+          <button class="btn small" data-action="deleteFlow" data-flowid="${escapeHtml(f.id)}" data-flowloc="${escapeHtml(loc)}" type="button">Elimina</button>
+        ` : ``;
+
+        return `
+          <div class="folderRow" data-action="openFlow" data-flowid="${escapeHtml(f.id)}" data-flowloc="${escapeHtml(loc)}" role="button" tabindex="0" aria-label="Apri flusso">
             <div class="folderLeft">
               <div class="folderTitle">${kindLabel} • ${name} ${voided}</div>
               <div class="folderMeta">${meta}</div>
@@ -3358,9 +3525,9 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
       }
     }
 
-    async function handleDeleteFlow(flowId, { fromList=false } = {}){
+    async function handleDeleteFlow(flowId, { fromList=false, locOverride="" } = {}){
       if(!state.user?.isAdmin) return;
-      const loc = state.route.loc;
+      const loc = (locOverride==="cerea" || locOverride==="concamarise") ? locOverride : state.route.loc;
       const flow = (state.logs[loc]?.flows || []).find(f=>f.id===flowId) || null;
       if(!flow) { showToast("Flusso non trovato", "Riprova."); return; }
 
@@ -3385,7 +3552,10 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
         }
 
         showToast("Flusso eliminato", "Inventario ripristinato e storico rimosso.");
-        if(!fromList) renderFlowsList();
+        // aggiorna liste
+        if(state.route.view==="location" && state.route.loc===loc) renderFlowsList();
+        if(state.ui.sheet==="flows") renderFlowsModal();
+        if(!fromList && state.route.view==="location") renderFlowsList();
       }catch(err){
         console.warn("delete flow error", err);
         showToast("Errore", err?.message || String(err));
@@ -3774,6 +3944,7 @@ function currentInv(){
       if(kind==="carica") return $("sheetCarica");
       if(kind==="scarica") return $("sheetScarica");
       if(kind==="flow") return $("sheetFlow");
+      if(kind==="flows") return $("sheetFlows");
       if(kind==="products") return $("sheetProducts");
       if(kind==="productDetails") return $("sheetProductDetails");
       if(kind==="skuPick") return $("sheetSkuPick");
@@ -5935,6 +6106,55 @@ async function applyFlow(kind){
       $("btnHomeScarica")?.addEventListener("click", ()=>{
         openSheet("scarica");
       });
+
+      $("btnHomeFlowsModal")?.addEventListener("click", ()=>{
+        openSheet("flows");
+        setFlowsModalLoc(state.ui.flowsModalLoc || "concamarise");
+      });
+
+      $("btnFlowsLocConcamarise")?.addEventListener("click", ()=> setFlowsModalLoc("concamarise"));
+      $("btnFlowsLocCerea")?.addEventListener("click", ()=> setFlowsModalLoc("cerea"));
+
+      $("btnCloseFlows")?.addEventListener("click", ()=> closeSheet("flows"));
+      $("sheetFlows")?.addEventListener("click", (e)=>{ if(e.target?.id==="sheetFlows") closeSheet("flows"); });
+
+      $("flowsModalList")?.addEventListener("click", async (e)=>{
+        const actEl = e.target?.closest?.("[data-action]");
+        const action = actEl?.getAttribute?.("data-action") || "";
+        const flowId = actEl?.getAttribute?.("data-flowid") || actEl?.closest?.("[data-flowid]")?.getAttribute?.("data-flowid") || "";
+        const flowLoc = actEl?.getAttribute?.("data-flowloc") || actEl?.closest?.("[data-flowloc]")?.getAttribute?.("data-flowloc") || state.ui.flowsModalLoc || "concamarise";
+        if(!flowId) return;
+
+        if(action==="deleteFlow"){
+          e.preventDefault(); e.stopPropagation();
+          await handleDeleteFlow(flowId, { fromList:true, locOverride: flowLoc });
+          renderFlowsModal();
+          return;
+        }
+
+        const row = e.target?.closest?.("[data-action='openFlow']");
+        if(row){
+          e.preventDefault();
+          closeSheet("flows");
+          enterLocation(flowLoc);
+          requestAnimationFrame(()=> openFlow(flowId));
+        }
+      });
+
+      $("flowsModalList")?.addEventListener("keydown", (e)=>{
+        if(e.key!=="Enter" && e.key!==" ") return;
+        const row = e.target?.closest?.("[data-action='openFlow']");
+        if(!row) return;
+        const flowId = row.getAttribute("data-flowid") || "";
+        const flowLoc = row.getAttribute("data-flowloc") || state.ui.flowsModalLoc || "concamarise";
+        if(!flowId) return;
+        e.preventDefault();
+        closeSheet("flows");
+        enterLocation(flowLoc);
+        requestAnimationFrame(()=> openFlow(flowId));
+      });
+
+
 
       $("btnHomeFlows")?.addEventListener("click", ()=>{
         const el = $("homeFlowsSection");
