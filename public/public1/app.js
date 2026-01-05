@@ -8,103 +8,6 @@
 
   const docEl = document.documentElement;
 
-  // --- Firebase/Google Auth persistence (shared across all hubs) ---
-  // Obiettivo: mantenere la sessione login stabile tra tutte le pagine HTML
-  // SENZA toccare gli HTML. Questo file è già incluso ovunque.
-  //
-  // Nota importante: la persistenza è condivisa SOLO se i 7 HTML stanno sullo stesso ORIGIN
-  // (stesso dominio + protocollo + porta). Se sono su origin diversi, il browser non condivide
-  // lo storage e non esiste un fix lato JS.
-  (function ensureAuthPersistenceOnce() {
-    if (window.__gcAuthPersistenceStarted) return;
-    window.__gcAuthPersistenceStarted = true;
-
-    const MAX_TRIES = 30;      // ~3s
-    const DELAY_MS = 100;
-    let tries = 0;
-
-    function safeDebugLog(...args) {
-      // Debug opzionale: localStorage.setItem('gc_debug_persist','1')
-      try {
-        if (localStorage.getItem("gc_debug_persist") === "1") {
-          console.log("[gc:persist]", ...args);
-        }
-      } catch (_e) {}
-    }
-
-    function tryCompatFirebase() {
-      const fb = window.firebase;
-      if (!fb || typeof fb.auth !== "function" || !fb.auth.Auth || !fb.auth.Auth.Persistence) return false;
-      try {
-        const auth = fb.auth();
-        if (!auth || typeof auth.setPersistence !== "function") return false;
-        // Prefer LOCAL; fallback SESSION (iOS private mode / storage restrictions)
-        auth.setPersistence(fb.auth.Auth.Persistence.LOCAL)
-          .then(() => safeDebugLog("compat: LOCAL ok"))
-          .catch(() => auth.setPersistence(fb.auth.Auth.Persistence.SESSION)
-            .then(() => safeDebugLog("compat: SESSION fallback ok"))
-            .catch(() => safeDebugLog("compat: persistence failed"))
-          );
-        return true;
-      } catch (_e) {
-        return false;
-      }
-    }
-
-    function tryModularBridge() {
-      // Se nel tuo codice modular esponi un bridge, lo agganciamo qui senza toccare gli HTML.
-      // Esempio bridge (una volta nel codice dove crei auth):
-      // window.gcAuth = { auth, setPersistence, browserLocalPersistence, browserSessionPersistence };
-      const b = window.gcAuth || window.__gcAuth || null;
-      if (!b || !b.auth || typeof b.setPersistence !== "function") return false;
-      const local = b.browserLocalPersistence || b.localPersistence || null;
-      const session = b.browserSessionPersistence || b.sessionPersistence || null;
-      if (!local) return false;
-      Promise.resolve()
-        .then(() => b.setPersistence(b.auth, local))
-        .then(() => safeDebugLog("modular: LOCAL ok"))
-        .catch(() => {
-          if (!session) return;
-          return b.setPersistence(b.auth, session)
-            .then(() => safeDebugLog("modular: SESSION fallback ok"))
-            .catch(() => safeDebugLog("modular: persistence failed"));
-        });
-      return true;
-    }
-
-    function tryCommonGlobals() {
-      // Ultima spiaggia: alcune app espongono auth/persistence helper su window.
-      const auth = window.auth || window.firebaseAuth || window.gcFirebaseAuth || null;
-      const setPersistence = window.setPersistence || null;
-      const local = window.browserLocalPersistence || window.LOCAL_PERSISTENCE || null;
-      const session = window.browserSessionPersistence || window.SESSION_PERSISTENCE || null;
-      if (!auth || typeof setPersistence !== "function" || !local) return false;
-      Promise.resolve()
-        .then(() => setPersistence(auth, local))
-        .then(() => safeDebugLog("globals: LOCAL ok"))
-        .catch(() => {
-          if (!session) return;
-          return setPersistence(auth, session)
-            .then(() => safeDebugLog("globals: SESSION fallback ok"))
-            .catch(() => safeDebugLog("globals: persistence failed"));
-        });
-      return true;
-    }
-
-    function tick() {
-      tries++;
-      const ok = tryCompatFirebase() || tryModularBridge() || tryCommonGlobals();
-      if (ok) {
-        window.__gcAuthPersistenceDone = true;
-        return;
-      }
-      if (tries < MAX_TRIES) setTimeout(tick, DELAY_MS);
-    }
-
-    // Esegui subito: più presto = meglio (prima che partano eventuali flow di login)
-    tick();
-  })();
-
   // Detect standalone (Home Screen) mode on iOS
   const isStandalone = (() => {
     try {
@@ -203,6 +106,183 @@
   });
 
 
+  // --- iOS-like page transitions between hubs (no HTML edits needed) ---
+  const NAV_DIR_KEY = "gc_nav_dir_v1";
+  const NAV_TS_KEY = "gc_nav_ts_v1";
+  const NAV_MAX_AGE_MS = 8000;
+  let navLocked = false;
+
+  function nowMs(){ return Date.now ? Date.now() : (new Date()).getTime(); }
+
+  function setNextNavDir(dir){
+    try{
+      sessionStorage.setItem(NAV_DIR_KEY, dir === "back" ? "back" : "forward");
+      sessionStorage.setItem(NAV_TS_KEY, String(nowMs()));
+    } catch(_e) {}
+  }
+
+  function consumeNavDir(){
+    try{
+      const dir = sessionStorage.getItem(NAV_DIR_KEY);
+      const ts = parseInt(sessionStorage.getItem(NAV_TS_KEY) || "0", 10);
+      sessionStorage.removeItem(NAV_DIR_KEY);
+      sessionStorage.removeItem(NAV_TS_KEY);
+      if (!dir) return null;
+      if (!ts || (nowMs() - ts) > NAV_MAX_AGE_MS) return null;
+      return dir === "back" ? "back" : "forward";
+    } catch(_e) {
+      return null;
+    }
+  }
+
+  function parseMs(v){
+    const s = String(v || "").trim();
+    if (!s) return null;
+    if (s.endsWith("ms")) {
+      const n = parseFloat(s.slice(0, -2));
+      return Number.isFinite(n) ? n : null;
+    }
+    if (s.endsWith("s")) {
+      const n = parseFloat(s.slice(0, -1));
+      return Number.isFinite(n) ? n * 1000 : null;
+    }
+    const n = parseFloat(s);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  function getCssDurMs(){
+    try{
+      const v = getComputedStyle(docEl).getPropertyValue("--gc-dur");
+      const ms = parseMs(v);
+      return (ms == null) ? 240 : ms;
+    } catch(_e) {
+      return 240;
+    }
+  }
+
+  function ensureCover(){
+    try{
+      if (!document.body) return null;
+      let cover = document.querySelector(".gc-cover");
+      if (cover) return cover;
+      cover = document.createElement("div");
+      cover.className = "gc-cover";
+      document.body.appendChild(cover);
+      return cover;
+    } catch(_e) {
+      return null;
+    }
+  }
+
+  // Enter animation (runs once right after navigation)
+  const enterDir = consumeNavDir();
+  if (enterDir) {
+    docEl.classList.add(enterDir === "back" ? "gc-enter-back" : "gc-enter-forward");
+    window.setTimeout(() => {
+      try { docEl.classList.remove("gc-enter-back", "gc-enter-forward"); } catch(_e) {}
+    }, 450);
+  }
+
+  function normalizeUrl(href){
+    try{
+      return new URL(href, location.href).toString();
+    } catch(_e) {
+      return href;
+    }
+  }
+
+  function shouldHandleAnchor(a){
+    try{
+      if (!a) return false;
+      if (a.hasAttribute("download")) return false;
+      if (a.getAttribute("target") && a.getAttribute("target") !== "_self") return false;
+      if (a.hasAttribute("data-no-transition")) return false;
+
+      const href = (a.getAttribute("href") || "").trim();
+      if (!href) return false;
+      if (href.startsWith("#")) return false;
+      if (/^(mailto:|tel:|sms:|javascript:)/i.test(href)) return false;
+
+      // Same-origin only (keep external links normal)
+      const u = new URL(href, location.href);
+      if (u.origin !== location.origin) return false;
+
+      return true;
+    } catch(_e) {
+      return false;
+    }
+  }
+
+  function inferDirFromHref(href){
+    try{
+      const h = String(href || "").toLowerCase();
+      if (h.includes("hub_centrale")) return "back";
+    } catch(_e) {}
+    return "forward";
+  }
+
+  function navigateWithTransition(url, dir){
+    const to = normalizeUrl(url);
+    if (!to) return;
+
+    // Avoid double nav
+    if (navLocked) {
+      try { location.href = to; } catch(_e) {}
+      return;
+    }
+
+    // Avoid self-nav
+    try { if (to === location.href) return; } catch(_e) {}
+
+    navLocked = true;
+
+    const direction = (dir === "back") ? "back" : "forward";
+    setNextNavDir(direction);
+
+    // Make sure cover exists before we animate
+    ensureCover();
+
+    // Apply leave classes
+    try{
+      docEl.classList.add("gc-transitioning", direction === "back" ? "gc-leave-back" : "gc-leave-forward");
+      // Force a reflow so animations start reliably
+      void docEl.offsetHeight;
+    } catch(_e) {}
+
+    const delay = Math.max(0, getCssDurMs());
+
+    window.setTimeout(() => {
+      try { location.href = to; } catch(_e) {}
+    }, delay);
+  }
+
+  // Expose helper (optional usage in your pages without changing this file again)
+  try { window.gcNavigate = navigateWithTransition; } catch(_e) {}
+
+  // Intercept same-origin <a href="..."> clicks and animate the redirect
+  document.addEventListener("click", (e) => {
+    try{
+      if (!e || e.defaultPrevented) return;
+
+      // Respect modified clicks (new tab / new window)
+      if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+
+      const a = e.target && e.target.closest ? e.target.closest("a[href]") : null;
+      if (!a) return;
+      if (!shouldHandleAnchor(a)) return;
+
+      const href = a.getAttribute("href");
+      const dir = (a.getAttribute("data-nav") || "").toLowerCase() === "back"
+        ? "back"
+        : inferDirFromHref(href);
+
+      e.preventDefault();
+      navigateWithTransition(href, dir);
+    } catch(_e) {}
+  }, false);
+
+
+
   // --- Desktop-only "Back to Hub" button (injected) ---
   const HUB_KEY = "gc_hub_home_url";
 
@@ -290,7 +370,7 @@
         '<span>Hub Centrale</span>';
 
       btn.addEventListener("click", () => {
-        try { location.href = getHubUrl(); } catch (_e) {}
+        try { navigateWithTransition(getHubUrl(), "back"); } catch (_e) {}
       });
 
       document.body.appendChild(btn);
