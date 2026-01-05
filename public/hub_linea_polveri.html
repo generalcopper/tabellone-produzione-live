@@ -1150,6 +1150,7 @@
     docs: [],
     fatturatoLordo: null,
     powderOrders: [],
+    ordersReady: false,
     activeProductions: [],
     history: [],
     historyReady: false,
@@ -1253,7 +1254,37 @@
     firstRenderDone: false,
     inError: false
   };
-  let syncInFlight = false;
+  
+  const FAST_SNAPSHOT_KEY = "HUB_LINEA_POLVERI_FAST_SNAPSHOT_V1";
+  function saveFastSnapshot(){
+    try{
+      const snap = {
+        at: Date.now(),
+        modifiedTime: state.xmlModifiedTime || null,
+        lastFetchAt: state.lastFetchAt || null,
+        fatturatoLordo: state.fatturatoLordo ?? null,
+        powderOrders: Array.isArray(state.powderOrders) ? state.powderOrders : [],
+      };
+      localStorage.setItem(FAST_SNAPSHOT_KEY, JSON.stringify(snap));
+    }catch(_e){}
+  }
+  function hydrateFastSnapshot(){
+    try{
+      const raw = localStorage.getItem(FAST_SNAPSHOT_KEY);
+      if(!raw) return false;
+      const snap = JSON.parse(raw);
+      if(!snap || !Array.isArray(snap.powderOrders)) return false;
+
+      state.powderOrders = snap.powderOrders;
+      state.fatturatoLordo = (snap.fatturatoLordo ?? state.fatturatoLordo) ?? null;
+      state.lastFetchAt = snap.lastFetchAt ?? state.lastFetchAt;
+      state.xmlModifiedTime = snap.modifiedTime ?? state.xmlModifiedTime;
+      state.ordersReady = true;
+      return true;
+    }catch(_e){}
+    return false;
+  }
+let syncInFlight = false;
   let syncQueued = false;
   let syncRetryTimer = null;
   let syncBackoffMs = 0;
@@ -1586,11 +1617,12 @@
     loader.inError = false;
   }
   function gateReady(){
-    return !!(loader.firstRenderDone && state.historyReady);
+    return !!(loader.firstRenderDone && state.ordersReady);
   }
   function maybeHideGate(){
     if(authGateState !== "signed_in" && authGateState !== "restoring") return;
     if(!gateReady()) return;
+    try{ state.__bootFinished = true; }catch(_e){}
     try{ hideAuthLoader(); }catch(_e){}
   }
 
@@ -2529,13 +2561,27 @@ document.body.appendChild(banner);
     }
     globalThis.__BOOT_DONE__ = true;
 
-    // Mostra la rotella solo quando siamo dentro app (sessione in ripristino o già attiva).
+    // Mostra la rotella solo se NON abbiamo ancora gli ordini renderizzati.
     const inApp = (authGateState === "signed_in" || authGateState === "restoring");
-    if(inApp){
+    const needsGate = inApp && !gateReady();
+    if(needsGate){
       showAuthLoader("Caricamento dati…", "Sto sincronizzando ordini e statistiche.");
       // Hard-timeout di sicurezza: se qualcosa va storto non resta bloccato.
-      setTimeout(()=>{ try{ hideAuthLoader(); }catch(_e){} }, 12000);
+      setTimeout(()=>{ try{ if(!gateReady()) hideAuthLoader(); }catch(_e){} }, 12000);
     }
+
+    // Avvio sync (non blocca l’UI più del necessario)
+    const ordersPromise = queuedSyncOrders(true, "boot");
+    const livePromise   = initLiveSync();
+
+    // Aspetta un minimo per avere dati “realmente utili”, poi lascia che maybeHideGate faccia il resto.
+    try{
+      await Promise.race([ordersPromise, new Promise(r=>setTimeout(r, 1800))]);
+      if(inApp && !gateReady()) showAuthLoader("Caricamento dati…", "Sto finalizzando…");
+      await Promise.race([livePromise, new Promise(r=>setTimeout(r, 700))]);
+    }catch(_e){}
+    try{ maybeHideGate(); }catch(_e){}
+  }
 
     // Avvio sync (non blocca l’UI più del necessario)
     const ordersPromise = queuedSyncOrders(true, "boot");
@@ -2941,7 +2987,8 @@ document.body.appendChild(banner);
     try {
       setOnlinePill("warn", "Stato: sincronizzazione…");
       const isFirstPass = !loader.firstRenderDone;
-      showLoader(isFirstPass ? "Connessione…" : "Aggiornamento…");
+      const showFull = isFirstPass && !state.ordersReady;
+      showLoader(showFull ? "Connessione…" : "Aggiornamento…");
       if(isBoot) bootSet(40, "DOWNLOAD: ordini in corso…");
 
       const res = await fetchWithTimeout(XML_PROXY_CFG.proxyUrl, 16000, { cache:"no-store" });
@@ -2951,9 +2998,20 @@ document.body.appendChild(banner);
       const xmlText = j?.xml;
       if(!xmlText || typeof xmlText !== "string") throw new Error("XML mancante");
 
+      const prevMod = state.xmlModifiedTime;
       state.xmlModifiedTime = j?.modifiedTime || null;
       state.lastFetchAt = Date.now();
       localStorage.setItem(XML_PROXY_CFG.cacheKey, JSON.stringify({ at: state.lastFetchAt, xml: xmlText, modifiedTime: state.xmlModifiedTime }));
+
+
+      if(state.ordersReady && prevMod && state.xmlModifiedTime && String(prevMod) === String(state.xmlModifiedTime)){
+        // Niente parsing: nessun cambiamento, evitiamo il "secondo caricamento"
+        setOnlinePill("ok", "Stato: online");
+        if(isBoot) bootSet(62, "OK: ordini aggiornati");
+        loader.inError = false;
+        resetSyncBackoff();
+        return;
+      }
 
       showLoader(isFirstPass ? "Parsing…" : "Aggiornamento…");
       state.docs = await parseEasyfattXml(xmlText);
@@ -2968,6 +3026,9 @@ document.body.appendChild(banner);
         powderDocs.push({ customer: d.customer, number: d.number, orderNo: d.number, conclusion: d.conclusion, lines: pLines, alerts: alertLines, totalKg });
       }
       state.powderOrders = powderDocs;
+      state.ordersReady = true;
+      saveFastSnapshot();
+      bootMark("orders");
       flushAllowlistPendingRender();
 
       showLoader("Aggiornamento…");
@@ -3002,6 +3063,9 @@ document.body.appendChild(banner);
             powderDocs.push({ customer: d.customer, number: d.number, orderNo: d.number, conclusion: d.conclusion, lines: pLines, alerts: alertLines, totalKg });
           }
           state.powderOrders = powderDocs;
+      state.ordersReady = true;
+      saveFastSnapshot();
+      bootMark("orders");
           flushAllowlistPendingRender();
         } catch(_e) {}
       }
@@ -3146,27 +3210,20 @@ function showAuthGate(){
   }
   
 
-  // --- Boot gating: una sola rotella finché arrivano i primi dati (evita "0" iniziale) ---
-  state.__bootFlags = state.__bootFlags || { active:false, hist:false };
+  // --- Boot gating: una sola rotella finché arrivano i primi dati davvero utili ---
+  state.__bootFlags = state.__bootFlags || { orders:false, active:false, hist:false };
   state.__bootFinished = !!state.__bootFinished;
   function bootMark(kind){
     try{
-      state.__bootFlags = state.__bootFlags || { active:false, hist:false };
+      state.__bootFlags = state.__bootFlags || { orders:false, active:false, hist:false };
+      if(kind === "orders") state.__bootFlags.orders = true;
       if(kind === "active") state.__bootFlags.active = true;
       if(kind === "hist") state.__bootFlags.hist = true;
 
       if(state.__bootFinished) return;
 
-      // Fallback soft: se arriva la coda ma la storia tarda, non restiamo bloccati troppo
-      if(state.__bootFlags.active && !state.__bootSoftTimer){
-        state.__bootSoftTimer = setTimeout(()=>{
-          state.__bootSoftTimer = null;
-          bootFinish();
-        }, 1200);
-      }
-
-      // Ideale: quando arrivano entrambi, chiudiamo subito
-      if(state.__bootFlags.active && state.__bootFlags.hist){
+      // Chiudiamo la rotella SOLO quando abbiamo gli ordini (evita "falso caricamento")
+      if(state.__bootFlags.orders){
         bootFinish();
       }
     }catch(_e){}
@@ -3174,13 +3231,30 @@ function showAuthGate(){
   function bootFinish(){
     if(state.__bootFinished) return;
     state.__bootFinished = true;
-    hideAuthLoader();
+    try{ hideAuthLoader(); }catch(_e){}
   }
 
 function showApp(){
     showAppShell();
     hideLogin();
-    // Non mostrare l'interfaccia a "zero": la rotella resta finché arrivano i primi snapshot.
+
+    // FAST: se ho uno snapshot locale, mostralo subito (niente "falso" caricamento)
+    if(!state.ordersReady){
+      const ok = hydrateFastSnapshot();
+      if(ok){
+        try{ renderHome(); }catch(_e){}
+        try{ renderHeaderKpis && renderHeaderKpis(); }catch(_e){}
+        setOnlinePill("warn", "Stato: cache locale");
+        bootMark("orders");
+        if(!loader.firstRenderDone){
+          requestAnimationFrame(()=> markFirstRenderDone());
+        }else{
+          try{ maybeHideGate(); }catch(_e){}
+        }
+      }
+    }
+
+    // Non mostrare l'interfaccia a "zero": la rotella resta finché abbiamo almeno gli ordini
     if(!state.__bootFinished){
       showAuthLoader("Caricamento…","Sto sincronizzando i dati.");
     }else{
