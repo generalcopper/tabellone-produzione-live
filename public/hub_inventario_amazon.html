@@ -2454,35 +2454,57 @@ Tip:
       return Number.isFinite(n) ? String(Math.round(n*1000)/1000) : "0";
     }
 
-    function __buildLowStockEmailPayload(items){
-      const rows = (items||[])
-        .slice()
-        .map(it=>{
-          const meta = parseTitleMeta(it.title || "");
-          const main = (meta && meta.main) ? String(meta.main).trim() : String(it.title||"").trim();
-          const product = main || "(senza nome)";
-          const qty = __fmtQty(it.qty);
-          return { product, qty };
-        })
-        .sort((a,b)=>{
-          const qa = Number(a.qty);
-          const qb = Number(b.qty);
-          if(Number.isFinite(qa) && Number.isFinite(qb) && qa !== qb) return qa - qb;
-          return String(a.product||"").localeCompare(String(b.product||""));
-        });
+        function __buildLowStockEmailPayload(items){
+      // items: [{ sku, title, qty, loc }]
+      const byLoc = { concamarise: [], cerea: [] };
+      for(const it of (items||[])){
+        const loc = (it && (it.loc==="cerea" || it.loc==="concamarise")) ? it.loc : "concamarise";
+        byLoc[loc].push(it);
+      }
 
-      const total = rows.length;
+      function toRows(list){
+        return (list||[])
+          .slice()
+          .map(it=>{
+            const meta = parseTitleMeta(it.title || "");
+            const main = (meta && meta.main) ? String(meta.main).trim() : String(it.title||"").trim();
+            const product = main || "(senza nome)";
+            const qty = __fmtQty(it.qty);
+            return { product, qty };
+          })
+          .sort((a,b)=>{
+            const qa = Number(a.qty);
+            const qb = Number(b.qty);
+            if(Number.isFinite(qa) && Number.isFinite(qb) && qa !== qb) return qa - qb;
+            return String(a.product||"").localeCompare(String(b.product||""));
+          });
+      }
+
+      const rowsConca = toRows(byLoc.concamarise);
+      const rowsCerea = toRows(byLoc.cerea);
+
+      const total = rowsConca.length + rowsCerea.length;
       const stamp = (typeof fmtDate==="function") ? fmtDate(Date.now()) : (new Date().toLocaleString("it-IT"));
 
-      // --- TEXT (plain) ---
-      const maxLen = Math.min(42, rows.reduce((m,r)=> Math.max(m, String(r.product||"").length), 0) || 18);
-      const headerLine = `${"Prodotto".padEnd(maxLen, " ")}  |  Scorta`;
-      const sepLine = `${"-".repeat(maxLen)}--|--------`;
-      const textLines = rows.map(r=>{
-        const p = String(r.product||"");
-        const name = (p.length>maxLen) ? (p.slice(0, Math.max(0, maxLen-1)) + "…") : p;
-        return `${name.padEnd(maxLen, " ")}  |  ${String(r.qty)}`;
-      });
+      function buildTextSection(label, rows){
+        if(!rows.length) return `${label}:
+(nessun prodotto sotto soglia)
+`;
+        const maxLen = Math.min(46, rows.reduce((m,r)=> Math.max(m, String(r.product||"").length), 0) || 18);
+        const headerLine = `${"Prodotto".padEnd(maxLen, " ")}  |  Scorta`;
+        const sepLine = `${"-".repeat(maxLen)}--|--------`;
+        const textLines = rows.map(r=>{
+          const p = String(r.product||"");
+          const name = (p.length>maxLen) ? (p.slice(0, Math.max(0, maxLen-1)) + "…") : p;
+          return `${name.padEnd(maxLen, " ")}  |  ${String(r.qty)}`;
+        });
+        return `${label}:
+${headerLine}
+${sepLine}
+${textLines.join("
+")}
+`;
+      }
 
       const head = [
         "Amazon — Alert sotto scorta inventario",
@@ -2491,26 +2513,50 @@ Tip:
         "Soglia: < 100 pz",
         `Totale prodotti: ${total}`,
         "",
-        headerLine,
-        sepLine,
-        ...textLines
-      ].join("\n");
+        buildTextSection("CONCAMARISE", rowsConca),
+        "",
+        buildTextSection("CEREA", rowsCerea)
+      ].join("
+");
 
-      // --- HTML (table) ---
-      const htmlRows = rows.map(r=>`
-        <tr>
-          <td style="padding:10px 12px; border-bottom:1px solid #e9eef2; vertical-align:top; font-size:14px; color:#111">
-            ${escapeHtml(String(r.product||""))}
-          </td>
-          <td style="padding:10px 12px; border-bottom:1px solid #e9eef2; vertical-align:top; text-align:right; white-space:nowrap; font-size:14px; font-weight:700; color:#111">
-            ${escapeHtml(String(r.qty))}
-          </td>
-        </tr>
-      `).join("");
+      function buildHtmlTable(rows){
+        const htmlRows = rows.map(r=>`
+          <tr>
+            <td style="padding:10px 12px; border-bottom:1px solid #e9eef2; vertical-align:top; font-size:14px; color:#111">
+              ${escapeHtml(String(r.product||""))}
+            </td>
+            <td style="padding:10px 12px; border-bottom:1px solid #e9eef2; vertical-align:top; text-align:right; white-space:nowrap; font-size:14px; font-weight:700; color:#111">
+              ${escapeHtml(String(r.qty))}
+            </td>
+          </tr>
+        `).join("");
+
+        return `
+          <table style="width:100%; border-collapse:collapse; border:1px solid #e9eef2; border-radius:12px; overflow:hidden">
+            <thead>
+              <tr>
+                <th style="text-align:left; padding:10px 12px; font-size:12px; letter-spacing:.04em; text-transform:uppercase; color:#556; background:#fbfcfd; border-bottom:1px solid #e9eef2">
+                  Prodotto
+                </th>
+                <th style="text-align:right; padding:10px 12px; font-size:12px; letter-spacing:.04em; text-transform:uppercase; color:#556; background:#fbfcfd; border-bottom:1px solid #e9eef2; white-space:nowrap">
+                  Scorta
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              ${htmlRows || `
+                <tr>
+                  <td colspan="2" style="padding:12px; font-size:14px; color:#556">Nessun prodotto sotto soglia 🎯</td>
+                </tr>
+              `}
+            </tbody>
+          </table>
+        `;
+      }
 
       const htmlBody = `
         <div style="font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Arial; line-height:1.45; background:#ffffff; padding:0; margin:0">
-          <div style="max-width:680px; margin:0 auto; border:1px solid #e9eef2; border-radius:14px; overflow:hidden">
+          <div style="max-width:720px; margin:0 auto; border:1px solid #e9eef2; border-radius:14px; overflow:hidden">
             <div style="padding:16px 18px; background:#f6f7f8; border-bottom:1px solid #e9eef2">
               <div style="font-size:16px; font-weight:800; margin:0 0 4px 0">Amazon • Alert sotto scorta</div>
               <div style="font-size:13px; color:#556; margin:0">
@@ -2523,27 +2569,13 @@ Tip:
                 Azione consigliata: <b>avviare produzione / riordino</b>.
               </p>
 
-              <table style="width:100%; border-collapse:collapse; border:1px solid #e9eef2; border-radius:12px; overflow:hidden">
-                <thead>
-                  <tr>
-                    <th style="text-align:left; padding:10px 12px; font-size:12px; letter-spacing:.04em; text-transform:uppercase; color:#556; background:#fbfcfd; border-bottom:1px solid #e9eef2">
-                      Prodotto
-                    </th>
-                    <th style="text-align:right; padding:10px 12px; font-size:12px; letter-spacing:.04em; text-transform:uppercase; color:#556; background:#fbfcfd; border-bottom:1px solid #e9eef2; white-space:nowrap">
-                      Scorta
-                    </th>
-                  </tr>
-                </thead>
-                <tbody>
-                  ${htmlRows || `
-                    <tr>
-                      <td colspan="2" style="padding:12px; font-size:14px; color:#556">Nessun prodotto sotto soglia 🎯</td>
-                    </tr>
-                  `}
-                </tbody>
-              </table>
+              <div style="margin:12px 0 8px 0; font-size:13px; font-weight:800; color:#111">Concamarise</div>
+              ${buildHtmlTable(rowsConca)}
 
-              <div style="margin-top:12px; font-size:12px; color:#667">
+              <div style="margin:18px 0 8px 0; font-size:13px; font-weight:800; color:#111">Cerea</div>
+              ${buildHtmlTable(rowsCerea)}
+
+              <div style="margin-top:14px; font-size:12px; color:#667">
                 Nota: righe generate automaticamente dall'hub inventario Amazon.
               </div>
             </div>
@@ -2551,44 +2583,27 @@ Tip:
         </div>
       `;
 
-      const subject = `Amazon — Sotto scorta inventario (${total} prodotti)`;
+      const subject = `Amazon — Sotto scorta inventario (Cerea + Concamarise) • ${total} prodotti`;
       return { subject, text: head, html: htmlBody, total };
     }
 
-    async function __enqueueLowStockEmailIfNeeded(items){
+        async function __enqueueLowStockEmailIfNeeded(items, { reason="" } = {}){
       try{
         const mailLog = $("homeLowStockMailLog");
+
+        // solo Admin: evita invii accidentali da operatori/utenti base
+        if(!state.user?.isAdmin){
+          if(mailLog) mailLog.textContent = "";
+          return;
+        }
+
         if(!state.user?.isWhitelisted){
           if(mailLog) mailLog.textContent = "";
           return;
         }
+
         const fb = state.firebase;
-        if(!fb?.ok || !fb.db || !fb.api?.addDoc){
-          if(mailLog) mailLog.textContent = "";
-          return;
-        }
-
-        const list = (items||[]).slice().map(it=>({
-          loc: String(it.loc||""),
-          sku: String(toSkuId(it.sku||"")||""),
-          qty: Number.isFinite(it.qty) ? Number(it.qty) : null
-        })).sort((a,b)=>{
-          if(a.loc!==b.loc) return a.loc.localeCompare(b.loc);
-          if(a.sku!==b.sku) return a.sku.localeCompare(b.sku);
-          return (a.qty||0) - (b.qty||0);
-        });
-
-        const fingerprint = await stableHashHex(JSON.stringify(list));
-        const lastHash = __lsGet(__LS_LOWMAIL_HASH);
-        const lastAt = Number(__lsGet(__LS_LOWMAIL_AT) || 0);
-        const lastId = __lsGet(__LS_LOWMAIL_ID);
-
-        // cooldown anti-spam (10 minuti) + invio solo se cambia lo stato
-        const now = Date.now();
-        const cooldownOk = (now - lastAt) > (10 * 60 * 1000);
-        const changed = fingerprint && fingerprint !== lastHash;
-
-        if(!items || !items.length){
+        if(!fb?.ok || !fb.db || !fb.api?.runTransaction){
           if(mailLog) mailLog.textContent = "";
           return;
         }
@@ -2600,16 +2615,30 @@ Tip:
           return;
         }
 
-        if(!changed || !cooldownOk){
-          if(mailLog && lastAt){
-            mailLog.textContent = `Email automatica già inviata/accodata alle ${fmtDate(lastAt)} (stesso stato).`;
-          }else if(mailLog){
-            mailLog.textContent = "";
-          }
+        if(!items || !items.length){
+          if(mailLog) mailLog.textContent = "";
           return;
         }
 
-        // lock anti-doppio invio (multi-tab / doppie render)
+        // fingerprint globale (include loc) per dedupe server-side
+        const list = (items||[]).slice().map(it=>({
+          loc: String(it.loc||""),
+          sku: String(toSkuId(it.sku||"")||""),
+          qty: Number.isFinite(it.qty) ? Number(it.qty) : null
+        })).sort((a,b)=>{
+          if(a.loc!==b.loc) return a.loc.localeCompare(b.loc);
+          if(a.sku!==b.sku) return a.sku.localeCompare(b.sku);
+          return (a.qty||0) - (b.qty||0);
+        });
+
+        const fingerprint = await stableHashHex(JSON.stringify(list));
+        if(!fingerprint){
+          if(mailLog) mailLog.textContent = "";
+          return;
+        }
+
+        // lock anti doppio invio (multi-tab)
+        const now = Date.now();
         const lockAt = Number(__lsGet(__LS_LOWMAIL_LOCK) || 0);
         const lockHash = String(__lsGet(__LS_LOWMAIL_LOCK_HASH) || "");
         if(lockAt && (now - lockAt) < (90 * 1000) && lockHash === fingerprint){
@@ -2620,42 +2649,125 @@ Tip:
         __lsSet(__LS_LOWMAIL_LOCK_HASH, fingerprint);
 
         const payload = __buildLowStockEmailPayload(items);
-        const { collection, addDoc, serverTimestamp } = fb.api;
 
-        const docRef = await addDoc(collection(fb.db, "email"), {
-          to: ["matteo@generalcoppersrl.com"],
-          message: {
-            subject: payload.subject,
-            text: payload.text,
-            html: payload.html
-          },
-          createdAt: serverTimestamp(),
-          meta: {
-            kind: "auto_low_stock",
-            total: payload.total,
-            hash: fingerprint
+        const api = fb.api;
+        const db = fb.db;
+
+        const META_COL = "amzInventoryMeta";
+        const META_DOC = "lowStockEmailState";
+        const metaRef = api.doc(db, META_COL, META_DOC);
+
+        // docId deterministico: evita duplicati assoluti anche senza meta
+        const emailDocId = "auto_low_stock_" + String(fingerprint).slice(0, 24);
+        const emailRef = api.doc(db, "email", emailDocId);
+
+        let enqueued = false;
+
+        await api.runTransaction(db, async (tx)=>{
+          const metaSnap = await tx.get(metaRef);
+          const prevHash = metaSnap?.exists?.() ? String((metaSnap.data()||{}).hash || "") : "";
+          if(prevHash === fingerprint){
+            // stesso stato: niente invio
+            return;
           }
+
+          const emSnap = await tx.get(emailRef);
+          if(!emSnap.exists()){
+            tx.set(emailRef, {
+              to: ["matteo@generalcoppersrl.com"],
+              message: {
+                subject: payload.subject,
+                text: payload.text,
+                html: payload.html
+              },
+              createdAt: api.serverTimestamp(),
+              meta: {
+                kind: "auto_low_stock",
+                total: payload.total,
+                hash: fingerprint,
+                reason: String(reason||"")
+              }
+            });
+            enqueued = true;
+          }
+
+          tx.set(metaRef, {
+            hash: fingerprint,
+            total: payload.total,
+            sentAt: api.serverTimestamp(),
+            sentAtClient: now,
+            sentBy: state.user?.emailLower || state.user?.email || "",
+            reason: String(reason||"")
+          }, { merge:true });
         });
 
+        // memo locale (solo UI)
         __lsSet(__LS_LOWMAIL_HASH, fingerprint);
         __lsSet(__LS_LOWMAIL_AT, now);
-        __lsSet(__LS_LOWMAIL_ID, docRef?.id || "");
+        __lsSet(__LS_LOWMAIL_ID, emailDocId);
 
         // rilascio lock
         __lsSet(__LS_LOWMAIL_LOCK, 0);
         __lsSet(__LS_LOWMAIL_LOCK_HASH, "");
 
-        if(mailLog) mailLog.textContent = `Email automatica accodata alle ${fmtDate(now)} • ${payload.total} righe.`;
+        if(mailLog){
+          mailLog.textContent = enqueued
+            ? `Email automatica inviata/accodata alle ${fmtDate(now)} • ${payload.total} righe.`
+            : `Email automatica: nessun invio (stesso stato).`;
+        }
       }catch(err){
         // rilascio lock (in caso di errore)
         try{ __lsSet(__LS_LOWMAIL_LOCK, 0); __lsSet(__LS_LOWMAIL_LOCK_HASH, ""); }catch(_e){}
-        // non bloccare la UI
         try{
           const mailLog = $("homeLowStockMailLog");
-          if(mailLog) mailLog.textContent = "Email automatica: errore in invio (controlla connessione).";
+          if(mailLog) mailLog.textContent = "Email automatica: errore in invio (permessi/connessione).";
         }catch(_e){}
         console.warn("auto low-stock email error:", err);
       }
+    }
+
+    // calcola sotto-scorta globale (Cerea + Concamarise)
+    function __getLowStockBoth(){
+      const out = [];
+      const pushLoc = (loc)=>{
+        const items = (state.inventory[loc] && state.inventory[loc].items) ? state.inventory[loc].items : [];
+        for(const it of items){
+          if(!Number.isFinite(it.qty)) continue;
+          if(it.qty >= 100) continue;
+          out.push({ ...it, loc });
+        }
+      };
+      pushLoc("cerea");
+      pushLoc("concamarise");
+      out.sort((x,y)=> (x.qty||0) - (y.qty||0));
+      return out;
+    }
+
+    // trigger email SOLO dopo aggiornamenti reali (carica/scarica/undo/edit), NON all'accesso
+    let __lowMailSeq = 0;
+    let __lowMailT1 = null;
+    let __lowMailT2 = null;
+
+    function scheduleLowStockEmailAfterUpdate(reason){
+      if(!state.user?.isAdmin) return;
+      __lowMailSeq++;
+      const seq = __lowMailSeq;
+      const r = String(reason || "inventory_update");
+
+      try{
+        if(__lowMailT1) clearTimeout(__lowMailT1);
+        if(__lowMailT2) clearTimeout(__lowMailT2);
+      }catch(_e){}
+
+      const run = ()=>{
+        if(seq !== __lowMailSeq) return;
+        const items = __getLowStockBoth();
+        void __enqueueLowStockEmailIfNeeded(items, { reason: r });
+      };
+
+      // 2 tentativi: il primo quasi subito, il secondo dopo qualche secondo (snapshot realtime)
+      __lowMailT1 = setTimeout(run, 1600);
+      __lowMailT2 = setTimeout(run, 6500);
     }
 
 async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
@@ -3507,6 +3619,8 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
         });
 
         showToast("Flusso annullato", "Inventario ripristinato.");
+        scheduleLowStockEmailAfterUpdate("undo_flow");
+
       }catch(err){
         console.warn("undo flow error", err);
         showToast("Errore", err?.message || String(err));
@@ -3540,6 +3654,8 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
         }
 
         showToast("Flusso eliminato", "Inventario ripristinato e storico rimosso.");
+        scheduleLowStockEmailAfterUpdate("delete_flow");
+
         // aggiorna liste
         if(state.route.view==="location" && state.route.loc===loc) renderFlowsList();
         if(state.ui.sheet==="flows") renderFlowsModal();
@@ -3589,6 +3705,8 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
         });
 
         showToast("Riga eliminata", "Inventario ripristinato.");
+        scheduleLowStockEmailAfterUpdate("remove_line_flow");
+
       }catch(err){
         console.warn("remove line error", err);
         showToast("Errore", err?.message || String(err));
@@ -3809,9 +3927,6 @@ function currentInv(){
 
         out.sort((x,y)=> (x.qty||0) - (y.qty||0));
         lowCount.textContent = fmtN(out.length);
-
-        // Auto email: se esistono righe sotto scorta, crea un documento in Firestore/email
-        void __enqueueLowStockEmailIfNeeded(out);
 
 
         if(!out.length){
@@ -4208,15 +4323,17 @@ function closeSheet(kind){
       const tail = raw.match(/(?:-|–|—|:)\s*(\d[\d\.\,]*)\s*(pz|pcs|pezzi|pc|unit|units)?\s*\.?\s*$/i) ||
                    raw.match(/\b(\d[\d\.\,]*)\s*(pz|pcs|pezzi|pc|unit|units)\b\.?/i);
       if(tail){
-        const num = String(tail[1]||"").replace(/\./g,"").replace(/,/g,".");
-        qty = parseQty(num);
+        const numRaw = String(tail[1]||"");
+        const qParsed = parseSignedQtyStrict(numRaw);
+        qty = Number.isFinite(qParsed) ? Math.abs(qParsed) : 0;
         namePart = squashWhitespace(raw.replace(tail[0], " "));
       }else{
         // fallback: ultimo numero
         const lastNum = raw.match(/(\d[\d\.\,]*)\s*$/);
         if(lastNum){
-          const num = String(lastNum[1]||"").replace(/\./g,"").replace(/,/g,".");
-          qty = parseQty(num);
+          const numRaw = String(lastNum[1]||"");
+          const qParsed = parseSignedQtyStrict(numRaw);
+          qty = Number.isFinite(qParsed) ? Math.abs(qParsed) : 0;
           namePart = squashWhitespace(raw.replace(lastNum[0], " "));
         }
       }
@@ -4351,6 +4468,9 @@ function closeSheet(kind){
       const qTokens = tokenizeForMatch(q);
       const qNums = (q.match(/\d+/g) || []);
 
+      const petHints = ["cani","gatti","pulci","zecche","zanzare","animali","urine","disabituante","odori","odore","repellente"];
+      const qHasPet = petHints.some(w=> q.includes(w));
+
       const bestBySku = new Map(); // sku -> { sku, title, score }
       for(const row of idx.all){
         const it = row.it;
@@ -4388,6 +4508,12 @@ function closeSheet(kind){
 
         // piccolo boost se compare una parola lunga identica
         if(qTokens.some(t=> t.length>=6 && tNorm.includes(t))) score += 0.4;
+
+        // se la query NON parla di cani/gatti/pulci/zecche ecc, penalizzo i titoli che lo fanno
+        // (utile per distinguere "Neem spray 500" concentrato vs versione per cani/gatti)
+        const tHasPet = petHints.some(w=> tNorm.includes(w));
+        if(!qHasPet && tHasPet) score -= 0.45;
+        if(qHasPet && tHasPet) score += 0.12;
 
         const prev = bestBySku.get(sku);
         if(!prev || score > prev.score){
@@ -4754,6 +4880,8 @@ function closeSheet(kind){
         // toast riepilogo
         const parts = plans.map(p=> `${prettyLoc(p.loc)}: +${p.totalPieces} pz`);
         showToast("Carico applicato", `Aggiornati ${parts.join(" • ")}`, 2400);
+        scheduleLowStockEmailAfterUpdate("manual_carica_text");
+
 
         // reset campo
         state.manual.carica.text = "";
@@ -5287,6 +5415,8 @@ async function saveProductFromDetails(){
         });
 
         showToast("Salvato", "Prodotto aggiornato.", 1400);
+        scheduleLowStockEmailAfterUpdate("product_edit");
+
         state.ui.productDetailsSku = sku;
         state.ui.productDetailsEditMode = false;
         state.ui.productEditSku = null;
@@ -5708,6 +5838,8 @@ function renderProductsSheet(){
         // best effort: rimuovi anagrafica globale
         try{ await api.deleteDoc(api.doc(db, COL_PRODUCTS, s)); }catch(_e){}
         showToast("Eliminato", "Prodotto rimosso.", 1600);
+        scheduleLowStockEmailAfterUpdate("product_delete");
+
         state.ui.productEditSku = null;
         renderProductsSheet();
         renderInventoryList();
@@ -5935,6 +6067,8 @@ async function applyFlow(kind){
         // toast riepilogo
         const parts = planChunks.map(p=> `${prettyLoc(p.loc)}: ${p.aggregated.length} righe • ${p.totalPieces} pz`).join(" · ");
         showToast("Applicato", parts || "OK", 2400);
+        scheduleLowStockEmailAfterUpdate("flow_" + kind);
+
 
         // reset flow UI
         flow.file = null;
