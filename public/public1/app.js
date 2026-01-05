@@ -8,6 +8,103 @@
 
   const docEl = document.documentElement;
 
+  // --- Firebase/Google Auth persistence (shared across all hubs) ---
+  // Obiettivo: mantenere la sessione login stabile tra tutte le pagine HTML
+  // SENZA toccare gli HTML. Questo file è già incluso ovunque.
+  //
+  // Nota importante: la persistenza è condivisa SOLO se i 7 HTML stanno sullo stesso ORIGIN
+  // (stesso dominio + protocollo + porta). Se sono su origin diversi, il browser non condivide
+  // lo storage e non esiste un fix lato JS.
+  (function ensureAuthPersistenceOnce() {
+    if (window.__gcAuthPersistenceStarted) return;
+    window.__gcAuthPersistenceStarted = true;
+
+    const MAX_TRIES = 30;      // ~3s
+    const DELAY_MS = 100;
+    let tries = 0;
+
+    function safeDebugLog(...args) {
+      // Debug opzionale: localStorage.setItem('gc_debug_persist','1')
+      try {
+        if (localStorage.getItem("gc_debug_persist") === "1") {
+          console.log("[gc:persist]", ...args);
+        }
+      } catch (_e) {}
+    }
+
+    function tryCompatFirebase() {
+      const fb = window.firebase;
+      if (!fb || typeof fb.auth !== "function" || !fb.auth.Auth || !fb.auth.Auth.Persistence) return false;
+      try {
+        const auth = fb.auth();
+        if (!auth || typeof auth.setPersistence !== "function") return false;
+        // Prefer LOCAL; fallback SESSION (iOS private mode / storage restrictions)
+        auth.setPersistence(fb.auth.Auth.Persistence.LOCAL)
+          .then(() => safeDebugLog("compat: LOCAL ok"))
+          .catch(() => auth.setPersistence(fb.auth.Auth.Persistence.SESSION)
+            .then(() => safeDebugLog("compat: SESSION fallback ok"))
+            .catch(() => safeDebugLog("compat: persistence failed"))
+          );
+        return true;
+      } catch (_e) {
+        return false;
+      }
+    }
+
+    function tryModularBridge() {
+      // Se nel tuo codice modular esponi un bridge, lo agganciamo qui senza toccare gli HTML.
+      // Esempio bridge (una volta nel codice dove crei auth):
+      // window.gcAuth = { auth, setPersistence, browserLocalPersistence, browserSessionPersistence };
+      const b = window.gcAuth || window.__gcAuth || null;
+      if (!b || !b.auth || typeof b.setPersistence !== "function") return false;
+      const local = b.browserLocalPersistence || b.localPersistence || null;
+      const session = b.browserSessionPersistence || b.sessionPersistence || null;
+      if (!local) return false;
+      Promise.resolve()
+        .then(() => b.setPersistence(b.auth, local))
+        .then(() => safeDebugLog("modular: LOCAL ok"))
+        .catch(() => {
+          if (!session) return;
+          return b.setPersistence(b.auth, session)
+            .then(() => safeDebugLog("modular: SESSION fallback ok"))
+            .catch(() => safeDebugLog("modular: persistence failed"));
+        });
+      return true;
+    }
+
+    function tryCommonGlobals() {
+      // Ultima spiaggia: alcune app espongono auth/persistence helper su window.
+      const auth = window.auth || window.firebaseAuth || window.gcFirebaseAuth || null;
+      const setPersistence = window.setPersistence || null;
+      const local = window.browserLocalPersistence || window.LOCAL_PERSISTENCE || null;
+      const session = window.browserSessionPersistence || window.SESSION_PERSISTENCE || null;
+      if (!auth || typeof setPersistence !== "function" || !local) return false;
+      Promise.resolve()
+        .then(() => setPersistence(auth, local))
+        .then(() => safeDebugLog("globals: LOCAL ok"))
+        .catch(() => {
+          if (!session) return;
+          return setPersistence(auth, session)
+            .then(() => safeDebugLog("globals: SESSION fallback ok"))
+            .catch(() => safeDebugLog("globals: persistence failed"));
+        });
+      return true;
+    }
+
+    function tick() {
+      tries++;
+      const ok = tryCompatFirebase() || tryModularBridge() || tryCommonGlobals();
+      if (ok) {
+        window.__gcAuthPersistenceDone = true;
+        return;
+      }
+      if (tries < MAX_TRIES) setTimeout(tick, DELAY_MS);
+    }
+
+    // Esegui subito: più presto = meglio (prima che partano eventuali flow di login)
+    tick();
+  })();
+
   // Detect standalone (Home Screen) mode on iOS
   const isStandalone = (() => {
     try {
