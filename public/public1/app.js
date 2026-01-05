@@ -111,8 +111,11 @@
 
   function isHubHomePage() {
     try {
-      const file = String(location.pathname || "").split("/").pop().toLowerCase();
-      return file === "hub_centrale.html";
+      const p = String(location.pathname || "").toLowerCase();
+      if (p.includes("hub_centrale")) return true;
+      const t = String(document.title || "").toLowerCase();
+      if (t.includes("hub centrale")) return true;
+      return false;
     } catch (_e) {
       return false;
     }
@@ -158,6 +161,15 @@
     // 3) Last resort
     return "hub_centrale.html";
   }
+
+  function shouldSkipBackBtn() {
+    try {
+      if (!document.body) return true;
+      if (document.body.classList.contains("locked")) return true;
+      if (document.body.classList.contains("authPending")) return true;
+      const ov = document.getElementById("authOverlay");
+      if (ov && ov.hidden === false) return true;
+    } catch (_e) {}
     return false;
   }
 
@@ -165,7 +177,7 @@
     try {
       if (!isDesktop()) return;
       if (isHubHomePage()) return;
-      
+      if (shouldSkipBackBtn()) return;
       if (document.querySelector(".gc-back-btn")) return;
 
       const btn = document.createElement("button");
@@ -184,20 +196,14 @@
         try { location.href = getHubUrl(); } catch (_e) {}
       });
 
-      document.documentElement.appendChild(btn);
+      document.body.appendChild(btn);
     } catch (_e) {}
   }
 
-  function ensureBackBtn() {
-    try { injectBackBtn(); } catch (_e) {}
-    // Retry once shortly after (some pages replace <body> / toggle overlays after auth)
-    setTimeout(() => { try { injectBackBtn(); } catch (_e) {} }, 800);
-  }
-
   if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", ensureBackBtn, { once: true });
+    document.addEventListener("DOMContentLoaded", injectBackBtn, { once: true });
   } else {
-    ensureBackBtn();
+    injectBackBtn();
   }
 
 })();
