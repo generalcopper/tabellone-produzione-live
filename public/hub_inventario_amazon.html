@@ -2677,62 +2677,62 @@ ${textLines.join("\n")}
 
         const metaRef = api.doc(db, COL_META, DOC_LOWSTOCK_EMAIL_STATE);
 
-        // docId deterministico: evita duplicati assoluti anche senza meta
-        const emailDocId = "auto_low_stock_" + String(fingerprint).slice(0, 24);
-        const emailRef = api.doc(db, "email", emailDocId);
+// docRef con ID random: evita read/update su /email (regole create-only)
+const emailRef = api.doc(api.collection(db, "email"));
+const emailDocId = emailRef.id;
 
-        let enqueued = false;
+let enqueued = false;
 
-        await api.runTransaction(db, async (tx)=>{
-          const metaSnap = await tx.get(metaRef);
-          const prevHash = metaSnap?.exists?.() ? String((metaSnap.data()||{}).hash || "") : "";
-          if(prevHash === fingerprint){
-            // stesso stato: niente invio
-            return;
-          }
+await api.runTransaction(db, async (tx)=>{
+  const metaSnap = await tx.get(metaRef);
+  const prevHash = metaSnap?.exists?.() ? String((metaSnap.data()||{}).hash || "") : "";
+  if(prevHash === fingerprint){
+    // stesso stato: niente invio
+    return;
+  }
 
-          const emSnap = await tx.get(emailRef);
-          if(!emSnap.exists()){
-            tx.set(emailRef, {
-              to: ["matteo@generalcoppersrl.com"],
-              message: {
-                subject: payload.subject,
-                text: payload.text,
-                html: payload.html
-              },
-              createdAt: api.serverTimestamp(),
-              createdAtClient: now,
-              kind: "auto_low_stock",
-              lowStock: {
-                total: payload.total,
-                counts: payload.counts || null,
-                preview: payload.preview || null,
-                hash: fingerprint,
-                reason: String(reason||"")
-              },
-              createdBy: state.user?.emailLower || state.user?.email || "",
-              locations: ["cerea","concamarise"]
-            });
-            enqueued = true;
-          }
+  // crea sempre un nuovo doc email (id random) SOLO quando cambia il sotto-scorta
+  tx.set(emailRef, {
+    to: ["matteo@generalcoppersrl.com"],
+    message: {
+      subject: payload.subject,
+      text: payload.text,
+      html: payload.html
+    },
+    createdAt: api.serverTimestamp(),
+    createdAtClient: now,
+    kind: "auto_low_stock",
+    lowStock: {
+      total: payload.total,
+      counts: payload.counts || null,
+      preview: payload.preview || null,
+      hash: fingerprint,
+      reason: String(reason||"")
+    },
+    createdBy: state.user?.emailLower || state.user?.email || "",
+    locations: ["cerea","concamarise"]
+  });
 
-          tx.set(metaRef, {
-            hash: fingerprint,
-            total: payload.total,
-            counts: payload.counts || null,
-            preview: payload.preview || null,
-            emailDocId: emailDocId,
-            sentAt: api.serverTimestamp(),
-            sentAtClient: now,
-            sentBy: state.user?.emailLower || state.user?.email || "",
-            reason: String(reason||"")
-          }, { merge:true });
-        });
+  enqueued = true;
+
+  tx.set(metaRef, {
+    hash: fingerprint,
+    total: payload.total,
+    counts: payload.counts || null,
+    preview: payload.preview || null,
+    emailDocId: emailDocId,
+    sentAt: api.serverTimestamp(),
+    sentAtClient: now,
+    sentBy: state.user?.emailLower || state.user?.email || "",
+    reason: String(reason||"")
+  }, { merge:true });
+});
+
 
         // memo locale (solo UI)
         __lsSet(__LS_LOWMAIL_HASH, fingerprint);
         __lsSet(__LS_LOWMAIL_AT, now);
-        __lsSet(__LS_LOWMAIL_ID, emailDocId);
+        if(enqueued){ __lsSet(__LS_LOWMAIL_ID, emailDocId); }
 
         // rilascio lock
         __lsSet(__LS_LOWMAIL_LOCK, 0);
@@ -3451,20 +3451,7 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
       const havePreview = preview && (Array.isArray(preview.concamarise) || Array.isArray(preview.cerea));
 
       if(!havePreview){
-        // fallback: prova a caricare il doc email dell’ultimo invio (utile dopo refresh)
-        const busy = !!state.mail?.lowStock?.emailDocBusy;
-        const docErr = state.mail?.lowStock?.emailDocError || "";
-
-        if(busy){
-          el.innerHTML += `<div class="hint" style="margin-top:6px">Caricamento dettagli ultimo invio…</div>`;
-        }else if(meta.hash){
-          __loadLowStockEmailDocIfNeeded(meta);
-          el.innerHTML += `<div class="hint" style="margin-top:6px">Caricamento dettagli ultimo invio…</div>`;
-        }
-
-        if(docErr){
-          el.innerHTML += `<div class="hint" style="margin-top:6px">Dettagli email: ${escapeHtml(docErr)}</div>`;
-        }
+        el.innerHTML += `<div class="hint" style="margin-top:6px">Dettagli righe inviate non disponibili (nessuna preview salvata nell’ultimo invio). Appena cambia il sotto scorta, la prossima mail salverà automaticamente lo snapshot qui.</div>`;
         return;
       }
 
