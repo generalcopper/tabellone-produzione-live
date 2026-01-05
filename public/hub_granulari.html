@@ -1525,7 +1525,10 @@
     loader.inError = false;
   }
   function gateReady(){
-    return !!(loader.firstRenderDone && state.historyReady);
+    if(state.__bootFinished) return true;
+    const f = state.__bootFlags;
+    const flagsOk = !!(f && f.active && f.hist && f.orders);
+    return !!(loader.firstRenderDone && state.historyReady && flagsOk);
   }
   function maybeHideGate(){
     if(authGateState !== "signed_in" && authGateState !== "restoring") return;
@@ -2703,6 +2706,9 @@ document.body.appendChild(banner);
       state.powderOrders = powderDocs;
       flushAllowlistPendingRender();
 
+      try{ localStorage.setItem(XML_PROXY_CFG.cacheKey, JSON.stringify({ xml: xmlText, modifiedTime: state.xmlModifiedTime || null, fetchedAt: state.lastFetchAt || Date.now() })); }catch(_e){}
+      try{ bootMark("orders"); }catch(_e){}
+
       showLoader("Aggiornamento…");
       renderHome();
       setOnlinePill("ok", "Stato: online");
@@ -2738,6 +2744,7 @@ document.body.appendChild(banner);
           flushAllowlistPendingRender();
         } catch(_e) {}
       }
+      try{ bootMark("orders"); }catch(_e){}
       renderHome();
       setOnlinePill("bad", "Stato: offline (cache)");
       if(isBoot) bootSet(55, "Connessione lenta… uso cache locale");
@@ -2880,18 +2887,20 @@ function showAuthGate(){
   
 
   // --- Boot gating: una sola rotella finché arrivano i primi dati (evita "0" iniziale) ---
-  state.__bootFlags = state.__bootFlags || { active:false, hist:false };
+  state.__bootFlags = state.__bootFlags || { active:false, hist:false, orders:false };
   state.__bootFinished = !!state.__bootFinished;
   function bootMark(kind){
     try{
-      state.__bootFlags = state.__bootFlags || { active:false, hist:false };
+      state.__bootFlags = state.__bootFlags || { active:false, hist:false, orders:false };
       if(kind === "active") state.__bootFlags.active = true;
       if(kind === "hist") state.__bootFlags.hist = true;
 
-      if(state.__bootFinished) return;
+            if(kind === "orders") state.__bootFlags.orders = true;
+
+if(state.__bootFinished) return;
 
       // Fallback soft: se arriva la coda ma la storia tarda, non restiamo bloccati troppo
-      if(state.__bootFlags.active && !state.__bootSoftTimer){
+      if(state.__bootFlags.orders && (state.__bootFlags.active || state.__bootFlags.hist) && !state.__bootSoftTimer){
         state.__bootSoftTimer = setTimeout(()=>{
           state.__bootSoftTimer = null;
           bootFinish();
@@ -2899,7 +2908,7 @@ function showAuthGate(){
       }
 
       // Ideale: quando arrivano entrambi, chiudiamo subito
-      if(state.__bootFlags.active && state.__bootFlags.hist){
+      if(state.__bootFlags.active && state.__bootFlags.hist && state.__bootFlags.orders){
         bootFinish();
       }
     }catch(_e){}
@@ -3655,8 +3664,11 @@ function hideLogin(){
       try{ await initNotificationsInbox(); }catch(_e){ state.notifications.unavailable = true; renderNotifCenter(); }
       renderNotifCenter();
       hideAuthGate();
-      hideAuthLoader();
-      renderHome();
+      // Loader overlay gestito dal boot gating (ordini + snapshot): evita flash a 0 / doppia rotella.
+      if(state.__bootFinished){
+        try{ hideAuthLoader(); }catch(_e){}
+        renderHome();
+      }
       try{ Payroll.onSignedIn(); }catch(_e){}
       ensureAllowlistListener();
       ensureActionLogListener();
@@ -3742,6 +3754,8 @@ function hideLogin(){
       renderNotifCenter();
       updateNotificationBadge();
       renderHome();
+      try{ state.historyReady = true; }catch(_e){}
+      try{ bootMark("active"); bootMark("hist"); }catch(_e){}
       renderAuthLogin("Connessione Firebase non disponibile. Verifica rete o contatta il responsabile.");
     }
   }
