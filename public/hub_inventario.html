@@ -103,6 +103,23 @@
 
     .tableWrap { border: 1px solid rgba(12,22,52,.08); border-radius: 16px; overflow: hidden; background: rgba(255,255,255,.82); }
     table { width: 100%; border-collapse: collapse; }
+
+    /* Doc detail (DDT) actions */
+    #modalDocDetail .tableWrap table tbody tr { cursor: pointer; }
+    #modalDocDetail .tableWrap table tbody tr.selected td { background: rgba(10,132,255,.10); }
+    .cellInput {
+      width: 100%;
+      padding: 8px 10px;
+      border: 1px solid rgba(12,22,52,.12);
+      border-radius: 12px;
+      background: rgba(255,255,255,.96);
+      font: inherit;
+      color: var(--text);
+      outline: none;
+    }
+    .cellInput:focus { border-color: rgba(10,132,255,.55); box-shadow: 0 0 0 4px rgba(10,132,255,.12); }
+    .cellInput.qty { text-align: right; }
+
     thead th { position: sticky; top: 0; background: rgba(248,249,253,.96); backdrop-filter: blur(10px); font-size: 12px; text-transform: uppercase; letter-spacing: .02em; color: rgba(0,0,0,.62); padding: 10px 10px; border-bottom: 1px solid rgba(12,22,52,.08); text-align: left; }
     tbody td { padding: 10px 10px; border-bottom: 1px solid rgba(12,22,52,.06); font-weight: 800; color: rgba(0,0,0,.84); vertical-align: top; }
     tbody tr:hover td { background: rgba(10,132,255,.06); }
@@ -1400,9 +1417,15 @@ tr.docRow:hover td{ background: rgba(10,132,255,.06); }
         </table>
       </div>
 
-      <div class="inlineRow" style="justify-content:space-between; margin-top: 12px;">
+      <div class="inlineRow" style="justify-content:space-between; margin-top: 12px; flex-wrap: wrap; gap: 10px;">
         <div class="pill" id="docDetailTotals">—</div>
-        <button class="btn" id="btnCloseDocDetail2" type="button">Chiudi</button>
+        <div class="inlineRow" style="gap:8px; justify-content:flex-end; flex:1; flex-wrap: wrap;">
+          <button class="btn btn-secondary" id="btnDocEdit" type="button">Modifica</button>
+          <button class="btn btn-danger" id="btnDocDelete" type="button">Elimina</button>
+          <button class="btn btn-primary" id="btnDocSave" type="button" style="display:none;">Salva</button>
+          <button class="btn" id="btnDocCancel" type="button" style="display:none;">Annulla</button>
+          <button class="btn" id="btnCloseDocDetail2" type="button">Chiudi</button>
+        </div>
       </div>
     </div>
   </div>
@@ -1504,6 +1527,18 @@ tr.docRow:hover td{ background: rgba(10,132,255,.06); }
     const docDetailTotals = document.getElementById("docDetailTotals");
     const btnCloseDocDetail = document.getElementById("btnCloseDocDetail");
     const btnCloseDocDetail2 = document.getElementById("btnCloseDocDetail2");
+    const btnDocEdit = document.getElementById("btnDocEdit");
+    const btnDocDelete = document.getElementById("btnDocDelete");
+    const btnDocSave = document.getElementById("btnDocSave");
+    const btnDocCancel = document.getElementById("btnDocCancel");
+
+    // Doc detail state
+    let __activeDocKey = "";
+    let __activeDocGroup = null;
+    let __docDetailRows = [];
+    let __docDetailSelectedKey = "";
+    let __docDetailEditMode = false;
+
 
 
 
@@ -2045,6 +2080,11 @@ btnLogout.addEventListener("click", async () => {
       const g = __docGroupsMap.get(String(docKey || ""));
       if (!g) { showToast("Documento non trovato"); return; }
 
+      __activeDocKey = String(docKey || "");
+      __activeDocGroup = g;
+      __docDetailSelectedKey = "";
+      __docDetailEditMode = false;
+
       const linesMap = new Map();
       let totalPieces = 0;
 
@@ -2054,15 +2094,20 @@ btnLogout.addEventListener("click", async () => {
         if (__isConaiLine(code) || __isConaiLine(item)) return;
 
         const lk = (code + "||" + item).toLowerCase();
-        const row = linesMap.get(lk) || { code, item, qty: 0 };
+        const row = linesMap.get(lk) || { lk, code, item, qty: 0, ids: [], type: String(mv.type || "IN") };
         const q = safeInt(mv.qty);
         row.qty += q;
         totalPieces += q;
+        if (mv && mv.id) row.ids.push(mv.id);
+        // keep a stable type if present
+        if (mv && mv.type && !row.type) row.type = String(mv.type);
         linesMap.set(lk, row);
       });
 
       const rows = Array.from(linesMap.values())
         .sort((a,b) => String(a.code || "").localeCompare(String(b.code || "")) || String(a.item || "").localeCompare(String(b.item || "")));
+
+      __docDetailRows = rows.map(r => ({ ...r }));
 
       if (docDetailTitle) docDetailTitle.textContent = formatDocLabel(g);
       if (docDetailSubtitle) {
@@ -2070,26 +2115,167 @@ btnLogout.addEventListener("click", async () => {
         docDetailSubtitle.textContent = `${g.customer || "—"}${d ? " · " + d : ""}`;
       }
 
-      if (docDetailTbody) {
-        if (rows.length === 0) {
-          docDetailTbody.innerHTML = '<tr><td class="td-muted" colspan="3">Nessuna riga.</td></tr>';
-        } else {
-          docDetailTbody.innerHTML = rows.map(r => `
-            <tr>
-              <td class="td-muted">${escapeHtml(r.code || "")}</td>
-              <td>${escapeHtml(r.item || "")}</td>
-              <td class="qty">${safeInt(r.qty).toLocaleString("it-IT")}</td>
-            </tr>
-          `).join("");
-        }
-      }
+      __renderDocDetailTable();
 
       if (docDetailTotals) {
         docDetailTotals.textContent = `Righe: ${rows.length.toLocaleString("it-IT")} · Pezzi: ${totalPieces.toLocaleString("it-IT")}`;
       }
 
+      __syncDocDetailButtons();
+
       if (modalDocDetail) modalDocDetail.classList.add("open");
     }
+
+    function __syncDocDetailButtons(){
+      if (btnDocEdit) btnDocEdit.style.display = __docDetailEditMode ? "none" : "inline-flex";
+      if (btnDocSave) btnDocSave.style.display = __docDetailEditMode ? "inline-flex" : "none";
+      if (btnDocCancel) btnDocCancel.style.display = __docDetailEditMode ? "inline-flex" : "none";
+    }
+
+    function __renderDocDetailTable(){
+      if (!docDetailTbody) return;
+
+      const rows = Array.isArray(__docDetailRows) ? __docDetailRows : [];
+      if (!rows.length){
+        docDetailTbody.innerHTML = '<tr><td class="td-muted" colspan="3">Nessuna riga.</td></tr>';
+        return;
+      }
+
+      if (__docDetailEditMode){
+        docDetailTbody.innerHTML = rows.map(r => `
+          <tr data-lk="${escapeHtmlAttr(r.lk)}" class="${r.lk === __docDetailSelectedKey ? "selected" : ""}">
+            <td><input class="cellInput" data-f="code" value="${escapeHtmlAttr(r.code || "")}" /></td>
+            <td><input class="cellInput" data-f="item" value="${escapeHtmlAttr(r.item || "")}" /></td>
+            <td><input class="cellInput qty" data-f="qty" type="number" min="0" step="1" value="${escapeHtmlAttr(String(safeInt(r.qty)))}" /></td>
+          </tr>
+        `).join("");
+      } else {
+        docDetailTbody.innerHTML = rows.map(r => `
+          <tr data-lk="${escapeHtmlAttr(r.lk)}" class="${r.lk === __docDetailSelectedKey ? "selected" : ""}">
+            <td class="td-muted">${escapeHtml(r.code || "")}</td>
+            <td>${escapeHtml(r.item || "")}</td>
+            <td class="qty">${safeInt(r.qty).toLocaleString("it-IT")}</td>
+          </tr>
+        `).join("");
+      }
+    }
+
+    async function __deleteActiveDocWhole(){
+      if (!__activeDocGroup) return;
+      const g = __activeDocGroup;
+      const n = (g.movements || []).length;
+      if (!n) return;
+
+      const ok = confirm(`Eliminare tutto il documento?\n\nRighe movimento: ${n}\n\nQuesta azione non si può annullare.`);
+      if (!ok) return;
+
+      showToast("Eliminazione documento…");
+      // elimina tutte le righe movimento del documento
+      for (const mv of (g.movements || [])) {
+        if (mv && mv.id) await deleteMovement(mv.id);
+      }
+
+      closeDocDetail();
+      try { renderFlowsTable(); } catch(_) {}
+      showToast("Documento eliminato");
+    }
+
+    async function __deleteActiveDocSelectedRow(){
+      if (!__activeDocGroup) return;
+      const g = __activeDocGroup;
+      const sel = String(__docDetailSelectedKey || "");
+      if (!sel) { showToast("Seleziona una riga"); return; }
+
+      const row = (__docDetailRows || []).find(r => String(r.lk) === sel) || null;
+      if (!row) { showToast("Riga non trovata"); return; }
+
+      const ok = confirm(`Eliminare la riga selezionata?\n\n${row.code || ""}\n${row.item || ""}\nPezzi: ${safeInt(row.qty)}\n\nQuesta azione non si può annullare.`);
+      if (!ok) return;
+
+      const toDelete = new Set(row.ids || []);
+      // fallback: match per code/item se ids non disponibili
+      if (!toDelete.size){
+        (g.movements || []).forEach(mv => {
+          const code = String(mv.code || "").trim();
+          const item = String(mv.item || "").trim();
+          const lk = (code + "||" + item).toLowerCase();
+          if (lk === sel && mv && mv.id) toDelete.add(mv.id);
+        });
+      }
+
+      if (!toDelete.size) { showToast("Nessuna riga da eliminare"); return; }
+
+      showToast("Eliminazione riga…");
+      for (const id of Array.from(toDelete)) {
+        await deleteMovement(id);
+      }
+
+      // refresh view (best effort)
+      try { rebuildDocGroupsCache(); } catch(_) {}
+      try { renderFlowsTable(); } catch(_) {}
+      try { setTimeout(() => { try { openDocDetail(__activeDocKey); } catch(_) {} }, 250); } catch(_) {}
+      showToast("Riga eliminata");
+    }
+
+    async function __saveDocDetailEdits(){
+      if (!__activeDocGroup) return;
+      const g = __activeDocGroup;
+
+      if (!docDetailTbody) return;
+
+      // read edited rows from DOM
+      const trs = Array.from(docDetailTbody.querySelectorAll("tr[data-lk]"));
+      const edited = [];
+      for (const tr of trs){
+        const code = String(tr.querySelector('input[data-f="code"]')?.value || "").trim();
+        const item = String(tr.querySelector('input[data-f="item"]')?.value || "").trim();
+        const qty  = safeInt(tr.querySelector('input[data-f="qty"]')?.value || 0);
+        if (!code && !item) continue;
+        if (qty <= 0) continue;
+        if (__isConaiLine(code) || __isConaiLine(item)) continue;
+        edited.push({ code, item, qty });
+      }
+
+      const baseMv = (g.movements && g.movements[0]) ? g.movements[0] : null;
+      const baseType = String((baseMv && baseMv.type) || "IN");
+      const baseSource = String((baseMv && baseMv.source) || g.source || "OCR");
+      const baseRaw = String((baseMv && baseMv.rawText) || "");
+
+      const ok = confirm(`Salvare le modifiche al documento?\n\nRighe: ${edited.length}\n\nQuesta operazione aggiorna i movimenti del documento.`);
+      if (!ok) return;
+
+      showToast("Salvataggio…");
+
+      // Delete all existing movements for the doc (rewrite)
+      for (const mv of (g.movements || [])) {
+        if (mv && mv.id) await deleteMovement(mv.id);
+      }
+
+      // Recreate movements
+      for (const r of edited) {
+        const mv = makeMovement({
+          type: baseType,
+          customer: g.customer || "",
+          code: r.code,
+          item: r.item,
+          qty: r.qty,
+          date: g.date || todayYYYYMMDD(),
+          note: g.note || "",
+          source: baseSource,
+          rawText: baseRaw
+        });
+        if (!validateMovementFields(mv)) continue;
+        await addMovement(mv);
+      }
+
+      __docDetailEditMode = false;
+      __syncDocDetailButtons();
+      closeDocDetail();
+
+      try { renderFlowsTable(); } catch(_) {}
+      showToast("Documento aggiornato");
+    }
+
 
 
     function openSettings() { modalSettings.classList.add("open"); }
@@ -4071,6 +4257,59 @@ function renderFlowsTable() {
     if (btnCloseDocDetail) btnCloseDocDetail.addEventListener("click", closeDocDetail);
     if (btnCloseDocDetail2) btnCloseDocDetail2.addEventListener("click", closeDocDetail);
     if (modalDocDetail) modalDocDetail.addEventListener("click", (e) => { if (e.target === modalDocDetail) closeDocDetail(); });
+
+
+    // Doc detail: selection + actions
+    if (docDetailTbody) {
+      docDetailTbody.addEventListener("click", (e) => {
+        const tr = e.target.closest("tr[data-lk]");
+        if (!tr) return;
+        __docDetailSelectedKey = String(tr.getAttribute("data-lk") || "");
+        __renderDocDetailTable();
+      });
+
+      // keep state in sync while typing
+      docDetailTbody.addEventListener("input", (e) => {
+        if (!__docDetailEditMode) return;
+        const tr = e.target.closest("tr[data-lk]");
+        if (!tr) return;
+        const lk = String(tr.getAttribute("data-lk") || "");
+        const row = (__docDetailRows || []).find(r => String(r.lk) === lk);
+        if (!row) return;
+        const code = String(tr.querySelector('input[data-f="code"]')?.value || "").trim();
+        const item = String(tr.querySelector('input[data-f="item"]')?.value || "").trim();
+        const qty = safeInt(tr.querySelector('input[data-f="qty"]')?.value || 0);
+        row.code = code;
+        row.item = item;
+        row.qty = qty;
+      });
+    }
+
+    if (btnDocEdit) btnDocEdit.addEventListener("click", () => {
+      if (!__activeDocGroup) return;
+      __docDetailEditMode = true;
+      __syncDocDetailButtons();
+      __renderDocDetailTable();
+    });
+
+    if (btnDocCancel) btnDocCancel.addEventListener("click", () => {
+      __docDetailEditMode = false;
+      __syncDocDetailButtons();
+      try { openDocDetail(__activeDocKey); } catch(_) { __renderDocDetailTable(); }
+    });
+
+    if (btnDocSave) btnDocSave.addEventListener("click", () => { __saveDocDetailEdits(); });
+
+    if (btnDocDelete) btnDocDelete.addEventListener("click", async () => {
+      if (!__activeDocGroup) return;
+      if (__docDetailSelectedKey) {
+        const choice = confirm("OK = elimina riga selezionata
+Annulla = scegli eliminazione documento intero");
+        if (choice) return __deleteActiveDocSelectedRow();
+      }
+      return __deleteActiveDocWhole();
+    });
+ });
 
     // Document row click (Movimenti recenti / Flussi)
     if (movTbody) movTbody.addEventListener("click", (e) => {
