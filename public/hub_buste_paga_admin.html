@@ -2709,7 +2709,77 @@ flex-direction: column !important;
 }
 
 
-  </style>
+  
+
+/* === PATCH 2026-01-06 V3 — Dipendenti: righe nei riquadri + toolbar/switch + edit mode === */
+
+/* Toolbar: ricerca/sort/switch distribuiti bene */
+#sendLogModal .empToolbar{
+  display:grid !important;
+  grid-template-columns: 1fr 180px auto auto;
+  align-items:center;
+  gap:10px;
+  margin-top:0 !important;
+}
+#sendLogModal .empToolbar #empSearch{min-width:0;}
+#sendLogModal .empToolbar #empSort{width:100%;}
+#sendLogModal .empToolbar .empMiniBtn{height:44px; padding:0 12px; border-radius:14px;}
+#sendLogModal .empToolbar .empToggle{
+  width:100%;
+  justify-content:space-between;
+  padding:10px 12px;
+  border:1px solid rgba(15,23,42,.10);
+  border-radius:14px;
+  background:#fff;
+}
+#sendLogModal .empToolbar .empToggle span{font-weight:900;color:#0b0f1a;line-height:1.1;}
+#sendLogModal .empToolbar .empToggle input{flex:0 0 auto;}
+
+@media (max-width: 520px){
+  #sendLogModal .empToolbar{grid-template-columns:1fr 1fr;}
+  #sendLogModal #empSearch{grid-column:1 / -1;}
+  #sendLogModal .empToggle{grid-column:1 / -1;}
+  #sendLogModal #btnEmpReload{width:100%;}
+}
+
+/* Campi anagrafica: 2 colonne su desktop, 1 su mobile */
+#sendLogModal .row2{
+  display:grid !important;
+  grid-template-columns:1fr 1fr;
+  gap:10px;
+}
+@media (max-width: 520px){
+  #sendLogModal .row2{grid-template-columns:1fr;}
+}
+#sendLogModal .field .pcSub{margin-bottom:6px;}
+#sendLogModal .field input.iosInput{width:100%;}
+#sendLogModal .empEditInput.ro{
+  background:rgba(15,23,42,.03) !important;
+  border-color:rgba(15,23,42,.08) !important;
+}
+
+/* Switch: più leggibile e allineato */
+#sendLogModal .toggleSwitch{align-items:center;gap:10px;}
+#sendLogModal .toggleSwitch input{width:44px;height:26px;}
+#sendLogModal .toggleSwitch span{font-weight:900;color:#0b0f1a;}
+#sendLogModal .toggleSwitch input:disabled{opacity:.55;cursor:not-allowed;}
+#sendLogModal .toggleSwitch input:disabled::after{box-shadow:0 2px 6px rgba(0,0,0,.12);}
+
+/* Storico invii: righe più chiare e incolonnate */
+#sendLogModal .empLogRow{
+  display:grid !important;
+  grid-template-columns:1fr auto;
+  gap:10px;
+  align-items:start;
+}
+#sendLogModal .empLogActions{align-items:flex-start;}
+#sendLogModal .empLogSub{line-height:1.25;}
+@media (max-width: 520px){
+  #sendLogModal .empLogRow{grid-template-columns:1fr;}
+  #sendLogModal .empLogActions{justify-content:flex-start;}
+  #sendLogModal .empLogActions .empMiniBtn{flex:1 1 auto;}
+}
+</style>
 
 </head>
 <body>
@@ -5911,11 +5981,46 @@ async function Yi() {
         // Render detail
         const selected = filtered.find(e=>e.emailLower === st.selectedEmail) || filtered[0];
         const selEmail = selected.emailLower;
-        const selLogs = (logsByEmail[String(selEmail||"").toLowerCase()] || []).slice();
+        const selLogsAll = (logsByEmail[String(selEmail||"").toLowerCase()] || []).slice();
+
+        const _logTime = (l)=>{
+          try{
+            const t = l?.sentAt;
+            if(t?.toDate) return t.toDate().getTime();
+            if(t instanceof Date) return t.getTime();
+            if(typeof t === "number") return t;
+          }catch(_e){}
+          try{
+            const tc = l?.sentAtClient;
+            if(tc?.toDate) return tc.toDate().getTime();
+            if(tc instanceof Date) return tc.getTime();
+            if(typeof tc === "number") return tc;
+          }catch(_e){}
+          try{
+            const iso = l?.sentAtISO;
+            if(iso) return new Date(iso).getTime();
+          }catch(_e){}
+          return 0;
+        };
+
+        selLogsAll.sort((a,b)=> _logTime(b) - _logTime(a));
+        const selLogs = selLogsAll.slice(0, 12);
 
         const enabled = selected.enabled !== false;
         const statusPill = enabled ? '<span class="pillTone ok">Abilitato</span>' : '<span class="pillTone">Disabilitato</span>';
         const ghostNote = selected._ghost ? '<div class="pcHint">Questo indirizzo compare nei log, ma non esiste in payrollDirectory (anagrafica).</div>' : '';
+
+        // blocco anagrafica: modificabile solo con "Modifica"
+        st.ui.detailEdit = !!st.ui.detailEdit;
+        if(st._lastSelEmail !== selEmail){
+          st.ui.detailEdit = false;
+          st._lastSelEmail = selEmail;
+        }
+        const editMode = !!st.ui.detailEdit;
+
+        const logsMetaText = selLogsAll.length > 12
+          ? `Ultimi 12 di ${selLogsAll.length} log`
+          : `${selLogsAll.length||0} log`;
 
         const logsHtml = selLogs.length ? selLogs.map((l,i)=>{
           const opened = openedByDocKey[l.docKey] || {};
@@ -5949,20 +6054,7 @@ async function Yi() {
                 <div class="empLogSub">${Ao(when)} · ${Ao(fileRef)}${l.netPayText ? " · " + Ao(l.netPayText) : ""}</div>
               </div>
               <div class="empLogActions">
-                <button class="empMiniBtn" type="button"
-                  data-emp-preview="1"
-                  data-emp-url="${Ao(url)}"
-                  data-emp-dockey="${Ao(l.docKey||"")}"
-                  data-emp-docid="${Ao(l.payrollDocId||"")}"
-                  data-emp-fn="${Ao((l.sourceFileName||l.fileName||"busta_paga.pdf"))}"
-                  >Anteprima</button>
-                <button class="empMiniBtn" type="button"
-                  data-emp-open="1"
-                  data-emp-url="${Ao(url)}"
-                  data-emp-dockey="${Ao(l.docKey||"")}"
-                  data-emp-docid="${Ao(l.payrollDocId||"")}"
-                  >Apri</button>
-                <button class="empMiniBtn" type="button"
+<button class="empMiniBtn" type="button"
                   data-emp-resend="1"
                   data-emp-logkey="${Ao(logKey)}"
                   >Reinvia</button>
@@ -5986,35 +6078,37 @@ async function Yi() {
           <div class="row2" style="margin-top:10px">
             <div class="field">
               <div class="pcSub">Nome</div>
-              <input id="empEditName" type="text" value="${Ao(selected.displayName||"")}" placeholder="Nome e cognome" />
+              <input id="empEditName" class="iosInput empEditInput ${editMode ? "" : "ro"}" type="text" value="${Ao(selected.displayName||"")}" placeholder="Nome e cognome" ${editMode ? "" : "readonly"} />
             </div>
             <div class="field">
               <div class="pcSub">Email</div>
-              <input id="empEditEmail" type="email" value="${Ao(selected.emailLower||"")}" placeholder="email@dominio.it" />
+              <input id="empEditEmail" class="iosInput empEditInput ${editMode ? "" : "ro"}" type="email" value="${Ao(selected.emailLower||"")}" placeholder="email@dominio.it" ${editMode ? "" : "readonly"} />
             </div>
           </div>
 
           <div class="row2" style="margin-top:10px">
             <div class="field">
               <div class="pcSub">Codice Fiscale (opzionale)</div>
-              <input id="empEditCf" type="text" value="${Ao(selected.fiscalCode||"")}" placeholder="CF" />
+              <input id="empEditCf" class="iosInput empEditInput ${editMode ? "" : "ro"}" type="text" value="${Ao(selected.fiscalCode||"")}" placeholder="CF" ${editMode ? "" : "readonly"} />
             </div>
             <div class="field">
               <div class="pcSub">Stato</div>
               <label class="toggleSwitch" style="justify-content:flex-start; gap:10px">
-                <input id="empEditEnabled" type="checkbox" ${enabled ? "checked" : ""} />
-                <span>${enabled ? "Abilitato" : "Disabilitato"}</span>
+                <input id="empEditEnabled" type="checkbox" ${enabled ? "checked" : ""} ${editMode ? "" : "disabled"} />
+                <span id="empEditEnabledLabel">${enabled ? "Abilitato" : "Disabilitato"}</span>
               </label>
             </div>
           </div>
 
-          <div class="pcPills" style="margin-top:12px; justify-content:flex-end">
-            <button class="pillBtn" id="btnEmpSave" type="button">Salva</button>
+          <div class="pcPills empEditBar" style="margin-top:12px; justify-content:flex-end">
+            ${editMode
+              ? '<button class="pillBtn ghost" id="btnEmpCancel" type="button">Annulla</button><button class="pillBtn" id="btnEmpSave" type="button">Salva</button>'
+              : '<button class="pillBtn" id="btnEmpEdit" type="button">Modifica</button>'}
           </div>
 
           <div class="empSectionBar">
             <div class="empSectionTitle">Storico invii</div>
-            <div class="empSectionMeta">${Ao(selLogs.length||0)} log</div>
+            <div class="empSectionMeta">${Ao(logsMetaText)}</div>
           </div>
 
           <div class="empLogList">${logsHtml}</div>
@@ -6072,6 +6166,7 @@ async function Yi() {
           await loadPayrollDirectoryAllEmployees();
 
           st.selectedEmail = newEmail;
+          st.ui.detailEdit = false;
           renderEmployeesModal();
           try{ Ve("Salvato", "Dipendente aggiornato."); }catch(_e){}
           try{ showBootSpinner(false); }catch(_e){}
@@ -6321,11 +6416,21 @@ async function Yi() {
           await reloadEmployeesModal();
         });
 
+
+        modal.addEventListener("change", (evt)=>{
+          const t = evt.target;
+          if(t && t.id === "empEditEnabled"){
+            const lab = U("empEditEnabledLabel");
+            if(lab) lab.textContent = t.checked ? "Abilitato" : "Disabilitato";
+          }
+        });
+
         modal.addEventListener("click", async (evt)=>{
           const back = evt.target.closest("[data-emp-back]");
           if(back){
             const st = ensureEmployeesState();
             st.ui.view = "list";
+            st.ui.detailEdit = false;
             renderEmployeesModal();
             return;
           }
@@ -6335,6 +6440,22 @@ async function Yi() {
             const st = ensureEmployeesState();
             st.selectedEmail = String(sel.getAttribute("data-emp-select") || "").toLowerCase();
             st.ui.view = "detail";
+            st.ui.detailEdit = false;
+            renderEmployeesModal();
+            return;
+          }
+
+          if(evt.target.closest("#btnEmpEdit")){
+            const st = ensureEmployeesState();
+            st.ui.detailEdit = true;
+            renderEmployeesModal();
+            setTimeout(()=>{ try{ U("empEditName")?.focus?.(); }catch(_e){} }, 20);
+            return;
+          }
+
+          if(evt.target.closest("#btnEmpCancel")){
+            const st = ensureEmployeesState();
+            st.ui.detailEdit = false;
             renderEmployeesModal();
             return;
           }
