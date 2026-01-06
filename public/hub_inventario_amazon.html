@@ -81,6 +81,16 @@
     }
 
     /* consentire input (solo testo), ma bloccare comunque copia/incolla via JS */
+
+    /* --- Copy: consenti selezione/copia nelle righe (liste e tabelle) --- */
+    .list .row, .list .row *,
+    .gridTable .row, .gridTable .row *,
+    .gridTable .gridCell, .gridTable .gridCell *{
+      -webkit-user-select: text !important;
+      user-select: text !important;
+      -webkit-touch-callout: default !important;
+    }
+
     input, textarea{
       -webkit-user-select: text;
       user-select: text;
@@ -1501,7 +1511,7 @@
                   <div class="kpiSub" id="homePiecesSub">Cerea: — • Concamarise: —</div>
                 </div>
                 <div class="kpiWideBlock">
-                  <div class="kpiLabel">Sotto scorta (&lt;100 pz)</div>
+                  <div class="kpiLabel">Sotto scorta (policy variabile)</div>
                   <div class="kpiVal" id="homeTotalLow">—</div>
                   <div class="kpiSub" id="homeUpdatedAt">Aggiornato: —</div>
                 </div>
@@ -1600,7 +1610,7 @@
             <div class="miniTop">
               <div>
                 <div class="miniTitle">Sotto scorta</div>
-                <div class="miniSub">&lt;100 pz • Cerea + Concamarise</div>
+                <div class="miniSub">Policy: &lt;100 pz (5kg ≤20) • Cerea + Concamarise</div>
               </div>
               <div class="pill warn" id="homeLowStockCount">—</div>
             </div>
@@ -1656,8 +1666,8 @@
           <div class="miniCard" id="lowStockBox">
             <div class="miniTop">
               <div style="min-width:0">
-                <div class="miniTitle">Sotto scorta (&lt;100 pz)</div>
-                <div class="miniSub">Articoli con giacenza inferiore a 100 pezzi. Tocca una riga per aprire l’anagrafica.</div>
+                <div class="miniTitle">Sotto scorta (policy variabile)</div>
+                <div class="miniSub">Articoli sotto scorta: default <100 pz (solo 5kg: ≤20 pz). Tocca una riga per aprire l’anagrafica.</div>
               </div>
               <div class="pill" id="lowStockCount">—</div>
             </div>
@@ -1842,7 +1852,7 @@ Tip:
       <div class="sheetTop">
         <div style="min-width:0">
           <p class="sheetTitle">Sottoscorta</p>
-          <div class="sheetSub">Tutti i prodotti sotto scorta (soglia: 100 pezzi) su Concamarise e Cerea.</div>
+          <div class="sheetSub">Tutti i prodotti sotto scorta (soglia: <100 pz — solo 5kg: ≤20 pz) su Concamarise e Cerea.</div>
         </div>
         <button class="btn" id="btnCloseSottoscorta" type="button">Chiudi</button>
       </div>
@@ -2368,11 +2378,8 @@ Tip:
         };
         const stopAlways = (e)=>{ try{ e.preventDefault(); }catch(_e){} };
 
-        // Blocca menu/clipboard SOLO fuori dagli input (così il campo libero supporta copia/incolla)
-        document.addEventListener("contextmenu", stopUnlessEditable, { passive:false });
-        document.addEventListener("copy", stopUnlessEditable, { passive:false });
-        document.addEventListener("cut", stopUnlessEditable, { passive:false });
-        document.addEventListener("paste", stopUnlessEditable, { passive:false });
+        // Clipboard/menu: ora permettiamo la copia nelle righe (SKU, nomi prodotti, ecc.).
+        // Manteniamo solo il blocco zoom gesture su iOS.
 
         // Blocca gesture zoom (iOS)
         document.addEventListener("gesturestart", stopAlways, { passive:false });
@@ -2629,6 +2636,39 @@ Tip:
       return Number.isFinite(n) ? String(Math.round(n*1000)/1000) : "0";
     }
 
+    // --- policy sotto-scorta ---
+    const LOW_STOCK_DEFAULT = 100;
+    const LOW_STOCK_5KG = 20;
+    const LOW_STOCK_5KG_SKUS = new Set(["q6-kwh6-owul"]); // esempio: Poltiglia 5kg
+
+    function __isFiveKgItem(it){
+      try{
+        const sku = toSkuId((it && (it.sku || it.id)) ? (it.sku || it.id) : "");
+        if(sku && LOW_STOCK_5KG_SKUS.has(sku)) return true;
+        const t = String((it && (it.title || it.name)) ? (it.title || it.name) : "");
+        return /\b5\s*kg\b/i.test(t) || /\b5kg\b/i.test(t);
+      }catch(_e){
+        return false;
+      }
+    }
+
+    function __lowStockThreshold(it){
+      return __isFiveKgItem(it) ? LOW_STOCK_5KG : LOW_STOCK_DEFAULT;
+    }
+
+    function __isLowStockItem(it){
+      const qty = Number.isFinite(it && it.qty) ? Number(it.qty) : 0;
+      const th = __lowStockThreshold(it);
+      // regola speciale: 5kg => sotto scorta solo quando resta <= 20
+      if(__isFiveKgItem(it)) return qty <= th;
+      return qty < th;
+    }
+
+    function __lowStockPolicyLabel(){
+      return `< ${LOW_STOCK_DEFAULT} pz (solo 5kg: ≤ ${LOW_STOCK_5KG} pz)`;
+    }
+
+
         function __buildLowStockEmailPayload(items){
       // items: [{ sku, title, qty, loc }]
       const byLoc = { concamarise: [], cerea: [] };
@@ -2684,7 +2724,7 @@ ${textLines.join("\n")}
         "Amazon — Alert sotto scorta inventario",
         `Generato: ${stamp}`,
         "Azione: avviare produzione / riordino.",
-        "Soglia: < 100 pz",
+        "Soglia: " + __lowStockPolicyLabel(),
         `Totale prodotti: ${total}`,
         "",
         buildTextSection("CONCAMARISE", rowsConca),
@@ -2733,7 +2773,7 @@ ${textLines.join("\n")}
             <div style="padding:16px 18px; background:#f6f7f8; border-bottom:1px solid #e9eef2">
               <div style="font-size:16px; font-weight:800; margin:0 0 4px 0">Amazon • Alert sotto scorta</div>
               <div style="font-size:13px; color:#556; margin:0">
-                Generato: <b>${escapeHtml(stamp)}</b> • Soglia: <b>&lt; 100 pz</b> • Prodotti: <b>${total}</b>
+                Generato: <b>${escapeHtml(stamp)}</b> • Soglia: <b>${escapeHtml(__lowStockPolicyLabel())}</b> • Prodotti: <b>${total}</b>
               </div>
             </div>
 
@@ -2933,7 +2973,7 @@ ${textLines.join("\n")}
         const items = (state.inventory[loc] && state.inventory[loc].items) ? state.inventory[loc].items : [];
         for(const it of items){
           if(!Number.isFinite(it.qty)) continue;
-          if(it.qty >= 100) continue;
+          if(!__isLowStockItem(it)) continue;
           out.push({ ...it, loc });
         }
       };
@@ -4204,7 +4244,7 @@ function currentInv(){
       }
 
       const low = (allItems || [])
-        .filter(it=> Number.isFinite(it.qty) && it.qty < 100)
+        .filter(it=> Number.isFinite(it.qty) && __isLowStockItem(it))
         .sort((a,b)=> (a.qty||0) - (b.qty||0));
 
       count.textContent = String(low.length);
@@ -4215,7 +4255,7 @@ function currentInv(){
           <button class="btn small lowStockBtn" type="button" data-action="openLocSottoscorta" disabled>
             Sotto scorta (0)
           </button>
-          <div class="hint" style="margin-top:10px">Nessun articolo sotto 100 pezzi 🎉</div>
+          <div class="hint" style="margin-top:10px">Nessun articolo sotto scorta 🎉</div>
         `;
         return;
       }
@@ -4224,7 +4264,7 @@ function currentInv(){
         <button class="btn small lowStockBtn" type="button" data-action="openLocSottoscorta">
           Apri sotto scorta (${low.length})
         </button>
-        <div class="hint" style="margin-top:10px">Le righe sotto-scorta sono visibili solo in Home.</div>
+        <div class="hint" style="margin-top:10px">Le righe sotto-scorta seguono la soglia <100 pz (solo 5kg: ≤20 pz).</div>
       `;
     }
 
@@ -4247,7 +4287,7 @@ function currentInv(){
         const items = (state.inventory[loc] && state.inventory[loc].items) ? state.inventory[loc].items : [];
         for(const it of items){
           const qty = Number.isFinite(it.qty) ? it.qty : 0;
-          if(qty < 100){
+          if(__isLowStockItem({ ...it, qty })){
             const sku = toSkuId(it.sku || it.id || "");
             if(!sku) continue;
             out.push({ loc, sku, title: it.title || "", qty });
@@ -4273,10 +4313,10 @@ function currentInv(){
       });
 
       const scopeLabel = filterLoc ? prettyLoc(filterLoc) : "Concamarise + Cerea";
-      hint.textContent = `Sotto 100 pezzi: ${out.length} articoli (${scopeLabel})`;
+      hint.textContent = `Sotto scorta: ${out.length} articoli (soglia: ${__lowStockPolicyLabel()}) • ${scopeLabel}`;
 
       if(!out.length){
-        list.innerHTML = `<div class="hint">Nessun articolo sotto 100 pezzi 🎉</div>`;
+        list.innerHTML = `<div class="hint">Nessun articolo sotto scorta 🎉</div>`;
         return;
       }
 
@@ -4292,7 +4332,7 @@ function currentInv(){
         const titleMain = meta.main ? escapeHtml(meta.main) : (it.title ? escapeHtml(it.title) : "<span class='muted'>(senza nome)</span>");
         const sku = escapeHtml(toSkuId(it.sku||""));
         const qty = Number.isFinite(it.qty) ? it.qty : 0;
-        const badgeClass = qty>0 ? (qty<100 ? "warn" : "ok") : "bad";
+        const badgeClass = qty>0 ? (__isLowStockItem({ ...it, qty }) ? "warn" : "ok") : "bad";
         const locLabel = escapeHtml(prettyLoc(it.loc));
 
         return `
@@ -4329,7 +4369,7 @@ function currentInv(){
       for(const it of items){
         const q = Number.isFinite(it.qty) ? it.qty : 0;
         pieces += q;
-        if(Number.isFinite(it.qty) && it.qty < 100) low++;
+        if(__isLowStockItem(it)) low++;
       }
       return {
         skuCount: items.length,
@@ -4400,7 +4440,7 @@ function currentInv(){
           const items = (state.inventory[loc] && state.inventory[loc].items) ? state.inventory[loc].items : [];
           for(const it of items){
             if(!Number.isFinite(it.qty)) continue;
-            if(it.qty >= 100) continue;
+            if(!__isLowStockItem(it)) continue;
             out.push({ ...it, loc });
           }
         };
@@ -4423,7 +4463,7 @@ function currentInv(){
           const titleMain = meta.main ? escapeHtml(meta.main) : (it.title ? escapeHtml(it.title) : "<span class='muted'>(senza nome)</span>");
           const sku = escapeHtml(toSkuId(it.sku||""));
           const qty = Number.isFinite(it.qty) ? it.qty : 0;
-          const badgeClass = qty>0 ? (qty<100 ? "warn" : "ok") : "bad";
+          const badgeClass = qty>0 ? (__isLowStockItem({ ...it, qty }) ? "warn" : "ok") : "bad";
           const locLabel = escapeHtml(prettyLoc(it.loc));
           return `
             <div class="row gridRow" role="button" tabindex="0" data-sku="${sku}" data-loc="${it.loc}" data-action="openHomeSottoscortaItem">
@@ -5165,7 +5205,7 @@ function closeSheet(kind){
         const metaSmall = buildMetaSmall(meta);
         const sku = escapeHtml(toSkuId(row.sku || it.sku || ""));
         const qty = Number.isFinite(row.qty) ? row.qty : (Number.isFinite(it.qty) ? it.qty : 0);
-        const badgeClass = qty>=100 ? "ok" : (qty>0 ? "warn" : "bad");
+        const badgeClass = __isLowStockItem({ sku: (row.sku || it.sku || ""), title: (row.title || it.title || ""), qty }) ? (qty>0 ? "warn" : "bad") : "ok";
         const locLab = escapeHtml(prettyLoc(row.loc || it.loc || ""));
         const sub = `${locLab}${metaSmall ? " • " + escapeHtml(metaSmall) : ""}`;
 
@@ -6265,7 +6305,7 @@ function renderProductsSheet(){
           const meta = parseTitleMeta(it.title || "");
           const titleMain = meta.main ? escapeHtml(meta.main) : (it.title ? escapeHtml(it.title) : "<span class='muted'>(senza nome)</span>");
           const metaSmall = buildMetaSmall(meta);
-          const badgeClass = qty>=100 ? "ok" : (qty>0 ? "warn" : "bad");
+          const badgeClass = __isLowStockItem({ sku, title: (it.title||""), qty }) ? (qty>0 ? "warn" : "bad") : "ok";
 
           if(editingSku && editingSku===sku){
             editHtml = `
