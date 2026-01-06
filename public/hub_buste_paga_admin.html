@@ -1191,6 +1191,29 @@ flex-direction: column !important;
       #sendLogModal .empListCol{flex:0 0 auto;max-width:none}
     }
 
+
+/* === Boot Spinner (full white, no overlay box) === */
+.bootSpinner{
+  position:fixed;
+  inset:0;
+  display:none;
+  align-items:center;
+  justify-content:center;
+  background:#fff;
+  z-index:9998;
+}
+.bootSpinner .spin{
+  width:44px;
+  height:44px;
+  border-radius:999px;
+  background:conic-gradient(from 0deg, rgba(10,132,255,.95), rgba(10,132,255,0) 58%);
+  -webkit-mask:radial-gradient(farthest-side, transparent calc(100% - 6px), #000 0);
+  mask:radial-gradient(farthest-side, transparent calc(100% - 6px), #000 0);
+  animation:spin .78s linear infinite;
+  filter:drop-shadow(0 12px 22px rgba(10,132,255,.18));
+}
+@keyframes spin{ to{ transform:rotate(360deg) } }
+
 </style>
   <style id="payrollStyles">
     .payrollCard{position:relative;overflow:hidden;border-radius:22px;padding:18px;border:1px solid rgba(15,23,42,.06);background:#fff;box-shadow:0 18px 42px rgba(15,23,42,.12);display:flex;flex-direction:column;gap:12px}
@@ -2180,6 +2203,8 @@ flex-direction: column !important;
 </style>
 </head>
 <body>
+  <div class="bootSpinner" id="bootSpinner" aria-hidden="true"><div class="spin"></div></div>
+
   <div id="toast" role="status" aria-live="polite">
     <div id="toastTitle">Info</div>
     <div id="toastBody">—</div>
@@ -2951,6 +2976,15 @@ function toggleSendLogModal(show){
     const Payroll = (()=>{
       const N = state;
       const U = (id)=>document.getElementById(id);
+
+      const showBootSpinner = (on)=>{
+        try{
+          const el = document.getElementById("bootSpinner");
+          if(!el) return;
+          el.style.display = on ? "flex" : "none";
+        }catch(_e){}
+      };
+
       const Ao = (s)=>String(s??"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#39;");
       const Ve = (title, body)=>{ try{ showToast(String(title||"Info"), String(body||"")); }catch(_e){ alert(String(title||"Info")+"\\n\\n"+String(body||"")); } };
 
@@ -5013,6 +5047,7 @@ function renderUploadHistory(){
 
 async function Yi() {
         const e = N.payroll.admin;
+        const __dedupByFile = new Set();
         const rows = (e.groupedRows || []).filter(r=>r.enabled!==false);
         if (!rows.length) return void Ve("Nessun dato", "Esegui l’estrazione e abilita almeno una riga.");
         const invalid = rows.filter(r=>r.missingEmail || r.missingMonth || r.conflict);
@@ -5060,6 +5095,18 @@ async function Yi() {
           let done = 0; const total = rows.length;
           for (const row of rows) {
             const o = N.firebase.api, i = N.firebase.db, emailLower = (row.email || "").toLowerCase(), baseId = `${emailLower}_${row.monthKey}`, sendKey = row.key || baseId;
+            const __srcName = String(e.sourceFileName || "").trim();
+            const __dupKey = __srcName ? `${emailLower}__${__srcName.toLowerCase()}` : "";
+            if(__dupKey && __dedupByFile.has(__dupKey)){
+              setPayrollSendRowStatus(sendKey, "ok", "duplicato (stesso file)");
+              setPayrollSendRowMailStatus(sendKey, "ok", "skip");
+              done++;
+              setPayrollSendProgress(done, total);
+              await nextFrame();
+              continue;
+            }
+            if(__dupKey) __dedupByFile.add(__dupKey);
+
             setPayrollSendRowStatus(sendKey, "run");
             setPayrollSendRowMailStatus(sendKey, "idle");
             setPayrollSendProgress(done, total, `Inviando ${done+1}/${total}`);
@@ -5080,6 +5127,17 @@ async function Yi() {
 
             const existingData = s?.data ? s.data() : (s && typeof s.get === "function" ? s.data() : null);
             const existingId = s?.id || baseId;
+            const __srcName2 = String(e.sourceFileName || "").trim();
+            const __alreadySameFile = !!(existingData && __srcName2 && String(existingData.sourceFileName || "") === __srcName2);
+            if(__alreadySameFile){
+              setPayrollSendRowStatus(sendKey, "ok", "già inviato (stesso file)");
+              setPayrollSendRowMailStatus(sendKey, "ok", "skip");
+              done++;
+              setPayrollSendProgress(done, total);
+              await nextFrame();
+              continue;
+            }
+
             const sameHash = existingData && existingData.sourceFileHash === e.sourceFileHash;
             const samePages = existingData && Array.isArray(existingData.pageIndices) && Array.isArray(row.pages) && existingData.pageIndices.join(",") === row.pages.map(p=>p.pageIndex).join(",");
             let docId = existingId;
@@ -5415,7 +5473,7 @@ async function Yi() {
         const statusPill = enabled ? '<span class="pillTone ok">Abilitato</span>' : '<span class="pillTone">Disabilitato</span>';
         const ghostNote = selected._ghost ? '<div class="pcHint">Questo indirizzo compare nei log, ma non esiste in payrollDirectory (anagrafica).</div>' : '';
 
-        const logsHtml = selLogs.length ? selLogs.map(l=>{
+        const logsHtml = selLogs.length ? selLogs.map((l,i)=>{
           const opened = openedByDocKey[l.docKey] || {};
           const openedAt = opened.openedAt || null;
           let isOpened = false;
@@ -5428,6 +5486,9 @@ async function Yi() {
           const openedLabel = isOpened ? "Aperto" : "Non aperto";
           const openedCls = isOpened ? "ok" : "";
           const fileRef = l.sourceFileName || l.fileName || l.payrollDocId || l.docKey || "—";
+          const logKey = String(l.eventKey || `${l.docKey||""}_${l.sentAtISO||l.sentAtClient||i}` || i);
+          try{ st.logMap = st.logMap || {}; st.logMap[logKey] = l; }catch(_e){}
+
           const when = _fmtIt(l.sentAt) || _fmtIt(l.sentAtClient) || "—";
           const url = l.downloadUrl || "";
           return `
@@ -5451,6 +5512,10 @@ async function Yi() {
                   data-emp-dockey="${Ao(l.docKey||"")}"
                   data-emp-docid="${Ao(l.payrollDocId||"")}"
                   >Apri</button>
+                <button class="empMiniBtn" type="button"
+                  data-emp-resend="1"
+                  data-emp-logkey="${Ao(logKey)}"
+                  >Reinvia</button>
               </div>
             </div>
           `;
@@ -5507,6 +5572,7 @@ async function Yi() {
 
       async function saveSelectedEmployeeEdits(){
         try{
+          try{ showBootSpinner(true); }catch(_e){}
           if(!(N.firebase?.ok && N.user?.isAdmin)) { Ve("Solo admin", "Funzione riservata."); return; }
           const st = ensureEmployeesState();
           const oldEmail = String(st.selectedEmail || "").toLowerCase();
@@ -5547,7 +5613,9 @@ async function Yi() {
           st.selectedEmail = newEmail;
           renderEmployeesModal();
           try{ Ve("Salvato", "Dipendente aggiornato."); }catch(_e){}
+          try{ showBootSpinner(false); }catch(_e){}
         }catch(err){
+          try{ showBootSpinner(false); }catch(_e){}
           console.warn("saveSelectedEmployeeEdits", err);
           try{ Ve("Errore", "Impossibile salvare il dipendente."); }catch(_e){}
         }
@@ -5578,6 +5646,112 @@ async function Yi() {
         if(!r.url){ Ve("PDF non disponibile", "Non trovo un link al PDF per questo log."); return; }
         showPdfPreview({ title: title || "Busta paga", sub: sub || "—", srcUrl: r.url, fileName: r.fileName });
       }
+
+      async function resendEmployeePayrollFromLogKey(logKey){
+        try{
+          if(!(N.firebase?.ok && N.user?.isAdmin)) { try{ Ve("Solo admin", "Funzione riservata."); }catch(_e){}; return; }
+          const st = ensureEmployeesState();
+          const key = String(logKey || "");
+          const log = (st.logMap || {})[key] || null;
+          if(!log){ try{ Ve("Log non trovato", "Ricarica la lista e riprova."); }catch(_e){}; return; }
+
+          st.resendLocks = st.resendLocks || {};
+          if(st.resendLocks[key]) return;
+          st.resendLocks[key] = true;
+
+          try{ showBootSpinner(true); }catch(_e){}
+
+          const api = N.firebase.api, db = N.firebase.db;
+
+          const emailLower = normalizeEmail(log.emailLower || log.email || log.toEmail || "");
+          const monthKey = normalizeMonthKey(log.monthKey || log.month || "");
+          const docKey = String(log.docKey || (emailLower && monthKey ? `${emailLower}_${monthKey}` : ""));
+          const docId = String(log.payrollDocId || log.docId || "");
+
+          if(!emailLower){ try{ Ve("Email mancante", "Impossibile reinviare senza email."); }catch(_e){}; return; }
+
+          const fullName = String(log.fullName || log.displayName || log.name || log.fiscalCode || "");
+          const netPayText = String(log.netPayText || "");
+          const storagePath = String(log.storagePath || "");
+
+          const resolved = await resolvePayrollDocUrl({ directUrl: log.downloadUrl || "", docKey, docId });
+          const dl = String(resolved.url || log.downloadUrl || "").trim();
+          if(!dl){ try{ Ve("PDF non disponibile", "Non trovo un link al PDF per questo log."); }catch(_e){}; return; }
+
+          const srcName = String(log.sourceFileName || log.fileName || "").trim();
+          const fnameBase = String((srcName || `${fullName || emailLower} ${monthKey}` || "busta_paga")).replace(/\.pdf$/i,"").trim();
+          const attachmentName = (typeof buildSafePdfName==="function") ? buildSafePdfName(fnameBase) : (fnameBase + ".pdf");
+
+          const mailDoc = buildPayrollEmailDoc({
+            toEmail: emailLower,
+            fullName: fullName,
+            monthKey: monthKey,
+            netPayText: netPayText,
+            downloadUrl: dl,
+            fileName: attachmentName,
+            payrollDocId: docId || docKey || "",
+            storagePath: storagePath || ""
+          });
+
+          // Anti doppio invio: stesso utente + stesso nome file (stabile) => un solo reinvio possibile
+          const stableBase = String(`${emailLower}__${srcName.toLowerCase()}__${monthKey}`).replace(/[^a-zA-Z0-9_-]/g,"_").slice(0, 140);
+          const mailDocId = `payrollResend_${stableBase || String(key).replace(/[^a-zA-Z0-9_-]/g,"_").slice(0, 140)}`;
+
+          const ref = api.doc(db, COL_EMAIL, mailDocId);
+          let snap = null;
+          try{ snap = await api.getDoc(ref); }catch(_e){}
+          if(snap && snap.exists && snap.exists()){
+            try{ Ve("Bloccato", "Questa busta paga risulta già reinviata (stesso nome file)."); }catch(_e){}
+            return;
+          }
+
+          await api.setDoc(ref, {
+            ...mailDoc,
+            createdAt: api.serverTimestamp(),
+            createdAtClient: Date.now(),
+            _payrollResend: {
+              originalEventKey: log.eventKey || "",
+              docKey: docKey || "",
+              payrollDocId: docId || "",
+              sourceFileName: srcName,
+              monthKey,
+              emailLower
+            }
+          });
+
+          try{
+            await logPayrollSendEvent({
+              action: "resend",
+              originalEventKey: log.eventKey || "",
+              docKey: docKey || "",
+              emailLower,
+              monthKey,
+              payrollDocId: docId || "",
+              netPayText,
+              downloadUrl: dl,
+              fileName: srcName || attachmentName,
+              sourceFileName: srcName || "",
+              storagePath: storagePath || "",
+              note: "resend_from_employees"
+            });
+          }catch(_e){}
+
+          try{ Ve("Reinviato", "Mail reinviata (in coda)."); }catch(_e){}
+          try{ await loadPayrollSendLogs(); }catch(_e){}
+          try{ renderEmployeesModal(); }catch(_e){}
+        }catch(err){
+          console.warn("resendEmployeePayrollFromLogKey", err);
+          try{ Ve("Errore", "Impossibile reinviare la mail."); }catch(_e){}
+        }finally{
+          try{ showBootSpinner(false); }catch(_e){}
+          try{
+            const st = ensureEmployeesState();
+            const key = String(logKey || "");
+            if(st && st.resendLocks) delete st.resendLocks[key];
+          }catch(_e){}
+        }
+      }
+
 
       async function reloadEmployeesModal(){
         try{
@@ -5693,6 +5867,13 @@ async function Yi() {
 
           if(evt.target.closest("#btnEmpSave")){
             await saveSelectedEmployeeEdits();
+            return;
+          }
+
+          const rs = evt.target.closest("[data-emp-resend]");
+          if(rs){
+            const key = String(rs.getAttribute("data-emp-logkey") || "");
+            await resendEmployeePayrollFromLogKey(key);
             return;
           }
 
