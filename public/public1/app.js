@@ -1,30 +1,92 @@
-/* public/app.js
-   Shared behavior for all hubs:
-   - iOS statusbar background sync
-   - Consistent "press" feedback (adds .is-pressed) with event delegation
+/* app.js (v2) — iOS/PWA fullscreen hardening
+   - Inject meta tags for iOS standalone (helps remove Safari bars when launched from Home Screen)
+   - Robust viewport height var (--vh) without setting fixed heights (so scroll stays OK)
+   - Statusbar background sync (optional, best-effort)
+   - Press feedback (adds .is-pressed)
 */
 (() => {
   "use strict";
 
   const docEl = document.documentElement;
 
-  // Detect standalone (Home Screen) mode on iOS
-  const isStandalone = (() => {
-    try {
-      // iOS Safari
-      if (typeof navigator !== "undefined" && navigator.standalone === true) return true;
-      // Modern display-mode
-      return !!(window.matchMedia && window.matchMedia("(display-mode: standalone)").matches);
-    } catch (_e) {
-      return false;
-    }
-  })();
+  function upsertMeta(name, content){
+    try{
+      const head = document.head || document.getElementsByTagName("head")[0];
+      if(!head) return;
 
+      let meta = head.querySelector(`meta[name="${name}"]`);
+      if(!meta){
+        meta = document.createElement("meta");
+        meta.setAttribute("name", name);
+        head.appendChild(meta);
+      }
+      meta.setAttribute("content", content);
+    }catch(_e){}
+  }
+
+  function ensureViewportMeta(){
+    try{
+      const head = document.head || document.getElementsByTagName("head")[0];
+      if(!head) return;
+
+      let meta = head.querySelector('meta[name="viewport"]');
+      const want = "viewport-fit=cover";
+      const base = "width=device-width, initial-scale=1";
+
+      if(!meta){
+        meta = document.createElement("meta");
+        meta.setAttribute("name", "viewport");
+        meta.setAttribute("content", `${base}, ${want}`);
+        head.appendChild(meta);
+        return;
+      }
+
+      const content = String(meta.getAttribute("content") || "");
+      const hasFit = content.toLowerCase().includes(want);
+      const next = hasFit ? content : (content.trim() ? (content.replace(/,\s*$/, "") + ", " + want) : `${base}, ${want}`);
+      meta.setAttribute("content", next);
+    }catch(_e){}
+  }
+
+  // These meta tags are what usually removes the Safari top/bottom toolbars
+  // when the app is launched from the Home Screen on iOS.
+  function ensureAppleStandaloneMeta(){
+    upsertMeta("apple-mobile-web-app-capable", "yes");
+    // 'black-translucent' lets your page extend under the status bar
+    upsertMeta("apple-mobile-web-app-status-bar-style", "black-translucent");
+  }
+
+  // Standalone detection (best effort)
+  const isStandalone = (() => {
+    try{
+      if (typeof navigator !== "undefined" && navigator.standalone === true) return true;
+      return !!(window.matchMedia && window.matchMedia("(display-mode: standalone)").matches);
+    }catch(_e){ return false; }
+  })();
   if (isStandalone) docEl.classList.add("is-standalone");
 
-  // Try to sync the statusbar background with the top header/hero background.
-  function syncStatusBarBg() {
-    try {
+  ensureViewportMeta();
+  ensureAppleStandaloneMeta();
+
+  // --- Viewport height fix (no fixed heights, only CSS vars) ---
+  let raf = 0;
+  function syncVh(){
+    try{
+      if(raf) cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() => {
+        raf = 0;
+        const vv = window.visualViewport;
+        const h = (vv && vv.height) ? vv.height : window.innerHeight;
+        const vh = h * 0.01;
+        docEl.style.setProperty("--vh", `${vh}px`);
+        docEl.style.setProperty("--app-height", `${Math.round(h)}px`);
+      });
+    }catch(_e){}
+  }
+
+  // --- Status bar bg sync (optional) ---
+  function syncStatusBarBg(){
+    try{
       const header =
         document.querySelector(".hero") ||
         document.querySelector(".app-header") ||
@@ -34,176 +96,56 @@
       const cs = window.getComputedStyle(target);
       let bg = cs.backgroundColor;
 
-      // If transparent, fall back to body/html
-      if (!bg || bg === "rgba(0, 0, 0, 0)" || bg === "transparent") {
+      if(!bg || bg === "rgba(0, 0, 0, 0)" || bg === "transparent"){
         bg = window.getComputedStyle(document.body).backgroundColor || "#ffffff";
       }
-
       docEl.style.setProperty("--statusbar-bg", bg);
-    } catch (_e) {}
+    }catch(_e){}
   }
 
-  // Run ASAP + after load (fonts/images can change computed bg in rare cases)
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", syncStatusBarBg, { once: true });
-  } else {
+  function boot(){
+    syncVh();
     syncStatusBarBg();
   }
-  window.addEventListener("load", syncStatusBarBg, { once: true });
+
+  if(document.readyState === "loading"){
+    document.addEventListener("DOMContentLoaded", boot, { once:true });
+  }else{
+    boot();
+  }
+  window.addEventListener("load", () => { syncVh(); syncStatusBarBg(); }, { once:true });
+
+  window.addEventListener("resize", syncVh, { passive:true });
+  window.addEventListener("orientationchange", syncVh, { passive:true });
+  if(window.visualViewport){
+    window.visualViewport.addEventListener("resize", syncVh, { passive:true });
+    window.visualViewport.addEventListener("scroll", syncVh, { passive:true });
+  }
 
   // --- Press effect (event delegation) ---
-  // Add .is-pressed to common tappable elements. Your CSS already defines
-  // styles for .tile.is-pressed, buttons, etc. This makes it reliable on iOS.
   const PRESS_SELECTOR = [
-    ".tile",
-    ".pill",
-    ".primaryBtn",
-    ".ghostBtn",
-    ".iconBtn",
-    ".modalTile",
-    "[data-press]"
+    ".tile",".pill",".primaryBtn",".ghostBtn",".iconBtn",".modalTile","[data-press]"
   ].join(",");
 
   let active = null;
-
-  function clearActive() {
-    if (!active) return;
-    try { active.classList.remove("is-pressed"); } catch (_e) {}
+  function clearActive(){
+    if(!active) return;
+    try{ active.classList.remove("is-pressed"); }catch(_e){}
     active = null;
   }
-
-  function onDown(e) {
-    // Ignore right click / non-primary
-    if (e.button != null && e.button !== 0) return;
-
+  function onDown(e){
+    if(e.button != null && e.button !== 0) return;
     const t = e.target && e.target.closest ? e.target.closest(PRESS_SELECTOR) : null;
-    if (!t) return;
-
-    // Opt-out
-    if (t.hasAttribute("data-no-press")) return;
-
-    // Avoid interfering with text inputs
-    const tag = (t.tagName || "").toLowerCase();
-    if (tag === "input" || tag === "textarea" || tag === "select") return;
-
+    if(!t) return;
+    if(t.hasAttribute("data-no-press")) return;
     clearActive();
     active = t;
-    try { active.classList.add("is-pressed"); } catch (_e) {}
+    try{ active.classList.add("is-pressed"); }catch(_e){}
   }
 
-  function onUp() { clearActive(); }
-  function onCancel() { clearActive(); }
-
-  // pointer events are supported on modern iOS; we keep it simple and safe
-  document.addEventListener("pointerdown", onDown, { passive: true });
-  document.addEventListener("pointerup", onUp, { passive: true });
-  document.addEventListener("pointercancel", onCancel, { passive: true });
-  document.addEventListener("pointerleave", onCancel, { passive: true });
-
-  // Safety: clear if page gets hidden (app switcher)
-  document.addEventListener("visibilitychange", () => {
-    if (document.hidden) clearActive();
-  });
-
-
-  // --- Desktop-only "Back to Hub" button (injected) ---
-  const HUB_KEY = "gc_hub_home_url";
-
-  function isHubHomePage() {
-    try {
-      const p = String(location.pathname || "").toLowerCase();
-      if (p.includes("hub_centrale")) return true;
-      const t = String(document.title || "").toLowerCase();
-      if (t.includes("hub centrale")) return true;
-      return false;
-    } catch (_e) {
-      return false;
-    }
-  }
-
-  function rememberHubHomeUrl() {
-    try { sessionStorage.setItem(HUB_KEY, location.href); } catch (_e) {}
-  }
-
-  // If we're on Hub Centrale, remember its URL (so subpages can always come back).
-  if (isHubHomePage()) {
-    rememberHubHomeUrl();
-    // Also refresh the stored value on any navigation click from the hub.
-    document.addEventListener("click", (e) => {
-      const a = e.target && e.target.closest ? e.target.closest("a[href]") : null;
-      if (!a) return;
-      rememberHubHomeUrl();
-    }, { capture: true, passive: true });
-  }
-
-  function isDesktop() {
-    try {
-      return !!(window.matchMedia && window.matchMedia("(hover:hover) and (pointer:fine)").matches);
-    } catch (_e) {
-      return false;
-    }
-  }
-
-  function getHubUrl() {
-    // 1) Best: sessionStorage (set when leaving Hub Centrale)
-    try {
-      const stored = sessionStorage.getItem(HUB_KEY);
-      if (stored) return stored;
-    } catch (_e) {}
-
-    // 2) Fallback: assume hub is in the same folder as current page
-    try {
-      const path = String(location.pathname || "/");
-      const dir = path.slice(0, path.lastIndexOf("/") + 1);
-      return new URL(dir + "hub_centrale.html", location.origin).toString();
-    } catch (_e) {}
-
-    // 3) Last resort
-    return "hub_centrale.html";
-  }
-
-  function shouldSkipBackBtn() {
-    try {
-      if (!document.body) return true;
-      if (document.body.classList.contains("locked")) return true;
-      if (document.body.classList.contains("authPending")) return true;
-      const ov = document.getElementById("authOverlay");
-      if (ov && ov.hidden === false) return true;
-    } catch (_e) {}
-    return false;
-  }
-
-  function injectBackBtn() {
-    try {
-      if (!isDesktop()) return;
-      if (isHubHomePage()) return;
-      if (shouldSkipBackBtn()) return;
-      if (document.querySelector(".gc-back-btn")) return;
-
-      const btn = document.createElement("button");
-      btn.type = "button";
-      btn.className = "gc-back-btn";
-      btn.setAttribute("data-press", "");
-      btn.setAttribute("aria-label", "Torna al Hub Centrale");
-      btn.innerHTML =
-        '<svg viewBox="0 0 24 24" aria-hidden="true">' +
-          '<path d="M15 18l-6-6 6-6"></path>' +
-          '<path d="M9 12h12"></path>' +
-        '</svg>' +
-        '<span>Hub Centrale</span>';
-
-      btn.addEventListener("click", () => {
-        try { location.href = getHubUrl(); } catch (_e) {}
-      });
-
-      document.body.appendChild(btn);
-    } catch (_e) {}
-  }
-
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", injectBackBtn, { once: true });
-  } else {
-    injectBackBtn();
-  }
+  document.addEventListener("pointerdown", onDown, { passive:true });
+  document.addEventListener("pointerup", clearActive, { passive:true });
+  document.addEventListener("pointercancel", clearActive, { passive:true });
+  document.addEventListener("visibilitychange", () => { if(document.hidden) clearActive(); });
 
 })();
