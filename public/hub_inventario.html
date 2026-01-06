@@ -101,6 +101,13 @@
     .field label { font-size: 12px; font-weight: 900; color: rgba(0,0,0,.66); }
     .field input, .field select { width: 100%; border-radius: 14px; border: 1px solid rgba(12,22,52,.10); background: rgba(255,255,255,.92); padding: 12px; font-size: 14px; font-weight: 850; color: var(--text); box-shadow: inset 0 1px 0 rgba(255,255,255,.7); }
 
+
+    /* Supplier view (Anagrafica): mostra solo campi compilati, layout pulito */
+    .kv { display:flex; flex-direction:column; gap:4px; padding: 12px; border: 1px solid rgba(12,22,52,.08); border-radius: 16px; background: rgba(255,255,255,.86); box-shadow: inset 0 1px 0 rgba(255,255,255,.7); }
+    .kv .k { font-size: 12px; font-weight: 900; color: rgba(0,0,0,.66); text-transform: uppercase; letter-spacing: .02em; }
+    .kv .v { font-size: 14px; font-weight: 900; color: rgba(0,0,0,.88); overflow-wrap: anywhere; }
+
+
     .tableWrap { border: 1px solid rgba(12,22,52,.08); border-radius: 16px; overflow: hidden; background: rgba(255,255,255,.82); }
     table { width: 100%; border-collapse: collapse; }
     thead th { position: sticky; top: 0; background: rgba(248,249,253,.96); backdrop-filter: blur(10px); font-size: 12px; text-transform: uppercase; letter-spacing: .02em; color: rgba(0,0,0,.62); padding: 10px 10px; border-bottom: 1px solid rgba(12,22,52,.08); text-align: left; }
@@ -1343,16 +1350,19 @@ tr.docRow:hover td{ background: rgba(10,132,255,.06); }
 
       <p id="supSub" class="hero-sub">Dettagli e documenti.</p>
 
+      <div class="inlineRow" id="supEditBar" style="justify-content:flex-end; gap:8px; margin: 6px 0 2px;">
+        <button class="btn btn-ghost" id="btnSupEdit" type="button">Modifica</button>
+        <button class="btn btn-primary" id="btnSupSave" type="button" style="display:none;">Salva</button>
+        <button class="btn btn-secondary" id="btnSupCancelEdit" type="button" style="display:none;">Annulla</button>
+      </div>
+
       <div class="fieldGrid" id="supFields">
         <!-- filled by JS -->
       </div>
 
       <div class="inlineRow" style="justify-content: space-between; margin-top: 4px;">
         <p class="hero-sub" style="margin:0;">Documenti</p>
-        <div class="inlineRow" style="justify-content:flex-end;">
-          <input id="supDocInput" type="file" style="display:none" />
-          <button class="btn btn-secondary" id="btnSupUpload" type="button">Carica documento</button>
-        </div>
+        
       </div>
 
       <div class="tableWrap" style="max-height: 260px; overflow:auto;">
@@ -1371,7 +1381,8 @@ tr.docRow:hover td{ background: rgba(10,132,255,.06); }
         </table>
       </div>
 
-      <div class="inlineRow" style="justify-content:flex-end;">
+      <div class="inlineRow" style="justify-content:space-between; margin-top: 12px;">
+        <button class="btn btn-danger" id="btnSupDelete" type="button">Elimina fornitore</button>
         <button class="btn btn-primary" id="btnSupDone" type="button">Chiudi</button>
       </div>
     </div>
@@ -1472,8 +1483,8 @@ tr.docRow:hover td{ background: rgba(10,132,255,.06); }
      ****************************************************************/
     import { initializeApp } from "https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js";
     import { getAuth, GoogleAuthProvider, signInWithPopup, signInWithRedirect, getRedirectResult, signOut, onAuthStateChanged, setPersistence, browserLocalPersistence } from "https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js";
-    import { initializeFirestore, collection, doc, setDoc, addDoc, deleteDoc, onSnapshot, query, orderBy, serverTimestamp } from "https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js";
-    import { getStorage, ref as sRef, uploadBytes, getDownloadURL } from "https://www.gstatic.com/firebasejs/12.7.0/firebase-storage.js";
+    import { initializeFirestore, collection, doc, setDoc, addDoc, deleteDoc, onSnapshot, query, orderBy, serverTimestamp, getDocs } from "https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js";
+    import { getStorage, ref as sRef, uploadBytes, getDownloadURL, deleteObject } from "https://www.gstatic.com/firebasejs/12.7.0/firebase-storage.js";
 
     // 🔧 INCOLLA QUI la config del tuo progetto Firebase (Console > Project settings)
     const FIREBASE_CONFIG = {
@@ -1540,10 +1551,11 @@ tr.docRow:hover td{ background: rgba(10,132,255,.06); }
     const supDocsTbody = document.getElementById("supDocsTbody");
     const supClose = document.getElementById("supClose");
     const btnSupDone = document.getElementById("btnSupDone");
-    const supDocInput = document.getElementById("supDocInput");
-    const btnSupUpload = document.getElementById("btnSupUpload");
-
-    // Product modal
+    const btnSupDelete = document.getElementById("btnSupDelete");
+    const btnSupEdit = document.getElementById("btnSupEdit");
+    const btnSupSave = document.getElementById("btnSupSave");
+    const btnSupCancelEdit = document.getElementById("btnSupCancelEdit");
+// Product modal
     const modalProduct = document.getElementById("modalProduct");
     const prodTitle = document.getElementById("prodTitle");
     const prodFields = document.getElementById("prodFields");
@@ -2050,22 +2062,11 @@ btnLogout.addEventListener("click", async () => {
     }
 
     function watchSupplierDocs(supplierId) {
-      if (!fb.db) return;
+      // Legacy: prima erano "allegati" su Firestore. Ora la lista documenti del fornitore
+      // è derivata dai DDT / documenti caricati (OCR) e si aggiorna via renderAll().
       try { fb.unsub.supplierDocs && fb.unsub.supplierDocs(); } catch {}
       fb.unsub.supplierDocs = null;
-
-      const docsCol = collection(fb.db, "orgs", ORG_ID, "suppliers", supplierId, "documents");
-      fb.unsub.supplierDocs = onSnapshot(
-        query(docsCol, orderBy("uploadedAt", "desc")),
-        (snap) => {
-          const docs = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-          renderSupplierDocs(docs);
-        },
-        (err) => {
-          console.warn("supplier docs watch error", err);
-          renderSupplierDocs([]);
-        }
-      );
+      renderSupplierLinkedDocs();
     }
 
 
@@ -3234,6 +3235,11 @@ function renderAll() {
       rebuildDocGroupsCache();
       renderMovementsTable();
       renderFlowsTable();
+
+      // Se la vista dettaglio fornitore è aperta, aggiorna i documenti collegati (DDT / OCR)
+      if (modalSupplier && modalSupplier.classList.contains("open")) {
+        try { renderSupplierLinkedDocs(); } catch {}
+      }
     }
 
     
@@ -3292,7 +3298,7 @@ function renderAll() {
             <td>${h(s.city || "")}</td>
             <td>${h(s.province || "")}</td>
             <td class="td-muted">${contacts || "<span class='td-muted'>—</span>"}</td>
-            <td><button class="btn btn-ghost" type="button" data-action="supplierDocs" data-id="${h(s.id)}">Documenti</button></td>
+            <td class="td-actions"><div class="inlineRow" style="justify-content:flex-end; gap:8px;"><button class="btn btn-ghost btn-xs" type="button" data-action="supplierDocs" data-id="${h(s.id)}">Documenti</button><button class="btn btn-danger btn-xs" type="button" data-action="deleteSupplier" data-id="${h(s.id)}">Elimina</button></div></td>
           </tr>
         `;
       }).join("");
@@ -3300,113 +3306,433 @@ function renderAll() {
       anagTbody.innerHTML = rows;
     }
 
-    function openSupplierModal(id) {
+    
+// ===== Fornitore: modalità Edit + Salva (senza staccare i documenti collegati) =====
+let __supEditMode = false;
+let __supEditSnapshot = null;
+let __supSaving = false;
+
+const __SUP_EDIT_FIELDS = [
+  { k: "name", label: "Nome / Ragione sociale", spanAll: true, required: true },
+  { k: "code", label: "Codice", spanAll: false },
+  { k: "vat", label: "P.IVA", spanAll: false },
+  { k: "fiscalCode", label: "Codice Fiscale", spanAll: false },
+  { k: "address", label: "Indirizzo", spanAll: true },
+  { k: "cap", label: "CAP", spanAll: false },
+  { k: "city", label: "Città", spanAll: false },
+  { k: "province", label: "Provincia", spanAll: false },
+  { k: "region", label: "Regione", spanAll: false },
+  { k: "country", label: "Nazione", spanAll: false },
+  { k: "phone", label: "Telefono", spanAll: false },
+  { k: "mobile", label: "Cellulare", spanAll: false },
+  { k: "email", label: "Email", spanAll: true },
+  { k: "pec", label: "PEC", spanAll: true },
+  { k: "homepage", label: "Home page", spanAll: true },
+  { k: "loginWeb", label: "Login web", spanAll: true },
+];
+
+function renderSupplierFieldsUI(sup, isEdit) {
+  if (!supFields) return;
+  const s = sup || {};
+  const cells = [];
+
+  for (const f of __SUP_EDIT_FIELDS) {
+    let v = "";
+    if (f.k === "code") v = String(s.code || "");
+    else v = String(s[f.k] || "");
+
+    const trimmed = String(v || "").trim();
+
+    // View mode: mostra solo i campi compilati (niente vuoti / niente placeholder)
+    if (!isEdit && !trimmed) continue;
+
+    const style = f.spanAll ? ' style="grid-column: 1 / -1;"' : "";
+    const label = `${h(f.label)}${(isEdit && f.required) ? " *" : ""}`;
+
+    if (isEdit) {
+      cells.push(`
+        <div class="field"${style}>
+          <label>${label}</label>
+          <input id="supEdit_${h(f.k)}" value="${h(v || "")}" ${f.required ? 'required' : ''} />
+        </div>
+      `);
+    } else {
+      cells.push(`
+        <div class="kv"${style}>
+          <div class="k">${h(f.label)}</div>
+          <div class="v">${h(trimmed)}</div>
+        </div>
+      `);
+    }
+  }
+
+  if (!cells.length && !isEdit) {
+    supFields.innerHTML = `<div class="td-muted" style="padding: 6px 0;">Nessun dettaglio disponibile.</div>`;
+    return;
+  }
+
+  supFields.innerHTML = cells.join("");
+}
+
+function setSupplierEditMode(on) {
+  const sup = getSupplierByIdLocal(currentSupplierId);
+  if (!sup) return;
+
+  __supEditMode = !!on;
+
+  // toggle buttons
+  try { if (btnSupEdit) btnSupEdit.style.display = __supEditMode ? "none" : "inline-flex"; } catch {}
+  try { if (btnSupSave) btnSupSave.style.display = __supEditMode ? "inline-flex" : "none"; } catch {}
+  try { if (btnSupCancelEdit) btnSupCancelEdit.style.display = __supEditMode ? "inline-flex" : "none"; } catch {}
+
+  // snapshot only when entering edit
+  if (__supEditMode) {
+    __supEditSnapshot = JSON.parse(JSON.stringify(sup || {}));
+  }
+
+  // title/sub
+  try { supTitle.textContent = sup.name || "Fornitore"; } catch {}
+  try {
+    const _code = String(sup.code || sup.id || "").trim();
+    const _loc = [sup.city, sup.province].filter(x => String(x || "").trim()).join(" ").trim();
+    const _parts = [];
+    if (_code) _parts.push(`Codice: ${_code}`);
+    if (_loc) _parts.push(_loc);
+    supSub.textContent = _parts.join(" • ");
+  } catch {}
+
+  renderSupplierFieldsUI(sup, __supEditMode);
+
+  if (__supEditMode) {
+    try { document.getElementById("supEdit_name")?.focus(); } catch {}
+  }
+}
+
+function __readSupplierEditDraft() {
+  const out = {};
+  for (const f of __SUP_EDIT_FIELDS) {
+    const el = document.getElementById("supEdit_" + f.k);
+    out[f.k] = (el && typeof el.value === "string") ? el.value.trim() : "";
+  }
+  return out;
+}
+
+function __mergeSupplierSearchKeepingHistory(currentSup, snapshotSup, nextSup) {
+  const prev = Array.isArray(currentSup?.search) ? currentSup.search : [];
+  const extras = [
+    currentSup?.name, currentSup?.vat, currentSup?.code,
+    snapshotSup?.name, snapshotSup?.vat, snapshotSup?.code,
+    nextSup?.name, nextSup?.vat, nextSup?.code
+  ].filter(Boolean);
+
+  const all = prev.concat(extras);
+  const merged = [];
+  const seen = new Set();
+  for (const x of all) {
+    const v = String(x || "").trim();
+    if (!v) continue;
+    const key = v.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(v);
+  }
+  return merged.slice(0, 50);
+}
+
+async function saveSupplierEdits() {
+  if (__supSaving) return;
+  if (!fb.user || !fb.db) return openModal("Accesso richiesto", "Accedi con Google per modificare l’anagrafica.");
+
+  const sid = String(currentSupplierId || "");
+  if (!sid) return;
+
+  const currentSup = getSupplierByIdLocal(sid);
+  if (!currentSup) return;
+
+  const draft = __readSupplierEditDraft();
+
+  const name = (typeof __sup_normSpaces === "function") ? __sup_normSpaces(draft.name) : String(draft.name || "").trim();
+  if (!name) {
+    openModal("Nome mancante", "Inserisci il nome / ragione sociale del fornitore.");
+    return;
+  }
+
+  // Normalizzazioni soft (non aggressive)
+  const clean = (v) => (typeof __sup_normSpaces === "function") ? __sup_normSpaces(v) : String(v || "").trim();
+
+  const vatNorm = (typeof __sup_cleanVat === "function") ? __sup_cleanVat(draft.vat) : clean(draft.vat).toUpperCase();
+  const cfNorm  = (typeof __sup_cleanFiscalCode === "function") ? __sup_cleanFiscalCode(draft.fiscalCode) : clean(draft.fiscalCode).toUpperCase();
+
+  const patch = {
+    name,
+    nameLower: name.toLowerCase(),
+    code: clean(draft.code),
+    vat: vatNorm || "",
+    fiscalCode: cfNorm || "",
+    address: clean(draft.address),
+    cap: clean(draft.cap),
+    city: (typeof __sup_titleCase === "function") ? __sup_titleCase(clean(draft.city)) : clean(draft.city),
+    province: clean(draft.province).toUpperCase(),
+    region: (typeof __sup_titleCase === "function") ? __sup_titleCase(clean(draft.region)) : clean(draft.region),
+    country: clean(draft.country).toUpperCase(),
+    phone: clean(draft.phone),
+    mobile: clean(draft.mobile),
+    email: clean(draft.email),
+    pec: clean(draft.pec),
+    homepage: clean(draft.homepage),
+    loginWeb: clean(draft.loginWeb),
+    updatedAt: serverTimestamp(),
+    updatedBy: fb.user.email || fb.user.uid,
+    lastSource: "Manual"
+  };
+
+  // Regola critica: non "staccare" i documenti già collegati.
+  // Manteniamo in `search` anche i valori precedenti (nome/PIVA/codice), così il matching resta valido.
+  patch.search = __mergeSupplierSearchKeepingHistory(currentSup, __supEditSnapshot || {}, patch);
+
+  __supSaving = true;
+  try {
+    if (btnSupSave) btnSupSave.disabled = true;
+
+    await setDoc(doc(fb.db, "orgs", ORG_ID, "suppliers", sid), patch, { merge: true });
+
+    // UI immediata (oltre al realtime snapshot)
+    const localPatch = { ...patch };
+    delete localPatch.updatedAt;
+    localPatch.updatedAtIso = new Date().toISOString();
+
+    suppliers = (suppliers || []).map(x => (String(x.id) === sid ? { ...x, ...localPatch } : x));
+    renderAnag();
+
+    // refresh modal header + fields
+    try { supTitle.textContent = patch.name || "Fornitore"; } catch {}
+    try { supSub.textContent = `Codice: ${patch.code || sid || "—"} • ${patch.city || ""} ${patch.province || ""}`.trim(); } catch {}
+    renderSupplierFieldsUI(getSupplierByIdLocal(sid) || { id: sid, ...localPatch }, false);
+
+    // docs list should keep working (match via search storico)
+    try { renderSupplierLinkedDocs(); } catch {}
+
+    setSupplierEditMode(false);
+    showToast("Fornitore aggiornato");
+  } catch (e) {
+    console.error("saveSupplierEdits failed", e);
+    openModal("Errore", "Non sono riuscito a salvare le modifiche.");
+  } finally {
+    __supSaving = false;
+    try { if (btnSupSave) btnSupSave.disabled = false; } catch {}
+  }
+}
+
+
+
+function openSupplierModal(id) {
       if (!modalSupplier) return;
       const s = suppliers.find(x => x.id === id) || suppliers.find(x => String(x.code) === String(id));
       if (!s) return;
 
       currentSupplierId = s.id;
+
+      // reset edit mode/UI
+      __supEditMode = false;
+      __supEditSnapshot = null;
+      try { if (btnSupEdit) btnSupEdit.style.display = "inline-flex"; } catch {}
+      try { if (btnSupSave) btnSupSave.style.display = "none"; } catch {}
+      try { if (btnSupCancelEdit) btnSupCancelEdit.style.display = "none"; } catch {}
+
       supTitle.textContent = s.name || "Fornitore";
       supSub.textContent = `Codice: ${s.code || s.id || "—"} • ${s.city || ""} ${s.province || ""}`.trim();
 
-      const pairs = [
-        ["Codice", s.code || s.id || ""],
-        ["P.IVA", s.vat || ""],
-        ["Codice Fiscale", s.fiscalCode || ""],
-        ["Indirizzo", s.address || ""],
-        ["CAP", s.cap || ""],
-        ["Città", s.city || ""],
-        ["Provincia", s.province || ""],
-        ["Regione", s.region || ""],
-        ["Nazione", s.country || ""],
-        ["Telefono", s.phone || ""],
-        ["Cellulare", s.mobile || ""],
-        ["Email", s.email || ""],
-        ["PEC", s.pec || ""],
-        ["Home page", s.homepage || ""],
-        ["Login web", s.loginWeb || ""]
-      ];
-
-      supFields.innerHTML = pairs.map(([k,v]) => `
-        <div class="field">
-          <label>${h(k)}</label>
-          <input value="${h(v || "")}" readonly />
-        </div>
-      `).join("");
+      // View: mostra solo campi compilati
+      renderSupplierFieldsUI(s, false);
 
       // docs
       supDocsTbody.innerHTML = `<tr><td class="td-muted" colspan="4">Caricamento…</td></tr>`;
       modalSupplier.classList.add("open");
-      watchSupplierDocs(currentSupplierId);
+      renderSupplierLinkedDocs();
     }
 
-    function closeSupplierModal() {
+    
+function closeSupplierModal() {
       if (!modalSupplier) return;
       modalSupplier.classList.remove("open");
       currentSupplierId = null;
+
+      // reset edit mode
+      __supEditMode = false;
+      __supEditSnapshot = null;
+      try { if (btnSupEdit) btnSupEdit.style.display = "inline-flex"; } catch {}
+      try { if (btnSupSave) btnSupSave.style.display = "none"; } catch {}
+      try { if (btnSupCancelEdit) btnSupCancelEdit.style.display = "none"; } catch {}
+
       try { fb.unsub.supplierDocs && fb.unsub.supplierDocs(); } catch {}
       fb.unsub.supplierDocs = null;
     }
 
-    function renderSupplierDocs(docs) {
+    function normSupplierKey(v) {
+      return String(v || "")
+        .toLowerCase()
+        .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+        .replace(/[^a-z0-9]+/g, " ")
+        .trim()
+        .replace(/\s+/g, " ");
+    }
+
+    function supplierMatchesCustomer(sup, customerName) {
+      const c = normSupplierKey(customerName);
+      if (!c) return false;
+
+      const candidates = []
+        .concat(sup?.name || "")
+        .concat(sup?.code || "")
+        .concat(sup?.vat || "")
+        .concat(Array.isArray(sup?.search) ? sup.search : [])
+        .filter(Boolean)
+        .map(normSupplierKey);
+
+      if (candidates.includes(c)) return true;
+
+      // token containment (tollerante a "SRL", punteggiatura, spazi)
+      const cTok = new Set(c.split(" ").filter(Boolean));
+      for (const cand of candidates) {
+        const t = cand.split(" ").filter(Boolean);
+        if (t.length >= 2 && t.every(w => cTok.has(w))) return true;
+        if (t.length === 1 && t[0] && t[0].length >= 5 && c.includes(t[0])) return true;
+      }
+      return false;
+    }
+
+    function getSupplierByIdLocal(id) {
+      const sid = String(id || "");
+      return (suppliers || []).find(x => String(x.id) === sid) || null;
+    }
+
+    function renderSupplierLinkedDocs() {
       if (!supDocsTbody) return;
-      if (!docs || !docs.length) {
-        supDocsTbody.innerHTML = `<tr><td class="td-muted" colspan="4">Nessun documento.</td></tr>`;
+
+      const sup = getSupplierByIdLocal(currentSupplierId);
+      if (!sup) {
+        supDocsTbody.innerHTML = `<tr><td class="td-muted" colspan="4">Fornitore non trovato.</td></tr>`;
         return;
       }
-      const rows = docs.slice(0, 100).map(d => {
-        const iso = tsToIso(d.uploadedAt) || d.uploadedAtIso || "";
-        const day = iso ? new Date(iso).toLocaleDateString("it-IT") : "—";
-        const url = d.url || "";
+
+      const docs = (__docGroups || []).filter(g => supplierMatchesCustomer(sup, g.customer));
+      if (!docs.length) {
+        supDocsTbody.innerHTML = `<tr><td class="td-muted" colspan="4">Nessun documento collegato a questo fornitore.</td></tr>`;
+        return;
+      }
+
+      const rows = docs.slice(0, 200).map(g => {
+        const label = formatDocLabel(g);
+        const day = formatDateOnlyIT(g.date) || "—";
+        const noteTxt = String(g.note || "").trim();
+        const lines = safeInt((g.movements || []).length);
+        const pieces = (g.movements || []).reduce((sum, mv) => sum + safeInt(mv.qty), 0);
+
+        const noteHtml = noteTxt ? `<div>${h(noteTxt)}</div>` : "";
+        const metaHtml = `<div class="td-muted">Righe: ${h(lines.toLocaleString("it-IT"))} · Pezzi: ${h(pieces.toLocaleString("it-IT"))}</div>`;
+
         return `
-          <tr>
+          <tr class="docRow" data-dockey="${escapeHtmlAttr(g.key)}" title="Apri dettaglio">
             <td>${h(day)}</td>
-            <td><strong>${h(d.fileName || d.name || "Documento")}</strong></td>
-            <td class="td-muted">${h(d.note || "")}</td>
-            <td>${url ? `<a class="btn btn-ghost" href="${h(url)}" target="_blank" rel="noreferrer" style="display:inline-flex; padding:8px 10px;">Apri</a>` : "<span class='td-muted'>—</span>"}</td>
+            <td><strong>${h(label)}</strong></td>
+            <td class="td-muted">${noteHtml}${metaHtml}</td>
+            <td><button class="btn btn-ghost btn-xs" type="button" data-open-doc="${escapeHtmlAttr(g.key)}">Apri</button></td>
           </tr>
         `;
       }).join("");
+
       supDocsTbody.innerHTML = rows;
     }
 
-    async function uploadSupplierDoc(file) {
-      if (!file) return;
-      if (!fb.user || !fb.db || !fb.storage) return openModal("Accesso richiesto", "Accedi con Google per caricare documenti.");
-      if (!currentSupplierId) return;
+// ===== Fornitore: eliminazione con cascata documenti (DDT/OCR) =====
+let __deletingSupplier = false;
 
-      try {
-        btnSupUpload.disabled = true;
-        btnSupUpload.textContent = "Caricamento…";
+async function __deleteLegacySupplierAttachments(supplierId){
+  // Best effort: elimina eventuali allegati legacy in /suppliers/{id}/documents (se esistono),
+  // inclusi i file su Storage quando c'è storagePath.
+  if (!fb.user || !fb.db) return;
+  try{
+    const colRef = collection(fb.db, "orgs", ORG_ID, "suppliers", String(supplierId), "documents");
+    const snap = await getDocs(colRef);
+    if (!snap || !snap.docs || snap.docs.length === 0) return;
 
-        const safeName = file.name.replace(/[^a-zA-Z0-9._-]+/g, "_");
-        const path = `orgs/${ORG_ID}/suppliers/${currentSupplierId}/${Date.now()}_${safeName}`;
-        const storageRef = sRef(fb.storage, path);
-
-        await uploadBytes(storageRef, file, { contentType: file.type || "application/octet-stream" });
-        const url = await getDownloadURL(storageRef);
-
-        const docsCol = collection(fb.db, "orgs", ORG_ID, "suppliers", currentSupplierId, "documents");
-        await addDoc(docsCol, {
-          fileName: file.name,
-          url,
-          storagePath: path,
-          size: file.size || 0,
-          contentType: file.type || "",
-          note: "",
-          uploadedAt: serverTimestamp(),
-          uploadedBy: fb.user.email || fb.user.uid
-        });
-
-        showToast("Documento caricato");
-        supDocInput.value = "";
-      } catch (e) {
-        console.error("uploadSupplierDoc failed", e);
-        openModal("Upload fallito", "Non sono riuscito a caricare il documento. Controlla permessi Storage/Firestore.");
-      } finally {
-        btnSupUpload.disabled = false;
-        btnSupUpload.textContent = "Carica documento";
+    await Promise.all(snap.docs.map(async (d) => {
+      const data = d.data ? (d.data() || {}) : {};
+      const storagePath = String(data.storagePath || "");
+      try { await deleteDoc(d.ref); } catch(e){ console.warn("delete legacy doc ref failed", e); }
+      if (storagePath && fb.storage) {
+        try { await deleteObject(sRef(fb.storage, storagePath)); } catch(e){ /* ignore */ }
       }
+    }));
+  }catch(e){
+    console.warn("__deleteLegacySupplierAttachments warning", e);
+  }
+}
+
+async function deleteSupplierCascade(supplierId){
+  const sid = String(supplierId || "");
+  if (!sid) return;
+
+  if (__deletingSupplier) return;
+  if (!fb.user || !fb.db) {
+    openModal("Accesso richiesto", "Accedi con Google per eliminare un fornitore.");
+    return;
+  }
+
+  const sup = getSupplierByIdLocal(sid);
+  if (!sup) { showToast("Fornitore non trovato"); return; }
+
+  // aggiorna cache documenti per coerenza
+  try { rebuildDocGroupsCache(); } catch(_){ }
+
+  // Documenti collegati = stessi che vedi in dettaglio fornitore (derivati dai DDT/OCR)
+  const linkedDocs = (__docGroups || []).filter(g => supplierMatchesCustomer(sup, g.customer));
+
+  const idSet = new Set();
+  linkedDocs.forEach(g => (g.movements || []).forEach(mv => { if (mv && mv.id) idSet.add(mv.id); }));
+  const ids = Array.from(idSet);
+
+  const labelName = (sup.name || "Fornitore");
+  const nDocs = linkedDocs.length;
+  const nRows = ids.length;
+
+  const ok = confirm(
+    `Eliminare il fornitore?\n\n${labelName}\n\nRegola critica: verranno eliminati anche tutti i documenti associati (cascata).\nDocumenti: ${nDocs}\nRighe: ${nRows}`
+  );
+  if (!ok) return;
+
+  __deletingSupplier = true;
+
+  // UI: prevenzione doppio click
+  try { if (btnSupDelete) btnSupDelete.disabled = true; } catch(_){}
+  try { closeDocDetail(); } catch(_){}
+
+  try{
+    // 1) Elimina movimenti/documenti (DDT/OCR) collegati
+    if (ids.length) {
+      await deleteMovementsBulk(ids);
+    }
+
+    // 2) Elimina eventuali allegati legacy (best effort)
+    await __deleteLegacySupplierAttachments(sid);
+
+    // 3) Elimina fornitore
+    await deleteDoc(doc(fb.db, "orgs", ORG_ID, "suppliers", sid));
+
+    // UI immediata (oltre al realtime snapshot)
+    suppliers = (suppliers || []).filter(x => String(x.id) !== sid);
+    renderAnag();
+
+    if (currentSupplierId === sid) closeSupplierModal();
+    showToast("Fornitore eliminato");
+  }catch(e){
+    console.error("deleteSupplierCascade failed", e);
+    openModal("Errore", "Non sono riuscito a eliminare il fornitore.");
+  }finally{
+    __deletingSupplier = false;
+    try { if (btnSupDelete) btnSupDelete.disabled = false; } catch(_){}
+  }
+}
     }
 
     function openProductModal(id) {
@@ -3798,14 +4124,23 @@ function renderAll() {
     // Supplier modal
     if (supClose) supClose.addEventListener("click", closeSupplierModal);
     if (btnSupDone) btnSupDone.addEventListener("click", closeSupplierModal);
-    if (btnSupUpload) btnSupUpload.addEventListener("click", () => {
-      if (!fb.user) return openModal("Accesso richiesto", "Accedi con Google per caricare documenti.");
-      if (!currentSupplierId) return;
-      supDocInput.click();
-    });
-    if (supDocInput) supDocInput.addEventListener("change", (e) => uploadSupplierDoc(e.target.files?.[0]));
+    if (btnSupDelete) btnSupDelete.addEventListener("click", () => { if (currentSupplierId) deleteSupplierCascade(currentSupplierId); });
 
-    // Product modal
+    // Edit / Salva
+    if (btnSupEdit) btnSupEdit.addEventListener("click", () => { try { setSupplierEditMode(true); } catch(e){ console.warn(e); } });
+    if (btnSupCancelEdit) btnSupCancelEdit.addEventListener("click", () => { try { setSupplierEditMode(false); } catch(e){ console.warn(e); } });
+    if (btnSupSave) btnSupSave.addEventListener("click", () => { try { saveSupplierEdits(); } catch(e){ console.warn(e); } });
+    if (supDocsTbody) supDocsTbody.addEventListener("click", (e) => {
+      const btn = e.target.closest('button[data-open-doc]');
+      const tr = e.target.closest('tr[data-dockey]');
+      const key = (btn && btn.getAttribute("data-open-doc")) || (tr && tr.getAttribute("data-dockey")) || "";
+      if (key) {
+        e.preventDefault();
+        e.stopPropagation();
+        openDocDetail(key);
+      }
+    });
+// Product modal
     if (prodClose) prodClose.addEventListener("click", () => modalProduct.classList.remove("open"));
     if (btnProdDone) btnProdDone.addEventListener("click", () => modalProduct.classList.remove("open"));
 
@@ -3817,8 +4152,8 @@ function renderAll() {
         const action = btn.getAttribute("data-action");
         const id = btn.getAttribute("data-id");
         if (!action || !id) return;
-
-        if (action === "supplierDocs") openSupplierModal(id);
+        if (action === "supplierDocs") { openSupplierModal(id); return; }
+        if (action === "deleteSupplier") { deleteSupplierCascade(id); return; }
 });
     }
 
@@ -3959,6 +4294,107 @@ function renderAll() {
     function __sup_looksLikeCompany(v){
       const s = String(v || "");
       return /\b(srl|s\.r\.l\.|spa|s\.p\.a\.|sas|snc|societ[aà]|coop|cooperativa|ditta)\b/i.test(s);
+    }
+
+
+    // ===== Phone helpers (OCR supplier) =====
+    function __sup_phoneDigits(v){
+      return String(v || "").replace(/[^\d]/g,"");
+    }
+
+    function __sup_cleanPhone(v){
+      const raw = String(v || "").trim();
+      if (!raw) return "";
+      // keep the first phone-like chunk
+      const m = raw.match(/(\+?\d[\d\s().\/-]{6,}\d)/);
+      let s = (m && m[1]) ? m[1] : raw;
+
+      // Normalize spaces
+      s = String(s || "").replace(/\s+/g," ").trim();
+      const compact = s.replace(/\s+/g,"");
+
+      // If international format 00xx -> +xx
+      if (/^00\d{6,}/.test(compact)){
+        const d = compact.replace(/[^\d]/g,"").replace(/^00/,"");
+        return d ? ("+" + d) : "";
+      }
+
+      // If +xx keep plus
+      if (/^\+\d{6,}/.test(compact)){
+        const d = compact.replace(/[^\d]/g,"");
+        return d ? ("+" + d) : "";
+      }
+
+      // Default: digits only
+      const digits = compact.replace(/[^\d]/g,"");
+      return digits || "";
+    }
+
+    function __sup_isLikelyPhone(v, vat){
+      const digits = __sup_phoneDigits(v);
+      if (!digits) return false;
+      if (digits.length < 8 || digits.length > 13) return false;
+      if (/^0{8,}$/.test(digits)) return false;
+
+      const vatDigits = __sup_phoneDigits(vat || "");
+      if (vatDigits && digits === vatDigits) return false;
+
+      return true;
+    }
+
+    function __sup_extractPhonesFromText(rawText, vat){
+      const t = String(rawText || "").replace(/\r/g,"");
+      const lines = t.split(/\n+/).map(x => String(x || "").trim()).filter(Boolean);
+
+      const candidates = [];
+      const push = (val, kind, labeled) => {
+        const cleaned = __sup_cleanPhone(val);
+        if (!cleaned) return;
+        if (!__sup_isLikelyPhone(cleaned, vat)) return;
+
+        const digits = __sup_phoneDigits(cleaned);
+        if (digits.length === 5) return; // CAP
+
+        let score = digits.length;
+        if (labeled) score += 10;
+        if (/^\+/.test(cleaned)) score += 2;
+        if (/[\s().\/-]/.test(String(val || ""))) score += 1;
+
+        candidates.push({ kind, cleaned, score });
+      };
+
+      const phoneLabel = /\b(tel(?:efono)?|telefono|phone)\b/i;
+      const mobLabel = /\b(cell(?:ulare)?|mobile)\b/i;
+
+      for (const line of lines){
+        // skip lines that clearly describe VAT
+        if (/\b(p\.?\s*iva|partita\s*iva|vat\s*(?:no\.?|number)?)\b/i.test(line)) continue;
+
+        const labeledPhone = phoneLabel.test(line);
+        const labeledMob = mobLabel.test(line);
+
+        if (labeledPhone || labeledMob){
+          const ms = line.match(/(\+?\d[\d\s().\/-]{6,}\d)/g) || [];
+          for (const m of ms){
+            push(m, labeledMob ? "mobile" : "phone", true);
+          }
+        }
+      }
+
+      // Generic +39 (often phone)
+      const plus39 = t.match(/(\+39[\d\s().\/-]{6,}\d)/g) || [];
+      for (const m of plus39) push(m, "phone", false);
+
+      // Generic Italian patterns
+      const generic = t.match(/\b(?:0\d{1,4}[\s.\/-]?\d{4,8}|3\d{2}[\s.\/-]?\d{6,8})\b/g) || [];
+      for (const m of generic) push(m, "phone", false);
+
+      const best = (kind) => {
+        const arr = candidates.filter(c => c.kind === kind).sort((a,b) => b.score - a.score);
+        return arr.length ? arr[0].cleaned : "";
+      };
+
+      return { phone: best("phone"), mobile: best("mobile") };
     }
 
     function __sup_parseAddressParts(text){
@@ -4108,6 +4544,10 @@ function renderAll() {
 
       const fromText = __sup_parseSupplierFromText(rawText || "");
 
+      const phones = __sup_extractPhonesFromText(rawText || "", structuredVat || fromText.vat || "");
+      const structuredPhone = __sup_cleanPhone(sup.phone || sup.telephone || sup.tel || sup.telefono || "");
+      const structuredMobile = __sup_cleanPhone(sup.mobile || sup.cell || sup.cellulare || "");
+
       // Name: prefer structured unless it clearly looks like an address / label
       let name = structuredName;
       if (!name || __sup_looksLikeAddress(name) || /\b(p\.?\s*iva|partita\s*iva)\b/i.test(name)) name = fromText.name || name;
@@ -4140,6 +4580,9 @@ function renderAll() {
       let address = __sup_normSpaces(parts.address || "");
       if (address && address.length > 140) address = address.slice(0, 140);
 
+      const phone = structuredPhone || phones.phone || "";
+      const mobile = structuredMobile || phones.mobile || "";
+
       return {
         name,
         vat,
@@ -4148,7 +4591,9 @@ function renderAll() {
         cap,
         city,
         province,
-        country
+        country,
+        phone,
+        mobile
       };
     }
 
@@ -4222,6 +4667,27 @@ function renderAll() {
         if (city) payload.city = __sup_titleCase(city);
         if (province) payload.province = province;
         if (country) payload.country = String(country).toUpperCase();
+
+
+        // Phone: non sovrascrivere valori esistenti con vuoti/inaffidabili
+        const phoneCand = __sup_cleanPhone(details.phone || details.telefono || details.tel || "");
+        const mobileCand = __sup_cleanPhone(details.mobile || details.cell || details.cellulare || "");
+        const existingPhone = __sup_cleanPhone(existing?.phone || existing?.telefono || "");
+        const existingMobile = __sup_cleanPhone(existing?.mobile || "");
+
+        if (phoneCand && __sup_isLikelyPhone(phoneCand, vatNorm)) {
+          if (!existingPhone || __sup_phoneDigits(existingPhone) === __sup_phoneDigits(phoneCand)) {
+            payload.phone = phoneCand;
+            // alias compatibilità
+            payload.telefono = phoneCand;
+          }
+        }
+
+        if (mobileCand && __sup_isLikelyPhone(mobileCand, vatNorm)) {
+          if (!existingMobile || __sup_phoneDigits(existingMobile) === __sup_phoneDigits(mobileCand)) {
+            payload.mobile = mobileCand;
+          }
+        }
 
         await setDoc(ref, payload, { merge: true });
       } catch (e) {
