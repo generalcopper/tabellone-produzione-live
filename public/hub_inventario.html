@@ -2235,24 +2235,38 @@ btnLogout.addEventListener("click", async () => {
       const g = __docGroupsMap.get(String(docKey || ""));
       if (!g) { showToast("Documento non trovato"); return; }
 
-      const linesMap = new Map();
-      let totalPieces = 0;
+      const rows = (g.movements || [])
+        .filter((mv) => {
+          const code = String(mv.code || "").trim();
+          const item = String(mv.item || "").trim();
+          if (!code && !item) return false;
+          if (__isConaiLine(code) || __isConaiLine(item) || __isConaiCode(code) || __isConaiCode(item)) return false;
+          return true;
+        })
+        .map((mv) => ({
+          code: String(mv.code || "").trim(),
+          item: String(mv.item || "").trim(),
+          qty: safeInt(mv.qty),
+          lineIndex: safeInt(mv.lineIndex),
+          createdAt: String(mv.createdAt || "")
+        }));
 
-      (g.movements || []).forEach((mv) => {
-        const code = String(mv.code || "").trim();
-        const item = String(mv.item || "").trim();
-        if (__isConaiLine(code) || __isConaiLine(item)) return;
+      const totalPieces = rows.reduce((sum, r) => sum + safeInt(r.qty), 0);
 
-        const lk = (code + "||" + item).toLowerCase();
-        const row = linesMap.get(lk) || { code, item, qty: 0 };
-        const q = safeInt(mv.qty);
-        row.qty += q;
-        totalPieces += q;
-        linesMap.set(lk, row);
+      rows.sort((a, b) => {
+        const ai = safeInt(a.lineIndex);
+        const bi = safeInt(b.lineIndex);
+        if (ai && bi && ai !== bi) return ai - bi;
+        if ((ai || bi) && ai !== bi) return (ai || 0) - (bi || 0);
+
+        const ca = String(a.createdAt || "");
+        const cb = String(b.createdAt || "");
+        if (ca && cb && ca !== cb) return ca.localeCompare(cb);
+
+        const cc = String(a.code || "").localeCompare(String(b.code || ""));
+        if (cc !== 0) return cc;
+        return String(a.item || "").localeCompare(String(b.item || ""));
       });
-
-      const rows = Array.from(linesMap.values())
-        .sort((a,b) => String(a.code || "").localeCompare(String(b.code || "")) || String(a.item || "").localeCompare(String(b.item || "")));
 
       if (docDetailTitle) docDetailTitle.textContent = formatDocLabel(g);
       if (docDetailSubtitle) {
@@ -2998,12 +3012,16 @@ function validateMovementFields(fields) {
 
     function extractDocNumber(note) {
       const s = String(note || "").toUpperCase();
-      // Prefer patterns tied to a DDT / document number
-      let m = s.match(/\b(?:DDT|D\.?D\.?T\.?|DOCUMENTO\s+DI\s+TRASPORTO)\b[^0-9]{0,12}(\d{1,10})\b/);
+
+      // Prefer patterns tied to a DDT / document number (keep suffixes like 123/2026)
+      let m = s.match(/\b(?:DDT|D\.?D\.?T\.?|DOCUMENTO\s+DI\s+TRASPORTO)\b[^0-9]{0,12}(\d{1,10}(?:[\/\-]\d{1,6})?)\b/);
       if (m && m[1]) return m[1];
-      m = s.match(/\b(?:N\.?|N°|NR\.?|NUM\.?|NUMERO)\s*[:\-]?\s*(\d{1,10})\b/);
+
+      m = s.match(/\b(?:N\.?|N°|NR\.?|NUM\.?|NUMERO)\s*[:\-]?\s*(\d{1,10}(?:[\/\-]\d{1,6})?)\b/);
       if (m && m[1]) return m[1];
-      m = s.match(/\b(\d{1,10})\b/);
+
+      // Fallback: take a "real-looking" number (avoid days like 01 in dates)
+      m = s.match(/\b(\d{3,10})\b/);
       return (m && m[1]) ? m[1] : "";
     }
 
@@ -3017,10 +3035,11 @@ function validateMovementFields(fields) {
         const isDocLike = (source.toUpperCase() === "OCR") || /\bDDT\b|DOCUMENTO|TRASPORTO|BOLLA|FATTURA/i.test(note);
         if (!isDocLike) return;
 
+        const docNumKey = String(mv.docNum || "").trim().toLowerCase();
         const key = [
           String(mv.customer || "").trim().toLowerCase(),
           String(mv.date || "").trim(),
-          note.toLowerCase(),
+          (docNumKey || note.toLowerCase()),
           source.toLowerCase()
         ].join("|");
 
@@ -3030,7 +3049,7 @@ function validateMovementFields(fields) {
           date: mv.date || "",
           note,
           source,
-          docNum: extractDocNumber(note),
+          docNum: (String(mv.docNum || "").trim() || extractDocNumber(note)),
           createdAtMax: "",
           movements: []
         };
@@ -3840,8 +3859,10 @@ function renderAll() {
 
         let ok = 0;
         let skip = 0;
+        let lineIndex = 0;
 
         for (const it of safeItems) {
+          lineIndex++;
           const rawCode = String(it.code || "").trim();
           const rawDesc = String(it.description || "").trim();
 
@@ -3861,6 +3882,10 @@ function renderAll() {
             qty: qtyStr,
             date: docDateISO,
             note: baseNote,
+            docType: String(docType || \"\"),
+            docNum: String(docNum || \"\"),
+            docDateRaw: String(docDateRaw || \"\"),
+            lineIndex: lineIndex,
             source: "OCR",
             rawText: capture.rawText
           });
