@@ -833,7 +833,7 @@ tbody td, thead th{
   </div>
   <div class="homeTileText">
     <div class="homeTileTitle">Anagrafica</div>
-    <div class="homeTileSub">Fornitori e prodotti</div>
+    <div class="homeTileSub">Fornitori</div>
   </div>
 </button>
 
@@ -1157,7 +1157,6 @@ tbody td, thead th{
               <div class="inlineRow" style="justify-content: space-between; align-items: flex-end;">
                 <div class="seg" aria-label="Anagrafica">
                   <button type="button" id="segSuppliers" class="active">Fornitori</button>
-                  <button type="button" id="segProducts">Prodotti</button>
                 </div>
                 <div class="inlineRow" style="justify-content:flex-end;">
                   <button class="btn btn-secondary" id="btnReloadAnag" type="button" title="Ricarica">Aggiorna</button>
@@ -1190,7 +1189,7 @@ tbody td, thead th{
               </div>
 
               <p class="hero-sub" style="margin-top: 10px;">
-                Fornitori e prodotti sono sincronizzati in tempo reale (Firebase).
+                I fornitori sono sincronizzati in tempo reale (Firebase).
               </p>
             </div>
           </article>
@@ -1597,6 +1596,7 @@ tbody td, thead th{
         const desc = (tr.dataset.desc || "").trim();
         const qty = (tr.dataset.qty || "").trim();
 
+        if (__isConaiCode(code) || __isConaiLine(code) || __isConaiLine(desc)) return;
         if (fCode) fCode.value = code;
         if (fItem) fItem.value = desc;
         if (fQty) fQty.value = qty;
@@ -2233,9 +2233,37 @@ btnLogout.addEventListener("click", async () => {
       return String(t || "").replace(/\r/g, "").trim();
     }
 
+// OCR filtering (CRITICO): ignora righe CONAI B1 / CONAI B2
+function __isConaiCode(v){
+  const s = String(v || "").toLowerCase().replace(/\s+/g, " ").trim();
+  return s === "conai b1" || s === "conai b2";
+}
+function __isConaiLine(v){
+  const s = String(v || "").toLowerCase().replace(/\s+/g, " ").trim();
+  if (!s) return false;
+  const hasConai = (s.includes("conai b1") || s.includes("conai b2"));
+  if (!hasConai) return false;
+  // regola richiesta: "codice articolo: CONAI B1/B2" (anche in varianti/spaziature)
+  const hasMarker = (s.includes("codice") && s.includes("articolo"));
+  return hasMarker || __isConaiCode(s);
+}
+function __isConaiItem(it){
+  if (!it) return false;
+  const code = String(it.code || "").toLowerCase().replace(/\s+/g, " ").trim();
+  const desc = String(it.description || "").toLowerCase().replace(/\s+/g, " ").trim();
+  if (__isConaiCode(code)) return true;
+  // alcune OCR mettono "codice articolo: CONAI B1 / CONAI B2" in descrizione/testo
+  if (__isConaiLine(code) || __isConaiLine(desc)) return true;
+  const merged = `${code} ${desc}`.trim();
+  if (!merged) return false;
+  // fallback prudente
+  if ((merged.includes("conai b1") || merged.includes("conai b2")) && (merged.includes("codice") && merged.includes("articolo"))) return true;
+  return false;
+}
+
     function extractFieldsFromText(text) {
       const t = normalizeText(text);
-      const lines = t.split(/\n+/).map(x => x.trim()).filter(Boolean);
+      const lines = t.split(/\n+/).map(x => x.trim()).filter(Boolean).filter(ln => !__isConaiLine(ln));
 
       const joined = lines.join(" \n ");
       const out = { customer: "", code: "", item: "", qty: "", date: "", note: "" };
@@ -2312,12 +2340,14 @@ btnLogout.addEventListener("click", async () => {
       const out = [];
       const lines = String(rawText || "").split(/\r?\n/).map(l => l.trim());
       for (const ln of lines){
+        if (__isConaiLine(ln)) continue;
         if (!ln.startsWith("-")) continue;
         const parts = ln.replace(/^\-\s*/, "").split(" | ").map(p => p.trim()).filter(Boolean);
         if (parts.length < 3) continue;
         const code = parts[0];
         const qtyPart = parts[1]; // es: "1.760,00 PZ"
         const desc = parts.slice(2).join(" | ");
+        if (__isConaiCode(code) || __isConaiLine(code) || __isConaiLine(desc)) continue;
         let uom = "";
         let qtyRaw = qtyPart;
         const uomMatch = qtyPart.match(/\b([A-Z]{1,4})\b\s*$/);
@@ -2379,6 +2409,8 @@ btnLogout.addEventListener("click", async () => {
 
       let items = Array.isArray(s.items) ? s.items.slice() : [];
       if (!items.length && rawText) items = parseItemsFromRawText(rawText);
+      // OCR filtering (CRITICO): ignora CONAI B1/B2
+      items = (items || []).filter(it => !__isConaiItem(it));
 
       const hasAny = !!(docType || docNumber || docDateRaw || (sup && sup.name) || items.length);
       if (!hasAny) return;
@@ -2839,34 +2871,24 @@ function validateMovementFields(fields) {
         "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
       }[ch]));
     }
-
     function renderAnag() {
       if (!anagTbody || !anagTheadRow) return;
 
+      // ✅ Solo Fornitori (nessuna altra categoria)
+      anagTheadRow.innerHTML = `
+        <th>Nome</th><th>P.IVA</th><th>Città</th><th>Prov.</th><th>Contatti</th><th>Azioni</th>
+      `;
+
       if (!fb.user) {
-        anagTheadRow.innerHTML = `
-          <th>Nome</th><th>P.IVA</th><th>Città</th><th>Prov.</th><th>Contatti</th><th>Azioni</th>
-        `;
-        anagTbody.innerHTML = `<tr><td class="td-muted" colspan="6">Accedi con Google per sincronizzare fornitori e prodotti.</td></tr>`;
+        anagTbody.innerHTML = `<tr><td class="td-muted" colspan="6">Accedi con Google per sincronizzare i fornitori.</td></tr>`;
         return;
       }
 
       const q = (searchAnag?.value || "").trim().toLowerCase();
-      const list = activeAnagTab === "products" ? products : suppliers;
-
-      if (activeAnagTab === "products") {
-        anagTheadRow.innerHTML = `
-          <th>Nome</th><th>Codice</th><th>Categoria</th><th>U.M.</th><th>Note</th><th>Azioni</th>
-        `;
-      } else {
-        anagTheadRow.innerHTML = `
-          <th>Nome</th><th>P.IVA</th><th>Città</th><th>Prov.</th><th>Contatti</th><th>Azioni</th>
-        `;
-      }
+      const list = Array.isArray(suppliers) ? suppliers : [];
 
       if (!list.length) {
-        const cols = activeAnagTab === "products" ? 6 : 6;
-        anagTbody.innerHTML = `<tr><td class="td-muted" colspan="${cols}">Nessun dato. (Importa in Firestore)</td></tr>`;
+        anagTbody.innerHTML = `<tr><td class="td-muted" colspan="6">Nessun fornitore. (Importa in Firestore)</td></tr>`;
         return;
       }
 
@@ -2882,43 +2904,25 @@ function validateMovementFields(fields) {
       });
 
       if (!filtered.length) {
-        const cols = 6;
-        anagTbody.innerHTML = `<tr><td class="td-muted" colspan="${cols}">Nessun risultato.</td></tr>`;
+        anagTbody.innerHTML = `<tr><td class="td-muted" colspan="6">Nessun risultato.</td></tr>`;
         return;
       }
 
-      // Render rows
-      if (activeAnagTab === "products") {
-        const rows = filtered.slice(0, 500).map(p => {
-          const note = (p.note || p.notes || "").toString();
-          return `
-            <tr>
-              <td><strong>${h(p.name || "")}</strong></td>
-              <td>${h(p.code || p.id || "")}</td>
-              <td>${h(p.category || "")}</td>
-              <td>${h(p.uom || "")}</td>
-              <td class="td-muted">${h(note)}</td>
-              <td><button class="btn btn-ghost" type="button" data-action="productView" data-id="${h(p.id)}">Apri</button></td>
-            </tr>
-          `;
-        }).join("");
-        anagTbody.innerHTML = rows;
-      } else {
-        const rows = filtered.slice(0, 500).map(s => {
-          const contacts = [s.phone, s.email, s.pec].filter(Boolean).map(x => h(x)).join("<br>");
-          return `
-            <tr>
-              <td><strong>${h(s.name || "")}</strong><div class="td-muted">${h(s.code || s.id || "")}</div></td>
-              <td>${h(s.vat || "")}</td>
-              <td>${h(s.city || "")}</td>
-              <td>${h(s.province || "")}</td>
-              <td class="td-muted">${contacts || "<span class='td-muted'>—</span>"}</td>
-              <td><button class="btn btn-ghost" type="button" data-action="supplierDocs" data-id="${h(s.id)}">Documenti</button></td>
-            </tr>
-          `;
-        }).join("");
-        anagTbody.innerHTML = rows;
-      }
+      const rows = filtered.slice(0, 500).map(s => {
+        const contacts = [s.phone, s.email, s.pec].filter(Boolean).map(x => h(x)).join("<br>");
+        return `
+          <tr>
+            <td><strong>${h(s.name || "")}</strong><div class="td-muted">${h(s.code || s.id || "")}</div></td>
+            <td>${h(s.vat || "")}</td>
+            <td>${h(s.city || "")}</td>
+            <td>${h(s.province || "")}</td>
+            <td class="td-muted">${contacts || "<span class='td-muted'>—</span>"}</td>
+            <td><button class="btn btn-ghost" type="button" data-action="supplierDocs" data-id="${h(s.id)}">Documenti</button></td>
+          </tr>
+        `;
+      }).join("");
+
+      anagTbody.innerHTML = rows;
     }
 
     function openSupplierModal(id) {
@@ -3136,7 +3140,15 @@ function validateMovementFields(fields) {
         ocrResult.value = capture.rawText;
 
         const structured = (data && data.structured) ? data.structured : null;
-        renderDocExtract(structured, capture.rawText);
+                renderDocExtract(structured, capture.rawText);
+
+        // Auto: salva/aggiorna anagrafica fornitore (best effort, con mappatura affidabile)
+        try {
+          const supDetails = buildSupplierFromOcr(structured, capture.rawText);
+          if (supDetails && supDetails.name) await ensureSupplierUpsert(supDetails);
+        } catch (e) {
+          console.warn("supplier OCR upsert skipped", e);
+        }
 
 
         progressFill.style.width = "100%";
@@ -3432,8 +3444,7 @@ function validateMovementFields(fields) {
         if (!action || !id) return;
 
         if (action === "supplierDocs") openSupplierModal(id);
-        if (action === "productView") openProductModal(id);
-      });
+});
     }
 
 
@@ -3441,6 +3452,7 @@ function validateMovementFields(fields) {
       // Import completo dal documento (multi-riga)
       const doc = __lastDocExtract || null;
       const items = (doc && Array.isArray(doc.__items)) ? doc.__items : ((doc && Array.isArray(doc.items)) ? doc.items : []);
+      const safeItems = (items || []).filter(it => !__isConaiItem(it));
 
       // Flusso OCR Home = solo CARICO
       capture.movementType = "IN";
@@ -3473,11 +3485,12 @@ function validateMovementFields(fields) {
         let ok = 0;
         let skip = 0;
 
-        for (const it of items) {
+        for (const it of safeItems) {
           const rawCode = String(it.code || "").trim();
           const rawDesc = String(it.description || "").trim();
 
           const code = (rawCode || rawDesc || "").trim();
+          if (__isConaiCode(code) || __isConaiLine(code) || __isConaiLine(rawDesc)) { skip++; continue; }
           const item = (rawDesc || rawCode || "").trim();
 
           const qtyStr = (it.qty != null && it.qty !== "" && !Number.isNaN(Number(it.qty)))
@@ -3513,33 +3526,321 @@ function validateMovementFields(fields) {
       }
     });
 
-    // Upsert anagrafica cliente (se manca) — best effort
-    async function ensureSupplierUpsert(name){
+        /****************************************************************
+     * Fornitori: mappatura affidabile da OCR (best effort)
+     ****************************************************************/
+    function __sup_normSpaces(s){
+      return String(s || "").replace(/\s+/g, " ").trim();
+    }
+
+    function __sup_titleCase(s){
+      const str = __sup_normSpaces(s);
+      if (!str) return "";
+      return str.toLowerCase().replace(/\b([a-zà-ÿ])([a-zà-ÿ]*)/g, (m,a,b) => a.toUpperCase() + b);
+    }
+
+    function __sup_cleanVat(v){
+      const raw = String(v || "").toUpperCase();
+      const compact = raw.replace(/\s+/g,"").replace(/[.\-]/g,"");
+      // Prefer IT VAT (11 digits)
+      const mIt = compact.match(/\b(?:IT)?(\d{11})\b/);
+      if (mIt) return mIt[1];
+      // Generic EU VAT (country + 8-14 alnum)
+      const mEu = compact.match(/\b([A-Z]{2}[A-Z0-9]{8,14})\b/);
+      if (mEu) return mEu[1];
+      return "";
+    }
+
+    function __sup_cleanFiscalCode(v){
+      const raw = String(v || "").toUpperCase();
+      const compact = raw.replace(/\s+/g,"").replace(/[^A-Z0-9]/g,"");
+      // Avoid mistaking VAT for CF
+      if (/^\d{11}$/.test(compact)) return "";
+      // Italian CF is 16 chars, but keep other formats if present
+      if (compact.length >= 8) return compact;
+      return "";
+    }
+
+    function __sup_isValidCap(v){
+      return /^\d{5}$/.test(String(v || "").trim());
+    }
+
+    function __sup_isValidProvince(v){
+      return /^[A-Z]{2}$/.test(String(v || "").trim().toUpperCase());
+    }
+
+    function __sup_looksLikeAddress(v){
+      const s = String(v || "");
+      if (!s) return false;
+      return /\b(via|viale|piazza|corso|strada|localit[aà]|loc\.|frazione|contrada|cap)\b/i.test(s) || /\b\d{5}\b/.test(s);
+    }
+
+    function __sup_looksLikeCompany(v){
+      const s = String(v || "");
+      return /\b(srl|s\.r\.l\.|spa|s\.p\.a\.|sas|snc|societ[aà]|coop|cooperativa|ditta)\b/i.test(s);
+    }
+
+    function __sup_parseAddressParts(text){
+      const s0 = String(text || "").replace(/\r/g," ").replace(/\n+/g," ").replace(/\s*\|\s*/g," ").trim();
+      const s = __sup_normSpaces(s0);
+      let cap = "", city = "", province = "", country = "";
+
+      // CAP + city + (PR)
+      let m = s.match(/\b(\d{5})\s+([A-ZÀ-Ü][A-ZÀ-Ü' \-]{1,})\s*\(([A-Z]{2})\)\b/i);
+      if (m){
+        cap = m[1];
+        city = __sup_titleCase(m[2]);
+        province = String(m[3] || "").toUpperCase();
+      } else {
+        // CAP + city (no province)
+        const m2 = s.match(/\b(\d{5})\s+([A-ZÀ-Ü][A-ZÀ-Ü' \-]{1,})\b/i);
+        if (m2){
+          cap = m2[1];
+          city = __sup_titleCase(String(m2[2]).split(/[,\-–]/)[0]);
+        }
+        const m3 = s.match(/\(([A-Z]{2})\)/);
+        if (m3) province = String(m3[1] || "").toUpperCase();
+      }
+
+      if (/\bitalia\b/i.test(s) || /\bIT\b/.test(s)) country = "IT";
+
+      // Street/address = everything before CAP (if CAP exists)
+      let address = s;
+      if (cap){
+        const idx = s.indexOf(cap);
+        if (idx > 0){
+          address = s.slice(0, idx).replace(/[,\-–]+$/,"").trim();
+        }
+      }
+
+      // Clean obvious junk
+      address = __sup_normSpaces(address);
+      if (/^\d{5}\b/.test(address)) address = "";
+      if (address && city && address.toLowerCase() === city.toLowerCase()) address = "";
+
+      // If we still have a full string with commas, keep only the first chunk as street
+      if (address && address.includes(",") && __sup_looksLikeAddress(address)){
+        address = address.split(",")[0].trim();
+      }
+
+      return { address, cap, city, province, country };
+    }
+
+    function __sup_parseSupplierFromText(rawText){
+      const t = String(rawText || "").replace(/\r/g,"").trim();
+      const lines = t.split(/\n+/).map(x => String(x || "").trim()).filter(Boolean);
+      const up = lines.map(l => l.toUpperCase());
+
+      const supplierKeys = ["CEDENTE", "PRESTATORE", "CEDENTE/PREST", "FORNITORE", "MITTENTE", "EMITTENTE", "VENDITORE"];
+      const buyerKeys = ["CESSIONARIO", "COMMITTENTE", "DESTINATARIO", "CLIENTE"];
+
+      let start = 0;
+      for (let i = 0; i < up.length; i++){
+        if (supplierKeys.some(k => up[i].includes(k))){
+          start = Math.min(up.length - 1, i + 1);
+          break;
+        }
+      }
+
+      let end = Math.min(lines.length, start + 18);
+      for (let i = start; i < up.length; i++){
+        if (buyerKeys.some(k => up[i].includes(k))){
+          end = i;
+          break;
+        }
+      }
+
+      const block = lines.slice(start, end);
+
+      // VAT
+      let vat = "";
+      const vatRe = /\b(?:P\.?\s*IVA|PARTITA\s*IVA|VAT)\b[^A-Z0-9]{0,12}(?:IT)?\s*([0-9]{11})\b/i;
+      for (const l of block){
+        const m = l.match(vatRe);
+        if (m){ vat = m[1]; break; }
+      }
+      if (!vat){
+        const m2 = t.match(vatRe);
+        if (m2) vat = m2[1];
+      }
+
+      // Name (best score)
+      const badNameRe = /\b(ddt|fattura|documento|trasporto|ordine|totale|pagamento)\b/i;
+      const labelRe = /\b(p\.?\s*iva|partita\s*iva|codice\s*fiscale|c\.?f\.?)\b/i;
+      const buyerRe = /^\s*(spett\.?le|destinatario|cliente)\b/i;
+
+      let best = "";
+      let bestScore = -1;
+      for (const l0 of block){
+        const l = __sup_normSpaces(l0);
+        if (!l || l.length < 3 || l.length > 80) continue;
+        if (buyerRe.test(l)) continue;
+        if (badNameRe.test(l)) continue;
+        if (labelRe.test(l)) continue;
+        if (/\b\d{5}\b/.test(l)) continue;
+        if (__sup_looksLikeAddress(l)) continue;
+
+        let score = 0;
+        if (__sup_looksLikeCompany(l)) score += 3;
+        if (/^[A-ZÀ-Ü0-9 '._-]+$/.test(l) && /[A-ZÀ-Ü]/.test(l)) score += 1; // uppercase-ish
+        if ((l.match(/[A-ZÀ-Üa-zà-ÿ]/g) || []).length >= 8) score += 1;
+        if ((l.match(/\d/g) || []).length === 0) score += 1;
+
+        if (score > bestScore){
+          bestScore = score;
+          best = l;
+        }
+      }
+
+      // Address: pick street + cap line if present
+      const streetKw = /\b(via|viale|piazza|corso|strada|localit[aà]|loc\.|frazione|contrada|v\.le|v\.)\b/i;
+      let streetLine = "";
+      let capLine = "";
+      for (const l of block){
+        if (!streetLine && streetKw.test(l)) streetLine = __sup_normSpaces(l);
+        if (!capLine && /\b\d{5}\b/.test(l)) capLine = __sup_normSpaces(l);
+      }
+      const addressRaw = __sup_normSpaces([streetLine, capLine].filter(Boolean).join(", "));
+
+      const parts = __sup_parseAddressParts(addressRaw || capLine || "");
+      return {
+        name: best || "",
+        vat: __sup_cleanVat(vat),
+        fiscalCode: "",
+        address: parts.address || "",
+        cap: parts.cap || "",
+        city: parts.city || "",
+        province: parts.province || "",
+        country: parts.country || "",
+        addressRaw: addressRaw || ""
+      };
+    }
+
+    function buildSupplierFromOcr(structured, rawText){
+      const s = (structured && typeof structured === "object") ? structured : {};
+      const sup = (s && s.supplier && typeof s.supplier === "object") ? s.supplier : {};
+
+      const structuredName = __sup_normSpaces(sup.name || "");
+      const structuredVat  = __sup_cleanVat(sup.vatNumber || sup.vat || sup.piva || "");
+      const structuredCF   = __sup_cleanFiscalCode(sup.taxCode || sup.fiscalCode || "");
+      const structuredAddr = String(sup.address || sup.fullAddress || "").trim();
+
+      const fromText = __sup_parseSupplierFromText(rawText || "");
+
+      // Name: prefer structured unless it clearly looks like an address / label
+      let name = structuredName;
+      if (!name || __sup_looksLikeAddress(name) || /\b(p\.?\s*iva|partita\s*iva)\b/i.test(name)) name = fromText.name || name;
+
+      // VAT: prefer valid structured, else from text
+      let vat = structuredVat || fromText.vat || "";
+
+      // Address parts: parse structured address; if weak/missing, fallback to text-derived
+      let parts = __sup_parseAddressParts(structuredAddr || "");
+      const weakParts = !(parts.address || parts.cap || parts.city || parts.province);
+      if (weakParts){
+        parts = __sup_parseAddressParts(fromText.addressRaw || fromText.address || "");
+      }
+
+      // Merge last-mile fields from text if still missing
+      if (!parts.cap && fromText.cap) parts.cap = fromText.cap;
+      if (!parts.city && fromText.city) parts.city = fromText.city;
+      if (!parts.province && fromText.province) parts.province = fromText.province;
+      if (!parts.country && fromText.country) parts.country = fromText.country;
+
+      // Final clean + validate
+      name = __sup_normSpaces(name);
+      if (name && name.length > 120) name = name.slice(0, 120);
+
+      const cap = __sup_isValidCap(parts.cap) ? parts.cap : "";
+      const province = __sup_isValidProvince(parts.province) ? String(parts.province).toUpperCase() : "";
+      const city = parts.city ? __sup_titleCase(parts.city) : "";
+      const country = parts.country ? String(parts.country).toUpperCase() : (province || cap ? "IT" : "");
+
+      let address = __sup_normSpaces(parts.address || "");
+      if (address && address.length > 140) address = address.slice(0, 140);
+
+      return {
+        name,
+        vat,
+        fiscalCode: structuredCF || fromText.fiscalCode || "",
+        address,
+        cap,
+        city,
+        province,
+        country
+      };
+    }
+
+    // Upsert anagrafica fornitore (se manca) — best effort
+    // Accetta sia stringa (nome) che oggetto con campi {name, vat, address, cap, city, province, ...}
+    async function ensureSupplierUpsert(input){
       try {
         if (!(fb.user && fb.db)) return;
 
-        const n = String(name || "").trim();
-        if (!n) return;
+        const details = (typeof input === "string") ? { name: input } : (input && typeof input === "object" ? input : {});
+        const name = __sup_normSpaces(details.name || "");
+        if (!name) return;
 
-        const nameLower = n.toLowerCase();
-        const already = (suppliers || []).some(s => {
-          const a = String(s.nameLower || "").toLowerCase();
-          const b = String(s.name || "").toLowerCase();
-          return a === nameLower || b === nameLower;
-        });
-        if (already) return;
+        const nameLower = name.toLowerCase();
+        const vatNorm = __sup_cleanVat(details.vat || details.vatNumber || details.piva || "");
+        const cfNorm  = __sup_cleanFiscalCode(details.fiscalCode || details.taxCode || details.cf || "");
 
-        const id = keyToDocId(nameLower);
-        const ref = doc(orgCol("suppliers"), id);
+        // Find existing supplier (prefer VAT match)
+        let existing = null;
+        if (vatNorm){
+          existing = (suppliers || []).find(s => __sup_cleanVat(s.vat || s.vatNumber || s.piva || "") === vatNorm) || null;
+        }
+        if (!existing){
+          existing = (suppliers || []).find(s => {
+            const a = String(s.nameLower || "").toLowerCase();
+            const b = String(s.name || "").toLowerCase();
+            return a === nameLower || b === nameLower;
+          }) || null;
+        }
+
+        // Doc id strategy: stable on VAT when possible, else on nameLower
+        let docId = "";
+        if (existing && existing.id) {
+          docId = existing.id;
+        } else if (vatNorm && /^\d{11}$/.test(vatNorm)) {
+          docId = keyToDocId("vat_" + vatNorm);
+        } else {
+          docId = keyToDocId(nameLower);
+        }
+
+        const ref = doc(orgCol("suppliers"), docId);
+
+        // Address / components
+        const parts = __sup_parseAddressParts(details.address || "");
+        const cap = __sup_isValidCap(details.cap) ? String(details.cap) : (parts.cap || "");
+        const city = __sup_normSpaces(details.city || parts.city || "");
+        const province = __sup_isValidProvince(details.province) ? String(details.province).toUpperCase() : (parts.province || "");
+        const country = __sup_normSpaces(details.country || parts.country || "");
 
         const payload = {
-          name: n,
+          name,
           nameLower,
-          createdAt: serverTimestamp(),
-          createdBy: fb.user.email || fb.user.uid,
           updatedAt: serverTimestamp(),
-          updatedBy: fb.user.email || fb.user.uid
+          updatedBy: fb.user.email || fb.user.uid,
+          lastSource: "OCR"
         };
+
+        if (!existing){
+          payload.createdAt = serverTimestamp();
+          payload.createdBy = fb.user.email || fb.user.uid;
+        }
+
+        // Only set fields if they look valid (anti-scambio campi)
+        if (vatNorm) payload.vat = vatNorm;
+        if (cfNorm) payload.fiscalCode = cfNorm;
+
+        const addr = __sup_normSpaces(details.address || parts.address || "");
+        if (addr && __sup_looksLikeAddress(addr)) payload.address = addr;
+
+        if (cap) payload.cap = cap;
+        if (city) payload.city = __sup_titleCase(city);
+        if (province) payload.province = province;
+        if (country) payload.country = String(country).toUpperCase();
 
         await setDoc(ref, payload, { merge: true });
       } catch (e) {
@@ -3547,18 +3848,19 @@ function validateMovementFields(fields) {
       }
     }
 
-    // Upsert prodotti (best effort)
+// Upsert prodotti (best effort)
     async function ensureProductsUpsert(items){
       try {
         if (!(fb.user && fb.db)) return;
         if (!Array.isArray(items) || !items.length) return;
 
         const seen = new Set();
-        for (const it of items) {
+        for (const it of safeItems) {
           const rawCode = String(it.code || "").trim();
           const rawDesc = String(it.description || "").trim();
           const code = (rawCode || rawDesc || "").trim();
           if (!code) continue;
+          if (__isConaiCode(code) || __isConaiLine(rawCode) || __isConaiLine(rawDesc)) continue;
 
           const key = code.toLowerCase();
           if (seen.has(key)) continue;
