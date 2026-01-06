@@ -140,6 +140,17 @@
       outline-offset: 2px;
     }
 
+
+/* Doc detail photos (pagine acquisite) */
+.docPhotosWrap{ margin-top: 10px; }
+.docPhotosHeader{ display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom: 10px; }
+.docPhotosGrid{ display:grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 10px; }
+.docPhoto{ position: relative; display:block; border-radius: 14px; overflow:hidden; border: 1px solid rgba(12,22,52,.10); background: rgba(255,255,255,.86); box-shadow: inset 0 1px 0 rgba(255,255,255,.7); }
+.docPhoto img{ width:100%; height:150px; object-fit: cover; display:block; }
+.docPhotoBadge{ position:absolute; top:8px; left:8px; background: rgba(10,132,255,.92); color:#fff; font-size: 11px; padding: 2px 6px; border-radius:999px; font-weight: 900; }
+@media (max-width: 420px){ .docPhoto img{ height: 120px; } }
+
+
     textarea { width: 100%; border-radius: 14px; border: 1px solid rgba(12,22,52,.08); background: rgba(255,255,255,.9); min-height: 120px; padding: 12px; font-size: 14px; font-weight: 800; color: var(--text); resize: vertical; box-shadow: inset 0 1px 0 rgba(255,255,255,.7); }
 
     .stack { display: grid; gap: 12px; }
@@ -1676,6 +1687,15 @@ td.td-actions{ white-space: normal !important; }
 
       <p id="docDetailSubtitle" class="hero-sub">—</p>
 
+
+<div id="docDetailPhotosWrap" class="docPhotosWrap" style="display:none;">
+  <div class="docPhotosHeader">
+    <div class="pill">Pagine acquisite</div>
+    <div id="docDetailPhotosMeta" class="td-muted"></div>
+  </div>
+  <div id="docDetailPhotosGrid" class="docPhotosGrid"></div>
+</div>
+
       <div class="tableWrap" style="max-height: 60vh; overflow:auto;">
         <table>
           <thead>
@@ -1831,6 +1851,10 @@ td.td-actions{ white-space: normal !important; }
     const docDetailSubtitle = document.getElementById("docDetailSubtitle");
     const docDetailTbody = document.getElementById("docDetailTbody");
     const docDetailTotals = document.getElementById("docDetailTotals");
+
+const docDetailPhotosWrap = document.getElementById("docDetailPhotosWrap");
+const docDetailPhotosGrid = document.getElementById("docDetailPhotosGrid");
+const docDetailPhotosMeta = document.getElementById("docDetailPhotosMeta");
     const btnCloseDocDetail = document.getElementById("btnCloseDocDetail");
     const btnCloseDocDetail2 = document.getElementById("btnCloseDocDetail2");
 
@@ -2346,6 +2370,11 @@ btnLogout.addEventListener("click", async () => {
               note: data.note || "",
               source: data.source || "Manual",
               rawText: data.rawText || "",
+              docType: data.docType || \"\",
+              docNum: data.docNum || \"\",
+              docDateRaw: data.docDateRaw || \"\",
+              lineIndex: safeInt(data.lineIndex),
+              docPages: __sanitizeDocPages(data.docPages || data.docImages),
               createdAt: tsToIso(data.createdAt) || data.createdAtIso || ""
             };
           });
@@ -2509,30 +2538,59 @@ function showToast(msg) {
       saveLocalData();
     }
 
-    async function deleteMovementsBulk(ids) {
-      const list = (Array.isArray(ids) ? ids : []).filter(Boolean);
-      if (!list.length) return;
+    
+async function deleteMovementsBulk(ids) {
+  const list = (Array.isArray(ids) ? ids : []).filter(Boolean);
+  if (!list.length) return;
 
-      // optimistic update (UI immediata)
-      const set = new Set(list);
-      state.movements = state.movements.filter(m => !set.has(m.id));
-      renderAll();
+  const set = new Set(list);
 
-      // realtime (Firestore)
-      if (fb.user && fb.db) {
-        await Promise.all(list.map(async (id) => {
-          try {
-            await deleteDoc(doc(fb.db, "orgs", ORG_ID, "inventoryMovements", id));
-          } catch (e) {
-            console.error("delete movement failed", id, e);
-          }
-        }));
-        return;
-      }
+  // Collect doc-pages paths grouped by documento (elimina foto solo se sparisce tutto il documento)
+  const deletedByDocKey = new Map(); // docKey -> Set(paths)
+  for (const mv of (state.movements || [])) {
+    if (!set.has(mv.id)) continue;
+    const dk = docKeyFromMovement(mv);
+    const pages = __sanitizeDocPages((mv && (mv.docPages || mv.docImages)) || []);
+    if (!pages.length) continue;
+    const s = deletedByDocKey.get(dk) || new Set();
+    pages.forEach(p => { if (p && p.path) s.add(String(p.path)); });
+    deletedByDocKey.set(dk, s);
+  }
 
-      // local fallback
-      saveLocalData();
+  // optimistic update (UI immediata)
+  state.movements = (state.movements || []).filter(m => !set.has(m.id));
+  renderAll();
+
+  // Which docs still exist after deletion?
+  const remainingDocKeys = new Set();
+  (state.movements || []).forEach(mv => {
+    try { remainingDocKeys.add(docKeyFromMovement(mv)); } catch {}
+  });
+
+  const pathsToDelete = new Set();
+  deletedByDocKey.forEach((paths, dk) => {
+    if (!remainingDocKeys.has(dk)) {
+      paths.forEach(p => pathsToDelete.add(p));
     }
+  });
+
+  // realtime (Firestore)
+  if (fb.user && fb.db) {
+    await Promise.all(list.map(async (id) => {
+      try {
+        await deleteDoc(doc(fb.db, "orgs", ORG_ID, "inventoryMovements", id));
+      } catch (e) {
+        console.error("delete movement failed", id, e);
+      }
+    }));
+    // best-effort: delete immagini (solo se il documento non esiste più)
+    await deleteStoragePaths(pathsToDelete);
+    return;
+  }
+
+  // local fallback
+  saveLocalData();
+}
 
     async function saveFlowEdit() {
       const g = __docGroupsMap.get(String(__currentFlowEditKey || ""));
@@ -2619,6 +2677,9 @@ function showToast(msg) {
         const d = formatDateOnlyIT(g.date);
         docDetailSubtitle.textContent = `${g.customer || "—"}${d ? " · " + d : ""}`;
       }
+
+
+      renderDocDetailPhotos(g);
 
       if (docDetailTbody) {
         if (rows.length === 0) {
@@ -3361,6 +3422,12 @@ function validateMovementFields(fields) {
             note: mv.note || "",
             source: mv.source || "Manual",
             rawText: mv.rawText || "",
+
+docType: mv.docType || "",
+docNum: mv.docNum || "",
+docDateRaw: mv.docDateRaw || "",
+lineIndex: safeInt(mv.lineIndex),
+docPages: __sanitizeDocPages(mv.docPages || mv.docImages),
             createdAt: serverTimestamp(),
             createdBy: fb.user.email || fb.user.uid
           };
@@ -3378,44 +3445,50 @@ function validateMovementFields(fields) {
       renderAll();
     }
 
-    async function deleteMovement(id) {
-      if (!id) return;
+    
+async function deleteMovement(id) {
+  if (!id) return;
+  await deleteMovementsBulk([id]);
+}
 
-      // realtime (Firestore)
-      if (fb.user && fb.db) {
-        try {
-          await deleteDoc(doc(fb.db, "orgs", ORG_ID, "inventoryMovements", id));
-          return;
-        } catch (e) {
-          console.error("movement delete failed", e);
-          showToast("Errore: non riesco a eliminare");
-        }
-      }
+    function makeMovement(fields) {
+  const f = (fields && typeof fields === "object") ? fields : {};
+  const mv = {
+    id: "mv_" + Date.now() + "_" + Math.random().toString(16).slice(2),
+    type: f.type || "IN",
+    customer: (f.customer || "").trim(),
+    code: (f.code || "").trim(),
+    item: (f.item || "").trim(),
+    qty: safeInt(f.qty),
+    date: f.date || todayYYYYMMDD(),
+    note: (f.note || "").trim(),
+    source: f.source || "Manual",
+    rawText: f.rawText || "",
+    createdAt: nowIso()
+  };
 
-      // local fallback
-      const idx = state.movements.findIndex(m => m.id === id);
-      if (idx >= 0) {
-        state.movements.splice(idx, 1);
-        saveLocalData();
-        renderAll();
-      }
-    }
+  // extras (doc meta, immagini, ecc.)
+  const extras = Object.assign({}, f);
+  delete extras.id; delete extras.createdAt;
+  delete extras.type; delete extras.customer; delete extras.code; delete extras.item;
+  delete extras.qty; delete extras.date; delete extras.note; delete extras.source; delete extras.rawText;
 
-    function makeMovement({ type, customer, code, item, qty, date, note, source, rawText }) {
-      return {
-        id: "mv_" + Date.now() + "_" + Math.random().toString(16).slice(2),
-        type,
-        customer: (customer || "").trim(),
-        code: (code || "").trim(),
-        item: (item || "").trim(),
-        qty: safeInt(qty),
-        date: date || todayYYYYMMDD(),
-        note: (note || "").trim(),
-        source: source || "Manual",
-        rawText: rawText || "",
-        createdAt: nowIso()
-      };
-    }
+  for (const k of Object.keys(extras)) {
+    if (extras[k] == null) continue;
+    mv[k] = extras[k];
+  }
+
+  // normalize docPages / legacy docImages
+  if (Array.isArray(mv.docPages) || Array.isArray(mv.docImages)) {
+    mv.docPages = __sanitizeDocPages(mv.docPages || mv.docImages);
+    delete mv.docImages;
+  }
+
+  // normalize lineIndex
+  if (mv.lineIndex != null) mv.lineIndex = safeInt(mv.lineIndex);
+
+  return mv;
+}
 
     /****************************************************************
      * Rendering
@@ -3540,6 +3613,125 @@ function validateMovementFields(fields) {
       if (num) return `DDT numero ${num} del ${dateTxt || "—"}`;
       return `DDT (numero non letto) del ${dateTxt || "—"}`;
     }
+
+
+function docKeyFromMeta(meta){
+  const m = (meta && typeof meta === "object") ? meta : {};
+  const customer = String(m.customer || "").trim().toLowerCase();
+  const date = String(m.date || "").trim();
+  const note = String(m.note || "").trim();
+  const source = String(m.source || "").trim();
+  const docNumKey = String(m.docNum || "").trim().toLowerCase();
+  return [customer, date, (docNumKey || note.toLowerCase()), source.toLowerCase()].join("|");
+}
+
+function docKeyFromMovement(mv){
+  return docKeyFromMeta({
+    customer: mv && mv.customer,
+    date: mv && mv.date,
+    note: (mv && mv.note) || "",
+    source: (mv && mv.source) || "",
+    docNum: (mv && mv.docNum) || ""
+  });
+}
+
+function __sanitizeDocPages(pages){
+  const arr = Array.isArray(pages) ? pages : [];
+  const out = [];
+  for (let i = 0; i < arr.length; i++){
+    const p = arr[i];
+    if (typeof p === "string"){
+      const url = String(p || "").trim();
+      if (url) out.push({ url, path: "", page: i + 1 });
+      continue;
+    }
+    if (!p || typeof p !== "object") continue;
+    const url = String(p.url || p.downloadURL || p.href || "").trim();
+    const path = String(p.path || p.storagePath || "").trim();
+    const page = safeInt(p.page || p.index) || (i + 1);
+    if (!url && !path) continue;
+    out.push({ url, path, page });
+  }
+  return out;
+}
+
+async function uploadDocPagesToStorage(docKey, files){
+  const picked = Array.from(files || []).filter(Boolean);
+  if (!picked.length) return [];
+  if (!(fb.user && fb.storage)) return [];
+  const folder = `orgs/${ORG_ID}/docPages/${keyToDocId(docKey)}/${Date.now()}_${Math.random().toString(16).slice(2)}`;
+  const out = [];
+  for (let i = 0; i < picked.length; i++){
+    const f = picked[i];
+    const typeExt = (f && f.type && String(f.type).includes("/")) ? String(f.type).split("/")[1] : "";
+    const nameExt = String(f && f.name || "").includes(".") ? String(f.name).split(".").pop() : "";
+    const ext = (typeExt || nameExt || "jpg");
+    const safeExt = String(ext || "jpg").replace(/[^a-z0-9]/gi,"").toLowerCase() || "jpg";
+    const path = `${folder}/page_${String(i+1).padStart(2,"0")}.${safeExt}`;
+    const r = sRef(fb.storage, path);
+    await uploadBytes(r, f);
+    const url = await getDownloadURL(r);
+    out.push({ url, path, page: i + 1 });
+  }
+  return out;
+}
+
+async function deleteStoragePaths(paths){
+  const arr = Array.from(paths || []).filter(Boolean);
+  if (!arr.length) return;
+  if (!(fb.user && fb.storage)) return;
+  await Promise.all(arr.map(async (p) => {
+    try{
+      const r = sRef(fb.storage, String(p));
+      await deleteObject(r);
+    } catch(e){
+      console.warn("deleteObject failed", p, e);
+    }
+  }));
+}
+
+function getDocPagesFromGroup(g){
+  const pages = [];
+  const movs = (g && Array.isArray(g.movements)) ? g.movements : [];
+  movs.forEach(mv => {
+    const a = __sanitizeDocPages((mv && mv.docPages) || (mv && mv.docImages) || []);
+    a.forEach(x => pages.push(x));
+  });
+
+  const seen = new Set();
+  const out = [];
+  pages.forEach(p => {
+    const k = String(p.url || "") || String(p.path || "");
+    if (!k) return;
+    if (seen.has(k)) return;
+    seen.add(k);
+    out.push(p);
+  });
+
+  out.sort((a,b) => safeInt(a.page) - safeInt(b.page));
+  out.forEach((p, idx) => { if (!safeInt(p.page)) p.page = idx + 1; });
+  return out;
+}
+
+function renderDocDetailPhotos(g){
+  if (!docDetailPhotosWrap || !docDetailPhotosGrid) return;
+  const pages = getDocPagesFromGroup(g);
+  if (!pages.length){
+    docDetailPhotosWrap.style.display = "none";
+    docDetailPhotosGrid.innerHTML = "";
+    if (docDetailPhotosMeta) docDetailPhotosMeta.textContent = "";
+    return;
+  }
+  docDetailPhotosWrap.style.display = "";
+  if (docDetailPhotosMeta) docDetailPhotosMeta.textContent = `${pages.length} pagina${pages.length === 1 ? "" : "e"}`;
+  docDetailPhotosGrid.innerHTML = pages.map(p => `
+    <a class="docPhoto" href="${escapeHtmlAttr(p.url || "")}" target="_blank" rel="noopener">
+      <img src="${escapeHtmlAttr(p.url || "")}" alt="Pagina ${safeInt(p.page) || ""}">
+      <div class="docPhotoBadge">${safeInt(p.page) || ""}</div>
+    </a>
+  `).join("");
+}
+
 
 
     function renderStockTable(stockArr) {
@@ -4807,6 +4999,8 @@ async function handleFileSelection(fileList) {
       const docDateRaw = doc && (doc.__docDateRaw || doc.documentDateRaw || doc.documentDate || "");
       const baseNote = [docType, docNum, docDateRaw].filter(Boolean).join(" ").trim();
 
+      const docKey = docKeyFromMeta({ customer, date: docDateISO, note: baseNote, source: \"OCR\", docNum: docNum });
+
       if (!customer) {
         openModal("Cliente mancante", "Non riesco a leggere il nome cliente dal documento. Riprova con una foto più nitida.");
         return;
@@ -4821,6 +5015,19 @@ async function handleFileSelection(fileList) {
       progressFill.style.width = "88%";
 
       try {
+
+let docPages = [];
+try {
+  if (capture.files && capture.files.length) {
+    progressLabel.textContent = "Caricamento foto…";
+    progressFill.style.width = "80%";
+    docPages = await uploadDocPagesToStorage(docKey, capture.files);
+  }
+} catch (e) {
+  console.warn("upload doc pages failed", e);
+  docPages = [];
+}
+
         await ensureSupplierUpsert(customer);
         await ensureProductsUpsert(items);
 
@@ -4852,6 +5059,7 @@ async function handleFileSelection(fileList) {
             docType: String(docType || ""),
             docNum: String(docNum || ""),
             docDateRaw: String(docDateRaw || ""),
+            docPages: docPages,
             lineIndex: lineIndex,
             source: "OCR",
             rawText: capture.rawText
