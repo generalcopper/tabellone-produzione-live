@@ -1,22 +1,16 @@
-/* auth_ios.js — Google/Firebase Auth stabilizer for iOS/PWA
-   Obiettivi:
-   - evitare “flash/crash” al rientro in web-app (iOS standalone) coprendo il boot con overlay
-   - ridurre falsi “signed-out” dovuti a race condition di re-idratazione auth
-   - impostare persistence robusta (Firebase compat) quando possibile
-   - esportare un hook globale e un evento per sincronizzare UI senza toccare le tue logiche esistenti
+/* auth_ios.js (v2) — Google/Firebase Auth stabilizer for iOS/PWA
+   Fix v2: ripristina “no bars” su iOS assicurando viewport-fit=cover e meta PWA,
+   senza interferire con la tua UI. Overlay solo durante re-idratazione auth.
 
-   Non modifica app.js/app.css: si limita a creare overlay + ascoltare auth state.
-
-   Integrazione (opzionale):
-   - window.authFixOnUser(user)  // chiamata ad ogni cambio utente (user=null => signed-out)
-   - ascolta evento: window.addEventListener("authfix:ready", (e)=>{ console.log(e.detail.user) })
+   Eventi/Hooks:
+   - window.__AUTH_READY__ Promise<user|null>
+   - window.addEventListener("authfix:ready", (e)=>{ ... })
+   - window.authFixOnUser = (user)=>{ ... }  // opzionale
 */
 (() => {
   "use strict";
-  if (window.__AUTH_FIX_V1__) return;
-  window.__AUTH_FIX_V1__ = true;
-
-  const docEl = document.documentElement;
+  if (window.__AUTH_FIX_V2__) return;
+  window.__AUTH_FIX_V2__ = true;
 
   // --- iOS / standalone detection (best effort) ---
   const isIOS = (() => {
@@ -33,36 +27,109 @@
     }catch(_e){ return false; }
   })();
 
+  // --- Meta hardening (prevents iOS top/bottom white bars) ---
+  function upsertMeta(name, content){
+    try{
+      const head = document.head || document.getElementsByTagName("head")[0];
+      if(!head) return null;
+      let m = head.querySelector(`meta[name="${name}"]`);
+      if(!m){
+        m = document.createElement("meta");
+        m.setAttribute("name", name);
+        head.appendChild(m);
+      }
+      m.setAttribute("content", content);
+      return m;
+    }catch(_e){ return null; }
+  }
+
+  function normalizeViewportMeta(){
+    try{
+      const head = document.head || document.getElementsByTagName("head")[0];
+      if(!head) return;
+
+      const metas = Array.from(head.querySelectorAll('meta[name="viewport"]'));
+      let meta = metas[0] || null;
+
+      // Remove duplicates (iOS can pick the “wrong” one and reintroduce bars)
+      for (let i=1;i<metas.length;i++){
+        try{ metas[i].parentNode && metas[i].parentNode.removeChild(metas[i]); }catch(_e){}
+      }
+
+      if(!meta){
+        meta = document.createElement("meta");
+        meta.setAttribute("name","viewport");
+        head.appendChild(meta);
+      }
+
+      const base = "width=device-width, initial-scale=1";
+      const fit = "viewport-fit=cover";
+
+      // Preserve existing params but ensure viewport-fit=cover exists
+      const cur = (meta.getAttribute("content") || "").trim();
+      const parts = cur ? cur.split(",").map(s => s.trim()).filter(Boolean) : [];
+      const hasWidth = parts.some(p => p.startsWith("width="));
+      const hasInit  = parts.some(p => p.startsWith("initial-scale="));
+      const hasFit   = parts.some(p => p === fit);
+
+      const next = [];
+      if (hasWidth || hasInit || parts.length){
+        // keep as much as possible
+        for (const p of parts){
+          // drop “minimal-ui” / weird tokens if present (iOS ignores or causes oddities)
+          if (p === "minimal-ui") continue;
+          next.push(p);
+        }
+        if(!hasFit) next.push(fit);
+        if(!hasWidth) next.unshift("width=device-width");
+        if(!hasInit) next.push("initial-scale=1");
+      } else {
+        next.push(base, fit);
+      }
+
+      meta.setAttribute("content", Array.from(new Set(next)).join(", "));
+    }catch(_e){}
+  }
+
+  function ensurePWAMetas(){
+    if (!isIOS) return;
+    // iOS standalone + Safari need these to avoid UI bars / odd relayout on resume
+    upsertMeta("apple-mobile-web-app-capable", "yes");
+    upsertMeta("mobile-web-app-capable", "yes");
+    // black-translucent lets the page fill under the status bar (with safe-area insets)
+    upsertMeta("apple-mobile-web-app-status-bar-style", "black-translucent");
+    normalizeViewportMeta();
+  }
+
+  // Run meta hardening ASAP (before auth gating)
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", ensurePWAMetas, { once:true });
+  } else {
+    ensurePWAMetas();
+  }
+
   // --- Overlay ---
   let overlayEl = null;
+
   function ensureOverlay(){
     try{
       if (overlayEl) return overlayEl;
       overlayEl = document.createElement("div");
       overlayEl.className = "authFixOverlay";
       overlayEl.setAttribute("aria-hidden", "true");
-      overlayEl.innerHTML = `
-        <div>
-          <div class="authFixSpinner" aria-label="Loading" role="img"></div>
-        </div>
-      `;
+      overlayEl.innerHTML = `<div><div class="authFixSpinner" aria-label="Loading" role="img"></div></div>`;
       (document.body || document.documentElement).appendChild(overlayEl);
       return overlayEl;
-    }catch(_e){
-      return null;
-    }
+    }catch(_e){ return null; }
   }
 
   let pending = false;
   function setPending(on){
     pending = !!on;
     try{
-      if(on){
-        docEl.classList.add("authFix-pending");
-        ensureOverlay()?.classList.add("is-on");
-      }else{
-        docEl.classList.remove("authFix-pending");
-        if (overlayEl) overlayEl.classList.remove("is-on");
+      ensureOverlay();
+      if (overlayEl){
+        overlayEl.classList.toggle("is-on", pending);
       }
     }catch(_e){}
   }
@@ -70,21 +137,13 @@
   // start pending early on iOS PWA to mask the “momentary crash”
   if (isIOS && isStandalone) setPending(true);
 
-  // --- Tiny state ---
+  // --- Session hints (reduce signed-out flicker) ---
   const SS_KEY_UID  = "authfix:last_uid";
   const SS_KEY_TS   = "authfix:last_ts";
-  const SS_KEY_BOOT = "authfix:boot_id";
 
   const now = () => Date.now();
-
   function ssGet(k){ try{ return sessionStorage.getItem(k); }catch(_e){ return null; } }
   function ssSet(k,v){ try{ sessionStorage.setItem(k, String(v)); }catch(_e){} }
-
-  // Unique boot id to detect “fresh” vs BFCache return
-  (function markBoot(){
-    const bootId = Math.random().toString(16).slice(2) + "-" + now();
-    ssSet(SS_KEY_BOOT, bootId);
-  })();
 
   // --- Public promise to allow other scripts to await auth readiness ---
   let resolveReady;
@@ -93,8 +152,7 @@
 
   function emitReady(user){
     try{
-      const ev = new CustomEvent("authfix:ready", { detail: { user: user || null }});
-      window.dispatchEvent(ev);
+      window.dispatchEvent(new CustomEvent("authfix:ready", { detail: { user: user || null }}));
     }catch(_e){}
   }
 
@@ -104,13 +162,11 @@
     }catch(_e){}
   }
 
-  // --- Auth resolver gating (prevents false sign-out flicker) ---
+  // --- Auth resolver gating ---
   let authResolved = false;
-  let lastUser = undefined;
 
   function markResolved(user){
     authResolved = true;
-    lastUser = user || null;
 
     if (user && user.uid) {
       ssSet(SS_KEY_UID, user.uid);
@@ -126,7 +182,6 @@
     notifyHook(user);
   }
 
-  // When returning to foreground, re-apply pending briefly if we *expect* a user
   function maybeGateOnResume(){
     try{
       if (!isIOS || !isStandalone) return;
@@ -134,15 +189,13 @@
       const ts = parseInt(ssGet(SS_KEY_TS) || "0", 10);
       const fresh = (now() - ts) < 6 * 60 * 60 * 1000; // 6h
       if (expectedUid && fresh){
-        // show overlay while auth re-hydrates to avoid “signed-out flash”
         setPending(true);
-        // safety timeout: never hang indefinitely
         window.setTimeout(() => { if (!authResolved) setPending(false); }, 9000);
       }
     }catch(_e){}
   }
 
-  // --- Generic "waitFor" helper ---
+  // --- waitFor helper ---
   function waitFor(getter, { timeoutMs=8000, intervalMs=80 } = {}){
     return new Promise((resolve, reject) => {
       const t0 = now();
@@ -166,7 +219,7 @@
     try{ auth = fb.auth(); }catch(_e){ return false; }
     if (!auth) return false;
 
-    // Persistence: try LOCAL then SESSION (iOS sometimes blocks certain storage)
+    // Persistence: try LOCAL then SESSION
     try{
       const P = fb.auth.Auth.Persistence;
       if (P && auth.setPersistence){
@@ -175,55 +228,31 @@
       }
     }catch(_e){}
 
-    // Clear redirect "in-flight" if any (prevents weird half-states)
+    // Kick redirect result (non-blocking)
     try{
-      if (typeof auth.getRedirectResult === "function") {
-        // don't block; just trigger
-        auth.getRedirectResult().catch(() => {});
-      }
+      if (typeof auth.getRedirectResult === "function") auth.getRedirectResult().catch(() => {});
     }catch(_e){}
 
-    // Main listener
     auth.onAuthStateChanged((user) => {
-      // First resolution wins the “boot gating”
-      if (!authResolved) {
-        markResolved(user);
-        return;
-      }
-      // Subsequent changes
-      lastUser = user || null;
+      if (!authResolved) return markResolved(user);
       emitReady(user);
       notifyHook(user);
-    }, (_err) => {
-      // If listener errors, stop gating so UI isn't stuck
+    }, () => {
       if (!authResolved) markResolved(null);
     });
 
-    // Safety timer in case onAuthStateChanged is slow / never fires
-    window.setTimeout(() => {
-      if (!authResolved) {
-        // Soft decision: if we expected a uid, keep pending a bit longer; else resolve null
-        const expectedUid = ssGet(SS_KEY_UID);
-        if (expectedUid) {
-          setPending(false);
-        } else {
-          markResolved(null);
-        }
-      }
-    }, 12000);
-
+    window.setTimeout(() => { if (!authResolved) markResolved(null); }, 12000);
     return true;
   }
 
-  // --- Minimal generic integration (non-Firebase) ---
+  // --- Generic integration (optional) ---
   async function initGenericAuth(){
-    // If you expose a global `window.auth` compatible with onAuthStateChanged
     const auth = await waitFor(() => window.auth, { timeoutMs: 6000 }).catch(() => null);
     if (!auth || typeof auth.onAuthStateChanged !== "function") return false;
 
     auth.onAuthStateChanged((user) => {
       if (!authResolved) markResolved(user);
-      else { lastUser = user || null; emitReady(user); notifyHook(user); }
+      else { emitReady(user); notifyHook(user); }
     }, () => {
       if (!authResolved) markResolved(null);
     });
@@ -233,44 +262,37 @@
   }
 
   async function boot(){
-    // If not iOS standalone, still helps (but we avoid overlay unless needed)
+    // Non-iOS: keep gating short just to avoid flicker
     if (!(isIOS && isStandalone)) {
-      // small gate to avoid flicker even on desktop
       setPending(true);
-      window.setTimeout(() => { if (!authResolved) setPending(false); }, 4000);
+      window.setTimeout(() => { if (!authResolved) setPending(false); }, 1500);
     }
 
-    // try Firebase compat first, then generic
     const ok1 = await initFirebaseCompat().catch(() => false);
     if (!ok1) await initGenericAuth().catch(() => false);
 
     // If nothing hooked, drop gating quickly
-    window.setTimeout(() => { if (!authResolved) setPending(false); }, 1500);
+    window.setTimeout(() => { if (!authResolved) setPending(false); }, 1200);
   }
 
-  // --- Resume / BFCache handling ---
-  window.addEventListener("visibilitychange", () => {
-    if (!document.hidden) {
-      authResolved = false; // allow re-gate on resume until listener fires again
-      maybeGateOnResume();
-      // Let the browser settle (iOS needs a beat)
-      setTimeout(() => { authResolved = false; }, 0);
-    }
-  });
-
+  // Resume / BFCache handling
   window.addEventListener("pageshow", (e) => {
-    // BFCache return often triggers weird “state flashes”
     authResolved = false;
     if (e && e.persisted) maybeGateOnResume();
   });
 
+  window.addEventListener("visibilitychange", () => {
+    if (!document.hidden){
+      authResolved = false;
+      maybeGateOnResume();
+    }
+  });
+
   window.addEventListener("online", () => {
-    // When coming back online, don't force sign-in; just re-gate briefly
     authResolved = false;
     maybeGateOnResume();
   });
 
-  // Boot timing
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", boot, { once: true });
   } else {
