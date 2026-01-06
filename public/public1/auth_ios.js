@@ -1,18 +1,19 @@
-/* auth_ios.js (v2) — Google/Firebase Auth stabilizer for iOS/PWA
-   Fix v2: ripristina “no bars” su iOS assicurando viewport-fit=cover e meta PWA,
-   senza interferire con la tua UI. Overlay solo durante re-idratazione auth.
+/* auth_ios.js (v3) — Google/Firebase Auth stabilizer for iOS/PWA
+   v3 change:
+   - DOES NOT edit viewport/status-bar metas (avoids layout “jump” & scroll-to-camera issues)
+   - Adds fixed safe-area background bars (top/bottom) to match app background
+   - Keeps auth gating + persistence improvements
 
-   Eventi/Hooks:
+   Hooks:
    - window.__AUTH_READY__ Promise<user|null>
    - window.addEventListener("authfix:ready", (e)=>{ ... })
-   - window.authFixOnUser = (user)=>{ ... }  // opzionale
+   - window.authFixOnUser = (user)=>{ ... } // optional
 */
 (() => {
   "use strict";
-  if (window.__AUTH_FIX_V2__) return;
-  window.__AUTH_FIX_V2__ = true;
+  if (window.__AUTH_FIX_V3__) return;
+  window.__AUTH_FIX_V3__ = true;
 
-  // --- iOS / standalone detection (best effort) ---
   const isIOS = (() => {
     try{
       const ua = navigator.userAgent || "";
@@ -27,88 +28,60 @@
     }catch(_e){ return false; }
   })();
 
-  // --- Meta hardening (prevents iOS top/bottom white bars) ---
-  function upsertMeta(name, content){
+  // --- Safe-area background bars (top/bottom) ---
+  function pickBg(){
     try{
-      const head = document.head || document.getElementsByTagName("head")[0];
-      if(!head) return null;
-      let m = head.querySelector(`meta[name="${name}"]`);
-      if(!m){
-        m = document.createElement("meta");
-        m.setAttribute("name", name);
-        head.appendChild(m);
-      }
-      m.setAttribute("content", content);
-      return m;
-    }catch(_e){ return null; }
+      const body = document.body;
+      const html = document.documentElement;
+      const bgBody = body ? getComputedStyle(body).backgroundColor : "";
+      const bgHtml = html ? getComputedStyle(html).backgroundColor : "";
+      const isTransparent = (v) => !v || v === "transparent" || v === "rgba(0, 0, 0, 0)";
+      if (!isTransparent(bgBody)) return bgBody;
+      if (!isTransparent(bgHtml)) return bgHtml;
+    }catch(_e){}
+    return "#fff";
   }
 
-  function normalizeViewportMeta(){
+  function setBarBg(bg){
     try{
-      const head = document.head || document.getElementsByTagName("head")[0];
-      if(!head) return;
-
-      const metas = Array.from(head.querySelectorAll('meta[name="viewport"]'));
-      let meta = metas[0] || null;
-
-      // Remove duplicates (iOS can pick the “wrong” one and reintroduce bars)
-      for (let i=1;i<metas.length;i++){
-        try{ metas[i].parentNode && metas[i].parentNode.removeChild(metas[i]); }catch(_e){}
-      }
-
-      if(!meta){
-        meta = document.createElement("meta");
-        meta.setAttribute("name","viewport");
-        head.appendChild(meta);
-      }
-
-      const base = "width=device-width, initial-scale=1";
-      const fit = "viewport-fit=cover";
-
-      // Preserve existing params but ensure viewport-fit=cover exists
-      const cur = (meta.getAttribute("content") || "").trim();
-      const parts = cur ? cur.split(",").map(s => s.trim()).filter(Boolean) : [];
-      const hasWidth = parts.some(p => p.startsWith("width="));
-      const hasInit  = parts.some(p => p.startsWith("initial-scale="));
-      const hasFit   = parts.some(p => p === fit);
-
-      const next = [];
-      if (hasWidth || hasInit || parts.length){
-        // keep as much as possible
-        for (const p of parts){
-          // drop “minimal-ui” / weird tokens if present (iOS ignores or causes oddities)
-          if (p === "minimal-ui") continue;
-          next.push(p);
-        }
-        if(!hasFit) next.push(fit);
-        if(!hasWidth) next.unshift("width=device-width");
-        if(!hasInit) next.push("initial-scale=1");
-      } else {
-        next.push(base, fit);
-      }
-
-      meta.setAttribute("content", Array.from(new Set(next)).join(", "));
+      document.documentElement.style.setProperty("--authfix-bar-bg", bg);
+      // also set overlay bg if body/html were transparent
+      const ov = document.documentElement.style.getPropertyValue("--authfix-bg");
+      if (!ov) document.documentElement.style.setProperty("--authfix-bg", bg);
     }catch(_e){}
   }
 
-  function ensurePWAMetas(){
+  function ensureSafeBars(){
     if (!isIOS) return;
-    // iOS standalone + Safari need these to avoid UI bars / odd relayout on resume
-    upsertMeta("apple-mobile-web-app-capable", "yes");
-    upsertMeta("mobile-web-app-capable", "yes");
-    // black-translucent lets the page fill under the status bar (with safe-area insets)
-    upsertMeta("apple-mobile-web-app-status-bar-style", "black-translucent");
-    normalizeViewportMeta();
+    try{
+      setBarBg(pickBg());
+      const topId = "authFixSafeTop";
+      const botId = "authFixSafeBottom";
+
+      if (!document.getElementById(topId)){
+        const t = document.createElement("div");
+        t.id = topId;
+        t.className = "authFixSafeTop";
+        (document.body || document.documentElement).appendChild(t);
+      }
+      if (!document.getElementById(botId)){
+        const b = document.createElement("div");
+        b.id = botId;
+        b.className = "authFixSafeBottom";
+        (document.body || document.documentElement).appendChild(b);
+      }
+    }catch(_e){}
   }
 
-  // Run meta hardening ASAP (before auth gating)
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", ensurePWAMetas, { once:true });
-  } else {
-    ensurePWAMetas();
+  // Keep bars updated on theme/background changes (best-effort)
+  function refreshBars(){
+    try{
+      if (!isIOS) return;
+      setBarBg(pickBg());
+    }catch(_e){}
   }
 
-  // --- Overlay ---
+  // --- Overlay gating (auth hydration) ---
   let overlayEl = null;
 
   function ensureOverlay(){
@@ -123,14 +96,12 @@
     }catch(_e){ return null; }
   }
 
-  let pending = false;
+  let authResolved = false;
+
   function setPending(on){
-    pending = !!on;
     try{
       ensureOverlay();
-      if (overlayEl){
-        overlayEl.classList.toggle("is-on", pending);
-      }
+      if (overlayEl) overlayEl.classList.toggle("is-on", !!on);
     }catch(_e){}
   }
 
@@ -140,15 +111,14 @@
   // --- Session hints (reduce signed-out flicker) ---
   const SS_KEY_UID  = "authfix:last_uid";
   const SS_KEY_TS   = "authfix:last_ts";
-
   const now = () => Date.now();
+
   function ssGet(k){ try{ return sessionStorage.getItem(k); }catch(_e){ return null; } }
   function ssSet(k,v){ try{ sessionStorage.setItem(k, String(v)); }catch(_e){} }
 
   // --- Public promise to allow other scripts to await auth readiness ---
   let resolveReady;
-  const readyPromise = new Promise((res) => { resolveReady = res; });
-  window.__AUTH_READY__ = readyPromise;
+  window.__AUTH_READY__ = new Promise((res) => { resolveReady = res; });
 
   function emitReady(user){
     try{
@@ -161,9 +131,6 @@
       if (typeof window.authFixOnUser === "function") window.authFixOnUser(user || null);
     }catch(_e){}
   }
-
-  // --- Auth resolver gating ---
-  let authResolved = false;
 
   function markResolved(user){
     authResolved = true;
@@ -195,7 +162,6 @@
     }catch(_e){}
   }
 
-  // --- waitFor helper ---
   function waitFor(getter, { timeoutMs=8000, intervalMs=80 } = {}){
     return new Promise((resolve, reject) => {
       const t0 = now();
@@ -228,7 +194,7 @@
       }
     }catch(_e){}
 
-    // Kick redirect result (non-blocking)
+    // non-blocking redirect result
     try{
       if (typeof auth.getRedirectResult === "function") auth.getRedirectResult().catch(() => {});
     }catch(_e){}
@@ -245,7 +211,6 @@
     return true;
   }
 
-  // --- Generic integration (optional) ---
   async function initGenericAuth(){
     const auth = await waitFor(() => window.auth, { timeoutMs: 6000 }).catch(() => null);
     if (!auth || typeof auth.onAuthStateChanged !== "function") return false;
@@ -262,10 +227,13 @@
   }
 
   async function boot(){
-    // Non-iOS: keep gating short just to avoid flicker
+    ensureSafeBars();
+    refreshBars();
+
+    // If not iOS standalone, keep gating short
     if (!(isIOS && isStandalone)) {
       setPending(true);
-      window.setTimeout(() => { if (!authResolved) setPending(false); }, 1500);
+      window.setTimeout(() => { if (!authResolved) setPending(false); }, 1200);
     }
 
     const ok1 = await initFirebaseCompat().catch(() => false);
@@ -275,15 +243,23 @@
     window.setTimeout(() => { if (!authResolved) setPending(false); }, 1200);
   }
 
+  // Update bars on resize/orientation (iOS safe-area can change)
+  window.addEventListener("resize", () => { ensureSafeBars(); refreshBars(); }, { passive:true });
+  window.addEventListener("orientationchange", () => { ensureSafeBars(); refreshBars(); }, { passive:true });
+
   // Resume / BFCache handling
   window.addEventListener("pageshow", (e) => {
     authResolved = false;
+    ensureSafeBars();
+    refreshBars();
     if (e && e.persisted) maybeGateOnResume();
   });
 
   window.addEventListener("visibilitychange", () => {
     if (!document.hidden){
       authResolved = false;
+      ensureSafeBars();
+      refreshBars();
       maybeGateOnResume();
     }
   });
