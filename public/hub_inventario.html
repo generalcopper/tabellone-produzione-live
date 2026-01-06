@@ -752,6 +752,22 @@ tbody td, thead th{
 #statsCard .stat-tile .meta{ color: rgba(0,0,0,.88) !important; }
 
 /* Liste documenti (Movimenti recenti / Flussi) */
+/* Table actions (small buttons) */
+.btn-xs{
+  min-height: 34px !important;
+  padding: 8px 10px !important;
+  font-size: 13px !important;
+  border-radius: 12px !important;
+}
+td.td-actions{
+  white-space: nowrap;
+}
+.flowActRow{ gap: 8px; }
+@media (max-width: 560px){
+  .flowActRow{ gap: 6px; }
+  .btn-xs{ padding: 8px 8px !important; }
+}
+
 tr.docRow{ cursor:pointer; }
 tr.docRow:hover td{ background: rgba(10,132,255,.06); }
 
@@ -1143,10 +1159,11 @@ tr.docRow:hover td{ background: rgba(10,132,255,.06); }
               <th>Fornitore</th>
               <th class="qty">Righe</th>
               <th class="qty">Pezzi</th>
+              <th>Azioni</th>
             </tr>
           </thead>
           <tbody id="flowsTbody">
-            <tr><td class="td-muted" colspan="4">Nessun flusso ancora.</td></tr>
+            <tr><td class="td-muted" colspan="5">Nessun flusso ancora.</td></tr>
           </tbody>
         </table>
       </div>
@@ -1407,6 +1424,43 @@ tr.docRow:hover td{ background: rgba(10,132,255,.06); }
     </div>
   </div>
 
+
+
+  <!-- Flow edit modal -->
+  <div class="modal" id="modalFlowEdit">
+    <div class="modalContent" style="width: min(760px, 96vw);">
+      <div class="titleRow">
+        <h3 id="flowEditTitle">Modifica flusso</h3>
+        <button class="iconBtn" id="btnCloseFlowEdit" type="button" aria-label="Chiudi">×</button>
+      </div>
+
+      <p id="flowEditSub" class="hero-sub">Aggiorna i dati del documento. Le modifiche si applicano a tutte le righe del flusso.</p>
+
+      <div class="fieldGrid">
+        <div class="field">
+          <label for="flowEditCustomer">Fornitore</label>
+          <input id="flowEditCustomer" placeholder="Fornitore" />
+        </div>
+        <div class="field">
+          <label for="flowEditDate">Data</label>
+          <input id="flowEditDate" type="date" />
+        </div>
+        <div class="field" style="grid-column: 1 / -1;">
+          <label for="flowEditNote">Documento / Note</label>
+          <input id="flowEditNote" placeholder="Es. DDT n. 123 del 01/01/2026" />
+        </div>
+      </div>
+
+      <div class="inlineRow" style="justify-content: space-between; margin-top: 12px;">
+        <button class="btn btn-danger" id="btnDeleteFlowFromEdit" type="button">Elimina flusso</button>
+        <div class="inlineRow" style="justify-content:flex-end;">
+          <button class="btn btn-secondary" id="btnCancelFlowEdit" type="button">Annulla</button>
+          <button class="btn btn-primary" id="btnSaveFlowEdit" type="button">Salva</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
 <div class="toast" id="toast" role="status" aria-live="polite">Pronto</div>
 
   <script type="module">
@@ -1504,6 +1558,20 @@ tr.docRow:hover td{ background: rgba(10,132,255,.06); }
     const docDetailTotals = document.getElementById("docDetailTotals");
     const btnCloseDocDetail = document.getElementById("btnCloseDocDetail");
     const btnCloseDocDetail2 = document.getElementById("btnCloseDocDetail2");
+
+    // Flow edit modal
+    const modalFlowEdit = document.getElementById("modalFlowEdit");
+    const flowEditTitle = document.getElementById("flowEditTitle");
+    const flowEditSub = document.getElementById("flowEditSub");
+    const flowEditCustomer = document.getElementById("flowEditCustomer");
+    const flowEditDate = document.getElementById("flowEditDate");
+    const flowEditNote = document.getElementById("flowEditNote");
+    const btnCloseFlowEdit = document.getElementById("btnCloseFlowEdit");
+    const btnCancelFlowEdit = document.getElementById("btnCancelFlowEdit");
+    const btnSaveFlowEdit = document.getElementById("btnSaveFlowEdit");
+    const btnDeleteFlowFromEdit = document.getElementById("btnDeleteFlowFromEdit");
+
+
 
 
 
@@ -2040,6 +2108,128 @@ btnLogout.addEventListener("click", async () => {
     function closeModal() { modalQuick.classList.remove("open"); }
 
     function closeDocDetail() { if (modalDocDetail) modalDocDetail.classList.remove("open"); }
+
+    // ===== Flussi: modifica / elimina (documento) =====
+    let __currentFlowEditKey = null;
+
+    function openFlowEdit(docKey) {
+      const g = __docGroupsMap.get(String(docKey || ""));
+      if (!g) { showToast("Flusso non trovato"); return; }
+      if (!modalFlowEdit) return;
+
+      __currentFlowEditKey = String(g.key || "");
+      if (flowEditTitle) flowEditTitle.textContent = `Modifica flusso`;
+      if (flowEditSub) flowEditSub.textContent = `Documento: ${formatDocLabel(g)} • ${safeInt((g.movements || []).length)} righe`;
+
+      if (flowEditCustomer) flowEditCustomer.value = (g.customer || "");
+      if (flowEditDate) flowEditDate.value = (g.date || "");
+      if (flowEditNote) flowEditNote.value = (g.note || "");
+
+      modalFlowEdit.classList.add("open");
+      try { flowEditCustomer && flowEditCustomer.focus(); } catch {}
+    }
+
+    function closeFlowEdit() {
+      __currentFlowEditKey = null;
+      if (modalFlowEdit) modalFlowEdit.classList.remove("open");
+    }
+
+    async function updateMovementsBulk(ids, patch) {
+      const list = (Array.isArray(ids) ? ids : []).filter(Boolean);
+      if (!list.length) return;
+
+      // optimistic update (UI immediata)
+      const nowIso = new Date().toISOString();
+      for (const m of state.movements) {
+        if (list.includes(m.id)) {
+          Object.assign(m, patch || {});
+          m.updatedAtIso = nowIso;
+          m.updatedBy = (fb.user && (fb.user.email || fb.user.uid)) ? (fb.user.email || fb.user.uid) : "local";
+        }
+      }
+      renderAll();
+
+      // realtime (Firestore)
+      if (fb.user && fb.db) {
+        const updatedBy = (fb.user.email || fb.user.uid || "user");
+        const data = Object.assign({}, patch || {}, { updatedAt: serverTimestamp(), updatedBy });
+        await Promise.all(list.map(async (id) => {
+          await setDoc(doc(fb.db, "orgs", ORG_ID, "inventoryMovements", id), data, { merge: true });
+        }));
+        return;
+      }
+
+      // local fallback
+      saveLocalData();
+    }
+
+    async function deleteMovementsBulk(ids) {
+      const list = (Array.isArray(ids) ? ids : []).filter(Boolean);
+      if (!list.length) return;
+
+      // optimistic update (UI immediata)
+      const set = new Set(list);
+      state.movements = state.movements.filter(m => !set.has(m.id));
+      renderAll();
+
+      // realtime (Firestore)
+      if (fb.user && fb.db) {
+        await Promise.all(list.map(async (id) => {
+          try {
+            await deleteDoc(doc(fb.db, "orgs", ORG_ID, "inventoryMovements", id));
+          } catch (e) {
+            console.error("delete movement failed", id, e);
+          }
+        }));
+        return;
+      }
+
+      // local fallback
+      saveLocalData();
+    }
+
+    async function saveFlowEdit() {
+      const g = __docGroupsMap.get(String(__currentFlowEditKey || ""));
+      if (!g) { showToast("Flusso non trovato"); return; }
+
+      const customer = String(flowEditCustomer ? flowEditCustomer.value : "").trim();
+      const date = String(flowEditDate ? flowEditDate.value : "").trim();
+      const note = String(flowEditNote ? flowEditNote.value : "").trim();
+
+      if (!customer) return openModal("Dato mancante", "Inserisci il fornitore.");
+      if (!date) return openModal("Dato mancante", "Inserisci la data.");
+
+      const ids = (g.movements || []).map(m => m.id).filter(Boolean);
+      try {
+        btnSaveFlowEdit && (btnSaveFlowEdit.disabled = true);
+        await updateMovementsBulk(ids, { customer, date, note });
+        showToast("Flusso aggiornato");
+        closeFlowEdit();
+      } catch (e) {
+        console.error("saveFlowEdit failed", e);
+        openModal("Errore", "Non sono riuscito a salvare le modifiche.");
+        btnSaveFlowEdit && (btnSaveFlowEdit.disabled = false);
+      } finally {
+        btnSaveFlowEdit && (btnSaveFlowEdit.disabled = false);
+      }
+    }
+
+    async function deleteFlowByKey(docKey) {
+      const g = __docGroupsMap.get(String(docKey || ""));
+      if (!g) { showToast("Flusso non trovato"); return; }
+
+      const label = formatDocLabel(g);
+      const n = safeInt((g.movements || []).length);
+      const ok = confirm(`Eliminare il flusso?\n\n${label}\n\nVerranno eliminate ${n} righe.`);
+      if (!ok) return;
+
+      const ids = (g.movements || []).map(m => m.id).filter(Boolean);
+      await deleteMovementsBulk(ids);
+      showToast("Flusso eliminato");
+      closeFlowEdit();
+    }
+
+
 
     function openDocDetail(docKey) {
       const g = __docGroupsMap.get(String(docKey || ""));
@@ -2960,7 +3150,6 @@ function renderMovementsTable() {
       const docs = (__docGroups || []).slice(0, max);
 
       if (pillMov) pillMov.textContent = String((__docGroups || []).length);
-
       if (!movTbody) return;
 
       if (docs.length === 0) {
@@ -2984,9 +3173,7 @@ function renderMovementsTable() {
       }).join("");
     }
 
-
-    
-function renderFlowsTable() {
+    function renderFlowsTable() {
       if (!flowsTbody) return;
       const max = Math.max(10, Math.floor(Number(state.settings.maxRecent) || 50));
       const docs = (__docGroups || []).slice(0, max);
@@ -2994,7 +3181,7 @@ function renderFlowsTable() {
       if (pillFlowsCount) pillFlowsCount.textContent = String((__docGroups || []).length);
 
       if (docs.length === 0) {
-        flowsTbody.innerHTML = '<tr><td class="td-muted" colspan="4">Nessun flusso ancora.</td></tr>';
+        flowsTbody.innerHTML = '<tr><td class="td-muted" colspan="5">Nessun flusso ancora.</td></tr>';
         return;
       }
 
@@ -3009,13 +3196,18 @@ function renderFlowsTable() {
             <td>${escapeHtml(g.customer || "")}</td>
             <td class="qty">${Number(lines).toLocaleString("it-IT")}</td>
             <td class="qty">${Number(pieces).toLocaleString("it-IT")}</td>
+            <td class="td-actions">
+              <div class="inlineRow flowActRow" style="justify-content:flex-end;">
+                <button class="btn btn-ghost btn-xs" type="button" data-action="editFlow" title="Modifica flusso">Modifica</button>
+                <button class="btn btn-danger btn-xs" type="button" data-action="deleteFlow" title="Elimina flusso">Elimina</button>
+              </div>
+            </td>
           </tr>
         `;
       }).join("");
     }
 
-
-    function renderAll() {
+function renderAll() {
       const stockArr = computeStock();
       renderStats(stockArr);
       renderCustomerOptions(stockArr);
@@ -4072,14 +4264,38 @@ function renderFlowsTable() {
     if (btnCloseDocDetail2) btnCloseDocDetail2.addEventListener("click", closeDocDetail);
     if (modalDocDetail) modalDocDetail.addEventListener("click", (e) => { if (e.target === modalDocDetail) closeDocDetail(); });
 
+    // Flow edit modal controls
+    if (btnCloseFlowEdit) btnCloseFlowEdit.addEventListener("click", closeFlowEdit);
+    if (btnCancelFlowEdit) btnCancelFlowEdit.addEventListener("click", closeFlowEdit);
+    if (btnSaveFlowEdit) btnSaveFlowEdit.addEventListener("click", saveFlowEdit);
+    if (btnDeleteFlowFromEdit) btnDeleteFlowFromEdit.addEventListener("click", () => {
+      if (__currentFlowEditKey) deleteFlowByKey(__currentFlowEditKey);
+    });
+    if (modalFlowEdit) modalFlowEdit.addEventListener("click", (e) => { if (e.target === modalFlowEdit) closeFlowEdit(); });
+
+
     // Document row click (Movimenti recenti / Flussi)
     if (movTbody) movTbody.addEventListener("click", (e) => {
       const tr = e.target.closest('tr[data-dockey]');
       if (tr) openDocDetail(tr.getAttribute("data-dockey"));
     });
-    if (flowsTbody) flowsTbody.addEventListener("click", (e) => {
+    if (flowsTbody) flowsTbody.addEventListener("click", async (e) => {
       const tr = e.target.closest('tr[data-dockey]');
-      if (tr) openDocDetail(tr.getAttribute("data-dockey"));
+      if (!tr) return;
+
+      const actionBtn = e.target.closest('button[data-action]');
+      const key = tr.getAttribute("data-dockey");
+
+      if (actionBtn) {
+        e.preventDefault();
+        e.stopPropagation();
+        const act = actionBtn.getAttribute("data-action");
+        if (act === "editFlow") return openFlowEdit(key);
+        if (act === "deleteFlow") return deleteFlowByKey(key);
+        return;
+      }
+
+      openDocDetail(key);
     });
 
 
