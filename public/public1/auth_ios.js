@@ -1,8 +1,9 @@
-/* auth_ios.js (v3) — Google/Firebase Auth stabilizer for iOS/PWA
-   v3 change:
-   - DOES NOT edit viewport/status-bar metas (avoids layout “jump” & scroll-to-camera issues)
-   - Adds fixed safe-area background bars (top/bottom) to match app background
-   - Keeps auth gating + persistence improvements
+/* auth_ios.js (v4) — Google/Firebase Auth stabilizer for iOS/PWA + header docking
+   v4 change:
+   - Only on iOS + PWA (standalone): docks the page header under the status bar
+     (safe-area fused) and keeps it fixed while scrolling, with auto spacer.
+   - Keeps existing: auth gating + safe-area bottom bar background
+   - Still DOES NOT edit viewport/status-bar metas (avoids layout jump)
 
    Hooks:
    - window.__AUTH_READY__ Promise<user|null>
@@ -11,8 +12,8 @@
 */
 (() => {
   "use strict";
-  if (window.__AUTH_FIX_V3__) return;
-  window.__AUTH_FIX_V3__ = true;
+  if (window.__AUTH_FIX_V4__) return;
+  window.__AUTH_FIX_V4__ = true;
 
   const isIOS = (() => {
     try{
@@ -42,19 +43,37 @@
     return "#fff";
   }
 
-  function setBarBg(bg){
+  function isTransparentColor(v){
+    return !v || v === "transparent" || v === "rgba(0, 0, 0, 0)";
+  }
+
+  function pickSolidBgFrom(el){
     try{
-      document.documentElement.style.setProperty("--authfix-bar-bg", bg);
-      // also set overlay bg if body/html were transparent
-      const ov = document.documentElement.style.getPropertyValue("--authfix-bg");
-      if (!ov) document.documentElement.style.setProperty("--authfix-bg", bg);
+      let cur = el;
+      for (let i=0; i<8 && cur; i++){
+        const bg = getComputedStyle(cur).backgroundColor;
+        if (!isTransparentColor(bg)) return bg;
+        cur = cur.parentElement;
+      }
+    }catch(_e){}
+    return pickBg();
+  }
+
+  function setVars({ barBg, headerBg } = {}){
+    try{
+      const root = document.documentElement;
+      if (barBg) root.style.setProperty("--authfix-bar-bg", barBg);
+      if (headerBg) root.style.setProperty("--authfix-header-bg", headerBg);
+      // also set overlay bg if unset
+      const ov = root.style.getPropertyValue("--authfix-bg");
+      if (!ov && (barBg || headerBg)) root.style.setProperty("--authfix-bg", (barBg || headerBg));
     }catch(_e){}
   }
 
   function ensureSafeBars(){
     if (!isIOS) return;
     try{
-      setBarBg(pickBg());
+      setVars({ barBg: pickBg() });
       const topId = "authFixSafeTop";
       const botId = "authFixSafeBottom";
 
@@ -73,11 +92,128 @@
     }catch(_e){}
   }
 
-  // Keep bars updated on theme/background changes (best-effort)
   function refreshBars(){
     try{
       if (!isIOS) return;
-      setBarBg(pickBg());
+      setVars({ barBg: pickBg() });
+    }catch(_e){}
+  }
+
+  // --- Header docking (iOS + PWA only) ---
+  const HEADER_SELECTORS = [
+    "[data-authfix-header]",
+    "header",
+    "[role='banner']",
+    "#appHeader", "#header", ".app-header", ".appHeader",
+    ".topbar", ".topBar", ".navbar", ".navBar",
+    ".site-header", ".siteHeader",
+    ".header"
+  ];
+
+  function isVisible(el){
+    try{
+      if (!el) return false;
+      const cs = getComputedStyle(el);
+      if (cs.display === "none" || cs.visibility === "hidden") return false;
+      const r = el.getBoundingClientRect();
+      return r.width > 0 && r.height > 0;
+    }catch(_e){ return false; }
+  }
+
+  function findHeaderCandidate(){
+    try{
+      const candidates = [];
+      for (const sel of HEADER_SELECTORS){
+        const nodes = document.querySelectorAll(sel);
+        nodes.forEach((el) => {
+          if (!isVisible(el)) return;
+          // avoid docking modal headers/toolbars (best effort)
+          const inDialog = el.closest("[role='dialog'], .modal, .overlay, .sheet, .drawer");
+          if (inDialog) return;
+          candidates.push(el);
+        });
+        if (candidates.length) break;
+      }
+      if (!candidates.length) return null;
+
+      // Pick the one closest to the top of the page
+      candidates.sort((a,b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top);
+      const nearTop = candidates.find(el => el.getBoundingClientRect().top < 120) || candidates[0];
+      return nearTop;
+    }catch(_e){ return null; }
+  }
+
+  function hasTransformedAncestor(el){
+    try{
+      let p = el && el.parentElement;
+      while (p && p !== document.body && p !== document.documentElement){
+        const cs = getComputedStyle(p);
+        if ((cs.transform && cs.transform !== "none") ||
+            (cs.filter && cs.filter !== "none") ||
+            (cs.perspective && cs.perspective !== "none")) return true;
+        p = p.parentElement;
+      }
+    }catch(_e){}
+    return false;
+  }
+
+  let dockedHeader = null;
+  let spacerEl = null;
+
+  function ensureDockedHeader(){
+    if (!isIOS || !isStandalone) return;
+    try{
+      const html = document.documentElement;
+      html.classList.add("authfix-ios-standalone");
+
+      const header = findHeaderCandidate();
+      if (!header) return;
+
+      // already docked
+      if (header.classList.contains("authFixDockHeader")) {
+        dockedHeader = header;
+        return;
+      }
+
+      dockedHeader = header;
+      html.classList.add("authfix-has-header");
+
+      const bg = pickSolidBgFrom(header);
+      setVars({ barBg: bg, headerBg: bg });
+
+      header.classList.add("authFixDockHeader");
+      if (hasTransformedAncestor(header)) header.classList.add("authFixDockSticky");
+
+      // Spacer (only when fixed; sticky stays in flow)
+      if (!header.classList.contains("authFixDockSticky")){
+        const spacerId = "authFixHeaderSpacer";
+        spacerEl = document.getElementById(spacerId);
+        if (!spacerEl){
+          spacerEl = document.createElement("div");
+          spacerEl.id = spacerId;
+          spacerEl.className = "authFixHeaderSpacer";
+          spacerEl.setAttribute("aria-hidden", "true");
+          if (header.parentNode) header.parentNode.insertBefore(spacerEl, header.nextSibling);
+          else (document.body || html).appendChild(spacerEl);
+        }
+      } else {
+        spacerEl = null;
+      }
+
+      updateHeaderMetrics();
+      // Re-measure after fonts/layout settle
+      requestAnimationFrame(() => requestAnimationFrame(updateHeaderMetrics));
+    }catch(_e){}
+  }
+
+  function updateHeaderMetrics(){
+    try{
+      if (!dockedHeader) return;
+      const html = document.documentElement;
+      const r = dockedHeader.getBoundingClientRect();
+      const h = Math.max(0, Math.round(r.height));
+      html.style.setProperty("--authfix-header-h", h + "px");
+      if (spacerEl) spacerEl.style.height = h + "px";
     }catch(_e){}
   }
 
@@ -230,6 +366,9 @@
     ensureSafeBars();
     refreshBars();
 
+    // Dock header before first paint (as much as possible)
+    ensureDockedHeader();
+
     // If not iOS standalone, keep gating short
     if (!(isIOS && isStandalone)) {
       setPending(true);
@@ -243,23 +382,30 @@
     window.setTimeout(() => { if (!authResolved) setPending(false); }, 1200);
   }
 
-  // Update bars on resize/orientation (iOS safe-area can change)
-  window.addEventListener("resize", () => { ensureSafeBars(); refreshBars(); }, { passive:true });
-  window.addEventListener("orientationchange", () => { ensureSafeBars(); refreshBars(); }, { passive:true });
+  // Update on resize/orientation (safe-area + header height can change)
+  window.addEventListener("resize", () => {
+    ensureSafeBars(); refreshBars();
+    ensureDockedHeader(); updateHeaderMetrics();
+  }, { passive:true });
+
+  window.addEventListener("orientationchange", () => {
+    ensureSafeBars(); refreshBars();
+    ensureDockedHeader(); updateHeaderMetrics();
+  }, { passive:true });
 
   // Resume / BFCache handling
   window.addEventListener("pageshow", (e) => {
     authResolved = false;
-    ensureSafeBars();
-    refreshBars();
+    ensureSafeBars(); refreshBars();
+    ensureDockedHeader(); updateHeaderMetrics();
     if (e && e.persisted) maybeGateOnResume();
   });
 
   window.addEventListener("visibilitychange", () => {
     if (!document.hidden){
       authResolved = false;
-      ensureSafeBars();
-      refreshBars();
+      ensureSafeBars(); refreshBars();
+      ensureDockedHeader(); updateHeaderMetrics();
       maybeGateOnResume();
     }
   });
@@ -274,5 +420,4 @@
   } else {
     boot();
   }
-
 })();
