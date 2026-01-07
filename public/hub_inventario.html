@@ -158,23 +158,6 @@
 .docPhotoBadge{ position:absolute; top:8px; left:8px; background: rgba(10,132,255,.92); color:#fff; font-size: 11px; padding: 2px 6px; border-radius:999px; font-weight: 900; }
 @media (max-width: 420px){ .docPhoto img{ height: 120px; } }
 
-.sessionDocsWrap{ margin-top: 12px; display: grid; gap: 10px; }
-.sessionDocsHeader{ display:flex; align-items:flex-end; justify-content:space-between; gap: 12px; }
-.sessionDocsGrid{ display:grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; }
-.sessionDocCard{ border: 1px solid rgba(12,22,52,.08); border-radius: 16px; background: rgba(255,255,255,.92); padding: 10px; display: grid; gap: 8px; text-align: left; box-shadow: inset 0 1px 0 rgba(255,255,255,.7); }
-.sessionDocCard.is-active{ outline: 2px solid rgba(10,132,255,.45); outline-offset: 2px; }
-.sessionDocThumb{ width: 100%; height: 130px; border-radius: 12px; border: 1px solid rgba(12,22,52,.10); overflow:hidden; background: rgba(0,0,0,.04); display:grid; place-items:center; cursor: pointer; }
-.sessionDocThumb img{ width: 100%; height: 100%; object-fit: cover; display:block; }
-.sessionDocThumb .placeholder{ font-size: 12px; }
-.sessionDocMeta{ display:grid; gap: 4px; }
-.sessionDocMeta .title{ font-size: 13px; font-weight: 900; color: rgba(0,0,0,.88); line-height: 1.2; }
-.sessionDocMeta .sub{ font-size: 12px; color: var(--muted); font-weight: 800; }
-.sessionDocActions{ display:flex; gap: 6px; flex-wrap: wrap; }
-.sessionDocStatus{ font-size: 11px; font-weight: 900; padding: 2px 8px; border-radius: 999px; border: 1px solid rgba(0,0,0,.1); background: rgba(0,0,0,.03); }
-.sessionDocStatus.imported{ border-color: rgba(37,185,79,.25); background: rgba(37,185,79,.12); color: rgba(0,70,20,.88); }
-.sessionDocStatus.processing{ border-color: rgba(255,159,10,.25); background: rgba(255,159,10,.12); color: rgba(120,70,0,.88); }
-.sessionDocStatus.error{ border-color: rgba(255,59,48,.25); background: rgba(255,59,48,.12); color: rgba(110,0,0,.86); }
-
 
     textarea { width: 100%; border-radius: 14px; border: 1px solid rgba(12,22,52,.08); background: rgba(255,255,255,.9); min-height: 120px; padding: 12px; font-size: 14px; font-weight: 800; color: var(--text); resize: vertical; box-shadow: inset 0 1px 0 rgba(255,255,255,.7); }
 
@@ -378,6 +361,41 @@
 }
 #docExtractPanel .doc-table tbody tr.is-selected{
   background: rgba(0,0,0,.06);
+}
+
+/* OCR session docs (più DDT nella stessa sessione) */
+.sessionDocsList{
+  display:grid;
+  gap: 8px;
+}
+.sessionDocCard{
+  display:flex;
+  align-items:flex-start;
+  justify-content:space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid rgba(60,60,67,.18);
+  border-radius: 12px;
+  background: #fff;
+}
+.sessionDocMeta{
+  display:grid;
+  gap: 4px;
+  min-width: 0;
+}
+.sessionDocTitle{
+  font-weight: 900;
+  color: var(--text);
+}
+.sessionDocSub{
+  font-size: 12px;
+  color: var(--muted);
+  font-weight: 800;
+}
+.sessionDocActions{
+  display:flex;
+  align-items:center;
+  gap: 8px;
 }
 
 @media (max-width: 560px){
@@ -1468,14 +1486,6 @@ td.td-actions{ white-space: normal !important; }
                     </div>
                   </div>
 
-                  <div id="sessionDocsWrap" class="sessionDocsWrap" style="display:none">
-                    <div class="sessionDocsHeader">
-                      <div class="hero-sub">DDT caricati in sessione</div>
-                      <div class="td-muted">Tocca una miniatura per i dettagli.</div>
-                    </div>
-                    <div id="sessionDocsGrid" class="sessionDocsGrid"></div>
-                  </div>
-
 <div id="movementFooter" class="movementFooter">
 <div class="stack mvMeta">
                     <div class="hero-sub">Dati movimento (puoi correggerli prima di confermare)</div>
@@ -1507,9 +1517,17 @@ td.td-actions{ white-space: normal !important; }
                     </div>
                   </div>
 
+                  <div id="sessionDocsPanel" class="stack" style="display:none;">
+                    <div class="inlineRow" style="justify-content:space-between; align-items:center;">
+                      <div class="hero-sub">DDT in sessione: <span id="sessionDocsCount">0</span></div>
+                      <button class="btn btn-ghost btn-xs" id="btnClearSessionDocs" type="button" style="display:none;">Svuota</button>
+                    </div>
+                    <div class="sessionDocsList" id="sessionDocsList"></div>
+                  </div>
+
                   <div class="movementActions">
                     <button class="btn btn-primary btnConfirmBig" id="btnConfirmMovement" type="button" disabled>Conferma carico</button>
-                    <button class="btn btn-secondary" id="btnNewDoc" type="button">Nuovo DDT</button>
+                    <button class="btn btn-secondary" id="btnAddDoc" type="button" disabled>Aggiungi DDT</button>
                     <button class="btn btn-ghost btnResetMini" id="btnReset" type="button">Reset</button>
                   </div>
 
@@ -1974,6 +1992,7 @@ td.td-actions{ white-space: normal !important; }
     const ocrResult = document.getElementById("ocrResult");
 
     const btnConfirmMovement = document.getElementById("btnConfirmMovement");
+    const btnAddDoc = document.getElementById("btnAddDoc");
     const btnReset = document.getElementById("btnReset");
     const toastEl = document.getElementById("toast");
 
@@ -2057,8 +2076,11 @@ const docDetailPhotosMeta = document.getElementById("docDetailPhotosMeta");
     const pagesCount = document.getElementById("pagesCount");
     const pagesThumbs = document.getElementById("pagesThumbs");
     const btnRemoveLastPage = document.getElementById("btnRemoveLastPage");
-    const sessionDocsWrap = document.getElementById("sessionDocsWrap");
-    const sessionDocsGrid = document.getElementById("sessionDocsGrid");
+
+    const sessionDocsPanel = document.getElementById("sessionDocsPanel");
+    const sessionDocsCount = document.getElementById("sessionDocsCount");
+    const sessionDocsList = document.getElementById("sessionDocsList");
+    const btnClearSessionDocs = document.getElementById("btnClearSessionDocs");
 
     const segIn = document.getElementById("segIn");
     const segOut = document.getElementById("segOut");
@@ -2069,7 +2091,6 @@ const docDetailPhotosMeta = document.getElementById("docDetailPhotosMeta");
     const fQty = document.getElementById("fQty");
     const fItem = document.getElementById("fItem");
     const fNote = document.getElementById("fNote");
-    const btnNewDoc = document.getElementById("btnNewDoc");
 
     // Click su una riga documento => precompila i campi movimento
     const docItemsTable = document.getElementById("docItemsTable");
@@ -2131,10 +2152,6 @@ const docDetailPhotosMeta = document.getElementById("docDetailPhotosMeta");
           "Anagrafica";
       }
       if (__btnBack) __btnBack.style.display = (isOverlay) ? "inline-flex" : "none";
-      if (key === "ocr") {
-        renderActiveDoc();
-        renderSessionDocsList();
-      }
       try { window.scrollTo(0, 0); } catch(_){}
     }
 
@@ -2281,9 +2298,14 @@ const docDetailPhotosMeta = document.getElementById("docDetailPhotosMeta");
     };
 
     let capture = {
-      docs: [],            // documenti OCR nella sessione
-      activeDocId: null,   // id documento attivo
-      movementType: "IN"   // IN/OUT
+      docs: [],             // DDT già pronti in sessione
+      files: [],            // pagine acquisite (File[])
+      rawPages: [],         // OCR per pagina (stesso indice di files)
+      structuredPages: [],  // structured OCR per pagina (se disponibile)
+      activePageIndex: 0,   // pagina attiva per preview
+      file: null,           // ultima/attiva (compatibilità)
+      rawText: "",
+      movementType: "IN" // IN/OUT
     };
 
 
@@ -2876,64 +2898,6 @@ async function deleteMovementsBulk(ids) {
       __syncBodyLockFromModals();
     }
 
-    function openSessionDocDetail(doc) {
-      if (!doc) { showToast("Documento non trovato"); return; }
-
-      const extract = doc.extractRef || doc.extractStructured || {};
-      const items = (extract && Array.isArray(extract.__items)) ? extract.__items : (Array.isArray(extract.items) ? extract.items : []);
-      const safeRows = (items || [])
-        .filter((it) => !__isConaiItem(it))
-        .map((it) => ({
-          code: String(it.code || "").trim(),
-          item: String(it.description || it.item || "").trim(),
-          qty: (it.qty != null && it.qty !== "" && !Number.isNaN(Number(it.qty))) ? Number(it.qty) : safeInt(String(it.qtyRaw || "").replace(/[^\d,\.]/g, "")),
-          lineIndex: safeInt(it.lineIndex)
-        }))
-        .filter(r => r.code || r.item);
-
-      const totalPieces = safeRows.reduce((sum, r) => sum + safeInt(r.qty), 0);
-
-      safeRows.sort((a, b) => {
-        const ai = safeInt(a.lineIndex);
-        const bi = safeInt(b.lineIndex);
-        if (ai && bi && ai !== bi) return ai - bi;
-        if ((ai || bi) && ai !== bi) return (ai || 0) - (bi || 0);
-        const cc = String(a.code || "").localeCompare(String(b.code || ""));
-        if (cc !== 0) return cc;
-        return String(a.item || "").localeCompare(String(b.item || ""));
-      });
-
-      if (docDetailTitle) docDetailTitle.textContent = formatSessionDocLabel(doc);
-      if (docDetailSubtitle) {
-        const supplier = getSessionDocSupplierName(doc);
-        const dateTxt = formatDateOnlyIT((extract.__docDateISO || coerceToISODate(extract.documentDateRaw || extract.documentDate || "")) || "");
-        docDetailSubtitle.textContent = `${supplier || "—"}${dateTxt ? " · " + dateTxt : ""}`;
-      }
-
-      renderDocDetailPhotosFromFiles(doc.files || []);
-
-      if (docDetailTbody) {
-        if (!safeRows.length) {
-          docDetailTbody.innerHTML = '<tr><td class="td-muted" colspan="3">Nessuna riga.</td></tr>';
-        } else {
-          docDetailTbody.innerHTML = safeRows.map(r => `
-            <tr>
-              <td data-label="Codice" class="td-muted">${escapeHtml(r.code || "")}</td>
-              <td data-label="Articolo">${escapeHtml(r.item || "")}</td>
-              <td data-label="Pezzi" class="qty">${safeInt(r.qty).toLocaleString("it-IT")}</td>
-            </tr>
-          `).join("");
-        }
-      }
-
-      if (docDetailTotals) {
-        docDetailTotals.textContent = `Righe: ${safeRows.length.toLocaleString("it-IT")} · Pezzi: ${totalPieces.toLocaleString("it-IT")}`;
-      }
-
-      if (modalDocDetail) modalDocDetail.classList.add("open");
-      __syncBodyLockFromModals();
-    }
-
 
     function openSettings() { modalSettings.classList.add("open"); }
     function closeSettings() { modalSettings.classList.remove("open"); }
@@ -3371,8 +3335,42 @@ function __isConaiItem(it){
           const q = Number(qRaw.replace(",", ".").replace(/[^\d.]/g,""));
           return !!key && !Number.isNaN(q) && q > 0;
         });
-        btn.disabled = !(String(customerEl && customerEl.value || "").trim() && hasValid);
+        const currentValid = String(customerEl && customerEl.value || "").trim() && hasValid;
+        btn.disabled = !(currentValid || __hasQueuedDocs());
       } catch (_e) {}
+      __updateConfirmLabels();
+    }
+
+    function __hasQueuedDocs(){
+      return Array.isArray(capture.docs) && capture.docs.length > 0;
+    }
+
+    function __isCurrentDocValid(){
+      try{
+        const items = __getDocItemsArr();
+        const customer = String((fCustomer && fCustomer.value) || "").trim();
+        if (!customer) return false;
+        const hasValid = (items || []).some(it => {
+          const key = String(it.code || it.description || "").trim();
+          const qRaw = (it.qty != null && it.qty !== "") ? String(it.qty) : String(it.qtyRaw || "");
+          const q = Number(qRaw.replace(",", ".").replace(/[^\d.]/g,""));
+          return !!key && !Number.isNaN(q) && q > 0;
+        });
+        return !!hasValid;
+      }catch(_e){
+        return false;
+      }
+    }
+
+    function __updateConfirmLabels(){
+      try{
+        if (btnAddDoc) btnAddDoc.disabled = !__isCurrentDocValid();
+        if (!btnConfirmMovement) return;
+        const queued = (capture.docs && capture.docs.length) ? capture.docs.length : 0;
+        const current = __isCurrentDocValid() ? 1 : 0;
+        const total = queued + current;
+        btnConfirmMovement.textContent = total > 1 ? `Conferma carico (${total} DDT)` : "Conferma carico";
+      }catch(_e){}
     }
 
     function __rerenderDocItemsTable(){
@@ -3381,6 +3379,104 @@ function __isConaiItem(it){
       const items = __getDocItemsArr();
       tbody.innerHTML = __docItemsRowsHtml(items) || `<tr><td colspan="4" style="text-align:center; padding:12px; color:var(--muted)">Nessuna riga trovata.</td></tr>`;
       __refreshConfirmMovementEnabled();
+    }
+
+    function __buildDocFromCurrentCapture(){
+      const doc = __lastDocExtract || {};
+      const items = __getDocItemsArr();
+      const safeItems = (items || []).filter(it => !__isConaiItem(it));
+      const customer = String((fCustomer && fCustomer.value) || (doc && doc.supplier && doc.supplier.name) || "").trim();
+      const docDateISO = (doc && (doc.__docDateISO || coerceToISODate(doc.documentDateRaw || doc.documentDate || ""))) || (fDate && fDate.value) || todayYYYYMMDD();
+      const docType = (doc && (doc.__docType || doc.documentTypeRaw || doc.documentType || "")) || "";
+      const docNum  = (doc && (doc.__docNumber || doc.documentNumberRaw || doc.documentNumber || "")) || "";
+      const docDateRaw = (doc && (doc.__docDateRaw || doc.documentDateRaw || doc.documentDate || "")) || "";
+      const baseNote = [docType, docNum, docDateRaw].filter(Boolean).join(" ").trim();
+
+      if (!customer || !safeItems.length) return null;
+
+      return {
+        customer,
+        docDateISO,
+        docType,
+        docNum,
+        docDateRaw,
+        baseNote,
+        items: safeItems,
+        rawText: String(capture.rawText || ""),
+        structured: doc,
+        files: Array.isArray(capture.files) ? capture.files.slice() : [],
+        source: "OCR"
+      };
+    }
+
+    function __updateSessionDocsUI(){
+      if (!sessionDocsPanel || !sessionDocsList || !sessionDocsCount) return;
+      const docs = Array.isArray(capture.docs) ? capture.docs : [];
+      sessionDocsCount.textContent = String(docs.length);
+      if (!docs.length){
+        sessionDocsPanel.style.display = "none";
+        sessionDocsList.innerHTML = "";
+        if (btnClearSessionDocs) btnClearSessionDocs.style.display = "none";
+        __updateConfirmLabels();
+        return;
+      }
+
+      sessionDocsPanel.style.display = "";
+      if (btnClearSessionDocs) btnClearSessionDocs.style.display = "inline-flex";
+
+      sessionDocsList.innerHTML = docs.map((d, i) => {
+        const dateTxt = formatDateOnlyIT(d.docDateISO || d.docDateRaw || "");
+        const num = d.docNum ? `DDT n. ${d.docNum}` : "DDT";
+        const title = `${num}${dateTxt ? " del " + dateTxt : ""}`;
+        const lines = (d.items || []).length;
+        const pieces = (d.items || []).reduce((sum, it) => {
+          const raw = (it.qty != null && it.qty !== "") ? it.qty : it.qtyRaw;
+          const n = Number(String(raw || "").replace(/\./g,"").replace(",", ".").replace(/[^\d.]/g,""));
+          return sum + (Number.isFinite(n) ? n : 0);
+        }, 0);
+        const sub = `${d.customer || "—"} • ${lines} righe • ${pieces} pezzi`;
+        return `
+          <div class="sessionDocCard" data-idx="${i}">
+            <div class="sessionDocMeta">
+              <div class="sessionDocTitle">${escapeHtml(title)}</div>
+              <div class="sessionDocSub">${escapeHtml(sub)}</div>
+            </div>
+            <div class="sessionDocActions">
+              <button class="btn btn-danger btn-xs" type="button" data-action="removeSessionDoc" data-idx="${i}">Rimuovi</button>
+            </div>
+          </div>
+        `;
+      }).join("");
+
+      __updateConfirmLabels();
+    }
+
+    function __queueCurrentDoc(){
+      const doc = __buildDocFromCurrentCapture();
+      if (!doc || !__isCurrentDocValid()){
+        openModal("DDT non valido", "Completa fornitore e almeno una riga valida prima di aggiungere il DDT.");
+        return;
+      }
+      if (!Array.isArray(capture.docs)) capture.docs = [];
+      capture.docs.push(doc);
+      __updateSessionDocsUI();
+      resetCapture({ keepDocs: true });
+      showToast("DDT aggiunto alla sessione");
+    }
+
+    function __removeQueuedDocByIndex(idx){
+      if (!Array.isArray(capture.docs)) return;
+      if (Number.isNaN(idx) || idx < 0 || idx >= capture.docs.length) return;
+      capture.docs.splice(idx, 1);
+      __updateSessionDocsUI();
+      showToast("DDT rimosso");
+    }
+
+    function __clearQueuedDocs(){
+      if (!Array.isArray(capture.docs) || !capture.docs.length) return;
+      capture.docs = [];
+      __updateSessionDocsUI();
+      showToast("Sessione DDT svuotata");
     }
 
     function __deleteDocItemByIndex(i){
@@ -3557,16 +3653,17 @@ function validateMovementFields(fields) {
             const itemOk = String((it && it.item) || "").trim().length > 0;
             return q > 0 && (codeOk || itemOk);
           });
-          return customerOk && hasValid;
+          return (customerOk && hasValid) || __hasQueuedDocs();
         }
       }catch(_){}
-      return validateMovementFields({
+      const fallbackOk = validateMovementFields({
         customer: (fCustomer && fCustomer.value) || "",
         code: (fCode && fCode.value) || "",
         item: (fItem && fItem.value) || "",
         qty: (fQty && fQty.value) || "",
         date: (fDate && fDate.value) || ""
       });
+      return fallbackOk || __hasQueuedDocs();
     }
 
 
@@ -4201,48 +4298,6 @@ function renderDocDetailPhotos(g){
         if (img) img.alt = "Immagine non disponibile";
       }
     } catch(e){}
-  });
-}
-
-function renderDocDetailPhotosFromFiles(files){
-  if (!docDetailPhotosWrap || !docDetailPhotosGrid) return;
-
-  __revokeDocDetailBlobUrls();
-  const token = ++__docDetailRenderToken;
-
-  const pages = Array.isArray(files) ? files.filter(Boolean) : [];
-  if (!pages.length){
-    docDetailPhotosWrap.style.display = "none";
-    docDetailPhotosGrid.innerHTML = "";
-    if (docDetailPhotosMeta) docDetailPhotosMeta.textContent = "";
-    return;
-  }
-
-  docDetailPhotosWrap.style.display = "";
-  if (docDetailPhotosMeta) docDetailPhotosMeta.textContent = `${pages.length} pagina${pages.length === 1 ? "" : "e"}`;
-
-  docDetailPhotosGrid.innerHTML = pages.map((p, idx) => {
-    const page = idx + 1;
-    return `
-      <a class="docPhoto" href="#" data-idx="${idx}" data-page="${page}" target="_blank" rel="noopener" onclick="return false;">
-        <img src="${__BLANK_IMG}" alt="Pagina ${page}">
-        <div class="docPhotoBadge">${page}</div>
-      </a>
-    `;
-  }).join("");
-
-  const anchors = Array.from(docDetailPhotosGrid.querySelectorAll(".docPhoto"));
-  pages.forEach((file, idx) => {
-    if (token !== __docDetailRenderToken) return;
-    const u = URL.createObjectURL(file);
-    __docDetailBlobUrls.push(u);
-    const a = anchors[idx];
-    if (!a) return;
-    const img = a.querySelector("img");
-    if (img) img.src = u;
-    a.href = u;
-    a.onclick = null;
-    try { a.removeAttribute("onclick"); } catch(_){ }
   });
 }
 
@@ -4903,47 +4958,16 @@ async function deleteSupplierCascade(supplierId){
       btnConfirmMovement.textContent = t === "IN" ? "Conferma carico" : "Conferma scarico";
     }
 
-    function makeSessionDoc() {
-      return {
-        id: `doc_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-        files: [],
-        rawPages: [],
-        structuredPages: [],
-        activePageIndex: 0,
-        rawText: "",
-        extractStructured: null,
-        extractRef: null,
-        status: "pending",
-        createdAt: nowIso()
-      };
-    }
+    function resetCapture(options = {}) {
+      const keepDocs = !!options.keepDocs;
+      if (!keepDocs) capture.docs = [];
+      capture.files = [];
+      capture.rawPages = [];
+      capture.structuredPages = [];
+      capture.activePageIndex = 0;
+      capture.file = null;
+      capture.rawText = "";
 
-    function getSessionDocById(id) {
-      return (capture.docs || []).find(d => String(d.id) === String(id)) || null;
-    }
-
-    function getActiveDoc() {
-      return getSessionDocById(capture.activeDocId);
-    }
-
-    function ensureActiveDoc() {
-      let doc = getActiveDoc();
-      if (!doc) {
-        doc = makeSessionDoc();
-        capture.docs.push(doc);
-        capture.activeDocId = doc.id;
-      }
-      return doc;
-    }
-
-    function setActiveDoc(id) {
-      if (!id) return;
-      capture.activeDocId = String(id);
-      renderActiveDoc();
-      renderSessionDocsList();
-    }
-
-    function resetActiveUI() {
       // allow re-select same file again
       try { cameraInput.value = ""; } catch(_){}
       try { galleryInput.value = ""; } catch(_){}
@@ -4979,71 +5003,14 @@ async function deleteSupplierCascade(supplierId){
       fQty.value = "";
       fNote.value = "";
       fDate.value = todayYYYYMMDD();
-    }
-
-    function renderActiveDoc() {
-      const doc = getActiveDoc();
-      if (!doc) {
-        resetActiveUI();
-        return;
-      }
-
-      const n = (doc.files && doc.files.length) ? doc.files.length : 0;
-      if (n) {
-        const idx = (typeof doc.activePageIndex === "number") ? doc.activePageIndex : (n - 1);
-        doc.activePageIndex = Math.min(Math.max(0, idx), n - 1);
-        const file = doc.files[doc.activePageIndex];
-        if (file) {
-          const url = URL.createObjectURL(file);
-          previewImg.src = url;
-          previewImg.onload = () => URL.revokeObjectURL(url);
-          previewImg.style.display = "block";
-          previewPlaceholder.style.display = "none";
-        }
-      } else {
-        previewImg.src = "";
-        previewImg.style.display = "none";
-        previewPlaceholder.style.display = "grid";
-      }
-
-      ocrResult.value = doc.rawText || "";
-
-      if (doc.extractRef || doc.extractStructured) {
-        renderDocExtract(doc.extractRef || doc.extractStructured, doc.rawText || "");
-        doc.extractRef = __lastDocExtract;
-      } else {
-        renderDocExtract(null, "");
-      }
-
-      __renderPagesUI(doc);
-      btnConfirmMovement.disabled = !__canConfirmMovement();
-    }
-
-    function resetCapture() {
-      capture.docs = [];
-      capture.activeDocId = null;
-      resetActiveUI();
-      renderSessionDocsList();
-    }
-
-    function startNewDoc() {
-      const current = getActiveDoc();
-      if (current && !current.files.length && !current.rawText) {
-        resetActiveUI();
-        return;
-      }
-      const doc = makeSessionDoc();
-      capture.docs.push(doc);
-      capture.activeDocId = doc.id;
-      resetActiveUI();
-      renderSessionDocsList();
+      __updateSessionDocsUI();
+      __updateConfirmLabels();
     }
 
     
 
-    function __renderPagesUI(doc){
-      const activeDoc = doc || getActiveDoc();
-      const n = (activeDoc && activeDoc.files && activeDoc.files.length) ? activeDoc.files.length : 0;
+    function __renderPagesUI(){
+      const n = (capture.files && capture.files.length) ? capture.files.length : 0;
       if (!pagesMeta || !pagesCount || !pagesThumbs) return;
       if (!n){
         pagesMeta.style.display = "none";
@@ -5060,9 +5027,9 @@ async function deleteSupplierCascade(supplierId){
       pagesThumbs.style.display = "flex";
       pagesThumbs.innerHTML = "";
 
-      const active = (typeof activeDoc.activePageIndex === "number") ? activeDoc.activePageIndex : (n - 1);
+      const active = (typeof capture.activePageIndex === "number") ? capture.activePageIndex : (n - 1);
 
-      activeDoc.files.forEach((f, idx) => {
+      capture.files.forEach((f, idx) => {
         const b = document.createElement("button");
         b.type = "button";
         b.className = "pageThumb" + (idx === active ? " is-active" : "");
@@ -5085,136 +5052,26 @@ async function deleteSupplierCascade(supplierId){
     }
 
     function __setActivePage(idx){
-      const doc = getActiveDoc();
-      if (!doc || !doc.files || !doc.files[idx]) return;
-      doc.activePageIndex = idx;
-      const file = doc.files[idx];
+      if (!capture.files || !capture.files[idx]) return;
+      capture.activePageIndex = idx;
+      capture.file = capture.files[idx];
 
-      const url = URL.createObjectURL(file);
+      const url = URL.createObjectURL(capture.file);
       previewImg.src = url;
       previewImg.onload = () => URL.revokeObjectURL(url);
       previewImg.style.display = "block";
       previewPlaceholder.style.display = "none";
 
-      __renderPagesUI(doc);
+      __renderPagesUI();
     }
 
-    function __rebuildCombinedOCR(doc){
-      const activeDoc = doc || getActiveDoc();
-      if (!activeDoc) return;
-      const parts = Array.isArray(activeDoc.rawPages) ? activeDoc.rawPages.filter(t => t && String(t).trim()) : [];
-      activeDoc.rawText = parts.join("\n\n");
-      ocrResult.value = activeDoc.rawText;
-      const merged = __mergeStructuredPages(Array.isArray(activeDoc.structuredPages) ? activeDoc.structuredPages : []);
-      activeDoc.extractStructured = merged;
-      renderDocExtract(merged, activeDoc.rawText);
-      activeDoc.extractRef = __lastDocExtract;
+    function __rebuildCombinedOCR(){
+      const parts = Array.isArray(capture.rawPages) ? capture.rawPages.filter(t => t && String(t).trim()) : [];
+      capture.rawText = parts.join("\n\n");
+      ocrResult.value = capture.rawText;
+      const merged = __mergeStructuredPages(Array.isArray(capture.structuredPages) ? capture.structuredPages : []);
+      renderDocExtract(merged, capture.rawText);
       btnConfirmMovement.disabled = !__canConfirmMovement();
-    }
-
-    function formatSessionDocLabel(doc){
-      const extract = doc?.extractRef || doc?.extractStructured || {};
-      const docNum = extract.__docNumber || extract.documentNumberRaw || extract.documentNumber || "";
-      const docDateRaw = extract.__docDateRaw || extract.documentDateRaw || extract.documentDate || "";
-      const docDateISO = extract.__docDateISO || coerceToISODate(docDateRaw) || "";
-      const dateTxt = formatDateOnlyIT(docDateISO || docDateRaw);
-      if (docNum) return `DDT ${docNum} del ${dateTxt || "—"}`;
-      return `DDT (numero non letto) del ${dateTxt || "—"}`;
-    }
-
-    function getSessionDocSupplierName(doc){
-      const extract = doc?.extractRef || doc?.extractStructured || {};
-      const sup = extract && extract.supplier ? extract.supplier : {};
-      return String(sup?.name || "").trim();
-    }
-
-    const __sessionDocThumbUrls = [];
-    function __revokeSessionDocThumbUrls(){
-      if (!__sessionDocThumbUrls.length) return;
-      __sessionDocThumbUrls.splice(0).forEach(u => {
-        try { URL.revokeObjectURL(u); } catch(_){}
-      });
-    }
-
-    function renderSessionDocsList(){
-      if (!sessionDocsWrap || !sessionDocsGrid) return;
-      const docs = (capture.docs || []).filter(d => d && d.files && d.files.length);
-
-      __revokeSessionDocThumbUrls();
-      sessionDocsGrid.innerHTML = "";
-
-      if (!docs.length){
-        sessionDocsWrap.style.display = "none";
-        return;
-      }
-
-      sessionDocsWrap.style.display = "";
-
-      docs.forEach((doc, idx) => {
-        const card = document.createElement("div");
-        card.className = "sessionDocCard" + (doc.id === capture.activeDocId ? " is-active" : "");
-
-        const thumb = document.createElement("button");
-        thumb.type = "button";
-        thumb.className = "sessionDocThumb";
-        thumb.setAttribute("data-doc-id", doc.id);
-        thumb.setAttribute("data-doc-action", "detail");
-        if (doc.files && doc.files[0]) {
-          const img = document.createElement("img");
-          const url = URL.createObjectURL(doc.files[0]);
-          __sessionDocThumbUrls.push(url);
-          img.src = url;
-          thumb.appendChild(img);
-        } else {
-          const ph = document.createElement("div");
-          ph.className = "placeholder";
-          ph.textContent = "Nessuna immagine";
-          thumb.appendChild(ph);
-        }
-
-        const meta = document.createElement("div");
-        meta.className = "sessionDocMeta";
-        const title = document.createElement("div");
-        title.className = "title";
-        title.textContent = formatSessionDocLabel(doc);
-        const sub = document.createElement("div");
-        sub.className = "sub";
-        sub.textContent = getSessionDocSupplierName(doc) || `DDT ${idx + 1}`;
-        meta.appendChild(title);
-        meta.appendChild(sub);
-
-        const actions = document.createElement("div");
-        actions.className = "sessionDocActions";
-
-        const btnSelect = document.createElement("button");
-        btnSelect.type = "button";
-        btnSelect.className = "btn btn-secondary mini";
-        btnSelect.textContent = "Seleziona";
-        btnSelect.setAttribute("data-doc-id", doc.id);
-        btnSelect.setAttribute("data-doc-action", "select");
-
-        const status = document.createElement("div");
-        const statusText = doc.status === "imported"
-          ? "Importato"
-          : (doc.status === "error"
-            ? "Errore"
-            : (doc.status === "processing" ? "OCR…" : "Pronto"));
-        const statusClass = doc.status === "imported"
-          ? " imported"
-          : (doc.status === "error"
-            ? " error"
-            : (doc.status === "processing" ? " processing" : ""));
-        status.className = "sessionDocStatus" + statusClass;
-        status.textContent = statusText;
-
-        actions.appendChild(btnSelect);
-        actions.appendChild(status);
-
-        card.appendChild(thumb);
-        card.appendChild(meta);
-        card.appendChild(actions);
-        sessionDocsGrid.appendChild(card);
-      });
     }
 
     function __isEmptyVal(v){
@@ -5272,28 +5129,23 @@ async function deleteSupplierCascade(supplierId){
     }
 
     function __removeLastPage(){
-      const doc = getActiveDoc();
-      if (!doc || !doc.files || !doc.files.length) return;
-      doc.files.pop();
-      if (Array.isArray(doc.rawPages)) doc.rawPages.pop();
-      if (Array.isArray(doc.structuredPages)) doc.structuredPages.pop();
+      if (!capture.files || !capture.files.length) return;
+      capture.files.pop();
+      if (Array.isArray(capture.rawPages)) capture.rawPages.pop();
+      if (Array.isArray(capture.structuredPages)) capture.structuredPages.pop();
 
-      const n = doc.files.length;
-      doc.activePageIndex = Math.max(0, n - 1);
+      const n = capture.files.length;
+      capture.activePageIndex = Math.max(0, n - 1);
+      capture.file = n ? capture.files[capture.activePageIndex] : null;
 
       if (!n){
-        doc.rawText = "";
-        doc.extractStructured = null;
-        doc.extractRef = null;
-        resetActiveUI();
-        renderSessionDocsList();
+        resetCapture();
         return;
       }
 
-      __setActivePage(doc.activePageIndex);
-      __renderPagesUI(doc);
-      __rebuildCombinedOCR(doc);
-      renderSessionDocsList();
+      __setActivePage(capture.activePageIndex);
+      __renderPagesUI();
+      __rebuildCombinedOCR();
       showToast("Pagina rimossa");
     }
 async function handleFileSelection(fileList) {
@@ -5304,31 +5156,29 @@ async function handleFileSelection(fileList) {
       try { cameraInput.value = ""; } catch(_){}
       try { galleryInput.value = ""; } catch(_){}
 
-      const doc = ensureActiveDoc();
-      if (!Array.isArray(doc.files)) doc.files = [];
-      if (!Array.isArray(doc.rawPages)) doc.rawPages = [];
-      if (!Array.isArray(doc.structuredPages)) doc.structuredPages = [];
-      if (typeof doc.activePageIndex !== "number") doc.activePageIndex = 0;
+      if (!Array.isArray(capture.files)) capture.files = [];
+      if (!Array.isArray(capture.rawPages)) capture.rawPages = [];
+      if (!Array.isArray(capture.structuredPages)) capture.structuredPages = [];
+      if (typeof capture.activePageIndex !== "number") capture.activePageIndex = 0;
 
-      const startIdx = doc.files.length;
+      const startIdx = capture.files.length;
       const isNewDoc = (startIdx === 0);
 
       // append pages
-      doc.files = doc.files.concat(picked);
+      capture.files = capture.files.concat(picked);
 
       // set active last
-      doc.activePageIndex = doc.files.length - 1;
+      capture.activePageIndex = capture.files.length - 1;
+      capture.file = capture.files[capture.activePageIndex];
 
       // preview active
-      const url = URL.createObjectURL(doc.files[doc.activePageIndex]);
+      const url = URL.createObjectURL(capture.file);
       previewImg.src = url;
       previewImg.onload = () => URL.revokeObjectURL(url);
       previewImg.style.display = "block";
       previewPlaceholder.style.display = "none";
 
-      __renderPagesUI(doc);
-      doc.status = "processing";
-      renderSessionDocsList();
+      __renderPagesUI();
 
       if (isNewDoc) {
         ocrResult.value = "";
@@ -5347,18 +5197,19 @@ async function handleFileSelection(fileList) {
       try {
         try { imagePreview.classList.add("decrypting"); } catch(_) {}
 
-        const total = doc.files.length;
+        const total = capture.files.length;
 
-        for (let i = startIdx; i < doc.files.length; i++) {
+        for (let i = startIdx; i < capture.files.length; i++) {
           const pageNum = i + 1;
           progressLabel.textContent = `OCR pagina ${pageNum}/${total}…`;
 
           // convert if HEIC
-          const converted = await maybeConvertHeic(doc.files[i]);
-          doc.files[i] = converted;
+          const converted = await maybeConvertHeic(capture.files[i]);
+          capture.files[i] = converted;
 
           // refresh preview if active page was converted
-          if (doc.activePageIndex === i) {
+          if (capture.activePageIndex === i) {
+            capture.file = converted;
             const url2 = URL.createObjectURL(converted);
             previewImg.src = url2;
             previewImg.onload = () => URL.revokeObjectURL(url2);
@@ -5367,28 +5218,25 @@ async function handleFileSelection(fileList) {
           const data = await runGeminiOCR(converted);
 
           const text = (data && (data.text || data.rawText || data.raw || "")) || "";
-          doc.rawPages[i] = String(text || "");
-          doc.structuredPages[i] = (data && data.structured) ? data.structured : null;
+          capture.rawPages[i] = String(text || "");
+          capture.structuredPages[i] = (data && data.structured) ? data.structured : null;
 
           // live update combined result (tutte le pagine nello stesso documento)
-          const parts = Array.isArray(doc.rawPages) ? doc.rawPages.filter(t => t && String(t).trim()) : [];
-          doc.rawText = parts.join("\n\n");
-          ocrResult.value = doc.rawText;
+          const parts = Array.isArray(capture.rawPages) ? capture.rawPages.filter(t => t && String(t).trim()) : [];
+          capture.rawText = parts.join("\n\n");
+          ocrResult.value = capture.rawText;
 
-          const merged = __mergeStructuredPages(doc.structuredPages);
-          doc.extractStructured = merged;
-          renderDocExtract(merged, doc.rawText);
-          doc.extractRef = __lastDocExtract;
+          const merged = __mergeStructuredPages(capture.structuredPages);
+          renderDocExtract(merged, capture.rawText);
 
           const done = parts.length;
           const pct = Math.min(95, Math.round(10 + 85 * (done / Math.max(1, total))));
           progressFill.style.width = pct + "%";
 
-          __renderPagesUI(doc);
+          __renderPagesUI();
         }
 
-        const merged = __mergeStructuredPages(doc.structuredPages);
-        doc.extractStructured = merged;
+        const merged = __mergeStructuredPages(capture.structuredPages);
 
         // Auto: salva/aggiorna anagrafica fornitore (best-effort)
         try {
@@ -5405,7 +5253,7 @@ async function handleFileSelection(fileList) {
         try { imagePreview.classList.remove("decrypting"); } catch(_) {}
 
         // fill fields best-effort (senza sovrascrivere editing manuale)
-        const parsed = extractFieldsFromText(doc.rawText);
+        const parsed = extractFieldsFromText(capture.rawText);
         if (fCustomer && !String(fCustomer.value || "").trim()) fCustomer.value = parsed.customer || "";
         if (fCode && !String(fCode.value || "").trim()) fCode.value = parsed.code || "";
         if (fItem && !String(fItem.value || "").trim()) fItem.value = parsed.item || "";
@@ -5427,11 +5275,8 @@ async function handleFileSelection(fileList) {
           if (fNote && !String(fNote.value || "").trim() && noteAuto) fNote.value = noteAuto;
         }
 
-        doc.extractRef = __lastDocExtract;
-        doc.status = "ready";
-        renderSessionDocsList();
-
         btnConfirmMovement.disabled = !__canConfirmMovement();
+        __updateConfirmLabels();
 
         // update OCR pill
         setOcrPill("ok", "OCR: pronto");
@@ -5443,8 +5288,6 @@ async function handleFileSelection(fileList) {
         progressLabel.textContent = "Errore OCR";
         if (progressSpinner) progressSpinner.style.display = "none";
         setOcrPill("bad", "OCR: errore");
-        doc.status = "error";
-        renderSessionDocsList();
 
         const status = e && e.status ? e.status : 0;
         if (status === 403) {
@@ -5460,6 +5303,7 @@ async function handleFileSelection(fileList) {
     function bindFieldValidation() {
       const check = () => {
         btnConfirmMovement.disabled = !__canConfirmMovement();
+        __updateConfirmLabels();
         };
       [fCustomer, fCode, fItem, fQty, fDate].forEach(el => el.addEventListener("input", check));
       [fCustomer, fCode, fItem, fQty, fDate].forEach(el => el.addEventListener("change", check));
@@ -5667,24 +5511,14 @@ async function handleFileSelection(fileList) {
     segOut.addEventListener("click", () => setCaptureType("OUT"));
 
     btnReset.addEventListener("click", resetCapture);
-    if (btnNewDoc) btnNewDoc.addEventListener("click", startNewDoc);
-    if (sessionDocsGrid) {
-      sessionDocsGrid.addEventListener("click", (e) => {
-        const btn = e.target.closest("[data-doc-action]");
-        if (!btn) return;
-        const docId = btn.getAttribute("data-doc-id");
-        const action = btn.getAttribute("data-doc-action");
-        const doc = getSessionDocById(docId);
-        if (!doc) return;
-        if (action === "detail") {
-          openSessionDocDetail(doc);
-          return;
-        }
-        if (action === "select") {
-          setActiveDoc(docId);
-        }
-      });
-    }
+    btnAddDoc?.addEventListener("click", __queueCurrentDoc);
+    btnClearSessionDocs?.addEventListener("click", __clearQueuedDocs);
+    sessionDocsList?.addEventListener("click", (e) => {
+      const btn = e.target.closest("button[data-action='removeSessionDoc']");
+      if (!btn) return;
+      const idx = Number(btn.getAttribute("data-idx"));
+      if (!Number.isNaN(idx)) __removeQueuedDocByIndex(idx);
+    });
 
     // Anagrafica tabs + search
     if (segSuppliers && segProducts) {
@@ -5732,119 +5566,107 @@ async function handleFileSelection(fileList) {
 
 
     btnConfirmMovement.addEventListener("click", async () => {
-      // Import completo dal documento (multi-riga)
-      const activeDoc = getActiveDoc();
-      const doc = (activeDoc && (activeDoc.extractRef || __lastDocExtract)) ? (activeDoc.extractRef || __lastDocExtract) : null;
-      const items = (doc && Array.isArray(doc.__items)) ? doc.__items : ((doc && Array.isArray(doc.items)) ? doc.items : []);
-      const safeItems = (items || []).filter(it => !__isConaiItem(it));
+      const queuedDocs = Array.isArray(capture.docs) ? capture.docs.slice() : [];
+      const currentDoc = __isCurrentDocValid() ? __buildDocFromCurrentCapture() : null;
+      const docsToImport = [];
+      if (currentDoc) docsToImport.push(currentDoc);
+      if (queuedDocs.length) docsToImport.push(...queuedDocs);
+
+      if (!docsToImport.length) {
+        openModal("Nessun DDT", "Aggiungi almeno un DDT valido prima di confermare.");
+        return;
+      }
 
       // Flusso OCR Home = solo CARICO
       capture.movementType = "IN";
 
-      const customer = (fCustomer && fCustomer.value ? String(fCustomer.value).trim() : "");
-      const docDateISO = (doc && (doc.__docDateISO || coerceToISODate(doc.documentDateRaw || doc.documentDate || ""))) || (fDate && fDate.value) || todayYYYYMMDD();
-
-      const docType = doc && (doc.__docType || doc.documentTypeRaw || doc.documentType || "");
-      const docNum  = doc && (doc.__docNumber || doc.documentNumberRaw || doc.documentNumber || "");
-      const docDateRaw = doc && (doc.__docDateRaw || doc.documentDateRaw || doc.documentDate || "");
-      const baseNote = [docType, docNum, docDateRaw].filter(Boolean).join(" ").trim();
-
-      const docKey = docKeyFromMeta({ customer, date: docDateISO, note: baseNote, source: "OCR", docNum: docNum });
-
-      if (!customer) {
-        openModal("Cliente mancante", "Non riesco a leggere il nome cliente dal documento. Riprova con una foto più nitida.");
-        return;
-      }
-      if (!activeDoc || !activeDoc.files || !activeDoc.files.length) {
-        openModal("Nessuna immagine", "Non ci sono immagini associate a questo DDT. Carica almeno una pagina.");
-        return;
-      }
-      if (!items.length) {
-        openModal("Nessuna riga trovata", "Non ho trovato righe inventario nel documento. Riprova con una foto più nitida.");
-        return;
-      }
-
       btnConfirmMovement.disabled = true;
       progressLabel.textContent = "Import in corso…";
-      progressFill.style.width = "88%";
+      progressFill.style.width = "70%";
 
       try {
-
-let docPages = [];
-try {
-  if (activeDoc.files && activeDoc.files.length) {
-    progressLabel.textContent = "Caricamento foto…";
-    progressFill.style.width = "80%";
-    docPages = await uploadDocPagesToStorage(docKey, activeDoc.files);
-  }
-} catch (e) {
-  console.warn("upload doc pages failed", e);
-  docPages = [];
-}
-
-        try {
-          const supplierDetails = buildSupplierFromOcr(doc, activeDoc.rawText || "");
-          if (supplierDetails && supplierDetails.name) {
-            await ensureSupplierUpsert(supplierDetails);
-          } else {
-            await ensureSupplierUpsert(customer);
-          }
-        } catch (e) {
-          await ensureSupplierUpsert(customer);
-        }
-        await ensureProductsUpsert(items);
-
         let ok = 0;
         let skip = 0;
-        let lineIndex = 0;
 
-        for (const it of safeItems) {
-          lineIndex++;
-          const rawCode = String(it.code || "").trim();
-          const rawDesc = String(it.description || "").trim();
+        for (let d = 0; d < docsToImport.length; d++) {
+          const doc = docsToImport[d];
+          const customer = String(doc.customer || "").trim();
+          const docDateISO = doc.docDateISO || todayYYYYMMDD();
+          const docType = doc.docType || "";
+          const docNum = doc.docNum || "";
+          const docDateRaw = doc.docDateRaw || "";
+          const baseNote = doc.baseNote || [docType, docNum, docDateRaw].filter(Boolean).join(" ").trim();
 
-          const code = (rawCode || rawDesc || "").trim();
-          if (__isConaiCode(code) || __isConaiLine(code) || __isConaiLine(rawDesc)) { skip++; continue; }
-          const item = (rawDesc || rawCode || "").trim();
+          progressLabel.textContent = `Import DDT ${d + 1}/${docsToImport.length}…`;
+          progressFill.style.width = `${Math.min(90, Math.round(70 + 20 * ((d + 1) / docsToImport.length))) }%`;
 
-          const qtyStr = (it.qty != null && it.qty !== "" && !Number.isNaN(Number(it.qty)))
-            ? String(it.qty)
-            : (it.qtyRaw ? String(it.qtyRaw).replace(/[^\d,\.]/g,"").trim() : "");
+          const docKey = docKeyFromMeta({ customer, date: docDateISO, note: baseNote, source: "OCR", docNum: docNum });
 
-          const mv = makeMovement({
-            type: "IN",
-            customer,
-            code,
-            item,
-            qty: qtyStr,
-            date: docDateISO,
-            note: baseNote,
-            docType: String(docType || ""),
-            docNum: String(docNum || ""),
-            docDateRaw: String(docDateRaw || ""),
-            docPages: docPages,
-            lineIndex: lineIndex,
-            source: "OCR",
-            rawText: activeDoc.rawText || ""
-          });
+          let docPages = [];
+          try {
+            if (doc.files && doc.files.length) {
+              progressLabel.textContent = `Caricamento foto DDT ${d + 1}/${docsToImport.length}…`;
+              progressFill.style.width = `${Math.min(92, Math.round(70 + 20 * ((d + 1) / docsToImport.length))) }%`;
+              docPages = await uploadDocPagesToStorage(docKey, doc.files);
+            }
+          } catch (e) {
+            console.warn("upload doc pages failed", e);
+            docPages = [];
+          }
 
-          if (!validateMovementFields(mv)) { skip++; continue; }
-          await addMovement(mv);
-          ok++;
+          const supplierDetails = buildSupplierFromOcr(doc.structured || {}, doc.rawText || "");
+          if (supplierDetails && supplierDetails.name) await ensureSupplierUpsert(supplierDetails);
+          else await ensureSupplierUpsert(customer);
+
+          await ensureProductsUpsert(doc.items || []);
+
+          let lineIndex = 0;
+          for (const it of (doc.items || [])) {
+            lineIndex++;
+            const rawCode = String(it.code || "").trim();
+            const rawDesc = String(it.description || "").trim();
+
+            const code = (rawCode || rawDesc || "").trim();
+            if (__isConaiCode(code) || __isConaiLine(code) || __isConaiLine(rawDesc)) { skip++; continue; }
+            const item = (rawDesc || rawCode || "").trim();
+
+            const qtyStr = (it.qty != null && it.qty !== "" && !Number.isNaN(Number(it.qty)))
+              ? String(it.qty)
+              : (it.qtyRaw ? String(it.qtyRaw).replace(/[^\d,\.]/g,"").trim() : "");
+
+            const mv = makeMovement({
+              type: "IN",
+              customer,
+              code,
+              item,
+              qty: qtyStr,
+              date: docDateISO,
+              note: baseNote,
+              docType: String(docType || ""),
+              docNum: String(docNum || ""),
+              docDateRaw: String(docDateRaw || ""),
+              docPages: docPages,
+              lineIndex: lineIndex,
+              source: "OCR",
+              rawText: doc.rawText || ""
+            });
+
+            if (!validateMovementFields(mv)) { skip++; continue; }
+            await addMovement(mv);
+            ok++;
+          }
         }
 
         if (ok > 0) showToast(`Carico importato: ${ok} righe${skip ? " (alcune righe scartate)" : ""}`);
         else showToast("Nessuna riga valida da importare");
 
-        activeDoc.status = "imported";
-        activeDoc.importedAt = nowIso();
-        renderSessionDocsList();
-        startNewDoc();
+        resetCapture();
         setView("ocr");
       } catch (e) {
         console.error(e);
         openModal("Errore import", String(e.message || e));
         btnConfirmMovement.disabled = false;
+        __updateConfirmLabels();
       }
     });
 
@@ -6308,7 +6130,7 @@ try {
         if (!Array.isArray(items) || !items.length) return;
 
         const seen = new Set();
-        for (const it of safeItems) {
+        for (const it of items) {
           const rawCode = String(it.code || "").trim();
           const rawDesc = String(it.description || "").trim();
           const code = (rawCode || rawDesc || "").trim();
