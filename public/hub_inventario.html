@@ -3787,6 +3787,53 @@ function docKeyFromMovement(mv){
   });
 }
 
+
+// ===== Dedupe OCR documents (CRITICO): blocca doppio caricamento stesso DDT =====
+function __dup_normSupplierName(v){
+  const raw = String(v || "").toLowerCase().replace(/&/g, " e ");
+  // keep letters/digits/spaces (incl. accents), drop punctuation
+  const cleaned = raw.replace(/[^a-z0-9à-ÿ\s]/gi, " ").replace(/\s+/g, " ").trim();
+  if (!cleaned) return "";
+  const drop = new Set(["srl","srls","spa","sas","snc","srl.","s.p.a","s.r.l","s.a.s","s.n.c","societa","società","coop","cooperativa","ditta","impresa","azienda"]);
+  return cleaned.split(" ").filter(t => t && !drop.has(t)).join(" ");
+}
+
+function __dup_normDocNum(v){
+  const raw = String(v || "").trim().toLowerCase();
+  if (!raw) return "";
+  // normalize: remove spaces and dots, keep digits/letters and separators like / or -
+  return raw.replace(/\s+/g, "").replace(/[\.·]/g, "");
+}
+
+function __dup_docIdentityKey(customer, dateISO, docNum){
+  const c = __dup_normSupplierName(customer);
+  const d = String(dateISO || "").trim();
+  const n = __dup_normDocNum(docNum);
+  if (!c || !d || !n) return "";
+  return [c, d, n].join("|");
+}
+
+function __findDuplicateDocInState(customer, dateISO, docNum){
+  const key = __dup_docIdentityKey(customer, dateISO, docNum);
+  if (!key) return null;
+
+  const list = Array.isArray(state.movements) ? state.movements : [];
+  for (const mv of list){
+    // Consider only doc-like movements (OCR or with docNum / DDT in nota)
+    const src = String(mv && mv.source || "");
+    const note = String(mv && mv.note || "");
+    const isDocLike = (src.toUpperCase() === "OCR") || !!String(mv && mv.docNum || "").trim() || /\bDDT\b|DOCUMENTO|TRASPORTO|BOLLA|FATTURA/i.test(note);
+    if (!isDocLike) continue;
+
+    const mvDocNum = String(mv && mv.docNum || "").trim() || extractDocNumber(note) || "";
+    const k2 = __dup_docIdentityKey(mv && mv.customer, mv && mv.date, mvDocNum);
+    if (k2 && k2 === key) return mv;
+  }
+  return null;
+}
+// ===== end dedupe =====
+
+
 function __isRenderableUrl(u){
   const s = String(u || "").trim();
   return /^(https?:|data:|blob:)/i.test(s);
@@ -5474,11 +5521,17 @@ async function handleFileSelection(fileList) {
       const docDateISO = (doc && (doc.__docDateISO || coerceToISODate(doc.documentDateRaw || doc.documentDate || ""))) || (fDate && fDate.value) || todayYYYYMMDD();
 
       const docType = doc && (doc.__docType || doc.documentTypeRaw || doc.documentType || "");
-      const docNum  = doc && (doc.__docNumber || doc.documentNumberRaw || doc.documentNumber || "");
+      const docNumRaw  = doc && (doc.__docNumber || doc.documentNumberRaw || doc.documentNumber || "");
       const docDateRaw = doc && (doc.__docDateRaw || doc.documentDateRaw || doc.documentDate || "");
-      const baseNote = [docType, docNum, docDateRaw].filter(Boolean).join(" ").trim();
 
-      const docKey = docKeyFromMeta({ customer, date: docDateISO, note: baseNote, source: "OCR", docNum: docNum });
+      // Best-effort: risolvi numero DDT (serve per dedupe e per key documento)
+      const docNumResolved = String(docNumRaw || "").trim()
+        || extractDocNumber(String(capture && capture.rawText || "")) 
+        || "";
+
+      const baseNote = [docType, (docNumResolved || docNumRaw), docDateRaw].filter(Boolean).join(" ").trim();
+
+      const docKey = docKeyFromMeta({ customer, date: docDateISO, note: baseNote, source: "OCR", docNum: (docNumResolved || docNumRaw) });
 
       if (!customer) {
         openModal("Cliente mancante", "Non riesco a leggere il nome cliente dal documento. Riprova con una foto più nitida.");
@@ -5488,6 +5541,17 @@ async function handleFileSelection(fileList) {
         openModal("Nessuna riga trovata", "Non ho trovato righe inventario nel documento. Riprova con una foto più nitida.");
         return;
       }
+
+      // Dedupe (CRITICO): blocca doppio caricamento stesso documento (fornitore + DDT + data)
+      const dupMv = __findDuplicateDocInState(customer, docDateISO, (docNumResolved || docNumRaw));
+      if (dupMv) {
+        const numTxt = String((docNumResolved || docNumRaw) || "").trim();
+        const dateTxt = formatDateOnlyIT(docDateISO) || String(docDateISO || "");
+        openModal("Documento già caricato", `Hai già importato questo documento in OCR. Caricamento bloccato.\n\nFornitore: ${customer}\nDDT: ${numTxt || "—"}\nData: ${dateTxt}`);
+        showToast("Documento già caricato");
+        return;
+      }
+
 
       btnConfirmMovement.disabled = true;
       progressLabel.textContent = "Import in corso…";
@@ -5536,7 +5600,7 @@ try {
             date: docDateISO,
             note: baseNote,
             docType: String(docType || ""),
-            docNum: String(docNum || ""),
+            docNum: String((docNumResolved || docNumRaw) || ""),
             docDateRaw: String(docDateRaw || ""),
             docPages: docPages,
             lineIndex: lineIndex,
