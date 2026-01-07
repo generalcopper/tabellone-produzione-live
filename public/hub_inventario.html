@@ -2305,6 +2305,88 @@ const docDetailPhotosMeta = document.getElementById("docDetailPhotosMeta");
       // already string or invalid
       return String(ts || "");
     }
+    // --- Helpers: normalizzazione pagine documento (docPages/docImages) ---
+    function __isRenderableUrl(u){
+      if (u == null) return false;
+      const s = String(u).trim();
+      if (!s) return false;
+      // URL comuni
+      if (/^https?:\/\//i.test(s)) return true;
+      if (s.startsWith("data:image/")) return true;
+      if (s.startsWith("blob:")) return true;
+      if (s.startsWith("gs://")) return true; // Firebase Storage path (renderabile dopo getDownloadURL)
+      if (s.startsWith("/")) return true;
+      // anche path relativi
+      return true;
+    }
+
+    function __sanitizeDocPages(pages){
+      try {
+        if (!pages) return [];
+        const out = [];
+        const pushOne = (obj) => {
+          if (!obj) return;
+          let url = obj.url || obj.downloadURL || obj.downloadUrl || obj.src || obj.href || obj.path || obj.storagePath || obj.gsPath || "";
+          url = (url == null) ? "" : String(url).trim();
+          if (!url) return;
+          if (!__isRenderableUrl(url)) return;
+          out.push({
+            page: safeInt(obj.page) || 0,
+            url,
+            path: obj.path || obj.storagePath || obj.gsPath || "",
+            name: obj.name || obj.fileName || ""
+          });
+        };
+
+        // Stringa singola
+        if (typeof pages === "string") {
+          pushOne({ url: pages });
+        }
+        // Array
+        else if (Array.isArray(pages)) {
+          for (const p of pages) {
+            if (!p) continue;
+            if (typeof p === "string") pushOne({ url: p });
+            else if (typeof p === "object") pushOne(p);
+          }
+        }
+        // Oggetto singolo o mappa
+        else if (typeof pages === "object") {
+          // oggetto con url/path
+          if (pages.url || pages.path || pages.storagePath || pages.gsPath || pages.downloadURL || pages.downloadUrl) {
+            pushOne(pages);
+          } else {
+            // mappa {0:...,1:...}
+            for (const k of Object.keys(pages)) {
+              const v = pages[k];
+              if (!v) continue;
+              if (typeof v === "string") pushOne({ url: v, page: safeInt(k)+1 });
+              else if (typeof v === "object") pushOne({ ...v, page: safeInt(v.page) || (safeInt(k)+1) });
+            }
+          }
+        }
+
+        // Dedup e re-index
+        const seen = new Set();
+        const clean = [];
+        for (const it of out) {
+          const key = String(it.url || it.path || "").trim();
+          if (!key) continue;
+          const lk = key.toLowerCase();
+          if (seen.has(lk)) continue;
+          seen.add(lk);
+          clean.push(it);
+        }
+        for (let i = 0; i < clean.length; i++) {
+          clean[i].page = i + 1;
+        }
+        return clean;
+      } catch (e) {
+        console.warn("__sanitizeDocPages failed", e);
+        return [];
+      }
+    }
+
 
     function setSyncPill(status, text) {
       const el = document.getElementById("pillSync");
@@ -6290,7 +6372,8 @@ try {
         if (!Array.isArray(items) || !items.length) return;
 
         const seen = new Set();
-        for (const it of safeItems) {
+        const safeItemsArr = (items || []).filter(it => it && !__isConaiItem(it));
+        for (const it of safeItemsArr) {
           const rawCode = String(it.code || "").trim();
           const rawDesc = String(it.description || "").trim();
           const code = (rawCode || rawDesc || "").trim();
