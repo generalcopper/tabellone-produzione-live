@@ -3757,6 +3757,48 @@ async function deleteMovement(id) {
       return [v, n, d].join("|");
     }
 
+        function __findSupplierByVat(vatNorm){
+      const v = __sup_cleanVat(vatNorm);
+      if (!v) return null;
+      const list = Array.isArray(suppliers) ? suppliers : [];
+      for (const s of list){
+        if (!s) continue;
+        const sv = __sup_cleanVat(s.vat || s.vatNumber || s.piva || s.partitaIva || "");
+        if (sv && sv === v) return s;
+      }
+      return null;
+    }
+
+    function __findSupplierNameByVat(vatNorm){
+      const s = __findSupplierByVat(vatNorm);
+      return s && s.name ? String(s.name).trim() : "";
+    }
+
+    function __extractVatFromText(raw){
+      const t = String(raw || "");
+      if (!t) return "";
+      // preferenze: pattern espliciti P.IVA / PARTITA IVA / VAT
+      const patterns = [
+        /\bP\.?\s*I\.?\s*V\.?\s*A\.?\s*[:\s]*([0-9]{11})\b/i,
+        /\bPARTITA\s+IVA\s*[:\s]*([0-9]{11})\b/i,
+        /\bVAT\s*(?:ID)?\s*[:\s]*([0-9]{11})\b/i
+      ];
+      for (const re of patterns){
+        const m = t.match(re);
+        if (m && m[1]) {
+          const v = __sup_cleanVat(m[1]);
+          if (v) return v;
+        }
+      }
+      // fallback (più rischioso): prendi 11 cifre SOLO se vicine a "IVA"
+      const m2 = t.match(/\bIVA\b[\s\S]{0,25}\b([0-9]{11})\b/i);
+      if (m2 && m2[1]) {
+        const v = __sup_cleanVat(m2[1]);
+        if (v) return v;
+      }
+      return "";
+    }
+
     function __resolveVatFromDocOrCustomer(doc, customer){
       // 1) Preferisci VAT dal documento (più affidabile)
       try {
@@ -3766,11 +3808,18 @@ async function deleteMovement(id) {
         if (v1) return v1;
       } catch(_) {}
 
-      // 2) Fallback: usa anagrafica fornitori già salvata (matching per nome)
+      // 1b) Prova a estrarre da testo OCR (grezzo) se presente
+      try {
+        const raw = String((doc && (doc.rawText || doc.__rawText || "")) || "") || String(capture && capture.rawText || "");
+        const vTxt = __extractVatFromText(raw);
+        if (vTxt) return vTxt;
+      } catch(_) {}
+
+      // 2) Fallback: usa anagrafica fornitori già salvata (match per nome)
       try {
         const name = String(customer || "").trim();
         if (!name) return "";
-        const list = Array.isArray(state.suppliers) ? state.suppliers : [];
+        const list = Array.isArray(suppliers) ? suppliers : [];
         for (const s of list) {
           if (!s) continue;
           if (supplierMatchesCustomer(s, name)) {
@@ -3783,7 +3832,40 @@ async function deleteMovement(id) {
       return "";
     }
 
-    function __findExistingDocGroupByTriplet(vatNorm, docNumKey, dateISO){
+    
+
+    function __buildSupplierDetailsFromDoc(doc, customerName, vatNorm){
+      const d = (doc && typeof doc === "object") ? doc : {};
+      const sup = (d.supplier || d.__supplier || {}) || {};
+      const name = String(customerName || "").trim();
+
+      const cf = __sup_cleanFiscalCode(sup.taxCode || sup.fiscalCode || sup.cf || sup.codiceFiscale || "");
+
+      const details = {
+        name: name,
+        vat: __sup_cleanVat(vatNorm || sup.vatNumber || sup.vat || sup.piva || ""),
+        fiscalCode: cf || "",
+        address: sup.address || "",
+        cap: sup.postalCode || sup.cap || "",
+        city: sup.city || "",
+        province: sup.province || "",
+        country: sup.country || "",
+        phone: sup.phone || "",
+        mobile: sup.mobile || "",
+        email: sup.email || "",
+        pec: sup.pec || ""
+      };
+
+      // se abbiamo già un fornitore per P.IVA, forza il nome "canonico" (non sovrascrivere con OCR sporco)
+      try{
+        const byVat = __findSupplierByVat(details.vat);
+        if (byVat && byVat.name) details.name = String(byVat.name).trim() || details.name;
+      }catch(_){}
+
+      return details;
+    }
+
+function __findExistingDocGroupByTriplet(vatNorm, docNumKey, dateISO){
       try { rebuildDocGroupsCache(); } catch(_) {}
       const v = String(vatNorm || "").trim();
       const n = String(docNumKey || "").trim();
@@ -3901,17 +3983,32 @@ function buildDocGroupsFromMovements(movements) {
         const isDocLike = (source.toUpperCase() === "OCR") || /\bDDT\b|DOCUMENTO|TRASPORTO|BOLLA|FATTURA/i.test(note);
         if (!isDocLike) return;
 
+        const vatKey = __sup_cleanVat(mv.supplierVat || mv.vat || "");
         const docNumKey = String(mv.docNum || "").trim().toLowerCase();
+
+        // Key stabile: se ho P.IVA uso quella (così nomi OCR diversi non spezzano il collegamento)
+        const customerKey = vatKey ? ("vat_" + vatKey) : String(mv.customer || "").trim().toLowerCase();
+
         const key = [
-          String(mv.customer || "").trim().toLowerCase(),
+          customerKey,
           String(mv.date || "").trim(),
           (docNumKey || note.toLowerCase()),
           source.toLowerCase()
         ].join("|");
 
+        // Customer display: se ho P.IVA e ho un fornitore salvato, uso il nome "canonico"
+        let customerDisplay = mv.customer || "";
+        try{
+          if (vatKey) {
+            const nm = __findSupplierNameByVat(vatKey);
+            if (nm) customerDisplay = nm;
+          }
+        }catch(_){}
+
         const g = groups.get(key) || {
           key,
-          customer: mv.customer || "",
+          customer: customerDisplay,
+          supplierVat: vatKey || "",
           date: mv.date || "",
           note,
           source,
@@ -3919,6 +4016,15 @@ function buildDocGroupsFromMovements(movements) {
           createdAtMax: "",
           movements: []
         };
+
+        // Mantieni supplierVat (se arriva successivamente su righe vecchie)
+        if (!g.supplierVat && vatKey) g.supplierVat = vatKey;
+
+        // Mantieni customer display "canonico" se disponibile
+        if (vatKey) {
+          const nm2 = __findSupplierNameByVat(vatKey);
+          if (nm2) g.customer = nm2;
+        }
 
         g.movements.push(mv);
 
@@ -3934,78 +4040,6 @@ function buildDocGroupsFromMovements(movements) {
       const map = new Map(list.map(g => [g.key, g]));
       return { list, map };
     }
-
-    function rebuildDocGroupsCache() {
-      const out = buildDocGroupsFromMovements(state.movements);
-      __docGroups = out.list;
-      __docGroupsMap = out.map;
-    }
-
-    function formatDocLabel(g) {
-      const num = g?.docNum || extractDocNumber(g?.note);
-      const dateTxt = formatDateOnlyIT(g?.date);
-      if (num) return `DDT numero ${num} del ${dateTxt || "—"}`;
-      return `DDT (numero non letto) del ${dateTxt || "—"}`;
-    }
-
-
-function docKeyFromMeta(meta){
-  const m = (meta && typeof meta === "object") ? meta : {};
-  const customer = String(m.customer || "").trim().toLowerCase();
-  const date = String(m.date || "").trim();
-  const note = String(m.note || "").trim();
-  const source = String(m.source || "").trim();
-  const docNumKey = String(m.docNum || "").trim().toLowerCase();
-  return [customer, date, (docNumKey || note.toLowerCase()), source.toLowerCase()].join("|");
-}
-
-function docKeyFromMovement(mv){
-  return docKeyFromMeta({
-    customer: mv && mv.customer,
-    date: mv && mv.date,
-    note: (mv && mv.note) || "",
-    source: (mv && mv.source) || "",
-    docNum: (mv && mv.docNum) || ""
-  });
-}
-
-function __isRenderableUrl(u){
-  const s = String(u || "").trim();
-  return /^(https?:|data:|blob:)/i.test(s);
-}
-
-function __sanitizeDocPages(pages){
-  const arr = Array.isArray(pages) ? pages : [];
-  const out = [];
-  for (let i = 0; i < arr.length; i++){
-    const p = arr[i];
-
-    // Legacy: possono arrivare stringhe (URL o storage path)
-    if (typeof p === "string"){
-      const s = String(p || "").trim();
-      if (!s) continue;
-      if (__isRenderableUrl(s)) out.push({ url: s, path: "", page: i + 1 });
-      else out.push({ url: "", path: s, page: i + 1 });
-      continue;
-    }
-
-    if (!p || typeof p !== "object") continue;
-
-    let url = String(p.url || p.downloadURL || p.href || "").trim();
-    let path = String(p.path || p.storagePath || "").trim();
-    const page = safeInt(p.page || p.index) || (i + 1);
-
-    // Se l'unico valore sembra un path (es. "orgs/..."), spostalo su path
-    if (url && !path && !__isRenderableUrl(url)){
-      path = url;
-      url = "";
-    }
-
-    if (!url && !path) continue;
-    out.push({ url, path, page });
-  }
-  return out;
-}
 
 
 /****************************************************************
@@ -4801,7 +4835,12 @@ function closeSupplierModal() {
         return;
       }
 
-      const docs = (__docGroups || []).filter(g => supplierMatchesCustomer(sup, g.customer));
+      const supVat = __sup_cleanVat(sup.vat || sup.vatNumber || sup.piva || sup.partitaIva || "");
+      const docs = (__docGroups || []).filter(g => {
+        const gVat = __sup_cleanVat(g.supplierVat || g.vat || g.supplierVatNorm || "");
+        if (supVat && gVat && supVat === gVat) return true;
+        return supplierMatchesCustomer(sup, g.customer);
+      });
       if (!docs.length) {
         supDocsTbody.innerHTML = `<tr><td class="td-muted" colspan="4">Nessun documento collegato a questo fornitore.</td></tr>`;
         return;
@@ -5554,7 +5593,7 @@ async function handleFileSelection(fileList) {
       // Flusso OCR Home = solo CARICO
       capture.movementType = "IN";
 
-      const customer = (fCustomer && fCustomer.value ? String(fCustomer.value).trim() : "");
+      let customer = (fCustomer && fCustomer.value ? String(fCustomer.value).trim() : "");
       const docDateISO = (doc && (doc.__docDateISO || coerceToISODate(doc.documentDateRaw || doc.documentDate || ""))) || (fDate && fDate.value) || todayYYYYMMDD();
 
       const docType = doc && (doc.__docType || doc.documentTypeRaw || doc.documentType || "");
@@ -5562,10 +5601,26 @@ async function handleFileSelection(fileList) {
       const docDateRaw = doc && (doc.__docDateRaw || doc.documentDateRaw || doc.documentDate || "");
       const baseNote = [docType, docNum, docDateRaw].filter(Boolean).join(" ").trim();
 
+      // Anti-duplicato DDT (rigido): stesso numero + stessa P.IVA + stessa data => blocca il re-upload
+      const docNumResolved = String(docNum || "").trim() || extractDocNumber(baseNote) || extractDocNumber(capture.rawText || "");
+      const docNumKey = __docNumToKey(docNumResolved);
+      const vatNorm = __resolveVatFromDocOrCustomer(doc, customer);
+
+      // Se P.IVA presente: aggancia SEMPRE al fornitore con la stessa P.IVA (nome può essere diverso per OCR)
+      try {
+        const byVat = __findSupplierByVat(vatNorm);
+        if (byVat && byVat.name) {
+          customer = String(byVat.name).trim() || customer;
+        } else if (!customer && vatNorm) {
+          customer = `Fornitore ${vatNorm}`;
+        }
+        if (fCustomer && customer) fCustomer.value = customer;
+      } catch(_) {}
+
       const docKey = docKeyFromMeta({ customer, date: docDateISO, note: baseNote, source: "OCR", docNum: docNum });
 
       if (!customer) {
-        openModal("Cliente mancante", "Non riesco a leggere il nome cliente dal documento. Riprova con una foto più nitida.");
+        openModal("Cliente mancante", "Non riesco a leggere il nome fornitore dal documento. Riprova con una foto più nitida.");
         return;
       }
       if (!items.length) {
@@ -5573,13 +5628,9 @@ async function handleFileSelection(fileList) {
         return;
       }
 
-      // Anti-duplicato DDT (rigido): stesso numero + stessa P.IVA + stessa data => blocca il re-upload
-      const docNumResolved = String(docNum || "").trim() || extractDocNumber(baseNote) || extractDocNumber(capture.rawText || "");
-      const docNumKey = __docNumToKey(docNumResolved);
-      const vatNorm = __resolveVatFromDocOrCustomer(doc, customer);
       const ddtTripletKey = __buildDdtTripletKey(vatNorm, docNumKey, docDateISO);
 
-      const dupCheck = await __checkDuplicateDdtBeforeUpload({
+const dupCheck = await __checkDuplicateDdtBeforeUpload({
         ddtTripletKey,
         vatNorm,
         docNumKey,
@@ -5629,7 +5680,7 @@ try {
   docPages = [];
 }
 
-        await ensureSupplierUpsert(customer);
+        await ensureSupplierUpsert(__buildSupplierDetailsFromDoc(doc, customer, vatNorm));
         await ensureProductsUpsert(items);
 
         let ok = 0;
