@@ -14,6 +14,8 @@
   
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+  <link rel="preconnect" href="https://www.gstatic.com" crossorigin />
+  <link rel="dns-prefetch" href="https://www.gstatic.com" />
   <meta name="color-scheme" content="light" />
   <title>Hub Inventario</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%230a84ff'/%3E%3Cpath d='M22 43c0-11 8-20 20-20h2v6h-2c-8 0-14 6-14 14v2h-6v-2z' fill='white'/%3E%3Cpath d='M40 33a6 6 0 1 1 0-12h2v6h-2a0 0 0 0 0 0 0 0 0 0 0 0 0 6z' fill='white' opacity='0.9'/%3E%3C/svg%3E">
@@ -1907,11 +1909,31 @@ td.td-actions{ white-space: normal !important; }
      * - Google login persistente tra pagine (stesso progetto Firebase)
      * - Fornitori + Prodotti + Movimenti inventario in tempo reale
      ****************************************************************/
-    import { initializeApp } from "https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js";
-    import { getAuth, GoogleAuthProvider, signInWithPopup, signInWithRedirect, getRedirectResult, signOut, onAuthStateChanged, setPersistence, browserLocalPersistence } from "https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js";
-    import { initializeFirestore, collection, doc, setDoc, addDoc, deleteDoc, onSnapshot, query, orderBy, serverTimestamp, getDocs } from "https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js";
-    import { getStorage, ref as sRef, uploadBytes, getDownloadURL, deleteObject } from "https://www.gstatic.com/firebasejs/12.7.0/firebase-storage.js";
-    // Nota: usiamo Firebase Storage SDK (web) per upload/download: evita problemi di CORS/preflight tipici delle chiamate REST multipart da GitHub Pages.
+    // ✅ Boot veloce: carichiamo i moduli Firebase "lazy" (non bloccano il primo paint)
+    let initializeApp, getAuth, GoogleAuthProvider, signInWithPopup, signInWithRedirect, getRedirectResult, signOut, onAuthStateChanged, setPersistence, browserLocalPersistence;
+    let initializeFirestore, collection, doc, setDoc, addDoc, deleteDoc, onSnapshot, query, orderBy, serverTimestamp, getDocs;
+    let getStorage, sRef, uploadBytes, getDownloadURL, deleteObject;
+
+    let __fbLibPromise = null;
+    async function __loadFirebaseLibs(){
+      if (__fbLibPromise) return __fbLibPromise;
+      __fbLibPromise = (async () => {
+        const appMod  = await import("https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js");
+        const authMod = await import("https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js");
+        const fsMod   = await import("https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js");
+        const stMod   = await import("https://www.gstatic.com/firebasejs/12.7.0/firebase-storage.js");
+
+        ({ initializeApp } = appMod);
+        ({ getAuth, GoogleAuthProvider, signInWithPopup, signInWithRedirect, getRedirectResult, signOut, onAuthStateChanged, setPersistence, browserLocalPersistence } = authMod);
+        ({ initializeFirestore, collection, doc, setDoc, addDoc, deleteDoc, onSnapshot, query, orderBy, serverTimestamp, getDocs } = fsMod);
+        ({ getStorage, ref: sRef, uploadBytes, getDownloadURL, deleteObject } = stMod);
+
+        return true;
+      })();
+      return __fbLibPromise;
+    }
+
+// Nota: usiamo Firebase Storage SDK (web) per upload/download: evita problemi di CORS/preflight tipici delle chiamate REST multipart da GitHub Pages.
 
     // 🔧 INCOLLA QUI la config del tuo progetto Firebase (Console > Project settings)
     const FIREBASE_CONFIG = {
@@ -2326,9 +2348,30 @@ const docDetailPhotosMeta = document.getElementById("docDetailPhotosMeta");
         dot.classList.remove("ok","warn","bad");
         dot.classList.add(status === "ok" ? "ok" : (status === "bad" ? "bad" : "warn"));
       }
+
+    // ===== Render scheduling (evita render ripetuti durante il bootstrap/sync) =====
+    let __rafRenderAll = 0;
+    function renderAllSoon(){
+      if (__rafRenderAll) return;
+      __rafRenderAll = requestAnimationFrame(() => {
+        __rafRenderAll = 0;
+        try { renderAll(); } catch(e){ console.warn("renderAllSoon failed", e); }
+      });
+    }
+
+    let __rafRenderAnag = 0;
+    function renderAnagSoon(){
+      if (__rafRenderAnag) return;
+      __rafRenderAnag = requestAnimationFrame(() => {
+        __rafRenderAnag = 0;
+        try { renderAnag(); } catch(e){ console.warn("renderAnagSoon failed", e); }
+      });
+    }
+
     }
 
     async function initFirebase() {
+      if (fb && fb.ready) return;
       const btnLogin = document.getElementById("btnLoginGoogle");
       const btnLogout = document.getElementById("btnLogout");
       const pillUser = document.getElementById("pillUser");
@@ -2344,9 +2387,13 @@ const docDetailPhotosMeta = document.getElementById("docDetailPhotosMeta");
       }
 
       try {
+        // carico i moduli Firebase senza bloccare il primo paint
+        setSyncPill("warn", "Sync: inizializzo…");
+        await __loadFirebaseLibs();
+
         fb.app = initializeApp(FIREBASE_CONFIG);
         fb.auth = getAuth(fb.app);
-        await setPersistence(fb.auth, browserLocalPersistence);
+        setPersistence(fb.auth, browserLocalPersistence).catch((e)=>console.warn("setPersistence failed", e));
         fb.db = initializeFirestore(fb.app, { experimentalAutoDetectLongPolling: true, useFetchStreams: false });
         fb.storage = getStorage(fb.app);
         fb.storageBucket = (FIREBASE_CONFIG && FIREBASE_CONFIG.storageBucket) ? String(FIREBASE_CONFIG.storageBucket) : "";
@@ -2371,13 +2418,13 @@ const docDetailPhotosMeta = document.getElementById("docDetailPhotosMeta");
           return "Errore accesso. Controlla rete e riprova.";
         };
 
-        // Completa eventuale login via redirect (iOS / popup bloccati)
-        try { await getRedirectResult(fb.auth); } catch (e) {
+        // Completa eventuale login via redirect (iOS / popup bloccati) — non blocco il boot
+        getRedirectResult(fb.auth).catch((e) => {
           console.warn("getRedirectResult error", e);
-          // Non blocco l'app, ma mostro un hint.
-          openModal("Accesso", humanAuthErr(e));
-        }
-
+          const msg = humanAuthErr(e);
+          // Evita modali "a sorpresa" all'avvio: mostro un toast e lascio l'app usabile
+          try { showToast(msg); } catch(_){}
+        });
 
         btnLogin?.addEventListener("click", async () => {
           try {
@@ -2421,8 +2468,9 @@ btnLogout.addEventListener("click", async () => {
             pillUserText.textContent = label;
             btnLogin?.style && (btnLogin.style.display = "none");
             btnLogout.style.display = "none";
-            setSyncPill("ok", "Sync: connesso");
+            setSyncPill("warn", "Sync: sincronizzo…");
 
+            // Avvio realtime senza svuotare la UI (niente flash a 0)
             startRealtime();
           } else {
             pillUser.style.display = "none";
@@ -2430,11 +2478,10 @@ btnLogout.addEventListener("click", async () => {
             btnLogout.style.display = "none";
             setSyncPill("warn", "Sync: non connesso");
 
-            stopRealtime();
+            stopRealtime(true);
             // fallback: local-only
             loadLocalData();
             renderAll();
-    renderAnag();
             renderAnag();
           }
         });
@@ -2447,26 +2494,40 @@ btnLogout.addEventListener("click", async () => {
       }
     }
 
-    function stopRealtime() {
+    function stopRealtime(hard = false) {
       for (const k of Object.keys(fb.unsub)) {
         try { fb.unsub[k] && fb.unsub[k](); } catch {}
         fb.unsub[k] = null;
       }
-      suppliers = [];
-      products = [];
-      thresholds = {};
-      currentSupplierId = null;
+
+      // IMPORTANT: di default NON svuotiamo i dati -> evita flash "a 0" durante login/sync
+      if (hard) {
+        suppliers = [];
+        products = [];
+        thresholds = {};
+        currentSupplierId = null;
+      }
     }
 
     function startRealtime() {
-      stopRealtime();
+      // soft stop: non azzero la UI (niente "0" durante la riconnessione)
+      stopRealtime(false);
+
+      // tracking primo sync (evita "Sync OK" fasullo)
+      const syncState = { suppliers:false, products:false, thresholds:false, movements:false };
+      const mark = (k) => {
+        syncState[k] = true;
+        const done = Object.values(syncState).every(Boolean);
+        if (done) setSyncPill("ok", "Sync: OK");
+      };
 
       // Suppliers
       fb.unsub.suppliers = onSnapshot(
         query(orgCol("suppliers"), orderBy("nameLower")),
         (snap) => {
           suppliers = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-          renderAnag();
+          mark("suppliers");
+          renderAnagSoon();
         },
         (err) => {
           console.error("suppliers watch error", err);
@@ -2479,7 +2540,8 @@ btnLogout.addEventListener("click", async () => {
         query(orgCol("products"), orderBy("nameLower")),
         (snap) => {
           products = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-          renderAnag();
+          mark("products");
+          renderAnagSoon();
         },
         (err) => {
           console.error("products watch error", err);
@@ -2497,7 +2559,8 @@ btnLogout.addEventListener("click", async () => {
             const n = Number(data.value);
             if (Number.isFinite(n)) thresholds[decodeURIComponent(d.id)] = Math.floor(n);
           });
-          renderAll();
+          mark("thresholds");
+          renderAllSoon();
         },
         (err) => console.warn("thresholds watch error", err)
       );
@@ -2527,7 +2590,8 @@ btnLogout.addEventListener("click", async () => {
               createdAt: tsToIso(data.createdAt) || data.createdAtIso || ""
             };
           });
-          renderAll();
+          mark("movements");
+          renderAllSoon();
         },
         (err) => {
           console.error("movements watch error", err);
@@ -2536,7 +2600,7 @@ btnLogout.addEventListener("click", async () => {
       );
     }
 
-    function watchSupplierDocs(supplierId) {
+function watchSupplierDocs(supplierId) {
       // Legacy: prima erano "allegati" su Firestore. Ora la lista documenti del fornitore
       // è derivata dai DDT / documenti caricati (OCR) e si aggiorna via renderAll().
       try { fb.unsub.supplierDocs && fb.unsub.supplierDocs(); } catch {}
@@ -6281,12 +6345,14 @@ if (importMovementsInput) importMovementsInput.addEventListener("change", async 
      ****************************************************************/
     loadSettings();
     loadLocalData();
-    initFirebase();
+    // Firebase init dopo il primo paint: boot immediato, auth stabile
+    requestAnimationFrame(() => { initFirebase(); });
 
     setCaptureType("IN");
     resetCapture();
     applySettingsToUI();
-    renderAll();
+    // Primo render dopo paint (boot più rapido)
+    renderAllSoon();
     // Niente test automatico all'avvio (evita richieste inutili)
     if ((state.settings.ocrUrl || "").trim()) {
       setOcrPill("warn", "OCR: configurato (premi Test)");
