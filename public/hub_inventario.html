@@ -3202,7 +3202,31 @@ function __isConaiItem(it){
       return "";
     }
 
-    function parseItemsFromRawText(rawText){
+    
+    // Pulisce la descrizione articolo: rimuove coda tipo "Rif.vs.ord..." / "Pagamento..." che non fa parte del nome articolo
+    function __cleanItemDescription(desc){
+      let s = String(desc || "").replace(/\s+/g, " ").trim();
+      if (!s) return "";
+      const patterns = [
+        /\bRif\.?\s*(?:vs\.?|vostro|v\.s\.)\s*ord\.?(?:ine)?\b/i,
+        /\bRif\.?\s*(?:ns\.?|nostro|n\.s\.)\s*ord\.?(?:ine)?\b/i,
+        /\bRif\.?\s*ord\.?(?:ine)?\b/i,
+        /\bCondizioni?\s+di\s+pagamento\b/i,
+        /\bPagamento\b/i,
+        /\bScadenza\b/i
+      ];
+      let cut = -1;
+      for (const re of patterns){
+        const idx = s.search(re);
+        if (idx >= 0) cut = (cut < 0) ? idx : Math.min(cut, idx);
+      }
+      if (cut > 0) s = s.slice(0, cut).trim();
+      s = s.replace(/[\s\.,;:\-]+$/g, "").trim();
+      if (s.length > 220) s = s.slice(0, 220).trim();
+      return s;
+    }
+
+function parseItemsFromRawText(rawText){
       const out = [];
       const lines = String(rawText || "").split(/\r?\n/).map(l => l.trim());
       for (const ln of lines){
@@ -3212,7 +3236,9 @@ function __isConaiItem(it){
         if (parts.length < 3) continue;
         const code = parts[0];
         const qtyPart = parts[1]; // es: "1.760,00 PZ"
-        const desc = parts.slice(2).join(" | ");
+        let desc = parts.slice(2).join(" | ");
+        const __descClean = __cleanItemDescription(desc);
+        if (__descClean) desc = __descClean;
         if (__isConaiCode(code) || __isConaiLine(code) || __isConaiLine(desc)) continue;
         let uom = "";
         let qtyRaw = qtyPart;
@@ -3392,6 +3418,13 @@ function __isConaiItem(it){
       if (!items.length && rawText) items = parseItemsFromRawText(rawText);
       // OCR filtering (CRITICO): ignora CONAI B1/B2
       items = (items || []).filter(it => !__isConaiItem(it));
+
+      // Pulizia descrizioni: evita di includere code tipo "Rif.vs.ord..." / "Pagamento..." nel nome articolo
+      items = (items || []).map(it => {
+        const d0 = String((it && it.description) || "").trim();
+        const d1 = __cleanItemDescription(d0);
+        return { ...(it || {}), description: (d1 || d0) };
+      });
 
       const hasAny = !!(docType || docNumber || docDateRaw || (sup && sup.name) || items.length);
       if (!hasAny) return;
@@ -5556,7 +5589,8 @@ await ensureSupplierUpsert(customer);
         for (const it of safeItems) {
           lineIndex++;
           const rawCode = String(it.code || "").trim();
-          const rawDesc = String(it.description || "").trim();
+          const __rawDesc0 = String(it.description || "").trim();
+          const rawDesc = __cleanItemDescription(__rawDesc0) || __rawDesc0;
 
           const code = (rawCode || rawDesc || "").trim();
           if (__isConaiCode(code) || __isConaiLine(code) || __isConaiLine(rawDesc)) { skip++; continue; }
@@ -6062,7 +6096,8 @@ await ensureSupplierUpsert(customer);
         const seen = new Set();
         for (const it of safeItems) {
           const rawCode = String(it.code || "").trim();
-          const rawDesc = String(it.description || "").trim();
+          const __rawDesc0 = String(it.description || "").trim();
+          const rawDesc = __cleanItemDescription(__rawDesc0) || __rawDesc0;
           const code = (rawCode || rawDesc || "").trim();
           if (!code) continue;
           if (__isConaiCode(code) || __isConaiLine(rawCode) || __isConaiLine(rawDesc)) continue;
