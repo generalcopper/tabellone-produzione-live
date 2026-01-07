@@ -4042,6 +4042,69 @@ function buildDocGroupsFromMovements(movements) {
     }
 
 
+
+
+// ===== Doc groups cache (needed by renderAll + duplicate checks) =====
+function rebuildDocGroupsCache(){
+  try{
+    const movs = (() => {
+      try { return (state && Array.isArray(state.movements)) ? state.movements : []; }
+      catch(e){ return []; }
+    })();
+    const out = (typeof buildDocGroupsFromMovements === "function")
+      ? buildDocGroupsFromMovements(movs)
+      : { list: [], map: new Map() };
+    __docGroups = (out && Array.isArray(out.list)) ? out.list : [];
+    __docGroupsMap = (out && out.map instanceof Map) ? out.map : new Map();
+  }catch(e){
+    __docGroups = [];
+    __docGroupsMap = new Map();
+  }
+}
+
+// ===== Stable docKey from meta (used during OCR confirm) =====
+function docKeyFromMeta(meta){
+  const m = (meta && typeof meta === "object") ? meta : {};
+  const customer = String(m.customer || "").trim();
+  const date = String(m.date || m.dateISO || "").trim();
+  const source = String(m.source || "OCR").trim() || "OCR";
+  const note = String(m.note || "").trim();
+  const docNum = String(m.docNum || "").trim();
+
+  // Try to resolve VAT for stable grouping (best effort)
+  let vatNorm = "";
+  try { vatNorm = String(m.vatNorm || "").trim(); } catch(_){}
+  if (!vatNorm) {
+    // From customer string (e.g. "Fornitore 12345678901" or "IT12345678901")
+    const compact = customer.replace(/\s+/g, "");
+    const mm = compact.match(/\b(?:IT)?(\d{11})\b/i);
+    if (mm && mm[1]) {
+      try { vatNorm = __sup_cleanVat(mm[1]); } catch(_){}
+    }
+  }
+  if (!vatNorm) {
+    // From suppliers registry by name match
+    try{
+      const list = Array.isArray(suppliers) ? suppliers : [];
+      for (const s of list) {
+        if (!s) continue;
+        if (supplierMatchesCustomer(s, customer)) {
+          const v = __sup_cleanVat(s.vat || s.vatNumber || s.piva || s.partitaIva || "");
+          if (v) { vatNorm = v; break; }
+        }
+      }
+    }catch(_){}
+  }
+
+  const customerKey = vatNorm ? ("vat_" + vatNorm) : customer.toLowerCase();
+  const docNumKey = (typeof __docNumToKey === "function") ? __docNumToKey(docNum || extractDocNumber(note)) : String(docNum || "").trim();
+  const keyPart = docNumKey || note.toLowerCase();
+
+  return [customerKey, date, keyPart, source.toLowerCase()].join("|");
+}
+
+
+
 /****************************************************************
  * Local doc pages storage (IndexedDB) — evita base64 in localStorage
  ****************************************************************/
