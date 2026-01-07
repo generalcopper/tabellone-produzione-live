@@ -1018,6 +1018,8 @@ td.td-actions{
   .btn-xs{ padding: 8px 8px !important; }
 }
 
+  .docRowSub td{ border-top:0 !important; font-size:12px; color:#6b7280; }
+
 tr.docRow{ cursor:pointer; }
 tr.docRow:hover td{ background: rgba(10,132,255,.06); }
 
@@ -1908,7 +1910,7 @@ td.td-actions{ white-space: normal !important; }
     import { initializeApp } from "https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js";
     import { getAuth, GoogleAuthProvider, signInWithPopup, signInWithRedirect, getRedirectResult, signOut, onAuthStateChanged, setPersistence, browserLocalPersistence } from "https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js";
     import { initializeFirestore, collection, doc, setDoc, addDoc, deleteDoc, onSnapshot, query, orderBy, serverTimestamp, getDocs } from "https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js";
-    import { getStorage, ref as sRef, uploadBytes, getDownloadURL, deleteObject } from "https://www.gstatic.com/firebasejs/12.7.0/firebase-storage.js";
+    // Nota: per massima compatibilità (iOS / PWA) evitiamo il modulo firebase-storage e usiamo le API REST di Firebase Storage.
 
     // 🔧 INCOLLA QUI la config del tuo progetto Firebase (Console > Project settings)
     const FIREBASE_CONFIG = {
@@ -2340,7 +2342,7 @@ const docDetailPhotosMeta = document.getElementById("docDetailPhotosMeta");
         fb.auth = getAuth(fb.app);
         await setPersistence(fb.auth, browserLocalPersistence);
         fb.db = initializeFirestore(fb.app, { experimentalAutoDetectLongPolling: true, useFetchStreams: false });
-        fb.storage = getStorage(fb.app);
+        fb.storageBucket = (FIREBASE_CONFIG && FIREBASE_CONFIG.storageBucket) ? String(FIREBASE_CONFIG.storageBucket) : "";
 
         const provider = new GoogleAuthProvider();
         provider.setCustomParameters({ prompt: "select_account" });
@@ -3647,18 +3649,12 @@ async function deleteMovement(id) {
 
       statTotalItems.textContent = items.toLocaleString("it-IT");
       statTotalPieces.textContent = totalPieces.toLocaleString("it-IT");
-      // Flussi (cockpit) = numero documenti (DDT) caricati, non numero righe/articoli
-      let docsCount = 0;
       try {
-        if (Array.isArray(__docGroups)) {
-          docsCount = __docGroups.length;
-        } else if (typeof buildDocGroupsFromMovements === "function") {
-          const out = buildDocGroupsFromMovements(state.movements);
-          docsCount = (out && Array.isArray(out.list)) ? out.list.length : 0;
-        }
-      } catch (e) { docsCount = 0; }
-
-      if (typeof statTotalFlows !== "undefined" && statTotalFlows) statTotalFlows.textContent = (Number(docsCount) || 0).toLocaleString("it-IT");
+        const docCount = buildDocGroupsFromMovements(state.movements).list.length;
+        if (typeof statTotalFlows !== "undefined" && statTotalFlows) statTotalFlows.textContent = Number(docCount).toLocaleString("it-IT");
+      } catch(e) {
+        if (typeof statTotalFlows !== "undefined" && statTotalFlows) statTotalFlows.textContent = (state.movements.length).toLocaleString("it-IT");
+      }
       statLowStock.textContent = low.toLocaleString("it-IT");
       statLastUpdate.textContent = last ? formatDateIT(last.createdAt) : "—";
     }
@@ -3919,12 +3915,107 @@ function __fileToDataURL(file){
 }
 
 
+
+// ===== Firebase Storage REST helpers (no firebase-storage.js) =====
+function __storageReady(){
+  return !!(fb && fb.user && fb.storageBucket);
+}
+function __storageDownloadUrl(path, token){
+  const bucket = String(fb.storageBucket || "");
+  if (!bucket || !path) return "";
+  const enc = encodeURIComponent(String(path)).replace(/%2F/g, "%2F");
+  const t = String(token || "").trim();
+  if (!t) return `https://firebasestorage.googleapis.com/v0/b/${bucket}/o/${enc}?alt=media`;
+  return `https://firebasestorage.googleapis.com/v0/b/${bucket}/o/${enc}?alt=media&token=${encodeURIComponent(t)}`;
+}
+function __randomToken(){
+  try{
+    if (window.crypto && typeof window.crypto.randomUUID === "function") return window.crypto.randomUUID();
+  }catch(_){}
+  return `${Date.now()}_${Math.random().toString(16).slice(2)}`;
+}
+async function __getIdToken(){
+  if (!fb || !fb.user || typeof fb.user.getIdToken !== "function") throw new Error("Auth non disponibile");
+  return await fb.user.getIdToken(true);
+}
+async function __storageUploadFile(path, file){
+  if (!__storageReady()) throw new Error("Storage non pronto");
+  const bucket = String(fb.storageBucket || "");
+  const idToken = await __getIdToken();
+  const dlToken = __randomToken();
+
+  const meta = {
+    name: String(path),
+    contentType: (file && file.type) ? String(file.type) : "application/octet-stream",
+    metadata: { firebaseStorageDownloadTokens: String(dlToken) }
+  };
+
+  const boundary = "----firebaseRestUpload_" + Math.random().toString(16).slice(2);
+  const delimiter = `--${boundary}\r\n`;
+  const closeDelim = `\r\n--${boundary}--`;
+
+  const metaPart =
+    `${delimiter}Content-Type: application/json; charset=UTF-8\r\n\r\n` +
+    `${JSON.stringify(meta)}\r\n`;
+
+  const fileType = (file && file.type) ? String(file.type) : "application/octet-stream";
+  const filePartHeader =
+    `${delimiter}Content-Type: ${fileType}\r\n\r\n`;
+
+  const body = new Blob([metaPart, filePartHeader, file, closeDelim], { type: `multipart/related; boundary=${boundary}` });
+
+  const url = `https://firebasestorage.googleapis.com/v0/b/${bucket}/o?uploadType=multipart`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${idToken}`,
+      "Content-Type": `multipart/related; boundary=${boundary}`
+    },
+    body
+  });
+
+  if (!res.ok) {
+    const t = await res.text().catch(() => "");
+    throw new Error(`Upload Storage fallito (${res.status}): ${t.slice(0, 200)}`);
+  }
+
+  return { url: __storageDownloadUrl(path, dlToken), path: String(path), token: String(dlToken) };
+}
+async function __storageDeletePath(path){
+  if (!__storageReady()) return;
+  const bucket = String(fb.storageBucket || "");
+  const idToken = await __getIdToken();
+  const enc = encodeURIComponent(String(path)).replace(/%2F/g, "%2F");
+  const url = `https://firebasestorage.googleapis.com/v0/b/${bucket}/o/${enc}`;
+  await fetch(url, { method: "DELETE", headers: { "Authorization": `Bearer ${idToken}` } }).catch(()=>{});
+}
+async function __storageResolveUrlFromPath(path){
+  if (!__storageReady()) return "";
+  const bucket = String(fb.storageBucket || "");
+  const idToken = await __getIdToken();
+  const enc = encodeURIComponent(String(path)).replace(/%2F/g, "%2F");
+  const metaUrl = `https://firebasestorage.googleapis.com/v0/b/${bucket}/o/${enc}`;
+  try{
+    const res = await fetch(metaUrl, { headers: { "Authorization": `Bearer ${idToken}` } });
+    if (!res.ok) return "";
+    const js = await res.json().catch(()=>null);
+    const dt = String(js && (js.downloadTokens || (js.metadata && js.metadata.firebaseStorageDownloadTokens) || "") || "");
+    const token = dt.split(",").map(s=>s.trim()).filter(Boolean)[0] || "";
+    return __storageDownloadUrl(path, token);
+  }catch(_){
+    return "";
+  }
+}
+// ===== END Storage REST helpers =====
+
 async function uploadDocPagesToStorage(docKey, files){
   const picked = Array.from(files || []).filter(Boolean);
   if (!picked.length) return [];
 
-  // Cloud: Firebase Storage (se disponibile). Se fallisce, fallback local.
-  if (fb.user && fb.storage){
+  // Cloud: Firebase Storage (REST).
+  // Se sei loggato, le foto vanno su cloud (visibili su tutti i dispositivi).
+  // Se l’upload fallisce, NON facciamo fallback local silenzioso: meglio riprovare.
+  if (__storageReady()){
     try{
       const folder = `orgs/${ORG_ID}/docPages/${keyToDocId(docKey)}/${Date.now()}_${Math.random().toString(16).slice(2)}`;
       const out = [];
@@ -3935,15 +4026,14 @@ async function uploadDocPagesToStorage(docKey, files){
         const ext = (typeExt || nameExt || "jpg");
         const safeExt = String(ext || "jpg").replace(/[^a-z0-9]/gi,"").toLowerCase() || "jpg";
         const path = `${folder}/page_${String(i+1).padStart(2,"0")}.${safeExt}`;
-        const r = sRef(fb.storage, path);
-        await uploadBytes(r, f);
-        const url = await getDownloadURL(r);
-        out.push({ url, path, page: i + 1 });
+        const up = await __storageUploadFile(path, f);
+        out.push({ url: up.url, path: up.path, page: i + 1 });
       }
       return out;
     } catch(e){
-      console.warn("uploadDocPagesToStorage: upload failed, fallback local", e);
-      // continua al fallback local
+      console.warn("uploadDocPagesToStorage: upload failed", e);
+      showToast("Upload foto fallito: nessuna foto salvata. Riprova.");
+      throw e;
     }
   }
 
@@ -3984,13 +4074,12 @@ async function deleteStoragePaths(paths){
     }));
   }
 
-  if (cloudArr.length && (fb.user && fb.storage)){
+  if (cloudArr.length && __storageReady()){
     await Promise.all(cloudArr.map(async (p) => {
       try{
-        const r = sRef(fb.storage, String(p));
-        await deleteObject(r);
+        await __storageDeletePath(String(p));
       } catch(e){
-        console.warn("deleteObject failed", p, e);
+        console.warn("storage delete failed", p, e);
       }
     }));
   }
@@ -4053,11 +4142,10 @@ async function __resolveDocPageToUrl(p){
     return u;
   }
 
-  if (fb && fb.storage) {
+  if (__storageReady()) {
     try {
-      const r = sRef(fb.storage, path);
-      const u = await getDownloadURL(r);
-      return u;
+      const u = await __storageResolveUrlFromPath(path);
+      return u || "";
     } catch(e) {
       return "";
     }
@@ -4216,7 +4304,7 @@ function renderMovementsTable() {
         const label = formatDocLabel(g);
         const lines = (g.movements || []).length;
         const pieces = (g.movements || []).reduce((sum, mv) => sum + safeInt(mv.qty), 0);
-
+        const uploadedAt = formatDateIT(g.createdAtMax || "");
         return `
           <tr class="docRow" data-dockey="${escapeHtmlAttr(g.key)}" title="Apri dettaglio">
             <td data-label="Documento"><strong>${escapeHtml(label)}</strong></td>
@@ -4230,19 +4318,25 @@ function renderMovementsTable() {
               </div>
             </td>
           </tr>
+          <tr class="docRowSub" data-dockey="${escapeHtmlAttr(g.key)}">
+            <td colspan="5" class="td-muted" style="padding-top:6px;padding-bottom:10px;">
+              Caricato: ${escapeHtml(uploadedAt)}
+            </td>
+          </tr>
         `;
       }).join("");
     }
 
 function renderAll() {
       const stockArr = computeStock();
-      rebuildDocGroupsCache();
       renderStats(stockArr);
       renderCustomerOptions(stockArr);
       renderStockTable(stockArr);
+      rebuildDocGroupsCache();
       renderMovementsTable();
       renderFlowsTable();
-// Se la vista dettaglio fornitore è aperta, aggiorna i documenti collegati (DDT / OCR)
+
+      // Se la vista dettaglio fornitore è aperta, aggiorna i documenti collegati (DDT / OCR)
       if (modalSupplier && modalSupplier.classList.contains("open")) {
         try { renderSupplierLinkedDocs(); } catch {}
       }
@@ -4668,8 +4762,8 @@ async function __deleteLegacySupplierAttachments(supplierId){
       const data = d.data ? (d.data() || {}) : {};
       const storagePath = String(data.storagePath || "");
       try { await deleteDoc(d.ref); } catch(e){ console.warn("delete legacy doc ref failed", e); }
-      if (storagePath && fb.storage) {
-        try { await deleteObject(sRef(fb.storage, storagePath)); } catch(e){ /* ignore */ }
+      if (storagePath) {
+        try { await __storageDeletePath(storagePath); } catch(e){ /* ignore */ }
       }
     }));
   }catch(e){
