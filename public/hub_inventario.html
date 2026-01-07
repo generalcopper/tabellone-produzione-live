@@ -363,41 +363,6 @@
   background: rgba(0,0,0,.06);
 }
 
-/* OCR session docs (più DDT nella stessa sessione) */
-.sessionDocsList{
-  display:grid;
-  gap: 8px;
-}
-.sessionDocCard{
-  display:flex;
-  align-items:flex-start;
-  justify-content:space-between;
-  gap: 10px;
-  padding: 10px 12px;
-  border: 1px solid rgba(60,60,67,.18);
-  border-radius: 12px;
-  background: #fff;
-}
-.sessionDocMeta{
-  display:grid;
-  gap: 4px;
-  min-width: 0;
-}
-.sessionDocTitle{
-  font-weight: 900;
-  color: var(--text);
-}
-.sessionDocSub{
-  font-size: 12px;
-  color: var(--muted);
-  font-weight: 800;
-}
-.sessionDocActions{
-  display:flex;
-  align-items:center;
-  gap: 8px;
-}
-
 @media (max-width: 560px){
   #docExtractPanel .doc-kvgrid{ grid-template-columns: 1fr; }
   #docExtractPanel .doc-table th:nth-child(2),
@@ -1517,17 +1482,8 @@ td.td-actions{ white-space: normal !important; }
                     </div>
                   </div>
 
-                  <div id="sessionDocsPanel" class="stack" style="display:none;">
-                    <div class="inlineRow" style="justify-content:space-between; align-items:center;">
-                      <div class="hero-sub">DDT in sessione: <span id="sessionDocsCount">0</span></div>
-                      <button class="btn btn-ghost btn-xs" id="btnClearSessionDocs" type="button" style="display:none;">Svuota</button>
-                    </div>
-                    <div class="sessionDocsList" id="sessionDocsList"></div>
-                  </div>
-
                   <div class="movementActions">
                     <button class="btn btn-primary btnConfirmBig" id="btnConfirmMovement" type="button" disabled>Conferma carico</button>
-                    <button class="btn btn-secondary" id="btnAddDoc" type="button" disabled>Aggiungi DDT</button>
                     <button class="btn btn-ghost btnResetMini" id="btnReset" type="button">Reset</button>
                   </div>
 
@@ -1992,7 +1948,6 @@ td.td-actions{ white-space: normal !important; }
     const ocrResult = document.getElementById("ocrResult");
 
     const btnConfirmMovement = document.getElementById("btnConfirmMovement");
-    const btnAddDoc = document.getElementById("btnAddDoc");
     const btnReset = document.getElementById("btnReset");
     const toastEl = document.getElementById("toast");
 
@@ -2076,11 +2031,6 @@ const docDetailPhotosMeta = document.getElementById("docDetailPhotosMeta");
     const pagesCount = document.getElementById("pagesCount");
     const pagesThumbs = document.getElementById("pagesThumbs");
     const btnRemoveLastPage = document.getElementById("btnRemoveLastPage");
-
-    const sessionDocsPanel = document.getElementById("sessionDocsPanel");
-    const sessionDocsCount = document.getElementById("sessionDocsCount");
-    const sessionDocsList = document.getElementById("sessionDocsList");
-    const btnClearSessionDocs = document.getElementById("btnClearSessionDocs");
 
     const segIn = document.getElementById("segIn");
     const segOut = document.getElementById("segOut");
@@ -2298,7 +2248,6 @@ const docDetailPhotosMeta = document.getElementById("docDetailPhotosMeta");
     };
 
     let capture = {
-      docs: [],             // DDT già pronti in sessione
       files: [],            // pagine acquisite (File[])
       rawPages: [],         // OCR per pagina (stesso indice di files)
       structuredPages: [],  // structured OCR per pagina (se disponibile)
@@ -3335,42 +3284,8 @@ function __isConaiItem(it){
           const q = Number(qRaw.replace(",", ".").replace(/[^\d.]/g,""));
           return !!key && !Number.isNaN(q) && q > 0;
         });
-        const currentValid = String(customerEl && customerEl.value || "").trim() && hasValid;
-        btn.disabled = !(currentValid || __hasQueuedDocs());
+        btn.disabled = !(String(customerEl && customerEl.value || "").trim() && hasValid);
       } catch (_e) {}
-      __updateConfirmLabels();
-    }
-
-    function __hasQueuedDocs(){
-      return Array.isArray(capture.docs) && capture.docs.length > 0;
-    }
-
-    function __isCurrentDocValid(){
-      try{
-        const items = __getDocItemsArr();
-        const customer = String((fCustomer && fCustomer.value) || "").trim();
-        if (!customer) return false;
-        const hasValid = (items || []).some(it => {
-          const key = String(it.code || it.description || "").trim();
-          const qRaw = (it.qty != null && it.qty !== "") ? String(it.qty) : String(it.qtyRaw || "");
-          const q = Number(qRaw.replace(",", ".").replace(/[^\d.]/g,""));
-          return !!key && !Number.isNaN(q) && q > 0;
-        });
-        return !!hasValid;
-      }catch(_e){
-        return false;
-      }
-    }
-
-    function __updateConfirmLabels(){
-      try{
-        if (btnAddDoc) btnAddDoc.disabled = !__isCurrentDocValid();
-        if (!btnConfirmMovement) return;
-        const queued = (capture.docs && capture.docs.length) ? capture.docs.length : 0;
-        const current = __isCurrentDocValid() ? 1 : 0;
-        const total = queued + current;
-        btnConfirmMovement.textContent = total > 1 ? `Conferma carico (${total} DDT)` : "Conferma carico";
-      }catch(_e){}
     }
 
     function __rerenderDocItemsTable(){
@@ -3379,104 +3294,6 @@ function __isConaiItem(it){
       const items = __getDocItemsArr();
       tbody.innerHTML = __docItemsRowsHtml(items) || `<tr><td colspan="4" style="text-align:center; padding:12px; color:var(--muted)">Nessuna riga trovata.</td></tr>`;
       __refreshConfirmMovementEnabled();
-    }
-
-    function __buildDocFromCurrentCapture(){
-      const doc = __lastDocExtract || {};
-      const items = __getDocItemsArr();
-      const safeItems = (items || []).filter(it => !__isConaiItem(it));
-      const customer = String((fCustomer && fCustomer.value) || (doc && doc.supplier && doc.supplier.name) || "").trim();
-      const docDateISO = (doc && (doc.__docDateISO || coerceToISODate(doc.documentDateRaw || doc.documentDate || ""))) || (fDate && fDate.value) || todayYYYYMMDD();
-      const docType = (doc && (doc.__docType || doc.documentTypeRaw || doc.documentType || "")) || "";
-      const docNum  = (doc && (doc.__docNumber || doc.documentNumberRaw || doc.documentNumber || "")) || "";
-      const docDateRaw = (doc && (doc.__docDateRaw || doc.documentDateRaw || doc.documentDate || "")) || "";
-      const baseNote = [docType, docNum, docDateRaw].filter(Boolean).join(" ").trim();
-
-      if (!customer || !safeItems.length) return null;
-
-      return {
-        customer,
-        docDateISO,
-        docType,
-        docNum,
-        docDateRaw,
-        baseNote,
-        items: safeItems,
-        rawText: String(capture.rawText || ""),
-        structured: doc,
-        files: Array.isArray(capture.files) ? capture.files.slice() : [],
-        source: "OCR"
-      };
-    }
-
-    function __updateSessionDocsUI(){
-      if (!sessionDocsPanel || !sessionDocsList || !sessionDocsCount) return;
-      const docs = Array.isArray(capture.docs) ? capture.docs : [];
-      sessionDocsCount.textContent = String(docs.length);
-      if (!docs.length){
-        sessionDocsPanel.style.display = "none";
-        sessionDocsList.innerHTML = "";
-        if (btnClearSessionDocs) btnClearSessionDocs.style.display = "none";
-        __updateConfirmLabels();
-        return;
-      }
-
-      sessionDocsPanel.style.display = "";
-      if (btnClearSessionDocs) btnClearSessionDocs.style.display = "inline-flex";
-
-      sessionDocsList.innerHTML = docs.map((d, i) => {
-        const dateTxt = formatDateOnlyIT(d.docDateISO || d.docDateRaw || "");
-        const num = d.docNum ? `DDT n. ${d.docNum}` : "DDT";
-        const title = `${num}${dateTxt ? " del " + dateTxt : ""}`;
-        const lines = (d.items || []).length;
-        const pieces = (d.items || []).reduce((sum, it) => {
-          const raw = (it.qty != null && it.qty !== "") ? it.qty : it.qtyRaw;
-          const n = Number(String(raw || "").replace(/\./g,"").replace(",", ".").replace(/[^\d.]/g,""));
-          return sum + (Number.isFinite(n) ? n : 0);
-        }, 0);
-        const sub = `${d.customer || "—"} • ${lines} righe • ${pieces} pezzi`;
-        return `
-          <div class="sessionDocCard" data-idx="${i}">
-            <div class="sessionDocMeta">
-              <div class="sessionDocTitle">${escapeHtml(title)}</div>
-              <div class="sessionDocSub">${escapeHtml(sub)}</div>
-            </div>
-            <div class="sessionDocActions">
-              <button class="btn btn-danger btn-xs" type="button" data-action="removeSessionDoc" data-idx="${i}">Rimuovi</button>
-            </div>
-          </div>
-        `;
-      }).join("");
-
-      __updateConfirmLabels();
-    }
-
-    function __queueCurrentDoc(){
-      const doc = __buildDocFromCurrentCapture();
-      if (!doc || !__isCurrentDocValid()){
-        openModal("DDT non valido", "Completa fornitore e almeno una riga valida prima di aggiungere il DDT.");
-        return;
-      }
-      if (!Array.isArray(capture.docs)) capture.docs = [];
-      capture.docs.push(doc);
-      __updateSessionDocsUI();
-      resetCapture({ keepDocs: true });
-      showToast("DDT aggiunto alla sessione");
-    }
-
-    function __removeQueuedDocByIndex(idx){
-      if (!Array.isArray(capture.docs)) return;
-      if (Number.isNaN(idx) || idx < 0 || idx >= capture.docs.length) return;
-      capture.docs.splice(idx, 1);
-      __updateSessionDocsUI();
-      showToast("DDT rimosso");
-    }
-
-    function __clearQueuedDocs(){
-      if (!Array.isArray(capture.docs) || !capture.docs.length) return;
-      capture.docs = [];
-      __updateSessionDocsUI();
-      showToast("Sessione DDT svuotata");
     }
 
     function __deleteDocItemByIndex(i){
@@ -3653,17 +3470,16 @@ function validateMovementFields(fields) {
             const itemOk = String((it && it.item) || "").trim().length > 0;
             return q > 0 && (codeOk || itemOk);
           });
-          return (customerOk && hasValid) || __hasQueuedDocs();
+          return customerOk && hasValid;
         }
       }catch(_){}
-      const fallbackOk = validateMovementFields({
+      return validateMovementFields({
         customer: (fCustomer && fCustomer.value) || "",
         code: (fCode && fCode.value) || "",
         item: (fItem && fItem.value) || "",
         qty: (fQty && fQty.value) || "",
         date: (fDate && fDate.value) || ""
       });
-      return fallbackOk || __hasQueuedDocs();
     }
 
 
@@ -4958,9 +4774,7 @@ async function deleteSupplierCascade(supplierId){
       btnConfirmMovement.textContent = t === "IN" ? "Conferma carico" : "Conferma scarico";
     }
 
-    function resetCapture(options = {}) {
-      const keepDocs = !!options.keepDocs;
-      if (!keepDocs) capture.docs = [];
+    function resetCapture() {
       capture.files = [];
       capture.rawPages = [];
       capture.structuredPages = [];
@@ -5003,8 +4817,6 @@ async function deleteSupplierCascade(supplierId){
       fQty.value = "";
       fNote.value = "";
       fDate.value = todayYYYYMMDD();
-      __updateSessionDocsUI();
-      __updateConfirmLabels();
     }
 
     
@@ -5276,7 +5088,6 @@ async function handleFileSelection(fileList) {
         }
 
         btnConfirmMovement.disabled = !__canConfirmMovement();
-        __updateConfirmLabels();
 
         // update OCR pill
         setOcrPill("ok", "OCR: pronto");
@@ -5303,7 +5114,6 @@ async function handleFileSelection(fileList) {
     function bindFieldValidation() {
       const check = () => {
         btnConfirmMovement.disabled = !__canConfirmMovement();
-        __updateConfirmLabels();
         };
       [fCustomer, fCode, fItem, fQty, fDate].forEach(el => el.addEventListener("input", check));
       [fCustomer, fCode, fItem, fQty, fDate].forEach(el => el.addEventListener("change", check));
@@ -5511,14 +5321,6 @@ async function handleFileSelection(fileList) {
     segOut.addEventListener("click", () => setCaptureType("OUT"));
 
     btnReset.addEventListener("click", resetCapture);
-    btnAddDoc?.addEventListener("click", __queueCurrentDoc);
-    btnClearSessionDocs?.addEventListener("click", __clearQueuedDocs);
-    sessionDocsList?.addEventListener("click", (e) => {
-      const btn = e.target.closest("button[data-action='removeSessionDoc']");
-      if (!btn) return;
-      const idx = Number(btn.getAttribute("data-idx"));
-      if (!Number.isNaN(idx)) __removeQueuedDocByIndex(idx);
-    });
 
     // Anagrafica tabs + search
     if (segSuppliers && segProducts) {
@@ -5566,95 +5368,91 @@ async function handleFileSelection(fileList) {
 
 
     btnConfirmMovement.addEventListener("click", async () => {
-      const queuedDocs = Array.isArray(capture.docs) ? capture.docs.slice() : [];
-      const currentDoc = __isCurrentDocValid() ? __buildDocFromCurrentCapture() : null;
-      const docsToImport = [];
-      if (currentDoc) docsToImport.push(currentDoc);
-      if (queuedDocs.length) docsToImport.push(...queuedDocs);
-
-      if (!docsToImport.length) {
-        openModal("Nessun DDT", "Aggiungi almeno un DDT valido prima di confermare.");
-        return;
-      }
+      // Import completo dal documento (multi-riga)
+      const doc = __lastDocExtract || null;
+      const items = (doc && Array.isArray(doc.__items)) ? doc.__items : ((doc && Array.isArray(doc.items)) ? doc.items : []);
+      const safeItems = (items || []).filter(it => !__isConaiItem(it));
 
       // Flusso OCR Home = solo CARICO
       capture.movementType = "IN";
 
+      const customer = (fCustomer && fCustomer.value ? String(fCustomer.value).trim() : "");
+      const docDateISO = (doc && (doc.__docDateISO || coerceToISODate(doc.documentDateRaw || doc.documentDate || ""))) || (fDate && fDate.value) || todayYYYYMMDD();
+
+      const docType = doc && (doc.__docType || doc.documentTypeRaw || doc.documentType || "");
+      const docNum  = doc && (doc.__docNumber || doc.documentNumberRaw || doc.documentNumber || "");
+      const docDateRaw = doc && (doc.__docDateRaw || doc.documentDateRaw || doc.documentDate || "");
+      const baseNote = [docType, docNum, docDateRaw].filter(Boolean).join(" ").trim();
+
+      const docKey = docKeyFromMeta({ customer, date: docDateISO, note: baseNote, source: "OCR", docNum: docNum });
+
+      if (!customer) {
+        openModal("Cliente mancante", "Non riesco a leggere il nome cliente dal documento. Riprova con una foto più nitida.");
+        return;
+      }
+      if (!items.length) {
+        openModal("Nessuna riga trovata", "Non ho trovato righe inventario nel documento. Riprova con una foto più nitida.");
+        return;
+      }
+
       btnConfirmMovement.disabled = true;
       progressLabel.textContent = "Import in corso…";
-      progressFill.style.width = "70%";
+      progressFill.style.width = "88%";
 
       try {
+
+let docPages = [];
+try {
+  if (capture.files && capture.files.length) {
+    progressLabel.textContent = "Caricamento foto…";
+    progressFill.style.width = "80%";
+    docPages = await uploadDocPagesToStorage(docKey, capture.files);
+  }
+} catch (e) {
+  console.warn("upload doc pages failed", e);
+  docPages = [];
+}
+
+        await ensureSupplierUpsert(customer);
+        await ensureProductsUpsert(items);
+
         let ok = 0;
         let skip = 0;
+        let lineIndex = 0;
 
-        for (let d = 0; d < docsToImport.length; d++) {
-          const doc = docsToImport[d];
-          const customer = String(doc.customer || "").trim();
-          const docDateISO = doc.docDateISO || todayYYYYMMDD();
-          const docType = doc.docType || "";
-          const docNum = doc.docNum || "";
-          const docDateRaw = doc.docDateRaw || "";
-          const baseNote = doc.baseNote || [docType, docNum, docDateRaw].filter(Boolean).join(" ").trim();
+        for (const it of safeItems) {
+          lineIndex++;
+          const rawCode = String(it.code || "").trim();
+          const rawDesc = String(it.description || "").trim();
 
-          progressLabel.textContent = `Import DDT ${d + 1}/${docsToImport.length}…`;
-          progressFill.style.width = `${Math.min(90, Math.round(70 + 20 * ((d + 1) / docsToImport.length))) }%`;
+          const code = (rawCode || rawDesc || "").trim();
+          if (__isConaiCode(code) || __isConaiLine(code) || __isConaiLine(rawDesc)) { skip++; continue; }
+          const item = (rawDesc || rawCode || "").trim();
 
-          const docKey = docKeyFromMeta({ customer, date: docDateISO, note: baseNote, source: "OCR", docNum: docNum });
+          const qtyStr = (it.qty != null && it.qty !== "" && !Number.isNaN(Number(it.qty)))
+            ? String(it.qty)
+            : (it.qtyRaw ? String(it.qtyRaw).replace(/[^\d,\.]/g,"").trim() : "");
 
-          let docPages = [];
-          try {
-            if (doc.files && doc.files.length) {
-              progressLabel.textContent = `Caricamento foto DDT ${d + 1}/${docsToImport.length}…`;
-              progressFill.style.width = `${Math.min(92, Math.round(70 + 20 * ((d + 1) / docsToImport.length))) }%`;
-              docPages = await uploadDocPagesToStorage(docKey, doc.files);
-            }
-          } catch (e) {
-            console.warn("upload doc pages failed", e);
-            docPages = [];
-          }
+          const mv = makeMovement({
+            type: "IN",
+            customer,
+            code,
+            item,
+            qty: qtyStr,
+            date: docDateISO,
+            note: baseNote,
+            docType: String(docType || ""),
+            docNum: String(docNum || ""),
+            docDateRaw: String(docDateRaw || ""),
+            docPages: docPages,
+            lineIndex: lineIndex,
+            source: "OCR",
+            rawText: capture.rawText
+          });
 
-          const supplierDetails = buildSupplierFromOcr(doc.structured || {}, doc.rawText || "");
-          if (supplierDetails && supplierDetails.name) await ensureSupplierUpsert(supplierDetails);
-          else await ensureSupplierUpsert(customer);
-
-          await ensureProductsUpsert(doc.items || []);
-
-          let lineIndex = 0;
-          for (const it of (doc.items || [])) {
-            lineIndex++;
-            const rawCode = String(it.code || "").trim();
-            const rawDesc = String(it.description || "").trim();
-
-            const code = (rawCode || rawDesc || "").trim();
-            if (__isConaiCode(code) || __isConaiLine(code) || __isConaiLine(rawDesc)) { skip++; continue; }
-            const item = (rawDesc || rawCode || "").trim();
-
-            const qtyStr = (it.qty != null && it.qty !== "" && !Number.isNaN(Number(it.qty)))
-              ? String(it.qty)
-              : (it.qtyRaw ? String(it.qtyRaw).replace(/[^\d,\.]/g,"").trim() : "");
-
-            const mv = makeMovement({
-              type: "IN",
-              customer,
-              code,
-              item,
-              qty: qtyStr,
-              date: docDateISO,
-              note: baseNote,
-              docType: String(docType || ""),
-              docNum: String(docNum || ""),
-              docDateRaw: String(docDateRaw || ""),
-              docPages: docPages,
-              lineIndex: lineIndex,
-              source: "OCR",
-              rawText: doc.rawText || ""
-            });
-
-            if (!validateMovementFields(mv)) { skip++; continue; }
-            await addMovement(mv);
-            ok++;
-          }
+          if (!validateMovementFields(mv)) { skip++; continue; }
+          await addMovement(mv);
+          ok++;
         }
 
         if (ok > 0) showToast(`Carico importato: ${ok} righe${skip ? " (alcune righe scartate)" : ""}`);
@@ -5666,7 +5464,6 @@ async function handleFileSelection(fileList) {
         console.error(e);
         openModal("Errore import", String(e.message || e));
         btnConfirmMovement.disabled = false;
-        __updateConfirmLabels();
       }
     });
 
@@ -6130,7 +5927,7 @@ async function handleFileSelection(fileList) {
         if (!Array.isArray(items) || !items.length) return;
 
         const seen = new Set();
-        for (const it of items) {
+        for (const it of safeItems) {
           const rawCode = String(it.code || "").trim();
           const rawDesc = String(it.description || "").trim();
           const code = (rawCode || rawDesc || "").trim();
