@@ -1910,14 +1910,16 @@ td.td-actions{ white-space: normal !important; }
     import { initializeApp } from "https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js";
     import { getAuth, GoogleAuthProvider, signInWithPopup, signInWithRedirect, getRedirectResult, signOut, onAuthStateChanged, setPersistence, browserLocalPersistence } from "https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js";
     import { initializeFirestore, collection, doc, setDoc, addDoc, deleteDoc, onSnapshot, query, orderBy, serverTimestamp, getDocs } from "https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js";
-    // Nota: per massima compatibilità (iOS / PWA) evitiamo il modulo firebase-storage e usiamo le API REST di Firebase Storage.
+    import { getStorage, ref as sRef, uploadBytesResumable, getDownloadURL, deleteObject } from "https://www.gstatic.com/firebasejs/12.7.0/firebase-storage.js";
+    // Nota: usiamo Firebase Storage SDK (web) per upload/download: evita problemi di CORS/preflight tipici delle chiamate REST multipart da GitHub Pages.
 
     // 🔧 INCOLLA QUI la config del tuo progetto Firebase (Console > Project settings)
     const FIREBASE_CONFIG = {
       apiKey: "AIzaSyBiyB4pilnPpVj8vImD4PI6LF2_RtyDnv4",
       authDomain: "tabellone-produzione-liv-e313e.firebaseapp.com",
       projectId: "tabellone-produzione-liv-e313e",
-      storageBucket: "tabellone-produzione-liv-e313e.firebasestorage.app",
+      // Bucket reale (GCS). Importante: non usare ".firebasestorage.app" qui.
+      storageBucket: "tabellone-produzione-liv-e313e.appspot.com",
       messagingSenderId: "537555699968",
       appId: "1:537555699968:web:4d04cb9596b67bfb0e4be5"
     };
@@ -2342,6 +2344,7 @@ const docDetailPhotosMeta = document.getElementById("docDetailPhotosMeta");
         fb.auth = getAuth(fb.app);
         await setPersistence(fb.auth, browserLocalPersistence);
         fb.db = initializeFirestore(fb.app, { experimentalAutoDetectLongPolling: true, useFetchStreams: false });
+        fb.storage = getStorage(fb.app);
         fb.storageBucket = (FIREBASE_CONFIG && FIREBASE_CONFIG.storageBucket) ? String(FIREBASE_CONFIG.storageBucket) : "";
 
         const provider = new GoogleAuthProvider();
@@ -3963,207 +3966,44 @@ function __fileToDataURL(file){
 
 
 
-// ===== Firebase Storage REST helpers (no firebase-storage.js) =====
+// ===== Firebase Storage helpers (Firebase SDK) =====
 function __storageReady(){
-  return !!(fb && fb.user && fb.storageBucket);
-}
-
-function __normalizeBucketName(b){
-  let s = String(b || "").trim();
-  if (!s) return "";
-  // strip common prefixes / urls
-  s = s.replace(/^gs:\/\//i, "").replace(/^https?:\/\//i, "");
-  // extract bucket from REST urls if present
-  const m = s.match(/firebasestorage\.googleapis\.com\/v0\/b\/([^\/]+)/i);
-  if (m && m[1]) s = m[1];
-  // remove any trailing path
-  if (s.includes("/")) s = s.split("/")[0].trim();
-  if (!s) return "";
-
-  // Alcune config Firebase riportano "<project>.firebasestorage.app" (host) invece del bucket.
-  // Il bucket di default è quasi sempre "<project>.appspot.com". Proviamo entrambe le forme.
-  if (/\.firebasestorage\.app$/i.test(s)) return s.replace(/\.firebasestorage\.app$/i, ".appspot.com");
-
-  // Se viene passato solo il projectId, normalizziamo al bucket standard
-  if (!/\./.test(s) && FIREBASE_CONFIG && FIREBASE_CONFIG.projectId && s === String(FIREBASE_CONFIG.projectId)) {
-    return `${s}.appspot.com`;
-  }
-
-  return s;
-}
-
-function __storageBucketCandidates(){
-  const set = new Set();
-
-  const add = (v) => {
-    const raw = String(v || "").trim();
-    if (!raw) return;
-    set.add(raw);
-    const norm = __normalizeBucketName(raw);
-    if (norm) set.add(norm);
-  };
-
-  // da runtime config
-  add(fb && fb.storageBucket);
-
-  // da firebase config (projectId) — più robusto su progetti con bucket "firebasestorage.app"
-  const pid = String((FIREBASE_CONFIG && FIREBASE_CONFIG.projectId) || "").trim();
-  if (pid) {
-    add(`${pid}.appspot.com`);
-    add(`${pid}.firebasestorage.app`);
-  }
-
-  return Array.from(set);
-}
-
-function __storageDownloadUrl(path, token, bucketOverride){
-  const bucket = String(bucketOverride || (fb && fb.storageBucket) || "");
-  if (!bucket || !path) return "";
-  const enc = encodeURIComponent(String(path)).replace(/%2F/g, "%2F");
-  const t = String(token || "").trim();
-  if (!t) return `https://firebasestorage.googleapis.com/v0/b/${bucket}/o/${enc}?alt=media`;
-  return `https://firebasestorage.googleapis.com/v0/b/${bucket}/o/${enc}?alt=media&token=${encodeURIComponent(t)}`;
-}
-
-function __randomToken(){
-  try{
-    if (window.crypto && typeof window.crypto.randomUUID === "function") return window.crypto.randomUUID();
-  }catch(_){}
-  return `${Date.now()}_${Math.random().toString(16).slice(2)}`;
-}
-
-async function __getIdToken(){
-  if (!fb || !fb.user || typeof fb.user.getIdToken !== "function") throw new Error("Auth non disponibile");
-  return await fb.user.getIdToken(true);
+  return !!(fb && fb.user && fb.storage);
 }
 
 async function __storageUploadFile(path, file){
   if (!__storageReady()) throw new Error("Storage non pronto");
+  const r = sRef(fb.storage, String(path));
+  const metadata = { contentType: (file && file.type) ? String(file.type) : "application/octet-stream" };
 
-  const idToken = await __getIdToken();
-  const dlToken = __randomToken();
+  // Upload resumable: più stabile su mobile / reti ballerine
+  const task = uploadBytesResumable(r, file, metadata);
+  const snap = await new Promise((resolve, reject) => {
+    task.on("state_changed", null, (err) => reject(err), () => resolve(task.snapshot));
+  });
 
-  const meta = {
-    name: String(path),
-    contentType: (file && file.type) ? String(file.type) : "application/octet-stream",
-    metadata: { firebaseStorageDownloadTokens: String(dlToken) }
-  };
-
-  const boundary = "----firebaseRestUpload_" + Math.random().toString(16).slice(2);
-  const delimiter = `--${boundary}\r\n`;
-  const closeDelim = `\r\n--${boundary}--`;
-
-  const metaPart =
-    `${delimiter}Content-Type: application/json; charset=UTF-8\r\n\r\n` +
-    `${JSON.stringify(meta)}\r\n`;
-
-  const fileType = (file && file.type) ? String(file.type) : "application/octet-stream";
-  const filePartHeader =
-    `${delimiter}Content-Type: ${fileType}\r\n\r\n`;
-
-  // Nota: Safari/iOS sono più stabili se usiamo Blob come body
-  const body = new Blob([metaPart, filePartHeader, file, closeDelim], { type: `multipart/related; boundary=${boundary}` });
-
-  const buckets = __storageBucketCandidates();
-  let lastErr = null;
-
-  // Firebase Storage REST accetta in alcuni casi "Firebase <idToken>" (SDK) e in altri "Bearer <idToken>".
-  const schemes = ["Bearer", "Firebase"];
-
-  for (const bucket of buckets){
-    const url = `https://firebasestorage.googleapis.com/v0/b/${bucket}/o?uploadType=multipart`;
-    for (const scheme of schemes){
-      try{
-        const res = await fetch(url, {
-          method: "POST",
-          headers: {
-            "Authorization": `${scheme} ${idToken}`,
-            "Content-Type": `multipart/related; boundary=${boundary}`
-          },
-          body
-        });
-
-        if (res.ok) {
-          // "fissa" il bucket che ha funzionato (utile se config era nel formato sbagliato)
-          try { fb.storageBucket = bucket; } catch(_){}
-          return { url: __storageDownloadUrl(path, dlToken, bucket), path: String(path), token: String(dlToken) };
-        } else {
-          const t = await res.text().catch(() => "");
-          lastErr = new Error(`Upload Storage fallito (${res.status}) [${bucket}] [${scheme}]: ${t.slice(0, 200)}`);
-
-          // se bucket non esiste/errato, passa al prossimo bucket
-          if (res.status === 404) break;
-
-          // per 401/403 proviamo l'altro scheme prima di cambiare bucket
-        }
-      } catch (e){
-        lastErr = e;
-      }
-    }
-  }
-
-  throw lastErr || new Error("Upload Storage fallito");
+  const url = await getDownloadURL(snap.ref);
+  return { url, path: String(path) };
 }
 
 async function __storageDeletePath(path){
   if (!__storageReady()) return;
-  const idToken = await __getIdToken();
-  const enc = encodeURIComponent(String(path)).replace(/%2F/g, "%2F");
-
-  const buckets = __storageBucketCandidates();
-  const schemes = ["Bearer", "Firebase"];
-
-  for (const bucket of buckets){
-    const url = `https://firebasestorage.googleapis.com/v0/b/${bucket}/o/${enc}`;
-    for (const scheme of schemes){
-      try{
-        const res = await fetch(url, { method: "DELETE", headers: { "Authorization": `${scheme} ${idToken}` } }).catch(()=>null);
-        if (res && res.ok) {
-          try { fb.storageBucket = bucket; } catch(_){}
-          return;
-        }
-        // se 404, prova bucket alternativo (non serve cambiare scheme)
-        if (res && res.status === 404) break;
-        // per altri errori, proviamo l'altro scheme e poi usciamo
-        if (res && res.status && res.status !== 401 && res.status !== 403) return;
-      }catch(_){}
-    }
+  try{
+    await deleteObject(sRef(fb.storage, String(path)));
+  }catch(_){
+    // se non esiste/non hai permessi, non blocco
   }
 }
 
 async function __storageResolveUrlFromPath(path){
   if (!__storageReady()) return "";
-  const idToken = await __getIdToken();
-  const enc = encodeURIComponent(String(path)).replace(/%2F/g, "%2F");
-
-  const buckets = __storageBucketCandidates();
-  const schemes = ["Bearer", "Firebase"];
-
-  for (const bucket of buckets){
-    const metaUrl = `https://firebasestorage.googleapis.com/v0/b/${bucket}/o/${enc}`;
-    for (const scheme of schemes){
-      try{
-        const res = await fetch(metaUrl, { headers: { "Authorization": `${scheme} ${idToken}` } });
-        if (!res.ok) {
-          if (res.status === 404) break; // passa al bucket successivo
-          continue; // prova altro scheme o continua
-        }
-        const js = await res.json().catch(()=>null);
-        const dt = String(js && (js.downloadTokens || (js.metadata && js.metadata.firebaseStorageDownloadTokens) || "") || "");
-        const token = dt.split(",").map(s=>s.trim()).filter(Boolean)[0] || "";
-        if (token) {
-          try { fb.storageBucket = bucket; } catch(_){}
-        }
-        return __storageDownloadUrl(path, token, bucket);
-      }catch(_){
-        // continua
-      }
-    }
+  try{
+    return await getDownloadURL(sRef(fb.storage, String(path)));
+  }catch(_){
+    return "";
   }
-
-  return "";
 }
-// ===== END Storage REST helpers =====
+// ===== END Storage helpers =====
 
 async function uploadDocPagesToStorage(docKey, files){
   const picked = Array.from(files || []).filter(Boolean);
