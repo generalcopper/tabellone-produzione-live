@@ -15,12 +15,6 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
   <meta name="color-scheme" content="light" />
-  <link rel="preconnect" href="https://www.gstatic.com" crossorigin>
-  <link rel="dns-prefetch" href="https://www.gstatic.com">
-  <link rel="preconnect" href="https://www.googleapis.com" crossorigin>
-  <link rel="dns-prefetch" href="https://www.googleapis.com">
-  <link rel="preconnect" href="https://firebasestorage.googleapis.com" crossorigin>
-  <link rel="dns-prefetch" href="https://firebasestorage.googleapis.com">
   <title>Hub Inventario</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%230a84ff'/%3E%3Cpath d='M22 43c0-11 8-20 20-20h2v6h-2c-8 0-14 6-14 14v2h-6v-2z' fill='white'/%3E%3Cpath d='M40 33a6 6 0 1 1 0-12h2v6h-2a0 0 0 0 0 0 0 0 0 0 0 0 0 6z' fill='white' opacity='0.9'/%3E%3C/svg%3E">
   <!-- Optional: HEIC->JPEG conversion in-browser (loaded only when needed) -->
@@ -600,8 +594,6 @@ header.headerRow{
   border: 3px solid rgba(10,132,255,.20);
   border-top-color: rgba(10,132,255,.95);
   animation: spin .85s linear infinite;
-  will-change: transform;
-  transform: translateZ(0);
 }
 @keyframes spin{ to{ transform: rotate(360deg); } }
 
@@ -2355,13 +2347,7 @@ const docDetailPhotosMeta = document.getElementById("docDetailPhotosMeta");
         fb.app = initializeApp(FIREBASE_CONFIG);
         fb.auth = getAuth(fb.app);
         await setPersistence(fb.auth, browserLocalPersistence);
-        // iOS (PWA/standalone): evita il costo di auto-detect e riduce i "false sync"
-        const __isIOS = /iphone|ipad|ipod/i.test(navigator.userAgent || "");
-        const __isStandalone = (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) || !!window.navigator.standalone;
-        const __fsOpts = (__isIOS && __isStandalone)
-          ? { experimentalForceLongPolling: true, useFetchStreams: false }
-          : { experimentalAutoDetectLongPolling: true, useFetchStreams: false };
-        fb.db = initializeFirestore(fb.app, __fsOpts);
+        fb.db = initializeFirestore(fb.app, { experimentalAutoDetectLongPolling: true, useFetchStreams: false });
         fb.storage = getStorage(fb.app);
         fb.storageBucket = (FIREBASE_CONFIG && FIREBASE_CONFIG.storageBucket) ? String(FIREBASE_CONFIG.storageBucket) : "";
 
@@ -2447,8 +2433,9 @@ btnLogout.addEventListener("click", async () => {
             stopRealtime();
             // fallback: local-only
             loadLocalData();
-            requestRenderAll("local");
-            requestRenderAnag("local");
+            renderAll();
+    renderAnag();
+            renderAnag();
           }
         });
 
@@ -2479,7 +2466,7 @@ btnLogout.addEventListener("click", async () => {
         query(orgCol("suppliers"), orderBy("nameLower")),
         (snap) => {
           suppliers = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-          requestRenderAnag("suppliers");
+          renderAnag();
         },
         (err) => {
           console.error("suppliers watch error", err);
@@ -2492,7 +2479,7 @@ btnLogout.addEventListener("click", async () => {
         query(orgCol("products"), orderBy("nameLower")),
         (snap) => {
           products = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-          requestRenderAnag("products");
+          renderAnag();
         },
         (err) => {
           console.error("products watch error", err);
@@ -2510,7 +2497,7 @@ btnLogout.addEventListener("click", async () => {
             const n = Number(data.value);
             if (Number.isFinite(n)) thresholds[decodeURIComponent(d.id)] = Math.floor(n);
           });
-          requestRenderAll("thresholds");
+          renderAll();
         },
         (err) => console.warn("thresholds watch error", err)
       );
@@ -2540,7 +2527,7 @@ btnLogout.addEventListener("click", async () => {
               createdAt: tsToIso(data.createdAt) || data.createdAtIso || ""
             };
           });
-          requestRenderAll("movements");
+          renderAll();
         },
         (err) => {
           console.error("movements watch error", err);
@@ -2688,7 +2675,7 @@ function showToast(msg) {
           m.updatedBy = (fb.user && (fb.user.email || fb.user.uid)) ? (fb.user.email || fb.user.uid) : "local";
         }
       }
-      requestRenderAll("optimistic");
+      renderAll();
 
       // realtime (Firestore)
       if (fb.user && fb.db) {
@@ -2725,7 +2712,7 @@ async function deleteMovementsBulk(ids) {
 
   // optimistic update (UI immediata)
   state.movements = (state.movements || []).filter(m => !set.has(m.id));
-  requestRenderAll("optimisticDelete");
+  renderAll();
 
   // Which docs still exist after deletion?
   const remainingDocKeys = new Set();
@@ -3542,50 +3529,31 @@ function validateMovementFields(fields) {
     /****************************************************************
      * Business logic (stock computed from movements)
      ****************************************************************/
-    let __lastMovementCached = null;
-
     function computeStock() {
       const stock = new Map(); // key -> {customer, code, item, qty, lastMoveAt, threshold}
       const latestByKey = new Map();
 
-      const list = Array.isArray(state.movements) ? state.movements : [];
-
-      // Cache "ultimo movimento" senza fare sort (molto più veloce su iOS)
-      let lastMv = null;
-      let lastTs = "";
-
-      for (let i = 0; i < list.length; i++) {
-        const mv = list[i] || {};
-        const customer = String(mv.customer || "").trim();
-        const code = String(mv.code || "").trim();
-        const item = String(mv.item || "").trim();
+      for (const mv of state.movements) {
+        const customer = (mv.customer || "").trim();
+        const code = (mv.code || "").trim();
+        const item = (mv.item || "").trim();
         const k = movementKey(customer, code);
-
-        let cur = stock.get(k);
-        if (!cur) cur = { customer, code, item, qty: 0, lastMoveAt: "", threshold: getThresholdForKey(k) };
-
+        const cur = stock.get(k) || { customer, code, item, qty: 0, lastMoveAt: "", threshold: getThresholdForKey(k) };
         const q = safeInt(mv.qty);
         cur.qty += (mv.type === "OUT" ? -q : q);
         if (!cur.item && item) cur.item = item;
-
         // last move timestamp by createdAt (or date)
-        const ts = String(mv.createdAt || mv.date || "");
+        const ts = mv.createdAt || mv.date || "";
         const prev = latestByKey.get(k) || "";
-        if (!prev || ts > prev) {
-          latestByKey.set(k, ts);
-          cur.lastMoveAt = ts;
+        if (!prev || String(ts) > String(prev)) {
+          latestByKey.set(k, String(ts));
+          cur.lastMoveAt = String(ts);
         }
-
-        if (!lastTs || ts > lastTs) {
-          lastTs = ts;
-          lastMv = mv;
-        }
-
         stock.set(k, cur);
       }
 
-      __lastMovementCached = lastMv;
-
+      // normalize negative to 0? In a real ERP you might allow negative to signal errors
+      // Here we keep negatives visible so you can spot issues.
       const arr = Array.from(stock.values());
       return arr;
     }
@@ -3661,7 +3629,7 @@ docPages: __sanitizeDocPages(mv.docPages || mv.docImages),
       // local fallback
       state.movements.push(mv);
       saveLocalData();
-      requestRenderAll("localAdd");
+      renderAll();
     }
 
     
@@ -3717,25 +3685,19 @@ async function deleteMovement(id) {
       const totalPieces = stockArr.reduce((sum, x) => sum + (Number(x.qty) || 0), 0);
 
       const low = stockArr.filter(x => (Number(x.qty) || 0) < (Number(x.threshold) || 0)).length;
-
-      const last = __lastMovementCached;
-      const lastTs = last ? String(last.createdAt || last.date || "") : "";
+      const last = state.movements.slice().sort((a,b) => String(b.createdAt||"").localeCompare(String(a.createdAt||"")))[0];
 
       statTotalItems.textContent = items.toLocaleString("it-IT");
       statTotalPieces.textContent = totalPieces.toLocaleString("it-IT");
-
-      // Flussi: usa cache docGroups (calcolata in renderAll phase2). Evita ricalcoli pesanti su iOS.
       try {
-        if (typeof statTotalFlows !== "undefined" && statTotalFlows) {
-          const n = Array.isArray(__docGroups) ? __docGroups.length : null;
-          statTotalFlows.textContent = (typeof n === "number") ? n.toLocaleString("it-IT") : "—";
-        }
-      } catch(e) {}
-
+        const docCount = buildDocGroupsFromMovements(state.movements).list.length;
+        if (typeof statTotalFlows !== "undefined" && statTotalFlows) statTotalFlows.textContent = Number(docCount).toLocaleString("it-IT");
+      } catch(e) {
+        if (typeof statTotalFlows !== "undefined" && statTotalFlows) statTotalFlows.textContent = (state.movements.length).toLocaleString("it-IT");
+      }
       statLowStock.textContent = low.toLocaleString("it-IT");
-      statLastUpdate.textContent = lastTs ? formatDateIT(lastTs) : "—";
+      statLastUpdate.textContent = last ? formatDateIT(last.createdAt) : "—";
     }
-
 
     function renderCustomerOptions(stockArr) {
       const customers = Array.from(new Set(stockArr.map(x => x.customer).filter(Boolean))).sort((a,b)=>a.localeCompare(b));
@@ -4403,57 +4365,22 @@ function renderMovementsTable() {
       }).join("");
     }
 
+function renderAll() {
+      const stockArr = computeStock();
+      renderStats(stockArr);
+      renderCustomerOptions(stockArr);
+      renderStockTable(stockArr);
+      rebuildDocGroupsCache();
+      renderMovementsTable();
+      renderFlowsTable();
 
-let __renderAllScheduled = false;
-let __renderAllPhaseToken = 0;
-function requestRenderAll(reason){
-  if (__renderAllScheduled) return;
-  __renderAllScheduled = true;
-  requestAnimationFrame(() => {
-    __renderAllScheduled = false;
-    try { renderAll(reason); } catch (e) { console.error("renderAll failed", e); }
-  });
-}
-
-let __renderAnagScheduled = false;
-function requestRenderAnag(reason){
-  if (__renderAnagScheduled) return;
-  __renderAnagScheduled = true;
-  requestAnimationFrame(() => {
-    __renderAnagScheduled = false;
-    try { renderAnag(); } catch (e) { console.error("renderAnag failed", e); }
-  });
-}
-
-function renderAll(_reason) {
-  const token = ++__renderAllPhaseToken;
-
-  const stockArr = computeStock();
-  renderStats(stockArr);
-  renderCustomerOptions(stockArr);
-  renderStockTable(stockArr);
-
-  // Phase 2 (più pesante): documenti + tabelle (coalesced)
-  requestAnimationFrame(() => {
-    if (token !== __renderAllPhaseToken) return;
-    rebuildDocGroupsCache();
-
-    // KPI flussi (usa cache, evita ricalcoli)
-    try {
-      if (typeof statTotalFlows !== "undefined" && statTotalFlows) {
-        statTotalFlows.textContent = Number((__docGroups || []).length).toLocaleString("it-IT");
+      // Se la vista dettaglio fornitore è aperta, aggiorna i documenti collegati (DDT / OCR)
+      if (modalSupplier && modalSupplier.classList.contains("open")) {
+        try { renderSupplierLinkedDocs(); } catch {}
       }
-    } catch {}
-
-    renderMovementsTable();
-    renderFlowsTable();
-
-    // Se la vista dettaglio fornitore è aperta, aggiorna i documenti collegati (DDT / OCR)
-    if (modalSupplier && modalSupplier.classList.contains("open")) {
-      try { renderSupplierLinkedDocs(); } catch {}
     }
-  });
-}
+
+    
 
     /****************************************************************
      * Anagrafica (Fornitori / Prodotti) — realtime render
@@ -5462,7 +5389,7 @@ async function handleFileSelection(fileList) {
       // fallback: locale
       state.movements.push(...imported);
       saveLocalData();
-      requestRenderAll("localImport");
+      renderAll();
       showToast(`Importati ${imported.length} movimenti (locale)`);
     }
 
@@ -6298,7 +6225,7 @@ await ensureSupplierUpsert(customer);
         localStorage.removeItem(STORE_KEY_LEGACY);
         loadSettings();
         loadLocalData();
-        requestRenderAll("resetLocal");
+        renderAll();
         resetCapture();
         closeSettings();
         showToast("Dati locali resettati");
@@ -6354,17 +6281,12 @@ if (importMovementsInput) importMovementsInput.addEventListener("change", async 
      ****************************************************************/
     loadSettings();
     loadLocalData();
+    initFirebase();
 
     setCaptureType("IN");
     resetCapture();
     applySettingsToUI();
-
-    // Prima paint velocissima (usa cache locale), poi sync
-    requestRenderAll("init");
-    setSyncPill("warn", "Sync: avvio…");
-
-    // Avvia Firebase dopo il primo frame per non bloccare lo spinner su iOS (PWA)
-    requestAnimationFrame(() => { try { initFirebase(); } catch (e) { console.error(e); } });
+    renderAll();
     // Niente test automatico all'avvio (evita richieste inutili)
     if ((state.settings.ocrUrl || "").trim()) {
       setOcrPill("warn", "OCR: configurato (premi Test)");
