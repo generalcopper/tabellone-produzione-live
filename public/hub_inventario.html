@@ -186,7 +186,9 @@
     tbody td { padding: 10px 10px; border-bottom: 1px solid rgba(12,22,52,.06); font-weight: 800; color: rgba(0,0,0,.84); vertical-align: top; }
     tbody tr:hover td { background: rgba(10,132,255,.06); }
     .td-muted { color: rgba(0,0,0,.55); font-weight: 800; }
-    .qty { font-variant-numeric: tabular-nums; }
+    
+    .flow-subline { margin-top: 4px; font-size: 12px; color: var(--muted); font-weight: 700; }
+.qty { font-variant-numeric: tabular-nums; }
     .badge { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px; border: 1px solid rgba(12,22,52,.10); background: rgba(0,0,0,.03); font-size: 12px; font-weight: 900; color: rgba(0,0,0,.72); }
     .badge.in { border-color: rgba(37,185,79,.25); background: rgba(37,185,79,.10); color: rgba(0,70,20,.88); }
     .badge.out { border-color: rgba(255,59,48,.22); background: rgba(255,59,48,.10); color: rgba(110,0,0,.86); }
@@ -2551,7 +2553,17 @@ btnLogout.addEventListener("click", async () => {
       if (!isoDate) return "—";
       const d = new Date(isoDate);
       if (Number.isNaN(d.getTime())) return "—";
-      return d.toLocaleString("it-IT", { dateStyle: "medium", timeStyle: "short" });
+      return d.toLocaleString("it-IT", { dateStyle: "medium", timeStyle: "short" }
+    function formatDateTimeCompactIT(isoDate) {
+      if (!isoDate) return "—";
+      const d = new Date(String(isoDate || "").trim());
+      if (Number.isNaN(d.getTime())) return "—";
+      const date = d.toLocaleDateString("it-IT");
+      const time = d.toLocaleTimeString("it-IT", { hour: "2-digit", minute: "2-digit" });
+      return `${date} ${time}`;
+    }
+
+);
     }
 
     function todayYYYYMMDD() {
@@ -3590,6 +3602,35 @@ docPages: __sanitizeDocPages(mv.docPages || mv.docImages),
       renderAll();
     }
 
+
+    // Cloud-only insert (no fallback locale) — usato per import OCR con foto (serve realtime multi-dispositivo)
+    async function addMovementCloud(mv) {
+      if (!(fb && fb.user && fb.db)) {
+        throw new Error("Sync non attivo: effettua il login Google e riprova.");
+      }
+      const payload = {
+        type: mv.type || "IN",
+        customer: mv.customer || "",
+        code: mv.code || "",
+        item: mv.item || "",
+        qty: safeInt(mv.qty),
+        date: mv.date || "",
+        note: mv.note || "",
+        source: mv.source || "Manual",
+        rawText: mv.rawText || "",
+
+        docType: mv.docType || "",
+        docNum: mv.docNum || "",
+        docDateRaw: mv.docDateRaw || "",
+        lineIndex: safeInt(mv.lineIndex),
+        docPages: __sanitizeDocPages(mv.docPages || mv.docImages),
+        createdAt: serverTimestamp(),
+        createdBy: fb.user.email || fb.user.uid
+      };
+      await addDoc(orgCol("inventoryMovements"), payload);
+    }
+
+
     
 async function deleteMovement(id) {
   if (!id) return;
@@ -4010,6 +4051,75 @@ function getDocPagesFromGroup(g){
   return out;
 }
 
+// Migrazione automatica: se un documento ha pagine salvate solo in locale (IndexedDB),
+// prova a caricarle in Firebase Storage e aggiornare i movimenti, così la foto è visibile su tutti i dispositivi.
+const __migratingDocKeys = new Set();
+
+async function migrateLocalDocPagesForGroup(g){
+  try{
+    const docKey = String(g && g.key || "");
+    if (!docKey) return;
+    if (__migratingDocKeys.has(docKey)) return;
+
+    if (!(fb && fb.user && fb.db && fb.storage)) return;
+
+    const pages = getDocPagesFromGroup(g).filter(p => String((p && p.path) || "").startsWith("idb:"));
+    if (!pages.length) return;
+
+    __migratingDocKeys.add(docKey);
+    showToast("Salvataggio foto in cloud…");
+
+    const folder = `orgs/${ORG_ID}/docPages/${keyToDocId(docKey)}/migrated_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+    const map = new Map(); // oldPath -> newPageObj
+
+    for (let i = 0; i < pages.length; i++){
+      const p = pages[i];
+      const oldPath = String(p.path || "");
+      const id = oldPath.startsWith("idb:") ? oldPath.slice(4) : "";
+      if (!id) continue;
+
+      const blob = await __idbGetDocPage(id);
+      if (!blob) continue;
+
+      const pageNum = safeInt(p.page) || (i + 1);
+      const path = `${folder}/page_${String(pageNum).padStart(2,"0")}.jpg`;
+      const r = sRef(fb.storage, path);
+      await uploadBytes(r, blob);
+      const url = await getDownloadURL(r);
+      map.set(oldPath, { url, path, page: pageNum });
+    }
+
+    if (!map.size) return;
+
+    const updatedBy = (fb.user.email || fb.user.uid || "user");
+    const ids = (g.movements || []).map(m => m.id).filter(Boolean);
+
+    for (const id of ids){
+      const mv = (g.movements || []).find(x => x && x.id === id) || null;
+      const cur = __sanitizeDocPages((mv && (mv.docPages || mv.docImages)) || []);
+      const next = cur.map(pp => {
+        const k = String(pp.path || "");
+        const repl = map.get(k);
+        return repl ? Object.assign({}, pp, repl, { page: repl.page }) : pp;
+      });
+      await setDoc(doc(fb.db, "orgs", ORG_ID, "inventoryMovements", id), {
+        docPages: next,
+        updatedAt: serverTimestamp(),
+        updatedBy
+      }, { merge: true });
+    }
+
+    showToast("Foto documento sincronizzate");
+  } catch(e){
+    console.warn("migrateLocalDocPagesForGroup failed", e);
+  } finally {
+    const docKey = String(g && g.key || "");
+    if (docKey) __migratingDocKeys.delete(docKey);
+  }
+}
+
+
+
 const __BLANK_IMG = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
 let __docDetailBlobUrls = [];
 let __docDetailRenderToken = 0;
@@ -4063,6 +4173,8 @@ function renderDocDetailPhotos(g){
   const token = ++__docDetailRenderToken;
 
   const pages = getDocPagesFromGroup(g);
+  // Se necessario, migra pagine locali -> cloud (multi-dispositivo)
+  migrateLocalDocPagesForGroup(g);
   if (!pages.length){
     docDetailPhotosWrap.style.display = "none";
     docDetailPhotosGrid.innerHTML = "";
@@ -4180,7 +4292,7 @@ function renderMovementsTable() {
 
         return `
           <tr class="docRow" data-dockey="${escapeHtmlAttr(g.key)}" title="Apri dettaglio">
-            <td data-label="Documento"><strong>${escapeHtml(label)}</strong></td>
+            <td data-label="Documento"><strong>${escapeHtml(label)}</strong><div class="flow-subline">Caricato: ${escapeHtml(formatDateTimeCompactIT(g.createdAtMax || ""))}</div></td>
             <td data-label="Fornitore">${escapeHtml(g.customer || "")}</td>
             <td data-label="Righe" class="qty">${Number(lines).toLocaleString("it-IT")}</td>
             <td data-label="Pezzi" class="qty">${Number(pieces).toLocaleString("it-IT")}</td>
@@ -4208,7 +4320,7 @@ function renderMovementsTable() {
 
         return `
           <tr class="docRow" data-dockey="${escapeHtmlAttr(g.key)}" title="Apri dettaglio">
-            <td data-label="Documento"><strong>${escapeHtml(label)}</strong></td>
+            <td data-label="Documento"><strong>${escapeHtml(label)}</strong><div class="flow-subline">Caricato: ${escapeHtml(formatDateTimeCompactIT(g.createdAtMax || ""))}</div></td>
             <td data-label="Fornitore">${escapeHtml(g.customer || "")}</td>
             <td data-label="Righe" class="qty">${Number(lines).toLocaleString("it-IT")}</td>
             <td data-label="Pezzi" class="qty">${Number(pieces).toLocaleString("it-IT")}</td>
@@ -5392,15 +5504,19 @@ async function handleFileSelection(fileList) {
       try {
 
 let docPages = [];
-try {
-  if (capture.files && capture.files.length) {
-    progressLabel.textContent = "Caricamento foto…";
-    progressFill.style.width = "80%";
-    docPages = await uploadDocPagesToStorage(docKey, capture.files);
+if (capture.files && capture.files.length) {
+  // Richiesta: foto disponibili su tutti i dispositivi in tempo reale (cloud, non solo locale)
+  if (!(fb && fb.user && fb.db && fb.storage)) {
+    throw new Error("Per salvare le foto del documento su tutti i dispositivi serve il login Google (sync attivo). Effettua il login e riprova.");
   }
-} catch (e) {
-  console.warn("upload doc pages failed", e);
-  docPages = [];
+  progressLabel.textContent = "Caricamento foto…";
+  progressFill.style.width = "80%";
+  docPages = await uploadDocPagesToStorage(docKey, capture.files);
+
+  const localOnly = (docPages || []).some(p => String((p && p.path) || "").startsWith("idb:") || String((p && p.url) || "").startsWith("data:image"));
+  if (localOnly) {
+    throw new Error("Non sono riuscito a salvare le foto in cloud (risultato locale). Controlla connessione e riprova.");
+  }
 }
 
         await ensureSupplierUpsert(customer);
@@ -5441,7 +5557,7 @@ try {
           });
 
           if (!validateMovementFields(mv)) { skip++; continue; }
-          await addMovement(mv);
+          await addMovementCloud(mv);
           ok++;
         }
 
