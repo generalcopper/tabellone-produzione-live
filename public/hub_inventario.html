@@ -2479,8 +2479,12 @@ function showToast(msg) {
     function closeModal() { modalQuick.classList.remove("open");
       __syncBodyLockFromModals(); }
 
-    function closeDocDetail() { if (modalDocDetail) modalDocDetail.classList.remove("open");
-      __syncBodyLockFromModals(); }
+    function closeDocDetail() {
+      try { __docDetailRenderToken++; } catch(_){}
+      try { __revokeDocDetailBlobUrls(); } catch(_){}
+      if (modalDocDetail) modalDocDetail.classList.remove("open");
+      __syncBodyLockFromModals();
+    }
 
     // ===== Flussi: modifica / elimina (documento) =====
     let __currentFlowEditKey = null;
@@ -3635,60 +3639,212 @@ function docKeyFromMovement(mv){
   });
 }
 
+function __isRenderableUrl(u){
+  const s = String(u || "").trim();
+  return /^(https?:|data:|blob:)/i.test(s);
+}
+
 function __sanitizeDocPages(pages){
   const arr = Array.isArray(pages) ? pages : [];
   const out = [];
   for (let i = 0; i < arr.length; i++){
     const p = arr[i];
+
+    // Legacy: possono arrivare stringhe (URL o storage path)
     if (typeof p === "string"){
-      const url = String(p || "").trim();
-      if (url) out.push({ url, path: "", page: i + 1 });
+      const s = String(p || "").trim();
+      if (!s) continue;
+      if (__isRenderableUrl(s)) out.push({ url: s, path: "", page: i + 1 });
+      else out.push({ url: "", path: s, page: i + 1 });
       continue;
     }
+
     if (!p || typeof p !== "object") continue;
-    const url = String(p.url || p.downloadURL || p.href || "").trim();
-    const path = String(p.path || p.storagePath || "").trim();
+
+    let url = String(p.url || p.downloadURL || p.href || "").trim();
+    let path = String(p.path || p.storagePath || "").trim();
     const page = safeInt(p.page || p.index) || (i + 1);
+
+    // Se l'unico valore sembra un path (es. "orgs/..."), spostalo su path
+    if (url && !path && !__isRenderableUrl(url)){
+      path = url;
+      url = "";
+    }
+
     if (!url && !path) continue;
     out.push({ url, path, page });
   }
   return out;
 }
 
+
+/****************************************************************
+ * Local doc pages storage (IndexedDB) — evita base64 in localStorage
+ ****************************************************************/
+let __idbDocPagesPromise = null;
+
+function __idbDocPagesOpen(){
+  if (__idbDocPagesPromise) return __idbDocPagesPromise;
+  __idbDocPagesPromise = new Promise((resolve) => {
+    try{
+      if (!("indexedDB" in window)) return resolve(null);
+      const req = indexedDB.open("hub_inventario_db", 1);
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        if (!db.objectStoreNames.contains("docPages")) {
+          db.createObjectStore("docPages", { keyPath: "id" });
+        }
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => resolve(null);
+    } catch(e){
+      resolve(null);
+    }
+  });
+  return __idbDocPagesPromise;
+}
+
+async function __idbPutDocPage(id, blob){
+  const db = await __idbDocPagesOpen();
+  if (!db) return false;
+  return await new Promise((resolve) => {
+    try{
+      const tx = db.transaction("docPages", "readwrite");
+      const store = tx.objectStore("docPages");
+      store.put({ id: String(id), blob, ts: Date.now(), type: String(blob && blob.type || "") });
+      tx.oncomplete = () => resolve(true);
+      tx.onerror = () => resolve(false);
+    }catch(e){
+      resolve(false);
+    }
+  });
+}
+
+async function __idbGetDocPage(id){
+  const db = await __idbDocPagesOpen();
+  if (!db) return null;
+  return await new Promise((resolve) => {
+    try{
+      const tx = db.transaction("docPages", "readonly");
+      const store = tx.objectStore("docPages");
+      const req = store.get(String(id));
+      req.onsuccess = () => resolve((req.result && req.result.blob) ? req.result.blob : null);
+      req.onerror = () => resolve(null);
+    }catch(e){
+      resolve(null);
+    }
+  });
+}
+
+async function __idbDeleteDocPage(id){
+  const db = await __idbDocPagesOpen();
+  if (!db) return false;
+  return await new Promise((resolve) => {
+    try{
+      const tx = db.transaction("docPages", "readwrite");
+      const store = tx.objectStore("docPages");
+      store.delete(String(id));
+      tx.oncomplete = () => resolve(true);
+      tx.onerror = () => resolve(false);
+    }catch(e){
+      resolve(false);
+    }
+  });
+}
+
+// Fallback: convert file->dataURL (se IndexedDB non disponibile)
+function __fileToDataURL(file){
+  return new Promise((resolve) => {
+    try{
+      const fr = new FileReader();
+      fr.onload = () => resolve(String(fr.result || ""));
+      fr.onerror = () => resolve("");
+      fr.readAsDataURL(file);
+    } catch(e){
+      resolve("");
+    }
+  });
+}
+
+
 async function uploadDocPagesToStorage(docKey, files){
   const picked = Array.from(files || []).filter(Boolean);
   if (!picked.length) return [];
-  if (!(fb.user && fb.storage)) return [];
-  const folder = `orgs/${ORG_ID}/docPages/${keyToDocId(docKey)}/${Date.now()}_${Math.random().toString(16).slice(2)}`;
+
+  // Cloud: Firebase Storage (se disponibile). Se fallisce, fallback local.
+  if (fb.user && fb.storage){
+    try{
+      const folder = `orgs/${ORG_ID}/docPages/${keyToDocId(docKey)}/${Date.now()}_${Math.random().toString(16).slice(2)}`;
+      const out = [];
+      for (let i = 0; i < picked.length; i++){
+        const f = picked[i];
+        const typeExt = (f && f.type && String(f.type).includes("/")) ? String(f.type).split("/")[1] : "";
+        const nameExt = String(f && f.name || "").includes(".") ? String(f.name).split(".").pop() : "";
+        const ext = (typeExt || nameExt || "jpg");
+        const safeExt = String(ext || "jpg").replace(/[^a-z0-9]/gi,"").toLowerCase() || "jpg";
+        const path = `${folder}/page_${String(i+1).padStart(2,"0")}.${safeExt}`;
+        const r = sRef(fb.storage, path);
+        await uploadBytes(r, f);
+        const url = await getDownloadURL(r);
+        out.push({ url, path, page: i + 1 });
+      }
+      return out;
+    } catch(e){
+      console.warn("uploadDocPagesToStorage: upload failed, fallback local", e);
+      // continua al fallback local
+    }
+  }
+
+  // Local: IndexedDB (fallback su dataURL)
   const out = [];
+  const folder = `docPages/${keyToDocId(docKey)}/${Date.now()}_${Math.random().toString(16).slice(2)}`;
   for (let i = 0; i < picked.length; i++){
     const f = picked[i];
-    const typeExt = (f && f.type && String(f.type).includes("/")) ? String(f.type).split("/")[1] : "";
-    const nameExt = String(f && f.name || "").includes(".") ? String(f.name).split(".").pop() : "";
-    const ext = (typeExt || nameExt || "jpg");
-    const safeExt = String(ext || "jpg").replace(/[^a-z0-9]/gi,"").toLowerCase() || "jpg";
-    const path = `${folder}/page_${String(i+1).padStart(2,"0")}.${safeExt}`;
-    const r = sRef(fb.storage, path);
-    await uploadBytes(r, f);
-    const url = await getDownloadURL(r);
-    out.push({ url, path, page: i + 1 });
+    const id = `${folder}/page_${String(i+1).padStart(2,"0")}`;
+    const ok = await __idbPutDocPage(id, f);
+    if (ok){
+      out.push({ url: "", path: `idb:${id}`, page: i + 1 });
+    } else {
+      const dataUrl = await __fileToDataURL(f);
+      if (dataUrl) out.push({ url: dataUrl, path: "", page: i + 1 });
+    }
   }
   return out;
 }
 
+
+
+
 async function deleteStoragePaths(paths){
-  const arr = Array.from(paths || []).filter(Boolean);
+  const arr = Array.from(paths || []).filter(Boolean).map(p => String(p));
   if (!arr.length) return;
-  if (!(fb.user && fb.storage)) return;
-  await Promise.all(arr.map(async (p) => {
-    try{
-      const r = sRef(fb.storage, String(p));
-      await deleteObject(r);
-    } catch(e){
-      console.warn("deleteObject failed", p, e);
-    }
-  }));
+
+  const idbArr = arr.filter(p => p.startsWith("idb:"));
+  const cloudArr = arr.filter(p => !p.startsWith("idb:"));
+
+  if (idbArr.length){
+    await Promise.all(idbArr.map(async (p) => {
+      try{
+        await __idbDeleteDocPage(p.slice(4));
+      }catch(e){
+        console.warn("idb delete failed", p, e);
+      }
+    }));
+  }
+
+  if (cloudArr.length && (fb.user && fb.storage)){
+    await Promise.all(cloudArr.map(async (p) => {
+      try{
+        const r = sRef(fb.storage, String(p));
+        await deleteObject(r);
+      } catch(e){
+        console.warn("deleteObject failed", p, e);
+      }
+    }));
+  }
 }
+
+
 
 function getDocPagesFromGroup(g){
   const pages = [];
@@ -3713,8 +3869,58 @@ function getDocPagesFromGroup(g){
   return out;
 }
 
+const __BLANK_IMG = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
+let __docDetailBlobUrls = [];
+let __docDetailRenderToken = 0;
+
+function __revokeDocDetailBlobUrls(){
+  if (!__docDetailBlobUrls || !__docDetailBlobUrls.length) return;
+  __docDetailBlobUrls.forEach(u => {
+    try { URL.revokeObjectURL(u); } catch(_){}
+  });
+  __docDetailBlobUrls = [];
+}
+
+async function __resolveDocPageToUrl(p){
+  const url = String((p && p.url) || "").trim();
+  if (url && __isRenderableUrl(url)) return url;
+
+  let path = String((p && p.path) || "").trim();
+  // legacy: a volte il path finisce in url
+  if (!path && url && !__isRenderableUrl(url)) path = url;
+
+  if (!path) return "";
+  if (__isRenderableUrl(path)) return path;
+
+  if (path.startsWith("idb:")) {
+    const id = path.slice(4);
+    const blob = await __idbGetDocPage(id);
+    if (!blob) return "";
+    const u = URL.createObjectURL(blob);
+    __docDetailBlobUrls.push(u);
+    return u;
+  }
+
+  if (fb && fb.storage) {
+    try {
+      const r = sRef(fb.storage, path);
+      const u = await getDownloadURL(r);
+      return u;
+    } catch(e) {
+      return "";
+    }
+  }
+
+  return "";
+}
+
 function renderDocDetailPhotos(g){
   if (!docDetailPhotosWrap || !docDetailPhotosGrid) return;
+
+  // revoke eventuali blob url precedenti
+  __revokeDocDetailBlobUrls();
+  const token = ++__docDetailRenderToken;
+
   const pages = getDocPagesFromGroup(g);
   if (!pages.length){
     docDetailPhotosWrap.style.display = "none";
@@ -3722,15 +3928,43 @@ function renderDocDetailPhotos(g){
     if (docDetailPhotosMeta) docDetailPhotosMeta.textContent = "";
     return;
   }
+
   docDetailPhotosWrap.style.display = "";
   if (docDetailPhotosMeta) docDetailPhotosMeta.textContent = `${pages.length} pagina${pages.length === 1 ? "" : "e"}`;
-  docDetailPhotosGrid.innerHTML = pages.map(p => `
-    <a class="docPhoto" href="${escapeHtmlAttr(p.url || "")}" target="_blank" rel="noopener">
-      <img src="${escapeHtmlAttr(p.url || "")}" alt="Pagina ${safeInt(p.page) || ""}">
-      <div class="docPhotoBadge">${safeInt(p.page) || ""}</div>
-    </a>
-  `).join("");
+
+  docDetailPhotosGrid.innerHTML = pages.map((p, idx) => {
+    const page = safeInt(p.page) || (idx + 1);
+    const path = escapeHtmlAttr(String(p.path || ""));
+    const url = escapeHtmlAttr(String(p.url || ""));
+    return `
+      <a class="docPhoto" href="#" data-idx="${idx}" data-page="${page}" data-path="${path}" data-url="${url}" target="_blank" rel="noopener" onclick="return false;">
+        <img src="${__BLANK_IMG}" alt="Pagina ${page}">
+        <div class="docPhotoBadge">${page}</div>
+      </a>
+    `;
+  }).join("");
+
+  // resolve URLs async (Storage / IndexedDB)
+  const anchors = Array.from(docDetailPhotosGrid.querySelectorAll(".docPhoto"));
+  pages.forEach(async (p, idx) => {
+    try {
+      const u = await __resolveDocPageToUrl(p);
+      if (token !== __docDetailRenderToken) return;
+      const a = anchors[idx];
+      if (!a) return;
+      const img = a.querySelector("img");
+      if (u) {
+        if (img) img.src = u;
+        a.href = u;
+        a.onclick = null;
+        try { a.removeAttribute("onclick"); } catch(_){ }
+      } else {
+        if (img) img.alt = "Immagine non disponibile";
+      }
+    } catch(e){}
+  });
 }
+
 
 
 
