@@ -1907,7 +1907,7 @@ td.td-actions{ white-space: normal !important; }
      ****************************************************************/
     import { initializeApp } from "https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js";
     import { getAuth, GoogleAuthProvider, signInWithPopup, signInWithRedirect, getRedirectResult, signOut, onAuthStateChanged, setPersistence, browserLocalPersistence } from "https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js";
-    import { initializeFirestore, collection, doc, setDoc, addDoc, deleteDoc, onSnapshot, query, orderBy, serverTimestamp, getDocs } from "https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js";
+    import { initializeFirestore, collection, doc, setDoc, addDoc, deleteDoc, onSnapshot, query, orderBy, serverTimestamp, getDocs, runTransaction } from "https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js";
     import { getStorage, ref as sRef, uploadBytes, getDownloadURL, deleteObject } from "https://www.gstatic.com/firebasejs/12.7.0/firebase-storage.js";
 
     // 🔧 INCOLLA QUI la config del tuo progetto Firebase (Console > Project settings)
@@ -2691,6 +2691,7 @@ async function deleteMovementsBulk(ids) {
 
   // Collect doc-pages paths grouped by documento (elimina foto solo se sparisce tutto il documento)
   const deletedByDocKey = new Map(); // docKey -> Set(paths)
+  const deletedTripletByDocKey = new Map(); // docKey -> Set(ddtTripletKey)
   for (const mv of (state.movements || [])) {
     if (!set.has(mv.id)) continue;
     const dk = docKeyFromMovement(mv);
@@ -2699,6 +2700,12 @@ async function deleteMovementsBulk(ids) {
     const s = deletedByDocKey.get(dk) || new Set();
     pages.forEach(p => { if (p && p.path) s.add(String(p.path)); });
     deletedByDocKey.set(dk, s);
+    const tk = String((mv && (mv.ddtTripletKey || mv.ddtKey)) || "").trim();
+    if (tk) {
+      const ts = deletedTripletByDocKey.get(dk) || new Set();
+      ts.add(tk);
+      deletedTripletByDocKey.set(dk, ts);
+    }
   }
 
   // optimistic update (UI immediata)
@@ -2718,6 +2725,13 @@ async function deleteMovementsBulk(ids) {
     }
   });
 
+  const tripletKeysToDelete = new Set();
+  deletedTripletByDocKey.forEach((keys, dk) => {
+    if (!remainingDocKeys.has(dk)) {
+      keys.forEach(k => tripletKeysToDelete.add(k));
+    }
+  });
+
   // realtime (Firestore)
   if (fb.user && fb.db) {
     await Promise.all(list.map(async (id) => {
@@ -2729,6 +2743,8 @@ async function deleteMovementsBulk(ids) {
     }));
     // best-effort: delete immagini (solo se il documento non esiste più)
     await deleteStoragePaths(pathsToDelete);
+    // best-effort: delete indice anti-duplicato (solo se il documento non esiste più)
+    await Promise.all(Array.from(tripletKeysToDelete).map(k => __releaseDocTripletKey(k)));
     return;
   }
 
@@ -3573,6 +3589,9 @@ docNum: mv.docNum || "",
 docDateRaw: mv.docDateRaw || "",
 lineIndex: safeInt(mv.lineIndex),
 docPages: __sanitizeDocPages(mv.docPages || mv.docImages),
+            supplierVat: mv.supplierVat || "",
+            docNumKey: mv.docNumKey || "",
+            ddtTripletKey: mv.ddtTripletKey || "",
             createdAt: serverTimestamp(),
             createdBy: fb.user.email || fb.user.uid
           };
@@ -3713,7 +3732,166 @@ async function deleteMovement(id) {
     }
 
 
-    function buildDocGroupsFromMovements(movements) {
+    
+
+    /****************************************************************
+     * Anti-duplicato DDT (regola rigida):
+     * stesso numero DDT + stessa P.IVA + stessa data => NON si può ricaricare
+     ****************************************************************/
+    function __docNumToKey(v){
+      const raw = String(v || "").toUpperCase().trim();
+      if (!raw) return "";
+      // Rimuove spazi e qualsiasi carattere non alfanumerico
+      // Esempi: "1.756" -> "1756", "1756/23" -> "175623"
+      let k = raw.replace(/\s+/g,"").replace(/[^A-Z0-9]/g,"");
+      // Se è solo numerico, normalizza zeri iniziali (001756 -> 1756)
+      if (/^\d+$/.test(k)) k = k.replace(/^0+(?=\d)/, "");
+      return k;
+    }
+
+    function __buildDdtTripletKey(vatNorm, docNumKey, dateISO){
+      const v = String(vatNorm || "").trim();
+      const n = String(docNumKey || "").trim();
+      const d = String(dateISO || "").trim();
+      if (!v || !n || !d) return "";
+      return [v, n, d].join("|");
+    }
+
+    function __resolveVatFromDocOrCustomer(doc, customer){
+      // 1) Preferisci VAT dal documento (più affidabile)
+      try {
+        const sup = (doc && typeof doc === "object") ? (doc.supplier || doc.__supplier || {}) : {};
+        const cand = sup.vatNumber || sup.vat || sup.partitaIva || sup.piva || sup.vatId || "";
+        const v1 = __sup_cleanVat(cand);
+        if (v1) return v1;
+      } catch(_) {}
+
+      // 2) Fallback: usa anagrafica fornitori già salvata (matching per nome)
+      try {
+        const name = String(customer || "").trim();
+        if (!name) return "";
+        const list = Array.isArray(state.suppliers) ? state.suppliers : [];
+        for (const s of list) {
+          if (!s) continue;
+          if (supplierMatchesCustomer(s, name)) {
+            const v2 = __sup_cleanVat(s.vat || s.vatNumber || s.piva || s.partitaIva || "");
+            if (v2) return v2;
+          }
+        }
+      } catch(_) {}
+
+      return "";
+    }
+
+    function __findExistingDocGroupByTriplet(vatNorm, docNumKey, dateISO){
+      try { rebuildDocGroupsCache(); } catch(_) {}
+      const v = String(vatNorm || "").trim();
+      const n = String(docNumKey || "").trim();
+      const d = String(dateISO || "").trim();
+      if (!v || !n || !d) return null;
+
+      const groups = Array.isArray(__docGroups) ? __docGroups : [];
+      for (const g of groups) {
+        if (!g) continue;
+        if (String(g.date || "").trim() !== d) continue;
+        const gNumKey = __docNumToKey(g.docNum || extractDocNumber(g.note));
+        if (!gNumKey || gNumKey !== n) continue;
+
+        const gv = __resolveVatFromDocOrCustomer(null, g.customer);
+        if (gv && gv === v) return g;
+      }
+      return null;
+    }
+
+    function __hasTripletInMovements(tripletKey){
+      const key = String(tripletKey || "").trim();
+      if (!key) return false;
+      const arr = Array.isArray(state.movements) ? state.movements : [];
+      return arr.some(mv => String(mv?.ddtTripletKey || mv?.ddtKey || "").trim() === key);
+    }
+
+    async function __reserveDocTripletKey(tripletKey, meta){
+      // Usa una "index collection" per bloccare i doppi upload anche cross-device.
+      // Best effort: se non abbiamo Firestore o permessi, torniamo true e ci affidiamo al check locale.
+      const key = String(tripletKey || "").trim();
+      if (!key) return true;
+      if (!fb.user || !fb.db) return true;
+
+      try {
+        const ref = doc(fb.db, "orgs", ORG_ID, "inventoryDocIndex", keyToDocId(key));
+
+        await runTransaction(fb.db, async (tx) => {
+          const snap = await tx.get(ref);
+          if (snap.exists()) {
+            const err = new Error("DUPLICATE_DDT");
+            err.code = "DUPLICATE_DDT";
+            throw err;
+          }
+          const m = (meta && typeof meta === "object") ? meta : {};
+          tx.set(ref, {
+            key,
+            vat: String(m.vatNorm || ""),
+            docNum: String(m.docNumResolved || ""),
+            date: String(m.dateISO || ""),
+            customer: String(m.customer || ""),
+            createdAt: serverTimestamp(),
+            createdBy: fb.user.email || fb.user.uid
+          });
+        });
+
+        return true;
+      } catch (e) {
+        const msg = String(e?.code || e?.message || e || "");
+        if (msg.includes("DUPLICATE_DDT")) return false;
+        console.warn("reserveDocTripletKey failed (ignored)", e);
+        return true;
+      }
+    }
+
+    async function __releaseDocTripletKey(tripletKey){
+      const key = String(tripletKey || "").trim();
+      if (!key) return;
+      if (!fb.user || !fb.db) return;
+      try {
+        await deleteDoc(doc(fb.db, "orgs", ORG_ID, "inventoryDocIndex", keyToDocId(key)));
+      } catch (e) {
+        console.warn("releaseDocTripletKey failed (ignored)", e);
+      }
+    }
+
+    async function __checkDuplicateDdtBeforeUpload(ctx){
+      const c = (ctx && typeof ctx === "object") ? ctx : {};
+      const tripletKey = String(c.ddtTripletKey || "").trim();
+
+      // 1) Se ho la tripla (VAT+NUM+DATA), check super rigido
+      if (tripletKey) {
+        if (__hasTripletInMovements(tripletKey)) return { duplicate: true, reason: "triplet" };
+        const g = __findExistingDocGroupByTriplet(c.vatNorm, c.docNumKey, c.dateISO);
+        if (g) return { duplicate: true, reason: "triplet" };
+      }
+
+      // 2) Fallback: blocca comunque se esiste già lo stesso docKey (stesso fornitore+data+numero/nota)
+      try { rebuildDocGroupsCache(); } catch(_) {}
+      if (__docGroupsMap && c.docKey && __docGroupsMap.get(c.docKey)) return { duplicate: true, reason: "docKey" };
+
+      // 3) Extra fallback: stesso fornitore (normalizzato) + stessa data + stesso numero (normalizzato)
+      const custKey = normSupplierKey(c.customer || "");
+      const dateISO = String(c.dateISO || "").trim();
+      const numKey = String(c.docNumKey || "").trim();
+      if (custKey && dateISO && numKey) {
+        const groups = Array.isArray(__docGroups) ? __docGroups : [];
+        const hit = groups.find(g => (
+          normSupplierKey(g?.customer || "") === custKey &&
+          String(g?.date || "").trim() === dateISO &&
+          __docNumToKey(g?.docNum || extractDocNumber(g?.note)) === numKey
+        ));
+        if (hit) return { duplicate: true, reason: "meta" };
+      }
+
+      return { duplicate: false };
+    }
+
+function buildDocGroupsFromMovements(movements) {
       const groups = new Map();
 
       (Array.isArray(movements) ? movements : []).forEach((mv) => {
@@ -5395,6 +5573,44 @@ async function handleFileSelection(fileList) {
         return;
       }
 
+      // Anti-duplicato DDT (rigido): stesso numero + stessa P.IVA + stessa data => blocca il re-upload
+      const docNumResolved = String(docNum || "").trim() || extractDocNumber(baseNote) || extractDocNumber(capture.rawText || "");
+      const docNumKey = __docNumToKey(docNumResolved);
+      const vatNorm = __resolveVatFromDocOrCustomer(doc, customer);
+      const ddtTripletKey = __buildDdtTripletKey(vatNorm, docNumKey, docDateISO);
+
+      const dupCheck = await __checkDuplicateDdtBeforeUpload({
+        ddtTripletKey,
+        vatNorm,
+        docNumKey,
+        dateISO: docDateISO,
+        docKey,
+        customer
+      });
+
+      if (dupCheck && dupCheck.duplicate) {
+        const dateTxt = formatDateOnlyIT(docDateISO) || (docDateISO || "—");
+        const numTxt = (docNumResolved || "").trim() || (String(docNum || "").trim() || "—");
+        const vatTxt = vatNorm ? vatNorm : "—";
+        openModal("Documento già caricato",
+          `Questo DDT risulta già presente.\n\nNumero: ${numTxt}\nData: ${dateTxt}\nP.IVA: ${vatTxt}\n\nSe devi reimportarlo, elimina prima il documento esistente (e i suoi movimenti) dall’anagrafica/flussi.`);
+        return;
+      }
+
+      // Riserva il tripletKey su Firestore (cross-device) per rendere il blocco davvero "rigido"
+      let __reservedDocTripletKey = "";
+      if (ddtTripletKey) {
+        const reserved = await __reserveDocTripletKey(ddtTripletKey, { vatNorm, docNumResolved, dateISO: docDateISO, customer });
+        if (!reserved) {
+          const dateTxt = formatDateOnlyIT(docDateISO) || (docDateISO || "—");
+          openModal("Documento già caricato",
+            `Questo DDT (Numero ${docNumResolved || "—"} del ${dateTxt}, P.IVA ${vatNorm || "—"}) risulta già caricato.\n\nNon è possibile caricarlo una seconda volta.`);
+          return;
+        }
+        __reservedDocTripletKey = ddtTripletKey;
+      }
+
+
       btnConfirmMovement.disabled = true;
       progressLabel.textContent = "Import in corso…";
       progressFill.style.width = "88%";
@@ -5444,6 +5660,9 @@ try {
             docType: String(docType || ""),
             docNum: String(docNum || ""),
             docDateRaw: String(docDateRaw || ""),
+            supplierVat: vatNorm || "",
+            docNumKey: docNumKey || "",
+            ddtTripletKey: (__reservedDocTripletKey || ddtTripletKey || ""),
             docPages: docPages,
             lineIndex: lineIndex,
             source: "OCR",
@@ -5462,6 +5681,7 @@ try {
         setView("ocr");
       } catch (e) {
         console.error(e);
+        try { if (__reservedDocTripletKey) await __releaseDocTripletKey(__reservedDocTripletKey); } catch(_) {}
         openModal("Errore import", String(e.message || e));
         btnConfirmMovement.disabled = false;
       }
