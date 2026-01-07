@@ -3969,21 +3969,51 @@ function __storageReady(){
 }
 
 function __normalizeBucketName(b){
-  const s = String(b || "").trim();
+  let s = String(b || "").trim();
   if (!s) return "";
+  // strip common prefixes / urls
+  s = s.replace(/^gs:\/\//i, "").replace(/^https?:\/\//i, "");
+  // extract bucket from REST urls if present
+  const m = s.match(/firebasestorage\.googleapis\.com\/v0\/b\/([^\/]+)/i);
+  if (m && m[1]) s = m[1];
+  // remove any trailing path
+  if (s.includes("/")) s = s.split("/")[0].trim();
+  if (!s) return "";
+
   // Alcune config Firebase riportano "<project>.firebasestorage.app" (host) invece del bucket.
   // Il bucket di default è quasi sempre "<project>.appspot.com". Proviamo entrambe le forme.
   if (/\.firebasestorage\.app$/i.test(s)) return s.replace(/\.firebasestorage\.app$/i, ".appspot.com");
+
+  // Se viene passato solo il projectId, normalizziamo al bucket standard
+  if (!/\./.test(s) && FIREBASE_CONFIG && FIREBASE_CONFIG.projectId && s === String(FIREBASE_CONFIG.projectId)) {
+    return `${s}.appspot.com`;
+  }
+
   return s;
 }
 
 function __storageBucketCandidates(){
-  const raw = String((fb && fb.storageBucket) || "").trim();
-  const norm = __normalizeBucketName(raw);
-  const arr = [];
-  if (raw) arr.push(raw);
-  if (norm && norm !== raw) arr.push(norm);
-  return arr;
+  const set = new Set();
+
+  const add = (v) => {
+    const raw = String(v || "").trim();
+    if (!raw) return;
+    set.add(raw);
+    const norm = __normalizeBucketName(raw);
+    if (norm) set.add(norm);
+  };
+
+  // da runtime config
+  add(fb && fb.storageBucket);
+
+  // da firebase config (projectId) — più robusto su progetti con bucket "firebasestorage.app"
+  const pid = String((FIREBASE_CONFIG && FIREBASE_CONFIG.projectId) || "").trim();
+  if (pid) {
+    add(`${pid}.appspot.com`);
+    add(`${pid}.firebasestorage.app`);
+  }
+
+  return Array.from(set);
 }
 
 function __storageDownloadUrl(path, token, bucketOverride){
@@ -4031,34 +4061,44 @@ async function __storageUploadFile(path, file){
   const filePartHeader =
     `${delimiter}Content-Type: ${fileType}\r\n\r\n`;
 
+  // Nota: Safari/iOS sono più stabili se usiamo Blob come body
   const body = new Blob([metaPart, filePartHeader, file, closeDelim], { type: `multipart/related; boundary=${boundary}` });
 
   const buckets = __storageBucketCandidates();
   let lastErr = null;
 
+  // Firebase Storage REST accetta in alcuni casi "Firebase <idToken>" (SDK) e in altri "Bearer <idToken>".
+  const schemes = ["Bearer", "Firebase"];
+
   for (const bucket of buckets){
     const url = `https://firebasestorage.googleapis.com/v0/b/${bucket}/o?uploadType=multipart`;
-    try{
-      const res = await fetch(url, {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${idToken}`,
-          "Content-Type": `multipart/related; boundary=${boundary}`
-        },
-        body
-      });
+    for (const scheme of schemes){
+      try{
+        const res = await fetch(url, {
+          method: "POST",
+          headers: {
+            "Authorization": `${scheme} ${idToken}`,
+            "Content-Type": `multipart/related; boundary=${boundary}`
+          },
+          body
+        });
 
-      if (res.ok) {
-        // "fissa" il bucket che ha funzionato (utile se config era nel formato sbagliato)
-        try { fb.storageBucket = bucket; } catch(_){}
-        return { url: __storageDownloadUrl(path, dlToken, bucket), path: String(path), token: String(dlToken) };
-      } else {
-        const t = await res.text().catch(() => "");
-        lastErr = new Error(`Upload Storage fallito (${res.status}): ${t.slice(0, 200)}`);
-        // se abbiamo altri candidati, riproviamo; altrimenti lanciamo l'errore sotto
+        if (res.ok) {
+          // "fissa" il bucket che ha funzionato (utile se config era nel formato sbagliato)
+          try { fb.storageBucket = bucket; } catch(_){}
+          return { url: __storageDownloadUrl(path, dlToken, bucket), path: String(path), token: String(dlToken) };
+        } else {
+          const t = await res.text().catch(() => "");
+          lastErr = new Error(`Upload Storage fallito (${res.status}) [${bucket}] [${scheme}]: ${t.slice(0, 200)}`);
+
+          // se bucket non esiste/errato, passa al prossimo bucket
+          if (res.status === 404) break;
+
+          // per 401/403 proviamo l'altro scheme prima di cambiare bucket
+        }
+      } catch (e){
+        lastErr = e;
       }
-    } catch (e){
-      lastErr = e;
     }
   }
 
@@ -4071,17 +4111,23 @@ async function __storageDeletePath(path){
   const enc = encodeURIComponent(String(path)).replace(/%2F/g, "%2F");
 
   const buckets = __storageBucketCandidates();
+  const schemes = ["Bearer", "Firebase"];
+
   for (const bucket of buckets){
     const url = `https://firebasestorage.googleapis.com/v0/b/${bucket}/o/${enc}`;
-    try{
-      const res = await fetch(url, { method: "DELETE", headers: { "Authorization": `Bearer ${idToken}` } }).catch(()=>null);
-      if (res && res.ok) {
-        try { fb.storageBucket = bucket; } catch(_){}
-        return;
-      }
-      // se 404, prova bucket alternativo
-      if (res && res.status && res.status !== 404) return;
-    }catch(_){}
+    for (const scheme of schemes){
+      try{
+        const res = await fetch(url, { method: "DELETE", headers: { "Authorization": `${scheme} ${idToken}` } }).catch(()=>null);
+        if (res && res.ok) {
+          try { fb.storageBucket = bucket; } catch(_){}
+          return;
+        }
+        // se 404, prova bucket alternativo (non serve cambiare scheme)
+        if (res && res.status === 404) break;
+        // per altri errori, proviamo l'altro scheme e poi usciamo
+        if (res && res.status && res.status !== 401 && res.status !== 403) return;
+      }catch(_){}
+    }
   }
 }
 
@@ -4091,23 +4137,27 @@ async function __storageResolveUrlFromPath(path){
   const enc = encodeURIComponent(String(path)).replace(/%2F/g, "%2F");
 
   const buckets = __storageBucketCandidates();
+  const schemes = ["Bearer", "Firebase"];
+
   for (const bucket of buckets){
     const metaUrl = `https://firebasestorage.googleapis.com/v0/b/${bucket}/o/${enc}`;
-    try{
-      const res = await fetch(metaUrl, { headers: { "Authorization": `Bearer ${idToken}` } });
-      if (!res.ok) {
-        if (res.status === 404) continue;
-        continue;
+    for (const scheme of schemes){
+      try{
+        const res = await fetch(metaUrl, { headers: { "Authorization": `${scheme} ${idToken}` } });
+        if (!res.ok) {
+          if (res.status === 404) break; // passa al bucket successivo
+          continue; // prova altro scheme o continua
+        }
+        const js = await res.json().catch(()=>null);
+        const dt = String(js && (js.downloadTokens || (js.metadata && js.metadata.firebaseStorageDownloadTokens) || "") || "");
+        const token = dt.split(",").map(s=>s.trim()).filter(Boolean)[0] || "";
+        if (token) {
+          try { fb.storageBucket = bucket; } catch(_){}
+        }
+        return __storageDownloadUrl(path, token, bucket);
+      }catch(_){
+        // continua
       }
-      const js = await res.json().catch(()=>null);
-      const dt = String(js && (js.downloadTokens || (js.metadata && js.metadata.firebaseStorageDownloadTokens) || "") || "");
-      const token = dt.split(",").map(s=>s.trim()).filter(Boolean)[0] || "";
-      if (token) {
-        try { fb.storageBucket = bucket; } catch(_){}
-      }
-      return __storageDownloadUrl(path, token, bucket);
-    }catch(_){
-      // continua con il prossimo bucket
     }
   }
 
@@ -4125,25 +4175,48 @@ async function uploadDocPagesToStorage(docKey, files){
     throw new Error("Storage non pronto. Effettua il login e riprova.");
   }
 
-  try{
-    const folder = `orgs/${ORG_ID}/docPages/${keyToDocId(docKey)}/${Date.now()}_${Math.random().toString(16).slice(2)}`;
+  const docId = keyToDocId(docKey);
+  const uid = String((fb && fb.user && fb.user.uid) || "").trim();
+  const stamp = `${Date.now()}_${Math.random().toString(16).slice(2)}`;
+
+  // fallback path: alcune regole Storage permettono scrittura solo sotto users/<uid>/...
+  const baseFolders = [
+    `orgs/${ORG_ID}/docPages/${docId}/${stamp}`,
+    uid ? `users/${uid}/docPages/${docId}/${stamp}` : "",
+    `docPages/${docId}/${stamp}`
+  ].filter(Boolean);
+
+  let lastErr = null;
+
+  for (const folder of baseFolders){
     const out = [];
-    for (let i = 0; i < picked.length; i++){
-      const f = picked[i];
-      const typeExt = (f && f.type && String(f.type).includes("/")) ? String(f.type).split("/")[1] : "";
-      const nameExt = String(f && f.name || "").includes(".") ? String(f.name).split(".").pop() : "";
-      const ext = (typeExt || nameExt || "jpg");
-      const safeExt = String(ext || "jpg").replace(/[^a-z0-9]/gi,"").toLowerCase() || "jpg";
-      const path = `${folder}/page_${String(i+1).padStart(2,"0")}.${safeExt}`;
-      const up = await __storageUploadFile(path, f);
-      out.push({ url: up.url, path: up.path, page: i + 1 });
+    try{
+      for (let i = 0; i < picked.length; i++){
+        const f = picked[i];
+        const typeExt = (f && f.type && String(f.type).includes("/")) ? String(f.type).split("/")[1] : "";
+        const nameExt = String(f && f.name || "").includes(".") ? String(f.name).split(".").pop() : "";
+        const ext = (typeExt || nameExt || "jpg");
+        const safeExt = String(ext || "jpg").replace(/[^a-z0-9]/gi,"").toLowerCase() || "jpg";
+        const path = `${folder}/page_${String(i+1).padStart(2,"0")}.${safeExt}`;
+        const up = await __storageUploadFile(path, f);
+        out.push({ url: up.url, path: up.path, page: i + 1 });
+      }
+      return out;
+    } catch(e){
+      lastErr = e;
+      // pulizia: se abbiamo caricato qualcosa, eliminiamo prima di provare un altro folder
+      try{
+        for (const p of out){
+          if (p && p.path) await __storageDeletePath(String(p.path));
+        }
+      }catch(_){}
+      // prova folder successivo
     }
-    return out;
-  } catch(e){
-    console.warn("uploadDocPagesToStorage: upload failed", e);
-    showToast("Upload foto fallito: nessuna foto salvata. Riprova.");
-    throw e;
   }
+
+  console.warn("uploadDocPagesToStorage: upload failed", lastErr);
+  showToast("Upload foto fallito: nessuna foto salvata. Riprova.");
+  throw lastErr || new Error("Upload foto fallito");
 }
 
 
@@ -5622,7 +5695,7 @@ if (capture.files && capture.files.length) {
     docPages = await uploadDocPagesToStorage(docKey, capture.files);
   } catch (e) {
     console.warn("upload doc pages failed", e);
-    openModal("Upload foto non riuscito", "Le foto non sono state caricate su cloud, quindi il documento non può essere confermato. Riprova (o ricatta le foto).");
+    openModal("Upload foto non riuscito", "Le foto non sono state caricate su cloud, quindi il documento non può essere confermato.\n\nDettagli: " + String((e && e.message) || e || "").slice(0, 300));
     btnConfirmMovement.disabled = false;
     progressLabel.textContent = "Pronto";
     progressFill.style.width = "0%";
