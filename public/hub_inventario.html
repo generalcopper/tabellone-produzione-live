@@ -1327,6 +1327,25 @@ td.td-actions{ white-space: normal !important; }
     box-shadow: 0 0 0 3px rgba(0,84,255,.12);
   }
 
+
+
+/* Flussi > Modifica: righe (qty edit + minus) */
+#flowEditItemsTable .rowMinus{
+  width: 28px;
+  height: 28px;
+  border-radius: 10px;
+  border: 1px solid rgba(0,0,0,.18);
+  background: rgba(0,0,0,.04);
+  color:#111;
+  font-weight: 900;
+  line-height: 1;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  cursor:pointer;
+}
+#flowEditItemsTable .rowMinus:active{ transform: scale(.98); }
+#flowEditItemsTable td{ vertical-align: middle; }
 </style>
 </head>
 <body>
@@ -2069,6 +2088,33 @@ td.td-actions{ white-space: normal !important; }
         </div>
       </div>
 
+
+<div class="stack" style="gap:10px; margin-top: 12px;">
+  <div class="inlineRow" style="justify-content:space-between; align-items:center;">
+    <div class="hero-sub" style="margin:0;">Righe importate</div>
+    <div class="pill" id="flowEditItemsMeta">—</div>
+  </div>
+
+  <div class="tableWrap" style="max-height: 340px; overflow:auto;">
+    <table id="flowEditItemsTable">
+      <thead>
+        <tr>
+          <th style="width:44px"></th>
+          <th style="width:170px">Codice</th>
+          <th>Articolo</th>
+          <th class="qty" style="width:140px">Pezzi</th>
+        </tr>
+      </thead>
+      <tbody id="flowEditItemsTbody">
+        <tr><td class="td-muted" colspan="4">Apri un flusso per vedere le righe.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="td-muted" style="font-size:12px;">
+    Modifica <strong>Pezzi</strong> e premi <span class="kbd">Invio</span> (o esci dal campo) per salvare. Il tasto <strong>–</strong> elimina la singola riga dal flusso.
+  </div>
+</div>
       <div class="inlineRow" style="justify-content: space-between; margin-top: 12px;">
         <button class="btn btn-danger" id="btnDeleteFlowFromEdit" type="button">Elimina flusso</button>
         <div class="inlineRow" style="justify-content:flex-end;">
@@ -2192,6 +2238,9 @@ const docDetailPhotosMeta = document.getElementById("docDetailPhotosMeta");
     const btnCancelFlowEdit = document.getElementById("btnCancelFlowEdit");
     const btnSaveFlowEdit = document.getElementById("btnSaveFlowEdit");
     const btnDeleteFlowFromEdit = document.getElementById("btnDeleteFlowFromEdit");
+    const flowEditItemsMeta = document.getElementById("flowEditItemsMeta");
+    const flowEditItemsTbody = document.getElementById("flowEditItemsTbody");
+
 
 
 
@@ -2960,6 +3009,8 @@ function showToast(msg) {
       if (flowEditDate) flowEditDate.value = (g.date || "");
       if (flowEditNote) flowEditNote.value = (g.note || "");
 
+      try { renderFlowEditItems(g); } catch(_){ }
+
       modalFlowEdit.classList.add("open");
       __syncBodyLockFromModals();
       try { flowEditCustomer && flowEditCustomer.focus(); } catch {}
@@ -2970,6 +3021,90 @@ function showToast(msg) {
       if (modalFlowEdit) modalFlowEdit.classList.remove("open");
       __syncBodyLockFromModals();
     }
+
+
+
+function renderFlowEditItems(groupMaybe){
+  try{
+    if (!flowEditItemsTbody) return;
+
+    const g = (groupMaybe && typeof groupMaybe === "object")
+      ? groupMaybe
+      : __docGroupsMap.get(String(__currentFlowEditKey || ""));
+
+    if (!g) {
+      if (flowEditItemsMeta) flowEditItemsMeta.textContent = "0 righe";
+      flowEditItemsTbody.innerHTML = '<tr><td class="td-muted" colspan="4">Flusso non trovato.</td></tr>';
+      return;
+    }
+
+    const label = formatDocLabel(g);
+    const mvArr = Array.isArray(g.movements) ? g.movements.slice() : [];
+
+    // Header meta
+    try{
+      if (flowEditSub) flowEditSub.textContent = `Documento: ${label} • ${safeInt(mvArr.length)} righe`;
+    }catch(_){}
+
+    const rows = mvArr
+      .filter((mv) => {
+        const code = String(mv.code || "").trim();
+        const item = String(mv.item || "").trim();
+        if (!code && !item) return false;
+        // prudente: ignora eventuali righe CONAI rimaste (in teoria già filtrate a monte)
+        if (__isConaiLine(code) || __isConaiLine(item) || __isConaiCode(code) || __isConaiCode(item)) return false;
+        return true;
+      })
+      .map((mv) => ({
+        id: String(mv.id || ""),
+        code: String(mv.code || "").trim(),
+        item: String(mv.item || "").trim(),
+        qty: safeInt(mv.qty),
+        lineIndex: safeInt(mv.lineIndex),
+        createdAt: String(mv.createdAt || "")
+      }))
+      .filter(r => !!r.id);
+
+    rows.sort((a, b) => {
+      const ai = safeInt(a.lineIndex);
+      const bi = safeInt(b.lineIndex);
+      if (ai && bi && ai !== bi) return ai - bi;
+      if ((ai || bi) && ai !== bi) return (ai || 0) - (bi || 0);
+
+      const ca = String(a.createdAt || "");
+      const cb = String(b.createdAt || "");
+      if (ca && cb && ca !== cb) return ca.localeCompare(cb);
+
+      const cc = String(a.code || "").localeCompare(String(b.code || ""));
+      if (cc !== 0) return cc;
+      return String(a.item || "").localeCompare(String(b.item || ""));
+    });
+
+    const pieces = rows.reduce((sum, r) => sum + safeInt(r.qty), 0);
+    if (flowEditItemsMeta) flowEditItemsMeta.textContent = `${rows.length} righe • ${Number(pieces).toLocaleString("it-IT")} pezzi`;
+
+    if (!rows.length) {
+      flowEditItemsTbody.innerHTML = '<tr><td class="td-muted" colspan="4">Nessuna riga.</td></tr>';
+      return;
+    }
+
+    flowEditItemsTbody.innerHTML = rows.map(r => `
+      <tr data-mvid="${escapeHtmlAttr(r.id)}">
+        <td data-label="">
+          <button class="rowMinus jsFlowRowDelete" type="button" data-id="${escapeHtmlAttr(r.id)}" title="Elimina riga">−</button>
+        </td>
+        <td data-label="Codice"><span class="kbd">${escapeHtml(r.code || "—")}</span></td>
+        <td data-label="Articolo">${escapeHtml(r.item || "—")}</td>
+        <td data-label="Pezzi" class="qty">
+          <input class="qtyEditInput jsFlowQtyInput" type="number" inputmode="numeric" min="0" step="1"
+            value="${safeInt(r.qty)}" data-id="${escapeHtmlAttr(r.id)}" data-orig="${safeInt(r.qty)}" />
+        </td>
+      </tr>
+    `).join("");
+  }catch(e){
+    console.warn("renderFlowEditItems failed", e);
+  }
+}
 
     async function updateMovementsBulk(ids, patch) {
       const list = (Array.isArray(ids) ? ids : []).filter(Boolean);
@@ -5150,6 +5285,10 @@ function renderAll() {
 
       renderMovementsTable();
       renderFlowsTable();
+      // Se il modale Modifica flusso è aperto, aggiorna anche la lista righe
+      if (modalFlowEdit && modalFlowEdit.classList.contains("open") && __currentFlowEditKey) {
+        try { renderFlowEditItems(); } catch(_){ }
+      }
       // Se la vista dettaglio fornitore è aperta, aggiorna i documenti collegati (DDT / OCR)
       if (modalSupplier && modalSupplier.classList.contains("open")) {
         try { renderSupplierLinkedDocs(); } catch {}
@@ -7280,6 +7419,82 @@ try {
       if (__currentFlowEditKey) deleteFlowByKey(__currentFlowEditKey);
     });
     if (modalFlowEdit) modalFlowEdit.addEventListener("click", (e) => { if (e.target === modalFlowEdit) closeFlowEdit(); });
+
+// Flow edit: elimina singola riga (minus) + modifica quantità
+if (modalFlowEdit) {
+  // Delete row (minus)
+  modalFlowEdit.addEventListener("click", async (e) => {
+    const btn = e.target && e.target.closest ? e.target.closest("button.jsFlowRowDelete") : null;
+    if (!btn) return;
+    e.preventDefault();
+    e.stopPropagation();
+
+    const id = btn.getAttribute("data-id") || "";
+    if (!id) return;
+
+    const ok = confirm("Eliminare questa riga dal flusso?");
+    if (!ok) return;
+
+    try {
+      await deleteMovementsBulk([id]);
+      showToast("Riga eliminata");
+      // refresh list
+      try { renderFlowEditItems(); } catch(_){}
+    } catch (err) {
+      console.error("delete flow row failed", err);
+      openModal("Errore", "Non sono riuscito a eliminare la riga.");
+    }
+  });
+
+  // Enter/Esc on qty input
+  modalFlowEdit.addEventListener("keydown", (e) => {
+    const inp = e.target && e.target.closest ? e.target.closest("input.jsFlowQtyInput") : null;
+    if (!inp) return;
+
+    if (e.key === "Enter") {
+      e.preventDefault();
+      inp.blur();
+    }
+    if (e.key === "Escape") {
+      e.preventDefault();
+      const base = safeInt(inp.dataset.orig);
+      inp.value = String(Number.isFinite(base) ? base : 0);
+      inp.blur();
+    }
+  });
+
+  // Commit qty on blur (focusout bubbles)
+  modalFlowEdit.addEventListener("focusout", async (e) => {
+    const inp = e.target && e.target.closest ? e.target.closest("input.jsFlowQtyInput") : null;
+    if (!inp) return;
+
+    const id = String(inp.dataset.id || "").trim();
+    if (!id) return;
+
+    let v = safeInt(inp.value);
+    if (!Number.isFinite(v) || v < 0) v = 0;
+
+    const orig = safeInt(inp.dataset.orig);
+    if (v === orig) {
+      inp.value = String(orig);
+      return;
+    }
+
+    inp.disabled = true;
+    try {
+      await updateMovementsBulk([id], { qty: v });
+      inp.dataset.orig = String(v);
+      showToast("Quantità aggiornata");
+      try { renderFlowEditItems(); } catch(_){}
+    } catch (err) {
+      console.error("update flow qty failed", err);
+      openModal("Errore", "Non sono riuscito a salvare la quantità.");
+      inp.value = String(orig);
+    } finally {
+      inp.disabled = false;
+    }
+  });
+}
 
 
     // Document row click (Movimenti recenti / Flussi)
