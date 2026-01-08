@@ -6638,14 +6638,16 @@ if (mode === "master") {
 
           <div class="field" style="grid-column: 1 / -1;">
             <label>Inventario</label>
-            <div class="inlineRow" style="justify-content: space-between; gap:10px; align-items:center;">
-              <select id="prodWarehouseSelect" style="flex: 1 1 auto; min-width: 220px;">
+            <div class="inlineRow" style="justify-content: space-between; gap:10px; align-items:center; flex-wrap: wrap;">
+              <input id="prodWarehouseMoveQty" class="qtyEditInput" type="number" inputmode="numeric" min="1" step="1"
+                value="${qtyVal}" data-orig="${qtyVal}" placeholder="Q.tà" style="max-width: 140px;" />
+              <select id="prodWarehouseSelect" style="flex: 1 1 220px; min-width: 220px;">
                 <option value="cerea">Inventario Cerea</option>
                 <option value="concamarise">Inventario Concamarise</option>
               </select>
               <button id="prodWarehouseMove" class="btn btn-secondary btn-xs" type="button" disabled>Sposta</button>
             </div>
-            <div class="td-muted" style="margin-top:6px;">Sposta tutti i pezzi in un altro inventario (crea un movimento).</div>
+            <div class="td-muted" style="margin-top:6px;">Sposta una quantità in un altro inventario (crea 2 movimenti: OUT + IN).</div>
           </div>
         `;
       }
@@ -6877,29 +6879,37 @@ if (mode === "master") {
 
         // iniziale: se il valore coincide col default (nessun override), mostra input vuoto
         try {
-          const hasOverride = (thresholds && (thrKey in thresholds)) || (state.thresholds && (thrKey in state.thresholds));
-          if (!hasOverride) {
-            tInput.value = "";
-            tInput.dataset.orig = "";
-          }
-        } catch(_){}
-
-        syncThrBtn();
-      }
-
-      // Warehouse move (single only)
+          const hasOverride = (thresholds && // Warehouse move (single only)
       const wSel = document.getElementById("prodWarehouseSelect");
+      const wQty = document.getElementById("prodWarehouseMoveQty");
       const wBtn = document.getElementById("prodWarehouseMove");
-      if (wSel && wBtn && ctx && !isAliasGroup) {
+      if (wSel && wBtn && wQty && ctx && !isAliasGroup) {
         wSel.value = wh;
+
+        // default: tutto (come prima) se input vuoto/0
+        try {
+          const baseNow = safeInt(ctx.qty);
+          const cur0 = safeInt(wQty.value);
+          if (!cur0) wQty.value = String(Math.max(0, baseNow));
+          if (wQty.dataset && (wQty.dataset.orig === undefined || wQty.dataset.orig === "")) {
+            wQty.dataset.orig = String(Math.max(0, baseNow));
+          }
+        } catch(_) {}
 
         const sync = () => {
           const to = normalizeWarehouse(wSel.value);
           const qtyNow = safeInt(ctx.qty);
-          wBtn.disabled = (to === wh) || qtyNow <= 0;
+          let mvQty = safeInt(wQty.value);
+          if (!Number.isFinite(mvQty)) mvQty = 0;
+          wBtn.disabled = (to === wh) || qtyNow <= 0 || mvQty <= 0 || mvQty > qtyNow;
         };
 
         wSel.addEventListener("change", sync);
+        wQty.addEventListener("input", sync);
+        wQty.addEventListener("keydown", (e) => {
+          if (e.key === "Enter") { e.preventDefault(); if (!wBtn.disabled) wBtn.click(); }
+          if (e.key === "Escape") { e.preventDefault(); wQty.value = String(wQty.dataset.orig || ""); sync(); try{ wQty.blur(); }catch(_){ } }
+        });
         sync();
 
         wBtn.addEventListener("click", async (e) => {
@@ -6908,16 +6918,23 @@ if (mode === "master") {
 
           const to = normalizeWarehouse(wSel.value);
           const qtyNow = safeInt(ctx.qty);
+          let mvQty = safeInt(wQty.value);
 
-          // Sposta tutto: scarico da WH attuale + carico su WH target (movimenti)
+          if (!Number.isFinite(mvQty) || mvQty <= 0) { showToast("Quantità non valida"); sync(); return; }
+          if (mvQty > qtyNow) { showToast("Quantità superiore allo stock"); sync(); return; }
+          if (to === wh) { showToast("Scegli un inventario diverso"); sync(); return; }
+
+          const noteTxt = `Spostamento inventario (${mvQty} pz): ${warehouseLabel(wh)} → ${warehouseLabel(to)}`;
+
+          // Sposta quantità: scarico da WH attuale + carico su WH target (movimenti)
           const outMv = makeMovement({
             type: "OUT",
             customer: ctx.customer || "",
             code: code,
             item: (ctx.item || title || ""),
-            qty: qtyNow,
+            qty: mvQty,
             date: todayYYYYMMDD(),
-            note: `Spostamento inventario: ${warehouseLabel(wh)} → ${warehouseLabel(to)}`,
+            note: noteTxt,
             warehouse: wh,
             source: "Spostamento"
           });
@@ -6926,9 +6943,9 @@ if (mode === "master") {
             customer: ctx.customer || "",
             code: code,
             item: (ctx.item || title || ""),
-            qty: qtyNow,
+            qty: mvQty,
             date: todayYYYYMMDD(),
-            note: `Spostamento inventario: ${warehouseLabel(wh)} → ${warehouseLabel(to)}`,
+            note: noteTxt,
             warehouse: to,
             source: "Spostamento"
           });
@@ -6936,6 +6953,18 @@ if (mode === "master") {
           wBtn.disabled = true;
           try {
             await addMovement(outMv);
+            await addMovement(inMv);
+            showToast(`Spostato ${mvQty} pz`);
+          } catch (err) {
+            console.error(err);
+            showToast("Errore spostamento");
+          } finally {
+            renderAll();
+          }
+        });
+      }
+
+      v);
             await addMovement(inMv);
             showToast("Spostato");
           } catch (err) {
