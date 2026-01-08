@@ -5236,6 +5236,87 @@ function renderDocDetailPhotos(g){
     }
 
 
+
+    // ===== Prodotti: eliminazione (solo anagrafica) =====
+    async function deleteProductByCode(code, opts) {
+      const key = String(code || "").trim();
+      if (!key) return false;
+      const low = key.toLowerCase();
+      const silent = !!(opts && opts.silent);
+      const skipConfirm = !!(opts && opts.skipConfirm);
+
+      // Nota: operazione disponibile solo in realtime (Firestore)
+      if (!fb.user || !fb.db) {
+        openModal("Accesso richiesto", "Accedi con Google per eliminare un prodotto.");
+        return false;
+      }
+
+      // Info (best effort) per conferma
+      const p = findProductByCode(key);
+      const nm = String((p && p.name) || "").trim() || "—";
+      const al = String((p && (p.alias || p.aliasName)) || "").trim() || "—";
+      const cat = (typeof macroCatLabel === "function") ? (macroCatLabel(getMacroCategoryForCode(key)) || "—") : "—";
+
+      let nMov = 0;
+      let stockSum = 0;
+      try {
+        nMov = (state && Array.isArray(state.movements))
+          ? state.movements.filter(m => String(m && m.code || "").trim().toLowerCase() === low).length
+          : 0;
+      } catch(_) {}
+
+      try {
+        const rows = (typeof computeStock === "function") ? computeStock() : [];
+        stockSum = (rows || []).filter(r => String(r && r.code || "").trim().toLowerCase() === low)
+          .reduce((s, r) => s + safeInt(r && r.qty), 0);
+      } catch(_) {}
+
+      if (!skipConfirm) {
+        const ok = confirm(
+          `Eliminare il prodotto dall’anagrafica?\n\n` +
+          `Codice: ${key}\n` +
+          `Nome: ${nm}\n` +
+          `Alias: ${al}\n` +
+          `Categoria: ${cat}\n\n` +
+          `Nota: elimina SOLO l’anagrafica prodotto (nome/alias/categoria). Movimenti e stock restano.\n` +
+          `Movimenti che lo contengono: ${nMov}\n` +
+          `Stock totale attuale: ${Number(stockSum||0).toLocaleString("it-IT")}`
+        );
+        if (!ok) return false;
+      }
+
+      // Optimistic local
+      try {
+        products = (products || []).filter(pp => {
+          const a = String(pp && (pp.code || pp.id || "")).trim().toLowerCase();
+          const b = safeDecodeUri(String(pp && pp.id || "")).trim().toLowerCase();
+          return !(a === low || b === low);
+        });
+      } catch(_) {}
+
+      try {
+        if (state && state.productCategories && (low in state.productCategories)) {
+          delete state.productCategories[low];
+          saveLocalData();
+        }
+      } catch(_) {}
+
+      try { renderAll(); renderAnag(); } catch(_) {}
+
+      // Firestore delete
+      try {
+        await deleteDoc(doc(fb.db, "orgs", ORG_ID, "products", keyToDocId(low)));
+        try { renderAll(); renderAnag(); } catch(_) {}
+        if (!silent) showToast("Prodotto eliminato");
+        return true;
+      } catch (e) {
+        console.error("deleteProductByCode failed", e);
+        if (!silent) showToast("Errore eliminazione prodotto", "err");
+        return false;
+      }
+    }
+
+
 function getMacroCategoryForCode(code) {
       const low = String(code || "").trim().toLowerCase();
       const p = findProductByCode(code);
@@ -6190,7 +6271,10 @@ async function deleteSupplierCascade(supplierId){
                 </div>
               </td>
               <td data-label="Azioni" class="td-actions">
-                <button class="btn btn-ghost btn-xs" type="button" data-open-code="${escapeHtmlAttr(code)}">Apri</button>
+                <div class="inlineRow flowActRow" style="justify-content:flex-end;">
+                  <button class="btn btn-ghost btn-xs" type="button" data-open-code="${escapeHtmlAttr(code)}">Apri</button>
+                  <button class="btn btn-danger btn-xs jsProdDeleteInline" type="button" data-code="${escapeHtmlAttr(code)}">Elimina</button>
+                </div>
               </td>
             </tr>
           `;
@@ -6272,6 +6356,27 @@ async function deleteSupplierCascade(supplierId){
             inp.dataset.orig = v;
           });
         });
+
+        // inline delete (anagrafica prodotti)
+        prodFields.querySelectorAll("button.jsProdDeleteInline").forEach(btn => {
+          btn.addEventListener("click", async (e) => {
+            e.preventDefault(); e.stopPropagation();
+            const code = String(btn.getAttribute("data-code") || "").trim();
+            if (!code) return;
+            const ok = confirm(
+              `Eliminare il prodotto dall’anagrafica?\n\nCodice: ${code}\n\nNota: elimina SOLO l’anagrafica prodotto (nome/alias/categoria). Movimenti e stock restano.`
+            );
+            if (!ok) return;
+            const done = await deleteProductByCode(code, { skipConfirm: true, silent: true });
+            if (done) {
+              try { const tr = btn.closest("tr"); if (tr) tr.remove(); } catch(_){}
+              showToast("Prodotto eliminato");
+              // aggiorna contatori/lista in background
+              try { renderAll(); renderAnag(); } catch(_){}
+            }
+          });
+        });
+
 
         prodFields.querySelectorAll("button[data-open-code]").forEach(btn => {
           btn.addEventListener("click", (e) => {
@@ -6473,7 +6578,21 @@ async function deleteSupplierCascade(supplierId){
         `;
       }
 
-      prodFields.innerHTML = headerHtml + baseFields.join("") + groupHtml + stockHtml;
+            // Danger zone: elimina prodotto (solo da Anagrafica Prodotti)
+      let dangerHtml = "";
+      if (mode === "master" && !isAliasGroup) {
+        dangerHtml = `
+          <div class="field" style="grid-column: 1 / -1;">
+            <label>Azioni</label>
+            <div class="inlineRow" style="justify-content:flex-end;">
+              <button id="prodDelete" class="btn btn-danger" type="button">Elimina prodotto</button>
+            </div>
+            <div class="td-muted" style="margin-top:6px;">Elimina solo l’anagrafica prodotto (nome/alias/categoria). Non elimina movimenti o stock.</div>
+          </div>
+        `;
+      }
+
+      prodFields.innerHTML = headerHtml + baseFields.join("") + groupHtml + stockHtml + dangerHtml;
 
       // Category select
       const sel = document.getElementById("prodCategorySelect");
@@ -6737,7 +6856,23 @@ async function deleteSupplierCascade(supplierId){
         });
       }
 
-      modalProduct.classList.add("open");
+      
+
+      // Elimina prodotto (solo anagrafica prodotti, non stock)
+      const delBtn = document.getElementById("prodDelete");
+      if (delBtn) {
+        delBtn.addEventListener("click", async (e) => {
+          e.preventDefault(); e.stopPropagation();
+          try { delBtn.disabled = true; } catch(_){}
+          const done = await deleteProductByCode(code);
+          if (done) {
+            try { modalProduct.classList.remove("open"); } catch(_){}
+          } else {
+            try { delBtn.disabled = false; } catch(_){}
+          }
+        });
+      }
+modalProduct.classList.add("open");
     }
 
 
