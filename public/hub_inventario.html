@@ -4259,7 +4259,11 @@ async function deleteMovement(id) {
       const items = stockArr.length;
       const totalPieces = stockArr.reduce((sum, x) => sum + (Number(x.qty) || 0), 0);
 
-      const low = stockArr.filter(x => (Number(x.qty) || 0) < (Number(x.threshold) || 0)).length;
+      const low = stockArr.filter(x => {
+        const q = (Number(x.qty) || 0);
+        const t = (Number(x.threshold) || 0);
+        return q > 0 && t > 0 && q < t;
+      }).length;
       const last = state.movements.slice().sort((a,b) => String(b.createdAt||"").localeCompare(String(a.createdAt||"")))[0];
 
       statTotalItems.textContent = items.toLocaleString("it-IT");
@@ -4289,7 +4293,11 @@ async function deleteMovement(id) {
         const arr0 = Array.isArray(stockByWh) ? stockByWh : [];
         const arr = groupStockRowsByAlias(arr0);
 
-        const isLow = (r) => (Number(r && r.qty) || 0) < (Number(r && r.threshold) || 0);
+        const isLow = (r) => {
+        const q = (Number(r && r.qty) || 0);
+        const t = (Number(r && r.threshold) || 0);
+        return q > 0 && t > 0 && q < t;
+      };
 
         const cerea = arr.filter(r => normalizeWarehouse(r.warehouse) === WAREHOUSE_CEREA && isLow(r));
         const conca = arr.filter(r => normalizeWarehouse(r.warehouse) === WAREHOUSE_CONCA && isLow(r));
@@ -5984,6 +5992,107 @@ function __mergeSupplierSearchKeepingHistory(currentSup, snapshotSup, nextSup) {
   return merged.slice(0, 50);
 }
 
+// ===== Auto-merge fornitori duplicati (stesso Nome + stessa P.IVA) =====
+let __supAutoMerging = false;
+
+function __supplierMergeKeyFromSup(s){
+  try{
+    const nameKey = normSupplierKey((s && s.name) ? s.name : "");
+    const vatKey = __sup_cleanVat((s && (s.vat || s.vatNumber || s.piva || s.partitaIva)) ? (s.vat || s.vatNumber || s.piva || s.partitaIva) : "");
+    if (!nameKey || !vatKey) return "";
+    return nameKey + "|" + vatKey;
+  }catch(_){
+    return "";
+  }
+}
+
+function __pickSupplierFieldMergeValue(primaryVal, secondaryVal){
+  const p = String(primaryVal || "").trim();
+  if (p) return primaryVal;
+  const s = String(secondaryVal || "").trim();
+  if (s) return secondaryVal;
+  return primaryVal;
+}
+
+async function __mergeOneSupplierIntoPrimary(primaryId, secondaryId){
+  const pid = String(primaryId || "");
+  const sid = String(secondaryId || "");
+  if (!pid || !sid || pid === sid) return;
+
+  const p = getSupplierByIdLocal(pid);
+  const s = getSupplierByIdLocal(sid);
+  if (!p || !s) return;
+
+  // Merge fields: non sovrascrive campi già presenti sul primary, ma riempie i vuoti prendendo dal secondary
+  const merged = {};
+  for (const f of __SUP_EDIT_FIELDS){
+    const k = f && f.k;
+    if (!k) continue;
+    merged[k] = __pickSupplierFieldMergeValue(p[k], s[k]);
+  }
+  // Name + VAT: sono già uguali, ma assicurati che restino quelli del primary (quello che stai modificando)
+  merged.name = p.name;
+  merged.vat = p.vat;
+
+  // Helpers / metadata
+  merged.nameLower = String(merged.name || "").toLowerCase();
+  merged.search = __mergeSupplierSearchKeepingHistory(p, s, merged);
+  merged.updatedAt = serverTimestamp();
+  merged.updatedBy = (fb.user && (fb.user.email || fb.user.uid)) ? (fb.user.email || fb.user.uid) : "";
+  merged.lastSource = "MergeAuto";
+
+  // Salva merge su primary
+  await setDoc(doc(fb.db, "orgs", ORG_ID, "suppliers", pid), merged, { merge: true });
+
+  // Elimina secondary (duplicato)
+  try{
+    await deleteDoc(doc(fb.db, "orgs", ORG_ID, "suppliers", sid));
+  }catch(e){
+    console.warn("delete duplicate supplier failed", e);
+  }
+
+  // Update locale immediato (oltre al realtime snapshot)
+  try{
+    const localPatch = { ...merged };
+    delete localPatch.updatedAt;
+    localPatch.updatedAtIso = new Date().toISOString();
+
+    suppliers = (suppliers || [])
+      .filter(x => String(x && x.id) !== sid)
+      .map(x => (String(x && x.id) === pid ? { ...x, ...localPatch } : x));
+  }catch(_){}
+}
+
+async function __maybeUnifySuppliersByNameVat(primaryId){
+  if (__supAutoMerging) return false;
+  if (!fb.user || !fb.db) return false;
+
+  const pid = String(primaryId || "");
+  const p = getSupplierByIdLocal(pid);
+  if (!p) return false;
+
+  const key = __supplierMergeKeyFromSup(p);
+  if (!key) return false;
+
+  const dups = (suppliers || []).filter(x => x && String(x.id) !== pid && __supplierMergeKeyFromSup(x) === key);
+  if (!dups.length) return false;
+
+  __supAutoMerging = true;
+  try{
+    // Merge tutti i duplicati nel primary
+    for (const d of dups){
+      await __mergeOneSupplierIntoPrimary(pid, d.id);
+    }
+    return true;
+  }catch(e){
+    console.warn("__maybeUnifySuppliersByNameVat failed", e);
+    return false;
+  }finally{
+    __supAutoMerging = false;
+  }
+}
+
+
 async function saveSupplierEdits() {
   if (__supSaving) return;
   if (!fb.user || !fb.db) return openModal("Accesso richiesto", "Accedi con Google per modificare l’anagrafica.");
@@ -6047,6 +6156,10 @@ async function saveSupplierEdits() {
     localPatch.updatedAtIso = new Date().toISOString();
 
     suppliers = (suppliers || []).map(x => (String(x.id) === sid ? { ...x, ...localPatch } : x));
+
+    // Se, dopo modifica, questo fornitore diventa uguale ad un altro (stesso Nome + stessa P.IVA), unificali automaticamente
+    try { await __maybeUnifySuppliersByNameVat(sid); } catch(e){ console.warn("supplier auto-merge failed", e); }
+
     renderAnag();
 
     // refresh modal header + fields
