@@ -185,6 +185,7 @@
     thead th { position: sticky; top: 0; background: rgba(248,249,253,.96); backdrop-filter: blur(10px); font-size: 12px; text-transform: uppercase; letter-spacing: .02em; color: rgba(0,0,0,.62); padding: 10px 10px; border-bottom: 1px solid rgba(12,22,52,.08); text-align: left; }
     tbody td { padding: 10px 10px; border-bottom: 1px solid rgba(12,22,52,.06); font-weight: 800; color: rgba(0,0,0,.84); vertical-align: top; }
     tbody tr:hover td { background: rgba(10,132,255,.06); }
+    #stockTbody tr { cursor: pointer; }
     .td-muted { color: rgba(0,0,0,.55); font-weight: 800; }
     .qty { font-variant-numeric: tabular-nums; }
     .badge { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px; border: 1px solid rgba(12,22,52,.10); background: rgba(0,0,0,.03); font-size: 12px; font-weight: 900; color: rgba(0,0,0,.72); }
@@ -1526,6 +1527,17 @@ td.td-actions{ white-space: normal !important; }
               <option value="zero">Solo zero</option>
             </select>
           </div>
+          <div class="field" style="min-width: 180px;">
+            <label for="filterCategory">Categoria</label>
+            <select id="filterCategory">
+              <option value="">Tutte</option>
+              <option value="__none">Non assegnata</option>
+              <option value="scatole">Scatole</option>
+              <option value="divisori">Divisori</option>
+              <option value="flaconi">Flaconi</option>
+              <option value="trigger">Trigger</option>
+            </select>
+          </div>
         </div>
 </div>
 
@@ -1536,13 +1548,14 @@ td.td-actions{ white-space: normal !important; }
             <tr>
               <th>Cliente</th>
               <th>Codice</th>
+              <th>Categoria</th>
               <th>Articolo</th>
               <th class="qty">Pezzi</th>
               <th>Ultimo mov.</th>
             </tr>
           </thead>
           <tbody id="stockTbody">
-            <tr><td class="td-muted" colspan="5">Nessun risultato.</td></tr>
+            <tr><td class="td-muted" colspan="6">Nessun risultato.</td></tr>
           </tbody>
         </table>
       </div>
@@ -2219,6 +2232,7 @@ const docDetailPhotosMeta = document.getElementById("docDetailPhotosMeta");
     const searchStock = document.getElementById("searchStock");
     const filterCustomer = document.getElementById("filterCustomer");
     const filterLow = document.getElementById("filterLow");
+    const filterCategory = document.getElementById("filterCategory");
 
     const pillOcr = document.getElementById("pillOcr");
     const dotOcr = document.getElementById("dotOcr");
@@ -2244,7 +2258,8 @@ const docDetailPhotosMeta = document.getElementById("docDetailPhotosMeta");
     let state = {
       settings: { ...DEFAULT_SETTINGS },
       movements: [], // array of Movement
-      thresholds: {} // per-item threshold overrides: key -> number
+      thresholds: {}, // per-item threshold overrides: key -> number
+      productCategories: {} // per-code macro category (offline fallback)
     };
 
     let capture = {
@@ -2552,8 +2567,9 @@ btnLogout.addEventListener("click", async () => {
         query(orgCol("products"), orderBy("nameLower")),
         (snap) => {
           products = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+          renderAll();
           renderAnag();
-        },
+},
         (err) => {
           console.error("products watch error", err);
           setSyncPill("bad", "Sync: permessi prodotti");
@@ -3084,6 +3100,7 @@ async function deleteMovementsBulk(ids) {
         if (parsed && typeof parsed === "object") {
           state.movements = Array.isArray(parsed.movements) ? parsed.movements : [];
           state.thresholds = parsed.thresholds && typeof parsed.thresholds === "object" ? parsed.thresholds : {};
+          state.productCategories = parsed.productCategories && typeof parsed.productCategories === "object" ? parsed.productCategories : {};
         }
       } catch (e) {
         console.warn("loadLocalData failed", e);
@@ -3092,7 +3109,11 @@ async function deleteMovementsBulk(ids) {
 
     function saveLocalData() {
       try {
-        localStorage.setItem(STORE_KEY_LOCALDATA, JSON.stringify({ movements: state.movements, thresholds: state.thresholds }));
+        localStorage.setItem(STORE_KEY_LOCALDATA, JSON.stringify({
+          movements: state.movements,
+          thresholds: state.thresholds,
+          productCategories: state.productCategories
+        }));
       } catch {}
     }
 
@@ -4506,10 +4527,79 @@ function renderDocDetailPhotos(g){
 
 
 
+    const MACRO_CATEGORIES = ["scatole", "divisori", "flaconi", "trigger"];
+
+    function normalizeMacroCategory(v) {
+      const s = String(v || "").trim().toLowerCase();
+      return MACRO_CATEGORIES.includes(s) ? s : "";
+    }
+    function macroCatLabel(v) {
+      const s = normalizeMacroCategory(v);
+      return s ? (s.charAt(0).toUpperCase() + s.slice(1)) : "";
+    }
+    function safeDecodeUri(s) { try { return decodeURIComponent(s); } catch { return s; } }
+    function findProductByCode(code) {
+      const low = String(code || "").trim().toLowerCase();
+      if (!low) return null;
+      return (products || []).find(p => {
+        const pCode = String(p.code || "").trim().toLowerCase();
+        const pId = String(p.id || "").trim().toLowerCase();
+        const pIdDec = safeDecodeUri(String(p.id || "")).trim().toLowerCase();
+        return pCode === low || pId === low || pIdDec === low;
+      }) || null;
+    }
+    function getMacroCategoryForCode(code) {
+      const low = String(code || "").trim().toLowerCase();
+      const p = findProductByCode(code);
+      const fromProducts = normalizeMacroCategory(p && p.category);
+      const fromLocal = normalizeMacroCategory(state.productCategories && state.productCategories[low]);
+      return fromProducts || fromLocal || "";
+    }
+    async function setMacroCategoryForCode(code, category, nameHint) {
+      const key = String(code || "").trim();
+      const low = key.toLowerCase();
+      const cat = normalizeMacroCategory(category);
+
+      // Offline fallback + UI immediata
+      state.productCategories = state.productCategories || {};
+      if (cat) state.productCategories[low] = cat;
+      else delete state.productCategories[low];
+      saveLocalData();
+
+      // Optimistic local products (se già presente)
+      const p = findProductByCode(key);
+      if (p) p.category = cat;
+
+      if (!fb.user || !fb.db) return;
+
+      const patch = {
+        code: key,
+        codeLower: low,
+        category: cat,
+        updatedAt: serverTimestamp(),
+        updatedBy: (fb.user.email || fb.user.uid || "")
+      };
+      const nm = String(nameHint || "").trim();
+      if (nm) {
+        patch.name = nm;
+        patch.nameLower = nm.toLowerCase();
+      }
+
+      try {
+        await setDoc(doc(fb.db, "orgs", ORG_ID, "products", keyToDocId(low)), patch, { merge: true });
+      } catch (e) {
+        console.error("setMacroCategoryForCode failed", e);
+        showToast("Errore salvataggio categoria", "err");
+      }
+    }
+
+    let __stockRowByKey = new Map();
+
     function renderStockTable(stockArr) {
       const q = (searchStock.value || "").trim().toLowerCase();
       const cust = (filterCustomer.value || "").trim();
       const flt = (filterLow.value || "all");
+      const catF = (filterCategory && filterCategory.value ? String(filterCategory.value) : "").trim().toLowerCase();
 
       let rows = stockArr;
 
@@ -4520,16 +4610,23 @@ function renderDocDetailPhotos(g){
         (x.item || "").toLowerCase().includes(q)
       );
 
+      // filtro categoria (macro)
+      if (catF) {
+        if (catF === "__none") rows = rows.filter(x => !getMacroCategoryForCode(x.code));
+        else rows = rows.filter(x => getMacroCategoryForCode(x.code) === catF);
+      }
+
       // mantiene la logica "scorta bassa" basata su soglia (anche se la colonna non è più visibile)
       if (flt === "low") rows = rows.filter(x => (Number(x.qty)||0) < (Number(x.threshold)||0));
       if (flt === "zero") rows = rows.filter(x => (Number(x.qty)||0) === 0);
 
       if (pillStock) pillStock.textContent = `${rows.length} righe`;
-
       if (!stockTbody) return;
 
+      __stockRowByKey = new Map();
+
       if (rows.length === 0) {
-        stockTbody.innerHTML = '<tr><td class="td-muted" colspan="5">Nessun risultato.</td></tr>';
+        stockTbody.innerHTML = '<tr><td class="td-muted" colspan="6">Nessun risultato.</td></tr>';
         return;
       }
 
@@ -4537,16 +4634,23 @@ function renderDocDetailPhotos(g){
       const max = 800;
       const show = rows.slice(0, max);
 
+      // cache per click riga
+      __stockRowByKey = new Map(show.map(r => [movementKey(r.customer, r.code), r]));
+
       stockTbody.innerHTML = show.map(r => {
         const k = movementKey(r.customer, r.code);
         const warn = (Number(r.qty)||0) < (Number(r.threshold)||0);
-        const qtyHtml = `<span class="qty" style="color:${warn ? 'rgba(255,59,48,.95)' : 'rgba(0,0,0,.86)'}">${Number(r.qty).toLocaleString("it-IT")}</span>`;
+        const qtyColor = warn ? "var(--danger)" : "rgba(0,0,0,.86)";
+        const qtyHtml = `<span class="qty" style="color:${qtyColor}">${Number(r.qty).toLocaleString("it-IT")}</span>`;
         const lastTxt = r.lastMoveAt ? formatDateIT(r.lastMoveAt) : "—";
+        const cat = getMacroCategoryForCode(r.code);
+        const catHtml = cat ? `<span class="pill" style="padding:2px 8px;">${escapeHtml(macroCatLabel(cat))}</span>` : '<span class="td-muted">—</span>';
 
         return `
-          <tr data-k="${escapeHtmlAttr(k)}">
+          <tr data-k="${escapeHtmlAttr(k)}" title="Apri dettagli / imposta categoria">
             <td data-label="Cliente">${escapeHtml(r.customer)}</td>
             <td data-label="Codice">${escapeHtml(r.code)}</td>
+            <td data-label="Categoria">${catHtml}</td>
             <td data-label="Articolo">${escapeHtml(r.item)}</td>
             <td data-label="Pezzi" class="qty">${qtyHtml}</td>
             <td data-label="Ultimo mov." class="td-muted">${escapeHtml(lastTxt)}</td>
@@ -4556,9 +4660,7 @@ function renderDocDetailPhotos(g){
       // niente più bottoni Carico/Scarico in tabella
     }
 
-
-    
-function renderMovementsTable() {
+    function renderMovementsTable() {
       const max = Math.max(5, Math.floor(Number(state.settings.maxRecent) || 30));
       const docs = (__docGroups || []).slice(0, max);
 
@@ -5133,25 +5235,76 @@ async function deleteSupplierCascade(supplierId){
   }
 }
 
-    function openProductModal(id) {
+    function openProductModal(id, ctx) {
       if (!modalProduct) return;
-      const p = products.find(x => x.id === id) || products.find(x => String(x.code) === String(id));
-      if (!p) return;
 
-      prodTitle.textContent = p.name || "Prodotto";
-      const pairs = [
-        ["Codice", p.code || p.id || ""],
-        ["Categoria", p.category || ""],
-        ["U.M.", p.uom || ""],
-        ["Note", (p.note || p.notes || "")],
-        ["Aggiornato", tsToIso(p.updatedAt) || p.updatedAtIso || ""]
-      ];
-      prodFields.innerHTML = pairs.map(([k,v]) => `
+      const code = String((ctx && ctx.code) || id || "").trim();
+      if (!code) return;
+
+      const p = findProductByCode(code) || (products || []).find(x => x.id === id) || null;
+
+      const title = String((ctx && ctx.item) || (p && p.name) || "Prodotto").trim() || "Prodotto";
+      const cat = getMacroCategoryForCode(code);
+
+      const lastTxt = (ctx && ctx.lastMoveAt) ? formatDateIT(ctx.lastMoveAt) : "—";
+      const qtyTxt = (ctx && (ctx.qty !== undefined)) ? Number(ctx.qty).toLocaleString("it-IT") : "—";
+      const thrTxt = (ctx && (ctx.threshold !== undefined)) ? String(ctx.threshold) : "—";
+      const updTxt = (p && (p.updatedAt || p.updatedAtIso)) ? (tsToIso(p.updatedAt) || p.updatedAtIso || "") : "";
+
+      prodTitle.textContent = title;
+
+      prodFields.innerHTML = `
         <div class="field">
-          <label>${h(k)}</label>
-          <input value="${h(v || "")}" readonly />
+          <label>Cliente</label>
+          <input value="${h((ctx && ctx.customer) || "")}" readonly />
         </div>
-      `).join("");
+        <div class="field">
+          <label>Codice</label>
+          <input value="${h(code)}" readonly />
+        </div>
+        <div class="field" style="grid-column: 1 / -1;">
+          <label>Articolo</label>
+          <input value="${h(title)}" readonly />
+        </div>
+        <div class="field">
+          <label>Pezzi in stock</label>
+          <input value="${h(qtyTxt)}" readonly />
+        </div>
+        <div class="field">
+          <label>Soglia</label>
+          <input value="${h(thrTxt)}" readonly />
+        </div>
+        <div class="field">
+          <label>Ultimo mov.</label>
+          <input value="${h(lastTxt)}" readonly />
+        </div>
+        <div class="field">
+          <label>Aggiornato</label>
+          <input value="${h(updTxt || "—")}" readonly />
+        </div>
+
+        <div class="field" style="grid-column: 1 / -1;">
+          <label>Categoria (macro)</label>
+          <select id="prodCategorySelect">
+            <option value="">Non assegnata</option>
+            ${MACRO_CATEGORIES.map(c => `<option value="${h(c)}">${h(macroCatLabel(c))}</option>`).join("")}
+          </select>
+          <div class="td-muted" style="margin-top:6px;">
+            Clicca per associare il prodotto a: scatole, divisori, flaconi, trigger.
+          </div>
+        </div>
+      `;
+
+      const sel = document.getElementById("prodCategorySelect");
+      if (sel) {
+        sel.value = cat || "";
+        sel.addEventListener("change", async () => {
+          await setMacroCategoryForCode(code, sel.value, title);
+          renderAll();
+          showToast("Categoria salvata");
+        });
+      }
+
       modalProduct.classList.add("open");
     }
 
@@ -6512,6 +6665,19 @@ try {
 searchStock.addEventListener("input", () => renderAll());
     filterCustomer.addEventListener("change", () => renderAll());
     filterLow.addEventListener("change", () => renderAll());
+    if (filterCategory) filterCategory.addEventListener("change", () => renderAll());
+
+    // Click su riga stock: dettaglio + categoria
+    if (stockTbody) {
+      stockTbody.addEventListener("click", (e) => {
+        const tr = e.target.closest("tr[data-k]");
+        if (!tr) return;
+        const k = tr.getAttribute("data-k") || "";
+        const row = __stockRowByKey.get(k);
+        if (!row) return;
+        openProductModal(row.code, row);
+      });
+    }
 
     const btnNewMovementManual = document.getElementById("btnNewMovementManual");
     if (btnNewMovementManual) btnNewMovementManual.addEventListener("click", () => {
