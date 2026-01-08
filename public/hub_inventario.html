@@ -1006,6 +1006,86 @@ tbody td, thead th{
 }
 #statsCard .homeTileIcon{ color: rgba(0,0,0,.55) !important; }
 
+/* === Riquadro sotto-scorta (Home, fondo pagina) === */
+.lowStockBoard{
+  margin-top: 16px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+.lowStockCol{
+  background: var(--bg2);
+  border: 1px solid rgba(60,60,67,.18);
+  border-radius: 14px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+.lowStockColHd{
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.lowStockList{
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.lowStockItem{
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 10px;
+  background: #fff;
+  border: 1px solid rgba(60,60,67,.16);
+  border-radius: 12px;
+}
+.lowStockItemMain{ min-width: 0; flex: 1 1 auto; }
+.lowStockCode{
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size: 12px;
+  font-weight: 900;
+  color: rgba(0,0,0,.82);
+  overflow-wrap: anywhere;
+}
+.lowStockName{
+  font-size: 13px;
+  font-weight: 850;
+  color: rgba(0,0,0,.86);
+  margin-top: 2px;
+  overflow-wrap: anywhere;
+}
+.lowStockMeta{
+  font-size: 12px;
+  font-weight: 750;
+  color: var(--muted);
+  margin-top: 3px;
+  overflow-wrap: anywhere;
+}
+.lowStockQty{
+  flex: 0 0 auto;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.lowStockQty .n{
+  font-size: 16px;
+  font-weight: 950;
+  color: rgba(0,0,0,.90);
+}
+.lowStockQty .t{
+  font-size: 12px;
+  font-weight: 850;
+  color: var(--muted);
+}
+@media (max-width: 720px){
+  .lowStockBoard{ grid-template-columns: 1fr; }
+}
+
+
 /* Liste documenti (Movimenti recenti / Flussi) */
 /* Table actions (small buttons) */
 .btn-xs{
@@ -1362,6 +1442,28 @@ td.td-actions{ white-space: normal !important; }
 </button>
 
 </div>
+
+              <!-- Sotto-scorta (solo visual) -->
+              <div class="lowStockBoard" id="lowStockBoard" aria-label="Articoli sotto scorta">
+                <div class="lowStockCol">
+                  <div class="lowStockColHd">
+                    <div class="hero-sub">Sezione Cerea</div>
+                    <span class="pill" id="lowStockCountCerea">0</span>
+                  </div>
+                  <div class="lowStockList" id="lowStockListCerea">
+                    <div class="td-muted">—</div>
+                  </div>
+                </div>
+                <div class="lowStockCol">
+                  <div class="lowStockColHd">
+                    <div class="hero-sub">Sezione Concamarise</div>
+                    <span class="pill" id="lowStockCountConca">0</span>
+                  </div>
+                  <div class="lowStockList" id="lowStockListConca">
+                    <div class="td-muted">—</div>
+                  </div>
+                </div>
+              </div>
               </div>
           </article>
           </div>
@@ -2010,7 +2112,7 @@ td.td-actions{ white-space: normal !important; }
     const DEFAULT_SETTINGS = Object.freeze({
       ocrUrl: "https://ocrproxy-537555699968.europe-west1.run.app",
       ocrKey: "",              // header X-OCR-KEY se attivo sul server
-      lowThreshold: 10,
+      lowThreshold: 1000,
       maxRecent: 30
     });
 
@@ -2289,6 +2391,14 @@ const docDetailPhotosMeta = document.getElementById("docDetailPhotosMeta");
     const statTotalFlows = document.getElementById("statTotalFlows");
     const statLowStock = document.getElementById("statLowStock");
     const statLastUpdate = document.getElementById("statLastUpdate");
+
+
+    // Home: riquadro sotto-scorta (visual)
+    const lowStockBoard = document.getElementById("lowStockBoard");
+    const lowStockListCerea = document.getElementById("lowStockListCerea");
+    const lowStockListConca = document.getElementById("lowStockListConca");
+    const lowStockCountCerea = document.getElementById("lowStockCountCerea");
+    const lowStockCountConca = document.getElementById("lowStockCountConca");
 
     const stockTbody = document.getElementById("stockTbody");
     const movTbody = document.getElementById("movTbody");
@@ -3847,7 +3957,7 @@ function getThresholdForKey(k) {
       const n = Number(v);
       if (Number.isFinite(n) && n >= 0) return Math.floor(n);
 
-      return Math.floor(Number(state.settings.lowThreshold) || 0);
+      return Math.max(1000, Math.floor(Number(state.settings.lowThreshold) || 0));
     }
 
     async function setThresholdForKey(k, n) {
@@ -3873,6 +3983,29 @@ function getThresholdForKey(k) {
       state.thresholds[k] = value;
       saveLocalData();
     }
+
+
+    async function clearThresholdForKey(k) {
+      const key = String(k || "");
+      if (!key) return;
+
+      // realtime (Firestore)
+      if (fb.user && fb.db) {
+        try {
+          delete thresholds[key]; // optimistic
+          const ref = doc(fb.db, "orgs", ORG_ID, "thresholds", keyToDocId(key));
+          await deleteDoc(ref);
+          return;
+        } catch (e) {
+          console.warn("threshold delete failed, fallback local", e);
+        }
+      }
+
+      // local fallback
+      try { delete state.thresholds[key]; } catch(_){}
+      saveLocalData();
+    }
+
 
     async function addMovement(mv) {
       // realtime (Firestore)
@@ -3988,6 +4121,67 @@ async function deleteMovement(id) {
       if (typeof statTotalFlows !== "undefined" && statTotalFlows) statTotalFlows.textContent = (Number(docsCount) || 0).toLocaleString("it-IT");
       statLowStock.textContent = low.toLocaleString("it-IT");
       statLastUpdate.textContent = last ? formatDateIT(last.createdAt) : "—";
+    }
+
+
+    function renderLowStockBoard(stockByWh) {
+      try {
+        if (!lowStockBoard || !lowStockListCerea || !lowStockListConca) return;
+
+        const arr = Array.isArray(stockByWh) ? stockByWh : [];
+        const isLow = (r) => (Number(r && r.qty) || 0) < (Number(r && r.threshold) || 0);
+
+        const cerea = arr.filter(r => normalizeWarehouse(r.warehouse) === WAREHOUSE_CEREA && isLow(r));
+        const conca = arr.filter(r => normalizeWarehouse(r.warehouse) === WAREHOUSE_CONCA && isLow(r));
+
+        const sortFn = (a, b) => (Number(a && a.qty) || 0) - (Number(b && b.qty) || 0);
+        cerea.sort(sortFn);
+        conca.sort(sortFn);
+
+        if (lowStockCountCerea) lowStockCountCerea.textContent = String(cerea.length);
+        if (lowStockCountConca) lowStockCountConca.textContent = String(conca.length);
+
+        const fmt = (n) => (Number(n) || 0).toLocaleString("it-IT");
+        const maxShow = 12;
+
+        const renderList = (list, el) => {
+          if (!el) return;
+          if (!list.length) {
+            el.innerHTML = '<div class="td-muted">Nessun articolo sotto scorta.</div>';
+            return;
+          }
+
+          const show = list.slice(0, maxShow);
+          const more = list.length - show.length;
+
+          el.innerHTML = show.map(r => {
+            const code = escapeHtml(r.code || "");
+            const item = escapeHtml(r.item || "");
+            const cust = escapeHtml(r.customer || "");
+            const qty = fmt(safeInt(r.qty));
+            const thr = fmt(safeInt(r.threshold));
+
+            return `
+              <div class="lowStockItem">
+                <div class="lowStockItemMain">
+                  <div class="lowStockCode">${code || "—"}</div>
+                  <div class="lowStockName">${item || "—"}</div>
+                  ${cust ? `<div class="lowStockMeta">${cust}</div>` : ``}
+                </div>
+                <div class="lowStockQty">
+                  <div class="n">${qty}</div>
+                  <div class="t">soglia ${thr}</div>
+                </div>
+              </div>
+            `;
+          }).join("") + (more > 0 ? `<div class="td-muted">+${more} altri…</div>` : "");
+        };
+
+        renderList(cerea, lowStockListCerea);
+        renderList(conca, lowStockListConca);
+      } catch (e) {
+        console.warn("renderLowStockBoard failed", e);
+      }
     }
 
     function renderCustomerOptions(stockArr) {
@@ -4937,6 +5131,8 @@ function renderAll() {
 
       // Home / KPI: totale (somma di tutti i magazzini)
       renderStats(stockArr);
+      renderLowStockBoard(stockByWh);
+
 
       // Inventario: mostra tabella solo dopo scelta sede
       if (__currentWarehouse) {
@@ -5477,6 +5673,7 @@ async function deleteSupplierCascade(supplierId){
       const qtyTxt = (ctx && (ctx.qty !== undefined)) ? Number(ctx.qty).toLocaleString("it-IT") : "—";
       const thrTxt = (ctx && (ctx.threshold !== undefined)) ? String(ctx.threshold) : "—";
       const updTxt = (p && (p.updatedAt || p.updatedAtIso)) ? (tsToIso(p.updatedAt) || p.updatedAtIso || "") : "";
+      const thrKey = movementKey((ctx && ctx.customer) || "", code);
 
       prodTitle.textContent = title;
 
@@ -5504,8 +5701,16 @@ async function deleteSupplierCascade(supplierId){
           <div class="td-muted" style="margin-top:6px;">Modifica la quantità per rettificare lo stock (crea un movimento IN/OUT di differenza).</div>
         </div>
         <div class="field">
-          <label>Soglia</label>
-          <input value="${h(thrTxt)}" readonly />
+          <label>Soglia sottoscorta</label>
+          <div class="qty-editor" style="justify-content:flex-start;">
+            <input id="prodThrEdit" class="qtyEditInput" type="number" inputmode="numeric" min="0" step="1"
+              value="${safeInt((ctx && (ctx.threshold !== undefined)) ? ctx.threshold : getThresholdForKey(thrKey))}"
+              data-orig="${safeInt((ctx && (ctx.threshold !== undefined)) ? ctx.threshold : getThresholdForKey(thrKey))}"
+              placeholder="1000" />
+            <button id="prodThrSave" class="btn btn-primary btn-xs" type="button" disabled>Salva</button>
+            <button id="prodThrReset" class="btn btn-ghost btn-xs" type="button">Default</button>
+          </div>
+          <div class="td-muted" style="margin-top:6px;">Se non impostata: sotto scorta se &lt; 1000 pezzi. (La soglia è per articolo, vale su entrambe le sedi)</div>
         </div>
         <div class="field">
           <label>Ultimo mov.</label>
@@ -5626,7 +5831,108 @@ async function deleteSupplierCascade(supplierId){
         });
       }
 
-      const qInput = document.getElementById("prodQtyEdit");
+
+      // Soglia sottoscorta: modifica per articolo
+      const tInput = document.getElementById("prodThrEdit");
+      const tSave = document.getElementById("prodThrSave");
+      const tReset = document.getElementById("prodThrReset");
+      if (tInput && tSave) {
+        const syncThrBtn = () => {
+          const raw = String(tInput.value || "").trim();
+          const val = (raw === "") ? null : Math.max(0, safeInt(raw));
+          const base = String(tInput.dataset.orig || "").trim();
+          const baseVal = (base === "") ? null : Math.max(0, safeInt(base));
+          tSave.disabled = (val === baseVal);
+        };
+
+        tInput.addEventListener("click", (e) => e.stopPropagation());
+        tInput.addEventListener("input", syncThrBtn);
+        tInput.addEventListener("keydown", (e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            if (!tSave.disabled) tSave.click();
+            else tInput.blur();
+          }
+          if (e.key === "Escape") {
+            e.preventDefault();
+            tInput.value = String(tInput.dataset.orig || "");
+            syncThrBtn();
+            tInput.blur();
+          }
+        });
+
+        tSave.addEventListener("click", async (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+
+          const raw = String(tInput.value || "").trim();
+          const val = (raw === "") ? null : Math.max(0, safeInt(raw));
+
+          tInput.disabled = true;
+          tSave.disabled = true;
+          const prevTxt = tSave.textContent;
+          tSave.textContent = "Salvo…";
+          try {
+            if (val === null) {
+              await clearThresholdForKey(thrKey);
+              const baseThr = getThresholdForKey(thrKey);
+              ctx.threshold = baseThr;
+              tInput.value = ""; // vuoto = default
+              tInput.dataset.orig = "";
+            } else {
+              await setThresholdForKey(thrKey, val);
+              ctx.threshold = val;
+              tInput.dataset.orig = String(val);
+            }
+            renderAll();
+            showToast("Soglia salvata");
+          } catch (err) {
+            console.error(err);
+            showToast("Errore salvataggio soglia");
+          } finally {
+            tSave.textContent = prevTxt || "Salva";
+            tInput.disabled = false;
+            syncThrBtn();
+          }
+        });
+
+        if (tReset) {
+          tReset.addEventListener("click", async (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            tReset.disabled = true;
+            try {
+              await clearThresholdForKey(thrKey);
+              const baseThr = getThresholdForKey(thrKey);
+              ctx.threshold = baseThr;
+              tInput.value = "";
+              tInput.dataset.orig = "";
+              renderAll();
+              showToast("Soglia ripristinata");
+            } catch (err) {
+              console.error(err);
+              showToast("Errore ripristino soglia");
+            } finally {
+              tReset.disabled = false;
+              syncThrBtn();
+            }
+          });
+        }
+
+        // iniziale: se il valore coincide col default (nessun override), mostra input vuoto
+        try {
+          const hasOverride = (thresholds && (thrKey in thresholds)) || (state.thresholds && (thrKey in state.thresholds));
+          if (!hasOverride) {
+            tInput.value = "";
+            tInput.dataset.orig = "";
+          }
+        } catch(_){}
+
+        syncThrBtn();
+      }
+
+
+            const qInput = document.getElementById("prodQtyEdit");
 
       const qSave = document.getElementById("prodQtySave");
       if (qInput && qSave && ctx && (ctx.qty !== undefined)) {
@@ -6078,14 +6384,14 @@ async function handleFileSelection(fileList) {
     function applySettingsToUI() {
       sOcrUrl.value = state.settings.ocrUrl || "";
       sOcrKey.value = state.settings.ocrKey || "";
-      sLowThreshold.value = String(Math.floor(Number(state.settings.lowThreshold) || 0));
+      sLowThreshold.value = String(Math.max(1000, Math.floor(Number(state.settings.lowThreshold) || 0)));
       sMaxRecent.value = String(Math.floor(Number(state.settings.maxRecent) || 30));
     }
 
     function saveSettingsFromUI() {
       state.settings.ocrUrl = (sOcrUrl.value || "").trim();
       state.settings.ocrKey = (sOcrKey.value || "").trim();
-      state.settings.lowThreshold = safeInt(sLowThreshold.value);
+      state.settings.lowThreshold = Math.max(1000, safeInt(sLowThreshold.value));
       state.settings.maxRecent = Math.max(5, safeInt(sMaxRecent.value) || 30);
       saveSettings();
     }
