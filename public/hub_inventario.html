@@ -4100,10 +4100,12 @@ function validateMovementFields(fields) {
     function computeStock() {
       const stock = new Map(); // key -> {customer, code, item, qty, lastMoveAt, threshold}
       const latestByKey = new Map();
+      const movedCodes = new Set();
 
       for (const mv of state.movements) {
         const customer = (mv.customer || "").trim();
         const code = (mv.code || "").trim();
+        if (code) movedCodes.add(code.toLowerCase());
         const item = (mv.item || "").trim();
         const k = movementKey(customer, code);
         const cur = stock.get(k) || { customer, code, item, qty: 0, lastMoveAt: "", threshold: getThresholdForKey(k) };
@@ -4162,6 +4164,40 @@ function validateMovementFields(fields) {
 
         stock.set(k, cur);
       }
+
+      
+      // Assicura visibilità in inventario dei nuovi articoli creati in Anagrafica (senza movimenti)
+      try{
+        const whs = [WAREHOUSE_CEREA, WAREHOUSE_CONCA];
+        const plist = Array.isArray(products) ? products : [];
+        for (const p of plist) {
+          const codeP = String((p && (p.code || p.id || "")) || "").trim();
+          if (!codeP) continue;
+          const lowP = codeP.toLowerCase();
+          if (movedCodes.has(lowP)) continue; // se ha già movimenti, esiste già nello stock
+
+          const itemP = String((p && (p.name || p.item || "")) || "").trim() || codeP;
+          const itemK = movementKey("", codeP);
+
+          for (const w0 of whs) {
+            const w = normalizeWarehouse(w0);
+            const k = `${w}||${itemK}`;
+            if (stock.has(k)) continue;
+
+            stock.set(k, {
+              warehouse: w,
+              customer: "",
+              code: codeP,
+              item: itemP,
+              qty: 0,
+              lastMoveAt: "",
+              threshold: getThresholdForKey(itemK),
+              __isNew: true
+            });
+          }
+        }
+      }catch(_){}
+
 
       return Array.from(stock.values());
     }
@@ -5574,7 +5610,7 @@ const cust = (filterCustomer.value || "").trim();
       }
 
       // Inventario per sede: di default nasconde le righe con 0 pezzi (articolo non presente in questa sede)
-      if (flt === "all") rows = rows.filter(x => (Number(x.qty) || 0) !== 0);
+      if (flt === "all") rows = rows.filter(x => (Number(x.qty) || 0) !== 0 || !!x.__isNew);
 
       // mantiene la logica "scorta bassa" basata su soglia
       if (flt === "low") rows = rows.filter(x => (Number(x.qty)||0) < (Number(x.threshold)||0));
