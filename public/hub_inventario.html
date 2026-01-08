@@ -1434,6 +1434,19 @@ td.td-actions{ white-space: normal !important; }
   </div>
 </button>
 
+<button class="btn btn-primary homeTile" id="btnGoProdAnag" type="button" aria-label="Anagrafica prodotti">
+  <div class="homeTileTop">
+    <svg class="homeTileIcon" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M4 4h16v4H4V4zm0 6h16v10H4V10zm2 2v6h12v-6H6z"/>
+    </svg>
+    <span class="homeTileBadge">SKU</span>
+  </div>
+  <div class="homeTileText">
+    <div class="homeTileTitle">Anagrafica prodotti</div>
+    <div class="homeTileSub">Alias e dettagli</div>
+  </div>
+</button>
+
 <button class="btn btn-primary homeTile" id="btnGoInv" type="button" aria-label="Inventario">
   <div class="homeTileTop">
     <svg class="homeTileIcon" viewBox="0 0 24 24" aria-hidden="true">
@@ -1802,6 +1815,7 @@ td.td-actions{ white-space: normal !important; }
               <div class="inlineRow" style="justify-content: space-between; align-items: flex-end;">
                 <div class="seg" aria-label="Anagrafica">
                   <button type="button" id="segSuppliers" class="active">Fornitori</button>
+                  <button type="button" id="segProducts">Prodotti</button>
                 </div>
                 <div class="inlineRow" style="justify-content:flex-end;">
                   <button class="btn btn-secondary" id="btnReloadAnag" type="button" title="Ricarica">Aggiorna</button>
@@ -1811,7 +1825,7 @@ td.td-actions{ white-space: normal !important; }
               <div class="inlineRow" style="margin-top: 10px;">
                 <div class="field" style="flex: 1 1 auto; min-width: 220px;">
                   <label for="searchAnag">Cerca</label>
-                  <input id="searchAnag" placeholder="Nome, P.IVA, città, codice…" />
+                  <input id="searchAnag" placeholder="Nome, codice, alias, P.IVA, città…" />
                 </div>
               </div>
 
@@ -2136,7 +2150,7 @@ td.td-actions{ white-space: normal !important; }
      ****************************************************************/
     import { initializeApp } from "https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js";
     import { getAuth, GoogleAuthProvider, signInWithPopup, signInWithRedirect, getRedirectResult, signOut, onAuthStateChanged, setPersistence, browserLocalPersistence } from "https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js";
-    import { initializeFirestore, collection, doc, setDoc, addDoc, deleteDoc, onSnapshot, query, orderBy, serverTimestamp, getDocs, runTransaction } from "https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js";
+    import {initializeFirestore, collection, doc, setDoc, addDoc, deleteDoc, onSnapshot, query, orderBy, serverTimestamp, deleteField, getDocs, runTransaction} from "https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js";
     import { getStorage, ref as sRef, uploadBytes, getDownloadURL, deleteObject } from "https://www.gstatic.com/firebasejs/12.7.0/firebase-storage.js";
 
     // 🔧 INCOLLA QUI la config del tuo progetto Firebase (Console > Project settings)
@@ -2363,8 +2377,19 @@ const docDetailPhotosMeta = document.getElementById("docDetailPhotosMeta");
     // Close inventario anche con tap/click sul backdrop
     document.getElementById("viewInventory")?.addEventListener("click", (e) => { try{ if (e.target === e.currentTarget) setView("home"); }catch(_){ } });
     document.getElementById("btnCloseOcr")?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
-    document.getElementById("btnGoAnag")?.addEventListener("click", () => setView("anag"));
-    document.getElementById("btnCloseAnag")?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
+    document.getElementById("btnGoAnag")?.addEventListener("click", () => {
+      activeAnagTab = "suppliers";
+      try{ segSuppliers && segSuppliers.classList.add("active"); segProducts && segProducts.classList.remove("active"); }catch(_){ }
+      setView("anag");
+      try{ renderAnag(); }catch(_){ }
+    });
+    document.getElementById("btnGoProdAnag")?.addEventListener("click", () => {
+      activeAnagTab = "products";
+      try{ segProducts && segProducts.classList.add("active"); segSuppliers && segSuppliers.classList.remove("active"); }catch(_){ }
+      setView("anag");
+      try{ renderAnag(); }catch(_){ }
+    });
+document.getElementById("btnCloseAnag")?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
     document.getElementById("btnCloseFlows")?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
     document.getElementById("btnFlowsExport")?.addEventListener("click", () => { try{ exportMovementsCSV(); }catch(_){ } });
     __btnBack?.addEventListener("click", () => setView("home"));
@@ -4259,11 +4284,14 @@ async function deleteMovement(id) {
     }
 
 
+    
     function renderLowStockBoard(stockByWh) {
       try {
         if (!lowStockBoard || !lowStockListCerea || !lowStockListConca) return;
 
-        const arr = Array.isArray(stockByWh) ? stockByWh : [];
+        const arr0 = Array.isArray(stockByWh) ? stockByWh : [];
+        const arr = groupStockRowsByAlias(arr0);
+
         const isLow = (r) => (Number(r && r.qty) || 0) < (Number(r && r.threshold) || 0);
 
         const cerea = arr.filter(r => normalizeWarehouse(r.warehouse) === WAREHOUSE_CEREA && isLow(r));
@@ -4290,7 +4318,7 @@ async function deleteMovement(id) {
           const more = list.length - show.length;
 
           el.innerHTML = show.map(r => {
-            const code = escapeHtml(r.code || "");
+            const code = escapeHtml(r.__displayCode || r.code || "");
             const item = escapeHtml(r.item || "");
             const cust = escapeHtml(r.customer || "");
             const qty = fmt(safeInt(r.qty));
@@ -4318,6 +4346,7 @@ async function deleteMovement(id) {
         console.warn("renderLowStockBoard failed", e);
       }
     }
+
 
     function renderCustomerOptions(stockArr) {
       const customers = Array.from(new Set(stockArr.map(x => x.customer).filter(Boolean))).sort((a,b)=>a.localeCompare(b));
@@ -5056,7 +5085,158 @@ function renderDocDetailPhotos(g){
         return pCode === low || pId === low || pIdDec === low;
       }) || null;
     }
-    function getMacroCategoryForCode(code) {
+    
+    // === Alias (unificazione codici) ===
+    function normTextKey(v) {
+      return String(v || "")
+        .toLowerCase()
+        .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+        .replace(/[^a-z0-9]+/g, " ")
+        .trim()
+        .replace(/\s+/g, " ");
+    }
+
+    function getAliasForCode(code) {
+      const p = findProductByCode(code);
+      const a = String((p && (p.alias || p.aliasName)) || "").trim();
+      return a;
+    }
+
+    function getDisplayNameForCode(code, fallbackName) {
+      const p = findProductByCode(code);
+      const a = String((p && (p.alias || p.aliasName)) || "").trim();
+      if (a) return a;
+      const n = String((p && p.name) || "").trim();
+      if (n) return n;
+      return String(fallbackName || "").trim();
+    }
+
+    async function setProductNameForCode(code, name) {
+      const key = String(code || "").trim();
+      if (!key) return;
+      const nm = String(name || "").trim();
+      if (!nm) return;
+
+      // optimistic local
+      const p = findProductByCode(key);
+      if (p) { p.name = nm; p.nameLower = nm.toLowerCase(); p.updatedAtIso = new Date().toISOString(); }
+
+      if (!fb.user || !fb.db) { renderAll(); renderAnag(); return; }
+
+      try {
+        await setDoc(doc(fb.db, "orgs", ORG_ID, "products", keyToDocId(key.toLowerCase())), {
+          code: key,
+          codeLower: key.toLowerCase(),
+          name: nm,
+          nameLower: nm.toLowerCase(),
+          updatedAt: serverTimestamp(),
+          updatedBy: (fb.user.email || fb.user.uid || "")
+        }, { merge: true });
+        renderAll(); renderAnag();
+        showToast("Nome prodotto salvato");
+      } catch (e) {
+        console.error("setProductNameForCode failed", e);
+        showToast("Errore salvataggio nome", "err");
+      }
+    }
+
+    
+    async function setProductAliasForCode(code, alias, opts) {
+      const key = String(code || "").trim();
+      if (!key) return;
+      const al = String(alias || "").trim();
+      const alLower = al ? al.toLowerCase() : "";
+      const silent = !!(opts && opts.silent);
+
+      // optimistic local
+      const p = findProductByCode(key);
+      if (p) {
+        if (al) { p.alias = al; p.aliasLower = alLower; }
+        else { delete p.alias; delete p.aliasLower; }
+        p.updatedAtIso = new Date().toISOString();
+      }
+
+      if (!fb.user || !fb.db) {
+        renderAll(); renderAnag();
+        if (!silent) showToast(al ? "Alias salvato" : "Alias rimosso");
+        return;
+      }
+
+      try {
+        const patch = {
+          code: key,
+          codeLower: key.toLowerCase(),
+          updatedAt: serverTimestamp(),
+          updatedBy: (fb.user.email || fb.user.uid || "")
+        };
+        if (al) {
+          patch.alias = al;
+          patch.aliasLower = alLower;
+        } else {
+          patch.alias = deleteField();
+          patch.aliasLower = deleteField();
+        }
+        await setDoc(doc(fb.db, "orgs", ORG_ID, "products", keyToDocId(key.toLowerCase())), patch, { merge: true });
+        renderAll(); renderAnag();
+        if (!silent) showToast(al ? "Alias salvato" : "Alias rimosso");
+      } catch (e) {
+        console.error("setProductAliasForCode failed", e);
+        if (!silent) showToast("Errore salvataggio alias", "err");
+      }
+    }
+
+
+    
+    async function setProductAliasForCodes(codes, alias) {
+      const list = (Array.isArray(codes) ? codes : []).map(x => String(x || "").trim()).filter(Boolean);
+      if (!list.length) return;
+
+      const al = String(alias || "").trim();
+      const alLower = al ? al.toLowerCase() : "";
+
+      // optimistic local (immediato)
+      for (const c of list) {
+        const p = findProductByCode(c);
+        if (p) {
+          if (al) { p.alias = al; p.aliasLower = alLower; }
+          else { delete p.alias; delete p.aliasLower; }
+          p.updatedAtIso = new Date().toISOString();
+        }
+      }
+
+      if (!fb.user || !fb.db) {
+        renderAll(); renderAnag();
+        showToast(al ? "Alias applicato" : "Alias rimosso");
+        return;
+      }
+
+      try {
+        await Promise.all(list.map(async (key) => {
+          const patch = {
+            code: key,
+            codeLower: key.toLowerCase(),
+            updatedAt: serverTimestamp(),
+            updatedBy: (fb.user.email || fb.user.uid || "")
+          };
+          if (al) {
+            patch.alias = al;
+            patch.aliasLower = alLower;
+          } else {
+            patch.alias = deleteField();
+            patch.aliasLower = deleteField();
+          }
+          await setDoc(doc(fb.db, "orgs", ORG_ID, "products", keyToDocId(key.toLowerCase())), patch, { merge: true });
+        }));
+        renderAll(); renderAnag();
+        showToast(al ? "Alias applicato" : "Alias rimosso");
+      } catch (e) {
+        console.error("setProductAliasForCodes failed", e);
+        showToast("Errore salvataggio alias", "err");
+      }
+    }
+
+
+function getMacroCategoryForCode(code) {
       const low = String(code || "").trim().toLowerCase();
       const p = findProductByCode(code);
       const fromProducts = normalizeMacroCategory(p && p.category);
@@ -5101,30 +5281,102 @@ function renderDocDetailPhotos(g){
       }
     }
 
-    let __stockRowByKey = new Map();
+    
+    function groupStockRowsByAlias(rows){
+      try{
+        const arr = Array.isArray(rows) ? rows : [];
+        const map = new Map();
+
+        for (const r of arr) {
+          if (!r) continue;
+          const code = String(r.code || "").trim();
+          const alias = getAliasForCode(code);
+          const aliasKey = alias ? normTextKey(alias) : "";
+          const gk = aliasKey ? ("alias:" + aliasKey) : ("code:" + code.toLowerCase());
+
+          const wh = normalizeWarehouse(r.warehouse || "");
+          const cust = String(r.customer || "").trim().toLowerCase();
+          const k = `${wh}||${cust}||${gk}`;
+
+          let g = map.get(k);
+          if (!g) {
+            g = {
+              customer: r.customer || "",
+              warehouse: wh,
+              __groupKey: gk,
+              __isAliasGroup: !!aliasKey,
+              __alias: alias,
+              __codes: [],
+              __members: [],
+              code: code, // primary (will be overwritten below)
+              item: "",
+              qty: 0,
+              threshold: null,
+              lastMoveAt: ""
+            };
+          }
+
+          g.qty += safeInt(r.qty);
+          const thr = safeInt(r.threshold);
+          g.threshold = (g.threshold == null) ? thr : Math.min(safeInt(g.threshold), thr);
+          const ts = String(r.lastMoveAt || "");
+          if (!g.lastMoveAt || (ts && ts > String(g.lastMoveAt))) g.lastMoveAt = ts;
+
+          g.__codes.push(code);
+          g.__members.push(Object.assign({}, r));
+          map.set(k, g);
+        }
+
+        const out = Array.from(map.values());
+        out.forEach(g => {
+          const codes = Array.from(new Set(g.__codes.filter(Boolean)));
+          g.__codes = codes;
+          g.code = codes[0] || "";
+          g.item = g.__isAliasGroup ? (g.__alias || getDisplayNameForCode(g.code, "")) : getDisplayNameForCode(g.code, "");
+          g.__displayCode = g.__isAliasGroup && codes.length > 1 ? `${g.code} (+${codes.length-1})` : g.code;
+        });
+        return out;
+      }catch(e){
+        console.warn("groupStockRowsByAlias failed", e);
+        return Array.isArray(rows) ? rows : [];
+      }
+    }
+
+let __stockRowByKey = new Map();
 
     function renderStockTable(stockArr) {
-      const q = (searchStock.value || "").trim().toLowerCase();
+      const qRaw = (searchStock.value || "").trim();
+      const q = normTextKey(qRaw);
       const cust = (filterCustomer.value || "").trim();
       const flt = (filterLow.value || "all");
       const catF = (filterCategory && filterCategory.value ? String(filterCategory.value) : "").trim().toLowerCase();
 
-      let rows = stockArr;
+      let rows = Array.isArray(stockArr) ? stockArr : [];
 
       if (cust) rows = rows.filter(x => x.customer === cust);
-      if (q) rows = rows.filter(x =>
-        (x.customer || "").toLowerCase().includes(q) ||
-        (x.code || "").toLowerCase().includes(q) ||
-        (x.item || "").toLowerCase().includes(q)
-      );
 
-      // filtro categoria (macro)
+      // Unificazione per alias (solo visual, i movimenti restano separati per codice)
+      rows = groupStockRowsByAlias(rows);
+
+      // ricerca "furba": include alias, nome e codici del gruppo
+      if (q) rows = rows.filter(r => {
+        const hay = [
+          r.customer || "",
+          r.item || "",
+          r.__alias || "",
+          ...(Array.isArray(r.__codes) ? r.__codes : []),
+          ...(Array.isArray(r.__members) ? r.__members.map(m => (m.item || "")) : [])
+        ].join(" ");
+        return normTextKey(hay).includes(q);
+      });
+
+      // filtro categoria (macro) — usa codice primario
       if (catF) {
         if (catF === "__none") rows = rows.filter(x => !getMacroCategoryForCode(x.code));
         else rows = rows.filter(x => getMacroCategoryForCode(x.code) === catF);
       }
 
-      // mantiene la logica "scorta bassa" basata su soglia (anche se la colonna non è più visibile)
+      // mantiene la logica "scorta bassa" basata su soglia
       if (flt === "low") rows = rows.filter(x => (Number(x.qty)||0) < (Number(x.threshold)||0));
       if (flt === "zero") rows = rows.filter(x => (Number(x.qty)||0) === 0);
 
@@ -5150,26 +5402,36 @@ function renderDocDetailPhotos(g){
         const warn = (Number(r.qty)||0) < (Number(r.threshold)||0);
         const qtyColor = warn ? "var(--danger)" : "rgba(0,0,0,.86)";
         const qtyVal = safeInt(r.qty);
-        const qtyInput = `
-          <div class="qty-editor">
-            <input class="qtyEditInput jsQtyEdit" type="number" inputmode="numeric" min="0" step="1"
-              value="${qtyVal}" data-orig="${qtyVal}" style="color:${qtyColor}" />
-            <button class="btn btn-primary btn-xs jsQtySave" type="button" disabled>Salva</button>
-          </div>`;
-const cat = getMacroCategoryForCode(r.code);
+
+        const isGroup = (r.__isAliasGroup && Array.isArray(r.__codes) && r.__codes.length > 1);
+
+        const qtyCell = isGroup
+          ? `<div class="qty-editor" style="justify-content:flex-end;"><span style="font-weight:900; color:${qtyColor};">${Number(qtyVal).toLocaleString("it-IT")}</span></div>`
+          : `
+            <div class="qty-editor">
+              <input class="qtyEditInput jsQtyEdit" type="number" inputmode="numeric" min="0" step="1"
+                value="${qtyVal}" data-orig="${qtyVal}" style="color:${qtyColor}" />
+              <button class="btn btn-primary btn-xs jsQtySave" type="button" disabled>Salva</button>
+            </div>`;
+
+        const cat = getMacroCategoryForCode(r.code);
         const catHtml = cat ? `<span class="pill" style="padding:2px 8px;">${escapeHtml(macroCatLabel(cat))}</span>` : '<span class="td-muted">—</span>';
 
+        const displayCode = escapeHtml(r.__displayCode || r.code || "");
+        const displayName = escapeHtml(r.item || "");
+
         return `
-          <tr data-k="${escapeHtmlAttr(k)}" title="Apri dettagli / imposta categoria">
-            <td data-label="Cod. articolo">${escapeHtml(r.code)}</td>
-            <td data-label="Nome articolo">${escapeHtml(r.item)}</td>
+          <tr data-k="${escapeHtmlAttr(k)}" title="${isGroup ? "Apri gruppo alias" : "Apri dettagli / imposta categoria"}">
+            <td data-label="Cod. articolo">${displayCode}</td>
+            <td data-label="Nome articolo">${displayName}</td>
             <td data-label="Categoria">${catHtml}</td>
-            <td data-label="Pezzi" class="qty">${qtyInput}</td>
+            <td data-label="Pezzi" class="qty">${qtyCell}</td>
           </tr>`;
       }).join("");
 
       // niente più bottoni Carico/Scarico in tabella
     }
+
 
 
     async function adjustStockAbsoluteFromRow(row, newAbsQty) {
@@ -5305,10 +5567,112 @@ function renderAll() {
         "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
       }[ch]));
     }
+    
+    // cache gruppi prodotti (alias) per apertura dettaglio
+    let __prodGroupsMap = new Map();
+
     function renderAnag() {
       if (!anagTbody || !anagTheadRow) return;
 
-      // ✅ Solo Fornitori (nessuna altra categoria)
+      const qRaw = (searchAnag?.value || "").trim();
+      const q = normTextKey(qRaw);
+
+      // Tabs
+      if (activeAnagTab === "products") {
+        // Header + placeholder
+        try { if (searchAnag) searchAnag.placeholder = "Nome, codice, alias…"; } catch(_){}
+
+        anagTheadRow.innerHTML = `
+          <th>Alias / Nome</th>
+          <th>Codici</th>
+          <th class="qty">N.</th>
+          <th>Azioni</th>
+        `;
+
+        if (!fb.user) {
+          anagTbody.innerHTML = `<tr><td class="td-muted" colspan="4">Accedi con Google per sincronizzare i prodotti.</td></tr>`;
+          return;
+        }
+
+        const list = Array.isArray(products) ? products : [];
+
+        // raggruppa per alias (se presente), altrimenti singolo per codice
+        const map = new Map();
+        for (const p of list) {
+          if (!p) continue;
+          const code = String(p.code || safeDecodeUri(p.id) || "").trim();
+          if (!code) continue;
+
+          const alias = String(p.alias || p.aliasName || "").trim();
+          const aliasKey = alias ? ("alias:" + normTextKey(alias)) : "";
+          const key = aliasKey || ("code:" + code.toLowerCase());
+
+          const label = (alias || String(p.name || code)).trim();
+          const cur = map.get(key) || { key, label, alias, items: [] };
+
+          // preferisci label stabile se alias presente
+          if (alias && !cur.alias) { cur.alias = alias; cur.label = alias; }
+          if (alias && cur.alias && normTextKey(cur.alias) === normTextKey(alias)) {
+            // mantieni il primo alias come label
+          } else if (!cur.label) {
+            cur.label = label;
+          }
+
+          cur.items.push({ code, name: String(p.name || code).trim(), alias: alias });
+          map.set(key, cur);
+        }
+
+        const groups = Array.from(map.values()).map(g => {
+          const codes = g.items.map(x => x.code).filter(Boolean);
+          const codesUniq = Array.from(new Set(codes));
+          g.codes = codesUniq;
+          g.count = codesUniq.length;
+          return g;
+        }).sort((a,b) => String(a.label||"").localeCompare(String(b.label||""), "it", { sensitivity:"base" }));
+
+        // filtro ricerca (furbo: ignora spazi/maiuscole)
+        const filtered = q ? groups.filter(g => {
+          const hay = [
+            g.label || "",
+            g.alias || "",
+            ...(g.codes || []),
+            ...(g.items || []).map(x => x.name || "")
+          ].join(" ");
+          return normTextKey(hay).includes(q);
+        }) : groups;
+
+        __prodGroupsMap = new Map(filtered.map(g => [g.key, g]));
+
+        if (!filtered.length) {
+          anagTbody.innerHTML = `<tr><td class="td-muted" colspan="4">Nessun prodotto.</td></tr>`;
+          return;
+        }
+
+        anagTbody.innerHTML = filtered.slice(0, 600).map(g => {
+          const codes = (g.codes || []);
+          const preview = codes.slice(0, 2).join(", ");
+          const more = Math.max(0, codes.length - 2);
+          const codesTxt = preview + (more ? ` +${more}` : "");
+          const badge = (codes.length > 1) ? `<span class="pill" style="margin-left:8px;">Unificati</span>` : ``;
+
+          return `
+            <tr data-pg="${escapeHtmlAttr(g.key)}" title="Apri dettagli">
+              <td data-label="Alias / Nome"><strong>${escapeHtml(g.label || "—")}</strong>${badge}</td>
+              <td data-label="Codici"><span class="kbd">${escapeHtml(codesTxt || "—")}</span></td>
+              <td data-label="N." class="qty">${Number(codes.length||0).toLocaleString("it-IT")}</td>
+              <td data-label="Azioni" class="td-actions">
+                <button class="btn btn-ghost btn-xs" type="button" data-action="openProdGroup" data-id="${escapeHtmlAttr(g.key)}">Apri</button>
+              </td>
+            </tr>
+          `;
+        }).join("");
+
+        return;
+      }
+
+      // Default: fornitori
+      try { if (searchAnag) searchAnag.placeholder = "Nome, P.IVA, città, codice…"; } catch(_){}
+
       anagTheadRow.innerHTML = `
         <th>Nome</th><th>P.IVA</th><th>Città</th><th>Prov.</th><th>Contatti</th><th>Azioni</th>
       `;
@@ -5318,46 +5682,47 @@ function renderAll() {
         return;
       }
 
-      const q = (searchAnag?.value || "").trim().toLowerCase();
       const list = Array.isArray(suppliers) ? suppliers : [];
-
-      if (!list.length) {
-        anagTbody.innerHTML = `<tr><td class="td-muted" colspan="6">Nessun fornitore. (Importa in Firestore)</td></tr>`;
-        return;
-      }
-
-      const filtered = list.filter(x => {
-        const name = String(x.name || "").toLowerCase();
-        const code = String(x.code || x.id || "").toLowerCase();
-        const vat = String(x.vat || "").toLowerCase();
-        const city = String(x.city || "").toLowerCase();
-        const prov = String(x.province || "").toLowerCase();
-        const extra = Array.isArray(x.search) ? x.search.join(" ") : "";
-        const hay = `${name} ${code} ${vat} ${city} ${prov} ${extra}`.toLowerCase();
-        return !q || hay.includes(q);
-      });
+      const filtered = q ? list.filter(s => {
+        const hay = [
+          s?.name || "", s?.vat || "", s?.code || "", s?.city || "", s?.province || "",
+          ...(Array.isArray(s?.search) ? s.search : [])
+        ].join(" ");
+        return normSupplierKey(hay).includes(q);
+      }) : list;
 
       if (!filtered.length) {
-        anagTbody.innerHTML = `<tr><td class="td-muted" colspan="6">Nessun risultato.</td></tr>`;
+        anagTbody.innerHTML = `<tr><td class="td-muted" colspan="6">Nessun fornitore.</td></tr>`;
         return;
       }
 
-      const rows = filtered.slice(0, 500).map(s => {
-        const contacts = [s.phone, s.email, s.pec].filter(Boolean).map(x => h(x)).join("<br>");
+      const show = filtered.slice(0, 500);
+
+      anagTbody.innerHTML = show.map(s => {
+        const name = escapeHtml(s.name || "—");
+        const vat = escapeHtml(s.vat || "—");
+        const city = escapeHtml(s.city || "—");
+        const prov = escapeHtml(s.province || "—");
+        const contacts = [s.phone, s.email].filter(Boolean).map(x => escapeHtml(x)).join("<br>") || '<span class="td-muted">—</span>';
+
         return `
           <tr>
-            <td data-label="Nome"><strong>${h(s.name || "")}</strong><div class="td-muted">${h(s.code || s.id || "")}</div></td>
-            <td data-label="P.IVA">${h(s.vat || "")}</td>
-            <td data-label="Città">${h(s.city || "")}</td>
-            <td data-label="Prov.">${h(s.province || "")}</td>
-            <td data-label="Contatti" class="td-muted">${contacts || "<span class='td-muted'>—</span>"}</td>
-            <td data-label="Azioni" class="td-actions"><div class="inlineRow" style="justify-content:flex-end; gap:8px;"><button class="btn btn-ghost btn-xs" type="button" data-action="supplierDocs" data-id="${h(s.id)}">Documenti</button><button class="btn btn-danger btn-xs" type="button" data-action="deleteSupplier" data-id="${h(s.id)}">Elimina</button></div></td>
+            <td data-label="Nome"><strong>${name}</strong></td>
+            <td data-label="P.IVA">${vat}</td>
+            <td data-label="Città">${city}</td>
+            <td data-label="Prov.">${prov}</td>
+            <td data-label="Contatti" class="td-muted">${contacts}</td>
+            <td data-label="Azioni" class="td-actions">
+              <div class="inlineRow" style="justify-content:flex-end; gap:8px;">
+                <button class="btn btn-ghost btn-xs" type="button" data-action="supplierDocs" data-id="${escapeHtmlAttr(s.id)}">Apri</button>
+                <button class="btn btn-danger btn-xs" type="button" data-action="deleteSupplier" data-id="${escapeHtmlAttr(s.id)}">Elimina</button>
+              </div>
+            </td>
           </tr>
         `;
       }).join("");
-
-      anagTbody.innerHTML = rows;
     }
+
 
     
 // ===== Fornitore: modalità Edit + Salva (senza staccare i documenti collegati) =====
@@ -5794,84 +6159,201 @@ async function deleteSupplierCascade(supplierId){
   }
 }
 
+    
+    function openProductAliasGroup(groupId){
+      try{
+        if (!modalProduct) return;
+        const gid = String(groupId || "").trim();
+        if (!gid) return;
+
+        const g = (__prodGroupsMap && __prodGroupsMap.get) ? __prodGroupsMap.get(gid) : null;
+        if (!g) {
+          showToast("Gruppo non trovato");
+          return;
+        }
+
+        const codes = Array.isArray(g.codes) ? g.codes : [];
+        const alias = String(g.alias || g.label || "").trim();
+
+        prodTitle.textContent = alias || "Prodotti";
+
+        const rowsHtml = (g.items || []).slice(0, 300).map(it => {
+          const code = String(it.code || "").trim();
+          const name = String(it.name || code).trim();
+          return `
+            <tr>
+              <td data-label="Codice"><span class="kbd">${escapeHtml(code)}</span></td>
+              <td data-label="Nome">
+                <div class="qty-editor" style="justify-content:flex-start;">
+                  <input class="qtyEditInput jsProdNameInline" type="text" value="${escapeHtmlAttr(name)}" data-code="${escapeHtmlAttr(code)}" data-orig="${escapeHtmlAttr(name)}" />
+                  <button class="btn btn-primary btn-xs jsProdNameSave" type="button" data-code="${escapeHtmlAttr(code)}" disabled>Salva</button>
+                </div>
+              </td>
+              <td data-label="Azioni" class="td-actions">
+                <button class="btn btn-ghost btn-xs" type="button" data-open-code="${escapeHtmlAttr(code)}">Apri</button>
+              </td>
+            </tr>
+          `;
+        }).join("");
+
+        prodFields.innerHTML = `
+          <div class="field" style="grid-column: 1 / -1;">
+            <label>Alias (unifica codici)</label>
+            <div class="qty-editor" style="justify-content:flex-start;">
+              <input id="prodGroupAlias" class="qtyEditInput" type="text" placeholder="Es. tappo d50" value="${escapeHtmlAttr(alias)}" />
+              <button id="prodGroupAliasSave" class="btn btn-primary btn-xs" type="button">Applica a tutti</button>
+              <button id="prodGroupAliasClear" class="btn btn-ghost btn-xs" type="button">Rimuovi</button>
+            </div>
+            <div class="td-muted" style="margin-top:6px;">
+              Se due articoli hanno lo stesso alias, qui risultano <strong>unificati</strong>.
+            </div>
+          </div>
+
+          <div class="field" style="grid-column: 1 / -1;">
+            <label>Articoli raggruppati</label>
+            <div class="tableWrap" style="max-height: 320px; overflow:auto;">
+              <table>
+                <thead>
+                  <tr>
+                    <th style="width:180px">Codice</th>
+                    <th>Nome</th>
+                    <th style="width:120px">Apri</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${rowsHtml || `<tr><td class="td-muted" colspan="3">Nessun articolo.</td></tr>`}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        `;
+
+        const aInp = document.getElementById("prodGroupAlias");
+        const aSave = document.getElementById("prodGroupAliasSave");
+        const aClear = document.getElementById("prodGroupAliasClear");
+        if (aSave && aInp) {
+          aSave.addEventListener("click", async (e) => {
+            e.preventDefault(); e.stopPropagation();
+            const v = String(aInp.value || "").trim();
+            await setProductAliasForCodes(codes, v);
+          });
+        }
+        if (aClear && aInp) {
+          aClear.addEventListener("click", async (e) => {
+            e.preventDefault(); e.stopPropagation();
+            aInp.value = "";
+            await setProductAliasForCodes(codes, "");
+          });
+        }
+
+        // inline name save enable + handlers
+        prodFields.querySelectorAll("input.jsProdNameInline").forEach(inp => {
+          const sync = () => {
+            const wrap = inp.closest ? inp.closest(".qty-editor") : null;
+            const btn = wrap ? wrap.querySelector("button.jsProdNameSave") : null;
+            if (!btn) return;
+            btn.disabled = String(inp.value || "").trim() === String(inp.dataset.orig || "").trim();
+          };
+          inp.addEventListener("input", sync);
+          sync();
+        });
+
+        prodFields.querySelectorAll("button.jsProdNameSave").forEach(btn => {
+          btn.addEventListener("click", async (e) => {
+            e.preventDefault(); e.stopPropagation();
+            const wrap = btn.closest ? btn.closest(".qty-editor") : null;
+            const inp = wrap ? wrap.querySelector("input.jsProdNameInline") : null;
+            const code = String((inp && inp.dataset.code) || btn.dataset.code || "");
+            if (!inp) return;
+            const v = String(inp.value || "").trim();
+            if (!v) return;
+            btn.disabled = true;
+            await setProductNameForCode(code, v);
+            inp.dataset.orig = v;
+          });
+        });
+
+        prodFields.querySelectorAll("button[data-open-code]").forEach(btn => {
+          btn.addEventListener("click", (e) => {
+            e.preventDefault(); e.stopPropagation();
+            const code = String(btn.getAttribute("data-open-code") || "").trim();
+            if (code) openProductModal(code, { __mode: "master", code });
+          });
+        });
+
+        modalProduct.classList.add("open");
+      }catch(e){
+        console.warn("openProductAliasGroup failed", e);
+      }
+    }
+
+
     function openProductModal(id, ctx) {
       if (!modalProduct) return;
 
+      const mode = (ctx && ctx.__mode) ? String(ctx.__mode) : ""; // "master" | ""
       const code = String((ctx && ctx.code) || id || "").trim();
       if (!code) return;
 
-      const p = findProductByCode(code) || (products || []).find(x => x.id === id) || null;
+      const p = findProductByCode(code) || (products || []).find(x => x && (x.id === id)) || null;
 
-      const title = String((ctx && ctx.item) || (p && p.name) || "Prodotto").trim() || "Prodotto";
+      const isStockCtx = !!(ctx && (ctx.customer || ctx.warehouse || (ctx.qty !== undefined)));
+      const isAliasGroup = !!(ctx && ctx.__isAliasGroup && Array.isArray(ctx.__codes) && ctx.__codes.length > 1);
+
+      const alias = String((p && (p.alias || p.aliasName)) || (ctx && ctx.__alias) || "").trim();
+      const title = (isAliasGroup ? (alias || String((ctx && ctx.item) || "Alias")) : String((p && p.name) || (ctx && ctx.item) || code)).trim() || "Prodotto";
       const cat = getMacroCategoryForCode(code);
 
       const wh = normalizeWarehouse((ctx && ctx.warehouse) || "");
-      const whTxt = warehouseLabel(wh);
-
       const lastTxt = (ctx && ctx.lastMoveAt) ? formatDateIT(ctx.lastMoveAt) : "—";
-      const qtyTxt = (ctx && (ctx.qty !== undefined)) ? Number(ctx.qty).toLocaleString("it-IT") : "—";
-      const thrTxt = (ctx && (ctx.threshold !== undefined)) ? String(ctx.threshold) : "—";
       const updTxt = (p && (p.updatedAt || p.updatedAtIso)) ? (tsToIso(p.updatedAt) || p.updatedAtIso || "") : "";
-      const thrKey = movementKey((ctx && ctx.customer) || "", code);
 
       prodTitle.textContent = title;
 
-      prodFields.innerHTML = `
-        <div class="field">
-          <label>Cliente</label>
-          <input value="${h((ctx && ctx.customer) || "")}" readonly />
+      // --- Header fields (Nome + Alias) ---
+      const nameVal = String((p && p.name) || (ctx && ctx.item) || code).trim();
+      const aliasHint = isAliasGroup ? "Alias del gruppo (applica a tutti i codici)" : "Alias (se uguale = unifica)";
+
+      const headerHtml = `
+        <div class="field" style="grid-column: 1 / -1;">
+          <label>Nome (DB)</label>
+          <div class="qty-editor" style="justify-content:flex-start;">
+            <input id="prodNameEdit" class="qtyEditInput" type="text" value="${escapeHtmlAttr(nameVal)}" />
+            <button id="prodNameSave" class="btn btn-primary btn-xs" type="button" disabled>Salva</button>
+          </div>
+          <div class="td-muted" style="margin-top:6px;">Modifica il nome salvato in anagrafica.</div>
         </div>
+
+        <div class="field" style="grid-column: 1 / -1;">
+          <label>Alias</label>
+          <div class="qty-editor" style="justify-content:flex-start;">
+            <input id="prodAliasEdit" class="qtyEditInput" type="text" placeholder="${escapeHtmlAttr(aliasHint)}" value="${escapeHtmlAttr(alias)}" />
+            <button id="prodAliasSave" class="btn btn-primary btn-xs" type="button">Salva</button>
+            <button id="prodAliasClear" class="btn btn-ghost btn-xs" type="button">Rimuovi</button>
+          </div>
+          <div class="td-muted" style="margin-top:6px;">Se due articoli hanno lo stesso alias: vengono <strong>unificati</strong> (es. tappo d50 + tappo ferrari d50).</div>
+        </div>
+      `;
+
+      // --- Core fields ---
+      const baseFields = [];
+      if (!mode && isStockCtx) {
+        baseFields.push(`
+          <div class="field">
+            <label>Cliente</label>
+            <input value="${h((ctx && ctx.customer) || "")}" readonly />
+          </div>
+        `);
+      }
+
+      baseFields.push(`
         <div class="field">
           <label>Codice</label>
           <input value="${h(code)}" readonly />
         </div>
-        <div class="field" style="grid-column: 1 / -1;">
-          <label>Articolo</label>
-          <input value="${h(title)}" readonly />
-        </div>
-        <div class="field">
-          <label>Pezzi in stock</label>
-          ${((ctx && (ctx.qty !== undefined))
-            ? `<div class="qty-editor" style="justify-content:flex-start;">
-              <input id="prodQtyEdit" class="qtyEditInput" type="number" inputmode="numeric" min="0" step="1"
-                value="${safeInt(ctx.qty)}" data-orig="${safeInt(ctx.qty)}" />
-              <button id="prodQtySave" class="btn btn-primary btn-xs" type="button" disabled>Salva</button>
-            </div>` : `<input value="${h(qtyTxt)}" readonly />`)}
-          <div class="td-muted" style="margin-top:6px;">Modifica la quantità per rettificare lo stock (crea un movimento IN/OUT di differenza).</div>
-        </div>
-        <div class="field">
-          <label>Soglia sottoscorta</label>
-          <div class="qty-editor" style="justify-content:flex-start;">
-            <input id="prodThrEdit" class="qtyEditInput" type="number" inputmode="numeric" min="0" step="1"
-              value="${safeInt((ctx && (ctx.threshold !== undefined)) ? ctx.threshold : getThresholdForKey(thrKey))}"
-              data-orig="${safeInt((ctx && (ctx.threshold !== undefined)) ? ctx.threshold : getThresholdForKey(thrKey))}"
-              placeholder="1000" />
-            <button id="prodThrSave" class="btn btn-primary btn-xs" type="button" disabled>Salva</button>
-            <button id="prodThrReset" class="btn btn-ghost btn-xs" type="button">Default</button>
-          </div>
-          <div class="td-muted" style="margin-top:6px;">Se non impostata: sotto scorta se &lt; 1000 pezzi. (La soglia è per articolo, vale su entrambe le sedi)</div>
-        </div>
-        <div class="field">
-          <label>Ultimo mov.</label>
-          <input value="${h(lastTxt)}" readonly />
-        </div>
-        <div class="field">
-          <label>Aggiornato</label>
-          <input value="${h(updTxt || "—")}" readonly />
-        </div>
+      `);
 
-        <div class="field" style="grid-column: 1 / -1;">
-          <label>Inventario</label>
-          <div class="inlineRow" style="justify-content: space-between; gap:10px; align-items:center;">
-            <select id="prodWarehouseSelect" style="flex: 1 1 auto; min-width: 220px;">
-              <option value="cerea">Inventario Cerea</option>
-              <option value="concamarise">Inventario Concamarise</option>
-            </select>
-            <button id="prodWarehouseMove" class="btn btn-secondary btn-xs" type="button" disabled>Sposta</button>
-          </div>
-          <div class="td-muted" style="margin-top:6px;">Sposta tutti i pezzi in un altro inventario (crea un movimento).</div>
-        </div>
-
+      baseFields.push(`
         <div class="field" style="grid-column: 1 / -1;">
           <label>Categoria (macro)</label>
           <select id="prodCategorySelect">
@@ -5882,199 +6364,187 @@ async function deleteSupplierCascade(supplierId){
             Clicca per associare il prodotto a: scatole, divisori, flaconi, trigger, non classificati.
           </div>
         </div>
-      `;
+      `);
 
+      // Group members (stock alias groups)
+      let groupHtml = "";
+      if (isAliasGroup) {
+        const codes = Array.isArray(ctx.__codes) ? ctx.__codes : [];
+        const members = Array.isArray(ctx.__members) ? ctx.__members : [];
+        const sumQty = Number(ctx.qty || 0);
+        const thr = Number(ctx.threshold || 0);
+
+        const membersHtml = (members.length ? members : codes.map(c => ({ code: c }))).map(m => {
+          const c = String(m.code || "").trim();
+          const nm = getDisplayNameForCode(c, m.item || "");
+          const q = (m.qty !== undefined) ? safeInt(m.qty).toLocaleString("it-IT") : "—";
+          return `
+            <tr>
+              <td data-label="Codice"><span class="kbd">${escapeHtml(c)}</span></td>
+              <td data-label="Nome">${escapeHtml(nm || "—")}</td>
+              <td data-label="Pezzi" class="qty">${escapeHtml(q)}</td>
+              <td data-label="Apri" class="td-actions">
+                <button class="btn btn-ghost btn-xs" type="button" data-open-code="${escapeHtmlAttr(c)}">Apri</button>
+              </td>
+            </tr>
+          `;
+        }).join("");
+
+        groupHtml = `
+          <div class="field" style="grid-column: 1 / -1;">
+            <label>Stock totale (alias)</label>
+            <input value="${Number(sumQty||0).toLocaleString("it-IT")} pezzi (soglia min ${Number(thr||0).toLocaleString("it-IT")})" readonly />
+            <div class="td-muted" style="margin-top:6px;">Per rettifiche: apri un singolo codice dal gruppo.</div>
+          </div>
+
+          <div class="field" style="grid-column: 1 / -1;">
+            <label>Articoli raggruppati</label>
+            <div class="tableWrap" style="max-height: 320px; overflow:auto;">
+              <table>
+                <thead>
+                  <tr>
+                    <th style="width:180px">Codice</th>
+                    <th>Nome</th>
+                    <th class="qty" style="width:110px">Pezzi</th>
+                    <th style="width:120px">Apri</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${membersHtml || `<tr><td class="td-muted" colspan="4">Nessun articolo.</td></tr>`}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        `;
+      }
+
+      // Stock fields (single code only)
+      let stockHtml = "";
+      if (!isAliasGroup && !mode && isStockCtx) {
+        const qtyVal = safeInt(ctx.qty);
+        const thrKey = movementKey((ctx && ctx.customer) || "", code);
+
+        stockHtml = `
+          <div class="field">
+            <label>Pezzi in stock</label>
+            ${(ctx && (ctx.qty !== undefined))
+              ? `<div class="qty-editor" style="justify-content:flex-start;">
+                  <input id="prodQtyEdit" class="qtyEditInput" type="number" inputmode="numeric" min="0" step="1"
+                    value="${qtyVal}" data-orig="${qtyVal}" />
+                  <button id="prodQtySave" class="btn btn-primary btn-xs" type="button" disabled>Salva</button>
+                </div>`
+              : `<input value="${h(Number(qtyVal).toLocaleString("it-IT"))}" readonly />`}
+            <div class="td-muted" style="margin-top:6px;">Modifica la quantità per rettificare lo stock (crea un movimento IN/OUT di differenza).</div>
+          </div>
+
+          <div class="field">
+            <label>Soglia sottoscorta</label>
+            <div class="qty-editor" style="justify-content:flex-start;">
+              <input id="prodThrEdit" class="qtyEditInput" type="number" inputmode="numeric" min="0" step="1"
+                value="${safeInt((ctx && (ctx.threshold !== undefined)) ? ctx.threshold : getThresholdForKey(thrKey))}"
+                data-orig="${safeInt((ctx && (ctx.threshold !== undefined)) ? ctx.threshold : getThresholdForKey(thrKey))}"
+                placeholder="1000" />
+              <button id="prodThrSave" class="btn btn-primary btn-xs" type="button" disabled>Salva</button>
+              <button id="prodThrReset" class="btn btn-ghost btn-xs" type="button">Default</button>
+            </div>
+            <div class="td-muted" style="margin-top:6px;">Se non impostata: sotto scorta se &lt; 1000 pezzi. (La soglia è per articolo, vale su entrambe le sedi)</div>
+          </div>
+
+          <div class="field">
+            <label>Ultimo mov.</label>
+            <input value="${h(lastTxt)}" readonly />
+          </div>
+          <div class="field">
+            <label>Aggiornato</label>
+            <input value="${h(updTxt || "—")}" readonly />
+          </div>
+
+          <div class="field" style="grid-column: 1 / -1;">
+            <label>Inventario</label>
+            <div class="inlineRow" style="justify-content: space-between; gap:10px; align-items:center;">
+              <select id="prodWarehouseSelect" style="flex: 1 1 auto; min-width: 220px;">
+                <option value="cerea">Inventario Cerea</option>
+                <option value="concamarise">Inventario Concamarise</option>
+              </select>
+              <button id="prodWarehouseMove" class="btn btn-secondary btn-xs" type="button" disabled>Sposta</button>
+            </div>
+            <div class="td-muted" style="margin-top:6px;">Sposta tutti i pezzi in un altro inventario (crea un movimento).</div>
+          </div>
+        `;
+      }
+
+      prodFields.innerHTML = headerHtml + baseFields.join("") + groupHtml + stockHtml;
+
+      // Category select
       const sel = document.getElementById("prodCategorySelect");
       if (sel) {
         sel.value = cat || "";
         sel.addEventListener("change", async () => {
-          await setMacroCategoryForCode(code, sel.value, title);
+          await setMacroCategoryForCode(code, sel.value, (document.getElementById("prodNameEdit")?.value || title));
           renderAll();
           showToast("Categoria salvata");
         });
-
       }
 
-      // Inventario: spostamento tra sedi (crea movimento)
-      const wSel = document.getElementById("prodWarehouseSelect");
-      const wBtn = document.getElementById("prodWarehouseMove");
-      if (wSel && wBtn && ctx) {
-        wSel.value = wh;
-
+      // Name save
+      const nInp = document.getElementById("prodNameEdit");
+      const nSave = document.getElementById("prodNameSave");
+      if (nInp && nSave) {
         const sync = () => {
-          const to = normalizeWarehouse(wSel.value);
-          const qtyNow = safeInt(ctx.qty);
-          wBtn.disabled = (to === wh) || qtyNow <= 0;
+          const cur = String(nInp.value || "").trim();
+          nSave.disabled = (cur === nameVal);
         };
-
-        wSel.addEventListener("change", sync);
+        nInp.addEventListener("input", sync);
         sync();
-
-        wBtn.addEventListener("click", async (e) => {
-          e.preventDefault();
-          e.stopPropagation();
-
-          const to = normalizeWarehouse(wSel.value);
-          const qtyNow = safeInt(ctx.qty);
-
-          if (qtyNow <= 0) return openModal("Nessun pezzo", "Questo articolo è a zero: non c'è nulla da spostare.");
-          if (to === wh) return;
-
-          const ok = confirm(`Spostare ${qtyNow} pezzi da ${whTxt} a ${warehouseLabel(to)}?`);
-          if (!ok) return;
-
-          wBtn.disabled = true;
-          wBtn.textContent = "Sposto…";
-          try {
-            const note = `Spostamento inventario: ${whTxt} → ${warehouseLabel(to)}`;
-
-            const mvOut = makeMovement({
-              type: "OUT",
-              customer: ctx.customer || "",
-              code: code,
-              item: title,
-              qty: qtyNow,
-              date: todayYYYYMMDD(),
-              note,
-              source: "Spostamento",
-              warehouse: wh,
-              transferTo: to
-            });
-
-            const mvIn = makeMovement({
-              type: "IN",
-              customer: ctx.customer || "",
-              code: code,
-              item: title,
-              qty: qtyNow,
-              date: todayYYYYMMDD(),
-              note,
-              source: "Spostamento",
-              warehouse: to,
-              transferFrom: wh
-            });
-
-            await addMovement(mvOut);
-            await addMovement(mvIn);
-
-            showToast("Spostamento completato");
-            try { modalProduct.classList.remove("open"); } catch(_){}
-            try { __syncBodyLockFromModals(); } catch(_){}
-            renderAll();
-          } catch (err) {
-            console.error(err);
-            showToast("Errore spostamento inventario");
-            wBtn.disabled = false;
-            wBtn.textContent = "Sposta";
-          }
+        nSave.addEventListener("click", async (e) => {
+          e.preventDefault(); e.stopPropagation();
+          const v = String(nInp.value || "").trim();
+          if (!v) return;
+          nSave.disabled = true;
+          await setProductNameForCode(code, v);
         });
       }
 
-
-      // Soglia sottoscorta: modifica per articolo
-      const tInput = document.getElementById("prodThrEdit");
-      const tSave = document.getElementById("prodThrSave");
-      const tReset = document.getElementById("prodThrReset");
-      if (tInput && tSave) {
-        const syncThrBtn = () => {
-          const raw = String(tInput.value || "").trim();
-          const val = (raw === "") ? null : Math.max(0, safeInt(raw));
-          const base = String(tInput.dataset.orig || "").trim();
-          const baseVal = (base === "") ? null : Math.max(0, safeInt(base));
-          tSave.disabled = (val === baseVal);
-        };
-
-        tInput.addEventListener("click", (e) => e.stopPropagation());
-        tInput.addEventListener("input", syncThrBtn);
-        tInput.addEventListener("keydown", (e) => {
-          if (e.key === "Enter") {
-            e.preventDefault();
-            if (!tSave.disabled) tSave.click();
-            else tInput.blur();
-          }
-          if (e.key === "Escape") {
-            e.preventDefault();
-            tInput.value = String(tInput.dataset.orig || "");
-            syncThrBtn();
-            tInput.blur();
+      // Alias save/clear
+      const aInp = document.getElementById("prodAliasEdit");
+      const aSave = document.getElementById("prodAliasSave");
+      const aClear = document.getElementById("prodAliasClear");
+      if (aSave && aInp) {
+        aSave.addEventListener("click", async (e) => {
+          e.preventDefault(); e.stopPropagation();
+          const v = String(aInp.value || "").trim();
+          if (isAliasGroup) {
+            await setProductAliasForCodes(ctx.__codes || [], v);
+          } else {
+            await setProductAliasForCode(code, v);
           }
         });
-
-        tSave.addEventListener("click", async (e) => {
-          e.preventDefault();
-          e.stopPropagation();
-
-          const raw = String(tInput.value || "").trim();
-          const val = (raw === "") ? null : Math.max(0, safeInt(raw));
-
-          tInput.disabled = true;
-          tSave.disabled = true;
-          const prevTxt = tSave.textContent;
-          tSave.textContent = "Salvo…";
-          try {
-            if (val === null) {
-              await clearThresholdForKey(thrKey);
-              const baseThr = getThresholdForKey(thrKey);
-              ctx.threshold = baseThr;
-              tInput.value = ""; // vuoto = default
-              tInput.dataset.orig = "";
-            } else {
-              await setThresholdForKey(thrKey, val);
-              ctx.threshold = val;
-              tInput.dataset.orig = String(val);
-            }
-            renderAll();
-            showToast("Soglia salvata");
-          } catch (err) {
-            console.error(err);
-            showToast("Errore salvataggio soglia");
-          } finally {
-            tSave.textContent = prevTxt || "Salva";
-            tInput.disabled = false;
-            syncThrBtn();
-          }
+      }
+      if (aClear && aInp) {
+        aClear.addEventListener("click", async (e) => {
+          e.preventDefault(); e.stopPropagation();
+          aInp.value = "";
+          if (isAliasGroup) await setProductAliasForCodes(ctx.__codes || [], "");
+          else await setProductAliasForCode(code, "");
         });
-
-        if (tReset) {
-          tReset.addEventListener("click", async (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            tReset.disabled = true;
-            try {
-              await clearThresholdForKey(thrKey);
-              const baseThr = getThresholdForKey(thrKey);
-              ctx.threshold = baseThr;
-              tInput.value = "";
-              tInput.dataset.orig = "";
-              renderAll();
-              showToast("Soglia ripristinata");
-            } catch (err) {
-              console.error(err);
-              showToast("Errore ripristino soglia");
-            } finally {
-              tReset.disabled = false;
-              syncThrBtn();
-            }
-          });
-        }
-
-        // iniziale: se il valore coincide col default (nessun override), mostra input vuoto
-        try {
-          const hasOverride = (thresholds && (thrKey in thresholds)) || (state.thresholds && (thrKey in state.thresholds));
-          if (!hasOverride) {
-            tInput.value = "";
-            tInput.dataset.orig = "";
-          }
-        } catch(_){}
-
-        syncThrBtn();
       }
 
+      // Group open code buttons
+      prodFields.querySelectorAll("button[data-open-code]").forEach(btn => {
+        btn.addEventListener("click", (e) => {
+          e.preventDefault(); e.stopPropagation();
+          const c = String(btn.getAttribute("data-open-code") || "").trim();
+          if (!c) return;
+          // try find member ctx
+          const mem = (ctx && Array.isArray(ctx.__members)) ? ctx.__members.find(x => String(x.code||"").trim() === c) : null;
+          openProductModal(c, mem || { code: c, __mode: "" });
+        });
+      });
 
-            const qInput = document.getElementById("prodQtyEdit");
-
+      // Stock-only bindings (qty/threshold/warehouse)
+      const qInput = document.getElementById("prodQtyEdit");
       const qSave = document.getElementById("prodQtySave");
-      if (qInput && qSave && ctx && (ctx.qty !== undefined)) {
+      if (qInput && qSave && ctx && (ctx.qty !== undefined) && !isAliasGroup) {
         const syncBtn = () => {
           let val = safeInt(qInput.value);
           if (!Number.isFinite(val) || val < 0) val = 0;
@@ -6136,8 +6606,140 @@ async function deleteSupplierCascade(supplierId){
         syncBtn();
       }
 
+      // Threshold bindings (single only)
+      const tInput = document.getElementById("prodThrEdit");
+      const tSave = document.getElementById("prodThrSave");
+      const tReset = document.getElementById("prodThrReset");
+      if (tInput && tSave && !isAliasGroup) {
+        const thrKey = movementKey((ctx && ctx.customer) || "", code);
+
+        const syncThrBtn = () => {
+          const cur = String(tInput.value || "").trim();
+          const base = String(tInput.dataset.orig || "").trim();
+          tSave.disabled = (cur === base);
+        };
+
+        tInput.addEventListener("input", syncThrBtn);
+        tInput.addEventListener("keydown", (e) => {
+          if (e.key === "Enter") { e.preventDefault(); if (!tSave.disabled) tSave.click(); else tInput.blur(); }
+          if (e.key === "Escape") { e.preventDefault(); tInput.value = String(tInput.dataset.orig || ""); syncThrBtn(); tInput.blur(); }
+        });
+
+        tSave.addEventListener("click", async (e) => {
+          e.preventDefault(); e.stopPropagation();
+          let v = safeInt(tInput.value);
+          if (!Number.isFinite(v) || v < 0) v = 0;
+          tSave.disabled = true;
+          try {
+            await setThresholdForKey(thrKey, v);
+            tInput.dataset.orig = String(v);
+            showToast("Soglia salvata");
+            renderAll();
+          } catch (err) {
+            console.error(err);
+            showToast("Errore salvataggio soglia");
+          } finally {
+            syncThrBtn();
+          }
+        });
+
+        if (tReset) {
+          tReset.addEventListener("click", async (e) => {
+            e.preventDefault(); e.stopPropagation();
+            tReset.disabled = true;
+            try {
+              await clearThresholdForKey(thrKey);
+              const baseThr = getThresholdForKey(thrKey);
+              ctx.threshold = baseThr;
+              tInput.value = "";
+              tInput.dataset.orig = "";
+              renderAll();
+              showToast("Soglia ripristinata");
+            } catch (err) {
+              console.error(err);
+              showToast("Errore ripristino soglia");
+            } finally {
+              tReset.disabled = false;
+              syncThrBtn();
+            }
+          });
+        }
+
+        // iniziale: se il valore coincide col default (nessun override), mostra input vuoto
+        try {
+          const hasOverride = (thresholds && (thrKey in thresholds)) || (state.thresholds && (thrKey in state.thresholds));
+          if (!hasOverride) {
+            tInput.value = "";
+            tInput.dataset.orig = "";
+          }
+        } catch(_){}
+
+        syncThrBtn();
+      }
+
+      // Warehouse move (single only)
+      const wSel = document.getElementById("prodWarehouseSelect");
+      const wBtn = document.getElementById("prodWarehouseMove");
+      if (wSel && wBtn && ctx && !isAliasGroup) {
+        wSel.value = wh;
+
+        const sync = () => {
+          const to = normalizeWarehouse(wSel.value);
+          const qtyNow = safeInt(ctx.qty);
+          wBtn.disabled = (to === wh) || qtyNow <= 0;
+        };
+
+        wSel.addEventListener("change", sync);
+        sync();
+
+        wBtn.addEventListener("click", async (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+
+          const to = normalizeWarehouse(wSel.value);
+          const qtyNow = safeInt(ctx.qty);
+
+          // Sposta tutto: scarico da WH attuale + carico su WH target (movimenti)
+          const outMv = makeMovement({
+            type: "OUT",
+            customer: ctx.customer || "",
+            code: code,
+            item: (ctx.item || title || ""),
+            qty: qtyNow,
+            date: todayYYYYMMDD(),
+            note: `Spostamento inventario: ${warehouseLabel(wh)} → ${warehouseLabel(to)}`,
+            warehouse: wh,
+            source: "Spostamento"
+          });
+          const inMv = makeMovement({
+            type: "IN",
+            customer: ctx.customer || "",
+            code: code,
+            item: (ctx.item || title || ""),
+            qty: qtyNow,
+            date: todayYYYYMMDD(),
+            note: `Spostamento inventario: ${warehouseLabel(wh)} → ${warehouseLabel(to)}`,
+            warehouse: to,
+            source: "Spostamento"
+          });
+
+          wBtn.disabled = true;
+          try {
+            await addMovement(outMv);
+            await addMovement(inMv);
+            showToast("Spostato");
+          } catch (err) {
+            console.error(err);
+            showToast("Errore spostamento");
+          } finally {
+            renderAll();
+          }
+        });
+      }
+
       modalProduct.classList.add("open");
     }
+
 
 /****************************************************************
      * Capture & flow
@@ -6729,21 +7331,31 @@ async function handleFileSelection(fileList) {
     if (prodClose) prodClose.addEventListener("click", () => modalProduct.classList.remove("open"));
     if (btnProdDone) btnProdDone.addEventListener("click", () => modalProduct.classList.remove("open"));
 
+    
     // Table actions (delegation)
     if (anagTbody) {
       anagTbody.addEventListener("click", (e) => {
+        // Click riga (prodotti): apri gruppo
+        if (activeAnagTab === "products") {
+          const tr = e.target && e.target.closest ? e.target.closest("tr[data-pg]") : null;
+          if (tr && (!e.target.closest || !e.target.closest("button[data-action]"))) {
+            const gid = tr.getAttribute("data-pg") || "";
+            if (gid) { openProductAliasGroup(gid); return; }
+          }
+        }
+
         const btn = e.target.closest("button[data-action]");
         if (!btn) return;
         const action = btn.getAttribute("data-action");
         const id = btn.getAttribute("data-id");
         if (!action || !id) return;
+
         if (action === "supplierDocs") { openSupplierModal(id); return; }
         if (action === "deleteSupplier") { deleteSupplierCascade(id); return; }
-});
+        if (action === "openProdGroup") { openProductAliasGroup(id); return; }
+      });
     }
-
-
-    btnConfirmMovement.addEventListener("click", async () => {
+btnConfirmMovement.addEventListener("click", async () => {
       // Import completo dal documento (multi-riga)
       const doc = __lastDocExtract || null;
       const items = (doc && Array.isArray(doc.__items)) ? doc.__items : ((doc && Array.isArray(doc.items)) ? doc.items : []);
