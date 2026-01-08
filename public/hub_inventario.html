@@ -1224,6 +1224,25 @@ td.td-actions{ white-space: normal !important; }
   #docItemsTable td[colspan]::before{ display:none !important; }
 }
 
+
+  /* Inventario: quantità modificabile */
+  .qtyEditInput{
+    width: 100%;
+    min-width: 64px;
+    max-width: 140px;
+    text-align: right;
+    font: inherit;
+    padding: 6px 8px;
+    border-radius: 10px;
+    border: 1px solid rgba(0,0,0,.14);
+    background: rgba(255,255,255,.95);
+  }
+  .qtyEditInput:focus{
+    outline: none;
+    border-color: rgba(0,84,255,.45);
+    box-shadow: 0 0 0 3px rgba(0,84,255,.12);
+  }
+
 </style>
 </head>
 <body>
@@ -4643,7 +4662,8 @@ function renderDocDetailPhotos(g){
         const k = movementKey(r.customer, r.code);
         const warn = (Number(r.qty)||0) < (Number(r.threshold)||0);
         const qtyColor = warn ? "var(--danger)" : "rgba(0,0,0,.86)";
-        const qtyHtml = `<span class="qty" style="color:${qtyColor}">${Number(r.qty).toLocaleString("it-IT")}</span>`;
+        const qtyVal = safeInt(r.qty);
+        const qtyInput = `<input class="qtyEditInput jsQtyEdit" type="number" inputmode="numeric" min="0" step="1" value="${qtyVal}" style="color:${qtyColor}" />`;
 const cat = getMacroCategoryForCode(r.code);
         const catHtml = cat ? `<span class="pill" style="padding:2px 8px;">${escapeHtml(macroCatLabel(cat))}</span>` : '<span class="td-muted">—</span>';
 
@@ -4652,11 +4672,36 @@ const cat = getMacroCategoryForCode(r.code);
             <td data-label="Cod. articolo">${escapeHtml(r.code)}</td>
             <td data-label="Nome articolo">${escapeHtml(r.item)}</td>
             <td data-label="Categoria">${catHtml}</td>
-            <td data-label="Pezzi" class="qty">${qtyHtml}</td>
+            <td data-label="Pezzi" class="qty">${qtyInput}</td>
           </tr>`;
       }).join("");
 
       // niente più bottoni Carico/Scarico in tabella
+    }
+
+
+    async function adjustStockAbsoluteFromRow(row, newAbsQty) {
+      const r = row || {};
+      const oldQty = safeInt(r.qty);
+      let newQty = safeInt(newAbsQty);
+      if (!Number.isFinite(newQty) || newQty < 0) newQty = 0;
+      const delta = newQty - oldQty;
+      if (!delta) return;
+
+      const mv = makeMovement({
+        type: delta > 0 ? "IN" : "OUT",
+        customer: r.customer || "",
+        code: r.code || "",
+        item: r.item || "",
+        qty: Math.abs(delta),
+        date: todayYYYYMMDD(),
+        note: `Rettifica inventario: da ${oldQty} a ${newQty}`,
+        source: "Rettifica rapida",
+        rawText: ""
+      });
+
+      await addMovement(mv);
+      showToast(`Quantità aggiornata (${oldQty}→${newQty})`);
     }
 
     function renderMovementsTable() {
@@ -5267,7 +5312,10 @@ async function deleteSupplierCascade(supplierId){
         </div>
         <div class="field">
           <label>Pezzi in stock</label>
-          <input value="${h(qtyTxt)}" readonly />
+          ${((ctx && (ctx.qty !== undefined))
+            ? `<input id="prodQtyEdit" class="qtyEditInput" type="number" inputmode="numeric" min="0" step="1" value="${safeInt(ctx.qty)}" />`
+            : `<input value="${h(qtyTxt)}" readonly />`)}
+          <div class="td-muted" style="margin-top:6px;">Modifica la quantità per rettificare lo stock (crea un movimento IN/OUT di differenza).</div>
         </div>
         <div class="field">
           <label>Soglia</label>
@@ -5301,6 +5349,27 @@ async function deleteSupplierCascade(supplierId){
           await setMacroCategoryForCode(code, sel.value, title);
           renderAll();
           showToast("Categoria salvata");
+        });
+      }
+
+      const qInput = document.getElementById("prodQtyEdit");
+      if (qInput && ctx && (ctx.qty !== undefined)) {
+        qInput.addEventListener("click", (e) => e.stopPropagation());
+        qInput.addEventListener("keydown", (e) => {
+          if (e.key === "Enter") { e.preventDefault(); qInput.blur(); }
+        });
+        qInput.addEventListener("blur", async () => {
+          let newQty = safeInt(qInput.value);
+          if (!Number.isFinite(newQty) || newQty < 0) newQty = 0;
+          const oldQty = safeInt(ctx.qty);
+          if (newQty === oldQty) { qInput.value = String(oldQty); return; }
+          qInput.disabled = true;
+          try {
+            await adjustStockAbsoluteFromRow(ctx, newQty);
+            ctx.qty = newQty;
+          } finally {
+            qInput.disabled = false;
+          }
         });
       }
 
@@ -6669,6 +6738,7 @@ searchStock.addEventListener("input", () => renderAll());
     // Click su riga stock: dettaglio + categoria
     if (stockTbody) {
       stockTbody.addEventListener("click", (e) => {
+        if (e.target.closest("input.jsQtyEdit")) return;
         const tr = e.target.closest("tr[data-k]");
         if (!tr) return;
         const k = tr.getAttribute("data-k") || "";
@@ -6676,6 +6746,37 @@ searchStock.addEventListener("input", () => renderAll());
         if (!row) return;
         openProductModal(row.code, row);
       });
+
+      // Quantità: modifica rapida (rettifica automatica IN/OUT)
+      stockTbody.addEventListener("keydown", (e) => {
+        const inp = e.target;
+        if (inp && inp.matches && inp.matches("input.jsQtyEdit") && e.key === "Enter") {
+          e.preventDefault();
+          inp.blur();
+        }
+      });
+
+      stockTbody.addEventListener("blur", async (e) => {
+        const inp = e.target;
+        if (!inp || !inp.matches || !inp.matches("input.jsQtyEdit")) return;
+        const tr = inp.closest("tr[data-k]");
+        const k = tr ? (tr.getAttribute("data-k") || "") : (inp.getAttribute("data-k") || "");
+        const row = __stockRowByKey.get(k);
+        if (!row) return;
+
+        let newQty = safeInt(inp.value);
+        if (!Number.isFinite(newQty) || newQty < 0) newQty = 0;
+        const oldQty = safeInt(row.qty);
+        if (newQty === oldQty) { inp.value = String(oldQty); return; }
+
+        inp.disabled = true;
+        try {
+          await adjustStockAbsoluteFromRow(row, newQty);
+        } finally {
+          inp.disabled = false;
+        }
+      }, true);
+
     }
 
     const btnNewMovementManual = document.getElementById("btnNewMovementManual");
