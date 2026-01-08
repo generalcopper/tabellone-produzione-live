@@ -5537,6 +5537,8 @@ function getMacroCategoryForCode(code) {
               __alias: alias,
               __codes: [],
               __members: [],
+              __otherQty: 0,
+              __isNew: false,
               code: code, // primary (will be overwritten below)
               item: "",
               qty: 0,
@@ -5546,6 +5548,8 @@ function getMacroCategoryForCode(code) {
           }
 
           g.qty += safeInt(r.qty);
+          g.__otherQty += safeInt(r.__otherQty);
+          g.__isNew = g.__isNew || !!r.__isNew;
           const thr = safeInt(r.threshold);
           g.threshold = (g.threshold == null) ? thr : Math.min(safeInt(g.threshold), thr);
           const ts = String(r.lastMoveAt || "");
@@ -5609,12 +5613,20 @@ const cust = (filterCustomer.value || "").trim();
         else rows = rows.filter(x => getMacroCategoryForCode(x.code) === catF);
       }
 
-      // Inventario per sede: di default nasconde le righe con 0 pezzi (articolo non presente in questa sede)
-      if (flt === "all") rows = rows.filter(x => (Number(x.qty) || 0) !== 0 || !!x.__isNew);
+      // Visibilità per sede:
+      // - se qui è 0 ma nell'altra sede c'è stock, NON mostrare
+      // - se è 0 in tutte le sedi, MOSTRA (così puoi gestire l'articolo ovunque)
+      const baseVisible = (x) => {
+        const q = safeInt(x && x.qty);
+        const other = safeInt(x && x.__otherQty);
+        return q !== 0 || other === 0;
+      };
+
+      if (flt === "all") rows = rows.filter(baseVisible);
 
       // mantiene la logica "scorta bassa" basata su soglia
-      if (flt === "low") rows = rows.filter(x => (Number(x.qty)||0) < (Number(x.threshold)||0));
-      if (flt === "zero") rows = rows.filter(x => (Number(x.qty)||0) === 0);
+      if (flt === "low") rows = rows.filter(x => baseVisible(x) && safeInt(x.qty) < safeInt(x.threshold));
+      if (flt === "zero") rows = rows.filter(x => baseVisible(x) && safeInt(x.qty) === 0);
 
       if (pillStock) pillStock.textContent = `${rows.length} righe`;
       if (!stockTbody) return;
@@ -5771,6 +5783,22 @@ function renderAll() {
       if (__currentWarehouse) {
         const wh = normalizeWarehouse(__currentWarehouse);
         const invRows = (stockByWh || []).filter(x => normalizeWarehouse(x.warehouse) === wh);
+
+        // Visibilità per sede: se qui è 0 ma altrove c'è stock => non mostrare.
+        // Se è 0 in tutte le sedi => mostra (così puoi gestire l'articolo ovunque).
+        try{
+          const totalByItem = new Map();
+          for (const r of (stockByWh || [])) {
+            const k = movementKey(r.customer || "", r.code || "");
+            totalByItem.set(k, safeInt(totalByItem.get(k)) + safeInt(r.qty));
+          }
+          for (const r of invRows) {
+            const k = movementKey(r.customer || "", r.code || "");
+            const tot = safeInt(totalByItem.get(k));
+            r.__otherQty = Math.max(0, tot - safeInt(r.qty));
+          }
+        }catch(_){}
+
         renderCustomerOptions(invRows);
         renderStockTable(invRows);
       } else {
