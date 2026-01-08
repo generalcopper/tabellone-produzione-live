@@ -1738,6 +1738,9 @@ td.td-actions{ white-space: normal !important; }
                 <option value="divisori">Divisori</option>
                 <option value="flaconi">Flaconi</option>
                 <option value="trigger">Trigger</option>
+                <option value="tappi">Tappi</option>
+                <option value="bobine">Bobine</option>
+                <option value="materie_prime">Materie prime</option>
               </select>
             </div>
           </div>
@@ -1748,8 +1751,8 @@ td.td-actions{ white-space: normal !important; }
           <table>
             <thead>
               <tr>
-                <th>Cod. articolo</th>
                 <th>Nome articolo</th>
+                <th>Cod. articolo</th>
                 <th>Categoria</th>
                 <th class="qty">Pezzi</th>
               </tr>
@@ -5061,7 +5064,7 @@ function renderDocDetailPhotos(g){
 
 
 
-    const MACRO_CATEGORIES = ["scatole", "divisori", "flaconi", "trigger", "non_classificati"];
+    const MACRO_CATEGORIES = ["scatole", "divisori", "flaconi", "trigger", "tappi", "bobine", "materie_prime", "non_classificati"];
 
     function normalizeMacroCategory(v) {
       const s = String(v || "").trim().toLowerCase();
@@ -5549,8 +5552,8 @@ let __stockRowByKey = new Map();
 
         return `
           <tr data-k="${escapeHtmlAttr(k)}" title="${isGroup ? "Apri gruppo alias" : "Apri dettagli / imposta categoria"}">
-            <td data-label="Cod. articolo">${displayCode}</td>
             <td data-label="Nome articolo">${displayName}</td>
+            <td data-label="Cod. articolo">${displayCode}</td>
             <td data-label="Categoria">${catHtml}</td>
             <td data-label="Pezzi" class="qty">${qtyCell}</td>
           </tr>`;
@@ -6535,7 +6538,7 @@ if (mode === "master") {
             ${MACRO_CATEGORIES.map(c => `<option value="${h(c)}">${h(macroCatLabel(c))}</option>`).join("")}
           </select>
           <div class="td-muted" style="margin-top:6px;">
-            Clicca per associare il prodotto a: scatole, divisori, flaconi, trigger, non classificati.
+            Clicca per associare il prodotto a: scatole, divisori, flaconi, trigger, tappi, bobine, materie prime, non classificati.
           </div>
         </div>
       `);
@@ -6647,7 +6650,26 @@ if (mode === "master") {
         `;
       }
 
-            // Danger zone: elimina prodotto (solo da Anagrafica Prodotti)
+            
+      // Danger zone: elimina articolo (Inventario)
+      let invDangerHtml = "";
+      if (!mode && isStockCtx && !isAliasGroup) {
+        const whLabel = wh ? warehouseLabel(wh) : "";
+        invDangerHtml = `
+          <div class="field" style="grid-column: 1 / -1;">
+            <label>Azioni (Inventario)</label>
+            <div class="inlineRow" style="justify-content:flex-end;">
+              <button id="prodDeleteInventory" class="btn btn-danger" type="button">Elimina articolo</button>
+            </div>
+            <div class="td-muted" style="margin-top:6px;">
+              Elimina tutte le righe/movimenti per questo <strong>Cliente + Codice</strong> (anche su entrambe le sedi). Operazione irreversibile.
+              ${whLabel ? (" (Stai visualizzando: " + h(whLabel) + ")") : ""}
+            </div>
+          </div>
+        `;
+      }
+
+// Danger zone: elimina prodotto (solo da Anagrafica Prodotti)
       let dangerHtml = "";
       if (mode === "master" && !isAliasGroup) {
         dangerHtml = `
@@ -6661,7 +6683,7 @@ if (mode === "master") {
         `;
       }
 
-      prodFields.innerHTML = headerHtml + baseFields.join("") + groupHtml + stockHtml + dangerHtml;
+      prodFields.innerHTML = headerHtml + baseFields.join("") + groupHtml + stockHtml + invDangerHtml + dangerHtml;
 
       // Category select
       const sel = document.getElementById("prodCategorySelect");
@@ -6941,6 +6963,74 @@ if (mode === "master") {
           }
         });
       }
+
+      // Elimina articolo (Inventario): rimuove tutti i movimenti per questo Cliente+Codice (tutte le sedi)
+      const delInvBtn = document.getElementById("prodDeleteInventory");
+      if (delInvBtn && !mode && isStockCtx && !isAliasGroup) {
+        delInvBtn.addEventListener("click", async (e) => {
+          e.preventDefault(); e.stopPropagation();
+
+          const cust = String((ctx && ctx.customer) || "").trim();
+          const itemK = movementKey(cust, code);
+
+          // movimenti da eliminare (cliente+codice, tutte le sedi)
+          let ids = [];
+          try {
+            ids = (state && Array.isArray(state.movements))
+              ? state.movements
+                  .filter(m => movementKey(String(m?.customer || ""), String(m?.code || "")) === itemK)
+                  .map(m => String(m.id || "")).filter(Boolean)
+              : [];
+          } catch(_) { ids = []; }
+
+          // stock attuale per sede (best effort)
+          let qCerea = 0, qConca = 0;
+          try{
+            const rows = (typeof computeStockByWarehouse === "function") ? computeStockByWarehouse() : [];
+            for (const r of (rows || [])) {
+              if (!r) continue;
+              if (movementKey(String(r.customer || ""), String(r.code || "")) !== itemK) continue;
+              const w = normalizeWarehouse(r.warehouse || "");
+              if (w === WAREHOUSE_CONCA) qConca += safeInt(r.qty);
+              else qCerea += safeInt(r.qty);
+            }
+          }catch(_){}
+
+          const ok = confirm(
+            `Eliminare l’articolo dall’inventario?\n\n` +
+            `Cliente: ${cust || "—"}\n` +
+            `Codice: ${code}\n` +
+            `Nome: ${title || "—"}\n\n` +
+            `Stock attuale: Cerea ${Number(qCerea||0).toLocaleString("it-IT")} • Concamarise ${Number(qConca||0).toLocaleString("it-IT")}\n` +
+            `Movimenti da eliminare: ${Number(ids.length||0).toLocaleString("it-IT")}\n\n` +
+            `Nota: verranno eliminate tutte le righe/movimenti per questo Cliente+Codice (anche su entrambe le sedi).\n` +
+            `Operazione irreversibile.`
+          );
+          if (!ok) return;
+
+          try { delInvBtn.disabled = true; } catch(_){}
+          const oldTxt = String(delInvBtn.textContent || "");
+          try { delInvBtn.textContent = "Elimino…"; } catch(_){}
+
+          try {
+            // rimuovi anche eventuale soglia custom per questa coppia (cliente+codice)
+            try { await clearThresholdForKey(itemK); } catch(_){}
+
+            if (ids.length) await deleteMovementsBulk(ids);
+
+            showToast("Articolo eliminato");
+            try { modalProduct.classList.remove("open"); } catch(_){}
+            try { renderAll(); } catch(_){}
+          } catch (err) {
+            console.error(err);
+            showToast("Errore eliminazione articolo", "err");
+            try { delInvBtn.disabled = false; } catch(_){}
+          } finally {
+            try { delInvBtn.textContent = oldTxt || "Elimina articolo"; } catch(_){}
+          }
+        });
+      }
+
 modalProduct.classList.add("open");
     }
 
