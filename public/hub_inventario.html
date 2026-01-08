@@ -188,6 +188,10 @@
     #stockTbody tr { cursor: pointer; }
     .td-muted { color: rgba(0,0,0,.55); font-weight: 800; }
     .qty { font-variant-numeric: tabular-nums; }
+    .qty-editor{ display:flex; align-items:center; justify-content:flex-end; gap:10px; }
+    .qty-editor input.jsQtyEdit{ width: 92px; max-width: 110px; text-align:right; }
+    .qty-editor button.jsQtySave{ white-space: nowrap; }
+
     .badge { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px; border: 1px solid rgba(12,22,52,.10); background: rgba(0,0,0,.03); font-size: 12px; font-weight: 900; color: rgba(0,0,0,.72); }
     .badge.in { border-color: rgba(37,185,79,.25); background: rgba(37,185,79,.10); color: rgba(0,70,20,.88); }
     .badge.out { border-color: rgba(255,59,48,.22); background: rgba(255,59,48,.10); color: rgba(110,0,0,.86); }
@@ -4663,7 +4667,12 @@ function renderDocDetailPhotos(g){
         const warn = (Number(r.qty)||0) < (Number(r.threshold)||0);
         const qtyColor = warn ? "var(--danger)" : "rgba(0,0,0,.86)";
         const qtyVal = safeInt(r.qty);
-        const qtyInput = `<input class="qtyEditInput jsQtyEdit" type="number" inputmode="numeric" min="0" step="1" value="${qtyVal}" style="color:${qtyColor}" />`;
+        const qtyInput = `
+          <div class="qty-editor">
+            <input class="qtyEditInput jsQtyEdit" type="number" inputmode="numeric" min="0" step="1"
+              value="${qtyVal}" data-orig="${qtyVal}" style="color:${qtyColor}" />
+            <button class="btn btn-primary btn-xs jsQtySave" type="button" disabled>Salva</button>
+          </div>`;
 const cat = getMacroCategoryForCode(r.code);
         const catHtml = cat ? `<span class="pill" style="padding:2px 8px;">${escapeHtml(macroCatLabel(cat))}</span>` : '<span class="td-muted">—</span>';
 
@@ -5313,8 +5322,11 @@ async function deleteSupplierCascade(supplierId){
         <div class="field">
           <label>Pezzi in stock</label>
           ${((ctx && (ctx.qty !== undefined))
-            ? `<input id="prodQtyEdit" class="qtyEditInput" type="number" inputmode="numeric" min="0" step="1" value="${safeInt(ctx.qty)}" />`
-            : `<input value="${h(qtyTxt)}" readonly />`)}
+            ? `<div class="qty-editor" style="justify-content:flex-start;">
+              <input id="prodQtyEdit" class="qtyEditInput" type="number" inputmode="numeric" min="0" step="1"
+                value="${safeInt(ctx.qty)}" data-orig="${safeInt(ctx.qty)}" />
+              <button id="prodQtySave" class="btn btn-primary btn-xs" type="button" disabled>Salva</button>
+            </div>` : `<input value="${h(qtyTxt)}" readonly />`)}
           <div class="td-muted" style="margin-top:6px;">Modifica la quantità per rettificare lo stock (crea un movimento IN/OUT di differenza).</div>
         </div>
         <div class="field">
@@ -5353,23 +5365,69 @@ async function deleteSupplierCascade(supplierId){
       }
 
       const qInput = document.getElementById("prodQtyEdit");
-      if (qInput && ctx && (ctx.qty !== undefined)) {
+      const qSave = document.getElementById("prodQtySave");
+      if (qInput && qSave && ctx && (ctx.qty !== undefined)) {
+        const syncBtn = () => {
+          let val = safeInt(qInput.value);
+          if (!Number.isFinite(val) || val < 0) val = 0;
+          const base = Number.isFinite(safeInt(qInput.dataset.orig)) ? safeInt(qInput.dataset.orig) : safeInt(ctx.qty);
+          qSave.disabled = (val === base);
+        };
+
         qInput.addEventListener("click", (e) => e.stopPropagation());
-        qInput.addEventListener("keydown", (e) => {
-          if (e.key === "Enter") { e.preventDefault(); qInput.blur(); }
-        });
-        qInput.addEventListener("blur", async () => {
+        qSave.addEventListener("click", async (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+
           let newQty = safeInt(qInput.value);
           if (!Number.isFinite(newQty) || newQty < 0) newQty = 0;
+
           const oldQty = safeInt(ctx.qty);
-          if (newQty === oldQty) { qInput.value = String(oldQty); return; }
+          if (newQty === oldQty) {
+            qInput.value = String(oldQty);
+            qInput.dataset.orig = String(oldQty);
+            qSave.disabled = true;
+            return;
+          }
+
           qInput.disabled = true;
+          qSave.disabled = true;
+          qSave.textContent = "Salvo…";
           try {
             await adjustStockAbsoluteFromRow(ctx, newQty);
             ctx.qty = newQty;
+            qInput.dataset.orig = String(newQty);
+            qSave.textContent = "Salvato";
+            setTimeout(() => { try { qSave.textContent = "Salva"; } catch(_){} }, 600);
+          } catch (err) {
+            console.error(err);
+            showToast("Errore salvataggio quantità");
+            qSave.textContent = "Salva";
           } finally {
             qInput.disabled = false;
+            syncBtn();
           }
+        });
+
+        qInput.addEventListener("input", syncBtn);
+        qInput.addEventListener("keydown", (e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            if (!qSave.disabled) qSave.click();
+            else qInput.blur();
+          }
+          if (e.key === "Escape") {
+            e.preventDefault();
+            const base = safeInt(qInput.dataset.orig);
+            qInput.value = String(Number.isFinite(base) ? base : 0);
+            syncBtn();
+            qInput.blur();
+          }
+        });
+
+        syncBtn();
+      }
+
         });
       }
 
@@ -6737,8 +6795,54 @@ searchStock.addEventListener("input", () => renderAll());
 
     // Click su riga stock: dettaglio + categoria
     if (stockTbody) {
-      stockTbody.addEventListener("click", (e) => {
+      stockTbody.addEventListener("click", async (e) => {
+        const btnSave = e.target.closest("button.jsQtySave");
+        if (btnSave) {
+          e.preventDefault();
+          e.stopPropagation();
+
+          const tr = btnSave.closest("tr[data-k]");
+          if (!tr) return;
+          const k = tr.getAttribute("data-k") || "";
+          const row = __stockRowByKey.get(k);
+          if (!row) return;
+
+          const inp = tr.querySelector("input.jsQtyEdit");
+          if (!inp) return;
+
+          let newQty = safeInt(inp.value);
+          if (!Number.isFinite(newQty) || newQty < 0) newQty = 0;
+
+          const oldQty = safeInt(row.qty);
+          if (newQty === oldQty) {
+            inp.value = String(oldQty);
+            inp.dataset.orig = String(oldQty);
+            btnSave.disabled = true;
+            return;
+          }
+
+          inp.disabled = true;
+          btnSave.disabled = true;
+          btnSave.textContent = "Salvo…";
+          try {
+            await adjustStockAbsoluteFromRow(row, newQty);
+            // update in-memory row for immediate UI coherence
+            row.qty = newQty;
+            inp.dataset.orig = String(newQty);
+            btnSave.textContent = "Salvato";
+            setTimeout(() => { try { btnSave.textContent = "Salva"; } catch(_){} }, 600);
+          } catch (err) {
+            console.error(err);
+            showToast("Errore salvataggio quantità");
+            btnSave.textContent = "Salva";
+          } finally {
+            inp.disabled = false;
+          }
+          return;
+        }
+
         if (e.target.closest("input.jsQtyEdit")) return;
+
         const tr = e.target.closest("tr[data-k]");
         if (!tr) return;
         const k = tr.getAttribute("data-k") || "";
@@ -6747,37 +6851,51 @@ searchStock.addEventListener("input", () => renderAll());
         openProductModal(row.code, row);
       });
 
-      // Quantità: modifica rapida (rettifica automatica IN/OUT)
+// Quantità: modifica con tasto Salva
+      stockTbody.addEventListener("input", (e) => {
+        const inp = e.target;
+        if (!inp || !inp.matches || !inp.matches("input.jsQtyEdit")) return;
+
+        const tr = inp.closest("tr[data-k]");
+        if (!tr) return;
+
+        const btn = tr.querySelector("button.jsQtySave");
+        if (!btn) return;
+
+        const k = tr.getAttribute("data-k") || "";
+        const row = __stockRowByKey.get(k);
+
+        const base = Number.isFinite(safeInt(inp.dataset.orig)) ? safeInt(inp.dataset.orig) : safeInt(row ? row.qty : 0);
+        let val = safeInt(inp.value);
+        if (!Number.isFinite(val) || val < 0) val = 0;
+
+        btn.disabled = (val === base);
+      });
+
       stockTbody.addEventListener("keydown", (e) => {
         const inp = e.target;
-        if (inp && inp.matches && inp.matches("input.jsQtyEdit") && e.key === "Enter") {
+        if (!inp || !inp.matches || !inp.matches("input.jsQtyEdit")) return;
+
+        if (e.key === "Enter") {
           e.preventDefault();
+          const tr = inp.closest("tr[data-k]");
+          const btn = tr ? tr.querySelector("button.jsQtySave") : null;
+          if (btn && !btn.disabled) btn.click();
+          else inp.blur();
+        }
+
+        if (e.key === "Escape") {
+          e.preventDefault();
+          const base = safeInt(inp.dataset.orig);
+          inp.value = String(Number.isFinite(base) ? base : 0);
+          const tr = inp.closest("tr[data-k]");
+          const btn = tr ? tr.querySelector("button.jsQtySave") : null;
+          if (btn) btn.disabled = true;
           inp.blur();
         }
       });
 
-      stockTbody.addEventListener("blur", async (e) => {
-        const inp = e.target;
-        if (!inp || !inp.matches || !inp.matches("input.jsQtyEdit")) return;
-        const tr = inp.closest("tr[data-k]");
-        const k = tr ? (tr.getAttribute("data-k") || "") : (inp.getAttribute("data-k") || "");
-        const row = __stockRowByKey.get(k);
-        if (!row) return;
-
-        let newQty = safeInt(inp.value);
-        if (!Number.isFinite(newQty) || newQty < 0) newQty = 0;
-        const oldQty = safeInt(row.qty);
-        if (newQty === oldQty) { inp.value = String(oldQty); return; }
-
-        inp.disabled = true;
-        try {
-          await adjustStockAbsoluteFromRow(row, newQty);
-        } finally {
-          inp.disabled = false;
-        }
-      }, true);
-
-    }
+}
 
     const btnNewMovementManual = document.getElementById("btnNewMovementManual");
     if (btnNewMovementManual) btnNewMovementManual.addEventListener("click", () => {
