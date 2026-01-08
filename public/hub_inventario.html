@@ -5086,6 +5086,52 @@ function renderDocDetailPhotos(g){
       }) || null;
     }
     
+
+
+// === Fornitore (per prodotto): derivato dall'ultimo carico per quel codice ===
+function __getLastSupplierInfoForCode(code){
+  const low = String(code || "").trim().toLowerCase();
+  if (!low) return null;
+
+  const arr = (state.movements || []).filter(m => {
+    const c = String((m && m.code) || "").trim().toLowerCase();
+    if (c !== low) return false;
+    const t = String((m && m.type) || "IN").toUpperCase();
+    return t === "IN";
+  });
+
+  if (!arr.length) return null;
+  arr.sort((a,b) => String(b.createdAt||"").localeCompare(String(a.createdAt||"")));
+
+  const mv = arr[0] || {};
+  let name = String(mv.customer || mv.supplierName || mv.supplier || "").trim();
+  const vat = (typeof __sup_cleanVat === "function")
+    ? __sup_cleanVat(mv.supplierVat || mv.vat || "")
+    : String(mv.supplierVat || "").trim();
+
+  // Se ho P.IVA e ho anagrafica fornitori, usa il nome canonico
+  try{
+    if (vat) {
+      const s = __findSupplierByVat(vat);
+      if (s && s.name) name = String(s.name).trim();
+    } else if (name && Array.isArray(suppliers)) {
+      const s2 = (suppliers || []).find(s => supplierMatchesCustomer(s, name));
+      if (s2 && s2.name) name = String(s2.name).trim();
+    }
+  }catch(_){}
+
+  const docNum = String(mv.docNum || "").trim() || extractDocNumber(mv.note || "");
+  const day = String(mv.date || "").trim();
+
+  return {
+    name,
+    vat,
+    docNum,
+    date: day,
+    note: String(mv.note || "").trim()
+  };
+}
+
     // === Alias (unificazione codici) ===
     function normTextKey(v) {
       return String(v || "")
@@ -6458,6 +6504,29 @@ async function deleteSupplierCascade(supplierId){
         </div>
       `);
 
+
+// Fornitore (solo in Anagrafica prodotti)
+if (mode === "master") {
+  const supInfo = __getLastSupplierInfoForCode(code);
+  const supName = (supInfo && supInfo.name) ? String(supInfo.name).trim() : "—";
+
+  const metaParts = [];
+  if (supInfo && supInfo.vat) metaParts.push(`P.IVA: ${h(supInfo.vat)}`);
+  if (supInfo && supInfo.docNum) metaParts.push(`DDT: ${h(supInfo.docNum)}`);
+  if (supInfo && supInfo.date) metaParts.push(`Data: ${h(formatDateOnlyIT(supInfo.date) || supInfo.date)}`);
+
+  const meta = metaParts.join(" • ");
+
+  baseFields.push(`
+    <div class="field" style="grid-column: 1 / -1;">
+      <label>Fornitore (ultimo carico)</label>
+      <input value="${h(supName)}" readonly />
+      <div class="td-muted" style="margin-top:6px;">
+        ${meta ? meta : (supInfo ? "Derivato dall’ultimo documento di carico per questo codice." : "Nessun documento di carico trovato per questo codice.")}
+      </div>
+    </div>
+  `);
+}
       baseFields.push(`
         <div class="field" style="grid-column: 1 / -1;">
           <label>Categoria (macro)</label>
