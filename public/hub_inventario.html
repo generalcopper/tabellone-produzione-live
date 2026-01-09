@@ -7700,10 +7700,85 @@ async function deleteSupplierCascade(supplierId){
     function openProductModal(id, ctx) {
       if (!modalProduct) return;
 
-      const mode = (ctx && ctx.__mode) ? String(ctx.__mode) : ""; // "master" | ""
-      const code = String((ctx && ctx.code) || id || "").trim();
+      // ctx opzionale: se assente, apriamo in modalità "master" (Anagrafica → Prodotti) usando lo stesso modale dell'Inventario
+      const __hasCtx = !!(ctx && typeof ctx === "object");
+      let __ctx = __hasCtx ? ctx : null;
+
+      const code = String((__ctx && __ctx.code) || id || "").trim();
       if (!code) return;
 
+      if (!__ctx) {
+        __ctx = { __mode: "master", code };
+      }
+
+      // Auto: se l'alias unifica più codici, prepara il contesto gruppo (layout e bottoni identici all'Inventario)
+      try{
+        if (!__hasCtx) {
+          const a0 = String(getAliasForCode(code) || "").trim();
+          if (a0) {
+            const aKey = normTextKey(a0);
+            const codes = Array.from(new Set(
+              (Array.isArray(products) ? products : [])
+                .map(p => ({
+                  code: String((p && (p.code || safeDecodeUri(p.id) || "")) || "").trim(),
+                  alias: String((p && (p.alias || p.aliasName || "")) || "").trim()
+                }))
+                .filter(x => x.code && x.alias && normTextKey(x.alias) === aKey)
+                .map(x => x.code)
+            ));
+
+            if (codes.length > 1) {
+              __ctx.__isAliasGroup = true;
+              __ctx.__alias = a0;
+              __ctx.__codes = codes;
+
+              // scegli sede "principale" per mostrare quantità dei membri come in Inventario
+              let stockByWh = [];
+              try { stockByWh = (typeof computeStockByWarehouse === "function") ? computeStockByWarehouse() : []; } catch(_){}
+              const sumForWh = (w) => {
+                const ww = normalizeWarehouse(w);
+                let s = 0;
+                for (const r of (stockByWh || [])) {
+                  if (!r) continue;
+                  if (normalizeWarehouse(r.warehouse || "") !== ww) continue;
+                  const rc = String(r.code || "").trim();
+                  if (!rc || !codes.includes(rc)) continue;
+                  s += safeInt(r.qty);
+                }
+                return s;
+              };
+              const qC = sumForWh(WAREHOUSE_CEREA);
+              const qK = sumForWh(WAREHOUSE_CONCA);
+              const bestWh = (qK > qC) ? WAREHOUSE_CONCA : WAREHOUSE_CEREA;
+              __ctx.warehouse = bestWh;
+
+              const mem = (stockByWh || []).filter(r => r &&
+                normalizeWarehouse(r.warehouse || "") === normalizeWarehouse(bestWh) &&
+                codes.includes(String(r.code || "").trim())
+              );
+              __ctx.__members = mem;
+
+              __ctx.qty = (normalizeWarehouse(bestWh) === normalizeWarehouse(WAREHOUSE_CONCA)) ? qK : qC;
+
+              let thrMin = null;
+              let last = "";
+              for (const r of (mem || [])) {
+                const t = safeInt(r.threshold);
+                if (thrMin == null) thrMin = t;
+                else thrMin = Math.min(thrMin, t);
+                const ts = String(r.lastMoveAt || "");
+                if (ts && (!last || ts > last)) last = ts;
+              }
+              __ctx.threshold = (thrMin == null) ? 0 : thrMin;
+              if (last) __ctx.lastMoveAt = last;
+            }
+          }
+        }
+      }catch(_){}
+
+      ctx = __ctx;
+
+      const mode = (ctx && ctx.__mode) ? String(ctx.__mode) : ""; // "master" | ""
       const p = findProductByCode(code) || (products || []).find(x => x && (x.id === id)) || null;
 
       const isStockCtx = !!(ctx && (ctx.customer || ctx.warehouse || (ctx.qty !== undefined)));
@@ -7793,6 +7868,80 @@ if (mode === "master") {
           </select>
         </div>
       `);
+
+
+      // Stock summary (solo master): totali per sede + apertura rapido del dettaglio inventario
+      if (mode === "master") {
+        try{
+          const scopeCodes = (isAliasGroup && ctx && Array.isArray(ctx.__codes) && ctx.__codes.length) ? ctx.__codes : [code];
+          let stockByWh = [];
+          try { stockByWh = (typeof computeStockByWarehouse === "function") ? computeStockByWarehouse() : []; } catch(_){ stockByWh = []; }
+
+          const sumWh = (w) => {
+            const ww = normalizeWarehouse(w);
+            let s = 0;
+            for (const r of (stockByWh || [])) {
+              if (!r) continue;
+              if (normalizeWarehouse(r.warehouse || "") !== ww) continue;
+              const rc = String(r.code || "").trim();
+              if (!rc || !scopeCodes.includes(rc)) continue;
+              s += safeInt(r.qty);
+            }
+            return s;
+          };
+
+          const qCerea = sumWh(WAREHOUSE_CEREA);
+          const qConca = sumWh(WAREHOUSE_CONCA);
+
+          const pickRow = (w) => {
+            const ww = normalizeWarehouse(w);
+            let best = null;
+            for (const r of (stockByWh || [])) {
+              if (!r) continue;
+              if (normalizeWarehouse(r.warehouse || "") !== ww) continue;
+              const rc = String(r.code || "").trim();
+              if (!rc || !scopeCodes.includes(rc)) continue;
+              const cust = String(r.customer || "").trim();
+              if (!cust) continue;
+              const q = safeInt(r.qty);
+              if (!best || q > safeInt(best.qty)) best = r;
+            }
+            return best;
+          };
+
+          ctx.__pickStockCerea = pickRow(WAREHOUSE_CEREA);
+          ctx.__pickStockConca = pickRow(WAREHOUSE_CONCA);
+
+          const canC = !!ctx.__pickStockCerea;
+          const canK = !!ctx.__pickStockConca;
+
+          baseFields.push(`
+            <div class="field" style="grid-column: 1 / -1;">
+              <label>Stock per sede</label>
+              <div class="stack" style="gap:8px;">
+                <div class="inlineRow" style="justify-content: space-between; gap:10px; align-items:center; flex-wrap:wrap;">
+                  <div>
+                    <div><strong>Inventario Cerea</strong></div>
+                    <div class="td-muted">Totale: ${Number(qCerea||0).toLocaleString("it-IT")} pezzi</div>
+                  </div>
+                  <button id="prodOpenStockCerea" class="btn btn-secondary btn-xs" type="button" ${canC ? "" : "disabled"}>Apri dettaglio</button>
+                </div>
+                <div class="inlineRow" style="justify-content: space-between; gap:10px; align-items:center; flex-wrap:wrap;">
+                  <div>
+                    <div><strong>Inventario Concamarise</strong></div>
+                    <div class="td-muted">Totale: ${Number(qConca||0).toLocaleString("it-IT")} pezzi</div>
+                  </div>
+                  <button id="prodOpenStockConca" class="btn btn-secondary btn-xs" type="button" ${canK ? "" : "disabled"}>Apri dettaglio</button>
+                </div>
+              </div>
+              <div class="td-muted" style="margin-top:6px;">
+                Apri dettaglio = stesso modale in modalità Inventario (rettifica, soglia, spostamento, eliminazione articolo).
+                ${(!canC || !canK) ? " Se una sede non è apribile, significa che manca un movimento con Cliente per quella sede." : ""}
+              </div>
+            </div>
+          `);
+        }catch(_){}
+      }
 
       // Group members (stock alias groups)
       let groupHtml = "";
@@ -7999,9 +8148,31 @@ if (mode === "master") {
           if (!c) return;
           // try find member ctx
           const mem = (ctx && Array.isArray(ctx.__members)) ? ctx.__members.find(x => String(x.code||"").trim() === c) : null;
-          openProductModal(c, mem || { code: c, __mode: "" });
+          if (mem && String(mem.customer || "").trim()) {
+            openProductModal(c, mem);
+          } else {
+            openProductModal(c, { __mode: "master", code: c });
+          }
         });
       });
+
+
+      // Stock quick open (solo master)
+      const openC = document.getElementById("prodOpenStockCerea");
+      if (openC && ctx && ctx.__pickStockCerea) {
+        openC.addEventListener("click", (e) => {
+          e.preventDefault(); e.stopPropagation();
+          openProductModal(String(ctx.__pickStockCerea.code || code), ctx.__pickStockCerea);
+        });
+      }
+      const openK = document.getElementById("prodOpenStockConca");
+      if (openK && ctx && ctx.__pickStockConca) {
+        openK.addEventListener("click", (e) => {
+          e.preventDefault(); e.stopPropagation();
+          openProductModal(String(ctx.__pickStockConca.code || code), ctx.__pickStockConca);
+        });
+      }
+
 
       // Stock-only bindings (qty/threshold/warehouse)
       const qInput = document.getElementById("prodQtyEdit");
@@ -8345,7 +8516,8 @@ modalProduct.classList.add("open");
           if (!code) return;
           const mem = members.find(m => String(m?.code || "").trim() === code);
           try { modalUnified.classList.remove("open"); } catch(_){}
-          openProductModal(code, mem || { code, __mode: "" });
+          if (mem && String(mem.customer || "").trim()) openProductModal(code, mem);
+          else openProductModal(code, { __mode: "master", code });
         });
       });
 
@@ -8999,12 +9171,20 @@ async function handleFileSelection(fileList) {
     // Table actions (delegation)
     if (anagTbody) {
       anagTbody.addEventListener("click", (e) => {
-        // Click riga (prodotti): apri gruppo
+        // Click riga (prodotti): apri dettaglio prodotto (stesso modale Inventario)
         if (activeAnagTab === "products") {
           const tr = e.target && e.target.closest ? e.target.closest("tr[data-pg]") : null;
           if (tr && (!e.target.closest || !e.target.closest("button[data-action]"))) {
             const gid = tr.getAttribute("data-pg") || "";
-            if (gid) { openProductAliasGroup(gid); return; }
+            if (gid) {
+              try{
+                const g = (__prodGroupsMap && __prodGroupsMap.get) ? __prodGroupsMap.get(gid) : null;
+                const code = (g && Array.isArray(g.codes) && g.codes.length) ? String(g.codes[0] || "").trim() : "";
+                if (code) { openProductModal(code); return; }
+              }catch(_){}
+              showToast("Prodotto non trovato");
+              return;
+            }
           }
         }
 
@@ -9016,7 +9196,15 @@ async function handleFileSelection(fileList) {
 
         if (action === "supplierDocs") { openSupplierModal(id); return; }
         if (action === "deleteSupplier") { deleteSupplierCascade(id); return; }
-        if (action === "openProdGroup") { openProductAliasGroup(id); return; }
+        if (action === "openProdGroup") {
+          try{
+            const g = (__prodGroupsMap && __prodGroupsMap.get) ? __prodGroupsMap.get(id) : null;
+            const code = (g && Array.isArray(g.codes) && g.codes.length) ? String(g.codes[0] || "").trim() : "";
+            if (code) { openProductModal(code); return; }
+          }catch(_){}
+          showToast("Prodotto non trovato");
+          return;
+        }
       });
     }
 btnConfirmMovement.addEventListener("click", async () => {
