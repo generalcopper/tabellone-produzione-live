@@ -6109,15 +6109,6 @@ function __getLastSupplierInfoForCode(code){
       return String(fallbackName || "").trim();
     }
 
-    // Nome "reale" del codice (ignora alias: utile nei gruppi unificati)
-    function getNameWithoutAliasForCode(code, fallbackName) {
-      const p = findProductByCode(code);
-      const n = String((p && p.name) || "").trim();
-      if (n) return n;
-      return String(fallbackName || "").trim();
-    }
-
-
     async function setProductNameForCode(code, name) {
       const key = String(code || "").trim();
       if (!key) return;
@@ -7629,48 +7620,19 @@ if (mode === "master") {
         const sumQty = Number(ctx.qty || 0);
         const thr = Number(ctx.threshold || 0);
 
-        // Raggruppa per codice (può esserci più di un customer per lo stesso codice)
-        const byCode = new Map();
-        for (const m of (members || [])) {
-          const c = String((m && m.code) || "").trim();
-          if (!c) continue;
-          const cur = byCode.get(c) || { code: c, qty: 0, best: null };
-          cur.qty += safeInt(m.qty);
-
-          // scegli il "miglior" ctx per aprire il modale (qty maggiore, poi ultimo movimento)
-          if (!cur.best) cur.best = m;
-          else {
-            const q1 = safeInt(cur.best.qty);
-            const q2 = safeInt(m.qty);
-            const t1 = String(cur.best.lastMoveAt || "");
-            const t2 = String(m.lastMoveAt || "");
-            if (q2 > q1 || (q2 === q1 && t2 && t2 > t1)) cur.best = m;
-          }
-
-          byCode.set(c, cur);
-        }
-
-        const uniqCodes = Array.from(new Set((codes || []).map(x => String(x || "").trim()).filter(Boolean)));
-
-        const buttonsHtml = (uniqCodes.length ? uniqCodes : Array.from(byCode.keys())).map(c => {
-          const info = byCode.get(c) || { code: c, qty: 0, best: null };
-          const best = info.best || { code: c, warehouse: (ctx && ctx.warehouse) || __currentWarehouse || "", customer: "", item: "" };
-
-          // Nome senza alias (così non vengono tutti uguali)
-          const nameNoAlias = getNameWithoutAliasForCode(c, best.item || "");
-          const label = (nameNoAlias || String(best.item || "").trim() || c).trim();
-
-          const qTxt = Number(info.qty || 0).toLocaleString("it-IT");
-
+        const membersHtml = (members.length ? members : codes.map(c => ({ code: c }))).map(m => {
+          const c = String(m.code || "").trim();
+          const nm = getDisplayNameForCode(c, m.item || "");
+          const q = (m.qty !== undefined) ? safeInt(m.qty).toLocaleString("it-IT") : "—";
           return `
-            <button class="btn btn-secondary" type="button" data-open-code="${escapeHtmlAttr(c)}" title="Apri ${escapeHtmlAttr(c)}">
-              <div style="display:flex; flex-direction:column; align-items:flex-start; gap:4px; width:100%; text-align:left;">
-                <div style="font-weight:950;">${escapeHtml(label)}</div>
-                <div class="td-muted" style="font-size:12px;">
-                  <span class="kbd">${escapeHtml(c)}</span>${qTxt ? " • " + escapeHtml(qTxt) + " pz" : ""}
-                </div>
-              </div>
-            </button>
+            <tr>
+              <td data-label="Codice"><span class="kbd">${escapeHtml(c)}</span></td>
+              <td data-label="Nome">${escapeHtml(nm || "—")}</td>
+              <td data-label="Pezzi" class="qty">${escapeHtml(q)}</td>
+              <td data-label="Apri" class="td-actions">
+                <button class="btn btn-ghost btn-xs" type="button" data-open-code="${escapeHtmlAttr(c)}">Apri</button>
+              </td>
+            </tr>
           `;
         }).join("");
 
@@ -7683,9 +7645,20 @@ if (mode === "master") {
 
           <div class="field" style="grid-column: 1 / -1;">
             <label>Articoli raggruppati</label>
-            <div class="td-muted" style="margin-top:6px;">Seleziona l’articolo da aprire:</div>
-            <div class="unifiedPickGrid" style="margin-top:10px; display:grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px;">
-              ${buttonsHtml || `<span class="td-muted">Nessun articolo.</span>`}
+            <div class="tableWrap" style="max-height: 320px; overflow:auto;">
+              <table>
+                <thead>
+                  <tr>
+                    <th style="width:180px">Codice</th>
+                    <th>Nome</th>
+                    <th class="qty" style="width:110px">Pezzi</th>
+                    <th style="width:120px">Apri</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${membersHtml || `<tr><td class="td-muted" colspan="4">Nessun articolo.</td></tr>`}
+                </tbody>
+              </table>
             </div>
           </div>
         `;
@@ -7842,29 +7815,12 @@ if (mode === "master") {
           e.preventDefault(); e.stopPropagation();
           const c = String(btn.getAttribute("data-open-code") || "").trim();
           if (!c) return;
-
-          // scegli il member migliore (qty maggiore, poi ultimo movimento)
-          let mem = null;
-          try{
-            const arr = (ctx && Array.isArray(ctx.__members))
-              ? ctx.__members.filter(x => String(x && x.code || "").trim() === c)
-              : [];
-            if (arr && arr.length) {
-              mem = arr.reduce((best, cur) => {
-                if (!best) return cur;
-                const q1 = safeInt(best.qty);
-                const q2 = safeInt(cur.qty);
-                const t1 = String(best.lastMoveAt || "");
-                const t2 = String(cur.lastMoveAt || "");
-                if (q2 > q1 || (q2 === q1 && t2 && t2 > t1)) return cur;
-                return best;
-              }, arr[0]);
-            }
-          }catch(_){ mem = null; }
-
+          // try find member ctx
+          const mem = (ctx && Array.isArray(ctx.__members)) ? ctx.__members.find(x => String(x.code||"").trim() === c) : null;
           openProductModal(c, mem || { code: c, __mode: "" });
         });
       });
+
       // Stock-only bindings (qty/threshold/warehouse)
       const qInput = document.getElementById("prodQtyEdit");
       const qSave = document.getElementById("prodQtySave");
