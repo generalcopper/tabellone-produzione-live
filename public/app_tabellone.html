@@ -1618,16 +1618,6 @@
 
 <body>
 
-<!-- BOOT OVERLAY -->
-<div id="bootOverlay" class="bootOverlay" aria-hidden="false">
-  <div class="bootBox">
-    <div class="bootTitle">AVVIO SISTEMA</div>
-    <div class="bootMsg" id="bootMsg">Inizializzazione…</div>
-    <div class="bootBar"><div class="bootFill" id="bootFill"></div></div>
-    <div class="bootPct" id="bootPct">0%</div>
-  </div>
-</div>
-
 <div class="wrap">
   <div class="card top" style="padding:0">
     <div class="titleCard">
@@ -1676,7 +1666,7 @@
           <div class="mKicker">PRODUZIONE</div>
           <div class="mHeadRight">
             <div class="mTimer" id="mWipTimer">⏱ —</div>
-            <div class="mBadge" id="mWipRemainBadge" title="Articoli rimanenti">0</div>
+            <div class="mBadge" id="mWipRemainBadge" title="Articoli rimanenti">—</div>
           </div>
         </div>
         <div class="mProd" id="mWipProd">—</div>
@@ -1693,10 +1683,10 @@
       <button class="mWidget mDone" id="mDoneBtn" type="button">
         <div class="mHead">
           <div class="mKicker">COMPLETATI</div>
-          <div class="mCount" id="mDoneCount">0</div>
+          <div class="mCount" id="mDoneCount">—</div>
         </div>
         <div class="mProd" id="mDoneLast">SCARICA BACKUP</div>
-        <div class="mSub" id="mDoneSub">Righe completate: 0</div>
+        <div class="mSub" id="mDoneSub">Righe completate: —</div>
         <div class="mStatus">
           <span class="mDot done" aria-hidden="true"></span>
           <span class="mScan" id="mDoneScan">ULTIMO COMPLETATO</span>
@@ -1901,113 +1891,8 @@
   } from "https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js";
 const TTS_ELEVEN_PROXY_URL = "https://us-central1-tabellone-produzione-liv-e313e.cloudfunctions.net/ttsEleven";
 
-  const Boot = (() => {
-    const overlay = () => document.getElementById("bootOverlay");
-    const fill = () => document.getElementById("bootFill");
-    const pct = () => document.getElementById("bootPct");
-    const msg = () => document.getElementById("bootMsg");
-
-    const steps = [
-      "Avvio interfaccia…",
-      "Sincronizzazione pannelli…",
-      "Lettura dati produzione…",
-      "Connessione cloud…",
-      "Caricamento meteo…",
-      "Stabilizzazione…"
-    ];
-
-    let v = 0;
-    let t0 = 0;
-    let raf = 0;
-    let done = false;
-
-    const marks = { jobs:false, cloud:false, weather:false };
-    const minShowMs = 900;
-    const hardTimeoutMs = 9000;
-
-    function setMsg(s){
-      const el = msg();
-      if(el) el.textContent = s;
-    }
-
-    function setV(n){
-      v = Math.max(0, Math.min(100, n));
-      const f = fill();
-      const p = pct();
-      if(f) f.style.width = v.toFixed(1) + "%";
-      if(p) p.textContent = Math.floor(v) + "%";
-    }
-
-    function start(){
-      t0 = performance.now();
-      setV(0);
-      setMsg(steps[0]);
-      tick();
-      setTimeout(() => finish(), hardTimeoutMs);
-    }
-
-    function tick(){
-      if(done) return;
-
-      const elapsed = performance.now() - t0;
-
-      const targetSoft =
-        elapsed < 800  ? 35 :
-        elapsed < 1500 ? 55 :
-        elapsed < 2500 ? 72 :
-        85;
-
-      const si = Math.min(steps.length - 1, Math.floor((elapsed / 650)));
-      setMsg(steps[si]);
-
-      if(v < targetSoft){
-        const delta = (elapsed < 1500) ? (Math.random() * 2.8 + 1.2) : (Math.random() * 1.4 + 0.4);
-        setV(Math.min(targetSoft, v + delta));
-      }
-
-      const allReady = marks.jobs && marks.cloud && marks.weather;
-      if(allReady){
-        if(elapsed >= minShowMs){
-          const jump = Math.random() * 6 + 10;
-          setV(Math.min(100, v + jump));
-          if(v >= 99.2){
-            setV(100);
-            finish();
-            return;
-          }
-        }
-      }
-
-      raf = requestAnimationFrame(tick);
-    }
-
-    function mark(which){
-      if(which in marks) marks[which] = true;
-    }
-
-    function finish(){
-      if(done) return;
-      done = true;
-      try{ cancelAnimationFrame(raf); }catch(_){}
-      setV(100);
-      setMsg("Pronto.");
-      const el = overlay();
-      if(!el) return;
-      setTimeout(() => {
-        el.classList.add("hide");
-        el.setAttribute("aria-hidden", "true");
-      }, 260);
-      setTimeout(() => {
-        try{ el.remove(); }catch(_){}
-      }, 900);
-    }
-
-    return { start, mark, finish };
-  })();
-
-  Boot.start();
-
-  const DEVICE_ID = (() => {
+  const Boot = { start(){}, mark(){}, finish(){} };
+const DEVICE_ID = (() => {
     try{
       const k = "tabellone_device_id";
       let v = localStorage.getItem(k);
@@ -2502,6 +2387,75 @@ const BUCKET = "linea_liquidi";
   const PRODUCED_BACKUP_KEY = "TABELLONE_PRODUCED_BACKUP_V1";
   const PRODUCED_BACKUP_HISTORY_KEY = "TABELLONE_PRODUCED_BACKUP_HISTORY_V1";
 
+  const QUEUE_BACKUP_KEY = "TABELLONE_QUEUE_BACKUP_V1";
+
+  function saveQueueBackupNow(jobs){
+    try{
+      if(!Array.isArray(jobs)) return;
+      const clean = jobs.map(j => ({
+        id: String(j?.id ?? j?.key ?? ""),
+        key: String(j?.key ?? j?.id ?? ""),
+        product: String(j?.product ?? ""),
+        format: String(j?.format ?? ""),
+        qty: (j?.qty ?? "—"),
+        unit: String(j?.unit ?? "pz"),
+        status: String(j?.status ?? "DA PRODURRE"),
+        createdAtMs: Number(j?.createdAtMs || 0) || 0
+      }));
+      const payload = { savedAtClientMs: Date.now(), count: clean.length, jobs: clean };
+      localStorage.setItem(QUEUE_BACKUP_KEY, JSON.stringify(payload));
+    }catch(_){}
+  }
+
+  function restoreProducedBackupNow(){
+    try{
+      const raw = localStorage.getItem(PRODUCED_BACKUP_KEY) || "";
+      if(!raw) return false;
+      const payload = JSON.parse(raw);
+      const items = Array.isArray(payload?.items) ? payload.items : [];
+      if(!items.length) return false;
+
+      producedCloud.clear();
+      for(const it of items){
+        if(it && it.key) producedCloud.set(String(it.key), it);
+      }
+      renderProducedFromCloud();
+      try{ MobileUI.updateFromProduced(); }catch(_){}
+      return true;
+    }catch(_){
+      return false;
+    }
+  }
+
+  function restoreQueueBackupNow(){
+    try{
+      const raw = localStorage.getItem(QUEUE_BACKUP_KEY) || "";
+      if(!raw) return false;
+      const payload = JSON.parse(raw);
+      const jobs = Array.isArray(payload?.jobs) ? payload.jobs : [];
+      if(!jobs.length) return false;
+
+      // normalizza e riusa la stessa pipeline di render
+      lastJobs = jobs.map(j => ({
+        id: String(j?.id ?? j?.key ?? ""),
+        key: String(j?.key ?? j?.id ?? ""),
+        product: String(j?.product ?? ""),
+        format: String(j?.format ?? ""),
+        qty: (j?.qty ?? "—"),
+        unit: String(j?.unit ?? "pz"),
+        status: String(j?.status ?? "DA PRODURRE"),
+        createdAtMs: Number(j?.createdAtMs || 0) || 0
+      })).filter(j => !!j.key);
+
+      renderSoft(lastJobs);
+      try{ MobileUI.updateFromJobs(); }catch(_){}
+      return true;
+    }catch(_){
+      return false;
+    }
+  }
+
+
   function saveProducedBackupNow(){
     try{
       const items = [...producedCloud.entries()].map(([key,v]) => {
@@ -2883,6 +2837,7 @@ unmarkProducedCloud(it.key).then(() => {
   const WX_LON = 11.1462;
   const WX_TZ  = "Europe/Rome";
   const WX_REFRESH_MS = 10 * 60 * 1000;
+  const WEATHER_CACHE_KEY = "TABELLONE_WEATHER_CACHE_V1";
 
   let inFlight = false;
   let lastHash = "";
@@ -2917,6 +2872,9 @@ unmarkProducedCloud(it.key).then(() => {
 
         jobs.sort((a,b) => (a.createdAtMs||0) - (b.createdAtMs||0));
         lastJobs = jobs;
+
+        try{ saveQueueBackupNow(jobs); }catch(_){ }
+        try{ Boot.mark('jobs'); }catch(_){ }
 
         // Render usando la UI esistente
         try{
@@ -4017,7 +3975,30 @@ doneShareEl?.addEventListener("click", async (ev) => {
   };
   function wdesc(code){ return WCODE[code] || ("Meteo " + code); }
 
-  async function refreshWeather(){
+  
+  function restoreWeatherCacheNow(){
+    try{
+      const raw = localStorage.getItem(WEATHER_CACHE_KEY) || "";
+      if(!raw) return false;
+      const c = JSON.parse(raw) || {};
+      const temp = c.temp;
+      const code = c.code;
+      const wind = c.wind;
+      const rain = c.rain;
+      const t = Number(c.savedAtClientMs || 0) || 0;
+
+      if(temp != null) document.getElementById("wTemp").textContent = String(temp) + "°";
+      if(code != null) document.getElementById("wDesc").textContent = wdesc(code);
+      if(wind != null) document.getElementById("wWind").textContent = String(wind);
+      if(rain != null) document.getElementById("wRain").textContent = String(rain);
+      if(t) document.getElementById("wUpdated").textContent = "Agg. " + new Date(t).toLocaleTimeString("it-IT");
+      return true;
+    }catch(_){
+      return false;
+    }
+  }
+
+async function refreshWeather(){
     const url = `https://api.open-meteo.com/v1/forecast?latitude=${WX_LAT}&longitude=${WX_LON}&current=temperature_2m,weather_code,wind_speed_10m&hourly=precipitation_probability&timezone=${encodeURIComponent(WX_TZ)}&t=${Date.now()}`;
     const res = await fetch(url, { cache:"no-store" });
     if(!res.ok) throw new Error("Meteo HTTP " + res.status);
@@ -4043,6 +4024,11 @@ doneShareEl?.addEventListener("click", async (ev) => {
     document.getElementById("wRain").textContent = (p ?? "—");
     document.getElementById("wUpdated").textContent = "Agg. " + new Date().toLocaleTimeString("it-IT");
 
+    try{
+      const payload = { savedAtClientMs: Date.now(), temp, code, wind, rain: p };
+      localStorage.setItem(WEATHER_CACHE_KEY, JSON.stringify(payload));
+    }catch(_){ }
+
     try{ Boot.mark("weather"); }catch(_){}
   }
 
@@ -4050,6 +4036,11 @@ doneShareEl?.addEventListener("click", async (ev) => {
 
   tickClock();
   setInterval(tickClock, 1000);
+
+  // ===== Restore immediato (niente boot / niente 0) =====
+  try{ restoreProducedBackupNow(); }catch(_){ }
+  try{ restoreQueueBackupNow(); }catch(_){ }
+
 
 
   // ===== Mobile Widgets (desktop invariato) =====
@@ -5026,8 +5017,12 @@ el.sheetList.appendChild(item);
 
     return { updateFromJobs, updateFromProduced, updateWipTimer };
   })();
+  try{ MobileUI.updateFromProduced(); }catch(_){}
+  try{ MobileUI.updateFromJobs(); }catch(_){}
+  try{ MobileUI.updateWipTimer(); }catch(_){}
   // Sheet sync disabilitato: uso solo queue realtime
   // initQueueRealtime(): avviato dopo AUTH
+try{ restoreWeatherCacheNow(); }catch(_){ }
 refreshWeather().catch(()=>{ document.getElementById("wDesc").textContent="Meteo non disponibile"; });
   setInterval(() => refreshWeather().catch(()=>{}), WX_REFRESH_MS);
 
