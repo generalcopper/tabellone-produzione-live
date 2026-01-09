@@ -6504,12 +6504,10 @@ let __stockRowByKey = new Map();
 
         const isGroup = (r.__isAliasGroup && Array.isArray(r.__codes) && r.__codes.length > 1);
 
-        const qtyCell = isGroup
-          ? `<div class="qty-editor" style="justify-content:flex-end;"><span style="font-weight:900; color:${qtyColor};">${Number(qtyVal).toLocaleString("it-IT")}</span></div>`
-          : `
+        const qtyCell = `
             <div class="qty-editor">
               <input class="qtyEditInput jsQtyEdit" type="number" inputmode="numeric" min="0" step="1"
-                value="${qtyVal}" data-orig="${qtyVal}" style="color:${qtyColor}" />
+                value="${qtyVal}" data-orig="${qtyVal}" style="color:${qtyColor}" ${isGroup ? 'data-isgroup="1"' : ''} />
               <button class="btn btn-primary btn-xs jsQtySave" type="button" disabled>Salva</button>
             </div>`;
 
@@ -6556,6 +6554,117 @@ let __stockRowByKey = new Map();
 
       await addMovement(mv);
       showToast(`Quantità aggiornata (${oldQty}→${newQty})`);
+    }
+
+
+    // Rettifica stock totale per gruppo alias (inventario unificato)
+    // - crea movimenti IN/OUT distribuiti sui codici reali del gruppo
+    // - aggiorna anche row.__members per coerenza immediata UI (prima che arrivi realtime)
+    async function adjustStockAbsoluteFromAliasGroup(row, newAbsQty) {
+      const r = row || {};
+      const members = Array.isArray(r.__members) ? r.__members : [];
+
+      const oldTotal = safeInt(r.qty);
+      let newTotal = safeInt(newAbsQty);
+      if (!Number.isFinite(newTotal) || newTotal < 0) newTotal = 0;
+
+      const delta = newTotal - oldTotal;
+      if (!delta) return;
+
+      const wh = normalizeWarehouse(r.warehouse || __currentWarehouse || "");
+      const aliasLabel = String(r.__alias || r.item || "").trim();
+      const noteBase = `Rettifica inventario (alias${aliasLabel ? " " + aliasLabel : ""}): totale ${oldTotal}→${newTotal}`;
+
+      const qNorm = (v) => {
+        let n = safeInt(v);
+        if (!Number.isFinite(n)) n = 0;
+        return n;
+      };
+
+      // fallback: se non abbiamo membri, rettifica come singolo codice
+      if (!members.length) {
+        await adjustStockAbsoluteFromRow(r, newTotal);
+        r.qty = newTotal;
+        return;
+      }
+
+      // helper: item display
+      const itemFor = (code, fallback) => {
+        const c = String(code || "").trim();
+        const nm = getDisplayNameForCode(c, String(fallback || "").trim());
+        return String(nm || fallback || r.item || c || "").trim();
+      };
+
+      if (delta > 0) {
+        // aggiungi tutto sul membro con più stock (o il primo)
+        let best = members[0];
+        let bestQ = -1;
+        for (const m of members) {
+          const q = Math.max(0, qNorm(m && m.qty));
+          if (q > bestQ) { bestQ = q; best = m; }
+        }
+        const code = String((best && best.code) || r.code || "").trim();
+        const customer = String((best && best.customer) || r.customer || "").trim();
+        const item = itemFor(code, (best && best.item) || "");
+
+        const mv = makeMovement({
+          type: "IN",
+          customer,
+          code,
+          item,
+          qty: Math.abs(delta),
+          date: todayYYYYMMDD(),
+          note: noteBase,
+          warehouse: wh,
+          source: "Rettifica rapida (alias)",
+          rawText: ""
+        });
+
+        await addMovement(mv);
+
+        // optimistic UI: aggiorna membro scelto
+        try { if (best) best.qty = qNorm(best.qty) + Math.abs(delta); } catch(_){}
+      } else {
+        // scarica distribuendo sui membri (dal più grande al più piccolo)
+        let remaining = Math.abs(delta);
+        const sorted = members.slice().sort((a,b) => Math.max(0, qNorm(b && b.qty)) - Math.max(0, qNorm(a && a.qty)));
+
+        for (const m of sorted) {
+          if (remaining <= 0) break;
+          const have = Math.max(0, qNorm(m && m.qty));
+          if (have <= 0) continue;
+
+          const take = Math.min(have, remaining);
+          const code = String((m && m.code) || r.code || "").trim();
+          const customer = String((m && m.customer) || r.customer || "").trim();
+          const item = itemFor(code, (m && m.item) || "");
+
+          const mv = makeMovement({
+            type: "OUT",
+            customer,
+            code,
+            item,
+            qty: take,
+            date: todayYYYYMMDD(),
+            note: noteBase,
+            warehouse: wh,
+            source: "Rettifica rapida (alias)",
+            rawText: ""
+          });
+
+          await addMovement(mv);
+
+          // optimistic UI
+          try { if (m) m.qty = have - take; } catch(_){}
+          remaining -= take;
+        }
+      }
+
+      // optimistic total
+      r.qty = newTotal;
+
+      // (non chiamiamo renderAll qui: su Firebase arriva dal listener; offline viene già gestito da addMovement)
+      showToast(`Quantità aggiornata (totale ${oldTotal}→${newTotal})`);
     }
 
     function renderMovementsTable() {
@@ -7622,12 +7731,25 @@ if (mode === "master") {
         const sumQty = Number(ctx.qty || 0);
         const thr = Number(ctx.threshold || 0);
 
-        const membersHtml = (members.length ? members : codes.map(c => ({ code: c }))).map(m => {
+        const membersList = (members.length ? members.slice() : codes.map(c => ({ code: c })));
+        membersList.sort((a,b) => {
+          const ac = String((a && a.customer) || "").trim();
+          const bc = String((b && b.customer) || "").trim();
+          const byCust = ac.localeCompare(bc, "it", { sensitivity: "base" });
+          if (byCust) return byCust;
+          const aa = String((a && a.code) || "").trim();
+          const bb = String((b && b.code) || "").trim();
+          return aa.localeCompare(bb, "it", { sensitivity: "base" });
+        });
+        
+        const membersHtml = membersList.map(m => {
           const c = String(m.code || "").trim();
           const nm = getDisplayNameForCode(c, m.item || "");
+          const cust = String(m.customer || "").trim();
           const q = (m.qty !== undefined) ? safeInt(m.qty).toLocaleString("it-IT") : "—";
           return `
             <tr>
+              <td data-label="Fornitore">${escapeHtml(cust || "—")}</td>
               <td data-label="Codice"><span class="kbd">${escapeHtml(c)}</span></td>
               <td data-label="Nome">${escapeHtml(nm || "—")}</td>
               <td data-label="Pezzi" class="qty">${escapeHtml(q)}</td>
@@ -7640,9 +7762,9 @@ if (mode === "master") {
 
         groupHtml = `
           <div class="field" style="grid-column: 1 / -1;">
-            <label>Stock totale (alias)</label>
+            <label>Stock totale (alias) — ${h(warehouseLabel(wh))}</label>
             <input value="${Number(sumQty||0).toLocaleString("it-IT")} pezzi (soglia min ${Number(thr||0).toLocaleString("it-IT")})" readonly />
-            <div class="td-muted" style="margin-top:6px;">Per rettifiche: apri un singolo codice dal gruppo.</div>
+            <div class="td-muted" style="margin-top:6px;">Per rettifiche: puoi modificare il totale dalla tabella inventario, oppure aprire un singolo codice dal gruppo.</div>
           </div>
 
           <div class="field" style="grid-column: 1 / -1;">
@@ -7651,6 +7773,7 @@ if (mode === "master") {
               <table>
                 <thead>
                   <tr>
+                    <th style="width:220px">Fornitore</th>
                     <th style="width:180px">Codice</th>
                     <th>Nome</th>
                     <th class="qty" style="width:110px">Pezzi</th>
@@ -9663,9 +9786,14 @@ searchStock.addEventListener("input", () => renderAll());
           btnSave.disabled = true;
           btnSave.textContent = "Salvo…";
           try {
-            await adjustStockAbsoluteFromRow(row, newQty);
-            // update in-memory row for immediate UI coherence
-            row.qty = newQty;
+            const isGroup = !!(row && row.__isAliasGroup && Array.isArray(row.__codes) && row.__codes.length > 1);
+            if (isGroup) {
+              await adjustStockAbsoluteFromAliasGroup(row, newQty);
+            } else {
+              await adjustStockAbsoluteFromRow(row, newQty);
+              // update in-memory row for immediate UI coherence
+              row.qty = newQty;
+            }
             inp.dataset.orig = String(newQty);
             btnSave.textContent = "Salvato";
             setTimeout(() => { try { btnSave.textContent = "Salva"; } catch(_){} }, 600);
