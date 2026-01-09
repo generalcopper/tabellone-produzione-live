@@ -6934,15 +6934,14 @@ function renderAll() {
           const more = Math.max(0, codes.length - 2);
           const codesTxt = preview + (more ? ` +${more}` : "");
           const badge = (codes.length > 1) ? `<span class="pill pill-unified" aria-label="Unificati" title="Unificati"></span>` : ``;
-          const primaryCode = codes[0] || "";
 
           return `
-            <tr data-code="${escapeHtmlAttr(primaryCode)}" title="Apri dettagli">
+            <tr data-pg="${escapeHtmlAttr(g.key)}" title="Apri dettagli">
               <td data-label="Alias / Nome"><strong>${escapeHtml(g.label || "—")}</strong>${badge}</td>
               <td data-label="Codici"><span class="kbd">${escapeHtml(codesTxt || "—")}</span></td>
               <td data-label="N." class="qty">${Number(codes.length||0).toLocaleString("it-IT")}</td>
               <td data-label="Azioni" class="td-actions">
-                <button class="btn btn-ghost btn-xs" type="button" data-action="openProdDetail" data-id="${escapeHtmlAttr(primaryCode)}">Apri</button>
+                <button class="btn btn-ghost btn-xs" type="button" data-action="openProdGroup" data-id="${escapeHtmlAttr(g.key)}">Apri</button>
               </td>
             </tr>
           `;
@@ -7701,55 +7700,27 @@ async function deleteSupplierCascade(supplierId){
     function openProductModal(id, ctx) {
       if (!modalProduct) return;
 
-      const ctxSafe = ctx || {};
-
-      const mode = (ctxSafe && ctxSafe.__mode) ? String(ctxSafe.__mode) : ""; // "master" | ""
-      const code = String((ctxSafe && ctxSafe.code) || id || "").trim();
+      const mode = (ctx && ctx.__mode) ? String(ctx.__mode) : ""; // "master" | ""
+      const code = String((ctx && ctx.code) || id || "").trim();
       if (!code) return;
 
       const p = findProductByCode(code) || (products || []).find(x => x && (x.id === id)) || null;
 
-      const isStockCtx = !!(ctxSafe && (ctxSafe.customer || ctxSafe.warehouse || (ctxSafe.qty !== undefined)));
+      const isStockCtx = !!(ctx && (ctx.customer || ctx.warehouse || (ctx.qty !== undefined)));
+      const isAliasGroup = !!(ctx && ctx.__isAliasGroup && Array.isArray(ctx.__codes) && ctx.__codes.length > 1);
 
-      const alias = String((p && (p.alias || p.aliasName)) || (ctxSafe && ctxSafe.__alias) || "").trim();
-      const aliasKey = alias ? normTextKey(alias) : "";
-      let derivedGroupCodes = [];
-      let derivedGroupMembers = [];
-
-      if (!ctxSafe.__isAliasGroup && aliasKey) {
-        const sameAlias = (products || []).filter(prod => {
-          const prodAlias = String((prod && (prod.alias || prod.aliasName)) || "").trim();
-          return prodAlias && normTextKey(prodAlias) === aliasKey;
-        });
-
-        if (sameAlias.length > 1) {
-          derivedGroupCodes = Array.from(new Set(sameAlias.map(prod => String(prod?.code || safeDecodeUri(prod?.id) || "").trim()).filter(Boolean)));
-          derivedGroupMembers = sameAlias.map(prod => {
-            const c = String(prod?.code || safeDecodeUri(prod?.id) || "").trim();
-            return { code: c, item: String(prod?.name || c || "").trim() };
-          }).filter(m => !!m.code);
-        }
-      }
-
-      const ctxGroupCodes = (ctxSafe && Array.isArray(ctxSafe.__codes) && ctxSafe.__codes.length > 1) ? ctxSafe.__codes : [];
-      const ctxGroupMembers = (ctxSafe && Array.isArray(ctxSafe.__members) && ctxSafe.__members.length) ? ctxSafe.__members : [];
-      const hasCtxGroup = !!(ctxSafe && ctxSafe.__isAliasGroup && ctxGroupCodes.length > 1);
-
-      const aliasGroupCodes = hasCtxGroup ? ctxGroupCodes : derivedGroupCodes;
-      const aliasGroupMembers = hasCtxGroup ? ctxGroupMembers : derivedGroupMembers;
-      const isAliasGroup = (hasCtxGroup || aliasGroupCodes.length > 1);
-
-      const title = (isAliasGroup ? (alias || String((ctxSafe && ctxSafe.item) || "Alias")) : String((p && p.name) || (ctxSafe && ctxSafe.item) || code)).trim() || "Prodotto";
+      const alias = String((p && (p.alias || p.aliasName)) || (ctx && ctx.__alias) || "").trim();
+      const title = (isAliasGroup ? (alias || String((ctx && ctx.item) || "Alias")) : String((p && p.name) || (ctx && ctx.item) || code)).trim() || "Prodotto";
       const cat = getMacroCategoryForCode(code);
 
-      const wh = normalizeWarehouse((ctxSafe && ctxSafe.warehouse) || "");
-      const lastTxt = (ctxSafe && ctxSafe.lastMoveAt) ? formatDateIT(ctxSafe.lastMoveAt) : "—";
+      const wh = normalizeWarehouse((ctx && ctx.warehouse) || "");
+      const lastTxt = (ctx && ctx.lastMoveAt) ? formatDateIT(ctx.lastMoveAt) : "—";
       const updTxt = (p && (p.updatedAt || p.updatedAtIso)) ? (tsToIso(p.updatedAt) || p.updatedAtIso || "") : "";
 
       prodTitle.textContent = title;
 
       // --- Header fields (Nome + Alias) ---
-      const nameVal = String((p && p.name) || (ctxSafe && ctxSafe.item) || code).trim();
+      const nameVal = String((p && p.name) || (ctx && ctx.item) || code).trim();
       const aliasHint = isAliasGroup ? "Alias del gruppo (applica a tutti i codici)" : "Alias (se uguale = unifica)";
 
       const headerHtml = `
@@ -7778,7 +7749,7 @@ async function deleteSupplierCascade(supplierId){
         baseFields.push(`
           <div class="field">
             <label>Cliente</label>
-            <input value="${h((ctxSafe && ctxSafe.customer) || "")}" readonly />
+            <input value="${h((ctx && ctx.customer) || "")}" readonly />
           </div>
         `);
       }
@@ -7826,10 +7797,10 @@ if (mode === "master") {
       // Group members (stock alias groups)
       let groupHtml = "";
       if (isAliasGroup) {
-        const codes = Array.isArray(aliasGroupCodes) ? aliasGroupCodes : [];
-        const members = Array.isArray(aliasGroupMembers) ? aliasGroupMembers : [];
-        const sumQty = Number(ctxSafe.qty || 0);
-        const thr = Number(ctxSafe.threshold || 0);
+        const codes = Array.isArray(ctx.__codes) ? ctx.__codes : [];
+        const members = Array.isArray(ctx.__members) ? ctx.__members : [];
+        const sumQty = Number(ctx.qty || 0);
+        const thr = Number(ctx.threshold || 0);
 
         const membersHtml = (members.length ? members : codes.map(c => ({ code: c }))).map(m => {
           const c = String(m.code || "").trim();
@@ -7878,13 +7849,13 @@ if (mode === "master") {
       // Stock fields (single code only)
       let stockHtml = "";
       if (!isAliasGroup && !mode && isStockCtx) {
-        const qtyVal = safeInt(ctxSafe.qty);
-        const thrKey = movementKey((ctxSafe && ctxSafe.customer) || "", code);
+        const qtyVal = safeInt(ctx.qty);
+        const thrKey = movementKey((ctx && ctx.customer) || "", code);
 
         stockHtml = `
           <div class="field">
             <label>Pezzi in stock</label>
-            ${(ctxSafe && (ctxSafe.qty !== undefined))
+            ${(ctx && (ctx.qty !== undefined))
               ? `<div class="qty-editor" style="justify-content:flex-start;">
                   <input id="prodQtyEdit" class="qtyEditInput" type="number" inputmode="numeric" min="0" step="1"
                     value="${qtyVal}" data-orig="${qtyVal}" />
@@ -7898,8 +7869,8 @@ if (mode === "master") {
             <label>Soglia sottoscorta</label>
             <div class="qty-editor" style="justify-content:flex-start;">
               <input id="prodThrEdit" class="qtyEditInput" type="number" inputmode="numeric" min="0" step="1"
-                value="${safeInt((ctxSafe && (ctxSafe.threshold !== undefined)) ? ctxSafe.threshold : getThresholdForKey(thrKey))}"
-                data-orig="${safeInt((ctxSafe && (ctxSafe.threshold !== undefined)) ? ctxSafe.threshold : getThresholdForKey(thrKey))}"
+                value="${safeInt((ctx && (ctx.threshold !== undefined)) ? ctx.threshold : getThresholdForKey(thrKey))}"
+                data-orig="${safeInt((ctx && (ctx.threshold !== undefined)) ? ctx.threshold : getThresholdForKey(thrKey))}"
                 placeholder="1000" />
               <button id="prodThrSave" class="btn btn-primary btn-xs" type="button" disabled>Salva</button>
               <button id="prodThrReset" class="btn btn-ghost btn-xs" type="button">Default</button>
@@ -8005,7 +7976,7 @@ if (mode === "master") {
           e.preventDefault(); e.stopPropagation();
           const v = String(aInp.value || "").trim();
           if (isAliasGroup) {
-            await setProductAliasForCodes(aliasGroupCodes || [], v);
+            await setProductAliasForCodes(ctx.__codes || [], v);
           } else {
             await setProductAliasForCode(code, v);
           }
@@ -8015,7 +7986,7 @@ if (mode === "master") {
         aClear.addEventListener("click", async (e) => {
           e.preventDefault(); e.stopPropagation();
           aInp.value = "";
-          if (isAliasGroup) await setProductAliasForCodes(aliasGroupCodes || [], "");
+          if (isAliasGroup) await setProductAliasForCodes(ctx.__codes || [], "");
           else await setProductAliasForCode(code, "");
         });
       }
@@ -8027,7 +7998,7 @@ if (mode === "master") {
           const c = String(btn.getAttribute("data-open-code") || "").trim();
           if (!c) return;
           // try find member ctx
-          const mem = (aliasGroupMembers && Array.isArray(aliasGroupMembers)) ? aliasGroupMembers.find(x => String(x.code||"").trim() === c) : null;
+          const mem = (ctx && Array.isArray(ctx.__members)) ? ctx.__members.find(x => String(x.code||"").trim() === c) : null;
           openProductModal(c, mem || { code: c, __mode: "" });
         });
       });
@@ -8035,11 +8006,11 @@ if (mode === "master") {
       // Stock-only bindings (qty/threshold/warehouse)
       const qInput = document.getElementById("prodQtyEdit");
       const qSave = document.getElementById("prodQtySave");
-      if (qInput && qSave && ctxSafe && (ctxSafe.qty !== undefined) && !isAliasGroup) {
+      if (qInput && qSave && ctx && (ctx.qty !== undefined) && !isAliasGroup) {
         const syncBtn = () => {
           let val = safeInt(qInput.value);
           if (!Number.isFinite(val) || val < 0) val = 0;
-          const base = Number.isFinite(safeInt(qInput.dataset.orig)) ? safeInt(qInput.dataset.orig) : safeInt(ctxSafe.qty);
+          const base = Number.isFinite(safeInt(qInput.dataset.orig)) ? safeInt(qInput.dataset.orig) : safeInt(ctx.qty);
           qSave.disabled = (val === base);
         };
 
@@ -8051,7 +8022,7 @@ if (mode === "master") {
           let newQty = safeInt(qInput.value);
           if (!Number.isFinite(newQty) || newQty < 0) newQty = 0;
 
-          const oldQty = safeInt(ctxSafe.qty);
+          const oldQty = safeInt(ctx.qty);
           if (newQty === oldQty) {
             qInput.value = String(oldQty);
             qInput.dataset.orig = String(oldQty);
@@ -8063,8 +8034,8 @@ if (mode === "master") {
           qSave.disabled = true;
           qSave.textContent = "Salvo…";
           try {
-            await adjustStockAbsoluteFromRow(ctxSafe, newQty);
-            ctxSafe.qty = newQty;
+            await adjustStockAbsoluteFromRow(ctx, newQty);
+            ctx.qty = newQty;
             qInput.dataset.orig = String(newQty);
             qSave.textContent = "Salvato";
             setTimeout(() => { try { qSave.textContent = "Salva"; } catch(_){} }, 600);
@@ -8102,7 +8073,7 @@ if (mode === "master") {
       const tSave = document.getElementById("prodThrSave");
       const tReset = document.getElementById("prodThrReset");
       if (tInput && tSave && !isAliasGroup) {
-        const thrKey = movementKey((ctxSafe && ctxSafe.customer) || "", code);
+        const thrKey = movementKey((ctx && ctx.customer) || "", code);
 
         const syncThrBtn = () => {
           const cur = String(tInput.value || "").trim();
@@ -8141,7 +8112,7 @@ if (mode === "master") {
             try {
               await clearThresholdForKey(thrKey);
               const baseThr = getThresholdForKey(thrKey);
-              ctxSafe.threshold = baseThr;
+              ctx.threshold = baseThr;
               tInput.value = "";
               tInput.dataset.orig = "";
               renderAll();
@@ -8176,12 +8147,12 @@ if (mode === "master") {
       const wSel = document.getElementById("prodWarehouseSelect");
       const wQty = document.getElementById("prodWarehouseMoveQty");
       const wBtn = document.getElementById("prodWarehouseMove");
-      if (wSel && wBtn && wQty && ctxSafe && !isAliasGroup) {
+      if (wSel && wBtn && wQty && ctx && !isAliasGroup) {
         wSel.value = wh;
 
         // default: tutto (come prima) se input vuoto/0
         try {
-          const baseNow = safeInt(ctxSafe.qty);
+          const baseNow = safeInt(ctx.qty);
           const cur0 = safeInt(wQty.value);
           if (!cur0) wQty.value = String(Math.max(0, baseNow));
           if (wQty.dataset && (wQty.dataset.orig === undefined || wQty.dataset.orig === "")) {
@@ -8191,7 +8162,7 @@ if (mode === "master") {
 
         const sync = () => {
           const to = normalizeWarehouse(wSel.value);
-          const qtyNow = safeInt(ctxSafe.qty);
+          const qtyNow = safeInt(ctx.qty);
           let mvQty = safeInt(wQty.value);
           if (!Number.isFinite(mvQty)) mvQty = 0;
           wBtn.disabled = (to === wh) || qtyNow <= 0 || mvQty <= 0 || mvQty > qtyNow;
@@ -8210,7 +8181,7 @@ if (mode === "master") {
           e.stopPropagation();
 
           const to = normalizeWarehouse(wSel.value);
-          const qtyNow = safeInt(ctxSafe.qty);
+          const qtyNow = safeInt(ctx.qty);
           let mvQty = safeInt(wQty.value);
 
           if (!Number.isFinite(mvQty) || mvQty <= 0) { showToast("Quantità non valida"); sync(); return; }
@@ -8222,9 +8193,9 @@ if (mode === "master") {
           // Sposta quantità: scarico da WH attuale + carico su WH target (movimenti)
           const outMv = makeMovement({
             type: "OUT",
-            customer: ctxSafe.customer || "",
+            customer: ctx.customer || "",
             code: code,
-            item: (ctxSafe.item || title || ""),
+            item: (ctx.item || title || ""),
             qty: mvQty,
             date: todayYYYYMMDD(),
             note: noteTxt,
@@ -8233,9 +8204,9 @@ if (mode === "master") {
           });
           const inMv = makeMovement({
             type: "IN",
-            customer: ctxSafe.customer || "",
+            customer: ctx.customer || "",
             code: code,
-            item: (ctxSafe.item || title || ""),
+            item: (ctx.item || title || ""),
             qty: mvQty,
             date: todayYYYYMMDD(),
             note: noteTxt,
@@ -8278,7 +8249,7 @@ if (mode === "master") {
         delInvBtn.addEventListener("click", async (e) => {
           e.preventDefault(); e.stopPropagation();
 
-          const cust = String((ctxSafe && ctxSafe.customer) || "").trim();
+          const cust = String((ctx && ctx.customer) || "").trim();
           const itemK = movementKey(cust, code);
 
           // movimenti da eliminare (cliente+codice, tutte le sedi)
@@ -9028,12 +8999,12 @@ async function handleFileSelection(fileList) {
     // Table actions (delegation)
     if (anagTbody) {
       anagTbody.addEventListener("click", (e) => {
-        // Click riga (prodotti): apri dettaglio prodotto
+        // Click riga (prodotti): apri gruppo
         if (activeAnagTab === "products") {
-          const tr = e.target && e.target.closest ? e.target.closest("tr[data-code]") : null;
+          const tr = e.target && e.target.closest ? e.target.closest("tr[data-pg]") : null;
           if (tr && (!e.target.closest || !e.target.closest("button[data-action]"))) {
-            const code = tr.getAttribute("data-code") || "";
-            if (code) { openProductModal(code); return; }
+            const gid = tr.getAttribute("data-pg") || "";
+            if (gid) { openProductAliasGroup(gid); return; }
           }
         }
 
@@ -9045,7 +9016,7 @@ async function handleFileSelection(fileList) {
 
         if (action === "supplierDocs") { openSupplierModal(id); return; }
         if (action === "deleteSupplier") { deleteSupplierCascade(id); return; }
-        if (action === "openProdDetail") { openProductModal(id); return; }
+        if (action === "openProdGroup") { openProductAliasGroup(id); return; }
       });
     }
 btnConfirmMovement.addEventListener("click", async () => {
