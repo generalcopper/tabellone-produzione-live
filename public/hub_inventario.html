@@ -297,7 +297,6 @@
     @media (min-width: 720px) { .fieldGrid { grid-template-columns: 1fr 1fr; } }
     .field { display: grid; gap: 6px; }
     .field label { font-size: 12px; font-weight: 900; color: rgba(0,0,0,.66); }
-    .field .fieldLabel { font-size: 12px; font-weight: 900; color: rgba(0,0,0,.66); }
     .field input, .field select { width: 100%; border-radius: 14px; border: 1px solid rgba(12,22,52,.10); background: rgba(255,255,255,.92); padding: 12px; font-size: 14px; font-weight: 850; color: var(--text); box-shadow: inset 0 1px 0 rgba(255,255,255,.7); }
 
 
@@ -6386,8 +6385,6 @@ function getMacroCategoryForCode(code) {
             g = {
               customer: cust || "",
               warehouse: wh,
-              // Chiave univoca della riga visual (include alias group): serve per click/dettaglio
-              __rowKey: k,
               __groupKey: gk,
               __isAliasGroup: !!aliasKey,
               __alias: alias,
@@ -6439,42 +6436,6 @@ function getMacroCategoryForCode(code) {
 
 
 let __stockRowByKey = new Map();
-
-// DEBUG helper (console)
-window.__INV_DEBUG = true;
-window.__invDbg = function(){
-  try{ if (window.__INV_DEBUG) console.log.apply(console, arguments); }catch(_){ }
-};
-
-
-// Helper globale: apertura dettaglio da bottone "Apri" (anche dopo re-render)
-window.__openStockDetailBtn = function(btn, ev){
-  try{
-    window.__invDbg && window.__invDbg('[INV-DBG] Apri clicked', {btn: !!btn, evType: ev && ev.type});
-    if (ev && ev.preventDefault) ev.preventDefault();
-    if (ev && ev.stopPropagation) ev.stopPropagation();
-    const tr = btn && btn.closest ? btn.closest("tr[data-k]") : null;
-    window.__invDbg && window.__invDbg("[INV-DBG] tr", tr ? {k: tr.getAttribute("data-k"), rawk: tr.getAttribute("data-rawk")} : null);
-    if (!tr) { try{ showToast("Riga non trovata"); }catch(_){ } return; }
-    const kEnc = String(tr.getAttribute("data-k") || "").trim();
-    const rawK = String(tr.getAttribute("data-rawk") || "").trim();
-    let row = (__stockRowByKey && __stockRowByKey.get) ? __stockRowByKey.get(kEnc) : null;
-    if (!row && rawK) {
-      try { row = __stockRowByKey.get(encodeURIComponent(rawK)); } catch(_){}
-    }
-    if (!row) {
-      try{ showToast("Riga non trovata (aggiorna inventario)"); }catch(_){}
-      try{ renderAll(); }catch(_){}
-      return;
-    }
-    openProductModal(row.code, row);
-  }catch(err){
-    console.error("openStockDetailBtn failed", err);
-    try{ showToast("Errore apertura dettaglio"); }catch(_){}
-  }
-};
-
-
 
     function renderStockTable(stockArr) {
       const qRaw = (searchStock.value || "").trim();
@@ -6530,32 +6491,24 @@ window.__openStockDetailBtn = function(btn, ev){
       const max = 800;
       const show = rows.slice(0, max);
 
-      // cache per click riga (per gruppi alias serve una chiave univoca diversa da customer+code)
-            const __encK = (raw) => encodeURIComponent(String(raw || ""));
-      __stockRowByKey = new Map(show.map(r => {
-        const raw = (r && r.__rowKey) ? String(r.__rowKey) : stockRowKey(r.customer, r.code, r.warehouse);
-        const key = __encK(raw);
-        try { if (r) { r.__rowKeyRaw = raw; r.__rowKeyEnc = key; } } catch(_){ }
-        return [key, r];
-      }));
+      // cache per click riga
+      __stockRowByKey = new Map(show.map(r => [stockRowKey(r.customer, r.code, r.warehouse), r]));
 
       stockTbody.innerHTML = show.map(r => {
-        const rawK = (r && r.__rowKey) ? String(r.__rowKey) : stockRowKey(r.customer, r.code, r.warehouse);
-        const k = encodeURIComponent(rawK);
+        const k = stockRowKey(r.customer, r.code, r.warehouse);
         const warn = (Number(r.qty)||0) < (Number(r.threshold)||0);
         const qtyColor = warn ? "var(--danger)" : "rgba(0,0,0,.86)";
         const qtyVal = safeInt(r.qty);
 
         const isGroup = (r.__isAliasGroup && Array.isArray(r.__codes) && r.__codes.length > 1);
 
-        const openBtn = isGroup ? `<button class="btn btn-ghost btn-xs jsOpenDetail" type="button" title="Apri gruppo alias" onclick="window.__openStockDetailBtn && window.__openStockDetailBtn(this, event)">Apri</button>` : ``;
-
-        const qtyCell = `
+        const qtyCell = isGroup
+          ? `<div class="qty-editor" style="justify-content:flex-end;"><span style="font-weight:900; color:${qtyColor};">${Number(qtyVal).toLocaleString("it-IT")}</span></div>`
+          : `
             <div class="qty-editor">
               <input class="qtyEditInput jsQtyEdit" type="number" inputmode="numeric" min="0" step="1"
-                value="${qtyVal}" data-orig="${qtyVal}" style="color:${qtyColor}" ${isGroup ? 'data-isgroup="1"' : ''} />
+                value="${qtyVal}" data-orig="${qtyVal}" style="color:${qtyColor}" />
               <button class="btn btn-primary btn-xs jsQtySave" type="button" disabled>Salva</button>
-              ${openBtn}
             </div>`;
 
         const cat = getMacroCategoryForCode(r.code);
@@ -6565,46 +6518,13 @@ window.__openStockDetailBtn = function(btn, ev){
         const displayName = escapeHtml(r.item || "");
 
         return `
-          <tr data-k="${escapeHtmlAttr(k)}" data-rawk="${escapeHtmlAttr(rawK)}" title="${isGroup ? "Apri gruppo alias" : "Apri dettagli / imposta categoria"}">
+          <tr data-k="${escapeHtmlAttr(k)}" title="${isGroup ? "Apri gruppo alias" : "Apri dettagli / imposta categoria"}">
             <td data-label="Nome articolo">${displayName}</td>
             <td data-label="Cod. articolo">${displayCode}</td>
             <td data-label="Categoria">${catHtml}</td>
             <td data-label="Pezzi" class="qty">${qtyCell}</td>
           </tr>`;
       }).join("");
-
-
-      // Bind diretto (robusto) per Apri dettaglio su prodotti unificati (alias group)
-      // Nota: la tabella viene re-renderizzata spesso, quindi le binding vanno rifatte qui.
-      try {
-        stockTbody.querySelectorAll("button.jsOpenDetail").forEach(btn => {
-          btn.addEventListener("click", (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            try {
-              const tr = btn.closest("tr[data-k]");
-              if (!tr) return;
-              const kEnc = String(tr.getAttribute("data-k") || "").trim();
-              const rawK = String(tr.getAttribute("data-rawk") || "").trim();
-              let row = (__stockRowByKey && __stockRowByKey.get) ? __stockRowByKey.get(kEnc) : null;
-              if (!row && rawK) {
-                try { row = __stockRowByKey.get(encodeURIComponent(rawK)); } catch(_) {}
-              }
-              if (!row) {
-                showToast("Riga non trovata (aggiorna inventario)");
-                try { renderAll(); } catch(_) {}
-                return;
-              }
-              openProductModal(row.code, row);
-            } catch (err) {
-              console.error("Open unified detail failed", err);
-              showToast("Errore apertura dettaglio");
-            }
-          });
-        });
-      } catch (e) {
-        console.warn("Bind jsOpenDetail failed", e);
-      }
 
       // niente più bottoni Carico/Scarico in tabella
     }
@@ -6634,117 +6554,6 @@ window.__openStockDetailBtn = function(btn, ev){
 
       await addMovement(mv);
       showToast(`Quantità aggiornata (${oldQty}→${newQty})`);
-    }
-
-
-    // Rettifica stock totale per gruppo alias (inventario unificato)
-    // - crea movimenti IN/OUT distribuiti sui codici reali del gruppo
-    // - aggiorna anche row.__members per coerenza immediata UI (prima che arrivi realtime)
-    async function adjustStockAbsoluteFromAliasGroup(row, newAbsQty) {
-      const r = row || {};
-      const members = Array.isArray(r.__members) ? r.__members : [];
-
-      const oldTotal = safeInt(r.qty);
-      let newTotal = safeInt(newAbsQty);
-      if (!Number.isFinite(newTotal) || newTotal < 0) newTotal = 0;
-
-      const delta = newTotal - oldTotal;
-      if (!delta) return;
-
-      const wh = normalizeWarehouse(r.warehouse || __currentWarehouse || "");
-      const aliasLabel = String(r.__alias || r.item || "").trim();
-      const noteBase = `Rettifica inventario (alias${aliasLabel ? " " + aliasLabel : ""}): totale ${oldTotal}→${newTotal}`;
-
-      const qNorm = (v) => {
-        let n = safeInt(v);
-        if (!Number.isFinite(n)) n = 0;
-        return n;
-      };
-
-      // fallback: se non abbiamo membri, rettifica come singolo codice
-      if (!members.length) {
-        await adjustStockAbsoluteFromRow(r, newTotal);
-        r.qty = newTotal;
-        return;
-      }
-
-      // helper: item display
-      const itemFor = (code, fallback) => {
-        const c = String(code || "").trim();
-        const nm = getDisplayNameForCode(c, String(fallback || "").trim());
-        return String(nm || fallback || r.item || c || "").trim();
-      };
-
-      if (delta > 0) {
-        // aggiungi tutto sul membro con più stock (o il primo)
-        let best = members[0];
-        let bestQ = -1;
-        for (const m of members) {
-          const q = Math.max(0, qNorm(m && m.qty));
-          if (q > bestQ) { bestQ = q; best = m; }
-        }
-        const code = String((best && best.code) || r.code || "").trim();
-        const customer = String((best && best.customer) || r.customer || "").trim();
-        const item = itemFor(code, (best && best.item) || "");
-
-        const mv = makeMovement({
-          type: "IN",
-          customer,
-          code,
-          item,
-          qty: Math.abs(delta),
-          date: todayYYYYMMDD(),
-          note: noteBase,
-          warehouse: wh,
-          source: "Rettifica rapida (alias)",
-          rawText: ""
-        });
-
-        await addMovement(mv);
-
-        // optimistic UI: aggiorna membro scelto
-        try { if (best) best.qty = qNorm(best.qty) + Math.abs(delta); } catch(_){}
-      } else {
-        // scarica distribuendo sui membri (dal più grande al più piccolo)
-        let remaining = Math.abs(delta);
-        const sorted = members.slice().sort((a,b) => Math.max(0, qNorm(b && b.qty)) - Math.max(0, qNorm(a && a.qty)));
-
-        for (const m of sorted) {
-          if (remaining <= 0) break;
-          const have = Math.max(0, qNorm(m && m.qty));
-          if (have <= 0) continue;
-
-          const take = Math.min(have, remaining);
-          const code = String((m && m.code) || r.code || "").trim();
-          const customer = String((m && m.customer) || r.customer || "").trim();
-          const item = itemFor(code, (m && m.item) || "");
-
-          const mv = makeMovement({
-            type: "OUT",
-            customer,
-            code,
-            item,
-            qty: take,
-            date: todayYYYYMMDD(),
-            note: noteBase,
-            warehouse: wh,
-            source: "Rettifica rapida (alias)",
-            rawText: ""
-          });
-
-          await addMovement(mv);
-
-          // optimistic UI
-          try { if (m) m.qty = have - take; } catch(_){}
-          remaining -= take;
-        }
-      }
-
-      // optimistic total
-      r.qty = newTotal;
-
-      // (non chiamiamo renderAll qui: su Firebase arriva dal listener; offline viene già gestito da addMovement)
-      showToast(`Quantità aggiornata (totale ${oldTotal}→${newTotal})`);
     }
 
     function renderMovementsTable() {
@@ -7059,7 +6868,7 @@ function renderSupplierFieldsUI(sup, isEdit) {
     if (isEdit) {
       cells.push(`
         <div class="field"${style}>
-          <label for="supEdit_${h(f.k)}">${label}</label>
+          <label>${label}</label>
           <input id="supEdit_${h(f.k)}" value="${h(v || "")}" ${f.required ? 'required' : ''} />
         </div>
       `);
@@ -7595,7 +7404,7 @@ async function deleteSupplierCascade(supplierId){
 
         prodFields.innerHTML = `
           <div class="field" style="grid-column: 1 / -1;">
-            <label for="prodGroupAlias">Alias (unifica codici)</label>
+            <label>Alias (unifica codici)</label>
             <div class="qty-editor" style="justify-content:flex-start;">
               <input id="prodGroupAlias" class="qtyEditInput" type="text" placeholder="Es. tappo d50" value="${escapeHtmlAttr(alias)}" />
               <button id="prodGroupAliasSave" class="btn btn-primary btn-xs" type="button">Applica a tutti</button>
@@ -7607,7 +7416,7 @@ async function deleteSupplierCascade(supplierId){
           </div>
 
           <div class="field" style="grid-column: 1 / -1;">
-            <div class="fieldLabel">Articoli raggruppati</div>
+            <label>Articoli raggruppati</label>
             <div class="tableWrap" style="max-height: 320px; overflow:auto;">
               <table>
                 <thead>
@@ -7707,12 +7516,11 @@ async function deleteSupplierCascade(supplierId){
 
 
     function openProductModal(id, ctx) {
-      window.__invDbg && window.__invDbg("[INV-DBG] openProductModal ENTER", {id, ctx});
-      if (!modalProduct) { window.__invDbg && window.__invDbg("[INV-DBG] openProductModal ABORT: modalProduct missing"); return; }
+      if (!modalProduct) return;
 
       const mode = (ctx && ctx.__mode) ? String(ctx.__mode) : ""; // "master" | ""
       const code = String((ctx && ctx.code) || id || "").trim();
-      if (!code) { window.__invDbg && window.__invDbg("[INV-DBG] openProductModal ABORT: empty code", {id, ctx}); return; }
+      if (!code) return;
 
       const p = findProductByCode(code) || (products || []).find(x => x && (x.id === id)) || null;
 
@@ -7735,7 +7543,7 @@ async function deleteSupplierCascade(supplierId){
 
       const headerHtml = `
         <div class="field" style="grid-column: 1 / -1;">
-          <label for="prodNameEdit">Nome (DB)</label>
+          <label>Nome (DB)</label>
           <div class="qty-editor" style="justify-content:flex-start;">
             <input id="prodNameEdit" class="qtyEditInput" type="text" value="${escapeHtmlAttr(nameVal)}" />
             <button id="prodNameSave" class="btn btn-primary btn-xs" type="button" disabled>Salva</button>
@@ -7744,7 +7552,7 @@ async function deleteSupplierCascade(supplierId){
         </div>
 
         <div class="field" style="grid-column: 1 / -1;">
-          <label for="prodAliasEdit">Alias</label>
+          <label>Alias</label>
           <div class="qty-editor" style="justify-content:flex-start;">
             <input id="prodAliasEdit" class="qtyEditInput" type="text" placeholder="${escapeHtmlAttr(aliasHint)}" value="${escapeHtmlAttr(alias)}" />
             <button id="prodAliasSave" class="btn btn-primary btn-xs" type="button">Salva</button>
@@ -7758,16 +7566,16 @@ async function deleteSupplierCascade(supplierId){
       if (!mode && isStockCtx && !isAliasGroup) {
         baseFields.push(`
           <div class="field">
-            <label for="prodCustomerView">Cliente</label>
-            <input id="prodCustomerView" value="${h((ctx && ctx.customer) || "")}" readonly />
+            <label>Cliente</label>
+            <input value="${h((ctx && ctx.customer) || "")}" readonly />
           </div>
         `);
       }
 
       baseFields.push(`
         <div class="field">
-          <label for="prodCodeView">Codice</label>
-          <input id="prodCodeView" value="${h(code)}" readonly />
+          <label>Codice</label>
+          <input value="${h(code)}" readonly />
         </div>
       `);
 
@@ -7786,8 +7594,8 @@ if (mode === "master") {
 
   baseFields.push(`
     <div class="field" style="grid-column: 1 / -1;">
-      <label for="prodSupplierView">Fornitore (ultimo carico)</label>
-      <input id="prodSupplierView" value="${h(supName)}" readonly />
+      <label>Fornitore (ultimo carico)</label>
+      <input value="${h(supName)}" readonly />
       <div class="td-muted" style="margin-top:6px;">
         ${meta ? meta : (supInfo ? "Derivato dall’ultimo documento di carico per questo codice." : "Nessun documento di carico trovato per questo codice.")}
       </div>
@@ -7796,7 +7604,7 @@ if (mode === "master") {
 }
       baseFields.push(`
         <div class="field" style="grid-column: 1 / -1;">
-          <label for="prodCategorySelect">Categoria (macro)</label>
+          <label>Categoria (macro)</label>
           <select id="prodCategorySelect">
             <option value="">Non assegnata</option>
             ${MACRO_CATEGORIES.map(c => `<option value="${h(c)}">${h(macroCatLabel(c))}</option>`).join("")}
@@ -7812,25 +7620,12 @@ if (mode === "master") {
         const sumQty = Number(ctx.qty || 0);
         const thr = Number(ctx.threshold || 0);
 
-        const membersList = (members.length ? members.slice() : codes.map(c => ({ code: c })));
-        membersList.sort((a,b) => {
-          const ac = String((a && a.customer) || "").trim();
-          const bc = String((b && b.customer) || "").trim();
-          const byCust = ac.localeCompare(bc, "it", { sensitivity: "base" });
-          if (byCust) return byCust;
-          const aa = String((a && a.code) || "").trim();
-          const bb = String((b && b.code) || "").trim();
-          return aa.localeCompare(bb, "it", { sensitivity: "base" });
-        });
-        
-        const membersHtml = membersList.map(m => {
+        const membersHtml = (members.length ? members : codes.map(c => ({ code: c }))).map(m => {
           const c = String(m.code || "").trim();
           const nm = getDisplayNameForCode(c, m.item || "");
-          const cust = String(m.customer || "").trim();
           const q = (m.qty !== undefined) ? safeInt(m.qty).toLocaleString("it-IT") : "—";
           return `
             <tr>
-              <td data-label="Fornitore">${escapeHtml(cust || "—")}</td>
               <td data-label="Codice"><span class="kbd">${escapeHtml(c)}</span></td>
               <td data-label="Nome">${escapeHtml(nm || "—")}</td>
               <td data-label="Pezzi" class="qty">${escapeHtml(q)}</td>
@@ -7843,18 +7638,17 @@ if (mode === "master") {
 
         groupHtml = `
           <div class="field" style="grid-column: 1 / -1;">
-            <label for="aliasStockTotal_${escapeHtmlAttr(wh)}">Stock totale (alias) — ${h(warehouseLabel(wh))}</label>
-            <input id="aliasStockTotal_${escapeHtmlAttr(wh)}" value="${Number(sumQty||0).toLocaleString("it-IT")} pezzi (soglia min ${Number(thr||0).toLocaleString("it-IT")})" readonly />
-            <div class="td-muted" style="margin-top:6px;">Per rettifiche: puoi modificare il totale dalla tabella inventario, oppure aprire un singolo codice dal gruppo.</div>
+            <label>Stock totale (alias)</label>
+            <input value="${Number(sumQty||0).toLocaleString("it-IT")} pezzi (soglia min ${Number(thr||0).toLocaleString("it-IT")})" readonly />
+            <div class="td-muted" style="margin-top:6px;">Per rettifiche: apri un singolo codice dal gruppo.</div>
           </div>
 
           <div class="field" style="grid-column: 1 / -1;">
-            <div class="fieldLabel">Articoli raggruppati</div>
+            <label>Articoli raggruppati</label>
             <div class="tableWrap" style="max-height: 320px; overflow:auto;">
               <table>
                 <thead>
                   <tr>
-                    <th style="width:220px">Fornitore</th>
                     <th style="width:180px">Codice</th>
                     <th>Nome</th>
                     <th class="qty" style="width:110px">Pezzi</th>
@@ -7878,7 +7672,7 @@ if (mode === "master") {
 
         stockHtml = `
           <div class="field">
-            <label for="prodQtyEdit">Pezzi in stock</label>
+            <label>Pezzi in stock</label>
             ${(ctx && (ctx.qty !== undefined))
               ? `<div class="qty-editor" style="justify-content:flex-start;">
                   <input id="prodQtyEdit" class="qtyEditInput" type="number" inputmode="numeric" min="0" step="1"
@@ -7890,7 +7684,7 @@ if (mode === "master") {
           </div>
 
           <div class="field">
-            <label for="prodThrEdit">Soglia sottoscorta</label>
+            <label>Soglia sottoscorta</label>
             <div class="qty-editor" style="justify-content:flex-start;">
               <input id="prodThrEdit" class="qtyEditInput" type="number" inputmode="numeric" min="0" step="1"
                 value="${safeInt((ctx && (ctx.threshold !== undefined)) ? ctx.threshold : getThresholdForKey(thrKey))}"
@@ -7903,16 +7697,16 @@ if (mode === "master") {
           </div>
 
           <div class="field">
-            <label for="prodLastMoveView">Ultimo mov.</label>
-            <input id="prodLastMoveView" value="${h(lastTxt)}" readonly />
+            <label>Ultimo mov.</label>
+            <input value="${h(lastTxt)}" readonly />
           </div>
           <div class="field">
-            <label for="prodUpdatedView">Aggiornato</label>
-            <input id="prodUpdatedView" value="${h(updTxt || "—")}" readonly />
+            <label>Aggiornato</label>
+            <input value="${h(updTxt || "—")}" readonly />
           </div>
 
           <div class="field" style="grid-column: 1 / -1;">
-            <div class="fieldLabel">Inventario</div>
+            <label>Inventario</label>
             <div class="inlineRow" style="justify-content: space-between; gap:10px; align-items:center; flex-wrap: wrap;">
               <input id="prodWarehouseMoveQty" class="qtyEditInput" type="number" inputmode="numeric" min="1" step="1"
                 value="${qtyVal}" data-orig="${qtyVal}" placeholder="Q.tà" style="max-width: 140px;" />
@@ -7933,7 +7727,7 @@ if (mode === "master") {
         const whLabel = wh ? warehouseLabel(wh) : "";
         invDangerHtml = `
           <div class="field" style="grid-column: 1 / -1;">
-            <div class="fieldLabel">Azioni (Inventario)</div>
+            <label>Azioni (Inventario)</label>
             <div class="inlineRow" style="justify-content:flex-end;">
               <button id="prodDeleteInventory" class="btn btn-danger" type="button">Elimina articolo</button>
             </div>
@@ -7950,7 +7744,7 @@ if (mode === "master") {
       if (mode === "master" && !isAliasGroup) {
         dangerHtml = `
           <div class="field" style="grid-column: 1 / -1;">
-            <div class="fieldLabel">Azioni</div>
+            <label>Azioni</label>
             <div class="inlineRow" style="justify-content:flex-end;">
               <button id="prodDelete" class="btn btn-danger" type="button">Elimina prodotto</button>
             </div>
@@ -8333,7 +8127,6 @@ if (mode === "master") {
         });
       }
 
-window.__invDbg && window.__invDbg("[INV-DBG] openProductModal OPEN", {code, isAliasGroup, alias});
 modalProduct.classList.add("open");
     }
 
@@ -9839,22 +9632,7 @@ searchStock.addEventListener("input", () => renderAll());
     // Click su riga stock: dettaglio + categoria
     if (stockTbody) {
       stockTbody.addEventListener("click", async (e) => {
-        const t = (e && e.target && e.target.nodeType === 1) ? e.target : (e && e.target && e.target.parentElement ? e.target.parentElement : null);
-        if (!t) return;
-        const btnOpen = t.closest("button.jsOpenDetail");
-        if (btnOpen) {
-          e.preventDefault();
-          e.stopPropagation();
-          const tr = btnOpen.closest("tr[data-k]");
-          if (!tr) return;
-          const k = tr.getAttribute("data-k") || "";
-          const row = __stockRowByKey.get(k);
-          if (!row) return;
-          openProductModal(row.code, row);
-          return;
-        }
-
-        const btnSave = t.closest("button.jsQtySave");
+        const btnSave = e.target.closest("button.jsQtySave");
         if (btnSave) {
           e.preventDefault();
           e.stopPropagation();
@@ -9883,14 +9661,9 @@ searchStock.addEventListener("input", () => renderAll());
           btnSave.disabled = true;
           btnSave.textContent = "Salvo…";
           try {
-            const isGroup = !!(row && row.__isAliasGroup && Array.isArray(row.__codes) && row.__codes.length > 1);
-            if (isGroup) {
-              await adjustStockAbsoluteFromAliasGroup(row, newQty);
-            } else {
-              await adjustStockAbsoluteFromRow(row, newQty);
-              // update in-memory row for immediate UI coherence
-              row.qty = newQty;
-            }
+            await adjustStockAbsoluteFromRow(row, newQty);
+            // update in-memory row for immediate UI coherence
+            row.qty = newQty;
             inp.dataset.orig = String(newQty);
             btnSave.textContent = "Salvato";
             setTimeout(() => { try { btnSave.textContent = "Salva"; } catch(_){} }, 600);
@@ -9904,14 +9677,13 @@ searchStock.addEventListener("input", () => renderAll());
           return;
         }
 
-        if (t.closest("input.jsQtyEdit")) return;
+        if (e.target.closest("input.jsQtyEdit")) return;
 
-        const tr = t.closest("tr[data-k]");
+        const tr = e.target.closest("tr[data-k]");
         if (!tr) return;
         const k = tr.getAttribute("data-k") || "";
         const row = __stockRowByKey.get(k);
-        if (!row) { window.__invDbg && window.__invDbg("[INV-DBG] stock row click: row not found", {k}); return; }
-        window.__invDbg && window.__invDbg("[INV-DBG] stock row click -> openProductModal", {k, code: row.code, isAliasGroup: row.__isAliasGroup, codes: row.__codes});
+        if (!row) return;
         openProductModal(row.code, row);
       });
 
