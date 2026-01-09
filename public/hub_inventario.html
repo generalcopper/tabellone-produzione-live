@@ -6374,19 +6374,23 @@ function getMacroCategoryForCode(code) {
           const gk = aliasKey ? ("alias:" + aliasKey) : ("code:" + code.toLowerCase());
 
           const wh = normalizeWarehouse(r.warehouse || "");
-          const cust = String(r.customer || "").trim().toLowerCase();
-          const k = `${wh}||${cust}||${gk}`;
+          const cust = String(r.customer || "").trim();
+          const custKey = cust.toLowerCase();
+
+          // Per alias unificati: ignora customer così in inventario si vede UN SOLO articolo unificato
+          const k = aliasKey ? `${wh}||${gk}` : `${wh}||${custKey}||${gk}`;
 
           let g = map.get(k);
           if (!g) {
             g = {
-              customer: r.customer || "",
+              customer: cust || "",
               warehouse: wh,
               __groupKey: gk,
               __isAliasGroup: !!aliasKey,
               __alias: alias,
               __codes: [],
               __members: [],
+              __customers: [],
               __bothZero: (r && r.__bothZero) === true,
               code: code, // primary (will be overwritten below)
               item: "",
@@ -6404,6 +6408,7 @@ function getMacroCategoryForCode(code) {
 
           g.__codes.push(code);
           g.__members.push(Object.assign({}, r));
+          if (cust) g.__customers.push(cust);
           g.__bothZero = (g.__bothZero === true) && ((r && r.__bothZero) === true);
           map.set(k, g);
         }
@@ -6413,6 +6418,12 @@ function getMacroCategoryForCode(code) {
           const codes = Array.from(new Set(g.__codes.filter(Boolean)));
           g.__codes = codes;
           g.code = codes[0] || "";
+
+          const custs = Array.from(new Set((g.__customers || []).map(x => String(x||"").trim()).filter(Boolean)));
+          g.__customers = custs;
+          if (custs.length === 1) g.customer = custs[0];
+          else g.customer = "";
+
           g.item = g.__isAliasGroup ? (g.__alias || getDisplayNameForCode(g.code, "")) : getDisplayNameForCode(g.code, "");
           g.__displayCode = g.__isAliasGroup && codes.length > 1 ? `${g.code} (+${codes.length-1})` : g.code;
         });
@@ -6422,6 +6433,7 @@ function getMacroCategoryForCode(code) {
         return Array.isArray(rows) ? rows : [];
       }
     }
+
 
 let __stockRowByKey = new Map();
 
@@ -6446,7 +6458,8 @@ let __stockRowByKey = new Map();
           r.item || "",
           r.__alias || "",
           ...(Array.isArray(r.__codes) ? r.__codes : []),
-          ...(Array.isArray(r.__members) ? r.__members.map(m => (m.item || "")) : [])
+          ...(Array.isArray(r.__members) ? r.__members.map(m => (m.item || "")) : []),
+          ...(Array.isArray(r.__members) ? r.__members.map(m => (m.customer || "")) : [])
         ].join(" ");
         return normTextKey(hay).includes(q);
       });
@@ -7550,7 +7563,7 @@ async function deleteSupplierCascade(supplierId){
 
       // --- Core fields ---
       const baseFields = [];
-      if (!mode && isStockCtx) {
+      if (!mode && isStockCtx && !isAliasGroup) {
         baseFields.push(`
           <div class="field">
             <label>Cliente</label>
