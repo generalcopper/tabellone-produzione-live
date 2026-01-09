@@ -3197,6 +3197,9 @@ document.getElementById("btnCloseAnag")?.addEventListener("click", (e) => { try{
       movementType: "IN" // IN/OUT
     };
 
+    // OCR session token: increment to cancel any in-flight OCR processing
+    let __ocrSessionToken = 0;
+
 
     /****************************************************************
      * Firebase runtime state
@@ -4230,7 +4233,95 @@ async function deleteMovementsBulk(ids) {
       }
 
       const blob = await window.heic2any({ blob: file, toType: "image/jpeg", quality: 0.92 });
-      return new File([blob], (file.name || "photo").replace(/\.(heic|heif)$/i, ".jpg"), { type: "image/jpeg" });
+      return
+
+    // ===== OCR speed-up (client-side) =====
+    // Riduce tempo di upload + tempo server: ridimensiona e comprime l'immagine prima di inviarla all'OCR.
+    function __ocrMaxDim(){
+      const v = Number(state && state.settings && state.settings.ocrMaxDim);
+      if (Number.isFinite(v) && v >= 1200 && v <= 4200) return Math.round(v);
+      return 2200; // default: veloce ma leggibile
+    }
+    function __ocrJpegQuality(){
+      const v = Number(state && state.settings && state.settings.ocrJpegQ);
+      if (Number.isFinite(v) && v >= 0.5 && v <= 0.98) return v;
+      return 0.82;
+    }
+    function __ocrParallel(){
+      const v = Number(state && state.settings && state.settings.ocrParallel);
+      if (Number.isFinite(v) && v >= 1 && v <= 3) return Math.round(v);
+      const hc = Number(navigator && navigator.hardwareConcurrency || 4);
+      return (hc >= 6) ? 2 : 1;
+    }
+    function __canvasToBlob(canvas, type, quality){
+      return new Promise((resolve) => {
+        try { canvas.toBlob((b) => resolve(b), type, quality); }
+        catch(_){ resolve(null); }
+      });
+    }
+    async function maybeOptimizeForOCR(file){
+      try{
+        if (!file) return file;
+        const type = String(file.type || "").toLowerCase();
+        if (!type.startsWith("image/")) return file;
+
+        const bytes = Number(file.size || 0);
+        const isJpeg = type.includes("jpeg") || type.includes("jpg");
+        // Se è già un JPEG piccolo, non fare nulla
+        if (isJpeg && bytes > 0 && bytes <= 1400 * 1024) return file;
+
+        const maxDim = __ocrMaxDim();
+        const jpegQ  = __ocrJpegQuality();
+
+        let bmp = null;
+        try{
+          bmp = await createImageBitmap(file, { imageOrientation: "from-image" });
+        }catch(_){
+          bmp = await createImageBitmap(file);
+        }
+
+        const w = bmp.width || 0;
+        const h = bmp.height || 0;
+        const m = Math.max(w, h);
+
+        // Se è già in range e JPEG, evita re-encode (risparmia tempo client)
+        if (isJpeg && m > 0 && m <= maxDim && bytes > 0 && bytes <= 2200 * 1024){
+          try{ bmp.close && bmp.close(); }catch(_){}
+          return file;
+        }
+
+        const scale = (m > maxDim && m > 0) ? (maxDim / m) : 1;
+        const tw = Math.max(1, Math.round(w * scale));
+        const th = Math.max(1, Math.round(h * scale));
+
+        const canvas = document.createElement("canvas");
+        canvas.width = tw;
+        canvas.height = th;
+
+        const ctx = canvas.getContext("2d", { alpha: false });
+        ctx.fillStyle = "#ffffff";
+        ctx.fillRect(0, 0, tw, th);
+        try{
+          ctx.imageSmoothingEnabled = true;
+          ctx.imageSmoothingQuality = "high";
+        }catch(_){}
+        ctx.drawImage(bmp, 0, 0, tw, th);
+
+        try{ bmp.close && bmp.close(); }catch(_){}
+
+        const blob = await __canvasToBlob(canvas, "image/jpeg", jpegQ);
+        if (!blob) return file;
+
+        const base = String(file.name || "scan").replace(/\.(heic|heif|png|jpg|jpeg|webp|bmp|tif|tiff)$/i, "") || "scan";
+        const name = base + ".jpg";
+        return new File([blob], name, { type: "image/jpeg", lastModified: file.lastModified || Date.now() });
+      }catch(e){
+        console.warn("maybeOptimizeForOCR skipped", e);
+        return file;
+      }
+    }
+
+ new File([blob], (file.name || "photo").replace(/\.(heic|heif)$/i, ".jpg"), { type: "image/jpeg" });
     }
 
     async function runGeminiOCR(imageFile) {
@@ -7943,6 +8034,7 @@ modalProduct.classList.add("open");
     }
 
     function resetCapture() {
+      try { __ocrSessionToken++; } catch(_) { __ocrSessionToken = 1; }
       capture.files = [];
       capture.rawPages = [];
       capture.structuredPages = [];
@@ -8136,6 +8228,7 @@ async function handleFileSelection(fileList) {
       try{
         document.getElementById("viewOcr")?.classList.add("hasScan");
       }catch(_){}
+
       // allow re-select same file again
       try { cameraInput.value = ""; } catch(_){}
       try { galleryInput.value = ""; } catch(_){}
@@ -8178,47 +8271,78 @@ async function handleFileSelection(fileList) {
       progressLabel.textContent = "Preparazione…";
       progressFill.style.width = "10%";
 
+      // session token (cancella eventuali OCR in corso)
+      const myToken = ++__ocrSessionToken;
+
       try {
         try { imagePreview.classList.add("decrypting"); } catch(_) {}
 
         const total = capture.files.length;
+        let doneNow = 0;
 
-        for (let i = startIdx; i < capture.files.length; i++) {
-          const pageNum = i + 1;
-          progressLabel.textContent = `OCR pagina ${pageNum}/${total}…`;
+        const parallel = Math.max(1, Math.min(2, __ocrParallel()));
+
+        const queue = [];
+        for (let i = startIdx; i < capture.files.length; i++) queue.push(i);
+
+        const refreshPreviewIfActive = (i, f) => {
+          try{
+            if (capture.activePageIndex === i) {
+              capture.file = f;
+              const url2 = URL.createObjectURL(f);
+              previewImg.src = url2;
+              previewImg.onload = () => URL.revokeObjectURL(url2);
+            }
+          }catch(_){}
+        };
+
+        const afterOne = () => {
+          if (__ocrSessionToken !== myToken) throw new Error("OCR annullato");
+          doneNow++;
+
+          // live update combined result (tutte le pagine nello stesso documento)
+          __rebuildCombinedOCR();
+
+          const processed = startIdx + doneNow;
+          const pct = Math.min(95, Math.round(10 + 85 * (processed / Math.max(1, total))));
+          progressFill.style.width = pct + "%";
+          progressLabel.textContent = `OCR in corso… ${processed}/${total}`;
+
+          __renderPagesUI();
+        };
+
+        const processOne = async (i) => {
+          if (__ocrSessionToken !== myToken) return;
 
           // convert if HEIC
-          const converted = await maybeConvertHeic(capture.files[i]);
-          capture.files[i] = converted;
+          let f = await maybeConvertHeic(capture.files[i]);
 
-          // refresh preview if active page was converted
-          if (capture.activePageIndex === i) {
-            capture.file = converted;
-            const url2 = URL.createObjectURL(converted);
-            previewImg.src = url2;
-            previewImg.onload = () => URL.revokeObjectURL(url2);
-          }
+          // optimize (resize + JPEG compress)
+          f = await maybeOptimizeForOCR(f);
 
-          const data = await runGeminiOCR(converted);
+          capture.files[i] = f;
+          refreshPreviewIfActive(i, f);
+
+          const data = await runGeminiOCR(f);
 
           const text = (data && (data.text || data.rawText || data.raw || "")) || "";
           capture.rawPages[i] = String(text || "");
           capture.structuredPages[i] = (data && data.structured) ? data.structured : null;
 
-          // live update combined result (tutte le pagine nello stesso documento)
-          const parts = Array.isArray(capture.rawPages) ? capture.rawPages.filter(t => t && String(t).trim()) : [];
-          capture.rawText = parts.join("\n\n");
-          ocrResult.value = capture.rawText;
+          afterOne();
+        };
 
-          const merged = __mergeStructuredPages(capture.structuredPages);
-          renderDocExtract(merged, capture.rawText);
+        const worker = async () => {
+          while (queue.length) {
+            if (__ocrSessionToken !== myToken) return;
+            const i = queue.shift();
+            await processOne(i);
+          }
+        };
 
-          const done = parts.length;
-          const pct = Math.min(95, Math.round(10 + 85 * (done / Math.max(1, total))));
-          progressFill.style.width = pct + "%";
+        await Promise.all(Array.from({ length: parallel }, () => worker()));
 
-          __renderPagesUI();
-        }
+        if (__ocrSessionToken !== myToken) return;
 
         const merged = __mergeStructuredPages(capture.structuredPages);
 
@@ -8267,6 +8391,15 @@ async function handleFileSelection(fileList) {
       } catch (e) {
         try { imagePreview.classList.remove("decrypting"); } catch(_) {}
         console.error(e);
+
+        if (String(e && e.message || "").toLowerCase().includes("annullato")) {
+          progressFill.style.width = "0%";
+          progressLabel.textContent = "OCR annullato";
+          if (progressSpinner) progressSpinner.style.display = "none";
+          setOcrPill("warn", "OCR: annullato");
+          return;
+        }
+
         progressFill.style.width = "0%";
         progressLabel.textContent = "Errore OCR";
         if (progressSpinner) progressSpinner.style.display = "none";
