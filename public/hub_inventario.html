@@ -5132,6 +5132,61 @@ function getThresholdForKey(k) {
     }
 
 
+
+    // Aggiunge più movimenti in un colpo solo (utile per rettifiche su articoli unificati)
+    async function addMovementsBatch(movements) {
+      const list = (Array.isArray(movements) ? movements : []).filter(Boolean);
+      if (!list.length) return;
+
+      // realtime (Firestore)
+      if (fb.user && fb.db) {
+        let hadLocalFallback = false;
+        for (const mv of list) {
+          try {
+            const payload = {
+              type: mv.type || "IN",
+              customer: mv.customer || "",
+              code: mv.code || "",
+              item: mv.item || "",
+              qty: safeInt(mv.qty),
+              date: mv.date || "",
+              note: mv.note || "",
+              source: mv.source || "Manual",
+              rawText: mv.rawText || "",
+
+              warehouse: normalizeWarehouse(mv.warehouse || ""),
+
+              docType: mv.docType || "",
+              docNum: mv.docNum || "",
+              docDateRaw: mv.docDateRaw || "",
+              lineIndex: safeInt(mv.lineIndex),
+              docPages: __sanitizeDocPages(mv.docPages || mv.docImages),
+              supplierVat: mv.supplierVat || "",
+              docNumKey: mv.docNumKey || "",
+              ddtTripletKey: mv.ddtTripletKey || "",
+              createdAt: serverTimestamp(),
+              createdBy: fb.user.email || fb.user.uid
+            };
+            await addDoc(orgCol("inventoryMovements"), payload);
+          } catch (e) {
+            console.error("movement batch write failed, fallback local", e);
+            hadLocalFallback = true;
+            showToast("Errore sync: salvo in locale", "warn");
+            try { state.movements.push(mv); } catch(_){}
+          }
+        }
+        if (hadLocalFallback) {
+          try { saveLocalData(); renderAll(); } catch(_){}
+        }
+        return; // listener aggiorna UI per i movimenti scritti su cloud
+      }
+
+      // local fallback
+      state.movements.push(...list);
+      saveLocalData();
+      renderAll();
+    }
+
     async function addMovement(mv) {
       // realtime (Firestore)
       if (fb.user && fb.db) {
@@ -6523,9 +6578,7 @@ let __stockRowByKey = new Map();
 
         const isGroup = (r.__isAliasGroup && Array.isArray(r.__codes) && r.__codes.length > 1);
 
-        const qtyCell = isGroup
-          ? `<div class="qty-editor" style="justify-content:flex-end;"><span style="font-weight:900; color:${qtyColor};">${Number(qtyVal).toLocaleString("it-IT")}</span></div>`
-          : `
+        const qtyCell = `
             <div class="qty-editor">
               <input class="qtyEditInput jsQtyEdit" type="number" inputmode="numeric" min="0" step="1"
                 value="${qtyVal}" data-orig="${qtyVal}" style="color:${qtyColor}" />
@@ -6576,6 +6629,114 @@ let __stockRowByKey = new Map();
       await addMovement(mv);
       showToast(`Quantità aggiornata (${oldQty}→${newQty})`);
     }
+
+
+    // Rettifica quantità per ARTICOLO UNIFICATO (alias group):
+    // - Il totale mostrato è la somma dei membri (codici) nella stessa sede
+    // - Se aumento: carico sul membro "primario" (o il primo disponibile)
+    // - Se diminuisco: scarico distribuendo sui membri (parto da quello con più pezzi)
+    async function adjustStockAbsoluteFromAliasGroupRow(row, newAbsQty) {
+      const g = row || {};
+      const oldTotal = safeInt(g.qty);
+      let newTotal = safeInt(newAbsQty);
+      if (!Number.isFinite(newTotal) || newTotal < 0) newTotal = 0;
+
+      const delta = newTotal - oldTotal;
+      if (!delta) return;
+
+      const wh = normalizeWarehouse(g.warehouse || __currentWarehouse || "");
+      const noteBase = `Rettifica inventario (alias): totale da ${oldTotal} a ${newTotal}`;
+
+      const membersRaw = Array.isArray(g.__members) ? g.__members.slice() : [];
+      const members = membersRaw.map(m => ({
+        customer: String(m && m.customer || "").trim(),
+        code: String(m && m.code || "").trim(),
+        item: String(m && m.item || "").trim(),
+        qty: safeInt(m && m.qty),
+        warehouse: normalizeWarehouse((m && m.warehouse) || wh)
+      })).filter(m => !!m.code);
+
+      if (!members.length) {
+        // fallback (non dovrebbe succedere): usa la riga così com'è
+        await adjustStockAbsoluteFromRow(g, newTotal);
+        return;
+      }
+
+      // Customer fallback (non creare mai un "nuovo" cliente vuoto se posso evitarlo)
+      const custFallback = Array.isArray(g.__customers)
+        ? String(g.__customers.find(x => String(x || "").trim()) || "").trim()
+        : "";
+
+      const mvs = [];
+
+      if (delta > 0) {
+        // Preferisci il codice primario
+        const primaryCode = String(g.code || "").trim();
+        let target = members.find(m => m.code === primaryCode && m.customer) ||
+                     members.find(m => m.code === primaryCode) ||
+                     members.find(m => m.customer) ||
+                     members[0];
+
+        const cust = target.customer || custFallback || String(g.customer || "").trim();
+        const code = target.code || primaryCode || String(g.code || "").trim();
+        const item = target.item || String(g.item || "") || code;
+
+        mvs.push(makeMovement({
+          type: "IN",
+          customer: cust,
+          code,
+          item,
+          qty: Math.abs(delta),
+          date: todayYYYYMMDD(),
+          note: noteBase,
+          warehouse: wh,
+          source: "Rettifica rapida",
+          rawText: ""
+        }));
+      } else {
+        let remaining = Math.abs(delta);
+        const available = members.reduce((sum, m) => sum + safeInt(m.qty), 0);
+        if (available < remaining) {
+          showToast("Errore: lo stock del gruppo non è sufficiente per questa rettifica", "err");
+          return;
+        }
+
+        const sorted = members.slice().sort((a, b) => safeInt(b.qty) - safeInt(a.qty));
+
+        for (const m of sorted) {
+          if (remaining <= 0) break;
+          const take = Math.min(safeInt(m.qty), remaining);
+          if (!take) continue;
+
+          const cust = m.customer || custFallback || String(g.customer || "").trim();
+          const code = m.code || String(g.code || "").trim();
+          const item = m.item || String(g.item || "") || code;
+
+          mvs.push(makeMovement({
+            type: "OUT",
+            customer: cust,
+            code,
+            item,
+            qty: take,
+            date: todayYYYYMMDD(),
+            note: noteBase,
+            warehouse: wh,
+            source: "Rettifica rapida",
+            rawText: ""
+          }));
+
+          remaining -= take;
+        }
+      }
+
+      if (!mvs.length) return;
+
+      // Batch write (1 render locale invece di N)
+      await addMovementsBatch(mvs);
+
+      showToast(`Quantità aggiornata (${oldTotal}→${newTotal})`);
+    }
+
 
     function renderMovementsTable() {
       const max = Math.max(5, Math.floor(Number(state.settings.maxRecent) || 30));
@@ -9721,7 +9882,11 @@ searchStock.addEventListener("input", () => renderAll());
           btnSave.disabled = true;
           btnSave.textContent = "Salvo…";
           try {
-            await adjustStockAbsoluteFromRow(row, newQty);
+            if (row && row.__isAliasGroup && Array.isArray(row.__codes) && row.__codes.length > 1) {
+              await adjustStockAbsoluteFromAliasGroupRow(row, newQty);
+            } else {
+              await adjustStockAbsoluteFromRow(row, newQty);
+            }
             // update in-memory row for immediate UI coherence
             row.qty = newQty;
             inp.dataset.orig = String(newQty);
