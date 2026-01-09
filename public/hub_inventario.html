@@ -320,6 +320,19 @@
     .qty-editor input.jsQtyEdit{ width: 92px; max-width: 110px; text-align:right; }
     .qty-editor button.jsQtySave{ white-space: nowrap; }
 
+    /* Flow edit (DDT Caricati): input codice / articolo */
+    #flowEditItemsTable .flowCellInput{
+      width: 100%;
+      min-width: 0;
+      font-weight: 800;
+    }
+    #flowEditItemsTable td[data-label="Codice"] .flowCellInput{
+      max-width: 220px;
+    }
+    #flowEditItemsTable td[data-label="Articolo"] .flowCellInput{
+      max-width: none;
+    }
+
     .badge { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px; border: 1px solid rgba(12,22,52,.10); background: rgba(0,0,0,.03); font-size: 12px; font-weight: 900; color: rgba(0,0,0,.72); }
     .badge.in { border-color: rgba(37,185,79,.25); background: rgba(37,185,79,.10); color: rgba(0,70,20,.88); }
     .badge.out { border-color: rgba(255,59,48,.22); background: rgba(255,59,48,.10); color: rgba(110,0,0,.86); }
@@ -2483,7 +2496,7 @@ td.td-actions{ white-space: normal !important; }
       <div class="inlineRow" style="justify-content:space-between; align-items:flex-end; gap:12px;">
         <div class="stack" style="flex:1; min-width: 220px;">
           <div class="hero-sub">DDT caricati</div>
-          <div class="muted">Click su un DDT per vedere i prodotti contenuti</div>
+          <div class="muted">Click su un DDT per modificarlo</div>
         </div>
         <button class="btn btn-secondary" id="btnFlowsExport" type="button">Esporta CSV</button>
       </div>
@@ -2496,11 +2509,10 @@ td.td-actions{ white-space: normal !important; }
               <th>Fornitore</th>
               <th class="qty">Righe</th>
               <th class="qty">Pezzi</th>
-              <th>Azioni</th>
             </tr>
           </thead>
           <tbody id="flowsTbody">
-            <tr><td class="td-muted" colspan="5">Nessun flusso ancora.</td></tr>
+            <tr><td class="td-muted" colspan="4">Nessun flusso ancora.</td></tr>
           </tbody>
         </table>
       </div>
@@ -2843,10 +2855,11 @@ td.td-actions{ white-space: normal !important; }
   </div>
 
   <div class="td-muted" style="font-size:12px;">
-    Modifica <strong>Pezzi</strong> e premi <span class="kbd">Invio</span> (o esci dal campo) per salvare. Il tasto <strong>–</strong> elimina la singola riga dal flusso.
+    Modifica <strong>Codice</strong>, <strong>Articolo</strong> e <strong>Pezzi</strong> e premi <span class="kbd">Salva</span> per applicare tutte le modifiche.
+    Il tasto <strong>–</strong> elimina la singola riga dal flusso (solo se ci sono più righe).
   </div>
 </div>
-      <div class="inlineRow" style="justify-content: space-between; margin-top: 12px;">
+      <div class="inlineRow style="justify-content: space-between; margin-top: 12px;">
         <button class="btn btn-danger" id="btnDeleteFlowFromEdit" type="button">Elimina flusso</button>
         <div class="inlineRow" style="justify-content:flex-end;">
           <button class="btn btn-secondary" id="btnCancelFlowEdit" type="button">Annulla</button>
@@ -3985,19 +3998,32 @@ function renderFlowEditItems(groupMaybe){
       return;
     }
 
-    flowEditItemsTbody.innerHTML = rows.map(r => `
-      <tr data-mvid="${escapeHtmlAttr(r.id)}">
-        <td data-label="">
-          <button class="rowMinus jsFlowRowDelete" type="button" data-id="${escapeHtmlAttr(r.id)}" title="Elimina riga">−</button>
-        </td>
-        <td data-label="Codice"><span class="kbd">${escapeHtml(r.code || "—")}</span></td>
-        <td data-label="Articolo">${escapeHtml(r.item || "—")}</td>
-        <td data-label="Pezzi" class="qty">
-          <input class="qtyEditInput jsFlowQtyInput" type="number" inputmode="numeric" min="0" step="1"
-            value="${safeInt(r.qty)}" data-id="${escapeHtmlAttr(r.id)}" data-orig="${safeInt(r.qty)}" />
-        </td>
-      </tr>
-    `).join("");
+    const canDelete = rows.length > 1;
+
+    flowEditItemsTbody.innerHTML = rows.map(r => {
+      const minusHtml = canDelete
+        ? `<button class="rowMinus jsFlowRowDelete" type="button" data-id="${escapeHtmlAttr(r.id)}" title="Elimina riga">−</button>`
+        : ``;
+
+      return `
+        <tr data-mvid="${escapeHtmlAttr(r.id)}">
+          <td data-label="">${minusHtml}</td>
+          <td data-label="Codice">
+            <input class="qtyEditInput flowCellInput jsFlowCodeInput" type="text"
+              value="${escapeHtmlAttr(r.code || "")}" data-id="${escapeHtmlAttr(r.id)}" data-orig="${escapeHtmlAttr(r.code || "")}" />
+          </td>
+          <td data-label="Articolo">
+            <input class="qtyEditInput flowCellInput jsFlowItemInput" type="text"
+              value="${escapeHtmlAttr(r.item || "")}" data-id="${escapeHtmlAttr(r.id)}" data-orig="${escapeHtmlAttr(r.item || "")}" />
+          </td>
+          <td data-label="Pezzi" class="qty">
+            <input class="qtyEditInput jsFlowQtyInput" type="number" inputmode="numeric" min="0" step="1"
+              value="${safeInt(r.qty)}" data-id="${escapeHtmlAttr(r.id)}" data-orig="${safeInt(r.qty)}" />
+          </td>
+        </tr>
+      `;
+    }).join("");
+
   }catch(e){
     console.warn("renderFlowEditItems failed", e);
   }
@@ -4135,25 +4161,237 @@ async function deleteMovementsBulk(ids) {
       const g = __docGroupsMap.get(String(__currentFlowEditKey || ""));
       if (!g) { showToast("Flusso non trovato"); return; }
 
-      const customer = String(flowEditCustomer ? flowEditCustomer.value : "").trim();
-      const date = String(flowEditDate ? flowEditDate.value : "").trim();
-      const note = String(flowEditNote ? flowEditNote.value : "").trim();
+      const customerNew = String(flowEditCustomer ? flowEditCustomer.value : "").trim();
+      const dateNew = String(flowEditDate ? flowEditDate.value : "").trim();
+      const noteNew = String(flowEditNote ? flowEditNote.value : "").trim();
 
-      if (!customer) return openModal("Dato mancante", "Inserisci il fornitore.");
-      if (!date) return openModal("Dato mancante", "Inserisci la data.");
+      if (!customerNew) return openModal("Dato mancante", "Inserisci il fornitore.");
+      if (!dateNew) return openModal("Dato mancante", "Inserisci la data.");
 
-      const ids = (g.movements || []).map(m => m.id).filter(Boolean);
+      // Leggi righe dal modale (codice / articolo / qty)
+      const rowsEls = Array.from(flowEditItemsTbody ? flowEditItemsTbody.querySelectorAll('tr[data-mvid]') : []);
+      const rowDrafts = [];
+      for (const tr of rowsEls) {
+        const id = String(tr.getAttribute("data-mvid") || "").trim();
+        if (!id) continue;
+
+        const codeInp = tr.querySelector("input.jsFlowCodeInput");
+        const itemInp = tr.querySelector("input.jsFlowItemInput");
+        const qtyInp  = tr.querySelector("input.jsFlowQtyInput");
+
+        const code = String(codeInp ? codeInp.value : "").trim();
+        const item = String(itemInp ? itemInp.value : "").trim();
+        let qty = safeInt(qtyInp ? qtyInp.value : 0);
+        if (!Number.isFinite(qty) || qty < 0) qty = 0;
+
+        const origCode = String(codeInp ? (codeInp.dataset.orig || "") : "").trim();
+        const origItem = String(itemInp ? (itemInp.dataset.orig || "") : "").trim();
+
+        if (!code || !item) {
+          openModal("Dati mancanti", "Ogni riga deve avere Codice e Articolo.");
+          return;
+        }
+
+        rowDrafts.push({ id, code, item, qty, origCode, origItem });
+      }
+
+      const idsAll = (g.movements || []).map(m => m && m.id).filter(Boolean);
+      if (!idsAll.length) { showToast("Nessuna riga da salvare"); return; }
+
+      const basePatch = { customer: customerNew, date: dateNew, note: noteNew };
+
+      // Un solo giro di update: patch base su TUTTE le righe, e patch specifica su quelle visibili nel modale
+      const patchById = new Map(idsAll.map(id => [String(id), Object.assign({}, basePatch)]));
+
+      for (const r of rowDrafts) {
+        const p = patchById.get(r.id) || Object.assign({}, basePatch);
+        p.code = r.code;
+        p.item = r.item;
+        p.qty  = safeInt(r.qty);
+        patchById.set(r.id, p);
+      }
+
+      // Helpers: update many (1 render) + persist
+      const __updateMovementsMany = async (pairs) => {
+        const list = Array.isArray(pairs) ? pairs.filter(x => x && x.id && x.patch) : [];
+        if (!list.length) return;
+
+        const nowIso = new Date().toISOString();
+
+        // Optimistic local
+        const byId = new Map((state.movements || []).map(mv => [String(mv && mv.id || ""), mv]));
+        for (const it of list) {
+          const mv = byId.get(String(it.id));
+          if (mv) {
+            Object.assign(mv, it.patch || {});
+            mv.updatedAtIso = nowIso;
+            mv.updatedBy = (fb.user && (fb.user.email || fb.user.uid)) ? (fb.user.email || fb.user.uid) : "local";
+          }
+        }
+        renderAll();
+
+        // Realtime (Firestore)
+        if (fb.user && fb.db) {
+          const updatedBy = (fb.user.email || fb.user.uid || "user");
+          await Promise.all(list.map(async (it) => {
+            const data = Object.assign({}, it.patch || {}, { updatedAt: serverTimestamp(), updatedBy });
+            await setDoc(doc(fb.db, "orgs", ORG_ID, "inventoryMovements", String(it.id)), data, { merge: true });
+          }));
+          return;
+        }
+
+        // Local fallback
+        saveLocalData();
+      };
+
+      // Helpers: code used?
+      const __isCodeUsed = (codeLow) => {
+        const low = String(codeLow || "").trim().toLowerCase();
+        if (!low) return false;
+        return (state.movements || []).some(mv => String(mv && mv.code || "").trim().toLowerCase() === low);
+      };
+
+      // Helpers: (customer+code) used?
+      const __isThrKeyUsed = (thrKey) => {
+        const k = String(thrKey || "").trim().toLowerCase();
+        if (!k) return false;
+        return (state.movements || []).some(mv => movementKey(mv.customer || "", mv.code || "") === k);
+      };
+
+      const oldCustomer = String(g.customer || "").trim();
+
+      // Salva
       try {
-        btnSaveFlowEdit && (btnSaveFlowEdit.disabled = true);
-        await updateMovementsBulk(ids, { customer, date, note });
-        showToast("Flusso aggiornato");
+        if (btnSaveFlowEdit) {
+          btnSaveFlowEdit.disabled = true;
+          btnSaveFlowEdit.dataset.prevText = btnSaveFlowEdit.textContent || "";
+          btnSaveFlowEdit.textContent = "Salvo…";
+        }
+
+        // 1) Movimenti: update in un colpo
+        const pairs = Array.from(patchById.entries()).map(([id, patch]) => ({ id, patch }));
+        await __updateMovementsMany(pairs);
+
+        // 2) Migrazione soglie (best effort): customer e/o codice cambiati
+        try {
+          const thrOps = rowDrafts
+            .filter(r => (oldCustomer && customerNew && normSupplierKey(oldCustomer) !== normSupplierKey(customerNew))
+              || (r.origCode && String(r.origCode).trim().toLowerCase() !== String(r.code).trim().toLowerCase()))
+            .map(r => ({
+              oldKey: movementKey(oldCustomer || customerNew, r.origCode || r.code),
+              newKey: movementKey(customerNew, r.code)
+            }));
+
+          for (const op of thrOps) {
+            const ok = String(op.oldKey || "");
+            const nk = String(op.newKey || "");
+            if (!ok || !nk || ok === nk) continue;
+
+            const hasOld =
+              (thresholds && Object.prototype.hasOwnProperty.call(thresholds, ok) && Number.isFinite(Number(thresholds[ok])))
+              || (state && state.thresholds && Object.prototype.hasOwnProperty.call(state.thresholds, ok) && Number.isFinite(Number(state.thresholds[ok])));
+            const hasNew =
+              (thresholds && Object.prototype.hasOwnProperty.call(thresholds, nk) && Number.isFinite(Number(thresholds[nk])))
+              || (state && state.thresholds && Object.prototype.hasOwnProperty.call(state.thresholds, nk) && Number.isFinite(Number(state.thresholds[nk])));
+
+            if (hasOld && !hasNew) {
+              const v = getThresholdForKey(ok);
+              await setThresholdForKey(nk, v);
+            }
+
+            // se nessun movimento usa più la vecchia chiave, pulisci
+            if (!__isThrKeyUsed(ok)) {
+              await clearThresholdForKey(ok);
+            }
+          }
+        } catch (e) {
+          console.warn("threshold migrate skipped", e);
+        }
+
+        // 3) Anagrafica prodotti: upsert + (eventuale) migrazione docId se il codice cambia
+        try {
+          if (fb.user && fb.db) {
+            // dedup per nuovo codice
+            const prodMap = new Map();
+            for (const r of rowDrafts) {
+              const nCode = String(r.code || "").trim();
+              const nName = String(r.item || "").trim() || nCode;
+              const oCode = String(r.origCode || "").trim();
+              if (!nCode) continue;
+              prodMap.set(nCode.toLowerCase(), { oldCode: oCode, newCode: nCode, name: nName });
+            }
+
+            for (const it of prodMap.values()) {
+              const oldCode = String(it.oldCode || "").trim();
+              const newCode = String(it.newCode || "").trim();
+              const newLow = newCode.toLowerCase();
+              const nm = String(it.name || "").trim() || newCode;
+              const nmLow = nm.toLowerCase();
+
+              // carry fields from old (alias/categoria) if useful
+              const oldP = oldCode ? findProductByCode(oldCode) : null;
+              const newP = findProductByCode(newCode);
+
+              const payload = {
+                code: newCode,
+                codeLower: newLow,
+                name: nm,
+                nameLower: nmLow,
+                updatedAt: serverTimestamp(),
+                updatedBy: (fb.user.email || fb.user.uid || "")
+              };
+
+              // carry alias/categoria solo se non già presente sul target
+              const tgtHasAlias = !!(newP && (newP.alias || newP.aliasName));
+              const tgtHasCat = !!(newP && newP.category);
+              if (oldP && !tgtHasAlias) {
+                const al = String(oldP.alias || oldP.aliasName || "").trim();
+                if (al) {
+                  payload.alias = al;
+                  payload.aliasLower = al.toLowerCase();
+                }
+              }
+              if (oldP && !tgtHasCat) {
+                const cat = String(oldP.category || "").trim();
+                if (cat) payload.category = cat;
+              }
+
+              await setDoc(doc(fb.db, "orgs", ORG_ID, "products", keyToDocId(newLow)), payload, { merge: true });
+
+              // migra productCategories (fallback locale)
+              try{
+                const oLow = String(oldCode || "").trim().toLowerCase();
+                if (oLow && state && state.productCategories && (oLow in state.productCategories) && !(newLow in state.productCategories)) {
+                  state.productCategories[newLow] = state.productCategories[oLow];
+                  delete state.productCategories[oLow];
+                  saveLocalData();
+                }
+              }catch(_){}
+
+              // se il codice è cambiato, prova a eliminare il vecchio doc SOLO se non più usato da nessun movimento
+              if (oldCode && newCode && oldCode.toLowerCase() !== newLow) {
+                const oLow = oldCode.toLowerCase();
+                if (!__isCodeUsed(oLow)) {
+                  try { await deleteDoc(doc(fb.db, "orgs", ORG_ID, "products", keyToDocId(oLow))); } catch(_){}
+                }
+              }
+            }
+          }
+        } catch (e) {
+          console.warn("product upsert/migrate skipped", e);
+        }
+
+        showToast("Modifiche salvate");
         closeFlowEdit();
       } catch (e) {
         console.error("saveFlowEdit failed", e);
         openModal("Errore", "Non sono riuscito a salvare le modifiche.");
-        btnSaveFlowEdit && (btnSaveFlowEdit.disabled = false);
       } finally {
-        btnSaveFlowEdit && (btnSaveFlowEdit.disabled = false);
+        if (btnSaveFlowEdit) {
+          btnSaveFlowEdit.disabled = false;
+          btnSaveFlowEdit.textContent = btnSaveFlowEdit.dataset.prevText || "Salva";
+          delete btnSaveFlowEdit.dataset.prevText;
+        }
       }
     }
 
@@ -6849,7 +7087,7 @@ let __stockRowByKey = new Map();
       if (pillFlowsCount) pillFlowsCount.textContent = String((__docGroups || []).length);
 
       if (docs.length === 0) {
-        flowsTbody.innerHTML = '<tr><td class="td-muted" colspan="5">Nessun flusso ancora.</td></tr>';
+        flowsTbody.innerHTML = '<tr><td class="td-muted" colspan="4">Nessun flusso ancora.</td></tr>';
         return;
       }
 
@@ -6859,17 +7097,11 @@ let __stockRowByKey = new Map();
         const pieces = (g.movements || []).reduce((sum, mv) => sum + safeInt(mv.qty), 0);
 
         return `
-          <tr class="docRow" data-dockey="${escapeHtmlAttr(g.key)}" title="Apri dettaglio">
+          <tr class="docRow" data-dockey="${escapeHtmlAttr(g.key)}" title="Modifica flusso">
             <td data-label="Documento"><strong>${escapeHtml(label)}</strong></td>
             <td data-label="Fornitore">${escapeHtml(g.customer || "")}</td>
             <td data-label="Righe" class="qty">${Number(lines).toLocaleString("it-IT")}</td>
             <td data-label="Pezzi" class="qty">${Number(pieces).toLocaleString("it-IT")}</td>
-            <td data-label="Azioni" class="td-actions">
-              <div class="inlineRow flowActRow" style="justify-content:flex-end;">
-                <button class="btn btn-ghost btn-xs" type="button" data-action="editFlow" title="Modifica flusso">Modifica</button>
-                <button class="btn btn-danger btn-xs" type="button" data-action="deleteFlow" title="Elimina flusso">Elimina</button>
-              </div>
-            </td>
           </tr>
         `;
       }).join("");
@@ -9979,9 +10211,11 @@ if (modalFlowEdit) {
     }
   });
 
-  // Enter/Esc on qty input
+  // Enter/Esc on flow edit inputs (codice / articolo / pezzi)
   modalFlowEdit.addEventListener("keydown", (e) => {
-    const inp = e.target && e.target.closest ? e.target.closest("input.jsFlowQtyInput") : null;
+    const inp = e.target && e.target.closest
+      ? e.target.closest("input.jsFlowQtyInput, input.jsFlowCodeInput, input.jsFlowItemInput")
+      : null;
     if (!inp) return;
 
     if (e.key === "Enter") {
@@ -9990,42 +10224,24 @@ if (modalFlowEdit) {
     }
     if (e.key === "Escape") {
       e.preventDefault();
-      const base = safeInt(inp.dataset.orig);
-      inp.value = String(Number.isFinite(base) ? base : 0);
+      const orig = (inp.dataset && inp.dataset.orig != null) ? String(inp.dataset.orig) : "";
+      if (inp.classList.contains("jsFlowQtyInput")) {
+        const base = safeInt(orig);
+        inp.value = String(Number.isFinite(base) ? base : 0);
+      } else {
+        inp.value = orig;
+      }
       inp.blur();
     }
   });
 
-  // Commit qty on blur (focusout bubbles)
-  modalFlowEdit.addEventListener("focusout", async (e) => {
+  // Commit qty on blur: niente auto-save (salvataggio via "Salva" del modale)
+  modalFlowEdit.addEventListener("focusout", (e) => {
     const inp = e.target && e.target.closest ? e.target.closest("input.jsFlowQtyInput") : null;
     if (!inp) return;
-
-    const id = String(inp.dataset.id || "").trim();
-    if (!id) return;
-
     let v = safeInt(inp.value);
     if (!Number.isFinite(v) || v < 0) v = 0;
-
-    const orig = safeInt(inp.dataset.orig);
-    if (v === orig) {
-      inp.value = String(orig);
-      return;
-    }
-
-    inp.disabled = true;
-    try {
-      await updateMovementsBulk([id], { qty: v });
-      inp.dataset.orig = String(v);
-      showToast("Quantità aggiornata");
-      try { renderFlowEditItems(); } catch(_){}
-    } catch (err) {
-      console.error("update flow qty failed", err);
-      openModal("Errore", "Non sono riuscito a salvare la quantità.");
-      inp.value = String(orig);
-    } finally {
-      inp.disabled = false;
-    }
+    inp.value = String(v);
   });
 }
 
@@ -10035,23 +10251,11 @@ if (modalFlowEdit) {
       const tr = e.target.closest('tr[data-dockey]');
       if (tr) openDocDetail(tr.getAttribute("data-dockey"));
     });
-    if (flowsTbody) flowsTbody.addEventListener("click", async (e) => {
+    if (flowsTbody) flowsTbody.addEventListener("click", (e) => {
       const tr = e.target.closest('tr[data-dockey]');
       if (!tr) return;
-
-      const actionBtn = e.target.closest('button[data-action]');
       const key = tr.getAttribute("data-dockey");
-
-      if (actionBtn) {
-        e.preventDefault();
-        e.stopPropagation();
-        const act = actionBtn.getAttribute("data-action");
-        if (act === "editFlow") return openFlowEdit(key);
-        if (act === "deleteFlow") return deleteFlowByKey(key);
-        return;
-      }
-
-      openDocDetail(key);
+      if (key) openFlowEdit(key);
     });
 
 
