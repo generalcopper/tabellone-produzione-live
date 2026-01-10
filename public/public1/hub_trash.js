@@ -2,7 +2,7 @@
    - Injects UI (menu + overlay view)
    - Soft-delete for: Prodotti (anagrafica), Fornitori (con cascata DDT), Flussi (DDT caricati)
    - Restore / Permanent delete from Trash
-   Requirements: uses existing globals from hub_inventario.html (fb, ORG_ID, state, suppliers, products, etc.)
+   Requirements: expects a global bridge: globalThis.__HUB = { fb, ORG_ID } (set from main module).
 */
 ;(function(){
   "use strict";
@@ -29,6 +29,37 @@
     low(v){ return String(v ?? "").trim().toLowerCase(); },
     int(v){ const n = Number(v); return Number.isFinite(n) ? Math.max(0, Math.floor(n)) : 0; }
   };
+
+  // Bridge resolver (main app runs in a module: we need a global handle)
+  function __getHub(){
+    try{ return (typeof globalThis !== "undefined" && globalThis.__HUB) ? globalThis.__HUB : null; }catch(_){}
+    return null;
+  }
+  function __getFB(){
+    const h = __getHub();
+    if (h && h.fb) return h.fb;
+    try{ if (typeof globalThis !== "undefined" && globalThis.fb) return globalThis.fb; }catch(_){}
+    // last resort: classic global var (works only if app is not module-scoped)
+    try{ if (typeof fb !== "undefined") return fb; }catch(_){}
+    return null;
+  }
+  function __getORG(){
+    const h = __getHub();
+    if (h && h.ORG_ID) return h.ORG_ID;
+    try{ if (typeof globalThis !== "undefined" && globalThis.ORG_ID) return globalThis.ORG_ID; }catch(_){}
+    try{ if (typeof ORG_ID !== "undefined") return ORG_ID; }catch(_){}
+    return null;
+  }
+  function __getDB(){
+    const FB = __getFB();
+    return FB && FB.db ? FB.db : null;
+  }
+  function __getUser(){
+    const FB = __getFB();
+    if (!FB) return null;
+    return FB.user || (FB.auth && FB.auth.currentUser) || null;
+  }
+
 
   function __h(s){
     const t = SAFE.str(s);
@@ -66,21 +97,34 @@
   function __orgTrashCol(){
     try{
       if (typeof orgCol === "function") return orgCol("trash");
-    }catch(_){}
-    // fallback
+    }catch(_){/* ignore */}
+    // fallback (via global bridge)
     try{
-      if (typeof collection === "function" && fb && fb.db) return collection(fb.db, "orgs", ORG_ID, "trash");
-    }catch(_){}
+      const db = __getDB();
+      const org = __getORG();
+      if (typeof collection === "function" && db && org) return collection(db, "orgs", org, "trash");
+    }catch(_){/* ignore */}
     return null;
   }
+function __ensureFirebaseOrExplain(){
+    const FB = __getFB();
+    const db = __getDB();
+    const org = __getORG();
+    const user = __getUser();
 
-  function __ensureFirebaseOrExplain(){
-    if (typeof fb === "undefined" || !fb || !fb.user || !fb.db){
-      try{ openModal("Accesso richiesto", "Accedi con Google per usare il Cestino."); }catch(_){
-        alert("Accedi con Google per usare il Cestino.");
-      }
+    // Se il codice principale gira in un modulo, senza bridge qui FB/db/org risultano null.
+    if (!FB || !db || !org){
+      const msg = "Il Cestino non riesce a leggere la sessione/Firebase. Nel modulo principale aggiungi: globalThis.__HUB = { fb, ORG_ID } (o aggiorna __HUB.fb e __HUB.ORG_ID).";
+      try{ openModal("Cestino non collegato", msg); }catch(_){ alert(msg); }
       return false;
     }
+
+    // Auth non ancora agganciata (capita per qualche istante al reload)
+    if (!user){
+      try{ showToast("Accesso in corso… apri il Cestino tra un attimo", "warn"); }catch(_){}
+      return false;
+    }
+
     return true;
   }
 
@@ -158,7 +202,7 @@
     const id = SAFE.trim(trashId);
     if (!id) return false;
     try{
-      await deleteDoc(doc(fb.db, "orgs", ORG_ID, "trash", id));
+      await deleteDoc(doc(__getDB(), "orgs", __getORG(), "trash", id));
       return true;
     }catch(e){
       console.error("trash delete failed", e);
@@ -180,10 +224,11 @@
     }catch(_){}
 
     // realtime (Firestore)
-    if (fb && fb.user && fb.db) {
+    const __FB__ = __getFB();
+    if (__FB__ && (__FB__.user || (__FB__.auth && __FB__.auth.currentUser)) && __FB__.db) {
       await Promise.all(list.map(async (id) => {
         try{
-          await deleteDoc(doc(fb.db, "orgs", ORG_ID, "inventoryMovements", id));
+          await deleteDoc(doc(__getDB(), "orgs", __getORG(), "inventoryMovements", id));
         }catch(e){
           console.warn("soft delete movement failed", id, e);
         }
@@ -841,7 +886,7 @@
         if (!patch.createdAt) patch.createdAt = serverTimestamp();
         if (!patch.createdBy) patch.createdBy = __getUserTag();
 
-        await setDoc(doc(fb.db, "orgs", ORG_ID, "products", docId), patch, { merge: true });
+        await setDoc(doc(__getDB(), "orgs", __getORG(), "products", docId), patch, { merge: true });
 
         // restore local category fallback
         try{
@@ -866,7 +911,7 @@
         if (!patch.createdAt) patch.createdAt = serverTimestamp();
         if (!patch.createdBy) patch.createdBy = __getUserTag();
 
-        await setDoc(doc(fb.db, "orgs", ORG_ID, "suppliers", sid), patch, { merge: true });
+        await setDoc(doc(__getDB(), "orgs", __getORG(), "suppliers", sid), patch, { merge: true });
 
         // restore movements (docs)
         await __restoreMovementsFromTrash(it.movements || []);
@@ -1025,7 +1070,7 @@
 
       // delete supplier doc (no legacy attachments deletion for soft delete)
       try{
-        await deleteDoc(doc(fb.db, "orgs", ORG_ID, "suppliers", sid));
+        await deleteDoc(doc(__getDB(), "orgs", __getORG(), "suppliers", sid));
       }catch(e){
         console.error("soft supplier delete failed", e);
         openModal("Errore", "Ho salvato nel Cestino ma non riesco a eliminare il fornitore. Controlla i permessi.");
@@ -1148,7 +1193,7 @@
     // Firestore delete
     try {
       const docId = (typeof keyToDocId === "function") ? keyToDocId(low) : encodeURIComponent(low);
-      await deleteDoc(doc(fb.db, "orgs", ORG_ID, "products", docId));
+      await deleteDoc(doc(__getDB(), "orgs", __getORG(), "products", docId));
       try { renderAll && renderAll(); renderAnag && renderAnag(); } catch(_) {}
       if (!silent) showToast("Prodotto spostato nel cestino");
       return true;
