@@ -4338,21 +4338,41 @@ function buildInventoryRowsForWarehouse(wh, stockByWh){
     }
   }
 
-  // Filtra: riga a 0 nella sede corrente MA altra sede >0 => nascondi
+  // Filtra / arricchisci righe:
+  // - Aggiunge info totali per codice (cross-sede)
+  // - CEREA: se una riga è 0 qui ma in CONCA >0 => nascondi (evita rumore/duplicati)
+  // - CONCA: non filtrare qui, ma marca __hideInConca se in CEREA >0 (poi renderStockTable la nasconde sempre)
   const filtered = rows.filter(r => {
     const code = String(r.code || "").trim();
     if (!code) return true;
     const low = code.toLowerCase();
     const info = totByCode.get(low) || { cerea: 0, concamarise: 0 };
+
     const cur = Number(info[w] || 0);
     const oth = Number(info[other] || 0);
     const q = Number(r.qty) || 0;
 
+    // Totali cross-sede (utili anche dopo grouping alias)
+    try{
+      r.__totCerea = Number(info[WAREHOUSE_CEREA] || 0);
+      r.__totConca = Number(info[WAREHOUSE_CONCA] || 0);
+    }catch(_){}
+
     // Marca "both zero" anche per righe esistenti (net 0 su entrambe)
     if (cur === 0 && oth === 0) r.__bothZero = true;
 
-    if (q !== 0) return true;
-    if (oth > 0) return false;
+    // Regola richiesta: in Concamarise non mostrare articoli che in Cerea hanno stock >0
+    // (lo applichiamo dopo il grouping alias tramite flag)
+    r.__hideInConca = (w === WAREHOUSE_CONCA) && (Number(info[WAREHOUSE_CEREA] || 0) > 0);
+
+    // CEREA: riga 0 qui ma altra sede >0 => nascondi
+    if (w === WAREHOUSE_CEREA) {
+      if (q !== 0) return true;
+      if (oth > 0) return false;
+      return true;
+    }
+
+    // CONCA: non filtrare qui (filtri e regole di visibilità vengono applicati a valle)
     return true;
   });
 
@@ -6276,6 +6296,7 @@ function getMacroCategoryForCode(code) {
               __members: [],
               __customers: [],
               __bothZero: (r && r.__bothZero) === true,
+              __hideInConca: (r && r.__hideInConca) === true,
               code: code, // primary (will be overwritten below)
               item: "",
               qty: 0,
@@ -6301,6 +6322,7 @@ function getMacroCategoryForCode(code) {
 
           if (cust) g.__customers.push(cust);
           g.__bothZero = (g.__bothZero === true) && ((r && r.__bothZero) === true);
+          g.__hideInConca = (g.__hideInConca === true) || ((r && r.__hideInConca) === true);
           map.set(k, g);
         }
 
@@ -6347,6 +6369,13 @@ let __stockRowByKey = new Map();
 
       // Unificazione per alias (solo visual, i movimenti restano separati per codice)
       rows = groupStockRowsByAlias(rows);
+
+// Regola richiesta: quando stai vedendo Concamarise, nascondi sempre gli articoli che in Cerea hanno stock >0
+try{
+  const whNow = normalizeWarehouse(__currentWarehouse || "");
+  if (whNow === WAREHOUSE_CONCA) rows = rows.filter(x => !(x && x.__hideInConca === true));
+}catch(_){}
+
 
       // ricerca "furba": include alias, nome e codici del gruppo
       if (q) rows = rows.filter(r => {
