@@ -4290,7 +4290,14 @@ function buildInventoryRowsForWarehouse(wh, stockByWh){
   const w = normalizeWarehouse(wh);
   const other = (w === WAREHOUSE_CEREA) ? WAREHOUSE_CONCA : WAREHOUSE_CEREA;
 
-  const rows = (Array.isArray(stockByWh) ? stockByWh : []).filter(x => normalizeWarehouse(x.warehouse) === w).map(r => Object.assign({}, r));
+    let rows = (Array.isArray(stockByWh) ? stockByWh : []).filter(x => normalizeWarehouse(x.warehouse) === w).map(r => Object.assign({}, r));
+
+  // Filtra per visibilità sede (solo se impostata in anagrafica)
+  rows = rows.filter(r => {
+    const code = String(r && r.code || "").trim();
+    if (!code) return true;
+    return isCodeVisibleInWarehouse(code, w);
+  });
 
   // Totali per codice (somma per sede, indipendente dal customer)
   const totByCode = new Map(); // codeLower -> {cerea:number, concamarise:number}
@@ -4311,6 +4318,9 @@ function buildInventoryRowsForWarehouse(wh, stockByWh){
   for (const p of prodArr) {
     const code = String(p.code || safeDecodeUri(p.id || "") || "").trim();
     if (!code) continue;
+
+    // Se l’articolo non è abilitato su questa sede, non inserirlo qui
+    if (!isCodeVisibleInWarehouse(code, w)) continue;
     const low = code.toLowerCase();
     const info = totByCode.get(low) || { cerea: 0, concamarise: 0 };
     const curQty = Number(info[w] || 0);
@@ -6073,7 +6083,106 @@ function getMacroCategoryForCode(code) {
     }
 
 
-    // ===== Prodotti: Unità di misura (U.M.) =====
+    
+    // ===== Prodotti: Visibilità sedi (Cerea / Concamarise) =====
+    // Se non impostata => default: visibile in entrambe le sedi.
+    // Campo prodotto: warehouses: ["cerea","concamarise"] (oppure [])
+    function __normalizeWarehousesList(raw){
+      try{
+        if (raw == null) return [];
+        let arr = [];
+        if (Array.isArray(raw)) arr = raw.slice();
+        else if (typeof raw === "string") arr = String(raw).split(/[;,\s]+/g).filter(Boolean);
+        else if (raw && typeof raw === "object") {
+          // compat: {cerea:true, concamarise:false} / {cerea:1, conca:0}
+          const out = [];
+          const c = raw.cerea;
+          const k = (raw.concamarise !== undefined) ? raw.concamarise : raw.conca;
+          if (c === true || c === 1 || c === "1") out.push(WAREHOUSE_CEREA);
+          if (k === true || k === 1 || k === "1") out.push(WAREHOUSE_CONCA);
+          return Array.from(new Set(out.map(normalizeWarehouse))).filter(w => w === WAREHOUSE_CEREA || w === WAREHOUSE_CONCA);
+        }
+        const out2 = [];
+        for (const x of arr) {
+          const w = normalizeWarehouse(x);
+          if (w === WAREHOUSE_CEREA || w === WAREHOUSE_CONCA) out2.push(w);
+        }
+        return Array.from(new Set(out2));
+      }catch(_){ return []; }
+    }
+
+    function getWarehousesSettingForCode(code){
+      const low = String(code || "").trim().toLowerCase();
+      if (!low) return null;
+
+      // 1) products cloud
+      const p = findProductByCode(code);
+      if (p && (p.warehouses !== undefined)) {
+        return __normalizeWarehousesList(p.warehouses);
+      }
+
+      // 2) local fallback
+      try{
+        if (state && state.productWarehouses && (low in state.productWarehouses)) {
+          return __normalizeWarehousesList(state.productWarehouses[low]);
+        }
+      }catch(_){}
+
+      // default: entrambe
+      return null;
+    }
+
+    function isCodeVisibleInWarehouse(code, wh){
+      const setting = getWarehousesSettingForCode(code);
+      if (setting == null) return true; // default: show in both
+      const w = normalizeWarehouse(wh);
+      return setting.includes(w);
+    }
+
+    async function setProductWarehousesForCode(code, warehouses, opts){
+      const key = String(code || "").trim();
+      if (!key) return;
+      const low = key.toLowerCase();
+      const silent = !!(opts && opts.silent);
+
+      const list = __normalizeWarehousesList(warehouses);
+
+      // Offline fallback + UI immediata
+      state.productWarehouses = state.productWarehouses || {};
+      state.productWarehouses[low] = list;
+      saveLocalData();
+
+      // optimistic local products (se già presente)
+      const p = findProductByCode(key);
+      if (p){
+        p.warehouses = list;
+        p.updatedAtIso = new Date().toISOString();
+      }
+
+      if (!fb.user || !fb.db) {
+        renderAll(); renderAnag();
+        if (!silent) showToast("Visibilità salvata");
+        return;
+      }
+
+      try{
+        const patch = {
+          code: key,
+          codeLower: low,
+          warehouses: list,
+          updatedAt: serverTimestamp(),
+          updatedBy: (fb.user.email || fb.user.uid || "")
+        };
+        await setDoc(doc(fb.db, "orgs", ORG_ID, "products", keyToDocId(low)), patch, { merge: true });
+        renderAll(); renderAnag();
+        if (!silent) showToast("Visibilità salvata");
+      }catch(e){
+        console.error("setProductWarehousesForCode failed", e);
+        if (!silent) showToast("Errore salvataggio visibilità", "err");
+      }
+    }
+
+// ===== Prodotti: Unità di misura (U.M.) =====
     // Canoniche: nr / pz / kg / ton
     function getUomSettingForCode(code){
       const low = String(code || "").trim().toLowerCase();
@@ -7708,7 +7817,40 @@ if (mode === "master") {
       `);
 
 
-      // Stock summary (solo master): totali per sede + apertura rapido del dettaglio inventario
+      
+      // Visibilità sedi (Cerea / Concamarise)
+      if (!isAliasGroup) {
+        baseFields.push(`
+          <div class="field" style="grid-column: 1 / -1;">
+            <label>Visibilità inventari</label>
+            <div class="inlineRow" style="gap:16px; align-items:center;">
+              <label class="inlineRow" style="gap:8px; font-weight:900; color: rgba(0,0,0,.82);">
+                <input id="prodVisCerea" type="checkbox" />
+                <span>Inventario Cerea</span>
+              </label>
+              <label class="inlineRow" style="gap:8px; font-weight:900; color: rgba(0,0,0,.82);">
+                <input id="prodVisConca" type="checkbox" />
+                <span>Inventario Concamarise</span>
+              </label>
+              <button id="prodVisSave" class="btn btn-primary btn-xs" type="button" disabled>Salva</button>
+            </div>
+            <div class="td-muted" style="margin-top:6px;">
+              Se togli una sede, l’articolo non sarà visibile in quell’inventario.
+            </div>
+          </div>
+        `);
+      } else {
+        baseFields.push(`
+          <div class="field" style="grid-column: 1 / -1;">
+            <label>Visibilità inventari</label>
+            <div class="td-muted">
+              Alias di più codici: apri un articolo univoco per impostare la visibilità sede.
+            </div>
+          </div>
+        `);
+      }
+
+// Stock summary (solo master): totali per sede + apertura rapido del dettaglio inventario
       if (mode === "master") {
         try{
           const scopeCodes = (isAliasGroup && ctx && Array.isArray(ctx.__codes) && ctx.__codes.length) ? ctx.__codes : [code];
@@ -7942,6 +8084,65 @@ if (mode === "master") {
           await setMacroCategoryForCode(code, sel.value, (document.getElementById("prodNameEdit")?.value || title));
           renderAll();
           showToast("Categoria salvata");
+        });
+      }
+
+
+      // Visibilità sedi (Cerea / Concamarise)
+      const vC = document.getElementById("prodVisCerea");
+      const vK = document.getElementById("prodVisConca");
+      const vSave = document.getElementById("prodVisSave");
+      if (vC && vK && vSave && !isAliasGroup) {
+        const init = getWarehousesSettingForCode(code);
+        const initC = (init == null) ? true : init.includes(WAREHOUSE_CEREA);
+        const initK = (init == null) ? true : init.includes(WAREHOUSE_CONCA);
+
+        vC.checked = !!initC;
+        vK.checked = !!initK;
+
+        vC.dataset.orig = vC.checked ? "1" : "0";
+        vK.dataset.orig = vK.checked ? "1" : "0";
+
+        const sync = () => {
+          const oc = (vC.dataset.orig === "1");
+          const ok = (vK.dataset.orig === "1");
+          vSave.disabled = (vC.checked === oc) && (vK.checked === ok);
+        };
+
+        vC.addEventListener("click", (e) => e.stopPropagation());
+        vK.addEventListener("click", (e) => e.stopPropagation());
+        vC.addEventListener("change", sync);
+        vK.addEventListener("change", sync);
+        sync();
+
+        vSave.addEventListener("click", async (e) => {
+          e.preventDefault(); e.stopPropagation();
+
+          const list = [];
+          if (vC.checked) list.push(WAREHOUSE_CEREA);
+          if (vK.checked) list.push(WAREHOUSE_CONCA);
+
+          if (!list.length) {
+            const ok0 = confirm("Stai togliendo l’articolo da entrambe le sedi. Non sarà più visibile in Inventario. Continuare?");
+            if (!ok0) { sync(); return; }
+          }
+
+          vSave.disabled = true;
+          const old = String(vSave.textContent || "Salva");
+          vSave.textContent = "Salvo…";
+          try{
+            await setProductWarehousesForCode(code, list, { silent: true });
+            vC.dataset.orig = vC.checked ? "1" : "0";
+            vK.dataset.orig = vK.checked ? "1" : "0";
+            showToast("Visibilità salvata");
+            try{ renderAll(); }catch(_){}
+          }catch(err){
+            console.error(err);
+            showToast("Errore salvataggio visibilità", "err");
+          }finally{
+            vSave.textContent = old;
+            sync();
+          }
         });
       }
 
