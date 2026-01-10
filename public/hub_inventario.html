@@ -2844,6 +2844,31 @@ textarea,
                   <label for="searchAnag">Cerca</label>
                   <input id="searchAnag" placeholder="Nome, codice, alias, P.IVA, città…" />
                 </div>
+
+                <div id="anagProductsFilters" class="inlineRow" style="display:none; justify-content:flex-end; flex: 2 1 auto; min-width: 260px;">
+                  <div class="field" style="min-width: 220px;">
+                    <label for="anagProdCategoryFilter">Categoria</label>
+                    <select id="anagProdCategoryFilter">
+                      <option value="">Tutte</option>
+                    </select>
+                  </div>
+                  <div class="field" style="min-width: 180px;">
+                    <label for="anagProdUnifiedFilter">Stato</label>
+                    <select id="anagProdUnifiedFilter">
+                      <option value="all">Tutti</option>
+                      <option value="unified">Solo unificati</option>
+                      <option value="single">Solo singoli</option>
+                    </select>
+                  </div>
+                  <div class="field" style="min-width: 180px;">
+                    <label for="anagProdSort">Ordina</label>
+                    <select id="anagProdSort">
+                      <option value="name_asc">Nome A-Z</option>
+                      <option value="codes_desc">Più codici</option>
+                      <option value="codes_asc">Meno codici</option>
+                    </select>
+                  </div>
+                </div>
               </div>
 
               <div class="tableWrap" style="max-height: 420px; overflow:auto; margin-top: 10px;">
@@ -3312,6 +3337,10 @@ textarea,
     const segProducts = document.getElementById("segProducts");
     const btnReloadAnag = document.getElementById("btnReloadAnag");
     const searchAnag = document.getElementById("searchAnag");
+    const anagProductsFilters = document.getElementById("anagProductsFilters");
+    const anagProdCategoryFilter = document.getElementById("anagProdCategoryFilter");
+    const anagProdUnifiedFilter = document.getElementById("anagProdUnifiedFilter");
+    const anagProdSort = document.getElementById("anagProdSort");
     const anagTable = document.getElementById("anagTable");
     const anagTbody = document.getElementById("anagTbody");
     const anagTheadRow = document.getElementById("anagTheadRow");
@@ -7022,6 +7051,48 @@ function renderCategoryOptions(){
   if (allVals.has(cur)) filterCategory.value = cur;
 }
 
+function renderAnagProductsFiltersUI(){
+  try{
+    if (!anagProductsFilters) return;
+    const isProd = (activeAnagTab === "products");
+    anagProductsFilters.style.display = isProd ? "flex" : "none";
+    if (!isProd) return;
+
+    const mg = normalizeProductsMacroGroup(activeProductsMacroGroup) || "imballaggi";
+
+    // Categoria (solo quelle dentro la macro selezionata)
+    if (anagProdCategoryFilter){
+      const cur = String(anagProdCategoryFilter.value || "");
+      const base = ['<option value="">Tutte</option>'];
+      if (mg === "imballaggi") base.push('<option value="__none">Non assegnata</option>');
+
+      const list = (Array.isArray(categories) ? categories : [])
+        .filter(c => c && categoryMacroGroup(c.key) === mg)
+        .slice()
+        .sort((a,b) => String(a.name||"").localeCompare(String(b.name||""), "it", { sensitivity:"base" }));
+
+      const opts = list.map(c => `<option value="${escapeHtmlAttr(c.key)}">${escapeHtml(c.name || c.key)}</option>`);
+
+      anagProdCategoryFilter.innerHTML = base.join("") + opts.join("");
+
+      const allowed = new Set(["", "__none", ...list.map(x => x.key)]);
+      anagProdCategoryFilter.value = allowed.has(cur) ? cur : "";
+    }
+
+    // Stato unificazione
+    if (anagProdUnifiedFilter){
+      const cur = String(anagProdUnifiedFilter.value || "");
+      if (!["all","unified","single"].includes(cur)) anagProdUnifiedFilter.value = "all";
+    }
+
+    // Ordinamento
+    if (anagProdSort){
+      const cur = String(anagProdSort.value || "");
+      if (!["name_asc","codes_desc","codes_asc"].includes(cur)) anagProdSort.value = "name_asc";
+    }
+  }catch(_){}
+}
+
 // ===== CRUD categorie =====
 let __didSeedCategories = false;
 
@@ -7993,6 +8064,10 @@ function renderAll() {
       const qRaw = (searchAnag?.value || "").trim();
       const q = normTextKey(qRaw);
 
+      // UI: filtri specifici prodotti (tendine)
+      try{ renderAnagProductsFiltersUI(); }catch(_){ }
+
+
       // Tabs
       if (activeAnagTab === "products") {
                 // filtro macro (Materie prime / Imballaggi)
@@ -8008,6 +8083,22 @@ function renderAll() {
           }
         }catch(_){ }
 
+        // sotto-filtro categoria (tendina)
+        try{
+          const catSel = String(anagProdCategoryFilter?.value || "").trim();
+          if (catSel){
+            __filteredProducts = __filteredProducts.filter(p => {
+              const code = String(p?.code || p?.id || "").trim();
+              const catKey = getMacroCategoryForCode(code);
+              if (catSel === "__none") return !catKey;
+              return catKey === catSel;
+            });
+          }
+        }catch(_){ }
+
+        const __unifiedFilter = String(anagProdUnifiedFilter?.value || "all");
+        const __sortMode = String(anagProdSort?.value || "name_asc");
+
 try{
           if (window.HubProducts && typeof window.HubProducts.renderAnagProducts === "function") {
             __prodGroupsMap = window.HubProducts.renderAnagProducts({
@@ -8020,7 +8111,9 @@ try{
               escapeHtml,
               escapeHtmlAttr,
               normTextKey,
-              safeDecodeUri
+              safeDecodeUri,
+              unifiedFilter: __unifiedFilter,
+              sortMode: __sortMode
             }) || new Map();
             return;
           }
@@ -10232,6 +10325,9 @@ async function handleFileSelection(fileList) {
       syncAnagHeaderTitle(); segProducts.classList.add("active"); segSuppliers.classList.remove("active"); renderAnag(); });
     }
     if (searchAnag) searchAnag.addEventListener("input", () => renderAnag());
+    if (anagProdCategoryFilter) anagProdCategoryFilter.addEventListener("change", () => renderAnag());
+    if (anagProdUnifiedFilter) anagProdUnifiedFilter.addEventListener("change", () => renderAnag());
+    if (anagProdSort) anagProdSort.addEventListener("change", () => renderAnag());
     if (btnReloadAnag) btnReloadAnag.addEventListener("click", () => { renderAnag(); showToast("Anagrafica aggiornata"); });
 
     // Supplier modal
