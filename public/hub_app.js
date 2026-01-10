@@ -2072,6 +2072,7 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
     const statTotalPieces = document.getElementById("statTotalPieces");
     const statTotalFlows = document.getElementById("statTotalFlows");
     const statLowStock = document.getElementById("statLowStock");
+    const catQtyChart = document.getElementById("catQtyChart");
     const statLastUpdate = document.getElementById("statLastUpdate");
 
     // INIT_COUNTERS_TO_ZERO: evita "—" e micro-spostamenti all'ingresso
@@ -4697,6 +4698,63 @@ async function deleteMovement(id) {
       statLastUpdate.textContent = last ? formatDateIT(last.createdAt) : "—";
     }
 
+    // Dashboard: grafico quantità per categoria (orizzontale)
+    function renderCategoryQtyChart(stockArr){
+      if (!catQtyChart) return;
+
+      const sums = new Map(); // catKey -> qty
+      for (const x of (stockArr || [])) {
+        const q = Math.max(0, Number(x && x.qty) || 0);
+        if (!q) continue;
+        const cat = getMacroCategoryForCode(x.code) || "non_classificati";
+        sums.set(cat, (sums.get(cat) || 0) + q);
+      }
+
+      // Sempre presenti (come richiesto)
+      const pinned = ["flaconi","scatole","materie_prime"];
+      for (const k of pinned) if (!sums.has(k)) sums.set(k, 0);
+
+      // Ordine: pinned -> resto per quantità desc
+      const rows = [];
+      for (const k of pinned) {
+        rows.push({
+          key: k,
+          name: macroCatLabel(k) || k,
+          qty: Number(sums.get(k) || 0),
+          color: macroCatColor(k) || ""
+        });
+        sums.delete(k);
+      }
+      const rest = Array.from(sums.entries())
+        .map(([k,qty]) => ({ key:k, name: macroCatLabel(k) || k, qty: Number(qty||0), color: macroCatColor(k) || "" }))
+        .filter(r => r.qty > 0)
+        .sort((a,b) => b.qty - a.qty);
+
+      // (Per non allungare troppo) mostriamo max 7 categorie extra
+      rows.push(...rest.slice(0, 7));
+
+      const max = Math.max(1, ...rows.map(r => Number(r.qty) || 0));
+      const fmt = (n) => (Number(n) || 0).toLocaleString("it-IT");
+
+      const html = rows.map(r => {
+        const pct = Math.max(0, Math.min(100, Math.round(((Number(r.qty)||0) / max) * 100)));
+        const barStyle = `width:${pct}%;${r.color ? `background:${r.color};` : ""}`;
+        const emptyCls = (Number(r.qty)||0) <= 0 ? " is-empty" : "";
+        return `
+          <div class="catQtyRow${emptyCls}">
+            <div class="catQtyLabel" title="${h(r.name)}">${h(r.name)}</div>
+            <div class="catQtyBarWrap" role="img" aria-label="${h(r.name)}: ${fmt(r.qty)}">
+              <div class="catQtyBar" style="${barStyle}"></div>
+            </div>
+            <div class="catQtyValue">${fmt(r.qty)}</div>
+          </div>
+        `;
+      }).join("");
+
+      catQtyChart.innerHTML = html || '<div class="td-muted">—</div>';
+    }
+
+
 
 
     function renderLowStockBoard(stockByWh) {
@@ -6834,6 +6892,7 @@ function renderAll() {
       // Home / KPI: totale (somma di tutti i magazzini)
       renderStats(stockArr);
       renderLowStockBoard(stockByWh);
+      renderCategoryQtyChart(stockArr);
 
 
       // Inventario: mostra tabella solo dopo scelta sede
