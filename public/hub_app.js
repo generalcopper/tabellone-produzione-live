@@ -4294,6 +4294,17 @@ function buildInventoryRowsForWarehouse(wh, stockByWh){
 
   // Totali per codice (somma per sede, indipendente dal customer)
   const totByCode = new Map(); // codeLower -> {cerea:number, concamarise:number}
+  const totByAlias = new Map(); // aliasKey -> {cerea:number, concamarise:number}
+  const totByName  = new Map(); // nameKey  -> {cerea:number, concamarise:number}
+  const __bumpTot = (map, key, ww, qn) => {
+    try{
+      const k = String(key || "");
+      if (!k) return;
+      const info2 = map.get(k) || { cerea: 0, concamarise: 0 };
+      info2[ww] += (Number.isFinite(qn) ? qn : 0);
+      map.set(k, info2);
+    }catch(_){ }
+  };
   for (const r of (Array.isArray(stockByWh) ? stockByWh : [])) {
     if (!r) continue;
     const code = String(r.code || "").trim();
@@ -4304,6 +4315,17 @@ function buildInventoryRowsForWarehouse(wh, stockByWh){
     const q = Number(r.qty);
     info[ww] += (Number.isFinite(q) ? q : 0);
     totByCode.set(low, info);
+    // Totali per alias e per nome (per confronti cross-sede anche se cambiano i codici)
+    try{
+      const a = (typeof getAliasForCode === "function") ? getAliasForCode(code) : "";
+      const ak = a ? (typeof normTextKey === "function" ? normTextKey(a) : String(a).toLowerCase()) : "";
+      if (ak) __bumpTot(totByAlias, ak, ww, (Number.isFinite(q) ? q : 0));
+    }catch(_){ }
+    try{
+      const nm = String(r.item || "").trim();
+      const nk = nm ? (typeof normTextKey === "function" ? normTextKey(nm) : nm.toLowerCase()) : "";
+      if (nk) __bumpTot(totByName, nk, ww, (Number.isFinite(q) ? q : 0));
+    }catch(_){ }
   }
 
   // Aggiungi placeholder per prodotti presenti in anagrafica ma senza movimenti
@@ -4363,9 +4385,34 @@ function buildInventoryRowsForWarehouse(wh, stockByWh){
 
     // Regola richiesta: in Concamarise non mostrare articoli che in Cerea hanno stock >0
     // (lo applichiamo dopo il grouping alias tramite flag)
-    r.__hideInConca = (w === WAREHOUSE_CONCA) && (Number(info[WAREHOUSE_CEREA] || 0) > 0);
+    // Regola richiesta: in Concamarise nascondi se in Cerea c'è stock (>0).
+    // Match prioritario: codice -> alias -> nome.
+    let __hide = false;
+    if (w === WAREHOUSE_CONCA) {
+      try{
+        if (Number(info[WAREHOUSE_CEREA] || 0) > 0) __hide = true;
+      }catch(_){}
 
-    // CEREA: riga 0 qui ma altra sede >0 => nascondi
+      if (!__hide) {
+        try{
+          const a = (typeof getAliasForCode === "function") ? getAliasForCode(code) : "";
+          const ak = a ? (typeof normTextKey === "function" ? normTextKey(a) : String(a).toLowerCase()) : "";
+          const ai = ak ? (totByAlias.get(ak) || { cerea: 0, concamarise: 0 }) : null;
+          if (ai && Number(ai[WAREHOUSE_CEREA] || 0) > 0) __hide = true;
+        }catch(_){}
+      }
+
+      if (!__hide) {
+        try{
+          const nm = String(r.item || "").trim();
+          const nk = nm ? (typeof normTextKey === "function" ? normTextKey(nm) : nm.toLowerCase()) : "";
+          const ni = nk ? (totByName.get(nk) || { cerea: 0, concamarise: 0 }) : null;
+          if (ni && Number(ni[WAREHOUSE_CEREA] || 0) > 0) __hide = true;
+        }catch(_){}
+      }
+    }
+    r.__hideInConca = __hide;
+// CEREA: riga 0 qui ma altra sede >0 => nascondi
     if (w === WAREHOUSE_CEREA) {
       if (q !== 0) return true;
       if (oth > 0) return false;
