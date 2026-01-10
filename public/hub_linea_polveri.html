@@ -1266,10 +1266,13 @@
   };
   
   const FAST_SNAPSHOT_KEY = "HUB_LINEA_POLVERI_FAST_SNAPSHOT_V1";
+  const APP_VERSION = "HUB_LINEA_POLVERI_APP_2026_01_10_V7";
   function saveFastSnapshot(){
     try{
       const snap = {
         at: Date.now(),
+        appVersion: APP_VERSION,
+        parsedWithVersion: state._parsedWithVersion || null,
         modifiedTime: state.xmlModifiedTime || null,
         lastFetchAt: state.lastFetchAt || null,
         fatturatoLordo: state.fatturatoLordo ?? null,
@@ -1284,8 +1287,10 @@
       if(!raw) return false;
       const snap = JSON.parse(raw);
       if(!snap || !Array.isArray(snap.powderOrders)) return false;
+      if(snap.appVersion !== APP_VERSION) return false;
 
       state.powderOrders = snap.powderOrders;
+      state._parsedWithVersion = snap.parsedWithVersion || null;
       state.fatturatoLordo = (snap.fatturatoLordo ?? state.fatturatoLordo) ?? null;
       state.lastFetchAt = snap.lastFetchAt ?? state.lastFetchAt;
       state.xmlModifiedTime = snap.modifiedTime ?? state.xmlModifiedTime;
@@ -2929,6 +2934,8 @@ document.body.appendChild(banner);
       const customer = safeText(d.getElementsByTagName("CustomerName")[0]) || "Cliente";
       const number = safeText(d.getElementsByTagName("Number")[0]) || "";
       const date = safeText(d.getElementsByTagName("Date")[0]) || "";
+      const docUid = `d_${djb2HashBase36(stableNorm([customer, numbering, number, date, warehouse].join("|")))}`;
+      const numbering = safeText(d.getElementsByTagName("Numbering")[0]) || "";
       let conclusion = safeText(d.getElementsByTagName("ExpectedConclusion")[0])
         || safeText(d.getElementsByTagName("ExpectedDeliveryDate")[0])
         || safeText(d.getElementsByTagName("DeliveryDate")[0])
@@ -2982,6 +2989,7 @@ document.body.appendChild(banner);
           qtyTextRaw: qtyParsed.qtyTextRaw,
           qtyValueTextRaw: qtyParsed.qtyValueTextRaw,
           powder,
+          isMlLine,
           packagingInternal,
           packKg,
           lineKg,
@@ -2990,7 +2998,7 @@ document.body.appendChild(banner);
         });
       }
 
-      outDocs.push({ customer, number, date, conclusion, totalDoc, warehouse, lines });
+      outDocs.push({ id: docUid, customer, number, numbering, date, conclusion, totalDoc, warehouse, lines });
       if(di && di%12===0) await yieldFrame();
     }
     return outDocs;
@@ -3066,7 +3074,7 @@ async function syncOrders(isBoot=false, reason="manual"){
       localStorage.setItem(XML_PROXY_CFG.cacheKey, JSON.stringify({ at: state.lastFetchAt, xml: xmlText, modifiedTime: state.xmlModifiedTime }));
 
 
-      if(!isForce && state.ordersReady && prevMod && state.xmlModifiedTime && String(prevMod) === String(state.xmlModifiedTime)){
+      if(!isForce && state.ordersReady && prevMod && state.xmlModifiedTime && String(prevMod) === String(state.xmlModifiedTime) && state._parsedWithVersion === APP_VERSION){
         // Niente parsing: nessun cambiamento, evitiamo il "secondo caricamento"
         setOnlinePill("ok", "Stato: online");
         if(isBoot) bootSet(62, "OK: ordini aggiornati");
@@ -3080,14 +3088,42 @@ async function syncOrders(isBoot=false, reason="manual"){
       state.fatturatoLordo = computeFatturatoLordo(state.docs);
 
       const powderDocs = [];
-      for(const d of state.docs){
-        const pLines = d.lines.filter(x=>x.powder);
-        if(!pLines.length) continue;
-        const totalKg = pLines.reduce((a,x)=>a+(x.lineKg||0),0);
-        const alertLines = d.lines.filter(x=>x.alertInfo);
-        powderDocs.push({ customer: d.customer, number: d.number, orderNo: d.number, conclusion: d.conclusion, lines: pLines, alerts: alertLines, totalKg });
+      // Debug: conteggio documenti inclusi/esclusi
+      const dbgCounts = { totalDocs: (state.docs||[]).length, exclNoPowderNoAlerts: 0, inclFallback: 0 };
+      for(const d of (state.docs||[])){
+        const alertLines = (d.lines||[]).filter(x=>x.alertInfo);
+        const pLines = (d.lines||[]).filter(x=>x.powder);
+        if(pLines.length){
+          const totalKg = pLines.reduce((a,x)=>a+(x.lineKg||0),0);
+          powderDocs.push({ id: d.id, customer: d.customer, number: d.number, orderNo: d.number, warehouse: d.warehouse, date: d.date, conclusion: d.conclusion, lines: pLines, alerts: alertLines, totalKg });
+          continue;
+        }
+
+        // FALLBACK: se nessuna riga viene riconosciuta come "polvere", includiamo comunque l'ordine
+        // con tutte le righe NON liquide (e non alert), così non perdiamo ordini.
+        const fallbackLines = (d.lines||[]).filter(x=>!x.isMlLine && !x.alertInfo);
+        if(!fallbackLines.length && !alertLines.length){
+          dbgCounts.exclNoPowderNoAlerts++;
+          continue;
+        }
+        dbgCounts.inclFallback++;
+        powderDocs.push({
+          id: d.id,
+          customer: d.customer,
+          number: d.number,
+          orderNo: d.number,
+          warehouse: d.warehouse,
+          date: d.date,
+          conclusion: d.conclusion,
+          lines: fallbackLines,
+          alerts: alertLines,
+          totalKg: 0,
+          debugNote: "⚠️ Nessuna riga riconosciuta come polvere: incluse comunque (controlla UM/descrizioni)"
+        });
       }
       state.powderOrders = powderDocs;
+      state.powderDbgCounts = dbgCounts;
+      state._parsedWithVersion = APP_VERSION;
       state.ordersReady = true;
       saveFastSnapshot();
       bootMark("orders");
@@ -5241,9 +5277,13 @@ function computePartialOrders(){
         return { ...viewLine, status, activeProd, activeOp, activeIsMe, conclusion: l.conclusion || o.conclusion || "" };
       }).filter(Boolean).filter(l=>l.status !== "done");
       const alerts = Array.isArray(o.alerts) ? o.alerts : [];
+      const isCompleted = Boolean(fullMap.has(String(orderNo)));
       if(!lines.length){
-        if(autoDone>0) continue;
-        if(!alerts.length) continue;
+        // Se l'ordine risulta completato, lo manteniamo visibile (così non "sparisce" dal conteggio)
+        if(!isCompleted){
+          if(autoDone>0) continue;
+          if(!alerts.length) continue;
+        }
       }
 
       const planDate = priorityInfo.date || extractDateFromText(note);
@@ -8213,6 +8253,7 @@ Linea: polveri`, null); }catch(_e){}
       const qtySummary = renderQtySummaryByUnit(o.lines);
       const priority = o.priorityInfo?.priority || "normal";
       const badgeText = priority==="today" ? "Priorità" : o.partialInfo ? "Parziale" : "Apri";
+      const completedTag = o.isCompleted ? `<div class="muted" style="margin-top:6px;">✅ Ordine completato</div>` : "";
       const alertTag = (o.alerts&&o.alerts.length) ? `<div class="muted" style="margin-top:6px;">Avvisi: ${o.alerts.length}</div>` : "";
       const selectedCount = selectedEntriesForOrder(o).length;
       const selectionTag = selectedCount ? `<div class="muted" style="margin-top:6px; color:rgba(10,58,125,.92); font-weight:900;">Righe selezionate: ${selectedCount}</div>` : "";
@@ -8222,7 +8263,9 @@ Linea: polveri`, null); }catch(_e){}
             <div class="name">Ordine n. ${o.orderNo || o.number}</div>
             <div class="sub">Righe: ${o.lines.length} · Quantità: ${escapeHtml(qtySummary)} · Conclusione: ${o.conclusion||"—"}</div>
             ${o.partialInfo ? `<div class="muted" style="margin-top:6px;">Ordine parzialmente concluso (${o.partialInfo.done}/${o.partialInfo.total}).</div>`:""}
+            ${o.debugNote ? `<div class="muted" style="margin-top:6px;">${escapeHtml(o.debugNote)}</div>`:""}
             ${o.priorityInfo?.reason ? `<div class="muted" style="margin-top:6px;">${escapeHtml(o.priorityInfo.reason)}</div>`:""}
+            ${completedTag}
             ${alertTag}
             ${selectionTag}
           </div>
