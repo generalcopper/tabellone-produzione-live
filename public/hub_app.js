@@ -2072,13 +2072,11 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
     const statTotalPieces = document.getElementById("statTotalPieces");
     const statTotalFlows = document.getElementById("statTotalFlows");
     const statLowStock = document.getElementById("statLowStock");
-    const statTotalCategories = document.getElementById("statTotalCategories");
-    const statTotalSuppliers = document.getElementById("statTotalSuppliers");
-    const statMov30 = document.getElementById("statMov30");
     const statLastUpdate = document.getElementById("statLastUpdate");
-// INIT_COUNTERS_TO_ZERO: evita "—" e micro-spostamenti all'ingresso
+
+    // INIT_COUNTERS_TO_ZERO: evita "—" e micro-spostamenti all'ingresso
     try {
-      [statTotalItems, statTotalPieces, statTotalFlows, statLowStock, statTotalCategories, statTotalSuppliers, statMov30].forEach((el) => { if (el) el.textContent = "0"; });
+      [statTotalItems, statTotalPieces, statTotalFlows, statLowStock].forEach((el) => { if (el) el.textContent = "0"; });
     } catch (_) {}
 
 
@@ -4680,61 +4678,6 @@ async function deleteMovement(id) {
         const t = (Number(x.threshold) || 0);
         return q > 0 && t > 0 && q < t;
       }).length;
-
-      const last = state.movements.slice().sort((a,b) => String(b.createdAt||"").localeCompare(String(a.createdAt||"")))[0];
-
-      // extra KPI (catalogo)
-      let catCount = 0;
-      try { catCount = Array.isArray(categories) ? categories.length : (Array.isArray(state.categories) ? state.categories.length : 0); } catch(_) { catCount = 0; }
-
-      let supCount = 0;
-      try { supCount = Array.isArray(suppliers) ? suppliers.length : 0; } catch(_) { supCount = 0; }
-
-      // movimenti ultimi 30 giorni
-      let mov30 = 0;
-      try{
-        const now = Date.now();
-        const from = now - (30 * 24 * 60 * 60 * 1000);
-
-        const toMillis = (ts) => {
-          try{
-            if (!ts) return 0;
-            if (typeof ts === "number") return ts;
-            if (typeof ts.toMillis === "function") return ts.toMillis();
-            if (typeof ts.toDate === "function") return ts.toDate().getTime();
-            const t = Date.parse(String(ts));
-            return Number.isNaN(t) ? 0 : t;
-          }catch(_){ return 0; }
-        };
-
-        mov30 = (state.movements || []).filter(mv => {
-          const t = toMillis(mv && (mv.createdAt || mv.date));
-          return t && t >= from;
-        }).length;
-      }catch(_){ mov30 = 0; }
-
-      __counterAnim.animate(statTotalItems, items);
-      __counterAnim.animate(statTotalPieces, totalPieces);
-
-      // Flussi (cockpit) = numero documenti (DDT) caricati, non numero righe/articoli
-      let docsCount = 0;
-      try {
-        if (Array.isArray(__docGroups)) {
-          docsCount = __docGroups.length;
-        } else if (typeof buildDocGroupsFromMovements === "function") {
-          const out = buildDocGroupsFromMovements(state.movements);
-          docsCount = (out && Array.isArray(out.list)) ? out.list.length : 0;
-        }
-      } catch (e) { docsCount = 0; }
-
-      if (typeof statTotalFlows !== "undefined" && statTotalFlows) __counterAnim.animate(statTotalFlows, docsCount);
-      if (typeof statLowStock !== "undefined" && statLowStock) __counterAnim.animate(statLowStock, low);
-      if (typeof statTotalCategories !== "undefined" && statTotalCategories) __counterAnim.animate(statTotalCategories, catCount);
-      if (typeof statTotalSuppliers !== "undefined" && statTotalSuppliers) __counterAnim.animate(statTotalSuppliers, supCount);
-      if (typeof statMov30 !== "undefined" && statMov30) __counterAnim.animate(statMov30, mov30);
-
-      statLastUpdate.textContent = last ? formatDateIT(last.createdAt) : "—";
-    }).length;
       const last = state.movements.slice().sort((a,b) => String(b.createdAt||"").localeCompare(String(a.createdAt||"")))[0];
 
       __counterAnim.animate(statTotalItems, items);
@@ -6891,16 +6834,6 @@ function renderAll() {
       // Home / KPI: totale (somma di tutti i magazzini)
       renderStats(stockArr);
       renderLowStockBoard(stockByWh);
-
-      // Dashboard widgets (charts, recent, ecc.)
-      try{
-        window.dispatchEvent(new CustomEvent("HubDashData", { detail: {
-          stockArr,
-          stockByWh,
-          movements: (state && Array.isArray(state.movements)) ? state.movements : [],
-          categories: (typeof categories !== "undefined" && Array.isArray(categories)) ? categories : ((state && Array.isArray(state.categories)) ? state.categories : [])
-        }}));
-      }catch(_){}
 
 
       // Inventario: mostra tabella solo dopo scelta sede
@@ -10427,10 +10360,6 @@ if (importMovementsInput) importMovementsInput.addEventListener("change", async 
         showToast,
         exportMovementsCSV,
         openDocDetail,
-
-        // Anagrafica (read-only)
-        getSuppliers: () => (Array.isArray(suppliers) ? suppliers.slice() : []),
-        getProducts: () => (Array.isArray(products) ? products.slice() : []),
 
         // Categorie
         getCategories: () => (Array.isArray(categories) ? categories.slice() : []),
