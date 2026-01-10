@@ -905,7 +905,7 @@
 
   let hub = null;
   let selectedKey = "";
-  let selectedSnapshot = { name: "", color: "" };
+  let selectedSnapshot = { key: "", name: "", color: "", macro: "" };
 
   function closeSideMenuSafe(){
     try{
@@ -944,7 +944,7 @@
       }catch(_){ document.body.classList.remove("modal-open"); }
 
       selectedKey = "";
-      selectedSnapshot = { name:"", color:"" };
+      selectedSnapshot = { key:"", name:"", color:"", macro:"" };
       try{ $("catProdTbody").innerHTML = '<tr><td class="td-muted" colspan="2">Seleziona una categoria.</td></tr>'; }catch(_){}
     }
   }
@@ -1016,11 +1016,14 @@
 
     const nm = String(cat?.name || selectedKey || "").trim();
     const col = safeColor(cat?.color || "") || "#1c6fe6";
+    const mgRaw = String(cat?.macro || "").trim().toLowerCase();
+    const mg = (mgRaw === "materie_prime") ? "materie_prime" : "imballaggi";
 
     const used = (typeof hub.categoryUsageCount === "function") ? (hub.categoryUsageCount(selectedKey) || 0) : 0;
 
     const nameInp = $("catEditName");
     const colorInp = $("catEditColor");
+    const macroInp = $("catEditMacro");
     const pill = $("catDetailCount");
     const btnSave = $("btnCatSave");
     const btnDel = $("btnCatDelete");
@@ -1028,13 +1031,17 @@
 
     if (pill) pill.textContent = `${Number(used||0).toLocaleString("it-IT")} articol${used===1 ? "o" : "i"}`;
 
-    // snapshot base per enable/disable
-    if (!selectedSnapshot || selectedSnapshot.key !== selectedKey){
-      selectedSnapshot = { key: selectedKey, name: nm, color: col };
+    // snapshot base per enable/disable (solo quando apro una nuova categoria)
+    const shouldHydrate = (!selectedSnapshot || selectedSnapshot.key !== selectedKey);
+    if (shouldHydrate){
+      selectedSnapshot = { key: selectedKey, name: nm, color: col, macro: mg };
     }
 
-    if (nameInp) nameInp.value = nm;
-    if (colorInp) colorInp.value = col;
+    // Non sovrascrivere mentre sto editando (focus sul campo)
+    const activeEl = document.activeElement;
+    if (nameInp && (shouldHydrate || activeEl !== nameInp)) nameInp.value = nm;
+    if (colorInp && (shouldHydrate || activeEl !== colorInp)) colorInp.value = col;
+    if (macroInp && (shouldHydrate || activeEl !== macroInp)) macroInp.value = mg;
 
     const canDelete = (Number(used||0) === 0);
 
@@ -1067,7 +1074,13 @@
       if (!btnSave || !nameInp || !colorInp) return;
       const curName = String(nameInp.value || "").trim();
       const curCol = safeColor(colorInp.value || "") || "";
-      btnSave.disabled = (curName === String(selectedSnapshot.name||"")) && (curCol === safeColor(selectedSnapshot.color||""));
+      const curMacro = macroInp ? String(macroInp.value || "").trim().toLowerCase() : "";
+      const snapMacro = String(selectedSnapshot.macro || "").trim().toLowerCase();
+
+      btnSave.disabled =
+        (curName === String(selectedSnapshot.name||"")) &&
+        (curCol === safeColor(selectedSnapshot.color||"")) &&
+        (!macroInp || curMacro === snapMacro);
     };
     syncSave();
   }
@@ -1108,10 +1121,11 @@
     $("btnCatCreate")?.addEventListener("click", async () => {
       const name = String($("catNewName")?.value || "").trim();
       const color = String($("catNewColor")?.value || "").trim();
+      const macro = String($("catNewMacro")?.value || "").trim();
       if (!name) { try{ hub.showToast("Inserisci un nome categoria", "warn"); }catch(_){ } return; }
 
       try{
-        const created = await hub.createCategory(name, color);
+        const created = await hub.createCategory(name, color, macro);
         setCreateOpen(false);
         if (created && created.key) {
           pickCategory(created.key);
@@ -1150,6 +1164,7 @@
 // detail inputs
     $("catEditName")?.addEventListener("input", () => renderDetail());
     $("catEditColor")?.addEventListener("input", () => renderDetail());
+    $("catEditMacro")?.addEventListener("change", () => renderDetail());
 
     // save
     $("btnCatSave")?.addEventListener("click", async () => {
@@ -1159,8 +1174,9 @@
       if (!name) { try{ hub.showToast("Nome categoria non valido", "warn"); }catch(_){ } return; }
 
       try{
-        await hub.updateCategory(selectedKey, { name, color });
-        selectedSnapshot = { key: selectedKey, name, color };
+        const macro = String($("catEditMacro")?.value || "").trim();
+        await hub.updateCategory(selectedKey, { name, color, macro });
+        selectedSnapshot = { key: selectedKey, name, color, macro: String(macro||"").trim().toLowerCase() };
         render();
       }catch(e){
         console.error(e);
@@ -5514,7 +5530,7 @@ async function createCategory(name, color, macro){
   const mg = normalizeProductsMacroGroup(macro) || ((key === "materie_prime") ? "materie_prime" : "imballaggi");
 
   const cat = { key, name: nm, color: __safeCssColor(color || ""),
-        macro: mg, macro: mg };
+        macro: mg };
 
   // optimistic local
   const next = (Array.isArray(categories) ? categories.slice() : []).filter(c => c && c.key);
@@ -5560,7 +5576,7 @@ async function updateCategory(key, patch){
 
   // optimistic local
   const next = (categories || []).map(x => (String(x.key||"").toLowerCase() === k) ? ({...x, name: nm, color: col,
-        macro: mg, macro: mg}) : x);
+        macro: mg}) : x);
   __applyRuntimeCategories(next);
   try{ renderCategoryOptions(); }catch(_){}
   try{ renderAll(); renderAnag(); }catch(_){}
@@ -5573,6 +5589,7 @@ async function updateCategory(key, patch){
         name: nm,
         nameLower: nm.toLowerCase(),
         color: col,
+        macro: mg,
         updatedAt: serverTimestamp(),
         updatedBy: fb.user.email || fb.user.uid
       }, { merge: true });
