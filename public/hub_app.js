@@ -2072,13 +2072,7 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
     const statTotalPieces = document.getElementById("statTotalPieces");
     const statTotalFlows = document.getElementById("statTotalFlows");
     const statLowStock = document.getElementById("statLowStock");
-    const catQtyChart = document.getElementById("catQtyChart");
     const statLastUpdate = document.getElementById("statLastUpdate");
-
-    // INIT_COUNTERS_TO_ZERO: evita "—" e micro-spostamenti all'ingresso
-    try {
-      [statTotalItems, statTotalPieces, statTotalFlows, statLowStock].forEach((el) => { if (el) el.textContent = "0"; });
-    } catch (_) {}
 
 
     // Home: riquadro sotto-scorta (visual)
@@ -4595,81 +4589,6 @@ async function deleteMovement(id) {
     /****************************************************************
      * Rendering
      ****************************************************************/
-    // ===== Cockpit: contatori animati (0 → valore reale) =====
-    const __counterAnim = (() => {
-      const wm = new WeakMap();
-
-      const prefersReducedMotion = () => {
-        try { return !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches); }
-        catch(_) { return false; }
-      };
-
-      const easeOutCubic = (t) => (1 - Math.pow(1 - t, 3));
-      const fmt = (n) => (Number(n) || 0).toLocaleString("it-IT");
-
-      function setNow(el, n){
-        if (!el) return;
-        el.textContent = fmt(n);
-      }
-
-      function animate(el, target, opts){
-        if (!el) return;
-
-        const to = Number(target);
-        const end = Number.isFinite(to) ? to : 0;
-
-        // numeri del cockpit: interi (se vuoi decimali, dimmelo e li supporto)
-        const endInt = Math.max(0, Math.round(end));
-        const key = String(endInt);
-
-        // accessibilità: se l'utente riduce le animazioni, niente tween
-        if (prefersReducedMotion()){
-          el.dataset.animTarget = key;
-          el.dataset.animPlayed = "1";
-          setNow(el, endInt);
-          return;
-        }
-
-        // evita re-animazioni inutili se il valore non è cambiato
-        if (el.dataset.animTarget === key && el.dataset.animPlayed === "1"){
-          setNow(el, endInt);
-          return;
-        }
-
-        el.dataset.animTarget = key;
-        el.dataset.animPlayed = "1";
-
-        // cancella eventuale animazione in corso
-        try{
-          const prev = wm.get(el);
-          if (prev && typeof prev.cancel === "function") prev.cancel();
-        }catch(_){}
-
-        const duration = Math.max(300, Math.floor((opts && opts.duration) || 950));
-
-        // start da 0 come richiesto
-        const from = 0;
-        setNow(el, from);
-        if (endInt === 0) return;
-
-        const t0 = (typeof performance !== "undefined" && performance.now) ? performance.now() : Date.now();
-
-        let raf = 0;
-        const tick = (now) => {
-          const t1 = (typeof now === "number") ? now : ((typeof performance !== "undefined" && performance.now) ? performance.now() : Date.now());
-          const p = Math.min(1, (t1 - t0) / duration);
-          const v = Math.round(from + (endInt - from) * easeOutCubic(p));
-          el.textContent = fmt(v);
-          if (p < 1) raf = requestAnimationFrame(tick);
-        };
-
-        raf = requestAnimationFrame(tick);
-        wm.set(el, { cancel: () => { try{ cancelAnimationFrame(raf); }catch(_){} } });
-      }
-
-      return { animate, setNow };
-    })();
-
     function renderStats(stockArr) {
       const items = stockArr.length;
       const totalPieces = stockArr.reduce((sum, x) => sum + (Number(x.qty) || 0), 0);
@@ -4681,8 +4600,8 @@ async function deleteMovement(id) {
       }).length;
       const last = state.movements.slice().sort((a,b) => String(b.createdAt||"").localeCompare(String(a.createdAt||"")))[0];
 
-      __counterAnim.animate(statTotalItems, items);
-      __counterAnim.animate(statTotalPieces, totalPieces);
+      statTotalItems.textContent = items.toLocaleString("it-IT");
+      statTotalPieces.textContent = totalPieces.toLocaleString("it-IT");
       // Flussi (cockpit) = numero documenti (DDT) caricati, non numero righe/articoli
       let docsCount = 0;
       try {
@@ -4693,67 +4612,11 @@ async function deleteMovement(id) {
           docsCount = (out && Array.isArray(out.list)) ? out.list.length : 0;
         }
       } catch (e) { docsCount = 0; }
-      if (typeof statTotalFlows !== "undefined" && statTotalFlows) __counterAnim.animate(statTotalFlows, docsCount);
-      __counterAnim.animate(statLowStock, low);
+
+      if (typeof statTotalFlows !== "undefined" && statTotalFlows) statTotalFlows.textContent = (Number(docsCount) || 0).toLocaleString("it-IT");
+      statLowStock.textContent = low.toLocaleString("it-IT");
       statLastUpdate.textContent = last ? formatDateIT(last.createdAt) : "—";
     }
-
-    // Dashboard: grafico quantità per categoria (orizzontale)
-    function renderCategoryQtyChart(stockArr){
-      if (!catQtyChart) return;
-
-      const sums = new Map(); // catKey -> qty
-      for (const x of (stockArr || [])) {
-        const q = Math.max(0, Number(x && x.qty) || 0);
-        if (!q) continue;
-        const cat = getMacroCategoryForCode(x.code) || "non_classificati";
-        sums.set(cat, (sums.get(cat) || 0) + q);
-      }
-
-      // Sempre presenti (come richiesto)
-      const pinned = ["flaconi","scatole","materie_prime"];
-      for (const k of pinned) if (!sums.has(k)) sums.set(k, 0);
-
-      // Ordine: pinned -> resto per quantità desc
-      const rows = [];
-      for (const k of pinned) {
-        rows.push({
-          key: k,
-          name: macroCatLabel(k) || k,
-          qty: Number(sums.get(k) || 0),
-          color: macroCatColor(k) || ""
-        });
-        sums.delete(k);
-      }
-      const rest = Array.from(sums.entries())
-        .map(([k,qty]) => ({ key:k, name: macroCatLabel(k) || k, qty: Number(qty||0), color: macroCatColor(k) || "" }))
-        .filter(r => r.qty > 0)
-        .sort((a,b) => b.qty - a.qty);
-
-      // (Per non allungare troppo) mostriamo max 7 categorie extra
-      rows.push(...rest.slice(0, 7));
-
-      const max = Math.max(1, ...rows.map(r => Number(r.qty) || 0));
-      const fmt = (n) => (Number(n) || 0).toLocaleString("it-IT");
-
-      const html = rows.map(r => {
-        const pct = Math.max(0, Math.min(100, Math.round(((Number(r.qty)||0) / max) * 100)));
-        const barStyle = `width:${pct}%;${r.color ? `background:${r.color};` : ""}`;
-        const emptyCls = (Number(r.qty)||0) <= 0 ? " is-empty" : "";
-        return `
-          <div class="catQtyRow${emptyCls}">
-            <div class="catQtyLabel" title="${h(r.name)}">${h(r.name)}</div>
-            <div class="catQtyBarWrap" role="img" aria-label="${h(r.name)}: ${fmt(r.qty)}">
-              <div class="catQtyBar" style="${barStyle}"></div>
-            </div>
-            <div class="catQtyValue">${fmt(r.qty)}</div>
-          </div>
-        `;
-      }).join("");
-
-      catQtyChart.innerHTML = html || '<div class="td-muted">—</div>';
-    }
-
 
 
 
@@ -6892,7 +6755,6 @@ function renderAll() {
       // Home / KPI: totale (somma di tutti i magazzini)
       renderStats(stockArr);
       renderLowStockBoard(stockByWh);
-      renderCategoryQtyChart(stockArr);
 
 
       // Inventario: mostra tabella solo dopo scelta sede
