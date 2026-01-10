@@ -7668,22 +7668,10 @@ async function deleteSupplierCascade(supplierId){
             <option value="kg">kg</option>
             <option value="ton">ton</option>
           </select>
-          <div class="td-muted" style="margin-top:6px;">Imposta l’unità per avere sempre quantità coerenti in Inventario/Movimenti (Auto = ultimo movimento).</div>
+          <div class="td-muted" style="margin-top:6px;">Auto = usa l’unità vista negli ultimi movimenti. Impostala per mostrare sempre la quantità corretta in Inventario e Movimenti.</div>
         </div>
       `);
-      baseFields.push(`
-        <div class="field">
-          <label>U.M.</label>
-          <select id="prodUomSelect">
-            <option value="">Auto</option>
-            <option value="nr">nr</option>
-            <option value="pz">pz</option>
-            <option value="kg">kg</option>
-            <option value="ton">ton</option>
-          </select>
-          <div class="td-muted" style="margin-top:6px;">Auto = usa l’unità vista negli ultimi movimenti. Impostala per mostrare sempre la Q.tà corretta.</div>
-        </div>
-      `);
+
 
 
 
