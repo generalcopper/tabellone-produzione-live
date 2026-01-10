@@ -2015,8 +2015,18 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
         if (btnMinus) {
           ev.preventDefault();
           ev.stopPropagation();
+
           const i = Number(tr.dataset.i);
-          if (!Number.isNaN(i)) __deleteDocItemByIndex(i);
+          if (Number.isNaN(i)) return;
+
+          // Conferma eliminazione (OCR)
+          const codeLbl = String(tr.dataset.code || "").trim();
+          const descLbl = String(tr.dataset.desc || "").trim();
+          const lineLbl = [codeLbl, descLbl].filter(Boolean).join(" • ");
+          const ok = confirm(lineLbl ? ("Eliminare questa riga?\n\n" + lineLbl) : "Eliminare questa riga?");
+          if (!ok) return;
+
+          __deleteDocItemByIndex(i);
           return;
         }
 
