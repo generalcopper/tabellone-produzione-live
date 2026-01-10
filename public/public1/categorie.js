@@ -46,10 +46,20 @@
   }
 
   function setDetailOpen(open){
-    const box = $("catDetail");
-    if (!box) return;
-    box.style.display = open ? "" : "none";
-    if (!open){
+    const modal = $("modalCategory");
+    if (!modal) return;
+
+    if (open) {
+      modal.classList.add("open");
+      document.body.classList.add("modal-open");
+      try{ setTimeout(() => $("catEditName")?.focus(), 0); }catch(_){}
+    } else {
+      modal.classList.remove("open");
+      // Rimuovi lock scroll solo se nessun altro modale è aperto
+      try{
+        if (!document.querySelector(".modal.open")) document.body.classList.remove("modal-open");
+      }catch(_){ document.body.classList.remove("modal-open"); }
+
       selectedKey = "";
       selectedSnapshot = { name:"", color:"" };
       try{ $("catProdTbody").innerHTML = '<tr><td class="td-muted" colspan="2">Seleziona una categoria.</td></tr>'; }catch(_){}
@@ -197,8 +207,8 @@
     });
 
     // back/close
-    $("btnBackCategories")?.addEventListener("click", () => { try{ hub.setView("home"); }catch(_){ } });
-    $("btnCloseCategories")?.addEventListener("click", () => { try{ hub.setView("home"); }catch(_){ } });
+    $("btnBackCategories")?.addEventListener("click", () => { setDetailOpen(false); try{ hub.setView("home"); }catch(_){ } });
+    $("btnCloseCategories")?.addEventListener("click", () => { setDetailOpen(false); try{ hub.setView("home"); }catch(_){ } });
 
     // search
     $("catSearch")?.addEventListener("input", () => render());
@@ -242,12 +252,19 @@
     });
 
     // detail close
-    $("btnCatCloseDetail")?.addEventListener("click", () => {
-      setDetailOpen(false);
-      renderList();
-    });
 
-    // detail inputs
+    // modal close (categoria)
+    $("btnCatDone")?.addEventListener("click", () => { setDetailOpen(false); renderList(); });
+    $("catModalClose")?.addEventListener("click", () => { setDetailOpen(false); renderList(); });
+    $("modalCategory")?.addEventListener("click", (e) => {
+      if (e.target === $("modalCategory")) { setDetailOpen(false); renderList(); }
+    });
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && $("modalCategory")?.classList.contains("open")) {
+        setDetailOpen(false); renderList();
+      }
+    });
+// detail inputs
     $("catEditName")?.addEventListener("input", () => renderDetail());
     $("catEditColor")?.addEventListener("input", () => renderDetail());
 
