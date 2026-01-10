@@ -4290,81 +4290,67 @@ function buildInventoryRowsForWarehouse(wh, stockByWh){
   const w = normalizeWarehouse(wh);
   const other = (w === WAREHOUSE_CEREA) ? WAREHOUSE_CONCA : WAREHOUSE_CEREA;
 
-  const all = Array.isArray(stockByWh) ? stockByWh : [];
-  const rows = all
-    .filter(x => x && normalizeWarehouse(x.warehouse) === w)
-    .map(r => Object.assign({}, r));
+  const rows = (Array.isArray(stockByWh) ? stockByWh : []).filter(x => normalizeWarehouse(x.warehouse) === w).map(r => Object.assign({}, r));
 
-  // Totali "cross-sede" per articolo:
-  // - priorità: codice
-  // - fallback: alias (se esiste)
-  // - fallback: nome articolo
-  // Nota: usiamo chiavi diverse (c:/a:/n:) per evitare collisioni.
-  const totByKey = new Map(); // key -> {cerea:number, concamarise:number}
-
-  function _sigKeys(r){
-    const rr = r || {};
-    const keys = [];
-    const code = String(rr.code || "").trim();
-    const item = String(rr.item || "").trim();
-
-    if (code) keys.push("c:" + code.toLowerCase());
-
-    // alias legato al codice (se presente)
-    try{
-      const al = code ? getAliasForCode(code) : "";
-      const ak = al ? normTextKey(al) : "";
-      if (ak) keys.push("a:" + ak);
-    }catch(_){}
-
-    // fallback nome
-    const nk = item ? normTextKey(item) : "";
-    if (nk) keys.push("n:" + nk);
-
-    return keys;
-  }
-
-  for (const r of all) {
+  // Totali per codice (somma per sede, indipendente dal customer)
+  const totByCode = new Map(); // codeLower -> {cerea:number, concamarise:number}
+  for (const r of (Array.isArray(stockByWh) ? stockByWh : [])) {
     if (!r) continue;
+    const code = String(r.code || "").trim();
+    if (!code) continue;
+    const low = code.toLowerCase();
     const ww = normalizeWarehouse(r.warehouse || "");
-    const q = Number(r.qty) || 0;
+    const info = totByCode.get(low) || { cerea: 0, concamarise: 0 };
+    const q = Number(r.qty);
+    info[ww] += (Number.isFinite(q) ? q : 0);
+    totByCode.set(low, info);
+  }
 
-    const keys = _sigKeys(r);
-    if (!keys.length) continue;
+  // Aggiungi placeholder per prodotti presenti in anagrafica ma senza movimenti
+  const prodArr = Array.isArray(products) ? products : [];
+  for (const p of prodArr) {
+    const code = String(p.code || safeDecodeUri(p.id || "") || "").trim();
+    if (!code) continue;
+    const low = code.toLowerCase();
+    const info = totByCode.get(low) || { cerea: 0, concamarise: 0 };
+    const curQty = Number(info[w] || 0);
+    const othQty = Number(info[other] || 0);
 
-    for (const k of keys) {
-      const info = totByKey.get(k) || { cerea: 0, concamarise: 0 };
-      info[ww] = Number(info[ww] || 0) + q;
-      totByKey.set(k, info);
+    const hasInRows = rows.some(r => String(r.code || "").trim().toLowerCase() === low);
+    if (!hasInRows) {
+      // Se entrambe le sedi sono a 0, vogliamo mostrarlo comunque in entrambe
+      if (curQty === 0 && othQty === 0) {
+        const name = String(p.name || code).trim();
+        const cust = String(p.customer || "").trim();
+        const itemK = movementKey(cust, code);
+        rows.push({
+          warehouse: w,
+          customer: cust,
+          code: code,
+          item: name,
+          uom: getUomResolvedForCode(code) || "",
+          qty: 0,
+          lastMoveAt: "",
+          threshold: getThresholdForKey(itemK),
+          __bothZero: true
+        });
+      }
     }
   }
 
-  function _maxTotalsForRow(r){
-    const keys = _sigKeys(r);
-    let cur = 0;
-    let oth = 0;
-    for (const k of keys) {
-      const info = totByKey.get(k);
-      if (!info) continue;
-      cur = Math.max(cur, Number(info[w] || 0));
-      oth = Math.max(oth, Number(info[other] || 0));
-    }
-    return { cur, oth };
-  }
-
+  // Filtra: riga a 0 nella sede corrente MA altra sede >0 => nascondi
   const filtered = rows.filter(r => {
+    const code = String(r.code || "").trim();
+    if (!code) return true;
+    const low = code.toLowerCase();
+    const info = totByCode.get(low) || { cerea: 0, concamarise: 0 };
+    const cur = Number(info[w] || 0);
+    const oth = Number(info[other] || 0);
     const q = Number(r.qty) || 0;
-    const { cur, oth } = _maxTotalsForRow(r);
 
-    // Marca "both zero" (utile per articoli nuovi / mai movimentati)
+    // Marca "both zero" anche per righe esistenti (net 0 su entrambe)
     if (cur === 0 && oth === 0) r.__bothZero = true;
 
-    // REGOLA RICHIESTA:
-    // Se CEREA ha disponibilità > 0, in CONCAMARISE non deve apparire mai.
-    if (w === WAREHOUSE_CONCA && oth > 0) return false;
-
-    // Regola storica (simmetrica) per pulizia tabella:
-    // se qui è 0 ma nell'altra sede >0 => nascondi
     if (q !== 0) return true;
     if (oth > 0) return false;
     return true;
