@@ -32,41 +32,6 @@
 
 
 ;
-/* ===== inventario.js ===== */
-/* Hub Inventario — Sezione Inventario (viewInventory)
- * Estratta da hub_inventario.html per alleggerire l'HTML.
- * File: /public1/inventario.js
- */
-(function(){
-  try {
-    if (document.getElementById("viewInventory")) return;
-
-    const html = "<div id=\"viewInventory\" class=\"view modalOverlay\">\n  <article class=\"card\" id=\"stockCard\">\n    <div class=\"hd\">\n      <div class=\"overlayHeaderTitle\">\n        <button class=\"iconBtn overlayBack\" id=\"btnBackInv\" type=\"button\" aria-label=\"Indietro\">\u2039</button>\n        <h2>Inventario</h2>\n      </div>\n      <div class=\"inlineRow\" style=\"gap:8px; justify-content:flex-end;\">\n        <div class=\"pill\" id=\"pillInvWarehouse\" style=\"display:none\">\u2014</div>\n        <div class=\"pill\" id=\"pillStock\">0 righe</div>\n        <button class=\"iconBtn\" id=\"btnCloseInv\" type=\"button\" aria-label=\"Chiudi\">\u00d7</button>\n      </div>\n    </div>\n    <div class=\"bd\">\n\n      <!-- Step 1: scelta inventario -->\n      <div id=\"invPicker\" class=\"stack\">\n        <div class=\"hero-sub\">Seleziona inventario</div>\n        <div class=\"homeActions\" style=\"grid-template-columns: 1fr; gap: 14px;\">\n          <button class=\"btn btn-primary homeTile\" id=\"btnPickCerea\" type=\"button\" aria-label=\"Inventario Cerea\">\n            <div class=\"homeTileTop\">\n              <svg class=\"homeTileIcon\" viewBox=\"0 0 24 24\" aria-hidden=\"true\">\n                <path d=\"M4 6a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v2a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6zm0 8a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-4z\"/>\n              </svg>\n              <span class=\"homeTileBadge\">CEREA</span>\n            </div>\n            <div class=\"homeTileText\">\n              <div class=\"homeTileTitle\">Inventario Cerea</div>\n              <div class=\"homeTileSub\">Apri stock e categorie</div>\n            </div>\n          </button>\n\n          <button class=\"btn btn-primary homeTile\" id=\"btnPickConcamarise\" type=\"button\" aria-label=\"Inventario Concamarise\">\n            <div class=\"homeTileTop\">\n              <svg class=\"homeTileIcon\" viewBox=\"0 0 24 24\" aria-hidden=\"true\">\n                <path d=\"M4 6a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v2a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6zm0 8a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-4z\"/>\n              </svg>\n              <span class=\"homeTileBadge\">CONCA</span>\n            </div>\n            <div class=\"homeTileText\">\n              <div class=\"homeTileTitle\">Inventario Concamarise</div>\n              <div class=\"homeTileSub\">Apri stock e categorie</div>\n            </div>\n          </button>\n        </div>\n      </div>\n\n      <!-- Step 2: dettaglio inventario selezionato -->\n      <div id=\"invDetail\" class=\"stack\" style=\"display:none;\">\n        <div class=\"inlineRow\" style=\"justify-content:space-between; align-items:flex-end; gap:12px;\">\n          <div class=\"stack\" style=\"flex:1; min-width: 220px;\">\n            <div class=\"hero-sub\" id=\"invDetailTitle\">Inventario</div>\n            <div class=\"muted\">Stock e categorie per sede</div>\n          </div>\n          <button class=\"btn btn-ghost btn-xs\" id=\"btnInvBackPicker\" type=\"button\">\u2190 Cambia inventario</button>\n        </div>\n\n        <div class=\"inlineRow listStickyBar\" style=\"justify-content: space-between;\">\n          <div class=\"inlineRow\" style=\"flex: 1 1 auto;\">\n            <div class=\"field\" style=\"min-width: 220px;\">\n              <label for=\"searchStock\">Cerca</label>\n              <input id=\"searchStock\" placeholder=\"Fornitore / codice / articolo\u2026\" />\n            </div>\n            <div class=\"field\" style=\"min-width: 180px;\">\n              <label for=\"filterCustomer\">Fornitore</label>\n              <select id=\"filterCustomer\">\n                <option value=\"\">Tutti</option>\n              </select>\n            </div>\n            <div class=\"field\" style=\"min-width: 180px;\">\n              <label for=\"filterLow\">Filtro</label>\n              <select id=\"filterLow\">\n                <option value=\"all\">Tutti</option>\n                <option value=\"low\">Solo scorta bassa</option>\n                <option value=\"zero\">Solo zero</option>\n              </select>\n            </div>\n            <div class=\"field\" style=\"min-width: 180px;\">\n              <label for=\"filterCategory\">Categoria</label>\n              <select id=\"filterCategory\">\n                <option value=\"\">Tutte</option>\n                <option value=\"__none\">Non assegnata</option>\n              </select>\n            </div>\n          </div>\n        </div>\n\n        <!-- STOCK (per inventario selezionato) -->\n        <div class=\"tableWrap\" style=\"max-height: 420px; overflow:auto; margin-top: 10px;\">\n          <table class=\"dataGrid\">\n            <thead>\n              <tr>\n                <th>Nome articolo</th>\n                <th>Cod. articolo</th>\n                <th>Categoria</th>\n                <th class=\"qty\">Q.tà</th>\n              </tr>\n            </thead>\n            <tbody id=\"stockTbody\">\n              <tr><td class=\"td-muted\" colspan=\"4\">Seleziona un inventario.</td></tr>\n            </tbody>\n          </table>\n        </div>\n      </div>\n\n    </div>\n  </article>\n</div>";
-
-    const tpl = document.createElement("template");
-    tpl.innerHTML = html;
-
-    const anchor =
-      document.getElementById("viewMovements") ||
-      document.getElementById("viewFlows") ||
-      document.getElementById("viewAnag") ||
-      document.getElementById("toast") ||
-      document.getElementById("centerPop") ||
-      document.getElementById("mainModuleCode") ||
-      null;
-
-    if (anchor && anchor.parentNode) {
-      anchor.parentNode.insertBefore(tpl.content, anchor);
-    } else {
-      document.body.appendChild(tpl.content);
-    }
-  } catch (e) {
-    try { console.error("[inventario.js] inject failed", e); } catch (_) {}
-  }
-})();
-
-
-;
 /* ===== movimenti.js ===== */
 (function(){
   "use strict";
@@ -1782,13 +1747,16 @@ const docDetailPhotosMeta = document.getElementById("docDetailPhotosMeta");
     const btnBackFlows = document.getElementById("btnBackFlows");
     const btnBackMovements = document.getElementById("btnBackMovements");
     const btnBackAnag = document.getElementById("btnBackAnag");
+    const isInventoryPage = document.body?.dataset?.page === "inventory";
 
     // Porta overlay/modali come figli diretti di <body> per evitare stacking-context (transform/filter) sui parent
     (function __liftOverlaysToBody(){
       try{
         ["viewOcr","viewInventory","viewFlows","viewMovements","viewCategories","viewTrash","viewAnag"].forEach(id => {
           const el = document.getElementById(id);
-          if (el && el.parentElement !== document.body) document.body.appendChild(el);
+          if (el && el.classList.contains("modalOverlay") && el.parentElement !== document.body) {
+            document.body.appendChild(el);
+          }
         });
         document.querySelectorAll(".modal").forEach(m => {
           if (m && m.parentElement !== document.body) document.body.appendChild(m);
@@ -1798,8 +1766,12 @@ const docDetailPhotosMeta = document.getElementById("docDetailPhotosMeta");
 
 
     function setView(name){
-      const key = String(name || "home");
-      const overlayKeys = ["ocr","inventory","flows","movements","categories","trash","anag"];
+      let key = String(name || "home");
+      if (!__views.home && key === "home") key = "inventory";
+      const overlayKeys = ["ocr","flows","movements","categories","trash","anag"];
+      if (__views.inventory && __views.inventory.classList.contains("modalOverlay")) {
+        overlayKeys.push("inventory");
+      }
       const isOverlay = overlayKeys.includes(key);
 
       // Home resta sempre visibile dietro (come un gestionale iOS)
@@ -1810,6 +1782,9 @@ const docDetailPhotosMeta = document.getElementById("docDetailPhotosMeta");
         const el = __views[k];
         if (!el) continue;
         el.classList.toggle("active", isOverlay && k === key);
+      }
+      if (__views.inventory && !__views.inventory.classList.contains("modalOverlay")) {
+        __views.inventory.classList.toggle("active", key === "inventory");
       }
 
       // Se richiesto "home", chiudi overlay e stop
@@ -1900,9 +1875,21 @@ const docDetailPhotosMeta = document.getElementById("docDetailPhotosMeta");
 
     document.getElementById("btnGoOcr")?.addEventListener("click", startHomeOcr);
     document.getElementById("btnGoFlows")?.addEventListener("click", () => { setView("flows"); try{ renderFlowsTable(); }catch(_){ } });
-    document.getElementById("btnCloseInv")?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
+    document.getElementById("btnCloseInv")?.addEventListener("click", (e) => {
+      try{ e.preventDefault(); e.stopPropagation(); }catch(_){}
+      if (isInventoryPage) {
+        window.location.href = "./hub_inventario.html";
+        return;
+      }
+      setView("home");
+    });
     // Close inventario anche con tap/click sul backdrop
-    document.getElementById("viewInventory")?.addEventListener("click", (e) => { try{ if (e.target === e.currentTarget) setView("home"); }catch(_){ } });
+    const viewInventoryEl = document.getElementById("viewInventory");
+    viewInventoryEl?.addEventListener("click", (e) => {
+      try{
+        if (viewInventoryEl.classList.contains("modalOverlay") && e.target === e.currentTarget) setView("home");
+      }catch(_){ }
+    });
     document.getElementById("viewMovements")?.addEventListener("click", (e) => { try{ if (e.target === e.currentTarget) setView("home"); }catch(_){ } });
     document.getElementById("btnCloseOcr")?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
     btnBackOcr?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
@@ -1938,7 +1925,14 @@ const docDetailPhotosMeta = document.getElementById("docDetailPhotosMeta");
       };
     }catch(_){}
 
-document.getElementById("menuGoHome")?.addEventListener("click", () => { closeSideMenu(); setView("home"); });
+document.getElementById("menuGoHome")?.addEventListener("click", () => {
+  closeSideMenu();
+  if (isInventoryPage) {
+    window.location.href = "./hub_inventario.html";
+    return;
+  }
+  setView("home");
+});
     document.getElementById("menuGoOcr")?.addEventListener("click", () => { closeSideMenu(); startHomeOcr(); });
     document.getElementById("menuGoInvCerea")?.addEventListener("click", () => { closeSideMenu(); openInventoryOverlay(WAREHOUSE_CEREA); });
     document.getElementById("menuGoInvConcamarise")?.addEventListener("click", () => { closeSideMenu(); openInventoryOverlay(WAREHOUSE_CONCA); });
@@ -1993,7 +1987,7 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
     });
 
     // default view
-    setView("home");
+    setView(isInventoryPage ? "inventory" : "home");
 
     // Chiudi i modali cliccando fuori dal contenuto (overlay)
     ["ocr","inventory","flows","anag"].forEach((k) => {
@@ -2143,6 +2137,13 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
     }
 
     function openInventoryOverlay(warehouse){
+      const inventoryIsOverlay = __views.inventory && __views.inventory.classList.contains("modalOverlay");
+      if (!inventoryIsOverlay && !isInventoryPage) {
+        const url = new URL("inventario.html", window.location.href);
+        if (warehouse) url.searchParams.set("wh", warehouse);
+        window.location.href = url.toString();
+        return;
+      }
       setView("inventory");
       setInventoryWarehouse(warehouse || ""); // mostra picker se vuoto
       try{ renderAll(); }catch(_){}
@@ -2159,9 +2160,18 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
           renderAll();
           return;
         }
+        if (isInventoryPage) {
+          window.location.href = "./hub_inventario.html";
+          return;
+        }
         setView("home");
       });
     }catch(_){}
+    if (isInventoryPage) {
+      const wh = normalizeWarehouse(new URLSearchParams(window.location.search).get("wh") || "");
+      setInventoryWarehouse(wh);
+      try{ renderAll(); }catch(_){}
+    }
 /****************************************************************
      * State
      ****************************************************************/
