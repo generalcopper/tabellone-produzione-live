@@ -41,7 +41,7 @@
   try {
     if (document.getElementById("viewInventory")) return;
 
-    const html = "<div id=\"viewInventory\" class=\"view modalOverlay\">\n  <article class=\"card\" id=\"stockCard\">\n    <div class=\"hd\">\n      <div class=\"overlayHeaderTitle\">\n        <button class=\"iconBtn overlayBack\" id=\"btnBackInv\" type=\"button\" aria-label=\"Indietro\">\u2039</button>\n        <h2>Inventario</h2>\n      </div>\n      <div class=\"inlineRow\" style=\"gap:8px; justify-content:flex-end;\">\n        <div class=\"pill\" id=\"pillInvWarehouse\" style=\"display:none\">\u2014</div>\n        <div class=\"pill\" id=\"pillStock\">0 righe</div>\n        <button class=\"iconBtn\" id=\"btnCloseInv\" type=\"button\" aria-label=\"Chiudi\">\u00d7</button>\n      </div>\n    </div>\n    <div class=\"bd\">\n\n      <!-- Step 1: scelta inventario -->\n      <div id=\"invPicker\" class=\"stack\">\n        <div class=\"hero-sub\">Seleziona inventario</div>\n        <div class=\"homeActions\" style=\"grid-template-columns: 1fr; gap: 14px;\">\n          <button class=\"btn btn-primary homeTile\" id=\"btnPickCerea\" type=\"button\" aria-label=\"Inventario Cerea\">\n            <div class=\"homeTileTop\">\n              <svg class=\"homeTileIcon\" viewBox=\"0 0 24 24\" aria-hidden=\"true\">\n                <path d=\"M4 6a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v2a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6zm0 8a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-4z\"/>\n              </svg>\n              <span class=\"homeTileBadge\">CEREA</span>\n            </div>\n            <div class=\"homeTileText\">\n              <div class=\"homeTileTitle\">Inventario Cerea</div>\n              <div class=\"homeTileSub\">Apri stock e categorie</div>\n            </div>\n          </button>\n\n          <button class=\"btn btn-primary homeTile\" id=\"btnPickConcamarise\" type=\"button\" aria-label=\"Inventario Concamarise\">\n            <div class=\"homeTileTop\">\n              <svg class=\"homeTileIcon\" viewBox=\"0 0 24 24\" aria-hidden=\"true\">\n                <path d=\"M4 6a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v2a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6zm0 8a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-4z\"/>\n              </svg>\n              <span class=\"homeTileBadge\">CONCA</span>\n            </div>\n            <div class=\"homeTileText\">\n              <div class=\"homeTileTitle\">Inventario Concamarise</div>\n              <div class=\"homeTileSub\">Apri stock e categorie</div>\n            </div>\n          </button>\n        </div>\n      </div>\n\n      <!-- Step 2: dettaglio inventario selezionato -->\n      <div id=\"invDetail\" class=\"stack\" style=\"display:none;\">\n        <div class=\"inlineRow\" style=\"justify-content:space-between; align-items:flex-end; gap:12px;\">\n          <div class=\"stack\" style=\"flex:1; min-width: 220px;\">\n            <div class=\"hero-sub\" id=\"invDetailTitle\">Inventario</div>\n            <div class=\"muted\">Stock e categorie per sede</div>\n          </div>\n          <button class=\"btn btn-ghost btn-xs\" id=\"btnInvBackPicker\" type=\"button\">\u2190 Cambia inventario</button>\n        </div>\n\n        <div class=\"inlineRow listStickyBar\" style=\"justify-content: space-between;\">\n          <div class=\"inlineRow\" style=\"flex: 1 1 auto;\">\n            <div class=\"field\" style=\"min-width: 220px;\">\n              <label for=\"searchStock\">Cerca</label>\n              <input id=\"searchStock\" placeholder=\"Fornitore / codice / articolo\u2026\" />\n            </div>\n            <div class=\"field\" style=\"min-width: 180px;\">\n              <label for=\"filterCustomer\">Fornitore</label>\n              <select id=\"filterCustomer\">\n                <option value=\"\">Tutti</option>\n              </select>\n            </div>\n            <div class=\"field\" style=\"min-width: 180px;\">\n              <label for=\"filterLow\">Filtro</label>\n              <select id=\"filterLow\">\n                <option value=\"all\">Tutti</option>\n                <option value=\"low\">Solo scorta bassa</option>\n                <option value=\"zero\">Solo zero</option>\n              </select>\n            </div>\n            <div class=\"field\" style=\"min-width: 180px;\">\n              <label for=\"filterCategory\">Categoria</label>\n              <select id=\"filterCategory\">\n                <option value=\"\">Tutte</option>\n                <option value=\"__none\">Non assegnata</option>\n              </select>\n            </div>\n          </div>\n        </div>\n\n        <!-- STOCK (per inventario selezionato) -->\n        <div class=\"tableWrap\" style=\"max-height: 420px; overflow:auto; margin-top: 10px;\">\n          <table class=\"dataGrid\">\n            <thead>\n              <tr>\n                <th>Nome articolo</th>\n                <th>Cod. articolo</th>\n                <th>Categoria</th>\n                <th class=\"qty\">Pezzi</th>\n              </tr>\n            </thead>\n            <tbody id=\"stockTbody\">\n              <tr><td class=\"td-muted\" colspan=\"4\">Seleziona un inventario.</td></tr>\n            </tbody>\n          </table>\n        </div>\n      </div>\n\n    </div>\n  </article>\n</div>";
+    const html = "<div id=\"viewInventory\" class=\"view modalOverlay\">\n  <article class=\"card\" id=\"stockCard\">\n    <div class=\"hd\">\n      <div class=\"overlayHeaderTitle\">\n        <button class=\"iconBtn overlayBack\" id=\"btnBackInv\" type=\"button\" aria-label=\"Indietro\">\u2039</button>\n        <h2>Inventario</h2>\n      </div>\n      <div class=\"inlineRow\" style=\"gap:8px; justify-content:flex-end;\">\n        <div class=\"pill\" id=\"pillInvWarehouse\" style=\"display:none\">\u2014</div>\n        <div class=\"pill\" id=\"pillStock\">0 righe</div>\n        <button class=\"iconBtn\" id=\"btnCloseInv\" type=\"button\" aria-label=\"Chiudi\">\u00d7</button>\n      </div>\n    </div>\n    <div class=\"bd\">\n\n      <!-- Step 1: scelta inventario -->\n      <div id=\"invPicker\" class=\"stack\">\n        <div class=\"hero-sub\">Seleziona inventario</div>\n        <div class=\"homeActions\" style=\"grid-template-columns: 1fr; gap: 14px;\">\n          <button class=\"btn btn-primary homeTile\" id=\"btnPickCerea\" type=\"button\" aria-label=\"Inventario Cerea\">\n            <div class=\"homeTileTop\">\n              <svg class=\"homeTileIcon\" viewBox=\"0 0 24 24\" aria-hidden=\"true\">\n                <path d=\"M4 6a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v2a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6zm0 8a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-4z\"/>\n              </svg>\n              <span class=\"homeTileBadge\">CEREA</span>\n            </div>\n            <div class=\"homeTileText\">\n              <div class=\"homeTileTitle\">Inventario Cerea</div>\n              <div class=\"homeTileSub\">Apri stock e categorie</div>\n            </div>\n          </button>\n\n          <button class=\"btn btn-primary homeTile\" id=\"btnPickConcamarise\" type=\"button\" aria-label=\"Inventario Concamarise\">\n            <div class=\"homeTileTop\">\n              <svg class=\"homeTileIcon\" viewBox=\"0 0 24 24\" aria-hidden=\"true\">\n                <path d=\"M4 6a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v2a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6zm0 8a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-4z\"/>\n              </svg>\n              <span class=\"homeTileBadge\">CONCA</span>\n            </div>\n            <div class=\"homeTileText\">\n              <div class=\"homeTileTitle\">Inventario Concamarise</div>\n              <div class=\"homeTileSub\">Apri stock e categorie</div>\n            </div>\n          </button>\n        </div>\n      </div>\n\n      <!-- Step 2: dettaglio inventario selezionato -->\n      <div id=\"invDetail\" class=\"stack\" style=\"display:none;\">\n        <div class=\"inlineRow\" style=\"justify-content:space-between; align-items:flex-end; gap:12px;\">\n          <div class=\"stack\" style=\"flex:1; min-width: 220px;\">\n            <div class=\"hero-sub\" id=\"invDetailTitle\">Inventario</div>\n            <div class=\"muted\">Stock e categorie per sede</div>\n          </div>\n          <button class=\"btn btn-ghost btn-xs\" id=\"btnInvBackPicker\" type=\"button\">\u2190 Cambia inventario</button>\n        </div>\n\n        <div class=\"inlineRow listStickyBar\" style=\"justify-content: space-between;\">\n          <div class=\"inlineRow\" style=\"flex: 1 1 auto;\">\n            <div class=\"field\" style=\"min-width: 220px;\">\n              <label for=\"searchStock\">Cerca</label>\n              <input id=\"searchStock\" placeholder=\"Fornitore / codice / articolo\u2026\" />\n            </div>\n            <div class=\"field\" style=\"min-width: 180px;\">\n              <label for=\"filterCustomer\">Fornitore</label>\n              <select id=\"filterCustomer\">\n                <option value=\"\">Tutti</option>\n              </select>\n            </div>\n            <div class=\"field\" style=\"min-width: 180px;\">\n              <label for=\"filterLow\">Filtro</label>\n              <select id=\"filterLow\">\n                <option value=\"all\">Tutti</option>\n                <option value=\"low\">Solo scorta bassa</option>\n                <option value=\"zero\">Solo zero</option>\n              </select>\n            </div>\n            <div class=\"field\" style=\"min-width: 180px;\">\n              <label for=\"filterCategory\">Categoria</label>\n              <select id=\"filterCategory\">\n                <option value=\"\">Tutte</option>\n                <option value=\"__none\">Non assegnata</option>\n              </select>\n            </div>\n          </div>\n        </div>\n\n        <!-- STOCK (per inventario selezionato) -->\n        <div class=\"tableWrap\" style=\"max-height: 420px; overflow:auto; margin-top: 10px;\">\n          <table class=\"dataGrid\">\n            <thead>\n              <tr>\n                <th>Nome articolo</th>\n                <th>Cod. articolo</th>\n                <th>Categoria</th>\n                <th class=\"qty\">Q.tà</th>\n              </tr>\n            </thead>\n            <tbody id=\"stockTbody\">\n              <tr><td class=\"td-muted\" colspan=\"4\">Seleziona un inventario.</td></tr>\n            </tbody>\n          </table>\n        </div>\n      </div>\n\n    </div>\n  </article>\n</div>";
 
     const tpl = document.createElement("template");
     tpl.innerHTML = html;
@@ -271,6 +271,11 @@
       var code = String(mv.code || "");
       var item = String(mv.item || "");
       var qty = (api && typeof api.safeInt === "function") ? api.safeInt(mv.qty) : (Number(mv.qty)||0);
+      var uom = String(mv.uom || "").trim();
+      var qtyTxt = String(mv.qtyRaw || "").trim();
+      if (!qtyTxt){
+        qtyTxt = Number(qty).toLocaleString("it-IT") + (uom ? (" " + uom) : "");
+      }
       var wh = shortWh(mv.warehouse || "");
       var src = String(mv.source || "");
       var showDoc = isDocLike(mv);
@@ -282,7 +287,7 @@
           '<td data-label="Fornitore">'+esc(customer)+'</td>' +
           '<td data-label="Codice" class="td-muted"><span class="kbd">'+esc(code)+'</span></td>' +
           '<td data-label="Articolo">'+esc(item)+'</td>' +
-          '<td data-label="Pezzi" class="qty">'+Number(qty).toLocaleString("it-IT")+'</td>' +
+          '<td data-label="Q.tà" class="qty">'+Number(qty).toLocaleString("it-IT")+'</td>' +
           '<td data-label="Sede" class="colHideSm">'+esc(wh)+'</td>' +
           '<td data-label="Fonte" class="colHideSm">'+esc(src)+'</td>' +
           '<td data-label="">' +
@@ -311,7 +316,7 @@
     push("Fornitore", mv.customer);
     push("Codice", mv.code);
     push("Articolo", mv.item);
-    push("Pezzi", String((api.safeInt ? api.safeInt(mv.qty) : mv.qty) ?? ""));
+    push("Q.tà", String(String(mv.qtyRaw || "").trim() || (((api.safeInt ? api.safeInt(mv.qty) : mv.qty) ?? "") + (String(mv.uom||"").trim() ? (" " + String(mv.uom||"").trim()) : ""))));
     push("Sede", whLabel(mv.warehouse || ""));
     push("Fonte", mv.source);
     push("Note", mv.note);
@@ -2155,6 +2160,7 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
       movements: [], // array of Movement
       thresholds: {}, // per-item threshold overrides: key -> number
       productCategories: {}, // per-code categoria (offline fallback)
+      productUoms: {}, // per-code unità di misura (offline fallback)
       categories: [] // elenco categorie (offline fallback)
     };
 
@@ -3181,6 +3187,7 @@ async function deleteMovementsBulk(ids) {
               // carry alias/categoria solo se non già presente sul target
               const tgtHasAlias = !!(newP && (newP.alias || newP.aliasName));
               const tgtHasCat = !!(newP && newP.category);
+              const tgtHasUom = !!(newP && __normalizeUom(newP.uom || ""));
               if (oldP && !tgtHasAlias) {
                 const al = String(oldP.alias || oldP.aliasName || "").trim();
                 if (al) {
@@ -3191,6 +3198,11 @@ async function deleteMovementsBulk(ids) {
               if (oldP && !tgtHasCat) {
                 const cat = String(oldP.category || "").trim();
                 if (cat) payload.category = cat;
+              }
+
+              if (oldP && !tgtHasUom) {
+                const u = __normalizeUom(oldP.uom || "");
+                if (u) payload.uom = u;
               }
 
               await setDoc(doc(fb.db, "orgs", ORG_ID, "products", keyToDocId(newLow)), payload, { merge: true });
@@ -3453,6 +3465,7 @@ async function deleteMovementsBulk(ids) {
           state.movements = Array.isArray(parsed.movements) ? parsed.movements : [];
           state.thresholds = parsed.thresholds && typeof parsed.thresholds === "object" ? parsed.thresholds : {};
           state.productCategories = parsed.productCategories && typeof parsed.productCategories === "object" ? parsed.productCategories : {};
+          state.productUoms = parsed.productUoms && typeof parsed.productUoms === "object" ? parsed.productUoms : {};
           state.categories = Array.isArray(parsed.categories) ? parsed.categories : (Array.isArray(state.categories) ? state.categories : []);
           // Categorie: default + indice runtime
           if (!Array.isArray(state.categories) || !state.categories.length) state.categories = DEFAULT_CATEGORIES.slice();
@@ -3470,6 +3483,7 @@ async function deleteMovementsBulk(ids) {
           movements: state.movements,
           thresholds: state.thresholds,
           productCategories: state.productCategories,
+          productUoms: state.productUoms,
           categories: state.categories
         }));
       } catch {}
@@ -4201,10 +4215,12 @@ function validateMovementFields(fields) {
         const code = (mv.code || "").trim();
         const item = (mv.item || "").trim();
         const k = movementKey(customer, code);
-        const cur = stock.get(k) || { customer, code, item, qty: 0, lastMoveAt: "", threshold: getThresholdForKey(k) };
+        const cur = stock.get(k) || { customer, code, item, uom: "", qty: 0, lastMoveAt: "", threshold: getThresholdForKey(k) };
         const q = safeInt(mv.qty);
         cur.qty += (mv.type === "OUT" ? -q : q);
         if (!cur.item && item) cur.item = item;
+        const __u = __normalizeUom(mv.uom || "");
+        if (__u) cur.uom = __u;
         // last move timestamp by createdAt (or date)
         const ts = mv.createdAt || mv.date || "";
         const prev = latestByKey.get(k) || "";
@@ -4239,6 +4255,7 @@ function validateMovementFields(fields) {
           customer,
           code,
           item,
+          uom: "",
           qty: 0,
           lastMoveAt: "",
           threshold: getThresholdForKey(itemK)
@@ -4247,6 +4264,8 @@ function validateMovementFields(fields) {
         const q = safeInt(mv.qty);
         cur.qty += (mv.type === "OUT" ? -q : q);
         if (!cur.item && item) cur.item = item;
+        const __u = __normalizeUom(mv.uom || "");
+        if (__u) cur.uom = __u;
 
         const ts = mv.createdAt || mv.date || "";
         const prev = latestByKey.get(k) || "";
@@ -4309,6 +4328,7 @@ function buildInventoryRowsForWarehouse(wh, stockByWh){
           customer: cust,
           code: code,
           item: name,
+          uom: getUomResolvedForCode(code) || "",
           qty: 0,
           lastMoveAt: "",
           threshold: getThresholdForKey(itemK),
@@ -6051,6 +6071,141 @@ function getMacroCategoryForCode(code) {
       const fromLocal = normalizeMacroCategory(state.productCategories && state.productCategories[low]);
       return fromProducts || fromLocal || "";
     }
+
+
+    // ===== Prodotti: Unità di misura (U.M.) =====
+    // Canoniche: nr / pz / kg / ton
+    function getUomSettingForCode(code){
+      const low = String(code || "").trim().toLowerCase();
+      const p = findProductByCode(code);
+      const fromProducts = __normalizeUom(p && (p.uom || p.um || p.unit || p.unitOfMeasure));
+      const fromLocal = __normalizeUom(state.productUoms && state.productUoms[low]);
+      return fromProducts || fromLocal || "";
+    }
+
+    function getUomResolvedForCode(code){
+      const low = String(code || "").trim().toLowerCase();
+      const explicit = getUomSettingForCode(code);
+      if (explicit) return explicit;
+
+      // fallback: ultimo movimento che contiene U.M.
+      try{
+        const list = (state && Array.isArray(state.movements)) ? state.movements : [];
+        // movements sono già in ordine (createdAt asc). tengo l'ultima U.M. non vuota
+        let last = "";
+        for (const mv of list){
+          if (!mv) continue;
+          if (String(mv.code || "").trim().toLowerCase() !== low) continue;
+          const u = __normalizeUom(mv.uom || "");
+          if (u) last = u;
+        }
+        if (last) return last;
+      }catch(_){}
+      return "";
+    }
+
+    function getUomResolvedForCodes(codes){
+      const arr = Array.isArray(codes) ? codes : [];
+      const set = new Set();
+      for (const c of arr){
+        const u = getUomResolvedForCode(c);
+        if (u) set.add(u);
+      }
+      if (set.size === 1) return Array.from(set)[0];
+      // se mix o vuoto: non forzare
+      return "";
+    }
+
+    async function setProductUomForCode(code, uom, opts){
+      const key = String(code || "").trim();
+      if (!key) return;
+      const low = key.toLowerCase();
+      const u = __normalizeUom(uom || "");
+      const silent = !!(opts && opts.silent);
+
+      // Offline fallback + UI immediata
+      state.productUoms = state.productUoms || {};
+      if (u) state.productUoms[low] = u;
+      else delete state.productUoms[low];
+      saveLocalData();
+
+      // optimistic local products (se già presente)
+      const p = findProductByCode(key);
+      if (p){
+        if (u) p.uom = u;
+        else { try{ delete p.uom; }catch(_){ p.uom = ""; } }
+        p.updatedAtIso = new Date().toISOString();
+      }
+
+      if (!fb.user || !fb.db) {
+        renderAll(); renderAnag();
+        if (!silent) showToast(u ? "U.M. salvata" : "U.M. rimossa");
+        return;
+      }
+
+      try{
+        const patch = {
+          code: key,
+          codeLower: low,
+          updatedAt: serverTimestamp(),
+          updatedBy: (fb.user.email || fb.user.uid || "")
+        };
+        if (u) patch.uom = u;
+        else patch.uom = deleteField();
+
+        await setDoc(doc(fb.db, "orgs", ORG_ID, "products", keyToDocId(low)), patch, { merge: true });
+        renderAll(); renderAnag();
+        if (!silent) showToast(u ? "U.M. salvata" : "U.M. rimossa");
+      }catch(e){
+        console.error("setProductUomForCode failed", e);
+        if (!silent) showToast("Errore salvataggio U.M.", "err");
+      }
+    }
+
+    async function setProductUomForCodes(codes, uom){
+      const list = (Array.isArray(codes) ? codes : []).map(x => String(x || "").trim()).filter(Boolean);
+      if (!list.length) return;
+      const u = __normalizeUom(uom || "");
+
+      // optimistic local
+      state.productUoms = state.productUoms || {};
+      for (const c of list){
+        const low = c.toLowerCase();
+        if (u) state.productUoms[low] = u;
+        else delete state.productUoms[low];
+
+        const p = findProductByCode(c);
+        if (p){
+          if (u) p.uom = u;
+          else { try{ delete p.uom; }catch(_){ p.uom = ""; } }
+          p.updatedAtIso = new Date().toISOString();
+        }
+      }
+      saveLocalData();
+
+      if (!fb.user || !fb.db) { renderAll(); renderAnag(); showToast(u ? "U.M. salvata" : "U.M. rimossa"); return; }
+
+      try{
+        await Promise.all(list.map(async (c) => {
+          const low = c.toLowerCase();
+          const patch = {
+            code: c,
+            codeLower: low,
+            updatedAt: serverTimestamp(),
+            updatedBy: (fb.user.email || fb.user.uid || "")
+          };
+          if (u) patch.uom = u;
+          else patch.uom = deleteField();
+          await setDoc(doc(fb.db, "orgs", ORG_ID, "products", keyToDocId(low)), patch, { merge: true });
+        }));
+        renderAll(); renderAnag();
+        showToast(u ? "U.M. salvata" : "U.M. rimossa");
+      }catch(e){
+        console.error("setProductUomForCodes failed", e);
+        showToast("Errore salvataggio U.M.", "err");
+      }
+    }
+
     async function setMacroCategoryForCode(code, category, nameHint) {
       const key = String(code || "").trim();
       const low = key.toLowerCase();
@@ -6125,7 +6280,9 @@ function getMacroCategoryForCode(code) {
               item: "",
               qty: 0,
               threshold: null,
-              lastMoveAt: ""
+              lastMoveAt: "",
+              uom: "",
+              __uoms: []
             };
           }
 
@@ -6137,6 +6294,11 @@ function getMacroCategoryForCode(code) {
 
           g.__codes.push(code);
           g.__members.push(Object.assign({}, r));
+          try{
+            const __u = __normalizeUom(r.uom || "") || getUomResolvedForCode(code) || "";
+            if (__u) g.__uoms.push(__u);
+          }catch(_){ }
+
           if (cust) g.__customers.push(cust);
           g.__bothZero = (g.__bothZero === true) && ((r && r.__bothZero) === true);
           map.set(k, g);
@@ -6152,6 +6314,12 @@ function getMacroCategoryForCode(code) {
           g.__customers = custs;
           if (custs.length === 1) g.customer = custs[0];
           else g.customer = "";
+
+          try{
+            const __uoms = Array.from(new Set((g.__uoms || []).map(x => __normalizeUom(x)).filter(Boolean)));
+            g.uom = (__uoms.length === 1) ? __uoms[0] : "";
+          }catch(_){ g.uom = g.uom || ""; }
+          try{ delete g.__uoms; }catch(_){ }
 
           g.item = g.__isAliasGroup ? (g.__alias || getDisplayNameForCode(g.code, "")) : getDisplayNameForCode(g.code, "");
           g.__displayCode = g.__isAliasGroup && codes.length > 1 ? `${g.code} (+${codes.length-1})` : g.code;
@@ -6228,6 +6396,7 @@ let __stockRowByKey = new Map();
         const warn = (Number(r.qty)||0) < (Number(r.threshold)||0);
         const qtyColor = warn ? "var(--danger)" : "rgba(0,0,0,.86)";
         const qtyVal = safeInt(r.qty);
+        const uom = __normalizeUom(r.uom || "") || getUomResolvedForCode(r.code || "") || "pz";
 
         const isGroup = (r.__isAliasGroup && Array.isArray(r.__codes) && r.__codes.length > 1);
 
@@ -6235,6 +6404,7 @@ let __stockRowByKey = new Map();
             <div class="qty-editor">
               <input class="qtyEditInput jsQtyEdit" type="number" inputmode="numeric" min="0" step="1"
                 value="${qtyVal}" data-orig="${qtyVal}" style="color:${qtyColor}" />
+              <span class="td-muted" style="font-size:12px; font-weight:900; min-width:34px; text-align:left;">${escapeHtml(uom)}</span>
               <button class="btn btn-primary btn-xs jsQtySave" type="button" disabled>Salva</button>
             </div>`;
 
@@ -6251,7 +6421,7 @@ let __stockRowByKey = new Map();
             <td data-label="Nome articolo">${displayName}</td>
             <td data-label="Cod. articolo">${displayCode}</td>
             <td data-label="Categoria">${catHtml}</td>
-            <td data-label="Pezzi" class="qty">${qtyCell}</td>
+            <td data-label="Q.tà" class="qty">${qtyCell}</td>
           </tr>`;
       }).join("");
 
@@ -6268,6 +6438,8 @@ let __stockRowByKey = new Map();
       const delta = newQty - oldQty;
       if (!delta) return;
 
+      const __uom = __normalizeUom(r.uom || "") || getUomResolvedForCode(r.code || "") || "pz";
+
       const mv = makeMovement({
         type: delta > 0 ? "IN" : "OUT",
         customer: r.customer || "",
@@ -6275,14 +6447,16 @@ let __stockRowByKey = new Map();
         item: r.item || "",
         qty: Math.abs(delta),
         date: todayYYYYMMDD(),
-        note: `Rettifica inventario: da ${oldQty} a ${newQty}`,
+        note: `Rettifica inventario: da ${oldQty} ${__uom} a ${newQty} ${__uom}`,
+        uom: __uom,
+        qtyRaw: `${Math.abs(delta)} ${__uom}`.trim(),
         warehouse: r.warehouse || __currentWarehouse || "",
         source: "Rettifica rapida",
         rawText: ""
       });
 
       await addMovement(mv);
-      showToast(`Quantità aggiornata (${oldQty}→${newQty})`);
+      showToast(`Quantità aggiornata (${oldQty}→${newQty}) ${__uom}`);
     }
 
 
@@ -6300,7 +6474,8 @@ let __stockRowByKey = new Map();
       if (!delta) return;
 
       const wh = normalizeWarehouse(g.warehouse || __currentWarehouse || "");
-      const noteBase = `Rettifica inventario (alias): totale da ${oldTotal} a ${newTotal}`;
+      const __uom = __normalizeUom(g.uom || "") || getUomResolvedForCodes(g.__codes || []) || "pz";
+      const noteBase = `Rettifica inventario (alias): totale da ${oldTotal} ${__uom} a ${newTotal} ${__uom}`;
 
       const membersRaw = Array.isArray(g.__members) ? g.__members.slice() : [];
       const members = membersRaw.map(m => ({
@@ -6344,6 +6519,8 @@ let __stockRowByKey = new Map();
           qty: Math.abs(delta),
           date: todayYYYYMMDD(),
           note: noteBase,
+        uom: __uom,
+        qtyRaw: `${Math.abs(delta)} ${__uom}`.trim(),
           warehouse: wh,
           source: "Rettifica rapida",
           rawText: ""
@@ -6375,6 +6552,8 @@ let __stockRowByKey = new Map();
             qty: take,
             date: todayYYYYMMDD(),
             note: noteBase,
+        uom: __uom,
+        qtyRaw: `${take} ${__uom}`.trim(),
             warehouse: wh,
             source: "Rettifica rapida",
             rawText: ""
@@ -6389,7 +6568,7 @@ let __stockRowByKey = new Map();
       // Batch write (1 render locale invece di N)
       await addMovementsBatch(mvs);
 
-      showToast(`Quantità aggiornata (${oldTotal}→${newTotal})`);
+      showToast(`Quantità aggiornata (${oldTotal}→${newTotal}) ${__uom}`);
     }
 
 
@@ -7422,6 +7601,15 @@ async function deleteSupplierCascade(supplierId){
       const alias = String((p && (p.alias || p.aliasName)) || (ctx && ctx.__alias) || "").trim();
       const title = (isAliasGroup ? (alias || String((ctx && ctx.item) || "Alias")) : String((p && p.name) || (ctx && ctx.item) || code)).trim() || "Prodotto";
       const cat = getMacroCategoryForCode(code);
+      const uomSetting = (isAliasGroup && ctx && Array.isArray(ctx.__codes))
+        ? (() => {
+            const s = new Set();
+            (ctx.__codes || []).forEach(c => { const u = getUomSettingForCode(c); if (u) s.add(u); });
+            return (s.size === 1) ? Array.from(s)[0] : "";
+          })()
+        : getUomSettingForCode(code);
+      const uomResolved = (isAliasGroup && ctx && Array.isArray(ctx.__codes)) ? (getUomResolvedForCodes(ctx.__codes) || "") : (getUomResolvedForCode(code) || "");
+      const uomLabel = uomResolved || uomSetting || "";
 
       const wh = normalizeWarehouse((ctx && ctx.warehouse) || "");
       const lastTxt = (ctx && ctx.lastMoveAt) ? formatDateIT(ctx.lastMoveAt) : "—";
@@ -7470,6 +7658,33 @@ async function deleteSupplierCascade(supplierId){
           <input value="${h(code)}" />
         </div>
       `);
+      baseFields.push(`
+        <div class="field">
+          <label>U.M.</label>
+          <select id="prodUomSelect">
+            <option value="">Auto</option>
+            <option value="nr">nr</option>
+            <option value="pz">pz</option>
+            <option value="kg">kg</option>
+            <option value="ton">ton</option>
+          </select>
+          <div class="td-muted" style="margin-top:6px;">Imposta l’unità per avere sempre quantità coerenti in Inventario/Movimenti (Auto = ultimo movimento).</div>
+        </div>
+      `);
+      baseFields.push(`
+        <div class="field">
+          <label>U.M.</label>
+          <select id="prodUomSelect">
+            <option value="">Auto</option>
+            <option value="nr">nr</option>
+            <option value="pz">pz</option>
+            <option value="kg">kg</option>
+            <option value="ton">ton</option>
+          </select>
+          <div class="td-muted" style="margin-top:6px;">Auto = usa l’unità vista negli ultimi movimenti. Impostala per mostrare sempre la Q.tà corretta.</div>
+        </div>
+      `);
+
 
 
 // Fornitore (solo in Anagrafica prodotti)
@@ -7557,14 +7772,14 @@ if (mode === "master") {
                 <div class="inlineRow" style="justify-content: space-between; gap:10px; align-items:center; flex-wrap:wrap;">
                   <div>
                     <div><strong>Inventario Cerea</strong></div>
-                    <div class="td-muted">Totale: ${Number(qCerea||0).toLocaleString("it-IT")} pezzi</div>
+                    <div class="td-muted">Totale: ${Number(qCerea||0).toLocaleString("it-IT")} ${h(uomLabel || "pz")}</div>
                   </div>
                   <button id="prodOpenStockCerea" class="btn btn-secondary btn-xs" type="button" ${canC ? "" : "disabled"}>Apri dettaglio</button>
                 </div>
                 <div class="inlineRow" style="justify-content: space-between; gap:10px; align-items:center; flex-wrap:wrap;">
                   <div>
                     <div><strong>Inventario Concamarise</strong></div>
-                    <div class="td-muted">Totale: ${Number(qConca||0).toLocaleString("it-IT")} pezzi</div>
+                    <div class="td-muted">Totale: ${Number(qConca||0).toLocaleString("it-IT")} ${h(uomLabel || "pz")}</div>
                   </div>
                   <button id="prodOpenStockConca" class="btn btn-secondary btn-xs" type="button" ${canK ? "" : "disabled"}>Apri dettaglio</button>
                 </div>
@@ -7581,11 +7796,12 @@ if (mode === "master") {
         const members = Array.isArray(ctx.__members) ? ctx.__members : [];
         const sumQty = Number(ctx.qty || 0);
         const thr = Number(ctx.threshold || 0);
+        const uomG = getUomResolvedForCodes(codes) || uomLabel || "pz";
 
         const membersHtml = (members.length ? members : codes.map(c => ({ code: c }))).map(m => {
           const c = String(m.code || "").trim();
           const nm = getDisplayNameForCode(c, m.item || "");
-          const q = (m.qty !== undefined) ? safeInt(m.qty).toLocaleString("it-IT") : "—";
+          const q = (m.qty !== undefined) ? (safeInt(m.qty).toLocaleString("it-IT") + " " + uomG) : "—";
           return `
             <tr>
               <td data-label="Codice"><span class="kbd">${escapeHtml(c)}</span></td>
@@ -7601,7 +7817,7 @@ if (mode === "master") {
         groupHtml = `
           <div class="field" style="grid-column: 1 / -1;">
             <label>Stock totale (alias)</label>
-            <input value="${Number(sumQty||0).toLocaleString("it-IT")} pezzi (soglia min ${Number(thr||0).toLocaleString("it-IT")})" readonly />
+            <input value="${Number(sumQty||0).toLocaleString("it-IT")} ${h(uomG)} (soglia min ${Number(thr||0).toLocaleString("it-IT")} ${h(uomG)})" readonly />
             <div class="td-muted" style="margin-top:6px;">Per rettifiche: apri un singolo codice dal gruppo.</div>
           </div>
 
@@ -7613,7 +7829,7 @@ if (mode === "master") {
                   <tr>
                     <th style="width:180px">Codice</th>
                     <th>Nome</th>
-                    <th class="qty" style="width:110px">Pezzi</th>
+                    <th class="qty" style="width:110px">Q.tà</th>
                     <th style="width:120px">Apri</th>
                   </tr>
                 </thead>
@@ -7634,11 +7850,12 @@ if (mode === "master") {
 
         stockHtml = `
           <div class="field">
-            <label>Pezzi in stock</label>
+            <label>Quantità in stock</label>
             ${(ctx && (ctx.qty !== undefined))
               ? `<div class="qty-editor" style="justify-content:flex-start;">
                   <input id="prodQtyEdit" class="qtyEditInput" type="number" inputmode="numeric" min="0" step="1"
                     value="${qtyVal}" data-orig="${qtyVal}" />
+                  <span class="td-muted" style="font-size:12px; font-weight:900;">${h(uomLabel || "pz")}</span>
                   <button id="prodQtySave" class="btn btn-primary btn-xs" type="button" disabled>Salva</button>
                 </div>`
               : `<input value="${h(Number(qtyVal).toLocaleString("it-IT"))}" readonly />`}
@@ -7655,7 +7872,7 @@ if (mode === "master") {
               <button id="prodThrSave" class="btn btn-primary btn-xs" type="button" disabled>Salva</button>
               <button id="prodThrReset" class="btn btn-ghost btn-xs" type="button">Default</button>
             </div>
-            <div class="td-muted" style="margin-top:6px;">Se non impostata: sotto scorta se &lt; 1000 pezzi. (La soglia è per articolo, vale su entrambe le sedi)</div>
+            <div class="td-muted" style="margin-top:6px;">Se non impostata: sotto scorta se &lt; 1000 ${h(uomLabel || "pz")}. (La soglia è per articolo, vale su entrambe le sedi)</div>
           </div>
 
           <div class="field">
@@ -7716,7 +7933,20 @@ if (mode === "master") {
 
       prodFields.innerHTML = headerHtml + baseFields.join("") + groupHtml + stockHtml + invDangerHtml + dangerHtml;
 
-      // Category select
+      // U.M. select
+      const uSel = document.getElementById("prodUomSelect");
+      if (uSel) {
+        uSel.value = uomSetting || "";
+        uSel.addEventListener("change", async () => {
+          const v = String(uSel.value || "");
+          if (isAliasGroup) await setProductUomForCodes(ctx.__codes || [], v);
+          else await setProductUomForCode(code, v);
+          renderAll();
+          showToast("U.M. salvata");
+        });
+      }
+
+// Category select
       const sel = document.getElementById("prodCategorySelect");
       if (sel) {
         sel.value = cat || "";
@@ -7989,7 +8219,7 @@ if (mode === "master") {
           if (mvQty > qtyNow) { showToast("Quantità superiore allo stock"); sync(); return; }
           if (to === wh) { showToast("Scegli un inventario diverso"); sync(); return; }
 
-          const noteTxt = `Spostamento inventario (${mvQty} pz): ${warehouseLabel(wh)} → ${warehouseLabel(to)}`;
+          const noteTxt = `Spostamento inventario (${mvQty} ${(uomLabel || 'pz')}): ${warehouseLabel(wh)} → ${warehouseLabel(to)}`;
 
           // Sposta quantità: scarico da WH attuale + carico su WH target (movimenti)
           const outMv = makeMovement({
@@ -7998,6 +8228,8 @@ if (mode === "master") {
             code: code,
             item: (ctx.item || title || ""),
             qty: mvQty,
+            uom: (uomLabel || ""),
+            qtyRaw: `${mvQty} ${(uomLabel || "").trim()}`.trim(),
             date: todayYYYYMMDD(),
             note: noteTxt,
             warehouse: wh,
@@ -8009,6 +8241,8 @@ if (mode === "master") {
             code: code,
             item: (ctx.item || title || ""),
             qty: mvQty,
+            uom: (uomLabel || ""),
+            qtyRaw: `${mvQty} ${(uomLabel || "").trim()}`.trim(),
             date: todayYYYYMMDD(),
             note: noteTxt,
             warehouse: to,
@@ -8019,7 +8253,7 @@ if (mode === "master") {
           try {
             await addMovement(outMv);
             await addMovement(inMv);
-            showToast(`Spostato ${mvQty} pz`);
+            showToast(`Spostato ${mvQty} ${(uomLabel || 'pz')}`);
           } catch (err) {
             console.error(err);
             showToast("Errore spostamento");
@@ -9495,6 +9729,9 @@ try {
             updatedAt: serverTimestamp(),
             updatedBy: fb.user.email || fb.user.uid
           };
+
+          // se disponibile, salva anche l'unità di misura letta dall'OCR
+          try { const u0 = __normalizeUom(it.uom || it.um || it.unit || ""); if (u0) payload.uom = u0; } catch(_) {}
 
           await setDoc(ref, payload, { merge: true });
         }
