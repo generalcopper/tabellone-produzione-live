@@ -22,7 +22,7 @@
 
   let hub = null;
   let selectedKey = "";
-  let selectedSnapshot = { name: "", color: "", macro: "" };
+  let selectedSnapshot = { name: "", color: "" };
 
   function closeSideMenuSafe(){
     try{
@@ -42,7 +42,6 @@
       try{ $("catNewName")?.focus(); }catch(_){}
     } else {
       try{ $("catNewName").value = ""; }catch(_){}
-      try{ $("catNewMacro").value = "imballaggi"; }catch(_){}
     }
   }
 
@@ -62,7 +61,7 @@
       }catch(_){ document.body.classList.remove("modal-open"); }
 
       selectedKey = "";
-      selectedSnapshot = { name:"", color:"", macro:"" };
+      selectedSnapshot = { name:"", color:"" };
       try{ $("catProdTbody").innerHTML = '<tr><td class="td-muted" colspan="2">Seleziona una categoria.</td></tr>'; }catch(_){}
     }
   }
@@ -134,13 +133,11 @@
 
     const nm = String(cat?.name || selectedKey || "").trim();
     const col = safeColor(cat?.color || "") || "#1c6fe6";
-    const macro = String(cat?.macro || "").trim().toLowerCase() === "materie_prime" ? "materie_prime" : "imballaggi";
 
     const used = (typeof hub.categoryUsageCount === "function") ? (hub.categoryUsageCount(selectedKey) || 0) : 0;
 
     const nameInp = $("catEditName");
     const colorInp = $("catEditColor");
-    const macroSel = $("catEditMacro");
     const pill = $("catDetailCount");
     const btnSave = $("btnCatSave");
     const btnDel = $("btnCatDelete");
@@ -150,12 +147,11 @@
 
     // snapshot base per enable/disable
     if (!selectedSnapshot || selectedSnapshot.key !== selectedKey){
-      selectedSnapshot = { key: selectedKey, name: nm, color: col, macro: macro };
+      selectedSnapshot = { key: selectedKey, name: nm, color: col };
     }
 
     if (nameInp) nameInp.value = nm;
     if (colorInp) colorInp.value = col;
-    if (macroSel) macroSel.value = macro;
 
     const canDelete = (Number(used||0) === 0);
 
@@ -188,8 +184,7 @@
       if (!btnSave || !nameInp || !colorInp) return;
       const curName = String(nameInp.value || "").trim();
       const curCol = safeColor(colorInp.value || "") || "";
-      const curMacro = String(macroSel?.value || "").trim().toLowerCase() === "materie_prime" ? "materie_prime" : "imballaggi";
-      btnSave.disabled = (curName === String(selectedSnapshot.name||"")) && (curCol === safeColor(selectedSnapshot.color||"")) && (curMacro === String(selectedSnapshot.macro||""));
+      btnSave.disabled = (curName === String(selectedSnapshot.name||"")) && (curCol === safeColor(selectedSnapshot.color||""));
     };
     syncSave();
   }
@@ -230,11 +225,10 @@
     $("btnCatCreate")?.addEventListener("click", async () => {
       const name = String($("catNewName")?.value || "").trim();
       const color = String($("catNewColor")?.value || "").trim();
-      const macro = String($("catNewMacro")?.value || "").trim().toLowerCase() === "materie_prime" ? "materie_prime" : "imballaggi";
       if (!name) { try{ hub.showToast("Inserisci un nome categoria", "warn"); }catch(_){ } return; }
 
       try{
-        const created = await hub.createCategory(name, color, macro);
+        const created = await hub.createCategory(name, color);
         setCreateOpen(false);
         if (created && created.key) {
           pickCategory(created.key);
@@ -273,19 +267,17 @@
 // detail inputs
     $("catEditName")?.addEventListener("input", () => renderDetail());
     $("catEditColor")?.addEventListener("input", () => renderDetail());
-    $("catEditMacro")?.addEventListener("change", () => renderDetail());
 
     // save
     $("btnCatSave")?.addEventListener("click", async () => {
       if (!selectedKey) return;
       const name = String($("catEditName")?.value || "").trim();
       const color = String($("catEditColor")?.value || "").trim();
-      const macro = String($("catEditMacro")?.value || "").trim().toLowerCase() === "materie_prime" ? "materie_prime" : "imballaggi";
       if (!name) { try{ hub.showToast("Nome categoria non valido", "warn"); }catch(_){ } return; }
 
       try{
-        await hub.updateCategory(selectedKey, { name, color, macro });
-        selectedSnapshot = { key: selectedKey, name, color, macro };
+        await hub.updateCategory(selectedKey, { name, color });
+        selectedSnapshot = { key: selectedKey, name, color };
         render();
       }catch(e){
         console.error(e);
