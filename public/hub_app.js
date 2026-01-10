@@ -9840,21 +9840,37 @@ try {
         const country = __sup_normSpaces(details.country || parts.country || "");
 
         const payload = {
-          name,
-          nameLower,
           updatedAt: serverTimestamp(),
           updatedBy: fb.user.email || fb.user.uid,
           lastSource: "OCR"
         };
 
+        // Se il fornitore esiste già, NON sovrascrivere nome/codice: riempi solo se mancano
         if (!existing){
+          payload.name = name;
+          payload.nameLower = nameLower;
           payload.createdAt = serverTimestamp();
           payload.createdBy = fb.user.email || fb.user.uid;
+        } else {
+          const exName = __sup_normSpaces(existing.name || "");
+          if (!exName){
+            payload.name = name;
+            payload.nameLower = nameLower;
+          } else if (!existing.nameLower){
+            payload.nameLower = exName.toLowerCase();
+          }
         }
 
+
         // Only set fields if they look valid (anti-scambio campi)
-        if (vatNorm) payload.vat = vatNorm;
-        if (cfNorm) payload.fiscalCode = cfNorm;
+        if (vatNorm) {
+          const exVat = existing ? __sup_cleanVat(existing.vat || existing.vatNumber || existing.piva || existing.partitaIva || "") : "";
+          if (!exVat) payload.vat = vatNorm;
+        }
+        if (cfNorm) {
+          const exCf = existing ? __sup_cleanFiscalCode(existing.fiscalCode || existing.taxCode || existing.cf || existing.codiceFiscale || "") : "";
+          if (!exCf) payload.fiscalCode = cfNorm;
+        }
 
         const addr = __sup_normSpaces(details.address || parts.address || "");
         if (addr && __sup_looksLikeAddress(addr)) payload.address = addr;
