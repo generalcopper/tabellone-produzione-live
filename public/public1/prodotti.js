@@ -51,6 +51,8 @@
       : function (v) { return String(v || "").toLowerCase().trim(); };
     var safeDecodeUri = (typeof ctx.safeDecodeUri === "function") ? ctx.safeDecodeUri : _safeDecodeUri;
 
+    var getUomForCode = (typeof ctx.getUomForCode === "function") ? ctx.getUomForCode : function(){ return ""; };
+
     // UI: stile tabella + placeholder
     try { if (anagTable) anagTable.classList.add("anagTableProducts"); } catch (_) {}
     try { if (searchAnag) searchAnag.placeholder = "Nome, codice, alias…"; } catch (_) {}
@@ -60,6 +62,7 @@
       if (anagTheadRow) anagTheadRow.innerHTML =
         "<th>Alias / Nome</th>" +
         "<th>Codici</th>" +
+        "<th class=\"uom\">U.M.</th>" +
         "<th class=\"qty\">N.</th>" +
         "<th>Azioni</th>";
     } catch (_) {}
@@ -121,6 +124,19 @@
       var uniq = Array.from(new Set(codes));
       g.codes = uniq;
       g.count = uniq.length;
+      // U.M. (se coerente sul gruppo)
+      try {
+        var set = new Set();
+        for (var j = 0; j < uniq.length; j++) {
+          var c = String(uniq[j] || "").trim();
+          if (!c) continue;
+          var u = String(getUomForCode(c) || "").trim().toLowerCase();
+          if (u === "pz" || u === "kg" || u === "ton") set.add(u);
+        }
+        if (set.size === 1) g.uom = Array.from(set)[0];
+        else if (set.size > 1) g.uom = "mista";
+        else g.uom = "";
+      } catch (_) { g.uom = ""; }
       return g;
     });
 
@@ -159,7 +175,7 @@
     if (!anagTbody) return groupsMap;
 
     if (!filtered.length) {
-      anagTbody.innerHTML = "<tr><td class=\"td-muted\" colspan=\"4\">Nessun prodotto.</td></tr>";
+      anagTbody.innerHTML = "<tr><td class=\"td-muted\" colspan=\"5\">Nessun prodotto.</td></tr>";
       return groupsMap;
     }
 
@@ -176,6 +192,7 @@
         "<tr data-pg=\"" + escapeHtmlAttr(g.key) + "\" title=\"Apri dettagli\">" +
           "<td data-label=\"Alias / Nome\"><strong>" + escapeHtml(g.label || "—") + "</strong>" + badge + "</td>" +
           "<td data-label=\"Codici\"><span class=\"kbd\">" + escapeHtml(codesTxt || "—") + "</span></td>" +
+          "<td data-label=\"U.M.\" class=\"uom\">" + escapeHtml((g.uom === "mista") ? "Mista" : (g.uom ? g.uom.toUpperCase() : "—")) + "</td>" +
           "<td data-label=\"N.\" class=\"qty\">" + Number(codes.length || 0).toLocaleString("it-IT") + "</td>" +
           "<td data-label=\"Azioni\" class=\"td-actions\">" +
             "<button class=\"btn btn-ghost btn-xs\" type=\"button\" data-action=\"openProdGroup\" data-id=\"" + escapeHtmlAttr(g.key) + "\">Apri</button>" +
