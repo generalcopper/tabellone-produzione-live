@@ -2068,6 +2068,11 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
     const statLowStock = document.getElementById("statLowStock");
     const statLastUpdate = document.getElementById("statLastUpdate");
 
+    // INIT_COUNTERS_TO_ZERO: evita "—" e micro-spostamenti all'ingresso
+    try {
+      [statTotalItems, statTotalPieces, statTotalFlows, statLowStock].forEach((el) => { if (el) el.textContent = "0"; });
+    } catch (_) {}
+
 
     // Home: riquadro sotto-scorta (visual)
     const lowStockBoard = document.getElementById("lowStockBoard");
@@ -2075,6 +2080,12 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
     const lowStockListConca = document.getElementById("lowStockListConca");
     const lowStockCountCerea = document.getElementById("lowStockCountCerea");
     const lowStockCountConca = document.getElementById("lowStockCountConca");
+
+    // Home: riquadro quantità per categoria (grafico orizzontale)
+    const catQtyBoard = document.getElementById("catQtyBoard");
+    const catQtyList = document.getElementById("catQtyList");
+    const catQtyMeta = document.getElementById("catQtyMeta");
+
 
     const stockTbody = document.getElementById("stockTbody");
     const movTbody = document.getElementById("movTbody");
@@ -4599,6 +4610,81 @@ async function deleteMovement(id) {
     /****************************************************************
      * Rendering
      ****************************************************************/
+    // ===== Cockpit: contatori animati (0 → valore reale) =====
+    const __counterAnim = (() => {
+      const wm = new WeakMap();
+
+      const prefersReducedMotion = () => {
+        try { return !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches); }
+        catch(_) { return false; }
+      };
+
+      const easeOutCubic = (t) => (1 - Math.pow(1 - t, 3));
+      const fmt = (n) => (Number(n) || 0).toLocaleString("it-IT");
+
+      function setNow(el, n){
+        if (!el) return;
+        el.textContent = fmt(n);
+      }
+
+      function animate(el, target, opts){
+        if (!el) return;
+
+        const to = Number(target);
+        const end = Number.isFinite(to) ? to : 0;
+
+        // numeri del cockpit: interi (se vuoi decimali, dimmelo e li supporto)
+        const endInt = Math.max(0, Math.round(end));
+        const key = String(endInt);
+
+        // accessibilità: se l'utente riduce le animazioni, niente tween
+        if (prefersReducedMotion()){
+          el.dataset.animTarget = key;
+          el.dataset.animPlayed = "1";
+          setNow(el, endInt);
+          return;
+        }
+
+        // evita re-animazioni inutili se il valore non è cambiato
+        if (el.dataset.animTarget === key && el.dataset.animPlayed === "1"){
+          setNow(el, endInt);
+          return;
+        }
+
+        el.dataset.animTarget = key;
+        el.dataset.animPlayed = "1";
+
+        // cancella eventuale animazione in corso
+        try{
+          const prev = wm.get(el);
+          if (prev && typeof prev.cancel === "function") prev.cancel();
+        }catch(_){}
+
+        const duration = Math.max(300, Math.floor((opts && opts.duration) || 950));
+
+        // start da 0 come richiesto
+        const from = 0;
+        setNow(el, from);
+        if (endInt === 0) return;
+
+        const t0 = (typeof performance !== "undefined" && performance.now) ? performance.now() : Date.now();
+
+        let raf = 0;
+        const tick = (now) => {
+          const t1 = (typeof now === "number") ? now : ((typeof performance !== "undefined" && performance.now) ? performance.now() : Date.now());
+          const p = Math.min(1, (t1 - t0) / duration);
+          const v = Math.round(from + (endInt - from) * easeOutCubic(p));
+          el.textContent = fmt(v);
+          if (p < 1) raf = requestAnimationFrame(tick);
+        };
+
+        raf = requestAnimationFrame(tick);
+        wm.set(el, { cancel: () => { try{ cancelAnimationFrame(raf); }catch(_){} } });
+      }
+
+      return { animate, setNow };
+    })();
+
     function renderStats(stockArr) {
       const items = stockArr.length;
       const totalPieces = stockArr.reduce((sum, x) => sum + (Number(x.qty) || 0), 0);
@@ -4610,8 +4696,8 @@ async function deleteMovement(id) {
       }).length;
       const last = state.movements.slice().sort((a,b) => String(b.createdAt||"").localeCompare(String(a.createdAt||"")))[0];
 
-      statTotalItems.textContent = items.toLocaleString("it-IT");
-      statTotalPieces.textContent = totalPieces.toLocaleString("it-IT");
+      __counterAnim.animate(statTotalItems, items);
+      __counterAnim.animate(statTotalPieces, totalPieces);
       // Flussi (cockpit) = numero documenti (DDT) caricati, non numero righe/articoli
       let docsCount = 0;
       try {
@@ -4622,9 +4708,8 @@ async function deleteMovement(id) {
           docsCount = (out && Array.isArray(out.list)) ? out.list.length : 0;
         }
       } catch (e) { docsCount = 0; }
-
-      if (typeof statTotalFlows !== "undefined" && statTotalFlows) statTotalFlows.textContent = (Number(docsCount) || 0).toLocaleString("it-IT");
-      statLowStock.textContent = low.toLocaleString("it-IT");
+      if (typeof statTotalFlows !== "undefined" && statTotalFlows) __counterAnim.animate(statTotalFlows, docsCount);
+      __counterAnim.animate(statLowStock, low);
       statLastUpdate.textContent = last ? formatDateIT(last.createdAt) : "—";
     }
 
@@ -4696,6 +4781,120 @@ async function deleteMovement(id) {
       }
     }
 
+
+
+
+function renderCategoryQtyBoard(stockByWh) {
+  try {
+    if (!catQtyBoard || !catQtyList) return;
+
+    const rows = Array.isArray(stockByWh) ? stockByWh : [];
+
+    // Somma per codice (aggregando sedi e fornitori)
+    const sumByCode = new Map(); // codeLower -> qty
+    for (const r of rows) {
+      if (!r) continue;
+      const code = String(r.code || "").trim();
+      if (!code) continue;
+      const low = code.toLowerCase();
+      const prev = sumByCode.get(low) || 0;
+      sumByCode.set(low, prev + safeInt(r.qty));
+    }
+
+    // Somma per categoria (macro)
+    const sumByCat = new Map(); // catKey -> qty
+    for (const [codeLow, qty] of sumByCode.entries()) {
+      const cat = (typeof getMacroCategoryForCode === "function")
+        ? (getMacroCategoryForCode(codeLow) || "")
+        : "";
+      const k = (cat || "non_classificati");
+      sumByCat.set(k, (sumByCat.get(k) || 0) + (Number(qty) || 0));
+    }
+
+    // Preferite (sempre visibili): flaconi, scatole, materie prime
+    const preferred = ["flaconi", "scatole", "materie_prime"];
+
+    const all = [];
+
+    // Garantisce le preferite anche a 0
+    preferred.forEach(k => {
+      const qty = Number(sumByCat.get(k) || 0);
+      const label = (typeof macroCatLabel === "function" ? (macroCatLabel(k) || "") : "") || k;
+      const color = (typeof macroCatColor === "function" ? (macroCatColor(k) || "") : "") || "";
+      all.push({ key: k, qty, label, color });
+    });
+
+    // Aggiungi le altre (solo se non-zero)
+    for (const [k, qty] of sumByCat.entries()) {
+      if (preferred.includes(k)) continue;
+      const n = Number(qty) || 0;
+      if (n === 0) continue;
+      const label = (typeof macroCatLabel === "function" ? (macroCatLabel(k) || "") : "") || k;
+      const color = (typeof macroCatColor === "function" ? (macroCatColor(k) || "") : "") || "";
+      all.push({ key: k, qty: n, label, color });
+    }
+
+    // Ordina: preferite in testa (tradizione) + poi per quantità
+    const prefIndex = (k) => {
+      const i = preferred.indexOf(k);
+      return (i < 0) ? 999 : i;
+    };
+    all.sort((a, b) => {
+      const pa = prefIndex(a.key), pb = prefIndex(b.key);
+      if (pa != pb) return pa - pb;
+      return (Number(b.qty) || 0) - (Number(a.qty) || 0);
+    });
+
+    const maxRows = 8;
+    const list = all.slice(0, maxRows);
+
+    const total = list.reduce((s, x) => s + (Number(x.qty) || 0), 0);
+    if (catQtyMeta) catQtyMeta.textContent = total ? Number(total).toLocaleString("it-IT") : "0";
+
+    if (!list.length) {
+      catQtyList.innerHTML = '<div class="td-muted">Nessun dato categorie.</div>';
+      return;
+    }
+
+    const max = Math.max(1, ...list.map(x => Math.max(0, Number(x.qty) || 0)));
+
+    catQtyList.innerHTML = list.map(x => {
+      const name = escapeHtml(String(x.label || x.key || "—"));
+      const val = Number(x.qty || 0);
+      const pct = Math.max(0, Math.min(100, Math.round((Math.max(0, val) / max) * 100)));
+      const col = String(x.color || "").trim();
+      const dotStyle = col ? `style="background:${escapeHtmlAttr(col)}"` : '';
+      const fillStyle = col ? `style="background:${escapeHtmlAttr(col)}; width:0%"` : 'style="width:0%"';
+
+      return `
+        <div class="catBarRow" data-cat="${escapeHtmlAttr(x.key || "")}">
+          <div class="catBarLabel">
+            <span class="catDot" ${dotStyle}></span>
+            <span class="catName">${name}</span>
+          </div>
+          <div class="catBarTrack" role="progressbar" aria-valuemin="0" aria-valuemax="${max}" aria-valuenow="${val}">
+            <div class="catBarFill" data-pct="${pct}" ${fillStyle}></div>
+          </div>
+          <div class="catBarVal">${Number(val).toLocaleString("it-IT")}</div>
+        </div>
+      `;
+    }).join("");
+
+    // Animazione fill (0 -> target)
+    try {
+      const fills = Array.from(catQtyList.querySelectorAll(".catBarFill"));
+      requestAnimationFrame(() => {
+        fills.forEach(f => {
+          const p = String(f.getAttribute("data-pct") || "0");
+          f.style.width = p + "%";
+        });
+      });
+    } catch (_) {}
+
+  } catch (e) {
+    console.warn("renderCategoryQtyBoard failed", e);
+  }
+}
 
     function renderCustomerOptions(stockArr) {
       const customers = Array.from(new Set(stockArr.map(x => x.customer).filter(Boolean))).sort((a,b)=>a.localeCompare(b));
@@ -6767,6 +6966,7 @@ function renderAll() {
       renderLowStockBoard(stockByWh);
 
 
+      renderCategoryQtyBoard(stockByWh);
       // Inventario: mostra tabella solo dopo scelta sede
       if (__currentWarehouse) {
         const wh = normalizeWarehouse(__currentWarehouse);
