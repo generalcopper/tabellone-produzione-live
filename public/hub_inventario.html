@@ -2110,7 +2110,11 @@ textarea,
           <button class="sideMenuLink" id="menuGoInvCerea" type="button">Inventario Cerea</button>
           <button class="sideMenuLink" id="menuGoInvConcamarise" type="button">Inventario Concamarise</button>
           <button class="sideMenuLink" id="menuGoSuppliers" type="button">Fornitori</button>
-          <button class="sideMenuLink" id="menuGoProducts" type="button">Prodotti</button>
+          <details class="sideMenuSubmenu" id="menuProductsSub">
+            <summary>Prodotti</summary>
+            <button class="sideMenuLink" id="menuGoProductsRaw" type="button">Materie prime</button>
+            <button class="sideMenuLink" id="menuGoProductsPack" type="button">Imballaggi</button>
+          </details>
           <button class="sideMenuLink" id="menuGoFlows" type="button">DDT Caricati</button>
           <button class="sideMenuLink" id="menuGoMovements" type="button">Movimenti</button>
           <button class="sideMenuLink" id="menuGoCategories" type="button">Categorie</button>
@@ -2780,7 +2784,11 @@ textarea,
           <label>Nuova categoria</label>
           <div class="inlineRow" style="justify-content:flex-start; gap:10px;">
             <input id="catNewName" class="qtyEditInput" type="text" placeholder="Nome categoria (es. Imballi)" style="flex:1 1 260px; min-width: 220px;" />
-            <input id="catNewColor" type="color" value="#1c6fe6" style="width: 58px; height: 44px; padding: 0; border: 1px solid rgba(0,0,0,.12); background:#fff;" />
+                        <select id="catNewMacro" class="qtyEditInput" style="flex:0 0 200px; min-width: 190px; max-width: 240px;">
+              <option value="imballaggi">Imballaggi</option>
+              <option value="materie_prime">Materie prime</option>
+            </select>
+<input id="catNewColor" type="color" value="#1c6fe6" style="width: 58px; height: 44px; padding: 0; border: 1px solid rgba(0,0,0,.12); background:#fff;" />
             <button class="btn btn-primary btn-xs" id="btnCatCreate" type="button">Crea</button>
             <button class="btn btn-ghost btn-xs" id="btnCatCancelCreate" type="button">Annulla</button>
           </div>
@@ -3085,6 +3093,13 @@ textarea,
         <div class="field" style="max-width: 220px;">
           <label>Colore</label>
           <input id="catEditColor" type="color" value="#1c6fe6" style="height:44px; padding:0; border: 1px solid rgba(0,0,0,.12); background:#fff;" />
+        </div>
+        <div class="field" style="max-width: 260px;">
+          <label>Macro categoria</label>
+          <select id="catEditMacro" class="qtyEditInput">
+            <option value="imballaggi">Imballaggi</option>
+            <option value="materie_prime">Materie prime</option>
+          </select>
         </div>
       </div>
 
@@ -3571,14 +3586,25 @@ document.getElementById("menuGoHome")?.addEventListener("click", () => { closeSi
     document.getElementById("menuGoSuppliers")?.addEventListener("click", () => {
       closeSideMenu();
       activeAnagTab = "suppliers";
+      activeProductsMacroGroup = "";
       syncAnagHeaderTitle();
       try{ segSuppliers && segSuppliers.classList.add("active"); segProducts && segProducts.classList.remove("active"); }catch(_){ }
       setView("anag");
       try{ renderAnag(); }catch(_){ }
     });
-    document.getElementById("menuGoProducts")?.addEventListener("click", () => {
+        document.getElementById("menuGoProductsRaw")?.addEventListener("click", () => {
       closeSideMenu();
       activeAnagTab = "products";
+      activeProductsMacroGroup = "materie_prime";
+      syncAnagHeaderTitle();
+      try{ segProducts && segProducts.classList.add("active"); segSuppliers && segSuppliers.classList.remove("active"); }catch(_){ }
+      setView("anag");
+      try{ renderAnag(); }catch(_){ }
+    });
+    document.getElementById("menuGoProductsPack")?.addEventListener("click", () => {
+      closeSideMenu();
+      activeAnagTab = "products";
+      activeProductsMacroGroup = "imballaggi";
       syncAnagHeaderTitle();
       try{ segProducts && segProducts.classList.add("active"); segSuppliers && segSuppliers.classList.remove("active"); }catch(_){ }
       setView("anag");
@@ -3814,11 +3840,20 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
     let products = [];
     let thresholds = {}; // key -> number (from Firestore)
     let activeAnagTab = "suppliers"; // suppliers|products
+    let activeProductsMacroGroup = ""; // materie_prime|imballaggi|"" (tutti)
+
 
     function syncAnagHeaderTitle(){
       const el = document.getElementById("anagHeaderTitle");
       if (!el) return;
-      el.textContent = (activeAnagTab === "products") ? "Prodotti" : "Fornitori";
+      if (activeAnagTab === "products") {
+        const mg = String(activeProductsMacroGroup || "").trim();
+        if (mg === "materie_prime") el.textContent = "Prodotti — Materie prime";
+        else if (mg === "imballaggi") el.textContent = "Prodotti — Imballaggi";
+        else el.textContent = "Prodotti";
+      } else {
+        el.textContent = "Fornitori";
+      }
     }
 
     let currentSupplierId = null;
@@ -6896,11 +6931,19 @@ function __applyRuntimeCategories(list){
     const name = String(c.name || c.label || key || "").trim();
     if (!key || seen.has(key)) continue;
     seen.add(key);
-    norm.push({ key, name: name || key, color: __safeCssColor(c.color || "") });
+    norm.push({ key, name: name || key, color: __safeCssColor(c.color || ""), macro: normalizeProductsMacroGroup(c.macro || c.macroGroup || c.group || "") || ((key === "materie_prime") ? "materie_prime" : "imballaggi") });
   }
 
   // fallback: se vuoto, usa defaults
-  const finalList = norm.length ? norm : DEFAULT_CATEGORIES.slice();
+  const baseList = norm.length ? norm : DEFAULT_CATEGORIES.slice();
+
+  const finalList = baseList.map(c => {
+    const key = String(c.key||"").trim().toLowerCase();
+    const name = String(c.name||key||"").trim() || key;
+    const color = __safeCssColor(c.color || "");
+    const macro = normalizeProductsMacroGroup(c.macro || c.macroGroup || c.group || "") || ((key === "materie_prime") ? "materie_prime" : "imballaggi");
+    return { key, name, color, macro };
+  });
 
   // ordina: per nome (it), ma tenendo "non_classificati" in cima
   finalList.sort((a,b) => {
@@ -6933,6 +6976,30 @@ function macroCatColor(v){
   const def = s ? __catMap.get(s) : null;
   return def && def.color ? def.color : "";
 }
+
+// Macro gruppi prodotti (menu Prodotti)
+const PRODUCT_MACRO_GROUPS = [
+  { key: "materie_prime", name: "Materie prime" },
+  { key: "imballaggi", name: "Imballaggi" }
+];
+function normalizeProductsMacroGroup(v){
+  const s = String(v || "").trim().toLowerCase();
+  return (s === "materie_prime" || s === "imballaggi") ? s : "";
+}
+function productsMacroLabel(v){
+  const s = normalizeProductsMacroGroup(v);
+  if (!s) return "";
+  return (s === "materie_prime") ? "Materie prime" : "Imballaggi";
+}
+function categoryMacroGroup(catKey){
+  const k = normalizeMacroCategory(catKey);
+  const def = k ? __catMap.get(k) : null;
+  const mg = normalizeProductsMacroGroup(def && def.macro);
+  if (mg) return mg;
+  // fallback: se non definito, trattiamo come imballaggi (tradizionale)
+  return (k === "materie_prime") ? "materie_prime" : "imballaggi";
+}
+
 
 // (UI) Popola select categorie in Inventario (filtro)
 function renderCategoryOptions(){
@@ -7048,7 +7115,7 @@ function __categoryProducts(catKey){
   return out;
 }
 
-async function createCategory(name, color){
+async function createCategory(name, color, macro){
   const nm = String(name || "").trim();
   if (!nm) return null;
 
@@ -7061,7 +7128,10 @@ async function createCategory(name, color){
     key = `${key}_${i}`;
   }
 
-  const cat = { key, name: nm, color: __safeCssColor(color || "") };
+  const mg = normalizeProductsMacroGroup(macro) || ((key === "materie_prime") ? "materie_prime" : "imballaggi");
+
+  const cat = { key, name: nm, color: __safeCssColor(color || ""),
+        macro: mg, macro: mg };
 
   // optimistic local
   const next = (Array.isArray(categories) ? categories.slice() : []).filter(c => c && c.key);
@@ -7079,6 +7149,7 @@ async function createCategory(name, color){
         name: nm,
         nameLower: nm.toLowerCase(),
         color: __safeCssColor(color || ""),
+        macro: mg,
         createdAt: serverTimestamp(),
         createdBy: fb.user.email || fb.user.uid,
         updatedAt: serverTimestamp(),
@@ -7102,9 +7173,11 @@ async function updateCategory(key, patch){
 
   const nm = (patch && patch.name != null) ? String(patch.name || "").trim() : String(cur.name || "");
   const col = (patch && patch.color != null) ? __safeCssColor(patch.color || "") : __safeCssColor(cur.color || "");
+  const mg = (patch && patch.macro != null) ? (normalizeProductsMacroGroup(patch.macro) || categoryMacroGroup(k)) : categoryMacroGroup(k);
 
   // optimistic local
-  const next = (categories || []).map(x => (String(x.key||"").toLowerCase() === k) ? ({...x, name: nm, color: col}) : x);
+  const next = (categories || []).map(x => (String(x.key||"").toLowerCase() === k) ? ({...x, name: nm, color: col,
+        macro: mg, macro: mg}) : x);
   __applyRuntimeCategories(next);
   try{ renderCategoryOptions(); }catch(_){}
   try{ renderAll(); renderAnag(); }catch(_){}
@@ -7922,10 +7995,23 @@ function renderAll() {
 
       // Tabs
       if (activeAnagTab === "products") {
+                // filtro macro (Materie prime / Imballaggi)
+        let __filteredProducts = Array.isArray(products) ? products.slice() : [];
         try{
+          const mg = normalizeProductsMacroGroup(activeProductsMacroGroup);
+          if (mg){
+            __filteredProducts = __filteredProducts.filter(p => {
+              const code = String(p?.code || p?.id || "").trim();
+              const catKey = getMacroCategoryForCode(code);
+              return categoryMacroGroup(catKey) === mg;
+            });
+          }
+        }catch(_){ }
+
+try{
           if (window.HubProducts && typeof window.HubProducts.renderAnagProducts === "function") {
             __prodGroupsMap = window.HubProducts.renderAnagProducts({
-              products,
+              products: __filteredProducts,
               fbUser: fb.user,
               anagTbody,
               anagTheadRow,
