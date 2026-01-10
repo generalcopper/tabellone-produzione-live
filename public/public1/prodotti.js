@@ -80,6 +80,13 @@
     try { qRaw = String((searchAnag && searchAnag.value) || "").trim(); } catch (_) { qRaw = ""; }
     var q = normTextKey(qRaw);
 
+    var unifiedFilter = String(ctx.unifiedFilter || "all").toLowerCase();
+    if (["all","unified","single"].indexOf(unifiedFilter) === -1) unifiedFilter = "all";
+
+    var sortMode = String(ctx.sortMode || "name_asc").toLowerCase();
+    if (["name_asc","codes_desc","codes_asc"].indexOf(sortMode) === -1) sortMode = "name_asc";
+
+
     // Raggruppa per alias (se presente), altrimenti per codice
     var map = new Map();
 
@@ -115,8 +122,6 @@
       g.codes = uniq;
       g.count = uniq.length;
       return g;
-    }).sort(function (a, b) {
-      return String(a.label || "").localeCompare(String(b.label || ""), "it", { sensitivity: "base" });
     });
 
     // filtro ricerca (ignora spazi/maiuscole)
@@ -127,6 +132,26 @@
         .join(" ");
       return normTextKey(hay).indexOf(q) !== -1;
     }) : groups;
+
+
+    // filtro stato (unificati / singoli)
+    if (unifiedFilter === "unified") {
+      filtered = filtered.filter(function (g) { return (g.codes || []).length > 1; });
+    } else if (unifiedFilter === "single") {
+      filtered = filtered.filter(function (g) { return (g.codes || []).length <= 1; });
+    }
+
+    // ordinamento
+    filtered = filtered.slice().sort(function (a, b) {
+      var ac = (a.codes || []).length;
+      var bc = (b.codes || []).length;
+      if (sortMode === "codes_desc") {
+        if (bc !== ac) return bc - ac;
+      } else if (sortMode === "codes_asc") {
+        if (ac !== bc) return ac - bc;
+      }
+      return String(a.label || "").localeCompare(String(b.label || ""), "it", { sensitivity: "base" });
+    });
 
     var groupsMap = new Map(filtered.map(function (g) { return [g.key, g]; }));
     window.HubProducts.groupsMap = groupsMap;
