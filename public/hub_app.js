@@ -676,29 +676,7 @@
           const ref = doc(H.fb.db, "orgs", H.ORG_ID, "movements", mid);
           const payload = Object.assign({}, mv);
           // Firestore doc non deve contenere id duplicato per forza, ma non fa danni
-
-// Non sovrascrivere il nome se il prodotto esiste già (regola richiesta)
-await runTransaction(fb.db, async (tx) => {
-  const snap = await tx.get(ref);
-  if (!snap.exists()) {
-    tx.set(ref, payload);
-    return;
-  }
-  const cur = snap.data() || {};
-  const upd = {
-    updatedAt: serverTimestamp(),
-    updatedBy: fb.user.email || fb.user.uid
-  };
-  // aggiorna nome solo se mancante
-  if (!String(cur.name || "").trim()) {
-    upd.name = payload.name;
-    upd.nameLower = payload.nameLower;
-    upd.code = payload.code;
-  }
-  // aggiorna U.M. solo se mancante
-  if (!String(cur.uom || "").trim() && payload.uom) upd.uom = payload.uom;
-  tx.set(ref, upd, { merge: true });
-});
+          await setDoc(ref, payload, { merge: true });
         }
       } else {
         throw new Error("Nessuna riga movimento da ripristinare");
@@ -3646,49 +3624,7 @@ async function deleteMovementsBulk(ids) {
       const fd = new FormData();
       fd.append("file", imageFile);
 
-      
-// timeout + fallback endpoints (root, /ocr, /api/ocr)
-const baseUrl = url.replace(/\/+$/,"");
-const candidates = [];
-try {
-  const u = new URL(url, window.location.href);
-  const hasPath = (u.pathname && u.pathname !== "/");
-  if (hasPath) {
-    candidates.push(u.toString());
-  } else {
-    candidates.push(baseUrl);
-    candidates.push(baseUrl + "/");
-    candidates.push(baseUrl + "/ocr");
-    candidates.push(baseUrl + "/api/ocr");
-  }
-} catch(_) {
-  candidates.push(url);
-}
-
-let lastErr = null;
-let res = null;
-for (const u of candidates) {
-  const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), 45000);
-  try {
-    res = await fetch(u, { method: "POST", headers, body: fd, signal: ctrl.signal, credentials: "omit" });
-    clearTimeout(t);
-    if (res) break;
-  } catch (e) {
-    clearTimeout(t);
-    lastErr = e;
-    res = null;
-  }
-}
-if (!res) {
-  const u = (state.settings.ocrUrl || "").trim();
-  const msg = (lastErr && lastErr.name === "AbortError")
-    ? "Timeout OCR (45s)."
-    : "Failed to fetch (OCR non raggiungibile).";
-  const err = new Error(`${msg}\n\nControlla:\n- Impostazioni → OCR URL (deve essere HTTPS e raggiungibile)\n- CORS del servizio (Access-Control-Allow-Origin)\n- Se è Cloud Run: servizio attivo e 'Allow unauthenticated'\n\nURL: ${u}`);
-  err.cause = lastErr;
-  throw err;
-}
+      const res = await fetch(url, { method: "POST", headers, body: fd });
       const ct = res.headers.get("content-type") || "";
       let data;
       if (ct.includes("application/json")) {
@@ -3766,39 +3702,6 @@ if (!res) {
     function normalizeText(t) {
       return String(t || "").replace(/\r/g, "").trim();
     }
-
-    function __sanitizeOcrItemName(v){
-      let s = String(v || "").replace(/\s+/g, " ").trim();
-      if (!s) return "";
-
-      // Rimuovi riferimenti "rumore" (doc/ordine)
-      s = s
-        // es: "ns. doc (in) n 3816" / "ns doc n 3816"
-        .replace(/\bns\.?\s*doc(?:\s*\(in\))?\s*(?:n\.?|n°|nr\.?|nr)?\s*[A-Z0-9\-\/]{1,}\b/ig, " ")
-        // es: "rif ns ordine 12345" / "rif. ns ordine ABC-12"
-        .replace(/\brif\.?\s*ns\.?\s*ordine\b\s*(?:n\.?|n°|nr\.?|nr)?\s*[A-Z0-9\-\/]{0,}\b/ig, " ")
-        .replace(/\brif\.?\s*ns\.?\s*ordine\b/ig, " ")
-        // es: "rif doc n 123" / "rif. doc 123"
-        .replace(/\brif\.?\s*doc\b\s*(?:n\.?|n°|nr\.?|nr)?\s*[A-Z0-9\-\/]{0,}\b/ig, " ")
-        .replace(/\brif\.?\s*doc\b/ig, " ");
-
-      s = s.replace(/\s{2,}/g, " ").trim();
-      if (!s) return "";
-
-      // Taglia dettagli imballo/confezione/lotto: teniamo solo il nome articolo
-      const cutPack = /\b(?:imballo|imballi|imballaggio|confez(?:ione)?|conf\.?|lotto)\b/i;
-      const m2 = cutPack.exec(s);
-      if (m2 && typeof m2.index === "number") {
-        if (m2.index === 0) return "";
-        s = s.slice(0, m2.index).trim();
-      }
-
-      // Pulizia finale
-      s = s.replace(/[\s\-–—|,:;]+$/g, "").trim();
-      s = s.replace(/\s{2,}/g, " ").trim();
-      return s;
-    }
-
 
 // OCR filtering (CRITICO): ignora righe CONAI B1 / CONAI B2
 function __isConaiCode(v){
@@ -4016,9 +3919,7 @@ function __isConaiItem(it){
 
         const code = parts[0];
         const qtyPart = parts[1]; // es: "1.760,00 PZ" / "1760pz" / "NR 10"
-        const descRaw = parts.slice(2).join(" | ");
-        const desc = __sanitizeOcrItemName(descRaw);
-        if (!desc) continue;
+        const desc = parts.slice(2).join(" | ");
         if (__isConaiCode(code) || __isConaiLine(code) || __isConaiLine(desc)) continue;
 
         const split = __splitQtyUom(qtyPart);
@@ -4116,7 +4017,6 @@ function __isConaiItem(it){
       const items = __getDocItemsArr();
       if (!Array.isArray(items)) return;
       if (Number.isNaN(i) || i < 0 || i >= items.length) return;
-      if (!confirm("Confermi eliminazione della riga articolo?")) return;
       items.splice(i, 1);
       __rerenderDocItemsTable();
     }
@@ -9065,12 +8965,7 @@ async function handleFileSelection(fileList) {
           hintPrivate.style.display = "block";
           openModal("OCR privato (403)", "Il servizio OCR risponde 403. Se stai usando Cloud Run privato, assicurati che l'endpoint punti al proxy pubblico (es. ocrproxy-…a.run.app) e non al servizio Cloud Run privato.");
         } else {
-        const msg = String((e && e.message) || e || "");
-        if (msg.includes("Failed to fetch")) {
-          const u = (state.settings.ocrUrl || "").trim();
-          openModal("OCR non raggiungibile", msg + "\n\nURL OCR: " + u + "\n\nTipico: URL sbagliato/servizio giù oppure CORS non configurato sul proxy OCR.");
-        } else {
-          openModal("Errore OCR", msg);
+          openModal("Errore OCR", String(e.message || e));
         }
       }
     }
@@ -9282,8 +9177,8 @@ async function handleFileSelection(fileList) {
 
     btnRemoveLastPage?.addEventListener("click", __removeLastPage);
 
-    cameraInput.addEventListener("change", (e) => { handleFileSelection(e.target.files).catch(err => { try{ console.error(err); }catch(_){} }); });
-    galleryInput.addEventListener("change", (e) => { handleFileSelection(e.target.files).catch(err => { try{ console.error(err); }catch(_){} }); });
+    cameraInput.addEventListener("change", (e) => handleFileSelection(e.target.files));
+    galleryInput.addEventListener("change", (e) => handleFileSelection(e.target.files));
 
     segIn.addEventListener("click", () => setCaptureType("IN"));
     segOut.addEventListener("click", () => setCaptureType("OUT"));
@@ -9904,10 +9799,8 @@ try {
 
         // Find existing supplier (prefer VAT match)
         let existing = null;
-        let matchedByVat = false;
         if (vatNorm){
           existing = (suppliers || []).find(s => __sup_cleanVat(s.vat || s.vatNumber || s.piva || "") === vatNorm) || null;
-          if (existing) matchedByVat = true;
         }
         if (!existing){
           existing = (suppliers || []).find(s => {
@@ -9937,17 +9830,12 @@ try {
         const country = __sup_normSpaces(details.country || parts.country || "");
 
         const payload = {
+          name,
+          nameLower,
           updatedAt: serverTimestamp(),
           updatedBy: fb.user.email || fb.user.uid,
           lastSource: "OCR"
         };
-        // NON sovrascrivere il nome se abbiamo match su P.IVA e il fornitore ha già un nome registrato
-        const existingName = String(existing?.name || "").trim();
-        if (!matchedByVat || !existingName) {
-          payload.name = name;
-          payload.nameLower = nameLower;
-        }
-
 
         if (!existing){
           payload.createdAt = serverTimestamp();
@@ -10034,29 +9922,7 @@ try {
           // se disponibile, salva anche l'unità di misura letta dall'OCR
           try { const u0 = __normalizeUom(it.uom || it.um || it.unit || ""); if (u0) payload.uom = u0; } catch(_) {}
 
-
-// Non sovrascrivere il nome se il prodotto esiste già (regola richiesta)
-await runTransaction(fb.db, async (tx) => {
-  const snap = await tx.get(ref);
-  if (!snap.exists()) {
-    tx.set(ref, payload);
-    return;
-  }
-  const cur = snap.data() || {};
-  const upd = {
-    updatedAt: serverTimestamp(),
-    updatedBy: fb.user.email || fb.user.uid
-  };
-  // aggiorna nome solo se mancante
-  if (!String(cur.name || "").trim()) {
-    upd.name = payload.name;
-    upd.nameLower = payload.nameLower;
-    upd.code = payload.code;
-  }
-  // aggiorna U.M. solo se mancante
-  if (!String(cur.uom || "").trim() && payload.uom) upd.uom = payload.uom;
-  tx.set(ref, upd, { merge: true });
-});
+          await setDoc(ref, payload, { merge: true });
         }
       } catch (e) {
         console.warn("products upsert skipped", e);
