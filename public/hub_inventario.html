@@ -321,6 +321,8 @@
     .qty-editor{ display:flex; align-items:center; justify-content:flex-end; gap:10px; }
     .qty-editor input.jsQtyEdit{ width: 92px; max-width: 110px; text-align:right; }
     .qty-editor button.jsQtySave{ white-space: nowrap; }
+    .uomTag{ display:inline-flex; align-items:center; padding:6px 10px; border:1px solid var(--stroke); border-radius: 999px; background: rgba(0,0,0,.03); font-size: 12px; font-weight: 900; color: rgba(0,0,0,.62); line-height: 1; }
+    .uomTag.uomEmpty{ opacity: .7; }
 
     /* Flow edit (DDT Caricati): input codice / articolo */
     #flowEditItemsTable .flowCellInput{
@@ -2542,7 +2544,7 @@ textarea,
                 <th>Nome articolo</th>
                 <th>Cod. articolo</th>
                 <th>Categoria</th>
-                <th class="qty">Pezzi</th>
+                <th class="qty">Q.tà</th>
               </tr>
             </thead>
             <tbody id="stockTbody">
@@ -2630,7 +2632,7 @@ textarea,
               <th>Fornitore</th>
               <th style="width: 160px;">Codice</th>
               <th>Articolo</th>
-              <th class="qty" style="width: 120px;">Pezzi</th>
+              <th class="qty" style="width: 120px;">Q.tà</th>
               <th class="colHideSm" style="width: 140px;">Sede</th>
               <th class="colHideSm" style="width: 120px;">Fonte</th>
               <th style="width: 80px;"></th>
@@ -3827,6 +3829,7 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
       movements: [], // array of Movement
       thresholds: {}, // per-item threshold overrides: key -> number
       productCategories: {}, // per-code categoria (offline fallback)
+      productUoms: {}, // per-code unità di misura (offline fallback) — pz|kg|ton
       categories: [] // elenco categorie (offline fallback)
     };
 
@@ -4875,6 +4878,16 @@ async function deleteMovementsBulk(ids) {
                 }
               }catch(_){}
 
+              // migra productUoms (fallback locale)
+              try{
+                const oLow = String(oldCode || "").trim().toLowerCase();
+                if (oLow && state && state.productUoms && (oLow in state.productUoms) && !(newLow in state.productUoms)) {
+                  state.productUoms[newLow] = state.productUoms[oLow];
+                  delete state.productUoms[oLow];
+                  saveLocalData();
+                }
+              }catch(_){}
+
               // se il codice è cambiato, prova a eliminare il vecchio doc SOLO se non più usato da nessun movimento
               if (oldCode && newCode && oldCode.toLowerCase() !== newLow) {
                 const oLow = oldCode.toLowerCase();
@@ -5123,6 +5136,7 @@ async function deleteMovementsBulk(ids) {
           state.movements = Array.isArray(parsed.movements) ? parsed.movements : [];
           state.thresholds = parsed.thresholds && typeof parsed.thresholds === "object" ? parsed.thresholds : {};
           state.productCategories = parsed.productCategories && typeof parsed.productCategories === "object" ? parsed.productCategories : {};
+          state.productUoms = parsed.productUoms && typeof parsed.productUoms === "object" ? parsed.productUoms : {};
           state.categories = Array.isArray(parsed.categories) ? parsed.categories : (Array.isArray(state.categories) ? state.categories : []);
           // Categorie: default + indice runtime
           if (!Array.isArray(state.categories) || !state.categories.length) state.categories = DEFAULT_CATEGORIES.slice();
@@ -5140,6 +5154,7 @@ async function deleteMovementsBulk(ids) {
           movements: state.movements,
           thresholds: state.thresholds,
           productCategories: state.productCategories,
+          productUoms: state.productUoms,
           categories: state.categories
         }));
       } catch {}
@@ -7582,6 +7597,13 @@ function __getLastSupplierInfoForCode(code){
         }
       } catch(_) {}
 
+      try {
+        if (state && state.productUoms && (low in state.productUoms)) {
+          delete state.productUoms[low];
+          saveLocalData();
+        }
+      } catch(_) {}
+
       try { renderAll(); renderAnag(); } catch(_) {}
 
       // Firestore delete
@@ -7645,6 +7667,116 @@ function getMacroCategoryForCode(code) {
     }
 
     
+function normalizeUom(v){
+      const s = String(v || "").trim().toLowerCase();
+      return (s === "pz" || s === "kg" || s === "ton") ? s : "";
+    }
+    function uomLabel(v){
+      const s = normalizeUom(v);
+      if (!s) return "";
+      return s.toUpperCase();
+    }
+    function getUomForCode(code){
+      const low = String(code || "").trim().toLowerCase();
+      const p = findProductByCode(code);
+      const fromProducts = normalizeUom(p && (p.uom || p.unit || p.um));
+      const fromLocal = normalizeUom(state.productUoms && state.productUoms[low]);
+      return fromProducts || fromLocal || "";
+    }
+    async function setProductUomForCode(code, uom, nameHint){
+      const key = String(code || "").trim();
+      const low = key.toLowerCase();
+      if (!key) return;
+
+      const u = normalizeUom(uom);
+
+      // Offline fallback + UI immediata
+      state.productUoms = state.productUoms || {};
+      if (u) state.productUoms[low] = u;
+      else delete state.productUoms[low];
+      saveLocalData();
+
+      // optimistic local products (se già presente)
+      const p = findProductByCode(key);
+      if (p) {
+        if (u) p.uom = u;
+        else delete p.uom;
+        p.updatedAtIso = new Date().toISOString();
+      }
+
+      if (!fb.user || !fb.db) { renderAll(); renderAnag(); return; }
+
+      try{
+        const patch = {
+          code: key,
+          codeLower: low,
+          updatedAt: serverTimestamp(),
+          updatedBy: (fb.user.email || fb.user.uid || "")
+        };
+        if (u) patch.uom = u;
+        else patch.uom = deleteField();
+
+        const nm = String(nameHint || "").trim();
+        if (nm) { patch.name = nm; patch.nameLower = nm.toLowerCase(); }
+
+        await setDoc(doc(fb.db, "orgs", ORG_ID, "products", keyToDocId(low)), patch, { merge: true });
+        renderAll(); renderAnag();
+      }catch(e){
+        console.error("setProductUomForCode failed", e);
+        showToast("Errore salvataggio unità di misura", "err");
+      }
+    }
+
+    async function setProductUomForCodes(codes, uom, nameHint){
+      const list = (Array.isArray(codes) ? codes : []).map(x => String(x || "").trim()).filter(Boolean);
+      if (!list.length) return;
+
+      const u = normalizeUom(uom);
+
+      // Offline fallback + optimistic local (una sola volta)
+      state.productUoms = state.productUoms || {};
+      for (const key of list) {
+        const low = String(key || "").trim().toLowerCase();
+        if (!low) continue;
+        if (u) state.productUoms[low] = u;
+        else delete state.productUoms[low];
+
+        const p = findProductByCode(key);
+        if (p) {
+          if (u) p.uom = u;
+          else delete p.uom;
+          p.updatedAtIso = new Date().toISOString();
+        }
+      }
+      saveLocalData();
+      renderAll(); renderAnag();
+
+      if (!fb.user || !fb.db) return;
+
+      try{
+        const nm = String(nameHint || "").trim();
+        await Promise.all(list.map(async (key) => {
+          const low = String(key || "").trim().toLowerCase();
+          if (!low) return;
+          const patch = {
+            code: key,
+            codeLower: low,
+            updatedAt: serverTimestamp(),
+            updatedBy: (fb.user.email || fb.user.uid || "")
+          };
+          if (u) patch.uom = u;
+          else patch.uom = deleteField();
+          // nameHint solo sul primo (evita overwrite)
+          if (nm && key === list[0]) { patch.name = nm; patch.nameLower = nm.toLowerCase(); }
+          await setDoc(doc(fb.db, "orgs", ORG_ID, "products", keyToDocId(low)), patch, { merge: true });
+        }));
+      }catch(e){
+        console.error("setProductUomForCodes failed", e);
+        showToast("Errore salvataggio unità di misura", "err");
+      }
+    }
+
+
     function groupStockRowsByAlias(rows){
       try{
         const arr = Array.isArray(rows) ? rows : [];
@@ -7782,14 +7914,31 @@ let __stockRowByKey = new Map();
         const k = stockRowKey(r.customer, r.code, r.warehouse);
         const warn = (Number(r.qty)||0) < (Number(r.threshold)||0);
         const qtyColor = warn ? "var(--danger)" : "rgba(0,0,0,.86)";
-        const qtyVal = safeInt(r.qty);
+        const qtyVal = safeInt(r.qty);        const isGroup = (r.__isAliasGroup && Array.isArray(r.__codes) && r.__codes.length > 1);
 
-        const isGroup = (r.__isAliasGroup && Array.isArray(r.__codes) && r.__codes.length > 1);
+        // U.M. (unità di misura)
+        let uom = "";
+        try{
+          if (isGroup && Array.isArray(r.__codes) && r.__codes.length) {
+            const set = new Set();
+            for (const c of r.__codes) {
+              const u = normalizeUom(getUomForCode(c));
+              if (u) set.add(u);
+            }
+            if (set.size === 1) uom = Array.from(set)[0];
+          } else {
+            uom = normalizeUom(getUomForCode(r.code));
+          }
+        }catch(_){ uom = ""; }
+        const uomPill = uom
+          ? `<span class="uomTag" title="Unità di misura">${escapeHtml(uomLabel(uom) || uom)}</span>`
+          : `<span class="uomTag uomEmpty" title="Unità di misura non definita">—</span>`;
 
         const qtyCell = `
             <div class="qty-editor">
               <input class="qtyEditInput jsQtyEdit" type="number" inputmode="numeric" min="0" step="1"
                 value="${qtyVal}" data-orig="${qtyVal}" style="color:${qtyColor}" />
+              ${uomPill}
               <button class="btn btn-primary btn-xs jsQtySave" type="button" disabled>Salva</button>
             </div>`;
 
@@ -8112,6 +8261,7 @@ try{
               escapeHtmlAttr,
               normTextKey,
               safeDecodeUri,
+              getUomForCode,
               unifiedFilter: __unifiedFilter,
               sortMode: __sortMode
             }) || new Map();
@@ -8128,11 +8278,12 @@ try{
           anagTheadRow.innerHTML = `
             <th>Alias / Nome</th>
             <th>Codici</th>
+            <th class="uom">U.M.</th>
             <th class="qty">N.</th>
             <th>Azioni</th>
           `;
         } catch(_){}
-        if (anagTbody) anagTbody.innerHTML = `<tr><td class="td-muted" colspan="4">Modulo prodotti non caricato.</td></tr>`;
+        if (anagTbody) anagTbody.innerHTML = `<tr><td class="td-muted" colspan="5">Modulo prodotti non caricato.</td></tr>`;
         return;
       }
 
@@ -8977,6 +9128,17 @@ async function deleteSupplierCascade(supplierId){
       const alias = String((p && (p.alias || p.aliasName)) || (ctx && ctx.__alias) || "").trim();
       const title = (isAliasGroup ? (alias || String((ctx && ctx.item) || "Alias")) : String((p && p.name) || (ctx && ctx.item) || code)).trim() || "Prodotto";
       const cat = getMacroCategoryForCode(code);
+      // U.M. (unità di misura): per singolo codice o gruppo alias (se coerente)
+      let __uom = "";
+      try{
+        const scope = (isAliasGroup && ctx && Array.isArray(ctx.__codes) && ctx.__codes.length) ? ctx.__codes : [code];
+        const set = new Set();
+        for (const c of scope) {
+          const u = normalizeUom(getUomForCode(c));
+          if (u) set.add(u);
+        }
+        if (set.size === 1) __uom = Array.from(set)[0];
+      }catch(_){ __uom = normalizeUom(getUomForCode(code)); }
 
       const wh = normalizeWarehouse((ctx && ctx.warehouse) || "");
       const lastTxt = (ctx && ctx.lastMoveAt) ? formatDateIT(ctx.lastMoveAt) : "—";
@@ -9057,6 +9219,22 @@ if (mode === "master") {
             ${MACRO_CATEGORIES.map(c => `<option value="${h(c)}">${h(macroCatLabel(c))}</option>`).join("")}
           </select>
         </div>
+
+      baseFields.push(`
+        <div class="field" style="grid-column: 1 / -1;">
+          <label>Unità di misura</label>
+          <select id="prodUomSelect">
+            <option value="">Non definita</option>
+            <option value="pz">pz</option>
+            <option value="kg">kg</option>
+            <option value="ton">ton</option>
+          </select>
+          <div class="td-muted" style="margin-top:6px;">
+            ${isAliasGroup ? "Si applica a tutti i codici del gruppo alias." : "Classifica come pezzi, kg o tonnellate."}
+          </div>
+        </div>
+      `);
+
       `);
 
 
@@ -9281,6 +9459,20 @@ if (mode === "master") {
           showToast("Categoria salvata");
         });
       }
+
+      // U.M. select
+      const uSel = document.getElementById("prodUomSelect");
+      if (uSel) {
+        uSel.value = __uom || "";
+        uSel.addEventListener("change", async () => {
+          const v = String(uSel.value || "");
+          const nm = (document.getElementById("prodNameEdit")?.value || title);
+          if (isAliasGroup) await setProductUomForCodes((ctx && ctx.__codes) || [], v, nm);
+          else await setProductUomForCode(code, v, nm);
+          showToast("Unità di misura salvata");
+        });
+      }
+
 
       // Name save
       const nInp = document.getElementById("prodNameEdit");
