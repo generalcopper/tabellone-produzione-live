@@ -2016,6 +2016,14 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
           ev.preventDefault();
           ev.stopPropagation();
           const i = Number(tr.dataset.i);
+          const code = (tr.dataset.code || "").trim();
+          const desc = (tr.dataset.desc || "").trim();
+          const ok = confirm(
+            `Eliminare la riga?\n\n` +
+            `${code ? ("Codice: " + code + "\n") : ""}` +
+            `${desc ? ("Articolo: " + desc) : ""}`
+          );
+          if (!ok) return;
           if (!Number.isNaN(i)) __deleteDocItemByIndex(i);
           return;
         }
@@ -2622,8 +2630,59 @@ btnLogout.addEventListener("click", async () => {
      ****************************************************************/
     function nowIso() { return new Date().toISOString(); }
 
+    
+    function safeNumber(v) {
+      if (v == null) return NaN;
+      if (typeof v === "number") return v;
+      let s = String(v).trim();
+      if (!s) return NaN;
+
+      // keep sign
+      let sign = 1;
+      if (s[0] === "-" || s[0] === "+") {
+        if (s[0] === "-") sign = -1;
+        s = s.slice(1);
+      }
+
+      // remove spaces + keep only digits and separators
+      s = s.replace(/\s+/g, "");
+      s = s.replace(/[^\d.,]/g, "");
+      if (!s) return NaN;
+
+      const hasDot = s.indexOf(".") >= 0;
+      const hasComma = s.indexOf(",") >= 0;
+
+      if (hasDot && hasComma) {
+        // Decide decimal separator by last occurrence (IT docs usually use comma decimals)
+        if (s.lastIndexOf(",") > s.lastIndexOf(".")) {
+          // dot = thousands, comma = decimals
+          s = s.replace(/\./g, "").replace(/,/g, ".");
+        } else {
+          // comma = thousands, dot = decimals
+          s = s.replace(/,/g, "");
+        }
+      } else if (hasDot) {
+        // If dot looks like thousands separator (1.760 or 12.345.678)
+        if (/^\d{1,3}(?:\.\d{3})+$/.test(s)) {
+          s = s.replace(/\./g, "");
+        }
+        // else leave dot as decimal separator
+      } else if (hasComma) {
+        // If comma looks like thousands separator (1,760)
+        if (/^\d{1,3}(?:,\d{3})+$/.test(s)) {
+          s = s.replace(/,/g, "");
+        } else {
+          // comma as decimal separator
+          s = s.replace(/,/g, ".");
+        }
+      }
+
+      const n = Number(s);
+      return Number.isFinite(n) ? (sign * n) : NaN;
+    }
+
     function safeInt(v) {
-      const n = Number(v);
+      const n = safeNumber(v);
       if (!Number.isFinite(n)) return 0;
       return Math.max(0, Math.floor(n));
     }
@@ -3703,6 +3762,53 @@ async function deleteMovementsBulk(ids) {
       return String(t || "").replace(/\r/g, "").trim();
     }
 
+
+    function __sanitizeOcrItemName(v){
+      let s = String(v || "").replace(/\s+/g, " ").trim();
+      if (!s) return "";
+
+      // 1) Rimuovi segmenti "rumorosi" (riferimenti documento / ordine) ma NON buttare via tutto il testo
+      s = s
+        // es: "ns. doc (in) n 3816" / "ns doc n 3816"
+        .replace(/\bns\.?\s*doc(?:\s*\(in\))?\s*(?:n\.?|n°|nr\.?|n)?\s*\d+\b/ig, " ")
+        // es: "rif ns ordine 12345" / "rif. ns ordine ABC-12"
+        .replace(/\brif\.?\s*ns\.?\s*ordine\b\s*(?:n\.?|n°|nr\.?|n)?\s*[A-Z0-9\-\/]{2,}\b/ig, " ")
+        .replace(/\brif\.?\s*ns\.?\s*ordine\b/ig, " ")
+        .replace(/\brif\.?\s*doc\b\s*(?:n\.?|n°|nr\.?|n)?\s*\d+\b/ig, " ")
+        .replace(/\brif\.?\s*doc\b/ig, " ");
+
+      s = s.replace(/\s{2,}/g, " ").trim();
+      if (!s) return "";
+
+      // 2) Taglia dettagli imballo/confezione/lotto (teniamo solo il nome articolo)
+      const cutPack = /\b(?:imballo|imballi|imballaggio|confez(?:ione)?|conf\.?|lotto)\b/i;
+      const m2 = cutPack.exec(s);
+      if (m2 && typeof m2.index === "number") {
+        if (m2.index === 0) return "";
+        s = s.slice(0, m2.index).trim();
+      }
+
+      // 3) Pulizia finale
+      s = s.replace(/[\s\-–—|,:;]+$/g, "").trim();
+      s = s.replace(/\s{2,}/g, " ").trim();
+
+      return s;
+    }
+
+      // taglia dettagli imballo/confezione/lotto (teniamo solo il nome articolo)
+      const cutPack = /\b(?:imballo|imballi|imballaggio|confez(?:ione)?|conf\.?|lotto)\b/i;
+      const m2 = cutPack.exec(s);
+      if (m2 && typeof m2.index === "number") {
+        if (m2.index === 0) return "";
+        s = s.slice(0, m2.index).trim();
+      }
+
+      // pulizia finale
+      s = s.replace(/[\s\-–—|,:;]+$/g, "").trim();
+      s = s.replace(/\s{2,}/g, " ").trim();
+      return s;
+    }
+
 // OCR filtering (CRITICO): ignora righe CONAI B1 / CONAI B2
 function __isConaiCode(v){
   const s = String(v || "").toLowerCase().replace(/\s+/g, " ").trim();
@@ -3880,6 +3986,10 @@ function __isConaiItem(it){
         if (out.description == null && out.item != null) out.description = out.item;
         if (out.code == null && out.sku != null) out.code = out.sku;
 
+        // Sanitize descrizione (no riferimenti tipo "ns. doc", "rif ns ordine", "lotto", "imballo", ecc.)
+        if (out.description != null) out.description = __sanitizeOcrItemName(out.description);
+        if (out.item != null) out.item = __sanitizeOcrItemName(out.item);
+
         // qtyRaw sorgente (anche se la struttura usa altri nomi)
         const rawQtyStr = String(
           (out.qtyRaw ?? out.quantityRaw ?? out.qtaRaw ?? out.qta ?? out.quantity ?? out.qty ?? "")
@@ -3897,14 +4007,12 @@ function __isConaiItem(it){
         out.uom = uom || "";
         out.qtyRaw = (qtyOnly ? `${qtyOnly}${uom ? " " + uom : ""}`.trim() : "");
 
-        // parse qty (best effort) mantenendo supporto a virgola italiana
+        // parse qty (best effort) con separatori IT (1.760 -> 1760, 1.760,00 -> 1760)
         if (qtyOnly) {
-          const norm = String(qtyOnly).replace(/\./g, "").replace(",", ".");
-          const n = Number(norm);
+          const n = safeNumber(qtyOnly);
           if (!Number.isNaN(n)) out.qty = n;
         }
-
-        return out;
+return out;
       });
     }
 
@@ -3919,7 +4027,8 @@ function __isConaiItem(it){
 
         const code = parts[0];
         const qtyPart = parts[1]; // es: "1.760,00 PZ" / "1760pz" / "NR 10"
-        const desc = parts.slice(2).join(" | ");
+        const descRaw = parts.slice(2).join(" | ");
+        const desc = __sanitizeOcrItemName(descRaw) || descRaw;
         if (__isConaiCode(code) || __isConaiLine(code) || __isConaiLine(desc)) continue;
 
         const split = __splitQtyUom(qtyPart);
@@ -3928,12 +4037,10 @@ function __isConaiItem(it){
 
         let qty = null;
         if (qtyOnly){
-          const norm = String(qtyOnly).replace(/\./g, "").replace(",", ".");
-          const n = Number(norm);
+          const n = safeNumber(qtyOnly);
           if (!Number.isNaN(n)) qty = n;
         }
-
-        out.push({
+out.push({
           code,
           description: desc,
           uom,
@@ -3998,7 +4105,7 @@ function __isConaiItem(it){
         const hasValid = (items || []).some(it => {
           const key = String(it.code || it.description || "").trim();
           const qRaw = (it.qty != null && it.qty !== "") ? String(it.qty) : String(it.qtyRaw || "");
-          const q = Number(qRaw.replace(",", ".").replace(/[^\d.]/g,""));
+          const q = safeNumber(qRaw);
           return !!key && !Number.isNaN(q) && q > 0;
         });
         btn.disabled = !(String(customerEl && customerEl.value || "").trim() && hasValid);
@@ -4036,7 +4143,7 @@ function __isConaiItem(it){
       if (tdQty.querySelector("input.qtyInputInline")) return;
 
       const currentRaw = ((it.qty != null && it.qty !== "") ? String(it.qty) : String(it.qtyRaw || "")).trim();
-      const currentNum = Number(currentRaw.replace(",", ".").replace(/[^\d.]/g,""));
+      const currentNum = safeNumber(currentRaw);
       const value = (!Number.isNaN(currentNum) ? String(currentNum) : (currentRaw || ""));
 
       const input = document.createElement("input");
@@ -4061,7 +4168,7 @@ function __isConaiItem(it){
           it.qty = "";
           it.qtyRaw = "";
         } else {
-          const n = Number(v.replace(",", ".").replace(/[^\d.]/g,""));
+          const n = safeNumber(v);
           if (!Number.isNaN(n)) {
             it.qty = n;
             it.qtyRaw = v;
@@ -9374,7 +9481,7 @@ try {
 
           const code = (rawCode || rawDesc || "").trim();
           if (__isConaiCode(code) || __isConaiLine(code) || __isConaiLine(rawDesc)) { skip++; continue; }
-          const item = (rawDesc || rawCode || "").trim();
+          const item = __sanitizeOcrItemName(rawDesc || rawCode || "");
 
           // U.M. + qtyRaw: supporta nr / pz / kg / ton (anche in formati tipo "1760pz" o "NR 10")
           const split = __splitQtyUom(String(it.qtyRaw ?? ""));
@@ -9785,6 +9892,7 @@ try {
 
     // Upsert anagrafica fornitore (se manca) — best effort
     // Accetta sia stringa (nome) che oggetto con campi {name, vat, address, cap, city, province, ...}
+
     async function ensureSupplierUpsert(input){
       try {
         if (!(fb.user && fb.db)) return;
@@ -9797,7 +9905,7 @@ try {
         const vatNorm = __sup_cleanVat(details.vat || details.vatNumber || details.piva || "");
         const cfNorm  = __sup_cleanFiscalCode(details.fiscalCode || details.taxCode || details.cf || "");
 
-        // Find existing supplier (prefer VAT match)
+        // Find existing supplier (prefer VAT match) - best effort (cache locale)
         let existing = null;
         if (vatNorm){
           existing = (suppliers || []).find(s => __sup_cleanVat(s.vat || s.vatNumber || s.piva || "") === vatNorm) || null;
@@ -9822,60 +9930,86 @@ try {
 
         const ref = doc(orgCol("suppliers"), docId);
 
-        // Address / components
+        // Address / components (candidate)
         const parts = __sup_parseAddressParts(details.address || "");
         const cap = __sup_isValidCap(details.cap) ? String(details.cap) : (parts.cap || "");
         const city = __sup_normSpaces(details.city || parts.city || "");
         const province = __sup_isValidProvince(details.province) ? String(details.province).toUpperCase() : (parts.province || "");
         const country = __sup_normSpaces(details.country || parts.country || "");
 
-        const payload = {
-          name,
-          nameLower,
-          updatedAt: serverTimestamp(),
-          updatedBy: fb.user.email || fb.user.uid,
-          lastSource: "OCR"
-        };
+        // 🔒 Regola: se matcho P.IVA su un fornitore già esistente, NON devo sovrascrivere il nome già registrato.
+        await runTransaction(fb.db, async (tx) => {
+          const snap = await tx.get(ref);
+          const dbExisting = snap.exists() ? (snap.data() || {}) : {};
+          const isNew = !snap.exists();
 
-        if (!existing){
-          payload.createdAt = serverTimestamp();
-          payload.createdBy = fb.user.email || fb.user.uid;
-        }
+          const payload = {
+            updatedAt: serverTimestamp(),
+            updatedBy: fb.user.email || fb.user.uid,
+            lastSource: "OCR"
+          };
 
-        // Only set fields if they look valid (anti-scambio campi)
-        if (vatNorm) payload.vat = vatNorm;
-        if (cfNorm) payload.fiscalCode = cfNorm;
-
-        const addr = __sup_normSpaces(details.address || parts.address || "");
-        if (addr && __sup_looksLikeAddress(addr)) payload.address = addr;
-
-        if (cap) payload.cap = cap;
-        if (city) payload.city = __sup_titleCase(city);
-        if (province) payload.province = province;
-        if (country) payload.country = String(country).toUpperCase();
-
-
-        // Phone: non sovrascrivere valori esistenti con vuoti/inaffidabili
-        const phoneCand = __sup_cleanPhone(details.phone || details.telefono || details.tel || "");
-        const mobileCand = __sup_cleanPhone(details.mobile || details.cell || details.cellulare || "");
-        const existingPhone = __sup_cleanPhone(existing?.phone || existing?.telefono || "");
-        const existingMobile = __sup_cleanPhone(existing?.mobile || "");
-
-        if (phoneCand && __sup_isLikelyPhone(phoneCand, vatNorm)) {
-          if (!existingPhone || __sup_phoneDigits(existingPhone) === __sup_phoneDigits(phoneCand)) {
-            payload.phone = phoneCand;
-            // alias compatibilità
-            payload.telefono = phoneCand;
+          if (isNew){
+            payload.createdAt = serverTimestamp();
+            payload.createdBy = fb.user.email || fb.user.uid;
           }
-        }
 
-        if (mobileCand && __sup_isLikelyPhone(mobileCand, vatNorm)) {
-          if (!existingMobile || __sup_phoneDigits(existingMobile) === __sup_phoneDigits(mobileCand)) {
-            payload.mobile = mobileCand;
+          // Nome: scrivilo SOLO se manca oppure è uguale (mai sostituire un nome già registrato diverso)
+          const existingName = __sup_normSpaces(dbExisting.name || "");
+          if (isNew || !existingName || existingName.toLowerCase() === nameLower){
+            payload.name = name;
+            payload.nameLower = nameLower;
           }
-        }
 
-        await setDoc(ref, payload, { merge: true });
+          // VAT / CF: non sovrascrivere valori diversi già presenti
+          const existingVat = __sup_cleanVat(dbExisting.vat || dbExisting.vatNumber || dbExisting.piva || "");
+          if (vatNorm && (!existingVat || existingVat === vatNorm)) payload.vat = vatNorm;
+
+          const existingCf = __sup_cleanFiscalCode(dbExisting.fiscalCode || dbExisting.taxCode || dbExisting.cf || "");
+          if (cfNorm && (!existingCf || existingCf === cfNorm)) payload.fiscalCode = cfNorm;
+
+          // Address: scrivi solo se credibile e se campo vuoto o già uguale
+          const addrCand = __sup_normSpaces(details.address || parts.address || "");
+          const existingAddr = __sup_normSpaces(dbExisting.address || "");
+          if (addrCand && __sup_looksLikeAddress(addrCand) && (!existingAddr || existingAddr.toLowerCase() === addrCand.toLowerCase())) {
+            payload.address = addrCand;
+          }
+
+          // cap/city/province/country: scrivi solo se vuoti o già uguali (conservativo)
+          const existingCap = String(dbExisting.cap || "").trim();
+          if (cap && (!existingCap || existingCap === cap)) payload.cap = cap;
+
+          const existingCity = __sup_normSpaces(dbExisting.city || "");
+          if (city && (!existingCity || existingCity.toLowerCase() === city.toLowerCase())) payload.city = __sup_titleCase(city);
+
+          const existingProv = String(dbExisting.province || "").trim().toUpperCase();
+          if (province && (!existingProv || existingProv === String(province).toUpperCase())) payload.province = province;
+
+          const existingCountry = String(dbExisting.country || "").trim().toUpperCase();
+          if (country && (!existingCountry || existingCountry === String(country).toUpperCase())) payload.country = String(country).toUpperCase();
+
+          // Phone: non sovrascrivere valori esistenti con diversi
+          const phoneCand = __sup_cleanPhone(details.phone || details.telefono || details.tel || "");
+          const mobileCand = __sup_cleanPhone(details.mobile || details.cell || details.cellulare || "");
+          const existingPhone = __sup_cleanPhone(dbExisting.phone || dbExisting.telefono || "");
+          const existingMobile = __sup_cleanPhone(dbExisting.mobile || "");
+
+          if (phoneCand && __sup_isLikelyPhone(phoneCand, vatNorm)) {
+            if (!existingPhone || __sup_phoneDigits(existingPhone) === __sup_phoneDigits(phoneCand)) {
+              payload.phone = phoneCand;
+              // alias compatibilità
+              payload.telefono = phoneCand;
+            }
+          }
+
+          if (mobileCand && __sup_isLikelyPhone(mobileCand, vatNorm)) {
+            if (!existingMobile || __sup_phoneDigits(existingMobile) === __sup_phoneDigits(mobileCand)) {
+              payload.mobile = mobileCand;
+            }
+          }
+
+          tx.set(ref, payload, { merge: true });
+        });
       } catch (e) {
         console.warn("supplier upsert skipped", e);
       }
@@ -9889,9 +10023,11 @@ try {
 
         const seen = new Set();
         const safeItemsArr = (items || []).filter(it => it && !__isConaiItem(it));
+
         for (const it of safeItemsArr) {
           const rawCode = String(it.code || "").trim();
           const rawDesc = String(it.description || "").trim();
+
           const code = (rawCode || rawDesc || "").trim();
           if (!code) continue;
           if (__isConaiCode(code) || __isConaiLine(rawCode) || __isConaiLine(rawDesc)) continue;
@@ -9900,29 +10036,60 @@ try {
           if (seen.has(key)) continue;
           seen.add(key);
 
-          const already = (products || []).some(p => {
-            const a = String(p.code || p.id || "").toLowerCase();
-            return a === key;
-          });
-          if (already) continue;
+          // Se il prodotto è già in cache locale, non fare nulla (non deve sovrascrivere)
+          const alreadyLocal = (products || []).some(p => String(p.code || p.id || "").toLowerCase() === key);
+          if (alreadyLocal) continue;
 
           const id = keyToDocId(key);
           const ref = doc(orgCol("products"), id);
 
-          const payload = {
-            code: code,
-            name: rawDesc || code,
-            nameLower: (rawDesc || code).toLowerCase(),
-            createdAt: serverTimestamp(),
-            createdBy: fb.user.email || fb.user.uid,
-            updatedAt: serverTimestamp(),
-            updatedBy: fb.user.email || fb.user.uid
-          };
+          // Nome candidato (sanificato)
+          const nameCandRaw = rawDesc || code;
+          const nameCand = __sanitizeOcrItemName(nameCandRaw) || nameCandRaw;
+          const nameCandLower = String(nameCand || "").toLowerCase();
 
-          // se disponibile, salva anche l'unità di misura letta dall'OCR
-          try { const u0 = __normalizeUom(it.uom || it.um || it.unit || ""); if (u0) payload.uom = u0; } catch(_) {}
+          // U.M. candidata
+          let u0 = "";
+          try { u0 = __normalizeUom(it.uom || it.um || it.unit || ""); } catch(_) { u0 = ""; }
 
-          await setDoc(ref, payload, { merge: true });
+          // 🔒 Regola: se il codice articolo esiste già su Firestore, NON devo sostituire il suo nome.
+          await runTransaction(fb.db, async (tx) => {
+            const snap = await tx.get(ref);
+            const exists = snap.exists();
+            const db = exists ? (snap.data() || {}) : {};
+
+            const patch = {
+              updatedAt: serverTimestamp(),
+              updatedBy: fb.user.email || fb.user.uid
+            };
+
+            if (!exists){
+              patch.createdAt = serverTimestamp();
+              patch.createdBy = fb.user.email || fb.user.uid;
+              patch.code = code;
+              patch.codeLower = key;
+              patch.name = nameCand || code;
+              patch.nameLower = (nameCand || code).toLowerCase();
+            } else {
+              // Nome: solo se manca
+              const existingName = String(db.name || "").trim();
+              if (!existingName && (nameCand || code)) {
+                patch.name = nameCand || code;
+                patch.nameLower = (nameCand || code).toLowerCase();
+              }
+              // salva code/codeLower se mancanti (non fa danni)
+              if (!String(db.code || "").trim()) patch.code = code;
+              if (!String(db.codeLower || "").trim()) patch.codeLower = key;
+            }
+
+            // U.M.: scrivi solo se manca sul doc
+            try{
+              const existingUom = __normalizeUom(db.uom || db.um || "");
+              if (u0 && !existingUom) patch.uom = u0;
+            }catch(_){}
+
+            tx.set(ref, patch, { merge: true });
+          });
         }
       } catch (e) {
         console.warn("products upsert skipped", e);
