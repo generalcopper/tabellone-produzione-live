@@ -919,6 +919,7 @@
       const sideMenuOverlay = $("sideMenuOverlay");
       sideMenu && sideMenu.setAttribute("aria-hidden", "true");
       sideMenuOverlay && sideMenuOverlay.setAttribute("aria-hidden", "true");
+      __syncBodyLock();
     }catch(_){}
   }
 
@@ -938,15 +939,13 @@
     if (!modal) return;
 
     if (open) {
+      closeSideMenuSafe();
       modal.classList.add("open");
-      document.body.classList.add("modal-open");
+      __syncBodyLock();
       try{ setTimeout(() => $("catEditName")?.focus(), 0); }catch(_){}
     } else {
       modal.classList.remove("open");
-      // Rimuovi lock scroll solo se nessun altro modale è aperto
-      try{
-        if (!document.querySelector(".modal.open")) document.body.classList.remove("modal-open");
-      }catch(_){ document.body.classList.remove("modal-open"); }
+      __syncBodyLock();
 
       selectedKey = "";
       selectedSnapshot = { key:"", name:"", color:"", macro:"" };
@@ -1802,6 +1801,10 @@ const docDetailPhotosMeta = document.getElementById("docDetailPhotosMeta");
       const overlayKeys = ["ocr","inventory","flows","movements","categories","trash","anag"];
       const isOverlay = overlayKeys.includes(key);
 
+      if (isOverlay && document.body.classList.contains("menu-open")) {
+        closeSideMenu();
+      }
+
       // Home resta sempre visibile dietro (come un gestionale iOS)
       if (__views.home) __views.home.classList.add("active");
 
@@ -1848,6 +1851,7 @@ const docDetailPhotosMeta = document.getElementById("docDetailPhotosMeta");
       }
       if (__btnBack) __btnBack.style.display = (isOverlay) ? "inline-flex" : "none";
       try { window.scrollTo(0, 0); } catch(_){}
+      __syncBodyLock();
     }
 
     function __isMobileDevice(){
@@ -1856,6 +1860,18 @@ const docDetailPhotosMeta = document.getElementById("docDetailPhotosMeta");
       } catch(_){
         return false;
       }
+    }
+
+    function __closeAllModals(){
+      try{
+        document.querySelectorAll(".modal.open").forEach(modal => modal.classList.remove("open"));
+      }catch(_){}
+    }
+
+    function __closeAllOverlays(){
+      try{
+        if (document.querySelector(".view.modalOverlay.active")) setView("home");
+      }catch(_){}
     }
 
     function startHomeOcr(){
@@ -1874,15 +1890,19 @@ const docDetailPhotosMeta = document.getElementById("docDetailPhotosMeta");
     }
 
     function openSideMenu(){
+      __closeAllModals();
+      __closeAllOverlays();
       document.body.classList.add("menu-open");
       sideMenu?.setAttribute("aria-hidden", "false");
       sideMenuOverlay?.setAttribute("aria-hidden", "false");
+      __syncBodyLock();
     }
 
     function closeSideMenu(){
       document.body.classList.remove("menu-open");
       sideMenu?.setAttribute("aria-hidden", "true");
       sideMenuOverlay?.setAttribute("aria-hidden", "true");
+      __syncBodyLock();
     }
 
     btnMenuToggle?.addEventListener("click", () => {
@@ -2663,7 +2683,49 @@ btnLogout.addEventListener("click", async () => {
     }
 
 
-// ===== Scroll lock (blocca pagina sotto ai modali) =====
+// ===== Header height sync =====
+let __headerHeight = 0;
+let __headerEl = null;
+let __headerResizeObserver = null;
+
+function __updateHeaderHeight(){
+  try{
+    const header = __headerEl || document.querySelector("header.headerRow");
+    if (!header) return;
+    __headerEl = header;
+    const height = Math.ceil(header.offsetHeight || 0);
+    if (!height || height === __headerHeight) return;
+    __headerHeight = height;
+    const root = document.documentElement;
+    root.style.setProperty("--header-h", `${height}px`, "important");
+    root.style.setProperty("--hdrH", `${height}px`, "important");
+  }catch(_){}
+}
+
+function __initHeaderHeight(){
+  try{
+    const header = document.querySelector("header.headerRow");
+    if (!header) return;
+    __headerEl = header;
+    __updateHeaderHeight();
+    if (!__headerResizeObserver && window.ResizeObserver) {
+      __headerResizeObserver = new ResizeObserver(() => __updateHeaderHeight());
+      __headerResizeObserver.observe(header);
+    }
+  }catch(_){}
+}
+
+try{
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", __initHeaderHeight, { once: true });
+  } else {
+    __initHeaderHeight();
+  }
+  window.addEventListener("resize", () => requestAnimationFrame(__updateHeaderHeight));
+  window.addEventListener("orientationchange", () => requestAnimationFrame(__updateHeaderHeight));
+}catch(_){}
+
+// ===== Scroll lock (blocca pagina sotto ai modali/menu) =====
 let __modalLockScrollY = 0;
 
 function __setBodyLocked(locked){
@@ -2697,10 +2759,15 @@ function __setBodyLocked(locked){
   }catch(e){}
 }
 
-function __syncBodyLockFromModals(){
+function __syncBodyLock(){
   try{
-    const anyOpen = !!document.querySelector(".modal.open");
-    __setBodyLocked(anyOpen);
+    const anyModalOpen = !!document.querySelector(".modal.open");
+    const anyOverlayOpen = !!document.querySelector(".view.modalOverlay.active");
+    const menuOpen = document.body.classList.contains("menu-open");
+    if (menuOpen && (anyModalOpen || anyOverlayOpen) && typeof closeSideMenu === "function") {
+      closeSideMenu();
+    }
+    __setBodyLocked(anyModalOpen || anyOverlayOpen || menuOpen);
   }catch(e){}
 }
 
@@ -2755,16 +2822,16 @@ function __shouldCenterPop(msg, kind){
       modalTitle.textContent = title;
       modalBody.textContent = body;
       modalQuick.classList.add("open");
-      __syncBodyLockFromModals();
+      __syncBodyLock();
     }
     function closeModal() { modalQuick.classList.remove("open");
-      __syncBodyLockFromModals(); }
+      __syncBodyLock(); }
 
     function closeDocDetail() {
       try { __docDetailRenderToken++; } catch(_){}
       try { __revokeDocDetailBlobUrls(); } catch(_){}
       if (modalDocDetail) modalDocDetail.classList.remove("open");
-      __syncBodyLockFromModals();
+      __syncBodyLock();
     }
 
     // ===== Flussi: modifica / elimina (documento) =====
@@ -2786,14 +2853,14 @@ function __shouldCenterPop(msg, kind){
       try { renderFlowEditItems(g); } catch(_){ }
 
       modalFlowEdit.classList.add("open");
-      __syncBodyLockFromModals();
+      __syncBodyLock();
       try { flowEditCustomer && flowEditCustomer.focus(); } catch {}
     }
 
     function closeFlowEdit() {
       __currentFlowEditKey = null;
       if (modalFlowEdit) modalFlowEdit.classList.remove("open");
-      __syncBodyLockFromModals();
+      __syncBodyLock();
     }
 
 
@@ -3348,7 +3415,7 @@ async function deleteMovementsBulk(ids) {
       }
 
       if (modalDocDetail) modalDocDetail.classList.add("open");
-      __syncBodyLockFromModals();
+      __syncBodyLock();
     }
 
 
@@ -3356,9 +3423,9 @@ async function deleteMovementsBulk(ids) {
     function closeSettings() { modalSettings.classList.remove("open"); }
 
     function openMovementModal() { modalMovement.classList.add("open");
-      __syncBodyLockFromModals(); }
+      __syncBodyLock(); }
     function closeMovementModal() { modalMovement.classList.remove("open");
-      __syncBodyLockFromModals(); }
+      __syncBodyLock(); }
 
     function movementKey(customer, code) {
       return `${(customer||"").trim().toLowerCase()}||${(code||"").trim().toLowerCase()}`;
@@ -7480,7 +7547,7 @@ function openSupplierModal(id) {
       // docs
       supDocsTbody.innerHTML = `<tr><td class="td-muted" colspan="4">Caricamento…</td></tr>`;
       modalSupplier.classList.add("open");
-      __syncBodyLockFromModals();
+      __syncBodyLock();
       renderSupplierLinkedDocs();
     }
 
@@ -7488,7 +7555,7 @@ function openSupplierModal(id) {
 function closeSupplierModal() {
       if (!modalSupplier) return;
       modalSupplier.classList.remove("open");
-      __syncBodyLockFromModals();
+      __syncBodyLock();
       currentSupplierId = null;
 
       // reset edit mode
