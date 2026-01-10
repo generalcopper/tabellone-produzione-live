@@ -2074,6 +2074,11 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
     const statLowStock = document.getElementById("statLowStock");
     const statLastUpdate = document.getElementById("statLastUpdate");
 
+    // INIT_COUNTERS_TO_ZERO: evita "—" e micro-spostamenti all'ingresso
+    try {
+      [statTotalItems, statTotalPieces, statTotalFlows, statLowStock].forEach((el) => { if (el) el.textContent = "0"; });
+    } catch (_) {}
+
 
     // Home: riquadro sotto-scorta (visual)
     const lowStockBoard = document.getElementById("lowStockBoard");
@@ -4639,7 +4644,7 @@ async function deleteMovement(id) {
           if (prev && typeof prev.cancel === "function") prev.cancel();
         }catch(_){}
 
-        const duration = Math.max(180, Math.floor((opts && opts.duration) || 650));
+        const duration = Math.max(300, Math.floor((opts && opts.duration) || 950));
 
         // start da 0 come richiesto
         const from = 0;
