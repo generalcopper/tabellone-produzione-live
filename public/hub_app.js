@@ -2577,6 +2577,8 @@ btnLogout.addEventListener("click", async () => {
               customer: data.customer || "",
               code: data.code || "",
               item: data.item || "",
+              uom: String(data.uom || "").trim(),
+              qtyRaw: String(data.qtyRaw || "").trim(),
               qty: safeInt(data.qty),
               date: data.date || "",
               note: data.note || "",
@@ -3790,6 +3792,108 @@ function __isConaiItem(it){
       return "";
     }
 
+    // ===== U.M. (unità di misura) normalizzazione =====
+    // Canoniche richieste: nr / pz / kg / ton
+    function __normalizeUom(v){
+      const raw = String(v ?? "").trim().toLowerCase();
+      if (!raw) return "";
+
+      // Togli spazi/punteggiatura “soft” (preserva ° per n°)
+      let k = raw
+        .replace(/\s+/g, "")
+        .replace(/[,;:]/g, "")
+        .replace(/\.+$/g, "");
+
+      // Normalizza alcuni simboli comuni
+      k = k.replace(/º/g, "°");
+
+      // pezzi
+      if (k === "pz" || k === "p.z" || k === "p.z." || k === "pc" || k === "pcs" || k === "pezzi") return "pz";
+      // numero
+      if (k === "nr" || k === "n" || k === "n°" || k === "no") return "nr";
+      // peso
+      if (k === "kg" || k === "kgs" || k === "k" || k === "kilo" || k === "kilogrammi" || k === "kilogrammo") return "kg";
+      // tonnellate
+      if (k === "ton" || k === "tons" || k === "tonn" || k === "tonne" || k === "t" || k === "tonnellate" || k === "tonnellata") return "ton";
+
+      return "";
+    }
+
+    // Estrae (qtyRaw, uom) da una stringa quantità, supportando:
+    // - "1760 PZ", "1760pz", "NR 10", "10 nr", "48 kg", "1,2 t", "0.5 ton" …
+    function __splitQtyUom(qtyPart){
+      const s0 = String(qtyPart ?? "").trim();
+      if (!s0) return { qtyRaw: "", uom: "" };
+
+      let s = s0.replace(/\s+/g, " ").trim();
+      let uom = "";
+      let qtyRaw = s;
+
+      // 1) uom in coda (anche attaccata al numero)
+      const end = s.match(/(nr\.?|n\.?|n°|pz\.?|p\.?z\.?|pcs?|kg(?:s)?\.?|ton(?:nellate|nellata|ne|n|s)?\.?|t)\s*$/i);
+      if (end && end.index != null) {
+        const cand = __normalizeUom(end[1]);
+        if (cand) {
+          uom = cand;
+          qtyRaw = s.slice(0, end.index).trim();
+        }
+      }
+
+      // 2) uom in testa (es: "NR 10")
+      if (!uom) {
+        const beg = s.match(/^\s*(nr\.?|n\.?|n°|pz\.?|p\.?z\.?|pcs?|kg(?:s)?\.?|ton(?:nellate|nellata|ne|n|s)?\.?|t)\b\s*/i);
+        if (beg) {
+          const cand = __normalizeUom(beg[1]);
+          if (cand) {
+            uom = cand;
+            qtyRaw = s.slice(beg[0].length).trim();
+          }
+        }
+      }
+
+      // Pulizia qtyRaw (solo per evitare residui tipo "x" finali)
+      qtyRaw = String(qtyRaw || "").trim();
+      return { qtyRaw, uom };
+    }
+
+    function __normalizeDocItems(items){
+      const arr = Array.isArray(items) ? items : [];
+      return arr.map((it) => {
+        const o = (it && typeof it === "object") ? it : {};
+        const out = { ...o };
+
+        // compatibilità chiavi
+        if (out.description == null && out.item != null) out.description = out.item;
+        if (out.code == null && out.sku != null) out.code = out.sku;
+
+        // qtyRaw sorgente (anche se la struttura usa altri nomi)
+        const rawQtyStr = String(
+          (out.qtyRaw ?? out.quantityRaw ?? out.qtaRaw ?? out.qta ?? out.quantity ?? out.qty ?? "")
+        ).trim();
+
+        // uom sorgente
+        let uom = __normalizeUom(out.uom ?? out.um ?? out.unit ?? out.unitOfMeasure ?? out.unitaMisura ?? "");
+
+        // se qtyRaw include già l'unità, separala
+        const split = __splitQtyUom(rawQtyStr);
+        if (!uom && split.uom) uom = split.uom;
+
+        const qtyOnly = split.qtyRaw || rawQtyStr;
+
+        out.uom = uom || "";
+        out.qtyRaw = (qtyOnly ? `${qtyOnly}${uom ? " " + uom : ""}`.trim() : "");
+
+        // parse qty (best effort) mantenendo supporto a virgola italiana
+        if (qtyOnly) {
+          const norm = String(qtyOnly).replace(/\./g, "").replace(",", ".");
+          const n = Number(norm);
+          if (!Number.isNaN(n)) out.qty = n;
+        }
+
+        return out;
+      });
+    }
+
     function parseItemsFromRawText(rawText){
       const out = [];
       const lines = String(rawText || "").split(/\r?\n/).map(l => l.trim());
@@ -3798,24 +3902,30 @@ function __isConaiItem(it){
         if (!ln.startsWith("-")) continue;
         const parts = ln.replace(/^\-\s*/, "").split(" | ").map(p => p.trim()).filter(Boolean);
         if (parts.length < 3) continue;
+
         const code = parts[0];
-        const qtyPart = parts[1]; // es: "1.760,00 PZ"
+        const qtyPart = parts[1]; // es: "1.760,00 PZ" / "1760pz" / "NR 10"
         const desc = parts.slice(2).join(" | ");
         if (__isConaiCode(code) || __isConaiLine(code) || __isConaiLine(desc)) continue;
-        let uom = "";
-        let qtyRaw = qtyPart;
-        const uomMatch = qtyPart.match(/\b([A-Z]{1,4})\b\s*$/);
-        if (uomMatch){
-          uom = uomMatch[1];
-          qtyRaw = qtyPart.slice(0, uomMatch.index).trim();
-        }
+
+        const split = __splitQtyUom(qtyPart);
+        const uom = split.uom || "";
+        const qtyOnly = split.qtyRaw || String(qtyPart || "").trim();
+
         let qty = null;
-        if (qtyRaw){
-          const norm = qtyRaw.replace(/\./g,"").replace(",",".");
+        if (qtyOnly){
+          const norm = String(qtyOnly).replace(/\./g, "").replace(",", ".");
           const n = Number(norm);
           if (!Number.isNaN(n)) qty = n;
         }
-        out.push({ code, description: desc, uom, qtyRaw: qtyRaw ? `${qtyRaw}${uom ? " " + uom : ""}`.trim() : qtyPart, qty });
+
+        out.push({
+          code,
+          description: desc,
+          uom,
+          qtyRaw: (qtyOnly ? `${qtyOnly}${uom ? " " + uom : ""}`.trim() : String(qtyPart || "").trim()),
+          qty
+        });
       }
       return out;
     }
@@ -3978,6 +4088,8 @@ function __isConaiItem(it){
 
       let items = Array.isArray(s.items) ? s.items.slice() : [];
       if (!items.length && rawText) items = parseItemsFromRawText(rawText);
+      // Normalizza chiavi + U.M. (nr/pz/kg/ton) + qtyRaw
+      items = __normalizeDocItems(items);
       // OCR filtering (CRITICO): ignora CONAI B1/B2
       items = (items || []).filter(it => !__isConaiItem(it));
 
@@ -4303,6 +4415,8 @@ function getThresholdForKey(k) {
               customer: mv.customer || "",
               code: mv.code || "",
               item: mv.item || "",
+              uom: String(mv.uom || "").trim(),
+              qtyRaw: String(mv.qtyRaw || "").trim(),
               qty: safeInt(mv.qty),
               date: mv.date || "",
               note: mv.note || "",
@@ -4351,6 +4465,8 @@ function getThresholdForKey(k) {
             customer: mv.customer || "",
             code: mv.code || "",
             item: mv.item || "",
+            uom: String(mv.uom || "").trim(),
+            qtyRaw: String(mv.qtyRaw || "").trim(),
             qty: safeInt(mv.qty),
             date: mv.date || "",
             note: mv.note || "",
@@ -8837,9 +8953,17 @@ try {
           if (__isConaiCode(code) || __isConaiLine(code) || __isConaiLine(rawDesc)) { skip++; continue; }
           const item = (rawDesc || rawCode || "").trim();
 
+          // U.M. + qtyRaw: supporta nr / pz / kg / ton (anche in formati tipo "1760pz" o "NR 10")
+          const split = __splitQtyUom(String(it.qtyRaw ?? ""));
+          const uom = __normalizeUom(it.uom ?? "") || split.uom || "";
+          const qtyOnlyFromRaw = String(split.qtyRaw || "").trim();
+
           const qtyStr = (it.qty != null && it.qty !== "" && !Number.isNaN(Number(it.qty)))
             ? String(it.qty)
-            : (it.qtyRaw ? String(it.qtyRaw).replace(/[^\d,\.]/g,"").trim() : "");
+            : (qtyOnlyFromRaw ? qtyOnlyFromRaw.replace(/[^\d,\.]/g,"").trim()
+               : (it.qtyRaw ? String(it.qtyRaw).replace(/[^\d,\.]/g,"").trim() : ""));
+
+          const qtyRaw = (qtyOnlyFromRaw || it.qtyRaw) ? `${(qtyOnlyFromRaw || String(it.qtyRaw || "")).trim()}${uom ? " " + uom : ""}`.trim() : "";
 
           const mv = makeMovement({
             type: "IN",
@@ -8847,6 +8971,8 @@ try {
             code,
             item,
             qty: qtyStr,
+            uom: uom,
+            qtyRaw: qtyRaw,
             date: docDateISO,
             note: baseNote,
             docType: String(docType || ""),
