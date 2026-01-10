@@ -1139,7 +1139,7 @@ Sapone Molle 750ml | 480 | pz | Spray 750ml" style="width:100%; min-height:140px
       db: null,
       api: null,
     },
-    magFilters: loadMagazzinoFilters(),
+    magFilters: defaultMagazzinoFilters(),
     magazzinoOverview: [],
     magazzinoDetailLookup: new Map(),
     mobileAllowlist: { ready:false, keys:new Set(), updatedAt:null, updatedBy:"", allowAll:true, docExists:false, error:"", lastError:"", lastSyncTs:null, pendingRender:false },
@@ -4959,7 +4959,7 @@ function opNormName(s){
 
   function buildOrderViews(options={}){
 
-    const applyRoleVisibility = options.applyRoleVisibility !== false;
+    const applyRoleVisibility = false; // Hub Ordini Agenti: nessun filtro visibilità
     const includeHidden = options.includeHidden === true;
     const concluded = new Set();
     for(const h of (state.history||[])){
@@ -4999,8 +4999,8 @@ function opNormName(s){
     const allowInfo = state.mobileAllowlist || {};
     const allowKeySet = (globalThis.__ALLOW_KEYS__ instanceof Set) ? globalThis.__ALLOW_KEYS__ : new Set();
     const allowLoaded = Boolean(globalThis.__ALLOW_LOADED__);
-    const allowFilterActive = Boolean(!isAdmin && isMobileView && allowLoaded);
-    const allowGuardActive = Boolean(!isAdmin && isMobileView && !allowLoaded);
+    const allowFilterActive = false; // Hub Ordini Agenti: nessun filtro allowlist
+    const allowGuardActive = false; // Hub Ordini Agenti: nessun filtro allowlist
 
     const meOp = (state.user?.fullName || state.operator || "");
 
@@ -6819,7 +6819,7 @@ function renderHome(){
   }
 
 
-  function renderMagazzinoPanel(bodyEl, badgeEl, data, prefix=""){
+    function renderMagazzinoPanel(bodyEl, badgeEl, data, prefix=""){
     if(!bodyEl || !badgeEl) return;
 
     const {
@@ -6828,109 +6828,49 @@ function renderHome(){
       overviewItems,
       visibleItems,
       needsSeeAll,
-      filteredTotals,
-      applied,
-      options
-    } = data;
+      filteredTotals
+    } = data || {};
 
+    const totalOrders = (orderDetails||[]).length;
+    const shownOrders = (sortedDetails||[]).length;
 
-    badgeEl.textContent = `${sortedDetails.length || 0}`;
-    badgeEl.title = `Ordini filtrati: ${sortedDetails.length} / Totale: ${orderDetails.length}`;
+    badgeEl.textContent = `${shownOrders || 0}`;
+    badgeEl.title = `Ordini: ${shownOrders} / Totale: ${totalOrders}`;
 
-
-    const active = document.activeElement;
-    const orderInputId = _magId(prefix, "magFilterOrder");
-    const wasOrderFocused = !!(active && bodyEl.contains(active) && active.id === orderInputId);
-
+    // salva scroll attuale lista
     const prevOverview = _magSel(bodyEl, `#${_magId(prefix, "whOverview")}`);
     const prevOverviewScroll = prevOverview ? prevOverview.scrollTop : 0;
 
     const updatedTxt = state.xmlModifiedTime || (state.lastFetchAt ? fmtDateTime(state.lastFetchAt) : "—");
-    const critCount = (filteredTotals.warnings?.length||0) + (filteredTotals.nonConfig?.length||0);
+    const critCount = Number((filteredTotals?.warnings?.length||0) + (filteredTotals?.nonConfig?.length||0)) || 0;
+
     const kpisHtml = `<div class="whKpiRow">
-        <div class="whKpi"><span class="v">${overviewItems.length || 0}</span><span>Articoli monitorati</span></div>
-        <div class="whKpi"><span class="v">${critCount}</span><span>Criticità</span></div>
-        <div class="whKpi"><span class="v">${escapeHtml(updatedTxt)}</span><span>Aggiornato</span></div>
-      </div>`;
+      <div class="whKpi"><span class="v">${(overviewItems||[]).length || 0}</span><span>Articoli monitorati</span></div>
+      <div class="whKpi"><span class="v">${critCount}</span><span>Criticità</span></div>
+      <div class="whKpi"><span class="v">${escapeHtml(updatedTxt)}</span><span>Aggiornato</span></div>
+    </div>`;
 
-
-    const overviewHtml = visibleItems.length
-      ? visibleItems.map(it=>{
-        const calcHint = (getWhCalcHint(it.label, it) || "").trim();
-        const calcHintHtml = calcHint ? `<div class="calcHint">(${escapeHtml(calcHint)})</div>` : "";
-        return `
-        <button class="whOverviewRow rowPress" data-key="${escapeHtml(it.key)}" type="button">
-          <div style="flex:1; min-width:0;">
+    const listItems = Array.isArray(visibleItems) ? visibleItems : (Array.isArray(overviewItems) ? overviewItems : []);
+    const overviewHtml = listItems.length ? listItems.map(it=>{
+      const hint = (getWhCalcHint(it.label, it) || "").trim();
+      const sub = [it.subtitle, hint ? `(${hint})` : ""].filter(Boolean).join(" ");
+      return `
+        <button type="button" class="whOverviewRow" data-key="${escapeHtml(it.key)}">
+          <div>
             <div class="whOverviewName">${escapeHtml(it.label)}</div>
-            ${calcHintHtml}
-            ${it.subtitle ? `<div class="whOverviewSub">${escapeHtml(it.subtitle)}</div>`:""}
+            ${sub ? `<div class="whOverviewSub">${escapeHtml(sub)}</div>` : ``}
           </div>
-          <div class="whOverviewVal">${formatWhQty(it)}</div>
+          <div class="whOverviewVal">${escapeHtml(formatWhQty(it))}</div>
         </button>`;
-      }).join("")
-      : `<div class="muted">${orderDetails.length ? "Nessun ordine corrisponde ai filtri." : "Nessun ordine disponibile."}</div>`;
+    }).join("") : `<div class="muted">Nessun articolo da mostrare.</div>`;
 
-    const critAlert = (()=>{
-      const crit = [];
-      if((filteredTotals.warnings||[]).length) crit.push(`<div class="badge" style="background:rgba(255,159,10,.14); border-color:rgba(255,159,10,.3);">Solleciti sacchi: ${filteredTotals.warnings.length}</div>`);
-      if((filteredTotals.nonConfig||[]).length) crit.push(`<div class="badge" style="background:rgba(255,149,0,.12); border-color:rgba(255,149,0,.3);">Distinte mancanti: ${filteredTotals.nonConfig.length}</div>`);
-      return crit.join("");
-    })();
-
-    const hasFilters = Boolean(applied.customer || applied.order || applied.item);
-
-    const idCustomer = _magId(prefix, "magFilterCustomer");
-    const idOrder = _magId(prefix, "magFilterOrder");
-    const idItem = _magId(prefix, "magFilterItem");
-    const idReset = _magId(prefix, "magFiltersReset");
-    const idChips = _magId(prefix, "magFilterChips");
-    const idResult = _magId(prefix, "magResultBadge");
     const idOverview = _magId(prefix, "whOverview");
     const idSeeAll = _magId(prefix, "whSeeAll");
     const idScrollTop = _magId(prefix, "whScrollTop");
-    const appliedOrderNorm = stableNorm(applied.order);
-    const orderOptionsBase = Array.isArray(options.orders) ? options.orders.slice() : [];
-    const orderOptions = (()=>{
-      if(applied.order && !orderOptionsBase.some(o=> stableNorm(o.value) === appliedOrderNorm)){
-        return [{ value: applied.order, label: applied.order }, ...orderOptionsBase];
-      }
-      return orderOptionsBase;
-    })();
-
-    const filterBarHtml = `<div class="magFilterBar">
-      <div class="magFilterField">
-        <label class="magFilterLabel" for="${idCustomer}">Cliente</label>
-        <select id="${idCustomer}" class="magFilterInput">
-          <option value="">Tutti</option>
-          ${options.customers.map(c=>`<option value="${escapeHtml(c)}"${stableNorm(c)===stableNorm(applied.customer)?" selected":""}>${escapeHtml(c)}</option>`).join("")}
-        </select>
-      </div>
-      <div class="magFilterField">
-        <label class="magFilterLabel" for="${idOrder}">Ordine</label>
-        <select id="${idOrder}" class="magFilterInput">
-          <option value="">Tutti</option>
-          ${orderOptions.map(o=>`<option value="${escapeHtml(o.value||"")}"${stableNorm(o.value)===appliedOrderNorm?" selected":""}>${escapeHtml(o.label||o.value||"")}</option>`).join("")}
-        </select>
-      </div>
-      <div class="magFilterField">
-        <label class="magFilterLabel" for="${idItem}">Articolo (imballaggio)</label>
-        <select id="${idItem}" class="magFilterInput">
-          <option value="">Tutti</option>
-          ${options.items.map(i=>`<option value="${escapeHtml(i)}"${stableNorm(i)===stableNorm(applied.item)?" selected":""}>${escapeHtml(i)}</option>`).join("")}
-        </select>
-      </div>
-      <div class="magFilterActions">
-        <div class="magResultBadge" id="${idResult}">Risultati: ${overviewItems.length} · Ordini: ${sortedDetails.length}</div>
-        <button class="btn ghost" id="${idReset}" type="button"${hasFilters ? "" : " style=\"opacity:.8;\""}>Pulisci filtri</button>
-      </div>
-    </div>
-    <div class="magFilterChips" id="${idChips}"></div>`;
 
     bodyEl.innerHTML = `<div class="magSimple">
       <div class="magTitle">Panoramica materiale necessario</div>
-      ${filterBarHtml}
       ${kpisHtml}
-      ${critAlert?`<div class="whCritRow">${critAlert}</div>`:""}
       <div id="${idOverview}" class="whOverview rowsScroll">${overviewHtml}</div>
       <div class="row2 whActions" style="margin-top:10px;">
         <button class="btn ghost" id="${idSeeAll}" type="button"${needsSeeAll ? "" : " style=\"opacity:.65;\""}>Apri elenco completo</button>
@@ -6938,9 +6878,7 @@ function renderHome(){
       </div>
     </div>`;
 
-
     bindWarehouseListDelegation(bodyEl);
-
 
     const seeAllBtn = _magSel(bodyEl, `#${idSeeAll}`);
     if(seeAllBtn){
@@ -6954,74 +6892,12 @@ function renderHome(){
       });
     }
 
-
-    const customerSelect = _magSel(bodyEl, `#${idCustomer}`);
-    if(customerSelect){
-      customerSelect.onchange = (e)=>{
-        const nextCustomer = e.target.value || "";
-        const cur = state.magFilters || defaultMagazzinoFilters();
-
-        const scoped = applyMagazzinoFilters(orderDetails, { ...cur, customer: nextCustomer, order:"", item:"" }).filteredOrders || [];
-        const scopedOpts = collectMagazzinoOptions(scoped);
-        const scopedItems = scopedOpts.items || [];
-        const scopedOrders = scopedOpts.orders || [];
-        const curItemNorm = stableNorm(cur.item || "");
-        const curOrderNorm = stableNorm(cur.order || "");
-        const itemStillValid = !curItemNorm || scopedItems.some(i=> stableNorm(i) === curItemNorm);
-        const orderStillValid = !curOrderNorm || scopedOrders.some(o=> stableNorm(o.value) === curOrderNorm);
-        const nextFilters = { customer: nextCustomer };
-        if(!itemStillValid) nextFilters.item = "";
-        if(!orderStillValid) nextFilters.order = "";
-        setMagazzinoFilters(nextFilters);
-        renderMagazzino();
-      };
-    }
-
-    const orderSelect = _magSel(bodyEl, `#${idOrder}`);
-    if(orderSelect){
-      orderSelect.value = applied.order || "";
-      orderSelect.onchange = (e)=>{
-        setMagazzinoFilters({ order: e.target.value || "" });
-        renderMagazzino();
-      };
-    }
-
-    const itemSelect = _magSel(bodyEl, `#${idItem}`);
-    if(itemSelect){
-      itemSelect.onchange = (e)=>{
-        setMagazzinoFilters({ item: e.target.value || "" });
-        renderMagazzino();
-      };
-    }
-
-    const resetBtn = _magSel(bodyEl, `#${idReset}`);
-    if(resetBtn){
-      resetBtn.addEventListener("click", ()=>{
-        resetMagazzinoFilters();
-        renderMagazzino();
-      });
-    }
-
-    renderMagFilterChips(_magSel(bodyEl, `#${idChips}`), applied);
-
-    const resultBadge = _magSel(bodyEl, `#${idResult}`);
-    if(resultBadge){
-      resultBadge.textContent = `Risultati: ${overviewItems.length} · Ordini: ${sortedDetails.length}`;
-    }
-
-
+    // ripristina scroll lista
     const newOverview = _magSel(bodyEl, `#${idOverview}`);
     if(newOverview && typeof prevOverviewScroll === "number"){
       newOverview.scrollTop = prevOverviewScroll;
     }
-    if(wasOrderFocused){
-      const input = _magSel(bodyEl, `#${idOrder}`);
-      if(input){
-        try{ input.focus({ preventScroll:true }); }catch(_e){ try{ input.focus(); }catch(__e){} }
-      }
-    }
   }
-
 
   function renderMagazzinoHomePanel(bodyEl, badgeEl, data){
     if(!bodyEl || !badgeEl) return;
@@ -7171,19 +7047,15 @@ function renderHome(){
       updatedTxt
     });
 
-
-    const filters = state.magFilters || defaultMagazzinoFilters();
+    // Nessun filtro nel Hub Ordini Agenti: mostra sempre tutti gli ordini
+    const filters = defaultMagazzinoFilters();
     const { filteredOrders, filteredTotals, applied } = applyMagazzinoFilters(orderDetails, filters);
-    const filtersNoItem = { ...(filters||defaultMagazzinoFilters()), item:"" };
-    const filtersNoOrder = { ...(filters||defaultMagazzinoFilters()), order:"" };
-    const scopedOrders = applyMagazzinoFilters(orderDetails, filtersNoItem).filteredOrders || [];
-    const scopedForOrderSelect = applyMagazzinoFilters(orderDetails, filtersNoOrder).filteredOrders || orderDetails;
-    const optionsAll = collectMagazzinoOptions(orderDetails);
-    const optionsScoped = collectMagazzinoOptions(scopedOrders);
-    const optionsOrders = collectMagazzinoOptions(scopedForOrderSelect).orders;
-    const options = { customers: optionsAll.customers, items: optionsScoped.items, orders: optionsOrders };
 
-    const sortedDetails = (filteredOrders||[]).slice().sort((a,b)=>`${a.order.customer||""}`.localeCompare(`${b.order.customer||""}`) || `${a.order.orderNo||a.order.number||""}`.localeCompare(`${b.order.orderNo||b.order.number||""}`));
+    const sortedDetails = (filteredOrders||[]).slice().sort((a,b)=>
+      `${a.order.customer||""}`.localeCompare(`${b.order.customer||""}`)
+      || `${a.order.orderNo||a.order.number||""}`.localeCompare(`${b.order.orderNo||b.order.number||""}`)
+    );
+
     const detailLookup = buildMagazzinoDetailLookup(sortedDetails);
     const overviewItems = buildMagazzinoOverview(filteredTotals);
 
@@ -7202,7 +7074,7 @@ function renderHome(){
       needsSeeAll,
       filteredTotals,
       applied,
-      options
+      options: { customers:[], items:[], orders:[] }
     };
 
     const modal = $("warehouseModal");
@@ -7250,7 +7122,7 @@ function renderHome(){
     }catch(_e){
       orderDetails = [];
     }
-    const filters = (state && state.magFilters) ? state.magFilters : defaultMagazzinoFilters();
+    const filters = defaultMagazzinoFilters();
     const res = applyMagazzinoFilters(orderDetails, filters);
     const rows = (res && res.filteredTotals && Array.isArray(res.filteredTotals.nonConfig)) ? res.filteredTotals.nonConfig.slice() : [];
     return { rows, filters: res?.applied || filters };
