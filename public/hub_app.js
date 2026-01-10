@@ -4589,6 +4589,81 @@ async function deleteMovement(id) {
     /****************************************************************
      * Rendering
      ****************************************************************/
+    // ===== Cockpit: contatori animati (0 → valore reale) =====
+    const __counterAnim = (() => {
+      const wm = new WeakMap();
+
+      const prefersReducedMotion = () => {
+        try { return !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches); }
+        catch(_) { return false; }
+      };
+
+      const easeOutCubic = (t) => (1 - Math.pow(1 - t, 3));
+      const fmt = (n) => (Number(n) || 0).toLocaleString("it-IT");
+
+      function setNow(el, n){
+        if (!el) return;
+        el.textContent = fmt(n);
+      }
+
+      function animate(el, target, opts){
+        if (!el) return;
+
+        const to = Number(target);
+        const end = Number.isFinite(to) ? to : 0;
+
+        // numeri del cockpit: interi (se vuoi decimali, dimmelo e li supporto)
+        const endInt = Math.max(0, Math.round(end));
+        const key = String(endInt);
+
+        // accessibilità: se l'utente riduce le animazioni, niente tween
+        if (prefersReducedMotion()){
+          el.dataset.animTarget = key;
+          el.dataset.animPlayed = "1";
+          setNow(el, endInt);
+          return;
+        }
+
+        // evita re-animazioni inutili se il valore non è cambiato
+        if (el.dataset.animTarget === key && el.dataset.animPlayed === "1"){
+          setNow(el, endInt);
+          return;
+        }
+
+        el.dataset.animTarget = key;
+        el.dataset.animPlayed = "1";
+
+        // cancella eventuale animazione in corso
+        try{
+          const prev = wm.get(el);
+          if (prev && typeof prev.cancel === "function") prev.cancel();
+        }catch(_){}
+
+        const duration = Math.max(180, Math.floor((opts && opts.duration) || 650));
+
+        // start da 0 come richiesto
+        const from = 0;
+        setNow(el, from);
+        if (endInt === 0) return;
+
+        const t0 = (typeof performance !== "undefined" && performance.now) ? performance.now() : Date.now();
+
+        let raf = 0;
+        const tick = (now) => {
+          const t1 = (typeof now === "number") ? now : ((typeof performance !== "undefined" && performance.now) ? performance.now() : Date.now());
+          const p = Math.min(1, (t1 - t0) / duration);
+          const v = Math.round(from + (endInt - from) * easeOutCubic(p));
+          el.textContent = fmt(v);
+          if (p < 1) raf = requestAnimationFrame(tick);
+        };
+
+        raf = requestAnimationFrame(tick);
+        wm.set(el, { cancel: () => { try{ cancelAnimationFrame(raf); }catch(_){} } });
+      }
+
+      return { animate, setNow };
+    })();
+
     function renderStats(stockArr) {
       const items = stockArr.length;
       const totalPieces = stockArr.reduce((sum, x) => sum + (Number(x.qty) || 0), 0);
@@ -4600,8 +4675,8 @@ async function deleteMovement(id) {
       }).length;
       const last = state.movements.slice().sort((a,b) => String(b.createdAt||"").localeCompare(String(a.createdAt||"")))[0];
 
-      statTotalItems.textContent = items.toLocaleString("it-IT");
-      statTotalPieces.textContent = totalPieces.toLocaleString("it-IT");
+      __counterAnim.animate(statTotalItems, items);
+      __counterAnim.animate(statTotalPieces, totalPieces);
       // Flussi (cockpit) = numero documenti (DDT) caricati, non numero righe/articoli
       let docsCount = 0;
       try {
@@ -4612,9 +4687,8 @@ async function deleteMovement(id) {
           docsCount = (out && Array.isArray(out.list)) ? out.list.length : 0;
         }
       } catch (e) { docsCount = 0; }
-
-      if (typeof statTotalFlows !== "undefined" && statTotalFlows) statTotalFlows.textContent = (Number(docsCount) || 0).toLocaleString("it-IT");
-      statLowStock.textContent = low.toLocaleString("it-IT");
+      if (typeof statTotalFlows !== "undefined" && statTotalFlows) __counterAnim.animate(statTotalFlows, docsCount);
+      __counterAnim.animate(statLowStock, low);
       statLastUpdate.textContent = last ? formatDateIT(last.createdAt) : "—";
     }
 
