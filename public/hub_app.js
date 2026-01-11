@@ -1988,7 +1988,39 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
     btnBackFlows?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
     btnBackMovements?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
     document.getElementById("btnFlowsExport")?.addEventListener("click", () => { try{ exportMovementsCSV(); }catch(_){ } });
-    __btnBack?.addEventListener("click", () => setView("home"));
+    function closeHeaderModalIfOpen(){
+      const modalOrder = [
+        { el: modalFlowEdit, close: closeFlowEdit },
+        { el: modalDocDetail, close: closeDocDetail },
+        { el: modalMovement, close: closeMovementModal },
+        { el: modalUnified, close: () => { modalUnified?.classList.remove("open"); __syncBodyLockFromModals(); } },
+        { el: modalProduct, close: () => { modalProduct?.classList.remove("open"); __syncBodyLockFromModals(); } },
+        { el: modalSupplier, close: closeSupplierModal },
+        { el: document.getElementById("modalCategory"), close: () => {
+          const closeBtn = document.getElementById("catModalClose") || document.getElementById("btnCatDone");
+          if (closeBtn) closeBtn.click();
+          else {
+            document.getElementById("modalCategory")?.classList.remove("open");
+            __syncBodyLockFromModals();
+          }
+        }},
+        { el: modalSettings, close: closeSettings },
+        { el: modalQuick, close: closeModal }
+      ];
+
+      for (const item of modalOrder){
+        if (item.el && item.el.classList.contains("open")){
+          try{ item.close(); }catch(_){ }
+          return true;
+        }
+      }
+      return false;
+    }
+
+    __btnBack?.addEventListener("click", () => {
+      if (closeHeaderModalIfOpen()) return;
+      setView("home");
+    });
     homeInvSelect?.addEventListener("change", () => {
       const value = homeInvSelect.value;
       if (!value) return;
