@@ -1495,7 +1495,7 @@
                       <div class="progressLabel" id="progressLabel">In attesa di acquisizione</div>
                       <div class="winSpinner" id="progressSpinner" aria-hidden="true" style="display:none"></div>
                     </div>
-                    <div class="progressBar" aria-hidden="true"><div class="progressFill" id="progressFill"></div></div>
+                    <div class="progressBar segmentedBar" id="progressBar" aria-hidden="true"></div>
                   </div>
 
                   <div class="stack">
@@ -1639,15 +1639,41 @@
     const STORE_KEY_LOCALDATA = "hubInventario.localdata.v1";
     const STORE_KEY_LEGACY = "hubInventario.v1";
 
+    const LED_SEGMENTS = 50;
+
+    function buildLedSegmentsMarkup(activeCount, total){
+      const max = Number.isFinite(total) ? Math.max(1, total) : LED_SEGMENTS;
+      const on = Math.max(0, Math.min(max, Number(activeCount) || 0));
+      return Array.from({ length: max }, (_, idx) => {
+        return `<span class="barSegment${idx < on ? " is-on" : ""}"></span>`;
+      }).join("");
+    }
+
+    function setLedBarValue(barEl, pct){
+      if (!barEl) return;
+      const clamped = Math.max(0, Math.min(100, Number(pct) || 0));
+      const active = Math.round((clamped / 100) * LED_SEGMENTS);
+      const segments = barEl.querySelectorAll(".barSegment");
+      if (segments.length !== LED_SEGMENTS){
+        barEl.innerHTML = buildLedSegmentsMarkup(active, LED_SEGMENTS);
+        return;
+      }
+      segments.forEach((seg, idx) => {
+        if (idx < active) seg.classList.add("is-on");
+        else seg.classList.remove("is-on");
+      });
+    }
+
     /****************************************************************
      * UI refs
      ****************************************************************/
     const previewImg = document.getElementById("previewImg");
     const previewPlaceholder = document.getElementById("previewPlaceholder");
     const progressLabel = document.getElementById("progressLabel");
-    const progressFill = document.getElementById("progressFill");
+    const progressBar = document.getElementById("progressBar");
     const progressSpinner = document.getElementById("progressSpinner");
     const ocrResult = document.getElementById("ocrResult");
+    if (progressBar) setLedBarValue(progressBar, 0);
 
     const btnConfirmMovement = document.getElementById("btnConfirmMovement");
     const btnReset = document.getElementById("btnReset");
@@ -3529,7 +3555,7 @@ async function deleteMovementsBulk(ids) {
       if (!isHeic) return file;
 
       progressLabel.textContent = "Conversione HEIC → JPEG…";
-      progressFill.style.width = "22%";
+      setLedBarValue(progressBar, 22);
 
       const ok = await ensureHeic2AnyLoaded();
       if (!ok || !window.heic2any) {
@@ -4769,6 +4795,7 @@ async function deleteMovement(id) {
       return /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(s);
     }
 
+
     // Dashboard: riquadro "Categorie" (pezzi per categoria) — Inventario Cerea
     function renderCategoryBoardCerea(stockByWh){
       try{
@@ -4814,12 +4841,13 @@ async function deleteMovement(id) {
         categoryListCerea.innerHTML = list.map(item => {
           const pct = Math.max(0, Math.min(100, Math.round((Math.max(0, Number(item.qty)||0) / max) * 100)));
           const col = __isHexColor(item.color) ? item.color : "";
-          const fillStyle = col ? `background:${escapeHtmlAttr(col)};` : "";
+          const activeSegments = Math.round((pct / 100) * LED_SEGMENTS);
+          const trackStyle = col ? `--bar-color:${escapeHtmlAttr(col)};` : "";
           return `
             <div class="categoryRow">
               <div class="categoryName">${escapeHtml(item.name || item.key || "")}</div>
-              <div class="categoryTrack">
-                <div class="categoryFill" style="width:${pct}%; ${fillStyle}"></div>
+              <div class="categoryTrack segmentedBar" style="${trackStyle}">
+                ${buildLedSegmentsMarkup(activeSegments, LED_SEGMENTS)}
               </div>
               <div class="categoryValue">${Number(item.qty||0).toLocaleString("it-IT")}</div>
             </div>
@@ -8776,7 +8804,7 @@ modalProduct.classList.add("open");
 
       // ui
       ocrResult.value = "";
-      progressFill.style.width = "0%";
+      setLedBarValue(progressBar, 0);
       progressLabel.textContent = "In attesa di acquisizione";
       if (progressSpinner) progressSpinner.style.display = "none";
       btnConfirmMovement.disabled = true;
@@ -8980,7 +9008,7 @@ async function handleFileSelection(fileList) {
       if (progressSpinner) progressSpinner.style.display = "block";
 
       progressLabel.textContent = "Preparazione…";
-      progressFill.style.width = "10%";
+      setLedBarValue(progressBar, 10);
 
       // session token (cancella eventuali OCR in corso)
       const myToken = ++__ocrSessionToken;
@@ -9016,7 +9044,7 @@ async function handleFileSelection(fileList) {
 
           const processed = startIdx + doneNow;
           const pct = Math.min(95, Math.round(10 + 85 * (processed / Math.max(1, total))));
-          progressFill.style.width = pct + "%";
+          setLedBarValue(progressBar, pct);
           progressLabel.textContent = `OCR in corso… ${processed}/${total}`;
 
           __renderPagesUI();
@@ -9065,7 +9093,7 @@ async function handleFileSelection(fileList) {
           console.warn("supplier OCR upsert skipped", e);
         }
 
-        progressFill.style.width = "100%";
+        setLedBarValue(progressBar, 100);
         progressLabel.textContent = "OCR completato";
         if (progressSpinner) progressSpinner.style.display = "none";
         showToast("OCR completato");
@@ -9104,14 +9132,14 @@ async function handleFileSelection(fileList) {
         console.error(e);
 
         if (String(e && e.message || "").toLowerCase().includes("annullato")) {
-          progressFill.style.width = "0%";
+          setLedBarValue(progressBar, 0);
           progressLabel.textContent = "OCR annullato";
           if (progressSpinner) progressSpinner.style.display = "none";
           setOcrPill("warn", "OCR: annullato");
           return;
         }
 
-        progressFill.style.width = "0%";
+        setLedBarValue(progressBar, 0);
         progressLabel.textContent = "Errore OCR";
         if (progressSpinner) progressSpinner.style.display = "none";
         setOcrPill("bad", "OCR: errore");
@@ -9500,7 +9528,7 @@ const dupCheck = await __checkDuplicateDdtBeforeUpload({
 
       btnConfirmMovement.disabled = true;
       progressLabel.textContent = "Import in corso…";
-      progressFill.style.width = "88%";
+      setLedBarValue(progressBar, 88);
 
       try {
 
@@ -9508,7 +9536,7 @@ let docPages = [];
 try {
   if (capture.files && capture.files.length) {
     progressLabel.textContent = "Caricamento foto…";
-    progressFill.style.width = "80%";
+    setLedBarValue(progressBar, 80);
     docPages = await uploadDocPagesToStorage(docKey, capture.files);
   }
 } catch (e) {
