@@ -5109,12 +5109,9 @@ async function deleteMovement(id) {
       // Path
       const d = __invTrendActivePoints.map((p, i) => `${i ? "L" : "M"}${p.x.toFixed(2)} ${p.y.toFixed(2)}`).join(" ");
       const last = __invTrendActivePoints[__invTrendActivePoints.length - 1];
-      const areaBaseY = H - padBot;
-      const areaD = `${d} L ${last.x.toFixed(2)} ${areaBaseY.toFixed(2)} L ${__invTrendActivePoints[0].x.toFixed(2)} ${areaBaseY.toFixed(2)} Z`;
 
       invTrendChart.innerHTML = `
         <g class="trendGrid">${gridLines.join("")}</g>
-        <path class="trendArea" d="${areaD}"></path>
         <path class="trendLine" d="${d}"></path>
         <circle class="trendDot" cx="${last.x.toFixed(2)}" cy="${last.y.toFixed(2)}" r="4.2"></circle>
         <circle class="trendDot trendDotFocus" cx="${last.x.toFixed(2)}" cy="${last.y.toFixed(2)}" r="5.0" style="opacity:0;"></circle>
