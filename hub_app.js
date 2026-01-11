@@ -1781,6 +1781,7 @@ const docDetailPhotosMeta = document.getElementById("docDetailPhotosMeta");
     const btnBackFlows = document.getElementById("btnBackFlows");
     const btnBackMovements = document.getElementById("btnBackMovements");
     const btnBackAnag = document.getElementById("btnBackAnag");
+    let __modalOpenSeq = 0;
 
     // Porta overlay/modali come figli diretti di <body> per evitare stacking-context (transform/filter) sui parent
     (function __liftOverlaysToBody(){
@@ -1795,6 +1796,34 @@ const docDetailPhotosMeta = document.getElementById("docDetailPhotosMeta");
       }catch(_){}
     })();
 
+
+    function __markModalOpen(modal){
+      if (!modal) return;
+      __modalOpenSeq += 1;
+      modal.dataset.openSeq = String(__modalOpenSeq);
+    }
+
+    function __getTopModal(){
+      const openModals = Array.from(document.querySelectorAll(".modal.open"));
+      if (!openModals.length) return null;
+      let top = null;
+      let topSeq = -1;
+      openModals.forEach((modal) => {
+        const seq = Number(modal.dataset.openSeq || 0);
+        if (seq >= topSeq) {
+          topSeq = seq;
+          top = modal;
+        }
+      });
+      return top || openModals[openModals.length - 1];
+    }
+
+    function __syncHeaderBack(){
+      if (!__btnBack) return;
+      const hasOverlay = !!document.querySelector(".view.modalOverlay.active");
+      const hasModal = !!document.querySelector(".modal.open");
+      __btnBack.style.display = (hasOverlay || hasModal) ? "inline-flex" : "none";
+    }
 
     function setView(name){
       const key = String(name || "home");
@@ -1849,10 +1878,29 @@ const docDetailPhotosMeta = document.getElementById("docDetailPhotosMeta");
           (key === "trash") ? "Cestino" :
           "Anagrafica";
       }
-      if (__btnBack) __btnBack.style.display = (isOverlay) ? "inline-flex" : "none";
       try { window.scrollTo(0, 0); } catch(_){}
       __syncBodyLock();
+      __syncHeaderBack();
     }
+
+    (function __observeModalStack(){
+      const modals = Array.from(document.querySelectorAll(".modal"));
+      if (!modals.length) return;
+      const observer = new MutationObserver((mutations) => {
+        let needsSync = false;
+        mutations.forEach((mutation) => {
+          if (mutation.type !== "attributes" || mutation.attributeName !== "class") return;
+          const el = mutation.target;
+          if (!el.classList.contains("modal")) return;
+          if (el.classList.contains("open")) {
+            __markModalOpen(el);
+          }
+          needsSync = true;
+        });
+        if (needsSync) __syncHeaderBack();
+      });
+      modals.forEach((modal) => observer.observe(modal, { attributes: true, attributeFilter: ["class"] }));
+    })();
 
     function __isMobileDevice(){
       try {
@@ -1866,12 +1914,14 @@ const docDetailPhotosMeta = document.getElementById("docDetailPhotosMeta");
       try{
         document.querySelectorAll(".modal.open").forEach(modal => modal.classList.remove("open"));
       }catch(_){}
+      __syncHeaderBack();
     }
 
     function __closeAllOverlays(){
       try{
         if (document.querySelector(".view.modalOverlay.active")) setView("home");
       }catch(_){}
+      __syncHeaderBack();
     }
 
     function startHomeOcr(){
@@ -2002,7 +2052,17 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
     btnBackFlows?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
     btnBackMovements?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
     document.getElementById("btnFlowsExport")?.addEventListener("click", () => { try{ exportMovementsCSV(); }catch(_){ } });
-    __btnBack?.addEventListener("click", () => setView("home"));
+    __btnBack?.addEventListener("click", () => {
+      const topModal = __getTopModal();
+      if (topModal) {
+        topModal.classList.remove("open");
+        __syncHeaderBack();
+        return;
+      }
+      if (document.querySelector(".view.modalOverlay.active")) {
+        setView("home");
+      }
+    });
     homeInvSelect?.addEventListener("change", () => {
       const value = homeInvSelect.value;
       if (!value) return;
