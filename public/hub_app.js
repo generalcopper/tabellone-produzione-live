@@ -5109,6 +5109,26 @@ async function deleteMovement(id) {
         return { day: p.day, value: Number(p.value) || 0, x, y };
       });
 
+      const buildSmoothPath = (pointsIn) => {
+        if (!pointsIn || pointsIn.length === 0) return "";
+        if (pointsIn.length === 1){
+          return `M${pointsIn[0].x.toFixed(2)} ${pointsIn[0].y.toFixed(2)}`;
+        }
+        let d = `M${pointsIn[0].x.toFixed(2)} ${pointsIn[0].y.toFixed(2)}`;
+        for (let i = 0; i < pointsIn.length - 1; i++){
+          const p0 = pointsIn[i - 1] || pointsIn[i];
+          const p1 = pointsIn[i];
+          const p2 = pointsIn[i + 1];
+          const p3 = pointsIn[i + 2] || p2;
+          const c1x = p1.x + (p2.x - p0.x) / 6;
+          const c1y = p1.y + (p2.y - p0.y) / 6;
+          const c2x = p2.x - (p3.x - p1.x) / 6;
+          const c2y = p2.y - (p3.y - p1.y) / 6;
+          d += ` C${c1x.toFixed(2)} ${c1y.toFixed(2)}, ${c2x.toFixed(2)} ${c2y.toFixed(2)}, ${p2.x.toFixed(2)} ${p2.y.toFixed(2)}`;
+        }
+        return d;
+      };
+
       // Grid
       const gridLines = [];
       const gCount = 4;
@@ -5118,7 +5138,7 @@ async function deleteMovement(id) {
       }
 
       // Path
-      const d = __invTrendActivePoints.map((p, i) => `${i ? "L" : "M"}${p.x.toFixed(2)} ${p.y.toFixed(2)}`).join(" ");
+      const d = buildSmoothPath(__invTrendActivePoints);
       const last = __invTrendActivePoints[__invTrendActivePoints.length - 1];
 
       invTrendChart.innerHTML = `
