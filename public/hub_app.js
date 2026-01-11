@@ -2090,6 +2090,13 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
     const categoryListCerea = document.getElementById("categoryListCerea");
     const categoryTotalCerea = document.getElementById("categoryTotalCerea");
 
+    // Home: Andamento inventario (grafico temporale)
+    const invTrendTotal = document.getElementById("invTrendTotal");
+    const invTrendRanges = document.getElementById("invTrendRanges");
+    const invTrendChart = document.getElementById("invTrendChart");
+    const invTrendTooltip = document.getElementById("invTrendTooltip");
+
+
     const stockTbody = document.getElementById("stockTbody");
     const movTbody = document.getElementById("movTbody");
     const flowsTbody = document.getElementById("flowsTbody");
@@ -4832,6 +4839,320 @@ async function deleteMovement(id) {
 
 
 
+
+    // ===== Dashboard: Andamento inventario (totale pezzi nel tempo) =====
+    let __invTrendRange = "30";           // "7" | "30" | "90" | "all"
+    let __invTrendDidBind = false;
+    let __invTrendSvgBound = false;
+    let __invTrendActivePoints = [];      // [{day,value,x,y}]
+    let __invTrendActiveIdx = -1;
+
+    function __invTrendPrefersReducedMotion(){
+      try { return !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches); }
+      catch(_) { return false; }
+    }
+
+    function __invTrendPad2(n){ return String(n).padStart(2, "0"); }
+    function __invTrendTodayISO(){
+      const d = new Date();
+      return `${d.getFullYear()}-${__invTrendPad2(d.getMonth()+1)}-${__invTrendPad2(d.getDate())}`;
+    }
+    function __invTrendAddDays(iso, delta){
+      const d = new Date(String(iso || "") + "T00:00:00");
+      if (Number.isNaN(d.getTime())) return "";
+      d.setDate(d.getDate() + (Number(delta) || 0));
+      return `${d.getFullYear()}-${__invTrendPad2(d.getMonth()+1)}-${__invTrendPad2(d.getDate())}`;
+    }
+    function __invTrendFmtDateShort(iso){
+      try{
+        const d = new Date(String(iso || "") + "T00:00:00");
+        if (Number.isNaN(d.getTime())) return String(iso || "");
+        return d.toLocaleDateString("it-IT", { day: "2-digit", month: "short" });
+      }catch(_){ return String(iso || ""); }
+    }
+
+    function __invTrendGetMvDay(mv){
+      let d = String((mv && mv.date) || "").trim();
+      if (!d || d.length < 10){
+        const ca = String((mv && mv.createdAt) || "").trim();
+        if (ca && ca.length >= 10) d = ca.slice(0, 10);
+      }
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) return "";
+      return d;
+    }
+
+    function __initInvTrendUI(){
+      if (__invTrendDidBind) return;
+      __invTrendDidBind = true;
+
+      // range persist (localStorage)
+      try{
+        const saved = String(localStorage.getItem("invTrendRange") || "").trim();
+        if (saved && ["7","30","90","all"].includes(saved)) __invTrendRange = saved;
+      }catch(_){}
+
+      if (invTrendRanges){
+        invTrendRanges.addEventListener("click", (e) => {
+          const btn = e.target && e.target.closest ? e.target.closest("button[data-range]") : null;
+          if (!btn) return;
+          const r = String(btn.getAttribute("data-range") || "").trim();
+          if (!["7","30","90","all"].includes(r)) return;
+          __invTrendRange = r;
+          try{ localStorage.setItem("invTrendRange", r); }catch(_){}
+          renderInventoryTrend(); // redraw now
+        });
+      }
+
+      // Bind tooltip tracking once
+      __bindInvTrendSvg();
+    }
+
+    function __setInvTrendActiveBtn(){
+      if (!invTrendRanges) return;
+      const btns = invTrendRanges.querySelectorAll("button[data-range]");
+      btns.forEach(b => {
+        const r = String(b.getAttribute("data-range") || "").trim();
+        b.classList.toggle("is-active", r === __invTrendRange);
+      });
+    }
+
+    function __buildInvTrendSeries(movements, range){
+      const movs = Array.isArray(movements) ? movements : [];
+
+      // delta per giorno
+      const deltaByDay = new Map(); // day -> signed int
+      let minDay = "";
+      let maxDay = "";
+
+      for (const mv of movs){
+        const day = __invTrendGetMvDay(mv);
+        if (!day) continue;
+        const q = safeInt(mv.qty);
+        const sign = String(mv.type || "").toUpperCase() === "OUT" ? -1 : 1;
+        const delta = sign * q;
+        if (!delta) continue;
+
+        deltaByDay.set(day, (deltaByDay.get(day) || 0) + delta);
+
+        if (!minDay || day < minDay) minDay = day;
+        if (!maxDay || day > maxDay) maxDay = day;
+      }
+
+      const today = __invTrendTodayISO();
+      let endDay = maxDay || today;
+      if (today && today > endDay) endDay = today;
+
+      if (!minDay) minDay = endDay;
+
+      let startDay = minDay;
+      if (String(range) !== "all"){
+        const n = Math.max(1, safeInt(range));
+        const wantStart = __invTrendAddDays(endDay, -(n-1));
+        if (wantStart && wantStart > startDay) startDay = wantStart;
+      }
+
+      // baseline = somma delta dei giorni < startDay
+      let base = 0;
+      if (deltaByDay.size){
+        const daysSorted = Array.from(deltaByDay.keys()).sort((a,b) => a.localeCompare(b));
+        for (const d of daysSorted){
+          if (d < startDay) base += (deltaByDay.get(d) || 0);
+          else break;
+        }
+      }
+
+      // serie giornaliera (con carry)
+      const points = [];
+      let level = base;
+      let guard = 0;
+      for (let d = startDay; d <= endDay && guard < 6000; d = __invTrendAddDays(d, 1), guard++){
+        level += (deltaByDay.get(d) || 0);
+        points.push({ day: d, value: level });
+      }
+
+      // se per qualche motivo è vuota
+      if (!points.length){
+        points.push({ day: endDay, value: 0 });
+      }
+
+      // downsample (tutto) per evitare troppo carico su SVG
+      const MAX_PTS = 220;
+      if (points.length > MAX_PTS){
+        const step = Math.ceil(points.length / MAX_PTS);
+        const out = [];
+        for (let i = 0; i < points.length; i += step) out.push(points[i]);
+        if (out[out.length - 1] !== points[points.length - 1]) out.push(points[points.length - 1]);
+        return out;
+      }
+
+      return points;
+    }
+
+    function __bindInvTrendSvg(){
+      if (__invTrendSvgBound) return;
+      if (!invTrendChart) return;
+      __invTrendSvgBound = true;
+
+      const onMove = (clientX, clientY) => {
+        if (!invTrendChart || !invTrendTooltip) return;
+        const pts = Array.isArray(__invTrendActivePoints) ? __invTrendActivePoints : [];
+        if (!pts.length) return;
+
+        const rect = invTrendChart.getBoundingClientRect();
+        if (!rect.width || !rect.height) return;
+
+        const px = Math.max(0, Math.min(rect.width, (clientX - rect.left)));
+        const t = rect.width ? (px / rect.width) : 0;
+        const idx = Math.max(0, Math.min(pts.length - 1, Math.round(t * (pts.length - 1))));
+        __invTrendActiveIdx = idx;
+
+        const p = pts[idx];
+        if (!p) return;
+
+        // focus dot
+        try{
+          const dot = invTrendChart.querySelector("circle.trendDotFocus");
+          if (dot){
+            dot.setAttribute("cx", String(p.x));
+            dot.setAttribute("cy", String(p.y));
+            dot.style.opacity = "1";
+          }
+        }catch(_){}
+
+        // tooltip position in px
+        const xPx = (p.x / 480) * rect.width;
+        const yPx = (p.y / 180) * rect.height;
+
+        const valTxt = Number(p.value || 0).toLocaleString("it-IT");
+        const dateTxt = __invTrendFmtDateShort(p.day);
+        invTrendTooltip.textContent = `${valTxt} • ${dateTxt}`;
+        invTrendTooltip.style.left = `${xPx}px`;
+        invTrendTooltip.style.top = `${yPx}px`;
+        invTrendTooltip.classList.add("is-visible");
+        invTrendTooltip.setAttribute("aria-hidden", "false");
+      };
+
+      const hide = () => {
+        if (!invTrendTooltip) return;
+        invTrendTooltip.classList.remove("is-visible");
+        invTrendTooltip.setAttribute("aria-hidden", "true");
+        try{
+          const dot = invTrendChart && invTrendChart.querySelector ? invTrendChart.querySelector("circle.trendDotFocus") : null;
+          if (dot) dot.style.opacity = "0";
+        }catch(_){}
+      };
+
+      invTrendChart.addEventListener("mousemove", (e) => onMove(e.clientX, e.clientY));
+      invTrendChart.addEventListener("mouseleave", hide);
+      invTrendChart.addEventListener("touchstart", (e) => {
+        const t = e.touches && e.touches[0];
+        if (!t) return;
+        onMove(t.clientX, t.clientY);
+      }, { passive: true });
+      invTrendChart.addEventListener("touchmove", (e) => {
+        const t = e.touches && e.touches[0];
+        if (!t) return;
+        onMove(t.clientX, t.clientY);
+      }, { passive: true });
+      invTrendChart.addEventListener("touchend", hide);
+      invTrendChart.addEventListener("touchcancel", hide);
+    }
+
+    function __renderInvTrendSvg(points){
+      if (!invTrendChart) return;
+
+      const ptsIn = Array.isArray(points) ? points : [];
+      const pts = ptsIn.length ? ptsIn.slice() : [{ day: __invTrendTodayISO(), value: 0 }];
+
+      // Ensure at least 2 points for a line
+      if (pts.length === 1){
+        pts.push({ day: pts[0].day, value: pts[0].value });
+      }
+
+      // viewbox dims
+      const W = 480, H = 180;
+      const padX = 14, padTop = 12, padBot = 16;
+
+      const values = pts.map(p => Number(p.value) || 0);
+      let vMin = Math.min(...values);
+      let vMax = Math.max(...values);
+      if (vMin === vMax){ vMin -= 1; vMax += 1; }
+
+      // a little breathing room
+      const span = Math.max(1, vMax - vMin);
+      const extra = span * 0.08;
+      vMin -= extra; vMax += extra;
+
+      const xStep = (W - padX*2) / Math.max(1, (pts.length - 1));
+      const ySpan = Math.max(1e-9, (vMax - vMin));
+
+      const toY = (v) => {
+        const t = (vMax - v) / ySpan;
+        return padTop + t * (H - padTop - padBot);
+      };
+
+      // Compute final points (with x/y)
+      __invTrendActivePoints = pts.map((p, i) => {
+        const x = padX + xStep * i;
+        const y = toY(Number(p.value) || 0);
+        return { day: p.day, value: Number(p.value) || 0, x, y };
+      });
+
+      // Grid
+      const gridLines = [];
+      const gCount = 4;
+      for (let i = 1; i <= gCount; i++){
+        const y = padTop + (i/(gCount+1)) * (H - padTop - padBot);
+        gridLines.push(`<line x1="0" y1="${y.toFixed(2)}" x2="${W}" y2="${y.toFixed(2)}"></line>`);
+      }
+
+      // Path
+      const d = __invTrendActivePoints.map((p, i) => `${i ? "L" : "M"}${p.x.toFixed(2)} ${p.y.toFixed(2)}`).join(" ");
+      const last = __invTrendActivePoints[__invTrendActivePoints.length - 1];
+
+      invTrendChart.innerHTML = `
+        <g class="trendGrid">${gridLines.join("")}</g>
+        <path class="trendLine" d="${d}"></path>
+        <circle class="trendDot" cx="${last.x.toFixed(2)}" cy="${last.y.toFixed(2)}" r="4.2"></circle>
+        <circle class="trendDot trendDotFocus" cx="${last.x.toFixed(2)}" cy="${last.y.toFixed(2)}" r="5.0" style="opacity:0;"></circle>
+      `;
+
+      // Animate line draw (only if motion allowed)
+      try{
+        if (__invTrendPrefersReducedMotion()) return;
+        const path = invTrendChart.querySelector("path.trendLine");
+        if (!path || !path.getTotalLength) return;
+        const len = path.getTotalLength();
+        path.style.strokeDasharray = String(len);
+        path.style.strokeDashoffset = String(len);
+        // force layout
+        path.getBoundingClientRect();
+        path.classList.add("animate");
+      }catch(_){}
+    }
+
+    function renderInventoryTrend(stockArrMaybe){
+      try{
+        if (!invTrendChart || !invTrendTotal) return;
+
+        __initInvTrendUI();
+        __setInvTrendActiveBtn();
+
+        // Totale = pezzi totali attuali (come cockpit)
+        const stockArr = Array.isArray(stockArrMaybe) ? stockArrMaybe : (typeof computeStock === "function" ? computeStock() : []);
+        const total = (stockArr || []).reduce((s, x) => s + (Number(x && x.qty) || 0), 0);
+        invTrendTotal.textContent = Number(total || 0).toLocaleString("it-IT");
+
+        const series = __buildInvTrendSeries(state && state.movements, __invTrendRange);
+        __renderInvTrendSvg(series);
+      }catch(e){
+        console.warn("renderInventoryTrend failed", e);
+      }
+    }
+
+
+
+
     function renderCustomerOptions(stockArr) {
       const customers = Array.from(new Set(stockArr.map(x => x.customer).filter(Boolean))).sort((a,b)=>a.localeCompare(b));
       const current = filterCustomer.value;
@@ -6901,6 +7222,7 @@ function renderAll() {
       renderStats(stockArr);
       renderLowStockBoard(stockByWh);
       renderCategoryBoardCerea(stockByWh);
+      renderInventoryTrend(stockArr);
 
 
       // Inventario: mostra tabella solo dopo scelta sede
