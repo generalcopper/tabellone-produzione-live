@@ -1797,6 +1797,13 @@ const docDetailPhotosMeta = document.getElementById("docDetailPhotosMeta");
     })();
 
 
+    function syncHeaderBackVisibility(){
+      if (!__btnBack) return;
+      const hasModal = !!document.querySelector(".modal.open");
+      const hasOverlay = !!document.querySelector(".view.modalOverlay.active");
+      __btnBack.style.display = (hasModal || hasOverlay) ? "inline-flex" : "none";
+    }
+
     function setView(name){
       const key = String(name || "home");
       const overlayKeys = ["ocr","inventory","flows","movements","categories","trash","anag"];
@@ -1846,7 +1853,7 @@ const docDetailPhotosMeta = document.getElementById("docDetailPhotosMeta");
           (key === "trash") ? "Cestino" :
           "Anagrafica";
       }
-      if (__btnBack) __btnBack.style.display = (isOverlay) ? "inline-flex" : "none";
+      syncHeaderBackVisibility();
       try { window.scrollTo(0, 0); } catch(_){}
     }
 
@@ -2745,6 +2752,7 @@ function __syncBodyLockFromModals(){
   try{
     const anyOpen = !!document.querySelector(".modal.open");
     __setBodyLocked(anyOpen);
+    syncHeaderBackVisibility();
   }catch(e){}
 }
 
