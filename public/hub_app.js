@@ -2086,6 +2086,10 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
     const lowStockCountCerea = document.getElementById("lowStockCountCerea");
     const lowStockCountConca = document.getElementById("lowStockCountConca");
 
+    // Home: riquadro Categorie (Dashboard)
+    const categoryListCerea = document.getElementById("categoryListCerea");
+    const categoryTotalCerea = document.getElementById("categoryTotalCerea");
+
     const stockTbody = document.getElementById("stockTbody");
     const movTbody = document.getElementById("movTbody");
     const flowsTbody = document.getElementById("flowsTbody");
@@ -4760,6 +4764,73 @@ async function deleteMovement(id) {
       }
     }
 
+    function __isHexColor(v){
+      const s = String(v || "").trim();
+      return /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(s);
+    }
+
+    // Dashboard: riquadro "Categorie" (pezzi per categoria) — Inventario Cerea
+    function renderCategoryBoardCerea(stockByWh){
+      try{
+        if (!categoryListCerea || !categoryTotalCerea) return;
+
+        const rows = Array.isArray(stockByWh) ? stockByWh : [];
+        const codeTotals = new Map(); // codeLower -> qty
+
+        for (const r of rows){
+          if (!r) continue;
+          if (normalizeWarehouse(r.warehouse || "") !== WAREHOUSE_CEREA) continue;
+          const code = String(r.code || "").trim();
+          if (!code) continue;
+          const low = code.toLowerCase();
+          const q = safeInt(r.qty);
+          codeTotals.set(low, (codeTotals.get(low) || 0) + q);
+        }
+
+        const catTotals = new Map(); // catKey -> qty (clamped >=0)
+        for (const [codeLow, qtyRaw] of codeTotals.entries()){
+          const catKeyRaw = (typeof getMacroCategoryForCode === "function") ? getMacroCategoryForCode(codeLow) : "";
+          const catKey = String(catKeyRaw || "").trim().toLowerCase() || "non_classificati";
+          const qty = Math.max(0, Number(qtyRaw) || 0);
+          if (qty <= 0) continue; // evita categorie "0" che sporcano il widget
+          catTotals.set(catKey, (catTotals.get(catKey) || 0) + qty);
+        }
+
+        const list = Array.from(catTotals.entries()).map(([key, qty]) => {
+          const name = (typeof macroCatLabel === "function") ? (macroCatLabel(key) || key) : key;
+          const color = (typeof macroCatColor === "function") ? (macroCatColor(key) || "") : "";
+          return { key, name, color, qty: Number(qty) || 0 };
+        }).sort((a,b) => (Number(b.qty)||0) - (Number(a.qty)||0));
+
+        const total = list.reduce((s, x) => s + (Number(x.qty)||0), 0);
+        categoryTotalCerea.textContent = total ? Number(total).toLocaleString("it-IT") : "0";
+
+        if (!list.length){
+          categoryListCerea.innerHTML = '<div class="categoryPlaceholder">Nessuna categoria disponibile</div>';
+          return;
+        }
+
+        const max = Math.max(1, ...list.map(x => Math.max(0, Number(x.qty) || 0)));
+        categoryListCerea.innerHTML = list.map(item => {
+          const pct = Math.max(0, Math.min(100, Math.round((Math.max(0, Number(item.qty)||0) / max) * 100)));
+          const col = __isHexColor(item.color) ? item.color : "";
+          const fillStyle = col ? `background:${escapeHtmlAttr(col)};` : "";
+          return `
+            <div class="categoryRow">
+              <div class="categoryName">${escapeHtml(item.name || item.key || "")}</div>
+              <div class="categoryTrack">
+                <div class="categoryFill" style="width:${pct}%; ${fillStyle}"></div>
+              </div>
+              <div class="categoryValue">${Number(item.qty||0).toLocaleString("it-IT")}</div>
+            </div>
+          `;
+        }).join("");
+      }catch(e){
+        console.warn("renderCategoryBoardCerea failed", e);
+      }
+    }
+
+
 
     function renderCustomerOptions(stockArr) {
       const customers = Array.from(new Set(stockArr.map(x => x.customer).filter(Boolean))).sort((a,b)=>a.localeCompare(b));
@@ -6829,6 +6900,7 @@ function renderAll() {
       // Home / KPI: totale (somma di tutti i magazzini)
       renderStats(stockArr);
       renderLowStockBoard(stockByWh);
+      renderCategoryBoardCerea(stockByWh);
 
 
       // Inventario: mostra tabella solo dopo scelta sede
