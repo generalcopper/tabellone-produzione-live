@@ -284,21 +284,37 @@
       .undoBtn{ padding: 8px 10px; font-size: 12px; }
     }
 
+    :root{
+      --modalFadeDur: 220ms;
+      --modalSlideDur: 260ms;
+      --modalEase: cubic-bezier(0.22, 0.61, 0.36, 1);
+    }
     .modal{
       position:fixed;
       inset:0;
-      display:none;
+      display:flex;
       align-items:center;
       justify-content:center;
       padding: 18px;
-      background: rgba(0,0,0,.62);
-      backdrop-filter: blur(6px);
+      background: rgba(0,0,0,.04);
+      backdrop-filter: none;
       z-index: 10120;
       opacity:0;
-      transition: opacity .18s ease;
+      visibility:hidden;
+      pointer-events:none;
+      transition: opacity var(--modalFadeDur) var(--modalEase), visibility 0s linear var(--modalFadeDur);
     }
-    .modal.show{ display:flex; opacity:1; animation: modalFade .18s ease; }
-    .modal.show .modalBox{ opacity:1; transform: translateY(0) scale(1); }
+    .modal.open{
+      opacity:1;
+      visibility:visible;
+      pointer-events:auto;
+      transition: opacity var(--modalFadeDur) var(--modalEase), visibility 0s;
+    }
+    .modal.closing{
+      opacity:0;
+      visibility:visible;
+      pointer-events:none;
+    }
     .modalBox{
       width:min(520px, 100%);
       border-radius: 22px;
@@ -306,9 +322,13 @@
       background: rgba(10,12,20,.92);
       box-shadow: 0 20px 80px rgba(0,0,0,.55);
       padding: 18px;
-      transform: translateY(10px) scale(.985);
+      transform: translateY(18px) scale(.98);
       opacity:0;
-      transition: transform .18s ease, opacity .18s ease;
+      transition: transform var(--modalSlideDur) var(--modalEase), opacity var(--modalSlideDur) var(--modalEase);
+    }
+    .modal.open .modalBox{
+      opacity:1;
+      transform: translateY(0) scale(1);
     }
     .modalTitle{
       font-weight: 1000;
@@ -2951,10 +2971,36 @@ unmarkProducedCloud(it.key).then(() => {
 let pendingKey = null;
   let pendingLabelStatic = "";
 
+  function openModalEl(modal){
+    if(!modal) return;
+    modal.classList.remove("closing");
+    modal.classList.add("open");
+    modal.setAttribute("aria-hidden","false");
+  }
+
+  function closeModalEl(modal){
+    if(!modal) return;
+    if(!modal.classList.contains("open") && !modal.classList.contains("closing")) return;
+    modal.classList.remove("open");
+    modal.classList.add("closing");
+    modal.setAttribute("aria-hidden","true");
+  }
+
+  function initModalTransitions(){
+    document.querySelectorAll(".modal").forEach((modal) => {
+      modal.addEventListener("transitionend", (e) => {
+        if(e.target !== modal || e.propertyName !== "opacity") return;
+        if(modal.classList.contains("closing")) modal.classList.remove("closing");
+      });
+    });
+  }
+
+  initModalTransitions();
+
   function refreshQtyModalSub(){
     if(!pendingKey) return;
     const modal = document.getElementById("qtyModal");
-    if(!modal || !modal.classList.contains("show")) return;
+    if(!modal || !modal.classList.contains("open")) return;
     const sub = document.getElementById("qtyModalSub");
     if(!sub) return;
     let txt = pendingLabelStatic || "Riga selezionata";
@@ -2981,16 +3027,14 @@ let pendingKey = null;
     sub.textContent = pendingLabelStatic;
     input.value = "";
     try{ refreshQtyModalSub(); }catch(_){ }
-    modal.classList.add("show");
-    modal.setAttribute("aria-hidden","false");
+    openModalEl(modal);
 
     setTimeout(()=>{ input.focus(); input.select(); }, 40);
   }
 
   function closeModal(){
     const modal = document.getElementById("qtyModal");
-    modal.classList.remove("show");
-    modal.setAttribute("aria-hidden","true");
+    closeModalEl(modal);
     pendingKey = null;
     pendingLabelStatic = "";
   }
@@ -3185,7 +3229,7 @@ try{
 
   function _sigPointerDown(ev){
     if(!sigCanvasEl || !sigModalEl) return;
-    if(!sigModalEl.classList.contains("show")) return;
+    if(!sigModalEl.classList.contains("open")) return;
     ev.preventDefault?.();
 
     const p = _sigGetXY(ev);
@@ -3231,8 +3275,7 @@ try{
     _SIG.dirty = false;
     _SIG.drawing = false;
 
-    sigModalEl.classList.add("show");
-    sigModalEl.setAttribute("aria-hidden","false");
+    openModalEl(sigModalEl);
 
     // prepara canvas dopo render
     requestAnimationFrame(() => {
@@ -3243,8 +3286,7 @@ try{
 
   function closeSigModal(){
     if(!sigModalEl) return;
-    sigModalEl.classList.remove("show");
-    sigModalEl.setAttribute("aria-hidden","true");
+    closeModalEl(sigModalEl);
   }
 
   async function _sigFinalize(){
@@ -3359,14 +3401,12 @@ try{
       if(doneCopySigEl) doneCopySigEl.style.display = "none";
     }
 
-    doneModalEl.classList.add("show");
-    doneModalEl.setAttribute("aria-hidden","false");
+    openModalEl(doneModalEl);
   }
 
   function closeDoneModal(){
     if(!doneModalEl) return;
-    doneModalEl.classList.remove("show");
-    doneModalEl.setAttribute("aria-hidden","true");
+    closeModalEl(doneModalEl);
     window.__DONE_ITEM = null;
   }
 
@@ -4221,7 +4261,7 @@ async function refreshWeather(){
     function _scheduleCamRetry(reason){
       try{
         const camModal = document.getElementById("camViewModal");
-        if(!(camModal && camModal.classList.contains("show"))) return;
+        if(!(camModal && camModal.classList.contains("open"))) return;
       }catch(_e){}
 
       if(!IS_MOBILE) return;
@@ -4303,7 +4343,7 @@ async function refreshWeather(){
       // Lazy start: carica lo stream solo quando il popup telecamera è aperto
       try{
         const camModal = document.getElementById("camViewModal");
-        const isOpen = !!(camModal && camModal.classList.contains("show"));
+        const isOpen = !!(camModal && camModal.classList.contains("open"));
         if(!isOpen){
           // Assicura che non resti in riproduzione in background
           try{
@@ -4422,8 +4462,7 @@ async function refreshWeather(){
       if(in1) in1.value = cfg.embed || "";
       if(in2) in2.value = cfg.rtsp || "";
 
-      modal.classList.add("show");
-      modal.setAttribute("aria-hidden","false");
+      openModalEl(modal);
 
       requestAnimationFrame(() => { try{ (in1 || in2).focus(); }catch(_e){} });
     }
@@ -4431,8 +4470,7 @@ async function refreshWeather(){
     function _closeCamModal(){
       const modal = document.getElementById("camModal");
       if(!modal) return;
-      modal.classList.remove("show");
-      modal.setAttribute("aria-hidden","true");
+      closeModalEl(modal);
     }
 
     
@@ -4496,8 +4534,7 @@ async function refreshWeather(){
 
   function _openCamView(){
     if(!IS_MOBILE || !modal) return;
-    modal.classList.add("show");
-    modal.setAttribute("aria-hidden","false");
+    openModalEl(modal);
     try{ const ov=document.getElementById("mCamOverlay"); if(ov) ov.style.display=""; }catch(_e){}
 
     // Ruota la vista per ottenere un 9:16 naturale (senza bande nere)
@@ -4522,8 +4559,7 @@ async function refreshWeather(){
 
   function _closeCamView(){
     if(!modal) return;
-    modal.classList.remove("show");
-    modal.setAttribute("aria-hidden","true");
+    closeModalEl(modal);
 
     try{
       const body = document.getElementById("mCamBody");
@@ -4562,7 +4598,7 @@ async function refreshWeather(){
 
   document.addEventListener("keydown", (e) => {
     if(!e) return;
-    if(e.key === "Escape" && modal && modal.classList.contains("show")) _closeCamView();
+    if(e.key === "Escape" && modal && modal.classList.contains("open")) _closeCamView();
   });
 
   // Non aprire la telecamera se tocchi la rotella (impostazioni)
@@ -4575,10 +4611,10 @@ async function refreshWeather(){
 
   // Mantieni il 9:16 perfetto anche quando ruoti/sblocchi lo schermo
   window.addEventListener("resize", () => {
-    try{ if(modal && modal.classList.contains("show")) _fitCamStage(); }catch(_e){}
+    try{ if(modal && modal.classList.contains("open")) _fitCamStage(); }catch(_e){}
   }, { passive:true });
   window.addEventListener("orientationchange", () => {
-    setTimeout(() => { try{ if(modal && modal.classList.contains("show")) _fitCamStage(); }catch(_e){} }, 180);
+    setTimeout(() => { try{ if(modal && modal.classList.contains("open")) _fitCamStage(); }catch(_e){} }, 180);
   }, { passive:true });
 
   // Rotella dentro il popup full-screen
