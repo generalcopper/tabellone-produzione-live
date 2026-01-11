@@ -2381,15 +2381,46 @@ html, body{ overflow-x: hidden; }
   color: var(--muted);
   border-radius: 12px;
   cursor: pointer;
+  position: relative;
+  overflow: hidden;
+  transition: transform .12s ease, opacity .12s ease, filter .12s ease, background .12s ease, box-shadow .12s ease;
+  will-change: transform, opacity, filter, box-shadow;
+  touch-action: manipulation;
+}
+.mobileBottomNav .mobileNavItem > *{
+  position: relative;
+  z-index: 1;
+}
+.mobileBottomNav .mobileNavItem::after{
+  content: "";
+  position: absolute;
+  inset: 6px;
+  border-radius: 12px;
+  background: rgba(11,31,58,.18);
+  opacity: 0;
+  transition: opacity .12s ease;
 }
 .mobileBottomNav .mobileNavItem svg{
   width: 20px;
   height: 20px;
   fill: currentColor;
 }
-.mobileBottomNav .mobileNavItem.is-active{
+.mobileBottomNav .mobileNavItem.is-active,
+.mobileBottomNav .mobileNavItem.active{
   color: var(--accent);
   background: rgba(11,31,58,.08);
+}
+.mobileBottomNav .mobileNavItem:active,
+.mobileBottomNav .mobileNavItem.is-pressed{
+  transform: scale(.95);
+  opacity: .76;
+  filter: blur(.25px);
+  background: rgba(11,31,58,.14);
+  box-shadow: 0 6px 14px rgba(15,23,42,.16);
+}
+.mobileBottomNav .mobileNavItem:active::after,
+.mobileBottomNav .mobileNavItem.is-pressed::after{
+  opacity: 1;
 }
 @media (max-width: 768px){
   header.headerRow{
@@ -3269,7 +3300,7 @@ html, body{ overflow-x: hidden; }
   </div>
 
   <nav class="mobileBottomNav" aria-label="Navigazione mobile">
-    <button class="mobileNavItem is-active" id="navHome" type="button" data-target="menuGoHome" data-view="viewHome" aria-current="page">
+    <button class="mobileNavItem is-active active" id="navHome" type="button" data-target="menuGoHome" data-view="viewHome" aria-current="page">
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4l9 7h-3v9h-5v-6H11v6H6v-9H3l9-7z"/></svg>
       <span class="label">Home</span>
     </button>
@@ -3301,10 +3332,14 @@ html, body{ overflow-x: hidden; }
       if (!nav) return;
       var navItems = Array.from(nav.querySelectorAll('.mobileNavItem'));
       var lastInventoryNavId = 'navCerea';
+      function getInventoryView(){
+        return document.getElementById('viewInventory');
+      }
       function setActive(navId){
         navItems.forEach(function(btn){
           var isActive = btn.id === navId;
           btn.classList.toggle('is-active', isActive);
+          btn.classList.toggle('active', isActive);
           if (isActive){
             btn.setAttribute('aria-current', 'page');
           } else {
@@ -3312,11 +3347,30 @@ html, body{ overflow-x: hidden; }
           }
         });
       }
+      function getInventorySiteFromUI(){
+        var pill = document.getElementById('pillInvWarehouse');
+        var title = document.getElementById('invDetailTitle');
+        var text = '';
+        if (pill && pill.textContent) text = pill.textContent;
+        if (!text && title && title.textContent) text = title.textContent;
+        text = String(text || '').toLowerCase();
+        if (text.indexOf('conca') !== -1) return 'concamarise';
+        if (text.indexOf('cerea') !== -1) return 'cerea';
+        return '';
+      }
       function setActiveFromView(){
-        var activeView = document.querySelector('.view.active');
+        var activeOverlay = document.querySelector('.view.modalOverlay.active');
+        var activeView = activeOverlay || document.querySelector('#viewHome.view.active');
         if (!activeView) return;
         var viewId = activeView.id;
         if (viewId === 'viewInventory'){
+          var inventoryView = getInventoryView();
+          var inventorySite = (inventoryView && inventoryView.dataset.inventorySite) || getInventorySiteFromUI();
+          if (inventorySite === 'concamarise'){
+            lastInventoryNavId = 'navConcamarise';
+          } else if (inventorySite === 'cerea'){
+            lastInventoryNavId = 'navCerea';
+          }
           setActive(lastInventoryNavId);
           return;
         }
@@ -3329,6 +3383,42 @@ html, body{ overflow-x: hidden; }
           setActive(map[viewId]);
         }
       }
+      function setInventorySite(site){
+        var inventoryView = getInventoryView();
+        if (inventoryView){
+          inventoryView.dataset.inventorySite = site;
+        }
+        lastInventoryNavId = site === 'concamarise' ? 'navConcamarise' : 'navCerea';
+        setActive(lastInventoryNavId);
+      }
+      function bindInventoryPickerClick(){
+        document.addEventListener('click', function(event){
+          var target = event.target;
+          if (!target) return;
+          if (target.closest && target.closest('#btnPickCerea')){
+            setInventorySite('cerea');
+            return;
+          }
+          if (target.closest && target.closest('#btnPickConcamarise')){
+            setInventorySite('concamarise');
+            return;
+          }
+          if (target.closest && target.closest('#btnInvBackPicker')){
+            setActive(lastInventoryNavId);
+          }
+        });
+      }
+      function bindNavShortcut(triggerId, navId, inventorySite){
+        var trigger = document.getElementById(triggerId);
+        if (!trigger) return;
+        trigger.addEventListener('click', function(){
+          if (inventorySite){
+            setInventorySite(inventorySite);
+            return;
+          }
+          setActive(navId);
+        });
+      }
       navItems.forEach(function(btn){
         btn.addEventListener('click', function(){
           var targetId = btn.getAttribute('data-target');
@@ -3338,14 +3428,76 @@ html, body{ overflow-x: hidden; }
           }
           if (btn.getAttribute('data-view') === 'viewInventory'){
             lastInventoryNavId = btn.id;
+            setInventorySite(btn.id === 'navConcamarise' ? 'concamarise' : 'cerea');
+            return;
           }
           setActive(btn.id);
         });
       });
-      var observer = new MutationObserver(setActiveFromView);
-      document.querySelectorAll('.view').forEach(function(view){
-        observer.observe(view, { attributes: true, attributeFilter: ['class'] });
+      bindNavShortcut('menuGoHome', 'navHome');
+      bindNavShortcut('btnGoOcr', 'navOcr');
+      bindNavShortcut('menuGoOcr', 'navOcr');
+      bindNavShortcut('menuGoMovements', 'navMovements');
+      bindNavShortcut('menuGoInvCerea', 'navCerea', 'cerea');
+      bindNavShortcut('menuGoInvConcamarise', 'navConcamarise', 'concamarise');
+      bindNavShortcut('btnGoInvCerea', 'navCerea', 'cerea');
+      bindNavShortcut('btnGoInvConcamarise', 'navConcamarise', 'concamarise');
+
+      function attachPressFeedback(btn){
+        var pressTimer;
+        function clearPress(){
+          if (pressTimer){
+            clearTimeout(pressTimer);
+            pressTimer = null;
+          }
+          btn.classList.remove('is-pressed');
+        }
+        function setPress(){
+          btn.classList.add('is-pressed');
+          if (pressTimer) clearTimeout(pressTimer);
+          pressTimer = setTimeout(function(){
+            btn.classList.remove('is-pressed');
+            pressTimer = null;
+          }, 140);
+        }
+        if ('PointerEvent' in window){
+          btn.addEventListener('pointerdown', setPress, { passive: true });
+          btn.addEventListener('pointerup', clearPress);
+          btn.addEventListener('pointerleave', clearPress);
+          btn.addEventListener('pointercancel', clearPress);
+        } else {
+          btn.addEventListener('touchstart', setPress, { passive: true });
+          btn.addEventListener('touchend', clearPress);
+          btn.addEventListener('touchcancel', clearPress);
+        }
+        btn.addEventListener('blur', clearPress);
+      }
+      navItems.forEach(attachPressFeedback);
+      function observeViews(){
+        document.querySelectorAll('.view').forEach(function(view){
+          if (view.dataset.navObserved) return;
+          view.dataset.navObserved = '1';
+          observer.observe(view, { attributes: true, attributeFilter: ['class'] });
+        });
+      }
+      function observeInventoryLabels(){
+        var pill = document.getElementById('pillInvWarehouse');
+        var title = document.getElementById('invDetailTitle');
+        [pill, title].forEach(function(el){
+          if (!el || el.dataset.navObserved) return;
+          el.dataset.navObserved = '1';
+          observer.observe(el, { childList: true, subtree: true, characterData: true });
+        });
+      }
+      var observer = new MutationObserver(function(){
+        observeViews();
+        observeInventoryLabels();
+        setActiveFromView();
       });
+      observer.observe(document.body, { childList: true, subtree: true });
+      observeViews();
+      observeInventoryLabels();
+      bindInventoryPickerClick();
       setActiveFromView();
     })();
   </script>
