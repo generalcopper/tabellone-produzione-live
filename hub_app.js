@@ -7469,7 +7469,7 @@ try{
         const contacts = [s.phone, s.email].filter(Boolean).map(x => escapeHtml(x)).join("<br>") || '<span class="td-muted">—</span>';
 
         return `
-          <tr>
+          <tr data-supplier-id="${escapeHtmlAttr(s.id)}">
             <td data-label="Nome"><strong>${name}</strong></td>
             <td data-label="P.IVA">${vat}</td>
             <td data-label="Città">${city}</td>
@@ -9791,6 +9791,14 @@ async function handleFileSelection(fileList) {
     // Table actions (delegation)
     if (anagTbody) {
       anagTbody.addEventListener("click", (e) => {
+        if (activeAnagTab === "suppliers") {
+          const tr = e.target && e.target.closest ? e.target.closest("tr[data-supplier-id]") : null;
+          const id = tr ? tr.getAttribute("data-supplier-id") : "";
+          if (id) {
+            openSupplierModal(id);
+            return;
+          }
+        }
         // Click riga (prodotti): apri dettaglio prodotto (stesso modale Inventario)
         if (activeAnagTab === "products") {
           const tr = e.target && e.target.closest ? e.target.closest("tr[data-pg]") : null;
