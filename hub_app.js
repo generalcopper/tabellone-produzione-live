@@ -4886,6 +4886,9 @@ async function deleteMovement(id) {
         const y = pad.top + spanY - (ratio / (max - min)) * spanY;
         return { x, y, row };
       });
+      const linePath = buildSmoothPath(points);
+      const areaBaseY = pad.top + spanY;
+      const areaPath = `${linePath} L ${points[points.length - 1].x} ${areaBaseY} L ${points[0].x} ${areaBaseY} Z`;
 
       const grid = document.createElementNS(svgNS, "g");
       grid.setAttribute("class", "trendGrid");
@@ -4901,9 +4904,14 @@ async function deleteMovement(id) {
       }
       invTrendChart.appendChild(grid);
 
+      const area = document.createElementNS(svgNS, "path");
+      area.setAttribute("class", "trendArea");
+      area.setAttribute("d", areaPath);
+      invTrendChart.appendChild(area);
+
       const path = document.createElementNS(svgNS, "path");
       path.setAttribute("class", "trendLine");
-      path.setAttribute("d", buildSmoothPath(points));
+      path.setAttribute("d", linePath);
       invTrendChart.appendChild(path);
 
       try{
