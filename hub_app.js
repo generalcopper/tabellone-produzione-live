@@ -483,6 +483,13 @@
         <button class="btn btn-secondary" id="btnFlowsExport" type="button">Esporta CSV</button>
       </div>
 
+      <div class="inlineRow listStickyBar" style="justify-content:space-between; align-items:flex-end; gap:12px; margin-top: 10px;">
+        <div class="field" style="flex: 1 1 auto; min-width: 220px;">
+          <label for="flowsSearch">Cerca</label>
+          <input id="flowsSearch" placeholder="Documento, fornitore, data…" />
+        </div>
+      </div>
+
       <div class="tableWrap" style="max-height: 520px; overflow:auto; margin-top: 10px;">
         <table class="dataGrid">
           <thead>
@@ -2122,6 +2129,7 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
     const stockTbody = document.getElementById("stockTbody");
     const movTbody = document.getElementById("movTbody");
     const flowsTbody = document.getElementById("flowsTbody");
+    const flowsSearch = document.getElementById("flowsSearch");
     const pillFlowsCount = document.getElementById("pillFlowsCount");
     const pillStock = document.getElementById("pillStock");
     const pillInvWarehouse = document.getElementById("pillInvWarehouse");
@@ -7214,16 +7222,32 @@ let __stockRowByKey = new Map();
     function renderFlowsTable() {
       if (!flowsTbody) return;
       const max = Math.max(10, Math.floor(Number(state.settings.maxRecent) || 50));
-      const docs = (__docGroups || []).slice(0, max);
+      const allDocs = (__docGroups || []);
+      const docs = allDocs.slice(0, max);
+      const qRaw = (flowsSearch && flowsSearch.value || "").trim();
+      const q = normTextKey(qRaw);
+      const filteredDocs = q
+        ? docs.filter((g) => {
+            const label = normTextKey(formatDocLabel(g));
+            const customer = normTextKey(g.customer || "");
+            const note = normTextKey(g.note || g.notes || g.ocrText || g.text || "");
+            return label.includes(q) || customer.includes(q) || note.includes(q);
+          })
+        : docs;
 
       if (pillFlowsCount) pillFlowsCount.textContent = String((__docGroups || []).length);
 
-      if (docs.length === 0) {
+      if (allDocs.length === 0) {
         flowsTbody.innerHTML = '<tr><td class="td-muted" colspan="4">Nessun flusso ancora.</td></tr>';
         return;
       }
 
-      flowsTbody.innerHTML = docs.map(g => {
+      if (filteredDocs.length === 0) {
+        flowsTbody.innerHTML = '<tr><td class="td-muted" colspan="4">Nessun flusso trovato.</td></tr>';
+        return;
+      }
+
+      flowsTbody.innerHTML = filteredDocs.map(g => {
         const label = formatDocLabel(g);
         const lines = (g.movements || []).length;
         const pieces = (g.movements || []).reduce((sum, mv) => sum + safeInt(mv.qty), 0);
@@ -10594,7 +10618,8 @@ if (modalFlowEdit) {
     // Gestionale actions
     const btnRecalc = document.getElementById("btnRecalc");
     if (btnRecalc) btnRecalc.addEventListener("click", () => renderAll());
-searchStock.addEventListener("input", () => renderAll());
+    if (flowsSearch) flowsSearch.addEventListener("input", () => renderFlowsTable());
+    searchStock.addEventListener("input", () => renderAll());
     filterCustomer.addEventListener("change", () => renderAll());
     filterLow.addEventListener("change", () => renderAll());
     if (filterCategory) filterCategory.addEventListener("change", () => renderAll());
