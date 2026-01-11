@@ -4820,13 +4820,12 @@ async function deleteMovement(id) {
         const max = Math.max(1, ...list.map(x => Math.max(0, Number(x.qty) || 0)));
         categoryListCerea.innerHTML = list.map(item => {
           const pct = Math.max(0, Math.min(100, Math.round((Math.max(0, Number(item.qty)||0) / max) * 100)));
-          const col = __isHexColor(item.color) ? item.color : "";
-          const fillStyle = col ? `background:${escapeHtmlAttr(col)};` : "";
+          const fillStyle = `--pct:${pct};`;
           return `
             <div class="categoryRow">
               <div class="categoryName">${escapeHtml(item.name || item.key || "")}</div>
               <div class="categoryTrack">
-                <div class="categoryFill" style="width:${pct}%; ${fillStyle}"></div>
+                <div class="categoryFill" style="${fillStyle}"></div>
               </div>
               <div class="categoryValue">${Number(item.qty||0).toLocaleString("it-IT")}</div>
             </div>
