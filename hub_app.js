@@ -2111,6 +2111,10 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
     const catQtyBoard = document.getElementById("catQtyBoard");
     const catQtyList = document.getElementById("catQtyList");
     const catQtyMeta = document.getElementById("catQtyMeta");
+    const invTrendTotal = document.getElementById("invTrendTotal");
+    const invTrendChart = document.getElementById("invTrendChart");
+    const invTrendTooltip = document.getElementById("invTrendTooltip");
+    const invTrendRanges = document.getElementById("invTrendRanges");
 
 
     const stockTbody = document.getElementById("stockTbody");
@@ -4742,6 +4746,220 @@ async function deleteMovement(id) {
       return { animate, setNow };
     })();
 
+    let __invTrendRange = "30";
+    let __invTrendHistory = [];
+
+    function getLocalISODate(){
+      try{
+        const d = new Date();
+        const y = d.getFullYear();
+        const m = String(d.getMonth() + 1).padStart(2, "0");
+        const day = String(d.getDate()).padStart(2, "0");
+        return `${y}-${m}-${day}`;
+      }catch(_){
+        return new Date().toISOString().slice(0, 10);
+      }
+    }
+
+    function readInvTotalHistory(){
+      try{
+        const raw = localStorage.getItem("invTotalHistory");
+        const list = raw ? JSON.parse(raw) : [];
+        return Array.isArray(list) ? list : [];
+      }catch(_){
+        return [];
+      }
+    }
+
+    function writeInvTotalHistory(list){
+      try{
+        localStorage.setItem("invTotalHistory", JSON.stringify(list || []));
+      }catch(_){}
+    }
+
+    function normalizeInvHistory(list){
+      const cleaned = (Array.isArray(list) ? list : []).filter((row) => row && row.date);
+      cleaned.sort((a,b) => String(a.date || "").localeCompare(String(b.date || "")));
+      return cleaned;
+    }
+
+    function updateInvTotalHistory(total){
+      const today = getLocalISODate();
+      let list = normalizeInvHistory(readInvTotalHistory());
+      const totalNum = Number(total) || 0;
+      let updated = false;
+      list = list.map((row) => {
+        if (row && row.date === today){
+          updated = true;
+          return { date: today, total: totalNum };
+        }
+        return row;
+      });
+      if (!updated){
+        list.push({ date: today, total: totalNum });
+        list = normalizeInvHistory(list);
+      }
+      if (list.length > 180){
+        list = list.slice(list.length - 180);
+      }
+      writeInvTotalHistory(list);
+      return list;
+    }
+
+    function setInvTrendRange(range){
+      __invTrendRange = String(range || "30");
+      try{ localStorage.setItem("invTotalHistoryRange", __invTrendRange); }catch(_){}
+      if (invTrendRanges){
+        invTrendRanges.querySelectorAll(".trendRangeBtn").forEach((btn) => {
+          const isActive = String(btn.dataset.range || "") === __invTrendRange;
+          btn.classList.toggle("is-active", isActive);
+        });
+      }
+      renderInvTrendChart(__invTrendHistory);
+    }
+
+    function buildSmoothPath(points){
+      if (!points.length) return "";
+      if (points.length === 1){
+        const p = points[0];
+        return `M ${p.x} ${p.y}`;
+      }
+      let d = `M ${points[0].x} ${points[0].y}`;
+      for (let i = 0; i < points.length - 1; i++){
+        const p0 = points[i - 1] || points[i];
+        const p1 = points[i];
+        const p2 = points[i + 1];
+        const p3 = points[i + 2] || p2;
+        const c1x = p1.x + (p2.x - p0.x) / 6;
+        const c1y = p1.y + (p2.y - p0.y) / 6;
+        const c2x = p2.x - (p3.x - p1.x) / 6;
+        const c2y = p2.y - (p3.y - p1.y) / 6;
+        d += ` C ${c1x} ${c1y} ${c2x} ${c2y} ${p2.x} ${p2.y}`;
+      }
+      return d;
+    }
+
+    function renderInvTrendChart(list){
+      if (!invTrendChart) return;
+      const svgNS = "http://www.w3.org/2000/svg";
+      const width = 480;
+      const height = 180;
+      const pad = { top: 16, right: 18, bottom: 22, left: 32 };
+      invTrendChart.innerHTML = "";
+      if (invTrendTooltip){
+        invTrendTooltip.classList.remove("is-visible");
+        invTrendTooltip.setAttribute("aria-hidden", "true");
+      }
+
+      const history = Array.isArray(list) ? list : [];
+      let slice = history.slice();
+      if (__invTrendRange !== "all"){
+        const days = Math.max(1, Number(__invTrendRange) || 0);
+        if (days > 0) slice = slice.slice(Math.max(0, slice.length - days));
+      }
+
+      if (!slice.length){
+        const text = document.createElementNS(svgNS, "text");
+        text.setAttribute("x", width / 2);
+        text.setAttribute("y", height / 2);
+        text.setAttribute("text-anchor", "middle");
+        text.setAttribute("fill", "rgba(0,0,0,.45)");
+        text.setAttribute("font-size", "12");
+        text.textContent = "Nessun dato storico.";
+        invTrendChart.appendChild(text);
+        return;
+      }
+
+      const values = slice.map((row) => Number(row.total) || 0);
+      const min = Math.min.apply(null, values);
+      const maxRaw = Math.max.apply(null, values);
+      const max = maxRaw === min ? min + 1 : maxRaw;
+      const n = slice.length;
+      const spanX = width - pad.left - pad.right;
+      const spanY = height - pad.top - pad.bottom;
+
+      const points = slice.map((row, i) => {
+        const x = pad.left + (n === 1 ? spanX / 2 : (spanX * i) / (n - 1));
+        const ratio = (Number(row.total) || 0) - min;
+        const y = pad.top + spanY - (ratio / (max - min)) * spanY;
+        return { x, y, row };
+      });
+
+      const grid = document.createElementNS(svgNS, "g");
+      grid.setAttribute("class", "trendGrid");
+      const gridLines = 4;
+      for (let i = 0; i <= gridLines; i++){
+        const gy = pad.top + (spanY * i) / gridLines;
+        const line = document.createElementNS(svgNS, "line");
+        line.setAttribute("x1", pad.left);
+        line.setAttribute("x2", width - pad.right);
+        line.setAttribute("y1", gy);
+        line.setAttribute("y2", gy);
+        grid.appendChild(line);
+      }
+      invTrendChart.appendChild(grid);
+
+      const path = document.createElementNS(svgNS, "path");
+      path.setAttribute("class", "trendLine");
+      path.setAttribute("d", buildSmoothPath(points));
+      invTrendChart.appendChild(path);
+
+      try{
+        const length = path.getTotalLength();
+        path.style.strokeDasharray = String(length);
+        path.style.strokeDashoffset = String(length);
+        path.classList.remove("animate");
+        void path.getBoundingClientRect();
+        path.classList.add("animate");
+      }catch(_){}
+
+      points.forEach((pt) => {
+        const dot = document.createElementNS(svgNS, "circle");
+        dot.setAttribute("class", "trendDot");
+        dot.setAttribute("cx", pt.x);
+        dot.setAttribute("cy", pt.y);
+        dot.setAttribute("r", "3");
+        dot.dataset.date = String(pt.row.date || "");
+        dot.dataset.total = String(pt.row.total || 0);
+        dot.addEventListener("pointerenter", (event) => {
+          if (!invTrendTooltip) return;
+          const dateLabel = pt.row.date ? formatDateIT(pt.row.date) : pt.row.date;
+          const totalLabel = (Number(pt.row.total) || 0).toLocaleString("it-IT");
+          invTrendTooltip.innerHTML = `${dateLabel} · ${totalLabel}`;
+          invTrendTooltip.classList.add("is-visible");
+          invTrendTooltip.setAttribute("aria-hidden", "false");
+          positionTrendTooltip(event);
+        });
+        dot.addEventListener("pointermove", positionTrendTooltip);
+        dot.addEventListener("pointerleave", () => {
+          if (!invTrendTooltip) return;
+          invTrendTooltip.classList.remove("is-visible");
+          invTrendTooltip.setAttribute("aria-hidden", "true");
+        });
+        invTrendChart.appendChild(dot);
+      });
+
+      function positionTrendTooltip(event){
+        if (!invTrendTooltip || !event) return;
+        const rect = invTrendChart.getBoundingClientRect();
+        const x = event.clientX - rect.left;
+        const y = event.clientY - rect.top;
+        invTrendTooltip.style.left = `${x}px`;
+        invTrendTooltip.style.top = `${y - 10}px`;
+      }
+    }
+
+    try{
+      const savedRange = localStorage.getItem("invTotalHistoryRange");
+      if (savedRange) __invTrendRange = savedRange;
+    }catch(_){}
+    if (invTrendRanges){
+      invTrendRanges.querySelectorAll(".trendRangeBtn").forEach((btn) => {
+        btn.addEventListener("click", () => setInvTrendRange(btn.dataset.range || "30"));
+      });
+      setInvTrendRange(__invTrendRange);
+    }
+
     function renderStats(stockArr) {
       const items = stockArr.length;
       const totalPieces = stockArr.reduce((sum, x) => sum + (Number(x.qty) || 0), 0);
@@ -4768,6 +4986,12 @@ async function deleteMovement(id) {
       if (typeof statTotalFlows !== "undefined" && statTotalFlows) __counterAnim.animate(statTotalFlows, docsCount);
       __counterAnim.animate(statLowStock, low);
       statLastUpdate.textContent = last ? formatDateIT(last.createdAt) : "—";
+
+      if (invTrendTotal) invTrendTotal.textContent = totalPieces.toLocaleString("it-IT");
+      if (invTrendChart) {
+        __invTrendHistory = updateInvTotalHistory(totalPieces);
+        renderInvTrendChart(__invTrendHistory);
+      }
     }
 
 
