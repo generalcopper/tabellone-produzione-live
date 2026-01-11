@@ -1920,6 +1920,8 @@ const docDetailPhotosMeta = document.getElementById("docDetailPhotosMeta");
 
     document.getElementById("btnGoOcr")?.addEventListener("click", startHomeOcr);
     document.getElementById("btnGoFlows")?.addEventListener("click", () => { setView("flows"); try{ renderFlowsTable(); }catch(_){ } });
+    document.getElementById("btnGoMovements")?.addEventListener("click", () => { setView("movements"); try{ window.HubMovements && window.HubMovements.refresh && window.HubMovements.refresh(); }catch(_){ } });
+    document.getElementById("btnGoCategories")?.addEventListener("click", () => { document.getElementById("menuGoCategories")?.click(); });
     document.getElementById("btnCloseInv")?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
     // Close inventario anche con tap/click sul backdrop
     document.getElementById("viewInventory")?.addEventListener("click", (e) => { try{ if (e.target === e.currentTarget) setView("home"); }catch(_){ } });
