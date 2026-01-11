@@ -4818,19 +4818,34 @@ async function deleteMovement(id) {
         }
 
         const max = Math.max(1, ...list.map(x => Math.max(0, Number(x.qty) || 0)));
-        categoryListCerea.innerHTML = list.map(item => {
-          const pct = Math.max(0, Math.min(100, Math.round((Math.max(0, Number(item.qty)||0) / max) * 100)));
-          const fillStyle = `--pct:${pct};`;
+
+        // Render come grafico a barre (etichette in basso) — più leggibile del micro-vertical-track
+        try{ categoryListCerea.classList.add("isChart"); }catch(_){}
+        const fmt = (n) => Number(n || 0).toLocaleString("it-IT");
+
+        const barsHtml = list.map(item => {
+          const qty = Math.max(0, Number(item.qty) || 0);
+          let pct = Math.round((qty / max) * 100);
+          // Evita barre quasi invisibili: se qty>0, min 3%
+          pct = Math.max(qty > 0 ? 3 : 0, Math.min(100, pct));
+
+          const name = escapeHtml(item.name || item.key || "");
+          const col = (__isHexColor(item.color) ? String(item.color) : "");
+          const barColor = col || "#1c6fe6";
+          const title = escapeHtmlAttr(`${String(item.name || item.key || "").trim()}: ${fmt(qty)}`);
+
           return `
-            <div class="categoryRow">
-              <div class="categoryName">${escapeHtml(item.name || item.key || "")}</div>
-              <div class="categoryTrack">
-                <div class="categoryFill" style="${fillStyle}"></div>
+            <div class="catBar" title="${title}">
+              <div class="catBarVal">${fmt(qty)}</div>
+              <div class="catBarTrack" aria-hidden="true">
+                <div class="catBarFill" style="height:${pct}%; background:${barColor};"></div>
               </div>
-              <div class="categoryValue">${Number(item.qty||0).toLocaleString("it-IT")}</div>
+              <div class="catBarLabel">${name || "—"}</div>
             </div>
           `;
         }).join("");
+
+        categoryListCerea.innerHTML = `<div class="catChart" role="img" aria-label="Quantità per categoria (Cerea)">${barsHtml}</div>`;
       }catch(e){
         console.warn("renderCategoryBoardCerea failed", e);
       }
@@ -5070,7 +5085,8 @@ async function deleteMovement(id) {
 
       // viewbox dims
       const W = 480, H = 180;
-      const padX = 14, padTop = 12, padBot = 16;
+      // padding più ampio per una resa più "HD" (linea + punti più grandi)
+      const padX = 16, padTop = 14, padBot = 22;
 
       const values = pts.map(p => Number(p.value) || 0);
       let vMin = Math.min(...values);
@@ -5112,8 +5128,8 @@ async function deleteMovement(id) {
       invTrendChart.innerHTML = `
         <g class="trendGrid">${gridLines.join("")}</g>
         <path class="trendLine" d="${d}"></path>
-        <circle class="trendDot" cx="${last.x.toFixed(2)}" cy="${last.y.toFixed(2)}" r="4.2"></circle>
-        <circle class="trendDot trendDotFocus" cx="${last.x.toFixed(2)}" cy="${last.y.toFixed(2)}" r="5.0" style="opacity:0;"></circle>
+        <circle class="trendDot" cx="${last.x.toFixed(2)}" cy="${last.y.toFixed(2)}" r="5.4"></circle>
+        <circle class="trendDot trendDotFocus" cx="${last.x.toFixed(2)}" cy="${last.y.toFixed(2)}" r="6.6" style="opacity:0;"></circle>
       `;
 
       // Animate line draw (only if motion allowed)
