@@ -1658,8 +1658,54 @@ input, textarea, select,
   font-weight: 850;
   color: var(--muted);
 }
+.categoryBoard{
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.categoryRow{
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) minmax(120px, 2.2fr) auto;
+  align-items: center;
+  gap: 10px;
+  font-variant-numeric: tabular-nums;
+}
+.categoryName{
+  font-size: 13px;
+  font-weight: 850;
+  color: rgba(0,0,0,.86);
+  overflow-wrap: anywhere;
+}
+.categoryTrack{
+  position: relative;
+  height: 8px;
+  background: rgba(0,0,0,.08);
+  border-radius: 1px;
+  overflow: hidden;
+}
+.categoryFill{
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 0%;
+  background: rgba(10,132,255,.7);
+  border-radius: 1px;
+}
+.categoryValue{
+  font-size: 13px;
+  font-weight: 900;
+  color: rgba(0,0,0,.84);
+  text-align: right;
+  min-width: 56px;
+}
+.categoryPlaceholder{
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--muted);
+}
 @media (max-width: 720px){
   .lowStockBoard{ grid-template-columns: 1fr; }
+  .categoryRow{ grid-template-columns: 1fr; gap: 6px; align-items: start; }
+  .categoryValue{ text-align: left; }
 }
 
 /* Liste documenti (Movimenti recenti / Flussi) */
@@ -2617,6 +2663,15 @@ html, body{ overflow-x: hidden; }
                   </div>
                   <div class="lowStockList" id="lowStockListCerea">
                     <div class="td-muted">—</div>
+                  </div>
+                </div>
+                <div class="lowStockCol" id="categoryCardCerea">
+                  <div class="lowStockColHd">
+                    <div class="hero-sub">Categorie</div>
+                    <span class="pill" id="categoryTotalCerea">0</span>
+                  </div>
+                  <div class="categoryBoard" id="categoryListCerea">
+                    <div class="categoryPlaceholder">Nessuna categoria disponibile</div>
                   </div>
                 </div>
                 <div class="lowStockCol">
@@ -3670,6 +3725,138 @@ html, body{ overflow-x: hidden; }
     loadAll(0);
   })();
   
+</script>
+
+<script>
+(function(){
+  var listEl = document.getElementById("categoryListCerea");
+  var totalEl = document.getElementById("categoryTotalCerea");
+  if (!listEl) return;
+
+  function normalizeWarehouseName(hub, raw){
+    try{
+      if (hub && typeof hub.normalizeWarehouse === "function") {
+        return hub.normalizeWarehouse(raw || "");
+      }
+    }catch(_){}
+    return String(raw || "").trim().toLowerCase();
+  }
+
+  function getCategoryMeta(hub){
+    var cats = [];
+    try{
+      cats = (hub && typeof hub.getCategories === "function") ? hub.getCategories() : [];
+    }catch(_){}
+    var map = new Map();
+    cats.forEach(function(c){
+      if (!c) return;
+      var key = String(c.key || "").trim().toLowerCase();
+      if (!key) return;
+      map.set(key, {
+        name: String(c.name || key).trim(),
+        color: String(c.color || "").trim()
+      });
+    });
+    return map;
+  }
+
+  function safeCssColor(value){
+    var s = String(value || "").trim();
+    return /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(s) ? s : "";
+  }
+
+  function renderCategoryCard(){
+    var hub = window.HubInv;
+    if (!hub || !hub.state || !Array.isArray(hub.state.movements)) return;
+
+    var safeInt = (typeof hub.safeInt === "function") ? hub.safeInt : function(v){ return parseInt(v, 10) || 0; };
+    var getCatKey = (typeof hub.getMacroCategoryForCode === "function") ? hub.getMacroCategoryForCode : function(){ return ""; };
+    var catMeta = getCategoryMeta(hub);
+
+    var codeTotals = new Map();
+    hub.state.movements.forEach(function(mv){
+      if (!mv) return;
+      var wh = normalizeWarehouseName(hub, mv.warehouse || mv.site || mv.magazzino || mv.location || "");
+      if (wh !== "cerea") return;
+      var code = String(mv.code || "").trim();
+      if (!code) return;
+      var key = code.toLowerCase();
+      var qty = safeInt(mv.qty);
+      if (String(mv.type || "").toUpperCase() === "OUT") qty = -qty;
+      codeTotals.set(key, (codeTotals.get(key) || 0) + qty);
+    });
+
+    var catTotals = new Map();
+    codeTotals.forEach(function(qty, code){
+      var catKey = String(getCatKey(code) || "").trim().toLowerCase();
+      if (!catKey) catKey = "non_classificati";
+      catTotals.set(catKey, (catTotals.get(catKey) || 0) + (Number(qty) || 0));
+    });
+
+    var list = Array.from(catTotals.entries()).map(function(entry){
+      var key = entry[0];
+      var qty = Number(entry[1]) || 0;
+      var meta = catMeta.get(key) || { name: key, color: "" };
+      return {
+        key: key,
+        name: meta.name || key,
+        color: meta.color || "",
+        qty: qty
+      };
+    });
+
+    list.sort(function(a, b){ return (Number(b.qty) || 0) - (Number(a.qty) || 0); });
+
+    var total = list.reduce(function(sum, item){ return sum + (Number(item.qty) || 0); }, 0);
+    if (totalEl) totalEl.textContent = total ? Number(total).toLocaleString("it-IT") : "0";
+
+    if (!list.length) {
+      listEl.innerHTML = '<div class="categoryPlaceholder">Nessuna categoria disponibile</div>';
+      return;
+    }
+
+    var max = Math.max.apply(null, list.map(function(item){ return Math.max(0, Number(item.qty) || 0); }).concat([1]));
+
+    listEl.innerHTML = list.map(function(item){
+      var pct = Math.max(0, Math.min(100, Math.round((Math.max(0, item.qty) / max) * 100)));
+      var fillColor = safeCssColor(item.color);
+      var fillStyle = fillColor ? ('background:' + fillColor + ';') : '';
+      var safeName = String(item.name || item.key).replace(/[&<>"']/g, function(c){
+        return ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" })[c];
+      });
+      return '' +
+        '<div class="categoryRow">' +
+          '<div class="categoryName">' + safeName + '</div>' +
+          '<div class="categoryTrack">' +
+            '<div class="categoryFill" style="width:' + pct + '%;' + fillStyle + '"></div>' +
+          '</div>' +
+          '<div class="categoryValue">' + Number(item.qty || 0).toLocaleString("it-IT") + '</div>' +
+        '</div>';
+    }).join("");
+  }
+
+  function hookHubReady(){
+    var hub = window.HubInv;
+    if (!hub || typeof hub.renderAll !== "function") return false;
+    if (hub.__categoryCardHooked) return true;
+    hub.__categoryCardHooked = true;
+    var original = hub.renderAll;
+    hub.renderAll = function(){
+      var res = original.apply(this, arguments);
+      try{ renderCategoryCard(); }catch(_){}
+      return res;
+    };
+    try{ renderCategoryCard(); }catch(_){}
+    return true;
+  }
+
+  if (!hookHubReady()) {
+    window.addEventListener("HubInvReady", function(){
+      hookHubReady();
+      renderCategoryCard();
+    }, { once: true });
+  }
+})();
 </script>
 
 </body>
