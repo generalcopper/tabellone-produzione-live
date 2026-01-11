@@ -4826,12 +4826,23 @@ async function deleteMovement(id) {
             <div class="categoryRow">
               <div class="categoryName">${escapeHtml(item.name || item.key || "")}</div>
               <div class="categoryTrack">
-                <div class="categoryFill" style="width:${pct}%; ${fillStyle}"></div>
+                <div class="categoryFill" data-pct="${pct}" style="width:0%; ${fillStyle}"></div>
               </div>
               <div class="categoryValue">${Number(item.qty||0).toLocaleString("it-IT")}</div>
             </div>
           `;
         }).join("");
+
+        if (__invTrendPrefersReducedMotion()) return;
+        try {
+          const fills = Array.from(categoryListCerea.querySelectorAll(".categoryFill"));
+          requestAnimationFrame(() => {
+            fills.forEach(fill => {
+              const pct = String(fill.getAttribute("data-pct") || "0");
+              fill.style.width = pct + "%";
+            });
+          });
+        } catch (_) {}
       }catch(e){
         console.warn("renderCategoryBoardCerea failed", e);
       }
