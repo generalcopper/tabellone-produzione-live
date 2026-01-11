@@ -1106,61 +1106,81 @@ input, textarea, select,
 }
 .view.modalOverlay.active{ display: block !important; }
 
-/* Apertura/chiusura modali: leggermente più lenta (stile gestionale) */
+/* Apertura/chiusura modali: stile app (overlay istantaneo, micro-animazione) */
 :root{
-  --modalFadeDur: 220ms;
-  --modalPopDur: 260ms;
+  --modalEnterDur: 160ms;
+  --modalExitDur: 140ms;
+  --modalEaseOut: cubic-bezier(.22,.61,.36,1);
+  --modalEaseIn: cubic-bezier(.4,0,.6,1);
 }
 
 /* Overlay-view (schermate) */
 .view.modalOverlay{
-  display: block !important; /* serve per animare (niente display:none) */
+  display: block !important;
   opacity: 0;
   visibility: hidden;
   pointer-events: none;
-  transition: opacity var(--modalFadeDur) ease, visibility 0s linear var(--modalFadeDur);
 }
-.view.modalOverlay.active{
+.view.modalOverlay.is-open,
+.view.modalOverlay.is-closing{
   opacity: 1;
   visibility: visible;
+}
+.view.modalOverlay.is-open{
   pointer-events: auto;
-  transition: opacity var(--modalFadeDur) ease, visibility 0s;
+}
+.view.modalOverlay.is-closing{
+  pointer-events: none;
 }
 .view.modalOverlay > article.card{
-  transform: translateY(12px);
-  opacity: .98;
-  transition: transform var(--modalPopDur) ease, opacity var(--modalPopDur) ease;
+  transform: scale(.98);
+  opacity: 0;
   will-change: transform, opacity;
 }
-.view.modalOverlay.active > article.card{
-  transform: translateY(0);
+.view.modalOverlay.is-open > article.card{
+  transform: scale(1);
   opacity: 1;
+  transition: transform var(--modalEnterDur) var(--modalEaseOut), opacity var(--modalEnterDur) var(--modalEaseOut);
+}
+.view.modalOverlay.is-closing > article.card{
+  transform: scale(.98);
+  opacity: 0;
+  transition: transform var(--modalExitDur) var(--modalEaseIn), opacity var(--modalExitDur) var(--modalEaseIn);
 }
 
 /* Modali classici */
 .modal{
-  display: flex !important; /* serve per animare (niente display:none) */
+  display: flex !important;
   opacity: 0;
   visibility: hidden;
   pointer-events: none;
-  transition: opacity var(--modalFadeDur) ease, visibility 0s linear var(--modalFadeDur);
   will-change: opacity;
 }
-.modal.open{
+.modal.is-open,
+.modal.is-closing{
   opacity: 1;
   visibility: visible;
+}
+.modal.is-open{
   pointer-events: auto;
-  transition: opacity var(--modalFadeDur) ease, visibility 0s;
+}
+.modal.is-closing{
+  pointer-events: none;
 }
 .modalContent{
-  transform: translateY(10px) scale(.99);
-  opacity: .98;
-  transition: transform var(--modalPopDur) ease, opacity var(--modalPopDur) ease;
+  transform: scale(.98);
+  opacity: 0;
   will-change: transform, opacity;
 }
-.modal.open .modalContent{
-  transform: translateY(0) scale(1);
+.modal.is-open .modalContent{
+  transform: scale(1);
   opacity: 1;
+  transition: transform var(--modalEnterDur) var(--modalEaseOut), opacity var(--modalEnterDur) var(--modalEaseOut);
+}
+.modal.is-closing .modalContent{
+  transform: scale(.98);
+  opacity: 0;
+  transition: transform var(--modalExitDur) var(--modalEaseIn), opacity var(--modalExitDur) var(--modalEaseIn);
 }
 
 .view.modalOverlay > article.card{
@@ -3642,6 +3662,71 @@ html, body{ overflow-x: hidden; }
     loadAll(0);
   })();
   
+</script>
+<script>
+  (function(){
+    var closeTimers = new WeakMap();
+    function parseDuration(value, fallback){
+      if (!value) return fallback;
+      var trimmed = String(value).trim();
+      if (trimmed.endsWith('ms')) return parseFloat(trimmed);
+      if (trimmed.endsWith('s')) return parseFloat(trimmed) * 1000;
+      var num = parseFloat(trimmed);
+      return Number.isFinite(num) ? num : fallback;
+    }
+    function getDuration(varName, fallback){
+      var value = getComputedStyle(document.documentElement).getPropertyValue(varName);
+      return parseDuration(value, fallback);
+    }
+    function clearCloseTimer(el){
+      var timer = closeTimers.get(el);
+      if (timer){
+        clearTimeout(timer);
+        closeTimers.delete(el);
+      }
+    }
+    function updateBodyScroll(){
+      var anyOpen = document.querySelector('.modal.is-open, .modal.is-closing, .view.modalOverlay.is-open, .view.modalOverlay.is-closing');
+      document.documentElement.classList.toggle('modal-open', !!anyOpen);
+      document.body.classList.toggle('modal-open', !!anyOpen);
+    }
+    function syncElement(el){
+      var shouldOpen = el.classList.contains('open') || el.classList.contains('active');
+      if (shouldOpen){
+        clearCloseTimer(el);
+        el.classList.remove('is-closing');
+        el.classList.add('is-open');
+      } else if (el.classList.contains('is-open')){
+        var exitDuration = getDuration('--modalExitDur', 140);
+        el.classList.remove('is-open');
+        el.classList.add('is-closing');
+        clearCloseTimer(el);
+        closeTimers.set(el, setTimeout(function(){
+          el.classList.remove('is-closing');
+          updateBodyScroll();
+        }, exitDuration));
+      } else {
+        el.classList.remove('is-closing');
+      }
+      updateBodyScroll();
+    }
+    function syncAll(){
+      document.querySelectorAll('.modal, .view.modalOverlay').forEach(syncElement);
+    }
+    var observer = new MutationObserver(function(mutations){
+      var touched = new Set();
+      mutations.forEach(function(mutation){
+        if (mutation.type === 'attributes' && mutation.target){
+          touched.add(mutation.target);
+        }
+      });
+      if (!touched.size) return;
+      touched.forEach(syncElement);
+    });
+    observer.observe(document.body, { attributes: true, subtree: true, attributeFilter: ['class'] });
+    window.addEventListener('load', syncAll);
+    syncAll();
+  })();
 </script>
 
 </body>
