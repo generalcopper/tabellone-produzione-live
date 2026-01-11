@@ -4832,11 +4832,13 @@ async function deleteMovement(id) {
           const fillStyle = col ? `background:${escapeHtmlAttr(col)};` : "";
           return `
             <div class="categoryRow">
-              <div class="categoryName">${escapeHtml(item.name || item.key || "")}</div>
               <div class="categoryTrack">
                 <div class="categoryFill" data-pct="${pct}" style="width:0%; ${fillStyle}"></div>
+                <div class="categoryContent">
+                  <div class="categoryName">${escapeHtml(item.name || item.key || "")}</div>
+                  <div class="categoryValue">${Number(item.qty||0).toLocaleString("it-IT")}</div>
+                </div>
               </div>
-              <div class="categoryValue">${Number(item.qty||0).toLocaleString("it-IT")}</div>
             </div>
           `;
         }).join("");
