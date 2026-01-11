@@ -938,15 +938,10 @@
     if (!modal) return;
 
     if (open) {
-      modal.classList.add("open");
-      document.body.classList.add("modal-open");
+      openModalEl(modal);
       try{ setTimeout(() => $("catEditName")?.focus(), 0); }catch(_){}
     } else {
-      modal.classList.remove("open");
-      // Rimuovi lock scroll solo se nessun altro modale è aperto
-      try{
-        if (!document.querySelector(".modal.open")) document.body.classList.remove("modal-open");
-      }catch(_){ document.body.classList.remove("modal-open"); }
+      closeModalEl(modal);
 
       selectedKey = "";
       selectedSnapshot = { key:"", name:"", color:"", macro:"" };
@@ -1795,6 +1790,34 @@ const docDetailPhotosMeta = document.getElementById("docDetailPhotosMeta");
         });
       }catch(_){}
     })();
+
+    function openModalEl(modal){
+      if(!modal) return;
+      modal.classList.remove("closing");
+      modal.classList.add("open");
+      modal.setAttribute("aria-hidden","false");
+      __syncBodyLockFromModals();
+    }
+
+    function closeModalEl(modal){
+      if(!modal) return;
+      if(!modal.classList.contains("open") && !modal.classList.contains("closing")) return;
+      modal.classList.remove("open");
+      modal.classList.add("closing");
+      modal.setAttribute("aria-hidden","true");
+    }
+
+    function initModalTransitions(){
+      document.querySelectorAll(".modal").forEach((modal) => {
+        modal.addEventListener("transitionend", (e) => {
+          if(e.target !== modal || e.propertyName !== "opacity") return;
+          if(modal.classList.contains("closing")) modal.classList.remove("closing");
+          __syncBodyLockFromModals();
+        });
+      });
+    }
+
+    initModalTransitions();
 
 
     function setView(name){
@@ -2692,7 +2715,7 @@ function __setBodyLocked(locked){
 
 function __syncBodyLockFromModals(){
   try{
-    const anyOpen = !!document.querySelector(".modal.open");
+    const anyOpen = !!document.querySelector(".modal.open, .modal.closing");
     __setBodyLocked(anyOpen);
   }catch(e){}
 }
@@ -2747,17 +2770,14 @@ function __shouldCenterPop(msg, kind){
     function openModal(title, body) {
       modalTitle.textContent = title;
       modalBody.textContent = body;
-      modalQuick.classList.add("open");
-      __syncBodyLockFromModals();
+      openModalEl(modalQuick);
     }
-    function closeModal() { modalQuick.classList.remove("open");
-      __syncBodyLockFromModals(); }
+    function closeModal() { closeModalEl(modalQuick); }
 
     function closeDocDetail() {
       try { __docDetailRenderToken++; } catch(_){}
       try { __revokeDocDetailBlobUrls(); } catch(_){}
-      if (modalDocDetail) modalDocDetail.classList.remove("open");
-      __syncBodyLockFromModals();
+      if (modalDocDetail) closeModalEl(modalDocDetail);
     }
 
     // ===== Flussi: modifica / elimina (documento) =====
@@ -2778,15 +2798,13 @@ function __shouldCenterPop(msg, kind){
 
       try { renderFlowEditItems(g); } catch(_){ }
 
-      modalFlowEdit.classList.add("open");
-      __syncBodyLockFromModals();
+      openModalEl(modalFlowEdit);
       try { flowEditCustomer && flowEditCustomer.focus(); } catch {}
     }
 
     function closeFlowEdit() {
       __currentFlowEditKey = null;
-      if (modalFlowEdit) modalFlowEdit.classList.remove("open");
-      __syncBodyLockFromModals();
+      if (modalFlowEdit) closeModalEl(modalFlowEdit);
     }
 
 
@@ -3340,18 +3358,15 @@ async function deleteMovementsBulk(ids) {
         docDetailTotals.textContent = `Righe: ${rows.length.toLocaleString("it-IT")} · Pezzi: ${totalPieces.toLocaleString("it-IT")}`;
       }
 
-      if (modalDocDetail) modalDocDetail.classList.add("open");
-      __syncBodyLockFromModals();
+      if (modalDocDetail) openModalEl(modalDocDetail);
     }
 
 
-    function openSettings() { modalSettings.classList.add("open"); }
-    function closeSettings() { modalSettings.classList.remove("open"); }
+    function openSettings() { openModalEl(modalSettings); }
+    function closeSettings() { closeModalEl(modalSettings); }
 
-    function openMovementModal() { modalMovement.classList.add("open");
-      __syncBodyLockFromModals(); }
-    function closeMovementModal() { modalMovement.classList.remove("open");
-      __syncBodyLockFromModals(); }
+    function openMovementModal() { openModalEl(modalMovement); }
+    function closeMovementModal() { closeModalEl(modalMovement); }
 
     function movementKey(customer, code) {
       return `${(customer||"").trim().toLowerCase()}||${(code||"").trim().toLowerCase()}`;
@@ -7353,16 +7368,14 @@ function openSupplierModal(id) {
 
       // docs
       supDocsTbody.innerHTML = `<tr><td class="td-muted" colspan="4">Caricamento…</td></tr>`;
-      modalSupplier.classList.add("open");
-      __syncBodyLockFromModals();
+      openModalEl(modalSupplier);
       renderSupplierLinkedDocs();
     }
 
 
 function closeSupplierModal() {
       if (!modalSupplier) return;
-      modalSupplier.classList.remove("open");
-      __syncBodyLockFromModals();
+      closeModalEl(modalSupplier);
       currentSupplierId = null;
 
       // reset edit mode
@@ -7697,7 +7710,7 @@ async function deleteSupplierCascade(supplierId){
           });
         });
 
-        modalProduct.classList.add("open");
+        openModalEl(modalProduct);
       }catch(e){
         console.warn("openProductAliasGroup failed", e);
       }
@@ -8544,7 +8557,7 @@ if (mode === "master") {
           try { delBtn.disabled = true; } catch(_){}
           const done = await deleteProductByCode(code);
           if (done) {
-            try { modalProduct.classList.remove("open"); } catch(_){}
+            try { closeModalEl(modalProduct); } catch(_){}
           } else {
             try { delBtn.disabled = false; } catch(_){}
           }
@@ -8607,7 +8620,7 @@ if (mode === "master") {
       await deleteMovementsBulk(ids);
 
             showToast("Articolo eliminato");
-            try { modalProduct.classList.remove("open"); } catch(_){}
+            try { closeModalEl(modalProduct); } catch(_){}
             try { renderAll(); } catch(_){}
           } catch (err) {
             console.error(err);
@@ -8619,7 +8632,7 @@ if (mode === "master") {
         });
       }
 
-modalProduct.classList.add("open");
+openModalEl(modalProduct);
     }
 
     function openUnifiedArticleModal(row){
@@ -8653,13 +8666,13 @@ modalProduct.classList.add("open");
           const code = String(btn.getAttribute("data-open-code") || "").trim();
           if (!code) return;
           const mem = members.find(m => String(m?.code || "").trim() === code);
-          try { modalUnified.classList.remove("open"); } catch(_){}
+          try { closeModalEl(modalUnified); } catch(_){}
           if (mem && String(mem.customer || "").trim()) openProductModal(code, mem);
           else openProductModal(code, { __mode: "master", code });
         });
       });
 
-      modalUnified.classList.add("open");
+      openModalEl(modalUnified);
     }
 
 /****************************************************************
@@ -9302,11 +9315,11 @@ async function handleFileSelection(fileList) {
       }
     });
 // Product modal
-    if (prodClose) prodClose.addEventListener("click", () => modalProduct.classList.remove("open"));
-    if (btnProdDone) btnProdDone.addEventListener("click", () => modalProduct.classList.remove("open"));
-    if (unifiedClose) unifiedClose.addEventListener("click", () => modalUnified.classList.remove("open"));
-    if (btnUnifiedDone) btnUnifiedDone.addEventListener("click", () => modalUnified.classList.remove("open"));
-    if (modalUnified) modalUnified.addEventListener("click", (e) => { if (e.target === modalUnified) modalUnified.classList.remove("open"); });
+    if (prodClose) prodClose.addEventListener("click", () => closeModalEl(modalProduct));
+    if (btnProdDone) btnProdDone.addEventListener("click", () => closeModalEl(modalProduct));
+    if (unifiedClose) unifiedClose.addEventListener("click", () => closeModalEl(modalUnified));
+    if (btnUnifiedDone) btnUnifiedDone.addEventListener("click", () => closeModalEl(modalUnified));
+    if (modalUnified) modalUnified.addEventListener("click", (e) => { if (e.target === modalUnified) closeModalEl(modalUnified); });
 
 
     // Table actions (delegation)
