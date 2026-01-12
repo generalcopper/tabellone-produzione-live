@@ -198,6 +198,7 @@
 
     .btn.sm{padding:8px 10px; border-radius:12px; font-size:12px; font-weight:950;}
     .btn.red{background:#B3261E;}
+    .btn.green{background: var(--ok);}
     .btn.gray{background:#1E1B16;}
 
     .grid{display:grid; grid-template-columns: 1.05fr .95fr; gap:14px; margin-top:14px;}
@@ -572,6 +573,19 @@ Acqua rame | 2 | IBC | 1000 L | DA PRODURRE"></textarea>
             <div id="emptyDone" class="hint" style="margin-top:10px;">VUOTO</div>
           </div>
         </div>
+
+        <div class="card" id="pickedCard">
+          <div class="cardHd">
+            <div>
+              <h2>RITIRATI</h2>
+            </div>
+            <div class="small"></div>
+          </div>
+          <div class="cardBd">
+            <div id="pickedList" class="queue"></div>
+            <div id="emptyPicked" class="hint" style="margin-top:10px;">VUOTO</div>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -779,6 +793,9 @@ Acqua rame | 2 | IBC | 1000 L | DA PRODURRE"></textarea>
   const doneEl    = document.getElementById("doneList");
   const emptyDone = document.getElementById("emptyDone");
 
+  const pickedEl  = document.getElementById("pickedList");
+  const emptyPicked = document.getElementById("emptyPicked");
+
   // Formule UI (anagrafica)
   const formulaList = document.getElementById("formulaList");
   const emptyFormule = document.getElementById("emptyFormule");
@@ -824,6 +841,7 @@ Acqua rame | 2 | IBC | 1000 L | DA PRODURRE"></textarea>
   let isAdmin = false;
   let pendingComplete = null; // {id, job}
   let lastDoneItems = [];
+  let lastPickedItems = [];
   let lastQueueItems = [];
   let lastQueueById = new Map();
 
@@ -1933,7 +1951,7 @@ Verrà eliminata SOLO la formula (non il prodotto in coda/completati).`);
 
   async function clearAllCompletati(){
     if(!isAdmin){ alert("Non autorizzato."); return; }
-    const msg1 = "ATTENZIONE: questa azione cancella TUTTI i COMPLETATI salvati per BULK. Procedo?";
+    const msg1 = "ATTENZIONE: questa azione cancella TUTTI i COMPLETATI (NON i RITIRATI) salvati per BULK. Procedo?";
     if(!confirm(msg1)) return;
     if(!confirm("Conferma definitiva: svuotare COMPLETATI?")) return;
 
@@ -1952,6 +1970,9 @@ Verrà eliminata SOLO la formula (non il prodotto in coda/completati).`);
       let ops = 0;
 
       for(const d of docs){
+        const v = d.data() || {};
+        if(v.ritirato === true) continue;
+
         batch.delete(d.ref);
         ops++; deleted++;
         if(ops >= 450){
@@ -1972,9 +1993,20 @@ Verrà eliminata SOLO la formula (non il prodotto in coda/completati).`);
   }
 
   async function undoCompletato(it){
+    if(!isAdmin){ alert("Non autorizzato."); return; }
     if(!it || !it.id) return;
+
+    if(it.ritirato){
+      alert("Questo ordine è in RITIRATI.
+
+Per rimetterlo in coda, prima annulla il ritiro.");
+      return;
+    }
+
     const title = (it.product || it.label || "—") + (it.format ? (" • " + it.format) : "");
-    if(!confirm("Annullare questo completato e rimetterlo in coda?\n\n" + title)) return;
+    if(!confirm("Annullare questo completato e rimetterlo in coda?
+
+" + title)) return;
 
     try{
       setCloud("loading","annullo…");
@@ -2004,7 +2036,72 @@ Verrà eliminata SOLO la formula (non il prodotto in coda/completati).`);
     }
   }
 
-  
+  async function markRitirato(it){
+    if(!isAdmin){ alert("Non autorizzato."); return; }
+    if(!it || !it.id) return;
+
+    const title = (it.product || it.label || "—") + (it.format ? (" • " + it.format) : "");
+    if(!confirm("Segnare come RITIRATO?
+
+" + title)) return;
+
+    try{
+      setCloud("loading","ritiro…");
+      const nowMs = Date.now();
+      const payload = {
+        ritirato: true,
+        ritiratoAt: serverTimestamp(),
+        ritiratoAtMs: nowMs,
+        ritiratoByUid: currentUser?.uid || null,
+        ritiratoByEmail: currentUser?.email || null,
+        ritiratoByName: currentUser?.displayName || null,
+      };
+
+      await setDoc(doc(producedCol, it.id), payload, { merge:true });
+      setCloud("ok");
+    }catch(e){
+      console.warn("markRitirato error:", e);
+      setCloud("bad", e?.code || "error");
+      alert("Errore ritiro: " + (e?.message || e?.code || "unknown"));
+    }
+  }
+
+  async function annullaRitiro(it){
+    if(!isAdmin){ alert("Non autorizzato."); return; }
+    if(!it || !it.id) return;
+
+    const title = (it.product || it.label || "—") + (it.format ? (" • " + it.format) : "");
+    if(!confirm("Annullare il ritiro?
+
+" + title)) return;
+
+    try{
+      setCloud("loading","annullo…");
+      const nowMs = Date.now();
+      const payload = {
+        ritirato: false,
+        ritiratoAt: null,
+        ritiratoAtMs: 0,
+        ritiratoByUid: null,
+        ritiratoByEmail: null,
+        ritiratoByName: null,
+        ritiratoUndoAt: serverTimestamp(),
+        ritiratoUndoAtMs: nowMs,
+        ritiratoUndoByUid: currentUser?.uid || null,
+        ritiratoUndoByEmail: currentUser?.email || null,
+        ritiratoUndoByName: currentUser?.displayName || null,
+      };
+
+      await setDoc(doc(producedCol, it.id), payload, { merge:true });
+      setCloud("ok");
+    }catch(e){
+      console.warn("annullaRitiro error:", e);
+      setCloud("bad", e?.code || "error");
+      alert("Errore annulla ritiro: " + (e?.message || e?.code || "unknown"));
+    }
+  }
+
+
   // --- EMAIL: ORDINE COMPLETATO (invio automatico a Matteo) ---
   function _clip(s, max){
     s = String(s ?? "").replace(/\s+/g," ").trim();
@@ -2565,6 +2662,11 @@ Verrà eliminata SOLO la formula (non il prodotto in coda/completati).`);
       const qty = (it.qty || "") ? `${it.qty} ${it.unit||""}`.trim() : "—";
       const who = (it.completedByName || it.completedByEmail || it.createdByEmail || "").trim();
 
+      const btns = isAdmin ? `
+          <button class="btn sm green pickBtn" type="button">Ritira</button>
+          <button class="btn sm ghost undoBtn" type="button">Coda</button>
+      ` : ``;
+
       div.innerHTML = `
         <div class="qMain">
           <p class="qTitle">${escapeHtml(title)}</p>
@@ -2576,13 +2678,21 @@ Verrà eliminata SOLO la formula (non il prodotto in coda/completati).`);
           </div>
         </div>
         <div class="qBtns">
-          <button class="btn sm ghost undoBtn" type="button">Annulla</button>
+          ${btns}
         </div>
       `;
+
+      const pickBtn = div.querySelector(".pickBtn");
+      pickBtn?.addEventListener("click", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        markRitirato(it);
+      });
 
       const undoBtn = div.querySelector(".undoBtn");
       undoBtn?.addEventListener("click", (e) => {
         e.preventDefault();
+        e.stopPropagation();
         undoCompletato(it);
       });
 
@@ -2593,17 +2703,75 @@ Verrà eliminata SOLO la formula (non il prodotto in coda/completati).`);
     requestAnimationFrame(() => playFLIP(doneEl, firstRects));
   }
 
+  function renderPicked(items){
+    if(!pickedEl) return;
+
+    const firstRects = captureRects(pickedEl);
+
+    const frag = document.createDocumentFragment();
+    emptyPicked?.classList.toggle("hide", items.length !== 0);
+
+    for(const it of items){
+      const div = document.createElement("div");
+      div.className = "qItem";
+      div.dataset.id = it.id;
+
+      const title = (it.product || it.label || "—") + (it.format ? (" • " + it.format) : "");
+      const qty = (it.qty || "") ? `${it.qty} ${it.unit||""}`.trim() : "—";
+
+      const who = (it.completedByName || it.completedByEmail || it.createdByEmail || "").trim();
+      const whoR = (it.ritiratoByName || it.ritiratoByEmail || "").trim();
+      const whenR = it.ritiratoAtMs ? fmtWhen(it.ritiratoAtMs) : "—";
+
+      const btns = isAdmin ? `<button class="btn sm ghost unpickBtn" type="button">Annulla</button>` : ``;
+
+      div.innerHTML = `
+        <div class="qMain">
+          <p class="qTitle">${escapeHtml(title)}</p>
+          <div class="qMeta">
+            <span><b>Quantità:</b> ${escapeHtml(qty)}</span>
+            <span class="sep">•</span>
+            <span><b>Completato:</b> ${escapeHtml(fmtWhen(it.completedAtMs))}</span>
+            ${who ? `<span class="sep">•</span><span><b>Da:</b> ${escapeHtml(who)}</span>` : ``}
+            <span class="sep">•</span>
+            <span><b>Ritirato:</b> ${escapeHtml(whenR)}</span>
+            ${whoR ? `<span class="sep">•</span><span><b>Da:</b> ${escapeHtml(whoR)}</span>` : ``}
+          </div>
+        </div>
+        <div class="qBtns">
+          ${btns}
+        </div>
+      `;
+
+      const unpickBtn = div.querySelector(".unpickBtn");
+      unpickBtn?.addEventListener("click", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        annullaRitiro(it);
+      });
+
+      frag.appendChild(div);
+    }
+
+    pickedEl.replaceChildren(frag);
+    requestAnimationFrame(() => playFLIP(pickedEl, firstRects));
+  }
+
   let _unsubDone = null;
   function startDoneWatch(){
     if(!doneEl) return;
     try{ if(_unsubDone) _unsubDone(); }catch(_){}
     const q = query(producedCol, orderBy("completedAt","desc"));
     _unsubDone = onSnapshot(q, (snap) => {
-      const items = [];
+      const all = [];
       snap.forEach(d => {
         const v = d.data() || {};
         const completedAtMs = (v.completedAt && v.completedAt.toMillis) ? v.completedAt.toMillis() : (v.completedAtClientMs || 0);
-        items.push({
+
+        const rit = !!(v.ritirato === true);
+        const ritiratoAtMs = (v.ritiratoAt && v.ritiratoAt.toMillis) ? v.ritiratoAt.toMillis() : (v.ritiratoAtMs || 0);
+
+        all.push({
           id: d.id,
           label: (v.label || "").toString().trim(),
           product: (v.product || v.label || "").toString().trim(),
@@ -2614,10 +2782,21 @@ Verrà eliminata SOLO la formula (non il prodotto in coda/completati).`);
           completedByName: (v.completedByName || v.createdByName || "").toString().trim(),
           completedByEmail: (v.completedByEmail || v.createdByEmail || "").toString().trim(),
           createdByEmail: (v.createdByEmail || "").toString().trim(),
+          ritirato: rit,
+          ritiratoAtMs,
+          ritiratoByName: (v.ritiratoByName || "").toString().trim(),
+          ritiratoByEmail: (v.ritiratoByEmail || "").toString().trim(),
         });
       });
-      lastDoneItems = items;
-      renderDone(items);
+
+      const done = all.filter(x => !x.ritirato);
+      const picked = all.filter(x => x.ritirato).sort((a,b) => (b.ritiratoAtMs || b.completedAtMs) - (a.ritiratoAtMs || a.completedAtMs));
+
+      lastDoneItems = done;
+      lastPickedItems = picked;
+
+      renderDone(done);
+      renderPicked(picked);
     }, (err) => {
       console.warn("done snapshot error:", err);
     });
