@@ -483,6 +483,17 @@
         <button class="btn btn-secondary" id="btnFlowsExport" type="button">Esporta CSV</button>
       </div>
 
+      <div class="inlineRow listStickyBar" style="justify-content:space-between; align-items:flex-end; gap:12px; margin-top: 10px;">
+        <div class="field" style="flex: 1 1 auto; min-width: 220px;">
+          <label for="flowsSearch">Cerca</label>
+          <input id="flowsSearch" placeholder="Documento, fornitore, numero, codice, articolo…" autocomplete="off" />
+        </div>
+        <div class="inlineRow" style="gap:8px; justify-content:flex-end; margin-left:auto;">
+          <button class="btn btn-ghost mini" id="btnFlowsClear" type="button" title="Svuota ricerca">Reset</button>
+          <div class="hero-sub" id="flowsMeta">—</div>
+        </div>
+      </div>
+
       <div class="tableWrap" style="max-height: 520px; overflow:auto; margin-top: 10px;">
         <table class="dataGrid">
           <thead>
@@ -1995,6 +2006,34 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
     btnBackFlows?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
     btnBackMovements?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
     document.getElementById("btnFlowsExport")?.addEventListener("click", () => { try{ exportMovementsCSV(); }catch(_){ } });
+    // Flussi: ricerca intelligente (DDT caricati)
+    if (flowsSearch){
+      flowsSearch.addEventListener("input", () => { try{ renderFlowsTable(); }catch(_){ } });
+      flowsSearch.addEventListener("keydown", (e) => {
+        if (!e) return;
+        if (e.key === "Escape"){
+          e.preventDefault();
+          flowsSearch.value = "";
+          try{ renderFlowsTable(); }catch(_){ }
+          return;
+        }
+        if (e.key === "Enter"){
+          e.preventDefault();
+          try{
+            const list = renderFlowsTable && renderFlowsTable._lastFiltered ? renderFlowsTable._lastFiltered : [];
+            const first = (Array.isArray(list) && list.length) ? list[0] : null;
+            if (first && first.key) openFlowEdit(first.key);
+          }catch(_){ }
+        }
+      });
+    }
+    if (btnFlowsClear){
+      btnFlowsClear.addEventListener("click", () => {
+        try{ if (flowsSearch) flowsSearch.value = ""; }catch(_){}
+        try{ renderFlowsTable(); }catch(_){ }
+        try{ flowsSearch && flowsSearch.focus(); }catch(_){}
+      });
+    }
     function closeHeaderModalIfOpen(){
       const modalOrder = [
         { el: modalFlowEdit, close: closeFlowEdit },
@@ -2147,6 +2186,9 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
     const stockTbody = document.getElementById("stockTbody");
     const movTbody = document.getElementById("movTbody");
     const flowsTbody = document.getElementById("flowsTbody");
+    const flowsSearch = document.getElementById("flowsSearch");
+    const flowsMeta = document.getElementById("flowsMeta");
+    const btnFlowsClear = document.getElementById("btnFlowsClear");
     const pillFlowsCount = document.getElementById("pillFlowsCount");
     const pillStock = document.getElementById("pillStock");
     const pillInvWarehouse = document.getElementById("pillInvWarehouse");
@@ -7267,31 +7309,185 @@ let __stockRowByKey = new Map();
     }
 
     function renderFlowsTable() {
-      if (!flowsTbody) return;
-      const max = Math.max(10, Math.floor(Number(state.settings.maxRecent) || 50));
-      const docs = (__docGroups || []).slice(0, max);
+      try{
+        const totalAll = Array.isArray(__docGroups) ? __docGroups.length : 0;
 
-      if (pillFlowsCount) pillFlowsCount.textContent = String((__docGroups || []).length);
+        // Pill count sempre (anche se vista non aperta)
+        try{ if (pillFlowsCount) pillFlowsCount.textContent = String(totalAll); }catch(_){}
 
-      if (docs.length === 0) {
-        flowsTbody.innerHTML = '<tr><td class="td-muted" colspan="4">Nessun flusso ancora.</td></tr>';
-        return;
+        // Se la vista non è aperta, evita lavoro pesante
+        const isActive = !!(__views && __views.flows && __views.flows.classList && __views.flows.classList.contains("active"));
+        const qRaw = String((flowsSearch && flowsSearch.value) || "").trim();
+        const hasQuery = !!qRaw;
+
+        if (!isActive && !hasQuery) {
+          try{ if (flowsMeta) flowsMeta.textContent = "—"; }catch(_){}
+          return;
+        }
+
+        if (!flowsTbody) return;
+
+        const maxRecent = Math.max(10, Math.floor(Number(state && state.settings && state.settings.maxRecent) || 50));
+        const showCap = 200;
+
+        // Cache indices (invalidate when docGroups change)
+        const ver = String(totalAll) + "|" + (totalAll ? String((__docGroups[0] && (__docGroups[0].createdAtMax || __docGroups[0].key)) || "") : "");
+        if (renderFlowsTable._cacheVer !== ver) {
+          renderFlowsTable._cacheVer = ver;
+          renderFlowsTable._cache = new Map();
+        }
+        const cache = renderFlowsTable._cache;
+
+        const strip = (s) => {
+          try { return String(s || "").normalize("NFD").replace(/[\u0300-\u036f]/g, ""); }
+          catch(_){ return String(s || ""); }
+        };
+        const norm = (s) => strip(String(s || "")).toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+
+        const getIndex = (g) => {
+          const k = String(g && g.key || "");
+          try{ if (cache && cache.has(k)) return cache.get(k); }catch(_){}
+
+          const label = (typeof formatDocLabel === "function") ? formatDocLabel(g || {}) : String((g && g.note) || "");
+          const cust  = String((g && g.customer) || "");
+          const vat   = String((g && g.supplierVat) || (g && g.vatNorm) || "");
+          const note  = String((g && g.note) || "");
+          const docNum = String((g && g.docNum) || (typeof extractDocNumber === "function" ? (extractDocNumber(note) || "") : ""));
+          const date  = String((g && g.date) || "");
+          const dateIt = (typeof formatDateOnlyIT === "function") ? (formatDateOnlyIT(date) || "") : "";
+
+          // indicizza anche righe (codici/articoli) ma con un cap (UI)
+          let codes = "", items = "";
+          try{
+            const mv = Array.isArray(g && g.movements) ? g.movements : [];
+            const cap = 90;
+            for (let i=0; i<mv.length && i<cap; i++){
+              const r = mv[i] || {};
+              const c = String(r.code || "").trim();
+              const it = String(r.item || "").trim();
+              if (c) codes += " " + c;
+              if (it) items += " " + it;
+            }
+          }catch(_){}
+
+          const blob = norm([label, cust, vat, docNum, note, date, dateIt, codes, items].join(" "));
+
+          const idx = {
+            blob,
+            labelN: norm(label),
+            custN: norm(cust),
+            vatN: norm(vat),
+            docNumN: norm(docNum),
+            noteN: norm(note),
+            dateN: norm(date + " " + dateIt),
+            codesN: norm(codes),
+            itemsN: norm(items)
+          };
+
+          try{ cache && cache.set(k, idx); }catch(_){}
+          return idx;
+        };
+
+        const allDocs = Array.isArray(__docGroups) ? __docGroups : [];
+        let docsToShow = [];
+        let metaText = "";
+
+        const qN = norm(qRaw);
+        const tokens = qN ? qN.split(/\s+/).filter(Boolean) : [];
+
+        if (!tokens.length){
+          docsToShow = allDocs.slice(0, maxRecent);
+          metaText = totalAll ? (`Ultimi ${docsToShow.length.toLocaleString("it-IT")} su ${totalAll.toLocaleString("it-IT")}`) : "—";
+        } else {
+          const matches = [];
+          for (const g of allDocs){
+            const idx = getIndex(g);
+            if (!idx || !idx.blob) continue;
+
+            // AND: ogni token deve comparire da qualche parte
+            let ok = true;
+            for (const t of tokens){
+              if (idx.blob.indexOf(t) < 0) { ok = false; break; }
+            }
+            if (!ok) continue;
+
+            // scoring (smart)
+            let score = 0;
+            for (const t of tokens){
+              if (!t) continue;
+
+              if (idx.docNumN === t) score += 140;
+              else if (idx.docNumN && idx.docNumN.startsWith(t)) score += 110;
+              else if (idx.docNumN && idx.docNumN.indexOf(t) >= 0) score += 80;
+
+              if (idx.vatN && idx.vatN.startsWith(t)) score += 120;
+              else if (idx.vatN && idx.vatN.indexOf(t) >= 0) score += 85;
+
+              if (idx.codesN && idx.codesN.indexOf(t) >= 0) score += 95;
+              if (idx.itemsN && idx.itemsN.indexOf(t) >= 0) score += 35;
+
+              if (idx.custN && idx.custN.indexOf(t) >= 0) score += 60;
+              if (idx.labelN && idx.labelN.indexOf(t) >= 0) score += 55;
+              if (idx.noteN && idx.noteN.indexOf(t) >= 0) score += 28;
+              if (idx.dateN && idx.dateN.indexOf(t) >= 0) score += 70;
+
+              if (idx.custN && idx.custN.startsWith(t)) score += 8;
+              if (idx.labelN && idx.labelN.startsWith(t)) score += 6;
+            }
+
+            matches.push({ g, score });
+          }
+
+          matches.sort((a,b) => {
+            const s = (b.score||0) - (a.score||0);
+            if (s !== 0) return s;
+
+            const bc = String((b.g && (b.g.createdAtMax || "")) || "");
+            const ac = String((a.g && (a.g.createdAtMax || "")) || "");
+            if (bc && ac && bc !== ac) return bc.localeCompare(ac) * -1;
+
+            return String((b.g && b.g.key) || "").localeCompare(String((a.g && a.g.key) || ""));
+          });
+
+          const capped = matches.length > showCap;
+          docsToShow = matches.slice(0, showCap).map(x => x.g);
+
+          metaText = `Risultati: ${matches.length.toLocaleString("it-IT")} su ${totalAll.toLocaleString("it-IT")}`;
+          if (capped) metaText += ` (mostrati primi ${showCap.toLocaleString("it-IT")})`;
+        }
+
+        // expose for Enter-to-open
+        try{ renderFlowsTable._lastFiltered = docsToShow.slice(); }catch(_){}
+
+        try{ if (flowsMeta) flowsMeta.textContent = metaText || "—"; }catch(_){}
+
+        if (!docsToShow.length){
+          flowsTbody.innerHTML = tokens.length
+            ? '<tr><td class="td-muted" colspan="4">Nessun risultato. Prova con fornitore, numero, data, codice o articolo.</td></tr>'
+            : '<tr><td class="td-muted" colspan="4">Nessun flusso ancora.</td></tr>';
+          return;
+        }
+
+        flowsTbody.innerHTML = docsToShow.map(g => {
+          const label = formatDocLabel(g);
+          const lines = (g.movements || []).length;
+          const pieces = (g.movements || []).reduce((sum, mv) => sum + safeInt(mv.qty), 0);
+
+          return `
+            <tr class="docRow" data-dockey="${escapeHtmlAttr(g.key)}" title="Modifica flusso">
+              <td data-label="Documento"><strong>${escapeHtml(label)}</strong></td>
+              <td data-label="Fornitore">${escapeHtml(g.customer || "")}</td>
+              <td data-label="Righe" class="qty">${Number(lines).toLocaleString("it-IT")}</td>
+              <td data-label="Pezzi" class="qty">${Number(pieces).toLocaleString("it-IT")}</td>
+            </tr>
+          `;
+        }).join("");
+      }catch(e){
+        console.warn("renderFlowsTable failed", e);
+        try{
+          if (flowsTbody) flowsTbody.innerHTML = '<tr><td class="td-muted" colspan="4">Errore render flussi.</td></tr>';
+        }catch(_){}
       }
-
-      flowsTbody.innerHTML = docs.map(g => {
-        const label = formatDocLabel(g);
-        const lines = (g.movements || []).length;
-        const pieces = (g.movements || []).reduce((sum, mv) => sum + safeInt(mv.qty), 0);
-
-        return `
-          <tr class="docRow" data-dockey="${escapeHtmlAttr(g.key)}" title="Modifica flusso">
-            <td data-label="Documento"><strong>${escapeHtml(label)}</strong></td>
-            <td data-label="Fornitore">${escapeHtml(g.customer || "")}</td>
-            <td data-label="Righe" class="qty">${Number(lines).toLocaleString("it-IT")}</td>
-            <td data-label="Pezzi" class="qty">${Number(pieces).toLocaleString("it-IT")}</td>
-          </tr>
-        `;
-      }).join("");
     }
 
 function renderAll() {
