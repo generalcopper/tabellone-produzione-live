@@ -5377,66 +5377,61 @@ async function deleteMovement(id) {
       });
     }
 
-    function __buildInvTrendSeries(movements, range){
+    function __buildInvTrendSeries(movements, range, currentTotal){
       const movs = Array.isArray(movements) ? movements : [];
 
-      // delta per giorno
+      // delta per giorno (IN +, OUT -) — solo giorni validi
       const deltaByDay = new Map(); // day -> signed int
       let minDay = "";
-      let maxDay = "";
 
+      const endDay = __invTrendTodayISO(); // ancoriamo SEMPRE a "oggi" (valore reale)
       for (const mv of movs){
         const day = __invTrendGetMvDay(mv);
         if (!day) continue;
+        // evita date future (sporchi doc date)
+        if (endDay && day > endDay) continue;
+
         const q = safeInt(mv.qty);
+        if (!q) continue;
         const sign = String(mv.type || "").toUpperCase() === "OUT" ? -1 : 1;
         const delta = sign * q;
-        if (!delta) continue;
 
         deltaByDay.set(day, (deltaByDay.get(day) || 0) + delta);
 
         if (!minDay || day < minDay) minDay = day;
-        if (!maxDay || day > maxDay) maxDay = day;
       }
 
-      const today = __invTrendTodayISO();
-      let endDay = maxDay || today;
-      if (today && today > endDay) endDay = today;
+      // range: sempre finestra rispetto a endDay
+      const r = String(range || "").trim();
+      let startDay = endDay;
 
-      if (!minDay) minDay = endDay;
-
-      let startDay = minDay;
-      if (String(range) !== "all"){
-        const n = Math.max(1, safeInt(range));
-        const wantStart = __invTrendAddDays(endDay, -(n-1));
-        if (wantStart && wantStart > startDay) startDay = wantStart;
+      if (r === "all"){
+        startDay = (minDay && minDay <= endDay) ? minDay : endDay;
+      } else {
+        const n = Math.max(1, safeInt(r));
+        const s = __invTrendAddDays(endDay, -(n - 1));
+        startDay = (s && s <= endDay) ? s : endDay;
       }
 
-      // baseline = somma delta dei giorni < startDay
-      let base = 0;
-      if (deltaByDay.size){
-        const daysSorted = Array.from(deltaByDay.keys()).sort((a,b) => a.localeCompare(b));
-        for (const d of daysSorted){
-          if (d < startDay) base += (deltaByDay.get(d) || 0);
-          else break;
-        }
-      }
+      // Ancora al totale attuale (valore vero)
+      const anchor = Math.max(0, Math.round(Number(currentTotal) || 0));
 
-      // serie giornaliera (con carry)
-      const points = [];
-      let level = base;
+      // Serie: calcolo a ritroso dall'ancora (niente baseline inventate)
+      const rev = [];
+      let level = anchor;
+
       let guard = 0;
-      for (let d = startDay; d <= endDay && guard < 6000; d = __invTrendAddDays(d, 1), guard++){
-        level += (deltaByDay.get(d) || 0);
-        points.push({ day: d, value: level });
+      for (let d = endDay; d >= startDay && guard < 6000; d = __invTrendAddDays(d, -1), guard++){
+        rev.push({ day: d, value: level });
+        level -= (deltaByDay.get(d) || 0);
       }
 
-      // se per qualche motivo è vuota
+      const points = rev.reverse();
       if (!points.length){
-        points.push({ day: endDay, value: 0 });
+        points.push({ day: endDay, value: anchor });
       }
 
-      // downsample (tutto) per evitare troppo carico su SVG
+      // downsample (all) per evitare troppo carico su SVG
       const MAX_PTS = 220;
       if (points.length > MAX_PTS){
         const step = Math.ceil(points.length / MAX_PTS);
@@ -5550,12 +5545,12 @@ async function deleteMovement(id) {
           const r = String(__invTrendRange || "").trim();
           const d = new Date(String(iso).slice(0,10) + "T00:00:00");
           if (!isFinite(d.getTime())) return String(iso).slice(5,10);
-          const dd = String(d.getDate()).padStart(2,"0");
-          const mm = String(d.getMonth()+1).padStart(2,"0");
-          const yy = String(d.getFullYear()).slice(-2);
-          if (r === "all") return `${mm}/${yy}`;
-          if (r === "90") return `${mm}/${yy}`;
-          return `${dd}/${mm}`;
+
+          // Etichette italiane, coerenti con la finestra
+          if (r === "all" || r === "90"){
+            return d.toLocaleDateString("it-IT", { month: "short", year: "2-digit" });
+          }
+          return d.toLocaleDateString("it-IT", { day: "2-digit", month: "2-digit" });
         }catch(_){ return String(iso||"").slice(5,10); }
       };
       const __niceStep = (x) => {
@@ -5698,7 +5693,7 @@ async function deleteMovement(id) {
         const total = (stockArr || []).reduce((s, x) => s + (Number(x && x.qty) || 0), 0);
         invTrendTotal.textContent = Number(total || 0).toLocaleString("it-IT");
 
-        const series = __buildInvTrendSeries(state && state.movements, __invTrendRange);
+        const series = __buildInvTrendSeries(state && state.movements, __invTrendRange, total);
         __renderInvTrendSvg(series);
       }catch(e){
         console.warn("renderInventoryTrend failed", e);
