@@ -1556,7 +1556,7 @@
 
                     <div class="doc-tableWrap">
                       <div class="doc-tableTitle">N. Articoli</div>
-                      <div class="doc-tableHint">Righe già posizionate: pronte per import (campi non modificabili).</div>
+                      <div class="doc-tableHint">Righe pronte per import: puoi modificare Codice, Descrizione e Q.tà (clicca sulla cella).</div>
                       <table class="doc-table dataGrid" id="docItemsTable">
                         <thead>
                           <tr>
@@ -2093,7 +2093,7 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
     if (docItemsTable) {
       docItemsTable.addEventListener("click", (ev) => {
         // Se stai editando la quantità, non interferire con la selezione riga
-        if (ev.target && ev.target.closest && ev.target.closest("input.qtyInputInline")) return;
+        if (ev.target && ev.target.closest && ev.target.closest("input.qtyInputInline, input.txtInputInline")) return;
 
         const tr = ev.target && ev.target.closest ? ev.target.closest("tr[data-code]") : null;
         if (!tr) return;
@@ -2127,9 +2127,28 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
           return;
         }
 
+        // Modifica codice / descrizione: click sul testo
+        const codeCell = ev.target && ev.target.closest ? ev.target.closest(".jsEditCode") : null;
+        if (codeCell) {
+          ev.preventDefault();
+          ev.stopPropagation();
+          __beginInlineTextEdit(tr, "code");
+          return;
+        }
+        const descCell = ev.target && ev.target.closest ? ev.target.closest(".jsEditDesc") : null;
+        if (descCell) {
+          ev.preventDefault();
+          ev.stopPropagation();
+          __beginInlineTextEdit(tr, "desc");
+          return;
+        }
+
+
 // UI selection
         docItemsTable.querySelectorAll("tbody tr.is-selected").forEach(r => r.classList.remove("is-selected"));
         tr.classList.add("is-selected");
+
+        try{ __docSelectedIndex = Number(tr.dataset.i); }catch(_){ __docSelectedIndex = -1; }
 
         const code = (tr.dataset.code || "").trim();
         const desc = (tr.dataset.desc || "").trim();
@@ -3898,6 +3917,7 @@ function __isConaiItem(it){
 
     // --- Documento (estratto OCR) ---
     let __lastDocExtract = null;
+    let __docSelectedIndex = -1;
 
     function coerceToISODate(v){
       if (!v) return "";
@@ -4088,10 +4108,20 @@ function __isConaiItem(it){
         const desc = (it.description || "").trim();
         const uom = (it.uom || "").trim();
         const qtyDisp = formatQtyForCell(it);
-        const qtyVal = (it.qty != null && it.qty !== "" && !Number.isNaN(Number(it.qty))) ? String(it.qty) : (it.qtyRaw ? String(it.qtyRaw).replace(/[^\d,\.]/g,"").trim() : "");
+        const qtyVal = (it.qty != null && it.qty !== "" && !Number.isNaN(Number(it.qty)))
+          ? String(it.qty)
+          : (it.qtyRaw ? String(it.qtyRaw).replace(/[^\d,\.]/g,"").trim() : "");
+
         return `<tr data-i="${i}" data-code="${escapeHtmlAttr(code)}" data-desc="${escapeHtmlAttr(desc)}" data-uom="${escapeHtmlAttr(uom)}" data-qty="${escapeHtmlAttr(qtyVal)}">
-          <td data-label="Codice" class="code"><div class="codeCellWrap"><button type="button" class="rowMinus" aria-label="Elimina riga">–</button><span class="codeTxt">${escapeHtml(code || "-")}</span></div></td>
-          <td data-label="Descrizione">${escapeHtml(desc || "-")}</td>
+          <td data-label="Codice" class="code">
+            <div class="codeCellWrap">
+              <button type="button" class="rowMinus" aria-label="Elimina riga">–</button>
+              <span class="codeTxt jsEditCode" title="Clicca per modificare">${escapeHtml(code || "-")}</span>
+            </div>
+          </td>
+          <td data-label="Descrizione">
+            <span class="descTxt jsEditDesc" title="Clicca per modificare">${escapeHtml(desc || "-")}</span>
+          </td>
           <td data-label="U.M." class="num">${escapeHtml(uom || "-")}</td>
           <td data-label="Q.tà" class="num"><span class="qtyCell" title="Clicca per modificare">${escapeHtml(qtyDisp || "-")}</span></td>
         </tr>`;
@@ -4113,6 +4143,7 @@ function __isConaiItem(it){
         if (!btn) return;
         const items = __getDocItemsArr();
         const hasValid = (items || []).some(it => {
+          if (__isConaiItem(it)) return false;
           const key = String(it.code || it.description || "").trim();
           const qRaw = (it.qty != null && it.qty !== "") ? String(it.qty) : String(it.qtyRaw || "");
           const q = Number(qRaw.replace(",", ".").replace(/[^\d.]/g,""));
@@ -4127,6 +4158,16 @@ function __isConaiItem(it){
       if (!tbody) return;
       const items = __getDocItemsArr();
       tbody.innerHTML = __docItemsRowsHtml(items) || `<tr><td colspan="4" style="text-align:center; padding:12px; color:var(--muted)">Nessuna riga trovata.</td></tr>`;
+
+      // Ripristina selezione riga (best-effort)
+      try{
+        const idx = Number(__docSelectedIndex);
+        if (!Number.isNaN(idx) && idx >= 0){
+          const sel = tbody.querySelector(`tr[data-i="${idx}"]`);
+          if (sel) sel.classList.add("is-selected");
+        }
+      }catch(_){}
+
       __refreshConfirmMovementEnabled();
     }
 
@@ -4134,7 +4175,19 @@ function __isConaiItem(it){
       const items = __getDocItemsArr();
       if (!Array.isArray(items)) return;
       if (Number.isNaN(i) || i < 0 || i >= items.length) return;
+
       items.splice(i, 1);
+
+      // Aggiorna selezione (best-effort)
+      try{
+        if (__docSelectedIndex === i){
+          __docSelectedIndex = Math.min(i, items.length - 1);
+          if (items.length <= 0) __docSelectedIndex = -1;
+        } else if (__docSelectedIndex > i){
+          __docSelectedIndex = __docSelectedIndex - 1;
+        }
+      }catch(_){}
+
       __rerenderDocItemsTable();
     }
 
@@ -4193,6 +4246,76 @@ function __isConaiItem(it){
       });
       input.addEventListener("blur", commit);
     }
+
+
+    function __beginInlineTextEdit(tr, field){
+      if (!tr) return;
+      const idx = Number(tr.dataset.i);
+      if (Number.isNaN(idx)) return;
+
+      const items = __getDocItemsArr();
+      const it = items[idx];
+      if (!it) return;
+
+      const isCode = String(field || "") === "code";
+      const td = tr.querySelector(isCode ? 'td[data-label="Codice"]' : 'td[data-label="Descrizione"]');
+      if (!td) return;
+
+      if (td.querySelector("input.txtInputInline")) return;
+
+      const current = String(isCode ? (it.code || "") : (it.description || "")).trim();
+
+      const input = document.createElement("input");
+      input.type = "text";
+      input.autocomplete = "off";
+      input.spellcheck = false;
+      input.className = "txtInputInline " + (isCode ? "codeInputInline" : "descInputInline");
+      input.value = current;
+
+      // keep row selected
+      __docSelectedIndex = idx;
+
+      if (isCode){
+        const minus = td.querySelector("button.rowMinus");
+        td.innerHTML = "";
+        const wrap = document.createElement("div");
+        wrap.className = "codeCellWrap";
+        if (minus) wrap.appendChild(minus);
+        else{
+          const b = document.createElement("button");
+          b.type = "button";
+          b.className = "rowMinus";
+          b.setAttribute("aria-label","Elimina riga");
+          b.textContent = "–";
+          wrap.appendChild(b);
+        }
+        wrap.appendChild(input);
+        td.appendChild(wrap);
+      } else {
+        td.innerHTML = "";
+        td.appendChild(input);
+      }
+
+      input.focus();
+      try{ input.select(); }catch(_){}
+
+      let cancelled = false;
+
+      const commit = () => {
+        if (cancelled) return;
+        const v = String(input.value || "").trim();
+        if (isCode) it.code = v;
+        else it.description = v;
+        __rerenderDocItemsTable();
+      };
+
+      input.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") { e.preventDefault(); input.blur(); }
+        if (e.key === "Escape") { e.preventDefault(); cancelled = true; __rerenderDocItemsTable(); }
+      });
+      input.addEventListener("blur", commit);
+    }
+
 
 
     function renderDocExtract(structured, rawText){
@@ -4303,7 +4426,7 @@ function validateMovementFields(fields) {
           const hasValid = __lastDocExtract.items.some(it => {
             const q = safeInt(it && it.qty);
             const codeOk = String((it && it.code) || "").trim().length > 0;
-            const itemOk = String((it && it.item) || "").trim().length > 0;
+            const itemOk = String((it && (it.description || it.item)) || "").trim().length > 0;
             return q > 0 && (codeOk || itemOk);
           });
           return customerOk && hasValid;
