@@ -8028,7 +8028,7 @@ let __stockRowByKey = new Map();
         if (moveInvQtyHint) moveInvQtyHint.textContent = `Disponibile: ${avail.toLocaleString("it-IT")} ${uom}`;
         if (moveInvQtyItem){
           const itemName = String(row && row.item || "").trim();
-          moveInvQtyItem.value = itemName || "—";
+          moveInvQtyItem.textContent = itemName || "—";
         }
 
         if (moveInvQtyInput){
