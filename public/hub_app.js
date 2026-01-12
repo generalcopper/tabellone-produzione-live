@@ -9958,6 +9958,7 @@ async function handleFileSelection(fileList) {
     // Supplier modal
     if (supClose) supClose.addEventListener("click", closeSupplierModal);
     if (btnSupDone) btnSupDone.addEventListener("click", closeSupplierModal);
+    if (modalSupplier) modalSupplier.addEventListener("click", (e) => { if (e.target === modalSupplier) closeSupplierModal(); });
     if (btnSupDelete) btnSupDelete.addEventListener("click", () => { if (currentSupplierId) deleteSupplierCascade(currentSupplierId); });
 
     // Edit / Salva
@@ -9975,11 +9976,25 @@ async function handleFileSelection(fileList) {
       }
     });
 // Product modal
-    if (prodClose) prodClose.addEventListener("click", () => modalProduct.classList.remove("open"));
-    if (btnProdDone) btnProdDone.addEventListener("click", () => modalProduct.classList.remove("open"));
-    if (unifiedClose) unifiedClose.addEventListener("click", () => modalUnified.classList.remove("open"));
-    if (btnUnifiedDone) btnUnifiedDone.addEventListener("click", () => modalUnified.classList.remove("open"));
-    if (modalUnified) modalUnified.addEventListener("click", (e) => { if (e.target === modalUnified) modalUnified.classList.remove("open"); });
+    function closeProductModal(){
+      if (!modalProduct) return;
+      modalProduct.classList.remove("open");
+      __syncBodyLockFromModals();
+    }
+    function closeUnifiedModal(){
+      if (!modalUnified) return;
+      modalUnified.classList.remove("open");
+      __syncBodyLockFromModals();
+    }
+
+    if (prodClose) prodClose.addEventListener("click", closeProductModal);
+    if (btnProdDone) btnProdDone.addEventListener("click", closeProductModal);
+    if (modalProduct) modalProduct.addEventListener("click", (e) => { if (e.target === modalProduct) closeProductModal(); });
+
+    if (unifiedClose) unifiedClose.addEventListener("click", closeUnifiedModal);
+    if (btnUnifiedDone) btnUnifiedDone.addEventListener("click", closeUnifiedModal);
+    if (modalUnified) modalUnified.addEventListener("click", (e) => { if (e.target === modalUnified) closeUnifiedModal(); });
+
 
 
     // Table actions (delegation)
