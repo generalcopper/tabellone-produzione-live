@@ -7083,11 +7083,35 @@ function getMacroCategoryForCode(code) {
         const arr = Array.isArray(rows) ? rows : [];
         const map = new Map();
 
-        for (const r of arr) {
+        
+        // Alias grouping ONLY when the same alias is shared by >=2 different product codes.
+        // This avoids accidental "double counts" when alias is used as a simple display name.
+        const sharedAlias = new Set();
+        try{
+          const prodArr = Array.isArray(products) ? products : [];
+          const tmp = new Map(); // aliasKey -> Set(codesLower)
+          for (const p of prodArr){
+            if (!p) continue;
+            const c = String(p.code || (typeof safeDecodeUri==="function" ? safeDecodeUri(p.id || "") : (p.id || "")) || "").trim();
+            if (!c) continue;
+            const a = String((p.alias || p.aliasName) || "").trim();
+            if (!a) continue;
+            const ak = normTextKey(a);
+            if (!ak) continue;
+            const set = tmp.get(ak) || new Set();
+            set.add(c.toLowerCase());
+            tmp.set(ak, set);
+          }
+          for (const [ak, set] of tmp.entries()){
+            if (set && set.size >= 2) sharedAlias.add(ak);
+          }
+        }catch(_){}
+for (const r of arr) {
           if (!r) continue;
           const code = String(r.code || "").trim();
           const alias = getAliasForCode(code);
-          const aliasKey = alias ? normTextKey(alias) : "";
+          const aliasKey0 = alias ? normTextKey(alias) : "";
+          const aliasKey = (aliasKey0 && sharedAlias.has(aliasKey0)) ? aliasKey0 : "";
           const gk = aliasKey ? ("alias:" + aliasKey) : ("code:" + code.toLowerCase());
 
           const wh = normalizeWarehouse(r.warehouse || "");
@@ -8737,6 +8761,11 @@ if (mode === "master") {
           let stockByWh = [];
           try { stockByWh = (typeof computeStockByWarehouse === "function") ? computeStockByWarehouse() : []; } catch(_){ stockByWh = []; }
 
+
+          const scopeCustomerKey = (!isAliasGroup && ctx && String(ctx.customer || "").trim())
+            ? normSupplierKey(ctx.customer)
+            : "";
+
           const sumWh = (w) => {
             const ww = normalizeWarehouse(w);
             let s = 0;
@@ -8745,6 +8774,10 @@ if (mode === "master") {
               if (normalizeWarehouse(r.warehouse || "") !== ww) continue;
               const rc = String(r.code || "").trim();
               if (!rc || !scopeCodes.includes(rc)) continue;
+              if (scopeCustomerKey) {
+                const ck = normSupplierKey(r.customer || "");
+                if (ck !== scopeCustomerKey) continue;
+              }
               s += safeInt(r.qty);
             }
             return s;
@@ -8761,6 +8794,10 @@ if (mode === "master") {
               if (normalizeWarehouse(r.warehouse || "") !== ww) continue;
               const rc = String(r.code || "").trim();
               if (!rc || !scopeCodes.includes(rc)) continue;
+              if (scopeCustomerKey) {
+                const ck = normSupplierKey(r.customer || "");
+                if (ck !== scopeCustomerKey) continue;
+              }
               const cust = String(r.customer || "").trim();
               if (!cust) continue;
               const q = safeInt(r.qty);
