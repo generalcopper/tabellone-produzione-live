@@ -1785,6 +1785,7 @@ const docDetailPhotosMeta = document.getElementById("docDetailPhotosMeta");
       movements: document.getElementById("viewMovements"),
       categories: document.getElementById("viewCategories"),
       trash: document.getElementById("viewTrash"),
+      moveInv: document.getElementById("viewMoveInventory"),
       anag: document.getElementById("viewAnag")
     };
     const __hdrTitle = document.getElementById("hdrPageTitle");
@@ -1793,11 +1794,12 @@ const docDetailPhotosMeta = document.getElementById("docDetailPhotosMeta");
     const btnBackFlows = document.getElementById("btnBackFlows");
     const btnBackMovements = document.getElementById("btnBackMovements");
     const btnBackAnag = document.getElementById("btnBackAnag");
+    const btnBackMoveInv = document.getElementById("btnBackMoveInv");
 
     // Porta overlay/modali come figli diretti di <body> per evitare stacking-context (transform/filter) sui parent
     (function __liftOverlaysToBody(){
       try{
-        ["viewOcr","viewInventory","viewFlows","viewMovements","viewCategories","viewTrash","viewAnag"].forEach(id => {
+        ["viewOcr","viewInventory","viewFlows","viewMovements","viewMoveInventory","viewCategories","viewTrash","viewAnag"].forEach(id => {
           const el = document.getElementById(id);
           if (el && el.parentElement !== document.body) document.body.appendChild(el);
         });
@@ -1817,7 +1819,7 @@ const docDetailPhotosMeta = document.getElementById("docDetailPhotosMeta");
 
     function setView(name){
       const key = String(name || "home");
-      const overlayKeys = ["ocr","inventory","flows","movements","categories","trash","anag"];
+      const overlayKeys = ["ocr","inventory","flows","movements","moveInv","categories","trash","anag"];
       const isOverlay = overlayKeys.includes(key);
 
       // Home resta sempre visibile dietro (come un gestionale iOS)
@@ -1862,6 +1864,7 @@ const docDetailPhotosMeta = document.getElementById("docDetailPhotosMeta");
           (key === "movements") ? "Movimenti" :
           (key === "categories") ? "Categorie" :
           (key === "trash") ? "Cestino" :
+          (key === "moveInv") ? "Sposta inventario" :
           "Anagrafica";
       }
       syncHeaderBackVisibility();
@@ -1930,6 +1933,7 @@ const docDetailPhotosMeta = document.getElementById("docDetailPhotosMeta");
     // Close inventario anche con tap/click sul backdrop
     document.getElementById("viewInventory")?.addEventListener("click", (e) => { try{ if (e.target === e.currentTarget) setView("home"); }catch(_){ } });
     document.getElementById("viewMovements")?.addEventListener("click", (e) => { try{ if (e.target === e.currentTarget) setView("home"); }catch(_){ } });
+    document.getElementById("viewMoveInventory")?.addEventListener("click", (e) => { try{ if (e.target === e.currentTarget) { resetMoveInvDirection(); setView("home"); } }catch(_){ } });
     document.getElementById("btnCloseOcr")?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
     btnBackOcr?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
     document.getElementById("btnGoAnag")?.addEventListener("click", () => {
@@ -1968,6 +1972,7 @@ document.getElementById("menuGoHome")?.addEventListener("click", () => { closeSi
     document.getElementById("menuGoOcr")?.addEventListener("click", () => { closeSideMenu(); startHomeOcr(); });
     document.getElementById("menuGoInvCerea")?.addEventListener("click", () => { closeSideMenu(); openInventoryOverlay(WAREHOUSE_CEREA); });
     document.getElementById("menuGoInvConcamarise")?.addEventListener("click", () => { closeSideMenu(); openInventoryOverlay(WAREHOUSE_CONCA); });
+    document.getElementById("menuGoMoveInventory")?.addEventListener("click", () => { closeSideMenu(); try{ resetMoveInvDirection(); }catch(_){ } setView("moveInv"); try{ renderMoveInv && renderMoveInv(); }catch(_){ } });
     document.getElementById("menuGoFlows")?.addEventListener("click", () => { closeSideMenu(); setView("flows"); try{ renderFlowsTable(); }catch(_){ } });
     document.getElementById("menuGoMovements")?.addEventListener("click", () => { closeSideMenu(); setView("movements"); try{ window.HubMovements && window.HubMovements.refresh && window.HubMovements.refresh(); }catch(_){ } });
     document.getElementById("menuGoTrash")?.addEventListener("click", () => { closeSideMenu(); setView("trash"); try{ window.HubTrash && window.HubTrash.refresh && window.HubTrash.refresh(); }catch(_){ } });
@@ -2001,10 +2006,12 @@ document.getElementById("menuGoHome")?.addEventListener("click", () => { closeSi
         document.getElementById("btnCloseTrash")?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
 document.getElementById("btnCloseFlows")?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
     document.getElementById("btnCloseMovements")?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
+    document.getElementById("btnCloseMoveInv")?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} try{ resetMoveInvDirection(); }catch(_){ } setView("home"); });
         document.getElementById("btnBackTrash")?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
 btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
     btnBackFlows?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
     btnBackMovements?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
+    btnBackMoveInv?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} try{ resetMoveInvDirection(); }catch(_){ } setView("home"); });
     document.getElementById("btnFlowsExport")?.addEventListener("click", () => { try{ exportMovementsCSV(); }catch(_){ } });
     // Flussi: ricerca intelligente (DDT caricati)
     const __flowsSearch = document.getElementById("flowsSearch");
@@ -2084,7 +2091,7 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
     setView("home");
 
     // Chiudi i modali cliccando fuori dal contenuto (overlay)
-    ["ocr","inventory","flows","anag"].forEach((k) => {
+    ["ocr","inventory","flows","moveInv","anag"].forEach((k) => {
       const el = __views[k];
       if (!el) return;
       el.addEventListener("click", (e) => { if (e.target === el) setView("home"); });
@@ -7639,6 +7646,372 @@ let __stockRowByKey = new Map();
       }
     }
 
+
+    /****************************************************************
+     * Sposta Inventario (viewMoveInventory)
+     ****************************************************************/
+    const viewMoveInv = document.getElementById("viewMoveInventory");
+    const moveInvHome = document.getElementById("moveInvHome");
+    const moveInvList = document.getElementById("moveInvList");
+    const btnMoveFromCerea = document.getElementById("btnMoveFromCerea");
+    const btnMoveFromConca = document.getElementById("btnMoveFromConca");
+    const btnMoveInvBack = document.getElementById("btnMoveInvBack");
+    const moveInvListTitle = document.getElementById("moveInvListTitle");
+    const moveInvListSub = document.getElementById("moveInvListSub");
+    const moveInvSearch = document.getElementById("moveInvSearch");
+    const moveInvMeta = document.getElementById("moveInvMeta");
+    const moveInvTbody = document.getElementById("moveInvTbody");
+    const pillMoveInvCount = document.getElementById("pillMoveInvCount");
+
+    const modalMoveInvQty = document.getElementById("modalMoveInvQty");
+    const moveInvQtyTitle = document.getElementById("moveInvQtyTitle");
+    const moveInvQtySub = document.getElementById("moveInvQtySub");
+    const moveInvQtyHint = document.getElementById("moveInvQtyHint");
+    const moveInvQtyInput = document.getElementById("moveInvQtyInput");
+    const btnCloseMoveInvQty = document.getElementById("btnCloseMoveInvQty");
+    const btnMoveInvQtyCancel = document.getElementById("btnMoveInvQtyCancel");
+    const btnMoveInvQtyOk = document.getElementById("btnMoveInvQtyOk");
+
+    let __moveInvFromWh = "";
+    let __moveInvToWh = "";
+    let __moveInvRowMap = new Map();
+
+    function resetMoveInvDirection(){
+      __moveInvFromWh = "";
+      __moveInvToWh = "";
+      __moveInvRowMap = new Map();
+      try{ if (moveInvHome) moveInvHome.style.display = ""; }catch(_){}
+      try{ if (moveInvList) moveInvList.style.display = "none"; }catch(_){}
+      try{ if (moveInvSearch) moveInvSearch.value = ""; }catch(_){}
+      try{ if (moveInvMeta) moveInvMeta.textContent = "—"; }catch(_){}
+      try{ if (pillMoveInvCount) pillMoveInvCount.textContent = "0"; }catch(_){}
+      try{
+        if (moveInvTbody) moveInvTbody.innerHTML = '<tr><td class="td-muted" colspan="3">Seleziona una direzione.</td></tr>';
+      }catch(_){}
+      try{
+        if (modalMoveInvQty) modalMoveInvQty.classList.remove("open");
+      }catch(_){}
+      try{ __syncBodyLockFromModals && __syncBodyLockFromModals(); }catch(_){}
+    }
+
+    function __setMoveInvDirection(fromWh, toWh){
+      __moveInvFromWh = normalizeWarehouse(fromWh || "");
+      __moveInvToWh = normalizeWarehouse(toWh || "");
+
+      try{ if (moveInvHome) moveInvHome.style.display = "none"; }catch(_){}
+      try{ if (moveInvList) moveInvList.style.display = ""; }catch(_){}
+      try{
+        if (moveInvListTitle) moveInvListTitle.textContent =
+          `${warehouseLabel(__moveInvFromWh)} → ${warehouseLabel(__moveInvToWh)}`;
+      }catch(_){}
+      try{
+        if (moveInvListSub) moveInvListSub.textContent = "Clicca una riga per inserire la quantità da spostare.";
+      }catch(_){}
+      try{ if (moveInvSearch) moveInvSearch.value = ""; }catch(_){}
+      try{ renderMoveInv(); }catch(_){}
+    }
+
+    function __moveInvNorm(s){
+      try{
+        return normTextKey(String(s || ""));
+      }catch(_){
+        return String(s || "").toLowerCase();
+      }
+    }
+
+    function renderMoveInv(){
+      try{
+        if (!viewMoveInv) return;
+
+        // aggiorna solo se la vista è aperta o se serve contatore
+        const isActive = !!(viewMoveInv.classList && viewMoveInv.classList.contains("active"));
+
+        if (!isActive){
+          try{ if (pillMoveInvCount) pillMoveInvCount.textContent = String(pillMoveInvCount.textContent || "0"); }catch(_){}
+          return;
+        }
+
+        // step home
+        if (!__moveInvFromWh || !__moveInvToWh){
+          try{ if (pillMoveInvCount) pillMoveInvCount.textContent = "0"; }catch(_){}
+          return;
+        }
+
+        let stockByWh = [];
+        try{ stockByWh = (typeof computeStockByWarehouse === "function") ? computeStockByWarehouse() : []; }catch(_){ stockByWh = []; }
+
+        let rows = buildInventoryRowsForWarehouse(__moveInvFromWh, stockByWh || []);
+        rows = groupStockRowsByAlias(rows);
+
+        // solo disponibili (>0)
+        rows = rows.filter(r => safeInt(r && r.qty) > 0);
+
+        const q = __moveInvNorm((moveInvSearch && moveInvSearch.value) || "").trim();
+        if (q){
+          rows = rows.filter(r => {
+            const hay = [
+              r.customer || "",
+              r.item || "",
+              r.__alias || "",
+              ...(Array.isArray(r.__codes) ? r.__codes : []),
+              ...(Array.isArray(r.__customers) ? r.__customers : []),
+              ...(Array.isArray(r.__members) ? r.__members.map(m => (m && m.item) || "") : []),
+              ...(Array.isArray(r.__members) ? r.__members.map(m => (m && m.code) || "") : [])
+            ].join(" ");
+            return __moveInvNorm(hay).includes(q);
+          });
+        }
+
+        // sort by item then code
+        rows.sort((a,b) => {
+          const ai = String(a && a.item || "").toLowerCase();
+          const bi = String(b && b.item || "").toLowerCase();
+          if (ai && bi && ai !== bi) return ai.localeCompare(bi, "it");
+          const ac = String((a && (a.__displayCode || a.code)) || "");
+          const bc = String((b && (b.__displayCode || b.code)) || "");
+          return ac.localeCompare(bc, "it");
+        });
+
+        try{ if (pillMoveInvCount) pillMoveInvCount.textContent = String(rows.length); }catch(_){}
+        try{ if (moveInvMeta) moveInvMeta.textContent = `Righe: ${rows.length.toLocaleString("it-IT")}`; }catch(_){}
+
+        if (!moveInvTbody) return;
+
+        if (!rows.length){
+          moveInvTbody.innerHTML = '<tr><td class="td-muted" colspan="3">Nessun articolo disponibile.</td></tr>';
+          __moveInvRowMap = new Map();
+          return;
+        }
+
+        const max = 900;
+        const show = rows.slice(0, max);
+
+        __moveInvRowMap = new Map(show.map(r => {
+          const gk = String(r && (r.__groupKey || r.__displayCode || r.code) || "").trim() || ("gk_" + Math.random().toString(16).slice(2));
+          return [gk, r];
+        }));
+
+        const fmt = (n) => Number(safeInt(n)).toLocaleString("it-IT");
+        const uomFor = (r) => {
+          try{
+            const u = __normalizeUom(r && r.uom || "") || getUomResolvedForCodes(r && r.__codes || []) || getUomResolvedForCode((r && r.code) || "") || "pz";
+            return u || "pz";
+          }catch(_){ return "pz"; }
+        };
+
+        moveInvTbody.innerHTML = show.map(r => {
+          const gk = String(r && (r.__groupKey || r.__displayCode || r.code) || "").trim();
+          const code = escapeHtml(String(r && (r.__displayCode || r.code) || "").trim());
+          const item = escapeHtml(String(r && r.item || "").trim());
+          const qty = fmt(r && r.qty);
+          const uom = escapeHtml(uomFor(r));
+          return `
+            <tr class="moveInvRow" data-gk="${escapeHtmlAttr(gk)}" title="Sposta quantità">
+              <td data-label="Codice"><span class="kbd">${code || "—"}</span></td>
+              <td data-label="Articolo">${item || '<span class="td-muted">—</span>'}</td>
+              <td data-label="Disponibile" class="qty" style="text-align:right;">${qty} <span class="td-muted" style="font-size:12px;">${uom}</span></td>
+            </tr>
+          `;
+        }).join("") + (rows.length > show.length ? `<tr><td class="td-muted" colspan="3">+${rows.length - show.length} altri… (affina la ricerca)</td></tr>` : "");
+      }catch(e){
+        console.warn("renderMoveInv failed", e);
+        try{ if (moveInvTbody) moveInvTbody.innerHTML = '<tr><td class="td-muted" colspan="3">Errore render.</td></tr>'; }catch(_){}
+      }
+    }
+
+    function closeMoveInvQtyModal(){
+      try{ if (modalMoveInvQty) modalMoveInvQty.classList.remove("open"); }catch(_){}
+      try{ __syncBodyLockFromModals && __syncBodyLockFromModals(); }catch(_){}
+    }
+
+    function openMoveInvQtyModal(groupKey){
+      try{
+        const gk = String(groupKey || "").trim();
+        const row = (__moveInvRowMap && __moveInvRowMap.get) ? __moveInvRowMap.get(gk) : null;
+        if (!row) { showToast("Riga non trovata"); return; }
+
+        const avail = safeInt(row && row.qty);
+        if (avail <= 0) { showToast("Nessuna disponibilità"); return; }
+
+        const uom = __normalizeUom(row && row.uom || "") || getUomResolvedForCodes(row && row.__codes || []) || getUomResolvedForCode((row && row.code) || "") || "pz";
+
+        if (moveInvQtyTitle) moveInvQtyTitle.textContent = "Sposta inventario";
+        if (moveInvQtySub) moveInvQtySub.textContent = `${warehouseLabel(__moveInvFromWh)} → ${warehouseLabel(__moveInvToWh)}`;
+        if (moveInvQtyHint) moveInvQtyHint.textContent = `Disponibile: ${avail.toLocaleString("it-IT")} ${uom}`;
+
+        if (moveInvQtyInput){
+          moveInvQtyInput.value = "";
+          moveInvQtyInput.setAttribute("max", String(avail));
+          moveInvQtyInput.dataset.gk = gk;
+        }
+
+        if (modalMoveInvQty){
+          modalMoveInvQty.classList.add("open");
+          __syncBodyLockFromModals && __syncBodyLockFromModals();
+        }
+
+        try{ moveInvQtyInput && moveInvQtyInput.focus(); }catch(_){}
+      }catch(e){
+        console.warn("openMoveInvQtyModal failed", e);
+      }
+    }
+
+    async function __doMoveInvTransferFromRow(row, qty){
+      const g = row || {};
+      const q = safeInt(qty);
+      if (!Number.isFinite(q) || q <= 0){
+        showToast("Inserisci una quantità valida", "warn");
+        return;
+      }
+
+      const from = normalizeWarehouse(__moveInvFromWh || "");
+      const to = normalizeWarehouse(__moveInvToWh || "");
+      const avail = safeInt(g.qty);
+      if (q > avail){
+        showToast("Quantità superiore al disponibile", "err");
+        return;
+      }
+
+      const uom = __normalizeUom(g.uom || "") || getUomResolvedForCodes(g.__codes || []) || getUomResolvedForCode(g.code || "") || "pz";
+      const note = `Spostamento inventario: ${warehouseLabel(from)} → ${warehouseLabel(to)}`;
+
+      // membri (per alias group) — se non presenti, fallback su riga singola
+      const membersRaw = Array.isArray(g.__members) ? g.__members.slice() : [g];
+      const members = membersRaw.map(m => ({
+        customer: String(m && m.customer || "").trim(),
+        code: String(m && m.code || "").trim(),
+        item: String(m && m.item || "").trim(),
+        qty: safeInt(m && m.qty),
+        warehouse: normalizeWarehouse((m && m.warehouse) || from)
+      })).filter(m => !!m.code && normalizeWarehouse(m.warehouse) === from);
+
+      if (!members.length){
+        showToast("Errore: nessun membro valido", "err");
+        return;
+      }
+
+      const custFallback = Array.isArray(g.__customers)
+        ? String(g.__customers.find(x => String(x || "").trim()) || "").trim()
+        : "";
+
+      let remaining = q;
+      const mvs = [];
+      const sorted = members.slice().sort((a,b) => safeInt(b.qty) - safeInt(a.qty));
+
+      const available = sorted.reduce((sum, m) => sum + safeInt(m.qty), 0);
+      if (available < remaining){
+        showToast("Errore: stock non sufficiente", "err");
+        return;
+      }
+
+      for (const m of sorted){
+        if (remaining <= 0) break;
+        const take = Math.min(safeInt(m.qty), remaining);
+        if (!take) continue;
+
+        const cust = m.customer || custFallback || String(g.customer || "").trim();
+        const code = m.code || String(g.code || "").trim();
+        const item = m.item || String(g.item || "") || code;
+
+        mvs.push(makeMovement({
+          type: "OUT",
+          customer: cust,
+          code,
+          item,
+          qty: take,
+          date: todayYYYYMMDD(),
+          note,
+          uom,
+          qtyRaw: `${take} ${uom}`.trim(),
+          warehouse: from,
+          source: "Spostamento",
+          rawText: ""
+        }));
+
+        mvs.push(makeMovement({
+          type: "IN",
+          customer: cust,
+          code,
+          item,
+          qty: take,
+          date: todayYYYYMMDD(),
+          note,
+          uom,
+          qtyRaw: `${take} ${uom}`.trim(),
+          warehouse: to,
+          source: "Spostamento",
+          rawText: ""
+        }));
+
+        remaining -= take;
+      }
+
+      if (remaining > 0){
+        showToast("Errore: quantità non allocata", "err");
+        return;
+      }
+
+      try{
+        if (btnMoveInvQtyOk) btnMoveInvQtyOk.disabled = true;
+        await addMovementsBatch(mvs);
+        showToast(`Spostato ${q} ${uom}`);
+        closeMoveInvQtyModal();
+        // refresh list
+        try{ renderAll(); }catch(_){}
+        try{ renderMoveInv(); }catch(_){}
+      }catch(e){
+        console.error(e);
+        showToast("Errore spostamento", "err");
+      }finally{
+        try{ if (btnMoveInvQtyOk) btnMoveInvQtyOk.disabled = false; }catch(_){}
+      }
+    }
+
+    // Bind events (once)
+    (function __bindMoveInvEvents(){
+      try{
+        if (viewMoveInv && viewMoveInv.dataset && viewMoveInv.dataset.bound === "1") return;
+        if (viewMoveInv && viewMoveInv.dataset) viewMoveInv.dataset.bound = "1";
+
+        btnMoveFromCerea?.addEventListener("click", () => { __setMoveInvDirection(WAREHOUSE_CEREA, WAREHOUSE_CONCA); });
+        btnMoveFromConca?.addEventListener("click", () => { __setMoveInvDirection(WAREHOUSE_CONCA, WAREHOUSE_CEREA); });
+        btnMoveInvBack?.addEventListener("click", () => { resetMoveInvDirection(); });
+
+        moveInvSearch?.addEventListener("input", () => { try{ renderMoveInv(); }catch(_){ } });
+
+        // table row click
+        moveInvTbody?.addEventListener("click", (e) => {
+          const tr = e.target && e.target.closest ? e.target.closest("tr[data-gk]") : null;
+          if (!tr) return;
+          const gk = tr.getAttribute("data-gk") || "";
+          if (!gk) return;
+          openMoveInvQtyModal(gk);
+        });
+
+        // modal close/cancel
+        btnCloseMoveInvQty?.addEventListener("click", closeMoveInvQtyModal);
+        btnMoveInvQtyCancel?.addEventListener("click", closeMoveInvQtyModal);
+        modalMoveInvQty?.addEventListener("click", (e) => { if (e.target === modalMoveInvQty) closeMoveInvQtyModal(); });
+
+        // ok
+        btnMoveInvQtyOk?.addEventListener("click", async () => {
+          const gk = moveInvQtyInput ? String(moveInvQtyInput.dataset.gk || "") : "";
+          const row = (__moveInvRowMap && __moveInvRowMap.get) ? __moveInvRowMap.get(gk) : null;
+          if (!row) { showToast("Riga non trovata"); return; }
+          const q = safeInt(moveInvQtyInput ? moveInvQtyInput.value : 0);
+          await __doMoveInvTransferFromRow(row, q);
+        });
+
+        // Enter/Esc in input
+        moveInvQtyInput?.addEventListener("keydown", (e) => {
+          if (e.key === "Enter"){ e.preventDefault(); btnMoveInvQtyOk && btnMoveInvQtyOk.click(); }
+          if (e.key === "Escape"){ e.preventDefault(); closeMoveInvQtyModal(); }
+        });
+
+      }catch(_){}
+    })();
+
+
 function renderAll() {
       const stockArr = computeStock();
       const stockByWh = computeStockByWarehouse();
@@ -7650,6 +8023,7 @@ function renderAll() {
       renderCategoryBoardCerea(stockByWh);
       renderInventoryTrend(stockArr);
 
+      try{ renderMoveInv(); }catch(_){ }
 
       // Inventario: mostra tabella solo dopo scelta sede
       if (__currentWarehouse) {
