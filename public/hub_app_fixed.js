@@ -8042,7 +8042,9 @@ let __stockRowByKey = new Map();
           __syncBodyLockFromModals && __syncBodyLockFromModals();
         }
 
-        try{ moveInvQtyInput && moveInvQtyInput.focus(); }catch(_){}
+        if (!__isMobileDevice()){
+          try{ moveInvQtyInput && moveInvQtyInput.focus(); }catch(_){}
+        }
       }catch(e){
         console.warn("openMoveInvQtyModal failed", e);
       }
