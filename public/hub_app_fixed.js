@@ -7840,6 +7840,7 @@ let __stockRowByKey = new Map();
     const moveInvQtyTitle = document.getElementById("moveInvQtyTitle");
     const moveInvQtySub = document.getElementById("moveInvQtySub");
     const moveInvQtyHint = document.getElementById("moveInvQtyHint");
+    const moveInvQtyItem = document.getElementById("moveInvQtyItem");
     const moveInvQtyInput = document.getElementById("moveInvQtyInput");
     const btnCloseMoveInvQty = document.getElementById("btnCloseMoveInvQty");
     const btnMoveInvQtyCancel = document.getElementById("btnMoveInvQtyCancel");
@@ -8011,6 +8012,10 @@ let __stockRowByKey = new Map();
         if (moveInvQtyTitle) moveInvQtyTitle.textContent = "Sposta inventario";
         if (moveInvQtySub) moveInvQtySub.textContent = `${warehouseLabel(__moveInvFromWh)} → ${warehouseLabel(__moveInvToWh)}`;
         if (moveInvQtyHint) moveInvQtyHint.textContent = `Disponibile: ${avail.toLocaleString("it-IT")} ${uom}`;
+        if (moveInvQtyItem){
+          const itemName = String(row && row.item || "").trim();
+          moveInvQtyItem.textContent = itemName || "—";
+        }
 
         if (moveInvQtyInput){
           moveInvQtyInput.value = "";
