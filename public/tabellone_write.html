@@ -10751,18 +10751,19 @@ U("payrollAdminClose")?.addEventListener("click", () => {
   // public hooks for the hub
   function onSignedIn(){
     try{ D(); }catch(_e){}
-    // keep user emailLower aligned
+    // keep user emailLower aligned (hub didn't have it originally)
     try{
       if(N.user && N.user.email) N.user.emailLower = String(N.user.email).toLowerCase();
       N.payroll = N.payroll || {};
       N.payroll.userView = N.payroll.userView || {};
-      N.payroll.userView.emailLower = (N.user && (N.user.emailLower || (N.user.email ? String(N.user.email).toLowerCase() : ""))) || N.payroll.userView.emailLower || "";
+      N.payroll.userView.emailLower = N.user?.emailLower || N.payroll.userView.emailLower || "";
     }catch(_e){}
 
     try{ Mi(); }catch(_e){}
     try{ Oi(); }catch(_e){}
-
-    // Payroll watchers are lazy-started (avoid permission-denied on TV/tabelloni).
+    try{ startPayrollDirectoryWatch(); }catch(_e){}
+    try{ Fi(); }catch(_e){}
+    try{ zi(); }catch(_e){}
   }
 
   function onSignedOut(){
@@ -11173,11 +11174,22 @@ async function twSyncOrdersToWriteQueue(){
     }
 
     // Remove stale managed queue rows
+    // ⚠️ Safety: se per qualche motivo "desired" risulta vuoto (allowlist momentaneamente vuota,
+    // XML non ancora caricato, glitch di rete), NON devo cancellare tutta la coda automaticamente.
+    // In quel caso mi limito a togliere solo le righe già concluse (lineKey in concluded).
+    const __twSafetyNoWipe = (desired.size === 0 && existingManaged.length > 0);
+    if(__twSafetyNoWipe){
+      try{ console.warn("[TW] Safety: desired empty → skip auto-delete (except concluded)."); }catch(_e){}
+    }
     for(const it of existingManaged){
       const id = String(it?.id||"");
       const lineKey = String(it?.lineKey||"");
       if(!id) continue;
-      const shouldRemove = !desired.has(id) || (lineKey && concluded.has(lineKey));
+
+      const shouldRemove = __twSafetyNoWipe
+        ? (lineKey && concluded.has(lineKey))                 // safe mode: only concluded
+        : (!desired.has(id) || (lineKey && concluded.has(lineKey)));
+
       if(!shouldRemove) continue;
       batch.delete(fs.doc(queueCol, id));
       ops++;
