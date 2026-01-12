@@ -7465,7 +7465,7 @@ try{
         const contacts = [s.phone, s.email].filter(Boolean).map(x => escapeHtml(x)).join("<br>") || '<span class="td-muted">—</span>';
 
         return `
-          <tr>
+          <tr data-supplier-id="${escapeHtmlAttr(s.id)}" title="Apri fornitore">
             <td data-label="Nome"><strong>${name}</strong></td>
             <td data-label="P.IVA">${vat}</td>
             <td data-label="Città">${city}</td>
@@ -9787,10 +9787,26 @@ async function handleFileSelection(fileList) {
     // Table actions (delegation)
     if (anagTbody) {
       anagTbody.addEventListener("click", (e) => {
+        const targetEl = (e && e.target && e.target.nodeType === 3) ? e.target.parentElement : (e ? e.target : null);
+
+        // Click riga (fornitori): apri dettaglio fornitore cliccando ovunque sulla riga
+        // (escludi elementi interattivi come bottoni/link/input)
+        if (activeAnagTab !== "products") {
+          const isInteractive = !!(targetEl && targetEl.closest && targetEl.closest("button, a, input, select, textarea, label"));
+          if (!isInteractive) {
+            const trSup = targetEl && targetEl.closest ? targetEl.closest("tr[data-supplier-id]") : null;
+            const sid = trSup ? (trSup.getAttribute("data-supplier-id") || "") : "";
+            if (sid) {
+              openSupplierModal(sid);
+              return;
+            }
+          }
+        }
+
         // Click riga (prodotti): apri dettaglio prodotto (stesso modale Inventario)
         if (activeAnagTab === "products") {
-          const tr = e.target && e.target.closest ? e.target.closest("tr[data-pg]") : null;
-          if (tr && (!e.target.closest || !e.target.closest("button[data-action]"))) {
+          const tr = targetEl && targetEl.closest ? targetEl.closest("tr[data-pg]") : null;
+          if (tr && (!targetEl || !targetEl.closest || !targetEl.closest("button[data-action]"))) {
             const gid = tr.getAttribute("data-pg") || "";
             if (gid) {
               try{
@@ -9804,7 +9820,7 @@ async function handleFileSelection(fileList) {
           }
         }
 
-        const btn = e.target.closest("button[data-action]");
+        const btn = targetEl && targetEl.closest ? targetEl.closest("button[data-action]") : null;
         if (!btn) return;
         const action = btn.getAttribute("data-action");
         const id = btn.getAttribute("data-id");
