@@ -302,34 +302,116 @@
     }
   }
 
+    var __detailCtx = { id:"", docKey:"" };
+
+  function __setVal(el, v){
+    if (!el) return;
+    try{
+      el.value = (v == null) ? "" : String(v);
+    }catch(_){}
+  }
+
+  function __openDetailModal(){
+    if (!els.modalMovementDetail) return;
+    try{ els.modalMovementDetail.classList.add("open"); }catch(_){}
+    try{ (typeof __syncBodyLockFromModals === "function") && __syncBodyLockFromModals(); }catch(_){}
+  }
+
+  function __closeDetailModal(){
+    if (!els.modalMovementDetail) return;
+    try{ els.modalMovementDetail.classList.remove("open"); }catch(_){}
+    try{ (typeof __syncBodyLockFromModals === "function") && __syncBodyLockFromModals(); }catch(_){}
+  }
+
   function openDetails(mv){
     if (!api || !mv) return;
-    var lines = [];
-    function push(k,v){
-      var s = String(v ?? "").trim();
-      if (!s) s = "—";
-      lines.push(k + ": " + s);
+
+    // Se non abbiamo il modale dedicato, fallback alla modale testuale legacy
+    cacheEls();
+    if (!els.modalMovementDetail){
+      var lines = [];
+      function push(k,v){
+        var s = String(v ?? "").trim();
+        if (!s) s = "—";
+        lines.push(k + ": " + s);
+      }
+      push("Tipo", (String(mv.type || "").toUpperCase() === "OUT") ? "OUT (scarico)" : "IN (carico)");
+      push("Data documento", mv.date);
+      push("Creato il", mv.createdAt);
+      push("Fornitore", mv.customer);
+      push("Codice", mv.code);
+      push("Articolo", mv.item);
+      push("Q.tà", String(String(mv.qtyRaw || "").trim() || (((api.safeInt ? api.safeInt(mv.qty) : mv.qty) ?? "") + (String(mv.uom||"").trim() ? (" " + String(mv.uom||"").trim()) : ""))));
+      push("Sede", whLabel(mv.warehouse || ""));
+      push("Fonte", mv.source);
+      push("Note", mv.note);
+      if (mv.docType || mv.docNum || mv.docDateRaw){
+        push("Doc tipo", mv.docType);
+        push("Doc n.", mv.docNum);
+        push("Doc data (raw)", mv.docDateRaw);
+      }
+      if (mv.lineIndex != null && String(mv.lineIndex).trim() !== "") push("Riga", mv.lineIndex);
+      if (mv.rawText) push("RawText", String(mv.rawText).slice(0, 800) + (String(mv.rawText).length > 800 ? "…" : ""));
+      try{ api.openModal("Dettaglio movimento", lines.join("\n")); }catch(_){}
+      return;
     }
-    push("Tipo", (String(mv.type || "").toUpperCase() === "OUT") ? "OUT (scarico)" : "IN (carico)");
-    push("Data documento", mv.date);
-    push("Creato il", mv.createdAt);
-    push("Fornitore", mv.customer);
-    push("Codice", mv.code);
-    push("Articolo", mv.item);
-    push("Q.tà", String(String(mv.qtyRaw || "").trim() || (((api.safeInt ? api.safeInt(mv.qty) : mv.qty) ?? "") + (String(mv.uom||"").trim() ? (" " + String(mv.uom||"").trim()) : ""))));
-    push("Sede", whLabel(mv.warehouse || ""));
-    push("Fonte", mv.source);
-    push("Note", mv.note);
-    if (mv.docType || mv.docNum || mv.docDateRaw){
-      push("Doc tipo", mv.docType);
-      push("Doc n.", mv.docNum);
-      push("Doc data (raw)", mv.docDateRaw);
-    }
-    if (mv.lineIndex != null && String(mv.lineIndex).trim() !== "") push("Riga", mv.lineIndex);
-    if (mv.rawText) push("RawText", String(mv.rawText).slice(0, 800) + (String(mv.rawText).length > 800 ? "…" : ""));
+
+    // Doc key (se presente)
+    var docKey = "";
+    try{ docKey = buildDocKeyFromMovement(mv) || ""; }catch(_){ docKey = ""; }
+    __detailCtx.id = String(mv.id || "");
+    __detailCtx.docKey = String(docKey || "");
+
+    // Titolo + sub
     try{
-      api.openModal("Dettaglio movimento", lines.join("\n"));
+      if (els.movDetTitle) els.movDetTitle.textContent = "Dettaglio movimento";
+      if (els.movDetSubtitle){
+        var d = String(mv.date || "").trim();
+        var wh = whLabel(mv.warehouse || "");
+        var cust = String(mv.customer || "").trim();
+        els.movDetSubtitle.textContent = [cust || "—", (d || "—"), (wh || "—")].join(" · ");
+      }
     }catch(_){}
+
+    // Campi (ordine)
+    var typeLbl = (String(mv.type || "").toUpperCase() === "OUT") ? "OUT (scarico)" : "IN (carico)";
+    var uom = String(mv.uom || "").trim();
+    var qty = (api && typeof api.safeInt === "function") ? api.safeInt(mv.qty) : (Number(mv.qty)||0);
+    var qtyRaw = String(mv.qtyRaw || "").trim();
+    if (!qtyRaw) qtyRaw = Number(qty).toLocaleString("it-IT") + (uom ? (" " + uom) : "");
+
+    __setVal(els.movDetDate, String(mv.date || "").trim() || "—");
+    __setVal(els.movDetType, typeLbl);
+    __setVal(els.movDetWarehouse, whLabel(mv.warehouse || ""));
+    __setVal(els.movDetSource, String(mv.source || "").trim() || "—");
+    __setVal(els.movDetCustomer, String(mv.customer || "").trim() || "—");
+    __setVal(els.movDetCode, String(mv.code || "").trim() || "—");
+    __setVal(els.movDetItem, String(mv.item || "").trim() || "—");
+    __setVal(els.movDetQty, String(qtyRaw || "").trim() || "—");
+    __setVal(els.movDetUom, uom || "—");
+    __setVal(els.movDetNote, String(mv.note || "").trim() || "—");
+    __setVal(els.movDetDocType, String(mv.docType || "").trim() || "—");
+    __setVal(els.movDetDocNum, String(mv.docNum || "").trim() || "—");
+    __setVal(els.movDetDocDateRaw, String(mv.docDateRaw || "").trim() || "—");
+    __setVal(els.movDetLineIndex, (mv.lineIndex != null && String(mv.lineIndex).trim() !== "") ? String(mv.lineIndex) : "—");
+    __setVal(els.movDetVat, String(mv.supplierVat || mv.vatNorm || mv.vat || "").trim() || "—");
+    __setVal(els.movDetTriplet, String(mv.ddtTripletKey || mv.ddtKey || "").trim() || "—");
+    __setVal(els.movDetCreatedAt, (api && typeof api.formatDateIT === "function") ? api.formatDateIT(mv.createdAt) : (String(mv.createdAt || "").trim() || "—"));
+    __setVal(els.movDetId, String(mv.id || "").trim() || "—");
+    __setVal(els.movDetRawText, String(mv.rawText || "").trim() || "");
+
+    // Bottone documento
+    try{
+      var show = !!(__detailCtx.docKey && typeof api.openDocDetail === "function");
+      if (els.movDetOpenDoc) els.movDetOpenDoc.style.display = show ? "" : "none";
+    }catch(_){}
+
+    // Bottone annulla (richiede API)
+    try{
+      if (els.movDetUndo) els.movDetUndo.disabled = !(api && typeof api.deleteMovement === "function" && __detailCtx.id);
+    }catch(_){}
+
+    __openDetailModal();
   }
 
   function bindEvents(){
@@ -376,6 +458,58 @@
         if (mv2) openDetails(mv2);
       });
     }
+    // Detail modal controls (bind once)
+    try{
+      cacheEls();
+      if (els.modalMovementDetail && !(els.modalMovementDetail.dataset && els.modalMovementDetail.dataset.bound === "1")){
+        if (els.modalMovementDetail.dataset) els.modalMovementDetail.dataset.bound = "1";
+
+        // click fuori = chiudi
+        els.modalMovementDetail.addEventListener("click", function(ev){
+          if (ev && ev.target === els.modalMovementDetail) __closeDetailModal();
+        });
+
+        if (els.movDetClose) els.movDetClose.addEventListener("click", function(e){ try{ e.preventDefault(); e.stopPropagation(); }catch(_){}
+          __closeDetailModal();
+        });
+        if (els.movDetDone) els.movDetDone.addEventListener("click", function(e){ try{ e.preventDefault(); e.stopPropagation(); }catch(_){}
+          __closeDetailModal();
+        });
+
+        if (els.movDetOpenDoc) els.movDetOpenDoc.addEventListener("click", function(e){
+          try{ e.preventDefault(); e.stopPropagation(); }catch(_){}
+          if (!api || typeof api.openDocDetail !== "function") return;
+          var k = String(__detailCtx.docKey || "").trim();
+          if (!k) return;
+          try{ api.openDocDetail(k); }catch(_){}
+          __closeDetailModal();
+        });
+
+        if (els.movDetUndo) els.movDetUndo.addEventListener("click", async function(e){
+          try{ e.preventDefault(); e.stopPropagation(); }catch(_){}
+          if (!api || typeof api.deleteMovement !== "function") {
+            try{ api && api.openModal && api.openModal("Operazione non disponibile", "Per annullare un movimento serve l'API deleteMovement."); }catch(_){}
+            return;
+          }
+          var id = String(__detailCtx.id || "").trim();
+          if (!id) return;
+
+          var ok = confirm("Annullare questo movimento?\n\nVerrà eliminata questa riga e lo stock tornerà come prima.");
+          if (!ok) return;
+
+          try{ els.movDetUndo.disabled = true; }catch(_){}
+          try{ await api.deleteMovement(id); }catch(err){
+            try{ api.openModal && api.openModal("Errore", String(err && (err.message || err) || err)); }catch(_){}
+            try{ els.movDetUndo.disabled = false; }catch(_){}
+            return;
+          }
+
+          try{ api.showToast && api.showToast("Movimento annullato"); }catch(_){}
+          __closeDetailModal();
+        });
+      }
+    }catch(_){}
+
   }
 
   function cacheEls(){
@@ -390,6 +524,35 @@
     els.pillMovementsCount = $("pillMovementsCount");
     els.movementsAllTbody = $("movementsAllTbody");
     els.movementsMeta = $("movementsMeta");
+
+    // Dettaglio movimento (modal)
+    els.modalMovementDetail = $("modalMovementDetail");
+    els.movDetTitle = $("movDetTitle");
+    els.movDetSubtitle = $("movDetSubtitle");
+    els.movDetClose = $("movDetClose");
+    els.movDetDone = $("movDetDone");
+    els.movDetOpenDoc = $("movDetOpenDoc");
+    els.movDetUndo = $("movDetUndo");
+
+    els.movDetDate = $("movDetDate");
+    els.movDetType = $("movDetType");
+    els.movDetWarehouse = $("movDetWarehouse");
+    els.movDetSource = $("movDetSource");
+    els.movDetCustomer = $("movDetCustomer");
+    els.movDetCode = $("movDetCode");
+    els.movDetItem = $("movDetItem");
+    els.movDetQty = $("movDetQty");
+    els.movDetUom = $("movDetUom");
+    els.movDetNote = $("movDetNote");
+    els.movDetDocType = $("movDetDocType");
+    els.movDetDocNum = $("movDetDocNum");
+    els.movDetDocDateRaw = $("movDetDocDateRaw");
+    els.movDetLineIndex = $("movDetLineIndex");
+    els.movDetVat = $("movDetVat");
+    els.movDetTriplet = $("movDetTriplet");
+    els.movDetCreatedAt = $("movDetCreatedAt");
+    els.movDetId = $("movDetId");
+    els.movDetRawText = $("movDetRawText");
   }
 
   function render(){
@@ -4779,8 +4942,20 @@ docPages: __sanitizeDocPages(mv.docPages || mv.docImages),
 
 
 async function deleteMovement(id) {
-  if (!id) return;
-  await deleteMovementsBulk([id]);
+  const mid = String(id || "").trim();
+  if (!mid) return;
+
+  // Se sei loggato, prova una cancellazione "strict" (se fallisce, alza errore)
+  if (fb.user && fb.db) {
+    try {
+      await deleteDoc(doc(fb.db, "orgs", ORG_ID, "inventoryMovements", mid));
+    } catch (e) {
+      throw e;
+    }
+  }
+
+  // Cleanup/UI (include docPages + tripletKey best-effort)
+  await deleteMovementsBulk([mid]);
 }
 
     function makeMovement(fields) {
@@ -11592,6 +11767,7 @@ if (importMovementsInput) importMovementsInput.addEventListener("change", async 
         openModal,
         showToast,
         exportMovementsCSV,
+        deleteMovement,
         openDocDetail,
 
         // Categorie
