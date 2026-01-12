@@ -5184,6 +5184,45 @@ async function deleteMovement(id) {
       const s = String(v || "").trim();
       return /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(s);
     }
+    function __hexToRgb(hex){
+      const s = String(hex || "").trim().replace("#", "");
+      if (!/^[0-9a-f]{3}([0-9a-f]{3})?$/i.test(s)) return null;
+      const h = (s.length === 3) ? (s[0]+s[0]+s[1]+s[1]+s[2]+s[2]) : s;
+      const n = parseInt(h, 16);
+      return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
+    }
+    function __rgbToHex(r,g,b){
+      const to = (x) => Math.max(0, Math.min(255, Math.round(Number(x) || 0))).toString(16).padStart(2,"0");
+      return "#" + to(r) + to(g) + to(b);
+    }
+    function __mixRgb(a,b,t){
+      const tt = Math.max(0, Math.min(1, Number(t) || 0));
+      return {
+        r: Math.round(a.r + (b.r - a.r) * tt),
+        g: Math.round(a.g + (b.g - a.g) * tt),
+        b: Math.round(a.b + (b.b - a.b) * tt)
+      };
+    }
+    function __mixHex(baseHex, targetHex, t){
+      const a = __hexToRgb(baseHex);
+      const b = __hexToRgb(targetHex);
+      if (!a || !b) return baseHex;
+      const m = __mixRgb(a,b,t);
+      return __rgbToHex(m.r,m.g,m.b);
+    }
+    function __catIosFillVars(hex){
+      const base = __isHexColor(hex) ? String(hex).trim() : "#0a84ff";
+      const rgb = __hexToRgb(base) || { r:10, g:132, b:255 };
+
+      // variazioni leggere per "profondità" (stile bottone iOS)
+      const c1 = __mixHex(base, "#ffffff", 0.20); // highlight
+      const c2 = __mixHex(base, "#000000", 0.18); // shadow
+
+      const glow = `rgba(${rgb.r},${rgb.g},${rgb.b},0.20)`;
+
+      return `--cat-bg1:${c1}; --cat-bg2:${c2}; --cat-glow:${glow};`;
+    }
+
 
     // Dashboard: riquadro "Categorie" (pezzi per categoria) — Inventario Cerea
     function renderCategoryBoardCerea(stockByWh){
@@ -5230,7 +5269,7 @@ async function deleteMovement(id) {
         categoryListCerea.innerHTML = list.map(item => {
           const pct = Math.max(0, Math.min(100, Math.round((Math.max(0, Number(item.qty)||0) / max) * 100)));
           const col = __isHexColor(item.color) ? item.color : "";
-          const fillStyle = col ? `background:${escapeHtmlAttr(col)};` : "";
+          const fillStyle = __catIosFillVars(col);
           return `
             <div class="categoryRow">
               <div class="categoryTrack">
