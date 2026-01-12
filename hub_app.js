@@ -1782,6 +1782,21 @@ const docDetailPhotosMeta = document.getElementById("docDetailPhotosMeta");
     const btnBackMovements = document.getElementById("btnBackMovements");
     const btnBackAnag = document.getElementById("btnBackAnag");
     let __modalOpenSeq = 0;
+    let __modalSpinnerTimer = null;
+    const __modalOpenSpinner = (function(){
+      try{
+        const el = document.createElement("div");
+        el.id = "modalOpenSpinner";
+        el.setAttribute("role", "status");
+        el.setAttribute("aria-live", "polite");
+        el.setAttribute("aria-label", "Caricamento");
+        el.innerHTML = '<div class="winSpinner" aria-hidden="true"></div>';
+        document.body.appendChild(el);
+        return el;
+      }catch(_){
+        return null;
+      }
+    })();
 
     // Porta overlay/modali come figli diretti di <body> per evitare stacking-context (transform/filter) sui parent
     (function __liftOverlaysToBody(){
@@ -1801,6 +1816,15 @@ const docDetailPhotosMeta = document.getElementById("docDetailPhotosMeta");
       if (!modal) return;
       __modalOpenSeq += 1;
       modal.dataset.openSeq = String(__modalOpenSeq);
+    }
+
+    function __showModalOpeningSpinner(){
+      if (!__modalOpenSpinner) return;
+      __modalOpenSpinner.classList.add("active");
+      if (__modalSpinnerTimer) clearTimeout(__modalSpinnerTimer);
+      __modalSpinnerTimer = setTimeout(function(){
+        __modalOpenSpinner.classList.remove("active");
+      }, 320);
     }
 
     function __getTopModal(){
@@ -1892,14 +1916,33 @@ const docDetailPhotosMeta = document.getElementById("docDetailPhotosMeta");
           if (mutation.type !== "attributes" || mutation.attributeName !== "class") return;
           const el = mutation.target;
           if (!el.classList.contains("modal")) return;
-          if (el.classList.contains("open")) {
+          const wasOpen = (mutation.oldValue || "").split(" ").includes("open");
+          if (el.classList.contains("open") && !wasOpen) {
             __markModalOpen(el);
+            __showModalOpeningSpinner();
           }
           needsSync = true;
         });
         if (needsSync) __syncHeaderBack();
       });
-      modals.forEach((modal) => observer.observe(modal, { attributes: true, attributeFilter: ["class"] }));
+      modals.forEach((modal) => observer.observe(modal, { attributes: true, attributeFilter: ["class"], attributeOldValue: true }));
+    })();
+
+    (function __observeOverlayOpen(){
+      const overlays = Array.from(document.querySelectorAll(".view.modalOverlay"));
+      if (!overlays.length) return;
+      const observer = new MutationObserver((mutations) => {
+        mutations.forEach((mutation) => {
+          if (mutation.type !== "attributes" || mutation.attributeName !== "class") return;
+          const el = mutation.target;
+          if (!el.classList.contains("view") || !el.classList.contains("modalOverlay")) return;
+          const wasActive = (mutation.oldValue || "").split(" ").includes("active");
+          if (el.classList.contains("active") && !wasActive) {
+            __showModalOpeningSpinner();
+          }
+        });
+      });
+      overlays.forEach((overlay) => observer.observe(overlay, { attributes: true, attributeFilter: ["class"], attributeOldValue: true }));
     })();
 
     function __isMobileDevice(){
