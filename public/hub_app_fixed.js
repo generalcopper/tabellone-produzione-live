@@ -2099,12 +2099,10 @@ const docDetailPhotosMeta = document.getElementById("docDetailPhotosMeta");
     document.getElementById("viewMoveInventory")?.addEventListener("click", (e) => { try{ if (e.target === e.currentTarget) { resetMoveInvDirection(); setView("home"); } }catch(_){ } });
     document.getElementById("btnCloseOcr")?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
     btnBackOcr?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
-    document.getElementById("btnGoAnag")?.addEventListener("click", () => {
-      activeAnagTab = "suppliers";
-      syncAnagHeaderTitle();
-      try{ segSuppliers && segSuppliers.classList.add("active"); segProducts && segProducts.classList.remove("active"); }catch(_){ }
-      setView("anag");
-      try{ renderAnag(); }catch(_){ }
+    document.getElementById("btnGoMoveInventory")?.addEventListener("click", () => {
+      try{ resetMoveInvDirection(); }catch(_){ }
+      setView("moveInv");
+      try{ renderMoveInv && renderMoveInv(); }catch(_){ }
     });
     document.getElementById("btnGoProdAnag")?.addEventListener("click", () => {
       activeAnagTab = "products";
