@@ -2172,7 +2172,21 @@ document.getElementById("btnCloseFlows")?.addEventListener("click", (e) => { try
 btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
     btnBackFlows?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
     btnBackMovements?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
-    btnBackMoveInv?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} try{ resetMoveInvDirection(); }catch(_){ } setView("home"); });
+    btnBackMoveInv?.addEventListener("click", (e) => {
+      try{ e.preventDefault(); e.stopPropagation(); }catch(_){}
+      const hasMoveInvModal = !!(modalMoveInvQty && modalMoveInvQty.classList && modalMoveInvQty.classList.contains("open"));
+      const hasMoveInvDirection = !!__moveInvFromWh;
+      if (hasMoveInvModal){
+        try{ closeMoveInvQtyModal(); }catch(_){ }
+        return;
+      }
+      if (hasMoveInvDirection){
+        try{ resetMoveInvDirection(); }catch(_){ }
+        setView("moveInv");
+        return;
+      }
+      setView("home");
+    });
     document.getElementById("btnFlowsExport")?.addEventListener("click", () => { try{ exportMovementsCSV(); }catch(_){ } });
     // Flussi: ricerca intelligente (DDT caricati)
     const __flowsSearch = document.getElementById("flowsSearch");
@@ -8028,7 +8042,9 @@ let __stockRowByKey = new Map();
           __syncBodyLockFromModals && __syncBodyLockFromModals();
         }
 
-        try{ moveInvQtyInput && moveInvQtyInput.focus(); }catch(_){}
+        if (!__isMobileDevice()){
+          try{ moveInvQtyInput && moveInvQtyInput.focus(); }catch(_){}
+        }
       }catch(e){
         console.warn("openMoveInvQtyModal failed", e);
       }
