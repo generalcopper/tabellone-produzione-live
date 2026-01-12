@@ -9160,7 +9160,8 @@ modalProduct.classList.add("open");
       unifiedButtons.innerHTML = codes.map(code => {
         const mem = members.find(m => String(m?.code || "").trim() === code);
         const name = getDisplayNameForCode(code, mem ? mem.item : "");
-        const label = `${name || code} • ${code}`;
+        const supplier = mem ? String(mem.customer || "").trim() : "";
+        const label = supplier ? `${name || code} • ${supplier} • ${code}` : `${name || code} • ${code}`;
         return `
           <button class="btn btn-secondary" type="button" data-open-code="${escapeHtmlAttr(code)}">
             ${escapeHtml(label)}
