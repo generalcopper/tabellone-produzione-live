@@ -2007,13 +2007,15 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
     btnBackMovements?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
     document.getElementById("btnFlowsExport")?.addEventListener("click", () => { try{ exportMovementsCSV(); }catch(_){ } });
     // Flussi: ricerca intelligente (DDT caricati)
-    if (flowsSearch){
-      flowsSearch.addEventListener("input", () => { try{ renderFlowsTable(); }catch(_){ } });
-      flowsSearch.addEventListener("keydown", (e) => {
+    const __flowsSearch = document.getElementById("flowsSearch");
+    const __btnFlowsClear = document.getElementById("btnFlowsClear");
+    if (__flowsSearch){
+      __flowsSearch.addEventListener("input", () => { try{ renderFlowsTable(); }catch(_){ } });
+      __flowsSearch.addEventListener("keydown", (e) => {
         if (!e) return;
         if (e.key === "Escape"){
           e.preventDefault();
-          flowsSearch.value = "";
+          __flowsSearch.value = "";
           try{ renderFlowsTable(); }catch(_){ }
           return;
         }
@@ -2027,11 +2029,11 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
         }
       });
     }
-    if (btnFlowsClear){
-      btnFlowsClear.addEventListener("click", () => {
-        try{ if (flowsSearch) flowsSearch.value = ""; }catch(_){}
+    if (__btnFlowsClear){
+      __btnFlowsClear.addEventListener("click", () => {
+        try{ if (__flowsSearch) __flowsSearch.value = ""; }catch(_){}
         try{ renderFlowsTable(); }catch(_){ }
-        try{ flowsSearch && flowsSearch.focus(); }catch(_){}
+        try{ __flowsSearch && __flowsSearch.focus(); }catch(_){}
       });
     }
     function closeHeaderModalIfOpen(){
