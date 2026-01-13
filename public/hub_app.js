@@ -2896,12 +2896,22 @@
     const sideMenuOverlay = document.getElementById("sideMenuOverlay");
 
     let lastFocusBeforeMenu = null;
-    // Ensure hidden menu is unfocusable on load (prevents tabbing into it)
+
+    function setInert(el, on){
+      if(!el) return;
+      try{
+        if ("inert" in el) el.inert = !!on;
+      }catch(_){}
+      if(on) el.setAttribute("inert", "");
+      else el.removeAttribute("inert");
+    }
+
+    // On load: if menu is aria-hidden, keep it inert too (not tabbable/clickable)
     try{
-      if (sideMenu?.getAttribute("aria-hidden") === "true") sideMenu.setAttribute("inert", "");
-      if (sideMenuOverlay?.getAttribute("aria-hidden") === "true") sideMenuOverlay.setAttribute("inert", "");
-    }catch(_){ }
-    // Anagrafica
+      if (sideMenu?.getAttribute("aria-hidden") === "true") setInert(sideMenu, true);
+      if (sideMenuOverlay?.getAttribute("aria-hidden") === "true") setInert(sideMenuOverlay, true);
+    }catch(_){}
+// Anagrafica
     const segSuppliers = document.getElementById("segSuppliers");
     const segProducts = document.getElementById("segProducts");
     const btnReloadAnag = document.getElementById("btnReloadAnag");
@@ -3059,18 +3069,18 @@
     }
 
     function openSideMenu(){
-      // Remember focus so we can restore it on close (avoids aria-hidden warnings)
+      // Remember focus so we can restore it on close (prevents aria-hidden warnings)
       try{ lastFocusBeforeMenu = document.activeElement; }catch(_){ lastFocusBeforeMenu = null; }
 
       document.body.classList.add("menu-open");
 
       // Make menu visible + focusable
       if (sideMenu){
-        sideMenu.removeAttribute("inert");
+        setInert(sideMenu, false);
         sideMenu.setAttribute("aria-hidden", "false");
       }
       if (sideMenuOverlay){
-        sideMenuOverlay.removeAttribute("inert");
+        setInert(sideMenuOverlay, false);
         sideMenuOverlay.setAttribute("aria-hidden", "false");
       }
 
@@ -3086,8 +3096,9 @@
       try{
         const ae = document.activeElement;
         if (sideMenu && ae && sideMenu.contains(ae)){
-          try{ ae.blur(); }catch(_){}
-          const restore = (lastFocusBeforeMenu && typeof lastFocusBeforeMenu.focus === "function") ? lastFocusBeforeMenu : btnMenuToggle;
+          const restore = (lastFocusBeforeMenu && typeof lastFocusBeforeMenu.focus === "function")
+            ? lastFocusBeforeMenu
+            : btnMenuToggle;
           restore?.focus?.({ preventScroll: true });
         }
       }catch(_){}
@@ -3097,11 +3108,11 @@
       // Hide + make unfocusable
       if (sideMenu){
         sideMenu.setAttribute("aria-hidden", "true");
-        sideMenu.setAttribute("inert", "");
+        setInert(sideMenu, true);
       }
       if (sideMenuOverlay){
         sideMenuOverlay.setAttribute("aria-hidden", "true");
-        sideMenuOverlay.setAttribute("inert", "");
+        setInert(sideMenuOverlay, true);
       }
     }
 
