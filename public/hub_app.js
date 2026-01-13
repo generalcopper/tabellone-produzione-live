@@ -711,24 +711,6 @@
           </div>
         </div>
 
-        <div class="previewArea" style="margin-top: 6px;">
-          <div class="inlineRow" style="justify-content:space-between; align-items:flex-end; gap:12px;">
-            <div class="field" style="flex:1; min-width:240px;">
-              <label for="daneaXmlUrl">Endpoint XML (proxy)</label>
-              <input id="daneaXmlUrl" placeholder="Es. https://TUO-CLOUD-RUN/danea/latest.xml" />
-            </div>
-            <div class="inlineRow" style="gap:8px; justify-content:flex-end;">
-              <button class="btn btn-ghost mini" id="btnDaneaSaveUrl" type="button">Salva</button>
-              <button class="btn btn-ghost mini" id="btnDaneaRefresh" type="button">Aggiorna</button>
-              <button class="btn btn-secondary mini" id="btnDaneaPickXml" type="button" title="Fallback: carica XML a mano">Carica XML</button>
-              <input id="daneaXmlFile" type="file" accept=".xml,text/xml,application/xml" style="display:none;" />
-            </div>
-          </div>
-          <div class="muted" style="font-size:12px; font-weight:800; line-height:1.35;">
-            Nota: Google Drive spesso blocca le chiamate dirette dal browser (CORS). L’endpoint “proxy” serve proprio per leggere il file dalla cartella Drive e restituire l’XML senza login.
-          </div>
-        </div>
-
         <!-- LIST -->
         <div id="daneaListWrap" class="stack" style="gap:10px;">
           <div class="inlineRow listStickyBar" style="justify-content:space-between; align-items:flex-end; gap:12px; margin-top: 10px;">
@@ -755,7 +737,7 @@
                 </tr>
               </thead>
               <tbody id="daneaTbody">
-                <tr><td class="td-muted" colspan="6">Configura l’endpoint XML oppure carica un file.</td></tr>
+                <tr><td class="td-muted" colspan="6">Carico XML…</td></tr>
               </tbody>
             </table>
           </div>
@@ -815,6 +797,8 @@
 
   const LS_URL = "hubinv_danea_xml_url";
   const LS_WH  = "hubinv_danea_xml_wh";
+  // Default endpoint (Cloud Run proxy). If you deploy a new service, update this.
+  const DEFAULT_XML_URL_BASE = "https://danea-xml-proxy-537555699968.europe-west8.run.app";
 
   const S = {
     xmlUrl: "",
@@ -1469,19 +1453,6 @@
   }
 
   function bindEvents(){
-    $("btnDaneaSaveUrl")?.addEventListener("click", () => {
-      const vRaw = String($("daneaXmlUrl")?.value || "").trim();
-      const v = normalizeDaneaXmlUrl(vRaw);
-      S.xmlUrl = v;
-      if ($("daneaXmlUrl")) $("daneaXmlUrl").value = v;
-      try{ localStorage.setItem(LS_URL, v); }catch(_){}
-      fetchNow(true);
-      startPolling();
-      try{ window.HubInv?.showToast?.("Endpoint salvato"); }catch(_){}
-    });
-
-    $("btnDaneaRefresh")?.addEventListener("click", () => fetchNow(true));
-    $("btnDaneaPickXml")?.addEventListener("click", () => $("daneaXmlFile")?.click());
     $("btnDaneaClear")?.addEventListener("click", () => { const i=$("daneaSearch"); if (i) i.value=""; render(); });
     $("daneaSearch")?.addEventListener("input", () => render());
 
@@ -1496,110 +1467,95 @@
 
     $("btnDaneaSend")?.addEventListener("click", () => sendSelectedFromDetail());
 
-    // File upload fallback
-    $("daneaXmlFile")?.addEventListener("change", async (e) => {
-      const f = e.target?.files?.[0];
-      if (!f) return;
-      try{
-        const txt = await f.text();
-        ingestXml(txt, true);
-      }catch(err){
-        console.warn(err);
-        alert("File non leggibile");
-      }finally{
-        e.target.value = "";
-      }
-    });
-
     // list click
     $("daneaTbody")?.addEventListener("click", (e) => {
-      const btnOpen = e.target?.closest?.("button.jsDaneaOpen");
-      const btnSend = e.target?.closest?.("button.jsDaneaSendFromList");
-      const btnDelDone = e.target?.closest?.("button.jsDaneaDeleteDone");
-      const tr = e.target?.closest?.("tr.jsDaneaRow");
+          const btnOpen = e.target?.closest?.("button.jsDaneaOpen");
+          const btnSend = e.target?.closest?.("button.jsDaneaSendFromList");
+          const btnDelDone = e.target?.closest?.("button.jsDaneaDeleteDone");
+          const tr = e.target?.closest?.("tr.jsDaneaRow");
 
-      if (btnDelDone){
-        e.preventDefault(); e.stopPropagation();
-        const k = btnDelDone.getAttribute("data-key") || "";
-        deleteCompletedByKey(k);
-        return;
-      }
-      if (btnSend){
-        e.preventDefault(); e.stopPropagation();
-        const k = btnSend.getAttribute("data-key") || "";
-        openDetailByKey(k, "verify");
-        // auto invia solo se ok
-        setTimeout(() => { try{ sendSelectedFromDetail(); }catch(_){ } }, 0);
-        return;
-      }
-      if (btnOpen){
-        e.preventDefault(); e.stopPropagation();
-        const k = btnOpen.getAttribute("data-key") || "";
-        const mode = btnOpen.getAttribute("data-mode") || (tr?.getAttribute("data-mode") || "verify");
-        openDetailByKey(k, mode);
-        return;
-      }
-      if (tr){
-        const k = tr.getAttribute("data-key") || "";
-        const mode = tr.getAttribute("data-mode") || "verify";
-        openDetailByKey(k, mode);
-      }
-    });
+          if (btnDelDone){
+            e.preventDefault(); e.stopPropagation();
+            const k = btnDelDone.getAttribute("data-key") || "";
+            deleteCompletedByKey(k);
+            return;
+          }
+          if (btnSend){
+            e.preventDefault(); e.stopPropagation();
+            const k = btnSend.getAttribute("data-key") || "";
+            openDetailByKey(k, "verify");
+            // auto invia solo se ok
+            setTimeout(() => { try{ sendSelectedFromDetail(); }catch(_){ } }, 0);
+            return;
+          }
+          if (btnOpen){
+            e.preventDefault(); e.stopPropagation();
+            const k = btnOpen.getAttribute("data-key") || "";
+            const mode = btnOpen.getAttribute("data-mode") || (tr?.getAttribute("data-mode") || "verify");
+            openDetailByKey(k, mode);
+            return;
+          }
+          if (tr){
+            const k = tr.getAttribute("data-key") || "";
+            const mode = tr.getAttribute("data-mode") || "verify";
+            openDetailByKey(k, mode);
+          }
+        });
 
     // detail row actions
     $("daneaItemsTbody")?.addEventListener("click", async (e) => {
-      const btnImport = e.target?.closest?.("button.jsDaneaImportFp");
-      const btnConfig = e.target?.closest?.("button.jsDaneaConfigFp");
-      const btnOpenFp = e.target?.closest?.("button.jsDaneaOpenFp");
+          const btnImport = e.target?.closest?.("button.jsDaneaImportFp");
+          const btnConfig = e.target?.closest?.("button.jsDaneaConfigFp");
+          const btnOpenFp = e.target?.closest?.("button.jsDaneaOpenFp");
 
-      if (btnOpenFp){
-        e.preventDefault(); e.stopPropagation();
-        const id = String(btnOpenFp.getAttribute("data-fpid") || "").trim();
-        if (id) { try{ window.openFinishedProductModal && window.openFinishedProductModal(id); }catch(_){ } }
-        return;
-      }
+          if (btnOpenFp){
+            e.preventDefault(); e.stopPropagation();
+            const id = String(btnOpenFp.getAttribute("data-fpid") || "").trim();
+            if (id) { try{ window.openFinishedProductModal && window.openFinishedProductModal(id); }catch(_){ } }
+            return;
+          }
 
-      if (btnConfig){
-        e.preventDefault(); e.stopPropagation();
-        const id = String(btnConfig.getAttribute("data-fpid") || "").trim();
-        if (id) { try{ window.openFinishedProductModal && window.openFinishedProductModal(id); }catch(_){ } }
-        return;
-      }
+          if (btnConfig){
+            e.preventDefault(); e.stopPropagation();
+            const id = String(btnConfig.getAttribute("data-fpid") || "").trim();
+            if (id) { try{ window.openFinishedProductModal && window.openFinishedProductModal(id); }catch(_){ } }
+            return;
+          }
 
-      if (btnImport){
-        e.preventDefault(); e.stopPropagation();
+          if (btnImport){
+            e.preventDefault(); e.stopPropagation();
 
-        const H = S.hub;
-        if (!H || !H.fb || !H.fb.db || !H.FS) return;
-        if (!H.fb.user) { alert("Accedi con Google"); return; }
+            const H = S.hub;
+            if (!H || !H.fb || !H.fb.db || !H.FS) return;
+            if (!H.fb.user) { alert("Accedi con Google"); return; }
 
-        const code = String(btnImport.getAttribute("data-code") || "").trim();
-        const desc = String(btnImport.getAttribute("data-desc") || "").trim() || code;
-        if (!code) return;
+            const code = String(btnImport.getAttribute("data-code") || "").trim();
+            const desc = String(btnImport.getAttribute("data-desc") || "").trim() || code;
+            if (!code) return;
 
-        try{
-          const { addDoc, collection, serverTimestamp } = H.FS;
-          const col = collection(H.fb.db, "orgs", H.ORG_ID, "finishedProducts");
-          const payload = {
-            name: desc,
-            nameLower: desc.toLowerCase(),
-            code: code,
-            codeLower: code.toLowerCase(),
-            components: [],
-            createdAt: serverTimestamp(),
-            createdBy: H.fb.user.email || H.fb.user.uid,
-            updatedAt: serverTimestamp(),
-            updatedBy: H.fb.user.email || H.fb.user.uid
-          };
-          const ref = await addDoc(col, payload);
-          try{ window.HubInv?.showToast?.("Prodotto finito importato"); }catch(_){}
-          try{ if (ref?.id) window.openFinishedProductModal && window.openFinishedProductModal(ref.id); }catch(_){}
-        }catch(err){
-          console.error(err);
-          alert("Import fallito");
-        }
-      }
-    });
+            try{
+              const { addDoc, collection, serverTimestamp } = H.FS;
+              const col = collection(H.fb.db, "orgs", H.ORG_ID, "finishedProducts");
+              const payload = {
+                name: desc,
+                nameLower: desc.toLowerCase(),
+                code: code,
+                codeLower: code.toLowerCase(),
+                components: [],
+                createdAt: serverTimestamp(),
+                createdBy: H.fb.user.email || H.fb.user.uid,
+                updatedAt: serverTimestamp(),
+                updatedBy: H.fb.user.email || H.fb.user.uid
+              };
+              const ref = await addDoc(col, payload);
+              try{ window.HubInv?.showToast?.("Prodotto finito importato"); }catch(_){}
+              try{ if (ref?.id) window.openFinishedProductModal && window.openFinishedProductModal(ref.id); }catch(_){}
+            }catch(err){
+              console.error(err);
+              alert("Import fallito");
+            }
+          }
+        });
   }
 
   function ingestXml(text, force){
@@ -1725,10 +1681,11 @@
     const root = $("viewDaneaDdt");
     if (!root) return;
 
-    // restore prefs
+    // restore prefs (hidden UI) — always auto-load XML when you enter
     try{
-      S.xmlUrl = normalizeDaneaXmlUrl(String(localStorage.getItem(LS_URL) || "").trim());
-      if ($("daneaXmlUrl")) $("daneaXmlUrl").value = S.xmlUrl;
+      const stored = String(localStorage.getItem(LS_URL) || "").trim();
+      const base = stored || DEFAULT_XML_URL_BASE;
+      S.xmlUrl = normalizeDaneaXmlUrl(base);
       try{ localStorage.setItem(LS_URL, S.xmlUrl); }catch(_){}
     }catch(_){}
 
