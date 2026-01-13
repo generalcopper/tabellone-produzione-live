@@ -11123,6 +11123,9 @@ async function handleFileSelection(fileList) {
       __fpDraft = null;
     }
 
+    // expose globally (safety for listeners / inline handlers)
+    try{ window.closeFinishedProductModal = closeFinishedProductModal; }catch(_){ }
+
     async function saveFinishedProduct(){
       if (!(fb.user && fb.db)) { showToast("Accedi con Google per salvare", "warn"); return; }
 
@@ -11225,11 +11228,11 @@ Nota: elimina SOLO l’anagrafica prodotti finiti e la sua distinta base.`);
     if (modalUnified) modalUnified.addEventListener("click", (e) => { if (e.target === modalUnified) closeUnifiedModal(); });
 
     // Finished product modal
-    if (fpClose) fpClose.addEventListener("click", closeFinishedProductModal);
-    if (btnFpDone) btnFpDone.addEventListener("click", closeFinishedProductModal);
-    if (btnFpCancel) btnFpCancel.addEventListener("click", closeFinishedProductModal);
-    if (modalFinishedProduct) modalFinishedProduct.addEventListener("click", (e) => { if (e.target === modalFinishedProduct) closeFinishedProductModal(); });
-
+    const __fpCloseSafe = () => { try{ window.closeFinishedProductModal && window.closeFinishedProductModal(); }catch(_){ } };
+    if (fpClose) fpClose.addEventListener("click", __fpCloseSafe);
+    if (btnFpDone) btnFpDone.addEventListener("click", __fpCloseSafe);
+    if (btnFpCancel) btnFpCancel.addEventListener("click", __fpCloseSafe);
+    if (modalFinishedProduct) modalFinishedProduct.addEventListener("click", (e) => { if (e.target === modalFinishedProduct) __fpCloseSafe(); });
     if (btnFpSave) btnFpSave.addEventListener("click", (e) => { e.preventDefault(); e.stopPropagation(); saveFinishedProduct(); });
     if (btnFpDelete) btnFpDelete.addEventListener("click", (e) => { e.preventDefault(); e.stopPropagation(); if (__fpCurrentId) deleteFinishedProductById(__fpCurrentId); });
 
