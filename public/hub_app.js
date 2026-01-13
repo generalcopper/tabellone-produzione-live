@@ -676,6 +676,1064 @@
     try{ console.warn("flussi.js inject failed", e); }catch(_){ }
   }
 })();
+;
+/* ===== danea_ddt_download_view.js ===== */
+// Inject "Scarica flussi DDT" view markup into #viewDaneaDdt
+(function(){
+  try{
+    var root = document.getElementById("viewDaneaDdt");
+    if (!root) return;
+    if (root.dataset && root.dataset.injected === "1") return;
+    if (root.dataset) root.dataset.injected = "1";
+
+    root.innerHTML = `<article class="card" id="daneaDdtCard">
+      <div class="hd">
+        <div class="overlayHeaderTitle">
+          <button class="iconBtn overlayBack" id="btnBackDaneaDdt" type="button" aria-label="Indietro">‹</button>
+          <h2>Scarica flussi DDT</h2>
+        </div>
+        <div class="inlineRow" style="gap:8px; justify-content:flex-end;">
+          <div class="pill" id="pillDaneaCount">0</div>
+          <button class="iconBtn" id="btnCloseDaneaDdt" type="button" aria-label="Chiudi">×</button>
+        </div>
+      </div>
+
+      <div class="bd">
+        <div class="inlineRow" style="justify-content:space-between; align-items:flex-end; gap:12px;">
+          <div class="stack" style="flex:1; min-width: 240px;">
+            <div class="hero-sub">XML Easyfatt (Danea) → verifica distinta base → scarico automatico</div>
+            <div class="muted" id="daneaLastMeta" style="font-weight:800;">Ultimo XML: —</div>
+          </div>
+
+          <div class="seg" style="margin-left:auto;">
+            <button id="daneaTabVerify" class="active" type="button">Da verificare <span class="pill" id="pillDaneaVerify" style="height:auto; padding:2px 8px; border-radius:999px; border:0; background:rgba(10,132,255,.12); color:rgba(0,0,0,.86);">0</span></button>
+            <button id="daneaTabDone" type="button">Completati <span class="pill" id="pillDaneaDone" style="height:auto; padding:2px 8px; border-radius:999px; border:0; background:rgba(0,0,0,.06); color:rgba(0,0,0,.86);">0</span></button>
+          </div>
+        </div>
+
+        <div class="previewArea" style="margin-top: 6px;">
+          <div class="inlineRow" style="justify-content:space-between; align-items:flex-end; gap:12px;">
+            <div class="field" style="flex:1; min-width:240px;">
+              <label for="daneaXmlUrl">Endpoint XML (proxy)</label>
+              <input id="daneaXmlUrl" placeholder="Es. https://TUO-CLOUD-RUN/danea/latest.xml" />
+            </div>
+            <div class="inlineRow" style="gap:8px; justify-content:flex-end;">
+              <button class="btn btn-ghost mini" id="btnDaneaSaveUrl" type="button">Salva</button>
+              <button class="btn btn-ghost mini" id="btnDaneaRefresh" type="button">Aggiorna</button>
+              <button class="btn btn-secondary mini" id="btnDaneaPickXml" type="button" title="Fallback: carica XML a mano">Carica XML</button>
+              <input id="daneaXmlFile" type="file" accept=".xml,text/xml,application/xml" style="display:none;" />
+            </div>
+          </div>
+          <div class="muted" style="font-size:12px; font-weight:800; line-height:1.35;">
+            Nota: Google Drive spesso blocca le chiamate dirette dal browser (CORS). L’endpoint “proxy” serve proprio per leggere il file dalla cartella Drive e restituire l’XML senza login.
+          </div>
+        </div>
+
+        <!-- LIST -->
+        <div id="daneaListWrap" class="stack" style="gap:10px;">
+          <div class="inlineRow listStickyBar" style="justify-content:space-between; align-items:flex-end; gap:12px; margin-top: 10px;">
+            <div class="field" style="flex: 1 1 auto; min-width: 220px;">
+              <label for="daneaSearch">Cerca</label>
+              <input id="daneaSearch" placeholder="Numero, data, cliente…" autocomplete="off" />
+            </div>
+            <div class="inlineRow" style="gap:8px; justify-content:flex-end; margin-left:auto;">
+              <button class="btn btn-ghost mini" id="btnDaneaClear" type="button">Reset</button>
+              <div class="hero-sub" id="daneaMeta">—</div>
+            </div>
+          </div>
+
+          <div class="tableWrap" style="max-height: 520px; overflow:auto; margin-top: 0;">
+            <table class="dataGrid">
+              <thead>
+                <tr>
+                  <th style="width: 120px;">Data</th>
+                  <th style="width: 120px;">Numero</th>
+                  <th>Cliente</th>
+                  <th class="qty" style="width: 90px;">Righe</th>
+                  <th class="qty" style="width: 120px;">Stato</th>
+                  <th style="width: 120px;"></th>
+                </tr>
+              </thead>
+              <tbody id="daneaTbody">
+                <tr><td class="td-muted" colspan="6">Configura l’endpoint XML oppure carica un file.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- DETAIL -->
+        <div id="daneaDetailWrap" class="stack" style="gap:10px; display:none;">
+          <div class="inlineRow" style="justify-content:space-between; align-items:flex-end; gap:12px;">
+            <div class="stack" style="flex:1; min-width:240px;">
+              <div class="hero-sub" id="daneaDetTitle">DDT</div>
+              <div class="muted" id="daneaDetSubtitle" style="font-weight:900;">—</div>
+            </div>
+            <div class="inlineRow" style="gap:8px; justify-content:flex-end;">
+              <button class="btn btn-ghost mini" id="btnDaneaBackList" type="button">← Lista</button>
+              <div class="field" style="width: 190px;">
+                <label for="daneaWarehouse">Magazzino scarico</label>
+                <select id="daneaWarehouse">
+                  <option value="cerea">Cerea</option>
+                  <option value="concamarise">Concamarise</option>
+                </select>
+              </div>
+              <button class="btn btn-primary" id="btnDaneaSend" type="button" disabled>Invia (scarica)</button>
+            </div>
+          </div>
+
+          <div class="tableWrap" style="max-height: 520px; overflow:auto;">
+            <table class="dataGrid">
+              <thead>
+                <tr>
+                  <th style="width: 44px;"></th>
+                  <th style="width: 160px;">Codice</th>
+                  <th>Articolo</th>
+                  <th class="qty" style="width: 120px;">Q.tà</th>
+                  <th style="width: 90px;">U.M.</th>
+                  <th style="width: 170px; text-align:right;">Azioni</th>
+                </tr>
+              </thead>
+              <tbody id="daneaItemsTbody">
+                <tr><td class="td-muted" colspan="6">Apri un DDT.</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="muted" id="daneaDetFooter" style="font-size:12px; font-weight:900;">—</div>
+        </div>
+      </div>
+    </article>`;
+  }catch(e){
+    try{ console.warn("danea view inject failed", e); }catch(_){ }
+  }
+})();
+;
+/* ===== danea_ddt_download.js ===== */
+/* Scarica flussi DDT (Easyfatt-Xml/Danea) + verifica distinta base + scarico automatico componenti */
+(function(){
+  "use strict";
+
+  const LS_URL = "hubinv_danea_xml_url";
+  const LS_WH  = "hubinv_danea_xml_wh";
+
+  const S = {
+    xmlUrl: "",
+    lastXmlHash: "",
+    lastFetchedAt: "",
+    ddts: [],           // from XML
+    tab: "verify",      // verify | done
+    selectedKey: "",
+    selected: null,
+    completed: [],      // from Firestore
+    completedMap: new Map(),
+    finished: [],       // finishedProducts snapshot
+    fpByCode: new Map(),// codeLower -> fp
+    timer: null,
+    busy: false,
+    hub: null,
+    unsub: { completed:null, finished:null }
+  };
+
+  function $(id){ return document.getElementById(id); }
+
+  function esc(s){
+    return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
+  }
+  function escAttr(s){ return esc(s).replace(/\n/g, " "); }
+
+  function norm(s){ return String(s ?? "").trim().toLowerCase(); }
+
+  function hashStr(str){
+    // fast non-crypto hash (deterministico)
+    const s = String(str || "");
+    let h = 2166136261;
+    for (let i=0;i<s.length;i++){
+      h ^= s.charCodeAt(i);
+      h = Math.imul(h, 16777619);
+    }
+    return String((h>>>0));
+  }
+
+  function getHub(){
+    try{ return globalThis.__HUB || null; }catch(_){ return null; }
+  }
+
+  function getText(el, sel){
+    try{
+      const n = el.querySelector(sel);
+      return n ? String(n.textContent || "").trim() : "";
+    }catch(_){ return ""; }
+  }
+
+  function parseEasyfattXml(xmlText){
+    const text = String(xmlText || "").trim();
+    if (!text) return [];
+
+    const dom = new DOMParser().parseFromString(text, "text/xml");
+    const perr = dom.querySelector("parsererror");
+    if (perr) throw new Error("XML non valido (parsererror)");
+
+    // Supporta: <EasyfattDocuments><Documents><Document>...
+    const docs = Array.from(dom.querySelectorAll("EasyfattDocuments > Documents > Document, Documents > Document"));
+    const out = [];
+
+    for (const d of docs){
+      const type = getText(d, "DocumentType");
+      // D = DDT (Documento di trasporto)
+      if (type && String(type).trim().toUpperCase() !== "D") continue;
+
+      const date = getText(d, "Date");     // YYYY-MM-DD
+      const number = getText(d, "Number"); // numerico
+      const customer = getText(d, "CustomerName") || getText(d, "Customer") || getText(d, "DeliveryName") || "";
+
+      if (!date || !number) continue;
+      const key = `${String(number).trim()}__${String(date).trim()}`;
+
+      const rows = Array.from(d.querySelectorAll("Rows > Row")).map((r, idx) => {
+        const code = getText(r, "Code");
+        const desc = getText(r, "Description");
+        const qtyRaw = getText(r, "Qty");
+        const umRaw = getText(r, "Um") || getText(r, "UM") || getText(r, "Uom") || getText(r, "Unit") || "";
+
+        let qty = null;
+        if (qtyRaw){
+          const n = Number(String(qtyRaw).replace(",", "."));
+          if (Number.isFinite(n)) qty = n;
+        }
+
+        return {
+          idx,
+          code: String(code || "").trim(),
+          desc: String(desc || "").trim(),
+          qtyRaw: String(qtyRaw || "").trim(),
+          qty: (qty == null) ? null : qty,
+          uom: String(umRaw || "").trim()
+        };
+      }).filter(r => (r.code || r.desc) && (r.qty == null || r.qty !== 0));
+
+      const hash = hashStr(JSON.stringify(rows.map(x => [x.code, x.desc, x.qty, x.uom])));
+
+      out.push({
+        key,
+        date: String(date).trim(),
+        number: String(number).trim(),
+        customer: String(customer || "").trim(),
+        rows,
+        hash
+      });
+    }
+
+    // latest first
+    out.sort((a,b) => String(b.date || "").localeCompare(String(a.date || "")) || String(b.number||"").localeCompare(String(a.number||"")));
+    return out;
+  }
+
+  function normalizeWarehouse(v){
+    const s = norm(v);
+    if (s.includes("conca")) return "concamarise";
+    return "cerea";
+  }
+
+  function fmtDateIT(iso){
+    try{
+      const d = new Date(String(iso || ""));
+      if (Number.isNaN(d.getTime())) return String(iso || "—");
+      return d.toLocaleDateString("it-IT");
+    }catch(_){ return String(iso || "—"); }
+  }
+
+  function getFpForRow(row){
+    const code = norm(row && row.code);
+    if (!code) return null;
+    return S.fpByCode.get(code) || null;
+  }
+
+  function getFpComponents(fp){
+    if (!fp) return [];
+    const arr = (fp.components || fp.bom || fp.distintaBase);
+    return Array.isArray(arr) ? arr : [];
+  }
+
+  function isRowConfigured(row){
+    const fp = getFpForRow(row);
+    if (!fp) return { ok: false, why: "missing", fp: null };
+    const comps = getFpComponents(fp);
+    if (comps.length > 0) return { ok: true, why: "ok", fp };
+    return { ok: false, why: "empty", fp };
+  }
+
+  function ddtStatus(ddt){
+    const rows = Array.isArray(ddt?.rows) ? ddt.rows : [];
+    if (!rows.length) return { ok: false, green: 0, total: 0 };
+    let green = 0;
+    for (const r of rows){
+      if (isRowConfigured(r).ok) green++;
+    }
+    return { ok: green === rows.length, green, total: rows.length };
+  }
+
+  function cacheCompletedMap(){
+    S.completedMap = new Map();
+    for (const c of (S.completed || [])){
+      const k = String(c && c.key || c && c._id || "").trim();
+      if (k) S.completedMap.set(k, c);
+    }
+  }
+
+  function setTab(tab){
+    S.tab = (tab === "done") ? "done" : "verify";
+    try{
+      $("daneaTabVerify")?.classList.toggle("active", S.tab === "verify");
+      $("daneaTabDone")?.classList.toggle("active", S.tab === "done");
+    }catch(_){}
+    render();
+  }
+
+  function setDetailOpen(open){
+    const list = $("daneaListWrap");
+    const det = $("daneaDetailWrap");
+    if (!list || !det) return;
+    list.style.display = open ? "none" : "";
+    det.style.display = open ? "" : "none";
+  }
+
+  function render(){
+    const view = $("viewDaneaDdt");
+    const isActive = !!(view && view.classList.contains("active"));
+
+    const pillCount = $("pillDaneaCount");
+    const pillV = $("pillDaneaVerify");
+    const pillD = $("pillDaneaDone");
+    const lastMeta = $("daneaLastMeta");
+    const meta = $("daneaMeta");
+    const tbody = $("daneaTbody");
+
+    const search = norm($("daneaSearch")?.value);
+
+    cacheCompletedMap();
+
+    const verifyList = (S.ddts || []).filter(d => !S.completedMap.has(d.key));
+    const doneList = (S.completed || []).slice();
+
+    try{
+      pillV && (pillV.textContent = String(verifyList.length));
+      pillD && (pillD.textContent = String(doneList.length));
+      pillCount && (pillCount.textContent = String(S.tab === "done" ? doneList.length : verifyList.length));
+    }catch(_){}
+
+    if (lastMeta){
+      if (S.lastFetchedAt) {
+        const d = new Date(S.lastFetchedAt);
+        lastMeta.textContent = "Ultimo XML: " + (Number.isNaN(d.getTime()) ? S.lastFetchedAt : d.toLocaleString("it-IT"));
+      } else {
+        lastMeta.textContent = "Ultimo XML: —";
+      }
+    }
+
+    // se la vista non è aperta, aggiorna solo pill e stop (evita lavoro)
+    if (!isActive) return;
+
+    // LIST rendering
+    if (!tbody) return;
+
+    if (S.tab === "done"){
+      const filtered = doneList.filter(x => {
+        const num = norm(x?.number || x?.docNum || x?.num);
+        const date = norm(x?.date || x?.docDate || "");
+        const cust = norm(x?.customer || x?.customerName || x?.client || "");
+        const k = norm(x?.key || x?._id || "");
+        if (!search) return true;
+        return (num && num.includes(search)) || (date && date.includes(search)) || (cust && cust.includes(search)) || (k && k.includes(search));
+      });
+
+      if (meta) meta.textContent = `${filtered.length} DDT completati`;
+
+      tbody.innerHTML = filtered.length ? filtered.map(c => {
+        const k = String(c.key || c._id || "");
+        const date = String(c.date || "");
+        const number = String(c.number || "");
+        const cust = String(c.customer || "");
+        const rows = Array.isArray(c.rows) ? c.rows : [];
+        const n = rows.length;
+
+        return `<tr class="jsDaneaRow" data-key="${escAttr(k)}" data-mode="done" title="Apri">
+          <td data-label="Data">${esc(fmtDateIT(date) || "—")}</td>
+          <td data-label="Numero"><span class="kbd">${esc(number || "—")}</span></td>
+          <td data-label="Cliente">${esc(cust || "—")}</td>
+          <td data-label="Righe" class="qty">${Number(n||0).toLocaleString("it-IT")}</td>
+          <td data-label="Stato" class="qty"><span class="dot ok"></span>OK</td>
+          <td data-label="" style="text-align:right;">
+            <button class="btn btn-ghost btn-xs jsDaneaOpen" data-key="${escAttr(k)}" data-mode="done" type="button">Apri</button>
+            <button class="btn btn-danger btn-xs jsDaneaDeleteDone" data-key="${escAttr(k)}" type="button">Elimina</button>
+          </td>
+        </tr>`;
+      }).join("") : `<tr><td class="td-muted" colspan="6">${search ? "Nessun completato trovato." : "Nessun DDT completato."}</td></tr>`;
+      return;
+    }
+
+    // verify tab
+    const filtered = verifyList.filter(d => {
+      const num = norm(d.number);
+      const date = norm(d.date);
+      const cust = norm(d.customer);
+      if (!search) return true;
+      return (num && num.includes(search)) || (date && date.includes(search)) || (cust && cust.includes(search));
+    });
+
+    if (meta) meta.textContent = `${filtered.length} DDT da verificare`;
+
+    tbody.innerHTML = filtered.length ? filtered.map(d => {
+      const st = ddtStatus(d);
+      const okDot = st.ok ? '<span class="dot ok"></span>' : '<span class="dot bad"></span>';
+      const stTxt = `${st.green}/${st.total}`;
+      const btnDisabled = st.ok ? "" : "disabled";
+      return `<tr class="jsDaneaRow" data-key="${escAttr(d.key)}" data-mode="verify" title="Apri">
+        <td data-label="Data">${esc(fmtDateIT(d.date) || "—")}</td>
+        <td data-label="Numero"><span class="kbd">${esc(d.number || "—")}</span></td>
+        <td data-label="Cliente">${esc(d.customer || "—")}</td>
+        <td data-label="Righe" class="qty">${Number((d.rows||[]).length||0).toLocaleString("it-IT")}</td>
+        <td data-label="Stato" class="qty">${okDot} ${esc(stTxt)}</td>
+        <td data-label="" style="text-align:right;">
+          <button class="btn btn-secondary btn-xs jsDaneaOpen" data-key="${escAttr(d.key)}" data-mode="verify" type="button">Apri</button>
+          <button class="btn btn-primary btn-xs jsDaneaSendFromList" data-key="${escAttr(d.key)}" type="button" ${btnDisabled}>Invia</button>
+        </td>
+      </tr>`;
+    }).join("") : `<tr><td class="td-muted" colspan="6">${search ? "Nessun DDT trovato." : "In attesa del file XML…"}</td></tr>`;
+  }
+
+  function renderDetail(ddt, mode){
+    const title = $("daneaDetTitle");
+    const sub = $("daneaDetSubtitle");
+    const tbody = $("daneaItemsTbody");
+    const btnSend = $("btnDaneaSend");
+    const foot = $("daneaDetFooter");
+    const whSel = $("daneaWarehouse");
+
+    if (!ddt || !tbody) return;
+
+    const isDone = (mode === "done");
+    const rows = Array.isArray(ddt.rows) ? ddt.rows : [];
+
+    // title + subtitle
+    if (title) title.textContent = isDone ? "DDT (completato)" : "DDT (da verificare)";
+    if (sub) sub.textContent = `Numero ${ddt.number || "—"} • ${fmtDateIT(ddt.date || "")} • ${ddt.customer || "—"}`;
+
+    // warehouse
+    if (whSel){
+      const saved = normalizeWarehouse(localStorage.getItem(LS_WH) || "");
+      if (saved) whSel.value = saved;
+      if (ddt.warehouse) whSel.value = normalizeWarehouse(ddt.warehouse);
+    }
+
+    // send button
+    if (btnSend){
+      btnSend.style.display = isDone ? "none" : "";
+      const st = ddtStatus(ddt);
+      btnSend.disabled = !st.ok;
+    }
+
+    const hasFp = !!(S.hub && S.hub.fb && S.hub.fb.user);
+
+    tbody.innerHTML = rows.length ? rows.map(r => {
+      const code = String(r.code || "").trim();
+      const desc = String(r.desc || "").trim();
+      const qtyDisp = (r.qty != null && Number.isFinite(Number(r.qty))) ? Number(r.qty).toLocaleString("it-IT", { maximumFractionDigits: 2 }) : (r.qtyRaw || "—");
+      const uom = String(r.uom || "").trim() || "—";
+
+      const st = isRowConfigured(r);
+      const dot = st.ok ? '<span class="dot ok"></span>' : '<span class="dot bad"></span>';
+
+      let act = "";
+      if (!hasFp){
+        act = `<span class="td-muted">Accedi</span>`;
+      } else if (st.why === "missing"){
+        act = `<button class="btn btn-secondary btn-xs jsDaneaImportFp" data-code="${escAttr(code)}" data-desc="${escAttr(desc)}" type="button">Importa</button>`;
+      } else if (st.why === "empty"){
+        const fid = String(st.fp?.id || st.fp?._id || "").trim();
+        act = `<button class="btn btn-secondary btn-xs jsDaneaConfigFp" data-fpid="${escAttr(fid)}" type="button">Configura</button>`;
+      } else {
+        const fid = String(st.fp?.id || st.fp?._id || "").trim();
+        act = fid ? `<button class="btn btn-ghost btn-xs jsDaneaOpenFp" data-fpid="${escAttr(fid)}" type="button">Apri</button>` : `<span class="td-muted">OK</span>`;
+      }
+
+      return `<tr>
+        <td data-label="">${dot}</td>
+        <td data-label="Codice"><span class="kbd">${esc(code || "—")}</span></td>
+        <td data-label="Articolo">${esc(desc || "—")}</td>
+        <td data-label="Q.tà" class="qty">${esc(qtyDisp)}</td>
+        <td data-label="U.M.">${esc(uom)}</td>
+        <td data-label="Azioni" style="text-align:right;">${act}</td>
+      </tr>`;
+    }).join("") : `<tr><td class="td-muted" colspan="6">Nessuna riga nel DDT.</td></tr>`;
+
+    if (foot){
+      const st = ddtStatus(ddt);
+      const msg = isDone ? "Questo DDT è già stato scaricato: eliminandolo (in tab Completati) si resetta lo scarico." :
+        (st.ok ? "Tutte le righe sono configurate: puoi inviare e scaricare componenti." : "Configura le righe rosse (distinta base) per poter inviare.");
+      foot.textContent = msg;
+    }
+  }
+
+  function openDetailByKey(key, mode){
+    const k = String(key || "").trim();
+    if (!k) return;
+
+    if (mode === "done"){
+      const c = (S.completed || []).find(x => String(x?.key || x?._id || "") === k) || null;
+      if (!c) return;
+      S.selectedKey = k;
+      S.selected = {
+        key: k,
+        number: String(c.number || ""),
+        date: String(c.date || ""),
+        customer: String(c.customer || ""),
+        rows: Array.isArray(c.rows) ? c.rows : [],
+        warehouse: c.warehouse || "",
+        movementIds: Array.isArray(c.movementIds) ? c.movementIds : []
+      };
+      setDetailOpen(true);
+      renderDetail(S.selected, "done");
+      return;
+    }
+
+    const d = (S.ddts || []).find(x => String(x?.key || "") === k) || null;
+    if (!d) return;
+    S.selectedKey = k;
+    S.selected = d;
+    setDetailOpen(true);
+    renderDetail(S.selected, "verify");
+  }
+
+  async function maybeAutoImportFinishedProducts(ddts){
+    const H = S.hub;
+    if (!H || !H.fb || !H.fb.db || !H.FS) return;
+    if (!H.fb.user) return;
+
+    // best-effort: crea placeholder per codici nuovi (una sola volta per fetch)
+    try{
+      const { addDoc, collection, serverTimestamp } = H.FS;
+      const col = collection(H.fb.db, "orgs", H.ORG_ID, "finishedProducts");
+
+      const toCreate = [];
+      for (const d of (ddts || [])){
+        for (const r of (d.rows || [])){
+          const code = String(r.code || "").trim();
+          if (!code) continue;
+          const low = code.toLowerCase();
+          if (S.fpByCode.has(low)) continue;
+          toCreate.push({ code, name: String(r.desc || code).trim(), uom: String(r.uom || "").trim() });
+        }
+      }
+
+      // de-dup in-memory
+      const seen = new Set();
+      const uniq = [];
+      for (const x of toCreate){
+        const k = String(x.code || "").toLowerCase();
+        if (!k || seen.has(k)) continue;
+        seen.add(k);
+        uniq.push(x);
+      }
+
+      for (const x of uniq){
+        // ricontrollo (in caso di race con snapshot)
+        if (S.fpByCode.has(String(x.code||"").toLowerCase())) continue;
+        const payload = {
+          name: x.name,
+          nameLower: x.name.toLowerCase(),
+          updatedAt: serverTimestamp(),
+          updatedBy: H.fb.user.email || H.fb.user.uid || "",
+          createdAt: serverTimestamp(),
+          createdBy: H.fb.user.email || H.fb.user.uid || ""
+        };
+        if (x.code){
+          payload.code = x.code;
+          payload.codeLower = String(x.code).toLowerCase();
+        }
+        if (x.uom) payload.uom = x.uom;
+        // components vuoti (non configurato)
+        payload.components = [];
+        await addDoc(col, payload);
+      }
+    }catch(e){
+      // silenzioso: se regole non permettono, non bloccare la lettura XML
+      try{ console.warn("auto-import finishedProducts skipped", e); }catch(_){}
+    }
+  }
+
+  function parseFraction(v){
+    const s = String(v || "").trim();
+    if (!s) return null;
+    // 1/20
+    const m = s.match(/^(-?\d+(?:[.,]\d+)?)\s*\/\s*(\d+(?:[.,]\d+)?)$/);
+    if (m){
+      const a = Number(m[1].replace(",", "."));
+      const b = Number(m[2].replace(",", "."));
+      if (Number.isFinite(a) && Number.isFinite(b) && b !== 0) return a / b;
+    }
+    // number with comma
+    const n = Number(s.replace(/\./g,"").replace(",", "."));
+    if (Number.isFinite(n)) return n;
+    return null;
+  }
+
+  function compQtyPerUnit(comp){
+    const c = comp || {};
+    if (c.qty != null && Number.isFinite(Number(c.qty))) return Number(c.qty);
+    const raw = c.qtyRaw || c.qtaRaw || "";
+    const p = parseFraction(raw);
+    if (p != null && Number.isFinite(p)) return p;
+    return null;
+  }
+
+  async function sendSelectedFromDetail(){
+    if (S.busy) return;
+    const ddt = S.selected;
+    if (!ddt || !ddt.key) return;
+
+    const H = S.hub;
+    if (!H || !H.fb || !H.fb.db || !H.FS) { alert("Hub non pronto"); return; }
+    if (!H.fb.user) { try{ window.HubInv?.showToast?.("Accedi con Google per inviare", "warn"); }catch(_){ alert("Accedi con Google"); } return; }
+
+    cacheCompletedMap();
+    if (S.completedMap.has(ddt.key)) { alert("Questo DDT risulta già completato."); return; }
+
+    const st = ddtStatus(ddt);
+    if (!st.ok) { alert("Non tutte le righe sono configurate (cerchi rossi)."); return; }
+
+    const wh = normalizeWarehouse($("daneaWarehouse")?.value || localStorage.getItem(LS_WH) || "cerea");
+    try{ localStorage.setItem(LS_WH, wh); }catch(_){}
+
+    const ok = confirm(`Inviare e scaricare componenti?\n\nDDT ${ddt.number} del ${fmtDateIT(ddt.date)}\nRighe: ${st.total}`);
+    if (!ok) return;
+
+    S.busy = true;
+    try{
+      const { addDoc, setDoc, doc, collection, serverTimestamp } = H.FS;
+
+      // 1) calcola fabbisogni componenti (somma per codice)
+      const req = new Map(); // codeLower -> {code,name,uom,qtyFloat}
+      for (const r of (ddt.rows || [])){
+        const qtyLine = (r.qty != null && Number.isFinite(Number(r.qty))) ? Number(r.qty) : parseFraction(r.qtyRaw);
+        const qLine = (qtyLine != null && Number.isFinite(qtyLine)) ? qtyLine : 0;
+        if (qLine <= 0) continue;
+
+        const fp = getFpForRow(r);
+        const comps = getFpComponents(fp);
+        for (const c of comps){
+          const cCode = String(c.code || "").trim();
+          if (!cCode) continue;
+
+          const per = compQtyPerUnit(c);
+          if (per == null || !Number.isFinite(per) || per <= 0) continue;
+
+          const add = per * qLine;
+          const low = cCode.toLowerCase();
+          const cur = req.get(low) || { code: cCode, name: String(c.name || c.articolo || cCode).trim(), uom: String(c.uom || "").trim(), qty: 0 };
+          cur.qty += add;
+          if (!cur.name) cur.name = cCode;
+          if (!cur.uom) cur.uom = String(c.uom || "").trim();
+          req.set(low, cur);
+        }
+      }
+
+      if (!req.size){
+        alert("Nessun componente calcolabile (distinta base vuota o quantità non valide).");
+        return;
+      }
+
+      // 2) crea movimenti OUT
+      const movementIds = [];
+      const movCol = collection(H.fb.db, "orgs", H.ORG_ID, "inventoryMovements");
+
+      const noteBase = `Scarico componenti per DDT ${ddt.number} del ${fmtDateIT(ddt.date)} (DaneaXML)`;
+      for (const it of Array.from(req.values())){
+        // arrotondamento coerente col gestionale (qty integer)
+        const qtyInt = Math.round(Number(it.qty) || 0);
+        if (!qtyInt) continue;
+
+        const payload = {
+          type: "OUT",
+          customer: "Scarico DDT",
+          code: it.code,
+          item: it.name || it.code,
+          uom: String(it.uom || "").trim(),
+          qtyRaw: `${it.qty} ${String(it.uom||"").trim()}`.trim(),
+          qty: qtyInt,
+          date: String(ddt.date || "").trim(),
+          note: noteBase,
+          source: "DaneaXML",
+          rawText: "",
+          warehouse: wh,
+
+          docType: "DDT",
+          docNum: String(ddt.number || "").trim(),
+          docDateRaw: String(ddt.date || "").trim(),
+          daneaDdtKey: String(ddt.key || "").trim(),
+
+          createdAt: serverTimestamp(),
+          createdBy: H.fb.user.email || H.fb.user.uid
+        };
+
+        const ref = await addDoc(movCol, payload);
+        if (ref && ref.id) movementIds.push(ref.id);
+      }
+
+      // 3) salva completato (id deterministico)
+      const doneId = encodeURIComponent(String(ddt.key || "").trim());
+      const doneRef = doc(H.fb.db, "orgs", H.ORG_ID, "daneaDdtCompleted", doneId);
+      await setDoc(doneRef, {
+        key: String(ddt.key || "").trim(),
+        number: String(ddt.number || "").trim(),
+        date: String(ddt.date || "").trim(),
+        customer: String(ddt.customer || "").trim(),
+        rows: (ddt.rows || []).map(x => ({ code:x.code||"", desc:x.desc||"", qty:x.qty??null, qtyRaw:x.qtyRaw||"", uom:x.uom||"" })),
+        warehouse: wh,
+        xmlHash: String(ddt.hash || ""),
+        movementIds: movementIds,
+        createdAt: serverTimestamp(),
+        createdBy: H.fb.user.email || H.fb.user.uid
+      }, { merge: true });
+
+      try{ window.HubInv?.showToast?.("DDT inviato e scaricato"); }catch(_){}
+      // refresh lists
+      setDetailOpen(false);
+      setTab("done");
+      await fetchNow(true);
+    }catch(e){
+      console.error(e);
+      try{ window.HubInv?.showToast?.("Errore invio DDT", "err"); }catch(_){}
+      alert("Errore invio DDT");
+    }finally{
+      S.busy = false;
+    }
+  }
+
+  async function deleteCompletedByKey(key){
+    const k = String(key || "").trim();
+    if (!k) return;
+
+    const H = S.hub;
+    if (!H || !H.fb || !H.fb.db || !H.FS) return;
+    if (!H.fb.user) { alert("Accedi con Google"); return; }
+
+    const c = S.completedMap.get(k) || null;
+    if (!c) return;
+
+    const ok = confirm(`Eliminare questo DDT completato e resettare lo scarico?\n\nDDT ${c.number || "—"} del ${fmtDateIT(c.date || "")}`);
+    if (!ok) return;
+
+    S.busy = true;
+    try{
+      const { deleteDoc, doc } = H.FS;
+      const ids = Array.isArray(c.movementIds) ? c.movementIds : [];
+      for (const id of ids){
+        const mid = String(id || "").trim();
+        if (!mid) continue;
+        try{
+          await deleteDoc(doc(H.fb.db, "orgs", H.ORG_ID, "inventoryMovements", mid));
+        }catch(e){ console.warn("delete movement failed", mid, e); }
+      }
+
+      const doneId = encodeURIComponent(String(k));
+      await deleteDoc(doc(H.fb.db, "orgs", H.ORG_ID, "daneaDdtCompleted", doneId));
+
+      try{ window.HubInv?.showToast?.("DDT eliminato: scarico resettato"); }catch(_){}
+    }catch(e){
+      console.error(e);
+      alert("Errore eliminazione");
+    }finally{
+      S.busy = false;
+    }
+  }
+
+  function bindEvents(){
+    $("btnDaneaSaveUrl")?.addEventListener("click", () => {
+      const v = String($("daneaXmlUrl")?.value || "").trim();
+      S.xmlUrl = v;
+      try{ localStorage.setItem(LS_URL, v); }catch(_){}
+      fetchNow(true);
+      startPolling();
+      try{ window.HubInv?.showToast?.("Endpoint salvato"); }catch(_){}
+    });
+
+    $("btnDaneaRefresh")?.addEventListener("click", () => fetchNow(true));
+    $("btnDaneaPickXml")?.addEventListener("click", () => $("daneaXmlFile")?.click());
+    $("btnDaneaClear")?.addEventListener("click", () => { const i=$("daneaSearch"); if (i) i.value=""; render(); });
+    $("daneaSearch")?.addEventListener("input", () => render());
+
+    $("daneaTabVerify")?.addEventListener("click", () => setTab("verify"));
+    $("daneaTabDone")?.addEventListener("click", () => setTab("done"));
+
+    $("btnDaneaBackList")?.addEventListener("click", () => { setDetailOpen(false); S.selected=null; render(); });
+
+    $("daneaWarehouse")?.addEventListener("change", () => {
+      try{ localStorage.setItem(LS_WH, normalizeWarehouse($("daneaWarehouse")?.value)); }catch(_){}
+    });
+
+    $("btnDaneaSend")?.addEventListener("click", () => sendSelectedFromDetail());
+
+    // File upload fallback
+    $("daneaXmlFile")?.addEventListener("change", async (e) => {
+      const f = e.target?.files?.[0];
+      if (!f) return;
+      try{
+        const txt = await f.text();
+        ingestXml(txt, true);
+      }catch(err){
+        console.warn(err);
+        alert("File non leggibile");
+      }finally{
+        e.target.value = "";
+      }
+    });
+
+    // list click
+    $("daneaTbody")?.addEventListener("click", (e) => {
+      const btnOpen = e.target?.closest?.("button.jsDaneaOpen");
+      const btnSend = e.target?.closest?.("button.jsDaneaSendFromList");
+      const btnDelDone = e.target?.closest?.("button.jsDaneaDeleteDone");
+      const tr = e.target?.closest?.("tr.jsDaneaRow");
+
+      if (btnDelDone){
+        e.preventDefault(); e.stopPropagation();
+        const k = btnDelDone.getAttribute("data-key") || "";
+        deleteCompletedByKey(k);
+        return;
+      }
+      if (btnSend){
+        e.preventDefault(); e.stopPropagation();
+        const k = btnSend.getAttribute("data-key") || "";
+        openDetailByKey(k, "verify");
+        // auto invia solo se ok
+        setTimeout(() => { try{ sendSelectedFromDetail(); }catch(_){ } }, 0);
+        return;
+      }
+      if (btnOpen){
+        e.preventDefault(); e.stopPropagation();
+        const k = btnOpen.getAttribute("data-key") || "";
+        const mode = btnOpen.getAttribute("data-mode") || (tr?.getAttribute("data-mode") || "verify");
+        openDetailByKey(k, mode);
+        return;
+      }
+      if (tr){
+        const k = tr.getAttribute("data-key") || "";
+        const mode = tr.getAttribute("data-mode") || "verify";
+        openDetailByKey(k, mode);
+      }
+    });
+
+    // detail row actions
+    $("daneaItemsTbody")?.addEventListener("click", async (e) => {
+      const btnImport = e.target?.closest?.("button.jsDaneaImportFp");
+      const btnConfig = e.target?.closest?.("button.jsDaneaConfigFp");
+      const btnOpenFp = e.target?.closest?.("button.jsDaneaOpenFp");
+
+      if (btnOpenFp){
+        e.preventDefault(); e.stopPropagation();
+        const id = String(btnOpenFp.getAttribute("data-fpid") || "").trim();
+        if (id) { try{ window.openFinishedProductModal && window.openFinishedProductModal(id); }catch(_){ } }
+        return;
+      }
+
+      if (btnConfig){
+        e.preventDefault(); e.stopPropagation();
+        const id = String(btnConfig.getAttribute("data-fpid") || "").trim();
+        if (id) { try{ window.openFinishedProductModal && window.openFinishedProductModal(id); }catch(_){ } }
+        return;
+      }
+
+      if (btnImport){
+        e.preventDefault(); e.stopPropagation();
+
+        const H = S.hub;
+        if (!H || !H.fb || !H.fb.db || !H.FS) return;
+        if (!H.fb.user) { alert("Accedi con Google"); return; }
+
+        const code = String(btnImport.getAttribute("data-code") || "").trim();
+        const desc = String(btnImport.getAttribute("data-desc") || "").trim() || code;
+        if (!code) return;
+
+        try{
+          const { addDoc, collection, serverTimestamp } = H.FS;
+          const col = collection(H.fb.db, "orgs", H.ORG_ID, "finishedProducts");
+          const payload = {
+            name: desc,
+            nameLower: desc.toLowerCase(),
+            code: code,
+            codeLower: code.toLowerCase(),
+            components: [],
+            createdAt: serverTimestamp(),
+            createdBy: H.fb.user.email || H.fb.user.uid,
+            updatedAt: serverTimestamp(),
+            updatedBy: H.fb.user.email || H.fb.user.uid
+          };
+          const ref = await addDoc(col, payload);
+          try{ window.HubInv?.showToast?.("Prodotto finito importato"); }catch(_){}
+          try{ if (ref?.id) window.openFinishedProductModal && window.openFinishedProductModal(ref.id); }catch(_){}
+        }catch(err){
+          console.error(err);
+          alert("Import fallito");
+        }
+      }
+    });
+  }
+
+  function ingestXml(text, force){
+    const h = hashStr(text);
+    if (!force && h && h === S.lastXmlHash) return;
+
+    let ddts = [];
+    try{
+      ddts = parseEasyfattXml(text);
+    }catch(err){
+      console.warn(err);
+      try{ window.HubInv?.showToast?.("XML non valido", "err"); }catch(_){}
+      $("daneaTbody") && ($("daneaTbody").innerHTML = `<tr><td class="td-muted" colspan="6">XML non valido.</td></tr>`);
+      return;
+    }
+
+    S.lastXmlHash = h;
+    S.lastFetchedAt = new Date().toISOString();
+    S.ddts = ddts;
+
+    // auto import placeholder (solo se loggato)
+    try{ maybeAutoImportFinishedProducts(ddts); }catch(_){}
+
+    render();
+  }
+
+  async function fetchNow(force){
+    const url = String(S.xmlUrl || "").trim();
+    if (!url) { render(); return; }
+
+    try{
+      const r = await fetch(url, { cache: "no-store" });
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      const txt = await r.text();
+      ingestXml(txt, !!force);
+    }catch(err){
+      console.warn("fetch XML failed", err);
+      try{ window.HubInv?.showToast?.("Impossibile leggere XML", "warn"); }catch(_){}
+    }
+  }
+
+  function startPolling(){
+    if (S.timer) return;
+    // every minute (XML is overwritten ~10 min)
+    S.timer = setInterval(() => fetchNow(false), 60 * 1000);
+  }
+
+  function subscribeCompleted(){
+    const H = getHub();
+    if (!H || !H.fb || !H.fb.db || !H.FS) return;
+    if (S.unsub.completed) return;
+
+    try{
+      const { collection, query, orderBy, onSnapshot } = H.FS;
+      const col = collection(H.fb.db, "orgs", H.ORG_ID, "daneaDdtCompleted");
+      const q = query(col, orderBy("date", "desc"));
+      S.unsub.completed = onSnapshot(q, (snap) => {
+        const arr = [];
+        snap.forEach(docu => {
+          const d = docu.data() || {};
+          arr.push(Object.assign({ _id: docu.id }, d));
+        });
+        S.completed = arr;
+        cacheCompletedMap();
+        render();
+      }, (err) => {
+        console.warn("completed snapshot error", err);
+      });
+    }catch(e){
+      console.warn("subscribeCompleted failed", e);
+    }
+  }
+
+  function subscribeFinishedProducts(){
+    const H = getHub();
+    if (!H || !H.fb || !H.fb.db || !H.FS) return;
+    if (S.unsub.finished) return;
+
+    try{
+      const { collection, onSnapshot, query, orderBy } = H.FS;
+      const col = collection(H.fb.db, "orgs", H.ORG_ID, "finishedProducts");
+      const q = query(col, orderBy("nameLower", "asc"));
+      S.unsub.finished = onSnapshot(q, (snap) => {
+        const arr = [];
+        const map = new Map();
+        snap.forEach(docu => {
+          const d = docu.data() || {};
+          const id = docu.id;
+          const obj = Object.assign({ id }, d);
+          arr.push(obj);
+          const code = String(obj.code || "").trim();
+          if (code) map.set(code.toLowerCase(), obj);
+        });
+        S.finished = arr;
+        S.fpByCode = map;
+        render();
+        // se dettaglio aperto, re-render
+        if (S.selected && $("daneaDetailWrap")?.style.display !== "none"){
+          renderDetail(S.selected, "verify");
+        }
+      }, (err) => {
+        console.warn("finishedProducts snapshot error", err);
+      });
+    }catch(e){
+      console.warn("subscribeFinishedProducts failed", e);
+    }
+  }
+
+  function waitForHub(attempt){
+    attempt = attempt || 0;
+    const H = getHub();
+    if (H && H.fb && H.fb.db && H.FS){
+      S.hub = H;
+      subscribeCompleted();
+      subscribeFinishedProducts();
+      return;
+    }
+    if (attempt > 200) return;
+    setTimeout(() => waitForHub(attempt+1), 100);
+  }
+
+  function init(){
+    const root = $("viewDaneaDdt");
+    if (!root) return;
+
+    // restore prefs
+    try{
+      S.xmlUrl = String(localStorage.getItem(LS_URL) || "").trim();
+      if ($("daneaXmlUrl")) $("daneaXmlUrl").value = S.xmlUrl;
+    }catch(_){}
+
+    bindEvents();
+    render();
+
+    // start polling even if not logged
+    startPolling();
+    fetchNow(false);
+
+    // subscribe Firestore (when hub ready)
+    waitForHub(0);
+
+    // expose hook (called by menu click)
+    window.HubDaneaDdt = window.HubDaneaDdt || {};
+    window.HubDaneaDdt.refresh = function(){
+      try{ render(); }catch(_){}
+      try{ fetchNow(true); }catch(_){}
+    };
+  }
+
+  if (document.readyState === "loading"){
+    document.addEventListener("DOMContentLoaded", init);
+  } else {
+    init();
+  }
+})();
+
+
 
 
 ;
@@ -1885,7 +2943,8 @@
       categories: document.getElementById("viewCategories"),
       trash: document.getElementById("viewTrash"),
       moveInv: document.getElementById("viewMoveInventory"),
-      anag: document.getElementById("viewAnag")
+      anag: document.getElementById("viewAnag"),
+      daneaDdt: document.getElementById("viewDaneaDdt")
     };
     const __hdrTitle = document.getElementById("hdrPageTitle");
     const __btnBack = document.getElementById("btnNavBack");
@@ -1898,7 +2957,7 @@
     // Porta overlay/modali come figli diretti di <body> per evitare stacking-context (transform/filter) sui parent
     (function __liftOverlaysToBody(){
       try{
-        ["viewOcr","viewInventory","viewFlows","viewMovements","viewMoveInventory","viewCategories","viewTrash","viewAnag"].forEach(id => {
+        ["viewOcr","viewInventory","viewFlows","viewDaneaDdt","viewMovements","viewMoveInventory","viewCategories","viewTrash","viewAnag"].forEach(id => {
           const el = document.getElementById(id);
           if (el && el.parentElement !== document.body) document.body.appendChild(el);
         });
@@ -1918,7 +2977,7 @@
 
     function setView(name){
       const key = String(name || "home");
-      const overlayKeys = ["ocr","inventory","flows","movements","moveInv","categories","trash","anag"];
+      const overlayKeys = ["ocr","inventory","flows","daneaDdt","movements","moveInv","categories","trash","anag"];
       const isOverlay = overlayKeys.includes(key);
 
       // Home resta sempre visibile dietro (come un gestionale iOS)
@@ -2080,6 +3139,7 @@ document.getElementById("menuGoHome")?.addEventListener("click", () => { closeSi
     document.getElementById("menuGoInvConcamarise")?.addEventListener("click", () => { closeSideMenu(); openInventoryOverlay(WAREHOUSE_CONCA); });
     document.getElementById("menuGoMoveInventory")?.addEventListener("click", () => { closeSideMenu(); try{ resetMoveInvDirection(); }catch(_){ } setView("moveInv"); try{ renderMoveInv && renderMoveInv(); }catch(_){ } });
     document.getElementById("menuGoFlows")?.addEventListener("click", () => { closeSideMenu(); setView("flows"); try{ renderFlowsTable(); }catch(_){ } });
+    document.getElementById("menuGoDaneaDdt")?.addEventListener("click", () => { closeSideMenu(); setView("daneaDdt"); try{ window.HubDaneaDdt && window.HubDaneaDdt.refresh && window.HubDaneaDdt.refresh(); }catch(_){ } });
     document.getElementById("menuGoMovements")?.addEventListener("click", () => { closeSideMenu(); setView("movements"); try{ window.HubMovements && window.HubMovements.refresh && window.HubMovements.refresh(); }catch(_){ } });
     document.getElementById("menuGoTrash")?.addEventListener("click", () => { closeSideMenu(); setView("trash"); try{ window.HubTrash && window.HubTrash.refresh && window.HubTrash.refresh(); }catch(_){ } });
     document.getElementById("menuGoSuppliers")?.addEventListener("click", () => {
@@ -2121,6 +3181,9 @@ document.getElementById("menuGoHome")?.addEventListener("click", () => { closeSi
     });
 document.getElementById("btnCloseTrash")?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
 document.getElementById("btnCloseFlows")?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
+
+    document.getElementById("btnCloseDaneaDdt")?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
+    document.getElementById("btnBackDaneaDdt")?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
     document.getElementById("btnCloseMovements")?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
     document.getElementById("btnCloseMoveInv")?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} try{ resetMoveInvDirection(); }catch(_){ } setView("home"); });
         document.getElementById("btnBackTrash")?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
