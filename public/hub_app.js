@@ -2895,6 +2895,12 @@
     const sideMenu = document.getElementById("sideMenu");
     const sideMenuOverlay = document.getElementById("sideMenuOverlay");
 
+    let lastFocusBeforeMenu = null;
+    // Ensure hidden menu is unfocusable on load (prevents tabbing into it)
+    try{
+      if (sideMenu?.getAttribute("aria-hidden") === "true") sideMenu.setAttribute("inert", "");
+      if (sideMenuOverlay?.getAttribute("aria-hidden") === "true") sideMenuOverlay.setAttribute("inert", "");
+    }catch(_){ }
     // Anagrafica
     const segSuppliers = document.getElementById("segSuppliers");
     const segProducts = document.getElementById("segProducts");
@@ -3053,15 +3059,50 @@
     }
 
     function openSideMenu(){
+      // Remember focus so we can restore it on close (avoids aria-hidden warnings)
+      try{ lastFocusBeforeMenu = document.activeElement; }catch(_){ lastFocusBeforeMenu = null; }
+
       document.body.classList.add("menu-open");
-      sideMenu?.setAttribute("aria-hidden", "false");
-      sideMenuOverlay?.setAttribute("aria-hidden", "false");
+
+      // Make menu visible + focusable
+      if (sideMenu){
+        sideMenu.removeAttribute("inert");
+        sideMenu.setAttribute("aria-hidden", "false");
+      }
+      if (sideMenuOverlay){
+        sideMenuOverlay.removeAttribute("inert");
+        sideMenuOverlay.setAttribute("aria-hidden", "false");
+      }
+
+      // Move focus into the menu (close button first, otherwise first focusable)
+      try{
+        const first = sideMenu?.querySelector("#btnMenuClose, button, [href], input, select, textarea, [tabindex]:not([tabindex='-1'])");
+        first?.focus({ preventScroll: true });
+      }catch(_){}
     }
 
     function closeSideMenu(){
+      // If focus is inside the menu, move it OUT before hiding (prevents aria-hidden on focused ancestor)
+      try{
+        const ae = document.activeElement;
+        if (sideMenu && ae && sideMenu.contains(ae)){
+          try{ ae.blur(); }catch(_){}
+          const restore = (lastFocusBeforeMenu && typeof lastFocusBeforeMenu.focus === "function") ? lastFocusBeforeMenu : btnMenuToggle;
+          restore?.focus?.({ preventScroll: true });
+        }
+      }catch(_){}
+
       document.body.classList.remove("menu-open");
-      sideMenu?.setAttribute("aria-hidden", "true");
-      sideMenuOverlay?.setAttribute("aria-hidden", "true");
+
+      // Hide + make unfocusable
+      if (sideMenu){
+        sideMenu.setAttribute("aria-hidden", "true");
+        sideMenu.setAttribute("inert", "");
+      }
+      if (sideMenuOverlay){
+        sideMenuOverlay.setAttribute("aria-hidden", "true");
+        sideMenuOverlay.setAttribute("inert", "");
+      }
     }
 
     btnMenuToggle?.addEventListener("click", () => {
