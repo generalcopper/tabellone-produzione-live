@@ -10943,7 +10943,8 @@ async function handleFileSelection(fileList) {
       if (!modalUnified) return;
       modalUnified.classList.remove("open");
       __syncBodyLockFromModals();
-    
+    }
+
     // ===== Prodotti finiti (distinta base / BOM) =====
     let __fpCurrentId = null;
     let __fpDraft = null;
@@ -11124,6 +11125,7 @@ async function handleFileSelection(fileList) {
     }
 
     // expose globally (safety for listeners / inline handlers)
+    try{ window.openFinishedProductModal = openFinishedProductModal; }catch(_){ }
     try{ window.closeFinishedProductModal = closeFinishedProductModal; }catch(_){ }
 
     async function saveFinishedProduct(){
@@ -11217,7 +11219,6 @@ Nota: elimina SOLO l’anagrafica prodotti finiti e la sua distinta base.`);
         showToast("Errore eliminazione prodotto finito", "err");
       }
     }
-}
 
     if (prodClose) prodClose.addEventListener("click", closeProductModal);
     if (btnProdDone) btnProdDone.addEventListener("click", closeProductModal);
