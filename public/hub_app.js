@@ -5305,6 +5305,10 @@ async function deleteMovement(id) {
     let __invTrendSvgBound = false;
     let __invTrendActivePoints = [];      // [{day,value,x,y}]
     let __invTrendActiveIdx = -1;
+    // dimensioni viewBox correnti (per conversioni px → svg e tooltip)
+    let __invTrendSvgW = 480;
+    let __invTrendSvgH = 180;
+    let __invTrendResizeObs = null;
 
     function __invTrendPrefersReducedMotion(){
       try { return !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches); }
@@ -5364,6 +5368,7 @@ async function deleteMovement(id) {
 
       // Bind tooltip tracking once
       __bindInvTrendSvg();
+      __bindInvTrendResize();
     }
 
     function __setInvTrendActiveBtn(){
@@ -5473,9 +5478,11 @@ async function deleteMovement(id) {
           }
         }catch(_){}
 
-        // tooltip position in px
-        const xPx = (p.x / 480) * rect.width;
-        const yPx = (p.y / 180) * rect.height;
+        // tooltip position in px (usa viewBox reale, non valori fissi)
+        const vw = Number(__invTrendSvgW) || 480;
+        const vh = Number(__invTrendSvgH) || 180;
+        const xPx = (p.x / vw) * rect.width;
+        const yPx = (p.y / vh) * rect.height;
 
         const valTxt = Number(p.value || 0).toLocaleString("it-IT");
         const dateTxt = __invTrendFmtDateShort(p.day);
@@ -5512,6 +5519,33 @@ async function deleteMovement(id) {
       invTrendChart.addEventListener("touchcancel", hide);
     }
 
+    // Ricalcola il viewBox quando il riquadro cambia dimensione (desktop grid stretch / resize)
+    function __bindInvTrendResize(){
+      if (__invTrendResizeObs || !invTrendChart) return;
+      try{
+        if (typeof ResizeObserver !== "undefined"){
+          const ro = new ResizeObserver(() => {
+            try{
+              if (ro._raf) cancelAnimationFrame(ro._raf);
+              ro._raf = requestAnimationFrame(() => {
+                try{ renderInventoryTrend(); }catch(_){ }
+              });
+            }catch(_){ }
+          });
+          ro.observe(invTrendChart);
+          __invTrendResizeObs = ro;
+          return;
+        }
+      }catch(_){ }
+
+      // Fallback (vecchi browser)
+      try{
+        const onR = () => { try{ renderInventoryTrend(); }catch(_){ } };
+        window.addEventListener("resize", onR);
+        __invTrendResizeObs = { _win: onR };
+      }catch(_){ }
+    }
+
     function __renderInvTrendSvg(points){
       if (!invTrendChart) return;
 
@@ -5523,9 +5557,51 @@ async function deleteMovement(id) {
         pts.push({ day: pts[0].day, value: pts[0].value });
       }
 
-      // viewbox dims
-      const W = 480, H = 180;
-      const padX = 14, padTop = 12, padBot = 16;
+      // viewBox: si adatta al rapporto del riquadro (niente barre/letterbox),
+      // senza deformare la curva (preserveAspectRatio resta "meet").
+      // Manteniamo l'altezza "unit" stabile (tipografia/stroke coerenti) e
+      // adattiamo la larghezza al rapporto reale del riquadro.
+      let H = 180;
+      let W = 480;
+      try{
+        const rect = invTrendChart.getBoundingClientRect();
+        const wpx = (rect && rect.width) || 0;
+        const hpx = (rect && rect.height) || 0;
+        if (wpx > 20 && hpx > 20){
+          const ratio = wpx / hpx;
+          if (isFinite(ratio) && ratio > 0.15){
+            W = Math.round(H * ratio);
+            // safety (evita 0 / numeri troppo piccoli)
+            if (W < 80) W = 80;
+          }
+        }
+      }catch(_){ }
+
+      __invTrendSvgW = W;
+      __invTrendSvgH = H;
+      try{
+        invTrendChart.setAttribute("viewBox", `0 0 ${W} ${H}`);
+        if (!invTrendChart.getAttribute("preserveAspectRatio")) {
+          invTrendChart.setAttribute("preserveAspectRatio", "xMidYMid meet");
+        }
+      }catch(_){ }
+
+      // padding (margini) proporzionali, così il grafico respira sempre uguale
+      let padX = Math.max(18, Math.round(W * 0.045));
+      let padTop = Math.max(12, Math.round(H * 0.07));
+      let padBot = Math.max(16, Math.round(H * 0.10));
+      // safety: evita che i padding mangino tutto lo spazio verticale
+      try{
+        const maxPadSum = Math.max(24, H - 34);
+        const sum = padTop + padBot;
+        if (sum > maxPadSum){
+          const k = maxPadSum / Math.max(1, sum);
+          padTop = Math.max(10, Math.round(padTop * k));
+          padBot = Math.max(12, Math.round(padBot * k));
+        }
+        const maxPadX = Math.max(20, Math.floor((W - 24) / 2));
+        if (padX > maxPadX) padX = maxPadX;
+      }catch(_){ }
 
       // Helpers (labels)
       const __fmtQty = (n) => {
