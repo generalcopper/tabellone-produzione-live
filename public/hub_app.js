@@ -2899,19 +2899,58 @@
 
     function setInert(el, on){
       if(!el) return;
-      try{
-        if ("inert" in el) el.inert = !!on;
-      }catch(_){}
+      try{ if ("inert" in el) el.inert = !!on; }catch(_){}
       if(on) el.setAttribute("inert", "");
       else el.removeAttribute("inert");
     }
 
-    // On load: if menu is aria-hidden, keep it inert too (not tabbable/clickable)
+    // Desktop (min-width:1200px): menu è "pinned" sempre visibile via CSS.
+    // Mobile/tablet: menu è overlay → deve essere inert/aria-hidden quando chiuso.
+    const __mqPinnedMenu = (window.matchMedia ? window.matchMedia("(min-width: 1200px)") : null);
+    function __isPinnedMenu(){
+      try{ return __mqPinnedMenu ? !!__mqPinnedMenu.matches : (window.innerWidth >= 1200); }catch(_){ return (window.innerWidth >= 1200); }
+    }
+
+    function syncSideMenuA11y(){
+      const pinned = __isPinnedMenu();
+
+      if (pinned){
+        // pinned: sempre interattivo + accessibile
+        try{ document.body.classList.remove("menu-open"); }catch(_){}
+        if (sideMenu){
+          sideMenu.setAttribute("aria-hidden","false");
+          setInert(sideMenu,false);
+        }
+        if (sideMenuOverlay){
+          sideMenuOverlay.setAttribute("aria-hidden","true");
+          setInert(sideMenuOverlay,true);
+        }
+        return;
+      }
+
+      const open = document.body.classList.contains("menu-open");
+      if (sideMenu){
+        sideMenu.setAttribute("aria-hidden", open ? "false" : "true");
+        setInert(sideMenu, !open);
+      }
+      if (sideMenuOverlay){
+        sideMenuOverlay.setAttribute("aria-hidden", open ? "false" : "true");
+        setInert(sideMenuOverlay, !open);
+      }
+    }
+
     try{
-      if (sideMenu?.getAttribute("aria-hidden") === "true") setInert(sideMenu, true);
-      if (sideMenuOverlay?.getAttribute("aria-hidden") === "true") setInert(sideMenuOverlay, true);
+      if (__mqPinnedMenu && typeof __mqPinnedMenu.addEventListener === "function"){
+        __mqPinnedMenu.addEventListener("change", syncSideMenuA11y);
+      } else if (__mqPinnedMenu && typeof __mqPinnedMenu.addListener === "function") {
+        __mqPinnedMenu.addListener(syncSideMenuA11y);
+      }
+      window.addEventListener("resize", syncSideMenuA11y, { passive: true });
     }catch(_){}
-// Anagrafica
+    // Init
+    try{ syncSideMenuA11y(); }catch(_){}
+
+    // Anagrafica
     const segSuppliers = document.getElementById("segSuppliers");
     const segProducts = document.getElementById("segProducts");
     const btnReloadAnag = document.getElementById("btnReloadAnag");
@@ -3069,29 +3108,25 @@
     }
 
     function openSideMenu(){
+      // Desktop pinned: niente overlay, ma riallineiamo aria/inert nel caso fosse rimasto sporco
+      if (__isPinnedMenu()) { try{ syncSideMenuA11y(); }catch(_){} return; }
+
       // Remember focus so we can restore it on close (prevents aria-hidden warnings)
       try{ lastFocusBeforeMenu = document.activeElement; }catch(_){ lastFocusBeforeMenu = null; }
 
       document.body.classList.add("menu-open");
-
-      // Make menu visible + focusable
-      if (sideMenu){
-        setInert(sideMenu, false);
-        sideMenu.setAttribute("aria-hidden", "false");
-      }
-      if (sideMenuOverlay){
-        setInert(sideMenuOverlay, false);
-        sideMenuOverlay.setAttribute("aria-hidden", "false");
-      }
+      try{ syncSideMenuA11y(); }catch(_){}
 
       // Move focus into the menu (close button first, otherwise first focusable)
       try{
-        const first = sideMenu?.querySelector("#btnMenuClose, button, [href], input, select, textarea, [tabindex]:not([tabindex='-1'])");
-        first?.focus({ preventScroll: true });
+        const first = sideMenu && sideMenu.querySelector("#btnMenuClose, button, [href], input, select, textarea, [tabindex]:not([tabindex='-1'])");
+        first && first.focus && first.focus({ preventScroll: true });
       }catch(_){}
     }
 
     function closeSideMenu(){
+      if (__isPinnedMenu()) { try{ syncSideMenuA11y(); }catch(_){} return; }
+
       // If focus is inside the menu, move it OUT before hiding (prevents aria-hidden on focused ancestor)
       try{
         const ae = document.activeElement;
@@ -3099,21 +3134,13 @@
           const restore = (lastFocusBeforeMenu && typeof lastFocusBeforeMenu.focus === "function")
             ? lastFocusBeforeMenu
             : btnMenuToggle;
-          restore?.focus?.({ preventScroll: true });
+          try{ ae.blur && ae.blur(); }catch(_){}
+          restore && restore.focus && restore.focus({ preventScroll: true });
         }
       }catch(_){}
 
       document.body.classList.remove("menu-open");
-
-      // Hide + make unfocusable
-      if (sideMenu){
-        sideMenu.setAttribute("aria-hidden", "true");
-        setInert(sideMenu, true);
-      }
-      if (sideMenuOverlay){
-        sideMenuOverlay.setAttribute("aria-hidden", "true");
-        setInert(sideMenuOverlay, true);
-      }
+      try{ syncSideMenuA11y(); }catch(_){}
     }
 
     btnMenuToggle?.addEventListener("click", () => {
