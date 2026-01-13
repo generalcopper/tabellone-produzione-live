@@ -10911,9 +10911,8 @@ async function handleFileSelection(fileList) {
     if (btnReloadAnag) btnReloadAnag.addEventListener("click", () => { renderAnag(); showToast("Anagrafica aggiornata"); });
 
     // Nuovo prodotto finito
-    if (btnNewFinishedProduct) btnNewFinishedProduct.addEventListener("click", () => { openFinishedProductModal(null); });
-
-    // Supplier modal
+    if (btnNewFinishedProduct) btnNewFinishedProduct.addEventListener("click", () => { try{ window.openFinishedProductModal && window.openFinishedProductModal(null); }catch(e){ console.warn(e); } });
+// Supplier modal
     if (supClose) supClose.addEventListener("click", closeSupplierModal);
     if (btnSupDone) btnSupDone.addEventListener("click", closeSupplierModal);
     if (modalSupplier) modalSupplier.addEventListener("click", (e) => { if (e.target === modalSupplier) closeSupplierModal(); });
@@ -11362,8 +11361,8 @@ Nota: elimina SOLO l’anagrafica prodotti finiti e la sua distinta base.`);
             const trFp = targetEl && targetEl.closest ? targetEl.closest("tr[data-fp-id]") : null;
             const fid = trFp ? (trFp.getAttribute("data-fp-id") || "") : "";
             if (fid) {
-              openFinishedProductModal(fid);
-              return;
+              try{ window.openFinishedProductModal && window.openFinishedProductModal(fid); }catch(e){ console.warn(e); }
+return;
             }
           }
         }
@@ -11377,8 +11376,8 @@ const btn = targetEl && targetEl.closest ? targetEl.closest("button[data-action]
         if (action === "supplierDocs") { openSupplierModal(id); return; }
         if (action === "deleteSupplier") { deleteSupplierCascade(id); return; }
         
-        if (action === "openFinished") { openFinishedProductModal(id); return; }
-        if (action === "deleteFinished") { deleteFinishedProductById(id); return; }
+        if (action === "openFinished") { try{ window.openFinishedProductModal && window.openFinishedProductModal(id); }catch(e){ console.warn(e); } return; }
+if (action === "deleteFinished") { deleteFinishedProductById(id); return; }
 if (action === "openProdGroup") {
           try{
             const g = (__prodGroupsMap && __prodGroupsMap.get) ? __prodGroupsMap.get(id) : null;
