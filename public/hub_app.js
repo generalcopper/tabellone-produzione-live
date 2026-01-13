@@ -1850,89 +1850,27 @@
     const anagTbody = document.getElementById("anagTbody");
     const anagTheadRow = document.getElementById("anagTheadRow");
 
-    // Supplier modal
-    const modalSupplier = document.getElementById("modalSupplier");
-    const supTitle = document.getElementById("supTitle");
-    const supSub = document.getElementById("supSub");
-    const supFields = document.getElementById("supFields");
-    const supDocsTbody = document.getElementById("supDocsTbody");
-    const supClose = document.getElementById("supClose");
-    const btnSupDone = document.getElementById("btnSupDone");
-    const btnSupDelete = document.getElementById("btnSupDelete");
-    const btnSupEdit = document.getElementById("btnSupEdit");
-    const btnSupSave = document.getElementById("btnSupSave");
-    const btnSupCancelEdit = document.getElementById("btnSupCancelEdit");
-// Product modal
-    const modalProduct = document.getElementById("modalProduct");
-    const prodTitle = document.getElementById("prodTitle");
-    const prodFields = document.getElementById("prodFields");
-    const prodClose = document.getElementById("prodClose");
-    const btnProdDone = document.getElementById("btnProdDone");
-    const modalUnified = document.getElementById("modalUnified");
-    const unifiedTitle = document.getElementById("unifiedTitle");
-    const unifiedSubtitle = document.getElementById("unifiedSubtitle");
-    const unifiedButtons = document.getElementById("unifiedButtons");
-    const unifiedClose = document.getElementById("unifiedClose");
-    const btnUnifiedDone = document.getElementById("btnUnifiedDone");
+    // Anagrafica prodotti finiti (distinta base)
+    const btnNewFinishedProduct = document.getElementById("btnNewFinishedProduct");
+    const modalFinishedProduct = document.getElementById("modalFinishedProduct");
+    const fpTitle = document.getElementById("fpTitle");
+    const fpName = document.getElementById("fpName");
+    const fpCode = document.getElementById("fpCode");
+    const fpUom = document.getElementById("fpUom");
 
-    // DDT detail modal
-    const modalDocDetail = document.getElementById("modalDocDetail");
-    const docDetailTitle = document.getElementById("docDetailTitle");
-    const docDetailSubtitle = document.getElementById("docDetailSubtitle");
-    const docDetailTbody = document.getElementById("docDetailTbody");
-    const docDetailTotals = document.getElementById("docDetailTotals");
+    const fpCompMeta = document.getElementById("fpCompMeta");
+    const fpCompPick = document.getElementById("fpCompPick");
+    const fpCompQty = document.getElementById("fpCompQty");
+    const fpCompUom = document.getElementById("fpCompUom");
+    const fpComponentList = document.getElementById("fpComponentList");
+    const fpCompTbody = document.getElementById("fpCompTbody");
 
-const docDetailPhotosWrap = document.getElementById("docDetailPhotosWrap");
-const docDetailPhotosGrid = document.getElementById("docDetailPhotosGrid");
-const docDetailPhotosMeta = document.getElementById("docDetailPhotosMeta");
-    const btnCloseDocDetail = document.getElementById("btnCloseDocDetail");
-
-    // Flow edit modal
-    const modalFlowEdit = document.getElementById("modalFlowEdit");
-    const flowEditTitle = document.getElementById("flowEditTitle");
-    const flowEditSub = document.getElementById("flowEditSub");
-    const flowEditCustomer = document.getElementById("flowEditCustomer");
-    const flowEditDate = document.getElementById("flowEditDate");
-    const flowEditNote = document.getElementById("flowEditNote");
-    const btnCloseFlowEdit = document.getElementById("btnCloseFlowEdit");
-    const btnCancelFlowEdit = document.getElementById("btnCancelFlowEdit");
-    const btnSaveFlowEdit = document.getElementById("btnSaveFlowEdit");
-    const btnDeleteFlowFromEdit = document.getElementById("btnDeleteFlowFromEdit");
-    const flowEditItemsMeta = document.getElementById("flowEditItemsMeta");
-    const flowEditItemsTbody = document.getElementById("flowEditItemsTbody");
-
-
-
-
-
-
-    const modalQuick = document.getElementById("modalQuick");
-    const modalTitle = document.getElementById("modalTitle");
-    const modalBody = document.getElementById("modalBody");
-
-    const modalSettings = document.getElementById("modalSettings");
-    const sOcrUrl = document.getElementById("sOcrUrl");
-    const sOcrKey = document.getElementById("sOcrKey");
-    const sLowThreshold = document.getElementById("sLowThreshold");
-    const sMaxRecent = document.getElementById("sMaxRecent");
-    const ocrTestResult = document.getElementById("ocrTestResult");
-
-    const cameraInput = document.getElementById("cameraInput");
-    const galleryInput = document.getElementById("galleryInput");
-    const pagesMeta = document.getElementById("pagesMeta");
-    const pagesCount = document.getElementById("pagesCount");
-    const pagesThumbs = document.getElementById("pagesThumbs");
-    const btnRemoveLastPage = document.getElementById("btnRemoveLastPage");
-
-    const segIn = document.getElementById("segIn");
-    const segOut = document.getElementById("segOut");
-
-    const fCustomer = document.getElementById("fCustomer");
-    const fDate = document.getElementById("fDate");
-    const fCode = document.getElementById("fCode");
-    const fQty = document.getElementById("fQty");
-    const fItem = document.getElementById("fItem");
-    const fNote = document.getElementById("fNote");
+    const btnFpCompAdd = document.getElementById("btnFpCompAdd");
+    const btnFpSave = document.getElementById("btnFpSave");
+    const btnFpCancel = document.getElementById("btnFpCancel");
+    const btnFpDelete = document.getElementById("btnFpDelete");
+    const btnFpDone = document.getElementById("btnFpDone");
+    const fpClose = document.getElementById("fpClose");
 
     // Click su una riga documento => precompila i campi movimento
     const docItemsTable = document.getElementById("docItemsTable");
@@ -2109,7 +2047,16 @@ const docDetailPhotosMeta = document.getElementById("docDetailPhotosMeta");
       setView("anag");
       try{ renderAnag(); }catch(_){ }
     });
-    document.getElementById("btnGoInvCerea")?.addEventListener("click", () => { openInventoryOverlay(WAREHOUSE_CEREA); });
+    
+    document.getElementById("btnGoFinishedAnag")?.addEventListener("click", () => {
+      activeAnagTab = "finished";
+      activeProductsMacroGroup = "";
+      syncAnagHeaderTitle();
+      try{ segProducts && segProducts.classList.remove("active"); segSuppliers && segSuppliers.classList.remove("active"); }catch(_){ }
+      setView("anag");
+      try{ renderAnag(); }catch(_){ }
+    });
+document.getElementById("btnGoInvCerea")?.addEventListener("click", () => { openInventoryOverlay(WAREHOUSE_CEREA); });
     document.getElementById("btnGoInvConcamarise")?.addEventListener("click", () => { openInventoryOverlay(WAREHOUSE_CONCA); });
 
 
@@ -2162,7 +2109,17 @@ document.getElementById("menuGoHome")?.addEventListener("click", () => { closeSi
       setView("anag");
       try{ renderAnag(); }catch(_){ }
     });
-        document.getElementById("btnCloseTrash")?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
+        
+    document.getElementById("menuGoFinishedProducts")?.addEventListener("click", () => {
+      closeSideMenu();
+      activeAnagTab = "finished";
+      activeProductsMacroGroup = "";
+      syncAnagHeaderTitle();
+      try{ segProducts && segProducts.classList.remove("active"); segSuppliers && segSuppliers.classList.remove("active"); }catch(_){ }
+      setView("anag");
+      try{ renderAnag(); }catch(_){ }
+    });
+document.getElementById("btnCloseTrash")?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
 document.getElementById("btnCloseFlows")?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
     document.getElementById("btnCloseMovements")?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
     document.getElementById("btnCloseMoveInv")?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} try{ resetMoveInvDirection(); }catch(_){ } setView("home"); });
@@ -2510,28 +2467,37 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
         categories: null,
         movements: null,
         thresholds: null,
-        supplierDocs: null
+        supplierDocs: null,
+        finishedProducts: null
       }
     };
 
     let suppliers = [];
     let products = [];
-    let thresholds = {}; // key -> number (from Firestore)
-    let activeAnagTab = "suppliers"; // suppliers|products
+    let thresholds = {};
+    let finishedProducts = []; // key -> number (from Firestore)
+    let activeAnagTab = "suppliers"; // suppliers|products|finished
     let activeProductsMacroGroup = ""; // materie_prime|imballaggi|"" (tutti)
 
 
     function syncAnagHeaderTitle(){
       const el = document.getElementById("anagHeaderTitle");
       if (!el) return;
+
       if (activeAnagTab === "products") {
         const mg = String(activeProductsMacroGroup || "").trim();
         if (mg === "materie_prime") el.textContent = "Prodotti — Materie prime";
         else if (mg === "imballaggi") el.textContent = "Prodotti — Imballaggi";
         else el.textContent = "Prodotti";
-      } else {
-        el.textContent = "Fornitori";
+        return;
       }
+
+      if (activeAnagTab === "finished") {
+        el.textContent = "Prodotti finiti";
+        return;
+      }
+
+      el.textContent = "Fornitori";
     }
 
     let currentSupplierId = null;
@@ -2799,6 +2765,7 @@ btnLogout.addEventListener("click", async () => {
       }
       suppliers = [];
       products = [];
+      finishedProducts = [];
       thresholds = {};
       currentSupplierId = null;
       try {
@@ -2837,6 +2804,18 @@ btnLogout.addEventListener("click", async () => {
           // Evita di cambiare lo stato Sync globale per singole collezioni.
         }
       );
+      // Finished Products (Anagrafica prodotti finiti)
+      fb.unsub.finishedProducts = onSnapshot(
+        query(orgCol("finishedProducts"), orderBy("nameLower")),
+        (snap) => {
+          finishedProducts = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+          renderAnag();
+        },
+        (err) => {
+          console.error("finishedProducts watch error", err);
+        }
+      );
+
 
       // Categories
       fb.unsub.categories = onSnapshot(
@@ -8454,6 +8433,9 @@ function renderAll() {
       // UI: filtri specifici prodotti (tendine)
       try{ renderAnagProductsFiltersUI(); }catch(_){ }
 
+      // CTA: nuovo prodotto finito (solo in tab finished)
+      try{ if (btnNewFinishedProduct) btnNewFinishedProduct.style.display = (activeAnagTab === "finished") ? "" : "none"; }catch(_){ }
+
 
       // Tabs
       if (activeAnagTab === "products") {
@@ -8520,6 +8502,68 @@ try{
           `;
         } catch(_){}
         if (anagTbody) anagTbody.innerHTML = `<tr><td class="td-muted" colspan="4">Modulo prodotti non caricato.</td></tr>`;
+        return;
+      }
+
+      // ===== Anagrafica: Prodotti finiti =====
+      if (activeAnagTab === "finished") {
+        try { if (anagTable) anagTable.classList.remove("anagTableProducts"); } catch(_){}
+        try { if (searchAnag) searchAnag.placeholder = "Nome o codice prodotto finito…"; } catch(_){}
+
+        try {
+          anagTheadRow.innerHTML = `
+            <th style="width:200px">Codice</th>
+            <th>Nome</th>
+            <th class="qty" style="width:140px">Componenti</th>
+            <th style="width:160px; text-align:right;">Azioni</th>
+          `;
+        } catch(_){}
+
+        if (!fb.user) {
+          try { if (anagTbody) anagTbody.innerHTML = `<tr><td class="td-muted" colspan="4">Accedi con Google per sincronizzare i prodotti finiti.</td></tr>`; } catch(_){}
+          return;
+        }
+
+        const list0 = Array.isArray(finishedProducts) ? finishedProducts.slice() : [];
+        const filtered = list0.filter(fp => {
+          const name = normTextKey(fp && (fp.name || fp.nome || ""));
+          const code = normTextKey(fp && (fp.code || fp.sku || ""));
+          const idk  = normTextKey(fp && (fp.id || ""));
+          if (!q) return true;
+          return (name && name.includes(q)) || (code && code.includes(q)) || (idk && idk.includes(q));
+        });
+
+        filtered.sort((a,b) => String((a && (a.nameLower || a.name || "")) || "").localeCompare(String((b && (b.nameLower || b.name || "")) || ""), "it", { sensitivity:"base" }));
+
+        if (!filtered.length) {
+          const msg = q ? "Nessun prodotto finito trovato." : "Nessun prodotto finito. Premi “Nuovo prodotto finito” per crearne uno.";
+          try { if (anagTbody) anagTbody.innerHTML = `<tr><td class="td-muted" colspan="4">${escapeHtml(msg)}</td></tr>`; } catch(_){}
+          return;
+        }
+
+        try{
+          anagTbody.innerHTML = filtered.map(fp => {
+            const id = String(fp && fp.id || "");
+            const code = String(fp && (fp.code || "") || "").trim();
+            const name = String(fp && (fp.name || fp.nome || "") || "").trim();
+            const comps = Array.isArray(fp && (fp.components || fp.bom || fp.distintaBase)) ? (fp.components || fp.bom || fp.distintaBase) : [];
+            const n = comps.length;
+
+            return `
+              <tr class="jsFpRow" data-fp-id="${escapeHtmlAttr(id)}" title="Apri distinta base">
+                <td data-label="Codice"><span class="kbd">${escapeHtml(code || "—")}</span></td>
+                <td data-label="Nome">${escapeHtml(name || "—")}</td>
+                <td data-label="Componenti" class="qty">${Number(n||0).toLocaleString("it-IT")}</td>
+                <td data-label="Azioni" style="text-align:right;">
+                  <button class="btn btn-secondary btn-xs" data-action="openFinished" data-id="${escapeHtmlAttr(id)}" type="button">Apri</button>
+                  <button class="btn btn-ghost btn-xs" data-action="deleteFinished" data-id="${escapeHtmlAttr(id)}" type="button">Elimina</button>
+                </td>
+              </tr>
+            `;
+          }).join("");
+        }catch(_){
+          try { if (anagTbody) anagTbody.innerHTML = `<tr><td class="td-muted" colspan="4">Errore rendering.</td></tr>`; } catch(_){}
+        }
         return;
       }
 
@@ -10866,6 +10910,9 @@ async function handleFileSelection(fileList) {
     if (anagProdSort) anagProdSort.addEventListener("change", () => renderAnag());
     if (btnReloadAnag) btnReloadAnag.addEventListener("click", () => { renderAnag(); showToast("Anagrafica aggiornata"); });
 
+    // Nuovo prodotto finito
+    if (btnNewFinishedProduct) btnNewFinishedProduct.addEventListener("click", () => { openFinishedProductModal(null); });
+
     // Supplier modal
     if (supClose) supClose.addEventListener("click", closeSupplierModal);
     if (btnSupDone) btnSupDone.addEventListener("click", closeSupplierModal);
@@ -10896,7 +10943,278 @@ async function handleFileSelection(fileList) {
       if (!modalUnified) return;
       modalUnified.classList.remove("open");
       __syncBodyLockFromModals();
+    
+    // ===== Prodotti finiti (distinta base / BOM) =====
+    let __fpCurrentId = null;
+    let __fpDraft = null;
+
+    function __fpClone(obj){
+      try{ return JSON.parse(JSON.stringify(obj || {})); }catch(_){ return Object.assign({}, obj || {}); }
     }
+
+    function __fpParseQty(raw){
+      const s0 = String(raw || "").trim();
+      if (!s0) return { qty: null, qtyRaw: "" };
+      const s = s0.replace(/\s+/g, "").replace(",", ".");
+      if (s.includes("/")) {
+        const parts = s.split("/");
+        const a = Number(parts[0]);
+        const b = Number(parts[1]);
+        if (Number.isFinite(a) && Number.isFinite(b) && b !== 0) {
+          return { qty: a / b, qtyRaw: s0 };
+        }
+      }
+      const n = Number(s);
+      if (!Number.isFinite(n)) return { qty: null, qtyRaw: s0 };
+      return { qty: n, qtyRaw: s0 };
+    }
+
+    function __fpFmtQty(comp){
+      try{
+        const raw = String((comp && comp.qtyRaw) || "").trim();
+        if (raw) return raw;
+        const n = Number(comp && comp.qty);
+        if (!Number.isFinite(n)) return "";
+        // format "it" ma senza zeri inutili
+        const s = n.toLocaleString("it-IT", { maximumFractionDigits: 6 });
+        return s;
+      }catch(_){ return ""; }
+    }
+
+    function __fpBuildDatalist(){
+      try{
+        if (!fpComponentList) return;
+        const list = Array.isArray(products) ? products.slice() : [];
+        // cap per UI (datalist enorme può essere lento)
+        const cap = 2500;
+        const out = [];
+        for (let i=0; i<list.length && i<cap; i++){
+          const p = list[i] || {};
+          const code = String(p.code || (typeof safeDecodeUri==="function" ? safeDecodeUri(p.id || "") : (p.id||"")) || "").trim();
+          if (!code) continue;
+          const name = String(p.name || "").trim();
+          out.push(`<option value="${escapeHtmlAttr(code + (name ? " — " + name : ""))}"></option>`);
+        }
+        fpComponentList.innerHTML = out.join("");
+      }catch(_){}
+    }
+
+    function __fpResolvePickedProduct(val){
+      const s0 = String(val || "").trim();
+      if (!s0) return null;
+
+      let code = s0;
+      if (s0.includes("—")) code = s0.split("—")[0].trim();
+      if (!code) return null;
+
+      // prova match per codice
+      const p = (typeof findProductByCode === "function") ? findProductByCode(code) : null;
+      if (p) {
+        const c = String(p.code || (typeof safeDecodeUri==="function" ? safeDecodeUri(p.id || "") : (p.id||"")) || "").trim() || code;
+        return {
+          code: c,
+          name: String(p.name || "").trim() || c,
+          uom: __normalizeUom(p.uom || p.um || p.unit || "") || getUomResolvedForCode(c) || ""
+        };
+      }
+
+      // fallback: match per nome (se univoco)
+      try{
+        const key = normTextKey(s0);
+        if (key) {
+          const matches = (Array.isArray(products) ? products : []).filter(pp => normTextKey(pp && (pp.name || "")) === key);
+          if (matches.length === 1) {
+            const pp = matches[0];
+            const c = String(pp.code || (typeof safeDecodeUri==="function" ? safeDecodeUri(pp.id || "") : (pp.id||"")) || "").trim();
+            return { code: c, name: String(pp.name || "").trim() || c, uom: __normalizeUom(pp.uom || "") || getUomResolvedForCode(c) || "" };
+          }
+        }
+      }catch(_){}
+      return null;
+    }
+
+    function __fpEnsureDraftBase(fp){
+      const base = __fpClone(fp || {});
+      base.components = Array.isArray(base.components) ? base.components : (Array.isArray(base.bom) ? base.bom : (Array.isArray(base.distintaBase) ? base.distintaBase : []));
+      // normalizza array
+      base.components = (base.components || []).map(c => ({
+        productId: String(c.productId || c.pid || "").trim(),
+        code: String(c.code || c.codice || "").trim(),
+        name: String(c.name || c.articolo || c.item || "").trim(),
+        qty: (c.qty != null) ? Number(c.qty) : null,
+        qtyRaw: String(c.qtyRaw || "").trim(),
+        uom: String(c.uom || c.um || "").trim(),
+        note: String(c.note || "").trim()
+      })).filter(x => x.code || x.name);
+      return base;
+    }
+
+    function __fpRenderComponents(){
+      if (!fpCompTbody) return;
+      const comps = (__fpDraft && Array.isArray(__fpDraft.components)) ? __fpDraft.components : [];
+      if (fpCompMeta) fpCompMeta.textContent = String(comps.length || 0);
+
+      if (!comps.length) {
+        fpCompTbody.innerHTML = '<tr><td class="td-muted" colspan="5">Nessun componente.</td></tr>';
+        return;
+      }
+
+      fpCompTbody.innerHTML = comps.map((c, i) => {
+        const code = String(c.code || "").trim();
+        const name = String(c.name || "").trim();
+        const qty = __fpFmtQty(c);
+        const uom = String(c.uom || "").trim();
+        return `
+          <tr data-i="${i}">
+            <td data-label="Codice"><span class="kbd">${escapeHtml(code || "—")}</span></td>
+            <td data-label="Articolo">${escapeHtml(name || "—")}</td>
+            <td data-label="Q.tà" class="qty">
+              <input class="qtyEditInput jsFpCompQty" data-i="${i}" value="${escapeHtmlAttr(qty)}" placeholder="es. 1/20" style="width: 100%; max-width: 150px;" />
+            </td>
+            <td data-label="U.M.">
+              <input class="qtyEditInput jsFpCompUom" data-i="${i}" value="${escapeHtmlAttr(uom)}" placeholder="pz / g / kg" style="width: 100%; max-width: 120px;" />
+            </td>
+            <td style="text-align:right;">
+              <button class="btn btn-ghost btn-xs jsFpCompDel" data-i="${i}" type="button">–</button>
+            </td>
+          </tr>
+        `;
+      }).join("");
+    }
+
+    function openFinishedProductModal(id){
+      if (!modalFinishedProduct) return;
+
+      __fpBuildDatalist();
+
+      const fid = id ? String(id) : "";
+      __fpCurrentId = fid || null;
+
+      let fp = null;
+      if (fid) {
+        fp = (Array.isArray(finishedProducts) ? finishedProducts : []).find(x => String(x && x.id || "") === fid) || null;
+      }
+      __fpDraft = __fpEnsureDraftBase(fp || {});
+
+      if (fpTitle) fpTitle.textContent = fid ? "Prodotto finito" : "Nuovo prodotto finito";
+      if (fpName) fpName.value = String(__fpDraft.name || __fpDraft.nome || "").trim();
+      if (fpCode) fpCode.value = String(__fpDraft.code || "").trim();
+      if (fpUom) fpUom.value = String(__fpDraft.uom || "").trim();
+
+      // default UOM campi componente
+      try{
+        if (fpCompUom && !String(fpCompUom.value||"").trim()) fpCompUom.value = "pz";
+      }catch(_){}
+
+      if (btnFpDelete) btnFpDelete.style.display = fid ? "" : "none";
+
+      __fpRenderComponents();
+
+      modalFinishedProduct.classList.add("open");
+      __syncBodyLockFromModals();
+      try{ fpName && fpName.focus(); }catch(_){}
+    }
+
+    function closeFinishedProductModal(){
+      if (!modalFinishedProduct) return;
+      modalFinishedProduct.classList.remove("open");
+      __syncBodyLockFromModals();
+      __fpCurrentId = null;
+      __fpDraft = null;
+    }
+
+    async function saveFinishedProduct(){
+      if (!(fb.user && fb.db)) { showToast("Accedi con Google per salvare", "warn"); return; }
+
+      const name = String(fpName && fpName.value || "").trim();
+      if (!name) { showToast("Inserisci un nome prodotto finito", "warn"); return; }
+
+      const code = String(fpCode && fpCode.value || "").trim();
+      const uom = String(fpUom && fpUom.value || "").trim();
+
+      const comps = (__fpDraft && Array.isArray(__fpDraft.components)) ? __fpDraft.components : [];
+      // sanitize comps
+      const cleanComps = comps.map(c => {
+        const qtyNum = (c.qty != null && Number.isFinite(Number(c.qty))) ? Number(c.qty) : null;
+        const qtyRaw = String(c.qtyRaw || "").trim();
+        const code0 = String(c.code || "").trim();
+        const name0 = String(c.name || "").trim();
+        const pid0 = String(c.productId || "").trim();
+        const u0 = String(c.uom || "").trim();
+        return {
+          productId: pid0 || keyToDocId(code0.toLowerCase()),
+          code: code0,
+          name: name0,
+          qty: qtyNum,
+          qtyRaw: qtyRaw,
+          uom: u0
+        };
+      }).filter(x => x.code || x.name);
+
+      const payload = {
+        name,
+        nameLower: name.toLowerCase(),
+        updatedAt: serverTimestamp(),
+        updatedBy: (fb.user.email || fb.user.uid || "")
+      };
+      if (code) { payload.code = code; payload.codeLower = code.toLowerCase(); }
+      else { payload.code = deleteField(); payload.codeLower = deleteField(); }
+      if (uom) payload.uom = uom;
+      else payload.uom = deleteField();
+
+      payload.components = cleanComps;
+
+      try{
+        if (__fpCurrentId) {
+          await setDoc(doc(fb.db, "orgs", ORG_ID, "finishedProducts", __fpCurrentId), payload, { merge: true });
+          showToast("Prodotto finito salvato");
+          closeFinishedProductModal();
+          return;
+        }
+
+        payload.createdAt = serverTimestamp();
+        payload.createdBy = (fb.user.email || fb.user.uid || "");
+        const ref = await addDoc(orgCol("finishedProducts"), payload);
+        __fpCurrentId = ref && ref.id ? ref.id : null;
+        showToast("Prodotto finito creato");
+        closeFinishedProductModal();
+      }catch(e){
+        console.error("saveFinishedProduct failed", e);
+        showToast("Errore salvataggio prodotto finito", "err");
+      }
+    }
+
+    async function deleteFinishedProductById(id){
+      const fid = String(id || "").trim();
+      if (!fid) return;
+      if (!(fb.user && fb.db)) { showToast("Accedi con Google", "warn"); return; }
+
+      const fp = (Array.isArray(finishedProducts) ? finishedProducts : []).find(x => String(x && x.id || "") === fid) || null;
+      const nm = String(fp && (fp.name || fp.nome || "") || "").trim() || "Prodotto finito";
+      const cd = String(fp && (fp.code || "") || "").trim();
+
+      const ok = confirm(`Eliminare il prodotto finito?
+
+${cd ? ("Codice: " + cd + "\n") : ""}Nome: ${nm}
+
+Nota: elimina SOLO l’anagrafica prodotti finiti e la sua distinta base.`);
+      if (!ok) return;
+
+      // optimistic local
+      try{ finishedProducts = (finishedProducts || []).filter(x => String(x && x.id || "") !== fid); }catch(_){}
+      try{ renderAnag(); }catch(_){}
+
+      try{
+        try{ await trashPut({ kind:"finishedProduct", label: `${cd ? cd + " — " : ""}${nm}`, target:{ col:"finishedProducts", id: fid, code: cd }, data: fp ? {...fp} : { name:nm, code:cd } }); }catch(_){ }
+        await deleteDoc(doc(fb.db, "orgs", ORG_ID, "finishedProducts", fid));
+        showToast("Prodotto finito eliminato");
+        try{ renderAnag(); }catch(_){}
+      }catch(e){
+        console.error("deleteFinishedProductById failed", e);
+        showToast("Errore eliminazione prodotto finito", "err");
+      }
+    }
+}
 
     if (prodClose) prodClose.addEventListener("click", closeProductModal);
     if (btnProdDone) btnProdDone.addEventListener("click", closeProductModal);
@@ -10905,6 +11223,94 @@ async function handleFileSelection(fileList) {
     if (unifiedClose) unifiedClose.addEventListener("click", closeUnifiedModal);
     if (btnUnifiedDone) btnUnifiedDone.addEventListener("click", closeUnifiedModal);
     if (modalUnified) modalUnified.addEventListener("click", (e) => { if (e.target === modalUnified) closeUnifiedModal(); });
+
+    // Finished product modal
+    if (fpClose) fpClose.addEventListener("click", closeFinishedProductModal);
+    if (btnFpDone) btnFpDone.addEventListener("click", closeFinishedProductModal);
+    if (btnFpCancel) btnFpCancel.addEventListener("click", closeFinishedProductModal);
+    if (modalFinishedProduct) modalFinishedProduct.addEventListener("click", (e) => { if (e.target === modalFinishedProduct) closeFinishedProductModal(); });
+
+    if (btnFpSave) btnFpSave.addEventListener("click", (e) => { e.preventDefault(); e.stopPropagation(); saveFinishedProduct(); });
+    if (btnFpDelete) btnFpDelete.addEventListener("click", (e) => { e.preventDefault(); e.stopPropagation(); if (__fpCurrentId) deleteFinishedProductById(__fpCurrentId); });
+
+    if (btnFpCompAdd) btnFpCompAdd.addEventListener("click", (e) => {
+      e.preventDefault(); e.stopPropagation();
+      if (!__fpDraft) __fpDraft = __fpEnsureDraftBase({});
+      const picked = __fpResolvePickedProduct(fpCompPick && fpCompPick.value);
+      if (!picked) { showToast("Seleziona un componente valido", "warn"); return; }
+
+      const qx = __fpParseQty(fpCompQty && fpCompQty.value);
+      if (!(qx && (qx.qty != null) && Number.isFinite(Number(qx.qty)))) { showToast("Quantità non valida", "warn"); return; }
+
+      const u = String(fpCompUom && fpCompUom.value || "").trim() || (picked.uom || "pz");
+
+      // evita duplicati: se già presente stesso codice, somma qty
+      const comps = Array.isArray(__fpDraft.components) ? __fpDraft.components : [];
+      const low = String(picked.code || "").trim().toLowerCase();
+      const idx = comps.findIndex(c => String(c && c.code || "").trim().toLowerCase() === low);
+      if (idx >= 0) {
+        const cur = comps[idx] || {};
+        const curQty = Number(cur.qty);
+        const addQty = Number(qx.qty);
+        const newQty = (Number.isFinite(curQty) ? curQty : 0) + (Number.isFinite(addQty) ? addQty : 0);
+        cur.qty = newQty;
+        cur.qtyRaw = ""; // una volta sommato, mostra numero
+        cur.uom = u || cur.uom || "pz";
+        comps[idx] = cur;
+      } else {
+        comps.push({
+          productId: keyToDocId(String(picked.code||"").trim().toLowerCase()),
+          code: String(picked.code || "").trim(),
+          name: String(picked.name || "").trim(),
+          qty: Number(qx.qty),
+          qtyRaw: String(qx.qtyRaw || "").trim(),
+          uom: u
+        });
+      }
+      __fpDraft.components = comps;
+
+      try{ if (fpCompPick) fpCompPick.value = ""; }catch(_){}
+      try{ if (fpCompQty) fpCompQty.value = ""; }catch(_){}
+      try{ if (fpCompUom) fpCompUom.value = u; }catch(_){}
+
+      __fpRenderComponents();
+    });
+
+    // Delegation: edit qty/uom + delete component
+    if (modalFinishedProduct) {
+      modalFinishedProduct.addEventListener("click", (e) => {
+        const btn = e.target && e.target.closest ? e.target.closest("button.jsFpCompDel") : null;
+        if (!btn) return;
+        e.preventDefault(); e.stopPropagation();
+        const i = Number(btn.getAttribute("data-i"));
+        if (!__fpDraft || !Array.isArray(__fpDraft.components)) return;
+        if (!Number.isFinite(i) || i < 0) return;
+        __fpDraft.components.splice(i, 1);
+        __fpRenderComponents();
+      });
+
+      modalFinishedProduct.addEventListener("input", (e) => {
+        const t = e.target;
+        if (!t || !__fpDraft || !Array.isArray(__fpDraft.components)) return;
+
+        const i = Number(t.getAttribute("data-i"));
+        if (!Number.isFinite(i) || i < 0 || i >= __fpDraft.components.length) return;
+
+        if (t.classList && t.classList.contains("jsFpCompQty")) {
+          const qx = __fpParseQty(t.value);
+          __fpDraft.components[i].qty = (qx.qty != null && Number.isFinite(Number(qx.qty))) ? Number(qx.qty) : null;
+          __fpDraft.components[i].qtyRaw = String(qx.qtyRaw || "").trim();
+          if (fpCompMeta) fpCompMeta.textContent = String(__fpDraft.components.length || 0);
+          return;
+        }
+
+        if (t.classList && t.classList.contains("jsFpCompUom")) {
+          __fpDraft.components[i].uom = String(t.value || "").trim();
+          return;
+        }
+      });
+    }
+
 
 
 
@@ -10915,7 +11321,7 @@ async function handleFileSelection(fileList) {
 
         // Click riga (fornitori): apri dettaglio fornitore cliccando ovunque sulla riga
         // (escludi elementi interattivi come bottoni/link/input)
-        if (activeAnagTab !== "products") {
+        if (activeAnagTab === "suppliers") {
           const isInteractive = !!(targetEl && targetEl.closest && targetEl.closest("button, a, input, select, textarea, label"));
           if (!isInteractive) {
             const trSup = targetEl && targetEl.closest ? targetEl.closest("tr[data-supplier-id]") : null;
@@ -10944,7 +11350,21 @@ async function handleFileSelection(fileList) {
           }
         }
 
-        const btn = targetEl && targetEl.closest ? targetEl.closest("button[data-action]") : null;
+        
+        // Click riga (prodotti finiti): apri distinta base
+        if (activeAnagTab === "finished") {
+          const isInteractive = !!(targetEl && targetEl.closest && targetEl.closest("button, a, input, select, textarea, label"));
+          if (!isInteractive) {
+            const trFp = targetEl && targetEl.closest ? targetEl.closest("tr[data-fp-id]") : null;
+            const fid = trFp ? (trFp.getAttribute("data-fp-id") || "") : "";
+            if (fid) {
+              openFinishedProductModal(fid);
+              return;
+            }
+          }
+        }
+
+const btn = targetEl && targetEl.closest ? targetEl.closest("button[data-action]") : null;
         if (!btn) return;
         const action = btn.getAttribute("data-action");
         const id = btn.getAttribute("data-id");
@@ -10952,7 +11372,10 @@ async function handleFileSelection(fileList) {
 
         if (action === "supplierDocs") { openSupplierModal(id); return; }
         if (action === "deleteSupplier") { deleteSupplierCascade(id); return; }
-        if (action === "openProdGroup") {
+        
+        if (action === "openFinished") { openFinishedProductModal(id); return; }
+        if (action === "deleteFinished") { deleteFinishedProductById(id); return; }
+if (action === "openProdGroup") {
           try{
             const g = (__prodGroupsMap && __prodGroupsMap.get) ? __prodGroupsMap.get(id) : null;
             const code = (g && Array.isArray(g.codes) && g.codes.length) ? String(g.codes[0] || "").trim() : "";
