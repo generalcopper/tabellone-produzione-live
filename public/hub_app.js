@@ -934,6 +934,27 @@
     return "cerea";
   }
 
+  function normalizeDaneaXmlUrl(u){
+    u = String(u || "").trim();
+    if (!u) return "";
+    try{
+      // add scheme if user pasted only hostname
+      if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(u) && /^[\w.-]+\.[\w.-]+(\/.*)?$/.test(u)){
+        u = "https://" + u;
+      }
+      const url = new URL(u);
+      const path = String(url.pathname || "/").trim();
+      const looksXml = /\.xml$/i.test(path);
+      const isRoot = (path === "" || path === "/");
+      if (isRoot && !looksXml){
+        url.pathname = "/danea/latest.xml";
+      }
+      return url.toString();
+    }catch(_){
+      return String(u || "").trim();
+    }
+  }
+
   function fmtDateIT(iso){
     try{
       const d = new Date(String(iso || ""));
@@ -1449,8 +1470,10 @@
 
   function bindEvents(){
     $("btnDaneaSaveUrl")?.addEventListener("click", () => {
-      const v = String($("daneaXmlUrl")?.value || "").trim();
+      const vRaw = String($("daneaXmlUrl")?.value || "").trim();
+      const v = normalizeDaneaXmlUrl(vRaw);
       S.xmlUrl = v;
+      if ($("daneaXmlUrl")) $("daneaXmlUrl").value = v;
       try{ localStorage.setItem(LS_URL, v); }catch(_){}
       fetchNow(true);
       startPolling();
@@ -1704,8 +1727,9 @@
 
     // restore prefs
     try{
-      S.xmlUrl = String(localStorage.getItem(LS_URL) || "").trim();
+      S.xmlUrl = normalizeDaneaXmlUrl(String(localStorage.getItem(LS_URL) || "").trim());
       if ($("daneaXmlUrl")) $("daneaXmlUrl").value = S.xmlUrl;
+      try{ localStorage.setItem(LS_URL, S.xmlUrl); }catch(_){}
     }catch(_){}
 
     bindEvents();
