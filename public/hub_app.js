@@ -641,9 +641,7 @@
       <div class="inlineRow" style="justify-content:space-between; align-items:flex-end; gap:12px;">
         <div class="stack" style="flex:1; min-width: 220px;">
           <div class="hero-sub">DDT caricati</div>
-          <div class="muted">Click su un DDT per modificarlo</div>
         </div>
-        <button class="btn btn-secondary" id="btnFlowsExport" type="button">Esporta CSV</button>
       </div>
 
       <div class="inlineRow listStickyBar" style="justify-content:space-between; align-items:flex-end; gap:12px; margin-top: 10px;">
