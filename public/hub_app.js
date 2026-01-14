@@ -905,7 +905,7 @@
   try{ syncCacheToFirestore(arr).catch(()=>{}); }catch(_){}
 }
 
-async function syncCacheToFirestore(parsed){(parsed){
+async function syncCacheToFirestore(parsed){
     const H = S.hub || getHub();
     if (!H || !H.fb || !H.fb.db || !H.FS) return;
 
