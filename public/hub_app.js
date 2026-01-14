@@ -1142,9 +1142,6 @@
       const st = ddtStatus(ddt);
       btnSend.disabled = !st.ok;
     }
-
-    const hasFp = !!(S.hub && S.hub.fb && S.hub.fb.user);
-
     tbody.innerHTML = rows.length ? rows.map(r => {
       const code = String(r.code || "").trim();
       const desc = String(r.desc || "").trim();
@@ -1154,10 +1151,13 @@
       const st = isRowConfigured(r);
       const dot = st.ok ? '<span class="dot ok"></span>' : '<span class="dot bad"></span>';
 
+      const fidRow = String(st.fp?.id || st.fp?._id || "").trim();
+      const rowWhy = String(st.why || "");
+      const rowStyle = st.ok ? "" : ' style="background: rgba(255,59,48,.08); cursor:pointer;"';
+      const rowTitle = st.ok ? "Apri distinta base" : "Configura distinta base";
+
       let act = "";
-      if (!hasFp){
-        act = `<button class="btn btn-ghost btn-xs jsDaneaLogin" type="button">Accedi</button>`;
-      } else if (st.why === "missing"){
+      if (st.why === "missing"){
         act = `<button class="btn btn-secondary btn-xs jsDaneaImportFp" data-code="${escAttr(code)}" data-desc="${escAttr(desc)}" type="button">Importa</button>`;
       } else if (st.why === "empty"){
         const fid = String(st.fp?.id || st.fp?._id || "").trim();
@@ -1167,7 +1167,7 @@
         act = fid ? `<button class="btn btn-ghost btn-xs jsDaneaOpenFp" data-fpid="${escAttr(fid)}" type="button">Apri</button>` : `<span class="td-muted">OK</span>`;
       }
 
-      return `<tr>
+      return `<tr class="jsDaneaItemRow" data-code="${escAttr(code)}" data-desc="${escAttr(desc)}" data-fpid="${escAttr(fidRow)}" data-why="${escAttr(rowWhy)}" title="${escAttr(rowTitle)}"${rowStyle}>
         <td data-label="">${dot}</td>
         <td data-label="Codice"><span class="kbd">${esc(code || "—")}</span></td>
         <td data-label="Articolo">${esc(desc || "—")}</td>
@@ -1514,18 +1514,6 @@
           const btnConfig = e.target?.closest?.("button.jsDaneaConfigFp");
           const btnOpenFp = e.target?.closest?.("button.jsDaneaOpenFp");
 
-          const btnLogin = e.target?.closest?.("button.jsDaneaLogin");
-
-          if (btnLogin){
-            e.preventDefault(); e.stopPropagation();
-            try{
-              const b = document.getElementById("btnLoginGoogle");
-              if (b) { b.click(); return; }
-            }catch(_){}
-            alert("Accedi con Google");
-            return;
-          }
-
           if (btnOpenFp){
             e.preventDefault(); e.stopPropagation();
             const id = String(btnOpenFp.getAttribute("data-fpid") || "").trim();
@@ -1571,6 +1559,53 @@
             }catch(err){
               console.error(err);
               alert("Import fallito");
+            }
+          }
+
+          // click sulla riga (anche senza bottone): apre la distinta base
+          const tr = e.target?.closest?.("tr.jsDaneaItemRow");
+          if (tr){
+            e.preventDefault(); e.stopPropagation();
+
+            const H = S.hub;
+            if (!H || !H.fb || !H.fb.db || !H.FS) return;
+
+            const why = String(tr.getAttribute("data-why") || "").trim();
+            const fid = String(tr.getAttribute("data-fpid") || "").trim();
+            const code = String(tr.getAttribute("data-code") || "").trim();
+            const desc = String(tr.getAttribute("data-desc") || "").trim() || code;
+
+            // se esiste già il prodotto finito -> apri direttamente
+            if (fid){
+              try{ window.openFinishedProductModal && window.openFinishedProductModal(fid); }catch(_){}
+              return;
+            }
+
+            // se manca, prova a crearlo e aprire il modale
+            if (why === "missing" && code){
+              if (!H.fb.user) { try{ window.HubInv?.showToast?.("Accedi con Google per configurare", "warn"); }catch(_){ alert("Accedi con Google"); } return; }
+
+              try{
+                const { addDoc, collection, serverTimestamp } = H.FS;
+                const col = collection(H.fb.db, "orgs", H.ORG_ID, "finishedProducts");
+                const payload = {
+                  name: desc,
+                  nameLower: desc.toLowerCase(),
+                  code: code,
+                  codeLower: code.toLowerCase(),
+                  components: [],
+                  createdAt: serverTimestamp(),
+                  createdBy: H.fb.user.email || H.fb.user.uid,
+                  updatedAt: serverTimestamp(),
+                  updatedBy: H.fb.user.email || H.fb.user.uid
+                };
+                const ref = await addDoc(col, payload);
+                try{ window.HubInv?.showToast?.("Prodotto finito creato"); }catch(_){}
+                try{ if (ref?.id) window.openFinishedProductModal && window.openFinishedProductModal(ref.id); }catch(_){}
+              }catch(err){
+                console.error(err);
+                alert("Import fallito");
+              }
             }
           }
         });
