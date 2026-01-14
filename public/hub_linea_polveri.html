@@ -3387,15 +3387,38 @@ function hideLogin(){
     hideLogin();
     showAuthLoader("Verifica accesso…");
   }
-  async function getAccessByEmail(email){
-    const e = String(email||"").trim().toLowerCase();
-    if(!e) return null;
+  async function __tryGetAccessById(docId){
+    const id = String(docId||"").trim();
+    if(!id) return null;
     if(!state.firebase.ok) return null;
     const fs = state.firebase.api;
     const db = state.firebase.db;
-    const ref = fs.doc(db, USERS_COL, e);
+    const ref = fs.doc(db, USERS_COL, id);
     const snap = await fs.getDoc(ref);
     return snap.exists() ? (snap.data()||null) : null;
+  }
+
+  // Access allowlist lookup:
+  // - supporta docId = emailLower (standard), email raw (se incollata con maiuscole), oppure uid (vecchio stile)
+  async function getAccessForAuthUser(user){
+    const emailRaw = String(user?.email || "").trim();
+    const emailLower = emailRaw.toLowerCase();
+    const uid = String(user?.uid || "").trim();
+    const candidates = [];
+    if(emailLower) candidates.push(emailLower);
+    if(emailRaw && emailRaw !== emailLower) candidates.push(emailRaw);
+    if(uid && !candidates.includes(uid)) candidates.push(uid);
+
+    for(const id of candidates){
+      try{
+        const a = await __tryGetAccessById(id);
+        if(a) return a;
+      }catch(e){
+        // non bloccare: proviamo il prossimo id (es. email vs uid)
+        try{ console.warn("access read failed for", id, e); }catch(_e){}
+      }
+    }
+    return null;
   }
 
   function renderAuthDenied(email, reason=""){
@@ -4010,21 +4033,15 @@ function hideLogin(){
       markAuthOk(user.email || "");
 
 
-      let profile = await loadUserProfile(user.uid);
-      if(!profile){
-        const dn = (user.displayName||"").trim();
-        profile = { fullName: dn || user.email || "" , email: user.email||"" };
-        await upsertUserProfile(user, profile);
-      } else {
-
-        if(!profile.fullName){
-          const dn = (user.displayName||"").trim();
-          profile.fullName = dn || user.email || "";
-          await upsertUserProfile(user, { fullName: profile.fullName, email: user.email||"" });
-        }
+      // 1) Access allowlist: support emailLower / email raw / uid
+      let access = null;
+      try{
+        access = await getAccessForAuthUser(user);
+      }catch(e){
+        console.warn("getAccessForAuthUser failed", e);
+        access = null;
       }
 
-      const access = await getAccessByEmail(user.email||"");
       if(!access || access.enabled === false){
         clearAuthOk();
         resetAuthDependentState();
@@ -4032,8 +4049,35 @@ function hideLogin(){
         return;
       }
 
+      // 2) Profilo (non deve MAI bloccare l'accesso se mancano permessi di write su /powderUsers/{uid})
+      let profile = null;
+      try{
+        profile = await loadUserProfile(user.uid);
+      }catch(e){
+        console.warn("loadUserProfile failed (ignored)", e);
+        profile = null;
+      }
 
-      if(access && access.displayName){ profile.fullName = access.displayName; }
+      const dn = (user.displayName||"").trim();
+      const accessName = (access && access.displayName) ? String(access.displayName).trim() : "";
+
+      if(!profile || typeof profile !== "object"){
+        profile = { fullName: accessName || dn || user.email || "" , email: user.email||"" };
+        try{ await upsertUserProfile(user, profile); }catch(e){ console.warn("upsertUserProfile skipped", e); }
+      } else {
+
+        if(!profile.fullName){
+          profile.fullName = accessName || dn || user.email || "";
+          try{ await upsertUserProfile(user, { fullName: profile.fullName, email: user.email||"" }); }catch(e){ console.warn("upsertUserProfile name skipped", e); }
+        }
+        if(!profile.email){
+          profile.email = user.email||"";
+          try{ await upsertUserProfile(user, { email: profile.email }); }catch(e){ console.warn("upsertUserProfile email skipped", e); }
+        }
+
+        // se l'admin ha impostato un displayName nell'allowlist, ha priorità
+        if(accessName){ profile.fullName = accessName; }
+      }
 
       state.user = { uid: user.uid, fullName: profile.fullName, email: (user.email||profile.email||""), emailLower: String((user.email||profile.email||"")).toLowerCase(), isAdmin: Boolean(access && access.isAdmin) };
       state.operator = state.user.fullName;
