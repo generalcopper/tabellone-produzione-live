@@ -1587,15 +1587,27 @@
     if (!url) { render(); return; }
 
     try{
-      const r = await fetch(url, { cache: "no-store" });
+      // NOTE: CORS is handled by the proxy. We never send cookies.
+      const r = await fetch(url, { cache: "no-store", mode: "cors", credentials: "omit" });
       if (!r.ok) throw new Error("HTTP " + r.status);
-      const txt = await r.text();
-      ingestXml(txt, !!force);
+      const body = await r.text();
+      ingestXml(body, !!force);
     }catch(err){
       console.warn("fetch XML failed", err);
-      try{ window.HubInv?.showToast?.("Impossibile leggere XML", "warn"); }catch(_){}
+      const msg = String(err && (err.message || err) || "");
+      if (/Failed to fetch/i.test(msg) || /CORS/i.test(msg)){
+        try{ window.HubInv?.showToast?.("Impossibile leggere XML (CORS/proxy)", "warn"); }catch(_){}
+      } else {
+        try{ window.HubInv?.showToast?.("Impossibile leggere XML", "warn"); }catch(_){}
+      }
+      try{
+        if (/Failed to fetch/i.test(msg)){
+          console.warn("[DANEA] Tipico errore CORS: il proxy deve rispondere con Access-Control-Allow-Origin per " + (location && location.origin ? location.origin : "questa origin") + ".");
+        }
+      }catch(_){}
     }
   }
+
 
   function startPolling(){
     if (S.timer) return;
