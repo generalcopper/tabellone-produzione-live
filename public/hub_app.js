@@ -894,7 +894,7 @@
           uom: String(umRaw || "").trim()
         };
       }).filter(r => {
-        if (!(r.code || r.desc)) return false;
+        if (!r.code) return false; // importa solo righe con codice articolo
         if (r.qty != null && r.qty === 0) return false;
         const m = `${r.code || ""} ${r.desc || ""}`.toLowerCase().replace(/\s+/g, " ").trim();
         if (m.includes("rif. conferma ordine") || m.includes("rif conferma ordine")) return false;
