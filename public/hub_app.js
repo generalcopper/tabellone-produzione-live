@@ -1156,7 +1156,7 @@
 
       let act = "";
       if (!hasFp){
-        act = `<span class="td-muted">Accedi</span>`;
+        act = `<button class="btn btn-ghost btn-xs jsDaneaLogin" type="button">Accedi</button>`;
       } else if (st.why === "missing"){
         act = `<button class="btn btn-secondary btn-xs jsDaneaImportFp" data-code="${escAttr(code)}" data-desc="${escAttr(desc)}" type="button">Importa</button>`;
       } else if (st.why === "empty"){
@@ -1513,6 +1513,18 @@
           const btnImport = e.target?.closest?.("button.jsDaneaImportFp");
           const btnConfig = e.target?.closest?.("button.jsDaneaConfigFp");
           const btnOpenFp = e.target?.closest?.("button.jsDaneaOpenFp");
+
+          const btnLogin = e.target?.closest?.("button.jsDaneaLogin");
+
+          if (btnLogin){
+            e.preventDefault(); e.stopPropagation();
+            try{
+              const b = document.getElementById("btnLoginGoogle");
+              if (b) { b.click(); return; }
+            }catch(_){}
+            alert("Accedi con Google");
+            return;
+          }
 
           if (btnOpenFp){
             e.preventDefault(); e.stopPropagation();
