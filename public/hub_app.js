@@ -822,7 +822,8 @@
     cacheReady: false,
     latestKeys: new Set(),
     lastSync: { new:0, updated:0, same:0 },
-    fsPushed: new Map()
+    fsPushed: new Map(),
+    pendingParsed: null
   };
 
   function $(id){ return document.getElementById(id); }
@@ -871,8 +872,8 @@
   }
 
   function getEffectiveDdts(){
-    const list = Array.isArray(S.cache) && S.cache.length ? S.cache : (Array.isArray(S.ddts) ? S.ddts : []);
-    return list;
+    // Fonte unica: Firestore
+    return (Array.isArray(S.cache) ? S.cache : []);
   }
 
   function upsertCacheFromParsed(parsed){
@@ -902,6 +903,14 @@
   S.lastSync = { new:nNew, updated:nUpd, same:nSame };
 
   // Sync canonico: SOLO Firestore (nessuna cache locale)
+
+  const H = S.hub || getHub();
+  if (!H || !H.fb || !H.fb.db || !H.FS) {
+    // Hub/Firestore non ancora pronti: buffer in memoria e sincronizza appena possibile
+    S.pendingParsed = arr;
+    return;
+  }
+
   try{ syncCacheToFirestore(arr).catch(()=>{}); }catch(_){}
 }
 
@@ -1264,7 +1273,7 @@ const payload = basePayload;
           <button class="btn btn-primary btn-xs jsDaneaSendFromList" data-key="${escAttr(d.key)}" type="button" ${btnDisabled}>Invia</button>
         </td>
       </tr>`;
-    }).join("") : `<tr><td class="td-muted" colspan="6">${search ? "Nessun DDT trovato." : "In attesa del file XML…"}</td></tr>`;
+    }).join("") : `<tr><td class="td-muted" colspan="6">${search ? "Nessun DDT trovato." : "Nessun DDT su Firebase."}</td></tr>`;
   }
 
   function renderDetail(ddt, mode){
@@ -1749,9 +1758,7 @@ const payload = basePayload;
       ddts = parseEasyfattXml(text);
     }catch(err){
       console.warn(err);
-      try{ window.HubInv?.showToast?.("XML non valido", "err"); }catch(_){}
-      $("daneaTbody") && ($("daneaTbody").innerHTML = `<tr><td class="td-muted" colspan="6">XML non valido.</td></tr>`);
-      return;
+      try{ window.HubInv?.showToast?.("XML non valido", "err"); }catch(_){}      return;
     }
 
     S.lastXmlHash = h;
@@ -1792,6 +1799,7 @@ const payload = basePayload;
           console.warn("[DANEA] Tipico errore CORS: il proxy deve rispondere con Access-Control-Allow-Origin per " + (location && location.origin ? location.origin : "questa origin") + ".");
         }
       }catch(_){}
+      try{ render(); }catch(_){ }
     }
   }
 
@@ -1906,6 +1914,15 @@ const payload = basePayload;
       subscribeCompleted();
       subscribeCache();
       subscribeFinishedProducts();
+
+      // Se abbiamo già parsato XML prima che Firestore fosse pronto, sincronizza ora
+      try{
+        if (Array.isArray(S.pendingParsed) && S.pendingParsed.length){
+          const p = S.pendingParsed;
+          S.pendingParsed = null;
+          syncCacheToFirestore(p).catch(()=>{});
+        }
+      }catch(_){ }
       return;
     }
     if (attempt > 200) return;
@@ -1921,12 +1938,12 @@ const payload = basePayload;
     bindEvents();
     render();
 
+    // subscribe Firestore (when hub ready)
+    waitForHub(0);
+
     // start polling even if not logged
     startPolling();
     fetchNow(false);
-
-    // subscribe Firestore (when hub ready)
-    waitForHub(0);
 
     // expose hook (called by menu click)
     window.HubDaneaDdt = window.HubDaneaDdt || {};
