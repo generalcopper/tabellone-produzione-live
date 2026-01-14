@@ -3000,6 +3000,9 @@
     const fpUom = document.getElementById("fpUom");
 
     const fpCompMeta = document.getElementById("fpCompMeta");
+    const fpCompCat = document.getElementById("fpCompCat");
+    const fpCompBrowseWrap = document.getElementById("fpCompBrowseWrap");
+    const fpCompBrowse = document.getElementById("fpCompBrowse");
     const fpCompPick = document.getElementById("fpCompPick");
     const fpCompQty = document.getElementById("fpCompQty");
     const fpCompUom = document.getElementById("fpCompUom");
@@ -12151,22 +12154,130 @@ async function handleFileSelection(fileList) {
       }catch(_){ return ""; }
     }
 
-    function __fpBuildDatalist(){
+    function __fpBuildDatalist(catKey){
       try{
         if (!fpComponentList) return;
-        const list = Array.isArray(products) ? products.slice() : [];
-        // cap per UI (datalist enorme può essere lento)
+
+        const key = String(catKey || "").trim().toLowerCase();
+        const list = __fpGetProductsFiltered(key);
+
+        // datalist (per ricerca rapida)
         const cap = 2500;
         const out = [];
         for (let i=0; i<list.length && i<cap; i++){
           const p = list[i] || {};
-          const code = String(p.code || (typeof safeDecodeUri==="function" ? safeDecodeUri(p.id || "") : (p.id||"")) || "").trim();
+          const code = String(p.code || "").trim();
           if (!code) continue;
           const name = String(p.name || "").trim();
           out.push(`<option value="${escapeHtmlAttr(code + (name ? " — " + name : ""))}"></option>`);
         }
         fpComponentList.innerHTML = out.join("");
+
+        // elenco cliccabile (per vedere subito gli articoli della categoria)
+        if (key) __fpRenderBrowse(list);
+        else { try{ __fpRenderBrowse([]); }catch(_){ } }
       }catch(_){}
+    }
+
+    function __fpGetProductsFiltered(catKey){
+      const key = String(catKey || "").trim().toLowerCase();
+      const src = Array.isArray(products) ? products : [];
+      const seen = new Set();
+      const out = [];
+
+      for (const pp of src){
+        const p = pp || {};
+        const code = String(p.code || (typeof safeDecodeUri==="function" ? safeDecodeUri(p.id || "") : (p.id||"")) || "").trim();
+        if (!code) continue;
+
+        const low = code.toLowerCase();
+        if (seen.has(low)) continue;
+
+        const cat = (typeof getMacroCategoryForCode === "function")
+          ? (getMacroCategoryForCode(low) || "")
+          : (String(p.category || "").trim().toLowerCase());
+
+        if (key){
+          if (key === "__none"){
+            if (cat) continue;
+          } else {
+            if (cat !== key) continue;
+          }
+        }
+
+        const name = String(p.name || "").trim() || code;
+        const uom = __normalizeUom(p.uom || p.um || p.unit || "") || (typeof getUomResolvedForCode === "function" ? (getUomResolvedForCode(code) || "") : "");
+        out.push({ code, name, uom, cat });
+        seen.add(low);
+      }
+
+      out.sort((a,b) => String(a.name||a.code||"").localeCompare(String(b.name||b.code||""), "it", { sensitivity:"base" }));
+      return out;
+    }
+
+    function __fpRenderCompCategoryOptions(){
+      if (!fpCompCat) return;
+      const cur = String(fpCompCat.value || "");
+
+      const base = [
+        '<option value="">Tutte</option>',
+        '<option value="__none">Non assegnata</option>'
+      ];
+
+      const list = (Array.isArray(categories) ? categories : []).slice();
+
+      const imballaggi = list
+        .filter(c => c && c.key && categoryMacroGroup(c.key) === "imballaggi" && String(c.key).toLowerCase() !== "non_classificati")
+        .sort((a,b) => String(a.name||"").localeCompare(String(b.name||""), "it", { sensitivity:"base" }));
+
+      const materie = list
+        .filter(c => c && c.key && categoryMacroGroup(c.key) === "materie_prime")
+        .sort((a,b) => String(a.name||"").localeCompare(String(b.name||""), "it", { sensitivity:"base" }));
+
+      const groups = [];
+
+      if (imballaggi.length){
+        groups.push('<optgroup label="Imballaggi">');
+        for (const c of imballaggi){
+          groups.push(`<option value="${escapeHtmlAttr(String(c.key||"").toLowerCase())}">${escapeHtml(String(c.name||c.key||""))}</option>`);
+        }
+        groups.push('</optgroup>');
+      }
+
+      if (materie.length){
+        groups.push('<optgroup label="Materie prime">');
+        for (const c of materie){
+          groups.push(`<option value="${escapeHtmlAttr(String(c.key||"").toLowerCase())}">${escapeHtml(String(c.name||c.key||""))}</option>`);
+        }
+        groups.push('</optgroup>');
+      }
+
+      fpCompCat.innerHTML = base.join("") + groups.join("");
+
+      const allowed = new Set(["", "__none", ...imballaggi.map(x => String(x.key||"").toLowerCase()), ...materie.map(x => String(x.key||"").toLowerCase())]);
+      fpCompCat.value = allowed.has(cur) ? cur : "";
+    }
+
+    function __fpRenderBrowse(list){
+      if (!fpCompBrowseWrap || !fpCompBrowse) return;
+      const arr = Array.isArray(list) ? list : [];
+      if (!arr.length){
+        fpCompBrowseWrap.style.display = "none";
+        fpCompBrowse.innerHTML = "";
+        return;
+      }
+
+      const cap = 120;
+      const sliced = arr.slice(0, cap);
+
+      fpCompBrowseWrap.style.display = "";
+      fpCompBrowse.innerHTML = sliced.map(p => {
+        const code = String(p.code || "").trim();
+        const name = String(p.name || "").trim();
+        const uom = String(p.uom || "").trim();
+        const label = code + (name ? (" — " + name) : "");
+        return `<button type="button" class="sideMenuLink jsFpBrowsePick" data-code="${escapeHtmlAttr(code)}" data-name="${escapeHtmlAttr(name)}" data-uom="${escapeHtmlAttr(uom)}" title="Seleziona">${escapeHtml(label)}</button>`;
+      }).join("") + (arr.length > cap ? `<div class="td-muted" style="padding:10px 16px; font-weight:900;">Mostrati i primi ${cap.toLocaleString("it-IT")} articoli. Usa la ricerca oppure restringi la categoria.</div>` : "");
     }
 
     function __fpResolvePickedProduct(val){
@@ -12255,7 +12366,14 @@ async function handleFileSelection(fileList) {
     function openFinishedProductModal(id){
       if (!modalFinishedProduct) return;
 
-      __fpBuildDatalist();
+      __fpRenderCompCategoryOptions();
+
+      // restore ultima categoria usata per aggiungere componenti
+      try{
+        const savedCat = String(localStorage.getItem("hubinv_fp_comp_cat") || "");
+        if (fpCompCat && savedCat) fpCompCat.value = savedCat;
+      }catch(_){ }
+      __fpBuildDatalist(fpCompCat ? fpCompCat.value : "");
 
       const fid = id ? String(id) : "";
       __fpCurrentId = fid || null;
@@ -12448,6 +12566,33 @@ Nota: elimina SOLO l’anagrafica prodotti finiti e la sua distinta base.`);
 
       __fpRenderComponents();
     });
+
+    // Categoria → filtra articoli e mostra elenco
+    if (fpCompCat){
+      fpCompCat.addEventListener("change", () => {
+        try{ localStorage.setItem("hubinv_fp_comp_cat", String(fpCompCat.value || "")); }catch(_){}
+        try{ if (fpCompPick) fpCompPick.value = ""; }catch(_){}
+        __fpBuildDatalist(fpCompCat.value);
+      });
+    }
+
+    // Click su elenco articoli della categoria (seleziona componente)
+    if (fpCompBrowseWrap){
+      fpCompBrowseWrap.addEventListener("click", (e) => {
+        const btn = e && e.target && e.target.closest ? e.target.closest("button.jsFpBrowsePick") : null;
+        if (!btn) return;
+        e.preventDefault(); e.stopPropagation();
+
+        const code = String(btn.getAttribute("data-code") || "").trim();
+        const name = String(btn.getAttribute("data-name") || "").trim();
+        const uom = String(btn.getAttribute("data-uom") || "").trim();
+
+        if (fpCompPick) fpCompPick.value = code + (name ? (" — " + name) : "");
+        if (fpCompUom && !String(fpCompUom.value||"").trim()) fpCompUom.value = (uom || "pz");
+
+        try{ fpCompQty && fpCompQty.focus(); }catch(_){}
+      });
+    }
 
     // Delegation: edit qty/uom + delete component
     if (modalFinishedProduct) {
