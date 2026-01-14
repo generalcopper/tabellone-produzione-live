@@ -1509,106 +1509,88 @@
         });
 
     // detail row actions
-    $("daneaItemsTbody")?.addEventListener("click", async (e) => {
-          const btnImport = e.target?.closest?.("button.jsDaneaImportFp");
-          const btnConfig = e.target?.closest?.("button.jsDaneaConfigFp");
-          const btnOpenFp = e.target?.closest?.("button.jsDaneaOpenFp");
+    if (!S._boundDetailClicks){
+      S._boundDetailClicks = true;
 
-          if (btnOpenFp){
-            e.preventDefault(); e.stopPropagation();
-            const id = String(btnOpenFp.getAttribute("data-fpid") || "").trim();
-            if (id) { try{ window.openFinishedProductModal && window.openFinishedProductModal(id); }catch(_){ } }
-            return;
-          }
+      // delegated: funziona anche se la vista viene re-renderizzata
+      document.addEventListener("click", async (e) => {
+        const root = e.target?.closest?.("#viewDaneaDdt");
+        if (!root) return;
 
-          if (btnConfig){
-            e.preventDefault(); e.stopPropagation();
-            const id = String(btnConfig.getAttribute("data-fpid") || "").trim();
-            if (id) { try{ window.openFinishedProductModal && window.openFinishedProductModal(id); }catch(_){ } }
-            return;
-          }
+        const btnImport = e.target?.closest?.("button.jsDaneaImportFp");
+        const btnConfig = e.target?.closest?.("button.jsDaneaConfigFp");
+        const btnOpenFp = e.target?.closest?.("button.jsDaneaOpenFp");
 
-          if (btnImport){
-            e.preventDefault(); e.stopPropagation();
-
-            const H = S.hub;
-            if (!H || !H.fb || !H.fb.db || !H.FS) return;
-            if (!H.fb.user) { alert("Accedi con Google"); return; }
-
-            const code = String(btnImport.getAttribute("data-code") || "").trim();
-            const desc = String(btnImport.getAttribute("data-desc") || "").trim() || code;
-            if (!code) return;
-
-            try{
-              const { addDoc, collection, serverTimestamp } = H.FS;
-              const col = collection(H.fb.db, "orgs", H.ORG_ID, "finishedProducts");
-              const payload = {
-                name: desc,
-                nameLower: desc.toLowerCase(),
-                code: code,
-                codeLower: code.toLowerCase(),
-                components: [],
-                createdAt: serverTimestamp(),
-                createdBy: H.fb.user.email || H.fb.user.uid,
-                updatedAt: serverTimestamp(),
-                updatedBy: H.fb.user.email || H.fb.user.uid
-              };
-              const ref = await addDoc(col, payload);
-              try{ window.HubInv?.showToast?.("Prodotto finito importato"); }catch(_){}
-              try{ if (ref?.id) window.openFinishedProductModal && window.openFinishedProductModal(ref.id); }catch(_){}
-            }catch(err){
-              console.error(err);
-              alert("Import fallito");
-            }
-          }
-
-          // click sulla riga (anche senza bottone): apre la distinta base
-          const tr = e.target?.closest?.("tr.jsDaneaItemRow");
-          if (tr){
-            e.preventDefault(); e.stopPropagation();
-
-            const H = S.hub;
-            if (!H || !H.fb || !H.fb.db || !H.FS) return;
-
-            const why = String(tr.getAttribute("data-why") || "").trim();
-            const fid = String(tr.getAttribute("data-fpid") || "").trim();
-            const code = String(tr.getAttribute("data-code") || "").trim();
-            const desc = String(tr.getAttribute("data-desc") || "").trim() || code;
-
-            // se esiste già il prodotto finito -> apri direttamente
-            if (fid){
-              try{ window.openFinishedProductModal && window.openFinishedProductModal(fid); }catch(_){}
-              return;
-            }
-
-            // se manca, prova a crearlo e aprire il modale
-            if (why === "missing" && code){
-              if (!H.fb.user) { try{ window.HubInv?.showToast?.("Accedi con Google per configurare", "warn"); }catch(_){ alert("Accedi con Google"); } return; }
-
+        const prefillNewFinishedProduct = (code, desc) => {
+          try{
+            if (!window.openFinishedProductModal) return;
+            window.openFinishedProductModal(null);
+            setTimeout(() => {
               try{
-                const { addDoc, collection, serverTimestamp } = H.FS;
-                const col = collection(H.fb.db, "orgs", H.ORG_ID, "finishedProducts");
-                const payload = {
-                  name: desc,
-                  nameLower: desc.toLowerCase(),
-                  code: code,
-                  codeLower: code.toLowerCase(),
-                  components: [],
-                  createdAt: serverTimestamp(),
-                  createdBy: H.fb.user.email || H.fb.user.uid,
-                  updatedAt: serverTimestamp(),
-                  updatedBy: H.fb.user.email || H.fb.user.uid
-                };
-                const ref = await addDoc(col, payload);
-                try{ window.HubInv?.showToast?.("Prodotto finito creato"); }catch(_){}
-                try{ if (ref?.id) window.openFinishedProductModal && window.openFinishedProductModal(ref.id); }catch(_){}
-              }catch(err){
-                console.error(err);
-                alert("Import fallito");
-              }
+                const nameEl = document.getElementById("fpName");
+                const codeEl = document.getElementById("fpCode");
+                if (nameEl && !String(nameEl.value || "").trim()) nameEl.value = String(desc || "").trim();
+                if (codeEl && !String(codeEl.value || "").trim()) codeEl.value = String(code || "").trim();
+              }catch(_){}
+            }, 0);
+          }catch(_){}
+        };
+
+        if (btnOpenFp){
+          e.preventDefault(); e.stopPropagation();
+          const id = String(btnOpenFp.getAttribute("data-fpid") || "").trim();
+          if (id) { try{ window.openFinishedProductModal && window.openFinishedProductModal(id); }catch(_){ } }
+          return;
+        }
+
+        if (btnConfig){
+          e.preventDefault(); e.stopPropagation();
+          const id = String(btnConfig.getAttribute("data-fpid") || "").trim();
+          if (id) { try{ window.openFinishedProductModal && window.openFinishedProductModal(id); }catch(_){ } }
+          return;
+        }
+
+        if (btnImport){
+          e.preventDefault(); e.stopPropagation();
+
+          const tr = btnImport.closest("tr.jsDaneaItemRow");
+          const fid = String(tr?.getAttribute("data-fpid") || "").trim();
+          const code = String(btnImport.getAttribute("data-code") || tr?.getAttribute("data-code") || "").trim();
+          const desc = String(btnImport.getAttribute("data-desc") || tr?.getAttribute("data-desc") || "").trim() || code;
+
+          try{
+            if (fid){
+              window.openFinishedProductModal && window.openFinishedProductModal(fid);
+            } else {
+              prefillNewFinishedProduct(code, desc);
             }
+          }catch(err){
+            console.error(err);
           }
-        });
+          return;
+        }
+
+        // click sulla riga (anche senza bottone): apre la distinta base
+        const tr = e.target?.closest?.("tr.jsDaneaItemRow");
+        if (tr){
+          e.preventDefault(); e.stopPropagation();
+
+          const fid = String(tr.getAttribute("data-fpid") || "").trim();
+          const code = String(tr.getAttribute("data-code") || "").trim();
+          const desc = String(tr.getAttribute("data-desc") || "").trim() || code;
+
+          try{
+            if (fid){
+              window.openFinishedProductModal && window.openFinishedProductModal(fid);
+            } else {
+              prefillNewFinishedProduct(code, desc);
+            }
+          }catch(err){
+            console.error(err);
+          }
+        }
+      });
+    }
   }
 
   function ingestXml(text, force){
