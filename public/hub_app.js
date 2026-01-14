@@ -795,8 +795,8 @@
 (function(){
   "use strict";
 
-  const LS_URL = "hubinv_danea_xml_url";
-  const LS_WH  = "hubinv_danea_xml_wh";
+  // Tutto persistito su Firestore (niente cache locale)
+  const FS_CACHE_MAX = 3000;
   // Default endpoint (Cloud Run proxy). If you deploy a new service, update this.
   const DEFAULT_XML_URL_BASE = "https://danea-xml-proxy-537555699968.europe-west8.run.app";
 
@@ -815,7 +815,14 @@
     timer: null,
     busy: false,
     hub: null,
-    unsub: { completed:null, finished:null }
+    unsub: { completed:null, finished:null, cache:null },
+    cache: [],            // persistent cache (Firestore)
+    cacheMap: new Map(),
+    cacheSource: "firestore",  // firestore
+    cacheReady: false,
+    latestKeys: new Set(),
+    lastSync: { new:0, updated:0, same:0 },
+    fsPushed: new Map()
   };
 
   function $(id){ return document.getElementById(id); }
@@ -836,6 +843,145 @@
       h = Math.imul(h, 16777619);
     }
     return String((h>>>0));
+  }
+
+
+  function keyToId(k){
+    // Firestore docId safe
+    return encodeURIComponent(String(k || ""));
+  }
+
+  function safeJsonParse(s, fallback){
+    try{
+      return JSON.parse(String(s || ""));
+    }catch(_){
+      return fallback;
+    }
+  }
+
+  function rebuildCacheMap(){
+    try{
+      S.cacheMap = new Map();
+      (S.cache || []).forEach(d => {
+        if (d && d.key) S.cacheMap.set(String(d.key), d);
+      });
+    }catch(_){
+      S.cacheMap = new Map();
+    }
+  }
+
+  function getEffectiveDdts(){
+    const list = Array.isArray(S.cache) && S.cache.length ? S.cache : (Array.isArray(S.ddts) ? S.ddts : []);
+    return list;
+  }
+
+  function upsertCacheFromParsed(parsed){
+  const arr = Array.isArray(parsed) ? parsed : [];
+  if (!arr.length) return;
+
+  // Stato sincronizzazione (solo UI): confronto con snapshot Firestore già in memoria
+  const map = (S.cacheMap instanceof Map) ? S.cacheMap : new Map();
+  let nNew = 0, nUpd = 0, nSame = 0;
+  const latest = new Set();
+
+  for (const d of arr){
+    if (!d || !d.key) continue;
+    const k = String(d.key).trim();
+    if (!k) continue;
+    latest.add(k);
+
+    const existing = map.get(k);
+    const oldHash = String(existing?.xmlHash || existing?.hash || "");
+    const newHash = String(d.hash || "");
+    if (!oldHash) nNew++;
+    else if (oldHash && newHash && oldHash === newHash) nSame++;
+    else nUpd++;
+  }
+
+  S.latestKeys = latest;
+  S.lastSync = { new:nNew, updated:nUpd, same:nSame };
+
+  // Sync canonico: SOLO Firestore (nessuna cache locale)
+  try{ syncCacheToFirestore(arr).catch(()=>{}); }catch(_){}
+}
+
+async function syncCacheToFirestore(parsed){(parsed){
+    const H = S.hub || getHub();
+    if (!H || !H.fb || !H.fb.db || !H.FS) return;
+
+    // If cache comes from Firestore, we already have a good map; otherwise we still upsert by deterministic docId.
+    const { doc, setDoc, serverTimestamp } = H.FS;
+
+    // Do not spam writes: write only NEW or UPDATED (hash differs or missing)
+    for (const d of (parsed || [])){
+      if (!d || !d.key) continue;
+
+      const k = String(d.key).trim();
+      if (!k) continue;
+
+      const prevPush = (S.fsPushed && typeof S.fsPushed.get === "function") ? String(S.fsPushed.get(k) || "") : "";
+      const newHash = String(d.hash || "");
+      if (prevPush && newHash && prevPush === newHash) continue;
+
+      const existing = (S.cacheSource === "firestore" && (S.cacheMap instanceof Map)) ? S.cacheMap.get(k) : null;
+      const oldHash = String(existing?.xmlHash || "");if (oldHash && newHash && oldHash === newHash){
+  // DDT già presente e identico: aggiorna solo lastSeenAt + syncState
+  try{
+    const ref = doc(H.fb.db, "orgs", H.ORG_ID, "daneaDdts", keyToId(k));
+    await setDoc(ref, {
+      key: k,
+      xmlHash: newHash,
+      syncState: "same",
+      lastSeenAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    }, { merge: true });
+    try{ S.fsPushed && S.fsPushed.set && S.fsPushed.set(k, newHash); }catch(_){ }
+  }catch(e){
+    const msg = String(e?.code || e?.message || e || "");
+    if (/permission|insufficient|PERMISSION_DENIED/i.test(msg)) return;
+  }
+  continue;
+}
+
+const isNew = !oldHash;
+const isUpd = !!oldHash && (!newHash || oldHash !== newHash);
+
+const basePayload = {
+  key: k,
+  number: String(d.number || "").trim(),
+  date: String(d.date || "").trim(),
+  customer: String(d.customer || "").trim(),
+  rows: (d.rows || []).map(x => ({ idx:x.idx??null, code:x.code||"", desc:x.desc||"", qty:x.qty??null, qtyRaw:x.qtyRaw||"", uom:x.uom||"" })),
+  rowsCount: Array.isArray(d.rows) ? d.rows.length : 0,
+  xmlHash: newHash,
+  source: "DaneaXML",
+  syncState: isNew ? "new" : "updated",
+  lastSeenAt: serverTimestamp(),
+  updatedAt: serverTimestamp()
+};
+
+// Solo quando cambia (nuovo/aggiornato) incrementiamo rev e aggiorniamo changedAt
+if (isNew){
+  basePayload.rev = 1;
+  basePayload.firstSeenAt = serverTimestamp();
+  basePayload.changedAt = serverTimestamp();
+} else {
+  basePayload.rev = (Number(existing?.rev || 1) || 1) + 1;
+  basePayload.changedAt = serverTimestamp();
+}
+
+const payload = basePayload;
+
+      try{
+        const ref = doc(H.fb.db, "orgs", H.ORG_ID, "daneaDdts", keyToId(k));
+        await setDoc(ref, payload, { merge: true });
+        try{ S.fsPushed && S.fsPushed.set && S.fsPushed.set(k, newHash); }catch(_){ }
+      }catch(e){
+        // permission errors: stop trying
+        const msg = String(e?.code || e?.message || e || "");
+        if (/permission|insufficient|PERMISSION_DENIED/i.test(msg)) return;
+      }
+    }
   }
 
   function getHub(){
@@ -1023,7 +1169,7 @@
 
     cacheCompletedMap();
 
-    const verifyList = (S.ddts || []).filter(d => !S.completedMap.has(d.key));
+    const verifyList = (getEffectiveDdts() || []).filter(d => !S.completedMap.has(d.key));
     const doneList = (S.completed || []).slice();
 
     try{
@@ -1035,7 +1181,10 @@
     if (lastMeta){
       if (S.lastFetchedAt) {
         const d = new Date(S.lastFetchedAt);
-        lastMeta.textContent = "Ultimo XML: " + (Number.isNaN(d.getTime()) ? S.lastFetchedAt : d.toLocaleString("it-IT"));
+        const extra = (S.lastSync && ((S.lastSync.new||0) + (S.lastSync.updated||0) > 0))
+          ? (` · nuovi ${S.lastSync.new||0} · upd ${S.lastSync.updated||0}`)
+          : "";
+        lastMeta.textContent = "Ultimo XML: " + (Number.isNaN(d.getTime()) ? S.lastFetchedAt : d.toLocaleString("it-IT")) + extra;
       } else {
         lastMeta.textContent = "Ultimo XML: —";
       }
@@ -1097,13 +1246,19 @@
       const st = ddtStatus(d);
       const okDot = st.ok ? '<span class="dot ok"></span>' : '<span class="dot bad"></span>';
       const stTxt = `${st.green}/${st.total}`;
+      const sync = String(d.syncState || d.status || d.state || "").toLowerCase();
+      const badge = (sync === "new")
+        ? '<span class="pill" style="height:auto; padding:2px 8px; border-radius:999px; border:0; background:rgba(37,185,79,.14); color:rgba(0,0,0,.86);">NEW</span>'
+        : (sync === "updated")
+          ? '<span class="pill" style="height:auto; padding:2px 8px; border-radius:999px; border:0; background:rgba(255,159,10,.16); color:rgba(0,0,0,.86);">UPD</span>'
+          : "";
       const btnDisabled = st.ok ? "" : "disabled";
       return `<tr class="jsDaneaRow" data-key="${escAttr(d.key)}" data-mode="verify" title="Apri">
         <td data-label="Data">${esc(fmtDateIT(d.date) || "—")}</td>
         <td data-label="Numero"><span class="kbd">${esc(d.number || "—")}</span></td>
         <td data-label="Cliente">${esc(d.customer || "—")}</td>
         <td data-label="Righe" class="qty">${Number((d.rows||[]).length||0).toLocaleString("it-IT")}</td>
-        <td data-label="Stato" class="qty">${okDot} ${esc(stTxt)}</td>
+        <td data-label="Stato" class="qty">${okDot} ${esc(stTxt)} ${badge}</td>
         <td data-label="" style="text-align:right;">
           <button class="btn btn-secondary btn-xs jsDaneaOpen" data-key="${escAttr(d.key)}" data-mode="verify" type="button">Apri</button>
           <button class="btn btn-primary btn-xs jsDaneaSendFromList" data-key="${escAttr(d.key)}" type="button" ${btnDisabled}>Invia</button>
@@ -1131,9 +1286,7 @@
 
     // warehouse
     if (whSel){
-      const saved = normalizeWarehouse(localStorage.getItem(LS_WH) || "");
-      if (saved) whSel.value = saved;
-      if (ddt.warehouse) whSel.value = normalizeWarehouse(ddt.warehouse);
+            if (ddt.warehouse) whSel.value = normalizeWarehouse(ddt.warehouse);
     }
 
     // send button
@@ -1207,7 +1360,7 @@
       return;
     }
 
-    const d = (S.ddts || []).find(x => String(x?.key || "") === k) || null;
+    const d = (getEffectiveDdts() || []).find(x => String(x?.key || "") === k) || null;
     if (!d) return;
     S.selectedKey = k;
     S.selected = d;
@@ -1218,7 +1371,6 @@
   async function maybeAutoImportFinishedProducts(ddts){
     const H = S.hub;
     if (!H || !H.fb || !H.fb.db || !H.FS) return;
-    if (!H.fb.user) return;
 
     // best-effort: crea placeholder per codici nuovi (una sola volta per fetch)
     try{
@@ -1312,8 +1464,7 @@
     const st = ddtStatus(ddt);
     if (!st.ok) { alert("Non tutte le righe sono configurate (cerchi rossi)."); return; }
 
-    const wh = normalizeWarehouse($("daneaWarehouse")?.value || localStorage.getItem(LS_WH) || "cerea");
-    try{ localStorage.setItem(LS_WH, wh); }catch(_){}
+        const wh = normalizeWarehouse($("daneaWarehouse")?.value || "cerea");
 
     const ok = confirm(`Inviare e scaricare componenti?\n\nDDT ${ddt.number} del ${fmtDateIT(ddt.date)}\nRighe: ${st.total}`);
     if (!ok) return;
@@ -1467,10 +1618,6 @@
 
     $("btnDaneaBackList")?.addEventListener("click", () => { setDetailOpen(false); S.selected=null; render(); });
 
-    $("daneaWarehouse")?.addEventListener("change", () => {
-      try{ localStorage.setItem(LS_WH, normalizeWarehouse($("daneaWarehouse")?.value)); }catch(_){}
-    });
-
     $("btnDaneaSend")?.addEventListener("click", () => sendSelectedFromDetail());
 
     // list click
@@ -1609,10 +1756,15 @@
 
     S.lastXmlHash = h;
     S.lastFetchedAt = new Date().toISOString();
-    S.ddts = ddts;
+
+    // IMPORTANT: non svuotare la lista se l\'XML è vuoto / file rimosso: manteniamo cache persistente
+    if (Array.isArray(ddts) && ddts.length){
+      S.ddts = ddts;
+      try{ upsertCacheFromParsed(ddts); }catch(_){ }
+    }
 
     // auto import placeholder (solo se loggato)
-    try{ maybeAutoImportFinishedProducts(ddts); }catch(_){}
+    try{ maybeAutoImportFinishedProducts(ddts); }catch(_){ }
 
     render();
   }
@@ -1676,6 +1828,41 @@
     }
   }
 
+  function subscribeCache(){
+    const H = getHub();
+    if (!H || !H.fb || !H.fb.db || !H.FS) return;
+    if (S.unsub.cache) return;
+
+    try{
+      const { collection, query, orderBy, onSnapshot } = H.FS;
+      const col = collection(H.fb.db, "orgs", H.ORG_ID, "daneaDdts");
+      const q = query(col, orderBy("date", "desc"));
+      S.unsub.cache = onSnapshot(q, (snap) => {
+        const arr = [];
+        snap.forEach(docu => {
+          const d = docu.data() || {};
+          const key = String(d.key || d.ddtKey || docu.id || "").trim();
+          if (!key) return;
+          arr.push(Object.assign({ _id: docu.id, key }, d));
+        });
+
+        // normalize & sort (already ordered, but safety)
+        arr.sort((a,b) => String(b.date||"").localeCompare(String(a.date||"")) || String(b.number||"").localeCompare(String(a.number||"")));
+
+        S.cache = arr.slice(0, FS_CACHE_MAX);
+        S.cacheSource = "firestore";
+        S.cacheReady = true;
+        rebuildCacheMap();
+
+        render();
+      }, (err) => {
+        console.warn("daneaDdts snapshot error", err);
+      });
+    }catch(e){
+      console.warn("subscribeCache failed", e);
+    }
+  }
+
   function subscribeFinishedProducts(){
     const H = getHub();
     if (!H || !H.fb || !H.fb.db || !H.FS) return;
@@ -1717,6 +1904,7 @@
     if (H && H.fb && H.fb.db && H.FS){
       S.hub = H;
       subscribeCompleted();
+      subscribeCache();
       subscribeFinishedProducts();
       return;
     }
@@ -1727,14 +1915,8 @@
   function init(){
     const root = $("viewDaneaDdt");
     if (!root) return;
-
-    // restore prefs (hidden UI) — always auto-load XML when you enter
-    try{
-      const stored = String(localStorage.getItem(LS_URL) || "").trim();
-      const base = stored || DEFAULT_XML_URL_BASE;
-      S.xmlUrl = normalizeDaneaXmlUrl(base);
-      try{ localStorage.setItem(LS_URL, S.xmlUrl); }catch(_){}
-    }catch(_){}
+    // endpoint fisso (proxy Cloud Run)
+    S.xmlUrl = normalizeDaneaXmlUrl(DEFAULT_XML_URL_BASE);
 
     bindEvents();
     render();
