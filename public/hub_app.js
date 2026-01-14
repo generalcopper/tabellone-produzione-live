@@ -893,7 +893,13 @@
           qty: (qty == null) ? null : qty,
           uom: String(umRaw || "").trim()
         };
-      }).filter(r => (r.code || r.desc) && (r.qty == null || r.qty !== 0));
+      }).filter(r => {
+        if (!(r.code || r.desc)) return false;
+        if (r.qty != null && r.qty === 0) return false;
+        const m = `${r.code || ""} ${r.desc || ""}`.toLowerCase().replace(/\s+/g, " ").trim();
+        if (m.includes("rif. conferma ordine") || m.includes("rif conferma ordine")) return false;
+        return true;
+      });
 
       const hash = hashStr(JSON.stringify(rows.map(x => [x.code, x.desc, x.qty, x.uom])));
 
