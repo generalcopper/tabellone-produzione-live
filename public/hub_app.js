@@ -752,13 +752,6 @@
             </div>
             <div class="inlineRow" style="gap:8px; justify-content:flex-end;">
               <button class="btn btn-ghost mini" id="btnDaneaBackList" type="button">← Lista</button>
-              <div class="field" style="width: 190px;">
-                <label for="daneaWarehouse">Magazzino scarico</label>
-                <select id="daneaWarehouse">
-                  <option value="cerea">Cerea</option>
-                  <option value="concamarise">Concamarise</option>
-                </select>
-              </div>
               <button class="btn btn-primary" id="btnDaneaSend" type="button" disabled>Invia (scarica)</button>
             </div>
           </div>
@@ -796,7 +789,6 @@
   "use strict";
 
   const LS_URL = "hubinv_danea_xml_url";
-  const LS_WH  = "hubinv_danea_xml_wh";
   // Default endpoint (Cloud Run proxy). If you deploy a new service, update this.
   const DEFAULT_XML_URL_BASE = "https://danea-xml-proxy-537555699968.europe-west8.run.app";
 
@@ -1125,7 +1117,6 @@
     const tbody = $("daneaItemsTbody");
     const btnSend = $("btnDaneaSend");
     const foot = $("daneaDetFooter");
-    const whSel = $("daneaWarehouse");
 
     if (!ddt || !tbody) return;
 
@@ -1135,13 +1126,6 @@
     // title + subtitle
     if (title) title.textContent = isDone ? "DDT (completato)" : "DDT (da verificare)";
     if (sub) sub.textContent = `Numero ${ddt.number || "—"} • ${fmtDateIT(ddt.date || "")} • ${ddt.customer || "—"}`;
-
-    // warehouse
-    if (whSel){
-      const saved = normalizeWarehouse(localStorage.getItem(LS_WH) || "");
-      if (saved) whSel.value = saved;
-      if (ddt.warehouse) whSel.value = normalizeWarehouse(ddt.warehouse);
-    }
 
     // send button
     if (btnSend){
@@ -1304,7 +1288,7 @@
     return null;
   }
 
-  async function sendSelectedFromDetail(){
+    async function sendSelectedFromDetail(){
     if (S.busy) return;
     const ddt = S.selected;
     if (!ddt || !ddt.key) return;
@@ -1319,10 +1303,10 @@
     const st = ddtStatus(ddt);
     if (!st.ok) { alert("Non tutte le righe sono configurate (cerchi rossi)."); return; }
 
-    const wh = normalizeWarehouse($("daneaWarehouse")?.value || localStorage.getItem(LS_WH) || "cerea");
-    try{ localStorage.setItem(LS_WH, wh); }catch(_){}
+    const ok = confirm(`Inviare e scaricare componenti?
 
-    const ok = confirm(`Inviare e scaricare componenti?\n\nDDT ${ddt.number} del ${fmtDateIT(ddt.date)}\nRighe: ${st.total}`);
+DDT ${ddt.number} del ${fmtDateIT(ddt.date)}
+Righe: ${st.total}`);
     if (!ok) return;
 
     S.busy = true;
@@ -1360,17 +1344,98 @@
         return;
       }
 
-      // 2) crea movimenti OUT
+      // 2) inventario globale: calcola disponibilità per sede (ignorando fornitore)
+      const movs = (H.state && Array.isArray(H.state.movements)) ? H.state.movements : [];
+      if (!movs.length){
+        alert("Inventario non pronto: movimenti non caricati.");
+        return;
+      }
+
+      const _normWh = (w) => {
+        try{
+          if (H && typeof H.normalizeWarehouse === "function") return H.normalizeWarehouse(w);
+        }catch(_){}
+        return normalizeWarehouse(w);
+      };
+      const _safeInt = (v) => {
+        try{
+          if (H && typeof H.safeInt === "function") return H.safeInt(v);
+        }catch(_){}
+        const n = parseInt(String(v||"").replace(/[^0-9\-]/g,""), 10);
+        return Number.isFinite(n) ? n : 0;
+      };
+
+      const avail = { cerea: new Map(), concamarise: new Map() }; // codeLower -> qtyInt
+      for (const mv of movs){
+        const code = String(mv && mv.code || "").trim();
+        if (!code) continue;
+        const low = code.toLowerCase();
+        const w = _normWh(mv.warehouse || mv.site || mv.magazzino || mv.location || "");
+        const q = _safeInt(mv.qty);
+        if (!q) continue;
+        const delta = (String(mv.type || "").toUpperCase() === "OUT") ? -q : q;
+        const m = (w === "concamarise") ? avail.concamarise : avail.cerea;
+        m.set(low, (m.get(low) || 0) + delta);
+      }
+
+      // 3) validazione scorte (globale) prima di scrivere
+      const needList = Array.from(req.values()).map(it => {
+        const qtyInt = Math.round(Number(it.qty) || 0);
+        return Object.assign({}, it, { qtyInt });
+      }).filter(x => x.qtyInt);
+
+      for (const it of needList){
+        const low = String(it.code || "").trim().toLowerCase();
+        const aC = Math.max(0, _safeInt(avail.cerea.get(low)));
+        const aK = Math.max(0, _safeInt(avail.concamarise.get(low)));
+        const tot = aC + aK;
+        if (tot < it.qtyInt){
+          alert(`Scorta insufficiente per ${it.code} — ${it.name || ""}
+
+Richiesti: ${it.qtyInt.toLocaleString("it-IT")} ${String(it.uom||"").trim()}
+Disponibili: ${(tot).toLocaleString("it-IT")} (Cerea ${aC.toLocaleString("it-IT")}, Concamarise ${aK.toLocaleString("it-IT")})`);
+          return;
+        }
+      }
+
+      // 4) crea movimenti OUT (split automatico tra sedi, senza scelta manuale)
       const movementIds = [];
+      const allocations = [];
       const movCol = collection(H.fb.db, "orgs", H.ORG_ID, "inventoryMovements");
 
       const noteBase = `Scarico componenti per DDT ${ddt.number} del ${fmtDateIT(ddt.date)} (DaneaXML)`;
-      for (const it of Array.from(req.values())){
-        // arrotondamento coerente col gestionale (qty integer)
-        const qtyInt = Math.round(Number(it.qty) || 0);
-        if (!qtyInt) continue;
+      for (const it of needList){
+        const low = String(it.code || "").trim().toLowerCase();
+        let need = it.qtyInt;
 
-        const payload = {
+        let aC = Math.max(0, _safeInt(avail.cerea.get(low)));
+        let aK = Math.max(0, _safeInt(avail.concamarise.get(low)));
+
+        // scegli sede primaria = quella con più disponibilità (riduce split)
+        const first = (aK > aC) ? "concamarise" : "cerea";
+        const second = (first === "cerea") ? "concamarise" : "cerea";
+
+        const takeFrom = (wh) => {
+          if (need <= 0) return 0;
+          const cur = (wh === "concamarise") ? aK : aC;
+          const take = Math.min(need, cur);
+          if (take <= 0) return 0;
+          need -= take;
+          if (wh === "concamarise") aK -= take;
+          else aC -= take;
+          return take;
+        };
+
+        const t1 = takeFrom(first);
+        const t2 = takeFrom(second);
+
+        // aggiorna disponibilità residue
+        avail.cerea.set(low, aC);
+        avail.concamarise.set(low, aK);
+
+        allocations.push({ code: it.code, name: it.name || it.code, uom: String(it.uom||"").trim(), qty: it.qtyInt, byWarehouse: { cerea: (first==="cerea"?t1:t2) || 0, concamarise: (first==="concamarise"?t1:t2) || 0 } });
+
+        const makePayload = (warehouse, qtyInt) => ({
           type: "OUT",
           customer: "Scarico DDT",
           code: it.code,
@@ -1382,7 +1447,7 @@
           note: noteBase,
           source: "DaneaXML",
           rawText: "",
-          warehouse: wh,
+          warehouse: warehouse,
 
           docType: "DDT",
           docNum: String(ddt.number || "").trim(),
@@ -1391,13 +1456,19 @@
 
           createdAt: serverTimestamp(),
           createdBy: H.fb.user.email || H.fb.user.uid
-        };
+        });
 
-        const ref = await addDoc(movCol, payload);
-        if (ref && ref.id) movementIds.push(ref.id);
+        if (t1 > 0){
+          const ref = await addDoc(movCol, makePayload(first, t1));
+          if (ref && ref.id) movementIds.push(ref.id);
+        }
+        if (t2 > 0){
+          const ref = await addDoc(movCol, makePayload(second, t2));
+          if (ref && ref.id) movementIds.push(ref.id);
+        }
       }
 
-      // 3) salva completato (id deterministico)
+      // 5) salva completato (id deterministico)
       const doneId = encodeURIComponent(String(ddt.key || "").trim());
       const doneRef = doc(H.fb.db, "orgs", H.ORG_ID, "daneaDdtCompleted", doneId);
       await setDoc(doneRef, {
@@ -1406,7 +1477,8 @@
         date: String(ddt.date || "").trim(),
         customer: String(ddt.customer || "").trim(),
         rows: (ddt.rows || []).map(x => ({ code:x.code||"", desc:x.desc||"", qty:x.qty??null, qtyRaw:x.qtyRaw||"", uom:x.uom||"" })),
-        warehouse: wh,
+        warehouse: "global",
+        allocations: allocations,
         xmlHash: String(ddt.hash || ""),
         movementIds: movementIds,
         createdAt: serverTimestamp(),
@@ -1473,11 +1545,6 @@
     $("daneaTabDone")?.addEventListener("click", () => setTab("done"));
 
     $("btnDaneaBackList")?.addEventListener("click", () => { setDetailOpen(false); S.selected=null; render(); });
-
-    $("daneaWarehouse")?.addEventListener("change", () => {
-      try{ localStorage.setItem(LS_WH, normalizeWarehouse($("daneaWarehouse")?.value)); }catch(_){}
-    });
-
     $("btnDaneaSend")?.addEventListener("click", () => sendSelectedFromDetail());
 
     // list click
@@ -12410,27 +12477,136 @@ async function handleFileSelection(fileList) {
       fpCompCat.value = allowed.has(cur) ? cur : "";
     }
 
-    function __fpRenderBrowse(list){
-      if (!fpCompBrowseWrap || !fpCompBrowse) return;
-      const arr = Array.isArray(list) ? list : [];
-      if (!arr.length){
-        fpCompBrowseWrap.style.display = "none";
-        fpCompBrowse.innerHTML = "";
-        return;
-      }
+    
+function __fpCatLabel(key){
+  const k = String(key || "").trim().toLowerCase();
+  if (!k) return "";
+  const list = Array.isArray(categories) ? categories : [];
+  for (const c of list){
+    const ck = String(c && c.key || "").trim().toLowerCase();
+    if (ck && ck === k) return String(c && (c.name || c.key) || key).trim();
+  }
+  return String(key || "").trim();
+}
 
-      const cap = 120;
-      const sliced = arr.slice(0, cap);
+function __fpNormSearch(s){
+  try{
+    return String(s || "")
+      .toLowerCase()
+      .normalize("NFD").replace(/[\u0300-\u036f]/g,"")
+      .replace(/[^a-z0-9]+/g," ")
+      .trim();
+  }catch(_){
+    return String(s || "").toLowerCase().replace(/[^a-z0-9]+/g," ").trim();
+  }
+}
 
-      fpCompBrowseWrap.style.display = "";
-      fpCompBrowse.innerHTML = sliced.map(p => {
-        const code = String(p.code || "").trim();
-        const name = String(p.name || "").trim();
-        const uom = String(p.uom || "").trim();
-        const label = code + (name ? (" — " + name) : "");
-        return `<button type="button" class="sideMenuLink jsFpBrowsePick" data-code="${escapeHtmlAttr(code)}" data-name="${escapeHtmlAttr(name)}" data-uom="${escapeHtmlAttr(uom)}" title="Seleziona">${escapeHtml(label)}</button>`;
-      }).join("") + (arr.length > cap ? `<div class="td-muted" style="padding:10px 16px; font-weight:900;">Mostrati i primi ${cap.toLocaleString("it-IT")} articoli. Usa la ricerca oppure restringi la categoria.</div>` : "");
+function __fpSmartFilter(list, queryRaw){
+  const qN = __fpNormSearch(queryRaw);
+  const tokens = qN ? qN.split(/\s+/).filter(Boolean) : [];
+  if (!tokens.length) return [];
+
+  const scored = [];
+  const arr = Array.isArray(list) ? list : [];
+  for (const p of arr){
+    const code = String(p && p.code || "").trim();
+    if (!code) continue;
+
+    const codeN = __fpNormSearch(code);
+    const nameN = __fpNormSearch(p.name || "");
+    const catN  = __fpNormSearch(__fpCatLabel(p.cat) || "");
+    const blob  = (codeN + " " + nameN + " " + catN).trim();
+
+    let ok = true;
+    for (const t of tokens){
+      if (!t) continue;
+      if (blob.indexOf(t) < 0) { ok = false; break; }
     }
+    if (!ok) continue;
+
+    let score = 0;
+    for (const t of tokens){
+      if (!t) continue;
+
+      if (codeN === t) score += 500;
+      else if (codeN.startsWith(t)) score += 320;
+      else if (codeN.indexOf(t) >= 0) score += 180;
+
+      if (nameN === t) score += 260;
+      else if (nameN.startsWith(t)) score += 160;
+      else if (nameN.indexOf(t) >= 0) score += 90;
+
+      if (catN === t) score += 80;
+      else if (catN.startsWith(t)) score += 55;
+      else if (catN.indexOf(t) >= 0) score += 35;
+    }
+
+    scored.push(Object.assign({}, p, { __score: score }));
+  }
+
+  scored.sort((a,b) => (b.__score - a.__score) || String(a.name||a.code||"").localeCompare(String(b.name||b.code||""), "it", { sensitivity:"base" }));
+  return scored;
+}
+
+function __fpRenderBrowse(list, opts){
+  if (!fpCompBrowseWrap || !fpCompBrowse) return;
+  const arr = Array.isArray(list) ? list : [];
+  const o = (opts && typeof opts === "object") ? opts : {};
+  const isSearch = !!o.isSearch;
+
+  if (!arr.length){
+    fpCompBrowseWrap.style.display = "none";
+    fpCompBrowse.innerHTML = "";
+    return;
+  }
+
+  const cap = isSearch ? 80 : 120;
+  const sliced = arr.slice(0, cap);
+
+  fpCompBrowseWrap.style.display = "";
+  fpCompBrowse.innerHTML = sliced.map(p => {
+    const code = String(p.code || "").trim();
+    const name = String(p.name || "").trim();
+    const uom = String(p.uom || "").trim();
+    const catLbl = __fpCatLabel(p.cat || "");
+    const label = code + (name ? (" — " + name) : "");
+
+    const right = [
+      uom ? `<span class="pill" style="height:auto; padding:2px 8px; border-radius:999px; border:0; background:rgba(0,0,0,.06); color:rgba(0,0,0,.86);">${escapeHtml(uom)}</span>` : "",
+      catLbl ? `<span class="pill" style="height:auto; padding:2px 8px; border-radius:999px; border:0; background:rgba(10,132,255,.12); color:rgba(0,0,0,.86);">${escapeHtml(catLbl)}</span>` : ""
+    ].filter(Boolean).join("");
+
+    return `<button type="button" class="sideMenuLink jsFpBrowsePick" data-code="${escapeHtmlAttr(code)}" data-name="${escapeHtmlAttr(name)}" data-uom="${escapeHtmlAttr(uom)}" title="Seleziona">
+      <span style="display:flex; justify-content:space-between; align-items:center; gap:12px; width:100%;">
+        <span style="min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${escapeHtml(label)}</span>
+        <span style="flex:0 0 auto; display:flex; gap:6px; align-items:center;">${right}</span>
+      </span>
+    </button>`;
+  }).join("") + (arr.length > cap ? `<div class="td-muted" style="padding:10px 12px;">Mostrati ${cap} risultati. Affina la ricerca.</div>` : "");
+}
+
+function __fpRenderSmartBrowse(){
+  try{
+    const catKey = String(fpCompCat && fpCompCat.value || "").trim();
+    const qRaw = String(fpCompPick && fpCompPick.value || "").trim();
+    const q = qRaw.includes("—") ? qRaw.split("—")[0].trim() : qRaw;
+
+    const base = __fpGetProductsFiltered(catKey);
+    const qN = __fpNormSearch(q);
+
+    if (qN){
+      const scored = __fpSmartFilter(base, q);
+      __fpRenderBrowse(scored, { isSearch: true });
+      return;
+    }
+
+    if (String(catKey || "").trim()){
+      __fpRenderBrowse(base, { isSearch: false });
+    } else {
+      __fpRenderBrowse([], { isSearch: false });
+    }
+  }catch(_){}
+}
 
     function __fpResolvePickedProduct(val){
       const s0 = String(val || "").trim();
@@ -12467,20 +12643,40 @@ async function handleFileSelection(fileList) {
     }
 
     function __fpEnsureDraftBase(fp){
-      const base = __fpClone(fp || {});
-      base.components = Array.isArray(base.components) ? base.components : (Array.isArray(base.bom) ? base.bom : (Array.isArray(base.distintaBase) ? base.distintaBase : []));
-      // normalizza array
-      base.components = (base.components || []).map(c => ({
-        productId: String(c.productId || c.pid || "").trim(),
-        code: String(c.code || c.codice || "").trim(),
-        name: String(c.name || c.articolo || c.item || "").trim(),
-        qty: (c.qty != null) ? Number(c.qty) : null,
-        qtyRaw: String(c.qtyRaw || "").trim(),
-        uom: String(c.uom || c.um || "").trim(),
-        note: String(c.note || "").trim()
-      })).filter(x => x.code || x.name);
-      return base;
+  const base = __fpClone(fp || {});
+  base.components = Array.isArray(base.components) ? base.components : (Array.isArray(base.bom) ? base.bom : (Array.isArray(base.distintaBase) ? base.distintaBase : []));
+
+  // normalizza array + impone U.M. dall'anagrafica prodotto (quando possibile)
+  base.components = (base.components || []).map(c => {
+    const code = String(c.code || c.codice || "").trim();
+    const name = String(c.name || c.articolo || c.item || "").trim();
+
+    let uom = String(c.uom || c.um || "").trim();
+    if (!uom && code){
+      try{
+        const p = (typeof findProductByCode === "function") ? findProductByCode(code) : null;
+        if (p) uom = __normalizeUom(p.uom || p.um || p.unit || "") || "";
+      }catch(_){}
+      if (!uom){
+        try{
+          if (typeof getUomResolvedForCode === "function") uom = __normalizeUom(getUomResolvedForCode(code) || "") || "";
+        }catch(_){}
+      }
     }
+
+    return {
+      productId: String(c.productId || c.pid || "").trim(),
+      code,
+      name,
+      qty: (c.qty != null) ? Number(c.qty) : null,
+      qtyRaw: String(c.qtyRaw || "").trim(),
+      uom: String(uom || "").trim(),
+      note: String(c.note || "").trim()
+    };
+  }).filter(x => x.code || x.name);
+
+  return base;
+}
 
     function __fpRenderComponents(){
       if (!fpCompTbody) return;
@@ -12504,9 +12700,7 @@ async function handleFileSelection(fileList) {
             <td data-label="Q.tà" class="qty">
               <input class="qtyEditInput jsFpCompQty" data-i="${i}" value="${escapeHtmlAttr(qty)}" placeholder="es. 1/20" style="width: 100%; max-width: 150px;" />
             </td>
-            <td data-label="U.M.">
-              <input class="qtyEditInput jsFpCompUom" data-i="${i}" value="${escapeHtmlAttr(uom)}" placeholder="pz / g / kg" style="width: 100%; max-width: 120px;" />
-            </td>
+            <td data-label="U.M."><span class="kbd">${escapeHtml(uom || "—")}</span></td>
             <td style="text-align:right;">
               <button class="btn btn-ghost btn-xs jsFpCompDel" data-i="${i}" type="button">–</button>
             </td>
@@ -12518,6 +12712,9 @@ async function handleFileSelection(fileList) {
     function openFinishedProductModal(id){
       if (!modalFinishedProduct) return;
 
+      // U.M. componente: non modificabile (presa dall'anagrafica)
+      try{ if (fpCompUom && fpCompUom.closest) { const f = fpCompUom.closest(".field"); if (f) f.style.display = "none"; } }catch(_){ }
+
       __fpRenderCompCategoryOptions();
 
       // restore ultima categoria usata per aggiungere componenti
@@ -12526,6 +12723,7 @@ async function handleFileSelection(fileList) {
         if (fpCompCat && savedCat) fpCompCat.value = savedCat;
       }catch(_){ }
       __fpBuildDatalist(fpCompCat ? fpCompCat.value : "");
+      try{ __fpRenderSmartBrowse(); }catch(_){ }
 
       const fid = id ? String(id) : "";
       __fpCurrentId = fid || null;
@@ -12540,12 +12738,6 @@ async function handleFileSelection(fileList) {
       if (fpName) fpName.value = String(__fpDraft.name || __fpDraft.nome || "").trim();
       if (fpCode) fpCode.value = String(__fpDraft.code || "").trim();
       if (fpUom) fpUom.value = String(__fpDraft.uom || "").trim();
-
-      // default UOM campi componente
-      try{
-        if (fpCompUom && !String(fpCompUom.value||"").trim()) fpCompUom.value = "pz";
-      }catch(_){}
-
       if (btnFpDelete) btnFpDelete.style.display = fid ? "" : "none";
 
       __fpRenderComponents();
@@ -12685,7 +12877,7 @@ Nota: elimina SOLO l’anagrafica prodotti finiti e la sua distinta base.`);
       const qx = __fpParseQty(fpCompQty && fpCompQty.value);
       if (!(qx && (qx.qty != null) && Number.isFinite(Number(qx.qty)))) { showToast("Quantità non valida", "warn"); return; }
 
-      const u = String(fpCompUom && fpCompUom.value || "").trim() || (picked.uom || "pz");
+      const u = String((picked && picked.uom) || "").trim() || "pz";
 
       // evita duplicati: se già presente stesso codice, somma qty
       const comps = Array.isArray(__fpDraft.components) ? __fpDraft.components : [];
@@ -12714,7 +12906,7 @@ Nota: elimina SOLO l’anagrafica prodotti finiti e la sua distinta base.`);
 
       try{ if (fpCompPick) fpCompPick.value = ""; }catch(_){}
       try{ if (fpCompQty) fpCompQty.value = ""; }catch(_){}
-      try{ if (fpCompUom) fpCompUom.value = u; }catch(_){}
+
 
       __fpRenderComponents();
     });
@@ -12725,10 +12917,18 @@ Nota: elimina SOLO l’anagrafica prodotti finiti e la sua distinta base.`);
         try{ localStorage.setItem("hubinv_fp_comp_cat", String(fpCompCat.value || "")); }catch(_){}
         try{ if (fpCompPick) fpCompPick.value = ""; }catch(_){}
         __fpBuildDatalist(fpCompCat.value);
+        try{ __fpRenderSmartBrowse(); }catch(_){ }
       });
     }
 
-    // Click su elenco articoli della categoria (seleziona componente)
+    
+// Smart search componenti (ricerca live)
+if (fpCompPick){
+  fpCompPick.addEventListener("input", () => { try{ __fpRenderSmartBrowse(); }catch(_){ } });
+  fpCompPick.addEventListener("focus", () => { try{ __fpRenderSmartBrowse(); }catch(_){ } });
+}
+
+// Click su elenco articoli della categoria (seleziona componente)
     if (fpCompBrowseWrap){
       fpCompBrowseWrap.addEventListener("click", (e) => {
         const btn = e && e.target && e.target.closest ? e.target.closest("button.jsFpBrowsePick") : null;
@@ -12740,7 +12940,7 @@ Nota: elimina SOLO l’anagrafica prodotti finiti e la sua distinta base.`);
         const uom = String(btn.getAttribute("data-uom") || "").trim();
 
         if (fpCompPick) fpCompPick.value = code + (name ? (" — " + name) : "");
-        if (fpCompUom && !String(fpCompUom.value||"").trim()) fpCompUom.value = (uom || "pz");
+
 
         try{ fpCompQty && fpCompQty.focus(); }catch(_){}
       });
@@ -12774,10 +12974,6 @@ Nota: elimina SOLO l’anagrafica prodotti finiti e la sua distinta base.`);
           return;
         }
 
-        if (t.classList && t.classList.contains("jsFpCompUom")) {
-          __fpDraft.components[i].uom = String(t.value || "").trim();
-          return;
-        }
       });
     }
 
