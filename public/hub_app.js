@@ -65,6 +65,231 @@
   }
 })();
 
+/* ============================================================
+   Colonne tabelle ridimensionabili (drag utente)
+   - Funziona su qualsiasi <table> con <thead><th>
+   - Aggiunge una maniglia (handle) sul bordo destro di ogni colonna
+   - Persistenza in localStorage (per tabella)
+   ============================================================ */
+(function(){
+  "use strict";
+
+  const MIN_W = 44;
+  const LS_PREFIX = "hubinv_colwidths:";
+
+  function getTableKey(tbl){
+    try{
+      if (tbl && tbl.id) return "id:" + String(tbl.id);
+      const ths = Array.from(tbl.querySelectorAll("thead th"))
+        .map(th => String(th.textContent || "").trim().toLowerCase())
+        .filter(Boolean);
+      if (ths.length) return "sig:" + ths.join("|");
+    }catch(_){ }
+    // fallback: position in DOM
+    try{ return "idx:" + String(Array.from(document.querySelectorAll("table")).indexOf(tbl)); }catch(_){ }
+    return "tbl";
+  }
+
+  function ensureColgroup(tbl, count){
+    let cg = tbl.querySelector("colgroup");
+    if (!cg){
+      cg = document.createElement("colgroup");
+      for (let i=0; i<count; i++) cg.appendChild(document.createElement("col"));
+      tbl.insertBefore(cg, tbl.firstChild);
+    }
+    while (cg.children.length < count) cg.appendChild(document.createElement("col"));
+    return cg;
+  }
+
+  function readStoredWidths(tbl){
+    const key = LS_PREFIX + getTableKey(tbl);
+    try{
+      const raw = localStorage.getItem(key);
+      if (!raw) return null;
+      const arr = JSON.parse(raw);
+      return Array.isArray(arr) ? arr : null;
+    }catch(_){ return null; }
+  }
+
+  function writeStoredWidths(tbl, cols){
+    const key = LS_PREFIX + getTableKey(tbl);
+    try{
+      const arr = cols.map(c => {
+        const w = parseFloat((c && c.style && c.style.width) ? c.style.width : "0") || 0;
+        return w > 0 ? Math.round(w) : 0;
+      });
+      localStorage.setItem(key, JSON.stringify(arr));
+    }catch(_){ }
+  }
+
+  let __saveTimer = null;
+  function scheduleStore(tbl, cols){
+    try{ if (__saveTimer) clearTimeout(__saveTimer); }catch(_){ }
+    __saveTimer = setTimeout(() => writeStoredWidths(tbl, cols), 240);
+  }
+
+  function setupTable(tbl){
+    try{
+      if (!tbl || tbl.dataset.colResizeInit === "1") return;
+      const headRow = tbl.tHead && tbl.tHead.rows && tbl.tHead.rows[0];
+      if (!headRow) return;
+      const ths = Array.from(headRow.cells || []);
+      if (ths.length < 2) return;
+
+      tbl.classList.add("col-resizable");
+
+      const cg = ensureColgroup(tbl, ths.length);
+      const cols = Array.from(cg.children || []);
+
+      // 1) Apply stored widths if present
+      const stored = readStoredWidths(tbl);
+      if (stored && stored.length){
+        stored.forEach((w, i) => {
+          const n = Number(w || 0);
+          if (cols[i] && n > 0) cols[i].style.width = Math.max(MIN_W, n) + "px";
+        });
+      } else {
+        // 2) Initialize widths from current header layout
+        const widths = ths.map(th => {
+          try{ return th.getBoundingClientRect().width || 0; }catch(_){ return 0; }
+        });
+        widths.forEach((w, i) => {
+          const n = Math.max(MIN_W, Math.round(w || 0));
+          if (cols[i]) cols[i].style.width = n + "px";
+        });
+      }
+
+      // Add resize handles to each header (except last)
+      ths.forEach((th, i) => {
+        th.classList.add("col-resizable-th");
+        if (i === ths.length - 1) return;
+        if (th.querySelector(":scope > .col-resizer")) return;
+
+        const h = document.createElement("span");
+        h.className = "col-resizer";
+        h.setAttribute("role", "separator");
+        h.setAttribute("aria-orientation", "vertical");
+        h.tabIndex = 0;
+        th.appendChild(h);
+
+        let startX = 0;
+        let startW = 0;
+
+        const onMove = (ev) => {
+          const dx = (ev && typeof ev.clientX === "number") ? (ev.clientX - startX) : 0;
+          const newW = Math.max(MIN_W, startW + dx);
+          if (cols[i]) cols[i].style.width = Math.round(newW) + "px";
+          scheduleStore(tbl, cols);
+        };
+
+        const endDrag = () => {
+          try{ document.body.classList.remove("isColResizing"); }catch(_){ }
+          window.removeEventListener("pointermove", onMove);
+          window.removeEventListener("pointerup", endDrag);
+          window.removeEventListener("pointercancel", endDrag);
+        };
+
+        const startDrag = (ev) => {
+          try{ ev.preventDefault(); ev.stopPropagation(); }catch(_){ }
+          startX = ev.clientX;
+          try{
+            startW = (cols[i] && cols[i].getBoundingClientRect)
+              ? (cols[i].getBoundingClientRect().width || 0)
+              : 0;
+          }catch(_){ startW = 0; }
+          if (!startW){
+            try{ startW = th.getBoundingClientRect().width || MIN_W; }catch(_){ startW = MIN_W; }
+          }
+
+          try{ document.body.classList.add("isColResizing"); }catch(_){ }
+          try{ h.setPointerCapture && h.setPointerCapture(ev.pointerId); }catch(_){ }
+
+          window.addEventListener("pointermove", onMove);
+          window.addEventListener("pointerup", endDrag);
+          window.addEventListener("pointercancel", endDrag);
+        };
+
+        h.addEventListener("pointerdown", startDrag);
+
+        // keyboard (accessibility): left/right = resize
+        h.addEventListener("keydown", (ev) => {
+          if (!ev) return;
+          if (ev.key !== "ArrowLeft" && ev.key !== "ArrowRight") return;
+          ev.preventDefault();
+          let cur = 0;
+          try{ cur = (cols[i] && cols[i].getBoundingClientRect) ? cols[i].getBoundingClientRect().width : 0; }catch(_){ cur = 0; }
+          if (!cur){ try{ cur = th.getBoundingClientRect().width || MIN_W; }catch(_){ cur = MIN_W; } }
+          const delta = (ev.key === "ArrowRight") ? 10 : -10;
+          const newW = Math.max(MIN_W, cur + delta);
+          if (cols[i]) cols[i].style.width = Math.round(newW) + "px";
+          scheduleStore(tbl, cols);
+        });
+      });
+
+      tbl.dataset.colResizeInit = "1";
+    }catch(_){ }
+  }
+
+  function scan(root){
+    try{
+      const scope = root && root.querySelectorAll ? root : document;
+      const tables = scope.querySelectorAll("table");
+      tables.forEach(setupTable);
+    }catch(_){ }
+  }
+
+  function injectStyle(){
+    try{
+      const ID = "hubinv_col_resize_style_v1";
+      if (document.getElementById(ID)) return;
+      const st = document.createElement("style");
+      st.id = ID;
+      st.textContent = `
+/* Column resize */
+table.col-resizable{ table-layout: fixed; }
+table.col-resizable th, table.col-resizable td{ overflow-wrap:anywhere; }
+.col-resizable-th{ position: relative; }
+.col-resizer{ position:absolute; top:0; right:-3px; width:6px; height:100%; cursor: col-resize; touch-action:none; user-select:none; }
+.col-resizer::after{ content:""; position:absolute; top:0; left:50%; width:2px; height:100%; transform:translateX(-50%); opacity:0; background: rgba(10,132,255,.55); border-radius: 1px; transition: opacity .12s ease; }
+.col-resizable-th:hover .col-resizer::after{ opacity:.75; }
+body.isColResizing{ cursor: col-resize !important; }
+body.isColResizing *{ cursor: col-resize !important; user-select:none !important; }
+      `.trim();
+      (document.head || document.documentElement).appendChild(st);
+    }catch(_){ }
+  }
+
+  function watch(){
+    if (!window.MutationObserver) return;
+    try{
+      const obs = new MutationObserver((muts) => {
+        let needs = false;
+        for (const m of muts){
+          for (const n of (m.addedNodes || [])){
+            if (!n || n.nodeType !== 1) continue;
+            if (n.tagName === "TABLE") { needs = true; break; }
+            if (n.querySelector && n.querySelector("table")) { needs = true; break; }
+          }
+          if (needs) break;
+        }
+        if (needs) requestAnimationFrame(() => scan(document));
+      });
+      obs.observe(document.body, { childList: true, subtree: true });
+    }catch(_){ }
+  }
+
+  function boot(){
+    injectStyle();
+    scan(document);
+    watch();
+    // re-scan after first paint (font/layout settle)
+    setTimeout(() => scan(document), 650);
+  }
+
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot);
+  else boot();
+})();
+
 
 ;
 /* ===== movimenti.js ===== */
