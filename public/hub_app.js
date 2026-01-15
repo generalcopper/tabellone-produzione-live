@@ -9,112 +9,6 @@
     import { getStorage, ref as sRef, uploadBytes, getDownloadURL, deleteObject } from "https://www.gstatic.com/firebasejs/12.7.0/firebase-storage.js";
 
 /* ============================================================
-   UI PATCH (global): TABLES — metà dimensione + righe più fitte
-   - Si applica a tutte le tabelle .dataGrid (e stacked mobile)
-   - Solo UI: nessuna logica toccata
-   ============================================================ */
-(function injectTableHalfStyles(){
-  try{
-    if (document.getElementById("gcTblHalfStyles")) return;
-    const css = `
-/* Tabelle standard (dataGrid) */
-.dataGrid thead th{
-  font-size: 6px !important;          /* 12px -> 6px */
-  line-height: 1.1 !important;
-  padding: 5px 6px !important;       /* 10px -> 5px */
-}
-.dataGrid tbody td{
-  font-size: 8px !important;          /* ~16px -> 8px */
-  line-height: 1.1 !important;
-  padding: 5px 6px !important;        /* 10px -> 5px */
-}
-
-/* Label \"stacked\" su mobile (quando thead è nascosto) */
-.tableWrap td::before,
-#docItemsTable td::before{
-  font-size: 6px !important;          /* 12px -> 6px */
-  line-height: 1.1 !important;
-}
-
-/* Input / select / textarea dentro celle */
-.dataGrid input,
-.dataGrid select,
-.dataGrid textarea{
-  font-size: 8px !important;
-  padding: 4px 6px !important;
-  min-height: 22px !important;
-  border-radius: 10px !important;
-}
-
-/* Bottoni dentro celle (incluso mini) */
-.dataGrid .btn,
-.dataGrid button{
-  font-size: 6px !important;          /* ~12px -> 6px */
-  padding: 4px 6px !important;
-  min-height: 22px !important;
-  border-radius: 10px !important;
-}
-.dataGrid .btn.mini{
-  font-size: 6px !important;
-  padding: 4px 6px !important;
-  min-height: 22px !important;
-  border-radius: 10px !important;
-}
-
-/* Icon button (x/azioni) in tabella */
-.dataGrid .iconBtn{
-  width: 20px !important;             /* 40px -> 20px */
-  height: 20px !important;            /* 40px -> 20px */
-  border-radius: 10px !important;
-  font-size: 9px !important;          /* 18px -> 9px */
-  box-shadow: none !important;
-}
-
-/* Badge / kbd dentro tabelle */
-.dataGrid .badge{
-  font-size: 6px !important;
-  padding: 2px 5px !important;
-  gap: 4px !important;
-}
-.dataGrid .kbd{
-  font-size: 6px !important;
-  padding: 1px 4px !important;
-  border-radius: 8px !important;
-}
-
-/* Editor quantità (più compatto) */
-.qty-editor{ gap: 6px !important; }
-.qty-editor input.jsQtyEdit{
-  width: 46px !important;             /* 92px -> 46px */
-  max-width: 55px !important;
-  padding: 4px 6px !important;
-  font-size: 8px !important;
-}
-
-/* Mobile stacked view: dimezza padding card/righe */
-@media (max-width: 720px){
-  .tableWrap tr{ padding: 5px 6px !important; }      /* 10/12 -> 5/6 */
-  .tableWrap td{ padding: 3px 0 !important; }        /* 6/0 -> 3/0 */
-
-  /* Mobile modals (quando la tabella torna \"table\") */
-  .modal .tableWrap th,
-  .modal .tableWrap td,
-  .view.modalOverlay .tableWrap th,
-  .view.modalOverlay .tableWrap td{
-    padding: 4px 5px !important;                    /* 8/10 -> 4/5 */
-    font-size: 8px !important;
-  }
-}
-    `;
-
-    const st = document.createElement("style");
-    st.id = "gcTblHalfStyles";
-    st.textContent = css;
-    (document.head || document.documentElement).appendChild(st);
-  }catch(_){ }
-})();
-
-/* ============================================================
    MERGED FILE: mainModule.js + hub_bundle.js
    - hub_bundle.js viene eseguito prima del core, così le view
      (OCR, Inventario, ecc.) sono già presenti quando il core
@@ -14471,3 +14365,104 @@ if (importMovementsInput) importMovementsInput.addEventListener("change", async 
   }catch(_){}
 })();
 
+
+
+/* ============================================================
+   UI TUNE — Tabelle: via di mezzo
+   - + leggibilita': testi/bottoni/campi dentro le tabelle
+   - Inventario: colonna "Nome articolo" piu' larga
+   ============================================================ */
+(function(){
+  try{
+    const ID = "gc_table_density_mid_v1";
+    if (document.getElementById(ID)) return;
+    const css = `
+/* General table readability (mid size) */
+.tableWrap thead th,
+.doc-tableWrap thead th,
+table.dataGrid thead th{
+  font-size: 15px !important;
+  padding: 8px 10px !important;
+  line-height: 1.1 !important;
+}
+.tableWrap tbody td,
+.doc-tableWrap tbody td,
+table.dataGrid tbody td{
+  font-size: 15px !important;
+  padding: 8px 10px !important;
+  line-height: 1.15 !important;
+}
+.tableWrap td input,
+.tableWrap td select,
+.tableWrap td textarea,
+.doc-tableWrap td input,
+.doc-tableWrap td select,
+.doc-tableWrap td textarea{
+  font-size: 15px !important;
+  padding: 7px 10px !important;
+  min-height: 34px !important;
+  border-radius: 10px !important;
+}
+.tableWrap td button,
+.tableWrap td .btn,
+.doc-tableWrap td button,
+.doc-tableWrap td .btn{
+  font-size: 14px !important;
+  padding: 7px 10px !important;
+  min-height: 34px !important;
+}
+/* Mobile stacked labels */
+.tableWrap td::before,
+.doc-tableWrap td::before{
+  font-size: 12px !important;
+}
+
+/* More compact on very small screens (still readable) */
+@media (max-width: 720px){
+  .tableWrap thead th, .doc-tableWrap thead th, table.dataGrid thead th{
+    font-size: 13px !important;
+    padding: 7px 8px !important;
+  }
+  .tableWrap tbody td, .doc-tableWrap tbody td, table.dataGrid tbody td{
+    font-size: 14px !important;
+    padding: 7px 8px !important;
+  }
+  .tableWrap td input, .tableWrap td select, .doc-tableWrap td input, .doc-tableWrap td select{
+    font-size: 14px !important;
+    min-height: 32px !important;
+    padding: 6px 8px !important;
+  }
+}
+
+/* Inventory only: widen first column (Nome articolo) */
+#viewInventory .dataGrid{
+  table-layout: fixed !important;
+}
+#viewInventory .dataGrid th:first-child,
+#viewInventory .dataGrid td:first-child{
+  width: 58% !important;
+  min-width: 420px !important;
+}
+#viewInventory .dataGrid th:nth-child(2),
+#viewInventory .dataGrid td:nth-child(2){
+  width: 16% !important;
+  min-width: 140px !important;
+}
+#viewInventory .dataGrid th:nth-child(3),
+#viewInventory .dataGrid td:nth-child(3){
+  width: 16% !important;
+  min-width: 140px !important;
+}
+#viewInventory .dataGrid th:nth-child(4),
+#viewInventory .dataGrid td:nth-child(4){
+  width: 10% !important;
+  min-width: 90px !important;
+  white-space: nowrap !important;
+}
+    `.trim();
+    const st = document.createElement("style");
+    st.id = ID;
+    st.textContent = css;
+    (document.head || document.documentElement).appendChild(st);
+  }catch(_){ }
+})();
