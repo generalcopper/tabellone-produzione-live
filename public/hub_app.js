@@ -5,7 +5,7 @@
      ****************************************************************/
     import { initializeApp } from "https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js";
     import { getAuth, GoogleAuthProvider, signInWithPopup, signInWithRedirect, getRedirectResult, signOut, onAuthStateChanged, setPersistence, browserLocalPersistence } from "https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js";
-    import { initializeFirestore, collection, doc, setDoc, addDoc, updateDoc, deleteDoc, getDoc, getDocs, onSnapshot, query, orderBy, serverTimestamp, deleteField, runTransaction } from "https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js";
+    import {initializeFirestore, collection, doc, setDoc, addDoc, deleteDoc, onSnapshot, query, orderBy, serverTimestamp, deleteField, getDocs, runTransaction} from "https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js";
     import { getStorage, ref as sRef, uploadBytes, getDownloadURL, deleteObject } from "https://www.gstatic.com/firebasejs/12.7.0/firebase-storage.js";
 
 /* ============================================================
@@ -3366,21 +3366,7 @@ function subscribeFinishedProducts(){
     });
 document.getElementById("btnGoInvCerea")?.addEventListener("click", () => { openInventoryOverlay(WAREHOUSE_CEREA); });
     document.getElementById("btnGoInvConcamarise")?.addEventListener("click", () => { openInventoryOverlay(WAREHOUSE_CONCA); });
-
-
-    // 🔌 Bridge globale per script esterni (Cestino, ecc.)
-    try{
-      globalThis.__HUB = globalThis.__HUB || {};
-      globalThis.__HUB.fb = fb;
-      globalThis.__HUB.ORG_ID = ORG_ID;
-      globalThis.__HUB.setView = setView;
-      globalThis.__HUB.closeSideMenu = closeSideMenu;
-      globalThis.__HUB.orgCol = orgCol;
-      globalThis.__HUB.FS = {
-        collection, doc, setDoc, addDoc, updateDoc, deleteDoc, getDoc, getDocs,
-        onSnapshot, query, orderBy, serverTimestamp, deleteField
-      };
-    }catch(e){ try{ console.warn("HUB bridge init failed", e); }catch(_){} }document.getElementById("menuGoHome")?.addEventListener("click", () => { closeSideMenu(); setView("home"); });
+document.getElementById("menuGoHome")?.addEventListener("click", () => { closeSideMenu(); setView("home"); });
     document.getElementById("menuGoOcr")?.addEventListener("click", () => { closeSideMenu(); startHomeOcr(); });
     document.getElementById("menuGoInvCerea")?.addEventListener("click", () => { closeSideMenu(); openInventoryOverlay(WAREHOUSE_CEREA); });
     document.getElementById("menuGoInvConcamarise")?.addEventListener("click", () => { closeSideMenu(); openInventoryOverlay(WAREHOUSE_CONCA); });
@@ -3782,6 +3768,26 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
       }
     };
 
+    // 🔌 Bridge globale per moduli (DDT, Cestino, ecc.) — inizializzato DOPO fb (evita TDZ)
+    function syncHubBridge(){
+      try{
+        globalThis.__HUB = globalThis.__HUB || {};
+        globalThis.__HUB.fb = fb;
+        globalThis.__HUB.ORG_ID = ORG_ID;
+        globalThis.__HUB.setView = setView;
+        globalThis.__HUB.closeSideMenu = closeSideMenu;
+        globalThis.__HUB.orgCol = orgCol;
+        globalThis.__HUB.FS = {
+          collection, doc, setDoc, addDoc, updateDoc, deleteDoc, getDoc, getDocs,
+          onSnapshot, query, orderBy, serverTimestamp, deleteField, runTransaction
+        };
+        globalThis.__HUB.ready = true;
+      }catch(e){
+        console.warn("syncHubBridge failed", e);
+      }
+    }
+
+
     let suppliers = [];
     let products = [];
     let thresholds = {};
@@ -3972,6 +3978,8 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
         fb.db = initializeFirestore(fb.app, { experimentalAutoDetectLongPolling: true, useFetchStreams: false });
         fb.storage = getStorage(fb.app);
 
+        try{ syncHubBridge(); }catch(e){ console.warn("syncHubBridge call failed", e); }
+
         const provider = new GoogleAuthProvider();
         provider.setCustomParameters({ prompt: "select_account" });
 
@@ -4034,6 +4042,7 @@ btnLogout.addEventListener("click", async () => {
 
         onAuthStateChanged(fb.auth, (user) => {
           fb.user = user || null;
+          try{ syncHubBridge(); }catch(e){ console.warn("syncHubBridge auth refresh failed", e); }
 
           if (user) {
             // UI
