@@ -2670,9 +2670,11 @@ document.body.appendChild(banner);
         || "";
       const totalDoc = extractDocTotal(d);
 
-      // Warehouse filter: escludi ordini del “Magazzino agenti” (gestiti in hub dedicato)
+      // Warehouse/Cliente filter: escludi ordini del “Magazzino agenti” (gestiti in hub dedicato)
       const warehouse = xmlGetTextCI(d, ["warehouse","warehousename","magazzino","deposito","warehouse_name"]) || "";
-      if(norm(warehouse) === "magazzino agenti"){
+      const _magKey = "magazzino agenti";
+      const _isMagA = (norm(warehouse).includes(_magKey) || norm(customer).includes(_magKey));
+      if(_isMagA){
         if(di && di%12===0) await yieldFrame();
         continue;
       }
@@ -4895,7 +4897,53 @@ function opNormName(s){
     if(ownActive) openRunningModal(); else openProdModal();
   }
 
-  function buildOrderViews(options={}){
+  
+  // --- Regola speciale (richiesta):
+  // Se un prodotto è codice 00861 (NPK 10-10-10 FLOW 1L) e la quantità da fare è > 400 kg,
+  // NON deve essere visibile in "VAI IN PRODUZIONE" (ma resta visibile nel Tabellone WRITE).
+  function isGoProdBlockedLine(l){
+    try{
+      if(!l) return false;
+      const codeRaw = String(l.code||"").trim().replace(/\s+/g,"");
+      const codeNoZero = codeRaw.replace(/^0+/,"");
+      const isTarget = (codeRaw === "00861") || (codeNoZero === "861");
+      if(!isTarget) return false;
+
+      // Calcolo Kg effettivi:
+      // - se qty è a pezzi e c'è un peso unitario in descrizione tipo "kg 1,1" -> qty * 1,1
+      // - se è già in kg -> resta qty
+      const desc = String(l.desc || l.prodotto || l.product || "").trim();
+      const packKg = (typeof detectPackKg === "function") ? detectPackKg(desc) : null;
+      const kgEff = (typeof resolveQtyKg === "function")
+        ? resolveQtyKg({ qty: l.qty, um: l.um || l.unit || "", packKg, desc })
+        : parseItNumber(l.qty);
+
+      return Number.isFinite(kgEff) && kgEff > 400;
+    }catch(_e){
+      return false;
+    }
+  }
+
+
+  // --- Esclusione: ordini "Magazzino agenti" ---
+  // In Hub Linea Liquidi questi ordini NON devono comparire (gestiti in hub dedicato).
+  function isMagazzinoAgentiOrder(order, noteText=""){
+    try{
+      const key = "magazzino agenti";
+      const cust = norm(order?.customer || order?.cliente || "");
+      if(cust && cust.includes(key)) return true;
+      const wh = norm(order?.warehouse || order?.magazzino || order?.deposito || "");
+      if(wh && wh.includes(key)) return true;
+      const note = norm(noteText || order?.note || order?.comment || order?.internalNote || "");
+      if(note && note.includes(key)) return true;
+      return false;
+    }catch(_e){
+      return false;
+    }
+  }
+
+
+function buildOrderViews(options={}){
 
     const applyRoleVisibility = options.applyRoleVisibility !== false;
     const includeHidden = options.includeHidden === true;
@@ -4948,9 +4996,14 @@ function opNormName(s){
     for(const o of (state.powderOrders || [])){
       const orderNo = o.orderNo || o.number || "";
       const note = getOrderNote(o);
+      if(typeof isMagazzinoAgentiOrder==="function" && isMagazzinoAgentiOrder(o, note)) continue;
       const priorityInfo = computePriorityFromNote(note);
       let autoDone = 0;
       const lines = (o.lines||[]).map(l=>{
+        if(isGoProdBlockedLine(l)){
+          autoDone++;
+          return null;
+        }
         if(isNonProductionLine(l)){
           autoDone++;
           return null;
@@ -11046,7 +11099,12 @@ function twAllowInTabWrite(it){
     if(!k){
       const ordNo = String(it.orderNo || "").trim();
       if(ordNo){
-        const orders = Array.isArray(state.powderOrders) ? state.powderOrders : [];
+        const orders = (Array.isArray(state.powderOrders) ? state.powderOrders : []).filter(o=>{
+      try{
+        const note = (typeof getOrderNote==="function") ? getOrderNote(o) : (o?.note||"");
+        return !(typeof isMagazzinoAgentiOrder==="function" && isMagazzinoAgentiOrder(o, note));
+      }catch(_e){ return true; }
+    });
         for(const o of orders){
           const on = String(o?.orderNo || o?.number || "").trim();
           if(on && on === ordNo){
@@ -11076,7 +11134,14 @@ async function twSyncOrdersToWriteQueue(){
     const db = state.firebase.db;
     if(!fs || !db) return;
 
-    const orders = Array.isArray(state.powderOrders) ? state.powderOrders : [];
+    const orders = (Array.isArray(state.powderOrders) ? state.powderOrders : []).filter(o=>{
+      try{
+        const note = (typeof getOrderNote==="function") ? getOrderNote(o) : (o?.note||"");
+        return !(typeof isMagazzinoAgentiOrder==="function" && isMagazzinoAgentiOrder(o, note));
+      }catch(_e){
+        return true;
+      }
+    });
     if(!orders.length) return;
 
     // Tabellone WRITE: mostra SOLO
