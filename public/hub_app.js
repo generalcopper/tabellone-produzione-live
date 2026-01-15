@@ -3009,7 +3009,7 @@ function subscribeFinishedProducts(){
 
                     <div class="doc-tableWrap">
                       <div class="doc-tableTitle">N. Articoli</div>
-                      <div class="doc-tableHint">Righe pronte per import: puoi modificare Codice, Descrizione e Q.tà (clicca sulla cella).</div>
+                      <div class="doc-tableHint">Righe pronte per import: puoi modificare Codice, Descrizione, U.M. e Q.tà (clicca sulla cella).</div>
                       <table class="doc-table dataGrid" id="docItemsTable">
                         <thead>
                           <tr>
@@ -3640,6 +3640,15 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
           ev.preventDefault();
           ev.stopPropagation();
           __beginInlineTextEdit(tr, "desc");
+          return;
+        }
+
+        // Modifica U.M.: click sulla cella U.M.
+        const uomCell = ev.target && ev.target.closest ? ev.target.closest(".jsEditUom") : null;
+        if (uomCell) {
+          ev.preventDefault();
+          ev.stopPropagation();
+          __beginInlineUomEdit(tr);
           return;
         }
 
@@ -5495,7 +5504,7 @@ function __isConaiItem(it){
     }
 
     // ===== U.M. (unità di misura) normalizzazione =====
-    // Canoniche richieste: nr / pz / kg / ton
+    // Canoniche richieste: nr / pz / kg / ton (+ lt / g / ml)
     function __normalizeUom(v){
       const raw = String(v ?? "").trim().toLowerCase();
       if (!raw) return "";
@@ -5515,6 +5524,12 @@ function __isConaiItem(it){
       if (k === "nr" || k === "n" || k === "n°" || k === "no") return "nr";
       // peso
       if (k === "kg" || k === "kgs" || k === "k" || k === "kilo" || k === "kilogrammi" || k === "kilogrammo") return "kg";
+      // litri
+      if (k === "l" || k === "lt" || k === "ltri" || k === "litri" || k === "litro" || k === "litri." || k === "litro.") return "lt";
+      // grammi
+      if (k === "g" || k === "gr" || k === "grammi" || k === "grammo") return "g";
+      // millilitri
+      if (k === "ml" || k === "millilitri" || k === "millilitro") return "ml";
       // tonnellate
       if (k === "ton" || k === "tons" || k === "tonn" || k === "tonne" || k === "t" || k === "tonnellate" || k === "tonnellata") return "ton";
 
@@ -5522,7 +5537,7 @@ function __isConaiItem(it){
     }
 
     // Estrae (qtyRaw, uom) da una stringa quantità, supportando:
-    // - "1760 PZ", "1760pz", "NR 10", "10 nr", "48 kg", "1,2 t", "0.5 ton" …
+    // - "1760 PZ", "1760pz", "NR 10", "10 nr", "48 kg", "12 lt", "250 ml", "1,2 t" …
     function __splitQtyUom(qtyPart){
       const s0 = String(qtyPart ?? "").trim();
       if (!s0) return { qtyRaw: "", uom: "" };
@@ -5532,7 +5547,7 @@ function __isConaiItem(it){
       let qtyRaw = s;
 
       // 1) uom in coda (anche attaccata al numero)
-      const end = s.match(/(nr\.?|n\.?|n°|pz\.?|p\.?z\.?|pcs?|kg(?:s)?\.?|ton(?:nellate|nellata|ne|n|s)?\.?|t)\s*$/i);
+      const end = s.match(/(nr\.?|n\.?|n°|pz\.?|p\.?z\.?|pcs?|kg(?:s)?\.?|g(?:r|rammi|rammo)?\.?|ml\.?|l(?:t|itri|itro)?\.?|lt\.?|ton(?:nellate|nellata|ne|n|s)?\.?|t)\s*$/i);
       if (end && end.index != null) {
         const cand = __normalizeUom(end[1]);
         if (cand) {
@@ -5543,7 +5558,7 @@ function __isConaiItem(it){
 
       // 2) uom in testa (es: "NR 10")
       if (!uom) {
-        const beg = s.match(/^\s*(nr\.?|n\.?|n°|pz\.?|p\.?z\.?|pcs?|kg(?:s)?\.?|ton(?:nellate|nellata|ne|n|s)?\.?|t)\b\s*/i);
+        const beg = s.match(/^\s*(nr\.?|n\.?|n°|pz\.?|p\.?z\.?|pcs?|kg(?:s)?\.?|g(?:r|rammi|rammo)?\.?|ml\.?|l(?:t|itri|itro)?\.?|lt\.?|ton(?:nellate|nellata|ne|n|s)?\.?|t)\b\s*/i);
         if (beg) {
           const cand = __normalizeUom(beg[1]);
           if (cand) {
@@ -5673,7 +5688,7 @@ function __isConaiItem(it){
           <td data-label="Descrizione">
             <span class="descTxt jsEditDesc" title="Clicca per modificare">${escapeHtml(desc || "-")}</span>
           </td>
-          <td data-label="U.M." class="num">${escapeHtml(uom || "-")}</td>
+          <td data-label="U.M." class="num"><span class="uomTxt jsEditUom" title="Clicca per modificare">${escapeHtml(uom || "-")}</span></td>
           <td data-label="Q.tà" class="num"><span class="qtyCell" title="Clicca per modificare">${escapeHtml(qtyDisp || "-")}</span></td>
         </tr>`;
       }).join("");
@@ -5788,6 +5803,89 @@ function __isConaiItem(it){
             it.qtyRaw = v;
           }
         }
+        __rerenderDocItemsTable();
+      };
+
+      input.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") { e.preventDefault(); input.blur(); }
+        if (e.key === "Escape") { e.preventDefault(); cancelled = true; __rerenderDocItemsTable(); }
+      });
+      input.addEventListener("blur", commit);
+    }
+
+    function __ensureOcrUomDatalist(){
+      try{
+        let dl = document.getElementById("ocrUomDatalist");
+        if (dl) return dl;
+        dl = document.createElement("datalist");
+        dl.id = "ocrUomDatalist";
+        ["pz","nr","kg","ton","lt","g","ml"].forEach((u) => {
+          const opt = document.createElement("option");
+          opt.value = u;
+          dl.appendChild(opt);
+        });
+        document.body.appendChild(dl);
+        return dl;
+      }catch(_){ return null; }
+    }
+
+    function __beginInlineUomEdit(tr){
+      if (!tr) return;
+      const idx = Number(tr.dataset.i);
+      if (Number.isNaN(idx)) return;
+
+      const items = __getDocItemsArr();
+      const it = items[idx];
+      if (!it) return;
+
+      const tdUom = tr.querySelector('td[data-label="U.M."]');
+      if (!tdUom) return;
+
+      if (tdUom.querySelector("input.uomInputInline")) return;
+
+      const current = String(it.uom || "").trim();
+
+      const input = document.createElement("input");
+      input.type = "text";
+      input.autocomplete = "off";
+      input.spellcheck = false;
+      input.className = "txtInputInline uomInputInline";
+      input.inputMode = "text";
+      input.value = current;
+
+      // suggerimenti (pz/nr/kg/ton/lt/g/ml)
+      try{
+        const dl = __ensureOcrUomDatalist();
+        if (dl) input.setAttribute("list", dl.id);
+      }catch(_){ }
+
+      // keep row selected
+      __docSelectedIndex = idx;
+
+      tdUom.innerHTML = "";
+      tdUom.appendChild(input);
+      input.focus();
+      try { input.select(); } catch(_e){}
+
+      let cancelled = false;
+
+      const commit = () => {
+        if (cancelled) return;
+        const raw = String(input.value || "").trim();
+        const cleanRaw = (raw && raw !== "-") ? raw : "";
+        const norm = __normalizeUom(cleanRaw);
+        // se non è tra le canoniche, conserva comunque il valore inserito (lower)
+        it.uom = norm || (cleanRaw ? cleanRaw.toLowerCase() : "");
+
+        // aggiorna qtyRaw per riflettere la nuova U.M.
+        try{
+          const prev = String(it.qtyRaw || "").trim();
+          const split = __splitQtyUom(prev);
+          const qtyOnly = String(split.qtyRaw || prev || (it.qty != null ? it.qty : "")).trim();
+          const uomNow = String(it.uom || "").trim();
+          it.qtyRaw = (qtyOnly ? `${qtyOnly}${uomNow ? " " + uomNow : ""}`.trim() : "");
+        }catch(_){ }
+
         __rerenderDocItemsTable();
       };
 
@@ -13229,7 +13327,9 @@ try {
 
           // U.M. + qtyRaw: supporta nr / pz / kg / ton (anche in formati tipo "1760pz" o "NR 10")
           const split = __splitQtyUom(String(it.qtyRaw ?? ""));
-          const uom = __normalizeUom(it.uom ?? "") || split.uom || "";
+          const uomEdited = String(it.uom ?? "").trim();
+          const uomEditedClean = (uomEdited && uomEdited !== "-") ? uomEdited : "";
+          const uom = __normalizeUom(uomEditedClean) || (uomEditedClean ? uomEditedClean.toLowerCase() : "") || split.uom || "";
           const qtyOnlyFromRaw = String(split.qtyRaw || "").trim();
 
           const qtyStr = (it.qty != null && it.qty !== "" && !Number.isNaN(Number(it.qty)))
