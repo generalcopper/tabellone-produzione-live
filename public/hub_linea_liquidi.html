@@ -2670,10 +2670,25 @@ document.body.appendChild(banner);
         || "";
       const totalDoc = extractDocTotal(d);
 
-      // Warehouse/Cliente filter: escludi ordini del “Magazzino agenti” (gestiti in hub dedicato)
-      const warehouse = xmlGetTextCI(d, ["warehouse","warehousename","magazzino","deposito","warehouse_name"]) || "";
+      // Warehouse/Cliente/Note filter: escludi ordini del “Magazzino agenti” (gestiti in hub dedicato)
+      // Nota: alcuni XML hanno cliente = nome agente e la dicitura "Magazzino agenti" solo nel deposito/note/tipo documento.
+      const warehouse = xmlGetTextCI(d, [
+        "warehouse","warehousename","magazzino","deposito","depositname","depositdescr","depositdescription",
+        "warehouse_name","warehouse_description","storage","stock","location","sede","filiale"
+      ]) || "";
+      const docType = xmlGetTextCI(d, ["documenttype","doctype","type","tipo","causale","causal"]) || "";
+      const note = xmlGetTextCI(d, ["note","notes","internalnote","comment","annotation","reference","ref","riferimento"]) || "";
+
       const _magKey = "magazzino agenti";
-      const _isMagA = (norm(warehouse).includes(_magKey) || norm(customer).includes(_magKey));
+      const headerBlob = norm([customer, warehouse, docType, note].join(" "));
+      let _isMagA = headerBlob.includes(_magKey);
+      // Fallback ultra-robusto: controlla anche il testo documento (copre XML con campi non standard)
+      if(!_isMagA){
+        try{
+          const big = norm(d.textContent || "");
+          if(big && big.includes(_magKey)) _isMagA = true;
+        }catch(_e){}
+      }
       if(_isMagA){
         if(di && di%12===0) await yieldFrame();
         continue;
@@ -2716,7 +2731,7 @@ document.body.appendChild(banner);
         });
       }
 
-      outDocs.push({ customer, number, date, conclusion, totalDoc, lines });
+      outDocs.push({ customer, number, date, conclusion, totalDoc, warehouse, note, docType, lines });
       if(di && di%12===0) await yieldFrame();
     }
     return outDocs;
@@ -2728,7 +2743,7 @@ document.body.appendChild(banner);
      (Dopo auth: render immediato da cache, poi sync in background)
   ========================= */
   const PARSED_ORDERS_CACHE_KEY = "HUB_LIQUIDI_PARSED_ORDERS_V1";
-  const PARSED_ORDERS_CACHE_VER = 2;
+  const PARSED_ORDERS_CACHE_VER = 3;
 
   function _readParsedOrdersCache(){
     try{
@@ -2809,6 +2824,9 @@ document.body.appendChild(banner);
               date: d.date,
               dueDate: d.dueDate,
               conclusion: d.conclusion,
+              warehouse: d.warehouse || "",
+              note: d.note || "",
+              docType: d.docType || "",
               lines: pLines,
               alerts: alertLines,
               totalKg
@@ -2888,7 +2906,7 @@ showLoader(isFirstPass ? "Parsing…" : "Aggiornamento…");
         if(!pLines.length) continue;
         const totalKg = pLines.reduce((a,x)=>a + (Number(x.qty)||0), 0);
         const alertLines = d.lines.filter(x=>x.alertInfo);
-        powderDocs.push({ customer: d.customer, number: d.number, orderNo: d.number, conclusion: d.conclusion, lines: pLines, alerts: alertLines, totalKg });
+        powderDocs.push({ customer: d.customer, number: d.number, orderNo: d.number, conclusion: d.conclusion, warehouse: d.warehouse || "", note: d.note || "", docType: d.docType || "", lines: pLines, alerts: alertLines, totalKg });
       }
       state.powderOrders = powderDocs;
           try{ twScheduleOrdersSync(); }catch(_e){}
@@ -2940,7 +2958,7 @@ showLoader(isFirstPass ? "Parsing…" : "Aggiornamento…");
             if(!pLines.length) continue;
             const totalKg = pLines.reduce((a,x)=>a + (Number(x.qty)||0), 0);
             const alertLines = d.lines.filter(x=>x.alertInfo);
-            powderDocs.push({ customer: d.customer, number: d.number, orderNo: d.number, conclusion: d.conclusion, lines: pLines, alerts: alertLines, totalKg });
+            powderDocs.push({ customer: d.customer, number: d.number, orderNo: d.number, conclusion: d.conclusion, warehouse: d.warehouse || "", note: d.note || "", docType: d.docType || "", lines: pLines, alerts: alertLines, totalKg });
           }
           state.powderOrders = powderDocs;
           try{ twScheduleOrdersSync(); }catch(_e){}
@@ -5629,10 +5647,16 @@ function buildOrderViews(options={}){
     const list = $("mobileSendList");
     const source = Array.isArray(allOrders) ? allOrders : [];
     const term = norm(searchText || "");
-    const filtered = term ? source.filter(o=>{
+    let filtered = term ? source.filter(o=>{
       const probe = `${o.customer||""} ${o.orderNo||o.number||""} ${o.conclusion||""} ${(o.lines&&o.lines[0]?.desc)||""}`;
       return norm(probe).includes(term);
     }) : source;
+    // Safety: in Hub Linea Liquidi NON mostrare mai ordini del "Magazzino agenti"
+    try{
+      if(typeof isMagazzinoAgentiOrder === "function"){
+        filtered = filtered.filter(o=> !isMagazzinoAgentiOrder(o, (typeof getOrderNote==="function" ? getOrderNote(o) : (o?.note||"")) ));
+      }
+    }catch(_e){}
     if(!list) return { filteredOrders: filtered, total: source.length };
     list.innerHTML = "";
     if(!filtered.length){
