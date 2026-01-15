@@ -693,23 +693,16 @@
           <h2>Scarica flussi DDT</h2>
         </div>
         <div class="inlineRow" style="gap:8px; justify-content:flex-end;">
+          <div class="seg daneaTabs">
+            <button id="daneaTabVerify" class="active" type="button">Da verificare <span class="pill" id="pillDaneaVerify" style="height:auto; padding:2px 8px; border-radius:999px; border:0; background:rgba(10,132,255,.12); color:rgba(0,0,0,.86);">0</span></button>
+            <button id="daneaTabDone" type="button">Completati <span class="pill" id="pillDaneaDone" style="height:auto; padding:2px 8px; border-radius:999px; border:0; background:rgba(0,0,0,.06); color:rgba(0,0,0,.86);">0</span></button>
+          </div>
           <div class="pill" id="pillDaneaCount">0</div>
           <button class="iconBtn" id="btnCloseDaneaDdt" type="button" aria-label="Chiudi">×</button>
         </div>
       </div>
 
       <div class="bd">
-        <div class="inlineRow" style="justify-content:space-between; align-items:flex-end; gap:12px;">
-          <div class="stack" style="flex:1; min-width: 240px;">
-            <div class="hero-sub">XML Easyfatt (Danea) → verifica distinta base → scarico automatico</div>
-            <div class="muted" id="daneaLastMeta" style="font-weight:800;">Ultimo XML: —</div>
-          </div>
-
-          <div class="seg" style="margin-left:auto;">
-            <button id="daneaTabVerify" class="active" type="button">Da verificare <span class="pill" id="pillDaneaVerify" style="height:auto; padding:2px 8px; border-radius:999px; border:0; background:rgba(10,132,255,.12); color:rgba(0,0,0,.86);">0</span></button>
-            <button id="daneaTabDone" type="button">Completati <span class="pill" id="pillDaneaDone" style="height:auto; padding:2px 8px; border-radius:999px; border:0; background:rgba(0,0,0,.06); color:rgba(0,0,0,.86);">0</span></button>
-          </div>
-        </div>
 
         <!-- LIST -->
         <div id="daneaListWrap" class="stack" style="gap:10px;">
@@ -724,7 +717,7 @@
             </div>
           </div>
 
-          <div class="tableWrap" style="max-height: 520px; overflow:auto; margin-top: 0;">
+          <div class="tableWrap" style="max-height: 520px; overflow:auto; margin-top: 0; width:100%;">
             <table class="dataGrid">
               <thead>
                 <tr>
@@ -751,12 +744,11 @@
               <div class="muted" id="daneaDetSubtitle" style="font-weight:900;">—</div>
             </div>
             <div class="inlineRow" style="gap:8px; justify-content:flex-end;">
-              <button class="btn btn-ghost mini" id="btnDaneaBackList" type="button">← Lista</button>
               <button class="btn btn-primary" id="btnDaneaSend" type="button" disabled>Invia (scarica)</button>
             </div>
           </div>
 
-          <div class="tableWrap" style="max-height: 520px; overflow:auto;">
+          <div class="tableWrap" style="max-height: 520px; overflow:auto; width:100%;">
             <table class="dataGrid">
               <thead>
                 <tr>
@@ -991,6 +983,8 @@
 
   function setTab(tab){
     S.tab = (tab === "done") ? "done" : "verify";
+    try{ setDetailOpen(false); }catch(_){}
+    try{ S.selected=null; S.selectedKey=""; }catch(_){}
     try{
       $("daneaTabVerify")?.classList.toggle("active", S.tab === "verify");
       $("daneaTabDone")?.classList.toggle("active", S.tab === "done");
@@ -1006,6 +1000,12 @@
     det.style.display = open ? "" : "none";
 
     try{ window.__syncDockedControlsVisibility && window.__syncDockedControlsVisibility(); }catch(_){}
+  }
+
+  function backToList(){
+    try{ setDetailOpen(false); }catch(_){}
+    try{ S.selected=null; S.selectedKey=""; }catch(_){}
+    try{ render(); }catch(_){}
   }
 
   function render(){
@@ -1068,7 +1068,7 @@
         const rows = Array.isArray(c.rows) ? c.rows : [];
         const n = rows.length;
 
-        return `<tr class="jsDaneaRow" data-key="${escAttr(k)}" data-mode="done" title="Apri">
+        return `<tr class=\"jsDaneaRow daneaRowOk\" data-key=\"${escAttr(k)}\" data-mode=\"done\" title="Apri">
           <td data-label="Data">${esc(fmtDateIT(date) || "—")}</td>
           <td data-label="Numero"><span class="kbd">${esc(number || "—")}</span></td>
           <td data-label="Cliente">${esc(cust || "—")}</td>
@@ -1099,7 +1099,7 @@
       const okDot = st.ok ? '<span class="dot ok"></span>' : '<span class="dot bad"></span>';
       const stTxt = `${st.green}/${st.total}`;
       const btnDisabled = st.ok ? "" : "disabled";
-      return `<tr class="jsDaneaRow" data-key="${escAttr(d.key)}" data-mode="verify" title="Apri">
+      return `<tr class=\"jsDaneaRow ${st.ok ? 'daneaRowOk' : 'daneaRowBad'}\" data-key=\"${escAttr(d.key)}\" data-mode=\"verify\" title="Apri">
         <td data-label="Data">${esc(fmtDateIT(d.date) || "—")}</td>
         <td data-label="Numero"><span class="kbd">${esc(d.number || "—")}</span></td>
         <td data-label="Cliente">${esc(d.customer || "—")}</td>
@@ -1146,7 +1146,8 @@
 
       const fidRow = String(st.fp?.id || st.fp?._id || "").trim();
       const rowWhy = String(st.why || "");
-      const rowStyle = st.ok ? "" : ' style="background: rgba(255,59,48,.08); cursor:pointer;"';
+      const rowCls = st.ok ? '' : ' daneaRowBad';
+      const rowStyle = ' style="cursor:pointer;"';
       const rowTitle = st.ok ? "Apri distinta base" : "Configura distinta base";
 
       let act = "";
@@ -1160,7 +1161,7 @@
         act = fid ? `<button class="btn btn-ghost btn-xs jsDaneaOpenFp" data-fpid="${escAttr(fid)}" type="button">Apri</button>` : `<span class="td-muted">OK</span>`;
       }
 
-      return `<tr class="jsDaneaItemRow" data-code="${escAttr(code)}" data-desc="${escAttr(desc)}" data-fpid="${escAttr(fidRow)}" data-why="${escAttr(rowWhy)}" title="${escAttr(rowTitle)}"${rowStyle}>
+      return `<tr class="jsDaneaItemRow${rowCls}" data-code="${escAttr(code)}" data-desc="${escAttr(desc)}" data-fpid="${escAttr(fidRow)}" data-why="${escAttr(rowWhy)}" title="${escAttr(rowTitle)}"${rowStyle}>
         <td data-label="">${dot}</td>
         <td data-label="Codice"><span class="kbd">${esc(code || "—")}</span></td>
         <td data-label="Articolo">${esc(desc || "—")}</td>
@@ -1545,8 +1546,6 @@ Disponibili: ${(tot).toLocaleString("it-IT")} (Cerea ${aC.toLocaleString("it-IT"
 
     $("daneaTabVerify")?.addEventListener("click", () => setTab("verify"));
     $("daneaTabDone")?.addEventListener("click", () => setTab("done"));
-
-    $("btnDaneaBackList")?.addEventListener("click", () => { setDetailOpen(false); S.selected=null; render(); });
     $("btnDaneaSend")?.addEventListener("click", () => sendSelectedFromDetail());
 
     // list click
@@ -1959,6 +1958,9 @@ function subscribeFinishedProducts(){
     window.HubDaneaDdt.refresh = function(){
       try{ render(); }catch(_){}
       try{ fetchNow(true); }catch(_){}
+    };
+    window.HubDaneaDdt.backToList = function(){
+      try{ backToList(); }catch(_){}
     };
   }
 
@@ -2554,6 +2556,12 @@ function subscribeFinishedProducts(){
         (!macroInp || curMacro === snapMacro);
     };
     syncSave();
+  }
+
+  function backToList(){
+    try{ setDetailOpen(false); }catch(_){}
+    try{ S.selected=null; S.selectedKey=""; }catch(_){}
+    try{ render(); }catch(_){}
   }
 
   function render(){
@@ -3581,7 +3589,16 @@ document.getElementById("btnCloseTrash")?.addEventListener("click", (e) => { try
 document.getElementById("btnCloseFlows")?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
 
     document.getElementById("btnCloseDaneaDdt")?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
-    document.getElementById("btnBackDaneaDdt")?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
+    document.getElementById("btnBackDaneaDdt")?.addEventListener("click", (e) => {
+      try{ e.preventDefault(); e.stopPropagation(); }catch(_){}
+      try{
+        if (window.HubDaneaDdt && typeof window.HubDaneaDdt.backToList === "function"){
+          window.HubDaneaDdt.backToList();
+          return;
+        }
+      }catch(_){}
+      setView("home");
+    });
     document.getElementById("btnCloseMovements")?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
     document.getElementById("btnCloseMoveInv")?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} try{ resetMoveInvDirection(); }catch(_){ } setView("home"); });
         document.getElementById("btnBackTrash")?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
