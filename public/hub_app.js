@@ -66,16 +66,17 @@
 })();
 
 /* ============================================================
-   Colonne tabelle ridimensionabili (drag utente)
-   - Trascinamento mouse: puoi trascinare direttamente il bordo destro dell'intestazione
-   - Handle dedicata sul bordo destro (piu facile da prendere)
+   Colonne tabelle ridimensionabili (drag utente) — v3
+   - Trascinamento robusto (non "scappa" quando il bordo si muove)
+   - Overlay full-screen durante il drag (cattura mouse/pointer ovunque)
    - Persistenza in localStorage (per tabella)
    ============================================================ */
 (function(){
   "use strict";
 
   const MIN_W = 44;
-  const EDGE_PX = 10; // distanza dal bordo destro per attivare il resize
+  const EDGE_PX = 14;          // zona attiva vicino al bordo destro dell'header
+  const HANDLE_PX = 22;        // larghezza handle dedicata (facile da prendere)
   const LS_PREFIX = "hubinv_colwidths:";
 
   function getTableKey(tbl){
@@ -124,18 +125,21 @@
 
   function injectStyle(){
     try{
-      const ID = "hubinv_col_resize_style_v2";
+      const ID = "hubinv_col_resize_style_v3";
       if (document.getElementById(ID)) return;
       const st = document.createElement("style");
       st.id = ID;
       st.textContent = `
-/* Column resize (v2) */
+/* Column resize (v3) */
 table.col-resizable{ table-layout: fixed; }
 table.col-resizable th, table.col-resizable td{ overflow-wrap:anywhere; }
 .col-resizable-th{ position: relative; overflow: visible !important; }
-.col-resizer{ position:absolute; top:0; right:0; width:${EDGE_PX+6}px; height:100%; cursor: col-resize; touch-action:none; user-select:none; z-index: 5; }
-.col-resizer::after{ content:""; position:absolute; top:0; left:50%; width:2px; height:100%; transform:translateX(-50%); opacity:0; background: rgba(10,132,255,.55); border-radius: 1px; transition: opacity .12s ease; }
-.col-resizable-th:hover .col-resizer::after{ opacity:.75; }
+/* handle ampia: rimane facile da agganciare */
+.col-resizer{ position:absolute; top:0; right:0; width:${HANDLE_PX}px; height:100%; cursor: col-resize; touch-action:none; user-select:none; z-index: 999; background: transparent; }
+.col-resizer::after{ content:""; position:absolute; top:0; left:50%; width:2px; height:100%; transform:translateX(-50%); opacity:0; background: rgba(10,132,255,.60); border-radius: 1px; transition: opacity .12s ease; }
+.col-resizable-th:hover .col-resizer::after{ opacity:.85; }
+/* overlay drag: cattura tutto e impedisce selezioni/scroll strani */
+.col-resize-overlay{ position:fixed; inset:0; z-index:2147483647; cursor: col-resize; background: transparent; touch-action:none; }
 body.isColResizing{ cursor: col-resize !important; }
 body.isColResizing *{ cursor: col-resize !important; user-select:none !important; }
       `.trim();
@@ -143,7 +147,6 @@ body.isColResizing *{ cursor: col-resize !important; user-select:none !important
     }catch(_){ }
   }
 
-  // debounce per singola tabella
   const saveTimers = new WeakMap();
   function scheduleStore(tbl, cols){
     try{
@@ -169,6 +172,20 @@ body.isColResizing *{ cursor: col-resize !important; user-select:none !important
     }catch(_){ return false; }
   }
 
+  // trova un parent scrollabile (per evitare che durante il drag "scappi" a destra)
+  function findScrollParent(el){
+    try{
+      let n = el;
+      while (n && n !== document.body){
+        const cs = getComputedStyle(n);
+        const ox = cs.overflowX;
+        if ((ox === "auto" || ox === "scroll") && n.scrollWidth > n.clientWidth + 2) return n;
+        n = n.parentElement;
+      }
+    }catch(_){ }
+    return null;
+  }
+
   function setupTable(tbl){
     try{
       if (!tbl || tbl.dataset.colResizeInit === "1") return;
@@ -182,7 +199,7 @@ body.isColResizing *{ cursor: col-resize !important; user-select:none !important
       const cg = ensureColgroup(tbl, ths.length);
       const cols = Array.from(cg.children || []);
 
-      // Applica larghezze salvate, altrimenti inizializza dalle dimensioni attuali
+      // larghezze salvate o iniziali
       const stored = readStoredWidths(tbl);
       if (stored && stored.length){
         stored.forEach((w, i) => {
@@ -201,52 +218,83 @@ body.isColResizing *{ cursor: col-resize !important; user-select:none !important
         });
       }
 
-      function beginDrag(i, startClientX, dragKind){
+      function beginDrag(i, ev){
         const th = ths[i];
         const col = cols[i];
+        const startX = (ev && typeof ev.clientX === "number") ? ev.clientX : 0;
         const startW = getCurrentWidth(th, col);
+
+        // blocca scroll orizzontale del wrapper durante il drag
+        const scrollParent = findScrollParent(tbl);
+        const startScrollLeft = scrollParent ? scrollParent.scrollLeft : 0;
 
         document.body.classList.add("isColResizing");
 
-        const onMove = (ev) => {
-          try{ if (ev && ev.cancelable) ev.preventDefault(); }catch(_){ }
-          const x = (ev && typeof ev.clientX === "number") ? ev.clientX : startClientX;
-          const dx = x - startClientX;
+        // overlay che cattura tutto: evita che "scappi" quando la colonna si muove
+        const overlay = document.createElement("div");
+        overlay.className = "col-resize-overlay";
+        document.body.appendChild(overlay);
+
+        const prevDocCursor = document.documentElement.style.cursor;
+        const prevBodyUserSelect = document.body.style.userSelect;
+        document.documentElement.style.cursor = "col-resize";
+        document.body.style.userSelect = "none";
+
+        let raf = 0;
+        function applyAt(x){
+          const dx = x - startX;
           const newW = Math.max(MIN_W, startW + dx);
           const px = Math.round(newW) + "px";
           if (cols[i]) cols[i].style.width = px;
           if (ths[i]) ths[i].style.width = px;
+          // mantiene lo scroll stabile: niente "scappa a destra"
+          if (scrollParent) scrollParent.scrollLeft = startScrollLeft;
           scheduleStore(tbl, cols);
+        }
+
+        const onMove = (e) => {
+          try{ if (e && e.cancelable) e.preventDefault(); }catch(_){ }
+          const x = (e && typeof e.clientX === "number") ? e.clientX : startX;
+          if (raf) return;
+          raf = requestAnimationFrame(() => { raf = 0; applyAt(x); });
         };
 
         const end = () => {
+          try{ if (raf) cancelAnimationFrame(raf); }catch(_){ }
+          raf = 0;
           document.body.classList.remove("isColResizing");
-          if (dragKind === "pointer"){
-            window.removeEventListener("pointermove", onMove);
-            window.removeEventListener("pointerup", end);
-            window.removeEventListener("pointercancel", end);
-          } else {
-            window.removeEventListener("mousemove", onMove);
-            window.removeEventListener("mouseup", end);
-          }
+          document.documentElement.style.cursor = prevDocCursor;
+          document.body.style.userSelect = prevBodyUserSelect;
+          try{ overlay.remove(); }catch(_){ try{ overlay.parentNode && overlay.parentNode.removeChild(overlay); }catch(__){} }
+          window.removeEventListener("blur", end);
+          overlay.removeEventListener("pointermove", onMove);
+          overlay.removeEventListener("pointerup", end);
+          overlay.removeEventListener("pointercancel", end);
+          overlay.removeEventListener("mousemove", onMove);
+          overlay.removeEventListener("mouseup", end);
         };
 
-        if (dragKind === "pointer"){
-          window.addEventListener("pointermove", onMove, { passive:false });
-          window.addEventListener("pointerup", end);
-          window.addEventListener("pointercancel", end);
-        } else {
-          window.addEventListener("mousemove", onMove, { passive:false });
-          window.addEventListener("mouseup", end);
-        }
+        // usa pointer se disponibile, con fallback mouse
+        try{
+          overlay.addEventListener("pointermove", onMove, { passive:false });
+          overlay.addEventListener("pointerup", end);
+          overlay.addEventListener("pointercancel", end);
+          if (ev && ev.pointerId != null && overlay.setPointerCapture) {
+            try{ overlay.setPointerCapture(ev.pointerId); }catch(_){ }
+          }
+        }catch(_){ }
+        overlay.addEventListener("mousemove", onMove, { passive:false });
+        overlay.addEventListener("mouseup", end);
+        window.addEventListener("blur", end);
+
+        // prima applicazione (così è subito “agganciato”)
+        applyAt(startX);
       }
 
-      // Handle + bordo destro trascinabile
       ths.forEach((th, i) => {
         th.classList.add("col-resizable-th");
         if (i === ths.length - 1) return; // ultima colonna: non ridimensionabile
 
-        // handle visibile/cliccabile
         if (!th.querySelector(":scope > .col-resizer")){
           const h = document.createElement("span");
           h.className = "col-resizer";
@@ -255,17 +303,16 @@ body.isColResizing *{ cursor: col-resize !important; user-select:none !important
           h.tabIndex = 0;
           th.appendChild(h);
 
-          // pointer (include mouse) sul handle
+          // pointer (mouse incluso)
           h.addEventListener("pointerdown", (ev) => {
             try{ ev.preventDefault(); ev.stopPropagation(); }catch(_){ }
-            try{ h.setPointerCapture && h.setPointerCapture(ev.pointerId); }catch(_){ }
-            beginDrag(i, ev.clientX, "pointer");
+            beginDrag(i, ev);
           });
 
-          // fallback mouse (se per qualsiasi motivo i pointer non partono)
+          // fallback mouse
           h.addEventListener("mousedown", (ev) => {
             try{ ev.preventDefault(); ev.stopPropagation(); }catch(_){ }
-            beginDrag(i, ev.clientX, "mouse");
+            beginDrag(i, ev);
           });
 
           // tastiera
@@ -283,18 +330,21 @@ body.isColResizing *{ cursor: col-resize !important; user-select:none !important
           });
         }
 
-        // bordo destro trascinabile direttamente
+        // bordo destro trascinabile direttamente (robusto)
         th.addEventListener("mousemove", (ev) => {
-          try{
-            if (isNearRightEdge(ev, th)) th.style.cursor = "col-resize";
-            else th.style.cursor = "";
-          }catch(_){ }
+          try{ th.style.cursor = isNearRightEdge(ev, th) ? "col-resize" : ""; }catch(_){ }
+        });
+
+        th.addEventListener("pointerdown", (ev) => {
+          if (!isNearRightEdge(ev, th)) return;
+          try{ ev.preventDefault(); }catch(_){ }
+          beginDrag(i, ev);
         });
 
         th.addEventListener("mousedown", (ev) => {
           if (!isNearRightEdge(ev, th)) return;
           try{ ev.preventDefault(); }catch(_){ }
-          beginDrag(i, ev.clientX, "mouse");
+          beginDrag(i, ev);
         });
       });
 
@@ -341,6 +391,7 @@ body.isColResizing *{ cursor: col-resize !important; user-select:none !important
 
 ;
 /* ===== movimenti.js ===== */
+
 (function(){
   "use strict";
 
