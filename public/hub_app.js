@@ -1004,6 +1004,8 @@
     if (!list || !det) return;
     list.style.display = open ? "none" : "";
     det.style.display = open ? "" : "none";
+
+    try{ window.__syncDockedControlsVisibility && window.__syncDockedControlsVisibility(); }catch(_){}
   }
 
   function render(){
@@ -3257,7 +3259,101 @@ function subscribeFinishedProducts(){
           if (m && m.parentElement !== document.body) document.body.appendChild(m);
         });
       }catch(_){}
+
+
+
     })();
+
+    // =========================================================
+    // Dock: cerca / filtri / bottoni nella stessa riga del tasto indietro
+    // (sposta le .listStickyBar dentro la .hd di ogni overlay)
+    // =========================================================
+    function __dockBackRowControls(){
+      try{
+        const views = document.querySelectorAll('.view.modalOverlay');
+        views.forEach((view) => {
+          const card = view.querySelector('article.card');
+          if (!card) return;
+
+          const hd = card.querySelector(':scope > .hd') || card.querySelector('.hd');
+          const bd = card.querySelector(':scope > .bd') || card.querySelector('.bd');
+          if (!hd || !bd) return;
+
+          // Right cluster (pill + close). Se manca, ok.
+          try{
+            const kids = Array.from(hd.children || []);
+            const right = hd.querySelector('.hdrRight') || kids.find(el => el && el.classList && el.classList.contains('inlineRow') && !el.classList.contains('overlayHeaderTitle')) || null;
+            if (right && right.classList) right.classList.add('hdrRight');
+          }catch(_){ }
+
+          // Dock slot (between title and right)
+          let slot = hd.querySelector('.hdrDockSlot');
+          if (!slot){
+            slot = document.createElement('div');
+            slot.className = 'hdrDockSlot';
+            const title = hd.querySelector('.overlayHeaderTitle');
+            const right2 = hd.querySelector('.hdrRight');
+            if (title && title.nextSibling) hd.insertBefore(slot, title.nextSibling);
+            else if (right2) hd.insertBefore(slot, right2);
+            else hd.appendChild(slot);
+          }
+
+          // Primary bar: la prima .listStickyBar dentro la bd
+          const bar = bd.querySelector('.listStickyBar');
+          if (!bar) return;
+          if (bar.closest && bar.closest('.hd')) return; // già dockata
+
+          // show/hide: usa l'antenato con id più vicino (es. invDetail / moveInvList / daneaListWrap)
+          let showWhen = '';
+          try{
+            let p = bar.parentElement;
+            while (p && p !== bd){
+              if (p.id){ showWhen = String(p.id||''); break; }
+              p = p.parentElement;
+            }
+          }catch(_){ }
+          try{ if (showWhen) bar.dataset.dockShowWhen = showWhen; }catch(_){ }
+
+          // pulizia inline styles che occupavano spazio in bd
+          try{ bar.style.marginTop = '0'; }catch(_){ }
+          try{ bar.style.padding = '0'; }catch(_){ }
+          try{ bar.style.background = 'transparent'; }catch(_){ }
+          try{ bar.style.position = 'static'; }catch(_){ }
+          try{ bar.classList.add('inHeaderDock'); }catch(_){ }
+
+          slot.appendChild(bar);
+        });
+      }catch(_){ }
+    }
+
+    function __isVisibleEl(el){
+      if (!el) return false;
+      try{
+        const cs = window.getComputedStyle(el);
+        return !!(cs && cs.display !== 'none' && cs.visibility !== 'hidden');
+      }catch(_){
+        return true;
+      }
+    }
+
+    function __syncDockedControlsVisibility(){
+      try{
+        document.querySelectorAll('.view.modalOverlay article.card > .hd .listStickyBar.inHeaderDock').forEach((bar) => {
+          const id = (bar && bar.dataset) ? String(bar.dataset.dockShowWhen || '') : '';
+          if (!id){
+            try{ bar.style.display = ''; }catch(_){ }
+            return;
+          }
+          const src = document.getElementById(id);
+          const vis = __isVisibleEl(src);
+          try{ bar.style.display = vis ? '' : 'none'; }catch(_){ }
+        });
+      }catch(_){ }
+    }
+
+    try{ window.__syncDockedControlsVisibility = __syncDockedControlsVisibility; }catch(_){ }
+    try{ __dockBackRowControls(); __syncDockedControlsVisibility(); }catch(_){ }
+
 
 
     function syncHeaderBackVisibility(){
@@ -3318,6 +3414,8 @@ function subscribeFinishedProducts(){
           "Anagrafica";
       }
       syncHeaderBackVisibility();
+      try{ __dockBackRowControls && __dockBackRowControls(); }catch(_){ }
+      try{ __syncDockedControlsVisibility && __syncDockedControlsVisibility(); }catch(_){}
       try { window.scrollTo(0, 0); } catch(_){}
     }
 
@@ -3765,6 +3863,8 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
 
       if (invPicker) invPicker.style.display = wh ? "none" : "";
       if (invDetail) invDetail.style.display = wh ? "" : "none";
+
+      try{ __syncDockedControlsVisibility && __syncDockedControlsVisibility(); }catch(_){}
 
       if (pillInvWarehouse) {
         pillInvWarehouse.style.display = wh ? "inline-flex" : "none";
@@ -9531,6 +9631,7 @@ let __stockRowByKey = new Map();
         if (modalMoveInvQty) modalMoveInvQty.classList.remove("open");
       }catch(_){}
       try{ __syncBodyLockFromModals && __syncBodyLockFromModals(); }catch(_){}
+      try{ __syncDockedControlsVisibility && __syncDockedControlsVisibility(); }catch(_){}
     }
 
     function __setMoveInvDirection(fromWh, toWh){
@@ -9548,6 +9649,7 @@ let __stockRowByKey = new Map();
       }catch(_){}
       try{ if (moveInvSearch) moveInvSearch.value = ""; }catch(_){}
       try{ renderMoveInv(); }catch(_){}
+      try{ __syncDockedControlsVisibility && __syncDockedControlsVisibility(); }catch(_){}
     }
 
     function __moveInvNorm(s){
