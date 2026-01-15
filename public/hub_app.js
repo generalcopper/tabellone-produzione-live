@@ -66,8 +66,9 @@
 })();
 
 /* ============================================================
-   Colonne tabelle ridimensionabili (drag utente) — v3
-   - Trascinamento robusto (non "scappa" quando il bordo si muove)
+   Colonne tabelle ridimensionabili (drag utente) — v4
+   - NON parte mentre stai "selezionando" col mouse: si trascina SOLO dalla maniglia
+   - Niente auto-scroll a destra durante il drag (blocca lo scroll del wrapper)
    - Overlay full-screen durante il drag (cattura mouse/pointer ovunque)
    - Persistenza in localStorage (per tabella)
    ============================================================ */
@@ -75,8 +76,8 @@
   "use strict";
 
   const MIN_W = 44;
-  const EDGE_PX = 14;          // zona attiva vicino al bordo destro dell'header
-  const HANDLE_PX = 22;        // larghezza handle dedicata (facile da prendere)
+  const EDGE_PX = 8;           // (solo UI) distanza in px per mostrare cursor vicino al bordo
+  const HANDLE_PX = 12;        // maniglia più piccola: non "ruba" il click per selezionare testo
   const LS_PREFIX = "hubinv_colwidths:";
 
   function getTableKey(tbl){
@@ -125,21 +126,21 @@
 
   function injectStyle(){
     try{
-      const ID = "hubinv_col_resize_style_v3";
+      const ID = "hubinv_col_resize_style_v4";
       if (document.getElementById(ID)) return;
       const st = document.createElement("style");
       st.id = ID;
       st.textContent = `
-/* Column resize (v3) */
+/* Column resize (v4) */
 table.col-resizable{ table-layout: fixed; }
 table.col-resizable th, table.col-resizable td{ overflow-wrap:anywhere; }
 .col-resizable-th{ position: relative; overflow: visible !important; }
 /* handle ampia: rimane facile da agganciare */
-.col-resizer{ position:absolute; top:0; right:0; width:${HANDLE_PX}px; height:100%; cursor: col-resize; touch-action:none; user-select:none; z-index: 999; background: transparent; }
+.col-resizer{ position:absolute; top:0; right:0; width:${HANDLE_PX}px; height:100%; cursor: col-resize; touch-action:none; user-select:none; -webkit-user-select:none; z-index: 999; background: transparent; }
 .col-resizer::after{ content:""; position:absolute; top:0; left:50%; width:2px; height:100%; transform:translateX(-50%); opacity:0; background: rgba(10,132,255,.60); border-radius: 1px; transition: opacity .12s ease; }
 .col-resizable-th:hover .col-resizer::after{ opacity:.85; }
 /* overlay drag: cattura tutto e impedisce selezioni/scroll strani */
-.col-resize-overlay{ position:fixed; inset:0; z-index:2147483647; cursor: col-resize; background: transparent; touch-action:none; }
+.col-resize-overlay{ position:fixed; inset:0; z-index:2147483647; cursor: col-resize; background: transparent; touch-action:none; overscroll-behavior: none; }
 body.isColResizing{ cursor: col-resize !important; }
 body.isColResizing *{ cursor: col-resize !important; user-select:none !important; }
       `.trim();
@@ -164,26 +165,19 @@ body.isColResizing *{ cursor: col-resize !important; user-select:none !important
     return Math.max(MIN_W, Math.round(w || MIN_W));
   }
 
-  function isNearRightEdge(ev, th){
-    try{
-      const rect = th.getBoundingClientRect();
-      const d = rect.right - (ev.clientX || 0);
-      return d >= -1 && d <= EDGE_PX;
-    }catch(_){ return false; }
-  }
-
-  // trova un parent scrollabile (per evitare che durante il drag "scappi" a destra)
+  // trova il wrapper che PUO' scrollare in X (anche se al momento non sta scrollando)
+  // serve perché durante il resize può comparire la scrollbar e Chrome tende ad auto-scrollare.
   function findScrollParent(el){
     try{
-      let n = el;
+      let n = el && el.parentElement ? el.parentElement : null;
       while (n && n !== document.body){
         const cs = getComputedStyle(n);
         const ox = cs.overflowX;
-        if ((ox === "auto" || ox === "scroll") && n.scrollWidth > n.clientWidth + 2) return n;
+        if (ox === "auto" || ox === "scroll") return n;
         n = n.parentElement;
       }
     }catch(_){ }
-    return null;
+    try{ return document.scrollingElement || null; }catch(_){ return null; }
   }
 
   function setupTable(tbl){
@@ -224,9 +218,29 @@ body.isColResizing *{ cursor: col-resize !important; user-select:none !important
         const startX = (ev && typeof ev.clientX === "number") ? ev.clientX : 0;
         const startW = getCurrentWidth(th, col);
 
-        // blocca scroll orizzontale del wrapper durante il drag
+        // blocca scroll orizzontale durante il drag (wrapper + pagina)
+        // Nota: anche se al momento non c'è overflow-x, durante il resize può comparire.
         const scrollParent = findScrollParent(tbl);
+        const docScrollEl = (function(){
+          try{ return document.scrollingElement || document.documentElement || null; }catch(_){ return null; }
+        })();
         const startScrollLeft = scrollParent ? scrollParent.scrollLeft : 0;
+        const startDocScrollLeft = (docScrollEl && docScrollEl !== scrollParent) ? (docScrollEl.scrollLeft || 0) : 0;
+
+        const lockScroll = () => {
+          try{
+            if (scrollParent && scrollParent.scrollLeft !== startScrollLeft) scrollParent.scrollLeft = startScrollLeft;
+          }catch(_){ }
+          try{
+            if (docScrollEl && docScrollEl !== scrollParent && docScrollEl.scrollLeft !== startDocScrollLeft) {
+              docScrollEl.scrollLeft = startDocScrollLeft;
+            }
+          }catch(_){ }
+        };
+
+        const onScroll = () => { lockScroll(); };
+        try{ if (scrollParent) scrollParent.addEventListener("scroll", onScroll, { passive:true }); }catch(_){ }
+        try{ if (docScrollEl && docScrollEl !== scrollParent) docScrollEl.addEventListener("scroll", onScroll, { passive:true }); }catch(_){ }
 
         document.body.classList.add("isColResizing");
 
@@ -234,6 +248,13 @@ body.isColResizing *{ cursor: col-resize !important; user-select:none !important
         const overlay = document.createElement("div");
         overlay.className = "col-resize-overlay";
         document.body.appendChild(overlay);
+
+        // impedisce scroll (wheel) durante il drag
+        try{
+          overlay.addEventListener("wheel", (e) => {
+            try{ if (e && e.cancelable) e.preventDefault(); }catch(_){ }
+          }, { passive:false });
+        }catch(_){ }
 
         const prevDocCursor = document.documentElement.style.cursor;
         const prevBodyUserSelect = document.body.style.userSelect;
@@ -248,7 +269,7 @@ body.isColResizing *{ cursor: col-resize !important; user-select:none !important
           if (cols[i]) cols[i].style.width = px;
           if (ths[i]) ths[i].style.width = px;
           // mantiene lo scroll stabile: niente "scappa a destra"
-          if (scrollParent) scrollParent.scrollLeft = startScrollLeft;
+          lockScroll();
           scheduleStore(tbl, cols);
         }
 
@@ -262,6 +283,8 @@ body.isColResizing *{ cursor: col-resize !important; user-select:none !important
         const end = () => {
           try{ if (raf) cancelAnimationFrame(raf); }catch(_){ }
           raf = 0;
+          try{ if (scrollParent) scrollParent.removeEventListener("scroll", onScroll); }catch(_){ }
+          try{ if (docScrollEl && docScrollEl !== scrollParent) docScrollEl.removeEventListener("scroll", onScroll); }catch(_){ }
           document.body.classList.remove("isColResizing");
           document.documentElement.style.cursor = prevDocCursor;
           document.body.style.userSelect = prevBodyUserSelect;
@@ -330,22 +353,9 @@ body.isColResizing *{ cursor: col-resize !important; user-select:none !important
           });
         }
 
-        // bordo destro trascinabile direttamente (robusto)
-        th.addEventListener("mousemove", (ev) => {
-          try{ th.style.cursor = isNearRightEdge(ev, th) ? "col-resize" : ""; }catch(_){ }
-        });
-
-        th.addEventListener("pointerdown", (ev) => {
-          if (!isNearRightEdge(ev, th)) return;
-          try{ ev.preventDefault(); }catch(_){ }
-          beginDrag(i, ev);
-        });
-
-        th.addEventListener("mousedown", (ev) => {
-          if (!isNearRightEdge(ev, th)) return;
-          try{ ev.preventDefault(); }catch(_){ }
-          beginDrag(i, ev);
-        });
+        // NB: resize SOLO dalla maniglia (.col-resizer).
+        // Questo evita che il drag di selezione testo (o click normali sull'header)
+        // facciano partire il resize e “spostino” la tabella.
       });
 
       tbl.dataset.colResizeInit = "1";
