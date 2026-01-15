@@ -10943,9 +10943,9 @@ function twExcludeFromWrite(desc, code="", um=""){
 }
 
 
-// --- Tabellone WRITE: escludi unità non a pezzi (kg/lt/ml ecc.) ---
-// Nota: alcune righe arrivano con "qty" che include l'unità (es: "48 kg").
-// In ogni caso, nel Tabellone WRITE devono entrare solo righe a "pezzi".
+// --- Tabellone WRITE: escludi unità non gestite (lt/ml/gr ecc.) ---
+// Nota: alcune righe arrivano con "qty" che include già l'unità (es: "10lt").
+// Nel Tabellone WRITE sono ammesse righe a "pz" e righe a "kg" (prodotti liquidi).
 function twExcludeNonPiece(qty, unit, um=""){
   try{
     const q = norm(String(qty==null ? "" : qty));
@@ -10953,9 +10953,11 @@ function twExcludeNonPiece(qty, unit, um=""){
 
     // Match unit tokens even when glued to numbers (es: "48kg", "10lt")
     // Evita falsi positivi dentro parole (es: "flaconi") perché richiede separatori non-lettera.
-    const BAD = /(?:^|[^a-z])(?:kg|kilo|kilogrammi|g|gr|grammi|lt|l|litri?|ml|cl|cc)(?:$|[^a-z])/;
+    // Nota: nel Tabellone WRITE vogliamo permettere le righe "prodotto liquido" con UM = kg.
+    // Quindi qui escludiamo solo unità volume/piccole (lt/l/ml/cl/cc e grammi), ma NON i kg.
+    const BAD = /(?:^|[^a-z])(?:g|gr|grammi|lt|l|litri?|ml|cl|cc)(?:$|[^a-z])/;
 
-    // se la quantità contiene già l'unità (es: "48 kg", "10lt") -> fuori
+    // se la quantità contiene già l'unità (es: "10lt", "250 ml") -> fuori
     if(BAD.test(q)) return true;
 
     // se UM/unit indicano peso/volume -> fuori
@@ -11124,7 +11126,7 @@ async function twSyncOrdersToWriteQueue(){
         const supplier = (String(l.supplier || l.fornitore || l.vendor || l.brand || l.produttore || "").trim() || twInferSupplier(desc) || "");
 
 
-        // Esclusione: UM non a pezzi (kg/lt/ml ecc.)
+        // Esclusione: UM non ammessa (lt/ml/gr ecc.)
         if(typeof twExcludeNonPiece === "function" && twExcludeNonPiece(qty, unit, l.um)) continue;
 
 
@@ -11527,6 +11529,14 @@ function twParseJobLine(line){
     return { product, qty, unit:"pz", format:"", status:"DA PRODURRE" };
   }
 
+  // 2b) smart: "... 450 kg" → prodotto = tutto prima, qty = 450, unit = kg
+  const mk = raw.match(/^(.*?)(?:\s+)(\d+(?:[\.,]\d+)?)\s*(kg|kilo|kilogrammi)\.?$/i);
+  if(mk){
+    const product = (mk[1]||"").trim();
+    const qty = String(mk[2]||"").trim().replace(",",".");
+    return { product, qty, unit:"kg", format:"", status:"DA PRODURRE" };
+  }
+
   return { product: raw, qty:"", unit:"", format:"", status:"DA PRODURRE", rawLine: raw };
 }
 
@@ -11700,6 +11710,8 @@ function twRenderQueue(items){
     const orderLblWithCustomer = it.orderNo ? (`Ord. ${it.orderNo}${it.customer ? " · " + it.customer : ""}`) : "";
     const qtyTxt = (it.qty || "") ? `${it.qty} ${it.unit||""}`.trim() : "—";
 
+    const qtyLabel = (typeof twIsPieceUnit==="function" && twIsPieceUnit(it.unit||"", it.um||it.unit||"")) ? "Pezzi" : "Quantità";
+
     const delBtn = (state.user && state.user.isAdmin) ? `<button class="btn bad" data-tw-act="del" type="button">Elimina</button>` : ``;
 
     if(isOrderRow){
@@ -11710,7 +11722,7 @@ function twRenderQueue(items){
         <div class="top" style="gap:10px; align-items:flex-start;">
           <div style="min-width:0;">
             <div class="name">${escapeHtml(prod)}</div>
-            <div class="sub" style="font-weight:800;">Cliente: ${escapeHtml(customerTxt)} · Pezzi: ${escapeHtml(qtyTxt)}</div>
+            <div class="sub" style="font-weight:800;">Cliente: ${escapeHtml(customerTxt)} · ${escapeHtml(qtyLabel)}: ${escapeHtml(qtyTxt)}</div>
           </div>
           <div style="display:flex; gap:8px; align-items:center; justify-content:flex-end; flex-wrap:wrap;">
             <button class="btn good" data-tw-act="done" type="button">Completa</button>
@@ -11727,7 +11739,7 @@ function twRenderQueue(items){
         <div class="top" style="gap:10px; align-items:flex-start;">
           <div style="min-width:0;">
             <div class="name">${escapeHtml(title)}</div>
-            <div class="sub" style="font-weight:800;">Pezzi: ${escapeHtml(qtyTxt)} · Stato: ${escapeHtml(st)} · Creato: ${escapeHtml(created)}</div>
+            <div class="sub" style="font-weight:800;">${escapeHtml(qtyLabel)}: ${escapeHtml(qtyTxt)} · Stato: ${escapeHtml(st)} · Creato: ${escapeHtml(created)}</div>
           </div>
           <div style="display:flex; gap:8px; align-items:center; justify-content:flex-end; flex-wrap:wrap;">
             <button class="btn good" data-tw-act="done" type="button">Completa</button>
@@ -11770,6 +11782,8 @@ function twRenderDone(items){
     const orderLblWithCustomer = it.orderNo ? (`Ord. ${it.orderNo}${it.customer ? " · " + it.customer : ""}`) : "";
     const qtyTxt = (it.qty || "") ? `${it.qty} ${it.unit||""}`.trim() : "—";
 
+    const qtyLabel = (typeof twIsPieceUnit==="function" && twIsPieceUnit(it.unit||"", it.um||it.unit||"")) ? "Pezzi" : "Quantità";
+
     if(isOrderRow){
       const prod = twCompactProductName(it.product || it.label || it.rawLine || "—");
       const customerTxt = (String(it.customer||"").trim() || "—");
@@ -11780,7 +11794,7 @@ function twRenderDone(items){
         <div class="top" style="gap:10px; align-items:flex-start;">
           <div style="min-width:0;">
             <div class="name">${escapeHtml(prod)}</div>
-            <div class="sub" style="font-weight:800;">Cliente: ${escapeHtml(customerTxt)} · Pezzi: ${escapeHtml(qtyTxt)}</div>
+            <div class="sub" style="font-weight:800;">Cliente: ${escapeHtml(customerTxt)} · ${escapeHtml(qtyLabel)}: ${escapeHtml(qtyTxt)}</div>
           </div>
           <div style="display:flex; gap:8px; align-items:center; justify-content:flex-end; flex-wrap:wrap;">
             <button class="btn ghost" data-tw-act="undo" type="button">Annulla</button>
@@ -11795,7 +11809,7 @@ function twRenderDone(items){
         <div class="top" style="gap:10px; align-items:flex-start;">
           <div style="min-width:0;">
             <div class="name">${escapeHtml(title)}</div>
-            <div class="sub" style="font-weight:800;">Pezzi: ${escapeHtml(qtyTxt)} · Completato: ${escapeHtml(twFmtWhen(it.completedAtMs))}${who ? ` · Da: ${escapeHtml(who)}` : ``}</div>
+            <div class="sub" style="font-weight:800;">${escapeHtml(qtyLabel)}: ${escapeHtml(qtyTxt)} · Completato: ${escapeHtml(twFmtWhen(it.completedAtMs))}${who ? ` · Da: ${escapeHtml(who)}` : ``}</div>
           </div>
           <div style="display:flex; gap:8px; align-items:center; justify-content:flex-end; flex-wrap:wrap;">
             <button class="btn ghost" data-tw-act="undo" type="button">Annulla</button>
@@ -12357,7 +12371,7 @@ async function twSendLinesToQueue(){
     for(const line of lines){
       const j = twParseJobLine(line);
 
-      // Esclusione: UM non a pezzi (kg/lt/ml ecc.)
+      // Esclusione: UM non ammessa (lt/ml/gr ecc.)
       if(typeof twExcludeNonPiece==="function" && twExcludeNonPiece(j.qty, j.unit, j.unit)){
         skippedNonPiece++;
         continue;
@@ -12404,7 +12418,7 @@ async function twSendLinesToQueue(){
       if(skipped) extra += "Escluse " + skipped + " righe: 5/10 kg/lt o tanica";
       if((skipped || skippedNonPiece) && skippedSmall) extra += " · ";
       if(skipped && skippedNonPiece) extra += " · ";
-      if(skippedNonPiece) extra += "Escluse " + skippedNonPiece + " righe: UM non a pezzi (kg/lt/ml ecc.)";
+      if(skippedNonPiece) extra += "Escluse " + skippedNonPiece + " righe: UM non ammessa (lt/ml/gr ecc.)";
       if(skippedNonPiece && skippedSmall) extra += " · ";
       if(skippedSmall) extra += "Escluse " + skippedSmall + " righe: < 200 pz";
       extra += ")";
