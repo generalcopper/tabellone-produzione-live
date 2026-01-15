@@ -742,6 +742,16 @@
   @media(max-width:720px){.payrollOverlay{padding:12px}.payrollSheet{padding:16px;border-radius:22px}.payrollTop{flex-direction:column;align-items:flex-start}.payrollCard{border-radius:18px}}
 
 </style>
+
+<style id="gc_prod_minimal">
+/* Richiesta: in produzione mostra solo ordini inviati a mobile.
+   Inoltre rimuovo dalla UI: Materiale necessario, Avviso operatori, Statistiche produzione. */
+#warehouseCard, #warehouseAnchor, #warehouseModal, #whModal, #btnWarehouseOpen,
+#alertAdminCard, #alertModal, #topAlertBanner,
+#statsProdCard, #statsCardAnchor, #btnOpenStats{
+  display:none !important;
+}
+</style>
 </head><body><div id="authLoader" class="authLoader" role="status" aria-live="polite" aria-label="Caricamento">
   <div class="loaderStack">
     <div class="iosSpinner" aria-hidden="true"></div>
@@ -3620,6 +3630,11 @@ function hideLogin(){
         snap.forEach(doc=>arr.push({ id: doc.id, ...doc.data() }));
         state.activeProductions = arr.filter(x=>x && x.active);
         renderHome();
+        try{
+          if(document.getElementById("prodModal")?.classList.contains("show")){
+            renderProdStepOrders();
+          }
+        }catch(_e){}
         bootMark("active");
         __fsBackoffMs = 1500;
       };
@@ -4382,6 +4397,11 @@ function hideLogin(){
         refreshAllowDirtyFlag();
         state.mobileAllowSaveState = "idle";
         scheduleAllowlistRender();
+        try{
+          if(document.getElementById("prodModal")?.classList.contains("show")){
+            renderProdStepOrders();
+          }
+        }catch(_e){}
       }, (err)=>{
         console.warn("allowlist snapshot error", err);
         const code = err?.code || "";
@@ -4408,6 +4428,11 @@ function hideLogin(){
         state.mobileAllowDirty = false;
         state.mobileAllowSaveState = "error";
         renderHome();
+        try{
+          if(document.getElementById("prodModal")?.classList.contains("show")){
+            renderProdStepOrders();
+          }
+        }catch(_e){}
       });
     }catch(err){
       console.warn("allowlist listen failed", err);
@@ -5228,8 +5253,19 @@ function computePartialOrders(){
     const allowInfo = state.mobileAllowlist || {};
     const allowKeySet = (globalThis.__ALLOW_KEYS__ instanceof Set) ? globalThis.__ALLOW_KEYS__ : new Set();
     const allowLoaded = Boolean(globalThis.__ALLOW_LOADED__);
-    const allowFilterActive = Boolean(!isAdmin && isMobileView && allowLoaded);
-    const allowGuardActive = Boolean(!isAdmin && isMobileView && !allowLoaded);
+    const forceAllowlistOnly = options.forceAllowlistOnly === true;
+    const disableAllowlist = options.disableAllowlist === true;
+    let allowFilterActive = false;
+    let allowGuardActive = false;
+    if(!disableAllowlist){
+      if(forceAllowlistOnly){
+        allowFilterActive = Boolean(allowLoaded);
+        allowGuardActive = !allowLoaded;
+      } else {
+        allowFilterActive = Boolean(!isAdmin && isMobileView && allowLoaded);
+        allowGuardActive = Boolean(!isAdmin && isMobileView && !allowLoaded);
+      }
+    }
 
     const meOp = (state.user?.fullName || state.operator || "");
 
@@ -8145,8 +8181,11 @@ Linea: polveri`, null); }catch(_e){}
     $("prodModalTitle").textContent = "Produzione · Ordini";
     const { step: body } = ensureProdModalStep("orders");
     if(!body) return;
-    const { orders, baseOrders } = buildOrderViews();
-    pruneSelectionAgainstOrders(baseOrders);
+    const allowLoaded = Boolean(globalThis.__ALLOW_LOADED__);
+    const allowKeySet = (globalThis.__ALLOW_KEYS__ instanceof Set) ? globalThis.__ALLOW_KEYS__ : new Set();
+    const { orders, baseOrders } = buildOrderViews({ forceAllowlistOnly:true, applyRoleVisibility:false });
+    const sentBaseOrders = allowLoaded ? baseOrders.filter(o=> allowKeySet.has(o.__k || getOrderKey(o))) : [];
+    pruneSelectionAgainstOrders(sentBaseOrders);
     updateSelectionCounter();
     orders.sort((a,b)=>{
       const ra = a.priorityInfo?.priority==="today" ? 0 : a.priorityInfo?.priority==="scheduled" ? 1 : 2;
@@ -8156,16 +8195,16 @@ Linea: polveri`, null); }catch(_e){}
     const isDesktop = window.matchMedia("(min-width: 980px)").matches;
     const isAdmin = Boolean(state.user && state.user.isAdmin);
     let planMessageHtml = "";
-    if(isDesktop){
-      if(isAdmin){
-        planMessageHtml = `<div class="planMessage"><div class="headline">Vista admin</div><div class="muted">Tutti gli ordini (anche oltre 3 giorni) sono visibili per la pianificazione.</div></div>`;
-      } else {
-        const windowOrders = baseOrders.filter(o=>o.daysAway==null || o.daysAway<=3);
-        const listHtml = windowOrders.slice(0,8).map(o=>`<li>${escapeHtml(o.customer||"Cliente")} · Ord. ${escapeHtml(o.orderNo||o.number||"—")}${o.conclusion?` · ${escapeHtml(o.conclusion)}`:""}</li>`).join("") || `<li>Nessuna data pianificata disponibile.</li>`;
-        planMessageHtml = `<div class="planMessage"><div class="headline">Ci sono ${baseOrders.length} ordini da fare. In base alla pianificazione, puoi andare in produzione con questi ${windowOrders.length} ordini:</div><ul>${listHtml}</ul></div>`;
-      }
+    if(!allowLoaded){
+      planMessageHtml = `<div class="planMessage"><div class="headline">Caricamento ordini inviati a mobile…</div><div class="muted">Appena arrivano, compariranno qui.</div></div>`;
+    } else {
+      const totalSent = sentBaseOrders.length;
+      const available = orders.length;
+      const listHtml = (isDesktop && orders.length) ? orders.slice(0,8).map(o=>`<li>${escapeHtml(o.customer||"Cliente")} · Ord. ${escapeHtml(o.orderNo||o.number||"—")}${o.conclusion?` · ${escapeHtml(o.conclusion)}`:""}</li>`).join("") : "";
+      const listBlock = listHtml ? `<ul>${listHtml}</ul>` : ``;
+      planMessageHtml = `<div class="planMessage"><div class="headline">In produzione vedi solo gli ordini inviati a mobile.</div><div class="muted">Inviati: ${totalSent} · Disponibili: ${available}${isAdmin?` · Admin`:""}</div>${listBlock}</div>`;
     }
-    body.innerHTML = `
+body.innerHTML = `
       <div class="stepTitle">Ordini disponibili</div>
       <div class="muted">Operatore: <b>${state.user?.fullName || "—"}</b>. Tocca un cliente: vedrai gli ordini separati per numero.</div>
       ${planMessageHtml}
@@ -8176,10 +8215,11 @@ Linea: polveri`, null); }catch(_e){}
     const list = body.querySelector("#orderList");
     list.classList.add("chunkyList");
     if(!orders.length){
-      const windowHasOrders = baseOrders.some(o=>o.daysAway==null || o.daysAway<=3);
-      const emptyMsg = (isDesktop && !isAdmin && baseOrders.length && !windowHasOrders)
-        ? "Nessun ordine pianificato entro i prossimi 3 giorni."
-        : "Nessun ordine disponibile (attendi sincronizzazione).";
+      const emptyMsg = (!allowLoaded)
+        ? "Caricamento ordini inviati a mobile…"
+        : (allowKeySet.size===0)
+          ? "Nessun ordine inviato a mobile."
+          : "Nessun ordine disponibile (tutti conclusi o non presenti).";
       list.innerHTML = `<div class="muted">${emptyMsg}</div>
         <div style="height:10px"></div>
         <button class="btn" id="btnRetry" style="width:100%;">Riprova sincronizzazione</button>`;
