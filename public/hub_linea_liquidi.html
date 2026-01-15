@@ -4895,7 +4895,34 @@ function opNormName(s){
     if(ownActive) openRunningModal(); else openProdModal();
   }
 
-  function buildOrderViews(options={}){
+  
+  // --- Regola speciale (richiesta):
+  // Se un prodotto è codice 00861 (NPK 10-10-10 FLOW 1L) e la quantità da fare è > 400 kg,
+  // NON deve essere visibile in "VAI IN PRODUZIONE" (ma resta visibile nel Tabellone WRITE).
+  function isGoProdBlockedLine(l){
+    try{
+      if(!l) return false;
+      const codeRaw = String(l.code||"").trim().replace(/\s+/g,"");
+      const codeNoZero = codeRaw.replace(/^0+/,"");
+      const isTarget = (codeRaw === "00861") || (codeNoZero === "861");
+      if(!isTarget) return false;
+
+      // Calcolo Kg effettivi:
+      // - se qty è a pezzi e c'è un peso unitario in descrizione tipo "kg 1,1" -> qty * 1,1
+      // - se è già in kg -> resta qty
+      const desc = String(l.desc || l.prodotto || l.product || "").trim();
+      const packKg = (typeof detectPackKg === "function") ? detectPackKg(desc) : null;
+      const kgEff = (typeof resolveQtyKg === "function")
+        ? resolveQtyKg({ qty: l.qty, um: l.um || l.unit || "", packKg, desc })
+        : parseItNumber(l.qty);
+
+      return Number.isFinite(kgEff) && kgEff > 400;
+    }catch(_e){
+      return false;
+    }
+  }
+
+function buildOrderViews(options={}){
 
     const applyRoleVisibility = options.applyRoleVisibility !== false;
     const includeHidden = options.includeHidden === true;
@@ -4951,6 +4978,10 @@ function opNormName(s){
       const priorityInfo = computePriorityFromNote(note);
       let autoDone = 0;
       const lines = (o.lines||[]).map(l=>{
+        if(isGoProdBlockedLine(l)){
+          autoDone++;
+          return null;
+        }
         if(isNonProductionLine(l)){
           autoDone++;
           return null;
