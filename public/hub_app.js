@@ -14209,3 +14209,59 @@ if (importMovementsInput) importMovementsInput.addEventListener("change", async 
       }
     }
     try { if (typeof globalThis !== "undefined") globalThis.formatDocLabel = formatDocLabel; } catch(_){}
+
+
+/* ============================================================
+   UI FIX — Distinta base (Scarica flussi DDT)
+   Normalizza la tabella/lista scelta componenti nel modale "Prodotto finito"
+   (evita stile blu ereditato dai menu).
+   ============================================================ */
+(function(){
+  try{
+    const ID = "hubinv_fp_browse_style_fix_v1";
+    if (document.getElementById(ID)) return;
+    const css = `
+/* Finished product (BOM) — component browse list: look like normal tables */
+#modalFinishedProduct #fpCompBrowseWrap.tableWrap{
+  background: #fff !important;
+  border: 1px solid rgba(12,22,52,.08) !important;
+}
+#modalFinishedProduct #fpCompBrowse{
+  display:block !important;
+}
+#modalFinishedProduct #fpCompBrowse .jsFpBrowsePick{
+  display:block !important;
+  width:100% !important;
+  border: 0 !important;
+  border-bottom: 1px solid rgba(12,22,52,.08) !important;
+  border-radius: 0 !important;
+  background: rgba(255,255,255,.96) !important;
+  color: rgba(0,0,0,.86) !important;
+  padding: 10px 10px !important;
+  font-weight: 850 !important;
+  font-size: 13px !important;
+  line-height: 1.25 !important;
+  text-align: left !important;
+  box-shadow: none !important;
+}
+#modalFinishedProduct #fpCompBrowse .jsFpBrowsePick:hover{
+  background: rgba(0,0,0,.03) !important;
+}
+#modalFinishedProduct #fpCompBrowse .jsFpBrowsePick:active{
+  background: rgba(0,0,0,.06) !important;
+}
+#modalFinishedProduct #fpCompBrowse .jsFpBrowsePick:last-child{
+  border-bottom: 0 !important;
+}
+/* Force neutral table backgrounds inside this modal */
+#modalFinishedProduct .tableWrap{
+  background: #fff !important;
+}
+    `.trim();
+    const st = document.createElement("style");
+    st.id = ID;
+    st.textContent = css;
+    (document.head || document.documentElement).appendChild(st);
+  }catch(_){}
+})();
+
