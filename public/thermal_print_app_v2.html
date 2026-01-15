@@ -293,8 +293,9 @@
           <div class="field">
             <label>DPI render</label>
             <select id="dpi">
-              <option value="203" selected>203 dpi (classico termico)</option>
-              <option value="300">300 dpi (alta qualità)</option>
+              <option value="203">203 dpi (classico termico)</option>
+              <option value="300" selected>300 dpi (alta qualità)</option>
+              <option value="600">600 dpi (ultra, file più pesanti)</option>
             </select>
           </div>
 
@@ -487,17 +488,37 @@
 
     // Fast sampled trim: detect non-white pixels and crop
     function trimCanvas(srcCanvas, sampleStep=4, pad=12){
-      const w = srcCanvas.width, h = srcCanvas.height;
-      const ctx = srcCanvas.getContext('2d', {willReadFrequently:true});
-      const img = ctx.getImageData(0,0,w,h);
+      // Smart trim: scansiona su una copia ridotta (molto più veloce su render ad alta risoluzione)
+      const W = srcCanvas.width, H = srcCanvas.height;
+      const maxSide = 900; // scan canvas max side
+      const s = Math.min(1, maxSide / Math.max(W, H));
+
+      let scan = srcCanvas;
+      let sw = W, sh = H;
+      if(s < 1){
+        scan = document.createElement('canvas');
+        scan.width  = Math.max(1, Math.round(W * s));
+        scan.height = Math.max(1, Math.round(H * s));
+        const sctx = scan.getContext('2d', {alpha:false});
+        sctx.fillStyle = '#fff';
+        sctx.fillRect(0,0,scan.width, scan.height);
+        sctx.imageSmoothingEnabled = true;
+        sctx.imageSmoothingQuality = 'high';
+        sctx.drawImage(srcCanvas, 0,0, W,H, 0,0, scan.width, scan.height);
+        sw = scan.width; sh = scan.height;
+      }
+
+      const ctx = scan.getContext('2d', {willReadFrequently:true});
+      const img = ctx.getImageData(0,0,sw,sh);
       const d = img.data;
 
-      let minX=w, minY=h, maxX=0, maxY=0;
+      let minX=sw, minY=sh, maxX=0, maxY=0;
       let found = false;
+      const step = Math.max(1, Math.round(sampleStep));
 
-      for(let y=0; y<h; y+=sampleStep){
-        for(let x=0; x<w; x+=sampleStep){
-          const i = (y*w + x)*4;
+      for(let y=0; y<sh; y+=step){
+        for(let x=0; x<sw; x+=step){
+          const i = (y*sw + x)*4;
           const r=d[i], g=d[i+1], b=d[i+2], a=d[i+3];
           if(a === 0) continue;
           if(r > 250 && g > 250 && b > 250) continue; // white-ish
@@ -510,20 +531,22 @@
       }
       if(!found) return srcCanvas;
 
-      minX = Math.max(0, minX - pad);
-      minY = Math.max(0, minY - pad);
-      maxX = Math.min(w-1, maxX + pad);
-      maxY = Math.min(h-1, maxY + pad);
+      // map back to source coords
+      const inv = (s < 1) ? (1 / s) : 1;
+      let srcMinX = Math.max(0, Math.floor(minX*inv) - pad);
+      let srcMinY = Math.max(0, Math.floor(minY*inv) - pad);
+      let srcMaxX = Math.min(W-1, Math.ceil(maxX*inv) + pad);
+      let srcMaxY = Math.min(H-1, Math.ceil(maxY*inv) + pad);
 
-      const cw = Math.max(1, maxX - minX + 1);
-      const ch = Math.max(1, maxY - minY + 1);
+      const cw = Math.max(1, srcMaxX - srcMinX + 1);
+      const ch = Math.max(1, srcMaxY - srcMinY + 1);
 
       const out = document.createElement('canvas');
       out.width = cw; out.height = ch;
       const octx = out.getContext('2d', {alpha:false});
       octx.fillStyle = '#fff';
       octx.fillRect(0,0,cw,ch);
-      octx.drawImage(srcCanvas, minX, minY, cw, ch, 0, 0, cw, ch);
+      octx.drawImage(srcCanvas, srcMinX, srcMinY, cw, ch, 0, 0, cw, ch);
       return out;
     }
 
@@ -592,7 +615,7 @@
 
         const dataUrl = await blobUrlToDataUrl(r.url);
         // Inserisco l'immagine a tutta pagina (o dentro il margine impostato)
-        pdf.addImage(dataUrl, 'PNG', margin, margin, innerW, innerH, undefined, 'FAST');
+        pdf.addImage(dataUrl, 'PNG', margin, margin, innerW, innerH, undefined, 'SLOW');
 
         setProgress(((i+1)/rendered.length)*100);
         setStatus(`Creo PDF… pagina ${i+1}/${rendered.length}`);
@@ -641,16 +664,38 @@
       clearAll();
 
       const {w:paperWmm, h:paperHmm} = presetToMm(els.paperPreset.value);
-      const dpi = parseInt(els.dpi.value, 10) || 203;
+      const dpi = parseInt(els.dpi.value, 10) || 300;
       const targetW = Math.round((paperWmm / 25.4) * dpi);
       const targetH = Math.round((paperHmm / 25.4) * dpi);
+
+      // Supersampling per evitare effetto "sgranato" (render più grande e poi downscale)
+      const MAX_RENDER_PIXELS = 28_000_000; // cap per non esplodere su A4/600dpi
+      const MAX_RENDER_DIM = 12_000;
+
+      function chooseOversample(w,h){
+        const px = w*h;
+        if(px <= 2_000_000) return 2.0;
+        if(px <= 6_000_000) return 1.6;
+        if(px <= 12_000_000) return 1.35;
+        return 1.15;
+      }
+
+      let oversample = chooseOversample(targetW, targetH);
+      const basePx = targetW * targetH;
+      const wantedPx = basePx * (oversample**2);
+      if(wantedPx > MAX_RENDER_PIXELS){
+        oversample = Math.max(1, Math.sqrt(MAX_RENDER_PIXELS / Math.max(1, basePx)));
+      }
+
+      const hiTargetW = Math.min(MAX_RENDER_DIM, Math.max(1, Math.round(targetW * oversample)));
+      const hiTargetH = Math.min(MAX_RENDER_DIM, Math.max(1, Math.round(targetH * oversample)));
 
       const pages = parsePageRange(els.pageRange.value, pageCount);
       const doTrim = (els.trim.value === 'on');
       const mode = els.scaleMode.value; // fit/fill
       const rotSel = els.rotation.value;
 
-      setStatus(`Renderizzo ${pages.length} pagina/e…`);
+      setStatus(`Renderizzo ${pages.length} pagina/e… (qualità alta)`);
       setProgress(0);
 
       for(let idx=0; idx<pages.length; idx++){
@@ -661,40 +706,48 @@
         let rotation = baseRotation;
         if(rotSel !== 'auto') rotation = parseInt(rotSel, 10) || 0;
 
-        // compute scale to match target pixels
+        // viewport a scala 1
         const vp1 = page.getViewport({scale: 1, rotation});
-        const scaleX = targetW / vp1.width;
-        const scaleY = targetH / vp1.height;
+
+        // scala per arrivare alla canvas supersampled
+        const scaleX = hiTargetW / vp1.width;
+        const scaleY = hiTargetH / vp1.height;
         const scale = (mode === 'fill') ? Math.max(scaleX, scaleY) : Math.min(scaleX, scaleY);
         const viewport = page.getViewport({scale, rotation});
 
+        // raw render (supersampled)
         const raw = document.createElement('canvas');
-        raw.width = Math.max(1, Math.floor(viewport.width));
-        raw.height = Math.max(1, Math.floor(viewport.height));
+        raw.width = Math.max(1, Math.ceil(viewport.width));
+        raw.height = Math.max(1, Math.ceil(viewport.height));
         const rctx = raw.getContext('2d', {alpha:false});
         rctx.fillStyle = '#fff';
         rctx.fillRect(0,0,raw.width, raw.height);
+        rctx.imageSmoothingEnabled = true;
+        rctx.imageSmoothingQuality = 'high';
 
-        await page.render({canvasContext: rctx, viewport}).promise;
+        // intent print tende a mantenere meglio la resa in alcuni PDF
+        await page.render({canvasContext: rctx, viewport, intent: 'print'}).promise;
 
         const trimmed = doTrim ? trimCanvas(raw, 4, 12) : raw;
 
-        // final canvas exactly target pixels
+        // final canvas ESATTA (dpi scelto)
         const finalC = document.createElement('canvas');
         finalC.width = targetW;
         finalC.height = targetH;
         const fctx = finalC.getContext('2d', {alpha:false});
         fctx.fillStyle = '#fff';
         fctx.fillRect(0,0,targetW,targetH);
+        fctx.imageSmoothingEnabled = true;
+        fctx.imageSmoothingQuality = 'high';
 
         const sw = trimmed.width, sh = trimmed.height;
         const sScale = (mode === 'fill') ? Math.max(targetW/sw, targetH/sh) : Math.min(targetW/sw, targetH/sh);
-        const dw = Math.round(sw * sScale);
-        const dh = Math.round(sh * sScale);
-        const dx = Math.round((targetW - dw) / 2);
-        const dy = Math.round((targetH - dh) / 2);
+        const dw = sw * sScale;
+        const dh = sh * sScale;
+        const dx = (targetW - dw) / 2;
+        const dy = (targetH - dh) / 2;
 
-        fctx.imageSmoothingEnabled = true;
+        // Downscale (o fit) con alta qualità
         fctx.drawImage(trimmed, 0,0,sw,sh, dx,dy,dw,dh);
 
         const url = await canvasToPngUrl(finalC);
@@ -706,7 +759,7 @@
       }
 
       rebuildPrintArea();
-      setStatus(`Pronto: ${rendered.length} pagina/e renderizzate · puoi stampare.`);
+      setStatus(`Pronto: ${rendered.length} pagina/e renderizzate · puoi stampare o salvare PDF.`);
       setProgress(100);
       setTimeout(()=>setProgress(0), 600);
     }
