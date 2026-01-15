@@ -4917,33 +4917,69 @@ function opNormName(s){
 
   
   // --- Regola speciale (richiesta):
-  // Se un prodotto è codice 00861 (NPK 10-10-10 FLOW 1L) e la quantità da fare è > 400 kg,
-  // NON deve essere visibile in "VAI IN PRODUZIONE" (ma resta visibile nel Tabellone WRITE).
+  // In Hub Linea Liquidi NON devono comparire righe prodotto che:
+  // - sono in FLACONE/BOTTIGLIA da 1 L oppure 1 KG
+  // - e la quantità residua è > 400 (kg / lt / pz / nr, ecc.)
+  //
+  // Esempio: "SECUR ZOLFO FLOW 40% - BOTTIGLIA 1KG X12 PZ | ... 720 kg" -> NON visibile.
+  // Se <= 400 -> visibile.
+  // (Non tocca i filtri magazzino/warehouse)
+
+  const HUB_PACK1_MAX_VISIBLE = 400;
+
+  function detectPack1Lt(desc){
+    try{
+      const s = norm(desc||"").replace(/,/g,".").replace(/\s+/g," ").trim();
+      if(!s) return false;
+      if(/\b1\s*(?:l|lt)\b/.test(s)) return true;
+      if(/\b1\s*litri?\b/.test(s)) return true;
+      if(/\b1000\s*ml\b/.test(s)) return true;
+      return false;
+    }catch(_e){
+      return false;
+    }
+  }
+
+  function isBottleOrFlacone(desc){
+    try{
+      const s = norm(desc||"");
+      if(!s) return false;
+      return /\b(flacone|flaconi|bottiglia|bottiglie|spray|trigger|spruzzino|nebul|pompa|erogatore|atomizz)\b/.test(s);
+    }catch(_e){
+      return false;
+    }
+  }
+
+  function isPack1Bottle(desc){
+    try{
+      if(!desc) return false;
+      if(!isBottleOrFlacone(desc)) return false;
+
+      const kg = (typeof detectPackKg==="function") ? detectPackKg(desc) : null;
+      const is1kg = Number.isFinite(kg) && Math.abs(Number(kg) - 1) < 0.011;
+      const is1lt = detectPack1Lt(desc);
+
+      return Boolean(is1kg || is1lt);
+    }catch(_e){
+      return false;
+    }
+  }
+
   function isGoProdBlockedLine(l){
     try{
       if(!l) return false;
-      const codeRaw = String(l.code||"").trim().replace(/\s+/g,"");
-      const codeNoZero = codeRaw.replace(/^0+/,"");
-      const isTarget = (codeRaw === "00861") || (codeNoZero === "861");
-      if(!isTarget) return false;
-
-      // Calcolo Kg effettivi:
-      // - se qty è a pezzi e c'è un peso unitario in descrizione tipo "kg 1,1" -> qty * 1,1
-      // - se è già in kg -> resta qty
       const desc = String(l.desc || l.prodotto || l.product || "").trim();
-      const packKg = (typeof detectPackKg === "function") ? detectPackKg(desc) : null;
-      const kgEff = (typeof resolveQtyKg === "function")
-        ? resolveQtyKg({ qty: l.qty, um: l.um || l.unit || "", packKg, desc })
-        : parseItNumber(l.qty);
+      if(!isPack1Bottle(desc)) return false;
 
-      return Number.isFinite(kgEff) && kgEff > 400;
+      const qty = parseItNumber(l.qty);
+      return Number.isFinite(qty) && qty > HUB_PACK1_MAX_VISIBLE;
     }catch(_e){
       return false;
     }
   }
 
 
-  // --- Esclusione: ordini "Magazzino agenti" ---
+// --- Esclusione: ordini "Magazzino agenti" ---
   // In Hub Linea Liquidi questi ordini NON devono comparire (gestiti in hub dedicato).
   function isMagazzinoAgentiOrder(order, noteText=""){
     try{
@@ -5018,19 +5054,12 @@ function buildOrderViews(options={}){
       const priorityInfo = computePriorityFromNote(note);
       let autoDone = 0;
       const lines = (o.lines||[]).map(l=>{
-        if(isGoProdBlockedLine(l)){
-          autoDone++;
-          return null;
-        }
         if(isNonProductionLine(l)){
           autoDone++;
           return null;
         }
+
         const key = String(l.lineKey||"");
-        const activeProd = activeMap.get(key) || null;
-        const status = concluded.has(key) ? "done" : activeProd ? "active" : "idle";
-        const activeOp = activeProd?.operator || activeProd?.operatorName || "";
-        const activeIsMe = Boolean(activeProd && sameOperator(activeOp, meOp));
 
         // Se la riga è stata chiusa parzialmente (WRITE o altre chiusure), mostra SOLO la rimanenza
         let qtyAdj = l.qty;
@@ -5044,7 +5073,19 @@ function buildOrderViews(options={}){
           }
         }catch(_e){}
 
-        return { ...l, qty: qtyAdj, status, activeProd, activeOp, activeIsMe, conclusion: l.conclusion || o.conclusion || "" };
+        const lAdj = { ...l, qty: qtyAdj };
+
+        if(isGoProdBlockedLine(lAdj)){
+          autoDone++;
+          return null;
+        }
+
+        const activeProd = activeMap.get(key) || null;
+        const status = concluded.has(key) ? "done" : activeProd ? "active" : "idle";
+        const activeOp = activeProd?.operator || activeProd?.operatorName || "";
+        const activeIsMe = Boolean(activeProd && sameOperator(activeOp, meOp));
+
+        return { ...lAdj, status, activeProd, activeOp, activeIsMe, conclusion: l.conclusion || o.conclusion || "" };
       }).filter(Boolean).filter(l=>l.status !== "done");
       const alerts = Array.isArray(o.alerts) ? o.alerts : [];
       if(!lines.length){
