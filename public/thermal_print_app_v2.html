@@ -1,0 +1,773 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <title>Thermal PDF Print</title>
+
+  <!-- PDF.js (CDN) — NO integrity (evita blocchi SRI quando il digest non combacia) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js" crossorigin="anonymous"></script>
+
+  <!-- jsPDF (CDN) per esportare un PDF con misure esatte -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js" crossorigin="anonymous"></script>
+
+  <style>
+    :root{
+      --bg:#0b1220;
+      --card:#0f1a30;
+      --text:#e8eefc;
+      --muted:#a7b2ce;
+
+      --paper-w-mm: 100;
+      --paper-h-mm: 150;
+      --paper-margin-mm: 0;
+    }
+
+    html, body { height: 100%; }
+    body{
+      margin:0;
+      background: linear-gradient(180deg, var(--bg), #050a14);
+      color:var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial;
+      -webkit-font-smoothing: antialiased;
+      text-rendering: optimizeLegibility;
+    }
+
+    .topbar{
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      padding-top: env(safe-area-inset-top);
+      background: rgba(11,18,32,.90);
+      backdrop-filter: blur(10px);
+      border-bottom: 1px solid rgba(255,255,255,.06);
+    }
+    .bar{
+      display:flex;
+      gap:10px;
+      align-items:center;
+      justify-content: space-between;
+      padding: 12px 16px;
+      flex-wrap: wrap;
+    }
+    .title{
+      font-weight: 800;
+      letter-spacing: .2px;
+      display:flex;
+      align-items:center;
+      gap:10px;
+      white-space: nowrap;
+    }
+    .pill{
+      font-size: 12px;
+      color: var(--muted);
+      padding: 4px 10px;
+      border: 1px solid rgba(255,255,255,.10);
+      border-radius: 999px;
+    }
+
+    .wrap{
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 16px 16px calc(16px + env(safe-area-inset-bottom));
+    }
+
+    .card{
+      background: rgba(15,26,48,.85);
+      border: 1px solid rgba(255,255,255,.08);
+      border-radius: 14px;
+      padding: 14px;
+      box-shadow: 0 10px 30px rgba(0,0,0,.25);
+    }
+
+    .controls{
+      display:flex;
+      gap:10px;
+      align-items:center;
+      flex-wrap: wrap;
+    }
+    .btn{
+      appearance:none;
+      border: 1px solid rgba(255,255,255,.14);
+      background: rgba(255,255,255,.06);
+      color: var(--text);
+      border-radius: 12px;
+      padding: 10px 12px;
+      font-weight: 700;
+      cursor: pointer;
+      display:inline-flex;
+      gap:8px;
+      align-items:center;
+      transition: transform .06s ease, background .15s ease, border-color .15s ease;
+      user-select:none;
+    }
+    .btn:hover{ background: rgba(255,255,255,.10); border-color: rgba(255,255,255,.22); }
+    .btn:active{ transform: translateY(1px); }
+    .btn.primary{
+      background: rgba(77,163,255,.18);
+      border-color: rgba(77,163,255,.45);
+    }
+    .btn.danger{
+      background: rgba(255,91,91,.14);
+      border-color: rgba(255,91,91,.35);
+    }
+
+    .file{
+      display:flex;
+      align-items:center;
+      gap:10px;
+      flex-wrap: wrap;
+    }
+    input[type="file"]{ color: var(--muted); max-width: 420px; }
+
+    .grid{
+      margin-top: 14px;
+      display:grid;
+      grid-template-columns: 1fr;
+      gap: 14px;
+    }
+    .row{
+      display:grid;
+      grid-template-columns: 1fr 1fr 1fr 1fr;
+      gap: 10px;
+    }
+    @media (max-width: 900px){ .row{ grid-template-columns: 1fr 1fr; } }
+    @media (max-width: 520px){ .row{ grid-template-columns: 1fr; } }
+
+    .field label{
+      display:block;
+      font-size: 12px;
+      color: var(--muted);
+      margin-bottom: 6px;
+    }
+    .field select, .field input{
+      width:100%;
+      padding: 10px 12px;
+      border-radius: 12px;
+      border: 1px solid rgba(255,255,255,.14);
+      background: rgba(255,255,255,.05);
+      color: var(--text);
+      outline:none;
+    }
+
+    .status{
+      display:flex;
+      gap:10px;
+      align-items:center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      margin-top: 12px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .progress{
+      width: 340px;
+      max-width: 100%;
+      height: 10px;
+      border-radius: 999px;
+      background: rgba(255,255,255,.08);
+      overflow:hidden;
+      border: 1px solid rgba(255,255,255,.10);
+    }
+    .progress > div{
+      height:100%;
+      width:0%;
+      background: linear-gradient(90deg, rgba(77,163,255,.2), rgba(77,163,255,.85));
+      border-radius: 999px;
+      transition: width .12s ease;
+    }
+
+    .pages{
+      margin-top: 14px;
+      display:grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+    }
+    @media (max-width: 1000px){ .pages{ grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+    @media (max-width: 760px){ .pages{ grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+    @media (max-width: 520px){ .pages{ grid-template-columns: 1fr; } }
+
+    .thumb{
+      background: rgba(255,255,255,.04);
+      border: 1px solid rgba(255,255,255,.08);
+      border-radius: 14px;
+      overflow:hidden;
+      position: relative;
+      aspect-ratio: 2/3;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+    }
+    .thumb img{
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      background: #fff;
+    }
+    .badge{
+      position:absolute;
+      top:10px;
+      left:10px;
+      font-size: 12px;
+      font-weight: 800;
+      color: #0b1220;
+      background: rgba(232,238,252,.92);
+      padding: 4px 10px;
+      border-radius: 999px;
+      border: 1px solid rgba(11,18,32,.18);
+    }
+
+    .hint{
+      margin-top: 10px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.35;
+    }
+
+    /* Print styles */
+    @media print{
+      body{ background:#fff !important; color:#000; }
+      .topbar, .wrap > .card, .hint, .status, .pages { display:none !important; }
+      .print-area{ display:block !important; }
+      @page{
+        size: calc(var(--paper-w-mm) * 1mm) calc(var(--paper-h-mm) * 1mm);
+        margin: calc(var(--paper-margin-mm) * 1mm);
+      }
+      .print-page{
+        width: calc(var(--paper-w-mm) * 1mm);
+        height: calc(var(--paper-h-mm) * 1mm);
+        page-break-after: always;
+        break-after: page;
+        display:flex;
+        align-items: stretch;
+        justify-content: stretch;
+      }
+      .print-page img{
+        width: 100%;
+        height: 100%;
+        object-fit: contain; /* Fit */
+      }
+      .print-page.fill img{ object-fit: cover; } /* Riempi */
+    }
+    .print-area{ display:none; }
+  </style>
+</head>
+
+<body>
+  <div class="topbar">
+    <div class="bar">
+      <div class="title">
+        Thermal PDF Print
+        <span class="pill">stampa termica · margini 0</span>
+      </div>
+
+      <div class="controls">
+        <button id="btnClear" class="btn danger" title="Svuota anteprima">Svuota</button>
+        <button id="btnPrint" class="btn primary" title="Stampa">Stampa</button>
+        <button id="btnSavePdf" class="btn" title="Salva PDF">Salva PDF</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="wrap">
+    <div class="card">
+      <div class="file">
+        <input id="fileInput" type="file" accept="application/pdf" />
+        <button id="btnRender" class="btn primary">Renderizza</button>
+      </div>
+
+      <div class="grid">
+        <div class="row">
+          <div class="field">
+            <label>Formato termico</label>
+            <select id="paperPreset">
+              <option value="100x150" selected>100×150 mm (standard)</option>
+              <option value="102x152">102×152 mm (4×6")</option>
+              <option value="100x100">100×100 mm</option>
+              <option value="80x120">80×120 mm</option>
+              <option value="A4">A4 (210×297 mm)</option>
+            </select>
+          </div>
+
+          <div class="field">
+            <label>DPI render</label>
+            <select id="dpi">
+              <option value="203" selected>203 dpi (classico termico)</option>
+              <option value="300">300 dpi (alta qualità)</option>
+            </select>
+          </div>
+
+          <div class="field">
+            <label>Scala</label>
+            <select id="scaleMode">
+              <option value="fit" selected>Fit (sicuro)</option>
+              <option value="fill">Riempi (massimo, rischio taglio)</option>
+            </select>
+          </div>
+
+          <div class="field">
+            <label>Auto-crop margini bianchi</label>
+            <select id="trim">
+              <option value="on" selected>ON (consigliato)</option>
+              <option value="off">OFF</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="row">
+          <div class="field">
+            <label>Rotazione</label>
+            <select id="rotation">
+              <option value="auto" selected>Auto</option>
+              <option value="0">0°</option>
+              <option value="90">90°</option>
+              <option value="180">180°</option>
+              <option value="270">270°</option>
+            </select>
+          </div>
+
+          <div class="field">
+            <label>Margine stampa (mm)</label>
+            <input id="paperMargin" type="number" min="0" step="0.5" value="0" />
+          </div>
+
+          <div class="field">
+            <label>Pagine (es. 1-10 o 3,5,7)</label>
+            <input id="pageRange" type="text" placeholder="vuoto = tutte" />
+          </div>
+
+          <div class="field">
+            <label>Anteprima</label>
+            <select id="thumbs">
+              <option value="on" selected>ON</option>
+              <option value="off">OFF (più veloce)</option>
+            </select>
+          </div>
+        </div>
+      </div>
+
+      <div class="status">
+        <div id="statusText">Carica un PDF e premi Renderizza.</div>
+        <div class="progress" aria-hidden="true"><div id="progressBar"></div></div>
+      </div>
+
+      <div class="hint">
+        Nel popup di stampa imposta <b>Margini: Nessuno</b> e scegli il formato carta della tua termica (100×150 / 102×152).
+        Se qualcosa viene tagliato, passa da <b>Riempi</b> a <b>Fit</b> oppure disattiva <b>Auto‑crop</b>.
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:14px;">
+      <div class="pages" id="thumbGrid"></div>
+    </div>
+  </div>
+
+  <!-- Print container (hidden on screen) -->
+  <div class="print-area" id="printArea"></div>
+
+  <script>
+    // PDF.js global
+    const pdfjsLib = window.pdfjsLib;
+    if(!pdfjsLib){
+      alert('PDF.js non caricato. Verifica connessione internet o che il CDN non sia bloccato.');
+      throw new Error('pdfjsLib missing');
+    }
+
+    // Worker from CDN (same version)
+    pdfjsLib.GlobalWorkerOptions.workerSrc =
+      'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+    const els = {
+      fileInput: document.getElementById('fileInput'),
+      btnRender: document.getElementById('btnRender'),
+      btnPrint: document.getElementById('btnPrint'),
+      btnSavePdf: document.getElementById('btnSavePdf'),
+      btnClear: document.getElementById('btnClear'),
+      paperPreset: document.getElementById('paperPreset'),
+      dpi: document.getElementById('dpi'),
+      scaleMode: document.getElementById('scaleMode'),
+      trim: document.getElementById('trim'),
+      rotation: document.getElementById('rotation'),
+      paperMargin: document.getElementById('paperMargin'),
+      pageRange: document.getElementById('pageRange'),
+      thumbs: document.getElementById('thumbs'),
+      statusText: document.getElementById('statusText'),
+      progressBar: document.getElementById('progressBar'),
+      thumbGrid: document.getElementById('thumbGrid'),
+      printArea: document.getElementById('printArea'),
+    };
+
+    let currentPdf = null;
+    let currentPdfName = '';
+    let pageCount = 0;
+    let rendered = []; // {pageNumber, url}
+
+    function setStatus(msg){ els.statusText.textContent = msg; }
+    function setProgress(pct){ els.progressBar.style.width = Math.max(0, Math.min(100, pct)) + '%'; }
+
+    function presetToMm(preset){
+      switch(preset){
+        case '100x150': return {w:100, h:150};
+        case '102x152': return {w:102, h:152};
+        case '100x100': return {w:100, h:100};
+        case '80x120':  return {w:80,  h:120};
+        case 'A4':      return {w:210, h:297};
+        default:        return {w:100, h:150};
+      }
+    }
+
+    function updatePrintVars(){
+      const {w,h} = presetToMm(els.paperPreset.value);
+      const margin = parseFloat(els.paperMargin.value || '0') || 0;
+      document.documentElement.style.setProperty('--paper-w-mm', w);
+      document.documentElement.style.setProperty('--paper-h-mm', h);
+      document.documentElement.style.setProperty('--paper-margin-mm', margin);
+    }
+
+    function parsePageRange(input, max){
+      const s = (input || '').trim();
+      if(!s) return [...Array(max)].map((_,i)=>i+1);
+
+      const out = new Set();
+      const parts = s.split(',').map(x=>x.trim()).filter(Boolean);
+      for(const part of parts){
+        if(part.includes('-')){
+          const [a,b] = part.split('-').map(x=>parseInt(x.trim(),10));
+          if(Number.isFinite(a) && Number.isFinite(b)){
+            const start = Math.max(1, Math.min(a,b));
+            const end   = Math.min(max, Math.max(a,b));
+            for(let i=start;i<=end;i++) out.add(i);
+          }
+        }else{
+          const n = parseInt(part,10);
+          if(Number.isFinite(n) && n>=1 && n<=max) out.add(n);
+        }
+      }
+      const arr = Array.from(out).sort((x,y)=>x-y);
+      return arr.length ? arr : [...Array(max)].map((_,i)=>i+1);
+    }
+
+    async function fileToArrayBuffer(file){
+      return new Promise((resolve, reject)=>{
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = reject;
+        reader.readAsArrayBuffer(file);
+      });
+    }
+
+    async function loadPdfFromArrayBuffer(buf, name=''){
+      setStatus('Carico PDF…');
+      setProgress(5);
+
+      // fallback robust: if worker blocked, PDF.js can still run in fake-worker mode
+      const loadingTask = pdfjsLib.getDocument({data: buf});
+      currentPdf = await loadingTask.promise;
+
+      currentPdfName = name || 'PDF';
+      pageCount = currentPdf.numPages;
+
+      setProgress(0);
+      setStatus(`PDF caricato: ${currentPdfName} · ${pageCount} pagine`);
+    }
+
+    function clearAll(){
+      rendered.forEach(r => { try{ URL.revokeObjectURL(r.url); }catch(e){} });
+      rendered = [];
+      els.thumbGrid.innerHTML = '';
+      els.printArea.innerHTML = '';
+      setProgress(0);
+      if(currentPdf){
+        setStatus(`Pronto. PDF corrente: ${currentPdfName} · ${pageCount} pagine`);
+      }else{
+        setStatus('Carica un PDF e premi Renderizza.');
+      }
+    }
+
+    // Fast sampled trim: detect non-white pixels and crop
+    function trimCanvas(srcCanvas, sampleStep=4, pad=12){
+      const w = srcCanvas.width, h = srcCanvas.height;
+      const ctx = srcCanvas.getContext('2d', {willReadFrequently:true});
+      const img = ctx.getImageData(0,0,w,h);
+      const d = img.data;
+
+      let minX=w, minY=h, maxX=0, maxY=0;
+      let found = false;
+
+      for(let y=0; y<h; y+=sampleStep){
+        for(let x=0; x<w; x+=sampleStep){
+          const i = (y*w + x)*4;
+          const r=d[i], g=d[i+1], b=d[i+2], a=d[i+3];
+          if(a === 0) continue;
+          if(r > 250 && g > 250 && b > 250) continue; // white-ish
+          found = true;
+          if(x<minX) minX=x;
+          if(y<minY) minY=y;
+          if(x>maxX) maxX=x;
+          if(y>maxY) maxY=y;
+        }
+      }
+      if(!found) return srcCanvas;
+
+      minX = Math.max(0, minX - pad);
+      minY = Math.max(0, minY - pad);
+      maxX = Math.min(w-1, maxX + pad);
+      maxY = Math.min(h-1, maxY + pad);
+
+      const cw = Math.max(1, maxX - minX + 1);
+      const ch = Math.max(1, maxY - minY + 1);
+
+      const out = document.createElement('canvas');
+      out.width = cw; out.height = ch;
+      const octx = out.getContext('2d', {alpha:false});
+      octx.fillStyle = '#fff';
+      octx.fillRect(0,0,cw,ch);
+      octx.drawImage(srcCanvas, minX, minY, cw, ch, 0, 0, cw, ch);
+      return out;
+    }
+
+    function canvasToPngUrl(canvas){
+      return new Promise((resolve, reject)=>{
+        canvas.toBlob((blob)=>{
+          if(!blob) return reject(new Error('toBlob failed'));
+          resolve(URL.createObjectURL(blob));
+        }, 'image/png');
+      });
+    }
+
+    function blobUrlToDataUrl(url){
+      return fetch(url).then(res=>res.blob()).then(blob=>{
+        return new Promise((resolve, reject)=>{
+          const r = new FileReader();
+          r.onload = () => resolve(r.result);
+          r.onerror = reject;
+          r.readAsDataURL(blob);
+        });
+      });
+    }
+
+    async function exportRenderedToPdf(){
+      if(!rendered.length){
+        alert('Prima renderizza almeno una pagina.');
+        return;
+      }
+
+      const jspdfNS = window.jspdf;
+      if(!jspdfNS || !jspdfNS.jsPDF){
+        alert('jsPDF non caricato. Verifica connessione internet o che il CDN non sia bloccato.');
+        return;
+      }
+
+      updatePrintVars();
+
+      const {w, h} = presetToMm(els.paperPreset.value);
+      const margin = parseFloat(els.paperMargin.value || '0') || 0;
+      const innerW = Math.max(0, w - 2*margin);
+      const innerH = Math.max(0, h - 2*margin);
+      const orientation = (w >= h) ? 'l' : 'p';
+
+      setStatus('Creo PDF…');
+      setProgress(0);
+
+      const pdf = new jspdfNS.jsPDF({
+        orientation,
+        unit: 'mm',
+        format: [w, h],
+        compress: true,
+      });
+
+      const base = (currentPdfName || 'render').replace(/\.pdf$/i,'');
+      try{
+        pdf.setProperties({
+          title: base,
+          subject: 'Export termico',
+          creator: 'Thermal PDF Print',
+        });
+      }catch(e){}
+
+      for(let i=0; i<rendered.length; i++){
+        const r = rendered[i];
+        if(i>0) pdf.addPage([w, h], orientation);
+
+        const dataUrl = await blobUrlToDataUrl(r.url);
+        // Inserisco l'immagine a tutta pagina (o dentro il margine impostato)
+        pdf.addImage(dataUrl, 'PNG', margin, margin, innerW, innerH, undefined, 'FAST');
+
+        setProgress(((i+1)/rendered.length)*100);
+        setStatus(`Creo PDF… pagina ${i+1}/${rendered.length}`);
+      }
+
+      const safeBase = base.replace(/[^a-z0-9\-_]+/ig,'_').replace(/^_+|_+$/g,'') || 'render';
+      const dpi = parseInt(els.dpi.value, 10) || 0;
+      const stamp = new Date().toISOString().slice(0,19).replace(/[:T]/g,'-');
+      const fname = `${safeBase}_${els.paperPreset.value}_${dpi}dpi_${stamp}.pdf`;
+
+      pdf.save(fname);
+      setProgress(0);
+      setStatus('PDF salvato.');
+    }
+
+    function addThumb(pageNumber, url){
+      if(els.thumbs.value === 'off') return;
+      const div = document.createElement('div');
+      div.className = 'thumb';
+      div.innerHTML = `<span class="badge">Pag. ${pageNumber}</span><img alt="Pagina ${pageNumber}" />`;
+      div.querySelector('img').src = url;
+      els.thumbGrid.appendChild(div);
+    }
+
+    function rebuildPrintArea(){
+      els.printArea.innerHTML = '';
+      const mode = els.scaleMode.value; // fit/fill
+      for(const r of rendered){
+        const page = document.createElement('div');
+        page.className = 'print-page' + (mode === 'fill' ? ' fill' : '');
+        const img = document.createElement('img');
+        img.src = r.url;
+        img.alt = `Pagina ${r.pageNumber}`;
+        page.appendChild(img);
+        els.printArea.appendChild(page);
+      }
+    }
+
+    async function renderSelectedPages(){
+      if(!currentPdf){
+        alert('Prima carica un PDF.');
+        return;
+      }
+
+      updatePrintVars();
+      clearAll();
+
+      const {w:paperWmm, h:paperHmm} = presetToMm(els.paperPreset.value);
+      const dpi = parseInt(els.dpi.value, 10) || 203;
+      const targetW = Math.round((paperWmm / 25.4) * dpi);
+      const targetH = Math.round((paperHmm / 25.4) * dpi);
+
+      const pages = parsePageRange(els.pageRange.value, pageCount);
+      const doTrim = (els.trim.value === 'on');
+      const mode = els.scaleMode.value; // fit/fill
+      const rotSel = els.rotation.value;
+
+      setStatus(`Renderizzo ${pages.length} pagina/e…`);
+      setProgress(0);
+
+      for(let idx=0; idx<pages.length; idx++){
+        const pageNumber = pages[idx];
+        const page = await currentPdf.getPage(pageNumber);
+
+        const baseRotation = page.rotate || 0;
+        let rotation = baseRotation;
+        if(rotSel !== 'auto') rotation = parseInt(rotSel, 10) || 0;
+
+        // compute scale to match target pixels
+        const vp1 = page.getViewport({scale: 1, rotation});
+        const scaleX = targetW / vp1.width;
+        const scaleY = targetH / vp1.height;
+        const scale = (mode === 'fill') ? Math.max(scaleX, scaleY) : Math.min(scaleX, scaleY);
+        const viewport = page.getViewport({scale, rotation});
+
+        const raw = document.createElement('canvas');
+        raw.width = Math.max(1, Math.floor(viewport.width));
+        raw.height = Math.max(1, Math.floor(viewport.height));
+        const rctx = raw.getContext('2d', {alpha:false});
+        rctx.fillStyle = '#fff';
+        rctx.fillRect(0,0,raw.width, raw.height);
+
+        await page.render({canvasContext: rctx, viewport}).promise;
+
+        const trimmed = doTrim ? trimCanvas(raw, 4, 12) : raw;
+
+        // final canvas exactly target pixels
+        const finalC = document.createElement('canvas');
+        finalC.width = targetW;
+        finalC.height = targetH;
+        const fctx = finalC.getContext('2d', {alpha:false});
+        fctx.fillStyle = '#fff';
+        fctx.fillRect(0,0,targetW,targetH);
+
+        const sw = trimmed.width, sh = trimmed.height;
+        const sScale = (mode === 'fill') ? Math.max(targetW/sw, targetH/sh) : Math.min(targetW/sw, targetH/sh);
+        const dw = Math.round(sw * sScale);
+        const dh = Math.round(sh * sScale);
+        const dx = Math.round((targetW - dw) / 2);
+        const dy = Math.round((targetH - dh) / 2);
+
+        fctx.imageSmoothingEnabled = true;
+        fctx.drawImage(trimmed, 0,0,sw,sh, dx,dy,dw,dh);
+
+        const url = await canvasToPngUrl(finalC);
+        rendered.push({pageNumber, url});
+        addThumb(pageNumber, url);
+
+        setProgress(((idx+1)/pages.length)*100);
+        setStatus(`Renderizzata pagina ${pageNumber} (${idx+1}/${pages.length})`);
+      }
+
+      rebuildPrintArea();
+      setStatus(`Pronto: ${rendered.length} pagina/e renderizzate · puoi stampare.`);
+      setProgress(100);
+      setTimeout(()=>setProgress(0), 600);
+    }
+
+    // Events
+    els.paperPreset.addEventListener('change', () => { updatePrintVars(); rebuildPrintArea(); });
+    els.scaleMode.addEventListener('change', rebuildPrintArea);
+    els.paperMargin.addEventListener('input', updatePrintVars);
+    els.btnClear.addEventListener('click', clearAll);
+
+    els.btnPrint.addEventListener('click', ()=>{
+      if(!rendered.length){
+        alert('Prima renderizza almeno una pagina.');
+        return;
+      }
+      updatePrintVars();
+      window.print();
+    });
+
+    els.btnSavePdf.addEventListener('click', ()=>{
+      exportRenderedToPdf().catch(err=>{
+        console.error(err);
+        alert('Errore salvando PDF: ' + (err && err.message ? err.message : err));
+        setStatus('Errore durante il salvataggio PDF.');
+        setProgress(0);
+      });
+    });
+
+    els.btnRender.addEventListener('click', async ()=>{
+      try{
+        const f = els.fileInput.files && els.fileInput.files[0];
+        if(!currentPdf){
+          if(!f){
+            alert('Seleziona un PDF.');
+            return;
+          }
+          const buf = await fileToArrayBuffer(f);
+          await loadPdfFromArrayBuffer(buf, f.name);
+        }
+        await renderSelectedPages();
+      }catch(err){
+        console.error(err);
+        alert('Errore: ' + (err && err.message ? err.message : err));
+        setStatus('Errore durante il render.');
+        setProgress(0);
+      }
+    });
+
+    els.fileInput.addEventListener('change', async ()=>{
+      try{
+        const f = els.fileInput.files && els.fileInput.files[0];
+        if(!f) return;
+        const buf = await fileToArrayBuffer(f);
+        await loadPdfFromArrayBuffer(buf, f.name);
+      }catch(err){
+        console.error(err);
+        alert('Errore caricando PDF: ' + (err && err.message ? err.message : err));
+      }
+    });
+
+    updatePrintVars();
+  </script>
+</body>
+</html>
