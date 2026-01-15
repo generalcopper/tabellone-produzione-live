@@ -67,14 +67,15 @@
 
 /* ============================================================
    Colonne tabelle ridimensionabili (drag utente)
-   - Funziona su qualsiasi <table> con <thead><th>
-   - Aggiunge una maniglia (handle) sul bordo destro di ogni colonna
+   - Trascinamento mouse: puoi trascinare direttamente il bordo destro dell'intestazione
+   - Handle dedicata sul bordo destro (piu facile da prendere)
    - Persistenza in localStorage (per tabella)
    ============================================================ */
 (function(){
   "use strict";
 
   const MIN_W = 44;
+  const EDGE_PX = 10; // distanza dal bordo destro per attivare il resize
   const LS_PREFIX = "hubinv_colwidths:";
 
   function getTableKey(tbl){
@@ -85,7 +86,6 @@
         .filter(Boolean);
       if (ths.length) return "sig:" + ths.join("|");
     }catch(_){ }
-    // fallback: position in DOM
     try{ return "idx:" + String(Array.from(document.querySelectorAll("table")).indexOf(tbl)); }catch(_){ }
     return "tbl";
   }
@@ -122,10 +122,51 @@
     }catch(_){ }
   }
 
-  let __saveTimer = null;
+  function injectStyle(){
+    try{
+      const ID = "hubinv_col_resize_style_v2";
+      if (document.getElementById(ID)) return;
+      const st = document.createElement("style");
+      st.id = ID;
+      st.textContent = `
+/* Column resize (v2) */
+table.col-resizable{ table-layout: fixed; }
+table.col-resizable th, table.col-resizable td{ overflow-wrap:anywhere; }
+.col-resizable-th{ position: relative; overflow: visible !important; }
+.col-resizer{ position:absolute; top:0; right:0; width:${EDGE_PX+6}px; height:100%; cursor: col-resize; touch-action:none; user-select:none; z-index: 5; }
+.col-resizer::after{ content:""; position:absolute; top:0; left:50%; width:2px; height:100%; transform:translateX(-50%); opacity:0; background: rgba(10,132,255,.55); border-radius: 1px; transition: opacity .12s ease; }
+.col-resizable-th:hover .col-resizer::after{ opacity:.75; }
+body.isColResizing{ cursor: col-resize !important; }
+body.isColResizing *{ cursor: col-resize !important; user-select:none !important; }
+      `.trim();
+      (document.head || document.documentElement).appendChild(st);
+    }catch(_){ }
+  }
+
+  // debounce per singola tabella
+  const saveTimers = new WeakMap();
   function scheduleStore(tbl, cols){
-    try{ if (__saveTimer) clearTimeout(__saveTimer); }catch(_){ }
-    __saveTimer = setTimeout(() => writeStoredWidths(tbl, cols), 240);
+    try{
+      const prev = saveTimers.get(tbl);
+      if (prev) clearTimeout(prev);
+      const t = setTimeout(() => writeStoredWidths(tbl, cols), 220);
+      saveTimers.set(tbl, t);
+    }catch(_){ }
+  }
+
+  function getCurrentWidth(th, col){
+    let w = 0;
+    try{ w = col && col.getBoundingClientRect ? (col.getBoundingClientRect().width || 0) : 0; }catch(_){ w = 0; }
+    if (!w){ try{ w = th.getBoundingClientRect().width || 0; }catch(_){ w = 0; } }
+    return Math.max(MIN_W, Math.round(w || MIN_W));
+  }
+
+  function isNearRightEdge(ev, th){
+    try{
+      const rect = th.getBoundingClientRect();
+      const d = rect.right - (ev.clientX || 0);
+      return d >= -1 && d <= EDGE_PX;
+    }catch(_){ return false; }
   }
 
   function setupTable(tbl){
@@ -141,88 +182,119 @@
       const cg = ensureColgroup(tbl, ths.length);
       const cols = Array.from(cg.children || []);
 
-      // 1) Apply stored widths if present
+      // Applica larghezze salvate, altrimenti inizializza dalle dimensioni attuali
       const stored = readStoredWidths(tbl);
       if (stored && stored.length){
         stored.forEach((w, i) => {
           const n = Number(w || 0);
-          if (cols[i] && n > 0) cols[i].style.width = Math.max(MIN_W, n) + "px";
+          if (cols[i] && n > 0){
+            const px = Math.max(MIN_W, n) + "px";
+            cols[i].style.width = px;
+            if (ths[i]) ths[i].style.width = px;
+          }
         });
       } else {
-        // 2) Initialize widths from current header layout
-        const widths = ths.map(th => {
-          try{ return th.getBoundingClientRect().width || 0; }catch(_){ return 0; }
-        });
-        widths.forEach((w, i) => {
-          const n = Math.max(MIN_W, Math.round(w || 0));
+        ths.forEach((th, i) => {
+          const n = Math.max(MIN_W, Math.round((th.getBoundingClientRect().width || 0) || MIN_W));
           if (cols[i]) cols[i].style.width = n + "px";
+          th.style.width = n + "px";
         });
       }
 
-      // Add resize handles to each header (except last)
-      ths.forEach((th, i) => {
-        th.classList.add("col-resizable-th");
-        if (i === ths.length - 1) return;
-        if (th.querySelector(":scope > .col-resizer")) return;
+      function beginDrag(i, startClientX, dragKind){
+        const th = ths[i];
+        const col = cols[i];
+        const startW = getCurrentWidth(th, col);
 
-        const h = document.createElement("span");
-        h.className = "col-resizer";
-        h.setAttribute("role", "separator");
-        h.setAttribute("aria-orientation", "vertical");
-        h.tabIndex = 0;
-        th.appendChild(h);
-
-        let startX = 0;
-        let startW = 0;
+        document.body.classList.add("isColResizing");
 
         const onMove = (ev) => {
-          const dx = (ev && typeof ev.clientX === "number") ? (ev.clientX - startX) : 0;
+          try{ if (ev && ev.cancelable) ev.preventDefault(); }catch(_){ }
+          const x = (ev && typeof ev.clientX === "number") ? ev.clientX : startClientX;
+          const dx = x - startClientX;
           const newW = Math.max(MIN_W, startW + dx);
-          if (cols[i]) cols[i].style.width = Math.round(newW) + "px";
+          const px = Math.round(newW) + "px";
+          if (cols[i]) cols[i].style.width = px;
+          if (ths[i]) ths[i].style.width = px;
           scheduleStore(tbl, cols);
         };
 
-        const endDrag = () => {
-          try{ document.body.classList.remove("isColResizing"); }catch(_){ }
-          window.removeEventListener("pointermove", onMove);
-          window.removeEventListener("pointerup", endDrag);
-          window.removeEventListener("pointercancel", endDrag);
-        };
-
-        const startDrag = (ev) => {
-          try{ ev.preventDefault(); ev.stopPropagation(); }catch(_){ }
-          startX = ev.clientX;
-          try{
-            startW = (cols[i] && cols[i].getBoundingClientRect)
-              ? (cols[i].getBoundingClientRect().width || 0)
-              : 0;
-          }catch(_){ startW = 0; }
-          if (!startW){
-            try{ startW = th.getBoundingClientRect().width || MIN_W; }catch(_){ startW = MIN_W; }
+        const end = () => {
+          document.body.classList.remove("isColResizing");
+          if (dragKind === "pointer"){
+            window.removeEventListener("pointermove", onMove);
+            window.removeEventListener("pointerup", end);
+            window.removeEventListener("pointercancel", end);
+          } else {
+            window.removeEventListener("mousemove", onMove);
+            window.removeEventListener("mouseup", end);
           }
-
-          try{ document.body.classList.add("isColResizing"); }catch(_){ }
-          try{ h.setPointerCapture && h.setPointerCapture(ev.pointerId); }catch(_){ }
-
-          window.addEventListener("pointermove", onMove);
-          window.addEventListener("pointerup", endDrag);
-          window.addEventListener("pointercancel", endDrag);
         };
 
-        h.addEventListener("pointerdown", startDrag);
+        if (dragKind === "pointer"){
+          window.addEventListener("pointermove", onMove, { passive:false });
+          window.addEventListener("pointerup", end);
+          window.addEventListener("pointercancel", end);
+        } else {
+          window.addEventListener("mousemove", onMove, { passive:false });
+          window.addEventListener("mouseup", end);
+        }
+      }
 
-        // keyboard (accessibility): left/right = resize
-        h.addEventListener("keydown", (ev) => {
-          if (!ev) return;
-          if (ev.key !== "ArrowLeft" && ev.key !== "ArrowRight") return;
-          ev.preventDefault();
-          let cur = 0;
-          try{ cur = (cols[i] && cols[i].getBoundingClientRect) ? cols[i].getBoundingClientRect().width : 0; }catch(_){ cur = 0; }
-          if (!cur){ try{ cur = th.getBoundingClientRect().width || MIN_W; }catch(_){ cur = MIN_W; } }
-          const delta = (ev.key === "ArrowRight") ? 10 : -10;
-          const newW = Math.max(MIN_W, cur + delta);
-          if (cols[i]) cols[i].style.width = Math.round(newW) + "px";
-          scheduleStore(tbl, cols);
+      // Handle + bordo destro trascinabile
+      ths.forEach((th, i) => {
+        th.classList.add("col-resizable-th");
+        if (i === ths.length - 1) return; // ultima colonna: non ridimensionabile
+
+        // handle visibile/cliccabile
+        if (!th.querySelector(":scope > .col-resizer")){
+          const h = document.createElement("span");
+          h.className = "col-resizer";
+          h.setAttribute("role", "separator");
+          h.setAttribute("aria-orientation", "vertical");
+          h.tabIndex = 0;
+          th.appendChild(h);
+
+          // pointer (include mouse) sul handle
+          h.addEventListener("pointerdown", (ev) => {
+            try{ ev.preventDefault(); ev.stopPropagation(); }catch(_){ }
+            try{ h.setPointerCapture && h.setPointerCapture(ev.pointerId); }catch(_){ }
+            beginDrag(i, ev.clientX, "pointer");
+          });
+
+          // fallback mouse (se per qualsiasi motivo i pointer non partono)
+          h.addEventListener("mousedown", (ev) => {
+            try{ ev.preventDefault(); ev.stopPropagation(); }catch(_){ }
+            beginDrag(i, ev.clientX, "mouse");
+          });
+
+          // tastiera
+          h.addEventListener("keydown", (ev) => {
+            if (!ev) return;
+            if (ev.key !== "ArrowLeft" && ev.key !== "ArrowRight") return;
+            ev.preventDefault();
+            const cur = getCurrentWidth(ths[i], cols[i]);
+            const delta = (ev.key === "ArrowRight") ? 10 : -10;
+            const newW = Math.max(MIN_W, cur + delta);
+            const px = Math.round(newW) + "px";
+            if (cols[i]) cols[i].style.width = px;
+            if (ths[i]) ths[i].style.width = px;
+            scheduleStore(tbl, cols);
+          });
+        }
+
+        // bordo destro trascinabile direttamente
+        th.addEventListener("mousemove", (ev) => {
+          try{
+            if (isNearRightEdge(ev, th)) th.style.cursor = "col-resize";
+            else th.style.cursor = "";
+          }catch(_){ }
+        });
+
+        th.addEventListener("mousedown", (ev) => {
+          if (!isNearRightEdge(ev, th)) return;
+          try{ ev.preventDefault(); }catch(_){ }
+          beginDrag(i, ev.clientX, "mouse");
         });
       });
 
@@ -233,29 +305,7 @@
   function scan(root){
     try{
       const scope = root && root.querySelectorAll ? root : document;
-      const tables = scope.querySelectorAll("table");
-      tables.forEach(setupTable);
-    }catch(_){ }
-  }
-
-  function injectStyle(){
-    try{
-      const ID = "hubinv_col_resize_style_v1";
-      if (document.getElementById(ID)) return;
-      const st = document.createElement("style");
-      st.id = ID;
-      st.textContent = `
-/* Column resize */
-table.col-resizable{ table-layout: fixed; }
-table.col-resizable th, table.col-resizable td{ overflow-wrap:anywhere; }
-.col-resizable-th{ position: relative; }
-.col-resizer{ position:absolute; top:0; right:-3px; width:6px; height:100%; cursor: col-resize; touch-action:none; user-select:none; }
-.col-resizer::after{ content:""; position:absolute; top:0; left:50%; width:2px; height:100%; transform:translateX(-50%); opacity:0; background: rgba(10,132,255,.55); border-radius: 1px; transition: opacity .12s ease; }
-.col-resizable-th:hover .col-resizer::after{ opacity:.75; }
-body.isColResizing{ cursor: col-resize !important; }
-body.isColResizing *{ cursor: col-resize !important; user-select:none !important; }
-      `.trim();
-      (document.head || document.documentElement).appendChild(st);
+      scope.querySelectorAll("table").forEach(setupTable);
     }catch(_){ }
   }
 
@@ -263,18 +313,17 @@ body.isColResizing *{ cursor: col-resize !important; user-select:none !important
     if (!window.MutationObserver) return;
     try{
       const obs = new MutationObserver((muts) => {
-        let needs = false;
         for (const m of muts){
           for (const n of (m.addedNodes || [])){
             if (!n || n.nodeType !== 1) continue;
-            if (n.tagName === "TABLE") { needs = true; break; }
-            if (n.querySelector && n.querySelector("table")) { needs = true; break; }
+            if (n.tagName === "TABLE" || (n.querySelector && n.querySelector("table"))) {
+              requestAnimationFrame(() => scan(document));
+              return;
+            }
           }
-          if (needs) break;
         }
-        if (needs) requestAnimationFrame(() => scan(document));
       });
-      obs.observe(document.body, { childList: true, subtree: true });
+      obs.observe(document.body, { childList:true, subtree:true });
     }catch(_){ }
   }
 
@@ -282,7 +331,6 @@ body.isColResizing *{ cursor: col-resize !important; user-select:none !important
     injectStyle();
     scan(document);
     watch();
-    // re-scan after first paint (font/layout settle)
     setTimeout(() => scan(document), 650);
   }
 
