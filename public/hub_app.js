@@ -3777,10 +3777,16 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
         globalThis.__HUB.setView = setView;
         globalThis.__HUB.closeSideMenu = closeSideMenu;
         globalThis.__HUB.orgCol = orgCol;
-        globalThis.__HUB.FS = {
-          collection, doc, setDoc, addDoc, updateDoc, deleteDoc, getDoc, getDocs,
-          onSnapshot, query, orderBy, serverTimestamp, deleteField, runTransaction
-        };
+        globalThis.__HUB.FS = (()=>{
+          const FS = {
+            collection, doc, setDoc, addDoc, deleteDoc, getDocs,
+            onSnapshot, query, orderBy, serverTimestamp, deleteField, runTransaction
+          };
+          // opzionali (non far fallire il bridge se non importati)
+          try { FS.updateDoc = updateDoc; } catch(_){}
+          try { FS.getDoc = getDoc; } catch(_){}
+          return FS;
+        })();
         globalThis.__HUB.ready = true;
       }catch(e){
         console.warn("syncHubBridge failed", e);
