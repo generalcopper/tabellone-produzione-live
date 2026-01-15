@@ -1859,7 +1859,13 @@ function subscribeFinishedProducts(){
       }catch(_){ }
       return;
     }
-    if (attempt > 200) return;
+    if (attempt > 200){
+      // evita stato "loading" infinito se il bridge Firebase non è pronto
+      S.cacheReady = true;
+      render();
+      try{ window.HubInv?.showToast?.("Firebase non pronto (DDT): verifica Sync/login", "warn"); }catch(_){}
+      return;
+    }
     setTimeout(() => waitForHub(attempt+1), 100);
   }
 
@@ -3376,12 +3382,17 @@ document.getElementById("btnGoInvCerea")?.addEventListener("click", () => { open
       globalThis.__HUB.setView = setView;
       globalThis.__HUB.closeSideMenu = closeSideMenu;
       globalThis.__HUB.orgCol = orgCol;
-      globalThis.__HUB.FS = {
-        collection, doc, setDoc, addDoc, updateDoc, deleteDoc, getDoc, getDocs,
-        onSnapshot, query, orderBy, serverTimestamp, deleteField
-      };
-    }catch(_){}
 
+      // FS bridge: non includere simboli non importati (evita ReferenceError silenziosi)
+      const __FS = {
+        collection, doc, setDoc, addDoc, deleteDoc, getDocs,
+        onSnapshot, query, orderBy, serverTimestamp, deleteField, runTransaction
+      };
+      if (typeof getDoc === "function") __FS.getDoc = getDoc;
+      if (typeof updateDoc === "function") __FS.updateDoc = updateDoc;
+
+      globalThis.__HUB.FS = __FS;
+    }catch(_){}
 document.getElementById("menuGoHome")?.addEventListener("click", () => { closeSideMenu(); setView("home"); });
     document.getElementById("menuGoOcr")?.addEventListener("click", () => { closeSideMenu(); startHomeOcr(); });
     document.getElementById("menuGoInvCerea")?.addEventListener("click", () => { closeSideMenu(); openInventoryOverlay(WAREHOUSE_CEREA); });
