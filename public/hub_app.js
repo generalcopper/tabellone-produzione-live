@@ -118,6 +118,132 @@
     }catch(_){ return []; }
   }
 
+  // ===== DaneaXML (Scarica flussi DDT): raggruppo i movimenti OUT per DDT =====
+  var __daneaGroupsByKey = Object.create(null);
+
+  function __normWh(v){
+    try{
+      if (api && typeof api.normalizeWarehouse === "function") return api.normalizeWarehouse(v || "");
+    }catch(_){ }
+    return String(v || "").trim().toLowerCase();
+  }
+
+  function isDaneaXmlOut(mv){
+    try{
+      if (!mv) return false;
+      if (String(mv.type || "").toUpperCase() !== "OUT") return false;
+      var src = String(mv.source || "").trim().toLowerCase();
+      if (src !== "daneaxml") return false;
+      var k = String(mv.daneaDdtKey || mv.docNum || "").trim();
+      return !!k;
+    }catch(_){ return false; }
+  }
+
+  function getDaneaGroupKey(mv){
+    return String((mv && (mv.daneaDdtKey || mv.docNum)) || "").trim();
+  }
+
+  function getDaneaGroupByKey(k){
+    var key = String(k || "").trim();
+    if (!key) return null;
+    try{ return __daneaGroupsByKey[key] || null; }catch(_){ return null; }
+  }
+
+  function buildDaneaGroups(allMovements){
+    var byKey = Object.create(null);
+    (Array.isArray(allMovements) ? allMovements : []).forEach(function(mv){
+      if (!isDaneaXmlOut(mv)) return;
+      var k = getDaneaGroupKey(mv);
+      if (!k) return;
+      var g = byKey[k];
+      if (!g){
+        var ca0 = String(mv.createdAt || mv.createdAtIso || "").trim();
+        g = byKey[k] = {
+          __kind: "danea_ddt",
+          key: k,
+          id: "danea__" + encodeURIComponent(k),
+          type: "OUT",
+          source: "DaneaXML",
+          customer: "Scarico DDT",
+          code: "",
+          item: "",
+          qty: 0,
+          uom: "",
+          qtyRaw: "",
+          date: String(mv.date || "").trim() || "",
+          note: String(mv.note || "").trim() || "",
+          docType: String(mv.docType || "DDT").trim() || "DDT",
+          docNum: String(mv.docNum || "").trim() || "",
+          docDateRaw: String(mv.docDateRaw || mv.date || "").trim() || "",
+          warehouse: "",
+          _warehouses: [],
+          createdAtMax: ca0,
+          createdAt: ca0,
+          movements: []
+        };
+      }
+
+      g.movements.push(mv);
+
+      // warehouses list (unique)
+      var w = __normWh(mv.warehouse || "");
+      if (w && g._warehouses.indexOf(w) < 0) g._warehouses.push(w);
+
+      var ca = String(mv.createdAt || mv.createdAtIso || "").trim();
+      if (ca && (!g.createdAtMax || ca.localeCompare(g.createdAtMax) > 0)) g.createdAtMax = ca;
+
+      if (!g.date && mv.date) g.date = String(mv.date || "").trim();
+      if (!g.docNum && mv.docNum) g.docNum = String(mv.docNum || "").trim();
+      if (!g.docDateRaw && (mv.docDateRaw || mv.date)) g.docDateRaw = String(mv.docDateRaw || mv.date || "").trim();
+      if (!g.note && mv.note) g.note = String(mv.note || "").trim();
+    });
+
+    __daneaGroupsByKey = byKey;
+
+    var groups = [];
+    Object.keys(byKey).forEach(function(k){
+      var g = byKey[k];
+      if (!g) return;
+      g.qty = (g.movements || []).length;
+      g.qtyRaw = g.qty + " righe";
+      g.code = (g.docNum ? ("DDT " + g.docNum) : ("DDT " + g.key));
+      g.item = "Scarico DDT · " + g.qty + " righe";
+      g.createdAt = g.createdAtMax || g.createdAt || "";
+      if (g._warehouses.length === 1) g.warehouse = g._warehouses[0];
+      else if (g._warehouses.length > 1) g.warehouse = "split";
+      else g.warehouse = "";
+      groups.push(g);
+    });
+
+    return groups;
+  }
+
+  function buildUiRows(allMovements){
+    var all = Array.isArray(allMovements) ? allMovements : [];
+    var groups = buildDaneaGroups(all);
+
+    // ids to skip (movimenti "figli" del DDT)
+    var skip = Object.create(null);
+    groups.forEach(function(g){
+      (g.movements || []).forEach(function(mv){
+        var id = String(mv && mv.id || "").trim();
+        if (id) skip[id] = 1;
+      });
+    });
+
+    var rows = [];
+    all.forEach(function(mv){
+      if (!mv) return;
+      var id = String(mv.id || "").trim();
+      if (id && skip[id]) return;
+      rows.push(mv);
+    });
+
+    // add groups
+    rows.push.apply(rows, groups);
+    return rows;
+  }
+
   function applyFilters(list){
     var q = norm(els.movSearch && els.movSearch.value);
     var t = String(els.movTypeFilter && els.movTypeFilter.value || "").trim().toUpperCase();
@@ -125,16 +251,23 @@
     var from = String(els.movFrom && els.movFrom.value || "").trim();
     var to   = String(els.movTo && els.movTo.value || "").trim();
 
-    return list.filter(function(mv){
+    return (Array.isArray(list) ? list : []).filter(function(mv){
       if (!mv) return false;
+
+      var isGroup = (mv && mv.__kind === "danea_ddt");
 
       if (t && String(mv.type || "").toUpperCase() !== t) return false;
 
       if (wh){
-        var w = (api && typeof api.normalizeWarehouse === "function")
-          ? api.normalizeWarehouse(mv.warehouse || "")
-          : String(mv.warehouse || "").trim().toLowerCase();
-        if (w !== wh) return false;
+        if (isGroup){
+          var ws = Array.isArray(mv._warehouses) ? mv._warehouses : [];
+          if (ws.indexOf(wh) < 0) return false;
+        } else {
+          var w = (api && typeof api.normalizeWarehouse === "function")
+            ? api.normalizeWarehouse(mv.warehouse || "")
+            : String(mv.warehouse || "").trim().toLowerCase();
+          if (w !== wh) return false;
+        }
       }
 
       // Date filter uses mv.date (YYYY-MM-DD). If missing, fall back to createdAt ISO date.
@@ -148,10 +281,21 @@
 
       if (q){
         var hay = [
-          mv.customer, mv.code, mv.item, mv.note, mv.source, mv.docNum, mv.docType
+          mv.customer, mv.code, mv.item, mv.note, mv.source, mv.docNum, mv.docType, mv.daneaDdtKey
         ].map(norm).join(" ");
+
+        // group: include anche righe interne (codici/articoli)
+        if (isGroup){
+          try{
+            (mv.movements || []).forEach(function(x){
+              hay += " " + [x.code, x.item, x.qtyRaw, x.uom, x.warehouse].map(norm).join(" ");
+            });
+          }catch(_){ }
+        }
+
         if (hay.indexOf(q) < 0) return false;
       }
+
       return true;
     });
   }
@@ -229,6 +373,8 @@
 
   function shortWh(v){
     var s = (api && typeof api.normalizeWarehouse === "function") ? api.normalizeWarehouse(v) : String(v || "").toLowerCase();
+    s = String(s || "").trim().toLowerCase();
+    if (s === "split") return "Split";
     return (s === "concamarise") ? "Conca" : "Cerea";
   }
 
@@ -239,14 +385,14 @@
     try{
       if (els.pillMovementsCount) els.pillMovementsCount.textContent = String(totalCount || 0);
       if (els.movementsMeta) {
-        var shown = list.length;
+        var shown = (Array.isArray(list) ? list.length : 0);
         els.movementsMeta.textContent = (shown === totalCount)
-          ? (shown.toLocaleString("it-IT") + " movimenti")
-          : ("Mostrati " + shown.toLocaleString("it-IT") + " su " + (totalCount||0).toLocaleString("it-IT"));
+          ? (shown.toLocaleString("it-IT") + " righe")
+          : ("Mostrate " + shown.toLocaleString("it-IT") + " su " + (totalCount||0).toLocaleString("it-IT"));
       }
-    }catch(_){}
+    }catch(_){ }
 
-    if (!list.length){
+    if (!list || !list.length){
       els.movementsAllTbody.innerHTML = '<tr><td class="td-muted" colspan="9">Nessun movimento.</td></tr>';
       return;
     }
@@ -261,44 +407,52 @@
     }
 
     els.movementsAllTbody.innerHTML = sliced.map(function(mv){
+      var isGroup = (mv && mv.__kind === "danea_ddt");
+
       var id = String(mv.id || "");
       var date = String(mv.date || "").trim();
       if (!date){
         var ca = String(mv.createdAt || "");
         if (ca && ca.length >= 10) date = ca.slice(0,10);
       }
+
       var customer = String(mv.customer || "");
       var code = String(mv.code || "");
       var item = String(mv.item || "");
       var qty = (api && typeof api.safeInt === "function") ? api.safeInt(mv.qty) : (Number(mv.qty)||0);
       var uom = String(mv.uom || "").trim();
-      var qtyTxt = String(mv.qtyRaw || "").trim();
-      if (!qtyTxt){
-        qtyTxt = Number(qty).toLocaleString("it-IT") + (uom ? (" " + uom) : "");
-      }
+
       var wh = shortWh(mv.warehouse || "");
       var src = String(mv.source || "");
-      var showDoc = isDocLike(mv);
+      var showDoc = (!isGroup) && isDocLike(mv);
+
+      var attrs = 'data-mvid="'+esc(id)+'"';
+      if (isGroup){
+        attrs += ' data-kind="danea" data-daneakey="'+esc(String(mv.key || ""))+'"';
+      }
 
       return '' +
-        '<tr data-mvid="'+esc(id)+'" title="Dettagli">' +
+        '<tr '+attrs+' title="Dettagli">' +
           '<td data-label="Data">'+esc(date || "—")+'</td>' +
           '<td data-label="Tipo">'+badgeHtml(mv.type)+'</td>' +
           '<td data-label="Fornitore">'+esc(customer)+'</td>' +
-          '<td data-label="Codice" class="td-muted"><span class="kbd">'+esc(code)+'</span></td>' +
+          '<td data-label="Codice" class="td-muted"><span class="kbd">'+esc(code || "—")+'</span></td>' +
           '<td data-label="Articolo">'+esc(item)+'</td>' +
           '<td data-label="Q.tà" class="qty">'+Number(qty).toLocaleString("it-IT")+'</td>' +
           '<td data-label="Sede" class="colHideSm">'+esc(wh)+'</td>' +
           '<td data-label="Fonte" class="colHideSm">'+esc(src)+'</td>' +
           '<td data-label="">' +
-            (showDoc ? '<button class="btn btn-ghost mini jsOpenDoc" type="button" data-mvid="'+esc(id)+'" title="Apri documento">Doc</button>' : '') +
+            (isGroup
+              ? '<button class="btn btn-ghost mini jsOpenDaneaDdt" type="button" data-daneakey="'+esc(String(mv.key || ""))+'" title="Dettagli DDT">Dettagli</button>'
+              : (showDoc ? '<button class="btn btn-ghost mini jsOpenDoc" type="button" data-mvid="'+esc(id)+'" title="Apri documento">Doc</button>' : '')
+            ) +
           '</td>' +
         '</tr>';
     }).join("");
 
     if (capped){
       els.movementsAllTbody.insertAdjacentHTML("beforeend",
-        '<tr><td class="td-muted" colspan="9">Mostrati i primi '+cap.toLocaleString("it-IT")+' movimenti. Usa i filtri per restringere.</td></tr>');
+        '<tr><td class="td-muted" colspan="9">Mostrate le prime '+cap.toLocaleString("it-IT")+' righe. Usa i filtri per restringere.</td></tr>');
     }
   }
 
@@ -323,8 +477,96 @@
     try{ (typeof __syncBodyLockFromModals === "function") && __syncBodyLockFromModals(); }catch(_){}
   }
 
+  function openDaneaGroupDetails(g){
+    if (!api || !g) return;
+
+    cacheEls();
+
+    var rows = Array.isArray(g.movements) ? g.movements.slice() : [];
+    try{
+      rows.sort(function(a,b){
+        var wa = __normWh(a && a.warehouse || "");
+        var wb = __normWh(b && b.warehouse || "");
+        if (wa && wb && wa !== wb) return wa.localeCompare(wb);
+        var ca = String(a && a.code || "");
+        var cb = String(b && b.code || "");
+        if (ca && cb && ca !== cb) return ca.localeCompare(cb);
+        var ia = String(a && a.item || "");
+        var ib = String(b && b.item || "");
+        return ia.localeCompare(ib);
+      });
+    }catch(_){ }
+
+    var linesTxt = "";
+    try{
+      linesTxt = rows.map(function(mv, idx){
+        var wh = shortWh(mv.warehouse || "");
+        var code = String(mv.code || "").trim();
+        var item = String(mv.item || "").trim();
+        var q = (api && typeof api.safeInt === "function") ? api.safeInt(mv.qty) : (Number(mv.qty)||0);
+        var uom = String(mv.uom || "").trim();
+        var qr = String(mv.qtyRaw || "").trim();
+        if (!qr){
+          qr = Number(q).toLocaleString("it-IT") + (uom ? (" " + uom) : "");
+        }
+        return (idx+1) + ") [" + wh + "] " + (code || "—") + " — " + (item || "—") + " — " + (qr || "—");
+      }).join("\n");
+    }catch(_){ linesTxt = ""; }
+
+    // fallback: modale testo
+    if (!els.modalMovementDetail){
+      var title = "DDT " + (String(g.docNum || g.key || "").trim() || "DaneaXML");
+      var head = "Scarico DaneaXML · " + (String(g.date || "").trim() || "—") + " · " + (g.qty || 0) + " righe";
+      try{ api.openModal(title, head + "\n\n" + (linesTxt || "—")); }catch(_){ }
+      return;
+    }
+
+    __detailCtx.id = "";
+    __detailCtx.docKey = "";
+
+    try{
+      if (els.movDetTitle) els.movDetTitle.textContent = "Dettaglio DDT (DaneaXML)";
+      if (els.movDetSubtitle){
+        var whSum = (g.warehouse === "split") ? "Cerea + Concamarise" : whLabel(g.warehouse || "");
+        els.movDetSubtitle.textContent = [
+          ("DDT " + (g.docNum || g.key || "—")),
+          (String(g.date || "").trim() || "—"),
+          (whSum || "—"),
+          ((g.qty || 0) + " righe")
+        ].join(" · ");
+      }
+    }catch(_){ }
+
+    __setVal(els.movDetDate, String(g.date || "").trim() || "—");
+    __setVal(els.movDetType, "OUT (scarico)");
+    __setVal(els.movDetWarehouse, (g.warehouse === "split") ? "Cerea + Concamarise" : whLabel(g.warehouse || ""));
+    __setVal(els.movDetSource, "DaneaXML");
+    __setVal(els.movDetCustomer, "Scarico DDT");
+    __setVal(els.movDetCode, String(g.code || "").trim() || "—");
+    __setVal(els.movDetItem, "Scarico DDT · " + (g.qty || 0) + " righe");
+    __setVal(els.movDetQty, String(g.qty || 0) + " righe");
+    __setVal(els.movDetUom, "righe");
+    __setVal(els.movDetNote, String(g.note || "").trim() || "—");
+    __setVal(els.movDetDocType, "DDT");
+    __setVal(els.movDetDocNum, String(g.docNum || "").trim() || "—");
+    __setVal(els.movDetDocDateRaw, String(g.docDateRaw || g.date || "").trim() || "—");
+    __setVal(els.movDetLineIndex, "—");
+    __setVal(els.movDetVat, "—");
+    __setVal(els.movDetTriplet, String(g.key || "").trim() || "—");
+    __setVal(els.movDetCreatedAt, (api && typeof api.formatDateIT === "function") ? api.formatDateIT(g.createdAt || "") : (String(g.createdAt || "").trim() || "—"));
+    __setVal(els.movDetId, String(g.id || "").trim() || "—");
+    __setVal(els.movDetRawText, linesTxt);
+
+    try{ if (els.movDetOpenDoc) els.movDetOpenDoc.style.display = "none"; }catch(_){ }
+    try{ if (els.movDetUndo) els.movDetUndo.disabled = true; }catch(_){ }
+
+    __openDetailModal();
+  }
+
+
   function openDetails(mv){
     if (!api || !mv) return;
+    if (mv && mv.__kind === "danea_ddt") { openDaneaGroupDetails(mv); return; }
 
     // Se non abbiamo il modale dedicato, fallback alla modale testuale legacy
     cacheEls();
@@ -435,6 +677,15 @@
 
     if (els.movementsAllTbody){
       els.movementsAllTbody.addEventListener("click", function(e){
+        var btnDanea = e.target && e.target.closest ? e.target.closest("button.jsOpenDaneaDdt") : null;
+        if (btnDanea){
+          e.preventDefault(); e.stopPropagation();
+          var k0 = btnDanea.getAttribute("data-daneakey") || "";
+          var g0 = getDaneaGroupByKey(k0);
+          if (g0) openDaneaGroupDetails(g0);
+          return;
+        }
+
         var btn = e.target && e.target.closest ? e.target.closest("button.jsOpenDoc") : null;
         if (btn){
           e.preventDefault(); e.stopPropagation();
@@ -453,6 +704,16 @@
 
         var tr = e.target && e.target.closest ? e.target.closest("tr[data-mvid]") : null;
         if (!tr) return;
+
+        // DaneaXML group row
+        var kind = String(tr.getAttribute("data-kind") || "").trim().toLowerCase();
+        if (kind === "danea"){
+          var k1 = tr.getAttribute("data-daneakey") || "";
+          var g1 = getDaneaGroupByKey(k1);
+          if (g1) openDaneaGroupDetails(g1);
+          return;
+        }
+
         var id2 = tr.getAttribute("data-mvid") || "";
         var mv2 = (getAllMovements().find(function(x){ return String(x && x.id || "") === String(id2); })) || null;
         if (mv2) openDetails(mv2);
@@ -574,9 +835,12 @@
       return;
     }
 
-    var filtered = applyFilters(all);
+    var ui = buildUiRows(all);
+    var totalRows = ui.length;
+
+    var filtered = applyFilters(ui);
     applySort(filtered);
-    renderTable(filtered, total);
+    renderTable(filtered, totalRows);
   }
 
   function refresh(){
