@@ -744,7 +744,7 @@
               <div class="muted" id="daneaDetSubtitle" style="font-weight:900;">—</div>
             </div>
             <div class="inlineRow" style="gap:8px; justify-content:flex-end;">
-              <button class="btn btn-primary" id="btnDaneaSend" type="button" disabled>Invia (scarica)</button>
+              <button class="btn btn-primary" id="btnDaneaSend" type="button" disabled>Completa (scarica)</button>
             </div>
           </div>
 
@@ -1188,7 +1188,7 @@
         <td data-label="Stato" class="qty">${okDot} ${esc(stTxt)}</td>
         <td data-label="" style="text-align:right;">
           <button class="btn btn-secondary btn-xs jsDaneaOpen" data-key="${escAttr(d.key)}" data-mode="verify" type="button">Apri</button>
-          <button class="btn btn-primary btn-xs jsDaneaSendFromList" data-key="${escAttr(d.key)}" type="button" ${btnDisabled}>Invia</button>
+          <button class="btn btn-primary btn-xs jsDaneaSendFromList" data-key="${escAttr(d.key)}" type="button" ${btnDisabled}>Completa</button>
         </td>
       </tr>`;
     }).join("") : `<tr><td class="td-muted" colspan="6">${(!S.cacheReady) ? "Caricamento DDT da Firebase…" : (search ? "Nessun DDT trovato." : ((S.lastParsedCount > 0 && S.lastSyncError) ? ("Trovati " + Number(S.lastParsedCount||0).toLocaleString("it-IT") + " DDT nell’XML ma non salvati su Firebase (rules).") : "Nessun DDT su Firebase."))}</td></tr>`;
@@ -1255,7 +1255,7 @@
     if (foot){
       const st = ddtStatus(ddt);
       const msg = isDone ? "Questo DDT è già stato scaricato: eliminandolo (in tab Completati) si resetta lo scarico." :
-        (st.ok ? "Tutte le righe sono configurate: puoi inviare e scaricare componenti." : "Configura le righe rosse (distinta base) per poter inviare.");
+        (st.ok ? "Tutte le righe sono configurate: puoi completare e scaricare componenti." : "Configura le righe rosse (distinta base) per poter completare.");
       foot.textContent = msg;
     }
   }
@@ -1387,7 +1387,7 @@
     const st = ddtStatus(ddt);
     if (!st.ok) { alert("Non tutte le righe sono configurate (cerchi rossi)."); return; }
 
-    const ok = confirm(`Inviare e scaricare componenti?
+    const ok = confirm(`Completare e scaricare componenti?
 
 DDT ${ddt.number} del ${fmtDateIT(ddt.date)}
 Righe: ${st.total}`);
@@ -1569,15 +1569,15 @@ Disponibili: ${(tot).toLocaleString("it-IT")} (Cerea ${aC.toLocaleString("it-IT"
         createdBy: H.fb.user.email || H.fb.user.uid
       }, { merge: true });
 
-      try{ window.HubInv?.showToast?.("DDT inviato e scaricato"); }catch(_){}
+      try{ window.HubInv?.showToast?.("DDT completato e scaricato"); }catch(_){}
       // refresh lists
       setDetailOpen(false);
       setTab("done");
       await fetchNow(true);
     }catch(e){
       console.error(e);
-      try{ window.HubInv?.showToast?.("Errore invio DDT", "err"); }catch(_){}
-      alert("Errore invio DDT");
+      try{ window.HubInv?.showToast?.("Errore completamento DDT", "err"); }catch(_){}
+      alert("Errore completamento DDT");
     }finally{
       S.busy = false;
     }
