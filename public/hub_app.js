@@ -5,7 +5,7 @@
      ****************************************************************/
     import { initializeApp } from "https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js";
     import { getAuth, GoogleAuthProvider, signInWithPopup, signInWithRedirect, getRedirectResult, signOut, onAuthStateChanged, setPersistence, browserLocalPersistence } from "https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js";
-    import {initializeFirestore, collection, doc, setDoc, addDoc, deleteDoc, onSnapshot, query, orderBy, serverTimestamp, deleteField, getDocs, runTransaction} from "https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js";
+    import {initializeFirestore, collection, doc, setDoc, addDoc, deleteDoc, onSnapshot, query, orderBy, serverTimestamp, deleteField, getDocs, runTransaction, updateDoc, getDoc} from "https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js";
     import { getStorage, ref as sRef, uploadBytes, getDownloadURL, deleteObject } from "https://www.gstatic.com/firebasejs/12.7.0/firebase-storage.js";
 
 /* ============================================================
@@ -5544,7 +5544,8 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
         movements: null,
         thresholds: null,
         supplierDocs: null,
-        finishedProducts: null
+        finishedProducts: null,
+        finishedProductCategories: null
       }
     };
 
@@ -5578,8 +5579,140 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
     let products = [];
     let thresholds = {};
     let finishedProducts = []; // key -> number (from Firestore)
+    let finishedProductCategories = []; // elenco categorie prodotti finiti (from Firestore)
+    let finishedProductCategoriesMap = new Map(); // keyLower -> {key,name,...}
     let activeAnagTab = "suppliers"; // suppliers|products|finished
     let activeProductsMacroGroup = ""; // materie_prime|imballaggi|"" (tutti)
+
+    // Selezione multipla prodotti finiti (per associazione categoria)
+    let __fpSelectedIds = new Set();
+
+    function __fpSelPurgeAgainstList(){
+      try{
+        const valid = new Set((finishedProducts || []).map(x => String(x && x.id || "").trim()).filter(Boolean));
+        const next = new Set();
+        __fpSelectedIds.forEach(id => { if (valid.has(String(id))) next.add(String(id)); });
+        __fpSelectedIds = next;
+      }catch(_){ }
+    }
+
+    function __fpVisibleIds(){
+      try{
+        return Array.from(document.querySelectorAll('#anagTbody input.jsFpSel')).map(el => String(el.getAttribute('data-id') || '').trim()).filter(Boolean);
+      }catch(_){ return []; }
+    }
+
+    function __fpSyncSelectAllState(){
+      try{
+        const all = document.getElementById('fpSelectAll');
+        if (!all) return;
+        const ids = __fpVisibleIds();
+        if (!ids.length){ all.checked = false; all.indeterminate = false; return; }
+        let sel = 0;
+        for (const id of ids){ if (__fpSelectedIds.has(id)) sel++; }
+        all.checked = (sel > 0 && sel === ids.length);
+        all.indeterminate = (sel > 0 && sel < ids.length);
+      }catch(_){ }
+    }
+
+    function __fpRenderAssignControls(){
+      const wrap = document.getElementById('fpAssignWrap');
+      const sel  = document.getElementById('fpAssignCat');
+      const btn  = document.getElementById('btnFpAssignCat');
+      const pill = document.getElementById('fpSelectedPill');
+      const btnClear = document.getElementById('btnFpClearSel');
+      if (!wrap || !sel || !btn) return;
+
+      const on = (activeAnagTab === 'finished');
+      wrap.style.display = on ? 'flex' : 'none';
+      if (!on) return;
+
+      // bind once
+      try{
+        if (wrap.dataset.bound !== '1'){
+          wrap.dataset.bound = '1';
+          sel.addEventListener('change', () => {
+            try{ __fpRenderAssignControls(); }catch(_){ }
+          });
+          btn.addEventListener('click', async (e) => {
+            try{ e.preventDefault(); e.stopPropagation(); }catch(_){ }
+            try{ await __fpAssignSelectedToCategory(); }catch(_){ }
+          });
+          btnClear && btnClear.addEventListener('click', (e) => {
+            try{ e.preventDefault(); e.stopPropagation(); }catch(_){ }
+            __fpSelectedIds.clear();
+            __fpRenderAssignControls();
+            try{ renderAnag(); }catch(_){ }
+          });
+        }
+      }catch(_){ }
+
+      // options
+      try{
+        const prev = String(sel.value || '');
+        const opts = [];
+        opts.push('<option value="">Categoria prodotti finiti…</option>');
+        opts.push('<option value="__none">Rimuovi categoria</option>');
+        if (Array.isArray(finishedProductCategories) && finishedProductCategories.length){
+          for (const c of finishedProductCategories){
+            const k = String(c && c.key || '').trim();
+            if (!k) continue;
+            const nm = String(c && (c.name || c.label || c.key) || k).trim() || k;
+            opts.push('<option value="' + escapeHtmlAttr(k) + '">' + escapeHtml(nm) + '</option>');
+          }
+        } else {
+          opts.push('<option value="" disabled>— Nessuna categoria —</option>');
+        }
+        sel.innerHTML = opts.join('');
+        if (prev && Array.from(sel.options).some(o => o.value === prev)) sel.value = prev;
+      }catch(_){ }
+
+      // pills + enable
+      try{
+        const n = __fpSelectedIds.size;
+        if (pill) pill.textContent = n ? ('Selezionati: ' + n.toLocaleString('it-IT')) : 'Seleziona';
+        if (btnClear) btnClear.style.display = n ? 'inline-flex' : 'none';
+        const key = String(sel.value || '').trim();
+        btn.disabled = !(n && key);
+      }catch(_){ }
+    }
+
+    async function __fpAssignSelectedToCategory(){
+      if (!(fb && fb.user && fb.db)) { showToast('Accedi con Google', 'warn'); return; }
+      const sel  = document.getElementById('fpAssignCat');
+      const btn  = document.getElementById('btnFpAssignCat');
+      if (!sel || !btn) return;
+      const key = String(sel.value || '').trim();
+      if (!key) { showToast('Seleziona una categoria', 'warn'); return; }
+      if (!__fpSelectedIds.size) { showToast('Seleziona almeno un prodotto', 'warn'); return; }
+
+      const ids = Array.from(__fpSelectedIds);
+      const removing = (key === '__none');
+
+      try{ btn.disabled = true; }catch(_){ }
+      try{ showToast(removing ? 'Rimozione categoria…' : 'Associazione categoria…'); }catch(_){ }
+
+      try{
+        for (const id of ids){
+          const fid = String(id || '').trim();
+          if (!fid) continue;
+          const payload = removing
+            ? { categoryKey: deleteField(), categoryKeyLower: deleteField() }
+            : { categoryKey: key, categoryKeyLower: String(key).toLowerCase() };
+          await setDoc(doc(fb.db, 'orgs', ORG_ID, 'finishedProducts', fid), payload, { merge: true });
+        }
+        __fpSelectedIds.clear();
+        try{ sel.value = ''; }catch(_){ }
+        showToast(removing ? 'Categoria rimossa' : 'Prodotti finiti associati');
+      }catch(e){
+        console.warn('assign selected finished products failed', e);
+        showToast('Errore associazione', 'err');
+      } finally {
+        try{ btn.disabled = false; }catch(_){ }
+        __fpRenderAssignControls();
+        try{ renderAnag(); }catch(_){ }
+      }
+    }
 
 
     function syncAnagHeaderTitle(){
@@ -5871,6 +6004,9 @@ btnLogout.addEventListener("click", async () => {
       suppliers = [];
       products = [];
       finishedProducts = [];
+      finishedProductCategories = [];
+      finishedProductCategoriesMap = new Map();
+      try{ __fpSelectedIds.clear(); }catch(_){ }
       thresholds = {};
       currentSupplierId = null;
       try {
@@ -5918,6 +6054,28 @@ btnLogout.addEventListener("click", async () => {
         },
         (err) => {
           console.error("finishedProducts watch error", err);
+        }
+      );
+
+      // Finished Product Categories (per assegnazione in tab "Prodotti finiti")
+      fb.unsub.finishedProductCategories = onSnapshot(
+        query(orgCol("finishedProductCategories"), orderBy("nameLower")),
+        (snap) => {
+          finishedProductCategories = snap.docs.map(d => {
+            const data = d.data() || {};
+            let key = String(data.key || "").trim();
+            if (!key) {
+              try{ key = decodeURIComponent(String(d.id||"")); }catch(_){ key = String(d.id||""); }
+            }
+            key = String(key || "").trim().toLowerCase();
+            const name = String(data.name || data.label || key || "").trim() || key;
+            return { key, name, ...data };
+          }).filter(x => x && x.key);
+          finishedProductCategoriesMap = new Map(finishedProductCategories.map(c => [String(c && c.key || "").trim().toLowerCase(), c]));
+          renderAnag();
+        },
+        (err) => {
+          console.error("finishedProductCategories watch error", err);
         }
       );
 
@@ -11630,7 +11788,10 @@ function renderAll() {
       try{ renderAnagProductsFiltersUI(); }catch(_){ }
 
       // CTA: nuovo prodotto finito (solo in tab finished)
-      try{ if (btnNewFinishedProduct) btnNewFinishedProduct.style.display = (activeAnagTab === "finished") ? "" : "none"; }catch(_){ }
+      try{ if (btnNewFinishedProduct) btnNewFinishedProduct.style.display = "none"; }catch(_){ }
+
+      // UI: barra associazione categorie (nasconde/mostra in base al tab)
+      try{ __fpRenderAssignControls(); }catch(_){ }
 
 
       // Tabs
@@ -11706,12 +11867,18 @@ try{
         try { if (anagTable) anagTable.classList.remove("anagTableProducts"); } catch(_){}
         try { if (searchAnag) searchAnag.placeholder = "Nome o codice prodotto finito…"; } catch(_){}
 
+        // UI: selezione multipla + associazione categoria
+        try{ __fpSelPurgeAgainstList(); }catch(_){}
+        try{ __fpRenderAssignControls(); }catch(_){}
+
         try {
           anagTheadRow.innerHTML = `
-            <th style="width:200px">Codice</th>
+            <th style="width:56px; text-align:center;">
+              <input type="checkbox" id="fpSelectAll" aria-label="Seleziona tutti" />
+            </th>
+            <th style="width:180px">Codice</th>
             <th>Nome</th>
-            <th class="qty" style="width:140px">Componenti</th>
-            <th style="width:160px; text-align:right;">Azioni</th>
+            <th style="width:260px">Categoria</th>
           `;
         } catch(_){}
 
@@ -11732,36 +11899,60 @@ try{
         filtered.sort((a,b) => String((a && (a.nameLower || a.name || "")) || "").localeCompare(String((b && (b.nameLower || b.name || "")) || ""), "it", { sensitivity:"base" }));
 
         if (!filtered.length) {
-          const msg = q ? "Nessun prodotto finito trovato." : "Nessun prodotto finito. Premi “Nuovo prodotto finito” per crearne uno.";
+          const msg = q ? "Nessun prodotto finito trovato." : "Nessun prodotto finito.";
           try { if (anagTbody) anagTbody.innerHTML = `<tr><td class="td-muted" colspan="4">${escapeHtml(msg)}</td></tr>`; } catch(_){}
+          try{ __fpRenderAssignControls(); }catch(_){}
+          try{ __fpSyncSelectAllState(); }catch(_){}
           return;
         }
 
+        // map categorie (per colonna "Categoria")
+        try{
+          finishedProductCategoriesMap = new Map();
+          if (Array.isArray(finishedProductCategories)){
+            for (const c of finishedProductCategories){
+              const kk = String(c && c.key || "").trim().toLowerCase();
+              if (kk) finishedProductCategoriesMap.set(kk, c);
+            }
+          }
+        }catch(_){}
+
         try{
           anagTbody.innerHTML = filtered.map(fp => {
-            const id = String(fp && fp.id || "");
+            const id = String(fp && fp.id || "").trim();
             const code = String(fp && (fp.code || "") || "").trim();
             const name = String(fp && (fp.name || fp.nome || "") || "").trim();
+
+            const isSel = __fpSelectedIds.has(id) ? "checked" : "";
+
+            const catKey = String(fp && (fp.categoryKeyLower || fp.categoryKey || "") || "").trim().toLowerCase();
+            const catObj = catKey ? (finishedProductCategoriesMap.get(catKey) || null) : null;
+            const catName = String((catObj && (catObj.name || catObj.label || catObj.key)) || (catKey || "")).trim();
+            const catHtml = catName ? escapeHtml(catName) : '<span class="td-muted">—</span>';
+
             const comps = Array.isArray(fp && (fp.components || fp.bom || fp.distintaBase)) ? (fp.components || fp.bom || fp.distintaBase) : [];
             const n = comps.length;
 
             return `
-              <tr class="jsFpRow" data-fp-id="${escapeHtmlAttr(id)}" title="Apri distinta base">
+              <tr class="jsFpRow" data-fp-id="${escapeHtmlAttr(id)}">
+                <td data-label="Sel" style="text-align:center;">
+                  <input class="jsFpSel" type="checkbox" data-id="${escapeHtmlAttr(id)}" ${isSel} aria-label="Seleziona" />
+                </td>
                 <td data-label="Codice"><span class="kbd">${escapeHtml(code || "—")}</span></td>
                 <td data-label="Nome">${escapeHtml(name || "—")}</td>
-                <td data-label="Componenti" class="qty">${Number(n||0).toLocaleString("it-IT")}</td>
-                <td data-label="Azioni" style="text-align:right;">
-                  <button class="btn btn-secondary btn-xs" data-action="openFinished" data-id="${escapeHtmlAttr(id)}" type="button">Apri</button>
-                  <button class="btn btn-ghost btn-xs" data-action="deleteFinished" data-id="${escapeHtmlAttr(id)}" type="button">Elimina</button>
-                </td>
+                <td data-label="Categoria">${catHtml}</td>
               </tr>
             `;
           }).join("");
         }catch(_){
           try { if (anagTbody) anagTbody.innerHTML = `<tr><td class="td-muted" colspan="4">Errore rendering.</td></tr>`; } catch(_){}
         }
+
+        try{ __fpRenderAssignControls(); }catch(_){}
+        try{ __fpSyncSelectAllState(); }catch(_){}
         return;
       }
+
 
       if (anagTable) anagTable.classList.remove("anagTableProducts");
       // Default: fornitori
@@ -14170,7 +14361,7 @@ async function handleFileSelection(fileList) {
     if (btnReloadAnag) btnReloadAnag.addEventListener("click", () => { renderAnag(); showToast("Anagrafica aggiornata"); });
 
     // Nuovo prodotto finito
-    if (btnNewFinishedProduct) btnNewFinishedProduct.addEventListener("click", () => { try{ window.openFinishedProductModal && window.openFinishedProductModal(null); }catch(e){ console.warn(e); } });
+    if (btnNewFinishedProduct) btnNewFinishedProduct.addEventListener("click", () => { try{ setView && setView("fpCategories"); }catch(_){ } try{ showToast && showToast("Usa ‘Categorie prodotti finiti’ per gestire la BOM.", "warn"); }catch(_){ } });
 // Supplier modal
     if (supClose) supClose.addEventListener("click", closeSupplierModal);
     if (btnSupDone) btnSupDone.addEventListener("click", closeSupplierModal);
@@ -14577,7 +14768,12 @@ function __fpRenderSmartBrowse(){
     }
 
     function openFinishedProductModal(id){
-      if (!modalFinishedProduct) return;
+      if (!modalFinishedProduct) {
+        try{ showToast && showToast("Gestione componenti rimossa: usa ‘Categorie prodotti finiti’.", "warn"); }catch(_){ }
+        try{ setView && setView("fpCategories"); }catch(_){ }
+        try{ window.HubFPCategories && window.HubFPCategories.render && window.HubFPCategories.render(); }catch(_){ }
+        return;
+      }
 
       // U.M. componente: non modificabile (presa dall'anagrafica)
       try{ if (fpCompUom && fpCompUom.closest) { const f = fpCompUom.closest(".field"); if (f) f.style.display = "none"; } }catch(_){ }
@@ -14883,17 +15079,17 @@ if (fpCompPick){
           }
         }
 
-        
-        // Click riga (prodotti finiti): apri distinta base
+        // Click riga (prodotti finiti): toggle selezione (niente modale componenti)
         if (activeAnagTab === "finished") {
           const isInteractive = !!(targetEl && targetEl.closest && targetEl.closest("button, a, input, select, textarea, label"));
           if (!isInteractive) {
             const trFp = targetEl && targetEl.closest ? targetEl.closest("tr[data-fp-id]") : null;
-            const fid = trFp ? (trFp.getAttribute("data-fp-id") || "") : "";
-            if (fid) {
-              try{ window.openFinishedProductModal && window.openFinishedProductModal(fid); }catch(e){ console.warn(e); }
-return;
+            const cb = trFp ? trFp.querySelector('input.jsFpSel') : null;
+            if (cb) {
+              try { cb.checked = !cb.checked; } catch(_) {}
+              try { cb.dispatchEvent(new Event('change', { bubbles: true })); } catch(_) {}
             }
+            return;
           }
         }
 
@@ -14905,9 +15101,6 @@ const btn = targetEl && targetEl.closest ? targetEl.closest("button[data-action]
 
         if (action === "supplierDocs") { openSupplierModal(id); return; }
         if (action === "deleteSupplier") { deleteSupplierCascade(id); return; }
-        
-        if (action === "openFinished") { try{ window.openFinishedProductModal && window.openFinishedProductModal(id); }catch(e){ console.warn(e); } return; }
-if (action === "deleteFinished") { deleteFinishedProductById(id); return; }
 if (action === "openProdGroup") {
           try{
             const g = (__prodGroupsMap && __prodGroupsMap.get) ? __prodGroupsMap.get(id) : null;
@@ -14918,6 +15111,49 @@ if (action === "openProdGroup") {
           return;
         }
       });
+    }
+
+    // Prodotti finiti: selezione multipla (checkbox)
+    if (anagTable) {
+      try{
+        if (!anagTable.dataset.fpSelBound){
+          anagTable.dataset.fpSelBound = "1";
+          anagTable.addEventListener("change", (e) => {
+            try{
+              if (activeAnagTab !== "finished") return;
+              const t = e && e.target ? e.target : null;
+              if (!t) return;
+
+              // Select all
+              if (t.id === "fpSelectAll") {
+                const ids = __fpVisibleIds();
+                const on = !!t.checked;
+                for (const id of ids){
+                  if (on) __fpSelectedIds.add(id); else __fpSelectedIds.delete(id);
+                }
+                // sync UI for visible rows
+                try{
+                  document.querySelectorAll('#anagTbody input.jsFpSel').forEach(cb => { cb.checked = on; });
+                }catch(_){ }
+
+                try{ __fpRenderAssignControls(); }catch(_){ }
+                try{ __fpSyncSelectAllState(); }catch(_){ }
+                return;
+              }
+
+              // Single row checkbox
+              if (t.classList && t.classList.contains("jsFpSel")) {
+                const id = String(t.getAttribute("data-id") || "").trim();
+                if (!id) return;
+                if (t.checked) __fpSelectedIds.add(id);
+                else __fpSelectedIds.delete(id);
+                try{ __fpRenderAssignControls(); }catch(_){ }
+                try{ __fpSyncSelectAllState(); }catch(_){ }
+              }
+            }catch(_){ }
+          });
+        }
+      }catch(_){ }
     }
 btnConfirmMovement.addEventListener("click", async () => {
       // Import completo dal documento (multi-riga)
