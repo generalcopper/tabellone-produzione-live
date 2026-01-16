@@ -775,6 +775,73 @@
   }
 })();
 ;
+
+;
+/* ===== fp_categories_view.js ===== */
+// Inject "Categorie prodotti finiti" view markup into #viewFPCategories
+(function(){
+  try{
+    var root = document.getElementById("viewFPCategories");
+    if (!root) return;
+    if (root.dataset && root.dataset.injected === "1") return;
+    if (root.dataset) root.dataset.injected = "1";
+
+    root.innerHTML = `<article class="card" id="fpCategoriesCard">
+      <div class="hd">
+        <div class="overlayHeaderTitle">
+          <button class="iconBtn overlayBack" id="btnBackFPCategories" type="button" aria-label="Indietro">‹</button>
+          <h2>Categorie prodotti finiti</h2>
+        </div>
+        <div class="inlineRow" style="gap:8px; justify-content:flex-end;">
+          <div class="pill" id="pillFPCategoriesCount">0</div>
+          <button class="iconBtn" id="btnCloseFPCategories" type="button" aria-label="Chiudi">×</button>
+        </div>
+      </div>
+      <div class="bd">
+
+        <div class="inlineRow listStickyBar" style="justify-content:space-between; align-items:flex-end; gap:12px;">
+          <div class="field" style="flex: 1 1 auto; min-width: 220px;">
+            <label for="fpCatSearch">Cerca</label>
+            <input id="fpCatSearch" placeholder="Nome categoria o prodotto finito…" autocomplete="off" />
+          </div>
+          <button class="btn btn-secondary" id="btnFpCatNew" type="button">Nuova categoria</button>
+        </div>
+
+        <div id="fpCatCreateRow" class="fieldGrid" style="display:none; grid-template-columns: 1fr; gap:10px; margin-top: 6px;">
+          <div class="field" style="grid-column: 1 / -1;">
+            <label>Nuova categoria prodotti finiti</label>
+            <div class="inlineRow" style="justify-content:flex-start; gap:10px;">
+              <input id="fpCatNewName" class="qtyEditInput" type="text" placeholder="Nome categoria (es. Sacchetti 1 kg)" style="flex:1 1 260px; min-width: 220px;" />
+              <button class="btn btn-primary btn-xs" id="btnFpCatCreate" type="button">Crea</button>
+              <button class="btn btn-ghost btn-xs" id="btnFpCatCancelCreate" type="button">Annulla</button>
+            </div>
+            <div class="td-muted" style="margin-top:6px;">Definisci una distinta base per categoria e assegna i prodotti finiti: saranno configurati subito dappertutto.</div>
+          </div>
+        </div>
+
+        <div class="tableWrap" style="max-height: 520px; overflow:auto; margin-top: 10px;">
+          <table class="dataGrid" id="fpCatTable">
+            <thead>
+              <tr>
+                <th>Categoria</th>
+                <th class="qty" style="width: 110px;">Prodotti</th>
+                <th class="qty" style="width: 110px;">BOM</th>
+                <th style="width: 160px; text-align:right;">Azioni</th>
+              </tr>
+            </thead>
+            <tbody id="fpCatTbody">
+              <tr><td class="td-muted" colspan="4">Carico categorie…</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+      </div>
+    </article>`;
+  }catch(e){
+    try{ console.warn("fp_categories_view inject failed", e); }catch(_){ }
+  }
+})();
+
 /* ===== danea_ddt_download.js ===== */
 /* Scarica flussi DDT (Easyfatt-Xml/Danea) + verifica distinta base + scarico automatico componenti */
 (function(){
@@ -801,11 +868,13 @@
     cacheReady: false,
     finished: [],         // finishedProducts snapshot
     fpByCode: new Map(),  // codeLower -> fp
+    fpCats: [],
+    fpCatByKey: new Map(),
     timer: null,
     busy: false,
     hub: null,
     pendingParsed: null,  // buffer RAM (solo finché Firestore non è pronto)
-    unsub: { completed:null, finished:null, cache:null }
+    unsub: { completed:null, finished:null, cache:null, fpcats:null }
   };
 
   function $(id){ return document.getElementById(id); }
@@ -949,10 +1018,22 @@
     return S.fpByCode.get(code) || null;
   }
 
+  function getFpCategoryForFp(fp){
+    if (!fp) return null;
+    const k = norm(fp.categoryKey || fp.category || fp.catKey || fp.categoryId || "");
+    if (!k) return null;
+    return (S.fpCatByKey instanceof Map) ? (S.fpCatByKey.get(k) || null) : null;
+  }
+
   function getFpComponents(fp){
     if (!fp) return [];
     const arr = (fp.components || fp.bom || fp.distintaBase);
-    return Array.isArray(arr) ? arr : [];
+    const direct = Array.isArray(arr) ? arr : [];
+    if (direct.length > 0) return direct;
+
+    const cat = getFpCategoryForFp(fp);
+    const bom = (cat && (cat.bom || cat.components || cat.distintaBase)) || [];
+    return Array.isArray(bom) ? bom : [];
   }
 
   function isRowConfigured(row){
@@ -1908,7 +1989,46 @@ function subscribeFinishedProducts(){
     }
   }
 
-  function waitForHub(attempt){
+  
+
+function subscribeFinishedProductCategories(){
+    const H = getHub();
+    if (!H || !H.fb || !H.fb.db || !H.FS) return;
+    if (S.unsub.fpcats) return;
+
+    try{
+      const { collection, onSnapshot, query, orderBy } = H.FS;
+      const col = collection(H.fb.db, "orgs", H.ORG_ID, "finishedProductCategories");
+      const q = query(col, orderBy("nameLower", "asc"));
+      S.unsub.fpcats = onSnapshot(q, (snap) => {
+        const arr = [];
+        const map = new Map();
+        snap.forEach(docu => {
+          const d = docu.data() || {};
+          let key = String(d.key || "").trim();
+          if (!key) {
+            try{ key = decodeURIComponent(String(docu.id||"")); }catch(_){ key = String(docu.id||""); }
+          }
+          key = String(key||"").trim().toLowerCase();
+          if (!key) return;
+          const obj = Object.assign({ key }, d);
+          arr.push(obj);
+          map.set(key, obj);
+        });
+        S.fpCats = arr;
+        S.fpCatByKey = map;
+        render();
+        if (S.selected && $("daneaDetailWrap")?.style.display !== "none"){
+          renderDetail(S.selected, "verify");
+        }
+      }, (err) => {
+        console.warn("finishedProductCategories snapshot error", err);
+      });
+    }catch(e){
+      console.warn("subscribeFinishedProductCategories failed", e);
+    }
+  }
+function waitForHub(attempt){
     attempt = attempt || 0;
     const H = getHub();
     if (H && H.fb && H.fb.db && H.FS){
@@ -1916,6 +2036,7 @@ function subscribeFinishedProducts(){
       subscribeCompleted();
       subscribeCache();
       subscribeFinishedProducts();
+      subscribeFinishedProductCategories();
 
       // se abbiamo parsato XML prima che Firestore fosse pronto, sincronizza ora
       try{
@@ -2717,6 +2838,655 @@ function subscribeFinishedProducts(){
 })();
 
 
+
+
+;
+/* ===== fp_categories.js ===== */
+/* Hub Inventario — Sezione Categorie prodotti finiti
+   - CRUD categorie (collection: finishedProductCategories)
+   - BOM per categoria
+   - Assegnazione prodotti finiti (field su finishedProducts: categoryKey)
+*/
+(function(){
+  "use strict";
+
+  const S = {
+    ready:false,
+    cats:[],
+    catMap:new Map(),
+    products:[],
+    prodMap:new Map(),
+    finished:[],
+    fpByCode:new Map(),
+    selectedKey:"",
+    draft:null,
+    unsub:{ cats:null, products:null, finished:null }
+  };
+
+  function H(){ try{ return globalThis.__HUB || null; }catch(_){ return null; } }
+  function $(id){ return document.getElementById(id); }
+  function esc(s){ return String(s ?? "").replace(/[&<>"']/g, (c)=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+  function norm(s){ return String(s ?? "").trim().toLowerCase(); }
+  function keyToId(k){ return encodeURIComponent(String(k||"")); }
+
+  function slugKey(name){
+    return String(name||"")
+      .toLowerCase()
+      .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+      .replace(/[^a-z0-9]+/g, "_")
+      .replace(/^_+|_+$/g, "")
+      .replace(/_+/g, "_")
+      .slice(0, 64);
+  }
+
+  function showToast(msg, kind){
+    try{ window.HubInv?.showToast?.(msg, kind); return; }catch(_){ }
+    try{ alert(String(msg||"")); }catch(_){ }
+  }
+
+  function closeSideMenuSafe(){
+    try{ window.HubInv?.closeSideMenu?.(); }catch(_){ }
+    try{ H()?.closeSideMenu?.(); }catch(_){ }
+  }
+
+  function setViewSafe(key){
+    try{ window.HubInv?.setView?.(key); return; }catch(_){ }
+    try{ H()?.setView?.(key); }catch(_){ }
+  }
+
+  function parseQty(v){
+    const s = String(v || "").trim();
+    if (!s) return { num:null, raw:"" };
+    const m = s.match(/^(-?\d+(?:[.,]\d+)?)\s*\/\s*(\d+(?:[.,]\d+)?)$/);
+    if (m){
+      const a = Number(m[1].replace(",","."));
+      const b = Number(m[2].replace(",","."));
+      if (Number.isFinite(a) && Number.isFinite(b) && b !== 0) return { num: a/b, raw: s };
+    }
+    const n = Number(s.replace(/\./g,"").replace(",","."));
+    if (Number.isFinite(n)) return { num:n, raw:s };
+    return { num:null, raw:s };
+  }
+
+  function isActive(){
+    const v = $("viewFPCategories");
+    return !!(v && v.classList.contains("active"));
+  }
+
+  function setCreateOpen(open){
+    const row = $("fpCatCreateRow");
+    if (!row) return;
+    row.style.display = open ? "" : "none";
+    if (open){
+      try{ $("fpCatNewName")?.focus(); }catch(_){ }
+    } else {
+      try{ $("fpCatNewName").value = ""; }catch(_){ }
+    }
+  }
+
+  function setDetailOpen(open){
+    const modal = $("modalFPCategory");
+    if (!modal) return;
+    if (open){
+      modal.classList.add("open");
+      document.body.classList.add("modal-open");
+      try{ setTimeout(()=>$("fpCatEditName")?.focus(), 0); }catch(_){ }
+    } else {
+      modal.classList.remove("open");
+      try{ if (!document.querySelector(".modal.open")) document.body.classList.remove("modal-open"); }catch(_){ document.body.classList.remove("modal-open"); }
+      S.selectedKey = "";
+      S.draft = null;
+    }
+  }
+
+  function rebuildMaps(){
+    S.catMap = new Map();
+    for (const c of (S.cats || [])){
+      const k = norm(c && (c.key || c.id || ""));
+      if (k) S.catMap.set(k, c);
+    }
+    S.prodMap = new Map();
+    for (const p of (S.products || [])){
+      const code = norm(p && (p.code || ""));
+      const id = norm(p && (p.id || ""));
+      if (code) S.prodMap.set(code, p);
+      if (id && !S.prodMap.has(id)) S.prodMap.set(id, p);
+    }
+    S.fpByCode = new Map();
+    for (const fp of (S.finished || [])){
+      const code = norm(fp && (fp.code || ""));
+      if (code) S.fpByCode.set(code, fp);
+    }
+  }
+
+  function membersForKey(key){
+    const k = norm(key);
+    if (!k) return [];
+    return (S.finished || []).filter(fp => norm(fp?.categoryKey || fp?.category || fp?.catKey || "") === k);
+  }
+
+  function renderDatalists(){
+    const dlComp = $("fpCatComponentList");
+    if (dlComp){
+      const opts = (S.products || []).slice(0, 2500).map(p => {
+        const code = String(p.code || "").trim();
+        const name = String(p.name || p.nome || "").trim();
+        const label = (code && name) ? (code + " — " + name) : (name || code);
+        return `<option value="${esc(label)}"></option>`;
+      });
+      dlComp.innerHTML = opts.join("");
+    }
+
+    const dlMem = $("fpCatMemberList");
+    if (dlMem){
+      const opts = (S.finished || []).slice(0, 2500).map(fp => {
+        const code = String(fp.code || "").trim();
+        const name = String(fp.name || fp.nome || "").trim();
+        const label = (code && name) ? (code + " — " + name) : (name || code);
+        return `<option value="${esc(label)}"></option>`;
+      });
+      dlMem.innerHTML = opts.join("");
+    }
+  }
+
+  function renderList(){
+    const tbody = $("fpCatTbody");
+    const pill = $("pillFPCategoriesCount");
+    if (!tbody) return;
+
+    const q = norm($("fpCatSearch")?.value || "");
+    const list = (S.cats || []).slice().sort((a,b)=>String(a?.name||"").localeCompare(String(b?.name||""), "it", {sensitivity:"base"}));
+    const filtered = q ? list.filter(c => {
+      const nm = norm(c?.name || c?.key || "");
+      if (nm.includes(q)) return true;
+      // match on member name/code
+      const k = norm(c?.key || "");
+      if (!k) return false;
+      const mem = membersForKey(k);
+      for (const fp of mem){
+        const s = (String(fp?.code||"") + " " + String(fp?.name||fp?.nome||"")).toLowerCase();
+        if (s.includes(q)) return true;
+      }
+      return false;
+    }) : list;
+
+    if (pill) pill.textContent = String(filtered.length || 0);
+
+    if (!filtered.length){
+      tbody.innerHTML = '<tr><td class="td-muted" colspan="4">Nessuna categoria.</td></tr>';
+      return;
+    }
+
+    const rows = filtered.map(c => {
+      const key = norm(c?.key || c?.id || "");
+      const name = String(c?.name || key || "").trim() || key;
+      const memCount = membersForKey(key).length;
+      const bom = Array.isArray(c?.bom) ? c.bom : (Array.isArray(c?.components) ? c.components : []);
+      const bomCount = bom.length;
+      return `<tr class="jsFpCatRow" data-key="${esc(key)}">
+        <td>${esc(name)}</td>
+        <td class="qty">${esc(memCount)}</td>
+        <td class="qty">${esc(bomCount)}</td>
+        <td style="text-align:right;">
+          <button class="btn btn-ghost mini jsFpCatOpen" type="button">Apri</button>
+        </td>
+      </tr>`;
+    });
+
+    tbody.innerHTML = rows.join("");
+  }
+
+  function renderDetail(){
+    const key = norm(S.selectedKey);
+    const cat = key ? (S.catMap.get(key) || null) : null;
+    const d = S.draft || null;
+
+    if ($("fpCatEditKey")) $("fpCatEditKey").value = key || "";
+    if ($("fpCatEditName") && d) $("fpCatEditName").value = String(d.name || "");
+
+    const bom = (d && Array.isArray(d.bom)) ? d.bom : [];
+    if ($("fpCatBomCount")) $("fpCatBomCount").value = String(bom.length) + "";
+
+    // BOM table
+    const tb = $("fpCatCompTbody");
+    if (tb){
+      if (!bom.length){
+        tb.innerHTML = '<tr><td class="td-muted" colspan="5">Nessun componente.</td></tr>';
+      } else {
+        tb.innerHTML = bom.map((c, idx) => {
+          const code = String(c?.code||"").trim();
+          const name = String(c?.name||"").trim();
+          const qtyRaw = String(c?.qtyRaw||"").trim();
+          const qty = (c?.qty != null) ? String(c.qty) : (qtyRaw || "");
+          const uom = String(c?.uom||"").trim();
+          return `<tr class="jsFpCatCompRow" data-idx="${idx}">
+            <td>${esc(code)}</td>
+            <td>${esc(name || code)}</td>
+            <td class="qty">${esc(qty)}</td>
+            <td>${esc(uom)}</td>
+            <td style="text-align:right;"><button class="btn btn-ghost mini jsFpCatCompDel" type="button">–</button></td>
+          </tr>`;
+        }).join("");
+      }
+    }
+
+    // Members
+    const members = membersForKey(key);
+    if ($("fpCatMembersCount")) $("fpCatMembersCount").textContent = String(members.length);
+    const mtb = $("fpCatMembersTbody");
+    if (mtb){
+      if (!members.length){
+        mtb.innerHTML = '<tr><td class="td-muted" colspan="3">Nessun prodotto finito nella categoria.</td></tr>';
+      } else {
+        const rows = members.slice().sort((a,b)=>String(a?.name||"").localeCompare(String(b?.name||""),"it",{sensitivity:"base"})).map(fp => {
+          const id = String(fp?.id||"");
+          const code = String(fp?.code||"").trim();
+          const name = String(fp?.name||fp?.nome||"").trim();
+          return `<tr class="jsFpCatMemberRow" data-id="${esc(id)}">
+            <td>${esc(code)}</td>
+            <td>${esc(name || code)}</td>
+            <td style="text-align:right;"><button class="btn btn-ghost mini jsFpCatMemberDel" type="button">Rimuovi</button></td>
+          </tr>`;
+        });
+        mtb.innerHTML = rows.join("");
+      }
+    }
+
+    const meta = $("fpCatDetailMeta");
+    if (meta){
+      const bomCount = bom.length;
+      const memCount = members.length;
+      meta.textContent = `Prodotti: ${memCount} · BOM: ${bomCount}`;
+    }
+
+    const delHint = $("fpCatDeleteHint");
+    if (delHint){
+      delHint.textContent = members.length ? `Nota: eliminando la categoria verrà rimossa da ${members.length} prodotti finiti.` : "";
+    }
+  }
+
+  function openDetail(key){
+    S.selectedKey = norm(key);
+    const cat = S.catMap.get(S.selectedKey) || null;
+    S.draft = {
+      key: S.selectedKey,
+      name: String(cat?.name || cat?.key || "").trim() || S.selectedKey,
+      bom: Array.isArray(cat?.bom) ? cat.bom.slice() : (Array.isArray(cat?.components) ? cat.components.slice() : [])
+    };
+    setDetailOpen(true);
+    renderDatalists();
+    renderDetail();
+  }
+
+  async function createCategory(){
+    const h = H();
+    if (!h || !h.fb || !h.fb.db || !h.FS) { showToast("Firebase non pronto", "warn"); return; }
+    if (!h.fb.user) { showToast("Accedi con Google", "warn"); return; }
+
+    const name = String($("fpCatNewName")?.value || "").trim();
+    if (!name) { showToast("Inserisci un nome categoria", "warn"); return; }
+
+    let key = slugKey(name);
+    if (!key) key = "cat";
+
+    // avoid collisions
+    const exists = new Set((S.cats||[]).map(c => norm(c?.key || "")));
+    if (exists.has(key)){
+      let i=2;
+      while (exists.has(key + "_" + i)) i++;
+      key = key + "_" + i;
+    }
+
+    try{
+      const { doc, setDoc, serverTimestamp } = h.FS;
+      const ref = doc(h.fb.db, "orgs", h.ORG_ID, "finishedProductCategories", keyToId(key));
+      await setDoc(ref, {
+        key,
+        name,
+        nameLower: name.toLowerCase(),
+        bom: [],
+        createdAt: serverTimestamp(),
+        createdBy: h.fb.user.email || h.fb.user.uid || "",
+        updatedAt: serverTimestamp(),
+        updatedBy: h.fb.user.email || h.fb.user.uid || ""
+      }, { merge: true });
+      showToast("Categoria creata");
+      setCreateOpen(false);
+      openDetail(key);
+    }catch(e){
+      console.warn("create finishedProductCategories failed", e);
+      showToast("Errore creazione categoria", "err");
+    }
+  }
+
+  async function saveCategory(){
+    const h = H();
+    if (!h || !h.fb || !h.fb.db || !h.FS) { showToast("Firebase non pronto", "warn"); return; }
+    if (!h.fb.user) { showToast("Accedi con Google", "warn"); return; }
+
+    const key = norm(S.selectedKey);
+    if (!key) return;
+
+    const name = String($("fpCatEditName")?.value || "").trim();
+    if (!name) { showToast("Nome categoria non valido", "warn"); return; }
+
+    const bom = (S.draft && Array.isArray(S.draft.bom)) ? S.draft.bom : [];
+
+    try{
+      const { doc, setDoc, serverTimestamp } = h.FS;
+      const ref = doc(h.fb.db, "orgs", h.ORG_ID, "finishedProductCategories", keyToId(key));
+      await setDoc(ref, {
+        key,
+        name,
+        nameLower: name.toLowerCase(),
+        bom,
+        updatedAt: serverTimestamp(),
+        updatedBy: h.fb.user.email || h.fb.user.uid || ""
+      }, { merge: true });
+      showToast("Categoria salvata");
+    }catch(e){
+      console.warn("save finishedProductCategories failed", e);
+      showToast("Errore salvataggio categoria", "err");
+    }
+  }
+
+  async function deleteCategory(){
+    const h = H();
+    if (!h || !h.fb || !h.fb.db || !h.FS) { showToast("Firebase non pronto", "warn"); return; }
+    if (!h.fb.user) { showToast("Accedi con Google", "warn"); return; }
+
+    const key = norm(S.selectedKey);
+    if (!key) return;
+
+    const mem = membersForKey(key);
+    const ok = confirm(mem.length
+      ? `Eliminare questa categoria?\n\nVerrà rimossa da ${mem.length} prodotti finiti.`
+      : "Eliminare questa categoria?");
+    if (!ok) return;
+
+    try{
+      const { doc, deleteDoc, updateDoc, deleteField } = h.FS;
+
+      // remove category from finished products (best effort)
+      for (const fp of mem.slice(0, 500)){
+        const id = String(fp?.id || "");
+        if (!id) continue;
+        try{
+          await updateDoc(doc(h.fb.db, "orgs", h.ORG_ID, "finishedProducts", id), {
+            categoryKey: deleteField(),
+            categoryKeyLower: deleteField()
+          });
+        }catch(e){
+          console.warn("unassign fp from category failed", e);
+        }
+      }
+
+      await deleteDoc(doc(h.fb.db, "orgs", h.ORG_ID, "finishedProductCategories", keyToId(key)));
+      showToast("Categoria eliminata");
+      setDetailOpen(false);
+      renderList();
+    }catch(e){
+      console.warn("delete finishedProductCategories failed", e);
+      showToast("Errore eliminazione categoria", "err");
+    }
+  }
+
+  function pickCodeFromLabel(label){
+    const s = String(label || "").trim();
+    if (!s) return "";
+    const parts = s.split(" — ");
+    return String(parts[0] || "").trim();
+  }
+
+  function addBomItem(){
+    if (!S.draft) return;
+    const code = pickCodeFromLabel($("fpCatCompPick")?.value || "");
+    const q = String($("fpCatCompQty")?.value || "").trim();
+    if (!code) { showToast("Seleziona un componente", "warn"); return; }
+    if (!q) { showToast("Inserisci una quantità", "warn"); return; }
+
+    const pq = parseQty(q);
+    const p = S.prodMap.get(norm(code)) || null;
+    const name = String(p?.name || p?.nome || "").trim() || code;
+    const uom = String(p?.uom || "").trim() || "pz";
+
+    const bom = Array.isArray(S.draft.bom) ? S.draft.bom : [];
+    const existingIdx = bom.findIndex(x => norm(x?.code) === norm(code));
+
+    const item = {
+      productId: String(p?.id || "").trim() || keyToId(norm(code)),
+      code: String(code).trim(),
+      name,
+      qty: (pq.num != null) ? pq.num : null,
+      qtyRaw: pq.raw,
+      uom
+    };
+
+    if (existingIdx >= 0) bom[existingIdx] = item; else bom.push(item);
+    S.draft.bom = bom;
+
+    try{ $("fpCatCompPick").value = ""; }catch(_){ }
+    try{ $("fpCatCompQty").value = ""; }catch(_){ }
+
+    renderDetail();
+  }
+
+  function removeBomIdx(idx){
+    if (!S.draft) return;
+    const bom = Array.isArray(S.draft.bom) ? S.draft.bom : [];
+    const i = Number(idx);
+    if (!Number.isFinite(i) || i < 0 || i >= bom.length) return;
+    bom.splice(i, 1);
+    S.draft.bom = bom;
+    renderDetail();
+  }
+
+  async function addMember(){
+    const h = H();
+    if (!h || !h.fb || !h.fb.db || !h.FS) { showToast("Firebase non pronto", "warn"); return; }
+    if (!h.fb.user) { showToast("Accedi con Google", "warn"); return; }
+
+    const key = norm(S.selectedKey);
+    const code = pickCodeFromLabel($("fpCatMemberPick")?.value || "");
+    if (!key) return;
+    if (!code) { showToast("Seleziona un prodotto finito", "warn"); return; }
+
+    const fp = S.fpByCode.get(norm(code)) || null;
+    if (!fp || !fp.id){ showToast("Prodotto finito non trovato", "warn"); return; }
+
+    try{
+      const { doc, updateDoc } = h.FS;
+      await updateDoc(doc(h.fb.db, "orgs", h.ORG_ID, "finishedProducts", fp.id), {
+        categoryKey: key,
+        categoryKeyLower: key
+      });
+      showToast("Prodotto finito assegnato");
+      try{ $("fpCatMemberPick").value = ""; }catch(_){ }
+    }catch(e){
+      console.warn("assign finishedProduct failed", e);
+      showToast("Errore assegnazione prodotto finito", "err");
+    }
+  }
+
+  async function removeMemberById(id){
+    const h = H();
+    if (!h || !h.fb || !h.fb.db || !h.FS) { showToast("Firebase non pronto", "warn"); return; }
+    if (!h.fb.user) { showToast("Accedi con Google", "warn"); return; }
+
+    const fid = String(id || "").trim();
+    if (!fid) return;
+
+    try{
+      const { doc, updateDoc, deleteField } = h.FS;
+      await updateDoc(doc(h.fb.db, "orgs", h.ORG_ID, "finishedProducts", fid), {
+        categoryKey: deleteField(),
+        categoryKeyLower: deleteField()
+      });
+      showToast("Prodotto finito rimosso");
+    }catch(e){
+      console.warn("remove member failed", e);
+      showToast("Errore rimozione", "err");
+    }
+  }
+
+  function subscribe(){
+    const h = H();
+    if (!h || !h.fb || !h.fb.db || !h.FS) return false;
+    if (S.unsub.cats) return true;
+
+    try{
+      const { collection, query, orderBy, onSnapshot } = h.FS;
+
+      // categories
+      S.unsub.cats = onSnapshot(
+        query(collection(h.fb.db, "orgs", h.ORG_ID, "finishedProductCategories"), orderBy("nameLower", "asc")),
+        (snap) => {
+          const arr = [];
+          snap.forEach(d => {
+            const data = d.data() || {};
+            let key = String(data.key || "").trim();
+            if (!key){
+              try{ key = decodeURIComponent(String(d.id||"")); }catch(_){ key = String(d.id||""); }
+            }
+            key = norm(key);
+            if (!key) return;
+            arr.push(Object.assign({ key }, data));
+          });
+          S.cats = arr;
+          rebuildMaps();
+          if (isActive()) renderList();
+          if (S.selectedKey) renderDetail();
+        },
+        (err) => console.warn("finishedProductCategories watch error", err)
+      );
+
+      // finished products
+      S.unsub.finished = onSnapshot(
+        query(collection(h.fb.db, "orgs", h.ORG_ID, "finishedProducts"), orderBy("nameLower", "asc")),
+        (snap) => {
+          const arr = [];
+          snap.forEach(d => arr.push(Object.assign({ id:d.id }, (d.data()||{}))));
+          S.finished = arr;
+          rebuildMaps();
+          if (isActive()) renderList();
+          if (S.selectedKey) renderDetail();
+          renderDatalists();
+        },
+        (err) => console.warn("finishedProducts watch error", err)
+      );
+
+      // products (components)
+      S.unsub.products = onSnapshot(
+        query(collection(h.fb.db, "orgs", h.ORG_ID, "products"), orderBy("nameLower", "asc")),
+        (snap) => {
+          const arr = [];
+          snap.forEach(d => arr.push(Object.assign({ id:d.id }, (d.data()||{}))));
+          S.products = arr;
+          rebuildMaps();
+          renderDatalists();
+          if (S.selectedKey) renderDetail();
+        },
+        (err) => console.warn("products watch error", err)
+      );
+
+      return true;
+    }catch(e){
+      console.warn("subscribe fp_categories failed", e);
+      return false;
+    }
+  }
+
+  function bindEvents(){
+    // menu
+    $("menuGoFinishedCategories")?.addEventListener("click", (e) => {
+      e.preventDefault();
+      closeSideMenuSafe();
+      setViewSafe("fpCategories");
+      setCreateOpen(false);
+      renderDatalists();
+      renderList();
+    });
+
+    // close/back
+    $("btnBackFPCategories")?.addEventListener("click", ()=>{ setCreateOpen(false); try{ setDetailOpen(false); }catch(_){ } setViewSafe("home"); });
+    $("btnCloseFPCategories")?.addEventListener("click", ()=>{ setCreateOpen(false); try{ setDetailOpen(false); }catch(_){ } setViewSafe("home"); });
+
+    // list actions
+    $("fpCatSearch")?.addEventListener("input", ()=>{ if (isActive()) renderList(); });
+    $("btnFpCatNew")?.addEventListener("click", ()=> setCreateOpen(true));
+    $("btnFpCatCancelCreate")?.addEventListener("click", ()=> setCreateOpen(false));
+    $("btnFpCatCreate")?.addEventListener("click", ()=> createCategory());
+
+    $("fpCatTbody")?.addEventListener("click", (e) => {
+      const tr = e.target?.closest?.("tr.jsFpCatRow");
+      if (!tr) return;
+      const key = String(tr.getAttribute("data-key") || "").trim();
+      if (!key) return;
+      e.preventDefault(); e.stopPropagation();
+      openDetail(key);
+    });
+
+    // modal close
+    $("btnFpCatDone")?.addEventListener("click", ()=> setDetailOpen(false));
+    $("fpCatModalClose")?.addEventListener("click", ()=> setDetailOpen(false));
+    $("modalFPCategory")?.addEventListener("click", (e)=>{ if (e.target === $("modalFPCategory")) setDetailOpen(false); });
+
+    // modal actions
+    $("btnFpCatCompAdd")?.addEventListener("click", ()=> addBomItem());
+    $("btnFpCatMemberAdd")?.addEventListener("click", ()=> addMember());
+    $("btnFpCatSave")?.addEventListener("click", ()=> saveCategory());
+    $("btnFpCatDelete")?.addEventListener("click", ()=> deleteCategory());
+
+    $("fpCatCompTbody")?.addEventListener("click", (e) => {
+      const btn = e.target?.closest?.("button.jsFpCatCompDel");
+      const tr = e.target?.closest?.("tr.jsFpCatCompRow");
+      if (!btn || !tr) return;
+      const idx = tr.getAttribute("data-idx");
+      removeBomIdx(idx);
+    });
+
+    $("fpCatMembersTbody")?.addEventListener("click", (e) => {
+      const btn = e.target?.closest?.("button.jsFpCatMemberDel");
+      const tr = e.target?.closest?.("tr.jsFpCatMemberRow");
+      if (!btn || !tr) return;
+      const id = tr.getAttribute("data-id");
+      removeMemberById(id);
+    });
+
+    // enter to add
+    $("fpCatCompQty")?.addEventListener("keydown", (e)=>{ if (e.key === "Enter") { e.preventDefault(); addBomItem(); } });
+    $("fpCatMemberPick")?.addEventListener("keydown", (e)=>{ if (e.key === "Enter") { e.preventDefault(); addMember(); } });
+  }
+
+  function refresh(){
+    bindEvents();
+    subscribe();
+    renderDatalists();
+    if (isActive()) renderList();
+    S.ready = true;
+  }
+
+  function waitForHub(attempt){
+    attempt = attempt || 0;
+    const h = H();
+    if (h && h.fb && h.fb.db && h.FS){
+      refresh();
+      return;
+    }
+    if (attempt > 200) return;
+    setTimeout(()=>waitForHub(attempt+1), 100);
+  }
+
+  if (document.readyState === "loading"){
+    document.addEventListener("DOMContentLoaded", ()=>waitForHub(0));
+  } else {
+    waitForHub(0);
+  }
+
+  // expose (optional)
+  window.HubFPCategories = window.HubFPCategories || {};
+  window.HubFPCategories.render = function(){ try{ renderList(); }catch(_){ } };
+})();
 ;
 /* ===== prodotti.js ===== */
 /* ============================================================
@@ -3246,7 +4016,8 @@ function subscribeFinishedProducts(){
       trash: document.getElementById("viewTrash"),
       moveInv: document.getElementById("viewMoveInventory"),
       anag: document.getElementById("viewAnag"),
-      daneaDdt: document.getElementById("viewDaneaDdt")
+      daneaDdt: document.getElementById("viewDaneaDdt"),
+      fpCategories: document.getElementById("viewFPCategories")
     };
     const __hdrTitle = document.getElementById("hdrPageTitle");
     const __btnBack = document.getElementById("btnNavBack");
@@ -3259,7 +4030,7 @@ function subscribeFinishedProducts(){
     // Porta overlay/modali come figli diretti di <body> per evitare stacking-context (transform/filter) sui parent
     (function __liftOverlaysToBody(){
       try{
-        ["viewOcr","viewInventory","viewFlows","viewDaneaDdt","viewMovements","viewMoveInventory","viewCategories","viewTrash","viewAnag"].forEach(id => {
+        ["viewOcr","viewInventory","viewFlows","viewDaneaDdt","viewMovements","viewMoveInventory","viewCategories","viewFPCategories","viewTrash","viewAnag"].forEach(id => {
           const el = document.getElementById(id);
           if (el && el.parentElement !== document.body) document.body.appendChild(el);
         });
@@ -3373,7 +4144,7 @@ function subscribeFinishedProducts(){
 
     function setView(name){
       const key = String(name || "home");
-      const overlayKeys = ["ocr","inventory","flows","daneaDdt","movements","moveInv","categories","trash","anag"];
+      const overlayKeys = ["ocr","inventory","flows","daneaDdt","movements","moveInv","categories","fpCategories","trash","anag"];
       const isOverlay = overlayKeys.includes(key);
 
       // Home resta sempre visibile dietro (come un gestionale iOS)
@@ -3417,6 +4188,7 @@ function subscribeFinishedProducts(){
           (key === "flows") ? "DDT Caricati" :
           (key === "movements") ? "Movimenti" :
           (key === "categories") ? "Categorie" :
+          (key === "fpCategories") ? "Categorie prodotti finiti" :
           (key === "trash") ? "Cestino" :
           (key === "moveInv") ? "Sposta inventario" :
           "Anagrafica";
