@@ -1429,7 +1429,35 @@ Righe: ${st.total}`);
       }
 
       // 2) inventario globale: calcola disponibilità per sede (ignorando fornitore)
-      const movs = (H.state && Array.isArray(H.state.movements)) ? H.state.movements : [];
+      let movs = (H.state && Array.isArray(H.state.movements)) ? H.state.movements : [];
+
+      // Se l'app ha appena aperto, può capitare che lo snapshot dei movimenti non sia
+      // ancora arrivato: in quel caso facciamo un fetch one-shot e poi riproviamo.
+      if (!movs.length){
+        try{
+          const FS = H.FS || {};
+          if (H.fb && H.fb.db && typeof FS.getDocs === "function" && typeof FS.collection === "function" && typeof FS.query === "function" && typeof FS.orderBy === "function"){
+            try{ H.showToast?.("Carico inventario…", "warn"); }catch(_){ }
+            const col = FS.collection(H.fb.db, "orgs", H.ORG_ID, "inventoryMovements");
+            const q = FS.query(col, FS.orderBy("createdAt"));
+            const snap = await FS.getDocs(q);
+            movs = snap.docs.map(d => {
+              const data = d.data() || {};
+              return {
+                id: d.id,
+                type: data.type || "IN",
+                code: data.code || "",
+                qty: data.qty,
+                warehouse: data.warehouse || ""
+              };
+            });
+            if (H.state) H.state.movements = movs;
+          }
+        }catch(e){
+          try{ console.warn("fetch inventoryMovements failed", e); }catch(_){ }
+        }
+      }
+
       if (!movs.length){
         alert("Inventario non pronto: movimenti non caricati.");
         return;
@@ -1439,7 +1467,10 @@ Righe: ${st.total}`);
         try{
           if (H && typeof H.normalizeWarehouse === "function") return H.normalizeWarehouse(w);
         }catch(_){}
-        return normalizeWarehouse(w);
+        // fallback minimale (nel caso il bridge non esponga normalizeWarehouse)
+        const s = String(w || "").trim().toLowerCase();
+        if (s.includes("conca") || s.includes("concamarise")) return "concamarise";
+        return "cerea";
       };
       const _safeInt = (v) => {
         try{
@@ -5558,6 +5589,15 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
         globalThis.__HUB.setView = setView;
         globalThis.__HUB.closeSideMenu = closeSideMenu;
         globalThis.__HUB.orgCol = orgCol;
+
+        // Espone anche state + util: serve a moduli esterni (es. Scarica Flussi DDT)
+        // per poter leggere movimenti inventario e normalizzazioni.
+        globalThis.__HUB.state = state;
+        globalThis.__HUB.safeInt = safeInt;
+        globalThis.__HUB.normalizeWarehouse = normalizeWarehouse;
+        globalThis.__HUB.warehouseLabel = warehouseLabel;
+        globalThis.__HUB.showToast = showToast;
+        globalThis.__HUB.openModal = openModal;
         globalThis.__HUB.FS = (()=>{
           const FS = {
             collection, doc, setDoc, addDoc, deleteDoc, getDocs,
