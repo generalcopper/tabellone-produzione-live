@@ -2894,6 +2894,56 @@ function waitForHub(attempt){
     try{ H()?.setView?.(key); }catch(_){ }
   }
 
+  // UI patch: modal categoria prodotti finiti
+  // - niente aggiunta prodotti finiti qui (si fa da sezione Prodotti finiti)
+  // - input componenti: niente datalist infinito (solo ricerca intelligente)
+  // - modal full-screen con margini
+  function __fpCatPatchModalUI(){
+    try{
+      const modal = $("modalFPCategory");
+      if (!modal) return;
+
+      // CSS full screen (desktop: con margini del backdrop, mobile: full)
+      try{
+        if (!document.getElementById("fpCatFullCss")){
+          const st = document.createElement("style");
+          st.id = "fpCatFullCss";
+          st.textContent = `
+#modalFPCategory .modalProductContent{\n  width: calc(100vw - 32px) !important;\n  max-width: none !important;\n  height: calc(100dvh - var(--header-h) - 32px) !important;\n  max-height: calc(100dvh - var(--header-h) - 32px) !important;\n}\n@media (max-width: 768px){\n  #modalFPCategory .modalProductContent{\n    width: 100vw !important;\n    height: calc(100dvh - var(--header-h)) !important;\n    max-height: none !important;\n  }\n}`;
+          document.head.appendChild(st);
+        }
+      }catch(_){ }
+
+      // Subtitle coerente col nuovo workflow
+      try{
+        const sub = $("fpCatModalSub");
+        if (sub) sub.textContent = "Crea la distinta base (componenti) e visualizza i prodotti finiti associati. I prodotti si aggiungono da sezione Prodotti finiti.";
+      }catch(_){ }
+
+      // Rimuovi datalist infinito su componenti (solo ricerca intelligente)
+      try{
+        const comp = $("fpCatCompPick");
+        if (comp) comp.removeAttribute("list");
+      }catch(_){ }
+      try{ const dl = $("fpCatComponentList"); if (dl) dl.innerHTML = ""; }catch(_){ }
+
+      // Nascondi UI aggiunta prodotti finiti (si aggiungono altrove)
+      try{
+        const inp = $("fpCatMemberPick");
+        if (inp){
+          const row = inp.closest?.(".inlineRow") || inp.parentElement;
+          if (row) row.style.display = "none";
+          inp.disabled = true;
+        }
+      }catch(_){ }
+      try{ const btn = $("btnFpCatMemberAdd"); if (btn){ const r = btn.closest?.(".inlineRow") || btn.parentElement; if (r) r.style.display = "none"; btn.disabled = true; } }catch(_){ }
+      try{ const w = $("fpCatMemberSuggestWrap"); if (w) w.style.display = "none"; }catch(_){ }
+      try{ const dlm = $("fpCatMemberList"); if (dlm) dlm.innerHTML = ""; }catch(_){ }
+
+    }catch(_){ }
+  }
+
+
   function parseQty(v){
     const s = String(v || "").trim();
     if (!s) return { num:null, raw:"" };
@@ -2929,6 +2979,7 @@ function waitForHub(attempt){
     if (!modal) return;
     if (open){
       modal.classList.add("open");
+      try{ __fpCatPatchModalUI(); }catch(_){ }
       document.body.classList.add("modal-open");
       try{ setTimeout(()=>$("fpCatEditName")?.focus(), 0); }catch(_){ }
     } else {
