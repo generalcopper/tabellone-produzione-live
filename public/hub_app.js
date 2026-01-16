@@ -2549,6 +2549,8 @@ function waitForHub(attempt){
     renderDetail();
   }
 
+
+
   function isActive(){
     const v = $("viewCategories");
     return !!(v && v.classList.contains("active"));
@@ -2914,6 +2916,62 @@ function waitForHub(attempt){
         }
       }catch(_){ }
 
+      // CSS: header/footer fissi, body scroll (tasti sempre visibili)
+      try{
+        if (!document.getElementById("fpCatDockCss")){
+          const st2 = document.createElement("style");
+          st2.id = "fpCatDockCss";
+          st2.textContent = `
+#modalFPCategory .modalProductContent{
+  padding: 0 !important;
+  display: flex !important;
+  flex-direction: column !important;
+  gap: 0 !important;
+  overflow: hidden !important;
+}
+#modalFPCategory .fpCatModalHeader{
+  flex: 0 0 auto;
+  padding: 18px 18px 12px;
+  background: #fff;
+  border-bottom: 1px solid rgba(0,0,0,.08);
+}
+#modalFPCategory .fpCatModalBody{
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 16px 18px;
+  -webkit-overflow-scrolling: touch;
+}
+#modalFPCategory .fpCatModalFooter{
+  flex: 0 0 auto;
+  padding: 12px 18px calc(12px + var(--safe-bot));
+  background: #fff;
+  border-top: 1px solid rgba(0,0,0,.08);
+}
+@media (max-width: 768px){
+  #modalFPCategory .fpCatModalHeader{ padding: 14px 14px 10px; }
+  #modalFPCategory .fpCatModalBody{ padding: 12px 14px; }
+  #modalFPCategory .fpCatModalFooter{ padding: 10px 14px calc(10px + var(--safe-bot)); }
+}
+`;
+          document.head.appendChild(st2);
+        }
+      }catch(_){ }
+
+      // CSS: tabella componenti (BOM) senza righe azzurre, identica alle altre dataGrid
+      try{
+        if (!document.getElementById("fpCatBomTableCss")){
+          const st3 = document.createElement("style");
+          st3.id = "fpCatBomTableCss";
+          st3.textContent = `
+#modalFPCategory #fpCatCompTable tbody tr td{ background: transparent !important; }
+#modalFPCategory #fpCatCompTable tbody tr:hover td{ background: rgba(11,31,58,.04) !important; }
+`;
+          document.head.appendChild(st3);
+        }
+      }catch(_){ }
+
       // Subtitle coerente col nuovo workflow
       try{
         const sub = $("fpCatModalSub");
@@ -2940,6 +2998,40 @@ function waitForHub(attempt){
       try{ const w = $("fpCatMemberSuggestWrap"); if (w) w.style.display = "none"; }catch(_){ }
       try{ const dlm = $("fpCatMemberList"); if (dlm) dlm.innerHTML = ""; }catch(_){ }
 
+// Collassa lista prodotti finiti: visibile solo cliccando "Prodotti: X · BOM: Y"
+try{
+  const meta = $("fpCatDetailMeta");
+  const membersTable = $("fpCatMembersTable");
+  const membersStack = membersTable ? membersTable.closest(".stack") : null;
+  if (meta && membersStack){
+    // default: chiuso
+    membersStack.style.display = "none";
+    meta.style.cursor = "pointer";
+    meta.title = "Clicca per mostrare/nascondere i prodotti finiti";
+    meta.setAttribute("role","button");
+    meta.setAttribute("tabindex","0");
+
+    if (!(meta.dataset && meta.dataset.fpToggleBound === "1")){
+      if (meta.dataset) meta.dataset.fpToggleBound = "1";
+      const toggle = () => {
+        const open = membersStack.style.display !== "none";
+        membersStack.style.display = open ? "none" : "";
+      };
+      meta.addEventListener("click", (e)=>{
+        try{ e.preventDefault(); e.stopPropagation(); }catch(_){}
+        toggle();
+      });
+      meta.addEventListener("keydown", (e)=>{
+        if (!e) return;
+        if (e.key === "Enter" || e.key === " "){
+          e.preventDefault();
+          toggle();
+        }
+      });
+    }
+  }
+}catch(_){ }
+
     }catch(_){ }
   }
 
@@ -2957,6 +3049,184 @@ function waitForHub(attempt){
     if (Number.isFinite(n)) return { num:n, raw:s };
     return { num:null, raw:s };
   }
+
+  // ===== Smart qty parsing/conversion (componenti in distinta base) =====
+  // Permette di scrivere nel campo di ricerca: "... 20 gr" / "... 0,02 kg" / "... 250 ml".
+  // Se il componente è in kg e scrivi "20 gr", verrà precompilato automaticamente "0,02" nella Q.tà.
+  let __fpCatPendingCompQty = null; // { qty:Number, uom:"g|kg|ton|ml|lt|pz|nr" }
+
+  function __fpCatNormUom(v){
+    try{ if (typeof __normalizeUom === "function") return __normalizeUom(v); }catch(_){ }
+    const raw = String(v ?? "").trim().toLowerCase();
+    if (!raw) return "";
+    let k = raw.replace(/\s+/g, "").replace(/[,;:]/g, "").replace(/\.+$/g, "");
+    k = k.replace(/º/g, "°");
+
+    if (k === "pz" || k === "p.z" || k === "p.z." || k === "pc" || k === "pcs" || k === "pezzi") return "pz";
+    if (k === "nr" || k === "n" || k === "n°" || k === "no") return "nr";
+
+    if (k === "kg" || k === "kgs" || k === "k" || k === "kilo" || k === "kilogrammi" || k === "kilogrammo") return "kg";
+    if (k === "g" || k === "gr" || k === "grammi" || k === "grammo") return "g";
+    if (k === "ton" || k === "tons" || k === "tonn" || k === "tonne" || k === "t" || k === "tonnellate" || k === "tonnellata") return "ton";
+
+    if (k === "l" || k === "lt" || k === "ltri" || k === "litri" || k === "litro" || k === "litri." || k === "litro.") return "lt";
+    if (k === "ml" || k === "millilitri" || k === "millilitro") return "ml";
+
+    return "";
+  }
+
+  function __fpCatParseNumPart(v){
+    let s = String(v ?? "").trim().replace(/\s+/g, "");
+    if (!s) return null;
+    // se ho sia . che , assumo . come separatore migliaia e , come decimale
+    if (s.includes(",") && s.includes(".")) s = s.replace(/\./g, "").replace(",", ".");
+    else if (s.includes(",")) s = s.replace(",", ".");
+    // solo . => decimale
+    const n = Number(s);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  function __fpCatParseNumSmart(v){
+    const s0 = String(v ?? "").trim();
+    if (!s0) return null;
+    const s = s0.replace(/\s+/g, "");
+    if (s.includes("/")){
+      const parts = s.split("/");
+      if (parts.length === 2){
+        const a = __fpCatParseNumPart(parts[0]);
+        const b = __fpCatParseNumPart(parts[1]);
+        if (Number.isFinite(a) && Number.isFinite(b) && b !== 0) return a / b;
+      }
+      return null;
+    }
+    return __fpCatParseNumPart(s);
+  }
+
+  function __fpCatExtractTrailingQty(raw){
+    const s0 = String(raw || "").trim();
+    if (!s0) return { clean:"", qty:null, uom:"", qtyRaw:"" };
+
+    // cattura solo se c'è l'unità in coda (kg/gr/ml/lt/ton/pz/nr)
+    const m = s0.match(/^(.*?)(?:\s+|^)(-?\d+(?:[\.,]\d+)?|-?\d+\s*\/\s*\d+(?:[\.,]\d+)?)\s*(nr\.?|n\.?|n°|pz\.?|p\.?z\.?|pcs?|kg(?:s)?\.?|g(?:r|rammi|rammo)?\.?|ml\.?|l(?:t|itri|itro)?\.?|lt\.?|ton(?:nellate|nellata|ne|n|s)?\.?|t)\s*$/i);
+    if (!m) return { clean:s0, qty:null, uom:"", qtyRaw:"" };
+
+    const clean = String(m[1] || "").trim();
+    const qtyStr = String(m[2] || "").trim();
+    const uom = __fpCatNormUom(m[3] || "");
+    const qty = __fpCatParseNumSmart(qtyStr);
+
+    if (!uom || !Number.isFinite(qty)) return { clean:s0, qty:null, uom:"", qtyRaw:"" };
+    return { clean, qty, uom, qtyRaw: qtyStr };
+  }
+
+  function __fpCatExtractQtyOnly(raw){
+    const s0 = String(raw || "").trim();
+    if (!s0) return { qty:null, uom:"", qtyRaw:"" };
+    const m = s0.match(/^(-?\d+(?:[\.,]\d+)?|-?\d+\s*\/\s*\d+(?:[\.,]\d+)?)\s*(nr\.?|n\.?|n°|pz\.?|p\.?z\.?|pcs?|kg(?:s)?\.?|g(?:r|rammi|rammo)?\.?|ml\.?|l(?:t|itri|itro)?\.?|lt\.?|ton(?:nellate|nellata|ne|n|s)?\.?|t)\s*$/i);
+    if (!m) return { qty:null, uom:"", qtyRaw:"" };
+    const qtyStr = String(m[1] || "").trim();
+    const uom = __fpCatNormUom(m[2] || "");
+    const qty = __fpCatParseNumSmart(qtyStr);
+    if (!uom || !Number.isFinite(qty)) return { qty:null, uom:"", qtyRaw:"" };
+    return { qty, uom, qtyRaw: qtyStr };
+  }
+
+  function __fpCatConvertQty(qty, fromUom, toUom){
+    const a = __fpCatNormUom(fromUom);
+    const b = __fpCatNormUom(toUom);
+    const q = Number(qty);
+    if (!a || !b || !Number.isFinite(q)) return null;
+    if (a === b) return q;
+
+    // pezzi: nr <-> pz
+    if ((a === "pz" || a === "nr") && (b === "pz" || b === "nr")) return q;
+
+    // massa: g <-> kg <-> ton
+    const mass = new Set(["g","kg","ton"]);
+    if (mass.has(a) && mass.has(b)){
+      const toG = (u, v) => (u === "g") ? v : (u === "kg") ? (v * 1000) : (v * 1000 * 1000);
+      const fromG = (u, g) => (u === "g") ? g : (u === "kg") ? (g / 1000) : (g / (1000 * 1000));
+      const g = toG(a, q);
+      return fromG(b, g);
+    }
+
+    // volume: ml <-> lt
+    const vol = new Set(["ml","lt"]);
+    if (vol.has(a) && vol.has(b)){
+      const toMl = (u, v) => (u === "ml") ? v : (v * 1000);
+      const fromMl = (u, ml) => (u === "ml") ? ml : (ml / 1000);
+      const ml = toMl(a, q);
+      return fromMl(b, ml);
+    }
+
+    return null;
+  }
+
+  function __fpCatFmtNum(v){
+    try{
+      const n = Number(v);
+      if (!Number.isFinite(n)) return "";
+      return n.toLocaleString("it-IT", { maximumFractionDigits: 6 });
+    }catch(_){
+      return String(v ?? "");
+    }
+  }
+
+  function __fpCatUpdatePendingFromPick(rawAll){
+    const parsed = __fpCatExtractTrailingQty(rawAll);
+    if (parsed && parsed.qty != null && parsed.uom){
+      __fpCatPendingCompQty = { qty: Number(parsed.qty), uom: String(parsed.uom) };
+      return String(parsed.clean || "").trim();
+    }
+    __fpCatPendingCompQty = null;
+    return String(rawAll || "").trim();
+  }
+
+  function __fpCatAutofillQtyFromPending(code, uomHint){
+    try{
+      const pend = __fpCatPendingCompQty;
+      if (!pend || pend.qty == null || !pend.uom) { __fpCatPendingCompQty = null; return; }
+
+      const qtyEl = $("fpCatCompQty");
+      if (qtyEl && String(qtyEl.value || "").trim()) { __fpCatPendingCompQty = null; return; }
+
+      // target uom: dal suggerimento o dal prodotto
+      let targetUom = __fpCatNormUom(uomHint);
+      if (!targetUom){
+        const p = S && S.prodMap ? (S.prodMap.get(norm(code)) || null) : null;
+        targetUom = __fpCatNormUom(p && (p.uom || p.um || ""));
+      }
+      if (!targetUom) { __fpCatPendingCompQty = null; return; }
+
+      const conv = __fpCatConvertQty(pend.qty, pend.uom, targetUom);
+      if (conv == null) { __fpCatPendingCompQty = null; return; }
+
+      if (qtyEl) qtyEl.value = __fpCatFmtNum(conv);
+    }catch(_){ }
+    __fpCatPendingCompQty = null;
+  }
+
+  function __fpCatParseQtyForTarget(rawQty, targetUom){
+    const s0 = String(rawQty || "").trim();
+    if (!s0) return { num:null, raw:"" };
+
+    const target = __fpCatNormUom(targetUom) || "";
+
+    // se l'utente ha scritto anche l'unità (es. "20 gr"), converti
+    const pu = __fpCatExtractQtyOnly(s0);
+    if (pu && pu.qty != null && pu.uom && target){
+      const conv = __fpCatConvertQty(pu.qty, pu.uom, target);
+      if (conv != null) return { num: conv, raw: __fpCatFmtNum(conv) };
+    }
+
+    // fallback: numero/frazione senza unità
+    const n = __fpCatParseNumSmart(s0);
+    if (Number.isFinite(n)) return { num: n, raw: s0 };
+
+    // ultimo fallback (vecchia logica)
+    try{ return parseQty(s0); }catch(_){ return { num:null, raw:s0 }; }
+  }
+
 
   function isActive(){
     const v = $("viewFPCategories");
@@ -3079,14 +3349,115 @@ function waitForHub(attempt){
 
   function __fpCatGetMatchList(kind, raw){
     const qRaw = String(raw || "").trim();
-    const qKey = __fpCatKey(qRaw);
+
+    // Components: support "categoria + dettagli" (es. "scatola 20 kg", "bobina 480")
+    // - se la prima parola sembra una categoria, filtra subito su quella
+    // - il resto del testo restringe ulteriormente i risultati
+    let compCat = "";
+    let compRest = qRaw;
+
+    if (kind !== "member"){
+      try{
+        const toks = __fpCatKey(qRaw).split(" ").filter(Boolean);
+        if (toks.length){
+          const stem = (w)=>{
+            let s = String(w||"").toLowerCase().trim().replace(/[^a-z0-9]+/g,"");
+            if (!s) return "";
+            if (/[aeiou]$/.test(s) && s.length > 3) s = s.slice(0,-1); // scatola->scatol, bobina->bobin
+            return s;
+          };
+
+          const getProdCat = (it)=>{
+            try{
+              const code = String(it?.code || "").trim().toLowerCase();
+              let cat = "";
+              if (typeof window.getMacroCategoryForCode === "function"){
+                cat = String(window.getMacroCategoryForCode(code) || "").trim().toLowerCase();
+              }
+              if (!cat){
+                cat = String(it?.categoryKey || it?.category || it?.catKey || it?.cat || it?.macroCategory || it?.macro || "").trim().toLowerCase();
+              }
+              cat = cat.replace(/\s+/g,"_")
+                .replace(/[^a-z0-9_]+/g,"_")
+                .replace(/_+/g,"_")
+                .replace(/^_+|_+$/g,"");
+              return cat;
+            }catch(_){ return ""; }
+          };
+
+          // elenco categorie presenti sui prodotti
+          const catsSet = new Set();
+          const list0 = (S.products || []);
+          for (let i=0; i<list0.length; i++){
+            const c = getProdCat(list0[i]);
+            if (c) catsSet.add(c);
+          }
+          const cats = Array.from(catsSet);
+
+          const matchTokToCat = (tok)=>{
+            const t0 = stem(tok);
+            if (!t0) return "";
+            for (const c of cats){
+              const parts = String(c||"").split("_").filter(Boolean);
+              for (const w of parts){
+                const ws = stem(w);
+                if (!ws) continue;
+                if (ws === t0 || ws.startsWith(t0) || t0.startsWith(ws)) return c;
+              }
+            }
+            return "";
+          };
+
+          let usedIdx = -1;
+          compCat = matchTokToCat(toks[0]) || "";
+          if (compCat) usedIdx = 0;
+
+          if (!compCat){
+            for (let i=0; i<toks.length; i++){
+              const c = matchTokToCat(toks[i]);
+              if (c){ compCat = c; usedIdx = i; break; }
+            }
+          }
+
+          if (compCat && usedIdx >= 0){
+            const rest = toks.filter((_,i)=> i !== usedIdx);
+            compRest = rest.join(" ").trim();
+          }
+        }
+      }catch(_){}
+    }
+
+    const qKey = __fpCatKey(compRest);
     const qNo = qKey.replace(/\s+/g, "");
-    if (!qNo) return [];
+    // se ho riconosciuto la categoria, posso mostrare tutto anche senza dettagli
+    const wantAllInCat = !!(kind !== "member" && compCat && !qNo);
+
+    if (!qNo && !wantAllInCat) return [];
 
     const list = (kind === "member") ? (S.finished || []) : (S.products || []);
     const already = (kind === "member" && S.selectedKey)
       ? new Set(membersForKey(S.selectedKey).map(x => norm(x?.code || "")))
       : null;
+
+    const cap = (kind !== "member" && compCat) ? 300 : 40;
+
+    const getProdCat2 = (it)=>{
+      try{
+        const code = String(it?.code || "").trim().toLowerCase();
+        let cat = "";
+        if (typeof window.getMacroCategoryForCode === "function"){
+          cat = String(window.getMacroCategoryForCode(code) || "").trim().toLowerCase();
+        }
+        if (!cat){
+          cat = String(it?.categoryKey || it?.category || it?.catKey || it?.cat || it?.macroCategory || it?.macro || "").trim().toLowerCase();
+        }
+        cat = cat.replace(/\s+/g,"_")
+          .replace(/[^a-z0-9_]+/g,"_")
+          .replace(/_+/g,"_")
+          .replace(/^_+|_+$/g,"");
+        return cat;
+      }catch(_){ return ""; }
+    };
 
     const out = [];
     for (const it of list){
@@ -3094,17 +3465,27 @@ function waitForHub(attempt){
       const name = String(it?.name || it?.nome || "").trim();
       if (!code && !name) continue;
 
-      const sc = __fpCatScore(code, name, qKey);
-      if (sc < 0) continue;
+      if (kind !== "member" && compCat){
+        const ccat = getProdCat2(it);
+        if (ccat !== compCat) continue;
+      }
+
+      let sc = 0;
+      if (wantAllInCat){
+        sc = 50;
+      } else {
+        sc = __fpCatScore(code, name, qKey);
+        if (sc < 0) continue;
+      }
 
       const uom = String(it?.uom || it?.um || it?.unit || "").trim();
       const disabled = !!(already && code && already.has(norm(code)));
 
-      out.push({ code, name, uom, score: sc, disabled });
+      out.push({ code, name, uom, score: sc, disabled, __cat: compCat || "" });
     }
 
     out.sort((a,b) => (b.score - a.score) || String(a.name||a.code||"").localeCompare(String(b.name||b.code||""), "it", { sensitivity:"base" }));
-    return out.slice(0, 40);
+    return out.slice(0, cap);
   }
 
   function __fpCatHideSuggest(kind){
@@ -3120,7 +3501,8 @@ function waitForHub(attempt){
     const listEl = $(kind === "member" ? "fpCatMemberSuggest" : "fpCatCompSuggest");
     if (!input || !wrap || !listEl) return;
 
-    const raw = String(input.value || "").trim();
+    const rawAll = String(input.value || "").trim();
+    const raw = (kind !== "member") ? __fpCatUpdatePendingFromPick(rawAll) : rawAll;
     const qNo = __fpCatKey(raw).replace(/\s+/g, "");
     if (!qNo){
       __fpCatHideSuggest(kind);
@@ -3133,7 +3515,10 @@ function waitForHub(attempt){
       return;
     }
 
-    listEl.innerHTML = matches.map(m => {
+    const __cat = (kind !== "member" && matches[0] && matches[0].__cat) ? String(matches[0].__cat||"") : "";
+    const __catLabel = __cat ? __cat.replace(/_/g," ") : "";
+    const __head = __catLabel ? ('<div class="td-muted" style="padding:8px 10px; font-weight:900;">Categoria: ' + esc(__catLabel) + '</div>') : '';
+    listEl.innerHTML = __head + matches.map(m => {
       const label = __fpCatBuildLabel(m.code, m.name);
       const right = m.uom ? ('<span class="kbd" style="margin-left:10px;">' + esc('U.M. ' + m.uom) + '</span>') : '';
       const sub = m.disabled ? '<span class="td-muted" style="font-size:12px; font-weight:900; margin-left:10px;">Già in categoria</span>' : '';
@@ -3198,21 +3583,91 @@ function waitForHub(attempt){
     const pill = $("pillFPCategoriesCount");
     if (!tbody) return;
 
-    const q = norm($("fpCatSearch")?.value || "");
+    const qRaw = String($("fpCatSearch")?.value || "");
+    const q = norm(qRaw);
+
     const list = (S.cats || []).slice().sort((a,b)=>String(a?.name||"").localeCompare(String(b?.name||""), "it", {sensitivity:"base"}));
-    const filtered = q ? list.filter(c => {
-      const nm = norm(c?.name || c?.key || "");
-      if (nm.includes(q)) return true;
-      // match on member name/code
-      const k = norm(c?.key || "");
-      if (!k) return false;
-      const mem = membersForKey(k);
-      for (const fp of mem){
-        const s = (String(fp?.code||"") + " " + String(fp?.name||fp?.nome||"")).toLowerCase();
-        if (s.includes(q)) return true;
+
+    // match "categoria + dettagli" (es. "scatola 20 kg", "bobina 480")
+    const qKey = __fpCatKey(qRaw);
+    const toks = qKey.split(" ").filter(Boolean);
+
+    const stem = (w)=>{
+      let s = String(w||"").toLowerCase().trim().replace(/[^a-z0-9]+/g,"");
+      if (!s) return "";
+      if (/[aeiou]$/.test(s) && s.length > 3) s = s.slice(0,-1);
+      return s;
+    };
+
+    function catMatchesToken(cat, tok){
+      const t = stem(tok);
+      if (!t) return false;
+
+      const nm = __fpCatKey(cat?.name || cat?.key || "");
+      const words = nm.split(" ").filter(Boolean);
+
+      for (const w of words){
+        const ws = stem(w);
+        if (!ws) continue;
+        if (ws === t || ws.startsWith(t) || t.startsWith(ws)) return true;
       }
+
+      // prova anche sulla key (underscore)
+      const kk = __fpCatKey(String(cat?.key || "").replace(/_/g," "));
+      const kws = kk.split(" ").filter(Boolean);
+      for (const w of kws){
+        const ws = stem(w);
+        if (!ws) continue;
+        if (ws === t || ws.startsWith(t) || t.startsWith(ws)) return true;
+      }
+
       return false;
-    }) : list;
+    }
+
+    function memberMatchesTokens(fp, tokens){
+      if (!tokens || !tokens.length) return true;
+      const code = String(fp?.code || "").trim();
+      const name = String(fp?.name || fp?.nome || "").trim();
+      const hay = __fpCatKey(code + " " + name);
+      for (const t of tokens){
+        if (t && !hay.includes(t)) return false;
+      }
+      return true;
+    }
+
+    let modeCat = false;
+    let catTok = "";
+    let restToks = [];
+    let filtered = [];
+
+    if (toks.length){
+      catTok = toks[0];
+      const byCatToken = list.filter(c => catMatchesToken(c, catTok));
+      if (byCatToken.length){
+        modeCat = true;
+        restToks = toks.slice(1);
+        filtered = byCatToken;
+      }
+    }
+
+    // fallback: filtro classico (categoria o prodotti finiti)
+    if (!q){
+      filtered = list;
+      modeCat = false;
+    } else if (!modeCat){
+      filtered = list.filter(c => {
+        const nm = norm(c?.name || c?.key || "");
+        if (nm.includes(q)) return true;
+        const k = norm(c?.key || "");
+        if (!k) return false;
+        const mem = membersForKey(k);
+        for (const fp of mem){
+          const s = (String(fp?.code||"") + " " + String(fp?.name||fp?.nome||"")).toLowerCase();
+          if (s.includes(q)) return true;
+        }
+        return false;
+      });
+    }
 
     if (pill) pill.textContent = String(filtered.length || 0);
 
@@ -3221,21 +3676,53 @@ function waitForHub(attempt){
       return;
     }
 
-    const rows = filtered.map(c => {
+    const rows = [];
+    for (const c of filtered){
       const key = norm(c?.key || c?.id || "");
       const name = String(c?.name || key || "").trim() || key;
-      const memCount = membersForKey(key).length;
+      const memAll = membersForKey(key);
+      const memCount = memAll.length;
       const bom = Array.isArray(c?.bom) ? c.bom : (Array.isArray(c?.components) ? c.components : []);
       const bomCount = bom.length;
-      return `<tr class="jsFpCatRow" data-key="${esc(key)}">
+
+      // Categoria (sempre)
+      rows.push(`<tr class="jsFpCatRow" data-key="${esc(key)}">
         <td>${esc(name)}</td>
         <td class="qty">${esc(memCount)}</td>
         <td class="qty">${esc(bomCount)}</td>
         <td style="text-align:right;">
           <button class="btn btn-ghost mini jsFpCatOpen" type="button">Apri</button>
         </td>
-      </tr>`;
-    });
+      </tr>`);
+
+      // Se l'utente sta cercando "categoria + dettagli", mostra la lista prodotti finiti sotto
+      if (modeCat){
+        const memSorted = memAll.slice().sort((a,b)=>String(a?.name||"").localeCompare(String(b?.name||""), "it", {sensitivity:"base"}));
+        const memFiltered = restToks.length ? memSorted.filter(fp => memberMatchesTokens(fp, restToks)) : memSorted;
+
+        if (!memFiltered.length){
+          rows.push(`<tr class="jsFpCatRow" data-key="${esc(key)}">
+            <td class="td-muted" colspan="4" style="padding-left: 22px;">Nessun prodotto finito corrispondente.</td>
+          </tr>`);
+        } else {
+          for (const fp of memFiltered){
+            const code = String(fp?.code || "").trim();
+            const nm = String(fp?.name || fp?.nome || "").trim();
+            const label = (code && nm) ? (code + " — " + nm) : (nm || code || "—");
+            rows.push(`<tr class="jsFpCatRow" data-key="${esc(key)}">
+              <td style="padding-left: 22px;">
+                <span class="td-muted" style="font-weight:900;">↳</span>
+                <span class="kbd" style="margin-left:6px;">${esc(code || "—")}</span>
+                <span style="margin-left:8px;">${esc(nm || "")}</span>
+              </td>
+              <td class="qty"></td>
+              <td class="qty"></td>
+              <td></td>
+            </tr>`);
+          }
+        }
+      }
+    }
 
     tbody.innerHTML = rows.join("");
   }
@@ -3451,24 +3938,46 @@ function waitForHub(attempt){
   function addBomItem(){
     if (!S.draft) return;
 
+    // Supporto: quantità scritta direttamente nel campo ricerca (es. "SOLFATO 20 gr")
+    let rawPickAll = "";
+    let rawPickClean = "";
+    try{
+      rawPickAll = String($("fpCatCompPick")?.value || "");
+      rawPickClean = __fpCatUpdatePendingFromPick(rawPickAll);
+    }catch(_){ rawPickAll = String($("fpCatCompPick")?.value || ""); rawPickClean = rawPickAll; }
+
     // prova risoluzione automatica se l'utente ha scritto solo il nome/codice
     try{
-      const raw = String($("fpCatCompPick")?.value || "");
-      const resolved = __fpCatResolveUnique("comp", raw);
+      const resolved = __fpCatResolveUnique("comp", rawPickClean);
       if (resolved && resolved.code){
         $("fpCatCompPick").value = __fpCatBuildLabel(resolved.code, resolved.name);
+        // se avevo una qty nel campo ricerca, precompila (solo se Q.tà vuota)
+        __fpCatAutofillQtyFromPending(String(resolved.code||""), String(resolved.uom||""));
       }
     }catch(_){ }
 
     const code = pickCodeFromLabel($("fpCatCompPick")?.value || "");
-    const q = String($("fpCatCompQty")?.value || "").trim();
     if (!code) { showToast("Seleziona un componente", "warn"); return; }
-    if (!q) { showToast("Inserisci una quantità", "warn"); return; }
 
-    const pq = parseQty(q);
+    // prodotto + U.M. target
     const p = S.prodMap.get(norm(code)) || null;
     const name = String(p?.name || p?.nome || "").trim() || code;
-    const uom = String(p?.uom || "").trim() || "pz";
+    const uomTarget = __fpCatNormUom(p?.uom || p?.um || "") || "pz";
+
+    // quantità: 1) campo Q.tà, 2) fallback dal campo ricerca (pending)
+    let q = String($("fpCatCompQty")?.value || "").trim();
+    if (!q && __fpCatPendingCompQty && __fpCatPendingCompQty.qty != null && __fpCatPendingCompQty.uom){
+      const conv = __fpCatConvertQty(__fpCatPendingCompQty.qty, __fpCatPendingCompQty.uom, uomTarget);
+      if (conv != null){
+        q = __fpCatFmtNum(conv);
+        try{ $("fpCatCompQty").value = q; }catch(_){ }
+      }
+      __fpCatPendingCompQty = null;
+    }
+
+    if (!q) { showToast("Inserisci una quantità", "warn"); return; }
+
+    const pq = __fpCatParseQtyForTarget(q, uomTarget);
 
     const bom = Array.isArray(S.draft.bom) ? S.draft.bom : [];
     const existingIdx = bom.findIndex(x => norm(x?.code) === norm(code));
@@ -3477,9 +3986,9 @@ function waitForHub(attempt){
       productId: String(p?.id || "").trim() || keyToId(norm(code)),
       code: String(code).trim(),
       name,
-      qty: (pq.num != null) ? pq.num : null,
-      qtyRaw: pq.raw,
-      uom
+      qty: (pq.num != null) ? Number(pq.num) : null,
+      qtyRaw: String(pq.raw || "").trim(),
+      uom: uomTarget
     };
 
     if (existingIdx >= 0) bom[existingIdx] = item; else bom.push(item);
@@ -3488,9 +3997,11 @@ function waitForHub(attempt){
     try{ $("fpCatCompPick").value = ""; }catch(_){ }
     try{ __fpCatHideSuggest("comp"); }catch(_){ }
     try{ $("fpCatCompQty").value = ""; }catch(_){ }
+    try{ __fpCatPendingCompQty = null; }catch(_){ }
 
     renderDetail();
   }
+
 
   function removeBomIdx(idx){
     if (!S.draft) return;
@@ -3676,9 +4187,12 @@ function waitForHub(attempt){
       e.preventDefault(); e.stopPropagation();
       const code = String(btn.getAttribute("data-code") || "").trim();
       const name = String(btn.getAttribute("data-name") || "").trim();
+      const uom  = String(btn.getAttribute("data-uom") || "").trim();
       if (!code) return;
       try{ $("fpCatCompPick").value = __fpCatBuildLabel(code, name); }catch(_){ }
       try{ __fpCatHideSuggest("comp"); }catch(_){ }
+      // se nel campo ricerca avevo scritto una quantità (es. "20 gr"), la converte e la mette in Q.tà
+      try{ __fpCatAutofillQtyFromPending(code, uom); }catch(_){ }
       try{ $("fpCatCompQty")?.focus(); }catch(_){ }
     });
 
@@ -3728,11 +4242,13 @@ function waitForHub(attempt){
       if (e.key !== "Enter") return;
       e.preventDefault();
       try{
-        const raw = String($("fpCatCompPick")?.value || "");
+        const rawAll = String($("fpCatCompPick")?.value || "");
+        const raw = __fpCatUpdatePendingFromPick(rawAll);
         const resolved = __fpCatResolveUnique("comp", raw);
         if (resolved && resolved.code){
           $("fpCatCompPick").value = __fpCatBuildLabel(resolved.code, resolved.name);
           __fpCatHideSuggest("comp");
+          try{ __fpCatAutofillQtyFromPending(String(resolved.code||""), String(resolved.uom||"")); }catch(_){ }
           $("fpCatCompQty")?.focus();
           return;
         }
