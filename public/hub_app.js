@@ -2989,6 +2989,159 @@ function waitForHub(attempt){
     }
   }
 
+  // ===== Smart search (ricerca intelligente) =====
+  function __fpCatKey(v){
+    return String(v || "")
+      .toLowerCase()
+      .trim()
+      .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+      .replace(/[^a-z0-9]+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function __fpCatBuildLabel(code, name){
+    const c = String(code || "").trim();
+    const n = String(name || "").trim();
+    return (c && n) ? (c + " — " + n) : (n || c);
+  }
+
+  function __fpCatScore(code, name, qKey){
+    const c = __fpCatKey(code).replace(/\s+/g, "");
+    const n = __fpCatKey(name);
+    const q = String(qKey || "");
+    const qNo = q.replace(/\s+/g, "");
+    if (!qNo) return -1;
+    if (c && c.startsWith(qNo)) return 100;
+    if (n && n.startsWith(q)) return 80;
+    const hay = (c + " " + n).trim();
+    if (hay.includes(qNo) || hay.includes(q)) return 60;
+    const toks = q.split(" ").filter(Boolean);
+    if (toks.length){
+      for (const t of toks){
+        if (!hay.includes(t)) return -1;
+      }
+      return 40;
+    }
+    return -1;
+  }
+
+  function __fpCatGetMatchList(kind, raw){
+    const qRaw = String(raw || "").trim();
+    const qKey = __fpCatKey(qRaw);
+    const qNo = qKey.replace(/\s+/g, "");
+    if (!qNo) return [];
+
+    const list = (kind === "member") ? (S.finished || []) : (S.products || []);
+    const already = (kind === "member" && S.selectedKey)
+      ? new Set(membersForKey(S.selectedKey).map(x => norm(x?.code || "")))
+      : null;
+
+    const out = [];
+    for (const it of list){
+      const code = String(it?.code || "").trim();
+      const name = String(it?.name || it?.nome || "").trim();
+      if (!code && !name) continue;
+
+      const sc = __fpCatScore(code, name, qKey);
+      if (sc < 0) continue;
+
+      const uom = String(it?.uom || it?.um || it?.unit || "").trim();
+      const disabled = !!(already && code && already.has(norm(code)));
+
+      out.push({ code, name, uom, score: sc, disabled });
+    }
+
+    out.sort((a,b) => (b.score - a.score) || String(a.name||a.code||"").localeCompare(String(b.name||b.code||""), "it", { sensitivity:"base" }));
+    return out.slice(0, 40);
+  }
+
+  function __fpCatHideSuggest(kind){
+    const wrap = $(kind === "member" ? "fpCatMemberSuggestWrap" : "fpCatCompSuggestWrap");
+    const list = $(kind === "member" ? "fpCatMemberSuggest" : "fpCatCompSuggest");
+    if (wrap) wrap.style.display = "none";
+    if (list) list.innerHTML = "";
+  }
+
+  function __fpCatRenderSuggest(kind){
+    const input = $(kind === "member" ? "fpCatMemberPick" : "fpCatCompPick");
+    const wrap = $(kind === "member" ? "fpCatMemberSuggestWrap" : "fpCatCompSuggestWrap");
+    const listEl = $(kind === "member" ? "fpCatMemberSuggest" : "fpCatCompSuggest");
+    if (!input || !wrap || !listEl) return;
+
+    const raw = String(input.value || "").trim();
+    const qNo = __fpCatKey(raw).replace(/\s+/g, "");
+    if (!qNo){
+      __fpCatHideSuggest(kind);
+      return;
+    }
+
+    const matches = __fpCatGetMatchList(kind, raw);
+    if (!matches.length){
+      __fpCatHideSuggest(kind);
+      return;
+    }
+
+    listEl.innerHTML = matches.map(m => {
+      const label = __fpCatBuildLabel(m.code, m.name);
+      const right = m.uom ? ('<span class="kbd" style="margin-left:10px;">' + esc('U.M. ' + m.uom) + '</span>') : '';
+      const sub = m.disabled ? '<span class="td-muted" style="font-size:12px; font-weight:900; margin-left:10px;">Già in categoria</span>' : '';
+      const dis = m.disabled ? 'disabled' : '';
+      const op = m.disabled ? 'opacity:.55;' : '';
+      return (
+        '<button class="btn btn-ghost mini jsFpCatSuggestPick" type="button" ' +
+        'data-kind="' + esc(kind) + '" data-code="' + esc(m.code) + '" data-name="' + esc(m.name) + '" data-uom="' + esc(m.uom) + '" ' + dis +
+        ' style="width:100%; justify-content:space-between; border-radius: 12px; box-shadow:none; ' + op + '">' +
+          '<span style="text-align:left; flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">' + esc(label) + '</span>' +
+          '<span style="display:flex; align-items:center;">' + sub + right + '</span>' +
+        '</button>'
+      );
+    }).join('');
+
+    wrap.style.display = '';
+  }
+
+  function __fpCatResolveUnique(kind, raw){
+    const s0 = String(raw || "").trim();
+    if (!s0) return null;
+
+    const pickedCode = pickCodeFromLabel(s0);
+    if (pickedCode){
+      if (kind === "member"){
+        const fp = S.fpByCode.get(norm(pickedCode)) || null;
+        if (fp) return { code: String(fp.code || pickedCode).trim(), name: String(fp.name || fp.nome || "").trim(), uom: String(fp.uom || "").trim() };
+      } else {
+        const p = S.prodMap.get(norm(pickedCode)) || null;
+        if (p) return { code: String(p.code || pickedCode).trim(), name: String(p.name || p.nome || "").trim(), uom: String(p.uom || p.um || "").trim() };
+      }
+    }
+
+    const key = __fpCatKey(s0);
+    const keyNo = key.replace(/\s+/g, "");
+    const src = (kind === "member") ? (S.finished || []) : (S.products || []);
+
+    const byCode = keyNo ? src.filter(it => __fpCatKey(it?.code || "").replace(/\s+/g, "") === keyNo) : [];
+    if (byCode.length === 1){
+      const it = byCode[0] || {};
+      return { code: String(it.code || "").trim(), name: String(it.name || it.nome || "").trim(), uom: String(it.uom || it.um || "").trim() };
+    }
+
+    const byName = src.filter(it => __fpCatKey(it?.name || it?.nome || "") === key);
+    if (byName.length === 1){
+      const it = byName[0] || {};
+      return { code: String(it.code || "").trim(), name: String(it.name || it.nome || "").trim(), uom: String(it.uom || it.um || "").trim() };
+    }
+
+    const matches = __fpCatGetMatchList(kind, s0);
+    if (matches.length === 1){
+      const m = matches[0];
+      return { code: String(m.code || "").trim(), name: String(m.name || "").trim(), uom: String(m.uom || "").trim() };
+    }
+
+    return null;
+  }
+
+
   function renderList(){
     const tbody = $("fpCatTbody");
     const pill = $("pillFPCategoriesCount");
@@ -3116,6 +3269,12 @@ function waitForHub(attempt){
     setDetailOpen(true);
     renderDatalists();
     renderDetail();
+
+    // reset barre di ricerca + suggerimenti
+    try{ if ($("fpCatCompPick")) $("fpCatCompPick").value = ""; }catch(_){ }
+    try{ if ($("fpCatCompQty")) $("fpCatCompQty").value = ""; }catch(_){ }
+    try{ if ($("fpCatMemberPick")) $("fpCatMemberPick").value = ""; }catch(_){ }
+    try{ __fpCatHideSuggest("comp"); __fpCatHideSuggest("member"); }catch(_){ }
   }
 
   async function createCategory(){
@@ -3240,6 +3399,16 @@ function waitForHub(attempt){
 
   function addBomItem(){
     if (!S.draft) return;
+
+    // prova risoluzione automatica se l'utente ha scritto solo il nome/codice
+    try{
+      const raw = String($("fpCatCompPick")?.value || "");
+      const resolved = __fpCatResolveUnique("comp", raw);
+      if (resolved && resolved.code){
+        $("fpCatCompPick").value = __fpCatBuildLabel(resolved.code, resolved.name);
+      }
+    }catch(_){ }
+
     const code = pickCodeFromLabel($("fpCatCompPick")?.value || "");
     const q = String($("fpCatCompQty")?.value || "").trim();
     if (!code) { showToast("Seleziona un componente", "warn"); return; }
@@ -3266,6 +3435,7 @@ function waitForHub(attempt){
     S.draft.bom = bom;
 
     try{ $("fpCatCompPick").value = ""; }catch(_){ }
+    try{ __fpCatHideSuggest("comp"); }catch(_){ }
     try{ $("fpCatCompQty").value = ""; }catch(_){ }
 
     renderDetail();
@@ -3287,6 +3457,16 @@ function waitForHub(attempt){
     if (!h.fb.user) { showToast("Accedi con Google", "warn"); return; }
 
     const key = norm(S.selectedKey);
+
+    // prova risoluzione automatica se l'utente ha scritto solo il nome/codice
+    try{
+      const raw = String($("fpCatMemberPick")?.value || "");
+      const resolved = __fpCatResolveUnique("member", raw);
+      if (resolved && resolved.code){
+        $("fpCatMemberPick").value = __fpCatBuildLabel(resolved.code, resolved.name);
+      }
+    }catch(_){ }
+
     const code = pickCodeFromLabel($("fpCatMemberPick")?.value || "");
     if (!key) return;
     if (!code) { showToast("Seleziona un prodotto finito", "warn"); return; }
@@ -3302,6 +3482,7 @@ function waitForHub(attempt){
       });
       showToast("Prodotto finito assegnato");
       try{ $("fpCatMemberPick").value = ""; }catch(_){ }
+      try{ __fpCatHideSuggest("member"); }catch(_){ }
     }catch(e){
       console.warn("assign finishedProduct failed", e);
       showToast("Errore assegnazione prodotto finito", "err");
@@ -3431,6 +3612,44 @@ function waitForHub(attempt){
     $("fpCatModalClose")?.addEventListener("click", ()=> setDetailOpen(false));
     $("modalFPCategory")?.addEventListener("click", (e)=>{ if (e.target === $("modalFPCategory")) setDetailOpen(false); });
 
+    // smart search bars (componenti + prodotti finiti)
+    $("fpCatCompPick")?.addEventListener("input", ()=>{ try{ __fpCatRenderSuggest("comp"); }catch(_){ } });
+    $("fpCatCompPick")?.addEventListener("focus", ()=>{ try{ __fpCatRenderSuggest("comp"); }catch(_){ } });
+    $("fpCatMemberPick")?.addEventListener("input", ()=>{ try{ __fpCatRenderSuggest("member"); }catch(_){ } });
+    $("fpCatMemberPick")?.addEventListener("focus", ()=>{ try{ __fpCatRenderSuggest("member"); }catch(_){ } });
+
+    // click sui suggerimenti
+    $("fpCatCompSuggestWrap")?.addEventListener("click", (e)=>{
+      const btn = e.target?.closest?.("button.jsFpCatSuggestPick");
+      if (!btn || btn.disabled) return;
+      e.preventDefault(); e.stopPropagation();
+      const code = String(btn.getAttribute("data-code") || "").trim();
+      const name = String(btn.getAttribute("data-name") || "").trim();
+      if (!code) return;
+      try{ $("fpCatCompPick").value = __fpCatBuildLabel(code, name); }catch(_){ }
+      try{ __fpCatHideSuggest("comp"); }catch(_){ }
+      try{ $("fpCatCompQty")?.focus(); }catch(_){ }
+    });
+
+    $("fpCatMemberSuggestWrap")?.addEventListener("click", (e)=>{
+      const btn = e.target?.closest?.("button.jsFpCatSuggestPick");
+      if (!btn || btn.disabled) return;
+      e.preventDefault(); e.stopPropagation();
+      const code = String(btn.getAttribute("data-code") || "").trim();
+      const name = String(btn.getAttribute("data-name") || "").trim();
+      if (!code) return;
+      try{ $("fpCatMemberPick").value = __fpCatBuildLabel(code, name); }catch(_){ }
+      try{ __fpCatHideSuggest("member"); }catch(_){ }
+      try{ $("btnFpCatMemberAdd")?.focus(); }catch(_){ }
+    });
+
+    // esc = chiudi suggerimenti
+    $("modalFPCategory")?.addEventListener("keydown", (e)=>{
+      if (e.key === "Escape"){
+        try{ __fpCatHideSuggest("comp"); __fpCatHideSuggest("member"); }catch(_){ }
+      }
+    });
+
     // modal actions
     $("btnFpCatCompAdd")?.addEventListener("click", ()=> addBomItem());
     $("btnFpCatMemberAdd")?.addEventListener("click", ()=> addMember());
@@ -3453,9 +3672,38 @@ function waitForHub(attempt){
       removeMemberById(id);
     });
 
-    // enter to add
+    // enter to add + risoluzione smart
+    $("fpCatCompPick")?.addEventListener("keydown", (e)=>{
+      if (e.key !== "Enter") return;
+      e.preventDefault();
+      try{
+        const raw = String($("fpCatCompPick")?.value || "");
+        const resolved = __fpCatResolveUnique("comp", raw);
+        if (resolved && resolved.code){
+          $("fpCatCompPick").value = __fpCatBuildLabel(resolved.code, resolved.name);
+          __fpCatHideSuggest("comp");
+          $("fpCatCompQty")?.focus();
+          return;
+        }
+      }catch(_){ }
+      try{ __fpCatRenderSuggest("comp"); }catch(_){ }
+    });
+
     $("fpCatCompQty")?.addEventListener("keydown", (e)=>{ if (e.key === "Enter") { e.preventDefault(); addBomItem(); } });
-    $("fpCatMemberPick")?.addEventListener("keydown", (e)=>{ if (e.key === "Enter") { e.preventDefault(); addMember(); } });
+
+    $("fpCatMemberPick")?.addEventListener("keydown", (e)=>{
+      if (e.key !== "Enter") return;
+      e.preventDefault();
+      try{
+        const raw = String($("fpCatMemberPick")?.value || "");
+        const resolved = __fpCatResolveUnique("member", raw);
+        if (resolved && resolved.code){
+          $("fpCatMemberPick").value = __fpCatBuildLabel(resolved.code, resolved.name);
+          __fpCatHideSuggest("member");
+        }
+      }catch(_){ }
+      addMember();
+    });
   }
 
   function refresh(){
