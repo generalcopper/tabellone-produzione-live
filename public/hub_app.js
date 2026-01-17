@@ -9327,21 +9327,6 @@ async function deleteMovement(id) {
           const show = list.slice(0, MAX_ROWS);
           const more = list.length - show.length;
 
-          const head = `
-            <div class="tableWrap lowStockTableWrap" role="region" aria-label="Tabella sottoscorta" tabindex="0">
-              <table class="dataGrid lowStockTable">
-                <thead>
-                  <tr>
-                    <th style="width:22%;">Codice</th>
-                    <th style="width:40%;">Articolo</th>
-                    <th style="width:20%;">Fornitore</th>
-                    <th style="width:9%; text-align:right;">Qtà</th>
-                    <th style="width:9%; text-align:right;">Soglia</th>
-                  </tr>
-                </thead>
-                <tbody>
-          `;
-
           const rows = show.map(r => {
             const code = escapeHtml(r.__displayCode || r.code || "");
             const item = escapeHtml(r.item || "");
@@ -9349,32 +9334,40 @@ async function deleteMovement(id) {
             const qty = fmt(safeInt(r.qty));
             const thr = fmt(safeInt(r.threshold));
 
-            const codeCell = code ? `<span class="lowStockCodeCell">${code}</span>` : `<span class="td-muted">—</span>`;
+            const codeCell = code || "—";
             const itemCell = item || "—";
             const custCell = cust || "—";
 
             return `
-              <tr>
-                <td data-label="Codice">${codeCell}</td>
-                <td data-label="Articolo" class="lowStockItemCell">${itemCell}</td>
-                <td data-label="Fornitore" class="td-muted">${custCell}</td>
-                <td data-label="Qtà" class="lowStockQtyCell">${qty}</td>
-                <td data-label="Soglia" class="lowStockThrCell">${thr}</td>
-              </tr>
+              <div class="lowStockCockpitRow" role="row">
+                <div class="lowStockCockpitCell isCode colCode" role="cell">${codeCell}</div>
+                <div class="lowStockCockpitCell colItem" role="cell">${itemCell}</div>
+                <div class="lowStockCockpitCell isCust colCust" role="cell">${custCell}</div>
+                <div class="lowStockCockpitCell isQty colQty" role="cell">${qty}</div>
+                <div class="lowStockCockpitCell isThr colThr" role="cell">${thr}</div>
+              </div>
             `;
           }).join("");
 
           const moreRow = (more > 0)
-            ? `<tr><td colspan="5" class="td-muted">+${fmt(more)} altri…</td></tr>`
+            ? `<div class="lowStockCockpitMore">+${fmt(more)} altri…</div>`
             : ``;
 
-          const foot = `
-                </tbody>
-              </table>
+          el.innerHTML = `
+            <div class="lowStockCockpit" role="table" aria-label="Sottoscorta">
+              <div class="lowStockCockpitHead" role="row">
+                <div class="lowStockCockpitCell colCode" role="columnheader">Codice</div>
+                <div class="lowStockCockpitCell colItem" role="columnheader">Articolo</div>
+                <div class="lowStockCockpitCell colCust" role="columnheader">Fornitore</div>
+                <div class="lowStockCockpitCell colQty" role="columnheader" style="text-align:right;">Qtà</div>
+                <div class="lowStockCockpitCell colThr" role="columnheader" style="text-align:right;">Soglia</div>
+              </div>
+              <div class="lowStockCockpitBody" role="rowgroup" tabindex="0">
+                ${rows}
+                ${moreRow}
+              </div>
             </div>
           `;
-
-          el.innerHTML = head + rows + moreRow + foot;
         };
 
         renderList(cerea, lowStockListCerea);
