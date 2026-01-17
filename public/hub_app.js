@@ -10203,9 +10203,9 @@ async function deleteMovement(id) {
           return;
         }
 
-        // Velocita cinema: dipende dalla lunghezza (px per frame)
-        const base = 0.55;
-        const add = Math.min(0.45, seqW / 2600);
+        // Velocita cinema (leggermente piu lenta)
+        const base = 0.46;
+        const add = Math.min(0.26, seqW / 5200);
         const speed = base + add;
 
         const tick = () => {
@@ -10265,52 +10265,68 @@ async function deleteMovement(id) {
       try{
         if (!homeDaneaCockpit || !homeDaneaTickerSeq || !homeDaneaTickerSeqClone) return;
 
-        const list = __getHomeDaneaGroups();
+        // stato scarico automatico (dashboard)
+        const autoOn = (() => {
+          try{
+            const v = String(localStorage.getItem("hubinv_danea_auto_mode") || "").trim().toLowerCase();
+            if (!v) return false;
+            return (v === "1" || v === "true" || v === "on" || v === "yes");
+          }catch(_){ return false; }
+        })();
+
+        // aggiorna glow (verde/rosso) — solo estetico
+        try{
+          if (homeDaneaCockpit){
+            homeDaneaCockpit.classList.toggle("is-auto-on", !!autoOn);
+            homeDaneaCockpit.classList.toggle("is-auto-off", !autoOn);
+            const lbl = autoOn ? "ATTIVO" : "MANUALE";
+            homeDaneaCockpit.setAttribute("title", "Auto scarico: " + lbl);
+          }
+        }catch(_){ }
+
+        // DDT scaricati oggi (usa createdAt dei completati)
+        const todayCount = (() => {
+          try{
+            const now = new Date();
+            const y = now.getFullYear(), m = now.getMonth(), d = now.getDate();
+            let c = 0;
+            for (const it of (__daneaCompleted || [])){
+              const iso = String(it && it.createdAt || "").trim();
+              if (!iso) continue;
+              const dt = new Date(iso);
+              if (!dt || isNaN(dt.getTime())) continue;
+              if (dt.getFullYear() === y && dt.getMonth() === m && dt.getDate() === d) c++;
+            }
+            return c;
+          }catch(_){ return 0; }
+        })();
 
         const fmt = (n) => (Number(n) || 0).toLocaleString("it-IT");
+        const list = __getHomeDaneaGroups();
 
-        let html = "";
+        const chunks = [];
+        chunks.push(`<span class="homeDaneaTickerItem is-meta">OGGI: ${fmt(todayCount)} DDT SCARICATI</span>`);
+        chunks.push(`<span class="homeDaneaTickerItem is-meta">AUTO SCARICO: ${autoOn ? "ATTIVO" : "MANUALE"}</span>`);
+
         if (!list.length){
-          html = `<span class="homeDaneaTickerItem is-muted">Nessun scarico DDT da XML</span>`;
+          chunks.push(`<span class="homeDaneaTickerItem is-muted">NESSUN DDT DA XML</span>`);
         } else {
-          html = list.map((g) => {
-            const num = String(g.docNum || "").trim() || String(g.key || "").split("__")[0] || "";
-            const dateTxt = __fmtDateShortIT(g.date || g.createdAtMax || "");
-            const piecesTxt = fmt(g.pieces);
-            const whTxt = (Number(g.whConca) > 0 && Number(g.whCerea) > 0)
-              ? "Split"
-              : (Number(g.whConca) > 0 ? "Conca" : "Cerea");
-
-            const done = __daneaPickDone(g.key, num, String(g.date || "").trim());
-
-            let txt = "";
-            if (done){
+          chunks.push(
+            list.slice(0, 18).map((g) => {
+              const num = String(g.docNum || "").trim() || String(g.key || "").split("__")[0] || "";
+              const done = __daneaPickDone(g.key, num, String(g.date || "").trim());
               const cust = String(done && done.customer || "").trim();
-              const fpRows = (done && Array.isArray(done.rows)) ? done.rows : [];
-              const allocs = (done && Array.isArray(done.allocations)) ? done.allocations : [];
-
-              const fpSum = fpRows.length ? __daneaSummarizeFinished(fpRows, 3) : "";
-              const allocSum = allocs.length ? __daneaSummarizeAllocations(allocs, 4) : "";
-
-              const parts = [];
-              parts.push(`DDT ${num || "—"}`);
-              parts.push(dateTxt || "—");
-              if (cust) parts.push(cust);
-              if (fpSum) parts.push(`Prodotti finiti (${fpRows.length}): ${fpSum}`);
-              else if (fpRows.length) parts.push(`Prodotti finiti: ${fpRows.length}`);
-              if (allocSum) parts.push(`Scarico (${allocs.length}): ${allocSum}`);
-              parts.push(`Sede: ${whTxt}`);
-              txt = parts.join(" · ");
-            } else {
-              txt = `DDT ${num || "—"} · ${dateTxt} · ${piecesTxt} pz · ${whTxt}`;
-            }
-            return (
-              `<button class="homeDaneaTickerItem" type="button" data-key="${escapeHtmlAttr(String(g.key || ""))}" data-docnum="${escapeHtmlAttr(String(num || ""))}">` +
-                `${escapeHtml(txt)}` +
-              `</button>`
-            );
-          }).join("");
+              const txt = `CLIENTE: ${cust || "—"} | DDT: ${num || "—"}`;
+              return (
+                `<button class="homeDaneaTickerItem" type="button" data-key="${escapeHtmlAttr(String(g.key || ""))}" data-docnum="${escapeHtmlAttr(String(num || ""))}">` +
+                  `${escapeHtml(txt)}` +
+                `</button>`
+              );
+            }).join("")
+          );
         }
+
+        const html = chunks.join("");
 
         homeDaneaTickerSeq.innerHTML = html;
         homeDaneaTickerSeqClone.innerHTML = html;

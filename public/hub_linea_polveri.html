@@ -6469,19 +6469,45 @@ function computePartialOrders(){
         page.drawText('Spunta a penna le righe completate.', { x: M, y: y, size: 11.5, font: font, color: COL_MUTED });
         y -= 18;
 
-        // Table header
+        // Table header (margini/allineamenti migliorati)
         const tableX = M;
         const tableW = W - M*2;
-        const qtyColW = 130;
-        const descColW = tableW - qtyColW - 34;
-        const headerRowH = 22;
+
+        // Colonne
+        const cbX = tableX + 10;
+        const cbSize = 12;
+        const descX = tableX + 34;
+
+        const qtyColW = 150;               // piu respiro sulla quantita
+        const qtyXRight = tableX + tableW - 12; // allineamento a destra
+        const descColW = Math.max(160, tableW - (descX - tableX) - qtyColW - 12);
+
+        // Header tabella
+        const headerRowH = 24;
         page.drawRectangle({ x: tableX, y: y - headerRowH, width: tableW, height: headerRowH, color: COL_BG, borderWidth: 1, borderColor: COL_STROKE });
-        page.drawText('PRODOTTO', { x: tableX + 34, y: y - 16, size: 10.5, font: fontBold, color: COL_MUTED });
-        page.drawText('QTY', { x: tableX + tableW - qtyColW + 8, y: y - 16, size: 10.5, font: fontBold, color: COL_MUTED });
-        y -= (headerRowH + 10);
+        page.drawText('PRODOTTO', { x: descX, y: y - 17, size: 10.5, font: fontBold, color: COL_MUTED });
+        const qtyHdr = 'QTY';
+        const qtyHdrW = fontBold.widthOfTextAtSize(qtyHdr, 10.5);
+        page.drawText(qtyHdr, { x: qtyXRight - qtyHdrW, y: y - 17, size: 10.5, font: fontBold, color: COL_MUTED });
+        y -= (headerRowH + 12);
 
         const lines = Array.isArray(o.lines) ? o.lines : [];
         let shown = 0;
+
+        // Layout righe (piu leggibile a prova di operatore)
+        const descSize = 14.5;
+        const descLineH = 18;   // piu aria tra le righe
+        const metaSize = 10.5;
+        const metaLineH = 14;
+        const rowPadTop = 4;
+        const rowPadBottom = 8;
+        const rowGap = 10;      // spazio tra una riga e la successiva
+
+        // NOTE: area riservata (evita sovrapposizioni)
+        const NOTE_Y = 72;
+        const NOTE_H = 104;
+        const noteTop = NOTE_Y + NOTE_H;
+
         for(let li=0; li<lines.length; li++){
           const l = lines[li] || {};
           const desc = String(l.desc || l.description || l.item || 'Prodotto').trim() || 'Prodotto';
@@ -6489,51 +6515,62 @@ function computePartialOrders(){
           const unit = String(l.um || l.qtyUnitRaw || l.unit || '').trim();
           const planned = l.__plannedQtyOriginal;
           const produced = l.__producedQtySoFar;
-          const meta = (planned!=null || produced!=null) ? `Previsto: ${(typeof renderQty==='function')?renderQty(planned, unit):String(planned||'0')}${unit?'':''} · Prodotti: ${(typeof renderQty==='function')?renderQty(produced, unit):String(produced||'0')}` : '';
+          const plannedTxt = (typeof renderQty === 'function') ? renderQty(planned, unit) : String(planned==null?'' : planned) + (unit ? ` ${unit}` : '');
+          const producedTxt = (typeof renderQty === 'function') ? renderQty(produced, unit) : String(produced==null?'' : produced) + (unit ? ` ${unit}` : '');
+          const meta = (planned!=null || produced!=null) ? `Previsto: ${plannedTxt || '—'} · Prodotti: ${producedTxt || '—'}` : '';
 
-          // Stop if no space for note/footer
-          if(y < 170){
+          const descLines = __pdfWrapText(desc, fontBold, descSize, descColW);
+          const maxDescLines = Math.max(1, Math.min(3, descLines.length));
+          const rowHeight = rowPadTop + (maxDescLines * descLineH) + (meta ? metaLineH : 0) + rowPadBottom;
+
+          // Se non c'e spazio prima del box NOTE, taglia e segnala quante righe restano
+          if((y - rowHeight) < (noteTop + 18)){
             const remaining = lines.length - li;
             page.drawText(`Altre righe: ${remaining}`, { x: tableX, y: y, size: 12, font: fontBold, color: COL_MUTED });
-            y -= 14;
+            y -= 16;
             break;
           }
 
+          const rowTop = y;
+          const rowBottom = rowTop - rowHeight;
+
+          // Sfondo leggerissimo alternato + bordo (separazione chiara)
+          const zebra = (li % 2) ? rgb(0.985, 0.988, 0.993) : rgb(1,1,1);
+          page.drawRectangle({ x: tableX, y: rowBottom, width: tableW, height: rowHeight, color: zebra, borderWidth: 1, borderColor: COL_STROKE });
+
           // Checkbox
-          page.drawRectangle({ x: tableX + 8, y: y - 11, width: 12, height: 12, borderWidth: 1, borderColor: COL_STROKE, color: rgb(1,1,1) });
+          const firstBaseline = rowTop - rowPadTop;
+          page.drawRectangle({ x: cbX, y: firstBaseline - cbSize + 3, width: cbSize, height: cbSize, borderWidth: 1, borderColor: COL_STROKE, color: rgb(1,1,1) });
 
-          // Description (wrapped)
-          const descLines = __pdfWrapText(desc, fontBold, 14.5, descColW);
-          const maxDescLines = Math.min(3, descLines.length);
-          let rowY = y;
+          // Testo descrizione (wrappato)
+          let cursorY = firstBaseline;
           for(let k=0; k<maxDescLines; k++){
-            page.drawText(descLines[k], { x: tableX + 34, y: rowY, size: 14.5, font: (k==0?fontBold:font), color: COL_TEXT });
-            rowY -= 16;
+            const t = descLines[k] || '';
+            page.drawText(t, { x: descX, y: cursorY, size: descSize, font: (k===0?fontBold:font), color: COL_TEXT });
+            cursorY -= descLineH;
           }
 
-          // Quantity (right-ish)
+          // Quantita allineata a destra
           const qtySize = 15.5;
-          const qtyW = fontBold.widthOfTextAtSize(String(qtyTxt), qtySize);
-          page.drawText(String(qtyTxt), { x: tableX + tableW - qtyColW + 8 + Math.max(0, (qtyColW - 16 - qtyW)), y: y, size: qtySize, font: fontBold, color: COL_TEXT });
+          const qtyStr = String(qtyTxt||'');
+          const qtyW = fontBold.widthOfTextAtSize(qtyStr, qtySize);
+          page.drawText(qtyStr, { x: qtyXRight - qtyW, y: firstBaseline, size: qtySize, font: fontBold, color: COL_TEXT });
 
-          // Meta line
+          // Meta (una riga, se presente)
           if(meta){
-            page.drawText(meta, { x: tableX + 34, y: rowY + 2, size: 10.5, font: font, color: COL_MUTED });
-            rowY -= 10;
+            const metaLine = (__pdfWrapText(meta, font, metaSize, descColW)[0] || meta);
+            page.drawText(metaLine, { x: descX, y: cursorY + 2, size: metaSize, font: font, color: COL_MUTED });
+            cursorY -= metaLineH;
           }
 
-          // Divider
-          const rowBottom = rowY - 6;
-          page.drawLine({ start: { x: tableX, y: rowBottom }, end: { x: tableX + tableW, y: rowBottom }, thickness: 1, color: COL_STROKE });
-
-          y = rowBottom - 12;
+          y = rowBottom - rowGap;
           shown++;
         }
 
         // Note box
         const note = String(getOrderNote(o) || '').trim();
-        const noteH = 108;
-        const noteY = 64;
+        const noteH = 104;
+        const noteY = 72;
         page.drawRectangle({ x: M, y: noteY, width: W - M*2, height: noteH, borderWidth: 1, borderColor: COL_STROKE, color: rgb(1,1,1) });
         page.drawText('NOTE (se presenti)', { x: M + 12, y: noteY + noteH - 18, size: 10.5, font: fontBold, color: COL_MUTED });
         const noteText = note || '—';
