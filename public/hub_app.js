@@ -6247,6 +6247,13 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
     const invTrendChart = document.getElementById("invTrendChart");
     const invTrendTooltip = document.getElementById("invTrendTooltip");
 
+    // Home: cockpit "Scarichi flussi" (DaneaXML)
+    const homeDaneaCockpit = document.getElementById("homeDaneaCockpit");
+    const homeDaneaStrip = document.getElementById("homeDaneaStrip");
+    const homeDaneaEmpty = document.getElementById("homeDaneaEmpty");
+    const homeDaneaCount = document.getElementById("homeDaneaCount");
+    const homeDaneaLast = document.getElementById("homeDaneaLast");
+
 
     const stockTbody = document.getElementById("stockTbody");
     const movTbody = document.getElementById("movTbody");
@@ -9284,6 +9291,251 @@ async function deleteMovement(id) {
       if (typeof statTotalFlows !== "undefined" && statTotalFlows) __counterAnim.animate(statTotalFlows, docsCount);
       __counterAnim.animate(statLowStock, low);
       statLastUpdate.textContent = last ? formatDateIT(last.createdAt) : "—";
+    }
+
+
+    /* =========================================================
+       HOME — Cockpit Scarichi flussi DDT (DaneaXML)
+       - Legge i movimenti OUT con source=DaneaXML e li raggruppa per DDT
+       - UI: filmstrip scroll-snap + micro-parallax (JS)
+       ========================================================= */
+    let __homeDaneaFxBound = false;
+    let __homeDaneaFxRaf = 0;
+
+    function __fmtDateShortIT(v){
+      const s = String(v || "").trim();
+      if (!s) return "—";
+      // ISO o YYYY-MM-DD
+      try{
+        const iso = (/^\d{4}-\d{2}-\d{2}$/.test(s)) ? (s + "T00:00:00") : s;
+        const d = new Date(iso);
+        if (Number.isNaN(d.getTime())) return s;
+        return d.toLocaleDateString("it-IT");
+      }catch(_){
+        return s;
+      }
+    }
+
+    function __getHomeDaneaGroups(){
+      const list = Array.isArray(state && state.movements) ? state.movements : [];
+      const byKey = new Map();
+
+      for (const mv of list){
+        if (!mv) continue;
+        if (String(mv.type || "").toUpperCase() !== "OUT") continue;
+        const src = String(mv.source || "").trim().toLowerCase();
+        if (src !== "daneaxml") continue;
+
+        const docNum = String(mv.docNum || "").trim();
+        const date = String(mv.date || "").trim();
+        const key = String(mv.daneaDdtKey || "").trim() || (docNum && date ? (docNum + "__" + date) : docNum);
+        if (!key) continue;
+
+        let g = byKey.get(key);
+        if (!g){
+          g = {
+            key,
+            docNum,
+            date,
+            createdAtMax: String(mv.createdAt || "").trim(),
+            rows: 0,
+            pieces: 0,
+            codes: new Set(),
+            wh: { cerea: 0, concamarise: 0 }
+          };
+          byKey.set(key, g);
+        }
+
+        const q = safeInt(mv.qty);
+        g.rows += 1;
+        g.pieces += q;
+
+        const c = String(mv.code || "").trim();
+        if (c) g.codes.add(c.toLowerCase());
+
+        const w = normalizeWarehouse(mv.warehouse || "");
+        if (w === WAREHOUSE_CONCA) g.wh.concamarise += q;
+        else g.wh.cerea += q;
+
+        const ca = String(mv.createdAt || "").trim();
+        if (ca && (!g.createdAtMax || ca.localeCompare(g.createdAtMax) > 0)) g.createdAtMax = ca;
+        if (!g.docNum && docNum) g.docNum = docNum;
+        if (!g.date && date) g.date = date;
+      }
+
+      const arr = Array.from(byKey.values()).map(g => ({
+        key: g.key,
+        docNum: g.docNum || String(g.key || "").split("__")[0] || "",
+        date: g.date || (String(g.key || "").includes("__") ? String(g.key).split("__")[1] : ""),
+        createdAtMax: g.createdAtMax || "",
+        rows: g.rows || 0,
+        pieces: g.pieces || 0,
+        codesCount: (g.codes && g.codes.size) ? g.codes.size : 0,
+        whCerea: (g.wh && g.wh.cerea) ? g.wh.cerea : 0,
+        whConca: (g.wh && g.wh.concamarise) ? g.wh.concamarise : 0
+      }));
+
+      arr.sort((a,b) => {
+        const ka = String(a.createdAtMax || a.date || "");
+        const kb = String(b.createdAtMax || b.date || "");
+        return kb.localeCompare(ka);
+      });
+
+      return arr.slice(0, 24);
+    }
+
+    function __updateHomeDaneaCockpitFx(){
+      if (!homeDaneaStrip) return;
+      const cards = Array.from(homeDaneaStrip.querySelectorAll(".daneaCard"));
+      if (!cards.length) return;
+      const wrapRect = homeDaneaStrip.getBoundingClientRect();
+      const center = wrapRect.left + wrapRect.width / 2;
+      const span = Math.max(1, wrapRect.width / 2);
+
+      for (const card of cards){
+        const r = card.getBoundingClientRect();
+        const c = r.left + r.width / 2;
+        const t = Math.max(-1, Math.min(1, (c - center) / span));
+        const rot = t * 7;
+        const sc = 1 - Math.abs(t) * 0.07;
+        const op = 1 - Math.abs(t) * 0.22;
+        card.style.transform = `perspective(900px) rotateY(${rot}deg) scale(${sc})`;
+        card.style.opacity = String(op);
+      }
+    }
+
+    function __bindHomeDaneaCockpitFx(){
+      if (!homeDaneaStrip || __homeDaneaFxBound) return;
+      __homeDaneaFxBound = true;
+
+      const schedule = () => {
+        if (__homeDaneaFxRaf) return;
+        __homeDaneaFxRaf = requestAnimationFrame(() => {
+          __homeDaneaFxRaf = 0;
+          __updateHomeDaneaCockpitFx();
+        });
+      };
+
+      homeDaneaStrip.addEventListener("scroll", schedule, { passive: true });
+      window.addEventListener("resize", schedule, { passive: true });
+
+      // Wheel verticale -> scorrimento orizzontale (desktop)
+      homeDaneaStrip.addEventListener("wheel", (e) => {
+        try{
+          const dy = Number(e && e.deltaY) || 0;
+          const dx = Number(e && e.deltaX) || 0;
+          if (Math.abs(dy) <= Math.abs(dx)) return;
+          homeDaneaStrip.scrollLeft += dy;
+          e.preventDefault();
+          schedule();
+        }catch(_){ }
+      }, { passive: false });
+
+      // Drag (pointer)
+      let down = false;
+      let startX = 0;
+      let startL = 0;
+
+      const onDown = (e) => {
+        down = true;
+        startX = Number(e && e.clientX) || 0;
+        startL = homeDaneaStrip.scrollLeft || 0;
+        try{ homeDaneaStrip.setPointerCapture && homeDaneaStrip.setPointerCapture(e.pointerId); }catch(_){ }
+      };
+      const onMove = (e) => {
+        if (!down) return;
+        const x = Number(e && e.clientX) || 0;
+        homeDaneaStrip.scrollLeft = startL - (x - startX);
+        schedule();
+      };
+      const onUp = () => { down = false; };
+
+      homeDaneaStrip.addEventListener("pointerdown", onDown);
+      homeDaneaStrip.addEventListener("pointermove", onMove);
+      homeDaneaStrip.addEventListener("pointerup", onUp);
+      homeDaneaStrip.addEventListener("pointercancel", onUp);
+
+      // Click su card => apre Movimenti già filtrati
+      homeDaneaStrip.addEventListener("click", (e) => {
+        const btn = e && e.target && e.target.closest ? e.target.closest(".daneaCard[data-key]") : null;
+        if (!btn) return;
+        const key = String(btn.getAttribute("data-key") || "").trim();
+        const docNum = String(btn.getAttribute("data-docnum") || "").trim();
+        try{ e.preventDefault(); e.stopPropagation(); }catch(_){ }
+        try{
+          setView("movements");
+          const q = docNum || key;
+          const movSearch = document.getElementById("movSearch");
+          const movTypeFilter = document.getElementById("movTypeFilter");
+          if (movTypeFilter) movTypeFilter.value = "OUT";
+          if (movSearch) movSearch.value = q;
+          try{ window.HubMovements && window.HubMovements.refresh && window.HubMovements.refresh(); }catch(_){ }
+        }catch(_){ }
+      });
+
+      schedule();
+    }
+
+    function renderHomeDaneaCockpit(){
+      try{
+        if (!homeDaneaCockpit || !homeDaneaStrip) return;
+
+        const list = __getHomeDaneaGroups();
+
+        try{ if (homeDaneaCount) homeDaneaCount.textContent = String(list.length || 0); }catch(_){ }
+
+        const last = (list && list[0]) ? (String(list[0].createdAtMax || "").trim() || String(list[0].date || "").trim()) : "";
+        try{ if (homeDaneaLast) homeDaneaLast.textContent = last ? __fmtDateShortIT(last) : "—"; }catch(_){ }
+
+        try{ if (homeDaneaEmpty) homeDaneaEmpty.style.display = list.length ? "none" : "flex"; }catch(_){ }
+
+        if (!list.length){
+          try{ homeDaneaStrip.innerHTML = ""; }catch(_){ }
+          __bindHomeDaneaCockpitFx();
+          return;
+        }
+
+        const fmt = (n) => (Number(n) || 0).toLocaleString("it-IT");
+
+        homeDaneaStrip.innerHTML = list.map((g) => {
+          const num = String(g.docNum || "").trim() || String(g.key || "").split("__")[0] || "";
+          const dateTxt = __fmtDateShortIT(g.date || g.createdAtMax || "");
+
+          const rowsTxt = fmt(g.rows);
+          const codesTxt = fmt(g.codesCount);
+          const piecesTxt = fmt(g.pieces);
+
+          const whTxt = (Number(g.whConca) > 0 && Number(g.whCerea) > 0)
+            ? "Split"
+            : (Number(g.whConca) > 0 ? "Conca" : "Cerea");
+
+          const mid = `${rowsTxt} righe · ${codesTxt} codici`;
+          const meta = `${piecesTxt} pz`;
+          const wMeta = (whTxt === "Split")
+            ? (`Cerea ${fmt(g.whCerea)} · Conca ${fmt(g.whConca)}`)
+            : whTxt;
+
+          return (
+            `<button class="daneaCard" type="button" role="listitem" data-key="${escapeHtmlAttr(String(g.key || ""))}" data-docnum="${escapeHtmlAttr(String(num || ""))}">` +
+              `<div class="daneaCardTop">` +
+                `<div class="daneaCardCode">${escapeHtml(num ? ("DDT " + num) : ("DDT " + String(g.key || "")))}</div>` +
+                `<span class="daneaCardTag">${escapeHtml(dateTxt)}</span>` +
+              `</div>` +
+              `<div class="daneaCardMid">${escapeHtml(mid)}</div>` +
+              `<div class="daneaCardFoot">` +
+                `<div class="daneaCardNums">` +
+                  `<div class="daneaCardNum">${escapeHtml(meta)}</div>` +
+                  `<div class="daneaCardMeta">${escapeHtml(wMeta)}</div>` +
+                `</div>` +
+                `<span class="daneaCardWh">${escapeHtml(whTxt)}</span>` +
+              `</div>` +
+            `</button>`
+          );
+        }).join("");
+
+        __bindHomeDaneaCockpitFx();
+        __updateHomeDaneaCockpitFx();
+      }catch(_){ }
     }
 
 
@@ -12644,6 +12896,7 @@ function renderAll() {
       renderLowStockBoard(stockByWh);
       renderCategoryBoardCerea(stockByWh);
       renderInventoryTrend(stockArr);
+      try{ renderHomeDaneaCockpit(); }catch(_){ }
 
       try{ renderMoveInv(); }catch(_){ }
 
