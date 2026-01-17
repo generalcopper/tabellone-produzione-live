@@ -2061,7 +2061,7 @@
     const text = String(xmlText || "").trim();
     if (!text) return [];
 
-    // Parse numeri "italiani" (1.234,56) + valori con simboli (€, spazi, ecc.)
+    // Parse numeri: supporta sia formato IT (1.234,56) che formato Easyfatt (1234.56)
     function __numIT(v){
       let s = String(v ?? "").trim();
       if (!s) return null;
@@ -2072,6 +2072,7 @@
         // assume "." migliaia e "," decimali
         s = s.replace(/\./g, "").replace(",", ".");
       } else if (s.includes(",")) {
+        // assume "," decimale
         s = s.replace(",", ".");
       }
       const n = Number(s);
@@ -2088,6 +2089,42 @@
         if (n != null && Number.isFinite(n)) return n;
       }
       return null;
+    }
+
+    function __vatPercFromVatCode(rowNode){
+      try{
+        const el = rowNode ? rowNode.querySelector("VatCode") : null;
+        if (!el) return null;
+        // Easyfatt: <VatCode Perc="22" ...>22</VatCode>
+        let raw = String(el.getAttribute("Perc") || el.getAttribute("perc") || "").trim();
+        let n = __numIT(raw);
+        if (n != null && Number.isFinite(n)) return n;
+        raw = String(el.textContent || "").trim();
+        n = __numIT(raw);
+        if (n != null && Number.isFinite(n)) return n;
+      }catch(_){ }
+      return null;
+    }
+
+    function __discountMul(raw){
+      const s = String(raw || "").trim();
+      if (!s) return 1;
+      let mul = 1;
+      const re = /(-?\d+(?:[\.,]\d+)?)\s*%/g;
+      let m;
+      while ((m = re.exec(s))){
+        const p = __numIT(m[1]);
+        if (p == null || !Number.isFinite(p)) continue;
+        mul *= (1 - (p/100));
+      }
+      if (!Number.isFinite(mul)) return 1;
+      return mul;
+    }
+
+    function __round4(v){
+      const n = Number(v);
+      if (!Number.isFinite(n)) return null;
+      return Math.round(n * 10000) / 10000;
     }
 
     const dom = new DOMParser().parseFromString(text, "text/xml");
@@ -2116,34 +2153,55 @@
         const qtyRaw = getText(r, "Qty");
         const umRaw = getText(r, "Um") || getText(r, "UM") || getText(r, "Uom") || getText(r, "Unit") || "";
 
-        // Importi (best-effort): imponibile + IVA per riga
-        const unitNet = __numFrom(r, [
-          "UnitNetPrice","UnitPriceNet","UnitPrice","Price","NetPrice","PriceNet","PriceNoVat","NetUnitPrice"
+        const discountsRaw = getText(r, "Discounts") || getText(r, "Discount") || "";
+        const discMul = __discountMul(discountsRaw);
+
+        // Importi (best-effort): unitari
+        let unitNet = __numFrom(r, [
+          "UnitNetPrice","UnitPriceNet","NetUnitPrice",
+          "UnitPrice","Price","NetPrice","PriceNet","PriceNoVat"
         ]);
-        const unitGross = __numFrom(r, [
-          "UnitPriceWithVat","UnitGrossPrice","PriceWithVat","GrossUnitPrice"
+        let unitGross = __numFrom(r, [
+          "UnitPriceWithVat","UnitGrossPrice","GrossUnitPrice","PriceWithVat"
         ]);
+
+        // IVA: percentuale (supporto Easyfatt <VatCode Perc="...")
         let vatPerc = __numFrom(r, [
-          "VatPerc","VatPercent","VatRate","IvaPerc","IvaPercent","IvaRate","VatPercentage","TaxPercent"
+          "VatPerc","VatPercent","VatRate","VatPercentage",
+          "IvaPerc","IvaPercent","IvaRate","TaxPercent"
         ]);
+        if (vatPerc == null) vatPerc = __vatPercFromVatCode(r);
+
+        // Totali riga (se presenti)
         let net = __numFrom(r, [
-          "TotalNet","TotalNoVat","NetAmount","TaxableAmount","Taxable","RowNet","Net","LineNet","AmountNet","Total"
+          "TotalNet","TotalNoVat","NetAmount","TaxableAmount","Taxable",
+          "RowNet","Net","LineNet","AmountNet",
+          "TotalWithoutTax","TotalWithoutVat"
         ]);
         let vat = __numFrom(r, [
-          "VatAmount","VATAmount","IvaAmount","Iva","IVA","Vat","TaxAmount","TotalVat","VatTotal"
+          "VatAmount","VATAmount","IvaAmount",
+          "TaxAmount","TotalVat","VatTotal"
         ]);
         let gross = __numFrom(r, [
-          "TotalWithVat","TotalGross","GrossAmount","RowTotalWithVat","Gross","AmountWithVat","TotalAmount"
+          "TotalWithVat","TotalGross","GrossAmount","RowTotalWithVat",
+          "Gross","AmountWithVat","TotalAmount"
         ]);
 
         let qty = null;
         if (qtyRaw){
-          const n = Number(String(qtyRaw).replace(",", "."));
-          if (Number.isFinite(n)) qty = n;
+          const n = __numIT(qtyRaw);
+          if (n != null && Number.isFinite(n)) qty = n;
         }
 
-        // Derivazioni (senza forzare: se mancano i campi in XML, restano null)
+        // Derivazioni (best-effort)
         const qLine = (qty != null && Number.isFinite(Number(qty))) ? Number(qty) : null;
+
+        const netFromXml = (net != null);
+        const grossFromXml = (gross != null);
+
+        // Sconti: in Easyfatt spesso hai Price + Discounts (senza Totals)
+        if (!netFromXml && unitNet != null && discMul !== 1) unitNet = unitNet * discMul;
+        if (!grossFromXml && unitGross != null && discMul !== 1) unitGross = unitGross * discMul;
 
         if (net == null && unitNet != null && qLine != null) net = unitNet * qLine;
         if (gross == null && unitGross != null && qLine != null) gross = unitGross * qLine;
@@ -2155,11 +2213,13 @@
         if (vat == null && gross != null && net != null) vat = gross - net;
 
         if (vatPerc == null && net != null && vat != null && net !== 0) vatPerc = (vat / net) * 100;
-        if (gross == null && net != null && vatPerc != null) gross = net * (1 + (vatPerc/100));
+
+        // fallback: gross + vatPerc
         if (net == null && gross != null && vatPerc != null && (1 + (vatPerc/100)) !== 0){
           net = gross / (1 + (vatPerc/100));
           if (vat == null && net != null) vat = gross - net;
         }
+        if (gross == null && net != null && vatPerc != null) gross = net * (1 + (vatPerc/100));
 
         return {
           idx,
@@ -2170,12 +2230,12 @@
           uom: String(umRaw || "").trim(),
 
           // fatturato (best-effort)
-          unitNet: (unitNet == null) ? null : unitNet,
-          unitGross: (unitGross == null) ? null : unitGross,
-          vatPerc: (vatPerc == null) ? null : vatPerc,
-          net: (net == null) ? null : net,
-          vat: (vat == null) ? null : vat,
-          gross: (gross == null) ? null : gross
+          unitNet: (unitNet == null) ? null : __round4(unitNet),
+          unitGross: (unitGross == null) ? null : __round4(unitGross),
+          vatPerc: (vatPerc == null) ? null : __round4(vatPerc),
+          net: (net == null) ? null : __round4(net),
+          vat: (vat == null) ? null : __round4(vat),
+          gross: (gross == null) ? null : __round4(gross)
         };
       }).filter(r => {
         if (!r.code) return false; // importa solo righe con codice articolo
@@ -2185,7 +2245,7 @@
         return true;
       });
 
-      // Totali DDT (best-effort)
+      // Totali da righe
       const tot = rows.reduce((acc, r) => {
         const n = (r && r.net != null) ? Number(r.net) : 0;
         const v = (r && r.vat != null) ? Number(r.vat) : 0;
@@ -2195,6 +2255,46 @@
         acc.gross += (Number.isFinite(g) ? g : 0);
         return acc;
       }, { net: 0, vat: 0, gross: 0 });
+
+      // Totali testata (Easyfatt)
+      const headNet = __numFrom(d, [
+        "TotalWithoutTax","TotalWithoutVat","TotalNet","TotalNoVat","TotalTaxable","TaxableAmount"
+      ]);
+      const headVat = __numFrom(d, [
+        "VatAmount","TotalVat","VatTotal","TotalVatAmount","VATAmount","IvaAmount"
+      ]);
+      const headGross = __numFrom(d, [
+        "TotalWithVat","TotalAmount","TotalGross","GrossTotal","GrandTotal","Total"
+      ]);
+
+      let netTotal = (headNet != null) ? headNet : tot.net;
+      let vatTotal = (headVat != null) ? headVat : null;
+      let grossTotal = (headGross != null) ? headGross : null;
+
+      if (grossTotal == null){
+        if (netTotal != null && vatTotal != null) grossTotal = netTotal + vatTotal;
+        else grossTotal = tot.gross;
+      }
+      if (vatTotal == null){
+        if (grossTotal != null && netTotal != null) vatTotal = grossTotal - netTotal;
+        else vatTotal = tot.vat;
+      }
+      if (netTotal == null){
+        if (grossTotal != null && vatTotal != null) netTotal = grossTotal - vatTotal;
+        else netTotal = tot.net;
+      }
+
+      netTotal = __round4(netTotal);
+      if (netTotal == null) netTotal = 0;
+      vatTotal = __round4(vatTotal);
+      if (vatTotal == null) vatTotal = 0;
+      grossTotal = __round4(grossTotal);
+      if (grossTotal == null) grossTotal = __round4(netTotal + vatTotal) || 0;
+
+      // anti rumore floating
+      if (vatTotal < 0 && vatTotal > -0.02) vatTotal = 0;
+      if (netTotal < 0 && netTotal > -0.02) netTotal = 0;
+      if (grossTotal < 0 && grossTotal > -0.02) grossTotal = 0;
 
       const hash = hashStr(JSON.stringify(rows.map(x => [
         x.code, x.desc, x.qty, x.uom,
@@ -2208,9 +2308,9 @@
         number: String(number).trim(),
         customer: String(customer || "").trim(),
         rows,
-        netTotal: Number(tot.net || 0),
-        vatTotal: Number(tot.vat || 0),
-        grossTotal: Number(tot.gross || 0),
+        netTotal: Number(netTotal || 0),
+        vatTotal: Number(vatTotal || 0),
+        grossTotal: Number(grossTotal || 0),
         currency: "EUR",
         hash
       });
@@ -3909,29 +4009,34 @@ function waitForHub(attempt){
   function getDdtModel(key){
     const k = String(key || "").trim();
     if (!k) return null;
+
     const done = S.completedMap.get(k) || null;
     const cached = S.cacheMap.get(k) || null;
-    const base = done || cached;
+
+    // Fonte principale: cache (daneaDdts) perché è l’ultimo parse dell’XML
+    const base = cached || done;
     if (!base) return null;
 
-    const currency = String((base && base.currency) || (cached && cached.currency) || "EUR");
+    const currency = String((cached && cached.currency) || (done && done.currency) || "EUR");
     const rows = (cached && Array.isArray(cached.rows) && cached.rows.length)
       ? cached.rows
       : (done && Array.isArray(done.rows) ? done.rows : []);
 
-    const t0 = {
+    const tDone = {
       net: toNum(done && done.netTotal),
       vat: toNum(done && done.vatTotal),
       gross: toNum(done && done.grossTotal)
     };
-    const t1 = {
+    const tCache = {
       net: toNum(cached && cached.netTotal),
       vat: toNum(cached && cached.vatTotal),
       gross: toNum(cached && cached.grossTotal)
     };
-    let netTotal = (t0.net != null) ? t0.net : (t1.net != null) ? t1.net : null;
-    let vatTotal = (t0.vat != null) ? t0.vat : (t1.vat != null) ? t1.vat : null;
-    let grossTotal = (t0.gross != null) ? t0.gross : (t1.gross != null) ? t1.gross : null;
+
+    // Preferisci i totali della cache (aggiornabili anche per DDT già completati)
+    let netTotal = (tCache.net != null) ? tCache.net : (tDone.net != null) ? tDone.net : null;
+    let vatTotal = (tCache.vat != null) ? tCache.vat : (tDone.vat != null) ? tDone.vat : null;
+    let grossTotal = (tCache.gross != null) ? tCache.gross : (tDone.gross != null) ? tDone.gross : null;
 
     if (netTotal == null || vatTotal == null || grossTotal == null){
       const tr = computeTotalsFromRows(rows);
