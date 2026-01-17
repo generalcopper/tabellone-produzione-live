@@ -1499,7 +1499,7 @@
             <button id="daneaTabVerify" class="active" type="button">Da verificare <span class="pill" id="pillDaneaVerify" style="height:auto; padding:2px 8px; border-radius:999px; border:0; background:rgba(10,132,255,.12); color:rgba(0,0,0,.86);">0</span></button>
             <button id="daneaTabDone" type="button">Completati <span class="pill" id="pillDaneaDone" style="height:auto; padding:2px 8px; border-radius:999px; border:0; background:rgba(0,0,0,.06); color:rgba(0,0,0,.86);">0</span></button>
           </div>
-          <button class="btn btn-ghost mini" id="btnDaneaAutoToggle" type="button" aria-pressed="true" title="Attiva/disattiva scarico automatico">Scarico automatico: ATTIVO</button>
+          <button class="btn btn-ghost mini" id="btnDaneaAutoToggle" type="button" aria-pressed="true" title="Crea movimenti di scarico per tutti i DDT verdi">Scarica DDT verdi</button>
           <div class="pill" id="pillDaneaCount">0</div>
           <button class="iconBtn" id="btnCloseDaneaDdt" type="button" aria-label="Chiudi">×</button>
         </div>
@@ -1710,7 +1710,7 @@
 
     if (btn){
       try{ btn.setAttribute("aria-pressed", on ? "true" : "false"); }catch(_){ }
-      try{ btn.textContent = on ? "Scarico automatico: ATTIVO" : "Scarico automatico: DISATTIVATO"; }catch(_){ }
+      try{ btn.textContent = on ? "Scarica DDT verdi" : "Scarica DDT verdi (scarico OFF)"; }catch(_){ }
       try{
         // Colori: verde = ON, grigio = OFF (override anche se in overlay i bottoni sono blu)
         if (on){
@@ -2511,6 +2511,283 @@ Disponibili: ${(tot).toLocaleString("it-IT")} (Cerea ${aC.toLocaleString("it-IT"
     }
   }
 
+
+
+  // ===== BULK: scarica automaticamente TUTTI i DDT verdi (OK) =====
+  async function dischargeAllGreenDdts(){
+    if (S.busy) return;
+
+    const H = S.hub;
+    if (!H || !H.fb || !H.fb.db || !H.FS) { alert("Hub non pronto"); return; }
+    if (!H.fb.user) {
+      try{ window.HubInv?.showToast?.("Accedi con Google per scaricare", "warn"); }catch(_){ alert("Accedi con Google"); }
+      return;
+    }
+
+    // forza ON (manteniamo anche la logica per i singoli DDT)
+    try{ setAutoDischarge(true); }catch(_){ }
+
+    cacheCompletedMap();
+
+    if (!S.cacheReady){
+      try{ window.HubInv?.showToast?.("Caricamento DDT da Firebase… riprova tra un attimo", "warn"); }catch(_){ }
+      return;
+    }
+
+    const baseVerify = (S.cache || []);
+    const verifyList = baseVerify.filter(d => d && d.key && !S.completedMap.has(d.key));
+    const green = verifyList.filter(d => {
+      try{ return !!ddtStatus(d).ok; }catch(_){ return false; }
+    });
+
+    if (!green.length){
+      try{ window.HubInv?.showToast?.("Nessun DDT verde da scaricare", "warn"); }catch(_){ }
+      return;
+    }
+
+    // Ordine "tradizionale": prima i più vecchi
+    green.sort((a,b) => String(a?.date||"").localeCompare(String(b?.date||"")) || String(a?.number||"").localeCompare(String(b?.number||"")));
+
+    const ok = confirm(`Scaricare automaticamente ${green.length} DDT verdi?\n\n• Verranno creati movimenti di scarico (materie prime + imballaggi)\n• I DDT passeranno in "Completati"`);
+    if (!ok) return;
+
+    const btn = $("btnDaneaAutoToggle");
+    const prevTxt = btn ? String(btn.textContent||"") : "";
+
+    S.busy = true;
+    try{
+      try{ if (btn) { btn.disabled = true; btn.textContent = `Scarico 0/${green.length}…`; } }catch(_){ }
+
+      const { addDoc, setDoc, doc, collection, serverTimestamp, getDocs, query, orderBy } = H.FS;
+
+      // 1) Carica inventario (movimenti) una sola volta
+      let movs = (H.state && Array.isArray(H.state.movements)) ? H.state.movements : [];
+
+      if (!movs.length){
+        try{
+          if (H.fb && H.fb.db && typeof getDocs === "function" && typeof collection === "function" && typeof query === "function" && typeof orderBy === "function"){
+            try{ H.showToast?.("Carico inventario…", "warn"); }catch(_){ }
+            const col = collection(H.fb.db, "orgs", H.ORG_ID, "inventoryMovements");
+            const q = query(col, orderBy("createdAt"));
+            const snap = await getDocs(q);
+            movs = snap.docs.map(d => {
+              const data = d.data() || {};
+              return {
+                id: d.id,
+                type: data.type || "IN",
+                code: data.code || "",
+                qty: data.qty,
+                warehouse: data.warehouse || ""
+              };
+            });
+            if (H.state) H.state.movements = movs;
+          }
+        }catch(e){
+          try{ console.warn("fetch inventoryMovements failed", e); }catch(_){ }
+        }
+      }
+
+      if (!movs.length){
+        alert("Inventario non pronto: movimenti non caricati.");
+        return;
+      }
+
+      const _normWh = (w) => {
+        try{ if (H && typeof H.normalizeWarehouse === "function") return H.normalizeWarehouse(w); }catch(_){ }
+        const s = String(w || "").trim().toLowerCase();
+        if (s.includes("conca") || s.includes("concamarise")) return "concamarise";
+        return "cerea";
+      };
+      const _safeInt = (v) => {
+        try{ if (H && typeof H.safeInt === "function") return H.safeInt(v); }catch(_){ }
+        const n = parseInt(String(v||"").replace(/[^0-9\-]/g,""), 10);
+        return Number.isFinite(n) ? n : 0;
+      };
+
+      // Disponibilità aggiornata "live" durante il bulk (così non scarichi più del disponibile)
+      const avail = { cerea: new Map(), concamarise: new Map() };
+      for (const mv of movs){
+        const code = String(mv && mv.code || "").trim();
+        if (!code) continue;
+        const low = code.toLowerCase();
+        const w = _normWh(mv.warehouse || mv.site || mv.magazzino || mv.location || "");
+        const q = _safeInt(mv.qty);
+        if (!q) continue;
+        const delta = (String(mv.type || "").toUpperCase() === "OUT") ? -q : q;
+        const m = (w === "concamarise") ? avail.concamarise : avail.cerea;
+        m.set(low, (m.get(low) || 0) + delta);
+      }
+
+      const movCol = collection(H.fb.db, "orgs", H.ORG_ID, "inventoryMovements");
+
+      let doneCount = 0;
+      for (let i=0; i<green.length; i++){
+        const ddt = green[i];
+        if (!ddt || !ddt.key) continue;
+
+        // se nel frattempo è diventato completato, salta
+        if (S.completedMap.has(ddt.key)) continue;
+
+        try{ if (btn) btn.textContent = `Scarico ${doneCount}/${green.length}…`; }catch(_){ }
+
+        // 2) calcola fabbisogni componenti (somma per codice)
+        const req = new Map();
+        for (const r of (ddt.rows || [])){
+          const qtyLine = (r.qty != null && Number.isFinite(Number(r.qty))) ? Number(r.qty) : parseFraction(r.qtyRaw);
+          const qLine = (qtyLine != null && Number.isFinite(qtyLine)) ? qtyLine : 0;
+          if (qLine <= 0) continue;
+
+          const fp = getFpForRow(r);
+          const comps = getFpComponents(fp);
+          for (const c of comps){
+            const cCode = String(c.code || "").trim();
+            if (!cCode) continue;
+
+            const per = compQtyPerUnit(c);
+            if (per == null || !Number.isFinite(per) || per <= 0) continue;
+
+            const add = per * qLine;
+            const low = cCode.toLowerCase();
+            const cur = req.get(low) || { code: cCode, name: String(c.name || c.articolo || cCode).trim(), uom: String(c.uom || "").trim(), qty: 0 };
+            cur.qty += add;
+            if (!cur.name) cur.name = cCode;
+            if (!cur.uom) cur.uom = String(c.uom || "").trim();
+            req.set(low, cur);
+          }
+        }
+
+        if (!req.size){
+          // DDT verde ma senza componenti: lo segnaliamo e lo saltiamo
+          try{ window.HubInv?.showToast?.(`DDT ${ddt.number || "?"}: nessun componente calcolabile`, "warn"); }catch(_){ }
+          continue;
+        }
+
+        // 3) validazione scorte (globale) prima di scrivere
+        const needList = Array.from(req.values()).map(it => {
+          const qtyInt = Math.round(Number(it.qty) || 0);
+          return Object.assign({}, it, { qtyInt });
+        }).filter(x => x.qtyInt);
+
+        for (const it of needList){
+          const low = String(it.code || "").trim().toLowerCase();
+          const aC = Math.max(0, _safeInt(avail.cerea.get(low)));
+          const aK = Math.max(0, _safeInt(avail.concamarise.get(low)));
+          const tot = aC + aK;
+          if (tot < it.qtyInt){
+            alert(`Scarico interrotto.\n\nScorta insufficiente per ${it.code} — ${it.name || ""}\n\nDDT ${ddt.number || "—"} del ${fmtDateIT(ddt.date)}\nRichiesti: ${it.qtyInt.toLocaleString("it-IT")} ${String(it.uom||"").trim()}\nDisponibili: ${(tot).toLocaleString("it-IT")} (Cerea ${aC.toLocaleString("it-IT")}, Concamarise ${aK.toLocaleString("it-IT")})`);
+            return;
+          }
+        }
+
+        // 4) crea movimenti OUT (split automatico tra sedi) + aggiorna avail in RAM
+        const movementIds = [];
+        const allocations = [];
+
+        const noteBase = `Scarico componenti per DDT ${ddt.number} del ${fmtDateIT(ddt.date)} (DaneaXML)`;
+
+        for (const it of needList){
+          const low = String(it.code || "").trim().toLowerCase();
+          let need = it.qtyInt;
+
+          let aC = Math.max(0, _safeInt(avail.cerea.get(low)));
+          let aK = Math.max(0, _safeInt(avail.concamarise.get(low)));
+
+          const first = (aK > aC) ? "concamarise" : "cerea";
+          const second = (first === "cerea") ? "concamarise" : "cerea";
+
+          const takeFrom = (wh) => {
+            if (need <= 0) return 0;
+            const cur = (wh === "concamarise") ? aK : aC;
+            const take = Math.min(need, cur);
+            if (take <= 0) return 0;
+            need -= take;
+            if (wh === "concamarise") aK -= take;
+            else aC -= take;
+            return take;
+          };
+
+          const t1 = takeFrom(first);
+          const t2 = takeFrom(second);
+
+          // aggiorna disponibilità residue in RAM
+          avail.cerea.set(low, aC);
+          avail.concamarise.set(low, aK);
+
+          allocations.push({ code: it.code, name: it.name || it.code, uom: String(it.uom||"").trim(), qty: it.qtyInt, byWarehouse: { cerea: (first==="cerea"?t1:t2) || 0, concamarise: (first==="concamarise"?t1:t2) || 0 } });
+
+          const makePayload = (warehouse, qtyInt) => ({
+            type: "OUT",
+            customer: "Scarico DDT",
+            code: it.code,
+            item: it.name || it.code,
+            uom: String(it.uom || "").trim(),
+            qtyRaw: `${it.qty} ${String(it.uom||"").trim()}`.trim(),
+            qty: qtyInt,
+            date: String(ddt.date || "").trim(),
+            note: noteBase,
+            source: "DaneaXML",
+            rawText: "",
+            warehouse: warehouse,
+
+            docType: "DDT",
+            docNum: String(ddt.number || "").trim(),
+            docDateRaw: String(ddt.date || "").trim(),
+            daneaDdtKey: String(ddt.key || "").trim(),
+
+            createdAt: serverTimestamp(),
+            createdBy: H.fb.user.email || H.fb.user.uid
+          });
+
+          if (t1 > 0){
+            const ref = await addDoc(movCol, makePayload(first, t1));
+            if (ref && ref.id) movementIds.push(ref.id);
+          }
+          if (t2 > 0){
+            const ref = await addDoc(movCol, makePayload(second, t2));
+            if (ref && ref.id) movementIds.push(ref.id);
+          }
+        }
+
+        // 5) salva completato (id deterministico)
+        const doneId = encodeURIComponent(String(ddt.key || "").trim());
+        const doneRef = doc(H.fb.db, "orgs", H.ORG_ID, "daneaDdtCompleted", doneId);
+        await setDoc(doneRef, {
+          key: String(ddt.key || "").trim(),
+          number: String(ddt.number || "").trim(),
+          date: String(ddt.date || "").trim(),
+          customer: String(ddt.customer || "").trim(),
+          rows: (ddt.rows || []).map(x => ({ code:x.code||"", desc:x.desc||"", qty:x.qty??null, qtyRaw:x.qtyRaw||"", uom:x.uom||"" })),
+          warehouse: "global",
+          allocations: allocations,
+          xmlHash: String(ddt.hash || ""),
+          movementIds: movementIds,
+          autoDischarge: true,
+          createdAt: serverTimestamp(),
+          createdBy: H.fb.user.email || H.fb.user.uid
+        }, { merge: true });
+
+        // aggiorna cache locale (evita doppi se la snapshot è lenta)
+        try{ S.completedMap.set(String(ddt.key||"").trim(), { key: String(ddt.key||"").trim() }); }catch(_){ }
+
+        doneCount++;
+        try{ if (btn) btn.textContent = `Scarico ${doneCount}/${green.length}…`; }catch(_){ }
+
+      }
+
+      try{ window.HubInv?.showToast?.(`Scarico completato: ${doneCount} DDT`, "ok"); }catch(_){ }
+
+      // refresh xml (best effort)
+      try{ await fetchNow(true); }catch(_){ }
+
+    }catch(e){
+      console.error(e);
+      try{ window.HubInv?.showToast?.("Errore scarico automatico", "err"); }catch(_){ }
+      alert("Errore scarico automatico");
+    }finally{
+      try{ if (btn) { btn.disabled = false; btn.textContent = prevTxt || (S.autoDischarge ? "Scarica DDT verdi" : "Scarica DDT verdi (scarico OFF)"); } }catch(_){ }
+      S.busy = false;
+    }
+  }
   async function deleteCompletedByKey(key){
     const k = String(key || "").trim();
     if (!k) return;
@@ -2557,9 +2834,11 @@ Disponibili: ${(tot).toLocaleString("it-IT")} (Cerea ${aC.toLocaleString("it-IT"
     $("daneaTabDone")?.addEventListener("click", () => setTab("done"));
     $("btnDaneaSend")?.addEventListener("click", () => sendSelectedFromDetail());
 
-    // toggle scarico automatico (on/off)
-    $("btnDaneaAutoToggle")?.addEventListener("click", () => {
-      try{ setAutoDischarge(!S.autoDischarge); }catch(_){ }
+    // Scarico automatico: crea movimenti per TUTTI i DDT verdi (quelli OK)
+    $("btnDaneaAutoToggle")?.addEventListener("click", async (e) => {
+      try{ e && e.preventDefault && e.preventDefault(); }catch(_){ }
+      try{ e && e.stopPropagation && e.stopPropagation(); }catch(_){ }
+      try{ await dischargeAllGreenDdts(); }catch(_){ }
     });
 
     // list click
