@@ -9288,9 +9288,59 @@ async function deleteMovement(id) {
 
 
 
+    // Dashboard: cache righe sottoscorta (click -> dettaglio inventario)
+    let __lowStockRowByKey = new Map();
+
+    // Click su riga sottoscorta (Home) => apri dettaglio inventario
+    (function __bindLowStockBoardClick(){
+      try{
+        if (!lowStockBoard) return;
+        if (lowStockBoard.dataset && lowStockBoard.dataset.boundLowStockClick === "1") return;
+        if (lowStockBoard.dataset) lowStockBoard.dataset.boundLowStockClick = "1";
+
+        const openFromKey = (k) => {
+          const key = String(k || "").trim();
+          if (!key) return;
+          const row = (__lowStockRowByKey && __lowStockRowByKey.get) ? (__lowStockRowByKey.get(key) || null) : null;
+          if (!row) return;
+
+          // Alias group => scegli codice (come in Inventario)
+          if (row.__isAliasGroup && Array.isArray(row.__codes) && row.__codes.length > 1) {
+            openUnifiedArticleModal(row);
+            return;
+          }
+          openProductModal(String(row.code || ""), row);
+        };
+
+        lowStockBoard.addEventListener("click", (e) => {
+          const rowEl = e && e.target && e.target.closest ? e.target.closest(".lowStockCockpitRow[data-k]") : null;
+          if (!rowEl) return;
+          const k = rowEl.getAttribute("data-k") || "";
+          try{ e.preventDefault(); e.stopPropagation(); }catch(_){ }
+          openFromKey(k);
+        });
+
+        // Accessibilità: Enter/Space sulle righe
+        lowStockBoard.addEventListener("keydown", (e) => {
+          if (!e) return;
+          const key = e.key;
+          if (key !== "Enter" && key !== " ") return;
+          const rowEl = e.target && e.target.closest ? e.target.closest(".lowStockCockpitRow[data-k]") : null;
+          if (!rowEl) return;
+          const k = rowEl.getAttribute("data-k") || "";
+          try{ e.preventDefault(); e.stopPropagation(); }catch(_){ }
+          openFromKey(k);
+        });
+      }catch(_){ }
+    })();
+
+
     function renderLowStockBoard(stockByWh) {
       try {
         if (!lowStockBoard || !lowStockListCerea || !lowStockListConca) return;
+
+        // reset cache (usata dal click sulle righe)
+        __lowStockRowByKey = new Map();
 
         const arr0 = Array.isArray(stockByWh) ? stockByWh : [];
         const arr = groupStockRowsByAlias(arr0);
@@ -9328,6 +9378,8 @@ async function deleteMovement(id) {
           const more = list.length - show.length;
 
           const rows = show.map(r => {
+            const k = stockRowKey(String(r && r.customer || ""), String(r && r.code || ""), String(r && r.warehouse || ""));
+            try { __lowStockRowByKey.set(k, r); } catch(_){ }
             const code = escapeHtml(r.__displayCode || r.code || "");
             const item = escapeHtml(r.item || "");
             const qty = fmt(safeInt(r.qty));
@@ -9336,7 +9388,7 @@ async function deleteMovement(id) {
             const itemCell = item || "—";
 
             return `
-              <div class="lowStockCockpitRow" role="row">
+              <div class="lowStockCockpitRow" role="row" data-k="${escapeHtmlAttr(k)}" tabindex="0" title="Apri dettaglio">
                 <div class="lowStockCockpitCell isCode colCode" role="cell">${codeCell}</div>
                 <div class="lowStockCockpitCell colItem" role="cell">${itemCell}</div>
                 <div class="lowStockCockpitCell isQty colQty" role="cell">${qty}</div>
