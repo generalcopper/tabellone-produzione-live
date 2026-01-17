@@ -6141,6 +6141,49 @@ function computePartialOrders(){
 
 
   // === PDF: stampa ordini inviati a mobile (1 pagina A4 per ordine) ===
+
+
+  // PDF-LIB loader (self contained) - usa pdf-lib via CDN se non presente
+  function __moLoadScriptOnce(src){
+    return new Promise((resolve, reject)=>{
+      try{
+        const existing = Array.from(document.getElementsByTagName('script')).find(s=>s && s.src===src);
+        if(existing){
+          try{
+            if(existing.dataset && existing.dataset.loaded === '1') return resolve();
+          }catch(_e){}
+          existing.addEventListener('load', ()=>resolve(), { once:true });
+          existing.addEventListener('error', ()=>reject(new Error('Impossibile caricare libreria PDF (pdf-lib).')), { once:true });
+          return;
+        }
+        const s = document.createElement('script');
+        s.src = src;
+        s.async = true;
+        s.onload = ()=>{ try{ s.dataset.loaded = '1'; }catch(_e){} resolve(); };
+        s.onerror = ()=>reject(new Error('Impossibile caricare libreria PDF (pdf-lib).'));
+        document.head.appendChild(s);
+      }catch(e){ reject(e); }
+    });
+  }
+
+  async function __mobileOrdersGetPDFLib(){
+    if(globalThis.PDFLib && globalThis.PDFLib.PDFDocument) return globalThis.PDFLib;
+    if(!globalThis.__MOBILE_ORDERS_PDFLIB_PROMISE__){
+      globalThis.__MOBILE_ORDERS_PDFLIB_PROMISE__ = (async ()=>{
+        await __moLoadScriptOnce('https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js');
+        if(!globalThis.PDFLib || !globalThis.PDFLib.PDFDocument) throw new Error('pdf-lib non disponibile');
+        return globalThis.PDFLib;
+      })();
+    }
+    return await globalThis.__MOBILE_ORDERS_PDFLIB_PROMISE__;
+  }
+
+  // Esponi anche come helper globale (compatibilità): evita ReferenceError tra script module/classic
+  try{
+    if(typeof globalThis.__payrollGetPDFLib !== 'function'){
+      globalThis.__payrollGetPDFLib = __mobileOrdersGetPDFLib;
+    }
+  }catch(_e){}
   function __pdfHardWrapWord(word, font, size, maxWidth){
     const out = [];
     let cur = "";
@@ -6292,7 +6335,7 @@ function computePartialOrders(){
 
       try{ showToast('PDF', `Genero ${orders.length} pagine…`, 2200); }catch(_e){}
 
-      const lib = await __payrollGetPDFLib();
+      const lib = await __mobileOrdersGetPDFLib();
       const { PDFDocument, StandardFonts, rgb } = lib;
 
       const pdf = await PDFDocument.create();
