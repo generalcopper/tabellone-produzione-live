@@ -9313,7 +9313,7 @@ async function deleteMovement(id) {
 
         const fmt = (n) => (Number(n) || 0).toLocaleString("it-IT");
 
-        // Dashboard: tabella compatta (niente righe “a riquadro”), con scroll SOLO dentro il riquadro
+        // Dashboard: lista "cockpit" (no tabelle), con scroll SOLO dentro il riquadro
         // così la Home non diventa scrollabile su desktop.
         const MAX_ROWS = 200;
 
@@ -9327,54 +9327,63 @@ async function deleteMovement(id) {
           const show = list.slice(0, MAX_ROWS);
           const more = list.length - show.length;
 
-          const head = `
-            <div class="tableWrap lowStockTableWrap" role="region" aria-label="Tabella sottoscorta" tabindex="0">
-              <table class="dataGrid lowStockTable">
-                <thead>
-                  <tr>
-                    <th style="width:22%;">Codice</th>
-                    <th style="width:40%;">Articolo</th>
-                    <th style="width:20%;">Fornitore</th>
-                    <th style="width:9%; text-align:right;">Qtà</th>
-                    <th style="width:9%; text-align:right;">Soglia</th>
-                  </tr>
-                </thead>
-                <tbody>
-          `;
+          const items = show.map(r => {
+            const codeRaw = (r && (r.__displayCode || r.code)) || "";
+            const itemRaw = (r && r.item) || "";
+            const custRaw = (r && r.customer) || "";
 
-          const rows = show.map(r => {
-            const code = escapeHtml(r.__displayCode || r.code || "");
-            const item = escapeHtml(r.item || "");
-            const cust = escapeHtml(r.customer || "");
-            const qty = fmt(safeInt(r.qty));
-            const thr = fmt(safeInt(r.threshold));
+            const code = escapeHtml(codeRaw);
+            const item = escapeHtml(itemRaw);
+            const cust = escapeHtml(custRaw);
 
-            const codeCell = code ? `<span class="lowStockCodeCell">${code}</span>` : `<span class="td-muted">—</span>`;
-            const itemCell = item || "—";
-            const custCell = cust || "—";
+            const qInt = safeInt(r && r.qty);
+            const tInt = safeInt(r && r.threshold);
+            const qty = fmt(qInt);
+            const thr = fmt(tInt);
+
+            // livello visivo (cockpit)
+            let sev = "warn";
+            try{
+              const ratio = (tInt > 0) ? (qInt / tInt) : 0;
+              if (ratio <= 0.25) sev = "bad";
+              else if (ratio <= 0.6) sev = "warn";
+              else sev = "ok";
+            }catch(_){ sev = "warn"; }
+
+            const codeHtml = code
+              ? `<div class="lowStockCode">${code}</div>`
+              : `<div class="lowStockCode td-muted">—</div>`;
+
+            const nameHtml = item
+              ? `<div class="lowStockName">${item}</div>`
+              : `<div class="lowStockName td-muted">—</div>`;
+
+            const metaHtml = cust
+              ? `<div class="lowStockMeta">Fornitore: ${cust}</div>`
+              : ``;
 
             return `
-              <tr>
-                <td data-label="Codice">${codeCell}</td>
-                <td data-label="Articolo" class="lowStockItemCell">${itemCell}</td>
-                <td data-label="Fornitore" class="td-muted">${custCell}</td>
-                <td data-label="Qtà" class="lowStockQtyCell">${qty}</td>
-                <td data-label="Soglia" class="lowStockThrCell">${thr}</td>
-              </tr>
+              <div class="lowStockItem" role="listitem" data-sev="${sev}">
+                <div class="lowStockItemMain">
+                  ${codeHtml}
+                  ${nameHtml}
+                  ${metaHtml}
+                </div>
+                <div class="lowStockQty">
+                  <div class="n">${qty}</div>
+                  <div class="t">Soglia ${thr}</div>
+                </div>
+              </div>
             `;
           }).join("");
 
           const moreRow = (more > 0)
-            ? `<tr><td colspan="5" class="td-muted">+${fmt(more)} altri…</td></tr>`
+            ? `<div class="lowStockMore td-muted">+${fmt(more)} altri…</div>`
             : ``;
 
-          const foot = `
-                </tbody>
-              </table>
-            </div>
-          `;
-
-          el.innerHTML = head + rows + moreRow + foot;
+          try{ el.setAttribute("role","list"); }catch(_){ }
+          try{ if (!el.hasAttribute("tabindex")) el.setAttribute("tabindex","0"); }catch(_){ }
+          el.innerHTML = items + moreRow;
         };
 
         renderList(cerea, lowStockListCerea);
