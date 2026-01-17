@@ -6385,7 +6385,8 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
         thresholds: null,
         supplierDocs: null,
         finishedProducts: null,
-        finishedProductCategories: null
+        finishedProductCategories: null,
+        daneaCompleted: null
       }
     };
 
@@ -6430,6 +6431,27 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
     let finishedProducts = []; // key -> number (from Firestore)
     let finishedProductCategories = []; // elenco categorie prodotti finiti (from Firestore)
     let finishedProductCategoriesMap = new Map(); // keyLower -> {key,name,...}
+
+    // DaneaXML: DDT completati (usati per il ticker in Dashboard)
+    let __daneaCompleted = [];
+    let __daneaCompletedMap = new Map();
+
+    function __rebuildDaneaCompletedMap(){
+      try{
+        const map = new Map();
+        for (const d of (__daneaCompleted || [])) {
+          if (!d) continue;
+          let k = String(d.key || d._id || '').trim();
+          if (!k) {
+            try{ k = decodeURIComponent(String(d.id || d._id || '')); }catch(_){ k = String(d.id || d._id || ''); }
+            k = String(k||'').trim();
+          }
+          if (!k) continue;
+          map.set(k, d);
+        }
+        __daneaCompletedMap = map;
+      }catch(_){ __daneaCompletedMap = new Map(); }
+    }
     let activeAnagTab = "suppliers"; // suppliers|products|finished
     let activeProductsMacroGroup = ""; // materie_prime|imballaggi|"" (tutti)
 
@@ -6855,6 +6877,8 @@ btnLogout.addEventListener("click", async () => {
       finishedProducts = [];
       finishedProductCategories = [];
       finishedProductCategoriesMap = new Map();
+      __daneaCompleted = [];
+      __daneaCompletedMap = new Map();
       try{ __fpSelectedIds.clear(); }catch(_){ }
       thresholds = {};
       currentSupplierId = null;
@@ -6925,6 +6949,40 @@ btnLogout.addEventListener("click", async () => {
         },
         (err) => {
           console.error("finishedProductCategories watch error", err);
+        }
+      );
+
+      // DaneaXML: DDT completati (serve per dashboard ticker)
+      fb.unsub.daneaCompleted = onSnapshot(
+        query(orgCol("daneaDdtCompleted"), orderBy("date", "desc")),
+        (snap) => {
+          try{
+            const arr = [];
+            snap.forEach(d => {
+              const data = d.data() || {};
+              let key = String(data.key || "").trim();
+              if (!key){
+                try{ key = decodeURIComponent(String(d.id||"")); }catch(_){ key = String(d.id||""); }
+                key = String(key||"").trim();
+              }
+              arr.push({
+                _id: d.id,
+                key,
+                number: String(data.number || "").trim(),
+                date: String(data.date || "").trim(),
+                customer: String(data.customer || "").trim(),
+                rows: Array.isArray(data.rows) ? data.rows : [],
+                allocations: Array.isArray(data.allocations) ? data.allocations : [],
+                createdAt: tsToIso(data.createdAt) || ""
+              });
+            });
+            __daneaCompleted = arr;
+            __rebuildDaneaCompletedMap();
+          }catch(_){ __daneaCompleted = []; __daneaCompletedMap = new Map(); }
+          try{ renderAll(); }catch(_){ }
+        },
+        (err) => {
+          console.error("daneaDdtCompleted watch error", err);
         }
       );
 
@@ -9319,6 +9377,137 @@ async function deleteMovement(id) {
       }
     }
 
+    function __daneaPickDone(key, docNum, date){
+      try{
+        const k = String(key || "").trim();
+        const n = String(docNum || "").trim();
+        const d = String(date || "").trim();
+
+        const cand = [];
+        if (k) cand.push(k);
+        if (n && d) cand.push(n + "__" + d);
+        if (n) cand.push(n);
+
+        for (const x of cand){
+          try{
+            if (__daneaCompletedMap && typeof __daneaCompletedMap.get === "function"){
+              if (__daneaCompletedMap.has(x)) return __daneaCompletedMap.get(x);
+              const enc = encodeURIComponent(x);
+              if (__daneaCompletedMap.has(enc)) return __daneaCompletedMap.get(enc);
+              try{
+                const dec = decodeURIComponent(x);
+                if (__daneaCompletedMap.has(dec)) return __daneaCompletedMap.get(dec);
+              }catch(_){ }
+            }
+          }catch(_){ }
+        }
+
+        // fallback scan (nel dubbio)
+        const arr = Array.isArray(__daneaCompleted) ? __daneaCompleted : [];
+        for (const d0 of arr){
+          const dk = String(d0 && (d0.key || d0._id || "") || "").trim();
+          if (!dk) continue;
+          for (const x of cand){
+            if (dk === x) return d0;
+          }
+        }
+      }catch(_){ }
+      return null;
+    }
+
+    function __daneaEllipsis(s, maxLen){
+      const str = String(s || "").replace(/\s+/g, " ").trim();
+      const max = Math.max(10, Number(maxLen) || 0);
+      if (!str) return "";
+      if (str.length <= max) return str;
+      return str.slice(0, Math.max(0, max - 1)).trim() + "…";
+    }
+
+    function __daneaParseNum(v){
+      if (v == null) return null;
+      if (typeof v === "number" && Number.isFinite(v)) return v;
+      const s0 = String(v || "").trim();
+      if (!s0) return null;
+
+      // frazione 1/20
+      const m = s0.match(/^(-?\d+(?:[\.,]\d+)?)\s*\/\s*(\d+(?:[\.,]\d+)?)$/);
+      if (m){
+        const a = Number(String(m[1]).replace(",", "."));
+        const b = Number(String(m[2]).replace(",", "."));
+        if (Number.isFinite(a) && Number.isFinite(b) && b !== 0) return a / b;
+      }
+
+      let s = s0.replace(/\s+/g, "");
+      if (s.includes(",") && s.includes(".")) s = s.replace(/\./g, "").replace(",", ".");
+      else if (s.includes(",")) s = s.replace(",", ".");
+
+      const n = Number(s);
+      return Number.isFinite(n) ? n : null;
+    }
+
+    function __daneaFmtNum(v){
+      const n = Number(v);
+      if (!Number.isFinite(n)) return "";
+      const isInt = Math.abs(n - Math.round(n)) < 1e-9;
+      return n.toLocaleString("it-IT", { maximumFractionDigits: isInt ? 0 : 2 });
+    }
+
+    function __daneaSummarizeFinished(rows, maxItems){
+      const arr0 = Array.isArray(rows) ? rows : [];
+      const max = Math.max(1, Number(maxItems) || 3);
+      if (!arr0.length) return "";
+
+      // unique by code (best) or by desc
+      const seen = new Set();
+      const uniq = [];
+      for (const r of arr0){
+        if (!r) continue;
+        const code = String(r.code || "").trim();
+        const desc = String(r.desc || r.item || r.name || "").trim();
+        const k = String((code || desc) || "").trim().toLowerCase();
+        if (!k || seen.has(k)) continue;
+        seen.add(k);
+
+        const name = __daneaEllipsis(desc || code, 28);
+        const q0 = (r.qty != null) ? __daneaParseNum(r.qty) : null;
+        const q1 = (q0 != null) ? q0 : __daneaParseNum(r.qtyRaw);
+        const qtyTxt = (q1 != null) ? __daneaFmtNum(q1) : String(r.qtyRaw || "").trim();
+        const uom = String(r.uom || "").trim();
+        const qWith = qtyTxt ? (qtyTxt + (uom ? (" " + uom) : "")) : "";
+
+        uniq.push(qWith ? (name + " × " + qWith) : name);
+      }
+
+      if (!uniq.length) return "";
+      const show = uniq.slice(0, max);
+      const more = Math.max(0, uniq.length - show.length);
+      return show.join(", ") + (more ? (" +" + more) : "");
+    }
+
+    function __daneaSummarizeAllocations(allocations, maxItems){
+      const arr0 = Array.isArray(allocations) ? allocations : [];
+      const max = Math.max(1, Number(maxItems) || 4);
+      if (!arr0.length) return "";
+
+      const sorted = arr0.slice().sort((a,b) => (Number(b && b.qty || 0) - Number(a && a.qty || 0)));
+      const show = sorted.slice(0, max);
+      const out = [];
+      for (const it of show){
+        if (!it) continue;
+        const name = __daneaEllipsis(String(it.name || it.item || it.code || "").trim() || String(it.code || "").trim(), 26);
+        const qv = __daneaParseNum(it.qty);
+        const qtyTxt = __daneaFmtNum((qv != null) ? qv : (Number(it.qty) || 0));
+        const uom = String(it.uom || "").trim();
+        const qWith = qtyTxt ? (qtyTxt + (uom ? (" " + uom) : "")) : "";
+        if (!name) continue;
+        out.push(qWith ? (name + " " + qWith) : name);
+      }
+
+      if (!out.length) return "";
+      const more = Math.max(0, sorted.length - show.length);
+      return out.join(", ") + (more ? (" +" + more) : "");
+    }
+
     function __getHomeDaneaGroups(){
       const list = Array.isArray(state && state.movements) ? state.movements : [];
       const byKey = new Map();
@@ -9490,7 +9679,29 @@ async function deleteMovement(id) {
               ? "Split"
               : (Number(g.whConca) > 0 ? "Conca" : "Cerea");
 
-            const txt = `DDT ${num || "—"} · ${dateTxt} · ${piecesTxt} pz · ${whTxt}`;
+            const done = __daneaPickDone(g.key, num, String(g.date || "").trim());
+
+            let txt = "";
+            if (done){
+              const cust = String(done && done.customer || "").trim();
+              const fpRows = (done && Array.isArray(done.rows)) ? done.rows : [];
+              const allocs = (done && Array.isArray(done.allocations)) ? done.allocations : [];
+
+              const fpSum = fpRows.length ? __daneaSummarizeFinished(fpRows, 3) : "";
+              const allocSum = allocs.length ? __daneaSummarizeAllocations(allocs, 4) : "";
+
+              const parts = [];
+              parts.push(`DDT ${num || "—"}`);
+              parts.push(dateTxt || "—");
+              if (cust) parts.push(cust);
+              if (fpSum) parts.push(`Prodotti finiti (${fpRows.length}): ${fpSum}`);
+              else if (fpRows.length) parts.push(`Prodotti finiti: ${fpRows.length}`);
+              if (allocSum) parts.push(`Scarico (${allocs.length}): ${allocSum}`);
+              parts.push(`Sede: ${whTxt}`);
+              txt = parts.join(" · ");
+            } else {
+              txt = `DDT ${num || "—"} · ${dateTxt} · ${piecesTxt} pz · ${whTxt}`;
+            }
             return (
               `<button class="homeDaneaTickerItem" type="button" data-key="${escapeHtmlAttr(String(g.key || ""))}" data-docnum="${escapeHtmlAttr(String(num || ""))}">` +
                 `${escapeHtml(txt)}` +
