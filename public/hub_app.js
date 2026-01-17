@@ -71,1585 +71,29 @@
 (function(){
   "use strict";
 
-  var api = null;
-  var els = {};
-
-  function $(id){ return document.getElementById(id); }
-
-  function esc(s){
-    return String(s ?? "").replace(/[&<>"']/g, function(ch){
-      return ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" })[ch] || ch;
-    });
-  }
-
-  function norm(s){ return String(s ?? "").trim().toLowerCase(); }
-
-  function isDocLike(mv){
-    try{
-      var src = String(mv.source || "").toUpperCase();
-      if (src === "OCR") return true;
-      var note = String(mv.note || "");
-      if (/\bDDT\b|DOCUMENTO|TRASPORTO|BOLLA|FATTURA/i.test(note)) return true;
-      if (String(mv.docNum || "").trim()) return true;
-      return false;
-    }catch(_){ return false; }
-  }
-
-  function buildDocKeyFromMovement(mv){
-    if (!api || !mv) return "";
-    try{
-      var meta = {
-        customer: mv.customer || "",
-        date: mv.date || "",
-        source: mv.source || "OCR",
-        note: mv.note || "",
-        docNum: mv.docNum || "",
-        vatNorm: mv.supplierVat || mv.vatNorm || mv.vat || ""
-      };
-      if (typeof api.docKeyFromMeta === "function") return String(api.docKeyFromMeta(meta) || "");
-    }catch(_){}
-    return "";
-  }
-
-  function getAllMovements(){
-    try{
-      var arr = (api && api.state && Array.isArray(api.state.movements)) ? api.state.movements : [];
-      return arr.slice();
-    }catch(_){ return []; }
-  }
-
-  // ===== DaneaXML (Scarica flussi DDT): raggruppo i movimenti OUT per DDT =====
-  var __daneaGroupsByKey = Object.create(null);
-
-  function __normWh(v){
-    try{
-      if (api && typeof api.normalizeWarehouse === "function") return api.normalizeWarehouse(v || "");
-    }catch(_){ }
-    return String(v || "").trim().toLowerCase();
-  }
-
-  function isDaneaXmlOut(mv){
-    try{
-      if (!mv) return false;
-      if (String(mv.type || "").toUpperCase() !== "OUT") return false;
-      var src = String(mv.source || "").trim().toLowerCase();
-      if (src !== "daneaxml") return false;
-      // Nel realtime mapping alcune proprietà custom (es. daneaDdtKey) potrebbero
-      // non essere presenti su mv. Consideriamo valido se riusciamo a derivare
-      // una chiave di raggruppamento dal numero documento.
-      var k = String(mv.daneaDdtKey || mv.docNum || "").trim();
-      return !!k;
-    }catch(_){ return false; }
-  }
-
-  function getDaneaGroupKey(mv){
-    // Priorità: chiave completa salvata dal flusso DaneaXML (numero__data)
-    var k = String((mv && mv.daneaDdtKey) || "").trim();
-    if (k) return k;
-
-    // Fallback robusto: ricostruisci da docNum + docDateRaw/date
-    var num = String((mv && mv.docNum) || "").trim();
-    var date = String((mv && (mv.docDateRaw || mv.date)) || "").trim();
-    if (num && date && /^\d{4}-\d{2}-\d{2}$/.test(date)) return num + "__" + date;
-
-    // Ultimo fallback: solo numero (potrebbe non permettere drill-down righe DDT)
-    return String((mv && mv.docNum) || "").trim();
-  }
-
-  function getDaneaGroupByKey(k){
-    var key = String(k || "").trim();
-    if (!key) return null;
-    try{ return __daneaGroupsByKey[key] || null; }catch(_){ return null; }
-  }
-
-  function buildDaneaGroups(allMovements){
-    var byKey = Object.create(null);
-    (Array.isArray(allMovements) ? allMovements : []).forEach(function(mv){
-      if (!isDaneaXmlOut(mv)) return;
-      var k = getDaneaGroupKey(mv);
-      if (!k) return;
-      var g = byKey[k];
-      if (!g){
-        var ca0 = String(mv.createdAt || mv.createdAtIso || "").trim();
-        g = byKey[k] = {
-          __kind: "danea_ddt",
-          key: k,
-          id: "danea__" + encodeURIComponent(k),
-          type: "OUT",
-          source: "DaneaXML",
-          customer: "Scarico DDT",
-          code: "",
-          item: "",
-          qty: 0,
-          uom: "",
-          qtyRaw: "",
-          date: String(mv.date || "").trim() || "",
-          note: String(mv.note || "").trim() || "",
-          docType: String(mv.docType || "DDT").trim() || "DDT",
-          docNum: String(mv.docNum || "").trim() || "",
-          docDateRaw: String(mv.docDateRaw || mv.date || "").trim() || "",
-          warehouse: "",
-          _warehouses: [],
-          createdAtMax: ca0,
-          createdAt: ca0,
-          movements: []
-        };
-      }
-
-      g.movements.push(mv);
-
-      // warehouses list (unique)
-      var w = __normWh(mv.warehouse || "");
-      if (w && g._warehouses.indexOf(w) < 0) g._warehouses.push(w);
-
-      var ca = String(mv.createdAt || mv.createdAtIso || "").trim();
-      if (ca && (!g.createdAtMax || ca.localeCompare(g.createdAtMax) > 0)) g.createdAtMax = ca;
-
-      if (!g.date && mv.date) g.date = String(mv.date || "").trim();
-      if (!g.docNum && mv.docNum) g.docNum = String(mv.docNum || "").trim();
-      if (!g.docDateRaw && (mv.docDateRaw || mv.date)) g.docDateRaw = String(mv.docDateRaw || mv.date || "").trim();
-      if (!g.note && mv.note) g.note = String(mv.note || "").trim();
-    });
-
-    __daneaGroupsByKey = byKey;
-
-    var groups = [];
-    Object.keys(byKey).forEach(function(k){
-      var g = byKey[k];
-      if (!g) return;
-      g.qty = (g.movements || []).length;
-      g.qtyRaw = g.qty + " righe";
-      g.code = (g.docNum ? ("DDT " + g.docNum) : ("DDT " + g.key));
-      g.item = "Scarico DDT · " + g.qty + " righe";
-      g.createdAt = g.createdAtMax || g.createdAt || "";
-      if (g._warehouses.length === 1) g.warehouse = g._warehouses[0];
-      else if (g._warehouses.length > 1) g.warehouse = "split";
-      else g.warehouse = "";
-      groups.push(g);
-    });
-
-    return groups;
-  }
-
-  function buildUiRows(allMovements){
-    var all = Array.isArray(allMovements) ? allMovements : [];
-    var groups = buildDaneaGroups(all);
-
-    // ids to skip (movimenti "figli" del DDT)
-    var skip = Object.create(null);
-    groups.forEach(function(g){
-      (g.movements || []).forEach(function(mv){
-        var id = String(mv && mv.id || "").trim();
-        if (id) skip[id] = 1;
-      });
-    });
-
-    var rows = [];
-    all.forEach(function(mv){
-      if (!mv) return;
-      var id = String(mv.id || "").trim();
-      if (id && skip[id]) return;
-      rows.push(mv);
-    });
-
-    // add groups
-    rows.push.apply(rows, groups);
-    return rows;
-  }
-
-  function applyFilters(list){
-    var q = norm(els.movSearch && els.movSearch.value);
-    var t = String(els.movTypeFilter && els.movTypeFilter.value || "").trim().toUpperCase();
-    var wh = String(els.movWhFilter && els.movWhFilter.value || "").trim().toLowerCase();
-    var from = String(els.movFrom && els.movFrom.value || "").trim();
-    var to   = String(els.movTo && els.movTo.value || "").trim();
-
-    return (Array.isArray(list) ? list : []).filter(function(mv){
-      if (!mv) return false;
-
-      var isGroup = (mv && mv.__kind === "danea_ddt");
-
-      if (t && String(mv.type || "").toUpperCase() !== t) return false;
-
-      if (wh){
-        if (isGroup){
-          var ws = Array.isArray(mv._warehouses) ? mv._warehouses : [];
-          if (ws.indexOf(wh) < 0) return false;
-        } else {
-          var w = (api && typeof api.normalizeWarehouse === "function")
-            ? api.normalizeWarehouse(mv.warehouse || "")
-            : String(mv.warehouse || "").trim().toLowerCase();
-          if (w !== wh) return false;
-        }
-      }
-
-      // Date filter uses mv.date (YYYY-MM-DD). If missing, fall back to createdAt ISO date.
-      var d = String(mv.date || "").trim();
-      if (!d){
-        var ca = String(mv.createdAt || "").trim();
-        if (ca && ca.length >= 10) d = ca.slice(0,10);
-      }
-      if (from && d && d < from) return false;
-      if (to && d && d > to) return false;
-
-      if (q){
-        var hay = [
-          mv.customer, mv.code, mv.item, mv.note, mv.source, mv.docNum, mv.docType, mv.daneaDdtKey
-        ].map(norm).join(" ");
-
-        // group: include anche righe interne (codici/articoli)
-        if (isGroup){
-          try{
-            (mv.movements || []).forEach(function(x){
-              hay += " " + [x.code, x.item, x.qtyRaw, x.uom, x.warehouse].map(norm).join(" ");
-            });
-          }catch(_){ }
-        }
-
-        if (hay.indexOf(q) < 0) return false;
-      }
-
-      return true;
-    });
-  }
-
-  function applySort(list){
-    var s = String(els.movSort && els.movSort.value || "createdAtDesc");
-
-    function cmpStr(a,b){
-      a = String(a || "");
-      b = String(b || "");
-      if (a && b && a !== b) return a.localeCompare(b);
-      if (a !== b) return (a ? 1 : 0) - (b ? 1 : 0);
-      return 0;
-    }
-
-    function cmpNum(a,b){
-      a = Number(a || 0);
-      b = Number(b || 0);
-      if (a !== b) return a - b;
-      return 0;
-    }
-
-    list.sort(function(A,B){
-      var a = A || {}, b = B || {};
-
-      if (s === "createdAtAsc" || s === "createdAtDesc"){
-        var ca = String(a.createdAt || a.createdAtIso || "");
-        var cb = String(b.createdAt || b.createdAtIso || "");
-        var c = cmpStr(ca, cb);
-        if (s === "createdAtDesc") c = -c;
-        if (c !== 0) return c;
-      }
-
-      if (s === "dateAsc" || s === "dateDesc"){
-        var da = String(a.date || "");
-        var db = String(b.date || "");
-        var c2 = cmpStr(da, db);
-        if (s === "dateDesc") c2 = -c2;
-        if (c2 !== 0) return c2;
-      }
-
-      if (s === "customerAsc"){
-        var c3 = cmpStr(a.customer, b.customer);
-        if (c3 !== 0) return c3;
-      }
-
-      if (s === "codeAsc"){
-        var c4 = cmpStr(a.code, b.code);
-        if (c4 !== 0) return c4;
-      }
-
-      // stable-ish fallback
-      var cc = cmpStr(a.customer, b.customer); if (cc !== 0) return cc;
-      var cd = cmpStr(a.code, b.code); if (cd !== 0) return cd;
-      var ci = cmpStr(a.item, b.item); if (ci !== 0) return ci;
-      return cmpNum(a.qty, b.qty);
-    });
-
-    return list;
-  }
-
-  function badgeHtml(type){
-    var t = String(type || "").toUpperCase() === "OUT" ? "OUT" : "IN";
-    var cls = (t === "OUT") ? "badge out" : "badge in";
-    var label = (t === "OUT") ? "OUT" : "IN";
-    return '<span class="'+cls+'">'+label+'</span>';
-  }
-
-  function whLabel(v){
-    if (api && typeof api.warehouseLabel === "function") return api.warehouseLabel(v);
-    var s = String(v || "").toLowerCase();
-    if (s.includes("conca")) return "Concamarise";
-    return "Cerea";
-  }
-
-  function shortWh(v){
-    var s = (api && typeof api.normalizeWarehouse === "function") ? api.normalizeWarehouse(v) : String(v || "").toLowerCase();
-    s = String(s || "").trim().toLowerCase();
-    if (s === "split") return "Split";
-    return (s === "concamarise") ? "Conca" : "Cerea";
-  }
-
-  function renderTable(list, totalCount){
-    if (!els.movementsAllTbody) return;
-
-    // pills / meta
-    try{
-      if (els.pillMovementsCount) els.pillMovementsCount.textContent = String(totalCount || 0);
-      if (els.movementsMeta) {
-        var shown = (Array.isArray(list) ? list.length : 0);
-        els.movementsMeta.textContent = (shown === totalCount)
-          ? (shown.toLocaleString("it-IT") + " righe")
-          : ("Mostrate " + shown.toLocaleString("it-IT") + " su " + (totalCount||0).toLocaleString("it-IT"));
-      }
-    }catch(_){ }
-
-    if (!list || !list.length){
-      els.movementsAllTbody.innerHTML = '<tr><td class="td-muted" colspan="9">Nessun movimento.</td></tr>';
-      return;
-    }
-
-    // safety cap (UI)
-    var cap = 2000;
-    var sliced = list;
-    var capped = false;
-    if (list.length > cap){
-      sliced = list.slice(0, cap);
-      capped = true;
-    }
-
-    els.movementsAllTbody.innerHTML = sliced.map(function(mv){
-      var isGroup = (mv && mv.__kind === "danea_ddt");
-
-      var id = String(mv.id || "");
-      var date = String(mv.date || "").trim();
-      if (!date){
-        var ca = String(mv.createdAt || "");
-        if (ca && ca.length >= 10) date = ca.slice(0,10);
-      }
-
-      var customer = String(mv.customer || "");
-      var code = String(mv.code || "");
-      var item = String(mv.item || "");
-      var qty = (api && typeof api.safeInt === "function") ? api.safeInt(mv.qty) : (Number(mv.qty)||0);
-      var uom = String(mv.uom || "").trim();
-
-      var wh = shortWh(mv.warehouse || "");
-      var src = String(mv.source || "");
-      var showDoc = (!isGroup) && isDocLike(mv);
-
-      var attrs = 'data-mvid="'+esc(id)+'"';
-      if (isGroup){
-        attrs += ' data-kind="danea" data-daneakey="'+esc(String(mv.key || ""))+'"';
-      }
-
-      return '' +
-        '<tr '+attrs+' title="Dettagli">' +
-          '<td data-label="Data">'+esc(date || "—")+'</td>' +
-          '<td data-label="Tipo">'+badgeHtml(mv.type)+'</td>' +
-          '<td data-label="Fornitore">'+esc(customer)+'</td>' +
-          '<td data-label="Codice" class="td-muted"><span class="kbd">'+esc(code || "—")+'</span></td>' +
-          '<td data-label="Articolo">'+esc(item)+'</td>' +
-          '<td data-label="Q.tà" class="qty">'+Number(qty).toLocaleString("it-IT")+'</td>' +
-          '<td data-label="Sede" class="colHideSm">'+esc(wh)+'</td>' +
-          '<td data-label="Fonte" class="colHideSm">'+esc(src)+'</td>' +
-          '<td data-label="">' +
-            (isGroup
-              ? '<button class="btn btn-ghost mini jsOpenDaneaDdt" type="button" data-daneakey="'+esc(String(mv.key || ""))+'" title="Dettagli DDT">Dettagli</button>'
-              : (showDoc ? '<button class="btn btn-ghost mini jsOpenDoc" type="button" data-mvid="'+esc(id)+'" title="Apri documento">Doc</button>' : '')
-            ) +
-          '</td>' +
-        '</tr>';
-    }).join("");
-
-    if (capped){
-      els.movementsAllTbody.insertAdjacentHTML("beforeend",
-        '<tr><td class="td-muted" colspan="9">Mostrate le prime '+cap.toLocaleString("it-IT")+' righe. Usa i filtri per restringere.</td></tr>');
-    }
-  }
-
-    var __detailCtx = { id:"", docKey:"" };
-
-  function __setVal(el, v){
-    if (!el) return;
-    var s = (v == null) ? "" : String(v);
-    try{
-      // input/textarea => .value, altrimenti testo (div/span/pre)
-      if (typeof el.value !== "undefined") el.value = s;
-      else el.textContent = s;
-    }catch(_){
-      try{ el.textContent = s; }catch(__){}
-    }
-  }
-
-  function __openDetailModal(){
-    if (!els.modalMovementDetail) return;
-    try{ els.modalMovementDetail.classList.add("open"); }catch(_){}
-    try{ (typeof __syncBodyLockFromModals === "function") && __syncBodyLockFromModals(); }catch(_){}
-  }
-
-  function __closeDetailModal(){
-    if (!els.modalMovementDetail) return;
-    try{ els.modalMovementDetail.classList.remove("open"); }catch(_){}
-    try{ (typeof __syncBodyLockFromModals === "function") && __syncBodyLockFromModals(); }catch(_){}
-  }
-
-  
-  // ===== Dettaglio DDT (DaneaXML) — ordinato + drill-down per prodotto =====
-  var __ddtDetailCtx = { key: "", group: null, done: null, rows: [], selectedIdx: -1 };
-
-  var __fpCache = { loaded: false, loading: null, fpByCode: new Map(), catByKey: new Map() };
-
-  function __resetDdtDetailCtx(){
-    __ddtDetailCtx = { key: "", group: null, done: null, rows: [], selectedIdx: -1 };
-    try{ if (els.movDetDdtProdWrap) els.movDetDdtProdWrap.style.display = "none"; }catch(_){ }
-    try{ if (els.movDetDdtProdTbody) els.movDetDdtProdTbody.innerHTML = '<tr><td class="td-muted" colspan="5">Seleziona una riga prodotto sopra.</td></tr>'; }catch(_){ }
-    try{
-      if (els.movDetDdtRowsTbody){
-        var sel = els.movDetDdtRowsTbody.querySelectorAll('tr.is-selected');
-        sel && sel.forEach && sel.forEach(function(tr){ try{ tr.classList.remove('is-selected'); }catch(_){ } });
-      }
-    }catch(_){ }
-  }
-
-  function __setDdtMode(on){
-    try{ if (els.movDetDdtWrap) els.movDetDdtWrap.style.display = on ? "" : "none"; }catch(_){ }
-    if (!on) __resetDdtDetailCtx();
-  }
-
-  function __getHub(){
-    try{ return (window && window.__HUB) ? window.__HUB : null; }catch(_){ return null; }
-  }
-
-  async function __fetchDaneaCompletedByKey(key){
-    var k = String(key || "").trim();
-    if (!k) return null;
-    var H = __getHub();
-    if (!H || !H.fb || !H.fb.db || !H.FS) return null;
-    if (typeof H.FS.doc !== "function" || typeof H.FS.getDoc !== "function") return null;
-    try{
-      var doneId = encodeURIComponent(k);
-      var ref = H.FS.doc(H.fb.db, "orgs", H.ORG_ID, "daneaDdtCompleted", doneId);
-      var snap = await H.FS.getDoc(ref);
-      if (!snap || !snap.exists || !snap.exists()) return null;
-      var data = (typeof snap.data === "function") ? (snap.data() || {}) : (snap.data || {});
-      data._id = snap.id || doneId;
-      return data;
-    }catch(e){
-      try{ console.warn("fetch daneaDdtCompleted failed", e); }catch(_){ }
-      return null;
-    }
-  }
-
-  // Fallback: se manca il record "completato", prova a leggere il DDT dalla cache daneaDdts
-  // (dove vengono salvate le righe parse dell'XML). Così nel dettaglio Movimenti riesci
-  // comunque a vedere le righe DDT.
-  async function __fetchDaneaCacheByKey(key){
-    var k = String(key || "").trim();
-    if (!k) return null;
-    var H = __getHub();
-    if (!H || !H.fb || !H.fb.db || !H.FS) return null;
-    if (typeof H.FS.doc !== "function" || typeof H.FS.getDoc !== "function") return null;
-    try{
-      var id = encodeURIComponent(k);
-      var ref = H.FS.doc(H.fb.db, "orgs", H.ORG_ID, "daneaDdts", id);
-      var snap = await H.FS.getDoc(ref);
-      if (!snap || !snap.exists || !snap.exists()) return null;
-      var data = (typeof snap.data === "function") ? (snap.data() || {}) : (snap.data || {});
-      data._id = snap.id || id;
-      return data;
-    }catch(e){
-      try{ console.warn("fetch daneaDdts failed", e); }catch(_){ }
-      return null;
-    }
-  }
-
-  function __parseFraction(v){
-    var s = String(v || "").trim();
-    if (!s) return null;
-    // 1/20
-    var m = s.match(/^(-?\d+(?:[.,]\d+)?)\s*\/\s*(\d+(?:[.,]\d+)?)$/);
-    if (m){
-      var a = Number(String(m[1]).replace(",", "."));
-      var b = Number(String(m[2]).replace(",", "."));
-      if (Number.isFinite(a) && Number.isFinite(b) && b !== 0) return a / b;
-    }
-    // number with comma
-    var n = Number(s.replace(/\./g, "").replace(",", "."));
-    if (Number.isFinite(n)) return n;
-    return null;
-  }
-
-  function __compQtyPerUnit(comp){
-    var c = comp || {};
-    if (c.qty != null && Number.isFinite(Number(c.qty))) return Number(c.qty);
-    var raw = c.qtyRaw || c.qtaRaw || "";
-    var p = __parseFraction(raw);
-    if (p != null && Number.isFinite(p)) return p;
-    return null;
-  }
-
-  async function __ensureFinishedProductsCache(){
-    if (__fpCache.loaded) return true;
-    if (__fpCache.loading) {
-      try{ await __fpCache.loading; }catch(_){ }
-      return !!__fpCache.loaded;
-    }
-
-    var H = __getHub();
-    if (!H || !H.fb || !H.fb.db || !H.FS) return false;
-    if (typeof H.FS.collection !== "function" || typeof H.FS.getDocs !== "function") return false;
-
-    __fpCache.loading = (async function(){
-      try{
-        var fpByCode = new Map();
-        var catByKey = new Map();
-
-        // finishedProducts
-        var colFp = H.FS.collection(H.fb.db, "orgs", H.ORG_ID, "finishedProducts");
-        var snapFp = await H.FS.getDocs(colFp);
-        var docsFp = (snapFp && snapFp.docs) ? snapFp.docs : [];
-        docsFp.forEach(function(d){
-          try{
-            var data = d.data ? (d.data() || {}) : {};
-            var code = String(data.code || data.codeLower || "").trim();
-            var codeLower = String(data.codeLower || code).trim().toLowerCase();
-            if (!codeLower) return;
-            data.id = d.id;
-            fpByCode.set(codeLower, data);
-          }catch(_){ }
-        });
-
-        // finishedProductCategories
-        var colCat = H.FS.collection(H.fb.db, "orgs", H.ORG_ID, "finishedProductCategories");
-        var snapCat = await H.FS.getDocs(colCat);
-        var docsCat = (snapCat && snapCat.docs) ? snapCat.docs : [];
-        docsCat.forEach(function(d){
-          try{
-            var data = d.data ? (d.data() || {}) : {};
-            var key = String(data.key || data.name || d.id || "").trim();
-            var keyLower = String(key).toLowerCase();
-            if (!keyLower) return;
-            data.id = d.id;
-            catByKey.set(keyLower, data);
-          }catch(_){ }
-        });
-
-        __fpCache.fpByCode = fpByCode;
-        __fpCache.catByKey = catByKey;
-        __fpCache.loaded = true;
-      }catch(e){
-        __fpCache.loaded = false;
-        try{ console.warn("ensureFinishedProductsCache failed", e); }catch(_){ }
-      }finally{
-        __fpCache.loading = null;
-      }
-    })();
-
-    try{ await __fpCache.loading; }catch(_){ }
-    return !!__fpCache.loaded;
-  }
-
-  function __getFpForCode(code){
-    var low = norm(code || "");
-    if (!low) return null;
-    try{ return __fpCache.fpByCode.get(low) || null; }catch(_){ return null; }
-  }
-
-  function __getFpCategoryForFp(fp){
-    if (!fp) return null;
-    var k = norm(fp.categoryKey || fp.category || fp.catKey || fp.categoryId || "");
-    if (!k) return null;
-    try{ return __fpCache.catByKey.get(k) || null; }catch(_){ return null; }
-  }
-
-  function __getFpComponents(fp){
-    if (!fp) return [];
-    var arr = (fp.components || fp.bom || fp.distintaBase);
-    var direct = Array.isArray(arr) ? arr : [];
-    if (direct.length) return direct;
-    var cat = __getFpCategoryForFp(fp);
-    var bom = (cat && (cat.bom || cat.components || cat.distintaBase)) || [];
-    return Array.isArray(bom) ? bom : [];
-  }
-
-  function __macroGroupForCode(code){
-    var catKey = "";
-    try{ catKey = (api && typeof api.getMacroCategoryForCode === "function") ? String(api.getMacroCategoryForCode(code) || "") : ""; }catch(_){ catKey = ""; }
-    catKey = String(catKey || "").trim().toLowerCase();
-
-    // prova a risalire al macro group della categoria
-    var mg = "";
-    try{
-      var cats = (api && typeof api.getCategories === "function") ? (api.getCategories() || []) : [];
-      if (catKey && Array.isArray(cats)){
-        for (var i=0;i<cats.length;i++){
-          var c = cats[i];
-          if (!c) continue;
-          if (String(c.key || "").trim().toLowerCase() === catKey){
-            mg = String(c.macro || c.macroGroup || c.group || "").trim().toLowerCase();
-            break;
-          }
-        }
-      }
-    }catch(_){ }
-
-    if (mg !== "materie_prime" && mg !== "imballaggi"){
-      if (catKey === "materie_prime") mg = "materie_prime";
-      else if (catKey === "imballaggi") mg = "imballaggi";
-      else mg = "";
-    }
-    return mg;
-  }
-
-  function __macroGroupLabel(mg){
-    if (mg === "materie_prime") return "Materie prime";
-    if (mg === "imballaggi") return "Imballaggi";
-    return "—";
-  }
-
-  function __aggComponentsFromMovements(movs){
-    var map = new Map();
-    (Array.isArray(movs) ? movs : []).forEach(function(mv){
-      try{
-        var code = String(mv && mv.code || "").trim();
-        if (!code) return;
-        var low = code.toLowerCase();
-        var item = String(mv.item || mv.name || mv.articolo || code).trim();
-        var uom = String(mv.uom || "").trim();
-        var q = (api && typeof api.safeInt === "function") ? api.safeInt(mv.qty) : (Number(mv.qty) || 0);
-        if (!q) return;
-        var wh = __normWh(mv.warehouse || "");
-
-        var rec = map.get(low) || { code: code, item: item || code, uom: uom, total: 0, cerea: 0, concamarise: 0 };
-        rec.total += q;
-        if (wh === "concamarise") rec.concamarise += q;
-        else rec.cerea += q;
-        if (!rec.item) rec.item = item || code;
-        if (!rec.uom) rec.uom = uom;
-        map.set(low, rec);
-      }catch(_){ }
-    });
-    return Array.from(map.values());
-  }
-
-  function __renderDdtRows(rows){
-    if (!els.movDetDdtRowsTbody) return;
-    var arr = Array.isArray(rows) ? rows : [];
-    if (!arr.length){
-      els.movDetDdtRowsTbody.innerHTML = '<tr><td class="td-muted" colspan="4">Nessuna riga nel DDT.</td></tr>';
-      return;
-    }
-
-    els.movDetDdtRowsTbody.innerHTML = arr.map(function(r, idx){
-      var code = String(r && r.code || "").trim();
-      var desc = String(r && (r.desc || r.item || r.articolo) || "").trim();
-      var uom = String(r && r.uom || "").trim();
-
-      var qtyN = (r && r.qty != null && Number.isFinite(Number(r.qty))) ? Number(r.qty) : __parseFraction(r && r.qtyRaw);
-      var qtyDisp = (qtyN != null && Number.isFinite(qtyN)) ? qtyN.toLocaleString("it-IT") : String(r && r.qtyRaw || "").trim();
-      if (!qtyDisp) qtyDisp = "—";
-
-      return '<tr class="jsMovDetDdtRow" data-ddt-idx="'+idx+'">'
-        + '<td data-label="Codice"><span class="kbd">'+esc(code || "—")+'</span></td>'
-        + '<td data-label="Articolo">'+esc(desc || code || "—")+'</td>'
-        + '<td data-label="Q.tà" class="qty" style="text-align:right;">'+esc(qtyDisp)+'</td>'
-        + '<td data-label="U.M.">'+esc(uom || "")+'</td>'
-        + '</tr>';
-    }).join("");
-  }
-
-  function __renderDdtComponentsTable(comps){
-    if (!els.movDetDdtCompsTbody) return;
-    var arr = Array.isArray(comps) ? comps.slice() : [];
-    if (!arr.length){
-      els.movDetDdtCompsTbody.innerHTML = '<tr><td class="td-muted" colspan="7">Nessun componente scaricato.</td></tr>';
-      return;
-    }
-
-    // sort: Materie prime -> Imballaggi -> altri, poi codice
-    function typeRank(mg){
-      if (mg === "materie_prime") return 1;
-      if (mg === "imballaggi") return 2;
-      return 3;
-    }
-
-    arr.sort(function(a,b){
-      var ra = typeRank(__macroGroupForCode(a.code));
-      var rb = typeRank(__macroGroupForCode(b.code));
-      if (ra !== rb) return ra - rb;
-      var ca = String(a.code||"");
-      var cb = String(b.code||"");
-      if (ca !== cb) return ca.localeCompare(cb);
-      return String(a.item||"").localeCompare(String(b.item||""));
-    });
-
-    els.movDetDdtCompsTbody.innerHTML = arr.map(function(it){
-      var mg = __macroGroupForCode(it.code);
-      var tipo = __macroGroupLabel(mg);
-      var code = String(it.code || "").trim();
-      var item = String(it.item || code).trim();
-      var uom = String(it.uom || "").trim();
-      var tot = Number(it.total || 0);
-      var c = Number(it.cerea || 0);
-      var k = Number(it.concamarise || 0);
-      return '<tr>'
-        + '<td data-label="Tipo">'+esc(tipo)+'</td>'
-        + '<td data-label="Codice"><span class="kbd">'+esc(code || "—")+'</span></td>'
-        + '<td data-label="Articolo">'+esc(item || "—")+'</td>'
-        + '<td data-label="Totale" class="qty" style="text-align:right;">'+tot.toLocaleString("it-IT")+'</td>'
-        + '<td data-label="Cerea" class="qty" style="text-align:right;">'+c.toLocaleString("it-IT")+'</td>'
-        + '<td data-label="Concamarise" class="qty" style="text-align:right;">'+k.toLocaleString("it-IT")+'</td>'
-        + '<td data-label="U.M.">'+esc(uom)+'</td>'
-        + '</tr>';
-    }).join("");
-  }
-
-  function __renderDdtProdPlaceholder(msg){
-    try{ if (els.movDetDdtProdWrap) els.movDetDdtProdWrap.style.display = ""; }catch(_){ }
-    if (!els.movDetDdtProdTbody) return;
-    els.movDetDdtProdTbody.innerHTML = '<tr><td class="td-muted" colspan="5">'+esc(msg || "Seleziona una riga prodotto sopra.")+'</td></tr>';
-  }
-
-  function __selectDdtRow(idx){
-    idx = (idx == null) ? -1 : Number(idx);
-    if (!Number.isFinite(idx) || idx < 0) return;
-
-    if (!__ddtDetailCtx || !Array.isArray(__ddtDetailCtx.rows) || !__ddtDetailCtx.rows[idx]) return;
-
-    __ddtDetailCtx.selectedIdx = idx;
-
-    // highlight
-    try{
-      if (els.movDetDdtRowsTbody){
-        var trs = els.movDetDdtRowsTbody.querySelectorAll('tr.jsMovDetDdtRow');
-        trs && trs.forEach && trs.forEach(function(tr){ try{ tr.classList.remove('is-selected'); }catch(_){ } });
-        var trSel = els.movDetDdtRowsTbody.querySelector('tr[data-ddt-idx="'+idx+'"]');
-        if (trSel) trSel.classList.add('is-selected');
-      }
-    }catch(_){ }
-
-    var r = __ddtDetailCtx.rows[idx];
-    var code = String(r && r.code || "").trim();
-    var desc = String(r && (r.desc || r.item || r.articolo) || "").trim();
-
-    var qtyN = (r && r.qty != null && Number.isFinite(Number(r.qty))) ? Number(r.qty) : __parseFraction(r && r.qtyRaw);
-    var qLine = (qtyN != null && Number.isFinite(qtyN)) ? qtyN : 0;
-    if (qLine <= 0){
-      try{ if (els.movDetDdtProdTitle) els.movDetDdtProdTitle.textContent = "Dettaglio prodotto"; }catch(_){ }
-      __renderDdtProdPlaceholder("Quantità non valida per questa riga.");
-      return;
-    }
-
-    try{
-      if (els.movDetDdtProdTitle){
-        var title = (code ? (code + (desc ? (" — " + desc) : "")) : (desc || "Prodotto"));
-        var qlbl = qLine.toLocaleString("it-IT");
-        els.movDetDdtProdTitle.textContent = title + " (Q.tà " + qlbl + ")";
-      }
-    }catch(_){ }
-
-    __renderDdtProdPlaceholder("Calcolo componenti…");
-
-    // calcolo async (best effort)
-    (async function(){
-      try{
-        var ok = await __ensureFinishedProductsCache();
-        if (!ok) {
-          __renderDdtProdPlaceholder("Non riesco a caricare la distinta base (permessi / rete).");
-          return;
-        }
-
-        // se nel frattempo hai aperto un altro DDT
-        if (!__ddtDetailCtx || __ddtDetailCtx.selectedIdx !== idx) return;
-
-        var fp = __getFpForCode(code);
-        if (!fp){
-          __renderDdtProdPlaceholder("Prodotto finito non trovato per questo codice.");
-          return;
-        }
-
-        var comps = __getFpComponents(fp);
-        if (!comps || !comps.length){
-          __renderDdtProdPlaceholder("Distinta base vuota per questo prodotto.");
-          return;
-        }
-
-        var out = [];
-        for (var i=0;i<comps.length;i++){
-          var c = comps[i] || {};
-          var cCode = String(c.code || "").trim();
-          if (!cCode) continue;
-          var per = __compQtyPerUnit(c);
-          if (per == null || !Number.isFinite(per) || per <= 0) continue;
-          var qty = per * qLine;
-          var qtyInt = Math.round(qty);
-          if (!qtyInt) continue;
-          out.push({
-            code: cCode,
-            item: String(c.name || c.articolo || cCode).trim(),
-            uom: String(c.uom || "").trim(),
-            qty: qtyInt,
-            mg: __macroGroupForCode(cCode)
-          });
-        }
-
-        if (!out.length){
-          __renderDdtProdPlaceholder("Nessun componente calcolabile (quantità 0). Controlla la distinta base.");
-          return;
-        }
-
-        // sort
-        out.sort(function(a,b){
-          var ra = (a.mg === "materie_prime") ? 1 : (a.mg === "imballaggi") ? 2 : 3;
-          var rb = (b.mg === "materie_prime") ? 1 : (b.mg === "imballaggi") ? 2 : 3;
-          if (ra !== rb) return ra - rb;
-          var ca = String(a.code||"");
-          var cb = String(b.code||"");
-          if (ca !== cb) return ca.localeCompare(cb);
-          return String(a.item||"").localeCompare(String(b.item||""));
-        });
-
-        if (!els.movDetDdtProdTbody) return;
-        try{ if (els.movDetDdtProdWrap) els.movDetDdtProdWrap.style.display = ""; }catch(_){ }
-
-        els.movDetDdtProdTbody.innerHTML = out.map(function(it){
-          var tipo = __macroGroupLabel(it.mg);
-          return '<tr>'
-            + '<td data-label="Tipo">'+esc(tipo)+'</td>'
-            + '<td data-label="Codice"><span class="kbd">'+esc(String(it.code||""))+'</span></td>'
-            + '<td data-label="Articolo">'+esc(String(it.item||it.code||"—"))+'</td>'
-            + '<td data-label="Q.tà" class="qty" style="text-align:right;">'+Number(it.qty||0).toLocaleString("it-IT")+'</td>'
-            + '<td data-label="U.M.">'+esc(String(it.uom||""))+'</td>'
-            + '</tr>';
-        }).join("");
-
-      }catch(e){
-        try{ console.warn("DDT per-prodotto calc failed", e); }catch(_){ }
-        __renderDdtProdPlaceholder("Errore calcolo dettaglio prodotto.");
-      }
-    })();
-  }
-
-  function openDaneaGroupDetails(g){
-    if (!api || !g) return;
-
-    cacheEls();
-    __setDdtMode(true);
-
-    var rows = Array.isArray(g.movements) ? g.movements.slice() : [];
-    try{
-      rows.sort(function(a,b){
-        var wa = __normWh(a && a.warehouse || "");
-        var wb = __normWh(b && b.warehouse || "");
-        if (wa && wb && wa !== wb) return wa.localeCompare(wb);
-        var ca = String(a && a.code || "");
-        var cb = String(b && b.code || "");
-        if (ca && cb && ca !== cb) return ca.localeCompare(cb);
-        var ia = String(a && a.item || "");
-        var ib = String(b && b.item || "");
-        return ia.localeCompare(ib);
-      });
-    }catch(_){ }
-
-    // aggiorna ctx
-    __ddtDetailCtx.key = String(g.key || "").trim();
-    __ddtDetailCtx.group = g;
-    __ddtDetailCtx.done = null;
-    __ddtDetailCtx.rows = [];
-    __ddtDetailCtx.selectedIdx = -1;
-
-    // titolo + sub (prima passata)
-    try{
-      if (els.movDetTitle) els.movDetTitle.textContent = "Dettaglio DDT (DaneaXML)";
-      if (els.movDetSubtitle){
-        var whSum = (g.warehouse === "split") ? "Cerea + Concamarise" : whLabel(g.warehouse || "");
-        els.movDetSubtitle.textContent = [
-          ("DDT " + (g.docNum || g.key || "—")),
-          (String(g.date || "").trim() || "—"),
-          (whSum || "—"),
-          ((g.qty || 0) + " righe")
-        ].join(" · ");
-      }
-    }catch(_){ }
-
-    // campi base (KV)
-    __setVal(els.movDetDate, String(g.date || "").trim() || "—");
-    __setVal(els.movDetType, "OUT (scarico)");
-    __setVal(els.movDetWarehouse, (g.warehouse === "split") ? "Cerea + Concamarise" : whLabel(g.warehouse || ""));
-    __setVal(els.movDetSource, "DaneaXML");
-    __setVal(els.movDetCustomer, "—");
-    __setVal(els.movDetCode, String(g.code || "").trim() || "—");
-    __setVal(els.movDetItem, "Scarico DDT · " + (g.qty || 0) + " righe");
-    __setVal(els.movDetQty, String(g.qty || 0) + " righe");
-    __setVal(els.movDetUom, "righe");
-    __setVal(els.movDetNote, String(g.note || "").trim() || "—");
-    __setVal(els.movDetDocType, "DDT");
-    __setVal(els.movDetDocNum, String(g.docNum || "").trim() || "—");
-    __setVal(els.movDetDocDateRaw, String(g.docDateRaw || g.date || "").trim() || "—");
-    __setVal(els.movDetLineIndex, "—");
-    __setVal(els.movDetVat, "—");
-    __setVal(els.movDetTriplet, String(g.key || "").trim() || "—");
-    __setVal(els.movDetCreatedAt, (api && typeof api.formatDateIT === "function") ? api.formatDateIT(g.createdAt || "") : (String(g.createdAt || "").trim() || "—"));
-    __setVal(els.movDetId, String(g.id || "").trim() || "—");
-
-    // RawText nascosto (ora c'è la tabella)
-    try{ if (els.movDetRawWrap) els.movDetRawWrap.style.display = "none"; }catch(_){ }
-
-    // bottoni: in DDT non apro doc e non annullo singola riga
-    try{ if (els.movDetOpenDoc) els.movDetOpenDoc.style.display = "none"; }catch(_){ }
-    try{ if (els.movDetUndo) els.movDetUndo.disabled = true; }catch(_){ }
-
-    // Tabelle
-    try{
-      if (els.movDetDdtRowsTbody) els.movDetDdtRowsTbody.innerHTML = '<tr><td class="td-muted" colspan="4">Carico dettagli…</td></tr>';
-      if (els.movDetDdtCompsTbody) els.movDetDdtCompsTbody.innerHTML = '<tr><td class="td-muted" colspan="7">Carico…</td></tr>';
-      if (els.movDetDdtProdWrap) els.movDetDdtProdWrap.style.display = "none";
-    }catch(_){ }
-
-    // 1) Scarico componenti (dai movimenti effettivi)
-    var compsAgg = __aggComponentsFromMovements(rows);
-    __renderDdtComponentsTable(compsAgg);
-
-    // 2) Righe DDT
-    (async function(){
-      var k = String(g.key || "").trim();
-      if (!k) { __renderDdtRows([]); return; }
-      // Prova prima da "completati" (contiene anche allocations), poi fallback su cache DDT
-      var done = await __fetchDaneaCompletedByKey(k);
-      var ddtSrc = done || (await __fetchDaneaCacheByKey(k));
-      // se nel frattempo hai aperto un altro DDT
-      if (!__ddtDetailCtx || __ddtDetailCtx.key !== k) return;
-
-      if (!ddtSrc){
-        __renderDdtRows([]);
-        try{ __setVal(els.movDetCustomer, "—"); }catch(_){ }
-        return;
-      }
-
-      __ddtDetailCtx.done = done || null;
-      __ddtDetailCtx.rows = Array.isArray(ddtSrc.rows) ? ddtSrc.rows : [];
-      __renderDdtRows(__ddtDetailCtx.rows);
-
-      // aggiorna cliente/subtitle (seconda passata)
-      try{
-        var cust = String(ddtSrc.customer || "").trim();
-        if (cust) __setVal(els.movDetCustomer, cust);
-        if (els.movDetSubtitle){
-          var whSum = (g.warehouse === "split") ? "Cerea + Concamarise" : whLabel(g.warehouse || "");
-          els.movDetSubtitle.textContent = [
-            (cust || "—"),
-            ("DDT " + (ddtSrc.number || g.docNum || g.key || "—")),
-            (String(ddtSrc.date || g.date || "").trim() || "—"),
-            (whSum || "—")
-          ].join(" · ");
-        }
-      }catch(_){ }
-
-    })();
-
-    // hint: tradizionale e chiaro
-    try{
-      if (els.movDetHint) els.movDetHint.textContent = "Questo DDT ha generato uno scarico automatico di componenti (distinta base).";
-    }catch(_){ }
-
-    __openDetailModal();
-  }
-
-
-
-  
-  function openDetails(mv){
-    if (!api || !mv) return;
-
-    cacheEls();
-
-    // DaneaXML group row
-    if (mv && mv.__kind === "danea_ddt") { openDaneaGroupDetails(mv); return; }
-
-    // modal standard: nascondi sezioni DDT
-    try{ __setDdtMode(false); }catch(_){ }
-
-    // Se non abbiamo il modale dedicato, fallback alla modale testuale legacy
-    if (!els.modalMovementDetail){
-      var lines = [];
-      function push(k,v){
-        var s = String(v ?? "").trim();
-        if (!s) s = "—";
-        lines.push(k + ": " + s);
-      }
-      push("Tipo", (String(mv.type || "").toUpperCase() === "OUT") ? "OUT (scarico)" : "IN (carico)");
-      push("Data documento", mv.date);
-      push("Creato il", mv.createdAt);
-      push("Fornitore", mv.customer);
-      push("Codice", mv.code);
-      push("Articolo", mv.item);
-      push("Q.tà", String(String(mv.qtyRaw || "").trim() || (((api.safeInt ? api.safeInt(mv.qty) : mv.qty) ?? "") + (String(mv.uom||"").trim() ? (" " + String(mv.uom||"").trim()) : ""))));
-      push("Sede", whLabel(mv.warehouse || ""));
-      push("Fonte", mv.source);
-      push("Note", mv.note);
-      if (mv.docType || mv.docNum || mv.docDateRaw){
-        push("Doc tipo", mv.docType);
-        push("Doc n.", mv.docNum);
-        push("Doc data (raw)", mv.docDateRaw);
-      }
-      if (mv.lineIndex != null && String(mv.lineIndex).trim() !== "") push("Riga", mv.lineIndex);
-      if (mv.rawText) push("RawText", String(mv.rawText).slice(0, 800) + (String(mv.rawText).length > 800 ? "…" : ""));
-      try{ api.openModal("Dettaglio movimento", lines.join("\n")); }catch(_){ }
-      return;
-    }
-
-    // Doc key (se presente)
-    var docKey = "";
-    try{ docKey = buildDocKeyFromMovement(mv) || ""; }catch(_){ docKey = ""; }
-    __detailCtx.id = String(mv.id || "");
-    __detailCtx.docKey = String(docKey || "");
-
-    // Titolo + sub
-    try{
-      if (els.movDetTitle) els.movDetTitle.textContent = "Dettaglio movimento";
-      if (els.movDetSubtitle){
-        var d = String(mv.date || "").trim();
-        var wh = whLabel(mv.warehouse || "");
-        var cust = String(mv.customer || "").trim();
-        els.movDetSubtitle.textContent = [cust || "—", (d || "—"), (wh || "—")].join(" · ");
-      }
-    }catch(_){ }
-
-    // Campi (ordine)
-    var typeLbl = (String(mv.type || "").toUpperCase() === "OUT") ? "OUT (scarico)" : "IN (carico)";
-    var uom = String(mv.uom || "").trim();
-    var qty = (api && typeof api.safeInt === "function") ? api.safeInt(mv.qty) : (Number(mv.qty)||0);
-    var qtyRaw = String(mv.qtyRaw || "").trim();
-    if (!qtyRaw) qtyRaw = Number(qty).toLocaleString("it-IT") + (uom ? (" " + uom) : "");
-
-    __setVal(els.movDetDate, String(mv.date || "").trim() || "—");
-    __setVal(els.movDetType, typeLbl);
-    __setVal(els.movDetWarehouse, whLabel(mv.warehouse || ""));
-    __setVal(els.movDetSource, String(mv.source || "").trim() || "—");
-    __setVal(els.movDetCustomer, String(mv.customer || "").trim() || "—");
-    __setVal(els.movDetCode, String(mv.code || "").trim() || "—");
-    __setVal(els.movDetItem, String(mv.item || "").trim() || "—");
-    __setVal(els.movDetQty, String(qtyRaw || "").trim() || "—");
-    __setVal(els.movDetUom, uom || "—");
-    __setVal(els.movDetNote, String(mv.note || "").trim() || "—");
-    __setVal(els.movDetDocType, String(mv.docType || "").trim() || "—");
-    __setVal(els.movDetDocNum, String(mv.docNum || "").trim() || "—");
-    __setVal(els.movDetDocDateRaw, String(mv.docDateRaw || "").trim() || "—");
-    __setVal(els.movDetLineIndex, (mv.lineIndex != null && String(mv.lineIndex).trim() !== "") ? String(mv.lineIndex) : "—");
-    __setVal(els.movDetVat, String(mv.supplierVat || mv.vatNorm || mv.vat || "").trim() || "—");
-    __setVal(els.movDetTriplet, String(mv.ddtTripletKey || mv.ddtKey || "").trim() || "—");
-    __setVal(els.movDetCreatedAt, (api && typeof api.formatDateIT === "function") ? api.formatDateIT(mv.createdAt) : (String(mv.createdAt || "").trim() || "—"));
-    __setVal(els.movDetId, String(mv.id || "").trim() || "—");
-
-    var raw = String(mv.rawText || "").trim();
-    __setVal(els.movDetRawText, raw || "");
-    try{ if (els.movDetRawWrap) els.movDetRawWrap.style.display = raw ? "" : "none"; }catch(_){ }
-
-    // Bottone documento
-    try{
-      var show = !!(__detailCtx.docKey && typeof api.openDocDetail === "function");
-      if (els.movDetOpenDoc) els.movDetOpenDoc.style.display = show ? "" : "none";
-    }catch(_){ }
-
-    // Bottone annulla (richiede API)
-    try{
-      if (els.movDetUndo) els.movDetUndo.disabled = !(api && typeof api.deleteMovement === "function" && __detailCtx.id);
-    }catch(_){ }
-
-    // hint standard
-    try{
-      if (els.movDetHint) els.movDetHint.textContent = "Annulla movimento = elimina questa riga e ripristina lo stock come prima.";
-    }catch(_){ }
-
-    __openDetailModal();
-  }
-
-
-  function bindEvents(){
-    var inputs = [els.movSearch, els.movTypeFilter, els.movWhFilter, els.movSort, els.movFrom, els.movTo];
-    inputs.forEach(function(el){
-      if (!el) return;
-      el.addEventListener("input", render);
-      el.addEventListener("change", render);
-    });
-
-    if (els.btnMovExport){
-      els.btnMovExport.addEventListener("click", function(){
-        try{
-          api.exportMovementsCSV();
-          api.showToast && api.showToast("CSV movimenti scaricato");
-        }catch(e){
-          try{ api.openModal("Export fallito", String(e && (e.message || e) || e)); }catch(_){}
-        }
-      });
-    }
-
-    if (els.movementsAllTbody){
-      els.movementsAllTbody.addEventListener("click", function(e){
-        var btnDanea = e.target && e.target.closest ? e.target.closest("button.jsOpenDaneaDdt") : null;
-        if (btnDanea){
-          e.preventDefault(); e.stopPropagation();
-          var k0 = btnDanea.getAttribute("data-daneakey") || "";
-          var g0 = getDaneaGroupByKey(k0);
-          if (g0) openDaneaGroupDetails(g0);
-          return;
-        }
-
-        var btn = e.target && e.target.closest ? e.target.closest("button.jsOpenDoc") : null;
-        if (btn){
-          e.preventDefault(); e.stopPropagation();
-          var id = btn.getAttribute("data-mvid") || "";
-          var mv = (getAllMovements().find(function(x){ return String(x && x.id || "") === String(id); })) || null;
-          if (!mv) return;
-          var key = buildDocKeyFromMovement(mv);
-          if (key && typeof api.openDocDetail === "function") {
-            api.openDocDetail(key);
-            return;
-          }
-          // fallback: show details
-          openDetails(mv);
-          return;
-        }
-
-        var tr = e.target && e.target.closest ? e.target.closest("tr[data-mvid]") : null;
-        if (!tr) return;
-
-        // DaneaXML group row
-        var kind = String(tr.getAttribute("data-kind") || "").trim().toLowerCase();
-        if (kind === "danea"){
-          var k1 = tr.getAttribute("data-daneakey") || "";
-          var g1 = getDaneaGroupByKey(k1);
-          if (g1) openDaneaGroupDetails(g1);
-          return;
-        }
-
-        var id2 = tr.getAttribute("data-mvid") || "";
-        var mv2 = (getAllMovements().find(function(x){ return String(x && x.id || "") === String(id2); })) || null;
-        if (mv2) openDetails(mv2);
-      });
-    }
-    // Detail modal controls (bind once)
-    try{
-      cacheEls();
-      if (els.modalMovementDetail && !(els.modalMovementDetail.dataset && els.modalMovementDetail.dataset.bound === "1")){
-        if (els.modalMovementDetail.dataset) els.modalMovementDetail.dataset.bound = "1";
-
-        // click fuori = chiudi
-        els.modalMovementDetail.addEventListener("click", function(ev){
-          if (ev && ev.target === els.modalMovementDetail) __closeDetailModal();
-        });
-
-        if (els.movDetClose) els.movDetClose.addEventListener("click", function(e){ try{ e.preventDefault(); e.stopPropagation(); }catch(_){}
-          __closeDetailModal();
-        });
-        if (els.movDetDone) els.movDetDone.addEventListener("click", function(e){ try{ e.preventDefault(); e.stopPropagation(); }catch(_){}
-          __closeDetailModal();
-        });
-
-        // Click su riga prodotto (DDT) => dettaglio componenti per quel prodotto
-        try{
-          if (els.movDetDdtRowsTbody && !(els.movDetDdtRowsTbody.dataset && els.movDetDdtRowsTbody.dataset.bound === "1")){
-            if (els.movDetDdtRowsTbody.dataset) els.movDetDdtRowsTbody.dataset.bound = "1";
-            els.movDetDdtRowsTbody.addEventListener("click", function(ev){
-              var tr = ev && ev.target && ev.target.closest ? ev.target.closest("tr[data-ddt-idx]") : null;
-              if (!tr) return;
-              try{ ev.preventDefault(); ev.stopPropagation(); }catch(_){ }
-              var idx = parseInt(tr.getAttribute("data-ddt-idx") || "", 10);
-              if (!Number.isFinite(idx)) return;
-              try{ __selectDdtRow(idx); }catch(_){ }
-            });
-          }
-        }catch(_){ }
-
-
-        if (els.movDetOpenDoc) els.movDetOpenDoc.addEventListener("click", function(e){
-          try{ e.preventDefault(); e.stopPropagation(); }catch(_){}
-          if (!api || typeof api.openDocDetail !== "function") return;
-          var k = String(__detailCtx.docKey || "").trim();
-          if (!k) return;
-          try{ api.openDocDetail(k); }catch(_){}
-          __closeDetailModal();
-        });
-
-        if (els.movDetUndo) els.movDetUndo.addEventListener("click", async function(e){
-          try{ e.preventDefault(); e.stopPropagation(); }catch(_){}
-          if (!api || typeof api.deleteMovement !== "function") {
-            try{ api && api.openModal && api.openModal("Operazione non disponibile", "Per annullare un movimento serve l'API deleteMovement."); }catch(_){}
-            return;
-          }
-          var id = String(__detailCtx.id || "").trim();
-          if (!id) return;
-
-          var ok = confirm("Annullare questo movimento?\n\nVerrà eliminata questa riga e lo stock tornerà come prima.");
-          if (!ok) return;
-
-          try{ els.movDetUndo.disabled = true; }catch(_){}
-          try{ await api.deleteMovement(id); }catch(err){
-            try{ api.openModal && api.openModal("Errore", String(err && (err.message || err) || err)); }catch(_){}
-            try{ els.movDetUndo.disabled = false; }catch(_){}
-            return;
-          }
-
-          try{ api.showToast && api.showToast("Movimento annullato"); }catch(_){}
-          __closeDetailModal();
-        });
-      }
-    }catch(_){}
-
-  }
-
-  function cacheEls(){
-    els.viewMovements = $("viewMovements");
-    els.movSearch = $("movSearch");
-    els.movTypeFilter = $("movTypeFilter");
-    els.movWhFilter = $("movWhFilter");
-    els.movSort = $("movSort");
-    els.movFrom = $("movFrom");
-    els.movTo = $("movTo");
-    els.btnMovExport = $("btnMovExport");
-    els.pillMovementsCount = $("pillMovementsCount");
-    els.movementsAllTbody = $("movementsAllTbody");
-    els.movementsMeta = $("movementsMeta");
-
-    // Dettaglio movimento (modal)
-    els.modalMovementDetail = $("modalMovementDetail");
-    els.movDetTitle = $("movDetTitle");
-    els.movDetSubtitle = $("movDetSubtitle");
-    els.movDetClose = $("movDetClose");
-    els.movDetDone = $("movDetDone");
-    els.movDetOpenDoc = $("movDetOpenDoc");
-    els.movDetUndo = $("movDetUndo");
-
-    els.movDetDate = $("movDetDate");
-    els.movDetType = $("movDetType");
-    els.movDetWarehouse = $("movDetWarehouse");
-    els.movDetSource = $("movDetSource");
-    els.movDetCustomer = $("movDetCustomer");
-    els.movDetCode = $("movDetCode");
-    els.movDetItem = $("movDetItem");
-    els.movDetQty = $("movDetQty");
-    els.movDetUom = $("movDetUom");
-    els.movDetNote = $("movDetNote");
-    els.movDetDocType = $("movDetDocType");
-    els.movDetDocNum = $("movDetDocNum");
-    els.movDetDocDateRaw = $("movDetDocDateRaw");
-    els.movDetLineIndex = $("movDetLineIndex");
-    els.movDetVat = $("movDetVat");
-    els.movDetTriplet = $("movDetTriplet");
-    els.movDetCreatedAt = $("movDetCreatedAt");
-    els.movDetId = $("movDetId");
-    els.movDetRawText = $("movDetRawText");
-
-    // DDT (DaneaXML) dettaglio ordinato
-    els.movDetRawWrap = $("movDetRawWrap");
-    els.movDetKvGrid = $("movDetKvGrid");
-    els.movDetDdtWrap = $("movDetDdtWrap");
-    els.movDetDdtRowsTbody = $("movDetDdtRowsTbody");
-    els.movDetDdtCompsTbody = $("movDetDdtCompsTbody");
-    els.movDetDdtProdWrap = $("movDetDdtProdWrap");
-    els.movDetDdtProdTitle = $("movDetDdtProdTitle");
-    els.movDetDdtProdTbody = $("movDetDdtProdTbody");
-
-  }
-
-  function render(){
-    if (!api) return;
-
-    cacheEls();
-
-    // Se la vista non esiste, stop
-    if (!els.viewMovements) return;
-
-    var all = getAllMovements();
-    var total = all.length;
-
-    // se la pagina non è aperta, aggiorna solo il contatore (evita lavoro)
-    if (!els.viewMovements.classList.contains("active")){
-      try{
-        if (els.pillMovementsCount) els.pillMovementsCount.textContent = String(total);
-      }catch(_){}
-      return;
-    }
-
-    var ui = buildUiRows(all);
-    var totalRows = ui.length;
-
-    var filtered = applyFilters(ui);
-    applySort(filtered);
-    renderTable(filtered, totalRows);
-  }
-
-  function refresh(){
-    try{
-      // default: apri sui più recenti
-      cacheEls();
-      if (els.movSort && !els.movSort.value) els.movSort.value = "createdAtDesc";
-    }catch(_){}
-    render();
-  }
-
-  function init(_api){
-    api = _api || (window && window.HubInv) || null;
-    if (!api) return;
-    cacheEls();
-    bindEvents();
-    // prima render
-    render();
-  }
-
-  // Public hook used by main module
-  window.HubMovements = {
-    init: init,
-    render: render,
-    refresh: refresh
-  };
-
-  // Wait for app
-  window.addEventListener("HubInvReady", function(ev){
-    try{ init(ev && ev.detail); }catch(_){}
-  });
-
-  // If already there (hot reload)
-  if (window.HubInv){
-    try{ init(window.HubInv); }catch(_){}
-  }
-})();
-
-
-;
-/* ===== flussi.js ===== */
-// /public1/flussi.js
-// Inject "DDT Caricati" (Flussi) view markup into #viewFlows
-(function(){
-  try{
-    var root = document.getElementById("viewFlows");
-    if (!root) return;
-    if (root.dataset && root.dataset.injected === "1") return;
-    if (root.dataset) root.dataset.injected = "1";
-    root.innerHTML = `<article class="card" id="flowsCard">
-    <div class="hd">
-      <div class="overlayHeaderTitle">
-        <button class="iconBtn overlayBack" id="btnBackFlows" type="button" aria-label="Indietro">‹</button>
-        <h2>DDT Caricati</h2>
-      </div>
-      <div class="inlineRow" style="gap:8px; justify-content:flex-end;">
-        <div class="pill" id="pillFlowsCount">0</div>
-        <button class="iconBtn" id="btnCloseFlows" type="button" aria-label="Chiudi">×</button>
-      </div>
-    </div>
-    <div class="bd">
-      <div class="inlineRow" style="justify-content:space-between; align-items:flex-end; gap:12px;">
-        <div class="stack" style="flex:1; min-width: 220px;">
-          <div class="hero-sub">DDT caricati</div>
-        </div>
-      </div>
-
-      <div class="inlineRow listStickyBar" style="justify-content:space-between; align-items:flex-end; gap:12px; margin-top: 10px;">
-        <div class="field" style="flex: 1 1 auto; min-width: 220px;">
-          <label for="flowsSearch">Cerca</label>
-          <input id="flowsSearch" placeholder="Documento, fornitore, numero, codice, articolo…" autocomplete="off" />
-        </div>
-        <div class="inlineRow" style="gap:8px; justify-content:flex-end; margin-left:auto;">
-          <button class="btn btn-ghost mini" id="btnFlowsClear" type="button" title="Svuota ricerca">Reset</button>
-          <div class="hero-sub" id="flowsMeta">—</div>
-        </div>
-      </div>
-
-      <div class="tableWrap" style="max-height: 520px; overflow:auto; margin-top: 10px;">
-        <table class="dataGrid">
-          <thead>
-            <tr>
-              <th>Documento</th>
-              <th>Fornitore</th>
-              <th class="qty">Righe</th>
-              <th class="qty">Pezzi</th>
-            </tr>
-          </thead>
-          <tbody id="flowsTbody">
-            <tr><td class="td-muted" colspan="4">Nessun flusso ancora.</td></tr>
-          </tbody>
-        </table>
-      </div>
-    </div>
-  </article>`;
-  }catch(e){
-    try{ console.warn("flussi.js inject failed", e); }catch(_){ }
-  }
-})();
-;
-/* ===== danea_ddt_download_view.js ===== */
-// Inject "Scarica flussi DDT" view markup into #viewDaneaDdt
-(function(){
-  try{
-    var root = document.getElementById("viewDaneaDdt");
-    if (!root) return;
-    if (root.dataset && root.dataset.injected === "1") return;
-    if (root.dataset) root.dataset.injected = "1";
-
-    root.innerHTML = `<article class="card" id="daneaDdtCard">
-      <div class="hd">
-        <div class="overlayHeaderTitle">
-          <button class="iconBtn overlayBack" id="btnBackDaneaDdt" type="button" aria-label="Indietro">‹</button>
-          <h2>Scarica flussi DDT</h2>
-        </div>
-        <div class="inlineRow" style="gap:8px; justify-content:flex-end;">
-          <div class="seg daneaTabs">
-            <button id="daneaTabVerify" class="active" type="button">Da verificare <span class="pill" id="pillDaneaVerify" style="height:auto; padding:2px 8px; border-radius:999px; border:0; background:rgba(10,132,255,.12); color:rgba(0,0,0,.86);">0</span></button>
-            <button id="daneaTabDone" type="button">Completati <span class="pill" id="pillDaneaDone" style="height:auto; padding:2px 8px; border-radius:999px; border:0; background:rgba(0,0,0,.06); color:rgba(0,0,0,.86);">0</span></button>
-          </div>
-          <div class="pill" id="pillDaneaCount">0</div>
-          <button class="iconBtn" id="btnCloseDaneaDdt" type="button" aria-label="Chiudi">×</button>
-        </div>
-      </div>
-
-      <div class="bd">
-
-        <!-- LIST -->
-        <div id="daneaListWrap" class="stack" style="gap:10px;">
-          <div class="inlineRow listStickyBar" style="justify-content:space-between; align-items:flex-end; gap:12px; margin-top: 10px;">
-            <div class="field" style="flex: 1 1 auto; min-width: 220px;">
-              <label for="daneaSearch">Cerca</label>
-              <input id="daneaSearch" placeholder="Numero, data, cliente…" autocomplete="off" />
-            </div>
-            <div class="inlineRow" style="gap:8px; justify-content:flex-end; margin-left:auto;">
-              <button class="btn btn-ghost mini" id="btnDaneaClear" type="button">Reset</button>
-              <div class="hero-sub" id="daneaMeta">—</div>
-            </div>
-          </div>
-
-          <div class="tableWrap" style="max-height: 520px; overflow:auto; margin-top: 0; width:100%;">
-            <table class="dataGrid">
-              <thead>
-                <tr>
-                  <th style="width: 120px;">Data</th>
-                  <th style="width: 120px;">Numero</th>
-                  <th>Cliente</th>
-                  <th class="qty" style="width: 90px;">Righe</th>
-                  <th class="qty" style="width: 120px;">Stato</th>
-                  <th style="width: 120px;"></th>
-                </tr>
-              </thead>
-              <tbody id="daneaTbody">
-                <tr><td class="td-muted" colspan="6">Carico XML…</td></tr>
-              </tbody>
-            </table>
-          </div>
-        </div>
-
-        <!-- DETAIL -->
-        <div id="daneaDetailWrap" class="stack" style="gap:10px; display:none;">
-          <div class="inlineRow" style="justify-content:space-between; align-items:flex-end; gap:12px;">
-            <div class="stack" style="flex:1; min-width:240px;">
-              <div class="hero-sub" id="daneaDetTitle">DDT</div>
-              <div class="muted" id="daneaDetSubtitle" style="font-weight:900;">—</div>
-            </div>
-            <div class="inlineRow" style="gap:8px; justify-content:flex-end;">
-              <button class="btn btn-primary" id="btnDaneaSend" type="button" disabled>Completa (scarica)</button>
-            </div>
-          </div>
-
-          <div class="tableWrap" style="max-height: 520px; overflow:auto; width:100%;">
-            <table class="dataGrid">
-              <thead>
-                <tr>
-                  <th style="width: 44px;"></th>
-                  <th style="width: 160px;">Codice</th>
-                  <th>Articolo</th>
-                  <th class="qty" style="width: 120px;">Q.tà</th>
-                  <th style="width: 90px;">U.M.</th>
-                  <th style="width: 170px; text-align:right;">Azioni</th>
-                </tr>
-              </thead>
-              <tbody id="daneaItemsTbody">
-                <tr><td class="td-muted" colspan="6">Apri un DDT.</td></tr>
-              </tbody>
-            </table>
-          </div>
-
-          <div class="muted" id="daneaDetFooter" style="font-size:12px; font-weight:900;">—</div>
-        </div>
-      </div>
-    </article>`;
-  }catch(e){
-    try{ console.warn("danea view inject failed", e); }catch(_){ }
-  }
-})();
-;
-
-;
-/* ===== fp_categories_view.js ===== */
-// Inject "Categorie prodotti finiti" view markup into #viewFPCategories
-(function(){
-  try{
-    var root = document.getElementById("viewFPCategories");
-    if (!root) return;
-    if (root.dataset && root.dataset.injected === "1") return;
-    if (root.dataset) root.dataset.injected = "1";
-
-    root.innerHTML = `<article class="card" id="fpCategoriesCard">
-      <div class="hd">
-        <div class="overlayHeaderTitle">
-          <button class="iconBtn overlayBack" id="btnBackFPCategories" type="button" aria-label="Indietro">‹</button>
-          <h2>Categorie prodotti finiti</h2>
-        </div>
-        <div class="inlineRow" style="gap:8px; justify-content:flex-end;">
-          <div class="pill" id="pillFPCategoriesCount">0</div>
-          <button class="iconBtn" id="btnCloseFPCategories" type="button" aria-label="Chiudi">×</button>
-        </div>
-      </div>
-      <div class="bd">
-
-        <div class="inlineRow listStickyBar" style="justify-content:space-between; align-items:flex-end; gap:12px;">
-          <div class="field" style="flex: 1 1 auto; min-width: 220px;">
-            <label for="fpCatSearch">Cerca</label>
-            <input id="fpCatSearch" placeholder="Nome categoria o prodotto finito…" autocomplete="off" />
-          </div>
-          <button class="btn btn-secondary" id="btnFpCatNew" type="button">Nuova categoria</button>
-        </div>
-
-        <div id="fpCatCreateRow" class="fieldGrid" style="display:none; grid-template-columns: 1fr; gap:10px; margin-top: 6px;">
-          <div class="field" style="grid-column: 1 / -1;">
-            <label>Nuova categoria prodotti finiti</label>
-            <div class="inlineRow" style="justify-content:flex-start; gap:10px;">
-              <input id="fpCatNewName" class="qtyEditInput" type="text" placeholder="Nome categoria (es. Sacchetti 1 kg)" style="flex:1 1 260px; min-width: 220px;" />
-              <button class="btn btn-primary btn-xs" id="btnFpCatCreate" type="button">Crea</button>
-              <button class="btn btn-ghost btn-xs" id="btnFpCatCancelCreate" type="button">Annulla</button>
-            </div>
-            <div class="td-muted" style="margin-top:6px;">Definisci una distinta base per categoria e assegna i prodotti finiti: saranno configurati subito dappertutto.</div>
-          </div>
-        </div>
-
-        <div class="tableWrap" style="max-height: 520px; overflow:auto; margin-top: 10px;">
-          <table class="dataGrid" id="fpCatTable">
-            <thead>
-              <tr>
-                <th>Categoria</th>
-                <th class="qty" style="width: 110px;">Prodotti</th>
-                <th class="qty" style="width: 110px;">BOM</th>
-                <th style="width: 160px; text-align:right;">Azioni</th>
-              </tr>
-            </thead>
-            <tbody id="fpCatTbody">
-              <tr><td class="td-muted" colspan="4">Carico categorie…</td></tr>
-            </tbody>
-          </table>
-        </div>
-
-      </div>
-    </article>`;
-  }catch(e){
-    try{ console.warn("fp_categories_view inject failed", e); }catch(_){ }
-  }
-})();
-
-/* ===== danea_ddt_download.js ===== */
-/* Scarica flussi DDT (Easyfatt-Xml/Danea) + verifica distinta base + scarico automatico componenti */
-(function(){
-  "use strict";
-
   const LS_URL = "hubinv_danea_xml_url";
+
+  // Auto-scarico DDT XML (toggle da Dashboard)
+  const LS_AUTO = "hubinv_danea_auto_scarico";
+  let __autoTimer = 0;
+  let __autoBusy = false;
+  let __autoWarnedLogin = false;
+  const __autoFailAt = new Map(); // key -> epoch ms
+
+  function isAutoEnabled(){
+    try{ return String(localStorage.getItem(LS_AUTO) || "") === "1"; }catch(_){ return false; }
+  }
+  function setAutoEnabled(v){
+    try{ localStorage.setItem(LS_AUTO, v ? "1" : "0"); }catch(_){ }
+  }
+  function scheduleAutoComplete(delay){
+    try{
+      if (!isAutoEnabled()) return;
+      if (__autoTimer) clearTimeout(__autoTimer);
+      __autoTimer = setTimeout(() => { try{ maybeAutoCompleteReady(); }catch(_){ } }, Math.max(200, Number(delay) || 450));
+    }catch(_){ }
+  }
+
   // Default endpoint (Cloud Run proxy). If you deploy a new service, update this.
   const DEFAULT_XML_URL_BASE = "https://danea-xml-proxy-537555699968.europe-west8.run.app";
 
@@ -2174,247 +618,322 @@
     return null;
   }
 
-    async function sendSelectedFromDetail(){
-    if (S.busy) return;
-    const ddt = S.selected;
-    if (!ddt || !ddt.key) return;
+    function __daneaToast(msg, kind){
+      try{ window.HubInv?.showToast?.(msg, kind); }catch(_){ }
+    }
 
-    const H = S.hub;
-    if (!H || !H.fb || !H.fb.db || !H.FS) { alert("Hub non pronto"); return; }
-    if (!H.fb.user) { try{ window.HubInv?.showToast?.("Accedi con Google per inviare", "warn"); }catch(_){ alert("Accedi con Google"); } return; }
+    async function completeDdt(ddt, opts){
+      opts = opts || {};
+      const interactive = !!opts.interactive;
+      const isAuto = !!opts.auto;
 
-    cacheCompletedMap();
-    if (S.completedMap.has(ddt.key)) { alert("Questo DDT risulta già completato."); return; }
-
-    const st = ddtStatus(ddt);
-    if (!st.ok) { alert("Non tutte le righe sono configurate (cerchi rossi)."); return; }
-
-    const ok = confirm(`Completare e scaricare componenti?
-
-DDT ${ddt.number} del ${fmtDateIT(ddt.date)}
-Righe: ${st.total}`);
-    if (!ok) return;
-
-    S.busy = true;
-    try{
-      const { addDoc, setDoc, doc, collection, serverTimestamp } = H.FS;
-
-      // 1) calcola fabbisogni componenti (somma per codice)
-      const req = new Map(); // codeLower -> {code,name,uom,qtyFloat}
-      for (const r of (ddt.rows || [])){
-        const qtyLine = (r.qty != null && Number.isFinite(Number(r.qty))) ? Number(r.qty) : parseFraction(r.qtyRaw);
-        const qLine = (qtyLine != null && Number.isFinite(qtyLine)) ? qtyLine : 0;
-        if (qLine <= 0) continue;
-
-        const fp = getFpForRow(r);
-        const comps = getFpComponents(fp);
-        for (const c of comps){
-          const cCode = String(c.code || "").trim();
-          if (!cCode) continue;
-
-          const per = compQtyPerUnit(c);
-          if (per == null || !Number.isFinite(per) || per <= 0) continue;
-
-          const add = per * qLine;
-          const low = cCode.toLowerCase();
-          const cur = req.get(low) || { code: cCode, name: String(c.name || c.articolo || cCode).trim(), uom: String(c.uom || "").trim(), qty: 0 };
-          cur.qty += add;
-          if (!cur.name) cur.name = cCode;
-          if (!cur.uom) cur.uom = String(c.uom || "").trim();
-          req.set(low, cur);
+      const alertOrToast = (msg, kind) => {
+        if (interactive) {
+          alert(msg);
+        } else {
+          __daneaToast(msg, kind || "warn");
         }
-      }
+      };
 
-      if (!req.size){
-        alert("Nessun componente calcolabile (distinta base vuota o quantità non valide).");
-        return;
-      }
+      if (S.busy) return false;
+      const d = ddt;
+      if (!d || !d.key) return false;
 
-      // 2) inventario globale: calcola disponibilità per sede (ignorando fornitore)
-      let movs = (H.state && Array.isArray(H.state.movements)) ? H.state.movements : [];
-
-      // Se l'app ha appena aperto, può capitare che lo snapshot dei movimenti non sia
-      // ancora arrivato: in quel caso facciamo un fetch one-shot e poi riproviamo.
-      if (!movs.length){
-        try{
-          const FS = H.FS || {};
-          if (H.fb && H.fb.db && typeof FS.getDocs === "function" && typeof FS.collection === "function" && typeof FS.query === "function" && typeof FS.orderBy === "function"){
-            try{ H.showToast?.("Carico inventario…", "warn"); }catch(_){ }
-            const col = FS.collection(H.fb.db, "orgs", H.ORG_ID, "inventoryMovements");
-            const q = FS.query(col, FS.orderBy("createdAt"));
-            const snap = await FS.getDocs(q);
-            movs = snap.docs.map(d => {
-              const data = d.data() || {};
-              return {
-                id: d.id,
-                type: data.type || "IN",
-                code: data.code || "",
-                qty: data.qty,
-                warehouse: data.warehouse || ""
-              };
-            });
-            if (H.state) H.state.movements = movs;
+      const H = S.hub || getHub();
+      if (!H || !H.fb || !H.fb.db || !H.FS) { alertOrToast("Hub non pronto", "warn"); return false; }
+      if (!H.fb.user) {
+        if (interactive){
+          try{ window.HubInv?.showToast?.("Accedi con Google per inviare", "warn"); }catch(_){ alert("Accedi con Google"); }
+        } else {
+          if (!__autoWarnedLogin){
+            __autoWarnedLogin = true;
+            __daneaToast("Scarico automatico: accedi con Google", "warn");
           }
-        }catch(e){
-          try{ console.warn("fetch inventoryMovements failed", e); }catch(_){ }
         }
+        return false;
+      }
+      __autoWarnedLogin = false;
+
+      cacheCompletedMap();
+      if (S.completedMap.has(d.key)) { if (interactive) alert("Questo DDT risulta già completato."); return false; }
+
+      const st = ddtStatus(d);
+      if (!st.ok) { if (interactive) alert("Non tutte le righe sono configurate (cerchi rossi)."); return false; }
+
+      if (interactive){
+        const ok = confirm(`Completare e scaricare componenti?
+
+DDT ${d.number} del ${fmtDateIT(d.date)}
+Righe: ${st.total}`);
+        if (!ok) return false;
       }
 
-      if (!movs.length){
-        alert("Inventario non pronto: movimenti non caricati.");
-        return;
-      }
+      S.busy = true;
+      try{
+        const { addDoc, setDoc, doc, collection, serverTimestamp } = H.FS;
 
-      const _normWh = (w) => {
-        try{
-          if (H && typeof H.normalizeWarehouse === "function") return H.normalizeWarehouse(w);
-        }catch(_){}
-        // fallback minimale (nel caso il bridge non esponga normalizeWarehouse)
-        const s = String(w || "").trim().toLowerCase();
-        if (s.includes("conca") || s.includes("concamarise")) return "concamarise";
-        return "cerea";
-      };
-      const _safeInt = (v) => {
-        try{
-          if (H && typeof H.safeInt === "function") return H.safeInt(v);
-        }catch(_){}
-        const n = parseInt(String(v||"").replace(/[^0-9\-]/g,""), 10);
-        return Number.isFinite(n) ? n : 0;
-      };
+        // 1) calcola fabbisogni componenti (somma per codice)
+        const req = new Map(); // codeLower -> {code,name,uom,qtyFloat}
+        for (const r of (d.rows || [])){
+          const qtyLine = (r.qty != null && Number.isFinite(Number(r.qty))) ? Number(r.qty) : parseFraction(r.qtyRaw);
+          const qLine = (qtyLine != null && Number.isFinite(qtyLine)) ? qtyLine : 0;
+          if (qLine <= 0) continue;
 
-      const avail = { cerea: new Map(), concamarise: new Map() }; // codeLower -> qtyInt
-      for (const mv of movs){
-        const code = String(mv && mv.code || "").trim();
-        if (!code) continue;
-        const low = code.toLowerCase();
-        const w = _normWh(mv.warehouse || mv.site || mv.magazzino || mv.location || "");
-        const q = _safeInt(mv.qty);
-        if (!q) continue;
-        const delta = (String(mv.type || "").toUpperCase() === "OUT") ? -q : q;
-        const m = (w === "concamarise") ? avail.concamarise : avail.cerea;
-        m.set(low, (m.get(low) || 0) + delta);
-      }
+          const fp = getFpForRow(r);
+          const comps = getFpComponents(fp);
+          for (const c of comps){
+            const cCode = String(c.code || "").trim();
+            if (!cCode) continue;
 
-      // 3) validazione scorte (globale) prima di scrivere
-      const needList = Array.from(req.values()).map(it => {
-        const qtyInt = Math.round(Number(it.qty) || 0);
-        return Object.assign({}, it, { qtyInt });
-      }).filter(x => x.qtyInt);
+            const per = compQtyPerUnit(c);
+            if (per == null || !Number.isFinite(per) || per <= 0) continue;
 
-      for (const it of needList){
-        const low = String(it.code || "").trim().toLowerCase();
-        const aC = Math.max(0, _safeInt(avail.cerea.get(low)));
-        const aK = Math.max(0, _safeInt(avail.concamarise.get(low)));
-        const tot = aC + aK;
-        if (tot < it.qtyInt){
-          alert(`Scorta insufficiente per ${it.code} — ${it.name || ""}
-
-Richiesti: ${it.qtyInt.toLocaleString("it-IT")} ${String(it.uom||"").trim()}
-Disponibili: ${(tot).toLocaleString("it-IT")} (Cerea ${aC.toLocaleString("it-IT")}, Concamarise ${aK.toLocaleString("it-IT")})`);
-          return;
+            const add = per * qLine;
+            const low = cCode.toLowerCase();
+            const cur = req.get(low) || { code: cCode, name: String(c.name || c.articolo || cCode).trim(), uom: String(c.uom || "").trim(), qty: 0 };
+            cur.qty += add;
+            if (!cur.name) cur.name = cCode;
+            if (!cur.uom) cur.uom = String(c.uom || "").trim();
+            req.set(low, cur);
+          }
         }
-      }
 
-      // 4) crea movimenti OUT (split automatico tra sedi, senza scelta manuale)
-      const movementIds = [];
-      const allocations = [];
-      const movCol = collection(H.fb.db, "orgs", H.ORG_ID, "inventoryMovements");
+        if (!req.size){
+          alertOrToast("Nessun componente calcolabile (distinta base vuota o quantita non valide).", "warn");
+          return false;
+        }
 
-      const noteBase = `Scarico componenti per DDT ${ddt.number} del ${fmtDateIT(ddt.date)} (DaneaXML)`;
-      for (const it of needList){
-        const low = String(it.code || "").trim().toLowerCase();
-        let need = it.qtyInt;
+        // 2) inventario globale: calcola disponibilita per sede (ignorando fornitore)
+        let movs = (H.state && Array.isArray(H.state.movements)) ? H.state.movements : [];
 
-        let aC = Math.max(0, _safeInt(avail.cerea.get(low)));
-        let aK = Math.max(0, _safeInt(avail.concamarise.get(low)));
+        // Se l'app ha appena aperto, puo capitare che lo snapshot dei movimenti non sia ancora arrivato
+        if (!movs.length){
+          try{
+            const FS = H.FS || {};
+            if (H.fb && H.fb.db && typeof FS.getDocs === "function" && typeof FS.collection === "function" && typeof FS.query === "function" && typeof FS.orderBy === "function"){
+              try{ H.showToast?.("Carico inventario…", "warn"); }catch(_){ }
+              const col = FS.collection(H.fb.db, "orgs", H.ORG_ID, "inventoryMovements");
+              const q = FS.query(col, FS.orderBy("createdAt"));
+              const snap = await FS.getDocs(q);
+              movs = snap.docs.map(dd => {
+                const data = dd.data() || {};
+                return { id: dd.id, type: data.type || "IN", code: data.code || "", qty: data.qty, warehouse: data.warehouse || "" };
+              });
+              if (H.state) H.state.movements = movs;
+            }
+          }catch(e){
+            try{ console.warn("fetch inventoryMovements failed", e); }catch(_){ }
+          }
+        }
 
-        // scegli sede primaria = quella con più disponibilità (riduce split)
-        const first = (aK > aC) ? "concamarise" : "cerea";
-        const second = (first === "cerea") ? "concamarise" : "cerea";
+        if (!movs.length){
+          alertOrToast("Inventario non pronto: movimenti non caricati.", "warn");
+          return false;
+        }
 
-        const takeFrom = (wh) => {
-          if (need <= 0) return 0;
-          const cur = (wh === "concamarise") ? aK : aC;
-          const take = Math.min(need, cur);
-          if (take <= 0) return 0;
-          need -= take;
-          if (wh === "concamarise") aK -= take;
-          else aC -= take;
-          return take;
+        const _normWh = (w) => {
+          try{ if (H && typeof H.normalizeWarehouse === "function") return H.normalizeWarehouse(w); }catch(_){ }
+          const s = String(w || "").trim().toLowerCase();
+          if (s.includes("conca") || s.includes("concamarise")) return "concamarise";
+          return "cerea";
+        };
+        const _safeInt = (v) => {
+          try{ if (H && typeof H.safeInt === "function") return H.safeInt(v); }catch(_){ }
+          const n = parseInt(String(v||"").replace(/[^0-9\-]/g,""), 10);
+          return Number.isFinite(n) ? n : 0;
         };
 
-        const t1 = takeFrom(first);
-        const t2 = takeFrom(second);
+        const avail = { cerea: new Map(), concamarise: new Map() };
+        for (const mv of movs){
+          const code = String(mv && mv.code || "").trim();
+          if (!code) continue;
+          const low = code.toLowerCase();
+          const w = _normWh(mv.warehouse || mv.site || mv.magazzino || mv.location || "");
+          const q = _safeInt(mv.qty);
+          if (!q) continue;
+          const delta = (String(mv.type || "").toUpperCase() === "OUT") ? -q : q;
+          const m0 = (w === "concamarise") ? avail.concamarise : avail.cerea;
+          m0.set(low, (m0.get(low) || 0) + delta);
+        }
 
-        // aggiorna disponibilità residue
-        avail.cerea.set(low, aC);
-        avail.concamarise.set(low, aK);
+        // 3) validazione scorte prima di scrivere
+        const needList = Array.from(req.values()).map(it => {
+          const qtyInt = Math.round(Number(it.qty) || 0);
+          return Object.assign({}, it, { qtyInt });
+        }).filter(x => x.qtyInt);
 
-        allocations.push({ code: it.code, name: it.name || it.code, uom: String(it.uom||"").trim(), qty: it.qtyInt, byWarehouse: { cerea: (first==="cerea"?t1:t2) || 0, concamarise: (first==="concamarise"?t1:t2) || 0 } });
+        for (const it of needList){
+          const low = String(it.code || "").trim().toLowerCase();
+          const aC = Math.max(0, _safeInt(avail.cerea.get(low)));
+          const aK = Math.max(0, _safeInt(avail.concamarise.get(low)));
+          const tot = aC + aK;
+          if (tot < it.qtyInt){
+            const msg = `Scorta insufficiente per ${it.code} — ${it.name || ""}
 
-        const makePayload = (warehouse, qtyInt) => ({
-          type: "OUT",
-          customer: "Scarico DDT",
-          code: it.code,
-          item: it.name || it.code,
-          uom: String(it.uom || "").trim(),
-          qtyRaw: `${it.qty} ${String(it.uom||"").trim()}`.trim(),
-          qty: qtyInt,
-          date: String(ddt.date || "").trim(),
-          note: noteBase,
-          source: "DaneaXML",
-          rawText: "",
-          warehouse: warehouse,
+Richiesti: ${it.qtyInt.toLocaleString("it-IT")} ${String(it.uom||"").trim()}
+Disponibili: ${(tot).toLocaleString("it-IT")} (Cerea ${aC.toLocaleString("it-IT")}, Concamarise ${aK.toLocaleString("it-IT")})`;
+            if (interactive) alert(msg);
+            else __daneaToast(`Scorta insufficiente: ${it.code}`, "warn");
+            return false;
+          }
+        }
 
-          docType: "DDT",
-          docNum: String(ddt.number || "").trim(),
-          docDateRaw: String(ddt.date || "").trim(),
-          daneaDdtKey: String(ddt.key || "").trim(),
+        // 4) crea movimenti OUT (split automatico tra sedi)
+        const movementIds = [];
+        const allocations = [];
+        const movCol = collection(H.fb.db, "orgs", H.ORG_ID, "inventoryMovements");
 
+        const noteBase = `Scarico componenti per DDT ${d.number} del ${fmtDateIT(d.date)} (DaneaXML)`;
+        for (const it of needList){
+          const low = String(it.code || "").trim().toLowerCase();
+          let need = it.qtyInt;
+
+          let aC = Math.max(0, _safeInt(avail.cerea.get(low)));
+          let aK = Math.max(0, _safeInt(avail.concamarise.get(low)));
+
+          const first = (aK > aC) ? "concamarise" : "cerea";
+          const second = (first === "cerea") ? "concamarise" : "cerea";
+
+          const takeFrom = (wh) => {
+            if (need <= 0) return 0;
+            const cur = (wh === "concamarise") ? aK : aC;
+            const take = Math.min(need, cur);
+            if (take <= 0) return 0;
+            need -= take;
+            if (wh === "concamarise") aK -= take;
+            else aC -= take;
+            return take;
+          };
+
+          const t1 = takeFrom(first);
+          const t2 = takeFrom(second);
+
+          avail.cerea.set(low, aC);
+          avail.concamarise.set(low, aK);
+
+          allocations.push({ code: it.code, name: it.name || it.code, uom: String(it.uom||"").trim(), qty: it.qtyInt, byWarehouse: { cerea: (first==="cerea"?t1:t2) || 0, concamarise: (first==="concamarise"?t1:t2) || 0 } });
+
+          const makePayload = (warehouse, qtyInt) => ({
+            type: "OUT",
+            customer: "Scarico DDT",
+            code: it.code,
+            item: it.name || it.code,
+            uom: String(it.uom || "").trim(),
+            qtyRaw: `${it.qty} ${String(it.uom||"").trim()}`.trim(),
+            qty: qtyInt,
+            date: String(d.date || "").trim(),
+            note: noteBase,
+            source: "DaneaXML",
+            rawText: "",
+            warehouse: warehouse,
+
+            docType: "DDT",
+            docNum: String(d.number || "").trim(),
+            docDateRaw: String(d.date || "").trim(),
+            daneaDdtKey: String(d.key || "").trim(),
+
+            createdAt: serverTimestamp(),
+            createdBy: H.fb.user.email || H.fb.user.uid
+          });
+
+          if (t1 > 0){
+            const ref = await addDoc(movCol, makePayload(first, t1));
+            if (ref && ref.id) movementIds.push(ref.id);
+          }
+          if (t2 > 0){
+            const ref = await addDoc(movCol, makePayload(second, t2));
+            if (ref && ref.id) movementIds.push(ref.id);
+          }
+        }
+
+        // 5) salva completato
+        const doneId = encodeURIComponent(String(d.key || "").trim());
+        const doneRef = doc(H.fb.db, "orgs", H.ORG_ID, "daneaDdtCompleted", doneId);
+        await setDoc(doneRef, {
+          key: String(d.key || "").trim(),
+          number: String(d.number || "").trim(),
+          date: String(d.date || "").trim(),
+          customer: String(d.customer || "").trim(),
+          rows: (d.rows || []).map(x => ({ code:x.code||"", desc:x.desc||"", qty:x.qty??null, qtyRaw:x.qtyRaw||"", uom:x.uom||"" })),
+          warehouse: "global",
+          allocations: allocations,
+          xmlHash: String(d.hash || ""),
+          movementIds: movementIds,
           createdAt: serverTimestamp(),
           createdBy: H.fb.user.email || H.fb.user.uid
-        });
+        }, { merge: true });
 
-        if (t1 > 0){
-          const ref = await addDoc(movCol, makePayload(first, t1));
-          if (ref && ref.id) movementIds.push(ref.id);
+        try{ window.HubInv?.showToast?.(isAuto ? (`Auto: DDT ${d.number} scaricato`) : "DDT completato e scaricato", "ok"); }catch(_){ }
+
+        if (interactive){
+          setDetailOpen(false);
+          setTab("done");
+          await fetchNow(true);
         }
-        if (t2 > 0){
-          const ref = await addDoc(movCol, makePayload(second, t2));
-          if (ref && ref.id) movementIds.push(ref.id);
-        }
+
+        return true;
+      }catch(e){
+        console.error(e);
+        try{ window.HubInv?.showToast?.("Errore completamento DDT", "err"); }catch(_){ }
+        if (interactive) alert("Errore completamento DDT");
+        return false;
+      }finally{
+        S.busy = false;
       }
-
-      // 5) salva completato (id deterministico)
-      const doneId = encodeURIComponent(String(ddt.key || "").trim());
-      const doneRef = doc(H.fb.db, "orgs", H.ORG_ID, "daneaDdtCompleted", doneId);
-      await setDoc(doneRef, {
-        key: String(ddt.key || "").trim(),
-        number: String(ddt.number || "").trim(),
-        date: String(ddt.date || "").trim(),
-        customer: String(ddt.customer || "").trim(),
-        rows: (ddt.rows || []).map(x => ({ code:x.code||"", desc:x.desc||"", qty:x.qty??null, qtyRaw:x.qtyRaw||"", uom:x.uom||"" })),
-        warehouse: "global",
-        allocations: allocations,
-        xmlHash: String(ddt.hash || ""),
-        movementIds: movementIds,
-        createdAt: serverTimestamp(),
-        createdBy: H.fb.user.email || H.fb.user.uid
-      }, { merge: true });
-
-      try{ window.HubInv?.showToast?.("DDT completato e scaricato"); }catch(_){}
-      // refresh lists
-      setDetailOpen(false);
-      setTab("done");
-      await fetchNow(true);
-    }catch(e){
-      console.error(e);
-      try{ window.HubInv?.showToast?.("Errore completamento DDT", "err"); }catch(_){}
-      alert("Errore completamento DDT");
-    }finally{
-      S.busy = false;
     }
-  }
+
+    async function sendSelectedFromDetail(){
+      return completeDdt(S.selected, { interactive: true, auto: false });
+    }
+
+    async function maybeAutoCompleteReady(){
+      try{
+        if (!isAutoEnabled()) return;
+        if (__autoBusy || S.busy) return;
+
+        const H = S.hub || getHub();
+        if (!H || !H.fb || !H.fb.db || !H.FS) return;
+        if (!H.fb.user){
+          if (!__autoWarnedLogin){
+            __autoWarnedLogin = true;
+            try{ window.HubInv?.showToast?.("Scarico automatico: accedi con Google", "warn"); }catch(_){ }
+          }
+          return;
+        }
+        __autoWarnedLogin = false;
+
+        if (!S.cacheReady) return;
+
+        cacheCompletedMap();
+        const verifyList = (S.cache || []).filter(d => d && d.key && !S.completedMap.has(d.key));
+        const ready = verifyList.filter(d => { try{ return ddtStatus(d).ok; }catch(_){ return false; } });
+        if (!ready.length) return;
+
+        // processa 1 alla volta (ordine: piu vecchi prima)
+        ready.sort((a,b) => String(a.date||"").localeCompare(String(b.date||"")) || String(a.number||"").localeCompare(String(b.number||"")));
+
+        const now = Date.now();
+        const RETRY_MS = 5 * 60 * 1000;
+        let pick = null;
+        for (const d of ready){
+          const k = String(d.key||"").trim();
+          const lastFail = __autoFailAt.get(k) || 0;
+          if (!lastFail || (now - lastFail) > RETRY_MS){ pick = d; break; }
+        }
+        if (!pick) return;
+
+        __autoBusy = true;
+        const ok = await completeDdt(pick, { interactive: false, auto: true });
+        if (!ok){
+          __autoFailAt.set(String(pick.key||""), Date.now());
+        }
+      }catch(e){
+        try{ console.warn("auto complete failed", e); }catch(_){ }
+      }finally{
+        __autoBusy = false;
+        if (isAutoEnabled()) scheduleAutoComplete(1600);
+      }
+    }
 
   async function deleteCompletedByKey(key){
     const k = String(key || "").trim();
@@ -2607,6 +1126,7 @@ Disponibili: ${(tot).toLocaleString("it-IT")} (Cerea ${aC.toLocaleString("it-IT"
     try{ maybeAutoImportFinishedProducts(ddts); }catch(_){}
 
     render();
+    try{ scheduleAutoComplete(650); }catch(_){ }
   }
 
   async function fetchNow(force){
@@ -2660,6 +1180,7 @@ Disponibili: ${(tot).toLocaleString("it-IT")} (Cerea ${aC.toLocaleString("it-IT"
         S.completed = arr;
         cacheCompletedMap();
         render();
+        try{ scheduleAutoComplete(500); }catch(_){ }
       }, (err) => {
         console.warn("completed snapshot error", err);
       });
@@ -2709,6 +1230,7 @@ Disponibili: ${(tot).toLocaleString("it-IT")} (Cerea ${aC.toLocaleString("it-IT"
         S.cacheReady = true;
         rebuildCacheMap();
         render();
+        try{ scheduleAutoComplete(500); }catch(_){ }
       }, (err) => {
         console.warn("daneaDdts snapshot error", err);
         S.cacheReady = true;
@@ -2810,6 +1332,7 @@ function subscribeFinishedProducts(){
         S.finished = arr;
         S.fpByCode = map;
         render();
+        try{ scheduleAutoComplete(500); }catch(_){ }
         // se dettaglio aperto, re-render
         if (S.selected && $("daneaDetailWrap")?.style.display !== "none"){
           renderDetail(S.selected, "verify");
@@ -2907,6 +1430,8 @@ function waitForHub(attempt){
     // subscribe Firestore (when hub ready)
     waitForHub(0);
 
+    try{ scheduleAutoComplete(800); }catch(_){ }
+
     // expose hook (called by menu click)
     window.HubDaneaDdt = window.HubDaneaDdt || {};
     window.HubDaneaDdt.refresh = function(){
@@ -2915,6 +1440,17 @@ function waitForHub(attempt){
     };
     window.HubDaneaDdt.backToList = function(){
       try{ backToList(); }catch(_){}
+    };
+    window.HubDaneaDdt.isAutoEnabled = isAutoEnabled;
+    window.HubDaneaDdt.setAutoEnabled = function(v){
+      try{ setAutoEnabled(!!v); }catch(_){ }
+      try{ scheduleAutoComplete(250); }catch(_){ }
+    };
+    window.HubDaneaDdt.toggleAutoEnabled = function(){
+      const on = !isAutoEnabled();
+      try{ setAutoEnabled(on); }catch(_){ }
+      try{ scheduleAutoComplete(250); }catch(_){ }
+      return on;
     };
   }
 
@@ -6253,6 +4789,7 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
     const homeDaneaTickerTrack = document.getElementById("homeDaneaTickerTrack");
     const homeDaneaTickerSeq = document.getElementById("homeDaneaTickerSeq");
     const homeDaneaTickerSeqClone = document.getElementById("homeDaneaTickerSeqClone");
+    const btnHomeDaneaAuto = document.getElementById("btnHomeDaneaAuto");
 
 
     const stockTbody = document.getElementById("stockTbody");
@@ -9363,6 +7900,50 @@ async function deleteMovement(id) {
     let __homeDaneaMarqueeSeqW = 0;
     let __homeDaneaMarqueePaused = false;
 
+    const LS_DANEA_AUTO = "hubinv_danea_auto_scarico";
+
+    function __getDaneaAutoEnabled(){
+      try{ return String(localStorage.getItem(LS_DANEA_AUTO) || "") === "1"; }catch(_){ return false; }
+    }
+    function __setDaneaAutoEnabled(v){
+      try{ localStorage.setItem(LS_DANEA_AUTO, v ? "1" : "0"); }catch(_){ }
+    }
+    function __syncHomeDaneaAutoBtn(){
+      try{
+        if (!btnHomeDaneaAuto) return;
+        const on = __getDaneaAutoEnabled();
+        btnHomeDaneaAuto.setAttribute("aria-pressed", on ? "true" : "false");
+        btnHomeDaneaAuto.textContent = on ? "DISATTIVA" : "ATTIVA";
+        btnHomeDaneaAuto.title = on ? "Disattiva scarico automatico DDT XML" : "Attiva scarico automatico DDT XML";
+      }catch(_){ }
+    }
+
+    function __countTodayDaneaDdts(){
+      try{
+        const list = Array.isArray(state && state.movements) ? state.movements : [];
+        const keys = new Set();
+        const now = new Date();
+        const y = now.getFullYear(), m = now.getMonth(), d0 = now.getDate();
+        for (const mv of list){
+          if (!mv) continue;
+          if (String(mv.type || "").toUpperCase() !== "OUT") continue;
+          if (String(mv.source || "").trim().toLowerCase() !== "daneaxml") continue;
+          const ca = String(mv.createdAt || "").trim();
+          if (!ca) continue;
+          const dt = new Date(ca);
+          if (Number.isNaN(dt.getTime())) continue;
+          if (dt.getFullYear() !== y || dt.getMonth() !== m || dt.getDate() !== d0) continue;
+
+          const docNum = String(mv.docNum || "").trim();
+          const date = String(mv.date || "").trim();
+          const key = String(mv.daneaDdtKey || "").trim() || ((docNum && date) ? (docNum + "__" + date) : "") || docNum;
+          if (key) keys.add(key);
+        }
+        return keys.size;
+      }catch(_){ return 0; }
+    }
+
+
     function __fmtDateShortIT(v){
       const s = String(v || "").trim();
       if (!s) return "—";
@@ -9590,7 +8171,7 @@ async function deleteMovement(id) {
         homeDaneaTickerTrack.style.transform = "translateX(0px)";
 
         const seqRect = homeDaneaTickerSeq.getBoundingClientRect();
-        const wrapRect = homeDaneaCockpit.getBoundingClientRect();
+        const wrapRect = (homeDaneaTicker ? homeDaneaTicker.getBoundingClientRect() : homeDaneaCockpit.getBoundingClientRect());
         const seqW = Math.max(0, seqRect.width || 0);
         const wrapW = Math.max(0, wrapRect.width || 0);
 
@@ -9637,21 +8218,51 @@ async function deleteMovement(id) {
         homeDaneaCockpit.addEventListener("focusin", pause);
         homeDaneaCockpit.addEventListener("focusout", resume);
 
-        // Click su item => apre Movimenti filtrati
+        // Toggle auto-scarico (button a destra)
+        try{
+          if (btnHomeDaneaAuto && (!btnHomeDaneaAuto.dataset || btnHomeDaneaAuto.dataset.boundAuto !== "1")){
+            if (btnHomeDaneaAuto.dataset) btnHomeDaneaAuto.dataset.boundAuto = "1";
+            btnHomeDaneaAuto.addEventListener("click", (e) => {
+              try{ e.preventDefault(); e.stopPropagation(); }catch(_){ }
+              const on = !__getDaneaAutoEnabled();
+              __setDaneaAutoEnabled(on);
+              __syncHomeDaneaAutoBtn();
+              try{ renderHomeDaneaCockpit(); }catch(_){ }
+              try{ window.HubInv?.showToast?.(on ? "Scarico automatico attivato" : "Scarico automatico disattivato", on ? "ok" : "warn"); }catch(_){ }
+              try{ window.HubDaneaDdt && window.HubDaneaDdt.setAutoEnabled && window.HubDaneaDdt.setAutoEnabled(on); }catch(_){ }
+              try{ window.HubDaneaDdt && window.HubDaneaDdt.refresh && window.HubDaneaDdt.refresh(); }catch(_){ }
+            });
+          }
+        }catch(_){ }
+
+        // Click cockpit (escluso il bottone) => apri Scarica flussi DDT
         homeDaneaCockpit.addEventListener("click", (e) => {
+          try{
+            if (e && e.target && e.target.closest && e.target.closest("#btnHomeDaneaAuto")) return;
+          }catch(_){ }
+
           const el = e && e.target && e.target.closest ? e.target.closest(".homeDaneaTickerItem[data-key]") : null;
           const key = el ? String(el.getAttribute("data-key") || "").trim() : "";
           const docNum = el ? String(el.getAttribute("data-docnum") || "").trim() : "";
 
           try{ e.preventDefault(); e.stopPropagation(); }catch(_){ }
 
+          // Se ho un item con chiave, apro Movimenti filtrati. Altrimenti apro la vista DDT.
+          if (key || docNum){
+            try{
+              setView("movements");
+              const movSearch = document.getElementById("movSearch");
+              const movTypeFilter = document.getElementById("movTypeFilter");
+              if (movTypeFilter) movTypeFilter.value = "OUT";
+              if (movSearch) movSearch.value = (docNum || key || "daneaxml");
+              try{ window.HubMovements && window.HubMovements.refresh && window.HubMovements.refresh(); }catch(_){ }
+            }catch(_){ }
+            return;
+          }
+
           try{
-            setView("movements");
-            const movSearch = document.getElementById("movSearch");
-            const movTypeFilter = document.getElementById("movTypeFilter");
-            if (movTypeFilter) movTypeFilter.value = "OUT";
-            if (movSearch) movSearch.value = (docNum || key || "daneaxml");
-            try{ window.HubMovements && window.HubMovements.refresh && window.HubMovements.refresh(); }catch(_){ }
+            setView("daneaDdt");
+            try{ window.HubDaneaDdt && window.HubDaneaDdt.refresh && window.HubDaneaDdt.refresh(); }catch(_){ }
           }catch(_){ }
         });
 
@@ -9663,52 +8274,19 @@ async function deleteMovement(id) {
       try{
         if (!homeDaneaCockpit || !homeDaneaTickerSeq || !homeDaneaTickerSeqClone) return;
 
-        const list = __getHomeDaneaGroups();
+        __syncHomeDaneaAutoBtn();
 
-        const fmt = (n) => (Number(n) || 0).toLocaleString("it-IT");
+        const nToday = __countTodayDaneaDdts();
+        const autoOn = __getDaneaAutoEnabled();
+        const status = autoOn ? "ATTIVO" : "DISATTIVATO";
 
-        let html = "";
-        if (!list.length){
-          html = `<span class="homeDaneaTickerItem is-muted">Nessun scarico DDT da XML</span>`;
-        } else {
-          html = list.map((g) => {
-            const num = String(g.docNum || "").trim() || String(g.key || "").split("__")[0] || "";
-            const dateTxt = __fmtDateShortIT(g.date || g.createdAtMax || "");
-            const piecesTxt = fmt(g.pieces);
-            const whTxt = (Number(g.whConca) > 0 && Number(g.whCerea) > 0)
-              ? "Split"
-              : (Number(g.whConca) > 0 ? "Conca" : "Cerea");
+        const msg = `OGGI SCARICATI ${Number(nToday||0).toLocaleString("it-IT")} DDT. SCARICO AUTOMATICO ${status}.`;
 
-            const done = __daneaPickDone(g.key, num, String(g.date || "").trim());
-
-            let txt = "";
-            if (done){
-              const cust = String(done && done.customer || "").trim();
-              const fpRows = (done && Array.isArray(done.rows)) ? done.rows : [];
-              const allocs = (done && Array.isArray(done.allocations)) ? done.allocations : [];
-
-              const fpSum = fpRows.length ? __daneaSummarizeFinished(fpRows, 3) : "";
-              const allocSum = allocs.length ? __daneaSummarizeAllocations(allocs, 4) : "";
-
-              const parts = [];
-              parts.push(`DDT ${num || "—"}`);
-              parts.push(dateTxt || "—");
-              if (cust) parts.push(cust);
-              if (fpSum) parts.push(`Prodotti finiti (${fpRows.length}): ${fpSum}`);
-              else if (fpRows.length) parts.push(`Prodotti finiti: ${fpRows.length}`);
-              if (allocSum) parts.push(`Scarico (${allocs.length}): ${allocSum}`);
-              parts.push(`Sede: ${whTxt}`);
-              txt = parts.join(" · ");
-            } else {
-              txt = `DDT ${num || "—"} · ${dateTxt} · ${piecesTxt} pz · ${whTxt}`;
-            }
-            return (
-              `<button class="homeDaneaTickerItem" type="button" data-key="${escapeHtmlAttr(String(g.key || ""))}" data-docnum="${escapeHtmlAttr(String(num || ""))}">` +
-                `${escapeHtml(txt)}` +
-              `</button>`
-            );
-          }).join("");
-        }
+        // Ripeto il messaggio per mantenere l'effetto marquee anche quando e' corto
+        const sep = '<span class="homeDaneaTickerItem is-muted" aria-hidden="true" style="opacity:.65;"> · </span>';
+        const parts = [];
+        for (let i=0;i<6;i++) parts.push(`<span class="homeDaneaTickerItem">${escapeHtml(msg)}</span>`);
+        const html = parts.join(sep);
 
         homeDaneaTickerSeq.innerHTML = html;
         homeDaneaTickerSeqClone.innerHTML = html;
