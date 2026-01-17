@@ -9330,21 +9330,16 @@ async function deleteMovement(id) {
           const rows = show.map(r => {
             const code = escapeHtml(r.__displayCode || r.code || "");
             const item = escapeHtml(r.item || "");
-            const cust = escapeHtml(r.customer || "");
             const qty = fmt(safeInt(r.qty));
-            const thr = fmt(safeInt(r.threshold));
 
             const codeCell = code || "—";
             const itemCell = item || "—";
-            const custCell = cust || "—";
 
             return `
               <div class="lowStockCockpitRow" role="row">
                 <div class="lowStockCockpitCell isCode colCode" role="cell">${codeCell}</div>
                 <div class="lowStockCockpitCell colItem" role="cell">${itemCell}</div>
-                <div class="lowStockCockpitCell isCust colCust" role="cell">${custCell}</div>
                 <div class="lowStockCockpitCell isQty colQty" role="cell">${qty}</div>
-                <div class="lowStockCockpitCell isThr colThr" role="cell">${thr}</div>
               </div>
             `;
           }).join("");
@@ -9358,9 +9353,7 @@ async function deleteMovement(id) {
               <div class="lowStockCockpitHead" role="row">
                 <div class="lowStockCockpitCell colCode" role="columnheader">Codice</div>
                 <div class="lowStockCockpitCell colItem" role="columnheader">Articolo</div>
-                <div class="lowStockCockpitCell colCust" role="columnheader">Fornitore</div>
                 <div class="lowStockCockpitCell colQty" role="columnheader" style="text-align:right;">Qtà</div>
-                <div class="lowStockCockpitCell colThr" role="columnheader" style="text-align:right;">Soglia</div>
               </div>
               <div class="lowStockCockpitBody" role="rowgroup" tabindex="0">
                 ${rows}
