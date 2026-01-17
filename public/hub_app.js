@@ -134,13 +134,26 @@
       if (String(mv.type || "").toUpperCase() !== "OUT") return false;
       var src = String(mv.source || "").trim().toLowerCase();
       if (src !== "daneaxml") return false;
+      // Nel realtime mapping alcune proprietà custom (es. daneaDdtKey) potrebbero
+      // non essere presenti su mv. Consideriamo valido se riusciamo a derivare
+      // una chiave di raggruppamento dal numero documento.
       var k = String(mv.daneaDdtKey || mv.docNum || "").trim();
       return !!k;
     }catch(_){ return false; }
   }
 
   function getDaneaGroupKey(mv){
-    return String((mv && (mv.daneaDdtKey || mv.docNum)) || "").trim();
+    // Priorità: chiave completa salvata dal flusso DaneaXML (numero__data)
+    var k = String((mv && mv.daneaDdtKey) || "").trim();
+    if (k) return k;
+
+    // Fallback robusto: ricostruisci da docNum + docDateRaw/date
+    var num = String((mv && mv.docNum) || "").trim();
+    var date = String((mv && (mv.docDateRaw || mv.date)) || "").trim();
+    if (num && date && /^\d{4}-\d{2}-\d{2}$/.test(date)) return num + "__" + date;
+
+    // Ultimo fallback: solo numero (potrebbe non permettere drill-down righe DDT)
+    return String((mv && mv.docNum) || "").trim();
   }
 
   function getDaneaGroupByKey(k){
@@ -460,9 +473,14 @@
 
   function __setVal(el, v){
     if (!el) return;
+    var s = (v == null) ? "" : String(v);
     try{
-      el.value = (v == null) ? "" : String(v);
-    }catch(_){}
+      // input/textarea => .value, altrimenti testo (div/span/pre)
+      if (typeof el.value !== "undefined") el.value = s;
+      else el.textContent = s;
+    }catch(_){
+      try{ el.textContent = s; }catch(__){}
+    }
   }
 
   function __openDetailModal(){
@@ -477,10 +495,448 @@
     try{ (typeof __syncBodyLockFromModals === "function") && __syncBodyLockFromModals(); }catch(_){}
   }
 
+  
+  // ===== Dettaglio DDT (DaneaXML) — ordinato + drill-down per prodotto =====
+  var __ddtDetailCtx = { key: "", group: null, done: null, rows: [], selectedIdx: -1 };
+
+  var __fpCache = { loaded: false, loading: null, fpByCode: new Map(), catByKey: new Map() };
+
+  function __resetDdtDetailCtx(){
+    __ddtDetailCtx = { key: "", group: null, done: null, rows: [], selectedIdx: -1 };
+    try{ if (els.movDetDdtProdWrap) els.movDetDdtProdWrap.style.display = "none"; }catch(_){ }
+    try{ if (els.movDetDdtProdTbody) els.movDetDdtProdTbody.innerHTML = '<tr><td class="td-muted" colspan="5">Seleziona una riga prodotto sopra.</td></tr>'; }catch(_){ }
+    try{
+      if (els.movDetDdtRowsTbody){
+        var sel = els.movDetDdtRowsTbody.querySelectorAll('tr.is-selected');
+        sel && sel.forEach && sel.forEach(function(tr){ try{ tr.classList.remove('is-selected'); }catch(_){ } });
+      }
+    }catch(_){ }
+  }
+
+  function __setDdtMode(on){
+    try{ if (els.movDetDdtWrap) els.movDetDdtWrap.style.display = on ? "" : "none"; }catch(_){ }
+    if (!on) __resetDdtDetailCtx();
+  }
+
+  function __getHub(){
+    try{ return (window && window.__HUB) ? window.__HUB : null; }catch(_){ return null; }
+  }
+
+  async function __fetchDaneaCompletedByKey(key){
+    var k = String(key || "").trim();
+    if (!k) return null;
+    var H = __getHub();
+    if (!H || !H.fb || !H.fb.db || !H.FS) return null;
+    if (typeof H.FS.doc !== "function" || typeof H.FS.getDoc !== "function") return null;
+    try{
+      var doneId = encodeURIComponent(k);
+      var ref = H.FS.doc(H.fb.db, "orgs", H.ORG_ID, "daneaDdtCompleted", doneId);
+      var snap = await H.FS.getDoc(ref);
+      if (!snap || !snap.exists || !snap.exists()) return null;
+      var data = (typeof snap.data === "function") ? (snap.data() || {}) : (snap.data || {});
+      data._id = snap.id || doneId;
+      return data;
+    }catch(e){
+      try{ console.warn("fetch daneaDdtCompleted failed", e); }catch(_){ }
+      return null;
+    }
+  }
+
+  // Fallback: se manca il record "completato", prova a leggere il DDT dalla cache daneaDdts
+  // (dove vengono salvate le righe parse dell'XML). Così nel dettaglio Movimenti riesci
+  // comunque a vedere le righe DDT.
+  async function __fetchDaneaCacheByKey(key){
+    var k = String(key || "").trim();
+    if (!k) return null;
+    var H = __getHub();
+    if (!H || !H.fb || !H.fb.db || !H.FS) return null;
+    if (typeof H.FS.doc !== "function" || typeof H.FS.getDoc !== "function") return null;
+    try{
+      var id = encodeURIComponent(k);
+      var ref = H.FS.doc(H.fb.db, "orgs", H.ORG_ID, "daneaDdts", id);
+      var snap = await H.FS.getDoc(ref);
+      if (!snap || !snap.exists || !snap.exists()) return null;
+      var data = (typeof snap.data === "function") ? (snap.data() || {}) : (snap.data || {});
+      data._id = snap.id || id;
+      return data;
+    }catch(e){
+      try{ console.warn("fetch daneaDdts failed", e); }catch(_){ }
+      return null;
+    }
+  }
+
+  function __parseFraction(v){
+    var s = String(v || "").trim();
+    if (!s) return null;
+    // 1/20
+    var m = s.match(/^(-?\d+(?:[.,]\d+)?)\s*\/\s*(\d+(?:[.,]\d+)?)$/);
+    if (m){
+      var a = Number(String(m[1]).replace(",", "."));
+      var b = Number(String(m[2]).replace(",", "."));
+      if (Number.isFinite(a) && Number.isFinite(b) && b !== 0) return a / b;
+    }
+    // number with comma
+    var n = Number(s.replace(/\./g, "").replace(",", "."));
+    if (Number.isFinite(n)) return n;
+    return null;
+  }
+
+  function __compQtyPerUnit(comp){
+    var c = comp || {};
+    if (c.qty != null && Number.isFinite(Number(c.qty))) return Number(c.qty);
+    var raw = c.qtyRaw || c.qtaRaw || "";
+    var p = __parseFraction(raw);
+    if (p != null && Number.isFinite(p)) return p;
+    return null;
+  }
+
+  async function __ensureFinishedProductsCache(){
+    if (__fpCache.loaded) return true;
+    if (__fpCache.loading) {
+      try{ await __fpCache.loading; }catch(_){ }
+      return !!__fpCache.loaded;
+    }
+
+    var H = __getHub();
+    if (!H || !H.fb || !H.fb.db || !H.FS) return false;
+    if (typeof H.FS.collection !== "function" || typeof H.FS.getDocs !== "function") return false;
+
+    __fpCache.loading = (async function(){
+      try{
+        var fpByCode = new Map();
+        var catByKey = new Map();
+
+        // finishedProducts
+        var colFp = H.FS.collection(H.fb.db, "orgs", H.ORG_ID, "finishedProducts");
+        var snapFp = await H.FS.getDocs(colFp);
+        var docsFp = (snapFp && snapFp.docs) ? snapFp.docs : [];
+        docsFp.forEach(function(d){
+          try{
+            var data = d.data ? (d.data() || {}) : {};
+            var code = String(data.code || data.codeLower || "").trim();
+            var codeLower = String(data.codeLower || code).trim().toLowerCase();
+            if (!codeLower) return;
+            data.id = d.id;
+            fpByCode.set(codeLower, data);
+          }catch(_){ }
+        });
+
+        // finishedProductCategories
+        var colCat = H.FS.collection(H.fb.db, "orgs", H.ORG_ID, "finishedProductCategories");
+        var snapCat = await H.FS.getDocs(colCat);
+        var docsCat = (snapCat && snapCat.docs) ? snapCat.docs : [];
+        docsCat.forEach(function(d){
+          try{
+            var data = d.data ? (d.data() || {}) : {};
+            var key = String(data.key || data.name || d.id || "").trim();
+            var keyLower = String(key).toLowerCase();
+            if (!keyLower) return;
+            data.id = d.id;
+            catByKey.set(keyLower, data);
+          }catch(_){ }
+        });
+
+        __fpCache.fpByCode = fpByCode;
+        __fpCache.catByKey = catByKey;
+        __fpCache.loaded = true;
+      }catch(e){
+        __fpCache.loaded = false;
+        try{ console.warn("ensureFinishedProductsCache failed", e); }catch(_){ }
+      }finally{
+        __fpCache.loading = null;
+      }
+    })();
+
+    try{ await __fpCache.loading; }catch(_){ }
+    return !!__fpCache.loaded;
+  }
+
+  function __getFpForCode(code){
+    var low = norm(code || "");
+    if (!low) return null;
+    try{ return __fpCache.fpByCode.get(low) || null; }catch(_){ return null; }
+  }
+
+  function __getFpCategoryForFp(fp){
+    if (!fp) return null;
+    var k = norm(fp.categoryKey || fp.category || fp.catKey || fp.categoryId || "");
+    if (!k) return null;
+    try{ return __fpCache.catByKey.get(k) || null; }catch(_){ return null; }
+  }
+
+  function __getFpComponents(fp){
+    if (!fp) return [];
+    var arr = (fp.components || fp.bom || fp.distintaBase);
+    var direct = Array.isArray(arr) ? arr : [];
+    if (direct.length) return direct;
+    var cat = __getFpCategoryForFp(fp);
+    var bom = (cat && (cat.bom || cat.components || cat.distintaBase)) || [];
+    return Array.isArray(bom) ? bom : [];
+  }
+
+  function __macroGroupForCode(code){
+    var catKey = "";
+    try{ catKey = (api && typeof api.getMacroCategoryForCode === "function") ? String(api.getMacroCategoryForCode(code) || "") : ""; }catch(_){ catKey = ""; }
+    catKey = String(catKey || "").trim().toLowerCase();
+
+    // prova a risalire al macro group della categoria
+    var mg = "";
+    try{
+      var cats = (api && typeof api.getCategories === "function") ? (api.getCategories() || []) : [];
+      if (catKey && Array.isArray(cats)){
+        for (var i=0;i<cats.length;i++){
+          var c = cats[i];
+          if (!c) continue;
+          if (String(c.key || "").trim().toLowerCase() === catKey){
+            mg = String(c.macro || c.macroGroup || c.group || "").trim().toLowerCase();
+            break;
+          }
+        }
+      }
+    }catch(_){ }
+
+    if (mg !== "materie_prime" && mg !== "imballaggi"){
+      if (catKey === "materie_prime") mg = "materie_prime";
+      else if (catKey === "imballaggi") mg = "imballaggi";
+      else mg = "";
+    }
+    return mg;
+  }
+
+  function __macroGroupLabel(mg){
+    if (mg === "materie_prime") return "Materie prime";
+    if (mg === "imballaggi") return "Imballaggi";
+    return "—";
+  }
+
+  function __aggComponentsFromMovements(movs){
+    var map = new Map();
+    (Array.isArray(movs) ? movs : []).forEach(function(mv){
+      try{
+        var code = String(mv && mv.code || "").trim();
+        if (!code) return;
+        var low = code.toLowerCase();
+        var item = String(mv.item || mv.name || mv.articolo || code).trim();
+        var uom = String(mv.uom || "").trim();
+        var q = (api && typeof api.safeInt === "function") ? api.safeInt(mv.qty) : (Number(mv.qty) || 0);
+        if (!q) return;
+        var wh = __normWh(mv.warehouse || "");
+
+        var rec = map.get(low) || { code: code, item: item || code, uom: uom, total: 0, cerea: 0, concamarise: 0 };
+        rec.total += q;
+        if (wh === "concamarise") rec.concamarise += q;
+        else rec.cerea += q;
+        if (!rec.item) rec.item = item || code;
+        if (!rec.uom) rec.uom = uom;
+        map.set(low, rec);
+      }catch(_){ }
+    });
+    return Array.from(map.values());
+  }
+
+  function __renderDdtRows(rows){
+    if (!els.movDetDdtRowsTbody) return;
+    var arr = Array.isArray(rows) ? rows : [];
+    if (!arr.length){
+      els.movDetDdtRowsTbody.innerHTML = '<tr><td class="td-muted" colspan="4">Nessuna riga nel DDT.</td></tr>';
+      return;
+    }
+
+    els.movDetDdtRowsTbody.innerHTML = arr.map(function(r, idx){
+      var code = String(r && r.code || "").trim();
+      var desc = String(r && (r.desc || r.item || r.articolo) || "").trim();
+      var uom = String(r && r.uom || "").trim();
+
+      var qtyN = (r && r.qty != null && Number.isFinite(Number(r.qty))) ? Number(r.qty) : __parseFraction(r && r.qtyRaw);
+      var qtyDisp = (qtyN != null && Number.isFinite(qtyN)) ? qtyN.toLocaleString("it-IT") : String(r && r.qtyRaw || "").trim();
+      if (!qtyDisp) qtyDisp = "—";
+
+      return '<tr class="jsMovDetDdtRow" data-ddt-idx="'+idx+'">'
+        + '<td data-label="Codice"><span class="kbd">'+esc(code || "—")+'</span></td>'
+        + '<td data-label="Articolo">'+esc(desc || code || "—")+'</td>'
+        + '<td data-label="Q.tà" class="qty" style="text-align:right;">'+esc(qtyDisp)+'</td>'
+        + '<td data-label="U.M.">'+esc(uom || "")+'</td>'
+        + '</tr>';
+    }).join("");
+  }
+
+  function __renderDdtComponentsTable(comps){
+    if (!els.movDetDdtCompsTbody) return;
+    var arr = Array.isArray(comps) ? comps.slice() : [];
+    if (!arr.length){
+      els.movDetDdtCompsTbody.innerHTML = '<tr><td class="td-muted" colspan="7">Nessun componente scaricato.</td></tr>';
+      return;
+    }
+
+    // sort: Materie prime -> Imballaggi -> altri, poi codice
+    function typeRank(mg){
+      if (mg === "materie_prime") return 1;
+      if (mg === "imballaggi") return 2;
+      return 3;
+    }
+
+    arr.sort(function(a,b){
+      var ra = typeRank(__macroGroupForCode(a.code));
+      var rb = typeRank(__macroGroupForCode(b.code));
+      if (ra !== rb) return ra - rb;
+      var ca = String(a.code||"");
+      var cb = String(b.code||"");
+      if (ca !== cb) return ca.localeCompare(cb);
+      return String(a.item||"").localeCompare(String(b.item||""));
+    });
+
+    els.movDetDdtCompsTbody.innerHTML = arr.map(function(it){
+      var mg = __macroGroupForCode(it.code);
+      var tipo = __macroGroupLabel(mg);
+      var code = String(it.code || "").trim();
+      var item = String(it.item || code).trim();
+      var uom = String(it.uom || "").trim();
+      var tot = Number(it.total || 0);
+      var c = Number(it.cerea || 0);
+      var k = Number(it.concamarise || 0);
+      return '<tr>'
+        + '<td data-label="Tipo">'+esc(tipo)+'</td>'
+        + '<td data-label="Codice"><span class="kbd">'+esc(code || "—")+'</span></td>'
+        + '<td data-label="Articolo">'+esc(item || "—")+'</td>'
+        + '<td data-label="Totale" class="qty" style="text-align:right;">'+tot.toLocaleString("it-IT")+'</td>'
+        + '<td data-label="Cerea" class="qty" style="text-align:right;">'+c.toLocaleString("it-IT")+'</td>'
+        + '<td data-label="Concamarise" class="qty" style="text-align:right;">'+k.toLocaleString("it-IT")+'</td>'
+        + '<td data-label="U.M.">'+esc(uom)+'</td>'
+        + '</tr>';
+    }).join("");
+  }
+
+  function __renderDdtProdPlaceholder(msg){
+    try{ if (els.movDetDdtProdWrap) els.movDetDdtProdWrap.style.display = ""; }catch(_){ }
+    if (!els.movDetDdtProdTbody) return;
+    els.movDetDdtProdTbody.innerHTML = '<tr><td class="td-muted" colspan="5">'+esc(msg || "Seleziona una riga prodotto sopra.")+'</td></tr>';
+  }
+
+  function __selectDdtRow(idx){
+    idx = (idx == null) ? -1 : Number(idx);
+    if (!Number.isFinite(idx) || idx < 0) return;
+
+    if (!__ddtDetailCtx || !Array.isArray(__ddtDetailCtx.rows) || !__ddtDetailCtx.rows[idx]) return;
+
+    __ddtDetailCtx.selectedIdx = idx;
+
+    // highlight
+    try{
+      if (els.movDetDdtRowsTbody){
+        var trs = els.movDetDdtRowsTbody.querySelectorAll('tr.jsMovDetDdtRow');
+        trs && trs.forEach && trs.forEach(function(tr){ try{ tr.classList.remove('is-selected'); }catch(_){ } });
+        var trSel = els.movDetDdtRowsTbody.querySelector('tr[data-ddt-idx="'+idx+'"]');
+        if (trSel) trSel.classList.add('is-selected');
+      }
+    }catch(_){ }
+
+    var r = __ddtDetailCtx.rows[idx];
+    var code = String(r && r.code || "").trim();
+    var desc = String(r && (r.desc || r.item || r.articolo) || "").trim();
+
+    var qtyN = (r && r.qty != null && Number.isFinite(Number(r.qty))) ? Number(r.qty) : __parseFraction(r && r.qtyRaw);
+    var qLine = (qtyN != null && Number.isFinite(qtyN)) ? qtyN : 0;
+    if (qLine <= 0){
+      try{ if (els.movDetDdtProdTitle) els.movDetDdtProdTitle.textContent = "Dettaglio prodotto"; }catch(_){ }
+      __renderDdtProdPlaceholder("Quantità non valida per questa riga.");
+      return;
+    }
+
+    try{
+      if (els.movDetDdtProdTitle){
+        var title = (code ? (code + (desc ? (" — " + desc) : "")) : (desc || "Prodotto"));
+        var qlbl = qLine.toLocaleString("it-IT");
+        els.movDetDdtProdTitle.textContent = title + " (Q.tà " + qlbl + ")";
+      }
+    }catch(_){ }
+
+    __renderDdtProdPlaceholder("Calcolo componenti…");
+
+    // calcolo async (best effort)
+    (async function(){
+      try{
+        var ok = await __ensureFinishedProductsCache();
+        if (!ok) {
+          __renderDdtProdPlaceholder("Non riesco a caricare la distinta base (permessi / rete).");
+          return;
+        }
+
+        // se nel frattempo hai aperto un altro DDT
+        if (!__ddtDetailCtx || __ddtDetailCtx.selectedIdx !== idx) return;
+
+        var fp = __getFpForCode(code);
+        if (!fp){
+          __renderDdtProdPlaceholder("Prodotto finito non trovato per questo codice.");
+          return;
+        }
+
+        var comps = __getFpComponents(fp);
+        if (!comps || !comps.length){
+          __renderDdtProdPlaceholder("Distinta base vuota per questo prodotto.");
+          return;
+        }
+
+        var out = [];
+        for (var i=0;i<comps.length;i++){
+          var c = comps[i] || {};
+          var cCode = String(c.code || "").trim();
+          if (!cCode) continue;
+          var per = __compQtyPerUnit(c);
+          if (per == null || !Number.isFinite(per) || per <= 0) continue;
+          var qty = per * qLine;
+          var qtyInt = Math.round(qty);
+          if (!qtyInt) continue;
+          out.push({
+            code: cCode,
+            item: String(c.name || c.articolo || cCode).trim(),
+            uom: String(c.uom || "").trim(),
+            qty: qtyInt,
+            mg: __macroGroupForCode(cCode)
+          });
+        }
+
+        if (!out.length){
+          __renderDdtProdPlaceholder("Nessun componente calcolabile (quantità 0). Controlla la distinta base.");
+          return;
+        }
+
+        // sort
+        out.sort(function(a,b){
+          var ra = (a.mg === "materie_prime") ? 1 : (a.mg === "imballaggi") ? 2 : 3;
+          var rb = (b.mg === "materie_prime") ? 1 : (b.mg === "imballaggi") ? 2 : 3;
+          if (ra !== rb) return ra - rb;
+          var ca = String(a.code||"");
+          var cb = String(b.code||"");
+          if (ca !== cb) return ca.localeCompare(cb);
+          return String(a.item||"").localeCompare(String(b.item||""));
+        });
+
+        if (!els.movDetDdtProdTbody) return;
+        try{ if (els.movDetDdtProdWrap) els.movDetDdtProdWrap.style.display = ""; }catch(_){ }
+
+        els.movDetDdtProdTbody.innerHTML = out.map(function(it){
+          var tipo = __macroGroupLabel(it.mg);
+          return '<tr>'
+            + '<td data-label="Tipo">'+esc(tipo)+'</td>'
+            + '<td data-label="Codice"><span class="kbd">'+esc(String(it.code||""))+'</span></td>'
+            + '<td data-label="Articolo">'+esc(String(it.item||it.code||"—"))+'</td>'
+            + '<td data-label="Q.tà" class="qty" style="text-align:right;">'+Number(it.qty||0).toLocaleString("it-IT")+'</td>'
+            + '<td data-label="U.M.">'+esc(String(it.uom||""))+'</td>'
+            + '</tr>';
+        }).join("");
+
+      }catch(e){
+        try{ console.warn("DDT per-prodotto calc failed", e); }catch(_){ }
+        __renderDdtProdPlaceholder("Errore calcolo dettaglio prodotto.");
+      }
+    })();
+  }
+
   function openDaneaGroupDetails(g){
     if (!api || !g) return;
 
     cacheEls();
+    __setDdtMode(true);
 
     var rows = Array.isArray(g.movements) ? g.movements.slice() : [];
     try{
@@ -497,33 +953,14 @@
       });
     }catch(_){ }
 
-    var linesTxt = "";
-    try{
-      linesTxt = rows.map(function(mv, idx){
-        var wh = shortWh(mv.warehouse || "");
-        var code = String(mv.code || "").trim();
-        var item = String(mv.item || "").trim();
-        var q = (api && typeof api.safeInt === "function") ? api.safeInt(mv.qty) : (Number(mv.qty)||0);
-        var uom = String(mv.uom || "").trim();
-        var qr = String(mv.qtyRaw || "").trim();
-        if (!qr){
-          qr = Number(q).toLocaleString("it-IT") + (uom ? (" " + uom) : "");
-        }
-        return (idx+1) + ") [" + wh + "] " + (code || "—") + " — " + (item || "—") + " — " + (qr || "—");
-      }).join("\n");
-    }catch(_){ linesTxt = ""; }
+    // aggiorna ctx
+    __ddtDetailCtx.key = String(g.key || "").trim();
+    __ddtDetailCtx.group = g;
+    __ddtDetailCtx.done = null;
+    __ddtDetailCtx.rows = [];
+    __ddtDetailCtx.selectedIdx = -1;
 
-    // fallback: modale testo
-    if (!els.modalMovementDetail){
-      var title = "DDT " + (String(g.docNum || g.key || "").trim() || "DaneaXML");
-      var head = "Scarico DaneaXML · " + (String(g.date || "").trim() || "—") + " · " + (g.qty || 0) + " righe";
-      try{ api.openModal(title, head + "\n\n" + (linesTxt || "—")); }catch(_){ }
-      return;
-    }
-
-    __detailCtx.id = "";
-    __detailCtx.docKey = "";
-
+    // titolo + sub (prima passata)
     try{
       if (els.movDetTitle) els.movDetTitle.textContent = "Dettaglio DDT (DaneaXML)";
       if (els.movDetSubtitle){
@@ -537,11 +974,12 @@
       }
     }catch(_){ }
 
+    // campi base (KV)
     __setVal(els.movDetDate, String(g.date || "").trim() || "—");
     __setVal(els.movDetType, "OUT (scarico)");
     __setVal(els.movDetWarehouse, (g.warehouse === "split") ? "Cerea + Concamarise" : whLabel(g.warehouse || ""));
     __setVal(els.movDetSource, "DaneaXML");
-    __setVal(els.movDetCustomer, "Scarico DDT");
+    __setVal(els.movDetCustomer, "—");
     __setVal(els.movDetCode, String(g.code || "").trim() || "—");
     __setVal(els.movDetItem, "Scarico DDT · " + (g.qty || 0) + " righe");
     __setVal(els.movDetQty, String(g.qty || 0) + " righe");
@@ -555,21 +993,85 @@
     __setVal(els.movDetTriplet, String(g.key || "").trim() || "—");
     __setVal(els.movDetCreatedAt, (api && typeof api.formatDateIT === "function") ? api.formatDateIT(g.createdAt || "") : (String(g.createdAt || "").trim() || "—"));
     __setVal(els.movDetId, String(g.id || "").trim() || "—");
-    __setVal(els.movDetRawText, linesTxt);
 
+    // RawText nascosto (ora c'è la tabella)
+    try{ if (els.movDetRawWrap) els.movDetRawWrap.style.display = "none"; }catch(_){ }
+
+    // bottoni: in DDT non apro doc e non annullo singola riga
     try{ if (els.movDetOpenDoc) els.movDetOpenDoc.style.display = "none"; }catch(_){ }
     try{ if (els.movDetUndo) els.movDetUndo.disabled = true; }catch(_){ }
+
+    // Tabelle
+    try{
+      if (els.movDetDdtRowsTbody) els.movDetDdtRowsTbody.innerHTML = '<tr><td class="td-muted" colspan="4">Carico dettagli…</td></tr>';
+      if (els.movDetDdtCompsTbody) els.movDetDdtCompsTbody.innerHTML = '<tr><td class="td-muted" colspan="7">Carico…</td></tr>';
+      if (els.movDetDdtProdWrap) els.movDetDdtProdWrap.style.display = "none";
+    }catch(_){ }
+
+    // 1) Scarico componenti (dai movimenti effettivi)
+    var compsAgg = __aggComponentsFromMovements(rows);
+    __renderDdtComponentsTable(compsAgg);
+
+    // 2) Righe DDT
+    (async function(){
+      var k = String(g.key || "").trim();
+      if (!k) { __renderDdtRows([]); return; }
+      // Prova prima da "completati" (contiene anche allocations), poi fallback su cache DDT
+      var done = await __fetchDaneaCompletedByKey(k);
+      var ddtSrc = done || (await __fetchDaneaCacheByKey(k));
+      // se nel frattempo hai aperto un altro DDT
+      if (!__ddtDetailCtx || __ddtDetailCtx.key !== k) return;
+
+      if (!ddtSrc){
+        __renderDdtRows([]);
+        try{ __setVal(els.movDetCustomer, "—"); }catch(_){ }
+        return;
+      }
+
+      __ddtDetailCtx.done = done || null;
+      __ddtDetailCtx.rows = Array.isArray(ddtSrc.rows) ? ddtSrc.rows : [];
+      __renderDdtRows(__ddtDetailCtx.rows);
+
+      // aggiorna cliente/subtitle (seconda passata)
+      try{
+        var cust = String(ddtSrc.customer || "").trim();
+        if (cust) __setVal(els.movDetCustomer, cust);
+        if (els.movDetSubtitle){
+          var whSum = (g.warehouse === "split") ? "Cerea + Concamarise" : whLabel(g.warehouse || "");
+          els.movDetSubtitle.textContent = [
+            (cust || "—"),
+            ("DDT " + (ddtSrc.number || g.docNum || g.key || "—")),
+            (String(ddtSrc.date || g.date || "").trim() || "—"),
+            (whSum || "—")
+          ].join(" · ");
+        }
+      }catch(_){ }
+
+    })();
+
+    // hint: tradizionale e chiaro
+    try{
+      if (els.movDetHint) els.movDetHint.textContent = "Questo DDT ha generato uno scarico automatico di componenti (distinta base).";
+    }catch(_){ }
 
     __openDetailModal();
   }
 
 
+
+  
   function openDetails(mv){
     if (!api || !mv) return;
+
+    cacheEls();
+
+    // DaneaXML group row
     if (mv && mv.__kind === "danea_ddt") { openDaneaGroupDetails(mv); return; }
 
+    // modal standard: nascondi sezioni DDT
+    try{ __setDdtMode(false); }catch(_){ }
+
     // Se non abbiamo il modale dedicato, fallback alla modale testuale legacy
-    cacheEls();
     if (!els.modalMovementDetail){
       var lines = [];
       function push(k,v){
@@ -594,7 +1096,7 @@
       }
       if (mv.lineIndex != null && String(mv.lineIndex).trim() !== "") push("Riga", mv.lineIndex);
       if (mv.rawText) push("RawText", String(mv.rawText).slice(0, 800) + (String(mv.rawText).length > 800 ? "…" : ""));
-      try{ api.openModal("Dettaglio movimento", lines.join("\n")); }catch(_){}
+      try{ api.openModal("Dettaglio movimento", lines.join("\n")); }catch(_){ }
       return;
     }
 
@@ -613,7 +1115,7 @@
         var cust = String(mv.customer || "").trim();
         els.movDetSubtitle.textContent = [cust || "—", (d || "—"), (wh || "—")].join(" · ");
       }
-    }catch(_){}
+    }catch(_){ }
 
     // Campi (ordine)
     var typeLbl = (String(mv.type || "").toUpperCase() === "OUT") ? "OUT (scarico)" : "IN (carico)";
@@ -640,21 +1142,30 @@
     __setVal(els.movDetTriplet, String(mv.ddtTripletKey || mv.ddtKey || "").trim() || "—");
     __setVal(els.movDetCreatedAt, (api && typeof api.formatDateIT === "function") ? api.formatDateIT(mv.createdAt) : (String(mv.createdAt || "").trim() || "—"));
     __setVal(els.movDetId, String(mv.id || "").trim() || "—");
-    __setVal(els.movDetRawText, String(mv.rawText || "").trim() || "");
+
+    var raw = String(mv.rawText || "").trim();
+    __setVal(els.movDetRawText, raw || "");
+    try{ if (els.movDetRawWrap) els.movDetRawWrap.style.display = raw ? "" : "none"; }catch(_){ }
 
     // Bottone documento
     try{
       var show = !!(__detailCtx.docKey && typeof api.openDocDetail === "function");
       if (els.movDetOpenDoc) els.movDetOpenDoc.style.display = show ? "" : "none";
-    }catch(_){}
+    }catch(_){ }
 
     // Bottone annulla (richiede API)
     try{
       if (els.movDetUndo) els.movDetUndo.disabled = !(api && typeof api.deleteMovement === "function" && __detailCtx.id);
-    }catch(_){}
+    }catch(_){ }
+
+    // hint standard
+    try{
+      if (els.movDetHint) els.movDetHint.textContent = "Annulla movimento = elimina questa riga e ripristina lo stock come prima.";
+    }catch(_){ }
 
     __openDetailModal();
   }
+
 
   function bindEvents(){
     var inputs = [els.movSearch, els.movTypeFilter, els.movWhFilter, els.movSort, els.movFrom, els.movTo];
@@ -737,6 +1248,22 @@
           __closeDetailModal();
         });
 
+        // Click su riga prodotto (DDT) => dettaglio componenti per quel prodotto
+        try{
+          if (els.movDetDdtRowsTbody && !(els.movDetDdtRowsTbody.dataset && els.movDetDdtRowsTbody.dataset.bound === "1")){
+            if (els.movDetDdtRowsTbody.dataset) els.movDetDdtRowsTbody.dataset.bound = "1";
+            els.movDetDdtRowsTbody.addEventListener("click", function(ev){
+              var tr = ev && ev.target && ev.target.closest ? ev.target.closest("tr[data-ddt-idx]") : null;
+              if (!tr) return;
+              try{ ev.preventDefault(); ev.stopPropagation(); }catch(_){ }
+              var idx = parseInt(tr.getAttribute("data-ddt-idx") || "", 10);
+              if (!Number.isFinite(idx)) return;
+              try{ __selectDdtRow(idx); }catch(_){ }
+            });
+          }
+        }catch(_){ }
+
+
         if (els.movDetOpenDoc) els.movDetOpenDoc.addEventListener("click", function(e){
           try{ e.preventDefault(); e.stopPropagation(); }catch(_){}
           if (!api || typeof api.openDocDetail !== "function") return;
@@ -814,6 +1341,17 @@
     els.movDetCreatedAt = $("movDetCreatedAt");
     els.movDetId = $("movDetId");
     els.movDetRawText = $("movDetRawText");
+
+    // DDT (DaneaXML) dettaglio ordinato
+    els.movDetRawWrap = $("movDetRawWrap");
+    els.movDetKvGrid = $("movDetKvGrid");
+    els.movDetDdtWrap = $("movDetDdtWrap");
+    els.movDetDdtRowsTbody = $("movDetDdtRowsTbody");
+    els.movDetDdtCompsTbody = $("movDetDdtCompsTbody");
+    els.movDetDdtProdWrap = $("movDetDdtProdWrap");
+    els.movDetDdtProdTitle = $("movDetDdtProdTitle");
+    els.movDetDdtProdTbody = $("movDetDdtProdTbody");
+
   }
 
   function render(){
@@ -1197,10 +1735,10 @@
       const key = `${String(number).trim()}__${String(date).trim()}`;
 
       const rows = Array.from(d.querySelectorAll("Rows > Row")).map((r, idx) => {
-        const code = getText(r, "Code") || getText(r, "ItemCode") || getText(r, "ProductCode") || getText(r, "ArticleCode") || getText(r, "Codice") || "";
-        const desc = getText(r, "Description") || getText(r, "Desc") || getText(r, "ItemDescription") || getText(r, "ProductDescription") || getText(r, "Name") || "";
-        const qtyRaw = getText(r, "Qty") || getText(r, "Quantity") || getText(r, "Qta") || "";
-        const umRaw = getText(r, "Um") || getText(r, "UM") || getText(r, "Uom") || getText(r, "Unit") || getText(r, "U.M.") || "";
+        const code = getText(r, "Code");
+        const desc = getText(r, "Description");
+        const qtyRaw = getText(r, "Qty");
+        const umRaw = getText(r, "Um") || getText(r, "UM") || getText(r, "Uom") || getText(r, "Unit") || "";
 
         let qty = null;
         if (qtyRaw){
@@ -1217,8 +1755,7 @@
           uom: String(umRaw || "").trim()
         };
       }).filter(r => {
-        const hasAny = !!(String(r.code || "").trim() || String(r.desc || "").trim());
-        if (!hasAny) return false;
+        if (!r.code) return false; // importa solo righe con codice articolo
         if (r.qty != null && r.qty === 0) return false;
         const m = `${r.code || ""} ${r.desc || ""}`.toLowerCase().replace(/\s+/g, " ").trim();
         if (m.includes("rif. conferma ordine") || m.includes("rif conferma ordine")) return false;
@@ -1532,33 +2069,14 @@
     if (mode === "done"){
       const c = (S.completed || []).find(x => String(x?.key || x?._id || "") === k) || null;
       if (!c) return;
-
-      const pickRows = (obj) => {
-        try{
-          const r = obj && (obj.rows || obj.lines || obj.items || obj.ddtRows);
-          return Array.isArray(r) ? r : [];
-        }catch(_){ return []; }
-      };
-
-      let rows = pickRows(c);
-      if (!rows.length){
-        const fromCache = (S.cacheMap instanceof Map) ? (S.cacheMap.get(k) || null) : null;
-        rows = pickRows(fromCache);
-      }
-      if (!rows.length){
-        const fromXml = (S.ddts || []).find(x => String(x?.key || "") === k) || null;
-        rows = pickRows(fromXml);
-      }
-
       S.selectedKey = k;
       S.selected = {
         key: k,
         number: String(c.number || ""),
         date: String(c.date || ""),
         customer: String(c.customer || ""),
-        rows: rows,
+        rows: Array.isArray(c.rows) ? c.rows : [],
         warehouse: c.warehouse || "",
-        allocations: Array.isArray(c.allocations) ? c.allocations : [],
         movementIds: Array.isArray(c.movementIds) ? c.movementIds : []
       };
       setDetailOpen(true);
@@ -2224,12 +2742,8 @@ Disponibili: ${(tot).toLocaleString("it-IT")} (Cerea ${aC.toLocaleString("it-IT"
       const existing = (S.cacheMap instanceof Map) ? S.cacheMap.get(k) : null;
       const oldHash = String(existing?.xmlHash || existing?.hash || "");
 
-      const parsedRowsCount = Array.isArray(d.rows) ? d.rows.length : 0;
-      const needsRowsUpgrade = (parsedRowsCount > 0) && (!Array.isArray(existing?.rows) || (existing?.rows || []).length === 0);
-
       // se identico, non scriviamo (niente spam). Il sistema lo sa perché hash uguale.
-      // Eccezione: se la cache è "vecchia" e non contiene le righe, forziamo un upgrade.
-      if (oldHash && newHash && oldHash === newHash && !needsRowsUpgrade) continue;
+      if (oldHash && newHash && oldHash === newHash) continue;
 
       const isNew = !existing;
       const payload = {
@@ -6478,6 +6992,9 @@ btnLogout.addEventListener("click", async () => {
               docType: data.docType || "",
               docNum: data.docNum || "",
               docDateRaw: data.docDateRaw || "",
+              // DaneaXML: chiave completa del DDT (numero__data). Serve per raggruppare
+              // correttamente i movimenti e mostrare le righe DDT nel dettaglio.
+              daneaDdtKey: String(data.daneaDdtKey || data.daneaDdtkey || "").trim(),
               lineIndex: safeInt(data.lineIndex),
               docPages: __sanitizeDocPages(data.docPages || data.docImages),
               warehouse: normalizeWarehouse(data.warehouse || ""),
