@@ -1780,6 +1780,7 @@
     S.autoMode = !!on;
     __writeAutoModeToLS(S.autoMode);
     __syncAutoModeUi();
+    try{ window.HubInv?.renderHomeDaneaCockpit?.(); }catch(_){ }
 
     // stop timers
     try{ if (!S.autoMode && S.autoModeTimer) { clearTimeout(S.autoModeTimer); S.autoModeTimer = null; } }catch(_){ }
@@ -10279,7 +10280,7 @@ async function deleteMovement(id) {
           if (homeDaneaCockpit){
             homeDaneaCockpit.classList.toggle("is-auto-on", !!autoOn);
             homeDaneaCockpit.classList.toggle("is-auto-off", !autoOn);
-            const lbl = autoOn ? "ATTIVO" : "MANUALE";
+            const lbl = autoOn ? "ATTIVO" : "DISATTIVO";
             homeDaneaCockpit.setAttribute("title", "Auto scarico: " + lbl);
           }
         }catch(_){ }
@@ -10301,12 +10302,32 @@ async function deleteMovement(id) {
           }catch(_){ return 0; }
         })();
 
+        const piecesToday = (() => {
+          try{
+            const now = new Date();
+            const y = now.getFullYear(), m = now.getMonth(), d = now.getDate();
+            let sum = 0;
+            for (const it of (__daneaCompleted || [])){
+              const iso = String(it && it.createdAt || "").trim();
+              if (!iso) continue;
+              const dt = new Date(iso);
+              if (!dt || isNaN(dt.getTime())) continue;
+              if (dt.getFullYear() !== y || dt.getMonth() !== m || dt.getDate() !== d) continue;
+              const allocs = Array.isArray(it.allocations) ? it.allocations : [];
+              for (const a of allocs){
+                sum += safeInt(a && a.qty);
+              }
+            }
+            return sum;
+          }catch(_){ return 0; }
+        })();
+
         const fmt = (n) => (Number(n) || 0).toLocaleString("it-IT");
         const list = __getHomeDaneaGroups();
 
         const chunks = [];
-        chunks.push(`<span class="homeDaneaTickerItem is-meta">OGGI: ${fmt(todayCount)} DDT SCARICATI</span>`);
-        chunks.push(`<span class="homeDaneaTickerItem is-meta">AUTO SCARICO: ${autoOn ? "ATTIVO" : "MANUALE"}</span>`);
+        const autoLbl = autoOn ? "ATTIVO" : "DISATTIVO";
+        chunks.push(`<span class="homeDaneaTickerItem is-meta">SCARICO AUTOMATICO ${autoLbl} - DDT SCARICATI OGGI ${fmt(todayCount)} - PEZZI SCARICATI OGGI ${fmt(piecesToday)}</span>`);
 
         if (!list.length){
           chunks.push(`<span class="homeDaneaTickerItem is-muted">NESSUN DDT DA XML</span>`);
@@ -18125,6 +18146,7 @@ if (importMovementsInput) importMovementsInput.addEventListener("change", async 
         state,
         setView,
         renderAll,
+        renderHomeDaneaCockpit,
         safeInt,
         formatDateIT,
         normalizeWarehouse,
