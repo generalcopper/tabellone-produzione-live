@@ -9312,39 +9312,69 @@ async function deleteMovement(id) {
         if (lowStockCountConca) lowStockCountConca.textContent = String(conca.length);
 
         const fmt = (n) => (Number(n) || 0).toLocaleString("it-IT");
-        const maxShow = 12;
+
+        // Dashboard: tabella compatta (niente righe “a riquadro”), con scroll SOLO dentro il riquadro
+        // così la Home non diventa scrollabile su desktop.
+        const MAX_ROWS = 200;
 
         const renderList = (list, el) => {
           if (!el) return;
-          if (!list.length) {
+          if (!Array.isArray(list) || list.length === 0) {
             el.innerHTML = '<div class="td-muted">Nessun articolo sotto scorta.</div>';
             return;
           }
 
-          const show = list.slice(0, maxShow);
+          const show = list.slice(0, MAX_ROWS);
           const more = list.length - show.length;
 
-          el.innerHTML = show.map(r => {
+          const head = `
+            <div class="tableWrap lowStockTableWrap" role="region" aria-label="Tabella sottoscorta" tabindex="0">
+              <table class="dataGrid lowStockTable">
+                <thead>
+                  <tr>
+                    <th style="width:22%;">Codice</th>
+                    <th style="width:40%;">Articolo</th>
+                    <th style="width:20%;">Fornitore</th>
+                    <th style="width:9%; text-align:right;">Qtà</th>
+                    <th style="width:9%; text-align:right;">Soglia</th>
+                  </tr>
+                </thead>
+                <tbody>
+          `;
+
+          const rows = show.map(r => {
             const code = escapeHtml(r.__displayCode || r.code || "");
             const item = escapeHtml(r.item || "");
             const cust = escapeHtml(r.customer || "");
             const qty = fmt(safeInt(r.qty));
             const thr = fmt(safeInt(r.threshold));
 
+            const codeCell = code ? `<span class="lowStockCodeCell">${code}</span>` : `<span class="td-muted">—</span>`;
+            const itemCell = item || "—";
+            const custCell = cust || "—";
+
             return `
-              <div class="lowStockItem">
-                <div class="lowStockItemMain">
-                  <div class="lowStockCode">${code || "—"}</div>
-                  <div class="lowStockName">${item || "—"}</div>
-                  ${cust ? `<div class="lowStockMeta">${cust}</div>` : ``}
-                </div>
-                <div class="lowStockQty">
-                  <div class="n">${qty}</div>
-                  <div class="t">soglia ${thr}</div>
-                </div>
-              </div>
+              <tr>
+                <td data-label="Codice">${codeCell}</td>
+                <td data-label="Articolo" class="lowStockItemCell">${itemCell}</td>
+                <td data-label="Fornitore" class="td-muted">${custCell}</td>
+                <td data-label="Qtà" class="lowStockQtyCell">${qty}</td>
+                <td data-label="Soglia" class="lowStockThrCell">${thr}</td>
+              </tr>
             `;
-          }).join("") + (more > 0 ? `<div class="td-muted">+${more} altri…</div>` : "");
+          }).join("");
+
+          const moreRow = (more > 0)
+            ? `<tr><td colspan="5" class="td-muted">+${fmt(more)} altri…</td></tr>`
+            : ``;
+
+          const foot = `
+                </tbody>
+              </table>
+            </div>
+          `;
+
+          el.innerHTML = head + rows + moreRow + foot;
         };
 
         renderList(cerea, lowStockListCerea);
