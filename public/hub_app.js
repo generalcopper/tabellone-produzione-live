@@ -1585,6 +1585,107 @@
 })();
 ;
 
+/* ===== revenue_view.js ===== */
+// Inject "Fatturato" view markup into #viewRevenue
+(function(){
+  try{
+    var root = document.getElementById("viewRevenue");
+    if (!root) return;
+    if (root.dataset && root.dataset.injected === "1") return;
+    if (root.dataset) root.dataset.injected = "1";
+
+    root.innerHTML = `<article class="card" id="revenueCard">
+      <div class="hd">
+        <div class="overlayHeaderTitle">
+          <button class="iconBtn overlayBack" id="btnBackRevenue" type="button" aria-label="Indietro">‹</button>
+          <h2>Fatturato</h2>
+        </div>
+        <div class="inlineRow" style="gap:8px; justify-content:flex-end;">
+          <div class="pill" id="pillRevenueCount">0</div>
+          <button class="iconBtn" id="btnCloseRevenue" type="button" aria-label="Chiudi">×</button>
+        </div>
+      </div>
+
+      <div class="bd">
+        <!-- LIST -->
+        <div id="revListWrap" class="stack" style="gap:10px;">
+          <div class="inlineRow listStickyBar" style="justify-content:space-between; align-items:flex-end; gap:12px; margin-top: 10px;">
+            <div class="field" style="flex: 1 1 auto; min-width: 220px;">
+              <label for="revSearch">Cerca</label>
+              <input id="revSearch" placeholder="Numero, cliente, codice…" autocomplete="off" />
+            </div>
+            <div class="inlineRow" style="gap:8px; justify-content:flex-end; margin-left:auto;">
+              <button class="btn btn-ghost mini" id="btnRevClear" type="button">Reset</button>
+              <div class="hero-sub" id="revMeta">—</div>
+            </div>
+          </div>
+
+          <div class="tableWrap" style="max-height: 520px; overflow:auto; margin-top: 0; width:100%;">
+            <table class="dataGrid" id="revTable">
+              <thead>
+                <tr>
+                  <th style="width: 120px;">Data</th>
+                  <th style="width: 120px;">Numero</th>
+                  <th>Cliente</th>
+                  <th class="qty" style="width: 160px; text-align:right;">Imponibile</th>
+                  <th class="qty" style="width: 140px; text-align:right;">IVA</th>
+                  <th class="qty" style="width: 160px; text-align:right;">Totale</th>
+                  <th style="width: 120px;"></th>
+                </tr>
+              </thead>
+              <tbody id="revTbody">
+                <tr><td class="td-muted" colspan="7">Carico…</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- DETAIL -->
+        <div id="revDetailWrap" class="stack" style="gap:10px; display:none;">
+          <div class="inlineRow" style="justify-content:space-between; align-items:flex-end; gap:12px;">
+            <div class="stack" style="flex:1; min-width:240px;">
+              <div class="hero-sub" id="revDetTitle">DDT</div>
+              <div class="muted" id="revDetSubtitle" style="font-weight:900;">—</div>
+            </div>
+            <div class="inlineRow" style="gap:8px; justify-content:flex-end;">
+              <button class="btn btn-ghost btn-xs" id="btnRevBackList" type="button">← Elenco</button>
+            </div>
+          </div>
+
+          <div class="inlineRow" style="gap:10px; justify-content:flex-end;">
+            <div class="pill" id="revDetNet">Imponibile: —</div>
+            <div class="pill" id="revDetVat">IVA: —</div>
+            <div class="pill" id="revDetGross">Totale: —</div>
+          </div>
+
+          <div class="tableWrap" style="max-height: 520px; overflow:auto; width:100%;">
+            <table class="dataGrid" id="revItemsTable">
+              <thead>
+                <tr>
+                  <th style="width: 160px;">Codice</th>
+                  <th>Articolo</th>
+                  <th class="qty" style="width: 110px; text-align:right;">Q.tà</th>
+                  <th class="qty" style="width: 160px; text-align:right;">Imponibile</th>
+                  <th class="qty" style="width: 140px; text-align:right;">IVA</th>
+                  <th class="qty" style="width: 160px; text-align:right;">Totale</th>
+                </tr>
+              </thead>
+              <tbody id="revItemsTbody">
+                <tr><td class="td-muted" colspan="6">Apri un DDT.</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="muted" id="revDetFooter" style="font-size:12px; font-weight:900;">—</div>
+        </div>
+      </div>
+    </article>`;
+  }catch(e){
+    try{ console.warn("revenue view inject failed", e); }catch(_){ }
+  }
+})();
+
+
 ;
 /* ===== fp_categories_view.js ===== */
 // Inject "Categorie prodotti finiti" view markup into #viewFPCategories
@@ -1960,6 +2061,35 @@
     const text = String(xmlText || "").trim();
     if (!text) return [];
 
+    // Parse numeri "italiani" (1.234,56) + valori con simboli (€, spazi, ecc.)
+    function __numIT(v){
+      let s = String(v ?? "").trim();
+      if (!s) return null;
+      s = s.replace(/\s+/g, "");
+      s = s.replace(/[^0-9,\.-]/g, "");
+      if (!s) return null;
+      if (s.includes(",") && s.includes(".")) {
+        // assume "." migliaia e "," decimali
+        s = s.replace(/\./g, "").replace(",", ".");
+      } else if (s.includes(",")) {
+        s = s.replace(",", ".");
+      }
+      const n = Number(s);
+      return Number.isFinite(n) ? n : null;
+    }
+
+    function __numFrom(node, tags){
+      const list = Array.isArray(tags) ? tags : [];
+      for (let i=0; i<list.length; i++){
+        const t = String(list[i] || "").trim();
+        if (!t) continue;
+        const raw = getText(node, t);
+        const n = __numIT(raw);
+        if (n != null && Number.isFinite(n)) return n;
+      }
+      return null;
+    }
+
     const dom = new DOMParser().parseFromString(text, "text/xml");
     const perr = dom.querySelector("parsererror");
     if (perr) throw new Error("XML non valido (parsererror)");
@@ -1986,10 +2116,49 @@
         const qtyRaw = getText(r, "Qty");
         const umRaw = getText(r, "Um") || getText(r, "UM") || getText(r, "Uom") || getText(r, "Unit") || "";
 
+        // Importi (best-effort): imponibile + IVA per riga
+        const unitNet = __numFrom(r, [
+          "UnitNetPrice","UnitPriceNet","UnitPrice","Price","NetPrice","PriceNet","PriceNoVat","NetUnitPrice"
+        ]);
+        const unitGross = __numFrom(r, [
+          "UnitPriceWithVat","UnitGrossPrice","PriceWithVat","GrossUnitPrice"
+        ]);
+        let vatPerc = __numFrom(r, [
+          "VatPerc","VatPercent","VatRate","IvaPerc","IvaPercent","IvaRate","VatPercentage","TaxPercent"
+        ]);
+        let net = __numFrom(r, [
+          "TotalNet","TotalNoVat","NetAmount","TaxableAmount","Taxable","RowNet","Net","LineNet","AmountNet","Total"
+        ]);
+        let vat = __numFrom(r, [
+          "VatAmount","VATAmount","IvaAmount","Iva","IVA","Vat","TaxAmount","TotalVat","VatTotal"
+        ]);
+        let gross = __numFrom(r, [
+          "TotalWithVat","TotalGross","GrossAmount","RowTotalWithVat","Gross","AmountWithVat","TotalAmount"
+        ]);
+
         let qty = null;
         if (qtyRaw){
           const n = Number(String(qtyRaw).replace(",", "."));
           if (Number.isFinite(n)) qty = n;
+        }
+
+        // Derivazioni (senza forzare: se mancano i campi in XML, restano null)
+        const qLine = (qty != null && Number.isFinite(Number(qty))) ? Number(qty) : null;
+
+        if (net == null && unitNet != null && qLine != null) net = unitNet * qLine;
+        if (gross == null && unitGross != null && qLine != null) gross = unitGross * qLine;
+
+        if (vat == null && net != null && vatPerc != null) vat = net * (vatPerc / 100);
+        if (gross == null && net != null && vat != null) gross = net + vat;
+
+        if (net == null && gross != null && vat != null) net = gross - vat;
+        if (vat == null && gross != null && net != null) vat = gross - net;
+
+        if (vatPerc == null && net != null && vat != null && net !== 0) vatPerc = (vat / net) * 100;
+        if (gross == null && net != null && vatPerc != null) gross = net * (1 + (vatPerc/100));
+        if (net == null && gross != null && vatPerc != null && (1 + (vatPerc/100)) !== 0){
+          net = gross / (1 + (vatPerc/100));
+          if (vat == null && net != null) vat = gross - net;
         }
 
         return {
@@ -1998,7 +2167,15 @@
           desc: String(desc || "").trim(),
           qtyRaw: String(qtyRaw || "").trim(),
           qty: (qty == null) ? null : qty,
-          uom: String(umRaw || "").trim()
+          uom: String(umRaw || "").trim(),
+
+          // fatturato (best-effort)
+          unitNet: (unitNet == null) ? null : unitNet,
+          unitGross: (unitGross == null) ? null : unitGross,
+          vatPerc: (vatPerc == null) ? null : vatPerc,
+          net: (net == null) ? null : net,
+          vat: (vat == null) ? null : vat,
+          gross: (gross == null) ? null : gross
         };
       }).filter(r => {
         if (!r.code) return false; // importa solo righe con codice articolo
@@ -2008,7 +2185,22 @@
         return true;
       });
 
-      const hash = hashStr(JSON.stringify(rows.map(x => [x.code, x.desc, x.qty, x.uom])));
+      // Totali DDT (best-effort)
+      const tot = rows.reduce((acc, r) => {
+        const n = (r && r.net != null) ? Number(r.net) : 0;
+        const v = (r && r.vat != null) ? Number(r.vat) : 0;
+        const g = (r && r.gross != null) ? Number(r.gross) : (n + v);
+        acc.net += (Number.isFinite(n) ? n : 0);
+        acc.vat += (Number.isFinite(v) ? v : 0);
+        acc.gross += (Number.isFinite(g) ? g : 0);
+        return acc;
+      }, { net: 0, vat: 0, gross: 0 });
+
+      const hash = hashStr(JSON.stringify(rows.map(x => [
+        x.code, x.desc, x.qty, x.uom,
+        x.unitNet, x.unitGross, x.vatPerc,
+        x.net, x.vat, x.gross
+      ])));
 
       out.push({
         key,
@@ -2016,6 +2208,10 @@
         number: String(number).trim(),
         customer: String(customer || "").trim(),
         rows,
+        netTotal: Number(tot.net || 0),
+        vatTotal: Number(tot.vat || 0),
+        grossTotal: Number(tot.gross || 0),
+        currency: "EUR",
         hash
       });
     }
@@ -2467,7 +2663,26 @@ Righe: ${st.total}`);
           number: String(ddt.number || '').trim(),
           date: String(ddt.date || '').trim(),
           customer: String(ddt.customer || '').trim(),
-          rows: (ddt.rows || []).map(x => ({ code:x.code||'', desc:x.desc||'', qty:x.qty??null, qtyRaw:x.qtyRaw||'', uom:x.uom||'' })),
+          rows: (ddt.rows || []).map(x => ({
+            idx: (x && x.idx != null) ? x.idx : null,
+            code: x.code || '',
+            desc: x.desc || '',
+            qty: x.qty ?? null,
+            qtyRaw: x.qtyRaw || '',
+            uom: x.uom || '',
+
+            // fatturato (best-effort)
+            unitNet: (x && x.unitNet != null) ? x.unitNet : null,
+            unitGross: (x && x.unitGross != null) ? x.unitGross : null,
+            vatPerc: (x && x.vatPerc != null) ? x.vatPerc : null,
+            net: (x && x.net != null) ? x.net : null,
+            vat: (x && x.vat != null) ? x.vat : null,
+            gross: (x && x.gross != null) ? x.gross : null
+          })),
+          netTotal: (ddt && ddt.netTotal != null) ? ddt.netTotal : null,
+          vatTotal: (ddt && ddt.vatTotal != null) ? ddt.vatTotal : null,
+          grossTotal: (ddt && ddt.grossTotal != null) ? ddt.grossTotal : null,
+          currency: String(ddt.currency || 'EUR'),
           warehouse: 'none',
           allocations: [],
           xmlHash: String(ddt.hash || ''),
@@ -2682,7 +2897,26 @@ Disponibili: ${(tot).toLocaleString("it-IT")} (Cerea ${aC.toLocaleString("it-IT"
         number: String(ddt.number || "").trim(),
         date: String(ddt.date || "").trim(),
         customer: String(ddt.customer || "").trim(),
-        rows: (ddt.rows || []).map(x => ({ code:x.code||"", desc:x.desc||"", qty:x.qty??null, qtyRaw:x.qtyRaw||"", uom:x.uom||"" })),
+        rows: (ddt.rows || []).map(x => ({
+          idx: (x && x.idx != null) ? x.idx : null,
+          code: x.code || "",
+          desc: x.desc || "",
+          qty: x.qty ?? null,
+          qtyRaw: x.qtyRaw || "",
+          uom: x.uom || "",
+
+          // fatturato (best-effort)
+          unitNet: (x && x.unitNet != null) ? x.unitNet : null,
+          unitGross: (x && x.unitGross != null) ? x.unitGross : null,
+          vatPerc: (x && x.vatPerc != null) ? x.vatPerc : null,
+          net: (x && x.net != null) ? x.net : null,
+          vat: (x && x.vat != null) ? x.vat : null,
+          gross: (x && x.gross != null) ? x.gross : null
+        })),
+        netTotal: (ddt && ddt.netTotal != null) ? ddt.netTotal : null,
+        vatTotal: (ddt && ddt.vatTotal != null) ? ddt.vatTotal : null,
+        grossTotal: (ddt && ddt.grossTotal != null) ? ddt.grossTotal : null,
+        currency: String(ddt.currency || "EUR"),
         warehouse: "global",
         allocations: allocations,
         xmlHash: String(ddt.hash || ""),
@@ -2973,7 +3207,26 @@ Disponibili: ${(tot).toLocaleString("it-IT")} (Cerea ${aC.toLocaleString("it-IT"
           number: String(ddt.number || "").trim(),
           date: String(ddt.date || "").trim(),
           customer: String(ddt.customer || "").trim(),
-          rows: (ddt.rows || []).map(x => ({ code:x.code||"", desc:x.desc||"", qty:x.qty??null, qtyRaw:x.qtyRaw||"", uom:x.uom||"" })),
+          rows: (ddt.rows || []).map(x => ({
+            idx: (x && x.idx != null) ? x.idx : null,
+            code: x.code || "",
+            desc: x.desc || "",
+            qty: x.qty ?? null,
+            qtyRaw: x.qtyRaw || "",
+            uom: x.uom || "",
+
+            // fatturato (best-effort)
+            unitNet: (x && x.unitNet != null) ? x.unitNet : null,
+            unitGross: (x && x.unitGross != null) ? x.unitGross : null,
+            vatPerc: (x && x.vatPerc != null) ? x.vatPerc : null,
+            net: (x && x.net != null) ? x.net : null,
+            vat: (x && x.vat != null) ? x.vat : null,
+            gross: (x && x.gross != null) ? x.gross : null
+          })),
+          netTotal: (ddt && ddt.netTotal != null) ? ddt.netTotal : null,
+          vatTotal: (ddt && ddt.vatTotal != null) ? ddt.vatTotal : null,
+          grossTotal: (ddt && ddt.grossTotal != null) ? ddt.grossTotal : null,
+          currency: String(ddt.currency || "EUR"),
           warehouse: "global",
           allocations: allocations,
           xmlHash: String(ddt.hash || ""),
@@ -3355,9 +3608,21 @@ Disponibili: ${(tot).toLocaleString("it-IT")} (Cerea ${aC.toLocaleString("it-IT"
           desc: String(x?.desc || "").trim(),
           qty: (x && x.qty != null) ? x.qty : null,
           qtyRaw: String(x?.qtyRaw || "").trim(),
-          uom: String(x?.uom || "").trim()
+          uom: String(x?.uom || "").trim(),
+
+          // fatturato (best-effort)
+          unitNet: (x && x.unitNet != null) ? x.unitNet : null,
+          unitGross: (x && x.unitGross != null) ? x.unitGross : null,
+          vatPerc: (x && x.vatPerc != null) ? x.vatPerc : null,
+          net: (x && x.net != null) ? x.net : null,
+          vat: (x && x.vat != null) ? x.vat : null,
+          gross: (x && x.gross != null) ? x.gross : null
         })),
         rowsCount: Array.isArray(d.rows) ? d.rows.length : 0,
+        netTotal: (d && d.netTotal != null) ? d.netTotal : null,
+        vatTotal: (d && d.vatTotal != null) ? d.vatTotal : null,
+        grossTotal: (d && d.grossTotal != null) ? d.grossTotal : null,
+        currency: String(d.currency || "EUR"),
         xmlHash: newHash,
         syncState: isNew ? "new" : "updated",
         updatedAt: serverTimestamp(),
@@ -3532,6 +3797,430 @@ function waitForHub(attempt){
 
 
 ;
+/* ===== revenue.js ===== */
+/* Sezione: Fatturato
+   - Mostra il fatturato per DDT COMPLETATI con movimenti creati
+   - Dati letti da Firestore:
+     • orgs/{ORG_ID}/daneaDdtCompleted
+     • orgs/{ORG_ID}/daneaDdts (fallback/importi riga)
+*/
+(function(){
+  "use strict";
+
+  const S = {
+    ready: false,
+    hub: null,
+    completed: [],
+    completedMap: new Map(),
+    cacheMap: new Map(),
+    selectedKey: "",
+    unsub: { done: null, cache: null }
+  };
+
+  function H(){ try{ return globalThis.__HUB || null; }catch(_){ return null; } }
+  function $(id){ return document.getElementById(id); }
+
+  function esc(s){
+    return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
+  }
+  function escAttr(s){ return esc(s).replace(/\n/g, " "); }
+  function norm(s){ return String(s ?? "").trim().toLowerCase(); }
+
+  function fmtDateIT(iso){
+    try{
+      const d = new Date(String(iso || ""));
+      if (Number.isNaN(d.getTime())) return String(iso || "—");
+      return d.toLocaleDateString("it-IT");
+    }catch(_){ return String(iso || "—"); }
+  }
+
+  function toNum(v){
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  function fmtMoney(v, cur){
+    const n = toNum(v);
+    if (n == null) return "—";
+    const c = String(cur || "EUR").trim() || "EUR";
+    try{ return n.toLocaleString("it-IT", { style: "currency", currency: c }); }catch(_){
+      try{ return "€ " + n.toLocaleString("it-IT", { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }catch(__){
+        return String(n);
+      }
+    }
+  }
+
+  function fmtQty(q, raw){
+    const n = toNum(q);
+    if (n == null) return String(raw || "—");
+    try{ return n.toLocaleString("it-IT", { maximumFractionDigits: 3 }); }catch(_){ return String(n); }
+  }
+
+  function isMovementsCreated(d){
+    try{
+      const ids = Array.isArray(d && d.movementIds) ? d.movementIds : [];
+      return ids.length > 0;
+    }catch(_){ return false; }
+  }
+
+  function rebuildCompletedMap(){
+    const m = new Map();
+    for (const c of (S.completed || [])){
+      const k = String(c && (c.key || c._id) || "").trim();
+      if (k) m.set(k, c);
+    }
+    S.completedMap = m;
+  }
+
+  function rebuildCacheMap(list){
+    const m = new Map();
+    for (const d of (list || [])){
+      const k = String(d && d.key || "").trim();
+      if (k) m.set(k, d);
+    }
+    S.cacheMap = m;
+  }
+
+  function setDetailOpen(open){
+    const list = $("revListWrap");
+    const det = $("revDetailWrap");
+    if (list) list.style.display = open ? "none" : "";
+    if (det) det.style.display = open ? "" : "none";
+    try{ window.__syncDockedControlsVisibility && window.__syncDockedControlsVisibility(); }catch(_){ }
+  }
+
+  function computeTotalsFromRows(rows){
+    const out = { net: 0, vat: 0, gross: 0 };
+    const arr = Array.isArray(rows) ? rows : [];
+    for (const r of arr){
+      const net = toNum(r && r.net);
+      const vat = toNum(r && r.vat);
+      const gross = toNum(r && r.gross);
+      const n = (net == null) ? 0 : net;
+      const v = (vat == null) ? 0 : vat;
+      const g = (gross == null) ? (n + v) : gross;
+      out.net += n;
+      out.vat += v;
+      out.gross += g;
+    }
+    return out;
+  }
+
+  function getDdtModel(key){
+    const k = String(key || "").trim();
+    if (!k) return null;
+    const done = S.completedMap.get(k) || null;
+    const cached = S.cacheMap.get(k) || null;
+    const base = done || cached;
+    if (!base) return null;
+
+    const currency = String((base && base.currency) || (cached && cached.currency) || "EUR");
+    const rows = (cached && Array.isArray(cached.rows) && cached.rows.length)
+      ? cached.rows
+      : (done && Array.isArray(done.rows) ? done.rows : []);
+
+    const t0 = {
+      net: toNum(done && done.netTotal),
+      vat: toNum(done && done.vatTotal),
+      gross: toNum(done && done.grossTotal)
+    };
+    const t1 = {
+      net: toNum(cached && cached.netTotal),
+      vat: toNum(cached && cached.vatTotal),
+      gross: toNum(cached && cached.grossTotal)
+    };
+    let netTotal = (t0.net != null) ? t0.net : (t1.net != null) ? t1.net : null;
+    let vatTotal = (t0.vat != null) ? t0.vat : (t1.vat != null) ? t1.vat : null;
+    let grossTotal = (t0.gross != null) ? t0.gross : (t1.gross != null) ? t1.gross : null;
+
+    if (netTotal == null || vatTotal == null || grossTotal == null){
+      const tr = computeTotalsFromRows(rows);
+      if (netTotal == null) netTotal = tr.net;
+      if (vatTotal == null) vatTotal = tr.vat;
+      if (grossTotal == null) grossTotal = tr.gross;
+    }
+
+    return {
+      key: k,
+      number: String(base.number || "").trim(),
+      date: String(base.date || "").trim(),
+      customer: String(base.customer || "").trim(),
+      currency,
+      rows,
+      netTotal: netTotal || 0,
+      vatTotal: vatTotal || 0,
+      grossTotal: grossTotal || 0,
+      __done: done
+    };
+  }
+
+  function listDdts(){
+    const list = (S.completed || []).filter(isMovementsCreated);
+    // ordina: più recenti prima (data, numero)
+    return list.slice().sort((a,b) => {
+      const da = String(a?.date || "");
+      const db = String(b?.date || "");
+      const na = String(a?.number || "");
+      const nb = String(b?.number || "");
+      return db.localeCompare(da) || nb.localeCompare(na);
+    });
+  }
+
+  function renderList(){
+    const view = $("viewRevenue");
+    const isActive = !!(view && view.classList.contains("active"));
+
+    const list = listDdts();
+    try{ const pill = $("pillRevenueCount"); if (pill) pill.textContent = String(list.length); }catch(_){ }
+
+    if (!isActive) return;
+
+    const q = norm($("revSearch")?.value);
+    const meta = $("revMeta");
+    const tbody = $("revTbody");
+    if (!tbody) return;
+
+    const filtered = q ? list.filter(d => {
+      const k = String(d?.key || d?._id || "").trim();
+      const base = [d?.number, d?.date, d?.customer, k].map(x => norm(x)).join(" ");
+      if (base.includes(q)) return true;
+      // include codici/articoli (solo se cache disponibile)
+      const m = getDdtModel(k);
+      if (!m) return false;
+      try{
+        for (const r of (m.rows || [])){
+          const hay = norm((r?.code || "") + " " + (r?.desc || r?.item || ""));
+          if (hay.includes(q)) return true;
+        }
+      }catch(_){ }
+      return false;
+    }) : list;
+
+    try{ if (meta) meta.textContent = `${filtered.length} DDT completati`; }catch(_){ }
+
+    if (!filtered.length){
+      tbody.innerHTML = `<tr><td class="td-muted" colspan="7">${q ? "Nessun DDT trovato." : "Nessun DDT completato (movimenti creati)."}</td></tr>`;
+      return;
+    }
+
+    tbody.innerHTML = filtered.map(d => {
+      const k = String(d?.key || d?._id || "").trim();
+      const m = getDdtModel(k) || { key:k, number: d?.number, date: d?.date, customer: d?.customer, currency:"EUR", netTotal:0, vatTotal:0, grossTotal:0 };
+      const cur = m.currency || "EUR";
+
+      return `<tr class="jsRevRow" data-key="${escAttr(k)}" title="Apri">
+        <td data-label="Data">${esc(fmtDateIT(m.date) || "—")}</td>
+        <td data-label="Numero"><span class="kbd">${esc(m.number || "—")}</span></td>
+        <td data-label="Cliente">${esc(m.customer || "—")}</td>
+        <td data-label="Imponibile" class="qty" style="text-align:right;">${esc(fmtMoney(m.netTotal, cur))}</td>
+        <td data-label="IVA" class="qty" style="text-align:right;">${esc(fmtMoney(m.vatTotal, cur))}</td>
+        <td data-label="Totale" class="qty" style="text-align:right;">${esc(fmtMoney(m.grossTotal, cur))}</td>
+        <td data-label="" style="text-align:right;">
+          <button class="btn btn-ghost btn-xs jsRevOpen" type="button" data-key="${escAttr(k)}">Apri</button>
+        </td>
+      </tr>`;
+    }).join("");
+  }
+
+  function renderDetail(key){
+    const m = getDdtModel(key);
+    const rows = m ? (m.rows || []) : [];
+
+    const title = $("revDetTitle");
+    const sub = $("revDetSubtitle");
+    const netP = $("revDetNet");
+    const vatP = $("revDetVat");
+    const groP = $("revDetGross");
+    const foot = $("revDetFooter");
+    const tbody = $("revItemsTbody");
+
+    if (!m || !tbody){
+      if (tbody) tbody.innerHTML = '<tr><td class="td-muted" colspan="6">DDT non trovato.</td></tr>';
+      return;
+    }
+
+    const cur = m.currency || "EUR";
+    if (title) title.textContent = "Dettaglio DDT";
+    if (sub) sub.textContent = [
+      (m.customer || "—"),
+      (m.number ? ("DDT " + m.number) : ("DDT " + m.key)),
+      (fmtDateIT(m.date) || "—")
+    ].join(" · ");
+
+    if (netP) netP.textContent = "Imponibile: " + fmtMoney(m.netTotal, cur);
+    if (vatP) vatP.textContent = "IVA: " + fmtMoney(m.vatTotal, cur);
+    if (groP) groP.textContent = "Totale: " + fmtMoney(m.grossTotal, cur);
+
+    if (!rows.length){
+      tbody.innerHTML = '<tr><td class="td-muted" colspan="6">Nessuna riga nel DDT.</td></tr>';
+    } else {
+      tbody.innerHTML = rows.map(r => {
+        const code = String(r?.code || "").trim();
+        const desc = String(r?.desc || r?.item || "").trim();
+        const qtyDisp = fmtQty(r?.qty, r?.qtyRaw);
+
+        // importi riga (fallback in UI)
+        let net = toNum(r?.net);
+        let vat = toNum(r?.vat);
+        let gross = toNum(r?.gross);
+        const q = toNum(r?.qty);
+        const unitNet = toNum(r?.unitNet);
+        const unitGross = toNum(r?.unitGross);
+        const vatPerc = toNum(r?.vatPerc);
+
+        if (net == null && unitNet != null && q != null) net = unitNet * q;
+        if (gross == null && unitGross != null && q != null) gross = unitGross * q;
+        if (vat == null && net != null && vatPerc != null) vat = net * (vatPerc/100);
+        if (gross == null && net != null && vat != null) gross = net + vat;
+        if (net == null && gross != null && vat != null) net = gross - vat;
+        if (vat == null && gross != null && net != null) vat = gross - net;
+
+        return `<tr>
+          <td data-label="Codice"><span class="kbd">${esc(code || "—")}</span></td>
+          <td data-label="Articolo">${esc(desc || code || "—")}</td>
+          <td data-label="Q.tà" class="qty" style="text-align:right;">${esc(qtyDisp || "—")}</td>
+          <td data-label="Imponibile" class="qty" style="text-align:right;">${esc(fmtMoney(net, cur))}</td>
+          <td data-label="IVA" class="qty" style="text-align:right;">${esc(fmtMoney(vat, cur))}</td>
+          <td data-label="Totale" class="qty" style="text-align:right;">${esc(fmtMoney(gross, cur))}</td>
+        </tr>`;
+      }).join("");
+    }
+
+    if (foot){
+      const hasMoney = (toNum(m.netTotal) || 0) > 0 || (toNum(m.grossTotal) || 0) > 0;
+      foot.textContent = hasMoney
+        ? "Valori letti dall’XML (imponibile + IVA)."
+        : "Nell’XML non trovo i campi importo (imponibile/IVA) per queste righe.";
+    }
+  }
+
+  function openDetail(key){
+    const k = String(key || "").trim();
+    if (!k) return;
+    S.selectedKey = k;
+    setDetailOpen(true);
+    renderDetail(k);
+  }
+
+  function backToList(){
+    S.selectedKey = "";
+    setDetailOpen(false);
+    renderList();
+  }
+
+  function bindEvents(){
+    if (S.ready) return;
+    S.ready = true;
+
+    $("btnRevClear")?.addEventListener("click", () => {
+      const i = $("revSearch");
+      if (i) i.value = "";
+      renderList();
+      try{ i && i.focus && i.focus(); }catch(_){ }
+    });
+    $("revSearch")?.addEventListener("input", () => renderList());
+
+    $("btnRevBackList")?.addEventListener("click", (e) => {
+      try{ e.preventDefault(); e.stopPropagation(); }catch(_){ }
+      backToList();
+    });
+
+    $("revTbody")?.addEventListener("click", (e) => {
+      const btn = e.target?.closest?.("button.jsRevOpen");
+      const tr = e.target?.closest?.("tr.jsRevRow");
+      const key = String(btn?.getAttribute("data-key") || tr?.getAttribute("data-key") || "").trim();
+      if (!key) return;
+      if (btn){ try{ e.preventDefault(); e.stopPropagation(); }catch(_){ } }
+      openDetail(key);
+    });
+  }
+
+  function subscribe(){
+    const h = H();
+    if (!h || !h.fb || !h.fb.db || !h.FS) return false;
+    if (S.unsub.done || S.unsub.cache) return true;
+
+    try{
+      const { collection, query, orderBy, onSnapshot } = h.FS;
+
+      // completed
+      S.unsub.done = onSnapshot(
+        query(collection(h.fb.db, "orgs", h.ORG_ID, "daneaDdtCompleted"), orderBy("date", "desc")),
+        (snap) => {
+          const arr = [];
+          snap.forEach(docu => {
+            const d = docu.data() || {};
+            arr.push(Object.assign({ _id: docu.id }, d));
+          });
+          S.completed = arr;
+          rebuildCompletedMap();
+          renderList();
+          if (S.selectedKey) renderDetail(S.selectedKey);
+        },
+        (err) => { try{ console.warn("revenue completed snapshot error", err); }catch(_){ } }
+      );
+
+      // cache ddts (importi)
+      S.unsub.cache = onSnapshot(
+        query(collection(h.fb.db, "orgs", h.ORG_ID, "daneaDdts"), orderBy("date", "desc")),
+        (snap) => {
+          const arr = [];
+          snap.forEach(docu => {
+            const d = docu.data() || {};
+            let key = String(d.key || d.ddtKey || "").trim();
+            if (!key){
+              try{ key = decodeURIComponent(String(docu.id||"")); }catch(_){ key = String(docu.id||""); }
+              key = String(key||"").trim();
+            }
+            if (!key) return;
+            arr.push(Object.assign({ _id: docu.id, key }, d));
+          });
+          rebuildCacheMap(arr);
+          renderList();
+          if (S.selectedKey) renderDetail(S.selectedKey);
+        },
+        (err) => { try{ console.warn("revenue daneaDdts snapshot error", err); }catch(_){ } }
+      );
+
+      return true;
+    }catch(e){
+      try{ console.warn("revenue subscribe failed", e); }catch(_){ }
+      return false;
+    }
+  }
+
+  function refresh(){
+    bindEvents();
+    subscribe();
+    // se riapro la vista, default su lista
+    if (!S.selectedKey) setDetailOpen(false);
+    renderList();
+  }
+
+  function waitForHub(attempt){
+    attempt = attempt || 0;
+    const h = H();
+    if (h && h.fb && h.fb.db && h.FS){
+      refresh();
+      return;
+    }
+    if (attempt > 200) return;
+    setTimeout(() => waitForHub(attempt+1), 100);
+  }
+
+  // expose
+  window.HubRevenue = window.HubRevenue || {};
+  window.HubRevenue.refresh = refresh;
+  window.HubRevenue.backToList = backToList;
+  window.HubRevenue.openDetail = openDetail;
+
+  if (document.readyState === "loading"){
+    document.addEventListener("DOMContentLoaded", () => waitForHub(0));
+  } else {
+    waitForHub(0);
+  }
+})();
+
 /* ===== hub_trash.js ===== */
 /* hub_trash.js - Cestino (soft delete + restore)
    Richiede: globalThis.__HUB = { fb, ORG_ID, setView, closeSideMenu, FS, orgCol }
@@ -6268,6 +6957,7 @@ try{
       moveInv: document.getElementById("viewMoveInventory"),
       anag: document.getElementById("viewAnag"),
       daneaDdt: document.getElementById("viewDaneaDdt"),
+      revenue: document.getElementById("viewRevenue"),
       fpCategories: document.getElementById("viewFPCategories")
     };
     const __hdrTitle = document.getElementById("hdrPageTitle");
@@ -6281,7 +6971,7 @@ try{
     // Porta overlay/modali come figli diretti di <body> per evitare stacking-context (transform/filter) sui parent
     (function __liftOverlaysToBody(){
       try{
-        ["viewOcr","viewInventory","viewFlows","viewDaneaDdt","viewMovements","viewMoveInventory","viewCategories","viewFPCategories","viewTrash","viewAnag"].forEach(id => {
+        ["viewOcr","viewInventory","viewFlows","viewDaneaDdt","viewRevenue","viewMovements","viewMoveInventory","viewCategories","viewFPCategories","viewTrash","viewAnag"].forEach(id => {
           const el = document.getElementById(id);
           if (el && el.parentElement !== document.body) document.body.appendChild(el);
         });
@@ -6395,7 +7085,7 @@ try{
 
     function setView(name){
       const key = String(name || "home");
-      const overlayKeys = ["ocr","inventory","flows","daneaDdt","movements","moveInv","categories","fpCategories","trash","anag"];
+      const overlayKeys = ["ocr","inventory","flows","daneaDdt","revenue","movements","moveInv","categories","fpCategories","trash","anag"];
       const isOverlay = overlayKeys.includes(key);
 
       // Home resta sempre visibile dietro (come un gestionale iOS)
@@ -6437,6 +7127,8 @@ try{
           (key === "ocr") ? "Carica" :
           (key === "inventory") ? "Inventario" :
           (key === "flows") ? "DDT Caricati" :
+          (key === "daneaDdt") ? "Scarica flussi DDT" :
+          (key === "revenue") ? "Fatturato" :
           (key === "movements") ? "Movimenti" :
           (key === "categories") ? "Categorie" :
           (key === "fpCategories") ? "Categorie prodotti finiti" :
@@ -6569,6 +7261,7 @@ document.getElementById("menuGoHome")?.addEventListener("click", () => { closeSi
     document.getElementById("menuGoMoveInventory")?.addEventListener("click", () => { closeSideMenu(); try{ resetMoveInvDirection(); }catch(_){ } setView("moveInv"); try{ renderMoveInv && renderMoveInv(); }catch(_){ } });
     document.getElementById("menuGoFlows")?.addEventListener("click", () => { closeSideMenu(); setView("flows"); try{ renderFlowsTable(); }catch(_){ } });
     document.getElementById("menuGoDaneaDdt")?.addEventListener("click", () => { closeSideMenu(); setView("daneaDdt"); try{ window.HubDaneaDdt && window.HubDaneaDdt.refresh && window.HubDaneaDdt.refresh(); }catch(_){ } });
+    document.getElementById("menuGoRevenue")?.addEventListener("click", () => { closeSideMenu(); setView("revenue"); try{ window.HubRevenue && window.HubRevenue.refresh && window.HubRevenue.refresh(); }catch(_){ } });
     document.getElementById("menuGoMovements")?.addEventListener("click", () => { closeSideMenu(); setView("movements"); try{ window.HubMovements && window.HubMovements.refresh && window.HubMovements.refresh(); }catch(_){ } });
     document.getElementById("menuGoTrash")?.addEventListener("click", () => { closeSideMenu(); setView("trash"); try{ window.HubTrash && window.HubTrash.refresh && window.HubTrash.refresh(); }catch(_){ } });
     document.getElementById("menuGoSuppliers")?.addEventListener("click", () => {
@@ -6620,6 +7313,22 @@ document.getElementById("btnCloseFlows")?.addEventListener("click", (e) => { try
           return;
         }
       }catch(_){}
+      setView("home");
+    });
+
+    // Fatturato (DDT completati con movimenti)
+    document.getElementById("viewRevenue")?.addEventListener("click", (e) => { try{ if (e.target === e.currentTarget) setView("home"); }catch(_){ } });
+    document.getElementById("btnCloseRevenue")?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
+    document.getElementById("btnBackRevenue")?.addEventListener("click", (e) => {
+      try{ e.preventDefault(); e.stopPropagation(); }catch(_){ }
+      try{
+        const det = document.getElementById("revDetailWrap");
+        const isDet = !!(det && det.style.display !== "none");
+        if (isDet && window.HubRevenue && typeof window.HubRevenue.backToList === "function"){
+          window.HubRevenue.backToList();
+          return;
+        }
+      }catch(_){ }
       setView("home");
     });
     document.getElementById("btnCloseMovements")?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
