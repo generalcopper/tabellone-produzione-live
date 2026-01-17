@@ -1499,7 +1499,13 @@
             <button id="daneaTabVerify" class="active" type="button">Da verificare <span class="pill" id="pillDaneaVerify" style="height:auto; padding:2px 8px; border-radius:999px; border:0; background:rgba(10,132,255,.12); color:rgba(0,0,0,.86);">0</span></button>
             <button id="daneaTabDone" type="button">Completati <span class="pill" id="pillDaneaDone" style="height:auto; padding:2px 8px; border-radius:999px; border:0; background:rgba(0,0,0,.06); color:rgba(0,0,0,.86);">0</span></button>
           </div>
-          <button class="btn btn-ghost mini" id="btnDaneaAutoToggle" type="button" aria-pressed="true" title="Crea movimenti di scarico per tutti i DDT verdi">Scarica DDT verdi</button>
+          <div class="daneaAutoCtl" id="daneaAutoCtl" title="Se ON: scarica automaticamente tutti i DDT verdi che arrivano. Se OFF: modalità manuale.">
+            <span class="daneaAutoLbl" id="daneaAutoLbl">MANUALE</span>
+            <label class="iosSwitch" aria-label="Scarico automatico DDT">
+              <input id="daneaAutoSwitch" type="checkbox" />
+              <span class="iosSlider"></span>
+            </label>
+          </div>
           <div class="pill" id="pillDaneaCount">0</div>
           <button class="iconBtn" id="btnCloseDaneaDdt" type="button" aria-label="Chiudi">×</button>
         </div>
@@ -1651,13 +1657,17 @@
   "use strict";
 
   const LS_URL = "hubinv_danea_xml_url";
-  const LS_AUTO = "hubinv_danea_auto_discharge"; // 1=on, 0=off
+  const LS_AUTO_DISCH = "hubinv_danea_auto_discharge"; // 1=on, 0=off (scarico su 'Completa')
+  const LS_AUTO_MODE = "hubinv_danea_auto_mode"; // 1=auto, 0=manual (scarica automaticamente i DDT verdi)
   // Default endpoint (Cloud Run proxy). If you deploy a new service, update this.
   const DEFAULT_XML_URL_BASE = "https://danea-xml-proxy-537555699968.europe-west8.run.app";
 
   const S = {
     xmlUrl: "",
     autoDischarge: true,
+    autoMode: false,
+    autoModeTimer: null,
+    autoModeLastRun: 0,
     lastXmlHash: "",
     lastFetchedAt: "",
     ddts: [],             // from XML (solo per sync, NON per UI)
@@ -1693,7 +1703,7 @@
 
   function __readAutoFromLS(){
     try{
-      const v = String(localStorage.getItem(LS_AUTO) || "").trim().toLowerCase();
+      const v = String(localStorage.getItem(LS_AUTO_DISCH) || "").trim().toLowerCase();
       if (!v) return true; // default ON
       if (v === "0" || v === "false" || v === "off" || v === "no") return false;
       return true;
@@ -1701,7 +1711,186 @@
   }
 
   function __writeAutoToLS(on){
-    try{ localStorage.setItem(LS_AUTO, on ? "1" : "0"); }catch(_){ }
+    try{ localStorage.setItem(LS_AUTO_DISCH, on ? "1" : "0"); }catch(_){ }
+  }
+
+  // ===== AUTO MODE (switch) — scarica automaticamente i DDT verdi che arrivano =====
+  function __readAutoModeFromLS(){
+    try{
+      const v = String(localStorage.getItem(LS_AUTO_MODE) || "").trim().toLowerCase();
+      if (!v) return false; // default: MANUALE
+      if (v === "1" || v === "true" || v === "on" || v === "yes") return true;
+      return false;
+    }catch(_){ return false; }
+  }
+
+  function __writeAutoModeToLS(on){
+    try{ localStorage.setItem(LS_AUTO_MODE, on ? "1" : "0"); }catch(_){ }
+  }
+
+  function __ensureAutoModeCss(){
+    try{
+      if (document.getElementById("daneaAutoModeCss")) return;
+      const st = document.createElement("style");
+      st.id = "daneaAutoModeCss";
+      st.textContent = `
+/* Danea — Auto mode switch (iOS-ish) */
+.daneaAutoCtl{ display:inline-flex; align-items:center; gap:8px; height:36px; padding:0 10px; border-radius:999px; border:1px solid rgba(0,0,0,.12); background:rgba(0,0,0,.02); user-select:none; }
+.daneaAutoCtl.is-on{ border-color: rgba(37,185,79,.35); background: rgba(37,185,79,.12); }
+.daneaAutoCtl.is-running{ border-color: rgba(10,132,255,.28); background: rgba(10,132,255,.10); }
+.daneaAutoLbl{ font-size:12px; font-weight:950; letter-spacing:.02em; color: rgba(0,0,0,.86); white-space:nowrap; }
+.iosSwitch{ position:relative; width:44px; height:24px; display:inline-block; flex:0 0 auto; }
+.iosSwitch input{ position:absolute; opacity:0; width:0; height:0; }
+.iosSwitch .iosSlider{ position:absolute; inset:0; border-radius:999px; background: rgba(0,0,0,.22); transition: background .18s ease; }
+.iosSwitch .iosSlider::before{ content:""; position:absolute; width:20px; height:20px; left:2px; top:2px; border-radius:50%; background:#fff; box-shadow:0 2px 8px rgba(0,0,0,.18); transition: transform .18s ease; }
+.iosSwitch input:checked + .iosSlider{ background: rgba(37,185,79,.72); }
+.iosSwitch input:checked + .iosSlider::before{ transform: translateX(20px); }
+`;
+      document.head.appendChild(st);
+    }catch(_){ }
+  }
+
+  function __syncAutoModeUi(tmpLabel){
+    const ctl = $("daneaAutoCtl");
+    const lbl = $("daneaAutoLbl");
+    const sw  = $("daneaAutoSwitch");
+    const on = !!S.autoMode;
+
+    try{ __ensureAutoModeCss(); }catch(_){ }
+
+    if (sw){
+      try{ sw.checked = on; }catch(_){ }
+    }
+    if (ctl){
+      try{ ctl.classList.toggle("is-on", on); }catch(_){ }
+      try{ ctl.classList.toggle("is-off", !on); }catch(_){ }
+    }
+    if (lbl){
+      try{ lbl.textContent = tmpLabel ? String(tmpLabel) : (on ? "AUTO" : "MANUALE"); }catch(_){ }
+    }
+  }
+
+  function __autoModeSetRunning(running){
+    const ctl = $("daneaAutoCtl");
+    if (!ctl) return;
+    try{ ctl.classList.toggle("is-running", !!running); }catch(_){ }
+  }
+
+  function setAutoMode(on){
+    S.autoMode = !!on;
+    __writeAutoModeToLS(S.autoMode);
+    __syncAutoModeUi();
+
+    // stop timers
+    try{ if (!S.autoMode && S.autoModeTimer) { clearTimeout(S.autoModeTimer); S.autoModeTimer = null; } }catch(_){ }
+
+    // se accendo: prova subito a scaricare i verdi (best-effort)
+    if (S.autoMode){
+      try{ maybeAutoModeTick("toggleOn"); }catch(_){ }
+    }
+  }
+
+  function scheduleAutoModeTick(delayMs){
+    if (!S.autoMode) return;
+    let d = Number(delayMs);
+    if (!Number.isFinite(d) || d < 0) d = 900;
+    d = Math.max(250, Math.min(60000, d));
+    try{ if (S.autoModeTimer) clearTimeout(S.autoModeTimer); }catch(_){ }
+    S.autoModeTimer = setTimeout(() => {
+      S.autoModeTimer = null;
+      autoModeTick().catch(()=>{});
+    }, d);
+  }
+
+  function maybeAutoModeTick(reason){
+    if (!S.autoMode) return;
+    // piccolo debounce (evita loop troppo aggressivi)
+    const now = Date.now();
+    if (now - (S.autoModeLastRun || 0) < 500) {
+      scheduleAutoModeTick(1200);
+      return;
+    }
+    scheduleAutoModeTick(700);
+  }
+
+  async function autoModeTick(){
+    if (!S.autoMode) { __syncAutoModeUi(); return; }
+    if (S.busy) { scheduleAutoModeTick(1500); return; }
+    if (!S.cacheReady) { scheduleAutoModeTick(1500); return; }
+
+    // serve la configurazione prodotti finiti per sapere se un DDT è verde
+    try{
+      if (!(S.fpByCode instanceof Map) || S.fpByCode.size === 0){
+        scheduleAutoModeTick(2000);
+        return;
+      }
+    }catch(_){ scheduleAutoModeTick(2000); return; }
+
+    cacheCompletedMap();
+
+    const baseVerify = (S.cache || []);
+    const verifyList = baseVerify.filter(d => d && d.key && !S.completedMap.has(d.key));
+    const green = verifyList.filter(d => { try{ return !!ddtStatus(d).ok; }catch(_){ return false; } });
+
+    if (!green.length){
+      __syncAutoModeUi();
+      return;
+    }
+
+    // run
+    S.autoModeLastRun = Date.now();
+    __autoModeSetRunning(true);
+    __syncAutoModeUi(`AUTO ${green.length}`);
+
+    try{
+      await dischargeAllGreenDdts({ silent: true, fromAuto: true });
+    }catch(e){
+      try{ console.warn("autoModeTick discharge failed", e); }catch(_){ }
+      try{ window.HubInv?.showToast?.("Auto-scarico DDT: errore", "err"); }catch(_){ }
+    }finally{
+      __autoModeSetRunning(false);
+      __syncAutoModeUi();
+      if (S.autoMode) scheduleAutoModeTick(2500);
+    }
+  }
+
+  function __initAutoMode(){
+    try{ __ensureAutoModeCss(); }catch(_){ }
+    try{ S.autoMode = __readAutoModeFromLS(); }catch(_){ S.autoMode = false; }
+    __syncAutoModeUi();
+    if (S.autoMode){
+      try{ maybeAutoModeTick("init"); }catch(_){ }
+    }
+  }
+
+  function __bindAutoModeSwitch(){
+    const sw = $("daneaAutoSwitch");
+    if (!sw) return;
+    if (sw.dataset && sw.dataset.bound === "1") return;
+    try{ if (sw.dataset) sw.dataset.bound = "1"; }catch(_){ }
+
+    try{ sw.addEventListener("change", () => { try{ setAutoMode(!!sw.checked); }catch(_){ } }); }catch(_){ }
+
+    // click sul testo = toggle (più comodo)
+    try{
+      const lbl = $("daneaAutoLbl");
+      if (lbl && !(lbl.dataset && lbl.dataset.bound === "1")){
+        if (lbl.dataset) lbl.dataset.bound = "1";
+        lbl.style.cursor = "pointer";
+        lbl.addEventListener("click", () => {
+          try{ sw.checked = !sw.checked; }catch(_){ }
+          try{ setAutoMode(!!sw.checked); }catch(_){ }
+        });
+      }
+    }catch(_){ }
+
+    // init state
+    __initAutoMode();
+  }
+
+  function __autoModeKick(reason){
+    if (!S.autoMode) return;
+    try{ maybeAutoModeTick(reason || "kick"); }catch(_){ }
   }
 
   function __syncAutoToggleUi(){
@@ -1952,6 +2141,7 @@
     const isActive = !!(view && view.classList.contains("active"));
 
     try{ __syncAutoToggleUi(); }catch(_){ }
+    try{ __syncAutoModeUi(); }catch(_){ }
 
     const pillCount = $("pillDaneaCount");
     const pillV = $("pillDaneaVerify");
@@ -2355,7 +2545,11 @@ Righe: ${st.total}`);
       }
 
       if (!movs.length){
-        alert("Inventario non pronto: movimenti non caricati.");
+        if (!silent){
+          alert("Inventario non pronto: movimenti non caricati.");
+        } else {
+          try{ window.HubInv?.showToast?.("Auto-scarico: inventario non pronto", "warn"); }catch(_){ }
+        }
         return;
       }
 
@@ -2514,23 +2708,29 @@ Disponibili: ${(tot).toLocaleString("it-IT")} (Cerea ${aC.toLocaleString("it-IT"
 
 
   // ===== BULK: scarica automaticamente TUTTI i DDT verdi (OK) =====
-  async function dischargeAllGreenDdts(){
+  async function dischargeAllGreenDdts(opts){
+    opts = (opts && typeof opts === "object") ? opts : {};
+    const silent = !!opts.silent;
+    const fromAuto = !!opts.fromAuto;
+
     if (S.busy) return;
 
     const H = S.hub;
-    if (!H || !H.fb || !H.fb.db || !H.FS) { alert("Hub non pronto"); return; }
-    if (!H.fb.user) {
-      try{ window.HubInv?.showToast?.("Accedi con Google per scaricare", "warn"); }catch(_){ alert("Accedi con Google"); }
+    if (!H || !H.fb || !H.fb.db || !H.FS) {
+      if (!silent) alert("Hub non pronto");
       return;
     }
 
-    // forza ON (manteniamo anche la logica per i singoli DDT)
-    try{ setAutoDischarge(true); }catch(_){ }
+    // "a prescindere da accesso utente": procediamo anche senza login.
+    const actor = (H.fb.user && (H.fb.user.email || H.fb.user.uid)) || "auto";
+    if (!H.fb.user && !silent){
+      try{ window.HubInv?.showToast?.("Auto-scarico: nessun utente loggato (procedo se le regole lo consentono)", "warn"); }catch(_){ }
+    }
 
     cacheCompletedMap();
 
     if (!S.cacheReady){
-      try{ window.HubInv?.showToast?.("Caricamento DDT da Firebase… riprova tra un attimo", "warn"); }catch(_){ }
+      if (!silent){ try{ window.HubInv?.showToast?.("Caricamento DDT da Firebase… riprova tra un attimo", "warn"); }catch(_){ } }
       return;
     }
 
@@ -2541,22 +2741,30 @@ Disponibili: ${(tot).toLocaleString("it-IT")} (Cerea ${aC.toLocaleString("it-IT"
     });
 
     if (!green.length){
-      try{ window.HubInv?.showToast?.("Nessun DDT verde da scaricare", "warn"); }catch(_){ }
+      if (!silent){ try{ window.HubInv?.showToast?.("Nessun DDT verde da scaricare", "warn"); }catch(_){ } }
       return;
     }
 
     // Ordine "tradizionale": prima i più vecchi
     green.sort((a,b) => String(a?.date||"").localeCompare(String(b?.date||"")) || String(a?.number||"").localeCompare(String(b?.number||"")));
 
-    const ok = confirm(`Scaricare automaticamente ${green.length} DDT verdi?\n\n• Verranno creati movimenti di scarico (materie prime + imballaggi)\n• I DDT passeranno in "Completati"`);
-    if (!ok) return;
+    if (!silent){
+      const ok = confirm(`Scaricare automaticamente ${green.length} DDT verdi?
 
-    const btn = $("btnDaneaAutoToggle");
-    const prevTxt = btn ? String(btn.textContent||"") : "";
+• Verranno creati movimenti di scarico (materie prime + imballaggi)
+• I DDT passeranno in "Completati"`);
+      if (!ok) return;
+    }
+
+    const swEl = $("daneaAutoSwitch");
+    const modeWord = S.autoMode ? "AUTO" : "MANUALE";
+    const setProg = (n) => { try{ __syncAutoModeUi(`${modeWord} ${n}/${green.length}`); }catch(_){ } };
 
     S.busy = true;
     try{
-      try{ if (btn) { btn.disabled = true; btn.textContent = `Scarico 0/${green.length}…`; } }catch(_){ }
+      try{ __autoModeSetRunning(true); }catch(_){ }
+      try{ if (swEl) swEl.disabled = true; }catch(_){ }
+      setProg(0);
 
       const { addDoc, setDoc, doc, collection, serverTimestamp, getDocs, query, orderBy } = H.FS;
 
@@ -2588,7 +2796,11 @@ Disponibili: ${(tot).toLocaleString("it-IT")} (Cerea ${aC.toLocaleString("it-IT"
       }
 
       if (!movs.length){
-        alert("Inventario non pronto: movimenti non caricati.");
+        if (!silent){
+          alert("Inventario non pronto: movimenti non caricati.");
+        } else {
+          try{ window.HubInv?.showToast?.("Auto-scarico: inventario non pronto", "warn"); }catch(_){ }
+        }
         return;
       }
 
@@ -2628,7 +2840,7 @@ Disponibili: ${(tot).toLocaleString("it-IT")} (Cerea ${aC.toLocaleString("it-IT"
         // se nel frattempo è diventato completato, salta
         if (S.completedMap.has(ddt.key)) continue;
 
-        try{ if (btn) btn.textContent = `Scarico ${doneCount}/${green.length}…`; }catch(_){ }
+        try{ setProg(doneCount); }catch(_){ }
 
         // 2) calcola fabbisogni componenti (somma per codice)
         const req = new Map();
@@ -2674,7 +2886,11 @@ Disponibili: ${(tot).toLocaleString("it-IT")} (Cerea ${aC.toLocaleString("it-IT"
           const aK = Math.max(0, _safeInt(avail.concamarise.get(low)));
           const tot = aC + aK;
           if (tot < it.qtyInt){
-            alert(`Scarico interrotto.\n\nScorta insufficiente per ${it.code} — ${it.name || ""}\n\nDDT ${ddt.number || "—"} del ${fmtDateIT(ddt.date)}\nRichiesti: ${it.qtyInt.toLocaleString("it-IT")} ${String(it.uom||"").trim()}\nDisponibili: ${(tot).toLocaleString("it-IT")} (Cerea ${aC.toLocaleString("it-IT")}, Concamarise ${aK.toLocaleString("it-IT")})`);
+            if (!silent){
+              alert(`Scarico interrotto\n\nScorta insufficiente per ${it.code} — ${it.name || ""}\n\nDDT ${ddt.number || "—"} del ${fmtDateIT(ddt.date)}\nRichiesti: ${it.qtyInt.toLocaleString("it-IT")} ${String(it.uom||"").trim()}\nDisponibili: ${(tot).toLocaleString("it-IT")} (Cerea ${aC.toLocaleString("it-IT")}, Concamarise ${aK.toLocaleString("it-IT")})`);
+            } else {
+              try{ window.HubInv?.showToast?.(`Auto-scarico: scorta insufficiente per ${it.code}`, "warn"); }catch(_){ }
+            }
             return;
           }
         }
@@ -2735,7 +2951,7 @@ Disponibili: ${(tot).toLocaleString("it-IT")} (Cerea ${aC.toLocaleString("it-IT"
             daneaDdtKey: String(ddt.key || "").trim(),
 
             createdAt: serverTimestamp(),
-            createdBy: H.fb.user.email || H.fb.user.uid
+            createdBy: actor
           });
 
           if (t1 > 0){
@@ -2763,14 +2979,14 @@ Disponibili: ${(tot).toLocaleString("it-IT")} (Cerea ${aC.toLocaleString("it-IT"
           movementIds: movementIds,
           autoDischarge: true,
           createdAt: serverTimestamp(),
-          createdBy: H.fb.user.email || H.fb.user.uid
+          createdBy: actor
         }, { merge: true });
 
         // aggiorna cache locale (evita doppi se la snapshot è lenta)
         try{ S.completedMap.set(String(ddt.key||"").trim(), { key: String(ddt.key||"").trim() }); }catch(_){ }
 
         doneCount++;
-        try{ if (btn) btn.textContent = `Scarico ${doneCount}/${green.length}…`; }catch(_){ }
+        try{ setProg(doneCount); }catch(_){ }
 
       }
 
@@ -2782,9 +2998,11 @@ Disponibili: ${(tot).toLocaleString("it-IT")} (Cerea ${aC.toLocaleString("it-IT"
     }catch(e){
       console.error(e);
       try{ window.HubInv?.showToast?.("Errore scarico automatico", "err"); }catch(_){ }
-      alert("Errore scarico automatico");
+      if (!silent) alert("Errore scarico automatico");
     }finally{
-      try{ if (btn) { btn.disabled = false; btn.textContent = prevTxt || (S.autoDischarge ? "Scarica DDT verdi" : "Scarica DDT verdi (scarico OFF)"); } }catch(_){ }
+      try{ if (swEl) swEl.disabled = false; }catch(_){ }
+      try{ __autoModeSetRunning(false); }catch(_){ }
+      try{ __syncAutoModeUi(); }catch(_){ }
       S.busy = false;
     }
   }
@@ -2834,12 +3052,8 @@ Disponibili: ${(tot).toLocaleString("it-IT")} (Cerea ${aC.toLocaleString("it-IT"
     $("daneaTabDone")?.addEventListener("click", () => setTab("done"));
     $("btnDaneaSend")?.addEventListener("click", () => sendSelectedFromDetail());
 
-    // Scarico automatico: crea movimenti per TUTTI i DDT verdi (quelli OK)
-    $("btnDaneaAutoToggle")?.addEventListener("click", async (e) => {
-      try{ e && e.preventDefault && e.preventDefault(); }catch(_){ }
-      try{ e && e.stopPropagation && e.stopPropagation(); }catch(_){ }
-      try{ await dischargeAllGreenDdts(); }catch(_){ }
-    });
+    // Scarico DDT automatico (switch)
+    try{ __bindAutoModeSwitch(); }catch(_){ }
 
     // list click
     $("daneaTbody")?.addEventListener("click", (e) => {
@@ -2986,6 +3200,7 @@ Disponibili: ${(tot).toLocaleString("it-IT")} (Cerea ${aC.toLocaleString("it-IT"
     try{ maybeAutoImportFinishedProducts(ddts); }catch(_){}
 
     render();
+    try{ __autoModeKick("xml"); }catch(_){ }
   }
 
   async function fetchNow(force){
@@ -3039,6 +3254,7 @@ Disponibili: ${(tot).toLocaleString("it-IT")} (Cerea ${aC.toLocaleString("it-IT"
         S.completed = arr;
         cacheCompletedMap();
         render();
+        try{ __autoModeKick("completed"); }catch(_){ }
       }, (err) => {
         console.warn("completed snapshot error", err);
       });
@@ -3088,10 +3304,12 @@ Disponibili: ${(tot).toLocaleString("it-IT")} (Cerea ${aC.toLocaleString("it-IT"
         S.cacheReady = true;
         rebuildCacheMap();
         render();
+        try{ __autoModeKick("cache"); }catch(_){ }
       }, (err) => {
         console.warn("daneaDdts snapshot error", err);
         S.cacheReady = true;
         render();
+        try{ __autoModeKick("cache_err"); }catch(_){ }
       });
     }catch(e){
       console.warn("subscribeCache failed", e);
@@ -3189,6 +3407,7 @@ function subscribeFinishedProducts(){
         S.finished = arr;
         S.fpByCode = map;
         render();
+        try{ __autoModeKick("fp"); }catch(_){ }
         // se dettaglio aperto, re-render
         if (S.selected && $("daneaDetailWrap")?.style.display !== "none"){
           renderDetail(S.selected, "verify");
@@ -3230,6 +3449,7 @@ function subscribeFinishedProductCategories(){
         S.fpCats = arr;
         S.fpCatByKey = map;
         render();
+        try{ __autoModeKick("fpcats"); }catch(_){ }
         if (S.selected && $("daneaDetailWrap")?.style.display !== "none"){
           renderDetail(S.selected, "verify");
         }
