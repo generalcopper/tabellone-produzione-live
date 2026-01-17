@@ -7906,6 +7906,7 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
     function __fpRenderAssignControls(){
       const wrap = document.getElementById('fpAssignWrap');
       const sel  = document.getElementById('fpAssignCat');
+      const flt  = document.getElementById('fpFilterUnclassified');
       const btn  = document.getElementById('btnFpAssignCat');
       const pill = document.getElementById('fpSelectedPill');
       const btnClear = document.getElementById('btnFpClearSel');
@@ -7921,6 +7922,10 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
           wrap.dataset.bound = '1';
           sel.addEventListener('change', () => {
             try{ __fpRenderAssignControls(); }catch(_){ }
+          });
+          flt && flt.addEventListener('change', () => {
+            try{ renderAnag(); }catch(_){ }
+            try{ __fpSyncSelectAllState(); }catch(_){ }
           });
           btn.addEventListener('click', async (e) => {
             try{ e.preventDefault(); e.stopPropagation(); }catch(_){ }
@@ -14688,7 +14693,7 @@ try{
         }
 
         const list0 = Array.isArray(finishedProducts) ? finishedProducts.slice() : [];
-        const filtered = list0.filter(fp => {
+        let filtered = list0.filter(fp => {
           const name = normTextKey(fp && (fp.name || fp.nome || ""));
           const code = normTextKey(fp && (fp.code || fp.sku || ""));
           const idk  = normTextKey(fp && (fp.id || ""));
@@ -14696,10 +14701,25 @@ try{
           return (name && name.includes(q)) || (code && code.includes(q)) || (idk && idk.includes(q));
         });
 
+        // filtro: prodotti non classificati
+        try{
+          const mode = String(document.getElementById("fpFilterUnclassified")?.value || "all").trim().toLowerCase();
+          if (mode === "unclassified"){
+            filtered = filtered.filter(fp => {
+              const k = String(fp && (fp.categoryKeyLower || fp.categoryKey || "") || "").trim();
+              return !k;
+            });
+          }
+        }catch(_){ }
+
+
         filtered.sort((a,b) => String((a && (a.nameLower || a.name || "")) || "").localeCompare(String((b && (b.nameLower || b.name || "")) || ""), "it", { sensitivity:"base" }));
 
         if (!filtered.length) {
-          const msg = q ? "Nessun prodotto finito trovato." : "Nessun prodotto finito.";
+          const __mode = String(document.getElementById("fpFilterUnclassified")?.value || "all").trim().toLowerCase();
+          const msg = (__mode === "unclassified")
+            ? (q ? "Nessun prodotto finito non classificato trovato." : "Nessun prodotto finito non classificato.")
+            : (q ? "Nessun prodotto finito trovato." : "Nessun prodotto finito.");
           try { if (anagTbody) anagTbody.innerHTML = `<tr><td class="td-muted" colspan="4">${escapeHtml(msg)}</td></tr>`; } catch(_){}
           try{ __fpRenderAssignControls(); }catch(_){}
           try{ __fpSyncSelectAllState(); }catch(_){}
