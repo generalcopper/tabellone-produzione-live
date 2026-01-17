@@ -9313,7 +9313,7 @@ async function deleteMovement(id) {
 
         const fmt = (n) => (Number(n) || 0).toLocaleString("it-IT");
 
-        // Dashboard: lista "cockpit" (no tabelle), con scroll SOLO dentro il riquadro
+        // Dashboard: tabella compatta (niente righe “a riquadro”), con scroll SOLO dentro il riquadro
         // così la Home non diventa scrollabile su desktop.
         const MAX_ROWS = 200;
 
@@ -9327,63 +9327,47 @@ async function deleteMovement(id) {
           const show = list.slice(0, MAX_ROWS);
           const more = list.length - show.length;
 
-          const items = show.map(r => {
-            const codeRaw = (r && (r.__displayCode || r.code)) || "";
-            const itemRaw = (r && r.item) || "";
-            const custRaw = (r && r.customer) || "";
+          const rows = show.map(r => {
+            const code = escapeHtml(r.__displayCode || r.code || "");
+            const item = escapeHtml(r.item || "");
+            const cust = escapeHtml(r.customer || "");
+            const qty = fmt(safeInt(r.qty));
+            const thr = fmt(safeInt(r.threshold));
 
-            const code = escapeHtml(codeRaw);
-            const item = escapeHtml(itemRaw);
-            const cust = escapeHtml(custRaw);
-
-            const qInt = safeInt(r && r.qty);
-            const tInt = safeInt(r && r.threshold);
-            const qty = fmt(qInt);
-            const thr = fmt(tInt);
-
-            // livello visivo (cockpit)
-            let sev = "warn";
-            try{
-              const ratio = (tInt > 0) ? (qInt / tInt) : 0;
-              if (ratio <= 0.25) sev = "bad";
-              else if (ratio <= 0.6) sev = "warn";
-              else sev = "ok";
-            }catch(_){ sev = "warn"; }
-
-            const codeHtml = code
-              ? `<div class="lowStockCode">${code}</div>`
-              : `<div class="lowStockCode td-muted">—</div>`;
-
-            const nameHtml = item
-              ? `<div class="lowStockName">${item}</div>`
-              : `<div class="lowStockName td-muted">—</div>`;
-
-            const metaHtml = cust
-              ? `<div class="lowStockMeta">Fornitore: ${cust}</div>`
-              : ``;
+            const codeCell = code || "—";
+            const itemCell = item || "—";
+            const custCell = cust || "—";
 
             return `
-              <div class="lowStockItem" role="listitem" data-sev="${sev}">
-                <div class="lowStockItemMain">
-                  ${codeHtml}
-                  ${nameHtml}
-                  ${metaHtml}
-                </div>
-                <div class="lowStockQty">
-                  <div class="n">${qty}</div>
-                  <div class="t">Soglia ${thr}</div>
-                </div>
+              <div class="lowStockCockpitRow" role="row">
+                <div class="lowStockCockpitCell isCode colCode" role="cell">${codeCell}</div>
+                <div class="lowStockCockpitCell colItem" role="cell">${itemCell}</div>
+                <div class="lowStockCockpitCell isCust colCust" role="cell">${custCell}</div>
+                <div class="lowStockCockpitCell isQty colQty" role="cell">${qty}</div>
+                <div class="lowStockCockpitCell isThr colThr" role="cell">${thr}</div>
               </div>
             `;
           }).join("");
 
           const moreRow = (more > 0)
-            ? `<div class="lowStockMore td-muted">+${fmt(more)} altri…</div>`
+            ? `<div class="lowStockCockpitMore">+${fmt(more)} altri…</div>`
             : ``;
 
-          try{ el.setAttribute("role","list"); }catch(_){ }
-          try{ if (!el.hasAttribute("tabindex")) el.setAttribute("tabindex","0"); }catch(_){ }
-          el.innerHTML = items + moreRow;
+          el.innerHTML = `
+            <div class="lowStockCockpit" role="table" aria-label="Sottoscorta">
+              <div class="lowStockCockpitHead" role="row">
+                <div class="lowStockCockpitCell colCode" role="columnheader">Codice</div>
+                <div class="lowStockCockpitCell colItem" role="columnheader">Articolo</div>
+                <div class="lowStockCockpitCell colCust" role="columnheader">Fornitore</div>
+                <div class="lowStockCockpitCell colQty" role="columnheader" style="text-align:right;">Qtà</div>
+                <div class="lowStockCockpitCell colThr" role="columnheader" style="text-align:right;">Soglia</div>
+              </div>
+              <div class="lowStockCockpitBody" role="rowgroup" tabindex="0">
+                ${rows}
+                ${moreRow}
+              </div>
+            </div>
+          `;
         };
 
         renderList(cerea, lowStockListCerea);
