@@ -84,6 +84,109 @@
 
   function norm(s){ return String(s ?? "").trim().toLowerCase(); }
 
+
+  function __ensureDaneaAutoToggleStyles(){
+    try{
+      if (document.getElementById("daneaAutoToggleCss")) return;
+      const st = document.createElement("style");
+      st.id = "daneaAutoToggleCss";
+      st.textContent = `
+#viewDaneaDdt .daneaAutoCtl{
+  display:inline-flex;
+  align-items:center;
+  gap:8px;
+  height:36px;
+  padding:0 10px;
+  border:1px solid rgba(60,60,67,.22);
+  border-radius:999px;
+  background: rgba(255,255,255,.72);
+  cursor:pointer;
+  user-select:none;
+  -webkit-tap-highlight-color: transparent;
+  position: relative;
+}
+#viewDaneaDdt .daneaAutoLabel{
+  font-size:11px;
+  font-weight:950;
+  letter-spacing:.08em;
+  text-transform:uppercase;
+  color: rgba(0,0,0,.62);
+}
+#viewDaneaDdt .daneaAutoInput{
+  position:absolute;
+  left:-9999px;
+  top:0;
+  opacity:0;
+  width:1px;
+  height:1px;
+}
+#viewDaneaDdt .daneaAutoTrack{
+  width:42px;
+  height:24px;
+  border-radius:999px;
+  background: rgba(0,0,0,.14);
+  border: 1px solid rgba(0,0,0,.10);
+  position: relative;
+  flex: 0 0 auto;
+  transition: background .16s ease, border-color .16s ease;
+}
+#viewDaneaDdt .daneaAutoTrack::after{
+  content:"";
+  position:absolute;
+  top:2px;
+  left:2px;
+  width:20px;
+  height:20px;
+  border-radius:999px;
+  background:#fff;
+  box-shadow: 0 1px 2px rgba(0,0,0,.18);
+  transition: transform .18s cubic-bezier(.22,.61,.36,1);
+}
+#viewDaneaDdt .daneaAutoInput:checked + .daneaAutoTrack{
+  background: rgba(37,185,79,1);
+  border-color: rgba(37,185,79,1);
+}
+#viewDaneaDdt .daneaAutoInput:checked + .daneaAutoTrack::after{
+  transform: translateX(18px);
+}
+#viewDaneaDdt .daneaAutoInput:focus-visible + .daneaAutoTrack{
+  outline: 3px solid rgba(10,132,255,.22);
+  outline-offset: 2px;
+}
+#viewDaneaDdt .daneaAutoState{
+  font-size:11px;
+  font-weight:950;
+  letter-spacing:.08em;
+  text-transform:uppercase;
+  color: rgba(0,0,0,.62);
+}
+#viewDaneaDdt .daneaAutoState.is-on{
+  color: rgba(0,70,20,.86);
+}
+
+#viewDaneaDdt .daneaTabs{
+  height:36px;
+  border-radius:999px;
+}
+#viewDaneaDdt .daneaTabs button{
+  height:36px;
+  padding:0 10px;
+  font-size:12px;
+  font-weight:950;
+}
+#viewDaneaDdt .daneaTabs button .pill{
+  height:18px !important;
+  padding:0 8px !important;
+  border-radius:999px !important;
+}
+`;
+      document.head.appendChild(st);
+    }catch(_){ }
+  }
+
+  try{ window.__ensureDaneaAutoToggleStyles = __ensureDaneaAutoToggleStyles; }catch(_){ }
+
+
   function isDocLike(mv){
     try{
       var src = String(mv.source || "").toUpperCase();
@@ -1499,7 +1602,12 @@
             <button id="daneaTabVerify" class="active" type="button">Da verificare <span class="pill" id="pillDaneaVerify" style="height:auto; padding:2px 8px; border-radius:999px; border:0; background:rgba(10,132,255,.12); color:rgba(0,0,0,.86);">0</span></button>
             <button id="daneaTabDone" type="button">Completati <span class="pill" id="pillDaneaDone" style="height:auto; padding:2px 8px; border-radius:999px; border:0; background:rgba(0,0,0,.06); color:rgba(0,0,0,.86);">0</span></button>
           </div>
-          <button class="btn btn-ghost mini" id="btnDaneaAutoToggle" type="button" aria-pressed="true" title="Attiva/disattiva scarico automatico">Scarico automatico: ATTIVO</button>
+          <label class="daneaAutoCtl" title="Scarico automatico (crea movimenti)">
+            <span class="daneaAutoLabel">Auto</span>
+            <input class="daneaAutoInput" id="btnDaneaAutoToggle" type="checkbox" role="switch" aria-label="Scarico automatico" />
+            <span class="daneaAutoTrack" aria-hidden="true"></span>
+            <span class="daneaAutoState" id="daneaAutoState">ON</span>
+          </label>
           <div class="pill" id="pillDaneaCount">0</div>
           <button class="iconBtn" id="btnCloseDaneaDdt" type="button" aria-label="Chiudi">×</button>
         </div>
@@ -1705,24 +1813,17 @@
   }
 
   function __syncAutoToggleUi(){
-    const btn = $("btnDaneaAutoToggle");
+    const sw = $("btnDaneaAutoToggle"); // checkbox
+    const st = $("daneaAutoState");
     const on = !!S.autoDischarge;
 
-    if (btn){
-      try{ btn.setAttribute("aria-pressed", on ? "true" : "false"); }catch(_){ }
-      try{ btn.textContent = on ? "Scarico automatico: ATTIVO" : "Scarico automatico: DISATTIVATO"; }catch(_){ }
-      try{
-        // Colori: verde = ON, grigio = OFF (override anche se in overlay i bottoni sono blu)
-        if (on){
-          btn.style.setProperty("background", "rgba(37,185,79,.14)", "important");
-          btn.style.setProperty("border-color", "rgba(37,185,79,.35)", "important");
-          btn.style.setProperty("color", "rgba(0,70,20,.92)", "important");
-        } else {
-          btn.style.setProperty("background", "rgba(0,0,0,.06)", "important");
-          btn.style.setProperty("border-color", "rgba(0,0,0,.12)", "important");
-          btn.style.setProperty("color", "rgba(0,0,0,.84)", "important");
-        }
-      }catch(_){ }
+    if (sw){
+      try{ sw.checked = on; }catch(_){ }
+      try{ sw.setAttribute("aria-checked", on ? "true" : "false"); }catch(_){ }
+    }
+    if (st){
+      try{ st.textContent = on ? "ON" : "OFF"; }catch(_){ }
+      try{ st.classList.toggle("is-on", on); }catch(_){ }
     }
 
     const btnSend = $("btnDaneaSend");
@@ -1730,6 +1831,7 @@
       try{ btnSend.textContent = on ? "Completa (scarica)" : "Completa (senza scarico)"; }catch(_){ }
     }
   }
+
 
   function setAutoDischarge(on){
     S.autoDischarge = !!on;
@@ -2557,10 +2659,20 @@ Disponibili: ${(tot).toLocaleString("it-IT")} (Cerea ${aC.toLocaleString("it-IT"
     $("daneaTabDone")?.addEventListener("click", () => setTab("done"));
     $("btnDaneaSend")?.addEventListener("click", () => sendSelectedFromDetail());
 
-    // toggle scarico automatico (on/off)
-    $("btnDaneaAutoToggle")?.addEventListener("click", () => {
-      try{ setAutoDischarge(!S.autoDischarge); }catch(_){ }
-    });
+    // toggle scarico automatico (on/off) — robusto anche se la UI viene re-renderizzata
+    if (!S._boundAutoToggle){
+      S._boundAutoToggle = true;
+      document.addEventListener("change", (ev) => {
+        const t = ev && ev.target;
+        if (!t || t.id !== "btnDaneaAutoToggle") return;
+        if (!t.closest || !t.closest("#viewDaneaDdt")) return;
+        try{ setAutoDischarge(!!t.checked); }catch(_){ }
+        try{
+          const msg = (!!t.checked) ? "Scarico automatico: ATTIVO" : "Scarico automatico: DISATTIVATO";
+          window.HubInv?.showToast?.(msg);
+        }catch(_){ }
+      });
+    }
 
     // list click
     $("daneaTbody")?.addEventListener("click", (e) => {
@@ -2988,6 +3100,9 @@ function waitForHub(attempt){
   function init(){
     const root = $("viewDaneaDdt");
     if (!root) return;
+
+    // CSS toggle (iOS switch)
+    try{ window.__ensureDaneaAutoToggleStyles && window.__ensureDaneaAutoToggleStyles(); }catch(_){ }
 
     // restore prefs (hidden UI) — always auto-load XML when you enter
     try{
