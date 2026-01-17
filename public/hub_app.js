@@ -1499,6 +1499,7 @@
             <button id="daneaTabVerify" class="active" type="button">Da verificare <span class="pill" id="pillDaneaVerify" style="height:auto; padding:2px 8px; border-radius:999px; border:0; background:rgba(10,132,255,.12); color:rgba(0,0,0,.86);">0</span></button>
             <button id="daneaTabDone" type="button">Completati <span class="pill" id="pillDaneaDone" style="height:auto; padding:2px 8px; border-radius:999px; border:0; background:rgba(0,0,0,.06); color:rgba(0,0,0,.86);">0</span></button>
           </div>
+          <button class="btn btn-ghost mini" id="btnDaneaAutoToggle" type="button" aria-pressed="true" title="Attiva/disattiva scarico automatico">Scarico automatico: ATTIVO</button>
           <div class="pill" id="pillDaneaCount">0</div>
           <button class="iconBtn" id="btnCloseDaneaDdt" type="button" aria-label="Chiudi">×</button>
         </div>
@@ -1650,11 +1651,13 @@
   "use strict";
 
   const LS_URL = "hubinv_danea_xml_url";
+  const LS_AUTO = "hubinv_danea_auto_discharge"; // 1=on, 0=off
   // Default endpoint (Cloud Run proxy). If you deploy a new service, update this.
   const DEFAULT_XML_URL_BASE = "https://danea-xml-proxy-537555699968.europe-west8.run.app";
 
   const S = {
     xmlUrl: "",
+    autoDischarge: true,
     lastXmlHash: "",
     lastFetchedAt: "",
     ddts: [],             // from XML (solo per sync, NON per UI)
@@ -1687,6 +1690,59 @@
   function escAttr(s){ return esc(s).replace(/\n/g, " "); }
 
   function norm(s){ return String(s ?? "").trim().toLowerCase(); }
+
+  function __readAutoFromLS(){
+    try{
+      const v = String(localStorage.getItem(LS_AUTO) || "").trim().toLowerCase();
+      if (!v) return true; // default ON
+      if (v === "0" || v === "false" || v === "off" || v === "no") return false;
+      return true;
+    }catch(_){ return true; }
+  }
+
+  function __writeAutoToLS(on){
+    try{ localStorage.setItem(LS_AUTO, on ? "1" : "0"); }catch(_){ }
+  }
+
+  function __syncAutoToggleUi(){
+    const btn = $("btnDaneaAutoToggle");
+    const on = !!S.autoDischarge;
+
+    if (btn){
+      try{ btn.setAttribute("aria-pressed", on ? "true" : "false"); }catch(_){ }
+      try{ btn.textContent = on ? "Scarico automatico: ATTIVO" : "Scarico automatico: DISATTIVATO"; }catch(_){ }
+      try{
+        // Colori: verde = ON, grigio = OFF (override anche se in overlay i bottoni sono blu)
+        if (on){
+          btn.style.setProperty("background", "rgba(37,185,79,.14)", "important");
+          btn.style.setProperty("border-color", "rgba(37,185,79,.35)", "important");
+          btn.style.setProperty("color", "rgba(0,70,20,.92)", "important");
+        } else {
+          btn.style.setProperty("background", "rgba(0,0,0,.06)", "important");
+          btn.style.setProperty("border-color", "rgba(0,0,0,.12)", "important");
+          btn.style.setProperty("color", "rgba(0,0,0,.84)", "important");
+        }
+      }catch(_){ }
+    }
+
+    const btnSend = $("btnDaneaSend");
+    if (btnSend){
+      try{ btnSend.textContent = on ? "Completa (scarica)" : "Completa (senza scarico)"; }catch(_){ }
+    }
+  }
+
+  function setAutoDischarge(on){
+    S.autoDischarge = !!on;
+    __writeAutoToLS(S.autoDischarge);
+    __syncAutoToggleUi();
+    // se dettaglio aperto, aggiorna footer + stato bottone
+    try{
+      const wrap = $("daneaDetailWrap");
+      if (S.selected && wrap && wrap.style.display !== "none"){
+        renderDetail(S.selected, S.tab === "done" ? "done" : "verify");
+      }
+    }catch(_){ }
+  }
 
   function hashStr(str){
     // fast non-crypto hash (deterministico)
@@ -1895,6 +1951,8 @@
     const view = $("viewDaneaDdt");
     const isActive = !!(view && view.classList.contains("active"));
 
+    try{ __syncAutoToggleUi(); }catch(_){ }
+
     const pillCount = $("pillDaneaCount");
     const pillV = $("pillDaneaVerify");
     const pillD = $("pillDaneaDone");
@@ -2017,6 +2075,7 @@
       btnSend.style.display = isDone ? "none" : "";
       const st = ddtStatus(ddt);
       btnSend.disabled = !st.ok;
+      btnSend.textContent = (S.autoDischarge ? "Completa (scarica)" : "Completa (senza scarico)");
     }
     tbody.innerHTML = rows.length ? rows.map(r => {
       const code = String(r.code || "").trim();
@@ -2056,8 +2115,9 @@
 
     if (foot){
       const st = ddtStatus(ddt);
+      const autoOn = !!S.autoDischarge;
       const msg = isDone ? "Questo DDT è già stato scaricato: eliminandolo (in tab Completati) si resetta lo scarico." :
-        (st.ok ? "Tutte le righe sono configurate: puoi completare e scaricare componenti." : "Configura le righe rosse (distinta base) per poter completare.");
+        (st.ok ? (autoOn ? "Tutte le righe sono configurate: puoi completare e scaricare componenti." : "Tutte le righe sono configurate: puoi completare (scarico automatico DISATTIVATO).") : "Configura le righe rosse (distinta base) per poter completare.");
       foot.textContent = msg;
     }
   }
@@ -2189,7 +2249,15 @@
     const st = ddtStatus(ddt);
     if (!st.ok) { alert("Non tutte le righe sono configurate (cerchi rossi)."); return; }
 
-    const ok = confirm(`Completare e scaricare componenti?
+    const autoOn = !!S.autoDischarge;
+
+    const ok = confirm(autoOn ? `Completare e scaricare componenti?
+
+DDT ${ddt.number} del ${fmtDateIT(ddt.date)}
+Righe: ${st.total}` : `Completare SENZA scarico automatico?
+
+• Il DDT finirà in "Completati"
+• NON verranno creati movimenti di inventario
 
 DDT ${ddt.number} del ${fmtDateIT(ddt.date)}
 Righe: ${st.total}`);
@@ -2198,6 +2266,32 @@ Righe: ${st.total}`);
     S.busy = true;
     try{
       const { addDoc, setDoc, doc, collection, serverTimestamp } = H.FS;
+
+      // Se lo scarico automatico è disattivato: segna solo come completato (senza movimenti)
+      if (!autoOn){
+        const doneId = encodeURIComponent(String(ddt.key || '').trim());
+        const doneRef = doc(H.fb.db, 'orgs', H.ORG_ID, 'daneaDdtCompleted', doneId);
+        await setDoc(doneRef, {
+          key: String(ddt.key || '').trim(),
+          number: String(ddt.number || '').trim(),
+          date: String(ddt.date || '').trim(),
+          customer: String(ddt.customer || '').trim(),
+          rows: (ddt.rows || []).map(x => ({ code:x.code||'', desc:x.desc||'', qty:x.qty??null, qtyRaw:x.qtyRaw||'', uom:x.uom||'' })),
+          warehouse: 'none',
+          allocations: [],
+          xmlHash: String(ddt.hash || ''),
+          movementIds: [],
+          autoDischarge: false,
+          createdAt: serverTimestamp(),
+          createdBy: H.fb.user.email || H.fb.user.uid
+        }, { merge: true });
+
+        try{ window.HubInv?.showToast?.('DDT completato (senza scarico)'); }catch(_){ }
+        setDetailOpen(false);
+        setTab('done');
+        await fetchNow(true);
+        return;
+      }
 
       // 1) calcola fabbisogni componenti (somma per codice)
       const req = new Map(); // codeLower -> {code,name,uom,qtyFloat}
@@ -2398,6 +2492,7 @@ Disponibili: ${(tot).toLocaleString("it-IT")} (Cerea ${aC.toLocaleString("it-IT"
         allocations: allocations,
         xmlHash: String(ddt.hash || ""),
         movementIds: movementIds,
+        autoDischarge: true,
         createdAt: serverTimestamp(),
         createdBy: H.fb.user.email || H.fb.user.uid
       }, { merge: true });
@@ -2461,6 +2556,11 @@ Disponibili: ${(tot).toLocaleString("it-IT")} (Cerea ${aC.toLocaleString("it-IT"
     $("daneaTabVerify")?.addEventListener("click", () => setTab("verify"));
     $("daneaTabDone")?.addEventListener("click", () => setTab("done"));
     $("btnDaneaSend")?.addEventListener("click", () => sendSelectedFromDetail());
+
+    // toggle scarico automatico (on/off)
+    $("btnDaneaAutoToggle")?.addEventListener("click", () => {
+      try{ setAutoDischarge(!S.autoDischarge); }catch(_){ }
+    });
 
     // list click
     $("daneaTbody")?.addEventListener("click", (e) => {
@@ -2896,6 +2996,9 @@ function waitForHub(attempt){
       S.xmlUrl = normalizeDaneaXmlUrl(base);
       try{ localStorage.setItem(LS_URL, S.xmlUrl); }catch(_){}
     }catch(_){}
+
+    // restore toggle (default ON)
+    try{ setAutoDischarge(__readAutoFromLS()); }catch(_){ }
 
     bindEvents();
     render();
