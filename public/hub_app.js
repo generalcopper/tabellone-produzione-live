@@ -10780,10 +10780,14 @@ async function deleteMovement(id) {
        - UI: ticker testo grande su sfondo bianco (NO cards)
        ========================================================= */
     let __homeDaneaMarqueeBound = false;
-    let __homeDaneaMarqueeRaf = 0;
-    let __homeDaneaMarqueeX = 0;
-    let __homeDaneaMarqueeSeqW = 0;
-    let __homeDaneaMarqueePaused = false;
+    // Vertical ticker (step every few seconds)
+    let __homeDaneaMarqueeRaf = 0;          // interval id
+    let __homeDaneaMarqueeIdx = 0;          // current item index
+    let __homeDaneaMarqueeItems = [];       // array of HTML strings (1 item per slide)
+    let __homeDaneaMarqueeSig = "";         // signature to avoid restarting on every render
+    let __homeDaneaMarqueePaused = false;   // pause on hover/focus
+    let __homeDaneaMarqueeBusy = false;     // running transition
+    let __homeDaneaMarqueeH = 0;            // cached slide height
 
     function __fmtDateShortIT(v){
       const s = String(v || "").trim();
@@ -10999,50 +11003,106 @@ async function deleteMovement(id) {
     }
 
     function __stopHomeDaneaMarquee(){
-      try{ if (__homeDaneaMarqueeRaf) cancelAnimationFrame(__homeDaneaMarqueeRaf); }catch(_){ }
+      // stop vertical ticker
+      try{ if (__homeDaneaMarqueeRaf) clearInterval(__homeDaneaMarqueeRaf); }catch(_){ }
       __homeDaneaMarqueeRaf = 0;
+      __homeDaneaMarqueeBusy = false;
+      try{
+        if (homeDaneaTickerTrack){
+          homeDaneaTickerTrack.style.transition = "none";
+          homeDaneaTickerTrack.style.transform = "translateY(0px)";
+        }
+      }catch(_){ }
     }
 
-    function __startHomeDaneaMarquee(){
+    function __homeDaneaMeasureH(){
       try{
-        if (!homeDaneaCockpit || !homeDaneaTickerTrack || !homeDaneaTickerSeq) return;
+        const ref = homeDaneaTicker || homeDaneaCockpit;
+        const r = ref ? ref.getBoundingClientRect() : null;
+        const h = Math.round((r && r.height) || 0);
+        return (h > 10) ? h : 0;
+      }catch(_){ return 0; }
+    }
+
+    function __homeDaneaSyncHeights(){
+      const h = __homeDaneaMeasureH();
+      if (!h) return 0;
+      __homeDaneaMarqueeH = h;
+      try{
+        if (homeDaneaTickerSeq) homeDaneaTickerSeq.style.height = h + "px";
+        if (homeDaneaTickerSeqClone) homeDaneaTickerSeqClone.style.height = h + "px";
+      }catch(_){ }
+      return h;
+    }
+
+    function __homeDaneaSetSlides(idx){
+      const items = Array.isArray(__homeDaneaMarqueeItems) ? __homeDaneaMarqueeItems : [];
+      if (!items.length) return;
+      const n = items.length;
+      const i = ((Number(idx) || 0) % n + n) % n;
+      const next = (i + 1) % n;
+      try{ if (homeDaneaTickerSeq) homeDaneaTickerSeq.innerHTML = items[i] || ""; }catch(_){ }
+      try{ if (homeDaneaTickerSeqClone) homeDaneaTickerSeqClone.innerHTML = items[next] || ""; }catch(_){ }
+    }
+
+    function __homeDaneaStep(){
+      try{
+        const items = Array.isArray(__homeDaneaMarqueeItems) ? __homeDaneaMarqueeItems : [];
+        if (!items || items.length <= 1) return;
+        if (!homeDaneaTickerTrack || !homeDaneaTickerSeq || !homeDaneaTickerSeqClone) return;
+        if (__homeDaneaMarqueePaused || __homeDaneaMarqueeBusy) return;
+
+        const h = __homeDaneaSyncHeights() || __homeDaneaMarqueeH;
+        if (!h) return;
+
+        // refresh "next" in clone (in case list changed)
+        const nextIdx = (__homeDaneaMarqueeIdx + 1) % items.length;
+        try{ homeDaneaTickerSeqClone.innerHTML = items[nextIdx] || ""; }catch(_){ }
+
+        __homeDaneaMarqueeBusy = true;
+
+        requestAnimationFrame(() => {
+          try{
+            if (!homeDaneaTickerTrack) return;
+            homeDaneaTickerTrack.style.transition = "transform 520ms cubic-bezier(.22,.61,.36,1)";
+            homeDaneaTickerTrack.style.transform = `translateY(${-h}px)`;
+          }catch(_){ }
+        });
+      }catch(_){ }
+    }
+
+    function __startHomeDaneaMarquee(preserveIndex){
+      try{
+        if (!homeDaneaCockpit || !homeDaneaTickerTrack || !homeDaneaTickerSeq || !homeDaneaTickerSeqClone) return;
+
+        const items = Array.isArray(__homeDaneaMarqueeItems) ? __homeDaneaMarqueeItems : [];
         __stopHomeDaneaMarquee();
-        __homeDaneaMarqueeX = 0;
-        __homeDaneaMarqueeSeqW = 0;
-        homeDaneaTickerTrack.style.transform = "translateX(0px)";
 
-        const seqRect = homeDaneaTickerSeq.getBoundingClientRect();
-        const wrapRect = homeDaneaCockpit.getBoundingClientRect();
-        const seqW = Math.max(0, seqRect.width || 0);
-        const wrapW = Math.max(0, wrapRect.width || 0);
-
-        __homeDaneaMarqueeSeqW = seqW;
-
-        // Se il contenuto non supera il contenitore, niente scroll
-        if (!seqW || seqW <= wrapW - 32){
+        if (!items.length){
+          try{ homeDaneaTickerSeq.innerHTML = '<span class="homeDaneaTickerItem is-muted">—</span>'; }catch(_){ }
+          try{ homeDaneaTickerSeqClone.innerHTML = ''; }catch(_){ }
           return;
         }
 
-        // Velocita cinema (leggermente piu lenta)
-        const base = 0.46;
-        const add = Math.min(0.26, seqW / 5200);
-        const speed = base + add;
+        if (!preserveIndex) __homeDaneaMarqueeIdx = 0;
+        if (!Number.isFinite(Number(__homeDaneaMarqueeIdx))) __homeDaneaMarqueeIdx = 0;
+        if (__homeDaneaMarqueeIdx < 0) __homeDaneaMarqueeIdx = 0;
+        if (__homeDaneaMarqueeIdx >= items.length) __homeDaneaMarqueeIdx = 0;
 
-        const tick = () => {
-          try{
-            if (!homeDaneaTickerTrack || !homeDaneaTickerSeq) { __stopHomeDaneaMarquee(); return; }
-            if (!__homeDaneaMarqueePaused){
-              __homeDaneaMarqueeX += speed;
-              if (__homeDaneaMarqueeSeqW > 0 && __homeDaneaMarqueeX >= __homeDaneaMarqueeSeqW){
-                __homeDaneaMarqueeX = 0;
-              }
-              homeDaneaTickerTrack.style.transform = `translateX(${-__homeDaneaMarqueeX}px)`;
-            }
-          }catch(_){ }
-          __homeDaneaMarqueeRaf = requestAnimationFrame(tick);
-        };
+        __homeDaneaSyncHeights();
+        __homeDaneaSetSlides(__homeDaneaMarqueeIdx);
 
-        __homeDaneaMarqueeRaf = requestAnimationFrame(tick);
+        try{
+          homeDaneaTickerTrack.style.transition = "none";
+          homeDaneaTickerTrack.style.transform = "translateY(0px)";
+        }catch(_){ }
+
+        // Se 0/1 elementi, niente rotazione
+        if (items.length <= 1) return;
+
+        // Ogni tot secondi (gestionale / leggibile)
+        const stepMs = 4200;
+        __homeDaneaMarqueeRaf = setInterval(() => { try{ __homeDaneaStep(); }catch(_){ } }, stepMs);
       }catch(_){ }
     }
 
@@ -11058,6 +11118,42 @@ async function deleteMovement(id) {
         homeDaneaCockpit.addEventListener("pointerleave", resume);
         homeDaneaCockpit.addEventListener("focusin", pause);
         homeDaneaCockpit.addEventListener("focusout", resume);
+
+        // Vertical ticker: swap slides on transition end
+        try{
+          if (homeDaneaTickerTrack && !(homeDaneaTickerTrack.dataset && homeDaneaTickerTrack.dataset.vBound === "1")){
+            try{ if (homeDaneaTickerTrack.dataset) homeDaneaTickerTrack.dataset.vBound = "1"; }catch(_){ }
+            homeDaneaTickerTrack.addEventListener("transitionend", (ev) => {
+              try{
+                if (ev && ev.propertyName && ev.propertyName !== "transform") return;
+                if (!__homeDaneaMarqueeBusy) return;
+
+                const items = Array.isArray(__homeDaneaMarqueeItems) ? __homeDaneaMarqueeItems : [];
+                if (!items.length){ __homeDaneaMarqueeBusy = false; return; }
+
+                const nextIdx = (__homeDaneaMarqueeIdx + 1) % items.length;
+                const upcoming = (nextIdx + 1) % items.length;
+
+                // 1) mentre il clone e visibile, copia il clone nel primo slot
+                try{ if (homeDaneaTickerSeq) homeDaneaTickerSeq.innerHTML = items[nextIdx] || ""; }catch(_){ }
+
+                // 2) snap back (senza animazione)
+                try{
+                  homeDaneaTickerTrack.style.transition = "none";
+                  homeDaneaTickerTrack.style.transform = "translateY(0px)";
+                  // force reflow (stabilizza il prossimo step)
+                  void homeDaneaTickerTrack.offsetHeight;
+                }catch(_){ }
+
+                // 3) prepara il prossimo "clone" (ora e sotto, non visibile)
+                try{ if (homeDaneaTickerSeqClone) homeDaneaTickerSeqClone.innerHTML = items[upcoming] || ""; }catch(_){ }
+
+                __homeDaneaMarqueeIdx = nextIdx;
+              }catch(_){ }
+              __homeDaneaMarqueeBusy = false;
+            });
+          }
+        }catch(_){ }
 
         // Click su item => apre Movimenti filtrati
         homeDaneaCockpit.addEventListener("click", (e) => {
@@ -11077,7 +11173,7 @@ async function deleteMovement(id) {
           }catch(_){ }
         });
 
-        window.addEventListener("resize", () => { try{ __startHomeDaneaMarquee(); }catch(_){ } }, { passive: true });
+        window.addEventListener("resize", () => { try{ __startHomeDaneaMarquee(true); }catch(_){ } }, { passive: true });
       }catch(_){ }
     }
 
@@ -11144,15 +11240,15 @@ async function deleteMovement(id) {
         const fmt = (n) => (Number(n) || 0).toLocaleString("it-IT");
         const list = __getHomeDaneaGroups();
 
-        const chunks = [];
+        const items = [];
         const autoLbl = autoOn ? "ATTIVO" : "DISATTIVO";
-        chunks.push(`<span class="homeDaneaTickerItem is-meta">SCARICO AUTOMATICO ${autoLbl} - DDT SCARICATI OGGI ${fmt(todayCount)} - PEZZI SCARICATI OGGI ${fmt(piecesToday)}</span>`);
+        items.push(`<span class="homeDaneaTickerItem is-meta">SCARICO AUTOMATICO ${autoLbl} - DDT SCARICATI OGGI ${fmt(todayCount)} - PEZZI SCARICATI OGGI ${fmt(piecesToday)}</span>`);
 
         if (!list.length){
-          chunks.push(`<span class="homeDaneaTickerItem is-muted">NESSUN DDT DA XML</span>`);
+          items.push(`<span class="homeDaneaTickerItem is-muted">NESSUN DDT DA XML</span>`);
         } else {
-          chunks.push(
-            list.slice(0, 18).map((g) => {
+          items.push(
+            ...list.slice(0, 18).map((g) => {
               const num = String(g.docNum || "").trim() || String(g.key || "").split("__")[0] || "";
               const done = __daneaPickDone(g.key, num, String(g.date || "").trim());
               const cust = String(done && done.customer || "").trim();
@@ -11162,17 +11258,33 @@ async function deleteMovement(id) {
                   `${escapeHtml(txt)}` +
                 `</button>`
               );
-            }).join("")
+            })
           );
         }
 
-        const html = chunks.join("");
+        // Signature: evita di riavviare il ticker ad ogni renderAll (sennò non scorre mai)
+        const sig = items.join("§");
+        const changed = (sig !== __homeDaneaMarqueeSig);
 
-        homeDaneaTickerSeq.innerHTML = html;
-        homeDaneaTickerSeqClone.innerHTML = html;
+        __homeDaneaMarqueeItems = items;
 
         __bindHomeDaneaMarquee();
-        __startHomeDaneaMarquee();
+
+        // Start/refresh only when content changes (or first paint)
+        try{
+          const isEmpty = !String(homeDaneaTickerSeq && homeDaneaTickerSeq.innerHTML || "").trim();
+          if (changed){
+            __homeDaneaMarqueeSig = sig;
+            if (!Number.isFinite(Number(__homeDaneaMarqueeIdx))) __homeDaneaMarqueeIdx = 0;
+            if (__homeDaneaMarqueeIdx < 0) __homeDaneaMarqueeIdx = 0;
+            if (__homeDaneaMarqueeIdx >= items.length) __homeDaneaMarqueeIdx = 0;
+            __startHomeDaneaMarquee(true);
+          } else if (isEmpty || (!__homeDaneaMarqueeRaf && items.length > 1)) {
+            __startHomeDaneaMarquee(true);
+          }
+        }catch(_){
+          try{ __startHomeDaneaMarquee(true); }catch(__){ }
+        }
       }catch(_){ }
     }
 
