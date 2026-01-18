@@ -4071,7 +4071,147 @@ function waitForHub(attempt){
     });
   }
 
-  function renderList(){
+  
+
+  /* =========================================================
+     HOME — Cockpit fatturato (Dashboard)
+     - usa i DDT completati con movimenti creati
+     - KPI: Oggi / 7g / Mese / IVA mese
+     ========================================================= */
+  let __homeRevBound = false;
+  let __homeRevLockedTileH = 0;
+
+  function __pad2(n){ return String(n).padStart(2, "0"); }
+  function __todayISO(){
+    const d = new Date();
+    return `${d.getFullYear()}-${__pad2(d.getMonth()+1)}-${__pad2(d.getDate())}`;
+  }
+  function __addDays(iso, delta){
+    const d = new Date(String(iso||"") + "T00:00:00");
+    if (Number.isNaN(d.getTime())) return "";
+    d.setDate(d.getDate() + (Number(delta)||0));
+    return `${d.getFullYear()}-${__pad2(d.getMonth()+1)}-${__pad2(d.getDate())}`;
+  }
+
+  function __fmtEuro0(v){
+    const n = toNum(v);
+    if (n == null) return "—";
+    const x = Math.round(n);
+    try{ return "€ " + x.toLocaleString("it-IT"); }catch(_){ return "€ " + String(x); }
+  }
+
+  function __lockHomeRevenueCockpitHeight(){
+    const el = $("homeRevenueCockpit");
+    if (!el) return (__homeRevLockedTileH || 0);
+    const ref = document.getElementById("btnGoCategories");
+    const r = ref && ref.getBoundingClientRect ? ref.getBoundingClientRect() : null;
+    const h = Math.round((r && r.height) || 0);
+    if (h > 10){
+      if (h !== __homeRevLockedTileH){
+        __homeRevLockedTileH = h;
+        el.style.height = h + "px";
+        el.style.minHeight = h + "px";
+        el.style.maxHeight = h + "px";
+      }
+      return h;
+    }
+    return (__homeRevLockedTileH || 0);
+  }
+
+  function renderHomeCockpit(){
+    const cockpit = $("homeRevenueCockpit");
+    if (!cockpit) return;
+
+    // Lock altezza (evita che la dashboard si allunghi su refresh)
+    __lockHomeRevenueCockpitHeight();
+
+    const elToday = $("homeRevToday");
+    const elWeek  = $("homeRevWeek");
+    const elMonth = $("homeRevMonth");
+    const elVat   = $("homeRevVatMonth");
+
+    const today = __todayISO();
+    const weekStart = __addDays(today, -6);
+    const monthStart = today ? (today.slice(0,8) + "01") : "";
+
+    let sumToday=0, sumWeek=0, sumMonth=0, sumVatMonth=0;
+    let cntToday=0, cntWeek=0, cntMonth=0;
+
+    const list = listDdts();
+
+    for (const d of list){
+      const k = String(d?.key || d?._id || "").trim();
+      const m = getDdtModel(k);
+      if (!m) continue;
+      const day = String(m.date || "").trim();
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) continue;
+
+      const gross = Number(toNum(m.grossTotal) || 0);
+      const vat = Number(toNum(m.vatTotal) || 0);
+
+      if (day === today){
+        sumToday += gross;
+        cntToday++;
+      }
+      if (weekStart && day >= weekStart && day <= today){
+        sumWeek += gross;
+        cntWeek++;
+      }
+      if (monthStart && day >= monthStart && day <= today){
+        sumMonth += gross;
+        sumVatMonth += vat;
+        cntMonth++;
+      }
+    }
+
+    const line = (amt, cnt) => {
+      const a = __fmtEuro0(amt);
+      const c = Number(cnt || 0);
+      return a + " · " + c.toLocaleString("it-IT") + " DDT";
+    };
+
+    if (elToday) elToday.textContent = line(sumToday, cntToday);
+    if (elWeek)  elWeek.textContent  = line(sumWeek, cntWeek);
+    if (elMonth) elMonth.textContent = line(sumMonth, cntMonth);
+    if (elVat)   elVat.textContent   = __fmtEuro0(sumVatMonth);
+
+    // Tooltip: ultimo DDT (se disponibile)
+    try{
+      const first = (list && list.length) ? list[0] : null;
+      if (first){
+        const k = String(first?.key || first?._id || "").trim();
+        const m = getDdtModel(k);
+        if (m){
+          cockpit.title = `Fatturato (DDT completati) — Ultimo: ${m.customer || "—"} · DDT ${m.number || "—"} · ${fmtDateIT(m.date||"") || "—"} · ${fmtMoney(m.grossTotal, m.currency||"EUR")}`;
+        }
+      }
+    }catch(_){ }
+
+    // Bind una sola volta: click -> apri sezione Fatturato
+    if (!__homeRevBound){
+      __homeRevBound = true;
+
+      cockpit.addEventListener("click", (e) => {
+        try{ e.preventDefault(); e.stopPropagation(); }catch(_){ }
+        try{
+          if (window.HubInv && typeof window.HubInv.setView === "function") window.HubInv.setView("revenue");
+          if (window.HubRevenue && typeof window.HubRevenue.refresh === "function") window.HubRevenue.refresh();
+        }catch(_){ }
+      });
+
+      cockpit.addEventListener("keydown", (e) => {
+        if (!e) return;
+        if (e.key !== "Enter" && e.key !== " " ) return;
+        try{ e.preventDefault(); e.stopPropagation(); }catch(_){ }
+        try{ cockpit.click(); }catch(_){ }
+      });
+
+      try{
+        window.addEventListener("resize", () => { try{ __lockHomeRevenueCockpitHeight(); }catch(_){ } }, { passive: true });
+      }catch(_){ }
+    }
+  }
+function renderList(){
     const view = $("viewRevenue");
     const isActive = !!(view && view.classList.contains("active"));
 
@@ -4211,6 +4351,7 @@ function waitForHub(attempt){
     S.selectedKey = "";
     setDetailOpen(false);
     renderList();
+    try{ renderHomeCockpit(); }catch(_){ }
   }
 
   function bindEvents(){
@@ -4261,6 +4402,7 @@ function waitForHub(attempt){
           rebuildCompletedMap();
           renderList();
           if (S.selectedKey) renderDetail(S.selectedKey);
+          try{ renderHomeCockpit(); }catch(_){ }
         },
         (err) => { try{ console.warn("revenue completed snapshot error", err); }catch(_){ } }
       );
@@ -4283,6 +4425,7 @@ function waitForHub(attempt){
           rebuildCacheMap(arr);
           renderList();
           if (S.selectedKey) renderDetail(S.selectedKey);
+          try{ renderHomeCockpit(); }catch(_){ }
         },
         (err) => { try{ console.warn("revenue daneaDdts snapshot error", err); }catch(_){ } }
       );
@@ -4300,6 +4443,7 @@ function waitForHub(attempt){
     // se riapro la vista, default su lista
     if (!S.selectedKey) setDetailOpen(false);
     renderList();
+    try{ renderHomeCockpit(); }catch(_){ }
   }
 
   function waitForHub(attempt){
@@ -4318,6 +4462,7 @@ function waitForHub(attempt){
   window.HubRevenue.refresh = refresh;
   window.HubRevenue.backToList = backToList;
   window.HubRevenue.openDetail = openDetail;
+  window.HubRevenue.renderHomeCockpit = renderHomeCockpit;
 
   if (document.readyState === "loading"){
     document.addEventListener("DOMContentLoaded", () => waitForHub(0));
