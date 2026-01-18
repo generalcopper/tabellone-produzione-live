@@ -4129,9 +4129,10 @@ function waitForHub(attempt){
     const ref = document.getElementById("btnGoCategories");
     const r = ref && ref.getBoundingClientRect ? ref.getBoundingClientRect() : null;
 
-    // -20% rispetto al vecchio +30%: cockpit più basso, ma sempre bloccato (dashboard non si allunga)
+    // Altezza cockpit = come prima (stessa scala del tile "Categorie")
+    // (+30%: leggibilita' KPI senza far "saltare" la dashboard)
     const baseH = Math.round((r && r.height) || 0);
-    const h = Math.round(baseH * 1.04);
+    const h = Math.round(baseH * 1.30);
 
     if (h > 10){
       if (h !== __homeRevLockedTileH){
