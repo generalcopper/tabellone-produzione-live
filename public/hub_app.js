@@ -4105,7 +4105,11 @@ function waitForHub(attempt){
     if (!el) return (__homeRevLockedTileH || 0);
     const ref = document.getElementById("btnGoCategories");
     const r = ref && ref.getBoundingClientRect ? ref.getBoundingClientRect() : null;
-    const h = Math.round((r && r.height) || 0);
+
+    // +30% (richiesta): cockpit più alto, ma sempre bloccato (dashboard non si allunga)
+    const baseH = Math.round((r && r.height) || 0);
+    const h = Math.round(baseH * 1.3);
+
     if (h > 10){
       if (h !== __homeRevLockedTileH){
         __homeRevLockedTileH = h;
@@ -4129,6 +4133,10 @@ function waitForHub(attempt){
     const elWeek  = $("homeRevWeek");
     const elMonth = $("homeRevMonth");
     const elVat   = $("homeRevVatMonth");
+
+    // Contagiri (fine scala 100k)
+    const elGaugeNeedle = $("homeRevGaugeNeedle");
+    const elGaugeValue  = $("homeRevGaugeValue");
 
     const today = __todayISO();
     const weekStart = __addDays(today, -6);
@@ -4174,6 +4182,28 @@ function waitForHub(attempt){
     if (elWeek)  elWeek.textContent  = line(sumWeek, cntWeek);
     if (elMonth) elMonth.textContent = line(sumMonth, cntMonth);
     if (elVat)   elVat.textContent   = __fmtEuro0(sumVatMonth);
+
+    // Aggiorna contagiri (Mese): 0 → 100.000€ (rosso/giallo/verde)
+    try{
+      const MAX = 100000;
+      const raw = Number(sumMonth || 0);
+      const v = (Number.isFinite(raw) ? raw : 0);
+      const pct = Math.max(0, Math.min(1, (MAX > 0 ? (v / MAX) : 0)));
+      const angle = 180 + (pct * 180); // 180° (0) → 360° (100k)
+
+      if (elGaugeNeedle){
+        try{ elGaugeNeedle.setAttribute("transform", `rotate(${angle.toFixed(2)} 120 120)`); }catch(_){ }
+      }
+      if (elGaugeValue){
+        try{ elGaugeValue.textContent = __fmtEuro0(v); }catch(_){ }
+      }
+
+      if (cockpit){
+        try{ cockpit.classList.remove("revZoneRed", "revZoneYellow", "revZoneGreen"); }catch(_){ }
+        const cls = (pct < 0.34) ? "revZoneRed" : (pct < 0.67) ? "revZoneYellow" : "revZoneGreen";
+        try{ cockpit.classList.add(cls); }catch(_){ }
+      }
+    }catch(_){ }
 
     // Tooltip: ultimo DDT (se disponibile)
     try{
