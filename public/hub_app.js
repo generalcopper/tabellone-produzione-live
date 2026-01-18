@@ -4080,6 +4080,13 @@ function waitForHub(attempt){
      ========================================================= */
   let __homeRevBound = false;
   let __homeRevLockedTileH = 0;
+  let __homeRevPeriod = (function(){
+    try{
+      const v = localStorage.getItem("hubHomeRevPeriod");
+      if (v === "day" || v === "week" || v === "month") return v;
+    }catch(_){ }
+    return "month";
+  })();
 
   function __pad2(n){ return String(n).padStart(2, "0"); }
   function __todayISO(){
@@ -4106,7 +4113,7 @@ function waitForHub(attempt){
     const ref = document.getElementById("btnGoCategories");
     const r = ref && ref.getBoundingClientRect ? ref.getBoundingClientRect() : null;
 
-    // Altezza bloccata: cockpit -20% (rispetto al vecchio)
+    // -20% rispetto al vecchio +30%: cockpit più basso, ma sempre bloccato (dashboard non si allunga)
     const baseH = Math.round((r && r.height) || 0);
     const h = Math.round(baseH * 1.04);
 
@@ -4130,31 +4137,22 @@ function waitForHub(attempt){
     __lockHomeRevenueCockpitHeight();
 
     const elTotal = $("homeRevTotal");
-    const elMeta  = $("homeRevTotalMeta");
-    const elBars  = $("homeRevBars");
+    const elMeta  = $("homeRevMeta");
+    const barsEl  = $("homeRevBars");
+    const segEl   = $("homeRevSeg");
 
-    const now = new Date();
-    const MONTHS_SHORT = ["GEN","FEB","MAR","APR","MAG","GIU","LUG","AGO","SET","OTT","NOV","DIC"];
-    const MONTHS_LONG  = ["Gennaio","Febbraio","Marzo","Aprile","Maggio","Giugno","Luglio","Agosto","Settembre","Ottobre","Novembre","Dicembre"];
+    const today = __todayISO();
+    const weekStart = __addDays(today, -6);
+    const monthStart = today ? (today.slice(0,8) + "01") : "";
 
-    // Ultimi 12 mesi (incluso mese corrente)
-    const months = [];
-    for (let i = 11; i >= 0; i--){
-      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-      const y = d.getFullYear();
-      const mo = d.getMonth();
-      const key = `${y}-${__pad2(mo+1)}`;
-      months.push({ y, m: mo, key, lab: (MONTHS_SHORT[mo] || ""), long: (MONTHS_LONG[mo] || "") });
-    }
+    let sumDay=0, sumWeek=0, sumMonth=0;
+    let cntDay=0, cntWeek=0, cntMonth=0;
 
-    const monthSet = new Set(months.map(x => x.key));
-    const totals = new Map();
-    for (const mo of months) totals.set(mo.key, 0);
-
-    let total = 0;
-    let cnt = 0;
+    const monthSum = Object.create(null);
+    const monthCnt = Object.create(null);
 
     const list = listDdts();
+
     for (const d of list){
       const k = String(d?.key || d?._id || "").trim();
       const m = getDdtModel(k);
@@ -4162,56 +4160,95 @@ function waitForHub(attempt){
       const day = String(m.date || "").trim();
       if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) continue;
 
-      const ym = day.slice(0,7);
-      if (!monthSet.has(ym)) continue;
-
       const gross = Number(toNum(m.grossTotal) || 0);
-      totals.set(ym, (totals.get(ym) || 0) + gross);
-      total += gross;
-      cnt++;
+
+      if (day === today){
+        sumDay += gross;
+        cntDay++;
+      }
+      if (weekStart && day >= weekStart && day <= today){
+        sumWeek += gross;
+        cntWeek++;
+      }
+      if (monthStart && day >= monthStart && day <= today){
+        sumMonth += gross;
+        cntMonth++;
+      }
+
+      const mk = day.slice(0,7); // YYYY-MM
+      monthSum[mk] = Number(monthSum[mk] || 0) + gross;
+      monthCnt[mk] = Number(monthCnt[mk] || 0) + 1;
     }
 
-    const vals = Array.from(totals.values()).map(v => Number(v) || 0);
-    const max = Math.max(0, ...(vals.length ? vals : [0]));
+    // Indicatori variabili: giorno / settimana / mese
+    let pickedSum = sumMonth;
+    let pickedCnt = cntMonth;
+    let pickedLabel = "Mese corrente";
 
-    if (elTotal) elTotal.textContent = __fmtEuro0(total);
+    if (__homeRevPeriod === "day"){
+      pickedSum = sumDay;
+      pickedCnt = cntDay;
+      pickedLabel = "Oggi";
+    } else if (__homeRevPeriod === "week"){
+      pickedSum = sumWeek;
+      pickedCnt = cntWeek;
+      pickedLabel = "Ultimi 7 giorni";
+    } else {
+      __homeRevPeriod = "month";
+      pickedSum = sumMonth;
+      pickedCnt = cntMonth;
+      pickedLabel = "Mese corrente";
+    }
+
+    if (elTotal) elTotal.textContent = __fmtEuro0(pickedSum);
     if (elMeta){
-      const c = Number(cnt || 0);
-      elMeta.textContent = `${c.toLocaleString("it-IT")} DDT · ultimi 12 mesi`;
+      const c = Number(pickedCnt || 0);
+      elMeta.textContent = `${pickedLabel} · ${c.toLocaleString("it-IT")} DDT`;
     }
 
-    if (elBars){
-      const needBuild = elBars.querySelectorAll(".homeRevBar").length !== months.length;
-      if (needBuild){
-        elBars.innerHTML = months.map(mo => {
-          return `<div class="homeRevBar" data-ym="${escAttr(mo.key)}">`
-            + `<div class="homeRevBarTrack"><div class="homeRevBarFill"></div></div>`
-            + `<div class="homeRevBarLbl">${esc(mo.lab)}</div>`
-            + `</div>`;
-        }).join("");
-      }
-
-      const curKey = `${now.getFullYear()}-${__pad2(now.getMonth()+1)}`;
-      const bars = elBars.querySelectorAll(".homeRevBar");
-      for (const bar of bars){
-        const ym = String(bar.getAttribute("data-ym") || "");
-        const val = Number(totals.get(ym) || 0);
-        const pct = (max > 0) ? Math.max(0, Math.min(1, val / max)) : 0;
-
-        const fill = bar.querySelector(".homeRevBarFill");
-        if (fill) fill.style.height = (pct * 100).toFixed(1) + "%";
-
-        // Title (tooltip)
-        const mo = months.find(x => x.key === ym);
-        if (mo){
-          bar.title = `${mo.long || mo.lab} ${mo.y} · ${__fmtEuro0(val)}`;
-        } else {
-          bar.title = `${ym} · ${__fmtEuro0(val)}`;
+    // Evidenzia selezione
+    if (segEl){
+      try{
+        const btns = Array.from(segEl.querySelectorAll('.homeRevSegBtn'));
+        for (const b of btns){
+          const p = String(b.getAttribute('data-period') || '').trim();
+          const active = (p === __homeRevPeriod);
+          b.classList.toggle('is-active', active);
+          try{ b.setAttribute('aria-selected', active ? 'true' : 'false'); }catch(_){ }
         }
+      }catch(_){ }
+    }
 
-        if (ym === curKey) bar.classList.add("is-current");
-        else bar.classList.remove("is-current");
+    // Barre mensili (ultimi 12 mesi)
+    if (barsEl){
+      const M3 = ["Gen","Feb","Mar","Apr","Mag","Giu","Lug","Ago","Set","Ott","Nov","Dic"];
+      const now = new Date();
+      const months = [];
+      for (let i=11; i>=0; i--){
+        const dt = new Date(now.getFullYear(), now.getMonth()-i, 1);
+        const key = `${dt.getFullYear()}-${__pad2(dt.getMonth()+1)}`;
+        months.push({ key, y: dt.getFullYear(), m: dt.getMonth() });
       }
+
+      let max = 0;
+      for (const mm of months){
+        const v = Number(monthSum[mm.key] || 0);
+        if (v > max) max = v;
+      }
+      if (!Number.isFinite(max) || max <= 0) max = 1;
+
+      barsEl.innerHTML = months.map((mm, idx) => {
+        const v = Number(monthSum[mm.key] || 0);
+        const c = Number(monthCnt[mm.key] || 0);
+        const pct = Math.max(4, Math.round((v / max) * 100));
+        const lbl = (mm.m >= 0 && mm.m < 12) ? M3[mm.m] : mm.key;
+        const isCurrent = (idx === (months.length - 1));
+        const t = `${lbl} ${mm.y}: ${__fmtEuro0(v)} · ${c.toLocaleString('it-IT')} DDT`;
+        return `<div class="homeRevBar ${isCurrent ? 'is-current' : ''}" title="${escAttr(t)}">
+          <div class="homeRevBarTrack"><div class="homeRevBarFill" style="height:${pct}%"></div></div>
+          <div class="homeRevBarLbl">${lbl}</div>
+        </div>`;
+      }).join('');
     }
 
     // Tooltip: ultimo DDT (se disponibile)
@@ -4226,27 +4263,48 @@ function waitForHub(attempt){
       }
     }catch(_){ }
 
-    // Bind una sola volta: click -> apri sezione Fatturato
+    // Bind una sola volta: click -> apri sezione Fatturato / toggle periodo
     if (!__homeRevBound){
       __homeRevBound = true;
 
-      cockpit.addEventListener("click", (e) => {
+      cockpit.addEventListener('click', (e) => {
+        const t = e?.target;
+        if (t && t.closest && t.closest('#homeRevSeg')) return; // cambio periodo, non aprire
         try{ e.preventDefault(); e.stopPropagation(); }catch(_){ }
         try{
-          if (window.HubInv && typeof window.HubInv.setView === "function") window.HubInv.setView("revenue");
-          if (window.HubRevenue && typeof window.HubRevenue.refresh === "function") window.HubRevenue.refresh();
+          if (window.HubInv && typeof window.HubInv.setView === 'function') window.HubInv.setView('revenue');
+          if (window.HubRevenue && typeof window.HubRevenue.refresh === 'function') window.HubRevenue.refresh();
         }catch(_){ }
       });
 
-      cockpit.addEventListener("keydown", (e) => {
+      cockpit.addEventListener('keydown', (e) => {
         if (!e) return;
-        if (e.key !== "Enter" && e.key !== " " ) return;
+        if (e.target && e.target !== cockpit) return; // se focus su bottoni interni
+        if (e.key !== 'Enter' && e.key !== ' ') return;
         try{ e.preventDefault(); e.stopPropagation(); }catch(_){ }
         try{ cockpit.click(); }catch(_){ }
       });
 
+      if (segEl){
+        segEl.addEventListener('click', (e) => {
+          const btn = e.target?.closest?.('.homeRevSegBtn');
+          if (!btn) return;
+          try{ e.preventDefault(); e.stopPropagation(); }catch(_){ }
+          const p = String(btn.getAttribute('data-period') || '').trim();
+          if (p !== 'day' && p !== 'week' && p !== 'month') return;
+          __homeRevPeriod = p;
+          try{ localStorage.setItem('hubHomeRevPeriod', __homeRevPeriod); }catch(_){ }
+          try{ renderHomeCockpit(); }catch(_){ }
+        });
+
+        segEl.addEventListener('keydown', (e) => {
+          // evita che lo space/enter sui bottoni faccia aprire il cockpit
+          try{ e.stopPropagation(); }catch(_){ }
+        }, true);
+      }
+
       try{
-        window.addEventListener("resize", () => { try{ __lockHomeRevenueCockpitHeight(); }catch(_){ } }, { passive: true });
+        window.addEventListener('resize', () => { try{ __lockHomeRevenueCockpitHeight(); }catch(_){ } }, { passive: true });
       }catch(_){ }
     }
   }
