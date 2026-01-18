@@ -1813,43 +1813,53 @@ if(absenceMsg) absenceMsg.textContent = "Richiesta inviata ✅";
     }
   }
 
-
-
   // ✅ Bootstrap profilo: crea powderUsers/{uid} al primo login (da invite su powderUsers/{emailLower})
+  // IMPORTANTE: per funzionare, le Firestore Rules devono permettere CREATE su powderUsers/{uid}
+  // (docId == myUid()) SOLO se esiste un invito su powderUsers/{emailLower}.
   async function ensureUidPowderUser(user){
     try{
       const uid = user?.uid || "";
       const emailLower = String(user?.email || "").trim().toLowerCase();
       if(!uid || !emailLower) return { ok:false, reason:"missing" };
 
-      // già creato
       const uidRef = fsMod.doc(db, "powderUsers", uid);
-      const uidSnap = await fsMod.getDoc(uidRef);
-      if(uidSnap.exists()){
-        const data = uidSnap.data() || {};
-        if(data.enabled === false) return { ok:false, reason:"disabled" };
-        return { ok:true, existed:true };
-      }
-
-      // invito per email
       const invRef = fsMod.doc(db, "powderUsers", emailLower);
-      const invSnap = await fsMod.getDoc(invRef);
-      if(!invSnap.exists()) return { ok:false, reason:"noinvite" };
-      const inv = invSnap.data() || {};
-      if(inv.enabled === false) return { ok:false, reason:"disabled" };
 
-      const orgId = (typeof inv.orgId === "string" && inv.orgId.trim()) ? inv.orgId.trim() : "default";
-      const payload = {
-        emailLower,
-        enabled: true,
-        isAdmin: inv.isAdmin === true,
-        orgId,
-        createdAt: fsMod.serverTimestamp()
-      };
+      // Transaction = create-only (evita update accidentali se due tab aperte)
+      const result = await fsMod.runTransaction(db, async (tx)=>{
+        const uidSnap = await tx.get(uidRef);
+        if(uidSnap.exists()){
+          const data = uidSnap.data() || {};
+          if(data.enabled === false) return { ok:false, reason:"disabled", existed:true };
+          return { ok:true, existed:true };
+        }
 
-      await fsMod.setDoc(uidRef, payload);
-      return { ok:true, created:true };
+        const invSnap = await tx.get(invRef);
+        if(!invSnap.exists()) return { ok:false, reason:"noinvite" };
+
+        const inv = invSnap.data() || {};
+        if(inv.enabled === false) return { ok:false, reason:"disabled" };
+
+        const orgId = (typeof inv.orgId === "string" && inv.orgId.trim()) ? inv.orgId.trim() : "default";
+        const payload = {
+          emailLower,
+          enabled: true,
+          isAdmin: inv.isAdmin === true,
+          orgId,
+          createdAt: fsMod.serverTimestamp()
+        };
+
+        tx.set(uidRef, payload);
+        return { ok:true, created:true };
+      });
+
+      return result || { ok:false, reason:"error" };
     }catch(e){
+      const code = String(e?.code || "");
+      if(code === "permission-denied" || code === "PERMISSION_DENIED"){
+        console.warn("ensureUidPowderUser permission-denied", e);
+        return { ok:false, reason:"forbidden", error:e };
+      }
       console.warn("ensureUidPowderUser error", e);
       return { ok:false, reason:"error", error: e };
     }
@@ -1936,11 +1946,17 @@ if(absenceMsg) absenceMsg.textContent = "Richiesta inviata ✅";
       lockPage(true);
       showOverlayState("noaccess");
       if(profileRoleEl) profileRoleEl.textContent = (boot.reason === "noinvite" || boot.reason === "disabled") ? "No accesso" : "Errore";
-      setMsg(
-        (boot.reason === "noinvite" || boot.reason === "disabled")
-          ? "Accesso non autorizzato per questo account. Contatta l’amministratore."
-          : "Errore inizializzazione profilo. Premi Esci e rientra, oppure ricarica la pagina."
-      );
+      (function(){
+        let _m = "";
+        if(boot.reason === "noinvite" || boot.reason === "disabled"){
+          _m = "Accesso non autorizzato per questo account. Contatta l’amministratore.";
+        }else if(boot.reason === "forbidden"){
+          _m = "Profilo non inizializzato: permessi insufficienti per creare il profilo UID. Avvisa l’amministratore (serve aggiornare le Firestore Rules su powderUsers).";
+        }else{
+          _m = "Errore inizializzazione profilo. Premi Esci e rientra, oppure ricarica la pagina.";
+        }
+        setMsg(_m);
+      })();
       // Nascondi anche eventuali tile admin
       document.querySelectorAll("[data-admin-only]").forEach(el=>el.style.display="none");
       return;
