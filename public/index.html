@@ -1813,6 +1813,48 @@ if(absenceMsg) absenceMsg.textContent = "Richiesta inviata ✅";
     }
   }
 
+
+
+  // ✅ Bootstrap profilo: crea powderUsers/{uid} al primo login (da invite su powderUsers/{emailLower})
+  async function ensureUidPowderUser(user){
+    try{
+      const uid = user?.uid || "";
+      const emailLower = String(user?.email || "").trim().toLowerCase();
+      if(!uid || !emailLower) return { ok:false, reason:"missing" };
+
+      // già creato
+      const uidRef = fsMod.doc(db, "powderUsers", uid);
+      const uidSnap = await fsMod.getDoc(uidRef);
+      if(uidSnap.exists()){
+        const data = uidSnap.data() || {};
+        if(data.enabled === false) return { ok:false, reason:"disabled" };
+        return { ok:true, existed:true };
+      }
+
+      // invito per email
+      const invRef = fsMod.doc(db, "powderUsers", emailLower);
+      const invSnap = await fsMod.getDoc(invRef);
+      if(!invSnap.exists()) return { ok:false, reason:"noinvite" };
+      const inv = invSnap.data() || {};
+      if(inv.enabled === false) return { ok:false, reason:"disabled" };
+
+      const orgId = (typeof inv.orgId === "string" && inv.orgId.trim()) ? inv.orgId.trim() : "default";
+      const payload = {
+        emailLower,
+        enabled: true,
+        isAdmin: inv.isAdmin === true,
+        orgId,
+        createdAt: fsMod.serverTimestamp()
+      };
+
+      await fsMod.setDoc(uidRef, payload);
+      return { ok:true, created:true };
+    }catch(e){
+      console.warn("ensureUidPowderUser error", e);
+      return { ok:false, reason:"error", error: e };
+    }
+  }
+
   async function resolveRole(user){
     const uid = user?.uid || "";
     const emailLower = (user?.email || "").toLowerCase();
@@ -1885,6 +1927,24 @@ if(absenceMsg) absenceMsg.textContent = "Richiesta inviata ✅";
     if(profileUserEl) profileUserEl.textContent = (user.email || displayName);
     if(profileRoleEl) profileRoleEl.textContent = "Verifica…";
     if(avatarInitialsEl) avatarInitialsEl.textContent = initialsFromName(displayName);
+
+
+
+    // ✅ Fix accessi "parziali": crea/aggancia il profilo UID una volta sola
+    const boot = await ensureUidPowderUser(user);
+    if(!boot.ok){
+      lockPage(true);
+      showOverlayState("noaccess");
+      if(profileRoleEl) profileRoleEl.textContent = (boot.reason === "noinvite" || boot.reason === "disabled") ? "No accesso" : "Errore";
+      setMsg(
+        (boot.reason === "noinvite" || boot.reason === "disabled")
+          ? "Accesso non autorizzato per questo account. Contatta l’amministratore."
+          : "Errore inizializzazione profilo. Premi Esci e rientra, oppure ricarica la pagina."
+      );
+      // Nascondi anche eventuali tile admin
+      document.querySelectorAll("[data-admin-only]").forEach(el=>el.style.display="none");
+      return;
+    }
 
     const role = await resolveRole(user);
 
