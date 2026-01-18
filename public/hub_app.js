@@ -4080,13 +4080,9 @@ function waitForHub(attempt){
      ========================================================= */
   let __homeRevBound = false;
   let __homeRevLockedTileH = 0;
-  let __homeRevPeriod = (function(){
-    try{
-      const v = localStorage.getItem("hubHomeRevPeriod");
-      if (v === "day" || v === "week" || v === "month") return v;
-    }catch(_){ }
-    return "month";
-  })();
+  // Dashboard cockpit: nessun toggle giorno/settimana/mese nel box.
+  // Manteniamo la vista mensile (12 mesi). I dettagli si vedono nella sezione "Fatturato".
+  let __homeRevPeriod = "month";
 
   function __pad2(n){ return String(n).padStart(2, "0"); }
   function __todayISO(){
