@@ -1825,31 +1825,56 @@ if(absenceMsg) absenceMsg.textContent = "Richiesta inviata ✅";
       const uidRef = fsMod.doc(db, "powderUsers", uid);
       const invRef = fsMod.doc(db, "powderUsers", emailLower);
 
-      // Transaction = create-only (evita update accidentali se due tab aperte)
+      // Transaction (auto-heal):
+      // - se NON esiste UID -> lo crea da invite
+      // - se ESISTE ma manca orgId/flag/valori corretti -> lo ripara (merge)
       const result = await fsMod.runTransaction(db, async (tx)=>{
-        const uidSnap = await tx.get(uidRef);
-        if(uidSnap.exists()){
-          const data = uidSnap.data() || {};
-          if(data.enabled === false) return { ok:false, reason:"disabled", existed:true };
-          return { ok:true, existed:true };
-        }
-
+        // 1) Leggi invito (emailLower) — è la fonte di verità per orgId/isAdmin
         const invSnap = await tx.get(invRef);
         if(!invSnap.exists()) return { ok:false, reason:"noinvite" };
 
         const inv = invSnap.data() || {};
         if(inv.enabled === false) return { ok:false, reason:"disabled" };
 
-        const orgId = (typeof inv.orgId === "string" && inv.orgId.trim()) ? inv.orgId.trim() : "default";
-        const payload = {
+        // Allinea la logica all'equivalente nelle Firestore Rules (regex + fallback default)
+        const rawOrg = (typeof inv.orgId === "string") ? inv.orgId.trim() : "";
+        const orgId = (/^[A-Za-z0-9_-]{1,50}$/.test(rawOrg)) ? rawOrg : "default";
+        const desired = {
           emailLower,
           enabled: true,
           isAdmin: inv.isAdmin === true,
-          orgId,
-          createdAt: fsMod.serverTimestamp()
+          orgId
         };
 
-        tx.set(uidRef, payload);
+        // 2) UID doc
+        const uidSnap = await tx.get(uidRef);
+
+        // Se esiste ma è disabilitato, non fare override
+        if(uidSnap.exists()){
+          const cur = uidSnap.data() || {};
+          if(cur.enabled === false) return { ok:false, reason:"disabled", existed:true };
+
+          const needsRepair =
+            (cur.emailLower !== desired.emailLower) ||
+            (cur.enabled !== true) ||
+            ((cur.isAdmin === true) !== (desired.isAdmin === true)) ||
+            (cur.orgId !== desired.orgId);
+
+          if(needsRepair){
+            tx.set(uidRef, {
+              ...desired,
+              repairedAt: fsMod.serverTimestamp()
+            }, { merge:true });
+            return { ok:true, existed:true, repaired:true };
+          }
+          return { ok:true, existed:true, repaired:false };
+        }
+
+        // Non esiste: crea
+        tx.set(uidRef, {
+          ...desired,
+          createdAt: fsMod.serverTimestamp()
+        });
         return { ok:true, created:true };
       });
 
@@ -1867,7 +1892,7 @@ if(absenceMsg) absenceMsg.textContent = "Richiesta inviata ✅";
 
   async function resolveRole(user){
     const uid = user?.uid || "";
-    const emailLower = (user?.email || "").toLowerCase();
+    const emailLower = String(user?.email || "").trim().toLowerCase();
 
     let data = null;
     if(uid) data = await getAccess(uid);
