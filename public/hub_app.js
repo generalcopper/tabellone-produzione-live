@@ -4145,7 +4145,6 @@ function waitForHub(attempt){
     }
     return (__homeRevLockedTileH || 0);
   }
-
   function renderHomeCockpit(){
     const cockpit = $("homeRevenueCockpit");
     if (!cockpit) return;
@@ -4156,12 +4155,9 @@ function waitForHub(attempt){
     const elTotal = $("homeRevTotal");
     const elMeta  = $("homeRevMeta");
 
-    const elTopProd     = $("homeRevTopProduct");
-    const elTopProdMeta = $("homeRevTopProductMeta");
+    // Solo 2 parti: vendite totali + imballaggio più movimentato
     const elTopPack     = $("homeRevTopPackaging");
     const elTopPackMeta = $("homeRevTopPackagingMeta");
-    const elTopCust     = $("homeRevTopCustomer");
-    const elTopCustMeta = $("homeRevTopCustomerMeta");
 
     const segEl   = $("homeRevSeg");
 
@@ -4196,49 +4192,6 @@ function waitForHub(attempt){
       return d >= fromISO && d <= toISO;
     }
 
-    function __parseQty(raw){
-      const n0 = toNum(raw);
-      if (n0 != null) return n0;
-      const s0 = String(raw || "").trim();
-      if (!s0) return null;
-      const s = s0.replace(/\s+/g, "");
-      const m = s.match(/^(-?\d+(?:[.,]\d+)?)\/(\d+(?:[.,]\d+)?)$/);
-      if (m){
-        const a = Number(String(m[1]).replace(",", "."));
-        const b = Number(String(m[2]).replace(",", "."));
-        if (Number.isFinite(a) && Number.isFinite(b) && b !== 0) return a / b;
-      }
-      let t = s;
-      if (t.includes(",") && t.includes(".")) t = t.replace(/\./g, "").replace(",", ".");
-      else if (t.includes(",")) t = t.replace(",", ".");
-      const n = Number(t);
-      return Number.isFinite(n) ? n : null;
-    }
-
-    function __fmtQty2(v){
-      const n = Number(v);
-      if (!Number.isFinite(n)) return "";
-      try{ return n.toLocaleString("it-IT", { maximumFractionDigits: 2 }); }catch(_){ return String(n); }
-    }
-
-    function __rowGross(r){
-      const qty = toNum(r && r.qty);
-      let net = toNum(r && r.net);
-      let vat = toNum(r && r.vat);
-      let gross = toNum(r && r.gross);
-      const unitNet = toNum(r && r.unitNet);
-      const unitGross = toNum(r && r.unitGross);
-      const vatPerc = toNum(r && r.vatPerc);
-
-      if (gross == null && unitGross != null && qty != null) gross = unitGross * qty;
-      if (net == null && unitNet != null && qty != null) net = unitNet * qty;
-      if (vat == null && net != null && vatPerc != null) vat = net * (vatPerc / 100);
-      if (gross == null && net != null && vat != null) gross = net + vat;
-      if (gross == null && net != null && vatPerc != null) gross = net * (1 + vatPerc / 100);
-      const g = Number(gross);
-      return Number.isFinite(g) ? g : 0;
-    }
-
     function __macroGroup(code){
       try{
         if (typeof getMacroCategoryForCode === "function") return String(getMacroCategoryForCode(code) || "").trim().toLowerCase();
@@ -4249,9 +4202,7 @@ function waitForHub(attempt){
     // Aggregazioni (solo DDT nel periodo)
     let sumGross = 0;
     let ddtCount = 0;
-    const prodAgg = new Map(); // codeLower -> {code,name,gross,qty}
     const packAgg = new Map(); // codeLower -> {code,name,uom,qty}
-    const custAgg = new Map(); // customerLower -> {name,gross,cnt}
 
     const list = listDdts();
     for (const d of (Array.isArray(list) ? list : [])){
@@ -4266,33 +4217,7 @@ function waitForHub(attempt){
       sumGross += grossTot;
       ddtCount++;
 
-      // Cliente
-      const custName = String(m.customer || "").trim() || "—";
-      const custKey = custName.toLowerCase();
-      const cRec = custAgg.get(custKey) || { name: custName, gross: 0, cnt: 0 };
-      cRec.gross += grossTot;
-      cRec.cnt += 1;
-      custAgg.set(custKey, cRec);
-
-      // Prodotti venduti (righe DDT)
-      const rows = Array.isArray(m.rows) ? m.rows : [];
-      for (const r of rows){
-        const code = String(r?.code || "").trim();
-        if (!code) continue;
-        const low = code.toLowerCase();
-
-        const name = String(r?.desc || r?.item || r?.name || "").trim() || code;
-        const qty = (r && r.qty != null && Number.isFinite(Number(r.qty))) ? Number(r.qty) : __parseQty(r?.qtyRaw);
-        const gLine = __rowGross(r);
-
-        const pRec = prodAgg.get(low) || { code, name, gross: 0, qty: 0 };
-        pRec.gross += gLine;
-        if (qty != null && Number.isFinite(qty)) pRec.qty += qty;
-        if ((!pRec.name || pRec.name === pRec.code) && name) pRec.name = name;
-        prodAgg.set(low, pRec);
-      }
-
-      // Imballaggi scaricati (allocazioni componenti)
+      // Imballaggi movimentati (allocazioni componenti)
       const done = m.__done || null;
       const allocs = (done && Array.isArray(done.allocations)) ? done.allocations : [];
       for (const a of allocs){
@@ -4324,16 +4249,6 @@ function waitForHub(attempt){
       return best;
     }
 
-    const topProd = __pickTop(prodAgg, (a,b) => {
-      const ga = Number(a?.gross || 0);
-      const gb = Number(b?.gross || 0);
-      if (ga !== gb) return ga - gb;
-      const qa = Number(a?.qty || 0);
-      const qb = Number(b?.qty || 0);
-      if (qa !== qb) return qa - qb;
-      return String(a?.name || a?.code || "").localeCompare(String(b?.name || b?.code || ""), "it", { sensitivity:"base" });
-    });
-
     const topPack = __pickTop(packAgg, (a,b) => {
       const qa = Number(a?.qty || 0);
       const qb = Number(b?.qty || 0);
@@ -4341,34 +4256,11 @@ function waitForHub(attempt){
       return String(a?.name || a?.code || "").localeCompare(String(b?.name || b?.code || ""), "it", { sensitivity:"base" });
     });
 
-    const topCust = __pickTop(custAgg, (a,b) => {
-      const ga = Number(a?.gross || 0);
-      const gb = Number(b?.gross || 0);
-      if (ga !== gb) return ga - gb;
-      const ca = Number(a?.cnt || 0);
-      const cb = Number(b?.cnt || 0);
-      if (ca !== cb) return ca - cb;
-      return String(a?.name || "").localeCompare(String(b?.name || ""), "it", { sensitivity:"base" });
-    });
-
     // UI: vendite totali
     if (elTotal) elTotal.textContent = __fmtEuro0(sumGross);
     if (elMeta) elMeta.textContent = `${pickedLabel} · ${Number(ddtCount || 0).toLocaleString("it-IT")} DDT`;
 
-    // UI: prodotto più venduto
-    if (elTopProd) elTopProd.textContent = topProd ? String(topProd.name || topProd.code || "—") : "—";
-    if (elTopProdMeta){
-      if (!topProd) {
-        elTopProdMeta.textContent = "—";
-      } else {
-        const parts = [__fmtEuro0(topProd.gross || 0)];
-        const q = Number(topProd.qty || 0);
-        if (Number.isFinite(q) && q > 0) parts.push(__fmtQty2(q) + " pz");
-        elTopProdMeta.textContent = parts.join(" · ");
-      }
-    }
-
-    // UI: imballaggio più scaricato
+    // UI: imballaggio più movimentato
     if (elTopPack) elTopPack.textContent = topPack ? String(topPack.name || topPack.code || "—") : "—";
     if (elTopPackMeta){
       if (!topPack) {
@@ -4380,23 +4272,11 @@ function waitForHub(attempt){
       }
     }
 
-    // UI: cliente più grosso
-    if (elTopCust) elTopCust.textContent = topCust ? String(topCust.name || "—") : "—";
-    if (elTopCustMeta){
-      if (!topCust) {
-        elTopCustMeta.textContent = "—";
-      } else {
-        elTopCustMeta.textContent = [__fmtEuro0(topCust.gross || 0), (Number(topCust.cnt || 0).toLocaleString("it-IT") + " DDT")].join(" · ");
-      }
-    }
-
     // Tooltip (riassunto)
     try{
       cockpit.title = "Cockpit fatturato — " + [
         `${pickedLabel}: ${__fmtEuro0(sumGross)} (${Number(ddtCount||0).toLocaleString('it-IT')} DDT)`,
-        topProd ? (`Prodotto: ${String(topProd.name || topProd.code || '—')} · ${__fmtEuro0(topProd.gross || 0)}`) : "Prodotto: —",
-        topPack ? (`Imballaggio: ${String(topPack.name || topPack.code || '—')} · ${Number(topPack.qty||0).toLocaleString('it-IT')}${topPack.uom ? (' ' + String(topPack.uom)) : ''}`) : "Imballaggio: —",
-        topCust ? (`Cliente: ${String(topCust.name || '—')} · ${__fmtEuro0(topCust.gross || 0)}`) : "Cliente: —"
+        topPack ? (`Imballaggio: ${String(topPack.name || topPack.code || '—')} · ${Number(topPack.qty||0).toLocaleString('it-IT')}${topPack.uom ? (' ' + String(topPack.uom)) : ''}`) : "Imballaggio: —"
       ].join(" — ");
     }catch(_){ }
 
