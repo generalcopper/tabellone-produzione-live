@@ -4106,9 +4106,9 @@ function waitForHub(attempt){
     const ref = document.getElementById("btnGoCategories");
     const r = ref && ref.getBoundingClientRect ? ref.getBoundingClientRect() : null;
 
-    // +30% (richiesta): cockpit più alto, ma sempre bloccato (dashboard non si allunga)
+    // Altezza bloccata: cockpit -20% (rispetto al vecchio)
     const baseH = Math.round((r && r.height) || 0);
-    const h = Math.round(baseH * 1.3);
+    const h = Math.round(baseH * 1.04);
 
     if (h > 10){
       if (h !== __homeRevLockedTileH){
@@ -4129,24 +4129,32 @@ function waitForHub(attempt){
     // Lock altezza (evita che la dashboard si allunghi su refresh)
     __lockHomeRevenueCockpitHeight();
 
-    const elToday = $("homeRevToday");
-    const elWeek  = $("homeRevWeek");
-    const elMonth = $("homeRevMonth");
-    const elVat   = $("homeRevVatMonth");
+    const elTotal = $("homeRevTotal");
+    const elMeta  = $("homeRevTotalMeta");
+    const elBars  = $("homeRevBars");
 
-    // Contagiri (fine scala 100k)
-    const elGaugeNeedle = $("homeRevGaugeNeedle");
-    const elGaugeValue  = $("homeRevGaugeValue");
+    const now = new Date();
+    const MONTHS_SHORT = ["GEN","FEB","MAR","APR","MAG","GIU","LUG","AGO","SET","OTT","NOV","DIC"];
+    const MONTHS_LONG  = ["Gennaio","Febbraio","Marzo","Aprile","Maggio","Giugno","Luglio","Agosto","Settembre","Ottobre","Novembre","Dicembre"];
 
-    const today = __todayISO();
-    const weekStart = __addDays(today, -6);
-    const monthStart = today ? (today.slice(0,8) + "01") : "";
+    // Ultimi 12 mesi (incluso mese corrente)
+    const months = [];
+    for (let i = 11; i >= 0; i--){
+      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+      const y = d.getFullYear();
+      const mo = d.getMonth();
+      const key = `${y}-${__pad2(mo+1)}`;
+      months.push({ y, m: mo, key, lab: (MONTHS_SHORT[mo] || ""), long: (MONTHS_LONG[mo] || "") });
+    }
 
-    let sumToday=0, sumWeek=0, sumMonth=0, sumVatMonth=0;
-    let cntToday=0, cntWeek=0, cntMonth=0;
+    const monthSet = new Set(months.map(x => x.key));
+    const totals = new Map();
+    for (const mo of months) totals.set(mo.key, 0);
+
+    let total = 0;
+    let cnt = 0;
 
     const list = listDdts();
-
     for (const d of list){
       const k = String(d?.key || d?._id || "").trim();
       const m = getDdtModel(k);
@@ -4154,56 +4162,57 @@ function waitForHub(attempt){
       const day = String(m.date || "").trim();
       if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) continue;
 
-      const gross = Number(toNum(m.grossTotal) || 0);
-      const vat = Number(toNum(m.vatTotal) || 0);
+      const ym = day.slice(0,7);
+      if (!monthSet.has(ym)) continue;
 
-      if (day === today){
-        sumToday += gross;
-        cntToday++;
-      }
-      if (weekStart && day >= weekStart && day <= today){
-        sumWeek += gross;
-        cntWeek++;
-      }
-      if (monthStart && day >= monthStart && day <= today){
-        sumMonth += gross;
-        sumVatMonth += vat;
-        cntMonth++;
-      }
+      const gross = Number(toNum(m.grossTotal) || 0);
+      totals.set(ym, (totals.get(ym) || 0) + gross);
+      total += gross;
+      cnt++;
     }
 
-    const line = (amt, cnt) => {
-      const a = __fmtEuro0(amt);
+    const vals = Array.from(totals.values()).map(v => Number(v) || 0);
+    const max = Math.max(0, ...(vals.length ? vals : [0]));
+
+    if (elTotal) elTotal.textContent = __fmtEuro0(total);
+    if (elMeta){
       const c = Number(cnt || 0);
-      return a + " · " + c.toLocaleString("it-IT") + " DDT";
-    };
+      elMeta.textContent = `${c.toLocaleString("it-IT")} DDT · ultimi 12 mesi`;
+    }
 
-    if (elToday) elToday.textContent = line(sumToday, cntToday);
-    if (elWeek)  elWeek.textContent  = line(sumWeek, cntWeek);
-    if (elMonth) elMonth.textContent = line(sumMonth, cntMonth);
-    if (elVat)   elVat.textContent   = __fmtEuro0(sumVatMonth);
-
-    // Aggiorna contagiri (Mese): 0 → 100.000€ (rosso/giallo/verde)
-    try{
-      const MAX = 100000;
-      const raw = Number(sumMonth || 0);
-      const v = (Number.isFinite(raw) ? raw : 0);
-      const pct = Math.max(0, Math.min(1, (MAX > 0 ? (v / MAX) : 0)));
-      const angle = 180 + (pct * 180); // 180° (0) → 360° (100k)
-
-      if (elGaugeNeedle){
-        try{ elGaugeNeedle.setAttribute("transform", `rotate(${angle.toFixed(2)} 120 120)`); }catch(_){ }
-      }
-      if (elGaugeValue){
-        try{ elGaugeValue.textContent = __fmtEuro0(v); }catch(_){ }
+    if (elBars){
+      const needBuild = elBars.querySelectorAll(".homeRevBar").length !== months.length;
+      if (needBuild){
+        elBars.innerHTML = months.map(mo => {
+          return `<div class="homeRevBar" data-ym="${escAttr(mo.key)}">`
+            + `<div class="homeRevBarTrack"><div class="homeRevBarFill"></div></div>`
+            + `<div class="homeRevBarLbl">${esc(mo.lab)}</div>`
+            + `</div>`;
+        }).join("");
       }
 
-      if (cockpit){
-        try{ cockpit.classList.remove("revZoneRed", "revZoneYellow", "revZoneGreen"); }catch(_){ }
-        const cls = (pct < 0.34) ? "revZoneRed" : (pct < 0.67) ? "revZoneYellow" : "revZoneGreen";
-        try{ cockpit.classList.add(cls); }catch(_){ }
+      const curKey = `${now.getFullYear()}-${__pad2(now.getMonth()+1)}`;
+      const bars = elBars.querySelectorAll(".homeRevBar");
+      for (const bar of bars){
+        const ym = String(bar.getAttribute("data-ym") || "");
+        const val = Number(totals.get(ym) || 0);
+        const pct = (max > 0) ? Math.max(0, Math.min(1, val / max)) : 0;
+
+        const fill = bar.querySelector(".homeRevBarFill");
+        if (fill) fill.style.height = (pct * 100).toFixed(1) + "%";
+
+        // Title (tooltip)
+        const mo = months.find(x => x.key === ym);
+        if (mo){
+          bar.title = `${mo.long || mo.lab} ${mo.y} · ${__fmtEuro0(val)}`;
+        } else {
+          bar.title = `${ym} · ${__fmtEuro0(val)}`;
+        }
+
+        if (ym === curKey) bar.classList.add("is-current");
+        else bar.classList.remove("is-current");
       }
-    }catch(_){ }
+    }
 
     // Tooltip: ultimo DDT (se disponibile)
     try{
