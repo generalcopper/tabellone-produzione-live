@@ -10789,6 +10789,30 @@ async function deleteMovement(id) {
     let __homeDaneaMarqueeBusy = false;     // running transition
     let __homeDaneaMarqueeH = 0;            // cached slide height
 
+    // Lock cockpit height to the "Categorie" tile (prevents layout stretching on refresh)
+    let __homeDaneaLockedTileH = 0;
+    function __homeDaneaLockCockpitHeight(){
+      try{
+        if (!homeDaneaCockpit) return (__homeDaneaLockedTileH || 0);
+        const btn = document.getElementById("btnGoCategories");
+        if (!btn) return (__homeDaneaLockedTileH || 0);
+
+        const r = (btn.getBoundingClientRect ? btn.getBoundingClientRect() : null);
+        const h = Math.round((r && r.height) || 0);
+        if (h > 10){
+          if (h !== __homeDaneaLockedTileH){
+            __homeDaneaLockedTileH = h;
+            // hard lock (same height as tile "Categorie")
+            homeDaneaCockpit.style.height = h + "px";
+            homeDaneaCockpit.style.minHeight = h + "px";
+            homeDaneaCockpit.style.maxHeight = h + "px";
+          }
+          return h;
+        }
+      }catch(_){ }
+      return (__homeDaneaLockedTileH || 0);
+    }
+
     function __fmtDateShortIT(v){
       const s = String(v || "").trim();
       if (!s) return "—";
@@ -11017,7 +11041,9 @@ async function deleteMovement(id) {
 
     function __homeDaneaMeasureH(){
       try{
-        const ref = homeDaneaTicker || homeDaneaCockpit;
+        // keep cockpit height identical to the "Categorie" tile
+        __homeDaneaLockCockpitHeight();
+        const ref = homeDaneaCockpit || homeDaneaTicker;
         const r = ref ? ref.getBoundingClientRect() : null;
         const h = Math.round((r && r.height) || 0);
         return (h > 10) ? h : 0;
@@ -11180,6 +11206,9 @@ async function deleteMovement(id) {
     function renderHomeDaneaCockpit(){
       try{
         if (!homeDaneaCockpit || !homeDaneaTickerSeq || !homeDaneaTickerSeqClone) return;
+
+        // lock cockpit height before measuring/animating
+        __homeDaneaLockCockpitHeight();
 
         // stato scarico automatico (dashboard)
         const autoOn = (() => {
