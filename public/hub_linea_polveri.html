@@ -4391,7 +4391,7 @@ function hideLogin(){
           keys: allowSet,
           updatedAt: data.updatedAt || null,
           updatedBy: data.updatedBy || "",
-          allowAll: Boolean(data.allowAll) && snap.exists(),
+          allowAll: (snap.exists() ? (Boolean(data.allowAll) === true) : true),
           docExists: snap.exists(),
           error: "",
           lastError: "",
@@ -4428,7 +4428,7 @@ function hideLogin(){
         state.mobileAllowlist.ready = true;
         state.mobileAllowlist.keys = new Set();
         state.mobileAllowlist.docExists = false;
-        state.mobileAllowlist.allowAll = false;
+        state.mobileAllowlist.allowAll = true; // fail-open: se allowlist non leggibile, mostra tutti gli ordini
         state.mobileAllowSelection = new Set();
         state.mobileAllowDirty = false;
         state.mobileAllowSaveState = "error";
@@ -4460,7 +4460,7 @@ function hideLogin(){
       state.mobileAllowlist.ready = true;
       state.mobileAllowlist.keys = new Set();
       state.mobileAllowlist.docExists = false;
-      state.mobileAllowlist.allowAll = false;
+      state.mobileAllowlist.allowAll = true; // fail-open: se allowlist non leggibile, mostra tutti gli ordini
       state.mobileAllowSelection = new Set();
       state.mobileAllowDirty = false;
       state.mobileAllowSaveState = "error";
@@ -5260,9 +5260,12 @@ function computePartialOrders(){
     const allowLoaded = Boolean(globalThis.__ALLOW_LOADED__);
     const forceAllowlistOnly = options.forceAllowlistOnly === true;
     const disableAllowlist = options.disableAllowlist === true;
+    const allowAllMode = Boolean(allowInfo && allowInfo.allowAll);
     let allowFilterActive = false;
     let allowGuardActive = false;
-    if(!disableAllowlist){
+    // Allowlist: di default filtra SOLO quando configurata.
+    // Se allowAllMode e' true (doc mancante o permessi bloccati) -> fail-open: mostra tutti gli ordini.
+    if(!disableAllowlist && !allowAllMode){
       if(forceAllowlistOnly){
         allowFilterActive = Boolean(allowLoaded);
         allowGuardActive = !allowLoaded;
@@ -7008,6 +7011,8 @@ function openHistModal(id){
 
     const allowLoaded = Boolean(globalThis.__ALLOW_LOADED__);
     const allowKeySet = (globalThis.__ALLOW_KEYS__ instanceof Set) ? globalThis.__ALLOW_KEYS__ : new Set();
+    const allowInfo = state.mobileAllowlist || {};
+    const allowAllMode = Boolean(allowInfo && allowInfo.allowAll);
     const { orders } = buildOrderViews({ forceAllowlistOnly:true, applyRoleVisibility:false });
 
     if(seq !== __opsInlineProdSeq) return;
@@ -7017,7 +7022,7 @@ function openHistModal(id){
       list.innerHTML = `<div class="muted">Caricamento ordini inviati a mobile…</div>`;
       return;
     }
-    if(allowKeySet.size===0){
+    if(!allowAllMode && allowKeySet.size===0){
       sub.textContent = "Nessun ordine inviato a mobile.";
       list.innerHTML = `<div class="muted">Nessun ordine inviato a mobile.</div>`;
       return;
@@ -7172,7 +7177,18 @@ function renderHome(){
         const allowLoaded = Boolean(globalThis.__ALLOW_LOADED__);
         const count = visibleOrders.length;
         const docMissing = allowLoaded && !allowInfo.docExists;
-        if(docMissing){
+        const hasErr = Boolean((allowInfo && (allowInfo.lastError || allowInfo.error)) || (globalThis.__ALLOW_META__||{}).lastError);
+        const allowAllMode = Boolean(allowInfo && allowInfo.allowAll);
+
+        if(allowAllMode){
+          if(hasErr){
+            mobileInfo.textContent = "Filtro ordini mobile non disponibile (permessi): mostro tutti gli ordini";
+          } else if(docMissing){
+            mobileInfo.textContent = "Assegnazioni non configurate: mostro tutti gli ordini";
+          } else {
+            mobileInfo.textContent = `Filtro disattivo: ${count} ordini visibili`;
+          }
+        } else if(docMissing){
           mobileInfo.textContent = "Assegnazioni non configurate";
         } else if(allowLoaded && count===0){
           mobileInfo.textContent = "Nessun ordine assegnato dall’admin";
@@ -8722,8 +8738,12 @@ Linea: polveri`, null); }catch(_e){}
     if(!body) return;
     const allowLoaded = Boolean(globalThis.__ALLOW_LOADED__);
     const allowKeySet = (globalThis.__ALLOW_KEYS__ instanceof Set) ? globalThis.__ALLOW_KEYS__ : new Set();
+    const allowInfo = state.mobileAllowlist || {};
+    const allowAllMode = Boolean(allowInfo && allowInfo.allowAll);
     const { orders, baseOrders } = buildOrderViews({ forceAllowlistOnly:true, applyRoleVisibility:false });
-    const sentBaseOrders = allowLoaded ? baseOrders.filter(o=> allowKeySet.has(o.__k || getOrderKey(o))) : [];
+    const sentBaseOrders = allowLoaded
+      ? (allowAllMode ? baseOrders : baseOrders.filter(o=> allowKeySet.has(o.__k || getOrderKey(o))))
+      : [];
     pruneSelectionAgainstOrders(sentBaseOrders);
     updateSelectionCounter();
     orders.sort((a,b)=>{
@@ -8736,12 +8756,15 @@ Linea: polveri`, null); }catch(_e){}
     let planMessageHtml = "";
     if(!allowLoaded){
       planMessageHtml = `<div class="planMessage"><div class="headline">Caricamento ordini inviati a mobile…</div><div class="muted">Appena arrivano, compariranno qui.</div></div>`;
+    } else if(allowAllMode){
+      const available = orders.length;
+      planMessageHtml = `<div class="planMessage"><div class="headline">Filtro mobile non attivo: vedi tutti gli ordini.</div><div class="muted">Disponibili: ${available}${isAdmin?` · Admin`:``}</div></div>`;
     } else {
       const totalSent = sentBaseOrders.length;
       const available = orders.length;
-      const listHtml = (isDesktop && orders.length) ? orders.slice(0,8).map(o=>`<li>${escapeHtml(o.customer||"Cliente")} · Ord. ${escapeHtml(o.orderNo||o.number||"—")}${o.conclusion?` · ${escapeHtml(o.conclusion)}`:""}</li>`).join("") : "";
+      const listHtml = (isDesktop && orders.length) ? orders.slice(0,8).map(o=>`<li>${escapeHtml(o.customer||"Cliente")} · Ord. ${escapeHtml(o.orderNo||o.number||"—")}${o.conclusion?` · ${escapeHtml(o.conclusion)}`:``}</li>`).join("") : "";
       const listBlock = listHtml ? `<ul>${listHtml}</ul>` : ``;
-      planMessageHtml = `<div class="planMessage"><div class="headline">In produzione vedi solo gli ordini inviati a mobile.</div><div class="muted">Inviati: ${totalSent} · Disponibili: ${available}${isAdmin?` · Admin`:""}</div>${listBlock}</div>`;
+      planMessageHtml = `<div class="planMessage"><div class="headline">In produzione vedi solo gli ordini inviati a mobile.</div><div class="muted">Inviati: ${totalSent} · Disponibili: ${available}${isAdmin?` · Admin`:``}</div>${listBlock}</div>`;
     }
 body.innerHTML = `
       <div class="stepTitle">Ordini disponibili</div>
@@ -8756,7 +8779,7 @@ body.innerHTML = `
     if(!orders.length){
       const emptyMsg = (!allowLoaded)
         ? "Caricamento ordini inviati a mobile…"
-        : (allowKeySet.size===0)
+        : (!allowAllMode && allowKeySet.size===0)
           ? "Nessun ordine inviato a mobile."
           : "Nessun ordine disponibile (tutti conclusi o non presenti).";
       list.innerHTML = `<div class="muted">${emptyMsg}</div>
