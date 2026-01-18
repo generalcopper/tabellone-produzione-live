@@ -1825,60 +1825,46 @@ if(absenceMsg) absenceMsg.textContent = "Richiesta inviata ✅";
       const uidRef = fsMod.doc(db, "powderUsers", uid);
       const invRef = fsMod.doc(db, "powderUsers", emailLower);
 
-      // Transaction (auto-heal):
-      // - se NON esiste UID -> lo crea da invite
-      // - se ESISTE ma manca orgId/flag/valori corretti -> lo ripara (merge)
-      const result = await fsMod.runTransaction(db, async (tx)=>{
-        // 1) Leggi invito (emailLower) — è la fonte di verità per orgId/isAdmin
-        const invSnap = await tx.get(invRef);
-        if(!invSnap.exists()) return { ok:false, reason:"noinvite" };
+      // 1) Leggi invito (emailLower)
+      const invSnap = await fsMod.getDoc(invRef);
+      if(!invSnap.exists()) return { ok:false, reason:"noinvite", emailLower, uid };
 
-        const inv = invSnap.data() || {};
-        if(inv.enabled === false) return { ok:false, reason:"disabled" };
+      const inv = invSnap.data() || {};
+      if(inv.enabled === false) return { ok:false, reason:"disabled_invite", emailLower, uid };
 
-        // Allinea la logica all'equivalente nelle Firestore Rules (regex + fallback default)
-        const rawOrg = (typeof inv.orgId === "string") ? inv.orgId.trim() : "";
-        const orgId = (/^[A-Za-z0-9_-]{1,50}$/.test(rawOrg)) ? rawOrg : "default";
-        const desired = {
-          emailLower,
-          enabled: true,
-          isAdmin: inv.isAdmin === true,
-          orgId
-        };
+      // allinea orgId alla stessa regex delle Rules
+      const rawOrg = (typeof inv.orgId === "string") ? inv.orgId.trim() : "";
+      const orgId = (/^[A-Za-z0-9_-]{1,50}$/.test(rawOrg)) ? rawOrg : "default";
 
-        // 2) UID doc
-        const uidSnap = await tx.get(uidRef);
+      const desired = {
+        emailLower,
+        enabled: true,
+        isAdmin: inv.isAdmin === true,
+        orgId
+      };
 
-        // Se esiste ma è disabilitato, non fare override
-        if(uidSnap.exists()){
-          const cur = uidSnap.data() || {};
-          if(cur.enabled === false) return { ok:false, reason:"disabled", existed:true };
+      // 2) Controlla UID doc (se esiste ed e' disabilitato -> stop)
+      let uidSnap = null;
+      try{ uidSnap = await fsMod.getDoc(uidRef); }catch(_e){}
+      if(uidSnap && uidSnap.exists()){
+        const cur = uidSnap.data() || {};
+        if(cur.enabled === false) return { ok:false, reason:"disabled_uid", emailLower, uid, existed:true };
+      }
 
-          const needsRepair =
-            (cur.emailLower !== desired.emailLower) ||
-            (cur.enabled !== true) ||
-            ((cur.isAdmin === true) !== (desired.isAdmin === true)) ||
-            (cur.orgId !== desired.orgId);
+      // 3) Crea o ripara (merge)
+      const stamp = (!uidSnap || !uidSnap.exists())
+        ? { createdAt: fsMod.serverTimestamp() }
+        : { repairedAt: fsMod.serverTimestamp() };
 
-          if(needsRepair){
-            tx.set(uidRef, {
-              ...desired,
-              repairedAt: fsMod.serverTimestamp()
-            }, { merge:true });
-            return { ok:true, existed:true, repaired:true };
-          }
-          return { ok:true, existed:true, repaired:false };
-        }
+      await fsMod.setDoc(uidRef, { ...desired, ...stamp }, { merge:true });
 
-        // Non esiste: crea
-        tx.set(uidRef, {
-          ...desired,
-          createdAt: fsMod.serverTimestamp()
-        });
-        return { ok:true, created:true };
-      });
-
-      return result || { ok:false, reason:"error" };
+      return {
+        ok:true,
+        created: (!uidSnap || !uidSnap.exists()),
+        repaired: (uidSnap && uidSnap.exists()),
+        emailLower,
+        uid
+      };
     }catch(e){
       const code = String(e?.code || "");
       if(code === "permission-denied" || code === "PERMISSION_DENIED"){
@@ -1965,40 +1951,42 @@ if(absenceMsg) absenceMsg.textContent = "Richiesta inviata ✅";
 
 
 
-    // ✅ Fix accessi "parziali": crea/aggancia il profilo UID una volta sola
+    // 1) Verifica accesso (anche solo via invito emailLower)
+    const preRole = await resolveRole(user);
+    if(!preRole.isMember){
+      lockPage(true);
+      showOverlayState("noaccess");
+      const who = (user?.email || "").toLowerCase();
+      setMsg(who ? ("Accesso non autorizzato per: " + who + ". Contatta l’amministratore.")
+                  : "Accesso non autorizzato per questo account. Contatta l’amministratore.");
+      if(profileRoleEl) profileRoleEl.textContent = "No accesso";
+      document.querySelectorAll("[data-admin-only]").forEach(el=>el.style.display="none");
+      return;
+    }
+
+    // 2) Prova a creare/riparare il profilo UID (non blocca se sei gia' autorizzato)
     const boot = await ensureUidPowderUser(user);
     if(!boot.ok){
-      lockPage(true);
-      showOverlayState("noaccess");
-      if(profileRoleEl) profileRoleEl.textContent = (boot.reason === "noinvite" || boot.reason === "disabled") ? "No accesso" : "Errore";
-      (function(){
-        let _m = "";
-        if(boot.reason === "noinvite" || boot.reason === "disabled"){
-          _m = "Accesso non autorizzato per questo account. Contatta l’amministratore.";
-        }else if(boot.reason === "forbidden"){
-          _m = "Profilo non inizializzato: permessi insufficienti per creare il profilo UID. Avvisa l’amministratore (serve aggiornare le Firestore Rules su powderUsers).";
-        }else{
-          _m = "Errore inizializzazione profilo. Premi Esci e rientra, oppure ricarica la pagina.";
-        }
-        setMsg(_m);
-      })();
-      // Nascondi anche eventuali tile admin
-      document.querySelectorAll("[data-admin-only]").forEach(el=>el.style.display="none");
-      return;
+      // se l'UID e' disabilitato, blocca davvero
+      if(boot.reason === "disabled_uid"){
+        lockPage(true);
+        showOverlayState("noaccess");
+        setMsg("Account disabilitato. Contatta l’amministratore.");
+        if(profileRoleEl) profileRoleEl.textContent = "Disabilitato";
+        document.querySelectorAll("[data-admin-only]").forEach(el=>el.style.display="none");
+        return;
+      }
+
+      // altrimenti: avviso soft
+      const who = (user?.email || "").toLowerCase();
+      setMsg("Accesso OK" + (who ? (" ("+who+")") : "") + ", ma il profilo UID non è stato inizializzato. Alcune funzioni potrebbero essere limitate. Ricarica o avvisa l’amministratore.");
+    }else{
+      setMsg("");
     }
 
+    // 3) Ricalcola ruolo (dopo eventuale boot)
     const role = await resolveRole(user);
 
-    if(!role.isMember){
-      // Signed in but not authorized
-      lockPage(true);
-      showOverlayState("noaccess");
-      setMsg("Accesso non autorizzato per questo account. Contatta l’amministratore.");
-      if(profileRoleEl) profileRoleEl.textContent = "No accesso";
-      // Nascondi anche eventuali tile admin
-      document.querySelectorAll("[data-admin-only]").forEach(el=>el.style.display="none");
-      return;
-    }
 
     // Apply per-user tile visibility (alcune tile possono essere nascoste per specifiche email)
     applyIconVisibilityByUser(user);
