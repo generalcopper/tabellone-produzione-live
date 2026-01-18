@@ -19418,7 +19418,9 @@ table.dataGrid tbody td{
   }
 
   function applyGradient(svg, gradId){
-    var fill = "url(#" + gradId + ")";
+    // Patch 2026-01: icone dashboard devono seguire il colore (CSS) -> nero su tile bianchi
+    // Usiamo currentColor invece del gradiente (evita inline fill colorati)
+    var fill = "currentColor";
     try{
       var nodes = svg.querySelectorAll("path,circle,rect,polygon,ellipse");
       for (var i=0; i<nodes.length; i++){
