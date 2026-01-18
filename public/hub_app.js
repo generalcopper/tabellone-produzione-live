@@ -7912,6 +7912,7 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
     const homeDaneaTickerTrack = document.getElementById("homeDaneaTickerTrack");
     const homeDaneaTickerSeq = document.getElementById("homeDaneaTickerSeq");
     const homeDaneaTickerSeqClone = document.getElementById("homeDaneaTickerSeqClone");
+    const homeDaneaToggleBtn = document.getElementById("homeDaneaToggleBtn");
 
 
     const stockTbody = document.getElementById("stockTbody");
@@ -11288,7 +11289,11 @@ async function deleteMovement(id) {
         const ref = homeDaneaCockpit || homeDaneaTicker;
         const r = ref ? ref.getBoundingClientRect() : null;
         const h = Math.round((r && r.height) || 0);
-        return (h > 10) ? h : 0;
+        if (h > 10) return h;
+        // Se la Home non è visibile (display:none), getBoundingClientRect() torna 0.
+        // In quel caso usa l'ultima altezza bloccata, così nel cockpit resta UNA riga.
+        const fb = Math.round(Number(__homeDaneaLockedTileH || 0));
+        return (fb > 10) ? fb : 0;
       }catch(_){ return 0; }
     }
 
@@ -11387,6 +11392,46 @@ async function deleteMovement(id) {
         homeDaneaCockpit.addEventListener("focusin", pause);
         homeDaneaCockpit.addEventListener("focusout", resume);
 
+        // Pulsante destro: ATTIVATO/DISATTIVATO (toggle auto mode)
+        try{
+          if (homeDaneaToggleBtn && !(homeDaneaToggleBtn.dataset && homeDaneaToggleBtn.dataset.bound === "1")){
+            try{ if (homeDaneaToggleBtn.dataset) homeDaneaToggleBtn.dataset.bound = "1"; }catch(_){ }
+
+            const readAuto = () => {
+              try{
+                const v = String(localStorage.getItem("hubinv_danea_auto_mode") || "").trim().toLowerCase();
+                if (!v) return false;
+                return (v === "1" || v === "true" || v === "on" || v === "yes");
+              }catch(_){ return false; }
+            };
+
+            const writeAuto = (on) => {
+              const next = !!on;
+              // Preferisci la switch reale: aggiorna anche i timer interni del modulo Danea
+              try{
+                const sw = document.getElementById("daneaAutoSwitch");
+                if (sw){
+                  try{ sw.checked = next; }catch(_){ }
+                  try{ sw.dispatchEvent(new Event("change", { bubbles: true })); }catch(_){ }
+                  return true;
+                }
+              }catch(_){ }
+              // fallback: solo localStorage
+              try{ localStorage.setItem("hubinv_danea_auto_mode", next ? "1" : "0"); }catch(_){ }
+              return false;
+            };
+
+            homeDaneaToggleBtn.addEventListener("click", (e) => {
+              try{ e.preventDefault(); e.stopPropagation(); }catch(_){ }
+              const cur = readAuto();
+              const next = !cur;
+              writeAuto(next);
+              try{ renderHomeDaneaCockpit(); }catch(_){ }
+              try{ showToast(next ? "Scarico automatico ATTIVATO" : "Scarico automatico DISATTIVATO", next ? "ok" : "warn"); }catch(_){ }
+            });
+          }
+        }catch(_){ }
+
         // Vertical ticker: swap slides on transition end
         try{
           if (homeDaneaTickerTrack && !(homeDaneaTickerTrack.dataset && homeDaneaTickerTrack.dataset.vBound === "1")){
@@ -11461,13 +11506,21 @@ async function deleteMovement(id) {
           }catch(_){ return false; }
         })();
 
-        // aggiorna glow (verde/rosso) — solo estetico
+        // stato UI (toggle) — no glow esterno
         try{
           if (homeDaneaCockpit){
             homeDaneaCockpit.classList.toggle("is-auto-on", !!autoOn);
             homeDaneaCockpit.classList.toggle("is-auto-off", !autoOn);
-            const lbl = autoOn ? "ATTIVO" : "DISATTIVO";
-            homeDaneaCockpit.setAttribute("title", "Auto scarico: " + lbl);
+            const lbl = autoOn ? "ATTIVATO" : "DISATTIVATO";
+            homeDaneaCockpit.setAttribute("title", "Scarico automatico: " + lbl);
+          }
+        }catch(_){ }
+
+        // Bottone a destra: attivato/disattivato
+        try{
+          if (homeDaneaToggleBtn){
+            homeDaneaToggleBtn.textContent = autoOn ? "ATTIVATO" : "DISATTIVATO";
+            try{ homeDaneaToggleBtn.setAttribute("aria-pressed", autoOn ? "true" : "false"); }catch(_){ }
           }
         }catch(_){ }
 
@@ -11512,7 +11565,7 @@ async function deleteMovement(id) {
         const list = __getHomeDaneaGroups();
 
         const items = [];
-        const autoLbl = autoOn ? "ATTIVO" : "DISATTIVO";
+        const autoLbl = autoOn ? "ATTIVATO" : "DISATTIVATO";
         items.push(`<span class="homeDaneaTickerItem is-meta">SCARICO AUTOMATICO ${autoLbl} - DDT SCARICATI OGGI ${fmt(todayCount)} - PEZZI SCARICATI OGGI ${fmt(piecesToday)}</span>`);
 
         if (!list.length){
