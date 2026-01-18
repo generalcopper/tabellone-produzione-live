@@ -4146,20 +4146,14 @@ function waitForHub(attempt){
     return (__homeRevLockedTileH || 0);
   }
   function renderHomeCockpit(){
-    const cockpit = $("homeRevenueCockpit");
-    if (!cockpit) return;
-
-    // Lock altezza (evita che la dashboard si allunghi su refresh)
-    __lockHomeRevenueCockpitHeight();
+    const boxTotal = $("homeRevenueTotalCockpit");
+    const boxPack  = $("homeRevenuePackCockpit");
+    if (!boxTotal && !boxPack) return;
 
     const elTotal = $("homeRevTotal");
     const elMeta  = $("homeRevMeta");
-
-    // Solo 2 parti: vendite totali + imballaggio più movimentato
     const elTopPack     = $("homeRevTopPackaging");
     const elTopPackMeta = $("homeRevTopPackagingMeta");
-
-    const segEl   = $("homeRevSeg");
 
     const today = __todayISO();
     const weekStart = __addDays(today, -6);
@@ -4256,7 +4250,7 @@ function waitForHub(attempt){
       return String(a?.name || a?.code || "").localeCompare(String(b?.name || b?.code || ""), "it", { sensitivity:"base" });
     });
 
-    // UI: vendite totali
+    // UI: fatturato totale
     if (elTotal) elTotal.textContent = __fmtEuro0(sumGross);
     if (elMeta) elMeta.textContent = `${pickedLabel} · ${Number(ddtCount || 0).toLocaleString("it-IT")} DDT`;
 
@@ -4273,72 +4267,42 @@ function waitForHub(attempt){
     }
 
     // Tooltip (riassunto)
-    try{
-      cockpit.title = "Cockpit fatturato — " + [
-        `${pickedLabel}: ${__fmtEuro0(sumGross)} (${Number(ddtCount||0).toLocaleString('it-IT')} DDT)`,
-        topPack ? (`Imballaggio: ${String(topPack.name || topPack.code || '—')} · ${Number(topPack.qty||0).toLocaleString('it-IT')}${topPack.uom ? (' ' + String(topPack.uom)) : ''}`) : "Imballaggio: —"
-      ].join(" — ");
-    }catch(_){ }
+    const tip = "Cockpit fatturato — " + [
+      `${pickedLabel}: ${__fmtEuro0(sumGross)} (${Number(ddtCount||0).toLocaleString("it-IT")} DDT)`,
+      topPack ? (`Imballaggio: ${String(topPack.name || topPack.code || "—")} · ${Number(topPack.qty||0).toLocaleString("it-IT")}${topPack.uom ? (" " + String(topPack.uom)) : ""}`) : "Imballaggio: —"
+    ].join(" — ");
+    try{ if (boxTotal) boxTotal.title = tip; }catch(_){ }
+    try{ if (boxPack) boxPack.title = tip; }catch(_){ }
 
-    // Evidenzia selezione (se esiste)
-    if (segEl){
-      try{
-        const btns = Array.from(segEl.querySelectorAll('.homeRevSegBtn'));
-        for (const b of btns){
-          const p = String(b.getAttribute('data-period') || '').trim();
-          const active = (p === __homeRevPeriod);
-          b.classList.toggle('is-active', active);
-          try{ b.setAttribute('aria-selected', active ? 'true' : 'false'); }catch(_){ }
-        }
-      }catch(_){ }
-    }
-
-    // Bind una sola volta: click -> apri sezione Fatturato / toggle periodo
+    // Bind una sola volta: click -> apri sezione Fatturato
     if (!__homeRevBound){
       __homeRevBound = true;
 
-      // blocca bubbling/capture verso handler esterni (evita che apra altre viste)
-      cockpit.addEventListener('pointerdown', (e) => {
-        try{ e.stopPropagation(); e.stopImmediatePropagation && e.stopImmediatePropagation(); }catch(_){ }
-      }, true);
-
-      cockpit.addEventListener('click', (e) => {
-        try{ e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation && e.stopImmediatePropagation(); }catch(_){ }
+      function openRevenue(e){
+        try{ e && e.preventDefault && e.preventDefault(); }catch(_){ }
+        try{ e && e.stopPropagation && e.stopPropagation(); }catch(_){ }
         try{
-          if (window.HubInv && typeof window.HubInv.setView === 'function') window.HubInv.setView('revenue');
-          if (window.HubRevenue && typeof window.HubRevenue.refresh === 'function') window.HubRevenue.refresh();
+          if (window.HubInv && typeof window.HubInv.setView === "function") window.HubInv.setView("revenue");
+          if (window.HubRevenue && typeof window.HubRevenue.refresh === "function") window.HubRevenue.refresh();
         }catch(_){ }
-      }, true);
-
-      cockpit.addEventListener('keydown', (e) => {
-        if (!e) return;
-        if (e.target && e.target !== cockpit) return; // se focus su bottoni interni
-        if (e.key !== 'Enter' && e.key !== ' ') return;
-        try{ e.preventDefault(); e.stopPropagation(); }catch(_){ }
-        try{ cockpit.click(); }catch(_){ }
-      });
-
-      if (segEl){
-        segEl.addEventListener('click', (e) => {
-          const btn = e.target?.closest?.('.homeRevSegBtn');
-          if (!btn) return;
-          try{ e.preventDefault(); e.stopPropagation(); }catch(_){ }
-          const p = String(btn.getAttribute('data-period') || '').trim();
-          if (p !== 'day' && p !== 'week' && p !== 'month') return;
-          __homeRevPeriod = p;
-          try{ localStorage.setItem('hubHomeRevPeriod', __homeRevPeriod); }catch(_){ }
-          try{ renderHomeCockpit(); }catch(_){ }
-        });
-
-        segEl.addEventListener('keydown', (e) => {
-          // evita che lo space/enter sui bottoni faccia aprire il cockpit
-          try{ e.stopPropagation(); }catch(_){ }
-        }, true);
       }
 
-      try{
-        window.addEventListener('resize', () => { try{ __lockHomeRevenueCockpitHeight(); }catch(_){ } }, { passive: true });
-      }catch(_){ }
+      const bindBox = (el) => {
+        if (!el) return;
+        el.addEventListener("pointerdown", (e) => {
+          try{ e.stopPropagation(); e.stopImmediatePropagation && e.stopImmediatePropagation(); }catch(_){ }
+        }, true);
+        el.addEventListener("click", openRevenue, true);
+        el.addEventListener("keydown", (e) => {
+          if (!e) return;
+          if (e.key !== "Enter" && e.key !== " ") return;
+          try{ e.preventDefault(); e.stopPropagation(); }catch(_){ }
+          openRevenue(e);
+        });
+      };
+
+      bindBox(boxTotal);
+      bindBox(boxPack);
     }
   }
 function renderList(){
