@@ -4093,11 +4093,31 @@ function waitForHub(attempt){
     const d = new Date();
     return `${d.getFullYear()}-${__pad2(d.getMonth()+1)}-${__pad2(d.getDate())}`;
   }
+
+
   function __addDays(iso, delta){
     const d = new Date(String(iso||"") + "T00:00:00");
     if (Number.isNaN(d.getTime())) return "";
     d.setDate(d.getDate() + (Number(delta)||0));
     return `${d.getFullYear()}-${__pad2(d.getMonth()+1)}-${__pad2(d.getDate())}`;
+  }
+  
+  function __isoFromDate(d){
+    try{
+      if (!d || Number.isNaN(d.getTime())) return "";
+      return `${d.getFullYear()}-${__pad2(d.getMonth()+1)}-${__pad2(d.getDate())}`;
+    }catch(_){ return ""; }
+  }
+
+  function __weekStartISO(iso){
+    try{
+      const d = new Date(String(iso||"") + "T00:00:00");
+      if (Number.isNaN(d.getTime())) return "";
+      const dow = d.getDay();
+      const diff = (dow === 0 ? -6 : 1 - dow);
+      d.setDate(d.getDate() + diff);
+      return __isoFromDate(d);
+    }catch(_){ return ""; }
   }
 
   function __fmtEuro0(v){
@@ -4148,6 +4168,11 @@ function waitForHub(attempt){
     let sumDay=0, sumWeek=0, sumMonth=0;
     let cntDay=0, cntWeek=0, cntMonth=0;
 
+    const daySum = Object.create(null);
+    const dayCnt = Object.create(null);
+    const weekSum = Object.create(null);
+    const weekCnt = Object.create(null);
+
     const monthSum = Object.create(null);
     const monthCnt = Object.create(null);
 
@@ -4161,6 +4186,16 @@ function waitForHub(attempt){
       if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) continue;
 
       const gross = Number(toNum(m.grossTotal) || 0);
+      // serie (grafico): giorno / settimana / mese
+      try{
+        daySum[day] = Number(daySum[day] || 0) + gross;
+        dayCnt[day] = Number(dayCnt[day] || 0) + 1;
+        const wk = __weekStartISO(day);
+        if (wk){
+          weekSum[wk] = Number(weekSum[wk] || 0) + gross;
+          weekCnt[wk] = Number(weekCnt[wk] || 0) + 1;
+        }
+      }catch(_){ }
 
       if (day === today){
         sumDay += gross;
@@ -4219,36 +4254,131 @@ function waitForHub(attempt){
       }catch(_){ }
     }
 
-    // Barre mensili (ultimi 12 mesi)
+    // Trend linea (punti) — cambia in base al periodo (day/week/month)
     if (barsEl){
+      const period = (__homeRevPeriod === "day" || __homeRevPeriod === "week" || __homeRevPeriod === "month") ? __homeRevPeriod : "month";
       const M3 = ["Gen","Feb","Mar","Apr","Mag","Giu","Lug","Ago","Set","Ott","Nov","Dic"];
-      const now = new Date();
-      const months = [];
-      for (let i=11; i>=0; i--){
-        const dt = new Date(now.getFullYear(), now.getMonth()-i, 1);
-        const key = `${dt.getFullYear()}-${__pad2(dt.getMonth()+1)}`;
-        months.push({ key, y: dt.getFullYear(), m: dt.getMonth() });
+
+      function __labelDDMM(iso){
+        try{
+          const d = new Date(String(iso||"") + "T00:00:00");
+          if (Number.isNaN(d.getTime())) return String(iso||"").slice(5);
+          return __pad2(d.getDate()) + "/" + __pad2(d.getMonth()+1);
+        }catch(_){ return String(iso||"").slice(5); }
+      }
+
+      const series = [];
+
+      if (period === "month"){
+        const now = new Date();
+        for (let i=11; i>=0; i--){
+          const dt = new Date(now.getFullYear(), now.getMonth()-i, 1);
+          const key = `${dt.getFullYear()}-${__pad2(dt.getMonth()+1)}`;
+          const v = Number(monthSum[key] || 0);
+          const c = Number(monthCnt[key] || 0);
+          series.push({
+            key,
+            label: (dt.getMonth()>=0 && dt.getMonth()<12) ? M3[dt.getMonth()] : key,
+            value: v,
+            count: c,
+            isCurrent: (i === 0)
+          });
+        }
+      } else if (period === "week"){
+        const curWk = __weekStartISO(today);
+        for (let i=11; i>=0; i--){
+          const wk = __addDays(curWk, -7*i);
+          const v = Number(weekSum[wk] || 0);
+          const c = Number(weekCnt[wk] || 0);
+          series.push({
+            key: wk,
+            label: __labelDDMM(wk),
+            value: v,
+            count: c,
+            isCurrent: (i === 0)
+          });
+        }
+      } else {
+        // day: ultimi 14 giorni (molto diverso dal mensile)
+        for (let i=13; i>=0; i--){
+          const d0 = __addDays(today, -i);
+          const v = Number(daySum[d0] || 0);
+          const c = Number(dayCnt[d0] || 0);
+          series.push({
+            key: d0,
+            label: __labelDDMM(d0),
+            value: v,
+            count: c,
+            isCurrent: (i === 0)
+          });
+        }
       }
 
       let max = 0;
-      for (const mm of months){
-        const v = Number(monthSum[mm.key] || 0);
+      for (const it of series){
+        const v = Number(it && it.value || 0);
         if (v > max) max = v;
       }
       if (!Number.isFinite(max) || max <= 0) max = 1;
 
-      barsEl.innerHTML = months.map((mm, idx) => {
-        const v = Number(monthSum[mm.key] || 0);
-        const c = Number(monthCnt[mm.key] || 0);
-        const pct = Math.max(4, Math.round((v / max) * 100));
-        const lbl = (mm.m >= 0 && mm.m < 12) ? M3[mm.m] : mm.key;
-        const isCurrent = (idx === (months.length - 1));
-        const t = `${lbl} ${mm.y}: ${__fmtEuro0(v)} · ${c.toLocaleString('it-IT')} DDT`;
-        return `<div class="homeRevBar ${isCurrent ? 'is-current' : ''}" title="${escAttr(t)}">
-          <div class="homeRevBarTrack"><div class="homeRevBarFill" style="height:${pct}%"></div></div>
-          <div class="homeRevBarLbl">${lbl}</div>
-        </div>`;
-      }).join('');
+      const W = 120, H = 48;
+      const padL = 6, padR = 6, padT = 6, padB = 14;
+      const cw = W - padL - padR;
+      const ch = H - padT - padB;
+
+      const n = series.length || 0;
+      const step = (n > 1) ? (cw / (n - 1)) : 0;
+
+      const pts = series.map((it, idx) => {
+        const v = Number(it && it.value || 0);
+        const x = padL + (step * idx);
+        const y = padT + (1 - (v / max)) * ch;
+        return { x, y, it };
+      });
+
+      const pathD = pts.map((p, i) =>
+        (i === 0 ? `M ${p.x.toFixed(2)} ${p.y.toFixed(2)}` : `L ${p.x.toFixed(2)} ${p.y.toFixed(2)}`)
+      ).join(" ");
+
+      const gridYs = [0.25, 0.5, 0.75].map(t => (padT + ch * t));
+
+      // Labels: mese = tutti, settimana/giorno = pochi (per non affollare)
+      const showAllLabels = (period === "month");
+
+      barsEl.innerHTML = `
+        <svg class="homeRevSvg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true">
+          <g>
+            ${gridYs.map(y => `<line class="homeRevGrid" x1="${padL}" y1="${y.toFixed(2)}" x2="${(W-padR)}" y2="${y.toFixed(2)}" />`).join("")}
+            <line class="homeRevGrid" x1="${padL}" y1="${(padT+ch).toFixed(2)}" x2="${(W-padR)}" y2="${(padT+ch).toFixed(2)}" />
+          </g>
+
+          <path class="homeRevLine" d="${pathD}"></path>
+
+          ${pts.map((p, idx) => {
+            const it = p.it || {};
+            const c = Number(it.count || 0);
+            const label = String(it.label || it.key || "");
+            const tip = (period === "month")
+              ? `${label}: ${__fmtEuro0(it.value)} · ${c.toLocaleString('it-IT')} DDT`
+              : (period === "week")
+                ? `Settimana ${label}: ${__fmtEuro0(it.value)} · ${c.toLocaleString('it-IT')} DDT`
+                : `${label}: ${__fmtEuro0(it.value)} · ${c.toLocaleString('it-IT')} DDT`;
+
+            const r = it.isCurrent ? 2.8 : 2.2;
+            const cls = it.isCurrent ? "homeRevDot is-current" : "homeRevDot";
+
+            const showLbl = showAllLabels || (idx === 0) || (idx === pts.length-1) || (period !== "month" && idx % 3 === 0);
+
+            return `
+              <g>
+                <circle class="${cls}" cx="${p.x.toFixed(2)}" cy="${p.y.toFixed(2)}" r="${r}">
+                  <title>${esc(String(tip))}</title>
+                </circle>
+                ${showLbl ? `<text class="homeRevLbl" x="${p.x.toFixed(2)}" y="${(H-3).toFixed(2)}" text-anchor="middle">${esc(label)}</text>` : ""}
+              </g>`;
+          }).join("")}
+        </svg>
+      `;
     }
 
     // Tooltip: ultimo DDT (se disponibile)
@@ -4267,15 +4397,18 @@ function waitForHub(attempt){
     if (!__homeRevBound){
       __homeRevBound = true;
 
+      // blocca bubbling/capture verso handler esterni (evita che apra altre viste)
+      cockpit.addEventListener('pointerdown', (e) => {
+        try{ e.stopPropagation(); e.stopImmediatePropagation && e.stopImmediatePropagation(); }catch(_){ }
+      }, true);
+
       cockpit.addEventListener('click', (e) => {
-        const t = e?.target;
-        if (t && t.closest && t.closest('#homeRevSeg')) return; // cambio periodo, non aprire
-        try{ e.preventDefault(); e.stopPropagation(); }catch(_){ }
+        try{ e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation && e.stopImmediatePropagation(); }catch(_){ }
         try{
           if (window.HubInv && typeof window.HubInv.setView === 'function') window.HubInv.setView('revenue');
           if (window.HubRevenue && typeof window.HubRevenue.refresh === 'function') window.HubRevenue.refresh();
         }catch(_){ }
-      });
+      }, true);
 
       cockpit.addEventListener('keydown', (e) => {
         if (!e) return;
