@@ -4154,90 +4154,252 @@ function waitForHub(attempt){
 
     const elTotal = $("homeRevTotal");
     const elMeta  = $("homeRevMeta");
-    const barsEl  = $("homeRevBars");
+
+    const elTopProd     = $("homeRevTopProduct");
+    const elTopProdMeta = $("homeRevTopProductMeta");
+    const elTopPack     = $("homeRevTopPackaging");
+    const elTopPackMeta = $("homeRevTopPackagingMeta");
+    const elTopCust     = $("homeRevTopCustomer");
+    const elTopCustMeta = $("homeRevTopCustomerMeta");
+
     const segEl   = $("homeRevSeg");
 
     const today = __todayISO();
     const weekStart = __addDays(today, -6);
     const monthStart = today ? (today.slice(0,8) + "01") : "";
 
-    let sumDay=0, sumWeek=0, sumMonth=0;
-    let cntDay=0, cntWeek=0, cntMonth=0;
+    // Periodo (best-effort): default mese corrente.
+    let pickedLabel = "Mese corrente";
+    let fromISO = monthStart;
+    let toISO = today;
+    if (__homeRevPeriod === "day"){
+      pickedLabel = "Oggi";
+      fromISO = today;
+      toISO = today;
+    } else if (__homeRevPeriod === "week"){
+      pickedLabel = "Ultimi 7 giorni";
+      fromISO = weekStart;
+      toISO = today;
+    } else {
+      __homeRevPeriod = "month";
+      pickedLabel = "Mese corrente";
+      fromISO = monthStart;
+      toISO = today;
+    }
 
-    const daySum = Object.create(null);
-    const dayCnt = Object.create(null);
-    const weekSum = Object.create(null);
-    const weekCnt = Object.create(null);
+    function __isIsoDate(s){ return /^\d{4}-\d{2}-\d{2}$/.test(String(s||"")); }
+    function __inRange(day){
+      const d = String(day||"").trim();
+      if (!__isIsoDate(d)) return false;
+      if (!fromISO || !toISO) return true;
+      return d >= fromISO && d <= toISO;
+    }
 
-    const monthSum = Object.create(null);
-    const monthCnt = Object.create(null);
+    function __parseQty(raw){
+      const n0 = toNum(raw);
+      if (n0 != null) return n0;
+      const s0 = String(raw || "").trim();
+      if (!s0) return null;
+      const s = s0.replace(/\s+/g, "");
+      const m = s.match(/^(-?\d+(?:[.,]\d+)?)\/(\d+(?:[.,]\d+)?)$/);
+      if (m){
+        const a = Number(String(m[1]).replace(",", "."));
+        const b = Number(String(m[2]).replace(",", "."));
+        if (Number.isFinite(a) && Number.isFinite(b) && b !== 0) return a / b;
+      }
+      let t = s;
+      if (t.includes(",") && t.includes(".")) t = t.replace(/\./g, "").replace(",", ".");
+      else if (t.includes(",")) t = t.replace(",", ".");
+      const n = Number(t);
+      return Number.isFinite(n) ? n : null;
+    }
+
+    function __fmtQty2(v){
+      const n = Number(v);
+      if (!Number.isFinite(n)) return "";
+      try{ return n.toLocaleString("it-IT", { maximumFractionDigits: 2 }); }catch(_){ return String(n); }
+    }
+
+    function __rowGross(r){
+      const qty = toNum(r && r.qty);
+      let net = toNum(r && r.net);
+      let vat = toNum(r && r.vat);
+      let gross = toNum(r && r.gross);
+      const unitNet = toNum(r && r.unitNet);
+      const unitGross = toNum(r && r.unitGross);
+      const vatPerc = toNum(r && r.vatPerc);
+
+      if (gross == null && unitGross != null && qty != null) gross = unitGross * qty;
+      if (net == null && unitNet != null && qty != null) net = unitNet * qty;
+      if (vat == null && net != null && vatPerc != null) vat = net * (vatPerc / 100);
+      if (gross == null && net != null && vat != null) gross = net + vat;
+      if (gross == null && net != null && vatPerc != null) gross = net * (1 + vatPerc / 100);
+      const g = Number(gross);
+      return Number.isFinite(g) ? g : 0;
+    }
+
+    function __macroGroup(code){
+      try{
+        if (typeof getMacroCategoryForCode === "function") return String(getMacroCategoryForCode(code) || "").trim().toLowerCase();
+      }catch(_){ }
+      return "";
+    }
+
+    // Aggregazioni (solo DDT nel periodo)
+    let sumGross = 0;
+    let ddtCount = 0;
+    const prodAgg = new Map(); // codeLower -> {code,name,gross,qty}
+    const packAgg = new Map(); // codeLower -> {code,name,uom,qty}
+    const custAgg = new Map(); // customerLower -> {name,gross,cnt}
 
     const list = listDdts();
-
-    for (const d of list){
+    for (const d of (Array.isArray(list) ? list : [])){
       const k = String(d?.key || d?._id || "").trim();
       const m = getDdtModel(k);
       if (!m) continue;
+
       const day = String(m.date || "").trim();
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) continue;
+      if (!__inRange(day)) continue;
 
-      const gross = Number(toNum(m.grossTotal) || 0);
-      // serie (grafico): giorno / settimana / mese
-      try{
-        daySum[day] = Number(daySum[day] || 0) + gross;
-        dayCnt[day] = Number(dayCnt[day] || 0) + 1;
-        const wk = __weekStartISO(day);
-        if (wk){
-          weekSum[wk] = Number(weekSum[wk] || 0) + gross;
-          weekCnt[wk] = Number(weekCnt[wk] || 0) + 1;
-        }
-      }catch(_){ }
+      const grossTot = Number(toNum(m.grossTotal) || 0);
+      sumGross += grossTot;
+      ddtCount++;
 
-      if (day === today){
-        sumDay += gross;
-        cntDay++;
-      }
-      if (weekStart && day >= weekStart && day <= today){
-        sumWeek += gross;
-        cntWeek++;
-      }
-      if (monthStart && day >= monthStart && day <= today){
-        sumMonth += gross;
-        cntMonth++;
+      // Cliente
+      const custName = String(m.customer || "").trim() || "—";
+      const custKey = custName.toLowerCase();
+      const cRec = custAgg.get(custKey) || { name: custName, gross: 0, cnt: 0 };
+      cRec.gross += grossTot;
+      cRec.cnt += 1;
+      custAgg.set(custKey, cRec);
+
+      // Prodotti venduti (righe DDT)
+      const rows = Array.isArray(m.rows) ? m.rows : [];
+      for (const r of rows){
+        const code = String(r?.code || "").trim();
+        if (!code) continue;
+        const low = code.toLowerCase();
+
+        const name = String(r?.desc || r?.item || r?.name || "").trim() || code;
+        const qty = (r && r.qty != null && Number.isFinite(Number(r.qty))) ? Number(r.qty) : __parseQty(r?.qtyRaw);
+        const gLine = __rowGross(r);
+
+        const pRec = prodAgg.get(low) || { code, name, gross: 0, qty: 0 };
+        pRec.gross += gLine;
+        if (qty != null && Number.isFinite(qty)) pRec.qty += qty;
+        if ((!pRec.name || pRec.name === pRec.code) && name) pRec.name = name;
+        prodAgg.set(low, pRec);
       }
 
-      const mk = day.slice(0,7); // YYYY-MM
-      monthSum[mk] = Number(monthSum[mk] || 0) + gross;
-      monthCnt[mk] = Number(monthCnt[mk] || 0) + 1;
+      // Imballaggi scaricati (allocazioni componenti)
+      const done = m.__done || null;
+      const allocs = (done && Array.isArray(done.allocations)) ? done.allocations : [];
+      for (const a of allocs){
+        const code = String(a?.code || "").trim();
+        if (!code) continue;
+        if (__macroGroup(code) !== "imballaggi") continue;
+
+        const qty = Number(a?.qty || 0);
+        if (!Number.isFinite(qty) || qty <= 0) continue;
+
+        const low = code.toLowerCase();
+        const name = String(a?.name || a?.item || "").trim() || code;
+        const uom = String(a?.uom || "").trim();
+
+        const rec = packAgg.get(low) || { code, name, uom, qty: 0 };
+        rec.qty += qty;
+        if ((!rec.name || rec.name === rec.code) && name) rec.name = name;
+        if (!rec.uom && uom) rec.uom = uom;
+        packAgg.set(low, rec);
+      }
     }
 
-    // Indicatori variabili: giorno / settimana / mese
-    let pickedSum = sumMonth;
-    let pickedCnt = cntMonth;
-    let pickedLabel = "Mese corrente";
-
-    if (__homeRevPeriod === "day"){
-      pickedSum = sumDay;
-      pickedCnt = cntDay;
-      pickedLabel = "Oggi";
-    } else if (__homeRevPeriod === "week"){
-      pickedSum = sumWeek;
-      pickedCnt = cntWeek;
-      pickedLabel = "Ultimi 7 giorni";
-    } else {
-      __homeRevPeriod = "month";
-      pickedSum = sumMonth;
-      pickedCnt = cntMonth;
-      pickedLabel = "Mese corrente";
+    function __pickTop(map, cmp){
+      let best = null;
+      for (const v of map.values()){
+        if (!best) { best = v; continue; }
+        if (cmp(v, best) > 0) best = v;
+      }
+      return best;
     }
 
-    if (elTotal) elTotal.textContent = __fmtEuro0(pickedSum);
-    if (elMeta){
-      const c = Number(pickedCnt || 0);
-      elMeta.textContent = `${pickedLabel} · ${c.toLocaleString("it-IT")} DDT`;
+    const topProd = __pickTop(prodAgg, (a,b) => {
+      const ga = Number(a?.gross || 0);
+      const gb = Number(b?.gross || 0);
+      if (ga !== gb) return ga - gb;
+      const qa = Number(a?.qty || 0);
+      const qb = Number(b?.qty || 0);
+      if (qa !== qb) return qa - qb;
+      return String(a?.name || a?.code || "").localeCompare(String(b?.name || b?.code || ""), "it", { sensitivity:"base" });
+    });
+
+    const topPack = __pickTop(packAgg, (a,b) => {
+      const qa = Number(a?.qty || 0);
+      const qb = Number(b?.qty || 0);
+      if (qa !== qb) return qa - qb;
+      return String(a?.name || a?.code || "").localeCompare(String(b?.name || b?.code || ""), "it", { sensitivity:"base" });
+    });
+
+    const topCust = __pickTop(custAgg, (a,b) => {
+      const ga = Number(a?.gross || 0);
+      const gb = Number(b?.gross || 0);
+      if (ga !== gb) return ga - gb;
+      const ca = Number(a?.cnt || 0);
+      const cb = Number(b?.cnt || 0);
+      if (ca !== cb) return ca - cb;
+      return String(a?.name || "").localeCompare(String(b?.name || ""), "it", { sensitivity:"base" });
+    });
+
+    // UI: vendite totali
+    if (elTotal) elTotal.textContent = __fmtEuro0(sumGross);
+    if (elMeta) elMeta.textContent = `${pickedLabel} · ${Number(ddtCount || 0).toLocaleString("it-IT")} DDT`;
+
+    // UI: prodotto più venduto
+    if (elTopProd) elTopProd.textContent = topProd ? String(topProd.name || topProd.code || "—") : "—";
+    if (elTopProdMeta){
+      if (!topProd) {
+        elTopProdMeta.textContent = "—";
+      } else {
+        const parts = [__fmtEuro0(topProd.gross || 0)];
+        const q = Number(topProd.qty || 0);
+        if (Number.isFinite(q) && q > 0) parts.push(__fmtQty2(q) + " pz");
+        elTopProdMeta.textContent = parts.join(" · ");
+      }
     }
 
-    // Evidenzia selezione
+    // UI: imballaggio più scaricato
+    if (elTopPack) elTopPack.textContent = topPack ? String(topPack.name || topPack.code || "—") : "—";
+    if (elTopPackMeta){
+      if (!topPack) {
+        elTopPackMeta.textContent = "—";
+      } else {
+        const q = Number(topPack.qty || 0);
+        const u = String(topPack.uom || "").trim();
+        elTopPackMeta.textContent = q ? (q.toLocaleString("it-IT") + (u ? (" " + u) : "")) : "—";
+      }
+    }
+
+    // UI: cliente più grosso
+    if (elTopCust) elTopCust.textContent = topCust ? String(topCust.name || "—") : "—";
+    if (elTopCustMeta){
+      if (!topCust) {
+        elTopCustMeta.textContent = "—";
+      } else {
+        elTopCustMeta.textContent = [__fmtEuro0(topCust.gross || 0), (Number(topCust.cnt || 0).toLocaleString("it-IT") + " DDT")].join(" · ");
+      }
+    }
+
+    // Tooltip (riassunto)
+    try{
+      cockpit.title = "Cockpit fatturato — " + [
+        `${pickedLabel}: ${__fmtEuro0(sumGross)} (${Number(ddtCount||0).toLocaleString('it-IT')} DDT)`,
+        topProd ? (`Prodotto: ${String(topProd.name || topProd.code || '—')} · ${__fmtEuro0(topProd.gross || 0)}`) : "Prodotto: —",
+        topPack ? (`Imballaggio: ${String(topPack.name || topPack.code || '—')} · ${Number(topPack.qty||0).toLocaleString('it-IT')}${topPack.uom ? (' ' + String(topPack.uom)) : ''}`) : "Imballaggio: —",
+        topCust ? (`Cliente: ${String(topCust.name || '—')} · ${__fmtEuro0(topCust.gross || 0)}`) : "Cliente: —"
+      ].join(" — ");
+    }catch(_){ }
+
+    // Evidenzia selezione (se esiste)
     if (segEl){
       try{
         const btns = Array.from(segEl.querySelectorAll('.homeRevSegBtn'));
@@ -4249,145 +4411,6 @@ function waitForHub(attempt){
         }
       }catch(_){ }
     }
-
-    // Trend linea (punti) — cambia in base al periodo (day/week/month)
-    if (barsEl){
-      const period = (__homeRevPeriod === "day" || __homeRevPeriod === "week" || __homeRevPeriod === "month") ? __homeRevPeriod : "month";
-      const M3 = ["Gen","Feb","Mar","Apr","Mag","Giu","Lug","Ago","Set","Ott","Nov","Dic"];
-
-      function __labelDDMM(iso){
-        try{
-          const d = new Date(String(iso||"") + "T00:00:00");
-          if (Number.isNaN(d.getTime())) return String(iso||"").slice(5);
-          return __pad2(d.getDate()) + "/" + __pad2(d.getMonth()+1);
-        }catch(_){ return String(iso||"").slice(5); }
-      }
-
-      const series = [];
-
-      if (period === "month"){
-        const now = new Date();
-        for (let i=11; i>=0; i--){
-          const dt = new Date(now.getFullYear(), now.getMonth()-i, 1);
-          const key = `${dt.getFullYear()}-${__pad2(dt.getMonth()+1)}`;
-          const v = Number(monthSum[key] || 0);
-          const c = Number(monthCnt[key] || 0);
-          series.push({
-            key,
-            label: (dt.getMonth()>=0 && dt.getMonth()<12) ? M3[dt.getMonth()] : key,
-            value: v,
-            count: c,
-            isCurrent: (i === 0)
-          });
-        }
-      } else if (period === "week"){
-        const curWk = __weekStartISO(today);
-        for (let i=11; i>=0; i--){
-          const wk = __addDays(curWk, -7*i);
-          const v = Number(weekSum[wk] || 0);
-          const c = Number(weekCnt[wk] || 0);
-          series.push({
-            key: wk,
-            label: __labelDDMM(wk),
-            value: v,
-            count: c,
-            isCurrent: (i === 0)
-          });
-        }
-      } else {
-        // day: ultimi 14 giorni (molto diverso dal mensile)
-        for (let i=13; i>=0; i--){
-          const d0 = __addDays(today, -i);
-          const v = Number(daySum[d0] || 0);
-          const c = Number(dayCnt[d0] || 0);
-          series.push({
-            key: d0,
-            label: __labelDDMM(d0),
-            value: v,
-            count: c,
-            isCurrent: (i === 0)
-          });
-        }
-      }
-
-      let max = 0;
-      for (const it of series){
-        const v = Number(it && it.value || 0);
-        if (v > max) max = v;
-      }
-      if (!Number.isFinite(max) || max <= 0) max = 1;
-
-      const W = 120, H = 48;
-      const padL = 6, padR = 6, padT = 6, padB = 14;
-      const cw = W - padL - padR;
-      const ch = H - padT - padB;
-
-      const n = series.length || 0;
-      const step = (n > 1) ? (cw / (n - 1)) : 0;
-
-      const pts = series.map((it, idx) => {
-        const v = Number(it && it.value || 0);
-        const x = padL + (step * idx);
-        const y = padT + (1 - (v / max)) * ch;
-        return { x, y, it };
-      });
-
-      const pathD = pts.map((p, i) =>
-        (i === 0 ? `M ${p.x.toFixed(2)} ${p.y.toFixed(2)}` : `L ${p.x.toFixed(2)} ${p.y.toFixed(2)}`)
-      ).join(" ");
-
-      const gridYs = [0.25, 0.5, 0.75].map(t => (padT + ch * t));
-
-      // Labels: mese = tutti, settimana/giorno = pochi (per non affollare)
-      const showAllLabels = (period === "month");
-
-      barsEl.innerHTML = `
-        <svg class="homeRevSvg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true">
-          <g>
-            ${gridYs.map(y => `<line class="homeRevGrid" x1="${padL}" y1="${y.toFixed(2)}" x2="${(W-padR)}" y2="${y.toFixed(2)}" />`).join("")}
-            <line class="homeRevGrid" x1="${padL}" y1="${(padT+ch).toFixed(2)}" x2="${(W-padR)}" y2="${(padT+ch).toFixed(2)}" />
-          </g>
-
-          <path class="homeRevLine" d="${pathD}"></path>
-
-          ${pts.map((p, idx) => {
-            const it = p.it || {};
-            const c = Number(it.count || 0);
-            const label = String(it.label || it.key || "");
-            const tip = (period === "month")
-              ? `${label}: ${__fmtEuro0(it.value)} · ${c.toLocaleString('it-IT')} DDT`
-              : (period === "week")
-                ? `Settimana ${label}: ${__fmtEuro0(it.value)} · ${c.toLocaleString('it-IT')} DDT`
-                : `${label}: ${__fmtEuro0(it.value)} · ${c.toLocaleString('it-IT')} DDT`;
-
-            const r = it.isCurrent ? 2.8 : 2.2;
-            const cls = it.isCurrent ? "homeRevDot is-current" : "homeRevDot";
-
-            const showLbl = showAllLabels || (idx === 0) || (idx === pts.length-1) || (period !== "month" && idx % 3 === 0);
-
-            return `
-              <g>
-                <circle class="${cls}" cx="${p.x.toFixed(2)}" cy="${p.y.toFixed(2)}" r="${r}">
-                  <title>${esc(String(tip))}</title>
-                </circle>
-                ${showLbl ? `<text class="homeRevLbl" x="${p.x.toFixed(2)}" y="${(H-3).toFixed(2)}" text-anchor="middle">${esc(label)}</text>` : ""}
-              </g>`;
-          }).join("")}
-        </svg>
-      `;
-    }
-
-    // Tooltip: ultimo DDT (se disponibile)
-    try{
-      const first = (list && list.length) ? list[0] : null;
-      if (first){
-        const k = String(first?.key || first?._id || "").trim();
-        const m = getDdtModel(k);
-        if (m){
-          cockpit.title = `Fatturato (DDT completati) — Ultimo: ${m.customer || "—"} · DDT ${m.number || "—"} · ${fmtDateIT(m.date||"") || "—"} · ${fmtMoney(m.grossTotal, m.currency||"EUR")}`;
-        }
-      }
-    }catch(_){ }
 
     // Bind una sola volta: click -> apri sezione Fatturato / toggle periodo
     if (!__homeRevBound){
