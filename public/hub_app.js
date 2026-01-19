@@ -17577,6 +17577,10 @@ async function handleFileSelection(fileList) {
     function applySettingsToUI() {
       sOcrUrl.value = state.settings.ocrUrl || "";
       sOcrKey.value = state.settings.ocrKey || "";
+      try {
+        const el = document.getElementById("sScanBridgeKey");
+        if (el) el.value = state.settings.scanbridgeKey || "";
+      } catch(_) {}
       sLowThreshold.value = String(Math.max(1000, Math.floor(Number(state.settings.lowThreshold) || 0)));
       sMaxRecent.value = String(Math.floor(Number(state.settings.maxRecent) || 30));
     }
@@ -17584,6 +17588,12 @@ async function handleFileSelection(fileList) {
     function saveSettingsFromUI() {
       state.settings.ocrUrl = (sOcrUrl.value || "").trim();
       state.settings.ocrKey = (sOcrKey.value || "").trim();
+      try {
+        const el = document.getElementById("sScanBridgeKey");
+        state.settings.scanbridgeKey = (el && el.value ? String(el.value).trim() : "");
+      } catch(_) {
+        state.settings.scanbridgeKey = String(state.settings.scanbridgeKey || "");
+      }
       state.settings.lowThreshold = Math.max(1000, safeInt(sLowThreshold.value));
       state.settings.maxRecent = Math.max(5, safeInt(sMaxRecent.value) || 30);
       saveSettings();
@@ -17799,12 +17809,118 @@ async function handleFileSelection(fileList) {
     }
 
     /****************************************************************
+     * ScanBridge (scanner locale) -> OCR
+     * - prova a fare scan via http://127.0.0.1:27899
+     * - se non disponibile, fallback su file picker
+     ****************************************************************/
+    const __SCANBRIDGE_BASE = "http://127.0.0.1:27899";
+
+    function __scanbridgeIsMobile(){
+      try{
+        // euristica: touch + schermo piccolo
+        if (window.matchMedia && window.matchMedia("(pointer: coarse)").matches && window.matchMedia("(max-width: 900px)").matches) return true;
+      }catch(_){ }
+      try{
+        const ua = String(navigator.userAgent || "");
+        if (/Android|iPhone|iPad|iPod|Mobile/i.test(ua)) return true;
+      }catch(_){ }
+      return false;
+    }
+
+    function __scanbridgeKey(){
+      try{
+        const k = String((state && state.settings && state.settings.scanbridgeKey) || "").trim();
+        if (k) return k;
+      }catch(_){ }
+      // fallback (se vuoi impostarla via console): localStorage.setItem('hubinv_scanbridge_key','...')
+      try{
+        const k2 = String(localStorage.getItem("hubinv_scanbridge_key") || "").trim();
+        if (k2) return k2;
+      }catch(_){ }
+      return "";
+    }
+
+    async function __scanbridgeFetchJpg(key){
+      const k = String(key || "").trim();
+      if (!k) throw new Error("ScanBridge key mancante");
+
+      const urlBase = __SCANBRIDGE_BASE + "/scan?format=jpg";
+      const optsBase = {
+        method: "POST",
+        mode: "cors",
+        credentials: "omit",
+        cache: "no-store",
+        // Chrome Local Network Access / Private Network Access (ignorato se non supportato)
+        targetAddressSpace: "local"
+      };
+
+      // Tentativo 1: key in query (evita preflight in molti casi)
+      let res = null;
+      try{
+        res = await fetch(urlBase + "&key=" + encodeURIComponent(k), optsBase);
+      }catch(_){ res = null; }
+
+      // Tentativo 2: key in header (fallback)
+      if (!res || !res.ok){
+        res = await fetch(urlBase, Object.assign({}, optsBase, { headers: { "X-API-Key": k } }));
+      }
+
+      if (!res || !res.ok){
+        let body = "";
+        try{ body = await res.text(); }catch(_){ }
+        const err = new Error("ScanBridge HTTP " + (res ? res.status : "0"));
+        err.status = res ? res.status : 0;
+        err.body = body;
+        throw err;
+      }
+
+      const blob = await res.blob();
+      const type = String(blob && blob.type || "").toLowerCase();
+      if (!type.startsWith("image/")) throw new Error("ScanBridge non ha restituito un'immagine");
+
+      const ext = (type === "image/png") ? "png" : "jpg";
+      const name = "scan_" + todayYYYYMMDD() + "_" + Date.now() + "." + ext;
+      return new File([blob], name, { type: blob.type || "image/jpeg" });
+    }
+
+    async function __scanbridgeScanAndImport(){
+      const k = __scanbridgeKey();
+      if (!k){
+        try{ showToast("ScanBridge non configurato: apri Impostazioni e inserisci la key", "warn"); }catch(_){ }
+        throw new Error("ScanBridge key mancante");
+      }
+
+      try{
+        if (progressSpinner) progressSpinner.style.display = "block";
+      }catch(_){ }
+      try{
+        progressLabel.textContent = "Apro lo scanner…";
+        progressFill.style.width = "5%";
+      }catch(_){ }
+
+      const file = await __scanbridgeFetchJpg(k);
+      await handleFileSelection([file]);
+    }
+
+    /****************************************************************
      * Events
      ****************************************************************/
     const __btnOpenCamera = document.getElementById("btnOpenCamera");
     if (__btnOpenCamera) __btnOpenCamera.addEventListener("click", () => cameraInput.click());
     const __btnOpenGallery = document.getElementById("btnOpenGallery");
-    if (__btnOpenGallery) __btnOpenGallery.addEventListener("click", () => galleryInput.click());
+    if (__btnOpenGallery) __btnOpenGallery.addEventListener("click", async () => {
+      // Su mobile: resta il picker classico (fotocamera/galleria)
+      if (__scanbridgeIsMobile()) { try{ galleryInput.click(); }catch(_){ } return; }
+
+      // Desktop: prova ScanBridge (scanner locale), fallback su picker
+      try{
+        await __scanbridgeScanAndImport();
+      }catch(e){
+        try{ console.warn("[ScanBridge] scan failed", e); }catch(_){ }
+        try{ showToast("Scanner non disponibile: carica manualmente", "warn"); }catch(_){ }
+        try{ galleryInput.click(); }catch(_){ }
+      }
+    });
     document.getElementById("btnPaste")?.addEventListener("click", handlePaste);
 
     btnRemoveLastPage?.addEventListener("click", __removeLastPage);
