@@ -17813,11 +17813,110 @@ async function handleFileSelection(fileList) {
      * - prova a fare scan via http://127.0.0.1:27899
      * - se non disponibile, fallback su file picker
      ****************************************************************/
-    const __SCANBRIDGE_BASE = "http://127.0.0.1:27899";
+    // Base URL ScanBridge (locale). Puoi fare override con:
+    // - window.SCANBRIDGE_BASE / window.SCANBRIDGE_URL
+    // - meta[name="scanbridge-base"]
+    // - state.settings.scanbridgeBase (se lo aggiungi in futuro)
+    // Fallback: 127.0.0.1 + localhost (+ https se la pagina e' https)
+    const __SCANBRIDGE_BASE_DEFAULT = "http://127.0.0.1:27899";
+
+    function __scanbridgeNormalizeBase(u){
+      u = String(u || "").trim();
+      if (!u) return "";
+      try{
+        // se manca lo schema e sembra un host, aggiungi http://
+        if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(u) && /^[\w.-]+(?::\d+)?(\/.*)?$/.test(u)){
+          u = "http://" + u;
+        }
+        const url = new URL(u);
+        url.pathname = "";
+        url.search = "";
+        url.hash = "";
+        return url.toString().replace(/\/+$/g, "");
+      }catch(_){
+        return String(u || "").replace(/\/+$/g, "");
+      }
+    }
+
+    function __scanbridgeGetBases(){
+      const out = [];
+      const seen = new Set();
+      const push = (v) => {
+        const b = __scanbridgeNormalizeBase(v);
+        if (!b) return;
+        const k = String(b).toLowerCase();
+        if (seen.has(k)) return;
+        seen.add(k);
+        out.push(b);
+      };
+
+      // 1) settings/localStorage (se presente)
+      try{
+        const v0 = String((state && state.settings && (state.settings.scanbridgeBase || state.settings.scanbridgeUrl || state.settings.scanbridgeURL)) || "").trim();
+        if (v0) push(v0);
+      }catch(_){ }
+      try{
+        const v1 = String(localStorage.getItem("hubinv_scanbridge_base") || localStorage.getItem("hubinv_scanbridge_url") || "").trim();
+        if (v1) push(v1);
+      }catch(_){ }
+
+      // 2) global (HTML)
+      try{
+        const w = (typeof window !== "undefined") ? window : null;
+        const v2 = String((w && (w.SCANBRIDGE_BASE || w.SCANBRIDGE_URL || w.__SCANBRIDGE_BASE)) || "").trim();
+        if (v2) push(v2);
+      }catch(_){ }
+
+      // 3) meta tag (optional)
+      try{
+        const m = document.querySelector('meta[name="scanbridge-base"], meta[name="scanbridge-url"]');
+        const v3 = m ? String(m.getAttribute("content") || "").trim() : "";
+        if (v3) push(v3);
+      }catch(_){ }
+
+      // 4) defaults
+      push(__SCANBRIDGE_BASE_DEFAULT);
+      push("http://localhost:27899");
+
+      // 5) https variants (solo se la pagina e' https)
+      try{
+        if (location && location.protocol === "https:"){
+          push("https://127.0.0.1:27899");
+          push("https://localhost:27899");
+        }
+      }catch(_){ }
+
+      return out;
+    }
+
+    function __scanbridgeMakeErr(code, message, extra){
+      const e = new Error(String(message || "ScanBridge error"));
+      try{ e.code = code; }catch(_){ }
+      if (extra && typeof extra === "object"){
+        try{ Object.keys(extra).forEach(k => { try{ e[k] = extra[k]; }catch(_){ } }); }catch(_){ }
+      }
+      return e;
+    }
+
+    async function __scanbridgeFetchWithTimeout(url, opts, timeoutMs){
+      const ms = Number(timeoutMs);
+      const t = (Number.isFinite(ms) && ms > 0) ? ms : 20000;
+      if (typeof AbortController !== "function"){
+        return fetch(url, opts);
+      }
+      const ac = new AbortController();
+      const timer = setTimeout(() => { try{ ac.abort(); }catch(_){ } }, t);
+      try{
+        return await fetch(url, Object.assign({}, opts || {}, { signal: ac.signal }));
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+
 
     // ScanBridge key (hardcoded).
     // Se preferisci, puoi impostarla nell'HTML: window.SCANBRIDGE_KEY = "...";
-    const __SCANBRIDGE_KEY_HARDCODED = "mX5lafy2qE2L7vIc4G7b8Q2dsIaf2EdiGYHvs-ZHgUk";
+    const __SCANBRIDGE_KEY_HARDCODED = "";
 
 
     function __scanbridgeIsMobile(){
@@ -17869,7 +17968,30 @@ async function handleFileSelection(fileList) {
       const k = String(key || "").trim();
       if (!k) throw new Error("ScanBridge key mancante");
 
-      const urlBase = __SCANBRIDGE_BASE + "/scan?format=jpg";
+      const bases = __scanbridgeGetBases();
+      let lastErr = null;
+
+      for (let i=0; i<bases.length; i++){
+        const base = bases[i];
+        try{
+          const file = await __scanbridgeFetchJpgFromBase(base, k);
+          if (file) return file;
+        }catch(e){
+          lastErr = e;
+          try{ console.warn("[ScanBridge] base failed:", base, e); }catch(_){ }
+        }
+      }
+
+      if (lastErr) throw lastErr;
+      throw __scanbridgeMakeErr("SCANBRIDGE_UNREACHABLE", "ScanBridge non raggiungibile", { bases });
+    }
+
+    async function __scanbridgeFetchJpgFromBase(base, key){
+      const k = String(key || "").trim();
+      const b = __scanbridgeNormalizeBase(base);
+      if (!b) throw __scanbridgeMakeErr("SCANBRIDGE_BAD_BASE", "ScanBridge base non valida");
+
+      const urlBase = b + "/scan?format=jpg";
       const optsBase = {
         method: "POST",
         mode: "cors",
@@ -17879,29 +18001,76 @@ async function handleFileSelection(fileList) {
         targetAddressSpace: "local"
       };
 
-      // Tentativo 1: key in query (evita preflight in molti casi)
-      let res = null;
-      try{
-        res = await fetch(urlBase + "&key=" + encodeURIComponent(k), optsBase);
-      }catch(_){ res = null; }
+      const timeoutMs = 25000;
 
-      // Tentativo 2: key in header (fallback)
-      if (!res || !res.ok){
-        res = await fetch(urlBase, Object.assign({}, optsBase, { headers: { "X-API-Key": k } }));
+      // Tentativo 1: key in query (di solito evita preflight)
+      let res = null;
+      let errNet = null;
+      try{
+        res = await __scanbridgeFetchWithTimeout(urlBase + "&key=" + encodeURIComponent(k), optsBase, timeoutMs);
+      }catch(e){
+        errNet = e;
+        res = null;
       }
 
-      if (!res || !res.ok){
-        let body = "";
-        try{ body = await res.text(); }catch(_){ }
-        const err = new Error("ScanBridge HTTP " + (res ? res.status : "0"));
-        err.status = res ? res.status : 0;
-        err.body = body;
-        throw err;
+      // Fallback metodo GET (se il servizio non accetta POST)
+      if (res && !res.ok && (res.status === 405 || res.status === 404)){
+        try{
+          res = await __scanbridgeFetchWithTimeout(
+            urlBase + "&key=" + encodeURIComponent(k),
+            Object.assign({}, optsBase, { method: "GET" }),
+            timeoutMs
+          );
+        }catch(_){ }
+      }
+
+      // Se ho una risposta HTTP ma non ok: leggo body (best effort)
+      let body1 = "";
+      if (res && !res.ok){
+        try{ body1 = await res.text(); }catch(_){ body1 = ""; }
+      }
+
+      // Tentativo 2: key in header (solo se ho ottenuto una risposta HTTP non-ok)
+      // NB: aggiungere header spesso forza preflight CORS; lo facciamo solo quando serve.
+      if (res && !res.ok){
+        try{
+          const res2 = await __scanbridgeFetchWithTimeout(
+            urlBase,
+            Object.assign({}, optsBase, { headers: { "X-API-Key": k } }),
+            timeoutMs
+          );
+          if (res2 && res2.ok) res = res2;
+          else if (res2 && !res2.ok){
+            let body2 = "";
+            try{ body2 = await res2.text(); }catch(_){ body2 = ""; }
+            throw __scanbridgeMakeErr("SCANBRIDGE_HTTP", "ScanBridge HTTP " + res2.status, { status: res2.status, body: body2, base: b });
+          }
+        }catch(e){
+          // se il tentativo 2 fallisce per rete/preflight, manteniamo l'errore 1 (piu' utile)
+          if (e && e.code === "SCANBRIDGE_HTTP") throw e;
+        }
+      }
+
+      // Network unreachable (nessuna risposta)
+      if (!res){
+        const hint = (location && location.protocol === "https:")
+          ? "Avvia ScanBridge e abilita CORS/Private Network (Access-Control-Allow-Origin + Access-Control-Allow-Private-Network)."
+          : "Avvia ScanBridge sul PC (porta 27899).";
+        throw __scanbridgeMakeErr("SCANBRIDGE_UNREACHABLE", "ScanBridge non raggiungibile", { base: b, hint, cause: errNet });
+      }
+
+      if (!res.ok){
+        const status = res.status || 0;
+        const body = body1 || "";
+        if (status === 401 || status === 403){
+          throw __scanbridgeMakeErr("SCANBRIDGE_AUTH", "ScanBridge key non valida", { status, body, base: b });
+        }
+        throw __scanbridgeMakeErr("SCANBRIDGE_HTTP", "ScanBridge HTTP " + status, { status, body, base: b });
       }
 
       const blob = await res.blob();
       const type = String(blob && blob.type || "").toLowerCase();
-      if (!type.startsWith("image/")) throw new Error("ScanBridge non ha restituito un'immagine");
+      if (!type.startsWith("image/")) throw __scanbridgeMakeErr("SCANBRIDGE_BAD_RESPONSE", "ScanBridge non ha restituito un'immagine", { base: b });
 
       const ext = (type === "image/png") ? "png" : "jpg";
       const name = "scan_" + todayYYYYMMDD() + "_" + Date.now() + "." + ext;
@@ -17942,9 +18111,28 @@ async function handleFileSelection(fileList) {
       }catch(e){
         let msg = "";
         try{ msg = String(e && (e.message || e) || ""); }catch(_){ msg = ""; }
-        const low = msg.toLowerCase();
+
+        const low = String(msg || "").toLowerCase();
+        const code = String(e && e.code || "").toUpperCase();
+        const status = (e && e.status != null) ? Number(e.status) : null;
+        const base = String(e && e.base || "").trim();
+        const hint = String(e && e.hint || "").trim();
+
         if (low.includes("key") && low.includes("manc")) {
-          try{ showToast("ScanBridge key mancante: incollala nel file hub_inventario.html (window.SCANBRIDGE_KEY)", "warn"); }catch(_){ }
+          try{ showToast("ScanBridge key mancante: inseriscila in Impostazioni > ScanBridge Key (oppure window.SCANBRIDGE_KEY)", "warn"); }catch(_){ }
+
+        } else if (code === "SCANBRIDGE_AUTH" || status === 401 || status === 403 || low.includes("non valida")) {
+          try{ showToast("ScanBridge key non valida: controlla Impostazioni > ScanBridge Key", "warn"); }catch(_){ }
+
+        } else if (code === "SCANBRIDGE_UNREACHABLE" || low.includes("failed to fetch") || low.includes("network")) {
+          const where = base ? (" (" + base + ")") : "";
+          const extra = hint ? (" " + hint) : "";
+          try{ showToast("ScanBridge non raggiungibile" + where + "." + extra, "warn"); }catch(_){ }
+
+        } else if (code === "SCANBRIDGE_HTTP" || (status && status >= 400)) {
+          const where = base ? (" (" + base + ")") : "";
+          try{ showToast("ScanBridge errore" + (status ? (" " + status) : "") + where + ": carica manualmente", "warn"); }catch(_){ }
+
         } else {
           try{ showToast("Scanner non disponibile: carica manualmente", "warn"); }catch(_){ }
         }
