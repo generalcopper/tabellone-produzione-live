@@ -17955,7 +17955,7 @@ async function handleFileSelection(fileList) {
 
     // ScanBridge key (hardcoded).
     // Se preferisci, puoi impostarla nell'HTML: window.SCANBRIDGE_KEY = "...";
-    const __SCANBRIDGE_KEY_HARDCODED = "";
+    const __SCANBRIDGE_KEY_HARDCODED = "mX5lafy2qE2L7vIc4G7b8Q2dsIaf2EdiGYHvs-ZHgUk";
 
 
     function __scanbridgeIsMobile(){
