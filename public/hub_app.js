@@ -17838,6 +17838,45 @@ async function handleFileSelection(fileList) {
       }
     }
 
+    // Determina il targetAddressSpace corretto per Chrome Local Network Access
+    // - loopback: localhost / 127.0.0.0/8 / ::1
+    // - local: rete privata (192.168.x.x / 10.x.x.x / 172.16-31.x.x / 169.254.x.x) / *.local
+    function __scanbridgeIsPrivateIPv4(host){
+      const h = String(host || '').trim();
+      if (!h) return false;
+      if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(h)) return false;
+      const p = h.split('.').map(x => Number(x));
+      if (p.length !== 4 || p.some(n => !Number.isFinite(n) || n < 0 || n > 255)) return false;
+      const a = p[0], b = p[1];
+      if (a == 10) return true;
+      if (a == 192 && b == 168) return true;
+      if (a == 172 && b >= 16 && b <= 31) return true;
+      if (a == 169 && b == 254) return true;
+      return false;
+    }
+
+    function __scanbridgeTargetAddressSpaceForBase(base){
+      const b = __scanbridgeNormalizeBase(base);
+      if (!b) return null;
+      try{
+        const u = new URL(b);
+        const host = String(u.hostname || '').trim().toLowerCase();
+        if (!host) return null;
+
+        // Loopback (macchina locale)
+        if (host === 'localhost' || host === '127.0.0.1' || host === '::1' || host.startsWith('127.')) return 'loopback';
+
+        // Rete locale (LAN)
+        if (host.endsWith('.local')) return 'local';
+        if (__scanbridgeIsPrivateIPv4(host)) return 'local';
+
+        return null;
+      }catch(_){
+        return null;
+      }
+    }
+
+
     function __scanbridgeGetBases(){
       const out = [];
       const seen = new Set();
@@ -17916,7 +17955,7 @@ async function handleFileSelection(fileList) {
 
     // ScanBridge key (hardcoded).
     // Se preferisci, puoi impostarla nell'HTML: window.SCANBRIDGE_KEY = "...";
-    const __SCANBRIDGE_KEY_HARDCODED = "mX5lafy2qE2L7vIc4G7b8Q2dsIaf2EdiGYHvs-ZHgUk";
+    const __SCANBRIDGE_KEY_HARDCODED = "";
 
 
     function __scanbridgeIsMobile(){
@@ -17990,16 +18029,20 @@ async function handleFileSelection(fileList) {
       const k = String(key || "").trim();
       const b = __scanbridgeNormalizeBase(base);
       if (!b) throw __scanbridgeMakeErr("SCANBRIDGE_BAD_BASE", "ScanBridge base non valida");
-
       const urlBase = b + "/scan?format=jpg";
       const optsBase = {
         method: "POST",
         mode: "cors",
         credentials: "omit",
-        cache: "no-store",
-        // Chrome Local Network Access / Private Network Access (ignorato se non supportato)
-        targetAddressSpace: "local"
+        cache: "no-store"
       };
+
+      // Chrome Local Network Access: per localhost/127.* serve 'loopback' (non 'local')
+      try{
+        const tas = __scanbridgeTargetAddressSpaceForBase(b);
+        if (tas) optsBase.targetAddressSpace = tas;
+      }catch(_){ }
+
 
       const timeoutMs = 25000;
 
@@ -18011,17 +18054,6 @@ async function handleFileSelection(fileList) {
       }catch(e){
         errNet = e;
         res = null;
-      }
-
-      // Fallback metodo GET (se il servizio non accetta POST)
-      if (res && !res.ok && (res.status === 405 || res.status === 404)){
-        try{
-          res = await __scanbridgeFetchWithTimeout(
-            urlBase + "&key=" + encodeURIComponent(k),
-            Object.assign({}, optsBase, { method: "GET" }),
-            timeoutMs
-          );
-        }catch(_){ }
       }
 
       // Se ho una risposta HTTP ma non ok: leggo body (best effort)
