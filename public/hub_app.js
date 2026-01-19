@@ -5331,6 +5331,10 @@ function renderList(){
     fpByCode:new Map(),
     selectedKey:"",
     draft:null,
+
+    // edit state (nome + chiave)
+    keyManual:false,
+
     unsub:{ cats:null, products:null, finished:null }
   };
 
@@ -5726,6 +5730,7 @@ try{
       try{ if (!document.querySelector(".modal.open")) document.body.classList.remove("modal-open"); }catch(_){ document.body.classList.remove("modal-open"); }
       S.selectedKey = "";
       S.draft = null;
+      S.keyManual = false;
     }
   }
 
@@ -5752,7 +5757,10 @@ try{
   function membersForKey(key){
     const k = norm(key);
     if (!k) return [];
-    return (S.finished || []).filter(fp => norm(fp?.categoryKey || fp?.category || fp?.catKey || "") === k);
+    return (S.finished || []).filter(fp => {
+      const v = norm(fp?.categoryKeyLower || fp?.categoryKey || fp?.category || fp?.catKey || "");
+      return v === k;
+    });
   }
 
   function renderDatalists(){
@@ -6201,8 +6209,18 @@ try{
     const cat = key ? (S.catMap.get(key) || null) : null;
     const d = S.draft || null;
 
-    if ($("fpCatEditKey")) $("fpCatEditKey").value = key || "";
-    if ($("fpCatEditName") && d) $("fpCatEditName").value = String(d.name || "");
+    const activeEl = (typeof document !== "undefined") ? document.activeElement : null;
+    const elKey = $("fpCatEditKey");
+    const elName = $("fpCatEditName");
+
+    if (elKey){
+      const v = String((d && d.key) ? d.key : (key || ""));
+      if (activeEl !== elKey) elKey.value = v;
+    }
+    if (elName && d){
+      const v = String(d.name || "");
+      if (activeEl !== elName) elName.value = v;
+    }
 
     const bom = (d && Array.isArray(d.bom)) ? d.bom : [];
     if ($("fpCatBomCount")) $("fpCatBomCount").value = String(bom.length) + "";
@@ -6267,10 +6285,12 @@ try{
 
   function openDetail(key){
     S.selectedKey = norm(key);
+    S.keyManual = false;
     const cat = S.catMap.get(S.selectedKey) || null;
+    const nm = String(cat?.name || cat?.key || "").trim() || S.selectedKey;
     S.draft = {
       key: S.selectedKey,
-      name: String(cat?.name || cat?.key || "").trim() || S.selectedKey,
+      name: nm,
       bom: Array.isArray(cat?.bom) ? cat.bom.slice() : (Array.isArray(cat?.components) ? cat.components.slice() : [])
     };
     setDetailOpen(true);
@@ -6325,24 +6345,164 @@ try{
     }
   }
 
+  function __cleanKey(v){
+    return slugKey(String(v || ""));
+  }
+
+  async function __renameCategoryKey(oldKey, newKey, name, bom){
+    const h = H();
+    if (!h || !h.fb || !h.fb.db || !h.FS) { showToast("Firebase non pronto", "warn"); return false; }
+    if (!h.fb.user) { showToast("Accedi con Google", "warn"); return false; }
+
+    const fromKey = norm(oldKey);
+    const toKey = norm(newKey);
+    if (!fromKey || !toKey) return false;
+    if (fromKey == toKey) return true;
+
+    // collision guard
+    if (S.catMap && S.catMap.has(toKey)) {
+      showToast("Esiste già una categoria con questa chiave", "warn");
+      return false;
+    }
+
+    const { doc, setDoc, getDoc, deleteDoc, updateDoc, serverTimestamp } = h.FS;
+    const actor = (h.fb.user && (h.fb.user.email || h.fb.user.uid)) || "";
+
+    // Leggi doc sorgente (così preservi eventuali campi extra)
+    let src = null;
+    try{
+      const snap = await getDoc(doc(h.fb.db, "orgs", h.ORG_ID, "finishedProductCategories", keyToId(fromKey)));
+      if (!snap || !snap.exists || !snap.exists()) {
+        showToast("Categoria non trovata", "err");
+        return false;
+      }
+      src = snap.data() || {};
+    }catch(e){
+      console.warn("rename category getDoc failed", e);
+      showToast("Errore lettura categoria", "err");
+      return false;
+    }
+
+    // 1) Crea (o aggiorna) nuovo doc
+    const dstRef = doc(h.fb.db, "orgs", h.ORG_ID, "finishedProductCategories", keyToId(toKey));
+    const payload = Object.assign({}, src, {
+      key: toKey,
+      name: String(name || "").trim(),
+      nameLower: String(name || "").trim().toLowerCase(),
+      bom: Array.isArray(bom) ? bom : [],
+      updatedAt: serverTimestamp(),
+      updatedBy: actor
+    });
+    if (!payload.createdAt) payload.createdAt = serverTimestamp();
+    if (!payload.createdBy) payload.createdBy = actor;
+
+    try{
+      await setDoc(dstRef, payload, { merge: true });
+    }catch(e){
+      console.warn("rename category setDoc failed", e);
+      showToast("Errore creazione nuova categoria", "err");
+      return false;
+    }
+
+    // 2) Aggiorna tutti i prodotti finiti collegati
+    const mem = membersForKey(fromKey);
+    let okN = 0, failN = 0;
+
+    for (const fp of (mem || [])){
+      const id = String(fp?.id || "").trim();
+      if (!id) continue;
+      try{
+        await updateDoc(doc(h.fb.db, "orgs", h.ORG_ID, "finishedProducts", id), {
+          categoryKey: toKey,
+          categoryKeyLower: toKey,
+          updatedAt: serverTimestamp(),
+          updatedBy: actor
+        });
+        okN++;
+      }catch(e){
+        console.warn("rename category update finishedProducts failed", id, e);
+        failN++;
+      }
+    }
+
+    // 3) Elimina il doc vecchio SOLO se tutti i prodotti sono stati aggiornati
+    if (failN === 0){
+      try{
+        await deleteDoc(doc(h.fb.db, "orgs", h.ORG_ID, "finishedProductCategories", keyToId(fromKey)));
+      }catch(e){
+        console.warn("rename category delete old failed", e);
+        showToast("Categoria rinominata, ma non riesco a eliminare la vecchia (permessi)", "warn");
+      }
+      showToast("Categoria rinominata");
+      return true;
+    }
+
+    showToast(`Categoria rinominata, ma ${failN} prodotti non aggiornati (ho lasciato anche la vecchia categoria)`, "warn");
+    return true;
+  }
+
   async function saveCategory(){
     const h = H();
     if (!h || !h.fb || !h.fb.db || !h.FS) { showToast("Firebase non pronto", "warn"); return; }
     if (!h.fb.user) { showToast("Accedi con Google", "warn"); return; }
 
-    const key = norm(S.selectedKey);
-    if (!key) return;
+    const oldKey = norm(S.selectedKey);
+    if (!oldKey) return;
 
     const name = String($("fpCatEditName")?.value || "").trim();
     if (!name) { showToast("Nome categoria non valido", "warn"); return; }
 
     const bom = (S.draft && Array.isArray(S.draft.bom)) ? S.draft.bom : [];
 
+    // key può essere editata: se vuota, la rigenero dal nome
+    const keyRaw = String($("fpCatEditKey")?.value || "").trim();
+    let newKey = __cleanKey(keyRaw) || __cleanKey(name);
+    newKey = norm(newKey);
+
+    if (!newKey){ showToast("Chiave non valida", "warn"); return; }
+
+    // collision (se cambio chiave)
+    if (newKey !== oldKey && (S.catMap && S.catMap.has(newKey))){
+      showToast("Esiste già una categoria con questa chiave", "warn");
+      return;
+    }
+
+    // Rinominare anche la chiave = cambia docId + aggiorna i prodotti finiti
+    if (newKey !== oldKey){
+      const memCount = membersForKey(oldKey).length;
+      const ok = confirm(`Rinominare la categoria?
+
+Da: ${oldKey}
+A: ${newKey}
+Prodotti collegati: ${memCount}
+
+Verrà aggiornata anche la chiave su tutti i prodotti finiti.`);
+      if (!ok) return;
+
+      // allinea draft
+      if (S.draft){
+        S.draft.name = name;
+        S.draft.key = newKey;
+        S.draft.bom = bom;
+      }
+
+      const done = await __renameCategoryKey(oldKey, newKey, name, bom);
+      if (done){
+        S.selectedKey = newKey;
+        S.keyManual = false;
+        if (S.draft) S.draft.key = newKey;
+        try{ const elKey = $("fpCatEditKey"); if (elKey) elKey.value = newKey; }catch(_){ }
+        try{ renderList(); renderDetail(); }catch(_){ }
+      }
+      return;
+    }
+
+    // Salvataggio normale (chiave invariata)
     try{
       const { doc, setDoc, serverTimestamp } = h.FS;
-      const ref = doc(h.fb.db, "orgs", h.ORG_ID, "finishedProductCategories", keyToId(key));
+      const ref = doc(h.fb.db, "orgs", h.ORG_ID, "finishedProductCategories", keyToId(oldKey));
       await setDoc(ref, {
-        key,
+        key: oldKey,
         name,
         nameLower: name.toLowerCase(),
         bom,
@@ -6642,6 +6802,63 @@ try{
     $("btnFpCatDone")?.addEventListener("click", ()=> setDetailOpen(false));
     $("fpCatModalClose")?.addEventListener("click", ()=> setDetailOpen(false));
     $("modalFPCategory")?.addEventListener("click", (e)=>{ if (e.target === $("modalFPCategory")) setDetailOpen(false); });
+
+    // edit: nome + chiave (rinomina anche docId)
+    try{
+      const nameEl = $("fpCatEditName");
+      const keyEl  = $("fpCatEditKey");
+
+      if (nameEl && !(nameEl.dataset && nameEl.dataset.boundFpCatName === "1")){
+        if (nameEl.dataset) nameEl.dataset.boundFpCatName = "1";
+        nameEl.addEventListener("input", () => {
+          if (!S.draft) return;
+          const nm = String(nameEl.value || "").trim();
+          S.draft.name = nm;
+          if (!S.keyManual){
+            const autoKey = slugKey(nm);
+            if (autoKey){
+              S.draft.key = autoKey;
+              try{ if (keyEl && document.activeElement !== keyEl) keyEl.value = autoKey; }catch(_){ }
+            }
+          }
+        });
+      }
+
+      if (keyEl && !(keyEl.dataset && keyEl.dataset.boundFpCatKey === "1")){
+        if (keyEl.dataset) keyEl.dataset.boundFpCatKey = "1";
+
+        keyEl.addEventListener("focus", () => { S.keyManual = true; });
+
+        keyEl.addEventListener("input", () => {
+          if (!S.draft) return;
+          S.keyManual = true;
+          const clean = slugKey(String(keyEl.value || ""));
+          S.draft.key = clean || "";
+        });
+
+        keyEl.addEventListener("blur", () => {
+          if (!S.draft) return;
+          const clean = slugKey(String(keyEl.value || ""));
+          if (clean){
+            keyEl.value = clean;
+            S.draft.key = clean;
+            S.keyManual = true;
+          } else {
+            // se svuota: torna in auto dal nome
+            S.keyManual = false;
+            const nm = String(nameEl && nameEl.value || "").trim();
+            const autoKey = slugKey(nm);
+            if (autoKey){
+              keyEl.value = autoKey;
+              S.draft.key = autoKey;
+            } else {
+              keyEl.value = "";
+              S.draft.key = "";
+            }
+          }
+        });
+      }
+    }catch(_){ }
 
     // smart search bars (componenti + prodotti finiti)
     $("fpCatCompPick")?.addEventListener("input", ()=>{ try{ __fpCatRenderSuggest("comp"); }catch(_){ } });
