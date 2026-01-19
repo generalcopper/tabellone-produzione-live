@@ -7713,6 +7713,11 @@ Verrà aggiornata anche la chiave su tutti i prodotti finiti.`);
 
     function startHomeOcr(){
       setView("ocr");
+
+      // Warm-up ScanBridge appena entri nella vista OCR (non apre lo scanner):
+      // riduce il caso "parte solo al secondo clic".
+      try{ __scanbridgeWarmup(false).catch(()=>{}); }catch(_){ }
+
       // forza carico
       capture.movementType = "IN";
       try{ segIn.classList.add("active"); segOut.classList.remove("active"); }catch(_){}
@@ -18092,14 +18097,34 @@ async function handleFileSelection(fileList) {
     // Fallback: 127.0.0.1 + localhost (+ https se la pagina e' https)
     const __SCANBRIDGE_BASE_DEFAULT = "http://127.0.0.1:27899";
 
+    // Cache: ultima base funzionante (così il primo click è sempre immediato)
+    let __scanbridgeGoodBase = "";
+
+    // Warm-up (Chrome Local Network Access / wake-up): evita il caso "parte al secondo click"
+    let __scanbridgeWarmInFlight = null;
+    let __scanbridgeWarmLastAt = 0;
+
     function __scanbridgeNormalizeBase(u){
       u = String(u || "").trim();
       if (!u) return "";
+
+      // Guard: evita che una API key venga interpretata come base URL.
+      // Se non ho lo schema, una base deve SOMIGLIARE a un host ('.' o ':' o 'localhost').
       try{
-        // se manca lo schema e sembra un host, aggiungi http://
-        if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(u) && /^[\w.-]+(?::\d+)?(\/.*)?$/.test(u)){
-          u = "http://" + u;
+        const hasScheme = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(u);
+        if (!hasScheme){
+          const low = u.toLowerCase();
+          const looksHost = low.includes("localhost") || u.includes(".") || u.includes(":") || u.startsWith("[") || low === "::1" || low.startsWith("127.");
+          if (!looksHost) return "";
+
+          // se manca lo schema e sembra un host, aggiungi http://
+          if (/^[\w.-]+(?::\d+)?(\/.*)?$/.test(u) || u.startsWith("[")){
+            u = "http://" + u;
+          }
         }
+      }catch(_){ }
+
+      try{
         const url = new URL(u);
         url.pathname = "";
         url.search = "";
@@ -18161,6 +18186,12 @@ async function handleFileSelection(fileList) {
         out.push(b);
       };
 
+      // 0) cache in-memory (ultima base valida di questa sessione)
+      try{
+        const vMem = String(__scanbridgeGoodBase || "").trim();
+        if (vMem) push(vMem);
+      }catch(_){ }
+
       // 1) settings/localStorage (se presente)
       try{
         const v0 = String((state && state.settings && (state.settings.scanbridgeBase || state.settings.scanbridgeUrl || state.settings.scanbridgeURL)) || "").trim();
@@ -18209,6 +18240,13 @@ async function handleFileSelection(fileList) {
       return e;
     }
 
+    function __scanbridgeRememberGoodBase(base){
+      const b = __scanbridgeNormalizeBase(base);
+      if (!b) return;
+      __scanbridgeGoodBase = b;
+      try{ localStorage.setItem("hubinv_scanbridge_base", b); }catch(_){ }
+    }
+
     async function __scanbridgeFetchWithTimeout(url, opts, timeoutMs){
       const ms = Number(timeoutMs);
       const t = (Number.isFinite(ms) && ms > 0) ? ms : 20000;
@@ -18222,6 +18260,43 @@ async function handleFileSelection(fileList) {
       } finally {
         clearTimeout(timer);
       }
+    }
+
+    // Warm-up: prova un ping veloce per far apparire eventuali permessi "rete locale"
+    // e per memorizzare subito la base giusta. Non apre lo scanner.
+    async function __scanbridgeWarmup(force){
+      const now = Date.now();
+      if (!force && __scanbridgeWarmInFlight) return __scanbridgeWarmInFlight;
+      if (!force && now - (__scanbridgeWarmLastAt || 0) < 1500) return;
+      __scanbridgeWarmLastAt = now;
+
+      __scanbridgeWarmInFlight = (async () => {
+        const bases = __scanbridgeGetBases();
+        if (!Array.isArray(bases) || !bases.length) return;
+        for (let i=0; i<bases.length; i++){
+          const b0 = __scanbridgeNormalizeBase(bases[i]);
+          if (!b0) continue;
+
+          // Endpoint "safe": anche se 404, basta che risponda per dire che la base è raggiungibile.
+          const url = b0 + "/health";
+          const opts = { method: "GET", mode: "cors", credentials: "omit", cache: "no-store" };
+          try{
+            const tas = __scanbridgeTargetAddressSpaceForBase(b0);
+            if (tas) opts.targetAddressSpace = tas;
+          }catch(_){ }
+
+          try{
+            const res = await __scanbridgeFetchWithTimeout(url, opts, 1500);
+            if (res){
+              try{ __scanbridgeRememberGoodBase(b0); }catch(_){ }
+              break;
+            }
+          }catch(_e){ }
+        }
+      })();
+
+      try{ await __scanbridgeWarmInFlight; }catch(_){ }
+      __scanbridgeWarmInFlight = null;
     }
 
 
@@ -18372,6 +18447,9 @@ async function handleFileSelection(fileList) {
         throw __scanbridgeMakeErr("SCANBRIDGE_HTTP", "ScanBridge HTTP " + status, { status, body, base: b });
       }
 
+      // Se arrivo qui, la base ha risposto correttamente: memorizzala.
+      try{ __scanbridgeRememberGoodBase(b); }catch(_){ }
+
       const blob = await res.blob();
       const type = String(blob && blob.type || "").toLowerCase();
       if (!type.startsWith("image/")) throw __scanbridgeMakeErr("SCANBRIDGE_BAD_RESPONSE", "ScanBridge non ha restituito un'immagine", { base: b });
@@ -18387,16 +18465,49 @@ async function handleFileSelection(fileList) {
         throw new Error("ScanBridge key mancante");
       }
 
-      try{
-        if (progressSpinner) progressSpinner.style.display = "block";
-      }catch(_){ }
-      try{
-        progressLabel.textContent = "Apro lo scanner…";
-        progressFill.style.width = "5%";
-      }catch(_){ }
+      // Warm-up: in alcuni casi il primo tentativo serve solo a far apparire il permesso
+      // "rete locale" o a svegliare ScanBridge. Lo facciamo QUI (safe endpoint) così
+      // il click successivo non è necessario.
+      try{ await __scanbridgeWarmup(false); }catch(_){ }
 
-      const file = await __scanbridgeFetchJpg(k);
-      await handleFileSelection([file]);
+      // Lock UI (evita doppi click mentre lo scanner lavora)
+      const __btn = document.getElementById("btnOpenGallery");
+      try{ if (__btn) __btn.disabled = true; }catch(_){ }
+
+      try{
+        try{
+          if (progressSpinner) progressSpinner.style.display = "block";
+        }catch(_){ }
+        try{
+          progressLabel.textContent = "Apro lo scanner…";
+          progressFill.style.width = "5%";
+        }catch(_){ }
+
+        let file = null;
+        try{
+          file = await __scanbridgeFetchJpg(k);
+        }catch(err1){
+          // Retry UNA volta su errori transienti (tipico: primo click dopo avvio ScanBridge)
+          const code = String(err1 && err1.code || "").toUpperCase();
+          const status = (err1 && err1.status != null) ? Number(err1.status) : null;
+          const msg = String(err1 && (err1.message || err1) || "").toLowerCase();
+          const retryableStatus = (status === 408 || status === 409 || status === 423 || status === 425 || status === 429 || status === 500 || status === 502 || status === 503 || status === 504);
+          const retryable = (code === "SCANBRIDGE_UNREACHABLE" || (code === "SCANBRIDGE_HTTP" && retryableStatus) || msg.includes("abort") || msg.includes("timeout"));
+
+          if (!retryable) throw err1;
+
+          try{
+            progressLabel.textContent = "Riprovo…";
+            progressFill.style.width = "8%";
+          }catch(_){ }
+          await new Promise(r => setTimeout(r, 350));
+          file = await __scanbridgeFetchJpg(k);
+        }
+
+        await handleFileSelection([file]);
+      } finally {
+        try{ if (__btn) __btn.disabled = false; }catch(_){ }
+      }
     }
 
     /****************************************************************
