@@ -5,7 +5,7 @@
      ****************************************************************/
     import { initializeApp } from "https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js";
     import { getAuth, GoogleAuthProvider, signInWithPopup, signInWithRedirect, getRedirectResult, signOut, onAuthStateChanged, setPersistence, browserLocalPersistence } from "https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js";
-    import {initializeFirestore, collection, doc, setDoc, addDoc, deleteDoc, onSnapshot, query, orderBy, serverTimestamp, deleteField, getDocs, runTransaction} from "https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js";
+    import {initializeFirestore, collection, doc, setDoc, addDoc, deleteDoc, onSnapshot, query, orderBy, serverTimestamp, deleteField, getDocs, runTransaction, updateDoc, getDoc} from "https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js";
     import { getStorage, ref as sRef, uploadBytes, getDownloadURL, deleteObject } from "https://www.gstatic.com/firebasejs/12.7.0/firebase-storage.js";
 
 /* ============================================================
@@ -41,7 +41,7 @@
   try {
     if (document.getElementById("viewInventory")) return;
 
-    const html = "<div id=\"viewInventory\" class=\"view modalOverlay\">\n  <article class=\"card\" id=\"stockCard\">\n    <div class=\"hd\">\n      <div class=\"overlayHeaderTitle\">\n        <button class=\"iconBtn overlayBack\" id=\"btnBackInv\" type=\"button\" aria-label=\"Indietro\">\u2039</button>\n        <h2>Inventario</h2>\n      </div>\n      <div class=\"inlineRow\" style=\"gap:8px; justify-content:flex-end;\">\n        <div class=\"pill\" id=\"pillInvWarehouse\" style=\"display:none\">\u2014</div>\n        <div class=\"pill\" id=\"pillStock\">0 righe</div>\n        <button class=\"iconBtn\" id=\"btnCloseInv\" type=\"button\" aria-label=\"Chiudi\">\u00d7</button>\n      </div>\n    </div>\n    <div class=\"bd\">\n\n      <!-- Step 1: scelta inventario -->\n      <div id=\"invPicker\" class=\"stack\">\n        <div class=\"hero-sub\">Seleziona inventario</div>\n        <div class=\"homeActions\" style=\"grid-template-columns: 1fr; gap: 14px;\">\n          <button class=\"btn btn-primary homeTile\" id=\"btnPickCerea\" type=\"button\" aria-label=\"Inventario Cerea\">\n            <div class=\"homeTileTop\">\n              <svg class=\"homeTileIcon\" viewBox=\"0 0 24 24\" aria-hidden=\"true\">\n                <path d=\"M4 6a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v2a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6zm0 8a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-4z\"/>\n              </svg>\n              <span class=\"homeTileBadge\">CEREA</span>\n            </div>\n            <div class=\"homeTileText\">\n              <div class=\"homeTileTitle\">Inventario Cerea</div>\n              <div class=\"homeTileSub\">Apri stock e categorie</div>\n            </div>\n          </button>\n\n          <button class=\"btn btn-primary homeTile\" id=\"btnPickConcamarise\" type=\"button\" aria-label=\"Inventario Concamarise\">\n            <div class=\"homeTileTop\">\n              <svg class=\"homeTileIcon\" viewBox=\"0 0 24 24\" aria-hidden=\"true\">\n                <path d=\"M4 6a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v2a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6zm0 8a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-4z\"/>\n              </svg>\n              <span class=\"homeTileBadge\">CONCA</span>\n            </div>\n            <div class=\"homeTileText\">\n              <div class=\"homeTileTitle\">Inventario Concamarise</div>\n              <div class=\"homeTileSub\">Apri stock e categorie</div>\n            </div>\n          </button>\n        </div>\n      </div>\n\n      <!-- Step 2: dettaglio inventario selezionato -->\n      <div id=\"invDetail\" class=\"stack\" style=\"display:none;\">\n        <div class=\"inlineRow\" style=\"justify-content:space-between; align-items:flex-end; gap:12px;\">\n          <div class=\"stack\" style=\"flex:1; min-width: 220px;\">\n            <div class=\"hero-sub\" id=\"invDetailTitle\">Inventario</div>\n            <div class=\"muted\">Stock e categorie per sede</div>\n          </div>\n          <button class=\"btn btn-ghost btn-xs\" id=\"btnInvBackPicker\" type=\"button\">\u2190 Cambia inventario</button>\n        </div>\n\n        <div class=\"inlineRow listStickyBar\" style=\"justify-content: space-between;\">\n          <div class=\"inlineRow\" style=\"flex: 1 1 auto;\">\n            <div class=\"field\" style=\"min-width: 220px;\">\n              <label for=\"searchStock\">Cerca</label>\n              <input id=\"searchStock\" placeholder=\"Fornitore / codice / articolo\u2026\" />\n            </div>\n            <div class=\"field\" style=\"min-width: 180px;\">\n              <label for=\"filterCustomer\">Fornitore</label>\n              <select id=\"filterCustomer\">\n                <option value=\"\">Tutti</option>\n              </select>\n            </div>\n            <div class=\"field\" style=\"min-width: 180px;\">\n              <label for=\"filterLow\">Filtro</label>\n              <select id=\"filterLow\">\n                <option value=\"all\">Tutti</option>\n                <option value=\"low\">Solo scorta bassa</option>\n                <option value=\"zero\">Solo zero</option>\n              </select>\n            </div>\n            <div class=\"field\" style=\"min-width: 180px;\">\n              <label for=\"filterCategory\">Categoria</label>\n              <select id=\"filterCategory\">\n                <option value=\"\">Tutte</option>\n                <option value=\"__none\">Non assegnata</option>\n              </select>\n            </div>\n          </div>\n        </div>\n\n        <!-- STOCK (per inventario selezionato) -->\n        <div class=\"tableWrap\" style=\"max-height: 420px; overflow:auto; margin-top: 10px;\">\n          <table class=\"dataGrid\">\n            <thead>\n              <tr>\n                <th>Nome articolo</th>\n                <th>Cod. articolo</th>\n                <th>Categoria</th>\n                <th class=\"qty\">Q.tà</th>\n              </tr>\n            </thead>\n            <tbody id=\"stockTbody\">\n              <tr><td class=\"td-muted\" colspan=\"4\">Seleziona un inventario.</td></tr>\n            </tbody>\n          </table>\n        </div>\n      </div>\n\n    </div>\n  </article>\n</div>";
+    const html = "<div id=\"viewInventory\" class=\"view modalOverlay\">\n  <article class=\"card\" id=\"stockCard\">\n    <div class=\"hd\">\n      <div class=\"overlayHeaderTitle\">\n        <button class=\"iconBtn overlayBack\" id=\"btnBackInv\" type=\"button\" aria-label=\"Indietro\">\u2039</button>\n        <h2>Inventario</h2>\n      </div>\n      <div class=\"inlineRow\" style=\"gap:8px; justify-content:flex-end;\">\n        <div class=\"pill\" id=\"pillInvWarehouse\" style=\"display:none\">\u2014</div>\n        <div class=\"pill\" id=\"pillStock\">0 righe</div>\n        <button class=\"iconBtn\" id=\"btnCloseInv\" type=\"button\" aria-label=\"Chiudi\">\u00d7</button>\n      </div>\n    </div>\n    <div class=\"bd\">\n\n      <!-- Step 1: scelta inventario -->\n      <div id=\"invPicker\" class=\"stack\">\n        <div class=\"hero-sub\">Seleziona inventario</div>\n        <div class=\"homeActions\" style=\"grid-template-columns: 1fr; gap: 14px;\">\n          <button class=\"btn btn-primary homeTile\" id=\"btnPickCerea\" type=\"button\" aria-label=\"Inventario Cerea\">\n            <div class=\"homeTileTop\">\n              <svg class=\"homeTileIcon\" viewBox=\"0 0 24 24\" aria-hidden=\"true\">\n                <path d=\"M4 6a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v2a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6zm0 8a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-4z\"/>\n              </svg>\n              <span class=\"homeTileBadge\">CEREA</span>\n            </div>\n            <div class=\"homeTileText\">\n              <div class=\"homeTileTitle\">Inventario Cerea</div>\n              <div class=\"homeTileSub\">Apri stock e categorie</div>\n            </div>\n          </button>\n\n          <button class=\"btn btn-primary homeTile\" id=\"btnPickConcamarise\" type=\"button\" aria-label=\"Inventario Concamarise\">\n            <div class=\"homeTileTop\">\n              <svg class=\"homeTileIcon\" viewBox=\"0 0 24 24\" aria-hidden=\"true\">\n                <path d=\"M4 6a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v2a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6zm0 8a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-4z\"/>\n              </svg>\n              <span class=\"homeTileBadge\">CONCA</span>\n            </div>\n            <div class=\"homeTileText\">\n              <div class=\"homeTileTitle\">Inventario Concamarise</div>\n              <div class=\"homeTileSub\">Apri stock e categorie</div>\n            </div>\n          </button>\n        </div>\n      </div>\n\n      <!-- Step 2: dettaglio inventario selezionato -->\n      <div id=\"invDetail\" class=\"stack\" style=\"display:none;\">\n        <div class=\"inlineRow\" style=\"justify-content:space-between; align-items:flex-end; gap:12px;\">\n          <div class=\"stack\" style=\"flex:1; min-width: 220px;\">\n            <div class=\"hero-sub\" id=\"invDetailTitle\">Inventario</div>\n            <div class=\"muted\">Stock e categorie per sede</div>\n          </div>\n          <button class=\"btn btn-ghost btn-xs\" id=\"btnInvBackPicker\" type=\"button\">\u2190 Cambia inventario</button>\n        </div>\n\n        <div class=\"inlineRow listStickyBar\" style=\"justify-content: space-between;\">\n          <div class=\"inlineRow\" style=\"flex: 1 1 auto;\">\n            <div class=\"field\" style=\"min-width: 220px;\">\n              <label for=\"searchStock\">Cerca</label>\n              <input id=\"searchStock\" placeholder=\"Fornitore / codice / articolo\u2026\" />\n            </div>\n            <div class=\"field\" style=\"min-width: 180px;\">\n              <label for=\"filterCustomer\">Fornitore</label>\n              <select id=\"filterCustomer\">\n                <option value=\"\">Tutti</option>\n              </select>\n            </div>\n            <div class=\"field\" style=\"min-width: 180px;\">\n              <label for=\"filterLow\">Filtro</label>\n              <select id=\"filterLow\">\n                <option value=\"all\">Tutti</option>\n                <option value=\"low\">Solo scorta bassa</option>\n                <option value=\"zero\">Solo zero</option>\n              </select>\n            </div>\n            <div class=\"field\" style=\"min-width: 180px;\">\n              <label for=\"filterCategory\">Categoria</label>\n              <select id=\"filterCategory\">\n                <option value=\"\">Tutte</option>\n                <option value=\"__none\">Non assegnata</option>\n              </select>\n            </div>\n          </div>\n          <div class=\"inlineRow\" style=\"gap:8px; align-items:flex-end;\">\n            <button class=\"btn btn-secondary btn-xs\" id=\"btnPdfBackup\" type=\"button\">PDF backup</button>\n          </div>\n        </div>\n\n        <!-- STOCK (per inventario selezionato) -->\n        <div class=\"tableWrap\" style=\"max-height: 420px; overflow:auto; margin-top: 10px;\">\n          <table class=\"dataGrid\">\n            <thead>\n              <tr>\n                <th>Nome articolo</th>\n                <th>Cod. articolo</th>\n                <th>Categoria</th>\n                <th class=\"qty\">Q.tà</th>\n              </tr>\n            </thead>\n            <tbody id=\"stockTbody\">\n              <tr><td class=\"td-muted\" colspan=\"4\">Seleziona un inventario.</td></tr>\n            </tbody>\n          </table>\n        </div>\n      </div>\n\n    </div>\n  </article>\n</div>";
 
     const tpl = document.createElement("template");
     tpl.innerHTML = html;
@@ -118,6 +118,145 @@
     }catch(_){ return []; }
   }
 
+  // ===== DaneaXML (Scarica flussi DDT): raggruppo i movimenti OUT per DDT =====
+  var __daneaGroupsByKey = Object.create(null);
+
+  function __normWh(v){
+    try{
+      if (api && typeof api.normalizeWarehouse === "function") return api.normalizeWarehouse(v || "");
+    }catch(_){ }
+    return String(v || "").trim().toLowerCase();
+  }
+
+  function isDaneaXmlOut(mv){
+    try{
+      if (!mv) return false;
+      if (String(mv.type || "").toUpperCase() !== "OUT") return false;
+      var src = String(mv.source || "").trim().toLowerCase();
+      if (src !== "daneaxml") return false;
+      // Nel realtime mapping alcune proprietà custom (es. daneaDdtKey) potrebbero
+      // non essere presenti su mv. Consideriamo valido se riusciamo a derivare
+      // una chiave di raggruppamento dal numero documento.
+      var k = String(mv.daneaDdtKey || mv.docNum || "").trim();
+      return !!k;
+    }catch(_){ return false; }
+  }
+
+  function getDaneaGroupKey(mv){
+    // Priorità: chiave completa salvata dal flusso DaneaXML (numero__data)
+    var k = String((mv && mv.daneaDdtKey) || "").trim();
+    if (k) return k;
+
+    // Fallback robusto: ricostruisci da docNum + docDateRaw/date
+    var num = String((mv && mv.docNum) || "").trim();
+    var date = String((mv && (mv.docDateRaw || mv.date)) || "").trim();
+    if (num && date && /^\d{4}-\d{2}-\d{2}$/.test(date)) return num + "__" + date;
+
+    // Ultimo fallback: solo numero (potrebbe non permettere drill-down righe DDT)
+    return String((mv && mv.docNum) || "").trim();
+  }
+
+  function getDaneaGroupByKey(k){
+    var key = String(k || "").trim();
+    if (!key) return null;
+    try{ return __daneaGroupsByKey[key] || null; }catch(_){ return null; }
+  }
+
+  function buildDaneaGroups(allMovements){
+    var byKey = Object.create(null);
+    (Array.isArray(allMovements) ? allMovements : []).forEach(function(mv){
+      if (!isDaneaXmlOut(mv)) return;
+      var k = getDaneaGroupKey(mv);
+      if (!k) return;
+      var g = byKey[k];
+      if (!g){
+        var ca0 = String(mv.createdAt || mv.createdAtIso || "").trim();
+        g = byKey[k] = {
+          __kind: "danea_ddt",
+          key: k,
+          id: "danea__" + encodeURIComponent(k),
+          type: "OUT",
+          source: "DaneaXML",
+          customer: "Scarico DDT",
+          code: "",
+          item: "",
+          qty: 0,
+          uom: "",
+          qtyRaw: "",
+          date: String(mv.date || "").trim() || "",
+          note: String(mv.note || "").trim() || "",
+          docType: String(mv.docType || "DDT").trim() || "DDT",
+          docNum: String(mv.docNum || "").trim() || "",
+          docDateRaw: String(mv.docDateRaw || mv.date || "").trim() || "",
+          warehouse: "",
+          _warehouses: [],
+          createdAtMax: ca0,
+          createdAt: ca0,
+          movements: []
+        };
+      }
+
+      g.movements.push(mv);
+
+      // warehouses list (unique)
+      var w = __normWh(mv.warehouse || "");
+      if (w && g._warehouses.indexOf(w) < 0) g._warehouses.push(w);
+
+      var ca = String(mv.createdAt || mv.createdAtIso || "").trim();
+      if (ca && (!g.createdAtMax || ca.localeCompare(g.createdAtMax) > 0)) g.createdAtMax = ca;
+
+      if (!g.date && mv.date) g.date = String(mv.date || "").trim();
+      if (!g.docNum && mv.docNum) g.docNum = String(mv.docNum || "").trim();
+      if (!g.docDateRaw && (mv.docDateRaw || mv.date)) g.docDateRaw = String(mv.docDateRaw || mv.date || "").trim();
+      if (!g.note && mv.note) g.note = String(mv.note || "").trim();
+    });
+
+    __daneaGroupsByKey = byKey;
+
+    var groups = [];
+    Object.keys(byKey).forEach(function(k){
+      var g = byKey[k];
+      if (!g) return;
+      g.qty = (g.movements || []).length;
+      g.qtyRaw = g.qty + " righe";
+      g.code = (g.docNum ? ("DDT " + g.docNum) : ("DDT " + g.key));
+      g.item = "Scarico DDT · " + g.qty + " righe";
+      g.createdAt = g.createdAtMax || g.createdAt || "";
+      if (g._warehouses.length === 1) g.warehouse = g._warehouses[0];
+      else if (g._warehouses.length > 1) g.warehouse = "split";
+      else g.warehouse = "";
+      groups.push(g);
+    });
+
+    return groups;
+  }
+
+  function buildUiRows(allMovements){
+    var all = Array.isArray(allMovements) ? allMovements : [];
+    var groups = buildDaneaGroups(all);
+
+    // ids to skip (movimenti "figli" del DDT)
+    var skip = Object.create(null);
+    groups.forEach(function(g){
+      (g.movements || []).forEach(function(mv){
+        var id = String(mv && mv.id || "").trim();
+        if (id) skip[id] = 1;
+      });
+    });
+
+    var rows = [];
+    all.forEach(function(mv){
+      if (!mv) return;
+      var id = String(mv.id || "").trim();
+      if (id && skip[id]) return;
+      rows.push(mv);
+    });
+
+    // add groups
+    rows.push.apply(rows, groups);
+    return rows;
+  }
+
   function applyFilters(list){
     var q = norm(els.movSearch && els.movSearch.value);
     var t = String(els.movTypeFilter && els.movTypeFilter.value || "").trim().toUpperCase();
@@ -125,16 +264,23 @@
     var from = String(els.movFrom && els.movFrom.value || "").trim();
     var to   = String(els.movTo && els.movTo.value || "").trim();
 
-    return list.filter(function(mv){
+    return (Array.isArray(list) ? list : []).filter(function(mv){
       if (!mv) return false;
+
+      var isGroup = (mv && mv.__kind === "danea_ddt");
 
       if (t && String(mv.type || "").toUpperCase() !== t) return false;
 
       if (wh){
-        var w = (api && typeof api.normalizeWarehouse === "function")
-          ? api.normalizeWarehouse(mv.warehouse || "")
-          : String(mv.warehouse || "").trim().toLowerCase();
-        if (w !== wh) return false;
+        if (isGroup){
+          var ws = Array.isArray(mv._warehouses) ? mv._warehouses : [];
+          if (ws.indexOf(wh) < 0) return false;
+        } else {
+          var w = (api && typeof api.normalizeWarehouse === "function")
+            ? api.normalizeWarehouse(mv.warehouse || "")
+            : String(mv.warehouse || "").trim().toLowerCase();
+          if (w !== wh) return false;
+        }
       }
 
       // Date filter uses mv.date (YYYY-MM-DD). If missing, fall back to createdAt ISO date.
@@ -148,10 +294,21 @@
 
       if (q){
         var hay = [
-          mv.customer, mv.code, mv.item, mv.note, mv.source, mv.docNum, mv.docType
+          mv.customer, mv.code, mv.item, mv.note, mv.source, mv.docNum, mv.docType, mv.daneaDdtKey
         ].map(norm).join(" ");
+
+        // group: include anche righe interne (codici/articoli)
+        if (isGroup){
+          try{
+            (mv.movements || []).forEach(function(x){
+              hay += " " + [x.code, x.item, x.qtyRaw, x.uom, x.warehouse].map(norm).join(" ");
+            });
+          }catch(_){ }
+        }
+
         if (hay.indexOf(q) < 0) return false;
       }
+
       return true;
     });
   }
@@ -229,6 +386,8 @@
 
   function shortWh(v){
     var s = (api && typeof api.normalizeWarehouse === "function") ? api.normalizeWarehouse(v) : String(v || "").toLowerCase();
+    s = String(s || "").trim().toLowerCase();
+    if (s === "split") return "Split";
     return (s === "concamarise") ? "Conca" : "Cerea";
   }
 
@@ -239,14 +398,14 @@
     try{
       if (els.pillMovementsCount) els.pillMovementsCount.textContent = String(totalCount || 0);
       if (els.movementsMeta) {
-        var shown = list.length;
+        var shown = (Array.isArray(list) ? list.length : 0);
         els.movementsMeta.textContent = (shown === totalCount)
-          ? (shown.toLocaleString("it-IT") + " movimenti")
-          : ("Mostrati " + shown.toLocaleString("it-IT") + " su " + (totalCount||0).toLocaleString("it-IT"));
+          ? (shown.toLocaleString("it-IT") + " righe")
+          : ("Mostrate " + shown.toLocaleString("it-IT") + " su " + (totalCount||0).toLocaleString("it-IT"));
       }
-    }catch(_){}
+    }catch(_){ }
 
-    if (!list.length){
+    if (!list || !list.length){
       els.movementsAllTbody.innerHTML = '<tr><td class="td-muted" colspan="9">Nessun movimento.</td></tr>';
       return;
     }
@@ -261,76 +420,752 @@
     }
 
     els.movementsAllTbody.innerHTML = sliced.map(function(mv){
+      var isGroup = (mv && mv.__kind === "danea_ddt");
+
       var id = String(mv.id || "");
       var date = String(mv.date || "").trim();
       if (!date){
         var ca = String(mv.createdAt || "");
         if (ca && ca.length >= 10) date = ca.slice(0,10);
       }
+
       var customer = String(mv.customer || "");
       var code = String(mv.code || "");
       var item = String(mv.item || "");
       var qty = (api && typeof api.safeInt === "function") ? api.safeInt(mv.qty) : (Number(mv.qty)||0);
       var uom = String(mv.uom || "").trim();
-      var qtyTxt = String(mv.qtyRaw || "").trim();
-      if (!qtyTxt){
-        qtyTxt = Number(qty).toLocaleString("it-IT") + (uom ? (" " + uom) : "");
-      }
+
       var wh = shortWh(mv.warehouse || "");
       var src = String(mv.source || "");
-      var showDoc = isDocLike(mv);
+      var showDoc = (!isGroup) && isDocLike(mv);
+
+      var attrs = 'data-mvid="'+esc(id)+'"';
+      if (isGroup){
+        attrs += ' data-kind="danea" data-daneakey="'+esc(String(mv.key || ""))+'"';
+      }
 
       return '' +
-        '<tr data-mvid="'+esc(id)+'" title="Dettagli">' +
+        '<tr '+attrs+' title="Dettagli">' +
           '<td data-label="Data">'+esc(date || "—")+'</td>' +
           '<td data-label="Tipo">'+badgeHtml(mv.type)+'</td>' +
           '<td data-label="Fornitore">'+esc(customer)+'</td>' +
-          '<td data-label="Codice" class="td-muted"><span class="kbd">'+esc(code)+'</span></td>' +
+          '<td data-label="Codice" class="td-muted"><span class="kbd">'+esc(code || "—")+'</span></td>' +
           '<td data-label="Articolo">'+esc(item)+'</td>' +
           '<td data-label="Q.tà" class="qty">'+Number(qty).toLocaleString("it-IT")+'</td>' +
           '<td data-label="Sede" class="colHideSm">'+esc(wh)+'</td>' +
           '<td data-label="Fonte" class="colHideSm">'+esc(src)+'</td>' +
           '<td data-label="">' +
-            (showDoc ? '<button class="btn btn-ghost mini jsOpenDoc" type="button" data-mvid="'+esc(id)+'" title="Apri documento">Doc</button>' : '') +
+            (isGroup
+              ? '<button class="btn btn-ghost mini jsOpenDaneaDdt" type="button" data-daneakey="'+esc(String(mv.key || ""))+'" title="Dettagli DDT">Dettagli</button>'
+              : (showDoc ? '<button class="btn btn-ghost mini jsOpenDoc" type="button" data-mvid="'+esc(id)+'" title="Apri documento">Doc</button>' : '')
+            ) +
           '</td>' +
         '</tr>';
     }).join("");
 
     if (capped){
       els.movementsAllTbody.insertAdjacentHTML("beforeend",
-        '<tr><td class="td-muted" colspan="9">Mostrati i primi '+cap.toLocaleString("it-IT")+' movimenti. Usa i filtri per restringere.</td></tr>');
+        '<tr><td class="td-muted" colspan="9">Mostrate le prime '+cap.toLocaleString("it-IT")+' righe. Usa i filtri per restringere.</td></tr>');
     }
   }
 
+    var __detailCtx = { id:"", docKey:"" };
+
+  function __setVal(el, v){
+    if (!el) return;
+    var s = (v == null) ? "" : String(v);
+    try{
+      // input/textarea => .value, altrimenti testo (div/span/pre)
+      if (typeof el.value !== "undefined") el.value = s;
+      else el.textContent = s;
+    }catch(_){
+      try{ el.textContent = s; }catch(__){}
+    }
+  }
+
+  function __openDetailModal(){
+    if (!els.modalMovementDetail) return;
+    try{ els.modalMovementDetail.classList.add("open"); }catch(_){}
+    try{ (typeof __syncBodyLockFromModals === "function") && __syncBodyLockFromModals(); }catch(_){}
+  }
+
+  function __closeDetailModal(){
+    if (!els.modalMovementDetail) return;
+    try{ els.modalMovementDetail.classList.remove("open"); }catch(_){}
+    try{ (typeof __syncBodyLockFromModals === "function") && __syncBodyLockFromModals(); }catch(_){}
+  }
+
+  
+  // ===== Dettaglio DDT (DaneaXML) — ordinato + drill-down per prodotto =====
+  var __ddtDetailCtx = { key: "", group: null, done: null, rows: [], selectedIdx: -1 };
+
+  var __fpCache = { loaded: false, loading: null, fpByCode: new Map(), catByKey: new Map() };
+
+  function __resetDdtDetailCtx(){
+    __ddtDetailCtx = { key: "", group: null, done: null, rows: [], selectedIdx: -1 };
+    try{ if (els.movDetDdtProdWrap) els.movDetDdtProdWrap.style.display = "none"; }catch(_){ }
+    try{ if (els.movDetDdtProdTbody) els.movDetDdtProdTbody.innerHTML = '<tr><td class="td-muted" colspan="5">Seleziona una riga prodotto sopra.</td></tr>'; }catch(_){ }
+    try{
+      if (els.movDetDdtRowsTbody){
+        var sel = els.movDetDdtRowsTbody.querySelectorAll('tr.is-selected');
+        sel && sel.forEach && sel.forEach(function(tr){ try{ tr.classList.remove('is-selected'); }catch(_){ } });
+      }
+    }catch(_){ }
+  }
+
+  function __setDdtMode(on){
+    try{ if (els.movDetDdtWrap) els.movDetDdtWrap.style.display = on ? "" : "none"; }catch(_){ }
+    if (!on) __resetDdtDetailCtx();
+  }
+
+  function __getHub(){
+    try{ return (window && window.__HUB) ? window.__HUB : null; }catch(_){ return null; }
+  }
+
+  async function __fetchDaneaCompletedByKey(key){
+    var k = String(key || "").trim();
+    if (!k) return null;
+    var H = __getHub();
+    if (!H || !H.fb || !H.fb.db || !H.FS) return null;
+    if (typeof H.FS.doc !== "function" || typeof H.FS.getDoc !== "function") return null;
+    try{
+      var doneId = encodeURIComponent(k);
+      var ref = H.FS.doc(H.fb.db, "orgs", H.ORG_ID, "daneaDdtCompleted", doneId);
+      var snap = await H.FS.getDoc(ref);
+      if (!snap || !snap.exists || !snap.exists()) return null;
+      var data = (typeof snap.data === "function") ? (snap.data() || {}) : (snap.data || {});
+      data._id = snap.id || doneId;
+      return data;
+    }catch(e){
+      try{ console.warn("fetch daneaDdtCompleted failed", e); }catch(_){ }
+      return null;
+    }
+  }
+
+  // Fallback: se manca il record "completato", prova a leggere il DDT dalla cache daneaDdts
+  // (dove vengono salvate le righe parse dell'XML). Così nel dettaglio Movimenti riesci
+  // comunque a vedere le righe DDT.
+  async function __fetchDaneaCacheByKey(key){
+    var k = String(key || "").trim();
+    if (!k) return null;
+    var H = __getHub();
+    if (!H || !H.fb || !H.fb.db || !H.FS) return null;
+    if (typeof H.FS.doc !== "function" || typeof H.FS.getDoc !== "function") return null;
+    try{
+      var id = encodeURIComponent(k);
+      var ref = H.FS.doc(H.fb.db, "orgs", H.ORG_ID, "daneaDdts", id);
+      var snap = await H.FS.getDoc(ref);
+      if (!snap || !snap.exists || !snap.exists()) return null;
+      var data = (typeof snap.data === "function") ? (snap.data() || {}) : (snap.data || {});
+      data._id = snap.id || id;
+      return data;
+    }catch(e){
+      try{ console.warn("fetch daneaDdts failed", e); }catch(_){ }
+      return null;
+    }
+  }
+
+  function __parseFraction(v){
+    var s = String(v || "").trim();
+    if (!s) return null;
+    // 1/20
+    var m = s.match(/^(-?\d+(?:[.,]\d+)?)\s*\/\s*(\d+(?:[.,]\d+)?)$/);
+    if (m){
+      var a = Number(String(m[1]).replace(",", "."));
+      var b = Number(String(m[2]).replace(",", "."));
+      if (Number.isFinite(a) && Number.isFinite(b) && b !== 0) return a / b;
+    }
+    // number with comma
+    var n = Number(s.replace(/\./g, "").replace(",", "."));
+    if (Number.isFinite(n)) return n;
+    return null;
+  }
+
+  function __compQtyPerUnit(comp){
+    var c = comp || {};
+    if (c.qty != null && Number.isFinite(Number(c.qty))) return Number(c.qty);
+    var raw = c.qtyRaw || c.qtaRaw || "";
+    var p = __parseFraction(raw);
+    if (p != null && Number.isFinite(p)) return p;
+    return null;
+  }
+
+  async function __ensureFinishedProductsCache(){
+    if (__fpCache.loaded) return true;
+    if (__fpCache.loading) {
+      try{ await __fpCache.loading; }catch(_){ }
+      return !!__fpCache.loaded;
+    }
+
+    var H = __getHub();
+    if (!H || !H.fb || !H.fb.db || !H.FS) return false;
+    if (typeof H.FS.collection !== "function" || typeof H.FS.getDocs !== "function") return false;
+
+    __fpCache.loading = (async function(){
+      try{
+        var fpByCode = new Map();
+        var catByKey = new Map();
+
+        // finishedProducts
+        var colFp = H.FS.collection(H.fb.db, "orgs", H.ORG_ID, "finishedProducts");
+        var snapFp = await H.FS.getDocs(colFp);
+        var docsFp = (snapFp && snapFp.docs) ? snapFp.docs : [];
+        docsFp.forEach(function(d){
+          try{
+            var data = d.data ? (d.data() || {}) : {};
+            var code = String(data.code || data.codeLower || "").trim();
+            var codeLower = String(data.codeLower || code).trim().toLowerCase();
+            if (!codeLower) return;
+            data.id = d.id;
+            fpByCode.set(codeLower, data);
+          }catch(_){ }
+        });
+
+        // finishedProductCategories
+        var colCat = H.FS.collection(H.fb.db, "orgs", H.ORG_ID, "finishedProductCategories");
+        var snapCat = await H.FS.getDocs(colCat);
+        var docsCat = (snapCat && snapCat.docs) ? snapCat.docs : [];
+        docsCat.forEach(function(d){
+          try{
+            var data = d.data ? (d.data() || {}) : {};
+            var key = String(data.key || data.name || d.id || "").trim();
+            var keyLower = String(key).toLowerCase();
+            if (!keyLower) return;
+            data.id = d.id;
+            catByKey.set(keyLower, data);
+          }catch(_){ }
+        });
+
+        __fpCache.fpByCode = fpByCode;
+        __fpCache.catByKey = catByKey;
+        __fpCache.loaded = true;
+      }catch(e){
+        __fpCache.loaded = false;
+        try{ console.warn("ensureFinishedProductsCache failed", e); }catch(_){ }
+      }finally{
+        __fpCache.loading = null;
+      }
+    })();
+
+    try{ await __fpCache.loading; }catch(_){ }
+    return !!__fpCache.loaded;
+  }
+
+  function __getFpForCode(code){
+    var low = norm(code || "");
+    if (!low) return null;
+    try{ return __fpCache.fpByCode.get(low) || null; }catch(_){ return null; }
+  }
+
+  function __getFpCategoryForFp(fp){
+    if (!fp) return null;
+    var k = norm(fp.categoryKey || fp.category || fp.catKey || fp.categoryId || "");
+    if (!k) return null;
+    try{ return __fpCache.catByKey.get(k) || null; }catch(_){ return null; }
+  }
+
+  function __getFpComponents(fp){
+    if (!fp) return [];
+    var arr = (fp.components || fp.bom || fp.distintaBase);
+    var direct = Array.isArray(arr) ? arr : [];
+    if (direct.length) return direct;
+    var cat = __getFpCategoryForFp(fp);
+    var bom = (cat && (cat.bom || cat.components || cat.distintaBase)) || [];
+    return Array.isArray(bom) ? bom : [];
+  }
+
+  function __macroGroupForCode(code){
+    var catKey = "";
+    try{ catKey = (api && typeof api.getMacroCategoryForCode === "function") ? String(api.getMacroCategoryForCode(code) || "") : ""; }catch(_){ catKey = ""; }
+    catKey = String(catKey || "").trim().toLowerCase();
+
+    // prova a risalire al macro group della categoria
+    var mg = "";
+    try{
+      var cats = (api && typeof api.getCategories === "function") ? (api.getCategories() || []) : [];
+      if (catKey && Array.isArray(cats)){
+        for (var i=0;i<cats.length;i++){
+          var c = cats[i];
+          if (!c) continue;
+          if (String(c.key || "").trim().toLowerCase() === catKey){
+            mg = String(c.macro || c.macroGroup || c.group || "").trim().toLowerCase();
+            break;
+          }
+        }
+      }
+    }catch(_){ }
+
+    if (mg !== "materie_prime" && mg !== "imballaggi"){
+      if (catKey === "materie_prime") mg = "materie_prime";
+      else if (catKey === "imballaggi") mg = "imballaggi";
+      else mg = "";
+    }
+    return mg;
+  }
+
+  function __macroGroupLabel(mg){
+    if (mg === "materie_prime") return "Materie prime";
+    if (mg === "imballaggi") return "Imballaggi";
+    return "—";
+  }
+
+  function __aggComponentsFromMovements(movs){
+    var map = new Map();
+    (Array.isArray(movs) ? movs : []).forEach(function(mv){
+      try{
+        var code = String(mv && mv.code || "").trim();
+        if (!code) return;
+        var low = code.toLowerCase();
+        var item = String(mv.item || mv.name || mv.articolo || code).trim();
+        var uom = String(mv.uom || "").trim();
+        var q = (api && typeof api.safeInt === "function") ? api.safeInt(mv.qty) : (Number(mv.qty) || 0);
+        if (!q) return;
+        var wh = __normWh(mv.warehouse || "");
+
+        var rec = map.get(low) || { code: code, item: item || code, uom: uom, total: 0, cerea: 0, concamarise: 0 };
+        rec.total += q;
+        if (wh === "concamarise") rec.concamarise += q;
+        else rec.cerea += q;
+        if (!rec.item) rec.item = item || code;
+        if (!rec.uom) rec.uom = uom;
+        map.set(low, rec);
+      }catch(_){ }
+    });
+    return Array.from(map.values());
+  }
+
+  function __renderDdtRows(rows){
+    if (!els.movDetDdtRowsTbody) return;
+    var arr = Array.isArray(rows) ? rows : [];
+    if (!arr.length){
+      els.movDetDdtRowsTbody.innerHTML = '<tr><td class="td-muted" colspan="4">Nessuna riga nel DDT.</td></tr>';
+      return;
+    }
+
+    els.movDetDdtRowsTbody.innerHTML = arr.map(function(r, idx){
+      var code = String(r && r.code || "").trim();
+      var desc = String(r && (r.desc || r.item || r.articolo) || "").trim();
+      var uom = String(r && r.uom || "").trim();
+
+      var qtyN = (r && r.qty != null && Number.isFinite(Number(r.qty))) ? Number(r.qty) : __parseFraction(r && r.qtyRaw);
+      var qtyDisp = (qtyN != null && Number.isFinite(qtyN)) ? qtyN.toLocaleString("it-IT") : String(r && r.qtyRaw || "").trim();
+      if (!qtyDisp) qtyDisp = "—";
+
+      return '<tr class="jsMovDetDdtRow" data-ddt-idx="'+idx+'">'
+        + '<td data-label="Codice"><span class="kbd">'+esc(code || "—")+'</span></td>'
+        + '<td data-label="Articolo">'+esc(desc || code || "—")+'</td>'
+        + '<td data-label="Q.tà" class="qty" style="text-align:right;">'+esc(qtyDisp)+'</td>'
+        + '<td data-label="U.M.">'+esc(uom || "")+'</td>'
+        + '</tr>';
+    }).join("");
+  }
+
+  function __renderDdtComponentsTable(comps){
+    if (!els.movDetDdtCompsTbody) return;
+    var arr = Array.isArray(comps) ? comps.slice() : [];
+    if (!arr.length){
+      els.movDetDdtCompsTbody.innerHTML = '<tr><td class="td-muted" colspan="7">Nessun componente scaricato.</td></tr>';
+      return;
+    }
+
+    // sort: Materie prime -> Imballaggi -> altri, poi codice
+    function typeRank(mg){
+      if (mg === "materie_prime") return 1;
+      if (mg === "imballaggi") return 2;
+      return 3;
+    }
+
+    arr.sort(function(a,b){
+      var ra = typeRank(__macroGroupForCode(a.code));
+      var rb = typeRank(__macroGroupForCode(b.code));
+      if (ra !== rb) return ra - rb;
+      var ca = String(a.code||"");
+      var cb = String(b.code||"");
+      if (ca !== cb) return ca.localeCompare(cb);
+      return String(a.item||"").localeCompare(String(b.item||""));
+    });
+
+    els.movDetDdtCompsTbody.innerHTML = arr.map(function(it){
+      var mg = __macroGroupForCode(it.code);
+      var tipo = __macroGroupLabel(mg);
+      var code = String(it.code || "").trim();
+      var item = String(it.item || code).trim();
+      var uom = String(it.uom || "").trim();
+      var tot = Number(it.total || 0);
+      var c = Number(it.cerea || 0);
+      var k = Number(it.concamarise || 0);
+      return '<tr>'
+        + '<td data-label="Tipo">'+esc(tipo)+'</td>'
+        + '<td data-label="Codice"><span class="kbd">'+esc(code || "—")+'</span></td>'
+        + '<td data-label="Articolo">'+esc(item || "—")+'</td>'
+        + '<td data-label="Totale" class="qty" style="text-align:right;">'+tot.toLocaleString("it-IT")+'</td>'
+        + '<td data-label="Cerea" class="qty" style="text-align:right;">'+c.toLocaleString("it-IT")+'</td>'
+        + '<td data-label="Concamarise" class="qty" style="text-align:right;">'+k.toLocaleString("it-IT")+'</td>'
+        + '<td data-label="U.M.">'+esc(uom)+'</td>'
+        + '</tr>';
+    }).join("");
+  }
+
+  function __renderDdtProdPlaceholder(msg){
+    try{ if (els.movDetDdtProdWrap) els.movDetDdtProdWrap.style.display = ""; }catch(_){ }
+    if (!els.movDetDdtProdTbody) return;
+    els.movDetDdtProdTbody.innerHTML = '<tr><td class="td-muted" colspan="5">'+esc(msg || "Seleziona una riga prodotto sopra.")+'</td></tr>';
+  }
+
+  function __selectDdtRow(idx){
+    idx = (idx == null) ? -1 : Number(idx);
+    if (!Number.isFinite(idx) || idx < 0) return;
+
+    if (!__ddtDetailCtx || !Array.isArray(__ddtDetailCtx.rows) || !__ddtDetailCtx.rows[idx]) return;
+
+    __ddtDetailCtx.selectedIdx = idx;
+
+    // highlight
+    try{
+      if (els.movDetDdtRowsTbody){
+        var trs = els.movDetDdtRowsTbody.querySelectorAll('tr.jsMovDetDdtRow');
+        trs && trs.forEach && trs.forEach(function(tr){ try{ tr.classList.remove('is-selected'); }catch(_){ } });
+        var trSel = els.movDetDdtRowsTbody.querySelector('tr[data-ddt-idx="'+idx+'"]');
+        if (trSel) trSel.classList.add('is-selected');
+      }
+    }catch(_){ }
+
+    var r = __ddtDetailCtx.rows[idx];
+    var code = String(r && r.code || "").trim();
+    var desc = String(r && (r.desc || r.item || r.articolo) || "").trim();
+
+    var qtyN = (r && r.qty != null && Number.isFinite(Number(r.qty))) ? Number(r.qty) : __parseFraction(r && r.qtyRaw);
+    var qLine = (qtyN != null && Number.isFinite(qtyN)) ? qtyN : 0;
+    if (qLine <= 0){
+      try{ if (els.movDetDdtProdTitle) els.movDetDdtProdTitle.textContent = "Dettaglio prodotto"; }catch(_){ }
+      __renderDdtProdPlaceholder("Quantità non valida per questa riga.");
+      return;
+    }
+
+    try{
+      if (els.movDetDdtProdTitle){
+        var title = (code ? (code + (desc ? (" — " + desc) : "")) : (desc || "Prodotto"));
+        var qlbl = qLine.toLocaleString("it-IT");
+        els.movDetDdtProdTitle.textContent = title + " (Q.tà " + qlbl + ")";
+      }
+    }catch(_){ }
+
+    __renderDdtProdPlaceholder("Calcolo componenti…");
+
+    // calcolo async (best effort)
+    (async function(){
+      try{
+        var ok = await __ensureFinishedProductsCache();
+        if (!ok) {
+          __renderDdtProdPlaceholder("Non riesco a caricare la distinta base (permessi / rete).");
+          return;
+        }
+
+        // se nel frattempo hai aperto un altro DDT
+        if (!__ddtDetailCtx || __ddtDetailCtx.selectedIdx !== idx) return;
+
+        var fp = __getFpForCode(code);
+        if (!fp){
+          __renderDdtProdPlaceholder("Prodotto finito non trovato per questo codice.");
+          return;
+        }
+
+        var comps = __getFpComponents(fp);
+        if (!comps || !comps.length){
+          __renderDdtProdPlaceholder("Distinta base vuota per questo prodotto.");
+          return;
+        }
+
+        var out = [];
+        for (var i=0;i<comps.length;i++){
+          var c = comps[i] || {};
+          var cCode = String(c.code || "").trim();
+          if (!cCode) continue;
+          var per = __compQtyPerUnit(c);
+          if (per == null || !Number.isFinite(per) || per <= 0) continue;
+          var qty = per * qLine;
+          var qtyInt = Math.round(qty);
+          if (!qtyInt) continue;
+          out.push({
+            code: cCode,
+            item: String(c.name || c.articolo || cCode).trim(),
+            uom: String(c.uom || "").trim(),
+            qty: qtyInt,
+            mg: __macroGroupForCode(cCode)
+          });
+        }
+
+        if (!out.length){
+          __renderDdtProdPlaceholder("Nessun componente calcolabile (quantità 0). Controlla la distinta base.");
+          return;
+        }
+
+        // sort
+        out.sort(function(a,b){
+          var ra = (a.mg === "materie_prime") ? 1 : (a.mg === "imballaggi") ? 2 : 3;
+          var rb = (b.mg === "materie_prime") ? 1 : (b.mg === "imballaggi") ? 2 : 3;
+          if (ra !== rb) return ra - rb;
+          var ca = String(a.code||"");
+          var cb = String(b.code||"");
+          if (ca !== cb) return ca.localeCompare(cb);
+          return String(a.item||"").localeCompare(String(b.item||""));
+        });
+
+        if (!els.movDetDdtProdTbody) return;
+        try{ if (els.movDetDdtProdWrap) els.movDetDdtProdWrap.style.display = ""; }catch(_){ }
+
+        els.movDetDdtProdTbody.innerHTML = out.map(function(it){
+          var tipo = __macroGroupLabel(it.mg);
+          return '<tr>'
+            + '<td data-label="Tipo">'+esc(tipo)+'</td>'
+            + '<td data-label="Codice"><span class="kbd">'+esc(String(it.code||""))+'</span></td>'
+            + '<td data-label="Articolo">'+esc(String(it.item||it.code||"—"))+'</td>'
+            + '<td data-label="Q.tà" class="qty" style="text-align:right;">'+Number(it.qty||0).toLocaleString("it-IT")+'</td>'
+            + '<td data-label="U.M.">'+esc(String(it.uom||""))+'</td>'
+            + '</tr>';
+        }).join("");
+
+      }catch(e){
+        try{ console.warn("DDT per-prodotto calc failed", e); }catch(_){ }
+        __renderDdtProdPlaceholder("Errore calcolo dettaglio prodotto.");
+      }
+    })();
+  }
+
+  function openDaneaGroupDetails(g){
+    if (!api || !g) return;
+
+    cacheEls();
+    __setDdtMode(true);
+
+    var rows = Array.isArray(g.movements) ? g.movements.slice() : [];
+    try{
+      rows.sort(function(a,b){
+        var wa = __normWh(a && a.warehouse || "");
+        var wb = __normWh(b && b.warehouse || "");
+        if (wa && wb && wa !== wb) return wa.localeCompare(wb);
+        var ca = String(a && a.code || "");
+        var cb = String(b && b.code || "");
+        if (ca && cb && ca !== cb) return ca.localeCompare(cb);
+        var ia = String(a && a.item || "");
+        var ib = String(b && b.item || "");
+        return ia.localeCompare(ib);
+      });
+    }catch(_){ }
+
+    // aggiorna ctx
+    __ddtDetailCtx.key = String(g.key || "").trim();
+    __ddtDetailCtx.group = g;
+    __ddtDetailCtx.done = null;
+    __ddtDetailCtx.rows = [];
+    __ddtDetailCtx.selectedIdx = -1;
+
+    // titolo + sub (prima passata)
+    try{
+      if (els.movDetTitle) els.movDetTitle.textContent = "Dettaglio DDT (DaneaXML)";
+      if (els.movDetSubtitle){
+        var whSum = (g.warehouse === "split") ? "Cerea + Concamarise" : whLabel(g.warehouse || "");
+        els.movDetSubtitle.textContent = [
+          ("DDT " + (g.docNum || g.key || "—")),
+          (String(g.date || "").trim() || "—"),
+          (whSum || "—"),
+          ((g.qty || 0) + " righe")
+        ].join(" · ");
+      }
+    }catch(_){ }
+
+    // campi base (KV)
+    __setVal(els.movDetDate, String(g.date || "").trim() || "—");
+    __setVal(els.movDetType, "OUT (scarico)");
+    __setVal(els.movDetWarehouse, (g.warehouse === "split") ? "Cerea + Concamarise" : whLabel(g.warehouse || ""));
+    __setVal(els.movDetSource, "DaneaXML");
+    __setVal(els.movDetCustomer, "—");
+    __setVal(els.movDetCode, String(g.code || "").trim() || "—");
+    __setVal(els.movDetItem, "Scarico DDT · " + (g.qty || 0) + " righe");
+    __setVal(els.movDetQty, String(g.qty || 0) + " righe");
+    __setVal(els.movDetUom, "righe");
+    __setVal(els.movDetNote, String(g.note || "").trim() || "—");
+    __setVal(els.movDetDocType, "DDT");
+    __setVal(els.movDetDocNum, String(g.docNum || "").trim() || "—");
+    __setVal(els.movDetDocDateRaw, String(g.docDateRaw || g.date || "").trim() || "—");
+    __setVal(els.movDetLineIndex, "—");
+    __setVal(els.movDetVat, "—");
+    __setVal(els.movDetTriplet, String(g.key || "").trim() || "—");
+    __setVal(els.movDetCreatedAt, (api && typeof api.formatDateIT === "function") ? api.formatDateIT(g.createdAt || "") : (String(g.createdAt || "").trim() || "—"));
+    __setVal(els.movDetId, String(g.id || "").trim() || "—");
+
+    // RawText nascosto (ora c'è la tabella)
+    try{ if (els.movDetRawWrap) els.movDetRawWrap.style.display = "none"; }catch(_){ }
+
+    // bottoni: in DDT non apro doc e non annullo singola riga
+    try{ if (els.movDetOpenDoc) els.movDetOpenDoc.style.display = "none"; }catch(_){ }
+    try{ if (els.movDetUndo) els.movDetUndo.disabled = true; }catch(_){ }
+
+    // Tabelle
+    try{
+      if (els.movDetDdtRowsTbody) els.movDetDdtRowsTbody.innerHTML = '<tr><td class="td-muted" colspan="4">Carico dettagli…</td></tr>';
+      if (els.movDetDdtCompsTbody) els.movDetDdtCompsTbody.innerHTML = '<tr><td class="td-muted" colspan="7">Carico…</td></tr>';
+      if (els.movDetDdtProdWrap) els.movDetDdtProdWrap.style.display = "none";
+    }catch(_){ }
+
+    // 1) Scarico componenti (dai movimenti effettivi)
+    var compsAgg = __aggComponentsFromMovements(rows);
+    __renderDdtComponentsTable(compsAgg);
+
+    // 2) Righe DDT
+    (async function(){
+      var k = String(g.key || "").trim();
+      if (!k) { __renderDdtRows([]); return; }
+      // Prova prima da "completati" (contiene anche allocations), poi fallback su cache DDT
+      var done = await __fetchDaneaCompletedByKey(k);
+      var ddtSrc = done || (await __fetchDaneaCacheByKey(k));
+      // se nel frattempo hai aperto un altro DDT
+      if (!__ddtDetailCtx || __ddtDetailCtx.key !== k) return;
+
+      if (!ddtSrc){
+        __renderDdtRows([]);
+        try{ __setVal(els.movDetCustomer, "—"); }catch(_){ }
+        return;
+      }
+
+      __ddtDetailCtx.done = done || null;
+      __ddtDetailCtx.rows = Array.isArray(ddtSrc.rows) ? ddtSrc.rows : [];
+      __renderDdtRows(__ddtDetailCtx.rows);
+
+      // aggiorna cliente/subtitle (seconda passata)
+      try{
+        var cust = String(ddtSrc.customer || "").trim();
+        if (cust) __setVal(els.movDetCustomer, cust);
+        if (els.movDetSubtitle){
+          var whSum = (g.warehouse === "split") ? "Cerea + Concamarise" : whLabel(g.warehouse || "");
+          els.movDetSubtitle.textContent = [
+            (cust || "—"),
+            ("DDT " + (ddtSrc.number || g.docNum || g.key || "—")),
+            (String(ddtSrc.date || g.date || "").trim() || "—"),
+            (whSum || "—")
+          ].join(" · ");
+        }
+      }catch(_){ }
+
+    })();
+
+    // hint: tradizionale e chiaro
+    try{
+      if (els.movDetHint) els.movDetHint.textContent = "Questo DDT ha generato uno scarico automatico di componenti (distinta base).";
+    }catch(_){ }
+
+    __openDetailModal();
+  }
+
+
+
+  
   function openDetails(mv){
     if (!api || !mv) return;
-    var lines = [];
-    function push(k,v){
-      var s = String(v ?? "").trim();
-      if (!s) s = "—";
-      lines.push(k + ": " + s);
+
+    cacheEls();
+
+    // DaneaXML group row
+    if (mv && mv.__kind === "danea_ddt") { openDaneaGroupDetails(mv); return; }
+
+    // modal standard: nascondi sezioni DDT
+    try{ __setDdtMode(false); }catch(_){ }
+
+    // Se non abbiamo il modale dedicato, fallback alla modale testuale legacy
+    if (!els.modalMovementDetail){
+      var lines = [];
+      function push(k,v){
+        var s = String(v ?? "").trim();
+        if (!s) s = "—";
+        lines.push(k + ": " + s);
+      }
+      push("Tipo", (String(mv.type || "").toUpperCase() === "OUT") ? "OUT (scarico)" : "IN (carico)");
+      push("Data documento", mv.date);
+      push("Creato il", mv.createdAt);
+      push("Fornitore", mv.customer);
+      push("Codice", mv.code);
+      push("Articolo", mv.item);
+      push("Q.tà", String(String(mv.qtyRaw || "").trim() || (((api.safeInt ? api.safeInt(mv.qty) : mv.qty) ?? "") + (String(mv.uom||"").trim() ? (" " + String(mv.uom||"").trim()) : ""))));
+      push("Sede", whLabel(mv.warehouse || ""));
+      push("Fonte", mv.source);
+      push("Note", mv.note);
+      if (mv.docType || mv.docNum || mv.docDateRaw){
+        push("Doc tipo", mv.docType);
+        push("Doc n.", mv.docNum);
+        push("Doc data (raw)", mv.docDateRaw);
+      }
+      if (mv.lineIndex != null && String(mv.lineIndex).trim() !== "") push("Riga", mv.lineIndex);
+      if (mv.rawText) push("RawText", String(mv.rawText).slice(0, 800) + (String(mv.rawText).length > 800 ? "…" : ""));
+      try{ api.openModal("Dettaglio movimento", lines.join("\n")); }catch(_){ }
+      return;
     }
-    push("Tipo", (String(mv.type || "").toUpperCase() === "OUT") ? "OUT (scarico)" : "IN (carico)");
-    push("Data documento", mv.date);
-    push("Creato il", mv.createdAt);
-    push("Fornitore", mv.customer);
-    push("Codice", mv.code);
-    push("Articolo", mv.item);
-    push("Q.tà", String(String(mv.qtyRaw || "").trim() || (((api.safeInt ? api.safeInt(mv.qty) : mv.qty) ?? "") + (String(mv.uom||"").trim() ? (" " + String(mv.uom||"").trim()) : ""))));
-    push("Sede", whLabel(mv.warehouse || ""));
-    push("Fonte", mv.source);
-    push("Note", mv.note);
-    if (mv.docType || mv.docNum || mv.docDateRaw){
-      push("Doc tipo", mv.docType);
-      push("Doc n.", mv.docNum);
-      push("Doc data (raw)", mv.docDateRaw);
-    }
-    if (mv.lineIndex != null && String(mv.lineIndex).trim() !== "") push("Riga", mv.lineIndex);
-    if (mv.rawText) push("RawText", String(mv.rawText).slice(0, 800) + (String(mv.rawText).length > 800 ? "…" : ""));
+
+    // Doc key (se presente)
+    var docKey = "";
+    try{ docKey = buildDocKeyFromMovement(mv) || ""; }catch(_){ docKey = ""; }
+    __detailCtx.id = String(mv.id || "");
+    __detailCtx.docKey = String(docKey || "");
+
+    // Titolo + sub
     try{
-      api.openModal("Dettaglio movimento", lines.join("\n"));
-    }catch(_){}
+      if (els.movDetTitle) els.movDetTitle.textContent = "Dettaglio movimento";
+      if (els.movDetSubtitle){
+        var d = String(mv.date || "").trim();
+        var wh = whLabel(mv.warehouse || "");
+        var cust = String(mv.customer || "").trim();
+        els.movDetSubtitle.textContent = [cust || "—", (d || "—"), (wh || "—")].join(" · ");
+      }
+    }catch(_){ }
+
+    // Campi (ordine)
+    var typeLbl = (String(mv.type || "").toUpperCase() === "OUT") ? "OUT (scarico)" : "IN (carico)";
+    var uom = String(mv.uom || "").trim();
+    var qty = (api && typeof api.safeInt === "function") ? api.safeInt(mv.qty) : (Number(mv.qty)||0);
+    var qtyRaw = String(mv.qtyRaw || "").trim();
+    if (!qtyRaw) qtyRaw = Number(qty).toLocaleString("it-IT") + (uom ? (" " + uom) : "");
+
+    __setVal(els.movDetDate, String(mv.date || "").trim() || "—");
+    __setVal(els.movDetType, typeLbl);
+    __setVal(els.movDetWarehouse, whLabel(mv.warehouse || ""));
+    __setVal(els.movDetSource, String(mv.source || "").trim() || "—");
+    __setVal(els.movDetCustomer, String(mv.customer || "").trim() || "—");
+    __setVal(els.movDetCode, String(mv.code || "").trim() || "—");
+    __setVal(els.movDetItem, String(mv.item || "").trim() || "—");
+    __setVal(els.movDetQty, String(qtyRaw || "").trim() || "—");
+    __setVal(els.movDetUom, uom || "—");
+    __setVal(els.movDetNote, String(mv.note || "").trim() || "—");
+    __setVal(els.movDetDocType, String(mv.docType || "").trim() || "—");
+    __setVal(els.movDetDocNum, String(mv.docNum || "").trim() || "—");
+    __setVal(els.movDetDocDateRaw, String(mv.docDateRaw || "").trim() || "—");
+    __setVal(els.movDetLineIndex, (mv.lineIndex != null && String(mv.lineIndex).trim() !== "") ? String(mv.lineIndex) : "—");
+    __setVal(els.movDetVat, String(mv.supplierVat || mv.vatNorm || mv.vat || "").trim() || "—");
+    __setVal(els.movDetTriplet, String(mv.ddtTripletKey || mv.ddtKey || "").trim() || "—");
+    __setVal(els.movDetCreatedAt, (api && typeof api.formatDateIT === "function") ? api.formatDateIT(mv.createdAt) : (String(mv.createdAt || "").trim() || "—"));
+    __setVal(els.movDetId, String(mv.id || "").trim() || "—");
+
+    var raw = String(mv.rawText || "").trim();
+    __setVal(els.movDetRawText, raw || "");
+    try{ if (els.movDetRawWrap) els.movDetRawWrap.style.display = raw ? "" : "none"; }catch(_){ }
+
+    // Bottone documento
+    try{
+      var show = !!(__detailCtx.docKey && typeof api.openDocDetail === "function");
+      if (els.movDetOpenDoc) els.movDetOpenDoc.style.display = show ? "" : "none";
+    }catch(_){ }
+
+    // Bottone annulla (richiede API)
+    try{
+      if (els.movDetUndo) els.movDetUndo.disabled = !(api && typeof api.deleteMovement === "function" && __detailCtx.id);
+    }catch(_){ }
+
+    // hint standard
+    try{
+      if (els.movDetHint) els.movDetHint.textContent = "Annulla movimento = elimina questa riga e ripristina lo stock come prima.";
+    }catch(_){ }
+
+    __openDetailModal();
   }
+
 
   function bindEvents(){
     var inputs = [els.movSearch, els.movTypeFilter, els.movWhFilter, els.movSort, els.movFrom, els.movTo];
@@ -353,6 +1188,15 @@
 
     if (els.movementsAllTbody){
       els.movementsAllTbody.addEventListener("click", function(e){
+        var btnDanea = e.target && e.target.closest ? e.target.closest("button.jsOpenDaneaDdt") : null;
+        if (btnDanea){
+          e.preventDefault(); e.stopPropagation();
+          var k0 = btnDanea.getAttribute("data-daneakey") || "";
+          var g0 = getDaneaGroupByKey(k0);
+          if (g0) openDaneaGroupDetails(g0);
+          return;
+        }
+
         var btn = e.target && e.target.closest ? e.target.closest("button.jsOpenDoc") : null;
         if (btn){
           e.preventDefault(); e.stopPropagation();
@@ -371,11 +1215,89 @@
 
         var tr = e.target && e.target.closest ? e.target.closest("tr[data-mvid]") : null;
         if (!tr) return;
+
+        // DaneaXML group row
+        var kind = String(tr.getAttribute("data-kind") || "").trim().toLowerCase();
+        if (kind === "danea"){
+          var k1 = tr.getAttribute("data-daneakey") || "";
+          var g1 = getDaneaGroupByKey(k1);
+          if (g1) openDaneaGroupDetails(g1);
+          return;
+        }
+
         var id2 = tr.getAttribute("data-mvid") || "";
         var mv2 = (getAllMovements().find(function(x){ return String(x && x.id || "") === String(id2); })) || null;
         if (mv2) openDetails(mv2);
       });
     }
+    // Detail modal controls (bind once)
+    try{
+      cacheEls();
+      if (els.modalMovementDetail && !(els.modalMovementDetail.dataset && els.modalMovementDetail.dataset.bound === "1")){
+        if (els.modalMovementDetail.dataset) els.modalMovementDetail.dataset.bound = "1";
+
+        // click fuori = chiudi
+        els.modalMovementDetail.addEventListener("click", function(ev){
+          if (ev && ev.target === els.modalMovementDetail) __closeDetailModal();
+        });
+
+        if (els.movDetClose) els.movDetClose.addEventListener("click", function(e){ try{ e.preventDefault(); e.stopPropagation(); }catch(_){}
+          __closeDetailModal();
+        });
+        if (els.movDetDone) els.movDetDone.addEventListener("click", function(e){ try{ e.preventDefault(); e.stopPropagation(); }catch(_){}
+          __closeDetailModal();
+        });
+
+        // Click su riga prodotto (DDT) => dettaglio componenti per quel prodotto
+        try{
+          if (els.movDetDdtRowsTbody && !(els.movDetDdtRowsTbody.dataset && els.movDetDdtRowsTbody.dataset.bound === "1")){
+            if (els.movDetDdtRowsTbody.dataset) els.movDetDdtRowsTbody.dataset.bound = "1";
+            els.movDetDdtRowsTbody.addEventListener("click", function(ev){
+              var tr = ev && ev.target && ev.target.closest ? ev.target.closest("tr[data-ddt-idx]") : null;
+              if (!tr) return;
+              try{ ev.preventDefault(); ev.stopPropagation(); }catch(_){ }
+              var idx = parseInt(tr.getAttribute("data-ddt-idx") || "", 10);
+              if (!Number.isFinite(idx)) return;
+              try{ __selectDdtRow(idx); }catch(_){ }
+            });
+          }
+        }catch(_){ }
+
+
+        if (els.movDetOpenDoc) els.movDetOpenDoc.addEventListener("click", function(e){
+          try{ e.preventDefault(); e.stopPropagation(); }catch(_){}
+          if (!api || typeof api.openDocDetail !== "function") return;
+          var k = String(__detailCtx.docKey || "").trim();
+          if (!k) return;
+          try{ api.openDocDetail(k); }catch(_){}
+          __closeDetailModal();
+        });
+
+        if (els.movDetUndo) els.movDetUndo.addEventListener("click", async function(e){
+          try{ e.preventDefault(); e.stopPropagation(); }catch(_){}
+          if (!api || typeof api.deleteMovement !== "function") {
+            try{ api && api.openModal && api.openModal("Operazione non disponibile", "Per annullare un movimento serve l'API deleteMovement."); }catch(_){}
+            return;
+          }
+          var id = String(__detailCtx.id || "").trim();
+          if (!id) return;
+
+          var ok = confirm("Annullare questo movimento?\n\nVerrà eliminata questa riga e lo stock tornerà come prima.");
+          if (!ok) return;
+
+          try{ els.movDetUndo.disabled = true; }catch(_){}
+          try{ await api.deleteMovement(id); }catch(err){
+            try{ api.openModal && api.openModal("Errore", String(err && (err.message || err) || err)); }catch(_){}
+            try{ els.movDetUndo.disabled = false; }catch(_){}
+            return;
+          }
+
+          try{ api.showToast && api.showToast("Movimento annullato"); }catch(_){}
+          __closeDetailModal();
+        });
+      }
+    }catch(_){}
+
   }
 
   function cacheEls(){
@@ -390,6 +1312,46 @@
     els.pillMovementsCount = $("pillMovementsCount");
     els.movementsAllTbody = $("movementsAllTbody");
     els.movementsMeta = $("movementsMeta");
+
+    // Dettaglio movimento (modal)
+    els.modalMovementDetail = $("modalMovementDetail");
+    els.movDetTitle = $("movDetTitle");
+    els.movDetSubtitle = $("movDetSubtitle");
+    els.movDetClose = $("movDetClose");
+    els.movDetDone = $("movDetDone");
+    els.movDetOpenDoc = $("movDetOpenDoc");
+    els.movDetUndo = $("movDetUndo");
+
+    els.movDetDate = $("movDetDate");
+    els.movDetType = $("movDetType");
+    els.movDetWarehouse = $("movDetWarehouse");
+    els.movDetSource = $("movDetSource");
+    els.movDetCustomer = $("movDetCustomer");
+    els.movDetCode = $("movDetCode");
+    els.movDetItem = $("movDetItem");
+    els.movDetQty = $("movDetQty");
+    els.movDetUom = $("movDetUom");
+    els.movDetNote = $("movDetNote");
+    els.movDetDocType = $("movDetDocType");
+    els.movDetDocNum = $("movDetDocNum");
+    els.movDetDocDateRaw = $("movDetDocDateRaw");
+    els.movDetLineIndex = $("movDetLineIndex");
+    els.movDetVat = $("movDetVat");
+    els.movDetTriplet = $("movDetTriplet");
+    els.movDetCreatedAt = $("movDetCreatedAt");
+    els.movDetId = $("movDetId");
+    els.movDetRawText = $("movDetRawText");
+
+    // DDT (DaneaXML) dettaglio ordinato
+    els.movDetRawWrap = $("movDetRawWrap");
+    els.movDetKvGrid = $("movDetKvGrid");
+    els.movDetDdtWrap = $("movDetDdtWrap");
+    els.movDetDdtRowsTbody = $("movDetDdtRowsTbody");
+    els.movDetDdtCompsTbody = $("movDetDdtCompsTbody");
+    els.movDetDdtProdWrap = $("movDetDdtProdWrap");
+    els.movDetDdtProdTitle = $("movDetDdtProdTitle");
+    els.movDetDdtProdTbody = $("movDetDdtProdTbody");
+
   }
 
   function render(){
@@ -411,9 +1373,12 @@
       return;
     }
 
-    var filtered = applyFilters(all);
+    var ui = buildUiRows(all);
+    var totalRows = ui.length;
+
+    var filtered = applyFilters(ui);
     applySort(filtered);
-    renderTable(filtered, total);
+    renderTable(filtered, totalRows);
   }
 
   function refresh(){
@@ -478,9 +1443,18 @@
       <div class="inlineRow" style="justify-content:space-between; align-items:flex-end; gap:12px;">
         <div class="stack" style="flex:1; min-width: 220px;">
           <div class="hero-sub">DDT caricati</div>
-          <div class="muted">Click su un DDT per modificarlo</div>
         </div>
-        <button class="btn btn-secondary" id="btnFlowsExport" type="button">Esporta CSV</button>
+      </div>
+
+      <div class="inlineRow listStickyBar" style="justify-content:space-between; align-items:flex-end; gap:12px; margin-top: 10px;">
+        <div class="field" style="flex: 1 1 auto; min-width: 220px;">
+          <label for="flowsSearch">Cerca</label>
+          <input id="flowsSearch" placeholder="Documento, fornitore, numero, codice, articolo…" autocomplete="off" />
+        </div>
+        <div class="inlineRow" style="gap:8px; justify-content:flex-end; margin-left:auto;">
+          <button class="btn btn-ghost mini" id="btnFlowsClear" type="button" title="Svuota ricerca">Reset</button>
+          <div class="hero-sub" id="flowsMeta">—</div>
+        </div>
       </div>
 
       <div class="tableWrap" style="max-height: 520px; overflow:auto; margin-top: 10px;">
@@ -504,9 +1478,3093 @@
     try{ console.warn("flussi.js inject failed", e); }catch(_){ }
   }
 })();
+;
+/* ===== danea_ddt_download_view.js ===== */
+// Inject "Scarica flussi DDT" view markup into #viewDaneaDdt
+(function(){
+  try{
+    var root = document.getElementById("viewDaneaDdt");
+    if (!root) return;
+    if (root.dataset && root.dataset.injected === "1") return;
+    if (root.dataset) root.dataset.injected = "1";
+
+    root.innerHTML = `<article class="card" id="daneaDdtCard">
+      <div class="hd">
+        <div class="overlayHeaderTitle">
+          <button class="iconBtn overlayBack" id="btnBackDaneaDdt" type="button" aria-label="Indietro">‹</button>
+          <h2>Scarica flussi DDT</h2>
+        </div>
+        <div class="inlineRow" style="gap:8px; justify-content:flex-end;">
+          <div class="seg daneaTabs">
+            <button id="daneaTabVerify" class="active" type="button">Da verificare <span class="pill" id="pillDaneaVerify" style="height:auto; padding:2px 8px; border-radius:999px; border:0; background:rgba(10,132,255,.12); color:rgba(0,0,0,.86);">0</span></button>
+            <button id="daneaTabDone" type="button">Completati <span class="pill" id="pillDaneaDone" style="height:auto; padding:2px 8px; border-radius:999px; border:0; background:rgba(0,0,0,.06); color:rgba(0,0,0,.86);">0</span></button>
+          </div>
+          <div class="daneaAutoCtl" id="daneaAutoCtl" title="Se ON: scarica automaticamente tutti i DDT verdi che arrivano. Se OFF: modalità manuale.">
+            <span class="daneaAutoLbl" id="daneaAutoLbl">MANUALE</span>
+            <label class="iosSwitch" aria-label="Scarico automatico DDT">
+              <input id="daneaAutoSwitch" type="checkbox" />
+              <span class="iosSlider"></span>
+            </label>
+          </div>
+          <div class="pill" id="pillDaneaCount">0</div>
+          <button class="iconBtn" id="btnCloseDaneaDdt" type="button" aria-label="Chiudi">×</button>
+        </div>
+      </div>
+
+      <div class="bd">
+
+        <!-- LIST -->
+        <div id="daneaListWrap" class="stack" style="gap:10px;">
+          <div class="inlineRow listStickyBar" style="justify-content:space-between; align-items:flex-end; gap:12px; margin-top: 10px;">
+            <div class="field" style="flex: 1 1 auto; min-width: 220px;">
+              <label for="daneaSearch">Cerca</label>
+              <input id="daneaSearch" placeholder="Numero, data, cliente…" autocomplete="off" />
+            </div>
+            <div class="inlineRow" style="gap:8px; justify-content:flex-end; margin-left:auto;">
+              <button class="btn btn-ghost mini" id="btnDaneaClear" type="button">Reset</button>
+              <div class="hero-sub" id="daneaMeta">—</div>
+            </div>
+          </div>
+
+          <div class="tableWrap" style="max-height: 520px; overflow:auto; margin-top: 0; width:100%;">
+            <table class="dataGrid">
+              <thead>
+                <tr>
+                  <th style="width: 120px;">Data</th>
+                  <th style="width: 120px;">Numero</th>
+                  <th>Cliente</th>
+                  <th class="qty" style="width: 90px;">Righe</th>
+                  <th class="qty" style="width: 120px;">Stato</th>
+                  <th style="width: 120px;"></th>
+                </tr>
+              </thead>
+              <tbody id="daneaTbody">
+                <tr><td class="td-muted" colspan="6">Carico XML…</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- DETAIL -->
+        <div id="daneaDetailWrap" class="stack" style="gap:10px; display:none;">
+          <div class="inlineRow" style="justify-content:space-between; align-items:flex-end; gap:12px;">
+            <div class="stack" style="flex:1; min-width:240px;">
+              <div class="hero-sub" id="daneaDetTitle">DDT</div>
+              <div class="muted" id="daneaDetSubtitle" style="font-weight:900;">—</div>
+            </div>
+            <div class="inlineRow" style="gap:8px; justify-content:flex-end;">
+              <button class="btn btn-primary" id="btnDaneaSend" type="button" disabled>Completa (scarica)</button>
+            </div>
+          </div>
+
+          <div class="tableWrap" style="max-height: 520px; overflow:auto; width:100%;">
+            <table class="dataGrid">
+              <thead>
+                <tr>
+                  <th style="width: 44px;"></th>
+                  <th style="width: 160px;">Codice</th>
+                  <th>Articolo</th>
+                  <th class="qty" style="width: 120px;">Q.tà</th>
+                  <th style="width: 90px;">U.M.</th>
+                  <th style="width: 170px; text-align:right;">Azioni</th>
+                </tr>
+              </thead>
+              <tbody id="daneaItemsTbody">
+                <tr><td class="td-muted" colspan="6">Apri un DDT.</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="muted" id="daneaDetFooter" style="font-size:12px; font-weight:900;">—</div>
+        </div>
+      </div>
+    </article>`;
+  }catch(e){
+    try{ console.warn("danea view inject failed", e); }catch(_){ }
+  }
+})();
+;
+
+/* ===== revenue_view.js ===== */
+// Inject "Fatturato" view markup into #viewRevenue
+(function(){
+  try{
+    var root = document.getElementById("viewRevenue");
+    if (!root) return;
+    if (root.dataset && root.dataset.injected === "1") return;
+    if (root.dataset) root.dataset.injected = "1";
+
+    root.innerHTML = `<article class="card" id="revenueCard">
+      <div class="hd">
+        <div class="overlayHeaderTitle">
+          <button class="iconBtn overlayBack" id="btnBackRevenue" type="button" aria-label="Indietro">‹</button>
+          <h2>Fatturato</h2>
+        </div>
+        <div class="inlineRow" style="gap:8px; justify-content:flex-end;">
+          <div class="pill" id="pillRevenueCount">0</div>
+          <button class="iconBtn" id="btnCloseRevenue" type="button" aria-label="Chiudi">×</button>
+        </div>
+      </div>
+
+      <div class="bd">
+        <!-- LIST -->
+        <div id="revListWrap" class="stack" style="gap:10px;">
+          <div class="inlineRow listStickyBar" style="justify-content:space-between; align-items:flex-end; gap:12px; margin-top: 10px;">
+            <div class="field" style="flex: 1 1 auto; min-width: 220px;">
+              <label for="revSearch">Cerca</label>
+              <input id="revSearch" placeholder="Numero, cliente, codice…" autocomplete="off" />
+            </div>
+            <div class="inlineRow" style="gap:8px; justify-content:flex-end; margin-left:auto;">
+              <button class="btn btn-ghost mini" id="btnRevClear" type="button">Reset</button>
+              <div class="hero-sub" id="revMeta">—</div>
+            </div>
+          </div>
+
+          <div class="tableWrap" style="max-height: 520px; overflow:auto; margin-top: 0; width:100%;">
+            <table class="dataGrid" id="revTable">
+              <thead>
+                <tr>
+                  <th style="width: 120px;">Data</th>
+                  <th style="width: 120px;">Numero</th>
+                  <th>Cliente</th>
+                  <th class="qty" style="width: 160px; text-align:right;">Imponibile</th>
+                  <th class="qty" style="width: 140px; text-align:right;">IVA</th>
+                  <th class="qty" style="width: 160px; text-align:right;">Totale</th>
+                  <th style="width: 120px;"></th>
+                </tr>
+              </thead>
+              <tbody id="revTbody">
+                <tr><td class="td-muted" colspan="7">Carico…</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- DETAIL -->
+        <div id="revDetailWrap" class="stack" style="gap:10px; display:none;">
+          <div class="inlineRow" style="justify-content:space-between; align-items:flex-end; gap:12px;">
+            <div class="stack" style="flex:1; min-width:240px;">
+              <div class="hero-sub" id="revDetTitle">DDT</div>
+              <div class="muted" id="revDetSubtitle" style="font-weight:900;">—</div>
+            </div>
+            <div class="inlineRow" style="gap:8px; justify-content:flex-end;">
+              <button class="btn btn-ghost btn-xs" id="btnRevBackList" type="button">← Elenco</button>
+            </div>
+          </div>
+
+          <div class="inlineRow" style="gap:10px; justify-content:flex-end;">
+            <div class="pill" id="revDetNet">Imponibile: —</div>
+            <div class="pill" id="revDetVat">IVA: —</div>
+            <div class="pill" id="revDetGross">Totale: —</div>
+          </div>
+
+          <div class="tableWrap" style="max-height: 520px; overflow:auto; width:100%;">
+            <table class="dataGrid" id="revItemsTable">
+              <thead>
+                <tr>
+                  <th style="width: 160px;">Codice</th>
+                  <th>Articolo</th>
+                  <th class="qty" style="width: 110px; text-align:right;">Q.tà</th>
+                  <th class="qty" style="width: 160px; text-align:right;">Imponibile</th>
+                  <th class="qty" style="width: 140px; text-align:right;">IVA</th>
+                  <th class="qty" style="width: 160px; text-align:right;">Totale</th>
+                </tr>
+              </thead>
+              <tbody id="revItemsTbody">
+                <tr><td class="td-muted" colspan="6">Apri un DDT.</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="muted" id="revDetFooter" style="font-size:12px; font-weight:900;">—</div>
+        </div>
+      </div>
+    </article>`;
+  }catch(e){
+    try{ console.warn("revenue view inject failed", e); }catch(_){ }
+  }
+})();
 
 
 ;
+/* ===== fp_categories_view.js ===== */
+// Inject "Categorie prodotti finiti" view markup into #viewFPCategories
+(function(){
+  try{
+    var root = document.getElementById("viewFPCategories");
+    if (!root) return;
+    if (root.dataset && root.dataset.injected === "1") return;
+    if (root.dataset) root.dataset.injected = "1";
+
+    root.innerHTML = `<article class="card" id="fpCategoriesCard">
+      <div class="hd">
+        <div class="overlayHeaderTitle">
+          <button class="iconBtn overlayBack" id="btnBackFPCategories" type="button" aria-label="Indietro">‹</button>
+          <h2>Categorie prodotti finiti</h2>
+        </div>
+        <div class="inlineRow" style="gap:8px; justify-content:flex-end;">
+          <div class="pill" id="pillFPCategoriesCount">0</div>
+          <button class="iconBtn" id="btnCloseFPCategories" type="button" aria-label="Chiudi">×</button>
+        </div>
+      </div>
+      <div class="bd">
+
+        <div class="inlineRow listStickyBar" style="justify-content:space-between; align-items:flex-end; gap:12px;">
+          <div class="field" style="flex: 1 1 auto; min-width: 220px;">
+            <label for="fpCatSearch">Cerca</label>
+            <input id="fpCatSearch" placeholder="Nome categoria o prodotto finito…" autocomplete="off" />
+          </div>
+          <button class="btn btn-secondary" id="btnFpCatNew" type="button">Nuova categoria</button>
+        </div>
+
+        <div id="fpCatCreateRow" class="fieldGrid" style="display:none; grid-template-columns: 1fr; gap:10px; margin-top: 6px;">
+          <div class="field" style="grid-column: 1 / -1;">
+            <label>Nuova categoria prodotti finiti</label>
+            <div class="inlineRow" style="justify-content:flex-start; gap:10px;">
+              <input id="fpCatNewName" class="qtyEditInput" type="text" placeholder="Nome categoria (es. Sacchetti 1 kg)" style="flex:1 1 260px; min-width: 220px;" />
+              <button class="btn btn-primary btn-xs" id="btnFpCatCreate" type="button">Crea</button>
+              <button class="btn btn-ghost btn-xs" id="btnFpCatCancelCreate" type="button">Annulla</button>
+            </div>
+            <div class="td-muted" style="margin-top:6px;">Definisci una distinta base per categoria e assegna i prodotti finiti: saranno configurati subito dappertutto.</div>
+          </div>
+        </div>
+
+        <div class="tableWrap" style="max-height: 520px; overflow:auto; margin-top: 10px;">
+          <table class="dataGrid" id="fpCatTable">
+            <thead>
+              <tr>
+                <th>Categoria</th>
+                <th class="qty" style="width: 110px;">Prodotti</th>
+                <th class="qty" style="width: 110px;">BOM</th>
+                <th style="width: 160px; text-align:right;">Azioni</th>
+              </tr>
+            </thead>
+            <tbody id="fpCatTbody">
+              <tr><td class="td-muted" colspan="4">Carico categorie…</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+      </div>
+    </article>`;
+  }catch(e){
+    try{ console.warn("fp_categories_view inject failed", e); }catch(_){ }
+  }
+})();
+
+/* ===== danea_ddt_download.js ===== */
+/* Scarica flussi DDT (Easyfatt-Xml/Danea) + verifica distinta base + scarico automatico componenti */
+(function(){
+  "use strict";
+
+  const LS_URL = "hubinv_danea_xml_url";
+  const LS_AUTO_DISCH = "hubinv_danea_auto_discharge"; // 1=on, 0=off (scarico su 'Completa')
+  const LS_AUTO_MODE = "hubinv_danea_auto_mode"; // 1=auto, 0=manual (scarica automaticamente i DDT verdi)
+  // Default endpoint (Cloud Run proxy). If you deploy a new service, update this.
+  const DEFAULT_XML_URL_BASE = "https://danea-xml-proxy-537555699968.europe-west8.run.app";
+
+  const S = {
+    xmlUrl: "",
+    autoDischarge: true,
+    autoMode: false,
+    autoModeTimer: null,
+    autoModeLastRun: 0,
+    lastXmlHash: "",
+    lastFetchedAt: "",
+    ddts: [],             // from XML (solo per sync, NON per UI)
+    lastParsedCount: 0,
+    lastSyncError: "",
+    tab: "verify",        // verify | done
+    selectedKey: "",
+    selected: null,
+    completed: [],        // from Firestore (scaricati)
+    completedMap: new Map(),
+    cache: [],            // from Firestore (DDT persistenti)
+    cacheMap: new Map(),
+    cacheReady: false,
+    finished: [],         // finishedProducts snapshot
+    fpByCode: new Map(),  // codeLower -> fp
+    fpCats: [],
+    fpCatByKey: new Map(),
+    timer: null,
+    busy: false,
+    hub: null,
+    pendingParsed: null,  // buffer RAM (solo finché Firestore non è pronto)
+    unsub: { completed:null, finished:null, cache:null, fpcats:null }
+  };
+
+  function $(id){ return document.getElementById(id); }
+
+  function esc(s){
+    return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
+  }
+  function escAttr(s){ return esc(s).replace(/\n/g, " "); }
+
+  function norm(s){ return String(s ?? "").trim().toLowerCase(); }
+
+  function __readAutoFromLS(){
+    try{
+      const v = String(localStorage.getItem(LS_AUTO_DISCH) || "").trim().toLowerCase();
+      if (!v) return true; // default ON
+      if (v === "0" || v === "false" || v === "off" || v === "no") return false;
+      return true;
+    }catch(_){ return true; }
+  }
+
+  function __writeAutoToLS(on){
+    try{ localStorage.setItem(LS_AUTO_DISCH, on ? "1" : "0"); }catch(_){ }
+  }
+
+  // ===== AUTO MODE (switch) — scarica automaticamente i DDT verdi che arrivano =====
+  function __readAutoModeFromLS(){
+    try{
+      const v = String(localStorage.getItem(LS_AUTO_MODE) || "").trim().toLowerCase();
+      if (!v) return false; // default: MANUALE
+      if (v === "1" || v === "true" || v === "on" || v === "yes") return true;
+      return false;
+    }catch(_){ return false; }
+  }
+
+  function __writeAutoModeToLS(on){
+    try{ localStorage.setItem(LS_AUTO_MODE, on ? "1" : "0"); }catch(_){ }
+  }
+
+  function __ensureAutoModeCss(){
+    try{
+      if (document.getElementById("daneaAutoModeCss")) return;
+      const st = document.createElement("style");
+      st.id = "daneaAutoModeCss";
+      st.textContent = `
+/* Danea — Auto mode switch (iOS-ish) */
+.daneaAutoCtl{ display:inline-flex; align-items:center; gap:8px; height:36px; padding:0 10px; border-radius:999px; border:1px solid rgba(0,0,0,.12); background:rgba(0,0,0,.02); user-select:none; }
+.daneaAutoCtl.is-on{ border-color: rgba(37,185,79,.35); background: rgba(37,185,79,.12); }
+.daneaAutoCtl.is-running{ border-color: rgba(10,132,255,.28); background: rgba(10,132,255,.10); }
+.daneaAutoLbl{ font-size:12px; font-weight:950; letter-spacing:.02em; color: rgba(0,0,0,.86); white-space:nowrap; }
+.iosSwitch{ position:relative; width:44px; height:24px; display:inline-block; flex:0 0 auto; }
+.iosSwitch input{ position:absolute; opacity:0; width:0; height:0; }
+.iosSwitch .iosSlider{ position:absolute; inset:0; border-radius:999px; background: rgba(0,0,0,.22); transition: background .18s ease; }
+.iosSwitch .iosSlider::before{ content:""; position:absolute; width:20px; height:20px; left:2px; top:2px; border-radius:50%; background:#fff; box-shadow:0 2px 8px rgba(0,0,0,.18); transition: transform .18s ease; }
+.iosSwitch input:checked + .iosSlider{ background: rgba(37,185,79,.72); }
+.iosSwitch input:checked + .iosSlider::before{ transform: translateX(20px); }
+`;
+      document.head.appendChild(st);
+    }catch(_){ }
+  }
+
+  function __syncAutoModeUi(tmpLabel){
+    const ctl = $("daneaAutoCtl");
+    const lbl = $("daneaAutoLbl");
+    const sw  = $("daneaAutoSwitch");
+    const on = !!S.autoMode;
+
+    try{ __ensureAutoModeCss(); }catch(_){ }
+
+    if (sw){
+      try{ sw.checked = on; }catch(_){ }
+    }
+    if (ctl){
+      try{ ctl.classList.toggle("is-on", on); }catch(_){ }
+      try{ ctl.classList.toggle("is-off", !on); }catch(_){ }
+    }
+    if (lbl){
+      try{ lbl.textContent = tmpLabel ? String(tmpLabel) : (on ? "AUTO" : "MANUALE"); }catch(_){ }
+    }
+  }
+
+  function __autoModeSetRunning(running){
+    const ctl = $("daneaAutoCtl");
+    if (!ctl) return;
+    try{ ctl.classList.toggle("is-running", !!running); }catch(_){ }
+  }
+
+  function setAutoMode(on){
+    S.autoMode = !!on;
+    __writeAutoModeToLS(S.autoMode);
+    __syncAutoModeUi();
+    try{ window.HubInv?.renderHomeDaneaCockpit?.(); }catch(_){ }
+
+    // stop timers
+    try{ if (!S.autoMode && S.autoModeTimer) { clearTimeout(S.autoModeTimer); S.autoModeTimer = null; } }catch(_){ }
+
+    // se accendo: prova subito a scaricare i verdi (best-effort)
+    if (S.autoMode){
+      try{ maybeAutoModeTick("toggleOn"); }catch(_){ }
+    }
+  }
+
+  function scheduleAutoModeTick(delayMs){
+    if (!S.autoMode) return;
+    let d = Number(delayMs);
+    if (!Number.isFinite(d) || d < 0) d = 900;
+    d = Math.max(250, Math.min(60000, d));
+    try{ if (S.autoModeTimer) clearTimeout(S.autoModeTimer); }catch(_){ }
+    S.autoModeTimer = setTimeout(() => {
+      S.autoModeTimer = null;
+      autoModeTick().catch(()=>{});
+    }, d);
+  }
+
+  function maybeAutoModeTick(reason){
+    if (!S.autoMode) return;
+    // piccolo debounce (evita loop troppo aggressivi)
+    const now = Date.now();
+    if (now - (S.autoModeLastRun || 0) < 500) {
+      scheduleAutoModeTick(1200);
+      return;
+    }
+    scheduleAutoModeTick(700);
+  }
+
+  async function autoModeTick(){
+    if (!S.autoMode) { __syncAutoModeUi(); return; }
+    if (S.busy) { scheduleAutoModeTick(1500); return; }
+    if (!S.cacheReady) { scheduleAutoModeTick(1500); return; }
+
+    // serve la configurazione prodotti finiti per sapere se un DDT è verde
+    try{
+      if (!(S.fpByCode instanceof Map) || S.fpByCode.size === 0){
+        scheduleAutoModeTick(2000);
+        return;
+      }
+    }catch(_){ scheduleAutoModeTick(2000); return; }
+
+    cacheCompletedMap();
+
+    const baseVerify = (S.cache || []);
+    const verifyList = baseVerify.filter(d => d && d.key && !S.completedMap.has(d.key));
+    const green = verifyList.filter(d => { try{ return !!ddtStatus(d).ok; }catch(_){ return false; } });
+
+    if (!green.length){
+      __syncAutoModeUi();
+      return;
+    }
+
+    // run
+    S.autoModeLastRun = Date.now();
+    __autoModeSetRunning(true);
+    __syncAutoModeUi(`AUTO ${green.length}`);
+
+    try{
+      await dischargeAllGreenDdts({ silent: true, fromAuto: true });
+    }catch(e){
+      try{ console.warn("autoModeTick discharge failed", e); }catch(_){ }
+      try{ window.HubInv?.showToast?.("Auto-scarico DDT: errore", "err"); }catch(_){ }
+    }finally{
+      __autoModeSetRunning(false);
+      __syncAutoModeUi();
+      if (S.autoMode) scheduleAutoModeTick(2500);
+    }
+  }
+
+  function __initAutoMode(){
+    try{ __ensureAutoModeCss(); }catch(_){ }
+    try{ S.autoMode = __readAutoModeFromLS(); }catch(_){ S.autoMode = false; }
+    __syncAutoModeUi();
+    if (S.autoMode){
+      try{ maybeAutoModeTick("init"); }catch(_){ }
+    }
+  }
+
+  function __bindAutoModeSwitch(){
+    const sw = $("daneaAutoSwitch");
+    if (!sw) return;
+    if (sw.dataset && sw.dataset.bound === "1") return;
+    try{ if (sw.dataset) sw.dataset.bound = "1"; }catch(_){ }
+
+    try{ sw.addEventListener("change", () => { try{ setAutoMode(!!sw.checked); }catch(_){ } }); }catch(_){ }
+
+    // click sul testo = toggle (più comodo)
+    try{
+      const lbl = $("daneaAutoLbl");
+      if (lbl && !(lbl.dataset && lbl.dataset.bound === "1")){
+        if (lbl.dataset) lbl.dataset.bound = "1";
+        lbl.style.cursor = "pointer";
+        lbl.addEventListener("click", () => {
+          try{ sw.checked = !sw.checked; }catch(_){ }
+          try{ setAutoMode(!!sw.checked); }catch(_){ }
+        });
+      }
+    }catch(_){ }
+
+    // init state
+    __initAutoMode();
+  }
+
+  function __autoModeKick(reason){
+    if (!S.autoMode) return;
+    try{ maybeAutoModeTick(reason || "kick"); }catch(_){ }
+  }
+
+  function __syncAutoToggleUi(){
+    const btn = $("btnDaneaAutoToggle");
+    const on = !!S.autoDischarge;
+
+    if (btn){
+      try{ btn.setAttribute("aria-pressed", on ? "true" : "false"); }catch(_){ }
+      try{ btn.textContent = on ? "Scarica DDT verdi" : "Scarica DDT verdi (scarico OFF)"; }catch(_){ }
+      try{
+        // Colori: verde = ON, grigio = OFF (override anche se in overlay i bottoni sono blu)
+        if (on){
+          btn.style.setProperty("background", "rgba(37,185,79,.14)", "important");
+          btn.style.setProperty("border-color", "rgba(37,185,79,.35)", "important");
+          btn.style.setProperty("color", "rgba(0,70,20,.92)", "important");
+        } else {
+          btn.style.setProperty("background", "rgba(0,0,0,.06)", "important");
+          btn.style.setProperty("border-color", "rgba(0,0,0,.12)", "important");
+          btn.style.setProperty("color", "rgba(0,0,0,.84)", "important");
+        }
+      }catch(_){ }
+    }
+
+    const btnSend = $("btnDaneaSend");
+    if (btnSend){
+      try{ btnSend.textContent = on ? "Completa (scarica)" : "Completa (senza scarico)"; }catch(_){ }
+    }
+  }
+
+  function setAutoDischarge(on){
+    S.autoDischarge = !!on;
+    __writeAutoToLS(S.autoDischarge);
+    __syncAutoToggleUi();
+    // se dettaglio aperto, aggiorna footer + stato bottone
+    try{
+      const wrap = $("daneaDetailWrap");
+      if (S.selected && wrap && wrap.style.display !== "none"){
+        renderDetail(S.selected, S.tab === "done" ? "done" : "verify");
+      }
+    }catch(_){ }
+  }
+
+  function hashStr(str){
+    // fast non-crypto hash (deterministico)
+    const s = String(str || "");
+    let h = 2166136261;
+    for (let i=0;i<s.length;i++){
+      h ^= s.charCodeAt(i);
+      h = Math.imul(h, 16777619);
+    }
+    return String((h>>>0));
+  }
+
+  function getHub(){
+    try{ return globalThis.__HUB || null; }catch(_){ return null; }
+  }
+
+  function getText(el, sel){
+    try{
+      const n = el.querySelector(sel);
+      return n ? String(n.textContent || "").trim() : "";
+    }catch(_){ return ""; }
+  }
+
+  function parseEasyfattXml(xmlText){
+    const text = String(xmlText || "").trim();
+    if (!text) return [];
+
+    // Parse numeri: supporta sia formato IT (1.234,56) che formato Easyfatt (1234.56)
+    function __numIT(v){
+      let s = String(v ?? "").trim();
+      if (!s) return null;
+      s = s.replace(/\s+/g, "");
+      s = s.replace(/[^0-9,\.-]/g, "");
+      if (!s) return null;
+      if (s.includes(",") && s.includes(".")) {
+        // assume "." migliaia e "," decimali
+        s = s.replace(/\./g, "").replace(",", ".");
+      } else if (s.includes(",")) {
+        // assume "," decimale
+        s = s.replace(",", ".");
+      }
+      const n = Number(s);
+      return Number.isFinite(n) ? n : null;
+    }
+
+    function __numFrom(node, tags){
+      const list = Array.isArray(tags) ? tags : [];
+      for (let i=0; i<list.length; i++){
+        const t = String(list[i] || "").trim();
+        if (!t) continue;
+        const raw = getText(node, t);
+        const n = __numIT(raw);
+        if (n != null && Number.isFinite(n)) return n;
+      }
+      return null;
+    }
+
+    function __vatPercFromVatCode(rowNode){
+      try{
+        const el = rowNode ? rowNode.querySelector("VatCode") : null;
+        if (!el) return null;
+        // Easyfatt: <VatCode Perc="22" ...>22</VatCode>
+        let raw = String(el.getAttribute("Perc") || el.getAttribute("perc") || "").trim();
+        let n = __numIT(raw);
+        if (n != null && Number.isFinite(n)) return n;
+        raw = String(el.textContent || "").trim();
+        n = __numIT(raw);
+        if (n != null && Number.isFinite(n)) return n;
+      }catch(_){ }
+      return null;
+    }
+
+    function __discountMul(raw){
+      const s = String(raw || "").trim();
+      if (!s) return 1;
+      let mul = 1;
+      const re = /(-?\d+(?:[\.,]\d+)?)\s*%/g;
+      let m;
+      while ((m = re.exec(s))){
+        const p = __numIT(m[1]);
+        if (p == null || !Number.isFinite(p)) continue;
+        mul *= (1 - (p/100));
+      }
+      if (!Number.isFinite(mul)) return 1;
+      return mul;
+    }
+
+    function __round4(v){
+      const n = Number(v);
+      if (!Number.isFinite(n)) return null;
+      return Math.round(n * 10000) / 10000;
+    }
+
+    const dom = new DOMParser().parseFromString(text, "text/xml");
+    const perr = dom.querySelector("parsererror");
+    if (perr) throw new Error("XML non valido (parsererror)");
+
+    // Supporta: <EasyfattDocuments><Documents><Document>...
+    const docs = Array.from(dom.querySelectorAll("EasyfattDocuments > Documents > Document, Documents > Document"));
+    const out = [];
+
+    for (const d of docs){
+      const type = getText(d, "DocumentType");
+      // D = DDT (Documento di trasporto)
+      if (type && String(type).trim().toUpperCase() !== "D") continue;
+
+      const date = getText(d, "Date");     // YYYY-MM-DD
+      const number = getText(d, "Number"); // numerico
+      const customer = getText(d, "CustomerName") || getText(d, "Customer") || getText(d, "DeliveryName") || "";
+
+      if (!date || !number) continue;
+      const key = `${String(number).trim()}__${String(date).trim()}`;
+
+      const rows = Array.from(d.querySelectorAll("Rows > Row")).map((r, idx) => {
+        const code = getText(r, "Code");
+        const desc = getText(r, "Description");
+        const qtyRaw = getText(r, "Qty");
+        const umRaw = getText(r, "Um") || getText(r, "UM") || getText(r, "Uom") || getText(r, "Unit") || "";
+
+        const discountsRaw = getText(r, "Discounts") || getText(r, "Discount") || "";
+        const discMul = __discountMul(discountsRaw);
+
+        // Importi (best-effort): unitari
+        let unitNet = __numFrom(r, [
+          "UnitNetPrice","UnitPriceNet","NetUnitPrice",
+          "UnitPrice","Price","NetPrice","PriceNet","PriceNoVat"
+        ]);
+        let unitGross = __numFrom(r, [
+          "UnitPriceWithVat","UnitGrossPrice","GrossUnitPrice","PriceWithVat"
+        ]);
+
+        // IVA: percentuale (supporto Easyfatt <VatCode Perc="...")
+        let vatPerc = __numFrom(r, [
+          "VatPerc","VatPercent","VatRate","VatPercentage",
+          "IvaPerc","IvaPercent","IvaRate","TaxPercent"
+        ]);
+        if (vatPerc == null) vatPerc = __vatPercFromVatCode(r);
+
+        // Totali riga (se presenti)
+        let net = __numFrom(r, [
+          "TotalNet","TotalNoVat","NetAmount","TaxableAmount","Taxable",
+          "RowNet","Net","LineNet","AmountNet",
+          "TotalWithoutTax","TotalWithoutVat"
+        ]);
+        let vat = __numFrom(r, [
+          "VatAmount","VATAmount","IvaAmount",
+          "TaxAmount","TotalVat","VatTotal"
+        ]);
+        let gross = __numFrom(r, [
+          "TotalWithVat","TotalGross","GrossAmount","RowTotalWithVat",
+          "Gross","AmountWithVat","TotalAmount"
+        ]);
+
+        let qty = null;
+        if (qtyRaw){
+          const n = __numIT(qtyRaw);
+          if (n != null && Number.isFinite(n)) qty = n;
+        }
+
+        // Derivazioni (best-effort)
+        const qLine = (qty != null && Number.isFinite(Number(qty))) ? Number(qty) : null;
+
+        const netFromXml = (net != null);
+        const grossFromXml = (gross != null);
+
+        // Sconti: in Easyfatt spesso hai Price + Discounts (senza Totals)
+        if (!netFromXml && unitNet != null && discMul !== 1) unitNet = unitNet * discMul;
+        if (!grossFromXml && unitGross != null && discMul !== 1) unitGross = unitGross * discMul;
+
+        if (net == null && unitNet != null && qLine != null) net = unitNet * qLine;
+        if (gross == null && unitGross != null && qLine != null) gross = unitGross * qLine;
+
+        if (vat == null && net != null && vatPerc != null) vat = net * (vatPerc / 100);
+        if (gross == null && net != null && vat != null) gross = net + vat;
+
+        if (net == null && gross != null && vat != null) net = gross - vat;
+        if (vat == null && gross != null && net != null) vat = gross - net;
+
+        if (vatPerc == null && net != null && vat != null && net !== 0) vatPerc = (vat / net) * 100;
+
+        // fallback: gross + vatPerc
+        if (net == null && gross != null && vatPerc != null && (1 + (vatPerc/100)) !== 0){
+          net = gross / (1 + (vatPerc/100));
+          if (vat == null && net != null) vat = gross - net;
+        }
+        if (gross == null && net != null && vatPerc != null) gross = net * (1 + (vatPerc/100));
+
+        return {
+          idx,
+          code: String(code || "").trim(),
+          desc: String(desc || "").trim(),
+          qtyRaw: String(qtyRaw || "").trim(),
+          qty: (qty == null) ? null : qty,
+          uom: String(umRaw || "").trim(),
+
+          // fatturato (best-effort)
+          unitNet: (unitNet == null) ? null : __round4(unitNet),
+          unitGross: (unitGross == null) ? null : __round4(unitGross),
+          vatPerc: (vatPerc == null) ? null : __round4(vatPerc),
+          net: (net == null) ? null : __round4(net),
+          vat: (vat == null) ? null : __round4(vat),
+          gross: (gross == null) ? null : __round4(gross)
+        };
+      }).filter(r => {
+        if (!r.code) return false; // importa solo righe con codice articolo
+        if (r.qty != null && r.qty === 0) return false;
+        const m = `${r.code || ""} ${r.desc || ""}`.toLowerCase().replace(/\s+/g, " ").trim();
+        if (m.includes("rif. conferma ordine") || m.includes("rif conferma ordine")) return false;
+        return true;
+      });
+
+      // Totali da righe
+      const tot = rows.reduce((acc, r) => {
+        const n = (r && r.net != null) ? Number(r.net) : 0;
+        const v = (r && r.vat != null) ? Number(r.vat) : 0;
+        const g = (r && r.gross != null) ? Number(r.gross) : (n + v);
+        acc.net += (Number.isFinite(n) ? n : 0);
+        acc.vat += (Number.isFinite(v) ? v : 0);
+        acc.gross += (Number.isFinite(g) ? g : 0);
+        return acc;
+      }, { net: 0, vat: 0, gross: 0 });
+
+      // Totali testata (Easyfatt)
+      const headNet = __numFrom(d, [
+        "TotalWithoutTax","TotalWithoutVat","TotalNet","TotalNoVat","TotalTaxable","TaxableAmount"
+      ]);
+      const headVat = __numFrom(d, [
+        "VatAmount","TotalVat","VatTotal","TotalVatAmount","VATAmount","IvaAmount"
+      ]);
+      const headGross = __numFrom(d, [
+        "TotalWithVat","TotalAmount","TotalGross","GrossTotal","GrandTotal","Total"
+      ]);
+
+      let netTotal = (headNet != null) ? headNet : tot.net;
+      let vatTotal = (headVat != null) ? headVat : null;
+      let grossTotal = (headGross != null) ? headGross : null;
+
+      if (grossTotal == null){
+        if (netTotal != null && vatTotal != null) grossTotal = netTotal + vatTotal;
+        else grossTotal = tot.gross;
+      }
+      if (vatTotal == null){
+        if (grossTotal != null && netTotal != null) vatTotal = grossTotal - netTotal;
+        else vatTotal = tot.vat;
+      }
+      if (netTotal == null){
+        if (grossTotal != null && vatTotal != null) netTotal = grossTotal - vatTotal;
+        else netTotal = tot.net;
+      }
+
+      netTotal = __round4(netTotal);
+      if (netTotal == null) netTotal = 0;
+      vatTotal = __round4(vatTotal);
+      if (vatTotal == null) vatTotal = 0;
+      grossTotal = __round4(grossTotal);
+      if (grossTotal == null) grossTotal = __round4(netTotal + vatTotal) || 0;
+
+      // anti rumore floating
+      if (vatTotal < 0 && vatTotal > -0.02) vatTotal = 0;
+      if (netTotal < 0 && netTotal > -0.02) netTotal = 0;
+      if (grossTotal < 0 && grossTotal > -0.02) grossTotal = 0;
+
+      const hash = hashStr(JSON.stringify(rows.map(x => [
+        x.code, x.desc, x.qty, x.uom,
+        x.unitNet, x.unitGross, x.vatPerc,
+        x.net, x.vat, x.gross
+      ])));
+
+      out.push({
+        key,
+        date: String(date).trim(),
+        number: String(number).trim(),
+        customer: String(customer || "").trim(),
+        rows,
+        netTotal: Number(netTotal || 0),
+        vatTotal: Number(vatTotal || 0),
+        grossTotal: Number(grossTotal || 0),
+        currency: "EUR",
+        hash
+      });
+    }
+
+    // latest first
+    out.sort((a,b) => String(b.date || "").localeCompare(String(a.date || "")) || String(b.number||"").localeCompare(String(a.number||"")));
+    return out;
+  }
+
+  function normalizeWarehouse(v){
+    const s = norm(v);
+    if (s.includes("conca")) return "concamarise";
+    return "cerea";
+  }
+
+  function normalizeDaneaXmlUrl(u){
+    u = String(u || "").trim();
+    if (!u) return "";
+    try{
+      // add scheme if user pasted only hostname
+      if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(u) && /^[\w.-]+\.[\w.-]+(\/.*)?$/.test(u)){
+        u = "https://" + u;
+      }
+      const url = new URL(u);
+      const path = String(url.pathname || "/").trim();
+      const looksXml = /\.xml$/i.test(path);
+      const isRoot = (path === "" || path === "/");
+      if (isRoot && !looksXml){
+        url.pathname = "/danea/latest.xml";
+      }
+      return url.toString();
+    }catch(_){
+      return String(u || "").trim();
+    }
+  }
+
+  function fmtDateIT(iso){
+    try{
+      const d = new Date(String(iso || ""));
+      if (Number.isNaN(d.getTime())) return String(iso || "—");
+      return d.toLocaleDateString("it-IT");
+    }catch(_){ return String(iso || "—"); }
+  }
+
+  function getFpForRow(row){
+    const code = norm(row && row.code);
+    if (!code) return null;
+    return S.fpByCode.get(code) || null;
+  }
+
+  function getFpCategoryForFp(fp){
+    if (!fp) return null;
+    const k = norm(fp.categoryKey || fp.category || fp.catKey || fp.categoryId || "");
+    if (!k) return null;
+    return (S.fpCatByKey instanceof Map) ? (S.fpCatByKey.get(k) || null) : null;
+  }
+
+  function getFpComponents(fp){
+    if (!fp) return [];
+    const arr = (fp.components || fp.bom || fp.distintaBase);
+    const direct = Array.isArray(arr) ? arr : [];
+    if (direct.length > 0) return direct;
+
+    const cat = getFpCategoryForFp(fp);
+    const bom = (cat && (cat.bom || cat.components || cat.distintaBase)) || [];
+    return Array.isArray(bom) ? bom : [];
+  }
+
+  function isRowConfigured(row){
+    const fp = getFpForRow(row);
+    if (!fp) return { ok: false, why: "missing", fp: null };
+    const comps = getFpComponents(fp);
+    if (comps.length > 0) return { ok: true, why: "ok", fp };
+    return { ok: false, why: "empty", fp };
+  }
+
+  function ddtStatus(ddt){
+    const rows = Array.isArray(ddt?.rows) ? ddt.rows : [];
+    if (!rows.length) return { ok: false, green: 0, total: 0 };
+    let green = 0;
+    for (const r of rows){
+      if (isRowConfigured(r).ok) green++;
+    }
+    return { ok: green === rows.length, green, total: rows.length };
+  }
+
+  function cacheCompletedMap(){
+    S.completedMap = new Map();
+    for (const c of (S.completed || [])){
+      const k = String(c && c.key || c && c._id || "").trim();
+      if (k) S.completedMap.set(k, c);
+    }
+  }
+
+  function setTab(tab){
+    S.tab = (tab === "done") ? "done" : "verify";
+    try{ setDetailOpen(false); }catch(_){}
+    try{ S.selected=null; S.selectedKey=""; }catch(_){}
+    try{
+      $("daneaTabVerify")?.classList.toggle("active", S.tab === "verify");
+      $("daneaTabDone")?.classList.toggle("active", S.tab === "done");
+    }catch(_){}
+    render();
+  }
+
+  function setDetailOpen(open){
+    const list = $("daneaListWrap");
+    const det = $("daneaDetailWrap");
+    if (!list || !det) return;
+    list.style.display = open ? "none" : "";
+    det.style.display = open ? "" : "none";
+
+    try{ window.__syncDockedControlsVisibility && window.__syncDockedControlsVisibility(); }catch(_){}
+  }
+
+  function backToList(){
+    try{ setDetailOpen(false); }catch(_){}
+    try{ S.selected=null; S.selectedKey=""; }catch(_){}
+    try{ render(); }catch(_){}
+  }
+
+  function render(){
+    const view = $("viewDaneaDdt");
+    const isActive = !!(view && view.classList.contains("active"));
+
+    try{ __syncAutoToggleUi(); }catch(_){ }
+    try{ __syncAutoModeUi(); }catch(_){ }
+
+    const pillCount = $("pillDaneaCount");
+    const pillV = $("pillDaneaVerify");
+    const pillD = $("pillDaneaDone");
+    const lastMeta = $("daneaLastMeta");
+    const meta = $("daneaMeta");
+    const tbody = $("daneaTbody");
+
+    const search = norm($("daneaSearch")?.value);
+
+    cacheCompletedMap();
+
+    const baseVerify = (S.cacheReady ? (S.cache || []) : []);
+    const verifyList = baseVerify.filter(d => !S.completedMap.has(d.key));
+    const doneList = (S.completed || []).slice();
+
+    try{
+      pillV && (pillV.textContent = String(verifyList.length));
+      pillD && (pillD.textContent = String(doneList.length));
+      pillCount && (pillCount.textContent = String(S.tab === "done" ? doneList.length : verifyList.length));
+    }catch(_){}
+
+    if (lastMeta){
+      if (S.lastFetchedAt) {
+        const d = new Date(S.lastFetchedAt);
+        lastMeta.textContent = "Ultimo XML: " + (Number.isNaN(d.getTime()) ? S.lastFetchedAt : d.toLocaleString("it-IT"));
+      } else {
+        lastMeta.textContent = "Ultimo XML: —";
+      }
+    }
+
+    // se la vista non è aperta, aggiorna solo pill e stop (evita lavoro)
+    if (!isActive) return;
+
+    // LIST rendering
+    if (!tbody) return;
+
+    if (S.tab === "done"){
+      const filtered = doneList.filter(x => {
+        const num = norm(x?.number || x?.docNum || x?.num);
+        const date = norm(x?.date || x?.docDate || "");
+        const cust = norm(x?.customer || x?.customerName || x?.client || "");
+        const k = norm(x?.key || x?._id || "");
+        if (!search) return true;
+        return (num && num.includes(search)) || (date && date.includes(search)) || (cust && cust.includes(search)) || (k && k.includes(search));
+      });
+
+      if (meta) meta.textContent = `${filtered.length} DDT completati`;
+
+      tbody.innerHTML = filtered.length ? filtered.map(c => {
+        const k = String(c.key || c._id || "");
+        const date = String(c.date || "");
+        const number = String(c.number || "");
+        const cust = String(c.customer || "");
+        const rows = Array.isArray(c.rows) ? c.rows : [];
+        const n = rows.length;
+
+        return `<tr class=\"jsDaneaRow daneaRowOk\" data-key=\"${escAttr(k)}\" data-mode=\"done\" title="Apri">
+          <td data-label="Data">${esc(fmtDateIT(date) || "—")}</td>
+          <td data-label="Numero"><span class="kbd">${esc(number || "—")}</span></td>
+          <td data-label="Cliente">${esc(cust || "—")}</td>
+          <td data-label="Righe" class="qty">${Number(n||0).toLocaleString("it-IT")}</td>
+          <td data-label="Stato" class="qty"><span class="dot ok"></span>OK</td>
+          <td data-label="" style="text-align:right;">
+            <button class="btn btn-ghost btn-xs jsDaneaOpen" data-key="${escAttr(k)}" data-mode="done" type="button">Apri</button>
+            <button class="btn btn-danger btn-xs jsDaneaDeleteDone" data-key="${escAttr(k)}" type="button">Elimina</button>
+          </td>
+        </tr>`;
+      }).join("") : `<tr><td class="td-muted" colspan="6">${search ? "Nessun completato trovato." : "Nessun DDT completato."}</td></tr>`;
+      return;
+    }
+
+    // verify tab
+    const filtered = verifyList.filter(d => {
+      const num = norm(d.number);
+      const date = norm(d.date);
+      const cust = norm(d.customer);
+      if (!search) return true;
+      return (num && num.includes(search)) || (date && date.includes(search)) || (cust && cust.includes(search));
+    });
+
+    if (meta) meta.textContent = `${filtered.length} DDT da verificare`;
+
+    tbody.innerHTML = filtered.length ? filtered.map(d => {
+      const st = ddtStatus(d);
+      const okDot = st.ok ? '<span class="dot ok"></span>' : '<span class="dot bad"></span>';
+      const stTxt = `${st.green}/${st.total}`;
+      const btnDisabled = st.ok ? "" : "disabled";
+      return `<tr class=\"jsDaneaRow ${st.ok ? 'daneaRowOk' : 'daneaRowBad'}\" data-key=\"${escAttr(d.key)}\" data-mode=\"verify\" title="Apri">
+        <td data-label="Data">${esc(fmtDateIT(d.date) || "—")}</td>
+        <td data-label="Numero"><span class="kbd">${esc(d.number || "—")}</span></td>
+        <td data-label="Cliente">${esc(d.customer || "—")}</td>
+        <td data-label="Righe" class="qty">${Number((d.rows||[]).length||0).toLocaleString("it-IT")}</td>
+        <td data-label="Stato" class="qty">${okDot} ${esc(stTxt)}</td>
+        <td data-label="" style="text-align:right;">
+          <button class="btn btn-secondary btn-xs jsDaneaOpen" data-key="${escAttr(d.key)}" data-mode="verify" type="button">Apri</button>
+          <button class="btn btn-primary btn-xs jsDaneaSendFromList" data-key="${escAttr(d.key)}" type="button" ${btnDisabled}>Completa</button>
+        </td>
+      </tr>`;
+    }).join("") : `<tr><td class="td-muted" colspan="6">${(!S.cacheReady) ? "Caricamento DDT da Firebase…" : (search ? "Nessun DDT trovato." : ((S.lastParsedCount > 0 && S.lastSyncError) ? ("Trovati " + Number(S.lastParsedCount||0).toLocaleString("it-IT") + " DDT nell’XML ma non salvati su Firebase (rules).") : "Nessun DDT su Firebase."))}</td></tr>`;
+  }
+
+  function renderDetail(ddt, mode){
+    const title = $("daneaDetTitle");
+    const sub = $("daneaDetSubtitle");
+    const tbody = $("daneaItemsTbody");
+    const btnSend = $("btnDaneaSend");
+    const foot = $("daneaDetFooter");
+
+    if (!ddt || !tbody) return;
+
+    const isDone = (mode === "done");
+    const rows = Array.isArray(ddt.rows) ? ddt.rows : [];
+
+    // title + subtitle
+    if (title) title.textContent = isDone ? "DDT (completato)" : "DDT (da verificare)";
+    if (sub) sub.textContent = `Numero ${ddt.number || "—"} • ${fmtDateIT(ddt.date || "")} • ${ddt.customer || "—"}`;
+
+    // send button
+    if (btnSend){
+      btnSend.style.display = isDone ? "none" : "";
+      const st = ddtStatus(ddt);
+      btnSend.disabled = !st.ok;
+      btnSend.textContent = (S.autoDischarge ? "Completa (scarica)" : "Completa (senza scarico)");
+    }
+    tbody.innerHTML = rows.length ? rows.map(r => {
+      const code = String(r.code || "").trim();
+      const desc = String(r.desc || "").trim();
+      const qtyDisp = (r.qty != null && Number.isFinite(Number(r.qty))) ? Number(r.qty).toLocaleString("it-IT", { maximumFractionDigits: 2 }) : (r.qtyRaw || "—");
+      const uom = String(r.uom || "").trim() || "—";
+
+      const st = isRowConfigured(r);
+      const dot = st.ok ? '<span class="dot ok"></span>' : '<span class="dot bad"></span>';
+
+      const fidRow = String(st.fp?.id || st.fp?._id || "").trim();
+      const rowWhy = String(st.why || "");
+      const rowCls = st.ok ? '' : ' daneaRowBad';
+      const rowStyle = ' style="cursor:pointer;"';
+      const rowTitle = st.ok ? "Apri distinta base" : "Configura distinta base";
+
+      let act = "";
+      if (st.why === "missing"){
+        act = `<button class="btn btn-secondary btn-xs jsDaneaImportFp" data-code="${escAttr(code)}" data-desc="${escAttr(desc)}" type="button">Importa</button>`;
+      } else if (st.why === "empty"){
+        const fid = String(st.fp?.id || st.fp?._id || "").trim();
+        act = `<button class="btn btn-secondary btn-xs jsDaneaConfigFp" data-fpid="${escAttr(fid)}" type="button">Configura</button>`;
+      } else {
+        const fid = String(st.fp?.id || st.fp?._id || "").trim();
+        act = fid ? `<button class="btn btn-ghost btn-xs jsDaneaOpenFp" data-fpid="${escAttr(fid)}" type="button">Apri</button>` : `<span class="td-muted">OK</span>`;
+      }
+
+      return `<tr class="jsDaneaItemRow${rowCls}" data-code="${escAttr(code)}" data-desc="${escAttr(desc)}" data-fpid="${escAttr(fidRow)}" data-why="${escAttr(rowWhy)}" title="${escAttr(rowTitle)}"${rowStyle}>
+        <td data-label="">${dot}</td>
+        <td data-label="Codice"><span class="kbd">${esc(code || "—")}</span></td>
+        <td data-label="Articolo">${esc(desc || "—")}</td>
+        <td data-label="Q.tà" class="qty">${esc(qtyDisp)}</td>
+        <td data-label="U.M.">${esc(uom)}</td>
+        <td data-label="Azioni" style="text-align:right;">${act}</td>
+      </tr>`;
+    }).join("") : `<tr><td class="td-muted" colspan="6">Nessuna riga nel DDT.</td></tr>`;
+
+    if (foot){
+      const st = ddtStatus(ddt);
+      const autoOn = !!S.autoDischarge;
+      const msg = isDone ? "Questo DDT è già stato scaricato: eliminandolo (in tab Completati) si resetta lo scarico." :
+        (st.ok ? (autoOn ? "Tutte le righe sono configurate: puoi completare e scaricare componenti." : "Tutte le righe sono configurate: puoi completare (scarico automatico DISATTIVATO).") : "Configura le righe rosse (distinta base) per poter completare.");
+      foot.textContent = msg;
+    }
+  }
+
+  function openDetailByKey(key, mode){
+    const k = String(key || "").trim();
+    if (!k) return;
+
+    if (mode === "done"){
+      const c = (S.completed || []).find(x => String(x?.key || x?._id || "") === k) || null;
+      if (!c) return;
+      S.selectedKey = k;
+      S.selected = {
+        key: k,
+        number: String(c.number || ""),
+        date: String(c.date || ""),
+        customer: String(c.customer || ""),
+        rows: Array.isArray(c.rows) ? c.rows : [],
+        warehouse: c.warehouse || "",
+        movementIds: Array.isArray(c.movementIds) ? c.movementIds : []
+      };
+      setDetailOpen(true);
+      renderDetail(S.selected, "done");
+      return;
+    }
+
+    const d = (S.cache || []).find(x => String(x?.key || "") === k) || null;
+    if (!d) return;
+    S.selectedKey = k;
+    S.selected = d;
+    setDetailOpen(true);
+    renderDetail(S.selected, "verify");
+  }
+
+  async function maybeAutoImportFinishedProducts(ddts){
+    const H = S.hub;
+    if (!H || !H.fb || !H.fb.db || !H.FS) return;
+    if (!H.fb.user) return;
+
+    // best-effort: crea placeholder per codici nuovi (una sola volta per fetch)
+    try{
+      const { addDoc, collection, serverTimestamp } = H.FS;
+      const col = collection(H.fb.db, "orgs", H.ORG_ID, "finishedProducts");
+
+      const toCreate = [];
+      for (const d of (ddts || [])){
+        for (const r of (d.rows || [])){
+          const code = String(r.code || "").trim();
+          if (!code) continue;
+          const low = code.toLowerCase();
+          if (S.fpByCode.has(low)) continue;
+          toCreate.push({ code, name: String(r.desc || code).trim(), uom: String(r.uom || "").trim() });
+        }
+      }
+
+      // de-dup in-memory
+      const seen = new Set();
+      const uniq = [];
+      for (const x of toCreate){
+        const k = String(x.code || "").toLowerCase();
+        if (!k || seen.has(k)) continue;
+        seen.add(k);
+        uniq.push(x);
+      }
+
+      for (const x of uniq){
+        // ricontrollo (in caso di race con snapshot)
+        if (S.fpByCode.has(String(x.code||"").toLowerCase())) continue;
+        const payload = {
+          name: x.name,
+          nameLower: x.name.toLowerCase(),
+          updatedAt: serverTimestamp(),
+          updatedBy: H.fb.user.email || H.fb.user.uid || "",
+          createdAt: serverTimestamp(),
+          createdBy: H.fb.user.email || H.fb.user.uid || ""
+        };
+        if (x.code){
+          payload.code = x.code;
+          payload.codeLower = String(x.code).toLowerCase();
+        }
+        if (x.uom) payload.uom = x.uom;
+        // components vuoti (non configurato)
+        payload.components = [];
+        await addDoc(col, payload);
+      }
+    }catch(e){
+      // silenzioso: se regole non permettono, non bloccare la lettura XML
+      try{ console.warn("auto-import finishedProducts skipped", e); }catch(_){}
+    }
+  }
+
+  function parseFraction(v){
+    const s = String(v || "").trim();
+    if (!s) return null;
+    // 1/20
+    const m = s.match(/^(-?\d+(?:[.,]\d+)?)\s*\/\s*(\d+(?:[.,]\d+)?)$/);
+    if (m){
+      const a = Number(m[1].replace(",", "."));
+      const b = Number(m[2].replace(",", "."));
+      if (Number.isFinite(a) && Number.isFinite(b) && b !== 0) return a / b;
+    }
+    // number with comma
+    const n = Number(s.replace(/\./g,"").replace(",", "."));
+    if (Number.isFinite(n)) return n;
+    return null;
+  }
+
+  function compQtyPerUnit(comp){
+    const c = comp || {};
+    if (c.qty != null && Number.isFinite(Number(c.qty))) return Number(c.qty);
+    const raw = c.qtyRaw || c.qtaRaw || "";
+    const p = parseFraction(raw);
+    if (p != null && Number.isFinite(p)) return p;
+    return null;
+  }
+
+    async function sendSelectedFromDetail(){
+    if (S.busy) return;
+    const ddt = S.selected;
+    if (!ddt || !ddt.key) return;
+
+    const H = S.hub;
+    if (!H || !H.fb || !H.fb.db || !H.FS) { alert("Hub non pronto"); return; }
+    if (!H.fb.user) { try{ window.HubInv?.showToast?.("Accedi con Google per inviare", "warn"); }catch(_){ alert("Accedi con Google"); } return; }
+
+    cacheCompletedMap();
+    if (S.completedMap.has(ddt.key)) { alert("Questo DDT risulta già completato."); return; }
+
+    const st = ddtStatus(ddt);
+    if (!st.ok) { alert("Non tutte le righe sono configurate (cerchi rossi)."); return; }
+
+    const autoOn = !!S.autoDischarge;
+
+    const ok = confirm(autoOn ? `Completare e scaricare componenti?
+
+DDT ${ddt.number} del ${fmtDateIT(ddt.date)}
+Righe: ${st.total}` : `Completare SENZA scarico automatico?
+
+• Il DDT finirà in "Completati"
+• NON verranno creati movimenti di inventario
+
+DDT ${ddt.number} del ${fmtDateIT(ddt.date)}
+Righe: ${st.total}`);
+    if (!ok) return;
+
+    S.busy = true;
+    try{
+      const { addDoc, setDoc, doc, collection, serverTimestamp } = H.FS;
+
+      // Se lo scarico automatico è disattivato: segna solo come completato (senza movimenti)
+      if (!autoOn){
+        const doneId = encodeURIComponent(String(ddt.key || '').trim());
+        const doneRef = doc(H.fb.db, 'orgs', H.ORG_ID, 'daneaDdtCompleted', doneId);
+        await setDoc(doneRef, {
+          key: String(ddt.key || '').trim(),
+          number: String(ddt.number || '').trim(),
+          date: String(ddt.date || '').trim(),
+          customer: String(ddt.customer || '').trim(),
+          rows: (ddt.rows || []).map(x => ({
+            idx: (x && x.idx != null) ? x.idx : null,
+            code: x.code || '',
+            desc: x.desc || '',
+            qty: x.qty ?? null,
+            qtyRaw: x.qtyRaw || '',
+            uom: x.uom || '',
+
+            // fatturato (best-effort)
+            unitNet: (x && x.unitNet != null) ? x.unitNet : null,
+            unitGross: (x && x.unitGross != null) ? x.unitGross : null,
+            vatPerc: (x && x.vatPerc != null) ? x.vatPerc : null,
+            net: (x && x.net != null) ? x.net : null,
+            vat: (x && x.vat != null) ? x.vat : null,
+            gross: (x && x.gross != null) ? x.gross : null
+          })),
+          netTotal: (ddt && ddt.netTotal != null) ? ddt.netTotal : null,
+          vatTotal: (ddt && ddt.vatTotal != null) ? ddt.vatTotal : null,
+          grossTotal: (ddt && ddt.grossTotal != null) ? ddt.grossTotal : null,
+          currency: String(ddt.currency || 'EUR'),
+          warehouse: 'none',
+          allocations: [],
+          xmlHash: String(ddt.hash || ''),
+          movementIds: [],
+          autoDischarge: false,
+          createdAt: serverTimestamp(),
+          createdBy: H.fb.user.email || H.fb.user.uid
+        }, { merge: true });
+
+        try{ window.HubInv?.showToast?.('DDT completato (senza scarico)'); }catch(_){ }
+        setDetailOpen(false);
+        setTab('done');
+        await fetchNow(true);
+        return;
+      }
+
+      // 1) calcola fabbisogni componenti (somma per codice)
+      const req = new Map(); // codeLower -> {code,name,uom,qtyFloat}
+      for (const r of (ddt.rows || [])){
+        const qtyLine = (r.qty != null && Number.isFinite(Number(r.qty))) ? Number(r.qty) : parseFraction(r.qtyRaw);
+        const qLine = (qtyLine != null && Number.isFinite(qtyLine)) ? qtyLine : 0;
+        if (qLine <= 0) continue;
+
+        const fp = getFpForRow(r);
+        const comps = getFpComponents(fp);
+        for (const c of comps){
+          const cCode = String(c.code || "").trim();
+          if (!cCode) continue;
+
+          const per = compQtyPerUnit(c);
+          if (per == null || !Number.isFinite(per) || per <= 0) continue;
+
+          const add = per * qLine;
+          const low = cCode.toLowerCase();
+          const cur = req.get(low) || { code: cCode, name: String(c.name || c.articolo || cCode).trim(), uom: String(c.uom || "").trim(), qty: 0 };
+          cur.qty += add;
+          if (!cur.name) cur.name = cCode;
+          if (!cur.uom) cur.uom = String(c.uom || "").trim();
+          req.set(low, cur);
+        }
+      }
+
+      if (!req.size){
+        alert("Nessun componente calcolabile (distinta base vuota o quantità non valide).");
+        return;
+      }
+
+      // 2) inventario globale: calcola disponibilità per sede (ignorando fornitore)
+      let movs = (H.state && Array.isArray(H.state.movements)) ? H.state.movements : [];
+
+      // Se l'app ha appena aperto, può capitare che lo snapshot dei movimenti non sia
+      // ancora arrivato: in quel caso facciamo un fetch one-shot e poi riproviamo.
+      if (!movs.length){
+        try{
+          const FS = H.FS || {};
+          if (H.fb && H.fb.db && typeof FS.getDocs === "function" && typeof FS.collection === "function" && typeof FS.query === "function" && typeof FS.orderBy === "function"){
+            try{ H.showToast?.("Carico inventario…", "warn"); }catch(_){ }
+            const col = FS.collection(H.fb.db, "orgs", H.ORG_ID, "inventoryMovements");
+            const q = FS.query(col, FS.orderBy("createdAt"));
+            const snap = await FS.getDocs(q);
+            movs = snap.docs.map(d => {
+              const data = d.data() || {};
+              return {
+                id: d.id,
+                type: data.type || "IN",
+                code: data.code || "",
+                qty: data.qty,
+                warehouse: data.warehouse || ""
+              };
+            });
+            if (H.state) H.state.movements = movs;
+          }
+        }catch(e){
+          try{ console.warn("fetch inventoryMovements failed", e); }catch(_){ }
+        }
+      }
+
+      if (!movs.length){
+        if (!silent){
+          alert("Inventario non pronto: movimenti non caricati.");
+        } else {
+          try{ window.HubInv?.showToast?.("Auto-scarico: inventario non pronto", "warn"); }catch(_){ }
+        }
+        return;
+      }
+
+      const _normWh = (w) => {
+        try{
+          if (H && typeof H.normalizeWarehouse === "function") return H.normalizeWarehouse(w);
+        }catch(_){}
+        // fallback minimale (nel caso il bridge non esponga normalizeWarehouse)
+        const s = String(w || "").trim().toLowerCase();
+        if (s.includes("conca") || s.includes("concamarise")) return "concamarise";
+        return "cerea";
+      };
+      const _safeInt = (v) => {
+        try{
+          if (H && typeof H.safeInt === "function") return H.safeInt(v);
+        }catch(_){}
+        const n = parseInt(String(v||"").replace(/[^0-9\-]/g,""), 10);
+        return Number.isFinite(n) ? n : 0;
+      };
+
+      const avail = { cerea: new Map(), concamarise: new Map() }; // codeLower -> qtyInt
+      for (const mv of movs){
+        const code = String(mv && mv.code || "").trim();
+        if (!code) continue;
+        const low = code.toLowerCase();
+        const w = _normWh(mv.warehouse || mv.site || mv.magazzino || mv.location || "");
+        const q = _safeInt(mv.qty);
+        if (!q) continue;
+        const delta = (String(mv.type || "").toUpperCase() === "OUT") ? -q : q;
+        const m = (w === "concamarise") ? avail.concamarise : avail.cerea;
+        m.set(low, (m.get(low) || 0) + delta);
+      }
+
+      // 3) validazione scorte (globale) prima di scrivere
+      const needList = Array.from(req.values()).map(it => {
+        const qtyInt = Math.round(Number(it.qty) || 0);
+        return Object.assign({}, it, { qtyInt });
+      }).filter(x => x.qtyInt);
+
+      for (const it of needList){
+        const low = String(it.code || "").trim().toLowerCase();
+        const aC = Math.max(0, _safeInt(avail.cerea.get(low)));
+        const aK = Math.max(0, _safeInt(avail.concamarise.get(low)));
+        const tot = aC + aK;
+        if (tot < it.qtyInt){
+          alert(`Scorta insufficiente per ${it.code} — ${it.name || ""}
+
+Richiesti: ${it.qtyInt.toLocaleString("it-IT")} ${String(it.uom||"").trim()}
+Disponibili: ${(tot).toLocaleString("it-IT")} (Cerea ${aC.toLocaleString("it-IT")}, Concamarise ${aK.toLocaleString("it-IT")})`);
+          return;
+        }
+      }
+
+      // 4) crea movimenti OUT (split automatico tra sedi, senza scelta manuale)
+      const movementIds = [];
+      const allocations = [];
+      const movCol = collection(H.fb.db, "orgs", H.ORG_ID, "inventoryMovements");
+
+      const noteBase = `Scarico componenti per DDT ${ddt.number} del ${fmtDateIT(ddt.date)} (DaneaXML)`;
+      for (const it of needList){
+        const low = String(it.code || "").trim().toLowerCase();
+        let need = it.qtyInt;
+
+        let aC = Math.max(0, _safeInt(avail.cerea.get(low)));
+        let aK = Math.max(0, _safeInt(avail.concamarise.get(low)));
+
+        // scegli sede primaria = quella con più disponibilità (riduce split)
+        const first = (aK > aC) ? "concamarise" : "cerea";
+        const second = (first === "cerea") ? "concamarise" : "cerea";
+
+        const takeFrom = (wh) => {
+          if (need <= 0) return 0;
+          const cur = (wh === "concamarise") ? aK : aC;
+          const take = Math.min(need, cur);
+          if (take <= 0) return 0;
+          need -= take;
+          if (wh === "concamarise") aK -= take;
+          else aC -= take;
+          return take;
+        };
+
+        const t1 = takeFrom(first);
+        const t2 = takeFrom(second);
+
+        // aggiorna disponibilità residue
+        avail.cerea.set(low, aC);
+        avail.concamarise.set(low, aK);
+
+        allocations.push({ code: it.code, name: it.name || it.code, uom: String(it.uom||"").trim(), qty: it.qtyInt, byWarehouse: { cerea: (first==="cerea"?t1:t2) || 0, concamarise: (first==="concamarise"?t1:t2) || 0 } });
+
+        const makePayload = (warehouse, qtyInt) => ({
+          type: "OUT",
+          customer: "Scarico DDT",
+          code: it.code,
+          item: it.name || it.code,
+          uom: String(it.uom || "").trim(),
+          qtyRaw: `${it.qty} ${String(it.uom||"").trim()}`.trim(),
+          qty: qtyInt,
+          date: String(ddt.date || "").trim(),
+          note: noteBase,
+          source: "DaneaXML",
+          rawText: "",
+          warehouse: warehouse,
+
+          docType: "DDT",
+          docNum: String(ddt.number || "").trim(),
+          docDateRaw: String(ddt.date || "").trim(),
+          daneaDdtKey: String(ddt.key || "").trim(),
+
+          createdAt: serverTimestamp(),
+          createdBy: H.fb.user.email || H.fb.user.uid
+        });
+
+        if (t1 > 0){
+          const ref = await addDoc(movCol, makePayload(first, t1));
+          if (ref && ref.id) movementIds.push(ref.id);
+        }
+        if (t2 > 0){
+          const ref = await addDoc(movCol, makePayload(second, t2));
+          if (ref && ref.id) movementIds.push(ref.id);
+        }
+      }
+
+      // 5) salva completato (id deterministico)
+      const doneId = encodeURIComponent(String(ddt.key || "").trim());
+      const doneRef = doc(H.fb.db, "orgs", H.ORG_ID, "daneaDdtCompleted", doneId);
+      await setDoc(doneRef, {
+        key: String(ddt.key || "").trim(),
+        number: String(ddt.number || "").trim(),
+        date: String(ddt.date || "").trim(),
+        customer: String(ddt.customer || "").trim(),
+        rows: (ddt.rows || []).map(x => ({
+          idx: (x && x.idx != null) ? x.idx : null,
+          code: x.code || "",
+          desc: x.desc || "",
+          qty: x.qty ?? null,
+          qtyRaw: x.qtyRaw || "",
+          uom: x.uom || "",
+
+          // fatturato (best-effort)
+          unitNet: (x && x.unitNet != null) ? x.unitNet : null,
+          unitGross: (x && x.unitGross != null) ? x.unitGross : null,
+          vatPerc: (x && x.vatPerc != null) ? x.vatPerc : null,
+          net: (x && x.net != null) ? x.net : null,
+          vat: (x && x.vat != null) ? x.vat : null,
+          gross: (x && x.gross != null) ? x.gross : null
+        })),
+        netTotal: (ddt && ddt.netTotal != null) ? ddt.netTotal : null,
+        vatTotal: (ddt && ddt.vatTotal != null) ? ddt.vatTotal : null,
+        grossTotal: (ddt && ddt.grossTotal != null) ? ddt.grossTotal : null,
+        currency: String(ddt.currency || "EUR"),
+        warehouse: "global",
+        allocations: allocations,
+        xmlHash: String(ddt.hash || ""),
+        movementIds: movementIds,
+        autoDischarge: true,
+        createdAt: serverTimestamp(),
+        createdBy: H.fb.user.email || H.fb.user.uid
+      }, { merge: true });
+
+      try{ window.HubInv?.showToast?.("DDT completato e scaricato"); }catch(_){}
+      // refresh lists
+      setDetailOpen(false);
+      setTab("done");
+      await fetchNow(true);
+    }catch(e){
+      console.error(e);
+      try{ window.HubInv?.showToast?.("Errore completamento DDT", "err"); }catch(_){}
+      alert("Errore completamento DDT");
+    }finally{
+      S.busy = false;
+    }
+  }
+
+
+
+  // ===== BULK: scarica automaticamente TUTTI i DDT verdi (OK) =====
+  async function dischargeAllGreenDdts(opts){
+    opts = (opts && typeof opts === "object") ? opts : {};
+    const silent = !!opts.silent;
+    const fromAuto = !!opts.fromAuto;
+
+    if (S.busy) return;
+
+    const H = S.hub;
+    if (!H || !H.fb || !H.fb.db || !H.FS) {
+      if (!silent) alert("Hub non pronto");
+      return;
+    }
+
+    // "a prescindere da accesso utente": procediamo anche senza login.
+    const actor = (H.fb.user && (H.fb.user.email || H.fb.user.uid)) || "auto";
+    if (!H.fb.user && !silent){
+      try{ window.HubInv?.showToast?.("Auto-scarico: nessun utente loggato (procedo se le regole lo consentono)", "warn"); }catch(_){ }
+    }
+
+    cacheCompletedMap();
+
+    if (!S.cacheReady){
+      if (!silent){ try{ window.HubInv?.showToast?.("Caricamento DDT da Firebase… riprova tra un attimo", "warn"); }catch(_){ } }
+      return;
+    }
+
+    const baseVerify = (S.cache || []);
+    const verifyList = baseVerify.filter(d => d && d.key && !S.completedMap.has(d.key));
+    const green = verifyList.filter(d => {
+      try{ return !!ddtStatus(d).ok; }catch(_){ return false; }
+    });
+
+    if (!green.length){
+      if (!silent){ try{ window.HubInv?.showToast?.("Nessun DDT verde da scaricare", "warn"); }catch(_){ } }
+      return;
+    }
+
+    // Ordine "tradizionale": prima i più vecchi
+    green.sort((a,b) => String(a?.date||"").localeCompare(String(b?.date||"")) || String(a?.number||"").localeCompare(String(b?.number||"")));
+
+    if (!silent){
+      const ok = confirm(`Scaricare automaticamente ${green.length} DDT verdi?
+
+• Verranno creati movimenti di scarico (materie prime + imballaggi)
+• I DDT passeranno in "Completati"`);
+      if (!ok) return;
+    }
+
+    const swEl = $("daneaAutoSwitch");
+    const modeWord = S.autoMode ? "AUTO" : "MANUALE";
+    const setProg = (n) => { try{ __syncAutoModeUi(`${modeWord} ${n}/${green.length}`); }catch(_){ } };
+
+    S.busy = true;
+    try{
+      try{ __autoModeSetRunning(true); }catch(_){ }
+      try{ if (swEl) swEl.disabled = true; }catch(_){ }
+      setProg(0);
+
+      const { addDoc, setDoc, doc, collection, serverTimestamp, getDocs, query, orderBy } = H.FS;
+
+      // 1) Carica inventario (movimenti) una sola volta
+      let movs = (H.state && Array.isArray(H.state.movements)) ? H.state.movements : [];
+
+      if (!movs.length){
+        try{
+          if (H.fb && H.fb.db && typeof getDocs === "function" && typeof collection === "function" && typeof query === "function" && typeof orderBy === "function"){
+            try{ H.showToast?.("Carico inventario…", "warn"); }catch(_){ }
+            const col = collection(H.fb.db, "orgs", H.ORG_ID, "inventoryMovements");
+            const q = query(col, orderBy("createdAt"));
+            const snap = await getDocs(q);
+            movs = snap.docs.map(d => {
+              const data = d.data() || {};
+              return {
+                id: d.id,
+                type: data.type || "IN",
+                code: data.code || "",
+                qty: data.qty,
+                warehouse: data.warehouse || ""
+              };
+            });
+            if (H.state) H.state.movements = movs;
+          }
+        }catch(e){
+          try{ console.warn("fetch inventoryMovements failed", e); }catch(_){ }
+        }
+      }
+
+      if (!movs.length){
+        if (!silent){
+          alert("Inventario non pronto: movimenti non caricati.");
+        } else {
+          try{ window.HubInv?.showToast?.("Auto-scarico: inventario non pronto", "warn"); }catch(_){ }
+        }
+        return;
+      }
+
+      const _normWh = (w) => {
+        try{ if (H && typeof H.normalizeWarehouse === "function") return H.normalizeWarehouse(w); }catch(_){ }
+        const s = String(w || "").trim().toLowerCase();
+        if (s.includes("conca") || s.includes("concamarise")) return "concamarise";
+        return "cerea";
+      };
+      const _safeInt = (v) => {
+        try{ if (H && typeof H.safeInt === "function") return H.safeInt(v); }catch(_){ }
+        const n = parseInt(String(v||"").replace(/[^0-9\-]/g,""), 10);
+        return Number.isFinite(n) ? n : 0;
+      };
+
+      // Disponibilità aggiornata "live" durante il bulk (così non scarichi più del disponibile)
+      const avail = { cerea: new Map(), concamarise: new Map() };
+      for (const mv of movs){
+        const code = String(mv && mv.code || "").trim();
+        if (!code) continue;
+        const low = code.toLowerCase();
+        const w = _normWh(mv.warehouse || mv.site || mv.magazzino || mv.location || "");
+        const q = _safeInt(mv.qty);
+        if (!q) continue;
+        const delta = (String(mv.type || "").toUpperCase() === "OUT") ? -q : q;
+        const m = (w === "concamarise") ? avail.concamarise : avail.cerea;
+        m.set(low, (m.get(low) || 0) + delta);
+      }
+
+      const movCol = collection(H.fb.db, "orgs", H.ORG_ID, "inventoryMovements");
+
+      let doneCount = 0;
+      for (let i=0; i<green.length; i++){
+        const ddt = green[i];
+        if (!ddt || !ddt.key) continue;
+
+        // se nel frattempo è diventato completato, salta
+        if (S.completedMap.has(ddt.key)) continue;
+
+        try{ setProg(doneCount); }catch(_){ }
+
+        // 2) calcola fabbisogni componenti (somma per codice)
+        const req = new Map();
+        for (const r of (ddt.rows || [])){
+          const qtyLine = (r.qty != null && Number.isFinite(Number(r.qty))) ? Number(r.qty) : parseFraction(r.qtyRaw);
+          const qLine = (qtyLine != null && Number.isFinite(qtyLine)) ? qtyLine : 0;
+          if (qLine <= 0) continue;
+
+          const fp = getFpForRow(r);
+          const comps = getFpComponents(fp);
+          for (const c of comps){
+            const cCode = String(c.code || "").trim();
+            if (!cCode) continue;
+
+            const per = compQtyPerUnit(c);
+            if (per == null || !Number.isFinite(per) || per <= 0) continue;
+
+            const add = per * qLine;
+            const low = cCode.toLowerCase();
+            const cur = req.get(low) || { code: cCode, name: String(c.name || c.articolo || cCode).trim(), uom: String(c.uom || "").trim(), qty: 0 };
+            cur.qty += add;
+            if (!cur.name) cur.name = cCode;
+            if (!cur.uom) cur.uom = String(c.uom || "").trim();
+            req.set(low, cur);
+          }
+        }
+
+        if (!req.size){
+          // DDT verde ma senza componenti: lo segnaliamo e lo saltiamo
+          try{ window.HubInv?.showToast?.(`DDT ${ddt.number || "?"}: nessun componente calcolabile`, "warn"); }catch(_){ }
+          continue;
+        }
+
+        // 3) validazione scorte (globale) prima di scrivere
+        const needList = Array.from(req.values()).map(it => {
+          const qtyInt = Math.round(Number(it.qty) || 0);
+          return Object.assign({}, it, { qtyInt });
+        }).filter(x => x.qtyInt);
+
+        for (const it of needList){
+          const low = String(it.code || "").trim().toLowerCase();
+          const aC = Math.max(0, _safeInt(avail.cerea.get(low)));
+          const aK = Math.max(0, _safeInt(avail.concamarise.get(low)));
+          const tot = aC + aK;
+          if (tot < it.qtyInt){
+            if (!silent){
+              alert(`Scarico interrotto\n\nScorta insufficiente per ${it.code} — ${it.name || ""}\n\nDDT ${ddt.number || "—"} del ${fmtDateIT(ddt.date)}\nRichiesti: ${it.qtyInt.toLocaleString("it-IT")} ${String(it.uom||"").trim()}\nDisponibili: ${(tot).toLocaleString("it-IT")} (Cerea ${aC.toLocaleString("it-IT")}, Concamarise ${aK.toLocaleString("it-IT")})`);
+            } else {
+              try{ window.HubInv?.showToast?.(`Auto-scarico: scorta insufficiente per ${it.code}`, "warn"); }catch(_){ }
+            }
+            return;
+          }
+        }
+
+        // 4) crea movimenti OUT (split automatico tra sedi) + aggiorna avail in RAM
+        const movementIds = [];
+        const allocations = [];
+
+        const noteBase = `Scarico componenti per DDT ${ddt.number} del ${fmtDateIT(ddt.date)} (DaneaXML)`;
+
+        for (const it of needList){
+          const low = String(it.code || "").trim().toLowerCase();
+          let need = it.qtyInt;
+
+          let aC = Math.max(0, _safeInt(avail.cerea.get(low)));
+          let aK = Math.max(0, _safeInt(avail.concamarise.get(low)));
+
+          const first = (aK > aC) ? "concamarise" : "cerea";
+          const second = (first === "cerea") ? "concamarise" : "cerea";
+
+          const takeFrom = (wh) => {
+            if (need <= 0) return 0;
+            const cur = (wh === "concamarise") ? aK : aC;
+            const take = Math.min(need, cur);
+            if (take <= 0) return 0;
+            need -= take;
+            if (wh === "concamarise") aK -= take;
+            else aC -= take;
+            return take;
+          };
+
+          const t1 = takeFrom(first);
+          const t2 = takeFrom(second);
+
+          // aggiorna disponibilità residue in RAM
+          avail.cerea.set(low, aC);
+          avail.concamarise.set(low, aK);
+
+          allocations.push({ code: it.code, name: it.name || it.code, uom: String(it.uom||"").trim(), qty: it.qtyInt, byWarehouse: { cerea: (first==="cerea"?t1:t2) || 0, concamarise: (first==="concamarise"?t1:t2) || 0 } });
+
+          const makePayload = (warehouse, qtyInt) => ({
+            type: "OUT",
+            customer: "Scarico DDT",
+            code: it.code,
+            item: it.name || it.code,
+            uom: String(it.uom || "").trim(),
+            qtyRaw: `${it.qty} ${String(it.uom||"").trim()}`.trim(),
+            qty: qtyInt,
+            date: String(ddt.date || "").trim(),
+            note: noteBase,
+            source: "DaneaXML",
+            rawText: "",
+            warehouse: warehouse,
+
+            docType: "DDT",
+            docNum: String(ddt.number || "").trim(),
+            docDateRaw: String(ddt.date || "").trim(),
+            daneaDdtKey: String(ddt.key || "").trim(),
+
+            createdAt: serverTimestamp(),
+            createdBy: actor
+          });
+
+          if (t1 > 0){
+            const ref = await addDoc(movCol, makePayload(first, t1));
+            if (ref && ref.id) movementIds.push(ref.id);
+          }
+          if (t2 > 0){
+            const ref = await addDoc(movCol, makePayload(second, t2));
+            if (ref && ref.id) movementIds.push(ref.id);
+          }
+        }
+
+        // 5) salva completato (id deterministico)
+        const doneId = encodeURIComponent(String(ddt.key || "").trim());
+        const doneRef = doc(H.fb.db, "orgs", H.ORG_ID, "daneaDdtCompleted", doneId);
+        await setDoc(doneRef, {
+          key: String(ddt.key || "").trim(),
+          number: String(ddt.number || "").trim(),
+          date: String(ddt.date || "").trim(),
+          customer: String(ddt.customer || "").trim(),
+          rows: (ddt.rows || []).map(x => ({
+            idx: (x && x.idx != null) ? x.idx : null,
+            code: x.code || "",
+            desc: x.desc || "",
+            qty: x.qty ?? null,
+            qtyRaw: x.qtyRaw || "",
+            uom: x.uom || "",
+
+            // fatturato (best-effort)
+            unitNet: (x && x.unitNet != null) ? x.unitNet : null,
+            unitGross: (x && x.unitGross != null) ? x.unitGross : null,
+            vatPerc: (x && x.vatPerc != null) ? x.vatPerc : null,
+            net: (x && x.net != null) ? x.net : null,
+            vat: (x && x.vat != null) ? x.vat : null,
+            gross: (x && x.gross != null) ? x.gross : null
+          })),
+          netTotal: (ddt && ddt.netTotal != null) ? ddt.netTotal : null,
+          vatTotal: (ddt && ddt.vatTotal != null) ? ddt.vatTotal : null,
+          grossTotal: (ddt && ddt.grossTotal != null) ? ddt.grossTotal : null,
+          currency: String(ddt.currency || "EUR"),
+          warehouse: "global",
+          allocations: allocations,
+          xmlHash: String(ddt.hash || ""),
+          movementIds: movementIds,
+          autoDischarge: true,
+          createdAt: serverTimestamp(),
+          createdBy: actor
+        }, { merge: true });
+
+        // aggiorna cache locale (evita doppi se la snapshot è lenta)
+        try{ S.completedMap.set(String(ddt.key||"").trim(), { key: String(ddt.key||"").trim() }); }catch(_){ }
+
+        doneCount++;
+        try{ setProg(doneCount); }catch(_){ }
+
+      }
+
+      try{ window.HubInv?.showToast?.(`Scarico completato: ${doneCount} DDT`, "ok"); }catch(_){ }
+
+      // refresh xml (best effort)
+      try{ await fetchNow(true); }catch(_){ }
+
+    }catch(e){
+      console.error(e);
+      try{ window.HubInv?.showToast?.("Errore scarico automatico", "err"); }catch(_){ }
+      if (!silent) alert("Errore scarico automatico");
+    }finally{
+      try{ if (swEl) swEl.disabled = false; }catch(_){ }
+      try{ __autoModeSetRunning(false); }catch(_){ }
+      try{ __syncAutoModeUi(); }catch(_){ }
+      S.busy = false;
+    }
+  }
+  async function deleteCompletedByKey(key){
+    const k = String(key || "").trim();
+    if (!k) return;
+
+    const H = S.hub;
+    if (!H || !H.fb || !H.fb.db || !H.FS) return;
+    if (!H.fb.user) { alert("Accedi con Google"); return; }
+
+    const c = S.completedMap.get(k) || null;
+    if (!c) return;
+
+    const ok = confirm(`Eliminare questo DDT completato e resettare lo scarico?\n\nDDT ${c.number || "—"} del ${fmtDateIT(c.date || "")}`);
+    if (!ok) return;
+
+    S.busy = true;
+    try{
+      const { deleteDoc, doc } = H.FS;
+      const ids = Array.isArray(c.movementIds) ? c.movementIds : [];
+      for (const id of ids){
+        const mid = String(id || "").trim();
+        if (!mid) continue;
+        try{
+          await deleteDoc(doc(H.fb.db, "orgs", H.ORG_ID, "inventoryMovements", mid));
+        }catch(e){ console.warn("delete movement failed", mid, e); }
+      }
+
+      const doneId = encodeURIComponent(String(k));
+      await deleteDoc(doc(H.fb.db, "orgs", H.ORG_ID, "daneaDdtCompleted", doneId));
+
+      try{ window.HubInv?.showToast?.("DDT eliminato: scarico resettato"); }catch(_){}
+    }catch(e){
+      console.error(e);
+      alert("Errore eliminazione");
+    }finally{
+      S.busy = false;
+    }
+  }
+
+  function bindEvents(){
+    $("btnDaneaClear")?.addEventListener("click", () => { const i=$("daneaSearch"); if (i) i.value=""; render(); });
+    $("daneaSearch")?.addEventListener("input", () => render());
+
+    $("daneaTabVerify")?.addEventListener("click", () => setTab("verify"));
+    $("daneaTabDone")?.addEventListener("click", () => setTab("done"));
+    $("btnDaneaSend")?.addEventListener("click", () => sendSelectedFromDetail());
+
+    // Scarico DDT automatico (switch)
+    try{ __bindAutoModeSwitch(); }catch(_){ }
+
+    // list click
+    $("daneaTbody")?.addEventListener("click", (e) => {
+          const btnOpen = e.target?.closest?.("button.jsDaneaOpen");
+          const btnSend = e.target?.closest?.("button.jsDaneaSendFromList");
+          const btnDelDone = e.target?.closest?.("button.jsDaneaDeleteDone");
+          const tr = e.target?.closest?.("tr.jsDaneaRow");
+
+          if (btnDelDone){
+            e.preventDefault(); e.stopPropagation();
+            const k = btnDelDone.getAttribute("data-key") || "";
+            deleteCompletedByKey(k);
+            return;
+          }
+          if (btnSend){
+            e.preventDefault(); e.stopPropagation();
+            const k = btnSend.getAttribute("data-key") || "";
+            openDetailByKey(k, "verify");
+            // auto invia solo se ok
+            setTimeout(() => { try{ sendSelectedFromDetail(); }catch(_){ } }, 0);
+            return;
+          }
+          if (btnOpen){
+            e.preventDefault(); e.stopPropagation();
+            const k = btnOpen.getAttribute("data-key") || "";
+            const mode = btnOpen.getAttribute("data-mode") || (tr?.getAttribute("data-mode") || "verify");
+            openDetailByKey(k, mode);
+            return;
+          }
+          if (tr){
+            const k = tr.getAttribute("data-key") || "";
+            const mode = tr.getAttribute("data-mode") || "verify";
+            openDetailByKey(k, mode);
+          }
+        });
+
+    // detail row actions
+    if (!S._boundDetailClicks){
+      S._boundDetailClicks = true;
+
+      // delegated: funziona anche se la vista viene re-renderizzata
+      document.addEventListener("click", async (e) => {
+        const root = e.target?.closest?.("#viewDaneaDdt");
+        if (!root) return;
+
+        const btnImport = e.target?.closest?.("button.jsDaneaImportFp");
+        const btnConfig = e.target?.closest?.("button.jsDaneaConfigFp");
+        const btnOpenFp = e.target?.closest?.("button.jsDaneaOpenFp");
+
+        const prefillNewFinishedProduct = (code, desc) => {
+          try{
+            if (!window.openFinishedProductModal) return;
+            window.openFinishedProductModal(null);
+            setTimeout(() => {
+              try{
+                const nameEl = document.getElementById("fpName");
+                const codeEl = document.getElementById("fpCode");
+                if (nameEl && !String(nameEl.value || "").trim()) nameEl.value = String(desc || "").trim();
+                if (codeEl && !String(codeEl.value || "").trim()) codeEl.value = String(code || "").trim();
+              }catch(_){}
+            }, 0);
+          }catch(_){}
+        };
+
+        if (btnOpenFp){
+          e.preventDefault(); e.stopPropagation();
+          const id = String(btnOpenFp.getAttribute("data-fpid") || "").trim();
+          if (id) { try{ window.openFinishedProductModal && window.openFinishedProductModal(id); }catch(_){ } }
+          return;
+        }
+
+        if (btnConfig){
+          e.preventDefault(); e.stopPropagation();
+          const id = String(btnConfig.getAttribute("data-fpid") || "").trim();
+          if (id) { try{ window.openFinishedProductModal && window.openFinishedProductModal(id); }catch(_){ } }
+          return;
+        }
+
+        if (btnImport){
+          e.preventDefault(); e.stopPropagation();
+
+          const tr = btnImport.closest("tr.jsDaneaItemRow");
+          const fid = String(tr?.getAttribute("data-fpid") || "").trim();
+          const code = String(btnImport.getAttribute("data-code") || tr?.getAttribute("data-code") || "").trim();
+          const desc = String(btnImport.getAttribute("data-desc") || tr?.getAttribute("data-desc") || "").trim() || code;
+
+          try{
+            if (fid){
+              window.openFinishedProductModal && window.openFinishedProductModal(fid);
+            } else {
+              prefillNewFinishedProduct(code, desc);
+            }
+          }catch(err){
+            console.error(err);
+          }
+          return;
+        }
+
+        // click sulla riga (anche senza bottone): apre la distinta base
+        const tr = e.target?.closest?.("tr.jsDaneaItemRow");
+        if (tr){
+          e.preventDefault(); e.stopPropagation();
+
+          const fid = String(tr.getAttribute("data-fpid") || "").trim();
+          const code = String(tr.getAttribute("data-code") || "").trim();
+          const desc = String(tr.getAttribute("data-desc") || "").trim() || code;
+
+          try{
+            if (fid){
+              window.openFinishedProductModal && window.openFinishedProductModal(fid);
+            } else {
+              prefillNewFinishedProduct(code, desc);
+            }
+          }catch(err){
+            console.error(err);
+          }
+        }
+      });
+    }
+  }
+
+  function ingestXml(text, force){
+    const h = hashStr(text);
+    if (!force && h && h === S.lastXmlHash) return;
+
+    let ddts = [];
+    try{
+      ddts = parseEasyfattXml(text);
+    }catch(err){
+      console.warn(err);
+      try{ window.HubInv?.showToast?.("XML non valido", "err"); }catch(_){}
+            return;
+    }
+
+    S.lastXmlHash = h;
+    S.lastFetchedAt = new Date().toISOString();
+    S.ddts = ddts;
+    S.lastParsedCount = Array.isArray(ddts) ? ddts.length : 0;
+
+    // Persistenza su Firestore (nessuna cache locale)
+    try{ syncParsedToFirestore(ddts).catch(()=>{}); }catch(_){ }
+
+    // auto import placeholder (solo se loggato)
+    try{ maybeAutoImportFinishedProducts(ddts); }catch(_){}
+
+    render();
+    try{ __autoModeKick("xml"); }catch(_){ }
+  }
+
+  async function fetchNow(force){
+    const url = String(S.xmlUrl || "").trim();
+    if (!url) { render(); return; }
+
+    try{
+      // NOTE: CORS is handled by the proxy. We never send cookies.
+      const r = await fetch(url, { cache: "no-store", mode: "cors", credentials: "omit" });
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      const body = await r.text();
+      ingestXml(body, !!force);
+    }catch(err){
+      console.warn("fetch XML failed", err);
+      const msg = String(err && (err.message || err) || "");
+      if (/Failed to fetch/i.test(msg) || /CORS/i.test(msg)){
+        try{ window.HubInv?.showToast?.("Impossibile leggere XML (CORS/proxy)", "warn"); }catch(_){}
+      } else {
+        try{ window.HubInv?.showToast?.("Impossibile leggere XML", "warn"); }catch(_){}
+      }
+      try{
+        if (/Failed to fetch/i.test(msg)){
+          console.warn("[DANEA] Tipico errore CORS: il proxy deve rispondere con Access-Control-Allow-Origin per " + (location && location.origin ? location.origin : "questa origin") + ".");
+        }
+      }catch(_){}
+    }
+  }
+
+
+  function startPolling(){
+    if (S.timer) return;
+    // every minute (XML is overwritten ~10 min)
+    S.timer = setInterval(() => fetchNow(false), 60 * 1000);
+  }
+
+  function subscribeCompleted(){
+    const H = getHub();
+    if (!H || !H.fb || !H.fb.db || !H.FS) return;
+    if (S.unsub.completed) return;
+
+    try{
+      const { collection, query, orderBy, onSnapshot } = H.FS;
+      const col = collection(H.fb.db, "orgs", H.ORG_ID, "daneaDdtCompleted");
+      const q = query(col, orderBy("date", "desc"));
+      S.unsub.completed = onSnapshot(q, (snap) => {
+        const arr = [];
+        snap.forEach(docu => {
+          const d = docu.data() || {};
+          arr.push(Object.assign({ _id: docu.id }, d));
+        });
+        S.completed = arr;
+        cacheCompletedMap();
+        render();
+        try{ __autoModeKick("completed"); }catch(_){ }
+      }, (err) => {
+        console.warn("completed snapshot error", err);
+      });
+    }catch(e){
+      console.warn("subscribeCompleted failed", e);
+    }
+  }
+
+  
+  function keyToId(k){
+    // docId deterministico: numero__data (sanitizzato)
+    return encodeURIComponent(String(k || "").trim());
+  }
+
+  function rebuildCacheMap(){
+    const map = new Map();
+    for (const d of (S.cache || [])){
+      const k = String(d.key || "").trim();
+      if (!k) continue;
+      map.set(k, d);
+    }
+    S.cacheMap = map;
+  }
+
+  function subscribeCache(){
+    const H = getHub();
+    if (!H || !H.fb || !H.fb.db || !H.FS) return;
+    if (S.unsub.cache) return;
+
+    try{
+      const { collection, query, orderBy, onSnapshot } = H.FS;
+      const col = collection(H.fb.db, "orgs", H.ORG_ID, "daneaDdts");
+      const q = query(col, orderBy("date", "desc"));
+      S.unsub.cache = onSnapshot(q, (snap) => {
+        const arr = [];
+        snap.forEach(docu => {
+          const d = docu.data() || {};
+          let key = String(d.key || d.ddtKey || "").trim();
+          if (!key){
+            try{ key = decodeURIComponent(String(docu.id||"")); }catch(_){ key = String(docu.id||""); }
+            key = String(key||"").trim();
+          }
+          if (!key) return;
+          arr.push(Object.assign({ _id: docu.id, key }, d));
+        });
+        S.cache = arr;
+        S.cacheReady = true;
+        rebuildCacheMap();
+        render();
+        try{ __autoModeKick("cache"); }catch(_){ }
+      }, (err) => {
+        console.warn("daneaDdts snapshot error", err);
+        S.cacheReady = true;
+        render();
+        try{ __autoModeKick("cache_err"); }catch(_){ }
+      });
+    }catch(e){
+      console.warn("subscribeCache failed", e);
+      S.cacheReady = true;
+    }
+  }
+
+  async function syncParsedToFirestore(parsed){
+    const arr = Array.isArray(parsed) ? parsed : [];
+    if (!arr.length) return;
+
+    const H = S.hub || getHub();
+    if (!H || !H.fb || !H.fb.db || !H.FS) {
+      S.pendingParsed = arr;
+      return;
+    }
+
+    const { doc, setDoc, serverTimestamp } = H.FS;
+
+    // Upsert solo per NEW/UPDATED (hash diverso o doc mancante)
+    for (const d of arr){
+      if (!d || !d.key) continue;
+      const k = String(d.key).trim();
+      if (!k) continue;
+
+      const newHash = String(d.hash || "");
+      const existing = (S.cacheMap instanceof Map) ? S.cacheMap.get(k) : null;
+      const oldHash = String(existing?.xmlHash || existing?.hash || "");
+
+      // se identico, non scriviamo (niente spam). Il sistema lo sa perché hash uguale.
+      if (oldHash && newHash && oldHash === newHash) continue;
+
+      const isNew = !existing;
+      const payload = {
+        key: k,
+        number: String(d.number || "").trim(),
+        date: String(d.date || "").trim(),
+        customer: String(d.customer || "").trim(),
+        rows: (d.rows || []).map(x => ({
+          idx: (x && x.idx != null) ? x.idx : null,
+          code: String(x?.code || "").trim(),
+          desc: String(x?.desc || "").trim(),
+          qty: (x && x.qty != null) ? x.qty : null,
+          qtyRaw: String(x?.qtyRaw || "").trim(),
+          uom: String(x?.uom || "").trim(),
+
+          // fatturato (best-effort)
+          unitNet: (x && x.unitNet != null) ? x.unitNet : null,
+          unitGross: (x && x.unitGross != null) ? x.unitGross : null,
+          vatPerc: (x && x.vatPerc != null) ? x.vatPerc : null,
+          net: (x && x.net != null) ? x.net : null,
+          vat: (x && x.vat != null) ? x.vat : null,
+          gross: (x && x.gross != null) ? x.gross : null
+        })),
+        rowsCount: Array.isArray(d.rows) ? d.rows.length : 0,
+        netTotal: (d && d.netTotal != null) ? d.netTotal : null,
+        vatTotal: (d && d.vatTotal != null) ? d.vatTotal : null,
+        grossTotal: (d && d.grossTotal != null) ? d.grossTotal : null,
+        currency: String(d.currency || "EUR"),
+        xmlHash: newHash,
+        syncState: isNew ? "new" : "updated",
+        updatedAt: serverTimestamp(),
+        lastSeenAt: serverTimestamp()
+      };
+
+      if (isNew){
+        payload.createdAt = serverTimestamp();
+        payload.rev = 1;
+      } else {
+        const prev = Number(existing?.rev || 1);
+        payload.rev = (Number.isFinite(prev) ? prev : 1) + 1;
+      }
+
+      try{
+        const ref = doc(H.fb.db, "orgs", H.ORG_ID, "daneaDdts", keyToId(k));
+        await setDoc(ref, payload, { merge: true });
+        S.lastSyncError = "";
+      }catch(e){
+        const msg = String(e?.code || e?.message || e || "");
+        S.lastSyncError = msg;
+        console.warn("sync daneaDdts failed", msg);
+        try{ window.HubInv?.showToast?.("Permessi Firebase: non posso salvare i DDT (rules)", "err"); }catch(_){}
+        if (/permission|insufficient|PERMISSION_DENIED/i.test(msg)) return;
+      }
+    }
+  }
+function subscribeFinishedProducts(){
+    const H = getHub();
+    if (!H || !H.fb || !H.fb.db || !H.FS) return;
+    if (S.unsub.finished) return;
+
+    try{
+      const { collection, onSnapshot, query, orderBy } = H.FS;
+      const col = collection(H.fb.db, "orgs", H.ORG_ID, "finishedProducts");
+      const q = query(col, orderBy("nameLower", "asc"));
+      S.unsub.finished = onSnapshot(q, (snap) => {
+        const arr = [];
+        const map = new Map();
+        snap.forEach(docu => {
+          const d = docu.data() || {};
+          const id = docu.id;
+          const obj = Object.assign({ id }, d);
+          arr.push(obj);
+          const code = String(obj.code || "").trim();
+          if (code) map.set(code.toLowerCase(), obj);
+        });
+        S.finished = arr;
+        S.fpByCode = map;
+        render();
+        try{ __autoModeKick("fp"); }catch(_){ }
+        // se dettaglio aperto, re-render
+        if (S.selected && $("daneaDetailWrap")?.style.display !== "none"){
+          renderDetail(S.selected, "verify");
+        }
+      }, (err) => {
+        console.warn("finishedProducts snapshot error", err);
+      });
+    }catch(e){
+      console.warn("subscribeFinishedProducts failed", e);
+    }
+  }
+
+  
+
+function subscribeFinishedProductCategories(){
+    const H = getHub();
+    if (!H || !H.fb || !H.fb.db || !H.FS) return;
+    if (S.unsub.fpcats) return;
+
+    try{
+      const { collection, onSnapshot, query, orderBy } = H.FS;
+      const col = collection(H.fb.db, "orgs", H.ORG_ID, "finishedProductCategories");
+      const q = query(col, orderBy("nameLower", "asc"));
+      S.unsub.fpcats = onSnapshot(q, (snap) => {
+        const arr = [];
+        const map = new Map();
+        snap.forEach(docu => {
+          const d = docu.data() || {};
+          let key = String(d.key || "").trim();
+          if (!key) {
+            try{ key = decodeURIComponent(String(docu.id||"")); }catch(_){ key = String(docu.id||""); }
+          }
+          key = String(key||"").trim().toLowerCase();
+          if (!key) return;
+          const obj = Object.assign({ key }, d);
+          arr.push(obj);
+          map.set(key, obj);
+        });
+        S.fpCats = arr;
+        S.fpCatByKey = map;
+        render();
+        try{ __autoModeKick("fpcats"); }catch(_){ }
+        if (S.selected && $("daneaDetailWrap")?.style.display !== "none"){
+          renderDetail(S.selected, "verify");
+        }
+      }, (err) => {
+        console.warn("finishedProductCategories snapshot error", err);
+      });
+    }catch(e){
+      console.warn("subscribeFinishedProductCategories failed", e);
+    }
+  }
+function waitForHub(attempt){
+    attempt = attempt || 0;
+    const H = getHub();
+    if (H && H.fb && H.fb.db && H.FS){
+      S.hub = H;
+      subscribeCompleted();
+      subscribeCache();
+      subscribeFinishedProducts();
+      subscribeFinishedProductCategories();
+
+      // se abbiamo parsato XML prima che Firestore fosse pronto, sincronizza ora
+      try{
+        if (Array.isArray(S.pendingParsed) && S.pendingParsed.length){
+          const p = S.pendingParsed;
+          S.pendingParsed = null;
+          syncParsedToFirestore(p).catch(()=>{});
+        }
+      }catch(_){ }
+      return;
+    }
+    if (attempt > 200) return;
+    setTimeout(() => waitForHub(attempt+1), 100);
+  }
+
+  function init(){
+    const root = $("viewDaneaDdt");
+    if (!root) return;
+
+    // restore prefs (hidden UI) — always auto-load XML when you enter
+    try{
+      const stored = String(localStorage.getItem(LS_URL) || "").trim();
+      const base = stored || DEFAULT_XML_URL_BASE;
+      S.xmlUrl = normalizeDaneaXmlUrl(base);
+      try{ localStorage.setItem(LS_URL, S.xmlUrl); }catch(_){}
+    }catch(_){}
+
+    // restore toggle (default ON)
+    try{ setAutoDischarge(__readAutoFromLS()); }catch(_){ }
+
+    bindEvents();
+    render();
+
+    // start polling even if not logged
+    startPolling();
+    fetchNow(false);
+
+    // subscribe Firestore (when hub ready)
+    waitForHub(0);
+
+    // expose hook (called by menu click)
+    window.HubDaneaDdt = window.HubDaneaDdt || {};
+    window.HubDaneaDdt.refresh = function(){
+      try{ render(); }catch(_){}
+      try{ fetchNow(true); }catch(_){}
+    };
+    window.HubDaneaDdt.backToList = function(){
+      try{ backToList(); }catch(_){}
+    };
+  }
+
+  if (document.readyState === "loading"){
+    document.addEventListener("DOMContentLoaded", init);
+  } else {
+    init();
+  }
+})();
+
+
+
+
+;
+/* ===== revenue.js ===== */
+/* Sezione: Fatturato
+   - Mostra il fatturato per DDT COMPLETATI con movimenti creati
+   - Dati letti da Firestore:
+     • orgs/{ORG_ID}/daneaDdtCompleted
+     • orgs/{ORG_ID}/daneaDdts (fallback/importi riga)
+*/
+(function(){
+  "use strict";
+
+  const S = {
+    ready: false,
+    hub: null,
+    completed: [],
+    completedMap: new Map(),
+    cacheMap: new Map(),
+    selectedKey: "",
+    unsub: { done: null, cache: null }
+  };
+
+  function H(){ try{ return globalThis.__HUB || null; }catch(_){ return null; } }
+  function $(id){ return document.getElementById(id); }
+
+  function esc(s){
+    return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
+  }
+  function escAttr(s){ return esc(s).replace(/\n/g, " "); }
+  function norm(s){ return String(s ?? "").trim().toLowerCase(); }
+
+  function fmtDateIT(iso){
+    try{
+      const d = new Date(String(iso || ""));
+      if (Number.isNaN(d.getTime())) return String(iso || "—");
+      return d.toLocaleDateString("it-IT");
+    }catch(_){ return String(iso || "—"); }
+  }
+
+  function toNum(v){
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  function fmtMoney(v, cur){
+    const n = toNum(v);
+    if (n == null) return "—";
+    const c = String(cur || "EUR").trim() || "EUR";
+    try{ return n.toLocaleString("it-IT", { style: "currency", currency: c }); }catch(_){
+      try{ return "€ " + n.toLocaleString("it-IT", { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }catch(__){
+        return String(n);
+      }
+    }
+  }
+
+  function fmtQty(q, raw){
+    const n = toNum(q);
+    if (n == null) return String(raw || "—");
+    try{ return n.toLocaleString("it-IT", { maximumFractionDigits: 3 }); }catch(_){ return String(n); }
+  }
+
+  function isMovementsCreated(d){
+    try{
+      const ids = Array.isArray(d && d.movementIds) ? d.movementIds : [];
+      return ids.length > 0;
+    }catch(_){ return false; }
+  }
+
+  function rebuildCompletedMap(){
+    const m = new Map();
+    for (const c of (S.completed || [])){
+      const k = String(c && (c.key || c._id) || "").trim();
+      if (k) m.set(k, c);
+    }
+    S.completedMap = m;
+  }
+
+  function rebuildCacheMap(list){
+    const m = new Map();
+    for (const d of (list || [])){
+      const k = String(d && d.key || "").trim();
+      if (k) m.set(k, d);
+    }
+    S.cacheMap = m;
+  }
+
+  function setDetailOpen(open){
+    const list = $("revListWrap");
+    const det = $("revDetailWrap");
+    if (list) list.style.display = open ? "none" : "";
+    if (det) det.style.display = open ? "" : "none";
+    try{ window.__syncDockedControlsVisibility && window.__syncDockedControlsVisibility(); }catch(_){ }
+  }
+
+  function computeTotalsFromRows(rows){
+    const out = { net: 0, vat: 0, gross: 0 };
+    const arr = Array.isArray(rows) ? rows : [];
+    for (const r of arr){
+      const net = toNum(r && r.net);
+      const vat = toNum(r && r.vat);
+      const gross = toNum(r && r.gross);
+      const n = (net == null) ? 0 : net;
+      const v = (vat == null) ? 0 : vat;
+      const g = (gross == null) ? (n + v) : gross;
+      out.net += n;
+      out.vat += v;
+      out.gross += g;
+    }
+    return out;
+  }
+
+  function getDdtModel(key){
+    const k = String(key || "").trim();
+    if (!k) return null;
+
+    const done = S.completedMap.get(k) || null;
+    const cached = S.cacheMap.get(k) || null;
+
+    // Fonte principale: cache (daneaDdts) perché è l’ultimo parse dell’XML
+    const base = cached || done;
+    if (!base) return null;
+
+    const currency = String((cached && cached.currency) || (done && done.currency) || "EUR");
+    const rows = (cached && Array.isArray(cached.rows) && cached.rows.length)
+      ? cached.rows
+      : (done && Array.isArray(done.rows) ? done.rows : []);
+
+    const tDone = {
+      net: toNum(done && done.netTotal),
+      vat: toNum(done && done.vatTotal),
+      gross: toNum(done && done.grossTotal)
+    };
+    const tCache = {
+      net: toNum(cached && cached.netTotal),
+      vat: toNum(cached && cached.vatTotal),
+      gross: toNum(cached && cached.grossTotal)
+    };
+
+    // Preferisci i totali della cache (aggiornabili anche per DDT già completati)
+    let netTotal = (tCache.net != null) ? tCache.net : (tDone.net != null) ? tDone.net : null;
+    let vatTotal = (tCache.vat != null) ? tCache.vat : (tDone.vat != null) ? tDone.vat : null;
+    let grossTotal = (tCache.gross != null) ? tCache.gross : (tDone.gross != null) ? tDone.gross : null;
+
+    if (netTotal == null || vatTotal == null || grossTotal == null){
+      const tr = computeTotalsFromRows(rows);
+      if (netTotal == null) netTotal = tr.net;
+      if (vatTotal == null) vatTotal = tr.vat;
+      if (grossTotal == null) grossTotal = tr.gross;
+    }
+
+    return {
+      key: k,
+      number: String(base.number || "").trim(),
+      date: String(base.date || "").trim(),
+      customer: String(base.customer || "").trim(),
+      currency,
+      rows,
+      netTotal: netTotal || 0,
+      vatTotal: vatTotal || 0,
+      grossTotal: grossTotal || 0,
+      __done: done
+    };
+  }
+
+  function listDdts(){
+    const list = (S.completed || []).filter(isMovementsCreated);
+    // ordina: più recenti prima (data, numero)
+    return list.slice().sort((a,b) => {
+      const da = String(a?.date || "");
+      const db = String(b?.date || "");
+      const na = String(a?.number || "");
+      const nb = String(b?.number || "");
+      return db.localeCompare(da) || nb.localeCompare(na);
+    });
+  }
+
+  
+
+  /* =========================================================
+     HOME — Cockpit fatturato (Dashboard)
+     - usa i DDT completati con movimenti creati
+     - KPI: Oggi / 7g / Mese / IVA mese
+     ========================================================= */
+  let __homeRevBound = false;
+  let __homeRevLockedTileH = 0;
+  // Dashboard cockpit: nessun toggle giorno/settimana/mese nel box.
+  // Manteniamo la vista mensile (12 mesi). I dettagli si vedono nella sezione "Fatturato".
+  let __homeRevPeriod = "month";
+
+  function __pad2(n){ return String(n).padStart(2, "0"); }
+  function __todayISO(){
+    const d = new Date();
+    return `${d.getFullYear()}-${__pad2(d.getMonth()+1)}-${__pad2(d.getDate())}`;
+  }
+
+
+  function __addDays(iso, delta){
+    const d = new Date(String(iso||"") + "T00:00:00");
+    if (Number.isNaN(d.getTime())) return "";
+    d.setDate(d.getDate() + (Number(delta)||0));
+    return `${d.getFullYear()}-${__pad2(d.getMonth()+1)}-${__pad2(d.getDate())}`;
+  }
+  
+  function __isoFromDate(d){
+    try{
+      if (!d || Number.isNaN(d.getTime())) return "";
+      return `${d.getFullYear()}-${__pad2(d.getMonth()+1)}-${__pad2(d.getDate())}`;
+    }catch(_){ return ""; }
+  }
+
+  function __weekStartISO(iso){
+    try{
+      const d = new Date(String(iso||"") + "T00:00:00");
+      if (Number.isNaN(d.getTime())) return "";
+      const dow = d.getDay();
+      const diff = (dow === 0 ? -6 : 1 - dow);
+      d.setDate(d.getDate() + diff);
+      return __isoFromDate(d);
+    }catch(_){ return ""; }
+  }
+
+  function __fmtEuro0(v){
+    const n = toNum(v);
+    if (n == null) return "—";
+    const x = Math.round(n);
+    try{ return "€ " + x.toLocaleString("it-IT"); }catch(_){ return "€ " + String(x); }
+  }
+
+  function __lockHomeRevenueCockpitHeight(){
+    const el = $("homeRevenueCockpit");
+    if (!el) return (__homeRevLockedTileH || 0);
+    const ref = document.getElementById("btnGoCategories");
+    const r = ref && ref.getBoundingClientRect ? ref.getBoundingClientRect() : null;
+
+    // Altezza cockpit = come prima (stessa scala del tile "Categorie")
+    // (+30%: leggibilita' KPI senza far "saltare" la dashboard)
+    const baseH = Math.round((r && r.height) || 0);
+    const h = Math.round(baseH * 1.30);
+
+    if (h > 10){
+      if (h !== __homeRevLockedTileH){
+        __homeRevLockedTileH = h;
+        el.style.height = h + "px";
+        el.style.minHeight = h + "px";
+        el.style.maxHeight = h + "px";
+      }
+      return h;
+    }
+    return (__homeRevLockedTileH || 0);
+  }
+  function renderHomeCockpit(){
+    const boxTotal = $("homeRevenueTotalCockpit");
+    const boxPack  = $("homeRevenuePackCockpit");
+    if (!boxTotal && !boxPack) return;
+
+    const elTotal = $("homeRevTotal");
+    const elMeta  = $("homeRevMeta");
+    const elTopPack     = $("homeRevTopPackaging");
+    const elTopPackMeta = $("homeRevTopPackagingMeta");
+
+    const today = __todayISO();
+    const weekStart = __addDays(today, -6);
+    const monthStart = today ? (today.slice(0,8) + "01") : "";
+
+    // Periodo (best-effort): default mese corrente.
+    let pickedLabel = "Mese corrente";
+    let fromISO = monthStart;
+    let toISO = today;
+    if (__homeRevPeriod === "day"){
+      pickedLabel = "Oggi";
+      fromISO = today;
+      toISO = today;
+    } else if (__homeRevPeriod === "week"){
+      pickedLabel = "Ultimi 7 giorni";
+      fromISO = weekStart;
+      toISO = today;
+    } else {
+      __homeRevPeriod = "month";
+      pickedLabel = "Mese corrente";
+      fromISO = monthStart;
+      toISO = today;
+    }
+
+    function __isIsoDate(s){ return /^\d{4}-\d{2}-\d{2}$/.test(String(s||"")); }
+    function __inRange(day){
+      const d = String(day||"").trim();
+      if (!__isIsoDate(d)) return false;
+      if (!fromISO || !toISO) return true;
+      return d >= fromISO && d <= toISO;
+    }
+
+    function __macroGroup(code){
+      try{
+        if (typeof getMacroCategoryForCode === "function") return String(getMacroCategoryForCode(code) || "").trim().toLowerCase();
+      }catch(_){ }
+      return "";
+    }
+
+    // Aggregazioni (solo DDT nel periodo)
+    let sumGross = 0;
+    let ddtCount = 0;
+    const packAgg = new Map(); // codeLower -> {code,name,uom,qty}
+
+    const list = listDdts();
+    for (const d of (Array.isArray(list) ? list : [])){
+      const k = String(d?.key || d?._id || "").trim();
+      const m = getDdtModel(k);
+      if (!m) continue;
+
+      const day = String(m.date || "").trim();
+      if (!__inRange(day)) continue;
+
+      const grossTot = Number(toNum(m.grossTotal) || 0);
+      sumGross += grossTot;
+      ddtCount++;
+
+      // Imballaggi movimentati (allocazioni componenti)
+      const done = m.__done || null;
+      const allocs = (done && Array.isArray(done.allocations)) ? done.allocations : [];
+      for (const a of allocs){
+        const code = String(a?.code || "").trim();
+        if (!code) continue;
+        if (__macroGroup(code) !== "imballaggi") continue;
+
+        const qty = Number(a?.qty || 0);
+        if (!Number.isFinite(qty) || qty <= 0) continue;
+
+        const low = code.toLowerCase();
+        const name = String(a?.name || a?.item || "").trim() || code;
+        const uom = String(a?.uom || "").trim();
+
+        const rec = packAgg.get(low) || { code, name, uom, qty: 0 };
+        rec.qty += qty;
+        if ((!rec.name || rec.name === rec.code) && name) rec.name = name;
+        if (!rec.uom && uom) rec.uom = uom;
+        packAgg.set(low, rec);
+      }
+    }
+
+    function __pickTop(map, cmp){
+      let best = null;
+      for (const v of map.values()){
+        if (!best) { best = v; continue; }
+        if (cmp(v, best) > 0) best = v;
+      }
+      return best;
+    }
+
+    const topPack = __pickTop(packAgg, (a,b) => {
+      const qa = Number(a?.qty || 0);
+      const qb = Number(b?.qty || 0);
+      if (qa !== qb) return qa - qb;
+      return String(a?.name || a?.code || "").localeCompare(String(b?.name || b?.code || ""), "it", { sensitivity:"base" });
+    });
+
+    // UI: fatturato totale
+    if (elTotal) elTotal.textContent = __fmtEuro0(sumGross);
+    if (elMeta) elMeta.textContent = `${pickedLabel} · ${Number(ddtCount || 0).toLocaleString("it-IT")} DDT`;
+
+    // UI: imballaggio più movimentato
+    if (elTopPack) elTopPack.textContent = topPack ? String(topPack.name || topPack.code || "—") : "—";
+    if (elTopPackMeta){
+      if (!topPack) {
+        elTopPackMeta.textContent = "—";
+      } else {
+        const q = Number(topPack.qty || 0);
+        const u = String(topPack.uom || "").trim();
+        elTopPackMeta.textContent = q ? (q.toLocaleString("it-IT") + (u ? (" " + u) : "")) : "—";
+      }
+    }
+
+    // Tooltip (riassunto)
+    const tip = "Cockpit fatturato — " + [
+      `${pickedLabel}: ${__fmtEuro0(sumGross)} (${Number(ddtCount||0).toLocaleString("it-IT")} DDT)`,
+      topPack ? (`Imballaggio: ${String(topPack.name || topPack.code || "—")} · ${Number(topPack.qty||0).toLocaleString("it-IT")}${topPack.uom ? (" " + String(topPack.uom)) : ""}`) : "Imballaggio: —"
+    ].join(" — ");
+    try{ if (boxTotal) boxTotal.title = tip; }catch(_){ }
+    try{ if (boxPack) boxPack.title = tip; }catch(_){ }
+
+    // Bind una sola volta: click -> apri sezione Fatturato
+    if (!__homeRevBound){
+      __homeRevBound = true;
+
+      function openRevenue(e){
+        try{ e && e.preventDefault && e.preventDefault(); }catch(_){ }
+        try{ e && e.stopPropagation && e.stopPropagation(); }catch(_){ }
+        try{
+          if (window.HubInv && typeof window.HubInv.setView === "function") window.HubInv.setView("revenue");
+          if (window.HubRevenue && typeof window.HubRevenue.refresh === "function") window.HubRevenue.refresh();
+        }catch(_){ }
+      }
+
+      const bindBox = (el) => {
+        if (!el) return;
+        el.addEventListener("pointerdown", (e) => {
+          try{ e.stopPropagation(); e.stopImmediatePropagation && e.stopImmediatePropagation(); }catch(_){ }
+        }, true);
+        el.addEventListener("click", openRevenue, true);
+        el.addEventListener("keydown", (e) => {
+          if (!e) return;
+          if (e.key !== "Enter" && e.key !== " ") return;
+          try{ e.preventDefault(); e.stopPropagation(); }catch(_){ }
+          openRevenue(e);
+        });
+      };
+
+      bindBox(boxTotal);
+      bindBox(boxPack);
+    }
+  }
+function renderList(){
+    const view = $("viewRevenue");
+    const isActive = !!(view && view.classList.contains("active"));
+
+    const list = listDdts();
+    try{ const pill = $("pillRevenueCount"); if (pill) pill.textContent = String(list.length); }catch(_){ }
+
+    if (!isActive) return;
+
+    const q = norm($("revSearch")?.value);
+    const meta = $("revMeta");
+    const tbody = $("revTbody");
+    if (!tbody) return;
+
+    const filtered = q ? list.filter(d => {
+      const k = String(d?.key || d?._id || "").trim();
+      const base = [d?.number, d?.date, d?.customer, k].map(x => norm(x)).join(" ");
+      if (base.includes(q)) return true;
+      // include codici/articoli (solo se cache disponibile)
+      const m = getDdtModel(k);
+      if (!m) return false;
+      try{
+        for (const r of (m.rows || [])){
+          const hay = norm((r?.code || "") + " " + (r?.desc || r?.item || ""));
+          if (hay.includes(q)) return true;
+        }
+      }catch(_){ }
+      return false;
+    }) : list;
+
+    try{ if (meta) meta.textContent = `${filtered.length} DDT completati`; }catch(_){ }
+
+    if (!filtered.length){
+      tbody.innerHTML = `<tr><td class="td-muted" colspan="7">${q ? "Nessun DDT trovato." : "Nessun DDT completato (movimenti creati)."}</td></tr>`;
+      return;
+    }
+
+    tbody.innerHTML = filtered.map(d => {
+      const k = String(d?.key || d?._id || "").trim();
+      const m = getDdtModel(k) || { key:k, number: d?.number, date: d?.date, customer: d?.customer, currency:"EUR", netTotal:0, vatTotal:0, grossTotal:0 };
+      const cur = m.currency || "EUR";
+
+      return `<tr class="jsRevRow" data-key="${escAttr(k)}" title="Apri">
+        <td data-label="Data">${esc(fmtDateIT(m.date) || "—")}</td>
+        <td data-label="Numero"><span class="kbd">${esc(m.number || "—")}</span></td>
+        <td data-label="Cliente">${esc(m.customer || "—")}</td>
+        <td data-label="Imponibile" class="qty" style="text-align:right;">${esc(fmtMoney(m.netTotal, cur))}</td>
+        <td data-label="IVA" class="qty" style="text-align:right;">${esc(fmtMoney(m.vatTotal, cur))}</td>
+        <td data-label="Totale" class="qty" style="text-align:right;">${esc(fmtMoney(m.grossTotal, cur))}</td>
+        <td data-label="" style="text-align:right;">
+          <button class="btn btn-ghost btn-xs jsRevOpen" type="button" data-key="${escAttr(k)}">Apri</button>
+        </td>
+      </tr>`;
+    }).join("");
+  }
+
+  function renderDetail(key){
+    const m = getDdtModel(key);
+    const rows = m ? (m.rows || []) : [];
+
+    const title = $("revDetTitle");
+    const sub = $("revDetSubtitle");
+    const netP = $("revDetNet");
+    const vatP = $("revDetVat");
+    const groP = $("revDetGross");
+    const foot = $("revDetFooter");
+    const tbody = $("revItemsTbody");
+
+    if (!m || !tbody){
+      if (tbody) tbody.innerHTML = '<tr><td class="td-muted" colspan="6">DDT non trovato.</td></tr>';
+      return;
+    }
+
+    const cur = m.currency || "EUR";
+    if (title) title.textContent = "Dettaglio DDT";
+    if (sub) sub.textContent = [
+      (m.customer || "—"),
+      (m.number ? ("DDT " + m.number) : ("DDT " + m.key)),
+      (fmtDateIT(m.date) || "—")
+    ].join(" · ");
+
+    if (netP) netP.textContent = "Imponibile: " + fmtMoney(m.netTotal, cur);
+    if (vatP) vatP.textContent = "IVA: " + fmtMoney(m.vatTotal, cur);
+    if (groP) groP.textContent = "Totale: " + fmtMoney(m.grossTotal, cur);
+
+    if (!rows.length){
+      tbody.innerHTML = '<tr><td class="td-muted" colspan="6">Nessuna riga nel DDT.</td></tr>';
+    } else {
+      tbody.innerHTML = rows.map(r => {
+        const code = String(r?.code || "").trim();
+        const desc = String(r?.desc || r?.item || "").trim();
+        const qtyDisp = fmtQty(r?.qty, r?.qtyRaw);
+
+        // importi riga (fallback in UI)
+        let net = toNum(r?.net);
+        let vat = toNum(r?.vat);
+        let gross = toNum(r?.gross);
+        const q = toNum(r?.qty);
+        const unitNet = toNum(r?.unitNet);
+        const unitGross = toNum(r?.unitGross);
+        const vatPerc = toNum(r?.vatPerc);
+
+        if (net == null && unitNet != null && q != null) net = unitNet * q;
+        if (gross == null && unitGross != null && q != null) gross = unitGross * q;
+        if (vat == null && net != null && vatPerc != null) vat = net * (vatPerc/100);
+        if (gross == null && net != null && vat != null) gross = net + vat;
+        if (net == null && gross != null && vat != null) net = gross - vat;
+        if (vat == null && gross != null && net != null) vat = gross - net;
+
+        return `<tr>
+          <td data-label="Codice"><span class="kbd">${esc(code || "—")}</span></td>
+          <td data-label="Articolo">${esc(desc || code || "—")}</td>
+          <td data-label="Q.tà" class="qty" style="text-align:right;">${esc(qtyDisp || "—")}</td>
+          <td data-label="Imponibile" class="qty" style="text-align:right;">${esc(fmtMoney(net, cur))}</td>
+          <td data-label="IVA" class="qty" style="text-align:right;">${esc(fmtMoney(vat, cur))}</td>
+          <td data-label="Totale" class="qty" style="text-align:right;">${esc(fmtMoney(gross, cur))}</td>
+        </tr>`;
+      }).join("");
+    }
+
+    if (foot){
+      const hasMoney = (toNum(m.netTotal) || 0) > 0 || (toNum(m.grossTotal) || 0) > 0;
+      foot.textContent = hasMoney
+        ? "Valori letti dall’XML (imponibile + IVA)."
+        : "Nell’XML non trovo i campi importo (imponibile/IVA) per queste righe.";
+    }
+  }
+
+  function openDetail(key){
+    const k = String(key || "").trim();
+    if (!k) return;
+    S.selectedKey = k;
+    setDetailOpen(true);
+    renderDetail(k);
+  }
+
+  function backToList(){
+    S.selectedKey = "";
+    setDetailOpen(false);
+    renderList();
+    try{ renderHomeCockpit(); }catch(_){ }
+  }
+
+  function bindEvents(){
+    if (S.ready) return;
+    S.ready = true;
+
+    $("btnRevClear")?.addEventListener("click", () => {
+      const i = $("revSearch");
+      if (i) i.value = "";
+      renderList();
+      try{ i && i.focus && i.focus(); }catch(_){ }
+    });
+    $("revSearch")?.addEventListener("input", () => renderList());
+
+    $("btnRevBackList")?.addEventListener("click", (e) => {
+      try{ e.preventDefault(); e.stopPropagation(); }catch(_){ }
+      backToList();
+    });
+
+    $("revTbody")?.addEventListener("click", (e) => {
+      const btn = e.target?.closest?.("button.jsRevOpen");
+      const tr = e.target?.closest?.("tr.jsRevRow");
+      const key = String(btn?.getAttribute("data-key") || tr?.getAttribute("data-key") || "").trim();
+      if (!key) return;
+      if (btn){ try{ e.preventDefault(); e.stopPropagation(); }catch(_){ } }
+      openDetail(key);
+    });
+  }
+
+  function subscribe(){
+    const h = H();
+    if (!h || !h.fb || !h.fb.db || !h.FS) return false;
+    if (S.unsub.done || S.unsub.cache) return true;
+
+    try{
+      const { collection, query, orderBy, onSnapshot } = h.FS;
+
+      // completed
+      S.unsub.done = onSnapshot(
+        query(collection(h.fb.db, "orgs", h.ORG_ID, "daneaDdtCompleted"), orderBy("date", "desc")),
+        (snap) => {
+          const arr = [];
+          snap.forEach(docu => {
+            const d = docu.data() || {};
+            arr.push(Object.assign({ _id: docu.id }, d));
+          });
+          S.completed = arr;
+          rebuildCompletedMap();
+          renderList();
+          if (S.selectedKey) renderDetail(S.selectedKey);
+          try{ renderHomeCockpit(); }catch(_){ }
+        },
+        (err) => { try{ console.warn("revenue completed snapshot error", err); }catch(_){ } }
+      );
+
+      // cache ddts (importi)
+      S.unsub.cache = onSnapshot(
+        query(collection(h.fb.db, "orgs", h.ORG_ID, "daneaDdts"), orderBy("date", "desc")),
+        (snap) => {
+          const arr = [];
+          snap.forEach(docu => {
+            const d = docu.data() || {};
+            let key = String(d.key || d.ddtKey || "").trim();
+            if (!key){
+              try{ key = decodeURIComponent(String(docu.id||"")); }catch(_){ key = String(docu.id||""); }
+              key = String(key||"").trim();
+            }
+            if (!key) return;
+            arr.push(Object.assign({ _id: docu.id, key }, d));
+          });
+          rebuildCacheMap(arr);
+          renderList();
+          if (S.selectedKey) renderDetail(S.selectedKey);
+          try{ renderHomeCockpit(); }catch(_){ }
+        },
+        (err) => { try{ console.warn("revenue daneaDdts snapshot error", err); }catch(_){ } }
+      );
+
+      return true;
+    }catch(e){
+      try{ console.warn("revenue subscribe failed", e); }catch(_){ }
+      return false;
+    }
+  }
+
+  function refresh(){
+    bindEvents();
+    subscribe();
+    // se riapro la vista, default su lista
+    if (!S.selectedKey) setDetailOpen(false);
+    renderList();
+    try{ renderHomeCockpit(); }catch(_){ }
+  }
+
+  function waitForHub(attempt){
+    attempt = attempt || 0;
+    const h = H();
+    if (h && h.fb && h.fb.db && h.FS){
+      refresh();
+      return;
+    }
+    if (attempt > 200) return;
+    setTimeout(() => waitForHub(attempt+1), 100);
+  }
+
+  // expose
+  window.HubRevenue = window.HubRevenue || {};
+  window.HubRevenue.refresh = refresh;
+  window.HubRevenue.backToList = backToList;
+  window.HubRevenue.openDetail = openDetail;
+  window.HubRevenue.renderHomeCockpit = renderHomeCockpit;
+
+  if (document.readyState === "loading"){
+    document.addEventListener("DOMContentLoaded", () => waitForHub(0));
+  } else {
+    waitForHub(0);
+  }
+})();
+
 /* ===== hub_trash.js ===== */
 /* hub_trash.js - Cestino (soft delete + restore)
    Richiede: globalThis.__HUB = { fb, ORG_ID, setView, closeSideMenu, FS, orgCol }
@@ -919,7 +4977,6 @@
       const sideMenuOverlay = $("sideMenuOverlay");
       sideMenu && sideMenu.setAttribute("aria-hidden", "true");
       sideMenuOverlay && sideMenuOverlay.setAttribute("aria-hidden", "true");
-      __syncBodyLock();
     }catch(_){}
   }
 
@@ -939,13 +4996,15 @@
     if (!modal) return;
 
     if (open) {
-      closeSideMenuSafe();
       modal.classList.add("open");
-      __syncBodyLock();
+      document.body.classList.add("modal-open");
       try{ setTimeout(() => $("catEditName")?.focus(), 0); }catch(_){}
     } else {
       modal.classList.remove("open");
-      __syncBodyLock();
+      // Rimuovi lock scroll solo se nessun altro modale è aperto
+      try{
+        if (!document.querySelector(".modal.open")) document.body.classList.remove("modal-open");
+      }catch(_){ document.body.classList.remove("modal-open"); }
 
       selectedKey = "";
       selectedSnapshot = { key:"", name:"", color:"", macro:"" };
@@ -958,6 +5017,8 @@
     setDetailOpen(!!selectedKey);
     renderDetail();
   }
+
+
 
   function isActive(){
     const v = $("viewCategories");
@@ -1087,6 +5148,12 @@
         (!macroInp || curMacro === snapMacro);
     };
     syncSave();
+  }
+
+  function backToList(){
+    try{ setDetailOpen(false); }catch(_){}
+    try{ S.selected=null; S.selectedKey=""; }catch(_){}
+    try{ render(); }catch(_){}
   }
 
   function render(){
@@ -1242,6 +5309,1685 @@
 })();
 
 
+
+
+;
+/* ===== fp_categories.js ===== */
+/* Hub Inventario — Sezione Categorie prodotti finiti
+   - CRUD categorie (collection: finishedProductCategories)
+   - BOM per categoria
+   - Assegnazione prodotti finiti (field su finishedProducts: categoryKey)
+*/
+(function(){
+  "use strict";
+
+  const S = {
+    ready:false,
+    cats:[],
+    catMap:new Map(),
+    products:[],
+    prodMap:new Map(),
+    finished:[],
+    fpByCode:new Map(),
+    selectedKey:"",
+    draft:null,
+
+    // edit state (nome + chiave)
+    keyManual:false,
+
+    unsub:{ cats:null, products:null, finished:null }
+  };
+
+  function H(){ try{ return globalThis.__HUB || null; }catch(_){ return null; } }
+  function $(id){ return document.getElementById(id); }
+  function esc(s){ return String(s ?? "").replace(/[&<>"']/g, (c)=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+  function norm(s){ return String(s ?? "").trim().toLowerCase(); }
+  function keyToId(k){ return encodeURIComponent(String(k||"")); }
+
+  function slugKey(name){
+    return String(name||"")
+      .toLowerCase()
+      .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+      .replace(/[^a-z0-9]+/g, "_")
+      .replace(/^_+|_+$/g, "")
+      .replace(/_+/g, "_")
+      .slice(0, 64);
+  }
+
+  function showToast(msg, kind){
+    try{ window.HubInv?.showToast?.(msg, kind); return; }catch(_){ }
+    try{ alert(String(msg||"")); }catch(_){ }
+  }
+
+  function closeSideMenuSafe(){
+    try{ window.HubInv?.closeSideMenu?.(); }catch(_){ }
+    try{ H()?.closeSideMenu?.(); }catch(_){ }
+  }
+
+  function setViewSafe(key){
+    try{ window.HubInv?.setView?.(key); return; }catch(_){ }
+    try{ H()?.setView?.(key); }catch(_){ }
+  }
+
+  // UI patch: modal categoria prodotti finiti
+  // - niente aggiunta prodotti finiti qui (si fa da sezione Prodotti finiti)
+  // - input componenti: niente datalist infinito (solo ricerca intelligente)
+  // - modal full-screen con margini
+  function __fpCatPatchModalUI(){
+    try{
+      const modal = $("modalFPCategory");
+      if (!modal) return;
+
+      // CSS full screen (desktop: con margini del backdrop, mobile: full)
+      try{
+        if (!document.getElementById("fpCatFullCss")){
+          const st = document.createElement("style");
+          st.id = "fpCatFullCss";
+          st.textContent = `
+#modalFPCategory .modalProductContent{\n  width: calc(100vw - 32px) !important;\n  max-width: none !important;\n  height: calc(100dvh - var(--header-h) - 32px) !important;\n  max-height: calc(100dvh - var(--header-h) - 32px) !important;\n}\n@media (max-width: 768px){\n  #modalFPCategory .modalProductContent{\n    width: 100vw !important;\n    height: calc(100dvh - var(--header-h)) !important;\n    max-height: none !important;\n  }\n}`;
+          document.head.appendChild(st);
+        }
+      }catch(_){ }
+
+      // CSS: header/footer fissi, body scroll (tasti sempre visibili)
+      try{
+        if (!document.getElementById("fpCatDockCss")){
+          const st2 = document.createElement("style");
+          st2.id = "fpCatDockCss";
+          st2.textContent = `
+#modalFPCategory .modalProductContent{
+  padding: 0 !important;
+  display: flex !important;
+  flex-direction: column !important;
+  gap: 0 !important;
+  overflow: hidden !important;
+}
+#modalFPCategory .fpCatModalHeader{
+  flex: 0 0 auto;
+  padding: 18px 18px 12px;
+  background: #fff;
+  border-bottom: 1px solid rgba(0,0,0,.08);
+}
+#modalFPCategory .fpCatModalBody{
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 16px 18px;
+  -webkit-overflow-scrolling: touch;
+}
+#modalFPCategory .fpCatModalFooter{
+  flex: 0 0 auto;
+  padding: 12px 18px calc(12px + var(--safe-bot));
+  background: #fff;
+  border-top: 1px solid rgba(0,0,0,.08);
+}
+@media (max-width: 768px){
+  #modalFPCategory .fpCatModalHeader{ padding: 14px 14px 10px; }
+  #modalFPCategory .fpCatModalBody{ padding: 12px 14px; }
+  #modalFPCategory .fpCatModalFooter{ padding: 10px 14px calc(10px + var(--safe-bot)); }
+}
+`;
+          document.head.appendChild(st2);
+        }
+      }catch(_){ }
+
+      // CSS: tabella componenti (BOM) senza righe azzurre, identica alle altre dataGrid
+      try{
+        if (!document.getElementById("fpCatBomTableCss")){
+          const st3 = document.createElement("style");
+          st3.id = "fpCatBomTableCss";
+          st3.textContent = `
+#modalFPCategory #fpCatCompTable tbody tr td{ background: transparent !important; }
+#modalFPCategory #fpCatCompTable tbody tr:hover td{ background: rgba(11,31,58,.04) !important; }
+`;
+          document.head.appendChild(st3);
+        }
+      }catch(_){ }
+
+      // Subtitle coerente col nuovo workflow
+      try{
+        const sub = $("fpCatModalSub");
+        if (sub) sub.textContent = "Crea la distinta base (componenti) e visualizza i prodotti finiti associati. I prodotti si aggiungono da sezione Prodotti finiti.";
+      }catch(_){ }
+
+      // Rimuovi datalist infinito su componenti (solo ricerca intelligente)
+      try{
+        const comp = $("fpCatCompPick");
+        if (comp) comp.removeAttribute("list");
+      }catch(_){ }
+      try{ const dl = $("fpCatComponentList"); if (dl) dl.innerHTML = ""; }catch(_){ }
+
+      // Nascondi UI aggiunta prodotti finiti (si aggiungono altrove)
+      try{
+        const inp = $("fpCatMemberPick");
+        if (inp){
+          const row = inp.closest?.(".inlineRow") || inp.parentElement;
+          if (row) row.style.display = "none";
+          inp.disabled = true;
+        }
+      }catch(_){ }
+      try{ const btn = $("btnFpCatMemberAdd"); if (btn){ const r = btn.closest?.(".inlineRow") || btn.parentElement; if (r) r.style.display = "none"; btn.disabled = true; } }catch(_){ }
+      try{ const w = $("fpCatMemberSuggestWrap"); if (w) w.style.display = "none"; }catch(_){ }
+      try{ const dlm = $("fpCatMemberList"); if (dlm) dlm.innerHTML = ""; }catch(_){ }
+
+// Collassa lista prodotti finiti: visibile solo cliccando "Prodotti: X · BOM: Y"
+try{
+  const meta = $("fpCatDetailMeta");
+  const membersTable = $("fpCatMembersTable");
+  const membersStack = membersTable ? membersTable.closest(".stack") : null;
+  if (meta && membersStack){
+    // default: chiuso
+    membersStack.style.display = "none";
+    meta.style.cursor = "pointer";
+    meta.title = "Clicca per mostrare/nascondere i prodotti finiti";
+    meta.setAttribute("role","button");
+    meta.setAttribute("tabindex","0");
+
+    if (!(meta.dataset && meta.dataset.fpToggleBound === "1")){
+      if (meta.dataset) meta.dataset.fpToggleBound = "1";
+      const toggle = () => {
+        const open = membersStack.style.display !== "none";
+        membersStack.style.display = open ? "none" : "";
+      };
+      meta.addEventListener("click", (e)=>{
+        try{ e.preventDefault(); e.stopPropagation(); }catch(_){}
+        toggle();
+      });
+      meta.addEventListener("keydown", (e)=>{
+        if (!e) return;
+        if (e.key === "Enter" || e.key === " "){
+          e.preventDefault();
+          toggle();
+        }
+      });
+    }
+  }
+}catch(_){ }
+
+    }catch(_){ }
+  }
+
+
+  function parseQty(v){
+    const s = String(v || "").trim();
+    if (!s) return { num:null, raw:"" };
+    const m = s.match(/^(-?\d+(?:[.,]\d+)?)\s*\/\s*(\d+(?:[.,]\d+)?)$/);
+    if (m){
+      const a = Number(m[1].replace(",","."));
+      const b = Number(m[2].replace(",","."));
+      if (Number.isFinite(a) && Number.isFinite(b) && b !== 0) return { num: a/b, raw: s };
+    }
+    const n = Number(s.replace(/\./g,"").replace(",","."));
+    if (Number.isFinite(n)) return { num:n, raw:s };
+    return { num:null, raw:s };
+  }
+
+  // ===== Smart qty parsing/conversion (componenti in distinta base) =====
+  // Permette di scrivere nel campo di ricerca: "... 20 gr" / "... 0,02 kg" / "... 250 ml".
+  // Se il componente è in kg e scrivi "20 gr", verrà precompilato automaticamente "0,02" nella Q.tà.
+  let __fpCatPendingCompQty = null; // { qty:Number, uom:"g|kg|ton|ml|lt|pz|nr" }
+
+  function __fpCatNormUom(v){
+    try{ if (typeof __normalizeUom === "function") return __normalizeUom(v); }catch(_){ }
+    const raw = String(v ?? "").trim().toLowerCase();
+    if (!raw) return "";
+    let k = raw.replace(/\s+/g, "").replace(/[,;:]/g, "").replace(/\.+$/g, "");
+    k = k.replace(/º/g, "°");
+
+    if (k === "pz" || k === "p.z" || k === "p.z." || k === "pc" || k === "pcs" || k === "pezzi") return "pz";
+    if (k === "nr" || k === "n" || k === "n°" || k === "no") return "nr";
+
+    if (k === "kg" || k === "kgs" || k === "k" || k === "kilo" || k === "kilogrammi" || k === "kilogrammo") return "kg";
+    if (k === "g" || k === "gr" || k === "grammi" || k === "grammo") return "g";
+    if (k === "ton" || k === "tons" || k === "tonn" || k === "tonne" || k === "t" || k === "tonnellate" || k === "tonnellata") return "ton";
+
+    if (k === "l" || k === "lt" || k === "ltri" || k === "litri" || k === "litro" || k === "litri." || k === "litro.") return "lt";
+    if (k === "ml" || k === "millilitri" || k === "millilitro") return "ml";
+
+    return "";
+  }
+
+  function __fpCatParseNumPart(v){
+    let s = String(v ?? "").trim().replace(/\s+/g, "");
+    if (!s) return null;
+    // se ho sia . che , assumo . come separatore migliaia e , come decimale
+    if (s.includes(",") && s.includes(".")) s = s.replace(/\./g, "").replace(",", ".");
+    else if (s.includes(",")) s = s.replace(",", ".");
+    // solo . => decimale
+    const n = Number(s);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  function __fpCatParseNumSmart(v){
+    const s0 = String(v ?? "").trim();
+    if (!s0) return null;
+    const s = s0.replace(/\s+/g, "");
+    if (s.includes("/")){
+      const parts = s.split("/");
+      if (parts.length === 2){
+        const a = __fpCatParseNumPart(parts[0]);
+        const b = __fpCatParseNumPart(parts[1]);
+        if (Number.isFinite(a) && Number.isFinite(b) && b !== 0) return a / b;
+      }
+      return null;
+    }
+    return __fpCatParseNumPart(s);
+  }
+
+  function __fpCatExtractTrailingQty(raw){
+    const s0 = String(raw || "").trim();
+    if (!s0) return { clean:"", qty:null, uom:"", qtyRaw:"" };
+
+    // cattura solo se c'è l'unità in coda (kg/gr/ml/lt/ton/pz/nr)
+    const m = s0.match(/^(.*?)(?:\s+|^)(-?\d+(?:[\.,]\d+)?|-?\d+\s*\/\s*\d+(?:[\.,]\d+)?)\s*(nr\.?|n\.?|n°|pz\.?|p\.?z\.?|pcs?|kg(?:s)?\.?|g(?:r|rammi|rammo)?\.?|ml\.?|l(?:t|itri|itro)?\.?|lt\.?|ton(?:nellate|nellata|ne|n|s)?\.?|t)\s*$/i);
+    if (!m) return { clean:s0, qty:null, uom:"", qtyRaw:"" };
+
+    const clean = String(m[1] || "").trim();
+    const qtyStr = String(m[2] || "").trim();
+    const uom = __fpCatNormUom(m[3] || "");
+    const qty = __fpCatParseNumSmart(qtyStr);
+
+    if (!uom || !Number.isFinite(qty)) return { clean:s0, qty:null, uom:"", qtyRaw:"" };
+    return { clean, qty, uom, qtyRaw: qtyStr };
+  }
+
+  function __fpCatExtractQtyOnly(raw){
+    const s0 = String(raw || "").trim();
+    if (!s0) return { qty:null, uom:"", qtyRaw:"" };
+    const m = s0.match(/^(-?\d+(?:[\.,]\d+)?|-?\d+\s*\/\s*\d+(?:[\.,]\d+)?)\s*(nr\.?|n\.?|n°|pz\.?|p\.?z\.?|pcs?|kg(?:s)?\.?|g(?:r|rammi|rammo)?\.?|ml\.?|l(?:t|itri|itro)?\.?|lt\.?|ton(?:nellate|nellata|ne|n|s)?\.?|t)\s*$/i);
+    if (!m) return { qty:null, uom:"", qtyRaw:"" };
+    const qtyStr = String(m[1] || "").trim();
+    const uom = __fpCatNormUom(m[2] || "");
+    const qty = __fpCatParseNumSmart(qtyStr);
+    if (!uom || !Number.isFinite(qty)) return { qty:null, uom:"", qtyRaw:"" };
+    return { qty, uom, qtyRaw: qtyStr };
+  }
+
+  function __fpCatConvertQty(qty, fromUom, toUom){
+    const a = __fpCatNormUom(fromUom);
+    const b = __fpCatNormUom(toUom);
+    const q = Number(qty);
+    if (!a || !b || !Number.isFinite(q)) return null;
+    if (a === b) return q;
+
+    // pezzi: nr <-> pz
+    if ((a === "pz" || a === "nr") && (b === "pz" || b === "nr")) return q;
+
+    // massa: g <-> kg <-> ton
+    const mass = new Set(["g","kg","ton"]);
+    if (mass.has(a) && mass.has(b)){
+      const toG = (u, v) => (u === "g") ? v : (u === "kg") ? (v * 1000) : (v * 1000 * 1000);
+      const fromG = (u, g) => (u === "g") ? g : (u === "kg") ? (g / 1000) : (g / (1000 * 1000));
+      const g = toG(a, q);
+      return fromG(b, g);
+    }
+
+    // volume: ml <-> lt
+    const vol = new Set(["ml","lt"]);
+    if (vol.has(a) && vol.has(b)){
+      const toMl = (u, v) => (u === "ml") ? v : (v * 1000);
+      const fromMl = (u, ml) => (u === "ml") ? ml : (ml / 1000);
+      const ml = toMl(a, q);
+      return fromMl(b, ml);
+    }
+
+    return null;
+  }
+
+  function __fpCatFmtNum(v){
+    try{
+      const n = Number(v);
+      if (!Number.isFinite(n)) return "";
+      return n.toLocaleString("it-IT", { maximumFractionDigits: 6 });
+    }catch(_){
+      return String(v ?? "");
+    }
+  }
+
+  function __fpCatUpdatePendingFromPick(rawAll){
+    const parsed = __fpCatExtractTrailingQty(rawAll);
+    if (parsed && parsed.qty != null && parsed.uom){
+      __fpCatPendingCompQty = { qty: Number(parsed.qty), uom: String(parsed.uom) };
+      return String(parsed.clean || "").trim();
+    }
+    __fpCatPendingCompQty = null;
+    return String(rawAll || "").trim();
+  }
+
+  function __fpCatAutofillQtyFromPending(code, uomHint){
+    try{
+      const pend = __fpCatPendingCompQty;
+      if (!pend || pend.qty == null || !pend.uom) { __fpCatPendingCompQty = null; return; }
+
+      const qtyEl = $("fpCatCompQty");
+      if (qtyEl && String(qtyEl.value || "").trim()) { __fpCatPendingCompQty = null; return; }
+
+      // target uom: dal suggerimento o dal prodotto
+      let targetUom = __fpCatNormUom(uomHint);
+      if (!targetUom){
+        const p = S && S.prodMap ? (S.prodMap.get(norm(code)) || null) : null;
+        targetUom = __fpCatNormUom(p && (p.uom || p.um || ""));
+      }
+      if (!targetUom) { __fpCatPendingCompQty = null; return; }
+
+      const conv = __fpCatConvertQty(pend.qty, pend.uom, targetUom);
+      if (conv == null) { __fpCatPendingCompQty = null; return; }
+
+      if (qtyEl) qtyEl.value = __fpCatFmtNum(conv);
+    }catch(_){ }
+    __fpCatPendingCompQty = null;
+  }
+
+  function __fpCatParseQtyForTarget(rawQty, targetUom){
+    const s0 = String(rawQty || "").trim();
+    if (!s0) return { num:null, raw:"" };
+
+    const target = __fpCatNormUom(targetUom) || "";
+
+    // se l'utente ha scritto anche l'unità (es. "20 gr"), converti
+    const pu = __fpCatExtractQtyOnly(s0);
+    if (pu && pu.qty != null && pu.uom && target){
+      const conv = __fpCatConvertQty(pu.qty, pu.uom, target);
+      if (conv != null) return { num: conv, raw: __fpCatFmtNum(conv) };
+    }
+
+    // fallback: numero/frazione senza unità
+    const n = __fpCatParseNumSmart(s0);
+    if (Number.isFinite(n)) return { num: n, raw: s0 };
+
+    // ultimo fallback (vecchia logica)
+    try{ return parseQty(s0); }catch(_){ return { num:null, raw:s0 }; }
+  }
+
+
+  function isActive(){
+    const v = $("viewFPCategories");
+    return !!(v && v.classList.contains("active"));
+  }
+
+  function setCreateOpen(open){
+    const row = $("fpCatCreateRow");
+    if (!row) return;
+    row.style.display = open ? "" : "none";
+    if (open){
+      try{ $("fpCatNewName")?.focus(); }catch(_){ }
+    } else {
+      try{ $("fpCatNewName").value = ""; }catch(_){ }
+    }
+  }
+
+  function setDetailOpen(open){
+    const modal = $("modalFPCategory");
+    if (!modal) return;
+    if (open){
+      modal.classList.add("open");
+      try{ __fpCatPatchModalUI(); }catch(_){ }
+      document.body.classList.add("modal-open");
+      try{ setTimeout(()=>$("fpCatEditName")?.focus(), 0); }catch(_){ }
+    } else {
+      modal.classList.remove("open");
+      try{ if (!document.querySelector(".modal.open")) document.body.classList.remove("modal-open"); }catch(_){ document.body.classList.remove("modal-open"); }
+      S.selectedKey = "";
+      S.draft = null;
+      S.keyManual = false;
+    }
+  }
+
+  function rebuildMaps(){
+    S.catMap = new Map();
+    for (const c of (S.cats || [])){
+      const k = norm(c && (c.key || c.id || ""));
+      if (k) S.catMap.set(k, c);
+    }
+    S.prodMap = new Map();
+    for (const p of (S.products || [])){
+      const code = norm(p && (p.code || ""));
+      const id = norm(p && (p.id || ""));
+      if (code) S.prodMap.set(code, p);
+      if (id && !S.prodMap.has(id)) S.prodMap.set(id, p);
+    }
+    S.fpByCode = new Map();
+    for (const fp of (S.finished || [])){
+      const code = norm(fp && (fp.code || ""));
+      if (code) S.fpByCode.set(code, fp);
+    }
+  }
+
+  function membersForKey(key){
+    const k = norm(key);
+    if (!k) return [];
+    return (S.finished || []).filter(fp => {
+      const v = norm(fp?.categoryKeyLower || fp?.categoryKey || fp?.category || fp?.catKey || "");
+      return v === k;
+    });
+  }
+
+  function renderDatalists(){
+    const dlComp = $("fpCatComponentList");
+    if (dlComp){
+      const opts = (S.products || []).slice(0, 2500).map(p => {
+        const code = String(p.code || "").trim();
+        const name = String(p.name || p.nome || "").trim();
+        const label = (code && name) ? (code + " — " + name) : (name || code);
+        return `<option value="${esc(label)}"></option>`;
+      });
+      dlComp.innerHTML = opts.join("");
+    }
+
+    const dlMem = $("fpCatMemberList");
+    if (dlMem){
+      const opts = (S.finished || []).slice(0, 2500).map(fp => {
+        const code = String(fp.code || "").trim();
+        const name = String(fp.name || fp.nome || "").trim();
+        const label = (code && name) ? (code + " — " + name) : (name || code);
+        return `<option value="${esc(label)}"></option>`;
+      });
+      dlMem.innerHTML = opts.join("");
+    }
+  }
+
+  // ===== Smart search (ricerca intelligente) =====
+  function __fpCatKey(v){
+    return String(v || "")
+      .toLowerCase()
+      .trim()
+      .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+      .replace(/[^a-z0-9]+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function __fpCatBuildLabel(code, name){
+    const c = String(code || "").trim();
+    const n = String(name || "").trim();
+    return (c && n) ? (c + " — " + n) : (n || c);
+  }
+
+  function __fpCatScore(code, name, qKey){
+    const c = __fpCatKey(code).replace(/\s+/g, "");
+    const n = __fpCatKey(name);
+    const q = String(qKey || "");
+    const qNo = q.replace(/\s+/g, "");
+    if (!qNo) return -1;
+    if (c && c.startsWith(qNo)) return 100;
+    if (n && n.startsWith(q)) return 80;
+    const hay = (c + " " + n).trim();
+    if (hay.includes(qNo) || hay.includes(q)) return 60;
+    const toks = q.split(" ").filter(Boolean);
+    if (toks.length){
+      for (const t of toks){
+        if (!hay.includes(t)) return -1;
+      }
+      return 40;
+    }
+    return -1;
+  }
+
+  function __fpCatGetMatchList(kind, raw){
+    const qRaw = String(raw || "").trim();
+
+    // Components: support "categoria + dettagli" (es. "scatola 20 kg", "bobina 480")
+    // - se la prima parola sembra una categoria, filtra subito su quella
+    // - il resto del testo restringe ulteriormente i risultati
+    let compCat = "";
+    let compRest = qRaw;
+
+    if (kind !== "member"){
+      try{
+        const toks = __fpCatKey(qRaw).split(" ").filter(Boolean);
+        if (toks.length){
+          const stem = (w)=>{
+            let s = String(w||"").toLowerCase().trim().replace(/[^a-z0-9]+/g,"");
+            if (!s) return "";
+            if (/[aeiou]$/.test(s) && s.length > 3) s = s.slice(0,-1); // scatola->scatol, bobina->bobin
+            return s;
+          };
+
+          const getProdCat = (it)=>{
+            try{
+              const code = String(it?.code || "").trim().toLowerCase();
+              let cat = "";
+              if (typeof window.getMacroCategoryForCode === "function"){
+                cat = String(window.getMacroCategoryForCode(code) || "").trim().toLowerCase();
+              }
+              if (!cat){
+                cat = String(it?.categoryKey || it?.category || it?.catKey || it?.cat || it?.macroCategory || it?.macro || "").trim().toLowerCase();
+              }
+              cat = cat.replace(/\s+/g,"_")
+                .replace(/[^a-z0-9_]+/g,"_")
+                .replace(/_+/g,"_")
+                .replace(/^_+|_+$/g,"");
+              return cat;
+            }catch(_){ return ""; }
+          };
+
+          // elenco categorie presenti sui prodotti
+          const catsSet = new Set();
+          const list0 = (S.products || []);
+          for (let i=0; i<list0.length; i++){
+            const c = getProdCat(list0[i]);
+            if (c) catsSet.add(c);
+          }
+          const cats = Array.from(catsSet);
+
+          const matchTokToCat = (tok)=>{
+            const t0 = stem(tok);
+            if (!t0) return "";
+            for (const c of cats){
+              const parts = String(c||"").split("_").filter(Boolean);
+              for (const w of parts){
+                const ws = stem(w);
+                if (!ws) continue;
+                if (ws === t0 || ws.startsWith(t0) || t0.startsWith(ws)) return c;
+              }
+            }
+            return "";
+          };
+
+          let usedIdx = -1;
+          compCat = matchTokToCat(toks[0]) || "";
+          if (compCat) usedIdx = 0;
+
+          if (!compCat){
+            for (let i=0; i<toks.length; i++){
+              const c = matchTokToCat(toks[i]);
+              if (c){ compCat = c; usedIdx = i; break; }
+            }
+          }
+
+          if (compCat && usedIdx >= 0){
+            const rest = toks.filter((_,i)=> i !== usedIdx);
+            compRest = rest.join(" ").trim();
+          }
+        }
+      }catch(_){}
+    }
+
+    const qKey = __fpCatKey(compRest);
+    const qNo = qKey.replace(/\s+/g, "");
+    // se ho riconosciuto la categoria, posso mostrare tutto anche senza dettagli
+    const wantAllInCat = !!(kind !== "member" && compCat && !qNo);
+
+    if (!qNo && !wantAllInCat) return [];
+
+    const list = (kind === "member") ? (S.finished || []) : (S.products || []);
+    const already = (kind === "member" && S.selectedKey)
+      ? new Set(membersForKey(S.selectedKey).map(x => norm(x?.code || "")))
+      : null;
+
+    const cap = (kind !== "member" && compCat) ? 300 : 40;
+
+    const getProdCat2 = (it)=>{
+      try{
+        const code = String(it?.code || "").trim().toLowerCase();
+        let cat = "";
+        if (typeof window.getMacroCategoryForCode === "function"){
+          cat = String(window.getMacroCategoryForCode(code) || "").trim().toLowerCase();
+        }
+        if (!cat){
+          cat = String(it?.categoryKey || it?.category || it?.catKey || it?.cat || it?.macroCategory || it?.macro || "").trim().toLowerCase();
+        }
+        cat = cat.replace(/\s+/g,"_")
+          .replace(/[^a-z0-9_]+/g,"_")
+          .replace(/_+/g,"_")
+          .replace(/^_+|_+$/g,"");
+        return cat;
+      }catch(_){ return ""; }
+    };
+
+    const out = [];
+    for (const it of list){
+      const code = String(it?.code || "").trim();
+      const name = String(it?.name || it?.nome || "").trim();
+      if (!code && !name) continue;
+
+      if (kind !== "member" && compCat){
+        const ccat = getProdCat2(it);
+        if (ccat !== compCat) continue;
+      }
+
+      let sc = 0;
+      if (wantAllInCat){
+        sc = 50;
+      } else {
+        sc = __fpCatScore(code, name, qKey);
+        if (sc < 0) continue;
+      }
+
+      const uom = String(it?.uom || it?.um || it?.unit || "").trim();
+      const disabled = !!(already && code && already.has(norm(code)));
+
+      out.push({ code, name, uom, score: sc, disabled, __cat: compCat || "" });
+    }
+
+    out.sort((a,b) => (b.score - a.score) || String(a.name||a.code||"").localeCompare(String(b.name||b.code||""), "it", { sensitivity:"base" }));
+    return out.slice(0, cap);
+  }
+
+  function __fpCatHideSuggest(kind){
+    const wrap = $(kind === "member" ? "fpCatMemberSuggestWrap" : "fpCatCompSuggestWrap");
+    const list = $(kind === "member" ? "fpCatMemberSuggest" : "fpCatCompSuggest");
+    if (wrap) wrap.style.display = "none";
+    if (list) list.innerHTML = "";
+  }
+
+  function __fpCatRenderSuggest(kind){
+    const input = $(kind === "member" ? "fpCatMemberPick" : "fpCatCompPick");
+    const wrap = $(kind === "member" ? "fpCatMemberSuggestWrap" : "fpCatCompSuggestWrap");
+    const listEl = $(kind === "member" ? "fpCatMemberSuggest" : "fpCatCompSuggest");
+    if (!input || !wrap || !listEl) return;
+
+    const rawAll = String(input.value || "").trim();
+    const raw = (kind !== "member") ? __fpCatUpdatePendingFromPick(rawAll) : rawAll;
+    const qNo = __fpCatKey(raw).replace(/\s+/g, "");
+    if (!qNo){
+      __fpCatHideSuggest(kind);
+      return;
+    }
+
+    const matches = __fpCatGetMatchList(kind, raw);
+    if (!matches.length){
+      __fpCatHideSuggest(kind);
+      return;
+    }
+
+    const __cat = (kind !== "member" && matches[0] && matches[0].__cat) ? String(matches[0].__cat||"") : "";
+    const __catLabel = __cat ? __cat.replace(/_/g," ") : "";
+    const __head = __catLabel ? ('<div class="td-muted" style="padding:8px 10px; font-weight:900;">Categoria: ' + esc(__catLabel) + '</div>') : '';
+    listEl.innerHTML = __head + matches.map(m => {
+      const label = __fpCatBuildLabel(m.code, m.name);
+      const right = m.uom ? ('<span class="kbd" style="margin-left:10px;">' + esc('U.M. ' + m.uom) + '</span>') : '';
+      const sub = m.disabled ? '<span class="td-muted" style="font-size:12px; font-weight:900; margin-left:10px;">Già in categoria</span>' : '';
+      const dis = m.disabled ? 'disabled' : '';
+      const op = m.disabled ? 'opacity:.55;' : '';
+      return (
+        '<button class="btn btn-ghost mini jsFpCatSuggestPick" type="button" ' +
+        'data-kind="' + esc(kind) + '" data-code="' + esc(m.code) + '" data-name="' + esc(m.name) + '" data-uom="' + esc(m.uom) + '" ' + dis +
+        ' style="width:100%; justify-content:space-between; border-radius: 12px; box-shadow:none; ' + op + '">' +
+          '<span style="text-align:left; flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">' + esc(label) + '</span>' +
+          '<span style="display:flex; align-items:center;">' + sub + right + '</span>' +
+        '</button>'
+      );
+    }).join('');
+
+    wrap.style.display = '';
+  }
+
+  function __fpCatResolveUnique(kind, raw){
+    const s0 = String(raw || "").trim();
+    if (!s0) return null;
+
+    const pickedCode = pickCodeFromLabel(s0);
+    if (pickedCode){
+      if (kind === "member"){
+        const fp = S.fpByCode.get(norm(pickedCode)) || null;
+        if (fp) return { code: String(fp.code || pickedCode).trim(), name: String(fp.name || fp.nome || "").trim(), uom: String(fp.uom || "").trim() };
+      } else {
+        const p = S.prodMap.get(norm(pickedCode)) || null;
+        if (p) return { code: String(p.code || pickedCode).trim(), name: String(p.name || p.nome || "").trim(), uom: String(p.uom || p.um || "").trim() };
+      }
+    }
+
+    const key = __fpCatKey(s0);
+    const keyNo = key.replace(/\s+/g, "");
+    const src = (kind === "member") ? (S.finished || []) : (S.products || []);
+
+    const byCode = keyNo ? src.filter(it => __fpCatKey(it?.code || "").replace(/\s+/g, "") === keyNo) : [];
+    if (byCode.length === 1){
+      const it = byCode[0] || {};
+      return { code: String(it.code || "").trim(), name: String(it.name || it.nome || "").trim(), uom: String(it.uom || it.um || "").trim() };
+    }
+
+    const byName = src.filter(it => __fpCatKey(it?.name || it?.nome || "") === key);
+    if (byName.length === 1){
+      const it = byName[0] || {};
+      return { code: String(it.code || "").trim(), name: String(it.name || it.nome || "").trim(), uom: String(it.uom || it.um || "").trim() };
+    }
+
+    const matches = __fpCatGetMatchList(kind, s0);
+    if (matches.length === 1){
+      const m = matches[0];
+      return { code: String(m.code || "").trim(), name: String(m.name || "").trim(), uom: String(m.uom || "").trim() };
+    }
+
+    return null;
+  }
+
+
+  function renderList(){
+    const tbody = $("fpCatTbody");
+    const pill = $("pillFPCategoriesCount");
+    if (!tbody) return;
+
+    const qRaw = String($("fpCatSearch")?.value || "");
+    const q = norm(qRaw);
+
+    const list = (S.cats || []).slice().sort((a,b)=>String(a?.name||"").localeCompare(String(b?.name||""), "it", {sensitivity:"base"}));
+
+    // match "categoria + dettagli" (es. "scatola 20 kg", "bobina 480")
+    const qKey = __fpCatKey(qRaw);
+    const toks = qKey.split(" ").filter(Boolean);
+
+    const stem = (w)=>{
+      let s = String(w||"").toLowerCase().trim().replace(/[^a-z0-9]+/g,"");
+      if (!s) return "";
+      if (/[aeiou]$/.test(s) && s.length > 3) s = s.slice(0,-1);
+      return s;
+    };
+
+    function catMatchesToken(cat, tok){
+      const t = stem(tok);
+      if (!t) return false;
+
+      const nm = __fpCatKey(cat?.name || cat?.key || "");
+      const words = nm.split(" ").filter(Boolean);
+
+      for (const w of words){
+        const ws = stem(w);
+        if (!ws) continue;
+        if (ws === t || ws.startsWith(t) || t.startsWith(ws)) return true;
+      }
+
+      // prova anche sulla key (underscore)
+      const kk = __fpCatKey(String(cat?.key || "").replace(/_/g," "));
+      const kws = kk.split(" ").filter(Boolean);
+      for (const w of kws){
+        const ws = stem(w);
+        if (!ws) continue;
+        if (ws === t || ws.startsWith(t) || t.startsWith(ws)) return true;
+      }
+
+      return false;
+    }
+
+    function memberMatchesTokens(fp, tokens){
+      if (!tokens || !tokens.length) return true;
+      const code = String(fp?.code || "").trim();
+      const name = String(fp?.name || fp?.nome || "").trim();
+      const hay = __fpCatKey(code + " " + name);
+      for (const t of tokens){
+        if (t && !hay.includes(t)) return false;
+      }
+      return true;
+    }
+
+    let modeCat = false;
+    let catTok = "";
+    let restToks = [];
+    let filtered = [];
+
+    if (toks.length){
+      catTok = toks[0];
+      const byCatToken = list.filter(c => catMatchesToken(c, catTok));
+      if (byCatToken.length){
+        modeCat = true;
+        restToks = toks.slice(1);
+        filtered = byCatToken;
+      }
+    }
+
+    // fallback: filtro classico (categoria o prodotti finiti)
+    if (!q){
+      filtered = list;
+      modeCat = false;
+    } else if (!modeCat){
+      filtered = list.filter(c => {
+        const nm = norm(c?.name || c?.key || "");
+        if (nm.includes(q)) return true;
+        const k = norm(c?.key || "");
+        if (!k) return false;
+        const mem = membersForKey(k);
+        for (const fp of mem){
+          const s = (String(fp?.code||"") + " " + String(fp?.name||fp?.nome||"")).toLowerCase();
+          if (s.includes(q)) return true;
+        }
+        return false;
+      });
+    }
+
+    if (pill) pill.textContent = String(filtered.length || 0);
+
+    if (!filtered.length){
+      tbody.innerHTML = '<tr><td class="td-muted" colspan="4">Nessuna categoria.</td></tr>';
+      return;
+    }
+
+    const rows = [];
+    for (const c of filtered){
+      const key = norm(c?.key || c?.id || "");
+      const name = String(c?.name || key || "").trim() || key;
+      const memAll = membersForKey(key);
+      const memCount = memAll.length;
+      const bom = Array.isArray(c?.bom) ? c.bom : (Array.isArray(c?.components) ? c.components : []);
+      const bomCount = bom.length;
+
+      // Categoria (sempre)
+      rows.push(`<tr class="jsFpCatRow" data-key="${esc(key)}">
+        <td>${esc(name)}</td>
+        <td class="qty">${esc(memCount)}</td>
+        <td class="qty">${esc(bomCount)}</td>
+        <td style="text-align:right;">
+          <button class="btn btn-ghost mini jsFpCatOpen" type="button">Apri</button>
+        </td>
+      </tr>`);
+
+      // Se l'utente sta cercando "categoria + dettagli", mostra la lista prodotti finiti sotto
+      if (modeCat){
+        const memSorted = memAll.slice().sort((a,b)=>String(a?.name||"").localeCompare(String(b?.name||""), "it", {sensitivity:"base"}));
+        const memFiltered = restToks.length ? memSorted.filter(fp => memberMatchesTokens(fp, restToks)) : memSorted;
+
+        if (!memFiltered.length){
+          rows.push(`<tr class="jsFpCatRow" data-key="${esc(key)}">
+            <td class="td-muted" colspan="4" style="padding-left: 22px;">Nessun prodotto finito corrispondente.</td>
+          </tr>`);
+        } else {
+          for (const fp of memFiltered){
+            const code = String(fp?.code || "").trim();
+            const nm = String(fp?.name || fp?.nome || "").trim();
+            const label = (code && nm) ? (code + " — " + nm) : (nm || code || "—");
+            rows.push(`<tr class="jsFpCatRow" data-key="${esc(key)}">
+              <td style="padding-left: 22px;">
+                <span class="td-muted" style="font-weight:900;">↳</span>
+                <span class="kbd" style="margin-left:6px;">${esc(code || "—")}</span>
+                <span style="margin-left:8px;">${esc(nm || "")}</span>
+              </td>
+              <td class="qty"></td>
+              <td class="qty"></td>
+              <td></td>
+            </tr>`);
+          }
+        }
+      }
+    }
+
+    tbody.innerHTML = rows.join("");
+  }
+
+  function renderDetail(){
+    const key = norm(S.selectedKey);
+    const cat = key ? (S.catMap.get(key) || null) : null;
+    const d = S.draft || null;
+
+    const activeEl = (typeof document !== "undefined") ? document.activeElement : null;
+    const elKey = $("fpCatEditKey");
+    const elName = $("fpCatEditName");
+
+    if (elKey){
+      const v = String((d && d.key) ? d.key : (key || ""));
+      if (activeEl !== elKey) elKey.value = v;
+    }
+    if (elName && d){
+      const v = String(d.name || "");
+      if (activeEl !== elName) elName.value = v;
+    }
+
+    const bom = (d && Array.isArray(d.bom)) ? d.bom : [];
+    if ($("fpCatBomCount")) $("fpCatBomCount").value = String(bom.length) + "";
+
+    // BOM table
+    const tb = $("fpCatCompTbody");
+    if (tb){
+      if (!bom.length){
+        tb.innerHTML = '<tr><td class="td-muted" colspan="5">Nessun componente.</td></tr>';
+      } else {
+        tb.innerHTML = bom.map((c, idx) => {
+          const code = String(c?.code||"").trim();
+          const name = String(c?.name||"").trim();
+          const qtyRaw = String(c?.qtyRaw||"").trim();
+          const qty = (c?.qty != null) ? String(c.qty) : (qtyRaw || "");
+          const uom = String(c?.uom||"").trim();
+          return `<tr class="jsFpCatCompRow" data-idx="${idx}">
+            <td>${esc(code)}</td>
+            <td>${esc(name || code)}</td>
+            <td class="qty">${esc(qty)}</td>
+            <td>${esc(uom)}</td>
+            <td style="text-align:right;"><button class="btn btn-ghost mini jsFpCatCompDel" type="button">–</button></td>
+          </tr>`;
+        }).join("");
+      }
+    }
+
+    // Members
+    const members = membersForKey(key);
+    if ($("fpCatMembersCount")) $("fpCatMembersCount").textContent = String(members.length);
+    const mtb = $("fpCatMembersTbody");
+    if (mtb){
+      if (!members.length){
+        mtb.innerHTML = '<tr><td class="td-muted" colspan="3">Nessun prodotto finito nella categoria.</td></tr>';
+      } else {
+        const rows = members.slice().sort((a,b)=>String(a?.name||"").localeCompare(String(b?.name||""),"it",{sensitivity:"base"})).map(fp => {
+          const id = String(fp?.id||"");
+          const code = String(fp?.code||"").trim();
+          const name = String(fp?.name||fp?.nome||"").trim();
+          return `<tr class="jsFpCatMemberRow" data-id="${esc(id)}">
+            <td>${esc(code)}</td>
+            <td>${esc(name || code)}</td>
+            <td style="text-align:right;"><button class="btn btn-ghost mini jsFpCatMemberDel" type="button">Rimuovi</button></td>
+          </tr>`;
+        });
+        mtb.innerHTML = rows.join("");
+      }
+    }
+
+    const meta = $("fpCatDetailMeta");
+    if (meta){
+      const bomCount = bom.length;
+      const memCount = members.length;
+      meta.textContent = `Prodotti: ${memCount} · BOM: ${bomCount}`;
+    }
+
+    const delHint = $("fpCatDeleteHint");
+    if (delHint){
+      delHint.textContent = members.length ? `Nota: eliminando la categoria verrà rimossa da ${members.length} prodotti finiti.` : "";
+    }
+  }
+
+  function openDetail(key){
+    S.selectedKey = norm(key);
+    S.keyManual = false;
+    const cat = S.catMap.get(S.selectedKey) || null;
+    const nm = String(cat?.name || cat?.key || "").trim() || S.selectedKey;
+    S.draft = {
+      key: S.selectedKey,
+      name: nm,
+      bom: Array.isArray(cat?.bom) ? cat.bom.slice() : (Array.isArray(cat?.components) ? cat.components.slice() : [])
+    };
+    setDetailOpen(true);
+    renderDatalists();
+    renderDetail();
+
+    // reset barre di ricerca + suggerimenti
+    try{ if ($("fpCatCompPick")) $("fpCatCompPick").value = ""; }catch(_){ }
+    try{ if ($("fpCatCompQty")) $("fpCatCompQty").value = ""; }catch(_){ }
+    try{ if ($("fpCatMemberPick")) $("fpCatMemberPick").value = ""; }catch(_){ }
+    try{ __fpCatHideSuggest("comp"); __fpCatHideSuggest("member"); }catch(_){ }
+  }
+
+  async function createCategory(){
+    const h = H();
+    if (!h || !h.fb || !h.fb.db || !h.FS) { showToast("Firebase non pronto", "warn"); return; }
+    if (!h.fb.user) { showToast("Accedi con Google", "warn"); return; }
+
+    const name = String($("fpCatNewName")?.value || "").trim();
+    if (!name) { showToast("Inserisci un nome categoria", "warn"); return; }
+
+    let key = slugKey(name);
+    if (!key) key = "cat";
+
+    // avoid collisions
+    const exists = new Set((S.cats||[]).map(c => norm(c?.key || "")));
+    if (exists.has(key)){
+      let i=2;
+      while (exists.has(key + "_" + i)) i++;
+      key = key + "_" + i;
+    }
+
+    try{
+      const { doc, setDoc, serverTimestamp } = h.FS;
+      const ref = doc(h.fb.db, "orgs", h.ORG_ID, "finishedProductCategories", keyToId(key));
+      await setDoc(ref, {
+        key,
+        name,
+        nameLower: name.toLowerCase(),
+        bom: [],
+        createdAt: serverTimestamp(),
+        createdBy: h.fb.user.email || h.fb.user.uid || "",
+        updatedAt: serverTimestamp(),
+        updatedBy: h.fb.user.email || h.fb.user.uid || ""
+      }, { merge: true });
+      showToast("Categoria creata");
+      setCreateOpen(false);
+      openDetail(key);
+    }catch(e){
+      console.warn("create finishedProductCategories failed", e);
+      showToast("Errore creazione categoria", "err");
+    }
+  }
+
+  function __cleanKey(v){
+    return slugKey(String(v || ""));
+  }
+
+  async function __renameCategoryKey(oldKey, newKey, name, bom){
+    const h = H();
+    if (!h || !h.fb || !h.fb.db || !h.FS) { showToast("Firebase non pronto", "warn"); return false; }
+    if (!h.fb.user) { showToast("Accedi con Google", "warn"); return false; }
+
+    const fromKey = norm(oldKey);
+    const toKey = norm(newKey);
+    if (!fromKey || !toKey) return false;
+    if (fromKey == toKey) return true;
+
+    // collision guard
+    if (S.catMap && S.catMap.has(toKey)) {
+      showToast("Esiste già una categoria con questa chiave", "warn");
+      return false;
+    }
+
+    const { doc, setDoc, getDoc, deleteDoc, updateDoc, serverTimestamp } = h.FS;
+    const actor = (h.fb.user && (h.fb.user.email || h.fb.user.uid)) || "";
+
+    // Leggi doc sorgente (così preservi eventuali campi extra)
+    let src = null;
+    try{
+      const snap = await getDoc(doc(h.fb.db, "orgs", h.ORG_ID, "finishedProductCategories", keyToId(fromKey)));
+      if (!snap || !snap.exists || !snap.exists()) {
+        showToast("Categoria non trovata", "err");
+        return false;
+      }
+      src = snap.data() || {};
+    }catch(e){
+      console.warn("rename category getDoc failed", e);
+      showToast("Errore lettura categoria", "err");
+      return false;
+    }
+
+    // 1) Crea (o aggiorna) nuovo doc
+    const dstRef = doc(h.fb.db, "orgs", h.ORG_ID, "finishedProductCategories", keyToId(toKey));
+    const payload = Object.assign({}, src, {
+      key: toKey,
+      name: String(name || "").trim(),
+      nameLower: String(name || "").trim().toLowerCase(),
+      bom: Array.isArray(bom) ? bom : [],
+      updatedAt: serverTimestamp(),
+      updatedBy: actor
+    });
+    if (!payload.createdAt) payload.createdAt = serverTimestamp();
+    if (!payload.createdBy) payload.createdBy = actor;
+
+    try{
+      await setDoc(dstRef, payload, { merge: true });
+    }catch(e){
+      console.warn("rename category setDoc failed", e);
+      showToast("Errore creazione nuova categoria", "err");
+      return false;
+    }
+
+    // 2) Aggiorna tutti i prodotti finiti collegati
+    const mem = membersForKey(fromKey);
+    let okN = 0, failN = 0;
+
+    for (const fp of (mem || [])){
+      const id = String(fp?.id || "").trim();
+      if (!id) continue;
+      try{
+        await updateDoc(doc(h.fb.db, "orgs", h.ORG_ID, "finishedProducts", id), {
+          categoryKey: toKey,
+          categoryKeyLower: toKey,
+          updatedAt: serverTimestamp(),
+          updatedBy: actor
+        });
+        okN++;
+      }catch(e){
+        console.warn("rename category update finishedProducts failed", id, e);
+        failN++;
+      }
+    }
+
+    // 3) Elimina il doc vecchio SOLO se tutti i prodotti sono stati aggiornati
+    if (failN === 0){
+      try{
+        await deleteDoc(doc(h.fb.db, "orgs", h.ORG_ID, "finishedProductCategories", keyToId(fromKey)));
+      }catch(e){
+        console.warn("rename category delete old failed", e);
+        showToast("Categoria rinominata, ma non riesco a eliminare la vecchia (permessi)", "warn");
+      }
+      showToast("Categoria rinominata");
+      return true;
+    }
+
+    showToast(`Categoria rinominata, ma ${failN} prodotti non aggiornati (ho lasciato anche la vecchia categoria)`, "warn");
+    return true;
+  }
+
+  async function saveCategory(){
+    const h = H();
+    if (!h || !h.fb || !h.fb.db || !h.FS) { showToast("Firebase non pronto", "warn"); return; }
+    if (!h.fb.user) { showToast("Accedi con Google", "warn"); return; }
+
+    const oldKey = norm(S.selectedKey);
+    if (!oldKey) return;
+
+    const name = String($("fpCatEditName")?.value || "").trim();
+    if (!name) { showToast("Nome categoria non valido", "warn"); return; }
+
+    const bom = (S.draft && Array.isArray(S.draft.bom)) ? S.draft.bom : [];
+
+    // key può essere editata: se vuota, la rigenero dal nome
+    const keyRaw = String($("fpCatEditKey")?.value || "").trim();
+    let newKey = __cleanKey(keyRaw) || __cleanKey(name);
+    newKey = norm(newKey);
+
+    if (!newKey){ showToast("Chiave non valida", "warn"); return; }
+
+    // collision (se cambio chiave)
+    if (newKey !== oldKey && (S.catMap && S.catMap.has(newKey))){
+      showToast("Esiste già una categoria con questa chiave", "warn");
+      return;
+    }
+
+    // Rinominare anche la chiave = cambia docId + aggiorna i prodotti finiti
+    if (newKey !== oldKey){
+      const memCount = membersForKey(oldKey).length;
+      const ok = confirm(`Rinominare la categoria?
+
+Da: ${oldKey}
+A: ${newKey}
+Prodotti collegati: ${memCount}
+
+Verrà aggiornata anche la chiave su tutti i prodotti finiti.`);
+      if (!ok) return;
+
+      // allinea draft
+      if (S.draft){
+        S.draft.name = name;
+        S.draft.key = newKey;
+        S.draft.bom = bom;
+      }
+
+      const done = await __renameCategoryKey(oldKey, newKey, name, bom);
+      if (done){
+        S.selectedKey = newKey;
+        S.keyManual = false;
+        if (S.draft) S.draft.key = newKey;
+        try{ const elKey = $("fpCatEditKey"); if (elKey) elKey.value = newKey; }catch(_){ }
+        try{ renderList(); renderDetail(); }catch(_){ }
+      }
+      return;
+    }
+
+    // Salvataggio normale (chiave invariata)
+    try{
+      const { doc, setDoc, serverTimestamp } = h.FS;
+      const ref = doc(h.fb.db, "orgs", h.ORG_ID, "finishedProductCategories", keyToId(oldKey));
+      await setDoc(ref, {
+        key: oldKey,
+        name,
+        nameLower: name.toLowerCase(),
+        bom,
+        updatedAt: serverTimestamp(),
+        updatedBy: h.fb.user.email || h.fb.user.uid || ""
+      }, { merge: true });
+      showToast("Categoria salvata");
+    }catch(e){
+      console.warn("save finishedProductCategories failed", e);
+      showToast("Errore salvataggio categoria", "err");
+    }
+  }
+
+  async function deleteCategory(){
+    const h = H();
+    if (!h || !h.fb || !h.fb.db || !h.FS) { showToast("Firebase non pronto", "warn"); return; }
+    if (!h.fb.user) { showToast("Accedi con Google", "warn"); return; }
+
+    const key = norm(S.selectedKey);
+    if (!key) return;
+
+    const mem = membersForKey(key);
+    const ok = confirm(mem.length
+      ? `Eliminare questa categoria?\n\nVerrà rimossa da ${mem.length} prodotti finiti.`
+      : "Eliminare questa categoria?");
+    if (!ok) return;
+
+    try{
+      const { doc, deleteDoc, updateDoc, deleteField } = h.FS;
+
+      // remove category from finished products (best effort)
+      for (const fp of mem.slice(0, 500)){
+        const id = String(fp?.id || "");
+        if (!id) continue;
+        try{
+          await updateDoc(doc(h.fb.db, "orgs", h.ORG_ID, "finishedProducts", id), {
+            categoryKey: deleteField(),
+            categoryKeyLower: deleteField()
+          });
+        }catch(e){
+          console.warn("unassign fp from category failed", e);
+        }
+      }
+
+      await deleteDoc(doc(h.fb.db, "orgs", h.ORG_ID, "finishedProductCategories", keyToId(key)));
+      showToast("Categoria eliminata");
+      setDetailOpen(false);
+      renderList();
+    }catch(e){
+      console.warn("delete finishedProductCategories failed", e);
+      showToast("Errore eliminazione categoria", "err");
+    }
+  }
+
+  function pickCodeFromLabel(label){
+    const s = String(label || "").trim();
+    if (!s) return "";
+    const parts = s.split(" — ");
+    return String(parts[0] || "").trim();
+  }
+
+  function addBomItem(){
+    if (!S.draft) return;
+
+    // Supporto: quantità scritta direttamente nel campo ricerca (es. "SOLFATO 20 gr")
+    let rawPickAll = "";
+    let rawPickClean = "";
+    try{
+      rawPickAll = String($("fpCatCompPick")?.value || "");
+      rawPickClean = __fpCatUpdatePendingFromPick(rawPickAll);
+    }catch(_){ rawPickAll = String($("fpCatCompPick")?.value || ""); rawPickClean = rawPickAll; }
+
+    // prova risoluzione automatica se l'utente ha scritto solo il nome/codice
+    try{
+      const resolved = __fpCatResolveUnique("comp", rawPickClean);
+      if (resolved && resolved.code){
+        $("fpCatCompPick").value = __fpCatBuildLabel(resolved.code, resolved.name);
+        // se avevo una qty nel campo ricerca, precompila (solo se Q.tà vuota)
+        __fpCatAutofillQtyFromPending(String(resolved.code||""), String(resolved.uom||""));
+      }
+    }catch(_){ }
+
+    const code = pickCodeFromLabel($("fpCatCompPick")?.value || "");
+    if (!code) { showToast("Seleziona un componente", "warn"); return; }
+
+    // prodotto + U.M. target
+    const p = S.prodMap.get(norm(code)) || null;
+    const name = String(p?.name || p?.nome || "").trim() || code;
+    const uomTarget = __fpCatNormUom(p?.uom || p?.um || "") || "pz";
+
+    // quantità: 1) campo Q.tà, 2) fallback dal campo ricerca (pending)
+    let q = String($("fpCatCompQty")?.value || "").trim();
+    if (!q && __fpCatPendingCompQty && __fpCatPendingCompQty.qty != null && __fpCatPendingCompQty.uom){
+      const conv = __fpCatConvertQty(__fpCatPendingCompQty.qty, __fpCatPendingCompQty.uom, uomTarget);
+      if (conv != null){
+        q = __fpCatFmtNum(conv);
+        try{ $("fpCatCompQty").value = q; }catch(_){ }
+      }
+      __fpCatPendingCompQty = null;
+    }
+
+    if (!q) { showToast("Inserisci una quantità", "warn"); return; }
+
+    const pq = __fpCatParseQtyForTarget(q, uomTarget);
+
+    const bom = Array.isArray(S.draft.bom) ? S.draft.bom : [];
+    const existingIdx = bom.findIndex(x => norm(x?.code) === norm(code));
+
+    const item = {
+      productId: String(p?.id || "").trim() || keyToId(norm(code)),
+      code: String(code).trim(),
+      name,
+      qty: (pq.num != null) ? Number(pq.num) : null,
+      qtyRaw: String(pq.raw || "").trim(),
+      uom: uomTarget
+    };
+
+    if (existingIdx >= 0) bom[existingIdx] = item; else bom.push(item);
+    S.draft.bom = bom;
+
+    try{ $("fpCatCompPick").value = ""; }catch(_){ }
+    try{ __fpCatHideSuggest("comp"); }catch(_){ }
+    try{ $("fpCatCompQty").value = ""; }catch(_){ }
+    try{ __fpCatPendingCompQty = null; }catch(_){ }
+
+    renderDetail();
+  }
+
+
+  function removeBomIdx(idx){
+    if (!S.draft) return;
+    const bom = Array.isArray(S.draft.bom) ? S.draft.bom : [];
+    const i = Number(idx);
+    if (!Number.isFinite(i) || i < 0 || i >= bom.length) return;
+    bom.splice(i, 1);
+    S.draft.bom = bom;
+    renderDetail();
+  }
+
+  async function addMember(){
+    const h = H();
+    if (!h || !h.fb || !h.fb.db || !h.FS) { showToast("Firebase non pronto", "warn"); return; }
+    if (!h.fb.user) { showToast("Accedi con Google", "warn"); return; }
+
+    const key = norm(S.selectedKey);
+
+    // prova risoluzione automatica se l'utente ha scritto solo il nome/codice
+    try{
+      const raw = String($("fpCatMemberPick")?.value || "");
+      const resolved = __fpCatResolveUnique("member", raw);
+      if (resolved && resolved.code){
+        $("fpCatMemberPick").value = __fpCatBuildLabel(resolved.code, resolved.name);
+      }
+    }catch(_){ }
+
+    const code = pickCodeFromLabel($("fpCatMemberPick")?.value || "");
+    if (!key) return;
+    if (!code) { showToast("Seleziona un prodotto finito", "warn"); return; }
+
+    const fp = S.fpByCode.get(norm(code)) || null;
+    if (!fp || !fp.id){ showToast("Prodotto finito non trovato", "warn"); return; }
+
+    try{
+      const { doc, updateDoc } = h.FS;
+      await updateDoc(doc(h.fb.db, "orgs", h.ORG_ID, "finishedProducts", fp.id), {
+        categoryKey: key,
+        categoryKeyLower: key
+      });
+      showToast("Prodotto finito assegnato");
+      try{ $("fpCatMemberPick").value = ""; }catch(_){ }
+      try{ __fpCatHideSuggest("member"); }catch(_){ }
+    }catch(e){
+      console.warn("assign finishedProduct failed", e);
+      showToast("Errore assegnazione prodotto finito", "err");
+    }
+  }
+
+  async function removeMemberById(id){
+    const h = H();
+    if (!h || !h.fb || !h.fb.db || !h.FS) { showToast("Firebase non pronto", "warn"); return; }
+    if (!h.fb.user) { showToast("Accedi con Google", "warn"); return; }
+
+    const fid = String(id || "").trim();
+    if (!fid) return;
+
+    try{
+      const { doc, updateDoc, deleteField } = h.FS;
+      await updateDoc(doc(h.fb.db, "orgs", h.ORG_ID, "finishedProducts", fid), {
+        categoryKey: deleteField(),
+        categoryKeyLower: deleteField()
+      });
+      showToast("Prodotto finito rimosso");
+    }catch(e){
+      console.warn("remove member failed", e);
+      showToast("Errore rimozione", "err");
+    }
+  }
+
+  function subscribe(){
+    const h = H();
+    if (!h || !h.fb || !h.fb.db || !h.FS) return false;
+    if (S.unsub.cats) return true;
+
+    try{
+      const { collection, query, orderBy, onSnapshot } = h.FS;
+
+      // categories
+      S.unsub.cats = onSnapshot(
+        query(collection(h.fb.db, "orgs", h.ORG_ID, "finishedProductCategories"), orderBy("nameLower", "asc")),
+        (snap) => {
+          const arr = [];
+          snap.forEach(d => {
+            const data = d.data() || {};
+            let key = String(data.key || "").trim();
+            if (!key){
+              try{ key = decodeURIComponent(String(d.id||"")); }catch(_){ key = String(d.id||""); }
+            }
+            key = norm(key);
+            if (!key) return;
+            arr.push(Object.assign({ key }, data));
+          });
+          S.cats = arr;
+          rebuildMaps();
+          if (isActive()) renderList();
+          if (S.selectedKey) renderDetail();
+        },
+        (err) => console.warn("finishedProductCategories watch error", err)
+      );
+
+      // finished products
+      S.unsub.finished = onSnapshot(
+        query(collection(h.fb.db, "orgs", h.ORG_ID, "finishedProducts"), orderBy("nameLower", "asc")),
+        (snap) => {
+          const arr = [];
+          snap.forEach(d => arr.push(Object.assign({ id:d.id }, (d.data()||{}))));
+          S.finished = arr;
+          rebuildMaps();
+          if (isActive()) renderList();
+          if (S.selectedKey) renderDetail();
+          renderDatalists();
+        },
+        (err) => console.warn("finishedProducts watch error", err)
+      );
+
+      // products (components)
+      S.unsub.products = onSnapshot(
+        query(collection(h.fb.db, "orgs", h.ORG_ID, "products"), orderBy("nameLower", "asc")),
+        (snap) => {
+          const arr = [];
+          snap.forEach(d => arr.push(Object.assign({ id:d.id }, (d.data()||{}))));
+          S.products = arr;
+          rebuildMaps();
+          renderDatalists();
+          if (S.selectedKey) renderDetail();
+        },
+        (err) => console.warn("products watch error", err)
+      );
+
+      return true;
+    }catch(e){
+      console.warn("subscribe fp_categories failed", e);
+      return false;
+    }
+  }
+
+  function bindEvents(){
+    // menu
+    $("menuGoFinishedCategories")?.addEventListener("click", (e) => {
+      e.preventDefault();
+      closeSideMenuSafe();
+      setViewSafe("fpCategories");
+      setCreateOpen(false);
+      renderDatalists();
+      renderList();
+    });
+
+    // close/back
+    $("btnBackFPCategories")?.addEventListener("click", ()=>{ setCreateOpen(false); try{ setDetailOpen(false); }catch(_){ } setViewSafe("home"); });
+    $("btnCloseFPCategories")?.addEventListener("click", ()=>{ setCreateOpen(false); try{ setDetailOpen(false); }catch(_){ } setViewSafe("home"); });
+
+    // list actions
+    $("fpCatSearch")?.addEventListener("input", ()=>{ if (isActive()) renderList(); });
+    $("btnFpCatNew")?.addEventListener("click", ()=> setCreateOpen(true));
+    $("btnFpCatCancelCreate")?.addEventListener("click", ()=> setCreateOpen(false));
+    $("btnFpCatCreate")?.addEventListener("click", ()=> createCategory());
+
+    $("fpCatTbody")?.addEventListener("click", (e) => {
+      const tr = e.target?.closest?.("tr.jsFpCatRow");
+      if (!tr) return;
+      const key = String(tr.getAttribute("data-key") || "").trim();
+      if (!key) return;
+      e.preventDefault(); e.stopPropagation();
+      openDetail(key);
+    });
+
+    // modal close
+    $("btnFpCatDone")?.addEventListener("click", ()=> setDetailOpen(false));
+    $("fpCatModalClose")?.addEventListener("click", ()=> setDetailOpen(false));
+    $("modalFPCategory")?.addEventListener("click", (e)=>{ if (e.target === $("modalFPCategory")) setDetailOpen(false); });
+
+    // edit: nome + chiave (rinomina anche docId)
+    try{
+      const nameEl = $("fpCatEditName");
+      const keyEl  = $("fpCatEditKey");
+
+      if (nameEl && !(nameEl.dataset && nameEl.dataset.boundFpCatName === "1")){
+        if (nameEl.dataset) nameEl.dataset.boundFpCatName = "1";
+        nameEl.addEventListener("input", () => {
+          if (!S.draft) return;
+          const nm = String(nameEl.value || "").trim();
+          S.draft.name = nm;
+          if (!S.keyManual){
+            const autoKey = slugKey(nm);
+            if (autoKey){
+              S.draft.key = autoKey;
+              try{ if (keyEl && document.activeElement !== keyEl) keyEl.value = autoKey; }catch(_){ }
+            }
+          }
+        });
+      }
+
+      if (keyEl && !(keyEl.dataset && keyEl.dataset.boundFpCatKey === "1")){
+        if (keyEl.dataset) keyEl.dataset.boundFpCatKey = "1";
+
+        keyEl.addEventListener("focus", () => { S.keyManual = true; });
+
+        keyEl.addEventListener("input", () => {
+          if (!S.draft) return;
+          S.keyManual = true;
+          const clean = slugKey(String(keyEl.value || ""));
+          S.draft.key = clean || "";
+        });
+
+        keyEl.addEventListener("blur", () => {
+          if (!S.draft) return;
+          const clean = slugKey(String(keyEl.value || ""));
+          if (clean){
+            keyEl.value = clean;
+            S.draft.key = clean;
+            S.keyManual = true;
+          } else {
+            // se svuota: torna in auto dal nome
+            S.keyManual = false;
+            const nm = String(nameEl && nameEl.value || "").trim();
+            const autoKey = slugKey(nm);
+            if (autoKey){
+              keyEl.value = autoKey;
+              S.draft.key = autoKey;
+            } else {
+              keyEl.value = "";
+              S.draft.key = "";
+            }
+          }
+        });
+      }
+    }catch(_){ }
+
+    // smart search bars (componenti + prodotti finiti)
+    $("fpCatCompPick")?.addEventListener("input", ()=>{ try{ __fpCatRenderSuggest("comp"); }catch(_){ } });
+    $("fpCatCompPick")?.addEventListener("focus", ()=>{ try{ __fpCatRenderSuggest("comp"); }catch(_){ } });
+    $("fpCatMemberPick")?.addEventListener("input", ()=>{ try{ __fpCatRenderSuggest("member"); }catch(_){ } });
+    $("fpCatMemberPick")?.addEventListener("focus", ()=>{ try{ __fpCatRenderSuggest("member"); }catch(_){ } });
+
+    // click sui suggerimenti
+    $("fpCatCompSuggestWrap")?.addEventListener("click", (e)=>{
+      const btn = e.target?.closest?.("button.jsFpCatSuggestPick");
+      if (!btn || btn.disabled) return;
+      e.preventDefault(); e.stopPropagation();
+      const code = String(btn.getAttribute("data-code") || "").trim();
+      const name = String(btn.getAttribute("data-name") || "").trim();
+      const uom  = String(btn.getAttribute("data-uom") || "").trim();
+      if (!code) return;
+      try{ $("fpCatCompPick").value = __fpCatBuildLabel(code, name); }catch(_){ }
+      try{ __fpCatHideSuggest("comp"); }catch(_){ }
+      // se nel campo ricerca avevo scritto una quantità (es. "20 gr"), la converte e la mette in Q.tà
+      try{ __fpCatAutofillQtyFromPending(code, uom); }catch(_){ }
+      try{ $("fpCatCompQty")?.focus(); }catch(_){ }
+    });
+
+    $("fpCatMemberSuggestWrap")?.addEventListener("click", (e)=>{
+      const btn = e.target?.closest?.("button.jsFpCatSuggestPick");
+      if (!btn || btn.disabled) return;
+      e.preventDefault(); e.stopPropagation();
+      const code = String(btn.getAttribute("data-code") || "").trim();
+      const name = String(btn.getAttribute("data-name") || "").trim();
+      if (!code) return;
+      try{ $("fpCatMemberPick").value = __fpCatBuildLabel(code, name); }catch(_){ }
+      try{ __fpCatHideSuggest("member"); }catch(_){ }
+      try{ $("btnFpCatMemberAdd")?.focus(); }catch(_){ }
+    });
+
+    // esc = chiudi suggerimenti
+    $("modalFPCategory")?.addEventListener("keydown", (e)=>{
+      if (e.key === "Escape"){
+        try{ __fpCatHideSuggest("comp"); __fpCatHideSuggest("member"); }catch(_){ }
+      }
+    });
+
+    // modal actions
+    $("btnFpCatCompAdd")?.addEventListener("click", ()=> addBomItem());
+    $("btnFpCatMemberAdd")?.addEventListener("click", ()=> addMember());
+    $("btnFpCatSave")?.addEventListener("click", ()=> saveCategory());
+    $("btnFpCatDelete")?.addEventListener("click", ()=> deleteCategory());
+
+    $("fpCatCompTbody")?.addEventListener("click", (e) => {
+      const btn = e.target?.closest?.("button.jsFpCatCompDel");
+      const tr = e.target?.closest?.("tr.jsFpCatCompRow");
+      if (!btn || !tr) return;
+      const idx = tr.getAttribute("data-idx");
+      removeBomIdx(idx);
+    });
+
+    $("fpCatMembersTbody")?.addEventListener("click", (e) => {
+      const btn = e.target?.closest?.("button.jsFpCatMemberDel");
+      const tr = e.target?.closest?.("tr.jsFpCatMemberRow");
+      if (!btn || !tr) return;
+      const id = tr.getAttribute("data-id");
+      removeMemberById(id);
+    });
+
+    // enter to add + risoluzione smart
+    $("fpCatCompPick")?.addEventListener("keydown", (e)=>{
+      if (e.key !== "Enter") return;
+      e.preventDefault();
+      try{
+        const rawAll = String($("fpCatCompPick")?.value || "");
+        const raw = __fpCatUpdatePendingFromPick(rawAll);
+        const resolved = __fpCatResolveUnique("comp", raw);
+        if (resolved && resolved.code){
+          $("fpCatCompPick").value = __fpCatBuildLabel(resolved.code, resolved.name);
+          __fpCatHideSuggest("comp");
+          try{ __fpCatAutofillQtyFromPending(String(resolved.code||""), String(resolved.uom||"")); }catch(_){ }
+          $("fpCatCompQty")?.focus();
+          return;
+        }
+      }catch(_){ }
+      try{ __fpCatRenderSuggest("comp"); }catch(_){ }
+    });
+
+    $("fpCatCompQty")?.addEventListener("keydown", (e)=>{ if (e.key === "Enter") { e.preventDefault(); addBomItem(); } });
+
+    $("fpCatMemberPick")?.addEventListener("keydown", (e)=>{
+      if (e.key !== "Enter") return;
+      e.preventDefault();
+      try{
+        const raw = String($("fpCatMemberPick")?.value || "");
+        const resolved = __fpCatResolveUnique("member", raw);
+        if (resolved && resolved.code){
+          $("fpCatMemberPick").value = __fpCatBuildLabel(resolved.code, resolved.name);
+          __fpCatHideSuggest("member");
+        }
+      }catch(_){ }
+      addMember();
+    });
+  }
+
+  function refresh(){
+    bindEvents();
+    subscribe();
+    renderDatalists();
+    if (isActive()) renderList();
+    S.ready = true;
+  }
+
+  function waitForHub(attempt){
+    attempt = attempt || 0;
+    const h = H();
+    if (h && h.fb && h.fb.db && h.FS){
+      refresh();
+      return;
+    }
+    if (attempt > 200) return;
+    setTimeout(()=>waitForHub(attempt+1), 100);
+  }
+
+  if (document.readyState === "loading"){
+    document.addEventListener("DOMContentLoaded", ()=>waitForHub(0));
+  } else {
+    waitForHub(0);
+  }
+
+  // expose (optional)
+  window.HubFPCategories = window.HubFPCategories || {};
+  window.HubFPCategories.render = function(){ try{ renderList(); }catch(_){ } };
+})();
 ;
 /* ===== prodotti.js ===== */
 /* ============================================================
@@ -1544,7 +7290,7 @@
 
                     <div class="doc-tableWrap">
                       <div class="doc-tableTitle">N. Articoli</div>
-                      <div class="doc-tableHint">Righe già posizionate: pronte per import (campi non modificabili).</div>
+                      <div class="doc-tableHint">Righe pronte per import: puoi modificare Codice, Descrizione, U.M. e Q.tà (clicca sulla cella).</div>
                       <table class="doc-table dataGrid" id="docItemsTable">
                         <thead>
                           <tr>
@@ -1664,6 +7410,61 @@
     const sideMenu = document.getElementById("sideMenu");
     const sideMenuOverlay = document.getElementById("sideMenuOverlay");
 
+    let lastFocusBeforeMenu = null;
+
+    function setInert(el, on){
+      if(!el) return;
+      try{ if ("inert" in el) el.inert = !!on; }catch(_){}
+      if(on) el.setAttribute("inert", "");
+      else el.removeAttribute("inert");
+    }
+
+    // Desktop (min-width:1200px): menu è "pinned" sempre visibile via CSS.
+    // Mobile/tablet: menu è overlay → deve essere inert/aria-hidden quando chiuso.
+    const __mqPinnedMenu = (window.matchMedia ? window.matchMedia("(min-width: 1200px)") : null);
+    function __isPinnedMenu(){
+      try{ return __mqPinnedMenu ? !!__mqPinnedMenu.matches : (window.innerWidth >= 1200); }catch(_){ return (window.innerWidth >= 1200); }
+    }
+
+    function syncSideMenuA11y(){
+      const pinned = __isPinnedMenu();
+
+      if (pinned){
+        // pinned: sempre interattivo + accessibile
+        try{ document.body.classList.remove("menu-open"); }catch(_){}
+        if (sideMenu){
+          sideMenu.setAttribute("aria-hidden","false");
+          setInert(sideMenu,false);
+        }
+        if (sideMenuOverlay){
+          sideMenuOverlay.setAttribute("aria-hidden","true");
+          setInert(sideMenuOverlay,true);
+        }
+        return;
+      }
+
+      const open = document.body.classList.contains("menu-open");
+      if (sideMenu){
+        sideMenu.setAttribute("aria-hidden", open ? "false" : "true");
+        setInert(sideMenu, !open);
+      }
+      if (sideMenuOverlay){
+        sideMenuOverlay.setAttribute("aria-hidden", open ? "false" : "true");
+        setInert(sideMenuOverlay, !open);
+      }
+    }
+
+    try{
+      if (__mqPinnedMenu && typeof __mqPinnedMenu.addEventListener === "function"){
+        __mqPinnedMenu.addEventListener("change", syncSideMenuA11y);
+      } else if (__mqPinnedMenu && typeof __mqPinnedMenu.addListener === "function") {
+        __mqPinnedMenu.addListener(syncSideMenuA11y);
+      }
+      window.addEventListener("resize", syncSideMenuA11y, { passive: true });
+    }catch(_){}
+    // Init
+    try{ syncSideMenuA11y(); }catch(_){}
+
     // Anagrafica
     const segSuppliers = document.getElementById("segSuppliers");
     const segProducts = document.getElementById("segProducts");
@@ -1677,89 +7478,30 @@
     const anagTbody = document.getElementById("anagTbody");
     const anagTheadRow = document.getElementById("anagTheadRow");
 
-    // Supplier modal
-    const modalSupplier = document.getElementById("modalSupplier");
-    const supTitle = document.getElementById("supTitle");
-    const supSub = document.getElementById("supSub");
-    const supFields = document.getElementById("supFields");
-    const supDocsTbody = document.getElementById("supDocsTbody");
-    const supClose = document.getElementById("supClose");
-    const btnSupDone = document.getElementById("btnSupDone");
-    const btnSupDelete = document.getElementById("btnSupDelete");
-    const btnSupEdit = document.getElementById("btnSupEdit");
-    const btnSupSave = document.getElementById("btnSupSave");
-    const btnSupCancelEdit = document.getElementById("btnSupCancelEdit");
-// Product modal
-    const modalProduct = document.getElementById("modalProduct");
-    const prodTitle = document.getElementById("prodTitle");
-    const prodFields = document.getElementById("prodFields");
-    const prodClose = document.getElementById("prodClose");
-    const btnProdDone = document.getElementById("btnProdDone");
-    const modalUnified = document.getElementById("modalUnified");
-    const unifiedTitle = document.getElementById("unifiedTitle");
-    const unifiedSubtitle = document.getElementById("unifiedSubtitle");
-    const unifiedButtons = document.getElementById("unifiedButtons");
-    const unifiedClose = document.getElementById("unifiedClose");
-    const btnUnifiedDone = document.getElementById("btnUnifiedDone");
+    // Anagrafica prodotti finiti (distinta base)
+    const btnNewFinishedProduct = document.getElementById("btnNewFinishedProduct");
+    const modalFinishedProduct = document.getElementById("modalFinishedProduct");
+    const fpTitle = document.getElementById("fpTitle");
+    const fpName = document.getElementById("fpName");
+    const fpCode = document.getElementById("fpCode");
+    const fpUom = document.getElementById("fpUom");
 
-    // DDT detail modal
-    const modalDocDetail = document.getElementById("modalDocDetail");
-    const docDetailTitle = document.getElementById("docDetailTitle");
-    const docDetailSubtitle = document.getElementById("docDetailSubtitle");
-    const docDetailTbody = document.getElementById("docDetailTbody");
-    const docDetailTotals = document.getElementById("docDetailTotals");
+    const fpCompMeta = document.getElementById("fpCompMeta");
+    const fpCompCat = document.getElementById("fpCompCat");
+    const fpCompBrowseWrap = document.getElementById("fpCompBrowseWrap");
+    const fpCompBrowse = document.getElementById("fpCompBrowse");
+    const fpCompPick = document.getElementById("fpCompPick");
+    const fpCompQty = document.getElementById("fpCompQty");
+    const fpCompUom = document.getElementById("fpCompUom");
+    const fpComponentList = document.getElementById("fpComponentList");
+    const fpCompTbody = document.getElementById("fpCompTbody");
 
-const docDetailPhotosWrap = document.getElementById("docDetailPhotosWrap");
-const docDetailPhotosGrid = document.getElementById("docDetailPhotosGrid");
-const docDetailPhotosMeta = document.getElementById("docDetailPhotosMeta");
-    const btnCloseDocDetail = document.getElementById("btnCloseDocDetail");
-
-    // Flow edit modal
-    const modalFlowEdit = document.getElementById("modalFlowEdit");
-    const flowEditTitle = document.getElementById("flowEditTitle");
-    const flowEditSub = document.getElementById("flowEditSub");
-    const flowEditCustomer = document.getElementById("flowEditCustomer");
-    const flowEditDate = document.getElementById("flowEditDate");
-    const flowEditNote = document.getElementById("flowEditNote");
-    const btnCloseFlowEdit = document.getElementById("btnCloseFlowEdit");
-    const btnCancelFlowEdit = document.getElementById("btnCancelFlowEdit");
-    const btnSaveFlowEdit = document.getElementById("btnSaveFlowEdit");
-    const btnDeleteFlowFromEdit = document.getElementById("btnDeleteFlowFromEdit");
-    const flowEditItemsMeta = document.getElementById("flowEditItemsMeta");
-    const flowEditItemsTbody = document.getElementById("flowEditItemsTbody");
-
-
-
-
-
-
-    const modalQuick = document.getElementById("modalQuick");
-    const modalTitle = document.getElementById("modalTitle");
-    const modalBody = document.getElementById("modalBody");
-
-    const modalSettings = document.getElementById("modalSettings");
-    const sOcrUrl = document.getElementById("sOcrUrl");
-    const sOcrKey = document.getElementById("sOcrKey");
-    const sLowThreshold = document.getElementById("sLowThreshold");
-    const sMaxRecent = document.getElementById("sMaxRecent");
-    const ocrTestResult = document.getElementById("ocrTestResult");
-
-    const cameraInput = document.getElementById("cameraInput");
-    const galleryInput = document.getElementById("galleryInput");
-    const pagesMeta = document.getElementById("pagesMeta");
-    const pagesCount = document.getElementById("pagesCount");
-    const pagesThumbs = document.getElementById("pagesThumbs");
-    const btnRemoveLastPage = document.getElementById("btnRemoveLastPage");
-
-    const segIn = document.getElementById("segIn");
-    const segOut = document.getElementById("segOut");
-
-    const fCustomer = document.getElementById("fCustomer");
-    const fDate = document.getElementById("fDate");
-    const fCode = document.getElementById("fCode");
-    const fQty = document.getElementById("fQty");
-    const fItem = document.getElementById("fItem");
-    const fNote = document.getElementById("fNote");
+    const btnFpCompAdd = document.getElementById("btnFpCompAdd");
+    const btnFpSave = document.getElementById("btnFpSave");
+    const btnFpCancel = document.getElementById("btnFpCancel");
+    const btnFpDelete = document.getElementById("btnFpDelete");
+    const btnFpDone = document.getElementById("btnFpDone");
+    const fpClose = document.getElementById("fpClose");
 
     // Click su una riga documento => precompila i campi movimento
     const docItemsTable = document.getElementById("docItemsTable");
@@ -1773,7 +7515,11 @@ const docDetailPhotosMeta = document.getElementById("docDetailPhotosMeta");
       movements: document.getElementById("viewMovements"),
       categories: document.getElementById("viewCategories"),
       trash: document.getElementById("viewTrash"),
-      anag: document.getElementById("viewAnag")
+      moveInv: document.getElementById("viewMoveInventory"),
+      anag: document.getElementById("viewAnag"),
+      daneaDdt: document.getElementById("viewDaneaDdt"),
+      revenue: document.getElementById("viewRevenue"),
+      fpCategories: document.getElementById("viewFPCategories")
     };
     const __hdrTitle = document.getElementById("hdrPageTitle");
     const __btnBack = document.getElementById("btnNavBack");
@@ -1781,27 +7527,12 @@ const docDetailPhotosMeta = document.getElementById("docDetailPhotosMeta");
     const btnBackFlows = document.getElementById("btnBackFlows");
     const btnBackMovements = document.getElementById("btnBackMovements");
     const btnBackAnag = document.getElementById("btnBackAnag");
-    let __modalOpenSeq = 0;
-    let __modalSpinnerTimer = null;
-    const __modalOpenSpinner = (function(){
-      try{
-        const el = document.createElement("div");
-        el.id = "modalOpenSpinner";
-        el.setAttribute("role", "status");
-        el.setAttribute("aria-live", "polite");
-        el.setAttribute("aria-label", "Caricamento");
-        el.innerHTML = '<div class="winSpinner" aria-hidden="true"></div>';
-        document.body.appendChild(el);
-        return el;
-      }catch(_){
-        return null;
-      }
-    })();
+    const btnBackMoveInv = document.getElementById("btnBackMoveInv");
 
     // Porta overlay/modali come figli diretti di <body> per evitare stacking-context (transform/filter) sui parent
     (function __liftOverlaysToBody(){
       try{
-        ["viewOcr","viewInventory","viewFlows","viewMovements","viewCategories","viewTrash","viewAnag"].forEach(id => {
+        ["viewOcr","viewInventory","viewFlows","viewDaneaDdt","viewRevenue","viewMovements","viewMoveInventory","viewCategories","viewFPCategories","viewTrash","viewAnag"].forEach(id => {
           const el = document.getElementById(id);
           if (el && el.parentElement !== document.body) document.body.appendChild(el);
         });
@@ -1809,54 +7540,114 @@ const docDetailPhotosMeta = document.getElementById("docDetailPhotosMeta");
           if (m && m.parentElement !== document.body) document.body.appendChild(m);
         });
       }catch(_){}
+
+
+
     })();
 
+    // =========================================================
+    // Dock: cerca / filtri / bottoni nella stessa riga del tasto indietro
+    // (sposta le .listStickyBar dentro la .hd di ogni overlay)
+    // =========================================================
+    function __dockBackRowControls(){
+      try{
+        const views = document.querySelectorAll('.view.modalOverlay');
+        views.forEach((view) => {
+          const card = view.querySelector('article.card');
+          if (!card) return;
 
-    function __markModalOpen(modal){
-      if (!modal) return;
-      __modalOpenSeq += 1;
-      modal.dataset.openSeq = String(__modalOpenSeq);
+          const hd = card.querySelector(':scope > .hd') || card.querySelector('.hd');
+          const bd = card.querySelector(':scope > .bd') || card.querySelector('.bd');
+          if (!hd || !bd) return;
+
+          // Right cluster (pill + close). Se manca, ok.
+          try{
+            const kids = Array.from(hd.children || []);
+            const right = hd.querySelector('.hdrRight') || kids.find(el => el && el.classList && el.classList.contains('inlineRow') && !el.classList.contains('overlayHeaderTitle')) || null;
+            if (right && right.classList) right.classList.add('hdrRight');
+          }catch(_){ }
+
+          // Dock slot (between title and right)
+          let slot = hd.querySelector('.hdrDockSlot');
+          if (!slot){
+            slot = document.createElement('div');
+            slot.className = 'hdrDockSlot';
+            const title = hd.querySelector('.overlayHeaderTitle');
+            const right2 = hd.querySelector('.hdrRight');
+            if (title && title.nextSibling) hd.insertBefore(slot, title.nextSibling);
+            else if (right2) hd.insertBefore(slot, right2);
+            else hd.appendChild(slot);
+          }
+
+          // Primary bar: la prima .listStickyBar dentro la bd
+          const bar = bd.querySelector('.listStickyBar');
+          if (!bar) return;
+          if (bar.closest && bar.closest('.hd')) return; // già dockata
+
+          // show/hide: usa l'antenato con id più vicino (es. invDetail / moveInvList / daneaListWrap)
+          let showWhen = '';
+          try{
+            let p = bar.parentElement;
+            while (p && p !== bd){
+              if (p.id){ showWhen = String(p.id||''); break; }
+              p = p.parentElement;
+            }
+          }catch(_){ }
+          try{ if (showWhen) bar.dataset.dockShowWhen = showWhen; }catch(_){ }
+
+          // pulizia inline styles che occupavano spazio in bd
+          try{ bar.style.marginTop = '0'; }catch(_){ }
+          try{ bar.style.padding = '0'; }catch(_){ }
+          try{ bar.style.background = 'transparent'; }catch(_){ }
+          try{ bar.style.position = 'static'; }catch(_){ }
+          try{ bar.classList.add('inHeaderDock'); }catch(_){ }
+
+          slot.appendChild(bar);
+        });
+      }catch(_){ }
     }
 
-    function __showModalOpeningSpinner(){
-      if (!__modalOpenSpinner) return;
-      __modalOpenSpinner.classList.add("active");
-      if (__modalSpinnerTimer) clearTimeout(__modalSpinnerTimer);
-      __modalSpinnerTimer = setTimeout(function(){
-        __modalOpenSpinner.classList.remove("active");
-      }, 320);
+    function __isVisibleEl(el){
+      if (!el) return false;
+      try{
+        const cs = window.getComputedStyle(el);
+        return !!(cs && cs.display !== 'none' && cs.visibility !== 'hidden');
+      }catch(_){
+        return true;
+      }
     }
 
-    function __getTopModal(){
-      const openModals = Array.from(document.querySelectorAll(".modal.open"));
-      if (!openModals.length) return null;
-      let top = null;
-      let topSeq = -1;
-      openModals.forEach((modal) => {
-        const seq = Number(modal.dataset.openSeq || 0);
-        if (seq >= topSeq) {
-          topSeq = seq;
-          top = modal;
-        }
-      });
-      return top || openModals[openModals.length - 1];
+    function __syncDockedControlsVisibility(){
+      try{
+        document.querySelectorAll('.view.modalOverlay article.card > .hd .listStickyBar.inHeaderDock').forEach((bar) => {
+          const id = (bar && bar.dataset) ? String(bar.dataset.dockShowWhen || '') : '';
+          if (!id){
+            try{ bar.style.display = ''; }catch(_){ }
+            return;
+          }
+          const src = document.getElementById(id);
+          const vis = __isVisibleEl(src);
+          try{ bar.style.display = vis ? '' : 'none'; }catch(_){ }
+        });
+      }catch(_){ }
     }
 
-    function __syncHeaderBack(){
+    try{ window.__syncDockedControlsVisibility = __syncDockedControlsVisibility; }catch(_){ }
+    try{ __dockBackRowControls(); __syncDockedControlsVisibility(); }catch(_){ }
+
+
+
+    function syncHeaderBackVisibility(){
       if (!__btnBack) return;
-      const hasOverlay = !!document.querySelector(".view.modalOverlay.active");
       const hasModal = !!document.querySelector(".modal.open");
-      __btnBack.style.display = (hasOverlay || hasModal) ? "inline-flex" : "none";
+      const hasOverlay = !!document.querySelector(".view.modalOverlay.active");
+      __btnBack.style.display = (hasModal || hasOverlay) ? "inline-flex" : "none";
     }
 
     function setView(name){
       const key = String(name || "home");
-      const overlayKeys = ["ocr","inventory","flows","movements","categories","trash","anag"];
+      const overlayKeys = ["ocr","inventory","flows","daneaDdt","revenue","movements","moveInv","categories","fpCategories","trash","anag"];
       const isOverlay = overlayKeys.includes(key);
-
-      if (isOverlay && document.body.classList.contains("menu-open")) {
-        closeSideMenu();
-      }
 
       // Home resta sempre visibile dietro (come un gestionale iOS)
       if (__views.home) __views.home.classList.add("active");
@@ -1897,53 +7688,20 @@ const docDetailPhotosMeta = document.getElementById("docDetailPhotosMeta");
           (key === "ocr") ? "Carica" :
           (key === "inventory") ? "Inventario" :
           (key === "flows") ? "DDT Caricati" :
+          (key === "daneaDdt") ? "Scarica flussi DDT" :
+          (key === "revenue") ? "Fatturato" :
           (key === "movements") ? "Movimenti" :
           (key === "categories") ? "Categorie" :
+          (key === "fpCategories") ? "Categorie prodotti finiti" :
           (key === "trash") ? "Cestino" :
+          (key === "moveInv") ? "Sposta inventario" :
           "Anagrafica";
       }
+      syncHeaderBackVisibility();
+      try{ __dockBackRowControls && __dockBackRowControls(); }catch(_){ }
+      try{ __syncDockedControlsVisibility && __syncDockedControlsVisibility(); }catch(_){}
       try { window.scrollTo(0, 0); } catch(_){}
-      __syncBodyLock();
-      __syncHeaderBack();
     }
-
-    (function __observeModalStack(){
-      const modals = Array.from(document.querySelectorAll(".modal"));
-      if (!modals.length) return;
-      const observer = new MutationObserver((mutations) => {
-        let needsSync = false;
-        mutations.forEach((mutation) => {
-          if (mutation.type !== "attributes" || mutation.attributeName !== "class") return;
-          const el = mutation.target;
-          if (!el.classList.contains("modal")) return;
-          const wasOpen = (mutation.oldValue || "").split(" ").includes("open");
-          if (el.classList.contains("open") && !wasOpen) {
-            __markModalOpen(el);
-            __showModalOpeningSpinner();
-          }
-          needsSync = true;
-        });
-        if (needsSync) __syncHeaderBack();
-      });
-      modals.forEach((modal) => observer.observe(modal, { attributes: true, attributeFilter: ["class"], attributeOldValue: true }));
-    })();
-
-    (function __observeOverlayOpen(){
-      const overlays = Array.from(document.querySelectorAll(".view.modalOverlay"));
-      if (!overlays.length) return;
-      const observer = new MutationObserver((mutations) => {
-        mutations.forEach((mutation) => {
-          if (mutation.type !== "attributes" || mutation.attributeName !== "class") return;
-          const el = mutation.target;
-          if (!el.classList.contains("view") || !el.classList.contains("modalOverlay")) return;
-          const wasActive = (mutation.oldValue || "").split(" ").includes("active");
-          if (el.classList.contains("active") && !wasActive) {
-            __showModalOpeningSpinner();
-          }
-        });
-      });
-      overlays.forEach((overlay) => observer.observe(overlay, { attributes: true, attributeFilter: ["class"], attributeOldValue: true }));
-    })();
 
     function __isMobileDevice(){
       try {
@@ -1953,22 +7711,13 @@ const docDetailPhotosMeta = document.getElementById("docDetailPhotosMeta");
       }
     }
 
-    function __closeAllModals(){
-      try{
-        document.querySelectorAll(".modal.open").forEach(modal => modal.classList.remove("open"));
-      }catch(_){}
-      __syncHeaderBack();
-    }
-
-    function __closeAllOverlays(){
-      try{
-        if (document.querySelector(".view.modalOverlay.active")) setView("home");
-      }catch(_){}
-      __syncHeaderBack();
-    }
-
     function startHomeOcr(){
       setView("ocr");
+
+      // Warm-up ScanBridge appena entri nella vista OCR (non apre lo scanner):
+      // riduce il caso "parte solo al secondo clic".
+      try{ __scanbridgeWarmup(false).catch(()=>{}); }catch(_){ }
+
       // forza carico
       capture.movementType = "IN";
       try{ segIn.classList.add("active"); segOut.classList.remove("active"); }catch(_){}
@@ -1983,19 +7732,39 @@ const docDetailPhotosMeta = document.getElementById("docDetailPhotosMeta");
     }
 
     function openSideMenu(){
-      __closeAllModals();
-      __closeAllOverlays();
+      // Desktop pinned: niente overlay, ma riallineiamo aria/inert nel caso fosse rimasto sporco
+      if (__isPinnedMenu()) { try{ syncSideMenuA11y(); }catch(_){} return; }
+
+      // Remember focus so we can restore it on close (prevents aria-hidden warnings)
+      try{ lastFocusBeforeMenu = document.activeElement; }catch(_){ lastFocusBeforeMenu = null; }
+
       document.body.classList.add("menu-open");
-      sideMenu?.setAttribute("aria-hidden", "false");
-      sideMenuOverlay?.setAttribute("aria-hidden", "false");
-      __syncBodyLock();
+      try{ syncSideMenuA11y(); }catch(_){}
+
+      // Move focus into the menu (close button first, otherwise first focusable)
+      try{
+        const first = sideMenu && sideMenu.querySelector("#btnMenuClose, button, [href], input, select, textarea, [tabindex]:not([tabindex='-1'])");
+        first && first.focus && first.focus({ preventScroll: true });
+      }catch(_){}
     }
 
     function closeSideMenu(){
+      if (__isPinnedMenu()) { try{ syncSideMenuA11y(); }catch(_){} return; }
+
+      // If focus is inside the menu, move it OUT before hiding (prevents aria-hidden on focused ancestor)
+      try{
+        const ae = document.activeElement;
+        if (sideMenu && ae && sideMenu.contains(ae)){
+          const restore = (lastFocusBeforeMenu && typeof lastFocusBeforeMenu.focus === "function")
+            ? lastFocusBeforeMenu
+            : btnMenuToggle;
+          try{ ae.blur && ae.blur(); }catch(_){}
+          restore && restore.focus && restore.focus({ preventScroll: true });
+        }
+      }catch(_){}
+
       document.body.classList.remove("menu-open");
-      sideMenu?.setAttribute("aria-hidden", "true");
-      sideMenuOverlay?.setAttribute("aria-hidden", "true");
-      __syncBodyLock();
+      try{ syncSideMenuA11y(); }catch(_){}
     }
 
     btnMenuToggle?.addEventListener("click", () => {
@@ -2013,20 +7782,25 @@ const docDetailPhotosMeta = document.getElementById("docDetailPhotosMeta");
 
     document.getElementById("btnGoOcr")?.addEventListener("click", startHomeOcr);
     document.getElementById("btnGoFlows")?.addEventListener("click", () => { setView("flows"); try{ renderFlowsTable(); }catch(_){ } });
-    document.getElementById("btnGoMovements")?.addEventListener("click", () => { setView("movements"); try{ window.HubMovements && window.HubMovements.refresh && window.HubMovements.refresh(); }catch(_){ } });
-    document.getElementById("btnGoCategories")?.addEventListener("click", () => { document.getElementById("menuGoCategories")?.click(); });
+    document.getElementById("btnGoMovements")?.addEventListener("click", () => {
+      setView("movements");
+      try{ window.HubMovements && window.HubMovements.refresh && window.HubMovements.refresh(); }catch(_){ }
+    });
+    document.getElementById("btnGoCategories")?.addEventListener("click", () => {
+      setView("categories");
+      try{ window.HubCategories && window.HubCategories.render && window.HubCategories.render(); }catch(_){ }
+    });
     document.getElementById("btnCloseInv")?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
     // Close inventario anche con tap/click sul backdrop
     document.getElementById("viewInventory")?.addEventListener("click", (e) => { try{ if (e.target === e.currentTarget) setView("home"); }catch(_){ } });
     document.getElementById("viewMovements")?.addEventListener("click", (e) => { try{ if (e.target === e.currentTarget) setView("home"); }catch(_){ } });
+    document.getElementById("viewMoveInventory")?.addEventListener("click", (e) => { try{ if (e.target === e.currentTarget) { resetMoveInvDirection(); setView("home"); } }catch(_){ } });
     document.getElementById("btnCloseOcr")?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
     btnBackOcr?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
-    document.getElementById("btnGoAnag")?.addEventListener("click", () => {
-      activeAnagTab = "suppliers";
-      syncAnagHeaderTitle();
-      try{ segSuppliers && segSuppliers.classList.add("active"); segProducts && segProducts.classList.remove("active"); }catch(_){ }
-      setView("anag");
-      try{ renderAnag(); }catch(_){ }
+    document.getElementById("btnGoMoveInventory")?.addEventListener("click", () => {
+      try{ resetMoveInvDirection(); }catch(_){ }
+      setView("moveInv");
+      try{ renderMoveInv && renderMoveInv(); }catch(_){ }
     });
     document.getElementById("btnGoProdAnag")?.addEventListener("click", () => {
       activeAnagTab = "products";
@@ -2035,29 +7809,25 @@ const docDetailPhotosMeta = document.getElementById("docDetailPhotosMeta");
       setView("anag");
       try{ renderAnag(); }catch(_){ }
     });
-    document.getElementById("btnGoInvCerea")?.addEventListener("click", () => { openInventoryOverlay(WAREHOUSE_CEREA); });
+    
+    document.getElementById("btnGoFinishedAnag")?.addEventListener("click", () => {
+      activeAnagTab = "finished";
+      activeProductsMacroGroup = "";
+      syncAnagHeaderTitle();
+      try{ segProducts && segProducts.classList.remove("active"); segSuppliers && segSuppliers.classList.remove("active"); }catch(_){ }
+      setView("anag");
+      try{ renderAnag(); }catch(_){ }
+    });
+document.getElementById("btnGoInvCerea")?.addEventListener("click", () => { openInventoryOverlay(WAREHOUSE_CEREA); });
     document.getElementById("btnGoInvConcamarise")?.addEventListener("click", () => { openInventoryOverlay(WAREHOUSE_CONCA); });
-
-
-    // 🔌 Bridge globale per script esterni (Cestino, ecc.)
-    try{
-      globalThis.__HUB = globalThis.__HUB || {};
-      globalThis.__HUB.fb = fb;
-      globalThis.__HUB.ORG_ID = ORG_ID;
-      globalThis.__HUB.setView = setView;
-      globalThis.__HUB.closeSideMenu = closeSideMenu;
-      globalThis.__HUB.orgCol = orgCol;
-      globalThis.__HUB.FS = {
-        collection, doc, setDoc, addDoc, updateDoc, deleteDoc, getDoc, getDocs,
-        onSnapshot, query, orderBy, serverTimestamp, deleteField
-      };
-    }catch(_){}
-
 document.getElementById("menuGoHome")?.addEventListener("click", () => { closeSideMenu(); setView("home"); });
     document.getElementById("menuGoOcr")?.addEventListener("click", () => { closeSideMenu(); startHomeOcr(); });
     document.getElementById("menuGoInvCerea")?.addEventListener("click", () => { closeSideMenu(); openInventoryOverlay(WAREHOUSE_CEREA); });
     document.getElementById("menuGoInvConcamarise")?.addEventListener("click", () => { closeSideMenu(); openInventoryOverlay(WAREHOUSE_CONCA); });
+    document.getElementById("menuGoMoveInventory")?.addEventListener("click", () => { closeSideMenu(); try{ resetMoveInvDirection(); }catch(_){ } setView("moveInv"); try{ renderMoveInv && renderMoveInv(); }catch(_){ } });
     document.getElementById("menuGoFlows")?.addEventListener("click", () => { closeSideMenu(); setView("flows"); try{ renderFlowsTable(); }catch(_){ } });
+    document.getElementById("menuGoDaneaDdt")?.addEventListener("click", () => { closeSideMenu(); setView("daneaDdt"); try{ window.HubDaneaDdt && window.HubDaneaDdt.refresh && window.HubDaneaDdt.refresh(); }catch(_){ } });
+    document.getElementById("menuGoRevenue")?.addEventListener("click", () => { closeSideMenu(); setView("revenue"); try{ window.HubRevenue && window.HubRevenue.refresh && window.HubRevenue.refresh(); }catch(_){ } });
     document.getElementById("menuGoMovements")?.addEventListener("click", () => { closeSideMenu(); setView("movements"); try{ window.HubMovements && window.HubMovements.refresh && window.HubMovements.refresh(); }catch(_){ } });
     document.getElementById("menuGoTrash")?.addEventListener("click", () => { closeSideMenu(); setView("trash"); try{ window.HubTrash && window.HubTrash.refresh && window.HubTrash.refresh(); }catch(_){ } });
     document.getElementById("menuGoSuppliers")?.addEventListener("click", () => {
@@ -2087,24 +7857,130 @@ document.getElementById("menuGoHome")?.addEventListener("click", () => { closeSi
       setView("anag");
       try{ renderAnag(); }catch(_){ }
     });
-        document.getElementById("btnCloseTrash")?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
+        
+    document.getElementById("menuGoFinishedProducts")?.addEventListener("click", () => {
+      closeSideMenu();
+      activeAnagTab = "finished";
+      activeProductsMacroGroup = "";
+      syncAnagHeaderTitle();
+      try{ segProducts && segProducts.classList.remove("active"); segSuppliers && segSuppliers.classList.remove("active"); }catch(_){ }
+      setView("anag");
+      try{ renderAnag(); }catch(_){ }
+    });
+document.getElementById("btnCloseTrash")?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
 document.getElementById("btnCloseFlows")?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
+
+    document.getElementById("btnCloseDaneaDdt")?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
+    document.getElementById("btnBackDaneaDdt")?.addEventListener("click", (e) => {
+      try{ e.preventDefault(); e.stopPropagation(); }catch(_){}
+      try{
+        if (window.HubDaneaDdt && typeof window.HubDaneaDdt.backToList === "function"){
+          window.HubDaneaDdt.backToList();
+          return;
+        }
+      }catch(_){}
+      setView("home");
+    });
+
+    // Fatturato (DDT completati con movimenti)
+    document.getElementById("viewRevenue")?.addEventListener("click", (e) => { try{ if (e.target === e.currentTarget) setView("home"); }catch(_){ } });
+    document.getElementById("btnCloseRevenue")?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
+    document.getElementById("btnBackRevenue")?.addEventListener("click", (e) => {
+      try{ e.preventDefault(); e.stopPropagation(); }catch(_){ }
+      try{
+        const det = document.getElementById("revDetailWrap");
+        const isDet = !!(det && det.style.display !== "none");
+        if (isDet && window.HubRevenue && typeof window.HubRevenue.backToList === "function"){
+          window.HubRevenue.backToList();
+          return;
+        }
+      }catch(_){ }
+      setView("home");
+    });
     document.getElementById("btnCloseMovements")?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
+    document.getElementById("btnCloseMoveInv")?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} try{ resetMoveInvDirection(); }catch(_){ } setView("home"); });
         document.getElementById("btnBackTrash")?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
 btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
     btnBackFlows?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
     btnBackMovements?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
-    document.getElementById("btnFlowsExport")?.addEventListener("click", () => { try{ exportMovementsCSV(); }catch(_){ } });
-    __btnBack?.addEventListener("click", () => {
-      const topModal = __getTopModal();
-      if (topModal) {
-        topModal.classList.remove("open");
-        __syncHeaderBack();
+    btnBackMoveInv?.addEventListener("click", (e) => {
+      try{ e.preventDefault(); e.stopPropagation(); }catch(_){}
+      const hasMoveInvModal = !!(modalMoveInvQty && modalMoveInvQty.classList && modalMoveInvQty.classList.contains("open"));
+      const hasMoveInvDirection = !!__moveInvFromWh;
+      if (hasMoveInvModal){
+        try{ closeMoveInvQtyModal(); }catch(_){ }
         return;
       }
-      if (document.querySelector(".view.modalOverlay.active")) {
-        setView("home");
+      if (hasMoveInvDirection){
+        try{ resetMoveInvDirection(); }catch(_){ }
+        setView("moveInv");
+        return;
       }
+      setView("home");
+    });
+    document.getElementById("btnFlowsExport")?.addEventListener("click", () => { try{ exportMovementsCSV(); }catch(_){ } });
+    // Flussi: ricerca intelligente (DDT caricati)
+    const __flowsSearch = document.getElementById("flowsSearch");
+    const __btnFlowsClear = document.getElementById("btnFlowsClear");
+    if (__flowsSearch){
+      __flowsSearch.addEventListener("input", () => { try{ renderFlowsTable(); }catch(_){ } });
+      __flowsSearch.addEventListener("keydown", (e) => {
+        if (!e) return;
+        if (e.key === "Escape"){
+          e.preventDefault();
+          __flowsSearch.value = "";
+          try{ renderFlowsTable(); }catch(_){ }
+          return;
+        }
+        if (e.key === "Enter"){
+          e.preventDefault();
+          try{
+            const list = renderFlowsTable && renderFlowsTable._lastFiltered ? renderFlowsTable._lastFiltered : [];
+            const first = (Array.isArray(list) && list.length) ? list[0] : null;
+            if (first && first.key) openFlowEdit(first.key);
+          }catch(_){ }
+        }
+      });
+    }
+    if (__btnFlowsClear){
+      __btnFlowsClear.addEventListener("click", () => {
+        try{ if (__flowsSearch) __flowsSearch.value = ""; }catch(_){}
+        try{ renderFlowsTable(); }catch(_){ }
+        try{ __flowsSearch && __flowsSearch.focus(); }catch(_){}
+      });
+    }
+    function closeHeaderModalIfOpen(){
+      const modalOrder = [
+        { el: modalFlowEdit, close: closeFlowEdit },
+        { el: modalDocDetail, close: closeDocDetail },
+        { el: modalMovement, close: closeMovementModal },
+        { el: modalUnified, close: () => { modalUnified?.classList.remove("open"); __syncBodyLockFromModals(); } },
+        { el: modalProduct, close: () => { modalProduct?.classList.remove("open"); __syncBodyLockFromModals(); } },
+        { el: modalSupplier, close: closeSupplierModal },
+        { el: document.getElementById("modalCategory"), close: () => {
+          const closeBtn = document.getElementById("catModalClose") || document.getElementById("btnCatDone");
+          if (closeBtn) closeBtn.click();
+          else {
+            document.getElementById("modalCategory")?.classList.remove("open");
+            __syncBodyLockFromModals();
+          }
+        }},
+        { el: modalSettings, close: closeSettings },
+        { el: modalQuick, close: closeModal }
+      ];
+
+      for (const item of modalOrder){
+        if (item.el && item.el.classList.contains("open")){
+          try{ item.close(); }catch(_){ }
+          return true;
+        }
+      }
+      return false;
+    }
+
+    __btnBack?.addEventListener("click", () => {
+      if (closeHeaderModalIfOpen()) return;
+      setView("home");
     });
     homeInvSelect?.addEventListener("change", () => {
       const value = homeInvSelect.value;
@@ -2121,7 +7997,7 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
     setView("home");
 
     // Chiudi i modali cliccando fuori dal contenuto (overlay)
-    ["ocr","inventory","flows","anag"].forEach((k) => {
+    ["ocr","inventory","flows","moveInv","anag"].forEach((k) => {
       const el = __views[k];
       if (!el) return;
       el.addEventListener("click", (e) => { if (e.target === el) setView("home"); });
@@ -2130,7 +8006,7 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
     if (docItemsTable) {
       docItemsTable.addEventListener("click", (ev) => {
         // Se stai editando la quantità, non interferire con la selezione riga
-        if (ev.target && ev.target.closest && ev.target.closest("input.qtyInputInline")) return;
+        if (ev.target && ev.target.closest && ev.target.closest("input.qtyInputInline, input.txtInputInline")) return;
 
         const tr = ev.target && ev.target.closest ? ev.target.closest("tr[data-code]") : null;
         if (!tr) return;
@@ -2164,9 +8040,37 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
           return;
         }
 
+        // Modifica codice / descrizione: click sul testo
+        const codeCell = ev.target && ev.target.closest ? ev.target.closest(".jsEditCode") : null;
+        if (codeCell) {
+          ev.preventDefault();
+          ev.stopPropagation();
+          __beginInlineTextEdit(tr, "code");
+          return;
+        }
+        const descCell = ev.target && ev.target.closest ? ev.target.closest(".jsEditDesc") : null;
+        if (descCell) {
+          ev.preventDefault();
+          ev.stopPropagation();
+          __beginInlineTextEdit(tr, "desc");
+          return;
+        }
+
+        // Modifica U.M.: click sulla cella U.M.
+        const uomCell = ev.target && ev.target.closest ? ev.target.closest(".jsEditUom") : null;
+        if (uomCell) {
+          ev.preventDefault();
+          ev.stopPropagation();
+          __beginInlineUomEdit(tr);
+          return;
+        }
+
+
 // UI selection
         docItemsTable.querySelectorAll("tbody tr.is-selected").forEach(r => r.classList.remove("is-selected"));
         tr.classList.add("is-selected");
+
+        try{ __docSelectedIndex = Number(tr.dataset.i); }catch(_){ __docSelectedIndex = -1; }
 
         const code = (tr.dataset.code || "").trim();
         const desc = (tr.dataset.desc || "").trim();
@@ -2199,10 +8103,9 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
     const statLowStock = document.getElementById("statLowStock");
     const statLastUpdate = document.getElementById("statLastUpdate");
 
-    // INIT_COUNTERS_TO_ZERO: evita "—" e micro-spostamenti all'ingresso
-    try {
-      [statTotalItems, statTotalPieces, statTotalFlows, statLowStock].forEach((el) => { if (el) el.textContent = "0"; });
-    } catch (_) {}
+    [statTotalItems, statTotalPieces, statTotalFlows, statLowStock].forEach((el) => {
+      if (el) el.textContent = "0";
+    });
 
 
     // Home: riquadro sotto-scorta (visual)
@@ -2212,19 +8115,31 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
     const lowStockCountCerea = document.getElementById("lowStockCountCerea");
     const lowStockCountConca = document.getElementById("lowStockCountConca");
 
-    // Home: riquadro quantità per categoria (grafico orizzontale)
-    const catQtyBoard = document.getElementById("catQtyBoard");
-    const catQtyList = document.getElementById("catQtyList");
-    const catQtyMeta = document.getElementById("catQtyMeta");
+    // Home: riquadro Categorie (Dashboard)
+    const categoryListCerea = document.getElementById("categoryListCerea");
+    const categoryTotalCerea = document.getElementById("categoryTotalCerea");
+
+    // Home: Andamento inventario (grafico temporale)
     const invTrendTotal = document.getElementById("invTrendTotal");
+    const invTrendRanges = document.getElementById("invTrendRanges");
     const invTrendChart = document.getElementById("invTrendChart");
     const invTrendTooltip = document.getElementById("invTrendTooltip");
-    const invTrendRanges = document.getElementById("invTrendRanges");
+
+    // Home: cockpit "Scarichi flussi" (DaneaXML)
+    const homeDaneaCockpit = document.getElementById("homeDaneaCockpit");
+    const homeDaneaTicker = document.getElementById("homeDaneaTicker");
+    const homeDaneaTickerTrack = document.getElementById("homeDaneaTickerTrack");
+    const homeDaneaTickerSeq = document.getElementById("homeDaneaTickerSeq");
+    const homeDaneaTickerSeqClone = document.getElementById("homeDaneaTickerSeqClone");
+    const homeDaneaToggleBtn = document.getElementById("homeDaneaToggleBtn");
 
 
     const stockTbody = document.getElementById("stockTbody");
     const movTbody = document.getElementById("movTbody");
     const flowsTbody = document.getElementById("flowsTbody");
+    const flowsSearch = document.getElementById("flowsSearch");
+    const flowsMeta = document.getElementById("flowsMeta");
+    const btnFlowsClear = document.getElementById("btnFlowsClear");
     const pillFlowsCount = document.getElementById("pillFlowsCount");
     const pillStock = document.getElementById("pillStock");
     const pillInvWarehouse = document.getElementById("pillInvWarehouse");
@@ -2271,6 +8186,8 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
 
       if (invPicker) invPicker.style.display = wh ? "none" : "";
       if (invDetail) invDetail.style.display = wh ? "" : "none";
+
+      try{ __syncDockedControlsVisibility && __syncDockedControlsVisibility(); }catch(_){}
 
       if (pillInvWarehouse) {
         pillInvWarehouse.style.display = wh ? "inline-flex" : "none";
@@ -2345,28 +8262,503 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
         categories: null,
         movements: null,
         thresholds: null,
-        supplierDocs: null
+        supplierDocs: null,
+        finishedProducts: null,
+        finishedProductCategories: null,
+        daneaCompleted: null
       }
     };
 
+    // 🔌 Bridge globale per moduli (DDT, Cestino, ecc.) — inizializzato DOPO fb (evita TDZ)
+    function syncHubBridge(){
+      try{
+        globalThis.__HUB = globalThis.__HUB || {};
+        globalThis.__HUB.fb = fb;
+        globalThis.__HUB.ORG_ID = ORG_ID;
+        globalThis.__HUB.setView = setView;
+        globalThis.__HUB.closeSideMenu = closeSideMenu;
+        globalThis.__HUB.orgCol = orgCol;
+
+        // Espone anche state + util: serve a moduli esterni (es. Scarica Flussi DDT)
+        // per poter leggere movimenti inventario e normalizzazioni.
+        globalThis.__HUB.state = state;
+        globalThis.__HUB.safeInt = safeInt;
+        globalThis.__HUB.normalizeWarehouse = normalizeWarehouse;
+        globalThis.__HUB.warehouseLabel = warehouseLabel;
+        globalThis.__HUB.showToast = showToast;
+        globalThis.__HUB.openModal = openModal;
+        globalThis.__HUB.FS = (()=>{
+          const FS = {
+            collection, doc, setDoc, addDoc, deleteDoc, getDocs,
+            onSnapshot, query, orderBy, serverTimestamp, deleteField, runTransaction
+          };
+          // opzionali (non far fallire il bridge se non importati)
+          try { FS.updateDoc = updateDoc; } catch(_){}
+          try { FS.getDoc = getDoc; } catch(_){}
+          return FS;
+        })();
+        globalThis.__HUB.ready = true;
+      }catch(e){
+        console.warn("syncHubBridge failed", e);
+      }
+    }
+
+
     let suppliers = [];
     let products = [];
-    let thresholds = {}; // key -> number (from Firestore)
-    let activeAnagTab = "suppliers"; // suppliers|products
+    let thresholds = {};
+    let finishedProducts = []; // key -> number (from Firestore)
+
+    // ===== Prodotti finiti: anti-duplicati per codice =====
+    // Obiettivo: in Firestore non devono esistere 2+ documenti finishedProducts con lo stesso codeLower.
+    // - Dedup automatico (best-effort) quando arriva lo snapshot realtime
+    // - Creazione: se il codice esiste gia', aggiorna il doc esistente invece di crearne uno nuovo
+    let __fpDedupRunning = false;
+    let __fpDedupLastSig = "";
+    let __fpDedupLastAt = 0;
+
+    function __fpNormCode(v){
+      return String(v || "").trim().toLowerCase();
+    }
+
+    function __fpTsMs(ts){
+      try{
+        if (!ts) return 0;
+        if (typeof ts.toMillis === "function") return ts.toMillis();
+        if (typeof ts.toDate === "function") return ts.toDate().getTime();
+        if (ts instanceof Date) return ts.getTime();
+        const s = String(ts || "");
+        const d = new Date(s);
+        const n = d.getTime();
+        return Number.isFinite(n) ? n : 0;
+      }catch(_){ return 0; }
+    }
+
+    function __fpGetComponents(fp){
+      if (!fp) return [];
+      const a = fp.components || fp.bom || fp.distintaBase || fp.distinta_base || [];
+      return Array.isArray(a) ? a : [];
+    }
+
+    function __fpScoreDoc(fp){
+      const name = String(fp && (fp.name || fp.nome) || "").trim();
+      const uom = String(fp && (fp.uom || fp.um) || "").trim();
+      const cat = String(fp && (fp.categoryKey || fp.category || fp.catKey || fp.categoryId) || "").trim();
+      const comps = __fpGetComponents(fp);
+
+      let score = 0;
+      if (name) score += Math.min(20, Math.floor(name.length / 3));
+      if (uom) score += 10;
+      if (cat) score += 20;
+      if (comps && comps.length) score += 100 + Math.min(50, comps.length);
+
+      // preferisci documenti piu' recenti (solo tie-break, non e' un requisito funzionale)
+      const t = __fpTsMs(fp && (fp.updatedAt || fp.createdAt));
+      if (t) score += 1;
+      return score;
+    }
+
+    function __fpPickCanonical(list){
+      const arr = Array.isArray(list) ? list.slice() : [];
+      arr.sort((a,b)=>{
+        const sa = __fpScoreDoc(a);
+        const sb = __fpScoreDoc(b);
+        if (sb !== sa) return sb - sa;
+        const ua = __fpTsMs(a && (a.updatedAt || a.createdAt));
+        const ub = __fpTsMs(b && (b.updatedAt || b.createdAt));
+        if (ub !== ua) return ub - ua;
+        return String(a && a.id || "").localeCompare(String(b && b.id || ""));
+      });
+      return arr[0] || null;
+    }
+
+    function __fpMergeComponents(docs){
+      const map = new Map();
+
+      const put = (c)=>{
+        if (!c) return;
+        const code = String(c.code || c.codice || "").trim();
+        const low = __fpNormCode(code);
+        if (!low) return;
+
+        const name = String(c.name || c.articolo || c.item || "").trim() || code;
+        const uom = String(c.uom || c.um || "").trim();
+        const pid = String(c.productId || c.pid || "").trim();
+        const qtyNum = (c.qty != null && Number.isFinite(Number(c.qty))) ? Number(c.qty) : null;
+        const qtyRaw = String(c.qtyRaw || c.qtaRaw || "").trim();
+        const note = String(c.note || "").trim();
+
+        const cur = map.get(low);
+        if (!cur){
+          map.set(low, { productId: pid, code, name, qty: qtyNum, qtyRaw, uom, note });
+          return;
+        }
+
+        // merge: preferisci dati piu' completi
+        if (!cur.productId && pid) cur.productId = pid;
+        if ((!cur.name || cur.name === cur.code) && name) cur.name = name;
+        if (!cur.uom && uom) cur.uom = uom;
+        if (cur.qty == null && qtyNum != null) cur.qty = qtyNum;
+        if (!cur.qtyRaw && qtyRaw) cur.qtyRaw = qtyRaw;
+        if (!cur.note && note) cur.note = note;
+      };
+
+      (Array.isArray(docs) ? docs : []).forEach(fp=>{
+        const comps = __fpGetComponents(fp);
+        (Array.isArray(comps) ? comps : []).forEach(put);
+      });
+
+      const out = Array.from(map.values());
+      out.sort((a,b)=>String(a.code||"").localeCompare(String(b.code||""), "it", { sensitivity:"base" }));
+      return out;
+    }
+
+    function __fpFindDuplicateGroups(list){
+      const by = new Map();
+      (Array.isArray(list) ? list : []).forEach(fp=>{
+        const id = String(fp && fp.id || "").trim();
+        const codeLower = __fpNormCode(fp && (fp.codeLower || fp.code) || "");
+        if (!id || !codeLower) return;
+        const arr = by.get(codeLower) || [];
+        arr.push(fp);
+        by.set(codeLower, arr);
+      });
+      const groups = [];
+      for (const [codeLower, arr] of by.entries()){
+        if ((arr || []).length > 1) groups.push({ codeLower, items: arr.slice() });
+      }
+      groups.sort((a,b)=>String(a.codeLower).localeCompare(String(b.codeLower)));
+      return groups;
+    }
+
+    function __fpDedupSignature(groups){
+      try{
+        return (groups||[]).map(g=>{
+          const ids = (g.items||[]).map(x=>String(x && x.id || "").trim()).filter(Boolean).sort().join(",");
+          return String(g.codeLower||"") + ":" + ids;
+        }).join("|");
+      }catch(_){ return ""; }
+    }
+
+    async function __fpDedupFinishedProducts(reason){
+      if (__fpDedupRunning) return;
+      if (!(fb && fb.user && fb.db)) return;
+
+      const groups = __fpFindDuplicateGroups(finishedProducts || []);
+      if (!groups.length) { __fpDedupLastSig = ""; return; }
+
+      const sig = __fpDedupSignature(groups);
+      const now = Date.now();
+      if (sig && sig === __fpDedupLastSig && (now - (__fpDedupLastAt || 0)) < 15000) return;
+
+      __fpDedupLastSig = sig;
+      __fpDedupLastAt = now;
+
+      // run async (non blocca render)
+      setTimeout(async ()=>{
+        if (__fpDedupRunning) return;
+        if (!(fb && fb.user && fb.db)) return;
+
+        const groups2 = __fpFindDuplicateGroups(finishedProducts || []);
+        if (!groups2.length) return;
+
+        __fpDedupRunning = true;
+        const actor = (fb.user && (fb.user.email || fb.user.uid)) || "";
+        let removed = 0;
+        let merged = 0;
+
+        try{
+          try{ showToast("Prodotti finiti: unifico codici duplicati…", "warn"); }catch(_){ }
+
+          for (const g of groups2){
+            const codeLower = String(g.codeLower || "").trim().toLowerCase();
+            const docs = Array.isArray(g.items) ? g.items.slice() : [];
+            if (!codeLower || docs.length < 2) continue;
+
+            const keep = __fpPickCanonical(docs) || docs[0];
+            const keepId = String(keep && keep.id || "").trim();
+            if (!keepId) continue;
+
+            const others = docs.filter(x => {
+              const id = String(x && x.id || "").trim();
+              return id && id !== keepId;
+            });
+            if (!others.length) continue;
+
+            const nameBest = (()=>{
+              const prefer = String(keep && (keep.name || keep.nome) || "").trim();
+              if (prefer) return prefer;
+              let best = "";
+              for (const d of docs){
+                const nm = String(d && (d.name || d.nome) || "").trim();
+                if (nm && nm.length > best.length) best = nm;
+              }
+              return best || codeLower;
+            })();
+
+            const codeBest = (()=>{
+              const c = String(keep && keep.code || "").trim();
+              if (c) return c;
+              for (const d of docs){
+                const cc = String(d && d.code || "").trim();
+                if (cc) return cc;
+              }
+              return String(codeLower || "");
+            })();
+
+            const uomBest = (()=>{
+              const u = String(keep && (keep.uom || keep.um) || "").trim();
+              if (u) return u;
+              for (const d of docs){
+                const uu = String(d && (d.uom || d.um) || "").trim();
+                if (uu) return uu;
+              }
+              return "";
+            })();
+
+            const catBest = (()=>{
+              const k = String(keep && (keep.categoryKey || keep.category || keep.catKey || keep.categoryId) || "").trim();
+              if (k) return k;
+              for (const d of docs){
+                const kk = String(d && (d.categoryKey || d.category || d.catKey || d.categoryId) || "").trim();
+                if (kk) return kk;
+              }
+              return "";
+            })();
+
+            const mergedComps = __fpMergeComponents(docs);
+
+            const payload = {
+              name: nameBest,
+              nameLower: String(nameBest || "").toLowerCase(),
+              code: codeBest,
+              codeLower: String(codeLower || "").toLowerCase(),
+              updatedAt: serverTimestamp(),
+              updatedBy: actor
+            };
+            if (uomBest) payload.uom = uomBest;
+            if (catBest){
+              payload.categoryKey = catBest;
+              payload.categoryKeyLower = String(catBest).toLowerCase();
+            }
+            if (mergedComps && mergedComps.length) payload.components = mergedComps;
+
+            await runTransaction(fb.db, async (tx)=>{
+              tx.set(doc(fb.db, "orgs", ORG_ID, "finishedProducts", keepId), payload, { merge: true });
+              for (const o of others){
+                const oid = String(o && o.id || "").trim();
+                if (!oid) continue;
+                tx.delete(doc(fb.db, "orgs", ORG_ID, "finishedProducts", oid));
+              }
+            });
+
+            // trash: best-effort (fuori transazione)
+            for (const o of others){
+              const oid = String(o && o.id || "").trim();
+              if (!oid) continue;
+              const nm = String(o && (o.name || o.nome) || "").trim() || "Prodotto finito";
+              const cd = String(o && o.code || "").trim();
+              try{ await trashPut({ kind:"finishedProduct", label: `${cd ? cd + " — " : ""}${nm} (dup)`, target:{ col:"finishedProducts", id: oid, code: cd }, data: o ? {...o} : { name:nm, code:cd } }); }catch(_){ }
+            }
+
+            removed += others.length;
+            merged += 1;
+          }
+
+          if (merged && removed){
+            try{ showToast(`Prodotti finiti unificati: ${merged} codici • rimossi ${removed} duplicati`, "ok"); }catch(_){ }
+          }
+        }catch(e){
+          console.warn("finishedProducts dedup failed", e);
+          __fpDedupLastSig = ""; // allow retry
+          try{ showToast("Errore unifica prodotti finiti", "err"); }catch(_){ }
+        }finally{
+          __fpDedupRunning = false;
+          try{ renderAnag(); }catch(_){ }
+        }
+      }, 500);
+    }
+
+    let finishedProductCategories = []; // elenco categorie prodotti finiti (from Firestore)
+    let finishedProductCategoriesMap = new Map(); // keyLower -> {key,name,...}
+
+    // DaneaXML: DDT completati (usati per il ticker in Dashboard)
+    let __daneaCompleted = [];
+    let __daneaCompletedMap = new Map();
+
+    function __rebuildDaneaCompletedMap(){
+      try{
+        const map = new Map();
+        for (const d of (__daneaCompleted || [])) {
+          if (!d) continue;
+          let k = String(d.key || d._id || '').trim();
+          if (!k) {
+            try{ k = decodeURIComponent(String(d.id || d._id || '')); }catch(_){ k = String(d.id || d._id || ''); }
+            k = String(k||'').trim();
+          }
+          if (!k) continue;
+          map.set(k, d);
+        }
+        __daneaCompletedMap = map;
+      }catch(_){ __daneaCompletedMap = new Map(); }
+    }
+    let activeAnagTab = "suppliers"; // suppliers|products|finished
     let activeProductsMacroGroup = ""; // materie_prime|imballaggi|"" (tutti)
+
+    // Selezione multipla prodotti finiti (per associazione categoria)
+    let __fpSelectedIds = new Set();
+
+    function __fpSelPurgeAgainstList(){
+      try{
+        const valid = new Set((finishedProducts || []).map(x => String(x && x.id || "").trim()).filter(Boolean));
+        const next = new Set();
+        __fpSelectedIds.forEach(id => { if (valid.has(String(id))) next.add(String(id)); });
+        __fpSelectedIds = next;
+      }catch(_){ }
+    }
+
+    function __fpVisibleIds(){
+      try{
+        return Array.from(document.querySelectorAll('#anagTbody input.jsFpSel')).map(el => String(el.getAttribute('data-id') || '').trim()).filter(Boolean);
+      }catch(_){ return []; }
+    }
+
+    function __fpSyncSelectAllState(){
+      try{
+        const all = document.getElementById('fpSelectAll');
+        if (!all) return;
+        const ids = __fpVisibleIds();
+        if (!ids.length){ all.checked = false; all.indeterminate = false; return; }
+        let sel = 0;
+        for (const id of ids){ if (__fpSelectedIds.has(id)) sel++; }
+        all.checked = (sel > 0 && sel === ids.length);
+        all.indeterminate = (sel > 0 && sel < ids.length);
+      }catch(_){ }
+    }
+
+    function __fpRenderAssignControls(){
+      const wrap = document.getElementById('fpAssignWrap');
+      const sel  = document.getElementById('fpAssignCat');
+      const flt  = document.getElementById('fpFilterUnclassified');
+      const btn  = document.getElementById('btnFpAssignCat');
+      const pill = document.getElementById('fpSelectedPill');
+      const btnClear = document.getElementById('btnFpClearSel');
+      if (!wrap || !sel || !btn) return;
+
+      const on = (activeAnagTab === 'finished');
+      wrap.style.display = on ? 'flex' : 'none';
+      if (!on) return;
+
+      // bind once
+      try{
+        if (wrap.dataset.bound !== '1'){
+          wrap.dataset.bound = '1';
+          sel.addEventListener('change', () => {
+            try{ __fpRenderAssignControls(); }catch(_){ }
+          });
+          flt && flt.addEventListener('change', () => {
+            try{ renderAnag(); }catch(_){ }
+            try{ __fpSyncSelectAllState(); }catch(_){ }
+          });
+          btn.addEventListener('click', async (e) => {
+            try{ e.preventDefault(); e.stopPropagation(); }catch(_){ }
+            try{ await __fpAssignSelectedToCategory(); }catch(_){ }
+          });
+          btnClear && btnClear.addEventListener('click', (e) => {
+            try{ e.preventDefault(); e.stopPropagation(); }catch(_){ }
+            __fpSelectedIds.clear();
+            __fpRenderAssignControls();
+            try{ renderAnag(); }catch(_){ }
+          });
+        }
+      }catch(_){ }
+
+      // options
+      try{
+        const prev = String(sel.value || '');
+        const opts = [];
+        opts.push('<option value="">Categoria prodotti finiti…</option>');
+        opts.push('<option value="__none">Rimuovi categoria</option>');
+        if (Array.isArray(finishedProductCategories) && finishedProductCategories.length){
+          for (const c of finishedProductCategories){
+            const k = String(c && c.key || '').trim();
+            if (!k) continue;
+            const nm = String(c && (c.name || c.label || c.key) || k).trim() || k;
+            opts.push('<option value="' + escapeHtmlAttr(k) + '">' + escapeHtml(nm) + '</option>');
+          }
+        } else {
+          opts.push('<option value="" disabled>— Nessuna categoria —</option>');
+        }
+        sel.innerHTML = opts.join('');
+        if (prev && Array.from(sel.options).some(o => o.value === prev)) sel.value = prev;
+      }catch(_){ }
+
+      // pills + enable
+      try{
+        const n = __fpSelectedIds.size;
+        if (pill) pill.textContent = n ? ('Selezionati: ' + n.toLocaleString('it-IT')) : 'Seleziona';
+        if (btnClear) btnClear.style.display = n ? 'inline-flex' : 'none';
+        const key = String(sel.value || '').trim();
+        btn.disabled = !(n && key);
+      }catch(_){ }
+    }
+
+    async function __fpAssignSelectedToCategory(){
+      if (!(fb && fb.user && fb.db)) { showToast('Accedi con Google', 'warn'); return; }
+      const sel  = document.getElementById('fpAssignCat');
+      const btn  = document.getElementById('btnFpAssignCat');
+      if (!sel || !btn) return;
+      const key = String(sel.value || '').trim();
+      if (!key) { showToast('Seleziona una categoria', 'warn'); return; }
+      if (!__fpSelectedIds.size) { showToast('Seleziona almeno un prodotto', 'warn'); return; }
+
+      const ids = Array.from(__fpSelectedIds);
+      const removing = (key === '__none');
+
+      try{ btn.disabled = true; }catch(_){ }
+      try{ showToast(removing ? 'Rimozione categoria…' : 'Associazione categoria…'); }catch(_){ }
+
+      try{
+        for (const id of ids){
+          const fid = String(id || '').trim();
+          if (!fid) continue;
+          const payload = removing
+            ? { categoryKey: deleteField(), categoryKeyLower: deleteField() }
+            : { categoryKey: key, categoryKeyLower: String(key).toLowerCase() };
+          await setDoc(doc(fb.db, 'orgs', ORG_ID, 'finishedProducts', fid), payload, { merge: true });
+        }
+        __fpSelectedIds.clear();
+        try{ sel.value = ''; }catch(_){ }
+        showToast(removing ? 'Categoria rimossa' : 'Prodotti finiti associati');
+      }catch(e){
+        console.warn('assign selected finished products failed', e);
+        showToast('Errore associazione', 'err');
+      } finally {
+        try{ btn.disabled = false; }catch(_){ }
+        __fpRenderAssignControls();
+        try{ renderAnag(); }catch(_){ }
+      }
+    }
 
 
     function syncAnagHeaderTitle(){
       const el = document.getElementById("anagHeaderTitle");
       if (!el) return;
+
       if (activeAnagTab === "products") {
         const mg = String(activeProductsMacroGroup || "").trim();
         if (mg === "materie_prime") el.textContent = "Prodotti — Materie prime";
         else if (mg === "imballaggi") el.textContent = "Prodotti — Imballaggi";
         else el.textContent = "Prodotti";
-      } else {
-        el.textContent = "Fornitori";
+        return;
       }
+
+      if (activeAnagTab === "finished") {
+        el.textContent = "Prodotti finiti";
+        return;
+      }
+
+      el.textContent = "Fornitori";
     }
 
     let currentSupplierId = null;
@@ -2531,6 +8923,8 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
         fb.db = initializeFirestore(fb.app, { experimentalAutoDetectLongPolling: true, useFetchStreams: false });
         fb.storage = getStorage(fb.app);
 
+        try{ syncHubBridge(); }catch(e){ console.warn("syncHubBridge call failed", e); }
+
         const provider = new GoogleAuthProvider();
         provider.setCustomParameters({ prompt: "select_account" });
 
@@ -2593,6 +8987,7 @@ btnLogout.addEventListener("click", async () => {
 
         onAuthStateChanged(fb.auth, (user) => {
           fb.user = user || null;
+          try{ syncHubBridge(); }catch(e){ console.warn("syncHubBridge auth refresh failed", e); }
 
           if (user) {
             // UI
@@ -2634,6 +9029,12 @@ btnLogout.addEventListener("click", async () => {
       }
       suppliers = [];
       products = [];
+      finishedProducts = [];
+      finishedProductCategories = [];
+      finishedProductCategoriesMap = new Map();
+      __daneaCompleted = [];
+      __daneaCompletedMap = new Map();
+      try{ __fpSelectedIds.clear(); }catch(_){ }
       thresholds = {};
       currentSupplierId = null;
       try {
@@ -2672,6 +9073,75 @@ btnLogout.addEventListener("click", async () => {
           // Evita di cambiare lo stato Sync globale per singole collezioni.
         }
       );
+      // Finished Products (Anagrafica prodotti finiti)
+      fb.unsub.finishedProducts = onSnapshot(
+        query(orgCol("finishedProducts"), orderBy("nameLower")),
+        (snap) => {
+          finishedProducts = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+          try{ __fpDedupFinishedProducts("realtime"); }catch(_){ }
+          renderAnag();
+        },
+        (err) => {
+          console.error("finishedProducts watch error", err);
+        }
+      );
+
+      // Finished Product Categories (per assegnazione in tab "Prodotti finiti")
+      fb.unsub.finishedProductCategories = onSnapshot(
+        query(orgCol("finishedProductCategories"), orderBy("nameLower")),
+        (snap) => {
+          finishedProductCategories = snap.docs.map(d => {
+            const data = d.data() || {};
+            let key = String(data.key || "").trim();
+            if (!key) {
+              try{ key = decodeURIComponent(String(d.id||"")); }catch(_){ key = String(d.id||""); }
+            }
+            key = String(key || "").trim().toLowerCase();
+            const name = String(data.name || data.label || key || "").trim() || key;
+            return { key, name, ...data };
+          }).filter(x => x && x.key);
+          finishedProductCategoriesMap = new Map(finishedProductCategories.map(c => [String(c && c.key || "").trim().toLowerCase(), c]));
+          renderAnag();
+        },
+        (err) => {
+          console.error("finishedProductCategories watch error", err);
+        }
+      );
+
+      // DaneaXML: DDT completati (serve per dashboard ticker)
+      fb.unsub.daneaCompleted = onSnapshot(
+        query(orgCol("daneaDdtCompleted"), orderBy("date", "desc")),
+        (snap) => {
+          try{
+            const arr = [];
+            snap.forEach(d => {
+              const data = d.data() || {};
+              let key = String(data.key || "").trim();
+              if (!key){
+                try{ key = decodeURIComponent(String(d.id||"")); }catch(_){ key = String(d.id||""); }
+                key = String(key||"").trim();
+              }
+              arr.push({
+                _id: d.id,
+                key,
+                number: String(data.number || "").trim(),
+                date: String(data.date || "").trim(),
+                customer: String(data.customer || "").trim(),
+                rows: Array.isArray(data.rows) ? data.rows : [],
+                allocations: Array.isArray(data.allocations) ? data.allocations : [],
+                createdAt: tsToIso(data.createdAt) || ""
+              });
+            });
+            __daneaCompleted = arr;
+            __rebuildDaneaCompletedMap();
+          }catch(_){ __daneaCompleted = []; __daneaCompletedMap = new Map(); }
+          try{ renderAll(); }catch(_){ }
+        },
+        (err) => {
+          console.error("daneaDdtCompleted watch error", err);
+        }
+      );
+
 
       // Categories
       fb.unsub.categories = onSnapshot(
@@ -2743,6 +9213,9 @@ btnLogout.addEventListener("click", async () => {
               docType: data.docType || "",
               docNum: data.docNum || "",
               docDateRaw: data.docDateRaw || "",
+              // DaneaXML: chiave completa del DDT (numero__data). Serve per raggruppare
+              // correttamente i movimenti e mostrare le righe DDT nel dettaglio.
+              daneaDdtKey: String(data.daneaDdtKey || data.daneaDdtkey || "").trim(),
               lineIndex: safeInt(data.lineIndex),
               docPages: __sanitizeDocPages(data.docPages || data.docImages),
               warehouse: normalizeWarehouse(data.warehouse || ""),
@@ -2792,49 +9265,7 @@ btnLogout.addEventListener("click", async () => {
     }
 
 
-// ===== Header height sync =====
-let __headerHeight = 0;
-let __headerEl = null;
-let __headerResizeObserver = null;
-
-function __updateHeaderHeight(){
-  try{
-    const header = __headerEl || document.querySelector("header.headerRow");
-    if (!header) return;
-    __headerEl = header;
-    const height = Math.ceil(header.offsetHeight || 0);
-    if (!height || height === __headerHeight) return;
-    __headerHeight = height;
-    const root = document.documentElement;
-    root.style.setProperty("--header-h", `${height}px`, "important");
-    root.style.setProperty("--hdrH", `${height}px`, "important");
-  }catch(_){}
-}
-
-function __initHeaderHeight(){
-  try{
-    const header = document.querySelector("header.headerRow");
-    if (!header) return;
-    __headerEl = header;
-    __updateHeaderHeight();
-    if (!__headerResizeObserver && window.ResizeObserver) {
-      __headerResizeObserver = new ResizeObserver(() => __updateHeaderHeight());
-      __headerResizeObserver.observe(header);
-    }
-  }catch(_){}
-}
-
-try{
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", __initHeaderHeight, { once: true });
-  } else {
-    __initHeaderHeight();
-  }
-  window.addEventListener("resize", () => requestAnimationFrame(__updateHeaderHeight));
-  window.addEventListener("orientationchange", () => requestAnimationFrame(__updateHeaderHeight));
-}catch(_){}
-
-// ===== Scroll lock (blocca pagina sotto ai modali/menu) =====
+// ===== Scroll lock (blocca pagina sotto ai modali) =====
 let __modalLockScrollY = 0;
 
 function __setBodyLocked(locked){
@@ -2868,15 +9299,11 @@ function __setBodyLocked(locked){
   }catch(e){}
 }
 
-function __syncBodyLock(){
+function __syncBodyLockFromModals(){
   try{
-    const anyModalOpen = !!document.querySelector(".modal.open");
-    const anyOverlayOpen = !!document.querySelector(".view.modalOverlay.active");
-    const menuOpen = document.body.classList.contains("menu-open");
-    if (menuOpen && (anyModalOpen || anyOverlayOpen) && typeof closeSideMenu === "function") {
-      closeSideMenu();
-    }
-    __setBodyLocked(anyModalOpen || anyOverlayOpen || menuOpen);
+    const anyOpen = !!document.querySelector(".modal.open");
+    __setBodyLocked(anyOpen);
+    syncHeaderBackVisibility();
   }catch(e){}
 }
 
@@ -2931,16 +9358,16 @@ function __shouldCenterPop(msg, kind){
       modalTitle.textContent = title;
       modalBody.textContent = body;
       modalQuick.classList.add("open");
-      __syncBodyLock();
+      __syncBodyLockFromModals();
     }
     function closeModal() { modalQuick.classList.remove("open");
-      __syncBodyLock(); }
+      __syncBodyLockFromModals(); }
 
     function closeDocDetail() {
       try { __docDetailRenderToken++; } catch(_){}
       try { __revokeDocDetailBlobUrls(); } catch(_){}
       if (modalDocDetail) modalDocDetail.classList.remove("open");
-      __syncBodyLock();
+      __syncBodyLockFromModals();
     }
 
     // ===== Flussi: modifica / elimina (documento) =====
@@ -2962,14 +9389,14 @@ function __shouldCenterPop(msg, kind){
       try { renderFlowEditItems(g); } catch(_){ }
 
       modalFlowEdit.classList.add("open");
-      __syncBodyLock();
+      __syncBodyLockFromModals();
       try { flowEditCustomer && flowEditCustomer.focus(); } catch {}
     }
 
     function closeFlowEdit() {
       __currentFlowEditKey = null;
       if (modalFlowEdit) modalFlowEdit.classList.remove("open");
-      __syncBodyLock();
+      __syncBodyLockFromModals();
     }
 
 
@@ -3524,7 +9951,7 @@ async function deleteMovementsBulk(ids) {
       }
 
       if (modalDocDetail) modalDocDetail.classList.add("open");
-      __syncBodyLock();
+      __syncBodyLockFromModals();
     }
 
 
@@ -3532,9 +9959,9 @@ async function deleteMovementsBulk(ids) {
     function closeSettings() { modalSettings.classList.remove("open"); }
 
     function openMovementModal() { modalMovement.classList.add("open");
-      __syncBodyLock(); }
+      __syncBodyLockFromModals(); }
     function closeMovementModal() { modalMovement.classList.remove("open");
-      __syncBodyLock(); }
+      __syncBodyLockFromModals(); }
 
     function movementKey(customer, code) {
       return `${(customer||"").trim().toLowerCase()}||${(code||"").trim().toLowerCase()}`;
@@ -3978,6 +10405,7 @@ function __isConaiItem(it){
 
     // --- Documento (estratto OCR) ---
     let __lastDocExtract = null;
+    let __docSelectedIndex = -1;
 
     function coerceToISODate(v){
       if (!v) return "";
@@ -4004,7 +10432,7 @@ function __isConaiItem(it){
     }
 
     // ===== U.M. (unità di misura) normalizzazione =====
-    // Canoniche richieste: nr / pz / kg / ton
+    // Canoniche richieste: nr / pz / kg / ton (+ lt / g / ml)
     function __normalizeUom(v){
       const raw = String(v ?? "").trim().toLowerCase();
       if (!raw) return "";
@@ -4024,6 +10452,12 @@ function __isConaiItem(it){
       if (k === "nr" || k === "n" || k === "n°" || k === "no") return "nr";
       // peso
       if (k === "kg" || k === "kgs" || k === "k" || k === "kilo" || k === "kilogrammi" || k === "kilogrammo") return "kg";
+      // litri
+      if (k === "l" || k === "lt" || k === "ltri" || k === "litri" || k === "litro" || k === "litri." || k === "litro.") return "lt";
+      // grammi
+      if (k === "g" || k === "gr" || k === "grammi" || k === "grammo") return "g";
+      // millilitri
+      if (k === "ml" || k === "millilitri" || k === "millilitro") return "ml";
       // tonnellate
       if (k === "ton" || k === "tons" || k === "tonn" || k === "tonne" || k === "t" || k === "tonnellate" || k === "tonnellata") return "ton";
 
@@ -4031,7 +10465,7 @@ function __isConaiItem(it){
     }
 
     // Estrae (qtyRaw, uom) da una stringa quantità, supportando:
-    // - "1760 PZ", "1760pz", "NR 10", "10 nr", "48 kg", "1,2 t", "0.5 ton" …
+    // - "1760 PZ", "1760pz", "NR 10", "10 nr", "48 kg", "12 lt", "250 ml", "1,2 t" …
     function __splitQtyUom(qtyPart){
       const s0 = String(qtyPart ?? "").trim();
       if (!s0) return { qtyRaw: "", uom: "" };
@@ -4041,7 +10475,7 @@ function __isConaiItem(it){
       let qtyRaw = s;
 
       // 1) uom in coda (anche attaccata al numero)
-      const end = s.match(/(nr\.?|n\.?|n°|pz\.?|p\.?z\.?|pcs?|kg(?:s)?\.?|ton(?:nellate|nellata|ne|n|s)?\.?|t)\s*$/i);
+      const end = s.match(/(nr\.?|n\.?|n°|pz\.?|p\.?z\.?|pcs?|kg(?:s)?\.?|g(?:r|rammi|rammo)?\.?|ml\.?|l(?:t|itri|itro)?\.?|lt\.?|ton(?:nellate|nellata|ne|n|s)?\.?|t)\s*$/i);
       if (end && end.index != null) {
         const cand = __normalizeUom(end[1]);
         if (cand) {
@@ -4052,7 +10486,7 @@ function __isConaiItem(it){
 
       // 2) uom in testa (es: "NR 10")
       if (!uom) {
-        const beg = s.match(/^\s*(nr\.?|n\.?|n°|pz\.?|p\.?z\.?|pcs?|kg(?:s)?\.?|ton(?:nellate|nellata|ne|n|s)?\.?|t)\b\s*/i);
+        const beg = s.match(/^\s*(nr\.?|n\.?|n°|pz\.?|p\.?z\.?|pcs?|kg(?:s)?\.?|g(?:r|rammi|rammo)?\.?|ml\.?|l(?:t|itri|itro)?\.?|lt\.?|ton(?:nellate|nellata|ne|n|s)?\.?|t)\b\s*/i);
         if (beg) {
           const cand = __normalizeUom(beg[1]);
           if (cand) {
@@ -4168,11 +10602,21 @@ function __isConaiItem(it){
         const desc = (it.description || "").trim();
         const uom = (it.uom || "").trim();
         const qtyDisp = formatQtyForCell(it);
-        const qtyVal = (it.qty != null && it.qty !== "" && !Number.isNaN(Number(it.qty))) ? String(it.qty) : (it.qtyRaw ? String(it.qtyRaw).replace(/[^\d,\.]/g,"").trim() : "");
+        const qtyVal = (it.qty != null && it.qty !== "" && !Number.isNaN(Number(it.qty)))
+          ? String(it.qty)
+          : (it.qtyRaw ? String(it.qtyRaw).replace(/[^\d,\.]/g,"").trim() : "");
+
         return `<tr data-i="${i}" data-code="${escapeHtmlAttr(code)}" data-desc="${escapeHtmlAttr(desc)}" data-uom="${escapeHtmlAttr(uom)}" data-qty="${escapeHtmlAttr(qtyVal)}">
-          <td data-label="Codice" class="code"><div class="codeCellWrap"><button type="button" class="rowMinus" aria-label="Elimina riga">–</button><span class="codeTxt">${escapeHtml(code || "-")}</span></div></td>
-          <td data-label="Descrizione">${escapeHtml(desc || "-")}</td>
-          <td data-label="U.M." class="num">${escapeHtml(uom || "-")}</td>
+          <td data-label="Codice" class="code">
+            <div class="codeCellWrap">
+              <button type="button" class="rowMinus" aria-label="Elimina riga">–</button>
+              <span class="codeTxt jsEditCode" title="Clicca per modificare">${escapeHtml(code || "-")}</span>
+            </div>
+          </td>
+          <td data-label="Descrizione">
+            <span class="descTxt jsEditDesc" title="Clicca per modificare">${escapeHtml(desc || "-")}</span>
+          </td>
+          <td data-label="U.M." class="num"><span class="uomTxt jsEditUom" title="Clicca per modificare">${escapeHtml(uom || "-")}</span></td>
           <td data-label="Q.tà" class="num"><span class="qtyCell" title="Clicca per modificare">${escapeHtml(qtyDisp || "-")}</span></td>
         </tr>`;
       }).join("");
@@ -4193,6 +10637,7 @@ function __isConaiItem(it){
         if (!btn) return;
         const items = __getDocItemsArr();
         const hasValid = (items || []).some(it => {
+          if (__isConaiItem(it)) return false;
           const key = String(it.code || it.description || "").trim();
           const qRaw = (it.qty != null && it.qty !== "") ? String(it.qty) : String(it.qtyRaw || "");
           const q = Number(qRaw.replace(",", ".").replace(/[^\d.]/g,""));
@@ -4207,6 +10652,16 @@ function __isConaiItem(it){
       if (!tbody) return;
       const items = __getDocItemsArr();
       tbody.innerHTML = __docItemsRowsHtml(items) || `<tr><td colspan="4" style="text-align:center; padding:12px; color:var(--muted)">Nessuna riga trovata.</td></tr>`;
+
+      // Ripristina selezione riga (best-effort)
+      try{
+        const idx = Number(__docSelectedIndex);
+        if (!Number.isNaN(idx) && idx >= 0){
+          const sel = tbody.querySelector(`tr[data-i="${idx}"]`);
+          if (sel) sel.classList.add("is-selected");
+        }
+      }catch(_){}
+
       __refreshConfirmMovementEnabled();
     }
 
@@ -4214,7 +10669,19 @@ function __isConaiItem(it){
       const items = __getDocItemsArr();
       if (!Array.isArray(items)) return;
       if (Number.isNaN(i) || i < 0 || i >= items.length) return;
+
       items.splice(i, 1);
+
+      // Aggiorna selezione (best-effort)
+      try{
+        if (__docSelectedIndex === i){
+          __docSelectedIndex = Math.min(i, items.length - 1);
+          if (items.length <= 0) __docSelectedIndex = -1;
+        } else if (__docSelectedIndex > i){
+          __docSelectedIndex = __docSelectedIndex - 1;
+        }
+      }catch(_){}
+
       __rerenderDocItemsTable();
     }
 
@@ -4273,6 +10740,159 @@ function __isConaiItem(it){
       });
       input.addEventListener("blur", commit);
     }
+
+    function __ensureOcrUomDatalist(){
+      try{
+        let dl = document.getElementById("ocrUomDatalist");
+        if (dl) return dl;
+        dl = document.createElement("datalist");
+        dl.id = "ocrUomDatalist";
+        ["pz","nr","kg","ton","lt","g","ml"].forEach((u) => {
+          const opt = document.createElement("option");
+          opt.value = u;
+          dl.appendChild(opt);
+        });
+        document.body.appendChild(dl);
+        return dl;
+      }catch(_){ return null; }
+    }
+
+    function __beginInlineUomEdit(tr){
+      if (!tr) return;
+      const idx = Number(tr.dataset.i);
+      if (Number.isNaN(idx)) return;
+
+      const items = __getDocItemsArr();
+      const it = items[idx];
+      if (!it) return;
+
+      const tdUom = tr.querySelector('td[data-label="U.M."]');
+      if (!tdUom) return;
+
+      if (tdUom.querySelector("input.uomInputInline")) return;
+
+      const current = String(it.uom || "").trim();
+
+      const input = document.createElement("input");
+      input.type = "text";
+      input.autocomplete = "off";
+      input.spellcheck = false;
+      input.className = "txtInputInline uomInputInline";
+      input.inputMode = "text";
+      input.value = current;
+
+      // suggerimenti (pz/nr/kg/ton/lt/g/ml)
+      try{
+        const dl = __ensureOcrUomDatalist();
+        if (dl) input.setAttribute("list", dl.id);
+      }catch(_){ }
+
+      // keep row selected
+      __docSelectedIndex = idx;
+
+      tdUom.innerHTML = "";
+      tdUom.appendChild(input);
+      input.focus();
+      try { input.select(); } catch(_e){}
+
+      let cancelled = false;
+
+      const commit = () => {
+        if (cancelled) return;
+        const raw = String(input.value || "").trim();
+        const cleanRaw = (raw && raw !== "-") ? raw : "";
+        const norm = __normalizeUom(cleanRaw);
+        // se non è tra le canoniche, conserva comunque il valore inserito (lower)
+        it.uom = norm || (cleanRaw ? cleanRaw.toLowerCase() : "");
+
+        // aggiorna qtyRaw per riflettere la nuova U.M.
+        try{
+          const prev = String(it.qtyRaw || "").trim();
+          const split = __splitQtyUom(prev);
+          const qtyOnly = String(split.qtyRaw || prev || (it.qty != null ? it.qty : "")).trim();
+          const uomNow = String(it.uom || "").trim();
+          it.qtyRaw = (qtyOnly ? `${qtyOnly}${uomNow ? " " + uomNow : ""}`.trim() : "");
+        }catch(_){ }
+
+        __rerenderDocItemsTable();
+      };
+
+      input.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") { e.preventDefault(); input.blur(); }
+        if (e.key === "Escape") { e.preventDefault(); cancelled = true; __rerenderDocItemsTable(); }
+      });
+      input.addEventListener("blur", commit);
+    }
+
+
+    function __beginInlineTextEdit(tr, field){
+      if (!tr) return;
+      const idx = Number(tr.dataset.i);
+      if (Number.isNaN(idx)) return;
+
+      const items = __getDocItemsArr();
+      const it = items[idx];
+      if (!it) return;
+
+      const isCode = String(field || "") === "code";
+      const td = tr.querySelector(isCode ? 'td[data-label="Codice"]' : 'td[data-label="Descrizione"]');
+      if (!td) return;
+
+      if (td.querySelector("input.txtInputInline")) return;
+
+      const current = String(isCode ? (it.code || "") : (it.description || "")).trim();
+
+      const input = document.createElement("input");
+      input.type = "text";
+      input.autocomplete = "off";
+      input.spellcheck = false;
+      input.className = "txtInputInline " + (isCode ? "codeInputInline" : "descInputInline");
+      input.value = current;
+
+      // keep row selected
+      __docSelectedIndex = idx;
+
+      if (isCode){
+        const minus = td.querySelector("button.rowMinus");
+        td.innerHTML = "";
+        const wrap = document.createElement("div");
+        wrap.className = "codeCellWrap";
+        if (minus) wrap.appendChild(minus);
+        else{
+          const b = document.createElement("button");
+          b.type = "button";
+          b.className = "rowMinus";
+          b.setAttribute("aria-label","Elimina riga");
+          b.textContent = "–";
+          wrap.appendChild(b);
+        }
+        wrap.appendChild(input);
+        td.appendChild(wrap);
+      } else {
+        td.innerHTML = "";
+        td.appendChild(input);
+      }
+
+      input.focus();
+      try{ input.select(); }catch(_){}
+
+      let cancelled = false;
+
+      const commit = () => {
+        if (cancelled) return;
+        const v = String(input.value || "").trim();
+        if (isCode) it.code = v;
+        else it.description = v;
+        __rerenderDocItemsTable();
+      };
+
+      input.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") { e.preventDefault(); input.blur(); }
+        if (e.key === "Escape") { e.preventDefault(); cancelled = true; __rerenderDocItemsTable(); }
+      });
+      input.addEventListener("blur", commit);
+    }
+
 
 
     function renderDocExtract(structured, rawText){
@@ -4383,7 +11003,7 @@ function validateMovementFields(fields) {
           const hasValid = __lastDocExtract.items.some(it => {
             const q = safeInt(it && it.qty);
             const codeOk = String((it && it.code) || "").trim().length > 0;
-            const itemOk = String((it && it.item) || "").trim().length > 0;
+            const itemOk = String((it && (it.description || it.item)) || "").trim().length > 0;
             return q > 0 && (codeOk || itemOk);
           });
           return customerOk && hasValid;
@@ -4729,8 +11349,20 @@ docPages: __sanitizeDocPages(mv.docPages || mv.docImages),
 
 
 async function deleteMovement(id) {
-  if (!id) return;
-  await deleteMovementsBulk([id]);
+  const mid = String(id || "").trim();
+  if (!mid) return;
+
+  // Se sei loggato, prova una cancellazione "strict" (se fallisce, alza errore)
+  if (fb.user && fb.db) {
+    try {
+      await deleteDoc(doc(fb.db, "orgs", ORG_ID, "inventoryMovements", mid));
+    } catch (e) {
+      throw e;
+    }
+  }
+
+  // Cleanup/UI (include docPages + tripletKey best-effort)
+  await deleteMovementsBulk([mid]);
 }
 
     function makeMovement(fields) {
@@ -4782,37 +11414,34 @@ async function deleteMovement(id) {
 
       const prefersReducedMotion = () => {
         try { return !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches); }
-        catch(_) { return false; }
+        catch (_) { return false; }
       };
 
       const easeOutCubic = (t) => (1 - Math.pow(1 - t, 3));
       const fmt = (n) => (Number(n) || 0).toLocaleString("it-IT");
 
-      function setNow(el, n){
+      function setNow(el, n) {
         if (!el) return;
         el.textContent = fmt(n);
       }
 
-      function animate(el, target, opts){
+      function animate(el, target, opts) {
         if (!el) return;
 
         const to = Number(target);
         const end = Number.isFinite(to) ? to : 0;
 
-        // numeri del cockpit: interi (se vuoi decimali, dimmelo e li supporto)
         const endInt = Math.max(0, Math.round(end));
         const key = String(endInt);
 
-        // accessibilità: se l'utente riduce le animazioni, niente tween
-        if (prefersReducedMotion()){
+        if (prefersReducedMotion()) {
           el.dataset.animTarget = key;
           el.dataset.animPlayed = "1";
           setNow(el, endInt);
           return;
         }
 
-        // evita re-animazioni inutili se il valore non è cambiato
-        if (el.dataset.animTarget === key && el.dataset.animPlayed === "1"){
+        if (el.dataset.animTarget === key && el.dataset.animPlayed === "1") {
           setNow(el, endInt);
           return;
         }
@@ -4820,15 +11449,13 @@ async function deleteMovement(id) {
         el.dataset.animTarget = key;
         el.dataset.animPlayed = "1";
 
-        // cancella eventuale animazione in corso
-        try{
+        try {
           const prev = wm.get(el);
           if (prev && typeof prev.cancel === "function") prev.cancel();
-        }catch(_){}
+        } catch (_) {}
 
         const duration = Math.max(300, Math.floor((opts && opts.duration) || 950));
 
-        // start da 0 come richiesto
         const from = 0;
         setNow(el, from);
         if (endInt === 0) return;
@@ -4845,225 +11472,11 @@ async function deleteMovement(id) {
         };
 
         raf = requestAnimationFrame(tick);
-        wm.set(el, { cancel: () => { try{ cancelAnimationFrame(raf); }catch(_){} } });
+        wm.set(el, { cancel: () => { try { cancelAnimationFrame(raf); } catch (_) {} } });
       }
 
       return { animate, setNow };
     })();
-
-    let __invTrendRange = "30";
-    let __invTrendHistory = [];
-
-    function getLocalISODate(){
-      try{
-        const d = new Date();
-        const y = d.getFullYear();
-        const m = String(d.getMonth() + 1).padStart(2, "0");
-        const day = String(d.getDate()).padStart(2, "0");
-        return `${y}-${m}-${day}`;
-      }catch(_){
-        return new Date().toISOString().slice(0, 10);
-      }
-    }
-
-    function readInvTotalHistory(){
-      try{
-        const raw = localStorage.getItem("invTotalHistory");
-        const list = raw ? JSON.parse(raw) : [];
-        return Array.isArray(list) ? list : [];
-      }catch(_){
-        return [];
-      }
-    }
-
-    function writeInvTotalHistory(list){
-      try{
-        localStorage.setItem("invTotalHistory", JSON.stringify(list || []));
-      }catch(_){}
-    }
-
-    function normalizeInvHistory(list){
-      const cleaned = (Array.isArray(list) ? list : []).filter((row) => row && row.date);
-      cleaned.sort((a,b) => String(a.date || "").localeCompare(String(b.date || "")));
-      return cleaned;
-    }
-
-    function updateInvTotalHistory(total){
-      const today = getLocalISODate();
-      let list = normalizeInvHistory(readInvTotalHistory());
-      const totalNum = Number(total) || 0;
-      let updated = false;
-      list = list.map((row) => {
-        if (row && row.date === today){
-          updated = true;
-          return { date: today, total: totalNum };
-        }
-        return row;
-      });
-      if (!updated){
-        list.push({ date: today, total: totalNum });
-        list = normalizeInvHistory(list);
-      }
-      if (list.length > 180){
-        list = list.slice(list.length - 180);
-      }
-      writeInvTotalHistory(list);
-      return list;
-    }
-
-    function setInvTrendRange(range){
-      __invTrendRange = String(range || "30");
-      try{ localStorage.setItem("invTotalHistoryRange", __invTrendRange); }catch(_){}
-      if (invTrendRanges){
-        invTrendRanges.querySelectorAll(".trendRangeBtn").forEach((btn) => {
-          const isActive = String(btn.dataset.range || "") === __invTrendRange;
-          btn.classList.toggle("is-active", isActive);
-        });
-      }
-      renderInvTrendChart(__invTrendHistory);
-    }
-
-    function buildSmoothPath(points){
-      if (!points.length) return "";
-      if (points.length === 1){
-        const p = points[0];
-        return `M ${p.x} ${p.y}`;
-      }
-      let d = `M ${points[0].x} ${points[0].y}`;
-      for (let i = 0; i < points.length - 1; i++){
-        const p0 = points[i - 1] || points[i];
-        const p1 = points[i];
-        const p2 = points[i + 1];
-        const p3 = points[i + 2] || p2;
-        const c1x = p1.x + (p2.x - p0.x) / 6;
-        const c1y = p1.y + (p2.y - p0.y) / 6;
-        const c2x = p2.x - (p3.x - p1.x) / 6;
-        const c2y = p2.y - (p3.y - p1.y) / 6;
-        d += ` C ${c1x} ${c1y} ${c2x} ${c2y} ${p2.x} ${p2.y}`;
-      }
-      return d;
-    }
-
-    function renderInvTrendChart(list){
-      if (!invTrendChart) return;
-      const svgNS = "http://www.w3.org/2000/svg";
-      const width = 480;
-      const height = 180;
-      const pad = { top: 16, right: 18, bottom: 22, left: 32 };
-      invTrendChart.innerHTML = "";
-      if (invTrendTooltip){
-        invTrendTooltip.classList.remove("is-visible");
-        invTrendTooltip.setAttribute("aria-hidden", "true");
-      }
-
-      const history = Array.isArray(list) ? list : [];
-      let slice = history.slice();
-      if (__invTrendRange !== "all"){
-        const days = Math.max(1, Number(__invTrendRange) || 0);
-        if (days > 0) slice = slice.slice(Math.max(0, slice.length - days));
-      }
-
-      if (!slice.length){
-        const text = document.createElementNS(svgNS, "text");
-        text.setAttribute("x", width / 2);
-        text.setAttribute("y", height / 2);
-        text.setAttribute("text-anchor", "middle");
-        text.setAttribute("fill", "rgba(0,0,0,.45)");
-        text.setAttribute("font-size", "12");
-        text.textContent = "Nessun dato storico.";
-        invTrendChart.appendChild(text);
-        return;
-      }
-
-      const values = slice.map((row) => Number(row.total) || 0);
-      const min = Math.min.apply(null, values);
-      const maxRaw = Math.max.apply(null, values);
-      const max = maxRaw === min ? min + 1 : maxRaw;
-      const n = slice.length;
-      const spanX = width - pad.left - pad.right;
-      const spanY = height - pad.top - pad.bottom;
-
-      const points = slice.map((row, i) => {
-        const x = pad.left + (n === 1 ? spanX / 2 : (spanX * i) / (n - 1));
-        const ratio = (Number(row.total) || 0) - min;
-        const y = pad.top + spanY - (ratio / (max - min)) * spanY;
-        return { x, y, row };
-      });
-
-      const grid = document.createElementNS(svgNS, "g");
-      grid.setAttribute("class", "trendGrid");
-      const gridLines = 4;
-      for (let i = 0; i <= gridLines; i++){
-        const gy = pad.top + (spanY * i) / gridLines;
-        const line = document.createElementNS(svgNS, "line");
-        line.setAttribute("x1", pad.left);
-        line.setAttribute("x2", width - pad.right);
-        line.setAttribute("y1", gy);
-        line.setAttribute("y2", gy);
-        grid.appendChild(line);
-      }
-      invTrendChart.appendChild(grid);
-
-      const path = document.createElementNS(svgNS, "path");
-      path.setAttribute("class", "trendLine");
-      path.setAttribute("d", buildSmoothPath(points));
-      invTrendChart.appendChild(path);
-
-      try{
-        const length = path.getTotalLength();
-        path.style.strokeDasharray = String(length);
-        path.style.strokeDashoffset = String(length);
-        path.classList.remove("animate");
-        void path.getBoundingClientRect();
-        path.classList.add("animate");
-      }catch(_){}
-
-      points.forEach((pt) => {
-        const dot = document.createElementNS(svgNS, "circle");
-        dot.setAttribute("class", "trendDot");
-        dot.setAttribute("cx", pt.x);
-        dot.setAttribute("cy", pt.y);
-        dot.setAttribute("r", "3");
-        dot.dataset.date = String(pt.row.date || "");
-        dot.dataset.total = String(pt.row.total || 0);
-        dot.addEventListener("pointerenter", (event) => {
-          if (!invTrendTooltip) return;
-          const dateLabel = pt.row.date ? formatDateIT(pt.row.date) : pt.row.date;
-          const totalLabel = (Number(pt.row.total) || 0).toLocaleString("it-IT");
-          invTrendTooltip.innerHTML = `${dateLabel} · ${totalLabel}`;
-          invTrendTooltip.classList.add("is-visible");
-          invTrendTooltip.setAttribute("aria-hidden", "false");
-          positionTrendTooltip(event);
-        });
-        dot.addEventListener("pointermove", positionTrendTooltip);
-        dot.addEventListener("pointerleave", () => {
-          if (!invTrendTooltip) return;
-          invTrendTooltip.classList.remove("is-visible");
-          invTrendTooltip.setAttribute("aria-hidden", "true");
-        });
-        invTrendChart.appendChild(dot);
-      });
-
-      function positionTrendTooltip(event){
-        if (!invTrendTooltip || !event) return;
-        const rect = invTrendChart.getBoundingClientRect();
-        const x = event.clientX - rect.left;
-        const y = event.clientY - rect.top;
-        invTrendTooltip.style.left = `${x}px`;
-        invTrendTooltip.style.top = `${y - 10}px`;
-      }
-    }
-
-    try{
-      const savedRange = localStorage.getItem("invTotalHistoryRange");
-      if (savedRange) __invTrendRange = savedRange;
-    }catch(_){}
-    if (invTrendRanges){
-      invTrendRanges.querySelectorAll(".trendRangeBtn").forEach((btn) => {
-        btn.addEventListener("click", () => setInvTrendRange(btn.dataset.range || "30"));
-      });
-      setInvTrendRange(__invTrendRange);
-    }
 
     function renderStats(stockArr) {
       const items = stockArr.length;
@@ -5088,22 +11501,664 @@ async function deleteMovement(id) {
           docsCount = (out && Array.isArray(out.list)) ? out.list.length : 0;
         }
       } catch (e) { docsCount = 0; }
+
       if (typeof statTotalFlows !== "undefined" && statTotalFlows) __counterAnim.animate(statTotalFlows, docsCount);
       __counterAnim.animate(statLowStock, low);
       statLastUpdate.textContent = last ? formatDateIT(last.createdAt) : "—";
+    }
 
-      if (invTrendTotal) invTrendTotal.textContent = totalPieces.toLocaleString("it-IT");
-      if (invTrendChart) {
-        __invTrendHistory = updateInvTotalHistory(totalPieces);
-        renderInvTrendChart(__invTrendHistory);
+
+    /* =========================================================
+       HOME — Cockpit Scarichi flussi DDT (DaneaXML)
+       - Legge i movimenti OUT con source=DaneaXML e li raggruppa per DDT
+       - UI: ticker testo grande su sfondo bianco (NO cards)
+       ========================================================= */
+    let __homeDaneaMarqueeBound = false;
+    // Vertical ticker (step every few seconds)
+    let __homeDaneaMarqueeRaf = 0;          // interval id
+    let __homeDaneaMarqueeIdx = 0;          // current item index
+    let __homeDaneaMarqueeItems = [];       // array of HTML strings (1 item per slide)
+    let __homeDaneaMarqueeSig = "";         // signature to avoid restarting on every render
+    let __homeDaneaMarqueePaused = false;   // pause on hover/focus
+    let __homeDaneaMarqueeBusy = false;     // running transition
+    let __homeDaneaMarqueeH = 0;            // cached slide height
+
+    // Lock cockpit height to the "Categorie" tile (prevents layout stretching on refresh)
+    let __homeDaneaLockedTileH = 0;
+    function __homeDaneaLockCockpitHeight(){
+      try{
+        if (!homeDaneaCockpit) return (__homeDaneaLockedTileH || 0);
+        const btn = document.getElementById("btnGoCategories");
+        if (!btn) return (__homeDaneaLockedTileH || 0);
+
+        const r = (btn.getBoundingClientRect ? btn.getBoundingClientRect() : null);
+        const h = Math.round((r && r.height) || 0);
+        if (h > 10){
+          if (h !== __homeDaneaLockedTileH){
+            __homeDaneaLockedTileH = h;
+            // hard lock (same height as tile "Categorie")
+            homeDaneaCockpit.style.height = h + "px";
+            homeDaneaCockpit.style.minHeight = h + "px";
+            homeDaneaCockpit.style.maxHeight = h + "px";
+          }
+          return h;
+        }
+      }catch(_){ }
+      return (__homeDaneaLockedTileH || 0);
+    }
+
+    function __fmtDateShortIT(v){
+      const s = String(v || "").trim();
+      if (!s) return "—";
+      // ISO o YYYY-MM-DD
+      try{
+        const iso = (/^\d{4}-\d{2}-\d{2}$/.test(s)) ? (s + "T00:00:00") : s;
+        const d = new Date(iso);
+        if (Number.isNaN(d.getTime())) return s;
+        return d.toLocaleDateString("it-IT");
+      }catch(_){
+        return s;
       }
     }
 
+    function __daneaPickDone(key, docNum, date){
+      try{
+        const k = String(key || "").trim();
+        const n = String(docNum || "").trim();
+        const d = String(date || "").trim();
+
+        const cand = [];
+        if (k) cand.push(k);
+        if (n && d) cand.push(n + "__" + d);
+        if (n) cand.push(n);
+
+        for (const x of cand){
+          try{
+            if (__daneaCompletedMap && typeof __daneaCompletedMap.get === "function"){
+              if (__daneaCompletedMap.has(x)) return __daneaCompletedMap.get(x);
+              const enc = encodeURIComponent(x);
+              if (__daneaCompletedMap.has(enc)) return __daneaCompletedMap.get(enc);
+              try{
+                const dec = decodeURIComponent(x);
+                if (__daneaCompletedMap.has(dec)) return __daneaCompletedMap.get(dec);
+              }catch(_){ }
+            }
+          }catch(_){ }
+        }
+
+        // fallback scan (nel dubbio)
+        const arr = Array.isArray(__daneaCompleted) ? __daneaCompleted : [];
+        for (const d0 of arr){
+          const dk = String(d0 && (d0.key || d0._id || "") || "").trim();
+          if (!dk) continue;
+          for (const x of cand){
+            if (dk === x) return d0;
+          }
+        }
+      }catch(_){ }
+      return null;
+    }
+
+    function __daneaEllipsis(s, maxLen){
+      const str = String(s || "").replace(/\s+/g, " ").trim();
+      const max = Math.max(10, Number(maxLen) || 0);
+      if (!str) return "";
+      if (str.length <= max) return str;
+      return str.slice(0, Math.max(0, max - 1)).trim() + "…";
+    }
+
+    function __daneaParseNum(v){
+      if (v == null) return null;
+      if (typeof v === "number" && Number.isFinite(v)) return v;
+      const s0 = String(v || "").trim();
+      if (!s0) return null;
+
+      // frazione 1/20
+      const m = s0.match(/^(-?\d+(?:[\.,]\d+)?)\s*\/\s*(\d+(?:[\.,]\d+)?)$/);
+      if (m){
+        const a = Number(String(m[1]).replace(",", "."));
+        const b = Number(String(m[2]).replace(",", "."));
+        if (Number.isFinite(a) && Number.isFinite(b) && b !== 0) return a / b;
+      }
+
+      let s = s0.replace(/\s+/g, "");
+      if (s.includes(",") && s.includes(".")) s = s.replace(/\./g, "").replace(",", ".");
+      else if (s.includes(",")) s = s.replace(",", ".");
+
+      const n = Number(s);
+      return Number.isFinite(n) ? n : null;
+    }
+
+    function __daneaFmtNum(v){
+      const n = Number(v);
+      if (!Number.isFinite(n)) return "";
+      const isInt = Math.abs(n - Math.round(n)) < 1e-9;
+      return n.toLocaleString("it-IT", { maximumFractionDigits: isInt ? 0 : 2 });
+    }
+
+    function __daneaSummarizeFinished(rows, maxItems){
+      const arr0 = Array.isArray(rows) ? rows : [];
+      const max = Math.max(1, Number(maxItems) || 3);
+      if (!arr0.length) return "";
+
+      // unique by code (best) or by desc
+      const seen = new Set();
+      const uniq = [];
+      for (const r of arr0){
+        if (!r) continue;
+        const code = String(r.code || "").trim();
+        const desc = String(r.desc || r.item || r.name || "").trim();
+        const k = String((code || desc) || "").trim().toLowerCase();
+        if (!k || seen.has(k)) continue;
+        seen.add(k);
+
+        const name = __daneaEllipsis(desc || code, 28);
+        const q0 = (r.qty != null) ? __daneaParseNum(r.qty) : null;
+        const q1 = (q0 != null) ? q0 : __daneaParseNum(r.qtyRaw);
+        const qtyTxt = (q1 != null) ? __daneaFmtNum(q1) : String(r.qtyRaw || "").trim();
+        const uom = String(r.uom || "").trim();
+        const qWith = qtyTxt ? (qtyTxt + (uom ? (" " + uom) : "")) : "";
+
+        uniq.push(qWith ? (name + " × " + qWith) : name);
+      }
+
+      if (!uniq.length) return "";
+      const show = uniq.slice(0, max);
+      const more = Math.max(0, uniq.length - show.length);
+      return show.join(", ") + (more ? (" +" + more) : "");
+    }
+
+    function __daneaSummarizeAllocations(allocations, maxItems){
+      const arr0 = Array.isArray(allocations) ? allocations : [];
+      const max = Math.max(1, Number(maxItems) || 4);
+      if (!arr0.length) return "";
+
+      const sorted = arr0.slice().sort((a,b) => (Number(b && b.qty || 0) - Number(a && a.qty || 0)));
+      const show = sorted.slice(0, max);
+      const out = [];
+      for (const it of show){
+        if (!it) continue;
+        const name = __daneaEllipsis(String(it.name || it.item || it.code || "").trim() || String(it.code || "").trim(), 26);
+        const qv = __daneaParseNum(it.qty);
+        const qtyTxt = __daneaFmtNum((qv != null) ? qv : (Number(it.qty) || 0));
+        const uom = String(it.uom || "").trim();
+        const qWith = qtyTxt ? (qtyTxt + (uom ? (" " + uom) : "")) : "";
+        if (!name) continue;
+        out.push(qWith ? (name + " " + qWith) : name);
+      }
+
+      if (!out.length) return "";
+      const more = Math.max(0, sorted.length - show.length);
+      return out.join(", ") + (more ? (" +" + more) : "");
+    }
+
+    function __getHomeDaneaGroups(){
+      const list = Array.isArray(state && state.movements) ? state.movements : [];
+      const byKey = new Map();
+
+      for (const mv of list){
+        if (!mv) continue;
+        if (String(mv.type || "").toUpperCase() !== "OUT") continue;
+        const src = String(mv.source || "").trim().toLowerCase();
+        if (src !== "daneaxml") continue;
+
+        const docNum = String(mv.docNum || "").trim();
+        const date = String(mv.date || "").trim();
+        const key = String(mv.daneaDdtKey || "").trim() || ((docNum && date ? (docNum + "__" + date) : "")) || docNum;
+        if (!key) continue;
+
+        let g = byKey.get(key);
+        if (!g){
+          g = {
+            key,
+            docNum,
+            date,
+            createdAtMax: String(mv.createdAt || "").trim(),
+            rows: 0,
+            pieces: 0,
+            codes: new Set(),
+            wh: { cerea: 0, concamarise: 0 }
+          };
+          byKey.set(key, g);
+        }
+
+        const q = safeInt(mv.qty);
+        g.rows += 1;
+        g.pieces += q;
+
+        const c = String(mv.code || "").trim();
+        if (c) g.codes.add(c.toLowerCase());
+
+        const w = normalizeWarehouse(mv.warehouse || "");
+        if (w === WAREHOUSE_CONCA) g.wh.concamarise += q;
+        else g.wh.cerea += q;
+
+        const ca = String(mv.createdAt || "").trim();
+        if (ca && (!g.createdAtMax || ca.localeCompare(g.createdAtMax) > 0)) g.createdAtMax = ca;
+        if (!g.docNum && docNum) g.docNum = docNum;
+        if (!g.date && date) g.date = date;
+      }
+
+      const arr = Array.from(byKey.values()).map(g => ({
+        key: g.key,
+        docNum: g.docNum || String(g.key || "").split("__")[0] || "",
+        date: g.date || (String(g.key || "").includes("__") ? String(g.key).split("__")[1] : ""),
+        createdAtMax: g.createdAtMax || "",
+        rows: g.rows || 0,
+        pieces: g.pieces || 0,
+        codesCount: (g.codes && g.codes.size) ? g.codes.size : 0,
+        whCerea: (g.wh && g.wh.cerea) ? g.wh.cerea : 0,
+        whConca: (g.wh && g.wh.concamarise) ? g.wh.concamarise : 0
+      }));
+
+      arr.sort((a,b) => {
+        const ka = String(a.createdAtMax || a.date || "");
+        const kb = String(b.createdAtMax || b.date || "");
+        return kb.localeCompare(ka);
+      });
+
+      return arr.slice(0, 24);
+    }
+
+    function __stopHomeDaneaMarquee(){
+      // stop vertical ticker
+      try{ if (__homeDaneaMarqueeRaf) clearInterval(__homeDaneaMarqueeRaf); }catch(_){ }
+      __homeDaneaMarqueeRaf = 0;
+      __homeDaneaMarqueeBusy = false;
+      try{
+        if (homeDaneaTickerTrack){
+          homeDaneaTickerTrack.style.transition = "none";
+          homeDaneaTickerTrack.style.transform = "translateY(0px)";
+        }
+      }catch(_){ }
+    }
+
+    function __homeDaneaMeasureH(){
+      try{
+        // keep cockpit height identical to the "Categorie" tile
+        __homeDaneaLockCockpitHeight();
+        const ref = homeDaneaCockpit || homeDaneaTicker;
+        const r = ref ? ref.getBoundingClientRect() : null;
+        const h = Math.round((r && r.height) || 0);
+        if (h > 10) return h;
+        // Se la Home non è visibile (display:none), getBoundingClientRect() torna 0.
+        // In quel caso usa l'ultima altezza bloccata, così nel cockpit resta UNA riga.
+        const fb = Math.round(Number(__homeDaneaLockedTileH || 0));
+        return (fb > 10) ? fb : 0;
+      }catch(_){ return 0; }
+    }
+
+    function __homeDaneaSyncHeights(){
+      const h = __homeDaneaMeasureH();
+      if (!h) return 0;
+      __homeDaneaMarqueeH = h;
+      try{
+        if (homeDaneaTickerSeq) homeDaneaTickerSeq.style.height = h + "px";
+        if (homeDaneaTickerSeqClone) homeDaneaTickerSeqClone.style.height = h + "px";
+      }catch(_){ }
+      return h;
+    }
+
+    function __homeDaneaSetSlides(idx){
+      const items = Array.isArray(__homeDaneaMarqueeItems) ? __homeDaneaMarqueeItems : [];
+      if (!items.length) return;
+      const n = items.length;
+      const i = ((Number(idx) || 0) % n + n) % n;
+      const next = (i + 1) % n;
+      try{ if (homeDaneaTickerSeq) homeDaneaTickerSeq.innerHTML = items[i] || ""; }catch(_){ }
+      try{ if (homeDaneaTickerSeqClone) homeDaneaTickerSeqClone.innerHTML = items[next] || ""; }catch(_){ }
+    }
+
+    function __homeDaneaStep(){
+      try{
+        const items = Array.isArray(__homeDaneaMarqueeItems) ? __homeDaneaMarqueeItems : [];
+        if (!items || items.length <= 1) return;
+        if (!homeDaneaTickerTrack || !homeDaneaTickerSeq || !homeDaneaTickerSeqClone) return;
+        if (__homeDaneaMarqueePaused || __homeDaneaMarqueeBusy) return;
+
+        const h = __homeDaneaSyncHeights() || __homeDaneaMarqueeH;
+        if (!h) return;
+
+        // refresh "next" in clone (in case list changed)
+        const nextIdx = (__homeDaneaMarqueeIdx + 1) % items.length;
+        try{ homeDaneaTickerSeqClone.innerHTML = items[nextIdx] || ""; }catch(_){ }
+
+        __homeDaneaMarqueeBusy = true;
+
+        requestAnimationFrame(() => {
+          try{
+            if (!homeDaneaTickerTrack) return;
+            homeDaneaTickerTrack.style.transition = "transform 520ms cubic-bezier(.22,.61,.36,1)";
+            homeDaneaTickerTrack.style.transform = `translateY(${-h}px)`;
+          }catch(_){ }
+        });
+      }catch(_){ }
+    }
+
+    function __startHomeDaneaMarquee(preserveIndex){
+      try{
+        if (!homeDaneaCockpit || !homeDaneaTickerTrack || !homeDaneaTickerSeq || !homeDaneaTickerSeqClone) return;
+
+        const items = Array.isArray(__homeDaneaMarqueeItems) ? __homeDaneaMarqueeItems : [];
+        __stopHomeDaneaMarquee();
+
+        if (!items.length){
+          try{ homeDaneaTickerSeq.innerHTML = '<span class="homeDaneaTickerItem is-muted">—</span>'; }catch(_){ }
+          try{ homeDaneaTickerSeqClone.innerHTML = ''; }catch(_){ }
+          return;
+        }
+
+        if (!preserveIndex) __homeDaneaMarqueeIdx = 0;
+        if (!Number.isFinite(Number(__homeDaneaMarqueeIdx))) __homeDaneaMarqueeIdx = 0;
+        if (__homeDaneaMarqueeIdx < 0) __homeDaneaMarqueeIdx = 0;
+        if (__homeDaneaMarqueeIdx >= items.length) __homeDaneaMarqueeIdx = 0;
+
+        __homeDaneaSyncHeights();
+        __homeDaneaSetSlides(__homeDaneaMarqueeIdx);
+
+        try{
+          homeDaneaTickerTrack.style.transition = "none";
+          homeDaneaTickerTrack.style.transform = "translateY(0px)";
+        }catch(_){ }
+
+        // Se 0/1 elementi, niente rotazione
+        if (items.length <= 1) return;
+
+        // Ogni tot secondi (gestionale / leggibile)
+        const stepMs = 4200;
+        __homeDaneaMarqueeRaf = setInterval(() => { try{ __homeDaneaStep(); }catch(_){ } }, stepMs);
+      }catch(_){ }
+    }
+
+    function __bindHomeDaneaMarquee(){
+      try{
+        if (!homeDaneaCockpit || __homeDaneaMarqueeBound) return;
+        __homeDaneaMarqueeBound = true;
+
+        const pause = () => { __homeDaneaMarqueePaused = true; };
+        const resume = () => { __homeDaneaMarqueePaused = false; };
+
+        homeDaneaCockpit.addEventListener("pointerenter", pause);
+        homeDaneaCockpit.addEventListener("pointerleave", resume);
+        homeDaneaCockpit.addEventListener("focusin", pause);
+        homeDaneaCockpit.addEventListener("focusout", resume);
+
+        // Pulsante destro: ATTIVATO/DISATTIVATO (toggle auto mode)
+        try{
+          if (homeDaneaToggleBtn && !(homeDaneaToggleBtn.dataset && homeDaneaToggleBtn.dataset.bound === "1")){
+            try{ if (homeDaneaToggleBtn.dataset) homeDaneaToggleBtn.dataset.bound = "1"; }catch(_){ }
+
+            const readAuto = () => {
+              try{
+                const v = String(localStorage.getItem("hubinv_danea_auto_mode") || "").trim().toLowerCase();
+                if (!v) return false;
+                return (v === "1" || v === "true" || v === "on" || v === "yes");
+              }catch(_){ return false; }
+            };
+
+            const writeAuto = (on) => {
+              const next = !!on;
+              // Preferisci la switch reale: aggiorna anche i timer interni del modulo Danea
+              try{
+                const sw = document.getElementById("daneaAutoSwitch");
+                if (sw){
+                  try{ sw.checked = next; }catch(_){ }
+                  try{ sw.dispatchEvent(new Event("change", { bubbles: true })); }catch(_){ }
+                  return true;
+                }
+              }catch(_){ }
+              // fallback: solo localStorage
+              try{ localStorage.setItem("hubinv_danea_auto_mode", next ? "1" : "0"); }catch(_){ }
+              return false;
+            };
+
+            homeDaneaToggleBtn.addEventListener("click", (e) => {
+              try{ e.preventDefault(); e.stopPropagation(); }catch(_){ }
+              const cur = readAuto();
+              const next = !cur;
+              writeAuto(next);
+              try{ renderHomeDaneaCockpit(); }catch(_){ }
+              try{ showToast(next ? "Scarico automatico ATTIVATO" : "Scarico automatico DISATTIVATO", next ? "ok" : "warn"); }catch(_){ }
+            });
+          }
+        }catch(_){ }
+
+        // Vertical ticker: swap slides on transition end
+        try{
+          if (homeDaneaTickerTrack && !(homeDaneaTickerTrack.dataset && homeDaneaTickerTrack.dataset.vBound === "1")){
+            try{ if (homeDaneaTickerTrack.dataset) homeDaneaTickerTrack.dataset.vBound = "1"; }catch(_){ }
+            homeDaneaTickerTrack.addEventListener("transitionend", (ev) => {
+              try{
+                if (ev && ev.propertyName && ev.propertyName !== "transform") return;
+                if (!__homeDaneaMarqueeBusy) return;
+
+                const items = Array.isArray(__homeDaneaMarqueeItems) ? __homeDaneaMarqueeItems : [];
+                if (!items.length){ __homeDaneaMarqueeBusy = false; return; }
+
+                const nextIdx = (__homeDaneaMarqueeIdx + 1) % items.length;
+                const upcoming = (nextIdx + 1) % items.length;
+
+                // 1) mentre il clone e visibile, copia il clone nel primo slot
+                try{ if (homeDaneaTickerSeq) homeDaneaTickerSeq.innerHTML = items[nextIdx] || ""; }catch(_){ }
+
+                // 2) snap back (senza animazione)
+                try{
+                  homeDaneaTickerTrack.style.transition = "none";
+                  homeDaneaTickerTrack.style.transform = "translateY(0px)";
+                  // force reflow (stabilizza il prossimo step)
+                  void homeDaneaTickerTrack.offsetHeight;
+                }catch(_){ }
+
+                // 3) prepara il prossimo "clone" (ora e sotto, non visibile)
+                try{ if (homeDaneaTickerSeqClone) homeDaneaTickerSeqClone.innerHTML = items[upcoming] || ""; }catch(_){ }
+
+                __homeDaneaMarqueeIdx = nextIdx;
+              }catch(_){ }
+              __homeDaneaMarqueeBusy = false;
+            });
+          }
+        }catch(_){ }
+
+        // Click su item => apre Movimenti filtrati
+        homeDaneaCockpit.addEventListener("click", (e) => {
+          const el = e && e.target && e.target.closest ? e.target.closest(".homeDaneaTickerItem[data-key]") : null;
+          const key = el ? String(el.getAttribute("data-key") || "").trim() : "";
+          const docNum = el ? String(el.getAttribute("data-docnum") || "").trim() : "";
+
+          try{ e.preventDefault(); e.stopPropagation(); }catch(_){ }
+
+          try{
+            setView("movements");
+            const movSearch = document.getElementById("movSearch");
+            const movTypeFilter = document.getElementById("movTypeFilter");
+            if (movTypeFilter) movTypeFilter.value = "OUT";
+            if (movSearch) movSearch.value = (docNum || key || "daneaxml");
+            try{ window.HubMovements && window.HubMovements.refresh && window.HubMovements.refresh(); }catch(_){ }
+          }catch(_){ }
+        });
+
+        window.addEventListener("resize", () => { try{ __startHomeDaneaMarquee(true); }catch(_){ } }, { passive: true });
+      }catch(_){ }
+    }
+
+    function renderHomeDaneaCockpit(){
+      try{
+        if (!homeDaneaCockpit || !homeDaneaTickerSeq || !homeDaneaTickerSeqClone) return;
+
+        // lock cockpit height before measuring/animating
+        __homeDaneaLockCockpitHeight();
+
+        // stato scarico automatico (dashboard)
+        const autoOn = (() => {
+          try{
+            const v = String(localStorage.getItem("hubinv_danea_auto_mode") || "").trim().toLowerCase();
+            if (!v) return false;
+            return (v === "1" || v === "true" || v === "on" || v === "yes");
+          }catch(_){ return false; }
+        })();
+
+        // stato UI (toggle) — no glow esterno
+        try{
+          if (homeDaneaCockpit){
+            homeDaneaCockpit.classList.toggle("is-auto-on", !!autoOn);
+            homeDaneaCockpit.classList.toggle("is-auto-off", !autoOn);
+            const lbl = autoOn ? "ATTIVATO" : "DISATTIVATO";
+            homeDaneaCockpit.setAttribute("title", "Scarico automatico: " + lbl);
+          }
+        }catch(_){ }
+
+        // Bottone a destra: attivato/disattivato
+        try{
+          if (homeDaneaToggleBtn){
+            homeDaneaToggleBtn.textContent = autoOn ? "ATTIVATO" : "DISATTIVATO";
+            try{ homeDaneaToggleBtn.setAttribute("aria-pressed", autoOn ? "true" : "false"); }catch(_){ }
+          }
+        }catch(_){ }
+
+        // DDT scaricati oggi (usa createdAt dei completati)
+        const todayCount = (() => {
+          try{
+            const now = new Date();
+            const y = now.getFullYear(), m = now.getMonth(), d = now.getDate();
+            let c = 0;
+            for (const it of (__daneaCompleted || [])){
+              const iso = String(it && it.createdAt || "").trim();
+              if (!iso) continue;
+              const dt = new Date(iso);
+              if (!dt || isNaN(dt.getTime())) continue;
+              if (dt.getFullYear() === y && dt.getMonth() === m && dt.getDate() === d) c++;
+            }
+            return c;
+          }catch(_){ return 0; }
+        })();
+
+        const piecesToday = (() => {
+          try{
+            const now = new Date();
+            const y = now.getFullYear(), m = now.getMonth(), d = now.getDate();
+            let sum = 0;
+            for (const it of (__daneaCompleted || [])){
+              const iso = String(it && it.createdAt || "").trim();
+              if (!iso) continue;
+              const dt = new Date(iso);
+              if (!dt || isNaN(dt.getTime())) continue;
+              if (dt.getFullYear() !== y || dt.getMonth() !== m || dt.getDate() !== d) continue;
+              const allocs = Array.isArray(it.allocations) ? it.allocations : [];
+              for (const a of allocs){
+                sum += safeInt(a && a.qty);
+              }
+            }
+            return sum;
+          }catch(_){ return 0; }
+        })();
+
+        const fmt = (n) => (Number(n) || 0).toLocaleString("it-IT");
+        const list = __getHomeDaneaGroups();
+
+        const items = [];
+        const autoLbl = autoOn ? "ATTIVATO" : "DISATTIVATO";
+        items.push(`<span class="homeDaneaTickerItem is-meta">SCARICO AUTOMATICO ${autoLbl} - DDT SCARICATI OGGI ${fmt(todayCount)} - PEZZI SCARICATI OGGI ${fmt(piecesToday)}</span>`);
+
+        if (!list.length){
+          items.push(`<span class="homeDaneaTickerItem is-muted">NESSUN DDT DA XML</span>`);
+        } else {
+          items.push(
+            ...list.slice(0, 18).map((g) => {
+              const num = String(g.docNum || "").trim() || String(g.key || "").split("__")[0] || "";
+              const done = __daneaPickDone(g.key, num, String(g.date || "").trim());
+              const cust = String(done && done.customer || "").trim();
+              const txt = `CLIENTE: ${cust || "—"} | DDT: ${num || "—"}`;
+              return (
+                `<button class="homeDaneaTickerItem" type="button" data-key="${escapeHtmlAttr(String(g.key || ""))}" data-docnum="${escapeHtmlAttr(String(num || ""))}">` +
+                  `${escapeHtml(txt)}` +
+                `</button>`
+              );
+            })
+          );
+        }
+
+        // Signature: evita di riavviare il ticker ad ogni renderAll (sennò non scorre mai)
+        const sig = items.join("§");
+        const changed = (sig !== __homeDaneaMarqueeSig);
+
+        __homeDaneaMarqueeItems = items;
+
+        __bindHomeDaneaMarquee();
+
+        // Start/refresh only when content changes (or first paint)
+        try{
+          const isEmpty = !String(homeDaneaTickerSeq && homeDaneaTickerSeq.innerHTML || "").trim();
+          if (changed){
+            __homeDaneaMarqueeSig = sig;
+            if (!Number.isFinite(Number(__homeDaneaMarqueeIdx))) __homeDaneaMarqueeIdx = 0;
+            if (__homeDaneaMarqueeIdx < 0) __homeDaneaMarqueeIdx = 0;
+            if (__homeDaneaMarqueeIdx >= items.length) __homeDaneaMarqueeIdx = 0;
+            __startHomeDaneaMarquee(true);
+          } else if (isEmpty || (!__homeDaneaMarqueeRaf && items.length > 1)) {
+            __startHomeDaneaMarquee(true);
+          }
+        }catch(_){
+          try{ __startHomeDaneaMarquee(true); }catch(__){ }
+        }
+      }catch(_){ }
+    }
+
+
+
+
+    // Dashboard: cache righe sottoscorta (click -> dettaglio inventario)
+    let __lowStockRowByKey = new Map();
+
+    // Click su riga sottoscorta (Home) => apri dettaglio inventario
+    (function __bindLowStockBoardClick(){
+      try{
+        if (!lowStockBoard) return;
+        if (lowStockBoard.dataset && lowStockBoard.dataset.boundLowStockClick === "1") return;
+        if (lowStockBoard.dataset) lowStockBoard.dataset.boundLowStockClick = "1";
+
+        const openFromKey = (k) => {
+          const key = String(k || "").trim();
+          if (!key) return;
+          const row = (__lowStockRowByKey && __lowStockRowByKey.get) ? (__lowStockRowByKey.get(key) || null) : null;
+          if (!row) return;
+
+          // Alias group => scegli codice (come in Inventario)
+          if (row.__isAliasGroup && Array.isArray(row.__codes) && row.__codes.length > 1) {
+            openUnifiedArticleModal(row);
+            return;
+          }
+          openProductModal(String(row.code || ""), row);
+        };
+
+        lowStockBoard.addEventListener("click", (e) => {
+          const rowEl = e && e.target && e.target.closest ? e.target.closest(".lowStockCockpitRow[data-k]") : null;
+          if (!rowEl) return;
+          const k = rowEl.getAttribute("data-k") || "";
+          try{ e.preventDefault(); e.stopPropagation(); }catch(_){ }
+          openFromKey(k);
+        });
+
+        // Accessibilità: Enter/Space sulle righe
+        lowStockBoard.addEventListener("keydown", (e) => {
+          if (!e) return;
+          const key = e.key;
+          if (key !== "Enter" && key !== " ") return;
+          const rowEl = e.target && e.target.closest ? e.target.closest(".lowStockCockpitRow[data-k]") : null;
+          if (!rowEl) return;
+          const k = rowEl.getAttribute("data-k") || "";
+          try{ e.preventDefault(); e.stopPropagation(); }catch(_){ }
+          openFromKey(k);
+        });
+      }catch(_){ }
+    })();
 
 
     function renderLowStockBoard(stockByWh) {
       try {
         if (!lowStockBoard || !lowStockListCerea || !lowStockListConca) return;
+
+        // reset cache (usata dal click sulle righe)
+        __lowStockRowByKey = new Map();
 
         const arr0 = Array.isArray(stockByWh) ? stockByWh : [];
         const arr = groupStockRowsByAlias(arr0);
@@ -5125,39 +12180,57 @@ async function deleteMovement(id) {
         if (lowStockCountConca) lowStockCountConca.textContent = String(conca.length);
 
         const fmt = (n) => (Number(n) || 0).toLocaleString("it-IT");
-        const maxShow = 12;
+
+        // Dashboard: tabella compatta (niente righe “a riquadro”), con scroll SOLO dentro il riquadro
+        // così la Home non diventa scrollabile su desktop.
+        const MAX_ROWS = 200;
 
         const renderList = (list, el) => {
           if (!el) return;
-          if (!list.length) {
+          if (!Array.isArray(list) || list.length === 0) {
             el.innerHTML = '<div class="td-muted">Nessun articolo sotto scorta.</div>';
             return;
           }
 
-          const show = list.slice(0, maxShow);
+          const show = list.slice(0, MAX_ROWS);
           const more = list.length - show.length;
 
-          el.innerHTML = show.map(r => {
+          const rows = show.map(r => {
+            const k = stockRowKey(String(r && r.customer || ""), String(r && r.code || ""), String(r && r.warehouse || ""));
+            try { __lowStockRowByKey.set(k, r); } catch(_){ }
             const code = escapeHtml(r.__displayCode || r.code || "");
             const item = escapeHtml(r.item || "");
-            const cust = escapeHtml(r.customer || "");
             const qty = fmt(safeInt(r.qty));
-            const thr = fmt(safeInt(r.threshold));
+
+            const codeCell = code || "—";
+            const itemCell = item || "—";
 
             return `
-              <div class="lowStockItem">
-                <div class="lowStockItemMain">
-                  <div class="lowStockCode">${code || "—"}</div>
-                  <div class="lowStockName">${item || "—"}</div>
-                  ${cust ? `<div class="lowStockMeta">${cust}</div>` : ``}
-                </div>
-                <div class="lowStockQty">
-                  <div class="n">${qty}</div>
-                  <div class="t">soglia ${thr}</div>
-                </div>
+              <div class="lowStockCockpitRow" role="row" data-k="${escapeHtmlAttr(k)}" tabindex="0" title="Apri dettaglio">
+                <div class="lowStockCockpitCell isCode colCode" role="cell">${codeCell}</div>
+                <div class="lowStockCockpitCell colItem" role="cell">${itemCell}</div>
+                <div class="lowStockCockpitCell isQty colQty" role="cell">${qty}</div>
               </div>
             `;
-          }).join("") + (more > 0 ? `<div class="td-muted">+${more} altri…</div>` : "");
+          }).join("");
+
+          const moreRow = (more > 0)
+            ? `<div class="lowStockCockpitMore">+${fmt(more)} altri…</div>`
+            : ``;
+
+          el.innerHTML = `
+            <div class="lowStockCockpit" role="table" aria-label="Sottoscorta">
+              <div class="lowStockCockpitHead" role="row">
+                <div class="lowStockCockpitCell colCode" role="columnheader">Codice</div>
+                <div class="lowStockCockpitCell colItem" role="columnheader">Articolo</div>
+                <div class="lowStockCockpitCell colQty" role="columnheader" style="text-align:right;">Qtà</div>
+              </div>
+              <div class="lowStockCockpitBody" role="rowgroup" tabindex="0">
+                ${rows}
+                ${moreRow}
+              </div>
+            </div>
+          `;
         };
 
         renderList(cerea, lowStockListCerea);
@@ -5167,120 +12240,604 @@ async function deleteMovement(id) {
       }
     }
 
+    function __isHexColor(v){
+      const s = String(v || "").trim();
+      return /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(s);
+    }
+    function __hexToRgb(hex){
+      const s = String(hex || "").trim().replace("#", "");
+      if (!/^[0-9a-f]{3}([0-9a-f]{3})?$/i.test(s)) return null;
+      const h = (s.length === 3) ? (s[0]+s[0]+s[1]+s[1]+s[2]+s[2]) : s;
+      const n = parseInt(h, 16);
+      return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
+    }
+    function __rgbToHex(r,g,b){
+      const to = (x) => Math.max(0, Math.min(255, Math.round(Number(x) || 0))).toString(16).padStart(2,"0");
+      return "#" + to(r) + to(g) + to(b);
+    }
+    function __mixRgb(a,b,t){
+      const tt = Math.max(0, Math.min(1, Number(t) || 0));
+      return {
+        r: Math.round(a.r + (b.r - a.r) * tt),
+        g: Math.round(a.g + (b.g - a.g) * tt),
+        b: Math.round(a.b + (b.b - a.b) * tt)
+      };
+    }
+    function __mixHex(baseHex, targetHex, t){
+      const a = __hexToRgb(baseHex);
+      const b = __hexToRgb(targetHex);
+      if (!a || !b) return baseHex;
+      const m = __mixRgb(a,b,t);
+      return __rgbToHex(m.r,m.g,m.b);
+    }
+    function __catIosFillVars(hex){
+      const base = __isHexColor(hex) ? String(hex).trim() : "#0a84ff";
+      const rgb = __hexToRgb(base) || { r:10, g:132, b:255 };
 
+      // variazioni leggere per "profondità" (stile bottone iOS)
+      const c1 = __mixHex(base, "#ffffff", 0.20); // highlight
+      const c2 = __mixHex(base, "#000000", 0.18); // shadow
 
+      const glow = `rgba(${rgb.r},${rgb.g},${rgb.b},0.20)`;
 
-function renderCategoryQtyBoard(stockByWh) {
-  try {
-    if (!catQtyBoard || !catQtyList) return;
-
-    const rows = Array.isArray(stockByWh) ? stockByWh : [];
-
-    // Somma per codice (aggregando sedi e fornitori)
-    const sumByCode = new Map(); // codeLower -> qty
-    for (const r of rows) {
-      if (!r) continue;
-      const code = String(r.code || "").trim();
-      if (!code) continue;
-      const low = code.toLowerCase();
-      const prev = sumByCode.get(low) || 0;
-      sumByCode.set(low, prev + safeInt(r.qty));
+      return `--cat-bg1:${c1}; --cat-bg2:${c2}; --cat-glow:${glow};`;
     }
 
-    // Somma per categoria (macro)
-    const sumByCat = new Map(); // catKey -> qty
-    for (const [codeLow, qty] of sumByCode.entries()) {
-      const cat = (typeof getMacroCategoryForCode === "function")
-        ? (getMacroCategoryForCode(codeLow) || "")
-        : "";
-      const k = (cat || "non_classificati");
-      sumByCat.set(k, (sumByCat.get(k) || 0) + (Number(qty) || 0));
+
+    // Dashboard: riquadro "Categorie" (pezzi per categoria) — Inventario Cerea
+    function renderCategoryBoardCerea(stockByWh){
+      try{
+        if (!categoryListCerea || !categoryTotalCerea) return;
+
+        const rows = Array.isArray(stockByWh) ? stockByWh : [];
+        const codeTotals = new Map(); // codeLower -> qty
+
+        for (const r of rows){
+          if (!r) continue;
+          if (normalizeWarehouse(r.warehouse || "") !== WAREHOUSE_CEREA) continue;
+          const code = String(r.code || "").trim();
+          if (!code) continue;
+          const low = code.toLowerCase();
+          const q = safeInt(r.qty);
+          codeTotals.set(low, (codeTotals.get(low) || 0) + q);
+        }
+
+        const catTotals = new Map(); // catKey -> qty (clamped >=0)
+        for (const [codeLow, qtyRaw] of codeTotals.entries()){
+          const catKeyRaw = (typeof getMacroCategoryForCode === "function") ? getMacroCategoryForCode(codeLow) : "";
+          const catKey = String(catKeyRaw || "").trim().toLowerCase() || "non_classificati";
+          const qty = Math.max(0, Number(qtyRaw) || 0);
+          if (qty <= 0) continue; // evita categorie "0" che sporcano il widget
+          catTotals.set(catKey, (catTotals.get(catKey) || 0) + qty);
+        }
+
+        const list = Array.from(catTotals.entries()).map(([key, qty]) => {
+          const name = (typeof macroCatLabel === "function") ? (macroCatLabel(key) || key) : key;
+          const color = (typeof macroCatColor === "function") ? (macroCatColor(key) || "") : "";
+          return { key, name, color, qty: Number(qty) || 0 };
+        }).sort((a,b) => (Number(b.qty)||0) - (Number(a.qty)||0));
+
+        const total = list.reduce((s, x) => s + (Number(x.qty)||0), 0);
+        categoryTotalCerea.textContent = total ? Number(total).toLocaleString("it-IT") : "0";
+
+        if (!list.length){
+          categoryListCerea.innerHTML = '<div class="categoryPlaceholder">Nessuna categoria disponibile</div>';
+          return;
+        }
+
+        const max = Math.max(1, ...list.map(x => Math.max(0, Number(x.qty) || 0)));
+        categoryListCerea.innerHTML = list.map(item => {
+          const pct = Math.max(0, Math.min(100, Math.round((Math.max(0, Number(item.qty)||0) / max) * 100)));
+          const col = __isHexColor(item.color) ? item.color : "";
+          const fillStyle = __catIosFillVars(col);
+          return `
+            <div class="categoryRow">
+              <div class="categoryTrack">
+                <div class="categoryFill" data-pct="${pct}" style="width:0%; ${fillStyle}"></div>
+                <div class="categoryContent">
+                  <div class="categoryName">${escapeHtml(item.name || item.key || "")}</div>
+                  <div class="categoryValue">${Number(item.qty||0).toLocaleString("it-IT")}</div>
+                </div>
+              </div>
+            </div>
+          `;
+        }).join("");
+
+        if (__invTrendPrefersReducedMotion()) return;
+        try {
+          const fills = Array.from(categoryListCerea.querySelectorAll(".categoryFill"));
+          requestAnimationFrame(() => {
+            fills.forEach(fill => {
+              const pct = String(fill.getAttribute("data-pct") || "0");
+              fill.style.width = pct + "%";
+            });
+          });
+        } catch (_) {}
+      }catch(e){
+        console.warn("renderCategoryBoardCerea failed", e);
+      }
     }
 
-    // Preferite (sempre visibili): flaconi, scatole, materie prime
-    const preferred = ["flaconi", "scatole", "materie_prime"];
 
-    const all = [];
 
-    // Garantisce le preferite anche a 0
-    preferred.forEach(k => {
-      const qty = Number(sumByCat.get(k) || 0);
-      const label = (typeof macroCatLabel === "function" ? (macroCatLabel(k) || "") : "") || k;
-      const color = (typeof macroCatColor === "function" ? (macroCatColor(k) || "") : "") || "";
-      all.push({ key: k, qty, label, color });
-    });
 
-    // Aggiungi le altre (solo se non-zero)
-    for (const [k, qty] of sumByCat.entries()) {
-      if (preferred.includes(k)) continue;
-      const n = Number(qty) || 0;
-      if (n === 0) continue;
-      const label = (typeof macroCatLabel === "function" ? (macroCatLabel(k) || "") : "") || k;
-      const color = (typeof macroCatColor === "function" ? (macroCatColor(k) || "") : "") || "";
-      all.push({ key: k, qty: n, label, color });
+    // ===== Dashboard: Andamento inventario (totale pezzi nel tempo) =====
+    let __invTrendRange = "30";           // "7" | "30" | "90" | "all"
+    let __invTrendDidBind = false;
+    let __invTrendSvgBound = false;
+    let __invTrendActivePoints = [];      // [{day,value,x,y}]
+    let __invTrendActiveIdx = -1;
+    // dimensioni viewBox correnti (per conversioni px → svg e tooltip)
+    let __invTrendSvgW = 480;
+    let __invTrendSvgH = 180;
+    let __invTrendResizeObs = null;
+
+    function __invTrendPrefersReducedMotion(){
+      try { return !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches); }
+      catch(_) { return false; }
     }
 
-    // Ordina: preferite in testa (tradizione) + poi per quantità
-    const prefIndex = (k) => {
-      const i = preferred.indexOf(k);
-      return (i < 0) ? 999 : i;
-    };
-    all.sort((a, b) => {
-      const pa = prefIndex(a.key), pb = prefIndex(b.key);
-      if (pa != pb) return pa - pb;
-      return (Number(b.qty) || 0) - (Number(a.qty) || 0);
-    });
-
-    const maxRows = 8;
-    const list = all.slice(0, maxRows);
-
-    const total = list.reduce((s, x) => s + (Number(x.qty) || 0), 0);
-    if (catQtyMeta) catQtyMeta.textContent = total ? Number(total).toLocaleString("it-IT") : "0";
-
-    if (!list.length) {
-      catQtyList.innerHTML = '<div class="td-muted">Nessun dato categorie.</div>';
-      return;
+    function __invTrendPad2(n){ return String(n).padStart(2, "0"); }
+    function __invTrendTodayISO(){
+      const d = new Date();
+      return `${d.getFullYear()}-${__invTrendPad2(d.getMonth()+1)}-${__invTrendPad2(d.getDate())}`;
+    }
+    function __invTrendAddDays(iso, delta){
+      const d = new Date(String(iso || "") + "T00:00:00");
+      if (Number.isNaN(d.getTime())) return "";
+      d.setDate(d.getDate() + (Number(delta) || 0));
+      return `${d.getFullYear()}-${__invTrendPad2(d.getMonth()+1)}-${__invTrendPad2(d.getDate())}`;
+    }
+    function __invTrendFmtDateShort(iso){
+      try{
+        const d = new Date(String(iso || "") + "T00:00:00");
+        if (Number.isNaN(d.getTime())) return String(iso || "");
+        return d.toLocaleDateString("it-IT", { day: "2-digit", month: "short" });
+      }catch(_){ return String(iso || ""); }
     }
 
-    const max = Math.max(1, ...list.map(x => Math.max(0, Number(x.qty) || 0)));
+    function __invTrendGetMvDay(mv){
+      let d = String((mv && mv.date) || "").trim();
+      if (!d || d.length < 10){
+        const ca = String((mv && mv.createdAt) || "").trim();
+        if (ca && ca.length >= 10) d = ca.slice(0, 10);
+      }
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) return "";
+      return d;
+    }
 
-    catQtyList.innerHTML = list.map(x => {
-      const name = escapeHtml(String(x.label || x.key || "—"));
-      const val = Number(x.qty || 0);
-      const pct = Math.max(0, Math.min(100, Math.round((Math.max(0, val) / max) * 100)));
-      const col = String(x.color || "").trim();
-      const dotStyle = col ? `style="background:${escapeHtmlAttr(col)}"` : '';
-      const fillStyle = col ? `style="background:${escapeHtmlAttr(col)}; width:0%"` : 'style="width:0%"';
+    function __initInvTrendUI(){
+      if (__invTrendDidBind) return;
+      __invTrendDidBind = true;
 
-      return `
-        <div class="catBarRow" data-cat="${escapeHtmlAttr(x.key || "")}">
-          <div class="catBarLabel">
-            <span class="catDot" ${dotStyle}></span>
-            <span class="catName">${name}</span>
-          </div>
-          <div class="catBarTrack" role="progressbar" aria-valuemin="0" aria-valuemax="${max}" aria-valuenow="${val}">
-            <div class="catBarFill" data-pct="${pct}" ${fillStyle}></div>
-          </div>
-          <div class="catBarVal">${Number(val).toLocaleString("it-IT")}</div>
-        </div>
-      `;
-    }).join("");
+      // range persist (localStorage)
+      try{
+        const saved = String(localStorage.getItem("invTrendRange") || "").trim();
+        if (saved && ["7","30","90","all"].includes(saved)) __invTrendRange = saved;
+      }catch(_){}
 
-    // Animazione fill (0 -> target)
-    try {
-      const fills = Array.from(catQtyList.querySelectorAll(".catBarFill"));
-      requestAnimationFrame(() => {
-        fills.forEach(f => {
-          const p = String(f.getAttribute("data-pct") || "0");
-          f.style.width = p + "%";
+      if (invTrendRanges){
+        invTrendRanges.addEventListener("click", (e) => {
+          const btn = e.target && e.target.closest ? e.target.closest("button[data-range]") : null;
+          if (!btn) return;
+          const r = String(btn.getAttribute("data-range") || "").trim();
+          if (!["7","30","90","all"].includes(r)) return;
+          __invTrendRange = r;
+          try{ localStorage.setItem("invTrendRange", r); }catch(_){}
+          renderInventoryTrend(); // redraw now
         });
-      });
-    } catch (_) {}
+      }
 
-  } catch (e) {
-    console.warn("renderCategoryQtyBoard failed", e);
-  }
-}
+      // Bind tooltip tracking once
+      __bindInvTrendSvg();
+      __bindInvTrendResize();
+    }
+
+    function __setInvTrendActiveBtn(){
+      if (!invTrendRanges) return;
+      const btns = invTrendRanges.querySelectorAll("button[data-range]");
+      btns.forEach(b => {
+        const r = String(b.getAttribute("data-range") || "").trim();
+        b.classList.toggle("is-active", r === __invTrendRange);
+      });
+    }
+
+    function __buildInvTrendSeries(movements, range, currentTotal){
+      const movs = Array.isArray(movements) ? movements : [];
+
+      // delta per giorno (IN +, OUT -) — solo giorni validi
+      const deltaByDay = new Map(); // day -> signed int
+      let minDay = "";
+
+      const endDay = __invTrendTodayISO(); // ancoriamo SEMPRE a "oggi" (valore reale)
+      for (const mv of movs){
+        const day = __invTrendGetMvDay(mv);
+        if (!day) continue;
+        // evita date future (sporchi doc date)
+        if (endDay && day > endDay) continue;
+
+        const q = safeInt(mv.qty);
+        if (!q) continue;
+        const sign = String(mv.type || "").toUpperCase() === "OUT" ? -1 : 1;
+        const delta = sign * q;
+
+        deltaByDay.set(day, (deltaByDay.get(day) || 0) + delta);
+
+        if (!minDay || day < minDay) minDay = day;
+      }
+
+      // range: sempre finestra rispetto a endDay
+      const r = String(range || "").trim();
+      let startDay = endDay;
+
+      if (r === "all"){
+        startDay = (minDay && minDay <= endDay) ? minDay : endDay;
+      } else {
+        const n = Math.max(1, safeInt(r));
+        const s = __invTrendAddDays(endDay, -(n - 1));
+        startDay = (s && s <= endDay) ? s : endDay;
+      }
+
+      // Ancora al totale attuale (valore vero)
+      const anchor = Math.max(0, Math.round(Number(currentTotal) || 0));
+
+      // Serie: calcolo a ritroso dall'ancora (niente baseline inventate)
+      const rev = [];
+      let level = anchor;
+
+      let guard = 0;
+      for (let d = endDay; d >= startDay && guard < 6000; d = __invTrendAddDays(d, -1), guard++){
+        rev.push({ day: d, value: level });
+        level -= (deltaByDay.get(d) || 0);
+      }
+
+      const points = rev.reverse();
+      if (!points.length){
+        points.push({ day: endDay, value: anchor });
+      }
+
+      // downsample (all) per evitare troppo carico su SVG
+      const MAX_PTS = 220;
+      if (points.length > MAX_PTS){
+        const step = Math.ceil(points.length / MAX_PTS);
+        const out = [];
+        for (let i = 0; i < points.length; i += step) out.push(points[i]);
+        if (out[out.length - 1] !== points[points.length - 1]) out.push(points[points.length - 1]);
+        return out;
+      }
+
+      return points;
+    }
+
+    function __bindInvTrendSvg(){
+      if (__invTrendSvgBound) return;
+      if (!invTrendChart) return;
+      __invTrendSvgBound = true;
+
+      const onMove = (clientX, clientY) => {
+        if (!invTrendChart || !invTrendTooltip) return;
+        const pts = Array.isArray(__invTrendActivePoints) ? __invTrendActivePoints : [];
+        if (!pts.length) return;
+
+        const rect = invTrendChart.getBoundingClientRect();
+        if (!rect.width || !rect.height) return;
+
+        const px = Math.max(0, Math.min(rect.width, (clientX - rect.left)));
+        const t = rect.width ? (px / rect.width) : 0;
+        const idx = Math.max(0, Math.min(pts.length - 1, Math.round(t * (pts.length - 1))));
+        __invTrendActiveIdx = idx;
+
+        const p = pts[idx];
+        if (!p) return;
+
+        // focus dot
+        try{
+          const dot = invTrendChart.querySelector("circle.trendDotFocus");
+          if (dot){
+            dot.setAttribute("cx", String(p.x));
+            dot.setAttribute("cy", String(p.y));
+            dot.style.opacity = "1";
+          }
+        }catch(_){}
+
+        // tooltip position in px (usa viewBox reale, non valori fissi)
+        const vw = Number(__invTrendSvgW) || 480;
+        const vh = Number(__invTrendSvgH) || 180;
+        const xPx = (p.x / vw) * rect.width;
+        const yPx = (p.y / vh) * rect.height;
+
+        const valTxt = Number(p.value || 0).toLocaleString("it-IT");
+        const dateTxt = __invTrendFmtDateShort(p.day);
+        invTrendTooltip.textContent = `${valTxt} • ${dateTxt}`;
+        invTrendTooltip.style.left = `${xPx}px`;
+        invTrendTooltip.style.top = `${yPx}px`;
+        invTrendTooltip.classList.add("is-visible");
+        invTrendTooltip.setAttribute("aria-hidden", "false");
+      };
+
+      const hide = () => {
+        if (!invTrendTooltip) return;
+        invTrendTooltip.classList.remove("is-visible");
+        invTrendTooltip.setAttribute("aria-hidden", "true");
+        try{
+          const dot = invTrendChart && invTrendChart.querySelector ? invTrendChart.querySelector("circle.trendDotFocus") : null;
+          if (dot) dot.style.opacity = "0";
+        }catch(_){}
+      };
+
+      invTrendChart.addEventListener("mousemove", (e) => onMove(e.clientX, e.clientY));
+      invTrendChart.addEventListener("mouseleave", hide);
+      invTrendChart.addEventListener("touchstart", (e) => {
+        const t = e.touches && e.touches[0];
+        if (!t) return;
+        onMove(t.clientX, t.clientY);
+      }, { passive: true });
+      invTrendChart.addEventListener("touchmove", (e) => {
+        const t = e.touches && e.touches[0];
+        if (!t) return;
+        onMove(t.clientX, t.clientY);
+      }, { passive: true });
+      invTrendChart.addEventListener("touchend", hide);
+      invTrendChart.addEventListener("touchcancel", hide);
+    }
+
+    // Ricalcola il viewBox quando il riquadro cambia dimensione (desktop grid stretch / resize)
+    function __bindInvTrendResize(){
+      if (__invTrendResizeObs || !invTrendChart) return;
+      try{
+        if (typeof ResizeObserver !== "undefined"){
+          const ro = new ResizeObserver(() => {
+            try{
+              if (ro._raf) cancelAnimationFrame(ro._raf);
+              ro._raf = requestAnimationFrame(() => {
+                try{ renderInventoryTrend(); }catch(_){ }
+              });
+            }catch(_){ }
+          });
+          ro.observe(invTrendChart);
+          __invTrendResizeObs = ro;
+          return;
+        }
+      }catch(_){ }
+
+      // Fallback (vecchi browser)
+      try{
+        const onR = () => { try{ renderInventoryTrend(); }catch(_){ } };
+        window.addEventListener("resize", onR);
+        __invTrendResizeObs = { _win: onR };
+      }catch(_){ }
+    }
+
+    function __renderInvTrendSvg(points){
+      if (!invTrendChart) return;
+
+      const ptsIn = Array.isArray(points) ? points : [];
+      const pts = ptsIn.length ? ptsIn.slice() : [{ day: __invTrendTodayISO(), value: 0 }];
+
+      // Ensure at least 2 points for a line
+      if (pts.length === 1){
+        pts.push({ day: pts[0].day, value: pts[0].value });
+      }
+
+      // viewBox: si adatta al rapporto del riquadro (niente barre/letterbox),
+      // senza deformare la curva (preserveAspectRatio resta "meet").
+      // Manteniamo l'altezza "unit" stabile (tipografia/stroke coerenti) e
+      // adattiamo la larghezza al rapporto reale del riquadro.
+      let H = 180;
+      let W = 480;
+      try{
+        const rect = invTrendChart.getBoundingClientRect();
+        const wpx = (rect && rect.width) || 0;
+        const hpx = (rect && rect.height) || 0;
+        if (wpx > 20 && hpx > 20){
+          const ratio = wpx / hpx;
+          if (isFinite(ratio) && ratio > 0.15){
+            W = Math.round(H * ratio);
+            // safety (evita 0 / numeri troppo piccoli)
+            if (W < 80) W = 80;
+          }
+        }
+      }catch(_){ }
+
+      __invTrendSvgW = W;
+      __invTrendSvgH = H;
+      try{
+        invTrendChart.setAttribute("viewBox", `0 0 ${W} ${H}`);
+        if (!invTrendChart.getAttribute("preserveAspectRatio")) {
+          invTrendChart.setAttribute("preserveAspectRatio", "xMidYMid meet");
+        }
+      }catch(_){ }
+
+      // padding (margini) proporzionali, così il grafico respira sempre uguale
+      let padX = Math.max(18, Math.round(W * 0.045));
+      let padTop = Math.max(12, Math.round(H * 0.07));
+      let padBot = Math.max(16, Math.round(H * 0.10));
+      // safety: evita che i padding mangino tutto lo spazio verticale
+      try{
+        const maxPadSum = Math.max(24, H - 34);
+        const sum = padTop + padBot;
+        if (sum > maxPadSum){
+          const k = maxPadSum / Math.max(1, sum);
+          padTop = Math.max(10, Math.round(padTop * k));
+          padBot = Math.max(12, Math.round(padBot * k));
+        }
+        const maxPadX = Math.max(20, Math.floor((W - 24) / 2));
+        if (padX > maxPadX) padX = maxPadX;
+      }catch(_){ }
+
+      // Helpers (labels)
+      const __fmtQty = (n) => {
+        const v = Number(n) || 0;
+        const a = Math.abs(v);
+        const trim = (s) => s.replace(/\.0+$/,"").replace(/(\.\d*[1-9])0+$/,"$1");
+        if (a >= 1e9) return trim((v/1e9).toFixed(1)) + "B";
+        if (a >= 1e6) return trim((v/1e6).toFixed(1)) + "M";
+        if (a >= 1e3) return trim((v/1e3).toFixed(1)) + "K";
+        return String(Math.round(v));
+      };
+      const __fmtDay = (iso) => {
+        try{
+          if (!iso) return "";
+          const r = String(__invTrendRange || "").trim();
+          const d = new Date(String(iso).slice(0,10) + "T00:00:00");
+          if (!isFinite(d.getTime())) return String(iso).slice(5,10);
+
+          // Etichette italiane, coerenti con la finestra
+          if (r === "all" || r === "90"){
+            return d.toLocaleDateString("it-IT", { month: "short", year: "2-digit" });
+          }
+          return d.toLocaleDateString("it-IT", { day: "2-digit", month: "2-digit" });
+        }catch(_){ return String(iso||"").slice(5,10); }
+      };
+      const __niceStep = (x) => {
+        const v = Math.max(1e-9, Number(x) || 0);
+        const exp = Math.floor(Math.log10(v));
+        const f = v / Math.pow(10, exp);
+        let nf = 1;
+        if (f <= 1) nf = 1;
+        else if (f <= 2) nf = 2;
+        else if (f <= 5) nf = 5;
+        else nf = 10;
+        return nf * Math.pow(10, exp);
+      };
+
+      const values = pts.map(p => Number(p.value) || 0);
+      let vMinRaw = Math.min(...values);
+      let vMaxRaw = Math.max(...values);
+      if (vMinRaw === vMaxRaw){ vMinRaw -= 1; vMaxRaw += 1; }
+
+      // Axes: "nice" ticks (keep 4 steps like the grid)
+      const gCount = 4;
+      const rawSpan = Math.max(1e-9, (vMaxRaw - vMinRaw));
+      let step = __niceStep(rawSpan / gCount);
+      if (!isFinite(step) || step <= 0) step = 1;
+
+      let vMin = Math.floor(vMinRaw / step) * step;
+      let vMax = vMin + step * gCount;
+      if (vMax < vMaxRaw){
+        vMax = Math.ceil(vMaxRaw / step) * step;
+        vMin = vMax - step * gCount;
+      }
+      if (vMin === vMax){ vMin -= step; vMax += step; }
+
+      const xStep = (W - padX*2) / Math.max(1, (pts.length - 1));
+      const ySpan = Math.max(1e-9, (vMax - vMin));
+
+      const toY = (v) => {
+        const t = (vMax - v) / ySpan;
+        return padTop + t * (H - padTop - padBot);
+      };
+
+      // Compute final points (with x/y)
+      __invTrendActivePoints = pts.map((p, i) => {
+        const x = padX + xStep * i;
+        const y = toY(Number(p.value) || 0);
+        return { day: p.day, value: Number(p.value) || 0, x, y };
+      });
+
+      // Smooth path (catmull-rom -> cubic)
+      const buildSmoothPath = (pointsIn) => {
+        if (!pointsIn || pointsIn.length === 0) return "";
+        if (pointsIn.length === 1){
+          return `M${pointsIn[0].x.toFixed(2)} ${pointsIn[0].y.toFixed(2)}`;
+        }
+        let d = `M${pointsIn[0].x.toFixed(2)} ${pointsIn[0].y.toFixed(2)}`;
+        for (let i = 0; i < pointsIn.length - 1; i++){
+          const p0 = pointsIn[i - 1] || pointsIn[i];
+          const p1 = pointsIn[i];
+          const p2 = pointsIn[i + 1];
+          const p3 = pointsIn[i + 2] || p2;
+
+          const c1x = p1.x + (p2.x - p0.x) / 6;
+          const c1y = p1.y + (p2.y - p0.y) / 6;
+          const c2x = p2.x - (p3.x - p1.x) / 6;
+          const c2y = p2.y - (p3.y - p1.y) / 6;
+          d += ` C${c1x.toFixed(2)} ${c1y.toFixed(2)}, ${c2x.toFixed(2)} ${c2y.toFixed(2)}, ${p2.x.toFixed(2)} ${p2.y.toFixed(2)}`;
+        }
+        return d;
+      };
+
+      // Grid + Y ticks
+      const gridLines = [];
+      const yLabels = [];
+      for (let i = 0; i <= gCount; i++){
+        const vTick = vMax - step * i;
+        const y = toY(vTick);
+        gridLines.push(`<line x1="0" y1="${y.toFixed(2)}" x2="${W}" y2="${y.toFixed(2)}"></line>`);
+        yLabels.push(
+          `<text x="2" y="${y.toFixed(2)}" text-anchor="start" dominant-baseline="middle" ` +
+          `font-size="9" font-weight="700" fill="rgba(60,60,67,.58)">${__fmtQty(vTick)}</text>`
+        );
+      }
+
+      // X labels (few, responsive)
+      const xLabels = [];
+      try{
+        const n = __invTrendActivePoints.length;
+        const picks = [0, Math.round((n-1)/3), Math.round((n-1)*2/3), n-1]
+          .filter(i => i >= 0 && i < n);
+        const uniq = [];
+        for (const i of picks){ if (!uniq.includes(i)) uniq.push(i); }
+        uniq.sort((a,b)=>a-b);
+
+        const yText = H - 4; // keep inside viewBox
+        for (const i of uniq){
+          const p = __invTrendActivePoints[i];
+          const label = __fmtDay(p.day);
+          xLabels.push(
+            `<text x="${p.x.toFixed(2)}" y="${yText}" text-anchor="middle" dominant-baseline="alphabetic" ` +
+            `font-size="9" font-weight="700" fill="rgba(60,60,67,.58)">${label}</text>`
+          );
+        }
+      }catch(_){}
+
+      // Path + dots
+      const d = buildSmoothPath(__invTrendActivePoints);
+      const last = __invTrendActivePoints[__invTrendActivePoints.length - 1];
+
+      invTrendChart.innerHTML = `
+        <g class="trendGrid">${gridLines.join("")}</g>
+        <g class="trendAxes" style="pointer-events:none">${yLabels.join("")}${xLabels.join("")}</g>
+        <path class="trendLine" d="${d}"></path>
+        <circle class="trendDot" cx="${last.x.toFixed(2)}" cy="${last.y.toFixed(2)}" r="4.2"></circle>
+        <circle class="trendDot trendDotFocus" cx="${last.x.toFixed(2)}" cy="${last.y.toFixed(2)}" r="5.0" style="opacity:0;"></circle>
+      `;
+
+      // Animate line draw (only if motion allowed)
+      try{
+        if (__invTrendPrefersReducedMotion()) return;
+        const path = invTrendChart.querySelector("path.trendLine");
+        if (!path || !path.getTotalLength) return;
+        const len = path.getTotalLength();
+        path.style.strokeDasharray = String(len);
+        path.style.strokeDashoffset = String(len);
+        // force layout
+        path.getBoundingClientRect();
+        path.classList.add("animate");
+      }catch(_){}
+    }
+
+    function renderInventoryTrend(stockArrMaybe){
+      try{
+        if (!invTrendChart || !invTrendTotal) return;
+
+        __initInvTrendUI();
+        __setInvTrendActiveBtn();
+
+        // Totale = pezzi totali attuali (come cockpit)
+        const stockArr = Array.isArray(stockArrMaybe) ? stockArrMaybe : (typeof computeStock === "function" ? computeStock() : []);
+        const total = (stockArr || []).reduce((s, x) => s + (Number(x && x.qty) || 0), 0);
+        invTrendTotal.textContent = Number(total || 0).toLocaleString("it-IT");
+
+        const series = __buildInvTrendSeries(state && state.movements, __invTrendRange, total);
+        __renderInvTrendSvg(series);
+      }catch(e){
+        console.warn("renderInventoryTrend failed", e);
+      }
+    }
+
+
+
 
     function renderCustomerOptions(stockArr) {
       const customers = Array.from(new Set(stockArr.map(x => x.customer).filter(Boolean))).sort((a,b)=>a.localeCompare(b));
@@ -6964,11 +14521,35 @@ function getMacroCategoryForCode(code) {
         const arr = Array.isArray(rows) ? rows : [];
         const map = new Map();
 
-        for (const r of arr) {
+        
+        // Alias grouping ONLY when the same alias is shared by >=2 different product codes.
+        // This avoids accidental "double counts" when alias is used as a simple display name.
+        const sharedAlias = new Set();
+        try{
+          const prodArr = Array.isArray(products) ? products : [];
+          const tmp = new Map(); // aliasKey -> Set(codesLower)
+          for (const p of prodArr){
+            if (!p) continue;
+            const c = String(p.code || (typeof safeDecodeUri==="function" ? safeDecodeUri(p.id || "") : (p.id || "")) || "").trim();
+            if (!c) continue;
+            const a = String((p.alias || p.aliasName) || "").trim();
+            if (!a) continue;
+            const ak = normTextKey(a);
+            if (!ak) continue;
+            const set = tmp.get(ak) || new Set();
+            set.add(c.toLowerCase());
+            tmp.set(ak, set);
+          }
+          for (const [ak, set] of tmp.entries()){
+            if (set && set.size >= 2) sharedAlias.add(ak);
+          }
+        }catch(_){}
+for (const r of arr) {
           if (!r) continue;
           const code = String(r.code || "").trim();
           const alias = getAliasForCode(code);
-          const aliasKey = alias ? normTextKey(alias) : "";
+          const aliasKey0 = alias ? normTextKey(alias) : "";
+          const aliasKey = (aliasKey0 && sharedAlias.has(aliasKey0)) ? aliasKey0 : "";
           const gk = aliasKey ? ("alias:" + aliasKey) : ("code:" + code.toLowerCase());
 
           const wh = normalizeWarehouse(r.warehouse || "");
@@ -7315,32 +14896,561 @@ let __stockRowByKey = new Map();
     }
 
     function renderFlowsTable() {
-      if (!flowsTbody) return;
-      const max = Math.max(10, Math.floor(Number(state.settings.maxRecent) || 50));
-      const docs = (__docGroups || []).slice(0, max);
+      try{
+        const totalAll = Array.isArray(__docGroups) ? __docGroups.length : 0;
 
-      if (pillFlowsCount) pillFlowsCount.textContent = String((__docGroups || []).length);
+        // Pill count sempre (anche se vista non aperta)
+        try{ if (pillFlowsCount) pillFlowsCount.textContent = String(totalAll); }catch(_){}
 
-      if (docs.length === 0) {
-        flowsTbody.innerHTML = '<tr><td class="td-muted" colspan="4">Nessun flusso ancora.</td></tr>';
+        // Se la vista non è aperta, evita lavoro pesante
+        const isActive = !!(__views && __views.flows && __views.flows.classList && __views.flows.classList.contains("active"));
+        const qRaw = String((flowsSearch && flowsSearch.value) || "").trim();
+        const hasQuery = !!qRaw;
+
+        if (!isActive && !hasQuery) {
+          try{ if (flowsMeta) flowsMeta.textContent = "—"; }catch(_){}
+          return;
+        }
+
+        if (!flowsTbody) return;
+
+        const maxRecent = Math.max(10, Math.floor(Number(state && state.settings && state.settings.maxRecent) || 50));
+        const showCap = 200;
+
+        // Cache indices (invalidate when docGroups change)
+        const ver = String(totalAll) + "|" + (totalAll ? String((__docGroups[0] && (__docGroups[0].createdAtMax || __docGroups[0].key)) || "") : "");
+        if (renderFlowsTable._cacheVer !== ver) {
+          renderFlowsTable._cacheVer = ver;
+          renderFlowsTable._cache = new Map();
+        }
+        const cache = renderFlowsTable._cache;
+
+        const strip = (s) => {
+          try { return String(s || "").normalize("NFD").replace(/[\u0300-\u036f]/g, ""); }
+          catch(_){ return String(s || ""); }
+        };
+        const norm = (s) => strip(String(s || "")).toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+
+        const getIndex = (g) => {
+          const k = String(g && g.key || "");
+          try{ if (cache && cache.has(k)) return cache.get(k); }catch(_){}
+
+          const label = (typeof formatDocLabel === "function") ? formatDocLabel(g || {}) : String((g && g.note) || "");
+          const cust  = String((g && g.customer) || "");
+          const vat   = String((g && g.supplierVat) || (g && g.vatNorm) || "");
+          const note  = String((g && g.note) || "");
+          const docNum = String((g && g.docNum) || (typeof extractDocNumber === "function" ? (extractDocNumber(note) || "") : ""));
+          const date  = String((g && g.date) || "");
+          const dateIt = (typeof formatDateOnlyIT === "function") ? (formatDateOnlyIT(date) || "") : "";
+
+          // indicizza anche righe (codici/articoli) ma con un cap (UI)
+          let codes = "", items = "";
+          try{
+            const mv = Array.isArray(g && g.movements) ? g.movements : [];
+            const cap = 90;
+            for (let i=0; i<mv.length && i<cap; i++){
+              const r = mv[i] || {};
+              const c = String(r.code || "").trim();
+              const it = String(r.item || "").trim();
+              if (c) codes += " " + c;
+              if (it) items += " " + it;
+            }
+          }catch(_){}
+
+          const blob = norm([label, cust, vat, docNum, note, date, dateIt, codes, items].join(" "));
+
+          const idx = {
+            blob,
+            labelN: norm(label),
+            custN: norm(cust),
+            vatN: norm(vat),
+            docNumN: norm(docNum),
+            noteN: norm(note),
+            dateN: norm(date + " " + dateIt),
+            codesN: norm(codes),
+            itemsN: norm(items)
+          };
+
+          try{ cache && cache.set(k, idx); }catch(_){}
+          return idx;
+        };
+
+        const allDocs = Array.isArray(__docGroups) ? __docGroups : [];
+        let docsToShow = [];
+        let metaText = "";
+
+        const qN = norm(qRaw);
+        const tokens = qN ? qN.split(/\s+/).filter(Boolean) : [];
+
+        if (!tokens.length){
+          docsToShow = allDocs.slice(0, maxRecent);
+          metaText = totalAll ? (`Ultimi ${docsToShow.length.toLocaleString("it-IT")} su ${totalAll.toLocaleString("it-IT")}`) : "—";
+        } else {
+          const matches = [];
+          for (const g of allDocs){
+            const idx = getIndex(g);
+            if (!idx || !idx.blob) continue;
+
+            // AND: ogni token deve comparire da qualche parte
+            let ok = true;
+            for (const t of tokens){
+              if (idx.blob.indexOf(t) < 0) { ok = false; break; }
+            }
+            if (!ok) continue;
+
+            // scoring (smart)
+            let score = 0;
+            for (const t of tokens){
+              if (!t) continue;
+
+              if (idx.docNumN === t) score += 140;
+              else if (idx.docNumN && idx.docNumN.startsWith(t)) score += 110;
+              else if (idx.docNumN && idx.docNumN.indexOf(t) >= 0) score += 80;
+
+              if (idx.vatN && idx.vatN.startsWith(t)) score += 120;
+              else if (idx.vatN && idx.vatN.indexOf(t) >= 0) score += 85;
+
+              if (idx.codesN && idx.codesN.indexOf(t) >= 0) score += 95;
+              if (idx.itemsN && idx.itemsN.indexOf(t) >= 0) score += 35;
+
+              if (idx.custN && idx.custN.indexOf(t) >= 0) score += 60;
+              if (idx.labelN && idx.labelN.indexOf(t) >= 0) score += 55;
+              if (idx.noteN && idx.noteN.indexOf(t) >= 0) score += 28;
+              if (idx.dateN && idx.dateN.indexOf(t) >= 0) score += 70;
+
+              if (idx.custN && idx.custN.startsWith(t)) score += 8;
+              if (idx.labelN && idx.labelN.startsWith(t)) score += 6;
+            }
+
+            matches.push({ g, score });
+          }
+
+          matches.sort((a,b) => {
+            const s = (b.score||0) - (a.score||0);
+            if (s !== 0) return s;
+
+            const bc = String((b.g && (b.g.createdAtMax || "")) || "");
+            const ac = String((a.g && (a.g.createdAtMax || "")) || "");
+            if (bc && ac && bc !== ac) return bc.localeCompare(ac) * -1;
+
+            return String((b.g && b.g.key) || "").localeCompare(String((a.g && a.g.key) || ""));
+          });
+
+          const capped = matches.length > showCap;
+          docsToShow = matches.slice(0, showCap).map(x => x.g);
+
+          metaText = `Risultati: ${matches.length.toLocaleString("it-IT")} su ${totalAll.toLocaleString("it-IT")}`;
+          if (capped) metaText += ` (mostrati primi ${showCap.toLocaleString("it-IT")})`;
+        }
+
+        // expose for Enter-to-open
+        try{ renderFlowsTable._lastFiltered = docsToShow.slice(); }catch(_){}
+
+        try{ if (flowsMeta) flowsMeta.textContent = metaText || "—"; }catch(_){}
+
+        if (!docsToShow.length){
+          flowsTbody.innerHTML = tokens.length
+            ? '<tr><td class="td-muted" colspan="4">Nessun risultato. Prova con fornitore, numero, data, codice o articolo.</td></tr>'
+            : '<tr><td class="td-muted" colspan="4">Nessun flusso ancora.</td></tr>';
+          return;
+        }
+
+        flowsTbody.innerHTML = docsToShow.map(g => {
+          const label = formatDocLabel(g);
+          const lines = (g.movements || []).length;
+          const pieces = (g.movements || []).reduce((sum, mv) => sum + safeInt(mv.qty), 0);
+
+          return `
+            <tr class="docRow" data-dockey="${escapeHtmlAttr(g.key)}" title="Modifica flusso">
+              <td data-label="Documento"><strong>${escapeHtml(label)}</strong></td>
+              <td data-label="Fornitore">${escapeHtml(g.customer || "")}</td>
+              <td data-label="Righe" class="qty">${Number(lines).toLocaleString("it-IT")}</td>
+              <td data-label="Pezzi" class="qty">${Number(pieces).toLocaleString("it-IT")}</td>
+            </tr>
+          `;
+        }).join("");
+      }catch(e){
+        console.warn("renderFlowsTable failed", e);
+        try{
+          if (flowsTbody) flowsTbody.innerHTML = '<tr><td class="td-muted" colspan="4">Errore render flussi.</td></tr>';
+        }catch(_){}
+      }
+    }
+
+
+    /****************************************************************
+     * Sposta Inventario (viewMoveInventory)
+     ****************************************************************/
+    const viewMoveInv = document.getElementById("viewMoveInventory");
+    const moveInvHome = document.getElementById("moveInvHome");
+    const moveInvList = document.getElementById("moveInvList");
+    const btnMoveFromCerea = document.getElementById("btnMoveFromCerea");
+    const btnMoveFromConca = document.getElementById("btnMoveFromConca");
+    const btnMoveInvBack = document.getElementById("btnMoveInvBack");
+    const moveInvListTitle = document.getElementById("moveInvListTitle");
+    const moveInvListSub = document.getElementById("moveInvListSub");
+    const moveInvSearch = document.getElementById("moveInvSearch");
+    const moveInvMeta = document.getElementById("moveInvMeta");
+    const moveInvTbody = document.getElementById("moveInvTbody");
+    const pillMoveInvCount = document.getElementById("pillMoveInvCount");
+
+    const modalMoveInvQty = document.getElementById("modalMoveInvQty");
+    const moveInvQtyTitle = document.getElementById("moveInvQtyTitle");
+    const moveInvQtySub = document.getElementById("moveInvQtySub");
+    const moveInvQtyHint = document.getElementById("moveInvQtyHint");
+    const moveInvQtyItem = document.getElementById("moveInvQtyItem");
+    const moveInvQtyInput = document.getElementById("moveInvQtyInput");
+    const btnCloseMoveInvQty = document.getElementById("btnCloseMoveInvQty");
+    const btnMoveInvQtyCancel = document.getElementById("btnMoveInvQtyCancel");
+    const btnMoveInvQtyOk = document.getElementById("btnMoveInvQtyOk");
+
+    let __moveInvFromWh = "";
+    let __moveInvToWh = "";
+    let __moveInvRowMap = new Map();
+
+    function resetMoveInvDirection(){
+      __moveInvFromWh = "";
+      __moveInvToWh = "";
+      __moveInvRowMap = new Map();
+      try{ if (moveInvHome) moveInvHome.style.display = ""; }catch(_){}
+      try{ if (moveInvList) moveInvList.style.display = "none"; }catch(_){}
+      try{ if (moveInvSearch) moveInvSearch.value = ""; }catch(_){}
+      try{ if (moveInvMeta) moveInvMeta.textContent = "—"; }catch(_){}
+      try{ if (pillMoveInvCount) pillMoveInvCount.textContent = "0"; }catch(_){}
+      try{
+        if (moveInvTbody) moveInvTbody.innerHTML = '<tr><td class="td-muted" colspan="3">Seleziona una direzione.</td></tr>';
+      }catch(_){}
+      try{
+        if (modalMoveInvQty) modalMoveInvQty.classList.remove("open");
+      }catch(_){}
+      try{ __syncBodyLockFromModals && __syncBodyLockFromModals(); }catch(_){}
+      try{ __syncDockedControlsVisibility && __syncDockedControlsVisibility(); }catch(_){}
+    }
+
+    function __setMoveInvDirection(fromWh, toWh){
+      __moveInvFromWh = normalizeWarehouse(fromWh || "");
+      __moveInvToWh = normalizeWarehouse(toWh || "");
+
+      try{ if (moveInvHome) moveInvHome.style.display = "none"; }catch(_){}
+      try{ if (moveInvList) moveInvList.style.display = ""; }catch(_){}
+      try{
+        if (moveInvListTitle) moveInvListTitle.textContent =
+          `${warehouseLabel(__moveInvFromWh)} → ${warehouseLabel(__moveInvToWh)}`;
+      }catch(_){}
+      try{
+        if (moveInvListSub) moveInvListSub.textContent = "Clicca una riga per inserire la quantità da spostare.";
+      }catch(_){}
+      try{ if (moveInvSearch) moveInvSearch.value = ""; }catch(_){}
+      try{ renderMoveInv(); }catch(_){}
+      try{ __syncDockedControlsVisibility && __syncDockedControlsVisibility(); }catch(_){}
+    }
+
+    function __moveInvNorm(s){
+      try{
+        return normTextKey(String(s || ""));
+      }catch(_){
+        return String(s || "").toLowerCase();
+      }
+    }
+
+    function renderMoveInv(){
+      try{
+        if (!viewMoveInv) return;
+
+        // aggiorna solo se la vista è aperta o se serve contatore
+        const isActive = !!(viewMoveInv.classList && viewMoveInv.classList.contains("active"));
+
+        if (!isActive){
+          try{ if (pillMoveInvCount) pillMoveInvCount.textContent = String(pillMoveInvCount.textContent || "0"); }catch(_){}
+          return;
+        }
+
+        // step home
+        if (!__moveInvFromWh || !__moveInvToWh){
+          try{ if (pillMoveInvCount) pillMoveInvCount.textContent = "0"; }catch(_){}
+          return;
+        }
+
+        let stockByWh = [];
+        try{ stockByWh = (typeof computeStockByWarehouse === "function") ? computeStockByWarehouse() : []; }catch(_){ stockByWh = []; }
+
+        let rows = buildInventoryRowsForWarehouse(__moveInvFromWh, stockByWh || []);
+        rows = groupStockRowsByAlias(rows);
+
+        // solo disponibili (>0)
+        rows = rows.filter(r => safeInt(r && r.qty) > 0);
+
+        const q = __moveInvNorm((moveInvSearch && moveInvSearch.value) || "").trim();
+        if (q){
+          rows = rows.filter(r => {
+            const hay = [
+              r.customer || "",
+              r.item || "",
+              r.__alias || "",
+              ...(Array.isArray(r.__codes) ? r.__codes : []),
+              ...(Array.isArray(r.__customers) ? r.__customers : []),
+              ...(Array.isArray(r.__members) ? r.__members.map(m => (m && m.item) || "") : []),
+              ...(Array.isArray(r.__members) ? r.__members.map(m => (m && m.code) || "") : [])
+            ].join(" ");
+            return __moveInvNorm(hay).includes(q);
+          });
+        }
+
+        // sort by item then code
+        rows.sort((a,b) => {
+          const ai = String(a && a.item || "").toLowerCase();
+          const bi = String(b && b.item || "").toLowerCase();
+          if (ai && bi && ai !== bi) return ai.localeCompare(bi, "it");
+          const ac = String((a && (a.__displayCode || a.code)) || "");
+          const bc = String((b && (b.__displayCode || b.code)) || "");
+          return ac.localeCompare(bc, "it");
+        });
+
+        try{ if (pillMoveInvCount) pillMoveInvCount.textContent = String(rows.length); }catch(_){}
+        try{ if (moveInvMeta) moveInvMeta.textContent = `Righe: ${rows.length.toLocaleString("it-IT")}`; }catch(_){}
+
+        if (!moveInvTbody) return;
+
+        if (!rows.length){
+          moveInvTbody.innerHTML = '<tr><td class="td-muted" colspan="3">Nessun articolo disponibile.</td></tr>';
+          __moveInvRowMap = new Map();
+          return;
+        }
+
+        const max = 900;
+        const show = rows.slice(0, max);
+
+        __moveInvRowMap = new Map(show.map(r => {
+          const gk = String(r && (r.__groupKey || r.__displayCode || r.code) || "").trim() || ("gk_" + Math.random().toString(16).slice(2));
+          return [gk, r];
+        }));
+
+        const fmt = (n) => Number(safeInt(n)).toLocaleString("it-IT");
+        const uomFor = (r) => {
+          try{
+            const u = __normalizeUom(r && r.uom || "") || getUomResolvedForCodes(r && r.__codes || []) || getUomResolvedForCode((r && r.code) || "") || "pz";
+            return u || "pz";
+          }catch(_){ return "pz"; }
+        };
+
+        moveInvTbody.innerHTML = show.map(r => {
+          const gk = String(r && (r.__groupKey || r.__displayCode || r.code) || "").trim();
+          const code = escapeHtml(String(r && (r.__displayCode || r.code) || "").trim());
+          const item = escapeHtml(String(r && r.item || "").trim());
+          const qty = fmt(r && r.qty);
+          const uom = escapeHtml(uomFor(r));
+          return `
+            <tr class="moveInvRow" data-gk="${escapeHtmlAttr(gk)}" title="Sposta quantità">
+              <td data-label="Codice"><span class="kbd">${code || "—"}</span></td>
+              <td data-label="Articolo">${item || '<span class="td-muted">—</span>'}</td>
+              <td data-label="Disponibile" class="qty" style="text-align:right;">${qty} <span class="td-muted" style="font-size:12px;">${uom}</span></td>
+            </tr>
+          `;
+        }).join("") + (rows.length > show.length ? `<tr><td class="td-muted" colspan="3">+${rows.length - show.length} altri… (affina la ricerca)</td></tr>` : "");
+      }catch(e){
+        console.warn("renderMoveInv failed", e);
+        try{ if (moveInvTbody) moveInvTbody.innerHTML = '<tr><td class="td-muted" colspan="3">Errore render.</td></tr>'; }catch(_){}
+      }
+    }
+
+    function closeMoveInvQtyModal(){
+      try{ if (modalMoveInvQty) modalMoveInvQty.classList.remove("open"); }catch(_){}
+      try{ __syncBodyLockFromModals && __syncBodyLockFromModals(); }catch(_){}
+    }
+
+    function openMoveInvQtyModal(groupKey){
+      try{
+        const gk = String(groupKey || "").trim();
+        const row = (__moveInvRowMap && __moveInvRowMap.get) ? __moveInvRowMap.get(gk) : null;
+        if (!row) { showToast("Riga non trovata"); return; }
+
+        const avail = safeInt(row && row.qty);
+        if (avail <= 0) { showToast("Nessuna disponibilità"); return; }
+
+        const uom = __normalizeUom(row && row.uom || "") || getUomResolvedForCodes(row && row.__codes || []) || getUomResolvedForCode((row && row.code) || "") || "pz";
+
+        if (moveInvQtyTitle) moveInvQtyTitle.textContent = "Sposta inventario";
+        if (moveInvQtySub) moveInvQtySub.textContent = `${warehouseLabel(__moveInvFromWh)} → ${warehouseLabel(__moveInvToWh)}`;
+        if (moveInvQtyHint) moveInvQtyHint.textContent = `Disponibile: ${avail.toLocaleString("it-IT")} ${uom}`;
+        if (moveInvQtyItem){
+          const itemName = String(row && row.item || "").trim();
+          moveInvQtyItem.textContent = itemName || "—";
+        }
+
+        if (moveInvQtyInput){
+          moveInvQtyInput.value = "";
+          moveInvQtyInput.setAttribute("max", String(avail));
+          moveInvQtyInput.dataset.gk = gk;
+        }
+
+        if (modalMoveInvQty){
+          modalMoveInvQty.classList.add("open");
+          __syncBodyLockFromModals && __syncBodyLockFromModals();
+        }
+
+        if (!__isMobileDevice()){
+          try{ moveInvQtyInput && moveInvQtyInput.focus(); }catch(_){}
+        }
+      }catch(e){
+        console.warn("openMoveInvQtyModal failed", e);
+      }
+    }
+
+    async function __doMoveInvTransferFromRow(row, qty){
+      const g = row || {};
+      const q = safeInt(qty);
+      if (!Number.isFinite(q) || q <= 0){
+        showToast("Inserisci una quantità valida", "warn");
         return;
       }
 
-      flowsTbody.innerHTML = docs.map(g => {
-        const label = formatDocLabel(g);
-        const lines = (g.movements || []).length;
-        const pieces = (g.movements || []).reduce((sum, mv) => sum + safeInt(mv.qty), 0);
+      const from = normalizeWarehouse(__moveInvFromWh || "");
+      const to = normalizeWarehouse(__moveInvToWh || "");
+      const avail = safeInt(g.qty);
+      if (q > avail){
+        showToast("Quantità superiore al disponibile", "err");
+        return;
+      }
 
-        return `
-          <tr class="docRow" data-dockey="${escapeHtmlAttr(g.key)}" title="Modifica flusso">
-            <td data-label="Documento"><strong>${escapeHtml(label)}</strong></td>
-            <td data-label="Fornitore">${escapeHtml(g.customer || "")}</td>
-            <td data-label="Righe" class="qty">${Number(lines).toLocaleString("it-IT")}</td>
-            <td data-label="Pezzi" class="qty">${Number(pieces).toLocaleString("it-IT")}</td>
-          </tr>
-        `;
-      }).join("");
+      const uom = __normalizeUom(g.uom || "") || getUomResolvedForCodes(g.__codes || []) || getUomResolvedForCode(g.code || "") || "pz";
+      const note = `Spostamento inventario: ${warehouseLabel(from)} → ${warehouseLabel(to)}`;
+
+      // membri (per alias group) — se non presenti, fallback su riga singola
+      const membersRaw = Array.isArray(g.__members) ? g.__members.slice() : [g];
+      const members = membersRaw.map(m => ({
+        customer: String(m && m.customer || "").trim(),
+        code: String(m && m.code || "").trim(),
+        item: String(m && m.item || "").trim(),
+        qty: safeInt(m && m.qty),
+        warehouse: normalizeWarehouse((m && m.warehouse) || from)
+      })).filter(m => !!m.code && normalizeWarehouse(m.warehouse) === from);
+
+      if (!members.length){
+        showToast("Errore: nessun membro valido", "err");
+        return;
+      }
+
+      const custFallback = Array.isArray(g.__customers)
+        ? String(g.__customers.find(x => String(x || "").trim()) || "").trim()
+        : "";
+
+      let remaining = q;
+      const mvs = [];
+      const sorted = members.slice().sort((a,b) => safeInt(b.qty) - safeInt(a.qty));
+
+      const available = sorted.reduce((sum, m) => sum + safeInt(m.qty), 0);
+      if (available < remaining){
+        showToast("Errore: stock non sufficiente", "err");
+        return;
+      }
+
+      for (const m of sorted){
+        if (remaining <= 0) break;
+        const take = Math.min(safeInt(m.qty), remaining);
+        if (!take) continue;
+
+        const cust = m.customer || custFallback || String(g.customer || "").trim();
+        const code = m.code || String(g.code || "").trim();
+        const item = m.item || String(g.item || "") || code;
+
+        mvs.push(makeMovement({
+          type: "OUT",
+          customer: cust,
+          code,
+          item,
+          qty: take,
+          date: todayYYYYMMDD(),
+          note,
+          uom,
+          qtyRaw: `${take} ${uom}`.trim(),
+          warehouse: from,
+          source: "Spostamento",
+          rawText: ""
+        }));
+
+        mvs.push(makeMovement({
+          type: "IN",
+          customer: cust,
+          code,
+          item,
+          qty: take,
+          date: todayYYYYMMDD(),
+          note,
+          uom,
+          qtyRaw: `${take} ${uom}`.trim(),
+          warehouse: to,
+          source: "Spostamento",
+          rawText: ""
+        }));
+
+        remaining -= take;
+      }
+
+      if (remaining > 0){
+        showToast("Errore: quantità non allocata", "err");
+        return;
+      }
+
+      try{
+        if (btnMoveInvQtyOk) btnMoveInvQtyOk.disabled = true;
+        await addMovementsBatch(mvs);
+        showToast(`Spostato ${q} ${uom}`);
+        closeMoveInvQtyModal();
+        // refresh list
+        try{ renderAll(); }catch(_){}
+        try{ renderMoveInv(); }catch(_){}
+      }catch(e){
+        console.error(e);
+        showToast("Errore spostamento", "err");
+      }finally{
+        try{ if (btnMoveInvQtyOk) btnMoveInvQtyOk.disabled = false; }catch(_){}
+      }
     }
+
+    // Bind events (once)
+    (function __bindMoveInvEvents(){
+      try{
+        if (viewMoveInv && viewMoveInv.dataset && viewMoveInv.dataset.bound === "1") return;
+        if (viewMoveInv && viewMoveInv.dataset) viewMoveInv.dataset.bound = "1";
+
+        btnMoveFromCerea?.addEventListener("click", () => { __setMoveInvDirection(WAREHOUSE_CEREA, WAREHOUSE_CONCA); });
+        btnMoveFromConca?.addEventListener("click", () => { __setMoveInvDirection(WAREHOUSE_CONCA, WAREHOUSE_CEREA); });
+        btnMoveInvBack?.addEventListener("click", () => { resetMoveInvDirection(); });
+
+        moveInvSearch?.addEventListener("input", () => { try{ renderMoveInv(); }catch(_){ } });
+
+        // table row click
+        moveInvTbody?.addEventListener("click", (e) => {
+          const tr = e.target && e.target.closest ? e.target.closest("tr[data-gk]") : null;
+          if (!tr) return;
+          const gk = tr.getAttribute("data-gk") || "";
+          if (!gk) return;
+          openMoveInvQtyModal(gk);
+        });
+
+        // modal close/cancel
+        btnCloseMoveInvQty?.addEventListener("click", closeMoveInvQtyModal);
+        btnMoveInvQtyCancel?.addEventListener("click", closeMoveInvQtyModal);
+        modalMoveInvQty?.addEventListener("click", (e) => { if (e.target === modalMoveInvQty) closeMoveInvQtyModal(); });
+
+        // ok
+        btnMoveInvQtyOk?.addEventListener("click", async () => {
+          const gk = moveInvQtyInput ? String(moveInvQtyInput.dataset.gk || "") : "";
+          const row = (__moveInvRowMap && __moveInvRowMap.get) ? __moveInvRowMap.get(gk) : null;
+          if (!row) { showToast("Riga non trovata"); return; }
+          const q = safeInt(moveInvQtyInput ? moveInvQtyInput.value : 0);
+          await __doMoveInvTransferFromRow(row, q);
+        });
+
+        // Enter/Esc in input
+        moveInvQtyInput?.addEventListener("keydown", (e) => {
+          if (e.key === "Enter"){ e.preventDefault(); btnMoveInvQtyOk && btnMoveInvQtyOk.click(); }
+          if (e.key === "Escape"){ e.preventDefault(); closeMoveInvQtyModal(); }
+        });
+
+      }catch(_){}
+    })();
+
 
 function renderAll() {
       const stockArr = computeStock();
@@ -7350,9 +15460,12 @@ function renderAll() {
       // Home / KPI: totale (somma di tutti i magazzini)
       renderStats(stockArr);
       renderLowStockBoard(stockByWh);
+      renderCategoryBoardCerea(stockByWh);
+      renderInventoryTrend(stockArr);
+      try{ renderHomeDaneaCockpit(); }catch(_){ }
 
+      try{ renderMoveInv(); }catch(_){ }
 
-      renderCategoryQtyBoard(stockByWh);
       // Inventario: mostra tabella solo dopo scelta sede
       if (__currentWarehouse) {
         const wh = normalizeWarehouse(__currentWarehouse);
@@ -7405,6 +15518,12 @@ function renderAll() {
 
       // UI: filtri specifici prodotti (tendine)
       try{ renderAnagProductsFiltersUI(); }catch(_){ }
+
+      // CTA: nuovo prodotto finito (solo in tab finished)
+      try{ if (btnNewFinishedProduct) btnNewFinishedProduct.style.display = "none"; }catch(_){ }
+
+      // UI: barra associazione categorie (nasconde/mostra in base al tab)
+      try{ __fpRenderAssignControls(); }catch(_){ }
 
 
       // Tabs
@@ -7475,6 +15594,113 @@ try{
         return;
       }
 
+      // ===== Anagrafica: Prodotti finiti =====
+      if (activeAnagTab === "finished") {
+        try { if (anagTable) anagTable.classList.remove("anagTableProducts"); } catch(_){}
+        try { if (searchAnag) searchAnag.placeholder = "Nome o codice prodotto finito…"; } catch(_){}
+
+        // UI: selezione multipla + associazione categoria
+        try{ __fpSelPurgeAgainstList(); }catch(_){}
+        try{ __fpRenderAssignControls(); }catch(_){}
+
+        try {
+          anagTheadRow.innerHTML = `
+            <th style="width:56px; text-align:center;">
+              <input type="checkbox" id="fpSelectAll" aria-label="Seleziona tutti" />
+            </th>
+            <th style="width:180px">Codice</th>
+            <th>Nome</th>
+            <th style="width:260px">Categoria</th>
+          `;
+        } catch(_){}
+
+        if (!fb.user) {
+          try { if (anagTbody) anagTbody.innerHTML = `<tr><td class="td-muted" colspan="4">Accedi con Google per sincronizzare i prodotti finiti.</td></tr>`; } catch(_){}
+          return;
+        }
+
+        const list0 = Array.isArray(finishedProducts) ? finishedProducts.slice() : [];
+        let filtered = list0.filter(fp => {
+          const name = normTextKey(fp && (fp.name || fp.nome || ""));
+          const code = normTextKey(fp && (fp.code || fp.sku || ""));
+          const idk  = normTextKey(fp && (fp.id || ""));
+          if (!q) return true;
+          return (name && name.includes(q)) || (code && code.includes(q)) || (idk && idk.includes(q));
+        });
+
+        // filtro: prodotti non classificati
+        try{
+          const mode = String(document.getElementById("fpFilterUnclassified")?.value || "all").trim().toLowerCase();
+          if (mode === "unclassified"){
+            filtered = filtered.filter(fp => {
+              const k = String(fp && (fp.categoryKeyLower || fp.categoryKey || "") || "").trim();
+              return !k;
+            });
+          }
+        }catch(_){ }
+
+
+        filtered.sort((a,b) => String((a && (a.nameLower || a.name || "")) || "").localeCompare(String((b && (b.nameLower || b.name || "")) || ""), "it", { sensitivity:"base" }));
+
+        if (!filtered.length) {
+          const __mode = String(document.getElementById("fpFilterUnclassified")?.value || "all").trim().toLowerCase();
+          const msg = (__mode === "unclassified")
+            ? (q ? "Nessun prodotto finito non classificato trovato." : "Nessun prodotto finito non classificato.")
+            : (q ? "Nessun prodotto finito trovato." : "Nessun prodotto finito.");
+          try { if (anagTbody) anagTbody.innerHTML = `<tr><td class="td-muted" colspan="4">${escapeHtml(msg)}</td></tr>`; } catch(_){}
+          try{ __fpRenderAssignControls(); }catch(_){}
+          try{ __fpSyncSelectAllState(); }catch(_){}
+          return;
+        }
+
+        // map categorie (per colonna "Categoria")
+        try{
+          finishedProductCategoriesMap = new Map();
+          if (Array.isArray(finishedProductCategories)){
+            for (const c of finishedProductCategories){
+              const kk = String(c && c.key || "").trim().toLowerCase();
+              if (kk) finishedProductCategoriesMap.set(kk, c);
+            }
+          }
+        }catch(_){}
+
+        try{
+          anagTbody.innerHTML = filtered.map(fp => {
+            const id = String(fp && fp.id || "").trim();
+            const code = String(fp && (fp.code || "") || "").trim();
+            const name = String(fp && (fp.name || fp.nome || "") || "").trim();
+
+            const isSel = __fpSelectedIds.has(id) ? "checked" : "";
+
+            const catKey = String(fp && (fp.categoryKeyLower || fp.categoryKey || "") || "").trim().toLowerCase();
+            const catObj = catKey ? (finishedProductCategoriesMap.get(catKey) || null) : null;
+            const catName = String((catObj && (catObj.name || catObj.label || catObj.key)) || (catKey || "")).trim();
+            const catHtml = catName ? escapeHtml(catName) : '<span class="td-muted">—</span>';
+
+            const comps = Array.isArray(fp && (fp.components || fp.bom || fp.distintaBase)) ? (fp.components || fp.bom || fp.distintaBase) : [];
+            const n = comps.length;
+
+            return `
+              <tr class="jsFpRow" data-fp-id="${escapeHtmlAttr(id)}">
+                <td data-label="Sel" style="text-align:center;">
+                  <input class="jsFpSel" type="checkbox" data-id="${escapeHtmlAttr(id)}" ${isSel} aria-label="Seleziona" />
+                </td>
+                <td data-label="Codice"><span class="kbd">${escapeHtml(code || "—")}</span></td>
+                <td data-label="Nome">${escapeHtml(name || "—")}</td>
+                <td data-label="Categoria">${catHtml}</td>
+              </tr>
+            `;
+          }).join("");
+        }catch(_){
+          try { if (anagTbody) anagTbody.innerHTML = `<tr><td class="td-muted" colspan="4">Errore rendering.</td></tr>`; } catch(_){}
+        }
+
+        try{ __fpRenderAssignControls(); }catch(_){}
+        try{ __fpSyncSelectAllState(); }catch(_){}
+        return;
+      }
+
+
       if (anagTable) anagTable.classList.remove("anagTableProducts");
       // Default: fornitori
       try { if (searchAnag) searchAnag.placeholder = "Nome, P.IVA, città, codice…"; } catch(_){}
@@ -7512,7 +15738,7 @@ try{
         const contacts = [s.phone, s.email].filter(Boolean).map(x => escapeHtml(x)).join("<br>") || '<span class="td-muted">—</span>';
 
         return `
-          <tr data-supplier-id="${escapeHtmlAttr(s.id)}">
+          <tr data-supplier-id="${escapeHtmlAttr(s.id)}" title="Apri fornitore">
             <td data-label="Nome"><strong>${name}</strong></td>
             <td data-label="P.IVA">${vat}</td>
             <td data-label="Città">${city}</td>
@@ -7876,7 +16102,7 @@ function openSupplierModal(id) {
       // docs
       supDocsTbody.innerHTML = `<tr><td class="td-muted" colspan="4">Caricamento…</td></tr>`;
       modalSupplier.classList.add("open");
-      __syncBodyLock();
+      __syncBodyLockFromModals();
       renderSupplierLinkedDocs();
     }
 
@@ -7884,7 +16110,7 @@ function openSupplierModal(id) {
 function closeSupplierModal() {
       if (!modalSupplier) return;
       modalSupplier.classList.remove("open");
-      __syncBodyLock();
+      __syncBodyLockFromModals();
       currentSupplierId = null;
 
       // reset edit mode
@@ -8463,6 +16689,11 @@ if (mode === "master") {
           let stockByWh = [];
           try { stockByWh = (typeof computeStockByWarehouse === "function") ? computeStockByWarehouse() : []; } catch(_){ stockByWh = []; }
 
+
+          const scopeCustomerKey = (!isAliasGroup && ctx && String(ctx.customer || "").trim())
+            ? normSupplierKey(ctx.customer)
+            : "";
+
           const sumWh = (w) => {
             const ww = normalizeWarehouse(w);
             let s = 0;
@@ -8471,6 +16702,10 @@ if (mode === "master") {
               if (normalizeWarehouse(r.warehouse || "") !== ww) continue;
               const rc = String(r.code || "").trim();
               if (!rc || !scopeCodes.includes(rc)) continue;
+              if (scopeCustomerKey) {
+                const ck = normSupplierKey(r.customer || "");
+                if (ck !== scopeCustomerKey) continue;
+              }
               s += safeInt(r.qty);
             }
             return s;
@@ -8487,6 +16722,10 @@ if (mode === "master") {
               if (normalizeWarehouse(r.warehouse || "") !== ww) continue;
               const rc = String(r.code || "").trim();
               if (!rc || !scopeCodes.includes(rc)) continue;
+              if (scopeCustomerKey) {
+                const ck = normSupplierKey(r.customer || "");
+                if (ck !== scopeCustomerKey) continue;
+              }
               const cust = String(r.customer || "").trim();
               if (!cust) continue;
               const q = safeInt(r.qty);
@@ -9615,6 +17854,10 @@ async function handleFileSelection(fileList) {
     function applySettingsToUI() {
       sOcrUrl.value = state.settings.ocrUrl || "";
       sOcrKey.value = state.settings.ocrKey || "";
+      try {
+        const el = document.getElementById("sScanBridgeKey");
+        if (el) el.value = state.settings.scanbridgeKey || "";
+      } catch(_) {}
       sLowThreshold.value = String(Math.max(1000, Math.floor(Number(state.settings.lowThreshold) || 0)));
       sMaxRecent.value = String(Math.floor(Number(state.settings.maxRecent) || 30));
     }
@@ -9622,6 +17865,12 @@ async function handleFileSelection(fileList) {
     function saveSettingsFromUI() {
       state.settings.ocrUrl = (sOcrUrl.value || "").trim();
       state.settings.ocrKey = (sOcrKey.value || "").trim();
+      try {
+        const el = document.getElementById("sScanBridgeKey");
+        state.settings.scanbridgeKey = (el && el.value ? String(el.value).trim() : "");
+      } catch(_) {
+        state.settings.scanbridgeKey = String(state.settings.scanbridgeKey || "");
+      }
       state.settings.lowThreshold = Math.max(1000, safeInt(sLowThreshold.value));
       state.settings.maxRecent = Math.max(5, safeInt(sMaxRecent.value) || 30);
       saveSettings();
@@ -9637,6 +17886,69 @@ async function handleFileSelection(fileList) {
       const csv = rows.map(r => r.map(csvEscape).join(",")).join("\n");
       downloadBlob(`inventario_${todayYYYYMMDD()}.csv`, csv, "text/csv;charset=utf-8");
     }
+
+    // PDF backup (in realtà TXT): esporta lista articoli + quantità per inventario selezionato
+    function exportInventoryBackupTxt() {
+      const wh = String(__currentWarehouse || "").trim();
+      if (!wh) { showToast("Seleziona inventario"); return; }
+
+      let stockByWh = [];
+      try { stockByWh = (typeof computeStockByWarehouse === "function") ? computeStockByWarehouse() : []; } catch(_) { stockByWh = []; }
+
+      let rows = [];
+      try { rows = buildInventoryRowsForWarehouse(wh, stockByWh || []); } catch(_) { rows = []; }
+
+      try { rows = groupStockRowsByAlias(rows); } catch(_) {}
+
+      const normUom = (r) => {
+        try {
+          const u = (typeof __normalizeUom === "function") ? __normalizeUom(r && r.uom) : String((r && r.uom) || "").trim();
+          const u0 = String(u || "").trim();
+          if (u0) return u0;
+        } catch(_) {}
+        try {
+          const codes = (r && Array.isArray(r.__codes)) ? r.__codes : [];
+          const u2 = (typeof getUomResolvedForCodes === "function") ? getUomResolvedForCodes(codes) : "";
+          if (u2) return String(u2);
+        } catch(_) {}
+        try {
+          const u3 = (typeof getUomResolvedForCode === "function") ? getUomResolvedForCode(r && r.code) : "";
+          if (u3) return String(u3);
+        } catch(_) {}
+        return "pz";
+      };
+
+      const fmtQty = (n) => (Number(n) || 0).toLocaleString("it-IT");
+
+      const list = (Array.isArray(rows) ? rows : []).map(r => ({
+        name: String(r && r.item || "").trim() || "—",
+        code: String(r && (r.__displayCode || r.code) || "").trim() || "—",
+        qty: safeInt(r && r.qty),
+        uom: normUom(r)
+      }));
+
+      list.sort((a,b) =>
+        (a.name || "").localeCompare((b.name || ""), "it", { sensitivity: "base" }) ||
+        (a.code || "").localeCompare((b.code || ""), "it", { sensitivity: "base" })
+      );
+
+      const title = (typeof warehouseLabel === "function") ? warehouseLabel(wh) : ("Inventario " + String(wh));
+      const ts = new Date().toLocaleString("it-IT");
+
+      const lines = [];
+      lines.push(`${title} — BACKUP`);
+      lines.push(`Generato: ${ts}`);
+      lines.push(`Righe: ${list.length}`);
+      lines.push("");
+      list.forEach((it, idx) => {
+        lines.push(`${String(idx+1).padStart(4," ")}. ${it.name} | ${it.code} | ${fmtQty(it.qty)} ${it.uom}`);
+      });
+
+      const filename = `backup_${normalizeWarehouse(wh)}_${todayYYYYMMDD()}.txt`;
+      downloadBlob(filename, lines.join("\n"), "text/plain;charset=utf-8");
+      showToast("Backup scaricato");
+    }
+
 
     function exportMovementsCSV() {
       const rows = [
@@ -9774,12 +18086,476 @@ async function handleFileSelection(fileList) {
     }
 
     /****************************************************************
+     * ScanBridge (scanner locale) -> OCR
+     * - prova a fare scan via http://127.0.0.1:27899
+     * - se non disponibile, fallback su file picker
+     ****************************************************************/
+    // Base URL ScanBridge (locale). Puoi fare override con:
+    // - window.SCANBRIDGE_BASE / window.SCANBRIDGE_URL
+    // - meta[name="scanbridge-base"]
+    // - state.settings.scanbridgeBase (se lo aggiungi in futuro)
+    // Fallback: 127.0.0.1 + localhost (+ https se la pagina e' https)
+    const __SCANBRIDGE_BASE_DEFAULT = "http://127.0.0.1:27899";
+
+    // Cache: ultima base funzionante (così il primo click è sempre immediato)
+    let __scanbridgeGoodBase = "";
+
+    // Warm-up (Chrome Local Network Access / wake-up): evita il caso "parte al secondo click"
+    let __scanbridgeWarmInFlight = null;
+    let __scanbridgeWarmLastAt = 0;
+
+    function __scanbridgeNormalizeBase(u){
+      u = String(u || "").trim();
+      if (!u) return "";
+
+      // Guard: evita che una API key venga interpretata come base URL.
+      // Se non ho lo schema, una base deve SOMIGLIARE a un host ('.' o ':' o 'localhost').
+      try{
+        const hasScheme = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(u);
+        if (!hasScheme){
+          const low = u.toLowerCase();
+          const looksHost = low.includes("localhost") || u.includes(".") || u.includes(":") || u.startsWith("[") || low === "::1" || low.startsWith("127.");
+          if (!looksHost) return "";
+
+          // se manca lo schema e sembra un host, aggiungi http://
+          if (/^[\w.-]+(?::\d+)?(\/.*)?$/.test(u) || u.startsWith("[")){
+            u = "http://" + u;
+          }
+        }
+      }catch(_){ }
+
+      try{
+        const url = new URL(u);
+        url.pathname = "";
+        url.search = "";
+        url.hash = "";
+        return url.toString().replace(/\/+$/g, "");
+      }catch(_){
+        return String(u || "").replace(/\/+$/g, "");
+      }
+    }
+
+    // Determina il targetAddressSpace corretto per Chrome Local Network Access
+    // - loopback: localhost / 127.0.0.0/8 / ::1
+    // - local: rete privata (192.168.x.x / 10.x.x.x / 172.16-31.x.x / 169.254.x.x) / *.local
+    function __scanbridgeIsPrivateIPv4(host){
+      const h = String(host || '').trim();
+      if (!h) return false;
+      if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(h)) return false;
+      const p = h.split('.').map(x => Number(x));
+      if (p.length !== 4 || p.some(n => !Number.isFinite(n) || n < 0 || n > 255)) return false;
+      const a = p[0], b = p[1];
+      if (a == 10) return true;
+      if (a == 192 && b == 168) return true;
+      if (a == 172 && b >= 16 && b <= 31) return true;
+      if (a == 169 && b == 254) return true;
+      return false;
+    }
+
+    function __scanbridgeTargetAddressSpaceForBase(base){
+      const b = __scanbridgeNormalizeBase(base);
+      if (!b) return null;
+      try{
+        const u = new URL(b);
+        const host = String(u.hostname || '').trim().toLowerCase();
+        if (!host) return null;
+
+        // Loopback (macchina locale)
+        if (host === 'localhost' || host === '127.0.0.1' || host === '::1' || host.startsWith('127.')) return 'loopback';
+
+        // Rete locale (LAN)
+        if (host.endsWith('.local')) return 'local';
+        if (__scanbridgeIsPrivateIPv4(host)) return 'local';
+
+        return null;
+      }catch(_){
+        return null;
+      }
+    }
+
+
+    function __scanbridgeGetBases(){
+      const out = [];
+      const seen = new Set();
+      const push = (v) => {
+        const b = __scanbridgeNormalizeBase(v);
+        if (!b) return;
+        const k = String(b).toLowerCase();
+        if (seen.has(k)) return;
+        seen.add(k);
+        out.push(b);
+      };
+
+      // 0) cache in-memory (ultima base valida di questa sessione)
+      try{
+        const vMem = String(__scanbridgeGoodBase || "").trim();
+        if (vMem) push(vMem);
+      }catch(_){ }
+
+      // 1) settings/localStorage (se presente)
+      try{
+        const v0 = String((state && state.settings && (state.settings.scanbridgeBase || state.settings.scanbridgeUrl || state.settings.scanbridgeURL)) || "").trim();
+        if (v0) push(v0);
+      }catch(_){ }
+      try{
+        const v1 = String(localStorage.getItem("hubinv_scanbridge_base") || localStorage.getItem("hubinv_scanbridge_url") || "").trim();
+        if (v1) push(v1);
+      }catch(_){ }
+
+      // 2) global (HTML)
+      try{
+        const w = (typeof window !== "undefined") ? window : null;
+        const v2 = String((w && (w.SCANBRIDGE_BASE || w.SCANBRIDGE_URL || w.__SCANBRIDGE_BASE)) || "").trim();
+        if (v2) push(v2);
+      }catch(_){ }
+
+      // 3) meta tag (optional)
+      try{
+        const m = document.querySelector('meta[name="scanbridge-base"], meta[name="scanbridge-url"]');
+        const v3 = m ? String(m.getAttribute("content") || "").trim() : "";
+        if (v3) push(v3);
+      }catch(_){ }
+
+      // 4) defaults
+      push(__SCANBRIDGE_BASE_DEFAULT);
+      push("http://localhost:27899");
+
+      // 5) https variants (solo se la pagina e' https)
+      try{
+        if (location && location.protocol === "https:"){
+          push("https://127.0.0.1:27899");
+          push("https://localhost:27899");
+        }
+      }catch(_){ }
+
+      return out;
+    }
+
+    function __scanbridgeMakeErr(code, message, extra){
+      const e = new Error(String(message || "ScanBridge error"));
+      try{ e.code = code; }catch(_){ }
+      if (extra && typeof extra === "object"){
+        try{ Object.keys(extra).forEach(k => { try{ e[k] = extra[k]; }catch(_){ } }); }catch(_){ }
+      }
+      return e;
+    }
+
+    function __scanbridgeRememberGoodBase(base){
+      const b = __scanbridgeNormalizeBase(base);
+      if (!b) return;
+      __scanbridgeGoodBase = b;
+      try{ localStorage.setItem("hubinv_scanbridge_base", b); }catch(_){ }
+    }
+
+    async function __scanbridgeFetchWithTimeout(url, opts, timeoutMs){
+      const ms = Number(timeoutMs);
+      const t = (Number.isFinite(ms) && ms > 0) ? ms : 20000;
+      if (typeof AbortController !== "function"){
+        return fetch(url, opts);
+      }
+      const ac = new AbortController();
+      const timer = setTimeout(() => { try{ ac.abort(); }catch(_){ } }, t);
+      try{
+        return await fetch(url, Object.assign({}, opts || {}, { signal: ac.signal }));
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+
+    // Warm-up: prova un ping veloce per far apparire eventuali permessi "rete locale"
+    // e per memorizzare subito la base giusta. Non apre lo scanner.
+    async function __scanbridgeWarmup(force){
+      const now = Date.now();
+      if (!force && __scanbridgeWarmInFlight) return __scanbridgeWarmInFlight;
+      if (!force && now - (__scanbridgeWarmLastAt || 0) < 1500) return;
+      __scanbridgeWarmLastAt = now;
+
+      __scanbridgeWarmInFlight = (async () => {
+        const bases = __scanbridgeGetBases();
+        if (!Array.isArray(bases) || !bases.length) return;
+        for (let i=0; i<bases.length; i++){
+          const b0 = __scanbridgeNormalizeBase(bases[i]);
+          if (!b0) continue;
+
+          // Endpoint "safe": anche se 404, basta che risponda per dire che la base è raggiungibile.
+          const url = b0 + "/health";
+          const opts = { method: "GET", mode: "cors", credentials: "omit", cache: "no-store" };
+          try{
+            const tas = __scanbridgeTargetAddressSpaceForBase(b0);
+            if (tas) opts.targetAddressSpace = tas;
+          }catch(_){ }
+
+          try{
+            const res = await __scanbridgeFetchWithTimeout(url, opts, 1500);
+            if (res){
+              try{ __scanbridgeRememberGoodBase(b0); }catch(_){ }
+              break;
+            }
+          }catch(_e){ }
+        }
+      })();
+
+      try{ await __scanbridgeWarmInFlight; }catch(_){ }
+      __scanbridgeWarmInFlight = null;
+    }
+
+
+    // ScanBridge key (hardcoded).
+    // Se preferisci, puoi impostarla nell'HTML: window.SCANBRIDGE_KEY = "...";
+    const __SCANBRIDGE_KEY_HARDCODED = "";
+
+
+    function __scanbridgeIsMobile(){
+      try{
+        // euristica: touch + schermo piccolo
+        if (window.matchMedia && window.matchMedia("(pointer: coarse)").matches && window.matchMedia("(max-width: 900px)").matches) return true;
+      }catch(_){ }
+      try{
+        const ua = String(navigator.userAgent || "");
+        if (/Android|iPhone|iPad|iPod|Mobile/i.test(ua)) return true;
+      }catch(_){ }
+      return false;
+    }
+    function __scanbridgeKey(){
+      // 1) hardcoded (JS)
+      try{
+        const k0 = String(__SCANBRIDGE_KEY_HARDCODED || "").trim();
+        if (k0) return k0;
+      }catch(_){ }
+
+      // 2) global (HTML)
+      try{
+        const w = (typeof window !== "undefined") ? window : null;
+        const k1 = String((w && (w.SCANBRIDGE_KEY || w.SCANBRIDGE_API_KEY || w.__SCANBRIDGE_KEY)) || "").trim();
+        if (k1) return k1;
+      }catch(_){ }
+
+      // 3) meta tag (optional)
+      try{
+        const m = document.querySelector('meta[name="scanbridge-key"]');
+        const k2 = m ? String(m.getAttribute('content') || "").trim() : "";
+        if (k2) return k2;
+      }catch(_){ }
+
+      // 4) legacy (compatibilità): settings/localStorage
+      try{
+        const k3 = String((state && state.settings && state.settings.scanbridgeKey) || "").trim();
+        if (k3) return k3;
+      }catch(_){ }
+      try{
+        const k4 = String(localStorage.getItem('hubinv_scanbridge_key') || "").trim();
+        if (k4) return k4;
+      }catch(_){ }
+
+      return "";
+    }
+
+    async function __scanbridgeFetchJpg(key){
+      const k = String(key || "").trim();
+      if (!k) throw new Error("ScanBridge key mancante");
+
+      const bases = __scanbridgeGetBases();
+      let lastErr = null;
+
+      for (let i=0; i<bases.length; i++){
+        const base = bases[i];
+        try{
+          const file = await __scanbridgeFetchJpgFromBase(base, k);
+          if (file) return file;
+        }catch(e){
+          lastErr = e;
+          try{ console.warn("[ScanBridge] base failed:", base, e); }catch(_){ }
+        }
+      }
+
+      if (lastErr) throw lastErr;
+      throw __scanbridgeMakeErr("SCANBRIDGE_UNREACHABLE", "ScanBridge non raggiungibile", { bases });
+    }
+
+    async function __scanbridgeFetchJpgFromBase(base, key){
+      const k = String(key || "").trim();
+      const b = __scanbridgeNormalizeBase(base);
+      if (!b) throw __scanbridgeMakeErr("SCANBRIDGE_BAD_BASE", "ScanBridge base non valida");
+      const urlBase = b + "/scan?format=jpg";
+      const optsBase = {
+        method: "POST",
+        mode: "cors",
+        credentials: "omit",
+        cache: "no-store"
+      };
+
+      // Chrome Local Network Access: per localhost/127.* serve 'loopback' (non 'local')
+      try{
+        const tas = __scanbridgeTargetAddressSpaceForBase(b);
+        if (tas) optsBase.targetAddressSpace = tas;
+      }catch(_){ }
+
+
+      const timeoutMs = 25000;
+
+      // Tentativo 1: key in query (di solito evita preflight)
+      let res = null;
+      let errNet = null;
+      try{
+        res = await __scanbridgeFetchWithTimeout(urlBase + "&key=" + encodeURIComponent(k), optsBase, timeoutMs);
+      }catch(e){
+        errNet = e;
+        res = null;
+      }
+
+      // Se ho una risposta HTTP ma non ok: leggo body (best effort)
+      let body1 = "";
+      if (res && !res.ok){
+        try{ body1 = await res.text(); }catch(_){ body1 = ""; }
+      }
+
+      // Tentativo 2: key in header (solo se ho ottenuto una risposta HTTP non-ok)
+      // NB: aggiungere header spesso forza preflight CORS; lo facciamo solo quando serve.
+      if (res && !res.ok){
+        try{
+          const res2 = await __scanbridgeFetchWithTimeout(
+            urlBase,
+            Object.assign({}, optsBase, { headers: { "X-API-Key": k } }),
+            timeoutMs
+          );
+          if (res2 && res2.ok) res = res2;
+          else if (res2 && !res2.ok){
+            let body2 = "";
+            try{ body2 = await res2.text(); }catch(_){ body2 = ""; }
+            throw __scanbridgeMakeErr("SCANBRIDGE_HTTP", "ScanBridge HTTP " + res2.status, { status: res2.status, body: body2, base: b });
+          }
+        }catch(e){
+          // se il tentativo 2 fallisce per rete/preflight, manteniamo l'errore 1 (piu' utile)
+          if (e && e.code === "SCANBRIDGE_HTTP") throw e;
+        }
+      }
+
+      // Network unreachable (nessuna risposta)
+      if (!res){
+        const hint = (location && location.protocol === "https:")
+          ? "Avvia ScanBridge e abilita CORS/Private Network (Access-Control-Allow-Origin + Access-Control-Allow-Private-Network)."
+          : "Avvia ScanBridge sul PC (porta 27899).";
+        throw __scanbridgeMakeErr("SCANBRIDGE_UNREACHABLE", "ScanBridge non raggiungibile", { base: b, hint, cause: errNet });
+      }
+
+      if (!res.ok){
+        const status = res.status || 0;
+        const body = body1 || "";
+        if (status === 401 || status === 403){
+          throw __scanbridgeMakeErr("SCANBRIDGE_AUTH", "ScanBridge key non valida", { status, body, base: b });
+        }
+        throw __scanbridgeMakeErr("SCANBRIDGE_HTTP", "ScanBridge HTTP " + status, { status, body, base: b });
+      }
+
+      // Se arrivo qui, la base ha risposto correttamente: memorizzala.
+      try{ __scanbridgeRememberGoodBase(b); }catch(_){ }
+
+      const blob = await res.blob();
+      const type = String(blob && blob.type || "").toLowerCase();
+      if (!type.startsWith("image/")) throw __scanbridgeMakeErr("SCANBRIDGE_BAD_RESPONSE", "ScanBridge non ha restituito un'immagine", { base: b });
+
+      const ext = (type === "image/png") ? "png" : "jpg";
+      const name = "scan_" + todayYYYYMMDD() + "_" + Date.now() + "." + ext;
+      return new File([blob], name, { type: blob.type || "image/jpeg" });
+    }
+
+    async function __scanbridgeScanAndImport(){
+      const k = __scanbridgeKey();
+      if (!k){
+        throw new Error("ScanBridge key mancante");
+      }
+
+      // Warm-up: in alcuni casi il primo tentativo serve solo a far apparire il permesso
+      // "rete locale" o a svegliare ScanBridge. Lo facciamo QUI (safe endpoint) così
+      // il click successivo non è necessario.
+      try{ await __scanbridgeWarmup(false); }catch(_){ }
+
+      // Lock UI (evita doppi click mentre lo scanner lavora)
+      const __btn = document.getElementById("btnOpenGallery");
+      try{ if (__btn) __btn.disabled = true; }catch(_){ }
+
+      try{
+        try{
+          if (progressSpinner) progressSpinner.style.display = "block";
+        }catch(_){ }
+        try{
+          progressLabel.textContent = "Apro lo scanner…";
+          progressFill.style.width = "5%";
+        }catch(_){ }
+
+        let file = null;
+        try{
+          file = await __scanbridgeFetchJpg(k);
+        }catch(err1){
+          // Retry UNA volta su errori transienti (tipico: primo click dopo avvio ScanBridge)
+          const code = String(err1 && err1.code || "").toUpperCase();
+          const status = (err1 && err1.status != null) ? Number(err1.status) : null;
+          const msg = String(err1 && (err1.message || err1) || "").toLowerCase();
+          const retryableStatus = (status === 408 || status === 409 || status === 423 || status === 425 || status === 429 || status === 500 || status === 502 || status === 503 || status === 504);
+          const retryable = (code === "SCANBRIDGE_UNREACHABLE" || (code === "SCANBRIDGE_HTTP" && retryableStatus) || msg.includes("abort") || msg.includes("timeout"));
+
+          if (!retryable) throw err1;
+
+          try{
+            progressLabel.textContent = "Riprovo…";
+            progressFill.style.width = "8%";
+          }catch(_){ }
+          await new Promise(r => setTimeout(r, 350));
+          file = await __scanbridgeFetchJpg(k);
+        }
+
+        await handleFileSelection([file]);
+      } finally {
+        try{ if (__btn) __btn.disabled = false; }catch(_){ }
+      }
+    }
+
+    /****************************************************************
      * Events
      ****************************************************************/
     const __btnOpenCamera = document.getElementById("btnOpenCamera");
     if (__btnOpenCamera) __btnOpenCamera.addEventListener("click", () => cameraInput.click());
     const __btnOpenGallery = document.getElementById("btnOpenGallery");
-    if (__btnOpenGallery) __btnOpenGallery.addEventListener("click", () => galleryInput.click());
+    if (__btnOpenGallery) __btnOpenGallery.addEventListener("click", async () => {
+      // Su mobile: resta il picker classico (fotocamera/galleria)
+      if (__scanbridgeIsMobile()) { try{ galleryInput.click(); }catch(_){ } return; }
+
+      // Desktop: prova ScanBridge (scanner locale), fallback su picker
+      try{
+        await __scanbridgeScanAndImport();
+      }catch(e){
+        let msg = "";
+        try{ msg = String(e && (e.message || e) || ""); }catch(_){ msg = ""; }
+
+        const low = String(msg || "").toLowerCase();
+        const code = String(e && e.code || "").toUpperCase();
+        const status = (e && e.status != null) ? Number(e.status) : null;
+        const base = String(e && e.base || "").trim();
+        const hint = String(e && e.hint || "").trim();
+
+        if (low.includes("key") && low.includes("manc")) {
+          try{ showToast("ScanBridge key mancante: inseriscila in Impostazioni > ScanBridge Key (oppure window.SCANBRIDGE_KEY)", "warn"); }catch(_){ }
+
+        } else if (code === "SCANBRIDGE_AUTH" || status === 401 || status === 403 || low.includes("non valida")) {
+          try{ showToast("ScanBridge key non valida: controlla Impostazioni > ScanBridge Key", "warn"); }catch(_){ }
+
+        } else if (code === "SCANBRIDGE_UNREACHABLE" || low.includes("failed to fetch") || low.includes("network")) {
+          const where = base ? (" (" + base + ")") : "";
+          const extra = hint ? (" " + hint) : "";
+          try{ showToast("ScanBridge non raggiungibile" + where + "." + extra, "warn"); }catch(_){ }
+
+        } else if (code === "SCANBRIDGE_HTTP" || (status && status >= 400)) {
+          const where = base ? (" (" + base + ")") : "";
+          try{ showToast("ScanBridge errore" + (status ? (" " + status) : "") + where + ": carica manualmente", "warn"); }catch(_){ }
+
+        } else {
+          try{ showToast("Scanner non disponibile: carica manualmente", "warn"); }catch(_){ }
+        }
+
+        try{ console.warn("[ScanBridge] scan failed", e); }catch(_){ }
+        try{ galleryInput.click(); }catch(_){ }
+      }
+    });
     document.getElementById("btnPaste")?.addEventListener("click", handlePaste);
 
     btnRemoveLastPage?.addEventListener("click", __removeLastPage);
@@ -9805,9 +18581,12 @@ async function handleFileSelection(fileList) {
     if (anagProdSort) anagProdSort.addEventListener("change", () => renderAnag());
     if (btnReloadAnag) btnReloadAnag.addEventListener("click", () => { renderAnag(); showToast("Anagrafica aggiornata"); });
 
-    // Supplier modal
+    // Nuovo prodotto finito
+    if (btnNewFinishedProduct) btnNewFinishedProduct.addEventListener("click", () => { try{ setView && setView("fpCategories"); }catch(_){ } try{ showToast && showToast("Usa ‘Categorie prodotti finiti’ per gestire la BOM.", "warn"); }catch(_){ } });
+// Supplier modal
     if (supClose) supClose.addEventListener("click", closeSupplierModal);
     if (btnSupDone) btnSupDone.addEventListener("click", closeSupplierModal);
+    if (modalSupplier) modalSupplier.addEventListener("click", (e) => { if (e.target === modalSupplier) closeSupplierModal(); });
     if (btnSupDelete) btnSupDelete.addEventListener("click", () => { if (currentSupplierId) deleteSupplierCascade(currentSupplierId); });
 
     // Edit / Salva
@@ -9825,28 +18604,709 @@ async function handleFileSelection(fileList) {
       }
     });
 // Product modal
-    if (prodClose) prodClose.addEventListener("click", () => modalProduct.classList.remove("open"));
-    if (btnProdDone) btnProdDone.addEventListener("click", () => modalProduct.classList.remove("open"));
-    if (unifiedClose) unifiedClose.addEventListener("click", () => modalUnified.classList.remove("open"));
-    if (btnUnifiedDone) btnUnifiedDone.addEventListener("click", () => modalUnified.classList.remove("open"));
-    if (modalUnified) modalUnified.addEventListener("click", (e) => { if (e.target === modalUnified) modalUnified.classList.remove("open"); });
+    function closeProductModal(){
+      if (!modalProduct) return;
+      modalProduct.classList.remove("open");
+      __syncBodyLockFromModals();
+    }
+    function closeUnifiedModal(){
+      if (!modalUnified) return;
+      modalUnified.classList.remove("open");
+      __syncBodyLockFromModals();
+    }
+
+    // ===== Prodotti finiti (distinta base / BOM) =====
+    let __fpCurrentId = null;
+    let __fpDraft = null;
+
+    function __fpClone(obj){
+      try{ return JSON.parse(JSON.stringify(obj || {})); }catch(_){ return Object.assign({}, obj || {}); }
+    }
+
+    function __fpParseQty(raw){
+      const s0 = String(raw || "").trim();
+      if (!s0) return { qty: null, qtyRaw: "" };
+      const s = s0.replace(/\s+/g, "").replace(",", ".");
+      if (s.includes("/")) {
+        const parts = s.split("/");
+        const a = Number(parts[0]);
+        const b = Number(parts[1]);
+        if (Number.isFinite(a) && Number.isFinite(b) && b !== 0) {
+          return { qty: a / b, qtyRaw: s0 };
+        }
+      }
+      const n = Number(s);
+      if (!Number.isFinite(n)) return { qty: null, qtyRaw: s0 };
+      return { qty: n, qtyRaw: s0 };
+    }
+
+    function __fpFmtQty(comp){
+      try{
+        const raw = String((comp && comp.qtyRaw) || "").trim();
+        if (raw) return raw;
+        const n = Number(comp && comp.qty);
+        if (!Number.isFinite(n)) return "";
+        // format "it" ma senza zeri inutili
+        const s = n.toLocaleString("it-IT", { maximumFractionDigits: 6 });
+        return s;
+      }catch(_){ return ""; }
+    }
+
+    function __fpBuildDatalist(catKey){
+      try{
+        if (!fpComponentList) return;
+
+        const key = String(catKey || "").trim().toLowerCase();
+        const list = __fpGetProductsFiltered(key);
+
+        // datalist (per ricerca rapida)
+        const cap = 2500;
+        const out = [];
+        for (let i=0; i<list.length && i<cap; i++){
+          const p = list[i] || {};
+          const code = String(p.code || "").trim();
+          if (!code) continue;
+          const name = String(p.name || "").trim();
+          out.push(`<option value="${escapeHtmlAttr(code + (name ? " — " + name : ""))}"></option>`);
+        }
+        fpComponentList.innerHTML = out.join("");
+
+        // elenco cliccabile (per vedere subito gli articoli della categoria)
+        if (key) __fpRenderBrowse(list);
+        else { try{ __fpRenderBrowse([]); }catch(_){ } }
+      }catch(_){}
+    }
+
+    function __fpGetProductsFiltered(catKey){
+      const key = String(catKey || "").trim().toLowerCase();
+      const src = Array.isArray(products) ? products : [];
+      const seen = new Set();
+      const out = [];
+
+      for (const pp of src){
+        const p = pp || {};
+        const code = String(p.code || (typeof safeDecodeUri==="function" ? safeDecodeUri(p.id || "") : (p.id||"")) || "").trim();
+        if (!code) continue;
+
+        const low = code.toLowerCase();
+        if (seen.has(low)) continue;
+
+        const cat = (typeof getMacroCategoryForCode === "function")
+          ? (getMacroCategoryForCode(low) || "")
+          : (String(p.category || "").trim().toLowerCase());
+
+        if (key){
+          if (key === "__none"){
+            if (cat) continue;
+          } else {
+            if (cat !== key) continue;
+          }
+        }
+
+        const name = String(p.name || "").trim() || code;
+        const uom = __normalizeUom(p.uom || p.um || p.unit || "") || (typeof getUomResolvedForCode === "function" ? (getUomResolvedForCode(code) || "") : "");
+        out.push({ code, name, uom, cat });
+        seen.add(low);
+      }
+
+      out.sort((a,b) => String(a.name||a.code||"").localeCompare(String(b.name||b.code||""), "it", { sensitivity:"base" }));
+      return out;
+    }
+
+    function __fpRenderCompCategoryOptions(){
+      if (!fpCompCat) return;
+      const cur = String(fpCompCat.value || "");
+
+      const base = [
+        '<option value="">Tutte</option>',
+        '<option value="__none">Non assegnata</option>'
+      ];
+
+      const list = (Array.isArray(categories) ? categories : []).slice();
+
+      const imballaggi = list
+        .filter(c => c && c.key && categoryMacroGroup(c.key) === "imballaggi" && String(c.key).toLowerCase() !== "non_classificati")
+        .sort((a,b) => String(a.name||"").localeCompare(String(b.name||""), "it", { sensitivity:"base" }));
+
+      const materie = list
+        .filter(c => c && c.key && categoryMacroGroup(c.key) === "materie_prime")
+        .sort((a,b) => String(a.name||"").localeCompare(String(b.name||""), "it", { sensitivity:"base" }));
+
+      const groups = [];
+
+      if (imballaggi.length){
+        groups.push('<optgroup label="Imballaggi">');
+        for (const c of imballaggi){
+          groups.push(`<option value="${escapeHtmlAttr(String(c.key||"").toLowerCase())}">${escapeHtml(String(c.name||c.key||""))}</option>`);
+        }
+        groups.push('</optgroup>');
+      }
+
+      if (materie.length){
+        groups.push('<optgroup label="Materie prime">');
+        for (const c of materie){
+          groups.push(`<option value="${escapeHtmlAttr(String(c.key||"").toLowerCase())}">${escapeHtml(String(c.name||c.key||""))}</option>`);
+        }
+        groups.push('</optgroup>');
+      }
+
+      fpCompCat.innerHTML = base.join("") + groups.join("");
+
+      const allowed = new Set(["", "__none", ...imballaggi.map(x => String(x.key||"").toLowerCase()), ...materie.map(x => String(x.key||"").toLowerCase())]);
+      fpCompCat.value = allowed.has(cur) ? cur : "";
+    }
+
+    
+function __fpCatLabel(key){
+  const k = String(key || "").trim().toLowerCase();
+  if (!k) return "";
+  const list = Array.isArray(categories) ? categories : [];
+  for (const c of list){
+    const ck = String(c && c.key || "").trim().toLowerCase();
+    if (ck && ck === k) return String(c && (c.name || c.key) || key).trim();
+  }
+  return String(key || "").trim();
+}
+
+function __fpNormSearch(s){
+  try{
+    return String(s || "")
+      .toLowerCase()
+      .normalize("NFD").replace(/[\u0300-\u036f]/g,"")
+      .replace(/[^a-z0-9]+/g," ")
+      .trim();
+  }catch(_){
+    return String(s || "").toLowerCase().replace(/[^a-z0-9]+/g," ").trim();
+  }
+}
+
+function __fpSmartFilter(list, queryRaw){
+  const qN = __fpNormSearch(queryRaw);
+  const tokens = qN ? qN.split(/\s+/).filter(Boolean) : [];
+  if (!tokens.length) return [];
+
+  const scored = [];
+  const arr = Array.isArray(list) ? list : [];
+  for (const p of arr){
+    const code = String(p && p.code || "").trim();
+    if (!code) continue;
+
+    const codeN = __fpNormSearch(code);
+    const nameN = __fpNormSearch(p.name || "");
+    const catN  = __fpNormSearch(__fpCatLabel(p.cat) || "");
+    const blob  = (codeN + " " + nameN + " " + catN).trim();
+
+    let ok = true;
+    for (const t of tokens){
+      if (!t) continue;
+      if (blob.indexOf(t) < 0) { ok = false; break; }
+    }
+    if (!ok) continue;
+
+    let score = 0;
+    for (const t of tokens){
+      if (!t) continue;
+
+      if (codeN === t) score += 500;
+      else if (codeN.startsWith(t)) score += 320;
+      else if (codeN.indexOf(t) >= 0) score += 180;
+
+      if (nameN === t) score += 260;
+      else if (nameN.startsWith(t)) score += 160;
+      else if (nameN.indexOf(t) >= 0) score += 90;
+
+      if (catN === t) score += 80;
+      else if (catN.startsWith(t)) score += 55;
+      else if (catN.indexOf(t) >= 0) score += 35;
+    }
+
+    scored.push(Object.assign({}, p, { __score: score }));
+  }
+
+  scored.sort((a,b) => (b.__score - a.__score) || String(a.name||a.code||"").localeCompare(String(b.name||b.code||""), "it", { sensitivity:"base" }));
+  return scored;
+}
+
+function __fpRenderBrowse(list, opts){
+  if (!fpCompBrowseWrap || !fpCompBrowse) return;
+  const arr = Array.isArray(list) ? list : [];
+  const o = (opts && typeof opts === "object") ? opts : {};
+  const isSearch = !!o.isSearch;
+
+  if (!arr.length){
+    fpCompBrowseWrap.style.display = "none";
+    fpCompBrowse.innerHTML = "";
+    return;
+  }
+
+  const cap = isSearch ? 80 : 120;
+  const sliced = arr.slice(0, cap);
+
+  fpCompBrowseWrap.style.display = "";
+  fpCompBrowse.innerHTML = sliced.map(p => {
+    const code = String(p.code || "").trim();
+    const name = String(p.name || "").trim();
+    const uom = String(p.uom || "").trim();
+    const catLbl = __fpCatLabel(p.cat || "");
+    const label = code + (name ? (" — " + name) : "");
+
+    const right = [
+      uom ? `<span class="pill" style="height:auto; padding:2px 8px; border-radius:999px; border:0; background:rgba(0,0,0,.06); color:rgba(0,0,0,.86);">${escapeHtml(uom)}</span>` : "",
+      catLbl ? `<span class="pill" style="height:auto; padding:2px 8px; border-radius:999px; border:0; background:rgba(10,132,255,.12); color:rgba(0,0,0,.86);">${escapeHtml(catLbl)}</span>` : ""
+    ].filter(Boolean).join("");
+
+    return `<button type="button" class="sideMenuLink jsFpBrowsePick" data-code="${escapeHtmlAttr(code)}" data-name="${escapeHtmlAttr(name)}" data-uom="${escapeHtmlAttr(uom)}" title="Seleziona">
+      <span style="display:flex; justify-content:space-between; align-items:center; gap:12px; width:100%;">
+        <span style="min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${escapeHtml(label)}</span>
+        <span style="flex:0 0 auto; display:flex; gap:6px; align-items:center;">${right}</span>
+      </span>
+    </button>`;
+  }).join("") + (arr.length > cap ? `<div class="td-muted" style="padding:10px 12px;">Mostrati ${cap} risultati. Affina la ricerca.</div>` : "");
+}
+
+function __fpRenderSmartBrowse(){
+  try{
+    const catKey = String(fpCompCat && fpCompCat.value || "").trim();
+    const qRaw = String(fpCompPick && fpCompPick.value || "").trim();
+    const q = qRaw.includes("—") ? qRaw.split("—")[0].trim() : qRaw;
+
+    const base = __fpGetProductsFiltered(catKey);
+    const qN = __fpNormSearch(q);
+
+    if (qN){
+      const scored = __fpSmartFilter(base, q);
+      __fpRenderBrowse(scored, { isSearch: true });
+      return;
+    }
+
+    if (String(catKey || "").trim()){
+      __fpRenderBrowse(base, { isSearch: false });
+    } else {
+      __fpRenderBrowse([], { isSearch: false });
+    }
+  }catch(_){}
+}
+
+    function __fpResolvePickedProduct(val){
+      const s0 = String(val || "").trim();
+      if (!s0) return null;
+
+      let code = s0;
+      if (s0.includes("—")) code = s0.split("—")[0].trim();
+      if (!code) return null;
+
+      // prova match per codice
+      const p = (typeof findProductByCode === "function") ? findProductByCode(code) : null;
+      if (p) {
+        const c = String(p.code || (typeof safeDecodeUri==="function" ? safeDecodeUri(p.id || "") : (p.id||"")) || "").trim() || code;
+        return {
+          code: c,
+          name: String(p.name || "").trim() || c,
+          uom: __normalizeUom(p.uom || p.um || p.unit || "") || getUomResolvedForCode(c) || ""
+        };
+      }
+
+      // fallback: match per nome (se univoco)
+      try{
+        const key = normTextKey(s0);
+        if (key) {
+          const matches = (Array.isArray(products) ? products : []).filter(pp => normTextKey(pp && (pp.name || "")) === key);
+          if (matches.length === 1) {
+            const pp = matches[0];
+            const c = String(pp.code || (typeof safeDecodeUri==="function" ? safeDecodeUri(pp.id || "") : (pp.id||"")) || "").trim();
+            return { code: c, name: String(pp.name || "").trim() || c, uom: __normalizeUom(pp.uom || "") || getUomResolvedForCode(c) || "" };
+          }
+        }
+      }catch(_){}
+      return null;
+    }
+
+    function __fpEnsureDraftBase(fp){
+  const base = __fpClone(fp || {});
+  base.components = Array.isArray(base.components) ? base.components : (Array.isArray(base.bom) ? base.bom : (Array.isArray(base.distintaBase) ? base.distintaBase : []));
+
+  // normalizza array + impone U.M. dall'anagrafica prodotto (quando possibile)
+  base.components = (base.components || []).map(c => {
+    const code = String(c.code || c.codice || "").trim();
+    const name = String(c.name || c.articolo || c.item || "").trim();
+
+    let uom = String(c.uom || c.um || "").trim();
+    if (!uom && code){
+      try{
+        const p = (typeof findProductByCode === "function") ? findProductByCode(code) : null;
+        if (p) uom = __normalizeUom(p.uom || p.um || p.unit || "") || "";
+      }catch(_){}
+      if (!uom){
+        try{
+          if (typeof getUomResolvedForCode === "function") uom = __normalizeUom(getUomResolvedForCode(code) || "") || "";
+        }catch(_){}
+      }
+    }
+
+    return {
+      productId: String(c.productId || c.pid || "").trim(),
+      code,
+      name,
+      qty: (c.qty != null) ? Number(c.qty) : null,
+      qtyRaw: String(c.qtyRaw || "").trim(),
+      uom: String(uom || "").trim(),
+      note: String(c.note || "").trim()
+    };
+  }).filter(x => x.code || x.name);
+
+  return base;
+}
+
+    function __fpRenderComponents(){
+      if (!fpCompTbody) return;
+      const comps = (__fpDraft && Array.isArray(__fpDraft.components)) ? __fpDraft.components : [];
+      if (fpCompMeta) fpCompMeta.textContent = String(comps.length || 0);
+
+      if (!comps.length) {
+        fpCompTbody.innerHTML = '<tr><td class="td-muted" colspan="5">Nessun componente.</td></tr>';
+        return;
+      }
+
+      fpCompTbody.innerHTML = comps.map((c, i) => {
+        const code = String(c.code || "").trim();
+        const name = String(c.name || "").trim();
+        const qty = __fpFmtQty(c);
+        const uom = String(c.uom || "").trim();
+        return `
+          <tr data-i="${i}">
+            <td data-label="Codice"><span class="kbd">${escapeHtml(code || "—")}</span></td>
+            <td data-label="Articolo">${escapeHtml(name || "—")}</td>
+            <td data-label="Q.tà" class="qty">
+              <input class="qtyEditInput jsFpCompQty" data-i="${i}" value="${escapeHtmlAttr(qty)}" placeholder="es. 1/20" style="width: 100%; max-width: 150px;" />
+            </td>
+            <td data-label="U.M."><span class="kbd">${escapeHtml(uom || "—")}</span></td>
+            <td style="text-align:right;">
+              <button class="btn btn-ghost btn-xs jsFpCompDel" data-i="${i}" type="button">–</button>
+            </td>
+          </tr>
+        `;
+      }).join("");
+    }
+
+    function openFinishedProductModal(id){
+      if (!modalFinishedProduct) {
+        try{ showToast && showToast("Gestione componenti rimossa: usa ‘Categorie prodotti finiti’.", "warn"); }catch(_){ }
+        try{ setView && setView("fpCategories"); }catch(_){ }
+        try{ window.HubFPCategories && window.HubFPCategories.render && window.HubFPCategories.render(); }catch(_){ }
+        return;
+      }
+
+      // U.M. componente: non modificabile (presa dall'anagrafica)
+      try{ if (fpCompUom && fpCompUom.closest) { const f = fpCompUom.closest(".field"); if (f) f.style.display = "none"; } }catch(_){ }
+
+      __fpRenderCompCategoryOptions();
+
+      // restore ultima categoria usata per aggiungere componenti
+      try{
+        const savedCat = String(localStorage.getItem("hubinv_fp_comp_cat") || "");
+        if (fpCompCat && savedCat) fpCompCat.value = savedCat;
+      }catch(_){ }
+      __fpBuildDatalist(fpCompCat ? fpCompCat.value : "");
+      try{ __fpRenderSmartBrowse(); }catch(_){ }
+
+      const fid = id ? String(id) : "";
+      __fpCurrentId = fid || null;
+
+      let fp = null;
+      if (fid) {
+        fp = (Array.isArray(finishedProducts) ? finishedProducts : []).find(x => String(x && x.id || "") === fid) || null;
+      }
+      __fpDraft = __fpEnsureDraftBase(fp || {});
+
+      if (fpTitle) fpTitle.textContent = fid ? "Prodotto finito" : "Nuovo prodotto finito";
+      if (fpName) fpName.value = String(__fpDraft.name || __fpDraft.nome || "").trim();
+      if (fpCode) fpCode.value = String(__fpDraft.code || "").trim();
+      if (fpUom) fpUom.value = String(__fpDraft.uom || "").trim();
+      if (btnFpDelete) btnFpDelete.style.display = fid ? "" : "none";
+
+      __fpRenderComponents();
+
+      modalFinishedProduct.classList.add("open");
+      __syncBodyLockFromModals();
+      try{ fpName && fpName.focus(); }catch(_){}
+    }
+
+    function closeFinishedProductModal(){
+      if (!modalFinishedProduct) return;
+      modalFinishedProduct.classList.remove("open");
+      __syncBodyLockFromModals();
+      __fpCurrentId = null;
+      __fpDraft = null;
+    }
+
+    // expose globally (safety for listeners / inline handlers)
+    try{ window.openFinishedProductModal = openFinishedProductModal; }catch(_){ }
+    try{ window.closeFinishedProductModal = closeFinishedProductModal; }catch(_){ }
+
+    async function saveFinishedProduct(){
+      if (!(fb.user && fb.db)) { showToast("Accedi con Google per salvare", "warn"); return; }
+
+      const name = String(fpName && fpName.value || "").trim();
+      if (!name) { showToast("Inserisci un nome prodotto finito", "warn"); return; }
+
+      const code = String(fpCode && fpCode.value || "").trim();
+      const uom = String(fpUom && fpUom.value || "").trim();
+
+      const comps = (__fpDraft && Array.isArray(__fpDraft.components)) ? __fpDraft.components : [];
+      // sanitize comps
+      const cleanComps = comps.map(c => {
+        const qtyNum = (c.qty != null && Number.isFinite(Number(c.qty))) ? Number(c.qty) : null;
+        const qtyRaw = String(c.qtyRaw || "").trim();
+        const code0 = String(c.code || "").trim();
+        const name0 = String(c.name || "").trim();
+        const pid0 = String(c.productId || "").trim();
+        const u0 = String(c.uom || "").trim();
+        return {
+          productId: pid0 || keyToDocId(code0.toLowerCase()),
+          code: code0,
+          name: name0,
+          qty: qtyNum,
+          qtyRaw: qtyRaw,
+          uom: u0
+        };
+      }).filter(x => x.code || x.name);
+
+      const payload = {
+        name,
+        nameLower: name.toLowerCase(),
+        updatedAt: serverTimestamp(),
+        updatedBy: (fb.user.email || fb.user.uid || "")
+      };
+      if (code) { payload.code = code; payload.codeLower = code.toLowerCase(); }
+      else { payload.code = deleteField(); payload.codeLower = deleteField(); }
+      if (uom) payload.uom = uom;
+      else payload.uom = deleteField();
+
+      payload.components = cleanComps;
+
+      // Anti-duplicati: se sto CREANDO e il codice esiste gia', aggiorno quello esistente (unifica).
+      const __fpCodeLower = code ? String(code).toLowerCase() : "";
+      let __fpCreateIntoExisting = null;
+      if (!__fpCurrentId && __fpCodeLower){
+        try{
+          __fpCreateIntoExisting = (Array.isArray(finishedProducts) ? finishedProducts : []).find(x => {
+            const cl = __fpNormCode(x && (x.codeLower || x.code) || "");
+            return cl && cl === __fpCodeLower;
+          }) || null;
+        }catch(_){ __fpCreateIntoExisting = null; }
+        if (__fpCreateIntoExisting && __fpCreateIntoExisting.id){
+          // converto la creazione in update sul doc esistente
+          __fpCurrentId = String(__fpCreateIntoExisting.id);
+          // merge componenti: non sovrascrivere BOM esistente con vuoto
+          try{ payload.components = __fpMergeComponents([__fpCreateIntoExisting, { components: cleanComps }]); }catch(_){ }
+        }
+      }
+
+      try{
+        if (__fpCurrentId) {
+          await setDoc(doc(fb.db, "orgs", ORG_ID, "finishedProducts", __fpCurrentId), payload, { merge: true });
+          try{ __fpDedupFinishedProducts("save"); }catch(_){ }
+          showToast((__fpCreateIntoExisting && __fpCreateIntoExisting.id) ? "Prodotto finito unificato" : "Prodotto finito salvato");
+          closeFinishedProductModal();
+          return;
+        }
+
+        payload.createdAt = serverTimestamp();
+        payload.createdBy = (fb.user.email || fb.user.uid || "");
+        const ref = await addDoc(orgCol("finishedProducts"), payload);
+        __fpCurrentId = ref && ref.id ? ref.id : null;
+        try{ __fpDedupFinishedProducts("create"); }catch(_){ }
+        showToast("Prodotto finito creato");
+        closeFinishedProductModal();
+      }catch(e){
+        console.error("saveFinishedProduct failed", e);
+        showToast("Errore salvataggio prodotto finito", "err");
+      }
+    }
+
+    async function deleteFinishedProductById(id){
+      const fid = String(id || "").trim();
+      if (!fid) return;
+      if (!(fb.user && fb.db)) { showToast("Accedi con Google", "warn"); return; }
+
+      const fp = (Array.isArray(finishedProducts) ? finishedProducts : []).find(x => String(x && x.id || "") === fid) || null;
+      const nm = String(fp && (fp.name || fp.nome || "") || "").trim() || "Prodotto finito";
+      const cd = String(fp && (fp.code || "") || "").trim();
+
+      const ok = confirm(`Eliminare il prodotto finito?
+
+${cd ? ("Codice: " + cd + "\n") : ""}Nome: ${nm}
+
+Nota: elimina SOLO l’anagrafica prodotti finiti e la sua distinta base.`);
+      if (!ok) return;
+
+      // optimistic local
+      try{ finishedProducts = (finishedProducts || []).filter(x => String(x && x.id || "") !== fid); }catch(_){}
+      try{ renderAnag(); }catch(_){}
+
+      try{
+        try{ await trashPut({ kind:"finishedProduct", label: `${cd ? cd + " — " : ""}${nm}`, target:{ col:"finishedProducts", id: fid, code: cd }, data: fp ? {...fp} : { name:nm, code:cd } }); }catch(_){ }
+        await deleteDoc(doc(fb.db, "orgs", ORG_ID, "finishedProducts", fid));
+        showToast("Prodotto finito eliminato");
+        try{ renderAnag(); }catch(_){}
+      }catch(e){
+        console.error("deleteFinishedProductById failed", e);
+        showToast("Errore eliminazione prodotto finito", "err");
+      }
+    }
+
+    if (prodClose) prodClose.addEventListener("click", closeProductModal);
+    if (btnProdDone) btnProdDone.addEventListener("click", closeProductModal);
+    if (modalProduct) modalProduct.addEventListener("click", (e) => { if (e.target === modalProduct) closeProductModal(); });
+
+    if (unifiedClose) unifiedClose.addEventListener("click", closeUnifiedModal);
+    if (btnUnifiedDone) btnUnifiedDone.addEventListener("click", closeUnifiedModal);
+    if (modalUnified) modalUnified.addEventListener("click", (e) => { if (e.target === modalUnified) closeUnifiedModal(); });
+
+    // Finished product modal
+    const __fpCloseSafe = () => { try{ window.closeFinishedProductModal && window.closeFinishedProductModal(); }catch(_){ } };
+    if (fpClose) fpClose.addEventListener("click", __fpCloseSafe);
+    if (btnFpDone) btnFpDone.addEventListener("click", __fpCloseSafe);
+    if (btnFpCancel) btnFpCancel.addEventListener("click", __fpCloseSafe);
+    if (modalFinishedProduct) modalFinishedProduct.addEventListener("click", (e) => { if (e.target === modalFinishedProduct) __fpCloseSafe(); });
+    if (btnFpSave) btnFpSave.addEventListener("click", (e) => { e.preventDefault(); e.stopPropagation(); saveFinishedProduct(); });
+    if (btnFpDelete) btnFpDelete.addEventListener("click", (e) => { e.preventDefault(); e.stopPropagation(); if (__fpCurrentId) deleteFinishedProductById(__fpCurrentId); });
+
+    if (btnFpCompAdd) btnFpCompAdd.addEventListener("click", (e) => {
+      e.preventDefault(); e.stopPropagation();
+      if (!__fpDraft) __fpDraft = __fpEnsureDraftBase({});
+      const picked = __fpResolvePickedProduct(fpCompPick && fpCompPick.value);
+      if (!picked) { showToast("Seleziona un componente valido", "warn"); return; }
+
+      const qx = __fpParseQty(fpCompQty && fpCompQty.value);
+      if (!(qx && (qx.qty != null) && Number.isFinite(Number(qx.qty)))) { showToast("Quantità non valida", "warn"); return; }
+
+      const u = String((picked && picked.uom) || "").trim() || "pz";
+
+      // evita duplicati: se già presente stesso codice, somma qty
+      const comps = Array.isArray(__fpDraft.components) ? __fpDraft.components : [];
+      const low = String(picked.code || "").trim().toLowerCase();
+      const idx = comps.findIndex(c => String(c && c.code || "").trim().toLowerCase() === low);
+      if (idx >= 0) {
+        const cur = comps[idx] || {};
+        const curQty = Number(cur.qty);
+        const addQty = Number(qx.qty);
+        const newQty = (Number.isFinite(curQty) ? curQty : 0) + (Number.isFinite(addQty) ? addQty : 0);
+        cur.qty = newQty;
+        cur.qtyRaw = ""; // una volta sommato, mostra numero
+        cur.uom = u || cur.uom || "pz";
+        comps[idx] = cur;
+      } else {
+        comps.push({
+          productId: keyToDocId(String(picked.code||"").trim().toLowerCase()),
+          code: String(picked.code || "").trim(),
+          name: String(picked.name || "").trim(),
+          qty: Number(qx.qty),
+          qtyRaw: String(qx.qtyRaw || "").trim(),
+          uom: u
+        });
+      }
+      __fpDraft.components = comps;
+
+      try{ if (fpCompPick) fpCompPick.value = ""; }catch(_){}
+      try{ if (fpCompQty) fpCompQty.value = ""; }catch(_){}
+
+
+      __fpRenderComponents();
+    });
+
+    // Categoria → filtra articoli e mostra elenco
+    if (fpCompCat){
+      fpCompCat.addEventListener("change", () => {
+        try{ localStorage.setItem("hubinv_fp_comp_cat", String(fpCompCat.value || "")); }catch(_){}
+        try{ if (fpCompPick) fpCompPick.value = ""; }catch(_){}
+        __fpBuildDatalist(fpCompCat.value);
+        try{ __fpRenderSmartBrowse(); }catch(_){ }
+      });
+    }
+
+    
+// Smart search componenti (ricerca live)
+if (fpCompPick){
+  fpCompPick.addEventListener("input", () => { try{ __fpRenderSmartBrowse(); }catch(_){ } });
+  fpCompPick.addEventListener("focus", () => { try{ __fpRenderSmartBrowse(); }catch(_){ } });
+}
+
+// Click su elenco articoli della categoria (seleziona componente)
+    if (fpCompBrowseWrap){
+      fpCompBrowseWrap.addEventListener("click", (e) => {
+        const btn = e && e.target && e.target.closest ? e.target.closest("button.jsFpBrowsePick") : null;
+        if (!btn) return;
+        e.preventDefault(); e.stopPropagation();
+
+        const code = String(btn.getAttribute("data-code") || "").trim();
+        const name = String(btn.getAttribute("data-name") || "").trim();
+        const uom = String(btn.getAttribute("data-uom") || "").trim();
+
+        if (fpCompPick) fpCompPick.value = code + (name ? (" — " + name) : "");
+
+
+        try{ fpCompQty && fpCompQty.focus(); }catch(_){}
+      });
+    }
+
+    // Delegation: edit qty/uom + delete component
+    if (modalFinishedProduct) {
+      modalFinishedProduct.addEventListener("click", (e) => {
+        const btn = e.target && e.target.closest ? e.target.closest("button.jsFpCompDel") : null;
+        if (!btn) return;
+        e.preventDefault(); e.stopPropagation();
+        const i = Number(btn.getAttribute("data-i"));
+        if (!__fpDraft || !Array.isArray(__fpDraft.components)) return;
+        if (!Number.isFinite(i) || i < 0) return;
+        __fpDraft.components.splice(i, 1);
+        __fpRenderComponents();
+      });
+
+      modalFinishedProduct.addEventListener("input", (e) => {
+        const t = e.target;
+        if (!t || !__fpDraft || !Array.isArray(__fpDraft.components)) return;
+
+        const i = Number(t.getAttribute("data-i"));
+        if (!Number.isFinite(i) || i < 0 || i >= __fpDraft.components.length) return;
+
+        if (t.classList && t.classList.contains("jsFpCompQty")) {
+          const qx = __fpParseQty(t.value);
+          __fpDraft.components[i].qty = (qx.qty != null && Number.isFinite(Number(qx.qty))) ? Number(qx.qty) : null;
+          __fpDraft.components[i].qtyRaw = String(qx.qtyRaw || "").trim();
+          if (fpCompMeta) fpCompMeta.textContent = String(__fpDraft.components.length || 0);
+          return;
+        }
+
+      });
+    }
+
+
 
 
     // Table actions (delegation)
     if (anagTbody) {
       anagTbody.addEventListener("click", (e) => {
+        const targetEl = (e && e.target && e.target.nodeType === 3) ? e.target.parentElement : (e ? e.target : null);
+
+        // Click riga (fornitori): apri dettaglio fornitore cliccando ovunque sulla riga
+        // (escludi elementi interattivi come bottoni/link/input)
         if (activeAnagTab === "suppliers") {
-          const tr = e.target && e.target.closest ? e.target.closest("tr[data-supplier-id]") : null;
-          const id = tr ? tr.getAttribute("data-supplier-id") : "";
-          if (id) {
-            openSupplierModal(id);
-            return;
+          const isInteractive = !!(targetEl && targetEl.closest && targetEl.closest("button, a, input, select, textarea, label"));
+          if (!isInteractive) {
+            const trSup = targetEl && targetEl.closest ? targetEl.closest("tr[data-supplier-id]") : null;
+            const sid = trSup ? (trSup.getAttribute("data-supplier-id") || "") : "";
+            if (sid) {
+              openSupplierModal(sid);
+              return;
+            }
           }
         }
+
         // Click riga (prodotti): apri dettaglio prodotto (stesso modale Inventario)
         if (activeAnagTab === "products") {
-          const tr = e.target && e.target.closest ? e.target.closest("tr[data-pg]") : null;
-          if (tr && (!e.target.closest || !e.target.closest("button[data-action]"))) {
+          const tr = targetEl && targetEl.closest ? targetEl.closest("tr[data-pg]") : null;
+          if (tr && (!targetEl || !targetEl.closest || !targetEl.closest("button[data-action]"))) {
             const gid = tr.getAttribute("data-pg") || "";
             if (gid) {
               try{
@@ -9860,7 +19320,21 @@ async function handleFileSelection(fileList) {
           }
         }
 
-        const btn = e.target.closest("button[data-action]");
+        // Click riga (prodotti finiti): toggle selezione (niente modale componenti)
+        if (activeAnagTab === "finished") {
+          const isInteractive = !!(targetEl && targetEl.closest && targetEl.closest("button, a, input, select, textarea, label"));
+          if (!isInteractive) {
+            const trFp = targetEl && targetEl.closest ? targetEl.closest("tr[data-fp-id]") : null;
+            const cb = trFp ? trFp.querySelector('input.jsFpSel') : null;
+            if (cb) {
+              try { cb.checked = !cb.checked; } catch(_) {}
+              try { cb.dispatchEvent(new Event('change', { bubbles: true })); } catch(_) {}
+            }
+            return;
+          }
+        }
+
+const btn = targetEl && targetEl.closest ? targetEl.closest("button[data-action]") : null;
         if (!btn) return;
         const action = btn.getAttribute("data-action");
         const id = btn.getAttribute("data-id");
@@ -9868,7 +19342,7 @@ async function handleFileSelection(fileList) {
 
         if (action === "supplierDocs") { openSupplierModal(id); return; }
         if (action === "deleteSupplier") { deleteSupplierCascade(id); return; }
-        if (action === "openProdGroup") {
+if (action === "openProdGroup") {
           try{
             const g = (__prodGroupsMap && __prodGroupsMap.get) ? __prodGroupsMap.get(id) : null;
             const code = (g && Array.isArray(g.codes) && g.codes.length) ? String(g.codes[0] || "").trim() : "";
@@ -9878,6 +19352,49 @@ async function handleFileSelection(fileList) {
           return;
         }
       });
+    }
+
+    // Prodotti finiti: selezione multipla (checkbox)
+    if (anagTable) {
+      try{
+        if (!anagTable.dataset.fpSelBound){
+          anagTable.dataset.fpSelBound = "1";
+          anagTable.addEventListener("change", (e) => {
+            try{
+              if (activeAnagTab !== "finished") return;
+              const t = e && e.target ? e.target : null;
+              if (!t) return;
+
+              // Select all
+              if (t.id === "fpSelectAll") {
+                const ids = __fpVisibleIds();
+                const on = !!t.checked;
+                for (const id of ids){
+                  if (on) __fpSelectedIds.add(id); else __fpSelectedIds.delete(id);
+                }
+                // sync UI for visible rows
+                try{
+                  document.querySelectorAll('#anagTbody input.jsFpSel').forEach(cb => { cb.checked = on; });
+                }catch(_){ }
+
+                try{ __fpRenderAssignControls(); }catch(_){ }
+                try{ __fpSyncSelectAllState(); }catch(_){ }
+                return;
+              }
+
+              // Single row checkbox
+              if (t.classList && t.classList.contains("jsFpSel")) {
+                const id = String(t.getAttribute("data-id") || "").trim();
+                if (!id) return;
+                if (t.checked) __fpSelectedIds.add(id);
+                else __fpSelectedIds.delete(id);
+                try{ __fpRenderAssignControls(); }catch(_){ }
+                try{ __fpSyncSelectAllState(); }catch(_){ }
+              }
+            }catch(_){ }
+          });
+        }
+      }catch(_){ }
     }
 btnConfirmMovement.addEventListener("click", async () => {
       // Import completo dal documento (multi-riga)
@@ -9993,7 +19510,9 @@ try {
 
           // U.M. + qtyRaw: supporta nr / pz / kg / ton (anche in formati tipo "1760pz" o "NR 10")
           const split = __splitQtyUom(String(it.qtyRaw ?? ""));
-          const uom = __normalizeUom(it.uom ?? "") || split.uom || "";
+          const uomEdited = String(it.uom ?? "").trim();
+          const uomEditedClean = (uomEdited && uomEdited !== "-") ? uomEdited : "";
+          const uom = __normalizeUom(uomEditedClean) || (uomEditedClean ? uomEditedClean.toLowerCase() : "") || split.uom || "";
           const qtyOnlyFromRaw = String(split.qtyRaw || "").trim();
 
           const qtyStr = (it.qty != null && it.qty !== "" && !Number.isNaN(Number(it.qty)))
@@ -10831,6 +20350,10 @@ resetManualModal();
 
     const btnExportStock = document.getElementById("btnExportStock");
     if (btnExportStock) btnExportStock.addEventListener("click", exportStockCSV);
+
+    const btnPdfBackup = document.getElementById("btnPdfBackup");
+    if (btnPdfBackup) btnPdfBackup.addEventListener("click", exportInventoryBackupTxt);
+
 const btnViewMovements = document.getElementById("btnViewMovements");
     if (btnViewMovements) btnViewMovements.addEventListener("click", () => {
       exportMovementsCSV();
@@ -10878,6 +20401,7 @@ if (importMovementsInput) importMovementsInput.addEventListener("change", async 
         state,
         setView,
         renderAll,
+        renderHomeDaneaCockpit,
         safeInt,
         formatDateIT,
         normalizeWarehouse,
@@ -10885,6 +20409,7 @@ if (importMovementsInput) importMovementsInput.addEventListener("change", async 
         openModal,
         showToast,
         exportMovementsCSV,
+        deleteMovement,
         openDocDetail,
 
         // Categorie
@@ -10968,3 +20493,267 @@ if (importMovementsInput) importMovementsInput.addEventListener("change", async 
       }
     }
     try { if (typeof globalThis !== "undefined") globalThis.formatDocLabel = formatDocLabel; } catch(_){}
+
+
+/* ============================================================
+   UI FIX — Distinta base (Scarica flussi DDT)
+   Normalizza la tabella/lista scelta componenti nel modale "Prodotto finito"
+   (evita stile blu ereditato dai menu).
+   ============================================================ */
+(function(){
+  try{
+    const ID = "hubinv_fp_browse_style_fix_v1";
+    if (document.getElementById(ID)) return;
+    const css = `
+/* Finished product (BOM) — component browse list: look like normal tables */
+#modalFinishedProduct #fpCompBrowseWrap.tableWrap{
+  background: #fff !important;
+  border: 1px solid rgba(12,22,52,.08) !important;
+}
+#modalFinishedProduct #fpCompBrowse{
+  display:block !important;
+}
+#modalFinishedProduct #fpCompBrowse .jsFpBrowsePick{
+  display:block !important;
+  width:100% !important;
+  border: 0 !important;
+  border-bottom: 1px solid rgba(12,22,52,.08) !important;
+  border-radius: 0 !important;
+  background: rgba(255,255,255,.96) !important;
+  color: rgba(0,0,0,.86) !important;
+  padding: 10px 10px !important;
+  font-weight: 850 !important;
+  font-size: 13px !important;
+  line-height: 1.25 !important;
+  text-align: left !important;
+  box-shadow: none !important;
+}
+#modalFinishedProduct #fpCompBrowse .jsFpBrowsePick:hover{
+  background: rgba(0,0,0,.03) !important;
+}
+#modalFinishedProduct #fpCompBrowse .jsFpBrowsePick:active{
+  background: rgba(0,0,0,.06) !important;
+}
+#modalFinishedProduct #fpCompBrowse .jsFpBrowsePick:last-child{
+  border-bottom: 0 !important;
+}
+/* Force neutral table backgrounds inside this modal */
+#modalFinishedProduct .tableWrap{
+  background: #fff !important;
+}
+    `.trim();
+    const st = document.createElement("style");
+    st.id = ID;
+    st.textContent = css;
+    (document.head || document.documentElement).appendChild(st);
+  }catch(_){}
+})();
+
+
+
+/* ============================================================
+   UI TUNE — Tabelle: via di mezzo
+   - + leggibilita': testi/bottoni/campi dentro le tabelle
+   - Inventario: colonna "Nome articolo" piu' larga
+   ============================================================ */
+(function(){
+  try{
+    const ID = "gc_table_density_mid_v1";
+    if (document.getElementById(ID)) return;
+    const css = `
+/* General table readability (mid size) */
+.tableWrap thead th,
+.doc-tableWrap thead th,
+table.dataGrid thead th{
+  font-size: 15px !important;
+  padding: 8px 10px !important;
+  line-height: 1.1 !important;
+}
+.tableWrap tbody td,
+.doc-tableWrap tbody td,
+table.dataGrid tbody td{
+  font-size: 15px !important;
+  padding: 8px 10px !important;
+  line-height: 1.15 !important;
+}
+.tableWrap td input,
+.tableWrap td select,
+.tableWrap td textarea,
+.doc-tableWrap td input,
+.doc-tableWrap td select,
+.doc-tableWrap td textarea{
+  font-size: 15px !important;
+  padding: 7px 10px !important;
+  min-height: 34px !important;
+  border-radius: 10px !important;
+}
+.tableWrap td button,
+.tableWrap td .btn,
+.doc-tableWrap td button,
+.doc-tableWrap td .btn{
+  font-size: 14px !important;
+  padding: 7px 10px !important;
+  min-height: 34px !important;
+}
+/* Mobile stacked labels */
+.tableWrap td::before,
+.doc-tableWrap td::before{
+  font-size: 12px !important;
+}
+
+/* More compact on very small screens (still readable) */
+@media (max-width: 720px){
+  .tableWrap thead th, .doc-tableWrap thead th, table.dataGrid thead th{
+    font-size: 13px !important;
+    padding: 7px 8px !important;
+  }
+  .tableWrap tbody td, .doc-tableWrap tbody td, table.dataGrid tbody td{
+    font-size: 14px !important;
+    padding: 7px 8px !important;
+  }
+  .tableWrap td input, .tableWrap td select, .doc-tableWrap td input, .doc-tableWrap td select{
+    font-size: 14px !important;
+    min-height: 32px !important;
+    padding: 6px 8px !important;
+  }
+}
+
+/* Inventory only: widen first column (Nome articolo) */
+#viewInventory .dataGrid{
+  table-layout: fixed !important;
+}
+#viewInventory .dataGrid th:first-child,
+#viewInventory .dataGrid td:first-child{
+  width: 58% !important;
+  min-width: 420px !important;
+}
+#viewInventory .dataGrid th:nth-child(2),
+#viewInventory .dataGrid td:nth-child(2){
+  width: 16% !important;
+  min-width: 140px !important;
+}
+#viewInventory .dataGrid th:nth-child(3),
+#viewInventory .dataGrid td:nth-child(3){
+  width: 16% !important;
+  min-width: 140px !important;
+}
+#viewInventory .dataGrid th:nth-child(4),
+#viewInventory .dataGrid td:nth-child(4){
+  width: 10% !important;
+  min-width: 90px !important;
+  white-space: nowrap !important;
+}
+    `.trim();
+    const st = document.createElement("style");
+    st.id = ID;
+    st.textContent = css;
+    (document.head || document.documentElement).appendChild(st);
+  }catch(_){ }
+})();
+
+/* =========================================================
+   2026-01 Patch: Dashboard SVG icons
+   - Size is handled in hub_inventario.html (all like "Categorie")
+   - Here we apply a unified blue/violet gradient to all dashboard icons
+   ========================================================= */
+(function(){
+  var SVG_NS = "http://www.w3.org/2000/svg";
+  var SEL = "#viewHome svg.homeTileIcon";
+
+  function ensureDefs(svg){
+    try{
+      var defs = svg.querySelector("defs");
+      if (defs) return defs;
+      defs = document.createElementNS(SVG_NS, "defs");
+      svg.insertBefore(defs, svg.firstChild);
+      return defs;
+    }catch(_){ return null; }
+  }
+
+  function makeGradient(defs, id){
+    try{
+      var grad = document.createElementNS(SVG_NS, "linearGradient");
+      grad.setAttribute("id", id);
+      grad.setAttribute("x1", "0%");
+      grad.setAttribute("y1", "0%");
+      grad.setAttribute("x2", "100%");
+      grad.setAttribute("y2", "100%");
+
+      var stops = [
+        { off: "0%",   col: "#0a84ff" },
+        { off: "55%",  col: "#5e5ce6" },
+        { off: "100%", col: "#af52de" }
+      ];
+
+      for (var i=0; i<stops.length; i++){
+        var st = document.createElementNS(SVG_NS, "stop");
+        st.setAttribute("offset", stops[i].off);
+        st.setAttribute("stop-color", stops[i].col);
+        grad.appendChild(st);
+      }
+
+      defs.appendChild(grad);
+      return grad;
+    }catch(_){ return null; }
+  }
+
+  function applyGradient(svg, gradId){
+    // Patch 2026-01: icone dashboard devono seguire il colore (CSS) -> nero su tile bianchi
+    // Usiamo currentColor invece del gradiente (evita inline fill colorati)
+    var fill = "currentColor";
+    try{
+      var nodes = svg.querySelectorAll("path,circle,rect,polygon,ellipse");
+      for (var i=0; i<nodes.length; i++){
+        var el = nodes[i];
+        try{ el.setAttribute("fill", fill); }catch(_){ }
+        try{ if (el && el.style && el.style.setProperty) el.style.setProperty("fill", fill, "important"); }catch(_){ }
+      }
+    }catch(_){ }
+  }
+
+  function apply(){
+    try{
+      var root = document.querySelectorAll(SEL);
+      if (!root || !root.length) return;
+
+      var prefix = window.__gcDashIconGradPrefix;
+      if (!prefix){
+        prefix = "gcbv_" + Math.random().toString(36).slice(2, 8);
+        window.__gcDashIconGradPrefix = prefix;
+      }
+
+      var seq = window.__gcDashIconGradSeq || 0;
+      for (var i=0; i<root.length; i++){
+        var svg = root[i];
+        if (!svg) continue;
+        try{
+          if (svg.dataset && svg.dataset.gcIconGrad === "1") continue;
+          if (svg.dataset) svg.dataset.gcIconGrad = "1";
+        }catch(_){ }
+
+        var defs = ensureDefs(svg);
+        if (!defs) continue;
+
+        var gradId = prefix + "_" + (seq++);
+        makeGradient(defs, gradId);
+        applyGradient(svg, gradId);
+      }
+      window.__gcDashIconGradSeq = seq;
+    }catch(_){ }
+  }
+
+  function schedule(){
+    try{ requestAnimationFrame(apply); }catch(_){ try{ setTimeout(apply, 0); }catch(__){} }
+  }
+
+  try{
+    if (document.readyState === "loading"){
+      document.addEventListener("DOMContentLoaded", schedule, { once: true });
+    } else {
+      schedule();
+    }
+
+    // Re-apply if something hot-injects/refreshes the Home UI
+    window.addEventListener("HubInvReady", schedule);
+  }catch(_){ }
+})();
