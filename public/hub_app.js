@@ -8303,6 +8303,277 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
     let products = [];
     let thresholds = {};
     let finishedProducts = []; // key -> number (from Firestore)
+
+    // ===== Prodotti finiti: anti-duplicati per codice =====
+    // Obiettivo: in Firestore non devono esistere 2+ documenti finishedProducts con lo stesso codeLower.
+    // - Dedup automatico (best-effort) quando arriva lo snapshot realtime
+    // - Creazione: se il codice esiste gia', aggiorna il doc esistente invece di crearne uno nuovo
+    let __fpDedupRunning = false;
+    let __fpDedupLastSig = "";
+    let __fpDedupLastAt = 0;
+
+    function __fpNormCode(v){
+      return String(v || "").trim().toLowerCase();
+    }
+
+    function __fpTsMs(ts){
+      try{
+        if (!ts) return 0;
+        if (typeof ts.toMillis === "function") return ts.toMillis();
+        if (typeof ts.toDate === "function") return ts.toDate().getTime();
+        if (ts instanceof Date) return ts.getTime();
+        const s = String(ts || "");
+        const d = new Date(s);
+        const n = d.getTime();
+        return Number.isFinite(n) ? n : 0;
+      }catch(_){ return 0; }
+    }
+
+    function __fpGetComponents(fp){
+      if (!fp) return [];
+      const a = fp.components || fp.bom || fp.distintaBase || fp.distinta_base || [];
+      return Array.isArray(a) ? a : [];
+    }
+
+    function __fpScoreDoc(fp){
+      const name = String(fp && (fp.name || fp.nome) || "").trim();
+      const uom = String(fp && (fp.uom || fp.um) || "").trim();
+      const cat = String(fp && (fp.categoryKey || fp.category || fp.catKey || fp.categoryId) || "").trim();
+      const comps = __fpGetComponents(fp);
+
+      let score = 0;
+      if (name) score += Math.min(20, Math.floor(name.length / 3));
+      if (uom) score += 10;
+      if (cat) score += 20;
+      if (comps && comps.length) score += 100 + Math.min(50, comps.length);
+
+      // preferisci documenti piu' recenti (solo tie-break, non e' un requisito funzionale)
+      const t = __fpTsMs(fp && (fp.updatedAt || fp.createdAt));
+      if (t) score += 1;
+      return score;
+    }
+
+    function __fpPickCanonical(list){
+      const arr = Array.isArray(list) ? list.slice() : [];
+      arr.sort((a,b)=>{
+        const sa = __fpScoreDoc(a);
+        const sb = __fpScoreDoc(b);
+        if (sb !== sa) return sb - sa;
+        const ua = __fpTsMs(a && (a.updatedAt || a.createdAt));
+        const ub = __fpTsMs(b && (b.updatedAt || b.createdAt));
+        if (ub !== ua) return ub - ua;
+        return String(a && a.id || "").localeCompare(String(b && b.id || ""));
+      });
+      return arr[0] || null;
+    }
+
+    function __fpMergeComponents(docs){
+      const map = new Map();
+
+      const put = (c)=>{
+        if (!c) return;
+        const code = String(c.code || c.codice || "").trim();
+        const low = __fpNormCode(code);
+        if (!low) return;
+
+        const name = String(c.name || c.articolo || c.item || "").trim() || code;
+        const uom = String(c.uom || c.um || "").trim();
+        const pid = String(c.productId || c.pid || "").trim();
+        const qtyNum = (c.qty != null && Number.isFinite(Number(c.qty))) ? Number(c.qty) : null;
+        const qtyRaw = String(c.qtyRaw || c.qtaRaw || "").trim();
+        const note = String(c.note || "").trim();
+
+        const cur = map.get(low);
+        if (!cur){
+          map.set(low, { productId: pid, code, name, qty: qtyNum, qtyRaw, uom, note });
+          return;
+        }
+
+        // merge: preferisci dati piu' completi
+        if (!cur.productId && pid) cur.productId = pid;
+        if ((!cur.name || cur.name === cur.code) && name) cur.name = name;
+        if (!cur.uom && uom) cur.uom = uom;
+        if (cur.qty == null && qtyNum != null) cur.qty = qtyNum;
+        if (!cur.qtyRaw && qtyRaw) cur.qtyRaw = qtyRaw;
+        if (!cur.note && note) cur.note = note;
+      };
+
+      (Array.isArray(docs) ? docs : []).forEach(fp=>{
+        const comps = __fpGetComponents(fp);
+        (Array.isArray(comps) ? comps : []).forEach(put);
+      });
+
+      const out = Array.from(map.values());
+      out.sort((a,b)=>String(a.code||"").localeCompare(String(b.code||""), "it", { sensitivity:"base" }));
+      return out;
+    }
+
+    function __fpFindDuplicateGroups(list){
+      const by = new Map();
+      (Array.isArray(list) ? list : []).forEach(fp=>{
+        const id = String(fp && fp.id || "").trim();
+        const codeLower = __fpNormCode(fp && (fp.codeLower || fp.code) || "");
+        if (!id || !codeLower) return;
+        const arr = by.get(codeLower) || [];
+        arr.push(fp);
+        by.set(codeLower, arr);
+      });
+      const groups = [];
+      for (const [codeLower, arr] of by.entries()){
+        if ((arr || []).length > 1) groups.push({ codeLower, items: arr.slice() });
+      }
+      groups.sort((a,b)=>String(a.codeLower).localeCompare(String(b.codeLower)));
+      return groups;
+    }
+
+    function __fpDedupSignature(groups){
+      try{
+        return (groups||[]).map(g=>{
+          const ids = (g.items||[]).map(x=>String(x && x.id || "").trim()).filter(Boolean).sort().join(",");
+          return String(g.codeLower||"") + ":" + ids;
+        }).join("|");
+      }catch(_){ return ""; }
+    }
+
+    async function __fpDedupFinishedProducts(reason){
+      if (__fpDedupRunning) return;
+      if (!(fb && fb.user && fb.db)) return;
+
+      const groups = __fpFindDuplicateGroups(finishedProducts || []);
+      if (!groups.length) { __fpDedupLastSig = ""; return; }
+
+      const sig = __fpDedupSignature(groups);
+      const now = Date.now();
+      if (sig && sig === __fpDedupLastSig && (now - (__fpDedupLastAt || 0)) < 15000) return;
+
+      __fpDedupLastSig = sig;
+      __fpDedupLastAt = now;
+
+      // run async (non blocca render)
+      setTimeout(async ()=>{
+        if (__fpDedupRunning) return;
+        if (!(fb && fb.user && fb.db)) return;
+
+        const groups2 = __fpFindDuplicateGroups(finishedProducts || []);
+        if (!groups2.length) return;
+
+        __fpDedupRunning = true;
+        const actor = (fb.user && (fb.user.email || fb.user.uid)) || "";
+        let removed = 0;
+        let merged = 0;
+
+        try{
+          try{ showToast("Prodotti finiti: unifico codici duplicati…", "warn"); }catch(_){ }
+
+          for (const g of groups2){
+            const codeLower = String(g.codeLower || "").trim().toLowerCase();
+            const docs = Array.isArray(g.items) ? g.items.slice() : [];
+            if (!codeLower || docs.length < 2) continue;
+
+            const keep = __fpPickCanonical(docs) || docs[0];
+            const keepId = String(keep && keep.id || "").trim();
+            if (!keepId) continue;
+
+            const others = docs.filter(x => {
+              const id = String(x && x.id || "").trim();
+              return id && id !== keepId;
+            });
+            if (!others.length) continue;
+
+            const nameBest = (()=>{
+              const prefer = String(keep && (keep.name || keep.nome) || "").trim();
+              if (prefer) return prefer;
+              let best = "";
+              for (const d of docs){
+                const nm = String(d && (d.name || d.nome) || "").trim();
+                if (nm && nm.length > best.length) best = nm;
+              }
+              return best || codeLower;
+            })();
+
+            const codeBest = (()=>{
+              const c = String(keep && keep.code || "").trim();
+              if (c) return c;
+              for (const d of docs){
+                const cc = String(d && d.code || "").trim();
+                if (cc) return cc;
+              }
+              return String(codeLower || "");
+            })();
+
+            const uomBest = (()=>{
+              const u = String(keep && (keep.uom || keep.um) || "").trim();
+              if (u) return u;
+              for (const d of docs){
+                const uu = String(d && (d.uom || d.um) || "").trim();
+                if (uu) return uu;
+              }
+              return "";
+            })();
+
+            const catBest = (()=>{
+              const k = String(keep && (keep.categoryKey || keep.category || keep.catKey || keep.categoryId) || "").trim();
+              if (k) return k;
+              for (const d of docs){
+                const kk = String(d && (d.categoryKey || d.category || d.catKey || d.categoryId) || "").trim();
+                if (kk) return kk;
+              }
+              return "";
+            })();
+
+            const mergedComps = __fpMergeComponents(docs);
+
+            const payload = {
+              name: nameBest,
+              nameLower: String(nameBest || "").toLowerCase(),
+              code: codeBest,
+              codeLower: String(codeLower || "").toLowerCase(),
+              updatedAt: serverTimestamp(),
+              updatedBy: actor
+            };
+            if (uomBest) payload.uom = uomBest;
+            if (catBest){
+              payload.categoryKey = catBest;
+              payload.categoryKeyLower = String(catBest).toLowerCase();
+            }
+            if (mergedComps && mergedComps.length) payload.components = mergedComps;
+
+            await runTransaction(fb.db, async (tx)=>{
+              tx.set(doc(fb.db, "orgs", ORG_ID, "finishedProducts", keepId), payload, { merge: true });
+              for (const o of others){
+                const oid = String(o && o.id || "").trim();
+                if (!oid) continue;
+                tx.delete(doc(fb.db, "orgs", ORG_ID, "finishedProducts", oid));
+              }
+            });
+
+            // trash: best-effort (fuori transazione)
+            for (const o of others){
+              const oid = String(o && o.id || "").trim();
+              if (!oid) continue;
+              const nm = String(o && (o.name || o.nome) || "").trim() || "Prodotto finito";
+              const cd = String(o && o.code || "").trim();
+              try{ await trashPut({ kind:"finishedProduct", label: `${cd ? cd + " — " : ""}${nm} (dup)`, target:{ col:"finishedProducts", id: oid, code: cd }, data: o ? {...o} : { name:nm, code:cd } }); }catch(_){ }
+            }
+
+            removed += others.length;
+            merged += 1;
+          }
+
+          if (merged && removed){
+            try{ showToast(`Prodotti finiti unificati: ${merged} codici • rimossi ${removed} duplicati`, "ok"); }catch(_){ }
+          }
+        }catch(e){
+          console.warn("finishedProducts dedup failed", e);
+          __fpDedupLastSig = ""; // allow retry
+          try{ showToast("Errore unifica prodotti finiti", "err"); }catch(_){ }
+        }finally{
+          __fpDedupRunning = false;
+          try{ renderAnag(); }catch(_){ }
+        }
+      }, 500);
+    }
+
     let finishedProductCategories = []; // elenco categorie prodotti finiti (from Firestore)
     let finishedProductCategoriesMap = new Map(); // keyLower -> {key,name,...}
 
@@ -8802,6 +9073,7 @@ btnLogout.addEventListener("click", async () => {
         query(orgCol("finishedProducts"), orderBy("nameLower")),
         (snap) => {
           finishedProducts = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+          try{ __fpDedupFinishedProducts("realtime"); }catch(_){ }
           renderAnag();
         },
         (err) => {
@@ -18701,10 +18973,29 @@ function __fpRenderSmartBrowse(){
 
       payload.components = cleanComps;
 
+      // Anti-duplicati: se sto CREANDO e il codice esiste gia', aggiorno quello esistente (unifica).
+      const __fpCodeLower = code ? String(code).toLowerCase() : "";
+      let __fpCreateIntoExisting = null;
+      if (!__fpCurrentId && __fpCodeLower){
+        try{
+          __fpCreateIntoExisting = (Array.isArray(finishedProducts) ? finishedProducts : []).find(x => {
+            const cl = __fpNormCode(x && (x.codeLower || x.code) || "");
+            return cl && cl === __fpCodeLower;
+          }) || null;
+        }catch(_){ __fpCreateIntoExisting = null; }
+        if (__fpCreateIntoExisting && __fpCreateIntoExisting.id){
+          // converto la creazione in update sul doc esistente
+          __fpCurrentId = String(__fpCreateIntoExisting.id);
+          // merge componenti: non sovrascrivere BOM esistente con vuoto
+          try{ payload.components = __fpMergeComponents([__fpCreateIntoExisting, { components: cleanComps }]); }catch(_){ }
+        }
+      }
+
       try{
         if (__fpCurrentId) {
           await setDoc(doc(fb.db, "orgs", ORG_ID, "finishedProducts", __fpCurrentId), payload, { merge: true });
-          showToast("Prodotto finito salvato");
+          try{ __fpDedupFinishedProducts("save"); }catch(_){ }
+          showToast((__fpCreateIntoExisting && __fpCreateIntoExisting.id) ? "Prodotto finito unificato" : "Prodotto finito salvato");
           closeFinishedProductModal();
           return;
         }
@@ -18713,6 +19004,7 @@ function __fpRenderSmartBrowse(){
         payload.createdBy = (fb.user.email || fb.user.uid || "");
         const ref = await addDoc(orgCol("finishedProducts"), payload);
         __fpCurrentId = ref && ref.id ? ref.id : null;
+        try{ __fpDedupFinishedProducts("create"); }catch(_){ }
         showToast("Prodotto finito creato");
         closeFinishedProductModal();
       }catch(e){
