@@ -17815,6 +17815,11 @@ async function handleFileSelection(fileList) {
      ****************************************************************/
     const __SCANBRIDGE_BASE = "http://127.0.0.1:27899";
 
+    // ScanBridge key (hardcoded).
+    // Se preferisci, puoi impostarla nell'HTML: window.SCANBRIDGE_KEY = "...";
+    const __SCANBRIDGE_KEY_HARDCODED = "";
+
+
     function __scanbridgeIsMobile(){
       try{
         // euristica: touch + schermo piccolo
@@ -17826,17 +17831,37 @@ async function handleFileSelection(fileList) {
       }catch(_){ }
       return false;
     }
-
     function __scanbridgeKey(){
+      // 1) hardcoded (JS)
       try{
-        const k = String((state && state.settings && state.settings.scanbridgeKey) || "").trim();
-        if (k) return k;
+        const k0 = String(__SCANBRIDGE_KEY_HARDCODED || "").trim();
+        if (k0) return k0;
       }catch(_){ }
-      // fallback (se vuoi impostarla via console): localStorage.setItem('hubinv_scanbridge_key','...')
+
+      // 2) global (HTML)
       try{
-        const k2 = String(localStorage.getItem("hubinv_scanbridge_key") || "").trim();
+        const w = (typeof window !== "undefined") ? window : null;
+        const k1 = String((w && (w.SCANBRIDGE_KEY || w.SCANBRIDGE_API_KEY || w.__SCANBRIDGE_KEY)) || "").trim();
+        if (k1) return k1;
+      }catch(_){ }
+
+      // 3) meta tag (optional)
+      try{
+        const m = document.querySelector('meta[name="scanbridge-key"]');
+        const k2 = m ? String(m.getAttribute('content') || "").trim() : "";
         if (k2) return k2;
       }catch(_){ }
+
+      // 4) legacy (compatibilità): settings/localStorage
+      try{
+        const k3 = String((state && state.settings && state.settings.scanbridgeKey) || "").trim();
+        if (k3) return k3;
+      }catch(_){ }
+      try{
+        const k4 = String(localStorage.getItem('hubinv_scanbridge_key') || "").trim();
+        if (k4) return k4;
+      }catch(_){ }
+
       return "";
     }
 
@@ -17886,7 +17911,6 @@ async function handleFileSelection(fileList) {
     async function __scanbridgeScanAndImport(){
       const k = __scanbridgeKey();
       if (!k){
-        try{ showToast("ScanBridge non configurato: apri Impostazioni e inserisci la key", "warn"); }catch(_){ }
         throw new Error("ScanBridge key mancante");
       }
 
@@ -17916,8 +17940,16 @@ async function handleFileSelection(fileList) {
       try{
         await __scanbridgeScanAndImport();
       }catch(e){
+        let msg = "";
+        try{ msg = String(e && (e.message || e) || ""); }catch(_){ msg = ""; }
+        const low = msg.toLowerCase();
+        if (low.includes("key") && low.includes("manc")) {
+          try{ showToast("ScanBridge key mancante: incollala nel file hub_inventario.html (window.SCANBRIDGE_KEY)", "warn"); }catch(_){ }
+        } else {
+          try{ showToast("Scanner non disponibile: carica manualmente", "warn"); }catch(_){ }
+        }
+
         try{ console.warn("[ScanBridge] scan failed", e); }catch(_){ }
-        try{ showToast("Scanner non disponibile: carica manualmente", "warn"); }catch(_){ }
         try{ galleryInput.click(); }catch(_){ }
       }
     });
