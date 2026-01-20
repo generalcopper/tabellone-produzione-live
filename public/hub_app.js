@@ -75,9 +75,66 @@
   try {
     if (document.getElementById("viewFinishedInventory")) return;
 
-    const html = "<div id=\"viewFinishedInventory\" class=\"view modalOverlay\">\n  <article class=\"card\" id=\"fpStockCard\">\n    <div class=\"hd\">\n      <div class=\"overlayHeaderTitle\">\n        <button class=\"iconBtn overlayBack\" id=\"btnBackFpInv\" type=\"button\" aria-label=\"Indietro\">\u2039</button>\n        <h2>Inventario prodotti finiti</h2>\n      </div>\n      <div class=\"inlineRow\" style=\"gap:8px; justify-content:flex-end;\">\n        <div class=\"pill\" id=\"pillFpInvWarehouse\" style=\"display:none\">\u2014</div>\n        <div class=\"pill\" id=\"pillFpStock\">Seleziona</div>\n        <button class=\"iconBtn\" id=\"btnCloseFpInv\" type=\"button\" aria-label=\"Chiudi\">\u00d7</button>\n      </div>\n    </div>\n    <div class=\"bd\">\n\n      <div id=\"fpInvPicker\" class=\"stack\">\n        <div class=\"hero-sub\">Seleziona sede</div>\n        <div class=\"homeActions\" style=\"grid-template-columns: 1fr; gap: 14px;\">\n          <button class=\"btn btn-primary homeTile\" id=\"btnFpInvPickCerea\" type=\"button\" aria-label=\"Inventario prodotti finiti Cerea\">\n            <div class=\"homeTileTop\">\n              <svg class=\"homeTileIcon\" viewBox=\"0 0 24 24\" aria-hidden=\"true\">\n                <path d=\"M4 6a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v2a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6zm0 8a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-4z\"/>\n              </svg>\n              <span class=\"homeTileBadge\">CEREA</span>\n            </div>\n            <div class=\"homeTileText\">\n              <div class=\"homeTileTitle\">Cerea</div>\n              <div class=\"homeTileSub\">Apri stock prodotti finiti</div>\n            </div>\n          </button>\n\n          <button class=\"btn btn-primary homeTile\" id=\"btnFpInvPickConcamarise\" type=\"button\" aria-label=\"Inventario prodotti finiti Concamarise\">\n            <div class=\"homeTileTop\">\n              <svg class=\"homeTileIcon\" viewBox=\"0 0 24 24\" aria-hidden=\"true\">\n                <path d=\"M4 6a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v2a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6zm0 8a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-4z\"/>\n              </svg>\n              <span class=\"homeTileBadge\">CONCA</span>\n            </div>\n            <div class=\"homeTileText\">\n              <div class=\"homeTileTitle\">Concamarise</div>\n              <div class=\"homeTileSub\">Apri stock prodotti finiti</div>\n            </div>\n          </button>\n        </div>\n      </div>\n\n      <div id=\"fpInvDetail\" class=\"stack\" style=\"display:none;\">\n        <div class=\"inlineRow\" style=\"justify-content:space-between; align-items:flex-end; gap:12px;\">\n          <div class=\"stack\" style=\"flex:1; min-width: 220px;\">\n            <div class=\"hero-sub\" id=\"fpInvDetailTitle\">Inventario prodotti finiti</div>\n            <div class=\"muted\">Stock per sede • modifica la quantità e salva</div>\n          </div>\n          <button class=\"btn btn-ghost btn-xs\" id=\"btnFpInvBackPicker\" type=\"button\">\u2190 Cambia sede</button>\n        </div>\n\n        <div class=\"inlineRow listStickyBar\" style=\"justify-content: space-between;\">\n          <div class=\"inlineRow\" style=\"flex: 1 1 auto;\">\n            <div class=\"field\" style=\"min-width: 220px;\">\n              <label for=\"fpInvSearch\">Cerca</label>\n              <input id=\"fpInvSearch\" placeholder=\"Codice / nome…\" />\n            </div>\n            <div class=\"field\" style=\"min-width: 220px;\">\n              <label for=\"fpInvFilterCategory\">Categoria</label>\n              <select id=\"fpInvFilterCategory\">\n                <option value=\"\">Tutte</option>\n                <option value=\"__none\">Non assegnata</option>\n              </select>\n            </div>\n          </div>\n        </div>\n\n        <div class=\"tableWrap\" style=\"max-height: 420px; overflow:auto; margin-top: 10px;\">\n          <table class=\"dataGrid\">\n            <thead>\n              <tr>\n                <th>Nome prodotto</th>\n                <th>Codice</th>\n                <th>Categoria</th>\n                <th class=\"qty\">Q.tà</th>\n              </tr>\n            </thead>\n            <tbody id=\"fpStockTbody\">\n              <tr><td class=\"td-muted\" colspan=\"4\">Seleziona una sede.</td></tr>\n            </tbody>\n          </table>\n        </div>\n      </div>\n\n    </div>\n  </article>\n</div>";
+    const html = `
+<div id="viewFinishedInventory" class="view modalOverlay">
+  <article class="card" id="fpStockCard">
+    <div class="hd">
+      <div class="overlayHeaderTitle">
+        <button class="iconBtn overlayBack" id="btnBackFpInv" type="button" aria-label="Indietro">‹</button>
+        <h2>Inventario prodotti finiti</h2>
+      </div>
+      <div class="inlineRow" style="gap:8px; justify-content:flex-end;">
+        <div class="pill" id="pillFpInvWarehouse">Sede unica</div>
+        <div class="pill" id="pillFpStock">—</div>
+        <button class="iconBtn" id="btnCloseFpInv" type="button" aria-label="Chiudi">×</button>
+      </div>
+    </div>
+    <div class="bd">
+      <div id="fpInvDetail" class="stack">
+        <div class="inlineRow" style="justify-content:space-between; align-items:flex-end; gap:12px;">
+          <div class="stack" style="flex:1; min-width: 220px;">
+            <div class="hero-sub" id="fpInvDetailTitle">Inventario prodotti finiti</div>
+            <div class="muted">Sede unica • modifica la quantità e salva</div>
+          </div>
+        </div>
 
-    const tpl = document.createElement("template");
+        <div class="inlineRow listStickyBar" style="justify-content: space-between;">
+          <div class="inlineRow" style="flex: 1 1 auto;">
+            <div class="field" style="min-width: 220px;">
+              <label for="fpInvSearch">Cerca</label>
+              <input id="fpInvSearch" placeholder="Codice / nome…" />
+            </div>
+            <div class="field" style="min-width: 220px;">
+              <label for="fpInvFilterCategory">Categoria</label>
+              <select id="fpInvFilterCategory">
+                <option value="">Tutte</option>
+                <option value="__none">Non assegnata</option>
+              </select>
+            </div>
+          </div>
+        </div>
+
+        <div class="tableWrap" style="max-height: 420px; overflow:auto; margin-top: 10px;">
+          <table class="dataGrid">
+            <thead>
+              <tr>
+                <th>Nome prodotto</th>
+                <th>Codice</th>
+                <th>Categoria</th>
+                <th class="qty">Q.tà</th>
+              </tr>
+            </thead>
+            <tbody id="fpStockTbody">
+              <tr><td class="td-muted" colspan="4">Carico inventario PF…</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </article>
+</div>`;
+
+const tpl = document.createElement("template");
     tpl.innerHTML = html;
 
     const anchor =
@@ -2411,11 +2468,64 @@
     return Array.isArray(bom) ? bom : [];
   }
 
+  function rowQtyInt(row){
+    try{
+      const qtyLine = (row && row.qty != null && Number.isFinite(Number(row.qty))) ? Number(row.qty) : parseFraction(row && row.qtyRaw);
+      const qLine = (qtyLine != null && Number.isFinite(qtyLine)) ? qtyLine : 0;
+      const qi = Math.round(qLine || 0);
+      return (qi > 0) ? qi : 0;
+    }catch(_){ return 0; }
+  }
+
+  let __fpStockCacheSig = "";
+  let __fpStockCacheMap = new Map();
+
+  function getFinishedStockMap(){
+    try{
+      const H = S.hub || getHub();
+      const mvs = (H && H.state && Array.isArray(H.state.finishedMovements)) ? H.state.finishedMovements : [];
+      const last = (mvs && mvs.length) ? (mvs[mvs.length-1].createdAt || mvs[mvs.length-1].date || "") : "";
+      const sig = String(mvs.length) + "|" + String(last);
+      if (sig && sig === __fpStockCacheSig && __fpStockCacheMap) return __fpStockCacheMap;
+
+      const map = new Map();
+      for (const mv of (mvs || [])){
+        const code = norm(mv && mv.code);
+        if (!code) continue;
+        const q = (mv && mv.qty != null && Number.isFinite(Number(mv.qty))) ? Math.round(Number(mv.qty)) : 0;
+        if (!q) continue;
+        const delta = (String(mv.type || "").toUpperCase() === "OUT") ? -q : q;
+        map.set(code, (map.get(code) || 0) + delta);
+      }
+
+      __fpStockCacheSig = sig;
+      __fpStockCacheMap = map;
+      return map;
+    }catch(_){ return new Map(); }
+  }
+
+  function finishedStockAvailable(code){
+    const k = norm(code);
+    if (!k) return 0;
+    const m = getFinishedStockMap();
+    const v = Number(m.get(k) || 0);
+    return Number.isFinite(v) ? v : 0;
+  }
+
   function isRowConfigured(row){
     const fp = getFpForRow(row);
     if (!fp) return { ok: false, why: "missing", fp: null };
+
+    const qi = rowQtyInt(row);
+    if (qi <= 0) return { ok: true, why: "skip", fp };
+
     const comps = getFpComponents(fp);
     if (comps.length > 0) return { ok: true, why: "ok", fp };
+
+    // Se non c'e' distinta base, va bene SOLO se la giacenza PF copre tutta la quantita' del DDT
+    const stock = finishedStockAvailable(row && row.code);
+    if (stock >= qi) return { ok: true, why: "stock", fp };
+
     return { ok: false, why: "empty", fp };
   }
 
@@ -2655,7 +2765,8 @@
         customer: String(c.customer || ""),
         rows: Array.isArray(c.rows) ? c.rows : [],
         warehouse: c.warehouse || "",
-        movementIds: Array.isArray(c.movementIds) ? c.movementIds : []
+        movementIds: Array.isArray(c.movementIds) ? c.movementIds : [],
+        finishedMovementIds: Array.isArray(c.finishedMovementIds) ? c.finishedMovementIds : []
       };
       setDetailOpen(true);
       renderDetail(S.selected, "done");
@@ -2759,22 +2870,28 @@
 
     const H = S.hub;
     if (!H || !H.fb || !H.fb.db || !H.FS) { alert("Hub non pronto"); return; }
-    if (!H.fb.user) { try{ window.HubInv?.showToast?.("Accedi con Google per inviare", "warn"); }catch(_){ alert("Accedi con Google"); } return; }
+    if (!H.fb.user) {
+      try{ window.HubInv?.showToast?.("Accedi con Google per inviare", "warn"); }catch(_){ alert("Accedi con Google"); }
+      return;
+    }
 
     cacheCompletedMap();
-    if (S.completedMap.has(ddt.key)) { alert("Questo DDT risulta già completato."); return; }
+    if (S.completedMap.has(ddt.key)) { alert("Questo DDT risulta gia' completato."); return; }
 
     const st = ddtStatus(ddt);
     if (!st.ok) { alert("Non tutte le righe sono configurate (cerchi rossi)."); return; }
 
     const autoOn = !!S.autoDischarge;
 
-    const ok = confirm(autoOn ? `Completare e scaricare componenti?
+    const ok = confirm(autoOn ? `Completare e scaricare?
+
+• Se la giacenza PF e' disponibile, scarico PRIMA i prodotti finiti
+• Se la giacenza PF non copre tutta la quantita', scarico gli imballaggi (distinta base/categoria)
 
 DDT ${ddt.number} del ${fmtDateIT(ddt.date)}
 Righe: ${st.total}` : `Completare SENZA scarico automatico?
 
-• Il DDT finirà in "Completati"
+• Il DDT finira' in "Completati"
 • NON verranno creati movimenti di inventario
 
 DDT ${ddt.number} del ${fmtDateIT(ddt.date)}
@@ -2783,9 +2900,9 @@ Righe: ${st.total}`);
 
     S.busy = true;
     try{
-      const { addDoc, setDoc, doc, collection, serverTimestamp } = H.FS;
+      const { addDoc, setDoc, doc, collection, serverTimestamp, getDocs, query, orderBy } = H.FS;
 
-      // Se lo scarico automatico è disattivato: segna solo come completato (senza movimenti)
+      // Se lo scarico automatico e' disattivato: segna solo come completato (senza movimenti)
       if (!autoOn){
         const doneId = encodeURIComponent(String(ddt.key || '').trim());
         const doneRef = doc(H.fb.db, 'orgs', H.ORG_ID, 'daneaDdtCompleted', doneId);
@@ -2801,8 +2918,6 @@ Righe: ${st.total}`);
             qty: x.qty ?? null,
             qtyRaw: x.qtyRaw || '',
             uom: x.uom || '',
-
-            // fatturato (best-effort)
             unitNet: (x && x.unitNet != null) ? x.unitNet : null,
             unitGross: (x && x.unitGross != null) ? x.unitGross : null,
             vatPerc: (x && x.vatPerc != null) ? x.vatPerc : null,
@@ -2816,8 +2931,10 @@ Righe: ${st.total}`);
           currency: String(ddt.currency || 'EUR'),
           warehouse: 'none',
           allocations: [],
+          finishedAllocations: [],
           xmlHash: String(ddt.hash || ''),
           movementIds: [],
+          finishedMovementIds: [],
           autoDischarge: false,
           createdAt: serverTimestamp(),
           createdBy: H.fb.user.email || H.fb.user.uid
@@ -2830,213 +2947,272 @@ Righe: ${st.total}`);
         return;
       }
 
-      // 1) calcola fabbisogni componenti (somma per codice)
-      const req = new Map(); // codeLower -> {code,name,uom,qtyFloat}
+      // 1) Carica inventario PF e crea disponibilita' (sede unica)
+      let fpMovs = (H.state && Array.isArray(H.state.finishedMovements)) ? H.state.finishedMovements : [];
+      if (!fpMovs.length){
+        try{
+          const col = collection(H.fb.db, 'orgs', H.ORG_ID, 'finishedInventoryMovements');
+          const q = query(col, orderBy('createdAt'));
+          const snap = await getDocs(q);
+          fpMovs = snap.docs.map(d => {
+            const data = d.data() || {};
+            return { id: d.id, type: data.type || 'IN', code: data.code || '', qty: data.qty };
+          });
+          if (H.state) H.state.finishedMovements = fpMovs;
+        }catch(e){ try{ console.warn('fetch finishedInventoryMovements failed', e); }catch(_){ } }
+      }
+
+      const availFp = new Map();
+      for (const mv of (fpMovs || [])){
+        const code = String(mv && mv.code || '').trim();
+        if (!code) continue;
+        const low = code.toLowerCase();
+        const q = (mv && mv.qty != null && Number.isFinite(Number(mv.qty))) ? Math.round(Number(mv.qty)) : 0;
+        if (!q) continue;
+        const delta = (String(mv.type || '').toUpperCase() === 'OUT') ? -q : q;
+        availFp.set(low, (availFp.get(low) || 0) + delta);
+      }
+
+      // 2) Calcola fabbisogni: prima PF (giacenza), poi componenti sul residuo
+      const req = new Map(); // componenti: codeLower -> {code,name,uom,qtyFloat}
+      const reqFp = new Map(); // PF: codeLower -> {code,name,uom,qtyInt}
+
       for (const r of (ddt.rows || [])){
+        const code = String(r.code || '').trim();
+        if (!code) continue;
+
         const qtyLine = (r.qty != null && Number.isFinite(Number(r.qty))) ? Number(r.qty) : parseFraction(r.qtyRaw);
         const qLine = (qtyLine != null && Number.isFinite(qtyLine)) ? qtyLine : 0;
         if (qLine <= 0) continue;
 
         const fp = getFpForRow(r);
+        if (!fp) continue;
+
+        const qInt = Math.round(qLine);
+        if (qInt <= 0) continue;
+
+        const low = code.toLowerCase();
+        const aFp = Math.max(0, Math.round(Number(availFp.get(low) || 0)));
+        const useFp = Math.min(qInt, aFp);
+
+        if (useFp > 0){
+          const name = String(fp.name || fp.nome || r.desc || code).trim() || code;
+          const uom = String(fp.uom || r.uom || 'pz').trim() || 'pz';
+          const cur = reqFp.get(low) || { code, name, uom, qtyInt: 0 };
+          cur.qtyInt += useFp;
+          if (!cur.name) cur.name = name;
+          if (!cur.uom) cur.uom = uom;
+          reqFp.set(low, cur);
+          availFp.set(low, aFp - useFp);
+        }
+
+        const rem = qInt - useFp;
+        if (rem <= 0) continue;
+
         const comps = getFpComponents(fp);
+        if (!comps || !comps.length){
+          alert(`Distinta base mancante per ${code} (${fp.name || fp.nome || ''}).\n\nGiacenza PF insufficiente: rimangono ${rem} pz da scaricare come componenti.`);
+          return;
+        }
+
         for (const c of comps){
-          const cCode = String(c.code || "").trim();
+          const cCode = String(c.code || '').trim();
           if (!cCode) continue;
 
           const per = compQtyPerUnit(c);
           if (per == null || !Number.isFinite(per) || per <= 0) continue;
 
-          const add = per * qLine;
-          const low = cCode.toLowerCase();
-          const cur = req.get(low) || { code: cCode, name: String(c.name || c.articolo || cCode).trim(), uom: String(c.uom || "").trim(), qty: 0 };
+          const add = per * rem;
+          const clow = cCode.toLowerCase();
+          const cur = req.get(clow) || { code: cCode, name: String(c.name || c.articolo || cCode).trim(), uom: String(c.uom || '').trim(), qty: 0 };
           cur.qty += add;
           if (!cur.name) cur.name = cCode;
-          if (!cur.uom) cur.uom = String(c.uom || "").trim();
-          req.set(low, cur);
+          if (!cur.uom) cur.uom = String(c.uom || '').trim();
+          req.set(clow, cur);
         }
       }
 
-      if (!req.size){
-        alert("Nessun componente calcolabile (distinta base vuota o quantità non valide).");
+      if (!req.size && !reqFp.size){
+        alert('Nessun movimento calcolabile (controlla righe e quantita).');
         return;
       }
 
-      // 2) inventario globale: calcola disponibilità per sede (ignorando fornitore)
-      let movs = (H.state && Array.isArray(H.state.movements)) ? H.state.movements : [];
-
-      // Se l'app ha appena aperto, può capitare che lo snapshot dei movimenti non sia
-      // ancora arrivato: in quel caso facciamo un fetch one-shot e poi riproviamo.
-      if (!movs.length){
-        try{
-          const FS = H.FS || {};
-          if (H.fb && H.fb.db && typeof FS.getDocs === "function" && typeof FS.collection === "function" && typeof FS.query === "function" && typeof FS.orderBy === "function"){
-            try{ H.showToast?.("Carico inventario…", "warn"); }catch(_){ }
-            const col = FS.collection(H.fb.db, "orgs", H.ORG_ID, "inventoryMovements");
-            const q = FS.query(col, FS.orderBy("createdAt"));
-            const snap = await FS.getDocs(q);
-            movs = snap.docs.map(d => {
-              const data = d.data() || {};
-              return {
-                id: d.id,
-                type: data.type || "IN",
-                code: data.code || "",
-                qty: data.qty,
-                warehouse: data.warehouse || ""
-              };
-            });
-            if (H.state) H.state.movements = movs;
-          }
-        }catch(e){
-          try{ console.warn("fetch inventoryMovements failed", e); }catch(_){ }
-        }
-      }
-
-      if (!movs.length){
-        if (!silent){
-          alert("Inventario non pronto: movimenti non caricati.");
-        } else {
-          try{ window.HubInv?.showToast?.("Auto-scarico: inventario non pronto", "warn"); }catch(_){ }
-        }
-        return;
-      }
-
-      const _normWh = (w) => {
-        try{
-          if (H && typeof H.normalizeWarehouse === "function") return H.normalizeWarehouse(w);
-        }catch(_){}
-        // fallback minimale (nel caso il bridge non esponga normalizeWarehouse)
-        const s = String(w || "").trim().toLowerCase();
-        if (s.includes("conca") || s.includes("concamarise")) return "concamarise";
-        return "cerea";
-      };
-      const _safeInt = (v) => {
-        try{
-          if (H && typeof H.safeInt === "function") return H.safeInt(v);
-        }catch(_){}
-        const n = parseInt(String(v||"").replace(/[^0-9\-]/g,""), 10);
-        return Number.isFinite(n) ? n : 0;
-      };
-
-      const avail = { cerea: new Map(), concamarise: new Map() }; // codeLower -> qtyInt
-      for (const mv of movs){
-        const code = String(mv && mv.code || "").trim();
-        if (!code) continue;
-        const low = code.toLowerCase();
-        const w = _normWh(mv.warehouse || mv.site || mv.magazzino || mv.location || "");
-        const q = _safeInt(mv.qty);
-        if (!q) continue;
-        const delta = (String(mv.type || "").toUpperCase() === "OUT") ? -q : q;
-        const m = (w === "concamarise") ? avail.concamarise : avail.cerea;
-        m.set(low, (m.get(low) || 0) + delta);
-      }
-
-      // 3) validazione scorte (globale) prima di scrivere
-      const needList = Array.from(req.values()).map(it => {
-        const qtyInt = Math.round(Number(it.qty) || 0);
-        return Object.assign({}, it, { qtyInt });
-      }).filter(x => x.qtyInt);
-
-      for (const it of needList){
-        const low = String(it.code || "").trim().toLowerCase();
-        const aC = Math.max(0, _safeInt(avail.cerea.get(low)));
-        const aK = Math.max(0, _safeInt(avail.concamarise.get(low)));
-        const tot = aC + aK;
-        if (tot < it.qtyInt){
-          alert(`Scorta insufficiente per ${it.code} — ${it.name || ""}
-
-Richiesti: ${it.qtyInt.toLocaleString("it-IT")} ${String(it.uom||"").trim()}
-Disponibili: ${(tot).toLocaleString("it-IT")} (Cerea ${aC.toLocaleString("it-IT")}, Concamarise ${aK.toLocaleString("it-IT")})`);
-          return;
-        }
-      }
-
-      // 4) crea movimenti OUT (split automatico tra sedi, senza scelta manuale)
+      // 3) Componenti: calcola disponibilita' per sede e valida scorte
       const movementIds = [];
       const allocations = [];
-      const movCol = collection(H.fb.db, "orgs", H.ORG_ID, "inventoryMovements");
 
-      const noteBase = `Scarico componenti per DDT ${ddt.number} del ${fmtDateIT(ddt.date)} (DaneaXML)`;
-      for (const it of needList){
-        const low = String(it.code || "").trim().toLowerCase();
-        let need = it.qtyInt;
+      if (req.size){
+        let movs = (H.state && Array.isArray(H.state.movements)) ? H.state.movements : [];
+        if (!movs.length){
+          try{
+            const col = collection(H.fb.db, 'orgs', H.ORG_ID, 'inventoryMovements');
+            const q = query(col, orderBy('createdAt'));
+            const snap = await getDocs(q);
+            movs = snap.docs.map(d => {
+              const data = d.data() || {};
+              return { id: d.id, type: data.type || 'IN', code: data.code || '', qty: data.qty, warehouse: data.warehouse || '' };
+            });
+            if (H.state) H.state.movements = movs;
+          }catch(e){ try{ console.warn('fetch inventoryMovements failed', e); }catch(_){ } }
+        }
 
-        let aC = Math.max(0, _safeInt(avail.cerea.get(low)));
-        let aK = Math.max(0, _safeInt(avail.concamarise.get(low)));
+        if (!movs.length){
+          alert('Inventario non pronto: movimenti non caricati.');
+          return;
+        }
 
-        // scegli sede primaria = quella con più disponibilità (riduce split)
-        const first = (aK > aC) ? "concamarise" : "cerea";
-        const second = (first === "cerea") ? "concamarise" : "cerea";
-
-        const takeFrom = (wh) => {
-          if (need <= 0) return 0;
-          const cur = (wh === "concamarise") ? aK : aC;
-          const take = Math.min(need, cur);
-          if (take <= 0) return 0;
-          need -= take;
-          if (wh === "concamarise") aK -= take;
-          else aC -= take;
-          return take;
+        const _normWh = (w) => {
+          try{ if (H && typeof H.normalizeWarehouse === 'function') return H.normalizeWarehouse(w); }catch(_){ }
+          const ss = String(w || '').trim().toLowerCase();
+          if (ss.includes('conca') || ss.includes('concamarise')) return 'concamarise';
+          return 'cerea';
+        };
+        const _safeInt = (v) => {
+          const n = parseInt(String(v||'').replace(/[^0-9\-]/g,''), 10);
+          return Number.isFinite(n) ? n : 0;
         };
 
-        const t1 = takeFrom(first);
-        const t2 = takeFrom(second);
-
-        // aggiorna disponibilità residue
-        avail.cerea.set(low, aC);
-        avail.concamarise.set(low, aK);
-
-        allocations.push({ code: it.code, name: it.name || it.code, uom: String(it.uom||"").trim(), qty: it.qtyInt, byWarehouse: { cerea: (first==="cerea"?t1:t2) || 0, concamarise: (first==="concamarise"?t1:t2) || 0 } });
-
-        const makePayload = (warehouse, qtyInt) => ({
-          type: "OUT",
-          customer: "Scarico DDT",
-          code: it.code,
-          item: it.name || it.code,
-          uom: String(it.uom || "").trim(),
-          qtyRaw: `${it.qty} ${String(it.uom||"").trim()}`.trim(),
-          qty: qtyInt,
-          date: String(ddt.date || "").trim(),
-          note: noteBase,
-          source: "DaneaXML",
-          rawText: "",
-          warehouse: warehouse,
-
-          docType: "DDT",
-          docNum: String(ddt.number || "").trim(),
-          docDateRaw: String(ddt.date || "").trim(),
-          daneaDdtKey: String(ddt.key || "").trim(),
-
-          createdAt: serverTimestamp(),
-          createdBy: H.fb.user.email || H.fb.user.uid
-        });
-
-        if (t1 > 0){
-          const ref = await addDoc(movCol, makePayload(first, t1));
-          if (ref && ref.id) movementIds.push(ref.id);
+        const avail = { cerea: new Map(), concamarise: new Map() };
+        for (const mv of movs){
+          const code = String(mv && mv.code || '').trim();
+          if (!code) continue;
+          const low = code.toLowerCase();
+          const w = _normWh(mv.warehouse || mv.site || mv.magazzino || mv.location || '');
+          const q = _safeInt(mv.qty);
+          if (!q) continue;
+          const delta = (String(mv.type || '').toUpperCase() === 'OUT') ? -q : q;
+          const m = (w === 'concamarise') ? avail.concamarise : avail.cerea;
+          m.set(low, (m.get(low) || 0) + delta);
         }
-        if (t2 > 0){
-          const ref = await addDoc(movCol, makePayload(second, t2));
-          if (ref && ref.id) movementIds.push(ref.id);
+
+        const needList = Array.from(req.values()).map(it => {
+          const qtyInt = Math.round(Number(it.qty) || 0);
+          return Object.assign({}, it, { qtyInt });
+        }).filter(x => x.qtyInt);
+
+        for (const it of needList){
+          const low = String(it.code || '').trim().toLowerCase();
+          const aC = Math.max(0, _safeInt(avail.cerea.get(low)));
+          const aK = Math.max(0, _safeInt(avail.concamarise.get(low)));
+          const tot = aC + aK;
+          if (tot < it.qtyInt){
+            alert(`Scorta insufficiente per ${it.code} — ${it.name || ''}\n\nRichiesti: ${it.qtyInt.toLocaleString('it-IT')} ${String(it.uom||'').trim()}\nDisponibili: ${(tot).toLocaleString('it-IT')} (Cerea ${aC.toLocaleString('it-IT')}, Concamarise ${aK.toLocaleString('it-IT')})`);
+            return;
+          }
+        }
+
+        // 4) crea movimenti OUT componenti (split automatico tra sedi)
+        const movCol = collection(H.fb.db, 'orgs', H.ORG_ID, 'inventoryMovements');
+        const noteBase = `Scarico componenti per DDT ${ddt.number} del ${fmtDateIT(ddt.date)} (DaneaXML)`;
+
+        for (const it of needList){
+          const low = String(it.code || '').trim().toLowerCase();
+          let need = it.qtyInt;
+
+          let aC = Math.max(0, _safeInt(avail.cerea.get(low)));
+          let aK = Math.max(0, _safeInt(avail.concamarise.get(low)));
+
+          const first = (aK > aC) ? 'concamarise' : 'cerea';
+          const second = (first === 'cerea') ? 'concamarise' : 'cerea';
+
+          const takeFrom = (wh) => {
+            if (need <= 0) return 0;
+            const cur = (wh === 'concamarise') ? aK : aC;
+            const take = Math.min(need, cur);
+            if (take <= 0) return 0;
+            need -= take;
+            if (wh === 'concamarise') aK -= take;
+            else aC -= take;
+            return take;
+          };
+
+          const t1 = takeFrom(first);
+          const t2 = takeFrom(second);
+
+          avail.cerea.set(low, aC);
+          avail.concamarise.set(low, aK);
+
+          allocations.push({ code: it.code, name: it.name || it.code, uom: String(it.uom||'').trim(), qty: it.qtyInt, byWarehouse: { cerea: (first==='cerea'?t1:t2) || 0, concamarise: (first==='concamarise'?t1:t2) || 0 } });
+
+          const makePayload = (warehouse, qtyInt) => ({
+            type: 'OUT',
+            customer: 'Scarico DDT',
+            code: it.code,
+            item: it.name || it.code,
+            uom: String(it.uom || '').trim(),
+            qtyRaw: `${it.qty} ${String(it.uom||'').trim()}`.trim(),
+            qty: qtyInt,
+            date: String(ddt.date || '').trim(),
+            note: noteBase,
+            source: 'DaneaXML',
+            rawText: '',
+            warehouse: warehouse,
+            docType: 'DDT',
+            docNum: String(ddt.number || '').trim(),
+            docDateRaw: String(ddt.date || '').trim(),
+            daneaDdtKey: String(ddt.key || '').trim(),
+            createdAt: serverTimestamp(),
+            createdBy: H.fb.user.email || H.fb.user.uid
+          });
+
+          if (t1 > 0){
+            const ref = await addDoc(movCol, makePayload(first, t1));
+            if (ref && ref.id) movementIds.push(ref.id);
+          }
+          if (t2 > 0){
+            const ref = await addDoc(movCol, makePayload(second, t2));
+            if (ref && ref.id) movementIds.push(ref.id);
+          }
+        }
+      }
+
+      // 4b) Prodotti finiti: crea movimenti OUT su sede unica
+      const finishedMovementIds = [];
+      const finishedAllocations = [];
+      if (reqFp.size){
+        const col = collection(H.fb.db, 'orgs', H.ORG_ID, 'finishedInventoryMovements');
+        const noteBase = `Scarico prodotti finiti per DDT ${ddt.number} del ${fmtDateIT(ddt.date)} (DaneaXML)`;
+        for (const it of Array.from(reqFp.values())){
+          if (!it || !it.qtyInt) continue;
+          finishedAllocations.push({ code: it.code, name: it.name || it.code, uom: String(it.uom||'').trim(), qty: it.qtyInt, warehouse: 'prodotti_finiti' });
+          const payload = {
+            type: 'OUT',
+            code: it.code,
+            item: it.name || it.code,
+            uom: String(it.uom || '').trim(),
+            qtyRaw: `${it.qtyInt} ${String(it.uom||'').trim()}`.trim(),
+            qty: it.qtyInt,
+            date: String(ddt.date || '').trim(),
+            note: noteBase,
+            source: 'DaneaXML',
+            warehouse: 'prodotti_finiti',
+            docType: 'DDT',
+            docNum: String(ddt.number || '').trim(),
+            docDateRaw: String(ddt.date || '').trim(),
+            daneaDdtKey: String(ddt.key || '').trim(),
+            createdAt: serverTimestamp(),
+            createdBy: H.fb.user.email || H.fb.user.uid
+          };
+          const ref = await addDoc(col, payload);
+          if (ref && ref.id) finishedMovementIds.push(ref.id);
         }
       }
 
       // 5) salva completato (id deterministico)
-      const doneId = encodeURIComponent(String(ddt.key || "").trim());
-      const doneRef = doc(H.fb.db, "orgs", H.ORG_ID, "daneaDdtCompleted", doneId);
+      const doneId = encodeURIComponent(String(ddt.key || '').trim());
+      const doneRef = doc(H.fb.db, 'orgs', H.ORG_ID, 'daneaDdtCompleted', doneId);
       await setDoc(doneRef, {
-        key: String(ddt.key || "").trim(),
-        number: String(ddt.number || "").trim(),
-        date: String(ddt.date || "").trim(),
-        customer: String(ddt.customer || "").trim(),
+        key: String(ddt.key || '').trim(),
+        number: String(ddt.number || '').trim(),
+        date: String(ddt.date || '').trim(),
+        customer: String(ddt.customer || '').trim(),
         rows: (ddt.rows || []).map(x => ({
           idx: (x && x.idx != null) ? x.idx : null,
-          code: x.code || "",
-          desc: x.desc || "",
+          code: x.code || '',
+          desc: x.desc || '',
           qty: x.qty ?? null,
-          qtyRaw: x.qtyRaw || "",
-          uom: x.uom || "",
-
-          // fatturato (best-effort)
+          qtyRaw: x.qtyRaw || '',
+          uom: x.uom || '',
           unitNet: (x && x.unitNet != null) ? x.unitNet : null,
           unitGross: (x && x.unitGross != null) ? x.unitGross : null,
           vatPerc: (x && x.vatPerc != null) ? x.vatPerc : null,
@@ -3047,37 +3223,37 @@ Disponibili: ${(tot).toLocaleString("it-IT")} (Cerea ${aC.toLocaleString("it-IT"
         netTotal: (ddt && ddt.netTotal != null) ? ddt.netTotal : null,
         vatTotal: (ddt && ddt.vatTotal != null) ? ddt.vatTotal : null,
         grossTotal: (ddt && ddt.grossTotal != null) ? ddt.grossTotal : null,
-        currency: String(ddt.currency || "EUR"),
-        warehouse: "global",
+        currency: String(ddt.currency || 'EUR'),
+        warehouse: 'global',
         allocations: allocations,
-        xmlHash: String(ddt.hash || ""),
+        finishedAllocations: finishedAllocations,
+        xmlHash: String(ddt.hash || ''),
         movementIds: movementIds,
+        finishedMovementIds: finishedMovementIds,
         autoDischarge: true,
         createdAt: serverTimestamp(),
         createdBy: H.fb.user.email || H.fb.user.uid
       }, { merge: true });
 
-      try{ window.HubInv?.showToast?.("DDT completato e scaricato"); }catch(_){}
-      // refresh lists
+      try{ window.HubInv?.showToast?.('DDT completato e scaricato'); }catch(_){ }
       setDetailOpen(false);
-      setTab("done");
+      setTab('done');
       await fetchNow(true);
+
     }catch(e){
       console.error(e);
-      try{ window.HubInv?.showToast?.("Errore completamento DDT", "err"); }catch(_){}
-      alert("Errore completamento DDT");
+      try{ window.HubInv?.showToast?.('Errore completamento DDT', 'err'); }catch(_){ }
+      alert('Errore completamento DDT');
     }finally{
       S.busy = false;
     }
   }
 
 
-
-  // ===== BULK: scarica automaticamente TUTTI i DDT verdi (OK) =====
+// ===== BULK: scarica automaticamente TUTTI i DDT verdi (OK) =====
   async function dischargeAllGreenDdts(opts){
     opts = (opts && typeof opts === "object") ? opts : {};
     const silent = !!opts.silent;
-    const fromAuto = !!opts.fromAuto;
 
     if (S.busy) return;
 
@@ -3087,11 +3263,8 @@ Disponibili: ${(tot).toLocaleString("it-IT")} (Cerea ${aC.toLocaleString("it-IT"
       return;
     }
 
-    // "a prescindere da accesso utente": procediamo anche senza login.
+    // procedi anche senza login (auto-mode), ma evita errori in rules
     const actor = (H.fb.user && (H.fb.user.email || H.fb.user.uid)) || "auto";
-    if (!H.fb.user && !silent){
-      try{ window.HubInv?.showToast?.("Auto-scarico: nessun utente loggato (procedo se le regole lo consentono)", "warn"); }catch(_){ }
-    }
 
     cacheCompletedMap();
 
@@ -3111,14 +3284,10 @@ Disponibili: ${(tot).toLocaleString("it-IT")} (Cerea ${aC.toLocaleString("it-IT"
       return;
     }
 
-    // Ordine "tradizionale": prima i più vecchi
     green.sort((a,b) => String(a?.date||"").localeCompare(String(b?.date||"")) || String(a?.number||"").localeCompare(String(b?.number||"")));
 
     if (!silent){
-      const ok = confirm(`Scaricare automaticamente ${green.length} DDT verdi?
-
-• Verranno creati movimenti di scarico (materie prime + imballaggi)
-• I DDT passeranno in "Completati"`);
+      const ok = confirm(`Scaricare automaticamente ${green.length} DDT verdi?\n\n• Scarico PF (se disponibili) + componenti (se necessari)\n• I DDT passeranno in "Completati"`);
       if (!ok) return;
     }
 
@@ -3134,57 +3303,50 @@ Disponibili: ${(tot).toLocaleString("it-IT")} (Cerea ${aC.toLocaleString("it-IT"
 
       const { addDoc, setDoc, doc, collection, serverTimestamp, getDocs, query, orderBy } = H.FS;
 
-      // 1) Carica inventario (movimenti) una sola volta
+      // 1) Carica inventario componenti (una sola volta)
       let movs = (H.state && Array.isArray(H.state.movements)) ? H.state.movements : [];
-
       if (!movs.length){
         try{
-          if (H.fb && H.fb.db && typeof getDocs === "function" && typeof collection === "function" && typeof query === "function" && typeof orderBy === "function"){
-            try{ H.showToast?.("Carico inventario…", "warn"); }catch(_){ }
-            const col = collection(H.fb.db, "orgs", H.ORG_ID, "inventoryMovements");
-            const q = query(col, orderBy("createdAt"));
-            const snap = await getDocs(q);
-            movs = snap.docs.map(d => {
-              const data = d.data() || {};
-              return {
-                id: d.id,
-                type: data.type || "IN",
-                code: data.code || "",
-                qty: data.qty,
-                warehouse: data.warehouse || ""
-              };
-            });
-            if (H.state) H.state.movements = movs;
-          }
-        }catch(e){
-          try{ console.warn("fetch inventoryMovements failed", e); }catch(_){ }
-        }
+          const col = collection(H.fb.db, "orgs", H.ORG_ID, "inventoryMovements");
+          const q = query(col, orderBy("createdAt"));
+          const snap = await getDocs(q);
+          movs = snap.docs.map(d => {
+            const data = d.data() || {};
+            return { id: d.id, type: data.type || "IN", code: data.code || "", qty: data.qty, warehouse: data.warehouse || "" };
+          });
+          if (H.state) H.state.movements = movs;
+        }catch(e){ try{ console.warn("fetch inventoryMovements failed", e); }catch(_){ } }
       }
 
-      if (!movs.length){
-        if (!silent){
-          alert("Inventario non pronto: movimenti non caricati.");
-        } else {
-          try{ window.HubInv?.showToast?.("Auto-scarico: inventario non pronto", "warn"); }catch(_){ }
-        }
-        return;
+      // 2) Carica inventario PF (una sola volta)
+      let fpMovs = (H.state && Array.isArray(H.state.finishedMovements)) ? H.state.finishedMovements : [];
+      if (!fpMovs.length){
+        try{
+          const col = collection(H.fb.db, "orgs", H.ORG_ID, "finishedInventoryMovements");
+          const q = query(col, orderBy("createdAt"));
+          const snap = await getDocs(q);
+          fpMovs = snap.docs.map(d => {
+            const data = d.data() || {};
+            return { id: d.id, type: data.type || "IN", code: data.code || "", qty: data.qty };
+          });
+          if (H.state) H.state.finishedMovements = fpMovs;
+        }catch(e){ try{ console.warn("fetch finishedInventoryMovements failed", e); }catch(_){ } }
       }
 
       const _normWh = (w) => {
         try{ if (H && typeof H.normalizeWarehouse === "function") return H.normalizeWarehouse(w); }catch(_){ }
-        const s = String(w || "").trim().toLowerCase();
-        if (s.includes("conca") || s.includes("concamarise")) return "concamarise";
+        const ss = String(w || "").trim().toLowerCase();
+        if (ss.includes("conca") || ss.includes("concamarise")) return "concamarise";
         return "cerea";
       };
       const _safeInt = (v) => {
-        try{ if (H && typeof H.safeInt === "function") return H.safeInt(v); }catch(_){ }
         const n = parseInt(String(v||"").replace(/[^0-9\-]/g,""), 10);
         return Number.isFinite(n) ? n : 0;
       };
 
-      // Disponibilità aggiornata "live" durante il bulk (così non scarichi più del disponibile)
+      // Disponibilita' live componenti (cosi' non scarichi piu' del disponibile)
       const avail = { cerea: new Map(), concamarise: new Map() };
-      for (const mv of movs){
+      for (const mv of (movs || [])){
         const code = String(mv && mv.code || "").trim();
         if (!code) continue;
         const low = code.toLowerCase();
@@ -3196,51 +3358,94 @@ Disponibili: ${(tot).toLocaleString("it-IT")} (Cerea ${aC.toLocaleString("it-IT"
         m.set(low, (m.get(low) || 0) + delta);
       }
 
+      // Disponibilita' live PF (sede unica)
+      const availFp = new Map();
+      for (const mv of (fpMovs || [])){
+        const code = String(mv && mv.code || "").trim();
+        if (!code) continue;
+        const low = code.toLowerCase();
+        const q = _safeInt(mv.qty);
+        if (!q) continue;
+        const delta = (String(mv.type || "").toUpperCase() === "OUT") ? -q : q;
+        availFp.set(low, (availFp.get(low) || 0) + delta);
+      }
+
       const movCol = collection(H.fb.db, "orgs", H.ORG_ID, "inventoryMovements");
+      const fpCol = collection(H.fb.db, "orgs", H.ORG_ID, "finishedInventoryMovements");
 
       let doneCount = 0;
       for (let i=0; i<green.length; i++){
         const ddt = green[i];
         if (!ddt || !ddt.key) continue;
-
-        // se nel frattempo è diventato completato, salta
         if (S.completedMap.has(ddt.key)) continue;
 
         try{ setProg(doneCount); }catch(_){ }
 
-        // 2) calcola fabbisogni componenti (somma per codice)
+        // 3) calcola fabbisogni (PF prima, componenti dopo)
         const req = new Map();
+        const reqFp = new Map();
+
         for (const r of (ddt.rows || [])){
+          const code = String(r.code || "").trim();
+          if (!code) continue;
+
           const qtyLine = (r.qty != null && Number.isFinite(Number(r.qty))) ? Number(r.qty) : parseFraction(r.qtyRaw);
           const qLine = (qtyLine != null && Number.isFinite(qtyLine)) ? qtyLine : 0;
           if (qLine <= 0) continue;
 
           const fp = getFpForRow(r);
+          if (!fp) continue;
+
+          const qInt = Math.round(qLine);
+          if (qInt <= 0) continue;
+
+          const low = code.toLowerCase();
+          const aFp = Math.max(0, _safeInt(availFp.get(low)));
+          const useFp = Math.min(qInt, aFp);
+
+          if (useFp > 0){
+            const name = String(fp.name || fp.nome || r.desc || code).trim() || code;
+            const uom = String(fp.uom || r.uom || "pz").trim() || "pz";
+            const cur = reqFp.get(low) || { code, name, uom, qtyInt: 0 };
+            cur.qtyInt += useFp;
+            reqFp.set(low, cur);
+            availFp.set(low, aFp - useFp);
+          }
+
+          const rem = qInt - useFp;
+          if (rem <= 0) continue;
+
           const comps = getFpComponents(fp);
+          if (!comps || !comps.length){
+            if (!silent){
+              alert(`DDT ${ddt.number || "?"}: distinta base mancante per ${code}.\n\nGiacenza PF insufficiente: rimangono ${rem} pz.`);
+            }
+            // ripristina PF allocati per questo codice (best-effort)
+            if (useFp > 0){ availFp.set(low, (availFp.get(low) || 0) + useFp); }
+            continue;
+          }
+
           for (const c of comps){
             const cCode = String(c.code || "").trim();
             if (!cCode) continue;
-
             const per = compQtyPerUnit(c);
             if (per == null || !Number.isFinite(per) || per <= 0) continue;
-
-            const add = per * qLine;
-            const low = cCode.toLowerCase();
-            const cur = req.get(low) || { code: cCode, name: String(c.name || c.articolo || cCode).trim(), uom: String(c.uom || "").trim(), qty: 0 };
+            const add = per * rem;
+            const clow = cCode.toLowerCase();
+            const cur = req.get(clow) || { code: cCode, name: String(c.name || c.articolo || cCode).trim(), uom: String(c.uom || "").trim(), qty: 0 };
             cur.qty += add;
             if (!cur.name) cur.name = cCode;
             if (!cur.uom) cur.uom = String(c.uom || "").trim();
-            req.set(low, cur);
+            req.set(clow, cur);
           }
         }
 
-        if (!req.size){
-          // DDT verde ma senza componenti: lo segnaliamo e lo saltiamo
-          try{ window.HubInv?.showToast?.(`DDT ${ddt.number || "?"}: nessun componente calcolabile`, "warn"); }catch(_){ }
+        if (!req.size && !reqFp.size){
+          try{ window.HubInv?.showToast?.(`DDT ${ddt.number || "?"}: nessun movimento calcolabile`, "warn"); }catch(_){ }
           continue;
         }
 
-        // 3) validazione scorte (globale) prima di scrivere
+        // 4) validazione scorte componenti (se necessari)
         const needList = Array.from(req.values()).map(it => {
           const qtyInt = Math.round(Number(it.qty) || 0);
           return Object.assign({}, it, { qtyInt });
@@ -3253,20 +3458,19 @@ Disponibili: ${(tot).toLocaleString("it-IT")} (Cerea ${aC.toLocaleString("it-IT"
           const tot = aC + aK;
           if (tot < it.qtyInt){
             if (!silent){
-              alert(`Scarico interrotto\n\nScorta insufficiente per ${it.code} — ${it.name || ""}\n\nDDT ${ddt.number || "—"} del ${fmtDateIT(ddt.date)}\nRichiesti: ${it.qtyInt.toLocaleString("it-IT")} ${String(it.uom||"").trim()}\nDisponibili: ${(tot).toLocaleString("it-IT")} (Cerea ${aC.toLocaleString("it-IT")}, Concamarise ${aK.toLocaleString("it-IT")})`);
-            } else {
-              try{ window.HubInv?.showToast?.(`Auto-scarico: scorta insufficiente per ${it.code}`, "warn"); }catch(_){ }
+              alert(`Scarico interrotto\n\nScorta insufficiente per ${it.code} — ${it.name || ""}\nRichiesti: ${it.qtyInt}\nDisponibili: ${tot} (Cerea ${aC}, Concamarise ${aK})`);
             }
             return;
           }
         }
 
-        // 4) crea movimenti OUT (split automatico tra sedi) + aggiorna avail in RAM
+        // 5) scrittura movimenti
         const movementIds = [];
+        const finishedMovementIds = [];
         const allocations = [];
+        const finishedAllocations = [];
 
-        const noteBase = `Scarico componenti per DDT ${ddt.number} del ${fmtDateIT(ddt.date)} (DaneaXML)`;
-
+        const noteComp = `Scarico componenti per DDT ${ddt.number} del ${fmtDateIT(ddt.date)} (DaneaXML)`;
         for (const it of needList){
           const low = String(it.code || "").trim().toLowerCase();
           let need = it.qtyInt;
@@ -3291,7 +3495,6 @@ Disponibili: ${(tot).toLocaleString("it-IT")} (Cerea ${aC.toLocaleString("it-IT"
           const t1 = takeFrom(first);
           const t2 = takeFrom(second);
 
-          // aggiorna disponibilità residue in RAM
           avail.cerea.set(low, aC);
           avail.concamarise.set(low, aK);
 
@@ -3306,16 +3509,14 @@ Disponibili: ${(tot).toLocaleString("it-IT")} (Cerea ${aC.toLocaleString("it-IT"
             qtyRaw: `${it.qty} ${String(it.uom||"").trim()}`.trim(),
             qty: qtyInt,
             date: String(ddt.date || "").trim(),
-            note: noteBase,
+            note: noteComp,
             source: "DaneaXML",
             rawText: "",
             warehouse: warehouse,
-
             docType: "DDT",
             docNum: String(ddt.number || "").trim(),
             docDateRaw: String(ddt.date || "").trim(),
             daneaDdtKey: String(ddt.key || "").trim(),
-
             createdAt: serverTimestamp(),
             createdBy: actor
           });
@@ -3330,7 +3531,33 @@ Disponibili: ${(tot).toLocaleString("it-IT")} (Cerea ${aC.toLocaleString("it-IT"
           }
         }
 
-        // 5) salva completato (id deterministico)
+        const noteFp = `Scarico prodotti finiti per DDT ${ddt.number} del ${fmtDateIT(ddt.date)} (DaneaXML)`;
+        for (const it of Array.from(reqFp.values())){
+          if (!it || !it.qtyInt) continue;
+          finishedAllocations.push({ code: it.code, name: it.name || it.code, uom: String(it.uom||"").trim(), qty: it.qtyInt, warehouse: "prodotti_finiti" });
+          const payload = {
+            type: "OUT",
+            code: it.code,
+            item: it.name || it.code,
+            uom: String(it.uom || "").trim(),
+            qtyRaw: `${it.qtyInt} ${String(it.uom||"").trim()}`.trim(),
+            qty: it.qtyInt,
+            date: String(ddt.date || "").trim(),
+            note: noteFp,
+            source: "DaneaXML",
+            warehouse: "prodotti_finiti",
+            docType: "DDT",
+            docNum: String(ddt.number || "").trim(),
+            docDateRaw: String(ddt.date || "").trim(),
+            daneaDdtKey: String(ddt.key || "").trim(),
+            createdAt: serverTimestamp(),
+            createdBy: actor
+          };
+          const ref = await addDoc(fpCol, payload);
+          if (ref && ref.id) finishedMovementIds.push(ref.id);
+        }
+
+        // 6) salva completato
         const doneId = encodeURIComponent(String(ddt.key || "").trim());
         const doneRef = doc(H.fb.db, "orgs", H.ORG_ID, "daneaDdtCompleted", doneId);
         await setDoc(doneRef, {
@@ -3345,8 +3572,6 @@ Disponibili: ${(tot).toLocaleString("it-IT")} (Cerea ${aC.toLocaleString("it-IT"
             qty: x.qty ?? null,
             qtyRaw: x.qtyRaw || "",
             uom: x.uom || "",
-
-            // fatturato (best-effort)
             unitNet: (x && x.unitNet != null) ? x.unitNet : null,
             unitGross: (x && x.unitGross != null) ? x.unitGross : null,
             vatPerc: (x && x.vatPerc != null) ? x.vatPerc : null,
@@ -3360,14 +3585,15 @@ Disponibili: ${(tot).toLocaleString("it-IT")} (Cerea ${aC.toLocaleString("it-IT"
           currency: String(ddt.currency || "EUR"),
           warehouse: "global",
           allocations: allocations,
+          finishedAllocations: finishedAllocations,
           xmlHash: String(ddt.hash || ""),
           movementIds: movementIds,
+          finishedMovementIds: finishedMovementIds,
           autoDischarge: true,
           createdAt: serverTimestamp(),
           createdBy: actor
         }, { merge: true });
 
-        // aggiorna cache locale (evita doppi se la snapshot è lenta)
         try{ S.completedMap.set(String(ddt.key||"").trim(), { key: String(ddt.key||"").trim() }); }catch(_){ }
 
         doneCount++;
@@ -3376,8 +3602,6 @@ Disponibili: ${(tot).toLocaleString("it-IT")} (Cerea ${aC.toLocaleString("it-IT"
       }
 
       try{ window.HubInv?.showToast?.(`Scarico completato: ${doneCount} DDT`, "ok"); }catch(_){ }
-
-      // refresh xml (best effort)
       try{ await fetchNow(true); }catch(_){ }
 
     }catch(e){
@@ -3391,7 +3615,9 @@ Disponibili: ${(tot).toLocaleString("it-IT")} (Cerea ${aC.toLocaleString("it-IT"
       S.busy = false;
     }
   }
-  async function deleteCompletedByKey(key){
+
+
+async function deleteCompletedByKey(key){
     const k = String(key || "").trim();
     if (!k) return;
 
@@ -3408,19 +3634,28 @@ Disponibili: ${(tot).toLocaleString("it-IT")} (Cerea ${aC.toLocaleString("it-IT"
     S.busy = true;
     try{
       const { deleteDoc, doc } = H.FS;
+
       const ids = Array.isArray(c.movementIds) ? c.movementIds : [];
+      const fpIds = Array.isArray(c.finishedMovementIds) ? c.finishedMovementIds : [];
+
       for (const id of ids){
         const mid = String(id || "").trim();
         if (!mid) continue;
-        try{
-          await deleteDoc(doc(H.fb.db, "orgs", H.ORG_ID, "inventoryMovements", mid));
-        }catch(e){ console.warn("delete movement failed", mid, e); }
+        try{ await deleteDoc(doc(H.fb.db, "orgs", H.ORG_ID, "inventoryMovements", mid)); }
+        catch(e){ console.warn("delete inventory movement failed", mid, e); }
+      }
+
+      for (const id of fpIds){
+        const mid = String(id || "").trim();
+        if (!mid) continue;
+        try{ await deleteDoc(doc(H.fb.db, "orgs", H.ORG_ID, "finishedInventoryMovements", mid)); }
+        catch(e){ console.warn("delete finished movement failed", mid, e); }
       }
 
       const doneId = encodeURIComponent(String(k));
       await deleteDoc(doc(H.fb.db, "orgs", H.ORG_ID, "daneaDdtCompleted", doneId));
 
-      try{ window.HubInv?.showToast?.("DDT eliminato: scarico resettato"); }catch(_){}
+      try{ window.HubInv?.showToast?.("DDT eliminato: scarico resettato"); }catch(_){ }
     }catch(e){
       console.error(e);
       alert("Errore eliminazione");
@@ -3429,7 +3664,7 @@ Disponibili: ${(tot).toLocaleString("it-IT")} (Cerea ${aC.toLocaleString("it-IT"
     }
   }
 
-  function bindEvents(){
+function bindEvents(){
     $("btnDaneaClear")?.addEventListener("click", () => { const i=$("daneaSearch"); if (i) i.value=""; render(); });
     $("daneaSearch")?.addEventListener("input", () => render());
 
@@ -3990,7 +4225,8 @@ function waitForHub(attempt){
   function isMovementsCreated(d){
     try{
       const ids = Array.isArray(d && d.movementIds) ? d.movementIds : [];
-      return ids.length > 0;
+      const fpIds = Array.isArray(d && d.finishedMovementIds) ? d.finishedMovementIds : [];
+      return ids.length > 0 || fpIds.length > 0;
     }catch(_){ return false; }
   }
 
@@ -7854,12 +8090,12 @@ Verrà aggiornata anche la chiave su tutti i prodotti finiti.`);
     });
 document.getElementById("btnGoInvCerea")?.addEventListener("click", () => { openInventoryOverlay(WAREHOUSE_CEREA); });
     document.getElementById("btnGoInvConcamarise")?.addEventListener("click", () => { openInventoryOverlay(WAREHOUSE_CONCA); });
-    document.getElementById("btnGoFinishedInventory")?.addEventListener("click", () => { openFinishedInventoryOverlay(""); });
+    document.getElementById("btnGoFinishedInventory")?.addEventListener("click", () => { openFinishedInventoryOverlay(); });
 document.getElementById("menuGoHome")?.addEventListener("click", () => { closeSideMenu(); setView("home"); });
     document.getElementById("menuGoOcr")?.addEventListener("click", () => { closeSideMenu(); startHomeOcr(); });
     document.getElementById("menuGoInvCerea")?.addEventListener("click", () => { closeSideMenu(); openInventoryOverlay(WAREHOUSE_CEREA); });
     document.getElementById("menuGoInvConcamarise")?.addEventListener("click", () => { closeSideMenu(); openInventoryOverlay(WAREHOUSE_CONCA); });
-    document.getElementById("menuGoFinishedInventory")?.addEventListener("click", () => { closeSideMenu(); openFinishedInventoryOverlay(""); });
+    document.getElementById("menuGoFinishedInventory")?.addEventListener("click", () => { closeSideMenu(); openFinishedInventoryOverlay(); });
     document.getElementById("menuGoMoveInventory")?.addEventListener("click", () => { closeSideMenu(); try{ resetMoveInvDirection(); }catch(_){ } setView("moveInv"); try{ renderMoveInv && renderMoveInv(); }catch(_){ } });
     document.getElementById("menuGoFlows")?.addEventListener("click", () => { closeSideMenu(); setView("flows"); try{ renderFlowsTable(); }catch(_){ } });
     document.getElementById("menuGoDaneaDdt")?.addEventListener("click", () => { closeSideMenu(); setView("daneaDdt"); try{ window.HubDaneaDdt && window.HubDaneaDdt.refresh && window.HubDaneaDdt.refresh(); }catch(_){ } });
@@ -8256,32 +8492,31 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
       try{ renderAll(); }catch(_){}
     }
 
-    // ===== Inventario prodotti finiti: UI picker + stato =====
-    function setFinishedInventoryWarehouse(w){
-      const wh = (String(w || "").trim()) ? normalizeWarehouse(w) : "";
+    // ===== Inventario prodotti finiti: sede unica =====
+    function setFinishedInventoryWarehouse(){
+      const wh = WAREHOUSE_FINISHED;
       __currentFinishedWarehouse = wh;
 
-      if (fpInvPicker) fpInvPicker.style.display = wh ? "none" : "";
-      if (fpInvDetail) fpInvDetail.style.display = wh ? "" : "none";
+      // Sede unica: niente picker
+      if (fpInvPicker) fpInvPicker.style.display = "none";
+      if (fpInvDetail) fpInvDetail.style.display = "";
 
       try{ __syncDockedControlsVisibility && __syncDockedControlsVisibility(); }catch(_){ }
 
       if (pillFpInvWarehouse) {
-        pillFpInvWarehouse.style.display = wh ? "inline-flex" : "none";
-        pillFpInvWarehouse.textContent = wh ? warehouseLabel(wh) : "—";
+        pillFpInvWarehouse.style.display = "inline-flex";
+        pillFpInvWarehouse.textContent = "Sede unica";
       }
-      if (fpInvDetailTitle) fpInvDetailTitle.textContent = wh ? ("Prodotti finiti — " + warehouseLabel(wh).replace("Inventario ", "")) : "Inventario prodotti finiti";
-
-      if (pillFpStock && !wh) pillFpStock.textContent = "Seleziona";
+      if (fpInvDetailTitle) fpInvDetailTitle.textContent = "Inventario prodotti finiti";
     }
 
-    function openFinishedInventoryOverlay(warehouse){
+    function openFinishedInventoryOverlay(){
       setView("finishedInventory");
-      setFinishedInventoryWarehouse(warehouse || "");
+      setFinishedInventoryWarehouse();
       try{ renderAll(); }catch(_){ }
     }
 
-    // binder (safe)
+// binder (safe)
     try{
       btnPickCerea && btnPickCerea.addEventListener("click", () => { setInventoryWarehouse(WAREHOUSE_CEREA); renderAll(); });
       btnPickConcamarise && btnPickConcamarise.addEventListener("click", () => { setInventoryWarehouse(WAREHOUSE_CONCA); renderAll(); });
@@ -8300,11 +8535,6 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
       btnFpInvPickConcamarise && btnFpInvPickConcamarise.addEventListener("click", () => { setFinishedInventoryWarehouse(WAREHOUSE_CONCA); renderAll(); });
       btnFpInvBackPicker && btnFpInvBackPicker.addEventListener("click", () => { setFinishedInventoryWarehouse(""); renderAll(); });
       btnBackFpInv && btnBackFpInv.addEventListener("click", () => {
-        if (fpInvDetail && fpInvDetail.style.display !== "none") {
-          setFinishedInventoryWarehouse("");
-          renderAll();
-          return;
-        }
         setView("home");
       });
       btnCloseFpInv && btnCloseFpInv.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){ } setView("home"); });
@@ -9130,7 +9360,7 @@ btnLogout.addEventListener("click", async () => {
 
       // Inventario prodotti finiti: nessun fallback locale
       try{ state.finishedMovements = []; }catch(_){ }
-      try{ __currentFinishedWarehouse = ""; }catch(_){ }
+      try{ __currentFinishedWarehouse = WAREHOUSE_FINISHED; }catch(_){ }
 
       thresholds = {};
       currentSupplierId = null;
@@ -9344,7 +9574,7 @@ btnLogout.addEventListener("click", async () => {
               date: data.date || "",
               note: data.note || "",
               source: data.source || "Manual",
-              warehouse: normalizeWarehouse(data.warehouse || data.site || data.magazzino || data.location || ""),
+              warehouse: WAREHOUSE_FINISHED,
               createdAt: tsToIso(data.createdAt) || data.createdAtIso || ""
             };
           });
@@ -10095,10 +10325,13 @@ async function deleteMovementsBulk(ids) {
     // ===== Inventari (Cerea / Concamarise) =====
     const WAREHOUSE_CEREA = "cerea";
     const WAREHOUSE_CONCA = "concamarise";
+    const WAREHOUSE_FINISHED = "prodotti_finiti";
 
     function normalizeWarehouse(v){
       const s = String(v || "").trim().toLowerCase();
       if (!s) return WAREHOUSE_CEREA;
+      // Prodotti finiti (sede unica)
+      if (s === WAREHOUSE_FINISHED || s === "pf" || s === "finiti" || s === "prodotti finiti" || s === "prodotti_finiti" || s.includes("finit")) return WAREHOUSE_FINISHED;
       if (s === "concamarise") return WAREHOUSE_CONCA;
       if (s === "cerea") return WAREHOUSE_CEREA;
       if (s.includes("conca")) return WAREHOUSE_CONCA;
@@ -10108,6 +10341,7 @@ async function deleteMovementsBulk(ids) {
 
     function warehouseLabel(v){
       const w = normalizeWarehouse(v);
+      if (w === WAREHOUSE_FINISHED) return "Prodotti finiti";
       return (w === WAREHOUSE_CONCA) ? "Inventario Concamarise" : "Inventario Cerea";
     }
 
@@ -10116,13 +10350,14 @@ async function deleteMovementsBulk(ids) {
     }
 
     function fpStockRowKey(code, warehouse){
-      return `${normalizeWarehouse(warehouse)}||${String(code || "").trim().toLowerCase()}`;
+      const w = normalizeWarehouse(warehouse || WAREHOUSE_FINISHED);
+      return `${w}||${String(code || "").trim().toLowerCase()}`;
     }
 
     // "" => nessun inventario selezionato (picker)
     let __currentWarehouse = "";
     // "" => nessuna sede selezionata (picker)
-    let __currentFinishedWarehouse = "";
+    let __currentFinishedWarehouse = WAREHOUSE_FINISHED;
 
     function downloadBlob(filename, content, mime="text/plain") {
       const blob = new Blob([content], { type: mime });
@@ -11235,11 +11470,12 @@ function validateMovementFields(fields) {
       const latestByKey = new Map();
 
       for (const mv of (state.finishedMovements || [])) {
-        const warehouse = normalizeWarehouse(mv.warehouse || mv.site || mv.magazzino || mv.location || "");
+        const warehouse = WAREHOUSE_FINISHED; // sede unica
         const code = (mv.code || "").trim();
         if (!code) continue;
+        const low = code.toLowerCase();
         const item = (mv.item || "").trim();
-        const k = fpStockRowKey(code, warehouse);
+        const k = low;
 
         const cur = stock.get(k) || {
           warehouse,
@@ -14828,23 +15064,9 @@ function __fpCategoryNameFromKey(key){
 }
 
 function buildFinishedInventoryRowsForWarehouse(wh, fpStockByWh){
-  const w = normalizeWarehouse(wh);
-  const other = (w === WAREHOUSE_CEREA) ? WAREHOUSE_CONCA : WAREHOUSE_CEREA;
-
-  let rows = (Array.isArray(fpStockByWh) ? fpStockByWh : []).filter(x => normalizeWarehouse(x.warehouse) === w).map(r => Object.assign({}, r));
-
-  const totByCode = new Map();
-  for (const r of (Array.isArray(fpStockByWh) ? fpStockByWh : [])) {
-    if (!r) continue;
-    const code = String(r.code || "").trim();
-    if (!code) continue;
-    const low = code.toLowerCase();
-    const ww = normalizeWarehouse(r.warehouse || "");
-    const info = totByCode.get(low) || { cerea: 0, concamarise: 0 };
-    const q = Number(r.qty);
-    info[ww] += (Number.isFinite(q) ? q : 0);
-    totByCode.set(low, info);
-  }
+  // Sede unica: niente split per magazzino
+  const w = WAREHOUSE_FINISHED;
+  let rows = (Array.isArray(fpStockByWh) ? fpStockByWh : []).map(r => Object.assign({}, r, { warehouse: w }));
 
   const existing = new Set(rows.map(r => String(r && r.code || "").trim().toLowerCase()).filter(Boolean));
   const fps = Array.isArray(finishedProducts) ? finishedProducts : [];
@@ -14858,9 +15080,6 @@ function buildFinishedInventoryRowsForWarehouse(wh, fpStockByWh){
     if (existing.has(low)) continue;
     existing.add(low);
 
-    const info = totByCode.get(low) || { cerea: 0, concamarise: 0 };
-    const bothZero = (Number(info.cerea)||0) === 0 && (Number(info.concamarise)||0) === 0;
-
     rows.push({
       warehouse: w,
       code,
@@ -14870,19 +15089,14 @@ function buildFinishedInventoryRowsForWarehouse(wh, fpStockByWh){
       lastMoveAt: "",
       fpId: String(fp.id || "").trim(),
       categoryKey: String(fp.categoryKeyLower || fp.categoryKey || "").trim().toLowerCase(),
-      categoryName: __fpCategoryNameFromKey(fp.categoryKeyLower || fp.categoryKey || ""),
-      __bothZero: bothZero
+      categoryName: __fpCategoryNameFromKey(fp.categoryKeyLower || fp.categoryKey || "")
     });
   }
 
-  // Enrich + regola visibilità sede
+  // Enrich categoria + uom + nome
   rows = rows.map(r => {
     const code = String(r && r.code || "").trim();
-    const low = code.toLowerCase();
     const fp = __findFinishedProductByCode(code);
-
-    const info = totByCode.get(low) || { cerea: 0, concamarise: 0 };
-    const bothZero = (Number(info.cerea)||0) === 0 && (Number(info.concamarise)||0) === 0;
 
     const catKey = String((r && r.categoryKey) || (fp && (fp.categoryKeyLower || fp.categoryKey)) || "").trim().toLowerCase();
     const catName = String((r && r.categoryName) || __fpCategoryNameFromKey(catKey) || "").trim();
@@ -14898,15 +15112,8 @@ function buildFinishedInventoryRowsForWarehouse(wh, fpStockByWh){
       uom,
       fpId,
       categoryKey: catKey,
-      categoryName: catName,
-      __bothZero: bothZero
+      categoryName: catName
     });
-  }).filter(r => {
-    const low = String(r && r.code || "").trim().toLowerCase();
-    const info = totByCode.get(low) || { cerea: 0, concamarise: 0 };
-    const otherQty = (w === WAREHOUSE_CEREA) ? info.concamarise : info.cerea;
-    if ((Number(r.qty)||0) === 0 && !r.__bothZero && (Number(otherQty)||0) > 0) return false;
-    return true;
   });
 
   rows.sort((a,b) => String(a.item || "").localeCompare(String(b.item || ""), "it", { sensitivity: "base" }));
@@ -14948,15 +15155,11 @@ function renderFinishedStockTable(fpRows){
     else rows = rows.filter(r => String(r.categoryKey || "").trim().toLowerCase() === catF);
   }
 
-  if (pillFpStock) pillFpStock.textContent = __currentFinishedWarehouse ? `${rows.length} righe` : "Seleziona";
+  if (pillFpStock) pillFpStock.textContent = `${rows.length} righe`;
   if (!fpStockTbody) return;
 
   __fpStockRowByKey = new Map();
 
-  if (!__currentFinishedWarehouse) {
-    fpStockTbody.innerHTML = '<tr><td class="td-muted" colspan="4">Seleziona una sede.</td></tr>';
-    return;
-  }
 
   if (rows.length === 0) {
     fpStockTbody.innerHTML = '<tr><td class="td-muted" colspan="4">Nessun risultato.</td></tr>';
@@ -15019,7 +15222,7 @@ async function adjustFinishedStockAbsoluteFromRow(row, newAbsQty) {
     note: `Rettifica inventario PF: da ${oldQty} ${__uom} a ${newQty} ${__uom}`,
     uom: __uom,
     qtyRaw: `${Math.abs(delta)} ${__uom}`.trim(),
-    warehouse: normalizeWarehouse(r.warehouse || __currentFinishedWarehouse || ""),
+    warehouse: WAREHOUSE_FINISHED,
     source: "Rettifica PF",
     createdAt: serverTimestamp(),
     createdBy: (fb.user.email || fb.user.uid || "")
@@ -15885,17 +16088,14 @@ function renderAll() {
         } catch(_){}
       }
 
-      // Inventario prodotti finiti: mostra tabella solo dopo scelta sede
+      // Inventario prodotti finiti: sede unica
       try{ renderFpInventoryCategoryOptions(); }catch(_){ }
-      if (__currentFinishedWarehouse) {
-        const wh = normalizeWarehouse(__currentFinishedWarehouse);
-        const fpRows = buildFinishedInventoryRowsForWarehouse(wh, fpStockByWh || []);
+      try{ setFinishedInventoryWarehouse(); }catch(_){ }
+      try{
+        const fpRows = buildFinishedInventoryRowsForWarehouse(__currentFinishedWarehouse, fpStockByWh || []);
         renderFinishedStockTable(fpRows);
-      } else {
-        try{
-          if (pillFpStock) pillFpStock.textContent = "Seleziona";
-          if (fpStockTbody) fpStockTbody.innerHTML = '<tr><td class="td-muted" colspan="4">Seleziona una sede.</td></tr>';
-        }catch(_){ }
+      }catch(_){
+        try{ if (pillFpStock) pillFpStock.textContent = "—"; }catch(__){ }
       }
 
       renderMovementsTable();
