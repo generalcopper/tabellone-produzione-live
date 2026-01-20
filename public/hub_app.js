@@ -94,7 +94,7 @@
         <div class="inlineRow" style="justify-content:space-between; align-items:flex-end; gap:12px;">
           <div class="stack" style="flex:1; min-width: 220px;">
             <div class="hero-sub" id="fpInvDetailTitle">Inventario prodotti finiti</div>
-            <div class="muted">Sede unica • modifica la quantità e salva</div>
+            <div class="muted">Sede unica • salva per rettifica, oppure <b>Produci</b> per carico PF + scarico componenti</div>
           </div>
         </div>
 
@@ -7745,6 +7745,15 @@ Verrà aggiornata anche la chiave su tutti i prodotti finiti.`);
     const anagTbody = document.getElementById("anagTbody");
     const anagTheadRow = document.getElementById("anagTheadRow");
 
+    // Nuovo articolo (Materie prime / Imballaggi)
+    const btnAnagAddProduct = document.getElementById("btnAnagAddProduct");
+    const modalNewProduct = document.getElementById("modalNewProduct");
+    const newProdClose = document.getElementById("newProdClose");
+    const newProdCancel = document.getElementById("newProdCancel");
+    const newProdCreate = document.getElementById("newProdCreate");
+    const newProdCode = document.getElementById("newProdCode");
+    const newProdName = document.getElementById("newProdName");
+
     // Anagrafica prodotti finiti (distinta base)
     const btnNewFinishedProduct = document.getElementById("btnNewFinishedProduct");
     const modalFinishedProduct = document.getElementById("modalFinishedProduct");
@@ -9041,17 +9050,34 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
       try{ showToast(removing ? 'Rimozione categoria…' : 'Associazione categoria…'); }catch(_){ }
 
       try{
+        let forcedSingolo = 0;
         for (const id of ids){
           const fid = String(id || '').trim();
           if (!fid) continue;
-          const payload = removing
-            ? { categoryKey: deleteField(), categoryKeyLower: deleteField() }
-            : { categoryKey: key, categoryKeyLower: String(key).toLowerCase() };
+
+          const fp = (Array.isArray(finishedProducts) ? finishedProducts : []).find(x => String(x && x.id || '') === fid) || null;
+          const isSingle = fp && __fpIsSingle(fp);
+
+          const payload = isSingle
+            ? { categoryKey: 'singolo', categoryKeyLower: 'singolo' }
+            : (removing
+              ? { categoryKey: deleteField(), categoryKeyLower: deleteField() }
+              : { categoryKey: key, categoryKeyLower: String(key).toLowerCase() });
+
+          if (isSingle) forcedSingolo++;
+
           await setDoc(doc(fb.db, 'orgs', ORG_ID, 'finishedProducts', fid), payload, { merge: true });
         }
         __fpSelectedIds.clear();
         try{ sel.value = ''; }catch(_){ }
-        showToast(removing ? 'Categoria rimossa' : 'Prodotti finiti associati');
+        if (forcedSingolo){
+          showToast(removing
+            ? (`Categoria rimossa. ${forcedSingolo} prodotti restano 'Singolo' (hanno distinta base).`)
+            : (`Categoria associata. ${forcedSingolo} prodotti impostati a 'Singolo' (hanno distinta base).`)
+          );
+        } else {
+          showToast(removing ? 'Categoria rimossa' : 'Prodotti finiti associati');
+        }
       }catch(e){
         console.warn('assign selected finished products failed', e);
         showToast('Errore associazione', 'err');
@@ -15053,14 +15079,100 @@ function __findFinishedProductByCode(code){
   return null;
 }
 
+function __fpDirectComponents(fp){
+  try{
+    const arr = fp && (fp.components || fp.bom || fp.distintaBase);
+    return Array.isArray(arr) ? arr : [];
+  }catch(_){ return []; }
+}
+
+function __fpIsSingle(fp){
+  try{ return __fpDirectComponents(fp).length > 0; }catch(_){ return false; }
+}
+
 function __fpCategoryNameFromKey(key){
   const k = String(key || "").trim().toLowerCase();
   if (!k) return "";
+  if (k === "singolo") return "Singolo";
   try{
     const o = finishedProductCategoriesMap && finishedProductCategoriesMap.get ? finishedProductCategoriesMap.get(k) : null;
     const name = o && (o.name || o.label) ? String(o.name || o.label) : "";
     return String(name || k).trim();
   }catch(_){ return String(k).trim(); }
+}
+
+// ===== Produzione PF: distinta base (prodotto o categoria) =====
+function __fpGetResolvedBomForCode(code){
+  const fp = __findFinishedProductByCode(code);
+  if (!fp) return [];
+
+  // 1) BOM diretta sul prodotto
+  const direct = __fpDirectComponents(fp);
+  if (Array.isArray(direct) && direct.length) return direct;
+
+  // 2) BOM da categoria (se presente)
+  const catKey = String(fp.categoryKeyLower || fp.categoryKey || fp.category || "").trim().toLowerCase();
+  if (!catKey) return [];
+  const cat = (finishedProductCategoriesMap && typeof finishedProductCategoriesMap.get === "function")
+    ? (finishedProductCategoriesMap.get(catKey) || null)
+    : null;
+  const bom = cat && (cat.bom || cat.components || cat.distintaBase);
+  return Array.isArray(bom) ? bom : [];
+}
+
+function __fpHasBomForCode(code){
+  try{ return __fpGetResolvedBomForCode(code).length > 0; }catch(_){ return false; }
+}
+
+function __fpParseNumberOrFraction(v){
+  const s = String(v ?? "").trim();
+  if (!s) return null;
+  // 1/2 (anche con virgola)
+  const m = s.match(/^(-?\d+(?:[.,]\d+)?)\s*\/\s*(\d+(?:[.,]\d+)?)$/);
+  if (m){
+    const a = Number(String(m[1]).replace(",","."));
+    const b = Number(String(m[2]).replace(",","."));
+    if (Number.isFinite(a) && Number.isFinite(b) && b !== 0) return a / b;
+  }
+  // numero con virgola
+  const n = Number(s.replace(/\./g, "").replace(",", "."));
+  if (Number.isFinite(n)) return n;
+  return null;
+}
+
+function __fpCompQtyPerUnit(comp){
+  const c = comp || {};
+  if (c.qty != null && Number.isFinite(Number(c.qty))) return Number(c.qty);
+  const raw = c.qtyRaw || c.qtaRaw || c.quantityRaw || c.qta || "";
+  const p = __fpParseNumberOrFraction(raw);
+  return (p != null && Number.isFinite(p)) ? p : null;
+}
+
+function __fpIsProductionMacroForCode(code){
+  try{
+    const mc = (typeof getMacroCategoryForCode === "function") ? String(getMacroCategoryForCode(code) || "").trim().toLowerCase() : "";
+    // Se non conosco la macro (non categorizzato), lo tratto come OK.
+    if (!mc) return true;
+    return (mc === "materie_prime" || mc === "imballaggi");
+  }catch(_){ return true; }
+}
+
+function __fpResolveComponentMeta(code, fallbackName, fallbackUom){
+  const c = String(code || "").trim();
+  const p = (typeof findProductByCode === "function") ? findProductByCode(c) : null;
+
+  let customer = String((p && p.customer) || "").trim();
+  if (!customer){
+    try{
+      const info = (typeof __getLastSupplierInfoForCode === "function") ? (__getLastSupplierInfoForCode(c) || null) : null;
+      if (info && info.name) customer = String(info.name).trim();
+    }catch(_){ }
+  }
+
+  const item = String((p && (p.name || p.nome || p.description)) || fallbackName || c).trim() || c;
+  const uom = __normalizeUom((p && (p.uom || p.um || p.unit)) || fallbackUom || "") || getUomResolvedForCode(c) || "";
+
+  return { customer, item, uom };
 }
 
 function buildFinishedInventoryRowsForWarehouse(wh, fpStockByWh){
@@ -15088,8 +15200,8 @@ function buildFinishedInventoryRowsForWarehouse(wh, fpStockByWh){
       qty: 0,
       lastMoveAt: "",
       fpId: String(fp.id || "").trim(),
-      categoryKey: String(fp.categoryKeyLower || fp.categoryKey || "").trim().toLowerCase(),
-      categoryName: __fpCategoryNameFromKey(fp.categoryKeyLower || fp.categoryKey || "")
+      categoryKey: (__fpIsSingle(fp) ? "singolo" : String(fp.categoryKeyLower || fp.categoryKey || "").trim().toLowerCase()),
+      categoryName: (__fpIsSingle(fp) ? "Singolo" : __fpCategoryNameFromKey(fp.categoryKeyLower || fp.categoryKey || ""))
     });
   }
 
@@ -15098,8 +15210,9 @@ function buildFinishedInventoryRowsForWarehouse(wh, fpStockByWh){
     const code = String(r && r.code || "").trim();
     const fp = __findFinishedProductByCode(code);
 
-    const catKey = String((r && r.categoryKey) || (fp && (fp.categoryKeyLower || fp.categoryKey)) || "").trim().toLowerCase();
-    const catName = String((r && r.categoryName) || __fpCategoryNameFromKey(catKey) || "").trim();
+    const isSingle = fp && __fpIsSingle(fp);
+    const catKey = isSingle ? "singolo" : String((r && r.categoryKey) || (fp && (fp.categoryKeyLower || fp.categoryKey)) || "").trim().toLowerCase();
+    const catName = String(((isSingle ? "" : (r && r.categoryName)) || __fpCategoryNameFromKey(catKey) || "")).trim();
     const uom = __normalizeUom((r && r.uom) || "") || __normalizeUom(fp && fp.uom) || "pz";
 
     const item = String((r && r.item) || (fp && (fp.name || fp.nome || fp.description)) || code).trim();
@@ -15123,7 +15236,7 @@ function buildFinishedInventoryRowsForWarehouse(wh, fpStockByWh){
 function renderFpInventoryCategoryOptions(){
   if (!fpInvFilterCategory) return;
   const prev = String(fpInvFilterCategory.value || "");
-  const opts = ['<option value="">Tutte</option>', '<option value="__none">Non assegnata</option>'];
+  const opts = ['<option value="">Tutte</option>', '<option value="__none">Non assegnata</option>', '<option value="singolo">Singolo</option>'];
   const cats = Array.isArray(finishedProductCategories) ? finishedProductCategories.slice() : [];
   cats.sort((a,b) => String((a && a.name) || a.key || "").localeCompare(String((b && b.name) || b.key || ""), "it", { sensitivity: "base" }));
   for (const c of cats){
@@ -15176,12 +15289,18 @@ function renderFinishedStockTable(fpRows){
     const qtyVal = safeInt(r.qty);
     const uom = __normalizeUom(r.uom || "") || "pz";
 
+    const canProduce = __fpHasBomForCode(r.code);
+    const prodBtn = canProduce
+      ? `<button class="btn btn-secondary btn-xs jsFpProduce" type="button" title="Produci e scarica componenti (distinta base)">Produci</button>`
+      : ``;
+
     const qtyCell = `
       <div class="qty-editor">
         <input class="qtyEditInput jsFpQtyEdit" type="number" inputmode="numeric" min="0" step="1"
           value="${qtyVal}" data-orig="${qtyVal}" />
         <span class="td-muted" style="font-size:12px; font-weight:900; min-width:34px; text-align:left;">${escapeHtml(uom)}</span>
         <button class="btn btn-primary btn-xs jsFpQtySave" type="button" disabled>Salva</button>
+        ${prodBtn}
       </div>`;
 
     const catHtml = r.categoryName ? `<span class="pill catPill" style="padding:2px 8px;">${escapeHtml(r.categoryName)}</span>` : '<span class="td-muted">—</span>';
@@ -15230,6 +15349,281 @@ async function adjustFinishedStockAbsoluteFromRow(row, newAbsQty) {
 
   await addDoc(orgCol("finishedInventoryMovements"), mv);
   showToast(`Quantità PF aggiornata (${oldQty}→${newQty}) ${__uom}`);
+}
+
+
+// ===== Produci (PF) + scarico componenti (materie prime / imballaggi) =====
+let __fpProduceBusy = false;
+
+function __fpProdMovKey(customer, code){
+  const c = String(customer || "").trim().toLowerCase();
+  const k = String(code || "").trim().toLowerCase();
+  return `${c}||${k}`;
+}
+
+function __fpBuildAvailByWhCustomerCode(){
+  const avail = { cerea: new Map(), concamarise: new Map() };
+  const arr = (state && Array.isArray(state.movements)) ? state.movements : [];
+
+  for (const mv of (arr || [])){
+    try{
+      const code = String(mv && mv.code || "").trim();
+      if (!code) continue;
+      const cust = String(mv && mv.customer || "").trim();
+      const key = __fpProdMovKey(cust, code);
+      const wh = normalizeWarehouse(mv.warehouse || mv.site || mv.magazzino || mv.location || "");
+      const q = safeInt(mv.qty);
+      if (!q) continue;
+      const delta = (String(mv.type || "").toUpperCase() === "OUT") ? -q : q;
+      const m = (wh === WAREHOUSE_CONCA) ? avail.concamarise : avail.cerea;
+      m.set(key, (m.get(key) || 0) + delta);
+    }catch(_){ }
+  }
+  return avail;
+}
+
+async function produceFinishedProductFromRow(row, qtyToProduce){
+  if (__fpProduceBusy) return null;
+
+  const r = row || {};
+  const fpCode = String(r.code || "").trim();
+  if (!fpCode) return null;
+
+  let qty = safeInt(qtyToProduce);
+  if (!Number.isFinite(qty) || qty <= 0) qty = 0;
+  if (!qty){
+    showToast("Quantità non valida", "warn");
+    return null;
+  }
+
+  // Auth: stessa regola della rettifica PF
+  if (!fb.user || !fb.db) {
+    showToast("Accedi con Google per produrre", "err");
+    throw new Error("not-auth");
+  }
+
+  const fp = __findFinishedProductByCode(fpCode);
+  if (!fp){
+    showToast("Prodotto finito non trovato in anagrafica", "warn");
+    return null;
+  }
+
+  const fpName = String(r.item || fp.name || fp.nome || fp.description || fpCode).trim() || fpCode;
+  const fpUom = __normalizeUom(r.uom || fp.uom || "") || "pz";
+
+  // Distinta base (prodotto o categoria)
+  const bom = __fpGetResolvedBomForCode(fpCode);
+  if (!Array.isArray(bom) || !bom.length){
+    showToast("Questo prodotto non ha distinta base (né categoria con distinta)", "warn");
+    return null;
+  }
+
+  // Calcola fabbisogni componenti
+  const req = new Map();
+  const skippedNoQty = [];
+  const skippedNotMacro = [];
+
+  for (const c of bom){
+    try{
+      const cCode = String(c && c.code || "").trim();
+      if (!cCode) continue;
+
+      // Solo materie prime / imballaggi
+      if (!__fpIsProductionMacroForCode(cCode)) {
+        skippedNotMacro.push(cCode);
+        continue;
+      }
+
+      const per = __fpCompQtyPerUnit(c);
+      if (per == null || !Number.isFinite(per) || per <= 0){
+        skippedNoQty.push(cCode);
+        continue;
+      }
+
+      const add = per * qty;
+      const low = cCode.toLowerCase();
+      const meta = __fpResolveComponentMeta(cCode, c.name || c.item || c.articolo || cCode, c.uom);
+
+      const cur = req.get(low) || {
+        code: cCode,
+        item: meta.item || cCode,
+        uom: meta.uom || __normalizeUom(c.uom || "") || "",
+        customer: meta.customer || "",
+        qty: 0
+      };
+      cur.qty += add;
+      if (!cur.item) cur.item = meta.item || cCode;
+      if (!cur.uom) cur.uom = meta.uom || __normalizeUom(c.uom || "") || "";
+      if (!cur.customer) cur.customer = meta.customer || "";
+      req.set(low, cur);
+    }catch(_){ }
+  }
+
+  const needList = Array.from(req.values()).map(it => {
+    const qtyInt = Math.round(Number(it.qty) || 0);
+    return Object.assign({}, it, { qtyInt });
+  }).filter(it => it && it.qtyInt > 0);
+
+  if (!needList.length){
+    showToast("Distinta base non valida: nessun componente con quantità", "warn");
+    return null;
+  }
+
+  // Disponibilità (best effort) per warning e per split sede
+  const avail = __fpBuildAvailByWhCustomerCode();
+  const shortages = [];
+  for (const it of needList){
+    const key = __fpProdMovKey(it.customer, it.code);
+    const aC = Math.max(0, safeInt(avail.cerea.get(key)));
+    const aK = Math.max(0, safeInt(avail.concamarise.get(key)));
+    const tot = aC + aK;
+    if (tot < it.qtyInt){
+      shortages.push({
+        code: it.code,
+        item: it.item,
+        uom: it.uom,
+        need: it.qtyInt,
+        have: tot,
+        cerea: aC,
+        concamarise: aK
+      });
+    }
+  }
+
+  // Preview (max 12 righe)
+  const prev = needList.slice(0, 12).map(it => `• ${it.code} — ${Math.round(it.qtyInt)} ${String(it.uom||"").trim()}`);
+  const more = (needList.length > 12) ? `\n… +${needList.length - 12} altri` : "";
+
+  let msg = `Produrre ${qty} ${fpUom} di\n${fpCode} — ${fpName}?\n\n` +
+    `Scarico componenti (${needList.length}):\n` +
+    prev.join("\n") + more;
+
+  if (skippedNoQty.length){
+    msg += `\n\n⚠️ Componenti senza quantità: ${Array.from(new Set(skippedNoQty)).slice(0,6).join(", ")}${skippedNoQty.length>6?"…":""}`;
+  }
+  if (skippedNotMacro.length){
+    msg += `\n\nℹ️ Componenti fuori macro (non scaricati): ${Array.from(new Set(skippedNotMacro)).slice(0,6).join(", ")}${skippedNotMacro.length>6?"…":""}`;
+  }
+  if (shortages.length){
+    const sPrev = shortages.slice(0, 6).map(s => `• ${s.code}: richiesti ${s.need}, disponibili ${s.have} (Cerea ${s.cerea}, Conca ${s.concamarise})`).join("\n");
+    msg += `\n\n⚠️ Scorte insufficienti (potresti andare in negativo):\n${sPrev}${shortages.length>6?"\n…":""}`;
+  }
+
+  msg += `\n\nConfermi?`;
+  if (!confirm(msg)) return null;
+
+  __fpProduceBusy = true;
+  try{
+    const actor = (fb.user && (fb.user.email || fb.user.uid)) || "";
+    const date = todayYYYYMMDD();
+    const batchId = `PROD-${date}-${String(Math.random()).slice(2,8)}`;
+
+    // Costruisci movimenti componenti (split su sede con più disponibilità)
+    const movs = [];
+
+    for (const it of needList){
+      const cust = String(it.customer || "").trim();
+      const key = __fpProdMovKey(cust, it.code);
+
+      let need = Math.max(0, safeInt(it.qtyInt));
+      let aC = Math.max(0, safeInt(avail.cerea.get(key)));
+      let aK = Math.max(0, safeInt(avail.concamarise.get(key)));
+
+      const first = (aK > aC) ? WAREHOUSE_CONCA : WAREHOUSE_CEREA;
+      const second = (first === WAREHOUSE_CEREA) ? WAREHOUSE_CONCA : WAREHOUSE_CEREA;
+
+      const takeFrom = (wh) => {
+        if (need <= 0) return 0;
+        const cur = (wh === WAREHOUSE_CONCA) ? aK : aC;
+        const take = Math.min(need, cur);
+        if (take <= 0) return 0;
+        need -= take;
+        if (wh === WAREHOUSE_CONCA) aK -= take;
+        else aC -= take;
+        return take;
+      };
+
+      const t1 = takeFrom(first);
+      const t2 = takeFrom(second);
+
+      // Se rimane bisogno (stock insufficiente), scarico comunque sul primo magazzino (andando in negativo)
+      let t3 = 0;
+      if (need > 0){
+        t3 = need;
+        need = 0;
+        if (first === WAREHOUSE_CONCA) aK -= t3;
+        else aC -= t3;
+      }
+
+      // aggiorna disponibilità live
+      avail.cerea.set(key, aC);
+      avail.concamarise.set(key, aK);
+
+      const note = `Produzione PF: ${fpCode} x ${qty} ${fpUom} (${batchId})`;
+      const makePayload = (warehouse, qtyInt) => ({
+        type: "OUT",
+        customer: cust,
+        code: it.code,
+        item: it.item || it.code,
+        uom: String(it.uom || "").trim(),
+        qtyRaw: `${it.qty} ${String(it.uom||"").trim()}`.trim(),
+        qty: qtyInt,
+        date: date,
+        note: note,
+        source: "Produzione PF",
+        rawText: "",
+        warehouse: warehouse,
+        docType: "PRODUZIONE",
+        docNum: batchId,
+        docDateRaw: date,
+        createdAt: serverTimestamp(),
+        createdBy: actor
+      });
+
+      if (t1 > 0) movs.push(makePayload(first, t1));
+      if (t2 > 0) movs.push(makePayload(second, t2));
+      if (t3 > 0) movs.push(makePayload(first, t3));
+    }
+
+    // Movimento carico PF
+    const fpMv = {
+      type: "IN",
+      code: fpCode,
+      item: fpName,
+      uom: fpUom,
+      qty: qty,
+      qtyRaw: `${qty} ${fpUom}`.trim(),
+      date: date,
+      note: `Produzione PF: +${qty} ${fpUom} (${batchId})`,
+      source: "Produzione PF",
+      warehouse: WAREHOUSE_FINISHED,
+      docType: "PRODUZIONE",
+      docNum: batchId,
+      docDateRaw: date,
+      createdAt: serverTimestamp(),
+      createdBy: actor
+    };
+
+    // Scrivi tutto in modo atomico (una transazione)
+    await runTransaction(fb.db, async (tx) => {
+      const fpRef = doc(orgCol("finishedInventoryMovements"));
+      tx.set(fpRef, fpMv);
+
+      for (const mv of (movs || [])){
+        const ref = doc(orgCol("inventoryMovements"));
+        tx.set(ref, mv);
+      }
+    });
+
+    showToast(`Prodotto: +${qty} ${fpUom} • scarico componenti: ${movs.length} movimenti`, "ok");
+    return { qty, batchId, movementsCount: movs.length };
+  }catch(e){
+    console.error("produceFinishedProductFromRow failed", e);
+    showToast("Errore produzione", "err");
+    throw e;
+  }finally{
+    __fpProduceBusy = false;
+  }
 }
 
 let __stockRowByKey = new Map();
@@ -16135,6 +16529,15 @@ function renderAll() {
       // UI: filtri specifici prodotti (tendine)
       try{ renderAnagProductsFiltersUI(); }catch(_){ }
 
+      // CTA: nuovo articolo (solo Materie prime / Imballaggi)
+      try{
+        if (btnAnagAddProduct) {
+          const mg = normalizeProductsMacroGroup(activeProductsMacroGroup) || "imballaggi";
+          const show = (activeAnagTab === "products") && (mg === "materie_prime" || mg === "imballaggi");
+          btnAnagAddProduct.style.display = show ? "" : "none";
+        }
+      }catch(_){ }
+
       // CTA: nuovo prodotto finito (solo in tab finished)
       try{ if (btnNewFinishedProduct) btnNewFinishedProduct.style.display = "none"; }catch(_){ }
 
@@ -16227,11 +16630,15 @@ try{
             <th style="width:180px">Codice</th>
             <th>Nome</th>
             <th style="width:260px">Categoria</th>
+            <th style="width:140px; text-align:right;">Distinta</th>
           `;
         } catch(_){}
 
+        // CTA: nuovo prodotto finito (solo se loggato)
+        try{ if (btnNewFinishedProduct) btnNewFinishedProduct.style.display = fb.user ? "" : "none"; }catch(_){}
+
         if (!fb.user) {
-          try { if (anagTbody) anagTbody.innerHTML = `<tr><td class="td-muted" colspan="4">Accedi con Google per sincronizzare i prodotti finiti.</td></tr>`; } catch(_){}
+          try { if (anagTbody) anagTbody.innerHTML = `<tr><td class="td-muted" colspan="5">Accedi con Google per sincronizzare i prodotti finiti.</td></tr>`; } catch(_){}
           return;
         }
 
@@ -16250,7 +16657,9 @@ try{
           if (mode === "unclassified"){
             filtered = filtered.filter(fp => {
               const k = String(fp && (fp.categoryKeyLower || fp.categoryKey || "") || "").trim();
-              return !k;
+              const comps = Array.isArray(fp && (fp.components || fp.bom || fp.distintaBase)) ? (fp.components || fp.bom || fp.distintaBase) : [];
+              // Se ha già una distinta base propria => è "Singolo" (non considerarlo "non classificato")
+              return (!k) && !(comps && comps.length);
             });
           }
         }catch(_){ }
@@ -16263,7 +16672,7 @@ try{
           const msg = (__mode === "unclassified")
             ? (q ? "Nessun prodotto finito non classificato trovato." : "Nessun prodotto finito non classificato.")
             : (q ? "Nessun prodotto finito trovato." : "Nessun prodotto finito.");
-          try { if (anagTbody) anagTbody.innerHTML = `<tr><td class="td-muted" colspan="4">${escapeHtml(msg)}</td></tr>`; } catch(_){}
+          try { if (anagTbody) anagTbody.innerHTML = `<tr><td class="td-muted" colspan="5">${escapeHtml(msg)}</td></tr>`; } catch(_){}
           try{ __fpRenderAssignControls(); }catch(_){}
           try{ __fpSyncSelectAllState(); }catch(_){}
           return;
@@ -16288,13 +16697,16 @@ try{
 
             const isSel = __fpSelectedIds.has(id) ? "checked" : "";
 
-            const catKey = String(fp && (fp.categoryKeyLower || fp.categoryKey || "") || "").trim().toLowerCase();
-            const catObj = catKey ? (finishedProductCategoriesMap.get(catKey) || null) : null;
-            const catName = String((catObj && (catObj.name || catObj.label || catObj.key)) || (catKey || "")).trim();
-            const catHtml = catName ? escapeHtml(catName) : '<span class="td-muted">—</span>';
-
             const comps = Array.isArray(fp && (fp.components || fp.bom || fp.distintaBase)) ? (fp.components || fp.bom || fp.distintaBase) : [];
             const n = comps.length;
+            const isSingle = n > 0;
+
+            const catKey = isSingle ? "singolo" : String(fp && (fp.categoryKeyLower || fp.categoryKey || "") || "").trim().toLowerCase();
+            const catObj = (!isSingle && catKey) ? (finishedProductCategoriesMap.get(catKey) || null) : null;
+            const catName = isSingle ? "Singolo" : String((catObj && (catObj.name || catObj.label || catObj.key)) || (catKey || "")).trim();
+            const catHtml = catName ? escapeHtml(catName) : '<span class="td-muted">—</span>';
+
+            const bomBtnLabel = n ? ("Distinta (" + n + ")") : "Distinta";
 
             return `
               <tr class="jsFpRow" data-fp-id="${escapeHtmlAttr(id)}">
@@ -16304,11 +16716,14 @@ try{
                 <td data-label="Codice"><span class="kbd">${escapeHtml(code || "—")}</span></td>
                 <td data-label="Nome">${escapeHtml(name || "—")}</td>
                 <td data-label="Categoria">${catHtml}</td>
+                <td data-label="Distinta" style="text-align:right;">
+                  <button class="btn btn-ghost btn-xs" type="button" data-action="openFinishedProduct" data-id="${escapeHtmlAttr(id)}" title="Apri distinta base">${escapeHtml(bomBtnLabel)}</button>
+                </td>
               </tr>
             `;
           }).join("");
         }catch(_){
-          try { if (anagTbody) anagTbody.innerHTML = `<tr><td class="td-muted" colspan="4">Errore rendering.</td></tr>`; } catch(_){}
+          try { if (anagTbody) anagTbody.innerHTML = `<tr><td class="td-muted" colspan="5">Errore rendering.</td></tr>`; } catch(_){}
         }
 
         try{ __fpRenderAssignControls(); }catch(_){}
@@ -19197,8 +19612,138 @@ async function handleFileSelection(fileList) {
     if (anagProdSort) anagProdSort.addEventListener("change", () => renderAnag());
     if (btnReloadAnag) btnReloadAnag.addEventListener("click", () => { renderAnag(); showToast("Anagrafica aggiornata"); });
 
+    // Nuovo articolo (Materie prime / Imballaggi)
+    function __openNewProductModal(){
+      if (!modalNewProduct) return;
+      if (!fb.user) { try{ showToast("Accedi con Google per creare un articolo", "warn"); }catch(_){ } return; }
+      try{
+        if (newProdCode) newProdCode.value = "";
+        if (newProdName) newProdName.value = "";
+      }catch(_){ }
+      modalNewProduct.classList.add("open");
+      __syncBodyLockFromModals();
+      setTimeout(() => { try{ newProdCode && newProdCode.focus(); }catch(_){ } }, 50);
+    }
+    function __closeNewProductModal(){
+      if (!modalNewProduct) return;
+      modalNewProduct.classList.remove("open");
+      __syncBodyLockFromModals();
+      try{ if (newProdCode) newProdCode.value = ""; }catch(_){ }
+      try{ if (newProdName) newProdName.value = ""; }catch(_){ }
+    }
+
+    if (btnAnagAddProduct) btnAnagAddProduct.addEventListener("click", (e) => {
+      try{ e.preventDefault(); e.stopPropagation(); }catch(_){ }
+      __openNewProductModal();
+    });
+    if (newProdClose) newProdClose.addEventListener("click", __closeNewProductModal);
+    if (newProdCancel) newProdCancel.addEventListener("click", __closeNewProductModal);
+    if (modalNewProduct) modalNewProduct.addEventListener("click", (e) => { if (e.target === modalNewProduct) __closeNewProductModal(); });
+
+    if (newProdCode) newProdCode.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); try{ newProdCreate && newProdCreate.click(); }catch(_){ } }
+      if (e.key === "Escape") { e.preventDefault(); __closeNewProductModal(); }
+    });
+    if (newProdName) newProdName.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); try{ newProdCreate && newProdCreate.click(); }catch(_){ } }
+      if (e.key === "Escape") { e.preventDefault(); __closeNewProductModal(); }
+    });
+
+    if (newProdCreate) newProdCreate.addEventListener("click", async (e) => {
+      try{ e.preventDefault(); e.stopPropagation(); }catch(_){ }
+      if (!fb.user) { try{ showToast("Accedi con Google per creare un articolo", "warn"); }catch(_){ } return; }
+
+      const code = String(newProdCode && newProdCode.value || "").trim();
+      const nameIn = String(newProdName && newProdName.value || "").trim();
+      if (!code) { try{ showToast("Inserisci un codice articolo", "warn"); }catch(_){ } try{ newProdCode && newProdCode.focus(); }catch(_){ } return; }
+
+      const existing = findProductByCode(code);
+      if (existing) {
+        __closeNewProductModal();
+        try{ openProductModal(code, { __mode: "master", code }); }catch(_){ }
+        return;
+      }
+
+      const low = code.toLowerCase();
+      const name = nameIn || code;
+
+      // default categoria: se stai guardando una categoria specifica, usala.
+      // In Materie prime, se non c’è filtro selezionato, assegna una categoria valida per farlo comparire in lista.
+      const mg = normalizeProductsMacroGroup(activeProductsMacroGroup) || "imballaggi";
+      let catDefault = "";
+      try{
+        const catSel = String(anagProdCategoryFilter && anagProdCategoryFilter.value || "").trim();
+        if (catSel && catSel !== "__none" && categoryMacroGroup(catSel) === mg) catDefault = catSel;
+      }catch(_){ }
+      if (!catDefault && mg === "materie_prime") {
+        try{
+          const k0 = normalizeMacroCategory("materie_prime");
+          if (k0) catDefault = k0;
+        }catch(_){ }
+        if (!catDefault) {
+          try{
+            const list = (Array.isArray(categories) ? categories : []).filter(c => c && categoryMacroGroup(c.key) === "materie_prime");
+            if (list.length) catDefault = String(list[0].key || "").trim().toLowerCase();
+          }catch(_){ }
+        }
+      }
+
+      const catNorm = normalizeMacroCategory(catDefault);
+
+      // UI lock
+      const oldTxt = String(newProdCreate.textContent || "Crea");
+      try{ newProdCreate.disabled = true; newProdCreate.textContent = "Creo…"; }catch(_){ }
+
+      // Offline fallback + UI immediata: aggiorna mapping categorie
+      try{
+        state.productCategories = state.productCategories || {};
+        if (catNorm) state.productCategories[low] = catNorm;
+        else delete state.productCategories[low];
+        saveLocalData();
+      }catch(_){ }
+
+      // Optimistic local product (se la lista è già in memoria)
+      try{
+        const p0 = findProductByCode(code);
+        if (p0) {
+          p0.name = name;
+          p0.nameLower = name.toLowerCase();
+          if (catNorm) p0.category = catNorm;
+          p0.updatedAtIso = new Date().toISOString();
+        }
+      }catch(_){ }
+
+      try {
+        if (!fb.db) throw new Error("Firestore non inizializzato");
+
+        const patch = {
+          code: code,
+          codeLower: low,
+          name: name,
+          nameLower: name.toLowerCase(),
+          updatedAt: serverTimestamp(),
+          updatedBy: (fb.user.email || fb.user.uid || "")
+        };
+        if (catNorm) patch.category = catNorm;
+
+        await setDoc(doc(fb.db, "orgs", ORG_ID, "products", keyToDocId(low)), patch, { merge: true });
+
+        try{ renderAll(); renderAnag(); }catch(_){ }
+        try{ showToast("Articolo creato"); }catch(_){ }
+
+        __closeNewProductModal();
+        try{ openProductModal(code, { __mode: "master", code }); }catch(_){ }
+        setTimeout(() => { try{ document.getElementById("prodNameEdit") && document.getElementById("prodNameEdit").focus(); }catch(_){ } }, 120);
+      } catch (err) {
+        console.error(err);
+        try{ showToast("Errore creazione articolo", "err"); }catch(_){ }
+      } finally {
+        try{ newProdCreate.disabled = false; newProdCreate.textContent = oldTxt; }catch(_){ }
+      }
+    });
+
     // Nuovo prodotto finito
-    if (btnNewFinishedProduct) btnNewFinishedProduct.addEventListener("click", () => { try{ setView && setView("fpCategories"); }catch(_){ } try{ showToast && showToast("Usa ‘Categorie prodotti finiti’ per gestire la BOM.", "warn"); }catch(_){ } });
+    if (btnNewFinishedProduct) btnNewFinishedProduct.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){ } try{ openFinishedProductModal(null); }catch(_){ } });
 // Supplier modal
     if (supClose) supClose.addEventListener("click", closeSupplierModal);
     if (btnSupDone) btnSupDone.addEventListener("click", closeSupplierModal);
@@ -19700,6 +20245,21 @@ function __fpRenderSmartBrowse(){
 
       payload.components = cleanComps;
 
+      // Regola: se il prodotto ha una distinta base propria => categoria forzata a "singolo"
+      try{
+        if (Array.isArray(cleanComps) && cleanComps.length){
+          payload.categoryKey = "singolo";
+          payload.categoryKeyLower = "singolo";
+        } else {
+          const prevCat = String(__fpDraft && (__fpDraft.categoryKeyLower || __fpDraft.categoryKey || "") || "").trim().toLowerCase();
+          if (prevCat === "singolo"){
+            payload.categoryKey = deleteField();
+            payload.categoryKeyLower = deleteField();
+          }
+        }
+      }catch(_){ }
+
+
       // Anti-duplicati: se sto CREANDO e il codice esiste gia', aggiorno quello esistente (unifica).
       const __fpCodeLower = code ? String(code).toLowerCase() : "";
       let __fpCreateIntoExisting = null;
@@ -19967,6 +20527,8 @@ if (action === "openProdGroup") {
           showToast("Prodotto non trovato");
           return;
         }
+
+        if (action === "openFinishedProduct") { openFinishedProductModal(id); return; }
       });
     }
 
@@ -20964,6 +21526,61 @@ searchStock.addEventListener("input", () => renderAll());
     // Inventario prodotti finiti: rettifica rapida
     if (fpStockTbody) {
       fpStockTbody.addEventListener("click", async (e) => {
+        const btnProd = e.target.closest("button.jsFpProduce");
+        if (btnProd) {
+          e.preventDefault();
+          e.stopPropagation();
+
+          const tr = btnProd.closest("tr[data-k]");
+          if (!tr) return;
+          const k = tr.getAttribute("data-k") || "";
+          const row = __fpStockRowByKey.get(k);
+          if (!row) return;
+
+          // sicurezza: solo se ha distinta base (prodotto o categoria)
+          if (!__fpHasBomForCode(row.code)) {
+            showToast("Prodotto non producibile: distinta base mancante", "warn");
+            return;
+          }
+
+          const def = "1";
+          const label = `${String(row.code||"").trim()} — ${String(row.item||"").trim()}`.trim();
+          const raw = prompt(`Quantità da produrre\n\n${label}`, def);
+          if (raw == null) return;
+          let qty = safeInt(raw);
+          if (!Number.isFinite(qty) || qty <= 0) {
+            showToast("Quantità non valida", "warn");
+            return;
+          }
+
+          const inp = tr.querySelector("input.jsFpQtyEdit");
+          const btnSave = tr.querySelector("button.jsFpQtySave");
+          const oldText = btnProd.textContent;
+          btnProd.disabled = true;
+          btnProd.textContent = "Produco…";
+          try {
+            const res = await produceFinishedProductFromRow(row, qty);
+            if (res && res.qty) {
+              // UI ottimistica: aggiorna quantità visualizzata
+              try {
+                const newQty = safeInt(row.qty) + safeInt(res.qty);
+                row.qty = newQty;
+                if (inp) {
+                  inp.value = String(newQty);
+                  inp.dataset.orig = String(newQty);
+                }
+                if (btnSave) btnSave.disabled = true;
+              } catch(_){ }
+            }
+          } catch (err) {
+            console.error(err);
+          } finally {
+            btnProd.textContent = oldText || "Produci";
+            btnProd.disabled = false;
+          }
+          return;
+        }
+
         const btnSave = e.target.closest("button.jsFpQtySave");
         if (btnSave) {
           e.preventDefault();
