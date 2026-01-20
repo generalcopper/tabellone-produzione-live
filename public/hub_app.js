@@ -67,6 +67,37 @@
 
 
 ;
+/* ===== inventario_prodotti_finiti.js ===== */
+/* Hub Inventario — Sezione Inventario Prodotti Finiti (viewFinishedInventory)
+ * UI + rettifica rapida per sede.
+ */
+(function(){
+  try {
+    if (document.getElementById("viewFinishedInventory")) return;
+
+    const html = "<div id=\"viewFinishedInventory\" class=\"view modalOverlay\">\n  <article class=\"card\" id=\"fpStockCard\">\n    <div class=\"hd\">\n      <div class=\"overlayHeaderTitle\">\n        <button class=\"iconBtn overlayBack\" id=\"btnBackFpInv\" type=\"button\" aria-label=\"Indietro\">\u2039</button>\n        <h2>Inventario prodotti finiti</h2>\n      </div>\n      <div class=\"inlineRow\" style=\"gap:8px; justify-content:flex-end;\">\n        <div class=\"pill\" id=\"pillFpInvWarehouse\" style=\"display:none\">\u2014</div>\n        <div class=\"pill\" id=\"pillFpStock\">Seleziona</div>\n        <button class=\"iconBtn\" id=\"btnCloseFpInv\" type=\"button\" aria-label=\"Chiudi\">\u00d7</button>\n      </div>\n    </div>\n    <div class=\"bd\">\n\n      <div id=\"fpInvPicker\" class=\"stack\">\n        <div class=\"hero-sub\">Seleziona sede</div>\n        <div class=\"homeActions\" style=\"grid-template-columns: 1fr; gap: 14px;\">\n          <button class=\"btn btn-primary homeTile\" id=\"btnFpInvPickCerea\" type=\"button\" aria-label=\"Inventario prodotti finiti Cerea\">\n            <div class=\"homeTileTop\">\n              <svg class=\"homeTileIcon\" viewBox=\"0 0 24 24\" aria-hidden=\"true\">\n                <path d=\"M4 6a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v2a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6zm0 8a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-4z\"/>\n              </svg>\n              <span class=\"homeTileBadge\">CEREA</span>\n            </div>\n            <div class=\"homeTileText\">\n              <div class=\"homeTileTitle\">Cerea</div>\n              <div class=\"homeTileSub\">Apri stock prodotti finiti</div>\n            </div>\n          </button>\n\n          <button class=\"btn btn-primary homeTile\" id=\"btnFpInvPickConcamarise\" type=\"button\" aria-label=\"Inventario prodotti finiti Concamarise\">\n            <div class=\"homeTileTop\">\n              <svg class=\"homeTileIcon\" viewBox=\"0 0 24 24\" aria-hidden=\"true\">\n                <path d=\"M4 6a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v2a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6zm0 8a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-4z\"/>\n              </svg>\n              <span class=\"homeTileBadge\">CONCA</span>\n            </div>\n            <div class=\"homeTileText\">\n              <div class=\"homeTileTitle\">Concamarise</div>\n              <div class=\"homeTileSub\">Apri stock prodotti finiti</div>\n            </div>\n          </button>\n        </div>\n      </div>\n\n      <div id=\"fpInvDetail\" class=\"stack\" style=\"display:none;\">\n        <div class=\"inlineRow\" style=\"justify-content:space-between; align-items:flex-end; gap:12px;\">\n          <div class=\"stack\" style=\"flex:1; min-width: 220px;\">\n            <div class=\"hero-sub\" id=\"fpInvDetailTitle\">Inventario prodotti finiti</div>\n            <div class=\"muted\">Stock per sede • modifica la quantità e salva</div>\n          </div>\n          <button class=\"btn btn-ghost btn-xs\" id=\"btnFpInvBackPicker\" type=\"button\">\u2190 Cambia sede</button>\n        </div>\n\n        <div class=\"inlineRow listStickyBar\" style=\"justify-content: space-between;\">\n          <div class=\"inlineRow\" style=\"flex: 1 1 auto;\">\n            <div class=\"field\" style=\"min-width: 220px;\">\n              <label for=\"fpInvSearch\">Cerca</label>\n              <input id=\"fpInvSearch\" placeholder=\"Codice / nome…\" />\n            </div>\n            <div class=\"field\" style=\"min-width: 220px;\">\n              <label for=\"fpInvFilterCategory\">Categoria</label>\n              <select id=\"fpInvFilterCategory\">\n                <option value=\"\">Tutte</option>\n                <option value=\"__none\">Non assegnata</option>\n              </select>\n            </div>\n          </div>\n        </div>\n\n        <div class=\"tableWrap\" style=\"max-height: 420px; overflow:auto; margin-top: 10px;\">\n          <table class=\"dataGrid\">\n            <thead>\n              <tr>\n                <th>Nome prodotto</th>\n                <th>Codice</th>\n                <th>Categoria</th>\n                <th class=\"qty\">Q.tà</th>\n              </tr>\n            </thead>\n            <tbody id=\"fpStockTbody\">\n              <tr><td class=\"td-muted\" colspan=\"4\">Seleziona una sede.</td></tr>\n            </tbody>\n          </table>\n        </div>\n      </div>\n\n    </div>\n  </article>\n</div>";
+
+    const tpl = document.createElement("template");
+    tpl.innerHTML = html;
+
+    const anchor =
+      document.getElementById("viewMovements") ||
+      document.getElementById("viewFlows") ||
+      document.getElementById("viewAnag") ||
+      document.getElementById("toast") ||
+      document.getElementById("centerPop") ||
+      document.getElementById("mainModuleCode") ||
+      null;
+
+    if (anchor && anchor.parentNode) anchor.parentNode.insertBefore(tpl.content, anchor);
+    else document.body.appendChild(tpl.content);
+  } catch (e) {
+    try { console.error("[inventario_prodotti_finiti.js] inject failed", e); } catch (_) {}
+  }
+})();
+
+
+;
 /* ===== movimenti.js ===== */
 (function(){
   "use strict";
@@ -7511,6 +7542,7 @@ Verrà aggiornata anche la chiave su tutti i prodotti finiti.`);
       home: document.getElementById("viewHome"),
       ocr: document.getElementById("viewOcr"),
       inventory: document.getElementById("viewInventory"),
+      finishedInventory: document.getElementById("viewFinishedInventory"),
       flows: document.getElementById("viewFlows"),
       movements: document.getElementById("viewMovements"),
       categories: document.getElementById("viewCategories"),
@@ -7532,7 +7564,7 @@ Verrà aggiornata anche la chiave su tutti i prodotti finiti.`);
     // Porta overlay/modali come figli diretti di <body> per evitare stacking-context (transform/filter) sui parent
     (function __liftOverlaysToBody(){
       try{
-        ["viewOcr","viewInventory","viewFlows","viewDaneaDdt","viewRevenue","viewMovements","viewMoveInventory","viewCategories","viewFPCategories","viewTrash","viewAnag"].forEach(id => {
+        ["viewOcr","viewInventory","viewFinishedInventory","viewFlows","viewDaneaDdt","viewRevenue","viewMovements","viewMoveInventory","viewCategories","viewFPCategories","viewTrash","viewAnag"].forEach(id => {
           const el = document.getElementById(id);
           if (el && el.parentElement !== document.body) document.body.appendChild(el);
         });
@@ -7646,7 +7678,7 @@ Verrà aggiornata anche la chiave su tutti i prodotti finiti.`);
 
     function setView(name){
       const key = String(name || "home");
-      const overlayKeys = ["ocr","inventory","flows","daneaDdt","revenue","movements","moveInv","categories","fpCategories","trash","anag"];
+      const overlayKeys = ["ocr","inventory","finishedInventory","flows","daneaDdt","revenue","movements","moveInv","categories","fpCategories","trash","anag"];
       const isOverlay = overlayKeys.includes(key);
 
       // Home resta sempre visibile dietro (come un gestionale iOS)
@@ -7687,6 +7719,7 @@ Verrà aggiornata anche la chiave su tutti i prodotti finiti.`);
           (key === "home") ? "Home" :
           (key === "ocr") ? "Carica" :
           (key === "inventory") ? "Inventario" :
+          (key === "finishedInventory") ? "Inventario prodotti finiti" :
           (key === "flows") ? "DDT Caricati" :
           (key === "daneaDdt") ? "Scarica flussi DDT" :
           (key === "revenue") ? "Fatturato" :
@@ -7793,6 +7826,7 @@ Verrà aggiornata anche la chiave su tutti i prodotti finiti.`);
     document.getElementById("btnCloseInv")?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
     // Close inventario anche con tap/click sul backdrop
     document.getElementById("viewInventory")?.addEventListener("click", (e) => { try{ if (e.target === e.currentTarget) setView("home"); }catch(_){ } });
+    document.getElementById("viewFinishedInventory")?.addEventListener("click", (e) => { try{ if (e.target === e.currentTarget) setView("home"); }catch(_){ } });
     document.getElementById("viewMovements")?.addEventListener("click", (e) => { try{ if (e.target === e.currentTarget) setView("home"); }catch(_){ } });
     document.getElementById("viewMoveInventory")?.addEventListener("click", (e) => { try{ if (e.target === e.currentTarget) { resetMoveInvDirection(); setView("home"); } }catch(_){ } });
     document.getElementById("btnCloseOcr")?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
@@ -7820,10 +7854,12 @@ Verrà aggiornata anche la chiave su tutti i prodotti finiti.`);
     });
 document.getElementById("btnGoInvCerea")?.addEventListener("click", () => { openInventoryOverlay(WAREHOUSE_CEREA); });
     document.getElementById("btnGoInvConcamarise")?.addEventListener("click", () => { openInventoryOverlay(WAREHOUSE_CONCA); });
+    document.getElementById("btnGoFinishedInventory")?.addEventListener("click", () => { openFinishedInventoryOverlay(""); });
 document.getElementById("menuGoHome")?.addEventListener("click", () => { closeSideMenu(); setView("home"); });
     document.getElementById("menuGoOcr")?.addEventListener("click", () => { closeSideMenu(); startHomeOcr(); });
     document.getElementById("menuGoInvCerea")?.addEventListener("click", () => { closeSideMenu(); openInventoryOverlay(WAREHOUSE_CEREA); });
     document.getElementById("menuGoInvConcamarise")?.addEventListener("click", () => { closeSideMenu(); openInventoryOverlay(WAREHOUSE_CONCA); });
+    document.getElementById("menuGoFinishedInventory")?.addEventListener("click", () => { closeSideMenu(); openFinishedInventoryOverlay(""); });
     document.getElementById("menuGoMoveInventory")?.addEventListener("click", () => { closeSideMenu(); try{ resetMoveInvDirection(); }catch(_){ } setView("moveInv"); try{ renderMoveInv && renderMoveInv(); }catch(_){ } });
     document.getElementById("menuGoFlows")?.addEventListener("click", () => { closeSideMenu(); setView("flows"); try{ renderFlowsTable(); }catch(_){ } });
     document.getElementById("menuGoDaneaDdt")?.addEventListener("click", () => { closeSideMenu(); setView("daneaDdt"); try{ window.HubDaneaDdt && window.HubDaneaDdt.refresh && window.HubDaneaDdt.refresh(); }catch(_){ } });
@@ -7997,7 +8033,7 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
     setView("home");
 
     // Chiudi i modali cliccando fuori dal contenuto (overlay)
-    ["ocr","inventory","flows","moveInv","anag"].forEach((k) => {
+    ["ocr","inventory","finishedInventory","flows","moveInv","anag"].forEach((k) => {
       const el = __views[k];
       if (!el) return;
       el.addEventListener("click", (e) => { if (e.target === el) setView("home"); });
@@ -8159,6 +8195,21 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
     const filterLow = document.getElementById("filterLow");
     const filterCategory = document.getElementById("filterCategory");
 
+    // ===== Inventario prodotti finiti =====
+    const fpInvPicker = document.getElementById("fpInvPicker");
+    const fpInvDetail = document.getElementById("fpInvDetail");
+    const fpInvDetailTitle = document.getElementById("fpInvDetailTitle");
+    const pillFpInvWarehouse = document.getElementById("pillFpInvWarehouse");
+    const pillFpStock = document.getElementById("pillFpStock");
+    const btnFpInvPickCerea = document.getElementById("btnFpInvPickCerea");
+    const btnFpInvPickConcamarise = document.getElementById("btnFpInvPickConcamarise");
+    const btnFpInvBackPicker = document.getElementById("btnFpInvBackPicker");
+    const btnBackFpInv = document.getElementById("btnBackFpInv");
+    const btnCloseFpInv = document.getElementById("btnCloseFpInv");
+    const fpInvSearch = document.getElementById("fpInvSearch");
+    const fpInvFilterCategory = document.getElementById("fpInvFilterCategory");
+    const fpStockTbody = document.getElementById("fpStockTbody");
+
     const pillOcr = document.getElementById("pillOcr");
     const dotOcr = document.getElementById("dotOcr");
     const pillOcrText = document.getElementById("pillOcrText");
@@ -8205,6 +8256,31 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
       try{ renderAll(); }catch(_){}
     }
 
+    // ===== Inventario prodotti finiti: UI picker + stato =====
+    function setFinishedInventoryWarehouse(w){
+      const wh = (String(w || "").trim()) ? normalizeWarehouse(w) : "";
+      __currentFinishedWarehouse = wh;
+
+      if (fpInvPicker) fpInvPicker.style.display = wh ? "none" : "";
+      if (fpInvDetail) fpInvDetail.style.display = wh ? "" : "none";
+
+      try{ __syncDockedControlsVisibility && __syncDockedControlsVisibility(); }catch(_){ }
+
+      if (pillFpInvWarehouse) {
+        pillFpInvWarehouse.style.display = wh ? "inline-flex" : "none";
+        pillFpInvWarehouse.textContent = wh ? warehouseLabel(wh) : "—";
+      }
+      if (fpInvDetailTitle) fpInvDetailTitle.textContent = wh ? ("Prodotti finiti — " + warehouseLabel(wh).replace("Inventario ", "")) : "Inventario prodotti finiti";
+
+      if (pillFpStock && !wh) pillFpStock.textContent = "Seleziona";
+    }
+
+    function openFinishedInventoryOverlay(warehouse){
+      setView("finishedInventory");
+      setFinishedInventoryWarehouse(warehouse || "");
+      try{ renderAll(); }catch(_){ }
+    }
+
     // binder (safe)
     try{
       btnPickCerea && btnPickCerea.addEventListener("click", () => { setInventoryWarehouse(WAREHOUSE_CEREA); renderAll(); });
@@ -8218,6 +8294,20 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
         }
         setView("home");
       });
+
+      // Inventario prodotti finiti
+      btnFpInvPickCerea && btnFpInvPickCerea.addEventListener("click", () => { setFinishedInventoryWarehouse(WAREHOUSE_CEREA); renderAll(); });
+      btnFpInvPickConcamarise && btnFpInvPickConcamarise.addEventListener("click", () => { setFinishedInventoryWarehouse(WAREHOUSE_CONCA); renderAll(); });
+      btnFpInvBackPicker && btnFpInvBackPicker.addEventListener("click", () => { setFinishedInventoryWarehouse(""); renderAll(); });
+      btnBackFpInv && btnBackFpInv.addEventListener("click", () => {
+        if (fpInvDetail && fpInvDetail.style.display !== "none") {
+          setFinishedInventoryWarehouse("");
+          renderAll();
+          return;
+        }
+        setView("home");
+      });
+      btnCloseFpInv && btnCloseFpInv.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){ } setView("home"); });
     }catch(_){}
 /****************************************************************
      * State
@@ -8225,6 +8315,7 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
     let state = {
       settings: { ...DEFAULT_SETTINGS },
       movements: [], // array of Movement
+      finishedMovements: [], // movimenti inventario prodotti finiti (sync)
       thresholds: {}, // per-item threshold overrides: key -> number
       productCategories: {}, // per-code categoria (offline fallback)
       productUoms: {}, // per-code unità di misura (offline fallback)
@@ -8261,6 +8352,7 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
         products: null,
         categories: null,
         movements: null,
+        finishedMovements: null,
         thresholds: null,
         supplierDocs: null,
         finishedProducts: null,
@@ -9035,6 +9127,11 @@ btnLogout.addEventListener("click", async () => {
       __daneaCompleted = [];
       __daneaCompletedMap = new Map();
       try{ __fpSelectedIds.clear(); }catch(_){ }
+
+      // Inventario prodotti finiti: nessun fallback locale
+      try{ state.finishedMovements = []; }catch(_){ }
+      try{ __currentFinishedWarehouse = ""; }catch(_){ }
+
       thresholds = {};
       currentSupplierId = null;
       try {
@@ -9227,6 +9324,34 @@ btnLogout.addEventListener("click", async () => {
         (err) => {
           console.error("movements watch error", err);
           // Evita di cambiare lo stato Sync globale per singole collezioni.
+        }
+      );
+
+      // Finished inventory movements (Prodotti finiti)
+      fb.unsub.finishedMovements = onSnapshot(
+        query(orgCol("finishedInventoryMovements"), orderBy("createdAt")),
+        (snap) => {
+          state.finishedMovements = snap.docs.map(d => {
+            const data = d.data() || {};
+            return {
+              id: d.id,
+              type: data.type || "IN",
+              code: data.code || "",
+              item: data.item || "",
+              uom: String(data.uom || "").trim(),
+              qtyRaw: String(data.qtyRaw || "").trim(),
+              qty: safeInt(data.qty),
+              date: data.date || "",
+              note: data.note || "",
+              source: data.source || "Manual",
+              warehouse: normalizeWarehouse(data.warehouse || data.site || data.magazzino || data.location || ""),
+              createdAt: tsToIso(data.createdAt) || data.createdAtIso || ""
+            };
+          });
+          renderAll();
+        },
+        (err) => {
+          console.error("finishedMovements watch error", err);
         }
       );
     }
@@ -9990,8 +10115,16 @@ async function deleteMovementsBulk(ids) {
       return `${normalizeWarehouse(warehouse)}||${movementKey(customer, code)}`;
     }
 
+    function fpStockRowKey(code, warehouse){
+      return `${normalizeWarehouse(warehouse)}||${String(code || "").trim().toLowerCase()}`;
+    }
+
     // "" => nessun inventario selezionato (picker)
-    let __currentWarehouse = "";function downloadBlob(filename, content, mime="text/plain") {
+    let __currentWarehouse = "";
+    // "" => nessuna sede selezionata (picker)
+    let __currentFinishedWarehouse = "";
+
+    function downloadBlob(filename, content, mime="text/plain") {
       const blob = new Blob([content], { type: mime });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -11081,6 +11214,46 @@ function validateMovementFields(fields) {
         const q = safeInt(mv.qty);
         cur.qty += (mv.type === "OUT" ? -q : q);
         if (!cur.item && item) cur.item = item;
+        const __u = __normalizeUom(mv.uom || "");
+        if (__u) cur.uom = __u;
+
+        const ts = mv.createdAt || mv.date || "";
+        const prev = latestByKey.get(k) || "";
+        if (!prev || String(ts) > String(prev)) {
+          latestByKey.set(k, String(ts));
+          cur.lastMoveAt = String(ts);
+        }
+
+        stock.set(k, cur);
+      }
+
+      return Array.from(stock.values());
+    }
+
+    function computeFinishedStockByWarehouse() {
+      const stock = new Map();
+      const latestByKey = new Map();
+
+      for (const mv of (state.finishedMovements || [])) {
+        const warehouse = normalizeWarehouse(mv.warehouse || mv.site || mv.magazzino || mv.location || "");
+        const code = (mv.code || "").trim();
+        if (!code) continue;
+        const item = (mv.item || "").trim();
+        const k = fpStockRowKey(code, warehouse);
+
+        const cur = stock.get(k) || {
+          warehouse,
+          code,
+          item,
+          uom: "",
+          qty: 0,
+          lastMoveAt: ""
+        };
+
+        const q = safeInt(mv.qty);
+        cur.qty += (mv.type === "OUT" ? -q : q);
+        if (!cur.item && item) cur.item = item;
+
         const __u = __normalizeUom(mv.uom || "");
         if (__u) cur.uom = __u;
 
@@ -14627,6 +14800,235 @@ for (const r of arr) {
     }
 
 
+// ===== Inventario prodotti finiti (UI + righe) =====
+let __fpStockRowByKey = new Map();
+
+function __findFinishedProductByCode(code){
+  const low = String(code || "").trim().toLowerCase();
+  if (!low) return null;
+  const list = Array.isArray(finishedProducts) ? finishedProducts : [];
+  for (const fp of list){
+    if (!fp) continue;
+    const c = String(fp.code || fp.sku || safeDecodeUri(fp.id || "") || "").trim();
+    const cl = String(fp.codeLower || "").trim();
+    if (c && c.toLowerCase() === low) return fp;
+    if (cl && cl.toLowerCase() === low) return fp;
+  }
+  return null;
+}
+
+function __fpCategoryNameFromKey(key){
+  const k = String(key || "").trim().toLowerCase();
+  if (!k) return "";
+  try{
+    const o = finishedProductCategoriesMap && finishedProductCategoriesMap.get ? finishedProductCategoriesMap.get(k) : null;
+    const name = o && (o.name || o.label) ? String(o.name || o.label) : "";
+    return String(name || k).trim();
+  }catch(_){ return String(k).trim(); }
+}
+
+function buildFinishedInventoryRowsForWarehouse(wh, fpStockByWh){
+  const w = normalizeWarehouse(wh);
+  const other = (w === WAREHOUSE_CEREA) ? WAREHOUSE_CONCA : WAREHOUSE_CEREA;
+
+  let rows = (Array.isArray(fpStockByWh) ? fpStockByWh : []).filter(x => normalizeWarehouse(x.warehouse) === w).map(r => Object.assign({}, r));
+
+  const totByCode = new Map();
+  for (const r of (Array.isArray(fpStockByWh) ? fpStockByWh : [])) {
+    if (!r) continue;
+    const code = String(r.code || "").trim();
+    if (!code) continue;
+    const low = code.toLowerCase();
+    const ww = normalizeWarehouse(r.warehouse || "");
+    const info = totByCode.get(low) || { cerea: 0, concamarise: 0 };
+    const q = Number(r.qty);
+    info[ww] += (Number.isFinite(q) ? q : 0);
+    totByCode.set(low, info);
+  }
+
+  const existing = new Set(rows.map(r => String(r && r.code || "").trim().toLowerCase()).filter(Boolean));
+  const fps = Array.isArray(finishedProducts) ? finishedProducts : [];
+
+  // Placeholder per PF senza movimenti
+  for (const fp of fps){
+    if (!fp) continue;
+    const code = String(fp.code || fp.sku || safeDecodeUri(fp.id || "") || "").trim();
+    if (!code) continue;
+    const low = code.toLowerCase();
+    if (existing.has(low)) continue;
+    existing.add(low);
+
+    const info = totByCode.get(low) || { cerea: 0, concamarise: 0 };
+    const bothZero = (Number(info.cerea)||0) === 0 && (Number(info.concamarise)||0) === 0;
+
+    rows.push({
+      warehouse: w,
+      code,
+      item: String(fp.name || fp.nome || fp.description || code),
+      uom: __normalizeUom(fp.uom || "") || "pz",
+      qty: 0,
+      lastMoveAt: "",
+      fpId: String(fp.id || "").trim(),
+      categoryKey: String(fp.categoryKeyLower || fp.categoryKey || "").trim().toLowerCase(),
+      categoryName: __fpCategoryNameFromKey(fp.categoryKeyLower || fp.categoryKey || ""),
+      __bothZero: bothZero
+    });
+  }
+
+  // Enrich + regola visibilità sede
+  rows = rows.map(r => {
+    const code = String(r && r.code || "").trim();
+    const low = code.toLowerCase();
+    const fp = __findFinishedProductByCode(code);
+
+    const info = totByCode.get(low) || { cerea: 0, concamarise: 0 };
+    const bothZero = (Number(info.cerea)||0) === 0 && (Number(info.concamarise)||0) === 0;
+
+    const catKey = String((r && r.categoryKey) || (fp && (fp.categoryKeyLower || fp.categoryKey)) || "").trim().toLowerCase();
+    const catName = String((r && r.categoryName) || __fpCategoryNameFromKey(catKey) || "").trim();
+    const uom = __normalizeUom((r && r.uom) || "") || __normalizeUom(fp && fp.uom) || "pz";
+
+    const item = String((r && r.item) || (fp && (fp.name || fp.nome || fp.description)) || code).trim();
+    const fpId = String((r && r.fpId) || (fp && fp.id) || "").trim();
+
+    return Object.assign({}, r, {
+      warehouse: w,
+      code,
+      item,
+      uom,
+      fpId,
+      categoryKey: catKey,
+      categoryName: catName,
+      __bothZero: bothZero
+    });
+  }).filter(r => {
+    const low = String(r && r.code || "").trim().toLowerCase();
+    const info = totByCode.get(low) || { cerea: 0, concamarise: 0 };
+    const otherQty = (w === WAREHOUSE_CEREA) ? info.concamarise : info.cerea;
+    if ((Number(r.qty)||0) === 0 && !r.__bothZero && (Number(otherQty)||0) > 0) return false;
+    return true;
+  });
+
+  rows.sort((a,b) => String(a.item || "").localeCompare(String(b.item || ""), "it", { sensitivity: "base" }));
+  return rows;
+}
+
+function renderFpInventoryCategoryOptions(){
+  if (!fpInvFilterCategory) return;
+  const prev = String(fpInvFilterCategory.value || "");
+  const opts = ['<option value="">Tutte</option>', '<option value="__none">Non assegnata</option>'];
+  const cats = Array.isArray(finishedProductCategories) ? finishedProductCategories.slice() : [];
+  cats.sort((a,b) => String((a && a.name) || a.key || "").localeCompare(String((b && b.name) || b.key || ""), "it", { sensitivity: "base" }));
+  for (const c of cats){
+    if (!c) continue;
+    const k = String(c.key || "").trim().toLowerCase();
+    if (!k) continue;
+    const name = String(c.name || c.label || k).trim();
+    opts.push(`<option value="${escapeHtmlAttr(k)}">${escapeHtml(name)}</option>`);
+  }
+  fpInvFilterCategory.innerHTML = opts.join("");
+  try{
+    if (prev && Array.from(fpInvFilterCategory.options || []).some(o => String(o.value) === prev)) fpInvFilterCategory.value = prev;
+  }catch(_){ }
+}
+
+function renderFinishedStockTable(fpRows){
+  const qRaw = (fpInvSearch && fpInvSearch.value ? String(fpInvSearch.value) : "").trim();
+  const q = normTextKey(qRaw);
+  const catF = (fpInvFilterCategory && fpInvFilterCategory.value ? String(fpInvFilterCategory.value) : "").trim().toLowerCase();
+  let rows = Array.isArray(fpRows) ? fpRows : [];
+
+  if (q) rows = rows.filter(r => {
+    const hay = [r.code || "", r.item || "", r.categoryName || ""].join(" ");
+    return normTextKey(hay).includes(q);
+  });
+
+  if (catF) {
+    if (catF === "__none") rows = rows.filter(r => !String(r.categoryKey || "").trim());
+    else rows = rows.filter(r => String(r.categoryKey || "").trim().toLowerCase() === catF);
+  }
+
+  if (pillFpStock) pillFpStock.textContent = __currentFinishedWarehouse ? `${rows.length} righe` : "Seleziona";
+  if (!fpStockTbody) return;
+
+  __fpStockRowByKey = new Map();
+
+  if (!__currentFinishedWarehouse) {
+    fpStockTbody.innerHTML = '<tr><td class="td-muted" colspan="4">Seleziona una sede.</td></tr>';
+    return;
+  }
+
+  if (rows.length === 0) {
+    fpStockTbody.innerHTML = '<tr><td class="td-muted" colspan="4">Nessun risultato.</td></tr>';
+    return;
+  }
+
+  const max = 800;
+  const show = rows.slice(0, max);
+
+  __fpStockRowByKey = new Map(show.map(r => [fpStockRowKey(r.code, r.warehouse), r]));
+
+  fpStockTbody.innerHTML = show.map(r => {
+    const k = fpStockRowKey(r.code, r.warehouse);
+    const qtyVal = safeInt(r.qty);
+    const uom = __normalizeUom(r.uom || "") || "pz";
+
+    const qtyCell = `
+      <div class="qty-editor">
+        <input class="qtyEditInput jsFpQtyEdit" type="number" inputmode="numeric" min="0" step="1"
+          value="${qtyVal}" data-orig="${qtyVal}" />
+        <span class="td-muted" style="font-size:12px; font-weight:900; min-width:34px; text-align:left;">${escapeHtml(uom)}</span>
+        <button class="btn btn-primary btn-xs jsFpQtySave" type="button" disabled>Salva</button>
+      </div>`;
+
+    const catHtml = r.categoryName ? `<span class="pill catPill" style="padding:2px 8px;">${escapeHtml(r.categoryName)}</span>` : '<span class="td-muted">—</span>';
+    const displayCode = escapeHtml(r.code || "");
+    const displayName = escapeHtml(r.item || "");
+
+    return `
+      <tr data-k="${escapeHtmlAttr(k)}" title="Apri prodotto finito">
+        <td data-label="Nome prodotto">${displayName}</td>
+        <td data-label="Codice">${displayCode}</td>
+        <td data-label="Categoria">${catHtml}</td>
+        <td data-label="Q.tà" class="qty">${qtyCell}</td>
+      </tr>`;
+  }).join("");
+}
+
+async function adjustFinishedStockAbsoluteFromRow(row, newAbsQty) {
+  const r = row || {};
+  const oldQty = safeInt(r.qty);
+  let newQty = safeInt(newAbsQty);
+  if (!Number.isFinite(newQty) || newQty < 0) newQty = 0;
+  const delta = newQty - oldQty;
+  if (!delta) return;
+
+  const __uom = __normalizeUom(r.uom || "") || "pz";
+
+  if (!fb.user || !fb.db) {
+    showToast("Accedi con Google per salvare l'inventario PF", "err");
+    throw new Error("not-auth");
+  }
+
+  const mv = {
+    type: delta > 0 ? "IN" : "OUT",
+    code: String(r.code || "").trim(),
+    item: String(r.item || "").trim(),
+    qty: Math.abs(delta),
+    date: todayYYYYMMDD(),
+    note: `Rettifica inventario PF: da ${oldQty} ${__uom} a ${newQty} ${__uom}`,
+    uom: __uom,
+    qtyRaw: `${Math.abs(delta)} ${__uom}`.trim(),
+    warehouse: normalizeWarehouse(r.warehouse || __currentFinishedWarehouse || ""),
+    source: "Rettifica PF",
+    createdAt: serverTimestamp(),
+    createdBy: (fb.user.email || fb.user.uid || "")
+  };
+
+  await addDoc(orgCol("finishedInventoryMovements"), mv);
+  showToast(`Quantità PF aggiornata (${oldQty}→${newQty}) ${__uom}`);
+}
+
 let __stockRowByKey = new Map();
 
     function renderStockTable(stockArr) {
@@ -15455,6 +15857,7 @@ let __stockRowByKey = new Map();
 function renderAll() {
       const stockArr = computeStock();
       const stockByWh = computeStockByWarehouse();
+      const fpStockByWh = computeFinishedStockByWarehouse();
       rebuildDocGroupsCache();
 
       // Home / KPI: totale (somma di tutti i magazzini)
@@ -15480,6 +15883,19 @@ function renderAll() {
           if (pillStock) pillStock.textContent = "Seleziona";
           if (stockTbody) stockTbody.innerHTML = '<tr><td class="td-muted" colspan="4">Seleziona un inventario.</td></tr>';
         } catch(_){}
+      }
+
+      // Inventario prodotti finiti: mostra tabella solo dopo scelta sede
+      try{ renderFpInventoryCategoryOptions(); }catch(_){ }
+      if (__currentFinishedWarehouse) {
+        const wh = normalizeWarehouse(__currentFinishedWarehouse);
+        const fpRows = buildFinishedInventoryRowsForWarehouse(wh, fpStockByWh || []);
+        renderFinishedStockTable(fpRows);
+      } else {
+        try{
+          if (pillFpStock) pillFpStock.textContent = "Seleziona";
+          if (fpStockTbody) fpStockTbody.innerHTML = '<tr><td class="td-muted" colspan="4">Seleziona una sede.</td></tr>';
+        }catch(_){ }
       }
 
       renderMovementsTable();
@@ -20230,6 +20646,9 @@ searchStock.addEventListener("input", () => renderAll());
     filterLow.addEventListener("change", () => renderAll());
     if (filterCategory) filterCategory.addEventListener("change", () => renderAll());
 
+    if (fpInvSearch) fpInvSearch.addEventListener("input", () => renderAll());
+    if (fpInvFilterCategory) fpInvFilterCategory.addEventListener("change", () => renderAll());
+
     // Click su riga stock: dettaglio + categoria
     if (stockTbody) {
       stockTbody.addEventListener("click", async (e) => {
@@ -20341,6 +20760,107 @@ searchStock.addEventListener("input", () => renderAll());
       });
 
 }
+
+    // Inventario prodotti finiti: rettifica rapida
+    if (fpStockTbody) {
+      fpStockTbody.addEventListener("click", async (e) => {
+        const btnSave = e.target.closest("button.jsFpQtySave");
+        if (btnSave) {
+          e.preventDefault();
+          e.stopPropagation();
+
+          const tr = btnSave.closest("tr[data-k]");
+          if (!tr) return;
+          const k = tr.getAttribute("data-k") || "";
+          const row = __fpStockRowByKey.get(k);
+          if (!row) return;
+
+          const inp = tr.querySelector("input.jsFpQtyEdit");
+          if (!inp) return;
+
+          let newQty = safeInt(inp.value);
+          if (!Number.isFinite(newQty) || newQty < 0) newQty = 0;
+
+          const oldQty = safeInt(row.qty);
+          if (newQty === oldQty) {
+            inp.value = String(oldQty);
+            inp.dataset.orig = String(oldQty);
+            btnSave.disabled = true;
+            return;
+          }
+
+          inp.disabled = true;
+          btnSave.disabled = true;
+          btnSave.textContent = "Salvo…";
+          try {
+            await adjustFinishedStockAbsoluteFromRow(row, newQty);
+            row.qty = newQty;
+            inp.dataset.orig = String(newQty);
+            btnSave.textContent = "Salvato";
+            setTimeout(() => { try { btnSave.textContent = "Salva"; } catch(_){} }, 600);
+          } catch (err) {
+            console.error(err);
+            showToast("Errore salvataggio quantità PF", "err");
+            btnSave.textContent = "Salva";
+          } finally {
+            inp.disabled = false;
+          }
+          return;
+        }
+
+        if (e.target.closest("input.jsFpQtyEdit")) return;
+
+        const tr = e.target.closest("tr[data-k]");
+        if (!tr) return;
+        const k = tr.getAttribute("data-k") || "";
+        const row = __fpStockRowByKey.get(k);
+        if (!row) return;
+        const fid = String(row.fpId || "").trim();
+        if (fid) {
+          try{ openFinishedProductModal(fid); }catch(_){ }
+        } else {
+          showToast("Prodotto finito non trovato in anagrafica", "warn");
+        }
+      });
+
+      fpStockTbody.addEventListener("input", (e) => {
+        const inp = e.target;
+        if (!inp || !inp.matches || !inp.matches("input.jsFpQtyEdit")) return;
+        const tr = inp.closest("tr[data-k]");
+        if (!tr) return;
+        const btn = tr.querySelector("button.jsFpQtySave");
+        if (!btn) return;
+        const k = tr.getAttribute("data-k") || "";
+        const row = __fpStockRowByKey.get(k);
+        const base = Number.isFinite(safeInt(inp.dataset.orig)) ? safeInt(inp.dataset.orig) : safeInt(row ? row.qty : 0);
+        let val = safeInt(inp.value);
+        if (!Number.isFinite(val) || val < 0) val = 0;
+        btn.disabled = (val === base);
+      });
+
+      fpStockTbody.addEventListener("keydown", (e) => {
+        const inp = e.target;
+        if (!inp || !inp.matches || !inp.matches("input.jsFpQtyEdit")) return;
+
+        if (e.key === "Enter") {
+          e.preventDefault();
+          const tr = inp.closest("tr[data-k]");
+          const btn = tr ? tr.querySelector("button.jsFpQtySave") : null;
+          if (btn && !btn.disabled) btn.click();
+          else inp.blur();
+        }
+
+        if (e.key === "Escape") {
+          e.preventDefault();
+          const base = safeInt(inp.dataset.orig);
+          inp.value = String(Number.isFinite(base) ? base : 0);
+          const tr = inp.closest("tr[data-k]");
+          const btn = tr ? tr.querySelector("button.jsFpQtySave") : null;
+          if (btn) btn.disabled = true;
+          inp.blur();
+        }
+      });
+    }
 
     const btnNewMovementManual = document.getElementById("btnNewMovementManual");
     if (btnNewMovementManual) btnNewMovementManual.addEventListener("click", () => {
