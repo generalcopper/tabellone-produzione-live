@@ -2459,13 +2459,20 @@ const tpl = document.createElement("template");
 
   function getFpComponents(fp){
     if (!fp) return [];
+
+    // 1) Distinta dalla categoria (se presente) — prevale sul singolo
+    const cat = getFpCategoryForFp(fp);
+    const catBom = (cat && (cat.bom || cat.components || cat.distintaBase)) || [];
+    const catArr = Array.isArray(catBom) ? catBom : [];
+    if (catArr.length > 0) return catArr;
+
+    // 2) Distinta del singolo prodotto finito
     const arr = (fp.components || fp.bom || fp.distintaBase);
     const direct = Array.isArray(arr) ? arr : [];
     if (direct.length > 0) return direct;
 
-    const cat = getFpCategoryForFp(fp);
-    const bom = (cat && (cat.bom || cat.components || cat.distintaBase)) || [];
-    return Array.isArray(bom) ? bom : [];
+    // 3) fallback (categoria vuota)
+    return catArr;
   }
 
   function rowQtyInt(row){
@@ -6933,10 +6940,14 @@ Verrà aggiornata anche la chiave su tutti i prodotti finiti.`);
     if (!fp || !fp.id){ showToast("Prodotto finito non trovato", "warn"); return; }
 
     try{
-      const { doc, updateDoc } = h.FS;
+      const { doc, updateDoc, deleteField } = h.FS;
       await updateDoc(doc(h.fb.db, "orgs", h.ORG_ID, "finishedProducts", fp.id), {
         categoryKey: key,
-        categoryKeyLower: key
+        categoryKeyLower: key,
+        // Se era "Singolo", quando lo assegno a una categoria deve ereditare la distinta base della categoria
+        components: deleteField(),
+        bom: deleteField(),
+        distintaBase: deleteField()
       });
       showToast("Prodotto finito assegnato");
       try{ $("fpCatMemberPick").value = ""; }catch(_){ }
@@ -9050,31 +9061,33 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
       try{ showToast(removing ? 'Rimozione categoria…' : 'Associazione categoria…'); }catch(_){ }
 
       try{
-        let forcedSingolo = 0;
+        let clearedSingolo = 0;
         for (const id of ids){
           const fid = String(id || '').trim();
           if (!fid) continue;
 
           const fp = (Array.isArray(finishedProducts) ? finishedProducts : []).find(x => String(x && x.id || '') === fid) || null;
-          const isSingle = fp && __fpIsSingle(fp);
+          const hadDirectBom = fp ? (__fpDirectComponents(fp).length > 0) : false;
 
-          const payload = isSingle
-            ? { categoryKey: 'singolo', categoryKeyLower: 'singolo' }
-            : (removing
-              ? { categoryKey: deleteField(), categoryKeyLower: deleteField() }
-              : { categoryKey: key, categoryKeyLower: String(key).toLowerCase() });
+          const payload = removing
+            ? { categoryKey: deleteField(), categoryKeyLower: deleteField() }
+            : {
+                categoryKey: key,
+                categoryKeyLower: String(key).toLowerCase(),
+                // Se era "Singolo", quando lo assegno a una categoria deve ereditare la distinta base della categoria
+                components: deleteField(),
+                bom: deleteField(),
+                distintaBase: deleteField()
+              };
 
-          if (isSingle) forcedSingolo++;
+          if (!removing && hadDirectBom) clearedSingolo++;
 
           await setDoc(doc(fb.db, 'orgs', ORG_ID, 'finishedProducts', fid), payload, { merge: true });
         }
         __fpSelectedIds.clear();
         try{ sel.value = ''; }catch(_){ }
-        if (forcedSingolo){
-          showToast(removing
-            ? (`Categoria rimossa. ${forcedSingolo} prodotti restano 'Singolo' (hanno distinta base).`)
-            : (`Categoria associata. ${forcedSingolo} prodotti impostati a 'Singolo' (hanno distinta base).`)
-          );
+        if (!removing && clearedSingolo){
+          showToast(`Categoria associata. ${clearedSingolo} prodotti ora ereditano la distinta della categoria.`);
         } else {
           showToast(removing ? 'Categoria rimossa' : 'Prodotti finiti associati');
         }
@@ -15086,8 +15099,32 @@ function __fpDirectComponents(fp){
   }catch(_){ return []; }
 }
 
+function __fpCategoryBomForKey(catKey){
+  const k = String(catKey || "").trim().toLowerCase();
+  if (!k || k === "singolo") return [];
+  try{
+    const cat = (finishedProductCategoriesMap && typeof finishedProductCategoriesMap.get === "function")
+      ? (finishedProductCategoriesMap.get(k) || null)
+      : null;
+    const bom = cat && (cat.bom || cat.components || cat.distintaBase);
+    return Array.isArray(bom) ? bom : [];
+  }catch(_){ return []; }
+}
+
 function __fpIsSingle(fp){
-  try{ return __fpDirectComponents(fp).length > 0; }catch(_){ return false; }
+  try{
+    const direct = __fpDirectComponents(fp);
+    if (!(Array.isArray(direct) && direct.length)) return false;
+
+    // Se appartiene a una categoria con distinta base => prevale la distinta della categoria
+    const catKey = String(fp && (fp.categoryKeyLower || fp.categoryKey || fp.category || "") || "").trim().toLowerCase();
+    if (catKey && catKey !== "singolo"){
+      const catBom = __fpCategoryBomForKey(catKey);
+      if (Array.isArray(catBom) && catBom.length) return false;
+    }
+
+    return true;
+  }catch(_){ return false; }
 }
 
 function __fpCategoryNameFromKey(key){
@@ -15106,19 +15143,20 @@ function __fpGetResolvedBomForCode(code){
   const fp = __findFinishedProductByCode(code);
   if (!fp) return [];
 
-  // 1) BOM diretta sul prodotto
+  const catKey = String(fp.categoryKeyLower || fp.categoryKey || fp.category || "").trim().toLowerCase();
+
+  // 1) BOM da categoria (se presente e non vuota) — prevale sempre
+  const catBom = __fpCategoryBomForKey(catKey);
+  if (Array.isArray(catBom) && catBom.length) return catBom;
+
+  // 2) BOM diretta sul prodotto
   const direct = __fpDirectComponents(fp);
   if (Array.isArray(direct) && direct.length) return direct;
 
-  // 2) BOM da categoria (se presente)
-  const catKey = String(fp.categoryKeyLower || fp.categoryKey || fp.category || "").trim().toLowerCase();
-  if (!catKey) return [];
-  const cat = (finishedProductCategoriesMap && typeof finishedProductCategoriesMap.get === "function")
-    ? (finishedProductCategoriesMap.get(catKey) || null)
-    : null;
-  const bom = cat && (cat.bom || cat.components || cat.distintaBase);
-  return Array.isArray(bom) ? bom : [];
+  // 3) fallback categoria (anche vuota)
+  return Array.isArray(catBom) ? catBom : [];
 }
+
 
 function __fpHasBomForCode(code){
   try{ return __fpGetResolvedBomForCode(code).length > 0; }catch(_){ return false; }
@@ -16698,8 +16736,9 @@ try{
             const isSel = __fpSelectedIds.has(id) ? "checked" : "";
 
             const comps = Array.isArray(fp && (fp.components || fp.bom || fp.distintaBase)) ? (fp.components || fp.bom || fp.distintaBase) : [];
-            const n = comps.length;
-            const isSingle = n > 0;
+            const nDirect = comps.length;
+            const isSingle = __fpIsSingle(fp);
+            const n = isSingle ? nDirect : 0;
 
             const catKey = isSingle ? "singolo" : String(fp && (fp.categoryKeyLower || fp.categoryKey || "") || "").trim().toLowerCase();
             const catObj = (!isSingle && catKey) ? (finishedProductCategoriesMap.get(catKey) || null) : null;
@@ -20178,6 +20217,18 @@ function __fpRenderSmartBrowse(){
         fp = (Array.isArray(finishedProducts) ? finishedProducts : []).find(x => String(x && x.id || "") === fid) || null;
       }
       __fpDraft = __fpEnsureDraftBase(fp || {});
+
+      // Se il PF appartiene a una categoria con distinta base, la distinta del singolo viene ignorata.
+      // (manteniamo il draft vuoto: la distinta si gestisce nelle "Categorie prodotti finiti")
+      try{
+        if (fp){
+          const catKey = String(fp.categoryKeyLower || fp.categoryKey || fp.category || "").trim().toLowerCase();
+          const catBom = __fpCategoryBomForKey(catKey);
+          if (Array.isArray(catBom) && catBom.length){
+            __fpDraft.components = [];
+          }
+        }
+      }catch(_){ }
 
       if (fpTitle) fpTitle.textContent = fid ? "Prodotto finito" : "Nuovo prodotto finito";
       if (fpName) fpName.value = String(__fpDraft.name || __fpDraft.nome || "").trim();
