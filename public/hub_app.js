@@ -15477,10 +15477,18 @@ function __fpCompQtyPerUnit(comp){
 
 function __fpIsProductionMacroForCode(code){
   try{
-    const mc = (typeof getMacroCategoryForCode === "function") ? String(getMacroCategoryForCode(code) || "").trim().toLowerCase() : "";
-    // Se non conosco la macro (non categorizzato), lo tratto come OK.
-    if (!mc) return true;
-    return (mc === "materie_prime" || mc === "imballaggi");
+    // getMacroCategoryForCode ritorna la *categoria* (es. "scatole", "flaconi", "materie_prime"),
+    // mentre per la produzione ci interessa il *macro gruppo* ("materie_prime" / "imballaggi").
+    const catKey = (typeof getMacroCategoryForCode === "function") ? String(getMacroCategoryForCode(code) || "").trim() : "";
+
+    let mg = "";
+    try{
+      if (typeof categoryMacroGroup === "function") mg = String(categoryMacroGroup(catKey) || "").trim().toLowerCase();
+    }catch(_){ mg = ""; }
+
+    // Se non riesco a risalire al macro gruppo, non blocco (compat / non categorizzato).
+    if (!mg) return true;
+    return (mg === "materie_prime" || mg === "imballaggi");
   }catch(_){ return true; }
 }
 
