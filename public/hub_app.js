@@ -8079,6 +8079,13 @@ Verrà aggiornata anche la chiave su tutti i prodotti finiti.`);
     const btnFpDone = document.getElementById("btnFpDone");
     const fpClose = document.getElementById("fpClose");
 
+    // Inventario prodotti finiti: popup rapido produzione (solo Quantità + Produci)
+    const modalFpProduce = document.getElementById("modalFpProduce");
+    const fpProdTitle = document.getElementById("fpProdTitle");
+    const fpProdQty = document.getElementById("fpProdQty");
+    const btnFpProdDo = document.getElementById("btnFpProdDo");
+    const fpProdClose = document.getElementById("fpProdClose");
+
     // Click su una riga documento => precompila i campi movimento
     const docItemsTable = document.getElementById("docItemsTable");
 
@@ -15648,7 +15655,7 @@ function renderFinishedStockTable(fpRows){
     const displayName = escapeHtml(r.item || "");
 
     return `
-      <tr data-k="${escapeHtmlAttr(k)}" title="Apri prodotto finito">
+      <tr data-k="${escapeHtmlAttr(k)}" title="Produci">
         <td data-label="Nome prodotto">${displayName}</td>
         <td data-label="Codice">${displayCode}</td>
         <td data-label="Categoria">${catHtml}</td>
@@ -15963,6 +15970,133 @@ async function produceFinishedProductFromRow(row, qtyToProduce){
     throw e;
   }finally{
     __fpProduceBusy = false;
+  }
+}
+
+// ===== Inventario PF: popup rapido Produci (Quantità + Produci) =====
+let __fpProduceModalCtx = null;
+
+function openFpProduceModal(row, tr){
+  const r = row || {};
+
+  // sicurezza: solo se ha distinta base (prodotto o categoria)
+  if (!__fpHasBomForCode(r.code)) {
+    showToast("Prodotto non producibile: distinta base mancante", "warn");
+    return;
+  }
+
+  // Fallback: se il popup non è presente, torno al prompt (comportamento precedente)
+  if (!modalFpProduce || !fpProdQty || !btnFpProdDo) {
+    const def = "1";
+    const label = `${String(r.code||"").trim()} — ${String(r.item||"").trim()}`.trim();
+    const raw = prompt(`Quantità da produrre\n\n${label}`, def);
+    if (raw == null) return;
+    let qty = safeInt(raw);
+    if (!Number.isFinite(qty) || qty <= 0) {
+      showToast("Quantità non valida", "warn");
+      return;
+    }
+    (async () => {
+      try{
+        const res = await produceFinishedProductFromRow(r, qty);
+        if (res && res.qty && tr){
+          try{
+            const delta = safeInt(res.qty);
+            const newQty = safeInt(r.qty) + delta;
+            r.qty = newQty;
+            const inp = tr.querySelector("input.jsFpQtyEdit");
+            const btnSave = tr.querySelector("button.jsFpQtySave");
+            if (inp) { inp.value = String(newQty); inp.dataset.orig = String(newQty); }
+            if (btnSave) btnSave.disabled = true;
+          }catch(_){ }
+        }
+      }catch(err){
+        console.error(err);
+      }
+    })();
+    return;
+  }
+
+  __fpProduceModalCtx = { row: r, tr: tr || null };
+
+  try{
+    if (fpProdTitle) fpProdTitle.textContent = "Produci";
+    fpProdQty.value = "1";
+    btnFpProdDo.disabled = false;
+    btnFpProdDo.textContent = "Produci";
+
+    modalFpProduce.classList.add("open");
+    __syncBodyLockFromModals();
+
+    setTimeout(() => {
+      try{ fpProdQty.focus(); fpProdQty.select(); }catch(_){ }
+    }, 0);
+  }catch(_){ }
+}
+
+function closeFpProduceModal(){
+  if (!modalFpProduce) return;
+  modalFpProduce.classList.remove("open");
+  __syncBodyLockFromModals();
+  __fpProduceModalCtx = null;
+  try{ if (fpProdQty) fpProdQty.value = "1"; }catch(_){ }
+  try{ if (btnFpProdDo) { btnFpProdDo.disabled = false; btnFpProdDo.textContent = "Produci"; } }catch(_){ }
+}
+
+async function __fpProduceFromModal(){
+  const ctx = __fpProduceModalCtx || {};
+  const r = ctx.row || null;
+  const tr = ctx.tr || null;
+  if (!r) return;
+
+  // sicurezza: solo se ha distinta base (prodotto o categoria)
+  if (!__fpHasBomForCode(r.code)) {
+    showToast("Prodotto non producibile: distinta base mancante", "warn");
+    return;
+  }
+
+  let qty = safeInt(fpProdQty && fpProdQty.value);
+  if (!Number.isFinite(qty) || qty <= 0) {
+    showToast("Quantità non valida", "warn");
+    return;
+  }
+
+  const oldText = btnFpProdDo ? btnFpProdDo.textContent : "";
+  if (btnFpProdDo) {
+    btnFpProdDo.disabled = true;
+    btnFpProdDo.textContent = "Produco…";
+  }
+
+  try{
+    const res = await produceFinishedProductFromRow(r, qty);
+    if (res && res.qty) {
+      // UI ottimistica: aggiorna quantità visualizzata
+      try{
+        const delta = safeInt(res.qty);
+        const newQty = safeInt(r.qty) + delta;
+        r.qty = newQty;
+        if (tr) {
+          const inp = tr.querySelector("input.jsFpQtyEdit");
+          const btnSave = tr.querySelector("button.jsFpQtySave");
+          if (inp) {
+            inp.value = String(newQty);
+            inp.dataset.orig = String(newQty);
+          }
+          if (btnSave) btnSave.disabled = true;
+        }
+      }catch(_){ }
+    }
+
+    closeFpProduceModal();
+  }catch(e){
+    console.error(e);
+    // lascio il popup aperto per permettere correzione e riprova
+    showToast("Errore produzione", "err");
+  }finally{
+    if (btnFpProdDo) {
+      btnFpProdDo.textContent = oldText || "Produci";
+      btnFpProdDo.disabled = false;
+    }
   }
 }
 
@@ -20700,6 +20834,22 @@ Nota: elimina SOLO l’anagrafica prodotti finiti e la sua distinta base.`);
     if (btnUnifiedDone) btnUnifiedDone.addEventListener("click", closeUnifiedModal);
     if (modalUnified) modalUnified.addEventListener("click", (e) => { if (e.target === modalUnified) closeUnifiedModal(); });
 
+    // Finished inventory: popup rapido "Produci" (Quantità + Produci)
+    const __fpProdCloseSafe = () => { try{ closeFpProduceModal(); }catch(_){ } };
+    if (fpProdClose) fpProdClose.addEventListener("click", __fpProdCloseSafe);
+    if (modalFpProduce) modalFpProduce.addEventListener("click", (e) => { if (e.target === modalFpProduce) __fpProdCloseSafe(); });
+    if (btnFpProdDo) btnFpProdDo.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){ } __fpProduceFromModal(); });
+    if (fpProdQty) fpProdQty.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        try{ btnFpProdDo && btnFpProdDo.click(); }catch(_){ }
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        __fpProdCloseSafe();
+      }
+    });
+
     // Finished product modal
     const __fpCloseSafe = () => { try{ window.closeFinishedProductModal && window.closeFinishedProductModal(); }catch(_){ } };
     if (fpClose) fpClose.addEventListener("click", __fpCloseSafe);
@@ -21907,47 +22057,8 @@ searchStock.addEventListener("input", () => renderAll());
           const row = __fpStockRowByKey.get(k);
           if (!row) return;
 
-          // sicurezza: solo se ha distinta base (prodotto o categoria)
-          if (!__fpHasBomForCode(row.code)) {
-            showToast("Prodotto non producibile: distinta base mancante", "warn");
-            return;
-          }
-
-          const def = "1";
-          const label = `${String(row.code||"").trim()} — ${String(row.item||"").trim()}`.trim();
-          const raw = prompt(`Quantità da produrre\n\n${label}`, def);
-          if (raw == null) return;
-          let qty = safeInt(raw);
-          if (!Number.isFinite(qty) || qty <= 0) {
-            showToast("Quantità non valida", "warn");
-            return;
-          }
-
-          const inp = tr.querySelector("input.jsFpQtyEdit");
-          const btnSave = tr.querySelector("button.jsFpQtySave");
-          const oldText = btnProd.textContent;
-          btnProd.disabled = true;
-          btnProd.textContent = "Produco…";
-          try {
-            const res = await produceFinishedProductFromRow(row, qty);
-            if (res && res.qty) {
-              // UI ottimistica: aggiorna quantità visualizzata
-              try {
-                const newQty = safeInt(row.qty) + safeInt(res.qty);
-                row.qty = newQty;
-                if (inp) {
-                  inp.value = String(newQty);
-                  inp.dataset.orig = String(newQty);
-                }
-                if (btnSave) btnSave.disabled = true;
-              } catch(_){ }
-            }
-          } catch (err) {
-            console.error(err);
-          } finally {
-            btnProd.textContent = oldText || "Produci";
-            btnProd.disabled = false;
-          }
+          // Apri popup rapido (solo Quantità + Produci)
+          try{ openFpProduceModal(row, tr); }catch(_){ }
           return;
         }
 
@@ -22002,12 +22113,9 @@ searchStock.addEventListener("input", () => renderAll());
         const k = tr.getAttribute("data-k") || "";
         const row = __fpStockRowByKey.get(k);
         if (!row) return;
-        const fid = String(row.fpId || "").trim();
-        if (fid) {
-          try{ openFinishedProductModal(fid); }catch(_){ }
-        } else {
-          showToast("Prodotto finito non trovato in anagrafica", "warn");
-        }
+
+        // Click sulla riga prodotto => popup rapido produzione
+        try{ openFpProduceModal(row, tr); }catch(_){ }
       });
 
       fpStockTbody.addEventListener("input", (e) => {
