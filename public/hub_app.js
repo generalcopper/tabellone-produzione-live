@@ -176,6 +176,12 @@ const tpl = document.createElement("template");
     try{
       var src = String(mv.source || "").toUpperCase();
       if (src === "OCR") return true;
+
+      // Produzione PF: ha docNum (batch) ma NON è un documento da aprire
+      if (src.indexOf("PRODUZIONE") >= 0) return false;
+      var dt = String(mv.docType || "").trim().toUpperCase();
+      if (dt === "PRODUZIONE") return false;
+
       var note = String(mv.note || "");
       if (/\bDDT\b|DOCUMENTO|TRASPORTO|BOLLA|FATTURA/i.test(note)) return true;
       if (String(mv.docNum || "").trim()) return true;
@@ -201,8 +207,26 @@ const tpl = document.createElement("template");
 
   function getAllMovements(){
     try{
-      var arr = (api && api.state && Array.isArray(api.state.movements)) ? api.state.movements : [];
-      return arr.slice();
+      var inv = (api && api.state && Array.isArray(api.state.movements)) ? api.state.movements : [];
+      var fp  = (api && api.state && Array.isArray(api.state.finishedMovements)) ? api.state.finishedMovements : [];
+
+      var out = inv.slice();
+
+      // Mappa i movimenti PF nello stesso schema (Movimenti) + marca la collezione
+      (Array.isArray(fp) ? fp : []).forEach(function(mv){
+        if (!mv) return;
+        var src = String(mv.source || "").trim();
+        var srcLow = src.toLowerCase();
+        var cust = srcLow.indexOf("produzione") >= 0 ? "Produzione PF" : "Prodotti finiti";
+        var wh = (api && typeof api.normalizeWarehouse === "function") ? api.normalizeWarehouse(mv.warehouse || "") : String(mv.warehouse || "").trim().toLowerCase();
+        out.push(Object.assign({}, mv, {
+          customer: String(mv.customer || cust || "").trim() || cust,
+          warehouse: wh,
+          __collection: "finishedInventoryMovements"
+        }));
+      });
+
+      return out;
     }catch(_){ return []; }
   }
 
@@ -227,6 +251,24 @@ const tpl = document.createElement("template");
       // una chiave di raggruppamento dal numero documento.
       var k = String(mv.daneaDdtKey || mv.docNum || "").trim();
       return !!k;
+    }catch(_){ return false; }
+  }
+
+  // ===== Produzione PF: nascondo le righe componenti in tabella movimenti
+  // (mostro solo il carico del prodotto finito, e nel dettaglio apro i componenti)
+  function isPfProductionComponent(mv){
+    try{
+      if (!mv) return false;
+      if (String(mv.type || "").toUpperCase() !== "OUT") return false;
+      var src = String(mv.source || "").trim().toLowerCase();
+      if (src !== "produzione pf") return false;
+      var num = String(mv.docNum || "").trim();
+      if (!num) return false;
+      var dt = String(mv.docType || "").trim().toUpperCase();
+      if (dt && dt !== "PRODUZIONE") return false;
+      var wh = __normWh(mv.warehouse || "");
+      if (wh === "prodotti_finiti") return false;
+      return true;
     }catch(_){ return false; }
   }
 
@@ -332,11 +374,20 @@ const tpl = document.createElement("template");
       });
     });
 
+    // ids to skip (righe componenti Produzione PF)
+    var skipProd = Object.create(null);
+    all.forEach(function(mv){
+      if (!mv) return;
+      if (!isPfProductionComponent(mv)) return;
+      var id = String(mv.id || "").trim();
+      if (id) skipProd[id] = 1;
+    });
+
     var rows = [];
     all.forEach(function(mv){
       if (!mv) return;
       var id = String(mv.id || "").trim();
-      if (id && skip[id]) return;
+      if (id && (skip[id] || skipProd[id])) return;
       rows.push(mv);
     });
 
@@ -468,6 +519,7 @@ const tpl = document.createElement("template");
   function whLabel(v){
     if (api && typeof api.warehouseLabel === "function") return api.warehouseLabel(v);
     var s = String(v || "").toLowerCase();
+    if (s === "prodotti_finiti" || s === "pf" || s.includes("finit")) return "Prodotti finiti";
     if (s.includes("conca")) return "Concamarise";
     return "Cerea";
   }
@@ -476,6 +528,7 @@ const tpl = document.createElement("template");
     var s = (api && typeof api.normalizeWarehouse === "function") ? api.normalizeWarehouse(v) : String(v || "").toLowerCase();
     s = String(s || "").trim().toLowerCase();
     if (s === "split") return "Split";
+    if (s === "prodotti_finiti" || s === "pf" || s.includes("finit")) return "PF";
     return (s === "concamarise") ? "Conca" : "Cerea";
   }
 
@@ -604,6 +657,15 @@ const tpl = document.createElement("template");
   function __setDdtMode(on){
     try{ if (els.movDetDdtWrap) els.movDetDdtWrap.style.display = on ? "" : "none"; }catch(_){ }
     if (!on) __resetDdtDetailCtx();
+  }
+
+  // ===== Dettaglio Produzione PF (solo elenco componenti scaricati)
+  function __setProdMode(on){
+    try{ if (els.movDetProdWrap) els.movDetProdWrap.style.display = on ? "" : "none"; }catch(_){ }
+    if (!on){
+      try{ if (els.movDetProdCompsTbody) els.movDetProdCompsTbody.innerHTML = '<tr><td class="td-muted" colspan="7">—</td></tr>'; }catch(_){ }
+      try{ if (els.movDetProdHint) els.movDetProdHint.textContent = "Componenti scaricati per questa produzione."; }catch(_){ }
+    }
   }
 
   function __getHub(){
@@ -894,6 +956,52 @@ const tpl = document.createElement("template");
     }).join("");
   }
 
+  function __renderProdComponentsTable(comps){
+    if (!els.movDetProdCompsTbody) return;
+    var arr = Array.isArray(comps) ? comps.slice() : [];
+    if (!arr.length){
+      els.movDetProdCompsTbody.innerHTML = '<tr><td class="td-muted" colspan="7">Nessun componente scaricato.</td></tr>';
+      return;
+    }
+
+    // sort: Materie prime -> Imballaggi -> altri, poi codice
+    function typeRank(mg){
+      if (mg === "materie_prime") return 1;
+      if (mg === "imballaggi") return 2;
+      return 3;
+    }
+
+    arr.sort(function(a,b){
+      var ra = typeRank(__macroGroupForCode(a.code));
+      var rb = typeRank(__macroGroupForCode(b.code));
+      if (ra !== rb) return ra - rb;
+      var ca = String(a.code||"");
+      var cb = String(b.code||"");
+      if (ca !== cb) return ca.localeCompare(cb);
+      return String(a.item||"").localeCompare(String(b.item||""));
+    });
+
+    els.movDetProdCompsTbody.innerHTML = arr.map(function(it){
+      var mg = __macroGroupForCode(it.code);
+      var tipo = __macroGroupLabel(mg);
+      var code = String(it.code || "").trim();
+      var item = String(it.item || code).trim();
+      var uom = String(it.uom || "").trim();
+      var tot = Number(it.total || 0);
+      var c = Number(it.cerea || 0);
+      var k = Number(it.concamarise || 0);
+      return '<tr>'
+        + '<td data-label="Tipo">'+esc(tipo)+'</td>'
+        + '<td data-label="Codice"><span class="kbd">'+esc(code || "—")+'</span></td>'
+        + '<td data-label="Articolo">'+esc(item || "—")+'</td>'
+        + '<td data-label="Totale" class="qty" style="text-align:right;">'+tot.toLocaleString("it-IT")+'</td>'
+        + '<td data-label="Cerea" class="qty" style="text-align:right;">'+c.toLocaleString("it-IT")+'</td>'
+        + '<td data-label="Concamarise" class="qty" style="text-align:right;">'+k.toLocaleString("it-IT")+'</td>'
+        + '<td data-label="U.M.">'+esc(uom)+'</td>'
+        + '</tr>';
+    }).join("");
+  }
+
   function __renderDdtProdPlaceholder(msg){
     try{ if (els.movDetDdtProdWrap) els.movDetDdtProdWrap.style.display = ""; }catch(_){ }
     if (!els.movDetDdtProdTbody) return;
@@ -1024,6 +1132,7 @@ const tpl = document.createElement("template");
     if (!api || !g) return;
 
     cacheEls();
+    try{ __setProdMode(false); }catch(_){ }
     __setDdtMode(true);
 
     var rows = Array.isArray(g.movements) ? g.movements.slice() : [];
@@ -1158,6 +1267,7 @@ const tpl = document.createElement("template");
 
     // modal standard: nascondi sezioni DDT
     try{ __setDdtMode(false); }catch(_){ }
+    try{ __setProdMode(false); }catch(_){ }
 
     // Se non abbiamo il modale dedicato, fallback alla modale testuale legacy
     if (!els.modalMovementDetail){
@@ -1246,10 +1356,76 @@ const tpl = document.createElement("template");
       if (els.movDetUndo) els.movDetUndo.disabled = !(api && typeof api.deleteMovement === "function" && __detailCtx.id);
     }catch(_){ }
 
-    // hint standard
-    try{
-      if (els.movDetHint) els.movDetHint.textContent = "Annulla movimento = elimina questa riga e ripristina lo stock come prima.";
-    }catch(_){ }
+    // Produzione PF: mostra elenco componenti scaricati (batch docNum)
+    var __isFinished = (String(mv && mv.__collection || "").trim() === "finishedInventoryMovements");
+    var __srcLow = String(mv && mv.source || "").trim().toLowerCase();
+    var __docTypeU = String(mv && mv.docType || "").trim().toUpperCase();
+    var __batch = String(mv && mv.docNum || "").trim();
+    var __isProd = !!(
+      __batch &&
+      (__docTypeU === "PRODUZIONE" || __srcLow === "produzione pf" || __srcLow.indexOf("produzione") >= 0) &&
+      (__normWh(mv.warehouse || "") === "prodotti_finiti" || __isFinished)
+    );
+
+    // Movimenti PF: non supporto annullo singola riga da qui (serve gestione dedicata)
+    if (__isFinished){
+      try{ if (els.movDetUndo) els.movDetUndo.disabled = true; }catch(_){ }
+      try{ if (els.movDetOpenDoc) els.movDetOpenDoc.style.display = "none"; }catch(_){ }
+    }
+
+    if (__isProd){
+      try{ if (els.movDetTitle) els.movDetTitle.textContent = "Produzione PF"; }catch(_){ }
+      try{ __setVal(els.movDetCustomer, "Produzione PF"); }catch(_){ }
+
+      // Sottotitolo più informativo
+      try{
+        if (els.movDetSubtitle){
+          var lab = [String(mv.code||"").trim(), String(mv.item||"").trim()].filter(Boolean).join(" — ");
+          var wh = whLabel(mv.warehouse || "");
+          els.movDetSubtitle.textContent = [lab || "Prodotto finito", (qtyRaw || "—"), (String(mv.date||"").trim() || "—"), (wh || "—")].join(" · ");
+        }
+      }catch(_){ }
+
+      // Carico componenti dalla collezione inventarioMovements
+      var compsMovs = [];
+      try{
+        var inv = (api && api.state && Array.isArray(api.state.movements)) ? api.state.movements : [];
+        compsMovs = inv.filter(function(x){
+          if (!x) return false;
+          if (String(x.docNum || "").trim() !== __batch) return false;
+          return isPfProductionComponent(x);
+        });
+      }catch(_){ compsMovs = []; }
+
+      var compsAgg = __aggComponentsFromMovements(compsMovs);
+      try{ __setProdMode(true); }catch(_){ }
+      __renderProdComponentsTable(compsAgg);
+
+      try{
+        if (els.movDetProdHint){
+          var n = Array.isArray(compsMovs) ? compsMovs.length : 0;
+          els.movDetProdHint.textContent = n ? ("Componenti scaricati: " + n + " righe") : "Componenti non trovati per questa produzione.";
+        }
+      }catch(_){ }
+
+      // No doc / no undo per produzione
+      try{ if (els.movDetUndo) els.movDetUndo.disabled = true; }catch(_){ }
+      try{ if (els.movDetOpenDoc) els.movDetOpenDoc.style.display = "none"; }catch(_){ }
+
+      // hint produzione
+      try{
+        if (els.movDetHint) els.movDetHint.textContent = "Questa riga rappresenta una produzione PF. Sotto trovi l'elenco dei componenti scaricati.";
+      }catch(_){ }
+    } else {
+      // hint standard
+      try{
+        if (els.movDetHint) {
+          els.movDetHint.textContent = __isFinished
+            ? "Movimento prodotti finiti: annullamento non disponibile da questa schermata."
+            : "Annulla movimento = elimina questa riga e ripristina lo stock come prima.";
+        }
+      }catch(_){ }
+    }
 
     __openDetailModal();
   }
@@ -1439,6 +1615,11 @@ const tpl = document.createElement("template");
     els.movDetDdtProdWrap = $("movDetDdtProdWrap");
     els.movDetDdtProdTitle = $("movDetDdtProdTitle");
     els.movDetDdtProdTbody = $("movDetDdtProdTbody");
+
+    // Produzione PF (componenti scaricati)
+    els.movDetProdWrap = $("movDetProdWrap");
+    els.movDetProdCompsTbody = $("movDetProdCompsTbody");
+    els.movDetProdHint = $("movDetProdHint");
 
   }
 
@@ -8079,13 +8260,6 @@ Verrà aggiornata anche la chiave su tutti i prodotti finiti.`);
     const btnFpDone = document.getElementById("btnFpDone");
     const fpClose = document.getElementById("fpClose");
 
-    // Inventario prodotti finiti: popup rapido produzione (solo Quantità + Produci)
-    const modalFpProduce = document.getElementById("modalFpProduce");
-    const fpProdTitle = document.getElementById("fpProdTitle");
-    const fpProdQty = document.getElementById("fpProdQty");
-    const btnFpProdDo = document.getElementById("btnFpProdDo");
-    const fpProdClose = document.getElementById("fpProdClose");
-
     // Click su una riga documento => precompila i campi movimento
     const docItemsTable = document.getElementById("docItemsTable");
 
@@ -9914,6 +10088,10 @@ btnLogout.addEventListener("click", async () => {
               date: data.date || "",
               note: data.note || "",
               source: data.source || "Manual",
+              docType: String(data.docType || "").trim(),
+              docNum: String(data.docNum || "").trim(),
+              docDateRaw: String(data.docDateRaw || data.date || "").trim(),
+              createdBy: String(data.createdBy || "").trim(),
               warehouse: WAREHOUSE_FINISHED,
               createdAt: tsToIso(data.createdAt) || data.createdAtIso || ""
             };
@@ -15636,30 +15814,18 @@ function renderFinishedStockTable(fpRows){
     const qtyVal = safeInt(r.qty);
     const uom = __normalizeUom(r.uom || "") || "pz";
 
-    const canProduce = __fpHasBomForCode(r.code);
-    const prodBtn = canProduce
-      ? `<button class="btn btn-secondary btn-xs jsFpProduce" type="button" title="Produci e scarica componenti (distinta base)">Produci</button>`
-      : ``;
-
-    const qtyCell = `
-      <div class="qty-editor">
-        <input class="qtyEditInput jsFpQtyEdit" type="number" inputmode="numeric" min="0" step="1"
-          value="${qtyVal}" data-orig="${qtyVal}" />
-        <span class="td-muted" style="font-size:12px; font-weight:900; min-width:34px; text-align:left;">${escapeHtml(uom)}</span>
-        <button class="btn btn-primary btn-xs jsFpQtySave" type="button" disabled>Salva</button>
-        ${prodBtn}
-      </div>`;
+    const qtyCell = `<span style="font-weight:900;">${qtyVal.toLocaleString("it-IT")}</span> <span class="td-muted" style="font-size:12px; font-weight:900;">${escapeHtml(uom)}</span>`;
 
     const catHtml = r.categoryName ? `<span class="pill catPill" style="padding:2px 8px;">${escapeHtml(r.categoryName)}</span>` : '<span class="td-muted">—</span>';
     const displayCode = escapeHtml(r.code || "");
     const displayName = escapeHtml(r.item || "");
 
     return `
-      <tr data-k="${escapeHtmlAttr(k)}" title="Produci">
+      <tr data-k="${escapeHtmlAttr(k)}" title="Produci prodotto finito">
         <td data-label="Nome prodotto">${displayName}</td>
         <td data-label="Codice">${displayCode}</td>
         <td data-label="Categoria">${catHtml}</td>
-        <td data-label="Q.tà" class="qty">${qtyCell}</td>
+        <td data-label="Q.tà" class="qty jsFpQtyCell">${qtyCell}</td>
       </tr>`;
   }).join("");
 }
@@ -15970,133 +16136,6 @@ async function produceFinishedProductFromRow(row, qtyToProduce){
     throw e;
   }finally{
     __fpProduceBusy = false;
-  }
-}
-
-// ===== Inventario PF: popup rapido Produci (Quantità + Produci) =====
-let __fpProduceModalCtx = null;
-
-function openFpProduceModal(row, tr){
-  const r = row || {};
-
-  // sicurezza: solo se ha distinta base (prodotto o categoria)
-  if (!__fpHasBomForCode(r.code)) {
-    showToast("Prodotto non producibile: distinta base mancante", "warn");
-    return;
-  }
-
-  // Fallback: se il popup non è presente, torno al prompt (comportamento precedente)
-  if (!modalFpProduce || !fpProdQty || !btnFpProdDo) {
-    const def = "1";
-    const label = `${String(r.code||"").trim()} — ${String(r.item||"").trim()}`.trim();
-    const raw = prompt(`Quantità da produrre\n\n${label}`, def);
-    if (raw == null) return;
-    let qty = safeInt(raw);
-    if (!Number.isFinite(qty) || qty <= 0) {
-      showToast("Quantità non valida", "warn");
-      return;
-    }
-    (async () => {
-      try{
-        const res = await produceFinishedProductFromRow(r, qty);
-        if (res && res.qty && tr){
-          try{
-            const delta = safeInt(res.qty);
-            const newQty = safeInt(r.qty) + delta;
-            r.qty = newQty;
-            const inp = tr.querySelector("input.jsFpQtyEdit");
-            const btnSave = tr.querySelector("button.jsFpQtySave");
-            if (inp) { inp.value = String(newQty); inp.dataset.orig = String(newQty); }
-            if (btnSave) btnSave.disabled = true;
-          }catch(_){ }
-        }
-      }catch(err){
-        console.error(err);
-      }
-    })();
-    return;
-  }
-
-  __fpProduceModalCtx = { row: r, tr: tr || null };
-
-  try{
-    if (fpProdTitle) fpProdTitle.textContent = "Produci";
-    fpProdQty.value = "1";
-    btnFpProdDo.disabled = false;
-    btnFpProdDo.textContent = "Produci";
-
-    modalFpProduce.classList.add("open");
-    __syncBodyLockFromModals();
-
-    setTimeout(() => {
-      try{ fpProdQty.focus(); fpProdQty.select(); }catch(_){ }
-    }, 0);
-  }catch(_){ }
-}
-
-function closeFpProduceModal(){
-  if (!modalFpProduce) return;
-  modalFpProduce.classList.remove("open");
-  __syncBodyLockFromModals();
-  __fpProduceModalCtx = null;
-  try{ if (fpProdQty) fpProdQty.value = "1"; }catch(_){ }
-  try{ if (btnFpProdDo) { btnFpProdDo.disabled = false; btnFpProdDo.textContent = "Produci"; } }catch(_){ }
-}
-
-async function __fpProduceFromModal(){
-  const ctx = __fpProduceModalCtx || {};
-  const r = ctx.row || null;
-  const tr = ctx.tr || null;
-  if (!r) return;
-
-  // sicurezza: solo se ha distinta base (prodotto o categoria)
-  if (!__fpHasBomForCode(r.code)) {
-    showToast("Prodotto non producibile: distinta base mancante", "warn");
-    return;
-  }
-
-  let qty = safeInt(fpProdQty && fpProdQty.value);
-  if (!Number.isFinite(qty) || qty <= 0) {
-    showToast("Quantità non valida", "warn");
-    return;
-  }
-
-  const oldText = btnFpProdDo ? btnFpProdDo.textContent : "";
-  if (btnFpProdDo) {
-    btnFpProdDo.disabled = true;
-    btnFpProdDo.textContent = "Produco…";
-  }
-
-  try{
-    const res = await produceFinishedProductFromRow(r, qty);
-    if (res && res.qty) {
-      // UI ottimistica: aggiorna quantità visualizzata
-      try{
-        const delta = safeInt(res.qty);
-        const newQty = safeInt(r.qty) + delta;
-        r.qty = newQty;
-        if (tr) {
-          const inp = tr.querySelector("input.jsFpQtyEdit");
-          const btnSave = tr.querySelector("button.jsFpQtySave");
-          if (inp) {
-            inp.value = String(newQty);
-            inp.dataset.orig = String(newQty);
-          }
-          if (btnSave) btnSave.disabled = true;
-        }
-      }catch(_){ }
-    }
-
-    closeFpProduceModal();
-  }catch(e){
-    console.error(e);
-    // lascio il popup aperto per permettere correzione e riprova
-    showToast("Errore produzione", "err");
-  }finally{
-    if (btnFpProdDo) {
-      btnFpProdDo.textContent = oldText || "Produci";
-      btnFpProdDo.disabled = false;
-    }
   }
 }
 
@@ -20834,22 +20873,6 @@ Nota: elimina SOLO l’anagrafica prodotti finiti e la sua distinta base.`);
     if (btnUnifiedDone) btnUnifiedDone.addEventListener("click", closeUnifiedModal);
     if (modalUnified) modalUnified.addEventListener("click", (e) => { if (e.target === modalUnified) closeUnifiedModal(); });
 
-    // Finished inventory: popup rapido "Produci" (Quantità + Produci)
-    const __fpProdCloseSafe = () => { try{ closeFpProduceModal(); }catch(_){ } };
-    if (fpProdClose) fpProdClose.addEventListener("click", __fpProdCloseSafe);
-    if (modalFpProduce) modalFpProduce.addEventListener("click", (e) => { if (e.target === modalFpProduce) __fpProdCloseSafe(); });
-    if (btnFpProdDo) btnFpProdDo.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){ } __fpProduceFromModal(); });
-    if (fpProdQty) fpProdQty.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") {
-        e.preventDefault();
-        try{ btnFpProdDo && btnFpProdDo.click(); }catch(_){ }
-      }
-      if (e.key === "Escape") {
-        e.preventDefault();
-        __fpProdCloseSafe();
-      }
-    });
-
     // Finished product modal
     const __fpCloseSafe = () => { try{ window.closeFinishedProductModal && window.closeFinishedProductModal(); }catch(_){ } };
     if (fpClose) fpClose.addEventListener("click", __fpCloseSafe);
@@ -22043,117 +22066,134 @@ searchStock.addEventListener("input", () => renderAll());
 
 }
 
-    // Inventario prodotti finiti: rettifica rapida
+    // Inventario prodotti finiti: PRODUCI via modale (click su riga)
+    let __fpProduceCtx = { key: "", row: null };
+    const modalFpProduce = document.getElementById("modalFpProduce");
+    const fpProduceTitle = document.getElementById("fpProduceTitle");
+    const fpProduceSub = document.getElementById("fpProduceSub");
+    const fpProduceQty = document.getElementById("fpProduceQty");
+    const btnFpProduceDo = document.getElementById("btnFpProduceDo");
+    const btnCloseFpProduce = document.getElementById("btnCloseFpProduce");
+
+    function __closeFpProduceModal(){
+      try{ if (modalFpProduce) modalFpProduce.classList.remove("open"); }catch(_){ }
+      try{ (typeof __syncBodyLockFromModals === "function") && __syncBodyLockFromModals(); }catch(_){ }
+      __fpProduceCtx = { key: "", row: null };
+      try{ if (fpProduceQty) fpProduceQty.value = ""; }catch(_){ }
+    }
+
+    function __openFpProduceModal(row, key){
+      const r = row || null;
+      const k = String(key || "").trim();
+      if (!r) return;
+      if (!modalFpProduce || !fpProduceQty || !btnFpProduceDo){
+        // fallback minimale (se manca HTML)
+        const label = `${String(r.code||"").trim()} — ${String(r.item||"").trim()}`.trim();
+        const raw = prompt(`Quantità da produrre\n\n${label}`, "1");
+        if (raw == null) return;
+        const qty = safeInt(raw);
+        if (!Number.isFinite(qty) || qty <= 0) { showToast("Quantità non valida", "warn"); return; }
+        produceFinishedProductFromRow(r, qty).catch(console.error);
+        return;
+      }
+
+      __fpProduceCtx = { key: k, row: r };
+
+      try{ if (fpProduceTitle) fpProduceTitle.textContent = "Produci"; }catch(_){ }
+      try{ if (fpProduceSub) fpProduceSub.textContent = `${String(r.code||"").trim()} — ${String(r.item||"").trim()}`.trim() || "—"; }catch(_){ }
+
+      try{
+        fpProduceQty.value = "1";
+        fpProduceQty.focus();
+        fpProduceQty.select();
+      }catch(_){ }
+
+      try{ modalFpProduce.classList.add("open"); }catch(_){ }
+      try{ (typeof __syncBodyLockFromModals === "function") && __syncBodyLockFromModals(); }catch(_){ }
+    }
+
+    async function __doFpProduceFromModal(){
+      const r = __fpProduceCtx.row;
+      if (!r) return;
+      let qty = safeInt(fpProduceQty ? fpProduceQty.value : "");
+      if (!Number.isFinite(qty) || qty <= 0){
+        showToast("Quantità non valida", "warn");
+        try{ if (fpProduceQty){ fpProduceQty.focus(); fpProduceQty.select(); } }catch(_){ }
+        return;
+      }
+
+      // sicurezza: solo se ha distinta base (prodotto o categoria)
+      if (!__fpHasBomForCode(r.code)) {
+        showToast("Prodotto non producibile: distinta base mancante", "warn");
+        return;
+      }
+
+      const oldText = btnFpProduceDo ? btnFpProduceDo.textContent : "Produci";
+      try{
+        if (btnFpProduceDo) { btnFpProduceDo.disabled = true; btnFpProduceDo.textContent = "Produco…"; }
+        if (fpProduceQty) fpProduceQty.disabled = true;
+
+        const res = await produceFinishedProductFromRow(r, qty);
+
+        if (res && res.qty){
+          // UI ottimistica: aggiorna quantità visualizzata
+          try{
+            const newQty = safeInt(r.qty) + safeInt(res.qty);
+            r.qty = newQty;
+            const uom = __normalizeUom(r.uom || "") || "pz";
+            const html = `<span style="font-weight:900;">${newQty.toLocaleString("it-IT")}</span> <span class="td-muted" style="font-size:12px; font-weight:900;">${escapeHtml(uom)}</span>`;
+
+            if (fpStockTbody){
+              const trs = fpStockTbody.querySelectorAll('tr[data-k]');
+              for (const tr of trs){
+                if (String(tr.getAttribute('data-k') || '') === String(__fpProduceCtx.key || '')){
+                  const td = tr.querySelector('.jsFpQtyCell');
+                  if (td) td.innerHTML = html;
+                  break;
+                }
+              }
+            }
+          }catch(_){ }
+        }
+
+        __closeFpProduceModal();
+      } catch (err) {
+        console.error(err);
+      } finally {
+        try{ if (btnFpProduceDo){ btnFpProduceDo.textContent = oldText || "Produci"; btnFpProduceDo.disabled = false; } }catch(_){ }
+        try{ if (fpProduceQty) fpProduceQty.disabled = false; }catch(_){ }
+      }
+    }
+
+    // bind modale (una volta)
+    try{
+      if (modalFpProduce && modalFpProduce.dataset.bound !== "1"){
+        modalFpProduce.dataset.bound = "1";
+        modalFpProduce.addEventListener("click", (e) => { if (e.target === modalFpProduce) __closeFpProduceModal(); });
+        if (btnCloseFpProduce) btnCloseFpProduce.addEventListener("click", __closeFpProduceModal);
+        if (btnFpProduceDo) btnFpProduceDo.addEventListener("click", __doFpProduceFromModal);
+        if (fpProduceQty) {
+          fpProduceQty.addEventListener("keydown", (e) => {
+            if (e.key === "Enter") { e.preventDefault(); __doFpProduceFromModal(); }
+            if (e.key === "Escape") { e.preventDefault(); __closeFpProduceModal(); }
+          });
+        }
+      }
+    }catch(_){ }
+
     if (fpStockTbody) {
-      fpStockTbody.addEventListener("click", async (e) => {
-        const btnProd = e.target.closest("button.jsFpProduce");
-        if (btnProd) {
-          e.preventDefault();
-          e.stopPropagation();
-
-          const tr = btnProd.closest("tr[data-k]");
-          if (!tr) return;
-          const k = tr.getAttribute("data-k") || "";
-          const row = __fpStockRowByKey.get(k);
-          if (!row) return;
-
-          // Apri popup rapido (solo Quantità + Produci)
-          try{ openFpProduceModal(row, tr); }catch(_){ }
-          return;
-        }
-
-        const btnSave = e.target.closest("button.jsFpQtySave");
-        if (btnSave) {
-          e.preventDefault();
-          e.stopPropagation();
-
-          const tr = btnSave.closest("tr[data-k]");
-          if (!tr) return;
-          const k = tr.getAttribute("data-k") || "";
-          const row = __fpStockRowByKey.get(k);
-          if (!row) return;
-
-          const inp = tr.querySelector("input.jsFpQtyEdit");
-          if (!inp) return;
-
-          let newQty = safeInt(inp.value);
-          if (!Number.isFinite(newQty) || newQty < 0) newQty = 0;
-
-          const oldQty = safeInt(row.qty);
-          if (newQty === oldQty) {
-            inp.value = String(oldQty);
-            inp.dataset.orig = String(oldQty);
-            btnSave.disabled = true;
-            return;
-          }
-
-          inp.disabled = true;
-          btnSave.disabled = true;
-          btnSave.textContent = "Salvo…";
-          try {
-            await adjustFinishedStockAbsoluteFromRow(row, newQty);
-            row.qty = newQty;
-            inp.dataset.orig = String(newQty);
-            btnSave.textContent = "Salvato";
-            setTimeout(() => { try { btnSave.textContent = "Salva"; } catch(_){} }, 600);
-          } catch (err) {
-            console.error(err);
-            showToast("Errore salvataggio quantità PF", "err");
-            btnSave.textContent = "Salva";
-          } finally {
-            inp.disabled = false;
-          }
-          return;
-        }
-
-        if (e.target.closest("input.jsFpQtyEdit")) return;
-
+      fpStockTbody.addEventListener("click", (e) => {
         const tr = e.target.closest("tr[data-k]");
         if (!tr) return;
         const k = tr.getAttribute("data-k") || "";
         const row = __fpStockRowByKey.get(k);
         if (!row) return;
 
-        // Click sulla riga prodotto => popup rapido produzione
-        try{ openFpProduceModal(row, tr); }catch(_){ }
-      });
-
-      fpStockTbody.addEventListener("input", (e) => {
-        const inp = e.target;
-        if (!inp || !inp.matches || !inp.matches("input.jsFpQtyEdit")) return;
-        const tr = inp.closest("tr[data-k]");
-        if (!tr) return;
-        const btn = tr.querySelector("button.jsFpQtySave");
-        if (!btn) return;
-        const k = tr.getAttribute("data-k") || "";
-        const row = __fpStockRowByKey.get(k);
-        const base = Number.isFinite(safeInt(inp.dataset.orig)) ? safeInt(inp.dataset.orig) : safeInt(row ? row.qty : 0);
-        let val = safeInt(inp.value);
-        if (!Number.isFinite(val) || val < 0) val = 0;
-        btn.disabled = (val === base);
-      });
-
-      fpStockTbody.addEventListener("keydown", (e) => {
-        const inp = e.target;
-        if (!inp || !inp.matches || !inp.matches("input.jsFpQtyEdit")) return;
-
-        if (e.key === "Enter") {
-          e.preventDefault();
-          const tr = inp.closest("tr[data-k]");
-          const btn = tr ? tr.querySelector("button.jsFpQtySave") : null;
-          if (btn && !btn.disabled) btn.click();
-          else inp.blur();
+        if (!__fpHasBomForCode(row.code)) {
+          showToast("Prodotto non producibile: distinta base mancante", "warn");
+          return;
         }
-
-        if (e.key === "Escape") {
-          e.preventDefault();
-          const base = safeInt(inp.dataset.orig);
-          inp.value = String(Number.isFinite(base) ? base : 0);
-          const tr = inp.closest("tr[data-k]");
-          const btn = tr ? tr.querySelector("button.jsFpQtySave") : null;
-          if (btn) btn.disabled = true;
-          inp.blur();
-        }
+        __openFpProduceModal(row, k);
       });
     }
 
