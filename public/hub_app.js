@@ -1931,6 +1931,84 @@ const tpl = document.createElement("template");
 })();
 ;
 
+/* ===== supplier_invoices_view.js ===== */
+/* Inject viewSupplierInvoices (Fatture fornitori) */
+(function(){
+  try{
+    const root = document.getElementById("viewSupplierInvoices");
+    if (!root) return;
+    try{ if (root.dataset && root.dataset.injected === "1") return; }catch(_){}
+    try{ if (root.dataset) root.dataset.injected = "1"; }catch(_){}
+
+    root.innerHTML = `
+      <article class="card" id="supplierInvoicesCard">
+        <div class="hd">
+          <div class="overlayHeaderTitle">
+            <button class="iconBtn overlayBack" id="btnBackSupplierInvoices" type="button" aria-label="Indietro">‹</button>
+            <h2>Fatture fornitori</h2>
+          </div>
+          <div class="inlineRow" style="gap:8px; justify-content:flex-end;">
+            <div class="pill" id="pillSupplierInvoicesCount">0</div>
+            <button class="iconBtn" id="btnCloseSupplierInvoices" type="button" aria-label="Chiudi">×</button>
+          </div>
+        </div>
+
+        <div class="bd">
+          <div class="stack" style="gap:10px;">
+            <div class="hero-sub">Carica fatture fornitori (XML)</div>
+
+            <div class="td-muted" style="font-weight:900;">
+              Le fatture che <b>non contengono</b> articoli presenti in inventario vengono scartate automaticamente e non sono visibili.
+            </div>
+
+            <div class="inlineRow" style="gap:10px; flex-wrap:wrap; align-items:flex-end;">
+              <div class="field" style="flex:1 1 340px; min-width: 240px;">
+                <label for="supplierInvoicesFiles">Seleziona file XML (anche multipli)</label>
+                <input id="supplierInvoicesFiles" type="file" multiple accept=".xml,application/xml,text/xml" />
+              </div>
+              <button class="btn btn-primary" id="btnSupplierInvoicesImport" type="button">Importa</button>
+              <button class="btn btn-ghost btn-xs" id="btnSupplierInvoicesResetFiles" type="button">Reset</button>
+            </div>
+
+            <div class="td-muted" id="supplierInvoicesImportMeta" style="font-weight:900;">—</div>
+          </div>
+
+          <div class="inlineRow listStickyBar" style="justify-content:space-between; align-items:flex-end; gap:12px; margin-top:10px;">
+            <div class="field" style="flex: 1 1 auto; min-width: 220px;">
+              <label for="supplierInvoicesSearch">Cerca</label>
+              <input id="supplierInvoicesSearch" placeholder="Fornitore, numero, data, file…" autocomplete="off" />
+            </div>
+            <div class="inlineRow" style="gap:8px; justify-content:flex-end; margin-left:auto;">
+              <button class="btn btn-ghost mini" id="btnSupplierInvoicesClear" type="button">Reset</button>
+              <div class="hero-sub" id="supplierInvoicesMeta">—</div>
+            </div>
+          </div>
+
+          <div class="tableWrap" style="max-height: 520px; overflow:auto; margin-top:10px;">
+            <table class="dataGrid" id="supplierInvoicesTable">
+              <thead>
+                <tr>
+                  <th style="width:120px;">Data</th>
+                  <th style="width:140px;">Numero</th>
+                  <th>Fornitore</th>
+                  <th class="qty" style="width:110px;">Codici</th>
+                  <th class="qty" style="width:130px;">Prezzi agg.</th>
+                  <th class="colHideSm" style="width:220px;">File</th>
+                </tr>
+              </thead>
+              <tbody id="supplierInvoicesTbody">
+                <tr><td class="td-muted" colspan="6">Nessuna fattura caricata.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </article>
+    `;
+  }catch(e){
+    try{ console.warn("supplierInvoices view inject failed", e); }catch(_){}
+  }
+})();
+
 /* ===== revenue_view.js ===== */
 // Inject "Fatturato" view markup into #viewRevenue
 (function(){
@@ -8465,6 +8543,7 @@ Verrà aggiornata anche la chiave su tutti i prodotti finiti.`);
       inventory: document.getElementById("viewInventory"),
       finishedInventory: document.getElementById("viewFinishedInventory"),
       flows: document.getElementById("viewFlows"),
+      supplierInvoices: document.getElementById("viewSupplierInvoices"),
       movements: document.getElementById("viewMovements"),
       categories: document.getElementById("viewCategories"),
       trash: document.getElementById("viewTrash"),
@@ -8478,6 +8557,7 @@ Verrà aggiornata anche la chiave su tutti i prodotti finiti.`);
     const __btnBack = document.getElementById("btnNavBack");
     const btnBackOcr = document.getElementById("btnBackOcr");
     const btnBackFlows = document.getElementById("btnBackFlows");
+    const btnBackSupplierInvoices = document.getElementById("btnBackSupplierInvoices");
     const btnBackMovements = document.getElementById("btnBackMovements");
     const btnBackAnag = document.getElementById("btnBackAnag");
     const btnBackMoveInv = document.getElementById("btnBackMoveInv");
@@ -8485,7 +8565,7 @@ Verrà aggiornata anche la chiave su tutti i prodotti finiti.`);
     // Porta overlay/modali come figli diretti di <body> per evitare stacking-context (transform/filter) sui parent
     (function __liftOverlaysToBody(){
       try{
-        ["viewOcr","viewInventory","viewFinishedInventory","viewFlows","viewDaneaDdt","viewRevenue","viewMovements","viewMoveInventory","viewCategories","viewFPCategories","viewTrash","viewAnag"].forEach(id => {
+        ["viewOcr","viewInventory","viewFinishedInventory","viewFlows","viewSupplierInvoices","viewDaneaDdt","viewRevenue","viewMovements","viewMoveInventory","viewCategories","viewFPCategories","viewTrash","viewAnag"].forEach(id => {
           const el = document.getElementById(id);
           if (el && el.parentElement !== document.body) document.body.appendChild(el);
         });
@@ -8599,7 +8679,7 @@ Verrà aggiornata anche la chiave su tutti i prodotti finiti.`);
 
     function setView(name){
       const key = String(name || "home");
-      const overlayKeys = ["ocr","inventory","finishedInventory","flows","daneaDdt","revenue","movements","moveInv","categories","fpCategories","trash","anag"];
+      const overlayKeys = ["ocr","inventory","finishedInventory","flows","supplierInvoices","daneaDdt","revenue","movements","moveInv","categories","fpCategories","trash","anag"];
       const isOverlay = overlayKeys.includes(key);
 
       // Home resta sempre visibile dietro (come un gestionale iOS)
@@ -8642,6 +8722,7 @@ Verrà aggiornata anche la chiave su tutti i prodotti finiti.`);
           (key === "inventory") ? "Inventario" :
           (key === "finishedInventory") ? "Inventario prodotti finiti" :
           (key === "flows") ? "DDT Caricati" :
+          (key === "supplierInvoices") ? "Fatture fornitori" :
           (key === "daneaDdt") ? "Scarica flussi DDT" :
           (key === "revenue") ? "Fatturato" :
           (key === "movements") ? "Movimenti" :
@@ -8783,6 +8864,7 @@ document.getElementById("menuGoHome")?.addEventListener("click", () => { closeSi
     document.getElementById("menuGoFinishedInventory")?.addEventListener("click", () => { closeSideMenu(); openFinishedInventoryOverlay(); });
     document.getElementById("menuGoMoveInventory")?.addEventListener("click", () => { closeSideMenu(); try{ resetMoveInvDirection(); }catch(_){ } setView("moveInv"); try{ renderMoveInv && renderMoveInv(); }catch(_){ } });
     document.getElementById("menuGoFlows")?.addEventListener("click", () => { closeSideMenu(); setView("flows"); try{ renderFlowsTable(); }catch(_){ } });
+    document.getElementById("menuGoSupplierInvoices")?.addEventListener("click", () => { closeSideMenu(); setView("supplierInvoices"); try{ window.HubSupplierInvoices && window.HubSupplierInvoices.refresh && window.HubSupplierInvoices.refresh(); }catch(_){ } });
     document.getElementById("menuGoDaneaDdt")?.addEventListener("click", () => { closeSideMenu(); setView("daneaDdt"); try{ window.HubDaneaDdt && window.HubDaneaDdt.refresh && window.HubDaneaDdt.refresh(); }catch(_){ } });
     document.getElementById("menuGoRevenue")?.addEventListener("click", () => { closeSideMenu(); setView("revenue"); try{ window.HubRevenue && window.HubRevenue.refresh && window.HubRevenue.refresh(); }catch(_){ } });
     document.getElementById("menuGoMovements")?.addEventListener("click", () => { closeSideMenu(); setView("movements"); try{ window.HubMovements && window.HubMovements.refresh && window.HubMovements.refresh(); }catch(_){ } });
@@ -8826,6 +8908,7 @@ document.getElementById("menuGoHome")?.addEventListener("click", () => { closeSi
     });
 document.getElementById("btnCloseTrash")?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
 document.getElementById("btnCloseFlows")?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
+document.getElementById("btnCloseSupplierInvoices")?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
 
     document.getElementById("btnCloseDaneaDdt")?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
     document.getElementById("btnBackDaneaDdt")?.addEventListener("click", (e) => {
@@ -8841,6 +8924,7 @@ document.getElementById("btnCloseFlows")?.addEventListener("click", (e) => { try
 
     // Fatturato (DDT completati con movimenti)
     document.getElementById("viewRevenue")?.addEventListener("click", (e) => { try{ if (e.target === e.currentTarget) setView("home"); }catch(_){ } });
+    document.getElementById("viewSupplierInvoices")?.addEventListener("click", (e) => { try{ if (e.target === e.currentTarget) setView("home"); }catch(_){ } });
     document.getElementById("btnCloseRevenue")?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
     document.getElementById("btnBackRevenue")?.addEventListener("click", (e) => {
       try{ e.preventDefault(); e.stopPropagation(); }catch(_){ }
@@ -8859,6 +8943,7 @@ document.getElementById("btnCloseFlows")?.addEventListener("click", (e) => { try
         document.getElementById("btnBackTrash")?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
 btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
     btnBackFlows?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
+    btnBackSupplierInvoices?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
     btnBackMovements?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
     btnBackMoveInv?.addEventListener("click", (e) => {
       try{ e.preventDefault(); e.stopPropagation(); }catch(_){}
@@ -9304,6 +9389,11 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
           try { FS.getDoc = getDoc; } catch(_){}
           return FS;
         })();
+        // Helper access (prodotti) per moduli esterni (es. Fatture fornitori)
+        try{ globalThis.__HUB.keyToDocId = keyToDocId; }catch(_){}
+        try{ globalThis.__HUB.findProductByCode = findProductByCode; }catch(_){}
+        try{ globalThis.__HUB.getProducts = () => products; }catch(_){}
+
         globalThis.__HUB.ready = true;
       }catch(e){
         console.warn("syncHubBridge failed", e);
@@ -18444,6 +18534,36 @@ async function deleteSupplierCascade(supplierId){
       `);
 
 
+      // Prezzo fornitore (non modificabile, da fatture fornitori)
+      try{
+        let spTxt = "—";
+        let spMeta = "";
+        if (!isAliasGroup) {
+          const __spRaw = (p && (p.supplierPrice != null ? p.supplierPrice : (p.prezzoFornitore != null ? p.prezzoFornitore : null)));
+          const __spNum = (__spRaw === "" || __spRaw == null) ? null : Number(__spRaw);
+          if (__spNum != null && Number.isFinite(__spNum)){
+            try{ spTxt = "€ " + __spNum.toLocaleString("it-IT", { minimumFractionDigits: 2, maximumFractionDigits: 6 }); }catch(_){ spTxt = "€ " + String(__spNum); }
+          }
+          const mParts = [];
+          const supN = String((p && (p.supplierPriceSupplierName || p.supplierPriceSupplier || "")) || "").trim();
+          if (supN) mParts.push(supN);
+          const invN = String((p && (p.supplierPriceInvoiceNumber || p.supplierPriceDocNum || "")) || "").trim();
+          if (invN) mParts.push("Fatt. " + invN);
+          const invD = String((p && (p.supplierPriceInvoiceDate || p.supplierPriceDate || "")) || "").trim();
+          if (invD) mParts.push(invD);
+          spMeta = mParts.join(" • ");
+        } else {
+          spMeta = "Alias di più codici: apri un singolo articolo per vedere il prezzo fornitore.";
+        }
+
+        baseFields.push(`
+          <div class="field">
+            <label>Prezzo fornitore</label>
+            <input value="${h(spTxt)}" readonly />
+            <div class="td-muted" style="margin-top:6px;">${h(spMeta || "Campo aggiornato automaticamente dalle fatture fornitori XML.")}</div>
+          </div>
+        `);
+      }catch(_){}
 
 
 // Fornitore (solo in Anagrafica prodotti)
@@ -22888,4 +23008,641 @@ table.dataGrid tbody td{
     // Re-apply if something hot-injects/refreshes the Home UI
     window.addEventListener("HubInvReady", schedule);
   }catch(_){ }
+})();
+
+
+/* ===== supplier_invoices.js ===== */
+/* Fatture fornitori (XML):
+   - carica molte fatture XML
+   - scarta automaticamente quelle che non contengono codici presenti in inventario
+   - aggiorna il campo non modificabile "Prezzo fornitore" sui prodotti (imballaggi/materie prime)
+*/
+(function(){
+  "use strict";
+
+  const S = {
+    ready: false,
+    unsub: null,
+    items: [],
+    keySet: new Set()
+  };
+
+  const H = () => (globalThis && globalThis.__HUB) ? globalThis.__HUB : null;
+  const $ = (id) => document.getElementById(id);
+
+  function esc(s){
+    return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
+  }
+
+  function norm(s){ return String(s ?? "").trim().toLowerCase(); }
+
+  function cleanVat(v){
+    const s = String(v ?? "").trim();
+    if (!s) return "";
+    return s.replace(/[^0-9A-Za-z]/g, "").toUpperCase();
+  }
+
+  function toISODate(v){
+    const s0 = String(v ?? "").trim();
+    if (!s0) return "";
+    const s = s0.replace(/\s+/g, " ").trim();
+
+    // YYYY-MM-DD
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+
+    // DD/MM/YYYY or DD-MM-YYYY
+    const m = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})$/);
+    if (m){
+      const dd = String(m[1]).padStart(2,"0");
+      const mm = String(m[2]).padStart(2,"0");
+      let yy = String(m[3]);
+      if (yy.length === 2) yy = "20" + yy;
+      return `${yy}-${mm}-${dd}`;
+    }
+
+    // fallback Date parse
+    try{
+      const d = new Date(s);
+      if (!Number.isNaN(d.getTime())) return d.toISOString().slice(0,10);
+    }catch(_){ }
+    return "";
+  }
+
+  function fmtDateIT(iso){
+    const s = String(iso || "").trim();
+    if (!s) return "—";
+    try{
+      const d = new Date(s);
+      if (!Number.isNaN(d.getTime())) return d.toLocaleDateString("it-IT");
+    }catch(_){ }
+    return s;
+  }
+
+  function parsePrice(v){
+    if (v == null) return null;
+    let s = String(v).trim();
+    if (!s) return null;
+
+    // remove spaces
+    s = s.replace(/\s+/g, "");
+
+    // If contains both '.' and ',', try to guess thousand/decimal separators
+    if (s.includes(",") && s.includes(".")){
+      // assume Italian: '.' thousands and ',' decimal
+      if (s.lastIndexOf(",") > s.lastIndexOf(".")){
+        s = s.replace(/\./g, "").replace(",", ".");
+      } else {
+        // assume US: ',' thousands and '.' decimal
+        s = s.replace(/,/g, "");
+      }
+    } else if (s.includes(",") && !s.includes(".")){
+      s = s.replace(",", ".");
+    }
+
+    const n = Number(s);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  function textIn(el, tag){
+    if (!el) return "";
+    try{
+      const n = el.getElementsByTagName(tag);
+      if (n && n.length) return String(n[0].textContent || "").trim();
+    }catch(_){ }
+    return "";
+  }
+
+  function parseFatturaPA(xmlDoc, fileName){
+    const out = [];
+
+    const header = xmlDoc.getElementsByTagName("FatturaElettronicaHeader")[0] || null;
+    const ced = header ? (header.getElementsByTagName("CedentePrestatore")[0] || null) : null;
+    const datiAnag = ced ? (ced.getElementsByTagName("DatiAnagrafici")[0] || null) : null;
+    const anag = datiAnag ? (datiAnag.getElementsByTagName("Anagrafica")[0] || null) : null;
+
+    const denom = textIn(anag, "Denominazione");
+    const nome = textIn(anag, "Nome");
+    const cognome = textIn(anag, "Cognome");
+    const supplierName = (denom || [nome, cognome].filter(Boolean).join(" ")).trim();
+
+    let supplierVat = "";
+    try{
+      const idIva = datiAnag ? (datiAnag.getElementsByTagName("IdFiscaleIVA")[0] || null) : null;
+      supplierVat = textIn(idIva, "IdCodice") || textIn(datiAnag, "CodiceFiscale");
+    }catch(_){}
+
+    const bodies = Array.from(xmlDoc.getElementsByTagName("FatturaElettronicaBody") || []);
+    const bodiesToScan = bodies.length ? bodies : [xmlDoc];
+
+    bodiesToScan.forEach((body, iBody) => {
+      const datiGenDoc = (body.getElementsByTagName("DatiGeneraliDocumento")[0] || null);
+      const dateRaw = textIn(datiGenDoc, "Data");
+      const numberRaw = textIn(datiGenDoc, "Numero");
+
+      const dateISO = toISODate(dateRaw);
+      const number = String(numberRaw || "").trim();
+
+      const lines = [];
+      const detts = Array.from(body.getElementsByTagName("DettaglioLinee") || []);
+      detts.forEach((ln) => {
+        let code = "";
+        try{
+          const codArt = Array.from(ln.getElementsByTagName("CodiceArticolo") || []);
+          for (const ca of codArt){
+            const v = textIn(ca, "CodiceValore");
+            if (v){ code = v; break; }
+          }
+        }catch(_){}
+
+        if (!code){
+          code = textIn(ln, "Codice") || textIn(ln, "Code");
+        }
+        code = String(code || "").trim();
+
+        const price = parsePrice(textIn(ln, "PrezzoUnitario") || textIn(ln, "UnitNetPrice") || textIn(ln, "UnitPrice"));
+        if (!code || price == null) return;
+
+        lines.push({ code, price });
+      });
+
+      // Se il file contiene più body, differenziamo la key con l'indice
+      out.push({
+        format: "fatturapa",
+        fileName: String(fileName || "").trim(),
+        supplierName,
+        supplierVat,
+        dateISO,
+        number: number || (iBody ? String(iBody+1) : ""),
+        lines
+      });
+    });
+
+    return out;
+  }
+
+  function parseEasyfatt(xmlDoc, fileName){
+    const out = [];
+    const docs = Array.from(xmlDoc.getElementsByTagName("Document") || []);
+    if (!docs.length) return out;
+
+    docs.forEach((docEl, i) => {
+      const dateISO = toISODate(textIn(docEl, "DocumentDate") || textIn(docEl, "Date"));
+      const number = String(textIn(docEl, "DocumentNumber") || textIn(docEl, "Number") || "").trim();
+
+      // in Easyfatt spesso il partner è "Customer"
+      const cust = docEl.getElementsByTagName("Customer")[0] || null;
+      const supplierName = String(textIn(cust, "Name") || textIn(docEl, "CustomerName") || textIn(docEl, "SupplierName") || "").trim();
+      const supplierVat = String(textIn(cust, "VatCode") || textIn(docEl, "VatCode") || "").trim();
+
+      const lines = [];
+      const rowsWrap = docEl.getElementsByTagName("Rows")[0] || null;
+      const rows = rowsWrap ? Array.from(rowsWrap.getElementsByTagName("Row") || []) : Array.from(docEl.getElementsByTagName("Row") || []);
+      rows.forEach((row) => {
+        const code = String(textIn(row, "Code") || textIn(row, "ItemCode") || "").trim();
+        const price = parsePrice(textIn(row, "UnitNetPrice") || textIn(row, "UnitPrice") || textIn(row, "Price"));
+        if (!code || price == null) return;
+        lines.push({ code, price });
+      });
+
+      out.push({
+        format: "easyfatt",
+        fileName: String(fileName || "").trim(),
+        supplierName,
+        supplierVat,
+        dateISO,
+        number: number || (i ? String(i+1) : ""),
+        lines
+      });
+    });
+
+    return out;
+  }
+
+  function parseGeneric(xmlDoc, fileName){
+    // fallback minimale
+    const out = [];
+    const dateISO = toISODate(
+      textIn(xmlDoc, "Data") ||
+      textIn(xmlDoc, "Date") ||
+      textIn(xmlDoc, "DocumentoData") ||
+      textIn(xmlDoc, "DocumentDate")
+    );
+    const number = String(
+      textIn(xmlDoc, "Numero") ||
+      textIn(xmlDoc, "Number") ||
+      textIn(xmlDoc, "DocumentNumber") ||
+      ""
+    ).trim();
+
+    const supplierName = String(textIn(xmlDoc, "Denominazione") || textIn(xmlDoc, "SupplierName") || textIn(xmlDoc, "Fornitore") || "").trim();
+
+    const lines = [];
+    const candidates = []
+      .concat(Array.from(xmlDoc.getElementsByTagName("DettaglioLinee") || []))
+      .concat(Array.from(xmlDoc.getElementsByTagName("Row") || []))
+      .concat(Array.from(xmlDoc.getElementsByTagName("Linea") || []));
+
+    candidates.forEach((ln) => {
+      const code = String(
+        textIn(ln, "CodiceValore") ||
+        textIn(ln, "Codice") ||
+        textIn(ln, "Code") ||
+        textIn(ln, "ItemCode") ||
+        ""
+      ).trim();
+      const price = parsePrice(
+        textIn(ln, "PrezzoUnitario") ||
+        textIn(ln, "UnitNetPrice") ||
+        textIn(ln, "UnitPrice") ||
+        textIn(ln, "Price") ||
+        textIn(ln, "Prezzo")
+      );
+      if (!code || price == null) return;
+      lines.push({ code, price });
+    });
+
+    out.push({
+      format: "generic",
+      fileName: String(fileName || "").trim(),
+      supplierName,
+      supplierVat: "",
+      dateISO,
+      number,
+      lines
+    });
+
+    return out;
+  }
+
+  function parseInvoicesFromXmlText(xmlText, fileName){
+    if (!xmlText) return [];
+    let xmlDoc = null;
+    try{
+      const parser = new DOMParser();
+      xmlDoc = parser.parseFromString(String(xmlText), "application/xml");
+      if (xmlDoc && xmlDoc.getElementsByTagName("parsererror") && xmlDoc.getElementsByTagName("parsererror").length){
+        return [];
+      }
+    }catch(_){ return []; }
+
+    let rootName = "";
+    try{ rootName = String(xmlDoc.documentElement && xmlDoc.documentElement.nodeName || ""); }catch(_){ rootName = ""; }
+    const rootLow = rootName.toLowerCase();
+
+    // FatturaPA
+    if (rootLow.includes("fatturaelettronica") || xmlDoc.getElementsByTagName("FatturaElettronicaHeader").length){
+      return parseFatturaPA(xmlDoc, fileName);
+    }
+
+    // Easyfatt
+    if (rootLow.includes("easyfatt") || xmlDoc.getElementsByTagName("EasyfattDocuments").length || xmlDoc.getElementsByTagName("Document").length){
+      const parsed = parseEasyfatt(xmlDoc, fileName);
+      if (parsed.length) return parsed;
+    }
+
+    // fallback
+    return parseGeneric(xmlDoc, fileName);
+  }
+
+  function buildInvoiceKey(inv){
+    const vat = cleanVat(inv && inv.supplierVat);
+    const supKey = vat || norm(inv && inv.supplierName) || "nosupplier";
+    const numKey = norm(inv && inv.number) || "nonum";
+    const dateKey = String(inv && inv.dateISO || "").trim() || "nodate";
+    return `SUPINV|${supKey}|${numKey}|${dateKey}`;
+  }
+
+  function setImportMeta(msg){
+    const el = $("supplierInvoicesImportMeta");
+    if (el) el.textContent = msg;
+  }
+
+  function setListMeta(msg){
+    const el = $("supplierInvoicesMeta");
+    if (el) el.textContent = msg;
+  }
+
+  function setPill(n){
+    const pill = $("pillSupplierInvoicesCount");
+    if (pill) pill.textContent = String(n ?? 0);
+  }
+
+  function renderList(){
+    const tbody = $("supplierInvoicesTbody");
+    const search = norm($("supplierInvoicesSearch")?.value || "");
+    const arr = Array.isArray(S.items) ? S.items.slice() : [];
+
+    let list = arr;
+    if (search){
+      list = arr.filter(it => {
+        const hay = [
+          it.date,
+          it.number,
+          it.supplierName,
+          it.supplierVat,
+          it.fileName,
+          it.format
+        ].map(x => String(x || "")).join(" ").toLowerCase();
+        return hay.includes(search);
+      });
+    }
+
+    setPill(arr.length);
+    setListMeta(search ? (`Mostrate ${list.length}/${arr.length}`) : (`Totale ${arr.length}`));
+
+    if (!tbody) return;
+    if (!list.length){
+      tbody.innerHTML = `<tr><td class="td-muted" colspan="6">${search ? "Nessun risultato." : "Nessuna fattura caricata."}</td></tr>`;
+      return;
+    }
+
+    const rows = list.map((it) => {
+      const dateTxt = fmtDateIT(it.date || it.dateISO || "");
+      const num = String(it.number || "—");
+      const sup = String(it.supplierName || it.supplier || "—");
+      const codes = Number(it.matchedCodesCount ?? it.codesCount ?? it.itemsCount ?? 0) || 0;
+      const upd = Number(it.updatedCodesCount ?? it.updatedCount ?? 0) || 0;
+      const file = String(it.fileName || it.file || "—");
+      return `
+        <tr>
+          <td>${esc(dateTxt)}</td>
+          <td>${esc(num)}</td>
+          <td>${esc(sup)}</td>
+          <td class="qty">${esc(String(codes))}</td>
+          <td class="qty">${esc(String(upd))}</td>
+          <td class="colHideSm">${esc(file)}</td>
+        </tr>
+      `;
+    }).join("");
+
+    tbody.innerHTML = rows;
+  }
+
+  function subscribe(){
+    const h = H();
+    if (!h || !h.fb || !h.fb.db || !h.FS) return false;
+    if (S.unsub) return true;
+
+    try{
+      const { collection, query, orderBy, onSnapshot } = h.FS;
+      S.unsub = onSnapshot(
+        query(collection(h.fb.db, "orgs", h.ORG_ID, "supplierInvoices"), orderBy("date","desc")),
+        (snap) => {
+          const arr = [];
+          snap.forEach((docu) => {
+            const d = docu.data() || {};
+            arr.push(Object.assign({ _id: docu.id }, d));
+          });
+          S.items = arr;
+          S.keySet = new Set(arr.map(x => String(x && (x.key || x.invoiceKey || "") || "").trim()).filter(Boolean));
+          renderList();
+        },
+        (err) => {
+          try{ console.warn("supplierInvoices snapshot error", err); }catch(_){}
+        }
+      );
+      return true;
+    }catch(e){
+      try{ console.warn("supplierInvoices subscribe failed", e); }catch(_){}
+      return false;
+    }
+  }
+
+  async function importFiles(){
+    const h = H();
+    if (!h) return;
+
+    // Requisiti: login + db
+    if (!h.fb || !h.fb.user || !h.fb.db){
+      try{
+        h.showToast ? h.showToast("Accedi per caricare le fatture fornitori", "warn") : alert("Accedi per caricare le fatture fornitori.");
+      }catch(_){}
+      return;
+    }
+
+    const inp = $("supplierInvoicesFiles");
+    const btn = $("btnSupplierInvoicesImport");
+    const resetBtn = $("btnSupplierInvoicesResetFiles");
+
+    const files = inp && inp.files ? Array.from(inp.files) : [];
+    if (!files.length){
+      setImportMeta("Seleziona uno o più file XML.");
+      return;
+    }
+
+    try{ if (btn) btn.disabled = true; }catch(_){}
+    try{ if (resetBtn) resetBtn.disabled = true; }catch(_){}
+    try{ if (inp) inp.disabled = true; }catch(_){}
+
+    const totalFiles = files.length;
+    let processedFiles = 0;
+    let parsedInvoices = 0;
+    let validInvoices = 0;
+    let discardedInvoices = 0;
+    let duplicateInvoices = 0;
+    let updatedPrices = 0;
+    let parseErrors = 0;
+
+    const { doc, setDoc, serverTimestamp } = h.FS;
+
+    // snapshot prodotti: usa quello già in memoria (più veloce)
+    const products = (typeof h.getProducts === "function") ? (h.getProducts() || []) : [];
+    const prodCount = Array.isArray(products) ? products.length : 0;
+
+    setImportMeta(`Pronto: ${totalFiles} file • ${prodCount} articoli in inventario`);
+
+    const userId = String((h.fb.user && (h.fb.user.email || h.fb.user.uid)) || "");
+
+    for (const file of files){
+      processedFiles++;
+      const fname = String(file && file.name || "").trim();
+
+      setImportMeta(`Elaboro ${processedFiles}/${totalFiles} • ${fname}`);
+
+      let text = "";
+      try{
+        text = await file.text();
+      }catch(_){
+        parseErrors++;
+        continue;
+      }
+
+      let invoices = [];
+      try{
+        invoices = parseInvoicesFromXmlText(text, fname) || [];
+      }catch(_){
+        invoices = [];
+      }
+
+      if (!Array.isArray(invoices) || !invoices.length){
+        parseErrors++;
+        continue;
+      }
+
+      parsedInvoices += invoices.length;
+
+      for (const inv of invoices){
+        const invDate = toISODate(inv.dateISO || inv.date || "");
+        inv.dateISO = invDate;
+        const key = buildInvoiceKey(inv);
+
+        // duplicato (già presente)
+        if (S.keySet && S.keySet.has(key)){
+          duplicateInvoices++;
+          continue;
+        }
+
+        // Dedup dei codici per fattura (ultimo prezzo vince)
+        const codeMap = new Map();
+        (Array.isArray(inv.lines) ? inv.lines : []).forEach((ln) => {
+          const c = String(ln && ln.code || "").trim();
+          if (!c) return;
+          const p = parsePrice(ln && ln.price);
+          if (p == null) return;
+          codeMap.set(c, p);
+        });
+
+        // match con inventario (solo codici esistenti)
+        const matches = [];
+        codeMap.forEach((price, code) => {
+          let prod = null;
+          try{ prod = (typeof h.findProductByCode === "function") ? h.findProductByCode(code) : null; }catch(_){ prod = null; }
+          if (!prod) return;
+          const realCode = String(prod.code || code).trim();
+          matches.push({
+            code: realCode,
+            codeLower: realCode.toLowerCase(),
+            price,
+            prod
+          });
+        });
+
+        if (!matches.length){
+          discardedInvoices++;
+          continue;
+        }
+
+        validInvoices++;
+
+        // aggiorna prezzi prodotto (se più vecchio, non sovrascrive)
+        let updatedThisInv = 0;
+        for (const m of matches){
+          const prod = m.prod || {};
+          const oldDate = String(prod.supplierPriceInvoiceDate || prod.supplierPriceDate || "").trim();
+          const canUpdate = !oldDate || !invDate || (invDate >= oldDate);
+
+          if (!canUpdate) continue;
+
+          const patch = {
+            code: m.code,
+            codeLower: m.codeLower,
+            supplierPrice: m.price,
+            supplierPriceCurrency: "EUR",
+            supplierPriceInvoiceDate: invDate || "",
+            supplierPriceInvoiceNumber: String(inv.number || "").trim(),
+            supplierPriceSupplierName: String(inv.supplierName || "").trim(),
+            supplierPriceSupplierVat: String(inv.supplierVat || "").trim(),
+            supplierPriceSource: "supplierInvoiceXml",
+            supplierPriceUpdatedAt: serverTimestamp(),
+            supplierPriceUpdatedBy: userId
+          };
+
+          try{
+            const prodDocId = (h.keyToDocId ? h.keyToDocId(m.codeLower) : encodeURIComponent(m.codeLower));
+            await setDoc(doc(h.fb.db, "orgs", h.ORG_ID, "products", prodDocId), patch, { merge: true });
+            updatedThisInv++;
+          }catch(e){
+            try{ console.warn("supplierPrice update failed", m.code, e); }catch(_){}
+          }
+        }
+
+        updatedPrices += updatedThisInv;
+
+        // salva fattura (riga tabella)
+        try{
+          const invDocId = encodeURIComponent(key);
+          await setDoc(doc(h.fb.db, "orgs", h.ORG_ID, "supplierInvoices", invDocId), {
+            key,
+            format: String(inv.format || "xml"),
+            date: invDate || "",
+            number: String(inv.number || "").trim(),
+            supplierName: String(inv.supplierName || "").trim(),
+            supplierVat: String(inv.supplierVat || "").trim(),
+            fileName: String(inv.fileName || "").trim(),
+            matchedCodesCount: matches.length,
+            updatedCodesCount: updatedThisInv,
+            importedAt: serverTimestamp(),
+            importedBy: userId
+          }, { merge: true });
+
+          // aggiorna set locale (evita duplicati nello stesso batch)
+          try{ S.keySet.add(key); }catch(_){}
+        }catch(e){
+          try{ console.warn("supplierInvoices save failed", e); }catch(_){}
+        }
+      }
+
+      // yield UI ogni tanto (molti file)
+      try{ if (processedFiles % 5 === 0) await new Promise(r => setTimeout(r, 0)); }catch(_){}
+    }
+
+    setImportMeta(`Completato • file ${processedFiles}/${totalFiles} • fatture parse ${parsedInvoices} • valide ${validInvoices} • scartate ${discardedInvoices} • duplicati ${duplicateInvoices} • prezzi aggiornati ${updatedPrices} • errori ${parseErrors}`);
+
+    try{ if (btn) btn.disabled = false; }catch(_){}
+    try{ if (resetBtn) resetBtn.disabled = false; }catch(_){}
+    try{ if (inp) inp.disabled = false; }catch(_){}
+
+    try{
+      h.showToast && h.showToast(`Import completato: ${validInvoices} fatture valide • ${discardedInvoices} scartate • ${updatedPrices} prezzi aggiornati`);
+    }catch(_){}
+  }
+
+  function bindEvents(){
+    if (S.ready) return;
+    S.ready = true;
+
+    $("btnSupplierInvoicesImport")?.addEventListener("click", () => { importFiles(); });
+
+    $("btnSupplierInvoicesResetFiles")?.addEventListener("click", () => {
+      const inp = $("supplierInvoicesFiles");
+      if (inp) inp.value = "";
+      setImportMeta("—");
+    });
+
+    $("btnSupplierInvoicesClear")?.addEventListener("click", () => {
+      const i = $("supplierInvoicesSearch");
+      if (i) i.value = "";
+      renderList();
+      try{ i && i.focus && i.focus(); }catch(_){}
+    });
+
+    $("supplierInvoicesSearch")?.addEventListener("input", () => renderList());
+  }
+
+  function refresh(){
+    bindEvents();
+    subscribe();
+    renderList();
+  }
+
+  function waitForHub(attempt){
+    attempt = attempt || 0;
+    const h = H();
+    if (h && h.FS){
+      refresh();
+      return;
+    }
+    if (attempt > 200) return;
+    setTimeout(() => waitForHub(attempt+1), 100);
+  }
+
+  // expose
+  window.HubSupplierInvoices = window.HubSupplierInvoices || {};
+  window.HubSupplierInvoices.refresh = refresh;
+
+  if (document.readyState === "loading"){
+    document.addEventListener("DOMContentLoaded", () => waitForHub(0));
+  } else {
+    waitForHub(0);
+  }
 })();
