@@ -5126,6 +5126,8 @@ function buildOrderViews(options={}){
       if(typeof isMagazzinoAgentiOrder==="function" && isMagazzinoAgentiOrder(o, note)) continue;
       const priorityInfo = computePriorityFromNote(note);
       let autoDone = 0;
+      let goProdBlocked = 0;
+      const hiddenGoProdLines = [];
       const lines = (o.lines||[]).map(l=>{
         if(isNonProductionLine(l)){
           autoDone++;
@@ -5150,6 +5152,9 @@ function buildOrderViews(options={}){
 
         if(isGoProdBlockedLine(lAdj)){
           autoDone++;
+          goProdBlocked++;
+          // Salvo una preview della riga filtrata per permettere di trovare l'ordine in allow list (Tabellone WRITE)
+          hiddenGoProdLines.push({ code:lAdj.code||"", desc:lAdj.desc||"", qty:lAdj.qty, um:lAdj.um||"" });
           return null;
         }
 
@@ -5161,19 +5166,25 @@ function buildOrderViews(options={}){
         return { ...lAdj, status, activeProd, activeOp, activeIsMe, conclusion: l.conclusion || o.conclusion || "" };
       }).filter(Boolean).filter(l=>l.status !== "done");
       const alerts = Array.isArray(o.alerts) ? o.alerts : [];
+      const allowOnly = (!lines.length && !alerts.length && goProdBlocked>0);
       if(!lines.length){
-        if(autoDone>0) continue;
-        if(!alerts.length) continue;
+        if(autoDone>0 && !allowOnly) continue;
+        if(!alerts.length && !allowOnly) continue;
       }
 
       const planDate = priorityInfo.date || extractDateFromText(note);
       const daysAway = planDate ? diffDaysFromNow(planDate) : null;
       const k = getOrderKey(o);
-      const baseOrder = { ...o, orderNo, lines, alerts, autoDone, totalLines: lines.length + autoDone, partialInfo: partialMap.get(String(orderNo)) || null, isCompleted: fullMap.has(String(orderNo)), note, priorityInfo, planDate, daysAway };
+      const baseOrder = { ...o, orderNo, lines, alerts, autoDone, goProdBlocked, hiddenGoProdLines, totalLines: lines.length + autoDone, partialInfo: partialMap.get(String(orderNo)) || null, isCompleted: fullMap.has(String(orderNo)), note, priorityInfo, planDate, daysAway };
       baseOrder.__k = k;
       baseOrder.stableKey = k;
       baseOrders.push(baseOrder);
       orderKeySet.add(k);
+
+      if(allowOnly){
+        // Ordine presente solo per allow list (righe filtrate dalla Linea Liquidi)
+        continue;
+      }
 
       let visible = true;
       if(applyRoleVisibility){
@@ -5762,7 +5773,12 @@ function buildOrderViews(options={}){
     const source = Array.isArray(allOrders) ? allOrders : [];
     const term = norm(searchText || "");
     let filtered = term ? source.filter(o=>{
-      const probe = `${o.customer||""} ${o.orderNo||o.number||""} ${o.conclusion||""} ${(o.lines&&o.lines[0]?.desc)||""}`;
+      const note = (typeof getOrderNote==="function") ? getOrderNote(o) : (o?.note||"");
+      const allLines = Array.isArray(o.lines) ? o.lines : [];
+      const hidden = Array.isArray(o.hiddenGoProdLines) ? o.hiddenGoProdLines : [];
+      const lineBlob = allLines.map(l=>`${l.code||""} ${l.desc||""}`).join(" ");
+      const hiddenBlob = hidden.map(l=>`${l.code||""} ${l.desc||""}`).join(" ");
+      const probe = `${o.customer||""} ${o.orderNo||o.number||""} ${o.conclusion||""} ${note||""} ${lineBlob} ${hiddenBlob}`;
       return norm(probe).includes(term);
     }) : source;
     // Safety: in Hub Linea Liquidi NON mostrare mai ordini del "Magazzino agenti"
@@ -5782,8 +5798,11 @@ function buildOrderViews(options={}){
     for(const o of filtered){
       const key = o.__k || o.stableKey || getOrderKey(o);
       const checked = draft.has(key);
-      const line = (o.lines && o.lines[0]) || {};
+      const line = (o.lines && o.lines[0]) || (o.hiddenGoProdLines && o.hiddenGoProdLines[0]) || {};
+      const isHiddenLine = !(o.lines && o.lines[0]) && (o.hiddenGoProdLines && o.hiddenGoProdLines[0]);
       const qtyLabel = formatQtyWithKg(line.qty, line.um);
+      const codeTag = line.code ? ` · Cod: ${escapeHtml(String(line.code))}` : "";
+      const hiddenTag = isHiddenLine ? ` · (solo WRITE)` : "";
       const row = document.createElement("div");
       row.className = "mobileSendRow";
       if(checked) row.classList.add("selected");
@@ -5791,7 +5810,7 @@ function buildOrderViews(options={}){
       row.innerHTML = `
         <div class="info">
           <div class="name">${escapeHtml(o.customer||"Cliente")} · Ord. ${escapeHtml(o.orderNo||o.number||"—")}</div>
-          <div class="meta">${escapeHtml(line.desc||"Prodotto")} · ${escapeHtml(qtyLabel)}${o.conclusion?` · Consegna: ${escapeHtml(o.conclusion)}`:""}</div>
+          <div class="meta">${escapeHtml(line.desc||"Prodotto")}${codeTag} · ${escapeHtml(qtyLabel)}${hiddenTag}${o.conclusion?` · Consegna: ${escapeHtml(o.conclusion)}`:""}</div>
         </div>
         <div class="mobileSendToggle" role="switch" aria-checked="${checked ? "true" : "false"}">
           <div class="knob"></div>

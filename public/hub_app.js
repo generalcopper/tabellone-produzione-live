@@ -12328,6 +12328,75 @@ async function deleteMovement(id) {
   await deleteMovementsBulk([mid]);
 }
 
+
+async function deletePfProduction(batchId) {
+  const batch = String(batchId || "").trim();
+  if (!batch) return;
+
+  const inv = Array.isArray(state.movements) ? state.movements : [];
+  const fin = Array.isArray(state.finishedMovements) ? state.finishedMovements : [];
+
+  const isProd = (mv) => {
+    const dn = String((mv && mv.docNum) || "").trim();
+    if (dn !== batch) return false;
+
+    const dt = String((mv && mv.docType) || "").trim().toUpperCase();
+    const src = String((mv && mv.source) || "").trim().toLowerCase();
+
+    // Produzione PF: docType "PRODUZIONE" oppure source contiene "produzione"
+    return (dt === "PRODUZIONE") || src.includes("produzione");
+  };
+
+  const invIds = inv
+    .filter(isProd)
+    .map(mv => String((mv && mv.id) || "").trim())
+    .filter(Boolean);
+
+  const finIds = fin
+    .filter(isProd)
+    .map(mv => String((mv && mv.id) || "").trim())
+    .filter(Boolean);
+
+  if (!invIds.length && !finIds.length) return;
+
+  // Optimistic UI (rollback on error)
+  const prevInv = inv.slice();
+  const prevFin = fin.slice();
+  const invSet = new Set(invIds);
+  const finSet = new Set(finIds);
+
+  try {
+    state.movements = prevInv.filter(mv => !invSet.has(String((mv && mv.id) || "")));
+    state.finishedMovements = prevFin.filter(mv => !finSet.has(String((mv && mv.id) || "")));
+    try { renderAll(); } catch (_) {}
+
+    // Realtime (Firestore)
+    if (fb.user && fb.db) {
+      // Elimina carico PF
+      for (const mid of finIds) {
+        await deleteDoc(doc(fb.db, "orgs", ORG_ID, "finishedInventoryMovements", mid));
+      }
+      // Elimina scarichi componenti
+      for (const mid of invIds) {
+        await deleteDoc(doc(fb.db, "orgs", ORG_ID, "inventoryMovements", mid));
+      }
+      return;
+    }
+
+    // Local fallback
+    saveLocalData();
+  } catch (e) {
+    // rollback optimistic UI
+    try {
+      state.movements = prevInv;
+      state.finishedMovements = prevFin;
+      renderAll();
+    } catch (_) {}
+    throw e;
+  }
+}
+
+
     function makeMovement(fields) {
   const f = (fields && typeof fields === "object") ? fields : {};
   const mv = {
