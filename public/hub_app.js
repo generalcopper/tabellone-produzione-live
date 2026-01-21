@@ -1879,7 +1879,7 @@ const tpl = document.createElement("template");
                   <th style="width: 120px;">Data</th>
                   <th style="width: 120px;">Numero</th>
                   <th>Cliente</th>
-                  <th style="width: 180px;">Magazzino</th>
+                  <th style="width: 160px;">Magazzino</th>
                   <th class="qty" style="width: 90px;">Righe</th>
                   <th class="qty" style="width: 120px;">Stato</th>
                   <th style="width: 120px;"></th>
@@ -2568,26 +2568,7 @@ const tpl = document.createElement("template");
       const date = getText(d, "Date");     // YYYY-MM-DD
       const number = getText(d, "Number"); // numerico
       const customer = getText(d, "CustomerName") || getText(d, "Customer") || getText(d, "DeliveryName") || "";
-
-      // Tipo magazzino (best-effort: varia tra export/versioni)
-      const warehouseType = (
-        getText(d, "WarehouseType") ||
-        getText(d, "Warehouse") ||
-        getText(d, "WarehouseName") ||
-        getText(d, "WarehouseDescription") ||
-        getText(d, "Storehouse") ||
-        getText(d, "StorehouseName") ||
-        getText(d, "Store") ||
-        getText(d, "StoreName") ||
-        getText(d, "Depot") ||
-        getText(d, "DepotName") ||
-        getText(d, "Magazzino") ||
-        getText(d, "MagazzinoNome") ||
-        getText(d, "MagazzinoDescrizione") ||
-        getText(d, "Location") ||
-        getText(d, "Site") ||
-        ""
-      );
+      const warehouse = getText(d, "Warehouse") || getText(d, "Magazzino") || "";
 
       if (!date || !number) continue;
       const key = `${String(number).trim()}__${String(date).trim()}`;
@@ -2741,18 +2722,20 @@ const tpl = document.createElement("template");
       if (netTotal < 0 && netTotal > -0.02) netTotal = 0;
       if (grossTotal < 0 && grossTotal > -0.02) grossTotal = 0;
 
-      const hash = hashStr(JSON.stringify(rows.map(x => [
+      const rowsSig = rows.map(x => [
         x.code, x.desc, x.qty, x.uom,
         x.unitNet, x.unitGross, x.vatPerc,
         x.net, x.vat, x.gross
-      ])));
+      ]);
+
+      const hash = hashStr(JSON.stringify([String(warehouse || "").trim(), rowsSig]));
 
       out.push({
         key,
         date: String(date).trim(),
         number: String(number).trim(),
         customer: String(customer || "").trim(),
-        warehouseType: String(warehouseType || "").trim(),
+        warehouse: String(warehouse || "").trim(),
         rows,
         netTotal: Number(netTotal || 0),
         vatTotal: Number(vatTotal || 0),
@@ -2771,16 +2754,6 @@ const tpl = document.createElement("template");
     const s = norm(v);
     if (s.includes("conca")) return "concamarise";
     return "cerea";
-  }
-
-  function getDdtWarehouseType(ddt){
-    try{ return String(ddt?.warehouseType || ddt?.magazzinoType || ddt?.magazzino || "").trim(); }catch(_){ return ""; }
-  }
-
-  function isAgentWarehouseDdt(ddt){
-    const w = norm(getDdtWarehouseType(ddt));
-    if (!w) return false;
-    return w.includes("agenti") || w.includes("agent");
   }
 
   function normalizeDaneaXmlUrl(u){
@@ -2887,6 +2860,19 @@ const tpl = document.createElement("template");
     return Number.isFinite(v) ? v : 0;
   }
 
+  function isAgentiWarehouse(warehouse){
+    const s = norm(String(warehouse || "")).replace(/\s+/g, " ").trim();
+    if (!s) return false;
+    if (s === "magazzino agenti") return true;
+    if (s.includes("magazzino") && s.includes("agenti")) return true;
+    if (s === "agenti") return true;
+    return false;
+  }
+
+  function isAgentWarehouseDdt(ddt){
+    try{ return isAgentiWarehouse(ddt && (ddt.warehouse || ddt.magazzino || ddt.site)); }catch(_){ return false; }
+  }
+
   function isRowConfigured(row, ddt){
     const fp = getFpForRow(row);
     if (!fp) return { ok: false, why: "missing", fp: null };
@@ -2894,11 +2880,9 @@ const tpl = document.createElement("template");
     const qi = rowQtyInt(row);
     if (qi <= 0) return { ok: true, why: "skip", fp };
 
-    // Regola speciale: Magazzino Agenti -> SOLO prodotti finiti (niente componenti)
+    // Regola speciale: Magazzino agenti -> SOLO scarico prodotti finiti (niente componenti)
     if (isAgentWarehouseDdt(ddt)){
-      const stock = finishedStockAvailable(row && row.code);
-      if (stock >= qi) return { ok: true, why: "agent_stock", fp };
-      return { ok: false, why: "agent_no_stock", fp, stock };
+      return { ok: true, why: "agent", fp };
     }
 
     const comps = getFpComponents(fp);
@@ -2918,6 +2902,9 @@ const tpl = document.createElement("template");
     for (const r of rows){
       if (isRowConfigured(r, ddt).ok) green++;
     }
+    return { ok: green === rows.length, green, total: rows.length };
+  }
+
     return { ok: green === rows.length, green, total: rows.length };
   }
 
@@ -3004,15 +2991,8 @@ const tpl = document.createElement("template");
         const num = norm(x?.number || x?.docNum || x?.num);
         const date = norm(x?.date || x?.docDate || "");
         const cust = norm(x?.customer || x?.customerName || x?.client || "");
+        const wh = norm(x?.warehouse || x?.magazzino || "");
         const k = norm(x?.key || x?._id || "");
-        let wh = norm(getDdtWarehouseType(x));
-        if (!wh){
-          try{
-            const kk = String(x?.key || x?._id || "").trim();
-            const cached = (S.cacheMap instanceof Map) ? (S.cacheMap.get(kk) || null) : null;
-            wh = norm(getDdtWarehouseType(cached));
-          }catch(_){ }
-        }
         if (!search) return true;
         return (num && num.includes(search)) || (date && date.includes(search)) || (cust && cust.includes(search)) || (wh && wh.includes(search)) || (k && k.includes(search));
       });
@@ -3024,10 +3004,7 @@ const tpl = document.createElement("template");
         const date = String(c.date || "");
         const number = String(c.number || "");
         const cust = String(c.customer || "");
-        let whType = getDdtWarehouseType(c);
-        if (!whType){
-          try{ whType = getDdtWarehouseType(S.cacheMap instanceof Map ? S.cacheMap.get(String(k||"").trim()) : null); }catch(_){ }
-        }
+        const wh = String(c.warehouse || (S.cacheMap.get(c.key)?.warehouse) || "");
         const rows = Array.isArray(c.rows) ? c.rows : [];
         const n = rows.length;
 
@@ -3035,7 +3012,7 @@ const tpl = document.createElement("template");
           <td data-label="Data">${esc(fmtDateIT(date) || "—")}</td>
           <td data-label="Numero"><span class="kbd">${esc(number || "—")}</span></td>
           <td data-label="Cliente">${esc(cust || "—")}</td>
-          <td data-label="Magazzino">${esc(whType || "—")}</td>
+          <td data-label="Magazzino">${esc((wh || "").trim() || "—")}</td>
           <td data-label="Righe" class="qty">${Number(n||0).toLocaleString("it-IT")}</td>
           <td data-label="Stato" class="qty"><span class="dot ok"></span>OK</td>
           <td data-label="" style="text-align:right;">
@@ -3052,7 +3029,7 @@ const tpl = document.createElement("template");
       const num = norm(d.number);
       const date = norm(d.date);
       const cust = norm(d.customer);
-      const wh = norm(getDdtWarehouseType(d));
+      const wh = norm(d.warehouse);
       if (!search) return true;
       return (num && num.includes(search)) || (date && date.includes(search)) || (cust && cust.includes(search)) || (wh && wh.includes(search));
     });
@@ -3063,13 +3040,12 @@ const tpl = document.createElement("template");
       const st = ddtStatus(d);
       const okDot = st.ok ? '<span class="dot ok"></span>' : '<span class="dot bad"></span>';
       const stTxt = `${st.green}/${st.total}`;
-      const whType = getDdtWarehouseType(d);
       const btnDisabled = st.ok ? "" : "disabled";
       return `<tr class=\"jsDaneaRow ${st.ok ? 'daneaRowOk' : 'daneaRowBad'}\" data-key=\"${escAttr(d.key)}\" data-mode=\"verify\" title="Apri">
         <td data-label="Data">${esc(fmtDateIT(d.date) || "—")}</td>
         <td data-label="Numero"><span class="kbd">${esc(d.number || "—")}</span></td>
         <td data-label="Cliente">${esc(d.customer || "—")}</td>
-        <td data-label="Magazzino">${esc(whType || "—")}</td>
+        <td data-label="Magazzino">${esc(String(d.warehouse || "").trim() || "—")}</td>
         <td data-label="Righe" class="qty">${Number((d.rows||[]).length||0).toLocaleString("it-IT")}</td>
         <td data-label="Stato" class="qty">${okDot} ${esc(stTxt)}</td>
         <td data-label="" style="text-align:right;">
@@ -3094,11 +3070,7 @@ const tpl = document.createElement("template");
 
     // title + subtitle
     if (title) title.textContent = isDone ? "DDT (completato)" : "DDT (da verificare)";
-    {
-      const whType = getDdtWarehouseType(ddt);
-      const whTxt = whType ? ` • Magazzino: ${whType}` : "";
-      if (sub) sub.textContent = `Numero ${ddt.number || "—"} • ${fmtDateIT(ddt.date || "")} • ${ddt.customer || "—"}${whTxt}`;
-    }
+    if (sub) sub.textContent = `Numero ${ddt.number || "—"} • ${fmtDateIT(ddt.date || "")} • ${ddt.customer || "—"} • ${ddt.warehouse || "—"}`;
 
     // send button
     if (btnSend){
@@ -3113,7 +3085,6 @@ const tpl = document.createElement("template");
       const qtyDisp = (r.qty != null && Number.isFinite(Number(r.qty))) ? Number(r.qty).toLocaleString("it-IT", { maximumFractionDigits: 2 }) : (r.qtyRaw || "—");
       const uom = String(r.uom || "").trim() || "—";
 
-      const isAgent = isAgentWarehouseDdt(ddt);
       const st = isRowConfigured(r, ddt);
       const dot = st.ok ? '<span class="dot ok"></span>' : '<span class="dot bad"></span>';
 
@@ -3121,15 +3092,11 @@ const tpl = document.createElement("template");
       const rowWhy = String(st.why || "");
       const rowCls = st.ok ? '' : ' daneaRowBad';
       const rowStyle = ' style="cursor:pointer;"';
-      const rowTitle = isAgent
-        ? (st.ok ? "Apri prodotto finito" : (st.why === "missing" ? "Importa prodotto finito" : "Scorta PF insufficiente"))
-        : (st.ok ? "Apri distinta base" : "Configura distinta base");
+      const rowTitle = st.ok ? "Apri distinta base" : "Configura distinta base";
 
       let act = "";
       if (st.why === "missing"){
         act = `<button class="btn btn-secondary btn-xs jsDaneaImportFp" data-code="${escAttr(code)}" data-desc="${escAttr(desc)}" type="button">Importa</button>`;
-      } else if (st.why === "agent_no_stock"){
-        act = `<span class="td-muted">Scorta PF insufficiente</span>`;
       } else if (st.why === "empty"){
         const fid = String(st.fp?.id || st.fp?._id || "").trim();
         act = `<button class="btn btn-secondary btn-xs jsDaneaConfigFp" data-fpid="${escAttr(fid)}" type="button">Configura</button>`;
@@ -3151,15 +3118,20 @@ const tpl = document.createElement("template");
     if (foot){
       const st = ddtStatus(ddt);
       const autoOn = !!S.autoDischarge;
-      const isAgent = isAgentWarehouseDdt(ddt);
-      const msg = isDone ? "Questo DDT è già stato scaricato: eliminandolo (in tab Completati) si resetta lo scarico." :
-        (isAgent
-          ? (st.ok
-              ? (autoOn ? "DDT Magazzino Agenti: tutte le righe hanno scorta PF sufficiente. Puoi completare e scaricare SOLO prodotti finiti." : "DDT Magazzino Agenti: puoi completare (scarico automatico DISATTIVATO).")
-              : "DDT Magazzino Agenti: una o più righe sono rosse perché manca scorta PF (non si possono scaricare componenti).")
-          : (st.ok
-              ? (autoOn ? "Tutte le righe sono configurate: puoi completare e scaricare componenti." : "Tutte le righe sono configurate: puoi completare (scarico automatico DISATTIVATO).")
-              : "Configura le righe rosse (distinta base) per poter completare."));
+      const isAgenti = isAgentWarehouseDdt(ddt);
+
+      const msg = isDone
+        ? "Questo DDT è già stato scaricato: eliminandolo (in tab Completati) si resetta lo scarico."
+        : (st.ok
+            ? (autoOn
+                ? (isAgenti
+                    ? "Tutte le righe sono OK: puoi completare e scaricare SOLO prodotti finiti (Magazzino agenti)."
+                    : "Tutte le righe sono configurate: puoi completare e scaricare componenti.")
+                : "Tutte le righe sono configurate: puoi completare (scarico automatico DISATTIVATO).")
+            : (isAgenti
+                ? "Controlla le righe rosse: per Magazzino agenti serve almeno il prodotto finito importato."
+                : "Configura le righe rosse (distinta base) per poter completare.")
+          );
       foot.textContent = msg;
     }
   }
@@ -3177,9 +3149,8 @@ const tpl = document.createElement("template");
         number: String(c.number || ""),
         date: String(c.date || ""),
         customer: String(c.customer || ""),
-        warehouseType: String(c.warehouseType || ""),
         rows: Array.isArray(c.rows) ? c.rows : [],
-        warehouse: c.warehouse || "",
+        warehouse: c.warehouse || cache?.warehouse || "",
         movementIds: Array.isArray(c.movementIds) ? c.movementIds : [],
         finishedMovementIds: Array.isArray(c.finishedMovementIds) ? c.finishedMovementIds : []
       };
@@ -3295,40 +3266,33 @@ const tpl = document.createElement("template");
 
     const st = ddtStatus(ddt);
     if (!st.ok) { alert("Non tutte le righe sono configurate (cerchi rossi)."); return; }
-
     const autoOn = !!S.autoDischarge;
-    const isAgent = isAgentWarehouseDdt(ddt);
-    const whType = getDdtWarehouseType(ddt);
+    const isAgenti = isAgentWarehouseDdt(ddt);
 
-    let confirmMsg = "";
-    if (!autoOn){
-      confirmMsg = `Completare SENZA scarico automatico?
+    const msgAuto = isAgenti ? `Completare e scaricare SOLO prodotti finiti?
 
-• Il DDT finira' in "Completati"
-• NON verranno creati movimenti di inventario
+• Magazzino: ${ddt.warehouse || "Magazzino agenti"}
+• Verranno creati SOLO movimenti su inventario PF
+• NON verranno scaricati imballaggi o materie prime
 
 DDT ${ddt.number} del ${fmtDateIT(ddt.date)}
-Righe: ${st.total}`;
-    } else if (isAgent){
-      confirmMsg = `Completare e scaricare SOLO prodotti finiti?
-
-• DDT Magazzino Agenti${whType ? ` (${whType})` : ""}
-• Non verranno scaricati imballaggi o materie prime
-• Se la giacenza PF non copre tutta la quantita', l'operazione verra' bloccata
-
-DDT ${ddt.number} del ${fmtDateIT(ddt.date)}
-Righe: ${st.total}`;
-    } else {
-      confirmMsg = `Completare e scaricare?
+Righe: ${st.total}` : `Completare e scaricare?
 
 • Se la giacenza PF e' disponibile, scarico PRIMA i prodotti finiti
 • Se la giacenza PF non copre tutta la quantita', scarico gli imballaggi (distinta base/categoria)
 
 DDT ${ddt.number} del ${fmtDateIT(ddt.date)}
 Righe: ${st.total}`;
-    }
 
-    const ok = confirm(confirmMsg);
+    const msgManual = `Completare SENZA scarico automatico?
+
+• Il DDT finira' in "Completati"
+• NON verranno creati movimenti di inventario
+
+DDT ${ddt.number} del ${fmtDateIT(ddt.date)}
+Righe: ${st.total}`;
+
+    const ok = confirm(autoOn ? msgAuto : msgManual);
     if (!ok) return;
 
     S.busy = true;
@@ -3344,7 +3308,6 @@ Righe: ${st.total}`;
           number: String(ddt.number || '').trim(),
           date: String(ddt.date || '').trim(),
           customer: String(ddt.customer || '').trim(),
-          warehouseType: String(whType || '').trim(),
           rows: (ddt.rows || []).map(x => ({
             idx: (x && x.idx != null) ? x.idx : null,
             code: x.code || '',
@@ -3363,7 +3326,7 @@ Righe: ${st.total}`;
           vatTotal: (ddt && ddt.vatTotal != null) ? ddt.vatTotal : null,
           grossTotal: (ddt && ddt.grossTotal != null) ? ddt.grossTotal : null,
           currency: String(ddt.currency || 'EUR'),
-          warehouse: 'none',
+          warehouse: String(ddt.warehouse || '').trim(),
           allocations: [],
           finishedAllocations: [],
           xmlHash: String(ddt.hash || ''),
@@ -3427,16 +3390,7 @@ Righe: ${st.total}`;
 
         const low = code.toLowerCase();
         const aFp = Math.max(0, Math.round(Number(availFp.get(low) || 0)));
-        let useFp = Math.min(qInt, aFp);
-
-        // Magazzino Agenti: si scaricano SOLO prodotti finiti (niente componenti)
-        if (isAgent){
-          if (aFp < qInt){
-            alert(`Scorta PF insufficiente per ${code} — ${String(fp.name || fp.nome || r.desc || '').trim() || code}\n\nRichiesti: ${qInt.toLocaleString('it-IT')} pz\nDisponibili: ${aFp.toLocaleString('it-IT')} pz`);
-            return;
-          }
-          useFp = qInt;
-        }
+        const useFp = isAgenti ? qInt : Math.min(qInt, aFp);
 
         if (useFp > 0){
           const name = String(fp.name || fp.nome || r.desc || code).trim() || code;
@@ -3709,7 +3663,6 @@ Righe: ${st.total}`;
         number: String(ddt.number || '').trim(),
         date: String(ddt.date || '').trim(),
         customer: String(ddt.customer || '').trim(),
-        warehouseType: String(whType || '').trim(),
         rows: (ddt.rows || []).map(x => ({
           idx: (x && x.idx != null) ? x.idx : null,
           code: x.code || '',
@@ -3728,7 +3681,7 @@ Righe: ${st.total}`;
         vatTotal: (ddt && ddt.vatTotal != null) ? ddt.vatTotal : null,
         grossTotal: (ddt && ddt.grossTotal != null) ? ddt.grossTotal : null,
         currency: String(ddt.currency || 'EUR'),
-        warehouse: 'global',
+        warehouse: String(ddt.warehouse || "").trim(),
         allocations: allocations,
         finishedAllocations: finishedAllocations,
         xmlHash: String(ddt.hash || ''),
@@ -3899,14 +3852,13 @@ Righe: ${st.total}`;
         if (!ddt || !ddt.key) continue;
         if (S.completedMap.has(ddt.key)) continue;
 
+        const isAgenti = isAgentWarehouseDdt(ddt);
+
         try{ setProg(doneCount); }catch(_){ }
 
         // 3) calcola fabbisogni (PF prima, componenti dopo)
         const req = new Map();
         const reqFp = new Map();
-        const isAgent = isAgentWarehouseDdt(ddt);
-        const whType = getDdtWarehouseType(ddt);
-        const rollbackFp = [];
 
         for (const r of (ddt.rows || [])){
           const code = String(r.code || "").trim();
@@ -3924,27 +3876,7 @@ Righe: ${st.total}`;
 
           const low = code.toLowerCase();
           const aFp = Math.max(0, _safeInt(availFp.get(low)));
-          let useFp = Math.min(qInt, aFp);
-
-          // Magazzino Agenti: si scaricano SOLO prodotti finiti (niente componenti)
-          if (isAgent){
-            if (aFp < qInt){
-              // rollback delle riserve PF di questo DDT (per non inquinare la simulazione)
-              try{
-                for (const rb of rollbackFp){
-                  const k0 = String(rb && rb.low || "");
-                  const q0 = _safeInt(rb && rb.qty);
-                  if (!k0 || !q0) continue;
-                  availFp.set(k0, (availFp.get(k0) || 0) + q0);
-                }
-              }catch(_){ }
-              const msg = `Scorta PF insufficiente per DDT ${ddt.number || "?"} (${fmtDateIT(ddt.date || "")})\n\n${code}: richiesti ${qInt} pz, disponibili ${aFp} pz`;
-              if (!silent) alert(msg);
-              else { try{ window.HubInv?.showToast?.(msg, "warn"); }catch(_){ } }
-              return;
-            }
-            useFp = qInt;
-          }
+          const useFp = isAgenti ? qInt : Math.min(qInt, aFp);
 
           if (useFp > 0){
             const name = String(fp.name || fp.nome || r.desc || code).trim() || code;
@@ -3953,7 +3885,6 @@ Righe: ${st.total}`;
             cur.qtyInt += useFp;
             reqFp.set(low, cur);
             availFp.set(low, aFp - useFp);
-            if (isAgent) rollbackFp.push({ low, qty: useFp });
           }
 
           const rem = qInt - useFp;
@@ -4151,7 +4082,6 @@ Righe: ${st.total}`;
           number: String(ddt.number || "").trim(),
           date: String(ddt.date || "").trim(),
           customer: String(ddt.customer || "").trim(),
-          warehouseType: String(whType || "").trim(),
           rows: (ddt.rows || []).map(x => ({
             idx: (x && x.idx != null) ? x.idx : null,
             code: x.code || "",
@@ -4170,7 +4100,7 @@ Righe: ${st.total}`;
           vatTotal: (ddt && ddt.vatTotal != null) ? ddt.vatTotal : null,
           grossTotal: (ddt && ddt.grossTotal != null) ? ddt.grossTotal : null,
           currency: String(ddt.currency || "EUR"),
-          warehouse: "global",
+          warehouse: String(ddt.warehouse || "").trim(),
           allocations: allocations,
           finishedAllocations: finishedAllocations,
           xmlHash: String(ddt.hash || ""),
@@ -4555,7 +4485,7 @@ function bindEvents(){
         number: String(d.number || "").trim(),
         date: String(d.date || "").trim(),
         customer: String(d.customer || "").trim(),
-        warehouseType: String(d.warehouseType || "").trim(),
+        warehouse: String(d.warehouse || "").trim(),
         rows: (d.rows || []).map(x => ({
           idx: (x && x.idx != null) ? x.idx : null,
           code: String(x?.code || "").trim(),
