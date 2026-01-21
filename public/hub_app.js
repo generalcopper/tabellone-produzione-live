@@ -1368,8 +1368,10 @@ const tpl = document.createElement("template");
       (__normWh(mv.warehouse || "") === "prodotti_finiti" || __isFinished)
     );
 
-    // Movimenti PF: non supporto annullo singola riga da qui (serve gestione dedicata)
-    if (__isFinished){
+    // Movimenti PF (collezione finishedInventoryMovements):
+    // - di default non permetto annullo singola riga da qui
+    // - eccezione: Produzione PF => annullo per batch (carico PF + scarico componenti)
+    if (__isFinished && !__isProd){
       try{ if (els.movDetUndo) els.movDetUndo.disabled = true; }catch(_){ }
       try{ if (els.movDetOpenDoc) els.movDetOpenDoc.style.display = "none"; }catch(_){ }
     }
@@ -1409,13 +1411,52 @@ const tpl = document.createElement("template");
         }
       }catch(_){ }
 
-      // No doc / no undo per produzione
-      try{ if (els.movDetUndo) els.movDetUndo.disabled = true; }catch(_){ }
+      // Context per annullo produzione (batch)
+      // NOTE: l'annullo deve eliminare:
+      //   - carico PF (finishedInventoryMovements)
+      //   - scarichi componenti (inventoryMovements)
+      var __finCount = 1;
+      var __compCount = 0;
+      try{
+        // conta righe reali che verranno eliminate (usa la stessa logica di deletePfProduction)
+        var _invAll = (api && api.state && Array.isArray(api.state.movements)) ? api.state.movements : [];
+        var _finAll = (api && api.state && Array.isArray(api.state.finishedMovements)) ? api.state.finishedMovements : [];
+        var _isProdAny = function(x){
+          try{
+            if (!x) return false;
+            if (String(x.docNum || "").trim() !== __batch) return false;
+            var dt = String(x.docType || "").trim().toUpperCase();
+            var src = String(x.source || "").trim().toLowerCase();
+            return (dt === "PRODUZIONE") || (src.indexOf("produzione") >= 0);
+          }catch(_){ return false; }
+        };
+        __compCount = _invAll.filter(_isProdAny).length;
+        __finCount  = _finAll.filter(_isProdAny).length;
+        if (!__finCount) __finCount = 1;
+      }catch(_){
+        __finCount = 1;
+        __compCount = Array.isArray(compsMovs) ? compsMovs.length : 0;
+      }
+
+      try{
+        __detailCtx.kind = "prod_pf";
+        __detailCtx.batch = __batch;
+        __detailCtx.counts = { components: __compCount, finished: __finCount };
+      }catch(_){ }
+
+      // No doc per produzione
       try{ if (els.movDetOpenDoc) els.movDetOpenDoc.style.display = "none"; }catch(_){ }
+
+      // Annulla movimento (produzione) => abilita solo se API presente
+      try{
+        if (els.movDetUndo) els.movDetUndo.disabled = !(api && typeof api.deletePfProduction === "function" && __batch);
+      }catch(_){ }
 
       // hint produzione
       try{
-        if (els.movDetHint) els.movDetHint.textContent = "Questa riga rappresenta una produzione PF. Sotto trovi l'elenco dei componenti scaricati.";
+        if (els.movDetHint){
+          els.movDetHint.textContent = "Questa riga rappresenta una produzione PF. Puoi annullarla con \"Annulla movimento\": verranno rimossi il carico del prodotto finito e gli scarichi dei componenti (ripristino inventario).";
+        }
       }catch(_){ }
     } else {
       // hint standard
