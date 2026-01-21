@@ -5603,7 +5603,12 @@ function renderList(){
     prodMap:new Map(),
     finished:[],
     fpByCode:new Map(),
+    fpById:new Map(),
+
+    // dettaglio: può essere "category" o "product" (singolo)
+    detailMode:"category",
     selectedKey:"",
+    selectedFpId:"",
     draft:null,
 
     // edit state (nome + chiave)
@@ -5761,6 +5766,9 @@ try{
     if (!(meta.dataset && meta.dataset.fpToggleBound === "1")){
       if (meta.dataset) meta.dataset.fpToggleBound = "1";
       const toggle = () => {
+        try{
+          if (meta && meta.dataset && meta.dataset.fpMode === "product") return;
+        }catch(_){}
         const open = membersStack.style.display !== "none";
         membersStack.style.display = open ? "none" : "";
       };
@@ -6002,7 +6010,9 @@ try{
     } else {
       modal.classList.remove("open");
       try{ if (!document.querySelector(".modal.open")) document.body.classList.remove("modal-open"); }catch(_){ document.body.classList.remove("modal-open"); }
+      S.detailMode = "category";
       S.selectedKey = "";
+      S.selectedFpId = "";
       S.draft = null;
       S.keyManual = false;
     }
@@ -6022,9 +6032,12 @@ try{
       if (id && !S.prodMap.has(id)) S.prodMap.set(id, p);
     }
     S.fpByCode = new Map();
+    S.fpById = new Map();
     for (const fp of (S.finished || [])){
       const code = norm(fp && (fp.code || ""));
       if (code) S.fpByCode.set(code, fp);
+      const fid = String(fp && fp.id || "").trim();
+      if (fid) S.fpById.set(fid, fp);
     }
   }
 
@@ -6478,10 +6491,141 @@ try{
     tbody.innerHTML = rows.join("");
   }
 
+  function __fpCatSetFieldLabel(inputId, label){
+    try{
+      const el = $(inputId);
+      const lbl = el ? (el.closest(".field") ? el.closest(".field").querySelector("label") : null) : null;
+      if (lbl) lbl.textContent = String(label || "");
+    }catch(_){ }
+  }
+
+  function __fpCatApplyDetailModeUi(){
+    const isProd = S.detailMode === "product";
+
+    try{
+      const title = $("fpCatModalTitle");
+      const sub = $("fpCatModalSub");
+      if (title) title.textContent = isProd ? "Distinta base prodotto finito" : "Categoria prodotto finito";
+      if (sub){
+        if (isProd){
+          sub.textContent = "Modifica la distinta base del prodotto singolo (fuori categoria).";
+        } else {
+          sub.textContent = "Crea la distinta base (componenti) e visualizza i prodotti finiti associati. I prodotti si aggiungono da sezione Prodotti finiti.";
+        }
+      }
+    }catch(_){ }
+
+    // meta: usato per toggle membri (disabilita in modo prodotto)
+    try{
+      const meta = $("fpCatDetailMeta");
+      if (meta && meta.dataset){
+        meta.dataset.fpMode = isProd ? "product" : "category";
+        meta.style.cursor = isProd ? "default" : "pointer";
+      }
+    }catch(_){ }
+
+    // labels + readonly
+    try{
+      __fpCatSetFieldLabel("fpCatEditName", isProd ? "Nome prodotto" : "Nome categoria");
+      __fpCatSetFieldLabel("fpCatEditKey", isProd ? "Codice" : "Chiave");
+    }catch(_){ }
+
+    try{
+      const nameEl = $("fpCatEditName");
+      const keyEl = $("fpCatEditKey");
+      if (nameEl) nameEl.readOnly = !!isProd;
+      if (keyEl) keyEl.readOnly = !!isProd;
+    }catch(_){ }
+
+    // members stack: forzata nascosta per prodotto singolo
+    try{
+      const membersTable = $("fpCatMembersTable");
+      const membersStack = membersTable ? membersTable.closest(".stack") : null;
+      if (membersStack){
+        if (isProd){
+          membersStack.style.display = "none";
+          membersStack.dataset.fpForceHidden = "1";
+        } else if (membersStack.dataset && membersStack.dataset.fpForceHidden === "1"){
+          // torna in modalità categoria: chiusa di default, ma sbloccabile dal toggle
+          delete membersStack.dataset.fpForceHidden;
+          membersStack.style.display = "none";
+        }
+      }
+    }catch(_){ }
+
+    // pulsanti
+    try{
+      const btnDel = $("btnFpCatDelete");
+      if (btnDel) btnDel.style.display = isProd ? "none" : "";
+    }catch(_){ }
+  }
+
+  function renderDetailProduct(){
+    const d = S.draft || null;
+    __fpCatApplyDetailModeUi();
+
+    const activeEl = (typeof document !== "undefined") ? document.activeElement : null;
+    const elKey = $("fpCatEditKey");
+    const elName = $("fpCatEditName");
+
+    if (elKey){
+      const v = String((d && d.key) ? d.key : "");
+      if (activeEl !== elKey) elKey.value = v;
+    }
+    if (elName && d){
+      const v = String(d.name || "");
+      if (activeEl !== elName) elName.value = v;
+    }
+
+    const bom = (d && Array.isArray(d.bom)) ? d.bom : [];
+    if ($("fpCatBomCount")) $("fpCatBomCount").value = String(bom.length) + "";
+
+    // BOM table
+    const tb = $("fpCatCompTbody");
+    if (tb){
+      if (!bom.length){
+        tb.innerHTML = '<tr><td class="td-muted" colspan="5">Nessun componente.</td></tr>';
+      } else {
+        tb.innerHTML = bom.map((c, idx) => {
+          const code = String(c?.code||"").trim();
+          const name = String(c?.name||"").trim();
+          const qtyRaw = String(c?.qtyRaw||"").trim();
+          const qty = (c?.qty != null) ? String(c.qty) : (qtyRaw || "");
+          const uom = String(c?.uom||"").trim();
+          return `<tr class="jsFpCatCompRow" data-idx="${idx}">
+            <td>${esc(code)}</td>
+            <td>${esc(name || code)}</td>
+            <td class="qty">${esc(qty)}</td>
+            <td>${esc(uom)}</td>
+            <td style="text-align:right;"><button class="btn btn-ghost mini jsFpCatCompDel" type="button">–</button></td>
+          </tr>`;
+        }).join("");
+      }
+    }
+
+    // Members: nascosti (ma pulisco conteggi per coerenza)
+    if ($("fpCatMembersCount")) $("fpCatMembersCount").textContent = "0";
+    const mtb = $("fpCatMembersTbody");
+    if (mtb) mtb.innerHTML = '<tr><td class="td-muted" colspan="3">—</td></tr>';
+
+    const meta = $("fpCatDetailMeta");
+    if (meta){
+      meta.textContent = `BOM: ${bom.length}`;
+    }
+    const delHint = $("fpCatDeleteHint");
+    if (delHint) delHint.textContent = "";
+  }
+
   function renderDetail(){
+    if (S.detailMode === "product"){
+      renderDetailProduct();
+      return;
+    }
     const key = norm(S.selectedKey);
     const cat = key ? (S.catMap.get(key) || null) : null;
     const d = S.draft || null;
+
+    __fpCatApplyDetailModeUi();
 
     const activeEl = (typeof document !== "undefined") ? document.activeElement : null;
     const elKey = $("fpCatEditKey");
@@ -6558,6 +6702,8 @@ try{
   }
 
   function openDetail(key){
+    S.detailMode = "category";
+    S.selectedFpId = "";
     S.selectedKey = norm(key);
     S.keyManual = false;
     const cat = S.catMap.get(S.selectedKey) || null;
@@ -6576,6 +6722,81 @@ try{
     try{ if ($("fpCatCompQty")) $("fpCatCompQty").value = ""; }catch(_){ }
     try{ if ($("fpCatMemberPick")) $("fpCatMemberPick").value = ""; }catch(_){ }
     try{ __fpCatHideSuggest("comp"); __fpCatHideSuggest("member"); }catch(_){ }
+  }
+
+  function __fpCatGetFinishedById(id){
+    const fid = String(id || "").trim();
+    if (!fid) return null;
+    try{
+      if (S.fpById && S.fpById.has && S.fpById.has(fid)) return S.fpById.get(fid) || null;
+    }catch(_){ }
+    try{
+      return (S.finished || []).find(x => String(x && x.id || "") === fid) || null;
+    }catch(_){ return null; }
+  }
+
+  function __fpCatGetFinishedBom(fp){
+    try{
+      if (!fp) return [];
+      const arr = Array.isArray(fp && (fp.components || fp.bom || fp.distintaBase)) ? (fp.components || fp.bom || fp.distintaBase) : [];
+      return Array.isArray(arr) ? arr : [];
+    }catch(_){ return []; }
+  }
+
+  function openSingleProduct(fpId){
+    const fp = __fpCatGetFinishedById(fpId);
+    if (!fp){ showToast("Prodotto finito non trovato", "warn"); return; }
+
+    S.detailMode = "product";
+    S.selectedFpId = String(fpId || "").trim();
+    S.selectedKey = "";
+    S.keyManual = true;
+
+    const code = String(fp?.code || "").trim();
+    const nm = String(fp?.name || fp?.nome || "").trim() || code || "Prodotto finito";
+    const bom0 = __fpCatGetFinishedBom(fp);
+
+    const prevCat = norm(fp?.categoryKeyLower || fp?.categoryKey || fp?.category || fp?.catKey || "");
+    S.draft = {
+      key: code,
+      name: nm,
+      bom: Array.isArray(bom0) ? bom0.slice() : [],
+      __prevCat: prevCat
+    };
+
+    setDetailOpen(true);
+    renderDatalists();
+    renderDetail();
+
+    // reset barre di ricerca + suggerimenti
+    try{ if ($("fpCatCompPick")) $("fpCatCompPick").value = ""; }catch(_){ }
+    try{ if ($("fpCatCompQty")) $("fpCatCompQty").value = ""; }catch(_){ }
+    try{ if ($("fpCatMemberPick")) $("fpCatMemberPick").value = ""; }catch(_){ }
+    try{ __fpCatHideSuggest("comp"); __fpCatHideSuggest("member"); }catch(_){ }
+
+    // focus componente
+    try{ setTimeout(() => $("fpCatCompPick")?.focus(), 0); }catch(_){ }
+  }
+
+  function openForFinishedProduct(fpId){
+    const fp = __fpCatGetFinishedById(fpId);
+    if (!fp){ showToast("Prodotto finito non trovato", "warn"); return; }
+
+    // Se ha una BOM propria => è singolo
+    const direct = __fpCatGetFinishedBom(fp);
+    if (direct && direct.length){
+      openSingleProduct(fpId);
+      return;
+    }
+
+    const catKey = norm(fp?.categoryKeyLower || fp?.categoryKey || fp?.category || fp?.catKey || "");
+    if (catKey && catKey !== "singolo" && S.catMap && S.catMap.has(catKey)){
+      openDetail(catKey);
+      return;
+    }
+
+    // nessuna categoria: usa modalità prodotto singolo
+    openSingleProduct(fpId);
   }
 
   async function createCategory(){
@@ -6715,7 +6936,60 @@ try{
     return true;
   }
 
+  async function saveSingleProductBom(){
+    const h = H();
+    if (!h || !h.fb || !h.fb.db || !h.FS) { showToast("Firebase non pronto", "warn"); return; }
+    if (!h.fb.user) { showToast("Accedi con Google", "warn"); return; }
+
+    const fid = String(S.selectedFpId || "").trim();
+    if (!fid){ showToast("Prodotto finito non valido", "warn"); return; }
+
+    const bom0 = (S.draft && Array.isArray(S.draft.bom)) ? S.draft.bom : [];
+    const bom = bom0.map(c => {
+      const code = String(c?.code || "").trim();
+      if (!code) return null;
+      const name = String(c?.name || "").trim();
+      const uom = String(c?.uom || "").trim();
+      const qtyRaw = String(c?.qtyRaw || "").trim();
+      const qtyNum = (c && c.qty != null && Number.isFinite(Number(c.qty))) ? Number(c.qty) : (c?.qty != null ? Number(c.qty) : null);
+      const productId = String(c?.productId || "").trim() || keyToId(code.toLowerCase());
+      return { productId, code, name, qty: (Number.isFinite(qtyNum) ? qtyNum : null), qtyRaw, uom };
+    }).filter(Boolean);
+
+    try{
+      const { doc, setDoc, serverTimestamp, deleteField } = h.FS;
+      const ref = doc(h.fb.db, "orgs", h.ORG_ID, "finishedProducts", fid);
+
+      const payload = {
+        components: bom,
+        updatedAt: serverTimestamp(),
+        updatedBy: h.fb.user.email || h.fb.user.uid || ""
+      };
+
+      if (bom.length){
+        payload.categoryKey = "singolo";
+        payload.categoryKeyLower = "singolo";
+      } else {
+        const prev = norm(S.draft && S.draft.__prevCat || "");
+        if (prev === "singolo"){
+          payload.categoryKey = deleteField();
+          payload.categoryKeyLower = deleteField();
+        }
+      }
+
+      await setDoc(ref, payload, { merge: true });
+      showToast("Distinta salvata");
+    }catch(e){
+      console.warn("save finishedProduct BOM failed", e);
+      showToast("Errore salvataggio distinta", "err");
+    }
+  }
+
   async function saveCategory(){
+    if (S.detailMode === "product"){
+      await saveSingleProductBom();
+      return;
+    }
     const h = H();
     if (!h || !h.fb || !h.fb.db || !h.FS) { showToast("Firebase non pronto", "warn"); return; }
     if (!h.fb.user) { showToast("Accedi con Google", "warn"); return; }
@@ -6791,6 +7065,10 @@ Verrà aggiornata anche la chiave su tutti i prodotti finiti.`);
   }
 
   async function deleteCategory(){
+    if (S.detailMode === "product"){
+      showToast("Operazione non disponibile sul prodotto singolo", "warn");
+      return;
+    }
     const h = H();
     if (!h || !h.fb || !h.fb.db || !h.FS) { showToast("Firebase non pronto", "warn"); return; }
     if (!h.fb.user) { showToast("Accedi con Google", "warn"); return; }
@@ -6917,6 +7195,10 @@ Verrà aggiornata anche la chiave su tutti i prodotti finiti.`);
   }
 
   async function addMember(){
+    if (S.detailMode === "product"){
+      showToast("Funzione disponibile solo per categorie", "warn");
+      return;
+    }
     const h = H();
     if (!h || !h.fb || !h.fb.db || !h.FS) { showToast("Firebase non pronto", "warn"); return; }
     if (!h.fb.user) { showToast("Accedi con Google", "warn"); return; }
@@ -6959,6 +7241,10 @@ Verrà aggiornata anche la chiave su tutti i prodotti finiti.`);
   }
 
   async function removeMemberById(id){
+    if (S.detailMode === "product"){
+      showToast("Funzione disponibile solo per categorie", "warn");
+      return;
+    }
     const h = H();
     if (!h || !h.fb || !h.fb.db || !h.FS) { showToast("Firebase non pronto", "warn"); return; }
     if (!h.fb.user) { showToast("Accedi con Google", "warn"); return; }
@@ -7265,6 +7551,9 @@ Verrà aggiornata anche la chiave su tutti i prodotti finiti.`);
   // expose (optional)
   window.HubFPCategories = window.HubFPCategories || {};
   window.HubFPCategories.render = function(){ try{ renderList(); }catch(_){ } };
+  window.HubFPCategories.openDetail = function(key){ try{ openDetail(key); }catch(_){ } };
+  window.HubFPCategories.openSingleProduct = function(fpId){ try{ openSingleProduct(fpId); }catch(_){ } };
+  window.HubFPCategories.openForFinishedProduct = function(fpId){ try{ openForFinishedProduct(fpId); }catch(_){ } };
 })();
 ;
 /* ===== prodotti.js ===== */
@@ -16738,14 +17027,22 @@ try{
             const comps = Array.isArray(fp && (fp.components || fp.bom || fp.distintaBase)) ? (fp.components || fp.bom || fp.distintaBase) : [];
             const nDirect = comps.length;
             const isSingle = __fpIsSingle(fp);
-            const n = isSingle ? nDirect : 0;
 
             const catKey = isSingle ? "singolo" : String(fp && (fp.categoryKeyLower || fp.categoryKey || "") || "").trim().toLowerCase();
             const catObj = (!isSingle && catKey) ? (finishedProductCategoriesMap.get(catKey) || null) : null;
             const catName = isSingle ? "Singolo" : String((catObj && (catObj.name || catObj.label || catObj.key)) || (catKey || "")).trim();
             const catHtml = catName ? escapeHtml(catName) : '<span class="td-muted">—</span>';
 
-            const bomBtnLabel = n ? ("Distinta (" + n + ")") : "Distinta";
+            // label distinta: se in categoria, mostra conteggio BOM della categoria; se singolo, conteggio BOM proprio
+            let bomCount = isSingle ? nDirect : 0;
+            try{
+              if (!isSingle && catObj){
+                const catBom = Array.isArray(catObj && (catObj.bom || catObj.components)) ? (catObj.bom || catObj.components) : [];
+                bomCount = catBom.length;
+              }
+            }catch(_){ bomCount = isSingle ? nDirect : 0; }
+
+            const bomBtnLabel = bomCount ? ("Distinta (" + bomCount + ")") : "Distinta";
 
             return `
               <tr class="jsFpRow" data-fp-id="${escapeHtmlAttr(id)}">
@@ -20579,7 +20876,16 @@ if (action === "openProdGroup") {
           return;
         }
 
-        if (action === "openFinishedProduct") { openFinishedProductModal(id); return; }
+        if (action === "openFinishedProduct") {
+          try{
+            if (window.HubFPCategories && typeof window.HubFPCategories.openForFinishedProduct === "function"){
+              window.HubFPCategories.openForFinishedProduct(id);
+              return;
+            }
+          }catch(_){ }
+          openFinishedProductModal(id);
+          return;
+        }
       });
     }
 
