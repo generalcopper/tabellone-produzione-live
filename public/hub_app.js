@@ -1303,6 +1303,7 @@ const tpl = document.createElement("template");
     try{ docKey = buildDocKeyFromMovement(mv) || ""; }catch(_){ docKey = ""; }
     __detailCtx.id = String(mv.id || "");
     __detailCtx.docKey = String(docKey || "");
+    try{ __detailCtx.kind = ""; __detailCtx.batch = ""; __detailCtx.counts = null; }catch(_){ }
 
     // Titolo + sub
     try{
@@ -1537,28 +1538,63 @@ const tpl = document.createElement("template");
           __closeDetailModal();
         });
 
-        if (els.movDetUndo) els.movDetUndo.addEventListener("click", async function(e){
-          try{ e.preventDefault(); e.stopPropagation(); }catch(_){}
-          if (!api || typeof api.deleteMovement !== "function") {
-            try{ api && api.openModal && api.openModal("Operazione non disponibile", "Per annullare un movimento serve l'API deleteMovement."); }catch(_){}
-            return;
-          }
-          var id = String(__detailCtx.id || "").trim();
-          if (!id) return;
+                if (els.movDetUndo) els.movDetUndo.addEventListener("click", async function(e){
+                  try{ e.preventDefault(); e.stopPropagation(); }catch(_){}
 
-          var ok = confirm("Annullare questo movimento?\n\nVerrà eliminata questa riga e lo stock tornerà come prima.");
-          if (!ok) return;
+                  // Produzione PF (batch): elimina carico PF + scarico componenti
+                  var kind = String((__detailCtx && __detailCtx.kind) || "").trim();
+                  if (kind === "prod_pf"){
+                    if (!api || typeof api.deletePfProduction !== "function") {
+                      try{ api && api.openModal && api.openModal("Operazione non disponibile", "Per annullare una produzione PF serve l'API deletePfProduction."); }catch(_){}
+                      return;
+                    }
 
-          try{ els.movDetUndo.disabled = true; }catch(_){}
-          try{ await api.deleteMovement(id); }catch(err){
-            try{ api.openModal && api.openModal("Errore", String(err && (err.message || err) || err)); }catch(_){}
-            try{ els.movDetUndo.disabled = false; }catch(_){}
-            return;
-          }
+                    var batch = String(__detailCtx.batch || "").trim();
+                    if (!batch) return;
 
-          try{ api.showToast && api.showToast("Movimento annullato"); }catch(_){}
-          __closeDetailModal();
-        });
+                    var counts = (__detailCtx && __detailCtx.counts) ? __detailCtx.counts : {};
+                    var nComp = Number(counts.components || 0) || 0;
+                    var nFin  = Number(counts.finished || 1) || 1;
+
+                    var msgP = "Annullare questa produzione PF?\n\n"
+                      + ("Verranno eliminati: " + nFin + " carico PF + " + nComp + " scarichi componenti.\n")
+                      + "L'inventario verrà ripristinato.";
+                    var okP = confirm(msgP);
+                    if (!okP) return;
+
+                    try{ els.movDetUndo.disabled = true; }catch(_){}
+                    try{ await api.deletePfProduction(batch); }catch(err){
+                      try{ api.openModal && api.openModal("Errore", String(err && (err.message || err) || err)); }catch(_){}
+                      try{ els.movDetUndo.disabled = false; }catch(_){}
+                      return;
+                    }
+
+                    try{ api.showToast && api.showToast("Produzione PF annullata"); }catch(_){}
+                    __closeDetailModal();
+                    return;
+                  }
+
+                  // Movimento standard
+                  if (!api || typeof api.deleteMovement !== "function") {
+                    try{ api && api.openModal && api.openModal("Operazione non disponibile", "Per annullare un movimento serve l'API deleteMovement."); }catch(_){}
+                    return;
+                  }
+                  var id = String(__detailCtx.id || "").trim();
+                  if (!id) return;
+
+                  var ok = confirm("Annullare questo movimento?\n\nVerrà eliminata questa riga e lo stock tornerà come prima.");
+                  if (!ok) return;
+
+                  try{ els.movDetUndo.disabled = true; }catch(_){}
+                  try{ await api.deleteMovement(id); }catch(err){
+                    try{ api.openModal && api.openModal("Errore", String(err && (err.message || err) || err)); }catch(_){}
+                    try{ els.movDetUndo.disabled = false; }catch(_){}
+                    return;
+                  }
+
+                  try{ api.showToast && api.showToast("Movimento annullato"); }catch(_){}
+                  __closeDetailModal();
+                });
       }
     }catch(_){}
 
@@ -16003,6 +16039,19 @@ async function produceFinishedProductFromRow(row, qtyToProduce){
     }
   }
 
+  // Se mancano componenti, blocca la produzione (niente stock negativo)
+  if (shortages.length){
+    const sPrev = shortages.slice(0, 8).map(s => `${s.code}: richiesti ${s.need}, disponibili ${s.have} (Cerea ${s.cerea}, Conca ${s.concamarise})`).join(" • ");
+    const moreS = (shortages.length > 8) ? ` … +${shortages.length - 8} altri` : "";
+    try{ showToast("Scorte insufficienti: impossibile produrre. Riduci la quantità o carica i componenti.", "warn"); }catch(_){ }
+    try{
+      if (typeof openModal === "function"){
+        openModal("Scorte insufficienti", `Non puoi produrre ${qty} ${fpUom} di ${fpCode} — ${fpName}. Mancano: ${sPrev}${moreS}`);
+      }
+    }catch(_){ }
+    return null;
+  }
+
   // Preview (max 12 righe)
   const prev = needList.slice(0, 12).map(it => `• ${it.code} — ${Math.round(it.qtyInt)} ${String(it.uom||"").trim()}`);
   const more = (needList.length > 12) ? `\n… +${needList.length - 12} altri` : "";
@@ -22154,9 +22203,8 @@ searchStock.addEventListener("input", () => renderAll());
               }
             }
           }catch(_){ }
+          __closeFpProduceModal();
         }
-
-        __closeFpProduceModal();
       } catch (err) {
         console.error(err);
       } finally {
@@ -22265,6 +22313,7 @@ if (importMovementsInput) importMovementsInput.addEventListener("change", async 
         showToast,
         exportMovementsCSV,
         deleteMovement,
+        deletePfProduction,
         openDocDetail,
 
         // Categorie
