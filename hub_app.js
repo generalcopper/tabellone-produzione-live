@@ -67,6 +67,94 @@
 
 
 ;
+/* ===== inventario_prodotti_finiti.js ===== */
+/* Hub Inventario — Sezione Inventario Prodotti Finiti (viewFinishedInventory)
+ * UI + rettifica rapida per sede.
+ */
+(function(){
+  try {
+    if (document.getElementById("viewFinishedInventory")) return;
+
+    const html = `
+<div id="viewFinishedInventory" class="view modalOverlay">
+  <article class="card" id="fpStockCard">
+    <div class="hd">
+      <div class="overlayHeaderTitle">
+        <button class="iconBtn overlayBack" id="btnBackFpInv" type="button" aria-label="Indietro">‹</button>
+        <h2>Inventario prodotti finiti</h2>
+      </div>
+      <div class="inlineRow" style="gap:8px; justify-content:flex-end;">
+        <div class="pill" id="pillFpInvWarehouse">Sede unica</div>
+        <div class="pill" id="pillFpStock">—</div>
+        <button class="iconBtn" id="btnCloseFpInv" type="button" aria-label="Chiudi">×</button>
+      </div>
+    </div>
+    <div class="bd">
+      <div id="fpInvDetail" class="stack">
+        <div class="inlineRow" style="justify-content:space-between; align-items:flex-end; gap:12px;">
+          <div class="stack" style="flex:1; min-width: 220px;">
+            <div class="hero-sub" id="fpInvDetailTitle">Inventario prodotti finiti</div>
+            <div class="muted">Sede unica • salva per rettifica, oppure <b>Produci</b> per carico PF + scarico componenti</div>
+          </div>
+        </div>
+
+        <div class="inlineRow listStickyBar" style="justify-content: space-between;">
+          <div class="inlineRow" style="flex: 1 1 auto;">
+            <div class="field" style="min-width: 220px;">
+              <label for="fpInvSearch">Cerca</label>
+              <input id="fpInvSearch" placeholder="Codice / nome…" />
+            </div>
+            <div class="field" style="min-width: 220px;">
+              <label for="fpInvFilterCategory">Categoria</label>
+              <select id="fpInvFilterCategory">
+                <option value="">Tutte</option>
+                <option value="__none">Non assegnata</option>
+              </select>
+            </div>
+          </div>
+        </div>
+
+        <div class="tableWrap" style="max-height: 420px; overflow:auto; margin-top: 10px;">
+          <table class="dataGrid">
+            <thead>
+              <tr>
+                <th>Nome prodotto</th>
+                <th>Codice</th>
+                <th>Categoria</th>
+                <th class="qty">Q.tà</th>
+              </tr>
+            </thead>
+            <tbody id="fpStockTbody">
+              <tr><td class="td-muted" colspan="4">Carico inventario PF…</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </article>
+</div>`;
+
+const tpl = document.createElement("template");
+    tpl.innerHTML = html;
+
+    const anchor =
+      document.getElementById("viewMovements") ||
+      document.getElementById("viewFlows") ||
+      document.getElementById("viewAnag") ||
+      document.getElementById("toast") ||
+      document.getElementById("centerPop") ||
+      document.getElementById("mainModuleCode") ||
+      null;
+
+    if (anchor && anchor.parentNode) anchor.parentNode.insertBefore(tpl.content, anchor);
+    else document.body.appendChild(tpl.content);
+  } catch (e) {
+    try { console.error("[inventario_prodotti_finiti.js] inject failed", e); } catch (_) {}
+  }
+})();
+
+
+;
 /* ===== movimenti.js ===== */
 (function(){
   "use strict";
@@ -88,6 +176,12 @@
     try{
       var src = String(mv.source || "").toUpperCase();
       if (src === "OCR") return true;
+
+      // Produzione PF: ha docNum (batch) ma NON è un documento da aprire
+      if (src.indexOf("PRODUZIONE") >= 0) return false;
+      var dt = String(mv.docType || "").trim().toUpperCase();
+      if (dt === "PRODUZIONE") return false;
+
       var note = String(mv.note || "");
       if (/\bDDT\b|DOCUMENTO|TRASPORTO|BOLLA|FATTURA/i.test(note)) return true;
       if (String(mv.docNum || "").trim()) return true;
@@ -113,8 +207,26 @@
 
   function getAllMovements(){
     try{
-      var arr = (api && api.state && Array.isArray(api.state.movements)) ? api.state.movements : [];
-      return arr.slice();
+      var inv = (api && api.state && Array.isArray(api.state.movements)) ? api.state.movements : [];
+      var fp  = (api && api.state && Array.isArray(api.state.finishedMovements)) ? api.state.finishedMovements : [];
+
+      var out = inv.slice();
+
+      // Mappa i movimenti PF nello stesso schema (Movimenti) + marca la collezione
+      (Array.isArray(fp) ? fp : []).forEach(function(mv){
+        if (!mv) return;
+        var src = String(mv.source || "").trim();
+        var srcLow = src.toLowerCase();
+        var cust = srcLow.indexOf("produzione") >= 0 ? "Produzione PF" : "Prodotti finiti";
+        var wh = (api && typeof api.normalizeWarehouse === "function") ? api.normalizeWarehouse(mv.warehouse || "") : String(mv.warehouse || "").trim().toLowerCase();
+        out.push(Object.assign({}, mv, {
+          customer: String(mv.customer || cust || "").trim() || cust,
+          warehouse: wh,
+          __collection: "finishedInventoryMovements"
+        }));
+      });
+
+      return out;
     }catch(_){ return []; }
   }
 
@@ -139,6 +251,24 @@
       // una chiave di raggruppamento dal numero documento.
       var k = String(mv.daneaDdtKey || mv.docNum || "").trim();
       return !!k;
+    }catch(_){ return false; }
+  }
+
+  // ===== Produzione PF: nascondo le righe componenti in tabella movimenti
+  // (mostro solo il carico del prodotto finito, e nel dettaglio apro i componenti)
+  function isPfProductionComponent(mv){
+    try{
+      if (!mv) return false;
+      if (String(mv.type || "").toUpperCase() !== "OUT") return false;
+      var src = String(mv.source || "").trim().toLowerCase();
+      if (src !== "produzione pf") return false;
+      var num = String(mv.docNum || "").trim();
+      if (!num) return false;
+      var dt = String(mv.docType || "").trim().toUpperCase();
+      if (dt && dt !== "PRODUZIONE") return false;
+      var wh = __normWh(mv.warehouse || "");
+      if (wh === "prodotti_finiti") return false;
+      return true;
     }catch(_){ return false; }
   }
 
@@ -244,11 +374,20 @@
       });
     });
 
+    // ids to skip (righe componenti Produzione PF)
+    var skipProd = Object.create(null);
+    all.forEach(function(mv){
+      if (!mv) return;
+      if (!isPfProductionComponent(mv)) return;
+      var id = String(mv.id || "").trim();
+      if (id) skipProd[id] = 1;
+    });
+
     var rows = [];
     all.forEach(function(mv){
       if (!mv) return;
       var id = String(mv.id || "").trim();
-      if (id && skip[id]) return;
+      if (id && (skip[id] || skipProd[id])) return;
       rows.push(mv);
     });
 
@@ -380,6 +519,7 @@
   function whLabel(v){
     if (api && typeof api.warehouseLabel === "function") return api.warehouseLabel(v);
     var s = String(v || "").toLowerCase();
+    if (s === "prodotti_finiti" || s === "pf" || s.includes("finit")) return "Prodotti finiti";
     if (s.includes("conca")) return "Concamarise";
     return "Cerea";
   }
@@ -388,6 +528,7 @@
     var s = (api && typeof api.normalizeWarehouse === "function") ? api.normalizeWarehouse(v) : String(v || "").toLowerCase();
     s = String(s || "").trim().toLowerCase();
     if (s === "split") return "Split";
+    if (s === "prodotti_finiti" || s === "pf" || s.includes("finit")) return "PF";
     return (s === "concamarise") ? "Conca" : "Cerea";
   }
 
@@ -516,6 +657,15 @@
   function __setDdtMode(on){
     try{ if (els.movDetDdtWrap) els.movDetDdtWrap.style.display = on ? "" : "none"; }catch(_){ }
     if (!on) __resetDdtDetailCtx();
+  }
+
+  // ===== Dettaglio Produzione PF (solo elenco componenti scaricati)
+  function __setProdMode(on){
+    try{ if (els.movDetProdWrap) els.movDetProdWrap.style.display = on ? "" : "none"; }catch(_){ }
+    if (!on){
+      try{ if (els.movDetProdCompsTbody) els.movDetProdCompsTbody.innerHTML = '<tr><td class="td-muted" colspan="7">—</td></tr>'; }catch(_){ }
+      try{ if (els.movDetProdHint) els.movDetProdHint.textContent = "Componenti scaricati per questa produzione."; }catch(_){ }
+    }
   }
 
   function __getHub(){
@@ -806,6 +956,52 @@
     }).join("");
   }
 
+  function __renderProdComponentsTable(comps){
+    if (!els.movDetProdCompsTbody) return;
+    var arr = Array.isArray(comps) ? comps.slice() : [];
+    if (!arr.length){
+      els.movDetProdCompsTbody.innerHTML = '<tr><td class="td-muted" colspan="7">Nessun componente scaricato.</td></tr>';
+      return;
+    }
+
+    // sort: Materie prime -> Imballaggi -> altri, poi codice
+    function typeRank(mg){
+      if (mg === "materie_prime") return 1;
+      if (mg === "imballaggi") return 2;
+      return 3;
+    }
+
+    arr.sort(function(a,b){
+      var ra = typeRank(__macroGroupForCode(a.code));
+      var rb = typeRank(__macroGroupForCode(b.code));
+      if (ra !== rb) return ra - rb;
+      var ca = String(a.code||"");
+      var cb = String(b.code||"");
+      if (ca !== cb) return ca.localeCompare(cb);
+      return String(a.item||"").localeCompare(String(b.item||""));
+    });
+
+    els.movDetProdCompsTbody.innerHTML = arr.map(function(it){
+      var mg = __macroGroupForCode(it.code);
+      var tipo = __macroGroupLabel(mg);
+      var code = String(it.code || "").trim();
+      var item = String(it.item || code).trim();
+      var uom = String(it.uom || "").trim();
+      var tot = Number(it.total || 0);
+      var c = Number(it.cerea || 0);
+      var k = Number(it.concamarise || 0);
+      return '<tr>'
+        + '<td data-label="Tipo">'+esc(tipo)+'</td>'
+        + '<td data-label="Codice"><span class="kbd">'+esc(code || "—")+'</span></td>'
+        + '<td data-label="Articolo">'+esc(item || "—")+'</td>'
+        + '<td data-label="Totale" class="qty" style="text-align:right;">'+tot.toLocaleString("it-IT")+'</td>'
+        + '<td data-label="Cerea" class="qty" style="text-align:right;">'+c.toLocaleString("it-IT")+'</td>'
+        + '<td data-label="Concamarise" class="qty" style="text-align:right;">'+k.toLocaleString("it-IT")+'</td>'
+        + '<td data-label="U.M.">'+esc(uom)+'</td>'
+        + '</tr>';
+    }).join("");
+  }
+
   function __renderDdtProdPlaceholder(msg){
     try{ if (els.movDetDdtProdWrap) els.movDetDdtProdWrap.style.display = ""; }catch(_){ }
     if (!els.movDetDdtProdTbody) return;
@@ -936,6 +1132,7 @@
     if (!api || !g) return;
 
     cacheEls();
+    try{ __setProdMode(false); }catch(_){ }
     __setDdtMode(true);
 
     var rows = Array.isArray(g.movements) ? g.movements.slice() : [];
@@ -1070,6 +1267,7 @@
 
     // modal standard: nascondi sezioni DDT
     try{ __setDdtMode(false); }catch(_){ }
+    try{ __setProdMode(false); }catch(_){ }
 
     // Se non abbiamo il modale dedicato, fallback alla modale testuale legacy
     if (!els.modalMovementDetail){
@@ -1105,6 +1303,7 @@
     try{ docKey = buildDocKeyFromMovement(mv) || ""; }catch(_){ docKey = ""; }
     __detailCtx.id = String(mv.id || "");
     __detailCtx.docKey = String(docKey || "");
+    try{ __detailCtx.kind = ""; __detailCtx.batch = ""; __detailCtx.counts = null; }catch(_){ }
 
     // Titolo + sub
     try{
@@ -1158,10 +1357,117 @@
       if (els.movDetUndo) els.movDetUndo.disabled = !(api && typeof api.deleteMovement === "function" && __detailCtx.id);
     }catch(_){ }
 
-    // hint standard
-    try{
-      if (els.movDetHint) els.movDetHint.textContent = "Annulla movimento = elimina questa riga e ripristina lo stock come prima.";
-    }catch(_){ }
+    // Produzione PF: mostra elenco componenti scaricati (batch docNum)
+    var __isFinished = (String(mv && mv.__collection || "").trim() === "finishedInventoryMovements");
+    var __srcLow = String(mv && mv.source || "").trim().toLowerCase();
+    var __docTypeU = String(mv && mv.docType || "").trim().toUpperCase();
+    var __batch = String(mv && mv.docNum || "").trim();
+    var __isProd = !!(
+      __batch &&
+      (__docTypeU === "PRODUZIONE" || __srcLow === "produzione pf" || __srcLow.indexOf("produzione") >= 0) &&
+      (__normWh(mv.warehouse || "") === "prodotti_finiti" || __isFinished)
+    );
+
+    // Movimenti PF (collezione finishedInventoryMovements):
+    // - di default non permetto annullo singola riga da qui
+    // - eccezione: Produzione PF => annullo per batch (carico PF + scarico componenti)
+    if (__isFinished && !__isProd){
+      try{ if (els.movDetUndo) els.movDetUndo.disabled = true; }catch(_){ }
+      try{ if (els.movDetOpenDoc) els.movDetOpenDoc.style.display = "none"; }catch(_){ }
+    }
+
+    if (__isProd){
+      try{ if (els.movDetTitle) els.movDetTitle.textContent = "Produzione PF"; }catch(_){ }
+      try{ __setVal(els.movDetCustomer, "Produzione PF"); }catch(_){ }
+
+      // Sottotitolo più informativo
+      try{
+        if (els.movDetSubtitle){
+          var lab = [String(mv.code||"").trim(), String(mv.item||"").trim()].filter(Boolean).join(" — ");
+          var wh = whLabel(mv.warehouse || "");
+          els.movDetSubtitle.textContent = [lab || "Prodotto finito", (qtyRaw || "—"), (String(mv.date||"").trim() || "—"), (wh || "—")].join(" · ");
+        }
+      }catch(_){ }
+
+      // Carico componenti dalla collezione inventarioMovements
+      var compsMovs = [];
+      try{
+        var inv = (api && api.state && Array.isArray(api.state.movements)) ? api.state.movements : [];
+        compsMovs = inv.filter(function(x){
+          if (!x) return false;
+          if (String(x.docNum || "").trim() !== __batch) return false;
+          return isPfProductionComponent(x);
+        });
+      }catch(_){ compsMovs = []; }
+
+      var compsAgg = __aggComponentsFromMovements(compsMovs);
+      try{ __setProdMode(true); }catch(_){ }
+      __renderProdComponentsTable(compsAgg);
+
+      try{
+        if (els.movDetProdHint){
+          var n = Array.isArray(compsMovs) ? compsMovs.length : 0;
+          els.movDetProdHint.textContent = n ? ("Componenti scaricati: " + n + " righe") : "Componenti non trovati per questa produzione.";
+        }
+      }catch(_){ }
+
+      // Context per annullo produzione (batch)
+      // NOTE: l'annullo deve eliminare:
+      //   - carico PF (finishedInventoryMovements)
+      //   - scarichi componenti (inventoryMovements)
+      var __finCount = 1;
+      var __compCount = 0;
+      try{
+        // conta righe reali che verranno eliminate (usa la stessa logica di deletePfProduction)
+        var _invAll = (api && api.state && Array.isArray(api.state.movements)) ? api.state.movements : [];
+        var _finAll = (api && api.state && Array.isArray(api.state.finishedMovements)) ? api.state.finishedMovements : [];
+        var _isProdAny = function(x){
+          try{
+            if (!x) return false;
+            if (String(x.docNum || "").trim() !== __batch) return false;
+            var dt = String(x.docType || "").trim().toUpperCase();
+            var src = String(x.source || "").trim().toLowerCase();
+            return (dt === "PRODUZIONE") || (src.indexOf("produzione") >= 0);
+          }catch(_){ return false; }
+        };
+        __compCount = _invAll.filter(_isProdAny).length;
+        __finCount  = _finAll.filter(_isProdAny).length;
+        if (!__finCount) __finCount = 1;
+      }catch(_){
+        __finCount = 1;
+        __compCount = Array.isArray(compsMovs) ? compsMovs.length : 0;
+      }
+
+      try{
+        __detailCtx.kind = "prod_pf";
+        __detailCtx.batch = __batch;
+        __detailCtx.counts = { components: __compCount, finished: __finCount };
+      }catch(_){ }
+
+      // No doc per produzione
+      try{ if (els.movDetOpenDoc) els.movDetOpenDoc.style.display = "none"; }catch(_){ }
+
+      // Annulla movimento (produzione) => abilita solo se API presente
+      try{
+        if (els.movDetUndo) els.movDetUndo.disabled = !(api && typeof api.deletePfProduction === "function" && __batch);
+      }catch(_){ }
+
+      // hint produzione
+      try{
+        if (els.movDetHint){
+          els.movDetHint.textContent = "Questa riga rappresenta una produzione PF. Puoi annullarla con \"Annulla movimento\": verranno rimossi il carico del prodotto finito e gli scarichi dei componenti (ripristino inventario).";
+        }
+      }catch(_){ }
+    } else {
+      // hint standard
+      try{
+        if (els.movDetHint) {
+          els.movDetHint.textContent = __isFinished
+            ? "Movimento prodotti finiti: annullamento non disponibile da questa schermata."
+            : "Annulla movimento = elimina questa riga e ripristina lo stock come prima.";
+        }
+      }catch(_){ }
+    }
 
     __openDetailModal();
   }
@@ -1273,28 +1579,63 @@
           __closeDetailModal();
         });
 
-        if (els.movDetUndo) els.movDetUndo.addEventListener("click", async function(e){
-          try{ e.preventDefault(); e.stopPropagation(); }catch(_){}
-          if (!api || typeof api.deleteMovement !== "function") {
-            try{ api && api.openModal && api.openModal("Operazione non disponibile", "Per annullare un movimento serve l'API deleteMovement."); }catch(_){}
-            return;
-          }
-          var id = String(__detailCtx.id || "").trim();
-          if (!id) return;
+                if (els.movDetUndo) els.movDetUndo.addEventListener("click", async function(e){
+                  try{ e.preventDefault(); e.stopPropagation(); }catch(_){}
 
-          var ok = confirm("Annullare questo movimento?\n\nVerrà eliminata questa riga e lo stock tornerà come prima.");
-          if (!ok) return;
+                  // Produzione PF (batch): elimina carico PF + scarico componenti
+                  var kind = String((__detailCtx && __detailCtx.kind) || "").trim();
+                  if (kind === "prod_pf"){
+                    if (!api || typeof api.deletePfProduction !== "function") {
+                      try{ api && api.openModal && api.openModal("Operazione non disponibile", "Per annullare una produzione PF serve l'API deletePfProduction."); }catch(_){}
+                      return;
+                    }
 
-          try{ els.movDetUndo.disabled = true; }catch(_){}
-          try{ await api.deleteMovement(id); }catch(err){
-            try{ api.openModal && api.openModal("Errore", String(err && (err.message || err) || err)); }catch(_){}
-            try{ els.movDetUndo.disabled = false; }catch(_){}
-            return;
-          }
+                    var batch = String(__detailCtx.batch || "").trim();
+                    if (!batch) return;
 
-          try{ api.showToast && api.showToast("Movimento annullato"); }catch(_){}
-          __closeDetailModal();
-        });
+                    var counts = (__detailCtx && __detailCtx.counts) ? __detailCtx.counts : {};
+                    var nComp = Number(counts.components || 0) || 0;
+                    var nFin  = Number(counts.finished || 1) || 1;
+
+                    var msgP = "Annullare questa produzione PF?\n\n"
+                      + ("Verranno eliminati: " + nFin + " carico PF + " + nComp + " scarichi componenti.\n")
+                      + "L'inventario verrà ripristinato.";
+                    var okP = confirm(msgP);
+                    if (!okP) return;
+
+                    try{ els.movDetUndo.disabled = true; }catch(_){}
+                    try{ await api.deletePfProduction(batch); }catch(err){
+                      try{ api.openModal && api.openModal("Errore", String(err && (err.message || err) || err)); }catch(_){}
+                      try{ els.movDetUndo.disabled = false; }catch(_){}
+                      return;
+                    }
+
+                    try{ api.showToast && api.showToast("Produzione PF annullata"); }catch(_){}
+                    __closeDetailModal();
+                    return;
+                  }
+
+                  // Movimento standard
+                  if (!api || typeof api.deleteMovement !== "function") {
+                    try{ api && api.openModal && api.openModal("Operazione non disponibile", "Per annullare un movimento serve l'API deleteMovement."); }catch(_){}
+                    return;
+                  }
+                  var id = String(__detailCtx.id || "").trim();
+                  if (!id) return;
+
+                  var ok = confirm("Annullare questo movimento?\n\nVerrà eliminata questa riga e lo stock tornerà come prima.");
+                  if (!ok) return;
+
+                  try{ els.movDetUndo.disabled = true; }catch(_){}
+                  try{ await api.deleteMovement(id); }catch(err){
+                    try{ api.openModal && api.openModal("Errore", String(err && (err.message || err) || err)); }catch(_){}
+                    try{ els.movDetUndo.disabled = false; }catch(_){}
+                    return;
+                  }
+
+                  try{ api.showToast && api.showToast("Movimento annullato"); }catch(_){}
+                  __closeDetailModal();
+                });
       }
     }catch(_){}
 
@@ -1351,6 +1692,11 @@
     els.movDetDdtProdWrap = $("movDetDdtProdWrap");
     els.movDetDdtProdTitle = $("movDetDdtProdTitle");
     els.movDetDdtProdTbody = $("movDetDdtProdTbody");
+
+    // Produzione PF (componenti scaricati)
+    els.movDetProdWrap = $("movDetProdWrap");
+    els.movDetProdCompsTbody = $("movDetProdCompsTbody");
+    els.movDetProdHint = $("movDetProdHint");
 
   }
 
@@ -1533,13 +1879,14 @@
                   <th style="width: 120px;">Data</th>
                   <th style="width: 120px;">Numero</th>
                   <th>Cliente</th>
+                  <th style="width: 160px;">Magazzino</th>
                   <th class="qty" style="width: 90px;">Righe</th>
                   <th class="qty" style="width: 120px;">Stato</th>
                   <th style="width: 120px;"></th>
                 </tr>
               </thead>
               <tbody id="daneaTbody">
-                <tr><td class="td-muted" colspan="6">Carico XML…</td></tr>
+                <tr><td class="td-muted" colspan="7">Carico XML…</td></tr>
               </tbody>
             </table>
           </div>
@@ -1584,6 +1931,84 @@
   }
 })();
 ;
+
+/* ===== supplier_invoices_view.js ===== */
+/* Inject viewSupplierInvoices (Fatture fornitori) */
+(function(){
+  try{
+    const root = document.getElementById("viewSupplierInvoices");
+    if (!root) return;
+    try{ if (root.dataset && root.dataset.injected === "1") return; }catch(_){}
+    try{ if (root.dataset) root.dataset.injected = "1"; }catch(_){}
+
+    root.innerHTML = `
+      <article class="card" id="supplierInvoicesCard">
+        <div class="hd">
+          <div class="overlayHeaderTitle">
+            <button class="iconBtn overlayBack" id="btnBackSupplierInvoices" type="button" aria-label="Indietro">‹</button>
+            <h2>Fatture fornitori</h2>
+          </div>
+          <div class="inlineRow" style="gap:8px; justify-content:flex-end;">
+            <div class="pill" id="pillSupplierInvoicesCount">0</div>
+            <button class="iconBtn" id="btnCloseSupplierInvoices" type="button" aria-label="Chiudi">×</button>
+          </div>
+        </div>
+
+        <div class="bd">
+          <div class="stack" style="gap:10px;">
+            <div class="hero-sub">Carica fatture fornitori (XML)</div>
+
+            <div class="td-muted" style="font-weight:900;">
+              Le fatture che <b>non contengono</b> articoli presenti in inventario vengono scartate automaticamente e non sono visibili.
+            </div>
+
+            <div class="inlineRow" style="gap:10px; flex-wrap:wrap; align-items:flex-end;">
+              <div class="field" style="flex:1 1 340px; min-width: 240px;">
+                <label for="supplierInvoicesFiles">Seleziona file XML (anche multipli)</label>
+                <input id="supplierInvoicesFiles" type="file" multiple accept=".xml,application/xml,text/xml" />
+              </div>
+              <button class="btn btn-primary" id="btnSupplierInvoicesImport" type="button">Importa</button>
+              <button class="btn btn-ghost btn-xs" id="btnSupplierInvoicesResetFiles" type="button">Reset</button>
+            </div>
+
+            <div class="td-muted" id="supplierInvoicesImportMeta" style="font-weight:900;">—</div>
+          </div>
+
+          <div class="inlineRow listStickyBar" style="justify-content:space-between; align-items:flex-end; gap:12px; margin-top:10px;">
+            <div class="field" style="flex: 1 1 auto; min-width: 220px;">
+              <label for="supplierInvoicesSearch">Cerca</label>
+              <input id="supplierInvoicesSearch" placeholder="Fornitore, numero, data, file…" autocomplete="off" />
+            </div>
+            <div class="inlineRow" style="gap:8px; justify-content:flex-end; margin-left:auto;">
+              <button class="btn btn-ghost mini" id="btnSupplierInvoicesClear" type="button">Reset</button>
+              <div class="hero-sub" id="supplierInvoicesMeta">—</div>
+            </div>
+          </div>
+
+          <div class="tableWrap" style="max-height: 520px; overflow:auto; margin-top:10px;">
+            <table class="dataGrid" id="supplierInvoicesTable">
+              <thead>
+                <tr>
+                  <th style="width:120px;">Data</th>
+                  <th style="width:140px;">Numero</th>
+                  <th>Fornitore</th>
+                  <th class="qty" style="width:110px;">Codici</th>
+                  <th class="qty" style="width:130px;">Prezzi agg.</th>
+                  <th class="colHideSm" style="width:220px;">File</th>
+                </tr>
+              </thead>
+              <tbody id="supplierInvoicesTbody">
+                <tr><td class="td-muted" colspan="6">Nessuna fattura caricata.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </article>
+    `;
+  }catch(e){
+    try{ console.warn("supplierInvoices view inject failed", e); }catch(_){}
+  }
+})();
 
 /* ===== revenue_view.js ===== */
 // Inject "Fatturato" view markup into #viewRevenue
@@ -2143,6 +2568,7 @@
       const date = getText(d, "Date");     // YYYY-MM-DD
       const number = getText(d, "Number"); // numerico
       const customer = getText(d, "CustomerName") || getText(d, "Customer") || getText(d, "DeliveryName") || "";
+      const warehouse = getText(d, "Warehouse") || getText(d, "Magazzino") || "";
 
       if (!date || !number) continue;
       const key = `${String(number).trim()}__${String(date).trim()}`;
@@ -2296,17 +2722,20 @@
       if (netTotal < 0 && netTotal > -0.02) netTotal = 0;
       if (grossTotal < 0 && grossTotal > -0.02) grossTotal = 0;
 
-      const hash = hashStr(JSON.stringify(rows.map(x => [
+      const rowsSig = rows.map(x => [
         x.code, x.desc, x.qty, x.uom,
         x.unitNet, x.unitGross, x.vatPerc,
         x.net, x.vat, x.gross
-      ])));
+      ]);
+
+      const hash = hashStr(JSON.stringify([String(warehouse || "").trim(), rowsSig]));
 
       out.push({
         key,
         date: String(date).trim(),
         number: String(number).trim(),
         customer: String(customer || "").trim(),
+        warehouse: String(warehouse || "").trim(),
         rows,
         netTotal: Number(netTotal || 0),
         vatTotal: Number(vatTotal || 0),
@@ -2371,21 +2800,118 @@
 
   function getFpComponents(fp){
     if (!fp) return [];
+
+    // 1) Distinta dalla categoria (se presente) — prevale sul singolo
+    const cat = getFpCategoryForFp(fp);
+    const catBom = (cat && (cat.bom || cat.components || cat.distintaBase)) || [];
+    const catArr = Array.isArray(catBom) ? catBom : [];
+    if (catArr.length > 0) return catArr;
+
+    // 2) Distinta del singolo prodotto finito
     const arr = (fp.components || fp.bom || fp.distintaBase);
     const direct = Array.isArray(arr) ? arr : [];
     if (direct.length > 0) return direct;
 
-    const cat = getFpCategoryForFp(fp);
-    const bom = (cat && (cat.bom || cat.components || cat.distintaBase)) || [];
-    return Array.isArray(bom) ? bom : [];
+    // 3) fallback (categoria vuota)
+    return catArr;
   }
 
-  function isRowConfigured(row){
+  function rowQtyInt(row){
+    try{
+      const qtyLine = (row && row.qty != null && Number.isFinite(Number(row.qty))) ? Number(row.qty) : parseFraction(row && row.qtyRaw);
+      const qLine = (qtyLine != null && Number.isFinite(qtyLine)) ? qtyLine : 0;
+      const qi = Math.round(qLine || 0);
+      return (qi > 0) ? qi : 0;
+    }catch(_){ return 0; }
+  }
+
+  let __fpStockCacheSig = "";
+  let __fpStockCacheMap = new Map();
+
+  function getFinishedStockMap(){
+    try{
+      const H = S.hub || getHub();
+      const mvs = (H && H.state && Array.isArray(H.state.finishedMovements)) ? H.state.finishedMovements : [];
+      const last = (mvs && mvs.length) ? (mvs[mvs.length-1].createdAt || mvs[mvs.length-1].date || "") : "";
+      const sig = String(mvs.length) + "|" + String(last);
+      if (sig && sig === __fpStockCacheSig && __fpStockCacheMap) return __fpStockCacheMap;
+
+      const map = new Map();
+      for (const mv of (mvs || [])){
+        const code = norm(mv && mv.code);
+        if (!code) continue;
+        const q = (mv && mv.qty != null && Number.isFinite(Number(mv.qty))) ? Math.round(Number(mv.qty)) : 0;
+        if (!q) continue;
+        const delta = (String(mv.type || "").toUpperCase() === "OUT") ? -q : q;
+        map.set(code, (map.get(code) || 0) + delta);
+      }
+
+      __fpStockCacheSig = sig;
+      __fpStockCacheMap = map;
+      return map;
+    }catch(_){ return new Map(); }
+  }
+
+  function finishedStockAvailable(code){
+    const k = norm(code);
+    if (!k) return 0;
+    const m = getFinishedStockMap();
+    const v = Number(m.get(k) || 0);
+    return Number.isFinite(v) ? v : 0;
+  }
+
+  function isAgentiWarehouse(warehouse){
+    const s = norm(String(warehouse || "")).replace(/\s+/g, " ").trim();
+    if (!s) return false;
+    if (s === "magazzino agenti") return true;
+    if (s.includes("magazzino") && s.includes("agenti")) return true;
+    if (s === "agenti") return true;
+    return false;
+  }
+
+  function isAgentWarehouseDdt(ddt){
+    try{ return isAgentiWarehouse(ddt && (ddt.warehouse || ddt.magazzino || ddt.site)); }catch(_){ return false; }
+  }
+
+  function isRowConfigured(row, ddt){
     const fp = getFpForRow(row);
     if (!fp) return { ok: false, why: "missing", fp: null };
+
+    const qi = rowQtyInt(row);
+    if (qi <= 0) return { ok: true, why: "skip", fp };
+
+    // Regola speciale: Magazzino agenti -> SOLO scarico PF
+    // + NON completabile se la giacenza PF non copre TUTTA la quantita' (somma per codice)
+    if (isAgentWarehouseDdt(ddt)){
+      const code = String(row && row.code || "").trim();
+      let need = qi;
+      try{
+        const rows = Array.isArray(ddt?.rows) ? ddt.rows : [];
+        const target = norm(code);
+        if (target){
+          need = 0;
+          for (const rr of rows){
+            if (!rr) continue;
+            const c2 = norm(rr.code);
+            if (!c2 || c2 !== target) continue;
+            need += rowQtyInt(rr);
+          }
+        }
+      }catch(_){ need = qi; }
+
+      const stock = finishedStockAvailable(code);
+      if (stock >= need) return { ok: true, why: "agent", fp, stock, need };
+      return { ok: false, why: "agent_stock", fp, stock, need };
+    }
+
     const comps = getFpComponents(fp);
     if (comps.length > 0) return { ok: true, why: "ok", fp };
-    return { ok: false, why: "empty", fp };
+
+    // Se non c'e' distinta base, va bene SOLO se la giacenza PF copre tutta la quantita' del DDT
+    const stock = finishedStockAvailable(row && row.code);
+    if (stock >= qi) return { ok: true, why: "stock", fp };
+
+    return { ok: false, why: "empty", fp, stock };
   }
 
   function ddtStatus(ddt){
@@ -2393,10 +2919,11 @@
     if (!rows.length) return { ok: false, green: 0, total: 0 };
     let green = 0;
     for (const r of rows){
-      if (isRowConfigured(r).ok) green++;
+      if (isRowConfigured(r, ddt).ok) green++;
     }
     return { ok: green === rows.length, green, total: rows.length };
   }
+
 
   function cacheCompletedMap(){
     S.completedMap = new Map();
@@ -2481,9 +3008,10 @@
         const num = norm(x?.number || x?.docNum || x?.num);
         const date = norm(x?.date || x?.docDate || "");
         const cust = norm(x?.customer || x?.customerName || x?.client || "");
+        const wh = norm(x?.warehouse || x?.magazzino || "");
         const k = norm(x?.key || x?._id || "");
         if (!search) return true;
-        return (num && num.includes(search)) || (date && date.includes(search)) || (cust && cust.includes(search)) || (k && k.includes(search));
+        return (num && num.includes(search)) || (date && date.includes(search)) || (cust && cust.includes(search)) || (wh && wh.includes(search)) || (k && k.includes(search));
       });
 
       if (meta) meta.textContent = `${filtered.length} DDT completati`;
@@ -2493,6 +3021,7 @@
         const date = String(c.date || "");
         const number = String(c.number || "");
         const cust = String(c.customer || "");
+        const wh = String(c.warehouse || (S.cacheMap.get(c.key)?.warehouse) || "");
         const rows = Array.isArray(c.rows) ? c.rows : [];
         const n = rows.length;
 
@@ -2500,6 +3029,7 @@
           <td data-label="Data">${esc(fmtDateIT(date) || "—")}</td>
           <td data-label="Numero"><span class="kbd">${esc(number || "—")}</span></td>
           <td data-label="Cliente">${esc(cust || "—")}</td>
+          <td data-label="Magazzino">${esc((wh || "").trim() || "—")}</td>
           <td data-label="Righe" class="qty">${Number(n||0).toLocaleString("it-IT")}</td>
           <td data-label="Stato" class="qty"><span class="dot ok"></span>OK</td>
           <td data-label="" style="text-align:right;">
@@ -2507,7 +3037,7 @@
             <button class="btn btn-danger btn-xs jsDaneaDeleteDone" data-key="${escAttr(k)}" type="button">Elimina</button>
           </td>
         </tr>`;
-      }).join("") : `<tr><td class="td-muted" colspan="6">${search ? "Nessun completato trovato." : "Nessun DDT completato."}</td></tr>`;
+      }).join("") : `<tr><td class="td-muted" colspan="7">${search ? "Nessun completato trovato." : "Nessun DDT completato."}</td></tr>`;
       return;
     }
 
@@ -2516,8 +3046,9 @@
       const num = norm(d.number);
       const date = norm(d.date);
       const cust = norm(d.customer);
+      const wh = norm(d.warehouse);
       if (!search) return true;
-      return (num && num.includes(search)) || (date && date.includes(search)) || (cust && cust.includes(search));
+      return (num && num.includes(search)) || (date && date.includes(search)) || (cust && cust.includes(search)) || (wh && wh.includes(search));
     });
 
     if (meta) meta.textContent = `${filtered.length} DDT da verificare`;
@@ -2531,6 +3062,7 @@
         <td data-label="Data">${esc(fmtDateIT(d.date) || "—")}</td>
         <td data-label="Numero"><span class="kbd">${esc(d.number || "—")}</span></td>
         <td data-label="Cliente">${esc(d.customer || "—")}</td>
+        <td data-label="Magazzino">${esc(String(d.warehouse || "").trim() || "—")}</td>
         <td data-label="Righe" class="qty">${Number((d.rows||[]).length||0).toLocaleString("it-IT")}</td>
         <td data-label="Stato" class="qty">${okDot} ${esc(stTxt)}</td>
         <td data-label="" style="text-align:right;">
@@ -2538,7 +3070,7 @@
           <button class="btn btn-primary btn-xs jsDaneaSendFromList" data-key="${escAttr(d.key)}" type="button" ${btnDisabled}>Completa</button>
         </td>
       </tr>`;
-    }).join("") : `<tr><td class="td-muted" colspan="6">${(!S.cacheReady) ? "Caricamento DDT da Firebase…" : (search ? "Nessun DDT trovato." : ((S.lastParsedCount > 0 && S.lastSyncError) ? ("Trovati " + Number(S.lastParsedCount||0).toLocaleString("it-IT") + " DDT nell’XML ma non salvati su Firebase (rules).") : "Nessun DDT su Firebase."))}</td></tr>`;
+    }).join("") : `<tr><td class="td-muted" colspan="7">${(!S.cacheReady) ? "Caricamento DDT da Firebase…" : (search ? "Nessun DDT trovato." : ((S.lastParsedCount > 0 && S.lastSyncError) ? ("Trovati " + Number(S.lastParsedCount||0).toLocaleString("it-IT") + " DDT nell’XML ma non salvati su Firebase (rules).") : "Nessun DDT su Firebase."))}</td></tr>`;
   }
 
   function renderDetail(ddt, mode){
@@ -2555,7 +3087,7 @@
 
     // title + subtitle
     if (title) title.textContent = isDone ? "DDT (completato)" : "DDT (da verificare)";
-    if (sub) sub.textContent = `Numero ${ddt.number || "—"} • ${fmtDateIT(ddt.date || "")} • ${ddt.customer || "—"}`;
+    if (sub) sub.textContent = `Numero ${ddt.number || "—"} • ${fmtDateIT(ddt.date || "")} • ${ddt.customer || "—"} • ${ddt.warehouse || "—"}`;
 
     // send button
     if (btnSend){
@@ -2570,14 +3102,21 @@
       const qtyDisp = (r.qty != null && Number.isFinite(Number(r.qty))) ? Number(r.qty).toLocaleString("it-IT", { maximumFractionDigits: 2 }) : (r.qtyRaw || "—");
       const uom = String(r.uom || "").trim() || "—";
 
-      const st = isRowConfigured(r);
+      const st = isRowConfigured(r, ddt);
       const dot = st.ok ? '<span class="dot ok"></span>' : '<span class="dot bad"></span>';
 
       const fidRow = String(st.fp?.id || st.fp?._id || "").trim();
       const rowWhy = String(st.why || "");
       const rowCls = st.ok ? '' : ' daneaRowBad';
       const rowStyle = ' style="cursor:pointer;"';
-      const rowTitle = st.ok ? "Apri distinta base" : "Configura distinta base";
+      let rowTitle = st.ok ? "Apri distinta base" : "Configura distinta base";
+      if (st.why === "agent_stock"){
+        const have = Number(st.stock || 0);
+        const need = Number(st.need || 0);
+        rowTitle = `Scorta PF insufficiente: disponibili ${have} • richiesti ${need}`;
+      } else if (st.why === "agent"){
+        rowTitle = "Apri prodotto finito";
+      }
 
       let act = "";
       if (st.why === "missing"){
@@ -2585,6 +3124,8 @@
       } else if (st.why === "empty"){
         const fid = String(st.fp?.id || st.fp?._id || "").trim();
         act = `<button class="btn btn-secondary btn-xs jsDaneaConfigFp" data-fpid="${escAttr(fid)}" type="button">Configura</button>`;
+      } else if (st.why === "agent_stock"){
+        act = `<button class="btn btn-secondary btn-xs jsDaneaGoFinishedInv" data-code="${escAttr(code)}" type="button">Inventario PF</button>`;
       } else {
         const fid = String(st.fp?.id || st.fp?._id || "").trim();
         act = fid ? `<button class="btn btn-ghost btn-xs jsDaneaOpenFp" data-fpid="${escAttr(fid)}" type="button">Apri</button>` : `<span class="td-muted">OK</span>`;
@@ -2603,8 +3144,20 @@
     if (foot){
       const st = ddtStatus(ddt);
       const autoOn = !!S.autoDischarge;
-      const msg = isDone ? "Questo DDT è già stato scaricato: eliminandolo (in tab Completati) si resetta lo scarico." :
-        (st.ok ? (autoOn ? "Tutte le righe sono configurate: puoi completare e scaricare componenti." : "Tutte le righe sono configurate: puoi completare (scarico automatico DISATTIVATO).") : "Configura le righe rosse (distinta base) per poter completare.");
+      const isAgenti = isAgentWarehouseDdt(ddt);
+
+      const msg = isDone
+        ? "Questo DDT è già stato scaricato: eliminandolo (in tab Completati) si resetta lo scarico."
+        : (st.ok
+            ? (autoOn
+                ? (isAgenti
+                    ? "Tutte le righe sono OK: puoi completare e scaricare SOLO prodotti finiti (Magazzino agenti)."
+                    : "Tutte le righe sono configurate: puoi completare e scaricare componenti.")
+                : "Tutte le righe sono configurate: puoi completare (scarico automatico DISATTIVATO).")
+            : (isAgenti
+                ? "Controlla le righe rosse: per Magazzino agenti serve il prodotto finito importato E giacenza PF sufficiente."
+                : "Configura le righe rosse (distinta base) per poter completare.")
+          );
       foot.textContent = msg;
     }
   }
@@ -2623,8 +3176,9 @@
         date: String(c.date || ""),
         customer: String(c.customer || ""),
         rows: Array.isArray(c.rows) ? c.rows : [],
-        warehouse: c.warehouse || "",
-        movementIds: Array.isArray(c.movementIds) ? c.movementIds : []
+        warehouse: c.warehouse || cache?.warehouse || "",
+        movementIds: Array.isArray(c.movementIds) ? c.movementIds : [],
+        finishedMovementIds: Array.isArray(c.finishedMovementIds) ? c.finishedMovementIds : []
       };
       setDetailOpen(true);
       renderDetail(S.selected, "done");
@@ -2728,33 +3282,51 @@
 
     const H = S.hub;
     if (!H || !H.fb || !H.fb.db || !H.FS) { alert("Hub non pronto"); return; }
-    if (!H.fb.user) { try{ window.HubInv?.showToast?.("Accedi con Google per inviare", "warn"); }catch(_){ alert("Accedi con Google"); } return; }
+    if (!H.fb.user) {
+      try{ window.HubInv?.showToast?.("Accedi con Google per inviare", "warn"); }catch(_){ alert("Accedi con Google"); }
+      return;
+    }
 
     cacheCompletedMap();
-    if (S.completedMap.has(ddt.key)) { alert("Questo DDT risulta già completato."); return; }
+    if (S.completedMap.has(ddt.key)) { alert("Questo DDT risulta gia' completato."); return; }
 
     const st = ddtStatus(ddt);
     if (!st.ok) { alert("Non tutte le righe sono configurate (cerchi rossi)."); return; }
-
     const autoOn = !!S.autoDischarge;
+    const isAgenti = isAgentWarehouseDdt(ddt);
 
-    const ok = confirm(autoOn ? `Completare e scaricare componenti?
+    const msgAuto = isAgenti ? `Completare e scaricare SOLO prodotti finiti?
+
+• Magazzino: ${ddt.warehouse || "Magazzino agenti"}
+• Verranno creati SOLO movimenti su inventario PF
+• NON verranno scaricati imballaggi o materie prime
+• Se la giacenza PF non basta, il DDT NON viene completato
 
 DDT ${ddt.number} del ${fmtDateIT(ddt.date)}
-Righe: ${st.total}` : `Completare SENZA scarico automatico?
+Righe: ${st.total}` : `Completare e scaricare?
 
-• Il DDT finirà in "Completati"
+• Se la giacenza PF e' disponibile, scarico PRIMA i prodotti finiti
+• Se la giacenza PF non copre tutta la quantita', scarico imballaggi e materie prime (distinta base/categoria)
+
+DDT ${ddt.number} del ${fmtDateIT(ddt.date)}
+Righe: ${st.total}`;
+
+    const msgManual = `Completare SENZA scarico automatico?
+
+• Il DDT finira' in "Completati"
 • NON verranno creati movimenti di inventario
 
 DDT ${ddt.number} del ${fmtDateIT(ddt.date)}
-Righe: ${st.total}`);
+Righe: ${st.total}`;
+
+    const ok = confirm(autoOn ? msgAuto : msgManual);
     if (!ok) return;
 
     S.busy = true;
     try{
-      const { addDoc, setDoc, doc, collection, serverTimestamp } = H.FS;
+      const { addDoc, setDoc, doc, collection, serverTimestamp, getDocs, query, orderBy } = H.FS;
 
-      // Se lo scarico automatico è disattivato: segna solo come completato (senza movimenti)
+      // Se lo scarico automatico e' disattivato: segna solo come completato (senza movimenti)
       if (!autoOn){
         const doneId = encodeURIComponent(String(ddt.key || '').trim());
         const doneRef = doc(H.fb.db, 'orgs', H.ORG_ID, 'daneaDdtCompleted', doneId);
@@ -2770,8 +3342,6 @@ Righe: ${st.total}`);
             qty: x.qty ?? null,
             qtyRaw: x.qtyRaw || '',
             uom: x.uom || '',
-
-            // fatturato (best-effort)
             unitNet: (x && x.unitNet != null) ? x.unitNet : null,
             unitGross: (x && x.unitGross != null) ? x.unitGross : null,
             vatPerc: (x && x.vatPerc != null) ? x.vatPerc : null,
@@ -2783,10 +3353,12 @@ Righe: ${st.total}`);
           vatTotal: (ddt && ddt.vatTotal != null) ? ddt.vatTotal : null,
           grossTotal: (ddt && ddt.grossTotal != null) ? ddt.grossTotal : null,
           currency: String(ddt.currency || 'EUR'),
-          warehouse: 'none',
+          warehouse: String(ddt.warehouse || '').trim(),
           allocations: [],
+          finishedAllocations: [],
           xmlHash: String(ddt.hash || ''),
           movementIds: [],
+          finishedMovementIds: [],
           autoDischarge: false,
           createdAt: serverTimestamp(),
           createdBy: H.fb.user.email || H.fb.user.uid
@@ -2799,213 +3371,378 @@ Righe: ${st.total}`);
         return;
       }
 
-      // 1) calcola fabbisogni componenti (somma per codice)
-      const req = new Map(); // codeLower -> {code,name,uom,qtyFloat}
-      for (const r of (ddt.rows || [])){
-        const qtyLine = (r.qty != null && Number.isFinite(Number(r.qty))) ? Number(r.qty) : parseFraction(r.qtyRaw);
-        const qLine = (qtyLine != null && Number.isFinite(qtyLine)) ? qtyLine : 0;
-        if (qLine <= 0) continue;
-
-        const fp = getFpForRow(r);
-        const comps = getFpComponents(fp);
-        for (const c of comps){
-          const cCode = String(c.code || "").trim();
-          if (!cCode) continue;
-
-          const per = compQtyPerUnit(c);
-          if (per == null || !Number.isFinite(per) || per <= 0) continue;
-
-          const add = per * qLine;
-          const low = cCode.toLowerCase();
-          const cur = req.get(low) || { code: cCode, name: String(c.name || c.articolo || cCode).trim(), uom: String(c.uom || "").trim(), qty: 0 };
-          cur.qty += add;
-          if (!cur.name) cur.name = cCode;
-          if (!cur.uom) cur.uom = String(c.uom || "").trim();
-          req.set(low, cur);
-        }
-      }
-
-      if (!req.size){
-        alert("Nessun componente calcolabile (distinta base vuota o quantità non valide).");
-        return;
-      }
-
-      // 2) inventario globale: calcola disponibilità per sede (ignorando fornitore)
-      let movs = (H.state && Array.isArray(H.state.movements)) ? H.state.movements : [];
-
-      // Se l'app ha appena aperto, può capitare che lo snapshot dei movimenti non sia
-      // ancora arrivato: in quel caso facciamo un fetch one-shot e poi riproviamo.
-      if (!movs.length){
+      // 1) Carica inventario PF e crea disponibilita' (sede unica)
+      let fpMovs = (H.state && Array.isArray(H.state.finishedMovements)) ? H.state.finishedMovements : [];
+      if (!fpMovs.length){
         try{
-          const FS = H.FS || {};
-          if (H.fb && H.fb.db && typeof FS.getDocs === "function" && typeof FS.collection === "function" && typeof FS.query === "function" && typeof FS.orderBy === "function"){
-            try{ H.showToast?.("Carico inventario…", "warn"); }catch(_){ }
-            const col = FS.collection(H.fb.db, "orgs", H.ORG_ID, "inventoryMovements");
-            const q = FS.query(col, FS.orderBy("createdAt"));
-            const snap = await FS.getDocs(q);
-            movs = snap.docs.map(d => {
-              const data = d.data() || {};
-              return {
-                id: d.id,
-                type: data.type || "IN",
-                code: data.code || "",
-                qty: data.qty,
-                warehouse: data.warehouse || ""
-              };
-            });
-            if (H.state) H.state.movements = movs;
-          }
-        }catch(e){
-          try{ console.warn("fetch inventoryMovements failed", e); }catch(_){ }
-        }
+          const col = collection(H.fb.db, 'orgs', H.ORG_ID, 'finishedInventoryMovements');
+          const q = query(col, orderBy('createdAt'));
+          const snap = await getDocs(q);
+          fpMovs = snap.docs.map(d => {
+            const data = d.data() || {};
+            return { id: d.id, type: data.type || 'IN', code: data.code || '', qty: data.qty };
+          });
+          if (H.state) H.state.finishedMovements = fpMovs;
+        }catch(e){ try{ console.warn('fetch finishedInventoryMovements failed', e); }catch(_){ } }
       }
 
-      if (!movs.length){
-        if (!silent){
-          alert("Inventario non pronto: movimenti non caricati.");
-        } else {
-          try{ window.HubInv?.showToast?.("Auto-scarico: inventario non pronto", "warn"); }catch(_){ }
-        }
-        return;
-      }
-
-      const _normWh = (w) => {
-        try{
-          if (H && typeof H.normalizeWarehouse === "function") return H.normalizeWarehouse(w);
-        }catch(_){}
-        // fallback minimale (nel caso il bridge non esponga normalizeWarehouse)
-        const s = String(w || "").trim().toLowerCase();
-        if (s.includes("conca") || s.includes("concamarise")) return "concamarise";
-        return "cerea";
-      };
-      const _safeInt = (v) => {
-        try{
-          if (H && typeof H.safeInt === "function") return H.safeInt(v);
-        }catch(_){}
-        const n = parseInt(String(v||"").replace(/[^0-9\-]/g,""), 10);
-        return Number.isFinite(n) ? n : 0;
-      };
-
-      const avail = { cerea: new Map(), concamarise: new Map() }; // codeLower -> qtyInt
-      for (const mv of movs){
-        const code = String(mv && mv.code || "").trim();
+      const availFp = new Map();
+      for (const mv of (fpMovs || [])){
+        const code = String(mv && mv.code || '').trim();
         if (!code) continue;
         const low = code.toLowerCase();
-        const w = _normWh(mv.warehouse || mv.site || mv.magazzino || mv.location || "");
-        const q = _safeInt(mv.qty);
+        const q = (mv && mv.qty != null && Number.isFinite(Number(mv.qty))) ? Math.round(Number(mv.qty)) : 0;
         if (!q) continue;
-        const delta = (String(mv.type || "").toUpperCase() === "OUT") ? -q : q;
-        const m = (w === "concamarise") ? avail.concamarise : avail.cerea;
-        m.set(low, (m.get(low) || 0) + delta);
+        const delta = (String(mv.type || '').toUpperCase() === 'OUT') ? -q : q;
+        availFp.set(low, (availFp.get(low) || 0) + delta);
       }
 
-      // 3) validazione scorte (globale) prima di scrivere
-      const needList = Array.from(req.values()).map(it => {
-        const qtyInt = Math.round(Number(it.qty) || 0);
-        return Object.assign({}, it, { qtyInt });
-      }).filter(x => x.qtyInt);
+      // 2) Calcola fabbisogni
+      // - Magazzino agenti: SOLO PF (serve giacenza sufficiente, altrimenti NON completabile)
+      // - Altri magazzini: prima PF (giacenza), poi componenti (distinta base) sul residuo
+      const req = new Map(); // componenti: codeLower -> {code,name,uom,qtyFloat}
+      const reqFp = new Map(); // PF: codeLower -> {code,name,uom,qtyInt}
 
-      for (const it of needList){
-        const low = String(it.code || "").trim().toLowerCase();
-        const aC = Math.max(0, _safeInt(avail.cerea.get(low)));
-        const aK = Math.max(0, _safeInt(avail.concamarise.get(low)));
-        const tot = aC + aK;
-        if (tot < it.qtyInt){
-          alert(`Scorta insufficiente per ${it.code} — ${it.name || ""}
+      if (isAgenti){
+        // Somma per codice (gestisce piu' righe con lo stesso PF)
+        for (const r of (ddt.rows || [])){
+          const code = String(r.code || '').trim();
+          if (!code) continue;
 
-Richiesti: ${it.qtyInt.toLocaleString("it-IT")} ${String(it.uom||"").trim()}
-Disponibili: ${(tot).toLocaleString("it-IT")} (Cerea ${aC.toLocaleString("it-IT")}, Concamarise ${aK.toLocaleString("it-IT")})`);
-          return;
+          const qtyLine = (r.qty != null && Number.isFinite(Number(r.qty))) ? Number(r.qty) : parseFraction(r.qtyRaw);
+          const qLine = (qtyLine != null && Number.isFinite(qtyLine)) ? qtyLine : 0;
+          if (qLine <= 0) continue;
+
+          const fp = getFpForRow(r);
+          if (!fp) continue;
+
+          const qInt = Math.round(qLine);
+          if (qInt <= 0) continue;
+
+          const low = code.toLowerCase();
+          const name = String(fp.name || fp.nome || r.desc || code).trim() || code;
+          const uom = String(fp.uom || r.uom || 'pz').trim() || 'pz';
+          const cur = reqFp.get(low) || { code, name, uom, qtyInt: 0 };
+          cur.qtyInt += qInt;
+          if (!cur.name) cur.name = name;
+          if (!cur.uom) cur.uom = uom;
+          reqFp.set(low, cur);
+        }
+
+        // Validazione giacenza PF (non si puo' andare in negativo su Magazzino agenti)
+        for (const it of Array.from(reqFp.values())){
+          const low = String(it.code || '').trim().toLowerCase();
+          const need = Math.max(0, Math.round(Number(it.qtyInt) || 0));
+          const have = Math.max(0, Math.round(Number(availFp.get(low) || 0)));
+          if (need > have){
+            alert(`Magazzino agenti: giacenza PF insufficiente per ${it.code} — ${it.name || ''}
+
+Richiesti: ${need.toLocaleString('it-IT')} ${String(it.uom||'').trim()}
+Disponibili: ${have.toLocaleString('it-IT')}`);
+            return;
+          }
+        }
+      } else {
+        // Prima scarico PF (se disponibili), poi componenti sul residuo
+        for (const r of (ddt.rows || [])){
+          const code = String(r.code || '').trim();
+          if (!code) continue;
+
+          const qtyLine = (r.qty != null && Number.isFinite(Number(r.qty))) ? Number(r.qty) : parseFraction(r.qtyRaw);
+          const qLine = (qtyLine != null && Number.isFinite(qtyLine)) ? qtyLine : 0;
+          if (qLine <= 0) continue;
+
+          const fp = getFpForRow(r);
+          if (!fp) continue;
+
+          const qInt = Math.round(qLine);
+          if (qInt <= 0) continue;
+
+          const low = code.toLowerCase();
+          const aFp = Math.max(0, Math.round(Number(availFp.get(low) || 0)));
+          const useFp = Math.min(qInt, aFp);
+
+          if (useFp > 0){
+            const name = String(fp.name || fp.nome || r.desc || code).trim() || code;
+            const uom = String(fp.uom || r.uom || 'pz').trim() || 'pz';
+            const cur = reqFp.get(low) || { code, name, uom, qtyInt: 0 };
+            cur.qtyInt += useFp;
+            if (!cur.name) cur.name = name;
+            if (!cur.uom) cur.uom = uom;
+            reqFp.set(low, cur);
+            availFp.set(low, aFp - useFp);
+          }
+
+          const rem = qInt - useFp;
+          if (rem <= 0) continue;
+
+          const comps = getFpComponents(fp);
+          if (!comps || !comps.length){
+            alert(`Distinta base mancante per ${code} (${fp.name || fp.nome || ''}).
+
+Giacenza PF insufficiente: rimangono ${rem} pz da scaricare come componenti.`);
+            return;
+          }
+
+          for (const c of comps){
+            const cCode = String(c.code || '').trim();
+            if (!cCode) continue;
+
+            const per = compQtyPerUnit(c);
+            if (per == null || !Number.isFinite(per) || per <= 0) continue;
+
+            const add = per * rem;
+            const clow = cCode.toLowerCase();
+            const cur = req.get(clow) || { code: cCode, name: String(c.name || c.articolo || cCode).trim(), uom: String(c.uom || '').trim(), qty: 0 };
+            cur.qty += add;
+            if (!cur.name) cur.name = cCode;
+            if (!cur.uom) cur.uom = String(c.uom || '').trim();
+            req.set(clow, cur);
+          }
         }
       }
 
-      // 4) crea movimenti OUT (split automatico tra sedi, senza scelta manuale)
+      if (!req.size && !reqFp.size){
+        alert('Nessun movimento calcolabile (controlla righe e quantita).');
+        return;
+      }
+
+      // 3) Componenti: calcola disponibilita' per sede e valida scorte
       const movementIds = [];
       const allocations = [];
-      const movCol = collection(H.fb.db, "orgs", H.ORG_ID, "inventoryMovements");
 
-      const noteBase = `Scarico componenti per DDT ${ddt.number} del ${fmtDateIT(ddt.date)} (DaneaXML)`;
-      for (const it of needList){
-        const low = String(it.code || "").trim().toLowerCase();
-        let need = it.qtyInt;
+      if (req.size){
+        let movs = (H.state && Array.isArray(H.state.movements)) ? H.state.movements : [];
+        if (!movs.length){
+          try{
+            const col = collection(H.fb.db, 'orgs', H.ORG_ID, 'inventoryMovements');
+            const q = query(col, orderBy('createdAt'));
+            const snap = await getDocs(q);
+            movs = snap.docs.map(d => {
+              const data = d.data() || {};
+              // NB: serve anche "customer" per scalare correttamente la giacenza
+              // (altrimenti lo scarico finisce su un cliente fittizio e la riga reale resta invariata)
+              return { id: d.id, type: data.type || 'IN', code: data.code || '', qty: data.qty, warehouse: data.warehouse || '', customer: data.customer || '' };
+            });
+            if (H.state) H.state.movements = movs;
+          }catch(e){ try{ console.warn('fetch inventoryMovements failed', e); }catch(_){ } }
+        }
 
-        let aC = Math.max(0, _safeInt(avail.cerea.get(low)));
-        let aK = Math.max(0, _safeInt(avail.concamarise.get(low)));
+        if (!movs.length){
+          alert('Inventario non pronto: movimenti non caricati.');
+          return;
+        }
 
-        // scegli sede primaria = quella con più disponibilità (riduce split)
-        const first = (aK > aC) ? "concamarise" : "cerea";
-        const second = (first === "cerea") ? "concamarise" : "cerea";
-
-        const takeFrom = (wh) => {
-          if (need <= 0) return 0;
-          const cur = (wh === "concamarise") ? aK : aC;
-          const take = Math.min(need, cur);
-          if (take <= 0) return 0;
-          need -= take;
-          if (wh === "concamarise") aK -= take;
-          else aC -= take;
-          return take;
+        const _normWh = (w) => {
+          try{ if (H && typeof H.normalizeWarehouse === 'function') return H.normalizeWarehouse(w); }catch(_){ }
+          const ss = String(w || '').trim().toLowerCase();
+          if (ss.includes('conca') || ss.includes('concamarise')) return 'concamarise';
+          return 'cerea';
+        };
+        const _safeInt = (v) => {
+          const n = parseInt(String(v||'').replace(/[^0-9\-]/g,''), 10);
+          return Number.isFinite(n) ? n : 0;
         };
 
-        const t1 = takeFrom(first);
-        const t2 = takeFrom(second);
+        const avail = { cerea: new Map(), concamarise: new Map() };
+        // Disponibilita' per customer: ci serve per fare OUT sullo stesso "Fornitore" della giacenza
+        // (cosi' la riga in inventario scende davvero, es. 7 -> 5, invece di restare 7 e creare una riga "Scarico DDT")
+        const availCust = { cerea: new Map(), concamarise: new Map() }; // codeLower -> Map(customerKey -> {customer, qty})
+        const anyCustomerByCode = new Map(); // fallback best-effort: codeLower -> customer
+        for (const mv of movs){
+          const code = String(mv && mv.code || '').trim();
+          if (!code) continue;
+          const low = code.toLowerCase();
+          const w = _normWh(mv.warehouse || mv.site || mv.magazzino || mv.location || '');
+          const q = _safeInt(mv.qty);
+          if (!q) continue;
+          const delta = (String(mv.type || '').toUpperCase() === 'OUT') ? -q : q;
+          const m = (w === 'concamarise') ? avail.concamarise : avail.cerea;
+          m.set(low, (m.get(low) || 0) + delta);
 
-        // aggiorna disponibilità residue
-        avail.cerea.set(low, aC);
-        avail.concamarise.set(low, aK);
-
-        allocations.push({ code: it.code, name: it.name || it.code, uom: String(it.uom||"").trim(), qty: it.qtyInt, byWarehouse: { cerea: (first==="cerea"?t1:t2) || 0, concamarise: (first==="concamarise"?t1:t2) || 0 } });
-
-        const makePayload = (warehouse, qtyInt) => ({
-          type: "OUT",
-          customer: "Scarico DDT",
-          code: it.code,
-          item: it.name || it.code,
-          uom: String(it.uom || "").trim(),
-          qtyRaw: `${it.qty} ${String(it.uom||"").trim()}`.trim(),
-          qty: qtyInt,
-          date: String(ddt.date || "").trim(),
-          note: noteBase,
-          source: "DaneaXML",
-          rawText: "",
-          warehouse: warehouse,
-
-          docType: "DDT",
-          docNum: String(ddt.number || "").trim(),
-          docDateRaw: String(ddt.date || "").trim(),
-          daneaDdtKey: String(ddt.key || "").trim(),
-
-          createdAt: serverTimestamp(),
-          createdBy: H.fb.user.email || H.fb.user.uid
-        });
-
-        if (t1 > 0){
-          const ref = await addDoc(movCol, makePayload(first, t1));
-          if (ref && ref.id) movementIds.push(ref.id);
+          // customer-aware availability
+          const custRaw = String((mv && (mv.customer || mv.supplierName || mv.supplier)) || '').trim();
+          if (custRaw) anyCustomerByCode.set(low, custRaw);
+          const mCust = (w === 'concamarise') ? availCust.concamarise : availCust.cerea;
+          let byCust = mCust.get(low);
+          if (!byCust){ byCust = new Map(); mCust.set(low, byCust); }
+          const ck = custRaw.toLowerCase();
+          const rec = byCust.get(ck) || { customer: custRaw, qty: 0 };
+          rec.qty = _safeInt(rec.qty) + delta;
+          if (!rec.customer && custRaw) rec.customer = custRaw;
+          byCust.set(ck, rec);
         }
-        if (t2 > 0){
-          const ref = await addDoc(movCol, makePayload(second, t2));
-          if (ref && ref.id) movementIds.push(ref.id);
+
+        const needList = Array.from(req.values()).map(it => {
+          const qtyInt = Math.round(Number(it.qty) || 0);
+          return Object.assign({}, it, { qtyInt });
+        }).filter(x => x.qtyInt);
+
+        for (const it of needList){
+          const low = String(it.code || '').trim().toLowerCase();
+          const aC = Math.max(0, _safeInt(avail.cerea.get(low)));
+          const aK = Math.max(0, _safeInt(avail.concamarise.get(low)));
+          const tot = aC + aK;
+          if (tot < it.qtyInt){
+            alert(`Scorta insufficiente per ${it.code} — ${it.name || ''}\n\nRichiesti: ${it.qtyInt.toLocaleString('it-IT')} ${String(it.uom||'').trim()}\nDisponibili: ${(tot).toLocaleString('it-IT')} (Cerea ${aC.toLocaleString('it-IT')}, Concamarise ${aK.toLocaleString('it-IT')})`);
+            return;
+          }
+        }
+
+        // 4) crea movimenti OUT componenti (split automatico tra sedi)
+        const movCol = collection(H.fb.db, 'orgs', H.ORG_ID, 'inventoryMovements');
+        const noteBase = `Scarico componenti per DDT ${ddt.number} del ${fmtDateIT(ddt.date)} (DaneaXML)`;
+
+        for (const it of needList){
+          const low = String(it.code || '').trim().toLowerCase();
+          let need = it.qtyInt;
+
+          let aC = Math.max(0, _safeInt(avail.cerea.get(low)));
+          let aK = Math.max(0, _safeInt(avail.concamarise.get(low)));
+
+          const first = (aK > aC) ? 'concamarise' : 'cerea';
+          const second = (first === 'cerea') ? 'concamarise' : 'cerea';
+
+          const takeFrom = (wh) => {
+            if (need <= 0) return 0;
+            const cur = (wh === 'concamarise') ? aK : aC;
+            const take = Math.min(need, cur);
+            if (take <= 0) return 0;
+            need -= take;
+            if (wh === 'concamarise') aK -= take;
+            else aC -= take;
+            return take;
+          };
+
+          const t1 = takeFrom(first);
+          const t2 = takeFrom(second);
+
+          avail.cerea.set(low, aC);
+          avail.concamarise.set(low, aK);
+
+          allocations.push({ code: it.code, name: it.name || it.code, uom: String(it.uom||'').trim(), qty: it.qtyInt, byWarehouse: { cerea: (first==='cerea'?t1:t2) || 0, concamarise: (first==='concamarise'?t1:t2) || 0 } });
+
+          const pickCustomerForWarehouse = (wh) => {
+            try{
+              const mm = (wh === 'concamarise') ? availCust.concamarise : availCust.cerea;
+              const byCust = mm.get(low);
+              if (byCust && byCust.size){
+                let bestKey = null;
+                let bestQty = 0;
+                let bestName = '';
+                for (const [ck, rec] of byCust.entries()){
+                  const q0 = _safeInt(rec && rec.qty);
+                  if (q0 > bestQty){
+                    bestQty = q0;
+                    bestKey = ck;
+                    bestName = String(rec && rec.customer || '').trim();
+                  }
+                }
+                if (bestKey != null && bestQty > 0) return { ck: bestKey, customer: bestName };
+              }
+            }catch(_){ }
+            const fb = String(anyCustomerByCode.get(low) || '').trim();
+            return { ck: fb.toLowerCase(), customer: fb };
+          };
+
+          const cust1 = (t1 > 0) ? pickCustomerForWarehouse(first) : null;
+          const cust2 = (t2 > 0) ? pickCustomerForWarehouse(second) : null;
+
+          // aggiorna la disponibilita' per customer (best-effort) per restare coerenti in caso di piu' righe
+          const decAvailCust = (wh, sel, qtyOut) => {
+            if (!sel || !qtyOut) return;
+            const mm = (wh === 'concamarise') ? availCust.concamarise : availCust.cerea;
+            let byCust = mm.get(low);
+            if (!byCust){ byCust = new Map(); mm.set(low, byCust); }
+            const ck = (sel.ck != null) ? String(sel.ck) : String(sel.customer || '').trim().toLowerCase();
+            const rec0 = byCust.get(ck) || { customer: sel.customer || '', qty: 0 };
+            rec0.qty = _safeInt(rec0.qty) - _safeInt(qtyOut);
+            if (!rec0.customer && sel.customer) rec0.customer = sel.customer;
+            byCust.set(ck, rec0);
+          };
+          decAvailCust(first, cust1, t1);
+          decAvailCust(second, cust2, t2);
+
+          const makePayload = (warehouse, qtyInt, customerName) => ({
+            type: 'OUT',
+            // IMPORTANT: usa il customer/fornitore della giacenza reale, cosi' la riga scende (es. 7 -> 5)
+            customer: String(customerName || '').trim(),
+            code: it.code,
+            item: it.name || it.code,
+            uom: String(it.uom || '').trim(),
+            qtyRaw: `${it.qty} ${String(it.uom||'').trim()}`.trim(),
+            qty: qtyInt,
+            date: String(ddt.date || '').trim(),
+            note: noteBase,
+            source: 'DaneaXML',
+            rawText: '',
+            warehouse: warehouse,
+            docType: 'DDT',
+            docNum: String(ddt.number || '').trim(),
+            docDateRaw: String(ddt.date || '').trim(),
+            daneaDdtKey: String(ddt.key || '').trim(),
+            createdAt: serverTimestamp(),
+            createdBy: H.fb.user.email || H.fb.user.uid
+          });
+
+          if (t1 > 0){
+            const ref = await addDoc(movCol, makePayload(first, t1, (cust1 && cust1.customer) || ''));
+            if (ref && ref.id) movementIds.push(ref.id);
+          }
+          if (t2 > 0){
+            const ref = await addDoc(movCol, makePayload(second, t2, (cust2 && cust2.customer) || ''));
+            if (ref && ref.id) movementIds.push(ref.id);
+          }
+        }
+      }
+
+      // 4b) Prodotti finiti: crea movimenti OUT su sede unica
+      const finishedMovementIds = [];
+      const finishedAllocations = [];
+      if (reqFp.size){
+        const col = collection(H.fb.db, 'orgs', H.ORG_ID, 'finishedInventoryMovements');
+        const noteBase = `Scarico prodotti finiti per DDT ${ddt.number} del ${fmtDateIT(ddt.date)} (DaneaXML)`;
+        for (const it of Array.from(reqFp.values())){
+          if (!it || !it.qtyInt) continue;
+          finishedAllocations.push({ code: it.code, name: it.name || it.code, uom: String(it.uom||'').trim(), qty: it.qtyInt, warehouse: 'prodotti_finiti' });
+          const payload = {
+            type: 'OUT',
+            code: it.code,
+            item: it.name || it.code,
+            uom: String(it.uom || '').trim(),
+            qtyRaw: `${it.qtyInt} ${String(it.uom||'').trim()}`.trim(),
+            qty: it.qtyInt,
+            date: String(ddt.date || '').trim(),
+            note: noteBase,
+            source: 'DaneaXML',
+            warehouse: 'prodotti_finiti',
+            docType: 'DDT',
+            docNum: String(ddt.number || '').trim(),
+            docDateRaw: String(ddt.date || '').trim(),
+            daneaDdtKey: String(ddt.key || '').trim(),
+            createdAt: serverTimestamp(),
+            createdBy: H.fb.user.email || H.fb.user.uid
+          };
+          const ref = await addDoc(col, payload);
+          if (ref && ref.id) finishedMovementIds.push(ref.id);
         }
       }
 
       // 5) salva completato (id deterministico)
-      const doneId = encodeURIComponent(String(ddt.key || "").trim());
-      const doneRef = doc(H.fb.db, "orgs", H.ORG_ID, "daneaDdtCompleted", doneId);
+      const doneId = encodeURIComponent(String(ddt.key || '').trim());
+      const doneRef = doc(H.fb.db, 'orgs', H.ORG_ID, 'daneaDdtCompleted', doneId);
       await setDoc(doneRef, {
-        key: String(ddt.key || "").trim(),
-        number: String(ddt.number || "").trim(),
-        date: String(ddt.date || "").trim(),
-        customer: String(ddt.customer || "").trim(),
+        key: String(ddt.key || '').trim(),
+        number: String(ddt.number || '').trim(),
+        date: String(ddt.date || '').trim(),
+        customer: String(ddt.customer || '').trim(),
         rows: (ddt.rows || []).map(x => ({
           idx: (x && x.idx != null) ? x.idx : null,
-          code: x.code || "",
-          desc: x.desc || "",
+          code: x.code || '',
+          desc: x.desc || '',
           qty: x.qty ?? null,
-          qtyRaw: x.qtyRaw || "",
-          uom: x.uom || "",
-
-          // fatturato (best-effort)
+          qtyRaw: x.qtyRaw || '',
+          uom: x.uom || '',
           unitNet: (x && x.unitNet != null) ? x.unitNet : null,
           unitGross: (x && x.unitGross != null) ? x.unitGross : null,
           vatPerc: (x && x.vatPerc != null) ? x.vatPerc : null,
@@ -3016,37 +3753,37 @@ Disponibili: ${(tot).toLocaleString("it-IT")} (Cerea ${aC.toLocaleString("it-IT"
         netTotal: (ddt && ddt.netTotal != null) ? ddt.netTotal : null,
         vatTotal: (ddt && ddt.vatTotal != null) ? ddt.vatTotal : null,
         grossTotal: (ddt && ddt.grossTotal != null) ? ddt.grossTotal : null,
-        currency: String(ddt.currency || "EUR"),
-        warehouse: "global",
+        currency: String(ddt.currency || 'EUR'),
+        warehouse: String(ddt.warehouse || "").trim(),
         allocations: allocations,
-        xmlHash: String(ddt.hash || ""),
+        finishedAllocations: finishedAllocations,
+        xmlHash: String(ddt.hash || ''),
         movementIds: movementIds,
+        finishedMovementIds: finishedMovementIds,
         autoDischarge: true,
         createdAt: serverTimestamp(),
         createdBy: H.fb.user.email || H.fb.user.uid
       }, { merge: true });
 
-      try{ window.HubInv?.showToast?.("DDT completato e scaricato"); }catch(_){}
-      // refresh lists
+      try{ window.HubInv?.showToast?.('DDT completato e scaricato'); }catch(_){ }
       setDetailOpen(false);
-      setTab("done");
+      setTab('done');
       await fetchNow(true);
+
     }catch(e){
       console.error(e);
-      try{ window.HubInv?.showToast?.("Errore completamento DDT", "err"); }catch(_){}
-      alert("Errore completamento DDT");
+      try{ window.HubInv?.showToast?.('Errore completamento DDT', 'err'); }catch(_){ }
+      alert('Errore completamento DDT');
     }finally{
       S.busy = false;
     }
   }
 
 
-
-  // ===== BULK: scarica automaticamente TUTTI i DDT verdi (OK) =====
+// ===== BULK: scarica automaticamente TUTTI i DDT verdi (OK) =====
   async function dischargeAllGreenDdts(opts){
     opts = (opts && typeof opts === "object") ? opts : {};
     const silent = !!opts.silent;
-    const fromAuto = !!opts.fromAuto;
 
     if (S.busy) return;
 
@@ -3056,11 +3793,8 @@ Disponibili: ${(tot).toLocaleString("it-IT")} (Cerea ${aC.toLocaleString("it-IT"
       return;
     }
 
-    // "a prescindere da accesso utente": procediamo anche senza login.
+    // procedi anche senza login (auto-mode), ma evita errori in rules
     const actor = (H.fb.user && (H.fb.user.email || H.fb.user.uid)) || "auto";
-    if (!H.fb.user && !silent){
-      try{ window.HubInv?.showToast?.("Auto-scarico: nessun utente loggato (procedo se le regole lo consentono)", "warn"); }catch(_){ }
-    }
 
     cacheCompletedMap();
 
@@ -3080,14 +3814,10 @@ Disponibili: ${(tot).toLocaleString("it-IT")} (Cerea ${aC.toLocaleString("it-IT"
       return;
     }
 
-    // Ordine "tradizionale": prima i più vecchi
     green.sort((a,b) => String(a?.date||"").localeCompare(String(b?.date||"")) || String(a?.number||"").localeCompare(String(b?.number||"")));
 
     if (!silent){
-      const ok = confirm(`Scaricare automaticamente ${green.length} DDT verdi?
-
-• Verranno creati movimenti di scarico (materie prime + imballaggi)
-• I DDT passeranno in "Completati"`);
+      const ok = confirm(`Scaricare automaticamente ${green.length} DDT verdi?\n\n• Scarico PF (se disponibili) + componenti (se necessari)\n• I DDT passeranno in "Completati"`);
       if (!ok) return;
     }
 
@@ -3103,57 +3833,54 @@ Disponibili: ${(tot).toLocaleString("it-IT")} (Cerea ${aC.toLocaleString("it-IT"
 
       const { addDoc, setDoc, doc, collection, serverTimestamp, getDocs, query, orderBy } = H.FS;
 
-      // 1) Carica inventario (movimenti) una sola volta
+      // 1) Carica inventario componenti (una sola volta)
       let movs = (H.state && Array.isArray(H.state.movements)) ? H.state.movements : [];
-
       if (!movs.length){
         try{
-          if (H.fb && H.fb.db && typeof getDocs === "function" && typeof collection === "function" && typeof query === "function" && typeof orderBy === "function"){
-            try{ H.showToast?.("Carico inventario…", "warn"); }catch(_){ }
-            const col = collection(H.fb.db, "orgs", H.ORG_ID, "inventoryMovements");
-            const q = query(col, orderBy("createdAt"));
-            const snap = await getDocs(q);
-            movs = snap.docs.map(d => {
-              const data = d.data() || {};
-              return {
-                id: d.id,
-                type: data.type || "IN",
-                code: data.code || "",
-                qty: data.qty,
-                warehouse: data.warehouse || ""
-              };
-            });
-            if (H.state) H.state.movements = movs;
-          }
-        }catch(e){
-          try{ console.warn("fetch inventoryMovements failed", e); }catch(_){ }
-        }
+          const col = collection(H.fb.db, "orgs", H.ORG_ID, "inventoryMovements");
+          const q = query(col, orderBy("createdAt"));
+          const snap = await getDocs(q);
+          movs = snap.docs.map(d => {
+            const data = d.data() || {};
+            // NB: includo anche "customer" per scalare la giacenza corretta in caso di scarico componenti
+            return { id: d.id, type: data.type || "IN", code: data.code || "", qty: data.qty, warehouse: data.warehouse || "", customer: data.customer || "" };
+          });
+          if (H.state) H.state.movements = movs;
+        }catch(e){ try{ console.warn("fetch inventoryMovements failed", e); }catch(_){ } }
       }
 
-      if (!movs.length){
-        if (!silent){
-          alert("Inventario non pronto: movimenti non caricati.");
-        } else {
-          try{ window.HubInv?.showToast?.("Auto-scarico: inventario non pronto", "warn"); }catch(_){ }
-        }
-        return;
+      // 2) Carica inventario PF (una sola volta)
+      let fpMovs = (H.state && Array.isArray(H.state.finishedMovements)) ? H.state.finishedMovements : [];
+      if (!fpMovs.length){
+        try{
+          const col = collection(H.fb.db, "orgs", H.ORG_ID, "finishedInventoryMovements");
+          const q = query(col, orderBy("createdAt"));
+          const snap = await getDocs(q);
+          fpMovs = snap.docs.map(d => {
+            const data = d.data() || {};
+            return { id: d.id, type: data.type || "IN", code: data.code || "", qty: data.qty };
+          });
+          if (H.state) H.state.finishedMovements = fpMovs;
+        }catch(e){ try{ console.warn("fetch finishedInventoryMovements failed", e); }catch(_){ } }
       }
 
       const _normWh = (w) => {
         try{ if (H && typeof H.normalizeWarehouse === "function") return H.normalizeWarehouse(w); }catch(_){ }
-        const s = String(w || "").trim().toLowerCase();
-        if (s.includes("conca") || s.includes("concamarise")) return "concamarise";
+        const ss = String(w || "").trim().toLowerCase();
+        if (ss.includes("conca") || ss.includes("concamarise")) return "concamarise";
         return "cerea";
       };
       const _safeInt = (v) => {
-        try{ if (H && typeof H.safeInt === "function") return H.safeInt(v); }catch(_){ }
         const n = parseInt(String(v||"").replace(/[^0-9\-]/g,""), 10);
         return Number.isFinite(n) ? n : 0;
       };
 
-      // Disponibilità aggiornata "live" durante il bulk (così non scarichi più del disponibile)
+      // Disponibilita' live componenti (cosi' non scarichi piu' del disponibile)
       const avail = { cerea: new Map(), concamarise: new Map() };
-      for (const mv of movs){
+      // Disponibilita' anche per customer (fornitore): serve per scalare la riga corretta in inventario
+      const availCust = { cerea: new Map(), concamarise: new Map() }; // codeLower -> Map(customerKey -> {customer, qty})
+      const anyCustomerByCode = new Map(); // fallback best-effort: codeLower -> customer
+      for (const mv of (movs || [])){
         const code = String(mv && mv.code || "").trim();
         if (!code) continue;
         const low = code.toLowerCase();
@@ -3163,53 +3890,161 @@ Disponibili: ${(tot).toLocaleString("it-IT")} (Cerea ${aC.toLocaleString("it-IT"
         const delta = (String(mv.type || "").toUpperCase() === "OUT") ? -q : q;
         const m = (w === "concamarise") ? avail.concamarise : avail.cerea;
         m.set(low, (m.get(low) || 0) + delta);
+
+        // customer-aware availability
+        const custRaw = String((mv && (mv.customer || mv.supplierName || mv.supplier)) || "").trim();
+        if (custRaw) anyCustomerByCode.set(low, custRaw);
+        const mCust = (w === "concamarise") ? availCust.concamarise : availCust.cerea;
+        let byCust = mCust.get(low);
+        if (!byCust){ byCust = new Map(); mCust.set(low, byCust); }
+        const ck = custRaw.toLowerCase();
+        const rec = byCust.get(ck) || { customer: custRaw, qty: 0 };
+        rec.qty = _safeInt(rec.qty) + delta;
+        if (!rec.customer && custRaw) rec.customer = custRaw;
+        byCust.set(ck, rec);
+      }
+
+      // Disponibilita' live PF (sede unica)
+      const availFp = new Map();
+      for (const mv of (fpMovs || [])){
+        const code = String(mv && mv.code || "").trim();
+        if (!code) continue;
+        const low = code.toLowerCase();
+        const q = _safeInt(mv.qty);
+        if (!q) continue;
+        const delta = (String(mv.type || "").toUpperCase() === "OUT") ? -q : q;
+        availFp.set(low, (availFp.get(low) || 0) + delta);
       }
 
       const movCol = collection(H.fb.db, "orgs", H.ORG_ID, "inventoryMovements");
+      const fpCol = collection(H.fb.db, "orgs", H.ORG_ID, "finishedInventoryMovements");
 
       let doneCount = 0;
       for (let i=0; i<green.length; i++){
         const ddt = green[i];
         if (!ddt || !ddt.key) continue;
-
-        // se nel frattempo è diventato completato, salta
         if (S.completedMap.has(ddt.key)) continue;
+
+        const isAgenti = isAgentWarehouseDdt(ddt);
 
         try{ setProg(doneCount); }catch(_){ }
 
-        // 2) calcola fabbisogni componenti (somma per codice)
+        // 3) calcola fabbisogni
+        // - Magazzino agenti: SOLO PF (serve giacenza sufficiente, altrimenti NON completabile)
+        // - Altri magazzini: prima PF (se disponibili), poi componenti sul residuo
         const req = new Map();
-        for (const r of (ddt.rows || [])){
-          const qtyLine = (r.qty != null && Number.isFinite(Number(r.qty))) ? Number(r.qty) : parseFraction(r.qtyRaw);
-          const qLine = (qtyLine != null && Number.isFinite(qtyLine)) ? qtyLine : 0;
-          if (qLine <= 0) continue;
+        const reqFp = new Map();
 
-          const fp = getFpForRow(r);
-          const comps = getFpComponents(fp);
-          for (const c of comps){
-            const cCode = String(c.code || "").trim();
-            if (!cCode) continue;
+        if (isAgenti){
+          // Somma per codice (gestisce piu' righe con lo stesso PF)
+          for (const r of (ddt.rows || [])){
+            const code = String(r.code || "").trim();
+            if (!code) continue;
 
-            const per = compQtyPerUnit(c);
-            if (per == null || !Number.isFinite(per) || per <= 0) continue;
+            const qtyLine = (r.qty != null && Number.isFinite(Number(r.qty))) ? Number(r.qty) : parseFraction(r.qtyRaw);
+            const qLine = (qtyLine != null && Number.isFinite(qtyLine)) ? qtyLine : 0;
+            if (qLine <= 0) continue;
 
-            const add = per * qLine;
-            const low = cCode.toLowerCase();
-            const cur = req.get(low) || { code: cCode, name: String(c.name || c.articolo || cCode).trim(), uom: String(c.uom || "").trim(), qty: 0 };
-            cur.qty += add;
-            if (!cur.name) cur.name = cCode;
-            if (!cur.uom) cur.uom = String(c.uom || "").trim();
-            req.set(low, cur);
+            const fp = getFpForRow(r);
+            if (!fp) continue;
+
+            const qInt = Math.round(qLine);
+            if (qInt <= 0) continue;
+
+            const low = code.toLowerCase();
+            const name = String(fp.name || fp.nome || r.desc || code).trim() || code;
+            const uom = String(fp.uom || r.uom || "pz").trim() || "pz";
+            const cur = reqFp.get(low) || { code, name, uom, qtyInt: 0 };
+            cur.qtyInt += qInt;
+            reqFp.set(low, cur);
+          }
+
+          // Validazione + riserva PF (non si puo' andare in negativo su Magazzino agenti)
+          let stockOk = true;
+          for (const it of Array.from(reqFp.values())){
+            const low = String(it.code || "").trim().toLowerCase();
+            const need = Math.max(0, _safeInt(it.qtyInt));
+            const have = Math.max(0, _safeInt(availFp.get(low)));
+            if (need > have){
+              stockOk = false;
+              try{ window.HubInv?.showToast?.(`DDT ${ddt.number || "?"}: PF insufficiente per ${it.code} (richiesti ${need}, disponibili ${have})`, "warn"); }catch(_){ }
+              break;
+            }
+          }
+          if (!stockOk){
+            continue;
+          }
+          for (const it of Array.from(reqFp.values())){
+            const low = String(it.code || "").trim().toLowerCase();
+            const need = Math.max(0, _safeInt(it.qtyInt));
+            const have = Math.max(0, _safeInt(availFp.get(low)));
+            availFp.set(low, have - need);
+          }
+        } else {
+          for (const r of (ddt.rows || [])){
+            const code = String(r.code || "").trim();
+            if (!code) continue;
+
+            const qtyLine = (r.qty != null && Number.isFinite(Number(r.qty))) ? Number(r.qty) : parseFraction(r.qtyRaw);
+            const qLine = (qtyLine != null && Number.isFinite(qtyLine)) ? qtyLine : 0;
+            if (qLine <= 0) continue;
+
+            const fp = getFpForRow(r);
+            if (!fp) continue;
+
+            const qInt = Math.round(qLine);
+            if (qInt <= 0) continue;
+
+            const low = code.toLowerCase();
+            const aFp = Math.max(0, _safeInt(availFp.get(low)));
+            const useFp = Math.min(qInt, aFp);
+
+            if (useFp > 0){
+              const name = String(fp.name || fp.nome || r.desc || code).trim() || code;
+              const uom = String(fp.uom || r.uom || "pz").trim() || "pz";
+              const cur = reqFp.get(low) || { code, name, uom, qtyInt: 0 };
+              cur.qtyInt += useFp;
+              reqFp.set(low, cur);
+              availFp.set(low, aFp - useFp);
+            }
+
+            const rem = qInt - useFp;
+            if (rem <= 0) continue;
+
+            const comps = getFpComponents(fp);
+            if (!comps || !comps.length){
+              if (!silent){
+                alert(`DDT ${ddt.number || "?"}: distinta base mancante per ${code}.
+
+Giacenza PF insufficiente: rimangono ${rem} pz.`);
+              }
+              // ripristina PF allocati per questo codice (best-effort)
+              if (useFp > 0){ availFp.set(low, (availFp.get(low) || 0) + useFp); }
+              continue;
+            }
+
+            for (const c of comps){
+              const cCode = String(c.code || "").trim();
+              if (!cCode) continue;
+              const per = compQtyPerUnit(c);
+              if (per == null || !Number.isFinite(per) || per <= 0) continue;
+              const add = per * rem;
+              const clow = cCode.toLowerCase();
+              const cur = req.get(clow) || { code: cCode, name: String(c.name || c.articolo || cCode).trim(), uom: String(c.uom || "").trim(), qty: 0 };
+              cur.qty += add;
+              if (!cur.name) cur.name = cCode;
+              if (!cur.uom) cur.uom = String(c.uom || "").trim();
+              req.set(clow, cur);
+            }
           }
         }
 
-        if (!req.size){
-          // DDT verde ma senza componenti: lo segnaliamo e lo saltiamo
-          try{ window.HubInv?.showToast?.(`DDT ${ddt.number || "?"}: nessun componente calcolabile`, "warn"); }catch(_){ }
+        if (!req.size && !reqFp.size){
+          try{ window.HubInv?.showToast?.(`DDT ${ddt.number || "?"}: nessun movimento calcolabile`, "warn"); }catch(_){ }
           continue;
         }
 
-        // 3) validazione scorte (globale) prima di scrivere
+        // 4) validazione scorte componenti (se necessari)
         const needList = Array.from(req.values()).map(it => {
           const qtyInt = Math.round(Number(it.qty) || 0);
           return Object.assign({}, it, { qtyInt });
@@ -3222,20 +4057,19 @@ Disponibili: ${(tot).toLocaleString("it-IT")} (Cerea ${aC.toLocaleString("it-IT"
           const tot = aC + aK;
           if (tot < it.qtyInt){
             if (!silent){
-              alert(`Scarico interrotto\n\nScorta insufficiente per ${it.code} — ${it.name || ""}\n\nDDT ${ddt.number || "—"} del ${fmtDateIT(ddt.date)}\nRichiesti: ${it.qtyInt.toLocaleString("it-IT")} ${String(it.uom||"").trim()}\nDisponibili: ${(tot).toLocaleString("it-IT")} (Cerea ${aC.toLocaleString("it-IT")}, Concamarise ${aK.toLocaleString("it-IT")})`);
-            } else {
-              try{ window.HubInv?.showToast?.(`Auto-scarico: scorta insufficiente per ${it.code}`, "warn"); }catch(_){ }
+              alert(`Scarico interrotto\n\nScorta insufficiente per ${it.code} — ${it.name || ""}\nRichiesti: ${it.qtyInt}\nDisponibili: ${tot} (Cerea ${aC}, Concamarise ${aK})`);
             }
             return;
           }
         }
 
-        // 4) crea movimenti OUT (split automatico tra sedi) + aggiorna avail in RAM
+        // 5) scrittura movimenti
         const movementIds = [];
+        const finishedMovementIds = [];
         const allocations = [];
+        const finishedAllocations = [];
 
-        const noteBase = `Scarico componenti per DDT ${ddt.number} del ${fmtDateIT(ddt.date)} (DaneaXML)`;
-
+        const noteComp = `Scarico componenti per DDT ${ddt.number} del ${fmtDateIT(ddt.date)} (DaneaXML)`;
         for (const it of needList){
           const low = String(it.code || "").trim().toLowerCase();
           let need = it.qtyInt;
@@ -3260,46 +4094,111 @@ Disponibili: ${(tot).toLocaleString("it-IT")} (Cerea ${aC.toLocaleString("it-IT"
           const t1 = takeFrom(first);
           const t2 = takeFrom(second);
 
-          // aggiorna disponibilità residue in RAM
           avail.cerea.set(low, aC);
           avail.concamarise.set(low, aK);
 
           allocations.push({ code: it.code, name: it.name || it.code, uom: String(it.uom||"").trim(), qty: it.qtyInt, byWarehouse: { cerea: (first==="cerea"?t1:t2) || 0, concamarise: (first==="concamarise"?t1:t2) || 0 } });
 
-          const makePayload = (warehouse, qtyInt) => ({
+          const pickCustomerForWarehouse = (wh) => {
+            try{
+              const mm = (wh === "concamarise") ? availCust.concamarise : availCust.cerea;
+              const byCust = mm.get(low);
+              if (byCust && byCust.size){
+                let bestKey = null;
+                let bestQty = 0;
+                let bestName = "";
+                for (const [ck, rec] of byCust.entries()){
+                  const q0 = _safeInt(rec && rec.qty);
+                  if (q0 > bestQty){
+                    bestQty = q0;
+                    bestKey = ck;
+                    bestName = String(rec && rec.customer || "").trim();
+                  }
+                }
+                if (bestKey != null && bestQty > 0) return { ck: bestKey, customer: bestName };
+              }
+            }catch(_){ }
+            const fb = String(anyCustomerByCode.get(low) || "").trim();
+            return { ck: fb.toLowerCase(), customer: fb };
+          };
+
+          const cust1 = (t1 > 0) ? pickCustomerForWarehouse(first) : null;
+          const cust2 = (t2 > 0) ? pickCustomerForWarehouse(second) : null;
+
+          // aggiorna la disponibilita' per customer (best-effort) per restare coerenti su scarichi multipli
+          const decAvailCust = (wh, sel, qtyOut) => {
+            if (!sel || !qtyOut) return;
+            const mm = (wh === "concamarise") ? availCust.concamarise : availCust.cerea;
+            let byCust = mm.get(low);
+            if (!byCust){ byCust = new Map(); mm.set(low, byCust); }
+            const ck = (sel.ck != null) ? String(sel.ck) : String(sel.customer || "").trim().toLowerCase();
+            const rec0 = byCust.get(ck) || { customer: sel.customer || "", qty: 0 };
+            rec0.qty = _safeInt(rec0.qty) - _safeInt(qtyOut);
+            if (!rec0.customer && sel.customer) rec0.customer = sel.customer;
+            byCust.set(ck, rec0);
+          };
+          decAvailCust(first, cust1, t1);
+          decAvailCust(second, cust2, t2);
+
+          const makePayload = (warehouse, qtyInt, customerName) => ({
             type: "OUT",
-            customer: "Scarico DDT",
+            // IMPORTANT: usa il customer/fornitore della giacenza reale, cosi' la riga scende (es. 7 -> 5)
+            customer: String(customerName || "").trim(),
             code: it.code,
             item: it.name || it.code,
             uom: String(it.uom || "").trim(),
             qtyRaw: `${it.qty} ${String(it.uom||"").trim()}`.trim(),
             qty: qtyInt,
             date: String(ddt.date || "").trim(),
-            note: noteBase,
+            note: noteComp,
             source: "DaneaXML",
             rawText: "",
             warehouse: warehouse,
-
             docType: "DDT",
             docNum: String(ddt.number || "").trim(),
             docDateRaw: String(ddt.date || "").trim(),
             daneaDdtKey: String(ddt.key || "").trim(),
-
             createdAt: serverTimestamp(),
             createdBy: actor
           });
 
           if (t1 > 0){
-            const ref = await addDoc(movCol, makePayload(first, t1));
+            const ref = await addDoc(movCol, makePayload(first, t1, (cust1 && cust1.customer) || ""));
             if (ref && ref.id) movementIds.push(ref.id);
           }
           if (t2 > 0){
-            const ref = await addDoc(movCol, makePayload(second, t2));
+            const ref = await addDoc(movCol, makePayload(second, t2, (cust2 && cust2.customer) || ""));
             if (ref && ref.id) movementIds.push(ref.id);
           }
         }
 
-        // 5) salva completato (id deterministico)
+        const noteFp = `Scarico prodotti finiti per DDT ${ddt.number} del ${fmtDateIT(ddt.date)} (DaneaXML)`;
+        for (const it of Array.from(reqFp.values())){
+          if (!it || !it.qtyInt) continue;
+          finishedAllocations.push({ code: it.code, name: it.name || it.code, uom: String(it.uom||"").trim(), qty: it.qtyInt, warehouse: "prodotti_finiti" });
+          const payload = {
+            type: "OUT",
+            code: it.code,
+            item: it.name || it.code,
+            uom: String(it.uom || "").trim(),
+            qtyRaw: `${it.qtyInt} ${String(it.uom||"").trim()}`.trim(),
+            qty: it.qtyInt,
+            date: String(ddt.date || "").trim(),
+            note: noteFp,
+            source: "DaneaXML",
+            warehouse: "prodotti_finiti",
+            docType: "DDT",
+            docNum: String(ddt.number || "").trim(),
+            docDateRaw: String(ddt.date || "").trim(),
+            daneaDdtKey: String(ddt.key || "").trim(),
+            createdAt: serverTimestamp(),
+            createdBy: actor
+          };
+          const ref = await addDoc(fpCol, payload);
+          if (ref && ref.id) finishedMovementIds.push(ref.id);
+        }
+
+        // 6) salva completato
         const doneId = encodeURIComponent(String(ddt.key || "").trim());
         const doneRef = doc(H.fb.db, "orgs", H.ORG_ID, "daneaDdtCompleted", doneId);
         await setDoc(doneRef, {
@@ -3314,8 +4213,6 @@ Disponibili: ${(tot).toLocaleString("it-IT")} (Cerea ${aC.toLocaleString("it-IT"
             qty: x.qty ?? null,
             qtyRaw: x.qtyRaw || "",
             uom: x.uom || "",
-
-            // fatturato (best-effort)
             unitNet: (x && x.unitNet != null) ? x.unitNet : null,
             unitGross: (x && x.unitGross != null) ? x.unitGross : null,
             vatPerc: (x && x.vatPerc != null) ? x.vatPerc : null,
@@ -3327,16 +4224,17 @@ Disponibili: ${(tot).toLocaleString("it-IT")} (Cerea ${aC.toLocaleString("it-IT"
           vatTotal: (ddt && ddt.vatTotal != null) ? ddt.vatTotal : null,
           grossTotal: (ddt && ddt.grossTotal != null) ? ddt.grossTotal : null,
           currency: String(ddt.currency || "EUR"),
-          warehouse: "global",
+          warehouse: String(ddt.warehouse || "").trim(),
           allocations: allocations,
+          finishedAllocations: finishedAllocations,
           xmlHash: String(ddt.hash || ""),
           movementIds: movementIds,
+          finishedMovementIds: finishedMovementIds,
           autoDischarge: true,
           createdAt: serverTimestamp(),
           createdBy: actor
         }, { merge: true });
 
-        // aggiorna cache locale (evita doppi se la snapshot è lenta)
         try{ S.completedMap.set(String(ddt.key||"").trim(), { key: String(ddt.key||"").trim() }); }catch(_){ }
 
         doneCount++;
@@ -3345,8 +4243,6 @@ Disponibili: ${(tot).toLocaleString("it-IT")} (Cerea ${aC.toLocaleString("it-IT"
       }
 
       try{ window.HubInv?.showToast?.(`Scarico completato: ${doneCount} DDT`, "ok"); }catch(_){ }
-
-      // refresh xml (best effort)
       try{ await fetchNow(true); }catch(_){ }
 
     }catch(e){
@@ -3360,7 +4256,9 @@ Disponibili: ${(tot).toLocaleString("it-IT")} (Cerea ${aC.toLocaleString("it-IT"
       S.busy = false;
     }
   }
-  async function deleteCompletedByKey(key){
+
+
+async function deleteCompletedByKey(key){
     const k = String(key || "").trim();
     if (!k) return;
 
@@ -3377,19 +4275,28 @@ Disponibili: ${(tot).toLocaleString("it-IT")} (Cerea ${aC.toLocaleString("it-IT"
     S.busy = true;
     try{
       const { deleteDoc, doc } = H.FS;
+
       const ids = Array.isArray(c.movementIds) ? c.movementIds : [];
+      const fpIds = Array.isArray(c.finishedMovementIds) ? c.finishedMovementIds : [];
+
       for (const id of ids){
         const mid = String(id || "").trim();
         if (!mid) continue;
-        try{
-          await deleteDoc(doc(H.fb.db, "orgs", H.ORG_ID, "inventoryMovements", mid));
-        }catch(e){ console.warn("delete movement failed", mid, e); }
+        try{ await deleteDoc(doc(H.fb.db, "orgs", H.ORG_ID, "inventoryMovements", mid)); }
+        catch(e){ console.warn("delete inventory movement failed", mid, e); }
+      }
+
+      for (const id of fpIds){
+        const mid = String(id || "").trim();
+        if (!mid) continue;
+        try{ await deleteDoc(doc(H.fb.db, "orgs", H.ORG_ID, "finishedInventoryMovements", mid)); }
+        catch(e){ console.warn("delete finished movement failed", mid, e); }
       }
 
       const doneId = encodeURIComponent(String(k));
       await deleteDoc(doc(H.fb.db, "orgs", H.ORG_ID, "daneaDdtCompleted", doneId));
 
-      try{ window.HubInv?.showToast?.("DDT eliminato: scarico resettato"); }catch(_){}
+      try{ window.HubInv?.showToast?.("DDT eliminato: scarico resettato"); }catch(_){ }
     }catch(e){
       console.error(e);
       alert("Errore eliminazione");
@@ -3398,7 +4305,7 @@ Disponibili: ${(tot).toLocaleString("it-IT")} (Cerea ${aC.toLocaleString("it-IT"
     }
   }
 
-  function bindEvents(){
+function bindEvents(){
     $("btnDaneaClear")?.addEventListener("click", () => { const i=$("daneaSearch"); if (i) i.value=""; render(); });
     $("daneaSearch")?.addEventListener("input", () => render());
 
@@ -3456,6 +4363,7 @@ Disponibili: ${(tot).toLocaleString("it-IT")} (Cerea ${aC.toLocaleString("it-IT"
         const btnImport = e.target?.closest?.("button.jsDaneaImportFp");
         const btnConfig = e.target?.closest?.("button.jsDaneaConfigFp");
         const btnOpenFp = e.target?.closest?.("button.jsDaneaOpenFp");
+        const btnGoFpInv = e.target?.closest?.("button.jsDaneaGoFinishedInv");
 
         const prefillNewFinishedProduct = (code, desc) => {
           try{
@@ -3471,6 +4379,22 @@ Disponibili: ${(tot).toLocaleString("it-IT")} (Cerea ${aC.toLocaleString("it-IT"
             }, 0);
           }catch(_){}
         };
+
+        if (btnGoFpInv){
+          e.preventDefault(); e.stopPropagation();
+          const code = String(btnGoFpInv.getAttribute("data-code") || "").trim();
+          try{
+            if (window.HubInv && typeof window.HubInv.setView === "function"){
+              window.HubInv.setView("finishedInventory");
+              if (code){
+                const s = document.getElementById("fpInvSearch");
+                if (s) s.value = code;
+              }
+              try{ window.HubInv.renderAll && window.HubInv.renderAll(); }catch(_){ }
+            }
+          }catch(_){ }
+          return;
+        }
 
         if (btnOpenFp){
           e.preventDefault(); e.stopPropagation();
@@ -3702,6 +4626,7 @@ Disponibili: ${(tot).toLocaleString("it-IT")} (Cerea ${aC.toLocaleString("it-IT"
         number: String(d.number || "").trim(),
         date: String(d.date || "").trim(),
         customer: String(d.customer || "").trim(),
+        warehouse: String(d.warehouse || "").trim(),
         rows: (d.rows || []).map(x => ({
           idx: (x && x.idx != null) ? x.idx : null,
           code: String(x?.code || "").trim(),
@@ -3959,7 +4884,8 @@ function waitForHub(attempt){
   function isMovementsCreated(d){
     try{
       const ids = Array.isArray(d && d.movementIds) ? d.movementIds : [];
-      return ids.length > 0;
+      const fpIds = Array.isArray(d && d.finishedMovementIds) ? d.finishedMovementIds : [];
+      return ids.length > 0 || fpIds.length > 0;
     }catch(_){ return false; }
   }
 
@@ -5329,7 +6255,12 @@ function renderList(){
     prodMap:new Map(),
     finished:[],
     fpByCode:new Map(),
+    fpById:new Map(),
+
+    // dettaglio: può essere "category" o "product" (singolo)
+    detailMode:"category",
     selectedKey:"",
+    selectedFpId:"",
     draft:null,
 
     // edit state (nome + chiave)
@@ -5487,6 +6418,9 @@ try{
     if (!(meta.dataset && meta.dataset.fpToggleBound === "1")){
       if (meta.dataset) meta.dataset.fpToggleBound = "1";
       const toggle = () => {
+        try{
+          if (meta && meta.dataset && meta.dataset.fpMode === "product") return;
+        }catch(_){}
         const open = membersStack.style.display !== "none";
         membersStack.style.display = open ? "none" : "";
       };
@@ -5728,7 +6662,9 @@ try{
     } else {
       modal.classList.remove("open");
       try{ if (!document.querySelector(".modal.open")) document.body.classList.remove("modal-open"); }catch(_){ document.body.classList.remove("modal-open"); }
+      S.detailMode = "category";
       S.selectedKey = "";
+      S.selectedFpId = "";
       S.draft = null;
       S.keyManual = false;
     }
@@ -5748,9 +6684,12 @@ try{
       if (id && !S.prodMap.has(id)) S.prodMap.set(id, p);
     }
     S.fpByCode = new Map();
+    S.fpById = new Map();
     for (const fp of (S.finished || [])){
       const code = norm(fp && (fp.code || ""));
       if (code) S.fpByCode.set(code, fp);
+      const fid = String(fp && fp.id || "").trim();
+      if (fid) S.fpById.set(fid, fp);
     }
   }
 
@@ -6204,10 +7143,141 @@ try{
     tbody.innerHTML = rows.join("");
   }
 
+  function __fpCatSetFieldLabel(inputId, label){
+    try{
+      const el = $(inputId);
+      const lbl = el ? (el.closest(".field") ? el.closest(".field").querySelector("label") : null) : null;
+      if (lbl) lbl.textContent = String(label || "");
+    }catch(_){ }
+  }
+
+  function __fpCatApplyDetailModeUi(){
+    const isProd = S.detailMode === "product";
+
+    try{
+      const title = $("fpCatModalTitle");
+      const sub = $("fpCatModalSub");
+      if (title) title.textContent = isProd ? "Distinta base prodotto finito" : "Categoria prodotto finito";
+      if (sub){
+        if (isProd){
+          sub.textContent = "Modifica la distinta base del prodotto singolo (fuori categoria).";
+        } else {
+          sub.textContent = "Crea la distinta base (componenti) e visualizza i prodotti finiti associati. I prodotti si aggiungono da sezione Prodotti finiti.";
+        }
+      }
+    }catch(_){ }
+
+    // meta: usato per toggle membri (disabilita in modo prodotto)
+    try{
+      const meta = $("fpCatDetailMeta");
+      if (meta && meta.dataset){
+        meta.dataset.fpMode = isProd ? "product" : "category";
+        meta.style.cursor = isProd ? "default" : "pointer";
+      }
+    }catch(_){ }
+
+    // labels + readonly
+    try{
+      __fpCatSetFieldLabel("fpCatEditName", isProd ? "Nome prodotto" : "Nome categoria");
+      __fpCatSetFieldLabel("fpCatEditKey", isProd ? "Codice" : "Chiave");
+    }catch(_){ }
+
+    try{
+      const nameEl = $("fpCatEditName");
+      const keyEl = $("fpCatEditKey");
+      if (nameEl) nameEl.readOnly = !!isProd;
+      if (keyEl) keyEl.readOnly = !!isProd;
+    }catch(_){ }
+
+    // members stack: forzata nascosta per prodotto singolo
+    try{
+      const membersTable = $("fpCatMembersTable");
+      const membersStack = membersTable ? membersTable.closest(".stack") : null;
+      if (membersStack){
+        if (isProd){
+          membersStack.style.display = "none";
+          membersStack.dataset.fpForceHidden = "1";
+        } else if (membersStack.dataset && membersStack.dataset.fpForceHidden === "1"){
+          // torna in modalità categoria: chiusa di default, ma sbloccabile dal toggle
+          delete membersStack.dataset.fpForceHidden;
+          membersStack.style.display = "none";
+        }
+      }
+    }catch(_){ }
+
+    // pulsanti
+    try{
+      const btnDel = $("btnFpCatDelete");
+      if (btnDel) btnDel.style.display = isProd ? "none" : "";
+    }catch(_){ }
+  }
+
+  function renderDetailProduct(){
+    const d = S.draft || null;
+    __fpCatApplyDetailModeUi();
+
+    const activeEl = (typeof document !== "undefined") ? document.activeElement : null;
+    const elKey = $("fpCatEditKey");
+    const elName = $("fpCatEditName");
+
+    if (elKey){
+      const v = String((d && d.key) ? d.key : "");
+      if (activeEl !== elKey) elKey.value = v;
+    }
+    if (elName && d){
+      const v = String(d.name || "");
+      if (activeEl !== elName) elName.value = v;
+    }
+
+    const bom = (d && Array.isArray(d.bom)) ? d.bom : [];
+    if ($("fpCatBomCount")) $("fpCatBomCount").value = String(bom.length) + "";
+
+    // BOM table
+    const tb = $("fpCatCompTbody");
+    if (tb){
+      if (!bom.length){
+        tb.innerHTML = '<tr><td class="td-muted" colspan="5">Nessun componente.</td></tr>';
+      } else {
+        tb.innerHTML = bom.map((c, idx) => {
+          const code = String(c?.code||"").trim();
+          const name = String(c?.name||"").trim();
+          const qtyRaw = String(c?.qtyRaw||"").trim();
+          const qty = (c?.qty != null) ? String(c.qty) : (qtyRaw || "");
+          const uom = String(c?.uom||"").trim();
+          return `<tr class="jsFpCatCompRow" data-idx="${idx}">
+            <td>${esc(code)}</td>
+            <td>${esc(name || code)}</td>
+            <td class="qty">${esc(qty)}</td>
+            <td>${esc(uom)}</td>
+            <td style="text-align:right;"><button class="btn btn-ghost mini jsFpCatCompDel" type="button">–</button></td>
+          </tr>`;
+        }).join("");
+      }
+    }
+
+    // Members: nascosti (ma pulisco conteggi per coerenza)
+    if ($("fpCatMembersCount")) $("fpCatMembersCount").textContent = "0";
+    const mtb = $("fpCatMembersTbody");
+    if (mtb) mtb.innerHTML = '<tr><td class="td-muted" colspan="3">—</td></tr>';
+
+    const meta = $("fpCatDetailMeta");
+    if (meta){
+      meta.textContent = `BOM: ${bom.length}`;
+    }
+    const delHint = $("fpCatDeleteHint");
+    if (delHint) delHint.textContent = "";
+  }
+
   function renderDetail(){
+    if (S.detailMode === "product"){
+      renderDetailProduct();
+      return;
+    }
     const key = norm(S.selectedKey);
     const cat = key ? (S.catMap.get(key) || null) : null;
     const d = S.draft || null;
+
+    __fpCatApplyDetailModeUi();
 
     const activeEl = (typeof document !== "undefined") ? document.activeElement : null;
     const elKey = $("fpCatEditKey");
@@ -6284,6 +7354,8 @@ try{
   }
 
   function openDetail(key){
+    S.detailMode = "category";
+    S.selectedFpId = "";
     S.selectedKey = norm(key);
     S.keyManual = false;
     const cat = S.catMap.get(S.selectedKey) || null;
@@ -6302,6 +7374,81 @@ try{
     try{ if ($("fpCatCompQty")) $("fpCatCompQty").value = ""; }catch(_){ }
     try{ if ($("fpCatMemberPick")) $("fpCatMemberPick").value = ""; }catch(_){ }
     try{ __fpCatHideSuggest("comp"); __fpCatHideSuggest("member"); }catch(_){ }
+  }
+
+  function __fpCatGetFinishedById(id){
+    const fid = String(id || "").trim();
+    if (!fid) return null;
+    try{
+      if (S.fpById && S.fpById.has && S.fpById.has(fid)) return S.fpById.get(fid) || null;
+    }catch(_){ }
+    try{
+      return (S.finished || []).find(x => String(x && x.id || "") === fid) || null;
+    }catch(_){ return null; }
+  }
+
+  function __fpCatGetFinishedBom(fp){
+    try{
+      if (!fp) return [];
+      const arr = Array.isArray(fp && (fp.components || fp.bom || fp.distintaBase)) ? (fp.components || fp.bom || fp.distintaBase) : [];
+      return Array.isArray(arr) ? arr : [];
+    }catch(_){ return []; }
+  }
+
+  function openSingleProduct(fpId){
+    const fp = __fpCatGetFinishedById(fpId);
+    if (!fp){ showToast("Prodotto finito non trovato", "warn"); return; }
+
+    S.detailMode = "product";
+    S.selectedFpId = String(fpId || "").trim();
+    S.selectedKey = "";
+    S.keyManual = true;
+
+    const code = String(fp?.code || "").trim();
+    const nm = String(fp?.name || fp?.nome || "").trim() || code || "Prodotto finito";
+    const bom0 = __fpCatGetFinishedBom(fp);
+
+    const prevCat = norm(fp?.categoryKeyLower || fp?.categoryKey || fp?.category || fp?.catKey || "");
+    S.draft = {
+      key: code,
+      name: nm,
+      bom: Array.isArray(bom0) ? bom0.slice() : [],
+      __prevCat: prevCat
+    };
+
+    setDetailOpen(true);
+    renderDatalists();
+    renderDetail();
+
+    // reset barre di ricerca + suggerimenti
+    try{ if ($("fpCatCompPick")) $("fpCatCompPick").value = ""; }catch(_){ }
+    try{ if ($("fpCatCompQty")) $("fpCatCompQty").value = ""; }catch(_){ }
+    try{ if ($("fpCatMemberPick")) $("fpCatMemberPick").value = ""; }catch(_){ }
+    try{ __fpCatHideSuggest("comp"); __fpCatHideSuggest("member"); }catch(_){ }
+
+    // focus componente
+    try{ setTimeout(() => $("fpCatCompPick")?.focus(), 0); }catch(_){ }
+  }
+
+  function openForFinishedProduct(fpId){
+    const fp = __fpCatGetFinishedById(fpId);
+    if (!fp){ showToast("Prodotto finito non trovato", "warn"); return; }
+
+    // Se ha una BOM propria => è singolo
+    const direct = __fpCatGetFinishedBom(fp);
+    if (direct && direct.length){
+      openSingleProduct(fpId);
+      return;
+    }
+
+    const catKey = norm(fp?.categoryKeyLower || fp?.categoryKey || fp?.category || fp?.catKey || "");
+    if (catKey && catKey !== "singolo" && S.catMap && S.catMap.has(catKey)){
+      openDetail(catKey);
+      return;
+    }
+
+    // nessuna categoria: usa modalità prodotto singolo
+    openSingleProduct(fpId);
   }
 
   async function createCategory(){
@@ -6441,7 +7588,60 @@ try{
     return true;
   }
 
+  async function saveSingleProductBom(){
+    const h = H();
+    if (!h || !h.fb || !h.fb.db || !h.FS) { showToast("Firebase non pronto", "warn"); return; }
+    if (!h.fb.user) { showToast("Accedi con Google", "warn"); return; }
+
+    const fid = String(S.selectedFpId || "").trim();
+    if (!fid){ showToast("Prodotto finito non valido", "warn"); return; }
+
+    const bom0 = (S.draft && Array.isArray(S.draft.bom)) ? S.draft.bom : [];
+    const bom = bom0.map(c => {
+      const code = String(c?.code || "").trim();
+      if (!code) return null;
+      const name = String(c?.name || "").trim();
+      const uom = String(c?.uom || "").trim();
+      const qtyRaw = String(c?.qtyRaw || "").trim();
+      const qtyNum = (c && c.qty != null && Number.isFinite(Number(c.qty))) ? Number(c.qty) : (c?.qty != null ? Number(c.qty) : null);
+      const productId = String(c?.productId || "").trim() || keyToId(code.toLowerCase());
+      return { productId, code, name, qty: (Number.isFinite(qtyNum) ? qtyNum : null), qtyRaw, uom };
+    }).filter(Boolean);
+
+    try{
+      const { doc, setDoc, serverTimestamp, deleteField } = h.FS;
+      const ref = doc(h.fb.db, "orgs", h.ORG_ID, "finishedProducts", fid);
+
+      const payload = {
+        components: bom,
+        updatedAt: serverTimestamp(),
+        updatedBy: h.fb.user.email || h.fb.user.uid || ""
+      };
+
+      if (bom.length){
+        payload.categoryKey = "singolo";
+        payload.categoryKeyLower = "singolo";
+      } else {
+        const prev = norm(S.draft && S.draft.__prevCat || "");
+        if (prev === "singolo"){
+          payload.categoryKey = deleteField();
+          payload.categoryKeyLower = deleteField();
+        }
+      }
+
+      await setDoc(ref, payload, { merge: true });
+      showToast("Distinta salvata");
+    }catch(e){
+      console.warn("save finishedProduct BOM failed", e);
+      showToast("Errore salvataggio distinta", "err");
+    }
+  }
+
   async function saveCategory(){
+    if (S.detailMode === "product"){
+      await saveSingleProductBom();
+      return;
+    }
     const h = H();
     if (!h || !h.fb || !h.fb.db || !h.FS) { showToast("Firebase non pronto", "warn"); return; }
     if (!h.fb.user) { showToast("Accedi con Google", "warn"); return; }
@@ -6517,6 +7717,10 @@ Verrà aggiornata anche la chiave su tutti i prodotti finiti.`);
   }
 
   async function deleteCategory(){
+    if (S.detailMode === "product"){
+      showToast("Operazione non disponibile sul prodotto singolo", "warn");
+      return;
+    }
     const h = H();
     if (!h || !h.fb || !h.fb.db || !h.FS) { showToast("Firebase non pronto", "warn"); return; }
     if (!h.fb.user) { showToast("Accedi con Google", "warn"); return; }
@@ -6643,6 +7847,10 @@ Verrà aggiornata anche la chiave su tutti i prodotti finiti.`);
   }
 
   async function addMember(){
+    if (S.detailMode === "product"){
+      showToast("Funzione disponibile solo per categorie", "warn");
+      return;
+    }
     const h = H();
     if (!h || !h.fb || !h.fb.db || !h.FS) { showToast("Firebase non pronto", "warn"); return; }
     if (!h.fb.user) { showToast("Accedi con Google", "warn"); return; }
@@ -6666,10 +7874,14 @@ Verrà aggiornata anche la chiave su tutti i prodotti finiti.`);
     if (!fp || !fp.id){ showToast("Prodotto finito non trovato", "warn"); return; }
 
     try{
-      const { doc, updateDoc } = h.FS;
+      const { doc, updateDoc, deleteField } = h.FS;
       await updateDoc(doc(h.fb.db, "orgs", h.ORG_ID, "finishedProducts", fp.id), {
         categoryKey: key,
-        categoryKeyLower: key
+        categoryKeyLower: key,
+        // Se era "Singolo", quando lo assegno a una categoria deve ereditare la distinta base della categoria
+        components: deleteField(),
+        bom: deleteField(),
+        distintaBase: deleteField()
       });
       showToast("Prodotto finito assegnato");
       try{ $("fpCatMemberPick").value = ""; }catch(_){ }
@@ -6681,6 +7893,10 @@ Verrà aggiornata anche la chiave su tutti i prodotti finiti.`);
   }
 
   async function removeMemberById(id){
+    if (S.detailMode === "product"){
+      showToast("Funzione disponibile solo per categorie", "warn");
+      return;
+    }
     const h = H();
     if (!h || !h.fb || !h.fb.db || !h.FS) { showToast("Firebase non pronto", "warn"); return; }
     if (!h.fb.user) { showToast("Accedi con Google", "warn"); return; }
@@ -6987,6 +8203,9 @@ Verrà aggiornata anche la chiave su tutti i prodotti finiti.`);
   // expose (optional)
   window.HubFPCategories = window.HubFPCategories || {};
   window.HubFPCategories.render = function(){ try{ renderList(); }catch(_){ } };
+  window.HubFPCategories.openDetail = function(key){ try{ openDetail(key); }catch(_){ } };
+  window.HubFPCategories.openSingleProduct = function(fpId){ try{ openSingleProduct(fpId); }catch(_){ } };
+  window.HubFPCategories.openForFinishedProduct = function(fpId){ try{ openForFinishedProduct(fpId); }catch(_){ } };
 })();
 ;
 /* ===== prodotti.js ===== */
@@ -7478,6 +8697,15 @@ Verrà aggiornata anche la chiave su tutti i prodotti finiti.`);
     const anagTbody = document.getElementById("anagTbody");
     const anagTheadRow = document.getElementById("anagTheadRow");
 
+    // Nuovo articolo (Materie prime / Imballaggi)
+    const btnAnagAddProduct = document.getElementById("btnAnagAddProduct");
+    const modalNewProduct = document.getElementById("modalNewProduct");
+    const newProdClose = document.getElementById("newProdClose");
+    const newProdCancel = document.getElementById("newProdCancel");
+    const newProdCreate = document.getElementById("newProdCreate");
+    const newProdCode = document.getElementById("newProdCode");
+    const newProdName = document.getElementById("newProdName");
+
     // Anagrafica prodotti finiti (distinta base)
     const btnNewFinishedProduct = document.getElementById("btnNewFinishedProduct");
     const modalFinishedProduct = document.getElementById("modalFinishedProduct");
@@ -7511,7 +8739,9 @@ Verrà aggiornata anche la chiave su tutti i prodotti finiti.`);
       home: document.getElementById("viewHome"),
       ocr: document.getElementById("viewOcr"),
       inventory: document.getElementById("viewInventory"),
+      finishedInventory: document.getElementById("viewFinishedInventory"),
       flows: document.getElementById("viewFlows"),
+      supplierInvoices: document.getElementById("viewSupplierInvoices"),
       movements: document.getElementById("viewMovements"),
       categories: document.getElementById("viewCategories"),
       trash: document.getElementById("viewTrash"),
@@ -7525,6 +8755,7 @@ Verrà aggiornata anche la chiave su tutti i prodotti finiti.`);
     const __btnBack = document.getElementById("btnNavBack");
     const btnBackOcr = document.getElementById("btnBackOcr");
     const btnBackFlows = document.getElementById("btnBackFlows");
+    const btnBackSupplierInvoices = document.getElementById("btnBackSupplierInvoices");
     const btnBackMovements = document.getElementById("btnBackMovements");
     const btnBackAnag = document.getElementById("btnBackAnag");
     const btnBackMoveInv = document.getElementById("btnBackMoveInv");
@@ -7532,7 +8763,7 @@ Verrà aggiornata anche la chiave su tutti i prodotti finiti.`);
     // Porta overlay/modali come figli diretti di <body> per evitare stacking-context (transform/filter) sui parent
     (function __liftOverlaysToBody(){
       try{
-        ["viewOcr","viewInventory","viewFlows","viewDaneaDdt","viewRevenue","viewMovements","viewMoveInventory","viewCategories","viewFPCategories","viewTrash","viewAnag"].forEach(id => {
+        ["viewOcr","viewInventory","viewFinishedInventory","viewFlows","viewSupplierInvoices","viewDaneaDdt","viewRevenue","viewMovements","viewMoveInventory","viewCategories","viewFPCategories","viewTrash","viewAnag"].forEach(id => {
           const el = document.getElementById(id);
           if (el && el.parentElement !== document.body) document.body.appendChild(el);
         });
@@ -7646,7 +8877,7 @@ Verrà aggiornata anche la chiave su tutti i prodotti finiti.`);
 
     function setView(name){
       const key = String(name || "home");
-      const overlayKeys = ["ocr","inventory","flows","daneaDdt","revenue","movements","moveInv","categories","fpCategories","trash","anag"];
+      const overlayKeys = ["ocr","inventory","finishedInventory","flows","supplierInvoices","daneaDdt","revenue","movements","moveInv","categories","fpCategories","trash","anag"];
       const isOverlay = overlayKeys.includes(key);
 
       // Home resta sempre visibile dietro (come un gestionale iOS)
@@ -7687,7 +8918,9 @@ Verrà aggiornata anche la chiave su tutti i prodotti finiti.`);
           (key === "home") ? "Home" :
           (key === "ocr") ? "Carica" :
           (key === "inventory") ? "Inventario" :
+          (key === "finishedInventory") ? "Inventario prodotti finiti" :
           (key === "flows") ? "DDT Caricati" :
+          (key === "supplierInvoices") ? "Fatture fornitori" :
           (key === "daneaDdt") ? "Scarica flussi DDT" :
           (key === "revenue") ? "Fatturato" :
           (key === "movements") ? "Movimenti" :
@@ -7793,6 +9026,7 @@ Verrà aggiornata anche la chiave su tutti i prodotti finiti.`);
     document.getElementById("btnCloseInv")?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
     // Close inventario anche con tap/click sul backdrop
     document.getElementById("viewInventory")?.addEventListener("click", (e) => { try{ if (e.target === e.currentTarget) setView("home"); }catch(_){ } });
+    document.getElementById("viewFinishedInventory")?.addEventListener("click", (e) => { try{ if (e.target === e.currentTarget) setView("home"); }catch(_){ } });
     document.getElementById("viewMovements")?.addEventListener("click", (e) => { try{ if (e.target === e.currentTarget) setView("home"); }catch(_){ } });
     document.getElementById("viewMoveInventory")?.addEventListener("click", (e) => { try{ if (e.target === e.currentTarget) { resetMoveInvDirection(); setView("home"); } }catch(_){ } });
     document.getElementById("btnCloseOcr")?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
@@ -7820,12 +9054,15 @@ Verrà aggiornata anche la chiave su tutti i prodotti finiti.`);
     });
 document.getElementById("btnGoInvCerea")?.addEventListener("click", () => { openInventoryOverlay(WAREHOUSE_CEREA); });
     document.getElementById("btnGoInvConcamarise")?.addEventListener("click", () => { openInventoryOverlay(WAREHOUSE_CONCA); });
+    document.getElementById("btnGoFinishedInventory")?.addEventListener("click", () => { openFinishedInventoryOverlay(); });
 document.getElementById("menuGoHome")?.addEventListener("click", () => { closeSideMenu(); setView("home"); });
     document.getElementById("menuGoOcr")?.addEventListener("click", () => { closeSideMenu(); startHomeOcr(); });
     document.getElementById("menuGoInvCerea")?.addEventListener("click", () => { closeSideMenu(); openInventoryOverlay(WAREHOUSE_CEREA); });
     document.getElementById("menuGoInvConcamarise")?.addEventListener("click", () => { closeSideMenu(); openInventoryOverlay(WAREHOUSE_CONCA); });
+    document.getElementById("menuGoFinishedInventory")?.addEventListener("click", () => { closeSideMenu(); openFinishedInventoryOverlay(); });
     document.getElementById("menuGoMoveInventory")?.addEventListener("click", () => { closeSideMenu(); try{ resetMoveInvDirection(); }catch(_){ } setView("moveInv"); try{ renderMoveInv && renderMoveInv(); }catch(_){ } });
     document.getElementById("menuGoFlows")?.addEventListener("click", () => { closeSideMenu(); setView("flows"); try{ renderFlowsTable(); }catch(_){ } });
+    document.getElementById("menuGoSupplierInvoices")?.addEventListener("click", () => { closeSideMenu(); setView("supplierInvoices"); try{ window.HubSupplierInvoices && window.HubSupplierInvoices.refresh && window.HubSupplierInvoices.refresh(); }catch(_){ } });
     document.getElementById("menuGoDaneaDdt")?.addEventListener("click", () => { closeSideMenu(); setView("daneaDdt"); try{ window.HubDaneaDdt && window.HubDaneaDdt.refresh && window.HubDaneaDdt.refresh(); }catch(_){ } });
     document.getElementById("menuGoRevenue")?.addEventListener("click", () => { closeSideMenu(); setView("revenue"); try{ window.HubRevenue && window.HubRevenue.refresh && window.HubRevenue.refresh(); }catch(_){ } });
     document.getElementById("menuGoMovements")?.addEventListener("click", () => { closeSideMenu(); setView("movements"); try{ window.HubMovements && window.HubMovements.refresh && window.HubMovements.refresh(); }catch(_){ } });
@@ -7869,6 +9106,7 @@ document.getElementById("menuGoHome")?.addEventListener("click", () => { closeSi
     });
 document.getElementById("btnCloseTrash")?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
 document.getElementById("btnCloseFlows")?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
+document.getElementById("btnCloseSupplierInvoices")?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
 
     document.getElementById("btnCloseDaneaDdt")?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
     document.getElementById("btnBackDaneaDdt")?.addEventListener("click", (e) => {
@@ -7884,6 +9122,7 @@ document.getElementById("btnCloseFlows")?.addEventListener("click", (e) => { try
 
     // Fatturato (DDT completati con movimenti)
     document.getElementById("viewRevenue")?.addEventListener("click", (e) => { try{ if (e.target === e.currentTarget) setView("home"); }catch(_){ } });
+    document.getElementById("viewSupplierInvoices")?.addEventListener("click", (e) => { try{ if (e.target === e.currentTarget) setView("home"); }catch(_){ } });
     document.getElementById("btnCloseRevenue")?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
     document.getElementById("btnBackRevenue")?.addEventListener("click", (e) => {
       try{ e.preventDefault(); e.stopPropagation(); }catch(_){ }
@@ -7902,6 +9141,7 @@ document.getElementById("btnCloseFlows")?.addEventListener("click", (e) => { try
         document.getElementById("btnBackTrash")?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
 btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
     btnBackFlows?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
+    btnBackSupplierInvoices?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
     btnBackMovements?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
     btnBackMoveInv?.addEventListener("click", (e) => {
       try{ e.preventDefault(); e.stopPropagation(); }catch(_){}
@@ -7997,7 +9237,7 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
     setView("home");
 
     // Chiudi i modali cliccando fuori dal contenuto (overlay)
-    ["ocr","inventory","flows","moveInv","anag"].forEach((k) => {
+    ["ocr","inventory","finishedInventory","flows","moveInv","anag"].forEach((k) => {
       const el = __views[k];
       if (!el) return;
       el.addEventListener("click", (e) => { if (e.target === el) setView("home"); });
@@ -8159,6 +9399,21 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
     const filterLow = document.getElementById("filterLow");
     const filterCategory = document.getElementById("filterCategory");
 
+    // ===== Inventario prodotti finiti =====
+    const fpInvPicker = document.getElementById("fpInvPicker");
+    const fpInvDetail = document.getElementById("fpInvDetail");
+    const fpInvDetailTitle = document.getElementById("fpInvDetailTitle");
+    const pillFpInvWarehouse = document.getElementById("pillFpInvWarehouse");
+    const pillFpStock = document.getElementById("pillFpStock");
+    const btnFpInvPickCerea = document.getElementById("btnFpInvPickCerea");
+    const btnFpInvPickConcamarise = document.getElementById("btnFpInvPickConcamarise");
+    const btnFpInvBackPicker = document.getElementById("btnFpInvBackPicker");
+    const btnBackFpInv = document.getElementById("btnBackFpInv");
+    const btnCloseFpInv = document.getElementById("btnCloseFpInv");
+    const fpInvSearch = document.getElementById("fpInvSearch");
+    const fpInvFilterCategory = document.getElementById("fpInvFilterCategory");
+    const fpStockTbody = document.getElementById("fpStockTbody");
+
     const pillOcr = document.getElementById("pillOcr");
     const dotOcr = document.getElementById("dotOcr");
     const pillOcrText = document.getElementById("pillOcrText");
@@ -8205,7 +9460,31 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
       try{ renderAll(); }catch(_){}
     }
 
-    // binder (safe)
+    // ===== Inventario prodotti finiti: sede unica =====
+    function setFinishedInventoryWarehouse(){
+      const wh = WAREHOUSE_FINISHED;
+      __currentFinishedWarehouse = wh;
+
+      // Sede unica: niente picker
+      if (fpInvPicker) fpInvPicker.style.display = "none";
+      if (fpInvDetail) fpInvDetail.style.display = "";
+
+      try{ __syncDockedControlsVisibility && __syncDockedControlsVisibility(); }catch(_){ }
+
+      if (pillFpInvWarehouse) {
+        pillFpInvWarehouse.style.display = "inline-flex";
+        pillFpInvWarehouse.textContent = "Sede unica";
+      }
+      if (fpInvDetailTitle) fpInvDetailTitle.textContent = "Inventario prodotti finiti";
+    }
+
+    function openFinishedInventoryOverlay(){
+      setView("finishedInventory");
+      setFinishedInventoryWarehouse();
+      try{ renderAll(); }catch(_){ }
+    }
+
+// binder (safe)
     try{
       btnPickCerea && btnPickCerea.addEventListener("click", () => { setInventoryWarehouse(WAREHOUSE_CEREA); renderAll(); });
       btnPickConcamarise && btnPickConcamarise.addEventListener("click", () => { setInventoryWarehouse(WAREHOUSE_CONCA); renderAll(); });
@@ -8218,6 +9497,15 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
         }
         setView("home");
       });
+
+      // Inventario prodotti finiti
+      btnFpInvPickCerea && btnFpInvPickCerea.addEventListener("click", () => { setFinishedInventoryWarehouse(WAREHOUSE_CEREA); renderAll(); });
+      btnFpInvPickConcamarise && btnFpInvPickConcamarise.addEventListener("click", () => { setFinishedInventoryWarehouse(WAREHOUSE_CONCA); renderAll(); });
+      btnFpInvBackPicker && btnFpInvBackPicker.addEventListener("click", () => { setFinishedInventoryWarehouse(""); renderAll(); });
+      btnBackFpInv && btnBackFpInv.addEventListener("click", () => {
+        setView("home");
+      });
+      btnCloseFpInv && btnCloseFpInv.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){ } setView("home"); });
     }catch(_){}
 /****************************************************************
      * State
@@ -8225,6 +9513,7 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
     let state = {
       settings: { ...DEFAULT_SETTINGS },
       movements: [], // array of Movement
+      finishedMovements: [], // movimenti inventario prodotti finiti (sync)
       thresholds: {}, // per-item threshold overrides: key -> number
       productCategories: {}, // per-code categoria (offline fallback)
       productUoms: {}, // per-code unità di misura (offline fallback)
@@ -8261,6 +9550,7 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
         products: null,
         categories: null,
         movements: null,
+        finishedMovements: null,
         thresholds: null,
         supplierDocs: null,
         finishedProducts: null,
@@ -8297,6 +9587,11 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
           try { FS.getDoc = getDoc; } catch(_){}
           return FS;
         })();
+        // Helper access (prodotti) per moduli esterni (es. Fatture fornitori)
+        try{ globalThis.__HUB.keyToDocId = keyToDocId; }catch(_){}
+        try{ globalThis.__HUB.findProductByCode = findProductByCode; }catch(_){}
+        try{ globalThis.__HUB.getProducts = () => products; }catch(_){}
+
         globalThis.__HUB.ready = true;
       }catch(e){
         console.warn("syncHubBridge failed", e);
@@ -8719,17 +10014,36 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
       try{ showToast(removing ? 'Rimozione categoria…' : 'Associazione categoria…'); }catch(_){ }
 
       try{
+        let clearedSingolo = 0;
         for (const id of ids){
           const fid = String(id || '').trim();
           if (!fid) continue;
+
+          const fp = (Array.isArray(finishedProducts) ? finishedProducts : []).find(x => String(x && x.id || '') === fid) || null;
+          const hadDirectBom = fp ? (__fpDirectComponents(fp).length > 0) : false;
+
           const payload = removing
             ? { categoryKey: deleteField(), categoryKeyLower: deleteField() }
-            : { categoryKey: key, categoryKeyLower: String(key).toLowerCase() };
+            : {
+                categoryKey: key,
+                categoryKeyLower: String(key).toLowerCase(),
+                // Se era "Singolo", quando lo assegno a una categoria deve ereditare la distinta base della categoria
+                components: deleteField(),
+                bom: deleteField(),
+                distintaBase: deleteField()
+              };
+
+          if (!removing && hadDirectBom) clearedSingolo++;
+
           await setDoc(doc(fb.db, 'orgs', ORG_ID, 'finishedProducts', fid), payload, { merge: true });
         }
         __fpSelectedIds.clear();
         try{ sel.value = ''; }catch(_){ }
-        showToast(removing ? 'Categoria rimossa' : 'Prodotti finiti associati');
+        if (!removing && clearedSingolo){
+          showToast(`Categoria associata. ${clearedSingolo} prodotti ora ereditano la distinta della categoria.`);
+        } else {
+          showToast(removing ? 'Categoria rimossa' : 'Prodotti finiti associati');
+        }
       }catch(e){
         console.warn('assign selected finished products failed', e);
         showToast('Errore associazione', 'err');
@@ -8919,6 +10233,11 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
       try {
         fb.app = initializeApp(FIREBASE_CONFIG);
         fb.auth = getAuth(fb.app);
+
+        // IMPORTANT: override any pre-existing window.__HUB (legacy scripts) BEFORE the first await,
+        // so other modules won't read a stale/incompatible Firestore reference.
+        try{ syncHubBridge(); }catch(e){ console.warn("syncHubBridge pre-await failed", e); }
+
         await setPersistence(fb.auth, browserLocalPersistence);
         fb.db = initializeFirestore(fb.app, { experimentalAutoDetectLongPolling: true, useFetchStreams: false });
         fb.storage = getStorage(fb.app);
@@ -9035,6 +10354,11 @@ btnLogout.addEventListener("click", async () => {
       __daneaCompleted = [];
       __daneaCompletedMap = new Map();
       try{ __fpSelectedIds.clear(); }catch(_){ }
+
+      // Inventario prodotti finiti: nessun fallback locale
+      try{ state.finishedMovements = []; }catch(_){ }
+      try{ __currentFinishedWarehouse = WAREHOUSE_FINISHED; }catch(_){ }
+
       thresholds = {};
       currentSupplierId = null;
       try {
@@ -9227,6 +10551,38 @@ btnLogout.addEventListener("click", async () => {
         (err) => {
           console.error("movements watch error", err);
           // Evita di cambiare lo stato Sync globale per singole collezioni.
+        }
+      );
+
+      // Finished inventory movements (Prodotti finiti)
+      fb.unsub.finishedMovements = onSnapshot(
+        query(orgCol("finishedInventoryMovements"), orderBy("createdAt")),
+        (snap) => {
+          state.finishedMovements = snap.docs.map(d => {
+            const data = d.data() || {};
+            return {
+              id: d.id,
+              type: data.type || "IN",
+              code: data.code || "",
+              item: data.item || "",
+              uom: String(data.uom || "").trim(),
+              qtyRaw: String(data.qtyRaw || "").trim(),
+              qty: safeInt(data.qty),
+              date: data.date || "",
+              note: data.note || "",
+              source: data.source || "Manual",
+              docType: String(data.docType || "").trim(),
+              docNum: String(data.docNum || "").trim(),
+              docDateRaw: String(data.docDateRaw || data.date || "").trim(),
+              createdBy: String(data.createdBy || "").trim(),
+              warehouse: WAREHOUSE_FINISHED,
+              createdAt: tsToIso(data.createdAt) || data.createdAtIso || ""
+            };
+          });
+          renderAll();
+        },
+        (err) => {
+          console.error("finishedMovements watch error", err);
         }
       );
     }
@@ -9970,10 +11326,13 @@ async function deleteMovementsBulk(ids) {
     // ===== Inventari (Cerea / Concamarise) =====
     const WAREHOUSE_CEREA = "cerea";
     const WAREHOUSE_CONCA = "concamarise";
+    const WAREHOUSE_FINISHED = "prodotti_finiti";
 
     function normalizeWarehouse(v){
       const s = String(v || "").trim().toLowerCase();
       if (!s) return WAREHOUSE_CEREA;
+      // Prodotti finiti (sede unica)
+      if (s === WAREHOUSE_FINISHED || s === "pf" || s === "finiti" || s === "prodotti finiti" || s === "prodotti_finiti" || s.includes("finit")) return WAREHOUSE_FINISHED;
       if (s === "concamarise") return WAREHOUSE_CONCA;
       if (s === "cerea") return WAREHOUSE_CEREA;
       if (s.includes("conca")) return WAREHOUSE_CONCA;
@@ -9983,6 +11342,7 @@ async function deleteMovementsBulk(ids) {
 
     function warehouseLabel(v){
       const w = normalizeWarehouse(v);
+      if (w === WAREHOUSE_FINISHED) return "Prodotti finiti";
       return (w === WAREHOUSE_CONCA) ? "Inventario Concamarise" : "Inventario Cerea";
     }
 
@@ -9990,8 +11350,17 @@ async function deleteMovementsBulk(ids) {
       return `${normalizeWarehouse(warehouse)}||${movementKey(customer, code)}`;
     }
 
+    function fpStockRowKey(code, warehouse){
+      const w = normalizeWarehouse(warehouse || WAREHOUSE_FINISHED);
+      return `${w}||${String(code || "").trim().toLowerCase()}`;
+    }
+
     // "" => nessun inventario selezionato (picker)
-    let __currentWarehouse = "";function downloadBlob(filename, content, mime="text/plain") {
+    let __currentWarehouse = "";
+    // "" => nessuna sede selezionata (picker)
+    let __currentFinishedWarehouse = WAREHOUSE_FINISHED;
+
+    function downloadBlob(filename, content, mime="text/plain") {
       const blob = new Blob([content], { type: mime });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -11097,6 +12466,47 @@ function validateMovementFields(fields) {
       return Array.from(stock.values());
     }
 
+    function computeFinishedStockByWarehouse() {
+      const stock = new Map();
+      const latestByKey = new Map();
+
+      for (const mv of (state.finishedMovements || [])) {
+        const warehouse = WAREHOUSE_FINISHED; // sede unica
+        const code = (mv.code || "").trim();
+        if (!code) continue;
+        const low = code.toLowerCase();
+        const item = (mv.item || "").trim();
+        const k = low;
+
+        const cur = stock.get(k) || {
+          warehouse,
+          code,
+          item,
+          uom: "",
+          qty: 0,
+          lastMoveAt: ""
+        };
+
+        const q = safeInt(mv.qty);
+        cur.qty += (mv.type === "OUT" ? -q : q);
+        if (!cur.item && item) cur.item = item;
+
+        const __u = __normalizeUom(mv.uom || "");
+        if (__u) cur.uom = __u;
+
+        const ts = mv.createdAt || mv.date || "";
+        const prev = latestByKey.get(k) || "";
+        if (!prev || String(ts) > String(prev)) {
+          latestByKey.set(k, String(ts));
+          cur.lastMoveAt = String(ts);
+        }
+
+        stock.set(k, cur);
+      }
+
+      return Array.from(stock.values());
+    }
+
 
 
 // === Inventario: righe per sede includendo prodotti senza movimenti ===
@@ -11364,6 +12774,75 @@ async function deleteMovement(id) {
   // Cleanup/UI (include docPages + tripletKey best-effort)
   await deleteMovementsBulk([mid]);
 }
+
+
+async function deletePfProduction(batchId) {
+  const batch = String(batchId || "").trim();
+  if (!batch) return;
+
+  const inv = Array.isArray(state.movements) ? state.movements : [];
+  const fin = Array.isArray(state.finishedMovements) ? state.finishedMovements : [];
+
+  const isProd = (mv) => {
+    const dn = String((mv && mv.docNum) || "").trim();
+    if (dn !== batch) return false;
+
+    const dt = String((mv && mv.docType) || "").trim().toUpperCase();
+    const src = String((mv && mv.source) || "").trim().toLowerCase();
+
+    // Produzione PF: docType "PRODUZIONE" oppure source contiene "produzione"
+    return (dt === "PRODUZIONE") || src.includes("produzione");
+  };
+
+  const invIds = inv
+    .filter(isProd)
+    .map(mv => String((mv && mv.id) || "").trim())
+    .filter(Boolean);
+
+  const finIds = fin
+    .filter(isProd)
+    .map(mv => String((mv && mv.id) || "").trim())
+    .filter(Boolean);
+
+  if (!invIds.length && !finIds.length) return;
+
+  // Optimistic UI (rollback on error)
+  const prevInv = inv.slice();
+  const prevFin = fin.slice();
+  const invSet = new Set(invIds);
+  const finSet = new Set(finIds);
+
+  try {
+    state.movements = prevInv.filter(mv => !invSet.has(String((mv && mv.id) || "")));
+    state.finishedMovements = prevFin.filter(mv => !finSet.has(String((mv && mv.id) || "")));
+    try { renderAll(); } catch (_) {}
+
+    // Realtime (Firestore)
+    if (fb.user && fb.db) {
+      // Elimina carico PF
+      for (const mid of finIds) {
+        await deleteDoc(doc(fb.db, "orgs", ORG_ID, "finishedInventoryMovements", mid));
+      }
+      // Elimina scarichi componenti
+      for (const mid of invIds) {
+        await deleteDoc(doc(fb.db, "orgs", ORG_ID, "inventoryMovements", mid));
+      }
+      return;
+    }
+
+    // Local fallback
+    saveLocalData();
+  } catch (e) {
+    // rollback optimistic UI
+    try {
+      state.movements = prevInv;
+      state.finishedMovements = prevFin;
+      renderAll();
+    } catch (_) {}
+    throw e;
+  }
+}
+
 
     function makeMovement(fields) {
   const f = (fields && typeof fields === "object") ? fields : {};
@@ -14627,6 +16106,604 @@ for (const r of arr) {
     }
 
 
+// ===== Inventario prodotti finiti (UI + righe) =====
+let __fpStockRowByKey = new Map();
+
+function __findFinishedProductByCode(code){
+  const low = String(code || "").trim().toLowerCase();
+  if (!low) return null;
+  const list = Array.isArray(finishedProducts) ? finishedProducts : [];
+  for (const fp of list){
+    if (!fp) continue;
+    const c = String(fp.code || fp.sku || safeDecodeUri(fp.id || "") || "").trim();
+    const cl = String(fp.codeLower || "").trim();
+    if (c && c.toLowerCase() === low) return fp;
+    if (cl && cl.toLowerCase() === low) return fp;
+  }
+  return null;
+}
+
+function __fpDirectComponents(fp){
+  try{
+    const arr = fp && (fp.components || fp.bom || fp.distintaBase);
+    return Array.isArray(arr) ? arr : [];
+  }catch(_){ return []; }
+}
+
+function __fpCategoryBomForKey(catKey){
+  const k = String(catKey || "").trim().toLowerCase();
+  if (!k || k === "singolo") return [];
+  try{
+    const cat = (finishedProductCategoriesMap && typeof finishedProductCategoriesMap.get === "function")
+      ? (finishedProductCategoriesMap.get(k) || null)
+      : null;
+    const bom = cat && (cat.bom || cat.components || cat.distintaBase);
+    return Array.isArray(bom) ? bom : [];
+  }catch(_){ return []; }
+}
+
+function __fpIsSingle(fp){
+  try{
+    const direct = __fpDirectComponents(fp);
+    if (!(Array.isArray(direct) && direct.length)) return false;
+
+    // Se appartiene a una categoria con distinta base => prevale la distinta della categoria
+    const catKey = String(fp && (fp.categoryKeyLower || fp.categoryKey || fp.category || "") || "").trim().toLowerCase();
+    if (catKey && catKey !== "singolo"){
+      const catBom = __fpCategoryBomForKey(catKey);
+      if (Array.isArray(catBom) && catBom.length) return false;
+    }
+
+    return true;
+  }catch(_){ return false; }
+}
+
+function __fpCategoryNameFromKey(key){
+  const k = String(key || "").trim().toLowerCase();
+  if (!k) return "";
+  if (k === "singolo") return "Singolo";
+  try{
+    const o = finishedProductCategoriesMap && finishedProductCategoriesMap.get ? finishedProductCategoriesMap.get(k) : null;
+    const name = o && (o.name || o.label) ? String(o.name || o.label) : "";
+    return String(name || k).trim();
+  }catch(_){ return String(k).trim(); }
+}
+
+// ===== Produzione PF: distinta base (prodotto o categoria) =====
+function __fpGetResolvedBomForCode(code){
+  const fp = __findFinishedProductByCode(code);
+  if (!fp) return [];
+
+  const catKey = String(fp.categoryKeyLower || fp.categoryKey || fp.category || "").trim().toLowerCase();
+
+  // 1) BOM da categoria (se presente e non vuota) — prevale sempre
+  const catBom = __fpCategoryBomForKey(catKey);
+  if (Array.isArray(catBom) && catBom.length) return catBom;
+
+  // 2) BOM diretta sul prodotto
+  const direct = __fpDirectComponents(fp);
+  if (Array.isArray(direct) && direct.length) return direct;
+
+  // 3) fallback categoria (anche vuota)
+  return Array.isArray(catBom) ? catBom : [];
+}
+
+
+function __fpHasBomForCode(code){
+  try{ return __fpGetResolvedBomForCode(code).length > 0; }catch(_){ return false; }
+}
+
+function __fpParseNumberOrFraction(v){
+  const s = String(v ?? "").trim();
+  if (!s) return null;
+  // 1/2 (anche con virgola)
+  const m = s.match(/^(-?\d+(?:[.,]\d+)?)\s*\/\s*(\d+(?:[.,]\d+)?)$/);
+  if (m){
+    const a = Number(String(m[1]).replace(",","."));
+    const b = Number(String(m[2]).replace(",","."));
+    if (Number.isFinite(a) && Number.isFinite(b) && b !== 0) return a / b;
+  }
+  // numero con virgola
+  const n = Number(s.replace(/\./g, "").replace(",", "."));
+  if (Number.isFinite(n)) return n;
+  return null;
+}
+
+function __fpCompQtyPerUnit(comp){
+  const c = comp || {};
+  if (c.qty != null && Number.isFinite(Number(c.qty))) return Number(c.qty);
+  const raw = c.qtyRaw || c.qtaRaw || c.quantityRaw || c.qta || "";
+  const p = __fpParseNumberOrFraction(raw);
+  return (p != null && Number.isFinite(p)) ? p : null;
+}
+
+function __fpIsProductionMacroForCode(code){
+  try{
+    // getMacroCategoryForCode ritorna la *categoria* (es. "scatole", "flaconi", "materie_prime"),
+    // mentre per la produzione ci interessa il *macro gruppo* ("materie_prime" / "imballaggi").
+    const catKey = (typeof getMacroCategoryForCode === "function") ? String(getMacroCategoryForCode(code) || "").trim() : "";
+
+    let mg = "";
+    try{
+      if (typeof categoryMacroGroup === "function") mg = String(categoryMacroGroup(catKey) || "").trim().toLowerCase();
+    }catch(_){ mg = ""; }
+
+    // Se non riesco a risalire al macro gruppo, non blocco (compat / non categorizzato).
+    if (!mg) return true;
+    return (mg === "materie_prime" || mg === "imballaggi");
+  }catch(_){ return true; }
+}
+
+function __fpResolveComponentMeta(code, fallbackName, fallbackUom){
+  const c = String(code || "").trim();
+  const p = (typeof findProductByCode === "function") ? findProductByCode(c) : null;
+
+  let customer = String((p && p.customer) || "").trim();
+  if (!customer){
+    try{
+      const info = (typeof __getLastSupplierInfoForCode === "function") ? (__getLastSupplierInfoForCode(c) || null) : null;
+      if (info && info.name) customer = String(info.name).trim();
+    }catch(_){ }
+  }
+
+  const item = String((p && (p.name || p.nome || p.description)) || fallbackName || c).trim() || c;
+  const uom = __normalizeUom((p && (p.uom || p.um || p.unit)) || fallbackUom || "") || getUomResolvedForCode(c) || "";
+
+  return { customer, item, uom };
+}
+
+function buildFinishedInventoryRowsForWarehouse(wh, fpStockByWh){
+  // Sede unica: niente split per magazzino
+  const w = WAREHOUSE_FINISHED;
+  let rows = (Array.isArray(fpStockByWh) ? fpStockByWh : []).map(r => Object.assign({}, r, { warehouse: w }));
+
+  const existing = new Set(rows.map(r => String(r && r.code || "").trim().toLowerCase()).filter(Boolean));
+  const fps = Array.isArray(finishedProducts) ? finishedProducts : [];
+
+  // Placeholder per PF senza movimenti
+  for (const fp of fps){
+    if (!fp) continue;
+    const code = String(fp.code || fp.sku || safeDecodeUri(fp.id || "") || "").trim();
+    if (!code) continue;
+    const low = code.toLowerCase();
+    if (existing.has(low)) continue;
+    existing.add(low);
+
+    rows.push({
+      warehouse: w,
+      code,
+      item: String(fp.name || fp.nome || fp.description || code),
+      uom: __normalizeUom(fp.uom || "") || "pz",
+      qty: 0,
+      lastMoveAt: "",
+      fpId: String(fp.id || "").trim(),
+      categoryKey: (__fpIsSingle(fp) ? "singolo" : String(fp.categoryKeyLower || fp.categoryKey || "").trim().toLowerCase()),
+      categoryName: (__fpIsSingle(fp) ? "Singolo" : __fpCategoryNameFromKey(fp.categoryKeyLower || fp.categoryKey || ""))
+    });
+  }
+
+  // Enrich categoria + uom + nome
+  rows = rows.map(r => {
+    const code = String(r && r.code || "").trim();
+    const fp = __findFinishedProductByCode(code);
+
+    const isSingle = fp && __fpIsSingle(fp);
+    const catKey = isSingle ? "singolo" : String((r && r.categoryKey) || (fp && (fp.categoryKeyLower || fp.categoryKey)) || "").trim().toLowerCase();
+    const catName = String(((isSingle ? "" : (r && r.categoryName)) || __fpCategoryNameFromKey(catKey) || "")).trim();
+    const uom = __normalizeUom((r && r.uom) || "") || __normalizeUom(fp && fp.uom) || "pz";
+
+    const item = String((r && r.item) || (fp && (fp.name || fp.nome || fp.description)) || code).trim();
+    const fpId = String((r && r.fpId) || (fp && fp.id) || "").trim();
+
+    return Object.assign({}, r, {
+      warehouse: w,
+      code,
+      item,
+      uom,
+      fpId,
+      categoryKey: catKey,
+      categoryName: catName
+    });
+  });
+
+  rows.sort((a,b) => String(a.item || "").localeCompare(String(b.item || ""), "it", { sensitivity: "base" }));
+  return rows;
+}
+
+function renderFpInventoryCategoryOptions(){
+  if (!fpInvFilterCategory) return;
+  const prev = String(fpInvFilterCategory.value || "");
+  const opts = ['<option value="">Tutte</option>', '<option value="__none">Non assegnata</option>', '<option value="singolo">Singolo</option>'];
+  const cats = Array.isArray(finishedProductCategories) ? finishedProductCategories.slice() : [];
+  cats.sort((a,b) => String((a && a.name) || a.key || "").localeCompare(String((b && b.name) || b.key || ""), "it", { sensitivity: "base" }));
+  for (const c of cats){
+    if (!c) continue;
+    const k = String(c.key || "").trim().toLowerCase();
+    if (!k) continue;
+    const name = String(c.name || c.label || k).trim();
+    opts.push(`<option value="${escapeHtmlAttr(k)}">${escapeHtml(name)}</option>`);
+  }
+  fpInvFilterCategory.innerHTML = opts.join("");
+  try{
+    if (prev && Array.from(fpInvFilterCategory.options || []).some(o => String(o.value) === prev)) fpInvFilterCategory.value = prev;
+  }catch(_){ }
+}
+
+function renderFinishedStockTable(fpRows){
+  const qRaw = (fpInvSearch && fpInvSearch.value ? String(fpInvSearch.value) : "").trim();
+  const q = normTextKey(qRaw);
+  const catF = (fpInvFilterCategory && fpInvFilterCategory.value ? String(fpInvFilterCategory.value) : "").trim().toLowerCase();
+  let rows = Array.isArray(fpRows) ? fpRows : [];
+
+  if (q) rows = rows.filter(r => {
+    const hay = [r.code || "", r.item || "", r.categoryName || ""].join(" ");
+    return normTextKey(hay).includes(q);
+  });
+
+  if (catF) {
+    if (catF === "__none") rows = rows.filter(r => !String(r.categoryKey || "").trim());
+    else rows = rows.filter(r => String(r.categoryKey || "").trim().toLowerCase() === catF);
+  }
+
+  if (pillFpStock) pillFpStock.textContent = `${rows.length} righe`;
+  if (!fpStockTbody) return;
+
+  __fpStockRowByKey = new Map();
+
+
+  if (rows.length === 0) {
+    fpStockTbody.innerHTML = '<tr><td class="td-muted" colspan="4">Nessun risultato.</td></tr>';
+    return;
+  }
+
+  const max = 800;
+  const show = rows.slice(0, max);
+
+  __fpStockRowByKey = new Map(show.map(r => [fpStockRowKey(r.code, r.warehouse), r]));
+
+  fpStockTbody.innerHTML = show.map(r => {
+    const k = fpStockRowKey(r.code, r.warehouse);
+    const qtyVal = safeInt(r.qty);
+    const uom = __normalizeUom(r.uom || "") || "pz";
+
+    const qtyCell = `<span style="font-weight:900;">${qtyVal.toLocaleString("it-IT")}</span> <span class="td-muted" style="font-size:12px; font-weight:900;">${escapeHtml(uom)}</span>`;
+
+    const catHtml = r.categoryName ? `<span class="pill catPill" style="padding:2px 8px;">${escapeHtml(r.categoryName)}</span>` : '<span class="td-muted">—</span>';
+    const displayCode = escapeHtml(r.code || "");
+    const displayName = escapeHtml(r.item || "");
+
+    return `
+      <tr data-k="${escapeHtmlAttr(k)}" title="Produci prodotto finito">
+        <td data-label="Nome prodotto">${displayName}</td>
+        <td data-label="Codice">${displayCode}</td>
+        <td data-label="Categoria">${catHtml}</td>
+        <td data-label="Q.tà" class="qty jsFpQtyCell">${qtyCell}</td>
+      </tr>`;
+  }).join("");
+}
+
+async function adjustFinishedStockAbsoluteFromRow(row, newAbsQty) {
+  const r = row || {};
+  const oldQty = safeInt(r.qty);
+  let newQty = safeInt(newAbsQty);
+  if (!Number.isFinite(newQty) || newQty < 0) newQty = 0;
+  const delta = newQty - oldQty;
+  if (!delta) return;
+
+  const __uom = __normalizeUom(r.uom || "") || "pz";
+
+  if (!fb.user || !fb.db) {
+    showToast("Accedi con Google per salvare l'inventario PF", "err");
+    throw new Error("not-auth");
+  }
+
+  const mv = {
+    type: delta > 0 ? "IN" : "OUT",
+    code: String(r.code || "").trim(),
+    item: String(r.item || "").trim(),
+    qty: Math.abs(delta),
+    date: todayYYYYMMDD(),
+    note: `Rettifica inventario PF: da ${oldQty} ${__uom} a ${newQty} ${__uom}`,
+    uom: __uom,
+    qtyRaw: `${Math.abs(delta)} ${__uom}`.trim(),
+    warehouse: WAREHOUSE_FINISHED,
+    source: "Rettifica PF",
+    createdAt: serverTimestamp(),
+    createdBy: (fb.user.email || fb.user.uid || "")
+  };
+
+  await addDoc(orgCol("finishedInventoryMovements"), mv);
+  showToast(`Quantità PF aggiornata (${oldQty}→${newQty}) ${__uom}`);
+}
+
+
+// ===== Produci (PF) + scarico componenti (materie prime / imballaggi) =====
+let __fpProduceBusy = false;
+
+function __fpProdMovKey(customer, code){
+  const c = String(customer || "").trim().toLowerCase();
+  const k = String(code || "").trim().toLowerCase();
+  return `${c}||${k}`;
+}
+
+function __fpBuildAvailByWhCustomerCode(){
+  const avail = { cerea: new Map(), concamarise: new Map() };
+  const arr = (state && Array.isArray(state.movements)) ? state.movements : [];
+
+  for (const mv of (arr || [])){
+    try{
+      const code = String(mv && mv.code || "").trim();
+      if (!code) continue;
+      const cust = String(mv && mv.customer || "").trim();
+      const key = __fpProdMovKey(cust, code);
+      const wh = normalizeWarehouse(mv.warehouse || mv.site || mv.magazzino || mv.location || "");
+      const q = safeInt(mv.qty);
+      if (!q) continue;
+      const delta = (String(mv.type || "").toUpperCase() === "OUT") ? -q : q;
+      const m = (wh === WAREHOUSE_CONCA) ? avail.concamarise : avail.cerea;
+      m.set(key, (m.get(key) || 0) + delta);
+    }catch(_){ }
+  }
+  return avail;
+}
+
+async function produceFinishedProductFromRow(row, qtyToProduce){
+  if (__fpProduceBusy) return null;
+
+  const r = row || {};
+  const fpCode = String(r.code || "").trim();
+  if (!fpCode) return null;
+
+  let qty = safeInt(qtyToProduce);
+  if (!Number.isFinite(qty) || qty <= 0) qty = 0;
+  if (!qty){
+    showToast("Quantità non valida", "warn");
+    return null;
+  }
+
+  // Auth: stessa regola della rettifica PF
+  if (!fb.user || !fb.db) {
+    showToast("Accedi con Google per produrre", "err");
+    throw new Error("not-auth");
+  }
+
+  const fp = __findFinishedProductByCode(fpCode);
+  if (!fp){
+    showToast("Prodotto finito non trovato in anagrafica", "warn");
+    return null;
+  }
+
+  const fpName = String(r.item || fp.name || fp.nome || fp.description || fpCode).trim() || fpCode;
+  const fpUom = __normalizeUom(r.uom || fp.uom || "") || "pz";
+
+  // Distinta base (prodotto o categoria)
+  const bom = __fpGetResolvedBomForCode(fpCode);
+  if (!Array.isArray(bom) || !bom.length){
+    showToast("Questo prodotto non ha distinta base (né categoria con distinta)", "warn");
+    return null;
+  }
+
+  // Calcola fabbisogni componenti
+  const req = new Map();
+  const skippedNoQty = [];
+  const skippedNotMacro = [];
+
+  for (const c of bom){
+    try{
+      const cCode = String(c && c.code || "").trim();
+      if (!cCode) continue;
+
+      // Solo materie prime / imballaggi
+      if (!__fpIsProductionMacroForCode(cCode)) {
+        skippedNotMacro.push(cCode);
+        continue;
+      }
+
+      const per = __fpCompQtyPerUnit(c);
+      if (per == null || !Number.isFinite(per) || per <= 0){
+        skippedNoQty.push(cCode);
+        continue;
+      }
+
+      const add = per * qty;
+      const low = cCode.toLowerCase();
+      const meta = __fpResolveComponentMeta(cCode, c.name || c.item || c.articolo || cCode, c.uom);
+
+      const cur = req.get(low) || {
+        code: cCode,
+        item: meta.item || cCode,
+        uom: meta.uom || __normalizeUom(c.uom || "") || "",
+        customer: meta.customer || "",
+        qty: 0
+      };
+      cur.qty += add;
+      if (!cur.item) cur.item = meta.item || cCode;
+      if (!cur.uom) cur.uom = meta.uom || __normalizeUom(c.uom || "") || "";
+      if (!cur.customer) cur.customer = meta.customer || "";
+      req.set(low, cur);
+    }catch(_){ }
+  }
+
+  const needList = Array.from(req.values()).map(it => {
+    const qtyInt = Math.round(Number(it.qty) || 0);
+    return Object.assign({}, it, { qtyInt });
+  }).filter(it => it && it.qtyInt > 0);
+
+  if (!needList.length){
+    showToast("Distinta base non valida: nessun componente con quantità", "warn");
+    return null;
+  }
+
+  // Disponibilità (best effort) per warning e per split sede
+  const avail = __fpBuildAvailByWhCustomerCode();
+  const shortages = [];
+  for (const it of needList){
+    const key = __fpProdMovKey(it.customer, it.code);
+    const aC = Math.max(0, safeInt(avail.cerea.get(key)));
+    const aK = Math.max(0, safeInt(avail.concamarise.get(key)));
+    const tot = aC + aK;
+    if (tot < it.qtyInt){
+      shortages.push({
+        code: it.code,
+        item: it.item,
+        uom: it.uom,
+        need: it.qtyInt,
+        have: tot,
+        cerea: aC,
+        concamarise: aK
+      });
+    }
+  }
+
+  // Se mancano componenti, blocca la produzione (niente stock negativo)
+  if (shortages.length){
+    const sPrev = shortages.slice(0, 8).map(s => `${s.code}: richiesti ${s.need}, disponibili ${s.have} (Cerea ${s.cerea}, Conca ${s.concamarise})`).join(" • ");
+    const moreS = (shortages.length > 8) ? ` … +${shortages.length - 8} altri` : "";
+    try{ showToast("Scorte insufficienti: impossibile produrre. Riduci la quantità o carica i componenti.", "warn"); }catch(_){ }
+    try{
+      if (typeof openModal === "function"){
+        openModal("Scorte insufficienti", `Non puoi produrre ${qty} ${fpUom} di ${fpCode} — ${fpName}. Mancano: ${sPrev}${moreS}`);
+      }
+    }catch(_){ }
+    return null;
+  }
+
+  // Preview (max 12 righe)
+  const prev = needList.slice(0, 12).map(it => `• ${it.code} — ${Math.round(it.qtyInt)} ${String(it.uom||"").trim()}`);
+  const more = (needList.length > 12) ? `\n… +${needList.length - 12} altri` : "";
+
+  let msg = `Produrre ${qty} ${fpUom} di\n${fpCode} — ${fpName}?\n\n` +
+    `Scarico componenti (${needList.length}):\n` +
+    prev.join("\n") + more;
+
+  if (skippedNoQty.length){
+    msg += `\n\n⚠️ Componenti senza quantità: ${Array.from(new Set(skippedNoQty)).slice(0,6).join(", ")}${skippedNoQty.length>6?"…":""}`;
+  }
+  if (skippedNotMacro.length){
+    msg += `\n\nℹ️ Componenti fuori macro (non scaricati): ${Array.from(new Set(skippedNotMacro)).slice(0,6).join(", ")}${skippedNotMacro.length>6?"…":""}`;
+  }
+  if (shortages.length){
+    const sPrev = shortages.slice(0, 6).map(s => `• ${s.code}: richiesti ${s.need}, disponibili ${s.have} (Cerea ${s.cerea}, Conca ${s.concamarise})`).join("\n");
+    msg += `\n\n⚠️ Scorte insufficienti (potresti andare in negativo):\n${sPrev}${shortages.length>6?"\n…":""}`;
+  }
+
+  msg += `\n\nConfermi?`;
+  if (!confirm(msg)) return null;
+
+  __fpProduceBusy = true;
+  try{
+    const actor = (fb.user && (fb.user.email || fb.user.uid)) || "";
+    const date = todayYYYYMMDD();
+    const batchId = `PROD-${date}-${String(Math.random()).slice(2,8)}`;
+
+    // Costruisci movimenti componenti (split su sede con più disponibilità)
+    const movs = [];
+
+    for (const it of needList){
+      const cust = String(it.customer || "").trim();
+      const key = __fpProdMovKey(cust, it.code);
+
+      let need = Math.max(0, safeInt(it.qtyInt));
+      let aC = Math.max(0, safeInt(avail.cerea.get(key)));
+      let aK = Math.max(0, safeInt(avail.concamarise.get(key)));
+
+      const first = (aK > aC) ? WAREHOUSE_CONCA : WAREHOUSE_CEREA;
+      const second = (first === WAREHOUSE_CEREA) ? WAREHOUSE_CONCA : WAREHOUSE_CEREA;
+
+      const takeFrom = (wh) => {
+        if (need <= 0) return 0;
+        const cur = (wh === WAREHOUSE_CONCA) ? aK : aC;
+        const take = Math.min(need, cur);
+        if (take <= 0) return 0;
+        need -= take;
+        if (wh === WAREHOUSE_CONCA) aK -= take;
+        else aC -= take;
+        return take;
+      };
+
+      const t1 = takeFrom(first);
+      const t2 = takeFrom(second);
+
+      // Se rimane bisogno (stock insufficiente), scarico comunque sul primo magazzino (andando in negativo)
+      let t3 = 0;
+      if (need > 0){
+        t3 = need;
+        need = 0;
+        if (first === WAREHOUSE_CONCA) aK -= t3;
+        else aC -= t3;
+      }
+
+      // aggiorna disponibilità live
+      avail.cerea.set(key, aC);
+      avail.concamarise.set(key, aK);
+
+      const note = `Produzione PF: ${fpCode} x ${qty} ${fpUom} (${batchId})`;
+      const makePayload = (warehouse, qtyInt) => ({
+        type: "OUT",
+        customer: cust,
+        code: it.code,
+        item: it.item || it.code,
+        uom: String(it.uom || "").trim(),
+        qtyRaw: `${it.qty} ${String(it.uom||"").trim()}`.trim(),
+        qty: qtyInt,
+        date: date,
+        note: note,
+        source: "Produzione PF",
+        rawText: "",
+        warehouse: warehouse,
+        docType: "PRODUZIONE",
+        docNum: batchId,
+        docDateRaw: date,
+        createdAt: serverTimestamp(),
+        createdBy: actor
+      });
+
+      if (t1 > 0) movs.push(makePayload(first, t1));
+      if (t2 > 0) movs.push(makePayload(second, t2));
+      if (t3 > 0) movs.push(makePayload(first, t3));
+    }
+
+    // Movimento carico PF
+    const fpMv = {
+      type: "IN",
+      code: fpCode,
+      item: fpName,
+      uom: fpUom,
+      qty: qty,
+      qtyRaw: `${qty} ${fpUom}`.trim(),
+      date: date,
+      note: `Produzione PF: +${qty} ${fpUom} (${batchId})`,
+      source: "Produzione PF",
+      warehouse: WAREHOUSE_FINISHED,
+      docType: "PRODUZIONE",
+      docNum: batchId,
+      docDateRaw: date,
+      createdAt: serverTimestamp(),
+      createdBy: actor
+    };
+
+    // Scrivi tutto in modo atomico (una transazione)
+    await runTransaction(fb.db, async (tx) => {
+      const fpRef = doc(orgCol("finishedInventoryMovements"));
+      tx.set(fpRef, fpMv);
+
+      for (const mv of (movs || [])){
+        const ref = doc(orgCol("inventoryMovements"));
+        tx.set(ref, mv);
+      }
+    });
+
+    showToast(`Prodotto: +${qty} ${fpUom} • scarico componenti: ${movs.length} movimenti`, "ok");
+    return { qty, batchId, movementsCount: movs.length };
+  }catch(e){
+    console.error("produceFinishedProductFromRow failed", e);
+    showToast("Errore produzione", "err");
+    throw e;
+  }finally{
+    __fpProduceBusy = false;
+  }
+}
+
 let __stockRowByKey = new Map();
 
     function renderStockTable(stockArr) {
@@ -15455,6 +17532,7 @@ let __stockRowByKey = new Map();
 function renderAll() {
       const stockArr = computeStock();
       const stockByWh = computeStockByWarehouse();
+      const fpStockByWh = computeFinishedStockByWarehouse();
       rebuildDocGroupsCache();
 
       // Home / KPI: totale (somma di tutti i magazzini)
@@ -15480,6 +17558,16 @@ function renderAll() {
           if (pillStock) pillStock.textContent = "Seleziona";
           if (stockTbody) stockTbody.innerHTML = '<tr><td class="td-muted" colspan="4">Seleziona un inventario.</td></tr>';
         } catch(_){}
+      }
+
+      // Inventario prodotti finiti: sede unica
+      try{ renderFpInventoryCategoryOptions(); }catch(_){ }
+      try{ setFinishedInventoryWarehouse(); }catch(_){ }
+      try{
+        const fpRows = buildFinishedInventoryRowsForWarehouse(__currentFinishedWarehouse, fpStockByWh || []);
+        renderFinishedStockTable(fpRows);
+      }catch(_){
+        try{ if (pillFpStock) pillFpStock.textContent = "—"; }catch(__){ }
       }
 
       renderMovementsTable();
@@ -15518,6 +17606,15 @@ function renderAll() {
 
       // UI: filtri specifici prodotti (tendine)
       try{ renderAnagProductsFiltersUI(); }catch(_){ }
+
+      // CTA: nuovo articolo (solo Materie prime / Imballaggi)
+      try{
+        if (btnAnagAddProduct) {
+          const mg = normalizeProductsMacroGroup(activeProductsMacroGroup) || "imballaggi";
+          const show = (activeAnagTab === "products") && (mg === "materie_prime" || mg === "imballaggi");
+          btnAnagAddProduct.style.display = show ? "" : "none";
+        }
+      }catch(_){ }
 
       // CTA: nuovo prodotto finito (solo in tab finished)
       try{ if (btnNewFinishedProduct) btnNewFinishedProduct.style.display = "none"; }catch(_){ }
@@ -15611,11 +17708,15 @@ try{
             <th style="width:180px">Codice</th>
             <th>Nome</th>
             <th style="width:260px">Categoria</th>
+            <th style="width:140px; text-align:right;">Distinta</th>
           `;
         } catch(_){}
 
+        // CTA: nuovo prodotto finito (solo se loggato)
+        try{ if (btnNewFinishedProduct) btnNewFinishedProduct.style.display = fb.user ? "" : "none"; }catch(_){}
+
         if (!fb.user) {
-          try { if (anagTbody) anagTbody.innerHTML = `<tr><td class="td-muted" colspan="4">Accedi con Google per sincronizzare i prodotti finiti.</td></tr>`; } catch(_){}
+          try { if (anagTbody) anagTbody.innerHTML = `<tr><td class="td-muted" colspan="5">Accedi con Google per sincronizzare i prodotti finiti.</td></tr>`; } catch(_){}
           return;
         }
 
@@ -15634,7 +17735,9 @@ try{
           if (mode === "unclassified"){
             filtered = filtered.filter(fp => {
               const k = String(fp && (fp.categoryKeyLower || fp.categoryKey || "") || "").trim();
-              return !k;
+              const comps = Array.isArray(fp && (fp.components || fp.bom || fp.distintaBase)) ? (fp.components || fp.bom || fp.distintaBase) : [];
+              // Se ha già una distinta base propria => è "Singolo" (non considerarlo "non classificato")
+              return (!k) && !(comps && comps.length);
             });
           }
         }catch(_){ }
@@ -15647,7 +17750,7 @@ try{
           const msg = (__mode === "unclassified")
             ? (q ? "Nessun prodotto finito non classificato trovato." : "Nessun prodotto finito non classificato.")
             : (q ? "Nessun prodotto finito trovato." : "Nessun prodotto finito.");
-          try { if (anagTbody) anagTbody.innerHTML = `<tr><td class="td-muted" colspan="4">${escapeHtml(msg)}</td></tr>`; } catch(_){}
+          try { if (anagTbody) anagTbody.innerHTML = `<tr><td class="td-muted" colspan="5">${escapeHtml(msg)}</td></tr>`; } catch(_){}
           try{ __fpRenderAssignControls(); }catch(_){}
           try{ __fpSyncSelectAllState(); }catch(_){}
           return;
@@ -15672,13 +17775,25 @@ try{
 
             const isSel = __fpSelectedIds.has(id) ? "checked" : "";
 
-            const catKey = String(fp && (fp.categoryKeyLower || fp.categoryKey || "") || "").trim().toLowerCase();
-            const catObj = catKey ? (finishedProductCategoriesMap.get(catKey) || null) : null;
-            const catName = String((catObj && (catObj.name || catObj.label || catObj.key)) || (catKey || "")).trim();
+            const comps = Array.isArray(fp && (fp.components || fp.bom || fp.distintaBase)) ? (fp.components || fp.bom || fp.distintaBase) : [];
+            const nDirect = comps.length;
+            const isSingle = __fpIsSingle(fp);
+
+            const catKey = isSingle ? "singolo" : String(fp && (fp.categoryKeyLower || fp.categoryKey || "") || "").trim().toLowerCase();
+            const catObj = (!isSingle && catKey) ? (finishedProductCategoriesMap.get(catKey) || null) : null;
+            const catName = isSingle ? "Singolo" : String((catObj && (catObj.name || catObj.label || catObj.key)) || (catKey || "")).trim();
             const catHtml = catName ? escapeHtml(catName) : '<span class="td-muted">—</span>';
 
-            const comps = Array.isArray(fp && (fp.components || fp.bom || fp.distintaBase)) ? (fp.components || fp.bom || fp.distintaBase) : [];
-            const n = comps.length;
+            // label distinta: se in categoria, mostra conteggio BOM della categoria; se singolo, conteggio BOM proprio
+            let bomCount = isSingle ? nDirect : 0;
+            try{
+              if (!isSingle && catObj){
+                const catBom = Array.isArray(catObj && (catObj.bom || catObj.components)) ? (catObj.bom || catObj.components) : [];
+                bomCount = catBom.length;
+              }
+            }catch(_){ bomCount = isSingle ? nDirect : 0; }
+
+            const bomBtnLabel = bomCount ? ("Distinta (" + bomCount + ")") : "Distinta";
 
             return `
               <tr class="jsFpRow" data-fp-id="${escapeHtmlAttr(id)}">
@@ -15688,11 +17803,14 @@ try{
                 <td data-label="Codice"><span class="kbd">${escapeHtml(code || "—")}</span></td>
                 <td data-label="Nome">${escapeHtml(name || "—")}</td>
                 <td data-label="Categoria">${catHtml}</td>
+                <td data-label="Distinta" style="text-align:right;">
+                  <button class="btn btn-ghost btn-xs" type="button" data-action="openFinishedProduct" data-id="${escapeHtmlAttr(id)}" title="Apri distinta base">${escapeHtml(bomBtnLabel)}</button>
+                </td>
               </tr>
             `;
           }).join("");
         }catch(_){
-          try { if (anagTbody) anagTbody.innerHTML = `<tr><td class="td-muted" colspan="4">Errore rendering.</td></tr>`; } catch(_){}
+          try { if (anagTbody) anagTbody.innerHTML = `<tr><td class="td-muted" colspan="5">Errore rendering.</td></tr>`; } catch(_){}
         }
 
         try{ __fpRenderAssignControls(); }catch(_){}
@@ -16614,6 +18732,36 @@ async function deleteSupplierCascade(supplierId){
       `);
 
 
+      // Prezzo fornitore (non modificabile, da fatture fornitori)
+      try{
+        let spTxt = "—";
+        let spMeta = "";
+        if (!isAliasGroup) {
+          const __spRaw = (p && (p.supplierPrice != null ? p.supplierPrice : (p.prezzoFornitore != null ? p.prezzoFornitore : null)));
+          const __spNum = (__spRaw === "" || __spRaw == null) ? null : Number(__spRaw);
+          if (__spNum != null && Number.isFinite(__spNum)){
+            try{ spTxt = "€ " + __spNum.toLocaleString("it-IT", { minimumFractionDigits: 2, maximumFractionDigits: 6 }); }catch(_){ spTxt = "€ " + String(__spNum); }
+          }
+          const mParts = [];
+          const supN = String((p && (p.supplierPriceSupplierName || p.supplierPriceSupplier || "")) || "").trim();
+          if (supN) mParts.push(supN);
+          const invN = String((p && (p.supplierPriceInvoiceNumber || p.supplierPriceDocNum || "")) || "").trim();
+          if (invN) mParts.push("Fatt. " + invN);
+          const invD = String((p && (p.supplierPriceInvoiceDate || p.supplierPriceDate || "")) || "").trim();
+          if (invD) mParts.push(invD);
+          spMeta = mParts.join(" • ");
+        } else {
+          spMeta = "Alias di più codici: apri un singolo articolo per vedere il prezzo fornitore.";
+        }
+
+        baseFields.push(`
+          <div class="field">
+            <label>Prezzo fornitore</label>
+            <input value="${h(spTxt)}" readonly />
+            <div class="td-muted" style="margin-top:6px;">${h(spMeta || "Campo aggiornato automaticamente dalle fatture fornitori XML.")}</div>
+          </div>
+        `);
+      }catch(_){}
 
 
 // Fornitore (solo in Anagrafica prodotti)
@@ -18581,8 +20729,138 @@ async function handleFileSelection(fileList) {
     if (anagProdSort) anagProdSort.addEventListener("change", () => renderAnag());
     if (btnReloadAnag) btnReloadAnag.addEventListener("click", () => { renderAnag(); showToast("Anagrafica aggiornata"); });
 
+    // Nuovo articolo (Materie prime / Imballaggi)
+    function __openNewProductModal(){
+      if (!modalNewProduct) return;
+      if (!fb.user) { try{ showToast("Accedi con Google per creare un articolo", "warn"); }catch(_){ } return; }
+      try{
+        if (newProdCode) newProdCode.value = "";
+        if (newProdName) newProdName.value = "";
+      }catch(_){ }
+      modalNewProduct.classList.add("open");
+      __syncBodyLockFromModals();
+      setTimeout(() => { try{ newProdCode && newProdCode.focus(); }catch(_){ } }, 50);
+    }
+    function __closeNewProductModal(){
+      if (!modalNewProduct) return;
+      modalNewProduct.classList.remove("open");
+      __syncBodyLockFromModals();
+      try{ if (newProdCode) newProdCode.value = ""; }catch(_){ }
+      try{ if (newProdName) newProdName.value = ""; }catch(_){ }
+    }
+
+    if (btnAnagAddProduct) btnAnagAddProduct.addEventListener("click", (e) => {
+      try{ e.preventDefault(); e.stopPropagation(); }catch(_){ }
+      __openNewProductModal();
+    });
+    if (newProdClose) newProdClose.addEventListener("click", __closeNewProductModal);
+    if (newProdCancel) newProdCancel.addEventListener("click", __closeNewProductModal);
+    if (modalNewProduct) modalNewProduct.addEventListener("click", (e) => { if (e.target === modalNewProduct) __closeNewProductModal(); });
+
+    if (newProdCode) newProdCode.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); try{ newProdCreate && newProdCreate.click(); }catch(_){ } }
+      if (e.key === "Escape") { e.preventDefault(); __closeNewProductModal(); }
+    });
+    if (newProdName) newProdName.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); try{ newProdCreate && newProdCreate.click(); }catch(_){ } }
+      if (e.key === "Escape") { e.preventDefault(); __closeNewProductModal(); }
+    });
+
+    if (newProdCreate) newProdCreate.addEventListener("click", async (e) => {
+      try{ e.preventDefault(); e.stopPropagation(); }catch(_){ }
+      if (!fb.user) { try{ showToast("Accedi con Google per creare un articolo", "warn"); }catch(_){ } return; }
+
+      const code = String(newProdCode && newProdCode.value || "").trim();
+      const nameIn = String(newProdName && newProdName.value || "").trim();
+      if (!code) { try{ showToast("Inserisci un codice articolo", "warn"); }catch(_){ } try{ newProdCode && newProdCode.focus(); }catch(_){ } return; }
+
+      const existing = findProductByCode(code);
+      if (existing) {
+        __closeNewProductModal();
+        try{ openProductModal(code, { __mode: "master", code }); }catch(_){ }
+        return;
+      }
+
+      const low = code.toLowerCase();
+      const name = nameIn || code;
+
+      // default categoria: se stai guardando una categoria specifica, usala.
+      // In Materie prime, se non c’è filtro selezionato, assegna una categoria valida per farlo comparire in lista.
+      const mg = normalizeProductsMacroGroup(activeProductsMacroGroup) || "imballaggi";
+      let catDefault = "";
+      try{
+        const catSel = String(anagProdCategoryFilter && anagProdCategoryFilter.value || "").trim();
+        if (catSel && catSel !== "__none" && categoryMacroGroup(catSel) === mg) catDefault = catSel;
+      }catch(_){ }
+      if (!catDefault && mg === "materie_prime") {
+        try{
+          const k0 = normalizeMacroCategory("materie_prime");
+          if (k0) catDefault = k0;
+        }catch(_){ }
+        if (!catDefault) {
+          try{
+            const list = (Array.isArray(categories) ? categories : []).filter(c => c && categoryMacroGroup(c.key) === "materie_prime");
+            if (list.length) catDefault = String(list[0].key || "").trim().toLowerCase();
+          }catch(_){ }
+        }
+      }
+
+      const catNorm = normalizeMacroCategory(catDefault);
+
+      // UI lock
+      const oldTxt = String(newProdCreate.textContent || "Crea");
+      try{ newProdCreate.disabled = true; newProdCreate.textContent = "Creo…"; }catch(_){ }
+
+      // Offline fallback + UI immediata: aggiorna mapping categorie
+      try{
+        state.productCategories = state.productCategories || {};
+        if (catNorm) state.productCategories[low] = catNorm;
+        else delete state.productCategories[low];
+        saveLocalData();
+      }catch(_){ }
+
+      // Optimistic local product (se la lista è già in memoria)
+      try{
+        const p0 = findProductByCode(code);
+        if (p0) {
+          p0.name = name;
+          p0.nameLower = name.toLowerCase();
+          if (catNorm) p0.category = catNorm;
+          p0.updatedAtIso = new Date().toISOString();
+        }
+      }catch(_){ }
+
+      try {
+        if (!fb.db) throw new Error("Firestore non inizializzato");
+
+        const patch = {
+          code: code,
+          codeLower: low,
+          name: name,
+          nameLower: name.toLowerCase(),
+          updatedAt: serverTimestamp(),
+          updatedBy: (fb.user.email || fb.user.uid || "")
+        };
+        if (catNorm) patch.category = catNorm;
+
+        await setDoc(doc(fb.db, "orgs", ORG_ID, "products", keyToDocId(low)), patch, { merge: true });
+
+        try{ renderAll(); renderAnag(); }catch(_){ }
+        try{ showToast("Articolo creato"); }catch(_){ }
+
+        __closeNewProductModal();
+        try{ openProductModal(code, { __mode: "master", code }); }catch(_){ }
+        setTimeout(() => { try{ document.getElementById("prodNameEdit") && document.getElementById("prodNameEdit").focus(); }catch(_){ } }, 120);
+      } catch (err) {
+        console.error(err);
+        try{ showToast("Errore creazione articolo", "err"); }catch(_){ }
+      } finally {
+        try{ newProdCreate.disabled = false; newProdCreate.textContent = oldTxt; }catch(_){ }
+      }
+    });
+
     // Nuovo prodotto finito
-    if (btnNewFinishedProduct) btnNewFinishedProduct.addEventListener("click", () => { try{ setView && setView("fpCategories"); }catch(_){ } try{ showToast && showToast("Usa ‘Categorie prodotti finiti’ per gestire la BOM.", "warn"); }catch(_){ } });
+    if (btnNewFinishedProduct) btnNewFinishedProduct.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){ } try{ openFinishedProductModal(null); }catch(_){ } });
 // Supplier modal
     if (supClose) supClose.addEventListener("click", closeSupplierModal);
     if (btnSupDone) btnSupDone.addEventListener("click", closeSupplierModal);
@@ -19018,6 +21296,18 @@ function __fpRenderSmartBrowse(){
       }
       __fpDraft = __fpEnsureDraftBase(fp || {});
 
+      // Se il PF appartiene a una categoria con distinta base, la distinta del singolo viene ignorata.
+      // (manteniamo il draft vuoto: la distinta si gestisce nelle "Categorie prodotti finiti")
+      try{
+        if (fp){
+          const catKey = String(fp.categoryKeyLower || fp.categoryKey || fp.category || "").trim().toLowerCase();
+          const catBom = __fpCategoryBomForKey(catKey);
+          if (Array.isArray(catBom) && catBom.length){
+            __fpDraft.components = [];
+          }
+        }
+      }catch(_){ }
+
       if (fpTitle) fpTitle.textContent = fid ? "Prodotto finito" : "Nuovo prodotto finito";
       if (fpName) fpName.value = String(__fpDraft.name || __fpDraft.nome || "").trim();
       if (fpCode) fpCode.value = String(__fpDraft.code || "").trim();
@@ -19083,6 +21373,21 @@ function __fpRenderSmartBrowse(){
       else payload.uom = deleteField();
 
       payload.components = cleanComps;
+
+      // Regola: se il prodotto ha una distinta base propria => categoria forzata a "singolo"
+      try{
+        if (Array.isArray(cleanComps) && cleanComps.length){
+          payload.categoryKey = "singolo";
+          payload.categoryKeyLower = "singolo";
+        } else {
+          const prevCat = String(__fpDraft && (__fpDraft.categoryKeyLower || __fpDraft.categoryKey || "") || "").trim().toLowerCase();
+          if (prevCat === "singolo"){
+            payload.categoryKey = deleteField();
+            payload.categoryKeyLower = deleteField();
+          }
+        }
+      }catch(_){ }
+
 
       // Anti-duplicati: se sto CREANDO e il codice esiste gia', aggiorno quello esistente (unifica).
       const __fpCodeLower = code ? String(code).toLowerCase() : "";
@@ -19349,6 +21654,17 @@ if (action === "openProdGroup") {
             if (code) { openProductModal(code); return; }
           }catch(_){}
           showToast("Prodotto non trovato");
+          return;
+        }
+
+        if (action === "openFinishedProduct") {
+          try{
+            if (window.HubFPCategories && typeof window.HubFPCategories.openForFinishedProduct === "function"){
+              window.HubFPCategories.openForFinishedProduct(id);
+              return;
+            }
+          }catch(_){ }
+          openFinishedProductModal(id);
           return;
         }
       });
@@ -20230,6 +22546,9 @@ searchStock.addEventListener("input", () => renderAll());
     filterLow.addEventListener("change", () => renderAll());
     if (filterCategory) filterCategory.addEventListener("change", () => renderAll());
 
+    if (fpInvSearch) fpInvSearch.addEventListener("input", () => renderAll());
+    if (fpInvFilterCategory) fpInvFilterCategory.addEventListener("change", () => renderAll());
+
     // Click su riga stock: dettaglio + categoria
     if (stockTbody) {
       stockTbody.addEventListener("click", async (e) => {
@@ -20342,6 +22661,136 @@ searchStock.addEventListener("input", () => renderAll());
 
 }
 
+    // Inventario prodotti finiti: PRODUCI via modale (click su riga)
+    let __fpProduceCtx = { key: "", row: null };
+    const modalFpProduce = document.getElementById("modalFpProduce");
+    const fpProduceTitle = document.getElementById("fpProduceTitle");
+    const fpProduceSub = document.getElementById("fpProduceSub");
+    const fpProduceQty = document.getElementById("fpProduceQty");
+    const btnFpProduceDo = document.getElementById("btnFpProduceDo");
+    const btnCloseFpProduce = document.getElementById("btnCloseFpProduce");
+
+    function __closeFpProduceModal(){
+      try{ if (modalFpProduce) modalFpProduce.classList.remove("open"); }catch(_){ }
+      try{ (typeof __syncBodyLockFromModals === "function") && __syncBodyLockFromModals(); }catch(_){ }
+      __fpProduceCtx = { key: "", row: null };
+      try{ if (fpProduceQty) fpProduceQty.value = ""; }catch(_){ }
+    }
+
+    function __openFpProduceModal(row, key){
+      const r = row || null;
+      const k = String(key || "").trim();
+      if (!r) return;
+      if (!modalFpProduce || !fpProduceQty || !btnFpProduceDo){
+        // fallback minimale (se manca HTML)
+        const label = `${String(r.code||"").trim()} — ${String(r.item||"").trim()}`.trim();
+        const raw = prompt(`Quantità da produrre\n\n${label}`, "1");
+        if (raw == null) return;
+        const qty = safeInt(raw);
+        if (!Number.isFinite(qty) || qty <= 0) { showToast("Quantità non valida", "warn"); return; }
+        produceFinishedProductFromRow(r, qty).catch(console.error);
+        return;
+      }
+
+      __fpProduceCtx = { key: k, row: r };
+
+      try{ if (fpProduceTitle) fpProduceTitle.textContent = "Produci"; }catch(_){ }
+      try{ if (fpProduceSub) fpProduceSub.textContent = `${String(r.code||"").trim()} — ${String(r.item||"").trim()}`.trim() || "—"; }catch(_){ }
+
+      try{
+        fpProduceQty.value = "1";
+        fpProduceQty.focus();
+        fpProduceQty.select();
+      }catch(_){ }
+
+      try{ modalFpProduce.classList.add("open"); }catch(_){ }
+      try{ (typeof __syncBodyLockFromModals === "function") && __syncBodyLockFromModals(); }catch(_){ }
+    }
+
+    async function __doFpProduceFromModal(){
+      const r = __fpProduceCtx.row;
+      if (!r) return;
+      let qty = safeInt(fpProduceQty ? fpProduceQty.value : "");
+      if (!Number.isFinite(qty) || qty <= 0){
+        showToast("Quantità non valida", "warn");
+        try{ if (fpProduceQty){ fpProduceQty.focus(); fpProduceQty.select(); } }catch(_){ }
+        return;
+      }
+
+      // sicurezza: solo se ha distinta base (prodotto o categoria)
+      if (!__fpHasBomForCode(r.code)) {
+        showToast("Prodotto non producibile: distinta base mancante", "warn");
+        return;
+      }
+
+      const oldText = btnFpProduceDo ? btnFpProduceDo.textContent : "Produci";
+      try{
+        if (btnFpProduceDo) { btnFpProduceDo.disabled = true; btnFpProduceDo.textContent = "Produco…"; }
+        if (fpProduceQty) fpProduceQty.disabled = true;
+
+        const res = await produceFinishedProductFromRow(r, qty);
+
+        if (res && res.qty){
+          // UI ottimistica: aggiorna quantità visualizzata
+          try{
+            const newQty = safeInt(r.qty) + safeInt(res.qty);
+            r.qty = newQty;
+            const uom = __normalizeUom(r.uom || "") || "pz";
+            const html = `<span style="font-weight:900;">${newQty.toLocaleString("it-IT")}</span> <span class="td-muted" style="font-size:12px; font-weight:900;">${escapeHtml(uom)}</span>`;
+
+            if (fpStockTbody){
+              const trs = fpStockTbody.querySelectorAll('tr[data-k]');
+              for (const tr of trs){
+                if (String(tr.getAttribute('data-k') || '') === String(__fpProduceCtx.key || '')){
+                  const td = tr.querySelector('.jsFpQtyCell');
+                  if (td) td.innerHTML = html;
+                  break;
+                }
+              }
+            }
+          }catch(_){ }
+          __closeFpProduceModal();
+        }
+      } catch (err) {
+        console.error(err);
+      } finally {
+        try{ if (btnFpProduceDo){ btnFpProduceDo.textContent = oldText || "Produci"; btnFpProduceDo.disabled = false; } }catch(_){ }
+        try{ if (fpProduceQty) fpProduceQty.disabled = false; }catch(_){ }
+      }
+    }
+
+    // bind modale (una volta)
+    try{
+      if (modalFpProduce && modalFpProduce.dataset.bound !== "1"){
+        modalFpProduce.dataset.bound = "1";
+        modalFpProduce.addEventListener("click", (e) => { if (e.target === modalFpProduce) __closeFpProduceModal(); });
+        if (btnCloseFpProduce) btnCloseFpProduce.addEventListener("click", __closeFpProduceModal);
+        if (btnFpProduceDo) btnFpProduceDo.addEventListener("click", __doFpProduceFromModal);
+        if (fpProduceQty) {
+          fpProduceQty.addEventListener("keydown", (e) => {
+            if (e.key === "Enter") { e.preventDefault(); __doFpProduceFromModal(); }
+            if (e.key === "Escape") { e.preventDefault(); __closeFpProduceModal(); }
+          });
+        }
+      }
+    }catch(_){ }
+
+    if (fpStockTbody) {
+      fpStockTbody.addEventListener("click", (e) => {
+        const tr = e.target.closest("tr[data-k]");
+        if (!tr) return;
+        const k = tr.getAttribute("data-k") || "";
+        const row = __fpStockRowByKey.get(k);
+        if (!row) return;
+
+        if (!__fpHasBomForCode(row.code)) {
+          showToast("Prodotto non producibile: distinta base mancante", "warn");
+          return;
+        }
+        __openFpProduceModal(row, k);
+      });
+    }
+
     const btnNewMovementManual = document.getElementById("btnNewMovementManual");
     if (btnNewMovementManual) btnNewMovementManual.addEventListener("click", () => {
 resetManualModal();
@@ -20410,6 +22859,7 @@ if (importMovementsInput) importMovementsInput.addEventListener("change", async 
         showToast,
         exportMovementsCSV,
         deleteMovement,
+        deletePfProduction,
         openDocDetail,
 
         // Categorie
@@ -20756,4 +23206,641 @@ table.dataGrid tbody td{
     // Re-apply if something hot-injects/refreshes the Home UI
     window.addEventListener("HubInvReady", schedule);
   }catch(_){ }
+})();
+
+
+/* ===== supplier_invoices.js ===== */
+/* Fatture fornitori (XML):
+   - carica molte fatture XML
+   - scarta automaticamente quelle che non contengono codici presenti in inventario
+   - aggiorna il campo non modificabile "Prezzo fornitore" sui prodotti (imballaggi/materie prime)
+*/
+(function(){
+  "use strict";
+
+  const S = {
+    ready: false,
+    unsub: null,
+    items: [],
+    keySet: new Set()
+  };
+
+  const H = () => (globalThis && globalThis.__HUB) ? globalThis.__HUB : null;
+  const $ = (id) => document.getElementById(id);
+
+  function esc(s){
+    return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
+  }
+
+  function norm(s){ return String(s ?? "").trim().toLowerCase(); }
+
+  function cleanVat(v){
+    const s = String(v ?? "").trim();
+    if (!s) return "";
+    return s.replace(/[^0-9A-Za-z]/g, "").toUpperCase();
+  }
+
+  function toISODate(v){
+    const s0 = String(v ?? "").trim();
+    if (!s0) return "";
+    const s = s0.replace(/\s+/g, " ").trim();
+
+    // YYYY-MM-DD
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+
+    // DD/MM/YYYY or DD-MM-YYYY
+    const m = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})$/);
+    if (m){
+      const dd = String(m[1]).padStart(2,"0");
+      const mm = String(m[2]).padStart(2,"0");
+      let yy = String(m[3]);
+      if (yy.length === 2) yy = "20" + yy;
+      return `${yy}-${mm}-${dd}`;
+    }
+
+    // fallback Date parse
+    try{
+      const d = new Date(s);
+      if (!Number.isNaN(d.getTime())) return d.toISOString().slice(0,10);
+    }catch(_){ }
+    return "";
+  }
+
+  function fmtDateIT(iso){
+    const s = String(iso || "").trim();
+    if (!s) return "—";
+    try{
+      const d = new Date(s);
+      if (!Number.isNaN(d.getTime())) return d.toLocaleDateString("it-IT");
+    }catch(_){ }
+    return s;
+  }
+
+  function parsePrice(v){
+    if (v == null) return null;
+    let s = String(v).trim();
+    if (!s) return null;
+
+    // remove spaces
+    s = s.replace(/\s+/g, "");
+
+    // If contains both '.' and ',', try to guess thousand/decimal separators
+    if (s.includes(",") && s.includes(".")){
+      // assume Italian: '.' thousands and ',' decimal
+      if (s.lastIndexOf(",") > s.lastIndexOf(".")){
+        s = s.replace(/\./g, "").replace(",", ".");
+      } else {
+        // assume US: ',' thousands and '.' decimal
+        s = s.replace(/,/g, "");
+      }
+    } else if (s.includes(",") && !s.includes(".")){
+      s = s.replace(",", ".");
+    }
+
+    const n = Number(s);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  function textIn(el, tag){
+    if (!el) return "";
+    try{
+      const n = el.getElementsByTagName(tag);
+      if (n && n.length) return String(n[0].textContent || "").trim();
+    }catch(_){ }
+    return "";
+  }
+
+  function parseFatturaPA(xmlDoc, fileName){
+    const out = [];
+
+    const header = xmlDoc.getElementsByTagName("FatturaElettronicaHeader")[0] || null;
+    const ced = header ? (header.getElementsByTagName("CedentePrestatore")[0] || null) : null;
+    const datiAnag = ced ? (ced.getElementsByTagName("DatiAnagrafici")[0] || null) : null;
+    const anag = datiAnag ? (datiAnag.getElementsByTagName("Anagrafica")[0] || null) : null;
+
+    const denom = textIn(anag, "Denominazione");
+    const nome = textIn(anag, "Nome");
+    const cognome = textIn(anag, "Cognome");
+    const supplierName = (denom || [nome, cognome].filter(Boolean).join(" ")).trim();
+
+    let supplierVat = "";
+    try{
+      const idIva = datiAnag ? (datiAnag.getElementsByTagName("IdFiscaleIVA")[0] || null) : null;
+      supplierVat = textIn(idIva, "IdCodice") || textIn(datiAnag, "CodiceFiscale");
+    }catch(_){}
+
+    const bodies = Array.from(xmlDoc.getElementsByTagName("FatturaElettronicaBody") || []);
+    const bodiesToScan = bodies.length ? bodies : [xmlDoc];
+
+    bodiesToScan.forEach((body, iBody) => {
+      const datiGenDoc = (body.getElementsByTagName("DatiGeneraliDocumento")[0] || null);
+      const dateRaw = textIn(datiGenDoc, "Data");
+      const numberRaw = textIn(datiGenDoc, "Numero");
+
+      const dateISO = toISODate(dateRaw);
+      const number = String(numberRaw || "").trim();
+
+      const lines = [];
+      const detts = Array.from(body.getElementsByTagName("DettaglioLinee") || []);
+      detts.forEach((ln) => {
+        let code = "";
+        try{
+          const codArt = Array.from(ln.getElementsByTagName("CodiceArticolo") || []);
+          for (const ca of codArt){
+            const v = textIn(ca, "CodiceValore");
+            if (v){ code = v; break; }
+          }
+        }catch(_){}
+
+        if (!code){
+          code = textIn(ln, "Codice") || textIn(ln, "Code");
+        }
+        code = String(code || "").trim();
+
+        const price = parsePrice(textIn(ln, "PrezzoUnitario") || textIn(ln, "UnitNetPrice") || textIn(ln, "UnitPrice"));
+        if (!code || price == null) return;
+
+        lines.push({ code, price });
+      });
+
+      // Se il file contiene più body, differenziamo la key con l'indice
+      out.push({
+        format: "fatturapa",
+        fileName: String(fileName || "").trim(),
+        supplierName,
+        supplierVat,
+        dateISO,
+        number: number || (iBody ? String(iBody+1) : ""),
+        lines
+      });
+    });
+
+    return out;
+  }
+
+  function parseEasyfatt(xmlDoc, fileName){
+    const out = [];
+    const docs = Array.from(xmlDoc.getElementsByTagName("Document") || []);
+    if (!docs.length) return out;
+
+    docs.forEach((docEl, i) => {
+      const dateISO = toISODate(textIn(docEl, "DocumentDate") || textIn(docEl, "Date"));
+      const number = String(textIn(docEl, "DocumentNumber") || textIn(docEl, "Number") || "").trim();
+
+      // in Easyfatt spesso il partner è "Customer"
+      const cust = docEl.getElementsByTagName("Customer")[0] || null;
+      const supplierName = String(textIn(cust, "Name") || textIn(docEl, "CustomerName") || textIn(docEl, "SupplierName") || "").trim();
+      const supplierVat = String(textIn(cust, "VatCode") || textIn(docEl, "VatCode") || "").trim();
+
+      const lines = [];
+      const rowsWrap = docEl.getElementsByTagName("Rows")[0] || null;
+      const rows = rowsWrap ? Array.from(rowsWrap.getElementsByTagName("Row") || []) : Array.from(docEl.getElementsByTagName("Row") || []);
+      rows.forEach((row) => {
+        const code = String(textIn(row, "Code") || textIn(row, "ItemCode") || "").trim();
+        const price = parsePrice(textIn(row, "UnitNetPrice") || textIn(row, "UnitPrice") || textIn(row, "Price"));
+        if (!code || price == null) return;
+        lines.push({ code, price });
+      });
+
+      out.push({
+        format: "easyfatt",
+        fileName: String(fileName || "").trim(),
+        supplierName,
+        supplierVat,
+        dateISO,
+        number: number || (i ? String(i+1) : ""),
+        lines
+      });
+    });
+
+    return out;
+  }
+
+  function parseGeneric(xmlDoc, fileName){
+    // fallback minimale
+    const out = [];
+    const dateISO = toISODate(
+      textIn(xmlDoc, "Data") ||
+      textIn(xmlDoc, "Date") ||
+      textIn(xmlDoc, "DocumentoData") ||
+      textIn(xmlDoc, "DocumentDate")
+    );
+    const number = String(
+      textIn(xmlDoc, "Numero") ||
+      textIn(xmlDoc, "Number") ||
+      textIn(xmlDoc, "DocumentNumber") ||
+      ""
+    ).trim();
+
+    const supplierName = String(textIn(xmlDoc, "Denominazione") || textIn(xmlDoc, "SupplierName") || textIn(xmlDoc, "Fornitore") || "").trim();
+
+    const lines = [];
+    const candidates = []
+      .concat(Array.from(xmlDoc.getElementsByTagName("DettaglioLinee") || []))
+      .concat(Array.from(xmlDoc.getElementsByTagName("Row") || []))
+      .concat(Array.from(xmlDoc.getElementsByTagName("Linea") || []));
+
+    candidates.forEach((ln) => {
+      const code = String(
+        textIn(ln, "CodiceValore") ||
+        textIn(ln, "Codice") ||
+        textIn(ln, "Code") ||
+        textIn(ln, "ItemCode") ||
+        ""
+      ).trim();
+      const price = parsePrice(
+        textIn(ln, "PrezzoUnitario") ||
+        textIn(ln, "UnitNetPrice") ||
+        textIn(ln, "UnitPrice") ||
+        textIn(ln, "Price") ||
+        textIn(ln, "Prezzo")
+      );
+      if (!code || price == null) return;
+      lines.push({ code, price });
+    });
+
+    out.push({
+      format: "generic",
+      fileName: String(fileName || "").trim(),
+      supplierName,
+      supplierVat: "",
+      dateISO,
+      number,
+      lines
+    });
+
+    return out;
+  }
+
+  function parseInvoicesFromXmlText(xmlText, fileName){
+    if (!xmlText) return [];
+    let xmlDoc = null;
+    try{
+      const parser = new DOMParser();
+      xmlDoc = parser.parseFromString(String(xmlText), "application/xml");
+      if (xmlDoc && xmlDoc.getElementsByTagName("parsererror") && xmlDoc.getElementsByTagName("parsererror").length){
+        return [];
+      }
+    }catch(_){ return []; }
+
+    let rootName = "";
+    try{ rootName = String(xmlDoc.documentElement && xmlDoc.documentElement.nodeName || ""); }catch(_){ rootName = ""; }
+    const rootLow = rootName.toLowerCase();
+
+    // FatturaPA
+    if (rootLow.includes("fatturaelettronica") || xmlDoc.getElementsByTagName("FatturaElettronicaHeader").length){
+      return parseFatturaPA(xmlDoc, fileName);
+    }
+
+    // Easyfatt
+    if (rootLow.includes("easyfatt") || xmlDoc.getElementsByTagName("EasyfattDocuments").length || xmlDoc.getElementsByTagName("Document").length){
+      const parsed = parseEasyfatt(xmlDoc, fileName);
+      if (parsed.length) return parsed;
+    }
+
+    // fallback
+    return parseGeneric(xmlDoc, fileName);
+  }
+
+  function buildInvoiceKey(inv){
+    const vat = cleanVat(inv && inv.supplierVat);
+    const supKey = vat || norm(inv && inv.supplierName) || "nosupplier";
+    const numKey = norm(inv && inv.number) || "nonum";
+    const dateKey = String(inv && inv.dateISO || "").trim() || "nodate";
+    return `SUPINV|${supKey}|${numKey}|${dateKey}`;
+  }
+
+  function setImportMeta(msg){
+    const el = $("supplierInvoicesImportMeta");
+    if (el) el.textContent = msg;
+  }
+
+  function setListMeta(msg){
+    const el = $("supplierInvoicesMeta");
+    if (el) el.textContent = msg;
+  }
+
+  function setPill(n){
+    const pill = $("pillSupplierInvoicesCount");
+    if (pill) pill.textContent = String(n ?? 0);
+  }
+
+  function renderList(){
+    const tbody = $("supplierInvoicesTbody");
+    const search = norm($("supplierInvoicesSearch")?.value || "");
+    const arr = Array.isArray(S.items) ? S.items.slice() : [];
+
+    let list = arr;
+    if (search){
+      list = arr.filter(it => {
+        const hay = [
+          it.date,
+          it.number,
+          it.supplierName,
+          it.supplierVat,
+          it.fileName,
+          it.format
+        ].map(x => String(x || "")).join(" ").toLowerCase();
+        return hay.includes(search);
+      });
+    }
+
+    setPill(arr.length);
+    setListMeta(search ? (`Mostrate ${list.length}/${arr.length}`) : (`Totale ${arr.length}`));
+
+    if (!tbody) return;
+    if (!list.length){
+      tbody.innerHTML = `<tr><td class="td-muted" colspan="6">${search ? "Nessun risultato." : "Nessuna fattura caricata."}</td></tr>`;
+      return;
+    }
+
+    const rows = list.map((it) => {
+      const dateTxt = fmtDateIT(it.date || it.dateISO || "");
+      const num = String(it.number || "—");
+      const sup = String(it.supplierName || it.supplier || "—");
+      const codes = Number(it.matchedCodesCount ?? it.codesCount ?? it.itemsCount ?? 0) || 0;
+      const upd = Number(it.updatedCodesCount ?? it.updatedCount ?? 0) || 0;
+      const file = String(it.fileName || it.file || "—");
+      return `
+        <tr>
+          <td>${esc(dateTxt)}</td>
+          <td>${esc(num)}</td>
+          <td>${esc(sup)}</td>
+          <td class="qty">${esc(String(codes))}</td>
+          <td class="qty">${esc(String(upd))}</td>
+          <td class="colHideSm">${esc(file)}</td>
+        </tr>
+      `;
+    }).join("");
+
+    tbody.innerHTML = rows;
+  }
+
+  function subscribe(){
+    const h = H();
+    if (!h || !h.fb || !h.fb.db || !h.FS) return false;
+    if (S.unsub) return true;
+
+    try{
+      const { collection, query, orderBy, onSnapshot } = h.FS;
+      S.unsub = onSnapshot(
+        query(collection(h.fb.db, "orgs", h.ORG_ID, "supplierInvoices"), orderBy("date","desc")),
+        (snap) => {
+          const arr = [];
+          snap.forEach((docu) => {
+            const d = docu.data() || {};
+            arr.push(Object.assign({ _id: docu.id }, d));
+          });
+          S.items = arr;
+          S.keySet = new Set(arr.map(x => String(x && (x.key || x.invoiceKey || "") || "").trim()).filter(Boolean));
+          renderList();
+        },
+        (err) => {
+          try{ console.warn("supplierInvoices snapshot error", err); }catch(_){}
+        }
+      );
+      return true;
+    }catch(e){
+      try{ console.warn("supplierInvoices subscribe failed", e); }catch(_){}
+      return false;
+    }
+  }
+
+  async function importFiles(){
+    const h = H();
+    if (!h) return;
+
+    // Requisiti: login + db
+    if (!h.fb || !h.fb.user || !h.fb.db){
+      try{
+        h.showToast ? h.showToast("Accedi per caricare le fatture fornitori", "warn") : alert("Accedi per caricare le fatture fornitori.");
+      }catch(_){}
+      return;
+    }
+
+    const inp = $("supplierInvoicesFiles");
+    const btn = $("btnSupplierInvoicesImport");
+    const resetBtn = $("btnSupplierInvoicesResetFiles");
+
+    const files = inp && inp.files ? Array.from(inp.files) : [];
+    if (!files.length){
+      setImportMeta("Seleziona uno o più file XML.");
+      return;
+    }
+
+    try{ if (btn) btn.disabled = true; }catch(_){}
+    try{ if (resetBtn) resetBtn.disabled = true; }catch(_){}
+    try{ if (inp) inp.disabled = true; }catch(_){}
+
+    const totalFiles = files.length;
+    let processedFiles = 0;
+    let parsedInvoices = 0;
+    let validInvoices = 0;
+    let discardedInvoices = 0;
+    let duplicateInvoices = 0;
+    let updatedPrices = 0;
+    let parseErrors = 0;
+
+    const { doc, setDoc, serverTimestamp } = h.FS;
+
+    // snapshot prodotti: usa quello già in memoria (più veloce)
+    const products = (typeof h.getProducts === "function") ? (h.getProducts() || []) : [];
+    const prodCount = Array.isArray(products) ? products.length : 0;
+
+    setImportMeta(`Pronto: ${totalFiles} file • ${prodCount} articoli in inventario`);
+
+    const userId = String((h.fb.user && (h.fb.user.email || h.fb.user.uid)) || "");
+
+    for (const file of files){
+      processedFiles++;
+      const fname = String(file && file.name || "").trim();
+
+      setImportMeta(`Elaboro ${processedFiles}/${totalFiles} • ${fname}`);
+
+      let text = "";
+      try{
+        text = await file.text();
+      }catch(_){
+        parseErrors++;
+        continue;
+      }
+
+      let invoices = [];
+      try{
+        invoices = parseInvoicesFromXmlText(text, fname) || [];
+      }catch(_){
+        invoices = [];
+      }
+
+      if (!Array.isArray(invoices) || !invoices.length){
+        parseErrors++;
+        continue;
+      }
+
+      parsedInvoices += invoices.length;
+
+      for (const inv of invoices){
+        const invDate = toISODate(inv.dateISO || inv.date || "");
+        inv.dateISO = invDate;
+        const key = buildInvoiceKey(inv);
+
+        // duplicato (già presente)
+        if (S.keySet && S.keySet.has(key)){
+          duplicateInvoices++;
+          continue;
+        }
+
+        // Dedup dei codici per fattura (ultimo prezzo vince)
+        const codeMap = new Map();
+        (Array.isArray(inv.lines) ? inv.lines : []).forEach((ln) => {
+          const c = String(ln && ln.code || "").trim();
+          if (!c) return;
+          const p = parsePrice(ln && ln.price);
+          if (p == null) return;
+          codeMap.set(c, p);
+        });
+
+        // match con inventario (solo codici esistenti)
+        const matches = [];
+        codeMap.forEach((price, code) => {
+          let prod = null;
+          try{ prod = (typeof h.findProductByCode === "function") ? h.findProductByCode(code) : null; }catch(_){ prod = null; }
+          if (!prod) return;
+          const realCode = String(prod.code || code).trim();
+          matches.push({
+            code: realCode,
+            codeLower: realCode.toLowerCase(),
+            price,
+            prod
+          });
+        });
+
+        if (!matches.length){
+          discardedInvoices++;
+          continue;
+        }
+
+        validInvoices++;
+
+        // aggiorna prezzi prodotto (se più vecchio, non sovrascrive)
+        let updatedThisInv = 0;
+        for (const m of matches){
+          const prod = m.prod || {};
+          const oldDate = String(prod.supplierPriceInvoiceDate || prod.supplierPriceDate || "").trim();
+          const canUpdate = !oldDate || !invDate || (invDate >= oldDate);
+
+          if (!canUpdate) continue;
+
+          const patch = {
+            code: m.code,
+            codeLower: m.codeLower,
+            supplierPrice: m.price,
+            supplierPriceCurrency: "EUR",
+            supplierPriceInvoiceDate: invDate || "",
+            supplierPriceInvoiceNumber: String(inv.number || "").trim(),
+            supplierPriceSupplierName: String(inv.supplierName || "").trim(),
+            supplierPriceSupplierVat: String(inv.supplierVat || "").trim(),
+            supplierPriceSource: "supplierInvoiceXml",
+            supplierPriceUpdatedAt: serverTimestamp(),
+            supplierPriceUpdatedBy: userId
+          };
+
+          try{
+            const prodDocId = (h.keyToDocId ? h.keyToDocId(m.codeLower) : encodeURIComponent(m.codeLower));
+            await setDoc(doc(h.fb.db, "orgs", h.ORG_ID, "products", prodDocId), patch, { merge: true });
+            updatedThisInv++;
+          }catch(e){
+            try{ console.warn("supplierPrice update failed", m.code, e); }catch(_){}
+          }
+        }
+
+        updatedPrices += updatedThisInv;
+
+        // salva fattura (riga tabella)
+        try{
+          const invDocId = encodeURIComponent(key);
+          await setDoc(doc(h.fb.db, "orgs", h.ORG_ID, "supplierInvoices", invDocId), {
+            key,
+            format: String(inv.format || "xml"),
+            date: invDate || "",
+            number: String(inv.number || "").trim(),
+            supplierName: String(inv.supplierName || "").trim(),
+            supplierVat: String(inv.supplierVat || "").trim(),
+            fileName: String(inv.fileName || "").trim(),
+            matchedCodesCount: matches.length,
+            updatedCodesCount: updatedThisInv,
+            importedAt: serverTimestamp(),
+            importedBy: userId
+          }, { merge: true });
+
+          // aggiorna set locale (evita duplicati nello stesso batch)
+          try{ S.keySet.add(key); }catch(_){}
+        }catch(e){
+          try{ console.warn("supplierInvoices save failed", e); }catch(_){}
+        }
+      }
+
+      // yield UI ogni tanto (molti file)
+      try{ if (processedFiles % 5 === 0) await new Promise(r => setTimeout(r, 0)); }catch(_){}
+    }
+
+    setImportMeta(`Completato • file ${processedFiles}/${totalFiles} • fatture parse ${parsedInvoices} • valide ${validInvoices} • scartate ${discardedInvoices} • duplicati ${duplicateInvoices} • prezzi aggiornati ${updatedPrices} • errori ${parseErrors}`);
+
+    try{ if (btn) btn.disabled = false; }catch(_){}
+    try{ if (resetBtn) resetBtn.disabled = false; }catch(_){}
+    try{ if (inp) inp.disabled = false; }catch(_){}
+
+    try{
+      h.showToast && h.showToast(`Import completato: ${validInvoices} fatture valide • ${discardedInvoices} scartate • ${updatedPrices} prezzi aggiornati`);
+    }catch(_){}
+  }
+
+  function bindEvents(){
+    if (S.ready) return;
+    S.ready = true;
+
+    $("btnSupplierInvoicesImport")?.addEventListener("click", () => { importFiles(); });
+
+    $("btnSupplierInvoicesResetFiles")?.addEventListener("click", () => {
+      const inp = $("supplierInvoicesFiles");
+      if (inp) inp.value = "";
+      setImportMeta("—");
+    });
+
+    $("btnSupplierInvoicesClear")?.addEventListener("click", () => {
+      const i = $("supplierInvoicesSearch");
+      if (i) i.value = "";
+      renderList();
+      try{ i && i.focus && i.focus(); }catch(_){}
+    });
+
+    $("supplierInvoicesSearch")?.addEventListener("input", () => renderList());
+  }
+
+  function refresh(){
+    bindEvents();
+    subscribe();
+    renderList();
+  }
+
+  function waitForHub(attempt){
+    attempt = attempt || 0;
+    const h = H();
+    if (h && h.FS){
+      refresh();
+      return;
+    }
+    if (attempt > 200) return;
+    setTimeout(() => waitForHub(attempt+1), 100);
+  }
+
+  // expose
+  window.HubSupplierInvoices = window.HubSupplierInvoices || {};
+  window.HubSupplierInvoices.refresh = refresh;
+
+  if (document.readyState === "loading"){
+    document.addEventListener("DOMContentLoaded", () => waitForHub(0));
+  } else {
+    waitForHub(0);
+  }
 })();
