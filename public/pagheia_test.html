@@ -2833,8 +2833,76 @@ flex-direction: column !important;
   .billingFootNote{font-size:12px;color:var(--muted);line-height:1.35;}
   </style>
 
+
+  <style id="pagheiaAdminOnlyMode">
+    /* ===== PagheIA · Modalità "solo admin" (landing) ===== */
+    body.pagheia-admin-only .heroGrid,
+    body.pagheia-admin-only .appFooter,
+    body.pagheia-admin-only #userArea,
+    body.pagheia-admin-only #adminLauncher,
+    body.pagheia-admin-only #btnOpenPayrollAdmin,
+    body.pagheia-admin-only #btnLaunchAdmin,
+    body.pagheia-admin-only #btnLaunchAdminAbsences,
+    body.pagheia-admin-only .adminLauncherCard,
+    body.pagheia-admin-only .payrollNonAdminCard{
+      display:none !important;
+    }
+
+    /* In questa pagina l'area admin deve essere visibile a prescindere dal ruolo */
+    body.pagheia-admin-only .adminOnly{
+      display:block !important;
+    }
+
+    /* Admin "modal" → resa come sezione pagina */
+    body.pagheia-admin-only #adminModal.adminModalOverlay{
+      position: static !important;
+      inset: auto !important;
+      display: block !important;
+      background: transparent !important;
+      backdrop-filter: none !important;
+      opacity: 1 !important;
+      transform: none !important;
+      pointer-events: auto !important;
+      padding: 10px 0 0 !important;
+      overflow: visible !important;
+    }
+    body.pagheia-admin-only #adminModal .adminModalShell{
+      width: 100% !important;
+      max-width: 1040px !important;
+      margin: 0 auto !important;
+      max-height: none !important;
+      transform: none !important;
+      opacity: 1 !important;
+      border-radius: 22px !important;
+      box-shadow: var(--shadow) !important;
+    }
+    body.pagheia-admin-only #adminModal .adminModalHeader{
+      display:none !important;
+    }
+    body.pagheia-admin-only #adminModal .adminModalBody{
+      padding: 0 !important;
+      overflow: visible !important;
+    }
+    body.pagheia-admin-only #adminArea{
+      position: relative !important;
+      top: auto !important;
+      max-height: none !important;
+      min-height: unset !important;
+      overflow: visible !important;
+      margin: 0 !important;
+    }
+
+    /* Mobile: NON nascondere admin */
+    @media (max-width:900px){
+      body.pagheia-admin-only #adminArea,
+      body.pagheia-admin-only #adminModal{
+        display:block !important;
+      }
+    }
+  </style>
+
 </head>
-<body>
+<body class="pagheia-admin-only">
   <div class="bootSpinner" id="bootSpinner" aria-hidden="true"><div class="spin"></div></div>
 
   <div id="toast" role="status" aria-live="polite">
@@ -2949,7 +3017,7 @@ flex-direction: column !important;
       </footer>
 
 
-  <div class="adminModalOverlay" id="adminModal" aria-hidden="true">
+  <div class="adminModalOverlay" id="adminModal" aria-hidden="false">
       <div class="adminModalShell">
         <div class="adminModalHeader">
           <div class="adminModalBar">
@@ -2983,7 +3051,7 @@ flex-direction: column !important;
                       <div class="pcTitle" style="font-size:18px">Carica e analizza</div>
                       <div class="pcSub">Trascina il PDF o usa il pulsante per avviare l’upload.</div>
                       <div class="uploadActions">
-                        <button class="payrollBtn primary" id="btnPayrollUpload" type="button">Carica e analizza</button>
+                        <button class="payrollBtn primary" id="btnPayrollUpload" type="button">Carica</button>
 </div>
                       <div class="progressShell progressAsSpinner" id="payrollProgress">
                         <div class="progressSpinRow">
@@ -3315,6 +3383,7 @@ flex-direction: column !important;
       firebase: { ok:false, app:null, auth:null, db:null, api:null, storage:null, storageApi:null },
       payroll: {},
       billing: { checked:false, status:"", planId:"", isActive:false, busy:false, lastError:"" },
+      ui: { billingRequested:false, pendingAction:"" },
       absences: { list:[], filters:{ status:"", type:"", search:"" }, loading:false }
     };
 
@@ -3452,8 +3521,9 @@ if(payrollGreeting) payrollGreeting.textContent = `Ciao, ${name}.`;
         badgeAuthText.textContent = `Accesso: ${isAuthed ? "attivo" : "non attivo"}`;
       }
 
-      document.body.classList.toggle("role-admin", !!state.user?.isAdmin);
-      document.body.classList.toggle("role-operator", !state.user?.isAdmin);
+      const forceAdminUI = isPagheiaAdminOnly();
+      document.body.classList.toggle("role-admin", forceAdminUI || !!state.user?.isAdmin);
+      document.body.classList.toggle("role-operator", !(forceAdminUI || !!state.user?.isAdmin));
 
       // Header buttons
       const btnLogin = document.getElementById("btnGoogleLogin");
@@ -3472,20 +3542,22 @@ if(payrollGreeting) payrollGreeting.textContent = `Ciao, ${name}.`;
       // "Esci" sempre in fondo (solo quando autenticato)
       if(btnLogoutBottom) btnLogoutBottom.style.display = isAuthed ? "" : "none";
 
-      // Pending overlay: in modalità app, mentre ripristina la sessione mostriamo SOLO la rotellina (zero login)
-      const shouldShowPending = (!isAuthed && (!hydrated || gate === "restoring" || gate === "unknown"));
+      // Overlay behavior:
+      // - In modalità "pagheia-admin-only" il paywall si apre SOLO quando clicchi "Carica" (o "Invia").
+      // - Fuori da questa modalità, manteniamo il comportamento precedente.
+      const shouldShowPending = (!forceAdminUI && !isAuthed && (!hydrated || gate === "restoring" || gate === "unknown"));
       togglePendingOverlay(shouldShowPending);
 
-      // Billing overlay (paywall):
-      // - Se sei fuori: scegli piano e accedi
-      // - Se sei dentro ma non attivo (o in verifica): scegli piano / completa pagamento
       const billingChecked = !!state.billing?.checked;
       const billingActive = !!state.billing?.isActive;
-      const billingShouldShow = (!shouldShowPending && (( !isAuthed && hydrated && gate === "signed_out") || (isAuthed && (!billingChecked || !billingActive))));
+
+      const billingShouldShow = forceAdminUI
+        ? !!state.ui?.billingRequested
+        : (!shouldShowPending && (( !isAuthed && hydrated && gate === "signed_out") || (isAuthed && (!billingChecked || !billingActive))));
       toggleBillingOverlay(billingShouldShow);
 
-      // Auth overlay: usata solo come fallback (se non stiamo mostrando il paywall)
-      const shouldShowOverlay = (!billingShouldShow && !shouldShowPending && !isAuthed && hydrated && gate === "signed_out");
+      // Auth overlay: fallback solo fuori dalla modalità admin-only
+      const shouldShowOverlay = (!forceAdminUI && !billingShouldShow && !shouldShowPending && !isAuthed && hydrated && gate === "signed_out");
       toggleAuthOverlay(shouldShowOverlay);
 
       const pendingMsgEl = document.getElementById("pendingMessage");
@@ -3509,6 +3581,8 @@ if(payrollGreeting) payrollGreeting.textContent = `Ciao, ${name}.`;
         if(ovBtn) ovBtn.disabled = false;
       }
 
+
+maybeResumePendingBillingAction();
 
 updateGreetingUI();
     }
@@ -3548,6 +3622,52 @@ updateGreetingUI();
       ov.setAttribute("aria-hidden", show ? "false" : "true");
       updateModalOpenState();
     }
+
+    // === PagheIA: admin-only landing + paywall on "Carica" ===
+    function isPagheiaAdminOnly(){
+      try{ return document.body.classList.contains("pagheia-admin-only"); }catch(_e){ return false; }
+    }
+
+    function isBillingActive(){
+      return !!(state.user && state.billing && state.billing.checked && state.billing.isActive);
+    }
+
+    function openBillingFor(action){
+      state.ui = state.ui || {};
+      state.ui.billingRequested = true;
+      state.ui.pendingAction = String(action || "");
+      try{
+        const sub = document.getElementById("billingSubtitle");
+        if(sub){
+          const msg = (action==="upload")
+            ? "Per caricare le buste paga scegli un piano per continuare."
+            : (action==="send")
+            ? "Per inviare le buste paga scegli un piano per continuare."
+            : "Scegli un piano per continuare.";
+          sub.textContent = msg;
+        }
+      }catch(_e){}
+      toggleBillingOverlay(true);
+    }
+
+    function maybeResumePendingBillingAction(){
+      if(!isPagheiaAdminOnly()) return;
+      state.ui = state.ui || {};
+      if(!state.ui.billingRequested) return;
+      if(!isBillingActive()) return;
+
+      const action = state.ui.pendingAction;
+      state.ui.billingRequested = false;
+      state.ui.pendingAction = "";
+      toggleBillingOverlay(false);
+
+      if(action === "upload"){
+        setTimeout(()=>{ try{ document.getElementById("payrollFileInput")?.click?.(); }catch(_e){} }, 220);
+      }else if(action === "send"){
+        setTimeout(()=>{ try{ Yi(); }catch(_e){} }, 120);
+      }
+    }
+
 
     
 function toggleAdminModal(show, focusId){
@@ -4235,7 +4355,7 @@ function Bi() {
       }
 
       function Oi() {
-        const isAdmin = Boolean(N.user && N.user.isAdmin);
+        const isAdmin = isPagheiaAdminOnly() || Boolean(N.user && N.user.isAdmin);
         const adminPanel = U("adminArea");
         if (adminPanel) adminPanel.style.display = isAdmin ? "" : "none";
         const pagesPanel = U("payrollPagesPanel");
@@ -6848,17 +6968,17 @@ const payrollDirAutofill = () => {
       U("dirEmailInput")?.addEventListener("change", payrollDirAutofill);
       U("dirEmailInput")?.addEventListener("input", payrollDirAutofill);
       U("dirCfInput")?.addEventListener("change", payrollDirAutofill);
-      const t = U("payrollDrop"), n = U("payrollFileInput"), o = e => { N.payroll.admin.files = e && e.length ? [e[0]] : [], Bi(), Vi() };
+      const t = U("payrollDrop"), n = U("payrollFileInput"), o = e => { if(isPagheiaAdminOnly() && !isBillingActive()){ N.payroll.admin.files = []; Bi(); openBillingFor("upload"); return; } N.payroll.admin.files = e && e.length ? [e[0]] : []; Bi(); Vi(); };
       t && (["dragover", "dragenter"].forEach(e => t.addEventListener(e, e => { e.preventDefault(), t.classList.add("drag") })), ["dragleave", "drop"].forEach(e => t.addEventListener(e, e => { e.preventDefault(), t.classList.remove("drag") })), t.addEventListener("drop", e => { e.preventDefault(), e.dataTransfer?.files?.length && o(e.dataTransfer.files) }), t.addEventListener("click", e => { if(e?.target?.closest && e.target.closest(".uploadActions")) return; n?.click() }));
       n?.addEventListener("change", () => o(n.files));
-      U("btnPayrollUpload")?.addEventListener("click", () => { const f = N.payroll.admin.files?.[0]; if (!f) { n?.click(); return; } Vi(); });
+      U("btnPayrollUpload")?.addEventListener("click", () => { if(isPagheiaAdminOnly() && !isBillingActive()){ openBillingFor("upload"); return; } const f = N.payroll.admin.files?.[0]; if (!f) { n?.click(); return; } Vi(); });
       U("btnPayrollRetry")?.addEventListener("click", () => Vi());
       U("btnPayrollReset")?.addEventListener("click", () => ji());
       U("btnPayrollReset2")?.addEventListener("click", () => ji());
       U("btnPayrollReset3")?.addEventListener("click", () => ji());
       U("btnPayrollMatch")?.addEventListener("click", () => Gi());
       U("btnPayrollBackPreview")?.addEventListener("click", () => Di("preview"));
-      U("btnPayrollSend")?.addEventListener("click", () => Yi());
+      U("btnPayrollSend")?.addEventListener("click", () => { if(isPagheiaAdminOnly() && !isBillingActive()){ openBillingFor("send"); return; } Yi(); });
       U("btnToggleDirForm")?.addEventListener("click", ()=>{ const form = U("dirForm"); form?.classList.toggle("isOpen"); });
       document.addEventListener("click", async evt=>{
         const btn = evt.target?.closest?.("[data-payroll-open-pages]");
