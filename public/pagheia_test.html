@@ -7728,14 +7728,17 @@ function buildSafePdfName(base){
           }
         }catch(_e){}
       }
-
       function updateBillingUI(){
         state.billing = state.billing || { checked:false, status:"", planId:"", isActive:false, busy:false, lastError:"" };
+
         const isAuthed = !!state.user;
         const checked = !!state.billing.checked;
         const busy = !!state.billing.busy;
         const status = String(state.billing.status||"");
         const active = !!state.billing.isActive;
+
+        // Firebase/auth pronto? (serve per mostrare i pulsanti "Accedi" e per aprire il popup)
+        const authReady = !!(state.firebase?.ok && state.firebase?.auth && typeof state.firebase?.signInWithGoogle === "function");
 
         // Action buttons visibility
         const btnLogin = document.getElementById("btnBillingLogin");
@@ -7745,14 +7748,40 @@ function buildSafePdfName(base){
         if(btnPortal) btnPortal.style.display = (isAuthed ? "" : "none");
         if(btnLogout) btnLogout.style.display = (isAuthed ? "" : "none");
 
-        // Status line
-        if(!isAuthed){
-          setStatusLine("Scegli un piano. Alla conferma ti chiediamo l’accesso Google.", "muted");
-          setSpinner(false);
-          setButtonsDisabled(busy);
+        // Se la pagina è aperta come file:// (o origin "null"), Google Auth e Stripe non funzionano correttamente.
+        try{
+          const badOrigin = (location.protocol === "file:" || location.origin === "null");
+          if(badOrigin){
+            setStatusLine("Apri questa pagina da un indirizzo https:// (non file://) per usare accesso e pagamenti.", "bad");
+            setSpinner(false);
+            setButtonsDisabled(true);
+            return;
+          }
+        }catch(_e){}
+
+        // Firebase non ancora pronto: evita click "a vuoto" (è il caso tipico del "clicco e non succede nulla")
+        if(!authReady){
+          setStatusLine("Caricamento servizi…", "muted");
+          setSpinner(true);
+          setButtonsDisabled(true);
           return;
         }
 
+        // Se non autenticato: guida e UI consistente
+        if(!isAuthed){
+          if(busy){
+            setStatusLine("Apro accesso Google…", "muted");
+            setSpinner(true);
+            setButtonsDisabled(true);
+          }else{
+            setStatusLine("Scegli un piano. Alla conferma ti chiediamo l’accesso Google.", "muted");
+            setSpinner(false);
+            setButtonsDisabled(false);
+          }
+          return;
+        }
+
+        // Autenticato: controlla stato abbonamento
         if(!checked){
           setStatusLine("Verifica abbonamento…", "muted");
           setSpinner(true);
@@ -7773,6 +7802,7 @@ function buildSafePdfName(base){
           setStatusLine("Nessun abbonamento attivo. Scegli un piano per continuare.", "muted");
         }
       }
+
 
       async function apiPost(path, body){
         if(!state.firebase?.ok || !state.firebase?.auth) throw new Error("Firebase non pronto");
@@ -7824,7 +7854,6 @@ function buildSafePdfName(base){
           setBusy(false);
         }
       }
-
       async function choosePlan(planId){
         const p = String(planId||"").trim();
         if(!ALLOWED.has(p)){
@@ -7832,22 +7861,42 @@ function buildSafePdfName(base){
           return;
         }
 
+        // Se la pagina è aperta come file:// (o origin "null"), Stripe/Google Auth non funzionano.
+        try{
+          const badOrigin = (location.protocol === "file:" || location.origin === "null");
+          if(badOrigin){
+            showToast("Apri da HTTPS", "Google Login e Stripe non funzionano su file://. Pubblica la pagina (https://) o usa un server locale.");
+            updateBillingUI();
+            return;
+          }
+        }catch(_e){}
+
         // Non salviamo in locale: usiamo solo query param (stabile anche con redirect iOS)
         writePlanToUrl(p);
 
+        const authReady = !!(state.firebase?.ok && state.firebase?.auth && typeof state.firebase?.signInWithGoogle === "function");
+        if(!authReady){
+          showToast("Caricamento…", "Sto inizializzando l’accesso. Riprova tra poco.");
+          updateBillingUI();
+          return;
+        }
+
         if(!state.user){
           updateBillingUI();
-          try{ await state.firebase?.signInWithGoogle?.(); }catch(_e){}
+          try{ await state.firebase.signInWithGoogle(); }catch(_e){}
           return;
         }
 
         try{
           await startCheckout(p);
         }catch(err){
-          showToast("Checkout non riuscito", err?.message || String(err));
+          const msg = err?.message || String(err);
+          showToast("Checkout non riuscito", msg);
+          try{ setStatusLine(`Checkout non riuscito: ${msg}`, "bad"); }catch(_e){}
           updateBillingUI();
         }
       }
+
 
       function stopWatch(){
         try{ state.billing?.unsub && state.billing.unsub(); }catch(_e){}
@@ -8043,9 +8092,15 @@ function buildSafePdfName(base){
         const __preferRedirect = (__isIOS && __isStandalone);
 
         async function signInWithGoogle(){
+          // Nota: evitare await prima di aprire il popup, altrimenti alcuni browser (soprattutto Safari/iOS)
+          // possono bloccare l'apertura del login. La persistenza viene già impostata all'init.
           try{
-            // Best-effort: persistenza (aiuta a mantenere la sessione tra pagine/refresh)
-            try{ await setBestAuthPersistence(authMod, auth); }catch(_e){}
+            // UI: blocca i pulsanti del paywall mentre si avvia il login
+            try{
+              state.billing = state.billing || {};
+              state.billing.busy = true;
+              try{ Billing.updateUI(); }catch(_e){}
+            }catch(_e){}
 
             // In modalità app iOS: usa redirect diretto (più stabile, niente popup "flash")
             if(__preferRedirect){
@@ -8060,7 +8115,7 @@ function buildSafePdfName(base){
             }catch(err){
               const code = String(err?.code || "");
               const msg = String(err?.message || "").toLowerCase();
-              const popupIssue = code.includes("popup") || msg.includes("popup");
+              const popupIssue = code.includes("popup") || msg.includes("popup") || code.includes("cancelled-popup-request");
               const notSupported = code.includes("operation-not-supported-in-this-environment") || code.includes("web-storage-unsupported");
               if(popupIssue || notSupported){
                 await authMod.signInWithRedirect(auth, googleProvider);
@@ -8070,9 +8125,29 @@ function buildSafePdfName(base){
             }
           }catch(err){
             console.warn("google login", err);
-            showToast("Accesso non riuscito", err?.message || String(err));
+            const human = err?.message || String(err);
+            showToast("Accesso non riuscito", human);
+
+            // Se il paywall è aperto, mostra l'errore anche nella riga stato (più visibile del toast)
+            try{
+              if(document.getElementById("billingOverlay")?.getAttribute("aria-hidden")==="false"){
+                const line = document.getElementById("billingStatusLine");
+                if(line){
+                  line.classList.remove("muted","warn");
+                  line.classList.add("bad");
+                  line.textContent = `Accesso non riuscito: ${human}`;
+                }
+              }
+            }catch(_e){}
+          }finally{
+            try{
+              state.billing = state.billing || {};
+              state.billing.busy = false;
+              try{ Billing.updateUI(); }catch(_e){}
+            }catch(_e){}
           }
         }
+
 
         async function signOutGoogle(){
           try{
