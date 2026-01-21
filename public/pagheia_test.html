@@ -15,13 +15,118 @@ Aggiornamento mobile iOS (2024-06-xx):
 <html lang="it" translate="no">
 <head>
 
- <script defer src="/public1/gc_back_to_index.js" data-back-href="./index.html"></script>
+ <script data-back-href="./index.html">
+// gc_back_to_index.js — minimal helper (fallback)
+// Adds a small floating button to go back to an index page.
+// Usage: <script defer src="./public1/gc_back_to_index.js" data-back-href="./index.html"></script>
+
+(function(){
+  try{
+    const s = document.currentScript;
+    const href = s && (s.getAttribute("data-back-href") || s.dataset?.backHref) || "";
+    if(!href) return;
+
+    const createBtn = ()=>{
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "gcBackBtn";
+      btn.setAttribute("aria-label", "Torna all'indice");
+      btn.title = "Torna all'indice";
+      btn.textContent = "←";
+      btn.addEventListener("click", ()=>{
+        try{ window.location.href = href; }catch(_e){}
+      });
+
+      // Only add once
+      if(document.querySelector(".gcBackBtn")) return;
+      document.body.appendChild(btn);
+
+      // Keyboard shortcut: Alt + ←
+      window.addEventListener("keydown", (e)=>{
+        if(!e) return;
+        const k = String(e.key || "");
+        if(e.altKey && (k === "ArrowLeft" || k === "Left")){
+          try{ window.location.href = href; }catch(_e){}
+        }
+      });
+    };
+
+    if(document.readyState === "loading"){
+      document.addEventListener("DOMContentLoaded", createBtn, { once:true });
+    }else{
+      createBtn();
+    }
+  }catch(_e){}
+})();
+
+</script>
 
  
 
   <!-- iOS Google Auth stabilizer (files in /public1) -->
-<link rel="stylesheet" href="/public1/gc_perf.css">
-<script defer src="/public1/gc_perf.js"></script>
+<style>
+/* gc_perf.css — micro helpers (fallback) */
+/* Keep it tiny: just avoid some iOS quirks and respect reduced-motion. */
+
+html{
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+@media (prefers-reduced-motion: reduce){
+  *, *::before, *::after{
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Optional floating back button styling (used by gc_back_to_index.js) */
+.gcBackBtn{
+  position: fixed;
+  left: 12px;
+  bottom: 12px;
+  z-index: 9999;
+  width: 52px;
+  height: 52px;
+  border-radius: 18px;
+  border: 1px solid rgba(12,22,52,.18);
+  background: rgba(255,255,255,.92);
+  color: #0b0f1a;
+  font-weight: 900;
+  font-size: 20px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 16px 40px rgba(15,23,42,.12);
+  backdrop-filter: blur(18px);
+  cursor: pointer;
+}
+.gcBackBtn:active{ transform: scale(0.98); }
+
+</style>
+<script>
+// gc_perf.js — lightweight no-op helpers (fallback)
+// This file exists so the HTML can be deployed standalone without 404s.
+// If you already have a richer implementation, you can replace this file.
+
+(function(){
+  try{
+    // Set a stable viewport height variable (some iOS versions lie on 100vh).
+    const setVh = ()=> {
+      const h = Math.max(window.innerHeight || 0, document.documentElement?.clientHeight || 0);
+      if(h) document.documentElement.style.setProperty("--gc-vh", h + "px");
+    };
+    window.addEventListener("resize", setVh, { passive:true });
+    window.addEventListener("orientationchange", ()=> setTimeout(setVh, 160), { passive:true });
+    setVh();
+    setTimeout(setVh, 320);
+  }catch(_e){}
+})();
+
+</script>
 
 
 
@@ -30,13 +135,13 @@ Aggiornamento mobile iOS (2024-06-xx):
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
 
 <meta name="theme-color" content="#0a84ff" />
-<link rel="manifest" href="./manifest.webmanifest" />
+
 
 <meta name="mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 <meta name="apple-mobile-web-app-title" content="Buste paga" />
-<link rel="apple-touch-icon" href="./icons/icon-180.png" />
+
 <meta name="format-detection" content="telephone=no" />
   
 <script id="__CANONICAL_HTML_SLASH__">
@@ -7805,24 +7910,49 @@ function buildSafePdfName(base){
 
 
       async function apiPost(path, body){
-        if(!state.firebase?.ok || !state.firebase?.auth) throw new Error("Firebase non pronto");
-        if(!state.user?.uid) throw new Error("Accesso richiesto");
-        const token = await state.firebase.auth.currentUser.getIdToken(true);
-        const res = await fetch(`${BILLING_BACKEND_URL}${path}`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Authorization": `Bearer ${token}`
-          },
-          body: JSON.stringify(body || {})
-        });
-        const data = await res.json().catch(()=> ({}));
-        if(!res.ok){
-          const msg = data?.error || `Errore (${res.status})`;
-          throw new Error(msg);
-        }
-        return data;
-      }
+              if(!state.firebase?.ok || !state.firebase?.auth) throw new Error("Firebase non pronto");
+              const user = state.firebase.auth.currentUser;
+              if(!user) throw new Error("Accesso richiesto");
+
+              const token = await user.getIdToken(true);
+              const url = `${BILLING_BACKEND_URL}${path}`;
+              const payload = JSON.stringify(body || {});
+
+              const doCall = async (authHeaderValue)=>{
+                const res = await fetch(url, {
+                  method: "POST",
+                  headers: {
+                    "Content-Type": "application/json",
+                    "Authorization": authHeaderValue
+                  },
+                  body: payload
+                });
+
+                const text = await res.text().catch(()=> "");
+                let data = {};
+                try{ data = text ? JSON.parse(text) : {}; }catch(_e){ data = { raw: text }; }
+
+                return { res, data };
+              };
+
+              // 1) Standard Bearer token
+              let out = await doCall(`Bearer ${token}`);
+
+              // 2) Retry with raw token (alcuni backend si aspettano solo il token, senza prefisso "Bearer ")
+              if((out.res.status === 401 || out.res.status === 403) && token){
+                out = await doCall(token);
+              }
+
+              if(!out.res.ok){
+                const serverMsg = out.data?.error || out.data?.message || "";
+                if(out.res.status === 401 || out.res.status === 403){
+                  const hint = "Errore (401/403). Il backend rifiuta l’autenticazione: verifica CORS e (se usi Cloud Run) che l’invocazione dal browser sia consentita e che il servizio accetti l’ID token Firebase.";
+                  throw new Error(serverMsg || hint);
+                }
+                throw new Error(serverMsg || `Errore (${out.res.status})`);
+              }
+              return out.data;
+            }
 
       async function startCheckout(planId){
         const p = String(planId||"").trim();
