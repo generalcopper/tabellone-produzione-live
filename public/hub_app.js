@@ -2882,7 +2882,25 @@ const tpl = document.createElement("template");
 
     // Regola speciale: Magazzino agenti -> SOLO scarico prodotti finiti (niente componenti)
     if (isAgentWarehouseDdt(ddt)){
-      return { ok: true, why: "agent", fp };
+      const code = String(row && row.code || "").trim();
+      // Per evitare falsi OK con lo stesso codice su più righe: sommo il fabbisogno totale del DDT per quel codice
+      let need = 0;
+      try{
+        const rowsAll = Array.isArray(ddt && ddt.rows) ? ddt.rows : [];
+        const low = code.toLowerCase();
+        for (const rr of rowsAll){
+          if (!rr) continue;
+          const c = String(rr.code || "").trim();
+          if (!c) continue;
+          if (c.toLowerCase() !== low) continue;
+          need += rowQtyInt(rr);
+        }
+      }catch(_){
+        need = rowQtyInt(row);
+      }
+      const stock = finishedStockAvailable(code);
+      if (stock >= need) return { ok: true, why: "agent", fp, stock, need };
+      return { ok: false, why: "agent_stock", fp, stock, need };
     }
 
     const comps = getFpComponents(fp);
@@ -2905,6 +2923,8 @@ const tpl = document.createElement("template");
     return { ok: green === rows.length, green, total: rows.length };
   }
 
+    return { ok: green === rows.length, green, total: rows.length };
+  }
 
   function cacheCompletedMap(){
     S.completedMap = new Map();
@@ -3090,7 +3110,7 @@ const tpl = document.createElement("template");
       const rowWhy = String(st.why || "");
       const rowCls = st.ok ? '' : ' daneaRowBad';
       const rowStyle = ' style="cursor:pointer;"';
-      const rowTitle = st.ok ? "Apri distinta base" : "Configura distinta base";
+      const rowTitle = st.ok ? "Apri distinta base" : (st.why === "agent_stock" ? `Scorta PF insufficiente: ${Number(st.stock||0).toLocaleString("it-IT")} disponibili / ${Number(st.need||0).toLocaleString("it-IT")} richiesti` : "Configura distinta base");
 
       let act = "";
       if (st.why === "missing"){
@@ -3098,6 +3118,10 @@ const tpl = document.createElement("template");
       } else if (st.why === "empty"){
         const fid = String(st.fp?.id || st.fp?._id || "").trim();
         act = `<button class="btn btn-secondary btn-xs jsDaneaConfigFp" data-fpid="${escAttr(fid)}" type="button">Configura</button>`;
+      } else if (st.why === "agent_stock"){
+        const s1 = Number(st.stock || 0).toLocaleString("it-IT");
+        const s2 = Number(st.need || 0).toLocaleString("it-IT");
+        act = `<span class="td-muted">Scorta insufficiente (${esc(s1)} / ${esc(s2)})</span>`;
       } else {
         const fid = String(st.fp?.id || st.fp?._id || "").trim();
         act = fid ? `<button class="btn btn-ghost btn-xs jsDaneaOpenFp" data-fpid="${escAttr(fid)}" type="button">Apri</button>` : `<span class="td-muted">OK</span>`;
@@ -3127,7 +3151,7 @@ const tpl = document.createElement("template");
                     : "Tutte le righe sono configurate: puoi completare e scaricare componenti.")
                 : "Tutte le righe sono configurate: puoi completare (scarico automatico DISATTIVATO).")
             : (isAgenti
-                ? "Controlla le righe rosse: per Magazzino agenti serve almeno il prodotto finito importato."
+                ? "Controlla le righe rosse: per Magazzino agenti serve il prodotto finito importato e scorta PF sufficiente."
                 : "Configura le righe rosse (distinta base) per poter completare.")
           );
       foot.textContent = msg;
@@ -3387,8 +3411,23 @@ Righe: ${st.total}`;
         if (qInt <= 0) continue;
 
         const low = code.toLowerCase();
-        const aFp = Math.max(0, Math.round(Number(availFp.get(low) || 0)));
-        const useFp = isAgenti ? qInt : Math.min(qInt, aFp);
+        const aFpRaw = Math.round(Number(availFp.get(low) || 0));
+        const aFp = Number.isFinite(aFpRaw) ? aFpRaw : 0;
+
+        // Magazzino agenti: NON posso andare in negativo sui PF
+        if (isAgenti && aFp < qInt){
+          const name = String(fp.name || fp.nome || r.desc || code).trim() || code;
+          const uom0 = String(fp.uom || r.uom || "pz").trim() || "pz";
+          alert(`Scorta prodotti finiti insufficiente per ${code} (${name}).
+
+Richiesti: ${qInt.toLocaleString("it-IT")} ${uom0}
+Disponibili: ${Math.max(0, aFp).toLocaleString("it-IT")}
+
+Carica prima i prodotti finiti in inventario PF, poi riprova.`);
+          return;
+        }
+
+        const useFp = isAgenti ? qInt : Math.min(qInt, Math.max(0, aFp));
 
         if (useFp > 0){
           const name = String(fp.name || fp.nome || r.desc || code).trim() || code;
@@ -3857,6 +3896,9 @@ Righe: ${st.total}`;
         // 3) calcola fabbisogni (PF prima, componenti dopo)
         const req = new Map();
         const reqFp = new Map();
+        const fpUsed = new Map(); // codeLower -> qtyInt (per ripristino se DDT annullato)
+        let abort = false;
+        let abortMsg = "";
 
         for (const r of (ddt.rows || [])){
           const code = String(r.code || "").trim();
@@ -3873,8 +3915,16 @@ Righe: ${st.total}`;
           if (qInt <= 0) continue;
 
           const low = code.toLowerCase();
-          const aFp = Math.max(0, _safeInt(availFp.get(low)));
-          const useFp = isAgenti ? qInt : Math.min(qInt, aFp);
+          const aFp = _safeInt(availFp.get(low));
+
+          // Magazzino agenti: NON posso andare in negativo sui PF
+          if (isAgenti && aFp < qInt){
+            abort = true;
+            abortMsg = `DDT ${ddt.number || "?"}: scorta PF insufficiente per ${code} (richiesti ${qInt}, disponibili ${Math.max(0, aFp)})`;
+            break;
+          }
+
+          const useFp = isAgenti ? qInt : Math.min(qInt, Math.max(0, aFp));
 
           if (useFp > 0){
             const name = String(fp.name || fp.nome || r.desc || code).trim() || code;
@@ -3882,6 +3932,7 @@ Righe: ${st.total}`;
             const cur = reqFp.get(low) || { code, name, uom, qtyInt: 0 };
             cur.qtyInt += useFp;
             reqFp.set(low, cur);
+            fpUsed.set(low, (fpUsed.get(low) || 0) + useFp);
             availFp.set(low, aFp - useFp);
           }
 
@@ -3911,6 +3962,21 @@ Righe: ${st.total}`;
             if (!cur.uom) cur.uom = String(c.uom || "").trim();
             req.set(clow, cur);
           }
+        }
+
+        if (abort){
+          // ripristina PF allocati per questo DDT (best-effort)
+          try{
+            for (const [kq, qv] of fpUsed.entries()){
+              availFp.set(kq, _safeInt(availFp.get(kq)) + _safeInt(qv));
+            }
+          }catch(_){ }
+          if (!silent){
+            alert(abortMsg);
+          } else {
+            try{ window.HubInv?.showToast?.(abortMsg, "warn"); }catch(_){ }
+          }
+          continue;
         }
 
         if (!req.size && !reqFp.size){
