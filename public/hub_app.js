@@ -3315,7 +3315,9 @@ Righe: ${st.total}`);
             const snap = await getDocs(q);
             movs = snap.docs.map(d => {
               const data = d.data() || {};
-              return { id: d.id, type: data.type || 'IN', code: data.code || '', qty: data.qty, warehouse: data.warehouse || '' };
+              // NB: serve anche "customer" per scalare correttamente la giacenza
+              // (altrimenti lo scarico finisce su un cliente fittizio e la riga reale resta invariata)
+              return { id: d.id, type: data.type || 'IN', code: data.code || '', qty: data.qty, warehouse: data.warehouse || '', customer: data.customer || '' };
             });
             if (H.state) H.state.movements = movs;
           }catch(e){ try{ console.warn('fetch inventoryMovements failed', e); }catch(_){ } }
@@ -3338,6 +3340,10 @@ Righe: ${st.total}`);
         };
 
         const avail = { cerea: new Map(), concamarise: new Map() };
+        // Disponibilita' per customer: ci serve per fare OUT sullo stesso "Fornitore" della giacenza
+        // (cosi' la riga in inventario scende davvero, es. 7 -> 5, invece di restare 7 e creare una riga "Scarico DDT")
+        const availCust = { cerea: new Map(), concamarise: new Map() }; // codeLower -> Map(customerKey -> {customer, qty})
+        const anyCustomerByCode = new Map(); // fallback best-effort: codeLower -> customer
         for (const mv of movs){
           const code = String(mv && mv.code || '').trim();
           if (!code) continue;
@@ -3348,6 +3354,18 @@ Righe: ${st.total}`);
           const delta = (String(mv.type || '').toUpperCase() === 'OUT') ? -q : q;
           const m = (w === 'concamarise') ? avail.concamarise : avail.cerea;
           m.set(low, (m.get(low) || 0) + delta);
+
+          // customer-aware availability
+          const custRaw = String((mv && (mv.customer || mv.supplierName || mv.supplier)) || '').trim();
+          if (custRaw) anyCustomerByCode.set(low, custRaw);
+          const mCust = (w === 'concamarise') ? availCust.concamarise : availCust.cerea;
+          let byCust = mCust.get(low);
+          if (!byCust){ byCust = new Map(); mCust.set(low, byCust); }
+          const ck = custRaw.toLowerCase();
+          const rec = byCust.get(ck) || { customer: custRaw, qty: 0 };
+          rec.qty = _safeInt(rec.qty) + delta;
+          if (!rec.customer && custRaw) rec.customer = custRaw;
+          byCust.set(ck, rec);
         }
 
         const needList = Array.from(req.values()).map(it => {
@@ -3399,9 +3417,51 @@ Righe: ${st.total}`);
 
           allocations.push({ code: it.code, name: it.name || it.code, uom: String(it.uom||'').trim(), qty: it.qtyInt, byWarehouse: { cerea: (first==='cerea'?t1:t2) || 0, concamarise: (first==='concamarise'?t1:t2) || 0 } });
 
-          const makePayload = (warehouse, qtyInt) => ({
+          const pickCustomerForWarehouse = (wh) => {
+            try{
+              const mm = (wh === 'concamarise') ? availCust.concamarise : availCust.cerea;
+              const byCust = mm.get(low);
+              if (byCust && byCust.size){
+                let bestKey = null;
+                let bestQty = 0;
+                let bestName = '';
+                for (const [ck, rec] of byCust.entries()){
+                  const q0 = _safeInt(rec && rec.qty);
+                  if (q0 > bestQty){
+                    bestQty = q0;
+                    bestKey = ck;
+                    bestName = String(rec && rec.customer || '').trim();
+                  }
+                }
+                if (bestKey != null && bestQty > 0) return { ck: bestKey, customer: bestName };
+              }
+            }catch(_){ }
+            const fb = String(anyCustomerByCode.get(low) || '').trim();
+            return { ck: fb.toLowerCase(), customer: fb };
+          };
+
+          const cust1 = (t1 > 0) ? pickCustomerForWarehouse(first) : null;
+          const cust2 = (t2 > 0) ? pickCustomerForWarehouse(second) : null;
+
+          // aggiorna la disponibilita' per customer (best-effort) per restare coerenti in caso di piu' righe
+          const decAvailCust = (wh, sel, qtyOut) => {
+            if (!sel || !qtyOut) return;
+            const mm = (wh === 'concamarise') ? availCust.concamarise : availCust.cerea;
+            let byCust = mm.get(low);
+            if (!byCust){ byCust = new Map(); mm.set(low, byCust); }
+            const ck = (sel.ck != null) ? String(sel.ck) : String(sel.customer || '').trim().toLowerCase();
+            const rec0 = byCust.get(ck) || { customer: sel.customer || '', qty: 0 };
+            rec0.qty = _safeInt(rec0.qty) - _safeInt(qtyOut);
+            if (!rec0.customer && sel.customer) rec0.customer = sel.customer;
+            byCust.set(ck, rec0);
+          };
+          decAvailCust(first, cust1, t1);
+          decAvailCust(second, cust2, t2);
+
+          const makePayload = (warehouse, qtyInt, customerName) => ({
             type: 'OUT',
-            customer: 'Scarico DDT',
+            // IMPORTANT: usa il customer/fornitore della giacenza reale, cosi' la riga scende (es. 7 -> 5)
+            customer: String(customerName || '').trim(),
             code: it.code,
             item: it.name || it.code,
             uom: String(it.uom || '').trim(),
@@ -3421,11 +3481,11 @@ Righe: ${st.total}`);
           });
 
           if (t1 > 0){
-            const ref = await addDoc(movCol, makePayload(first, t1));
+            const ref = await addDoc(movCol, makePayload(first, t1, (cust1 && cust1.customer) || ''));
             if (ref && ref.id) movementIds.push(ref.id);
           }
           if (t2 > 0){
-            const ref = await addDoc(movCol, makePayload(second, t2));
+            const ref = await addDoc(movCol, makePayload(second, t2, (cust2 && cust2.customer) || ''));
             if (ref && ref.id) movementIds.push(ref.id);
           }
         }
@@ -3577,7 +3637,8 @@ Righe: ${st.total}`);
           const snap = await getDocs(q);
           movs = snap.docs.map(d => {
             const data = d.data() || {};
-            return { id: d.id, type: data.type || "IN", code: data.code || "", qty: data.qty, warehouse: data.warehouse || "" };
+            // NB: includo anche "customer" per scalare la giacenza corretta in caso di scarico componenti
+            return { id: d.id, type: data.type || "IN", code: data.code || "", qty: data.qty, warehouse: data.warehouse || "", customer: data.customer || "" };
           });
           if (H.state) H.state.movements = movs;
         }catch(e){ try{ console.warn("fetch inventoryMovements failed", e); }catch(_){ } }
@@ -3611,6 +3672,9 @@ Righe: ${st.total}`);
 
       // Disponibilita' live componenti (cosi' non scarichi piu' del disponibile)
       const avail = { cerea: new Map(), concamarise: new Map() };
+      // Disponibilita' anche per customer (fornitore): serve per scalare la riga corretta in inventario
+      const availCust = { cerea: new Map(), concamarise: new Map() }; // codeLower -> Map(customerKey -> {customer, qty})
+      const anyCustomerByCode = new Map(); // fallback best-effort: codeLower -> customer
       for (const mv of (movs || [])){
         const code = String(mv && mv.code || "").trim();
         if (!code) continue;
@@ -3621,6 +3685,18 @@ Righe: ${st.total}`);
         const delta = (String(mv.type || "").toUpperCase() === "OUT") ? -q : q;
         const m = (w === "concamarise") ? avail.concamarise : avail.cerea;
         m.set(low, (m.get(low) || 0) + delta);
+
+        // customer-aware availability
+        const custRaw = String((mv && (mv.customer || mv.supplierName || mv.supplier)) || "").trim();
+        if (custRaw) anyCustomerByCode.set(low, custRaw);
+        const mCust = (w === "concamarise") ? availCust.concamarise : availCust.cerea;
+        let byCust = mCust.get(low);
+        if (!byCust){ byCust = new Map(); mCust.set(low, byCust); }
+        const ck = custRaw.toLowerCase();
+        const rec = byCust.get(ck) || { customer: custRaw, qty: 0 };
+        rec.qty = _safeInt(rec.qty) + delta;
+        if (!rec.customer && custRaw) rec.customer = custRaw;
+        byCust.set(ck, rec);
       }
 
       // Disponibilita' live PF (sede unica)
@@ -3765,9 +3841,51 @@ Righe: ${st.total}`);
 
           allocations.push({ code: it.code, name: it.name || it.code, uom: String(it.uom||"").trim(), qty: it.qtyInt, byWarehouse: { cerea: (first==="cerea"?t1:t2) || 0, concamarise: (first==="concamarise"?t1:t2) || 0 } });
 
-          const makePayload = (warehouse, qtyInt) => ({
+          const pickCustomerForWarehouse = (wh) => {
+            try{
+              const mm = (wh === "concamarise") ? availCust.concamarise : availCust.cerea;
+              const byCust = mm.get(low);
+              if (byCust && byCust.size){
+                let bestKey = null;
+                let bestQty = 0;
+                let bestName = "";
+                for (const [ck, rec] of byCust.entries()){
+                  const q0 = _safeInt(rec && rec.qty);
+                  if (q0 > bestQty){
+                    bestQty = q0;
+                    bestKey = ck;
+                    bestName = String(rec && rec.customer || "").trim();
+                  }
+                }
+                if (bestKey != null && bestQty > 0) return { ck: bestKey, customer: bestName };
+              }
+            }catch(_){ }
+            const fb = String(anyCustomerByCode.get(low) || "").trim();
+            return { ck: fb.toLowerCase(), customer: fb };
+          };
+
+          const cust1 = (t1 > 0) ? pickCustomerForWarehouse(first) : null;
+          const cust2 = (t2 > 0) ? pickCustomerForWarehouse(second) : null;
+
+          // aggiorna la disponibilita' per customer (best-effort) per restare coerenti su scarichi multipli
+          const decAvailCust = (wh, sel, qtyOut) => {
+            if (!sel || !qtyOut) return;
+            const mm = (wh === "concamarise") ? availCust.concamarise : availCust.cerea;
+            let byCust = mm.get(low);
+            if (!byCust){ byCust = new Map(); mm.set(low, byCust); }
+            const ck = (sel.ck != null) ? String(sel.ck) : String(sel.customer || "").trim().toLowerCase();
+            const rec0 = byCust.get(ck) || { customer: sel.customer || "", qty: 0 };
+            rec0.qty = _safeInt(rec0.qty) - _safeInt(qtyOut);
+            if (!rec0.customer && sel.customer) rec0.customer = sel.customer;
+            byCust.set(ck, rec0);
+          };
+          decAvailCust(first, cust1, t1);
+          decAvailCust(second, cust2, t2);
+
+          const makePayload = (warehouse, qtyInt, customerName) => ({
             type: "OUT",
-            customer: "Scarico DDT",
+            // IMPORTANT: usa il customer/fornitore della giacenza reale, cosi' la riga scende (es. 7 -> 5)
+            customer: String(customerName || "").trim(),
             code: it.code,
             item: it.name || it.code,
             uom: String(it.uom || "").trim(),
@@ -3787,11 +3905,11 @@ Righe: ${st.total}`);
           });
 
           if (t1 > 0){
-            const ref = await addDoc(movCol, makePayload(first, t1));
+            const ref = await addDoc(movCol, makePayload(first, t1, (cust1 && cust1.customer) || ""));
             if (ref && ref.id) movementIds.push(ref.id);
           }
           if (t2 > 0){
-            const ref = await addDoc(movCol, makePayload(second, t2));
+            const ref = await addDoc(movCol, makePayload(second, t2, (cust2 && cust2.customer) || ""));
             if (ref && ref.id) movementIds.push(ref.id);
           }
         }
