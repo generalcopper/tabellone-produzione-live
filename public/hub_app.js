@@ -2905,8 +2905,6 @@ const tpl = document.createElement("template");
     return { ok: green === rows.length, green, total: rows.length };
   }
 
-    return { ok: green === rows.length, green, total: rows.length };
-  }
 
   function cacheCompletedMap(){
     S.completedMap = new Map();
