@@ -94,7 +94,7 @@
         <div class="inlineRow" style="justify-content:space-between; align-items:flex-end; gap:12px;">
           <div class="stack" style="flex:1; min-width: 220px;">
             <div class="hero-sub" id="fpInvDetailTitle">Inventario prodotti finiti</div>
-            <div class="muted">Sede unica • salva per rettifica, oppure <b>Produci</b> per carico PF + scarico componenti</div>
+            <div class="muted">Sede unica • clicca un prodotto per <b>Produci</b> o impostare la quantità (senza movimenti)</div>
           </div>
         </div>
 
@@ -118,20 +118,50 @@
           <table class="dataGrid">
             <thead>
               <tr>
-                <th>Nome prodotto</th>
-                <th>Codice</th>
-                <th>Categoria</th>
-                <th class="qty">Q.tà</th>
+                <th>Prodotto</th>
+                <th class="qty">Q.tà disponibile</th>
               </tr>
             </thead>
             <tbody id="fpStockTbody">
-              <tr><td class="td-muted" colspan="4">Carico inventario PF…</td></tr>
+              <tr><td class="td-muted" colspan="2">Carico inventario PF…</td></tr>
             </tbody>
           </table>
         </div>
       </div>
     </div>
   </article>
+</div>
+
+<div class="modal" id="modalFpInvAction">
+  <div class="modalContent modalContentSafe modalProductContent" style="width: min(640px, 96vw);">
+    <div class="titleRow">
+      <h3 id="fpInvActionTitle">Prodotto finito</h3>
+      <div class="modalCloseRow">
+        <button class="btn btn-primary" id="btnFpInvActionClose" type="button">Chiudi</button>
+        <button class="iconBtn" id="fpInvActionCloseX" type="button" aria-label="Chiudi">×</button>
+      </div>
+    </div>
+
+    <div class="modalScroll">
+      <div class="fieldGrid" style="grid-template-columns: 1fr 160px; gap:10px;">
+        <div class="field">
+          <label>Produci</label>
+          <input id="fpInvProduceQty" class="qtyEditInput" type="number" inputmode="numeric" min="0" step="1" placeholder="Quantità da produrre" />
+        </div>
+        <div class="field" style="align-self:end;">
+          <button class="btn btn-primary" id="btnFpInvProduceDo" type="button">Esegui</button>
+        </div>
+
+        <div class="field">
+          <label>Quantità senza produzione</label>
+          <input id="fpInvSetQty" class="qtyEditInput" type="number" inputmode="numeric" min="0" step="1" placeholder="Imposta quantità disponibile" />
+        </div>
+        <div class="field" style="align-self:end;">
+          <button class="btn btn-secondary" id="btnFpInvSetDo" type="button">Imposta</button>
+        </div>
+      </div>
+    </div>
+  </div>
 </div>`;
 
 const tpl = document.createElement("template");
@@ -2487,14 +2517,30 @@ const tpl = document.createElement("template");
   let __fpStockCacheSig = "";
   let __fpStockCacheMap = new Map();
 
+  
   function getFinishedStockMap(){
     try{
       const H = S.hub || getHub();
       const mvs = (H && H.state && Array.isArray(H.state.finishedMovements)) ? H.state.finishedMovements : [];
-      const last = (mvs && mvs.length) ? (mvs[mvs.length-1].createdAt || mvs[mvs.length-1].date || "") : "";
-      const sig = String(mvs.length) + "|" + String(last);
+      const lvs = (H && H.state && Array.isArray(H.state.finishedLevels)) ? H.state.finishedLevels : [];
+      const lastMv = (mvs && mvs.length) ? (mvs[mvs.length-1].createdAt || mvs[mvs.length-1].date || "") : "";
+      let maxLv = "";
+      for (const lv of (lvs || [])){
+        const ts = String((lv && (lv.updatedAt || lv.updatedAtIso || lv.date)) || "");
+        if (ts && (!maxLv || ts > maxLv)) maxLv = ts;
+      }
+      const sig = String(mvs.length) + "|" + String(lastMv) + "|" + String(lvs.length) + "|" + String(maxLv);
       if (sig && sig === __fpStockCacheSig && __fpStockCacheMap) return __fpStockCacheMap;
 
+      // Preferisci il calcolo unificato del core (livelli + movimenti)
+      if (H && typeof H.computeFinishedStockMap === "function"){
+        const map = H.computeFinishedStockMap() || new Map();
+        __fpStockCacheSig = sig;
+        __fpStockCacheMap = map;
+        return map;
+      }
+
+      // Fallback legacy: solo somma movimenti
       const map = new Map();
       for (const mv of (mvs || [])){
         const code = norm(mv && mv.code);
@@ -2969,15 +3015,18 @@ Righe: ${st.total}`);
         }catch(e){ try{ console.warn('fetch finishedInventoryMovements failed', e); }catch(_){ } }
       }
 
-      const availFp = new Map();
-      for (const mv of (fpMovs || [])){
-        const code = String(mv && mv.code || '').trim();
-        if (!code) continue;
-        const low = code.toLowerCase();
-        const q = (mv && mv.qty != null && Number.isFinite(Number(mv.qty))) ? Math.round(Number(mv.qty)) : 0;
-        if (!q) continue;
-        const delta = (String(mv.type || '').toUpperCase() === 'OUT') ? -q : q;
-        availFp.set(low, (availFp.get(low) || 0) + delta);
+      const availFp = (H && typeof H.computeFinishedStockMap === "function") ? (H.computeFinishedStockMap() || new Map()) : new Map();
+      if (!(availFp instanceof Map) || !availFp.size){
+        // fallback legacy: solo movimenti
+        for (const mv of (fpMovs || [])){
+          const code = String(mv && mv.code || '').trim();
+          if (!code) continue;
+          const low = code.toLowerCase();
+          const q = (mv && mv.qty != null && Number.isFinite(Number(mv.qty))) ? Math.round(Number(mv.qty)) : 0;
+          if (!q) continue;
+          const delta = (String(mv.type || '').toUpperCase() === 'OUT') ? -q : q;
+          availFp.set(low, (availFp.get(low) || 0) + delta);
+        }
       }
 
       // 2) Calcola fabbisogni: prima PF (giacenza), poi componenti sul residuo
@@ -3366,15 +3415,18 @@ Righe: ${st.total}`);
       }
 
       // Disponibilita' live PF (sede unica)
-      const availFp = new Map();
-      for (const mv of (fpMovs || [])){
-        const code = String(mv && mv.code || "").trim();
-        if (!code) continue;
-        const low = code.toLowerCase();
-        const q = _safeInt(mv.qty);
-        if (!q) continue;
-        const delta = (String(mv.type || "").toUpperCase() === "OUT") ? -q : q;
-        availFp.set(low, (availFp.get(low) || 0) + delta);
+      const availFp = (H && typeof H.computeFinishedStockMap === "function") ? (H.computeFinishedStockMap() || new Map()) : new Map();
+      if (!(availFp instanceof Map) || !availFp.size){
+        // fallback legacy: solo movimenti
+        for (const mv of (fpMovs || [])){
+          const code = String(mv && mv.code || "").trim();
+          if (!code) continue;
+          const low = code.toLowerCase();
+          const q = _safeInt(mv.qty);
+          if (!q) continue;
+          const delta = (String(mv.type || "").toUpperCase() === "OUT") ? -q : q;
+          availFp.set(low, (availFp.get(low) || 0) + delta);
+        }
       }
 
       const movCol = collection(H.fb.db, "orgs", H.ORG_ID, "inventoryMovements");
@@ -8532,6 +8584,7 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
     }
     function closeHeaderModalIfOpen(){
       const modalOrder = [
+        { el: document.getElementById("modalFpInvAction"), close: closeFpInvActionModal },
         { el: modalFlowEdit, close: closeFlowEdit },
         { el: modalDocDetail, close: closeDocDetail },
         { el: modalMovement, close: closeMovementModal },
@@ -8855,6 +8908,7 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
       settings: { ...DEFAULT_SETTINGS },
       movements: [], // array of Movement
       finishedMovements: [], // movimenti inventario prodotti finiti (sync)
+      finishedLevels: [], // livelli assoluti PF (senza movimenti)
       thresholds: {}, // per-item threshold overrides: key -> number
       productCategories: {}, // per-code categoria (offline fallback)
       productUoms: {}, // per-code unità di misura (offline fallback)
@@ -8892,6 +8946,7 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
         categories: null,
         movements: null,
         finishedMovements: null,
+        finishedLevels: null,
         thresholds: null,
         supplierDocs: null,
         finishedProducts: null,
@@ -8913,6 +8968,7 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
         // Espone anche state + util: serve a moduli esterni (es. Scarica Flussi DDT)
         // per poter leggere movimenti inventario e normalizzazioni.
         globalThis.__HUB.state = state;
+        globalThis.__HUB.computeFinishedStockMap = computeFinishedStockMap;
         globalThis.__HUB.safeInt = safeInt;
         globalThis.__HUB.normalizeWarehouse = normalizeWarehouse;
         globalThis.__HUB.warehouseLabel = warehouseLabel;
@@ -9914,6 +9970,33 @@ btnLogout.addEventListener("click", async () => {
       );
     }
 
+
+      // Finished inventory levels (Prodotti finiti senza movimenti)
+      fb.unsub.finishedLevels = onSnapshot(
+        query(orgCol("finishedInventoryLevels"), orderBy("updatedAt")),
+        (snap) => {
+          state.finishedLevels = snap.docs.map(d => {
+            const data = d.data() || {};
+            const code = String(data.code || safeDecodeUri(d.id || "") || "").trim();
+            const codeLower = String(data.codeLower || code || "").trim().toLowerCase();
+            return {
+              id: d.id,
+              code,
+              codeLower,
+              item: String(data.item || "").trim(),
+              uom: String(data.uom || "").trim(),
+              qty: safeInt(data.qty),
+              updatedAt: tsToIso(data.updatedAt) || data.updatedAtIso || ""
+            };
+          }).filter(x => x && x.codeLower);
+          try{ __fpUnifiedStockCacheSig = ""; __fpUnifiedStockCacheMap = null; }catch(_){}
+          renderAll();
+        },
+        (err) => {
+          console.error("finishedLevels watch error", err);
+        }
+      );
+
     function watchSupplierDocs(supplierId) {
       // Legacy: prima erano "allegati" su Firestore. Ora la lista documenti del fornitore
       // è derivata dai DDT / documenti caricati (OCR) e si aggiorna via renderAll().
@@ -10786,6 +10869,7 @@ async function deleteMovementsBulk(ids) {
           state.thresholds = parsed.thresholds && typeof parsed.thresholds === "object" ? parsed.thresholds : {};
           state.productCategories = parsed.productCategories && typeof parsed.productCategories === "object" ? parsed.productCategories : {};
           state.productUoms = parsed.productUoms && typeof parsed.productUoms === "object" ? parsed.productUoms : {};
+          state.finishedLevels = Array.isArray(parsed.finishedLevels) ? parsed.finishedLevels : [];
           state.categories = Array.isArray(parsed.categories) ? parsed.categories : (Array.isArray(state.categories) ? state.categories : []);
           // Categorie: default + indice runtime
           if (!Array.isArray(state.categories) || !state.categories.length) state.categories = DEFAULT_CATEGORIES.slice();
@@ -10804,6 +10888,7 @@ async function deleteMovementsBulk(ids) {
           thresholds: state.thresholds,
           productCategories: state.productCategories,
           productUoms: state.productUoms,
+          finishedLevels: state.finishedLevels,
           categories: state.categories
         }));
       } catch {}
@@ -11793,45 +11878,130 @@ function validateMovementFields(fields) {
       return Array.from(stock.values());
     }
 
-    function computeFinishedStockByWarehouse() {
-      const stock = new Map();
-      const latestByKey = new Map();
+    
+    function __fpNormIsoTs(ts){
+      const s = String(ts || "").trim();
+      if (!s) return "";
+      if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s + "T00:00:00Z";
+      return s;
+    }
 
-      for (const mv of (state.finishedMovements || [])) {
-        const warehouse = WAREHOUSE_FINISHED; // sede unica
-        const code = (mv.code || "").trim();
-        if (!code) continue;
-        const low = code.toLowerCase();
-        const item = (mv.item || "").trim();
-        const k = low;
+    // Cache: stock PF calcolato con "livelli assoluti" + movimenti successivi
+    let __fpUnifiedStockCacheSig = "";
+    let __fpUnifiedStockCacheMap = null; // Map(codeLower -> {warehouse, code, item, uom, qty, lastMoveAt})
 
-        const cur = stock.get(k) || {
-          warehouse,
-          code,
-          item,
-          uom: "",
-          qty: 0,
-          lastMoveAt: ""
-        };
+    function __computeFinishedStockObjectMap(){
+      try{
+        const mvs = (state && Array.isArray(state.finishedMovements)) ? state.finishedMovements : [];
+        const levels = (state && Array.isArray(state.finishedLevels)) ? state.finishedLevels : [];
 
-        const q = safeInt(mv.qty);
-        cur.qty += (mv.type === "OUT" ? -q : q);
-        if (!cur.item && item) cur.item = item;
+        const lastMv = (mvs && mvs.length)
+          ? __fpNormIsoTs(mvs[mvs.length-1].createdAt || mvs[mvs.length-1].date || "")
+          : "";
 
-        const __u = __normalizeUom(mv.uom || "");
-        if (__u) cur.uom = __u;
-
-        const ts = mv.createdAt || mv.date || "";
-        const prev = latestByKey.get(k) || "";
-        if (!prev || String(ts) > String(prev)) {
-          latestByKey.set(k, String(ts));
-          cur.lastMoveAt = String(ts);
+        let maxLv = "";
+        for (const lv of (levels || [])){
+          const ts = __fpNormIsoTs((lv && (lv.updatedAt || lv.updatedAtIso || lv.date)) || "");
+          if (ts && (!maxLv || ts > maxLv)) maxLv = ts;
         }
 
-        stock.set(k, cur);
-      }
+        const sig = String(mvs.length) + "|" + String(lastMv) + "|" + String(levels.length) + "|" + String(maxLv);
+        if (sig && sig === __fpUnifiedStockCacheSig && (__fpUnifiedStockCacheMap instanceof Map)) return __fpUnifiedStockCacheMap;
 
-      return Array.from(stock.values());
+        // 1) Seleziona l'ultimo livello per codice
+        const levelByCode = new Map(); // codeLower -> {ts, qty, code, item, uom}
+        for (const lv of (levels || [])){
+          if (!lv) continue;
+          const codeLower = String(lv.codeLower || lv.code || "").trim().toLowerCase();
+          if (!codeLower) continue;
+
+          const ts = __fpNormIsoTs(lv.updatedAt || lv.updatedAtIso || "");
+          const prev = levelByCode.get(codeLower);
+          if (prev && prev.ts && ts && ts <= prev.ts) continue;
+
+          levelByCode.set(codeLower, {
+            ts,
+            qty: safeInt(lv.qty),
+            code: String(lv.code || "").trim() || codeLower,
+            item: String(lv.item || "").trim(),
+            uom: String(lv.uom || "").trim()
+          });
+        }
+
+        // 2) Base: livelli assoluti
+        const stock = new Map();
+        const cutoffByCode = new Map();
+
+        for (const [codeLower, lv] of levelByCode.entries()){
+          stock.set(codeLower, {
+            warehouse: WAREHOUSE_FINISHED,
+            code: lv.code || codeLower,
+            item: lv.item || "",
+            uom: __normalizeUom(lv.uom || "") || "",
+            qty: Number(lv.qty || 0),
+            lastMoveAt: lv.ts || ""
+          });
+          if (lv.ts) cutoffByCode.set(codeLower, lv.ts);
+        }
+
+        // 3) Applica solo i movimenti SUCCESSIVI al livello (se presente)
+        for (const mv of (mvs || [])){
+          const code = String(mv && mv.code || "").trim();
+          if (!code) continue;
+          const low = code.toLowerCase();
+
+          const q = safeInt(mv && mv.qty);
+          if (!q) continue;
+
+          const ts = __fpNormIsoTs(mv.createdAt || mv.date || "");
+          const cutoff = cutoffByCode.get(low) || "";
+          if (cutoff && ts && ts <= cutoff) continue;
+
+          const cur = stock.get(low) || {
+            warehouse: WAREHOUSE_FINISHED,
+            code: code,
+            item: String(mv && mv.item || "").trim(),
+            uom: "",
+            qty: 0,
+            lastMoveAt: ""
+          };
+
+          const dir = String(mv && mv.type || "").toUpperCase();
+          cur.qty += (dir === "OUT") ? -q : q;
+
+          const item = String(mv && mv.item || "").trim();
+          if (!cur.item && item) cur.item = item;
+
+          const __u = __normalizeUom(mv && mv.uom || "");
+          if (__u && !cur.uom) cur.uom = __u;
+
+          if (ts && (!cur.lastMoveAt || String(ts) > String(cur.lastMoveAt))) cur.lastMoveAt = String(ts);
+
+          stock.set(low, cur);
+        }
+
+        __fpUnifiedStockCacheSig = sig;
+        __fpUnifiedStockCacheMap = stock;
+        return stock;
+      }catch(_){
+        return new Map();
+      }
+    }
+
+    function computeFinishedStockMap(){
+      const map = new Map();
+      const m = __computeFinishedStockObjectMap();
+      if (!(m instanceof Map)) return map;
+      for (const [k, v] of m.entries()){
+        const n = (v && Number.isFinite(Number(v.qty))) ? Number(v.qty) : 0;
+        map.set(k, n);
+      }
+      return map;
+    }
+
+    function computeFinishedStockByWarehouse() {
+      const m = __computeFinishedStockObjectMap();
+      return Array.from((m instanceof Map) ? m.values() : []);
     }
 
 
@@ -15587,6 +15757,7 @@ function renderFpInventoryCategoryOptions(){
   }catch(_){ }
 }
 
+
 function renderFinishedStockTable(fpRows){
   const qRaw = (fpInvSearch && fpInvSearch.value ? String(fpInvSearch.value) : "").trim();
   const q = normTextKey(qRaw);
@@ -15608,9 +15779,8 @@ function renderFinishedStockTable(fpRows){
 
   __fpStockRowByKey = new Map();
 
-
   if (rows.length === 0) {
-    fpStockTbody.innerHTML = '<tr><td class="td-muted" colspan="4">Nessun risultato.</td></tr>';
+    fpStockTbody.innerHTML = '<tr><td class="td-muted" colspan="2">Nessun risultato.</td></tr>';
     return;
   }
 
@@ -15621,36 +15791,132 @@ function renderFinishedStockTable(fpRows){
 
   fpStockTbody.innerHTML = show.map(r => {
     const k = fpStockRowKey(r.code, r.warehouse);
-    const qtyVal = safeInt(r.qty);
+    const qtyVal = (r && r.qty != null && Number.isFinite(Number(r.qty))) ? Math.round(Number(r.qty)) : 0;
     const uom = __normalizeUom(r.uom || "") || "pz";
+    const qtyLabel = `${qtyVal} ${uom}`.trim();
 
-    const canProduce = __fpHasBomForCode(r.code);
-    const prodBtn = canProduce
-      ? `<button class="btn btn-secondary btn-xs jsFpProduce" type="button" title="Produci e scarica componenti (distinta base)">Produci</button>`
-      : ``;
-
-    const qtyCell = `
-      <div class="qty-editor">
-        <input class="qtyEditInput jsFpQtyEdit" type="number" inputmode="numeric" min="0" step="1"
-          value="${qtyVal}" data-orig="${qtyVal}" />
-        <span class="td-muted" style="font-size:12px; font-weight:900; min-width:34px; text-align:left;">${escapeHtml(uom)}</span>
-        <button class="btn btn-primary btn-xs jsFpQtySave" type="button" disabled>Salva</button>
-        ${prodBtn}
-      </div>`;
-
-    const catHtml = r.categoryName ? `<span class="pill catPill" style="padding:2px 8px;">${escapeHtml(r.categoryName)}</span>` : '<span class="td-muted">—</span>';
     const displayCode = escapeHtml(r.code || "");
     const displayName = escapeHtml(r.item || "");
 
+    const prodCell = `
+      <div class="stack" style="gap:2px;">
+        <strong>${displayName}</strong>
+        <span class="td-muted">${displayCode}</span>
+      </div>`;
+
     return `
-      <tr data-k="${escapeHtmlAttr(k)}" title="Apri prodotto finito">
-        <td data-label="Nome prodotto">${displayName}</td>
-        <td data-label="Codice">${displayCode}</td>
-        <td data-label="Categoria">${catHtml}</td>
-        <td data-label="Q.tà" class="qty">${qtyCell}</td>
+      <tr data-k="${escapeHtmlAttr(k)}" title="Apri azioni">
+        <td data-label="Prodotto">${prodCell}</td>
+        <td data-label="Q.tà" class="qty"><span class="kbd">${escapeHtml(qtyLabel)}</span></td>
       </tr>`;
   }).join("");
 }
+
+
+let __fpInvActionRow = null;
+
+function openFpInvActionModal(row){
+  const r = row || {};
+  __fpInvActionRow = r;
+
+  const modal = document.getElementById("modalFpInvAction");
+  if (!modal) return;
+
+  const title = document.getElementById("fpInvActionTitle");
+  const inpProd = document.getElementById("fpInvProduceQty");
+  const inpSet = document.getElementById("fpInvSetQty");
+  const btnProd = document.getElementById("btnFpInvProduceDo");
+
+  const code = String(r.code || "").trim();
+  const name = String(r.item || "").trim();
+
+  if (title) title.textContent = [code, name].filter(Boolean).join(" — ") || "Prodotto finito";
+
+  if (inpProd) {
+    inpProd.value = "";
+    try{ inpProd.focus(); }catch(_){}
+  }
+  if (inpSet) {
+    const cur = (r && r.qty != null && Number.isFinite(Number(r.qty))) ? Math.round(Number(r.qty)) : 0;
+    inpSet.value = String(Math.max(0, cur));
+  }
+
+  if (btnProd) {
+    const can = __fpHasBomForCode(code);
+    btnProd.disabled = !can;
+    try{ btnProd.title = can ? "" : "Distinta base mancante"; }catch(_){}
+  }
+
+  try{ modal.classList.add("open"); }catch(_){}
+  try{ __syncBodyLockFromModals && __syncBodyLockFromModals(); }catch(_){}
+}
+
+function closeFpInvActionModal(){
+  const modal = document.getElementById("modalFpInvAction");
+  if (!modal) return;
+  try{ modal.classList.remove("open"); }catch(_){}
+  try{ __syncBodyLockFromModals && __syncBodyLockFromModals(); }catch(_){}
+  __fpInvActionRow = null;
+}
+
+async function setFinishedStockLevelWithoutMovement(row, newAbsQty){
+  const r = row || {};
+  const code = String(r.code || "").trim();
+  if (!code) { showToast("Codice mancante", "warn"); return; }
+
+  const codeLower = code.toLowerCase();
+  let qty = safeInt(newAbsQty);
+  if (!Number.isFinite(qty) || qty < 0) qty = 0;
+
+  const item = String(r.item || "").trim() || code;
+  const uom = __normalizeUom(r.uom || "") || "pz";
+  const now = nowIso();
+
+  // Invalida cache
+  try{ __fpUnifiedStockCacheSig = ""; __fpUnifiedStockCacheMap = null; }catch(_){}
+
+  // Cloud (se loggato): salva un "livello assoluto" senza creare movimenti
+  if (fb.user && fb.db) {
+    const id = encodeURIComponent(codeLower);
+    const payload = {
+      code,
+      codeLower,
+      item,
+      uom,
+      qty,
+      updatedAt: serverTimestamp(),
+      updatedBy: (fb.user.email || fb.user.uid || "")
+    };
+    await setDoc(doc(orgCol("finishedInventoryLevels"), id), payload, { merge: true });
+
+    // UI ottimistica (in attesa dello snapshot)
+    try{
+      const arr = Array.isArray(state.finishedLevels) ? state.finishedLevels.slice() : [];
+      const i = arr.findIndex(x => String(x && x.codeLower || "").trim().toLowerCase() === codeLower);
+      const o = { id, code, codeLower, item, uom, qty, updatedAt: now };
+      if (i >= 0) arr[i] = Object.assign({}, arr[i], o);
+      else arr.push(o);
+      state.finishedLevels = arr;
+    }catch(_){ }
+  } else {
+    // fallback locale (solo sul dispositivo)
+    const id = encodeURIComponent(codeLower);
+    try{
+      const arr = Array.isArray(state.finishedLevels) ? state.finishedLevels.slice() : [];
+      const i = arr.findIndex(x => String(x && x.codeLower || "").trim().toLowerCase() === codeLower);
+      const o = { id, code, codeLower, item, uom, qty, updatedAt: now };
+      if (i >= 0) arr[i] = Object.assign({}, arr[i], o);
+      else arr.push(o);
+      state.finishedLevels = arr;
+      saveLocalData();
+    }catch(_){ }
+  }
+
+  try{ __fpUnifiedStockCacheSig = ""; __fpUnifiedStockCacheMap = null; }catch(_){}
+  try{ renderAll(); }catch(_){ }
+  showToast(`Quantità impostata: ${qty} ${uom}`, "ok");
+}
+
 
 async function adjustFinishedStockAbsoluteFromRow(row, newAbsQty) {
   const r = row || {};
@@ -21888,25 +22154,104 @@ searchStock.addEventListener("input", () => renderAll());
 
 }
 
-    // Inventario prodotti finiti: rettifica rapida
+
+    // Inventario prodotti finiti: click riga => modale azioni (solo Produci / Quantità senza produzione)
     if (fpStockTbody) {
-      fpStockTbody.addEventListener("click", async (e) => {
-        const btnProd = e.target.closest("button.jsFpProduce");
-        if (btnProd) {
-          e.preventDefault();
-          e.stopPropagation();
+      fpStockTbody.addEventListener("click", (e) => {
+        const tr = e.target.closest("tr[data-k]");
+        if (!tr) return;
+        const k = tr.getAttribute("data-k") || "";
+        const row = __fpStockRowByKey.get(k);
+        if (!row) return;
+        try{ openFpInvActionModal(row); }catch(_){ }
+      });
+    }
 
-          const tr = btnProd.closest("tr[data-k]");
-          if (!tr) return;
-          const k = tr.getAttribute("data-k") || "";
-          const row = __fpStockRowByKey.get(k);
-          if (!row) return;
+    // Modal azioni PF (bind once)
+    (function(){
+      const modal = document.getElementById("modalFpInvAction");
+      if (!modal) return;
+      if (modal.dataset && modal.dataset.bound === "1") return;
+      if (modal.dataset) modal.dataset.bound = "1";
 
-          // sicurezza: solo se ha distinta base (prodotto o categoria)
-          if (!__fpHasBomForCode(row.code)) {
-            showToast("Prodotto non producibile: distinta base mancante", "warn");
-            return;
-          }
+      const inpProd = document.getElementById("fpInvProduceQty");
+      const inpSet = document.getElementById("fpInvSetQty");
+      const btnProd = document.getElementById("btnFpInvProduceDo");
+      const btnSet = document.getElementById("btnFpInvSetDo");
+      const btnClose = document.getElementById("btnFpInvActionClose");
+      const btnCloseX = document.getElementById("fpInvActionCloseX");
+
+      const close = () => { try{ closeFpInvActionModal(); }catch(_){ try{ modal.classList.remove("open"); __syncBodyLockFromModals(); }catch(__){} } };
+
+      btnClose && btnClose.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){ } close(); });
+      btnCloseX && btnCloseX.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){ } close(); });
+      modal.addEventListener("click", (e) => { if (e && e.target === modal) close(); });
+
+      btnProd && btnProd.addEventListener("click", async (e) => {
+        try{ e.preventDefault(); e.stopPropagation(); }catch(_){}
+        const row = __fpInvActionRow;
+        if (!row) return;
+
+        if (!__fpHasBomForCode(row.code)) {
+          showToast("Prodotto non producibile: distinta base mancante", "warn");
+          return;
+        }
+
+        let qty = safeInt(inpProd ? inpProd.value : 0);
+        if (!Number.isFinite(qty) || qty <= 0) { showToast("Quantità non valida", "warn"); return; }
+
+        const oldTxt = btnProd.textContent;
+        btnProd.disabled = true;
+        btnProd.textContent = "Produco…";
+        try{
+          await produceFinishedProductFromRow(row, qty);
+          close();
+        }catch(err){
+          console.error(err);
+          showToast("Errore produzione", "err");
+        }finally{
+          btnProd.textContent = oldTxt || "Esegui";
+          btnProd.disabled = false;
+        }
+      });
+
+      btnSet && btnSet.addEventListener("click", async (e) => {
+        try{ e.preventDefault(); e.stopPropagation(); }catch(_){}
+        const row = __fpInvActionRow;
+        if (!row) return;
+
+        let newQty = safeInt(inpSet ? inpSet.value : 0);
+        if (!Number.isFinite(newQty) || newQty < 0) newQty = 0;
+
+        const oldTxt = btnSet.textContent;
+        btnSet.disabled = true;
+        btnSet.textContent = "Imposto…";
+        try{
+          await setFinishedStockLevelWithoutMovement(row, newQty);
+          close();
+        }catch(err){
+          console.error(err);
+          showToast("Errore impostazione quantità", "err");
+        }finally{
+          btnSet.textContent = oldTxt || "Imposta";
+          btnSet.disabled = false;
+        }
+      });
+
+      const onKey = (e) => {
+        if (!e) return;
+        if (e.key === "Escape"){ e.preventDefault(); close(); }
+      };
+      inpProd && inpProd.addEventListener("keydown", (e) => {
+        if (e.key === "Enter"){ e.preventDefault(); btnProd && btnProd.click(); }
+        onKey(e);
+      });
+      inpSet && inpSet.addEventListener("keydown", (e) => {
+        if (e.key === "Enter"){ e.preventDefault(); btnSet && btnSet.click(); }
+        onKey(e);
+      });
+    })();
+
 
           const def = "1";
           const label = `${String(row.code||"").trim()} — ${String(row.item||"").trim()}`.trim();
