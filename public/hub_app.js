@@ -2226,6 +2226,7 @@ const tpl = document.createElement("template");
     resyncInFlight: new Set(),
     resyncFail: new Map(),
     resyncTimer: null,
+    agentiFpCodes: { all: [], verify: [], updatedAt: 0 },
     unsub: { completed:null, finished:null, cache:null, fpcats:null }
   };
 
@@ -2882,6 +2883,74 @@ const tpl = document.createElement("template");
 
   function isAgentWarehouseDdt(ddt){
     try{ return isAgentiWarehouse(ddt && (ddt.warehouse || ddt.magazzino || ddt.site)); }catch(_){ return false; }
+  }
+
+
+  // ===== PF codes in DDT "Magazzino agenti" (per filtro inventario PF) =====
+  function __computeAgentiFpCodes(){
+    try{
+      const doneKeys = new Set();
+      for (const d of (S.completed || [])){
+        const k = String((d && (d.key || d.ddtKey || d.daneaDdtKey)) || "").trim();
+        if (k) doneKeys.add(k);
+      }
+
+      const allSet = new Set();
+      const verifySet = new Set();
+
+      const cacheList = Array.isArray(S.cache) ? S.cache : [];
+      for (const d of cacheList){
+        if (!d || !isAgentWarehouseDdt(d)) continue;
+        const k = String((d && (d.key || d.ddtKey || d.daneaDdtKey)) || "").trim();
+        const rows = Array.isArray(d.rows) ? d.rows : [];
+        for (const r of rows){
+          const c = String((r && (r.code || r.codice)) || "").trim();
+          if (!c) continue;
+          const low = c.toLowerCase();
+          allSet.add(low);
+          if (k && !doneKeys.has(k)) verifySet.add(low);
+        }
+      }
+
+      // Include anche i DDT già completati (safety: nel caso non fossero nel cache)
+      const doneList = Array.isArray(S.completed) ? S.completed : [];
+      for (const d of doneList){
+        if (!d || !isAgentWarehouseDdt(d)) continue;
+        const rows = Array.isArray(d.rows) ? d.rows : [];
+        for (const r of rows){
+          const c = String((r && (r.code || r.codice)) || "").trim();
+          if (!c) continue;
+          allSet.add(c.toLowerCase());
+        }
+      }
+
+      return {
+        all: Array.from(allSet),
+        verify: Array.from(verifySet),
+        updatedAt: Date.now()
+      };
+    }catch(_){
+      return { all: [], verify: [], updatedAt: Date.now() };
+    }
+  }
+
+  function __updateAgentiFpCodes(reason){
+    try{
+      const payload = __computeAgentiFpCodes();
+      if (reason) payload.reason = String(reason);
+      S.agentiFpCodes = payload;
+
+      // Espongo anche fuori dal modulo (serve al filtro "Solo magazzino agenti" nella view PF)
+      try{
+        window.HubDaneaDdt = window.HubDaneaDdt || {};
+        window.HubDaneaDdt.agentiFpCodes = payload;
+      }catch(_){ }
+
+      // Notifica per aggiornamento immediato UI (es. mentre sei in "da verificare")
+      try{
+        window.dispatchEvent(new CustomEvent("HubDaneaAgentiFpCodesUpdated", { detail: payload }));
+      }catch(_){ }
+    }catch(_){ }
   }
 
 
@@ -5354,6 +5423,7 @@ function bindEvents(){
         });
         S.completed = arr;
         cacheCompletedMap();
+        try{ __updateAgentiFpCodes("completed"); }catch(_){ }
         render();
         try{ __autoModeKick("completed"); }catch(_){ }
         try{ queueResyncOutOfSync("completed"); }catch(_){ }
@@ -5405,12 +5475,14 @@ function bindEvents(){
         S.cache = arr;
         S.cacheReady = true;
         rebuildCacheMap();
+        try{ __updateAgentiFpCodes("cache"); }catch(_){ }
         render();
         try{ __autoModeKick("cache"); }catch(_){ }
         try{ queueResyncOutOfSync("cache"); }catch(_){ }
       }, (err) => {
         console.warn("daneaDdts snapshot error", err);
         S.cacheReady = true;
+        try{ __updateAgentiFpCodes("cache_err"); }catch(_){ }
         render();
         try{ __autoModeKick("cache_err"); }catch(_){ }
       });
@@ -16951,11 +17023,32 @@ function __fpIsAgentiWarehouseStr(warehouse){
 }
 
 function __fpGetCodesFromAgentiDdt(){
+  // 1) Prefer dati live dal modulo Danea (include DDT "da verificare")
+  try{
+    const payload = (window.HubDaneaDdt && window.HubDaneaDdt.agentiFpCodes) ? window.HubDaneaDdt.agentiFpCodes : null;
+    const arr = payload && Array.isArray(payload.all) ? payload.all : [];
+    const sig = payload ? (String(payload.updatedAt || "") + "|" + String(arr.length || 0)) : "";
+
+    if (sig && sig === __fpAgentiDdtCodesSig && __fpAgentiDdtCodesSet) return __fpAgentiDdtCodesSet;
+
+    if (arr && arr.length){
+      const set = new Set();
+      for (const c of arr){
+        const low = String(c || "").trim().toLowerCase();
+        if (low) set.add(low);
+      }
+      __fpAgentiDdtCodesSig = sig;
+      __fpAgentiDdtCodesSet = set;
+      return set;
+    }
+  }catch(_){ }
+
+  // 2) Fallback: usa solo i DDT completati (compat)
   try{
     const list = Array.isArray(__daneaCompleted) ? __daneaCompleted : [];
     const first = list[0] || {};
     const last = list[list.length - 1] || {};
-    const sig = String(list.length) + "|" + String(first.key || first._id || "") + "|" + String(first.date || "") + "|" + String(last.key || last._id || "") + "|" + String(last.date || "");
+    const sig = "fallback|" + String(list.length) + "|" + String(first.key || first._id || "") + "|" + String(first.date || "") + "|" + String(last.key || last._id || "") + "|" + String(last.date || "");
     if (sig && sig === __fpAgentiDdtCodesSig && __fpAgentiDdtCodesSet) return __fpAgentiDdtCodesSet;
 
     const set = new Set();
@@ -23430,6 +23523,18 @@ searchStock.addEventListener("input", () => renderAll());
     if (fpInvSearch) fpInvSearch.addEventListener("input", () => renderAll());
     if (fpInvFilterCategory) fpInvFilterCategory.addEventListener("change", () => renderAll());
     if (fpInvFilterAgenti) fpInvFilterAgenti.addEventListener("change", () => renderAll());
+    // Aggiorna subito il filtro PF "Solo magazzino agenti" quando arrivano nuovi DDT (anche "da verificare")
+    try{
+      window.addEventListener("HubDaneaAgentiFpCodesUpdated", () => {
+        try{
+          const v = document.getElementById("viewFinishedInventory");
+          const isActive = !!(v && v.classList && v.classList.contains("active"));
+          const agentOn = fpInvFilterAgenti && String(fpInvFilterAgenti.value || "").trim().toLowerCase() === "agenti";
+          if (isActive && agentOn) renderAll();
+        }catch(_){ }
+      });
+    }catch(_){ }
+
 
     // Click su riga stock: dettaglio + categoria
     if (stockTbody) {
