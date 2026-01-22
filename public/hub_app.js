@@ -17538,7 +17538,104 @@ async function produceFinishedProductFromRow(row, qtyToProduce){
     return null;
   }
 
-  // Calcola fabbisogni componenti
+  // Alias "condivisi" (solo se lo stesso alias è usato da >=2 codici diversi)
+  const sharedAliasMap = new Map();
+  try{
+    const prodArr = Array.isArray(products) ? products : [];
+    const tmp = new Map(); // aliasKey -> { alias, codesByLow: Map(low->code) }
+
+    for (const p of prodArr){
+      if (!p) continue;
+      const code = String(
+        p.code ||
+        (typeof safeDecodeUri==="function" ? safeDecodeUri(p.id || "") : (p.id || "")) ||
+        ""
+      ).trim();
+      if (!code) continue;
+
+      const alias = String((p.alias || p.aliasName) || "").trim();
+      if (!alias) continue;
+
+      const ak = normTextKey(alias);
+      if (!ak) continue;
+
+      const rec = tmp.get(ak) || { alias: alias, codesByLow: new Map() };
+      if (!rec.alias && alias) rec.alias = alias;
+
+      const low = code.toLowerCase();
+      if (!rec.codesByLow.has(low)) rec.codesByLow.set(low, code);
+      tmp.set(ak, rec);
+    }
+
+    for (const [ak, rec] of tmp.entries()){
+      try{
+        const codes = rec && rec.codesByLow ? Array.from(rec.codesByLow.values()).filter(Boolean) : [];
+        if (codes.length >= 2) sharedAliasMap.set(ak, { alias: String(rec.alias || "").trim(), codes });
+      }catch(_){}
+    }
+  }catch(_){}
+
+  function __fpResolveSharedAliasGroup(baseCode, fallbackName, fallbackUom){
+    try{
+      const alias = String(getAliasForCode(baseCode) || "").trim();
+      const ak0 = alias ? normTextKey(alias) : "";
+      if (!ak0) return null;
+
+      const rec = sharedAliasMap.get(ak0);
+      if (!rec || !Array.isArray(rec.codes) || rec.codes.length < 2) return null;
+
+      // Filtra solo codici che "si scaricano" in produzione (materie prime / imballaggi)
+      let codes = rec.codes.slice().map(x => String(x || "").trim()).filter(Boolean);
+      codes = codes.filter(c => __fpIsProductionMacroForCode(c));
+      if (codes.length < 2) return null;
+
+      // U.M. coerente (se riesco a ricavarla)
+      const members = [];
+      const uomSet = new Set();
+      const aliasLabel = alias || String(rec.alias || "").trim() || "";
+
+      for (const c of codes){
+        const meta = __fpResolveComponentMeta(c, aliasLabel || fallbackName || c, fallbackUom);
+        const u = __normalizeUom(meta.uom || "") || __normalizeUom(fallbackUom || "") || "";
+        if (u) uomSet.add(u);
+
+        members.push({
+          code: c,
+          customer: String(meta.customer || "").trim(),
+          item: String(aliasLabel || meta.item || c).trim() || c,
+          uom: u
+        });
+      }
+
+      // U.M. diverse => non considero intercambiabili (evita errori)
+      if (uomSet.size > 1) return null;
+
+      const uom = (uomSet.size === 1)
+        ? Array.from(uomSet)[0]
+        : (__normalizeUom(fallbackUom || "") || "");
+
+      const mem2 = members.map(m => Object.assign({}, m, { uom: m.uom || uom || "" }));
+
+      // display code "A (+2)"
+      const uniqCodes = Array.from(new Set(mem2.map(m => String(m.code || "").trim()).filter(Boolean)));
+      uniqCodes.sort((a,b)=>a.localeCompare(b, "it", { sensitivity:"base" }));
+      const displayCode = (uniqCodes.length > 1) ? `${uniqCodes[0]} (+${uniqCodes.length - 1})` : (uniqCodes[0] || baseCode);
+
+      return {
+        __isAliasGroup: true,
+        __aliasKey: ak0,
+        __alias: aliasLabel,
+        __codes: uniqCodes,
+        __displayCode: displayCode,
+        __members: mem2,
+        uom
+      };
+    }catch(_){
+      return null;
+    }
+  }
+
+  // Calcola fabbisogni componenti (con gestione alias "intelligente")
   const req = new Map();
   const skippedNoQty = [];
   const skippedNotMacro = [];
@@ -17562,20 +17659,61 @@ async function produceFinishedProductFromRow(row, qtyToProduce){
 
       const add = per * qty;
       const low = cCode.toLowerCase();
-      const meta = __fpResolveComponentMeta(cCode, c.name || c.item || c.articolo || cCode, c.uom);
 
-      const cur = req.get(low) || {
-        code: cCode,
-        item: meta.item || cCode,
-        uom: meta.uom || __normalizeUom(c.uom || "") || "",
-        customer: meta.customer || "",
-        qty: 0
-      };
-      cur.qty += add;
-      if (!cur.item) cur.item = meta.item || cCode;
-      if (!cur.uom) cur.uom = meta.uom || __normalizeUom(c.uom || "") || "";
-      if (!cur.customer) cur.customer = meta.customer || "";
-      req.set(low, cur);
+      const fbName = String((c && (c.name || c.item || c.articolo)) || "").trim() || cCode;
+      const fbUom = __normalizeUom((c && c.uom) || "") || "";
+
+      // Prova a risolvere un gruppo alias "condiviso"
+      const aliasGroup = __fpResolveSharedAliasGroup(cCode, fbName || cCode, fbUom || "");
+      const isAlias = !!(aliasGroup && aliasGroup.__isAliasGroup);
+
+      const gk = isAlias ? ("alias:" + aliasGroup.__aliasKey) : ("code:" + low);
+
+      if (!req.has(gk)){
+        if (isAlias){
+          req.set(gk, {
+            __groupKey: gk,
+            __isAliasGroup: true,
+            __alias: aliasGroup.__alias || "",
+            __aliasKey: aliasGroup.__aliasKey || "",
+            __codes: aliasGroup.__codes || [],
+            __displayCode: aliasGroup.__displayCode || "",
+            __members: aliasGroup.__members || [],
+            code: (aliasGroup.__codes && aliasGroup.__codes[0]) ? aliasGroup.__codes[0] : cCode,
+            item: aliasGroup.__alias || getDisplayNameForCode(cCode, fbName || cCode) || fbName || cCode,
+            uom: aliasGroup.uom || fbUom || "",
+            customer: "",
+            qty: 0
+          });
+        } else {
+          const meta = __fpResolveComponentMeta(cCode, fbName || cCode, fbUom || "");
+          req.set(gk, {
+            __groupKey: gk,
+            __isAliasGroup: false,
+            __codes: [cCode],
+            __members: [{
+              code: cCode,
+              customer: String(meta.customer || "").trim(),
+              item: String(meta.item || fbName || cCode).trim() || cCode,
+              uom: String(meta.uom || fbUom || "").trim()
+            }],
+            code: cCode,
+            item: String(meta.item || fbName || cCode).trim() || cCode,
+            uom: String(meta.uom || fbUom || "").trim(),
+            customer: String(meta.customer || "").trim(),
+            qty: 0
+          });
+        }
+      }
+
+      const cur = req.get(gk);
+      cur.qty = (Number(cur.qty) || 0) + add;
+
+      // (best effort) se manca U.M., prova a riempire
+      if (!cur.uom){
+        if (isAlias) cur.uom = aliasGroup.uom || fbUom || "";
+        else cur.uom = fbUom || "";
+      }
     }catch(_){ }
   }
 
@@ -17589,30 +17727,65 @@ async function produceFinishedProductFromRow(row, qtyToProduce){
     return null;
   }
 
-  // Disponibilità (best effort) per warning e per split sede
+  // Disponibilità (best effort) per warning e per split sede / alias
   const avail = __fpBuildAvailByWhCustomerCode();
   const shortages = [];
+
   for (const it of needList){
-    const key = __fpProdMovKey(it.customer, it.code);
-    const aC = Math.max(0, safeInt(avail.cerea.get(key)));
-    const aK = Math.max(0, safeInt(avail.concamarise.get(key)));
-    const tot = aC + aK;
-    if (tot < it.qtyInt){
-      shortages.push({
-        code: it.code,
-        item: it.item,
-        uom: it.uom,
-        need: it.qtyInt,
-        have: tot,
-        cerea: aC,
-        concamarise: aK
-      });
+    const needInt = Math.max(0, safeInt(it.qtyInt));
+    if (!needInt) continue;
+
+    if (it.__isAliasGroup && Array.isArray(it.__members) && it.__members.length){
+      let sumC = 0;
+      let sumK = 0;
+
+      for (const m of it.__members){
+        const key = __fpProdMovKey(m.customer, m.code);
+        const aC = Math.max(0, safeInt(avail.cerea.get(key)));
+        const aK = Math.max(0, safeInt(avail.concamarise.get(key)));
+        sumC += aC;
+        sumK += aK;
+      }
+
+      const tot = sumC + sumK;
+      if (tot < needInt){
+        shortages.push({
+          code: it.__displayCode || it.code,
+          item: it.item,
+          uom: it.uom,
+          need: needInt,
+          have: tot,
+          cerea: sumC,
+          concamarise: sumK,
+          __isAliasGroup: true,
+          __codes: Array.isArray(it.__codes) ? it.__codes.slice() : []
+        });
+      }
+    } else {
+      const key = __fpProdMovKey(it.customer, it.code);
+      const aC = Math.max(0, safeInt(avail.cerea.get(key)));
+      const aK = Math.max(0, safeInt(avail.concamarise.get(key)));
+      const tot = aC + aK;
+      if (tot < needInt){
+        shortages.push({
+          code: it.code,
+          item: it.item,
+          uom: it.uom,
+          need: needInt,
+          have: tot,
+          cerea: aC,
+          concamarise: aK
+        });
+      }
     }
   }
 
   // Se mancano componenti, blocca la produzione (niente stock negativo)
   if (shortages.length){
-    const sPrev = shortages.slice(0, 8).map(s => `${s.code}: richiesti ${s.need}, disponibili ${s.have} (Cerea ${s.cerea}, Conca ${s.concamarise})`).join(" • ");
+    const sPrev = shortages.slice(0, 8).map(s => {
+      const codeInfo = s.__isAliasGroup ? `${s.code} (alias)` : s.code;
+      return `${codeInfo}: richiesti ${s.need}, disponibili ${s.have} (Cerea ${s.cerea}, Conca ${s.concamarise})`;
+    }).join(" • ");
     const moreS = (shortages.length > 8) ? ` … +${shortages.length - 8} altri` : "";
     try{ showToast("Scorte insufficienti: impossibile produrre. Riduci la quantità o carica i componenti.", "warn"); }catch(_){ }
     try{
@@ -17624,7 +17797,15 @@ async function produceFinishedProductFromRow(row, qtyToProduce){
   }
 
   // Preview (max 12 righe)
-  const prev = needList.slice(0, 12).map(it => `• ${it.code} — ${Math.round(it.qtyInt)} ${String(it.uom||"").trim()}`);
+  const prev = needList.slice(0, 12).map(it => {
+    const u = String(it.uom || "").trim();
+    if (it.__isAliasGroup){
+      const codeInfo = it.__displayCode ? ` [${it.__displayCode}]` : "";
+      const label = String(it.item || it.__alias || "").trim() || (it.__displayCode || it.code);
+      return `• ${label}${codeInfo} — ${it.qtyInt} ${u}`;
+    }
+    return `• ${it.code} — ${it.qtyInt} ${u}`;
+  });
   const more = (needList.length > 12) ? `\n… +${needList.length - 12} altri` : "";
 
   let msg = `Produrre ${qty} ${fpUom} di\n${fpCode} — ${fpName}?\n\n` +
@@ -17637,10 +17818,6 @@ async function produceFinishedProductFromRow(row, qtyToProduce){
   if (skippedNotMacro.length){
     msg += `\n\nℹ️ Componenti fuori macro (non scaricati): ${Array.from(new Set(skippedNotMacro)).slice(0,6).join(", ")}${skippedNotMacro.length>6?"…":""}`;
   }
-  if (shortages.length){
-    const sPrev = shortages.slice(0, 6).map(s => `• ${s.code}: richiesti ${s.need}, disponibili ${s.have} (Cerea ${s.cerea}, Conca ${s.concamarise})`).join("\n");
-    msg += `\n\n⚠️ Scorte insufficienti (potresti andare in negativo):\n${sPrev}${shortages.length>6?"\n…":""}`;
-  }
 
   msg += `\n\nConfermi?`;
   if (!confirm(msg)) return null;
@@ -17651,71 +17828,126 @@ async function produceFinishedProductFromRow(row, qtyToProduce){
     const date = todayYYYYMMDD();
     const batchId = `PROD-${date}-${String(Math.random()).slice(2,8)}`;
 
-    // Costruisci movimenti componenti (split su sede con più disponibilità)
+    const note = `Produzione PF: ${fpCode} x ${qty} ${fpUom} (${batchId})`;
+
+    const makePayload = (warehouse, src, qtyInt, baseItem, baseUom) => ({
+      type: "OUT",
+      customer: String(src && src.customer || "").trim(),
+      code: String(src && src.code || "").trim(),
+      item: String(baseItem || (src && src.item) || (src && src.code) || "").trim() || String(src && src.code || "").trim(),
+      uom: String(baseUom || (src && src.uom) || "").trim(),
+      qtyRaw: `${qtyInt} ${String(baseUom || (src && src.uom) || "").trim()}`.trim(),
+      qty: qtyInt,
+      date: date,
+      note: note,
+      source: "Produzione PF",
+      rawText: "",
+      warehouse: warehouse,
+      docType: "PRODUZIONE",
+      docNum: batchId,
+      docDateRaw: date,
+      createdAt: serverTimestamp(),
+      createdBy: actor
+    });
+
+    // Costruisci movimenti componenti (split su sede con più disponibilità + gestione alias)
     const movs = [];
 
+    const readAvail = (wh, key) => {
+      const m = (wh === WAREHOUSE_CONCA) ? avail.concamarise : avail.cerea;
+      return Math.max(0, safeInt(m.get(key)));
+    };
+    const writeAvail = (wh, key, val) => {
+      const m = (wh === WAREHOUSE_CONCA) ? avail.concamarise : avail.cerea;
+      m.set(key, val);
+    };
+
     for (const it of needList){
-      const cust = String(it.customer || "").trim();
-      const key = __fpProdMovKey(cust, it.code);
+      const needTot = Math.max(0, safeInt(it.qtyInt));
+      if (!needTot) continue;
 
-      let need = Math.max(0, safeInt(it.qtyInt));
-      let aC = Math.max(0, safeInt(avail.cerea.get(key)));
-      let aK = Math.max(0, safeInt(avail.concamarise.get(key)));
+      const baseItem = String(it.item || it.code || "").trim();
+      const baseUom = String(it.uom || "").trim();
 
-      const first = (aK > aC) ? WAREHOUSE_CONCA : WAREHOUSE_CEREA;
-      const second = (first === WAREHOUSE_CEREA) ? WAREHOUSE_CONCA : WAREHOUSE_CEREA;
+      // sorgenti: 1 codice (normale) oppure più codici (alias)
+      const sources = (it.__isAliasGroup && Array.isArray(it.__members) && it.__members.length)
+        ? it.__members.slice()
+        : [{
+            code: it.code,
+            customer: it.customer,
+            item: it.item,
+            uom: it.uom
+          }];
 
-      const takeFrom = (wh) => {
-        if (need <= 0) return 0;
-        const cur = (wh === WAREHOUSE_CONCA) ? aK : aC;
-        const take = Math.min(need, cur);
-        if (take <= 0) return 0;
-        need -= take;
-        if (wh === WAREHOUSE_CONCA) aK -= take;
-        else aC -= take;
-        return take;
-      };
-
-      const t1 = takeFrom(first);
-      const t2 = takeFrom(second);
-
-      // Se rimane bisogno (stock insufficiente), scarico comunque sul primo magazzino (andando in negativo)
-      let t3 = 0;
-      if (need > 0){
-        t3 = need;
-        need = 0;
-        if (first === WAREHOUSE_CONCA) aK -= t3;
-        else aC -= t3;
+      // Build src state with current availability
+      const srcState = [];
+      for (const s of sources){
+        const code = String(s && s.code || "").trim();
+        if (!code) continue;
+        const customer = String(s && s.customer || "").trim();
+        const key = __fpProdMovKey(customer, code);
+        const aC = readAvail(WAREHOUSE_CEREA, key);
+        const aK = readAvail(WAREHOUSE_CONCA, key);
+        srcState.push({
+          code,
+          customer,
+          key,
+          item: String(s && s.item || baseItem || code).trim() || code,
+          uom: String(s && s.uom || baseUom || "").trim(),
+          aC,
+          aK
+        });
       }
 
-      // aggiorna disponibilità live
-      avail.cerea.set(key, aC);
-      avail.concamarise.set(key, aK);
+      let need = needTot;
+      const sumC = srcState.reduce((acc,x)=>acc + Math.max(0, safeInt(x.aC)), 0);
+      const sumK = srcState.reduce((acc,x)=>acc + Math.max(0, safeInt(x.aK)), 0);
 
-      const note = `Produzione PF: ${fpCode} x ${qty} ${fpUom} (${batchId})`;
-      const makePayload = (warehouse, qtyInt) => ({
-        type: "OUT",
-        customer: cust,
-        code: it.code,
-        item: it.item || it.code,
-        uom: String(it.uom || "").trim(),
-        qtyRaw: `${it.qty} ${String(it.uom||"").trim()}`.trim(),
-        qty: qtyInt,
-        date: date,
-        note: note,
-        source: "Produzione PF",
-        rawText: "",
-        warehouse: warehouse,
-        docType: "PRODUZIONE",
-        docNum: batchId,
-        docDateRaw: date,
-        createdAt: serverTimestamp(),
-        createdBy: actor
-      });
+      const first = (sumK > sumC) ? WAREHOUSE_CONCA : WAREHOUSE_CEREA;
+      const second = (first === WAREHOUSE_CEREA) ? WAREHOUSE_CONCA : WAREHOUSE_CEREA;
 
-      if (t1 > 0) movs.push(makePayload(first, t1));
-      if (t2 > 0) movs.push(makePayload(second, t2));
-      if (t3 > 0) movs.push(makePayload(first, t3));
+      const takeFromWarehouse = (wh)=>{
+        if (need <= 0) return;
+
+        const getAvailWh = (x)=> (wh === WAREHOUSE_CONCA) ? x.aK : x.aC;
+        const setAvailWh = (x,v)=> { if (wh === WAREHOUSE_CONCA) x.aK = v; else x.aC = v; };
+
+        const list = srcState
+          .filter(x => getAvailWh(x) > 0)
+          .sort((a,b)=> getAvailWh(b) - getAvailWh(a));
+
+        for (const x of list){
+          if (need <= 0) break;
+
+          const cur = getAvailWh(x);
+          const take = Math.min(need, cur);
+          if (take <= 0) continue;
+
+          need -= take;
+          setAvailWh(x, cur - take);
+
+          // aggiorna disponibilità live (per i componenti successivi)
+          writeAvail(wh, x.key, cur - take);
+
+          movs.push(makePayload(wh, x, take, baseItem, baseUom || x.uom));
+        }
+      };
+
+      takeFromWarehouse(first);
+      takeFromWarehouse(second);
+
+      // safety: se rimane bisogno, scarica comunque sul primo (ma in teoria non succede perché blocchiamo gli shortage)
+      if (need > 0 && srcState.length){
+        const x = srcState[0];
+
+        movs.push(makePayload(first, x, need, baseItem, baseUom || x.uom));
+
+        // aggiorna disponibilità live andando in negativo
+        const cur = readAvail(first, x.key);
+        writeAvail(first, x.key, cur - need);
+
+        need = 0;
+      }
     }
 
     // Movimento carico PF
@@ -17758,6 +17990,7 @@ async function produceFinishedProductFromRow(row, qtyToProduce){
     __fpProduceBusy = false;
   }
 }
+
 
 let __stockRowByKey = new Map();
 
