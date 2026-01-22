@@ -3968,6 +3968,19 @@ Riallineare lo scarico aggiornando i movimenti?`);
       }
     }
 
+
+    // expose summary (per cockpit)
+    try{
+      window.HubDaneaDdt = window.HubDaneaDdt || {};
+      window.HubDaneaDdt.summary = {
+        verifyCount: verifyList.length,
+        doneCount: doneList.length,
+        lastFetchedAt: S.lastFetchedAt || "",
+        updatedAt: Date.now()
+      };
+      window.dispatchEvent(new CustomEvent("HubDaneaSummaryUpdated", { detail: window.HubDaneaDdt.summary }));
+    }catch(_){}
+
     // se la vista non è aperta, aggiorna solo pill e stop (evita lavoro)
     if (!isActive) return;
 
@@ -10621,10 +10634,10 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
     const statTotalItems = document.getElementById("statTotalItems");
     const statTotalPieces = document.getElementById("statTotalPieces");
     const statTotalFlows = document.getElementById("statTotalFlows");
-    const statLowStock = document.getElementById("statLowStock");
+    const statDdtVerify = document.getElementById("statDdtVerify");
     const statLastUpdate = document.getElementById("statLastUpdate");
 
-    [statTotalItems, statTotalPieces, statTotalFlows, statLowStock].forEach((el) => {
+    [statTotalItems, statTotalPieces, statTotalFlows, statDdtVerify].forEach((el) => {
       if (el) el.textContent = "0";
     });
 
@@ -11816,8 +11829,37 @@ if (adminEmails && adminEmails.size){
         }
       }
     }
+  // 3) Firestore: powderUsers (inviti/ruoli)
+  try{
+    if (fb && fb.db){
+      const orgNeedle = String(ORG_ID || "default").trim().toLowerCase();
+      const ids = [];
+      if (email) ids.push(email);
+      if (uid) ids.push(uid);
+
+      for (const id of ids){
+        try{
+          const snap = await getDoc(doc(fb.db, "powderUsers", id));
+          if (!snap.exists()) continue;
+
+          const data = snap.data() || {};
+          if (data.enabled === false) continue;
+
+          const orgId = String(data.orgId || "default").trim().toLowerCase();
+          if (orgId && orgNeedle && orgId !== orgNeedle) continue;
+
+          if (data.isAdmin === true || data.admin === true) return true;
+
+          const role = String(data.role || data.ruolo || data.kind || "").trim().toLowerCase();
+          if (role === "admin" || role === "administrator" || role === "owner") return true;
+        }catch(e3){
+          const c = String(e3?.code || e3?.message || "").toLowerCase();
+          if (c.includes("permission") || c.includes("permission-denied")) break;
+        }
+      }
+    }
   }catch(e){
-    console.warn("Admin check (Firestore) failed", e);
+    console.warn("Admin check (powderUsers) failed", e);
   }
 
   return false;
@@ -14593,8 +14635,9 @@ async function deletePfProduction(batchId) {
         const delta = Math.abs(endInt - from);
 
         // Durata adattiva: niente salto a 0, update più fluidi
-        const duration = Math.max(260, Math.min(1100,
-          Math.floor((opts && opts.duration) || (300 + Math.min(800, Math.sqrt(delta) * 35)))
+        // Durata adattiva (più lenta): update più leggibili in dashboard
+        const duration = Math.max(420, Math.min(1800,
+          Math.floor((opts && opts.duration) || (520 + Math.min(1200, Math.sqrt(delta) * 55)))
         ));
 
         if (from === endInt){
@@ -14620,6 +14663,52 @@ async function deletePfProduction(batchId) {
       return { animate, setNow };
     })();
 
+
+
+    // ===== Helpers (cockpit) =====
+    function __getDaneaPiecesToday(){
+      try{
+        const now = new Date();
+        const y = now.getFullYear(), m = now.getMonth(), d = now.getDate();
+        let sum = 0;
+        const list = Array.isArray(__daneaCompleted) ? __daneaCompleted : [];
+        for (const it of list){
+          const iso = String((it && it.createdAt) || "").trim();
+          if (!iso) continue;
+          const dt = new Date(iso);
+          if (!dt || isNaN(dt.getTime())) continue;
+          if (dt.getFullYear() !== y || dt.getMonth() !== m || dt.getDate() !== d) continue;
+
+          const allocs = Array.isArray(it.allocations) ? it.allocations : [];
+          for (const a of allocs) sum += safeInt(a && a.qty);
+        }
+        return sum;
+      }catch(_){ return 0; }
+    }
+
+    function __getDaneaVerifyCount(){
+      try{
+        const s = (window.HubDaneaDdt && window.HubDaneaDdt.summary) ? window.HubDaneaDdt.summary : null;
+        const n = Number(s && s.verifyCount);
+        return Number.isFinite(n) ? Math.max(0, Math.round(n)) : 0;
+      }catch(_){ return 0; }
+    }
+
+    // Aggiorna live il numero "DDT clienti da verificare" sul cockpit (anche se la vista DDT non è aperta)
+    try{
+      window.addEventListener("HubDaneaSummaryUpdated", (ev) => {
+        try{
+          const n = Number(ev && ev.detail && ev.detail.verifyCount);
+          if (statDdtVerify) __counterAnim.animate(statDdtVerify, Number.isFinite(n) ? n : 0);
+        }catch(_){}
+      });
+      // paint iniziale (se la summary esiste già)
+      try{
+        const n0 = __getDaneaVerifyCount();
+        if (statDdtVerify) __counterAnim.setNow(statDdtVerify, n0);
+      }catch(_){}
+    }catch(_){}
+
     function renderStats(stockArr) {
       const items = stockArr.length;
       const totalPieces = stockArr.reduce((sum, x) => sum + (Number(x.qty) || 0), 0);
@@ -14641,42 +14730,14 @@ async function deletePfProduction(batchId) {
 
       __counterAnim.animate(statTotalItems, items);
       __counterAnim.animate(statTotalPieces, totalPieces);
-      // Flussi (cockpit) = numero documenti (DDT) caricati, non numero righe/articoli
-      let docsCount = 0;
-      try {
-        if (Array.isArray(__docGroups)) {
-          docsCount = __docGroups.length;
-        } else {
-          // Calcolo leggero: conta documenti unici senza costruire la lista completa (dashboard più fluida)
-          const seen = new Set();
-          (Array.isArray(state.movements) ? state.movements : []).forEach((mv) => {
-            const source = String((mv && mv.source) || "");
-            const note = String((mv && mv.note) || "").trim();
-            const isDocLike = (source.toUpperCase() === "OCR") || /DDT|DOCUMENTO|TRASPORTO|BOLLA|FATTURA/i.test(note);
-            if (!isDocLike) return;
+      // IMAP scaricati oggi (da PF): totale pezzi da DDT clienti completati (allocations)
+      const piecesToday = __getDaneaPiecesToday();
+      if (typeof statTotalFlows !== "undefined" && statTotalFlows) __counterAnim.animate(statTotalFlows, piecesToday);
 
-            let vatKey = "";
-            try{
-              if (typeof __sup_cleanVat === "function") vatKey = __sup_cleanVat(mv.supplierVat || mv.vat || "");
-            }catch(_){ vatKey = ""; }
+      // DDT clienti da verificare
+      const ddtVerifyCount = __getDaneaVerifyCount();
+      if (statDdtVerify) __counterAnim.animate(statDdtVerify, ddtVerifyCount);
 
-            const docNumKey = String(mv.docNum || "").trim().toLowerCase();
-            const customerKey = vatKey ? ("vat_" + vatKey) : String(mv.customer || "").trim().toLowerCase();
-            const key = [
-              customerKey,
-              String(mv.date || "").trim(),
-              (docNumKey || note.toLowerCase()),
-              source.toLowerCase()
-            ].join("|");
-
-            seen.add(key);
-          });
-          docsCount = seen.size;
-        }
-      } catch (e) { docsCount = 0; }
-
-      if (typeof statTotalFlows !== "undefined" && statTotalFlows) __counterAnim.animate(statTotalFlows, docsCount);
-      __counterAnim.animate(statLowStock, low);
       statLastUpdate.textContent = last ? formatDateIT(last.createdAt) : "—";
     }
 
@@ -15205,25 +15266,7 @@ async function deletePfProduction(batchId) {
           }catch(_){ return 0; }
         })();
 
-        const piecesToday = (() => {
-          try{
-            const now = new Date();
-            const y = now.getFullYear(), m = now.getMonth(), d = now.getDate();
-            let sum = 0;
-            for (const it of (__daneaCompleted || [])){
-              const iso = String(it && it.createdAt || "").trim();
-              if (!iso) continue;
-              const dt = new Date(iso);
-              if (!dt || isNaN(dt.getTime())) continue;
-              if (dt.getFullYear() !== y || dt.getMonth() !== m || dt.getDate() !== d) continue;
-              const allocs = Array.isArray(it.allocations) ? it.allocations : [];
-              for (const a of allocs){
-                sum += safeInt(a && a.qty);
-              }
-            }
-            return sum;
-          }catch(_){ return 0; }
-        })();
+        const piecesToday = __getDaneaPiecesToday();
 
         const fmt = (n) => (Number(n) || 0).toLocaleString("it-IT");
         const list = __getHomeDaneaGroups();
