@@ -94,7 +94,7 @@
         <div class="inlineRow" style="justify-content:space-between; align-items:flex-end; gap:12px;">
           <div class="stack" style="flex:1; min-width: 220px;">
             <div class="hero-sub" id="fpInvDetailTitle">Inventario prodotti finiti</div>
-            <div class="muted">Sede unica • salva per rettifica, oppure <b>Produci</b> per carico PF + scarico componenti</div>
+            <div class="muted">Sede unica • <b>Produci</b> per carico PF + scarico componenti</div>
           </div>
         </div>
 
