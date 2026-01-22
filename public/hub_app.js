@@ -126,7 +126,7 @@
             <thead>
               <tr>
                 <th style="width: 120px;">Codice</th>
-                <th style="width: 320px;">Nome prodotto</th>
+                <th style="width: 700px;">Nome prodotto</th>
                 <th style="width: 160px;">Categoria</th>
                 <th class="qty">Q.tà</th>
               </tr>
