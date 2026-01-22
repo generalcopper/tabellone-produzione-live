@@ -10228,13 +10228,6 @@ Verrà aggiornata anche la chiave su tutti i prodotti finiti.`);
       try{ __dockBackRowControls && __dockBackRowControls(); }catch(_){ }
       try{ __syncDockedControlsVisibility && __syncDockedControlsVisibility(); }catch(_){}
       try { window.scrollTo(0, 0); } catch(_){}
-      if (key === "home") {
-        try {
-          if (window.HubRevenue && typeof window.HubRevenue.renderHomeCockpit === "function") {
-            window.HubRevenue.renderHomeCockpit();
-          }
-        } catch (_) {}
-      }
     }
 
     function __isMobileDevice(){
