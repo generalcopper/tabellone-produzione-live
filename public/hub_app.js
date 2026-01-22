@@ -2683,9 +2683,22 @@ const tpl = document.createElement("template");
           gross: (gross == null) ? null : __round4(gross)
         };
       }).filter(r => {
-        if (!r.code) return false; // importa solo righe con codice articolo
-        if (r.qty != null && r.qty === 0) return false;
-        const m = `${r.code || ""} ${r.desc || ""}`.toLowerCase().replace(/\s+/g, " ").trim();
+        // PATCH (Scarica flussi DDT): non ignorare righe merce senza codice.
+        // Se nel DDT arrivano righe con quantità ma senza <Code>, devono bloccare il completamento
+        // (altrimenti il documento risulta "OK" perché quelle righe venivano filtrate via).
+        const code = String(r && r.code || "").trim();
+        const qtyNum = (r && r.qty != null && Number.isFinite(Number(r.qty))) ? Number(r.qty) : null;
+        const hasQty = (qtyNum != null && qtyNum !== 0);
+        const hasQtyRaw = !!String(r && r.qtyRaw || "").trim();
+
+        // Scarta solo le righe "note" (senza codice e senza quantità). Le righe merce senza codice restano,
+        // così diventano rosse e impediscono il completamento/scarico.
+        if (!code && !hasQty && !hasQtyRaw) return false;
+
+        // quantità esplicita 0 → inutile
+        if (qtyNum != null && qtyNum === 0) return false;
+
+        const m = `${code} ${String(r && r.desc || "")}`.toLowerCase().replace(/\s+/g, " ").trim();
         if (m.includes("rif. conferma ordine") || m.includes("rif conferma ordine")) return false;
         return true;
       });
@@ -2996,6 +3009,11 @@ const tpl = document.createElement("template");
   }
 
   function isRowConfigured(row, ddt){
+    // Righe senza codice articolo: non devono essere "completate".
+    // (Tipico caso: DDT da Danea con articoli inseriti solo con descrizione.)
+    const rowCode = String(row && row.code || "").trim();
+    if (!rowCode) return { ok: false, why: "nocode", fp: null };
+
     const fp = getFpForRow(row);
     if (!fp) return { ok: false, why: "missing", fp: null };
 
@@ -4031,7 +4049,9 @@ Riallineare lo scarico aggiornando i movimenti?`);
       const rowCls = st.ok ? '' : ' daneaRowBad';
       const rowStyle = ' style="cursor:pointer;"';
       let rowTitle = st.ok ? "Apri distinta base" : "Configura distinta base";
-      if (st.why === "agent_stock"){
+      if (st.why === "nocode"){
+        rowTitle = "Manca il codice articolo nell’XML (correggi in Danea/Easyfatt)";
+      } else if (st.why === "agent_stock"){
         const have = Number(st.stock || 0);
         const need = Number(st.need || 0);
         rowTitle = `Scorta PF insufficiente: disponibili ${have} • richiesti ${need}`;
@@ -4040,7 +4060,9 @@ Riallineare lo scarico aggiornando i movimenti?`);
       }
 
       let act = "";
-      if (st.why === "missing"){
+      if (st.why === "nocode"){
+        act = `<span class="td-muted">Manca codice</span>`;
+      } else if (st.why === "missing"){
         act = `<button class="btn btn-secondary btn-xs jsDaneaImportFp" data-code="${escAttr(code)}" data-desc="${escAttr(desc)}" type="button">Importa</button>`;
       } else if (st.why === "empty"){
         const fid = String(st.fp?.id || st.fp?._id || "").trim();
@@ -4066,6 +4088,7 @@ Riallineare lo scarico aggiornando i movimenti?`);
       const st = ddtStatus(ddt);
       const autoOn = !!S.autoDischarge;
       const isAgenti = isAgentWarehouseDdt(ddt);
+      const hasNoCode = rows.some(r => !String(r?.code || "").trim());
 
       const msg = isDone
         ? "Questo DDT è già stato scaricato: eliminandolo (in tab Completati) si resetta lo scarico."
@@ -4075,9 +4098,11 @@ Riallineare lo scarico aggiornando i movimenti?`);
                     ? "Tutte le righe sono OK: puoi completare e scaricare SOLO prodotti finiti (Magazzino agenti)."
                     : "Tutte le righe sono configurate: puoi completare e scaricare componenti.")
                 : "Tutte le righe sono configurate: puoi completare (scarico automatico DISATTIVATO).")
-            : (isAgenti
-                ? "Controlla le righe rosse: per Magazzino agenti serve il prodotto finito importato E giacenza PF sufficiente."
-                : "Configura le righe rosse (distinta base) per poter completare.")
+            : (hasNoCode
+                ? "Ci sono righe senza codice articolo nel DDT: correggi in Danea/Easyfatt e attendi l’aggiornamento dell’XML."
+                : (isAgenti
+                    ? "Controlla le righe rosse: per Magazzino agenti serve il prodotto finito importato E giacenza PF sufficiente."
+                    : "Configura le righe rosse (distinta base) per poter completare."))
           );
       foot.textContent = msg;
     }
@@ -5354,6 +5379,12 @@ function bindEvents(){
         const tr = e.target?.closest?.("tr.jsDaneaItemRow");
         if (tr){
           e.preventDefault(); e.stopPropagation();
+
+          const why = String(tr.getAttribute("data-why") || "").trim();
+          if (why === "nocode"){
+            try{ window.HubInv?.showToast?.("Riga senza codice articolo: correggi in Danea/Easyfatt", "warn"); }catch(_){ }
+            return;
+          }
 
           const fid = String(tr.getAttribute("data-fpid") || "").trim();
           const code = String(tr.getAttribute("data-code") || "").trim();
