@@ -111,6 +111,13 @@
                 <option value="__none">Non assegnata</option>
               </select>
             </div>
+            <div class="field" style="min-width: 220px;">
+              <label for="fpInvFilterAgenti">Filtro</label>
+              <select id="fpInvFilterAgenti">
+                <option value="">Tutti</option>
+                <option value="agenti">Solo magazzino agenti</option>
+              </select>
+            </div>
           </div>
         </div>
 
@@ -10231,6 +10238,7 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
     const btnCloseFpInv = document.getElementById("btnCloseFpInv");
     const fpInvSearch = document.getElementById("fpInvSearch");
     const fpInvFilterCategory = document.getElementById("fpInvFilterCategory");
+    const fpInvFilterAgenti = document.getElementById("fpInvFilterAgenti");
     const fpStockTbody = document.getElementById("fpStockTbody");
 
     const pillOcr = document.getElementById("pillOcr");
@@ -11270,6 +11278,7 @@ btnLogout.addEventListener("click", async () => {
                 number: String(data.number || "").trim(),
                 date: String(data.date || "").trim(),
                 customer: String(data.customer || "").trim(),
+                warehouse: String(data.warehouse || "").trim(),
                 rows: Array.isArray(data.rows) ? data.rows : [],
                 allocations: Array.isArray(data.allocations) ? data.allocations : [],
                 createdAt: tsToIso(data.createdAt) || ""
@@ -16928,6 +16937,48 @@ for (const r of arr) {
 // ===== Inventario prodotti finiti (UI + righe) =====
 let __fpStockRowByKey = new Map();
 
+// Filtro: solo PF presenti in DDT con magazzino "agenti"
+let __fpAgentiDdtCodesSig = "";
+let __fpAgentiDdtCodesSet = new Set();
+
+function __fpIsAgentiWarehouseStr(warehouse){
+  const s = String(warehouse || "").trim().toLowerCase().replace(/\s+/g, " ").trim();
+  if (!s) return false;
+  if (s === "magazzino agenti") return true;
+  if (s.includes("magazzino") && s.includes("agenti")) return true;
+  if (s === "agenti") return true;
+  return false;
+}
+
+function __fpGetCodesFromAgentiDdt(){
+  try{
+    const list = Array.isArray(__daneaCompleted) ? __daneaCompleted : [];
+    const first = list[0] || {};
+    const last = list[list.length - 1] || {};
+    const sig = String(list.length) + "|" + String(first.key || first._id || "") + "|" + String(first.date || "") + "|" + String(last.key || last._id || "") + "|" + String(last.date || "");
+    if (sig && sig === __fpAgentiDdtCodesSig && __fpAgentiDdtCodesSet) return __fpAgentiDdtCodesSet;
+
+    const set = new Set();
+    for (const d of list){
+      if (!d) continue;
+      const wh = String(d.warehouse || d.magazzino || d.site || "").trim();
+      if (!__fpIsAgentiWarehouseStr(wh)) continue;
+      const rows = Array.isArray(d.rows) ? d.rows : [];
+      for (const r of rows){
+        const c = String((r && r.code) || "").trim();
+        if (c) set.add(c.toLowerCase());
+      }
+    }
+
+    __fpAgentiDdtCodesSig = sig;
+    __fpAgentiDdtCodesSet = set;
+    return set;
+  }catch(_){
+    return new Set();
+  }
+}
+
+
 function __findFinishedProductByCode(code){
   const low = String(code || "").trim().toLowerCase();
   if (!low) return null;
@@ -17152,6 +17203,7 @@ function renderFinishedStockTable(fpRows){
   const qRaw = (fpInvSearch && fpInvSearch.value ? String(fpInvSearch.value) : "").trim();
   const q = normTextKey(qRaw);
   const catF = (fpInvFilterCategory && fpInvFilterCategory.value ? String(fpInvFilterCategory.value) : "").trim().toLowerCase();
+  const agentF = (fpInvFilterAgenti && fpInvFilterAgenti.value ? String(fpInvFilterAgenti.value) : "").trim().toLowerCase();
   let rows = Array.isArray(fpRows) ? fpRows : [];
 
   if (q) rows = rows.filter(r => {
@@ -17162,6 +17214,16 @@ function renderFinishedStockTable(fpRows){
   if (catF) {
     if (catF === "__none") rows = rows.filter(r => !String(r.categoryKey || "").trim());
     else rows = rows.filter(r => String(r.categoryKey || "").trim().toLowerCase() === catF);
+  }
+
+  // Filtro: solo articoli provenienti da DDT con magazzino agenti
+  if (agentF === "agenti"){
+    const allowed = __fpGetCodesFromAgentiDdt();
+    if (allowed && allowed.size){
+      rows = rows.filter(r => allowed.has(String(r && r.code || "").trim().toLowerCase()));
+    } else {
+      rows = [];
+    }
   }
 
   if (pillFpStock) pillFpStock.textContent = `${rows.length} righe`;
@@ -23367,6 +23429,7 @@ searchStock.addEventListener("input", () => renderAll());
 
     if (fpInvSearch) fpInvSearch.addEventListener("input", () => renderAll());
     if (fpInvFilterCategory) fpInvFilterCategory.addEventListener("change", () => renderAll());
+    if (fpInvFilterAgenti) fpInvFilterAgenti.addEventListener("change", () => renderAll());
 
     // Click su riga stock: dettaglio + categoria
     if (stockTbody) {
