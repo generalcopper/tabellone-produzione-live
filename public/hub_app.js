@@ -17679,7 +17679,8 @@ async function produceFinishedProductFromRow(row, qtyToProduce){
             __codes: aliasGroup.__codes || [],
             __displayCode: aliasGroup.__displayCode || "",
             __members: aliasGroup.__members || [],
-            code: (aliasGroup.__codes && aliasGroup.__codes[0]) ? aliasGroup.__codes[0] : cCode,
+            __preferredCodes: [cCode],
+            code: cCode,
             item: aliasGroup.__alias || getDisplayNameForCode(cCode, fbName || cCode) || fbName || cCode,
             uom: aliasGroup.uom || fbUom || "",
             customer: "",
@@ -17697,6 +17698,7 @@ async function produceFinishedProductFromRow(row, qtyToProduce){
               item: String(meta.item || fbName || cCode).trim() || cCode,
               uom: String(meta.uom || fbUom || "").trim()
             }],
+            __preferredCodes: [cCode],
             code: cCode,
             item: String(meta.item || fbName || cCode).trim() || cCode,
             uom: String(meta.uom || fbUom || "").trim(),
@@ -17708,6 +17710,16 @@ async function produceFinishedProductFromRow(row, qtyToProduce){
 
       const cur = req.get(gk);
       cur.qty = (Number(cur.qty) || 0) + add;
+
+      // Preferenza scarico: se in BOM ho un codice che appartiene a un alias,
+      // provo prima quel codice e poi i "fratelli" (stesso alias)
+      try{
+        cur.__preferredCodes = Array.isArray(cur.__preferredCodes) ? cur.__preferredCodes : [];
+        const cLowPref = low;
+        if (cLowPref && !cur.__preferredCodes.some(x => String(x || "").trim().toLowerCase() === cLowPref)) {
+          cur.__preferredCodes.push(cCode);
+        }
+      }catch(_){}
 
       // (best effort) se manca U.M., prova a riempire
       if (!cur.uom){
@@ -17900,51 +17912,86 @@ async function produceFinishedProductFromRow(row, qtyToProduce){
       }
 
       let need = needTot;
-      const sumC = srcState.reduce((acc,x)=>acc + Math.max(0, safeInt(x.aC)), 0);
-      const sumK = srcState.reduce((acc,x)=>acc + Math.max(0, safeInt(x.aK)), 0);
 
-      const first = (sumK > sumC) ? WAREHOUSE_CONCA : WAREHOUSE_CEREA;
-      const second = (first === WAREHOUSE_CEREA) ? WAREHOUSE_CONCA : WAREHOUSE_CEREA;
+      // Ordine sorgenti: preferisci il codice scelto in BOM, poi i "fratelli" (alias)
+      const prefCodes = (Array.isArray(it.__preferredCodes) ? it.__preferredCodes : [])
+        .map(x => String(x || "").trim())
+        .filter(Boolean);
+      const prefLows = prefCodes.map(x => x.toLowerCase());
 
-      const takeFromWarehouse = (wh)=>{
+      const used = new Set();
+      const ordered = [];
+
+      // 1) codici preferiti (in ordine BOM)
+      for (const pl of prefLows){
+        for (const s of srcState){
+          if (!s || !s.code) continue;
+          if (String(s.code).trim().toLowerCase() !== pl) continue;
+          const kk = String(s.key || "") + "||" + String(s.code || "");
+          if (used.has(kk)) continue;
+          used.add(kk);
+          ordered.push(s);
+        }
+      }
+
+      // 2) altri codici: prima quelli con più disponibilità totale (somma sedi)
+      const rest = srcState
+        .filter(s => {
+          const kk = String(s.key || "") + "||" + String(s.code || "");
+          return !used.has(kk);
+        })
+        .sort((a,b)=> (
+          (Math.max(0, safeInt(b.aC)) + Math.max(0, safeInt(b.aK))) -
+          (Math.max(0, safeInt(a.aC)) + Math.max(0, safeInt(a.aK)))
+        ));
+      ordered.push(...rest);
+
+      const takeFromSrc = (x, wh)=>{
         if (need <= 0) return;
 
-        const getAvailWh = (x)=> (wh === WAREHOUSE_CONCA) ? x.aK : x.aC;
-        const setAvailWh = (x,v)=> { if (wh === WAREHOUSE_CONCA) x.aK = v; else x.aC = v; };
+        const cur = (wh === WAREHOUSE_CONCA)
+          ? Math.max(0, safeInt(x.aK))
+          : Math.max(0, safeInt(x.aC));
 
-        const list = srcState
-          .filter(x => getAvailWh(x) > 0)
-          .sort((a,b)=> getAvailWh(b) - getAvailWh(a));
+        const take = Math.min(need, cur);
+        if (take <= 0) return;
 
-        for (const x of list){
-          if (need <= 0) break;
+        need -= take;
 
-          const cur = getAvailWh(x);
-          const take = Math.min(need, cur);
-          if (take <= 0) continue;
+        if (wh === WAREHOUSE_CONCA) x.aK = cur - take;
+        else x.aC = cur - take;
 
-          need -= take;
-          setAvailWh(x, cur - take);
+        // aggiorna disponibilità live (per i componenti successivi)
+        writeAvail(wh, x.key, cur - take);
 
-          // aggiorna disponibilità live (per i componenti successivi)
-          writeAvail(wh, x.key, cur - take);
-
-          movs.push(makePayload(wh, x, take, baseItem, baseUom || x.uom));
-        }
+        movs.push(makePayload(wh, x, take, baseItem, baseUom || x.uom));
       };
 
-      takeFromWarehouse(first);
-      takeFromWarehouse(second);
+      // Consuma: per ogni sorgente, scarica prima dalla sede dove ne ho di più
+      for (const x of ordered){
+        if (need <= 0) break;
 
-      // safety: se rimane bisogno, scarica comunque sul primo (ma in teoria non succede perché blocchiamo gli shortage)
-      if (need > 0 && srcState.length){
-        const x = srcState[0];
+        const aC = Math.max(0, safeInt(x.aC));
+        const aK = Math.max(0, safeInt(x.aK));
+        const firstWh = (aK > aC) ? WAREHOUSE_CONCA : WAREHOUSE_CEREA;
+        const secondWh = (firstWh === WAREHOUSE_CEREA) ? WAREHOUSE_CONCA : WAREHOUSE_CEREA;
 
-        movs.push(makePayload(first, x, need, baseItem, baseUom || x.uom));
+        takeFromSrc(x, firstWh);
+        takeFromSrc(x, secondWh);
+      }
+
+      // safety: se rimane bisogno, scarica comunque sul primo preferito (ma in teoria non succede perché blocchiamo gli shortage)
+      if (need > 0 && ordered.length){
+        const x = ordered[0];
+        const aC = Math.max(0, safeInt(x.aC));
+        const aK = Math.max(0, safeInt(x.aK));
+        const wh = (aK > aC) ? WAREHOUSE_CONCA : WAREHOUSE_CEREA;
+
+        movs.push(makePayload(wh, x, need, baseItem, baseUom || x.uom));
 
         // aggiorna disponibilità live andando in negativo
-        const cur = readAvail(first, x.key);
-        writeAvail(first, x.key, cur - need);
+        const cur = readAvail(wh, x.key);
+        writeAvail(wh, x.key, cur - need);
 
         need = 0;
       }
