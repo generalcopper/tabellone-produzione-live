@@ -81,7 +81,7 @@
     <div class="hd">
       <div class="overlayHeaderTitle">
         <button class="iconBtn overlayBack" id="btnBackFpInv" type="button" aria-label="Indietro">‹</button>
-        <h2>Inventario prodotti finiti</h2>
+        <h2>Inventario PF</h2>
       </div>
       <div class="inlineRow" style="gap:8px; justify-content:flex-end;">
         <div class="pill" id="pillFpInvWarehouse">Sede unica</div>
@@ -93,7 +93,7 @@
       <div id="fpInvDetail" class="stack">
         <div class="inlineRow" style="justify-content:space-between; align-items:flex-end; gap:12px;">
           <div class="stack" style="flex:1; min-width: 220px;">
-            <div class="hero-sub" id="fpInvDetailTitle">Inventario prodotti finiti</div>
+            <div class="hero-sub" id="fpInvDetailTitle">Inventario PF</div>
             <div class="muted">Sede unica • <b>Produci</b> per carico PF + scarico componenti</div>
           </div>
         </div>
@@ -1792,7 +1792,7 @@ const tpl = document.createElement("template");
     <div class="hd">
       <div class="overlayHeaderTitle">
         <button class="iconBtn overlayBack" id="btnBackFlows" type="button" aria-label="Indietro">‹</button>
-        <h2>DDT Caricati</h2>
+        <h2>DDT fornitori</h2>
       </div>
       <div class="inlineRow" style="gap:8px; justify-content:flex-end;">
         <div class="pill" id="pillFlowsCount">0</div>
@@ -1852,7 +1852,7 @@ const tpl = document.createElement("template");
       <div class="hd">
         <div class="overlayHeaderTitle">
           <button class="iconBtn overlayBack" id="btnBackDaneaDdt" type="button" aria-label="Indietro">‹</button>
-          <h2>Scarica flussi DDT</h2>
+          <h2>DDT clienti</h2>
         </div>
         <div class="inlineRow" style="gap:8px; justify-content:flex-end;">
           <div class="seg daneaTabs">
@@ -2139,7 +2139,7 @@ const tpl = document.createElement("template");
       <div class="hd">
         <div class="overlayHeaderTitle">
           <button class="iconBtn overlayBack" id="btnBackFPCategories" type="button" aria-label="Indietro">‹</button>
-          <h2>Categorie prodotti finiti</h2>
+          <h2>Categorie PF</h2>
         </div>
         <div class="inlineRow" style="gap:8px; justify-content:flex-end;">
           <div class="pill" id="pillFPCategoriesCount">0</div>
@@ -10195,14 +10195,14 @@ Verrà aggiornata anche la chiave su tutti i prodotti finiti.`);
           (key === "home") ? "Home" :
           (key === "ocr") ? "Carica" :
           (key === "inventory") ? "Inventario" :
-          (key === "finishedInventory") ? "Inventario prodotti finiti" :
-          (key === "flows") ? "DDT Caricati" :
+          (key === "finishedInventory") ? "Inventario PF" :
+          (key === "flows") ? "DDT fornitori" :
           (key === "supplierInvoices") ? "Fatture fornitori" :
-          (key === "daneaDdt") ? "Scarica flussi DDT" :
+          (key === "daneaDdt") ? "DDT clienti" :
           (key === "revenue") ? "Fatturato" :
           (key === "movements") ? "Movimenti" :
-          (key === "categories") ? "Categorie" :
-          (key === "fpCategories") ? "Categorie prodotti finiti" :
+          (key === "categories") ? "IMAP" :
+          (key === "fpCategories") ? "Categorie PF" :
           (key === "trash") ? "Cestino" :
           (key === "moveInv") ? "Sposta inventario" :
           "Anagrafica";
@@ -10388,8 +10388,12 @@ document.getElementById("btnCloseSupplierInvoices")?.addEventListener("click", (
     document.getElementById("btnCloseDaneaDdt")?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
     document.getElementById("btnBackDaneaDdt")?.addEventListener("click", (e) => {
       try{ e.preventDefault(); e.stopPropagation(); }catch(_){}
+      // Nel modale DDT clienti: se sono nel dettaglio torno alla lista,
+      // altrimenti (inizio modale) torno alla Dashboard.
       try{
-        if (window.HubDaneaDdt && typeof window.HubDaneaDdt.backToList === "function"){
+        const det = document.getElementById("daneaDetailWrap");
+        const isDetailOpen = !!(det && det.style && det.style.display !== "none");
+        if (isDetailOpen && window.HubDaneaDdt && typeof window.HubDaneaDdt.backToList === "function"){
           window.HubDaneaDdt.backToList();
           return;
         }
@@ -10753,7 +10757,7 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
         pillFpInvWarehouse.style.display = "inline-flex";
         pillFpInvWarehouse.textContent = "Sede unica";
       }
-      if (fpInvDetailTitle) fpInvDetailTitle.textContent = "Inventario prodotti finiti";
+      if (fpInvDetailTitle) fpInvDetailTitle.textContent = "Inventario PF";
     }
 
     function openFinishedInventoryOverlay(){
@@ -11355,7 +11359,7 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
       }
 
       if (activeAnagTab === "finished") {
-        el.textContent = "Prodotti finiti";
+        el.textContent = "Associa PF";
         return;
       }
 
@@ -14575,11 +14579,28 @@ async function deletePfProduction(batchId) {
           if (prev && typeof prev.cancel === "function") prev.cancel();
         } catch (_) {}
 
-        const duration = Math.max(300, Math.floor((opts && opts.duration) || 950));
+        const shown = (() => {
+          try{
+            const raw = String(el.textContent || "").trim();
+            if (!raw) return 0;
+            // it-IT: separatore migliaia "." -> rimuovo; virgola -> punto
+            const n = Number(raw.replace(/\./g, "").replace(/,/g, "."));
+            return Number.isFinite(n) ? n : 0;
+          }catch(_){ return 0; }
+        })();
 
-        const from = 0;
-        setNow(el, from);
-        if (endInt === 0) return;
+        const from = Math.max(0, Math.round(shown));
+        const delta = Math.abs(endInt - from);
+
+        // Durata adattiva: niente salto a 0, update più fluidi
+        const duration = Math.max(260, Math.min(1100,
+          Math.floor((opts && opts.duration) || (300 + Math.min(800, Math.sqrt(delta) * 35)))
+        ));
+
+        if (from === endInt){
+          setNow(el, endInt);
+          return;
+        }
 
         const t0 = (typeof performance !== "undefined" && performance.now) ? performance.now() : Date.now();
 
@@ -14608,7 +14629,15 @@ async function deletePfProduction(batchId) {
         const t = (Number(x.threshold) || 0);
         return q > 0 && t > 0 && q < t;
       }).length;
-      const last = state.movements.slice().sort((a,b) => String(b.createdAt||"").localeCompare(String(a.createdAt||"")))[0];
+      let last = null;
+      try{
+        for (const mv of (state.movements || [])){
+          const c = (mv && mv.createdAt) ? String(mv.createdAt) : "";
+          if (!c) continue;
+          if (!last || c > String(last.createdAt || "")) last = mv;
+        }
+      }catch(_){ last = null; }
+
 
       __counterAnim.animate(statTotalItems, items);
       __counterAnim.animate(statTotalPieces, totalPieces);
@@ -14617,9 +14646,32 @@ async function deletePfProduction(batchId) {
       try {
         if (Array.isArray(__docGroups)) {
           docsCount = __docGroups.length;
-        } else if (typeof buildDocGroupsFromMovements === "function") {
-          const out = buildDocGroupsFromMovements(state.movements);
-          docsCount = (out && Array.isArray(out.list)) ? out.list.length : 0;
+        } else {
+          // Calcolo leggero: conta documenti unici senza costruire la lista completa (dashboard più fluida)
+          const seen = new Set();
+          (Array.isArray(state.movements) ? state.movements : []).forEach((mv) => {
+            const source = String((mv && mv.source) || "");
+            const note = String((mv && mv.note) || "").trim();
+            const isDocLike = (source.toUpperCase() === "OCR") || /DDT|DOCUMENTO|TRASPORTO|BOLLA|FATTURA/i.test(note);
+            if (!isDocLike) return;
+
+            let vatKey = "";
+            try{
+              if (typeof __sup_cleanVat === "function") vatKey = __sup_cleanVat(mv.supplierVat || mv.vat || "");
+            }catch(_){ vatKey = ""; }
+
+            const docNumKey = String(mv.docNum || "").trim().toLowerCase();
+            const customerKey = vatKey ? ("vat_" + vatKey) : String(mv.customer || "").trim().toLowerCase();
+            const key = [
+              customerKey,
+              String(mv.date || "").trim(),
+              (docNumKey || note.toLowerCase()),
+              source.toLowerCase()
+            ].join("|");
+
+            seen.add(key);
+          });
+          docsCount = seen.size;
         }
       } catch (e) { docsCount = 0; }
 
@@ -23305,7 +23357,7 @@ function __fpRenderSmartBrowse(){
 
     function openFinishedProductModal(id){
       if (!modalFinishedProduct) {
-        try{ showToast && showToast("Gestione componenti rimossa: usa ‘Categorie prodotti finiti’.", "warn"); }catch(_){ }
+        try{ showToast && showToast("Gestione componenti rimossa: usa ‘Categorie PF’.", "warn"); }catch(_){ }
         try{ setView && setView("fpCategories"); }catch(_){ }
         try{ window.HubFPCategories && window.HubFPCategories.render && window.HubFPCategories.render(); }catch(_){ }
         return;
@@ -23334,7 +23386,7 @@ function __fpRenderSmartBrowse(){
       __fpDraft = __fpEnsureDraftBase(fp || {});
 
       // Se il PF appartiene a una categoria con distinta base, la distinta del singolo viene ignorata.
-      // (manteniamo il draft vuoto: la distinta si gestisce nelle "Categorie prodotti finiti")
+      // (manteniamo il draft vuoto: la distinta si gestisce nelle "Categorie PF")
       try{
         if (fp){
           const catKey = String(fp.categoryKeyLower || fp.categoryKey || fp.category || "").trim().toLowerCase();
