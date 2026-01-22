@@ -1089,9 +1089,16 @@ const tpl = document.createElement("template");
           var qty = per * qLine;
           var qtyInt = Math.round(qty);
           if (!qtyInt) continue;
+          var item0 = String(c.name || c.articolo || cCode).trim();
+          try{
+            if (typeof getDisplayNameForCode === "function"){
+              var dn = getDisplayNameForCode(cCode, item0 || cCode);
+              if (dn) item0 = dn;
+            }
+          }catch(_){}
           out.push({
             code: cCode,
-            item: String(c.name || c.articolo || cCode).trim(),
+            item: item0,
             uom: String(c.uom || "").trim(),
             qty: qtyInt,
             mg: __macroGroupForCode(cCode)
@@ -3422,7 +3429,14 @@ Riallineare lo scarico aggiornando i movimenti?`);
 
             const add = per * qInt;
             const clow = cCode.toLowerCase();
-            const cur = req.get(clow) || { code: cCode, name: String(c.name || c.articolo || cCode).trim(), uom: String(c.uom || "").trim(), qty: 0 };
+            let name0 = String(c.name || c.articolo || cCode).trim();
+            try{
+              if (typeof getDisplayNameForCode === "function"){
+                const dn = getDisplayNameForCode(cCode, name0 || cCode);
+                if (dn) name0 = dn;
+              }
+            }catch(_){}
+            const cur = req.get(clow) || { code: cCode, name: name0, uom: String(c.uom || "").trim(), qty: 0 };
             cur.qty += add;
             if (!cur.name) cur.name = cCode;
             if (!cur.uom) cur.uom = String(c.uom || "").trim();
@@ -4385,7 +4399,14 @@ Per questo magazzino vengono scaricati SOLO componenti (imballaggi/materie prime
 
             const add = per * qInt;
             const clow = cCode.toLowerCase();
-            const cur = req.get(clow) || { code: cCode, name: String(c.name || c.articolo || cCode).trim(), uom: String(c.uom || '').trim(), qty: 0 };
+            let name0 = String(c.name || c.articolo || cCode).trim();
+            try{
+              if (typeof getDisplayNameForCode === "function"){
+                const dn = getDisplayNameForCode(cCode, name0 || cCode);
+                if (dn) name0 = dn;
+              }
+            }catch(_){}
+            const cur = req.get(clow) || { code: cCode, name: name0, uom: String(c.uom || '').trim(), qty: 0 };
             cur.qty += add;
             if (!cur.name) cur.name = cCode;
             if (!cur.uom) cur.uom = String(c.uom || '').trim();
@@ -4913,7 +4934,14 @@ Per questo magazzino vengono scaricati SOLO componenti (imballaggi/materie prime
 
               const add = per * qInt;
               const clow = cCode.toLowerCase();
-              const cur = req.get(clow) || { code: cCode, name: String(c.name || c.articolo || cCode).trim(), uom: String(c.uom || "").trim(), qty: 0 };
+              let name0 = String(c.name || c.articolo || cCode).trim();
+            try{
+              if (typeof getDisplayNameForCode === "function"){
+                const dn = getDisplayNameForCode(cCode, name0 || cCode);
+                if (dn) name0 = dn;
+              }
+            }catch(_){}
+            const cur = req.get(clow) || { code: cCode, name: name0, uom: String(c.uom || "").trim(), qty: 0 };
               cur.qty += add;
               if (!cur.name) cur.name = cCode;
               if (!cur.uom) cur.uom = String(c.uom || "").trim();
@@ -7605,7 +7633,9 @@ try{
     if (dlComp){
       const opts = (S.products || []).slice(0, 2500).map(p => {
         const code = String(p.code || "").trim();
-        const name = String(p.name || p.nome || "").trim();
+        const name0 = String(p.name || p.nome || "").trim();
+        const alias = String(p.alias || p.aliasName || "").trim();
+        const name = alias || name0;
         const label = (code && name) ? (code + " — " + name) : (name || code);
         return `<option value="${esc(label)}"></option>`;
       });
@@ -7776,8 +7806,11 @@ try{
     const out = [];
     for (const it of list){
       const code = String(it?.code || "").trim();
-      const name = String(it?.name || it?.nome || "").trim();
-      if (!code && !name) continue;
+      const nameRaw = String(it?.name || it?.nome || "").trim();
+      const alias = (kind !== "member") ? String(it?.alias || it?.aliasName || "").trim() : "";
+      const nameDisp = (kind !== "member") ? (alias || nameRaw) : nameRaw;
+      const nameScore = (kind !== "member" && alias && nameRaw && alias !== nameRaw) ? (alias + " " + nameRaw) : (nameDisp || "");
+      if (!code && !nameDisp) continue;
 
       if (kind !== "member" && compCat){
         const ccat = getProdCat2(it);
@@ -7788,14 +7821,14 @@ try{
       if (wantAllInCat){
         sc = 50;
       } else {
-        sc = __fpCatScore(code, name, qKey);
+        sc = __fpCatScore(code, nameScore, qKey);
         if (sc < 0) continue;
       }
 
       const uom = String(it?.uom || it?.um || it?.unit || "").trim();
       const disabled = !!(already && code && already.has(norm(code)));
 
-      out.push({ code, name, uom, score: sc, disabled, __cat: compCat || "" });
+      out.push({ code, name: nameDisp, uom, score: sc, disabled, __cat: compCat || "" });
     }
 
     out.sort((a,b) => (b.score - a.score) || String(a.name||a.code||"").localeCompare(String(b.name||b.code||""), "it", { sensitivity:"base" }));
@@ -7862,7 +7895,13 @@ try{
         if (fp) return { code: String(fp.code || pickedCode).trim(), name: String(fp.name || fp.nome || "").trim(), uom: String(fp.uom || "").trim() };
       } else {
         const p = S.prodMap.get(norm(pickedCode)) || null;
-        if (p) return { code: String(p.code || pickedCode).trim(), name: String(p.name || p.nome || "").trim(), uom: String(p.uom || p.um || "").trim() };
+        if (p) {
+          const code = String(p.code || pickedCode).trim();
+          const alias = String(p.alias || p.aliasName || "").trim();
+          const name0 = String(p.name || p.nome || "").trim();
+          const name = alias || name0 || code;
+          return { code, name, uom: String(p.uom || p.um || "").trim() };
+        }
       }
     }
 
@@ -7873,13 +7912,26 @@ try{
     const byCode = keyNo ? src.filter(it => __fpCatKey(it?.code || "").replace(/\s+/g, "") === keyNo) : [];
     if (byCode.length === 1){
       const it = byCode[0] || {};
-      return { code: String(it.code || "").trim(), name: String(it.name || it.nome || "").trim(), uom: String(it.uom || it.um || "").trim() };
+      const code = String(it.code || "").trim();
+      const name0 = String(it.name || it.nome || "").trim();
+      const alias = (kind === "member") ? "" : String(it.alias || it.aliasName || "").trim();
+      const name = (kind === "member") ? (name0 || code) : (alias || name0 || code);
+      return { code, name, uom: String(it.uom || it.um || "").trim() };
     }
 
-    const byName = src.filter(it => __fpCatKey(it?.name || it?.nome || "") === key);
+    const byName = src.filter(it => {
+      if (kind === "member") return __fpCatKey(it?.name || it?.nome || "") === key;
+      const nm = __fpCatKey(it?.name || it?.nome || "");
+      const al = __fpCatKey(it?.alias || it?.aliasName || "");
+      return (nm && nm === key) || (al && al === key);
+    });
     if (byName.length === 1){
       const it = byName[0] || {};
-      return { code: String(it.code || "").trim(), name: String(it.name || it.nome || "").trim(), uom: String(it.uom || it.um || "").trim() };
+      const code = String(it.code || "").trim();
+      const name0 = String(it.name || it.nome || "").trim();
+      const alias = (kind === "member") ? "" : String(it.alias || it.aliasName || "").trim();
+      const name = (kind === "member") ? (name0 || code) : (alias || name0 || code);
+      return { code, name, uom: String(it.uom || it.um || "").trim() };
     }
 
     const matches = __fpCatGetMatchList(kind, s0);
@@ -8138,7 +8190,16 @@ try{
       } else {
         tb.innerHTML = bom.map((c, idx) => {
           const code = String(c?.code||"").trim();
-          const name = String(c?.name||"").trim();
+          const name0 = String(c?.name||"").trim();
+          let name = name0;
+          if (code){
+            try{
+              if (typeof getDisplayNameForCode === "function"){
+                const dn = getDisplayNameForCode(code, name0 || code);
+                if (dn) name = dn;
+              }
+            }catch(_){ }
+          }
           const qtyRaw = String(c?.qtyRaw||"").trim();
           const qty = (c?.qty != null) ? String(c.qty) : (qtyRaw || "");
           const uom = String(c?.uom||"").trim();
@@ -8201,7 +8262,16 @@ try{
       } else {
         tb.innerHTML = bom.map((c, idx) => {
           const code = String(c?.code||"").trim();
-          const name = String(c?.name||"").trim();
+          const name0 = String(c?.name||"").trim();
+          let name = name0;
+          if (code){
+            try{
+              if (typeof getDisplayNameForCode === "function"){
+                const dn = getDisplayNameForCode(code, name0 || code);
+                if (dn) name = dn;
+              }
+            }catch(_){ }
+          }
           const qtyRaw = String(c?.qtyRaw||"").trim();
           const qty = (c?.qty != null) ? String(c.qty) : (qtyRaw || "");
           const uom = String(c?.uom||"").trim();
@@ -8692,7 +8762,9 @@ Verrà aggiornata anche la chiave su tutti i prodotti finiti.`);
 
     // prodotto + U.M. target
     const p = S.prodMap.get(norm(code)) || null;
-    const name = String(p?.name || p?.nome || "").trim() || code;
+    const alias = String(p?.alias || p?.aliasName || "").trim();
+    const name0 = String(p?.name || p?.nome || "").trim();
+    const name = alias || name0 || code;
     const uomTarget = __fpCatNormUom(p?.uom || p?.um || "") || "pz";
 
     // quantità: 1) campo Q.tà, 2) fallback dal campo ricerca (pending)
@@ -10575,7 +10647,16 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
         const low = __fpNormCode(code);
         if (!low) return;
 
-        const name = String(c.name || c.articolo || c.item || "").trim() || code;
+        const name0 = String(c.name || c.articolo || c.item || "").trim() || code;
+        let name = name0;
+        if (code){
+          try{
+            if (typeof getDisplayNameForCode === "function"){
+              const dn = getDisplayNameForCode(code, name0 || code);
+              if (dn) name = dn;
+            }
+          }catch(_){ }
+        }
         const uom = String(c.uom || c.um || "").trim();
         const pid = String(c.productId || c.pid || "").trim();
         const qtyNum = (c.qty != null && Number.isFinite(Number(c.qty))) ? Number(c.qty) : null;
@@ -21918,7 +21999,7 @@ async function handleFileSelection(fileList) {
           const p = list[i] || {};
           const code = String(p.code || "").trim();
           if (!code) continue;
-          const name = String(p.name || "").trim();
+          const name = String(p.displayName || p.name || "").trim();
           out.push(`<option value="${escapeHtmlAttr(code + (name ? " — " + name : ""))}"></option>`);
         }
         fpComponentList.innerHTML = out.join("");
@@ -21956,12 +22037,14 @@ async function handleFileSelection(fileList) {
         }
 
         const name = String(p.name || "").trim() || code;
+        const alias = String(p.alias || p.aliasName || "").trim();
+        const displayName = alias || name;
         const uom = __normalizeUom(p.uom || p.um || p.unit || "") || (typeof getUomResolvedForCode === "function" ? (getUomResolvedForCode(code) || "") : "");
-        out.push({ code, name, uom, cat });
+        out.push({ code, name, alias, displayName, uom, cat });
         seen.add(low);
       }
 
-      out.sort((a,b) => String(a.name||a.code||"").localeCompare(String(b.name||b.code||""), "it", { sensitivity:"base" }));
+      out.sort((a,b) => String(a.displayName||a.name||a.code||"").localeCompare(String(b.displayName||b.name||b.code||""), "it", { sensitivity:"base" }));
       return out;
     }
 
@@ -22044,9 +22127,12 @@ function __fpSmartFilter(list, queryRaw){
     if (!code) continue;
 
     const codeN = __fpNormSearch(code);
-    const nameN = __fpNormSearch(p.name || "");
+    const dispN = __fpNormSearch(p.displayName || p.name || "");
+    const nameRawN = __fpNormSearch(p.name || "");
+    const aliasN = __fpNormSearch(p.alias || "");
+    const nameBlob = (dispN + " " + nameRawN + " " + aliasN).trim();
     const catN  = __fpNormSearch(__fpCatLabel(p.cat) || "");
-    const blob  = (codeN + " " + nameN + " " + catN).trim();
+    const blob  = (codeN + " " + nameBlob + " " + catN).trim();
 
     let ok = true;
     for (const t of tokens){
@@ -22063,9 +22149,9 @@ function __fpSmartFilter(list, queryRaw){
       else if (codeN.startsWith(t)) score += 320;
       else if (codeN.indexOf(t) >= 0) score += 180;
 
-      if (nameN === t) score += 260;
-      else if (nameN.startsWith(t)) score += 160;
-      else if (nameN.indexOf(t) >= 0) score += 90;
+      if (dispN === t || nameRawN === t || aliasN === t) score += 260;
+      else if (dispN.startsWith(t) || nameRawN.startsWith(t) || aliasN.startsWith(t)) score += 160;
+      else if (nameBlob.indexOf(t) >= 0) score += 90;
 
       if (catN === t) score += 80;
       else if (catN.startsWith(t)) score += 55;
@@ -22075,7 +22161,7 @@ function __fpSmartFilter(list, queryRaw){
     scored.push(Object.assign({}, p, { __score: score }));
   }
 
-  scored.sort((a,b) => (b.__score - a.__score) || String(a.name||a.code||"").localeCompare(String(b.name||b.code||""), "it", { sensitivity:"base" }));
+  scored.sort((a,b) => (b.__score - a.__score) || String(a.displayName||a.name||a.code||"").localeCompare(String(b.displayName||b.name||b.code||""), "it", { sensitivity:"base" }));
   return scored;
 }
 
@@ -22097,7 +22183,7 @@ function __fpRenderBrowse(list, opts){
   fpCompBrowseWrap.style.display = "";
   fpCompBrowse.innerHTML = sliced.map(p => {
     const code = String(p.code || "").trim();
-    const name = String(p.name || "").trim();
+    const name = String(p.displayName || p.name || "").trim();
     const uom = String(p.uom || "").trim();
     const catLbl = __fpCatLabel(p.cat || "");
     const label = code + (name ? (" — " + name) : "");
@@ -22151,9 +22237,16 @@ function __fpRenderSmartBrowse(){
       const p = (typeof findProductByCode === "function") ? findProductByCode(code) : null;
       if (p) {
         const c = String(p.code || (typeof safeDecodeUri==="function" ? safeDecodeUri(p.id || "") : (p.id||"")) || "").trim() || code;
+        let nm = String(p.name || "").trim() || c;
+        try{
+          if (typeof getDisplayNameForCode === "function"){
+            const dn = getDisplayNameForCode(c, nm || c);
+            if (dn) nm = dn;
+          }
+        }catch(_){}
         return {
           code: c,
-          name: String(p.name || "").trim() || c,
+          name: nm || c,
           uom: __normalizeUom(p.uom || p.um || p.unit || "") || getUomResolvedForCode(c) || ""
         };
       }
@@ -22162,11 +22255,22 @@ function __fpRenderSmartBrowse(){
       try{
         const key = normTextKey(s0);
         if (key) {
-          const matches = (Array.isArray(products) ? products : []).filter(pp => normTextKey(pp && (pp.name || "")) === key);
+          const matches = (Array.isArray(products) ? products : []).filter(pp => {
+            const nm = normTextKey(pp && (pp.name || ""));
+            const al = normTextKey(pp && (pp.alias || pp.aliasName || ""));
+            return (nm && nm === key) || (al && al === key);
+          });
           if (matches.length === 1) {
             const pp = matches[0];
             const c = String(pp.code || (typeof safeDecodeUri==="function" ? safeDecodeUri(pp.id || "") : (pp.id||"")) || "").trim();
-            return { code: c, name: String(pp.name || "").trim() || c, uom: __normalizeUom(pp.uom || "") || getUomResolvedForCode(c) || "" };
+            let nm = String(pp.name || "").trim() || c;
+            try{
+              if (typeof getDisplayNameForCode === "function"){
+                const dn = getDisplayNameForCode(c, nm || c);
+                if (dn) nm = dn;
+              }
+            }catch(_){}
+            return { code: c, name: nm || c, uom: __normalizeUom(pp.uom || "") || getUomResolvedForCode(c) || "" };
           }
         }
       }catch(_){}
@@ -22180,7 +22284,16 @@ function __fpRenderSmartBrowse(){
   // normalizza array + impone U.M. dall'anagrafica prodotto (quando possibile)
   base.components = (base.components || []).map(c => {
     const code = String(c.code || c.codice || "").trim();
-    const name = String(c.name || c.articolo || c.item || "").trim();
+    const name0 = String(c.name || c.articolo || c.item || "").trim();
+    let name = name0;
+    if (code){
+      try{
+        if (typeof getDisplayNameForCode === "function"){
+          const dn = getDisplayNameForCode(code, name0 || code);
+          if (dn) name = dn;
+        }
+      }catch(_){ }
+    }
 
     let uom = String(c.uom || c.um || "").trim();
     if (!uom && code){
@@ -22221,7 +22334,16 @@ function __fpRenderSmartBrowse(){
 
       fpCompTbody.innerHTML = comps.map((c, i) => {
         const code = String(c.code || "").trim();
-        const name = String(c.name || "").trim();
+        const name0 = String(c.name || "").trim();
+        let name = name0;
+        if (code){
+          try{
+            if (typeof getDisplayNameForCode === "function"){
+              const dn = getDisplayNameForCode(code, name0 || code);
+              if (dn) name = dn;
+            }
+          }catch(_){ }
+        }
         const qty = __fpFmtQty(c);
         const uom = String(c.uom || "").trim();
         return `
