@@ -2877,6 +2877,41 @@ const tpl = document.createElement("template");
     try{ return isAgentiWarehouse(ddt && (ddt.warehouse || ddt.magazzino || ddt.site)); }catch(_){ return false; }
   }
 
+
+  // DDT: per magazzini diversi da "Magazzino agenti" scarichiamo SOLO componenti
+  // (imballaggi + materie prime). Per sicurezza non scarichiamo mai componenti che risultano PF.
+  function __ddtIsFinishedProductCode(code){
+    const low = String(code || "").trim().toLowerCase();
+    if (!low) return false;
+    try{ return (S.fpByCode instanceof Map) ? S.fpByCode.has(low) : false; }catch(_){ return false; }
+  }
+
+  function __ddtIsAllowedComponentCode(code){
+    const c = String(code || "").trim();
+    if (!c) return false;
+
+    // extra safety: non scaricare componenti che sono PF
+    if (__ddtIsFinishedProductCode(c)) return false;
+
+    // filtra per macro-gruppo: Materie prime / Imballaggi
+    try{
+      const catKey = (typeof getMacroCategoryForCode === "function")
+        ? String(getMacroCategoryForCode(c) || "").trim()
+        : "";
+
+      let mg = "";
+      try{
+        if (typeof categoryMacroGroup === "function") mg = String(categoryMacroGroup(catKey) || "").trim().toLowerCase();
+      }catch(_){ mg = ""; }
+
+      // se non riesco a determinare il macro-gruppo, non blocco (compat)
+      if (!mg) return true;
+      return (mg === "materie_prime" || mg === "imballaggi");
+    }catch(_){
+      return true;
+    }
+  }
+
   function isRowConfigured(row, ddt){
     const fp = getFpForRow(row);
     if (!fp) return { ok: false, why: "missing", fp: null };
@@ -2908,14 +2943,25 @@ const tpl = document.createElement("template");
       return { ok: false, why: "agent_stock", fp, stock, need };
     }
 
-    const comps = getFpComponents(fp);
-    if (comps.length > 0) return { ok: true, why: "ok", fp };
+    // Altri magazzini (es. Magazzino produzione):
+    // - scarico SOLO componenti (imballaggi + materie prime)
+    // - NON scarico prodotti finiti
+    const comps = getFpComponents(fp) || [];
 
-    // Se non c'e' distinta base, va bene SOLO se la giacenza PF copre tutta la quantita' del DDT
-    const stock = finishedStockAvailable(row && row.code);
-    if (stock >= qi) return { ok: true, why: "stock", fp };
+    let hasValid = false;
+    for (const c of comps){
+      const cCode = String(c && c.code || "").trim();
+      if (!cCode) continue;
+      if (!__ddtIsAllowedComponentCode(cCode)) continue;
 
-    return { ok: false, why: "empty", fp, stock };
+      const per = compQtyPerUnit(c);
+      if (per == null || !Number.isFinite(per) || per <= 0) continue;
+      hasValid = true;
+      break;
+    }
+
+    if (hasValid) return { ok: true, why: "ok", fp };
+    return { ok: false, why: "empty", fp };
   }
 
   function ddtStatus(ddt){
@@ -3266,7 +3312,7 @@ Riallineare lo scarico aggiornando i movimenti?`);
           }
         }
       } else {
-        // Prima scarico PF (se disponibili), poi componenti sul residuo
+        // Altri magazzini: SOLO componenti (imballaggi + materie prime). NON scarica PF.
         for (const r of (ddt.rows || [])){
           const code = String(r.code || "").trim();
           if (!code) continue;
@@ -3284,24 +3330,6 @@ Riallineare lo scarico aggiornando i movimenti?`);
           const qInt = Math.round(qLine);
           if (qInt <= 0) continue;
 
-          const low = code.toLowerCase();
-          const aFp = Math.max(0, Math.round(Number(availFp.get(low) || 0)));
-          const useFp = Math.min(qInt, aFp);
-
-          if (useFp > 0){
-            const name = String(fp.name || fp.nome || r.desc || code).trim() || code;
-            const uom = String(fp.uom || r.uom || "pz").trim() || "pz";
-            const cur = reqFp.get(low) || { code, name, uom, qtyInt: 0 };
-            cur.qtyInt += useFp;
-            if (!cur.name) cur.name = name;
-            if (!cur.uom) cur.uom = uom;
-            reqFp.set(low, cur);
-            availFp.set(low, aFp - useFp);
-          }
-
-          const rem = qInt - useFp;
-          if (rem <= 0) continue;
-
           const comps = getFpComponents(fp);
           if (!comps || !comps.length){
             __toastDedup(`danea_resync_bom_${k}_${code}`, `Riallineamento: distinta base mancante per ${code}`, "err", 60000);
@@ -3311,11 +3339,12 @@ Riallineare lo scarico aggiornando i movimenti?`);
           for (const c of comps){
             const cCode = String(c.code || "").trim();
             if (!cCode) continue;
+            if (!__ddtIsAllowedComponentCode(cCode)) continue;
 
             const per = compQtyPerUnit(c);
             if (per == null || !Number.isFinite(per) || per <= 0) continue;
 
-            const add = per * rem;
+            const add = per * qInt;
             const clow = cCode.toLowerCase();
             const cur = req.get(clow) || { code: cCode, name: String(c.name || c.articolo || cCode).trim(), uom: String(c.uom || "").trim(), qty: 0 };
             cur.qty += add;
@@ -4107,8 +4136,10 @@ Riallineare lo scarico aggiornando i movimenti?`);
 DDT ${ddt.number} del ${fmtDateIT(ddt.date)}
 Righe: ${st.total}` : `Completare e scaricare?
 
-• Se la giacenza PF e' disponibile, scarico PRIMA i prodotti finiti
-• Se la giacenza PF non copre tutta la quantita', scarico imballaggi e materie prime (distinta base/categoria)
+• Magazzino: ${ddt.warehouse || "Magazzino produzione"}
+• Verranno scaricati SOLO imballaggi e materie prime (distinta base/categoria)
+• NON verranno scaricati prodotti finiti
+• Se manca la distinta base, il DDT NON viene completato
 
 DDT ${ddt.number} del ${fmtDateIT(ddt.date)}
 Righe: ${st.total}`;
@@ -4201,7 +4232,7 @@ Righe: ${st.total}`;
 
       // 2) Calcola fabbisogni
       // - Magazzino agenti: SOLO PF (serve giacenza sufficiente, altrimenti NON completabile)
-      // - Altri magazzini: prima PF (giacenza), poi componenti (distinta base) sul residuo
+      // - Altri magazzini: SOLO componenti (imballaggi + materie prime). NON scarica PF
       const req = new Map(); // componenti: codeLower -> {code,name,uom,qtyFloat}
       const reqFp = new Map(); // PF: codeLower -> {code,name,uom,qtyInt}
 
@@ -4245,7 +4276,7 @@ Disponibili: ${have.toLocaleString('it-IT')}`);
           }
         }
       } else {
-        // Prima scarico PF (se disponibili), poi componenti sul residuo
+        // Magazzino produzione / altri: SOLO componenti (imballaggi + materie prime). Nessuno scarico PF.
         for (const r of (ddt.rows || [])){
           const code = String(r.code || '').trim();
           if (!code) continue;
@@ -4260,40 +4291,23 @@ Disponibili: ${have.toLocaleString('it-IT')}`);
           const qInt = Math.round(qLine);
           if (qInt <= 0) continue;
 
-          const low = code.toLowerCase();
-          const aFp = Math.max(0, Math.round(Number(availFp.get(low) || 0)));
-          const useFp = Math.min(qInt, aFp);
-
-          if (useFp > 0){
-            const name = String(fp.name || fp.nome || r.desc || code).trim() || code;
-            const uom = String(fp.uom || r.uom || 'pz').trim() || 'pz';
-            const cur = reqFp.get(low) || { code, name, uom, qtyInt: 0 };
-            cur.qtyInt += useFp;
-            if (!cur.name) cur.name = name;
-            if (!cur.uom) cur.uom = uom;
-            reqFp.set(low, cur);
-            availFp.set(low, aFp - useFp);
-          }
-
-          const rem = qInt - useFp;
-          if (rem <= 0) continue;
-
           const comps = getFpComponents(fp);
           if (!comps || !comps.length){
             alert(`Distinta base mancante per ${code} (${fp.name || fp.nome || ''}).
 
-Giacenza PF insufficiente: rimangono ${rem} pz da scaricare come componenti.`);
+Per questo magazzino vengono scaricati SOLO componenti (imballaggi/materie prime).`);
             return;
           }
 
           for (const c of comps){
             const cCode = String(c.code || '').trim();
             if (!cCode) continue;
+            if (!__ddtIsAllowedComponentCode(cCode)) continue;
 
             const per = compQtyPerUnit(c);
             if (per == null || !Number.isFinite(per) || per <= 0) continue;
 
-            const add = per * rem;
+            const add = per * qInt;
             const clow = cCode.toLowerCase();
             const cur = req.get(clow) || { code: cCode, name: String(c.name || c.articolo || cCode).trim(), uom: String(c.uom || '').trim(), qty: 0 };
             cur.qty += add;
@@ -4619,7 +4633,7 @@ Giacenza PF insufficiente: rimangono ${rem} pz da scaricare come componenti.`);
     green.sort((a,b) => String(a?.date||"").localeCompare(String(b?.date||"")) || String(a?.number||"").localeCompare(String(b?.number||"")));
 
     if (!silent){
-      const ok = confirm(`Scaricare automaticamente ${green.length} DDT verdi?\n\n• Scarico PF (se disponibili) + componenti (se necessari)\n• I DDT passeranno in "Completati"`);
+      const ok = confirm(`Scaricare automaticamente ${green.length} DDT verdi?\n\n• Magazzino agenti: scarico SOLO prodotti finiti (serve giacenza)\n• Altri magazzini: scarico SOLO imballaggi e materie prime (distinta base/categoria)\n• I DDT passeranno in "Completati"`);
       if (!ok) return;
     }
 
@@ -4733,7 +4747,7 @@ Giacenza PF insufficiente: rimangono ${rem} pz da scaricare come componenti.`);
 
         // 3) calcola fabbisogni
         // - Magazzino agenti: SOLO PF (serve giacenza sufficiente, altrimenti NON completabile)
-        // - Altri magazzini: prima PF (se disponibili), poi componenti sul residuo
+        // - Altri magazzini: SOLO componenti (imballaggi + materie prime). NON scarica PF
         const req = new Map();
         const reqFp = new Map();
 
@@ -4783,6 +4797,7 @@ Giacenza PF insufficiente: rimangono ${rem} pz da scaricare come componenti.`);
             availFp.set(low, have - need);
           }
         } else {
+          // Altri magazzini: SOLO componenti (imballaggi + materie prime). Non scarica PF.
           for (const r of (ddt.rows || [])){
             const code = String(r.code || "").trim();
             if (!code) continue;
@@ -4797,40 +4812,30 @@ Giacenza PF insufficiente: rimangono ${rem} pz da scaricare come componenti.`);
             const qInt = Math.round(qLine);
             if (qInt <= 0) continue;
 
-            const low = code.toLowerCase();
-            const aFp = Math.max(0, _safeInt(availFp.get(low)));
-            const useFp = Math.min(qInt, aFp);
-
-            if (useFp > 0){
-              const name = String(fp.name || fp.nome || r.desc || code).trim() || code;
-              const uom = String(fp.uom || r.uom || "pz").trim() || "pz";
-              const cur = reqFp.get(low) || { code, name, uom, qtyInt: 0 };
-              cur.qtyInt += useFp;
-              reqFp.set(low, cur);
-              availFp.set(low, aFp - useFp);
-            }
-
-            const rem = qInt - useFp;
-            if (rem <= 0) continue;
-
             const comps = getFpComponents(fp);
             if (!comps || !comps.length){
               if (!silent){
                 alert(`DDT ${ddt.number || "?"}: distinta base mancante per ${code}.
 
-Giacenza PF insufficiente: rimangono ${rem} pz.`);
+Per questo magazzino vengono scaricati SOLO componenti (imballaggi/materie prime).`);
+              } else {
+                try{ window.HubInv?.showToast?.(`DDT ${ddt.number || "?"}: distinta base mancante per ${code}`, "warn"); }catch(_){ }
               }
-              // ripristina PF allocati per questo codice (best-effort)
-              if (useFp > 0){ availFp.set(low, (availFp.get(low) || 0) + useFp); }
-              continue;
+              // evita completamenti parziali
+              try{ req.clear(); }catch(_){ }
+              try{ reqFp.clear(); }catch(_){ }
+              break;
             }
 
             for (const c of comps){
               const cCode = String(c.code || "").trim();
               if (!cCode) continue;
+              if (!__ddtIsAllowedComponentCode(cCode)) continue;
+
               const per = compQtyPerUnit(c);
               if (per == null || !Number.isFinite(per) || per <= 0) continue;
-              const add = per * rem;
+
+              const add = per * qInt;
               const clow = cCode.toLowerCase();
               const cur = req.get(clow) || { code: cCode, name: String(c.name || c.articolo || cCode).trim(), uom: String(c.uom || "").trim(), qty: 0 };
               cur.qty += add;
