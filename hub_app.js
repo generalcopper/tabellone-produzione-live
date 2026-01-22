@@ -125,8 +125,8 @@
           <table class="dataGrid">
             <thead>
               <tr>
+                <th style="width: 120px;">Codice</th>
                 <th>Nome prodotto</th>
-                <th>Codice</th>
                 <th>Categoria</th>
                 <th class="qty">Q.tà</th>
               </tr>
@@ -17569,8 +17569,8 @@ function renderFinishedStockTable(fpRows){
 
     return `
       <tr data-k="${escapeHtmlAttr(k)}" title="Produci prodotto finito">
-        <td data-label="Nome prodotto">${displayName}</td>
         <td data-label="Codice">${displayCode}</td>
+        <td data-label="Nome prodotto">${displayName}</td>
         <td data-label="Categoria">${catHtml}</td>
         <td data-label="Q.tà" class="qty jsFpQtyCell">${qtyCell}</td>
       </tr>`;

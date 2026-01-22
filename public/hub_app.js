@@ -125,7 +125,7 @@
           <table class="dataGrid">
             <thead>
               <tr>
-                <th>Codice</th>
+                <th style="width: 120px;">Codice</th>
                 <th>Nome prodotto</th>
                 <th>Categoria</th>
                 <th class="qty">Q.tà</th>
