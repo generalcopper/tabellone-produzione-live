@@ -11506,7 +11506,11 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
  * Access control (ADMIN only) — Hub Inventario
  * Abilitazione via HTML:
  *   window.HUBINV_REQUIRE_ADMIN = true;
- *   window.HUBINV_ADMIN_EMAILS = ["admin@..."]; // opzionale (fallback)
+ *
+ * Admin whitelist (esistente):
+ *   - window.powederuser  (array/stringa/oggetto con { powderUsers:[...] })
+ *   - window.powderUsers  (array/stringa)
+ *   - (fallback) custom claims / Firestore roles
  ****************************************************************/
 function __hubinvTruthy(v){
   if (v === true || v === 1) return true;
@@ -11541,24 +11545,76 @@ function __hubinvDenyRedirectUrl(){
 }
 
 function __hubinvGetAdminEmailSet(){
+  // Usa whitelist esistente: powederuser / powderUsers
+  // Supporta:
+  // - array ["a@b.it", "c@d.it"]
+  // - stringa "a@b.it, c@d.it"
+  // - oggetto { powderUsers:[...], ... } oppure mappa { "a@b.it": true }
   const set = new Set();
+
   const push = (v)=>{
-    const e = String(v || "").trim().toLowerCase();
-    if (!e) return;
-    set.add(e);
+    const raw = String(v ?? "").trim();
+    if (!raw) return;
+
+    // email → sempre lowercase
+    if (raw.includes("@")){
+      set.add(raw.toLowerCase());
+      return;
+    }
+
+    // uid / token → tengo anche lower-case per robustezza
+    set.add(raw);
+    set.add(raw.toLowerCase());
+  };
+
+  const ingest = (src)=>{
+    if (!src) return;
+
+    if (Array.isArray(src)){
+      for (const it of src) ingest(it);
+      return;
+    }
+
+    if (typeof src === "string"){
+      const s = src.trim();
+      if (!s) return;
+
+      // JSON embedded?
+      if ((s.startsWith("[") && s.endsWith("]")) || (s.startsWith("{") && s.endsWith("}"))){
+        try { ingest(JSON.parse(s)); return; } catch(_){}
+      }
+
+      s.split(/[;,\s]+/g).forEach(push);
+      return;
+    }
+
+    if (typeof src === "object"){
+      // caso tipico: { powderUsers:[...] }
+      if (Array.isArray(src.powderUsers)) { src.powderUsers.forEach(push); return; }
+      if (Array.isArray(src.powderusers)) { src.powderusers.forEach(push); return; }
+      if (Array.isArray(src.admins)) { src.admins.forEach(push); return; }
+      if (Array.isArray(src.emails)) { src.emails.forEach(push); return; }
+      if (Array.isArray(src.users)) { src.users.forEach(push); return; }
+
+      // mappa { "email": true }
+      for (const k of Object.keys(src)){
+        const val = src[k];
+        if (val === true || val === 1 || String(val).trim().toLowerCase() === "true") push(k);
+      }
+    }
   };
 
   try{
     const w = (typeof globalThis !== "undefined") ? globalThis : window;
-    const src = w && (w.HUBINV_ADMIN_EMAILS || w.HUB_ADMIN_EMAILS || w.HUBINV_ADMINS || w.HUB_ADMINS);
-    if (Array.isArray(src)) src.forEach(push);
-    else if (typeof src === "string") String(src).split(/[;,\s]+/g).forEach(push);
-  }catch(_){}
 
-  try{
-    const m = document.querySelector('meta[name="hubinv-admin-emails"], meta[name="hub-admin-emails"]');
-    const v = m ? String(m.getAttribute("content") || "") : "";
-    if (v) v.split(/[;,\s]+/g).forEach(push);
+    // ✅ richiesto: whitelist esistente
+    ingest(w.powederuser);
+    ingest(w.powderUsers);
+    ingest(w.powderusers);
+
+    // fallback: localStorage (se la whitelist è salvata lì)
+    try { ingest(localStorage.getItem("powederuser")); } catch(_){}
+    try { ingest(localStorage.getItem("powderUsers")); } catch(_){}
   }catch(_){}
 
   return set;
@@ -11664,8 +11720,13 @@ async function __hubinvResolveIsAdmin(user){
   if (!user) return false;
 
   const email = String(user.email || "").trim().toLowerCase();
-  const adminEmails = __hubinvGetAdminEmailSet();
-  if (email && adminEmails && adminEmails.size && adminEmails.has(email)) return true;
+const uid = String(user.uid || "").trim();
+
+const adminEmails = __hubinvGetAdminEmailSet();
+if (adminEmails && adminEmails.size){
+  if (email && adminEmails.has(email)) return true;
+  if (uid && (adminEmails.has(uid) || adminEmails.has(uid.toLowerCase()))) return true;
+}
 
   // 1) Firebase custom claims
   try{
