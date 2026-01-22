@@ -3075,6 +3075,47 @@ const tpl = document.createElement("template");
     return { ok: green === rows.length, green, total: rows.length };
   }
 
+  // DDT: consenti il completamento se le uniche righe "rosse" sono senza codice (es. resi muletti/aspirapolveri).
+  // In quel caso le righe senza codice NON generano movimenti ma il documento può essere marcato come completato.
+  function ddtCompletionInfo(ddt){
+    const rows = Array.isArray(ddt?.rows) ? ddt.rows : [];
+    const total = rows.length;
+
+    let green = 0;
+    let bad = 0;
+    let noCode = 0;
+    const reasons = new Set();
+
+    for (const r of rows){
+      const st = isRowConfigured(r, ddt);
+      if (st && st.ok) {
+        green++;
+      } else {
+        bad++;
+        const why = String(st && st.why || "").trim() || "unknown";
+        reasons.add(why);
+        if (why === "nocode") noCode++;
+      }
+    }
+
+    const okAll = (total > 0 && bad === 0);
+    const onlyNoCode = (total > 0 && bad > 0 && reasons.size === 1 && reasons.has("nocode"));
+    const canComplete = okAll || onlyNoCode;
+
+    return {
+      okAll,
+      onlyNoCode,
+      canComplete,
+      total,
+      green,
+      bad,
+      noCode,
+      reasons: Array.from(reasons)
+    };
+  }
+
+
+
 
   function cacheCompletedMap(){
     S.completedMap = new Map();
@@ -3994,10 +4035,12 @@ Riallineare lo scarico aggiornando i movimenti?`);
 
     tbody.innerHTML = filtered.length ? filtered.map(d => {
       const st = ddtStatus(d);
-      const okDot = st.ok ? '<span class="dot ok"></span>' : '<span class="dot bad"></span>';
+      const ci = ddtCompletionInfo(d);
+      const okDot = st.ok ? '<span class="dot ok"></span>' : (ci.onlyNoCode ? '<span class="dot warn"></span>' : '<span class="dot bad"></span>');
       const stTxt = `${st.green}/${st.total}`;
-      const btnDisabled = st.ok ? "" : "disabled";
-      return `<tr class=\"jsDaneaRow ${st.ok ? 'daneaRowOk' : 'daneaRowBad'}\" data-key=\"${escAttr(d.key)}\" data-mode=\"verify\" title="Apri">
+      const btnDisabled = ci.canComplete ? "" : "disabled";
+      const rowCls = st.ok ? 'daneaRowOk' : (ci.onlyNoCode ? 'daneaRowWarn' : 'daneaRowBad');
+      return `<tr class=\"jsDaneaRow ${rowCls}\" data-key=\"${escAttr(d.key)}\" data-mode=\"verify\" title="Apri">
         <td data-label="Data">${esc(fmtDateIT(d.date) || "—")}</td>
         <td data-label="Numero"><span class="kbd">${esc(d.number || "—")}</span></td>
         <td data-label="Cliente">${esc(d.customer || "—")}</td>
@@ -4032,7 +4075,8 @@ Riallineare lo scarico aggiornando i movimenti?`);
     if (btnSend){
       btnSend.style.display = isDone ? "none" : "";
       const st = ddtStatus(ddt);
-      btnSend.disabled = !st.ok;
+      const ci = ddtCompletionInfo(ddt);
+      btnSend.disabled = !ci.canComplete;
       btnSend.textContent = (S.autoDischarge ? "Completa (scarica)" : "Completa (senza scarico)");
     }
     tbody.innerHTML = rows.length ? rows.map(r => {
@@ -4086,24 +4130,32 @@ Riallineare lo scarico aggiornando i movimenti?`);
 
     if (foot){
       const st = ddtStatus(ddt);
+      const ci = ddtCompletionInfo(ddt);
       const autoOn = !!S.autoDischarge;
       const isAgenti = isAgentWarehouseDdt(ddt);
       const hasNoCode = rows.some(r => !String(r?.code || "").trim());
 
-      const msg = isDone
-        ? "Questo DDT è già stato scaricato: eliminandolo (in tab Completati) si resetta lo scarico."
-        : (st.ok
-            ? (autoOn
-                ? (isAgenti
-                    ? "Tutte le righe sono OK: puoi completare e scaricare SOLO prodotti finiti (Magazzino agenti)."
-                    : "Tutte le righe sono configurate: puoi completare e scaricare componenti.")
-                : "Tutte le righe sono configurate: puoi completare (scarico automatico DISATTIVATO).")
-            : (hasNoCode
-                ? "Ci sono righe senza codice articolo nel DDT: correggi in Danea/Easyfatt e attendi l’aggiornamento dell’XML."
-                : (isAgenti
-                    ? "Controlla le righe rosse: per Magazzino agenti serve il prodotto finito importato E giacenza PF sufficiente."
-                    : "Configura le righe rosse (distinta base) per poter completare."))
-          );
+      let msg = "";
+      if (isDone){
+        msg = "Questo DDT è già stato scaricato: eliminandolo (in tab Completati) si resetta lo scarico.";
+      } else if (st.ok){
+        msg = autoOn
+          ? (isAgenti
+              ? "Tutte le righe sono OK: puoi completare e scaricare SOLO prodotti finiti (Magazzino agenti)."
+              : "Tutte le righe sono configurate: puoi completare e scaricare componenti.")
+          : "Tutte le righe sono configurate: puoi completare (scarico automatico DISATTIVATO).";
+      } else if (ci.onlyNoCode){
+        msg = autoOn
+          ? "Ci sono righe senza codice articolo (es. resi muletti/aspirapolveri): puoi completare comunque. Le righe senza codice verranno ignorate nello scarico."
+          : "Ci sono righe senza codice articolo (es. resi muletti/aspirapolveri): puoi completare comunque (scarico automatico DISATTIVATO).";
+      } else {
+        msg = isAgenti
+          ? "Controlla le righe rosse: per Magazzino agenti serve il prodotto finito importato E giacenza PF sufficiente."
+          : "Configura le righe rosse (distinta base) per poter completare.";
+        if (hasNoCode){
+          msg += " (In più: ci sono righe senza codice nell’XML — se è merce va corretto in Danea/Easyfatt.)";
+        }
+      }
       foot.textContent = msg;
     }
   }
@@ -4237,11 +4289,22 @@ Riallineare lo scarico aggiornando i movimenti?`);
     if (S.completedMap.has(ddt.key)) { alert("Questo DDT risulta gia' completato."); return; }
 
     const st = ddtStatus(ddt);
-    if (!st.ok) { alert("Non tutte le righe sono configurate (cerchi rossi)."); return; }
+    const ci = ddtCompletionInfo(ddt);
+    if (!ci.canComplete) { alert("Non tutte le righe sono configurate (cerchi rossi)."); return; }
     const autoOn = !!S.autoDischarge;
+    const noCodeRows = Number(ci.noCode || 0);
+    const onlyNoCode = !!ci.onlyNoCode;
     const isAgenti = isAgentWarehouseDdt(ddt);
 
-    const msgAuto = isAgenti ? `Completare e scaricare SOLO prodotti finiti?
+    
+    const extraNoCode = (onlyNoCode && noCodeRows > 0)
+      ? `
+
+⚠️ Righe senza codice articolo: ${noCodeRows}
+• Queste righe verranno ignorate nello scarico (tipico caso: resi muletti/aspirapolveri).`
+      : "";
+
+const msgAuto = isAgenti ? `Completare e scaricare SOLO prodotti finiti?
 
 • Magazzino: ${ddt.warehouse || "Magazzino agenti"}
 • Verranno creati SOLO movimenti su inventario PF
@@ -4249,7 +4312,7 @@ Riallineare lo scarico aggiornando i movimenti?`);
 • Se la giacenza PF non basta, il DDT NON viene completato
 
 DDT ${ddt.number} del ${fmtDateIT(ddt.date)}
-Righe: ${st.total}` : `Completare e scaricare?
+Righe: ${st.total}${extraNoCode}` : `Completare e scaricare?
 
 • Magazzino: ${ddt.warehouse || "Magazzino produzione"}
 • Verranno scaricati SOLO imballaggi e materie prime (distinta base/categoria)
@@ -4257,7 +4320,7 @@ Righe: ${st.total}` : `Completare e scaricare?
 • Se manca la distinta base, il DDT NON viene completato
 
 DDT ${ddt.number} del ${fmtDateIT(ddt.date)}
-Righe: ${st.total}`;
+Righe: ${st.total}${extraNoCode}`;
 
     const msgManual = `Completare SENZA scarico automatico?
 
@@ -4265,7 +4328,7 @@ Righe: ${st.total}`;
 • NON verranno creati movimenti di inventario
 
 DDT ${ddt.number} del ${fmtDateIT(ddt.date)}
-Righe: ${st.total}`;
+Righe: ${st.total}${extraNoCode}`;
 
     const ok = confirm(autoOn ? msgAuto : msgManual);
     if (!ok) return;
@@ -4441,7 +4504,53 @@ Per questo magazzino vengono scaricati SOLO componenti (imballaggi/materie prime
       }
 
       if (!req.size && !reqFp.size){
-        alert('Nessun movimento calcolabile (controlla righe e quantita).');
+        // Nessun movimento calcolabile: tipico caso DDT con sole righe senza codice (es. resi muletti/aspirapolveri)
+        // o righe con quantità non scaricabile. In questo caso completiamo comunque SENZA creare movimenti.
+        const doneId = encodeURIComponent(String(ddt.key || '').trim());
+        const doneRef = doc(H.fb.db, 'orgs', H.ORG_ID, 'daneaDdtCompleted', doneId);
+        await setDoc(doneRef, {
+          key: String(ddt.key || '').trim(),
+          number: String(ddt.number || '').trim(),
+          date: String(ddt.date || '').trim(),
+          customer: String(ddt.customer || '').trim(),
+          rows: (ddt.rows || []).map(x => ({
+            idx: (x && x.idx != null) ? x.idx : null,
+            code: x.code || '',
+            desc: x.desc || '',
+            qty: x.qty ?? null,
+            qtyRaw: x.qtyRaw || '',
+            uom: x.uom || '',
+            unitNet: (x && x.unitNet != null) ? x.unitNet : null,
+            unitGross: (x && x.unitGross != null) ? x.unitGross : null,
+            vatPerc: (x && x.vatPerc != null) ? x.vatPerc : null,
+            net: (x && x.net != null) ? x.net : null,
+            vat: (x && x.vat != null) ? x.vat : null,
+            gross: (x && x.gross != null) ? x.gross : null
+          })),
+          netTotal: (ddt && ddt.netTotal != null) ? ddt.netTotal : null,
+          vatTotal: (ddt && ddt.vatTotal != null) ? ddt.vatTotal : null,
+          grossTotal: (ddt && ddt.grossTotal != null) ? ddt.grossTotal : null,
+          currency: String(ddt.currency || 'EUR'),
+          warehouse: String(ddt.warehouse || '').trim(),
+          allocations: [],
+          finishedAllocations: [],
+          xmlHash: String(ddt.xmlHash || ddt.hash || ''),
+          movementIds: [],
+          finishedMovementIds: [],
+          autoDischarge: false,
+          createdAt: serverTimestamp(),
+          createdBy: H.fb.user.email || H.fb.user.uid
+        }, { merge: true });
+
+        try{
+          const rr = Array.isArray(ddt.rows) ? ddt.rows : [];
+          const allNoCode = !!(rr.length && rr.every(x => !String(x?.code || '').trim()));
+          window.HubInv?.showToast?.(allNoCode ? 'DDT completato (senza prodotti finiti)' : 'DDT completato (nessun movimento)');
+        }catch(_){ }
+
+        setDetailOpen(false);
+        setTab('done');
+        await fetchNow(true);
         return;
       }
 
