@@ -111,6 +111,13 @@
                 <option value="__none">Non assegnata</option>
               </select>
             </div>
+            <div class="field" style="min-width: 220px;">
+              <label for="fpInvFilterAgenti">Filtro</label>
+              <select id="fpInvFilterAgenti">
+                <option value="">Tutti</option>
+                <option value="agenti">Solo magazzino agenti</option>
+              </select>
+            </div>
           </div>
         </div>
 
@@ -1082,9 +1089,16 @@ const tpl = document.createElement("template");
           var qty = per * qLine;
           var qtyInt = Math.round(qty);
           if (!qtyInt) continue;
+          var item0 = String(c.name || c.articolo || cCode).trim();
+          try{
+            if (typeof getDisplayNameForCode === "function"){
+              var dn = getDisplayNameForCode(cCode, item0 || cCode);
+              if (dn) item0 = dn;
+            }
+          }catch(_){}
           out.push({
             code: cCode,
-            item: String(c.name || c.articolo || cCode).trim(),
+            item: item0,
             uom: String(c.uom || "").trim(),
             qty: qtyInt,
             mg: __macroGroupForCode(cCode)
@@ -2215,6 +2229,11 @@ const tpl = document.createElement("template");
     busy: false,
     hub: null,
     pendingParsed: null,  // buffer RAM (solo finché Firestore non è pronto)
+    resyncQueue: new Map(),
+    resyncInFlight: new Set(),
+    resyncFail: new Map(),
+    resyncTimer: null,
+    agentiFpCodes: { all: [], verify: [], updatedAt: 0 },
     unsub: { completed:null, finished:null, cache:null, fpcats:null }
   };
 
@@ -2664,9 +2683,22 @@ const tpl = document.createElement("template");
           gross: (gross == null) ? null : __round4(gross)
         };
       }).filter(r => {
-        if (!r.code) return false; // importa solo righe con codice articolo
-        if (r.qty != null && r.qty === 0) return false;
-        const m = `${r.code || ""} ${r.desc || ""}`.toLowerCase().replace(/\s+/g, " ").trim();
+        // PATCH (Scarica flussi DDT): non ignorare righe merce senza codice.
+        // Se nel DDT arrivano righe con quantità ma senza <Code>, devono bloccare il completamento
+        // (altrimenti il documento risulta "OK" perché quelle righe venivano filtrate via).
+        const code = String(r && r.code || "").trim();
+        const qtyNum = (r && r.qty != null && Number.isFinite(Number(r.qty))) ? Number(r.qty) : null;
+        const hasQty = (qtyNum != null && qtyNum !== 0);
+        const hasQtyRaw = !!String(r && r.qtyRaw || "").trim();
+
+        // Scarta solo le righe "note" (senza codice e senza quantità). Le righe merce senza codice restano,
+        // così diventano rosse e impediscono il completamento/scarico.
+        if (!code && !hasQty && !hasQtyRaw) return false;
+
+        // quantità esplicita 0 → inutile
+        if (qtyNum != null && qtyNum === 0) return false;
+
+        const m = `${code} ${String(r && r.desc || "")}`.toLowerCase().replace(/\s+/g, " ").trim();
         if (m.includes("rif. conferma ordine") || m.includes("rif conferma ordine")) return false;
         return true;
       });
@@ -2873,7 +2905,115 @@ const tpl = document.createElement("template");
     try{ return isAgentiWarehouse(ddt && (ddt.warehouse || ddt.magazzino || ddt.site)); }catch(_){ return false; }
   }
 
+
+  // ===== PF codes in DDT "Magazzino agenti" (per filtro inventario PF) =====
+  function __computeAgentiFpCodes(){
+    try{
+      const doneKeys = new Set();
+      for (const d of (S.completed || [])){
+        const k = String((d && (d.key || d.ddtKey || d.daneaDdtKey)) || "").trim();
+        if (k) doneKeys.add(k);
+      }
+
+      const allSet = new Set();
+      const verifySet = new Set();
+
+      const cacheList = Array.isArray(S.cache) ? S.cache : [];
+      for (const d of cacheList){
+        if (!d || !isAgentWarehouseDdt(d)) continue;
+        const k = String((d && (d.key || d.ddtKey || d.daneaDdtKey)) || "").trim();
+        const rows = Array.isArray(d.rows) ? d.rows : [];
+        for (const r of rows){
+          const c = String((r && (r.code || r.codice)) || "").trim();
+          if (!c) continue;
+          const low = c.toLowerCase();
+          allSet.add(low);
+          if (k && !doneKeys.has(k)) verifySet.add(low);
+        }
+      }
+
+      // Include anche i DDT già completati (safety: nel caso non fossero nel cache)
+      const doneList = Array.isArray(S.completed) ? S.completed : [];
+      for (const d of doneList){
+        if (!d || !isAgentWarehouseDdt(d)) continue;
+        const rows = Array.isArray(d.rows) ? d.rows : [];
+        for (const r of rows){
+          const c = String((r && (r.code || r.codice)) || "").trim();
+          if (!c) continue;
+          allSet.add(c.toLowerCase());
+        }
+      }
+
+      return {
+        all: Array.from(allSet),
+        verify: Array.from(verifySet),
+        updatedAt: Date.now()
+      };
+    }catch(_){
+      return { all: [], verify: [], updatedAt: Date.now() };
+    }
+  }
+
+  function __updateAgentiFpCodes(reason){
+    try{
+      const payload = __computeAgentiFpCodes();
+      if (reason) payload.reason = String(reason);
+      S.agentiFpCodes = payload;
+
+      // Espongo anche fuori dal modulo (serve al filtro "Solo magazzino agenti" nella view PF)
+      try{
+        window.HubDaneaDdt = window.HubDaneaDdt || {};
+        window.HubDaneaDdt.agentiFpCodes = payload;
+      }catch(_){ }
+
+      // Notifica per aggiornamento immediato UI (es. mentre sei in "da verificare")
+      try{
+        window.dispatchEvent(new CustomEvent("HubDaneaAgentiFpCodesUpdated", { detail: payload }));
+      }catch(_){ }
+    }catch(_){ }
+  }
+
+
+  // DDT: per magazzini diversi da "Magazzino agenti" scarichiamo SOLO componenti
+  // (imballaggi + materie prime). Per sicurezza non scarichiamo mai componenti che risultano PF.
+  function __ddtIsFinishedProductCode(code){
+    const low = String(code || "").trim().toLowerCase();
+    if (!low) return false;
+    try{ return (S.fpByCode instanceof Map) ? S.fpByCode.has(low) : false; }catch(_){ return false; }
+  }
+
+  function __ddtIsAllowedComponentCode(code){
+    const c = String(code || "").trim();
+    if (!c) return false;
+
+    // extra safety: non scaricare componenti che sono PF
+    if (__ddtIsFinishedProductCode(c)) return false;
+
+    // filtra per macro-gruppo: Materie prime / Imballaggi
+    try{
+      const catKey = (typeof getMacroCategoryForCode === "function")
+        ? String(getMacroCategoryForCode(c) || "").trim()
+        : "";
+
+      let mg = "";
+      try{
+        if (typeof categoryMacroGroup === "function") mg = String(categoryMacroGroup(catKey) || "").trim().toLowerCase();
+      }catch(_){ mg = ""; }
+
+      // se non riesco a determinare il macro-gruppo, non blocco (compat)
+      if (!mg) return true;
+      return (mg === "materie_prime" || mg === "imballaggi");
+    }catch(_){
+      return true;
+    }
+  }
+
   function isRowConfigured(row, ddt){
+    // Righe senza codice articolo: non devono essere "completate".
+    // (Tipico caso: DDT da Danea con articoli inseriti solo con descrizione.)
+    const rowCode = String(row && row.code || "").trim();
+    if (!rowCode) return { ok: false, why: "nocode", fp: null };
+
     const fp = getFpForRow(row);
     if (!fp) return { ok: false, why: "missing", fp: null };
 
@@ -2904,14 +3044,25 @@ const tpl = document.createElement("template");
       return { ok: false, why: "agent_stock", fp, stock, need };
     }
 
-    const comps = getFpComponents(fp);
-    if (comps.length > 0) return { ok: true, why: "ok", fp };
+    // Altri magazzini (es. Magazzino produzione):
+    // - scarico SOLO componenti (imballaggi + materie prime)
+    // - NON scarico prodotti finiti
+    const comps = getFpComponents(fp) || [];
 
-    // Se non c'e' distinta base, va bene SOLO se la giacenza PF copre tutta la quantita' del DDT
-    const stock = finishedStockAvailable(row && row.code);
-    if (stock >= qi) return { ok: true, why: "stock", fp };
+    let hasValid = false;
+    for (const c of comps){
+      const cCode = String(c && c.code || "").trim();
+      if (!cCode) continue;
+      if (!__ddtIsAllowedComponentCode(cCode)) continue;
 
-    return { ok: false, why: "empty", fp, stock };
+      const per = compQtyPerUnit(c);
+      if (per == null || !Number.isFinite(per) || per <= 0) continue;
+      hasValid = true;
+      break;
+    }
+
+    if (hasValid) return { ok: true, why: "ok", fp };
+    return { ok: false, why: "empty", fp };
   }
 
   function ddtStatus(ddt){
@@ -2924,12 +3075,832 @@ const tpl = document.createElement("template");
     return { ok: green === rows.length, green, total: rows.length };
   }
 
+  // DDT: consenti il completamento se le uniche righe "rosse" sono senza codice (es. resi muletti/aspirapolveri).
+  // In quel caso le righe senza codice NON generano movimenti ma il documento può essere marcato come completato.
+  function ddtCompletionInfo(ddt){
+    const rows = Array.isArray(ddt?.rows) ? ddt.rows : [];
+    const total = rows.length;
+
+    let green = 0;
+    let bad = 0;
+    let noCode = 0;
+    const reasons = new Set();
+
+    for (const r of rows){
+      const st = isRowConfigured(r, ddt);
+      if (st && st.ok) {
+        green++;
+      } else {
+        bad++;
+        const why = String(st && st.why || "").trim() || "unknown";
+        reasons.add(why);
+        if (why === "nocode") noCode++;
+      }
+    }
+
+    const okAll = (total > 0 && bad === 0);
+    const onlyNoCode = (total > 0 && bad > 0 && reasons.size === 1 && reasons.has("nocode"));
+    const canComplete = okAll || onlyNoCode;
+
+    return {
+      okAll,
+      onlyNoCode,
+      canComplete,
+      total,
+      green,
+      bad,
+      noCode,
+      reasons: Array.from(reasons)
+    };
+  }
+
+
+
 
   function cacheCompletedMap(){
     S.completedMap = new Map();
     for (const c of (S.completed || [])){
       const k = String(c && c.key || c && c._id || "").trim();
       if (k) S.completedMap.set(k, c);
+    }
+  }
+
+
+  // ===== COMPLETED DDT RESYNC (se cambia alla fonte) =====
+  function __ddtRowsSignature(rows){
+    const rr = Array.isArray(rows) ? rows : [];
+    return rr.map(x => [
+      String(x?.code || "").trim(),
+      String(x?.desc || "").trim(),
+      (x && x.qty != null) ? x.qty : null,
+      String(x?.uom || "").trim(),
+      (x && x.unitNet != null) ? x.unitNet : null,
+      (x && x.unitGross != null) ? x.unitGross : null,
+      (x && x.vatPerc != null) ? x.vatPerc : null,
+      (x && x.net != null) ? x.net : null,
+      (x && x.vat != null) ? x.vat : null,
+      (x && x.gross != null) ? x.gross : null
+    ]);
+  }
+
+  function ddtXmlHashOf(obj){
+    const h = String(obj?.xmlHash || obj?.hash || "").trim();
+    if (h) return h;
+    try{
+      const wh = String(obj?.warehouse || "").trim();
+      const sig = __ddtRowsSignature(obj?.rows);
+      return hashStr(JSON.stringify([wh, sig]));
+    }catch(_){
+      return "";
+    }
+  }
+
+  function isCompletedOutOfSync(doneRec){
+    try{
+      const k = String(doneRec?.key || doneRec?._id || "").trim();
+      if (!k) return false;
+      const cacheRec = (S.cacheMap instanceof Map) ? (S.cacheMap.get(k) || null) : null;
+      if (!cacheRec) return false;
+      const hDone = ddtXmlHashOf(doneRec);
+      const hCache = ddtXmlHashOf(cacheRec);
+      return !!(hDone && hCache && hDone !== hCache);
+    }catch(_){ return false; }
+  }
+
+  function __toastDedup(token, msg, kind, ttlMs){
+    ttlMs = Number(ttlMs);
+    if (!Number.isFinite(ttlMs) || ttlMs <= 0) ttlMs = 60000;
+    try{
+      if (!S._toastAt) S._toastAt = new Map();
+      const now = Date.now();
+      const last = Number(S._toastAt.get(token) || 0);
+      if (now - last < ttlMs) return;
+      S._toastAt.set(token, now);
+      window.HubInv?.showToast?.(msg, kind);
+    }catch(_){ }
+  }
+
+  function __scheduleResyncQueue(delayMs){
+    delayMs = Number(delayMs);
+    if (!Number.isFinite(delayMs) || delayMs < 0) delayMs = 800;
+    delayMs = Math.max(250, Math.min(30000, delayMs));
+    try{ if (S.resyncTimer) clearTimeout(S.resyncTimer); }catch(_){ }
+    S.resyncTimer = setTimeout(() => {
+      S.resyncTimer = null;
+      runResyncQueue().catch(()=>{});
+    }, delayMs);
+  }
+
+  function queueResyncOutOfSync(reason){
+    try{
+      if (!S.cacheReady) return;
+      cacheCompletedMap();
+      const now = Date.now();
+
+      for (const c of (S.completed || [])){
+        const k = String(c?.key || c?._id || "").trim();
+        if (!k) continue;
+
+        const cacheRec = (S.cacheMap instanceof Map) ? (S.cacheMap.get(k) || null) : null;
+        if (!cacheRec) continue;
+
+        const hDone = ddtXmlHashOf(c);
+        const hCache = ddtXmlHashOf(cacheRec);
+        if (!hDone || !hCache || hDone === hCache) continue;
+
+        // evita spam se fallito recentemente sullo stesso hash
+        const fail = (S.resyncFail && typeof S.resyncFail.get === "function") ? (S.resyncFail.get(k) || null) : null;
+        if (fail && fail.hash === hCache && (now - (fail.at || 0)) < 10*60*1000) continue;
+
+        if (S.resyncInFlight && S.resyncInFlight.has(k)) continue;
+        const queued = (S.resyncQueue && typeof S.resyncQueue.get === "function") ? (S.resyncQueue.get(k) || null) : null;
+        if (queued && queued.hash === hCache) continue;
+
+        if (S.resyncQueue && typeof S.resyncQueue.set === "function"){
+          S.resyncQueue.set(k, { key: k, hash: hCache, reason: String(reason||"") || "auto", queuedAt: now });
+        }
+      }
+
+      if (S.resyncQueue && S.resyncQueue.size){
+        __scheduleResyncQueue(900);
+      }
+    }catch(_){ }
+  }
+
+  async function runResyncQueue(){
+    try{
+      if (!S.resyncQueue || !S.resyncQueue.size) return;
+      if (S.busy) { __scheduleResyncQueue(1500); return; }
+
+      const H = S.hub || getHub();
+      if (!H || !H.fb || !H.fb.db || !H.FS){
+        __scheduleResyncQueue(2000);
+        return;
+      }
+
+      if (!H.fb.user){
+        __toastDedup("danea_resync_login", "DDT aggiornato alla fonte: accedi per riallineare lo scarico", "warn", 60000);
+        __scheduleResyncQueue(8000);
+        return;
+      }
+
+      const it = S.resyncQueue.entries().next().value;
+      if (!it) return;
+      const key = it[0];
+      const info = it[1] || {};
+      S.resyncQueue.delete(key);
+
+      const ok = await resyncCompletedByKey(key, { silent: true, expectedHash: info.hash, reason: info.reason || "auto" });
+      if (!ok){
+        try{
+          if (S.resyncFail && typeof S.resyncFail.set === "function"){
+            S.resyncFail.set(String(key), { hash: String(info.hash || ""), at: Date.now(), msg: "failed" });
+          }
+        }catch(_){ }
+      }
+
+      if (S.resyncQueue.size){
+        __scheduleResyncQueue(700);
+      }
+    }catch(e){
+      try{ console.warn("runResyncQueue failed", e); }catch(_){ }
+      __scheduleResyncQueue(3000);
+    }
+  }
+
+  async function resyncCompletedByKey(key, opts){
+    opts = (opts && typeof opts === "object") ? opts : {};
+    const k = String(key || "").trim();
+    if (!k) return false;
+
+    // evita doppie esecuzioni
+    if (S.resyncInFlight && S.resyncInFlight.has(k)) return false;
+    if (S.busy) return false;
+
+    const H = S.hub || getHub();
+    if (!H || !H.fb || !H.fb.db || !H.FS) return false;
+
+    cacheCompletedMap();
+    const doneRec = (S.completedMap && typeof S.completedMap.get === "function") ? (S.completedMap.get(k) || null) : null;
+    const cacheRec = (S.cacheMap instanceof Map) ? (S.cacheMap.get(k) || null) : null;
+    if (!doneRec || !cacheRec) return false;
+
+    const hDone = ddtXmlHashOf(doneRec);
+    const hCache = ddtXmlHashOf(cacheRec);
+
+    const expected = String(opts.expectedHash || "").trim();
+    if (expected && hCache && expected !== hCache){
+      // è arrivata una nuova versione mentre era in coda
+      try{
+        if (S.resyncQueue && typeof S.resyncQueue.set === "function"){
+          S.resyncQueue.set(k, { key: k, hash: hCache, reason: "newer", queuedAt: Date.now() });
+        }
+      }catch(_){ }
+      __scheduleResyncQueue(900);
+      return false;
+    }
+
+    if (hDone && hCache && hDone === hCache && !opts.force) return true;
+
+    const silent = !!opts.silent;
+    if (!silent){
+      const ok = confirm(`Il DDT ${doneRec.number || "—"} del ${fmtDateIT(doneRec.date || "")} è cambiato alla fonte.
+
+Riallineare lo scarico aggiornando i movimenti?`);
+      if (!ok) return false;
+    }
+
+    if (!H.fb.user){
+      __toastDedup(`danea_resync_login_${k}`, "Accedi con Google per riallineare lo scarico", "warn", 60000);
+      return false;
+    }
+
+    const actor = (H.fb.user && (H.fb.user.email || H.fb.user.uid)) || "auto";
+
+    // Se manca la configurazione prodotti finiti, non possiamo ricalcolare
+    try{
+      if (!(S.fpByCode instanceof Map) || S.fpByCode.size === 0){
+        __toastDedup(`danea_resync_fp_${k}`, "Riallineamento DDT: prodotti finiti non caricati", "warn", 120000);
+        return false;
+      }
+    }catch(_){ }
+
+    S.resyncInFlight && S.resyncInFlight.add(k);
+    S.busy = true;
+
+    let success = false;
+    try{
+      const { addDoc, setDoc, doc, collection, serverTimestamp, getDocs, query, orderBy, deleteDoc, getDoc } = H.FS;
+
+      const newXmlHash = hCache || String(cacheRec.xmlHash || "") || "";
+      const doneId = encodeURIComponent(String(k));
+      const doneRef = doc(H.fb.db, "orgs", H.ORG_ID, "daneaDdtCompleted", doneId);
+
+      // Se il DDT era stato completato SENZA scarico: aggiorno solo i dati (nessun movimento)
+      if (!doneRec.autoDischarge){
+        await setDoc(doneRef, {
+          key: String(cacheRec.key || k).trim(),
+          number: String(cacheRec.number || doneRec.number || "").trim(),
+          date: String(cacheRec.date || doneRec.date || "").trim(),
+          customer: String(cacheRec.customer || doneRec.customer || "").trim(),
+          warehouse: String(cacheRec.warehouse || doneRec.warehouse || "").trim(),
+          rows: (cacheRec.rows || []).map(x => ({
+            idx: (x && x.idx != null) ? x.idx : null,
+            code: x.code || "",
+            desc: x.desc || "",
+            qty: x.qty ?? null,
+            qtyRaw: x.qtyRaw || "",
+            uom: x.uom || "",
+            unitNet: (x && x.unitNet != null) ? x.unitNet : null,
+            unitGross: (x && x.unitGross != null) ? x.unitGross : null,
+            vatPerc: (x && x.vatPerc != null) ? x.vatPerc : null,
+            net: (x && x.net != null) ? x.net : null,
+            vat: (x && x.vat != null) ? x.vat : null,
+            gross: (x && x.gross != null) ? x.gross : null
+          })),
+          netTotal: (cacheRec && cacheRec.netTotal != null) ? cacheRec.netTotal : null,
+          vatTotal: (cacheRec && cacheRec.vatTotal != null) ? cacheRec.vatTotal : null,
+          grossTotal: (cacheRec && cacheRec.grossTotal != null) ? cacheRec.grossTotal : null,
+          currency: String(cacheRec.currency || "EUR"),
+          xmlHash: newXmlHash,
+          updatedAt: serverTimestamp(),
+          updatedBy: actor,
+          autoDischarge: false
+        }, { merge: true });
+
+        __toastDedup(`danea_resync_ok_${k}_${newXmlHash}`, `DDT ${cacheRec.number || doneRec.number || ""}: aggiornato`, "ok", 30000);
+        success = true;
+        return true;
+      }
+
+      // ===== riallineamento con scarico =====
+      const oldIds = Array.isArray(doneRec.movementIds) ? doneRec.movementIds : [];
+      const oldFpIds = Array.isArray(doneRec.finishedMovementIds) ? doneRec.finishedMovementIds : [];
+      const oldIdSet = new Set(oldIds.map(x => String(x || "").trim()).filter(Boolean));
+      const oldFpIdSet = new Set(oldFpIds.map(x => String(x || "").trim()).filter(Boolean));
+
+      // carica movimenti PF (serve per calcolare la giacenza PF)
+      let fpMovs = (H.state && Array.isArray(H.state.finishedMovements)) ? H.state.finishedMovements : [];
+      if (!fpMovs.length){
+        try{
+          const col = collection(H.fb.db, "orgs", H.ORG_ID, "finishedInventoryMovements");
+          const q = query(col, orderBy("createdAt"));
+          const snap = await getDocs(q);
+          fpMovs = snap.docs.map(d => {
+            const data = d.data() || {};
+            return { id: d.id, type: data.type || "IN", code: data.code || "", qty: data.qty };
+          });
+          if (H.state) H.state.finishedMovements = fpMovs;
+        }catch(e){ try{ console.warn("fetch finishedInventoryMovements failed", e); }catch(_){ } }
+      }
+
+      const availFp = new Map();
+      for (const mv of (fpMovs || [])){
+        const id = String(mv && mv.id || "").trim();
+        if (id && oldFpIdSet.has(id)) continue; // escludi vecchi movimenti del DDT
+        const code = String(mv && mv.code || "").trim();
+        if (!code) continue;
+        const low = code.toLowerCase();
+        const q = (mv && mv.qty != null && Number.isFinite(Number(mv.qty))) ? Math.round(Number(mv.qty)) : 0;
+        if (!q) continue;
+        const delta = (String(mv.type || "").toUpperCase() === "OUT") ? -q : q;
+        availFp.set(low, (availFp.get(low) || 0) + delta);
+      }
+
+      const ddt = cacheRec; // alias
+      const isAgenti = isAgentWarehouseDdt(ddt);
+
+      // 1) calcola fabbisogni
+      const req = new Map();
+      const reqFp = new Map();
+
+      if (isAgenti){
+        // Somma per codice (gestisce piu' righe con lo stesso PF)
+        for (const r of (ddt.rows || [])){
+          const code = String(r.code || "").trim();
+          if (!code) continue;
+
+          const qtyLine = (r.qty != null && Number.isFinite(Number(r.qty))) ? Number(r.qty) : parseFraction(r.qtyRaw);
+          const qLine = (qtyLine != null && Number.isFinite(qtyLine)) ? qtyLine : 0;
+          if (qLine <= 0) continue;
+
+          const fp = getFpForRow(r);
+          if (!fp) {
+            __toastDedup(`danea_resync_missingfp_${k}_${code}`, `Riallineamento: manca prodotto finito ${code}`, "warn", 60000);
+            return false;
+          }
+
+          const qInt = Math.round(qLine);
+          if (qInt <= 0) continue;
+
+          const low = code.toLowerCase();
+          const name = String(fp.name || fp.nome || r.desc || code).trim() || code;
+          const uom = String(fp.uom || r.uom || "pz").trim() || "pz";
+          const cur = reqFp.get(low) || { code, name, uom, qtyInt: 0 };
+          cur.qtyInt += qInt;
+          if (!cur.name) cur.name = name;
+          if (!cur.uom) cur.uom = uom;
+          reqFp.set(low, cur);
+        }
+
+        // Validazione giacenza PF (non si puo' andare in negativo su Magazzino agenti)
+        for (const it of Array.from(reqFp.values())){
+          const low = String(it.code || "").trim().toLowerCase();
+          const need = Math.max(0, Math.round(Number(it.qtyInt) || 0));
+          const have = Math.max(0, Math.round(Number(availFp.get(low) || 0)));
+          if (need > have){
+            __toastDedup(`danea_resync_stockfp_${k}_${low}`, `Riallineamento: giacenza PF insufficiente per ${it.code}`, "err", 60000);
+            return false;
+          }
+        }
+      } else {
+        // Altri magazzini: SOLO componenti (imballaggi + materie prime). NON scarica PF.
+        for (const r of (ddt.rows || [])){
+          const code = String(r.code || "").trim();
+          if (!code) continue;
+
+          const qtyLine = (r.qty != null && Number.isFinite(Number(r.qty))) ? Number(r.qty) : parseFraction(r.qtyRaw);
+          const qLine = (qtyLine != null && Number.isFinite(qtyLine)) ? qtyLine : 0;
+          if (qLine <= 0) continue;
+
+          const fp = getFpForRow(r);
+          if (!fp) {
+            __toastDedup(`danea_resync_missingfp_${k}_${code}`, `Riallineamento: manca prodotto finito ${code}`, "warn", 60000);
+            return false;
+          }
+
+          const qInt = Math.round(qLine);
+          if (qInt <= 0) continue;
+
+          const comps = getFpComponents(fp);
+          if (!comps || !comps.length){
+            __toastDedup(`danea_resync_bom_${k}_${code}`, `Riallineamento: distinta base mancante per ${code}`, "err", 60000);
+            return false;
+          }
+
+          for (const c of comps){
+            const cCode = String(c.code || "").trim();
+            if (!cCode) continue;
+            if (!__ddtIsAllowedComponentCode(cCode)) continue;
+
+            const per = compQtyPerUnit(c);
+            if (per == null || !Number.isFinite(per) || per <= 0) continue;
+
+            const add = per * qInt;
+            const clow = cCode.toLowerCase();
+            let name0 = String(c.name || c.articolo || cCode).trim();
+            try{
+              if (typeof getDisplayNameForCode === "function"){
+                const dn = getDisplayNameForCode(cCode, name0 || cCode);
+                if (dn) name0 = dn;
+              }
+            }catch(_){}
+            const cur = req.get(clow) || { code: cCode, name: name0, uom: String(c.uom || "").trim(), qty: 0 };
+            cur.qty += add;
+            if (!cur.name) cur.name = cCode;
+            if (!cur.uom) cur.uom = String(c.uom || "").trim();
+            req.set(clow, cur);
+          }
+        }
+      }
+
+      if (!req.size && !reqFp.size){
+        __toastDedup(`danea_resync_nomov_${k}_${newXmlHash}`, "Riallineamento: nessun movimento calcolabile", "warn", 60000);
+        return false;
+      }
+
+      // 2) Carica inventario componenti
+      let movs = (H.state && Array.isArray(H.state.movements)) ? H.state.movements : [];
+      if (!movs.length){
+        try{
+          const col = collection(H.fb.db, "orgs", H.ORG_ID, "inventoryMovements");
+          const q = query(col, orderBy("createdAt"));
+          const snap = await getDocs(q);
+          movs = snap.docs.map(d => {
+            const data = d.data() || {};
+            return {
+              id: d.id,
+              type: data.type || "IN",
+              code: data.code || "",
+              qty: data.qty,
+              warehouse: data.warehouse || "",
+              customer: data.customer || "",
+              daneaDdtKey: String(data.daneaDdtKey || data.daneaDdtkey || "").trim()
+            };
+          });
+          if (H.state) H.state.movements = movs;
+        }catch(e){ try{ console.warn("fetch inventoryMovements failed", e); }catch(_){ } }
+      }
+
+      const _normWh = (w) => {
+        try{ if (H && typeof H.normalizeWarehouse === "function") return H.normalizeWarehouse(w); }catch(_){ }
+        const ss = String(w || "").trim().toLowerCase();
+        if (ss.includes("conca") || ss.includes("concamarise")) return "concamarise";
+        return "cerea";
+      };
+      const _safeInt = (v) => {
+        const n = parseInt(String(v||"").replace(/[^0-9\-]/g,""), 10);
+        return Number.isFinite(n) ? n : 0;
+      };
+
+      const avail = { cerea: new Map(), concamarise: new Map() };
+      const availCust = { cerea: new Map(), concamarise: new Map() };
+      const anyCustomerByCode = new Map();
+
+      for (const mv of (movs || [])){
+        const id = String(mv && mv.id || "").trim();
+        if (id && oldIdSet.has(id)) continue;
+
+        const mvKey = String(mv && (mv.daneaDdtKey || mv.daneaDdtkey) || "").trim();
+        if (mvKey && mvKey === k) continue;
+
+        const code = String(mv && mv.code || "").trim();
+        if (!code) continue;
+        const low = code.toLowerCase();
+        const w = _normWh(mv.warehouse || mv.site || mv.magazzino || mv.location || "");
+        const q = _safeInt(mv.qty);
+        if (!q) continue;
+        const delta = (String(mv.type || "").toUpperCase() === "OUT") ? -q : q;
+        const m = (w === "concamarise") ? avail.concamarise : avail.cerea;
+        m.set(low, (m.get(low) || 0) + delta);
+
+        const custRaw = String((mv && (mv.customer || mv.supplierName || mv.supplier)) || "").trim();
+        if (custRaw) anyCustomerByCode.set(low, custRaw);
+        const mCust = (w === "concamarise") ? availCust.concamarise : availCust.cerea;
+        let byCust = mCust.get(low);
+        if (!byCust){ byCust = new Map(); mCust.set(low, byCust); }
+        const ck = custRaw.toLowerCase();
+        const rec = byCust.get(ck) || { customer: custRaw, qty: 0 };
+        rec.qty = _safeInt(rec.qty) + delta;
+        if (!rec.customer && custRaw) rec.customer = custRaw;
+        byCust.set(ck, rec);
+      }
+
+      const needList = Array.from(req.values()).map(it => {
+        const qtyInt = Math.round(Number(it.qty) || 0);
+        return Object.assign({}, it, { qtyInt });
+      }).filter(x => x.qtyInt);
+
+      // Validazione scorte componenti
+      for (const it of needList){
+        const low = String(it.code || "").trim().toLowerCase();
+        const aC = Math.max(0, _safeInt(avail.cerea.get(low)));
+        const aK = Math.max(0, _safeInt(avail.concamarise.get(low)));
+        const tot = aC + aK;
+        if (tot < it.qtyInt){
+          __toastDedup(`danea_resync_stock_${k}_${low}`, `Riallineamento: scorta insufficiente per ${it.code}`, "err", 60000);
+          return false;
+        }
+      }
+
+      // 3) costruisci payload movimenti (senza scrivere ancora)
+      const compPayloads = [];
+      const allocations = [];
+      const noteBaseComp = `Scarico componenti per DDT ${ddt.number} del ${fmtDateIT(ddt.date)} (DaneaXML)`;
+
+      for (const it of needList){
+        const low = String(it.code || "").trim().toLowerCase();
+        let need = it.qtyInt;
+
+        let aC = Math.max(0, _safeInt(avail.cerea.get(low)));
+        let aK = Math.max(0, _safeInt(avail.concamarise.get(low)));
+
+        const first = (aK > aC) ? "concamarise" : "cerea";
+        const second = (first === "cerea") ? "concamarise" : "cerea";
+
+        const takeFrom = (wh) => {
+          if (need <= 0) return 0;
+          const cur = (wh === "concamarise") ? aK : aC;
+          const take = Math.min(need, cur);
+          if (take <= 0) return 0;
+          need -= take;
+          if (wh === "concamarise") aK -= take;
+          else aC -= take;
+          return take;
+        };
+
+        const t1 = takeFrom(first);
+        const t2 = takeFrom(second);
+
+        avail.cerea.set(low, aC);
+        avail.concamarise.set(low, aK);
+
+        allocations.push({ code: it.code, name: it.name || it.code, uom: String(it.uom||"").trim(), qty: it.qtyInt, byWarehouse: { cerea: (first==="cerea"?t1:t2) || 0, concamarise: (first==="concamarise"?t1:t2) || 0 } });
+
+        const pickCustomerForWarehouse = (wh) => {
+          try{
+            const mm = (wh === "concamarise") ? availCust.concamarise : availCust.cerea;
+            const byCust = mm.get(low);
+            if (byCust && byCust.size){
+              let bestKey = null;
+              let bestQty = 0;
+              let bestName = "";
+              for (const [ck, rec] of byCust.entries()){
+                const q0 = _safeInt(rec && rec.qty);
+                if (q0 > bestQty){
+                  bestQty = q0;
+                  bestKey = ck;
+                  bestName = String(rec && rec.customer || "").trim();
+                }
+              }
+              if (bestKey != null && bestQty > 0) return { ck: bestKey, customer: bestName };
+            }
+          }catch(_){ }
+          const fb = String(anyCustomerByCode.get(low) || "").trim();
+          return { ck: fb.toLowerCase(), customer: fb };
+        };
+
+        const cust1 = (t1 > 0) ? pickCustomerForWarehouse(first) : null;
+        const cust2 = (t2 > 0) ? pickCustomerForWarehouse(second) : null;
+
+        const decAvailCust = (wh, sel, qtyOut) => {
+          if (!sel || !qtyOut) return;
+          const mm = (wh === "concamarise") ? availCust.concamarise : availCust.cerea;
+          let byCust = mm.get(low);
+          if (!byCust){ byCust = new Map(); mm.set(low, byCust); }
+          const ck = (sel.ck != null) ? String(sel.ck) : String(sel.customer || "").trim().toLowerCase();
+          const rec0 = byCust.get(ck) || { customer: sel.customer || "", qty: 0 };
+          rec0.qty = _safeInt(rec0.qty) - _safeInt(qtyOut);
+          if (!rec0.customer && sel.customer) rec0.customer = sel.customer;
+          byCust.set(ck, rec0);
+        };
+        decAvailCust(first, cust1, t1);
+        decAvailCust(second, cust2, t2);
+
+        const makePayload = (warehouse, qtyInt, customerName) => ({
+          type: "OUT",
+          customer: String(customerName || "").trim(),
+          code: it.code,
+          item: it.name || it.code,
+          uom: String(it.uom || "").trim(),
+          qtyRaw: `${it.qty} ${String(it.uom||"").trim()}`.trim(),
+          qty: qtyInt,
+          date: String(ddt.date || "").trim(),
+          note: noteBaseComp,
+          source: "DaneaXML",
+          rawText: "",
+          warehouse: warehouse,
+          docType: "DDT",
+          docNum: String(ddt.number || "").trim(),
+          docDateRaw: String(ddt.date || "").trim(),
+          daneaDdtKey: String(ddt.key || "").trim(),
+          createdAt: serverTimestamp(),
+          createdBy: actor
+        });
+
+        if (t1 > 0) compPayloads.push({ payload: makePayload(first, t1, (cust1 && cust1.customer) || "") });
+        if (t2 > 0) compPayloads.push({ payload: makePayload(second, t2, (cust2 && cust2.customer) || "") });
+      }
+
+      const fpPayloads = [];
+      const finishedAllocations = [];
+      const noteBaseFp = `Scarico prodotti finiti per DDT ${ddt.number} del ${fmtDateIT(ddt.date)} (DaneaXML)`;
+      for (const it of Array.from(reqFp.values())){
+        if (!it || !it.qtyInt) continue;
+        finishedAllocations.push({ code: it.code, name: it.name || it.code, uom: String(it.uom||"").trim(), qty: it.qtyInt, warehouse: "prodotti_finiti" });
+        fpPayloads.push({
+          payload: {
+            type: "OUT",
+            code: it.code,
+            item: it.name || it.code,
+            uom: String(it.uom || "").trim(),
+            qtyRaw: `${it.qtyInt} ${String(it.uom||"").trim()}`.trim(),
+            qty: it.qtyInt,
+            date: String(ddt.date || "").trim(),
+            note: noteBaseFp,
+            source: "DaneaXML",
+            warehouse: "prodotti_finiti",
+            docType: "DDT",
+            docNum: String(ddt.number || "").trim(),
+            docDateRaw: String(ddt.date || "").trim(),
+            daneaDdtKey: String(ddt.key || "").trim(),
+            createdAt: serverTimestamp(),
+            createdBy: actor
+          }
+        });
+      }
+
+      // 4) applica sostituzione movimenti: delete vecchi + create nuovi + update completato
+      const hasBatch = (typeof H.FS.writeBatch === "function");
+      const movementIds = [];
+      const finishedMovementIds = [];
+
+      if (hasBatch){
+        const batch = H.FS.writeBatch(H.fb.db);
+
+        // delete vecchi
+        for (const id of oldIdSet){
+          batch.delete(doc(H.fb.db, "orgs", H.ORG_ID, "inventoryMovements", id));
+        }
+        for (const id of oldFpIdSet){
+          batch.delete(doc(H.fb.db, "orgs", H.ORG_ID, "finishedInventoryMovements", id));
+        }
+
+        // create nuovi (auto-id)
+        const movCol = collection(H.fb.db, "orgs", H.ORG_ID, "inventoryMovements");
+        const fpCol = collection(H.fb.db, "orgs", H.ORG_ID, "finishedInventoryMovements");
+
+        for (const it of compPayloads){
+          const ref = doc(movCol);
+          batch.set(ref, it.payload);
+          movementIds.push(ref.id);
+        }
+        for (const it of fpPayloads){
+          const ref = doc(fpCol);
+          batch.set(ref, it.payload);
+          finishedMovementIds.push(ref.id);
+        }
+
+        // update completato
+        const nextRev = (Number(doneRec.resyncRev || 0) + 1);
+        batch.set(doneRef, {
+          key: String(ddt.key || k).trim(),
+          number: String(ddt.number || "").trim(),
+          date: String(ddt.date || "").trim(),
+          customer: String(ddt.customer || "").trim(),
+          rows: (ddt.rows || []).map(x => ({
+            idx: (x && x.idx != null) ? x.idx : null,
+            code: x.code || "",
+            desc: x.desc || "",
+            qty: x.qty ?? null,
+            qtyRaw: x.qtyRaw || "",
+            uom: x.uom || "",
+            unitNet: (x && x.unitNet != null) ? x.unitNet : null,
+            unitGross: (x && x.unitGross != null) ? x.unitGross : null,
+            vatPerc: (x && x.vatPerc != null) ? x.vatPerc : null,
+            net: (x && x.net != null) ? x.net : null,
+            vat: (x && x.vat != null) ? x.vat : null,
+            gross: (x && x.gross != null) ? x.gross : null
+          })),
+          netTotal: (ddt && ddt.netTotal != null) ? ddt.netTotal : null,
+          vatTotal: (ddt && ddt.vatTotal != null) ? ddt.vatTotal : null,
+          grossTotal: (ddt && ddt.grossTotal != null) ? ddt.grossTotal : null,
+          currency: String(ddt.currency || "EUR"),
+          warehouse: String(ddt.warehouse || "").trim(),
+          allocations: allocations,
+          finishedAllocations: finishedAllocations,
+          xmlHash: newXmlHash,
+          movementIds: movementIds,
+          finishedMovementIds: finishedMovementIds,
+          autoDischarge: true,
+          resyncRev: nextRev,
+          updatedAt: serverTimestamp(),
+          updatedBy: actor
+        }, { merge: true });
+
+        await batch.commit();
+      } else {
+        // fallback senza batch: best-effort (con rollback)
+        const createdRefs = [];
+        const oldDocs = [];
+        const oldFpDocs = [];
+
+        // leggo prima (rollback)
+        for (const id of oldIdSet){
+          try{
+            const ref = doc(H.fb.db, "orgs", H.ORG_ID, "inventoryMovements", id);
+            const snap = await getDoc(ref);
+            oldDocs.push({ id, ref, data: (snap && typeof snap.exists === "function" && snap.exists()) ? snap.data() : null });
+          }catch(_){
+            oldDocs.push({ id, ref: doc(H.fb.db, "orgs", H.ORG_ID, "inventoryMovements", id), data: null });
+          }
+        }
+        for (const id of oldFpIdSet){
+          try{
+            const ref = doc(H.fb.db, "orgs", H.ORG_ID, "finishedInventoryMovements", id);
+            const snap = await getDoc(ref);
+            oldFpDocs.push({ id, ref, data: (snap && typeof snap.exists === "function" && snap.exists()) ? snap.data() : null });
+          }catch(_){
+            oldFpDocs.push({ id, ref: doc(H.fb.db, "orgs", H.ORG_ID, "finishedInventoryMovements", id), data: null });
+          }
+        }
+
+        const movCol = collection(H.fb.db, "orgs", H.ORG_ID, "inventoryMovements");
+        const fpCol = collection(H.fb.db, "orgs", H.ORG_ID, "finishedInventoryMovements");
+
+        try{
+          // delete vecchi
+          for (const id of oldIdSet){ await deleteDoc(doc(H.fb.db, "orgs", H.ORG_ID, "inventoryMovements", id)); }
+          for (const id of oldFpIdSet){ await deleteDoc(doc(H.fb.db, "orgs", H.ORG_ID, "finishedInventoryMovements", id)); }
+
+          // create nuovi
+          for (const it of compPayloads){
+            const ref = await addDoc(movCol, it.payload);
+            if (ref && ref.id){ movementIds.push(ref.id); createdRefs.push({ col: "inventoryMovements", id: ref.id }); }
+          }
+          for (const it of fpPayloads){
+            const ref = await addDoc(fpCol, it.payload);
+            if (ref && ref.id){ finishedMovementIds.push(ref.id); createdRefs.push({ col: "finishedInventoryMovements", id: ref.id }); }
+          }
+
+          const nextRev = (Number(doneRec.resyncRev || 0) + 1);
+          await setDoc(doneRef, {
+            key: String(ddt.key || k).trim(),
+            number: String(ddt.number || "").trim(),
+            date: String(ddt.date || "").trim(),
+            customer: String(ddt.customer || "").trim(),
+            rows: (ddt.rows || []).map(x => ({
+              idx: (x && x.idx != null) ? x.idx : null,
+              code: x.code || "",
+              desc: x.desc || "",
+              qty: x.qty ?? null,
+              qtyRaw: x.qtyRaw || "",
+              uom: x.uom || "",
+              unitNet: (x && x.unitNet != null) ? x.unitNet : null,
+              unitGross: (x && x.unitGross != null) ? x.unitGross : null,
+              vatPerc: (x && x.vatPerc != null) ? x.vatPerc : null,
+              net: (x && x.net != null) ? x.net : null,
+              vat: (x && x.vat != null) ? x.vat : null,
+              gross: (x && x.gross != null) ? x.gross : null
+            })),
+            netTotal: (ddt && ddt.netTotal != null) ? ddt.netTotal : null,
+            vatTotal: (ddt && ddt.vatTotal != null) ? ddt.vatTotal : null,
+            grossTotal: (ddt && ddt.grossTotal != null) ? ddt.grossTotal : null,
+            currency: String(ddt.currency || "EUR"),
+            warehouse: String(ddt.warehouse || "").trim(),
+            allocations: allocations,
+            finishedAllocations: finishedAllocations,
+            xmlHash: newXmlHash,
+            movementIds: movementIds,
+            finishedMovementIds: finishedMovementIds,
+            autoDischarge: true,
+            resyncRev: nextRev,
+            updatedAt: serverTimestamp(),
+            updatedBy: actor
+          }, { merge: true });
+
+        }catch(err){
+          // rollback: cancello i nuovi e ripristino i vecchi
+          try{
+            for (const r of createdRefs){
+              try{ await deleteDoc(doc(H.fb.db, "orgs", H.ORG_ID, r.col, r.id)); }catch(_){ }
+            }
+            for (const x of oldDocs){
+              if (x && x.data) { try{ await setDoc(x.ref, x.data, { merge: false }); }catch(_){ } }
+            }
+            for (const x of oldFpDocs){
+              if (x && x.data) { try{ await setDoc(x.ref, x.data, { merge: false }); }catch(_){ } }
+            }
+          }catch(_){ }
+          throw err;
+        }
+      }
+
+      __toastDedup(`danea_resync_ok_${k}_${newXmlHash}`, `DDT ${ddt.number || ""}: riallineato`, "ok", 30000);
+      try{ render(); }catch(_){ }
+
+      success = true;
+      return true;
+
+    }catch(e){
+      try{ console.warn("resyncCompletedByKey failed", e); }catch(_){ }
+      __toastDedup(`danea_resync_err_${k}`, "Errore riallineamento DDT", "err", 60000);
+      return false;
+    }finally{
+      try{ if (!success && S.resyncFail && typeof S.resyncFail.set === "function"){ S.resyncFail.set(k, { hash: String(hCache || ""), at: Date.now(), msg: "failed" }); } }catch(_){ }
+      try{ S.resyncInFlight && S.resyncInFlight.delete(k); }catch(_){ }
+      S.busy = false;
+      try{ __scheduleResyncQueue(1200); }catch(_){ }
     }
   }
 
@@ -3025,14 +3996,23 @@ const tpl = document.createElement("template");
         const rows = Array.isArray(c.rows) ? c.rows : [];
         const n = rows.length;
 
-        return `<tr class=\"jsDaneaRow daneaRowOk\" data-key=\"${escAttr(k)}\" data-mode=\"done\" title="Apri">
+        const outSync = isCompletedOutOfSync(c);
+        const rowCls = outSync ? "daneaRowBad" : "daneaRowOk";
+        const dotCls = outSync ? "bad" : "ok";
+        const stText = outSync ? "AGGIORNATO" : "OK";
+        const btnResync = outSync
+          ? `<button class="btn btn-secondary btn-xs jsDaneaResyncDone" data-key="${escAttr(k)}" type="button">Riallinea</button>`
+          : "";
+
+        return `<tr class=\"jsDaneaRow ${rowCls}\" data-key=\"${escAttr(k)}\" data-mode=\"done\" title="Apri">
           <td data-label="Data">${esc(fmtDateIT(date) || "—")}</td>
           <td data-label="Numero"><span class="kbd">${esc(number || "—")}</span></td>
           <td data-label="Cliente">${esc(cust || "—")}</td>
           <td data-label="Magazzino">${esc((wh || "").trim() || "—")}</td>
           <td data-label="Righe" class="qty">${Number(n||0).toLocaleString("it-IT")}</td>
-          <td data-label="Stato" class="qty"><span class="dot ok"></span>OK</td>
+          <td data-label="Stato" class="qty"><span class="dot ${dotCls}"></span>${stText}</td>
           <td data-label="" style="text-align:right;">
+            ${btnResync}
             <button class="btn btn-ghost btn-xs jsDaneaOpen" data-key="${escAttr(k)}" data-mode="done" type="button">Apri</button>
             <button class="btn btn-danger btn-xs jsDaneaDeleteDone" data-key="${escAttr(k)}" type="button">Elimina</button>
           </td>
@@ -3055,10 +4035,12 @@ const tpl = document.createElement("template");
 
     tbody.innerHTML = filtered.length ? filtered.map(d => {
       const st = ddtStatus(d);
-      const okDot = st.ok ? '<span class="dot ok"></span>' : '<span class="dot bad"></span>';
+      const ci = ddtCompletionInfo(d);
+      const okDot = st.ok ? '<span class="dot ok"></span>' : (ci.onlyNoCode ? '<span class="dot warn"></span>' : '<span class="dot bad"></span>');
       const stTxt = `${st.green}/${st.total}`;
-      const btnDisabled = st.ok ? "" : "disabled";
-      return `<tr class=\"jsDaneaRow ${st.ok ? 'daneaRowOk' : 'daneaRowBad'}\" data-key=\"${escAttr(d.key)}\" data-mode=\"verify\" title="Apri">
+      const btnDisabled = ci.canComplete ? "" : "disabled";
+      const rowCls = st.ok ? 'daneaRowOk' : (ci.onlyNoCode ? 'daneaRowWarn' : 'daneaRowBad');
+      return `<tr class=\"jsDaneaRow ${rowCls}\" data-key=\"${escAttr(d.key)}\" data-mode=\"verify\" title="Apri">
         <td data-label="Data">${esc(fmtDateIT(d.date) || "—")}</td>
         <td data-label="Numero"><span class="kbd">${esc(d.number || "—")}</span></td>
         <td data-label="Cliente">${esc(d.customer || "—")}</td>
@@ -3093,7 +4075,8 @@ const tpl = document.createElement("template");
     if (btnSend){
       btnSend.style.display = isDone ? "none" : "";
       const st = ddtStatus(ddt);
-      btnSend.disabled = !st.ok;
+      const ci = ddtCompletionInfo(ddt);
+      btnSend.disabled = !ci.canComplete;
       btnSend.textContent = (S.autoDischarge ? "Completa (scarica)" : "Completa (senza scarico)");
     }
     tbody.innerHTML = rows.length ? rows.map(r => {
@@ -3110,7 +4093,9 @@ const tpl = document.createElement("template");
       const rowCls = st.ok ? '' : ' daneaRowBad';
       const rowStyle = ' style="cursor:pointer;"';
       let rowTitle = st.ok ? "Apri distinta base" : "Configura distinta base";
-      if (st.why === "agent_stock"){
+      if (st.why === "nocode"){
+        rowTitle = "Manca il codice articolo nell’XML (correggi in Danea/Easyfatt)";
+      } else if (st.why === "agent_stock"){
         const have = Number(st.stock || 0);
         const need = Number(st.need || 0);
         rowTitle = `Scorta PF insufficiente: disponibili ${have} • richiesti ${need}`;
@@ -3119,7 +4104,9 @@ const tpl = document.createElement("template");
       }
 
       let act = "";
-      if (st.why === "missing"){
+      if (st.why === "nocode"){
+        act = `<span class="td-muted">Manca codice</span>`;
+      } else if (st.why === "missing"){
         act = `<button class="btn btn-secondary btn-xs jsDaneaImportFp" data-code="${escAttr(code)}" data-desc="${escAttr(desc)}" type="button">Importa</button>`;
       } else if (st.why === "empty"){
         const fid = String(st.fp?.id || st.fp?._id || "").trim();
@@ -3143,21 +4130,32 @@ const tpl = document.createElement("template");
 
     if (foot){
       const st = ddtStatus(ddt);
+      const ci = ddtCompletionInfo(ddt);
       const autoOn = !!S.autoDischarge;
       const isAgenti = isAgentWarehouseDdt(ddt);
+      const hasNoCode = rows.some(r => !String(r?.code || "").trim());
 
-      const msg = isDone
-        ? "Questo DDT è già stato scaricato: eliminandolo (in tab Completati) si resetta lo scarico."
-        : (st.ok
-            ? (autoOn
-                ? (isAgenti
-                    ? "Tutte le righe sono OK: puoi completare e scaricare SOLO prodotti finiti (Magazzino agenti)."
-                    : "Tutte le righe sono configurate: puoi completare e scaricare componenti.")
-                : "Tutte le righe sono configurate: puoi completare (scarico automatico DISATTIVATO).")
-            : (isAgenti
-                ? "Controlla le righe rosse: per Magazzino agenti serve il prodotto finito importato E giacenza PF sufficiente."
-                : "Configura le righe rosse (distinta base) per poter completare.")
-          );
+      let msg = "";
+      if (isDone){
+        msg = "Questo DDT è già stato scaricato: eliminandolo (in tab Completati) si resetta lo scarico.";
+      } else if (st.ok){
+        msg = autoOn
+          ? (isAgenti
+              ? "Tutte le righe sono OK: puoi completare e scaricare SOLO prodotti finiti (Magazzino agenti)."
+              : "Tutte le righe sono configurate: puoi completare e scaricare componenti.")
+          : "Tutte le righe sono configurate: puoi completare (scarico automatico DISATTIVATO).";
+      } else if (ci.onlyNoCode){
+        msg = autoOn
+          ? "Ci sono righe senza codice articolo (es. resi muletti/aspirapolveri): puoi completare comunque. Le righe senza codice verranno ignorate nello scarico."
+          : "Ci sono righe senza codice articolo (es. resi muletti/aspirapolveri): puoi completare comunque (scarico automatico DISATTIVATO).";
+      } else {
+        msg = isAgenti
+          ? "Controlla le righe rosse: per Magazzino agenti serve il prodotto finito importato E giacenza PF sufficiente."
+          : "Configura le righe rosse (distinta base) per poter completare.";
+        if (hasNoCode){
+          msg += " (In più: ci sono righe senza codice nell’XML — se è merce va corretto in Danea/Easyfatt.)";
+        }
+      }
       foot.textContent = msg;
     }
   }
@@ -3176,7 +4174,7 @@ const tpl = document.createElement("template");
         date: String(c.date || ""),
         customer: String(c.customer || ""),
         rows: Array.isArray(c.rows) ? c.rows : [],
-        warehouse: c.warehouse || cache?.warehouse || "",
+        warehouse: c.warehouse || (S.cacheMap.get(c.key)?.warehouse) || "",
         movementIds: Array.isArray(c.movementIds) ? c.movementIds : [],
         finishedMovementIds: Array.isArray(c.finishedMovementIds) ? c.finishedMovementIds : []
       };
@@ -3291,11 +4289,22 @@ const tpl = document.createElement("template");
     if (S.completedMap.has(ddt.key)) { alert("Questo DDT risulta gia' completato."); return; }
 
     const st = ddtStatus(ddt);
-    if (!st.ok) { alert("Non tutte le righe sono configurate (cerchi rossi)."); return; }
+    const ci = ddtCompletionInfo(ddt);
+    if (!ci.canComplete) { alert("Non tutte le righe sono configurate (cerchi rossi)."); return; }
     const autoOn = !!S.autoDischarge;
+    const noCodeRows = Number(ci.noCode || 0);
+    const onlyNoCode = !!ci.onlyNoCode;
     const isAgenti = isAgentWarehouseDdt(ddt);
 
-    const msgAuto = isAgenti ? `Completare e scaricare SOLO prodotti finiti?
+    
+    const extraNoCode = (onlyNoCode && noCodeRows > 0)
+      ? `
+
+⚠️ Righe senza codice articolo: ${noCodeRows}
+• Queste righe verranno ignorate nello scarico (tipico caso: resi muletti/aspirapolveri).`
+      : "";
+
+const msgAuto = isAgenti ? `Completare e scaricare SOLO prodotti finiti?
 
 • Magazzino: ${ddt.warehouse || "Magazzino agenti"}
 • Verranno creati SOLO movimenti su inventario PF
@@ -3303,13 +4312,15 @@ const tpl = document.createElement("template");
 • Se la giacenza PF non basta, il DDT NON viene completato
 
 DDT ${ddt.number} del ${fmtDateIT(ddt.date)}
-Righe: ${st.total}` : `Completare e scaricare?
+Righe: ${st.total}${extraNoCode}` : `Completare e scaricare?
 
-• Se la giacenza PF e' disponibile, scarico PRIMA i prodotti finiti
-• Se la giacenza PF non copre tutta la quantita', scarico imballaggi e materie prime (distinta base/categoria)
+• Magazzino: ${ddt.warehouse || "Magazzino produzione"}
+• Verranno scaricati SOLO imballaggi e materie prime (distinta base/categoria)
+• NON verranno scaricati prodotti finiti
+• Se manca la distinta base, il DDT NON viene completato
 
 DDT ${ddt.number} del ${fmtDateIT(ddt.date)}
-Righe: ${st.total}`;
+Righe: ${st.total}${extraNoCode}`;
 
     const msgManual = `Completare SENZA scarico automatico?
 
@@ -3317,7 +4328,7 @@ Righe: ${st.total}`;
 • NON verranno creati movimenti di inventario
 
 DDT ${ddt.number} del ${fmtDateIT(ddt.date)}
-Righe: ${st.total}`;
+Righe: ${st.total}${extraNoCode}`;
 
     const ok = confirm(autoOn ? msgAuto : msgManual);
     if (!ok) return;
@@ -3356,7 +4367,7 @@ Righe: ${st.total}`;
           warehouse: String(ddt.warehouse || '').trim(),
           allocations: [],
           finishedAllocations: [],
-          xmlHash: String(ddt.hash || ''),
+          xmlHash: String(ddt.xmlHash || ddt.hash || ''),
           movementIds: [],
           finishedMovementIds: [],
           autoDischarge: false,
@@ -3399,7 +4410,7 @@ Righe: ${st.total}`;
 
       // 2) Calcola fabbisogni
       // - Magazzino agenti: SOLO PF (serve giacenza sufficiente, altrimenti NON completabile)
-      // - Altri magazzini: prima PF (giacenza), poi componenti (distinta base) sul residuo
+      // - Altri magazzini: SOLO componenti (imballaggi + materie prime). NON scarica PF
       const req = new Map(); // componenti: codeLower -> {code,name,uom,qtyFloat}
       const reqFp = new Map(); // PF: codeLower -> {code,name,uom,qtyInt}
 
@@ -3443,7 +4454,7 @@ Disponibili: ${have.toLocaleString('it-IT')}`);
           }
         }
       } else {
-        // Prima scarico PF (se disponibili), poi componenti sul residuo
+        // Magazzino produzione / altri: SOLO componenti (imballaggi + materie prime). Nessuno scarico PF.
         for (const r of (ddt.rows || [])){
           const code = String(r.code || '').trim();
           if (!code) continue;
@@ -3458,42 +4469,32 @@ Disponibili: ${have.toLocaleString('it-IT')}`);
           const qInt = Math.round(qLine);
           if (qInt <= 0) continue;
 
-          const low = code.toLowerCase();
-          const aFp = Math.max(0, Math.round(Number(availFp.get(low) || 0)));
-          const useFp = Math.min(qInt, aFp);
-
-          if (useFp > 0){
-            const name = String(fp.name || fp.nome || r.desc || code).trim() || code;
-            const uom = String(fp.uom || r.uom || 'pz').trim() || 'pz';
-            const cur = reqFp.get(low) || { code, name, uom, qtyInt: 0 };
-            cur.qtyInt += useFp;
-            if (!cur.name) cur.name = name;
-            if (!cur.uom) cur.uom = uom;
-            reqFp.set(low, cur);
-            availFp.set(low, aFp - useFp);
-          }
-
-          const rem = qInt - useFp;
-          if (rem <= 0) continue;
-
           const comps = getFpComponents(fp);
           if (!comps || !comps.length){
             alert(`Distinta base mancante per ${code} (${fp.name || fp.nome || ''}).
 
-Giacenza PF insufficiente: rimangono ${rem} pz da scaricare come componenti.`);
+Per questo magazzino vengono scaricati SOLO componenti (imballaggi/materie prime).`);
             return;
           }
 
           for (const c of comps){
             const cCode = String(c.code || '').trim();
             if (!cCode) continue;
+            if (!__ddtIsAllowedComponentCode(cCode)) continue;
 
             const per = compQtyPerUnit(c);
             if (per == null || !Number.isFinite(per) || per <= 0) continue;
 
-            const add = per * rem;
+            const add = per * qInt;
             const clow = cCode.toLowerCase();
-            const cur = req.get(clow) || { code: cCode, name: String(c.name || c.articolo || cCode).trim(), uom: String(c.uom || '').trim(), qty: 0 };
+            let name0 = String(c.name || c.articolo || cCode).trim();
+            try{
+              if (typeof getDisplayNameForCode === "function"){
+                const dn = getDisplayNameForCode(cCode, name0 || cCode);
+                if (dn) name0 = dn;
+              }
+            }catch(_){}
+            const cur = req.get(clow) || { code: cCode, name: name0, uom: String(c.uom || '').trim(), qty: 0 };
             cur.qty += add;
             if (!cur.name) cur.name = cCode;
             if (!cur.uom) cur.uom = String(c.uom || '').trim();
@@ -3503,7 +4504,53 @@ Giacenza PF insufficiente: rimangono ${rem} pz da scaricare come componenti.`);
       }
 
       if (!req.size && !reqFp.size){
-        alert('Nessun movimento calcolabile (controlla righe e quantita).');
+        // Nessun movimento calcolabile: tipico caso DDT con sole righe senza codice (es. resi muletti/aspirapolveri)
+        // o righe con quantità non scaricabile. In questo caso completiamo comunque SENZA creare movimenti.
+        const doneId = encodeURIComponent(String(ddt.key || '').trim());
+        const doneRef = doc(H.fb.db, 'orgs', H.ORG_ID, 'daneaDdtCompleted', doneId);
+        await setDoc(doneRef, {
+          key: String(ddt.key || '').trim(),
+          number: String(ddt.number || '').trim(),
+          date: String(ddt.date || '').trim(),
+          customer: String(ddt.customer || '').trim(),
+          rows: (ddt.rows || []).map(x => ({
+            idx: (x && x.idx != null) ? x.idx : null,
+            code: x.code || '',
+            desc: x.desc || '',
+            qty: x.qty ?? null,
+            qtyRaw: x.qtyRaw || '',
+            uom: x.uom || '',
+            unitNet: (x && x.unitNet != null) ? x.unitNet : null,
+            unitGross: (x && x.unitGross != null) ? x.unitGross : null,
+            vatPerc: (x && x.vatPerc != null) ? x.vatPerc : null,
+            net: (x && x.net != null) ? x.net : null,
+            vat: (x && x.vat != null) ? x.vat : null,
+            gross: (x && x.gross != null) ? x.gross : null
+          })),
+          netTotal: (ddt && ddt.netTotal != null) ? ddt.netTotal : null,
+          vatTotal: (ddt && ddt.vatTotal != null) ? ddt.vatTotal : null,
+          grossTotal: (ddt && ddt.grossTotal != null) ? ddt.grossTotal : null,
+          currency: String(ddt.currency || 'EUR'),
+          warehouse: String(ddt.warehouse || '').trim(),
+          allocations: [],
+          finishedAllocations: [],
+          xmlHash: String(ddt.xmlHash || ddt.hash || ''),
+          movementIds: [],
+          finishedMovementIds: [],
+          autoDischarge: false,
+          createdAt: serverTimestamp(),
+          createdBy: H.fb.user.email || H.fb.user.uid
+        }, { merge: true });
+
+        try{
+          const rr = Array.isArray(ddt.rows) ? ddt.rows : [];
+          const allNoCode = !!(rr.length && rr.every(x => !String(x?.code || '').trim()));
+          window.HubInv?.showToast?.(allNoCode ? 'DDT completato (senza prodotti finiti)' : 'DDT completato (nessun movimento)');
+        }catch(_){ }
+
+        setDetailOpen(false);
+        setTab('done');
+        await fetchNow(true);
         return;
       }
 
@@ -3757,7 +4804,7 @@ Giacenza PF insufficiente: rimangono ${rem} pz da scaricare come componenti.`);
         warehouse: String(ddt.warehouse || "").trim(),
         allocations: allocations,
         finishedAllocations: finishedAllocations,
-        xmlHash: String(ddt.hash || ''),
+        xmlHash: String(ddt.xmlHash || ddt.hash || ''),
         movementIds: movementIds,
         finishedMovementIds: finishedMovementIds,
         autoDischarge: true,
@@ -3817,7 +4864,7 @@ Giacenza PF insufficiente: rimangono ${rem} pz da scaricare come componenti.`);
     green.sort((a,b) => String(a?.date||"").localeCompare(String(b?.date||"")) || String(a?.number||"").localeCompare(String(b?.number||"")));
 
     if (!silent){
-      const ok = confirm(`Scaricare automaticamente ${green.length} DDT verdi?\n\n• Scarico PF (se disponibili) + componenti (se necessari)\n• I DDT passeranno in "Completati"`);
+      const ok = confirm(`Scaricare automaticamente ${green.length} DDT verdi?\n\n• Magazzino agenti: scarico SOLO prodotti finiti (serve giacenza)\n• Altri magazzini: scarico SOLO imballaggi e materie prime (distinta base/categoria)\n• I DDT passeranno in "Completati"`);
       if (!ok) return;
     }
 
@@ -3931,7 +4978,7 @@ Giacenza PF insufficiente: rimangono ${rem} pz da scaricare come componenti.`);
 
         // 3) calcola fabbisogni
         // - Magazzino agenti: SOLO PF (serve giacenza sufficiente, altrimenti NON completabile)
-        // - Altri magazzini: prima PF (se disponibili), poi componenti sul residuo
+        // - Altri magazzini: SOLO componenti (imballaggi + materie prime). NON scarica PF
         const req = new Map();
         const reqFp = new Map();
 
@@ -3981,6 +5028,7 @@ Giacenza PF insufficiente: rimangono ${rem} pz da scaricare come componenti.`);
             availFp.set(low, have - need);
           }
         } else {
+          // Altri magazzini: SOLO componenti (imballaggi + materie prime). Non scarica PF.
           for (const r of (ddt.rows || [])){
             const code = String(r.code || "").trim();
             if (!code) continue;
@@ -3995,42 +5043,39 @@ Giacenza PF insufficiente: rimangono ${rem} pz da scaricare come componenti.`);
             const qInt = Math.round(qLine);
             if (qInt <= 0) continue;
 
-            const low = code.toLowerCase();
-            const aFp = Math.max(0, _safeInt(availFp.get(low)));
-            const useFp = Math.min(qInt, aFp);
-
-            if (useFp > 0){
-              const name = String(fp.name || fp.nome || r.desc || code).trim() || code;
-              const uom = String(fp.uom || r.uom || "pz").trim() || "pz";
-              const cur = reqFp.get(low) || { code, name, uom, qtyInt: 0 };
-              cur.qtyInt += useFp;
-              reqFp.set(low, cur);
-              availFp.set(low, aFp - useFp);
-            }
-
-            const rem = qInt - useFp;
-            if (rem <= 0) continue;
-
             const comps = getFpComponents(fp);
             if (!comps || !comps.length){
               if (!silent){
                 alert(`DDT ${ddt.number || "?"}: distinta base mancante per ${code}.
 
-Giacenza PF insufficiente: rimangono ${rem} pz.`);
+Per questo magazzino vengono scaricati SOLO componenti (imballaggi/materie prime).`);
+              } else {
+                try{ window.HubInv?.showToast?.(`DDT ${ddt.number || "?"}: distinta base mancante per ${code}`, "warn"); }catch(_){ }
               }
-              // ripristina PF allocati per questo codice (best-effort)
-              if (useFp > 0){ availFp.set(low, (availFp.get(low) || 0) + useFp); }
-              continue;
+              // evita completamenti parziali
+              try{ req.clear(); }catch(_){ }
+              try{ reqFp.clear(); }catch(_){ }
+              break;
             }
 
             for (const c of comps){
               const cCode = String(c.code || "").trim();
               if (!cCode) continue;
+              if (!__ddtIsAllowedComponentCode(cCode)) continue;
+
               const per = compQtyPerUnit(c);
               if (per == null || !Number.isFinite(per) || per <= 0) continue;
-              const add = per * rem;
+
+              const add = per * qInt;
               const clow = cCode.toLowerCase();
-              const cur = req.get(clow) || { code: cCode, name: String(c.name || c.articolo || cCode).trim(), uom: String(c.uom || "").trim(), qty: 0 };
+              let name0 = String(c.name || c.articolo || cCode).trim();
+            try{
+              if (typeof getDisplayNameForCode === "function"){
+                const dn = getDisplayNameForCode(cCode, name0 || cCode);
+                if (dn) name0 = dn;
+              }
+            }catch(_){}
+            const cur = req.get(clow) || { code: cCode, name: name0, uom: String(c.uom || "").trim(), qty: 0 };
               cur.qty += add;
               if (!cur.name) cur.name = cCode;
               if (!cur.uom) cur.uom = String(c.uom || "").trim();
@@ -4227,7 +5272,7 @@ Giacenza PF insufficiente: rimangono ${rem} pz.`);
           warehouse: String(ddt.warehouse || "").trim(),
           allocations: allocations,
           finishedAllocations: finishedAllocations,
-          xmlHash: String(ddt.hash || ""),
+          xmlHash: String(ddt.xmlHash || ddt.hash || ""),
           movementIds: movementIds,
           finishedMovementIds: finishedMovementIds,
           autoDischarge: true,
@@ -4321,7 +5366,16 @@ function bindEvents(){
           const btnOpen = e.target?.closest?.("button.jsDaneaOpen");
           const btnSend = e.target?.closest?.("button.jsDaneaSendFromList");
           const btnDelDone = e.target?.closest?.("button.jsDaneaDeleteDone");
+          const btnResync = e.target?.closest?.("button.jsDaneaResyncDone");
           const tr = e.target?.closest?.("tr.jsDaneaRow");
+
+          if (btnResync){
+            e.preventDefault();
+            e.stopPropagation();
+            const k = String(btnResync.getAttribute("data-key") || "").trim();
+            if (k) resyncCompletedByKey(k, { silent: false, force: true }).catch(()=>{});
+            return;
+          }
 
           if (btnDelDone){
             e.preventDefault(); e.stopPropagation();
@@ -4435,6 +5489,12 @@ function bindEvents(){
         if (tr){
           e.preventDefault(); e.stopPropagation();
 
+          const why = String(tr.getAttribute("data-why") || "").trim();
+          if (why === "nocode"){
+            try{ window.HubInv?.showToast?.("Riga senza codice articolo: correggi in Danea/Easyfatt", "warn"); }catch(_){ }
+            return;
+          }
+
           const fid = String(tr.getAttribute("data-fpid") || "").trim();
           const code = String(tr.getAttribute("data-code") || "").trim();
           const desc = String(tr.getAttribute("data-desc") || "").trim() || code;
@@ -4531,8 +5591,10 @@ function bindEvents(){
         });
         S.completed = arr;
         cacheCompletedMap();
+        try{ __updateAgentiFpCodes("completed"); }catch(_){ }
         render();
         try{ __autoModeKick("completed"); }catch(_){ }
+        try{ queueResyncOutOfSync("completed"); }catch(_){ }
       }, (err) => {
         console.warn("completed snapshot error", err);
       });
@@ -4581,11 +5643,14 @@ function bindEvents(){
         S.cache = arr;
         S.cacheReady = true;
         rebuildCacheMap();
+        try{ __updateAgentiFpCodes("cache"); }catch(_){ }
         render();
         try{ __autoModeKick("cache"); }catch(_){ }
+        try{ queueResyncOutOfSync("cache"); }catch(_){ }
       }, (err) => {
         console.warn("daneaDdts snapshot error", err);
         S.cacheReady = true;
+        try{ __updateAgentiFpCodes("cache_err"); }catch(_){ }
         render();
         try{ __autoModeKick("cache_err"); }catch(_){ }
       });
@@ -4699,6 +5764,7 @@ function subscribeFinishedProducts(){
         S.fpByCode = map;
         render();
         try{ __autoModeKick("fp"); }catch(_){ }
+        try{ queueResyncOutOfSync("fp"); }catch(_){ }
         // se dettaglio aperto, re-render
         if (S.selected && $("daneaDetailWrap")?.style.display !== "none"){
           renderDetail(S.selected, "verify");
@@ -6707,7 +7773,9 @@ try{
     if (dlComp){
       const opts = (S.products || []).slice(0, 2500).map(p => {
         const code = String(p.code || "").trim();
-        const name = String(p.name || p.nome || "").trim();
+        const name0 = String(p.name || p.nome || "").trim();
+        const alias = String(p.alias || p.aliasName || "").trim();
+        const name = alias || name0;
         const label = (code && name) ? (code + " — " + name) : (name || code);
         return `<option value="${esc(label)}"></option>`;
       });
@@ -6878,8 +7946,11 @@ try{
     const out = [];
     for (const it of list){
       const code = String(it?.code || "").trim();
-      const name = String(it?.name || it?.nome || "").trim();
-      if (!code && !name) continue;
+      const nameRaw = String(it?.name || it?.nome || "").trim();
+      const alias = (kind !== "member") ? String(it?.alias || it?.aliasName || "").trim() : "";
+      const nameDisp = (kind !== "member") ? (alias || nameRaw) : nameRaw;
+      const nameScore = (kind !== "member" && alias && nameRaw && alias !== nameRaw) ? (alias + " " + nameRaw) : (nameDisp || "");
+      if (!code && !nameDisp) continue;
 
       if (kind !== "member" && compCat){
         const ccat = getProdCat2(it);
@@ -6890,14 +7961,14 @@ try{
       if (wantAllInCat){
         sc = 50;
       } else {
-        sc = __fpCatScore(code, name, qKey);
+        sc = __fpCatScore(code, nameScore, qKey);
         if (sc < 0) continue;
       }
 
       const uom = String(it?.uom || it?.um || it?.unit || "").trim();
       const disabled = !!(already && code && already.has(norm(code)));
 
-      out.push({ code, name, uom, score: sc, disabled, __cat: compCat || "" });
+      out.push({ code, name: nameDisp, uom, score: sc, disabled, __cat: compCat || "" });
     }
 
     out.sort((a,b) => (b.score - a.score) || String(a.name||a.code||"").localeCompare(String(b.name||b.code||""), "it", { sensitivity:"base" }));
@@ -6964,7 +8035,13 @@ try{
         if (fp) return { code: String(fp.code || pickedCode).trim(), name: String(fp.name || fp.nome || "").trim(), uom: String(fp.uom || "").trim() };
       } else {
         const p = S.prodMap.get(norm(pickedCode)) || null;
-        if (p) return { code: String(p.code || pickedCode).trim(), name: String(p.name || p.nome || "").trim(), uom: String(p.uom || p.um || "").trim() };
+        if (p) {
+          const code = String(p.code || pickedCode).trim();
+          const alias = String(p.alias || p.aliasName || "").trim();
+          const name0 = String(p.name || p.nome || "").trim();
+          const name = alias || name0 || code;
+          return { code, name, uom: String(p.uom || p.um || "").trim() };
+        }
       }
     }
 
@@ -6975,13 +8052,26 @@ try{
     const byCode = keyNo ? src.filter(it => __fpCatKey(it?.code || "").replace(/\s+/g, "") === keyNo) : [];
     if (byCode.length === 1){
       const it = byCode[0] || {};
-      return { code: String(it.code || "").trim(), name: String(it.name || it.nome || "").trim(), uom: String(it.uom || it.um || "").trim() };
+      const code = String(it.code || "").trim();
+      const name0 = String(it.name || it.nome || "").trim();
+      const alias = (kind === "member") ? "" : String(it.alias || it.aliasName || "").trim();
+      const name = (kind === "member") ? (name0 || code) : (alias || name0 || code);
+      return { code, name, uom: String(it.uom || it.um || "").trim() };
     }
 
-    const byName = src.filter(it => __fpCatKey(it?.name || it?.nome || "") === key);
+    const byName = src.filter(it => {
+      if (kind === "member") return __fpCatKey(it?.name || it?.nome || "") === key;
+      const nm = __fpCatKey(it?.name || it?.nome || "");
+      const al = __fpCatKey(it?.alias || it?.aliasName || "");
+      return (nm && nm === key) || (al && al === key);
+    });
     if (byName.length === 1){
       const it = byName[0] || {};
-      return { code: String(it.code || "").trim(), name: String(it.name || it.nome || "").trim(), uom: String(it.uom || it.um || "").trim() };
+      const code = String(it.code || "").trim();
+      const name0 = String(it.name || it.nome || "").trim();
+      const alias = (kind === "member") ? "" : String(it.alias || it.aliasName || "").trim();
+      const name = (kind === "member") ? (name0 || code) : (alias || name0 || code);
+      return { code, name, uom: String(it.uom || it.um || "").trim() };
     }
 
     const matches = __fpCatGetMatchList(kind, s0);
@@ -7240,7 +8330,16 @@ try{
       } else {
         tb.innerHTML = bom.map((c, idx) => {
           const code = String(c?.code||"").trim();
-          const name = String(c?.name||"").trim();
+          const name0 = String(c?.name||"").trim();
+          let name = name0;
+          if (code){
+            try{
+              if (typeof getDisplayNameForCode === "function"){
+                const dn = getDisplayNameForCode(code, name0 || code);
+                if (dn) name = dn;
+              }
+            }catch(_){ }
+          }
           const qtyRaw = String(c?.qtyRaw||"").trim();
           const qty = (c?.qty != null) ? String(c.qty) : (qtyRaw || "");
           const uom = String(c?.uom||"").trim();
@@ -7303,7 +8402,16 @@ try{
       } else {
         tb.innerHTML = bom.map((c, idx) => {
           const code = String(c?.code||"").trim();
-          const name = String(c?.name||"").trim();
+          const name0 = String(c?.name||"").trim();
+          let name = name0;
+          if (code){
+            try{
+              if (typeof getDisplayNameForCode === "function"){
+                const dn = getDisplayNameForCode(code, name0 || code);
+                if (dn) name = dn;
+              }
+            }catch(_){ }
+          }
           const qtyRaw = String(c?.qtyRaw||"").trim();
           const qty = (c?.qty != null) ? String(c.qty) : (qtyRaw || "");
           const uom = String(c?.uom||"").trim();
@@ -7794,7 +8902,9 @@ Verrà aggiornata anche la chiave su tutti i prodotti finiti.`);
 
     // prodotto + U.M. target
     const p = S.prodMap.get(norm(code)) || null;
-    const name = String(p?.name || p?.nome || "").trim() || code;
+    const alias = String(p?.alias || p?.aliasName || "").trim();
+    const name0 = String(p?.name || p?.nome || "").trim();
+    const name = alias || name0 || code;
     const uomTarget = __fpCatNormUom(p?.uom || p?.um || "") || "pz";
 
     // quantità: 1) campo Q.tà, 2) fallback dal campo ricerca (pending)
@@ -9014,7 +10124,7 @@ Verrà aggiornata anche la chiave su tutti i prodotti finiti.`);
     const menuInvSummary = document.getElementById("menuInvSummary");
 
     document.getElementById("btnGoOcr")?.addEventListener("click", startHomeOcr);
-    document.getElementById("btnGoFlows")?.addEventListener("click", () => { setView("flows"); try{ renderFlowsTable(); }catch(_){ } });
+    document.getElementById("btnGoFlows")?.addEventListener("click", () => { setView("daneaDdt"); try{ window.HubDaneaDdt && window.HubDaneaDdt.refresh && window.HubDaneaDdt.refresh(); }catch(_){ } });
     document.getElementById("btnGoMovements")?.addEventListener("click", () => {
       setView("movements");
       try{ window.HubMovements && window.HubMovements.refresh && window.HubMovements.refresh(); }catch(_){ }
@@ -9412,6 +10522,7 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
     const btnCloseFpInv = document.getElementById("btnCloseFpInv");
     const fpInvSearch = document.getElementById("fpInvSearch");
     const fpInvFilterCategory = document.getElementById("fpInvFilterCategory");
+    const fpInvFilterAgenti = document.getElementById("fpInvFilterAgenti");
     const fpStockTbody = document.getElementById("fpStockTbody");
 
     const pillOcr = document.getElementById("pillOcr");
@@ -9676,7 +10787,16 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
         const low = __fpNormCode(code);
         if (!low) return;
 
-        const name = String(c.name || c.articolo || c.item || "").trim() || code;
+        const name0 = String(c.name || c.articolo || c.item || "").trim() || code;
+        let name = name0;
+        if (code){
+          try{
+            if (typeof getDisplayNameForCode === "function"){
+              const dn = getDisplayNameForCode(code, name0 || code);
+              if (dn) name = dn;
+            }
+          }catch(_){ }
+        }
         const uom = String(c.uom || c.um || "").trim();
         const pid = String(c.productId || c.pid || "").trim();
         const qtyNum = (c.qty != null && Number.isFinite(Number(c.qty))) ? Number(c.qty) : null;
@@ -10451,6 +11571,7 @@ btnLogout.addEventListener("click", async () => {
                 number: String(data.number || "").trim(),
                 date: String(data.date || "").trim(),
                 customer: String(data.customer || "").trim(),
+                warehouse: String(data.warehouse || "").trim(),
                 rows: Array.isArray(data.rows) ? data.rows : [],
                 allocations: Array.isArray(data.allocations) ? data.allocations : [],
                 createdAt: tsToIso(data.createdAt) || ""
@@ -16109,6 +17230,69 @@ for (const r of arr) {
 // ===== Inventario prodotti finiti (UI + righe) =====
 let __fpStockRowByKey = new Map();
 
+// Filtro: solo PF presenti in DDT con magazzino "agenti"
+let __fpAgentiDdtCodesSig = "";
+let __fpAgentiDdtCodesSet = new Set();
+
+function __fpIsAgentiWarehouseStr(warehouse){
+  const s = String(warehouse || "").trim().toLowerCase().replace(/\s+/g, " ").trim();
+  if (!s) return false;
+  if (s === "magazzino agenti") return true;
+  if (s.includes("magazzino") && s.includes("agenti")) return true;
+  if (s === "agenti") return true;
+  return false;
+}
+
+function __fpGetCodesFromAgentiDdt(){
+  // 1) Prefer dati live dal modulo Danea (include DDT "da verificare")
+  try{
+    const payload = (window.HubDaneaDdt && window.HubDaneaDdt.agentiFpCodes) ? window.HubDaneaDdt.agentiFpCodes : null;
+    const arr = payload && Array.isArray(payload.all) ? payload.all : [];
+    const sig = payload ? (String(payload.updatedAt || "") + "|" + String(arr.length || 0)) : "";
+
+    if (sig && sig === __fpAgentiDdtCodesSig && __fpAgentiDdtCodesSet) return __fpAgentiDdtCodesSet;
+
+    if (arr && arr.length){
+      const set = new Set();
+      for (const c of arr){
+        const low = String(c || "").trim().toLowerCase();
+        if (low) set.add(low);
+      }
+      __fpAgentiDdtCodesSig = sig;
+      __fpAgentiDdtCodesSet = set;
+      return set;
+    }
+  }catch(_){ }
+
+  // 2) Fallback: usa solo i DDT completati (compat)
+  try{
+    const list = Array.isArray(__daneaCompleted) ? __daneaCompleted : [];
+    const first = list[0] || {};
+    const last = list[list.length - 1] || {};
+    const sig = "fallback|" + String(list.length) + "|" + String(first.key || first._id || "") + "|" + String(first.date || "") + "|" + String(last.key || last._id || "") + "|" + String(last.date || "");
+    if (sig && sig === __fpAgentiDdtCodesSig && __fpAgentiDdtCodesSet) return __fpAgentiDdtCodesSet;
+
+    const set = new Set();
+    for (const d of list){
+      if (!d) continue;
+      const wh = String(d.warehouse || d.magazzino || d.site || "").trim();
+      if (!__fpIsAgentiWarehouseStr(wh)) continue;
+      const rows = Array.isArray(d.rows) ? d.rows : [];
+      for (const r of rows){
+        const c = String((r && r.code) || "").trim();
+        if (c) set.add(c.toLowerCase());
+      }
+    }
+
+    __fpAgentiDdtCodesSig = sig;
+    __fpAgentiDdtCodesSet = set;
+    return set;
+  }catch(_){
+    return new Set();
+  }
+}
+
+
 function __findFinishedProductByCode(code){
   const low = String(code || "").trim().toLowerCase();
   if (!low) return null;
@@ -16333,6 +17517,7 @@ function renderFinishedStockTable(fpRows){
   const qRaw = (fpInvSearch && fpInvSearch.value ? String(fpInvSearch.value) : "").trim();
   const q = normTextKey(qRaw);
   const catF = (fpInvFilterCategory && fpInvFilterCategory.value ? String(fpInvFilterCategory.value) : "").trim().toLowerCase();
+  const agentF = (fpInvFilterAgenti && fpInvFilterAgenti.value ? String(fpInvFilterAgenti.value) : "").trim().toLowerCase();
   let rows = Array.isArray(fpRows) ? fpRows : [];
 
   if (q) rows = rows.filter(r => {
@@ -16343,6 +17528,16 @@ function renderFinishedStockTable(fpRows){
   if (catF) {
     if (catF === "__none") rows = rows.filter(r => !String(r.categoryKey || "").trim());
     else rows = rows.filter(r => String(r.categoryKey || "").trim().toLowerCase() === catF);
+  }
+
+  // Filtro: solo articoli provenienti da DDT con magazzino agenti
+  if (agentF === "agenti"){
+    const allowed = __fpGetCodesFromAgentiDdt();
+    if (allowed && allowed.size){
+      rows = rows.filter(r => allowed.has(String(r && r.code || "").trim().toLowerCase()));
+    } else {
+      rows = [];
+    }
   }
 
   if (pillFpStock) pillFpStock.textContent = `${rows.length} righe`;
@@ -16483,7 +17678,104 @@ async function produceFinishedProductFromRow(row, qtyToProduce){
     return null;
   }
 
-  // Calcola fabbisogni componenti
+  // Alias "condivisi" (solo se lo stesso alias è usato da >=2 codici diversi)
+  const sharedAliasMap = new Map();
+  try{
+    const prodArr = Array.isArray(products) ? products : [];
+    const tmp = new Map(); // aliasKey -> { alias, codesByLow: Map(low->code) }
+
+    for (const p of prodArr){
+      if (!p) continue;
+      const code = String(
+        p.code ||
+        (typeof safeDecodeUri==="function" ? safeDecodeUri(p.id || "") : (p.id || "")) ||
+        ""
+      ).trim();
+      if (!code) continue;
+
+      const alias = String((p.alias || p.aliasName) || "").trim();
+      if (!alias) continue;
+
+      const ak = normTextKey(alias);
+      if (!ak) continue;
+
+      const rec = tmp.get(ak) || { alias: alias, codesByLow: new Map() };
+      if (!rec.alias && alias) rec.alias = alias;
+
+      const low = code.toLowerCase();
+      if (!rec.codesByLow.has(low)) rec.codesByLow.set(low, code);
+      tmp.set(ak, rec);
+    }
+
+    for (const [ak, rec] of tmp.entries()){
+      try{
+        const codes = rec && rec.codesByLow ? Array.from(rec.codesByLow.values()).filter(Boolean) : [];
+        if (codes.length >= 2) sharedAliasMap.set(ak, { alias: String(rec.alias || "").trim(), codes });
+      }catch(_){}
+    }
+  }catch(_){}
+
+  function __fpResolveSharedAliasGroup(baseCode, fallbackName, fallbackUom){
+    try{
+      const alias = String(getAliasForCode(baseCode) || "").trim();
+      const ak0 = alias ? normTextKey(alias) : "";
+      if (!ak0) return null;
+
+      const rec = sharedAliasMap.get(ak0);
+      if (!rec || !Array.isArray(rec.codes) || rec.codes.length < 2) return null;
+
+      // Filtra solo codici che "si scaricano" in produzione (materie prime / imballaggi)
+      let codes = rec.codes.slice().map(x => String(x || "").trim()).filter(Boolean);
+      codes = codes.filter(c => __fpIsProductionMacroForCode(c));
+      if (codes.length < 2) return null;
+
+      // U.M. coerente (se riesco a ricavarla)
+      const members = [];
+      const uomSet = new Set();
+      const aliasLabel = alias || String(rec.alias || "").trim() || "";
+
+      for (const c of codes){
+        const meta = __fpResolveComponentMeta(c, aliasLabel || fallbackName || c, fallbackUom);
+        const u = __normalizeUom(meta.uom || "") || __normalizeUom(fallbackUom || "") || "";
+        if (u) uomSet.add(u);
+
+        members.push({
+          code: c,
+          customer: String(meta.customer || "").trim(),
+          item: String(aliasLabel || meta.item || c).trim() || c,
+          uom: u
+        });
+      }
+
+      // U.M. diverse => non considero intercambiabili (evita errori)
+      if (uomSet.size > 1) return null;
+
+      const uom = (uomSet.size === 1)
+        ? Array.from(uomSet)[0]
+        : (__normalizeUom(fallbackUom || "") || "");
+
+      const mem2 = members.map(m => Object.assign({}, m, { uom: m.uom || uom || "" }));
+
+      // display code "A (+2)"
+      const uniqCodes = Array.from(new Set(mem2.map(m => String(m.code || "").trim()).filter(Boolean)));
+      uniqCodes.sort((a,b)=>a.localeCompare(b, "it", { sensitivity:"base" }));
+      const displayCode = (uniqCodes.length > 1) ? `${uniqCodes[0]} (+${uniqCodes.length - 1})` : (uniqCodes[0] || baseCode);
+
+      return {
+        __isAliasGroup: true,
+        __aliasKey: ak0,
+        __alias: aliasLabel,
+        __codes: uniqCodes,
+        __displayCode: displayCode,
+        __members: mem2,
+        uom
+      };
+    }catch(_){
+      return null;
+    }
+  }
+
+  // Calcola fabbisogni componenti (con gestione alias "intelligente")
   const req = new Map();
   const skippedNoQty = [];
   const skippedNotMacro = [];
@@ -16507,20 +17799,73 @@ async function produceFinishedProductFromRow(row, qtyToProduce){
 
       const add = per * qty;
       const low = cCode.toLowerCase();
-      const meta = __fpResolveComponentMeta(cCode, c.name || c.item || c.articolo || cCode, c.uom);
 
-      const cur = req.get(low) || {
-        code: cCode,
-        item: meta.item || cCode,
-        uom: meta.uom || __normalizeUom(c.uom || "") || "",
-        customer: meta.customer || "",
-        qty: 0
-      };
-      cur.qty += add;
-      if (!cur.item) cur.item = meta.item || cCode;
-      if (!cur.uom) cur.uom = meta.uom || __normalizeUom(c.uom || "") || "";
-      if (!cur.customer) cur.customer = meta.customer || "";
-      req.set(low, cur);
+      const fbName = String((c && (c.name || c.item || c.articolo)) || "").trim() || cCode;
+      const fbUom = __normalizeUom((c && c.uom) || "") || "";
+
+      // Prova a risolvere un gruppo alias "condiviso"
+      const aliasGroup = __fpResolveSharedAliasGroup(cCode, fbName || cCode, fbUom || "");
+      const isAlias = !!(aliasGroup && aliasGroup.__isAliasGroup);
+
+      const gk = isAlias ? ("alias:" + aliasGroup.__aliasKey) : ("code:" + low);
+
+      if (!req.has(gk)){
+        if (isAlias){
+          req.set(gk, {
+            __groupKey: gk,
+            __isAliasGroup: true,
+            __alias: aliasGroup.__alias || "",
+            __aliasKey: aliasGroup.__aliasKey || "",
+            __codes: aliasGroup.__codes || [],
+            __displayCode: aliasGroup.__displayCode || "",
+            __members: aliasGroup.__members || [],
+            __preferredCodes: [cCode],
+            code: cCode,
+            item: aliasGroup.__alias || getDisplayNameForCode(cCode, fbName || cCode) || fbName || cCode,
+            uom: aliasGroup.uom || fbUom || "",
+            customer: "",
+            qty: 0
+          });
+        } else {
+          const meta = __fpResolveComponentMeta(cCode, fbName || cCode, fbUom || "");
+          req.set(gk, {
+            __groupKey: gk,
+            __isAliasGroup: false,
+            __codes: [cCode],
+            __members: [{
+              code: cCode,
+              customer: String(meta.customer || "").trim(),
+              item: String(meta.item || fbName || cCode).trim() || cCode,
+              uom: String(meta.uom || fbUom || "").trim()
+            }],
+            __preferredCodes: [cCode],
+            code: cCode,
+            item: String(meta.item || fbName || cCode).trim() || cCode,
+            uom: String(meta.uom || fbUom || "").trim(),
+            customer: String(meta.customer || "").trim(),
+            qty: 0
+          });
+        }
+      }
+
+      const cur = req.get(gk);
+      cur.qty = (Number(cur.qty) || 0) + add;
+
+      // Preferenza scarico: se in BOM ho un codice che appartiene a un alias,
+      // provo prima quel codice e poi i "fratelli" (stesso alias)
+      try{
+        cur.__preferredCodes = Array.isArray(cur.__preferredCodes) ? cur.__preferredCodes : [];
+        const cLowPref = low;
+        if (cLowPref && !cur.__preferredCodes.some(x => String(x || "").trim().toLowerCase() === cLowPref)) {
+          cur.__preferredCodes.push(cCode);
+        }
+      }catch(_){}
+
+      // (best effort) se manca U.M., prova a riempire
+      if (!cur.uom){
+        if (isAlias) cur.uom = aliasGroup.uom || fbUom || "";
+        else cur.uom = fbUom || "";
+      }
     }catch(_){ }
   }
 
@@ -16534,30 +17879,65 @@ async function produceFinishedProductFromRow(row, qtyToProduce){
     return null;
   }
 
-  // Disponibilità (best effort) per warning e per split sede
+  // Disponibilità (best effort) per warning e per split sede / alias
   const avail = __fpBuildAvailByWhCustomerCode();
   const shortages = [];
+
   for (const it of needList){
-    const key = __fpProdMovKey(it.customer, it.code);
-    const aC = Math.max(0, safeInt(avail.cerea.get(key)));
-    const aK = Math.max(0, safeInt(avail.concamarise.get(key)));
-    const tot = aC + aK;
-    if (tot < it.qtyInt){
-      shortages.push({
-        code: it.code,
-        item: it.item,
-        uom: it.uom,
-        need: it.qtyInt,
-        have: tot,
-        cerea: aC,
-        concamarise: aK
-      });
+    const needInt = Math.max(0, safeInt(it.qtyInt));
+    if (!needInt) continue;
+
+    if (it.__isAliasGroup && Array.isArray(it.__members) && it.__members.length){
+      let sumC = 0;
+      let sumK = 0;
+
+      for (const m of it.__members){
+        const key = __fpProdMovKey(m.customer, m.code);
+        const aC = Math.max(0, safeInt(avail.cerea.get(key)));
+        const aK = Math.max(0, safeInt(avail.concamarise.get(key)));
+        sumC += aC;
+        sumK += aK;
+      }
+
+      const tot = sumC + sumK;
+      if (tot < needInt){
+        shortages.push({
+          code: it.__displayCode || it.code,
+          item: it.item,
+          uom: it.uom,
+          need: needInt,
+          have: tot,
+          cerea: sumC,
+          concamarise: sumK,
+          __isAliasGroup: true,
+          __codes: Array.isArray(it.__codes) ? it.__codes.slice() : []
+        });
+      }
+    } else {
+      const key = __fpProdMovKey(it.customer, it.code);
+      const aC = Math.max(0, safeInt(avail.cerea.get(key)));
+      const aK = Math.max(0, safeInt(avail.concamarise.get(key)));
+      const tot = aC + aK;
+      if (tot < needInt){
+        shortages.push({
+          code: it.code,
+          item: it.item,
+          uom: it.uom,
+          need: needInt,
+          have: tot,
+          cerea: aC,
+          concamarise: aK
+        });
+      }
     }
   }
 
   // Se mancano componenti, blocca la produzione (niente stock negativo)
   if (shortages.length){
-    const sPrev = shortages.slice(0, 8).map(s => `${s.code}: richiesti ${s.need}, disponibili ${s.have} (Cerea ${s.cerea}, Conca ${s.concamarise})`).join(" • ");
+    const sPrev = shortages.slice(0, 8).map(s => {
+      const codeInfo = s.__isAliasGroup ? `${s.code} (alias)` : s.code;
+      return `${codeInfo}: richiesti ${s.need}, disponibili ${s.have} (Cerea ${s.cerea}, Conca ${s.concamarise})`;
+    }).join(" • ");
     const moreS = (shortages.length > 8) ? ` … +${shortages.length - 8} altri` : "";
     try{ showToast("Scorte insufficienti: impossibile produrre. Riduci la quantità o carica i componenti.", "warn"); }catch(_){ }
     try{
@@ -16569,7 +17949,15 @@ async function produceFinishedProductFromRow(row, qtyToProduce){
   }
 
   // Preview (max 12 righe)
-  const prev = needList.slice(0, 12).map(it => `• ${it.code} — ${Math.round(it.qtyInt)} ${String(it.uom||"").trim()}`);
+  const prev = needList.slice(0, 12).map(it => {
+    const u = String(it.uom || "").trim();
+    if (it.__isAliasGroup){
+      const codeInfo = it.__displayCode ? ` [${it.__displayCode}]` : "";
+      const label = String(it.item || it.__alias || "").trim() || (it.__displayCode || it.code);
+      return `• ${label}${codeInfo} — ${it.qtyInt} ${u}`;
+    }
+    return `• ${it.code} — ${it.qtyInt} ${u}`;
+  });
   const more = (needList.length > 12) ? `\n… +${needList.length - 12} altri` : "";
 
   let msg = `Produrre ${qty} ${fpUom} di\n${fpCode} — ${fpName}?\n\n` +
@@ -16582,10 +17970,6 @@ async function produceFinishedProductFromRow(row, qtyToProduce){
   if (skippedNotMacro.length){
     msg += `\n\nℹ️ Componenti fuori macro (non scaricati): ${Array.from(new Set(skippedNotMacro)).slice(0,6).join(", ")}${skippedNotMacro.length>6?"…":""}`;
   }
-  if (shortages.length){
-    const sPrev = shortages.slice(0, 6).map(s => `• ${s.code}: richiesti ${s.need}, disponibili ${s.have} (Cerea ${s.cerea}, Conca ${s.concamarise})`).join("\n");
-    msg += `\n\n⚠️ Scorte insufficienti (potresti andare in negativo):\n${sPrev}${shortages.length>6?"\n…":""}`;
-  }
 
   msg += `\n\nConfermi?`;
   if (!confirm(msg)) return null;
@@ -16596,71 +17980,161 @@ async function produceFinishedProductFromRow(row, qtyToProduce){
     const date = todayYYYYMMDD();
     const batchId = `PROD-${date}-${String(Math.random()).slice(2,8)}`;
 
-    // Costruisci movimenti componenti (split su sede con più disponibilità)
+    const note = `Produzione PF: ${fpCode} x ${qty} ${fpUom} (${batchId})`;
+
+    const makePayload = (warehouse, src, qtyInt, baseItem, baseUom) => ({
+      type: "OUT",
+      customer: String(src && src.customer || "").trim(),
+      code: String(src && src.code || "").trim(),
+      item: String(baseItem || (src && src.item) || (src && src.code) || "").trim() || String(src && src.code || "").trim(),
+      uom: String(baseUom || (src && src.uom) || "").trim(),
+      qtyRaw: `${qtyInt} ${String(baseUom || (src && src.uom) || "").trim()}`.trim(),
+      qty: qtyInt,
+      date: date,
+      note: note,
+      source: "Produzione PF",
+      rawText: "",
+      warehouse: warehouse,
+      docType: "PRODUZIONE",
+      docNum: batchId,
+      docDateRaw: date,
+      createdAt: serverTimestamp(),
+      createdBy: actor
+    });
+
+    // Costruisci movimenti componenti (split su sede con più disponibilità + gestione alias)
     const movs = [];
 
+    const readAvail = (wh, key) => {
+      const m = (wh === WAREHOUSE_CONCA) ? avail.concamarise : avail.cerea;
+      return Math.max(0, safeInt(m.get(key)));
+    };
+    const writeAvail = (wh, key, val) => {
+      const m = (wh === WAREHOUSE_CONCA) ? avail.concamarise : avail.cerea;
+      m.set(key, val);
+    };
+
     for (const it of needList){
-      const cust = String(it.customer || "").trim();
-      const key = __fpProdMovKey(cust, it.code);
+      const needTot = Math.max(0, safeInt(it.qtyInt));
+      if (!needTot) continue;
 
-      let need = Math.max(0, safeInt(it.qtyInt));
-      let aC = Math.max(0, safeInt(avail.cerea.get(key)));
-      let aK = Math.max(0, safeInt(avail.concamarise.get(key)));
+      const baseItem = String(it.item || it.code || "").trim();
+      const baseUom = String(it.uom || "").trim();
 
-      const first = (aK > aC) ? WAREHOUSE_CONCA : WAREHOUSE_CEREA;
-      const second = (first === WAREHOUSE_CEREA) ? WAREHOUSE_CONCA : WAREHOUSE_CEREA;
+      // sorgenti: 1 codice (normale) oppure più codici (alias)
+      const sources = (it.__isAliasGroup && Array.isArray(it.__members) && it.__members.length)
+        ? it.__members.slice()
+        : [{
+            code: it.code,
+            customer: it.customer,
+            item: it.item,
+            uom: it.uom
+          }];
 
-      const takeFrom = (wh) => {
-        if (need <= 0) return 0;
-        const cur = (wh === WAREHOUSE_CONCA) ? aK : aC;
-        const take = Math.min(need, cur);
-        if (take <= 0) return 0;
-        need -= take;
-        if (wh === WAREHOUSE_CONCA) aK -= take;
-        else aC -= take;
-        return take;
-      };
-
-      const t1 = takeFrom(first);
-      const t2 = takeFrom(second);
-
-      // Se rimane bisogno (stock insufficiente), scarico comunque sul primo magazzino (andando in negativo)
-      let t3 = 0;
-      if (need > 0){
-        t3 = need;
-        need = 0;
-        if (first === WAREHOUSE_CONCA) aK -= t3;
-        else aC -= t3;
+      // Build src state with current availability
+      const srcState = [];
+      for (const s of sources){
+        const code = String(s && s.code || "").trim();
+        if (!code) continue;
+        const customer = String(s && s.customer || "").trim();
+        const key = __fpProdMovKey(customer, code);
+        const aC = readAvail(WAREHOUSE_CEREA, key);
+        const aK = readAvail(WAREHOUSE_CONCA, key);
+        srcState.push({
+          code,
+          customer,
+          key,
+          item: String(s && s.item || baseItem || code).trim() || code,
+          uom: String(s && s.uom || baseUom || "").trim(),
+          aC,
+          aK
+        });
       }
 
-      // aggiorna disponibilità live
-      avail.cerea.set(key, aC);
-      avail.concamarise.set(key, aK);
+      let need = needTot;
 
-      const note = `Produzione PF: ${fpCode} x ${qty} ${fpUom} (${batchId})`;
-      const makePayload = (warehouse, qtyInt) => ({
-        type: "OUT",
-        customer: cust,
-        code: it.code,
-        item: it.item || it.code,
-        uom: String(it.uom || "").trim(),
-        qtyRaw: `${it.qty} ${String(it.uom||"").trim()}`.trim(),
-        qty: qtyInt,
-        date: date,
-        note: note,
-        source: "Produzione PF",
-        rawText: "",
-        warehouse: warehouse,
-        docType: "PRODUZIONE",
-        docNum: batchId,
-        docDateRaw: date,
-        createdAt: serverTimestamp(),
-        createdBy: actor
-      });
+      // Ordine sorgenti: preferisci il codice scelto in BOM, poi i "fratelli" (alias)
+      const prefCodes = (Array.isArray(it.__preferredCodes) ? it.__preferredCodes : [])
+        .map(x => String(x || "").trim())
+        .filter(Boolean);
+      const prefLows = prefCodes.map(x => x.toLowerCase());
 
-      if (t1 > 0) movs.push(makePayload(first, t1));
-      if (t2 > 0) movs.push(makePayload(second, t2));
-      if (t3 > 0) movs.push(makePayload(first, t3));
+      const used = new Set();
+      const ordered = [];
+
+      // 1) codici preferiti (in ordine BOM)
+      for (const pl of prefLows){
+        for (const s of srcState){
+          if (!s || !s.code) continue;
+          if (String(s.code).trim().toLowerCase() !== pl) continue;
+          const kk = String(s.key || "") + "||" + String(s.code || "");
+          if (used.has(kk)) continue;
+          used.add(kk);
+          ordered.push(s);
+        }
+      }
+
+      // 2) altri codici: prima quelli con più disponibilità totale (somma sedi)
+      const rest = srcState
+        .filter(s => {
+          const kk = String(s.key || "") + "||" + String(s.code || "");
+          return !used.has(kk);
+        })
+        .sort((a,b)=> (
+          (Math.max(0, safeInt(b.aC)) + Math.max(0, safeInt(b.aK))) -
+          (Math.max(0, safeInt(a.aC)) + Math.max(0, safeInt(a.aK)))
+        ));
+      ordered.push(...rest);
+
+      const takeFromSrc = (x, wh)=>{
+        if (need <= 0) return;
+
+        const cur = (wh === WAREHOUSE_CONCA)
+          ? Math.max(0, safeInt(x.aK))
+          : Math.max(0, safeInt(x.aC));
+
+        const take = Math.min(need, cur);
+        if (take <= 0) return;
+
+        need -= take;
+
+        if (wh === WAREHOUSE_CONCA) x.aK = cur - take;
+        else x.aC = cur - take;
+
+        // aggiorna disponibilità live (per i componenti successivi)
+        writeAvail(wh, x.key, cur - take);
+
+        movs.push(makePayload(wh, x, take, baseItem, baseUom || x.uom));
+      };
+
+      // Consuma: per ogni sorgente, scarica prima dalla sede dove ne ho di più
+      for (const x of ordered){
+        if (need <= 0) break;
+
+        const aC = Math.max(0, safeInt(x.aC));
+        const aK = Math.max(0, safeInt(x.aK));
+        const firstWh = (aK > aC) ? WAREHOUSE_CONCA : WAREHOUSE_CEREA;
+        const secondWh = (firstWh === WAREHOUSE_CEREA) ? WAREHOUSE_CONCA : WAREHOUSE_CEREA;
+
+        takeFromSrc(x, firstWh);
+        takeFromSrc(x, secondWh);
+      }
+
+      // safety: se rimane bisogno, scarica comunque sul primo preferito (ma in teoria non succede perché blocchiamo gli shortage)
+      if (need > 0 && ordered.length){
+        const x = ordered[0];
+        const aC = Math.max(0, safeInt(x.aC));
+        const aK = Math.max(0, safeInt(x.aK));
+        const wh = (aK > aC) ? WAREHOUSE_CONCA : WAREHOUSE_CEREA;
+
+        movs.push(makePayload(wh, x, need, baseItem, baseUom || x.uom));
+
+        // aggiorna disponibilità live andando in negativo
+        const cur = readAvail(wh, x.key);
+        writeAvail(wh, x.key, cur - need);
+
+        need = 0;
+      }
     }
 
     // Movimento carico PF
@@ -16703,6 +18177,7 @@ async function produceFinishedProductFromRow(row, qtyToProduce){
     __fpProduceBusy = false;
   }
 }
+
 
 let __stockRowByKey = new Map();
 
@@ -20944,7 +22419,7 @@ async function handleFileSelection(fileList) {
           const p = list[i] || {};
           const code = String(p.code || "").trim();
           if (!code) continue;
-          const name = String(p.name || "").trim();
+          const name = String(p.displayName || p.name || "").trim();
           out.push(`<option value="${escapeHtmlAttr(code + (name ? " — " + name : ""))}"></option>`);
         }
         fpComponentList.innerHTML = out.join("");
@@ -20982,12 +22457,14 @@ async function handleFileSelection(fileList) {
         }
 
         const name = String(p.name || "").trim() || code;
+        const alias = String(p.alias || p.aliasName || "").trim();
+        const displayName = alias || name;
         const uom = __normalizeUom(p.uom || p.um || p.unit || "") || (typeof getUomResolvedForCode === "function" ? (getUomResolvedForCode(code) || "") : "");
-        out.push({ code, name, uom, cat });
+        out.push({ code, name, alias, displayName, uom, cat });
         seen.add(low);
       }
 
-      out.sort((a,b) => String(a.name||a.code||"").localeCompare(String(b.name||b.code||""), "it", { sensitivity:"base" }));
+      out.sort((a,b) => String(a.displayName||a.name||a.code||"").localeCompare(String(b.displayName||b.name||b.code||""), "it", { sensitivity:"base" }));
       return out;
     }
 
@@ -21070,9 +22547,12 @@ function __fpSmartFilter(list, queryRaw){
     if (!code) continue;
 
     const codeN = __fpNormSearch(code);
-    const nameN = __fpNormSearch(p.name || "");
+    const dispN = __fpNormSearch(p.displayName || p.name || "");
+    const nameRawN = __fpNormSearch(p.name || "");
+    const aliasN = __fpNormSearch(p.alias || "");
+    const nameBlob = (dispN + " " + nameRawN + " " + aliasN).trim();
     const catN  = __fpNormSearch(__fpCatLabel(p.cat) || "");
-    const blob  = (codeN + " " + nameN + " " + catN).trim();
+    const blob  = (codeN + " " + nameBlob + " " + catN).trim();
 
     let ok = true;
     for (const t of tokens){
@@ -21089,9 +22569,9 @@ function __fpSmartFilter(list, queryRaw){
       else if (codeN.startsWith(t)) score += 320;
       else if (codeN.indexOf(t) >= 0) score += 180;
 
-      if (nameN === t) score += 260;
-      else if (nameN.startsWith(t)) score += 160;
-      else if (nameN.indexOf(t) >= 0) score += 90;
+      if (dispN === t || nameRawN === t || aliasN === t) score += 260;
+      else if (dispN.startsWith(t) || nameRawN.startsWith(t) || aliasN.startsWith(t)) score += 160;
+      else if (nameBlob.indexOf(t) >= 0) score += 90;
 
       if (catN === t) score += 80;
       else if (catN.startsWith(t)) score += 55;
@@ -21101,7 +22581,7 @@ function __fpSmartFilter(list, queryRaw){
     scored.push(Object.assign({}, p, { __score: score }));
   }
 
-  scored.sort((a,b) => (b.__score - a.__score) || String(a.name||a.code||"").localeCompare(String(b.name||b.code||""), "it", { sensitivity:"base" }));
+  scored.sort((a,b) => (b.__score - a.__score) || String(a.displayName||a.name||a.code||"").localeCompare(String(b.displayName||b.name||b.code||""), "it", { sensitivity:"base" }));
   return scored;
 }
 
@@ -21123,7 +22603,7 @@ function __fpRenderBrowse(list, opts){
   fpCompBrowseWrap.style.display = "";
   fpCompBrowse.innerHTML = sliced.map(p => {
     const code = String(p.code || "").trim();
-    const name = String(p.name || "").trim();
+    const name = String(p.displayName || p.name || "").trim();
     const uom = String(p.uom || "").trim();
     const catLbl = __fpCatLabel(p.cat || "");
     const label = code + (name ? (" — " + name) : "");
@@ -21177,9 +22657,16 @@ function __fpRenderSmartBrowse(){
       const p = (typeof findProductByCode === "function") ? findProductByCode(code) : null;
       if (p) {
         const c = String(p.code || (typeof safeDecodeUri==="function" ? safeDecodeUri(p.id || "") : (p.id||"")) || "").trim() || code;
+        let nm = String(p.name || "").trim() || c;
+        try{
+          if (typeof getDisplayNameForCode === "function"){
+            const dn = getDisplayNameForCode(c, nm || c);
+            if (dn) nm = dn;
+          }
+        }catch(_){}
         return {
           code: c,
-          name: String(p.name || "").trim() || c,
+          name: nm || c,
           uom: __normalizeUom(p.uom || p.um || p.unit || "") || getUomResolvedForCode(c) || ""
         };
       }
@@ -21188,11 +22675,22 @@ function __fpRenderSmartBrowse(){
       try{
         const key = normTextKey(s0);
         if (key) {
-          const matches = (Array.isArray(products) ? products : []).filter(pp => normTextKey(pp && (pp.name || "")) === key);
+          const matches = (Array.isArray(products) ? products : []).filter(pp => {
+            const nm = normTextKey(pp && (pp.name || ""));
+            const al = normTextKey(pp && (pp.alias || pp.aliasName || ""));
+            return (nm && nm === key) || (al && al === key);
+          });
           if (matches.length === 1) {
             const pp = matches[0];
             const c = String(pp.code || (typeof safeDecodeUri==="function" ? safeDecodeUri(pp.id || "") : (pp.id||"")) || "").trim();
-            return { code: c, name: String(pp.name || "").trim() || c, uom: __normalizeUom(pp.uom || "") || getUomResolvedForCode(c) || "" };
+            let nm = String(pp.name || "").trim() || c;
+            try{
+              if (typeof getDisplayNameForCode === "function"){
+                const dn = getDisplayNameForCode(c, nm || c);
+                if (dn) nm = dn;
+              }
+            }catch(_){}
+            return { code: c, name: nm || c, uom: __normalizeUom(pp.uom || "") || getUomResolvedForCode(c) || "" };
           }
         }
       }catch(_){}
@@ -21206,7 +22704,16 @@ function __fpRenderSmartBrowse(){
   // normalizza array + impone U.M. dall'anagrafica prodotto (quando possibile)
   base.components = (base.components || []).map(c => {
     const code = String(c.code || c.codice || "").trim();
-    const name = String(c.name || c.articolo || c.item || "").trim();
+    const name0 = String(c.name || c.articolo || c.item || "").trim();
+    let name = name0;
+    if (code){
+      try{
+        if (typeof getDisplayNameForCode === "function"){
+          const dn = getDisplayNameForCode(code, name0 || code);
+          if (dn) name = dn;
+        }
+      }catch(_){ }
+    }
 
     let uom = String(c.uom || c.um || "").trim();
     if (!uom && code){
@@ -21247,7 +22754,16 @@ function __fpRenderSmartBrowse(){
 
       fpCompTbody.innerHTML = comps.map((c, i) => {
         const code = String(c.code || "").trim();
-        const name = String(c.name || "").trim();
+        const name0 = String(c.name || "").trim();
+        let name = name0;
+        if (code){
+          try{
+            if (typeof getDisplayNameForCode === "function"){
+              const dn = getDisplayNameForCode(code, name0 || code);
+              if (dn) name = dn;
+            }
+          }catch(_){ }
+        }
         const qty = __fpFmtQty(c);
         const uom = String(c.uom || "").trim();
         return `
@@ -22548,6 +24064,19 @@ searchStock.addEventListener("input", () => renderAll());
 
     if (fpInvSearch) fpInvSearch.addEventListener("input", () => renderAll());
     if (fpInvFilterCategory) fpInvFilterCategory.addEventListener("change", () => renderAll());
+    if (fpInvFilterAgenti) fpInvFilterAgenti.addEventListener("change", () => renderAll());
+    // Aggiorna subito il filtro PF "Solo magazzino agenti" quando arrivano nuovi DDT (anche "da verificare")
+    try{
+      window.addEventListener("HubDaneaAgentiFpCodesUpdated", () => {
+        try{
+          const v = document.getElementById("viewFinishedInventory");
+          const isActive = !!(v && v.classList && v.classList.contains("active"));
+          const agentOn = fpInvFilterAgenti && String(fpInvFilterAgenti.value || "").trim().toLowerCase() === "agenti";
+          if (isActive && agentOn) renderAll();
+        }catch(_){ }
+      });
+    }catch(_){ }
+
 
     // Click su riga stock: dettaglio + categoria
     if (stockTbody) {
