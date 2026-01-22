@@ -2215,6 +2215,10 @@ const tpl = document.createElement("template");
     busy: false,
     hub: null,
     pendingParsed: null,  // buffer RAM (solo finché Firestore non è pronto)
+    resyncQueue: new Map(),
+    resyncInFlight: new Set(),
+    resyncFail: new Map(),
+    resyncTimer: null,
     unsub: { completed:null, finished:null, cache:null, fpcats:null }
   };
 
@@ -2933,6 +2937,795 @@ const tpl = document.createElement("template");
     }
   }
 
+
+  // ===== COMPLETED DDT RESYNC (se cambia alla fonte) =====
+  function __ddtRowsSignature(rows){
+    const rr = Array.isArray(rows) ? rows : [];
+    return rr.map(x => [
+      String(x?.code || "").trim(),
+      String(x?.desc || "").trim(),
+      (x && x.qty != null) ? x.qty : null,
+      String(x?.uom || "").trim(),
+      (x && x.unitNet != null) ? x.unitNet : null,
+      (x && x.unitGross != null) ? x.unitGross : null,
+      (x && x.vatPerc != null) ? x.vatPerc : null,
+      (x && x.net != null) ? x.net : null,
+      (x && x.vat != null) ? x.vat : null,
+      (x && x.gross != null) ? x.gross : null
+    ]);
+  }
+
+  function ddtXmlHashOf(obj){
+    const h = String(obj?.xmlHash || obj?.hash || "").trim();
+    if (h) return h;
+    try{
+      const wh = String(obj?.warehouse || "").trim();
+      const sig = __ddtRowsSignature(obj?.rows);
+      return hashStr(JSON.stringify([wh, sig]));
+    }catch(_){
+      return "";
+    }
+  }
+
+  function isCompletedOutOfSync(doneRec){
+    try{
+      const k = String(doneRec?.key || doneRec?._id || "").trim();
+      if (!k) return false;
+      const cacheRec = (S.cacheMap instanceof Map) ? (S.cacheMap.get(k) || null) : null;
+      if (!cacheRec) return false;
+      const hDone = ddtXmlHashOf(doneRec);
+      const hCache = ddtXmlHashOf(cacheRec);
+      return !!(hDone && hCache && hDone !== hCache);
+    }catch(_){ return false; }
+  }
+
+  function __toastDedup(token, msg, kind, ttlMs){
+    ttlMs = Number(ttlMs);
+    if (!Number.isFinite(ttlMs) || ttlMs <= 0) ttlMs = 60000;
+    try{
+      if (!S._toastAt) S._toastAt = new Map();
+      const now = Date.now();
+      const last = Number(S._toastAt.get(token) || 0);
+      if (now - last < ttlMs) return;
+      S._toastAt.set(token, now);
+      window.HubInv?.showToast?.(msg, kind);
+    }catch(_){ }
+  }
+
+  function __scheduleResyncQueue(delayMs){
+    delayMs = Number(delayMs);
+    if (!Number.isFinite(delayMs) || delayMs < 0) delayMs = 800;
+    delayMs = Math.max(250, Math.min(30000, delayMs));
+    try{ if (S.resyncTimer) clearTimeout(S.resyncTimer); }catch(_){ }
+    S.resyncTimer = setTimeout(() => {
+      S.resyncTimer = null;
+      runResyncQueue().catch(()=>{});
+    }, delayMs);
+  }
+
+  function queueResyncOutOfSync(reason){
+    try{
+      if (!S.cacheReady) return;
+      cacheCompletedMap();
+      const now = Date.now();
+
+      for (const c of (S.completed || [])){
+        const k = String(c?.key || c?._id || "").trim();
+        if (!k) continue;
+
+        const cacheRec = (S.cacheMap instanceof Map) ? (S.cacheMap.get(k) || null) : null;
+        if (!cacheRec) continue;
+
+        const hDone = ddtXmlHashOf(c);
+        const hCache = ddtXmlHashOf(cacheRec);
+        if (!hDone || !hCache || hDone === hCache) continue;
+
+        // evita spam se fallito recentemente sullo stesso hash
+        const fail = (S.resyncFail && typeof S.resyncFail.get === "function") ? (S.resyncFail.get(k) || null) : null;
+        if (fail && fail.hash === hCache && (now - (fail.at || 0)) < 10*60*1000) continue;
+
+        if (S.resyncInFlight && S.resyncInFlight.has(k)) continue;
+        const queued = (S.resyncQueue && typeof S.resyncQueue.get === "function") ? (S.resyncQueue.get(k) || null) : null;
+        if (queued && queued.hash === hCache) continue;
+
+        if (S.resyncQueue && typeof S.resyncQueue.set === "function"){
+          S.resyncQueue.set(k, { key: k, hash: hCache, reason: String(reason||"") || "auto", queuedAt: now });
+        }
+      }
+
+      if (S.resyncQueue && S.resyncQueue.size){
+        __scheduleResyncQueue(900);
+      }
+    }catch(_){ }
+  }
+
+  async function runResyncQueue(){
+    try{
+      if (!S.resyncQueue || !S.resyncQueue.size) return;
+      if (S.busy) { __scheduleResyncQueue(1500); return; }
+
+      const H = S.hub || getHub();
+      if (!H || !H.fb || !H.fb.db || !H.FS){
+        __scheduleResyncQueue(2000);
+        return;
+      }
+
+      if (!H.fb.user){
+        __toastDedup("danea_resync_login", "DDT aggiornato alla fonte: accedi per riallineare lo scarico", "warn", 60000);
+        __scheduleResyncQueue(8000);
+        return;
+      }
+
+      const it = S.resyncQueue.entries().next().value;
+      if (!it) return;
+      const key = it[0];
+      const info = it[1] || {};
+      S.resyncQueue.delete(key);
+
+      const ok = await resyncCompletedByKey(key, { silent: true, expectedHash: info.hash, reason: info.reason || "auto" });
+      if (!ok){
+        try{
+          if (S.resyncFail && typeof S.resyncFail.set === "function"){
+            S.resyncFail.set(String(key), { hash: String(info.hash || ""), at: Date.now(), msg: "failed" });
+          }
+        }catch(_){ }
+      }
+
+      if (S.resyncQueue.size){
+        __scheduleResyncQueue(700);
+      }
+    }catch(e){
+      try{ console.warn("runResyncQueue failed", e); }catch(_){ }
+      __scheduleResyncQueue(3000);
+    }
+  }
+
+  async function resyncCompletedByKey(key, opts){
+    opts = (opts && typeof opts === "object") ? opts : {};
+    const k = String(key || "").trim();
+    if (!k) return false;
+
+    // evita doppie esecuzioni
+    if (S.resyncInFlight && S.resyncInFlight.has(k)) return false;
+    if (S.busy) return false;
+
+    const H = S.hub || getHub();
+    if (!H || !H.fb || !H.fb.db || !H.FS) return false;
+
+    cacheCompletedMap();
+    const doneRec = (S.completedMap && typeof S.completedMap.get === "function") ? (S.completedMap.get(k) || null) : null;
+    const cacheRec = (S.cacheMap instanceof Map) ? (S.cacheMap.get(k) || null) : null;
+    if (!doneRec || !cacheRec) return false;
+
+    const hDone = ddtXmlHashOf(doneRec);
+    const hCache = ddtXmlHashOf(cacheRec);
+
+    const expected = String(opts.expectedHash || "").trim();
+    if (expected && hCache && expected !== hCache){
+      // è arrivata una nuova versione mentre era in coda
+      try{
+        if (S.resyncQueue && typeof S.resyncQueue.set === "function"){
+          S.resyncQueue.set(k, { key: k, hash: hCache, reason: "newer", queuedAt: Date.now() });
+        }
+      }catch(_){ }
+      __scheduleResyncQueue(900);
+      return false;
+    }
+
+    if (hDone && hCache && hDone === hCache && !opts.force) return true;
+
+    const silent = !!opts.silent;
+    if (!silent){
+      const ok = confirm(`Il DDT ${doneRec.number || "—"} del ${fmtDateIT(doneRec.date || "")} è cambiato alla fonte.
+
+Riallineare lo scarico aggiornando i movimenti?`);
+      if (!ok) return false;
+    }
+
+    if (!H.fb.user){
+      __toastDedup(`danea_resync_login_${k}`, "Accedi con Google per riallineare lo scarico", "warn", 60000);
+      return false;
+    }
+
+    const actor = (H.fb.user && (H.fb.user.email || H.fb.user.uid)) || "auto";
+
+    // Se manca la configurazione prodotti finiti, non possiamo ricalcolare
+    try{
+      if (!(S.fpByCode instanceof Map) || S.fpByCode.size === 0){
+        __toastDedup(`danea_resync_fp_${k}`, "Riallineamento DDT: prodotti finiti non caricati", "warn", 120000);
+        return false;
+      }
+    }catch(_){ }
+
+    S.resyncInFlight && S.resyncInFlight.add(k);
+    S.busy = true;
+
+    let success = false;
+    try{
+      const { addDoc, setDoc, doc, collection, serverTimestamp, getDocs, query, orderBy, deleteDoc, getDoc } = H.FS;
+
+      const newXmlHash = hCache || String(cacheRec.xmlHash || "") || "";
+      const doneId = encodeURIComponent(String(k));
+      const doneRef = doc(H.fb.db, "orgs", H.ORG_ID, "daneaDdtCompleted", doneId);
+
+      // Se il DDT era stato completato SENZA scarico: aggiorno solo i dati (nessun movimento)
+      if (!doneRec.autoDischarge){
+        await setDoc(doneRef, {
+          key: String(cacheRec.key || k).trim(),
+          number: String(cacheRec.number || doneRec.number || "").trim(),
+          date: String(cacheRec.date || doneRec.date || "").trim(),
+          customer: String(cacheRec.customer || doneRec.customer || "").trim(),
+          warehouse: String(cacheRec.warehouse || doneRec.warehouse || "").trim(),
+          rows: (cacheRec.rows || []).map(x => ({
+            idx: (x && x.idx != null) ? x.idx : null,
+            code: x.code || "",
+            desc: x.desc || "",
+            qty: x.qty ?? null,
+            qtyRaw: x.qtyRaw || "",
+            uom: x.uom || "",
+            unitNet: (x && x.unitNet != null) ? x.unitNet : null,
+            unitGross: (x && x.unitGross != null) ? x.unitGross : null,
+            vatPerc: (x && x.vatPerc != null) ? x.vatPerc : null,
+            net: (x && x.net != null) ? x.net : null,
+            vat: (x && x.vat != null) ? x.vat : null,
+            gross: (x && x.gross != null) ? x.gross : null
+          })),
+          netTotal: (cacheRec && cacheRec.netTotal != null) ? cacheRec.netTotal : null,
+          vatTotal: (cacheRec && cacheRec.vatTotal != null) ? cacheRec.vatTotal : null,
+          grossTotal: (cacheRec && cacheRec.grossTotal != null) ? cacheRec.grossTotal : null,
+          currency: String(cacheRec.currency || "EUR"),
+          xmlHash: newXmlHash,
+          updatedAt: serverTimestamp(),
+          updatedBy: actor,
+          autoDischarge: false
+        }, { merge: true });
+
+        __toastDedup(`danea_resync_ok_${k}_${newXmlHash}`, `DDT ${cacheRec.number || doneRec.number || ""}: aggiornato`, "ok", 30000);
+        success = true;
+        return true;
+      }
+
+      // ===== riallineamento con scarico =====
+      const oldIds = Array.isArray(doneRec.movementIds) ? doneRec.movementIds : [];
+      const oldFpIds = Array.isArray(doneRec.finishedMovementIds) ? doneRec.finishedMovementIds : [];
+      const oldIdSet = new Set(oldIds.map(x => String(x || "").trim()).filter(Boolean));
+      const oldFpIdSet = new Set(oldFpIds.map(x => String(x || "").trim()).filter(Boolean));
+
+      // carica movimenti PF (serve per calcolare la giacenza PF)
+      let fpMovs = (H.state && Array.isArray(H.state.finishedMovements)) ? H.state.finishedMovements : [];
+      if (!fpMovs.length){
+        try{
+          const col = collection(H.fb.db, "orgs", H.ORG_ID, "finishedInventoryMovements");
+          const q = query(col, orderBy("createdAt"));
+          const snap = await getDocs(q);
+          fpMovs = snap.docs.map(d => {
+            const data = d.data() || {};
+            return { id: d.id, type: data.type || "IN", code: data.code || "", qty: data.qty };
+          });
+          if (H.state) H.state.finishedMovements = fpMovs;
+        }catch(e){ try{ console.warn("fetch finishedInventoryMovements failed", e); }catch(_){ } }
+      }
+
+      const availFp = new Map();
+      for (const mv of (fpMovs || [])){
+        const id = String(mv && mv.id || "").trim();
+        if (id && oldFpIdSet.has(id)) continue; // escludi vecchi movimenti del DDT
+        const code = String(mv && mv.code || "").trim();
+        if (!code) continue;
+        const low = code.toLowerCase();
+        const q = (mv && mv.qty != null && Number.isFinite(Number(mv.qty))) ? Math.round(Number(mv.qty)) : 0;
+        if (!q) continue;
+        const delta = (String(mv.type || "").toUpperCase() === "OUT") ? -q : q;
+        availFp.set(low, (availFp.get(low) || 0) + delta);
+      }
+
+      const ddt = cacheRec; // alias
+      const isAgenti = isAgentWarehouseDdt(ddt);
+
+      // 1) calcola fabbisogni
+      const req = new Map();
+      const reqFp = new Map();
+
+      if (isAgenti){
+        // Somma per codice (gestisce piu' righe con lo stesso PF)
+        for (const r of (ddt.rows || [])){
+          const code = String(r.code || "").trim();
+          if (!code) continue;
+
+          const qtyLine = (r.qty != null && Number.isFinite(Number(r.qty))) ? Number(r.qty) : parseFraction(r.qtyRaw);
+          const qLine = (qtyLine != null && Number.isFinite(qtyLine)) ? qtyLine : 0;
+          if (qLine <= 0) continue;
+
+          const fp = getFpForRow(r);
+          if (!fp) {
+            __toastDedup(`danea_resync_missingfp_${k}_${code}`, `Riallineamento: manca prodotto finito ${code}`, "warn", 60000);
+            return false;
+          }
+
+          const qInt = Math.round(qLine);
+          if (qInt <= 0) continue;
+
+          const low = code.toLowerCase();
+          const name = String(fp.name || fp.nome || r.desc || code).trim() || code;
+          const uom = String(fp.uom || r.uom || "pz").trim() || "pz";
+          const cur = reqFp.get(low) || { code, name, uom, qtyInt: 0 };
+          cur.qtyInt += qInt;
+          if (!cur.name) cur.name = name;
+          if (!cur.uom) cur.uom = uom;
+          reqFp.set(low, cur);
+        }
+
+        // Validazione giacenza PF (non si puo' andare in negativo su Magazzino agenti)
+        for (const it of Array.from(reqFp.values())){
+          const low = String(it.code || "").trim().toLowerCase();
+          const need = Math.max(0, Math.round(Number(it.qtyInt) || 0));
+          const have = Math.max(0, Math.round(Number(availFp.get(low) || 0)));
+          if (need > have){
+            __toastDedup(`danea_resync_stockfp_${k}_${low}`, `Riallineamento: giacenza PF insufficiente per ${it.code}`, "err", 60000);
+            return false;
+          }
+        }
+      } else {
+        // Prima scarico PF (se disponibili), poi componenti sul residuo
+        for (const r of (ddt.rows || [])){
+          const code = String(r.code || "").trim();
+          if (!code) continue;
+
+          const qtyLine = (r.qty != null && Number.isFinite(Number(r.qty))) ? Number(r.qty) : parseFraction(r.qtyRaw);
+          const qLine = (qtyLine != null && Number.isFinite(qtyLine)) ? qtyLine : 0;
+          if (qLine <= 0) continue;
+
+          const fp = getFpForRow(r);
+          if (!fp) {
+            __toastDedup(`danea_resync_missingfp_${k}_${code}`, `Riallineamento: manca prodotto finito ${code}`, "warn", 60000);
+            return false;
+          }
+
+          const qInt = Math.round(qLine);
+          if (qInt <= 0) continue;
+
+          const low = code.toLowerCase();
+          const aFp = Math.max(0, Math.round(Number(availFp.get(low) || 0)));
+          const useFp = Math.min(qInt, aFp);
+
+          if (useFp > 0){
+            const name = String(fp.name || fp.nome || r.desc || code).trim() || code;
+            const uom = String(fp.uom || r.uom || "pz").trim() || "pz";
+            const cur = reqFp.get(low) || { code, name, uom, qtyInt: 0 };
+            cur.qtyInt += useFp;
+            if (!cur.name) cur.name = name;
+            if (!cur.uom) cur.uom = uom;
+            reqFp.set(low, cur);
+            availFp.set(low, aFp - useFp);
+          }
+
+          const rem = qInt - useFp;
+          if (rem <= 0) continue;
+
+          const comps = getFpComponents(fp);
+          if (!comps || !comps.length){
+            __toastDedup(`danea_resync_bom_${k}_${code}`, `Riallineamento: distinta base mancante per ${code}`, "err", 60000);
+            return false;
+          }
+
+          for (const c of comps){
+            const cCode = String(c.code || "").trim();
+            if (!cCode) continue;
+
+            const per = compQtyPerUnit(c);
+            if (per == null || !Number.isFinite(per) || per <= 0) continue;
+
+            const add = per * rem;
+            const clow = cCode.toLowerCase();
+            const cur = req.get(clow) || { code: cCode, name: String(c.name || c.articolo || cCode).trim(), uom: String(c.uom || "").trim(), qty: 0 };
+            cur.qty += add;
+            if (!cur.name) cur.name = cCode;
+            if (!cur.uom) cur.uom = String(c.uom || "").trim();
+            req.set(clow, cur);
+          }
+        }
+      }
+
+      if (!req.size && !reqFp.size){
+        __toastDedup(`danea_resync_nomov_${k}_${newXmlHash}`, "Riallineamento: nessun movimento calcolabile", "warn", 60000);
+        return false;
+      }
+
+      // 2) Carica inventario componenti
+      let movs = (H.state && Array.isArray(H.state.movements)) ? H.state.movements : [];
+      if (!movs.length){
+        try{
+          const col = collection(H.fb.db, "orgs", H.ORG_ID, "inventoryMovements");
+          const q = query(col, orderBy("createdAt"));
+          const snap = await getDocs(q);
+          movs = snap.docs.map(d => {
+            const data = d.data() || {};
+            return {
+              id: d.id,
+              type: data.type || "IN",
+              code: data.code || "",
+              qty: data.qty,
+              warehouse: data.warehouse || "",
+              customer: data.customer || "",
+              daneaDdtKey: String(data.daneaDdtKey || data.daneaDdtkey || "").trim()
+            };
+          });
+          if (H.state) H.state.movements = movs;
+        }catch(e){ try{ console.warn("fetch inventoryMovements failed", e); }catch(_){ } }
+      }
+
+      const _normWh = (w) => {
+        try{ if (H && typeof H.normalizeWarehouse === "function") return H.normalizeWarehouse(w); }catch(_){ }
+        const ss = String(w || "").trim().toLowerCase();
+        if (ss.includes("conca") || ss.includes("concamarise")) return "concamarise";
+        return "cerea";
+      };
+      const _safeInt = (v) => {
+        const n = parseInt(String(v||"").replace(/[^0-9\-]/g,""), 10);
+        return Number.isFinite(n) ? n : 0;
+      };
+
+      const avail = { cerea: new Map(), concamarise: new Map() };
+      const availCust = { cerea: new Map(), concamarise: new Map() };
+      const anyCustomerByCode = new Map();
+
+      for (const mv of (movs || [])){
+        const id = String(mv && mv.id || "").trim();
+        if (id && oldIdSet.has(id)) continue;
+
+        const mvKey = String(mv && (mv.daneaDdtKey || mv.daneaDdtkey) || "").trim();
+        if (mvKey && mvKey === k) continue;
+
+        const code = String(mv && mv.code || "").trim();
+        if (!code) continue;
+        const low = code.toLowerCase();
+        const w = _normWh(mv.warehouse || mv.site || mv.magazzino || mv.location || "");
+        const q = _safeInt(mv.qty);
+        if (!q) continue;
+        const delta = (String(mv.type || "").toUpperCase() === "OUT") ? -q : q;
+        const m = (w === "concamarise") ? avail.concamarise : avail.cerea;
+        m.set(low, (m.get(low) || 0) + delta);
+
+        const custRaw = String((mv && (mv.customer || mv.supplierName || mv.supplier)) || "").trim();
+        if (custRaw) anyCustomerByCode.set(low, custRaw);
+        const mCust = (w === "concamarise") ? availCust.concamarise : availCust.cerea;
+        let byCust = mCust.get(low);
+        if (!byCust){ byCust = new Map(); mCust.set(low, byCust); }
+        const ck = custRaw.toLowerCase();
+        const rec = byCust.get(ck) || { customer: custRaw, qty: 0 };
+        rec.qty = _safeInt(rec.qty) + delta;
+        if (!rec.customer && custRaw) rec.customer = custRaw;
+        byCust.set(ck, rec);
+      }
+
+      const needList = Array.from(req.values()).map(it => {
+        const qtyInt = Math.round(Number(it.qty) || 0);
+        return Object.assign({}, it, { qtyInt });
+      }).filter(x => x.qtyInt);
+
+      // Validazione scorte componenti
+      for (const it of needList){
+        const low = String(it.code || "").trim().toLowerCase();
+        const aC = Math.max(0, _safeInt(avail.cerea.get(low)));
+        const aK = Math.max(0, _safeInt(avail.concamarise.get(low)));
+        const tot = aC + aK;
+        if (tot < it.qtyInt){
+          __toastDedup(`danea_resync_stock_${k}_${low}`, `Riallineamento: scorta insufficiente per ${it.code}`, "err", 60000);
+          return false;
+        }
+      }
+
+      // 3) costruisci payload movimenti (senza scrivere ancora)
+      const compPayloads = [];
+      const allocations = [];
+      const noteBaseComp = `Scarico componenti per DDT ${ddt.number} del ${fmtDateIT(ddt.date)} (DaneaXML)`;
+
+      for (const it of needList){
+        const low = String(it.code || "").trim().toLowerCase();
+        let need = it.qtyInt;
+
+        let aC = Math.max(0, _safeInt(avail.cerea.get(low)));
+        let aK = Math.max(0, _safeInt(avail.concamarise.get(low)));
+
+        const first = (aK > aC) ? "concamarise" : "cerea";
+        const second = (first === "cerea") ? "concamarise" : "cerea";
+
+        const takeFrom = (wh) => {
+          if (need <= 0) return 0;
+          const cur = (wh === "concamarise") ? aK : aC;
+          const take = Math.min(need, cur);
+          if (take <= 0) return 0;
+          need -= take;
+          if (wh === "concamarise") aK -= take;
+          else aC -= take;
+          return take;
+        };
+
+        const t1 = takeFrom(first);
+        const t2 = takeFrom(second);
+
+        avail.cerea.set(low, aC);
+        avail.concamarise.set(low, aK);
+
+        allocations.push({ code: it.code, name: it.name || it.code, uom: String(it.uom||"").trim(), qty: it.qtyInt, byWarehouse: { cerea: (first==="cerea"?t1:t2) || 0, concamarise: (first==="concamarise"?t1:t2) || 0 } });
+
+        const pickCustomerForWarehouse = (wh) => {
+          try{
+            const mm = (wh === "concamarise") ? availCust.concamarise : availCust.cerea;
+            const byCust = mm.get(low);
+            if (byCust && byCust.size){
+              let bestKey = null;
+              let bestQty = 0;
+              let bestName = "";
+              for (const [ck, rec] of byCust.entries()){
+                const q0 = _safeInt(rec && rec.qty);
+                if (q0 > bestQty){
+                  bestQty = q0;
+                  bestKey = ck;
+                  bestName = String(rec && rec.customer || "").trim();
+                }
+              }
+              if (bestKey != null && bestQty > 0) return { ck: bestKey, customer: bestName };
+            }
+          }catch(_){ }
+          const fb = String(anyCustomerByCode.get(low) || "").trim();
+          return { ck: fb.toLowerCase(), customer: fb };
+        };
+
+        const cust1 = (t1 > 0) ? pickCustomerForWarehouse(first) : null;
+        const cust2 = (t2 > 0) ? pickCustomerForWarehouse(second) : null;
+
+        const decAvailCust = (wh, sel, qtyOut) => {
+          if (!sel || !qtyOut) return;
+          const mm = (wh === "concamarise") ? availCust.concamarise : availCust.cerea;
+          let byCust = mm.get(low);
+          if (!byCust){ byCust = new Map(); mm.set(low, byCust); }
+          const ck = (sel.ck != null) ? String(sel.ck) : String(sel.customer || "").trim().toLowerCase();
+          const rec0 = byCust.get(ck) || { customer: sel.customer || "", qty: 0 };
+          rec0.qty = _safeInt(rec0.qty) - _safeInt(qtyOut);
+          if (!rec0.customer && sel.customer) rec0.customer = sel.customer;
+          byCust.set(ck, rec0);
+        };
+        decAvailCust(first, cust1, t1);
+        decAvailCust(second, cust2, t2);
+
+        const makePayload = (warehouse, qtyInt, customerName) => ({
+          type: "OUT",
+          customer: String(customerName || "").trim(),
+          code: it.code,
+          item: it.name || it.code,
+          uom: String(it.uom || "").trim(),
+          qtyRaw: `${it.qty} ${String(it.uom||"").trim()}`.trim(),
+          qty: qtyInt,
+          date: String(ddt.date || "").trim(),
+          note: noteBaseComp,
+          source: "DaneaXML",
+          rawText: "",
+          warehouse: warehouse,
+          docType: "DDT",
+          docNum: String(ddt.number || "").trim(),
+          docDateRaw: String(ddt.date || "").trim(),
+          daneaDdtKey: String(ddt.key || "").trim(),
+          createdAt: serverTimestamp(),
+          createdBy: actor
+        });
+
+        if (t1 > 0) compPayloads.push({ payload: makePayload(first, t1, (cust1 && cust1.customer) || "") });
+        if (t2 > 0) compPayloads.push({ payload: makePayload(second, t2, (cust2 && cust2.customer) || "") });
+      }
+
+      const fpPayloads = [];
+      const finishedAllocations = [];
+      const noteBaseFp = `Scarico prodotti finiti per DDT ${ddt.number} del ${fmtDateIT(ddt.date)} (DaneaXML)`;
+      for (const it of Array.from(reqFp.values())){
+        if (!it || !it.qtyInt) continue;
+        finishedAllocations.push({ code: it.code, name: it.name || it.code, uom: String(it.uom||"").trim(), qty: it.qtyInt, warehouse: "prodotti_finiti" });
+        fpPayloads.push({
+          payload: {
+            type: "OUT",
+            code: it.code,
+            item: it.name || it.code,
+            uom: String(it.uom || "").trim(),
+            qtyRaw: `${it.qtyInt} ${String(it.uom||"").trim()}`.trim(),
+            qty: it.qtyInt,
+            date: String(ddt.date || "").trim(),
+            note: noteBaseFp,
+            source: "DaneaXML",
+            warehouse: "prodotti_finiti",
+            docType: "DDT",
+            docNum: String(ddt.number || "").trim(),
+            docDateRaw: String(ddt.date || "").trim(),
+            daneaDdtKey: String(ddt.key || "").trim(),
+            createdAt: serverTimestamp(),
+            createdBy: actor
+          }
+        });
+      }
+
+      // 4) applica sostituzione movimenti: delete vecchi + create nuovi + update completato
+      const hasBatch = (typeof H.FS.writeBatch === "function");
+      const movementIds = [];
+      const finishedMovementIds = [];
+
+      if (hasBatch){
+        const batch = H.FS.writeBatch(H.fb.db);
+
+        // delete vecchi
+        for (const id of oldIdSet){
+          batch.delete(doc(H.fb.db, "orgs", H.ORG_ID, "inventoryMovements", id));
+        }
+        for (const id of oldFpIdSet){
+          batch.delete(doc(H.fb.db, "orgs", H.ORG_ID, "finishedInventoryMovements", id));
+        }
+
+        // create nuovi (auto-id)
+        const movCol = collection(H.fb.db, "orgs", H.ORG_ID, "inventoryMovements");
+        const fpCol = collection(H.fb.db, "orgs", H.ORG_ID, "finishedInventoryMovements");
+
+        for (const it of compPayloads){
+          const ref = doc(movCol);
+          batch.set(ref, it.payload);
+          movementIds.push(ref.id);
+        }
+        for (const it of fpPayloads){
+          const ref = doc(fpCol);
+          batch.set(ref, it.payload);
+          finishedMovementIds.push(ref.id);
+        }
+
+        // update completato
+        const nextRev = (Number(doneRec.resyncRev || 0) + 1);
+        batch.set(doneRef, {
+          key: String(ddt.key || k).trim(),
+          number: String(ddt.number || "").trim(),
+          date: String(ddt.date || "").trim(),
+          customer: String(ddt.customer || "").trim(),
+          rows: (ddt.rows || []).map(x => ({
+            idx: (x && x.idx != null) ? x.idx : null,
+            code: x.code || "",
+            desc: x.desc || "",
+            qty: x.qty ?? null,
+            qtyRaw: x.qtyRaw || "",
+            uom: x.uom || "",
+            unitNet: (x && x.unitNet != null) ? x.unitNet : null,
+            unitGross: (x && x.unitGross != null) ? x.unitGross : null,
+            vatPerc: (x && x.vatPerc != null) ? x.vatPerc : null,
+            net: (x && x.net != null) ? x.net : null,
+            vat: (x && x.vat != null) ? x.vat : null,
+            gross: (x && x.gross != null) ? x.gross : null
+          })),
+          netTotal: (ddt && ddt.netTotal != null) ? ddt.netTotal : null,
+          vatTotal: (ddt && ddt.vatTotal != null) ? ddt.vatTotal : null,
+          grossTotal: (ddt && ddt.grossTotal != null) ? ddt.grossTotal : null,
+          currency: String(ddt.currency || "EUR"),
+          warehouse: String(ddt.warehouse || "").trim(),
+          allocations: allocations,
+          finishedAllocations: finishedAllocations,
+          xmlHash: newXmlHash,
+          movementIds: movementIds,
+          finishedMovementIds: finishedMovementIds,
+          autoDischarge: true,
+          resyncRev: nextRev,
+          updatedAt: serverTimestamp(),
+          updatedBy: actor
+        }, { merge: true });
+
+        await batch.commit();
+      } else {
+        // fallback senza batch: best-effort (con rollback)
+        const createdRefs = [];
+        const oldDocs = [];
+        const oldFpDocs = [];
+
+        // leggo prima (rollback)
+        for (const id of oldIdSet){
+          try{
+            const ref = doc(H.fb.db, "orgs", H.ORG_ID, "inventoryMovements", id);
+            const snap = await getDoc(ref);
+            oldDocs.push({ id, ref, data: (snap && typeof snap.exists === "function" && snap.exists()) ? snap.data() : null });
+          }catch(_){
+            oldDocs.push({ id, ref: doc(H.fb.db, "orgs", H.ORG_ID, "inventoryMovements", id), data: null });
+          }
+        }
+        for (const id of oldFpIdSet){
+          try{
+            const ref = doc(H.fb.db, "orgs", H.ORG_ID, "finishedInventoryMovements", id);
+            const snap = await getDoc(ref);
+            oldFpDocs.push({ id, ref, data: (snap && typeof snap.exists === "function" && snap.exists()) ? snap.data() : null });
+          }catch(_){
+            oldFpDocs.push({ id, ref: doc(H.fb.db, "orgs", H.ORG_ID, "finishedInventoryMovements", id), data: null });
+          }
+        }
+
+        const movCol = collection(H.fb.db, "orgs", H.ORG_ID, "inventoryMovements");
+        const fpCol = collection(H.fb.db, "orgs", H.ORG_ID, "finishedInventoryMovements");
+
+        try{
+          // delete vecchi
+          for (const id of oldIdSet){ await deleteDoc(doc(H.fb.db, "orgs", H.ORG_ID, "inventoryMovements", id)); }
+          for (const id of oldFpIdSet){ await deleteDoc(doc(H.fb.db, "orgs", H.ORG_ID, "finishedInventoryMovements", id)); }
+
+          // create nuovi
+          for (const it of compPayloads){
+            const ref = await addDoc(movCol, it.payload);
+            if (ref && ref.id){ movementIds.push(ref.id); createdRefs.push({ col: "inventoryMovements", id: ref.id }); }
+          }
+          for (const it of fpPayloads){
+            const ref = await addDoc(fpCol, it.payload);
+            if (ref && ref.id){ finishedMovementIds.push(ref.id); createdRefs.push({ col: "finishedInventoryMovements", id: ref.id }); }
+          }
+
+          const nextRev = (Number(doneRec.resyncRev || 0) + 1);
+          await setDoc(doneRef, {
+            key: String(ddt.key || k).trim(),
+            number: String(ddt.number || "").trim(),
+            date: String(ddt.date || "").trim(),
+            customer: String(ddt.customer || "").trim(),
+            rows: (ddt.rows || []).map(x => ({
+              idx: (x && x.idx != null) ? x.idx : null,
+              code: x.code || "",
+              desc: x.desc || "",
+              qty: x.qty ?? null,
+              qtyRaw: x.qtyRaw || "",
+              uom: x.uom || "",
+              unitNet: (x && x.unitNet != null) ? x.unitNet : null,
+              unitGross: (x && x.unitGross != null) ? x.unitGross : null,
+              vatPerc: (x && x.vatPerc != null) ? x.vatPerc : null,
+              net: (x && x.net != null) ? x.net : null,
+              vat: (x && x.vat != null) ? x.vat : null,
+              gross: (x && x.gross != null) ? x.gross : null
+            })),
+            netTotal: (ddt && ddt.netTotal != null) ? ddt.netTotal : null,
+            vatTotal: (ddt && ddt.vatTotal != null) ? ddt.vatTotal : null,
+            grossTotal: (ddt && ddt.grossTotal != null) ? ddt.grossTotal : null,
+            currency: String(ddt.currency || "EUR"),
+            warehouse: String(ddt.warehouse || "").trim(),
+            allocations: allocations,
+            finishedAllocations: finishedAllocations,
+            xmlHash: newXmlHash,
+            movementIds: movementIds,
+            finishedMovementIds: finishedMovementIds,
+            autoDischarge: true,
+            resyncRev: nextRev,
+            updatedAt: serverTimestamp(),
+            updatedBy: actor
+          }, { merge: true });
+
+        }catch(err){
+          // rollback: cancello i nuovi e ripristino i vecchi
+          try{
+            for (const r of createdRefs){
+              try{ await deleteDoc(doc(H.fb.db, "orgs", H.ORG_ID, r.col, r.id)); }catch(_){ }
+            }
+            for (const x of oldDocs){
+              if (x && x.data) { try{ await setDoc(x.ref, x.data, { merge: false }); }catch(_){ } }
+            }
+            for (const x of oldFpDocs){
+              if (x && x.data) { try{ await setDoc(x.ref, x.data, { merge: false }); }catch(_){ } }
+            }
+          }catch(_){ }
+          throw err;
+        }
+      }
+
+      __toastDedup(`danea_resync_ok_${k}_${newXmlHash}`, `DDT ${ddt.number || ""}: riallineato`, "ok", 30000);
+      try{ render(); }catch(_){ }
+
+      success = true;
+      return true;
+
+    }catch(e){
+      try{ console.warn("resyncCompletedByKey failed", e); }catch(_){ }
+      __toastDedup(`danea_resync_err_${k}`, "Errore riallineamento DDT", "err", 60000);
+      return false;
+    }finally{
+      try{ if (!success && S.resyncFail && typeof S.resyncFail.set === "function"){ S.resyncFail.set(k, { hash: String(hCache || ""), at: Date.now(), msg: "failed" }); } }catch(_){ }
+      try{ S.resyncInFlight && S.resyncInFlight.delete(k); }catch(_){ }
+      S.busy = false;
+      try{ __scheduleResyncQueue(1200); }catch(_){ }
+    }
+  }
+
   function setTab(tab){
     S.tab = (tab === "done") ? "done" : "verify";
     try{ setDetailOpen(false); }catch(_){}
@@ -3025,14 +3818,23 @@ const tpl = document.createElement("template");
         const rows = Array.isArray(c.rows) ? c.rows : [];
         const n = rows.length;
 
-        return `<tr class=\"jsDaneaRow daneaRowOk\" data-key=\"${escAttr(k)}\" data-mode=\"done\" title="Apri">
+        const outSync = isCompletedOutOfSync(c);
+        const rowCls = outSync ? "daneaRowBad" : "daneaRowOk";
+        const dotCls = outSync ? "bad" : "ok";
+        const stText = outSync ? "AGGIORNATO" : "OK";
+        const btnResync = outSync
+          ? `<button class="btn btn-secondary btn-xs jsDaneaResyncDone" data-key="${escAttr(k)}" type="button">Riallinea</button>`
+          : "";
+
+        return `<tr class=\"jsDaneaRow ${rowCls}\" data-key=\"${escAttr(k)}\" data-mode=\"done\" title="Apri">
           <td data-label="Data">${esc(fmtDateIT(date) || "—")}</td>
           <td data-label="Numero"><span class="kbd">${esc(number || "—")}</span></td>
           <td data-label="Cliente">${esc(cust || "—")}</td>
           <td data-label="Magazzino">${esc((wh || "").trim() || "—")}</td>
           <td data-label="Righe" class="qty">${Number(n||0).toLocaleString("it-IT")}</td>
-          <td data-label="Stato" class="qty"><span class="dot ok"></span>OK</td>
+          <td data-label="Stato" class="qty"><span class="dot ${dotCls}"></span>${stText}</td>
           <td data-label="" style="text-align:right;">
+            ${btnResync}
             <button class="btn btn-ghost btn-xs jsDaneaOpen" data-key="${escAttr(k)}" data-mode="done" type="button">Apri</button>
             <button class="btn btn-danger btn-xs jsDaneaDeleteDone" data-key="${escAttr(k)}" type="button">Elimina</button>
           </td>
@@ -3176,7 +3978,7 @@ const tpl = document.createElement("template");
         date: String(c.date || ""),
         customer: String(c.customer || ""),
         rows: Array.isArray(c.rows) ? c.rows : [],
-        warehouse: c.warehouse || cache?.warehouse || "",
+        warehouse: c.warehouse || (S.cacheMap.get(c.key)?.warehouse) || "",
         movementIds: Array.isArray(c.movementIds) ? c.movementIds : [],
         finishedMovementIds: Array.isArray(c.finishedMovementIds) ? c.finishedMovementIds : []
       };
@@ -3356,7 +4158,7 @@ Righe: ${st.total}`;
           warehouse: String(ddt.warehouse || '').trim(),
           allocations: [],
           finishedAllocations: [],
-          xmlHash: String(ddt.hash || ''),
+          xmlHash: String(ddt.xmlHash || ddt.hash || ''),
           movementIds: [],
           finishedMovementIds: [],
           autoDischarge: false,
@@ -3757,7 +4559,7 @@ Giacenza PF insufficiente: rimangono ${rem} pz da scaricare come componenti.`);
         warehouse: String(ddt.warehouse || "").trim(),
         allocations: allocations,
         finishedAllocations: finishedAllocations,
-        xmlHash: String(ddt.hash || ''),
+        xmlHash: String(ddt.xmlHash || ddt.hash || ''),
         movementIds: movementIds,
         finishedMovementIds: finishedMovementIds,
         autoDischarge: true,
@@ -4227,7 +5029,7 @@ Giacenza PF insufficiente: rimangono ${rem} pz.`);
           warehouse: String(ddt.warehouse || "").trim(),
           allocations: allocations,
           finishedAllocations: finishedAllocations,
-          xmlHash: String(ddt.hash || ""),
+          xmlHash: String(ddt.xmlHash || ddt.hash || ""),
           movementIds: movementIds,
           finishedMovementIds: finishedMovementIds,
           autoDischarge: true,
@@ -4321,7 +5123,16 @@ function bindEvents(){
           const btnOpen = e.target?.closest?.("button.jsDaneaOpen");
           const btnSend = e.target?.closest?.("button.jsDaneaSendFromList");
           const btnDelDone = e.target?.closest?.("button.jsDaneaDeleteDone");
+          const btnResync = e.target?.closest?.("button.jsDaneaResyncDone");
           const tr = e.target?.closest?.("tr.jsDaneaRow");
+
+          if (btnResync){
+            e.preventDefault();
+            e.stopPropagation();
+            const k = String(btnResync.getAttribute("data-key") || "").trim();
+            if (k) resyncCompletedByKey(k, { silent: false, force: true }).catch(()=>{});
+            return;
+          }
 
           if (btnDelDone){
             e.preventDefault(); e.stopPropagation();
@@ -4533,6 +5344,7 @@ function bindEvents(){
         cacheCompletedMap();
         render();
         try{ __autoModeKick("completed"); }catch(_){ }
+        try{ queueResyncOutOfSync("completed"); }catch(_){ }
       }, (err) => {
         console.warn("completed snapshot error", err);
       });
@@ -4583,6 +5395,7 @@ function bindEvents(){
         rebuildCacheMap();
         render();
         try{ __autoModeKick("cache"); }catch(_){ }
+        try{ queueResyncOutOfSync("cache"); }catch(_){ }
       }, (err) => {
         console.warn("daneaDdts snapshot error", err);
         S.cacheReady = true;
@@ -4699,6 +5512,7 @@ function subscribeFinishedProducts(){
         S.fpByCode = map;
         render();
         try{ __autoModeKick("fp"); }catch(_){ }
+        try{ queueResyncOutOfSync("fp"); }catch(_){ }
         // se dettaglio aperto, re-render
         if (S.selected && $("daneaDetailWrap")?.style.display !== "none"){
           renderDetail(S.selected, "verify");
