@@ -9912,7 +9912,7 @@ Verrà aggiornata anche la chiave su tutti i prodotti finiti.`);
     const menuInvSummary = document.getElementById("menuInvSummary");
 
     document.getElementById("btnGoOcr")?.addEventListener("click", startHomeOcr);
-    document.getElementById("btnGoFlows")?.addEventListener("click", () => { setView("flows"); try{ renderFlowsTable(); }catch(_){ } });
+    document.getElementById("btnGoFlows")?.addEventListener("click", () => { setView("daneaDdt"); try{ window.HubDaneaDdt && window.HubDaneaDdt.refresh && window.HubDaneaDdt.refresh(); }catch(_){ } });
     document.getElementById("btnGoMovements")?.addEventListener("click", () => {
       setView("movements");
       try{ window.HubMovements && window.HubMovements.refresh && window.HubMovements.refresh(); }catch(_){ }
