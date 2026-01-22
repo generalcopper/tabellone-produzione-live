@@ -11502,6 +11502,263 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
       }
     }
 
+/****************************************************************
+ * Access control (ADMIN only) — Hub Inventario
+ * Abilitazione via HTML:
+ *   window.HUBINV_REQUIRE_ADMIN = true;
+ *   window.HUBINV_ADMIN_EMAILS = ["admin@..."]; // opzionale (fallback)
+ ****************************************************************/
+function __hubinvTruthy(v){
+  if (v === true || v === 1) return true;
+  const s = String(v ?? "").trim().toLowerCase();
+  return (s === "1" || s === "true" || s === "yes" || s === "on");
+}
+
+function __hubinvIsAdminRequired(){
+  try{
+    const w = (typeof globalThis !== "undefined") ? globalThis : window;
+    if (w && (__hubinvTruthy(w.HUBINV_REQUIRE_ADMIN) || __hubinvTruthy(w.HUB_REQUIRE_ADMIN))) return true;
+  }catch(_){}
+  try{
+    const m = document.querySelector('meta[name="hubinv-require-admin"], meta[name="hub-require-admin"]');
+    if (m && __hubinvTruthy(m.getAttribute("content"))) return true;
+  }catch(_){}
+  return false;
+}
+
+function __hubinvDenyRedirectUrl(){
+  try{
+    const w = (typeof globalThis !== "undefined") ? globalThis : window;
+    const v = w && (w.HUBINV_DENY_REDIRECT || w.HUB_DENY_REDIRECT);
+    if (typeof v === "string" && v.trim()) return v.trim();
+  }catch(_){}
+  try{
+    const m = document.querySelector('meta[name="hubinv-deny-redirect"], meta[name="hub-deny-redirect"]');
+    const v = m ? String(m.getAttribute("content") || "").trim() : "";
+    if (v) return v;
+  }catch(_){}
+  return "./index.html";
+}
+
+function __hubinvGetAdminEmailSet(){
+  const set = new Set();
+  const push = (v)=>{
+    const e = String(v || "").trim().toLowerCase();
+    if (!e) return;
+    set.add(e);
+  };
+
+  try{
+    const w = (typeof globalThis !== "undefined") ? globalThis : window;
+    const src = w && (w.HUBINV_ADMIN_EMAILS || w.HUB_ADMIN_EMAILS || w.HUBINV_ADMINS || w.HUB_ADMINS);
+    if (Array.isArray(src)) src.forEach(push);
+    else if (typeof src === "string") String(src).split(/[;,\s]+/g).forEach(push);
+  }catch(_){}
+
+  try{
+    const m = document.querySelector('meta[name="hubinv-admin-emails"], meta[name="hub-admin-emails"]');
+    const v = m ? String(m.getAttribute("content") || "") : "";
+    if (v) v.split(/[;,\s]+/g).forEach(push);
+  }catch(_){}
+
+  return set;
+}
+
+function __hubinvEnsureGateEl(){
+  try{
+    let el = document.getElementById("__hubAdminGate");
+    if (el) return el;
+
+    el = document.createElement("div");
+    el.id = "__hubAdminGate";
+    el.setAttribute("role","dialog");
+    el.setAttribute("aria-modal","true");
+    el.style.cssText = "position:fixed;inset:0;z-index:999999;display:none;align-items:center;justify-content:center;padding:22px;background:rgba(0,0,0,.55);backdrop-filter:blur(3px);";
+
+    el.innerHTML = `
+      <div style="width:min(560px,92vw);background:#fff;border-radius:14px;padding:18px 16px;box-shadow:0 18px 70px rgba(0,0,0,.35);border:1px solid rgba(0,0,0,.08);">
+        <div id="__hubAdminGateTitle" style="font-weight:950;font-size:18px;letter-spacing:-0.01em;margin:0 0 10px 0;color:rgba(0,0,0,.88);">Accesso riservato</div>
+        <div id="__hubAdminGateBody" style="font-size:14px;line-height:1.45;color:rgba(0,0,0,.72);">Accesso riservato agli admin.</div>
+        <div style="display:flex;flex-wrap:wrap;gap:10px;justify-content:flex-end;margin-top:16px;">
+          <button type="button" id="__hubAdminGateBack" style="height:38px;padding:0 14px;border-radius:10px;border:1px solid rgba(0,0,0,.16);background:#fff;font-weight:900;cursor:pointer;">Torna al menu</button>
+          <button type="button" id="__hubAdminGateLogout" style="height:38px;padding:0 14px;border-radius:10px;border:1px solid rgba(0,0,0,.16);background:#fff;font-weight:900;cursor:pointer;display:none;">Logout</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(el);
+
+    const btnBack = el.querySelector("#__hubAdminGateBack");
+    if (btnBack) btnBack.addEventListener("click", () => {
+      try{ window.location.href = __hubinvDenyRedirectUrl(); }catch(_){ window.location.href = "./index.html"; }
+    });
+
+    const btnLogout2 = el.querySelector("#__hubAdminGateLogout");
+    if (btnLogout2) btnLogout2.addEventListener("click", async () => {
+      try{
+        if (fb && fb.auth) await signOut(fb.auth);
+      }catch(e){
+        console.warn("Logout failed", e);
+      }
+    });
+
+    return el;
+  }catch(e){
+    console.warn("__hubinvEnsureGateEl failed", e);
+    return null;
+  }
+}
+
+function __hubinvShowGate(opts){
+  try{
+    const o = opts || {};
+    const mode = String(o.mode || "").trim().toLowerCase();
+    const el = __hubinvEnsureGateEl();
+    if (!el) return;
+
+    const t = el.querySelector("#__hubAdminGateTitle");
+    const b = el.querySelector("#__hubAdminGateBody");
+    const back = el.querySelector("#__hubAdminGateBack");
+    const logoutBtn = el.querySelector("#__hubAdminGateLogout");
+
+    const title = String(o.title || "").trim() || (mode === "checking" ? "Verifica permessi" : "Accesso riservato");
+    if (t) t.textContent = title;
+
+    let msg = String(o.body || "").trim();
+    if (!msg){
+      if (mode === "checking"){
+        msg = "Sto verificando i permessi admin per questo account…";
+      } else if (mode === "login"){
+        msg = "Per aprire Hub Inventario devi accedere con un account amministratore.";
+      } else if (mode === "denied"){
+        const who = (o && o.user && (o.user.email || o.user.displayName)) ? ` (${o.user.email || o.user.displayName})` : "";
+        msg = "Questo account non ha i permessi admin per accedere a Hub Inventario" + who + ".";
+      } else {
+        msg = "Accesso riservato agli admin.";
+      }
+    }
+    if (b) b.textContent = msg;
+
+    if (back) back.textContent = String(o.backLabel || "Torna al menu");
+
+    if (logoutBtn){
+      const canLogout = !!(fb && fb.auth && fb.user);
+      logoutBtn.style.display = canLogout ? "inline-block" : "none";
+    }
+
+    el.style.display = "flex";
+    try{ document.body.classList.add("hub-admin-gate"); }catch(_){}
+  }catch(e){
+    console.warn("__hubinvShowGate failed", e);
+  }
+}
+
+function __hubinvHideGate(){
+  try{
+    const el = document.getElementById("__hubAdminGate");
+    if (el) el.style.display = "none";
+    document.body.classList.remove("hub-admin-gate");
+  }catch(_){}
+}
+
+async function __hubinvResolveIsAdmin(user){
+  if (!user) return false;
+
+  const email = String(user.email || "").trim().toLowerCase();
+  const adminEmails = __hubinvGetAdminEmailSet();
+  if (email && adminEmails && adminEmails.size && adminEmails.has(email)) return true;
+
+  // 1) Firebase custom claims
+  try{
+    const token = await user.getIdTokenResult();
+    const claims = (token && token.claims) ? token.claims : {};
+    const roleStr = (v)=> String(v || "").trim().toLowerCase();
+
+    if (claims.admin === true || claims.isAdmin === true || claims.superadmin === true || claims.root === true) return true;
+
+    const role = roleStr(claims.role || claims.ruolo);
+    if (role === "admin" || role === "administrator" || role === "owner") return true;
+
+    if (Array.isArray(claims.roles)){
+      const rs = claims.roles.map(roleStr);
+      if (rs.includes("admin") || rs.includes("administrator") || rs.includes("owner")) return true;
+    }
+
+    // Org-scoped role: claims.orgs[ORG_ID] / claims.orgRoles[ORG_ID] / etc
+    const orgs = claims.orgs || claims.orgRoles || claims.organizations || claims.tenants;
+    if (orgs && typeof orgs === "object"){
+      const entry = orgs[ORG_ID] || orgs[String(ORG_ID)] || null;
+      if (entry){
+        if (entry === true) return true;
+        if (typeof entry === "string"){
+          const r2 = roleStr(entry);
+          if (r2 === "admin" || r2 === "administrator" || r2 === "owner") return true;
+        } else if (typeof entry === "object"){
+          if (entry.admin === true || entry.isAdmin === true || entry.owner === true) return true;
+          const r2 = roleStr(entry.role || entry.ruolo || entry.kind);
+          if (r2 === "admin" || r2 === "administrator" || r2 === "owner") return true;
+          if (Array.isArray(entry.roles)){
+            const rs2 = entry.roles.map(roleStr);
+            if (rs2.includes("admin") || rs2.includes("administrator") || rs2.includes("owner")) return true;
+          }
+        }
+      }
+    }
+  }catch(e){
+    console.warn("Admin check (claims) failed", e);
+  }
+
+  // 2) Firestore: prova convenzioni comuni (se hai una tabella ruoli)
+  try{
+    if (fb && fb.db){
+      const tries = [];
+      const encEmail = email ? encodeURIComponent(email) : "";
+      const addRef = (colName, id) => { if (id) tries.push(doc(fb.db, "orgs", ORG_ID, colName, id)); };
+
+      addRef("admins", user.uid);
+      addRef("admins", encEmail);
+      addRef("admins", email);
+
+      addRef("users", user.uid);
+      addRef("users", encEmail);
+      addRef("users", email);
+
+      addRef("roles", user.uid);
+      addRef("roles", encEmail);
+      addRef("roles", email);
+
+      for (const ref of tries){
+        try{
+          const snap = await getDoc(ref);
+          if (!snap.exists()) continue;
+          const data = snap.data() || {};
+          const parent = (ref && ref.parent && ref.parent.id) ? ref.parent.id : "";
+
+          if (parent === "admins"){
+            if (data.disabled === true || data.enabled === false) continue;
+            return true;
+          }
+
+          const role = String(data.role || data.ruolo || data.kind || data.type || "").trim().toLowerCase();
+          if (data.admin === true || data.isAdmin === true) return true;
+          if (role === "admin" || role === "administrator" || role === "owner") return true;
+          if (Array.isArray(data.roles)){
+            const rs = data.roles.map(v => String(v || "").trim().toLowerCase());
+            if (rs.includes("admin") || rs.includes("administrator") || rs.includes("owner")) return true;
+          }
+        }catch(e2){
+          const c = String(e2?.code || e2?.message || "").toLowerCase();
+          if (c.includes("permission") || c.includes("permission-denied")) break;
+        }
+      }
+    }
+  }catch(e){
+    console.warn("Admin check (Firestore) failed", e);
+  }
+
+  return false;
+}
+
+
     async function initFirebase() {
       const btnLogin = document.getElementById("btnLoginGoogle");
       const btnLogout = document.getElementById("btnLogout");
@@ -11591,39 +11848,70 @@ btnLogout.addEventListener("click", async () => {
           }
         });
 
-        onAuthStateChanged(fb.auth, (user) => {
-          fb.user = user || null;
-          try{ syncHubBridge(); }catch(e){ console.warn("syncHubBridge auth refresh failed", e); }
+            onAuthStateChanged(fb.auth, async (user) => {
+      fb.user = user || null;
+      try{ fb.isAdmin = false; }catch(_){}
+      try{ syncHubBridge(); }catch(e){ console.warn("syncHubBridge auth refresh failed", e); }
 
-          if (user) {
-            // UI
-            pillUser.style.display = "inline-flex";
-            const label = user.displayName || user.email || "Utente";
-            pillUserText.textContent = label;
-            btnLogin?.style && (btnLogin.style.display = "none");
-            btnLogout.style.display = "none";
-            setSyncPill("ok", "Sync: connesso");
+      const requireAdmin = __hubinvIsAdminRequired();
+      if (!requireAdmin) {
+        try{ __hubinvHideGate(); }catch(_){}
+      }
 
-            startRealtime();
+      if (user) {
+        // UI
+        pillUser.style.display = "inline-flex";
+        const label = user.displayName || user.email || "Utente";
+        pillUserText.textContent = label;
+        btnLogin?.style && (btnLogin.style.display = "none");
+        btnLogout.style.display = "none";
 
-            // KPI dashboard (Fatturato / Imballaggio più scaricato): aggiorna subito dopo login
-            try{ window.HubRevenue && window.HubRevenue.refresh && window.HubRevenue.refresh(); }catch(_){ }
-            try{ window.HubRevenue && window.HubRevenue.renderHomeCockpit && window.HubRevenue.renderHomeCockpit(); }catch(_){ }
-          } else {
-            pillUser.style.display = "none";
-            btnLogin?.style && (btnLogin.style.display = "inline-flex");
-            btnLogout.style.display = "none";
-            setSyncPill("warn", "Sync: non connesso");
-
+        if (requireAdmin) {
+          setSyncPill("warn", "Verifica permessi…");
+          __hubinvShowGate({ mode: "checking", user });
+          const okAdmin = await __hubinvResolveIsAdmin(user);
+          try{ fb.isAdmin = !!okAdmin; }catch(_){}
+          try{ syncHubBridge(); }catch(_){}
+          if (!okAdmin) {
+            setSyncPill("bad", "Accesso negato");
             stopRealtime();
-            try{ window.HubRevenue && window.HubRevenue.stop && window.HubRevenue.stop(); }catch(_){ }
-            // fallback: local-only
-            loadLocalData();
-            renderAll();
-    renderAnag();
-            renderAnag();
+            __hubinvShowGate({ mode: "denied", user });
+            return;
           }
-        });
+          __hubinvHideGate();
+        }
+
+        setSyncPill("ok", "Sync: connesso");
+
+        startRealtime();
+
+        // KPI dashboard (Fatturato / Imballaggio più scaricato): aggiorna subito dopo login
+        try{ window.HubRevenue && window.HubRevenue.refresh && window.HubRevenue.refresh(); }catch(_){ }
+        try{ window.HubRevenue && window.HubRevenue.renderHomeCockpit && window.HubRevenue.renderHomeCockpit(); }catch(_){ }
+      } else {
+        pillUser.style.display = "none";
+        btnLogin?.style && (btnLogin.style.display = "inline-flex");
+        btnLogout.style.display = "none";
+
+        // Se questa pagina richiede admin, non attivo il fallback "local-only"
+        if (requireAdmin) {
+          setSyncPill("bad", "Accesso riservato");
+          stopRealtime();
+          __hubinvShowGate({ mode: "login" });
+          return;
+        }
+
+        setSyncPill("warn", "Sync: non connesso");
+
+        stopRealtime();
+        try{ window.HubRevenue && window.HubRevenue.stop && window.HubRevenue.stop(); }catch(_){ }
+        // fallback: local-only
+        loadLocalData();
+        renderAll();
+renderAnag();
+        renderAnag();
+      }
+    });
 
         fb.ready = true;
       } catch (e) {
