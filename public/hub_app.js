@@ -6180,7 +6180,21 @@ function waitForHub(attempt){
 
     function __macroGroup(code){
       try{
-        if (typeof getMacroCategoryForCode === "function") return String(getMacroCategoryForCode(code) || "").trim().toLowerCase();
+        // getMacroCategoryForCode ritorna la *categoria* (es. "scatole", "flaconi", "materie_prime")
+        const catKey = (typeof getMacroCategoryForCode === "function")
+          ? String(getMacroCategoryForCode(code) || "").trim()
+          : "";
+        if (!catKey) return "";
+
+        // categoryMacroGroup ritorna il macro-gruppo ("imballaggi" / "materie_prime")
+        if (typeof categoryMacroGroup === "function") {
+          return String(categoryMacroGroup(catKey) || "").trim().toLowerCase();
+        }
+
+        // fallback tradizionale: se non abbiamo info di macro-group
+        const low = catKey.toLowerCase();
+        if (low === "materie_prime") return "materie_prime";
+        return "imballaggi";
       }catch(_){ }
       return "";
     }
@@ -6470,7 +6484,9 @@ function renderList(){
   function subscribe(){
     const h = H();
     if (!h || !h.fb || !h.fb.db || !h.FS) return false;
-    if (S.unsub.done || S.unsub.cache) return true;
+    // Evita listener Firestore quando non siamo autenticati (altrimenti PERMISSION_DENIED e listener "morto")
+    if (!h.fb.user) return false;
+    if (S.unsub.done && S.unsub.cache) return true;
 
     try{
       const { collection, query, orderBy, onSnapshot } = h.FS;
@@ -6532,20 +6548,34 @@ function renderList(){
     try{ renderHomeCockpit(); }catch(_){ }
   }
 
+  function stop(){
+    try{ S.unsub.done && S.unsub.done(); }catch(_){ }
+    try{ S.unsub.cache && S.unsub.cache(); }catch(_){ }
+    S.unsub.done = null;
+    S.unsub.cache = null;
+    S.completed = [];
+    S.completedMap = new Map();
+    S.cacheMap = new Map();
+    S.selectedKey = "";
+    try{ renderHomeCockpit(); }catch(_){ }
+  }
+
   function waitForHub(attempt){
     attempt = attempt || 0;
     const h = H();
-    if (h && h.fb && h.fb.db && h.FS){
+    // Aspetta anche l'utente autenticato: altrimenti i listener vanno in PERMISSION_DENIED
+    if (h && h.fb && h.fb.db && h.FS && h.fb.user){
       refresh();
       return;
     }
-    if (attempt > 200) return;
-    setTimeout(() => waitForHub(attempt+1), 100);
+    const delay = (attempt < 40) ? 100 : (attempt < 120) ? 250 : 500;
+    setTimeout(() => waitForHub(attempt+1), delay);
   }
 
   // expose
   window.HubRevenue = window.HubRevenue || {};
   window.HubRevenue.refresh = refresh;
+  window.HubRevenue.stop = stop;
   window.HubRevenue.backToList = backToList;
   window.HubRevenue.openDetail = openDetail;
   window.HubRevenue.renderHomeCockpit = renderHomeCockpit;
@@ -9794,6 +9824,143 @@ Verrà aggiornata anche la chiave su tutti i prodotti finiti.`);
     // Init
     try{ syncSideMenuA11y(); }catch(_){}
 
+    // SideMenu: rendi dinamiche le "tendine" dei sottomenu (apertura/chiusura con animazione)
+    function setupSideMenuSubmenuToggles(){
+      try{
+        const list = Array.from(document.querySelectorAll("details.sideMenuSubmenu"));
+        if (!list.length) return;
+
+        const prefersReduced = !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+
+        list.forEach((det) => {
+          if (!det || det.dataset.submenuDyn === "1") return;
+          det.dataset.submenuDyn = "1";
+
+          const summary = det.querySelector(":scope > summary");
+          if (!summary) return;
+
+          // Wrap submenu items (everything after summary) into a body element
+          const body = document.createElement("div");
+          body.className = "sideMenuSubmenuBody";
+          while (summary.nextSibling){
+            body.appendChild(summary.nextSibling);
+          }
+          det.appendChild(body);
+
+          // Basic animation styles (inline to avoid touching CSS)
+          try{
+            body.style.overflow = "hidden";
+            body.style.willChange = "height";
+            body.style.transition = prefersReduced ? "" : "height 220ms ease";
+            body.style.height = det.open ? "auto" : "0px";
+            if ("inert" in body) body.inert = !det.open;
+            body.setAttribute("aria-hidden", det.open ? "false" : "true");
+          }catch(_){}
+
+          let busy = false;
+
+          const openAnimated = (animate) => {
+            if (busy) return;
+            busy = true;
+
+            try{
+              if ("inert" in body) body.inert = false;
+              body.setAttribute("aria-hidden", "false");
+            }catch(_){}
+
+            det.open = true;
+
+            if (prefersReduced || !animate){
+              try{ body.style.height = "auto"; }catch(_){}
+              busy = false;
+              return;
+            }
+
+            // start closed → expand
+            try{ body.style.height = "0px"; }catch(_){}
+            try{ body.getBoundingClientRect(); }catch(_){}
+            const h = body.scrollHeight;
+            try{ body.style.height = h + "px"; }catch(_){}
+
+            const onEnd = (e) => {
+              if (e && e.target !== body) return;
+              body.removeEventListener("transitionend", onEnd);
+              try{ body.style.height = "auto"; }catch(_){}
+              busy = false;
+            };
+            body.addEventListener("transitionend", onEnd);
+          };
+
+          const closeAnimated = (animate) => {
+            if (busy) return;
+            busy = true;
+
+            if (prefersReduced || !animate){
+              try{
+                det.open = false;
+                body.style.height = "0px";
+                if ("inert" in body) body.inert = true;
+                body.setAttribute("aria-hidden", "true");
+              }catch(_){}
+              busy = false;
+              return;
+            }
+
+            // set fixed height → collapse → then close <details>
+            try{ body.style.height = body.scrollHeight + "px"; }catch(_){}
+            try{ body.getBoundingClientRect(); }catch(_){}
+            try{ body.style.height = "0px"; }catch(_){}
+
+            const onEnd = (e) => {
+              if (e && e.target !== body) return;
+              body.removeEventListener("transitionend", onEnd);
+              try{
+                det.open = false;
+                body.style.height = "0px";
+                if ("inert" in body) body.inert = true;
+                body.setAttribute("aria-hidden", "true");
+              }catch(_){}
+              setTimeout(() => { busy = false; }, 0);
+            };
+            body.addEventListener("transitionend", onEnd);
+          };
+
+          // Click su summary: animazione apertura/chiusura
+          summary.addEventListener("click", (e) => {
+            try{ e.preventDefault(); e.stopPropagation(); }catch(_){}
+            if (det.open) closeAnimated(true);
+            else openAnimated(true);
+          });
+
+          // Programmatic toggle (es. setSideMenuActive che fa det.open = true)
+          det.addEventListener("toggle", () => {
+            if (busy) return;
+            try{
+              if (det.open){
+                if ("inert" in body) body.inert = false;
+                body.setAttribute("aria-hidden", "false");
+                body.style.height = "auto";
+              } else {
+                body.style.height = "0px";
+                if ("inert" in body) body.inert = true;
+                body.setAttribute("aria-hidden", "true");
+              }
+            }catch(_){}
+          });
+        });
+      }catch(e){
+        try{ console.warn("setupSideMenuSubmenuToggles failed", e); }catch(_){}
+      }
+    }
+
+    try{
+      if (document.readyState === "loading"){
+        document.addEventListener("DOMContentLoaded", setupSideMenuSubmenuToggles, { once: true });
+      } else {
+        setupSideMenuSubmenuToggles();
+      }
+    }catch(_){}
+
     // Anagrafica
     const segSuppliers = document.getElementById("segSuppliers");
     const segProducts = document.getElementById("segProducts");
@@ -11438,6 +11605,10 @@ btnLogout.addEventListener("click", async () => {
             setSyncPill("ok", "Sync: connesso");
 
             startRealtime();
+
+            // KPI dashboard (Fatturato / Imballaggio più scaricato): aggiorna subito dopo login
+            try{ window.HubRevenue && window.HubRevenue.refresh && window.HubRevenue.refresh(); }catch(_){ }
+            try{ window.HubRevenue && window.HubRevenue.renderHomeCockpit && window.HubRevenue.renderHomeCockpit(); }catch(_){ }
           } else {
             pillUser.style.display = "none";
             btnLogin?.style && (btnLogin.style.display = "inline-flex");
@@ -11445,6 +11616,7 @@ btnLogout.addEventListener("click", async () => {
             setSyncPill("warn", "Sync: non connesso");
 
             stopRealtime();
+            try{ window.HubRevenue && window.HubRevenue.stop && window.HubRevenue.stop(); }catch(_){ }
             // fallback: local-only
             loadLocalData();
             renderAll();
