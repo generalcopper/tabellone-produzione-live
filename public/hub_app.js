@@ -3959,6 +3959,23 @@ Riallineare lo scarico aggiornando i movimenti?`);
       pillCount && (pillCount.textContent = String(S.tab === "done" ? doneList.length : verifyList.length));
     }catch(_){}
 
+
+    // Espone conteggi per cockpit (Home): DDT clienti da verificare / completati
+    try{
+      const sig = String(verifyList.length) + "|" + String(doneList.length);
+      if (S._countsSig !== sig){
+        S._countsSig = sig;
+        const payload = { verify: verifyList.length, done: doneList.length, updatedAt: Date.now() };
+        try{
+          window.HubDaneaDdt = window.HubDaneaDdt || {};
+          window.HubDaneaDdt.counts = payload;
+        }catch(_){ }
+        try{
+          window.dispatchEvent(new CustomEvent("HubDaneaDdtCountsUpdated", { detail: payload }));
+        }catch(_){ }
+      }
+    }catch(_){ }
+
     if (lastMeta){
       if (S.lastFetchedAt) {
         const d = new Date(S.lastFetchedAt);
@@ -14641,42 +14658,34 @@ async function deletePfProduction(batchId) {
 
       __counterAnim.animate(statTotalItems, items);
       __counterAnim.animate(statTotalPieces, totalPieces);
-      // Flussi (cockpit) = numero documenti (DDT) caricati, non numero righe/articoli
-      let docsCount = 0;
-      try {
-        if (Array.isArray(__docGroups)) {
-          docsCount = __docGroups.length;
-        } else {
-          // Calcolo leggero: conta documenti unici senza costruire la lista completa (dashboard più fluida)
-          const seen = new Set();
-          (Array.isArray(state.movements) ? state.movements : []).forEach((mv) => {
-            const source = String((mv && mv.source) || "");
-            const note = String((mv && mv.note) || "").trim();
-            const isDocLike = (source.toUpperCase() === "OCR") || /DDT|DOCUMENTO|TRASPORTO|BOLLA|FATTURA/i.test(note);
-            if (!isDocLike) return;
-
-            let vatKey = "";
-            try{
-              if (typeof __sup_cleanVat === "function") vatKey = __sup_cleanVat(mv.supplierVat || mv.vat || "");
-            }catch(_){ vatKey = ""; }
-
-            const docNumKey = String(mv.docNum || "").trim().toLowerCase();
-            const customerKey = vatKey ? ("vat_" + vatKey) : String(mv.customer || "").trim().toLowerCase();
-            const key = [
-              customerKey,
-              String(mv.date || "").trim(),
-              (docNumKey || note.toLowerCase()),
-              source.toLowerCase()
-            ].join("|");
-
-            seen.add(key);
-          });
-          docsCount = seen.size;
+      // IMAP scaricati oggi (cockpit) = totale pezzi (allocazioni) scaricati oggi dai PF
+      let imapPiecesToday = 0;
+      try{
+        const now = new Date();
+        const y = now.getFullYear(), m = now.getMonth(), d = now.getDate();
+        for (const it of (__daneaCompleted || [])){
+          const iso = String(it && it.createdAt || "").trim();
+          if (!iso) continue;
+          const dt = new Date(iso);
+          if (!dt || isNaN(dt.getTime())) continue;
+          if (dt.getFullYear() !== y || dt.getMonth() !== m || dt.getDate() !== d) continue;
+          const allocs = Array.isArray(it.allocations) ? it.allocations : [];
+          for (const a of allocs){
+            imapPiecesToday += safeInt(a && a.qty);
+          }
         }
-      } catch (e) { docsCount = 0; }
+      }catch(_){ imapPiecesToday = 0; }
 
-      if (typeof statTotalFlows !== "undefined" && statTotalFlows) __counterAnim.animate(statTotalFlows, docsCount);
-      __counterAnim.animate(statLowStock, low);
+      if (typeof statTotalFlows !== "undefined" && statTotalFlows) __counterAnim.animate(statTotalFlows, imapPiecesToday);
+
+      // DDT clienti da verificare (cockpit)
+      let ddtVerifyCount = 0;
+      try{
+        const payload = (window.HubDaneaDdt && window.HubDaneaDdt.counts) ? window.HubDaneaDdt.counts : null;
+        ddtVerifyCount = Number(payload && payload.verify) || 0;
+      }catch(_){ ddtVerifyCount = 0; }
+
+      __counterAnim.animate(statLowStock, ddtVerifyCount);
       statLastUpdate.textContent = last ? formatDateIT(last.createdAt) : "—";
     }
 
@@ -24651,6 +24660,18 @@ searchStock.addEventListener("input", () => renderAll());
     }catch(_){ }
 
 
+    // Aggiorna subito il conteggio cockpit "DDT clienti da verificare"
+    try{
+      window.addEventListener("HubDaneaDdtCountsUpdated", (ev) => {
+        try{
+          const n = Number(ev && ev.detail && ev.detail.verify) || 0;
+          __counterAnim.animate(statLowStock, n);
+        }catch(_){ }
+      });
+    }catch(_){ }
+
+
+
     // Click su riga stock: dettaglio + categoria
     if (stockTbody) {
       stockTbody.addEventListener("click", async (e) => {
@@ -24982,6 +25003,9 @@ if (importMovementsInput) importMovementsInput.addEventListener("change", async 
       };
       window.dispatchEvent(new CustomEvent("HubInvReady", { detail: window.HubInv }));
     }catch(_){}
+    // Cockpit fatturato: assicurati che sia sempre "vivo" (race: auth può arrivare prima di HubInvReady)
+    try{ window.HubRevenue && window.HubRevenue.refresh && window.HubRevenue.refresh(); }catch(_){ }
+    try{ window.HubRevenue && window.HubRevenue.renderHomeCockpit && window.HubRevenue.renderHomeCockpit(); }catch(_){ }
 // Niente test automatico all'avvio (evita richieste inutili)
     if ((state.settings.ocrUrl || "").trim()) {
       setOcrPill("warn", "OCR: configurato (premi Test)");
