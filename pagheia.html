@@ -1548,7 +1548,19 @@ flex-direction: column !important;
   }
 }
 
-</style>
+
+
+    /* Hidden file input (NO display:none): serve per aprire subito il selettore file anche su iOS */
+    .hiddenFileInput{
+      position:fixed;
+      left:-9999px;
+      top:-9999px;
+      width:1px;
+      height:1px;
+      opacity:0;
+    }
+
+  </style>
   <style id="payrollStyles">
     .payrollCard{position:relative;overflow:hidden;border-radius:22px;padding:18px;border:1px solid rgba(15,23,42,.06);background:#fff;box-shadow:0 18px 42px rgba(15,23,42,.12);display:flex;flex-direction:column;gap:12px}
     .pcHead{display:flex;align-items:center;justify-content:space-between;gap:12px}
@@ -2977,11 +2989,8 @@ flex-direction: column !important;
                   <div>
                     <div class="dropArea" id="payrollDrop">
                       <div class="pcTitle" style="font-size:18px">Carica e analizza</div>
-                      <div class="pcSub">Trascina il PDF o usa il pulsante per avviare l’upload.</div>
-                      <div class="uploadActions">
-                        <button class="payrollBtn primary" id="btnPayrollUpload" type="button">Carica e analizza</button>
-</div>
-                      <div class="progressShell progressAsSpinner" id="payrollProgress">
+                      <div class="pcSub">Trascina il PDF qui (desktop) oppure tocca per selezionarlo.</div>
+<div class="progressShell progressAsSpinner" id="payrollProgress">
                         <div class="progressSpinRow">
                           <div class="winSpinner" id="payrollProgressSpinner" aria-hidden="true" style="display:none"></div>
                           <div class="progressLabel" id="payrollProgressLabel">Pronto</div>
@@ -2990,8 +2999,7 @@ flex-direction: column !important;
                       </div>
                       <div class="miniHint" id="payrollIdleHint">Stato: inattivo.</div>
                       <div class="pcHint" id="payrollDeleteFeedback" style="color:var(--bad)"></div>
-                      <input type="file" id="payrollFileInput" accept="application/pdf" style="display:none">
-                    </div>
+</div>
                   </div>
                 </div>
               </div>
@@ -3188,6 +3196,10 @@ flex-direction: column !important;
       </div>
     </div>
   </div>
+
+
+  <!-- Upload PDF (globale): usato dal bottone "carica buste paga" e dall’area drop -->
+  <input type="file" id="payrollFileInput" class="hiddenFileInput" accept="application/pdf" />
 
 
 
@@ -5823,6 +5835,32 @@ async function Yi() {
         try{ zi(); }catch(_e){}
       }
 
+
+      // Nuovo percorso upload:
+      // 1) click su "carica buste paga" => apre SUBITO il selettore file (senza modale intermedia)
+      // 2) dopo la selezione: apre la modale e parte analisi + risultati
+      function openPayrollUploadPicker(){
+        if(!(N.user && N.user.isAdmin)){ Ve("Solo admin", "Funzione riservata."); return; }
+
+        // reset (così ogni upload riparte pulito)
+        try{ ji(); }catch(_e){}
+
+        // Apri subito il selettore file (gesto utente)
+        try{
+          const input = U("payrollFileInput");
+          if(input){
+            input.value = ""; // consenti di ricaricare lo stesso file
+            input.click();
+          }else{
+            Ve("Caricamento", "Input file non disponibile.");
+          }
+        }catch(err){
+          console.warn("openPayrollUploadPicker", err);
+          try{ Ve("Caricamento", "Impossibile aprire il selettore file."); }catch(_e){}
+        }
+      }
+
+
       
       // Dipendenti (vista admin) — lista utenti + storico invii + modifica dati
       function ensureEmployeesState(){
@@ -6319,9 +6357,9 @@ async function Yi() {
 
       // Back button removed per nuova UX
       U("btnHeaderPayrollUser")?.addEventListener("click", async () => { await Fi().catch(e=>{console.warn("payroll user load error",e);try{Ve("Buste paga","Impossibile caricare (permessi o rete).");}catch(_){}}); scrollToSection("userArea"); });
-      U("btnHeaderPayrollAdmin")?.addEventListener("click", async () => { await openAdminModalFlow(); });
+      U("btnHeaderPayrollAdmin")?.addEventListener("click", () => { try{ openPayrollUploadPicker(); }catch(_e){} });
       bindPayrollBtn("#btnOpenPayrollUser", async () => { await Fi().catch(e=>{console.warn("payroll user load error",e);try{Ve("Buste paga","Impossibile caricare (permessi o rete).");}catch(_){}}); scrollToSection("userArea"); });
-      bindPayrollBtn("#btnOpenPayrollAdmin", () => { openAdminModalFlow("payrollDrop", { autoUpload:true, forceUpload:true }); });
+      bindPayrollBtn("#btnOpenPayrollAdmin", () => { openPayrollUploadPicker(); });
       bindPayrollBtn("#btnOpenSendLogModal", async () => { await openSendLogModal(); });
       U("btnPayrollPreviewPage")?.addEventListener("click", () => openPayrollPdfWindow());
       U("btnPayrollUserReload")?.addEventListener("click", async ()=>{ try{ await Fi(); }catch(_e){} try{ startPayrollUserDocsWatch(); }catch(_e){} });
@@ -6730,7 +6768,21 @@ const payrollDirAutofill = () => {
       U("dirEmailInput")?.addEventListener("change", payrollDirAutofill);
       U("dirEmailInput")?.addEventListener("input", payrollDirAutofill);
       U("dirCfInput")?.addEventListener("change", payrollDirAutofill);
-      const t = U("payrollDrop"), n = U("payrollFileInput"), o = e => { N.payroll.admin.files = e && e.length ? [e[0]] : [], Bi(), Vi() };
+      const t = U("payrollDrop"), n = U("payrollFileInput");
+      const o = (files) => {
+        const has = files && files.length;
+        N.payroll.admin.files = has ? [files[0]] : [];
+        Bi();
+
+        // Se l’utente annulla la selezione, non apriamo nulla
+        if(!has) return;
+
+        // Apri la modale SOLO dopo la selezione (niente modale intermedia con un altro bottone "carica")
+        try{ Di("extracting"); }catch(_e){}
+        try{ toggleAdminModal(true, "adminArea"); }catch(_e){}
+
+        Vi();
+      };
       t && (["dragover", "dragenter"].forEach(e => t.addEventListener(e, e => { e.preventDefault(), t.classList.add("drag") })), ["dragleave", "drop"].forEach(e => t.addEventListener(e, e => { e.preventDefault(), t.classList.remove("drag") })), t.addEventListener("drop", e => { e.preventDefault(), e.dataTransfer?.files?.length && o(e.dataTransfer.files) }), t.addEventListener("click", e => { if(e?.target?.closest && e.target.closest(".uploadActions")) return; n?.click() }));
       n?.addEventListener("change", () => o(n.files));
       U("btnPayrollUpload")?.addEventListener("click", () => { const f = N.payroll.admin.files?.[0]; if (!f) { n?.click(); return; } Vi(); });
