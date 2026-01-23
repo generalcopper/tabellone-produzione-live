@@ -4106,23 +4106,18 @@ Riallineare lo scarico aggiornando i movimenti?`);
       const dot = st.ok ? '<span class="dot ok"></span>' : '<span class="dot bad"></span>';
 
       const fidRow = String(st.fp?.id || st.fp?._id || "").trim();
-      const fpCat = norm(st.fp?.categoryKeyLower || st.fp?.categoryKey || st.fp?.category || st.fp?.catKey || "");
       const rowWhy = String(st.why || "");
       const rowCls = st.ok ? '' : ' daneaRowBad';
       const rowStyle = ' style="cursor:pointer;"';
-      let rowTitle = st.ok ? ((fpCat && fpCat !== "singolo") ? "Apri Categorie PF" : "Apri Inventario PF") : "Da configurare";
+      let rowTitle = st.ok ? "Apri distinta base" : "Configura distinta base";
       if (st.why === "nocode"){
         rowTitle = "Manca il codice articolo nell’XML (correggi in Danea/Easyfatt)";
-      } else if (st.why === "missing"){
-        rowTitle = "Prodotto finito non importato: crea/associa in PF";
       } else if (st.why === "agent_stock"){
         const have = Number(st.stock || 0);
         const need = Number(st.need || 0);
         rowTitle = `Scorta PF insufficiente: disponibili ${have} • richiesti ${need}`;
       } else if (st.why === "agent"){
-        rowTitle = "Apri inventario PF";
-      } else if (st.why === "empty"){
-        rowTitle = (fpCat && fpCat !== "singolo") ? "Configura in Categorie PF" : "Configura in Inventario PF";
+        rowTitle = "Apri prodotto finito";
       }
 
       let act = "";
@@ -4131,20 +4126,16 @@ Riallineare lo scarico aggiornando i movimenti?`);
       } else if (st.why === "missing"){
         act = `<button class="btn btn-secondary btn-xs jsDaneaImportFp" data-code="${escAttr(code)}" data-desc="${escAttr(desc)}" type="button">Importa</button>`;
       } else if (st.why === "empty"){
-        act = (fpCat && fpCat !== "singolo")
-          ? `<button class="btn btn-secondary btn-xs jsDaneaGoFPCat" data-key="${escAttr(fpCat)}" type="button">Categorie PF</button>`
-          : `<button class="btn btn-secondary btn-xs jsDaneaGoFinishedInv" data-code="${escAttr(code)}" type="button">Inventario PF</button>`;
+        const fid = String(st.fp?.id || st.fp?._id || "").trim();
+        act = `<button class="btn btn-secondary btn-xs jsDaneaConfigFp" data-fpid="${escAttr(fid)}" type="button">Configura</button>`;
       } else if (st.why === "agent_stock"){
         act = `<button class="btn btn-secondary btn-xs jsDaneaGoFinishedInv" data-code="${escAttr(code)}" type="button">Inventario PF</button>`;
-      } else if (st.why === "agent"){
-        act = `<button class="btn btn-secondary btn-xs jsDaneaGoFinishedInv" data-code="${escAttr(code)}" type="button">Inventario PF</button>`;
       } else {
-        act = (fpCat && fpCat !== "singolo")
-          ? `<button class="btn btn-ghost btn-xs jsDaneaGoFPCat" data-key="${escAttr(fpCat)}" type="button">Categorie PF</button>`
-          : `<button class="btn btn-ghost btn-xs jsDaneaGoFinishedInv" data-code="${escAttr(code)}" type="button">Inventario PF</button>`;
+        const fid = String(st.fp?.id || st.fp?._id || "").trim();
+        act = fid ? `<button class="btn btn-ghost btn-xs jsDaneaOpenFp" data-fpid="${escAttr(fid)}" type="button">Apri</button>` : `<span class="td-muted">OK</span>`;
       }
 
-      return `<tr class="jsDaneaItemRow${rowCls}" data-code="${escAttr(code)}" data-desc="${escAttr(desc)}" data-fpid="${escAttr(fidRow)}" data-fpcat="${escAttr(fpCat)}" data-why="${escAttr(rowWhy)}" title="${escAttr(rowTitle)}"${rowStyle}>
+      return `<tr class="jsDaneaItemRow${rowCls}" data-code="${escAttr(code)}" data-desc="${escAttr(desc)}" data-fpid="${escAttr(fidRow)}" data-why="${escAttr(rowWhy)}" title="${escAttr(rowTitle)}"${rowStyle}>
         <td data-label="">${dot}</td>
         <td data-label="Codice"><span class="kbd">${esc(code || "—")}</span></td>
         <td data-label="Articolo">${esc(desc || "—")}</td>
@@ -4177,7 +4168,7 @@ Riallineare lo scarico aggiornando i movimenti?`);
       } else {
         msg = isAgenti
           ? "Controlla le righe rosse: per Magazzino agenti serve il prodotto finito importato E giacenza PF sufficiente."
-          : "Configura le righe rosse in Categorie PF / Inventario PF per poter completare.";
+          : "Configura le righe rosse (distinta base) per poter completare.";
         if (hasNoCode){
           msg += " (In più: ci sono righe senza codice nell’XML — se è merce va corretto in Danea/Easyfatt.)";
         }
@@ -5441,7 +5432,8 @@ function bindEvents(){
         if (!root) return;
 
         const btnImport = e.target?.closest?.("button.jsDaneaImportFp");
-        const btnGoCat = e.target?.closest?.("button.jsDaneaGoFPCat");
+        const btnConfig = e.target?.closest?.("button.jsDaneaConfigFp");
+        const btnOpenFp = e.target?.closest?.("button.jsDaneaOpenFp");
         const btnGoFpInv = e.target?.closest?.("button.jsDaneaGoFinishedInv");
 
         const prefillNewFinishedProduct = (code, desc) => {
@@ -5475,21 +5467,17 @@ function bindEvents(){
           return;
         }
 
-        if (btnGoCat){
+        if (btnOpenFp){
           e.preventDefault(); e.stopPropagation();
-          const key = String(btnGoCat.getAttribute("data-key") || "").trim().toLowerCase();
-          if (!key) return;
-          try{
-            if (window.HubInv && typeof window.HubInv.setView === "function"){
-              window.HubInv.setView("fpCategories");
-            }
-          }catch(_){ }
-          try{
-            if (window.HubFPCategories && typeof window.HubFPCategories.openDetail === "function"){
-              window.HubFPCategories.openDetail(key);
-              return;
-            }
-          }catch(_){ }
+          const id = String(btnOpenFp.getAttribute("data-fpid") || "").trim();
+          if (id) { try{ window.openFinishedProductModal && window.openFinishedProductModal(id); }catch(_){ } }
+          return;
+        }
+
+        if (btnConfig){
+          e.preventDefault(); e.stopPropagation();
+          const id = String(btnConfig.getAttribute("data-fpid") || "").trim();
+          if (id) { try{ window.openFinishedProductModal && window.openFinishedProductModal(id); }catch(_){ } }
           return;
         }
 
@@ -5513,7 +5501,7 @@ function bindEvents(){
           return;
         }
 
-        // click sulla riga (anche senza bottone): porta alla configurazione PF
+        // click sulla riga (anche senza bottone): apre la distinta base
         const tr = e.target?.closest?.("tr.jsDaneaItemRow");
         if (tr){
           e.preventDefault(); e.stopPropagation();
@@ -5524,43 +5512,16 @@ function bindEvents(){
             return;
           }
 
+          const fid = String(tr.getAttribute("data-fpid") || "").trim();
           const code = String(tr.getAttribute("data-code") || "").trim();
           const desc = String(tr.getAttribute("data-desc") || "").trim() || code;
-          const catKey = String(tr.getAttribute("data-fpcat") || "").trim().toLowerCase();
 
           try{
-            // Se non è importato: crea/compila prodotto finito
-            if (why === "missing"){
+            if (fid){
+              window.openFinishedProductModal && window.openFinishedProductModal(fid);
+            } else {
               prefillNewFinishedProduct(code, desc);
-              return;
             }
-
-            // Se appartiene a una categoria: apri Categorie PF
-            if (catKey && catKey !== "singolo"){
-              try{
-                if (window.HubInv && typeof window.HubInv.setView === "function"){
-                  window.HubInv.setView("fpCategories");
-                }
-              }catch(_){ }
-              try{
-                if (window.HubFPCategories && typeof window.HubFPCategories.openDetail === "function"){
-                  window.HubFPCategories.openDetail(catKey);
-                  return;
-                }
-              }catch(_){ }
-            }
-
-            // Altrimenti: apri Inventario PF filtrato sul codice
-            try{
-              if (window.HubInv && typeof window.HubInv.setView === "function"){
-                window.HubInv.setView("finishedInventory");
-                if (code){
-                  const s = document.getElementById("fpInvSearch");
-                  if (s) s.value = code;
-                }
-                try{ window.HubInv.renderAll && window.HubInv.renderAll(); }catch(_){ }
-              }
-            }catch(_){ }
           }catch(err){
             console.error(err);
           }
@@ -7409,6 +7370,11 @@ function renderList(){
     fpByCode:new Map(),
     fpById:new Map(),
 
+    // alias condivisi (dedup componenti: stesso alias usato da >=2 codici)
+    sharedAliasKeyByCode:new Map(),   // codeLower -> aliasKey
+    sharedAliasLabelByKey:new Map(),  // aliasKey -> alias label
+    sharedAliasCodesByKey:new Map(),  // aliasKey -> [codes]
+
     // dettaglio: può essere "category" o "product" (singolo)
     detailMode:"category",
     selectedKey:"",
@@ -7835,6 +7801,40 @@ try{
       if (code) S.prodMap.set(code, p);
       if (id && !S.prodMap.has(id)) S.prodMap.set(id, p);
     }
+
+    // cache alias condivisi: solo se lo stesso alias è usato da >=2 codici diversi
+    S.sharedAliasKeyByCode = new Map();
+    S.sharedAliasLabelByKey = new Map();
+    S.sharedAliasCodesByKey = new Map();
+    try{
+      const tmp = new Map(); // aliasKey -> { alias, codesByLow: Map(low->code) }
+      for (const p of (S.products || [])){
+        if (!p) continue;
+        const c = String(p.code || "").trim();
+        if (!c) continue;
+        const al = String(p.alias || p.aliasName || "").trim();
+        if (!al) continue;
+        const ak = (typeof normTextKey === "function") ? normTextKey(al) : __fpCatKey(al);
+        if (!ak) continue;
+        const rec = tmp.get(ak) || { alias: al, codesByLow: new Map() };
+        if (!rec.alias && al) rec.alias = al;
+        const low = c.toLowerCase();
+        if (!rec.codesByLow.has(low)) rec.codesByLow.set(low, c);
+        tmp.set(ak, rec);
+      }
+      for (const [ak, rec] of tmp.entries()){
+        const codes = rec && rec.codesByLow ? Array.from(rec.codesByLow.values()).filter(Boolean) : [];
+        if (codes.length >= 2){
+          S.sharedAliasLabelByKey.set(ak, String(rec.alias || "").trim());
+          S.sharedAliasCodesByKey.set(ak, codes.slice());
+          for (const c of codes){
+            const low = String(c || "").trim().toLowerCase();
+            if (low) S.sharedAliasKeyByCode.set(low, ak);
+          }
+        }
+      }
+    }catch(_){ }
+
     S.fpByCode = new Map();
     S.fpById = new Map();
     for (const fp of (S.finished || [])){
@@ -8030,6 +8030,8 @@ try{
     };
 
     const out = [];
+    const bestByGroup = (kind !== "member") ? new Map() : null;
+
     for (const it of list){
       const code = String(it?.code || "").trim();
       const nameRaw = String(it?.name || it?.nome || "").trim();
@@ -8054,11 +8056,39 @@ try{
       const uom = String(it?.uom || it?.um || it?.unit || "").trim();
       const disabled = !!(already && code && already.has(norm(code)));
 
-      out.push({ code, name: nameDisp, uom, score: sc, disabled, __cat: compCat || "" });
+      const rec = { code, name: nameDisp, uom, score: sc, disabled, __cat: compCat || "" };
+
+      // Componenti: se più codici condividono lo stesso alias, mostra una sola voce (dedup)
+      if (kind !== "member"){
+        let gk = "";
+        try{
+          const low = String(code || "").trim().toLowerCase();
+          const ak = (S.sharedAliasKeyByCode && S.sharedAliasKeyByCode.get) ? (S.sharedAliasKeyByCode.get(low) || "") : "";
+          gk = ak ? ("alias:" + ak) : ("code:" + low);
+        }catch(_){
+          gk = "code:" + String(code || "").trim().toLowerCase();
+        }
+
+        const prev = bestByGroup.get(gk);
+        if (!prev){
+          bestByGroup.set(gk, rec);
+        } else {
+          if (Number(rec.score) > Number(prev.score)) bestByGroup.set(gk, rec);
+          else if (Number(rec.score) === Number(prev.score)){
+            const a = String(rec.code || "");
+            const b = String(prev.code || "");
+            if (a && b && a.localeCompare(b, "it", { sensitivity:"base" }) < 0) bestByGroup.set(gk, rec);
+          }
+        }
+      } else {
+        out.push(rec);
+      }
     }
 
-    out.sort((a,b) => (b.score - a.score) || String(a.name||a.code||"").localeCompare(String(b.name||b.code||""), "it", { sensitivity:"base" }));
-    return out.slice(0, cap);
+    const res = (kind !== "member") ? Array.from(bestByGroup.values()) : out;
+
+    res.sort((a,b) => (b.score - a.score) || String(a.name||a.code||"").localeCompare(String(b.name||b.code||""), "it", { sensitivity:"base" }));
+    return res.slice(0, cap);
   }
 
   function __fpCatHideSuggest(kind){
@@ -8418,13 +8448,7 @@ try{
           const code = String(c?.code||"").trim();
           const name0 = String(c?.name||"").trim();
           let name = name0;
-
-          // Alias/descrizione live dall'anagrafica (aggiorna subito all'apertura)
-          let alias = "";
           if (code){
-            try{
-              if (typeof getAliasForCode === "function") alias = String(getAliasForCode(code) || "").trim();
-            }catch(_){ }
             try{
               if (typeof getDisplayNameForCode === "function"){
                 const dn = getDisplayNameForCode(code, name0 || code);
@@ -8432,30 +8456,12 @@ try{
               }
             }catch(_){ }
           }
-
-          // Articolo: prova a mostrare il nome "vero" (non l'alias) quando c'è
-          let article = "";
-          if (code){
-            try{
-              const p = (typeof findProductByCode === "function") ? findProductByCode(code) : null;
-              article = String(p?.name || p?.nome || "").trim();
-            }catch(_){ }
-          }
-          if (!article) article = name || code;
-
-          const codeShown = (alias || code);
-          const codeSub = (alias && code && alias !== code) ? code : "";
-
           const qtyRaw = String(c?.qtyRaw||"").trim();
           const qty = (c?.qty != null) ? String(c.qty) : (qtyRaw || "");
           const uom = String(c?.uom||"").trim();
-
           return `<tr class="jsFpCatCompRow" data-idx="${idx}">
-            <td>
-              <span class="kbd">${esc(codeShown || "—")}</span>
-              ${codeSub ? `<div class="td-muted" style="margin-top:4px; font-size:11px;">${esc(codeSub)}</div>` : ``}
-            </td>
-            <td>${esc(article || "—")}</td>
+            <td>${esc(code)}</td>
+            <td>${esc(name || code)}</td>
             <td class="qty">${esc(qty)}</td>
             <td>${esc(uom)}</td>
             <td style="text-align:right;"><button class="btn btn-ghost mini jsFpCatCompDel" type="button">–</button></td>
@@ -8514,13 +8520,7 @@ try{
           const code = String(c?.code||"").trim();
           const name0 = String(c?.name||"").trim();
           let name = name0;
-
-          // Alias/descrizione live dall'anagrafica (aggiorna subito all'apertura)
-          let alias = "";
           if (code){
-            try{
-              if (typeof getAliasForCode === "function") alias = String(getAliasForCode(code) || "").trim();
-            }catch(_){ }
             try{
               if (typeof getDisplayNameForCode === "function"){
                 const dn = getDisplayNameForCode(code, name0 || code);
@@ -8528,29 +8528,12 @@ try{
               }
             }catch(_){ }
           }
-
-          // Articolo: prova a mostrare il nome "vero" (non l'alias) quando c'è
-          let article = "";
-          if (code){
-            try{
-              const p = (typeof findProductByCode === "function") ? findProductByCode(code) : null;
-              article = String(p?.name || p?.nome || "").trim();
-            }catch(_){ }
-          }
-          if (!article) article = name || code;
-
-          const codeShown = (alias || code);
-          const codeSub = (alias && code && alias !== code) ? code : "";
-
           const qtyRaw = String(c?.qtyRaw||"").trim();
           const qty = (c?.qty != null) ? String(c.qty) : (qtyRaw || "");
           const uom = String(c?.uom||"").trim();
           return `<tr class="jsFpCatCompRow" data-idx="${idx}">
-            <td>
-              <span class="kbd">${esc(codeShown || "—")}</span>
-              ${codeSub ? `<div class="td-muted" style="margin-top:4px; font-size:11px;">${esc(codeSub)}</div>` : ``}
-            </td>
-            <td>${esc(article || "—")}</td>
+            <td>${esc(code)}</td>
+            <td>${esc(name || code)}</td>
             <td class="qty">${esc(qty)}</td>
             <td>${esc(uom)}</td>
             <td style="text-align:right;"><button class="btn btn-ghost mini jsFpCatCompDel" type="button">–</button></td>
@@ -9056,7 +9039,21 @@ Verrà aggiornata anche la chiave su tutti i prodotti finiti.`);
     const pq = __fpCatParseQtyForTarget(q, uomTarget);
 
     const bom = Array.isArray(S.draft.bom) ? S.draft.bom : [];
-    const existingIdx = bom.findIndex(x => norm(x?.code) === norm(code));
+    let existingIdx = bom.findIndex(x => norm(x?.code) === norm(code));
+
+    // Alias condivisi: un componente deve essere unico anche se seleziono un "fratello" con stesso alias
+    try{
+      const ak = (S.sharedAliasKeyByCode && S.sharedAliasKeyByCode.get) ? (S.sharedAliasKeyByCode.get(norm(code)) || "") : "";
+      if (ak){
+        const idx2 = bom.findIndex(x => {
+          const c2 = norm(x?.code || "");
+          if (!c2) return false;
+          const ak2 = (S.sharedAliasKeyByCode && S.sharedAliasKeyByCode.get) ? (S.sharedAliasKeyByCode.get(c2) || "") : "";
+          return ak2 && ak2 === ak;
+        });
+        if (idx2 >= 0) existingIdx = idx2;
+      }
+    }catch(_){ }
 
     const item = {
       productId: String(p?.id || "").trim() || keyToId(norm(code)),
@@ -23424,11 +23421,7 @@ function __fpRenderSmartBrowse(){
         const code = String(c.code || "").trim();
         const name0 = String(c.name || "").trim();
         let name = name0;
-
-        // Alias live dall'anagrafica (aggiorna subito all'apertura)
-        let alias = "";
         if (code){
-          try{ if (typeof getAliasForCode === "function") alias = String(getAliasForCode(code) || "").trim(); }catch(_){ }
           try{
             if (typeof getDisplayNameForCode === "function"){
               const dn = getDisplayNameForCode(code, name0 || code);
@@ -23436,29 +23429,12 @@ function __fpRenderSmartBrowse(){
             }
           }catch(_){ }
         }
-
-        // Articolo: prova a mostrare il nome "vero" (non l'alias) quando c'è
-        let article = "";
-        if (code){
-          try{
-            const p = (typeof findProductByCode === "function") ? findProductByCode(code) : null;
-            article = String(p?.name || p?.nome || "").trim();
-          }catch(_){ }
-        }
-        if (!article) article = name || code;
-
-        const codeShown = (alias || code);
-        const codeSub = (alias && code && alias !== code) ? code : "";
-
         const qty = __fpFmtQty(c);
         const uom = String(c.uom || "").trim();
         return `
           <tr data-i="${i}">
-            <td data-label="Codice">
-              <span class="kbd">${escapeHtml(codeShown || "—")}</span>
-              ${codeSub ? `<div class="td-muted" style="margin-top:4px; font-size:11px;">${escapeHtml(codeSub)}</div>` : ``}
-            </td>
-            <td data-label="Articolo">${escapeHtml(article || "—")}</td>
+            <td data-label="Codice"><span class="kbd">${escapeHtml(code || "—")}</span></td>
+            <td data-label="Articolo">${escapeHtml(name || "—")}</td>
             <td data-label="Q.tà" class="qty">
               <input class="qtyEditInput jsFpCompQty" data-i="${i}" value="${escapeHtmlAttr(qty)}" placeholder="es. 1/20" style="width: 100%; max-width: 150px;" />
             </td>
