@@ -2844,6 +2844,56 @@ flex-direction: column !important;
 
   </style>
 
+
+  <style id="fixedBarsRespectMargins">
+    :root{
+      /* fallback (se JS non riesce a misurare) */
+      --fixed-header-h: calc(var(--header-height) + var(--safe-top));
+      --fixed-footer-h: calc(72px + var(--safe-bot));
+    }
+
+    /* Contenuti mai sotto header/footer fissi */
+    .pageShell{ padding-top: var(--fixed-header-h) !important; }
+    .wrap{ padding-bottom: max(calc(96px + var(--safe-bot)), calc(var(--fixed-footer-h) + 18px)) !important; }
+
+    /* Overlays: non coprono mai header/footer */
+    #adminModal.adminModalOverlay,
+    #sendLogModal.adminModalOverlay,
+    .pdfPreviewOverlay,
+    .authOverlay,
+    .pendingOverlay{
+      inset: var(--fixed-header-h) 0 var(--fixed-footer-h) 0 !important;
+    }
+
+    /* Padding interno coerente con i margini/safe-area laterali */
+    #adminModal.adminModalOverlay,
+    #sendLogModal.adminModalOverlay{
+      padding: 16px calc(14px + var(--safe-right)) 16px calc(14px + var(--safe-left)) !important;
+    }
+    .pdfPreviewOverlay,
+    .authOverlay,
+    .pendingOverlay{
+      padding: 12px calc(14px + var(--safe-right)) 12px calc(14px + var(--safe-left)) !important;
+    }
+
+    
+    /* Shell delle overlay: non oltre l'area disponibile */
+    .pdfPreviewShell,
+    .authShell,
+    .pendingShell{
+      max-height: 100% !important;
+    }
+
+/* Se qualche patch imposta height:100dvh, lo rientriamo nell’area disponibile */
+    @media (min-width:900px){
+      #adminModal .adminModalShell,
+      #sendLogModal .adminModalShell{
+        max-height: 100% !important;
+        height: auto !important;
+      }
+    }
+  </style>
+
 </head>
 <body>
   <div class="bootSpinner" id="bootSpinner" aria-hidden="true"><div class="spin"></div></div>
@@ -3169,6 +3219,22 @@ flex-direction: column !important;
     window.addEventListener("orientationchange", ()=>setTimeout(updateAppHeight, 160), { passive:true });
     updateAppHeight();
     setTimeout(updateAppHeight, 320);
+
+    const syncFixedBars = ()=>{
+      try{
+        const header = document.querySelector("header.headerRow");
+        const footer = document.getElementById("appFooter");
+        const h = header ? Math.round(header.getBoundingClientRect().height) : 0;
+        const f = footer ? Math.round(footer.getBoundingClientRect().height) : 0;
+        if(h) document.documentElement.style.setProperty("--fixed-header-h", `${h}px`);
+        if(f) document.documentElement.style.setProperty("--fixed-footer-h", `${f}px`);
+      }catch(_e){}
+    };
+    window.addEventListener("resize", ()=>requestAnimationFrame(syncFixedBars), { passive:true });
+    window.addEventListener("orientationchange", ()=>setTimeout(syncFixedBars, 160), { passive:true });
+    syncFixedBars();
+    setTimeout(syncFixedBars, 320);
+
 
     const toast = document.getElementById("toast");
     const toastTitle = document.getElementById("toastTitle");
@@ -5726,10 +5792,35 @@ async function Yi() {
         loadPayrollSentCounts();
       }
 
-      async function openAdminModalFlow(targetPane){
+      async function openAdminModalFlow(targetPane, opts){
         if(!(N.user && N.user.isAdmin)){ Ve("Solo admin", "Funzione riservata."); return; }
-        await zi();
+
+        const options = opts || {};
+
+        // Se richiesto, forza sempre la tab "Carica" prima di aprire la modale
+        try{
+          if(options.forceUpload){
+            try{ N.payroll = N.payroll || {}; N.payroll.admin = N.payroll.admin || {}; N.payroll.admin.lastUploadStep = "idle"; }catch(_e){}
+            try{ Di("idle"); }catch(_e){}
+          }
+        }catch(_e){}
+
+        // Apri subito la modale (zero attese)
         toggleAdminModal(true, targetPane || "adminArea");
+
+        // Se richiesto, apri subito il selettore file (serve gesto utente)
+        if(options.autoUpload){
+          try{
+            const input = U("payrollFileInput");
+            if(input){
+              input.value = ""; // consenti di ricaricare lo stesso file
+              input.click();
+            }
+          }catch(_e){}
+        }
+
+        // Carica dati admin in background (non blocca la UX)
+        try{ zi(); }catch(_e){}
       }
 
       
@@ -6230,7 +6321,7 @@ async function Yi() {
       U("btnHeaderPayrollUser")?.addEventListener("click", async () => { await Fi().catch(e=>{console.warn("payroll user load error",e);try{Ve("Buste paga","Impossibile caricare (permessi o rete).");}catch(_){}}); scrollToSection("userArea"); });
       U("btnHeaderPayrollAdmin")?.addEventListener("click", async () => { await openAdminModalFlow(); });
       bindPayrollBtn("#btnOpenPayrollUser", async () => { await Fi().catch(e=>{console.warn("payroll user load error",e);try{Ve("Buste paga","Impossibile caricare (permessi o rete).");}catch(_){}}); scrollToSection("userArea"); });
-      bindPayrollBtn("#btnOpenPayrollAdmin", async () => { await openAdminModalFlow(); });
+      bindPayrollBtn("#btnOpenPayrollAdmin", () => { openAdminModalFlow("payrollDrop", { autoUpload:true, forceUpload:true }); });
       bindPayrollBtn("#btnOpenSendLogModal", async () => { await openSendLogModal(); });
       U("btnPayrollPreviewPage")?.addEventListener("click", () => openPayrollPdfWindow());
       U("btnPayrollUserReload")?.addEventListener("click", async ()=>{ try{ await Fi(); }catch(_e){} try{ startPayrollUserDocsWatch(); }catch(_e){} });
