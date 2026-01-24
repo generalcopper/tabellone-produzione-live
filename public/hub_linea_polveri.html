@@ -819,7 +819,6 @@
 
 
   const ISSUE_EMAIL_ENABLED = false;
-  const START_ORDER_EMAIL_ENABLED = false; // Email SOLO su chiusura ordine (avvio senza mail)
   const ISSUE_EMAIL_TO = "matteo@generalcoppersrl.com";
   const FAT_VALUE_KEY = "FATTURATO_EUR_CACHE";
   const NOTIF_READ_KEY = "POLVERI_NOTIF_READ_V1";
@@ -829,6 +828,28 @@
   const NOTIF_COLLECTION = "powderNotifications";
   const MAIL_COLLECTION = "email";
   const EMAIL_TO_MATTEO = "matteo@generalcoppersrl.com";
+
+  // Email policy (2026-01): invio automatico ATTIVO, ma DISATTIVATO per Avvio Ordine.
+  //  - "off": nessuna email automatica
+  //  - "no_start": tutte le email tranne l'avvio ordine
+  //  - "start_only": email solo quando si avvia un ordine
+  //  - "all": comportamento precedente (tutte le email)
+  const AUTO_EMAIL_POLICY = "no_start";
+
+  function autoEmailAllowed(kind){
+    if(AUTO_EMAIL_POLICY === "all") return true;
+    if(AUTO_EMAIL_POLICY === "off") return false;
+    if(AUTO_EMAIL_POLICY === "start_only") return kind === "order_start";
+    if(AUTO_EMAIL_POLICY === "no_start") return kind !== "order_start";
+    return true;
+  }
+
+
+async function enqueueAutoEmail(kind, subject, textBody, htmlBody){
+    if(!autoEmailAllowed(kind)) return;
+    return enqueueMatteoEmail(subject, textBody, htmlBody);
+  }
+
   const ACTION_LOG_COLLECTION = "powderActionLogs";
   const ACTION_LOG_LIMIT = 200;
 
@@ -3813,7 +3834,7 @@ function hideLogin(){
               `Motivo: ${reason}`,
               `Linea: polveri`
             ].join("\n");
-            await enqueueMatteoEmail(subj, txt, null);
+            await enqueueAutoEmail("absence_request", subj, txt, null);
           }catch(_e){}
           try{
             await addActionLog({
@@ -8458,7 +8479,7 @@ renderStats();
       audience: "all"});
 
 
-    try{ await enqueueMatteoEmail(`[Hub Polveri] ${title||'Notifica'}`, `${body||''}
+    try{ await enqueueAutoEmail("admin_notification", `[Hub Polveri] ${title||'Notifica'}`, `${body||''}
 
 —
 Da: ${state.user?.fullName||'Sistema'}
@@ -8481,7 +8502,7 @@ Linea: polveri`, null); }catch(_e){}
       adminOnly: true
     });
 
-    try{ await enqueueMatteoEmail(`[Hub Polveri] ${title||"Notifica"}`, `${body||""}\n\n—\nDa: ${state.user?.fullName||"Sistema"}\nLinea: polveri`, null); }catch(_e){}
+    try{ await enqueueAutoEmail("admin_only_notification", `[Hub Polveri] ${title||"Notifica"}`, `${body||""}\n\n—\nDa: ${state.user?.fullName||"Sistema"}\nLinea: polveri`, null); }catch(_e){}
   }
   function openNotifModal(){
     const modal = $("notifModal");
@@ -8696,8 +8717,6 @@ Linea: polveri`, null); }catch(_e){}
         });
       }catch(_e){}
       
-      if(START_ORDER_EMAIL_ENABLED){
-      
       try{
         const subj = `[Hub Polveri] Avvio ordine ${prod.orderNo||""} • ${prod.customer||""}`;
         const txt = [
@@ -8709,12 +8728,9 @@ Linea: polveri`, null); }catch(_e){}
           `Kg stimati: ${Number(totalKg||0).toFixed(2)}`,
           `Ordine completo: ${isFullOrderStart ? "Sì" : "No"}`,
           `Linea: polveri`
-        ].join("
-");
-        await enqueueMatteoEmail(subj, txt, null);
+        ].join("\n");
+        await enqueueAutoEmail("order_start", subj, txt, null);
       }catch(_e){}
-      
-      }
       const machineHint = machineHintFromLines(selectedLines);
       const machineMsg = machineHint==="small" ? " Utilizzare macchina piccola per fare questo ordine." : " Utilizzare macchina grande.";
       speak(`Ordine: operatore ${opName} ha avviato ordine ${prod.orderNo} del cliente ${prod.customer}.${machineMsg}`);
@@ -9378,7 +9394,7 @@ body.innerHTML = `
                                 isFullOrder: Boolean(askConfirm)
                               });
               
-                              await enqueueMatteoEmail(email.subject, email.text, email.html);
+                              await enqueueAutoEmail("order_close", email.subject, email.text, email.html);
                             }catch(_e){}
               try{
                 await addActionLog({
