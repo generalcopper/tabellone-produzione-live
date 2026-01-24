@@ -926,6 +926,20 @@
     line-height:1.25;
   }
 
+  .kioskLinesViewport{
+    max-height: clamp(320px, 56vh, 760px);
+    overflow-y: auto;
+    overflow-x: hidden;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+  .kioskLinesViewport::-webkit-scrollbar{ width:0; height:0; }
+  .kioskLinesScroll{
+    display:flex;
+    flex-direction:column;
+  }
+
+
   .kioskLines{
     display:flex;
     flex-direction:column;
@@ -12168,6 +12182,8 @@ U("payrollAdminClose")?.addEventListener("click", () => {
 
     if(!listEl) return;
 
+    kioskStopAutoScrollAll();
+
     const groups = kioskGroupActiveProductions(state.activeProductions || []);
     const ordersCount = groups.length;
 
@@ -12254,7 +12270,7 @@ U("payrollAdminClose")?.addEventListener("click", () => {
           </div>
         </div>
         <div class="bd">
-          <div class="kioskLines">${linesHtml}</div>
+          <div class="kioskLinesViewport" data-speed-px="28"><div class="kioskLinesScroll"><div class="kioskLines">${linesHtml}</div></div></div>
         </div>
       `;
 
@@ -12262,7 +12278,111 @@ U("payrollAdminClose")?.addEventListener("click", () => {
     }
 
     listEl.appendChild(frag);
+    kioskSetupAutoScrollAll();
   }
+
+
+  // =========================
+  // KIOSK: auto-scroll righe ordine (solo righe, header fisso)
+  // =========================
+  globalThis.__KIOSK_AUTO_SCROLL_CLEANUP__ = globalThis.__KIOSK_AUTO_SCROLL_CLEANUP__ || [];
+
+  function kioskStopAutoScrollAll(){
+    const arr = globalThis.__KIOSK_AUTO_SCROLL_CLEANUP__;
+    if(Array.isArray(arr)){
+      for(const fn of arr){
+        try{ if(typeof fn === "function") fn(); }catch(_e){}
+      }
+    }
+    globalThis.__KIOSK_AUTO_SCROLL_CLEANUP__ = [];
+  }
+
+  function kioskSetupAutoScrollAll(){
+    try{
+      if(!state || !state.kioskMode) return;
+      const nodes = document.querySelectorAll("#kioskOrdersList .kioskLinesViewport");
+      if(!nodes || !nodes.length) return;
+      for(const vp of nodes){
+        const stop = kioskSetupAutoScrollViewport(vp);
+        if(typeof stop === "function"){
+          globalThis.__KIOSK_AUTO_SCROLL_CLEANUP__.push(stop);
+        }
+      }
+    }catch(_e){}
+  }
+
+  function kioskSetupAutoScrollViewport(viewport){
+    try{
+      if(!viewport) return null;
+
+      const scroller = viewport; // scroll container
+      const wrap = viewport.querySelector(".kioskLinesScroll") || viewport;
+      const base = wrap.querySelector(".kioskLines");
+      if(!base) return null;
+
+      // cleanup old clones
+      try{
+        wrap.querySelectorAll('[data-kiosk-clone="1"]').forEach(n=>n.remove());
+      }catch(_e){}
+
+      // reset position
+      try{ scroller.scrollTop = 0; }catch(_e){}
+
+      const vpH = scroller.clientHeight || 0;
+      const contentH = base.scrollHeight || base.getBoundingClientRect().height || 0;
+
+      // if it fits, no auto-scroll
+      if(!(vpH > 0) || !(contentH > vpH + 6)) return null;
+
+      // duplicate content for seamless loop
+      const clone = base.cloneNode(true);
+      clone.dataset.kioskClone = "1";
+      clone.setAttribute("aria-hidden", "true");
+      clone.style.marginTop = "0";
+      clone.style.paddingTop = "0";
+      wrap.appendChild(clone);
+
+      const speed = Number(viewport.dataset.speedPx || "28") || 28; // px/sec
+      const loopAt = contentH;
+
+      let running = true;
+      let last = (typeof performance !== "undefined" ? performance.now() : Date.now());
+
+      function tick(now){
+        if(!running) return;
+        if(document.hidden){
+          last = now;
+          requestAnimationFrame(tick);
+          return;
+        }
+        const dt = Math.max(0, now - last);
+        last = now;
+        try{
+          scroller.scrollTop += (speed * dt / 1000);
+          if(scroller.scrollTop >= loopAt){
+            scroller.scrollTop = scroller.scrollTop - loopAt;
+          }
+        }catch(_e){}
+        requestAnimationFrame(tick);
+      }
+      requestAnimationFrame(tick);
+
+      const onResize = ()=>{
+        if(!running) return;
+        try{ scroller.scrollTop = 0; }catch(_e){}
+      };
+      window.addEventListener("resize", onResize);
+
+      return ()=>{
+        running = false;
+        try{ window.removeEventListener("resize", onResize); }catch(_e){}
+        try{ clone.remove(); }catch(_e){}
+      };
+    }catch(_e){
+      return null;
+    }
+  }
+
 
   function kioskInit(){
     try{
