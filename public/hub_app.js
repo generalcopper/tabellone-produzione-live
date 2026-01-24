@@ -7990,11 +7990,12 @@ try{
       }catch(_){ return ""; }
     };
 
-    const out = [];
-    for (const it of list){
-      const code = String(it?.code || "").trim();
-      const nameRaw = String(it?.name || it?.nome || "").trim();
-      const alias = (kind !== "member") ? String(it?.alias || it?.aliasName || "").trim() : "";
+	  const out = [];
+	  for (const it of list){
+	    const code = String(it?.code || "").trim();
+	    const nameRaw = String(it?.name || it?.nome || "").trim();
+	    const alias = (kind !== "member") ? String(it?.alias || it?.aliasName || "").trim() : "";
+	    const aliasKey = (kind !== "member" && alias) ? __fpCatKey(alias) : "";
       const nameDisp = (kind !== "member") ? (alias || nameRaw) : nameRaw;
       const nameScore = (kind !== "member" && alias && nameRaw && alias !== nameRaw) ? (alias + " " + nameRaw) : (nameDisp || "");
       if (!code && !nameDisp) continue;
@@ -8015,11 +8016,57 @@ try{
       const uom = String(it?.uom || it?.um || it?.unit || "").trim();
       const disabled = !!(already && code && already.has(norm(code)));
 
-      out.push({ code, name: nameDisp, uom, score: sc, disabled, __cat: compCat || "" });
+	    out.push({ code, name: nameDisp, alias, __aliasKey: aliasKey, uom, score: sc, disabled, __cat: compCat || "" });
     }
 
-    out.sort((a,b) => (b.score - a.score) || String(a.name||a.code||"").localeCompare(String(b.name||b.code||""), "it", { sensitivity:"base" }));
-    return out.slice(0, cap);
+	  let finalList = out;
+	  if (kind !== "member"){
+	    const gmap = new Map();
+	    for (const m of out){
+	      const c = String(m && m.code || "").trim();
+	      if (!c) continue;
+	      const ak = String(m && m.__aliasKey || "").trim();
+	      const u = __fpCatNormUom(m && m.uom || "") || "";
+	      const gk = ak ? (`a:${ak}|u:${u}`) : (`c:${norm(c)}`);
+	      let g = gmap.get(gk);
+	      if (!g){
+	        g = Object.assign({}, m);
+	        g.__codes = [c];
+	        if (ak){
+	          const lbl = String(m.alias || m.name || "").trim();
+	          if (lbl) g.__label = lbl;
+	        }
+	        gmap.set(gk, g);
+	      } else {
+	        g.__codes.push(c);
+	        g.disabled = !!(g.disabled || m.disabled);
+	        if ((m.score || 0) > (g.score || 0)){
+	          g.code = m.code;
+	          g.name = m.name;
+	          g.alias = m.alias;
+	          g.__aliasKey = m.__aliasKey;
+	          g.uom = m.uom;
+	          g.score = m.score;
+	          g.__cat = m.__cat;
+	        }
+	        if (ak && !g.__label){
+	          const lbl = String(g.alias || m.alias || g.name || m.name || "").trim();
+	          if (lbl) g.__label = lbl;
+	        }
+	      }
+	    }
+	    finalList = Array.from(gmap.values()).map(g => {
+	      if (Array.isArray(g.__codes)){
+	        const uniq = Array.from(new Set(g.__codes.map(x => String(x).trim()).filter(Boolean)));
+	        uniq.sort((a,b) => String(a).localeCompare(String(b), "it", { sensitivity:"base" }));
+	        g.__codes = uniq;
+	      }
+	      return g;
+	    });
+	  }
+
+	  finalList.sort((a,b) => (b.score - a.score) || String(a.name||a.code||"").localeCompare(String(b.name||b.code||""), "it", { sensitivity:"base" }));
+	  return finalList.slice(0, cap);
   }
 
   function __fpCatHideSuggest(kind){
@@ -8052,15 +8099,18 @@ try{
     const __cat = (kind !== "member" && matches[0] && matches[0].__cat) ? String(matches[0].__cat||"") : "";
     const __catLabel = __cat ? __cat.replace(/_/g," ") : "";
     const __head = __catLabel ? ('<div class="td-muted" style="padding:8px 10px; font-weight:900;">Categoria: ' + esc(__catLabel) + '</div>') : '';
-    listEl.innerHTML = __head + matches.map(m => {
-      const label = __fpCatBuildLabel(m.code, m.name);
-      const right = m.uom ? ('<span class="kbd" style="margin-left:10px;">' + esc('U.M. ' + m.uom) + '</span>') : '';
+	    listEl.innerHTML = __head + matches.map(m => {
+	      const label = String(m.__label || __fpCatBuildLabel(m.code, m.name));
+	      const nCodes = (kind !== "member" && Array.isArray(m.__codes)) ? m.__codes.length : 0;
+	      const right = (
+	        (kind !== "member" && nCodes > 1) ? ('<span class="kbd" style="margin-left:10px;">' + esc(nCodes + ' codici') + '</span>') : ''
+	      ) + (m.uom ? ('<span class="kbd" style="margin-left:10px;">' + esc('U.M. ' + m.uom) + '</span>') : '');
       const sub = m.disabled ? '<span class="td-muted" style="font-size:12px; font-weight:900; margin-left:10px;">Già in categoria</span>' : '';
       const dis = m.disabled ? 'disabled' : '';
       const op = m.disabled ? 'opacity:.55;' : '';
       return (
-        '<button class="btn btn-ghost mini jsFpCatSuggestPick" type="button" ' +
-        'data-kind="' + esc(kind) + '" data-code="' + esc(m.code) + '" data-name="' + esc(m.name) + '" data-uom="' + esc(m.uom) + '" ' + dis +
+	        '<button class="btn btn-ghost mini jsFpCatSuggestPick" type="button" ' +
+	        'data-kind="' + esc(kind) + '" data-code="' + esc(m.code) + '" data-name="' + esc(m.name) + '" data-uom="' + esc(m.uom) + '" data-pick="' + esc(label) + '" ' + dis +
         ' style="width:100%; justify-content:space-between; border-radius: 12px; box-shadow:none; ' + op + '">' +
           '<span style="text-align:left; flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">' + esc(label) + '</span>' +
           '<span style="display:flex; align-items:center;">' + sub + right + '</span>' +
@@ -9319,8 +9369,9 @@ Verrà aggiornata anche la chiave su tutti i prodotti finiti.`);
       const code = String(btn.getAttribute("data-code") || "").trim();
       const name = String(btn.getAttribute("data-name") || "").trim();
       const uom  = String(btn.getAttribute("data-uom") || "").trim();
+      const pick = String(btn.getAttribute("data-pick") || "").trim();
       if (!code) return;
-      try{ $("fpCatCompPick").value = __fpCatBuildLabel(code, name); }catch(_){ }
+      try{ $("fpCatCompPick").value = pick || __fpCatBuildLabel(code, name); }catch(_){ }
       try{ __fpCatHideSuggest("comp"); }catch(_){ }
       // se nel campo ricerca avevo scritto una quantità (es. "20 gr"), la converte e la mette in Q.tà
       try{ __fpCatAutofillQtyFromPending(code, uom); }catch(_){ }
@@ -9333,8 +9384,9 @@ Verrà aggiornata anche la chiave su tutti i prodotti finiti.`);
       e.preventDefault(); e.stopPropagation();
       const code = String(btn.getAttribute("data-code") || "").trim();
       const name = String(btn.getAttribute("data-name") || "").trim();
+      const pick = String(btn.getAttribute("data-pick") || "").trim();
       if (!code) return;
-      try{ $("fpCatMemberPick").value = __fpCatBuildLabel(code, name); }catch(_){ }
+      try{ $("fpCatMemberPick").value = pick || __fpCatBuildLabel(code, name); }catch(_){ }
       try{ __fpCatHideSuggest("member"); }catch(_){ }
       try{ $("btnFpCatMemberAdd")?.focus(); }catch(_){ }
     });
@@ -23073,8 +23125,8 @@ async function handleFileSelection(fileList) {
           const p = list[i] || {};
           const code = String(p.code || "").trim();
           if (!code) continue;
-          const name = String(p.displayName || p.name || "").trim();
-          out.push(`<option value="${escapeHtmlAttr(code + (name ? " — " + name : ""))}"></option>`);
+          const pick = __fpPickValueForProductEntry(p);
+          out.push(`<option value="${escapeHtmlAttr(pick)}"></option>`);
         }
         fpComponentList.innerHTML = out.join("");
 
@@ -23084,11 +23136,43 @@ async function handleFileSelection(fileList) {
       }catch(_){}
     }
 
+    // ===============================
+    // BOM (componenti): alias come prodotto unico
+    // ===============================
+    function __fpBomGroupKeyFromCode(code){
+      const c = String(code || "").trim();
+      const low = c.toLowerCase();
+      if (!low) return "c:";
+      let alias = "";
+      try{ alias = String(getAliasForCode(c) || "").trim(); }catch(_){ }
+      const ak = alias ? normTextKey(alias) : "";
+      return ak ? (`a:${ak}`) : (`c:${low}`);
+    }
+
+    function __fpBomDisplayCode(code){
+      const c = String(code || "").trim();
+      if (!c) return "";
+      let alias = "";
+      try{ alias = String(getAliasForCode(c) || "").trim(); }catch(_){ }
+      return alias || c;
+    }
+
+    function __fpPickValueForProductEntry(p){
+      const pp = p || {};
+      const code = String(pp.code || "").trim();
+      const name = String(pp.displayName || pp.name || "").trim();
+      const alias = String(pp.alias || "").trim();
+      if (alias) return (name || alias || code);
+      return code + (name ? ` — ${name}` : "");
+    }
+
     function __fpGetProductsFiltered(catKey){
       const key = String(catKey || "").trim().toLowerCase();
       const src = Array.isArray(products) ? products : [];
       const seen = new Set();
-      const out = [];
+
+      // groupKey -> { aliasKey, alias, cat, repCode, repName, repUom, codes(Map), uomSet(Set) }
+      const groups = new Map();
 
       for (const pp of src){
         const p = pp || {};
@@ -23097,6 +23181,7 @@ async function handleFileSelection(fileList) {
 
         const low = code.toLowerCase();
         if (seen.has(low)) continue;
+        seen.add(low);
 
         const cat = (typeof getMacroCategoryForCode === "function")
           ? (getMacroCategoryForCode(low) || "")
@@ -23114,8 +23199,78 @@ async function handleFileSelection(fileList) {
         const alias = String(p.alias || p.aliasName || "").trim();
         const displayName = alias || name;
         const uom = __normalizeUom(p.uom || p.um || p.unit || "") || (typeof getUomResolvedForCode === "function" ? (getUomResolvedForCode(code) || "") : "");
-        out.push({ code, name, alias, displayName, uom, cat });
-        seen.add(low);
+
+        const aliasKey = alias ? normTextKey(alias) : "";
+        const gk = aliasKey ? (`a:${aliasKey}`) : (`c:${low}`);
+
+        let g = groups.get(gk);
+        if (!g){
+          g = {
+            aliasKey,
+            alias: alias,
+            cat,
+            repCode: code,
+            repName: name,
+            repUom: uom,
+            codes: new Map(),
+            uomSet: new Set()
+          };
+          groups.set(gk, g);
+        }
+
+        // codici nel gruppo
+        if (!g.codes.has(low)) g.codes.set(low, code);
+
+        // alias (se presente)
+        if (alias && !g.alias) g.alias = alias;
+
+        // UoM
+        if (uom){
+          const uKey = __normalizeUom(uom) || String(uom).trim().toLowerCase();
+          if (uKey) g.uomSet.add(uKey);
+        }
+        if (!g.repUom && uom){
+          g.repCode = code;
+          g.repName = name;
+          g.repUom = uom;
+        }
+      }
+
+      const out = [];
+      for (const g of groups.values()){
+        const codes = Array.from(g.codes.values()).sort((a,b) => String(a).localeCompare(String(b), "it", { sensitivity:"base" }));
+
+        // Se alias ma UoM incoerente, non raggruppare: una voce per codice
+        if (g.aliasKey && g.uomSet.size > 1){
+          for (const code of codes){
+            let p0 = null;
+            try{ p0 = (typeof findProductByCode === "function") ? findProductByCode(code) : null; }catch(_){ }
+            const name0 = String((p0 && p0.name) || "").trim() || code;
+            const alias0 = String((p0 && (p0.alias || p0.aliasName)) || "").trim();
+            const disp0 = alias0 || name0;
+            const u0 = __normalizeUom((p0 && (p0.uom || p0.um || p0.unit)) || "") || (typeof getUomResolvedForCode === "function" ? (getUomResolvedForCode(code) || "") : "");
+            const cat0 = (typeof getMacroCategoryForCode === "function") ? (getMacroCategoryForCode(String(code).toLowerCase()) || "") : "";
+            out.push({ code, name: name0, alias: alias0, displayName: disp0, uom: u0, cat: cat0, __codes: [code] });
+          }
+          continue;
+        }
+
+        const repCode = codes[0] || g.repCode || "";
+        const name = String(g.repName || repCode).trim() || repCode;
+        const alias = String(g.alias || "").trim();
+        const displayName = alias || name || repCode;
+        const uom = String(g.repUom || "").trim();
+        const cat = String(g.cat || "").trim();
+
+        out.push({
+          code: repCode,
+          name,
+          alias,
+          displayName,
+          uom,
+          cat,
+          __codes: codes
+        });
       }
 
       out.sort((a,b) => String(a.displayName||a.name||a.code||"").localeCompare(String(b.displayName||b.name||b.code||""), "it", { sensitivity:"base" }));
@@ -23200,13 +23355,15 @@ function __fpSmartFilter(list, queryRaw){
     const code = String(p && p.code || "").trim();
     if (!code) continue;
 
-    const codeN = __fpNormSearch(code);
+    const codesAll = (Array.isArray(p.__codes) && p.__codes.length) ? p.__codes : [code];
+    const codesNorm = codesAll.map(c => __fpNormSearch(c)).filter(Boolean);
+    const codeBlob = codesNorm.join(" ").trim();
     const dispN = __fpNormSearch(p.displayName || p.name || "");
     const nameRawN = __fpNormSearch(p.name || "");
     const aliasN = __fpNormSearch(p.alias || "");
     const nameBlob = (dispN + " " + nameRawN + " " + aliasN).trim();
     const catN  = __fpNormSearch(__fpCatLabel(p.cat) || "");
-    const blob  = (codeN + " " + nameBlob + " " + catN).trim();
+    const blob  = (codeBlob + " " + nameBlob + " " + catN).trim();
 
     let ok = true;
     for (const t of tokens){
@@ -23219,9 +23376,9 @@ function __fpSmartFilter(list, queryRaw){
     for (const t of tokens){
       if (!t) continue;
 
-      if (codeN === t) score += 500;
-      else if (codeN.startsWith(t)) score += 320;
-      else if (codeN.indexOf(t) >= 0) score += 180;
+      if (codesNorm.some(cn => cn === t)) score += 500;
+      else if (codesNorm.some(cn => cn.startsWith(t))) score += 320;
+      else if (codesNorm.some(cn => cn.indexOf(t) >= 0)) score += 180;
 
       if (dispN === t || nameRawN === t || aliasN === t) score += 260;
       else if (dispN.startsWith(t) || nameRawN.startsWith(t) || aliasN.startsWith(t)) score += 160;
@@ -23260,14 +23417,17 @@ function __fpRenderBrowse(list, opts){
     const name = String(p.displayName || p.name || "").trim();
     const uom = String(p.uom || "").trim();
     const catLbl = __fpCatLabel(p.cat || "");
-    const label = code + (name ? (" — " + name) : "");
+    const pick = __fpPickValueForProductEntry(p);
+    const label = pick;
+    const nCodes = (Array.isArray(p.__codes) && p.__codes.length) ? p.__codes.length : 1;
 
     const right = [
+      (nCodes > 1) ? `<span class="pill" style="height:auto; padding:2px 8px; border-radius:999px; border:0; background:rgba(0,0,0,.06); color:rgba(0,0,0,.86);">${nCodes} codici</span>` : "",
       uom ? `<span class="pill" style="height:auto; padding:2px 8px; border-radius:999px; border:0; background:rgba(0,0,0,.06); color:rgba(0,0,0,.86);">${escapeHtml(uom)}</span>` : "",
       catLbl ? `<span class="pill" style="height:auto; padding:2px 8px; border-radius:999px; border:0; background:rgba(10,132,255,.12); color:rgba(0,0,0,.86);">${escapeHtml(catLbl)}</span>` : ""
     ].filter(Boolean).join("");
 
-    return `<button type="button" class="sideMenuLink jsFpBrowsePick" data-code="${escapeHtmlAttr(code)}" data-name="${escapeHtmlAttr(name)}" data-uom="${escapeHtmlAttr(uom)}" title="Seleziona">
+    return `<button type="button" class="sideMenuLink jsFpBrowsePick" data-code="${escapeHtmlAttr(code)}" data-name="${escapeHtmlAttr(name)}" data-uom="${escapeHtmlAttr(uom)}" data-pick="${escapeHtmlAttr(pick)}" title="Seleziona">
       <span style="display:flex; justify-content:space-between; align-items:center; gap:12px; width:100%;">
         <span style="min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${escapeHtml(label)}</span>
         <span style="flex:0 0 auto; display:flex; gap:6px; align-items:center;">${right}</span>
@@ -23325,14 +23485,58 @@ function __fpRenderSmartBrowse(){
         };
       }
 
-      // fallback: match per nome (se univoco)
+      // fallback: match per alias (anche se ci sono più codici) o per nome (solo se univoco)
       try{
         const key = normTextKey(s0);
         if (key) {
-          const matches = (Array.isArray(products) ? products : []).filter(pp => {
-            const nm = normTextKey(pp && (pp.name || ""));
+          const arr = (Array.isArray(products) ? products : []);
+
+          // 1) Match per alias: può avere più codici (alias condiviso)
+          const aliasHits = arr.filter(pp => {
             const al = normTextKey(pp && (pp.alias || pp.aliasName || ""));
-            return (nm && nm === key) || (al && al === key);
+            return al && al === key;
+          });
+          if (aliasHits.length >= 1) {
+            const codes = Array.from(new Map(aliasHits.map(pp => {
+              const c = String(pp && (pp.code || pp.codice || (typeof safeDecodeUri==="function" ? safeDecodeUri(pp.id || "") : (pp.id||""))) || "").trim();
+              return [String(c).toLowerCase(), c];
+            })).values()).filter(Boolean);
+            codes.sort((a,b) => String(a).localeCompare(String(b), "it", { sensitivity: "base" }));
+            const rep = codes[0];
+
+            if (rep) {
+              const uoms = new Set();
+              for (const pp of aliasHits){
+                const u = __normalizeUom(pp && (pp.uom || pp.um || pp.unit || pp.udm || "") || "");
+                if (u) uoms.add(u);
+              }
+              if (uoms.size > 1) return null;
+
+              let aliasName = String(aliasHits[0] && (aliasHits[0].alias || aliasHits[0].aliasName) || "").trim();
+              if (!aliasName) {
+                try{
+                  if (typeof getAliasForCode === "function") aliasName = String(getAliasForCode(rep) || "").trim();
+                }catch(_){}
+              }
+              if (!aliasName) {
+                const raw = String(aliasHits[0] && (aliasHits[0].name || aliasHits[0].nome || aliasHits[0].description || aliasHits[0].descrizione) || "").trim();
+                try{
+                  if (typeof getDisplayNameForCode === "function"){
+                    const dn = getDisplayNameForCode(rep, raw || rep);
+                    if (dn) aliasName = dn;
+                  }
+                }catch(_){}
+              }
+
+              const uom = (uoms.size === 1) ? Array.from(uoms)[0] : (__normalizeUom(aliasHits[0] && (aliasHits[0].uom || "") || "") || getUomResolvedForCode(rep) || "");
+              return { code: rep, name: aliasName || rep, uom };
+            }
+          }
+
+          // 2) Fallback nome: solo se univoco
+          const matches = arr.filter(pp => {
+            const nm = normTextKey(pp && (pp.name || ""));
+            return nm && nm === key;
           });
           if (matches.length === 1) {
             const pp = matches[0];
@@ -23408,22 +23612,35 @@ function __fpRenderSmartBrowse(){
 
       fpCompTbody.innerHTML = comps.map((c, i) => {
         const code = String(c.code || "").trim();
-        const name0 = String(c.name || "").trim();
-        let name = name0;
-        if (code){
-          try{
-            if (typeof getDisplayNameForCode === "function"){
-              const dn = getDisplayNameForCode(code, name0 || code);
-              if (dn) name = dn;
-            }
-          }catch(_){ }
-        }
+	        const name0 = String(c.name || "").trim();
+	        const codeDisp = code ? __fpBomDisplayCode(code) : "";
+
+	        // Alias (identificativo) e descrizione (anagrafica)
+	        let nameAlias = name0;
+	        if (code){
+	          try{
+	            if (typeof getDisplayNameForCode === "function"){
+	              const dn = getDisplayNameForCode(code, name0 || code);
+	              if (dn) nameAlias = dn;
+	            }
+	          }catch(_){ }
+	        }
+
+	        let desc = "";
+	        if (code){
+	          try{
+	            const p0 = (typeof findProductByCode === "function") ? findProductByCode(code) : null;
+	            const raw = String((p0 && (p0.name || p0.nome || p0.description || p0.descrizione)) || "").trim();
+	            if (raw) desc = raw;
+	          }catch(_){ }
+	        }
+	        if (!desc) desc = name0 || nameAlias || codeDisp || code;
         const qty = __fpFmtQty(c);
         const uom = String(c.uom || "").trim();
         return `
           <tr data-i="${i}">
-            <td data-label="Codice"><span class="kbd">${escapeHtml(code || "—")}</span></td>
-            <td data-label="Articolo">${escapeHtml(name || "—")}</td>
+            <td data-label="Codice"><span class="kbd">${escapeHtml(codeDisp || code || "—")}</span></td>
+            <td data-label="Articolo">${escapeHtml(desc || "—")}</td>
             <td data-label="Q.tà" class="qty">
               <input class="qtyEditInput jsFpCompQty" data-i="${i}" value="${escapeHtmlAttr(qty)}" placeholder="es. 1/20" style="width: 100%; max-width: 150px;" />
             </td>
@@ -23660,8 +23877,8 @@ Nota: elimina SOLO l’anagrafica prodotti finiti e la sua distinta base.`);
 
       // evita duplicati: se già presente stesso codice, somma qty
       const comps = Array.isArray(__fpDraft.components) ? __fpDraft.components : [];
-      const low = String(picked.code || "").trim().toLowerCase();
-      const idx = comps.findIndex(c => String(c && c.code || "").trim().toLowerCase() === low);
+      const newKey = __fpBomGroupKeyFromCode(picked.code);
+      const idx = comps.findIndex(c => __fpBomGroupKeyFromCode(c && c.code) === newKey);
       if (idx >= 0) {
         const cur = comps[idx] || {};
         const curQty = Number(cur.qty);
@@ -23714,11 +23931,12 @@ if (fpCompPick){
         if (!btn) return;
         e.preventDefault(); e.stopPropagation();
 
+        const pick = String(btn.getAttribute("data-pick") || "").trim();
         const code = String(btn.getAttribute("data-code") || "").trim();
         const name = String(btn.getAttribute("data-name") || "").trim();
         const uom = String(btn.getAttribute("data-uom") || "").trim();
 
-        if (fpCompPick) fpCompPick.value = code + (name ? (" — " + name) : "");
+        if (fpCompPick) fpCompPick.value = pick || (code + (name ? (" — " + name) : ""));
 
 
         try{ fpCompQty && fpCompQty.focus(); }catch(_){}
