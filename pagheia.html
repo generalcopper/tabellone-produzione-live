@@ -3144,6 +3144,7 @@ flex-direction: column !important;
   /* Flag */
   #adminModal[data-payroll-step="match"] #payrollStepMatch td.flagCell{ text-align:center; }
   #adminModal[data-payroll-step="match"] #payrollStepMatch .rowFlag{width:18px;height:18px;cursor:pointer;}
+  #adminModal[data-payroll-step="match"] #payrollStepMatch .headerFlag{margin:0;accent-color:var(--accent);}
 
   /* Nome */
   #adminModal[data-payroll-step="match"] #payrollStepMatch td.nameCell{font-weight:950;letter-spacing:-0.01em;}
@@ -3585,7 +3586,9 @@ flex-direction: column !important;
                         </colgroup>
                         <thead>
                           <tr>
-                            <th scope="col" class="flagHead">✓</th>
+                            <th scope="col" class="flagHead">
+                              <input id="payrollToggleAll" class="rowFlag headerFlag" type="checkbox" data-payroll-toggle-all="1" aria-label="Seleziona tutte le righe">
+                            </th>
                             <th scope="col">Nome</th>
                             <th scope="col">Codice fiscale</th>
                             <th scope="col">Importo</th>
@@ -4420,6 +4423,8 @@ function __payrollLoadScript(src){
         const conflictPages = N.payroll?.admin?.match?.conflictPages || [];
         const unassignedPages = N.payroll?.admin?.match?.unassignedPages || [];
         const messages = [];
+        let selectableCount = 0;
+        let selectedCount = 0;
         rows.forEach(r=>{
           r.missingEmail = !isValidEmail(r.email);
           r.missingMonth = !r.monthKey;
@@ -4439,6 +4444,10 @@ function __payrollLoadScript(src){
             if(!ok) r.enabled = false;
             toggle.disabled = !ok;
             toggle.checked = ok && (r.enabled !== false);
+          }
+          if(ok){
+            selectableCount += 1;
+            if(r.enabled !== false) selectedCount += 1;
           }
 
           // Colori riga (rosso se email mancante/errata)
@@ -4464,9 +4473,26 @@ function __payrollLoadScript(src){
         if(matchCount){ matchCount.textContent = `${filteredRows.length} righe · ${filteredPages} pagine`; }
         if(matchResultsTitle){ matchResultsTitle.textContent = `risultati: ${filteredRows.length} buste paga`; }
 
+        const headerToggle = U("payrollToggleAll");
+        if(headerToggle){
+          headerToggle.disabled = selectableCount === 0;
+          headerToggle.checked = selectableCount > 0 && selectedCount === selectableCount;
+          headerToggle.indeterminate = selectedCount > 0 && selectedCount < selectableCount;
+        }
+
         // Side menu: conteggi richiesti
         if(selectedTotalEl) selectedTotalEl.textContent = String(rows.filter(r=>r.enabled!==false).length);
         if(missingEmailTotalEl) missingEmailTotalEl.textContent = String(rows.filter(r=>r.missingEmail).length);
+      }
+
+      function isPayrollRowSelectable(row){
+        if(!row) return false;
+        const missingEmail = row.missingEmail ?? !isValidEmail(row.email);
+        const missingMonth = row.missingMonth ?? !row.monthKey;
+        const hasDocs = (row.pageNos?.length||row.pages?.length||0) > 0;
+        row.missingEmail = missingEmail;
+        row.missingMonth = missingMonth;
+        return !(missingEmail || missingMonth || row.conflict || !hasDocs);
       }
 
       function buildGroupedRows(){
@@ -7343,6 +7369,17 @@ const payrollDirAutofill = () => {
         }
       });
       document.addEventListener("change", evt=>{
+        const toggleAll = evt.target?.dataset?.payrollToggleAll;
+        if(toggleAll){
+          const shouldEnable = !!evt.target.checked;
+          const rows = N.payroll?.admin?.groupedRows || [];
+          rows.forEach(row=>{
+            if(isPayrollRowSelectable(row)) row.enabled = shouldEnable;
+            else row.enabled = false;
+          });
+          refreshGroupedValidation();
+          return;
+        }
         const toggleKey = evt.target?.dataset?.payrollRowToggle;
         if(toggleKey){
           const row = (N.payroll?.admin?.groupedRows || []).find(r=>r.key===toggleKey);
