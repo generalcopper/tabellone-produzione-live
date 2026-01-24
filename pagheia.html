@@ -3821,6 +3821,12 @@ flex-direction: column !important;
       appId: "1:162609991629:web:5e4b367a928fe8e4823e84"
     };
     const PAYROLL_EXTRACT_ENDPOINT = "https://gemini-pdf-extract-rgjpp5trna-ew.a.run.app/extract";
+
+    // Privacy / compliance: NON archiviare i PDF (niente Firebase Storage).
+    // Il PDF resta in RAM nel browser e viene inviato come allegato tramite un endpoint server (Cloud Run / Function).
+    const PAYROLL_PERSIST_UPLOADS = false; // false = NON salva PDF su Storage/DB
+    const PAYROLL_MAIL_ENDPOINT = ""; // es: "https://<tuo-servizio-cloud-run>/send"
+    globalThis.PAYROLL_MAIL_ENDPOINT = PAYROLL_MAIL_ENDPOINT;
     globalThis.PAYROLL_EXTRACT_ENDPOINT = PAYROLL_EXTRACT_ENDPOINT;
 
     const state = {
@@ -3984,7 +3990,7 @@ if(payrollGreeting) payrollGreeting.textContent = `Ciao, ${name}.`;
         if(hint){
           if(state.user.isAdmin) hint.textContent = "Accesso admin attivo: upload abilitato.";
           else if(state.user.isWhitelisted===false) hint.textContent = "Account non abilitato alle buste paga. Contatta l'admin.";
-          else if(state.user.isAnonymous) hint.textContent = "Accesso ospite attivo: puoi caricare e inviare.";
+          else if(state.user.isAnonymous) hint.textContent = "Accesso ospite attivo: puoi caricare e analizzare. Per inviare serve accesso Google.";
           else hint.textContent = "Accesso attivo.";
         }
       }else{
@@ -4393,8 +4399,33 @@ function __payrollLoadScript(src){
 
       async function $i(e, t, n, r=null) {
         if (!(N.firebase && N.firebase.storage && N.firebase.storageApi)) throw new Error("Storage non disponibile");
-        const o = N.firebase.storageApi, i = N.firebase.storage, a = `payroll/${t}/${(r||e||"").replace(/[^a-zA-Z0-9._-]/g,"")}.pdf`, storageRef = o.ref(i, a), s = await o.uploadBytes(storageRef, n, { contentType: "application/pdf" });
-        return { path: a, url: await o.getDownloadURL(s.ref) }
+
+        // Nota: molte regole di Storage non permettono upload da accesso ospite (anonimo).
+        // Qui intercettiamo l'errore e mostriamo un messaggio chiaro.
+        const o = N.firebase.storageApi, i = N.firebase.storage;
+        const a = `payroll/${t}/${(r||e||"").replace(/[^a-zA-Z0-9._-]/g,"")}.pdf`;
+        const storageRef = o.ref(i, a);
+
+        try{
+          const s = await o.uploadBytes(storageRef, n, { contentType: "application/pdf" });
+          return { path: a, url: await o.getDownloadURL(s.ref) };
+        }catch(err){
+          const code = String(err?.code || "");
+          const msg = String(err?.message || "");
+          const isUnauthorized = code.includes("storage/unauthorized") || msg.toLowerCase().includes("does not have permission") || msg.toLowerCase().includes("permission");
+          if(isUnauthorized){
+            const isAnon = !!N.firebase?.auth?.currentUser?.isAnonymous;
+            if(isAnon){
+              try{ showToast("Permessi Storage", "Accesso ospite non autorizzato. Accedi con Google e riprova."); }catch(_e){}
+              try{ toggleAuthOverlay(true); }catch(_e){}
+            }else{
+              try{ showToast("Permessi Storage", "Il tuo account non ha accesso a Firebase Storage per questo upload. Verifica whitelist/regole."); }catch(_e){}
+            }
+          }else{
+            try{ showToast("Errore upload", msg || "Upload non riuscito"); }catch(_e){}
+          }
+          throw err;
+        }
       }
 
             async function ki(e) {
@@ -6246,6 +6277,58 @@ function renderUploadHistory(){
       }
 
 
+
+      // === INVIO SENZA ARCHIVIAZIONE (NO Storage) ===
+      function buildPayrollMailContent({ toEmail, fullName, monthKey, netPayText }){
+        const monthLabel = formatPayrollMonthLabel(monthKey);
+        const who = String(fullName || "").trim() || String(toEmail || "").trim() || "—";
+        const amount = (netPayText && String(netPayText).trim()) ? String(netPayText).trim() : "";
+        const subject = `Busta paga · ${monthLabel}`;
+        const text = `Ciao ${who},\n\nin allegato trovi la busta paga di ${monthLabel}${amount ? " ("+amount+")" : ""}.\n\nSe hai bisogno, rispondi a questa email.\n\n— Ufficio Amministrazione`;
+        const html = `<p>Ciao ${Ao(who)},</p><p>in allegato trovi la busta paga di <b>${Ao(monthLabel)}</b>${amount ? " (<b>"+Ao(amount)+"</b>)" : ""}.</p><p>Se hai bisogno, rispondi a questa email.</p><p style="color:#6b7280">— Ufficio Amministrazione</p>`;
+        return { subject, text, html };
+      }
+
+      async function sendPayrollPdfViaEndpoint({ toEmail, fullName, monthKey, netPayText, pdfBytes, fileName }){
+        const endpoint = String(globalThis.PAYROLL_MAIL_ENDPOINT || "").trim();
+        if(!endpoint) throw new Error("PAYROLL_MAIL_ENDPOINT non configurato (serve un endpoint mail su Cloud Run/Fn).");
+
+        const email = String(toEmail || "").trim().toLowerCase();
+        if(!isValidEmail(email)) throw new Error("Email destinatario non valida.");
+
+        const { subject, text, html } = buildPayrollMailContent({ toEmail: email, fullName, monthKey, netPayText });
+
+        const safeName = fileName || "busta_paga.pdf";
+        const fd = new FormData();
+        fd.append("to", email);
+        fd.append("subject", subject);
+        fd.append("text", text);
+        fd.append("html", html);
+        fd.append("filename", safeName);
+        fd.append("pdf", new Blob([pdfBytes], { type:"application/pdf" }), safeName);
+
+        const headers = {};
+        try{
+          const u = N.firebase?.auth?.currentUser;
+          if(u && typeof u.getIdToken === "function"){
+            const tok = await u.getIdToken();
+            if(tok) headers["Authorization"] = "Bearer " + tok;
+          }
+        }catch(_e){}
+
+        const res = await fetch(endpoint, { method:"POST", body: fd, headers });
+        let bodyText = "";
+        if(!res.ok){
+          try{ bodyText = await res.text(); }catch(_e){}
+          throw new Error(bodyText || (`HTTP ${res.status}`));
+        }
+        let j = null;
+        try{ j = await res.json(); }catch(_e){}
+        if(j && j.ok === false) throw new Error(j.error || "Invio non riuscito");
+        return j || { ok:true };
+      }
+
+
 async function Yi() {
         const e = N.payroll.admin;
         const __dedupByFile = new Set();
@@ -6254,6 +6337,109 @@ async function Yi() {
         const invalid = rows.filter(r=>r.missingEmail || r.missingMonth || r.conflict);
         if (invalid.length) return void Ve("Completa i dati", "Email valida e data/mese obbligatoria per le righe attive.");
         if (!e.originalPdfBytes) return Ve("PDF mancante", "Riestrai l’estrazione."), void Di("preview");
+
+        // Permessi: per inviare servono credenziali Google (non accesso ospite)
+        if(!N.user || N.user.isAnonymous){
+          try{ showToast("Accesso richiesto", "Per inviare le buste paga accedi con Google."); }catch(_e){}
+          try{ toggleAuthOverlay(true); }catch(_e){}
+          return;
+        }
+        if(N.user.isWhitelisted===false){
+          try{ showToast("Account non abilitato", "Questo account non è abilitato alle buste paga."); }catch(_e){}
+          return;
+        }
+
+
+        // === Modalità privacy (NO Storage): invio diretto senza archiviazione ===
+        if(typeof PAYROLL_PERSIST_UPLOADS !== "undefined" && !PAYROLL_PERSIST_UPLOADS){
+          Di("sending");
+          initPayrollSendUI(rows);
+          const summary = { matched: rows.length, ambiguous: rows.filter(r=>r.conflict).length, unmatched: 0, status: "ok" };
+          try{
+            let done = 0; const total = rows.length;
+            for(const row of rows){
+              const emailLower = (row.email || "").toLowerCase();
+              const baseId = `${emailLower}_${row.monthKey}`;
+              const sendKey = row.key || baseId;
+
+              const __srcName = String(e.sourceFileName || "").trim();
+              const __dupKey = __srcName ? `${emailLower}__${__srcName.toLowerCase()}` : "";
+              if(__dupKey && __dedupByFile.has(__dupKey)){
+                setPayrollSendRowStatus(sendKey, "ok", "duplicato (stesso file)");
+                setPayrollSendRowMailStatus(sendKey, "ok", "skip");
+                done++;
+                setPayrollSendProgress(done, total);
+                await nextFrame();
+                continue;
+              }
+              if(__dupKey) __dedupByFile.add(__dupKey);
+
+              setPayrollSendRowStatus(sendKey, "run");
+              setPayrollSendRowMailStatus(sendKey, "run", "preparo PDF");
+              setPayrollSendProgress(done, total, `Invio ${done+1}/${total}`);
+              await nextFrame();
+
+              const pageIndices = (row.pages || []).map(p=>p.pageIndex);
+              if(!pageIndices.length){
+                summary.status = summary.status === "ok" ? "Errori su alcune righe" : summary.status;
+                setPayrollSendRowStatus(sendKey, "err", "pagine mancanti");
+                setPayrollSendRowMailStatus(sendKey, "err", "pagine mancanti");
+                done++;
+                setPayrollSendProgress(done, total);
+                await nextFrame();
+                continue;
+              }
+
+              try{
+                const pdfBytes = await xi(e.originalPdfBytes, pageIndices);
+                const fnameBase = `${row.displayName || row.fiscalCode || emailLower} ${row.monthKey}`.trim();
+                const attachmentName = buildSafePdfName(fnameBase);
+
+                setPayrollSendRowMailStatus(sendKey, "run", "invio…");
+                await sendPayrollPdfViaEndpoint({
+                  toEmail: emailLower,
+                  fullName: row.displayName || row.fiscalCode || "",
+                  monthKey: row.monthKey,
+                  netPayText: row.netPayText || "",
+                  pdfBytes,
+                  fileName: attachmentName
+                });
+                setPayrollSendRowMailStatus(sendKey, "ok", "inviata");
+                setPayrollSendRowStatus(sendKey, "live", "inviato");
+              }catch(err){
+                summary.status = summary.status === "ok" ? "Errori su alcune righe" : summary.status;
+                setPayrollSendRowMailStatus(sendKey, "err", err?.message || String(err));
+                setPayrollSendRowStatus(sendKey, "err", "errore invio");
+              }
+
+              done++;
+              setPayrollSendProgress(done, total);
+              await nextFrame();
+            }
+
+            if(summary.status === "ok") Ve("Inviato", "Buste paga inviate (senza archiviazione).");
+            else Ve("Invio completato", summary.status);
+          }catch(err){
+            console.warn("payroll send transient error", err);
+            summary.status = err?.message || String(err);
+            Ve("Errore invio", summary.status);
+          }
+
+          e.sendSummary = summary;
+          const ui = N.payroll?.admin?.sendUI;
+          if(ui) ui.finalStatus = summary.status || "—";
+          updatePayrollSendMatchSummary();
+          const title = U("payrollSendTitle");
+          if(title) title.textContent = summary.status === "ok" ? "Invio completato" : "Invio terminato";
+          const doneBtn = U("btnPayrollSendDone");
+          if(doneBtn) doneBtn.style.display = "";
+          const histBtn = U("btnPayrollSendGoHistory");
+          if(histBtn) histBtn.style.display = "";
+          try{ setPayrollSendProgress(N.payroll?.admin?.sendUI?.done || rows.length, rows.length); }catch(_e){}
+          try{ loadPayrollSentCounts(); }catch(_e){}
+          return;
+        }
+
         Di("sending");
         initPayrollSendUI(rows);
 
