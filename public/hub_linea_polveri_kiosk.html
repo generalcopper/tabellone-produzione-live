@@ -929,7 +929,7 @@
   .kioskLines{
     display:flex;
     flex-direction:column;
-    gap:10px;
+    gap:16px;
     margin-top:6px;
   }
   .kioskLineItem{
@@ -937,7 +937,7 @@
     align-items:flex-start;
     justify-content:space-between;
     gap:16px;
-    padding:16px 18px;
+    padding:22px 24px;
     border-radius:3px;
     border:1px solid rgba(53,242,255,.18);
     background:rgba(255,255,255,.04);
@@ -949,14 +949,14 @@
   }
   .kioskLineDesc{
     font-weight:950;
-    font-size:22px;
-    line-height:1.1;
+    font-size:40px;
+    line-height:1.05;
     word-break:break-word;
     text-shadow:0 0 18px rgba(53,242,255,0.12);
   }
   .kioskLineCode{
     margin-top:4px;
-    font-size:14px;
+    font-size:24px;
     color:var(--kiosk-muted);
     font-weight:850;
     word-break:break-word;
@@ -967,7 +967,7 @@
     font-variant-numeric:tabular-nums;
     letter-spacing:.01em;
     flex:0 0 auto;
-    font-size:26px;
+    font-size:44px;
   }
 
   .kioskEmptyMsg{
@@ -985,8 +985,9 @@
     .kioskNowTime{ font-size:28px; }
     .kioskMetric .v{ font-size:30px; }
     .kioskOrderCustomer{ font-size:18px; }
-    .kioskLineDesc{ font-size:18px; }
-    .kioskLineQty{ font-size:22px; }
+    .kioskLineDesc{ font-size:30px; }
+    .kioskLineCode{ font-size:20px; }
+    .kioskLineQty{ font-size:32px; }
   }
 </style>
 
@@ -1003,7 +1004,7 @@
 <div id="kioskDash" class="kioskDashOnly">
   <section class="card" id="kioskCockpitCard">
     <div class="hd">
-      <div class="cardTitle">Cockpit</div>
+      <div class="cardTitle">LINEA POLVERI AUTOMATICA</div>
       <div class="kioskNow">
         <div id="kioskNowTime" class="kioskNowTime">--:--:--</div>
         <div id="kioskNowDate" class="kioskNowDate">—</div>
@@ -3866,6 +3867,39 @@ function hideLogin(){
     }
   }
 
+
+  // Treat "active production" robustly (supports old clients / fields)
+  function isProductionActiveDoc(p){
+    try{
+      if(!p || typeof p !== "object") return false;
+
+      // Explicit flags
+      if(p.active === true) return true;
+      if(p.isActive === true) return true;
+      if(String(p.status||"").toLowerCase() === "active") return true;
+
+      // Explicitly closed/concluded
+      if(p.active === false) return false;
+      if(p.concluded === true) return false;
+      if(p.closed === true) return false;
+      if(p.closedAt != null) return false;
+      if(p.endedAt != null) return false;
+
+      // Heuristic: if it has selected lines + startedAt, treat as active
+      const selArr = Array.isArray(p.selectedLineKeys) ? p.selectedLineKeys
+        : (Array.isArray(p.lineKeys) ? p.lineKeys
+          : (Array.isArray(p.lines) ? p.lines : []));
+      const hasSel = Array.isArray(selArr) && selArr.length > 0;
+
+      const hasStart = !!(p.startedAt || p.startAt || p.at);
+      if(hasSel && hasStart) return true;
+
+      return false;
+    }catch(_e){
+      return false;
+    }
+  }
+
   function __fsStartListen(){
     if(__fsUnsub) return;
     if(__fsRetryT){ clearTimeout(__fsRetryT); __fsRetryT = null; }
@@ -3895,8 +3929,13 @@ function hideLogin(){
       const activeNext = (snap)=>{
         const arr = [];
         snap.forEach(doc=>arr.push({ id: doc.id, ...doc.data() }));
-        state.activeProductions = arr.filter(x=>x && x.active);
-        renderHome();
+        state.__lastActiveSnapshotAt = Date.now();
+        state.activeProductions = arr.filter(isProductionActiveDoc);
+        if(state && state.kioskMode){
+          try{ kioskRender(); }catch(_e){}
+        }else{
+          renderHome();
+        }
         try{
           if(document.getElementById("prodModal")?.classList.contains("show")){
             renderProdStepOrders();
@@ -4232,6 +4271,9 @@ function hideLogin(){
 
 
     document.addEventListener("visibilitychange", ()=>{
+      // Kiosk: realtime must stay always on (ordini avviati da altri device devono comparire subito)
+      if(state && state.kioskMode) return;
+
       if(document.visibilityState === "hidden"){
         __fsStopListen();
       } else {
@@ -11981,31 +12023,111 @@ U("payrollAdminClose")?.addEventListener("click", () => {
     return 999999;
   }
 
+  // Watchdog realtime (kiosk): se Firestore snapshot si blocca, faccio un pull leggero degli attivi
+  let __kioskActiveWatchdog = null;
+
+  async function kioskPullActiveProductionsOnce(_reason="watchdog"){
+    try{
+      if(!state || !state.kioskMode) return;
+      if(!state.firebase || !state.firebase.ok) return;
+      if(!state.user) return;
+
+      const fs = state.firebase.api;
+      const db = state.firebase.db;
+      if(!fs || !db) return;
+
+      let snap = null;
+      try{
+        const q = fs.query(
+          fs.collection(db, "powderProductions"),
+          fs.orderBy("startedAt", "desc"),
+          fs.limit(120)
+        );
+        snap = await fs.getDocs(q);
+      }catch(_e){
+        // fallback (più pesante, ma evita blocchi)
+        try{ snap = await fs.getDocs(fs.collection(db, "powderProductions")); }
+        catch(_e2){ return; }
+      }
+
+      const arr = [];
+      snap.forEach(doc=>arr.push({ id: doc.id, ...doc.data() }));
+
+      const next = arr.filter(isProductionActiveDoc);
+
+      // Evita render inutili
+      const prev = Array.isArray(state.activeProductions) ? state.activeProductions : [];
+      let changed = next.length !== prev.length;
+      if(!changed){
+        const prevIds = new Set(prev.map(p=>String(p?.id||"")));
+        for(const p of next){
+          const id = String(p?.id||"");
+          if(id && !prevIds.has(id)){ changed = true; break; }
+        }
+      }
+
+      if(changed){
+        state.activeProductions = next;
+        state.__lastActiveSnapshotAt = Date.now();
+        try{ kioskRender(); }catch(_e){}
+      }
+    }catch(_e){}
+  }
+
+  function kioskEnsureRealtimeActive(){
+    try{
+      if(__kioskActiveWatchdog) return;
+      __kioskActiveWatchdog = setInterval(()=>{
+        try{
+          if(!state || !state.kioskMode) return;
+          const last = Number(state.__lastActiveSnapshotAt || 0) || 0;
+          const age = last ? (Date.now() - last) : 999999;
+          // Se non ho snapshot recenti, refresho io
+          if(!last || age > 3500){
+            kioskPullActiveProductionsOnce("watchdog");
+          }
+        }catch(_e){}
+      }, 1500);
+    }catch(_e){}
+  }
+
   function kioskGroupActiveProductions(list){
     const grouped = new Map();
     for(const p of (Array.isArray(list) ? list : [])){
-      if(!p || !p.active) continue;
-      const key = kioskOrderKey(p.customer, p.orderNo);
+      if(!isProductionActiveDoc(p)) continue;
+
+      const custRaw = String((p?.customer ?? p?.customerName ?? p?.cliente ?? p?.ragioneSociale ?? "") || "").trim();
+      const ordRaw  = String((p?.orderNo  ?? p?.number ?? p?.numero ?? p?.docNumber ?? p?.orderId ?? "") || "").trim();
+      const key = kioskOrderKey(custRaw, ordRaw);
       if(!key || key==="__") continue;
+
+      const startedRaw = String((p?.startedAt ?? p?.startAt ?? p?.at ?? "") || "").trim();
 
       const cur = grouped.get(key) || {
         key,
-        customer: String(p.customer||"").trim(),
-        orderNo: String(p.orderNo||"").trim(),
-        startedAt: p.startedAt || "",
+        customer: custRaw,
+        orderNo: ordRaw,
+        startedAt: startedRaw || "",
         selected: new Set(),
         operators: new Set(),
         ids: []
       };
 
-      if(p.operator) cur.operators.add(String(p.operator||"").trim());
-      if(p.id) cur.ids.push(String(p.id));
+      const op = String((p?.operator ?? p?.operatorName ?? p?.user ?? p?.fullName ?? "") || "").trim();
+      if(op) cur.operators.add(op);
 
-      const sa = p.startedAt ? new Date(p.startedAt).getTime() : 0;
+      const pid = String((p?.id ?? p?.docId ?? "") || "").trim();
+      if(pid) cur.ids.push(pid);
+
+      const sa = startedRaw ? new Date(startedRaw).getTime() : 0;
       const ca = cur.startedAt ? new Date(cur.startedAt).getTime() : 0;
-      if(sa && (!ca || sa < ca)) cur.startedAt = p.startedAt;
+      if(sa && (!ca || sa < ca)) cur.startedAt = startedRaw;
 
-      for(const lk of (Array.isArray(p.selectedLineKeys) ? p.selectedLineKeys : [])){
+      const selArr = Array.isArray(p?.selectedLineKeys) ? p.selectedLineKeys
+        : (Array.isArray(p?.lineKeys) ? p.lineKeys
+          : (Array.isArray(p?.lines) ? p.lines : []));
+
+      for(const lk of selArr){
         const s = String(lk||"").trim();
         if(s) cur.selected.add(s);
       }
@@ -12148,6 +12270,7 @@ U("payrollAdminClose")?.addEventListener("click", () => {
       document.body.classList.add("kioskDash");
       kioskStartClock();
       kioskRender();
+      kioskEnsureRealtimeActive();
 
       // Refresh automatico leggero (kiosk): sincronizza XML periodicamente
       if(!globalThis.__KIOSK_AUTO_SYNC__){
