@@ -7370,11 +7370,6 @@ function renderList(){
     fpByCode:new Map(),
     fpById:new Map(),
 
-    // alias condivisi (dedup componenti: stesso alias usato da >=2 codici)
-    sharedAliasKeyByCode:new Map(),   // codeLower -> aliasKey
-    sharedAliasLabelByKey:new Map(),  // aliasKey -> alias label
-    sharedAliasCodesByKey:new Map(),  // aliasKey -> [codes]
-
     // dettaglio: può essere "category" o "product" (singolo)
     detailMode:"category",
     selectedKey:"",
@@ -7801,40 +7796,6 @@ try{
       if (code) S.prodMap.set(code, p);
       if (id && !S.prodMap.has(id)) S.prodMap.set(id, p);
     }
-
-    // cache alias condivisi: solo se lo stesso alias è usato da >=2 codici diversi
-    S.sharedAliasKeyByCode = new Map();
-    S.sharedAliasLabelByKey = new Map();
-    S.sharedAliasCodesByKey = new Map();
-    try{
-      const tmp = new Map(); // aliasKey -> { alias, codesByLow: Map(low->code) }
-      for (const p of (S.products || [])){
-        if (!p) continue;
-        const c = String(p.code || "").trim();
-        if (!c) continue;
-        const al = String(p.alias || p.aliasName || "").trim();
-        if (!al) continue;
-        const ak = (typeof normTextKey === "function") ? normTextKey(al) : __fpCatKey(al);
-        if (!ak) continue;
-        const rec = tmp.get(ak) || { alias: al, codesByLow: new Map() };
-        if (!rec.alias && al) rec.alias = al;
-        const low = c.toLowerCase();
-        if (!rec.codesByLow.has(low)) rec.codesByLow.set(low, c);
-        tmp.set(ak, rec);
-      }
-      for (const [ak, rec] of tmp.entries()){
-        const codes = rec && rec.codesByLow ? Array.from(rec.codesByLow.values()).filter(Boolean) : [];
-        if (codes.length >= 2){
-          S.sharedAliasLabelByKey.set(ak, String(rec.alias || "").trim());
-          S.sharedAliasCodesByKey.set(ak, codes.slice());
-          for (const c of codes){
-            const low = String(c || "").trim().toLowerCase();
-            if (low) S.sharedAliasKeyByCode.set(low, ak);
-          }
-        }
-      }
-    }catch(_){ }
-
     S.fpByCode = new Map();
     S.fpById = new Map();
     for (const fp of (S.finished || [])){
@@ -8030,8 +7991,6 @@ try{
     };
 
     const out = [];
-    const bestByGroup = (kind !== "member") ? new Map() : null;
-
     for (const it of list){
       const code = String(it?.code || "").trim();
       const nameRaw = String(it?.name || it?.nome || "").trim();
@@ -8056,39 +8015,11 @@ try{
       const uom = String(it?.uom || it?.um || it?.unit || "").trim();
       const disabled = !!(already && code && already.has(norm(code)));
 
-      const rec = { code, name: nameDisp, uom, score: sc, disabled, __cat: compCat || "" };
-
-      // Componenti: se più codici condividono lo stesso alias, mostra una sola voce (dedup)
-      if (kind !== "member"){
-        let gk = "";
-        try{
-          const low = String(code || "").trim().toLowerCase();
-          const ak = (S.sharedAliasKeyByCode && S.sharedAliasKeyByCode.get) ? (S.sharedAliasKeyByCode.get(low) || "") : "";
-          gk = ak ? ("alias:" + ak) : ("code:" + low);
-        }catch(_){
-          gk = "code:" + String(code || "").trim().toLowerCase();
-        }
-
-        const prev = bestByGroup.get(gk);
-        if (!prev){
-          bestByGroup.set(gk, rec);
-        } else {
-          if (Number(rec.score) > Number(prev.score)) bestByGroup.set(gk, rec);
-          else if (Number(rec.score) === Number(prev.score)){
-            const a = String(rec.code || "");
-            const b = String(prev.code || "");
-            if (a && b && a.localeCompare(b, "it", { sensitivity:"base" }) < 0) bestByGroup.set(gk, rec);
-          }
-        }
-      } else {
-        out.push(rec);
-      }
+      out.push({ code, name: nameDisp, uom, score: sc, disabled, __cat: compCat || "" });
     }
 
-    const res = (kind !== "member") ? Array.from(bestByGroup.values()) : out;
-
-    res.sort((a,b) => (b.score - a.score) || String(a.name||a.code||"").localeCompare(String(b.name||b.code||""), "it", { sensitivity:"base" }));
-    return res.slice(0, cap);
+    out.sort((a,b) => (b.score - a.score) || String(a.name||a.code||"").localeCompare(String(b.name||b.code||""), "it", { sensitivity:"base" }));
+    return out.slice(0, cap);
   }
 
   function __fpCatHideSuggest(kind){
@@ -8435,7 +8366,9 @@ try{
       if (activeEl !== elName) elName.value = v;
     }
 
-    const bom = (d && Array.isArray(d.bom)) ? d.bom : [];
+    const bom0 = (d && Array.isArray(d.bom)) ? d.bom : [];
+    const bom = __fpCatNormalizeBom(bom0);
+    if (d) d.bom = bom;
     if ($("fpCatBomCount")) $("fpCatBomCount").value = String(bom.length) + "";
 
     // BOM table
@@ -8446,6 +8379,7 @@ try{
       } else {
         tb.innerHTML = bom.map((c, idx) => {
           const code = String(c?.code||"").trim();
+          const codeDisp = __fpCatBomDisplayCode(code);
           const name0 = String(c?.name||"").trim();
           let name = name0;
           if (code){
@@ -8460,8 +8394,8 @@ try{
           const qty = (c?.qty != null) ? String(c.qty) : (qtyRaw || "");
           const uom = String(c?.uom||"").trim();
           return `<tr class="jsFpCatCompRow" data-idx="${idx}">
-            <td>${esc(code)}</td>
-            <td>${esc(name || code)}</td>
+            <td>${esc(codeDisp || code)}</td>
+            <td>${esc(name || codeDisp || code)}</td>
             <td class="qty">${esc(qty)}</td>
             <td>${esc(uom)}</td>
             <td style="text-align:right;"><button class="btn btn-ghost mini jsFpCatCompDel" type="button">–</button></td>
@@ -8507,7 +8441,9 @@ try{
       if (activeEl !== elName) elName.value = v;
     }
 
-    const bom = (d && Array.isArray(d.bom)) ? d.bom : [];
+    const bom0 = (d && Array.isArray(d.bom)) ? d.bom : [];
+    const bom = __fpCatNormalizeBom(bom0);
+    if (d) d.bom = bom;
     if ($("fpCatBomCount")) $("fpCatBomCount").value = String(bom.length) + "";
 
     // BOM table
@@ -8518,6 +8454,7 @@ try{
       } else {
         tb.innerHTML = bom.map((c, idx) => {
           const code = String(c?.code||"").trim();
+          const codeDisp = __fpCatBomDisplayCode(code);
           const name0 = String(c?.name||"").trim();
           let name = name0;
           if (code){
@@ -8532,8 +8469,8 @@ try{
           const qty = (c?.qty != null) ? String(c.qty) : (qtyRaw || "");
           const uom = String(c?.uom||"").trim();
           return `<tr class="jsFpCatCompRow" data-idx="${idx}">
-            <td>${esc(code)}</td>
-            <td>${esc(name || code)}</td>
+            <td>${esc(codeDisp || code)}</td>
+            <td>${esc(name || codeDisp || code)}</td>
             <td class="qty">${esc(qty)}</td>
             <td>${esc(uom)}</td>
             <td style="text-align:right;"><button class="btn btn-ghost mini jsFpCatCompDel" type="button">–</button></td>
@@ -8587,7 +8524,7 @@ try{
     S.draft = {
       key: S.selectedKey,
       name: nm,
-      bom: Array.isArray(cat?.bom) ? cat.bom.slice() : (Array.isArray(cat?.components) ? cat.components.slice() : [])
+      bom: __fpCatNormalizeBom(Array.isArray(cat?.bom) ? cat.bom.slice() : (Array.isArray(cat?.components) ? cat.components.slice() : []))
     };
     setDetailOpen(true);
     renderDatalists();
@@ -8636,7 +8573,7 @@ try{
     S.draft = {
       key: code,
       name: nm,
-      bom: Array.isArray(bom0) ? bom0.slice() : [],
+      bom: __fpCatNormalizeBom(Array.isArray(bom0) ? bom0.slice() : []),
       __prevCat: prevCat
     };
 
@@ -8820,7 +8757,7 @@ try{
     const fid = String(S.selectedFpId || "").trim();
     if (!fid){ showToast("Prodotto finito non valido", "warn"); return; }
 
-    const bom0 = (S.draft && Array.isArray(S.draft.bom)) ? S.draft.bom : [];
+    const bom0 = __fpCatNormalizeBom((S.draft && Array.isArray(S.draft.bom)) ? S.draft.bom : []);
     const bom = bom0.map(c => {
       const code = String(c?.code || "").trim();
       if (!code) return null;
@@ -8876,7 +8813,8 @@ try{
     const name = String($("fpCatEditName")?.value || "").trim();
     if (!name) { showToast("Nome categoria non valido", "warn"); return; }
 
-    const bom = (S.draft && Array.isArray(S.draft.bom)) ? S.draft.bom : [];
+    const bom = __fpCatNormalizeBom((S.draft && Array.isArray(S.draft.bom)) ? S.draft.bom : []);
+    try{ if (S.draft) S.draft.bom = bom; }catch(_){ }
 
     // key può essere editata: se vuota, la rigenero dal nome
     const keyRaw = String($("fpCatEditKey")?.value || "").trim();
@@ -8992,6 +8930,63 @@ Verrà aggiornata anche la chiave su tutti i prodotti finiti.`);
     return String(parts[0] || "").trim();
   }
 
+  function __fpCatBomGroupKey(code){
+    const c = String(code || "").trim();
+    if (!c) return "";
+
+    // Se in passato è stato salvato direttamente l'alias come "code",
+    // lo tratto come gruppo alias (se è un alias condiviso)
+    try{
+      const akTxt = __fpCatAliasKey(c);
+      if (akTxt && S.sharedAliasKeys && S.sharedAliasKeys.has(akTxt)) return "alias:" + akTxt;
+    }catch(_){ }
+
+    const low = norm(c);
+    const ak = (S.codeToSharedAliasKey && S.codeToSharedAliasKey.get(low)) ? String(S.codeToSharedAliasKey.get(low) || "") : "";
+    if (ak) return "alias:" + ak;
+    return "code:" + low;
+  }
+
+  function __fpCatNormalizeBom(bom){
+    const arr = Array.isArray(bom) ? bom : [];
+    const out = [];
+    const pos = new Map();
+
+    for (const it of arr){
+      if (!it) continue;
+      const code = String(it.code || it.productCode || it.codice || "").trim();
+      if (!code) continue;
+      const gk = __fpCatBomGroupKey(code) || ("code:" + norm(code));
+      const idx = pos.get(gk);
+      const rec = Object.assign({}, it, { code });
+      if (idx == null){
+        pos.set(gk, out.length);
+        out.push(rec);
+      } else {
+        // last wins (così l'ultima modifica prevale)
+        out[idx] = rec;
+      }
+    }
+    return out;
+  }
+
+  function __fpCatBomDisplayCode(code){
+    const c = String(code || "").trim();
+    if (!c) return "";
+    try{
+      const p = S.prodMap.get(norm(c)) || null;
+      const a = String(p?.alias || p?.aliasName || "").trim();
+      if (a) return a;
+    }catch(_){ }
+    try{
+      if (typeof getAliasForCode === "function"){
+        const a2 = String(getAliasForCode(c) || "").trim();
+        if (a2) return a2;
+      }
+    }catch(_){ }
+    return c;
+  }
+
   function addBomItem(){
     if (!S.draft) return;
 
@@ -9003,17 +8998,23 @@ Verrà aggiornata anche la chiave su tutti i prodotti finiti.`);
       rawPickClean = __fpCatUpdatePendingFromPick(rawPickAll);
     }catch(_){ rawPickAll = String($("fpCatCompPick")?.value || ""); rawPickClean = rawPickAll; }
 
-    // prova risoluzione automatica se l'utente ha scritto solo il nome/codice
+    // risoluzione unica (supporta anche alias condivisi)
+    let resolved = null;
     try{
-      const resolved = __fpCatResolveUnique("comp", rawPickClean);
+      resolved = __fpCatResolveUnique("comp", rawPickClean);
       if (resolved && resolved.code){
-        $("fpCatCompPick").value = __fpCatBuildLabel(resolved.code, resolved.name);
+        const lbl = String(resolved.__label || __fpCatBuildLabel(resolved.code, resolved.name) || "");
+        if (lbl) $("fpCatCompPick").value = lbl;
         // se avevo una qty nel campo ricerca, precompila (solo se Q.tà vuota)
-        __fpCatAutofillQtyFromPending(String(resolved.code||""), String(resolved.uom||""));
+        try{ __fpCatAutofillQtyFromPending(String(resolved.code||""), String(resolved.uom||"")); }catch(_){ }
       }
     }catch(_){ }
 
-    const code = pickCodeFromLabel($("fpCatCompPick")?.value || "");
+    if (!resolved || !resolved.code){
+      try{ resolved = __fpCatResolveUnique("comp", String($("fpCatCompPick")?.value || "")); }catch(_){ resolved = null; }
+    }
+
+    const code = String(resolved && resolved.code || "").trim();
     if (!code) { showToast("Seleziona un componente", "warn"); return; }
 
     // prodotto + U.M. target
@@ -9038,22 +9039,10 @@ Verrà aggiornata anche la chiave su tutti i prodotti finiti.`);
 
     const pq = __fpCatParseQtyForTarget(q, uomTarget);
 
-    const bom = Array.isArray(S.draft.bom) ? S.draft.bom : [];
-    let existingIdx = bom.findIndex(x => norm(x?.code) === norm(code));
-
-    // Alias condivisi: un componente deve essere unico anche se seleziono un "fratello" con stesso alias
-    try{
-      const ak = (S.sharedAliasKeyByCode && S.sharedAliasKeyByCode.get) ? (S.sharedAliasKeyByCode.get(norm(code)) || "") : "";
-      if (ak){
-        const idx2 = bom.findIndex(x => {
-          const c2 = norm(x?.code || "");
-          if (!c2) return false;
-          const ak2 = (S.sharedAliasKeyByCode && S.sharedAliasKeyByCode.get) ? (S.sharedAliasKeyByCode.get(c2) || "") : "";
-          return ak2 && ak2 === ak;
-        });
-        if (idx2 >= 0) existingIdx = idx2;
-      }
-    }catch(_){ }
+    const bom0 = Array.isArray(S.draft.bom) ? S.draft.bom : [];
+    const bom = __fpCatNormalizeBom(bom0);
+    const gkNew = __fpCatBomGroupKey(code);
+    const existingIdx = bom.findIndex(x => __fpCatBomGroupKey(x?.code) === gkNew);
 
     const item = {
       productId: String(p?.id || "").trim() || keyToId(norm(code)),
