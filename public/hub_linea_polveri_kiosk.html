@@ -12320,7 +12320,7 @@ U("payrollAdminClose")?.addEventListener("click", () => {
       const base = wrap.querySelector(".kioskLines");
       if(!base) return null;
 
-      // cleanup old clones
+      // cleanup old clones (legacy)
       try{
         wrap.querySelectorAll('[data-kiosk-clone="1"]').forEach(n=>n.remove());
       }catch(_e){}
@@ -12329,54 +12329,93 @@ U("payrollAdminClose")?.addEventListener("click", () => {
       try{ scroller.scrollTop = 0; }catch(_e){}
 
       const vpH = scroller.clientHeight || 0;
-      const contentH = base.scrollHeight || base.getBoundingClientRect().height || 0;
+      const maxScroll = Math.max(0, (scroller.scrollHeight || 0) - vpH);
 
       // if it fits, no auto-scroll
-      if(!(vpH > 0) || !(contentH > vpH + 6)) return null;
-
-      // duplicate content for seamless loop
-      const clone = base.cloneNode(true);
-      clone.dataset.kioskClone = "1";
-      clone.setAttribute("aria-hidden", "true");
-      clone.style.marginTop = "0";
-      clone.style.paddingTop = "0";
-      wrap.appendChild(clone);
+      if(!(vpH > 0) || !(maxScroll > 6)) return null;
 
       const speed = Number(viewport.dataset.speedPx || "28") || 28; // px/sec
-      const loopAt = contentH;
+
+      // Optional pauses (ms) to make start/end obvious (kiosk, no "seamless loop")
+      const pauseTop = Math.max(0, Number(viewport.dataset.pauseTop || "600") || 600);
+      const pauseBottom = Math.max(0, Number(viewport.dataset.pauseBottom || "1200") || 1200);
 
       let running = true;
       let last = (typeof performance !== "undefined" ? performance.now() : Date.now());
+      let holdUntil = 0; // timestamp in ms
+      let phase = "holdTop"; // start at top: holdTop -> down -> holdBottom -> reset -> holdTop ...
 
       function tick(now){
         if(!running) return;
+
         if(document.hidden){
           last = now;
           requestAnimationFrame(tick);
           return;
         }
+
         const dt = Math.max(0, now - last);
         last = now;
+
+        // Recompute bounds dynamically (content can change)
+        const vpH2 = scroller.clientHeight || 0;
+        const maxScroll2 = Math.max(0, (scroller.scrollHeight || 0) - vpH2);
+
+        // If content now fits, stop auto-scroll
+        if(!(vpH2 > 0) || !(maxScroll2 > 6)){
+          try{ scroller.scrollTop = 0; }catch(_e){}
+          running = false;
+          return;
+        }
+
         try{
-          scroller.scrollTop += (speed * dt / 1000);
-          if(scroller.scrollTop >= loopAt){
-            scroller.scrollTop = scroller.scrollTop - loopAt;
+          // hold (pause) if needed
+          if(holdUntil && now < holdUntil){
+            requestAnimationFrame(tick);
+            return;
+          }
+
+          if(phase === "holdTop"){
+            // after a short pause at top, start scrolling down
+            phase = "down";
+            holdUntil = 0;
+          }
+
+          if(phase === "down"){
+            scroller.scrollTop = Math.min(maxScroll2, scroller.scrollTop + (speed * dt / 1000));
+            if(scroller.scrollTop >= maxScroll2 - 0.5){
+              scroller.scrollTop = maxScroll2;
+              phase = "holdBottom";
+              holdUntil = now + pauseBottom;
+            }
+          }else if(phase === "holdBottom"){
+            // jump back to top (clear start/end, no duplicated content)
+            scroller.scrollTop = 0;
+            phase = "holdTop";
+            holdUntil = now + pauseTop;
           }
         }catch(_e){}
+
         requestAnimationFrame(tick);
       }
+
+      // ensure first pause at top is respected
+      holdUntil = last + pauseTop;
       requestAnimationFrame(tick);
 
       const onResize = ()=>{
         if(!running) return;
         try{ scroller.scrollTop = 0; }catch(_e){}
+        phase = "holdTop";
+        holdUntil = (typeof performance !== "undefined" ? performance.now() : Date.now()) + pauseTop;
       };
       window.addEventListener("resize", onResize);
 
       return ()=>{
         running = false;
         try{ window.removeEventListener("resize", onResize); }catch(_e){}
-        try{ clone.remove(); }catch(_e){}
+        // legacy cleanup safety
+        try{ wrap.querySelectorAll('[data-kiosk-clone="1"]').forEach(n=>n.remove()); }catch(_e){}
       };
     }catch(_e){
       return null;
