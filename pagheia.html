@@ -3663,6 +3663,35 @@ flex-direction: column !important;
   }
 </style>
 
+
+<style id="sentRowsToggle_20260125">
+  /* Righe già inviate: nascoste di default (toggle dal menu laterale) */
+  #payrollStepMatch .payrollMatchTable tbody tr.sentRow{
+    background: rgba(52,199,89,.10) !important;
+  }
+  #payrollStepMatch .sentBadge{
+    display:inline-flex;
+    align-items:center;
+    gap:6px;
+    margin-left:8px;
+    padding:4px 8px;
+    border-radius:999px;
+    border:1px solid rgba(52,199,89,.24);
+    background: rgba(52,199,89,.12);
+    color:#0b5d2a;
+    font-weight:900;
+    font-size:11px;
+    line-height:1;
+    vertical-align:middle;
+    white-space:nowrap;
+  }
+  #btnPayrollToggleSent[aria-pressed="true"]{
+    background: rgba(10,132,255,.10) !important;
+    border-color: rgba(10,132,255,.22) !important;
+    color:#0a84ff !important;
+  }
+</style>
+
 </head>
 <body>
   <div class="bootSpinner" id="bootSpinner" aria-hidden="true"><div class="spin"></div></div>
@@ -3818,6 +3847,10 @@ flex-direction: column !important;
                     <div class="sideBlock actions">
                       <button class="payrollBtn primary" id="btnPayrollSend" type="button">Invia</button>
                       <button class="payrollBtn" id="btnPayrollCancelMatch" type="button">Annulla</button>
+                    </div>
+
+                    <div class="sideBlock actions">
+                      <button class="payrollBtn" id="btnPayrollToggleSent" type="button" aria-pressed="false">Visualizza inviati</button>
                     </div>
 
                     <div class="sideBlock meta">
@@ -4317,7 +4350,7 @@ function toggleSendLogModal(show){
             admin: {
               step: "idle",
               lastFlowStep: prev.admin && prev.admin.lastFlowStep ? prev.admin.lastFlowStep : "idle",
-              filters: prev.admin?.filters || { search:"", showIssues:false },
+              filters: (()=>{ const f = prev.admin?.filters || {}; return { search: (f.search||""), showIssues: !!f.showIssues, showSent: !!f.showSent }; })(),
               files: [],
               originalPdfBytes: null,
               sourceFileName: "",
@@ -4712,6 +4745,7 @@ function __payrollLoadScript(src){
         const filters = N.payroll?.admin?.filters || {};
         const search = (filters.search || "").toLowerCase();
         const showIssues = !!filters.showIssues;
+        const showSent = !!filters.showSent;
         const btn = U("btnPayrollSend");
         const summary = U("payrollMatchSummary");
         const matchCount = U("payrollMatchCount");
@@ -4724,50 +4758,73 @@ function __payrollLoadScript(src){
         const messages = [];
         let selectableCount = 0;
         let selectedCount = 0;
+
         rows.forEach(r=>{
           r.missingEmail = !isValidEmail(r.email);
           r.missingMonth = !r.monthKey;
           if(!r.fiscalCode) r.warning = "CF mancante: raggruppo per nome";
+
+          // Già inviata: non selezionabile / non reinviabile
+          if(r.sent){
+            r.enabled = false;
+          }
+
           if(r.missingEmail) messages.push(`Email mancante per ${r.displayName||r.fiscalCode||r.key}`);
           if(r.missingMonth) messages.push(`Data/mese mancante per pagine ${r.pages?.map(p=>p.pageIndex+1).join(", ")||""}`);
           if(r.conflict) messages.push(`Conflitto su ${r.displayName||r.fiscalCode||r.key}`);
+
           const emailInput = document.querySelector(`input[data-payroll-field="email"][data-key="${cssEscape(r.key)}"]`);
           const toggle = document.querySelector(`input[data-payroll-row-toggle="${cssEscape(r.key)}"]`);
           const rowEl = document.querySelector(`[data-payroll-row="${cssEscape(r.key)}"]`);
-          if(emailInput) emailInput.classList.toggle("invalid", r.missingEmail);
+
+          if(emailInput){
+            emailInput.classList.toggle("invalid", r.missingEmail);
+            emailInput.readOnly = !!r.sent;
+          }
+
           const monthEl = document.querySelector(`[data-payroll-month="${cssEscape(r.key)}"]`);
           if(monthEl) monthEl.classList.toggle("invalid", r.missingMonth);
+
           const hasDocs = (r.pageNos?.length||r.pages?.length||0) > 0;
-          const ok = !(r.missingEmail || r.missingMonth || r.conflict || !hasDocs);
+          const ok = !(r.missingEmail || r.missingMonth || r.conflict || !hasDocs) && !r.sent;
+
           if(toggle){
             if(!ok) r.enabled = false;
             toggle.disabled = !ok;
-            toggle.checked = ok && (r.enabled !== false);
+            // se "già inviata" mostro check ma disabilitato
+            toggle.checked = r.sent ? true : (ok && (r.enabled !== false));
           }
+
           if(ok){
             selectableCount += 1;
             if(r.enabled !== false) selectedCount += 1;
           }
 
-          // Colori riga (rosso se email mancante/errata)
+          // Colori riga (rosso se email mancante/errata) + verde se già inviata
           if(rowEl){
-            rowEl.classList.remove("warn","conflict","badEmail");
-            if(r.missingEmail) rowEl.classList.add("badEmail");
+            rowEl.classList.remove("warn","conflict","badEmail","sentRow");
+            if(r.sent) rowEl.classList.add("sentRow");
+            else if(r.missingEmail) rowEl.classList.add("badEmail");
             else if(r.conflict) rowEl.classList.add("conflict");
             else if(r.missingMonth || !hasDocs) rowEl.classList.add("warn");
           }
         });
+
         if(conflictPages.length) messages.push(`Pagine in conflitto: ${conflictPages.map(p=>p+1).join(", ")}`);
         if(unassignedPages.length) messages.push(`Pagine non assegnate: ${unassignedPages.map(p=>p+1).join(", ")}`);
-        const readyRows = rows.filter(r=>r.enabled!==false && !r.missingEmail && !r.missingMonth && !r.conflict && ((r.pageNos?.length||r.pages?.length||0)>0));
+
+        const readyRows = rows.filter(r=>r.enabled!==false && !r.sent && !r.missingEmail && !r.missingMonth && !r.conflict && ((r.pageNos?.length||r.pages?.length||0)>0));
         if(btn) btn.disabled = !(readyRows.length);
+
         const totalPages = rows.reduce((a,r)=>a+(r.pageNos?.length||r.pages?.length||0),0);
         const filteredRows = rows.filter(row=>{
+          if(!showSent && row.sent) return false;
           const text = [row.displayName,row.fiscalCode,row.email].join(" ").toLowerCase();
           const hasIssue = row.missingEmail || row.missingMonth || row.conflict || row.warning;
           return (!search || text.includes(search)) && (!showIssues || hasIssue);
         });
         const filteredPages = filteredRows.reduce((a,r)=>a+(r.pageNos?.length||r.pages?.length||0),0);
+
         if(summary){ summary.textContent = `${rows.length} righe · ${totalPages} pagine`; }
         if(matchCount){ matchCount.textContent = `${filteredRows.length} righe · ${filteredPages} pagine`; }
         if(matchResultsTitle){ matchResultsTitle.textContent = `risultati: ${filteredRows.length} buste paga`; }
@@ -4780,12 +4837,39 @@ function __payrollLoadScript(src){
         }
 
         // Side menu: conteggi richiesti
-        if(selectedTotalEl) selectedTotalEl.textContent = String(rows.filter(r=>r.enabled!==false).length);
+        if(selectedTotalEl) selectedTotalEl.textContent = String(rows.filter(r=>r.enabled!==false && !r.sent).length);
         if(missingEmailTotalEl) missingEmailTotalEl.textContent = String(rows.filter(r=>r.missingEmail).length);
+
+        try{ updateSentToggleUI(); }catch(_e){}
+      }
+
+      function updateSentToggleUI(){
+        const btn = U("btnPayrollToggleSent");
+        if(!btn) return;
+        const rows = N.payroll?.admin?.groupedRows || [];
+        const sentCount = rows.filter(r=>!!r.sent).length;
+
+        N.payroll = N.payroll || {};
+        N.payroll.admin = N.payroll.admin || {};
+        N.payroll.admin.filters = N.payroll.admin.filters || { search:"", showIssues:false, showSent:false };
+
+        const showSent = !!N.payroll.admin.filters.showSent;
+
+        if(sentCount <= 0){
+          btn.disabled = true;
+          btn.textContent = "Visualizza inviati";
+          btn.setAttribute("aria-pressed","false");
+          N.payroll.admin.filters.showSent = false;
+          return;
+        }
+        btn.disabled = false;
+        btn.setAttribute("aria-pressed", showSent ? "true" : "false");
+        btn.textContent = showSent ? "Nascondi inviati" : `Visualizza inviati (${sentCount})`;
       }
 
       function isPayrollRowSelectable(row){
         if(!row) return false;
+        if(row.sent) return false;
         const missingEmail = row.missingEmail ?? !isValidEmail(row.email);
         const missingMonth = row.missingMonth ?? !row.monthKey;
         const hasDocs = (row.pageNos?.length||row.pages?.length||0) > 0;
@@ -4859,6 +4943,9 @@ function __payrollLoadScript(src){
               emailSource: prev?.emailSource || (dirMatch ? (fiscalCode ? "directory-cf" : "directory-name") : ""),
               saveState: prev?.saveState || "idle",
               enabled: prev?.enabled ?? true,
+              sent: prev?.sent || false,
+              sentReason: prev?.sentReason || "",
+              sentAtClient: prev?.sentAtClient || 0,
               pages: [],
               pageNos: [],
               sources: [],
@@ -5009,6 +5096,8 @@ function Bi() {
 	        const closeBtn = U("btnCloseAdmin");
 	        if(closeBtn) closeBtn.style.display = (e === "match") ? "none" : "";
 	      }catch(_e){}
+
+      try{ if(e==="match") Pi(); }catch(_e){}
       }
 
       const __payrollBusyPhrases = [
@@ -5223,11 +5312,13 @@ function Pi(){
   const filters = N.payroll?.admin?.filters || {};
   const search = (filters.search || "").trim().toLowerCase();
   const showIssues = !!filters.showIssues;
+  const showSent = !!filters.showSent;
 
   // aggiorna flags
   grouped.forEach(r=>{ r.missingEmail = !isValidEmail(r.email); r.missingMonth = !r.monthKey; });
 
   const filtered = grouped.filter(row=>{
+    if(!showSent && row.sent) return false;
     const text = [row.displayName,row.fiscalCode,row.email].join(" ").toLowerCase();
     const hasIssue = row.missingEmail || row.missingMonth || row.conflict || row.warning;
     return (!search || text.includes(search)) && (!showIssues || hasIssue);
@@ -5241,28 +5332,35 @@ function Pi(){
       if(p && typeof p.pageNo === "number") return p.pageNo;
       return null;
     }).filter(v=>v!=null);
+
     const pagesCount = pages.length;
     const pagesLabel = pagesCount ? (pagesCount===1 ? "1 pagina" : `${pagesCount} pagine`) : "—";
     const cf = row.fiscalCode || "";
-	    const amount = row.amountText || row.netPayText || "";
-	    const missingDocs = !((row.pageNos?.length||row.pages?.length||0));
-	    // Richiesta: righe senza mail o con mail errata devono essere rosse
-	    const issueClass = row.missingEmail ? "badEmail" : (row.conflict ? "conflict" : ((row.missingMonth || missingDocs) ? "warn" : ""));
+    const amount = row.amountText || row.netPayText || "";
+    const missingDocs = !((row.pageNos?.length||row.pages?.length||0));
 
-	    return `
-		      <tr class="${issueClass}" data-payroll-row="${Ao(row.key)}">
-		        <td class="flagCell">
-		          <input class="rowFlag" type="checkbox" data-payroll-row-toggle="${Ao(row.key)}" ${row.enabled!==false ? "checked":""} aria-label="Seleziona riga">
-		        </td>
-		        <td class="nameCell" title="${Ao(row.displayName||"")}">${Ao(row.displayName||"—")}</td>
-		        <td class="cfCell" title="Codice fiscale">${Ao(cf||"—")}</td>
-		        <td class="amountCell">${Ao(amount||"—")}</td>
-		        <td class="emailCell">
-		          <input class="emailInput ${row.missingEmail?"invalid":""}" data-payroll-field="email" data-key="${Ao(row.key)}" value="${Ao(row.email||"")}" placeholder="nome@azienda.it" inputmode="email" autocomplete="email">
-		        </td>
-		        <td class="pagesCell" title="Apri PDF"><button type="button" class="pageLink" data-payroll-open-pages="${Ao(row.key)}">${Ao(pagesLabel)}</button></td>
-		      </tr>
-		    `;
+    // classi riga: rosso se mail errata, verde se già inviata
+    const issueClass = row.missingEmail ? "badEmail" : (row.conflict ? "conflict" : ((row.missingMonth || missingDocs) ? "warn" : ""));
+    const rowClass = row.sent ? "sentRow" : issueClass;
+    const sentBadge = row.sent ? `<span class="sentBadge">già inviata</span>` : "";
+    const flagChecked = row.sent ? "checked" : (row.enabled!==false ? "checked" : "");
+    const flagDisabled = row.sent ? "disabled" : "";
+    const emailReadonly = row.sent ? "readonly" : "";
+
+    return `
+      <tr class="${rowClass}" data-payroll-row="${Ao(row.key)}">
+        <td class="flagCell">
+          <input class="rowFlag" type="checkbox" data-payroll-row-toggle="${Ao(row.key)}" ${flagChecked} ${flagDisabled} aria-label="${row.sent ? "Riga già inviata" : "Seleziona riga"}">
+        </td>
+        <td class="nameCell" title="${Ao(row.displayName||"")}">${Ao(row.displayName||"—")}${sentBadge}</td>
+        <td class="cfCell" title="Codice fiscale">${Ao(cf||"—")}</td>
+        <td class="amountCell">${Ao(amount||"—")}</td>
+        <td class="emailCell">
+          <input class="emailInput ${row.missingEmail?"invalid":""}" data-payroll-field="email" data-key="${Ao(row.key)}" value="${Ao(row.email||"")}" placeholder="nome@azienda.it" inputmode="email" autocomplete="email" ${emailReadonly}>
+        </td>
+        <td class="pagesCell" title="Apri PDF"><button type="button" class="pageLink" data-payroll-open-pages="${Ao(row.key)}">${Ao(pagesLabel)}</button></td>
+      </tr>
+    `;
   }).join("");
 
   body.innerHTML = html || '<tr><td colspan="6" class="muted" style="padding:14px">Nessuna riga.</td></tr>';
@@ -5270,7 +5368,7 @@ function Pi(){
   refreshGroupedValidation();
 }
 
-function renderUploadHistory(){
+function renderUploadHistory()function renderUploadHistory(){
         const list = U("payrollHistoryList");
         const meta = U("payrollHistoryMeta");
         const history = N.payroll?.admin?.uploadHistory || [];
@@ -6516,10 +6614,21 @@ function renderUploadHistory(){
       }
 
 
+function markPayrollRowSent(row, reason=""){
+        try{
+          if(!row) return;
+          row.sent = true;
+          row.sentReason = reason || row.sentReason || "";
+          row.sentAtClient = Date.now();
+          row.enabled = false;
+        }catch(_e){}
+      }
+
 async function Yi() {
         const e = N.payroll.admin;
         const __dedupByFile = new Set();
         const rows = (e.groupedRows || []).filter(r=>r.enabled!==false);
+        try{ e.filters = e.filters || (N.payroll.admin.filters = (N.payroll.admin.filters || { search:"", showIssues:false, showSent:false })); N.payroll.admin.filters.showSent = false; }catch(_e){}
         if (!rows.length) return void Ve("Nessun dato", "Esegui l’estrazione e abilita almeno una riga.");
         const invalid = rows.filter(r=>r.missingEmail || r.missingMonth || r.conflict);
         if (invalid.length) return void Ve("Completa i dati", "Email valida e data/mese obbligatoria per le righe attive.");
@@ -6545,6 +6654,7 @@ async function Yi() {
               if(__dupKey && __dedupByFile.has(__dupKey)){
                 setPayrollSendRowStatus(sendKey, "ok", "duplicato (stesso file)");
                 setPayrollSendRowMailStatus(sendKey, "ok", "skip");
+                try{ markPayrollRowSent(row, "duplicato"); }catch(_e){}
                 done++;
                 setPayrollSendProgress(done, total);
                 await nextFrame();
@@ -6584,6 +6694,7 @@ async function Yi() {
                 });
                 setPayrollSendRowMailStatus(sendKey, "ok", "inviata");
                 setPayrollSendRowStatus(sendKey, "live", "inviato");
+                try{ markPayrollRowSent(row, "ok"); }catch(_e){}
               }catch(err){
                 summary.status = summary.status === "ok" ? "Errori su alcune righe" : summary.status;
                 setPayrollSendRowMailStatus(sendKey, "err", err?.message || String(err));
@@ -6615,6 +6726,7 @@ async function Yi() {
           if(histBtn) histBtn.style.display = "";
           try{ setPayrollSendProgress(N.payroll?.admin?.sendUI?.done || rows.length, rows.length); }catch(_e){}
           try{ loadPayrollSentCounts(); }catch(_e){}
+          try{ Pi(); }catch(_e){}
           return;
         }
 
@@ -6665,6 +6777,7 @@ async function Yi() {
             if(__dupKey && __dedupByFile.has(__dupKey)){
               setPayrollSendRowStatus(sendKey, "ok", "duplicato (stesso file)");
               setPayrollSendRowMailStatus(sendKey, "ok", "skip");
+              try{ markPayrollRowSent(row, "duplicato"); }catch(_e){}
               done++;
               setPayrollSendProgress(done, total);
               await nextFrame();
@@ -6697,6 +6810,7 @@ async function Yi() {
             if(__alreadySameFile){
               setPayrollSendRowStatus(sendKey, "ok", "già inviato (stesso file)");
               setPayrollSendRowMailStatus(sendKey, "ok", "skip");
+              try{ markPayrollRowSent(row, "gia_inviato"); }catch(_e){}
               done++;
               setPayrollSendProgress(done, total);
               await nextFrame();
@@ -6807,6 +6921,7 @@ async function Yi() {
                 "Timeout invio mail"
               );
               watchPayrollMailDelivery(sendKey, mailDocId);
+              try{ markPayrollRowSent(row, "ok"); }catch(_e){}
             }catch(err){
               console.warn("payroll email enqueue", err);
               setPayrollSendRowMailStatus(sendKey, "err", err?.message || String(err));
@@ -7932,11 +8047,22 @@ const payrollDirAutofill = () => {
       if(payrollMatchSearch){
         payrollMatchSearch.value = N.payroll?.admin?.filters?.search || "";
         payrollMatchSearch.addEventListener("input", ()=>{
-          N.payroll.admin.filters = N.payroll.admin.filters || { search:"", showIssues:false };
+          N.payroll.admin.filters = N.payroll.admin.filters || { search:"", showIssues:false, showSent:false };
           N.payroll.admin.filters.search = payrollMatchSearch.value.trim().toLowerCase();
           Pi();
         });
       }
+
+      const btnToggleSent = U("btnPayrollToggleSent");
+      if(btnToggleSent && !btnToggleSent.__bound){
+        btnToggleSent.__bound = true;
+        btnToggleSent.addEventListener("click", ()=>{
+          N.payroll.admin.filters = N.payroll.admin.filters || { search:"", showIssues:false, showSent:false };
+          N.payroll.admin.filters.showSent = !N.payroll.admin.filters.showSent;
+          Pi();
+        });
+      }
+
       const payrollSendSearch = U("payrollSendSearch");
       if(payrollSendSearch){
         payrollSendSearch.value = N.payroll?.admin?.sendFilters?.search || "";
@@ -7950,7 +8076,7 @@ const payrollDirAutofill = () => {
       if(payrollShowIssues){
         payrollShowIssues.checked = !!N.payroll?.admin?.filters?.showIssues;
         payrollShowIssues.addEventListener("change", ()=>{
-          N.payroll.admin.filters = N.payroll.admin.filters || { search:"", showIssues:false };
+          N.payroll.admin.filters = N.payroll.admin.filters || { search:"", showIssues:false, showSent:false };
           N.payroll.admin.filters.showIssues = payrollShowIssues.checked;
           Pi();
         });
