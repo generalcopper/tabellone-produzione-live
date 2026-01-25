@@ -3182,6 +3182,22 @@ flex-direction: column !important;
     font-weight:900;
     letter-spacing:-0.01em;
   }
+  /* Header risultati match: testo responsive (conteggio + mese) */
+  #payrollMatchResultsTitle{
+    font-size:clamp(15px, 2.6vw, 18px);
+    line-height:1.15;
+    display:flex;
+    flex-wrap:wrap;
+    gap:6px;
+    align-items:baseline;
+    word-break:break-word;
+    text-wrap:balance;
+  }
+  #payrollMatchResultsTitle .rmMonth{
+    font-weight:800;
+    opacity:.88;
+  }
+
 
   /* Scroller: niente riquadri */
   #adminModal[data-payroll-step="match"] #payrollStepMatch .payrollListScroller,
@@ -3736,6 +3752,14 @@ flex-direction: column !important;
     flex:0 0 auto;
   }
   @keyframes rowSpin{ to{ transform:rotate(360deg); } }
+
+  /* Menu laterale invio: nascondi barra di caricamento (resta il contatore) */
+  #payrollStepSending #payrollSendSideMenu .progressShell.big{ display:none !important; }
+  #btnPayrollSendToggleSent[aria-pressed="true"]{
+    background: rgba(10,132,255,.10) !important;
+    border-color: rgba(10,132,255,.22) !important;
+    color:#0a84ff !important;
+  }
 </style>
 
 
@@ -3843,7 +3867,7 @@ flex-direction: column !important;
                 <div class="payrollMatchLayout">
                   <div class="payrollMatchMain">
                     <div class="payrollMatchHeader">
-                      <div class="pcTitle" id="payrollMatchResultsTitle">risultati: 0 buste paga</div>
+                      <div class="pcTitle" id="payrollMatchResultsTitle">Risultati: 0 buste paga</div>
                     </div>
                     <div class="payrollListScroller" id="payrollMatchScroller">
                       <table class="payrollMatchTable" id="payrollMatchTable" aria-label="Elenco buste paga">
@@ -3897,7 +3921,7 @@ flex-direction: column !important;
                     </div>
 
                     <div class="sideBlock actions">
-                      <button class="payrollBtn" id="btnPayrollToggleSent" type="button" aria-pressed="false">Visualizza inviati</button>
+                      <button class="payrollBtn" id="btnPayrollToggleSent" type="button" aria-pressed="false">Vedi già inviate</button>
                     </div>
 
                     <div class="sideBlock meta">
@@ -3971,7 +3995,8 @@ flex-direction: column !important;
                     </div>
 
                     <div class="sideBlock actions">
-                      <button class="payrollBtn" id="btnPayrollSendDone" type="button">Indietro</button>
+                      <button class="payrollBtn" id="btnPayrollSendToggleSent" type="button" aria-pressed="false">Vedi inviate</button>
+                      <button class="payrollBtn" id="btnPayrollSendDone" type="button" style="display:none">Torna ai risultati</button>
                     </div>
 
                     <div class="sideBlock meta">
@@ -4881,7 +4906,24 @@ function __payrollLoadScript(src){
 
         if(summary){ summary.textContent = `${rows.length} righe · ${totalPages} pagine`; }
         if(matchCount){ matchCount.textContent = `${filteredRows.length} righe · ${filteredPages} pagine`; }
-        if(matchResultsTitle){ matchResultsTitle.textContent = `risultati: ${filteredRows.length} buste paga`; }
+
+        if(matchResultsTitle){
+          const count = filteredRows.length;
+          const countLabel = (count === 1) ? "1 busta paga" : `${count} buste paga`;
+
+          // Mese: se unico lo mostro nel titolo; se diverso segnalo.
+          const monthKeys = filteredRows.map(r=>normalizeMonthKey(r.monthKey||"")).filter(Boolean);
+          const uniq = Array.from(new Set(monthKeys));
+
+          if(uniq.length === 1){
+            const mLabel = formatPayrollMonthLabel(uniq[0]);
+            matchResultsTitle.innerHTML = `<span class="rmMain">Risultati: ${Ao(countLabel)},</span><span class="rmMonth">del mese ${Ao(mLabel)}</span>`;
+          }else if(uniq.length > 1){
+            matchResultsTitle.textContent = `Risultati: ${countLabel} (mesi diversi)`;
+          }else{
+            matchResultsTitle.textContent = `Risultati: ${countLabel}`;
+          }
+        }
 
         const headerToggle = U("payrollToggleAll");
         if(headerToggle){
@@ -4911,14 +4953,14 @@ function __payrollLoadScript(src){
 
         if(sentCount <= 0){
           btn.disabled = true;
-          btn.textContent = "Visualizza inviati";
+          btn.textContent = "Vedi già inviate";
           btn.setAttribute("aria-pressed","false");
           N.payroll.admin.filters.showSent = false;
           return;
         }
         btn.disabled = false;
         btn.setAttribute("aria-pressed", showSent ? "true" : "false");
-        btn.textContent = showSent ? "Nascondi inviati" : `Visualizza inviati (${sentCount})`;
+        btn.textContent = showSent ? "Vedi da inviare" : `Vedi già inviate (${sentCount})`;
       }
 
       function isPayrollRowSelectable(row){
@@ -6311,7 +6353,7 @@ function renderUploadHistory(){
         updatePayrollSendMatchSummary();
         const sendSearch = U("payrollSendSearch");
         if(sendSearch) sendSearch.value = "";
-        N.payroll.admin.sendFilters = { search:"" };
+        N.payroll.admin.sendFilters = { search:"", view:"pending" };
       }
 
       function stopPayrollSendDocWatches(){
@@ -6528,19 +6570,62 @@ function renderUploadHistory(){
         updatePayrollSendMatchSummary();
       }
 
+
+      function updatePayrollSendSentToggleUI(){
+        const btn = U("btnPayrollSendToggleSent");
+        if(!btn) return;
+
+        const ui = N.payroll?.admin?.sendUI;
+        const items = ui?.items || [];
+
+        N.payroll = N.payroll || {};
+        N.payroll.admin = N.payroll.admin || {};
+        N.payroll.admin.sendFilters = N.payroll.admin.sendFilters || { search:"", view:"pending" };
+
+        const view = (N.payroll.admin.sendFilters.view || "pending");
+        const showingSent = view === "sent";
+
+        const sentCount = items.filter(it=>it && it.selected && (it.row && it.row.sent)).length;
+
+        if(sentCount <= 0){
+          btn.disabled = true;
+          btn.textContent = "Vedi inviate";
+          btn.setAttribute("aria-pressed","false");
+          N.payroll.admin.sendFilters.view = "pending";
+          return;
+        }
+
+        btn.disabled = false;
+        btn.setAttribute("aria-pressed", showingSent ? "true" : "false");
+        btn.textContent = showingSent ? "Vedi da inviare" : `Vedi inviate (${sentCount})`;
+      }
+
       function renderPayrollSendList(){
         const body = U("payrollSendTableBody");
         const ui = N.payroll?.admin?.sendUI;
         if(!body || !ui) return;
 
-        const filters = N.payroll?.admin?.sendFilters || {};
+        N.payroll = N.payroll || {};
+        N.payroll.admin = N.payroll.admin || {};
+        N.payroll.admin.sendFilters = N.payroll.admin.sendFilters || { search:"", view:"pending" };
+
+        const filters = N.payroll.admin.sendFilters;
         const search = (filters.search || "").trim().toLowerCase();
+        const view = (filters.view || "pending");
+        const showSent = view === "sent";
         const items = ui.items || [];
 
-        // Spariscono subito le righe segnate come "sent"
+        // Vista invio: per default mostro SOLO le righe ancora da inviare (selezionate + non inviate).
+        // Con toggle: mostro SOLO le righe già inviate.
         const visible = items.filter(it=>{
+          if(!it || !it.selected) return false;
           const row = it.row || {};
-          if(row.sent) return false;
+          const isSent = !!row.sent;
+          if(showSent){
+            if(!isSent) return false;
+          }else{
+            if(isSent) return false;
+          }
           const text = [it.name, it.email, row.displayName, row.fiscalCode].join(" ").toLowerCase();
           return !search || text.includes(search);
         });
@@ -6597,6 +6682,8 @@ function renderUploadHistory(){
         const missingEmailTotalEl = U("payrollSendMissingEmailTotal");
         if(selectedTotalEl) selectedTotalEl.textContent = String(remainingSelected);
         if(missingEmailTotalEl) missingEmailTotalEl.textContent = String(remainingMissingEmail);
+
+        try{ updatePayrollSendSentToggleUI(); }catch(_e){}
       }
 
       function buildPayrollEmailDoc({ toEmail, fullName, monthKey, netPayText, downloadUrl, fileName, payrollDocId, storagePath }){
@@ -6709,6 +6796,11 @@ function markPayrollRowSent(row, reason=""){
           row.sentReason = reason || row.sentReason || "";
           row.sentAtClient = Date.now();
           row.enabled = false;
+
+          // Aggiorna subito la UI (così la riga sparisce appena inviata)
+          try{ renderPayrollSendList(); }catch(_e){}
+          try{ updatePayrollSendSentToggleUI(); }catch(_e){}
+          try{ updateSentToggleUI(); }catch(_e){}
         }catch(_e){}
       }
 
@@ -8197,11 +8289,23 @@ const payrollDirAutofill = () => {
       if(payrollSendSearch){
         payrollSendSearch.value = N.payroll?.admin?.sendFilters?.search || "";
         payrollSendSearch.addEventListener("input", ()=>{
-          N.payroll.admin.sendFilters = N.payroll.admin.sendFilters || { search:"" };
+          N.payroll.admin.sendFilters = N.payroll.admin.sendFilters || { search:"", view:"pending" };
           N.payroll.admin.sendFilters.search = payrollSendSearch.value.trim().toLowerCase();
           renderPayrollSendList();
         });
       }
+
+      const btnPayrollSendToggleSent = U("btnPayrollSendToggleSent");
+      if(btnPayrollSendToggleSent && !btnPayrollSendToggleSent.__bound){
+        btnPayrollSendToggleSent.__bound = true;
+        btnPayrollSendToggleSent.addEventListener("click", ()=>{
+          N.payroll.admin.sendFilters = N.payroll.admin.sendFilters || { search:"", view:"pending" };
+          N.payroll.admin.sendFilters.view = (N.payroll.admin.sendFilters.view === "sent") ? "pending" : "sent";
+          renderPayrollSendList();
+          try{ updatePayrollSendSentToggleUI(); }catch(_e){}
+        });
+      }
+
       const payrollShowIssues = U("payrollShowIssues");
       if(payrollShowIssues){
         payrollShowIssues.checked = !!N.payroll?.admin?.filters?.showIssues;
