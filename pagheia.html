@@ -3820,6 +3820,8 @@ flex-direction: column !important;
       messagingSenderId: "162609991629",
       appId: "1:162609991629:web:5e4b367a928fe8e4823e84"
     };
+    const APPCHECK_SITE_KEY = "6LcwcVUsAAAAAK4A6obrpGbGFHYGw3Wparj1626K"; // reCAPTCHA v3 site key (public)
+
     const PAYROLL_EXTRACT_ENDPOINT = "https://gemini-pdf-extract-162609991629.europe-west1.run.app/extract";
 
     // Privacy / compliance: NON archiviare i PDF (niente Firebase Storage).
@@ -6322,7 +6324,19 @@ function renderUploadHistory(){
             const tok = await u.getIdToken();
             if(tok) headers["Authorization"] = "Bearer " + tok;
           }
-        }catch(_e){}
+}catch(_e){}
+
+        // App Check token (anti-abuso)
+        try{
+          const ac = N.firebase?.appCheck;
+          const acApi = N.firebase?.appCheckApi;
+          if(ac && acApi && typeof acApi.getToken === "function"){
+            const resp = await acApi.getToken(ac, /* forceRefresh= */ false);
+            if(resp && resp.token) headers["X-Firebase-AppCheck"] = resp.token;
+          }
+        }catch(err){
+          console.warn("appcheck token", err);
+        }
 
         const res = await fetch(endpoint, { method:"POST", body: fd, headers });
         let bodyText = "";
@@ -8367,13 +8381,29 @@ function buildSafePdfName(base){
 
     async function initFirebase(){
       try{
-        const [{ initializeApp }, authMod, fsMod, storageMod] = await Promise.all([
+        const [{ initializeApp }, authMod, fsMod, storageMod, appCheckMod] = await Promise.all([
           import("https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js"),
           import("https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js"),
           import("https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js"),
-          import("https://www.gstatic.com/firebasejs/12.7.0/firebase-storage.js")
+          import("https://www.gstatic.com/firebasejs/12.7.0/firebase-storage.js"),
+          import("https://www.gstatic.com/firebasejs/12.7.0/firebase-app-check.js")
         ]);
         const app = initializeApp(firebaseConfig);
+        // --- Firebase App Check (reCAPTCHA v3) ---
+        let appCheck = null;
+        try{
+          if(APPCHECK_SITE_KEY && !String(APPCHECK_SITE_KEY).includes("RECAPTCHA_SITE_KEY_HERE")){
+            appCheck = appCheckMod.initializeAppCheck(app, {
+              provider: new appCheckMod.ReCaptchaV3Provider(APPCHECK_SITE_KEY),
+              isTokenAutoRefreshEnabled: true
+            });
+          }else{
+            console.warn("⚠️ App Check: imposta APPCHECK_SITE_KEY (reCAPTCHA site key) per proteggere le API.");
+          }
+        }catch(e){
+          console.warn("App Check init", e);
+        }
+
         const auth = authMod.getAuth(app);
 
         // Mantieni l'accesso tra pagine/redirect (stesso dominio) + supporto popup bloccati
@@ -8407,6 +8437,8 @@ function buildSafePdfName(base){
           auth,
           db,
           storage,
+          appCheck,
+          appCheckApi: { getToken: appCheckMod.getToken, getLimitedUseToken: appCheckMod.getLimitedUseToken },
           api: {
             collection: fsMod.collection,
             doc: fsMod.doc,
