@@ -3923,6 +3923,12 @@ function hideLogin(){
     if(!fs || !db) return;
     try{
       const col = fs.collection(db, "powderProductions");
+      // ✅ Performance + realtime: ascolto SOLO delle produzioni attive (snapshot leggero, update immediato kiosk)
+      let colActive = col;
+      try{
+        colActive = fs.query(col, fs.where("active","==",true), fs.limit(300));
+      }catch(_e){}
+
       const hcol = fs.collection(db, "powderProdHistory");
       const alertRef = alertDoc(fs, db);
       const unsubs = [];
@@ -3974,7 +3980,7 @@ function hideLogin(){
         __fsBackoffMs = 1500;
       };
 
-      unsubs.push(fs.onSnapshot(col, activeNext, onErr));
+      unsubs.push(fs.onSnapshot(colActive, activeNext, onErr));
       try {
         unsubs.push(fs.onSnapshot(hcol, histNext, onErr));
       } catch(_e) {}
@@ -4440,6 +4446,12 @@ function hideLogin(){
       try{ Payroll.onSignedIn(); }catch(_e){}
       ensureAllowlistListener();
       ensureActionLogListener();
+
+      // Kiosk: primo pull immediato degli attivi (non aspetta il primo onSnapshot)
+      if(state && state.kioskMode){
+        try{ kioskPullActiveProductionsOnce("auth_ready"); }catch(_e){}
+      }
+
       __fsStartListen();
     });
   }
@@ -12041,27 +12053,43 @@ U("payrollAdminClose")?.addEventListener("click", () => {
   let __kioskActiveWatchdog = null;
 
   async function kioskPullActiveProductionsOnce(_reason="watchdog"){
-    try{
-      if(!state || !state.kioskMode) return;
-      if(!state.firebase || !state.firebase.ok) return;
-      if(!state.user) return;
+    if(!state || !state.kioskMode) return;
+    if(!state.firebase || !state.firebase.ok) return;
+    if(!state.user) return;
 
+    // Evita richieste sovrapposte: kiosk sempre-on
+    if(globalThis.__KIOSK_PULLING_ACTIVE__) return;
+    globalThis.__KIOSK_PULLING_ACTIVE__ = true;
+
+    try{
       const fs = state.firebase.api;
       const db = state.firebase.db;
       if(!fs || !db) return;
 
       let snap = null;
+
+      // Prefer: solo produzioni attive (molto più veloce)
       try{
-        const q = fs.query(
+        const qActive = fs.query(
           fs.collection(db, "powderProductions"),
-          fs.orderBy("startedAt", "desc"),
-          fs.limit(120)
+          fs.where("active","==",true),
+          fs.limit(250)
         );
-        snap = await fs.getDocs(q);
+        snap = await fs.getDocs(qActive);
       }catch(_e){
-        // fallback (più pesante, ma evita blocchi)
-        try{ snap = await fs.getDocs(fs.collection(db, "powderProductions")); }
-        catch(_e2){ return; }
+        // Fallback: ultimi documenti (per compatibilità con vecchi doc senza campo "active")
+        try{
+          const q = fs.query(
+            fs.collection(db, "powderProductions"),
+            fs.orderBy("startedAt", "desc"),
+            fs.limit(120)
+          );
+          snap = await fs.getDocs(q);
+        }catch(_e2){
+          // Ultimo fallback (più pesante)
+          try{ snap = await fs.getDocs(fs.collection(db, "powderProductions")); }
+          catch(_e3){ return; }
+        }
       }
 
       const arr = [];
@@ -12069,23 +12097,37 @@ U("payrollAdminClose")?.addEventListener("click", () => {
 
       const next = arr.filter(isProductionActiveDoc);
 
-      // Evita render inutili
-      const prev = Array.isArray(state.activeProductions) ? state.activeProductions : [];
-      let changed = next.length !== prev.length;
-      if(!changed){
-        const prevIds = new Set(prev.map(p=>String(p?.id||"")));
-        for(const p of next){
-          const id = String(p?.id||"");
-          if(id && !prevIds.has(id)){ changed = true; break; }
+      // Heartbeat anche se non cambia nulla (evita polling “a raffica”)
+      state.__lastActiveSnapshotAt = Date.now();
+
+      // Firma leggera per capire se è cambiato qualcosa (non solo id)
+      const sig = (list)=>{
+        try{
+          return (Array.isArray(list)?list:[]).map(p=>{
+            const id = String(p?.id||"");
+            const startedAt = String(p?.startedAt ?? p?.startAt ?? p?.at ?? "");
+            const selArr = Array.isArray(p?.selectedLineKeys) ? p.selectedLineKeys
+              : (Array.isArray(p?.lineKeys) ? p.lineKeys
+                : (Array.isArray(p?.lines) ? p.lines : []));
+            const selN = Array.isArray(selArr) ? selArr.length : 0;
+            return `${id}|${startedAt}|${selN}`;
+          }).sort().join(";");
+        }catch(_e){
+          return String((list||[]).length||0);
         }
-      }
+      };
+
+      const prev = Array.isArray(state.activeProductions) ? state.activeProductions : [];
+      const changed = sig(prev) !== sig(next);
 
       if(changed){
         state.activeProductions = next;
-        state.__lastActiveSnapshotAt = Date.now();
         try{ kioskRender(); }catch(_e){}
       }
     }catch(_e){}
+    finally{
+      try{ globalThis.__KIOSK_PULLING_ACTIVE__ = false; }catch(_e){}
+    }
   }
 
   function kioskEnsureRealtimeActive(){
@@ -12097,7 +12139,10 @@ U("payrollAdminClose")?.addEventListener("click", () => {
           const last = Number(state.__lastActiveSnapshotAt || 0) || 0;
           const age = last ? (Date.now() - last) : 999999;
           // Se non ho snapshot recenti, refresho io
-          if(!last || age > 3500){
+          if(document.hidden) return;
+          if(navigator.onLine === false) return;
+
+          if(!last || age > 5000){
             kioskPullActiveProductionsOnce("watchdog");
           }
         }catch(_e){}
