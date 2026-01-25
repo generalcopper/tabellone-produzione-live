@@ -1884,6 +1884,18 @@ flex-direction: column !important;
       min-width:420px;
     }
     .emailInput:focus{outline:none;box-shadow:none;border-bottom-color:rgba(10,132,255,.45)}
+    .emailText{
+      display:block;
+      padding:7px 0 6px;
+      font-weight:850;
+      font-size:13px;
+      min-width:420px;
+      color:rgba(0,0,0,.82);
+      white-space:nowrap;
+      overflow:hidden;
+      text-overflow:ellipsis;
+      cursor:default;
+    }
     .emailInput.invalid{border-bottom-color:rgba(255,59,48,.55)}
     .monthCell.invalid{color:rgba(255,59,48,.9)}
     .amountCell{font-weight:900}
@@ -3691,6 +3703,41 @@ flex-direction: column !important;
     color:#0a84ff !important;
   }
 </style>
+<style id="sendRowsSpinner_20260125">
+  /* Invio: spinner per riga (gira) + layout compatto */
+  #payrollStepSending .sendRowTail{
+    display:flex;
+    align-items:center;
+    justify-content:flex-end;
+    gap:10px;
+  }
+  #payrollStepSending .rowSpinner{
+    width:16px;
+    height:16px;
+    border-radius:999px;
+    border:2px solid rgba(0,0,0,.14);
+    border-top-color:rgba(10,132,255,.92);
+    animation:rowSpin .85s linear infinite;
+    flex:0 0 auto;
+  }
+  #payrollStepSending .rowSpinner.placeholder{ opacity:0; }
+  #payrollStepSending .rowSpinnerErr{
+    width:16px;
+    height:16px;
+    border-radius:999px;
+    border:2px solid rgba(255,59,48,.35);
+    color:rgba(255,59,48,.95);
+    display:inline-flex;
+    align-items:center;
+    justify-content:center;
+    font-weight:950;
+    font-size:12px;
+    line-height:1;
+    flex:0 0 auto;
+  }
+  @keyframes rowSpin{ to{ transform:rotate(360deg); } }
+</style>
+
 
 </head>
 <body>
@@ -4816,6 +4863,13 @@ function __payrollLoadScript(src){
         const readyRows = rows.filter(r=>r.enabled!==false && !r.sent && !r.missingEmail && !r.missingMonth && !r.conflict && ((r.pageNos?.length||r.pages?.length||0)>0));
         if(btn) btn.disabled = !(readyRows.length);
 
+        // Se NON esistono più righe non inviate, nascondi la CTA "Invia"
+        const remainingToSend = rows.filter(r=>!r.sent).length;
+        if(btn){
+          btn.style.display = (remainingToSend <= 0) ? "none" : "";
+        }
+
+
         const totalPages = rows.reduce((a,r)=>a+(r.pageNos?.length||r.pages?.length||0),0);
         const filteredRows = rows.filter(row=>{
           if(!showSent && row.sent) return false;
@@ -5345,7 +5399,9 @@ function Pi(){
     const sentBadge = row.sent ? `<span class="sentBadge">già inviata</span>` : "";
     const flagChecked = row.sent ? "checked" : (row.enabled!==false ? "checked" : "");
     const flagDisabled = row.sent ? "disabled" : "";
-    const emailReadonly = row.sent ? "readonly" : "";
+    const emailCell = row.sent
+      ? `<span class="emailText" title="${Ao(row.email||"")}">${Ao(row.email||"—")}</span>`
+      : `<input class="emailInput ${row.missingEmail?"invalid":""}" data-payroll-field="email" data-key="${Ao(row.key)}" value="${Ao(row.email||"")}" placeholder="nome@azienda.it" inputmode="email" autocomplete="email">`;
 
     return `
       <tr class="${rowClass}" data-payroll-row="${Ao(row.key)}">
@@ -5355,9 +5411,7 @@ function Pi(){
         <td class="nameCell" title="${Ao(row.displayName||"")}">${Ao(row.displayName||"—")}${sentBadge}</td>
         <td class="cfCell" title="Codice fiscale">${Ao(cf||"—")}</td>
         <td class="amountCell">${Ao(amount||"—")}</td>
-        <td class="emailCell">
-          <input class="emailInput ${row.missingEmail?"invalid":""}" data-payroll-field="email" data-key="${Ao(row.key)}" value="${Ao(row.email||"")}" placeholder="nome@azienda.it" inputmode="email" autocomplete="email" ${emailReadonly}>
-        </td>
+        <td class="emailCell">${emailCell}</td>
         <td class="pagesCell" title="Apri PDF"><button type="button" class="pageLink" data-payroll-open-pages="${Ao(row.key)}">${Ao(pagesLabel)}</button></td>
       </tr>
     `;
@@ -6214,13 +6268,33 @@ function renderUploadHistory(){
       ]);
 
 
-      function initPayrollSendUI(rows){
+      function initPayrollSendUI(allRows, selectedRows){
         stopPayrollSendDocWatches();
-        const ui = N.payroll.admin.sendUI = { total: rows.length, done: 0, items: [], byKey: {}, deliveryUnsubs: {}, mailUnsubs: {}, finalStatus: "" };
-        ui.items = (rows||[]).map(r=>{
-          const email = normalizeEmail(r.emailLower || r.email || r.id || "");
-          const key = r.key || `${email}_${r.monthKey || ""}`;
-          const item = { key, name: r.displayName || r.fullName || email || "—", email, status: "queue", detail: "", mailStatus: "idle", mailDetail: "", row: r };
+        const all = Array.isArray(allRows) ? allRows : [];
+        const sel = Array.isArray(selectedRows) ? selectedRows : [];
+        const selKeys = new Set(sel.map(r=>{
+          try{
+            const email = normalizeEmail(r?.emailLower || r?.email || r?.id || "");
+            return r?.key || `${email}_${r?.monthKey || ""}`;
+          }catch(_e){ return r?.key || ""; }
+        }).filter(Boolean));
+
+        const ui = N.payroll.admin.sendUI = {
+          total: sel.length,
+          done: 0,
+          items: [],
+          byKey: {},
+          selectedKeys: selKeys,
+          deliveryUnsubs: {},
+          mailUnsubs: {},
+          finalStatus: ""
+        };
+
+        ui.items = all.map(r=>{
+          const email = normalizeEmail(r?.emailLower || r?.email || r?.id || "");
+          const key = r?.key || `${email}_${r?.monthKey || ""}`;
+          const selected = selKeys.has(key);
+          const item = { key, name: r?.displayName || r?.fullName || email || "—", email, selected, status: selected ? "queue" : "skip", detail: "", mailStatus: "idle", mailDetail: "", row: r };
           ui.byKey[key] = item;
           return item;
         });
@@ -6387,24 +6461,24 @@ function renderUploadHistory(){
         const el = U("payrollSendSummary");
         if(!ui || !el) return;
         const items = ui.items || [];
-        const total = items.length || ui.total || 0;
+        const selItems = items.filter(it=>it && it.selected);
+        const total = ui.total || selItems.length || 0;
 
-        const delivered = items.filter(it=>it.status==="live").length;
-        const ok = items.filter(it=>it.status==="ok").length;
-        const run = items.filter(it=>it.status==="run").length;
-        const err = items.filter(it=>it.status==="err").length;
-        const queued = items.filter(it=>it.status==="queue").length;
+        const delivered = selItems.filter(it=>it.status==="live").length;
+        const run = selItems.filter(it=>it.status==="run").length;
+        const err = selItems.filter(it=>it.status==="err").length;
+        const queued = selItems.filter(it=>it.status==="queue").length;
 
-        const mailOk = items.filter(it=>it.mailStatus==="ok").length;
-        const mailRun = items.filter(it=>it.mailStatus==="run" || it.mailStatus==="processing").length;
-        const mailErr = items.filter(it=>it.mailStatus==="err").length;
-        const mailQueued = items.filter(it=>it.mailStatus==="queue" || it.mailStatus==="pending").length;
+        const mailOk = selItems.filter(it=>it.mailStatus==="ok").length;
+        const mailRun = selItems.filter(it=>it.mailStatus==="run" || it.mailStatus==="processing").length;
+        const mailErr = selItems.filter(it=>it.mailStatus==="err").length;
+        const mailQueued = selItems.filter(it=>it.mailStatus==="queue" || it.mailStatus==="pending").length;
 
         const head = ui.finalStatus ? `Esito: ${ui.finalStatus} · ` : "";
-        let msg = `${head}Match live: ${delivered}/${total} arrivati`;
+        let msg = `${head}Invio: ${(ui.done||0)}/${total}`;
         if(run) msg += ` · In invio: ${run}`;
         if(queued) msg += ` · In coda: ${queued}`;
-        if(ok && ok>delivered) msg += ` · Scritti: ${ok}`;
+        if(delivered) msg += ` · Completati: ${delivered}`;
         if(err) msg += ` · Errori: ${err}`;
 
         if(mailOk || mailRun || mailErr || mailQueued){
@@ -6463,13 +6537,15 @@ function renderUploadHistory(){
         const search = (filters.search || "").trim().toLowerCase();
         const items = ui.items || [];
 
-        const filtered = items.filter(it=>{
+        // Spariscono subito le righe segnate come "sent"
+        const visible = items.filter(it=>{
           const row = it.row || {};
+          if(row.sent) return false;
           const text = [it.name, it.email, row.displayName, row.fiscalCode].join(" ").toLowerCase();
           return !search || text.includes(search);
         });
 
-        const html = filtered.map(it=>{
+        const html = visible.map(it=>{
           const row = it.row || {};
           const pagesRaw = (row.pageNos || row.pages || []);
           const pages = pagesRaw.map(p=>{
@@ -6487,10 +6563,17 @@ function renderUploadHistory(){
           const missingMonth = row.missingMonth ?? !row.monthKey;
           const issueClass = missingEmail ? "badEmail" : (row.conflict ? "conflict" : ((missingMonth || missingDocs) ? "warn" : ""));
 
+          const selected = !!it.selected;
+          const spinning = selected && (it.status === "queue" || it.status === "run");
+          const hasErr = selected && (it.status === "err" || it.mailStatus === "err");
+          const spinner = spinning
+            ? '<span class="rowSpinner" aria-hidden="true"></span>'
+            : (hasErr ? '<span class="rowSpinnerErr" aria-hidden="true">!</span>' : '<span class="rowSpinner placeholder" aria-hidden="true"></span>');
+
           return `
             <tr class="${issueClass}" data-payroll-send-row="${Ao(it.key)}">
               <td class="flagCell">
-                <input class="rowFlag" type="checkbox" ${row.enabled!==false ? "checked":""} disabled aria-label="Riga inviata">
+                <input class="rowFlag" type="checkbox" ${selected ? "checked":""} disabled aria-label="${selected ? "Riga selezionata per invio" : "Riga non selezionata"}">
               </td>
               <td class="nameCell" title="${Ao(it.name||"")}">${Ao(it.name||"—")}</td>
               <td class="cfCell" title="Codice fiscale">${Ao(cf||"—")}</td>
@@ -6498,17 +6581,22 @@ function renderUploadHistory(){
               <td class="emailCell">
                 <input class="emailInput ${missingEmail?"invalid":""}" value="${Ao(it.email||"")}" placeholder="nome@azienda.it" inputmode="email" autocomplete="email" readonly>
               </td>
-              <td class="pagesCell" title="Apri PDF"><button type="button" class="pageLink" data-payroll-open-pages="${Ao(row.key || it.key)}">${Ao(pagesLabel)}</button></td>
+              <td class="pagesCell" title="Apri PDF">
+                <div class="sendRowTail">${spinner}<button type="button" class="pageLink" data-payroll-open-pages="${Ao(row.key || it.key)}">${Ao(pagesLabel)}</button></div>
+              </td>
             </tr>
           `;
         }).join("");
 
         body.innerHTML = html || '<tr><td colspan="6" class="muted" style="padding:14px">Nessuna riga.</td></tr>';
 
+        const remainingSelected = items.filter(it=>it.selected && !(it.row && it.row.sent)).length;
+        const remainingMissingEmail = items.filter(it=>!(it.row && it.row.sent) && !isValidEmail(it.row?.email || it.email)).length;
+
         const selectedTotalEl = U("payrollSendSelectedTotal");
         const missingEmailTotalEl = U("payrollSendMissingEmailTotal");
-        if(selectedTotalEl) selectedTotalEl.textContent = String(items.filter(r=>r.row?.enabled!==false).length);
-        if(missingEmailTotalEl) missingEmailTotalEl.textContent = String(items.filter(r=>!isValidEmail(r.row?.email || r.email)).length);
+        if(selectedTotalEl) selectedTotalEl.textContent = String(remainingSelected);
+        if(missingEmailTotalEl) missingEmailTotalEl.textContent = String(remainingMissingEmail);
       }
 
       function buildPayrollEmailDoc({ toEmail, fullName, monthKey, netPayText, downloadUrl, fileName, payrollDocId, storagePath }){
@@ -6627,7 +6715,8 @@ function markPayrollRowSent(row, reason=""){
 async function Yi() {
         const e = N.payroll.admin;
         const __dedupByFile = new Set();
-        const rows = (e.groupedRows || []).filter(r=>r.enabled!==false);
+        const allRows = (e.groupedRows || []).filter(r=>!r.sent);
+        const rows = allRows.filter(r=>r.enabled!==false);
         try{ e.filters = e.filters || (N.payroll.admin.filters = (N.payroll.admin.filters || { search:"", showIssues:false, showSent:false })); N.payroll.admin.filters.showSent = false; }catch(_e){}
         if (!rows.length) return void Ve("Nessun dato", "Esegui l’estrazione e abilita almeno una riga.");
         const invalid = rows.filter(r=>r.missingEmail || r.missingMonth || r.conflict);
@@ -6640,7 +6729,7 @@ async function Yi() {
 // === Modalità privacy (NO Storage): invio diretto senza archiviazione ===
         if(typeof PAYROLL_PERSIST_UPLOADS !== "undefined" && !PAYROLL_PERSIST_UPLOADS){
           Di("sending");
-          initPayrollSendUI(rows);
+          initPayrollSendUI(allRows, rows);
           const summary = { matched: rows.length, ambiguous: rows.filter(r=>r.conflict).length, unmatched: 0, status: "ok" };
           try{
             let done = 0; const total = rows.length;
@@ -6731,7 +6820,7 @@ async function Yi() {
         }
 
         Di("sending");
-        initPayrollSendUI(rows);
+        initPayrollSendUI(allRows, rows);
 
         // Auto-salvataggio dipendenti: se inserisci una mail nuova durante il match,
         // al click "Invia" viene aggiunta subito in Dipendenti (payrollDirectory).
@@ -7992,7 +8081,48 @@ const payrollDirAutofill = () => {
           if(row){ row.enabled = evt.target.checked; refreshGroupedValidation(); }
         }
       });
-      // Input live: email match rows + directory edit drafts
+      
+      // Conferma modifica email già compilata (sezione "risultati match")
+      // - se il campo era già valorizzato e cambia, chiede conferma
+      // - se annulli, ripristina il valore precedente
+      document.addEventListener("focusin", (evt)=>{
+        const el = evt.target;
+        if(el && el.matches && el.matches('input[data-payroll-field="email"][data-key]')){
+          el.dataset.prevEmail = el.value || "";
+        }
+      });
+
+      document.addEventListener("change", (evt)=>{
+        const el = evt.target;
+        if(!(el && el.matches && el.matches('input[data-payroll-field="email"][data-key]'))) return;
+        try{
+          const key = el.getAttribute("data-key") || "";
+          const prevRaw = String(el.dataset.prevEmail || "");
+          const prevNorm = normalizeEmail(prevRaw);
+          const nextNorm = normalizeEmail(el.value);
+
+          // Solo se era già compilata
+          if(prevNorm && prevNorm !== nextNorm){
+            const ok = window.confirm(`Confermi la modifica dell’email?\n\nDa: ${prevNorm}\nA: ${nextNorm || "—"}`);
+            if(!ok){
+              el.value = prevNorm;
+              if(key) updateGroupedRowField(key, "email", prevNorm);
+              el.dataset.prevEmail = prevNorm;
+              try{ showToast("Modifica annullata", "Email ripristinata."); }catch(_e){}
+              return;
+            }
+          }
+
+          // Commit (normalizza e salva nello state)
+          el.value = nextNorm;
+          if(key) updateGroupedRowField(key, "email", nextNorm);
+          el.dataset.prevEmail = nextNorm;
+        }catch(err){
+          console.warn("email confirm change", err);
+        }
+      });
+
+// Input live: email match rows + directory edit drafts
       document.addEventListener("input", (evt)=>{
         const el = evt.target;
         if(!el) return;
