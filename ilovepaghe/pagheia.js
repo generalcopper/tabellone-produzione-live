@@ -4393,6 +4393,162 @@ const payrollDirAutofill = () => {
 
       
       // PDF Preview overlay (same file, no #)
+
+// Helpers: prova a nascondere toolbar/nav del viewer PDF (parametri PDF Open) — usato SOLO nel fallback iframe
+function withHiddenPdfUi(url){
+  const raw = String(url || "").trim();
+  if(!raw || raw === "about:blank") return raw;
+
+  const desired = {
+    toolbar: "0",
+    navpanes: "0",
+    scrollbar: "0",
+    statusbar: "0",
+    messages: "0"
+  };
+
+  const hashIndex = raw.indexOf("#");
+  const base = (hashIndex >= 0) ? raw.slice(0, hashIndex) : raw;
+  const frag = (hashIndex >= 0) ? raw.slice(hashIndex + 1) : "";
+
+  const parts = frag ? frag.split("&").filter(Boolean) : [];
+  const present = new Set();
+  for(const p of parts){
+    const k = String(p.split("=")[0] || "").toLowerCase();
+    if(k) present.add(k);
+  }
+  for(const k of Object.keys(desired)){
+    if(!present.has(k)) parts.push(`${k}=${desired[k]}`);
+  }
+
+  const nextFrag = parts.join("&");
+  return base + "#" + nextFrag;
+}
+
+async function __payrollGetPDFJS(){
+  // pdf.js (render su canvas) — caricato on-demand
+  if(globalThis.pdfjsLib && globalThis.pdfjsLib.getDocument) return globalThis.pdfjsLib;
+
+  if(!globalThis.__PAYROLL_PDFJS_PROMISE__){
+    globalThis.__PAYROLL_PDFJS_PROMISE__ = (async ()=>{
+      const base = "https://cdn.jsdelivr.net/npm/pdfjs-dist@2.16.105/build/";
+      await __payrollLoadScript(base + "pdf.min.js");
+      if(!globalThis.pdfjsLib || !globalThis.pdfjsLib.getDocument) throw new Error("pdf.js non disponibile");
+      try{ globalThis.pdfjsLib.GlobalWorkerOptions.workerSrc = base + "pdf.worker.min.js"; }catch(_e){}
+      return globalThis.pdfjsLib;
+    })();
+  }
+
+  return await globalThis.__PAYROLL_PDFJS_PROMISE__;
+}
+
+async function renderPdfPreview(url){
+  const overlay = U("pdfPreviewOverlay");
+  const wrap = U("pdfPreviewCanvasWrap");
+  const frame = U("pdfPreviewFrame");
+
+  const src = String(url || "").trim();
+  if(!wrap || !overlay) return;
+
+  // Se l'overlay è già chiuso, evita lavoro inutile
+  if(overlay.getAttribute("aria-hidden") !== "false") return;
+
+  // reset UI
+  try{ wrap.innerHTML = ""; wrap.scrollTop = 0; }catch(_e){}
+  try{ wrap.style.display = "flex"; }catch(_e){}
+  try{ if(frame){ frame.style.display = "none"; frame.src = "about:blank"; } }catch(_e){}
+
+  if(!src) return;
+
+  N.ui = N.ui || {};
+  N.ui.pdfPreview = N.ui.pdfPreview || {};
+
+  // token per interrompere render se chiudi/cambi PDF
+  const token = String(Date.now()) + ":" + Math.random().toString(16).slice(2);
+  N.ui.pdfPreview._renderToken = token;
+
+  // interrompi eventuale task precedente
+  try{
+    if(N.ui.pdfPreview._pdfTask && typeof N.ui.pdfPreview._pdfTask.destroy === "function"){
+      N.ui.pdfPreview._pdfTask.destroy();
+    }
+  }catch(_e){}
+  N.ui.pdfPreview._pdfTask = null;
+
+  let pdfjs = null;
+  try{
+    pdfjs = await __payrollGetPDFJS();
+  }catch(err){
+    pdfjs = null;
+  }
+
+  // Se pdf.js non disponibile, fallback iframe (meno “pulito”, ma almeno funziona)
+  if(!pdfjs){
+    if(frame){
+      try{ frame.style.display = "block"; }catch(_e){}
+      try{ frame.src = withHiddenPdfUi(src); }catch(_e){}
+    }
+    return;
+  }
+
+  try{
+    const task = pdfjs.getDocument({ url: src });
+    N.ui.pdfPreview._pdfTask = task;
+
+    const pdf = await task.promise;
+    const dpr = Math.max(1, window.devicePixelRatio || 1);
+
+    const targetWidth = Math.max(320, (wrap.clientWidth || window.innerWidth || 1024) - 20);
+
+    for(let pageNum = 1; pageNum <= pdf.numPages; pageNum++){
+      if(N.ui.pdfPreview._renderToken !== token) break;
+      if(overlay.getAttribute("aria-hidden") !== "false") break;
+
+      const page = await pdf.getPage(pageNum);
+
+      // calcola scala per larghezza
+      const baseVp = page.getViewport({ scale: 1 });
+      const scale = targetWidth / baseVp.width;
+      const vp = page.getViewport({ scale: scale * dpr });
+
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.floor(vp.width);
+      canvas.height = Math.floor(vp.height);
+      canvas.style.width = Math.floor(vp.width / dpr) + "px";
+      canvas.style.height = Math.floor(vp.height / dpr) + "px";
+      canvas.style.display = "block";
+      canvas.style.background = "#fff";
+
+      const pageWrap = document.createElement("div");
+      pageWrap.className = "pdfPreviewPage";
+      pageWrap.appendChild(canvas);
+      wrap.appendChild(pageWrap);
+
+      const ctx = canvas.getContext("2d", { alpha: false });
+      // fondo bianco (evita trasparenze)
+      if(ctx){
+        try{
+          ctx.save();
+          ctx.fillStyle = "#fff";
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+          ctx.restore();
+        }catch(_e){}
+      }
+
+      const renderTask = page.render({ canvasContext: ctx, viewport: vp });
+      await renderTask.promise;
+    }
+
+    try{ pdf.cleanup?.(); }catch(_e){}
+  }catch(err){
+    console.warn("pdf preview render failed", err);
+    if(frame){
+      try{ frame.style.display = "block"; }catch(_e){}
+      try{ frame.src = withHiddenPdfUi(src); }catch(_e){}
+    }
+  }
+}
+
       
 function showPdfPreview({ title, sub, srcUrl, fileName, markOpenedVia } = {}){
         const overlay = U("pdfPreviewOverlay");
@@ -4427,16 +4583,21 @@ function showPdfPreview({ title, sub, srcUrl, fileName, markOpenedVia } = {}){
         if(t) t.textContent = N.ui.pdfPreview.title;
         if(s) s.textContent = N.ui.pdfPreview.sub;
 
-        // set iframe src (remote URL o blob URL) — forza refresh (evita contenuti “bloccati”)
-        try{ frame.src = "about:blank"; }catch(_e){}
-        try{
-          const u = N.ui.pdfPreview.directUrl || "";
-          setTimeout(()=>{ try{ frame.src = u; }catch(_e){} }, 0);
-        }catch(_e){}
+        // Render PDF full-screen senza toolbar (canvas via pdf.js). Fallback iframe se serve.
+try{ frame.src = "about:blank"; }catch(_e){}
+try{ frame.style.display = "none"; }catch(_e){}
+try{
+  const wrap = U("pdfPreviewCanvasWrap");
+  if(wrap){ wrap.innerHTML = ""; wrap.scrollTop = 0; }
+}catch(_e){}
 
-        overlay.setAttribute("aria-hidden","false");
+overlay.setAttribute("aria-hidden","false");
         document.body.classList.add("modalOpen");
         updateModalOpenState();
+// Render del PDF (solo pagina, niente UI)
+setTimeout(()=>{ try{ renderPdfPreview(N.ui?.pdfPreview?.directUrl || ""); }catch(_e){} }, 0);
+
+
 
         setTimeout(()=>{ try{ U("btnPdfPreviewClose")?.focus?.(); }catch(_e){} }, 10);
 
@@ -4460,6 +4621,21 @@ function closePdfPreview(){
         document.body.classList.remove("modalOpen");
         updateModalOpenState();
         try{ frame.src = "about:blank"; }catch(_e){}
+try{ frame.style.display = "none"; }catch(_e){}
+try{
+  const wrap = U("pdfPreviewCanvasWrap");
+  if(wrap) wrap.innerHTML = "";
+}catch(_e){}
+try{
+  if(N.ui?.pdfPreview){
+    N.ui.pdfPreview._renderToken = "";
+    if(N.ui.pdfPreview._pdfTask && typeof N.ui.pdfPreview._pdfTask.destroy === "function"){
+      N.ui.pdfPreview._pdfTask.destroy();
+    }
+    N.ui.pdfPreview._pdfTask = null;
+  }
+}catch(_e){}
+
         try{
           if(N.ui?.pdfPreview?.objectUrl){
             URL.revokeObjectURL(N.ui.pdfPreview.objectUrl);
