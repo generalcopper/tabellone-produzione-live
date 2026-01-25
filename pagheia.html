@@ -3184,19 +3184,31 @@ flex-direction: column !important;
   }
   /* Header risultati match: testo responsive (conteggio + mese) */
   #payrollMatchResultsTitle{
-    font-size:clamp(15px, 2.6vw, 18px);
-    line-height:1.15;
     display:flex;
-    flex-wrap:wrap;
+    flex-direction:column;
+    align-items:flex-start;
     gap:6px;
-    align-items:baseline;
+    line-height:1.12;
     word-break:break-word;
     text-wrap:balance;
   }
-  #payrollMatchResultsTitle .rmMonth{
-    font-weight:800;
-    opacity:.88;
+  #payrollMatchResultsTitle .rmClaim{
+    font-size:clamp(20px, 3.4vw, 28px);
+    font-weight:950;
+    letter-spacing:-0.02em;
   }
+  #payrollMatchResultsTitle .rmMeta{
+    font-size:clamp(13px, 2.2vw, 15px);
+    font-weight:850;
+    color:rgba(12,16,26,.72);
+    display:flex;
+    flex-wrap:wrap;
+    gap:8px;
+    align-items:baseline;
+  }
+  #payrollMatchResultsTitle .rmMeta .sep{opacity:.45}
+  #payrollMatchResultsTitle .rmMeta .rmCompany{font-weight:950;color:rgba(12,16,26,.86)}
+  #payrollMatchResultsTitle .rmMeta .rmEmp{font-weight:950;color:rgba(12,16,26,.86)}
 
 
   /* Scroller: niente riquadri */
@@ -3761,6 +3773,32 @@ flex-direction: column !important;
     color:#0a84ff !important;
   }
 </style>
+<style id="claimsText_20260125">
+  /* Claim (app-style): Match + Invio */
+  #payrollStepSending #payrollSendTitle{
+    font-size:clamp(20px, 3.2vw, 28px);
+    font-weight:950;
+    letter-spacing:-0.02em;
+  }
+  #payrollStepSending #payrollSendSummary{
+    font-size:clamp(13px, 2.2vw, 15px);
+    font-weight:850;
+    color:rgba(12,16,26,.72);
+    line-height:1.35;
+  }
+  #payrollStepSending #payrollSendSummary .psClaim{
+    display:block;
+    font-weight:950;
+    color:rgba(12,16,26,.86);
+  }
+  #payrollStepSending #payrollSendSummary .psMeta{
+    display:block;
+    margin-top:4px;
+    color:rgba(12,16,26,.62);
+    font-weight:850;
+  }
+</style>
+
 
 
 
@@ -3913,7 +3951,7 @@ flex-direction: column !important;
                 <div class="payrollMatchLayout">
                   <div class="payrollMatchMain">
                     <div class="payrollMatchHeader">
-                      <div class="pcTitle" id="payrollMatchResultsTitle">Risultati: 0 buste paga</div>
+                      <div class="pcTitle" id="payrollMatchResultsTitle"><span class="rmClaim">Match completato</span><span class="rmMeta"><span>Ditta: <span class="rmCompany">—</span></span><span class="sep">·</span><span>Dipendenti: <span class="rmEmp">0</span></span></span></div>
                     </div>
                     <div class="payrollListScroller" id="payrollMatchScroller">
                       <table class="payrollMatchTable" id="payrollMatchTable" aria-label="Elenco buste paga">
@@ -3968,7 +4006,7 @@ flex-direction: column !important;
                       <button class="payrollBtn" id="btnPayrollCancelMatch" type="button">Annulla</button>
                     </div>
 
-                    <div class="sideBlock actions">
+                    <div class="sideBlock actions" id="payrollToggleSentWrap" style="display:none">
                       <button class="payrollBtn" id="btnPayrollToggleSent" type="button" aria-pressed="false">Vedi già inviate</button>
                     </div>
 
@@ -4047,7 +4085,7 @@ flex-direction: column !important;
                     <div class="sideBottom">
 
                     <div class="sideBlock actions">
-                      <button class="payrollBtn" id="btnPayrollSendToggleSent" type="button" aria-pressed="false">Vedi inviate</button>
+                      <button class="payrollBtn" id="btnPayrollSendToggleSent" type="button" aria-pressed="false" style="display:none">Vedi inviate</button>
                       <button class="payrollBtn" id="btnPayrollSendDone" type="button" style="display:none">Torna ai risultati</button>
                     </div>
 
@@ -4963,20 +5001,53 @@ function __payrollLoadScript(src){
 
         if(matchResultsTitle){
           const count = filteredRows.length;
-          const countLabel = (count === 1) ? "1 busta paga" : `${count} buste paga`;
+          const employees = count;
 
-          // Mese: se unico lo mostro nel titolo; se diverso segnalo.
+          // Ditta (fallback): usa companyName se impostato, altrimenti prova a dedurla dal nome file
+          const company = (()=>{
+            try{
+              const explicit = String(N.payroll?.admin?.companyName || "").trim();
+              if(explicit) return explicit;
+
+              const fn = String(N.payroll?.admin?.sourceFileName || "").trim();
+              if(!fn) return "";
+              let base = fn.replace(/\.pdf$/i,"").trim();
+              if(!base) return "";
+
+              const monthWords = /(gennaio|febbraio|marzo|aprile|maggio|giugno|luglio|agosto|settembre|ottobre|novembre|dicembre|january|february|march|april|may|june|july|august|september|october|november|december)\b/i;
+              const looksLikePeriod = (s)=> monthWords.test(s) || /\b20\d{2}\b/.test(s) || /\b(0?[1-9]|1[0-2])[\/\-](20\d{2})\b/.test(s) || /\b20\d{2}[\/\-](0?[1-9]|1[0-2])\b/.test(s);
+
+              const parts = base.split(/[-–—|]+/).map(p=>p.trim()).filter(Boolean);
+              const candidates = parts.filter(p=>!looksLikePeriod(p) && /[a-zA-ZÀ-ÿ]/.test(p));
+
+              let pick = candidates.length ? candidates[candidates.length-1] : base;
+              pick = pick.replace(monthWords, " ").replace(/\b20\d{2}\b/g," ").replace(/\s+/g," ").trim();
+
+              if(pick.length > 48) pick = pick.slice(0,48).trim() + "…";
+              return pick;
+            }catch(_e){ return ""; }
+          })();
+          const companyLabel = company || "—";
+
+          // Periodo
           const monthKeys = filteredRows.map(r=>normalizeMonthKey(r.monthKey||"")).filter(Boolean);
           const uniq = Array.from(new Set(monthKeys));
-
+          let monthChunk = "";
           if(uniq.length === 1){
-            const mLabel = formatPayrollMonthLabel(uniq[0]);
-            matchResultsTitle.innerHTML = `<span class="rmMain">Risultati: ${Ao(countLabel)},</span><span class="rmMonth">del mese ${Ao(mLabel)}</span>`;
+            monthChunk = `<span class="sep">·</span><span>${Ao(formatPayrollMonthLabel(uniq[0]))}</span>`;
           }else if(uniq.length > 1){
-            matchResultsTitle.textContent = `Risultati: ${countLabel} (mesi diversi)`;
-          }else{
-            matchResultsTitle.textContent = `Risultati: ${countLabel}`;
+            monthChunk = `<span class="sep">·</span><span>Mesi diversi</span>`;
           }
+
+          // Claim "app"
+          matchResultsTitle.innerHTML =
+            `<span class="rmClaim">Match completato</span>` +
+            `<span class="rmMeta">` +
+              `<span>Ditta: <span class="rmCompany">${Ao(companyLabel)}</span></span>` +
+              `<span class="sep">·</span>` +
+              `<span>Dipendenti: <span class="rmEmp">${Ao(String(employees))}</span></span>` +
+              monthChunk +
+            `</span>`;
         }
 
         const headerToggle = U("payrollToggleAll");
@@ -4996,6 +5067,8 @@ function __payrollLoadScript(src){
       function updateSentToggleUI(){
         const btn = U("btnPayrollToggleSent");
         if(!btn) return;
+
+        const wrap = btn.closest(".sideBlock.actions") || btn.parentElement;
         const rows = N.payroll?.admin?.groupedRows || [];
         const sentCount = rows.filter(r=>!!r.sent).length;
 
@@ -5005,13 +5078,18 @@ function __payrollLoadScript(src){
 
         const showSent = !!N.payroll.admin.filters.showSent;
 
+        // Richiesta: mostra il toggle SOLO se esistono righe già inviate (successo)
         if(sentCount <= 0){
-          btn.disabled = true;
-          btn.textContent = "Vedi già inviate";
+          if(wrap) wrap.style.display = "none";
+          else btn.style.display = "none";
           btn.setAttribute("aria-pressed","false");
           N.payroll.admin.filters.showSent = false;
           return;
         }
+
+        if(wrap) wrap.style.display = "";
+        else btn.style.display = "";
+
         btn.disabled = false;
         btn.setAttribute("aria-pressed", showSent ? "true" : "false");
         btn.textContent = showSent ? "Vedi da inviare" : `Vedi già inviate (${sentCount})`;
@@ -6576,9 +6654,11 @@ function renderUploadHistory(){
         const ui = N.payroll?.admin?.sendUI;
         const el = U("payrollSendSummary");
         if(!ui || !el) return;
+
         const items = ui.items || [];
         const selItems = items.filter(it=>it && it.selected);
         const total = ui.total || selItems.length || 0;
+        const done = (ui.done || 0);
 
         const delivered = selItems.filter(it=>it.status==="live").length;
         const run = selItems.filter(it=>it.status==="run").length;
@@ -6590,24 +6670,57 @@ function renderUploadHistory(){
         const mailErr = selItems.filter(it=>it.mailStatus==="err").length;
         const mailQueued = selItems.filter(it=>it.mailStatus==="queue" || it.mailStatus==="pending").length;
 
-        const head = ui.finalStatus ? `Esito: ${ui.finalStatus} · ` : "";
-        let msg = `${head}Invio: ${(ui.done||0)}/${total}`;
-        if(run) msg += ` · In invio: ${run}`;
-        if(queued) msg += ` · In coda: ${queued}`;
-        if(delivered) msg += ` · Completati: ${delivered}`;
-        if(err) msg += ` · Errori: ${err}`;
+        // "Completati" = righe marcate sent (successo) oppure consegna live
+        const completed = selItems.filter(it=>it?.row?.sent || it.status==="live").length;
 
-        if(mailOk || mailRun || mailErr || mailQueued){
-          msg += ` · Mail: ${mailOk} ok`;
-          if(mailRun) msg += `, ${mailRun} in invio`;
-          if(mailQueued) msg += `, ${mailQueued} in coda`;
-          if(mailErr) msg += `, ${mailErr} errori`;
-        }
+        // Ditta (fallback): usa companyName se impostato, altrimenti prova a dedurla dal nome file
+        const company = (()=>{
+          try{
+            const explicit = String(N.payroll?.admin?.companyName || "").trim();
+            if(explicit) return explicit;
 
-        el.textContent = msg;
+            const fn = String(N.payroll?.admin?.sourceFileName || "").trim();
+            if(!fn) return "";
+            let base = fn.replace(/\.pdf$/i,"").trim();
+            if(!base) return "";
+
+            const monthWords = /(gennaio|febbraio|marzo|aprile|maggio|giugno|luglio|agosto|settembre|ottobre|novembre|dicembre|january|february|march|april|may|june|july|august|september|october|november|december)\b/i;
+            const looksLikePeriod = (s)=> monthWords.test(s) || /\b20\d{2}\b/.test(s) || /\b(0?[1-9]|1[0-2])[\/\-](20\d{2})\b/.test(s) || /\b20\d{2}[\/\-](0?[1-9]|1[0-2])\b/.test(s);
+
+            const parts = base.split(/[-–—|]+/).map(p=>p.trim()).filter(Boolean);
+            const candidates = parts.filter(p=>!looksLikePeriod(p) && /[a-zA-ZÀ-ÿ]/.test(p));
+
+            let pick = candidates.length ? candidates[candidates.length-1] : base;
+            pick = pick.replace(monthWords, " ").replace(/\b20\d{2}\b/g," ").replace(/\s+/g," ").trim();
+
+            if(pick.length > 48) pick = pick.slice(0,48).trim() + "…";
+            return pick;
+          }catch(_e){ return ""; }
+        })();
+        const companyLabel = company || "—";
+
+        // Claim "app"
+        const claimCount = ui.finalStatus ? completed : total;
+        const claimWord = (claimCount === 1) ? "busta paga" : "buste paga";
+        const claimCompany = companyLabel !== "—" ? ` della ${Ao(companyLabel)}` : ``;
+
+        const claim = ui.finalStatus
+          ? `Inviate ${Ao(String(claimCount))} ${claimWord}${claimCompany}`
+          : `Invio in corso · ${Ao(String(done))}/${Ao(String(total))}`;
+
+        // Riga meta: compatta, stile app
+        const esito = ui.finalStatus ? String(ui.finalStatus) : (err ? "attenzione" : "in corso");
+        let meta = `Esito: ${Ao(esito)} · Invio: ${Ao(String(done))}/${Ao(String(total))} · Completati: ${Ao(String(completed))} · Mail: ${Ao(String(mailOk))} ok`;
+        if(mailRun) meta += `, ${Ao(String(mailRun))} in invio`;
+        if(mailQueued) meta += `, ${Ao(String(mailQueued))} in coda`;
+        if(mailErr) meta += `, ${Ao(String(mailErr))} errori`;
+        if(err) meta += ` · Errori: ${Ao(String(err))}`;
+
+        el.innerHTML = `<span class="psClaim">${claim}</span><span class="psMeta">${meta}</span>`;
       }
 
-      function setPayrollSendProgress(done, total, label){
+
+function setPayrollSendProgress(done, total, label){
         const ui = N.payroll?.admin?.sendUI;
         if(ui){ ui.done = done; ui.total = total; }
         const pct = total ? Math.round((done / total) * 100) : 0;
@@ -6659,22 +6772,24 @@ function renderUploadHistory(){
         const view = (N.payroll.admin.sendFilters.view || "pending");
         const showingSent = view === "sent";
 
+        // Richiesta: mostra "Vedi inviate" SOLO quando esistono righe già inviate (successo)
         const sentCount = items.filter(it=>it && it.selected && (it.row && it.row.sent)).length;
 
         if(sentCount <= 0){
-          btn.disabled = true;
-          btn.textContent = "Vedi inviate";
+          btn.style.display = "none";
           btn.setAttribute("aria-pressed","false");
           N.payroll.admin.sendFilters.view = "pending";
           return;
         }
 
+        btn.style.display = "";
         btn.disabled = false;
         btn.setAttribute("aria-pressed", showingSent ? "true" : "false");
         btn.textContent = showingSent ? "Vedi da inviare" : `Vedi inviate (${sentCount})`;
       }
 
-      function renderPayrollSendList(){
+
+function renderPayrollSendList(){
         const body = U("payrollSendTableBody");
         const ui = N.payroll?.admin?.sendUI;
         if(!body || !ui) return;
