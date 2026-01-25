@@ -3990,7 +3990,7 @@ if(payrollGreeting) payrollGreeting.textContent = `Ciao, ${name}.`;
         if(hint){
           if(state.user.isAdmin) hint.textContent = "Accesso admin attivo: upload abilitato.";
           else if(state.user.isWhitelisted===false) hint.textContent = "Account non abilitato alle buste paga. Contatta l'admin.";
-          else if(state.user.isAnonymous) hint.textContent = "Accesso ospite attivo: puoi caricare e analizzare. Per inviare serve accesso Google.";
+          else if(state.user.isAnonymous) hint.textContent = "Accesso ospite attivo: puoi caricare, analizzare e inviare.";
           else hint.textContent = "Accesso attivo.";
         }
       }else{
@@ -4021,7 +4021,7 @@ if(payrollGreeting) payrollGreeting.textContent = `Ciao, ${name}.`;
       const btnLogoutBottom = document.getElementById("btnLogoutBottom");
 
       // Mostra "Accedi" sempre quando NON autenticato (niente schermate di caricamento)
-      const showLogin = (!isAuthed) || !!state.user?.isAnonymous;
+      const showLogin = (!isAuthed);
       if(btnLogin){
         btnLogin.style.display = showLogin ? "" : "none";
         // abilita quando Firebase è pronto
@@ -6308,6 +6308,14 @@ function renderUploadHistory(){
         fd.append("pdf", new Blob([pdfBytes], { type:"application/pdf" }), safeName);
 
         const headers = {};
+        // Assicura sessione ospite (anonima) attiva: serve un token per chiamare il mailer.
+        try{
+          const auth = N.firebase?.auth;
+          const authApi = N.firebase?.authApi;
+          if(authApi && auth && !auth.currentUser && typeof authApi.signInAnonymously === "function"){
+            await authApi.signInAnonymously(auth);
+          }
+        }catch(_e){}
         try{
           const u = N.firebase?.auth?.currentUser;
           if(u && typeof u.getIdToken === "function"){
@@ -6338,24 +6346,10 @@ async function Yi() {
         if (invalid.length) return void Ve("Completa i dati", "Email valida e data/mese obbligatoria per le righe attive.");
         if (!e.originalPdfBytes) return Ve("PDF mancante", "Riestrai l’estrazione."), void Di("preview");
 
-        // Permessi: per inviare servono credenziali Google (non accesso ospite)
-        if(!N.user || N.user.isAnonymous){
-          try{ showToast("Accesso richiesto", "Per inviare le buste paga accedi con Google."); }catch(_e){}
-          // Segna invio pendente: dopo login riparte automaticamente
-          try{ e._sendAfterLogin = true; }catch(_e){}
-          try{ sessionStorage.setItem("payroll_send_after_login","1"); }catch(_e){}
-          // Avvia login Google direttamente (nel modale la barra header può essere dietro)
-          try{ (document.getElementById("btnGoogleLoginOverlay") || document.getElementById("btnGoogleLogin"))?.click?.(); }catch(_e){}
-          try{ toggleAuthOverlay(true); }catch(_e){}
-          return;
-        }
-        if(N.user.isWhitelisted===false){
-          try{ showToast("Account non abilitato", "Questo account non è abilitato alle buste paga."); }catch(_e){}
-          return;
-        }
-
-
-        // === Modalità privacy (NO Storage): invio diretto senza archiviazione ===
+        // Accesso: il portale usa accesso ospite (anonimo) automatico.
+        // Non chiediamo login Google all’utente finale.
+        // (Il backend verifica comunque un token Firebase, generato dalla sessione anonima.)
+// === Modalità privacy (NO Storage): invio diretto senza archiviazione ===
         if(typeof PAYROLL_PERSIST_UPLOADS !== "undefined" && !PAYROLL_PERSIST_UPLOADS){
           Di("sending");
           initPayrollSendUI(rows);
