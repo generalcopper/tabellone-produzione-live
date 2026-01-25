@@ -4404,9 +4404,7 @@ function withHiddenPdfUi(url){
     navpanes: "0",
     scrollbar: "0",
     statusbar: "0",
-    messages: "0",
-    // Prova a partire in modalità "fit page" (alcuni viewer lo rispettano, altri lo ignorano)
-    view: "Fit"
+    messages: "0"
   };
 
   const hashIndex = raw.indexOf("#");
@@ -4500,22 +4498,7 @@ async function renderPdfPreview(url){
     const pdf = await task.promise;
     const dpr = Math.max(1, window.devicePixelRatio || 1);
 
-    // Calcola l'area davvero disponibile (tolgo i padding del wrap) e scala in modo che
-    // la pagina sia "adattata" (fit-to-page): deve stare tutta dentro lo schermo,
-    // non solo a larghezza piena.
-    let padX = 0;
-    let padY = 0;
-    try{
-      const cs = window.getComputedStyle(wrap);
-      padX = (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0);
-      padY = (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0);
-    }catch(_e){}
-
-    const availW = Math.max(240, (wrap.clientWidth || window.innerWidth || 1024) - padX);
-    const availH = Math.max(240, (wrap.clientHeight || window.innerHeight || 768) - padY);
-    const gutter = 8; // piccolo respiro ai bordi
-    const targetW = Math.max(240, availW - gutter);
-    const targetH = Math.max(240, availH - gutter);
+    const targetWidth = Math.max(320, (wrap.clientWidth || window.innerWidth || 1024) - 20);
 
     for(let pageNum = 1; pageNum <= pdf.numPages; pageNum++){
       if(N.ui.pdfPreview._renderToken !== token) break;
@@ -4523,13 +4506,9 @@ async function renderPdfPreview(url){
 
       const page = await pdf.getPage(pageNum);
 
-      // Calcola scala "fit page" (entra sia in larghezza che in altezza)
+      // calcola scala per larghezza
       const baseVp = page.getViewport({ scale: 1 });
-      const scaleW = targetW / baseVp.width;
-      const scaleH = targetH / baseVp.height;
-      let scale = Math.min(scaleW, scaleH);
-      // evita ingrandimenti esagerati su schermi enormi
-      scale = Math.min(scale, 2);
+      const scale = targetWidth / baseVp.width;
       const vp = page.getViewport({ scale: scale * dpr });
 
       const canvas = document.createElement("canvas");
