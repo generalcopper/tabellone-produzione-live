@@ -1656,6 +1656,21 @@ flex-direction: column !important;
     .pcBadge{padding:8px 12px;border-radius:14px;background:rgba(10,132,255,.12);color:#0a84ff;font-weight:900;border:1px solid rgba(10,132,255,.2)}
     .payrollBtn{border:1px solid #cdd3dd;background:#e7eaef;color:var(--text);padding:12px 14px;border-radius:14px;font-weight:850;cursor:pointer;position:relative;overflow:hidden;isolation:isolate;box-shadow:none}
     .payrollBtn.primary{background:#0a84ff;color:#fff;border-color:#0a84ff;box-shadow:none}
+    .payrollBtn.payrollBackBig{
+      width:100%;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      font-size:16px;
+      padding:16px 16px;
+      border-radius:18px;
+      background:#1c6fe6;
+      border-color:#1c6fe6;
+      color:#fff;
+      font-weight:950;
+    }
+    .payrollBtn.payrollBackBig:active{ transform:scale(.985); filter:brightness(.98); }
+
     .payrollBtn.ghost{background:transparent;color:var(--text);border-color:var(--stroke)}
     .payrollPill{display:inline-flex;align-items:center;gap:6px;padding:8px 10px;border-radius:999px;border:1px solid rgba(0,0,0,.08);background:rgba(0,0,0,.02);font-weight:850;font-size:12px}
     .payrollOverlay{position:fixed;inset:0;z-index:990;display:none;align-items:flex-start;justify-content:center;padding:calc(26px + var(--safe-top)) calc(18px + var(--safe-right)) calc(26px + var(--safe-bot)) calc(18px + var(--safe-left));background:rgba(0,0,0,.26);backdrop-filter:blur(10px);overflow:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch}
@@ -3757,6 +3772,10 @@ flex-direction: column !important;
                   <div class="pcSub" style="margin-bottom:8px">Destinatari</div>
                   <div class="sendList" id="payrollSendList"></div>
                 </div>
+                <div class="pcActionRow" style="margin-top:14px">
+                  <button class="payrollBtn payrollBackBig" id="btnPayrollBackToUnsent" type="button" disabled>Indietro</button>
+                </div>
+
 
                 </div>
             </div>
@@ -4176,7 +4195,7 @@ function toggleSendLogModal(show){
             admin: {
               step: "idle",
               lastFlowStep: prev.admin && prev.admin.lastFlowStep ? prev.admin.lastFlowStep : "idle",
-              filters: prev.admin?.filters || { search:"", showIssues:false },
+              filters: { search:"", showIssues:false, hideSent:false, ...(prev.admin?.filters || {}) },
               files: [],
               originalPdfBytes: null,
               sourceFileName: "",
@@ -4571,6 +4590,10 @@ function __payrollLoadScript(src){
         const filters = N.payroll?.admin?.filters || {};
         const search = (filters.search || "").toLowerCase();
         const showIssues = !!filters.showIssues;
+        const hideSent = !!filters.hideSent;
+        const sentTotal = rows.filter(r=>!!r.sent).length;
+
+
         const btn = U("btnPayrollSend");
         const summary = U("payrollMatchSummary");
         const matchCount = U("payrollMatchCount");
@@ -4586,6 +4609,7 @@ function __payrollLoadScript(src){
         rows.forEach(r=>{
           r.missingEmail = !isValidEmail(r.email);
           r.missingMonth = !r.monthKey;
+          if(r.sent){ r.enabled = false; }
           if(!r.fiscalCode) r.warning = "CF mancante: raggruppo per nome";
           if(r.missingEmail) messages.push(`Email mancante per ${r.displayName||r.fiscalCode||r.key}`);
           if(r.missingMonth) messages.push(`Data/mese mancante per pagine ${r.pages?.map(p=>p.pageIndex+1).join(", ")||""}`);
@@ -4597,7 +4621,7 @@ function __payrollLoadScript(src){
           const monthEl = document.querySelector(`[data-payroll-month="${cssEscape(r.key)}"]`);
           if(monthEl) monthEl.classList.toggle("invalid", r.missingMonth);
           const hasDocs = (r.pageNos?.length||r.pages?.length||0) > 0;
-          const ok = !(r.missingEmail || r.missingMonth || r.conflict || !hasDocs);
+          const ok = !r.sent && !(r.missingEmail || r.missingMonth || r.conflict || !hasDocs);
           if(toggle){
             if(!ok) r.enabled = false;
             toggle.disabled = !ok;
@@ -4618,18 +4642,26 @@ function __payrollLoadScript(src){
         });
         if(conflictPages.length) messages.push(`Pagine in conflitto: ${conflictPages.map(p=>p+1).join(", ")}`);
         if(unassignedPages.length) messages.push(`Pagine non assegnate: ${unassignedPages.map(p=>p+1).join(", ")}`);
-        const readyRows = rows.filter(r=>r.enabled!==false && !r.missingEmail && !r.missingMonth && !r.conflict && ((r.pageNos?.length||r.pages?.length||0)>0));
+        const readyRows = rows.filter(r=>!r.sent && r.enabled!==false && !r.missingEmail && !r.missingMonth && !r.conflict && ((r.pageNos?.length||r.pages?.length||0)>0));
         if(btn) btn.disabled = !(readyRows.length);
         const totalPages = rows.reduce((a,r)=>a+(r.pageNos?.length||r.pages?.length||0),0);
         const filteredRows = rows.filter(row=>{
           const text = [row.displayName,row.fiscalCode,row.email].join(" ").toLowerCase();
           const hasIssue = row.missingEmail || row.missingMonth || row.conflict || row.warning;
-          return (!search || text.includes(search)) && (!showIssues || hasIssue);
+          return (!hideSent || !row.sent) && (!search || text.includes(search)) && (!showIssues || hasIssue);
         });
         const filteredPages = filteredRows.reduce((a,r)=>a+(r.pageNos?.length||r.pages?.length||0),0);
         if(summary){ summary.textContent = `${rows.length} righe · ${totalPages} pagine`; }
-        if(matchCount){ matchCount.textContent = `${filteredRows.length} righe · ${filteredPages} pagine`; }
-        if(matchResultsTitle){ matchResultsTitle.textContent = `risultati: ${filteredRows.length} buste paga`; }
+        if(matchCount){
+          let t = `${filteredRows.length} righe · ${filteredPages} pagine`;
+          if(sentTotal){ t += ` · ${sentTotal} ${sentTotal===1 ? "già inviata" : "già inviate"}`; }
+          matchCount.textContent = t;
+        }
+        if(matchResultsTitle){
+          let t = `risultati: ${filteredRows.length} buste paga`;
+          if(sentTotal){ t += ` · ${sentTotal} ${sentTotal===1 ? "già inviata" : "già inviate"}`; }
+          matchResultsTitle.textContent = t;
+        }
 
         const headerToggle = U("payrollToggleAll");
         if(headerToggle){
@@ -4639,8 +4671,8 @@ function __payrollLoadScript(src){
         }
 
         // Side menu: conteggi richiesti
-        if(selectedTotalEl) selectedTotalEl.textContent = String(rows.filter(r=>r.enabled!==false).length);
-        if(missingEmailTotalEl) missingEmailTotalEl.textContent = String(rows.filter(r=>r.missingEmail).length);
+        if(selectedTotalEl) selectedTotalEl.textContent = String(rows.filter(r=>!r.sent && r.enabled!==false).length);
+        if(missingEmailTotalEl) missingEmailTotalEl.textContent = String(rows.filter(r=>!r.sent && r.missingEmail).length);
       }
 
       function isPayrollRowSelectable(row){
@@ -4717,6 +4749,9 @@ function __payrollLoadScript(src){
               emailLocked: prev?.emailLocked ?? Boolean(dirMatch && emailLower),
               emailSource: prev?.emailSource || (dirMatch ? (fiscalCode ? "directory-cf" : "directory-name") : ""),
               saveState: prev?.saveState || "idle",
+              sent: prev?.sent ?? false,
+              sentAt: prev?.sentAt || null,
+              sentReason: prev?.sentReason || "",
               enabled: prev?.enabled ?? true,
               pages: [],
               pageNos: [],
@@ -5082,6 +5117,8 @@ function Pi(){
   const filters = N.payroll?.admin?.filters || {};
   const search = (filters.search || "").trim().toLowerCase();
   const showIssues = !!filters.showIssues;
+  const hideSent = !!filters.hideSent;
+
 
   // aggiorna flags
   grouped.forEach(r=>{ r.missingEmail = !isValidEmail(r.email); r.missingMonth = !r.monthKey; });
@@ -5089,7 +5126,7 @@ function Pi(){
   const filtered = grouped.filter(row=>{
     const text = [row.displayName,row.fiscalCode,row.email].join(" ").toLowerCase();
     const hasIssue = row.missingEmail || row.missingMonth || row.conflict || row.warning;
-    return (!search || text.includes(search)) && (!showIssues || hasIssue);
+    return (!hideSent || !row.sent) && (!search || text.includes(search)) && (!showIssues || hasIssue);
   });
 
   const html = filtered.map(row=>{
@@ -5993,10 +6030,32 @@ function renderUploadHistory(){
         const histBtn = U("btnPayrollSendGoHistory"); 
         if(histBtn) histBtn.style.display = "none";
 
+        const backBtn = U("btnPayrollBackToUnsent");
+        if(backBtn){ backBtn.disabled = true; backBtn.style.display = ""; backBtn.textContent = "Indietro"; }
+
+
         setPayrollSendProgress(0, ui.total, "0%");
         renderPayrollSendList();
         updatePayrollSendMatchSummary();
       }
+
+      function backToUnsentFromSending(){
+        try{
+          const a = N.payroll?.admin;
+          if(!a) return;
+          a.filters = a.filters || { search:"", showIssues:false, hideSent:false };
+          a.filters.hideSent = true;
+          a.filters.search = "";
+          (a.groupedRows || []).forEach(r=>{ if(r.sent){ r.enabled = false; } });
+          const pending = (a.groupedRows || []).filter(r=>!r.sent);
+          if(!pending.length){
+            try{ Ve("Tutto inviato", "Non ci sono buste paga da inviare."); }catch(_e){}
+          }
+          Pi();
+          Di("match");
+        }catch(_e){}
+      }
+
 
       function stopPayrollSendDocWatches(){
         try{
@@ -6221,7 +6280,14 @@ function renderUploadHistory(){
           const mailCls = it.mailStatus==="err" ? "err" : (it.mailStatus==="run" ? "run" : (it.mailStatus==="ok") ? "ok" : "");
           const cls = (docCls==="err" || mailCls==="err") ? "err" : (docCls==="run" || mailCls==="run") ? "run" : (docCls==="ok" || mailCls==="ok") ? "ok" : "";
 
-          const label = it.status==="live" ? "Arrivato" : it.status==="ok" ? "Scritto" : it.status==="err" ? "Errore" : it.status==="run" ? "Invio…" : "In coda";
+          let label = "In coda";
+          if(it.status==="err") label = "Errore";
+          else if(it.status==="run") label = "Invio…";
+          else if(it.status==="queue") label = "In coda";
+          else{
+            const already = /già inviato|duplicato|skip/i.test(String(it.detail||"")) || /skip/i.test(String(it.mailDetail||""));
+            label = already ? "Già inviata" : "Inviata";
+          }
           const det = it.detail ? " · " + Ao(it.detail) : "";
 
           const mailLabel = it.mailStatus==="ok" ? "Mail OK"
@@ -6380,6 +6446,7 @@ async function Yi() {
               if(__dupKey && __dedupByFile.has(__dupKey)){
                 setPayrollSendRowStatus(sendKey, "ok", "duplicato (stesso file)");
                 setPayrollSendRowMailStatus(sendKey, "ok", "skip");
+                try{ row.sent = true; row.sentAt = Date.now(); row.sentReason = "già inviata"; row.enabled = false; }catch(_e){}
                 done++;
                 setPayrollSendProgress(done, total);
                 await nextFrame();
@@ -6419,6 +6486,7 @@ async function Yi() {
                 });
                 setPayrollSendRowMailStatus(sendKey, "ok", "inviata");
                 setPayrollSendRowStatus(sendKey, "live", "inviato");
+                try{ row.sent = true; row.sentAt = Date.now(); row.sentReason = "inviata"; row.enabled = false; }catch(_e){}
               }catch(err){
                 summary.status = summary.status === "ok" ? "Errori su alcune righe" : summary.status;
                 setPayrollSendRowMailStatus(sendKey, "err", err?.message || String(err));
@@ -6450,6 +6518,8 @@ async function Yi() {
           if(histBtn) histBtn.style.display = "";
           try{ setPayrollSendProgress(N.payroll?.admin?.sendUI?.done || rows.length, rows.length); }catch(_e){}
           try{ loadPayrollSentCounts(); }catch(_e){}
+          const backBtn = U("btnPayrollBackToUnsent");
+          if(backBtn) backBtn.disabled = false;
           return;
         }
 
@@ -6500,6 +6570,7 @@ async function Yi() {
             if(__dupKey && __dedupByFile.has(__dupKey)){
               setPayrollSendRowStatus(sendKey, "ok", "duplicato (stesso file)");
               setPayrollSendRowMailStatus(sendKey, "ok", "skip");
+              try{ row.sent = true; row.sentAt = Date.now(); row.sentReason = "già inviata"; row.enabled = false; }catch(_e){}
               done++;
               setPayrollSendProgress(done, total);
               await nextFrame();
@@ -6532,6 +6603,7 @@ async function Yi() {
             if(__alreadySameFile){
               setPayrollSendRowStatus(sendKey, "ok", "già inviato (stesso file)");
               setPayrollSendRowMailStatus(sendKey, "ok", "skip");
+              try{ row.sent = true; row.sentAt = Date.now(); row.sentReason = "già inviata"; row.enabled = false; }catch(_e){}
               done++;
               setPayrollSendProgress(done, total);
               await nextFrame();
@@ -6650,6 +6722,7 @@ async function Yi() {
 
             done++;
             setPayrollSendRowStatus(sendKey, "ok", "scritto");
+            try{ row.sent = true; row.sentAt = Date.now(); row.sentReason = "inviata"; row.enabled = false; }catch(_e){}
             watchPayrollDocDelivery(sendKey, docId);
             setPayrollSendProgress(done, total);
             await nextFrame();
@@ -6692,6 +6765,8 @@ async function Yi() {
         const histBtn = U("btnPayrollSendGoHistory");
         if(histBtn) histBtn.style.display = "";
         try{ setPayrollSendProgress(N.payroll?.admin?.sendUI?.done || 0, rows.length); }catch(_e){}
+        const backBtn = U("btnPayrollBackToUnsent");
+        if(backBtn) backBtn.disabled = false;
         loadPayrollSentCounts();
       }
 
@@ -7645,6 +7720,7 @@ btnDirSaveEdits && (btnDirSaveEdits.onclick = async ()=>{
 
       // Azioni invio (per evitare "Invio in corso…" bloccato)
       U("btnPayrollSendDone")?.addEventListener("click", ()=>Di("match"));
+      U("btnPayrollBackToUnsent")?.addEventListener("click", ()=>backToUnsentFromSending());
       U("btnPayrollSendGoHistory")?.addEventListener("click", async ()=>{
         Di("history");
         await loadPayrollSendLogs();
