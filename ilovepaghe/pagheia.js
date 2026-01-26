@@ -631,6 +631,80 @@ function toggleSendLogModal(show){
         return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(s);
       }
 
+
+      // === Cache locale email (fallback) + match nome "orderless" ===
+      // Se lo switch "Salva email" è ON, ricordiamo le email inserite per i prossimi invii.
+      // - Admin: proviamo anche a salvarle su Firestore (payrollDirectory)
+      // - Non-admin / permessi negati: fallback in localStorage (vale su questo dispositivo)
+      const LS_PAYROLL_EMAIL_CACHE = "payroll_email_cache_v1";
+
+      function normalizeNameKeyOrderless(name){
+        const norm = normalizeNameStrict(name);
+        if(!norm) return "";
+        const toks = norm.split(/\s+/).filter(Boolean);
+        if(!toks.length) return "";
+        toks.sort();
+        const out = [];
+        for(const t of toks){
+          if(!out.length || out[out.length-1] !== t) out.push(t);
+        }
+        return out.join(" ");
+      }
+
+      function payrollReadEmailCache(){
+        try{
+          const raw = localStorage.getItem(LS_PAYROLL_EMAIL_CACHE);
+          if(!raw) return {};
+          const obj = JSON.parse(raw);
+          return (obj && typeof obj === "object") ? obj : {};
+        }catch(_e){ return {}; }
+      }
+
+      function payrollWriteEmailCache(cache){
+        try{ localStorage.setItem(LS_PAYROLL_EMAIL_CACHE, JSON.stringify(cache || {})); }catch(_e){}
+      }
+
+      function payrollCacheEmailForNext(row, emailLower){
+        try{
+          const em = normalizeEmail(emailLower || row?.email || "");
+          if(!isValidEmail(em)) return;
+
+          const cache = payrollReadEmailCache();
+          const cf = normalizeFiscalCode(row?.fiscalCode || "");
+          const name = String(row?.displayName || "").trim();
+          const nameExact = normalizeNameStrict(name);
+          const nameKey = normalizeNameKeyOrderless(name);
+
+          if(cf) cache["cf:" + cf] = em;
+          if(nameKey) cache["name:" + nameKey] = em;
+          if(nameExact) cache["nameExact:" + nameExact] = em;
+
+          // best-effort: evita crescita infinita
+          try{
+            const keys = Object.keys(cache);
+            if(keys.length > 4000){
+              keys.slice(0, keys.length - 2500).forEach(k=>{ delete cache[k]; });
+            }
+          }catch(_e){}
+
+          payrollWriteEmailCache(cache);
+        }catch(_e){}
+      }
+
+      function payrollGetCachedEmail(cache, { fiscalCode, displayName } = {}){
+        try{
+          const cf = normalizeFiscalCode(fiscalCode || "");
+          if(cf && cache && cache["cf:" + cf]) return cache["cf:" + cf];
+
+          const name = String(displayName || "").trim();
+          const nameKey = normalizeNameKeyOrderless(name);
+          if(nameKey && cache && cache["name:" + nameKey]) return cache["name:" + nameKey];
+
+          const nameExact = normalizeNameStrict(name);
+          if(nameExact && cache && cache["nameExact:" + nameExact]) return cache["nameExact:" + nameExact];
+        }catch(_e){}
+        return "";
+      }
       // Heuristics: controlla se l'email "sembra" coerente con il nome del dipendente.
       // Serve solo per mostrare un pop-up di conferma quando l'utente inserisce una mail "strana".
       function __normalizeLooseToken(s){
@@ -1078,16 +1152,23 @@ function __payrollLoadScript(src){
         const docs = N.payroll?.admin?.gemini?.docs || [];
         const totalPages = N.payroll?.admin?.gemini?.totalPages || 0;
         const dirEntries = N.payroll?.directory?.entries || [];
+        const localEmailCache = payrollReadEmailCache();
         const existing = new Map((N.payroll?.admin?.groupedRows||[]).map(r=>[r.key,r]));
         const dirByFiscal = new Map();
         const dirByName = new Map();
+        const dirByNameKey = new Map();
         dirEntries.forEach(e=>{
           const fiscal = normalizeFiscalCode(e.fiscalCode || e.id || "");
           const nameNorm = normalizeNameStrict(e.displayName || e.fullName || "");
+          const nameKey = normalizeNameKeyOrderless(e.displayName || e.fullName || "");
           if(fiscal) dirByFiscal.set(fiscal, e);
           if(nameNorm){
             if(!dirByName.has(nameNorm)) dirByName.set(nameNorm, []);
             dirByName.get(nameNorm).push(e);
+          }
+          if(nameKey){
+            if(!dirByNameKey.has(nameKey)) dirByNameKey.set(nameKey, []);
+            dirByNameKey.get(nameKey).push(e);
           }
         });
         const items = (docs && docs.length) ? docs : pages.map(p=>({
@@ -1118,13 +1199,26 @@ function __payrollLoadScript(src){
           const netPayText = item.netPayText || fields.netPayText || "";
           const netPayCents = item.netPayCents ?? fields.netPayCents ?? null;
           const nameNorm = normalizeNameStrict(fullName || "");
+          const nameKey = normalizeNameKeyOrderless(fullName || "");
           const employeeKey = fiscalCode ? `cf:${fiscalCode.toLowerCase()}` : (nameNorm ? `name:${nameNorm}` : `anon:${idx}`);
           const prev = existing.get(employeeKey);
           let row = groups.get(employeeKey);
-          const dirCandidates = fiscalCode ? (dirByFiscal.get(fiscalCode) ? [dirByFiscal.get(fiscalCode)] : []) : (nameNorm ? (dirByName.get(nameNorm)||[]) : []);
+
+          let dirCandidates = [];
+          if(fiscalCode){
+            const m = dirByFiscal.get(fiscalCode);
+            dirCandidates = m ? [m] : [];
+          }else if(nameNorm){
+            dirCandidates = (dirByName.get(nameNorm)||[]);
+            if(!dirCandidates.length && nameKey){
+              dirCandidates = (dirByNameKey.get(nameKey)||[]);
+            }
+          }
           const dirMatch = dirCandidates[0];
+          const cachedEmail = payrollGetCachedEmail(localEmailCache, { fiscalCode, displayName: fullName });
+
           if(!row){
-            const emailLower = (prev?.email || dirMatch?.emailLower || "").toLowerCase();
+            const emailLower = (prev?.email || dirMatch?.emailLower || cachedEmail || "").toLowerCase();
             row = {
               key: employeeKey,
               displayName: prev?.displayName || fullName || dirMatch?.displayName || dirMatch?.fullName || "",
@@ -1135,7 +1229,7 @@ function __payrollLoadScript(src){
               netPayCents: prev?.netPayCents ?? netPayCents ?? null,
               email: emailLower || "",
               emailLocked: prev?.emailLocked ?? Boolean(dirMatch && emailLower),
-              emailSource: prev?.emailSource || (dirMatch ? (fiscalCode ? "directory-cf" : "directory-name") : ""),
+              emailSource: prev?.emailSource || (dirMatch ? (fiscalCode ? "directory-cf" : "directory-name") : (cachedEmail ? "cache" : "")),
               saveState: prev?.saveState || "idle",
               enabled: prev?.enabled ?? true,
               sent: prev?.sent || false,
@@ -1179,8 +1273,30 @@ function __payrollLoadScript(src){
           let warning = fiscalNorm ? "" : "CF mancante: raggruppo per nome";
           if(monthValues.length > 1) warning = warning ? `${warning}; date multiple rilevate` : "Date multiple rilevate";
           if(!r.email){
-            const dirMatch = fiscalNorm ? dirByFiscal.get(fiscalNorm) : (nameNorm ? (dirByName.get(nameNorm)||[])[0] : null);
-            if(dirMatch?.emailLower){ r.email = dirMatch.emailLower; r.emailLocked = true; r.emailSource = r.emailSource || "directory-auto"; }
+            let dirMatch = null;
+            if(fiscalNorm){
+              dirMatch = dirByFiscal.get(fiscalNorm);
+            }else if(nameNorm){
+              dirMatch = (dirByName.get(nameNorm)||[])[0] || null;
+              if(!dirMatch){
+                const k = normalizeNameKeyOrderless(r.displayName || "");
+                if(k) dirMatch = (dirByNameKey.get(k)||[])[0] || null;
+              }
+            }
+
+            if(dirMatch?.emailLower){
+              r.email = dirMatch.emailLower;
+              r.emailLocked = true;
+              r.emailSource = r.emailSource || "directory-auto";
+            }else{
+              const cached = payrollGetCachedEmail(localEmailCache, { fiscalCode: fiscalNorm, displayName: r.displayName || "" });
+              if(cached){
+                r.email = cached;
+                // cache locale: non blocco l'input (l'utente può correggere)
+                r.emailLocked = false;
+                r.emailSource = r.emailSource || "cache";
+              }
+            }
           }
           r.warning = warning;
           const nameCollision = !fiscalNorm && nameNorm && (fallbackNameCounts.get(nameNorm)||0) > 1;
@@ -3010,12 +3126,20 @@ async function Yi() {
         const _dirKnown = new Set(((N.payroll?.directory?.entries) || [])
           .map(d=>normalizeEmail(d.emailLower||d.email||d.id||""))
           .filter(Boolean));
+        let __dirSaveWarned = false;
         const _ensureDir = async (row, emailLower) => {
           if(!saveEmailsForNext) return;
-          if(!(N.firebase?.ok && N.user?.isAdmin)) return;
           try{
             const em = normalizeEmail(emailLower || row?.email || "");
-            if(!em || _dirKnown.has(em)) return;
+            if(!em || !isValidEmail(em)) return;
+
+            // Sempre: salva in cache locale (fallback su questo dispositivo)
+            try{ payrollCacheEmailForNext(row, em); }catch(_e){}
+
+            // Server: salva in payrollDirectory solo se admin
+            if(!(N.firebase?.ok && N.user?.isAdmin)) return;
+            if(_dirKnown.has(em)) return;
+
             const name = String(row?.displayName || "").trim() || String(row?.fiscalCode || "").trim() || em;
             const parts = name.split(/\s+/).filter(Boolean);
             const firstName = parts[0] || "";
@@ -3038,6 +3162,17 @@ async function Yi() {
             _dirKnown.add(em);
           }catch(err){
             console.warn("auto directory save", err);
+            // fallback già salvato in locale sopra
+            try{
+              if(!__dirSaveWarned && N.user?.isAdmin){
+                __dirSaveWarned = true;
+                const low = String(err?.message || "").toLowerCase();
+                const body = (err?.code === "permission-denied" || low.includes("permission"))
+                  ? "Permessi insufficienti: email salvata solo su questo dispositivo."
+                  : "Impossibile salvare in Dipendenti: email salvata solo su questo dispositivo.";
+                try{ showToast("Salvataggio email", body, 4200); }catch(_e){}
+              }
+            }catch(_e){}
           }
         };
 
