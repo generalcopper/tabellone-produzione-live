@@ -170,22 +170,22 @@ if(payrollGreeting) payrollGreeting.textContent = `Ciao, ${name}.`;
       const status = document.getElementById("authStatus");
       const hint = document.getElementById("authHint");
       const absenceBadge = document.getElementById("absenceStatusBadge");
-      const isAuthed = !!state.user;
+      const hasUser = !!state.user;
+      const isAnon = !!state.user?.isAnonymous;
+      const isAuthed = hasUser && !isAnon;
       if(isAuthed){
         pill?.classList.add("ok");
         dot?.classList.add("ok");
         if(status) status.textContent = `Accesso: ${state.user.displayName || state.user.email || "utente"}`;
         if(hint){
           if(state.user.isAdmin) hint.textContent = "Accesso admin attivo: upload abilitato.";
-          else if(state.user.isWhitelisted===false) hint.textContent = "Account non abilitato alle buste paga. Contatta l'admin.";
-          else if(state.user.isAnonymous) hint.textContent = "Accesso ospite attivo: puoi caricare, analizzare e inviare.";
-          else hint.textContent = "Accesso attivo.";
+          else if(state.user.isWhitelisted===false) hint.textContent = "Account non abilitato alle buste paga. Contatta l'admin.";          else hint.textContent = "Accesso attivo.";
         }
       }else{
         pill?.classList.remove("ok");
         dot?.classList.remove("ok");
         if(status) status.textContent = "Accesso non attivo";
-        if(hint) hint.textContent = "Sessione non attiva.";
+        if(hint) hint.textContent = isAnon ? "Accesso anonimo disattivato. Accedi con Google." : "Sessione non attiva.";
       }
       if(absenceBadge){
         absenceBadge.textContent = isAuthed ? "Pronto a inviare" : "Accesso richiesto";
@@ -201,8 +201,8 @@ if(payrollGreeting) payrollGreeting.textContent = `Ciao, ${name}.`;
         badgeAuthText.textContent = `Accesso: ${isAuthed ? "attivo" : "non attivo"}`;
       }
 
-      document.body.classList.toggle("role-admin", !!state.user?.isAdmin);
-      document.body.classList.toggle("role-operator", !state.user?.isAdmin);
+      document.body.classList.toggle("role-admin", isAuthed && !!state.user?.isAdmin);
+      document.body.classList.toggle("role-operator", isAuthed && !state.user?.isAdmin);
 
       // Header buttons
       const btnLogin = document.getElementById("btnGoogleLogin");
@@ -1086,8 +1086,8 @@ function Bi() {
       }
 
       function Oi() {
-        const isAuthed = Boolean(N.user);
-        const isAdmin = Boolean(N.user && N.user.isAdmin);
+        const isAuthed = Boolean(N.user && !N.user.isAnonymous);
+        const isAdmin = Boolean(N.user && !N.user.isAnonymous && N.user.isAdmin);
         const adminPanel = U("adminArea");
         // Upload buste paga: visibile anche per utenti NON admin (incluso accesso ospite)
         if (adminPanel) adminPanel.style.display = isAuthed ? "" : "none";
@@ -2784,21 +2784,13 @@ function renderUploadHistory(){
         fd.append("pdf", new Blob([pdfBytes], { type:"application/pdf" }), safeName);
 
         const headers = {};
-        // Assicura sessione ospite (anonima) attiva: serve un token per chiamare il mailer.
-        try{
-          const auth = N.firebase?.auth;
-          const authApi = N.firebase?.authApi;
-          if(authApi && auth && !auth.currentUser && typeof authApi.signInAnonymously === "function"){
-            await authApi.signInAnonymously(auth);
-          }
-        }catch(_e){}
-        try{
-          const u = N.firebase?.auth?.currentUser;
-          if(u && typeof u.getIdToken === "function"){
-            const tok = await u.getIdToken();
-            if(tok) headers["Authorization"] = "Bearer " + tok;
-          }
-}catch(_e){}
+        // Richiede utente loggato (niente accesso anonimo): serve un token per chiamare il mailer.
+        const u = N.firebase?.auth?.currentUser;
+        if(!u || u.isAnonymous) throw new Error("Accesso richiesto: accedi con Google per inviare le buste paga.");
+        let tok = "";
+        try{ tok = await u.getIdToken(); }catch(_e){}
+        if(tok) headers["Authorization"] = "Bearer " + tok;
+        else throw new Error("Impossibile ottenere il token di accesso. Accedi di nuovo e riprova.");
 
         // App Check token (anti-abuso)
         try{
@@ -3193,7 +3185,11 @@ async function Yi() {
       }
 
       async function openAdminModalFlow(targetPane, opts){
-        if(!N.user){ Ve("Accesso", "Sessione non attiva."); return; }
+        if(!N.user || N.user.isAnonymous){
+          Ve("Accesso richiesto", "Accedi con Google per continuare.");
+          try{ U("btnGoogleLogin")?.focus?.(); }catch(_e){}
+          return;
+        }
 
         const options = opts || {};
 
@@ -3228,7 +3224,7 @@ async function Yi() {
       // 1) click su "carica buste paga" => apre SUBITO il selettore file (senza modale intermedia)
       // 2) dopo la selezione: apre la modale e parte analisi + risultati
       function openPayrollUploadPicker(){
-        if(!N.user){ Ve("Accesso", "Sessione non attiva."); return; }
+        if(!N.user || N.user.isAnonymous){ Ve("Accesso richiesto", "Accedi con Google per caricare i PDF."); try{ U("btnGoogleLogin")?.focus?.(); }catch(_e){} return; }
 
         // reset (così ogni upload riparte pulito)
         try{ ji(); }catch(_e){}
@@ -4180,13 +4176,25 @@ const payrollDirAutofill = () => {
         // Se l’utente annulla la selezione, non apriamo nulla
         if(!has) return;
 
+        // Gate: niente accesso anonimo. Serve login Google per caricare.
+        if(!N.user || N.user.isAnonymous){
+          try{
+            N.payroll.admin.files = [];
+            Bi();
+          }catch(_e){}
+          try{ if(n) n.value = ""; }catch(_e){}
+          try{ Ve("Accesso richiesto", "Accedi con Google per caricare i PDF."); }catch(_e){}
+          try{ U("btnGoogleLogin")?.focus?.(); }catch(_e){}
+          return;
+        }
+
         // Apri la modale SOLO dopo la selezione (niente modale intermedia con un altro bottone "carica")
         try{ Di("extracting"); }catch(_e){}
         try{ toggleAdminModal(true, "adminArea"); }catch(_e){}
 
         Vi();
       };
-      t && (["dragover", "dragenter"].forEach(e => t.addEventListener(e, e => { e.preventDefault(), t.classList.add("drag") })), ["dragleave", "drop"].forEach(e => t.addEventListener(e, e => { e.preventDefault(), t.classList.remove("drag") })), t.addEventListener("drop", e => { e.preventDefault(), e.dataTransfer?.files?.length && o(e.dataTransfer.files) }), t.addEventListener("click", e => { if(e?.target?.closest && e.target.closest(".uploadActions")) return; n?.click() }));
+      t && (["dragover", "dragenter"].forEach(e => t.addEventListener(e, e => { e.preventDefault(), t.classList.add("drag") })), ["dragleave", "drop"].forEach(e => t.addEventListener(e, e => { e.preventDefault(), t.classList.remove("drag") })), t.addEventListener("drop", e => { e.preventDefault(), e.dataTransfer?.files?.length && o(e.dataTransfer.files) }), t.addEventListener("click", e => { if(e?.target?.closest && e.target.closest(".uploadActions")) return; if(!N.user || N.user.isAnonymous){ try{ Ve("Accesso richiesto", "Accedi con Google per caricare i PDF."); }catch(_e){} try{ U("btnGoogleLogin")?.focus?.(); }catch(_e){} return; } n?.click() }));
       n?.addEventListener("change", () => o(n.files));
       U("btnPayrollUpload")?.addEventListener("click", () => { const f = N.payroll.admin.files?.[0]; if (!f) { n?.click(); return; } Vi(); });
       U("btnPayrollRetry")?.addEventListener("click", () => Vi());
@@ -5300,19 +5308,8 @@ function buildSafePdfName(base){
         // Best-effort: gestisci eventuali errori del redirect flow
         try{ await authMod.getRedirectResult(auth); }catch(_e){}
 
-        // Accesso ospite automatico (sito pubblico): se non c'è sessione, entra anonimo.
-        try{
-          if(!auth.currentUser){
-            await authMod.signInAnonymously(auth);
-          }
-        }catch(err){
-          console.warn("anon login", err);
-        }
-
-
-
-        
-        // Role resolution (admin + whitelist) — evita query non autorizzate
+        // Accesso anonimo DISATTIVATO: se non c'è sessione, resta signed-out e chiedi login Google.
+// Role resolution (admin + whitelist) — evita query non autorizzate
         const ADMIN_EMAILS = ["ludovico@generalcoppersrl.com","eugenia@generalcoppersrl.com"];
         async function resolveUserRole(authUser){
           try{
@@ -5466,7 +5463,17 @@ function buildSafePdfName(base){
 
         authMod.onAuthStateChanged(auth, async user=>{
           state.authHydrated = true;
-if(user){
+          if(user && user.isAnonymous){
+            // Sessioni anonime non più abilitate: chiedi login Google.
+            try{ await authMod.signOut(auth); }catch(_e){}
+            try{ state.user = null; }catch(_e){}
+            try{ Payroll.onSignedOut(); }catch(_e){}
+            try{ clearRestoreTimeout(); }catch(_e){}
+            try{ enterSignedOut("Accesso anonimo disattivato. Accedi con Google per continuare."); }catch(_e){}
+            try{ showToast("Accesso richiesto", "Accesso anonimo disattivato. Accedi con Google per continuare.", 2200); }catch(_e){}
+            return;
+          }
+          if(user){
             state.user = {
               uid: user.uid,
               email: user.email || "",
