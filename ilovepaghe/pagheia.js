@@ -630,6 +630,54 @@ function toggleSendLogModal(show){
         if(!s) return false;
         return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(s);
       }
+
+      // Heuristics: controlla se l'email "sembra" coerente con il nome del dipendente.
+      // Serve solo per mostrare un pop-up di conferma quando l'utente inserisce una mail "strana".
+      function __normalizeLooseToken(s){
+        return String(s || "")
+          .normalize("NFD")
+          .replace(/[\u0300-\u036f]/g, "")
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, "");
+      }
+      function __nameTokensForEmailCheck(displayName){
+        const raw = String(displayName || "")
+          .normalize("NFD")
+          .replace(/[\u0300-\u036f]/g, "")
+          .toLowerCase();
+        const parts = raw.split(/[^a-z0-9]+/).filter(Boolean);
+        const stop = new Set(["di","de","del","della","dello","dei","degli","da","la","il","lo","le","gli","i"]);
+        return parts.filter(t => t.length >= 2 && !stop.has(t));
+      }
+      function emailLooksLikeEmployeeName(email, displayName){
+        const em = normalizeEmail(email);
+        const name = String(displayName || "").trim();
+        if(!em || !name) return true; // niente controllo se manca qualcosa
+
+        const local = (em.split("@")[0] || "");
+        const localNorm = __normalizeLooseToken(local);
+        if(!localNorm) return true;
+
+        const tokens = __nameTokensForEmailCheck(name);
+        if(!tokens.length) return true;
+
+        const significant = tokens.filter(t => t.length >= 3);
+        const toCheck = significant.length ? significant : tokens;
+
+        for(const t of toCheck){
+          const tn = __normalizeLooseToken(t);
+          if(tn && localNorm.includes(tn)) return true;
+        }
+
+        // fallback: iniziale + cognome (es. mrossi)
+        const first = tokens[0] || "";
+        const last = tokens[tokens.length - 1] || "";
+        const fi = __normalizeLooseToken(first).slice(0,1);
+        const ln = __normalizeLooseToken(last);
+        if(fi && ln && (localNorm.includes(fi + ln) || localNorm.includes(ln + fi))) return true;
+
+        return false;
+      }
       function cssEscape(v){
         try{ return (window.CSS && CSS.escape) ? CSS.escape(String(v)) : String(v).replace(/[^a-zA-Z0-9_-]/g, "\\$&"); }catch(_e){ return String(v||""); }
       }
@@ -2954,6 +3002,45 @@ async function Yi() {
         if (invalid.length) return void Ve("Completa i dati", "Email valida e data/mese obbligatoria per le righe attive.");
         if (!e.originalPdfBytes) return Ve("PDF mancante", "Riestrai l’estrazione."), void Di("preview");
 
+        // Switch (menu laterale): salva le email inserite in payrollDirectory per i prossimi invii
+        // Default: ON (a meno che l'utente lo disattivi esplicitamente).
+        const saveEmailsForNext = (N.payroll?.admin?.saveEmailsForNext !== false);
+
+        // Auto-salvataggio dipendenti (payrollDirectory) — usato sia in modalità privacy che in modalità con Storage.
+        const _dirKnown = new Set(((N.payroll?.directory?.entries) || [])
+          .map(d=>normalizeEmail(d.emailLower||d.email||d.id||""))
+          .filter(Boolean));
+        const _ensureDir = async (row, emailLower) => {
+          if(!saveEmailsForNext) return;
+          if(!(N.firebase?.ok && N.user?.isAdmin)) return;
+          try{
+            const em = normalizeEmail(emailLower || row?.email || "");
+            if(!em || _dirKnown.has(em)) return;
+            const name = String(row?.displayName || "").trim() || String(row?.fiscalCode || "").trim() || em;
+            const parts = name.split(/\s+/).filter(Boolean);
+            const firstName = parts[0] || "";
+            const lastName = parts.slice(1).join(" ");
+            const _fc = normalizeFiscalCode(row?.fiscalCode || "");
+            const fiscalCode = (_fc && _fc.length===16) ? _fc : "";
+            const payload = {
+              emailLower: em,
+              fiscalCode,
+              firstName,
+              lastName,
+              displayName: name,
+              fullNameNorm: normalizeNameStrict(name || fiscalCode || em),
+              enabled: true,
+              updatedAt: N.firebase.api.serverTimestamp(),
+              updatedBy: N.user?.email || "",
+              id: em
+            };
+            await N.firebase.api.setDoc(N.firebase.api.doc(N.firebase.db, COL_PAYROLL_DIRECTORY, em), payload, { merge:true });
+            _dirKnown.add(em);
+          }catch(err){
+            console.warn("auto directory save", err);
+          }
+        };
+
         // Accesso: il portale usa accesso ospite (anonimo) automatico.
         // Non chiediamo login Google all’utente finale.
         // (Il backend verifica comunque un token Firebase, generato dalla sessione anonima.)
@@ -2975,6 +3062,7 @@ async function Yi() {
                 setPayrollSendRowStatus(sendKey, "ok", "duplicato (stesso file)");
                 setPayrollSendRowMailStatus(sendKey, "ok", "skip");
                 try{ markPayrollRowSent(row, "duplicato"); }catch(_e){}
+                try{ await _ensureDir(row, emailLower); }catch(_e){}
                 done++;
                 setPayrollSendProgress(done, total);
                 await nextFrame();
@@ -2992,6 +3080,7 @@ async function Yi() {
                 summary.status = summary.status === "ok" ? "Errori su alcune righe" : summary.status;
                 setPayrollSendRowStatus(sendKey, "err", "pagine mancanti");
                 setPayrollSendRowMailStatus(sendKey, "err", "pagine mancanti");
+                try{ await _ensureDir(row, emailLower); }catch(_e){}
                 done++;
                 setPayrollSendProgress(done, total);
                 await nextFrame();
@@ -3020,6 +3109,9 @@ async function Yi() {
                 setPayrollSendRowMailStatus(sendKey, "err", err?.message || String(err));
                 setPayrollSendRowStatus(sendKey, "err", "errore invio");
               }
+
+              // Se attivo, salva l'email in payrollDirectory per il prossimo invio (best-effort)
+              try{ await _ensureDir(row, emailLower); }catch(_e){}
 
               done++;
               setPayrollSendProgress(done, total);
@@ -3053,39 +3145,8 @@ async function Yi() {
         Di("sending");
         initPayrollSendUI(allRows, rows);
 
-        // Auto-salvataggio dipendenti: se inserisci una mail nuova durante il match,
-        // al click "Invia" viene aggiunta subito in Dipendenti (payrollDirectory).
-        const _dirKnown = new Set(((N.payroll?.directory?.entries) || [])
-          .map(d=>normalizeEmail(d.emailLower||d.email||d.id||""))
-          .filter(Boolean));
-        const _ensureDir = async (row, emailLower) => {
-          try{
-            const em = normalizeEmail(emailLower || row?.email || "");
-            if(!em || _dirKnown.has(em)) return;
-            const name = String(row?.displayName || "").trim() || String(row?.fiscalCode || "").trim() || em;
-            const parts = name.split(/\s+/).filter(Boolean);
-            const firstName = parts[0] || "";
-            const lastName = parts.slice(1).join(" ");
-            const _fc = normalizeFiscalCode(row?.fiscalCode || "");
-            const fiscalCode = (_fc && _fc.length===16) ? _fc : "";
-            const payload = {
-              emailLower: em,
-              fiscalCode,
-              firstName,
-              lastName,
-              displayName: name,
-              fullNameNorm: normalizeNameStrict(name || fiscalCode || em),
-              enabled: true,
-              updatedAt: N.firebase.api.serverTimestamp(),
-              updatedBy: N.user?.email || "",
-              id: em
-            };
-            await N.firebase.api.setDoc(N.firebase.api.doc(N.firebase.db, COL_PAYROLL_DIRECTORY, em), payload, { merge:true });
-            _dirKnown.add(em);
-          }catch(err){
-            console.warn("auto directory save", err);
-          }
-        };
+        // Auto-salvataggio dipendenti (payrollDirectory): controllato da switch nel menu laterale
+        // (usa _ensureDir definita sopra)
 
         const summary = { matched: rows.length, ambiguous: rows.filter(r=>r.conflict).length, unmatched: 0, status: "ok" };
         try {
@@ -3098,6 +3159,7 @@ async function Yi() {
               setPayrollSendRowStatus(sendKey, "ok", "duplicato (stesso file)");
               setPayrollSendRowMailStatus(sendKey, "ok", "skip");
               try{ markPayrollRowSent(row, "duplicato"); }catch(_e){}
+              try{ await _ensureDir(row, emailLower); }catch(_e){}
               done++;
               setPayrollSendProgress(done, total);
               await nextFrame();
@@ -3131,6 +3193,7 @@ async function Yi() {
               setPayrollSendRowStatus(sendKey, "ok", "già inviato (stesso file)");
               setPayrollSendRowMailStatus(sendKey, "ok", "skip");
               try{ markPayrollRowSent(row, "gia_inviato"); }catch(_e){}
+              try{ await _ensureDir(row, emailLower); }catch(_e){}
               done++;
               setPayrollSendProgress(done, total);
               await nextFrame();
@@ -4374,6 +4437,30 @@ const payrollDirAutofill = () => {
             }
           }
 
+          // Se l'email era vuota e viene inserita ora: se sembra non coerente col nome, chiedi conferma
+          if(!prevNorm && nextNorm && isValidEmail(nextNorm)){
+            try{
+              const row = (N.payroll?.admin?.groupedRows || []).find(r=>r.key===key);
+              const displayName = String(row?.displayName || "").trim();
+              const looksNameOk = displayName ? emailLooksLikeEmployeeName(nextNorm, displayName) : true;
+              if(displayName && !looksNameOk){
+                const ok2 = window.confirm(
+                  `Sei sicuro che sia corretta?\n\n`+
+                  `L'email inserita sembra non corrispondere al nome del dipendente.\n\n`+
+                  `Nome: ${displayName}\n`+
+                  `Email: ${nextNorm}`
+                );
+                if(!ok2){
+                  el.value = prevNorm;
+                  if(key) updateGroupedRowField(key, "email", prevNorm);
+                  el.dataset.prevEmail = prevNorm;
+                  try{ showToast("Inserimento annullato", "Email rimossa."); }catch(_e){}
+                  return;
+                }
+              }
+            }catch(_e){}
+          }
+
           // Commit (normalizza e salva nello state)
           el.value = nextNorm;
           if(key) updateGroupedRowField(key, "email", nextNorm);
@@ -4451,6 +4538,39 @@ const payrollDirAutofill = () => {
           N.payroll.admin.filters = N.payroll.admin.filters || { search:"", showIssues:false, showSent:false };
           N.payroll.admin.filters.search = payrollMatchSearch.value.trim().toLowerCase();
           Pi();
+        });
+      }
+
+      // Switch (menu laterale): salva le email inserite per i prossimi invii (default ON)
+      const payrollSaveEmailsToggle = U("payrollSaveEmailsToggle");
+      if(payrollSaveEmailsToggle && !payrollSaveEmailsToggle.__bound){
+        payrollSaveEmailsToggle.__bound = true;
+        const LS_KEY = "payroll_save_emails_v1";
+        try{
+          N.payroll = N.payroll || {};
+          N.payroll.admin = N.payroll.admin || {};
+
+          let stored = null;
+          try{ stored = localStorage.getItem(LS_KEY); }catch(_e){}
+
+          if(stored === null || stored === undefined){
+            // default ON
+            if(typeof N.payroll.admin.saveEmailsForNext !== "boolean") N.payroll.admin.saveEmailsForNext = true;
+          }else{
+            N.payroll.admin.saveEmailsForNext = (stored !== "0");
+          }
+
+          payrollSaveEmailsToggle.checked = (N.payroll.admin.saveEmailsForNext !== false);
+        }catch(_e){
+          payrollSaveEmailsToggle.checked = true;
+        }
+
+        payrollSaveEmailsToggle.addEventListener("change", ()=>{
+          try{
+            N.payroll.admin = N.payroll.admin || {};
+            N.payroll.admin.saveEmailsForNext = !!payrollSaveEmailsToggle.checked;
+            localStorage.setItem(LS_KEY, payrollSaveEmailsToggle.checked ? "1" : "0");
+          }catch(_e){}
         });
       }
 
