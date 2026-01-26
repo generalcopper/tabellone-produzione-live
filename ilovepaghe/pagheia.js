@@ -219,12 +219,70 @@ if(payrollGreeting) payrollGreeting.textContent = `Ciao, ${name}.`;
       // "Esci" sempre in fondo (solo quando autenticato)
       if(btnLogoutBottom) btnLogoutBottom.style.display = isAuthed ? "" : "none";
 
+      // CTA principale (home):
+      // - se non autenticato (o anonimo): "Accedi e carica PDF" e copy coerente
+      // - se autenticato: "Carica PDF"
+      try{
+        const cta = document.getElementById("btnOpenPayrollAdmin");
+        if(cta){
+          cta.textContent = isAuthed ? "Carica PDF" : "Accedi e carica PDF";
+          cta.setAttribute("aria-label", cta.textContent);
+        }
+        const hintEl = document.querySelector(".homeHeroHint");
+        if(hintEl){
+          hintEl.textContent = isAuthed ? "o trascina e lascia il file PDF qui" : "Accedi per caricare un PDF.";
+        }
+      }catch(_e){}
+
       // Overlays disabilitati (nessun pending/auth full-screen)
       try{ togglePendingOverlay(false); }catch(_e){}
       try{ toggleAuthOverlay(false); }catch(_e){}
 
 
 updateGreetingUI();
+    }
+
+    // Richiesta accesso (login/registrazione):
+    // - se è configurato un AUTH URL esterno, redirect lì (con return URL)
+    // - altrimenti usa Firebase Google Sign-In (preferendo il redirect)
+    function goToAuth(reason=""){
+      const msg = String(reason || "Accedi per continuare.");
+
+      // 1) Redirect a pagina auth esterna (opzionale)
+      try{
+        const authUrl = String(globalThis.PAGHEIA_AUTH_URL || globalThis.AUTH_URL || "").trim();
+        if(authUrl){
+          const next = encodeURIComponent(location.href);
+          const sep = authUrl.includes("?") ? "&" : "?";
+          location.href = authUrl + sep + "next=" + next;
+          return true;
+        }
+      }catch(_e){}
+
+      // 2) Firebase Auth (Google) — prefer redirect
+      try{
+        const act = state.authActions || {};
+        if(typeof act.signInRedirect === "function"){
+          act.signInRedirect();
+          return true;
+        }
+        if(typeof act.signIn === "function"){
+          act.signIn();
+          return true;
+        }
+      }catch(_e){}
+
+      // 3) Fallback: focus/click sul bottone "Accedi"
+      try{
+        const btn = document.getElementById("btnGoogleLogin");
+        if(btn){
+          try{ btn.focus?.(); }catch(_e){}
+          try{ if(!btn.disabled) btn.click(); }catch(_e){}
+        }
+      }catch(_e){}
+
+      try{ showToast("Accesso richiesto", msg, 1800); }catch(_e){}
+      return false;
     }
 
     function updateModalOpenState(){
@@ -3186,8 +3244,7 @@ async function Yi() {
 
       async function openAdminModalFlow(targetPane, opts){
         if(!N.user || N.user.isAnonymous){
-          Ve("Accesso richiesto", "Accedi con Google per continuare.");
-          try{ U("btnGoogleLogin")?.focus?.(); }catch(_e){}
+          try{ goToAuth("Accedi per continuare."); }catch(_e){}
           return;
         }
 
@@ -3224,7 +3281,10 @@ async function Yi() {
       // 1) click su "carica buste paga" => apre SUBITO il selettore file (senza modale intermedia)
       // 2) dopo la selezione: apre la modale e parte analisi + risultati
       function openPayrollUploadPicker(){
-        if(!N.user || N.user.isAnonymous){ Ve("Accesso richiesto", "Accedi con Google per caricare i PDF."); try{ U("btnGoogleLogin")?.focus?.(); }catch(_e){} return; }
+        if(!N.user || N.user.isAnonymous){
+          try{ goToAuth("Accedi per caricare i PDF."); }catch(_e){}
+          return;
+        }
 
         // reset (così ogni upload riparte pulito)
         try{ ji(); }catch(_e){}
@@ -4183,8 +4243,7 @@ const payrollDirAutofill = () => {
             Bi();
           }catch(_e){}
           try{ if(n) n.value = ""; }catch(_e){}
-          try{ Ve("Accesso richiesto", "Accedi con Google per caricare i PDF."); }catch(_e){}
-          try{ U("btnGoogleLogin")?.focus?.(); }catch(_e){}
+          try{ goToAuth("Accedi per caricare i PDF."); }catch(_e){}
           return;
         }
 
@@ -4194,7 +4253,7 @@ const payrollDirAutofill = () => {
 
         Vi();
       };
-      t && (["dragover", "dragenter"].forEach(e => t.addEventListener(e, e => { e.preventDefault(), t.classList.add("drag") })), ["dragleave", "drop"].forEach(e => t.addEventListener(e, e => { e.preventDefault(), t.classList.remove("drag") })), t.addEventListener("drop", e => { e.preventDefault(), e.dataTransfer?.files?.length && o(e.dataTransfer.files) }), t.addEventListener("click", e => { if(e?.target?.closest && e.target.closest(".uploadActions")) return; if(!N.user || N.user.isAnonymous){ try{ Ve("Accesso richiesto", "Accedi con Google per caricare i PDF."); }catch(_e){} try{ U("btnGoogleLogin")?.focus?.(); }catch(_e){} return; } n?.click() }));
+      t && (["dragover", "dragenter"].forEach(e => t.addEventListener(e, e => { e.preventDefault(), t.classList.add("drag") })), ["dragleave", "drop"].forEach(e => t.addEventListener(e, e => { e.preventDefault(), t.classList.remove("drag") })), t.addEventListener("drop", e => { e.preventDefault(), e.dataTransfer?.files?.length && o(e.dataTransfer.files) }), t.addEventListener("click", e => { if(e?.target?.closest && e.target.closest(".uploadActions")) return; if(!N.user || N.user.isAnonymous){ try{ goToAuth("Accedi per caricare i PDF."); }catch(_e){} return; } n?.click() }));
       n?.addEventListener("change", () => o(n.files));
       U("btnPayrollUpload")?.addEventListener("click", () => { const f = N.payroll.admin.files?.[0]; if (!f) { n?.click(); return; } Vi(); });
       U("btnPayrollRetry")?.addEventListener("click", () => Vi());
@@ -5293,6 +5352,15 @@ function buildSafePdfName(base){
             showToast("Logout non riuscito", err?.message || String(err));
           }
         }
+
+        // Esponi azioni auth (usate anche dal CTA upload)
+        try{
+          state.authActions = {
+            signIn: signInWithGoogle,
+            signInRedirect: ()=> authMod.signInWithRedirect(auth, googleProvider),
+            signOut: signOutGoogle
+          };
+        }catch(_e){}
 
         // Wire UI buttons (header + overlay)
         try{
