@@ -27,6 +27,57 @@
       absences: { list:[], filters:{ status:"", type:"", search:"" }, loading:false }
     };
 
+
+    // --- Fix loop login (Safari/iOS bfcache) ---
+    // Quando rientri dalla pagina di autenticazione usando "Indietro", iOS può ripristinare la pagina da cache (bfcache)
+    // mantenendo in memoria lo stato "signed-out". Questo portava a un loop: "Accedi" -> auth -> indietro -> ancora "Accedi".
+    const SS_PAGHEIA_AUTH_INFLIGHT = "pagheia_auth_inflight_ts_v1";
+    const SS_PAGHEIA_AUTH_INTENT = "pagheia_auth_inflight_intent_v1";
+    const SS_PAGHEIA_AUTH_REASON = "pagheia_auth_inflight_reason_v1";
+
+    function markAuthInflight(reason = "", intent = ""){
+      try{
+        sessionStorage.setItem(SS_PAGHEIA_AUTH_INFLIGHT, String(Date.now()));
+        if(reason) sessionStorage.setItem(SS_PAGHEIA_AUTH_REASON, String(reason));
+        if(intent) sessionStorage.setItem(SS_PAGHEIA_AUTH_INTENT, String(intent));
+      }catch(_e){}
+    }
+    function clearAuthInflight(){
+      try{
+        sessionStorage.removeItem(SS_PAGHEIA_AUTH_INFLIGHT);
+        sessionStorage.removeItem(SS_PAGHEIA_AUTH_INTENT);
+        sessionStorage.removeItem(SS_PAGHEIA_AUTH_REASON);
+      }catch(_e){}
+    }
+    function authInflight(maxAgeMs = 5 * 60 * 1000){
+      try{
+        const ts = parseInt(sessionStorage.getItem(SS_PAGHEIA_AUTH_INFLIGHT) || "0", 10);
+        if(!Number.isFinite(ts) || ts <= 0) return false;
+        return (Date.now() - ts) < maxAgeMs;
+      }catch(_e){ return false; }
+    }
+
+    (function bindAuthBfcacheFix(){
+      // Reload SOLO se:
+      // - stiamo tornando da un tentativo di login (flag in sessionStorage)
+      // - la navigazione è "back/forward" o la pagina arriva da bfcache
+      const isBackForward = (ev)=>{
+        try{ if(ev && ev.persisted) return true; }catch(_e){}
+        try{
+          const nav = performance.getEntriesByType?.("navigation")?.[0];
+          if(nav && nav.type === "back_forward") return true;
+        }catch(_e){}
+        return false;
+      };
+      window.addEventListener("pageshow", (ev)=>{
+        try{
+          if(authInflight() && isBackForward(ev)){
+            location.reload();
+          }
+        }catch(_e){}
+      });
+    })();
+
     const scrollLockState = { locked:false, y:0, prev:{} };
     const updateAppHeight = ()=>{ try{ const h = Math.max(window.innerHeight || 0, document.documentElement?.clientHeight || 0); if(h) document.documentElement.style.setProperty("--app-height", `${h}px`); }catch(_e){} };
     const updateKeyboardOffset = ()=>{
@@ -245,13 +296,14 @@ updateGreetingUI();
     // Richiesta accesso (login/registrazione):
     // - se è configurato un AUTH URL esterno, redirect lì (con return URL)
     // - altrimenti usa Firebase Google Sign-In (preferendo il redirect)
-    function goToAuth(reason=""){
+    function goToAuth(reason="", intent=""){
       const msg = String(reason || "Accedi per continuare.");
 
       // 1) Redirect a pagina auth esterna (opzionale)
       try{
         const authUrl = String(globalThis.PAGHEIA_AUTH_URL || globalThis.AUTH_URL || "").trim();
         if(authUrl){
+          try{ markAuthInflight(msg, intent); }catch(_e){}
           const next = encodeURIComponent(location.href);
           const sep = authUrl.includes("?") ? "&" : "?";
           location.href = authUrl + sep + "next=" + next;
@@ -259,15 +311,16 @@ updateGreetingUI();
         }
       }catch(_e){}
 
-      // 2) Firebase Auth (Google) — prefer redirect
+      // 2) Firebase Auth (Google) — usa la stessa logica del bottone "Accedi" (popup-first, redirect solo se serve)
       try{
         const act = state.authActions || {};
-        if(typeof act.signInRedirect === "function"){
-          act.signInRedirect();
-          return true;
-        }
         if(typeof act.signIn === "function"){
           act.signIn();
+          return true;
+        }
+        if(typeof act.signInRedirect === "function"){
+          try{ markAuthInflight(msg, intent); }catch(_e){}
+          act.signInRedirect();
           return true;
         }
       }catch(_e){}
@@ -5318,6 +5371,7 @@ function buildSafePdfName(base){
 
             // In modalità app iOS: usa redirect diretto (più stabile, niente popup "flash")
             if(__preferRedirect){
+              try{ markAuthInflight("Accedi con Google", "login"); }catch(_e){}
               await authMod.signInWithRedirect(auth, googleProvider);
               return;
             }
@@ -5332,6 +5386,7 @@ function buildSafePdfName(base){
               const popupIssue = code.includes("popup") || msg.includes("popup");
               const notSupported = code.includes("operation-not-supported-in-this-environment") || code.includes("web-storage-unsupported");
               if(popupIssue || notSupported){
+                try{ markAuthInflight("Accedi con Google", "login"); }catch(_e){}
                 await authMod.signInWithRedirect(auth, googleProvider);
                 return;
               }
@@ -5531,9 +5586,11 @@ function buildSafePdfName(base){
 
         authMod.onAuthStateChanged(auth, async user=>{
           state.authHydrated = true;
+          const returningFromAuth = authInflight();
           if(user && user.isAnonymous){
             // Sessioni anonime non più abilitate: chiedi login Google.
             try{ await authMod.signOut(auth); }catch(_e){}
+            try{ clearAuthInflight(); }catch(_e){}
             try{ state.user = null; }catch(_e){}
             try{ Payroll.onSignedOut(); }catch(_e){}
             try{ clearRestoreTimeout(); }catch(_e){}
@@ -5542,6 +5599,7 @@ function buildSafePdfName(base){
             return;
           }
           if(user){
+            try{ clearAuthInflight(); }catch(_e){}
             state.user = {
               uid: user.uid,
               email: user.email || "",
@@ -5562,6 +5620,18 @@ function buildSafePdfName(base){
           }else{
             state.user = null;
             Payroll.onSignedOut();
+
+            // Se stavamo rientrando da un login (redirect/back) ma non c'è una sessione,
+            // evita loop silenziosi: avvisa l'utente e pulisci il flag.
+            if(returningFromAuth){
+              try{
+                const msg = "Accesso annullato o non completato. Riprova ad accedere.";
+                try{ showToast("Accesso non completato", msg, 2400); }catch(_e){}
+              }catch(_e){
+                try{ showToast("Accesso non completato", "Accesso non completato. Riprova.", 2400); }catch(_e2){}
+              }
+              try{ clearAuthInflight(); }catch(_e){}
+            }
 
             if(isMobileAuth()){
               enterRestoringMode("Ripristino sessione…");
