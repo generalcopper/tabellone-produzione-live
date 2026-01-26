@@ -12219,12 +12219,22 @@ U("payrollAdminClose")?.addEventListener("click", () => {
 
   function kioskBuildOrderLookup(){
     const map = new Map();
+    const byNo = new Map(); // orderNo -> [ordini] (customer può differire tra fonti)
+
     for(const o of (Array.isArray(state.powderOrders) ? state.powderOrders : [])){
       const on = String(o.orderNo || o.number || "").trim();
       const cust = String(o.customer || "").trim();
       if(!on) continue;
+
       map.set(kioskOrderKey(cust, on), o);
+
+      if(!byNo.has(on)) byNo.set(on, []);
+      byNo.get(on).push(o);
     }
+
+    // Attach helper map (JS Map può avere proprietà custom)
+    map.byNo = byNo;
+
     return map;
   }
 
@@ -12235,6 +12245,7 @@ U("payrollAdminClose")?.addEventListener("click", () => {
     const emptyEl = document.getElementById("kioskEmptyMsg");
     const kpiOrdersEl = document.getElementById("kioskOrdersCount");
     const kpiLinesEl = document.getElementById("kioskLinesCount");
+    const subEl = document.getElementById("kioskActiveSub");
 
     if(!listEl) return;
 
@@ -12243,11 +12254,15 @@ U("payrollAdminClose")?.addEventListener("click", () => {
     const groups = kioskGroupActiveProductions(state.activeProductions || []);
     const ordersCount = groups.length;
 
-    let linesCount = 0;
-    for(const g of groups) linesCount += (g.selected ? g.selected.size : 0);
+    let selectedLinesCount = 0;
+    for(const g of groups) selectedLinesCount += (g.selected ? g.selected.size : 0);
 
     if(kpiOrdersEl) kpiOrdersEl.textContent = String(ordersCount);
-    if(kpiLinesEl) kpiLinesEl.textContent = String(linesCount);
+    if(kpiLinesEl) kpiLinesEl.textContent = String(selectedLinesCount);
+
+    if(subEl){
+      subEl.textContent = state.ordersReady ? "Visibili esclusivamente gli ordini avviati" : "Sincronizzazione ordini in corso…";
+    }
 
     if(ordersCount === 0){
       if(emptyEl) emptyEl.style.display = "block";
@@ -12260,18 +12275,101 @@ U("payrollAdminClose")?.addEventListener("click", () => {
     const orderLookup = kioskBuildOrderLookup();
     const maps = computeHistoryLineProductionMaps(state.history || []);
 
+    const maybeForceSync = (reason="kiosk_force")=>{
+      try{
+        if(syncInFlight || refreshInFlight) return;
+        const now = Date.now();
+        const last = Number(globalThis.__KIOSK_LAST_FORCE_SYNC__ || 0) || 0;
+        if(now - last < 6000) return;
+        globalThis.__KIOSK_LAST_FORCE_SYNC__ = now;
+        queuedSyncOrders(false, reason).catch(()=>{});
+      }catch(_e){}
+    };
+
+    const findOrder = (g)=>{
+      try{
+        let o = orderLookup.get(g.key);
+        if(o) return o;
+
+        const on = String(g?.orderNo || "").trim();
+        if(!on) return null;
+
+        const byNo = orderLookup && orderLookup.byNo;
+        const arr = (byNo && typeof byNo.get === "function") ? byNo.get(on) : null;
+        if(!arr || !arr.length) return null;
+        if(arr.length === 1) return arr[0];
+
+        // Se esistono più ordini con lo stesso numero (raro), scegli quello col cliente più simile
+        const target = (typeof stableNorm === "function") ? stableNorm(g?.customer || "") : String(g?.customer||"").toLowerCase().trim();
+        let best = arr[0];
+        let bestScore = -1;
+        for(const cand of arr){
+          const c = (typeof stableNorm === "function") ? stableNorm(cand?.customer || "") : String(cand?.customer||"").toLowerCase().trim();
+          let score = 0;
+          if(target && c){
+            if(c === target) score = 3;
+            else if(c.includes(target) || target.includes(c)) score = 2;
+            else score = 1;
+          }
+          if(score > bestScore){
+            bestScore = score;
+            best = cand;
+          }
+        }
+        return best || null;
+      }catch(_e){
+        return null;
+      }
+    };
+
     const frag = document.createDocumentFragment();
     listEl.innerHTML = "";
 
     for(const g of groups){
-      const order = orderLookup.get(g.key);
+      const order = findOrder(g);
       const lines = [];
+
+      let matchedTotal = 0;
+
+      // Match tollerante per lineKey (compatibilità vecchi documenti):
+      // - exact
+      // - prefix "orderNo|rowIndex"
+      // - rowIndex
+      const selectedExact = (g && g.selected instanceof Set) ? g.selected : new Set();
+      const selectedPrefix2 = new Set();
+      const selectedIdx = new Set();
+      for(const sk of selectedExact){
+        const s = String(sk || "").trim();
+        if(!s) continue;
+        try{
+          const p2 = s.split("|").slice(0,2).join("|");
+          if(p2) selectedPrefix2.add(p2);
+        }catch(_e){}
+        const idx = kioskLineIndex(s);
+        if(idx !== 999999) selectedIdx.add(idx);
+      }
 
       if(order && Array.isArray(order.lines)){
         for(const l of order.lines){
           const lk = String(l?.lineKey || "").trim();
           if(!lk) continue;
-          if(!g.selected.has(lk)) continue;
+
+          let isSel = false;
+          if(selectedExact.has(lk)){
+            isSel = true;
+          }else{
+            try{
+              const p2 = lk.split("|").slice(0,2).join("|");
+              if(p2 && selectedPrefix2.has(p2)) isSel = true;
+            }catch(_e){}
+            if(!isSel){
+              const idx = kioskLineIndex(lk);
+              if(idx !== 999999 && selectedIdx.has(idx)) isSel = true;
+            }
+          }
+          if(!isSel) continue;
+
+          matchedTotal += 1;
 
           const viewLine = computeRemainingViewLine(l, maps);
           const rem = Number(viewLine?.__remainingQty);
@@ -12312,9 +12410,18 @@ U("payrollAdminClose")?.addEventListener("click", () => {
             </div>`;
         }
       }else{
-        // Fallback se non ho ancora le righe in XML
         const howMany = (g.selected && g.selected.size) ? g.selected.size : 0;
-        linesHtml = `<div class="kioskEmptyMsg">Righe non disponibili (ordine non ancora sincronizzato). ${howMany ? `Righe attive: <b>${howMany}</b>.` : ""}</div>`;
+
+        // Se non ho ancora le righe, provo a forzare una sync (throttled) e mostro un messaggio chiaro
+        if(!order){
+          maybeForceSync("kiosk_missing_order");
+          linesHtml = `<div class="kioskEmptyMsg">Sincronizzazione ordini in corso… ${howMany ? `Righe attive: <b>${howMany}</b>.` : ""}</div>`;
+        }else if(matchedTotal === 0){
+          maybeForceSync("kiosk_key_mismatch");
+          linesHtml = `<div class="kioskEmptyMsg">Ordine sincronizzato, ma righe non riconosciute. ${howMany ? `Righe attive: <b>${howMany}</b>.` : ""}</div>`;
+        }else{
+          linesHtml = `<div class="kioskEmptyMsg">Nessuna riga rimanente (ordine già completato). ${howMany ? `Righe attive: <b>${howMany}</b>.` : ""}</div>`;
+        }
       }
 
       card.innerHTML = `
@@ -12335,15 +12442,7 @@ U("payrollAdminClose")?.addEventListener("click", () => {
 
     listEl.appendChild(frag);
     kioskSetupAutoScrollAll();
-  }
-
-
-  // =========================
-  // KIOSK: auto-scroll righe ordine (solo righe, header fisso)
-  // =========================
-  globalThis.__KIOSK_AUTO_SCROLL_CLEANUP__ = globalThis.__KIOSK_AUTO_SCROLL_CLEANUP__ || [];
-
-  function kioskStopAutoScrollAll(){
+  }function kioskStopAutoScrollAll(){
     const arr = globalThis.__KIOSK_AUTO_SCROLL_CLEANUP__;
     if(Array.isArray(arr)){
       for(const fn of arr){
