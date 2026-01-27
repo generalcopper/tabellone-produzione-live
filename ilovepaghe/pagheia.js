@@ -426,7 +426,7 @@ function toggleSendLogModal(show){
       }
     }
 
-    // Payroll module (estratto dal hub originale)
+    // Payroll module
     /* =========================
        PAYROLL (Buste paga) — Gemini extract + split PDF + Storage
        ========================= */
@@ -445,7 +445,7 @@ function toggleSendLogModal(show){
       const Ao = (s)=>String(s??"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#39;");
       const Ve = (title, body)=>{ try{ showToast(String(title||"Info"), String(body||"")); }catch(_e){ alert(String(title||"Info")+"\\n\\n"+String(body||"")); } };
 
-      const COL_POWDER_USERS="powderUsers",COL_PAYROLL_DIRECTORY="payrollDirectory",COL_PAYROLL_DOCS="payrollDocs",COL_PAYROLL_DOCS_LEGACY="payrolls",COL_PAYROLL_SEND_LOGS="payrollSendLogs",COL_EMAIL="email",COL_ABSENCE_REQUESTS="absenceRequests";
+      const COL_PAYROLL_DIRECTORY="payrollDirectory",COL_PAYROLL_DOCS="payrollDocs",COL_PAYROLL_DOCS_LEGACY="payrolls",COL_PAYROLL_SEND_LOGS="payrollSendLogs",COL_EMAIL="email",COL_ABSENCE_REQUESTS="absenceRequests";
       const PAYROLL_DOC_COLS=[COL_PAYROLL_DOCS,COL_PAYROLL_DOCS_LEGACY];
 
       async function tryGetPayrollDocSnap(api, db, id){
@@ -2332,7 +2332,7 @@ function renderUploadHistory(){
           return;
         }
         if(!state.user){
-          feedback && (feedback.textContent = "Apri dal Hub Polveri per inviare la richiesta.");
+          feedback && (feedback.textContent = "Accedi per inviare la richiesta.");
           return;
         }
         const type = (U("absenceType")?.value || "").trim();
@@ -2403,7 +2403,7 @@ function renderUploadHistory(){
 
       async function startPayrollDirectoryWatch(){
         try{ N.payroll?.directory?.unsub && N.payroll.directory.unsub(); }catch(_e){}
-        if(!(N.firebase?.ok) || !N.user?.isAdmin) return;
+        if(!(N.firebase?.ok)) return;
         const api = N.firebase.api;
         const db = N.firebase.db;
         const q = api.query(api.collection(db, COL_PAYROLL_DIRECTORY), api.where("enabled", "==", !0));
@@ -2425,20 +2425,35 @@ function renderUploadHistory(){
       }
 
       async function zi() {
-        if (!(N.firebase?.ok) || !N.user?.isAdmin) return;
+        if(!(N.firebase?.ok)) return;
         const api = N.firebase.api, db = N.firebase.db;
-        N.payroll.admin.loadingUsers = !0;
+        try{ N.payroll.admin.loadingUsers = !0; }catch(_e){}
         try {
-          const q = api.query(api.collection(db, COL_POWDER_USERS), api.where("enabled","==",!0));
+          const q = api.query(api.collection(db, COL_PAYROLL_DIRECTORY), api.where("enabled","==",!0));
           const snap = await api.getDocs(q);
-          const users = [];
-          snap.forEach(e => { const d = e.data() || {}; d.id = e.id; d.emailLower = (d.emailLower || d.email || "").toLowerCase(); users.push(d); });
-          N.payroll.admin.users = users;
+          const entries = [];
+          snap.forEach(doc => { 
+            const d = doc.data() || {}; 
+            d.id = doc.id; 
+            d.emailLower = (d.emailLower || d.email || d.id || "").toLowerCase(); 
+            entries.push(d); 
+          });
+          entries.sort((a,b)=> (a.displayName||a.emailLower||"").localeCompare(b.displayName||b.emailLower||""));
+          N.payroll.directory = N.payroll.directory || {};
+          N.payroll.directory.entries = entries;
+          N.payroll.directory.ready = true;
+          N.payroll.directory.error = "";
         } catch (e) {
-          if(e?.code !== "permission-denied") console.warn("payroll users fetch", e);
+          if(e?.code !== "permission-denied") console.warn("payroll directory fetch", e);
+          try{
+            N.payroll.directory = N.payroll.directory || {};
+            N.payroll.directory.error = e?.message || String(e);
+            N.payroll.directory.ready = false;
+          }catch(_e){}
         }
-        N.payroll.admin.loadingUsers = !1;
+        try{ N.payroll.admin.loadingUsers = !1; }catch(_e){}
         renderDirectoryUI();
+        try{ buildGroupedRows(); }catch(_e){}
       }
 
       function setProgress(pct, label){
@@ -3136,8 +3151,8 @@ async function Yi() {
             // Sempre: salva in cache locale (fallback su questo dispositivo)
             try{ payrollCacheEmailForNext(row, em); }catch(_e){}
 
-            // Server: salva in payrollDirectory solo se admin
-            if(!(N.firebase?.ok && N.user?.isAdmin)) return;
+            // Server: salva in payrollDirectory (Firebase) per ricordare l'email ai prossimi accessi
+            if(!(N.firebase?.ok && N.user)) return;
             if(_dirKnown.has(em)) return;
 
             const name = String(row?.displayName || "").trim() || String(row?.fiscalCode || "").trim() || em;
@@ -3164,7 +3179,7 @@ async function Yi() {
             console.warn("auto directory save", err);
             // fallback già salvato in locale sopra
             try{
-              if(!__dirSaveWarned && N.user?.isAdmin){
+              if(!__dirSaveWarned){
                 __dirSaveWarned = true;
                 const low = String(err?.message || "").toLowerCase();
                 const body = (err?.code === "permission-denied" || low.includes("permission"))
@@ -4600,6 +4615,14 @@ const payrollDirAutofill = () => {
           el.value = nextNorm;
           if(key) updateGroupedRowField(key, "email", nextNorm);
           el.dataset.prevEmail = nextNorm;
+
+          // Salva subito su Firebase (se toggle ON) così viene ricordata al prossimo accesso
+          try{
+            if(key && nextNorm && isValidEmail(nextNorm)){
+              const row = (N.payroll?.admin?.groupedRows || []).find(r=>r.key===key);
+              if(row) { row.email = nextNorm; persistRowToDirectory(row); }
+            }
+          }catch(_e){}
         }catch(err){
           console.warn("email confirm change", err);
         }
@@ -4750,23 +4773,55 @@ const payrollDirAutofill = () => {
         });
       }
       async function persistRowToDirectory(row){
-        if(!(row && N.firebase?.ok && N.user?.isAdmin)) return;
+        // Salva l'email del dipendente in Firestore (payrollDirectory) così viene ricordata ai prossimi accessi.
+        if(!(row && N.firebase?.ok && N.user)) return;
+        if(N.payroll?.admin?.saveEmailsForNext === false) return;
+
+        const em = normalizeEmail(row.email);
+        if(!isValidEmail(em)) return;
+
         try{
+          // Fallback locale (utile se i permessi Firestore vengono negati)
+          try{ payrollCacheEmailForNext(row, em); }catch(_e){}
+
+          const name = String(row?.displayName || "").trim() || String(row?.fiscalCode || "").trim() || em;
+          const parts = name.split(/\s+/).filter(Boolean);
+          const firstName = parts[0] || "";
+          const lastName = parts.slice(1).join(" ");
+          const _fc = normalizeFiscalCode(row?.fiscalCode || "");
+          const fiscalCode = (_fc && _fc.length===16) ? _fc : "";
+
           const payload = {
-            emailLower: normalizeEmail(row.email),
-            fiscalCode: normalizeFiscalCode(row.fiscalCode || row.displayName || row.email || row.key),
-            displayName: row.displayName || row.fiscalCode || row.email || "",
-            fullNameNorm: normalizeNameStrict(row.displayName || row.fiscalCode || row.email || ""),
+            emailLower: em,
+            fiscalCode,
+            firstName,
+            lastName,
+            displayName: name,
+            fullNameNorm: normalizeNameStrict(name || fiscalCode || em),
             enabled: true,
             updatedAt: N.firebase.api.serverTimestamp(),
-            updatedBy: N.user?.email || ""
+            updatedBy: (N.user?.email || "").toLowerCase(),
+            id: em
           };
-          await N.firebase.api.setDoc(N.firebase.api.doc(N.firebase.db, COL_PAYROLL_DIRECTORY, payload.emailLower), payload, { merge:true });
-          await zi();
-        }catch(err){ console.warn("persistRowToDirectory", err); Ve("Salvataggio non riuscito", err?.message || String(err)); }
+
+          await N.firebase.api.setDoc(
+            N.firebase.api.doc(N.firebase.db, COL_PAYROLL_DIRECTORY, em),
+            payload,
+            { merge:true }
+          );
+        }catch(err){
+          console.warn("persistRowToDirectory", err);
+          // Se Firestore fallisce, abbiamo comunque salvato localmente sopra
+          try{
+            const low = String(err?.message || "").toLowerCase();
+            const body = (err?.code === "permission-denied" || low.includes("permission"))
+              ? "Permessi insufficienti: email salvata solo su questo dispositivo."
+              : "Impossibile salvare su Firebase: email salvata solo su questo dispositivo.";
+            try{ showToast("Salvataggio email", body, 4200); }catch(_e){}
+          }catch(_e){}
+        }
       }
 
-      
       // PDF Preview overlay (same file, no #)
 
 // Helpers: prova a nascondere toolbar/nav del viewer PDF (parametri PDF Open) — usato SOLO nel fallback iframe
@@ -5481,9 +5536,9 @@ function buildSafePdfName(base){
         try{ Oi(); }catch(_e){}
         try{ Fi(); }catch(_e){}
         try{ startPayrollUserDocsWatch(); }catch(_e){}
-        try{ if(N.user?.isAdmin){ startPayrollDirectoryWatch(); } }catch(_e){}
+        try{ startPayrollDirectoryWatch(); }catch(_e){}
         try{ if(N.user?.isAdmin || N.user?.isWhitelisted !== false) startPayrollUserDocsWatch(); else { N.payroll.userView = N.payroll.userView || {}; N.payroll.userView.error = "Non sei abilitato alle buste paga."; N.payroll.userView.ready = false; Oi(); } }catch(_e){}
-        try{ if(N.user?.isAdmin) zi(); }catch(_e){}
+        try{ /* directory handled by watch */ }catch(_e){}
         // Riprendi invio se avevi cliccato "Invia" da ospite
         try{
           const a = N.payroll?.admin;
@@ -5688,58 +5743,20 @@ function buildSafePdfName(base){
 
         // Accesso anonimo DISATTIVATO: se non c'è sessione, resta signed-out e chiedi login Google.
 // Role resolution (admin + whitelist) — evita query non autorizzate
-        const ADMIN_EMAILS = ["ludovico@generalcoppersrl.com","eugenia@generalcoppersrl.com"];
-        async function resolveUserRole(authUser){
+        // Ruoli: su iLovePaghe ogni utente autenticato è admin
+        async function resolveUserRole(_authUser){
           try{
-            if(!state.firebase?.ok) return;
-            const api = state.firebase.api;
-            const db = state.firebase.db;
-            const emailLower = (authUser?.email || "").toLowerCase();
-            let isAdmin = emailLower && ADMIN_EMAILS.includes(emailLower);
-            let isWhitelisted = true;
-
-            // Whitelist: payrollDirectory/{emailLower}
-            if(emailLower){
-              try{
-                const dirSnap = await api.getDoc(api.doc(db, "payrollDirectory", emailLower));
-                if(dirSnap?.exists()){
-                  const d = dirSnap.data() || {};
-                  isWhitelisted = (d.enabled !== false);
-                }
-              }catch(_e){}
-            }
-
-
-            // Admin SOLO Buste Paga:
-            // - fallback hardcoded ADMIN_EMAILS
-            // - opzionale: payrollAdmins/{uid} o payrollAdmins/{emailLower} con enabled!=false
-            if(!isAdmin){
-              const ids = [authUser?.uid, emailLower].filter(Boolean);
-              for(const id of ids){
-                try{
-                  const aSnap = await api.getDoc(api.doc(db, "payrollAdmins", id));
-                  if(aSnap?.exists()){
-                    const d = aSnap.data() || {};
-                    if(d.enabled !== false) isAdmin = true;
-                    break;
-                  }
-                }catch(_e){}
-              }
-            }
-
             if(state.user){
-              state.user.isAdmin = !!isAdmin;
-              state.user.isWhitelisted = !!(isWhitelisted || isAdmin);
+              state.user.isAdmin = true;
+              state.user.isWhitelisted = true;
             }
           }catch(_e){}
         }
 
-
-        // Login/Logout rimossi: l’autenticazione avviene nel Hub Polveri (pagina di origine del redirect).
-        // Qui facciamo solo "gate": se la sessione esiste entri, altrimenti torni al punto di accesso stabile.
+// Auth gate: se la sessione esiste entri, altrimenti chiedi login Google.
         const AUTH_TTL_MS = 7 * 24 * 60 * 60 * 1000;
-        const LS_AUTH_OK = "hub_auth_ok_ts_v1";
-        const LS_AUTH_EMAIL = "hub_auth_last_email_v1";
+        const LS_AUTH_OK = "ilovepaghe_auth_ok_ts_v1";
+        const LS_AUTH_EMAIL = "ilovepaghe_auth_last_email_v1";
         const RESTORE_TIMEOUT_MS = 20000;
         const RESTORE_TIMEOUT_SHORT_MS = 1200;
 
@@ -5768,9 +5785,7 @@ function buildSafePdfName(base){
           }catch(_e){}
         }
 
-        const HUB_POLVERI_URL = new URL("hub_linea_polveri.html", location.href).toString();
-
-        // Evita che "Indietro" ti riporti su accounts.google.com dopo un login via redirect.
+                // Evita che "Indietro" ti riporti su accounts.google.com dopo un login via redirect.
         (()=>{})();
 
         function openAuthOverlay(reason){
@@ -5809,7 +5824,7 @@ function buildSafePdfName(base){
           state.authGateState = "signed_out";
           state.authGateMessage = message || "";
           updateAuthUI();
-          // non mostriamo toast qui: lo fa redirectToHubPolveri quando serve
+          //
         }
         function enterSignedIn(){
           state.authGateState = "signed_in";
