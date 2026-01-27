@@ -690,52 +690,12 @@ function toggleSendLogModal(show){
 
       // Fallback opzionale: prova a chiedere lo status al backend billing (se espone un endpoint pubblico).
       async function tryLoadPayrollEntitlementsFromBillingBackend(){
-        try{
-          if(!(N.firebase?.ok && N.user && !N.user.isAnonymous)) return false;
-          const base = (typeof getBillingBase === "function") ? getBillingBase() : "";
-          if(!base) return false;
-
-          const authUser = N.firebase?.auth?.currentUser;
-          if(!authUser || authUser.isAnonymous) return false;
-
-          let tok = "";
-          try{ tok = await authUser.getIdToken(); }catch(_e){}
-          if(!tok) return false;
-
-          const headers = { "Authorization": "Bearer " + tok };
-
-          // App Check token (anti-abuso) — opzionale
-          try{
-            const ac = N.firebase?.appCheck;
-            const acApi = N.firebase?.appCheckApi;
-            if(ac && acApi && typeof acApi.getToken === "function"){
-              const resp = await acApi.getToken(ac, /* forceRefresh= */ false);
-              if(resp && resp.token) headers["X-Firebase-AppCheck"] = resp.token;
-            }
-          }catch(_e){}
-
-          const baseUrl = String(base).replace(/\/$/,"");
-          const endpoints = ["/entitlements", "/status", "/me", "/whoami", "/subscription"];
-
-          for(const path of endpoints){
-            try{
-              const res = await fetch(baseUrl + path, { method:"GET", headers });
-              if(!res || !res.ok) continue;
-              const data = await res.json().catch(()=>null);
-              if(!data) continue;
-
-              const plan = String(data.plan || data.tier || data.subscription || data.role || "").toLowerCase().trim();
-              const prem = (data.isPremium === true) || (plan === "premium" || plan === "pro" || plan === "plus");
-              const usedN = (typeof data.freeSendsUsed === "number") ? data.freeSendsUsed
-                          : (typeof data.freeUsedCount === "number") ? data.freeUsedCount
-                          : (data.trialUsed ? 1 : 0);
-              const freeUsed = (Number.isFinite(usedN) && usedN >= PAYROLL_FREE_SEND_LIMIT);
-
-              if(prem) N.user.isPremium = true;
-              if(freeUsed){
-                N.user.payrollFreeUsed = true;
-                try{ localStorage.setItem(LS_PAYROLL_FREE_USED, "1"); }catch(_e){}
-              }
+        // NOTE (2026-01): il backend billing Cloud Run attuale NON espone endpoint pubblici (es. /entitlements, /status, /me).
+        // Evitiamo chiamate che generano 404 in console. La verifica piano avviene via:
+        // 1) Firestore (payrollUsage/{uid}) + rules self-read, oppure
+        // 2) Custom Claims su ID token (se implementate nel backend).
+        return false;
+      }
 
               N.user.payrollUsageLoaded = true;
               N.user.payrollUsageLoading = false;
@@ -766,8 +726,8 @@ function toggleSendLogModal(show){
         const emailLower = String(N.user.emailLower || (N.user.email||"").toLowerCase() || "").trim();
 
         const ids = [];
+        // Usiamo SOLO docId = uid (più sicuro e più semplice per le regole Firestore)
         if(uid) ids.push(uid);
-        if(emailLower && !ids.includes(emailLower)) ids.push(emailLower);
 
         // Fast-path: prova a ricavare Premium da Custom Claims (se presenti).
         // Usiamo force=true quando rientri da Stripe (premium=success) per forzare refresh token.
@@ -1114,8 +1074,8 @@ function toggleSendLogModal(show){
           const uid = N.user.uid || "";
           const emailLower = N.user.emailLower || (N.user.email||"").toLowerCase();
           const ids = [];
-          if(uid) ids.push(uid);
-          if(emailLower && !ids.includes(emailLower)) ids.push(emailLower);
+        // Usiamo SOLO docId = uid (più sicuro e più semplice per le regole Firestore)
+        if(uid) ids.push(uid);
           if(!ids.length) return;
 
           const payload = {
