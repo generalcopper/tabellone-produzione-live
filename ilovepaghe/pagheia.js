@@ -17,6 +17,14 @@
     globalThis.PAYROLL_MAIL_ENDPOINT = PAYROLL_MAIL_ENDPOINT;
     globalThis.PAYROLL_EXTRACT_ENDPOINT = PAYROLL_EXTRACT_ENDPOINT;
 
+// Billing (Stripe) — Premium 19,90 €/mese
+    // Nota: l'URL qui sotto è il backend Cloud Run che crea la Checkout Session Stripe.
+    // Se cambi URL, puoi anche settare globalThis.PAGHEIA_BILLING_ENDPOINT prima di caricare questo script.
+    const PAYROLL_PREMIUM_PRICE_LABEL = "19,90 €/mese";
+    const PAGHEIA_BILLING_ENDPOINT = "https://pagheia-billing-162609991629.europe-west1.run.app"; // Cloud Run billing
+    globalThis.PAYROLL_PREMIUM_PRICE_LABEL = PAYROLL_PREMIUM_PRICE_LABEL;
+    globalThis.PAGHEIA_BILLING_ENDPOINT = globalThis.PAGHEIA_BILLING_ENDPOINT || PAGHEIA_BILLING_ENDPOINT;
+
     const state = {
       user: null,
       authHydrated: false,
@@ -241,7 +249,7 @@ if(payrollGreeting) payrollGreeting.textContent = `Ciao, ${name}.`;
         if(hint){
           if(uploadPending) hint.textContent = "Verifica piano in corso…";
           else if(uploadError) hint.textContent = "Verifica piano non riuscita: ricarica la pagina e riprova.";
-          else if(uploadLocked) hint.textContent = "Prova gratuita già utilizzata: per nuovi caricamenti serve Premium.";
+          else if(uploadLocked) hint.textContent = "Prova gratuita già utilizzata: per continuare attiva Premium (" + (globalThis.PAYROLL_PREMIUM_PRICE_LABEL || "19,90 €/mese") + ").";
           else if(isPremium) hint.textContent = "Premium attivo: caricamenti illimitati.";
           else if(state.user.isAdmin) hint.textContent = "Accesso admin attivo: upload abilitato.";
           else if(state.user.isWhitelisted===false) hint.textContent = "Account non abilitato alle buste paga. Contatta l'admin.";
@@ -326,7 +334,7 @@ if(payrollGreeting) payrollGreeting.textContent = `Ciao, ${name}.`;
           if(!isAuthed) hintEl.textContent = "Accedi per caricare un PDF.";
           else if(uploadPending) hintEl.textContent = "Verifica piano in corso…";
           else if(uploadError) hintEl.textContent = "Verifica piano non riuscita: ricarica la pagina.";
-          else if(uploadLocked) hintEl.textContent = "Hai già usato il caricamento gratuito: attiva Premium per continuare.";
+          else if(uploadLocked) hintEl.textContent = "Hai già usato il caricamento gratuito: attiva Premium (" + (globalThis.PAYROLL_PREMIUM_PRICE_LABEL || "19,90 €/mese") + ").";
           else hintEl.textContent = "o trascina e lascia il file PDF qui";
         }
 
@@ -335,7 +343,7 @@ if(payrollGreeting) payrollGreeting.textContent = `Ciao, ${name}.`;
         if(idleHint){
           if(uploadPending) idleHint.textContent = "Verifica piano in corso…";
           else if(uploadError) idleHint.textContent = "Verifica piano non riuscita: ricarica la pagina.";
-          else if(uploadLocked) idleHint.textContent = "Premium richiesto: prova gratuita già utilizzata.";
+          else if(uploadLocked) idleHint.textContent = "Premium richiesto: prova gratuita già utilizzata (" + (globalThis.PAYROLL_PREMIUM_PRICE_LABEL || "19,90 €/mese") + ").";
           else idleHint.textContent = "Stato: inattivo.";
         }
 
@@ -409,22 +417,104 @@ updateGreetingUI();
     // Pagamento/Upgrade Premium (opzionale):
     // - se è configurato un BILLING URL esterno, redirect lì (con return URL)
     // - altrimenti mostra solo un messaggio
-    function goToPremium(reason=""){
-      const msg = String(reason || "Per continuare, attiva l’abbonamento Premium.");
+    function getBillingBase(){
       try{
-        const billingUrl = String(globalThis.PAGHEIA_PREMIUM_URL || globalThis.PAGHEIA_BILLING_URL || globalThis.BILLING_URL || "").trim();
-        if(billingUrl){
-          const next = encodeURIComponent(location.href);
-          const sep = billingUrl.includes("?") ? "&" : "?";
-          location.href = billingUrl + sep + "next=" + next;
-          return true;
-        }
-      }catch(_e){}
-      try{ showToast("Premium richiesto", msg, 4200); }catch(_e){}
-      return false;
+        return String(
+          globalThis.PAGHEIA_BILLING_ENDPOINT ||
+          globalThis.PAGHEIA_BILLING_URL ||
+          globalThis.PAGHEIA_PREMIUM_URL ||
+          globalThis.BILLING_URL ||
+          ""
+        ).trim();
+      }catch(_e){ return ""; }
     }
 
-    function updateModalOpenState(){
+    async function startPremiumCheckout(nextUrl){
+      const base = getBillingBase();
+      if(!base) throw new Error("Backend billing non configurato.");
+
+      const endpoint = base.replace(/\/$/,"") + "/create-checkout-session";
+
+      if(!(state && state.firebase && state.firebase.auth)) throw new Error("Servizio non pronto. Ricarica la pagina.");
+      const u = state.firebase.auth.currentUser;
+      if(!u || u.isAnonymous) throw new Error("Accedi con Google per attivare Premium.");
+
+      let tok = "";
+      try{ tok = await u.getIdToken(); }catch(_e){}
+      if(!tok) throw new Error("Token non disponibile. Accedi di nuovo e riprova.");
+
+      const headers = { "Content-Type":"application/json", "Authorization":"Bearer " + tok };
+
+      // App Check token (anti-abuso)
+      try{
+        const ac = state.firebase?.appCheck;
+        const acApi = state.firebase?.appCheckApi;
+        if(ac && acApi && typeof acApi.getToken === "function"){
+          const resp = await acApi.getToken(ac, /* forceRefresh= */ false);
+          if(resp && resp.token) headers["X-Firebase-AppCheck"] = resp.token;
+        }
+      }catch(err){
+        console.warn("appcheck token (billing)", err);
+      }
+
+      const successUrl = (()=>{
+        try{
+          const u = new URL(location.href);
+          u.searchParams.set("premium","success");
+          u.searchParams.delete("premium_cancel");
+          u.searchParams.delete("premium_error");
+          return u.toString();
+        }catch(_e){ return location.href; }
+      })();
+
+      const cancelUrl = (nextUrl || location.href);
+
+      const res = await fetch(endpoint, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ successUrl, cancelUrl })
+      });
+
+      let text = "";
+      try{ text = await res.text(); }catch(_e){}
+      let data = null;
+      try{ data = text ? JSON.parse(text) : null; }catch(_e){ data = null; }
+
+      if(!res.ok){
+        const errMsg = (data && (data.error || data.message)) ? (data.error || data.message) : (text || ("HTTP " + res.status));
+        throw new Error(errMsg);
+      }
+
+      const url = data?.url || data?.checkoutUrl || "";
+      if(!url) throw new Error("Checkout URL non ricevuto dal backend.");
+
+      location.href = url;
+    }
+
+    function goToPremium(reason=""){
+      const price = String(globalThis.PAYROLL_PREMIUM_PRICE_LABEL || "19,90 €/mese");
+      const msg = String(reason || ("Per continuare, attiva l’abbonamento Premium (" + price + ")."));
+
+      (async ()=>{
+        try{
+          // Se non sei loggato, prima login
+          if(!state?.firebase?.auth?.currentUser || state.firebase.auth.currentUser.isAnonymous){
+            try{ goToAuth("Accedi per attivare Premium."); }catch(_e){}
+            return;
+          }
+          try{ showToast("Premium", "Apro il pagamento Stripe…", 1800); }catch(_e){}
+          await startPremiumCheckout(location.href);
+        }catch(err){
+          console.warn("goToPremium", err);
+          try{ showToast("Premium richiesto", (err?.message || msg), 5200); }catch(_e){}
+        }
+      })();
+
+      return true;
+    }
+
+
+        function updateModalOpenState(){
       try{
         const adminOpen = document.getElementById("adminModal")?.classList.contains("show");
         const logOpen = document.getElementById("sendLogModal")?.classList.contains("show");
@@ -698,7 +788,7 @@ function toggleSendLogModal(show){
       }
 
       function showPayrollPremiumGate(){
-        const msg = "Hai già utilizzato il caricamento gratuito. Per continuare, attiva l’abbonamento Premium.";
+        const msg = "Hai già utilizzato la prova gratuita. Per continuare, attiva Premium (" + (globalThis.PAYROLL_PREMIUM_PRICE_LABEL || "19,90 €/mese") + ").";
         try{ Ve("Premium richiesto", msg); }catch(_e){}
       }
 
@@ -5982,6 +6072,27 @@ function buildSafePdfName(base){
         try{ readLocalPayrollEntitlements(); }catch(_e){}
         try{ updateAuthUI(); }catch(_e){}
         try{ loadPayrollEntitlementsFromServer(); }catch(_e){}
+        try{
+          const u = new URL(location.href);
+          const p = u.searchParams;
+
+          // Rientro da Stripe Checkout: aggiorna subito Premium
+          if(p.get("premium") === "success"){
+            try{ showToast("Premium attivo", "Pagamento completato. Attivo Premium…", 2600); }catch(_e){}
+            try{ loadPayrollEntitlementsFromServer(true); }catch(_e){}
+            try{
+              p.delete("premium"); p.delete("session_id");
+              history.replaceState({}, "", u.toString());
+            }catch(_e){}
+          }else if(p.get("premium") === "cancel" || p.get("premium_cancel") === "1"){
+            try{ showToast("Pagamento annullato", "Nessun addebito. Puoi riprovare quando vuoi.", 2600); }catch(_e){}
+            try{
+              p.delete("premium"); p.delete("premium_cancel"); p.delete("session_id");
+              history.replaceState({}, "", u.toString());
+            }catch(_e){}
+          }
+        }catch(_e){}
+
         try{ Oi(); }catch(_e){}
         try{ Fi(); }catch(_e){}
         try{ startPayrollUserDocsWatch(); }catch(_e){}
