@@ -226,13 +226,22 @@ if(payrollGreeting) payrollGreeting.textContent = `Ciao, ${name}.`;
       const isAuthed = hasUser && !isAnon;
       const isPremium = !!state.user?.isPremium;
       const payrollFreeUsed = !!state.user?.payrollFreeUsed;
+      const payrollUsageLoaded = !!state.user?.payrollUsageLoaded;
+      const payrollUsageLoading = !!state.user?.payrollUsageLoading;
+      const payrollUsageError = !!state.user?.payrollUsageError;
+
       const uploadLocked = isAuthed && !isPremium && payrollFreeUsed;
+      const uploadPending = isAuthed && !isPremium && !payrollFreeUsed && !payrollUsageLoaded && !payrollUsageError;
+      const uploadError = isAuthed && !isPremium && !payrollFreeUsed && payrollUsageError;
+      const uploadBlocked = uploadLocked || uploadPending || uploadError;
       if(isAuthed){
         pill?.classList.add("ok");
         dot?.classList.add("ok");
         if(status) status.textContent = `Accesso: ${state.user.displayName || state.user.email || "utente"}`;
         if(hint){
-          if(uploadLocked) hint.textContent = "Prova gratuita già utilizzata: per nuovi caricamenti serve Premium.";
+          if(uploadPending) hint.textContent = "Verifica piano in corso…";
+          else if(uploadError) hint.textContent = "Verifica piano non riuscita: ricarica la pagina e riprova.";
+          else if(uploadLocked) hint.textContent = "Prova gratuita già utilizzata: per nuovi caricamenti serve Premium.";
           else if(isPremium) hint.textContent = "Premium attivo: caricamenti illimitati.";
           else if(state.user.isAdmin) hint.textContent = "Accesso admin attivo: upload abilitato.";
           else if(state.user.isWhitelisted===false) hint.textContent = "Account non abilitato alle buste paga. Contatta l'admin.";
@@ -287,15 +296,27 @@ if(payrollGreeting) payrollGreeting.textContent = `Ciao, ${name}.`;
       try{
         const cta = document.getElementById("btnOpenPayrollAdmin");
         if(cta){
+          // Se stiamo ancora verificando il piano, blocca la CTA (evita bypass da incognito)
           if(!isAuthed){
             cta.textContent = "Accedi e carica PDF";
             cta.classList.remove("locked");
+            cta.disabled = false;
+          }else if(uploadPending){
+            cta.textContent = payrollUsageLoading ? "Verifico…" : "Verifica…";
+            cta.classList.add("locked");
+            cta.disabled = true;
+          }else if(uploadError){
+            cta.textContent = "Ricarica e riprova";
+            cta.classList.add("locked");
+            cta.disabled = false;
           }else if(uploadLocked){
             cta.textContent = "Diventa Premium";
             cta.classList.add("locked");
+            cta.disabled = false;
           }else{
             cta.textContent = "Carica PDF";
             cta.classList.remove("locked");
+            cta.disabled = false;
           }
           cta.setAttribute("aria-label", cta.textContent);
         }
@@ -303,25 +324,31 @@ if(payrollGreeting) payrollGreeting.textContent = `Ciao, ${name}.`;
         const hintEl = document.querySelector(".homeHeroHint");
         if(hintEl){
           if(!isAuthed) hintEl.textContent = "Accedi per caricare un PDF.";
+          else if(uploadPending) hintEl.textContent = "Verifica piano in corso…";
+          else if(uploadError) hintEl.textContent = "Verifica piano non riuscita: ricarica la pagina.";
           else if(uploadLocked) hintEl.textContent = "Hai già usato il caricamento gratuito: attiva Premium per continuare.";
           else hintEl.textContent = "o trascina e lascia il file PDF qui";
         }
 
         // Hint nella modale upload (step idle): mostra il blocco Premium
         const idleHint = document.getElementById("payrollIdleHint");
-        if(idleHint && uploadLocked){
-          idleHint.textContent = "Premium richiesto: prova gratuita già utilizzata.";
+        if(idleHint){
+          if(uploadPending) idleHint.textContent = "Verifica piano in corso…";
+          else if(uploadError) idleHint.textContent = "Verifica piano non riuscita: ricarica la pagina.";
+          else if(uploadLocked) idleHint.textContent = "Premium richiesto: prova gratuita già utilizzata.";
+          else idleHint.textContent = "Stato: inattivo.";
         }
 
         const drop = document.getElementById("payrollDrop");
         if(drop){
-          drop.classList.toggle("locked", uploadLocked);
+          drop.classList.toggle("locked", uploadBlocked);
         }
 
         // Menu: badge lock sul pulsante Carica
         const navUp = document.getElementById("btnNavUpload");
         if(navUp){
-          navUp.textContent = (isAuthed && uploadLocked) ? "Carica 🔒" : "Carica";
+          if(isAuthed && uploadPending) navUp.textContent = "Carica ⏳";
+          else navUp.textContent = (isAuthed && uploadBlocked) ? "Carica 🔒" : "Carica";
         }
       }catch(_e){}
 
@@ -528,17 +555,86 @@ function toggleSendLogModal(show){
         }catch(_e){}
       }
 
-      async function loadPayrollEntitlementsFromServer(){
+      async function loadPayrollEntitlementsFromServer(force=false){
         if(!(N.firebase?.ok && N.user && !N.user.isAnonymous)) return;
-        const api = N.firebase.api, db = N.firebase.db;
-        const docId = N.user.uid || N.user.emailLower || "";
-        if(!docId) return;
+
+        // Evita richieste duplicate (utile su incognito / refresh)
         try{
-          const snap = await api.getDoc(api.doc(db, COL_PAYROLL_USAGE, docId));
-          if(!snap || !snap.exists()){
-            if(N.user) N.user.payrollUsageLoaded = true;
+          if(N.user.payrollUsageLoading && !force) return;
+          N.user.payrollUsageLoading = true;
+          N.user.payrollUsageError = "";
+        }catch(_e){}
+
+        const api = N.firebase.api, db = N.firebase.db;
+
+        const uid = String(N.user.uid || "").trim();
+        const emailLower = String(N.user.emailLower || (N.user.email||"").toLowerCase() || "").trim();
+
+        const ids = [];
+        if(uid) ids.push(uid);
+        if(emailLower && !ids.includes(emailLower)) ids.push(emailLower);
+
+        if(!ids.length){
+          try{
+            if(N.user){
+              N.user.payrollUsageLoaded = true;
+              N.user.payrollUsageLoading = false;
+              N.user.payrollUsageError = "";
+            }
+          }catch(_e){}
+          try{ updateAuthUI(); }catch(_e){}
+          return;
+        }
+
+        let anySuccess = false;
+        let snap = null;
+        let usedId = "";
+        let lastErr = null;
+
+        try{
+          for(const id of ids){
+            try{
+              const s = await api.getDoc(api.doc(db, COL_PAYROLL_USAGE, id));
+              anySuccess = true;
+              if(s && s.exists()){
+                snap = s;
+                usedId = id;
+                break;
+              }
+            }catch(err){
+              lastErr = err;
+            }
+          }
+
+          // Se non siamo riusciti a leggere nulla (tutti errori), blocchiamo l’upload finché non si risolve
+          if(!anySuccess){
+            try{
+              if(N.user){
+                N.user.payrollUsageError = (lastErr?.code || lastErr?.message || "entitlements_load_failed");
+                N.user.payrollUsageLoaded = true;
+                N.user.payrollUsageLoading = false;
+              }
+            }catch(_e){}
+            if(lastErr?.code !== "permission-denied"){
+              console.warn("payroll entitlements load", lastErr);
+            }
+            try{ updateAuthUI(); }catch(_e){}
             return;
           }
+
+          // Doc assente → significa "mai usato" (trial disponibile)
+          if(!snap || !snap.exists()){
+            try{
+              if(N.user){
+                N.user.payrollUsageLoaded = true;
+                N.user.payrollUsageLoading = false;
+                N.user.payrollUsageError = "";
+              }
+            }catch(_e){}
+            try{ updateAuthUI(); }catch(_e){}
+            return;
+          }
+
           const d = snap.data() || {};
           const plan = String(d.plan || d.tier || d.subscription || "").toLowerCase();
           const isPrem = (d.isPremium === true) || (plan === "premium" || plan === "pro" || plan === "plus");
@@ -548,18 +644,48 @@ function toggleSendLogModal(show){
                       : (d.trialUsed ? 1 : 0);
           if(Number.isFinite(usedN) && usedN >= PAYROLL_FREE_SEND_LIMIT) freeUsed = true;
 
-          if(N.user){
-            if(isPrem) N.user.isPremium = true;
-            if(freeUsed) N.user.payrollFreeUsed = true;
-            N.user.payrollUsageLoaded = true;
+          try{
+            if(N.user){
+              if(isPrem) N.user.isPremium = true;
+              if(freeUsed) N.user.payrollFreeUsed = true;
+              N.user.payrollUsageLoaded = true;
+              N.user.payrollUsageLoading = false;
+              N.user.payrollUsageError = "";
+            }
+          }catch(_e){}
+
+          // Cache locale (solo flag "trial used") — utile su questo device
+          if(freeUsed){
+            try{ localStorage.setItem(LS_PAYROLL_FREE_USED, "1"); }catch(_e){}
           }
+
+          // Migrazione soft: se troviamo il doc su emailLower, copialo anche su uid (best-effort)
+          try{
+            if(usedId && uid && usedId !== uid){
+              const payload = {
+                ...d,
+                uid: uid,
+                emailLower: emailLower || d.emailLower || "",
+                updatedAt: api.serverTimestamp(),
+                updatedAtClient: Date.now()
+              };
+              try{ await api.setDoc(api.doc(db, COL_PAYROLL_USAGE, uid), payload, { merge:true }); }catch(_e){}
+            }
+          }catch(_e){}
+
           try{ updateAuthUI(); }catch(_e){}
         }catch(err){
-          if(N.user) N.user.payrollUsageLoaded = true;
-          // best-effort: se manca permesso, ignoriamo
+          try{
+            if(N.user){
+              N.user.payrollUsageError = (err?.code || err?.message || "entitlements_load_failed");
+              N.user.payrollUsageLoaded = true;
+              N.user.payrollUsageLoading = false;
+            }
+          }catch(_e){}
           if(err?.code !== "permission-denied"){
             console.warn("payroll entitlements load", err);
           }
+          try{ updateAuthUI(); }catch(_e){}
         }
       }
 
@@ -588,6 +714,34 @@ function toggleSendLogModal(show){
           }
           return false;
         }
+
+        // Verifica entitlements (evita bypass da incognito / nuovo device)
+        try{
+          const u = N.user;
+          if(u && !u.isAnonymous && !u.isPremium){
+            const loaded = (u.payrollUsageLoaded === true);
+            const err = u.payrollUsageError;
+
+            // Se non abbiamo ancora verificato dal server, blocca e fai partire la fetch
+            if(!loaded){
+              try{ loadPayrollEntitlementsFromServer(); }catch(_e){}
+              if(show){
+                try{ Ve("Verifica in corso", "Sto verificando il tuo piano. Riprova tra qualche secondo."); }catch(_e){}
+              }
+              return false;
+            }
+
+            // Se la verifica non è riuscita, blocca (altrimenti incognito bypassa)
+            if(err){
+              if(openBilling){
+                try{ goToPremium("Non riesco a verificare il tuo piano. Riprova o attiva Premium."); }catch(_e){}
+              }else if(show){
+                try{ Ve("Verifica non riuscita", "Non riesco a verificare il tuo piano (connessione / AdBlock / permessi). Ricarica la pagina e riprova."); }catch(_e){}
+              }
+              return false;
+            }
+          }
+        }catch(_e){}
 
         // Paywall
         if(payrollUploadIsLocked()){
@@ -2671,6 +2825,13 @@ function renderUploadHistory(){
       async function Vi() {
         const e = N.payroll.admin, t = U("payrollIdleHint"), dbg = U("payrollGeminiDebug");
         if (!e.files || !e.files.length) return void(dbg && (dbg.textContent = "Seleziona un PDF per iniziare"));
+
+        // Gate premium (sicurezza): evita bypass su incognito / device nuovi
+        if(!ensurePayrollCanUpload({ toast:true, openBilling:true })){
+          try{ setProgress(0, "Bloccato"); }catch(_e){}
+          return;
+        }
+
         const t0 = performance.now();
         setProgress(5, "Preparazione…");
         try {
@@ -6234,7 +6395,9 @@ const app = initializeApp(firebaseConfig);
               isWhitelisted: null,
               isPremium: false,
               payrollFreeUsed: false,
-              payrollUsageLoaded: false
+              payrollUsageLoaded: false,
+              payrollUsageLoading: false,
+              payrollUsageError: ""
             };
             try{ clearRestoreTimeout(); }catch(_e){}
             try{ markAuthOk(user.email || ""); }catch(_e){}
