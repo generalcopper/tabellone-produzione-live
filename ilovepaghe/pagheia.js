@@ -233,21 +233,23 @@ if(payrollGreeting) payrollGreeting.textContent = `Ciao, ${name}.`;
       const isAnon = !!state.user?.isAnonymous;
       const isAuthed = hasUser && !isAnon;
       const isPremium = !!state.user?.isPremium;
+      const premiumSyncPending = !!state.user?.premiumSyncPending;
       const payrollFreeUsed = !!state.user?.payrollFreeUsed;
       const payrollUsageLoaded = !!state.user?.payrollUsageLoaded;
       const payrollUsageLoading = !!state.user?.payrollUsageLoading;
       const payrollUsageError = !!state.user?.payrollUsageError;
 
-      const uploadLocked = isAuthed && !isPremium && payrollFreeUsed;
-      const uploadPending = isAuthed && !isPremium && !payrollFreeUsed && !payrollUsageLoaded && !payrollUsageError;
-      const uploadError = isAuthed && !isPremium && !payrollFreeUsed && payrollUsageError;
+      // Premium sync: dopo un pagamento Stripe mostriamo "verifica in corso" e NON blocchiamo come "trial usata"
+      const uploadLocked = isAuthed && !isPremium && !premiumSyncPending && payrollFreeUsed;
+      const uploadPending = isAuthed && !isPremium && (premiumSyncPending || (!payrollFreeUsed && !payrollUsageLoaded && !payrollUsageError));
+      const uploadError = isAuthed && !isPremium && !premiumSyncPending && !payrollFreeUsed && payrollUsageError;
       const uploadBlocked = uploadLocked || uploadPending || uploadError;
       if(isAuthed){
         pill?.classList.add("ok");
         dot?.classList.add("ok");
         if(status) status.textContent = `Accesso: ${state.user.displayName || state.user.email || "utente"}`;
         if(hint){
-          if(uploadPending) hint.textContent = "Verifica piano in corso…";
+          if(uploadPending) hint.textContent = premiumSyncPending ? "Attivazione Premium in corso…" : "Verifica piano in corso…";
           else if(uploadError) hint.textContent = "Verifica piano non riuscita: ricarica la pagina e riprova.";
           else if(uploadLocked) hint.textContent = "Prova gratuita già utilizzata: per continuare attiva Premium (" + (globalThis.PAYROLL_PREMIUM_PRICE_LABEL || "19,90 €/mese") + ").";
           else if(isPremium) hint.textContent = "Premium attivo: caricamenti illimitati.";
@@ -332,7 +334,7 @@ if(payrollGreeting) payrollGreeting.textContent = `Ciao, ${name}.`;
         const hintEl = document.querySelector(".homeHeroHint");
         if(hintEl){
           if(!isAuthed) hintEl.textContent = "Accedi per caricare un PDF.";
-          else if(uploadPending) hintEl.textContent = "Verifica piano in corso…";
+          else if(uploadPending) hintEl.textContent = premiumSyncPending ? "Attivazione Premium in corso…" : "Verifica piano in corso…";
           else if(uploadError) hintEl.textContent = "Verifica piano non riuscita: ricarica la pagina.";
           else if(uploadLocked) hintEl.textContent = "Hai già usato il caricamento gratuito: attiva Premium (" + (globalThis.PAYROLL_PREMIUM_PRICE_LABEL || "19,90 €/mese") + ").";
           else hintEl.textContent = "o trascina e lascia il file PDF qui";
@@ -341,7 +343,7 @@ if(payrollGreeting) payrollGreeting.textContent = `Ciao, ${name}.`;
         // Hint nella modale upload (step idle): mostra il blocco Premium
         const idleHint = document.getElementById("payrollIdleHint");
         if(idleHint){
-          if(uploadPending) idleHint.textContent = "Verifica piano in corso…";
+          if(uploadPending) idleHint.textContent = premiumSyncPending ? "Attivazione Premium in corso…" : "Verifica piano in corso…";
           else if(uploadError) idleHint.textContent = "Verifica piano non riuscita: ricarica la pagina.";
           else if(uploadLocked) idleHint.textContent = "Premium richiesto: prova gratuita già utilizzata (" + (globalThis.PAYROLL_PREMIUM_PRICE_LABEL || "19,90 €/mese") + ").";
           else idleHint.textContent = "Stato: inattivo.";
@@ -645,6 +647,109 @@ function toggleSendLogModal(show){
         }catch(_e){}
       }
 
+      // Prova a leggere entitlements da Custom Claims (se presenti).
+      // Utile quando la sincronizzazione Stripe aggiorna claims prima di Firestore (o come fallback a problemi di lettura).
+      async function syncPayrollEntitlementsFromIdToken(force=false){
+        try{
+          if(!(N.firebase?.ok && N.user && !N.user.isAnonymous)) return false;
+          const authUser = N.firebase?.auth?.currentUser;
+          if(!authUser || authUser.isAnonymous) return false;
+
+          const res = await authUser.getIdTokenResult(!!force);
+          const c = (res && res.claims) ? res.claims : {};
+
+          const plan = String(c.plan || c.tier || c.subscription || c.role || c.stripeRole || "").toLowerCase().trim();
+          const prem = (c.isPremium === true) || (c.premium === true) || (plan === "premium" || plan === "pro" || plan === "plus");
+
+          const usedN = (typeof c.freeSendsUsed === "number") ? c.freeSendsUsed
+                      : (typeof c.freeUsedCount === "number") ? c.freeUsedCount
+                      : (c.trialUsed ? 1 : 0);
+          const freeUsed = (Number.isFinite(usedN) && usedN >= PAYROLL_FREE_SEND_LIMIT);
+
+          let changed = false;
+          if(prem && !N.user.isPremium){ N.user.isPremium = true; changed = true; }
+          if(freeUsed && !N.user.payrollFreeUsed){
+            N.user.payrollFreeUsed = true;
+            changed = true;
+            try{ localStorage.setItem(LS_PAYROLL_FREE_USED, "1"); }catch(_e){}
+          }
+
+          if(changed){
+            N.user.payrollUsageLoaded = true;
+            N.user.payrollUsageLoading = false;
+            N.user.payrollUsageError = "";
+            if(prem) N.user.premiumSyncPending = false;
+            try{ updateAuthUI(); }catch(_e){}
+          }
+
+          return prem || freeUsed;
+        }catch(_e){
+          return false;
+        }
+      }
+
+      // Fallback opzionale: prova a chiedere lo status al backend billing (se espone un endpoint pubblico).
+      async function tryLoadPayrollEntitlementsFromBillingBackend(){
+        try{
+          if(!(N.firebase?.ok && N.user && !N.user.isAnonymous)) return false;
+          const base = (typeof getBillingBase === "function") ? getBillingBase() : "";
+          if(!base) return false;
+
+          const authUser = N.firebase?.auth?.currentUser;
+          if(!authUser || authUser.isAnonymous) return false;
+
+          let tok = "";
+          try{ tok = await authUser.getIdToken(); }catch(_e){}
+          if(!tok) return false;
+
+          const headers = { "Authorization": "Bearer " + tok };
+
+          // App Check token (anti-abuso) — opzionale
+          try{
+            const ac = N.firebase?.appCheck;
+            const acApi = N.firebase?.appCheckApi;
+            if(ac && acApi && typeof acApi.getToken === "function"){
+              const resp = await acApi.getToken(ac, /* forceRefresh= */ false);
+              if(resp && resp.token) headers["X-Firebase-AppCheck"] = resp.token;
+            }
+          }catch(_e){}
+
+          const baseUrl = String(base).replace(/\/$/,"");
+          const endpoints = ["/entitlements", "/status", "/me", "/whoami", "/subscription"];
+
+          for(const path of endpoints){
+            try{
+              const res = await fetch(baseUrl + path, { method:"GET", headers });
+              if(!res || !res.ok) continue;
+              const data = await res.json().catch(()=>null);
+              if(!data) continue;
+
+              const plan = String(data.plan || data.tier || data.subscription || data.role || "").toLowerCase().trim();
+              const prem = (data.isPremium === true) || (plan === "premium" || plan === "pro" || plan === "plus");
+              const usedN = (typeof data.freeSendsUsed === "number") ? data.freeSendsUsed
+                          : (typeof data.freeUsedCount === "number") ? data.freeUsedCount
+                          : (data.trialUsed ? 1 : 0);
+              const freeUsed = (Number.isFinite(usedN) && usedN >= PAYROLL_FREE_SEND_LIMIT);
+
+              if(prem) N.user.isPremium = true;
+              if(freeUsed){
+                N.user.payrollFreeUsed = true;
+                try{ localStorage.setItem(LS_PAYROLL_FREE_USED, "1"); }catch(_e){}
+              }
+
+              N.user.payrollUsageLoaded = true;
+              N.user.payrollUsageLoading = false;
+              N.user.payrollUsageError = "";
+              if(prem) N.user.premiumSyncPending = false;
+              try{ updateAuthUI(); }catch(_e){}
+              return true;
+            }catch(_e){}
+          }
+        }catch(_e){}
+        return false;
+      }
+
+
       async function loadPayrollEntitlementsFromServer(force=false){
         if(!(N.firebase?.ok && N.user && !N.user.isAnonymous)) return;
 
@@ -663,6 +768,22 @@ function toggleSendLogModal(show){
         const ids = [];
         if(uid) ids.push(uid);
         if(emailLower && !ids.includes(emailLower)) ids.push(emailLower);
+
+        // Fast-path: prova a ricavare Premium da Custom Claims (se presenti).
+        // Usiamo force=true quando rientri da Stripe (premium=success) per forzare refresh token.
+        try{
+          await syncPayrollEntitlementsFromIdToken(!!force);
+          if(N.user?.isPremium){
+            try{
+              N.user.payrollUsageLoaded = true;
+              N.user.payrollUsageLoading = false;
+              N.user.payrollUsageError = "";
+              N.user.premiumSyncPending = false;
+            }catch(_e){}
+            try{ updateAuthUI(); }catch(_e){}
+            return;
+          }
+        }catch(_e){}
 
         if(!ids.length){
           try{
@@ -696,8 +817,61 @@ function toggleSendLogModal(show){
             }
           }
 
-          // Se non siamo riusciti a leggere nulla (tutti errori), blocchiamo l’upload finché non si risolve
+          // Se non siamo riusciti a leggere nulla (tutti errori), prima proviamo fallback e poi gestiamo retry/errore
           if(!anySuccess){
+            // 1) Fallback: se il backend billing espone uno status, proviamo lì (evita blocchi dovuti a regole Firestore)
+            try{
+              const ok = await tryLoadPayrollEntitlementsFromBillingBackend();
+              if(ok){
+                // lo stato utente è già stato aggiornato dalla funzione
+                return;
+              }
+            }catch(_e){}
+
+            const code = String(lastErr?.code || "").toLowerCase();
+            const msg = String(lastErr?.message || "").toLowerCase();
+            const transient = (
+              code === "unavailable" ||
+              code === "deadline-exceeded" ||
+              code === "resource-exhausted" ||
+              code === "internal" ||
+              msg.includes("network") ||
+              msg.includes("timeout")
+            );
+
+            // 2) Errori transienti: non mostrare subito "errore", riprova in background
+            if(transient){
+              try{ if(N.user) N.user.__entRetryCount = (Number(N.user.__entRetryCount||0) + 1); }catch(_e){}
+              const n = Number(N.user?.__entRetryCount || 1);
+
+              try{
+                if(N.user){
+                  N.user.payrollUsageLoaded = false;
+                  N.user.payrollUsageLoading = false;
+                  N.user.payrollUsageError = "";
+                }
+              }catch(_e){}
+              try{ updateAuthUI(); }catch(_e){}
+
+              if(n <= 5){
+                const delay = Math.min(8000, 900 * n);
+                setTimeout(()=>{ try{ loadPayrollEntitlementsFromServer(true); }catch(_e){} }, delay);
+              }else{
+                // dopo diversi tentativi, segnala errore
+                try{
+                  if(N.user){
+                    N.user.payrollUsageError = (lastErr?.code || lastErr?.message || "entitlements_load_failed");
+                    N.user.payrollUsageLoaded = true;
+                    N.user.payrollUsageLoading = false;
+                  }
+                }catch(_e){}
+                if(code !== "permission-denied") console.warn("payroll entitlements load", lastErr);
+                try{ updateAuthUI(); }catch(_e){}
+              }
+              return;
+            }
+
+            // 3) Errori non transienti: segnala blocco
             try{
               if(N.user){
                 N.user.payrollUsageError = (lastErr?.code || lastErr?.message || "entitlements_load_failed");
@@ -705,7 +879,7 @@ function toggleSendLogModal(show){
                 N.user.payrollUsageLoading = false;
               }
             }catch(_e){}
-            if(lastErr?.code !== "permission-denied"){
+            if(code !== "permission-denied"){
               console.warn("payroll entitlements load", lastErr);
             }
             try{ updateAuthUI(); }catch(_e){}
@@ -714,6 +888,23 @@ function toggleSendLogModal(show){
 
           // Doc assente → significa "mai usato" (trial disponibile)
           if(!snap || !snap.exists()){
+            // Se siamo rientrati da Stripe e stiamo sincronizzando Premium, riprova per qualche secondo
+            try{
+              const pending = !!N.user?.premiumSyncPending;
+              const t0 = Number(N.user?.premiumSyncStartedAt || 0);
+              const age = t0 ? (Date.now() - t0) : 0;
+              if(pending && t0 && age < 120000){
+                if(N.user){
+                  N.user.payrollUsageLoaded = false;
+                  N.user.payrollUsageLoading = false;
+                  N.user.payrollUsageError = "";
+                }
+                try{ updateAuthUI(); }catch(_e){}
+                setTimeout(()=>{ try{ loadPayrollEntitlementsFromServer(true); }catch(_e){} }, 2200);
+                return;
+              }
+            }catch(_e){}
+
             try{
               if(N.user){
                 N.user.payrollUsageLoaded = true;
@@ -736,11 +927,37 @@ function toggleSendLogModal(show){
 
           try{
             if(N.user){
-              if(isPrem) N.user.isPremium = true;
+              if(isPrem){
+                N.user.isPremium = true;
+                N.user.premiumSyncPending = false;
+              }
               if(freeUsed) N.user.payrollFreeUsed = true;
               N.user.payrollUsageLoaded = true;
               N.user.payrollUsageLoading = false;
               N.user.payrollUsageError = "";
+            }
+          }catch(_e){}
+
+          // Se rientri da Stripe e stiamo ancora aspettando il webhook, continua a riprovare per un breve periodo
+          try{
+            const pending = !!N.user?.premiumSyncPending;
+            const t0 = Number(N.user?.premiumSyncStartedAt || 0);
+            const age = t0 ? (Date.now() - t0) : 0;
+
+            if(pending && t0 && !isPrem && age < 120000){
+              if(N.user){
+                N.user.payrollUsageLoaded = false;
+                N.user.payrollUsageLoading = false;
+                N.user.payrollUsageError = "";
+              }
+              try{ updateAuthUI(); }catch(_e){}
+              setTimeout(()=>{ try{ loadPayrollEntitlementsFromServer(true); }catch(_e){} }, 2200);
+              return;
+            }
+
+            if(pending && t0 && !isPrem && age >= 120000){
+              // timeout: smettiamo di mostrare "in corso"
+              if(N.user) N.user.premiumSyncPending = false;
             }
           }catch(_e){}
 
@@ -823,10 +1040,10 @@ function toggleSendLogModal(show){
 
             // Se la verifica non è riuscita, blocca (altrimenti incognito bypassa)
             if(err){
-              if(openBilling){
-                try{ goToPremium("Non riesco a verificare il tuo piano. Riprova o attiva Premium."); }catch(_e){}
-              }else if(show){
-                try{ Ve("Verifica non riuscita", "Non riesco a verificare il tuo piano (connessione / AdBlock / permessi). Ricarica la pagina e riprova."); }catch(_e){}
+              // Riprova una verifica forzata prima di proporre il checkout (evita loop dopo pagamento)
+              try{ loadPayrollEntitlementsFromServer(true); }catch(_e){}
+              if(show){
+                try{ Ve("Verifica in corso", "Sto riprovando a verificare il tuo piano. Se non si sblocca, ricarica la pagina."); }catch(_e){}
               }
               return false;
             }
@@ -6116,7 +6333,19 @@ function buildSafePdfName(base){
 
           // Rientro da Stripe Checkout: aggiorna subito Premium
           if(p.get("premium") === "success"){
-            try{ showToast("Premium attivo", "Pagamento completato. Attivo Premium…", 2600); }catch(_e){}
+            // Rientro da Stripe: avvia sincronizzazione Premium (il webhook può impiegare qualche secondo)
+            try{
+              if(N.user){
+                N.user.premiumSyncPending = true;
+                N.user.premiumSyncStartedAt = Date.now();
+                N.user.payrollUsageLoaded = false;
+                N.user.payrollUsageLoading = false;
+                N.user.payrollUsageError = "";
+              }
+            }catch(_e){}
+            try{ updateAuthUI(); }catch(_e){}
+            try{ showToast("Premium", "Pagamento completato. Sto sincronizzando l’abbonamento…", 2600); }catch(_e){}
+            try{ syncPayrollEntitlementsFromIdToken(true); }catch(_e){}
             try{ loadPayrollEntitlementsFromServer(true); }catch(_e){}
             try{
               p.delete("premium"); p.delete("session_id");
@@ -6546,7 +6775,9 @@ const app = initializeApp(firebaseConfig);
               payrollFreeUsed: false,
               payrollUsageLoaded: false,
               payrollUsageLoading: false,
-              payrollUsageError: ""
+              payrollUsageError: "",
+              premiumSyncPending: false,
+              premiumSyncStartedAt: 0
             };
             try{ clearRestoreTimeout(); }catch(_e){}
             try{ markAuthOk(user.email || ""); }catch(_e){}
