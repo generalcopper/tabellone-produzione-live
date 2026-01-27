@@ -697,17 +697,6 @@ function toggleSendLogModal(show){
         return false;
       }
 
-              N.user.payrollUsageLoaded = true;
-              N.user.payrollUsageLoading = false;
-              N.user.payrollUsageError = "";
-              if(prem) N.user.premiumSyncPending = false;
-              try{ updateAuthUI(); }catch(_e){}
-              return true;
-            }catch(_e){}
-          }
-        }catch(_e){}
-        return false;
-      }
 
 
       async function loadPayrollEntitlementsFromServer(force=false){
