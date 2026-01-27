@@ -535,6 +535,10 @@ function toggleSendLogModal(show){
         }catch(_e){}
       }
 
+      // Header "Carica": pagina standalone (niente hub esterni)
+      try{ document.getElementById("btnNavUpload")?.addEventListener("click", ()=>scrollToSection("adminArea")); }catch(_e){}
+
+
       function ji() {
         const e = N.payroll.admin;
         e.files = [], e.originalPdfBytes = null, e.gemini = { loading: !1, error: "", pages: [] }, e.match = { pages: [], grouped: [], unmatched: [], matchedCount: 0, ambiguousCount: 0, unmatchedCount: 0 }, e.groupedRows = [], e.sendSummary = null, e.sourceFileName = "", e.sourceFileHash = "", Di("idle"), Bi(), Ii(), Pi();
@@ -5747,29 +5751,10 @@ function buildSafePdfName(base){
             // Best-effort: persistenza (aiuta a mantenere la sessione tra pagine/refresh)
             try{ await setBestAuthPersistence(authMod, auth); }catch(_e){}
 
-            // In modalità app iOS: usa redirect diretto (più stabile, niente popup "flash")
-            if(__preferRedirect){
-              try{ markAuthInflight("Accedi con Google", "login"); }catch(_e){}
-              await authMod.signInWithRedirect(auth, googleProvider);
-              return;
-            }
-
-            // Popup first, fallback to redirect se necessario (popup bloccato / non supportato)
-            try{
-              await authMod.signInWithPopup(auth, googleProvider);
-              return;
-            }catch(err){
-              const code = String(err?.code || "");
-              const msg = String(err?.message || "").toLowerCase();
-              const popupIssue = code.includes("popup") || msg.includes("popup");
-              const notSupported = code.includes("operation-not-supported-in-this-environment") || code.includes("web-storage-unsupported");
-              if(popupIssue || notSupported){
-                try{ markAuthInflight("Accedi con Google", "login"); }catch(_e){}
-                await authMod.signInWithRedirect(auth, googleProvider);
-                return;
-              }
-              throw err;
-            }
+            // Redirect SEMPRE: evita warning/errori COOP legati ai popup OAuth su alcuni browser/hosting.
+            try{ markAuthInflight("Accedi con Google", "login"); }catch(_e){}
+            await authMod.signInWithRedirect(auth, googleProvider);
+            return;
           }catch(err){
             console.warn("google login", err);
             showToast("Accesso non riuscito", err?.message || String(err));
