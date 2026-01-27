@@ -224,13 +224,19 @@ if(payrollGreeting) payrollGreeting.textContent = `Ciao, ${name}.`;
       const hasUser = !!state.user;
       const isAnon = !!state.user?.isAnonymous;
       const isAuthed = hasUser && !isAnon;
+      const isPremium = !!state.user?.isPremium;
+      const payrollFreeUsed = !!state.user?.payrollFreeUsed;
+      const uploadLocked = isAuthed && !isPremium && payrollFreeUsed;
       if(isAuthed){
         pill?.classList.add("ok");
         dot?.classList.add("ok");
         if(status) status.textContent = `Accesso: ${state.user.displayName || state.user.email || "utente"}`;
         if(hint){
-          if(state.user.isAdmin) hint.textContent = "Accesso admin attivo: upload abilitato.";
-          else if(state.user.isWhitelisted===false) hint.textContent = "Account non abilitato alle buste paga. Contatta l'admin.";          else hint.textContent = "Accesso attivo.";
+          if(uploadLocked) hint.textContent = "Prova gratuita già utilizzata: per nuovi caricamenti serve Premium.";
+          else if(isPremium) hint.textContent = "Premium attivo: caricamenti illimitati.";
+          else if(state.user.isAdmin) hint.textContent = "Accesso admin attivo: upload abilitato.";
+          else if(state.user.isWhitelisted===false) hint.textContent = "Account non abilitato alle buste paga. Contatta l'admin.";
+          else hint.textContent = "Accesso attivo.";
         }
       }else{
         pill?.classList.remove("ok");
@@ -263,25 +269,59 @@ if(payrollGreeting) payrollGreeting.textContent = `Ciao, ${name}.`;
       const showLogin = (!isAuthed);
       if(btnLogin){
         btnLogin.style.display = showLogin ? "" : "none";
+        const ready = !!state.firebase?.ok;
         // abilita quando Firebase è pronto
-        btnLogin.disabled = !state.firebase?.ok;
+        btnLogin.disabled = !ready;
+        // feedback visivo mentre Firebase carica
+        try{ const sp = btnLogin.querySelector("span"); if(sp) sp.textContent = ready ? "Accedi" : "Caricamento…"; }catch(_e){}
       }
 
       // "Esci" sempre in fondo (solo quando autenticato)
       if(btnLogoutBottom) btnLogoutBottom.style.display = isAuthed ? "" : "none";
 
       // CTA principale (home):
-      // - se non autenticato (o anonimo): "Accedi e carica PDF" e copy coerente
-      // - se autenticato: "Carica PDF"
+      // - se non autenticato: "Accedi e carica PDF"
+      // - se autenticato:
+      //    - se Premium: "Carica PDF"
+      //    - se prova gratuita già usata: "Diventa Premium"
       try{
         const cta = document.getElementById("btnOpenPayrollAdmin");
         if(cta){
-          cta.textContent = isAuthed ? "Carica PDF" : "Accedi e carica PDF";
+          if(!isAuthed){
+            cta.textContent = "Accedi e carica PDF";
+            cta.classList.remove("locked");
+          }else if(uploadLocked){
+            cta.textContent = "Diventa Premium";
+            cta.classList.add("locked");
+          }else{
+            cta.textContent = "Carica PDF";
+            cta.classList.remove("locked");
+          }
           cta.setAttribute("aria-label", cta.textContent);
         }
+
         const hintEl = document.querySelector(".homeHeroHint");
         if(hintEl){
-          hintEl.textContent = isAuthed ? "o trascina e lascia il file PDF qui" : "Accedi per caricare un PDF.";
+          if(!isAuthed) hintEl.textContent = "Accedi per caricare un PDF.";
+          else if(uploadLocked) hintEl.textContent = "Hai già usato il caricamento gratuito: attiva Premium per continuare.";
+          else hintEl.textContent = "o trascina e lascia il file PDF qui";
+        }
+
+        // Hint nella modale upload (step idle): mostra il blocco Premium
+        const idleHint = document.getElementById("payrollIdleHint");
+        if(idleHint && uploadLocked){
+          idleHint.textContent = "Premium richiesto: prova gratuita già utilizzata.";
+        }
+
+        const drop = document.getElementById("payrollDrop");
+        if(drop){
+          drop.classList.toggle("locked", uploadLocked);
+        }
+
+        // Menu: badge lock sul pulsante Carica
+        const navUp = document.getElementById("btnNavUpload");
+        if(navUp){
+          navUp.textContent = (isAuthed && uploadLocked) ? "Carica 🔒" : "Carica";
         }
       }catch(_e){}
 
@@ -335,6 +375,25 @@ updateGreetingUI();
       }catch(_e){}
 
       try{ showToast("Accesso richiesto", msg, 1800); }catch(_e){}
+      return false;
+    }
+
+
+    // Pagamento/Upgrade Premium (opzionale):
+    // - se è configurato un BILLING URL esterno, redirect lì (con return URL)
+    // - altrimenti mostra solo un messaggio
+    function goToPremium(reason=""){
+      const msg = String(reason || "Per continuare, attiva l’abbonamento Premium.");
+      try{
+        const billingUrl = String(globalThis.PAGHEIA_PREMIUM_URL || globalThis.PAGHEIA_BILLING_URL || globalThis.BILLING_URL || "").trim();
+        if(billingUrl){
+          const next = encodeURIComponent(location.href);
+          const sep = billingUrl.includes("?") ? "&" : "?";
+          location.href = billingUrl + sep + "next=" + next;
+          return true;
+        }
+      }catch(_e){}
+      try{ showToast("Premium richiesto", msg, 4200); }catch(_e){}
       return false;
     }
 
@@ -447,6 +506,138 @@ function toggleSendLogModal(show){
 
       const COL_PAYROLL_DIRECTORY="payrollDirectory",COL_PAYROLL_DOCS="payrollDocs",COL_PAYROLL_DOCS_LEGACY="payrolls",COL_PAYROLL_SEND_LOGS="payrollSendLogs",COL_EMAIL="email",COL_ABSENCE_REQUESTS="absenceRequests";
       const PAYROLL_DOC_COLS=[COL_PAYROLL_DOCS,COL_PAYROLL_DOCS_LEGACY];
+      // Premium gate (trial: 1 invio gratuito)
+      const COL_PAYROLL_USAGE = "payrollUsage";
+      const LS_PAYROLL_FREE_USED = "ilovepaghe_payroll_free_used_v1";
+      const LS_PAYROLL_PREMIUM_OVERRIDE = "ilovepaghe_premium_override_v1";
+      const PAYROLL_FREE_SEND_LIMIT = 1;
+
+      function readLocalPayrollEntitlements(){
+        try{
+          if(!N.user) return;
+          // Trial used (solo questo device, fallback)
+          try{
+            const v = localStorage.getItem(LS_PAYROLL_FREE_USED);
+            if(v === "1") N.user.payrollFreeUsed = true;
+          }catch(_e){}
+          // Premium override (solo ON) — utile per test/demo
+          try{
+            const v2 = localStorage.getItem(LS_PAYROLL_PREMIUM_OVERRIDE);
+            if(v2 === "1") N.user.isPremium = true;
+          }catch(_e){}
+        }catch(_e){}
+      }
+
+      async function loadPayrollEntitlementsFromServer(){
+        if(!(N.firebase?.ok && N.user && !N.user.isAnonymous)) return;
+        const api = N.firebase.api, db = N.firebase.db;
+        const docId = N.user.uid || N.user.emailLower || "";
+        if(!docId) return;
+        try{
+          const snap = await api.getDoc(api.doc(db, COL_PAYROLL_USAGE, docId));
+          if(!snap || !snap.exists()){
+            if(N.user) N.user.payrollUsageLoaded = true;
+            return;
+          }
+          const d = snap.data() || {};
+          const plan = String(d.plan || d.tier || d.subscription || "").toLowerCase();
+          const isPrem = (d.isPremium === true) || (plan === "premium" || plan === "pro" || plan === "plus");
+          let freeUsed = false;
+          const usedN = (typeof d.freeSendsUsed === "number") ? d.freeSendsUsed
+                      : (typeof d.freeUsedCount === "number") ? d.freeUsedCount
+                      : (d.trialUsed ? 1 : 0);
+          if(Number.isFinite(usedN) && usedN >= PAYROLL_FREE_SEND_LIMIT) freeUsed = true;
+
+          if(N.user){
+            if(isPrem) N.user.isPremium = true;
+            if(freeUsed) N.user.payrollFreeUsed = true;
+            N.user.payrollUsageLoaded = true;
+          }
+          try{ updateAuthUI(); }catch(_e){}
+        }catch(err){
+          if(N.user) N.user.payrollUsageLoaded = true;
+          // best-effort: se manca permesso, ignoriamo
+          if(err?.code !== "permission-denied"){
+            console.warn("payroll entitlements load", err);
+          }
+        }
+      }
+
+      function payrollUploadIsLocked(){
+        const isAuthed = !!(N.user && !N.user.isAnonymous);
+        if(!isAuthed) return false;
+        if(N.user?.isPremium) return false;
+        if(!N.user?.payrollFreeUsed) return false;
+        return true;
+      }
+
+      function showPayrollPremiumGate(){
+        const msg = "Hai già utilizzato il caricamento gratuito. Per continuare, attiva l’abbonamento Premium.";
+        try{ Ve("Premium richiesto", msg); }catch(_e){}
+      }
+
+      function ensurePayrollCanUpload(opts = {}){
+        const o = opts || {};
+        const show = (o.toast !== false);
+        const openBilling = !!o.openBilling;
+
+        // Login
+        if(!N.user || N.user.isAnonymous){
+          if(show){
+            try{ goToAuth("Accedi per caricare i PDF."); }catch(_e){}
+          }
+          return false;
+        }
+
+        // Paywall
+        if(payrollUploadIsLocked()){
+          if(openBilling){
+            try{ goToPremium("Per continuare, attiva l’abbonamento Premium."); }catch(_e){}
+          }else if(show){
+            showPayrollPremiumGate();
+          }
+          return false;
+        }
+        return true;
+      }
+
+      async function markPayrollTrialUsed(reason=""){
+        try{
+          if(!N.user || N.user.isAnonymous) return;
+          if(N.user.isPremium) return;
+          if(N.user.payrollFreeUsed) return;
+
+          N.user.payrollFreeUsed = true;
+          try{ localStorage.setItem(LS_PAYROLL_FREE_USED, "1"); }catch(_e){}
+          try{ updateAuthUI(); }catch(_e){}
+
+          if(!(N.firebase?.ok)) return;
+          const api = N.firebase.api, db = N.firebase.db;
+          const docId = N.user.uid || N.user.emailLower || "";
+          if(!docId) return;
+
+          const payload = {
+            uid: N.user.uid || "",
+            emailLower: N.user.emailLower || (N.user.email||"").toLowerCase(),
+            plan: "free",
+            trialUsed: true,
+            freeSendsUsed: PAYROLL_FREE_SEND_LIMIT,
+            lastReason: String(reason||""),
+            trialUsedAt: api.serverTimestamp(),
+            trialUsedAtClient: Date.now(),
+            updatedAt: api.serverTimestamp(),
+            updatedAtClient: Date.now()
+          };
+          try{
+            await api.setDoc(api.doc(db, COL_PAYROLL_USAGE, docId), payload, { merge:true });
+          }catch(err){
+            if(err?.code !== "permission-denied"){
+              console.warn("payroll usage write", err);
+            }
+          }
+        }catch(_e){}
+      }
+
 
       async function tryGetPayrollDocSnap(api, db, id){
         for(const col of PAYROLL_DOC_COLS){
@@ -3280,6 +3471,12 @@ async function Yi() {
             Ve("Errore invio", summary.status);
           }
 
+          // Trial: dopo il primo invio riuscito, segna la prova gratuita come usata
+          try{
+            const sentAny = rows.some(r=>r && r.sent);
+            if(sentAny) await markPayrollTrialUsed("send_privacy");
+          }catch(_e){}
+
           e.sendSummary = summary;
           const ui = N.payroll?.admin?.sendUI;
           if(ui) ui.finalStatus = summary.status || "—";
@@ -3471,6 +3668,11 @@ async function Yi() {
             setPayrollSendProgress(done, total);
             await nextFrame();
           }
+          // Trial: dopo il primo invio riuscito, segna la prova gratuita come usata
+          try{
+            const sentAny = rows.some(r=>r && r.sent);
+            if(sentAny) await markPayrollTrialUsed("send");
+          }catch(_e){}
           await (async function(payload) {
             try {
               const t = N.firebase.api, n = N.firebase.db, o = t.collection(n, "payrollIngestLogs");
@@ -3533,6 +3735,8 @@ async function Yi() {
 
         // Se richiesto, apri subito il selettore file (serve gesto utente)
         if(options.autoUpload){
+          // Gate premium
+          if(!ensurePayrollCanUpload({ toast:true, openBilling:true })) return;
           try{
             const input = U("payrollFileInput");
             if(input){
@@ -3551,10 +3755,8 @@ async function Yi() {
       // 1) click su "carica buste paga" => apre SUBITO il selettore file (senza modale intermedia)
       // 2) dopo la selezione: apre la modale e parte analisi + risultati
       function openPayrollUploadPicker(){
-        if(!N.user || N.user.isAnonymous){
-          try{ goToAuth("Accedi per caricare i PDF."); }catch(_e){}
-          return;
-        }
+        // Gate login + Premium (1 invio gratuito)
+        if(!ensurePayrollCanUpload({ toast:true, openBilling:true })) return;
 
         // reset (così ogni upload riparte pulito)
         try{ ji(); }catch(_e){}
@@ -4517,15 +4719,25 @@ const payrollDirAutofill = () => {
           return;
         }
 
+        // Gate Premium: 1 invio gratuito
+        if(!ensurePayrollCanUpload({ toast:true, openBilling:true })){
+          try{
+            N.payroll.admin.files = [];
+            Bi();
+          }catch(_e){}
+          try{ if(n) n.value = ""; }catch(_e){}
+          return;
+        }
+
         // Apri la modale SOLO dopo la selezione (niente modale intermedia con un altro bottone "carica")
         try{ Di("extracting"); }catch(_e){}
         try{ toggleAdminModal(true, "adminArea"); }catch(_e){}
 
         Vi();
       };
-      t && (["dragover", "dragenter"].forEach(e => t.addEventListener(e, e => { e.preventDefault(), t.classList.add("drag") })), ["dragleave", "drop"].forEach(e => t.addEventListener(e, e => { e.preventDefault(), t.classList.remove("drag") })), t.addEventListener("drop", e => { e.preventDefault(), e.dataTransfer?.files?.length && o(e.dataTransfer.files) }), t.addEventListener("click", e => { if(e?.target?.closest && e.target.closest(".uploadActions")) return; if(!N.user || N.user.isAnonymous){ try{ goToAuth("Accedi per caricare i PDF."); }catch(_e){} return; } n?.click() }));
+      t && (["dragover", "dragenter"].forEach(e => t.addEventListener(e, e => { e.preventDefault(), t.classList.add("drag") })), ["dragleave", "drop"].forEach(e => t.addEventListener(e, e => { e.preventDefault(), t.classList.remove("drag") })), t.addEventListener("drop", e => { e.preventDefault(), e.dataTransfer?.files?.length && o(e.dataTransfer.files) }), t.addEventListener("click", e => { if(e?.target?.closest && e.target.closest(".uploadActions")) return; if(!ensurePayrollCanUpload({ toast:true, openBilling:true })) return; n?.click() }));
       n?.addEventListener("change", () => o(n.files));
-      U("btnPayrollUpload")?.addEventListener("click", () => { const f = N.payroll.admin.files?.[0]; if (!f) { n?.click(); return; } Vi(); });
+      U("btnPayrollUpload")?.addEventListener("click", () => { if(!ensurePayrollCanUpload({ toast:true, openBilling:true })) return; const f = N.payroll.admin.files?.[0]; if (!f) { n?.click(); return; } Vi(); });
       U("btnPayrollRetry")?.addEventListener("click", () => Vi());
       U("btnPayrollReset")?.addEventListener("click", () => ji());
       U("btnPayrollReset2")?.addEventListener("click", () => ji());
@@ -5605,6 +5817,10 @@ function buildSafePdfName(base){
           N.payroll.userView = N.payroll.userView || {};
           N.payroll.userView.emailLower = N.user?.emailLower || N.payroll.userView.emailLower || "";
         }catch(_e){}
+        // Entitlements (Premium / prova gratuita): sync da localStorage + async da server
+        try{ readLocalPayrollEntitlements(); }catch(_e){}
+        try{ updateAuthUI(); }catch(_e){}
+        try{ loadPayrollEntitlementsFromServer(); }catch(_e){}
         try{ Oi(); }catch(_e){}
         try{ Fi(); }catch(_e){}
         try{ startPayrollUserDocsWatch(); }catch(_e){}
@@ -5652,14 +5868,36 @@ function buildSafePdfName(base){
 
     async function initFirebase(){
       try{
-        const [{ initializeApp }, authMod, fsMod, storageMod, appCheckMod] = await Promise.all([
-          import("https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js"),
-          import("https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js"),
-          import("https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js"),
-          import("https://www.gstatic.com/firebasejs/12.7.0/firebase-storage.js"),
-          import("https://www.gstatic.com/firebasejs/12.7.0/firebase-app-check.js")
-        ]);
-        const app = initializeApp(firebaseConfig);
+                // Firebase SDK loader con fallback CDN (utile se www.gstatic.com è bloccato da rete/adblock)
+        const FIREBASE_VER = "12.7.0";
+        const cdnAttempts = [
+          { name: "gstatic", base: "https://www.gstatic.com/firebasejs/" + FIREBASE_VER + "/" },
+          { name: "jsdelivr", base: "https://cdn.jsdelivr.net/npm/firebase@" + FIREBASE_VER + "/" },
+          { name: "unpkg", base: "https://unpkg.com/firebase@" + FIREBASE_VER + "/" }
+        ];
+        let mods = null;
+        let loadedFrom = "";
+        let lastErr = null;
+        for(const a of cdnAttempts){
+          try{
+            mods = await Promise.all([
+              import(a.base + "firebase-app.js"),
+              import(a.base + "firebase-auth.js"),
+              import(a.base + "firebase-firestore.js"),
+              import(a.base + "firebase-storage.js"),
+              import(a.base + "firebase-app-check.js")
+            ]);
+            loadedFrom = a.name;
+            break;
+          }catch(err){
+            lastErr = err;
+            console.warn("Firebase CDN load failed:", a.name, err);
+          }
+        }
+        if(!mods) throw lastErr || new Error("Firebase SDK non disponibile");
+        const [{ initializeApp }, authMod, fsMod, storageMod, appCheckMod] = mods;
+        try{ console.info("✅ Firebase SDK loaded from", loadedFrom); }catch(_e){}
+const app = initializeApp(firebaseConfig);
         // --- Firebase App Check (reCAPTCHA v3) ---
         let appCheck = null;
         try{
@@ -5744,20 +5982,74 @@ function buildSafePdfName(base){
         const __ua = String(navigator.userAgent || "").toLowerCase();
         const __isIOS = /iphone|ipad|ipod/.test(__ua) || (navigator.platform==="MacIntel" && (navigator.maxTouchPoints||0) > 1);
         const __isStandalone = (window.matchMedia && window.matchMedia("(display-mode: standalone)").matches) || (navigator.standalone === true);
-        const __preferRedirect = (__isIOS && __isStandalone);
+        const __preferRedirect = (__isIOS);
+
+                function describeAuthError(err){
+          try{
+            const code = String(err?.code || "");
+            const msg = String(err?.message || "");
+            const host = (typeof location !== "undefined" && location.hostname) ? location.hostname : "";
+            if(code === "auth/unauthorized-domain"){
+              return {
+                title: "Dominio non autorizzato",
+                body: host
+                  ? `In Firebase Console → Authentication → Settings → Authorized domains aggiungi: ${host}.`
+                  : "Dominio non autorizzato in Firebase Auth."
+              };
+            }
+            if(code === "auth/popup-blocked"){
+              return { title: "Popup bloccato", body: "Il browser ha bloccato il popup. Riprova o usa il login tramite redirect." };
+            }
+            if(code === "auth/popup-closed-by-user"){
+              return { title: "Accesso annullato", body: "Hai chiuso il popup. Riprova quando vuoi." };
+            }
+            if(code === "auth/cancelled-popup-request"){
+              return { title: "Accesso annullato", body: "Richiesta annullata. Riprova." };
+            }
+            if(code){
+              return { title: "Accesso non riuscito", body: `${code}${msg ? " · " + msg : ""}` };
+            }
+            return { title: "Accesso non riuscito", body: msg || "Operazione non completata." };
+          }catch(_e){
+            return { title: "Accesso non riuscito", body: "Operazione non completata." };
+          }
+        }
 
         async function signInWithGoogle(){
           try{
             // Best-effort: persistenza (aiuta a mantenere la sessione tra pagine/refresh)
             try{ await setBestAuthPersistence(authMod, auth); }catch(_e){}
 
-            // Redirect SEMPRE: evita warning/errori COOP legati ai popup OAuth su alcuni browser/hosting.
-            try{ markAuthInflight("Accedi con Google", "login"); }catch(_e){}
+            // Desktop: prova popup (più affidabile in alcuni hosting). iOS PWA/standalone: preferisci redirect.
+            const preferRedirect = !!__preferRedirect;
+
+            if(!preferRedirect){
+              try{
+                try{ markAuthInflight("Accedi con Google", "login_popup"); }catch(_e){}
+                await authMod.signInWithPopup(auth, googleProvider);
+                return;
+              }catch(err){
+                const code = String(err?.code || "");
+                // Se l'utente chiude il popup, non forzare redirect.
+                if(code === "auth/popup-closed-by-user"){
+                  try{ clearAuthInflight(); }catch(_e){}
+                  const d = describeAuthError(err);
+                  showToast(d.title, d.body, 2600);
+                  return;
+                }
+                // Fallback a redirect (popup bloccato / ambiente non supportato / COOP warning, ecc.)
+                console.warn("google popup fallback → redirect", err);
+              }
+            }
+
+            try{ markAuthInflight("Accedi con Google", "login_redirect"); }catch(_e){}
             await authMod.signInWithRedirect(auth, googleProvider);
             return;
           }catch(err){
             console.warn("google login", err);
-            showToast("Accesso non riuscito", err?.message || String(err));
+            try{ clearAuthInflight(); }catch(_e){}
+            const d = describeAuthError(err);
+            showToast(d.title, d.body, 5200);
           }
         }
 
@@ -5791,8 +6083,17 @@ function buildSafePdfName(base){
           });
         }catch(_e){}
 
-        // Best-effort: gestisci eventuali errori del redirect flow
-        try{ await authMod.getRedirectResult(auth); }catch(_e){}
+        // Redirect flow: se rientri dal login, intercetta errori (evita loop "silenziosi")
+        try{
+          await authMod.getRedirectResult(auth);
+        }catch(err){
+          console.warn("redirect result", err);
+          try{ clearAuthInflight(); }catch(_e){}
+          try{
+            const d = (typeof describeAuthError === "function") ? describeAuthError(err) : { title:"Accesso non riuscito", body: (err?.message || String(err)) };
+            showToast(d.title, d.body, 5200);
+          }catch(_e){}
+        }
 
         // Accesso anonimo DISATTIVATO: se non c'è sessione, resta signed-out e chiedi login Google.
 // Role resolution (admin + whitelist) — evita query non autorizzate
@@ -5930,11 +6231,21 @@ function buildSafePdfName(base){
               isAnonymous: !!user.isAnonymous,
               displayName: (user.isAnonymous ? "Ospite" : (user.displayName || user.email || "Utente")),
               isAdmin: false,
-              isWhitelisted: null
+              isWhitelisted: null,
+              isPremium: false,
+              payrollFreeUsed: false,
+              payrollUsageLoaded: false
             };
             try{ clearRestoreTimeout(); }catch(_e){}
             try{ markAuthOk(user.email || ""); }catch(_e){}
             state.authGateState = "signed_in";
+            // Premium gate: bootstrap rapido da localStorage (evita flicker)
+            try{
+              const used = localStorage.getItem("ilovepaghe_payroll_free_used_v1")==="1";
+              if(used) state.user.payrollFreeUsed = true;
+              const prem = localStorage.getItem("ilovepaghe_premium_override_v1")==="1";
+              if(prem) state.user.isPremium = true;
+            }catch(_e){}
             updateAuthUI();
             await resolveUserRole(user);
             updateAuthUI();
