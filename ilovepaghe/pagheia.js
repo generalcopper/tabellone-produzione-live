@@ -4620,7 +4620,7 @@ const payrollDirAutofill = () => {
           try{
             if(key && nextNorm && isValidEmail(nextNorm)){
               const row = (N.payroll?.admin?.groupedRows || []).find(r=>r.key===key);
-              if(row) { row.email = nextNorm; persistRowToDirectory(row); }
+              if(row) { row.email = nextNorm; persistRowToDirectory(row, { prevEmail: prevNorm }); }
             }
           }catch(_e){}
         }catch(err){
@@ -4772,43 +4772,111 @@ const payrollDirAutofill = () => {
           Pi();
         });
       }
-      async function persistRowToDirectory(row){
+      async function persistRowToDirectory(row, opts = {}) {
         // Salva l'email del dipendente in Firestore (payrollDirectory) così viene ricordata ai prossimi accessi.
+        // Richiesta: se l'email viene aggiornata, deve aggiornarsi subito anche su Firebase (evita duplicati).
         if(!(row && N.firebase?.ok && N.user)) return;
         if(N.payroll?.admin?.saveEmailsForNext === false) return;
 
         const em = normalizeEmail(row.email);
         if(!isValidEmail(em)) return;
 
+        // Fallback locale (utile se i permessi Firestore vengono negati)
+        try{ payrollCacheEmailForNext(row, em); }catch(_e){}
+
+        const name = String(row?.displayName || "").trim() || String(row?.fiscalCode || "").trim() || em;
+        const parts = name.split(/\s+/).filter(Boolean);
+        const firstName = parts[0] || "";
+        const lastName = parts.slice(1).join(" ");
+        const _fc = normalizeFiscalCode(row?.fiscalCode || "");
+        const fiscalCode = (_fc && _fc.length===16) ? _fc : "";
+        const fullNameNorm = normalizeNameStrict(name || fiscalCode || em);
+
+        const payload = {
+          emailLower: em,
+          fiscalCode,
+          firstName,
+          lastName,
+          displayName: name,
+          fullNameNorm,
+          enabled: true,
+          updatedAt: N.firebase.api.serverTimestamp(),
+          updatedBy: (N.user?.email || "").toLowerCase(),
+          id: em
+        };
+
+        const prevEmail = normalizeEmail(opts?.prevEmail || opts?.prevEmailLower || "");
+        const api = N.firebase.api;
+        const db = N.firebase.db;
+
+        // Se stiamo "cambiando" email, proviamo a rinominare il record evitando duplicati.
+        // Regola di sicurezza: eliminiamo il vecchio doc SOLO se siamo confident che sia lo stesso dipendente
+        // (match per codice fiscale oppure nome normalizzato).
+        let oldDocId = "";
         try{
-          // Fallback locale (utile se i permessi Firestore vengono negati)
-          try{ payrollCacheEmailForNext(row, em); }catch(_e){}
+          const entries = (N.payroll?.directory?.entries || []);
 
-          const name = String(row?.displayName || "").trim() || String(row?.fiscalCode || "").trim() || em;
-          const parts = name.split(/\s+/).filter(Boolean);
-          const firstName = parts[0] || "";
-          const lastName = parts.slice(1).join(" ");
-          const _fc = normalizeFiscalCode(row?.fiscalCode || "");
-          const fiscalCode = (_fc && _fc.length===16) ? _fc : "";
+          // 1) Match forte per codice fiscale (preferibile)
+          if(fiscalCode){
+            const hit = entries.find(e => normalizeFiscalCode(e?.fiscalCode || "") === fiscalCode);
+            const id = hit ? normalizeEmail(hit?.emailLower || hit?.email || hit?.id || "") : "";
+            if(id && id !== em) oldDocId = id;
+          }
 
-          const payload = {
-            emailLower: em,
-            fiscalCode,
-            firstName,
-            lastName,
-            displayName: name,
-            fullNameNorm: normalizeNameStrict(name || fiscalCode || em),
-            enabled: true,
-            updatedAt: N.firebase.api.serverTimestamp(),
-            updatedBy: (N.user?.email || "").toLowerCase(),
-            id: em
-          };
+          // 2) Fallback: usa l'email precedente solo se coincide con lo stesso dipendente (FC o nome)
+          if(!oldDocId && prevEmail && prevEmail !== em){
+            const hit2 = entries.find(e => normalizeEmail(e?.emailLower || e?.email || e?.id || "") === prevEmail);
+            if(hit2){
+              const fc2 = normalizeFiscalCode(hit2?.fiscalCode || "");
+              const nm2 = normalizeNameStrict(hit2?.displayName || hit2?.fullName || "");
+              const confident = (fiscalCode && fc2 === fiscalCode) || (fullNameNorm && nm2 === fullNameNorm);
+              if(confident) oldDocId = prevEmail;
+            }
+          }
+        }catch(_e){}
 
-          await N.firebase.api.setDoc(
-            N.firebase.api.doc(N.firebase.db, COL_PAYROLL_DIRECTORY, em),
-            payload,
-            { merge:true }
-          );
+        try{
+          // Upsert nuovo record (immediato)
+          await api.setDoc(api.doc(db, COL_PAYROLL_DIRECTORY, em), payload, { merge:true });
+
+          // Cleanup vecchio record (best-effort, solo se confident)
+          if(oldDocId && oldDocId !== em){
+            try{
+              const oldRef = api.doc(db, COL_PAYROLL_DIRECTORY, oldDocId);
+              const oldSnap = await api.getDoc(oldRef);
+              if(oldSnap && oldSnap.exists()){
+                const d = oldSnap.data() || {};
+                const oldFc = normalizeFiscalCode(d?.fiscalCode || "");
+                const oldNm = normalizeNameStrict(d?.displayName || d?.fullName || "");
+                const confident2 = (fiscalCode && oldFc === fiscalCode) || (fullNameNorm && oldNm === fullNameNorm);
+                if(confident2){
+                  await api.deleteDoc(oldRef);
+                }
+              }
+            }catch(err2){
+              console.warn("persistRowToDirectory cleanup", err2);
+            }
+          }
+
+          // Aggiorna subito la cache in memoria (così il match usa la mail nuova anche prima del realtime update)
+          try{
+            const dir = N.payroll?.directory;
+            if(dir && Array.isArray(dir.entries)){
+              const normId = (e)=> normalizeEmail(e?.emailLower || e?.email || e?.id || "");
+              if(oldDocId){
+                dir.entries = dir.entries.filter(e => normId(e) !== oldDocId);
+              }
+              const existing = dir.entries.find(e => normId(e) === em);
+              if(existing){
+                Object.assign(existing, payload);
+                existing.id = em;
+                existing.emailLower = em;
+              }else{
+                dir.entries.push({ ...payload, id: em, emailLower: em });
+                dir.entries.sort((a,b)=> (a.displayName||a.emailLower||"").localeCompare(b.displayName||b.emailLower||""));
+              }
+            }
+          }catch(_e){}
         }catch(err){
           console.warn("persistRowToDirectory", err);
           // Se Firestore fallisce, abbiamo comunque salvato localmente sopra
