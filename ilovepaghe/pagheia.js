@@ -855,15 +855,55 @@ function toggleSendLogModal(show){
           try{ localStorage.setItem(LS_PAYROLL_FREE_USED, "1"); }catch(_e){}
           try{ updateAuthUI(); }catch(_e){}
 
+          // Prefer backend write (Admin SDK) to prevent incognito/new-device bypass.
+          try{
+            const base = getBillingBase();
+            if(base && N.firebase?.auth){
+              const endpoint = base.replace(/\/$/,"") + "/mark-trial-used";
+              const u = N.firebase.auth.currentUser;
+              if(u && !u.isAnonymous){
+                let tok = "";
+                try{ tok = await u.getIdToken(); }catch(_e){}
+                if(tok){
+                  const headers = { "Content-Type":"application/json", "Authorization":"Bearer " + tok };
+
+                  // App Check token (anti-abuso) — opzionale
+                  try{
+                    const ac = N.firebase?.appCheck;
+                    const acApi = N.firebase?.appCheckApi;
+                    if(ac && acApi && typeof acApi.getToken === "function"){
+                      const resp = await acApi.getToken(ac, /* forceRefresh= */ false);
+                      if(resp && resp.token) headers["X-Firebase-AppCheck"] = resp.token;
+                    }
+                  }catch(_e){}
+
+                  const r = await fetch(endpoint, {
+                    method: "POST",
+                    headers,
+                    body: JSON.stringify({ reason: String(reason||"") })
+                  });
+                  if(r && r.ok) return;
+                  throw new Error("mark_trial_backend_http_" + (r?.status || "0"));
+                }
+              }
+            }
+          }catch(err){
+            console.warn("mark trial used (backend)", err);
+          }
+
+          // Fallback (best-effort): try to write on Firestore if rules allow it.
           if(!(N.firebase?.ok)) return;
           const api = N.firebase.api, db = N.firebase.db;
-          const docId = N.user.uid || N.user.emailLower || "";
-          if(!docId) return;
+          const uid = N.user.uid || "";
+          const emailLower = N.user.emailLower || (N.user.email||"").toLowerCase();
+          const ids = [];
+          if(uid) ids.push(uid);
+          if(emailLower && !ids.includes(emailLower)) ids.push(emailLower);
+          if(!ids.length) return;
 
           const payload = {
-            uid: N.user.uid || "",
-            emailLower: N.user.emailLower || (N.user.email||"").toLowerCase(),
-            plan: "free",
+            uid: uid,
+            emailLower: emailLower,
             trialUsed: true,
             freeSendsUsed: PAYROLL_FREE_SEND_LIMIT,
             lastReason: String(reason||""),
@@ -872,12 +912,10 @@ function toggleSendLogModal(show){
             updatedAt: api.serverTimestamp(),
             updatedAtClient: Date.now()
           };
-          try{
-            await api.setDoc(api.doc(db, COL_PAYROLL_USAGE, docId), payload, { merge:true });
-          }catch(err){
-            if(err?.code !== "permission-denied"){
-              console.warn("payroll usage write", err);
-            }
+
+          for(const id of ids){
+            try{ await api.setDoc(api.doc(db, COL_PAYROLL_USAGE, id), payload, { merge:true }); }
+            catch(err){ if(err?.code !== "permission-denied") console.warn("payroll usage write", err); }
           }
         }catch(_e){}
       }
