@@ -1,102 +1,3 @@
-// merged.js — iLovePaghe (pagheia + dashboard) — 2026-01-28
-// NOTE: File generato automaticamente: pagheia.js + dashboard.js + bridge di navigazione.
-// Caricato come ES module.
-
-(() => {
-  const APP_ID = "pagheiaPage";
-  const DASH_ID = "dashPage";
-  const ALLOWED_DASH_VIEWS = ["profile","plans","settings"];
-
-  const byId = (id) => document.getElementById(id);
-
-  function closeProfileDropdownDOM(){
-    try{
-      const dd = byId("profileDropdown");
-      const pill = byId("pillAuth");
-      if(dd){
-        dd.setAttribute("aria-hidden","true");
-        try{ dd.setAttribute("inert",""); }catch(_e){}
-      }
-      if(pill){
-        try{ pill.setAttribute("aria-expanded","false"); }catch(_e){}
-      }
-    }catch(_e){}
-  }
-
-  function showApp(){
-    const app = byId(APP_ID);
-    const dash = byId(DASH_ID);
-    if(app) app.style.display = "";
-    if(dash){
-      dash.style.display = "none";
-      try{ dash.setAttribute("aria-hidden","true"); }catch(_e){}
-    }
-    try{ document.body.classList.remove("mode-dashboard"); }catch(_e){}
-  }
-
-  function showDashboard(view){
-    const app = byId(APP_ID);
-    const dash = byId(DASH_ID);
-
-    if(app) app.style.display = "none";
-    if(dash){
-      dash.style.display = "";
-      try{ dash.setAttribute("aria-hidden","false"); }catch(_e){}
-    }
-    try{ document.body.classList.add("mode-dashboard"); }catch(_e){}
-
-    // Chiudi la tendina profilo (se aperta)
-    closeProfileDropdownDOM();
-
-    // Imposta view dashboard via hash
-    try{
-      const v = String(view || "").replace("#","").trim();
-      if(v && ALLOWED_DASH_VIEWS.includes(v)){
-        location.hash = v;
-      }else{
-        const h = (location.hash || "").replace("#","").trim();
-        if(!ALLOWED_DASH_VIEWS.includes(h)) location.hash = "profile";
-      }
-    }catch(_e){}
-
-    // Scroll top (best effort)
-    try{ window.scrollTo(0,0); }catch(_e){}
-  }
-
-  // Esponiamo funzioni per l'altra parte (dashboard)
-  globalThis.__ILOVEPAGHE_SHOW_APP = showApp;
-  globalThis.__ILOVEPAGHE_SHOW_DASH = showDashboard;
-
-  // Intercetta “Apri dashboard” (prima che pagheia.js provi a navigare su ./dashboard.html)
-  document.addEventListener("click", (ev) => {
-    try{
-      const btn = ev?.target?.closest?.("#btnProfileDashboard");
-      if(!btn) return;
-
-      ev.preventDefault();
-      ev.stopPropagation();
-      if(ev.stopImmediatePropagation) ev.stopImmediatePropagation();
-
-      showDashboard("profile");
-    }catch(_e){}
-  }, true);
-
-  // Avvio: se vuoi aprire direttamente la dashboard, usa ?view=dashboard oppure ?page=dashboard o ?dash=1
-  try{
-    const p = new URLSearchParams(location.search || "");
-    const wantDash =
-      p.get("view") === "dashboard" ||
-      p.get("page") === "dashboard" ||
-      p.get("dash") === "1";
-
-    if(wantDash) showDashboard();
-    else showApp();
-  }catch(_e){
-    showApp();
-  }
-})();
-
-
     const firebaseConfig = {
       apiKey: "AIzaSyD_2Eb6ni7E08hUbEkozP85LzyfesutO6M",
       authDomain: "ilovepaghe-ludo-2026.firebaseapp.com",
@@ -541,6 +442,7 @@ updateGreetingUI();
 
       try{ bindProfileDropdown(); }catch(_e){}
       try{ syncProfileDropdownUI(); }catch(_e){}
+      try{ syncDashboardUI(); }catch(_e){}
     }
 
 
@@ -1232,6 +1134,47 @@ const LS_PAYROLL_FREE_USED = "ilovepaghe_payroll_free_used_v1";
           }catch(_e){}
         }catch(_e){}
       }
+      // Preferenze utente (Firestore): salva impostazioni dashboard → account
+      // Attualmente usiamo questa preferenza per: "Ricorda le email dei dipendenti" (saveEmailsForNext).
+      async function persistUserPrefsSaveEmailsToFirestore(nextVal){
+        const on = !!nextVal;
+
+        // 1) Aggiorna subito localStorage + state (UI reattiva)
+        try{ localStorage.setItem("payroll_save_emails_v1", on ? "1" : "0"); }catch(_e){}
+        try{
+          N.payroll = N.payroll || {};
+          N.payroll.admin = N.payroll.admin || {};
+          N.payroll.admin.saveEmailsForNext = on;
+        }catch(_e){}
+        // Se la UI del match menu è già montata, allineala
+        try{
+          const t = U("payrollSaveEmailsToggle");
+          if(t) t.checked = on;
+        }catch(_e){}
+
+        // 2) Firestore best-effort (solo se autenticato)
+        try{
+          if(!(N.firebase?.ok && N.user && !N.user.isAnonymous)) return { ok:false, stored:"local" };
+          const api = N.firebase.api, db = N.firebase.db;
+          const uid = String(N.user.uid || "").trim();
+          if(!uid) return { ok:false, stored:"local" };
+
+          const ref = api.doc(db, COL_USER_PREFS, uid);
+          const payload = {
+            saveEmailsForNext: on,
+            updatedAt: api.serverTimestamp ? api.serverTimestamp() : null,
+            updatedAtClient: Date.now()
+          };
+          await api.setDoc(ref, payload, { merge:true });
+          return { ok:true, stored:"firestore" };
+        }catch(err){
+          // fallback: resta salvato localmente
+          console.warn("persistUserPrefsSaveEmailsToFirestore failed", err);
+          return { ok:false, stored:"local", error: err };
+        }
+      }
+
+
 
 
       // Prova a leggere entitlements da Custom Claims (se presenti).
@@ -7124,6 +7067,9 @@ function buildSafePdfName(base){
           try{ await syncPayrollEntitlementsFromIdToken(!!force); }catch(_e){}
           try{ await loadPayrollEntitlementsFromServer(!!force); }catch(_e){}
         },
+        // Preferenze dashboard (Firestore)
+        syncUserPrefsSaveEmailsFromFirestore,
+        persistUserPrefsSaveEmailsToFirestore,
         openUser: ()=>{ try{ scrollToSection("userArea"); }catch(_e){} },
         openAdmin: ()=>{ try{ openAdminModalFlow(); }catch(_e){} },
         reset: ()=>{ try{ ji(); }catch(_e){} },
@@ -7779,7 +7725,7 @@ document.getElementById("btnSecurityClose")?.addEventListener("click", ()=>toggl
             }catch(_e){}
 
             // Preferenze utente (dashboard): sync da Firestore
-            try{ await syncUserPrefsSaveEmailsFromFirestore(); }catch(_e){}
+            try{ if(typeof Payroll?.syncUserPrefsSaveEmailsFromFirestore === "function") await Payroll.syncUserPrefsSaveEmailsFromFirestore(); }catch(_e){}
 
             updateAuthUI();
             await resolveUserRole(user);
@@ -7829,6 +7775,9 @@ document.getElementById("btnSecurityClose")?.addEventListener("click", ()=>toggl
       "cookie-policy.html",
       "sicurezza-trasparenza.html"
     ];
+    const DASHBOARD_FILES = [
+      "dashboard.html"
+    ];
 
     function _fileNameFromPathname(pathname){
       try{
@@ -7857,6 +7806,11 @@ document.getElementById("btnSecurityClose")?.addEventListener("click", ()=>toggl
     function isLegalFile(file){
       const f = String(file || "").toLowerCase();
       return LEGAL_FILES.includes(f);
+    }
+
+    function isDashboardFile(file){
+      const f = String(file || "").toLowerCase();
+      return DASHBOARD_FILES.includes(f);
     }
 
     function getLegalTemplateId(file){
@@ -7940,22 +7894,406 @@ document.getElementById("btnSecurityClose")?.addEventListener("click", ()=>toggl
       }catch(_e){}
     }
 
+    // --------------------
+    // Dashboard SPA view (stesso tema di Pagheia, senza reload)
+    // --------------------
+    function getDashboardTabFromHash(){
+      try{
+        const h = String(location.hash || "").replace("#","").trim().toLowerCase();
+        if(!h) return "profile";
+        if(["plan","piano","piani","plans"].includes(h)) return "plans";
+        if(["settings","impostazioni","preferenze","prefs"].includes(h)) return "settings";
+        if(["profile","profilo","account"].includes(h)) return "profile";
+      }catch(_e){}
+      return "profile";
+    }
+
+    function setDashboardTab(tab, opts={}){
+      const t = String(tab || "profile").toLowerCase();
+      const safe = (t === "plans" || t === "settings" || t === "profile") ? t : "profile";
+      const root = document.getElementById("dashboardView");
+      if(!root) return safe;
+
+      try{
+        root.querySelectorAll("[data-dash-tab]").forEach(btn=>{
+          const on = String(btn.getAttribute("data-dash-tab")||"") === safe;
+          btn.classList.toggle("active", on);
+          try{ btn.setAttribute("aria-selected", on ? "true" : "false"); }catch(_e){}
+        });
+      }catch(_e){}
+
+      try{
+        root.querySelectorAll("[data-dash-panel]").forEach(p=>{
+          const on = String(p.getAttribute("data-dash-panel")||"") === safe;
+          p.classList.toggle("active", on);
+          p.style.display = on ? "" : "none";
+          try{ p.setAttribute("aria-hidden", on ? "false" : "true"); }catch(_e){}
+        });
+      }catch(_e){}
+
+      const updateHash = (opts && opts.updateHash === false) ? false : true;
+      const replace = (opts && opts.replace === false) ? false : true;
+
+      if(updateHash){
+        try{
+          const u = new URL(location.href);
+          u.hash = safe;
+          if(replace) history.replaceState(history.state || {}, "", u.toString());
+          else history.pushState(history.state || {}, "", u.toString());
+        }catch(_e){
+          try{ location.hash = "#" + safe; }catch(_e2){}
+        }
+      }
+
+      return safe;
+    }
+
+    function _readSaveEmailsPref(){
+      // prefer state first
+      try{
+        const v = state?.payroll?.admin?.saveEmailsForNext;
+        if(typeof v === "boolean") return v;
+      }catch(_e){}
+      // localStorage fallback (default ON)
+      try{
+        const raw = localStorage.getItem("payroll_save_emails_v1");
+        if(raw === null || raw === undefined) return true;
+        return raw !== "0";
+      }catch(_e){}
+      return true;
+    }
+
+    // Mantiene la UI dashboard allineata allo stato attuale (auth, piano, preferenze)
+    function syncDashboardUI(){
+      const root = document.getElementById("dashboardView");
+      if(!root) return;
+
+      const u = state.user;
+      const isAuthed = !!(u && !u.isAnonymous);
+      const au = state.firebase?.auth?.currentUser;
+
+      const setText = (id, val)=>{
+        try{
+          const el = document.getElementById(id);
+          if(!el) return;
+          const out = (val === undefined || val === null || val === "") ? "—" : String(val);
+          el.textContent = out;
+        }catch(_e){}
+      };
+
+      setText("dash_name", isAuthed ? (u.displayName || u.email || "Utente") : "Accesso non attivo");
+      setText("dash_email", isAuthed ? String(u.email||"").toLowerCase() : "—");
+      setText("dash_role", isAuthed ? (u.isAdmin ? "Amministratore" : "Dipendente") : "—");
+      setText("dash_provider", isAuthed ? getAuthProviderLabel() : "—");
+      setText("dash_uid", isAuthed ? (u.uid || "—") : "—");
+
+      try{
+        const last = au?.metadata?.lastSignInTime || "";
+        setText("dash_last", (isAuthed && last) ? formatItDateTime(last) : "—");
+      }catch(_e){ setText("dash_last", "—"); }
+
+      try{
+        const cr = au?.metadata?.creationTime || "";
+        setText("dash_created", (isAuthed && cr) ? formatItDateTime(cr) : "—");
+      }catch(_e){ setText("dash_created", "—"); }
+
+      // Piano
+      const plan = computePlanUi();
+      setText("dash_planValue", plan.planValue || "—");
+      try{
+        const hint = document.getElementById("dash_planHint");
+        if(hint) hint.textContent = plan.hint || "";
+      }catch(_e){}
+      try{
+        const b = document.getElementById("dashPlanBadge");
+        if(b){
+          b.textContent = plan.badgeText || "—";
+          b.classList.remove("ok","warn","bad");
+          if(plan.badgeClass) b.classList.add(plan.badgeClass);
+        }
+      }catch(_e){}
+
+      // Bottone premium
+      try{
+        const btn = document.getElementById("btnDashPremium");
+        if(btn){
+          btn.textContent = plan.premiumBtnText || "Diventa Premium";
+          btn.disabled = !!plan.premiumBtnDisabled;
+        }
+      }catch(_e){}
+
+      // Refresh plan
+      try{
+        const btn = document.getElementById("btnDashRefreshPlan");
+        if(btn) btn.disabled = !(isAuthed && !!state.firebase?.ok);
+      }catch(_e){}
+
+      // Portal: solo per Premium
+      try{
+        const btn = document.getElementById("btnDashManagePlan");
+        if(btn){
+          const can = (isAuthed && !!u?.isPremium);
+          btn.disabled = !can;
+        }
+      }catch(_e){}
+
+      // Logout button visibile solo se autenticato
+      try{
+        const btn = document.getElementById("btnDashLogout");
+        if(btn) btn.style.display = isAuthed ? "" : "none";
+      }catch(_e){}
+
+      // Callout login (solo se non authed)
+      try{
+        const call = document.getElementById("dashLoginCallout");
+        if(call) call.style.display = isAuthed ? "none" : "";
+      }catch(_e){}
+
+      // Preferenze: Ricorda email dipendenti
+      try{
+        const tog = document.getElementById("dashSaveEmailsToggle");
+        if(tog){
+          const v = _readSaveEmailsPref();
+          tog.checked = (v !== false);
+          // impostazione account-level: se non autenticato disabilita
+          tog.disabled = !isAuthed;
+        }
+      }catch(_e){}
+      try{
+        const note = document.getElementById("dashSaveEmailsNote");
+        if(note){
+          if(!isAuthed){
+            note.textContent = "Accedi per gestire questa impostazione.";
+          }else{
+            note.textContent = _readSaveEmailsPref()
+              ? "Attivo: le email inserite vengono ricordate per i prossimi invii."
+              : "Disattivo: non memorizziamo automaticamente le email.";
+          }
+        }
+      }catch(_e){}
+    }
+
+    async function openCustomerPortal(returnUrl){
+      if(!(state && state.firebase && state.firebase.auth)) throw new Error("Servizio non pronto. Ricarica la pagina.");
+      const u = state.firebase.auth.currentUser;
+      if(!u || u.isAnonymous) throw new Error("Accedi per gestire il piano.");
+
+      const tok = await u.getIdToken(true);
+
+      const base = String(globalThis.PAGHEIA_BILLING_ENDPOINT || "").trim().replace(/\/+$/, "");
+      if(!base) throw new Error("Endpoint billing non configurato.");
+
+      const endpoint = base + "/create-portal-session";
+      const headers = { "Content-Type":"application/json", "Authorization":"Bearer " + tok };
+
+      // App Check (se presente)
+      try{
+        const ac = state.firebase?.appCheck;
+        const acApi = state.firebase?.appCheckApi;
+        if(ac && acApi && typeof acApi.getToken === "function"){
+          const resp = await acApi.getToken(ac, false);
+          if(resp && resp.token) headers["X-Firebase-AppCheck"] = resp.token;
+        }
+      }catch(_e){}
+
+      const res = await fetch(endpoint, { method:"POST", headers, body: JSON.stringify({ returnUrl: returnUrl || location.href }) });
+      if(!res.ok){
+        let t = "";
+        try{ t = await res.text(); }catch(_e){}
+        throw new Error("Billing error: " + res.status + (t ? " — " + t.slice(0,160) : ""));
+      }
+
+      const data = await res.json().catch(()=> ({}));
+      const url = data?.url || data?.portalUrl || data?.redirectUrl || "";
+      if(!url) throw new Error("Risposta billing non valida.");
+
+      try{ window.open(url, "_blank", "noopener,noreferrer"); }catch(_e){ location.href = url; }
+      return url;
+    }
+
+    function bindDashboardView(){
+      const root = document.getElementById("dashboardView");
+      if(!root || root.__bound) return;
+      root.__bound = true;
+
+      // Tabs
+      try{
+        root.querySelectorAll("[data-dash-tab]").forEach(btn=>{
+          if(btn.__bound) return;
+          btn.__bound = true;
+          btn.addEventListener("click", (ev)=>{
+            try{ ev.preventDefault(); }catch(_e){}
+            setDashboardTab(btn.getAttribute("data-dash-tab"), { updateHash:true, replace:true });
+            syncDashboardUI();
+          });
+        });
+      }catch(_e){}
+
+      // Quick nav
+      document.getElementById("btnDashGoPlans")?.addEventListener("click", (ev)=>{ try{ ev.preventDefault(); }catch(_e){} setDashboardTab("plans", { updateHash:true, replace:true }); });
+      document.getElementById("btnDashGoSettings")?.addEventListener("click", (ev)=>{ try{ ev.preventDefault(); }catch(_e){} setDashboardTab("settings", { updateHash:true, replace:true }); });
+
+      // Back to app
+      document.getElementById("btnDashBack")?.addEventListener("click", (ev)=>{
+        try{ ev.preventDefault(); }catch(_e){}
+        try{ navigateSoft("./pagheia.html"); }catch(_e){ try{ location.href = "./pagheia.html"; }catch(_e2){} }
+      });
+
+      // Security overlay
+      document.getElementById("btnDashSecurity")?.addEventListener("click", (ev)=>{
+        try{ ev.preventDefault(); }catch(_e){}
+        try{ toggleSecurityOverlay(true); }catch(_e){
+          try{ navigateSoft("./sicurezza-trasparenza.html"); }catch(_e2){ try{ location.href = "./sicurezza-trasparenza.html"; }catch(_e3){} }
+        }
+      });
+
+      // Logout
+      document.getElementById("btnDashLogout")?.addEventListener("click", async (ev)=>{
+        try{ ev.preventDefault(); }catch(_e){}
+        try{
+          const act = state.authActions || {};
+          if(typeof act.signOut === "function") await act.signOut();
+          else if(state.firebase?.authApi?.signOut) await state.firebase.authApi.signOut(state.firebase.auth);
+        }catch(err){
+          console.warn("dash logout", err);
+          try{ showToast("Errore", "Logout non riuscito.", 2400); }catch(_e){}
+        }
+      });
+
+      // Premium
+      document.getElementById("btnDashPremium")?.addEventListener("click", (ev)=>{
+        try{ ev.preventDefault(); }catch(_e){}
+        const plan = computePlanUi();
+        const u = state.user;
+        const isAuthed = !!(u && !u.isAnonymous);
+
+        if(!isAuthed || plan.premiumBtnMode === "login"){
+          try{ state.authUI?.resetEmailUi?.(); }catch(_e){}
+          try{ openAuthOverlay("Accedi per gestire il piano.", "email"); }catch(_e){ try{ goToAuth("Accedi per gestire il piano."); }catch(_e2){} }
+          return;
+        }
+
+        if(u?.isPremium || plan.premiumBtnMode === "premium"){
+          try{ showToast("Premium", "Premium già attivo.", 2000); }catch(_e){}
+          return;
+        }
+
+        if(u?.premiumSyncPending || plan.premiumBtnMode === "pending"){
+          try{ showToast("Premium", "Attivazione in corso…", 2200); }catch(_e){}
+          return;
+        }
+
+        try{ goToPremium("Per continuare, attiva l’abbonamento Premium."); }catch(_e){}
+      });
+
+      // Refresh plan
+      document.getElementById("btnDashRefreshPlan")?.addEventListener("click", async (ev)=>{
+        try{ ev.preventDefault(); }catch(_e){}
+        try{
+          if(!(state.user && !state.user.isAnonymous)) return;
+          try{
+            if(state.user){
+              state.user.payrollUsageLoaded = false;
+              state.user.payrollUsageLoading = false;
+              state.user.payrollUsageError = "";
+            }
+          }catch(_e){}
+          syncDashboardUI();
+          try{ showToast("Aggiornamento", "Verifico lo stato dell’abbonamento…", 1800); }catch(_e){}
+          try{
+            if(typeof Payroll?.refreshEntitlements === "function") await Payroll.refreshEntitlements(true);
+            else await state.firebase?.auth?.currentUser?.getIdTokenResult?.(true);
+          }catch(_e){}
+          try{ updateAuthUI(); }catch(_e){}
+          try{ syncDashboardUI(); }catch(_e){}
+        }catch(_e){}
+      });
+
+      // Manage plan (portal)
+      document.getElementById("btnDashManagePlan")?.addEventListener("click", async (ev)=>{
+        try{ ev.preventDefault(); }catch(_e){}
+        try{
+          await openCustomerPortal(location.href);
+        }catch(err){
+          console.warn("portal", err);
+          try{ showToast("Gestione piano", err?.message || "Funzione non disponibile.", 4200); }catch(_e){}
+        }
+      });
+
+      // Save emails toggle
+      document.getElementById("dashSaveEmailsToggle")?.addEventListener("change", async (ev)=>{
+        const tog = ev?.target;
+        const next = !!tog?.checked;
+        let res = null;
+        try{
+          if(typeof Payroll?.persistUserPrefsSaveEmailsToFirestore === "function") res = await Payroll.persistUserPrefsSaveEmailsToFirestore(next);
+          else{
+            // fallback locale
+            try{ localStorage.setItem("payroll_save_emails_v1", next ? "1" : "0"); }catch(_e){}
+            try{ state.payroll = state.payroll || {}; state.payroll.admin = state.payroll.admin || {}; state.payroll.admin.saveEmailsForNext = next; }catch(_e){}
+            res = { ok:false, stored:"local" };
+          }
+        }catch(err){
+          console.warn("saveEmails pref", err);
+          res = { ok:false, stored:"local", error: err };
+        }
+        syncDashboardUI();
+        try{
+          if(res?.ok) showToast("Impostazioni", "Salvato nel tuo account.", 2000);
+          else showToast("Impostazioni", "Salvato su questo dispositivo.", 2000);
+        }catch(_e){}
+      });
+
+      // hash → tab (deep link)
+      window.addEventListener("hashchange", ()=>{
+        try{
+          const file = getCurrentFileName();
+          if(!isDashboardFile(file)) return;
+          setDashboardTab(getDashboardTabFromHash(), { updateHash:false });
+        }catch(_e){}
+      }, { passive:true });
+    }
+
+    function renderDashboard(){
+      try{
+        bindDashboardView();
+        syncDashboardUI();
+        setDashboardTab(getDashboardTabFromHash(), { updateHash:false });
+        try{ document.title = "Dashboard · iLovePaghe"; }catch(_e){}
+        try{ window.scrollTo({ top:0, left:0, behavior:"auto" }); }catch(_e){ try{ window.scrollTo(0,0); }catch(_e2){} }
+      }catch(_e){}
+    }
+
+
     function applyRouteFromLocation(){
       const file = getCurrentFileName();
       const legal = isLegalFile(file);
+      const dash = isDashboardFile(file);
+
+      // Chiudi eventuale tendina profilo quando cambi route
+      try{ closeProfileDropdown(); }catch(_e){}
+
       try{ document.body.classList.toggle("route-legal", !!legal); }catch(_e){}
+      try{ document.body.classList.toggle("route-dashboard", !!dash); }catch(_e){}
 
       const appView = document.getElementById("appView");
       const legalView = document.getElementById("legalView");
+      const dashView = document.getElementById("dashboardView");
 
-      if(appView) appView.style.display = legal ? "none" : "";
+      if(appView) appView.style.display = (legal || dash) ? "none" : "";
       if(legalView){
         legalView.style.display = legal ? "" : "none";
         try{ legalView.setAttribute("aria-hidden", legal ? "false" : "true"); }catch(_e){}
       }
+      if(dashView){
+        dashView.style.display = dash ? "" : "none";
+        try{ dashView.setAttribute("aria-hidden", dash ? "false" : "true"); }catch(_e){}
+      }
 
       if(legal){
         renderLegal(file);
+      }else if(dash){
+        renderDashboard();
       }else{
         try{ document.title = "iLovePaghe"; }catch(_e){}
       }
@@ -7978,7 +8316,7 @@ document.getElementById("btnSecurityClose")?.addEventListener("click", ()=>toggl
         if(url.origin !== location.origin) return false;
 
         const file = _fileNameFromPathname(url.pathname);
-        return isLegalFile(file) || isHomeFile(file);
+        return isLegalFile(file) || isDashboardFile(file) || isHomeFile(file);
       }catch(_e){
         return false;
       }
@@ -8020,558 +8358,3 @@ document.getElementById("btnSecurityClose")?.addEventListener("click", ()=>toggl
     }
 
     initLegalSoftNav();
-
-// dashboard.js — iLovePaghe (SPA dashboard)
-(() => {
-  const ROOT = document.getElementById("dashPage");
-  if(!ROOT) return;
-
-  function __dashCssEscape(v){
-    try{ return (window.CSS && CSS.escape) ? CSS.escape(String(v)) : String(v).replace(/[^a-zA-Z0-9_-]/g, "\$&"); }
-    catch(_e){ return String(v||""); }
-  }
-  const $ = (id) => ROOT.querySelector("#" + __dashCssEscape(id));
-
-// ===== Config Firebase (stesso progetto di pagheia.js) =====
-  const firebaseConfig = {
-    apiKey: "AIzaSyD_2Eb6ni7E08hUbEkozP85LzyfesutO6M",
-    authDomain: "ilovepaghe-ludo-2026.firebaseapp.com",
-    projectId: "ilovepaghe-ludo-2026",
-    storageBucket: "ilovepaghe-ludo-2026.firebasestorage.app",
-    messagingSenderId: "162609991629",
-    appId: "1:162609991629:web:5e4b367a928fe8e4823e84"
-  };
-
-  const APPCHECK_SITE_KEY = "6LcwcVUsAAAAAK4A6obrpGbGFHYGw3Wparj1626K"; // reCAPTCHA v3 site key (public)
-  const FIREBASE_VER = "12.7.0";
-  const CDN_BASES = [
-    { name: "gstatic", base: `https://www.gstatic.com/firebasejs/${FIREBASE_VER}/` },
-    { name: "jsdelivr", base: `https://cdn.jsdelivr.net/npm/firebase@${FIREBASE_VER}/` },
-    { name: "unpkg", base: `https://unpkg.com/firebase@${FIREBASE_VER}/` }
-  ];
-
-  // Billing (Stripe) — usa lo stesso override del progetto principale, se presente
-  const PAYROLL_PREMIUM_PRICE_LABEL = "19,90 €/mese";
-  const DEFAULT_BILLING_ENDPOINT = ""; // opzionale: puoi lasciarlo vuoto se setti globalThis.PAGHEIA_BILLING_ENDPOINT
-  const COL_PAYROLL_USAGE = "payrollUsage";
-  const COL_USER_PREFS = "userPrefs";
-  const LS_SAVE_EMAILS = "payroll_save_emails_v1"; // compatibilità con pagheia.js
-
-  function getBillingBase(){
-    try{
-      return String(
-        globalThis.PAGHEIA_BILLING_ENDPOINT ||
-        globalThis.PAGHEIA_BILLING_URL ||
-        globalThis.PAGHEIA_PREMIUM_URL ||
-        globalThis.BILLING_URL ||
-        DEFAULT_BILLING_ENDPOINT ||
-        ""
-      ).trim();
-    }catch(_e){ return (DEFAULT_BILLING_ENDPOINT || ""); }
-  }
-
-  // ===== UI helpers =====
-  let toastTimer = null;
-  function toast(msg, ms=2200){
-    const el = $("dashToast");
-    if(!el) return;
-    el.textContent = String(msg || "").trim() || "Ok";
-    el.setAttribute("aria-hidden", "false");
-    try{ clearTimeout(toastTimer); }catch(_e){}
-    toastTimer = setTimeout(() => {
-      el.setAttribute("aria-hidden", "true");
-    }, ms);
-  }
-
-  function setLoading(on){
-    const el = $("loading");
-    if(!el) return;
-    el.style.display = on ? "flex" : "none";
-  }
-
-  function fmtDate(iso){
-    try{
-      if(!iso) return "—";
-      const d = new Date(iso);
-      if(Number.isNaN(d.getTime())) return String(iso);
-      return d.toLocaleString("it-IT", { year:"numeric", month:"long", day:"2-digit", hour:"2-digit", minute:"2-digit" });
-    }catch(_e){ return "—"; }
-  }
-
-  function providerLabel(user){
-    try{
-      const p = (user?.providerData || []).map(x=>x?.providerId).filter(Boolean);
-      if(p.includes("google.com")) return "Google";
-      // Email link / password possono risultare "password"
-      if(p.includes("password")) return "Email";
-      if(p.length) return p[0];
-      return "—";
-    }catch(_e){ return "—"; }
-  }
-
-  // ===== SPA nav =====
-  function setView(view){
-    const views = ["profile","plans","settings"];
-    for(const v of views){
-      const sec = $(`view-${v}`);
-      if(sec) sec.setAttribute("aria-hidden", v === view ? "false" : "true");
-    }
-    const items = ROOT.querySelectorAll(".navItem");
-    items.forEach(btn => {
-      const is = btn?.getAttribute("data-view") === view;
-      if(is) btn.setAttribute("aria-current", "page");
-      else btn.removeAttribute("aria-current");
-    });
-    const title = $("pageTitle");
-    if(title){
-      title.textContent =
-        view === "profile" ? "Profilo" :
-        view === "plans" ? "Piani" :
-        view === "settings" ? "Impostazioni" : "Dashboard";
-    }
-
-    // Mobile: chiudi sidebar
-    closeSidebar();
-    try{ location.hash = view; }catch(_e){}
-  }
-
-  function openSidebar(){
-    const side = $("dashSide");
-    const back = $("sideBackdrop");
-    if(side) side.setAttribute("aria-hidden","false");
-    if(back) back.setAttribute("aria-hidden","false");
-  }
-  function closeSidebar(){
-    const side = $("dashSide");
-    const back = $("sideBackdrop");
-    // Su desktop la sidebar resta visibile: ma non fa male tenerla "aperta"
-    // Qui usiamo aria-hidden per la variante mobile.
-    if(window.matchMedia && window.matchMedia("(max-width: 920px)").matches){
-      if(side) side.setAttribute("aria-hidden","true");
-      if(back) back.setAttribute("aria-hidden","true");
-    }else{
-      if(side) side.setAttribute("aria-hidden","false");
-      if(back) back.setAttribute("aria-hidden","true");
-    }
-  }
-
-  // ===== Firebase loader =====
-  async function importWithFallback(file){
-    let lastErr = null;
-    for(const c of CDN_BASES){
-      try{
-        return await import(c.base + file);
-      }catch(err){
-        lastErr = err;
-      }
-    }
-    throw lastErr || new Error("Impossibile caricare Firebase.");
-  }
-
-  async function initFirebase(){
-    const appMod = await importWithFallback("firebase-app.js");
-    const authMod = await importWithFallback("firebase-auth.js");
-    const fsMod = await importWithFallback("firebase-firestore.js");
-
-    // App Check (best effort)
-    try{
-      const appCheckMod = await importWithFallback("firebase-app-check.js");
-      const { initializeAppCheck, ReCaptchaV3Provider } = appCheckMod;
-      // inizializziamo dopo createApp
-      var appCheckInit = { initializeAppCheck, ReCaptchaV3Provider };
-    }catch(_e){
-      var appCheckInit = null;
-    }
-
-    const { initializeApp } = appMod;
-    const { getAuth, onAuthStateChanged, signOut } = authMod;
-    const { getFirestore, doc, getDoc, setDoc } = fsMod;
-
-    const app = initializeApp(firebaseConfig);
-
-    try{
-      if(appCheckInit?.initializeAppCheck && appCheckInit?.ReCaptchaV3Provider){
-        appCheckInit.initializeAppCheck(app, {
-          provider: new appCheckInit.ReCaptchaV3Provider(APPCHECK_SITE_KEY),
-          isTokenAutoRefreshEnabled: true
-        });
-      }
-    }catch(_e){}
-
-    const auth = getAuth(app);
-    const db = getFirestore(app);
-
-    return {
-      app, auth, db,
-      api: { doc, getDoc, setDoc },
-      authMod: { onAuthStateChanged, signOut }
-    };
-  }
-
-  // ===== Data loaders =====
-  async function readPlanFromClaims(user, force=false){
-    try{
-      const res = await user.getIdTokenResult(!!force);
-      const c = res?.claims || {};
-      const plan = String(c.plan || c.tier || c.subscription || "").toLowerCase();
-      const isPremium = (c.isPremium === true) || (c.premium === true) || (plan === "premium" || plan === "pro" || plan === "plus");
-      return { isPremium, planFrom: "claims", rawPlan: plan || "" };
-    }catch(_e){
-      return { isPremium:false, planFrom:"claims", rawPlan:"" };
-    }
-  }
-
-  async function readPlanFromFirestore(env, uid){
-    try{
-      const { api, db } = env;
-      const ref = api.doc(db, COL_PAYROLL_USAGE, uid);
-      const snap = await api.getDoc(ref);
-      if(!snap || !snap.exists()) return { ok:true, exists:false };
-      const d = snap.data() || {};
-      const plan = String(d.plan || d.tier || d.subscription || "").toLowerCase();
-      const isPremium = (d.isPremium === true) || (plan === "premium" || plan === "pro" || plan === "plus");
-      return { ok:true, exists:true, isPremium, plan, raw:d };
-    }catch(err){
-      return { ok:false, err };
-    }
-  }
-
-  function applyPlanUI(planState){
-    const isPremium = !!planState?.isPremium;
-    const pending = !!planState?.pending;
-
-    const topBadge = $("topBadge");
-    const profileBadge = $("profileBadge");
-    const settingsBadge = $("settingsBadge");
-    const planBadge = $("planBadge");
-
-    const badgeText = pending ? "Verifica in corso" : (isPremium ? "Premium" : "Free");
-    const badgeClass = pending ? "pending" : (isPremium ? "premium" : "free");
-
-    [topBadge, profileBadge, settingsBadge, planBadge].forEach(el=>{
-      if(!el) return;
-      el.textContent = badgeText;
-      el.classList.remove("premium","free","pending");
-      el.classList.add(badgeClass);
-    });
-
-    const sidePlan = $("sideUserPlan");
-    if(sidePlan){
-      sidePlan.textContent = pending ? "Abbonamento: verifica in corso" : (isPremium ? "Abbonamento: Premium attivo" : "Abbonamento: Free");
-    }
-
-    const planStatus = $("planStatus");
-    const planDetails = $("planDetails");
-    const planNote = $("planNote");
-    if(planStatus) planStatus.textContent = pending ? "Verifica in corso…" : (isPremium ? "Premium attivo" : "Free");
-    if(planDetails){
-      if(pending) planDetails.textContent = "Stiamo aggiornando lo stato dopo il pagamento.";
-      else if(isPremium) planDetails.textContent = "Sbloccato invio illimitato · " + PAYROLL_PREMIUM_PRICE_LABEL;
-      else planDetails.textContent = "1 invio gratuito · poi Premium";
-    }
-    if(planNote){
-      planNote.textContent = isPremium
-        ? "Puoi gestire o annullare l’abbonamento in qualsiasi momento dal portale di pagamento."
-        : "Quando vuoi puoi passare a Premium e continuare subito, senza interruzioni.";
-    }
-
-    const dashBtnGoPremium = $("dashBtnGoPremium");
-    const btnManage = $("btnManagePlan");
-    if(dashBtnGoPremium) dashBtnGoPremium.style.display = (!isPremium && !pending) ? "" : "none";
-    if(btnManage) btnManage.style.display = isPremium ? "" : "none";
-  }
-
-  // ===== Billing actions =====
-  async function startPremiumCheckout(env, user){
-    const base = getBillingBase();
-    if(!base) throw new Error("Backend billing non configurato.");
-    const endpoint = base.replace(/\/$/,"") + "/create-checkout-session";
-    const tok = await user.getIdToken();
-    const here = location.href.split("#")[0];
-    const successUrl = here + "?premium=success#plans";
-    const cancelUrl = here + "#plans";
-
-    const resp = await fetch(endpoint, {
-      method:"POST",
-      headers:{
-        "Content-Type":"application/json",
-        "Authorization":"Bearer " + tok
-      },
-      body: JSON.stringify({ successUrl, cancelUrl })
-    });
-
-    const data = await resp.json().catch(()=> ({}));
-    if(!resp.ok || !data?.url) throw new Error(data?.error || "Impossibile avviare il checkout.");
-    location.href = data.url;
-  }
-
-  async function openCustomerPortal(env, user){
-    const base = getBillingBase();
-    if(!base) throw new Error("Backend billing non configurato.");
-    const endpoint = base.replace(/\/$/,"") + "/create-portal-session";
-    const tok = await user.getIdToken();
-    const returnUrl = location.href.split("?")[0] + "#plans";
-
-    const resp = await fetch(endpoint, {
-      method:"POST",
-      headers:{
-        "Content-Type":"application/json",
-        "Authorization":"Bearer " + tok
-      },
-      body: JSON.stringify({ returnUrl })
-    });
-
-    const data = await resp.json().catch(()=> ({}));
-    if(!resp.ok || !data?.url) throw new Error(data?.error || "Portale abbonamento non disponibile.");
-    window.open(data.url, "_blank", "noopener,noreferrer");
-  }
-
-  // ===== Prefs (save emails) =====
-  async function loadSaveEmailsPref(env, uid){
-    // Priority:
-    // 1) Firestore userPrefs/{uid}.saveEmailsForNext
-    // 2) localStorage payroll_save_emails_v1
-    // 3) default ON
-    let val = null;
-
-    try{
-      const ref = env.api.doc(env.db, COL_USER_PREFS, uid);
-      const snap = await env.api.getDoc(ref);
-      if(snap && snap.exists()){
-        const d = snap.data() || {};
-        if(typeof d.saveEmailsForNext === "boolean") val = !!d.saveEmailsForNext;
-      }
-    }catch(_e){}
-
-    if(typeof val !== "boolean"){
-      try{
-        const stored = localStorage.getItem(LS_SAVE_EMAILS);
-        if(stored === "0") val = false;
-        else if(stored === "1") val = true;
-      }catch(_e){}
-    }
-
-    if(typeof val !== "boolean") val = true;
-    return val;
-  }
-
-  async function persistSaveEmailsPref(env, uid, val){
-    // Sempre: localStorage (compatibilità immediata)
-    try{ localStorage.setItem(LS_SAVE_EMAILS, val ? "1" : "0"); }catch(_e){}
-
-    // Best effort: Firestore
-    try{
-      const ref = env.api.doc(env.db, COL_USER_PREFS, uid);
-      await env.api.setDoc(ref, { saveEmailsForNext: !!val, updatedAt: Date.now() }, { merge:true });
-      return { ok:true, stored:"cloud" };
-    }catch(_e){
-      return { ok:false, stored:"local" };
-    }
-  }
-
-  // ===== Boot =====
-  let ENV = null;
-  let CURRENT_USER = null;
-
-  async function refreshPlan(forceToken=false){
-    const user = CURRENT_USER;
-    if(!ENV || !user) return;
-
-    // Verifica in corso se rientri da Stripe
-    const url = new URL(location.href);
-    const pending = url.searchParams.get("premium") === "success";
-
-    let planState = { isPremium:false, pending: !!pending };
-    // 1) claims
-    const c = await readPlanFromClaims(user, !!forceToken || !!pending);
-    if(c.isPremium){
-      planState.isPremium = true;
-      planState.pending = false;
-      applyPlanUI(planState);
-      return;
-    }
-
-    // 2) Firestore payrollUsage/{uid}
-    const fs = await readPlanFromFirestore(ENV, user.uid);
-    if(fs.ok && fs.exists){
-      planState.isPremium = !!fs.isPremium;
-      // se ancora pending e non premium, restiamo pending per un attimo e suggeriamo refresh
-      planState.pending = pending && !planState.isPremium;
-    }else{
-      // se non possiamo leggere, mostriamo free (ma senza bloccare la UI)
-      planState.pending = false;
-    }
-
-    applyPlanUI(planState);
-  }
-
-  function bindNav(){
-    ROOT.querySelectorAll(".navItem").forEach(btn=>{
-      btn.addEventListener("click", ()=> setView(btn.getAttribute("data-view")));
-    });
-
-    $("btnProfileToPlans")?.addEventListener("click", ()=> setView("plans"));
-    $("btnProfileToSettings")?.addEventListener("click", ()=> setView("settings"));
-    $("btnSettingsToProfile")?.addEventListener("click", ()=> setView("profile"));
-    $("btnSettingsToPlans")?.addEventListener("click", ()=> setView("plans"));
-
-    $("btnHamb")?.addEventListener("click", ()=> openSidebar());
-    $("sideBackdrop")?.addEventListener("click", ()=> closeSidebar());
-
-    // Hash deep-link
-    try{
-      const h = (location.hash || "").replace("#","").trim();
-      if(h === "plans" || h === "settings" || h === "profile") setView(h);
-      else setView("profile");
-    }catch(_e){ setView("profile"); }
-
-    // Hash change: se cambi hash dall’esterno, sincronizziamo la view
-    window.addEventListener("hashchange", ()=>{
-      try{
-        const h = (location.hash || "").replace("#","").trim();
-        if(h === "plans" || h === "settings" || h === "profile") setView(h);
-      }catch(_e){}
-    }, { passive:true });
-
-    // Ensure sidebar state
-    closeSidebar();
-    window.addEventListener("resize", ()=> closeSidebar());
-  }
-
-  async function bindActions(){
-    $("btnGoApp")?.addEventListener("click", ()=>{
-      // Torna alla pagina principale
-      try{ if(globalThis.__ILOVEPAGHE_SHOW_APP) return globalThis.__ILOVEPAGHE_SHOW_APP(); }catch(_e){}
-      location.href = "./pagheia.html";
-    });
-
-    $("btnSignOut")?.addEventListener("click", async ()=>{
-      try{
-        if(!ENV?.authMod?.signOut || !ENV?.auth) return;
-        await ENV.authMod.signOut(ENV.auth);
-      }catch(_e){}
-      try{ if(globalThis.__ILOVEPAGHE_SHOW_APP) return globalThis.__ILOVEPAGHE_SHOW_APP(); }catch(_e){}
-      location.href = "./pagheia.html";
-    });
-
-    $("btnRefreshPlan")?.addEventListener("click", async ()=>{
-      toast("Verifico lo stato dell’abbonamento…");
-      await refreshPlan(true);
-    });
-
-    $("dashBtnGoPremium")?.addEventListener("click", async ()=>{
-      try{
-        if(!CURRENT_USER) throw new Error("Accedi per continuare.");
-        toast("Apro il checkout…");
-        await startPremiumCheckout(ENV, CURRENT_USER);
-      }catch(err){
-        toast(err?.message || "Impossibile avviare il checkout.");
-      }
-    });
-
-    $("btnManagePlan")?.addEventListener("click", async ()=>{
-      try{
-        if(!CURRENT_USER) throw new Error("Accedi per continuare.");
-        toast("Apro gestione abbonamento…");
-        await openCustomerPortal(ENV, CURRENT_USER);
-      }catch(err){
-        // Se il portale non è configurato, lasciamo un messaggio chiaro e tradizionale: una cosa alla volta.
-        toast((err?.message || "Portale abbonamento non disponibile.") + " Usa il link “Segnala un problema” nel footer dell’app.");
-      }
-    });
-  }
-
-  async function renderUser(user){
-    const name = (user.displayName || user.email || "Utente").trim();
-    const email = (user.email || "—").trim();
-    const created = fmtDate(user?.metadata?.creationTime);
-    const last = fmtDate(user?.metadata?.lastSignInTime);
-    const provider = providerLabel(user);
-
-    $("p_name").textContent = name || "—";
-    $("p_email").textContent = email || "—";
-    $("p_created").textContent = created || "—";
-    $("p_last").textContent = last || "—";
-    $("p_provider").textContent = provider || "—";
-
-    $("sideUserName").textContent = name || "—";
-    $("sideUserEmail").textContent = email || "—";
-  }
-
-  async function renderSettings(user){
-    const uid = user.uid;
-    const toggle = $("toggleSaveEmails");
-    const note = $("saveEmailsNote");
-    if(!toggle) return;
-
-    const current = await loadSaveEmailsPref(ENV, uid);
-    toggle.checked = !!current;
-    if(note){
-      note.textContent = current
-        ? "Attivo: quando inserisci un’email, la memorizziamo per i prossimi invii."
-        : "Disattivo: userai le email solo per l’invio corrente (nessuna memorizzazione).";
-    }
-
-    toggle.addEventListener("change", async ()=>{
-      const val = !!toggle.checked;
-      const res = await persistSaveEmailsPref(ENV, uid, val);
-      if(note){
-        note.textContent = val
-          ? (res.ok ? "Attivo e salvato nel tuo account." : "Attivo (salvato su questo dispositivo).")
-          : (res.ok ? "Disattivo e salvato nel tuo account." : "Disattivo (salvato su questo dispositivo).");
-      }
-      toast(val ? "Impostazione aggiornata: ON" : "Impostazione aggiornata: OFF");
-    }, { passive:true });
-  }
-
-  async function boot(){
-    setLoading(true);
-
-    bindNav();
-    await bindActions();
-
-    ENV = await initFirebase();
-
-    ENV.authMod.onAuthStateChanged(ENV.auth, async (user)=>{
-      try{
-        CURRENT_USER = user || null;
-
-        // Sidebar visibility default (desktop on)
-        closeSidebar();
-
-        if(!user || user.isAnonymous){
-          // Non autenticato: messaggio semplice e rimando all’accesso
-          setLoading(false);
-          toast("Accedi per vedere la dashboard.");
-          $("p_name").textContent = "Accesso richiesto";
-          $("p_email").textContent = "—";
-          $("p_created").textContent = "—";
-          $("p_last").textContent = "—";
-          $("p_provider").textContent = "—";
-          $("sideUserName").textContent = "Accesso richiesto";
-          $("sideUserEmail").textContent = "—";
-          $("sideUserPlan").textContent = "—";
-          applyPlanUI({ isPremium:false, pending:false });
-          $("planNote").textContent = "Per gestire piani e impostazioni devi accedere.";
-          // Forza view profilo
-          setView("profile");
-          return;
-        }
-
-        // Auth OK
-        await renderUser(user);
-        await refreshPlan(false);
-        await renderSettings(user);
-
-        // Sidebar on (desktop)
-        closeSidebar();
-
-        setLoading(false);
-      }catch(_e){
-        setLoading(false);
-      }
-    });
-  }
-
-  boot().catch(()=> setLoading(false));
-})();
