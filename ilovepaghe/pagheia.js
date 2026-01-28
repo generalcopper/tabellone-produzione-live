@@ -7848,6 +7848,8 @@ document.getElementById("btnSecurityClose")?.addEventListener("click", ()=>toggl
       }else{
         try{ document.title = "iLovePaghe"; }catch(_e){}
       }
+
+      try{ applyHashView(); }catch(_e){}
     }
 
     function shouldInterceptAnchor(a){
@@ -8032,10 +8034,11 @@ document.getElementById("btnSecurityClose")?.addEventListener("click", ()=>toggl
 
     function applySpaRoute(){
       try{
+        try{ applyRouteFromLocation(); }catch(_e){}
         const file = getCurrentFileName();
         if(isLegalFile(file)) return;
         const route = getSpaRouteFromLocation();
-        void renderSpaRoute(route);
+        void renderSpaRoute(route).then(()=>{ try{ applyHashView(); }catch(_e){} });
       }catch(_e){}
     }
 
@@ -8075,5 +8078,109 @@ document.getElementById("btnSecurityClose")?.addEventListener("click", ()=>toggl
       }catch(_e){}
     }
 
+    // =========================
+    // Hash router — #come-funziona (no reload, stesso header/footer)
+    // =========================
+    let __hashViewLast = "";
+    let __hashViewApplying = false;
+
+    function getHashView(){
+      try{
+        const h = String(location.hash || "").trim();
+        return (h === "#come-funziona") ? "come-funziona" : "home";
+      }catch(_e){
+        return "home";
+      }
+    }
+
+    function applyHashView(){
+      if(__hashViewApplying) return;
+      __hashViewApplying = true;
+      try{
+        const view = getHashView();
+        const showHow = (view === "come-funziona");
+
+        // Se sei in una pagina legale (privacy/cookie/sicurezza) e apri #come-funziona,
+        // torniamo alla home (sempre SPA, senza reload).
+        try{
+          const f = (typeof getCurrentFileName === "function") ? getCurrentFileName() : "";
+          const legal = (typeof isLegalFile === "function") ? isLegalFile(f) : false;
+          if(legal){
+            if(showHow && typeof getSpaUrlForRoute === "function"){
+              const u = new URL(getSpaUrlForRoute("home"), location.origin);
+              u.hash = "#come-funziona";
+              history.replaceState({ ...(history.state||{}), spa:true, route:"home" }, "", u.href);
+              try{ applySpaRoute(); }catch(_e){}
+            }
+            return;
+          }
+        }catch(_e){}
+
+        const home = document.getElementById("home");
+        const how = document.getElementById("come-funziona");
+
+        // Se siamo su /dashboard (o la home non è ancora stata renderizzata) e l'hash chiede "come-funziona",
+        // forza la route "home" mantenendo l'hash.
+        if(showHow && (!home || !how)){
+          try{
+            const r = (typeof getSpaRouteFromLocation === "function") ? getSpaRouteFromLocation() : "home";
+            if(r !== "home" && typeof getSpaUrlForRoute === "function"){
+              const u = new URL(getSpaUrlForRoute("home"), location.origin);
+              u.hash = "#come-funziona";
+              history.replaceState({ ...(history.state||{}), spa:true, route:"home" }, "", u.href);
+              try{ applySpaRoute(); }catch(_e){}
+              return;
+            }
+          }catch(_e){}
+          // In caso di render async, riprova al prossimo tick
+          setTimeout(()=>{ try{ applyHashView(); }catch(_e){} }, 0);
+          return;
+        }
+
+        // Toggle sezioni
+        if(home){
+          home.classList.toggle("isActive", !showHow);
+          home.style.display = showHow ? "none" : "";
+          try{ home.setAttribute("aria-hidden", showHow ? "true" : "false"); }catch(_e){}
+        }
+        if(how){
+          how.classList.toggle("isActive", showHow);
+          how.style.display = showHow ? "" : "none";
+          try{ how.setAttribute("aria-hidden", showHow ? "false" : "true"); }catch(_e){}
+        }
+
+        // Nav active
+        try{
+          const link = document.getElementById("navComeFunziona");
+          if(link) link.classList.toggle("active", showHow);
+        }catch(_e){}
+
+        // Scroll top solo quando cambia view
+        if(__hashViewLast !== view){
+          __hashViewLast = view;
+          try{
+            window.scrollTo({ top:0, left:0, behavior:"auto" });
+          }catch(_e){
+            try{ window.scrollTo(0,0); }catch(_e2){}
+          }
+        }
+      }finally{
+        __hashViewApplying = false;
+      }
+    }
+
+    function initHashRouter(){
+      try{
+        if(globalThis.__PAGHEIA_HASH_ROUTER__) return;
+        globalThis.__PAGHEIA_HASH_ROUTER__ = true;
+
+        window.addEventListener("hashchange", ()=>{ try{ applyHashView(); }catch(_e){} }, { passive:true });
+
+        // Primo render
+        setTimeout(()=>{ try{ applyHashView(); }catch(_e){} }, 0);
+      }catch(_e){}
+    }
+
     initLegalSoftNav();
     initSpaRouter();
+    initHashRouter();
