@@ -7137,10 +7137,11 @@ const app = initializeApp(firebaseConfig);
           document.getElementById("btnLogout")?.addEventListener("click", ()=>signOutGoogle());
 
           // Footer: Sicurezza e Trasparenza
-          document.getElementById("btnFooterSecurity")?.addEventListener("click", ()=>{
-            toggleSecurityOverlay(true);
+          document.getElementById("btnFooterSecurity")?.addEventListener("click", (ev)=>{
+            try{ ev?.preventDefault?.(); }catch(_e){}
+            try{ navigateSoft("./sicurezza-trasparenza.html"); }catch(_e){ try{ location.href="./sicurezza-trasparenza.html"; }catch(_e2){} }
           });
-          document.getElementById("btnSecurityClose")?.addEventListener("click", ()=>toggleSecurityOverlay(false));
+document.getElementById("btnSecurityClose")?.addEventListener("click", ()=>toggleSecurityOverlay(false));
           document.getElementById("securityOverlay")?.addEventListener("click", (ev)=>{
             try{
               if(ev?.target && ev.target.id === "securityOverlay"){
@@ -7149,28 +7150,12 @@ const app = initializeApp(firebaseConfig);
             }catch(_e){}
           });
 
-          // Footer: Segnala un problema (mailto)
-          document.getElementById("btnFooterReportIssue")?.addEventListener("click", ()=>{
-            try{
-              const dest = String(globalThis.PAGHEIA_SUPPORT_EMAIL || (typeof SUPER_ADMIN_EMAIL !== "undefined" ? SUPER_ADMIN_EMAIL : "") || "").trim();
-              const subj = encodeURIComponent("Segnalazione problema iLovePaghe");
-              const body = encodeURIComponent(
-                "Ciao,\n\nDescrizione del problema:\n\n---\nDettagli utili:\n" +
-                "- URL: " + location.href + "\n" +
-                "- Browser: " + (navigator.userAgent || "") + "\n" +
-                "- Utente: " + (state.user?.email || "non loggato") + "\n" +
-                "- Data: " + (new Date().toISOString()) + "\n"
-              );
-              if(dest){
-                location.href = "mailto:" + dest + "?subject=" + subj + "&body=" + body;
-              }else{
-                showToast("Contatto non configurato", "Imposta PAGHEIA_SUPPORT_EMAIL per 'Segnala un problema'.", 3500);
-              }
-            }catch(_e){
-              showToast("Impossibile aprire l’email", "Copia i dettagli e scrivici.", 3500);
-            }
+          // Footer: Segnala un problema (pagina dedicata, navigazione soft)
+          document.getElementById("btnFooterReportIssue")?.addEventListener("click", (ev)=>{
+            try{ ev?.preventDefault?.(); }catch(_e){}
+            try{ navigateSoft("./segnala-problema.html"); }catch(_e){ try{ location.href="./segnala-problema.html"; }catch(_e2){} }
           });
-        }catch(_e){}
+}catch(_e){}
 
         // Redirect flow: se rientri dal login, intercetta errori (evita loop "silenziosi")
         try{
@@ -7381,3 +7366,203 @@ const app = initializeApp(firebaseConfig);
     updateAuthUI();
     initFirebase();
   
+    // --------------------
+    // Legal SPA navigation (senza reload completo)
+    // --------------------
+    const LEGAL_FILES = [
+      "segnala-problema.html",
+      "privacy-policy.html",
+      "cookie-policy.html",
+      "sicurezza-trasparenza.html"
+    ];
+
+    function _fileNameFromPathname(pathname){
+      try{
+        const p = String(pathname || "");
+        const parts = p.split("/").filter(Boolean);
+        return (parts[parts.length-1] || "").toLowerCase();
+      }catch(_e){
+        return "";
+      }
+    }
+
+    function getCurrentFileName(){
+      try{
+        const u = new URL(location.href);
+        return _fileNameFromPathname(u.pathname);
+      }catch(_e){
+        return "";
+      }
+    }
+
+    function isHomeFile(file){
+      const f = String(file || "").toLowerCase();
+      return (!f || f === "pagheia.html" || f === "index.html");
+    }
+
+    function isLegalFile(file){
+      const f = String(file || "").toLowerCase();
+      return LEGAL_FILES.includes(f);
+    }
+
+    function getLegalTemplateId(file){
+      const f = String(file || "").toLowerCase();
+      if(f === "segnala-problema.html") return "tpl-segnala-problema";
+      if(f === "privacy-policy.html") return "tpl-privacy-policy";
+      if(f === "cookie-policy.html") return "tpl-cookie-policy";
+      if(f === "sicurezza-trasparenza.html") return "tpl-sicurezza-trasparenza";
+      return "";
+    }
+
+    function _buildSupportMailto(){
+      try{
+        const dest = String(globalThis.PAGHEIA_SUPPORT_EMAIL || (typeof SUPER_ADMIN_EMAIL !== "undefined" ? SUPER_ADMIN_EMAIL : "") || "").trim();
+        if(!dest) return null;
+
+        const subj = encodeURIComponent("Segnalazione problema iLovePaghe");
+        const body = encodeURIComponent(
+          "Ciao,\n\nDescrizione del problema:\n\n---\nDettagli utili:\n" +
+          "- URL: " + location.href + "\n" +
+          "- Browser: " + (navigator.userAgent || "") + "\n" +
+          "- Utente: " + (state?.user?.email || "non loggato") + "\n" +
+          "- Data: " + (new Date().toISOString()) + "\n"
+        );
+        return "mailto:" + dest + "?subject=" + subj + "&body=" + body;
+      }catch(_e){
+        return null;
+      }
+    }
+
+    function renderLegal(file){
+      try{
+        const tplId = getLegalTemplateId(file);
+        const tpl = tplId ? document.getElementById(tplId) : null;
+        const out = document.getElementById("legalContent");
+        if(out && tpl){
+          out.innerHTML = tpl.innerHTML;
+        }
+
+        // Active nav
+        try{
+          document.querySelectorAll("[data-legal-file]").forEach(a=>{
+            const af = String(a.getAttribute("data-legal-file") || "").toLowerCase();
+            a.classList.toggle("isActive", af === String(file || "").toLowerCase());
+          });
+        }catch(_e){}
+
+        // Support mail link
+        try{
+          const mailto = _buildSupportMailto();
+          const a = document.getElementById("legalSupportMailLink");
+          if(a){
+            if(mailto){
+              a.setAttribute("href", mailto);
+              a.textContent = "apri email precompilata";
+            }else{
+              a.setAttribute("href", "./segnala-problema.html");
+              a.textContent = "contattaci";
+            }
+          }
+        }catch(_e){}
+
+        // Title
+        try{
+          const titleMap = {
+            "segnala-problema.html": "Segnala un problema",
+            "privacy-policy.html": "Privacy Policy",
+            "cookie-policy.html": "Cookie Policy",
+            "sicurezza-trasparenza.html": "Sicurezza e Trasparenza"
+          };
+          const t = titleMap[String(file || "").toLowerCase()] || "Informazioni";
+          document.title = t + " · iLovePaghe";
+        }catch(_e){}
+
+        // Scroll top
+        try{
+          window.scrollTo({ top:0, left:0, behavior:"auto" });
+        }catch(_e){
+          try{ window.scrollTo(0,0); }catch(_e2){}
+        }
+      }catch(_e){}
+    }
+
+    function applyRouteFromLocation(){
+      const file = getCurrentFileName();
+      const legal = isLegalFile(file);
+      try{ document.body.classList.toggle("route-legal", !!legal); }catch(_e){}
+
+      const appView = document.getElementById("appView");
+      const legalView = document.getElementById("legalView");
+
+      if(appView) appView.style.display = legal ? "none" : "";
+      if(legalView){
+        legalView.style.display = legal ? "" : "none";
+        try{ legalView.setAttribute("aria-hidden", legal ? "false" : "true"); }catch(_e){}
+      }
+
+      if(legal){
+        renderLegal(file);
+      }else{
+        try{ document.title = "iLovePaghe"; }catch(_e){}
+      }
+    }
+
+    function shouldInterceptAnchor(a){
+      try{
+        if(!a) return false;
+        if(a.hasAttribute("download")) return false;
+
+        const hrefRaw = String(a.getAttribute("href") || "").trim();
+        if(!hrefRaw) return false;
+
+        const target = String(a.getAttribute("target") || "").trim().toLowerCase();
+        if(target && target !== "_self") return false;
+
+        if(hrefRaw.startsWith("mailto:") || hrefRaw.startsWith("tel:") || hrefRaw.startsWith("javascript:")) return false;
+
+        const url = new URL(hrefRaw, location.href);
+        if(url.origin !== location.origin) return false;
+
+        const file = _fileNameFromPathname(url.pathname);
+        return isLegalFile(file) || isHomeFile(file);
+      }catch(_e){
+        return false;
+      }
+    }
+
+    function navigateSoft(href){
+      try{
+        const url = new URL(href, location.href);
+        if(url.origin !== location.origin){
+          location.href = url.href;
+          return;
+        }
+        history.pushState({ soft:true }, "", url.href);
+        applyRouteFromLocation();
+      }catch(_e){
+        try{ location.href = href; }catch(_e2){}
+      }
+    }
+
+    function initLegalSoftNav(){
+      try{
+        if(globalThis.__PAGHEIA_LEGAL_SOFTNAV__) return;
+        globalThis.__PAGHEIA_LEGAL_SOFTNAV__ = true;
+
+        document.addEventListener("click", (ev)=>{
+          try{
+            const a = ev.target?.closest?.("a");
+            if(!a) return;
+            if(!shouldInterceptAnchor(a)) return;
+            ev.preventDefault();
+            navigateSoft(a.getAttribute("href"));
+          }catch(_e){}
+        }, true);
+
+        window.addEventListener("popstate", ()=>{ try{ applyRouteFromLocation(); }catch(_e){} }, { passive:true });
+
+        applyRouteFromLocation();
+      }catch(_e){}
+    }
+
+    initLegalSoftNav();
