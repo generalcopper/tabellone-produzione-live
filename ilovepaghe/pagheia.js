@@ -442,7 +442,6 @@ updateGreetingUI();
 
       try{ bindProfileDropdown(); }catch(_e){}
       try{ syncProfileDropdownUI(); }catch(_e){}
-      try{ syncDashboardUI(); }catch(_e){}
     }
 
 
@@ -1134,47 +1133,6 @@ const LS_PAYROLL_FREE_USED = "ilovepaghe_payroll_free_used_v1";
           }catch(_e){}
         }catch(_e){}
       }
-      // Preferenze utente (Firestore): salva impostazioni dashboard → account
-      // Attualmente usiamo questa preferenza per: "Ricorda le email dei dipendenti" (saveEmailsForNext).
-      async function persistUserPrefsSaveEmailsToFirestore(nextVal){
-        const on = !!nextVal;
-
-        // 1) Aggiorna subito localStorage + state (UI reattiva)
-        try{ localStorage.setItem("payroll_save_emails_v1", on ? "1" : "0"); }catch(_e){}
-        try{
-          N.payroll = N.payroll || {};
-          N.payroll.admin = N.payroll.admin || {};
-          N.payroll.admin.saveEmailsForNext = on;
-        }catch(_e){}
-        // Se la UI del match menu è già montata, allineala
-        try{
-          const t = U("payrollSaveEmailsToggle");
-          if(t) t.checked = on;
-        }catch(_e){}
-
-        // 2) Firestore best-effort (solo se autenticato)
-        try{
-          if(!(N.firebase?.ok && N.user && !N.user.isAnonymous)) return { ok:false, stored:"local" };
-          const api = N.firebase.api, db = N.firebase.db;
-          const uid = String(N.user.uid || "").trim();
-          if(!uid) return { ok:false, stored:"local" };
-
-          const ref = api.doc(db, COL_USER_PREFS, uid);
-          const payload = {
-            saveEmailsForNext: on,
-            updatedAt: api.serverTimestamp ? api.serverTimestamp() : null,
-            updatedAtClient: Date.now()
-          };
-          await api.setDoc(ref, payload, { merge:true });
-          return { ok:true, stored:"firestore" };
-        }catch(err){
-          // fallback: resta salvato localmente
-          console.warn("persistUserPrefsSaveEmailsToFirestore failed", err);
-          return { ok:false, stored:"local", error: err };
-        }
-      }
-
-
 
 
       // Prova a leggere entitlements da Custom Claims (se presenti).
@@ -7067,9 +7025,6 @@ function buildSafePdfName(base){
           try{ await syncPayrollEntitlementsFromIdToken(!!force); }catch(_e){}
           try{ await loadPayrollEntitlementsFromServer(!!force); }catch(_e){}
         },
-        // Preferenze dashboard (Firestore)
-        syncUserPrefsSaveEmailsFromFirestore,
-        persistUserPrefsSaveEmailsToFirestore,
         openUser: ()=>{ try{ scrollToSection("userArea"); }catch(_e){} },
         openAdmin: ()=>{ try{ openAdminModalFlow(); }catch(_e){} },
         reset: ()=>{ try{ ji(); }catch(_e){} },
@@ -7725,7 +7680,7 @@ document.getElementById("btnSecurityClose")?.addEventListener("click", ()=>toggl
             }catch(_e){}
 
             // Preferenze utente (dashboard): sync da Firestore
-            try{ if(typeof Payroll?.syncUserPrefsSaveEmailsFromFirestore === "function") await Payroll.syncUserPrefsSaveEmailsFromFirestore(); }catch(_e){}
+            try{ await syncUserPrefsSaveEmailsFromFirestore(); }catch(_e){}
 
             updateAuthUI();
             await resolveUserRole(user);
@@ -7775,9 +7730,6 @@ document.getElementById("btnSecurityClose")?.addEventListener("click", ()=>toggl
       "cookie-policy.html",
       "sicurezza-trasparenza.html"
     ];
-    const DASHBOARD_FILES = [
-      "dashboard.html"
-    ];
 
     function _fileNameFromPathname(pathname){
       try{
@@ -7806,11 +7758,6 @@ document.getElementById("btnSecurityClose")?.addEventListener("click", ()=>toggl
     function isLegalFile(file){
       const f = String(file || "").toLowerCase();
       return LEGAL_FILES.includes(f);
-    }
-
-    function isDashboardFile(file){
-      const f = String(file || "").toLowerCase();
-      return DASHBOARD_FILES.includes(f);
     }
 
     function getLegalTemplateId(file){
@@ -7894,406 +7841,22 @@ document.getElementById("btnSecurityClose")?.addEventListener("click", ()=>toggl
       }catch(_e){}
     }
 
-    // --------------------
-    // Dashboard SPA view (stesso tema di Pagheia, senza reload)
-    // --------------------
-    function getDashboardTabFromHash(){
-      try{
-        const h = String(location.hash || "").replace("#","").trim().toLowerCase();
-        if(!h) return "profile";
-        if(["plan","piano","piani","plans"].includes(h)) return "plans";
-        if(["settings","impostazioni","preferenze","prefs"].includes(h)) return "settings";
-        if(["profile","profilo","account"].includes(h)) return "profile";
-      }catch(_e){}
-      return "profile";
-    }
-
-    function setDashboardTab(tab, opts={}){
-      const t = String(tab || "profile").toLowerCase();
-      const safe = (t === "plans" || t === "settings" || t === "profile") ? t : "profile";
-      const root = document.getElementById("dashboardView");
-      if(!root) return safe;
-
-      try{
-        root.querySelectorAll("[data-dash-tab]").forEach(btn=>{
-          const on = String(btn.getAttribute("data-dash-tab")||"") === safe;
-          btn.classList.toggle("active", on);
-          try{ btn.setAttribute("aria-selected", on ? "true" : "false"); }catch(_e){}
-        });
-      }catch(_e){}
-
-      try{
-        root.querySelectorAll("[data-dash-panel]").forEach(p=>{
-          const on = String(p.getAttribute("data-dash-panel")||"") === safe;
-          p.classList.toggle("active", on);
-          p.style.display = on ? "" : "none";
-          try{ p.setAttribute("aria-hidden", on ? "false" : "true"); }catch(_e){}
-        });
-      }catch(_e){}
-
-      const updateHash = (opts && opts.updateHash === false) ? false : true;
-      const replace = (opts && opts.replace === false) ? false : true;
-
-      if(updateHash){
-        try{
-          const u = new URL(location.href);
-          u.hash = safe;
-          if(replace) history.replaceState(history.state || {}, "", u.toString());
-          else history.pushState(history.state || {}, "", u.toString());
-        }catch(_e){
-          try{ location.hash = "#" + safe; }catch(_e2){}
-        }
-      }
-
-      return safe;
-    }
-
-    function _readSaveEmailsPref(){
-      // prefer state first
-      try{
-        const v = state?.payroll?.admin?.saveEmailsForNext;
-        if(typeof v === "boolean") return v;
-      }catch(_e){}
-      // localStorage fallback (default ON)
-      try{
-        const raw = localStorage.getItem("payroll_save_emails_v1");
-        if(raw === null || raw === undefined) return true;
-        return raw !== "0";
-      }catch(_e){}
-      return true;
-    }
-
-    // Mantiene la UI dashboard allineata allo stato attuale (auth, piano, preferenze)
-    function syncDashboardUI(){
-      const root = document.getElementById("dashboardView");
-      if(!root) return;
-
-      const u = state.user;
-      const isAuthed = !!(u && !u.isAnonymous);
-      const au = state.firebase?.auth?.currentUser;
-
-      const setText = (id, val)=>{
-        try{
-          const el = document.getElementById(id);
-          if(!el) return;
-          const out = (val === undefined || val === null || val === "") ? "—" : String(val);
-          el.textContent = out;
-        }catch(_e){}
-      };
-
-      setText("dash_name", isAuthed ? (u.displayName || u.email || "Utente") : "Accesso non attivo");
-      setText("dash_email", isAuthed ? String(u.email||"").toLowerCase() : "—");
-      setText("dash_role", isAuthed ? (u.isAdmin ? "Amministratore" : "Dipendente") : "—");
-      setText("dash_provider", isAuthed ? getAuthProviderLabel() : "—");
-      setText("dash_uid", isAuthed ? (u.uid || "—") : "—");
-
-      try{
-        const last = au?.metadata?.lastSignInTime || "";
-        setText("dash_last", (isAuthed && last) ? formatItDateTime(last) : "—");
-      }catch(_e){ setText("dash_last", "—"); }
-
-      try{
-        const cr = au?.metadata?.creationTime || "";
-        setText("dash_created", (isAuthed && cr) ? formatItDateTime(cr) : "—");
-      }catch(_e){ setText("dash_created", "—"); }
-
-      // Piano
-      const plan = computePlanUi();
-      setText("dash_planValue", plan.planValue || "—");
-      try{
-        const hint = document.getElementById("dash_planHint");
-        if(hint) hint.textContent = plan.hint || "";
-      }catch(_e){}
-      try{
-        const b = document.getElementById("dashPlanBadge");
-        if(b){
-          b.textContent = plan.badgeText || "—";
-          b.classList.remove("ok","warn","bad");
-          if(plan.badgeClass) b.classList.add(plan.badgeClass);
-        }
-      }catch(_e){}
-
-      // Bottone premium
-      try{
-        const btn = document.getElementById("btnDashPremium");
-        if(btn){
-          btn.textContent = plan.premiumBtnText || "Diventa Premium";
-          btn.disabled = !!plan.premiumBtnDisabled;
-        }
-      }catch(_e){}
-
-      // Refresh plan
-      try{
-        const btn = document.getElementById("btnDashRefreshPlan");
-        if(btn) btn.disabled = !(isAuthed && !!state.firebase?.ok);
-      }catch(_e){}
-
-      // Portal: solo per Premium
-      try{
-        const btn = document.getElementById("btnDashManagePlan");
-        if(btn){
-          const can = (isAuthed && !!u?.isPremium);
-          btn.disabled = !can;
-        }
-      }catch(_e){}
-
-      // Logout button visibile solo se autenticato
-      try{
-        const btn = document.getElementById("btnDashLogout");
-        if(btn) btn.style.display = isAuthed ? "" : "none";
-      }catch(_e){}
-
-      // Callout login (solo se non authed)
-      try{
-        const call = document.getElementById("dashLoginCallout");
-        if(call) call.style.display = isAuthed ? "none" : "";
-      }catch(_e){}
-
-      // Preferenze: Ricorda email dipendenti
-      try{
-        const tog = document.getElementById("dashSaveEmailsToggle");
-        if(tog){
-          const v = _readSaveEmailsPref();
-          tog.checked = (v !== false);
-          // impostazione account-level: se non autenticato disabilita
-          tog.disabled = !isAuthed;
-        }
-      }catch(_e){}
-      try{
-        const note = document.getElementById("dashSaveEmailsNote");
-        if(note){
-          if(!isAuthed){
-            note.textContent = "Accedi per gestire questa impostazione.";
-          }else{
-            note.textContent = _readSaveEmailsPref()
-              ? "Attivo: le email inserite vengono ricordate per i prossimi invii."
-              : "Disattivo: non memorizziamo automaticamente le email.";
-          }
-        }
-      }catch(_e){}
-    }
-
-    async function openCustomerPortal(returnUrl){
-      if(!(state && state.firebase && state.firebase.auth)) throw new Error("Servizio non pronto. Ricarica la pagina.");
-      const u = state.firebase.auth.currentUser;
-      if(!u || u.isAnonymous) throw new Error("Accedi per gestire il piano.");
-
-      const tok = await u.getIdToken(true);
-
-      const base = String(globalThis.PAGHEIA_BILLING_ENDPOINT || "").trim().replace(/\/+$/, "");
-      if(!base) throw new Error("Endpoint billing non configurato.");
-
-      const endpoint = base + "/create-portal-session";
-      const headers = { "Content-Type":"application/json", "Authorization":"Bearer " + tok };
-
-      // App Check (se presente)
-      try{
-        const ac = state.firebase?.appCheck;
-        const acApi = state.firebase?.appCheckApi;
-        if(ac && acApi && typeof acApi.getToken === "function"){
-          const resp = await acApi.getToken(ac, false);
-          if(resp && resp.token) headers["X-Firebase-AppCheck"] = resp.token;
-        }
-      }catch(_e){}
-
-      const res = await fetch(endpoint, { method:"POST", headers, body: JSON.stringify({ returnUrl: returnUrl || location.href }) });
-      if(!res.ok){
-        let t = "";
-        try{ t = await res.text(); }catch(_e){}
-        throw new Error("Billing error: " + res.status + (t ? " — " + t.slice(0,160) : ""));
-      }
-
-      const data = await res.json().catch(()=> ({}));
-      const url = data?.url || data?.portalUrl || data?.redirectUrl || "";
-      if(!url) throw new Error("Risposta billing non valida.");
-
-      try{ window.open(url, "_blank", "noopener,noreferrer"); }catch(_e){ location.href = url; }
-      return url;
-    }
-
-    function bindDashboardView(){
-      const root = document.getElementById("dashboardView");
-      if(!root || root.__bound) return;
-      root.__bound = true;
-
-      // Tabs
-      try{
-        root.querySelectorAll("[data-dash-tab]").forEach(btn=>{
-          if(btn.__bound) return;
-          btn.__bound = true;
-          btn.addEventListener("click", (ev)=>{
-            try{ ev.preventDefault(); }catch(_e){}
-            setDashboardTab(btn.getAttribute("data-dash-tab"), { updateHash:true, replace:true });
-            syncDashboardUI();
-          });
-        });
-      }catch(_e){}
-
-      // Quick nav
-      document.getElementById("btnDashGoPlans")?.addEventListener("click", (ev)=>{ try{ ev.preventDefault(); }catch(_e){} setDashboardTab("plans", { updateHash:true, replace:true }); });
-      document.getElementById("btnDashGoSettings")?.addEventListener("click", (ev)=>{ try{ ev.preventDefault(); }catch(_e){} setDashboardTab("settings", { updateHash:true, replace:true }); });
-
-      // Back to app
-      document.getElementById("btnDashBack")?.addEventListener("click", (ev)=>{
-        try{ ev.preventDefault(); }catch(_e){}
-        try{ navigateSoft("./pagheia.html"); }catch(_e){ try{ location.href = "./pagheia.html"; }catch(_e2){} }
-      });
-
-      // Security overlay
-      document.getElementById("btnDashSecurity")?.addEventListener("click", (ev)=>{
-        try{ ev.preventDefault(); }catch(_e){}
-        try{ toggleSecurityOverlay(true); }catch(_e){
-          try{ navigateSoft("./sicurezza-trasparenza.html"); }catch(_e2){ try{ location.href = "./sicurezza-trasparenza.html"; }catch(_e3){} }
-        }
-      });
-
-      // Logout
-      document.getElementById("btnDashLogout")?.addEventListener("click", async (ev)=>{
-        try{ ev.preventDefault(); }catch(_e){}
-        try{
-          const act = state.authActions || {};
-          if(typeof act.signOut === "function") await act.signOut();
-          else if(state.firebase?.authApi?.signOut) await state.firebase.authApi.signOut(state.firebase.auth);
-        }catch(err){
-          console.warn("dash logout", err);
-          try{ showToast("Errore", "Logout non riuscito.", 2400); }catch(_e){}
-        }
-      });
-
-      // Premium
-      document.getElementById("btnDashPremium")?.addEventListener("click", (ev)=>{
-        try{ ev.preventDefault(); }catch(_e){}
-        const plan = computePlanUi();
-        const u = state.user;
-        const isAuthed = !!(u && !u.isAnonymous);
-
-        if(!isAuthed || plan.premiumBtnMode === "login"){
-          try{ state.authUI?.resetEmailUi?.(); }catch(_e){}
-          try{ openAuthOverlay("Accedi per gestire il piano.", "email"); }catch(_e){ try{ goToAuth("Accedi per gestire il piano."); }catch(_e2){} }
-          return;
-        }
-
-        if(u?.isPremium || plan.premiumBtnMode === "premium"){
-          try{ showToast("Premium", "Premium già attivo.", 2000); }catch(_e){}
-          return;
-        }
-
-        if(u?.premiumSyncPending || plan.premiumBtnMode === "pending"){
-          try{ showToast("Premium", "Attivazione in corso…", 2200); }catch(_e){}
-          return;
-        }
-
-        try{ goToPremium("Per continuare, attiva l’abbonamento Premium."); }catch(_e){}
-      });
-
-      // Refresh plan
-      document.getElementById("btnDashRefreshPlan")?.addEventListener("click", async (ev)=>{
-        try{ ev.preventDefault(); }catch(_e){}
-        try{
-          if(!(state.user && !state.user.isAnonymous)) return;
-          try{
-            if(state.user){
-              state.user.payrollUsageLoaded = false;
-              state.user.payrollUsageLoading = false;
-              state.user.payrollUsageError = "";
-            }
-          }catch(_e){}
-          syncDashboardUI();
-          try{ showToast("Aggiornamento", "Verifico lo stato dell’abbonamento…", 1800); }catch(_e){}
-          try{
-            if(typeof Payroll?.refreshEntitlements === "function") await Payroll.refreshEntitlements(true);
-            else await state.firebase?.auth?.currentUser?.getIdTokenResult?.(true);
-          }catch(_e){}
-          try{ updateAuthUI(); }catch(_e){}
-          try{ syncDashboardUI(); }catch(_e){}
-        }catch(_e){}
-      });
-
-      // Manage plan (portal)
-      document.getElementById("btnDashManagePlan")?.addEventListener("click", async (ev)=>{
-        try{ ev.preventDefault(); }catch(_e){}
-        try{
-          await openCustomerPortal(location.href);
-        }catch(err){
-          console.warn("portal", err);
-          try{ showToast("Gestione piano", err?.message || "Funzione non disponibile.", 4200); }catch(_e){}
-        }
-      });
-
-      // Save emails toggle
-      document.getElementById("dashSaveEmailsToggle")?.addEventListener("change", async (ev)=>{
-        const tog = ev?.target;
-        const next = !!tog?.checked;
-        let res = null;
-        try{
-          if(typeof Payroll?.persistUserPrefsSaveEmailsToFirestore === "function") res = await Payroll.persistUserPrefsSaveEmailsToFirestore(next);
-          else{
-            // fallback locale
-            try{ localStorage.setItem("payroll_save_emails_v1", next ? "1" : "0"); }catch(_e){}
-            try{ state.payroll = state.payroll || {}; state.payroll.admin = state.payroll.admin || {}; state.payroll.admin.saveEmailsForNext = next; }catch(_e){}
-            res = { ok:false, stored:"local" };
-          }
-        }catch(err){
-          console.warn("saveEmails pref", err);
-          res = { ok:false, stored:"local", error: err };
-        }
-        syncDashboardUI();
-        try{
-          if(res?.ok) showToast("Impostazioni", "Salvato nel tuo account.", 2000);
-          else showToast("Impostazioni", "Salvato su questo dispositivo.", 2000);
-        }catch(_e){}
-      });
-
-      // hash → tab (deep link)
-      window.addEventListener("hashchange", ()=>{
-        try{
-          const file = getCurrentFileName();
-          if(!isDashboardFile(file)) return;
-          setDashboardTab(getDashboardTabFromHash(), { updateHash:false });
-        }catch(_e){}
-      }, { passive:true });
-    }
-
-    function renderDashboard(){
-      try{
-        bindDashboardView();
-        syncDashboardUI();
-        setDashboardTab(getDashboardTabFromHash(), { updateHash:false });
-        try{ document.title = "Dashboard · iLovePaghe"; }catch(_e){}
-        try{ window.scrollTo({ top:0, left:0, behavior:"auto" }); }catch(_e){ try{ window.scrollTo(0,0); }catch(_e2){} }
-      }catch(_e){}
-    }
-
-
     function applyRouteFromLocation(){
       const file = getCurrentFileName();
       const legal = isLegalFile(file);
-      const dash = isDashboardFile(file);
-
-      // Chiudi eventuale tendina profilo quando cambi route
-      try{ closeProfileDropdown(); }catch(_e){}
-
       try{ document.body.classList.toggle("route-legal", !!legal); }catch(_e){}
-      try{ document.body.classList.toggle("route-dashboard", !!dash); }catch(_e){}
 
       const appView = document.getElementById("appView");
       const legalView = document.getElementById("legalView");
-      const dashView = document.getElementById("dashboardView");
 
-      if(appView) appView.style.display = (legal || dash) ? "none" : "";
+      if(appView) appView.style.display = legal ? "none" : "";
       if(legalView){
         legalView.style.display = legal ? "" : "none";
         try{ legalView.setAttribute("aria-hidden", legal ? "false" : "true"); }catch(_e){}
       }
-      if(dashView){
-        dashView.style.display = dash ? "" : "none";
-        try{ dashView.setAttribute("aria-hidden", dash ? "false" : "true"); }catch(_e){}
-      }
 
       if(legal){
         renderLegal(file);
-      }else if(dash){
-        renderDashboard();
       }else{
         try{ document.title = "iLovePaghe"; }catch(_e){}
       }
@@ -8316,7 +7879,7 @@ document.getElementById("btnSecurityClose")?.addEventListener("click", ()=>toggl
         if(url.origin !== location.origin) return false;
 
         const file = _fileNameFromPathname(url.pathname);
-        return isLegalFile(file) || isDashboardFile(file) || isHomeFile(file);
+        return isLegalFile(file) || isHomeFile(file);
       }catch(_e){
         return false;
       }
