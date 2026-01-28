@@ -439,7 +439,317 @@ if(payrollGreeting) payrollGreeting.textContent = `Ciao, ${name}.`;
 syncSuperAdminFooterLink();
 
 updateGreetingUI();
+
+      try{ bindProfileDropdown(); }catch(_e){}
+      try{ syncProfileDropdownUI(); }catch(_e){}
     }
+
+
+    // =========================
+    // Accesso — tendina (dashboard utente)
+    // =========================
+    function profileDropdownIsOpen(){
+      try{ return document.getElementById("profileDropdown")?.getAttribute("aria-hidden") === "false"; }catch(_e){ return false; }
+    }
+
+    function toggleProfileDropdown(show){
+      const dd = document.getElementById("profileDropdown");
+      const pill = document.getElementById("pillAuth");
+      if(!dd || !pill) return;
+      const on = !!show;
+      dd.setAttribute("aria-hidden", on ? "false" : "true");
+      try{ if(on) dd.removeAttribute("inert"); else dd.setAttribute("inert",""); }catch(_e){}
+      try{ pill.setAttribute("aria-expanded", on ? "true" : "false"); }catch(_e){}
+    }
+
+    function closeProfileDropdown(){ try{ toggleProfileDropdown(false); }catch(_e){} }
+
+    function formatItDateTime(v){
+      try{
+        if(!v) return "—";
+        const d = new Date(v);
+        if(!Number.isFinite(d.getTime())) return String(v);
+        return d.toLocaleString("it-IT");
+      }catch(_e){ return String(v||"—"); }
+    }
+
+    function getAuthProviderLabel(){
+      try{
+        const u = state.firebase?.auth?.currentUser;
+        const pd = Array.isArray(u?.providerData) ? u.providerData : [];
+        const pid = String(pd?.[0]?.providerId || u?.providerId || "").toLowerCase();
+        if(pid.includes("google")) return "Google";
+        if(pid === "password") return "Email + codice";
+        if(pid) return pid;
+      }catch(_e){}
+      return "—";
+    }
+
+    function computePlanUi(){
+      const u = state.user;
+      const isAuthed = !!(u && !u.isAnonymous);
+      const price = String(globalThis.PAYROLL_PREMIUM_PRICE_LABEL || "19,90 €/mese");
+
+      if(!isAuthed){
+        return {
+          planValue: "Accesso non attivo",
+          badgeText: "OFF",
+          badgeClass: "bad",
+          hint: state.authGateMessage || "Accedi per vedere i tuoi dati.",
+          premiumBtnText: "Accedi",
+          premiumBtnDisabled: false,
+          premiumBtnMode: "login"
+        };
+      }
+
+      const isPremium = !!u.isPremium;
+      const pending = !!u.premiumSyncPending;
+      const freeUsed = !!u.payrollFreeUsed;
+      const loaded = !!u.payrollUsageLoaded;
+      const err = !!u.payrollUsageError;
+
+      if(pending){
+        return {
+          planValue: `Premium (${price})`,
+          badgeText: "IN CORSO",
+          badgeClass: "warn",
+          hint: "Attivazione Premium in corso…",
+          premiumBtnText: "Attivazione in corso…",
+          premiumBtnDisabled: true,
+          premiumBtnMode: "pending"
+        };
+      }
+      if(isPremium){
+        return {
+          planValue: `Premium (${price})`,
+          badgeText: "PREMIUM",
+          badgeClass: "ok",
+          hint: "Premium attivo: caricamenti illimitati.",
+          premiumBtnText: "Premium attivo",
+          premiumBtnDisabled: true,
+          premiumBtnMode: "premium"
+        };
+      }
+      if(err){
+        return {
+          planValue: "Free",
+          badgeText: "VERIFICA",
+          badgeClass: "warn",
+          hint: "Verifica piano non riuscita: ricarica la pagina e riprova.",
+          premiumBtnText: `Diventa Premium – ${price}`,
+          premiumBtnDisabled: false,
+          premiumBtnMode: "upgrade"
+        };
+      }
+      if(!loaded){
+        return {
+          planValue: "Free",
+          badgeText: "VERIFICA",
+          badgeClass: "warn",
+          hint: "Verifica piano in corso…",
+          premiumBtnText: `Diventa Premium – ${price}`,
+          premiumBtnDisabled: false,
+          premiumBtnMode: "upgrade"
+        };
+      }
+      if(freeUsed){
+        return {
+          planValue: "Free",
+          badgeText: "FREE",
+          badgeClass: "bad",
+          hint: `Prova gratuita già utilizzata: per continuare attiva Premium (${price}).`,
+          premiumBtnText: `Diventa Premium – ${price}`,
+          premiumBtnDisabled: false,
+          premiumBtnMode: "upgrade"
+        };
+      }
+      return {
+        planValue: "Free",
+        badgeText: "FREE",
+        badgeClass: "ok",
+        hint: "Prova gratuita disponibile: puoi inviare 1 volta gratuitamente.",
+        premiumBtnText: `Diventa Premium – ${price}`,
+        premiumBtnDisabled: false,
+        premiumBtnMode: "upgrade"
+      };
+    }
+
+    function syncProfileDropdownUI(){
+      const dd = document.getElementById("profileDropdown");
+      if(!dd) return;
+
+      const u = state.user;
+      const isAuthed = !!(u && !u.isAnonymous);
+
+      const nameEl = document.getElementById("profileName");
+      const emailEl = document.getElementById("profileEmail");
+      const roleEl = document.getElementById("profileRole");
+      const providerEl = document.getElementById("profileProvider");
+      const uidEl = document.getElementById("profileUid");
+      const lastEl = document.getElementById("profileLastSignIn");
+      const planValueEl = document.getElementById("profilePlanValue");
+      const planHintEl = document.getElementById("profilePlanHint");
+      const planBadgeEl = document.getElementById("profilePlanBadge");
+      const btnPrem = document.getElementById("btnProfilePremium");
+      const btnRefresh = document.getElementById("btnProfileRefreshPlan");
+      const btnLogout = document.getElementById("btnProfileLogout");
+
+      if(!isAuthed){
+        if(nameEl) nameEl.textContent = "Accesso non attivo";
+        if(emailEl) emailEl.textContent = "—";
+        if(roleEl) roleEl.textContent = "—";
+        if(providerEl) providerEl.textContent = "—";
+        if(uidEl) uidEl.textContent = "—";
+        if(lastEl) lastEl.textContent = "—";
+      }else{
+        if(nameEl) nameEl.textContent = (u.displayName || u.email || "Utente");
+        if(emailEl) emailEl.textContent = String(u.email || "").toLowerCase();
+        if(roleEl) roleEl.textContent = u.isAdmin ? "Amministratore" : "Dipendente";
+        if(providerEl) providerEl.textContent = getAuthProviderLabel();
+        if(uidEl) uidEl.textContent = u.uid || "—";
+        try{
+          const au = state.firebase?.auth?.currentUser;
+          const last = au?.metadata?.lastSignInTime || "";
+          if(lastEl) lastEl.textContent = last ? formatItDateTime(last) : "—";
+        }catch(_e){
+          if(lastEl) lastEl.textContent = "—";
+        }
+      }
+
+      const plan = computePlanUi();
+      if(planValueEl) planValueEl.textContent = plan.planValue || "—";
+      if(planHintEl) planHintEl.textContent = plan.hint || "—";
+      if(planBadgeEl){
+        planBadgeEl.textContent = plan.badgeText || "—";
+        planBadgeEl.classList.remove("ok","warn","bad");
+        if(plan.badgeClass) planBadgeEl.classList.add(plan.badgeClass);
+      }
+
+      if(btnPrem){
+        btnPrem.textContent = plan.premiumBtnText || btnPrem.textContent;
+        btnPrem.disabled = !!plan.premiumBtnDisabled;
+      }
+
+      if(btnRefresh) btnRefresh.disabled = !isAuthed;
+      if(btnLogout) btnLogout.disabled = !isAuthed;
+
+      // Se l'utente non è autenticato, chiudi la tendina
+      if(!isAuthed && profileDropdownIsOpen()){
+        toggleProfileDropdown(false);
+      }
+    }
+
+    function bindProfileDropdown(){
+      if(globalThis.__ILOVEPAGHE_PROFILE_BOUND__) return;
+      globalThis.__ILOVEPAGHE_PROFILE_BOUND__ = true;
+
+      const pill = document.getElementById("pillAuth");
+      pill?.addEventListener("click", (ev)=>{
+        try{ ev.preventDefault(); ev.stopPropagation(); }catch(_e){}
+        const isAuthed = !!(state.user && !state.user.isAnonymous);
+        if(!isAuthed){
+          try{ state.authUI?.resetEmailUi?.(); }catch(_e){}
+          try{ openAuthOverlay("Accedi per vedere i tuoi dati.", "email"); }catch(_e){ try{ goToAuth("Accedi per continuare."); }catch(_e2){} }
+          return;
+        }
+        const next = !profileDropdownIsOpen();
+        toggleProfileDropdown(next);
+        syncProfileDropdownUI();
+      });
+
+      document.getElementById("btnProfileClose")?.addEventListener("click", (ev)=>{
+        try{ ev.preventDefault(); ev.stopPropagation(); }catch(_e){}
+        closeProfileDropdown();
+      });
+
+      document.getElementById("btnProfilePremium")?.addEventListener("click", (ev)=>{
+        try{ ev.preventDefault(); ev.stopPropagation(); }catch(_e){}
+        const u = state.user;
+        const isAuthed = !!(u && !u.isAnonymous);
+        if(!isAuthed){
+          try{ state.authUI?.resetEmailUi?.(); }catch(_e){}
+          try{ openAuthOverlay("Accedi per attivare Premium.", "email"); }catch(_e){ try{ goToAuth("Accedi per attivare Premium."); }catch(_e2){} }
+          return;
+        }
+        if(u.isPremium){
+          try{ showToast("Premium", "Premium già attivo.", 2000); }catch(_e){}
+          return;
+        }
+        if(u.premiumSyncPending){
+          try{ showToast("Premium", "Attivazione in corso…", 2200); }catch(_e){}
+          return;
+        }
+        closeProfileDropdown();
+        try{ goToPremium("Per continuare, attiva l’abbonamento Premium."); }catch(_e){}
+      });
+
+      document.getElementById("btnProfileRefreshPlan")?.addEventListener("click", async (ev)=>{
+        try{ ev.preventDefault(); ev.stopPropagation(); }catch(_e){}
+        try{
+          if(!(state.user && !state.user.isAnonymous)) return;
+          try{
+            if(state.user){
+              state.user.payrollUsageLoaded = false;
+              state.user.payrollUsageLoading = false;
+              state.user.payrollUsageError = "";
+            }
+          }catch(_e){}
+          syncProfileDropdownUI();
+          try{ showToast("Aggiornamento", "Verifico lo stato dell’abbonamento…", 1800); }catch(_e){}
+          try{
+            if(typeof Payroll?.refreshEntitlements === "function"){
+              await Payroll.refreshEntitlements(true);
+            }else{
+              const au = state.firebase?.auth?.currentUser;
+              await au?.getIdTokenResult?.(true);
+            }
+          }catch(_e){}
+          try{ updateAuthUI(); }catch(_e){}
+        }catch(_e){}
+      });
+
+      document.getElementById("btnProfileSecurity")?.addEventListener("click", (ev)=>{
+        try{ ev.preventDefault(); ev.stopPropagation(); }catch(_e){}
+        closeProfileDropdown();
+        try{ toggleSecurityOverlay(true); }catch(_e){
+          try{ navigateSoft("./sicurezza-trasparenza.html"); }catch(_e2){ try{ location.href="./sicurezza-trasparenza.html"; }catch(_e3){} }
+        }
+      });
+
+      document.getElementById("btnProfileLogout")?.addEventListener("click", (ev)=>{
+        try{ ev.preventDefault(); ev.stopPropagation(); }catch(_e){}
+        closeProfileDropdown();
+        try{
+          const act = state.authActions || {};
+          if(typeof act.signOut === "function") act.signOut();
+          else document.getElementById("btnLogoutBottom")?.click();
+        }catch(_e){}
+      });
+
+      // Click fuori → chiudi
+      document.addEventListener("click", (ev)=>{
+        try{
+          if(!profileDropdownIsOpen()) return;
+          const dd = document.getElementById("profileDropdown");
+          const pill = document.getElementById("pillAuth");
+          const t = ev.target;
+          if(dd && (dd === t || dd.contains(t))) return;
+          if(pill && (pill === t || pill.contains(t))) return;
+          closeProfileDropdown();
+        }catch(_e){}
+      }, true);
+
+      // ESC → chiudi
+      document.addEventListener("keydown", (ev)=>{
+        try{
+          if(ev.key === "Escape" && profileDropdownIsOpen()){
+            closeProfileDropdown();
+          }
+        }catch(_e){}
+      });
+    }
+
+
 
     // Richiesta accesso (login/registrazione):
     // - se è configurato un AUTH URL esterno, redirect lì (con return URL)
@@ -6675,6 +6985,10 @@ function buildSafePdfName(base){
         onSignedIn,
         onSignedOut,
         setExtractEndpoint,
+        refreshEntitlements: async (force=false)=>{
+          try{ await syncPayrollEntitlementsFromIdToken(!!force); }catch(_e){}
+          try{ await loadPayrollEntitlementsFromServer(!!force); }catch(_e){}
+        },
         openUser: ()=>{ try{ scrollToSection("userArea"); }catch(_e){} },
         openAdmin: ()=>{ try{ openAdminModalFlow(); }catch(_e){} },
         reset: ()=>{ try{ ji(); }catch(_e){} },
