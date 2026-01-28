@@ -430,9 +430,10 @@ if(payrollGreeting) payrollGreeting.textContent = `Ciao, ${name}.`;
         }
       }catch(_e){}
 
-      // Overlays disabilitati (nessun pending/auth full-screen)
+      // Pending overlay: assicurati che non resti attiva
       try{ togglePendingOverlay(false); }catch(_e){}
-      try{ toggleAuthOverlay(false); }catch(_e){}
+      // Chiudi l’auth full-screen solo dopo login riuscito
+      try{ if(isAuthed) toggleAuthOverlay(false); }catch(_e){}
 
 
 syncSuperAdminFooterLink();
@@ -6889,7 +6890,7 @@ const app = initializeApp(firebaseConfig);
           emailLinkCompleteUrl = String(linkUrl||"");
           try{
             const t = document.getElementById("btnEmailLinkSendText");
-            if(t) t.textContent = (emailLinkMode === "complete") ? "Completa accesso" : "Invia link";
+            if(t) t.textContent = (emailLinkMode === "complete") ? "Completa accesso" : "Invia codice";
           }catch(_e){}
         }
         function setEmailBusy(busy){
@@ -6971,7 +6972,7 @@ const app = initializeApp(firebaseConfig);
             }catch(_e){}
 
             setEmailSent(true);
-            try{ showToast("Link inviato", "Ti abbiamo inviato un link di accesso. Controlla anche spam/promozioni.", 4200); }catch(_e){}
+            try{ showToast("Codice inviato", "Ti abbiamo inviato un codice di accesso (link) via email. Apri il messaggio e completa l’accesso. Controlla anche spam/promozioni.", 4200); }catch(_e){}
           }catch(err){
             console.warn("sendSignInLinkToEmail", err);
             try{
