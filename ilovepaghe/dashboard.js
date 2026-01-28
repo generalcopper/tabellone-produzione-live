@@ -1,5 +1,9 @@
 // dashboard.js — iLovePaghe (SPA dashboard)
-(() => {
+const initPagheiaDashboard = () => {
+  const root = document.getElementById("dashboardView");
+  if(!root) return;
+  if(root.dataset.bound === "true") return;
+  root.dataset.bound = "true";
   const $ = (id) => document.getElementById(id);
 
   // ===== Config Firebase (stesso progetto di pagheia.js) =====
@@ -96,8 +100,16 @@
     if(title){
       title.textContent =
         view === "profile" ? "Profilo" :
-        view === "plans" ? "Piani" :
+        view === "plans" ? "Piani Premium" :
         view === "settings" ? "Impostazioni" : "Dashboard";
+    }
+    const sub = $("pageSub");
+    if(sub){
+      sub.textContent =
+        view === "profile" ? "Dati utente essenziali, sempre aggiornati." :
+        view === "plans" ? "Gestisci l’abbonamento Premium e lo stato del piano." :
+        view === "settings" ? "Preferenze rapide per l’invio delle buste paga." :
+        "Gestisci profilo, piani e impostazioni.";
     }
 
     // Mobile: chiudi sidebar
@@ -402,7 +414,10 @@
 
   async function bindActions(){
     $("btnGoApp")?.addEventListener("click", ()=>{
-      // Torna alla pagina principale
+      if(typeof globalThis.pagheiaSpaNavigate === "function"){
+        globalThis.pagheiaSpaNavigate("home");
+        return;
+      }
       location.href = "./pagheia.html";
     });
 
@@ -411,6 +426,10 @@
         if(!ENV?.authMod?.signOut || !ENV?.auth) return;
         await ENV.authMod.signOut(ENV.auth);
       }catch(_e){}
+      if(typeof globalThis.pagheiaSpaNavigate === "function"){
+        globalThis.pagheiaSpaNavigate("home");
+        return;
+      }
       location.href = "./pagheia.html";
     });
 
@@ -534,4 +553,7 @@
   }
 
   boot().catch(()=> setLoading(false));
-})();
+};
+
+globalThis.initPagheiaDashboard = initPagheiaDashboard;
+initPagheiaDashboard();

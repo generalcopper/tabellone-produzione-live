@@ -665,7 +665,7 @@ updateGreetingUI();
       document.getElementById("btnProfileDashboard")?.addEventListener("click", (ev)=>{
         try{ ev.preventDefault(); ev.stopPropagation(); }catch(_e){}
         closeProfileDropdown();
-        try{ navigateSoft("./dashboard.html"); }catch(_e){ try{ location.href = "./dashboard.html"; }catch(_e2){} }
+        try{ navigateSpaToRoute("dashboard"); }catch(_e){ try{ location.href = "./dashboard.html"; }catch(_e2){} }
       });
 
       document.getElementById("btnProfilePremium")?.addEventListener("click", (ev)=>{
@@ -7866,6 +7866,7 @@ document.getElementById("btnSecurityClose")?.addEventListener("click", ()=>toggl
       try{
         if(!a) return false;
         if(a.hasAttribute("download")) return false;
+        if(a.hasAttribute("data-spa")) return false;
 
         const hrefRaw = String(a.getAttribute("href") || "").trim();
         if(!hrefRaw) return false;
@@ -7920,4 +7921,137 @@ document.getElementById("btnSecurityClose")?.addEventListener("click", ()=>toggl
       }catch(_e){}
     }
 
+    const SPA_BASE_URL = new URL("./", import.meta.url);
+    const SPA_BASE_PATH = SPA_BASE_URL.pathname;
+    const spaState = {
+      homeMarkup: "",
+      dashboardMarkup: "",
+      dashboardModulePromise: null,
+      currentRoute: ""
+    };
+
+    function getSpaRouteFromLocation(){
+      try{
+        const path = String(location.pathname || "");
+        let relative = path.startsWith(SPA_BASE_PATH) ? path.slice(SPA_BASE_PATH.length) : path.replace(/^\\//, "");
+        relative = relative.replace(/\\/+$/, "");
+        if(!relative || relative === "pagheia.html" || relative === "index.html") return "home";
+        if(relative === "dashboard" || relative === "dashboard.html") return "dashboard";
+        return "home";
+      }catch(_e){
+        return "home";
+      }
+    }
+
+    function getSpaUrlForRoute(route){
+      const base = SPA_BASE_PATH.endsWith("/") ? SPA_BASE_PATH : `${SPA_BASE_PATH}/`;
+      if(route === "dashboard") return `${base}dashboard`;
+      return base;
+    }
+
+    function navigateSpaToRoute(route){
+      const url = new URL(getSpaUrlForRoute(route), location.origin);
+      history.pushState({ spa:true, route }, "", url.href);
+      applySpaRoute();
+    }
+
+    function navigateSpa(href){
+      try{
+        if(href === "home" || href === "/"){
+          navigateSpaToRoute("home");
+          return;
+        }
+        if(href === "dashboard"){
+          navigateSpaToRoute("dashboard");
+          return;
+        }
+        const url = new URL(href, location.href);
+        if(url.origin !== location.origin){
+          location.href = url.href;
+          return;
+        }
+        history.pushState({ spa:true }, "", url.href);
+        applySpaRoute();
+      }catch(_e){
+        try{ location.href = href; }catch(_e2){}
+      }
+    }
+
+    async function ensureDashboardModule(){
+      if(!spaState.dashboardModulePromise){
+        spaState.dashboardModulePromise = import(new URL("./dashboard.js?v=20260128_dashboard1", import.meta.url).toString())
+          .catch((err)=>{ spaState.dashboardModulePromise = null; throw err; });
+      }
+      try{
+        await spaState.dashboardModulePromise;
+      }catch(_e){}
+      try{ globalThis.initPagheiaDashboard?.(); }catch(_e){}
+    }
+
+    async function renderSpaRoute(route){
+      const appView = document.getElementById("appView");
+      if(!appView) return;
+      if(!spaState.homeMarkup){
+        spaState.homeMarkup = appView.innerHTML || "";
+      }
+
+      if(spaState.currentRoute === route) return;
+      spaState.currentRoute = route;
+
+      document.body.classList.toggle("route-dashboard", route === "dashboard");
+
+      if(route === "dashboard"){
+        if(!spaState.dashboardMarkup){
+          try{
+            const res = await fetch(new URL("./dashboard.html", import.meta.url), { cache:"no-store" });
+            spaState.dashboardMarkup = res.ok ? await res.text() : "";
+          }catch(_e){
+            spaState.dashboardMarkup = "";
+          }
+        }
+        appView.innerHTML = spaState.dashboardMarkup || "<p>Dashboard non disponibile.</p>";
+        await ensureDashboardModule();
+        try{ document.title = "Dashboard · iLovePaghe"; }catch(_e){}
+        return;
+      }
+
+      appView.innerHTML = spaState.homeMarkup;
+      try{ updateGreetingUI(); }catch(_e){}
+      try{ updateAuthUI(); }catch(_e){}
+      try{ syncProfileDropdownUI(); }catch(_e){}
+      try{ document.title = "iLovePaghe"; }catch(_e){}
+    }
+
+    function applySpaRoute(){
+      try{
+        const file = getCurrentFileName();
+        if(isLegalFile(file)) return;
+        const route = getSpaRouteFromLocation();
+        void renderSpaRoute(route);
+      }catch(_e){}
+    }
+
+    function initSpaRouter(){
+      try{
+        if(globalThis.__PAGHEIA_SPA_ROUTER__) return;
+        globalThis.__PAGHEIA_SPA_ROUTER__ = true;
+        globalThis.pagheiaSpaNavigate = navigateSpa;
+
+        document.addEventListener("click", (ev)=>{
+          try{
+            const a = ev.target?.closest?.("a[data-spa]");
+            if(!a) return;
+            const href = a.getAttribute("href");
+            if(!href) return;
+            ev.preventDefault();
+            navigateSpa(href);
+          }catch(_e){}
+        }, true);
+
+        window.addEventListener("popstate", ()=>{ try{ applySpaRoute(); }catch(_e){} }, { passive:true });
+        applySpaRoute();
+      }catch(_e){}
+    }
+
     initLegalSoftNav();
+    initSpaRouter();
