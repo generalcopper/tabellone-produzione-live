@@ -43,14 +43,14 @@
     const LS_EMAIL_LINK_SENT_AT = "pagheia_email_link_sent_at_v1";
 
 // =========================
-    // Super Admin (solo Ludovico)
+    // Super Admin (configurabile)
     // =========================
-    const SUPER_ADMIN_EMAIL = "ludovico@generalcoppersrl.com";
+    const SUPER_ADMIN_EMAIL = String(globalThis.PAGHEIA_SUPER_ADMIN_EMAIL || "").trim().toLowerCase();
 
     function isSuperAdminUser(u){
       try{
         const em = String(u?.emailLower || u?.email || "").trim().toLowerCase();
-        return !!em && em === SUPER_ADMIN_EMAIL;
+        return !!SUPER_ADMIN_EMAIL && !!em && em === SUPER_ADMIN_EMAIL;
       }catch(_e){ return false; }
     }
 
