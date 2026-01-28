@@ -34,6 +34,49 @@
       payroll: {},
       absences: { list:[], filters:{ status:"", type:"", search:"" }, loading:false }
     };
+    
+    // =========================
+    // Auth — Email link (passwordless / magic link)
+    // =========================
+    const LS_AUTH_NEXT_URL = "pagheia_auth_next_url_v1";
+    const LS_EMAIL_LINK_EMAIL = "pagheia_email_link_email_v1";
+    const LS_EMAIL_LINK_SENT_AT = "pagheia_email_link_sent_at_v1";
+
+// =========================
+    // Super Admin (solo Ludovico)
+    // =========================
+    const SUPER_ADMIN_EMAIL = "ludovico@generalcoppersrl.com";
+
+    function isSuperAdminUser(u){
+      try{
+        const em = String(u?.emailLower || u?.email || "").trim().toLowerCase();
+        return !!em && em === SUPER_ADMIN_EMAIL;
+      }catch(_e){ return false; }
+    }
+
+    function syncSuperAdminFooterLink(){
+      try{
+        const slot = document.getElementById("footerSuperAdminSlot");
+        if(!slot) return;
+
+        // Assicurati che NON esista alcun link per utenti non autorizzati
+        // (il link deve essere completamente assente dal DOM)
+        while(slot.firstChild) slot.removeChild(slot.firstChild);
+
+        const u = state.user;
+        const ok = !!(u && !u.isAnonymous && isSuperAdminUser(u));
+        if(!ok) return;
+
+        const a = document.createElement("a");
+        a.href = "superadmin.html";
+        a.textContent = "Super Admin";
+        a.className = "superAdminLink";
+        a.id = "footerSuperAdminLink";
+        a.rel = "noopener";
+        slot.appendChild(a);
+      }catch(_e){}
+    }
+
 
 
     // --- Fix loop login (Safari/iOS bfcache) ---
@@ -65,7 +108,27 @@
       }catch(_e){ return false; }
     }
 
-    (function bindAuthBfcacheFix(){
+    
+    function setAuthNextUrl(url){
+      try{ localStorage.setItem(LS_AUTH_NEXT_URL, String(url||"")); }catch(_e){}
+    }
+    function getAuthNextUrl(){
+      try{ return String(localStorage.getItem(LS_AUTH_NEXT_URL) || ""); }catch(_e){ return ""; }
+    }
+    function clearAuthNextUrl(){
+      try{ localStorage.removeItem(LS_AUTH_NEXT_URL); }catch(_e){}
+    }
+    function sanitizeSameOriginUrl(url){
+      try{
+        const raw = String(url||"").trim();
+        if(!raw) return "";
+        const u = new URL(raw, location.origin);
+        if(u.origin !== location.origin) return "";
+        return u.toString();
+      }catch(_e){ return ""; }
+    }
+
+(function bindAuthBfcacheFix(){
       // Reload SOLO se:
       // - stiamo tornando da un tentativo di login (flag in sessionStorage)
       // - la navigazione è "back/forward" o la pagina arriva da bfcache
@@ -195,7 +258,8 @@ const toast = document.getElementById("toast");
       const logOpen = document.getElementById("sendLogModal")?.classList.contains("show");
       const pdfOpen = document.getElementById("pdfPreviewOverlay")?.getAttribute("aria-hidden") === "false";
       const authOpen = document.getElementById("authOverlay")?.getAttribute("aria-hidden") === "false";
-      const shouldLock = !!(adminOpen || logOpen || pdfOpen || authOpen);
+      const securityOpen = document.getElementById("securityOverlay")?.getAttribute("aria-hidden") === "false";
+      const shouldLock = !!(adminOpen || logOpen || pdfOpen || authOpen || securityOpen);
       if(shouldLock) lockBodyScroll(); else unlockBodyScroll();
     }
 
@@ -261,7 +325,7 @@ if(payrollGreeting) payrollGreeting.textContent = `Ciao, ${name}.`;
         pill?.classList.remove("ok");
         dot?.classList.remove("ok");
         if(status) status.textContent = "Accesso non attivo";
-        if(hint) hint.textContent = isAnon ? "Accesso anonimo disattivato. Accedi con Google." : "Sessione non attiva.";
+        if(hint) hint.textContent = isAnon ? "Accesso anonimo disattivato. Accedi per continuare." : "Sessione non attiva.";
       }
       if(absenceBadge){
         absenceBadge.textContent = isAuthed ? "Pronto a inviare" : "Accesso richiesto";
@@ -283,17 +347,21 @@ if(payrollGreeting) payrollGreeting.textContent = `Ciao, ${name}.`;
       // Header buttons
       const btnLogin = document.getElementById("btnGoogleLogin");
       const btnLogoutBottom = document.getElementById("btnLogoutBottom");
+      const btnEmailLink = document.getElementById("btnEmailLinkSend");
+      const btnLoginOverlay = document.getElementById("btnGoogleLoginOverlay");
+      const ready = !!state.firebase?.ok;
 
       // Mostra "Accedi" sempre quando NON autenticato (niente schermate di caricamento)
       const showLogin = (!isAuthed);
       if(btnLogin){
         btnLogin.style.display = showLogin ? "" : "none";
-        const ready = !!state.firebase?.ok;
         // abilita quando Firebase è pronto
         btnLogin.disabled = !ready;
         // feedback visivo mentre Firebase carica
         try{ const sp = btnLogin.querySelector("span"); if(sp) sp.textContent = ready ? "Accedi" : "Caricamento…"; }catch(_e){}
       }
+      if(btnEmailLink) btnEmailLink.disabled = !ready;
+      if(btnLoginOverlay) btnLoginOverlay.disabled = !ready;
 
       // "Esci" sempre in fondo (solo quando autenticato)
       if(btnLogoutBottom) btnLogoutBottom.style.display = isAuthed ? "" : "none";
@@ -367,6 +435,8 @@ if(payrollGreeting) payrollGreeting.textContent = `Ciao, ${name}.`;
       try{ toggleAuthOverlay(false); }catch(_e){}
 
 
+syncSuperAdminFooterLink();
+
 updateGreetingUI();
     }
 
@@ -375,6 +445,9 @@ updateGreetingUI();
     // - altrimenti usa Firebase Google Sign-In (preferendo il redirect)
     function goToAuth(reason="", intent=""){
       const msg = String(reason || "Accedi per continuare.");
+
+      // Salva dove stavi (redirect post-login)
+      try{ setAuthNextUrl(location.href); }catch(_e){}
 
       // 1) Redirect a pagina auth esterna (opzionale)
       try{
@@ -388,7 +461,18 @@ updateGreetingUI();
         }
       }catch(_e){}
 
-      // 2) Firebase Auth (Google) — usa la stessa logica del bottone "Accedi" (popup-first, redirect solo se serve)
+      // 2) Overlay login interno (Email link / Google)
+      try{
+        const ov = document.getElementById("authOverlay");
+        if(ov){
+          try{ markAuthInflight(msg, intent || "login_overlay"); }catch(_e){}
+          try{ state.authUI?.resetEmailUi?.(); }catch(_e){}
+          try{ openAuthOverlay(msg, "email"); }catch(_e){ toggleAuthOverlay(true); }
+          return true;
+        }
+      }catch(_e){}
+
+      // 3) Fallback: Firebase Auth (Google)
       try{
         const act = state.authActions || {};
         if(typeof act.signIn === "function"){
@@ -402,7 +486,7 @@ updateGreetingUI();
         }
       }catch(_e){}
 
-      // 3) Fallback: focus/click sul bottone "Accedi"
+      // 4) Fallback: focus/click sul bottone "Accedi"
       try{
         const btn = document.getElementById("btnGoogleLogin");
         if(btn){
@@ -416,7 +500,8 @@ updateGreetingUI();
     }
 
 
-    // Pagamento/Upgrade Premium (opzionale):
+
+// Pagamento/Upgrade Premium (opzionale):
     // - se è configurato un BILLING URL esterno, redirect lì (con return URL)
     // - altrimenti mostra solo un messaggio
     function getBillingBase(){
@@ -439,7 +524,7 @@ updateGreetingUI();
 
       if(!(state && state.firebase && state.firebase.auth)) throw new Error("Servizio non pronto. Ricarica la pagina.");
       const u = state.firebase.auth.currentUser;
-      if(!u || u.isAnonymous) throw new Error("Accedi con Google per attivare Premium.");
+      if(!u || u.isAnonymous) throw new Error("Accedi per attivare Premium.");
 
       let tok = "";
       try{ tok = await u.getIdToken(); }catch(_e){}
@@ -521,16 +606,20 @@ updateGreetingUI();
         const adminOpen = document.getElementById("adminModal")?.classList.contains("show");
         const logOpen = document.getElementById("sendLogModal")?.classList.contains("show");
         const pdfOpen = document.getElementById("pdfPreviewOverlay")?.getAttribute("aria-hidden") === "false";
+        const reviewOpen = document.getElementById("reviewPromptOverlay")?.getAttribute("aria-hidden") === "false";
+        const premiumOpen = document.getElementById("premiumPromptOverlay")?.getAttribute("aria-hidden") === "false";
         const authOpen = document.getElementById("authOverlay")?.getAttribute("aria-hidden") === "false";
         const pendingOpen = document.getElementById("pendingOverlay")?.getAttribute("aria-hidden") === "false";
-        const anyOpen = !!(adminOpen || logOpen || pdfOpen || authOpen || pendingOpen);
+        const securityOpen = document.getElementById("securityOverlay")?.getAttribute("aria-hidden") === "false";
+        const anyOpen = !!(adminOpen || logOpen || pdfOpen || reviewOpen || premiumOpen || authOpen || pendingOpen || securityOpen);
         document.body.classList.toggle("admin-modal-open", anyOpen);
         syncBodyScrollLock();
       }catch(_e){}
     }
 
 
-    function togglePendingOverlay(show){
+
+function togglePendingOverlay(show){
       const ov = document.getElementById("pendingOverlay");
       if(!ov) return;
       ov.setAttribute("aria-hidden", show ? "false" : "true");
@@ -545,6 +634,53 @@ updateGreetingUI();
     }
 
     
+
+    function toggleSecurityOverlay(show){
+      const ov = document.getElementById("securityOverlay");
+      if(!ov) return;
+      ov.setAttribute("aria-hidden", show ? "false" : "true");
+      updateModalOpenState();
+    }
+
+    function setAuthTab(tab="email"){
+      try{
+        const tEmail = document.getElementById("authTabEmail");
+        const tGoogle = document.getElementById("authTabGoogle");
+        const pEmail = document.getElementById("authPaneEmail");
+        const pGoogle = document.getElementById("authPaneGoogle");
+        if(!tEmail || !tGoogle || !pEmail || !pGoogle) return;
+        const isEmail = String(tab||"").toLowerCase() !== "google";
+        tEmail.setAttribute("aria-selected", isEmail ? "true" : "false");
+        tGoogle.setAttribute("aria-selected", isEmail ? "false" : "true");
+        pEmail.hidden = !isEmail;
+        pGoogle.hidden = isEmail;
+      }catch(_e){}
+    }
+
+    function openAuthOverlay(reason="", tab="email"){
+      try{
+        const r = document.getElementById("authReason");
+        if(r){
+          const msg = String(reason||"").trim();
+          if(msg){
+            r.textContent = msg;
+            r.style.display = "";
+          }else{
+            r.textContent = "";
+            r.style.display = "none";
+          }
+        }
+      }catch(_e){}
+      try{ setAuthTab(tab); }catch(_e){}
+      try{ toggleAuthOverlay(true); }catch(_e){}
+      // Focus best-effort
+      try{
+        if(String(tab||"").toLowerCase() !== "google"){
+          setTimeout(()=>{ try{ document.getElementById("authEmailInput")?.focus?.(); }catch(_e){} }, 60);
+        }
+      }catch(_e){}
+    }
+
 function toggleAdminModal(show, focusId){
       const modal = document.getElementById("adminModal");
       if(!modal) return;
@@ -630,6 +766,11 @@ function toggleSendLogModal(show){
       const LS_PAYROLL_FREE_USED = "ilovepaghe_payroll_free_used_v1";
       const LS_PAYROLL_PREMIUM_OVERRIDE = "ilovepaghe_premium_override_v1";
       const PAYROLL_FREE_SEND_LIMIT = 1;
+
+      // Post-invio: recensione Trustpilot (frequency cap)
+      const LS_REVIEW_PROMPT_AT = "ilovepaghe_last_review_prompt_at_v1";
+      const REVIEW_PROMPT_COOLDOWN_DAYS = Number(globalThis.REVIEW_PROMPT_COOLDOWN_DAYS || 14);
+      const TRUSTPILOT_REVIEW_URL_DEFAULT = "https://it.trustpilot.com/review/ilovepaghe.it";
 
       function readLocalPayrollEntitlements(){
         try{
@@ -958,6 +1099,144 @@ function toggleSendLogModal(show){
         try{ Ve("Premium richiesto", msg); }catch(_e){}
       }
 
+      function promptIsOpen(overlayId){
+        try{ return U(overlayId)?.getAttribute("aria-hidden") === "false"; }catch(_e){ return false; }
+      }
+
+      function togglePromptOverlay(overlayId, show){
+        const ov = U(overlayId);
+        if(!ov) return;
+
+        const focusKey = overlayId === "reviewPromptOverlay" ? "__lastFocusReviewPrompt__" : "__lastFocusPremiumPrompt__";
+
+        if(show){
+          try{ window[focusKey] = document.activeElement || null; }catch(_e){ window[focusKey] = null; }
+          try{ ov.removeAttribute("inert"); }catch(_e){}
+          ov.setAttribute("aria-hidden","false");
+          try{ updateModalOpenState(); }catch(_e){}
+          setTimeout(()=>{
+            try{ (ov.querySelector("button") || ov.querySelector(".promptShell"))?.focus?.(); }catch(_e){}
+          }, 10);
+        }else{
+          try{ if(document.activeElement && ov.contains(document.activeElement)) document.activeElement.blur(); }catch(_e){}
+          ov.setAttribute("aria-hidden","true");
+          try{ ov.setAttribute("inert",""); }catch(_e){}
+          try{ updateModalOpenState(); }catch(_e){}
+          setTimeout(()=>{ try{ window[focusKey]?.focus?.(); }catch(_e){} }, 10);
+        }
+      }
+
+      function updatePremiumPromptPriceLabel(){
+        try{
+          const btn = U("btnGoPremium");
+          if(!btn) return;
+          const price = String(globalThis.PAYROLL_PREMIUM_PRICE_LABEL || "19,90€/mese");
+          btn.innerHTML = `<span class="crown">👑</span>Diventa Premium – ${Ao(price)}`;
+        }catch(_e){}
+      }
+
+      function showPremiumUpsellPrompt(){
+        if(promptIsOpen("premiumPromptOverlay")) return;
+        try{ updatePremiumPromptPriceLabel(); }catch(_e){}
+        togglePromptOverlay("premiumPromptOverlay", true);
+      }
+
+      function closePremiumUpsellPrompt(){
+        togglePromptOverlay("premiumPromptOverlay", false);
+        // Se abbiamo in coda la recensione (post invio prova), mostriamo dopo la chiusura
+        try{
+          if(N.ui?.prompts?.pendingReviewAfterPremium){
+            N.ui.prompts.pendingReviewAfterPremium = false;
+            setTimeout(()=>{ try{ maybeShowReviewPromptAfterSend(); }catch(_e){} }, 50);
+          }
+        }catch(_e){}
+      }
+
+      async function getLastReviewPromptAt(){
+        let last = 0;
+        try{ last = Number(localStorage.getItem(LS_REVIEW_PROMPT_AT) || 0) || 0; }catch(_e){}
+
+        // Best-effort: prova a leggere da users/{uid}.lastReviewPromptAt (se rules lo permettono)
+        try{
+          if(N.user && !N.user.isAnonymous && N.firebase?.ok){
+            const uid = String(N.user.uid || "").trim();
+            if(uid){
+              const api = N.firebase.api, db = N.firebase.db;
+              const snap = await api.getDoc(api.doc(db, "users", uid));
+              if(snap?.exists()){
+                const d = snap.data() || {};
+                const ts = d.lastReviewPromptAt;
+                if(ts && typeof ts.toDate === "function") last = Math.max(last, ts.toDate().getTime());
+                const client = Number(d.lastReviewPromptAtClient || 0) || 0;
+                if(client) last = Math.max(last, client);
+              }
+            }
+          }
+        }catch(_e){}
+
+        return last;
+      }
+
+      async function recordReviewPromptShown(){
+        const now = Date.now();
+        try{ localStorage.setItem(LS_REVIEW_PROMPT_AT, String(now)); }catch(_e){}
+
+        // Best-effort: salva in users/{uid}
+        try{
+          if(N.user && !N.user.isAnonymous && N.firebase?.ok){
+            const uid = String(N.user.uid || "").trim();
+            if(uid){
+              const api = N.firebase.api, db = N.firebase.db;
+              await api.setDoc(api.doc(db, "users", uid), {
+                lastReviewPromptAt: api.serverTimestamp(),
+                lastReviewPromptAtClient: now,
+                updatedAt: api.serverTimestamp(),
+                updatedAtClient: now
+              }, { merge:true });
+            }
+          }
+        }catch(_e){}
+      }
+
+      function getTrustpilotReviewUrl(){
+        try{
+          return String(globalThis.TRUSTPILOT_REVIEW_URL || globalThis.PAYROLL_TRUSTPILOT_REVIEW_URL || TRUSTPILOT_REVIEW_URL_DEFAULT).trim();
+        }catch(_e){
+          return TRUSTPILOT_REVIEW_URL_DEFAULT;
+        }
+      }
+
+      async function maybeShowReviewPromptAfterSend(){
+        if(promptIsOpen("reviewPromptOverlay") || promptIsOpen("premiumPromptOverlay")) return false;
+
+        const cooldownMs = Math.max(1, REVIEW_PROMPT_COOLDOWN_DAYS) * 24 * 60 * 60 * 1000;
+        const last = await getLastReviewPromptAt();
+        if(last && (Date.now() - last) < cooldownMs) return false;
+
+        await recordReviewPromptShown();
+        togglePromptOverlay("reviewPromptOverlay", true);
+        return true;
+      }
+
+      async function runPostSendPrompts({ sentAny=false, sendOk=false, trialJustUsed=false } = {}){
+        // Se la prova si è appena conclusa: prima Premium, poi (eventualmente) recensione
+        if(trialJustUsed && sentAny && !(N.user?.isPremium)){
+          N.ui = N.ui || {};
+          N.ui.prompts = N.ui.prompts || {};
+          N.ui.prompts.pendingReviewAfterPremium = !!sendOk;
+          showPremiumUpsellPrompt();
+          return;
+        }
+        if(sendOk) await maybeShowReviewPromptAfterSend();
+      }
+
+      function triggerPayrollVerifyHintFade(){
+        const el = U("payrollVerifyHint");
+        if(!el) return;
+        try{ el.classList.remove("show"); }catch(_e){}
+        requestAnimationFrame(()=>{ requestAnimationFrame(()=>{ try{ el.classList.add("show"); }catch(_e){} }); });
+      }
+
       function ensurePayrollCanUpload(opts = {}){
         const o = opts || {};
         const show = (o.toast !== false);
@@ -1002,7 +1281,7 @@ function toggleSendLogModal(show){
         // Paywall
         if(payrollUploadIsLocked()){
           if(openBilling){
-            try{ goToPremium("Per continuare, attiva l’abbonamento Premium."); }catch(_e){}
+            try{ showPremiumUpsellPrompt(); }catch(_e){ try{ goToPremium("Per continuare, attiva l’abbonamento Premium."); }catch(_e2){} }
           }else if(show){
             showPayrollPremiumGate();
           }
@@ -1480,7 +1759,7 @@ function __payrollLoadScript(src){
           if(isUnauthorized){
             const isAnon = !!N.firebase?.auth?.currentUser?.isAnonymous;
             if(isAnon){
-              try{ showToast("Permessi Storage", "Accesso ospite non autorizzato. Accedi con Google e riprova."); }catch(_e){}
+              try{ showToast("Permessi Storage", "Accesso ospite non autorizzato. Accedi e riprova."); }catch(_e){}
               try{ toggleAuthOverlay(true); }catch(_e){}
             }else{
               try{ showToast("Permessi Storage", "Il tuo account non ha accesso a Firebase Storage per questo upload. Verifica whitelist/regole."); }catch(_e){}
@@ -2052,6 +2331,7 @@ function Bi() {
 	      }catch(_e){}
 
       try{ if(e==="match") Pi(); }catch(_e){}
+      try{ if(e==="match") triggerPayrollVerifyHintFade(); }catch(_e){}
       }
 
       const __payrollBusyPhrases = [
@@ -2342,6 +2622,7 @@ function Pi(){
   }
   if(counter) counter.textContent = `${filtered.length} righe`;
   refreshGroupedValidation();
+  try{ triggerPayrollVerifyHintFade(); }catch(_e){}
 }
 
 function renderUploadHistory(){
@@ -3927,9 +4208,14 @@ async function Yi() {
           }
 
           // Trial: dopo il primo invio riuscito, segna la prova gratuita come usata
+          let __sentAny = false;
+          let __trialJustUsed = false;
           try{
-            const sentAny = rows.some(r=>r && r.sent);
-            if(sentAny) await markPayrollTrialUsed("send_privacy");
+            const hadFree = !!N.user?.payrollFreeUsed;
+            const hadPrem = !!N.user?.isPremium;
+            __sentAny = rows.some(r=>r && r.sent);
+            if(__sentAny) await markPayrollTrialUsed("send_privacy");
+            __trialJustUsed = __sentAny && !hadPrem && !hadFree && !!N.user?.payrollFreeUsed && !N.user?.isPremium;
           }catch(_e){}
 
           e.sendSummary = summary;
@@ -3945,6 +4231,7 @@ async function Yi() {
           try{ setPayrollSendProgress(N.payroll?.admin?.sendUI?.done || rows.length, rows.length); }catch(_e){}
           try{ loadPayrollSentCounts(); }catch(_e){}
           try{ Pi(); }catch(_e){}
+          try{ await runPostSendPrompts({ sentAny: __sentAny, sendOk: (summary.status === "ok"), trialJustUsed: __trialJustUsed }); }catch(_e){}
           return;
         }
 
@@ -3955,6 +4242,8 @@ async function Yi() {
         // (usa _ensureDir definita sopra)
 
         const summary = { matched: rows.length, ambiguous: rows.filter(r=>r.conflict).length, unmatched: 0, status: "ok" };
+        let __sentAny = false;
+        let __trialJustUsed = false;
         try {
           let done = 0; const total = rows.length;
           for (const row of rows) {
@@ -4125,8 +4414,11 @@ async function Yi() {
           }
           // Trial: dopo il primo invio riuscito, segna la prova gratuita come usata
           try{
-            const sentAny = rows.some(r=>r && r.sent);
-            if(sentAny) await markPayrollTrialUsed("send");
+            const hadFree = !!N.user?.payrollFreeUsed;
+            const hadPrem = !!N.user?.isPremium;
+            __sentAny = rows.some(r=>r && r.sent);
+            if(__sentAny) await markPayrollTrialUsed("send");
+            __trialJustUsed = __sentAny && !hadPrem && !hadFree && !!N.user?.payrollFreeUsed && !N.user?.isPremium;
           }catch(_e){}
           await (async function(payload) {
             try {
@@ -4167,6 +4459,7 @@ async function Yi() {
         if(histBtn) histBtn.style.display = "";
         try{ setPayrollSendProgress(N.payroll?.admin?.sendUI?.done || 0, rows.length); }catch(_e){}
         loadPayrollSentCounts();
+        try{ await runPostSendPrompts({ sentAny: __sentAny, sendOk: (summary.status === "ok"), trialJustUsed: __trialJustUsed }); }catch(_e){}
       }
 
       async function openAdminModalFlow(targetPane, opts){
@@ -4766,8 +5059,29 @@ async function Yi() {
         }
       });
 
+      // Post-invio: prompt Trustpilot + upsell Premium
+      U("btnReviewTrustpilot")?.addEventListener("click", ()=>{
+        const url = getTrustpilotReviewUrl();
+        if(!url){ try{ Ve("Recensione", "Link Trustpilot non configurato."); }catch(_e){}; return; }
+        try{ window.open(url, "_blank", "noopener"); }catch(_e){ try{ location.href = url; }catch(_e2){} }
+        try{ togglePromptOverlay("reviewPromptOverlay", false); }catch(_e){}
+      });
+      U("btnReviewLater")?.addEventListener("click", ()=>{ try{ togglePromptOverlay("reviewPromptOverlay", false); }catch(_e){} });
+      U("reviewPromptOverlay")?.addEventListener("click", (evt)=>{ if(evt.target?.id === "reviewPromptOverlay"){ try{ togglePromptOverlay("reviewPromptOverlay", false); }catch(_e){} } });
+
+      U("btnGoPremium")?.addEventListener("click", ()=>{
+        try{ togglePromptOverlay("premiumPromptOverlay", false); }catch(_e){}
+        try{ goToPremium("Per continuare, attiva l’abbonamento Premium."); }catch(_e){}
+      });
+      U("btnPremiumLater")?.addEventListener("click", ()=>{ try{ closePremiumUpsellPrompt(); }catch(_e){} });
+      U("premiumPromptOverlay")?.addEventListener("click", (evt)=>{ if(evt.target?.id === "premiumPromptOverlay"){ try{ closePremiumUpsellPrompt(); }catch(_e){} } });
+
       document.addEventListener("keydown", (e)=>{
         if(e.key === "Escape"){
+          const pov = U("premiumPromptOverlay");
+          if(pov && pov.getAttribute("aria-hidden")==="false"){ try{ closePremiumUpsellPrompt(); }catch(_e){}; return; }
+          const rov = U("reviewPromptOverlay");
+          if(rov && rov.getAttribute("aria-hidden")==="false"){ try{ togglePromptOverlay("reviewPromptOverlay", false); }catch(_e){}; return; }
           const ov = U("pdfPreviewOverlay");
           if(ov && ov.getAttribute("aria-hidden")==="false") closePdfPreview();
           const logModal = U("sendLogModal");
@@ -5199,6 +5513,18 @@ const payrollDirAutofill = () => {
       U("btnPayrollReset3")?.addEventListener("click", () => ji());
       U("btnPayrollMatch")?.addEventListener("click", () => Gi());
       U("btnPayrollBackPreview")?.addEventListener("click", () => Di("preview"));
+      U("btnPayrollVerifyMatched")?.addEventListener("click", async ()=>{
+        try{
+          const rows = N.payroll?.admin?.groupedRows || [];
+          const row = rows.find(r=>r && r.enabled!==false && !r.sent) || rows.find(r=>r && !r.sent) || rows[0] || null;
+          if(!row || !row.key){ Ve("Verifica", "Nessuna riga disponibile da verificare."); return; }
+          await openPayrollPages(row.key);
+          try{ triggerPayrollVerifyHintFade(); }catch(_e){}
+        }catch(err){
+          console.warn("verify matched pdf", err);
+          Ve("Anteprima non disponibile", err?.message || String(err));
+        }
+      });
       U("btnPayrollSend")?.addEventListener("click", () => Yi());
       U("btnToggleDirForm")?.addEventListener("click", ()=>{ const form = U("dirForm"); form?.classList.toggle("isOpen"); });
       document.addEventListener("click", async evt=>{
@@ -6513,7 +6839,7 @@ const app = initializeApp(firebaseConfig);
 
             if(!preferRedirect){
               try{
-                try{ markAuthInflight("Accedi con Google", "login_popup"); }catch(_e){}
+                try{ markAuthInflight("Accedi", "login_popup"); }catch(_e){}
                 await authMod.signInWithPopup(auth, googleProvider);
                 return;
               }catch(err){
@@ -6530,7 +6856,7 @@ const app = initializeApp(firebaseConfig);
               }
             }
 
-            try{ markAuthInflight("Accedi con Google", "login_redirect"); }catch(_e){}
+            try{ markAuthInflight("Accedi", "login_redirect"); }catch(_e){}
             await authMod.signInWithRedirect(auth, googleProvider);
             return;
           }catch(err){
@@ -6551,7 +6877,200 @@ const app = initializeApp(firebaseConfig);
           }
         }
 
-        // Esponi azioni auth (usate anche dal CTA upload)
+        
+        // =========================
+        // Email link (passwordless / magic link)
+        // =========================
+        let emailLinkMode = "send";        // "send" | "complete"
+        let emailLinkCompleteUrl = "";     // link corrente (quando serve completare)
+
+        function setEmailMode(mode="send", linkUrl=""){
+          emailLinkMode = (String(mode||"send").toLowerCase() === "complete") ? "complete" : "send";
+          emailLinkCompleteUrl = String(linkUrl||"");
+          try{
+            const t = document.getElementById("btnEmailLinkSendText");
+            if(t) t.textContent = (emailLinkMode === "complete") ? "Completa accesso" : "Invia link";
+          }catch(_e){}
+        }
+        function setEmailBusy(busy){
+          try{
+            const btn = document.getElementById("btnEmailLinkSend");
+            const sp = document.getElementById("authEmailSpinner");
+            if(sp) sp.style.display = busy ? "" : "none";
+            // disabilita sempre se Firebase non è pronto
+            const ready = !!state.firebase?.ok;
+            if(btn) btn.disabled = busy || !ready;
+          }catch(_e){}
+        }
+        function setEmailError(msg){
+          try{
+            const e = document.getElementById("authEmailError");
+            if(!e) return;
+            const m = String(msg||"").trim();
+            if(m){
+              e.textContent = m;
+              e.style.display = "";
+            }else{
+              e.textContent = "";
+              e.style.display = "none";
+            }
+          }catch(_e){}
+        }
+        function setEmailSent(show){
+          try{
+            const s = document.getElementById("authEmailSent");
+            if(!s) return;
+            s.style.display = show ? "" : "none";
+          }catch(_e){}
+        }
+        function getEmailInputValue(){
+          try{
+            return String(document.getElementById("authEmailInput")?.value || "").trim();
+          }catch(_e){ return ""; }
+        }
+        function isValidEmail(v){
+          const s = String(v||"").trim();
+          return !!(s && s.includes("@") && s.includes(".") && s.length <= 254);
+        }
+
+        function buildEmailLinkContinueUrl(nextUrl){
+          try{
+            const base = new URL(location.origin + location.pathname);
+            base.searchParams.set("emailLogin", "1");
+            const safeNext = sanitizeSameOriginUrl(nextUrl || "") || "";
+            if(safeNext) base.searchParams.set("next", safeNext);
+            return base.toString();
+          }catch(_e){
+            return String(location.origin + location.pathname);
+          }
+        }
+
+        async function sendMagicLink(email){
+          const mail = String(email||"").trim();
+          if(!isValidEmail(mail)){
+            setEmailError("Inserisci una email valida.");
+            return;
+          }
+          setEmailBusy(true);
+          setEmailError("");
+          setEmailSent(false);
+
+          try{
+            const next = sanitizeSameOriginUrl(getAuthNextUrl() || "") || sanitizeSameOriginUrl(location.href) || "";
+            const continueUrl = buildEmailLinkContinueUrl(next || (location.origin + location.pathname));
+            const actionCodeSettings = {
+              url: continueUrl,
+              handleCodeInApp: true
+            };
+
+            await authMod.sendSignInLinkToEmail(auth, mail, actionCodeSettings);
+
+            try{
+              localStorage.setItem(LS_EMAIL_LINK_EMAIL, mail);
+              localStorage.setItem(LS_EMAIL_LINK_SENT_AT, String(Date.now()));
+            }catch(_e){}
+
+            setEmailSent(true);
+            try{ showToast("Link inviato", "Ti abbiamo inviato un link di accesso. Controlla anche spam/promozioni.", 4200); }catch(_e){}
+          }catch(err){
+            console.warn("sendSignInLinkToEmail", err);
+            try{
+              const d = (typeof describeAuthError === "function") ? describeAuthError(err) : { title:"Invio non riuscito", body:(err?.message||String(err)) };
+              setEmailError(d.body || d.title || "Invio non riuscito.");
+              try{ showToast(d.title || "Invio non riuscito", d.body || "", 5200); }catch(_e){}
+            }catch(_e2){
+              setEmailError(err?.message || String(err));
+            }
+          }finally{
+            setEmailBusy(false);
+          }
+        }
+
+        async function completeMagicLink(email, linkUrl){
+          const mail = String(email||"").trim();
+          const link = String(linkUrl||location.href);
+          if(!isValidEmail(mail)){
+            setEmailError("Inserisci la tua email per completare l’accesso.");
+            return;
+          }
+          setEmailBusy(true);
+          setEmailError("");
+
+          try{
+            await authMod.signInWithEmailLink(auth, mail, link);
+
+            // cleanup email salvata
+            try{
+              localStorage.removeItem(LS_EMAIL_LINK_EMAIL);
+              localStorage.removeItem(LS_EMAIL_LINK_SENT_AT);
+            }catch(_e){}
+
+            // chiudi overlay (se aperto)
+            try{ toggleAuthOverlay(false); }catch(_e){}
+
+            // redirect dove stavi
+            let next = "";
+            try{
+              const u = new URL(link);
+              next = u.searchParams.get("next") || "";
+            }catch(_e){}
+            next = sanitizeSameOriginUrl(next) || sanitizeSameOriginUrl(getAuthNextUrl()) || "";
+            try{ clearAuthNextUrl(); }catch(_e){}
+
+            if(next){
+              location.replace(next);
+            }else{
+              // pulisci URL da parametri oobCode/apiKey ecc
+              location.replace(location.origin + location.pathname);
+            }
+          }catch(err){
+            console.warn("signInWithEmailLink", err);
+            try{
+              const d = (typeof describeAuthError === "function") ? describeAuthError(err) : { title:"Accesso non riuscito", body:(err?.message||String(err)) };
+              setEmailError(d.body || d.title || "Accesso non riuscito.");
+              try{ showToast(d.title || "Accesso non riuscito", d.body || "", 5200); }catch(_e){}
+            }catch(_e2){
+              setEmailError(err?.message || String(err));
+            }
+          }finally{
+            setEmailBusy(false);
+          }
+        }
+
+        async function maybeHandleMagicLink(){
+          try{
+            if(!authMod.isSignInWithEmailLink(auth, location.href)) return false;
+
+            // Se siamo qui, il link è valido → prova completamento automatico
+            const savedEmail = String(localStorage.getItem(LS_EMAIL_LINK_EMAIL) || "").trim();
+            if(savedEmail){
+              try{ markAuthInflight("Completo accesso", "email_link"); }catch(_e){}
+              await completeMagicLink(savedEmail, location.href);
+              return true;
+            }
+
+            // Se manca email (es. link aperto su un altro device), chiedila all’utente
+            setEmailMode("complete", location.href);
+            openAuthOverlay("Inserisci la tua email per completare l’accesso.", "email");
+            return true;
+          }catch(err){
+            console.warn("magic link flow", err);
+            return false;
+          }
+        }
+
+        async function handleEmailAuthAction(){
+          const email = getEmailInputValue();
+          if(emailLinkMode === "complete"){
+            await completeMagicLink(email, emailLinkCompleteUrl || location.href);
+          }else{
+            // salva next al click, così anche il footer/CTA può reindirizzare
+            try{ setAuthNextUrl(location.href); }catch(_e){}
+            await sendMagicLink(email);
+          }
+        }
+
+// Esponi azioni auth (usate anche dal CTA upload)
         try{
           state.authActions = {
             signIn: signInWithGoogle,
@@ -6560,14 +7079,96 @@ const app = initializeApp(firebaseConfig);
           };
         }catch(_e){}
 
+        // Helper UI (reset email state)
+        try{
+          state.authUI = {
+            resetEmailUi: ()=>{ try{ setEmailMode("send",""); setEmailError(""); setEmailSent(false); }catch(_e){} }
+          };
+        }catch(_e){}
+
         // Wire UI buttons (header + overlay)
         try{
-          document.getElementById("btnGoogleLogin")?.addEventListener("click", ()=>signInWithGoogle());
+          // Header "Accedi" → apre overlay (default: email)
+          document.getElementById("btnGoogleLogin")?.addEventListener("click", ()=>{
+            try{ setAuthNextUrl(location.href); }catch(_e){}
+            try{ state.authUI?.resetEmailUi?.(); }catch(_e){}
+            openAuthOverlay("", "email");
+          });
+
+          // Tabs (overlay)
+          document.getElementById("authTabEmail")?.addEventListener("click", ()=>setAuthTab("email"));
+          document.getElementById("authTabGoogle")?.addEventListener("click", ()=>setAuthTab("google"));
+
+          // Overlay actions
           document.getElementById("btnGoogleLoginOverlay")?.addEventListener("click", ()=>signInWithGoogle());
-          document.getElementById("btnLogoutBottom")?.addEventListener("click", ()=>signOutGoogle());
-          document.getElementById("btnLogout")?.addEventListener("click", ()=>signOutGoogle());
+          document.getElementById("btnEmailLinkSend")?.addEventListener("click", ()=>handleEmailAuthAction());
+          document.getElementById("authEmailInput")?.addEventListener("keydown", (ev)=>{
+            try{
+              if(ev && ev.key === "Enter"){
+                ev.preventDefault();
+                handleEmailAuthAction();
+              }
+            }catch(_e){}
+          });
+
+          // Close overlay
           document.getElementById("btnAuthBack")?.addEventListener("click", ()=>{
             toggleAuthOverlay(false);
+            try{
+              setEmailError("");
+              setEmailSent(false);
+              // torna in modalità "send" solo se NON siamo su un link di accesso email
+              const isLink = !!(authMod?.isSignInWithEmailLink && authMod.isSignInWithEmailLink(auth, location.href));
+              if(!isLink) setEmailMode("send","");
+            }catch(_e){}
+          });
+
+          // Backdrop click closes
+          document.getElementById("authOverlay")?.addEventListener("click", (ev)=>{
+            try{
+              if(ev?.target && ev.target.id === "authOverlay"){
+                toggleAuthOverlay(false);
+              }
+            }catch(_e){}
+          });
+
+          // Logout
+          document.getElementById("btnLogoutBottom")?.addEventListener("click", ()=>signOutGoogle());
+          document.getElementById("btnLogout")?.addEventListener("click", ()=>signOutGoogle());
+
+          // Footer: Sicurezza e Trasparenza
+          document.getElementById("btnFooterSecurity")?.addEventListener("click", ()=>{
+            toggleSecurityOverlay(true);
+          });
+          document.getElementById("btnSecurityClose")?.addEventListener("click", ()=>toggleSecurityOverlay(false));
+          document.getElementById("securityOverlay")?.addEventListener("click", (ev)=>{
+            try{
+              if(ev?.target && ev.target.id === "securityOverlay"){
+                toggleSecurityOverlay(false);
+              }
+            }catch(_e){}
+          });
+
+          // Footer: Segnala un problema (mailto)
+          document.getElementById("btnFooterReportIssue")?.addEventListener("click", ()=>{
+            try{
+              const dest = String(globalThis.PAGHEIA_SUPPORT_EMAIL || (typeof SUPER_ADMIN_EMAIL !== "undefined" ? SUPER_ADMIN_EMAIL : "") || "").trim();
+              const subj = encodeURIComponent("Segnalazione problema iLovePaghe");
+              const body = encodeURIComponent(
+                "Ciao,\n\nDescrizione del problema:\n\n---\nDettagli utili:\n" +
+                "- URL: " + location.href + "\n" +
+                "- Browser: " + (navigator.userAgent || "") + "\n" +
+                "- Utente: " + (state.user?.email || "non loggato") + "\n" +
+                "- Data: " + (new Date().toISOString()) + "\n"
+              );
+              if(dest){
+                location.href = "mailto:" + dest + "?subject=" + subj + "&body=" + body;
+              }else{
+                showToast("Contatto non configurato", "Imposta PAGHEIA_SUPPORT_EMAIL per 'Segnala un problema'.", 3500);
+              }
+            }catch(_e){
+              showToast("Impossibile aprire l’email", "Copia i dettagli e scrivici.", 3500);
+            }
           });
         }catch(_e){}
 
@@ -6582,6 +7183,9 @@ const app = initializeApp(firebaseConfig);
             showToast(d.title, d.body, 5200);
           }catch(_e){}
         }
+
+        // Magic link: completa l’accesso se arrivi da un link email
+        try{ await maybeHandleMagicLink(); }catch(_e){}
 
         // Accesso anonimo DISATTIVATO: se non c'è sessione, resta signed-out e chiedi login Google.
 // Role resolution (admin + whitelist) — evita query non autorizzate
@@ -6632,7 +7236,7 @@ const app = initializeApp(firebaseConfig);
 
         function openAuthOverlay(reason){
           try{
-            const msg = reason || "Sessione non attiva. Accedi con Google per continuare.";
+            const msg = reason || "Sessione non attiva. Accedi per continuare.";
             state.authGateMessage = msg;
             state.authGateState = "signed_out";
             updateAuthUI();
@@ -6678,7 +7282,7 @@ const app = initializeApp(firebaseConfig);
           if(state.authGateState === "signed_out") return;
           if(auth && auth.currentUser) return;
           enterRestoringMode("Ripristino sessione…");
-          startOrKeepRestoreTimeout(()=> enterSignedOut("Sessione non attiva. Accedi con Google per continuare."), (recentAuthOkWithinTTL() ? RESTORE_TIMEOUT_MS : RESTORE_TIMEOUT_SHORT_MS));
+          startOrKeepRestoreTimeout(()=> enterSignedOut("Sessione non attiva. Accedi per continuare."), (recentAuthOkWithinTTL() ? RESTORE_TIMEOUT_MS : RESTORE_TIMEOUT_SHORT_MS));
         }
         function wireAuthResumeHandlers(){
           if(globalThis.__BUSTE_AUTH_RESUME_BOUND__) return;
@@ -6693,7 +7297,7 @@ const app = initializeApp(firebaseConfig);
         // Prime UI: aspetta SEMPRE l’hydration auth (evita redirect prematuri / loop)
         if(isMobileAuth() && !auth.currentUser){
           enterRestoringMode("Ripristino sessione…");
-          startOrKeepRestoreTimeout(()=> enterSignedOut("Sessione non attiva. Accedi con Google per continuare."), (recentAuthOkWithinTTL() ? RESTORE_TIMEOUT_MS : RESTORE_TIMEOUT_SHORT_MS));
+          startOrKeepRestoreTimeout(()=> enterSignedOut("Sessione non attiva. Accedi per continuare."), (recentAuthOkWithinTTL() ? RESTORE_TIMEOUT_MS : RESTORE_TIMEOUT_SHORT_MS));
         }
 
         authMod.onAuthStateChanged(auth, async user=>{
@@ -6706,8 +7310,8 @@ const app = initializeApp(firebaseConfig);
             try{ state.user = null; }catch(_e){}
             try{ Payroll.onSignedOut(); }catch(_e){}
             try{ clearRestoreTimeout(); }catch(_e){}
-            try{ enterSignedOut("Accesso anonimo disattivato. Accedi con Google per continuare."); }catch(_e){}
-            try{ showToast("Accesso richiesto", "Accesso anonimo disattivato. Accedi con Google per continuare.", 2200); }catch(_e){}
+            try{ enterSignedOut("Accesso anonimo disattivato. Accedi per continuare."); }catch(_e){}
+            try{ showToast("Accesso richiesto", "Accesso anonimo disattivato. Accedi per continuare.", 2200); }catch(_e){}
             return;
           }
           if(user){
@@ -6761,10 +7365,10 @@ const app = initializeApp(firebaseConfig);
 
             if(isMobileAuth()){
               enterRestoringMode("Ripristino sessione…");
-              startOrKeepRestoreTimeout(()=> enterSignedOut("Sessione non attiva. Accedi con Google per continuare."), (recentAuthOkWithinTTL() ? RESTORE_TIMEOUT_MS : RESTORE_TIMEOUT_SHORT_MS));
+              startOrKeepRestoreTimeout(()=> enterSignedOut("Sessione non attiva. Accedi per continuare."), (recentAuthOkWithinTTL() ? RESTORE_TIMEOUT_MS : RESTORE_TIMEOUT_SHORT_MS));
             }else{
               clearRestoreTimeout();
-              enterSignedOut("Sessione non attiva. Accedi con Google per continuare.");
+              enterSignedOut("Sessione non attiva. Accedi per continuare.");
             }
           }
         });
