@@ -662,6 +662,12 @@ updateGreetingUI();
         closeProfileDropdown();
       });
 
+      document.getElementById("btnProfileDashboard")?.addEventListener("click", (ev)=>{
+        try{ ev.preventDefault(); ev.stopPropagation(); }catch(_e){}
+        closeProfileDropdown();
+        try{ navigateSoft("./dashboard.html"); }catch(_e){ try{ location.href = "./dashboard.html"; }catch(_e2){} }
+      });
+
       document.getElementById("btnProfilePremium")?.addEventListener("click", (ev)=>{
         try{ ev.preventDefault(); ev.stopPropagation(); }catch(_e){}
         const u = state.user;
@@ -1074,7 +1080,9 @@ function toggleSendLogModal(show){
       const PAYROLL_DOC_COLS=[COL_PAYROLL_DOCS,COL_PAYROLL_DOCS_LEGACY];
       // Premium gate (trial: 1 invio gratuito)
       const COL_PAYROLL_USAGE = "payrollUsage";
-      const LS_PAYROLL_FREE_USED = "ilovepaghe_payroll_free_used_v1";
+      
+      const COL_USER_PREFS = "userPrefs";
+const LS_PAYROLL_FREE_USED = "ilovepaghe_payroll_free_used_v1";
       const LS_PAYROLL_PREMIUM_OVERRIDE = "ilovepaghe_premium_override_v1";
       const PAYROLL_FREE_SEND_LIMIT = 1;
 
@@ -1098,6 +1106,34 @@ function toggleSendLogModal(show){
           }catch(_e){}
         }catch(_e){}
       }
+
+      // Preferenze utente (Firestore): sync impostazioni dashboard → app
+      // Attualmente usiamo questa preferenza per: "Ricorda le email dei dipendenti" (saveEmailsForNext).
+      async function syncUserPrefsSaveEmailsFromFirestore(){
+        try{
+          if(!(N.firebase?.ok && N.user && !N.user.isAnonymous)) return;
+          const api = N.firebase.api, db = N.firebase.db;
+          const uid = String(N.user.uid || "").trim();
+          if(!uid) return;
+
+          const ref = api.doc(db, COL_USER_PREFS, uid);
+          const s = await api.getDoc(ref);
+          if(!s || !s.exists()) return;
+
+          const d = s.data() || {};
+          if(typeof d.saveEmailsForNext !== "boolean") return;
+
+          // Persistiamo anche in localStorage per compatibilità con la UI esistente
+          try{ localStorage.setItem("payroll_save_emails_v1", d.saveEmailsForNext ? "1" : "0"); }catch(_e){}
+
+          try{
+            N.payroll = N.payroll || {};
+            N.payroll.admin = N.payroll.admin || {};
+            N.payroll.admin.saveEmailsForNext = !!d.saveEmailsForNext;
+          }catch(_e){}
+        }catch(_e){}
+      }
+
 
       // Prova a leggere entitlements da Custom Claims (se presenti).
       // Utile quando la sincronizzazione Stripe aggiorna claims prima di Firestore (o come fallback a problemi di lettura).
@@ -7642,6 +7678,10 @@ document.getElementById("btnSecurityClose")?.addEventListener("click", ()=>toggl
               const prem = localStorage.getItem("ilovepaghe_premium_override_v1")==="1";
               if(prem) state.user.isPremium = true;
             }catch(_e){}
+
+            // Preferenze utente (dashboard): sync da Firestore
+            try{ await syncUserPrefsSaveEmailsFromFirestore(); }catch(_e){}
+
             updateAuthUI();
             await resolveUserRole(user);
             updateAuthUI();
