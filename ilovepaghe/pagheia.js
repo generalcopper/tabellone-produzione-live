@@ -7945,15 +7945,35 @@ document.getElementById("btnSecurityClose")?.addEventListener("click", ()=>toggl
 
     function navigateSpa(href){
       try{
-        if(href === "home" || href === "/"){
+        const raw = String(href || "").trim();
+
+        // Home: gestisci anche i casi relativi (es. "./" quando sei su /dashboard/)
+        if(
+          raw === "" ||
+          raw === "home" ||
+          raw === "/" ||
+          raw === "." ||
+          raw === "./" ||
+          raw === "#"
+        ){
           navigateSpaToRoute("home");
           return;
         }
-        if(href === "dashboard"){
+
+        // Dashboard: gestisci anche i casi relativi
+        if(
+          raw === "dashboard" ||
+          raw === "./dashboard" ||
+          raw === "dashboard/" ||
+          raw === "./dashboard/" ||
+          raw === "dashboard.html" ||
+          raw === "./dashboard.html"
+        ){
           navigateSpaToRoute("dashboard");
           return;
         }
-        const url = new URL(href, location.href);
+
+        const url = new URL(raw, location.href);
         if(url.origin !== location.origin){
           location.href = url.href;
           return;
@@ -8025,12 +8045,26 @@ document.getElementById("btnSecurityClose")?.addEventListener("click", ()=>toggl
         globalThis.__PAGHEIA_SPA_ROUTER__ = true;
         globalThis.pagheiaSpaNavigate = navigateSpa;
 
+        // Brand/logo: imposta sempre href assoluto alla home (robusto su /dashboard/ e simili)
+        try{
+          const brand = document.getElementById("brandHomeLink");
+          if(brand) brand.setAttribute("href", getSpaUrlForRoute("home"));
+        }catch(_e){}
+
         document.addEventListener("click", (ev)=>{
           try{
             const a = ev.target?.closest?.("a[data-spa]");
             if(!a) return;
+
+            // Logo: sempre HOME, in ogni caso
+            if(a.id === "brandHomeLink"){
+              ev.preventDefault();
+              navigateSpaToRoute("home");
+              return;
+            }
+
             const href = a.getAttribute("href");
-            if(!href) return;
+            if(href == null) return;
             ev.preventDefault();
             navigateSpa(href);
           }catch(_e){}
