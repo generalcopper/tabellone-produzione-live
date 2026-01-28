@@ -7486,12 +7486,6 @@ const app = initializeApp(firebaseConfig);
           // Logout
           document.getElementById("btnLogoutBottom")?.addEventListener("click", ()=>signOutGoogle());
           document.getElementById("btnLogout")?.addEventListener("click", ()=>signOutGoogle());
-
-          // Footer: Sicurezza e Trasparenza
-          document.getElementById("btnFooterSecurity")?.addEventListener("click", (ev)=>{
-            try{ ev?.preventDefault?.(); }catch(_e){}
-            try{ navigateSoft("./sicurezza-trasparenza.html"); }catch(_e){ try{ location.href="./sicurezza-trasparenza.html"; }catch(_e2){} }
-          });
 document.getElementById("btnSecurityClose")?.addEventListener("click", ()=>toggleSecurityOverlay(false));
           document.getElementById("securityOverlay")?.addEventListener("click", (ev)=>{
             try{
@@ -7499,12 +7493,6 @@ document.getElementById("btnSecurityClose")?.addEventListener("click", ()=>toggl
                 toggleSecurityOverlay(false);
               }
             }catch(_e){}
-          });
-
-          // Footer: Segnala un problema (pagina dedicata, navigazione soft)
-          document.getElementById("btnFooterReportIssue")?.addEventListener("click", (ev)=>{
-            try{ ev?.preventDefault?.(); }catch(_e){}
-            try{ navigateSoft("./segnala-problema.html"); }catch(_e){ try{ location.href="./segnala-problema.html"; }catch(_e2){} }
           });
 }catch(_e){}
 
