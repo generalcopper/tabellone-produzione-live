@@ -7933,8 +7933,8 @@ document.getElementById("btnSecurityClose")?.addEventListener("click", ()=>toggl
     function getSpaRouteFromLocation(){
       try{
         const path = String(location.pathname || "");
-        let relative = path.startsWith(SPA_BASE_PATH) ? path.slice(SPA_BASE_PATH.length) : path.replace(/^\\//, "");
-        relative = relative.replace(/\\/+$/, "");
+        let relative = path.startsWith(SPA_BASE_PATH) ? path.slice(SPA_BASE_PATH.length) : path.replace(/^\//, "");
+        relative = relative.replace(/\/+$/, "");
         if(!relative || relative === "pagheia.html" || relative === "index.html") return "home";
         if(relative === "dashboard" || relative === "dashboard.html") return "dashboard";
         return "home";
