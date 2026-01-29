@@ -308,6 +308,14 @@ if(payrollGreeting) payrollGreeting.textContent = `Ciao, ${name}.`;
       const uploadPending = isAuthed && !isPremium && (premiumSyncPending || (!payrollFreeUsed && !payrollUsageLoaded && !payrollUsageError));
       const uploadError = isAuthed && !isPremium && !premiumSyncPending && !payrollFreeUsed && payrollUsageError;
       const uploadBlocked = uploadLocked || uploadPending || uploadError;
+
+      // Header user icon: mostra la corona se Premium
+      try{
+        if(pill){
+          pill.classList.toggle("premium", !!(isAuthed && isPremium));
+          pill.setAttribute("aria-label", isAuthed ? (isPremium ? "Account Premium" : "Account") : "Account");
+        }
+      }catch(_e){}
       if(isAuthed){
         pill?.classList.add("ok");
         dot?.classList.add("ok");
@@ -656,6 +664,37 @@ updateGreetingUI();
         toggleProfileDropdown(next);
         syncProfileDropdownUI();
       });
+
+      // Hover (desktop): apri la tendina automaticamente quando passi col mouse
+      try{
+        const dd = document.getElementById("profileDropdown");
+        const hoverOk = !!(window.matchMedia && window.matchMedia("(hover:hover) and (pointer:fine)").matches);
+        if(pill && dd && hoverOk){
+          let tClose = null;
+          const cancel = ()=>{ try{ if(tClose){ clearTimeout(tClose); tClose = null; } }catch(_e){} };
+          const schedule = (ms=220)=>{
+            cancel();
+            tClose = setTimeout(()=>{
+              try{
+                if(!pill.matches(":hover") && !dd.matches(":hover")) closeProfileDropdown();
+              }catch(_e){}
+            }, ms);
+          };
+
+          pill.addEventListener("mouseenter", ()=>{
+            cancel();
+            const isAuthed = !!(state.user && !state.user.isAnonymous);
+            if(!isAuthed) return;
+            if(!profileDropdownIsOpen()){
+              toggleProfileDropdown(true);
+              syncProfileDropdownUI();
+            }
+          });
+          pill.addEventListener("mouseleave", ()=> schedule(260));
+          dd.addEventListener("mouseenter", ()=> cancel());
+          dd.addEventListener("mouseleave", ()=> schedule(180));
+        }
+      }catch(_e){}
 
       document.getElementById("btnProfileClose")?.addEventListener("click", (ev)=>{
         try{ ev.preventDefault(); ev.stopPropagation(); }catch(_e){}
