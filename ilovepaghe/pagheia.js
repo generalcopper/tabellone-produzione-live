@@ -7604,7 +7604,7 @@ document.getElementById("btnSecurityClose")?.addEventListener("click", ()=>toggl
                 // Evita che "Indietro" ti riporti su accounts.google.com dopo un login via redirect.
         (()=>{})();
 
-        function openAuthOverlay(reason){
+        function setAuthGateSignedOut(reason){
           try{
             const msg = reason || "Sessione non attiva. Accedi per continuare.";
             state.authGateMessage = msg;
