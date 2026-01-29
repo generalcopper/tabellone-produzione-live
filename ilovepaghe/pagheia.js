@@ -7610,7 +7610,6 @@ document.getElementById("btnSecurityClose")?.addEventListener("click", ()=>toggl
             state.authGateMessage = msg;
             state.authGateState = "signed_out";
             updateAuthUI();
-            try{ showToast("Accesso richiesto", msg, 1800); }catch(_e){}
           }catch(_e){}
         }
 
