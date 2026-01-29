@@ -1,4 +1,7 @@
-    const firebaseConfig = {
+// Build: 20260130_001
+    globalThis.ILOVEPAGHE_BUILD = "20260130_001";
+
+const firebaseConfig = {
       apiKey: "AIzaSyD_2Eb6ni7E08hUbEkozP85LzyfesutO6M",
       authDomain: "ilovepaghe-ludo-2026.firebaseapp.com",
       projectId: "ilovepaghe-ludo-2026",
