@@ -8107,7 +8107,14 @@ document.getElementById("btnSecurityClose")?.addEventListener("click", ()=>toggl
             // Logo: sempre HOME, in ogni caso
             if(a.id === "brandHomeLink"){
               ev.preventDefault();
+              try{
+                if(location.hash){
+                  const u = new URL(getSpaUrlForRoute("home"), location.origin);
+                  history.replaceState({ ...(history.state||{}), spa:true, route:"home" }, "", u.href);
+                }
+              }catch(_e){}
               navigateSpaToRoute("home");
+              try{ applyHashView(); }catch(_e){}
               return;
             }
 
@@ -8124,15 +8131,18 @@ document.getElementById("btnSecurityClose")?.addEventListener("click", ()=>toggl
     }
 
     // =========================
-    // Hash router — #come-funziona (no reload, stesso header/footer)
+    // Hash router — #home, #come-funziona, #terms, #privacy-policy (no reload, stesso header/footer)
     // =========================
     let __hashViewLast = "";
     let __hashViewApplying = false;
 
     function getHashView(){
       try{
-        const h = String(location.hash || "").trim();
-        return (h === "#come-funziona") ? "come-funziona" : "home";
+        const h = String(location.hash || "").trim().replace(/^#/, "");
+        if(h === "come-funziona") return "come-funziona";
+        if(h === "terms") return "terms";
+        if(h === "privacy-policy") return "privacy-policy";
+        return "home";
       }catch(_e){
         return "home";
       }
@@ -8145,15 +8155,15 @@ document.getElementById("btnSecurityClose")?.addEventListener("click", ()=>toggl
         const view = getHashView();
         const showHow = (view === "come-funziona");
 
-        // Se sei in una pagina legale (privacy/cookie/sicurezza) e apri #come-funziona,
-        // torniamo alla home (sempre SPA, senza reload).
+        // Se sei in una pagina legale (privacy/cookie/sicurezza) e apri una hash view,
+        // torniamo alla home (sempre SPA, senza reload) mantenendo l'hash.
         try{
           const f = (typeof getCurrentFileName === "function") ? getCurrentFileName() : "";
           const legal = (typeof isLegalFile === "function") ? isLegalFile(f) : false;
           if(legal){
-            if(showHow && typeof getSpaUrlForRoute === "function"){
+            if(view !== "home" && typeof getSpaUrlForRoute === "function"){
               const u = new URL(getSpaUrlForRoute("home"), location.origin);
-              u.hash = "#come-funziona";
+              u.hash = `#${view}`;
               history.replaceState({ ...(history.state||{}), spa:true, route:"home" }, "", u.href);
               try{ applySpaRoute(); }catch(_e){}
             }
@@ -8163,15 +8173,17 @@ document.getElementById("btnSecurityClose")?.addEventListener("click", ()=>toggl
 
         const home = document.getElementById("home");
         const how = document.getElementById("come-funziona");
+        const terms = document.getElementById("terms");
+        const privacy = document.getElementById("privacy-policy");
 
-        // Se siamo su /dashboard (o la home non è ancora stata renderizzata) e l'hash chiede "come-funziona",
+        // Se siamo su /dashboard (o la home non è ancora stata renderizzata) e l'hash chiede una view,
         // forza la route "home" mantenendo l'hash.
-        if(showHow && (!home || !how)){
+        if(view !== "home" && (!home || !how || !terms || !privacy)){
           try{
             const r = (typeof getSpaRouteFromLocation === "function") ? getSpaRouteFromLocation() : "home";
             if(r !== "home" && typeof getSpaUrlForRoute === "function"){
               const u = new URL(getSpaUrlForRoute("home"), location.origin);
-              u.hash = "#come-funziona";
+              u.hash = `#${view}`;
               history.replaceState({ ...(history.state||{}), spa:true, route:"home" }, "", u.href);
               try{ applySpaRoute(); }catch(_e){}
               return;
@@ -8183,16 +8195,19 @@ document.getElementById("btnSecurityClose")?.addEventListener("click", ()=>toggl
         }
 
         // Toggle sezioni
-        if(home){
-          home.classList.toggle("isActive", !showHow);
-          home.style.display = showHow ? "none" : "";
-          try{ home.setAttribute("aria-hidden", showHow ? "true" : "false"); }catch(_e){}
-        }
-        if(how){
-          how.classList.toggle("isActive", showHow);
-          how.style.display = showHow ? "" : "none";
-          try{ how.setAttribute("aria-hidden", showHow ? "false" : "true"); }catch(_e){}
-        }
+        const sections = [
+          { el: home, key: "home" },
+          { el: how, key: "come-funziona" },
+          { el: terms, key: "terms" },
+          { el: privacy, key: "privacy-policy" },
+        ];
+        sections.forEach(({ el, key })=>{
+          if(!el) return;
+          const isActive = view === key;
+          el.classList.toggle("isActive", isActive);
+          el.style.display = isActive ? "" : "none";
+          try{ el.setAttribute("aria-hidden", isActive ? "false" : "true"); }catch(_e){}
+        });
 
         // Nav active
         try{
