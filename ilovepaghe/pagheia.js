@@ -308,14 +308,13 @@ if(payrollGreeting) payrollGreeting.textContent = `Ciao, ${name}.`;
       const uploadPending = isAuthed && !isPremium && (premiumSyncPending || (!payrollFreeUsed && !payrollUsageLoaded && !payrollUsageError));
       const uploadError = isAuthed && !isPremium && !premiumSyncPending && !payrollFreeUsed && payrollUsageError;
       const uploadBlocked = uploadLocked || uploadPending || uploadError;
-
-      // Header user icon: mostra la corona se Premium
-      try{
-        if(pill){
-          pill.classList.toggle("premium", !!(isAuthed && isPremium));
-          pill.setAttribute("aria-label", isAuthed ? (isPremium ? "Account Premium" : "Account") : "Account");
-        }
-      }catch(_e){}
+// Header user icon: mostra la corona se Premium
+try{
+  if(pill){
+    pill.classList.toggle("premium", !!(isAuthed && isPremium));
+    pill.setAttribute("aria-label", isAuthed ? (isPremium ? "Account Premium" : "Account") : "Account");
+  }
+}catch(_e){}
       if(isAuthed){
         pill?.classList.add("ok");
         dot?.classList.add("ok");
@@ -632,16 +631,24 @@ updateGreetingUI();
         planBadgeEl.classList.remove("ok","warn","bad");
         if(plan.badgeClass) planBadgeEl.classList.add(plan.badgeClass);
       }
+// Premium meta (testo a destra del menu)
+const premMetaEl = document.getElementById("profilePremiumMeta");
+if(premMetaEl){
+  let meta = "";
+  if(!isAuthed) meta = "Accedi";
+  else if(u?.premiumSyncPending) meta = "In corso";
+  else if(u?.isPremium) meta = "Attivo";
+  else if(u?.payrollUsageError) meta = "Verifica";
+  else if(!u?.payrollUsageLoaded) meta = "Verifica";
+  else if(u?.payrollFreeUsed) meta = "Upgrade";
+  else meta = "Prova gratuita";
+  premMetaEl.textContent = meta;
+}
 
-      if(btnPrem){
-        btnPrem.textContent = plan.premiumBtnText || btnPrem.textContent;
-        btnPrem.disabled = !!plan.premiumBtnDisabled;
-      }
-
-      if(btnRefresh) btnRefresh.disabled = !isAuthed;
-      if(btnLogout) btnLogout.disabled = !isAuthed;
-
-      // Se l'utente non è autenticato, chiudi la tendina
+try{
+  const premLink = document.getElementById("btnProfilePremium");
+  if(premLink) premLink.classList.toggle("isActive", !!(isAuthed && u?.isPremium));
+}catch(_e){}      // Se l'utente non è autenticato, chiudi la tendina
       if(!isAuthed && profileDropdownIsOpen()){
         toggleProfileDropdown(false);
       }
@@ -665,36 +672,36 @@ updateGreetingUI();
         syncProfileDropdownUI();
       });
 
-      // Hover (desktop): apri la tendina automaticamente quando passi col mouse
-      try{
-        const dd = document.getElementById("profileDropdown");
-        const hoverOk = !!(window.matchMedia && window.matchMedia("(hover:hover) and (pointer:fine)").matches);
-        if(pill && dd && hoverOk){
-          let tClose = null;
-          const cancel = ()=>{ try{ if(tClose){ clearTimeout(tClose); tClose = null; } }catch(_e){} };
-          const schedule = (ms=220)=>{
-            cancel();
-            tClose = setTimeout(()=>{
-              try{
-                if(!pill.matches(":hover") && !dd.matches(":hover")) closeProfileDropdown();
-              }catch(_e){}
-            }, ms);
-          };
+// Hover (desktop): apri la tendina automaticamente quando passi col mouse
+try{
+  const dd = document.getElementById("profileDropdown");
+  const hoverOk = !!(window.matchMedia && window.matchMedia("(hover:hover) and (pointer:fine)").matches);
+  if(pill && dd && hoverOk){
+    let tClose = null;
+    const cancel = ()=>{ try{ if(tClose){ clearTimeout(tClose); tClose = null; } }catch(_e){} };
+    const schedule = (ms=220)=>{
+      cancel();
+      tClose = setTimeout(()=>{
+        try{
+          if(!pill.matches(":hover") && !dd.matches(":hover")) closeProfileDropdown();
+        }catch(_e){}
+      }, ms);
+    };
 
-          pill.addEventListener("mouseenter", ()=>{
-            cancel();
-            const isAuthed = !!(state.user && !state.user.isAnonymous);
-            if(!isAuthed) return;
-            if(!profileDropdownIsOpen()){
-              toggleProfileDropdown(true);
-              syncProfileDropdownUI();
-            }
-          });
-          pill.addEventListener("mouseleave", ()=> schedule(260));
-          dd.addEventListener("mouseenter", ()=> cancel());
-          dd.addEventListener("mouseleave", ()=> schedule(180));
-        }
-      }catch(_e){}
+    pill.addEventListener("mouseenter", ()=>{
+      cancel();
+      const isAuthed = !!(state.user && !state.user.isAnonymous);
+      if(!isAuthed) return;
+      if(!profileDropdownIsOpen()){
+        toggleProfileDropdown(true);
+        syncProfileDropdownUI();
+      }
+    });
+    pill.addEventListener("mouseleave", ()=> schedule(260));
+    dd.addEventListener("mouseenter", ()=> cancel());
+    dd.addEventListener("mouseleave", ()=> schedule(180));
+  }
+}catch(_e){}
 
       document.getElementById("btnProfileClose")?.addEventListener("click", (ev)=>{
         try{ ev.preventDefault(); ev.stopPropagation(); }catch(_e){}
