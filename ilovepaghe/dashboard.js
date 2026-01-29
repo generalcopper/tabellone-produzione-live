@@ -527,9 +527,9 @@ const initPagheiaDashboard = () => {
           $("p_created").textContent = "—";
           $("p_last").textContent = "—";
           $("p_provider").textContent = "—";
-          $("sideUserName").textContent = "Accesso richiesto";
+          $("sideUserName").textContent = "—";
           $("sideUserEmail").textContent = "—";
-          $("sideUserPlan").textContent = "—";
+          $("sideUserPlan")?.textContent = "—";
           applyPlanUI({ isPremium:false, pending:false });
           $("planNote").textContent = "Per gestire piani e impostazioni devi accedere.";
           // Forza view profilo
