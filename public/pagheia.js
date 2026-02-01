@@ -8609,6 +8609,40 @@ function buildSafePdfName(base){
         let emailOtpStage = "request"; // "request" | "verify"
         let emailOtpLastEmail = "";
 
+        const OTP_RESEND_SECONDS = Math.max(10, Math.min(300, parseInt(globalThis.ILP_AUTH_OTP_RESEND_SECONDS || "60", 10) || 60));
+        let otpResendUntilMs = 0;
+        let otpResendTimer = 0;
+
+        function stopOtpResendTimer(){
+          try{ if(otpResendTimer) clearInterval(otpResendTimer); }catch(_e){}
+          otpResendTimer = 0;
+        }
+        function updateOtpResendUi(){
+          try{
+            const btn = document.getElementById("btnOtpResend");
+            if(!btn) return;
+            const now = Date.now();
+            const remain = otpResendUntilMs ? Math.ceil((otpResendUntilMs - now) / 1000) : 0;
+            if(remain > 0){
+              btn.disabled = true;
+              btn.textContent = `Rinvia codice (${remain}s)`;
+            }else{
+              btn.disabled = false;
+              btn.textContent = "Rinvia codice";
+              otpResendUntilMs = 0;
+              stopOtpResendTimer();
+            }
+          }catch(_e){}
+        }
+        function startOtpResendCooldown(seconds = OTP_RESEND_SECONDS){
+          const s = Math.max(1, parseInt(seconds || OTP_RESEND_SECONDS, 10) || OTP_RESEND_SECONDS);
+          otpResendUntilMs = Date.now() + (s * 1000);
+          updateOtpResendUi();
+          stopOtpResendTimer();
+          otpResendTimer = setInterval(updateOtpResendUi, 500);
+        }
+
+
         function setOtpStage(stage="request"){
           emailOtpStage = (String(stage||"request").toLowerCase() === "verify") ? "verify" : "request";
           try{
@@ -8623,7 +8657,13 @@ function buildSafePdfName(base){
             const links = document.getElementById("authOtpLinks");
             if(links) links.style.display = (emailOtpStage === "verify") ? "" : "none";
           }catch(_e){}
-          if(emailOtpStage !== "verify"){
+          
+          try{
+            const hc = document.getElementById("authOtpHaveCode");
+            if(hc) hc.style.display = (emailOtpStage === "verify") ? "none" : "";
+          }catch(_e){}
+          try{ updateOtpResendUi(); }catch(_e){}
+if(emailOtpStage !== "verify"){
             try{
               const ci = document.getElementById("authCodeInput");
               if(ci) ci.value = "";
@@ -8730,6 +8770,7 @@ function buildSafePdfName(base){
             emailOtpLastEmail = mail;
             setEmailSent(true);
             setOtpStage("verify");
+            try{ startOtpResendCooldown(); }catch(_e){}
 
             try{
               const ci = document.getElementById("authCodeInput");
@@ -8865,7 +8906,15 @@ function buildSafePdfName(base){
             }catch(_e){}
           });
           document.getElementById("btnOtpResend")?.addEventListener("click", async ()=>{
+            
             try{
+              if(otpResendUntilMs && Date.now() < otpResendUntilMs){
+                const remain = Math.ceil((otpResendUntilMs - Date.now())/1000);
+                try{ showToast("Attendi", `Puoi richiedere un nuovo codice tra ${remain}s.`, 2200); }catch(_e){}
+                return;
+              }
+            }catch(_e){}
+try{
               const em = getEmailInputValue() || emailOtpLastEmail;
               await requestOtpCode(em, { silentToast:true });
               try{ showToast("Codice rinviato", "Ti abbiamo inviato un nuovo codice via email.", 3200); }catch(_e){}
@@ -8881,6 +8930,21 @@ function buildSafePdfName(base){
               const ei = document.getElementById("authEmailInput");
               if(ei){ ei.focus(); ei.select?.(); }
             }catch(_e){}
+
+          // Hai già un codice? Passa direttamente alla verifica.
+          document.getElementById("btnOtpHaveCode")?.addEventListener("click", ()=>{
+            try{
+              setOtpStage("verify");
+              setEmailError("");
+              setEmailSent(false);
+              try{ startOtpResendCooldown(); }catch(_e){}
+            }catch(_e){}
+            try{
+              const ci = document.getElementById("authCodeInput");
+              if(ci){ ci.focus(); ci.select?.(); }
+            }catch(_e){}
+          });
+
           });
 
           document.getElementById("authEmailInput")?.addEventListener("keydown", (ev)=>{
