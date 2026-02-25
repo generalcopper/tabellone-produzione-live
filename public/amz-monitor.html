@@ -1,0 +1,422 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Amazon Live Monitor</title>
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+  <style>
+    :root{
+      --bg:#0b1220; --panel:#0f1b31; --panel2:#0c162a;
+      --text:#e8eefc; --muted:#94a3b8; --line:#1f2a44;
+      --good:#2dd4bf; --bad:#fb7185; --accent:#60a5fa;
+      --card:rgba(255,255,255,.03); --cardB:rgba(255,255,255,.06);
+    }
+    html,body{height:100%; margin:0; background:var(--bg); color:var(--text); font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto;}
+    .wrap{height:100%; display:flex; flex-direction:column;}
+    .top{
+      display:flex; align-items:center; justify-content:space-between;
+      padding:14px 18px; border-bottom:1px solid var(--line);
+      background:linear-gradient(180deg,var(--panel2),transparent);
+      gap:14px;
+    }
+    .brand{display:flex; gap:10px; align-items:baseline; white-space:nowrap;}
+    .brand .t{font-size:18px; font-weight:900; letter-spacing:.4px;}
+    .brand .s{font-size:12px; color:var(--muted);}
+    .controls{display:flex; gap:10px; align-items:center; flex-wrap:wrap; justify-content:flex-end;}
+    select,input{
+      background:rgba(255,255,255,.04);
+      border:1px solid rgba(255,255,255,.08);
+      color:var(--text);
+      padding:8px 10px; border-radius:10px; outline:none;
+    }
+    input::placeholder{color:rgba(148,163,184,.75);}
+    .kpis{display:grid; grid-template-columns:repeat(4,1fr); gap:12px; padding:12px 18px;}
+    .kpi{
+      background:var(--card);
+      border:1px solid var(--cardB);
+      border-radius:16px; padding:14px;
+      overflow:hidden;
+    }
+    .kpi .label{color:var(--muted); font-size:12px;}
+    .kpi .value{font-size:28px; font-weight:900; margin-top:6px; line-height:1.1;}
+    .kpi .sub{color:var(--muted); font-size:12px; margin-top:8px; display:flex; gap:10px; align-items:center;}
+    .delta.good{color:var(--good);} .delta.bad{color:var(--bad);}
+    .pill{display:inline-flex; gap:6px; align-items:center; padding:4px 8px; border-radius:999px; background:rgba(96,165,250,.12); border:1px solid rgba(96,165,250,.25); color:#cfe3ff;}
+    .main{flex:1; display:grid; grid-template-columns: 2.3fr 1fr; gap:12px; padding:0 18px 18px;}
+    .panel{
+      background:var(--card);
+      border:1px solid var(--cardB);
+      border-radius:18px;
+      overflow:hidden;
+    }
+    #chart{height:100%; width:100%;}
+    .side{display:flex; flex-direction:column; gap:12px;}
+    .side .panel{display:flex; flex-direction:column;}
+    .panelHead{
+      padding:12px 14px;
+      border-bottom:1px solid rgba(255,255,255,.06);
+      display:flex; align-items:center; justify-content:space-between;
+      background:linear-gradient(180deg, rgba(255,255,255,.02), transparent);
+    }
+    .panelHead .h{font-weight:800;}
+    .panelHead .m{color:var(--muted); font-size:12px;}
+    .tableWrap{padding:10px 12px; overflow:auto;}
+    table{width:100%; border-collapse:collapse; font-size:12px;}
+    th,td{padding:8px 6px; border-bottom:1px solid rgba(255,255,255,.06); vertical-align:top;}
+    th{color:var(--muted); font-weight:700; text-align:left;}
+    .name{font-weight:700; font-size:12px;}
+    .muted{color:var(--muted);}
+    .right{text-align:right;}
+    .foot{padding:10px 18px; color:var(--muted); font-size:12px; border-top:1px solid var(--line);}
+    @media (max-width: 1200px){
+      .main{grid-template-columns: 1fr; }
+      .kpis{grid-template-columns:repeat(2,1fr);}
+      .brand{display:none;}
+    }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top">
+    <div class="brand">
+      <div class="t">LGTrading • Amazon Live</div>
+      <div class="s">monitor realtime (auto refresh)</div>
+    </div>
+    <div class="controls">
+      <input id="apiBase" style="width:340px" placeholder="API Base (es: https://...cloudfunctions.net/amzAnalyticsApi)" />
+      <input id="apiKey" style="width:210px" placeholder="API key" />
+      <select id="fulfillment">
+        <option value="ALL">ALL</option>
+        <option value="FBA">FBA</option>
+        <option value="FBM">FBM</option>
+      </select>
+      <select id="business">
+        <option value="ALL">ALL</option>
+        <option value="B2B">B2B</option>
+        <option value="B2C">B2C</option>
+      </select>
+      <select id="range">
+        <option value="7d">7d</option>
+        <option value="30d">30d</option>
+        <option value="90d" selected>90d</option>
+        <option value="1y">1y</option>
+        <option value="2y">2y</option>
+      </select>
+      <select id="metric">
+        <option value="netTotal" selected>Net (Vendite - Rimborsi)</option>
+        <option value="salesTotal">Vendite</option>
+        <option value="refundsTotal">Rimborsi</option>
+        <option value="units">Unità</option>
+        <option value="orders">Ordini</option>
+      </select>
+      <select id="topMetric">
+        <option value="units" selected>Top prodotti: unità</option>
+        <option value="salesItemTotal">Top prodotti: vendite</option>
+      </select>
+    </div>
+  </div>
+
+  <div class="kpis">
+    <div class="kpi">
+      <div class="label">Oggi • NET</div>
+      <div class="value" id="k_today_net">—</div>
+      <div class="sub"><span class="pill" id="k_today_meta">—</span></div>
+    </div>
+    <div class="kpi">
+      <div class="label">Oggi • Vendite</div>
+      <div class="value" id="k_today_sales">—</div>
+      <div class="sub"><span class="pill" id="k_today_sales_meta">—</span></div>
+    </div>
+    <div class="kpi">
+      <div class="label">Oggi • Rimborsi</div>
+      <div class="value" id="k_today_ref">—</div>
+      <div class="sub"><span class="pill" id="k_today_ref_meta">—</span></div>
+    </div>
+    <div class="kpi">
+      <div class="label">Delta NET vs ieri</div>
+      <div class="value" id="k_delta_net">—</div>
+      <div class="sub"><span id="k_delta_meta">—</span></div>
+    </div>
+  </div>
+
+  <div class="main">
+    <div class="panel">
+      <div id="chart"></div>
+    </div>
+
+    <div class="side">
+      <div class="panel">
+        <div class="panelHead">
+          <div>
+            <div class="h">Top prodotti (oggi)</div>
+            <div class="m" id="topSub">—</div>
+          </div>
+          <div class="pill" id="topDim">—</div>
+        </div>
+        <div class="tableWrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Prodotto</th>
+                <th class="right">Unità</th>
+                <th class="right">Vendite</th>
+                <th class="right">NET</th>
+              </tr>
+            </thead>
+            <tbody id="topBody">
+              <tr><td class="muted" colspan="4">—</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="panel">
+  <div class="panelHead">
+    <div>
+      <div class="h">FBA in sospeso</div>
+      <div class="m" id="pendSub">—</div>
+    </div>
+    <div class="pill" id="pendCount">—</div>
+  </div>
+  <div class="tableWrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Order</th>
+          <th class="right">Unità</th>
+          <th class="right">Totale</th>
+        </tr>
+      </thead>
+      <tbody id="pendBody">
+        <tr><td class="muted" colspan="3">—</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="panel" style="flex:1;">
+        <div class="panelHead">
+          <div>
+            <div class="h">Note</div>
+            <div class="m">realtime ogni 10 min • rimborsi ogni 60 min</div>
+          </div>
+          <div class="pill" id="lastUpdate">—</div>
+        </div>
+        <div class="tableWrap">
+          <div class="muted" style="line-height:1.5;">
+            • Il grafico a candele usa valori giornalieri (oggi incluso).<br/>
+            • Top prodotti realtime: usa OrderItems per ordini nuovi (oggi/ieri).<br/>
+            • "In sospeso" = FBA con status Pending (aggiornato ogni ~2 min).<br/>
+            • Per lo storico 2 anni: esegui i backfill da terminale (vedi README).<br/>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="foot" id="status">—</div>
+</div>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+
+  function money(n, cur='EUR'){
+    const v = Number(n || 0);
+    return new Intl.NumberFormat('it-IT', { style:'currency', currency: cur }).format(v);
+  }
+  function num(n){
+    return new Intl.NumberFormat('it-IT').format(Number(n||0));
+  }
+  function pct(n){
+    const v = Number(n||0);
+    const s = (v>=0?'+':'') + v.toFixed(1) + '%';
+    return s;
+  }
+
+  function readCfg(){
+    return {
+      base: $('apiBase').value.trim().replace(/\/$/, ''),
+      key: $('apiKey').value.trim(),
+      fulfillment: $('fulfillment').value,
+      business: $('business').value,
+      range: $('range').value,
+      metric: $('metric').value,
+      topMetric: $('topMetric').value
+    };
+  }
+  function saveCfg(){
+    localStorage.setItem('amzMonCfg', JSON.stringify(readCfg()));
+  }
+  function loadCfg(){
+    const raw = localStorage.getItem('amzMonCfg');
+    if(!raw) return;
+    try{
+      const c = JSON.parse(raw);
+      $('apiBase').value = c.base || '';
+      $('apiKey').value = c.key || '';
+      $('fulfillment').value = c.fulfillment || 'ALL';
+      $('business').value = c.business || 'ALL';
+      $('range').value = c.range || '90d';
+      $('metric').value = c.metric || 'netTotal';
+      $('topMetric').value = c.topMetric || 'units';
+    }catch(e){}
+  }
+
+  async function apiGet(path, cfg){
+    const url = cfg.base + path + (path.includes('?') ? '&' : '?') + 'key=' + encodeURIComponent(cfg.key);
+    const res = await fetch(url);
+    const j = await res.json();
+    if(!res.ok || !j.ok) throw new Error(j.error || ('HTTP '+res.status));
+    return j;
+  }
+
+  const chart = echarts.init($('chart'));
+  function renderChart(labels, candleData, volData, metricLabel){
+    const opt = {
+      backgroundColor: 'transparent',
+      grid: [{ left: 60, right: 20, top: 30, bottom: 90 }, { left: 60, right: 20, top: '72%', bottom: 30 }],
+      xAxis: [
+        { type: 'category', data: labels, boundaryGap: true, axisLine:{lineStyle:{color:'#1f2a44'}}, axisLabel:{color:'#94a3b8'} },
+        { type: 'category', gridIndex: 1, data: labels, boundaryGap: true, axisLine:{lineStyle:{color:'#1f2a44'}}, axisLabel:{show:false} },
+      ],
+      yAxis: [
+        { scale: true, axisLine:{lineStyle:{color:'#1f2a44'}}, splitLine:{lineStyle:{color:'rgba(255,255,255,.06)'}}, axisLabel:{color:'#94a3b8'} },
+        { gridIndex: 1, axisLine:{lineStyle:{color:'#1f2a44'}}, splitLine:{show:false}, axisLabel:{color:'#94a3b8'} },
+      ],
+      tooltip: { trigger: 'axis' },
+      dataZoom: [
+        { type:'inside', xAxisIndex:[0,1], start: 40, end: 100 },
+        { type:'slider', xAxisIndex:[0,1], bottom: 10, height: 20, borderColor:'#1f2a44', textStyle:{color:'#94a3b8'} },
+      ],
+      series: [
+        { name: metricLabel, type: 'candlestick', data: candleData, itemStyle:{
+            color: '#2dd4bf', color0:'#fb7185', borderColor:'#2dd4bf', borderColor0:'#fb7185'
+        }},
+        { name: 'Ordini', type:'bar', xAxisIndex:1, yAxisIndex:1, data: volData, barWidth:'60%' },
+      ],
+    };
+    chart.setOption(opt, true);
+  }
+
+  function setTopProducts(list, currency){
+    const tbody = $('topBody');
+    tbody.innerHTML = '';
+    if(!list || !list.length){
+      tbody.innerHTML = '<tr><td class="muted" colspan="4">Nessun dato</td></tr>';
+      return;
+    }
+    for(const p of list){
+      const title = (p.title || p.sku || p.asin || p.productKey || '—');
+      const safeTitle = title.length > 70 ? (title.slice(0, 70) + '…') : title;
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>
+          <div class="name">${safeTitle}</div>
+          <div class="muted">${p.sku ? ('SKU: '+p.sku) : (p.asin ? ('ASIN: '+p.asin) : '')}</div>
+        </td>
+        <td class="right">${num(p.units)}</td>
+        <td class="right">${money(p.salesItemTotal, currency)}</td>
+        <td class="right">${money(p.netItemTotal, currency)}</td>
+      `;
+      tbody.appendChild(tr);
+    }
+  }
+
+  function setPendingOrders(list, currency){
+  const tbody = $('pendBody');
+  tbody.innerHTML = '';
+  if(!list || !list.length){
+    $('pendCount').textContent = '0';
+    tbody.innerHTML = '<tr><td class="muted" colspan="3">Nessun sospeso</td></tr>';
+    return;
+  }
+
+  $('pendCount').textContent = String(list.length);
+
+  for(const o of list){
+    const id = o.amazonOrderId || '—';
+    const units = num(o.units);
+    const amt = money(o.amount, currency);
+    const dt = o.purchaseIso ? new Date(o.purchaseIso) : null;
+    const t = dt ? dt.toLocaleTimeString('it-IT', { hour:'2-digit', minute:'2-digit' }) : '';
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>
+        <div class="name">${id}</div>
+        <div class="muted">${o.status || 'Pending'} ${t ? ('• '+t) : ''}</div>
+      </td>
+      <td class="right">${units}</td>
+      <td class="right">${amt}</td>
+    `;
+    tbody.appendChild(tr);
+  }
+}
+
+async function refreshAll(){
+    const cfg = readCfg();
+    if(!cfg.base || !cfg.key){
+      $('status').textContent = 'Imposta API Base e API Key (poi resta a schermo).';
+      return;
+    }
+    saveCfg();
+
+    $('status').textContent = 'Aggiorno dati...';
+
+    const kpi = await apiGet(`/kpi?fulfillment=${cfg.fulfillment}&business=${cfg.business}`, cfg);
+    const cur = kpi.currency || 'EUR';
+
+    $('k_today_net').textContent = money(kpi.today.netTotal, cur);
+    $('k_today_sales').textContent = money(kpi.today.salesTotal, cur);
+    $('k_today_ref').textContent = money(kpi.today.refundsTotal, cur);
+
+    $('k_today_meta').textContent = `${num(kpi.today.orders)} ord • ${num(kpi.today.units)} unità • ${kpi.todayKey}`;
+    $('k_today_sales_meta').textContent = `Ieri: ${money(kpi.yesterday.salesTotal, cur)} • ${pct(kpi.deltaPct.salesTotal)}`;
+    $('k_today_ref_meta').textContent = `Ieri: ${money(kpi.yesterday.refundsTotal, cur)} • ${pct(kpi.deltaPct.refundsTotal)}`;
+
+    const deltaNet = kpi.deltaPct.netTotal;
+    $('k_delta_net').textContent = pct(deltaNet);
+    $('k_delta_net').className = 'value ' + (deltaNet >= 0 ? 'delta good' : 'delta bad');
+    $('k_delta_meta').textContent = `Media 7gg NET: ${money(kpi.avg7NetTotal, cur)} • dim ${kpi.dim}`;
+
+    const candles = await apiGet(`/candles?fulfillment=${cfg.fulfillment}&business=${cfg.business}&range=${cfg.range}&metric=${cfg.metric}`, cfg);
+    const labels = candles.candles.map(x => x.t);
+    const cData = candles.candles.map(x => [x.o, x.c, x.l, x.h]);
+    const vData = candles.candles.map(x => x.v);
+
+    const metricLabel =
+      cfg.metric === 'salesTotal' ? 'Vendite' :
+      cfg.metric === 'refundsTotal' ? 'Rimborsi' :
+      cfg.metric === 'units' ? 'Unità' :
+      cfg.metric === 'orders' ? 'Ordini' :
+      'NET';
+
+    renderChart(labels, cData, vData, metricLabel);
+
+    const top = await apiGet(`/topProducts?fulfillment=${cfg.fulfillment}&business=${cfg.business}&dateKey=${kpi.todayKey}&metric=${cfg.topMetric}&limit=10`, cfg);
+    $('topSub').textContent = `ordinati per ${cfg.topMetric} • ${kpi.todayKey}`;
+    $('topDim').textContent = `${cfg.fulfillment}_${cfg.business}`;
+    setTopProducts(top.products, cur);
+
+const pend = await apiGet(`/pendingOrders?business=${cfg.business}&days=2&limit=25`, cfg);
+$('pendSub').textContent = `ultimi 2 giorni • ${cfg.business} • solo FBA Pending`;
+setPendingOrders(pend.orders, cur);
+
+
+    $('lastUpdate').textContent = new Date().toLocaleTimeString('it-IT');
+    $('status').textContent = `OK • range ${cfg.range} • dim ${cfg.fulfillment}_${cfg.business} • updated ${new Date().toLocaleTimeString('it-IT')}`;
+  }
+
+  loadCfg();
+  ['apiBase','apiKey','fulfillment','business','range','metric','topMetric'].forEach(id => {
+    $(id).addEventListener('change', refreshAll);
+    $(id).addEventListener('blur', refreshAll);
+  });
+
+  window.addEventListener('resize', () => chart.resize());
+
+  refreshAll();
+  setInterval(refreshAll, 30000);
+</script>
+</body>
+</html>
