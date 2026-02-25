@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="mobile-web-app-capable" content="yes" />
-  <title>Thermal PDF Print</title>
+  <title>Thermal PDF Print · Merge 2-in-1</title>
 
   <!-- PDF.js (CDN) -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js" crossorigin="anonymous"></script>
@@ -206,7 +206,7 @@
       border-radius: 16px;
       overflow:hidden;
       position: relative;
-      aspect-ratio: 2/3;
+      aspect-ratio: 1/2;
       display:flex;
       align-items:center;
       justify-content:center;
@@ -285,7 +285,7 @@
       </div>
 
       <div class="status">
-        <div id="statusText">Seleziona un PDF: render automatico in massima qualità.</div>
+        <div id="statusText">Seleziona un PDF: unifico automaticamente ogni 2 pagine (Amazon + UPS) in 1 etichetta 102×204 mm.</div>
         <div class="spinner" id="statusSpinner" aria-hidden="true"></div>
       </div>
     </div>
@@ -324,6 +324,7 @@
     const CFG = {
       dpi: 600,
       marginMm: 0,
+      gapMm: 3,          // leggero margine tra etichetta Amazon e UPS (mm)
       trim: true,
       trimSampleStep: 4,
       trimPad: 0,
@@ -338,9 +339,12 @@
     let currentPdf = null;
     let currentPdfName = '';
     let pageCount = 0;
-    let rendered = []; // {pageNumber, url}
-    let paperMm = { w: 100, h: 150 };
 
+    // pagine OUTPUT (merge 2-in-1)
+    // [{pageNumber, url, srcPages:[1,2]}]
+    let rendered = [];
+
+    let paperMm = { w: 100, h: 150 };
     let isBusy = false;
 
     function setStatus(msg){ els.statusText.textContent = msg; }
@@ -352,7 +356,6 @@
       const active = typeof pct === 'number' ? pct > 0 && pct < 100 : isBusy;
       setSpinner(active || isBusy);
     }
-
     function setUiBusy(busy){
       isBusy = !!busy;
       setSpinner(isBusy);
@@ -392,11 +395,11 @@
       pageCount = currentPdf.numPages;
 
       // formato stampa/export fisso (mm)
-      // NB: indipendente dal formato del PDF caricato
       setPaperMm(FIXED_PAPER_MM.w, FIXED_PAPER_MM.h);
 
       setProgress(0);
-      setStatus(`PDF caricato: ${currentPdfName} · ${pageCount} pagine · render in corso…`);
+      const outPages = Math.ceil(pageCount / 2);
+      setStatus(`PDF caricato: ${currentPdfName} · ${pageCount} pagine sorgenti → ${outPages} etichette (Amazon + UPS). Render in corso…`);
     }
 
     function clearAll(){
@@ -498,92 +501,165 @@
       return 1.15;
     }
 
-    async function renderAllPagesMaxQuality(){
+    function mmToPx(mm){
+      return Math.max(1, Math.round((mm / 25.4) * CFG.dpi));
+    }
+
+    async function renderPdfPageToTrimmedCanvas(pageNumber){
+      const page = await currentPdf.getPage(pageNumber);
+      const rotation = (page.rotate || 0);
+
+      const vp1 = page.getViewport({scale: 1, rotation});
+
+      // dimensione finale (in pixel) del foglio 102×204 mm a CFG.dpi
+      const targetW = mmToPx(paperMm.w);
+      const targetH = mmToPx(paperMm.h);
+
+      const basePx = targetW * targetH;
+      let oversample = chooseOversample(basePx);
+      const wantedPx = basePx * (oversample**2);
+      if(wantedPx > CFG.maxRenderPixels){
+        oversample = Math.max(1, Math.sqrt(CFG.maxRenderPixels / Math.max(1, basePx)));
+      }
+
+      const hiTargetW = Math.min(CFG.maxRenderDim, Math.max(1, Math.round(targetW * oversample)));
+      const hiTargetH = Math.min(CFG.maxRenderDim, Math.max(1, Math.round(targetH * oversample)));
+
+      // scale per arrivare alla canvas supersampled (partiamo dal viewport del foglio intero)
+      const scaleX = hiTargetW / vp1.width;
+      const scaleY = hiTargetH / vp1.height;
+      const scale = (scaleX + scaleY) / 2;
+      const viewport = page.getViewport({scale, rotation});
+
+      // raw render (supersampled)
+      const raw = document.createElement('canvas');
+      raw.width = Math.max(1, Math.ceil(viewport.width));
+      raw.height = Math.max(1, Math.ceil(viewport.height));
+      const rctx = raw.getContext('2d', {alpha:false});
+      rctx.fillStyle = '#fff';
+      rctx.fillRect(0,0,raw.width, raw.height);
+      rctx.imageSmoothingEnabled = true;
+      rctx.imageSmoothingQuality = 'high';
+
+      await page.render({canvasContext: rctx, viewport, intent: 'print'}).promise;
+
+      const trimmed = CFG.trim ? trimCanvas(raw, CFG.trimSampleStep, CFG.trimPad) : raw;
+      return trimmed;
+    }
+
+    function composeMergedLabel(topCanvas, bottomCanvas){
+      const targetW = mmToPx(paperMm.w);
+      const targetH = mmToPx(paperMm.h);
+      const gapPx = mmToPx(CFG.gapMm);
+
+      const out = document.createElement('canvas');
+      out.width = targetW;
+      out.height = targetH;
+      const ctx = out.getContext('2d', {alpha:false});
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(0,0,targetW,targetH);
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
+
+      if(!topCanvas) return out;
+
+      // Se manca la seconda pagina, stampo solo la prima (full width, top-aligned)
+      if(!bottomCanvas){
+        let s1 = targetW / topCanvas.width;
+        let h1 = topCanvas.height * s1;
+        if(h1 > targetH){
+          s1 = targetH / topCanvas.height;
+          h1 = topCanvas.height * s1;
+        }
+        ctx.drawImage(topCanvas, 0,0, topCanvas.width, topCanvas.height, 0,0, topCanvas.width*s1, h1);
+        return out;
+      }
+
+      const wScale1 = targetW / topCanvas.width;
+      let s1 = wScale1;
+      let h1 = topCanvas.height * s1;
+
+      // quanto spazio rimane per la UPS
+      let avail = targetH - h1 - gapPx;
+
+      const wScale2 = targetW / bottomCanvas.width;
+      const h2AtFullWidth = bottomCanvas.height * wScale2;
+
+      let s2 = wScale2;
+
+      // Se non c'è spazio a sufficienza, fallback: scala entrambe in modo proporzionale
+      if(avail <= 0){
+        const totalH = (topCanvas.height * wScale1) + (bottomCanvas.height * wScale2);
+        let g = (targetH - gapPx) / Math.max(1, totalH);
+        g = Math.max(0.05, Math.min(1, g));
+        s1 = wScale1 * g;
+        s2 = wScale2 * g;
+        h1 = topCanvas.height * s1;
+        avail = targetH - h1 - gapPx;
+      }else{
+        // Tenta di fare UPS più grande possibile rispettando lo spazio
+        const hScale2 = avail / bottomCanvas.height;
+        s2 = Math.min(wScale2, hScale2);
+      }
+
+      // draw top (Amazon) — allineato in alto, senza margine sopra
+      const w1 = topCanvas.width * s1;
+      const hh1 = topCanvas.height * s1;
+      ctx.drawImage(topCanvas, 0,0, topCanvas.width, topCanvas.height, 0,0, w1, hh1);
+
+      // draw bottom (UPS) — subito dopo con leggero margine
+      const y2 = Math.round(hh1 + gapPx);
+      const w2 = bottomCanvas.width * s2;
+      const h2 = bottomCanvas.height * s2;
+
+      ctx.drawImage(bottomCanvas, 0,0, bottomCanvas.width, bottomCanvas.height, 0, y2, w2, h2);
+
+      return out;
+    }
+
+    async function renderMergedPagesMaxQuality(){
       if(!currentPdf) return;
+
       clearAll();
       setUiBusy(true);
 
-      const pages = [...Array(pageCount)].map((_,i)=>i+1);
-      setStatus(`Renderizzo ${pages.length} pagina/e… (max quality)`);
+      const outPages = Math.ceil(pageCount / 2);
+      setStatus(`Renderizzo ${pageCount} pagine sorgenti → ${outPages} etichette… (max quality)`);
       setProgress(0);
 
-      for(let idx=0; idx<pages.length; idx++){
-        const pageNumber = pages[idx];
-        const page = await currentPdf.getPage(pageNumber);
-        const rotation = (page.rotate || 0);
+      let outIdx = 0;
 
-        const vp1 = page.getViewport({scale: 1, rotation});
+      for(let src=1; src<=pageCount; src+=2){
+        outIdx++;
+        const src2 = src + 1;
 
-        // dimensione finale ESATTA (in pixel) del foglio 102×204 mm a CFG.dpi
-        const targetW = Math.max(1, Math.round((paperMm.w / 25.4) * CFG.dpi));
-        const targetH = Math.max(1, Math.round((paperMm.h / 25.4) * CFG.dpi));
+        setStatus(`Render etichetta ${outIdx}/${outPages} (pagine ${src}${src2<=pageCount ? `+${src2}` : ''})…`);
 
-        const basePx = targetW * targetH;
-        let oversample = chooseOversample(basePx);
-        const wantedPx = basePx * (oversample**2);
-        if(wantedPx > CFG.maxRenderPixels){
-          oversample = Math.max(1, Math.sqrt(CFG.maxRenderPixels / Math.max(1, basePx)));
+        const top = await renderPdfPageToTrimmedCanvas(src);
+        let bottom = null;
+        if(src2 <= pageCount){
+          bottom = await renderPdfPageToTrimmedCanvas(src2);
         }
 
-        const hiTargetW = Math.min(CFG.maxRenderDim, Math.max(1, Math.round(targetW * oversample)));
-        const hiTargetH = Math.min(CFG.maxRenderDim, Math.max(1, Math.round(targetH * oversample)));
-
-        // scale per arrivare alla canvas supersampled
-        const scaleX = hiTargetW / vp1.width;
-        const scaleY = hiTargetH / vp1.height;
-        const scale = (scaleX + scaleY) / 2;
-        const viewport = page.getViewport({scale, rotation});
-
-        // raw render (supersampled)
-        const raw = document.createElement('canvas');
-        raw.width = Math.max(1, Math.ceil(viewport.width));
-        raw.height = Math.max(1, Math.ceil(viewport.height));
-        const rctx = raw.getContext('2d', {alpha:false});
-        rctx.fillStyle = '#fff';
-        rctx.fillRect(0,0,raw.width, raw.height);
-        rctx.imageSmoothingEnabled = true;
-        rctx.imageSmoothingQuality = 'high';
-
-        await page.render({canvasContext: rctx, viewport, intent: 'print'}).promise;
-
-        const trimmed = CFG.trim ? trimCanvas(raw, CFG.trimSampleStep, CFG.trimPad) : raw;
-
-        // final canvas ESATTA (600dpi)
-        const finalC = document.createElement('canvas');
-        finalC.width = targetW;
-        finalC.height = targetH;
-        const fctx = finalC.getContext('2d', {alpha:false});
-        fctx.fillStyle = '#fff';
-        fctx.fillRect(0,0,targetW,targetH);
-        fctx.imageSmoothingEnabled = true;
-        fctx.imageSmoothingQuality = 'high';
-
-        // Nessun margine laterale/superiore: riempi in larghezza e allinea in alto
-        const sw = trimmed.width, sh = trimmed.height;
-        const sScale = targetW / sw; // fill width (no side margins)
-        const dw = targetW;
-        const dh = sh * sScale;
-        const dx = 0;
-        const dy = 0; // top aligned (no top margin)
-        fctx.drawImage(trimmed, 0,0,sw,sh, dx,dy,dw,dh);
-
+        const finalC = composeMergedLabel(top, bottom);
         const url = await canvasToPngUrl(finalC);
-        rendered.push({pageNumber, url});
+
+        rendered.push({ pageNumber: outIdx, url, srcPages: bottom ? [src, src2] : [src] });
 
         // thumb
         const div = document.createElement('div');
         div.className = 'thumb';
-        div.innerHTML = `<span class="badge">Pag. ${pageNumber}</span><img alt="Pagina ${pageNumber}" />`;
+        const sp = bottom ? `${src}+${src2}` : `${src}`;
+        div.innerHTML = `<span class="badge">Etich. ${outIdx} (p${sp})</span><img alt="Etichetta ${outIdx}" />`;
         div.querySelector('img').src = url;
         els.thumbGrid.appendChild(div);
 
-        setProgress(((idx+1)/pages.length)*100);
-        setStatus(`Renderizzata pagina ${pageNumber} (${idx+1}/${pages.length})`);
+        setProgress((outIdx/outPages)*100);
       }
 
       rebuildPrintArea();
       setProgress(0);
-      setStatus(`Pronto: ${rendered.length} pagina/e · puoi stampare o salvare PDF.`);
+      setStatus(`Pronto: ${rendered.length} etichetta/e (Amazon + UPS) · puoi stampare o salvare PDF.`);
       setUiBusy(false);
     }
 
@@ -594,7 +670,7 @@
         page.className = 'print-page';
         const img = document.createElement('img');
         img.src = r.url;
-        img.alt = `Pagina ${r.pageNumber}`;
+        img.alt = `Etichetta ${r.pageNumber}`;
         page.appendChild(img);
         els.printArea.appendChild(page);
       }
@@ -633,7 +709,7 @@
       try{
         pdf.setProperties({
           title: base,
-          subject: 'Export termico',
+          subject: 'Export termico (merge 2-in-1)',
           creator: 'Thermal PDF Print',
         });
       }catch(e){}
@@ -642,14 +718,23 @@
         const r = rendered[i];
         if(i>0) pdf.addPage([w, h], orientation);
         const dataUrl = await blobUrlToDataUrl(r.url);
-        pdf.addImage(dataUrl, 'PNG', CFG.marginMm, CFG.marginMm, w - 2*CFG.marginMm, h - 2*CFG.marginMm, undefined, 'SLOW');
+        pdf.addImage(
+          dataUrl,
+          'PNG',
+          CFG.marginMm,
+          CFG.marginMm,
+          w - 2*CFG.marginMm,
+          h - 2*CFG.marginMm,
+          undefined,
+          'SLOW'
+        );
         setProgress(((i+1)/rendered.length)*100);
         setStatus(`Creo PDF… pagina ${i+1}/${rendered.length}`);
       }
 
       const safeBase = base.replace(/[^a-z0-9\-_]+/ig,'_').replace(/^_+|_+$/g,'') || 'render';
       const stamp = new Date().toISOString().slice(0,19).replace(/[:T]/g,'-');
-      const fname = `${safeBase}_${CFG.dpi}dpi_${stamp}.pdf`;
+      const fname = `${safeBase}_MERGE_2IN1_${CFG.dpi}dpi_${stamp}.pdf`;
 
       pdf.save(fname);
       setProgress(0);
@@ -685,7 +770,7 @@
         clearAll();
         const buf = await fileToArrayBuffer(f);
         await loadPdfFromArrayBuffer(buf, f.name);
-        await renderAllPagesMaxQuality();
+        await renderMergedPagesMaxQuality();
       }catch(err){
         console.error(err);
         alert('Errore: ' + (err && err.message ? err.message : err));
@@ -705,6 +790,7 @@
 
     // init
     setPaperMm(FIXED_PAPER_MM.w, FIXED_PAPER_MM.h);
+    setStatus('Seleziona un PDF: unifico automaticamente ogni 2 pagine (Amazon + UPS) in 1 etichetta 102×204 mm.');
     setUiBusy(false);
   </script>
 </body>
