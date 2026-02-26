@@ -111,11 +111,15 @@
       </select>
 
       <select id="metric">
-        <option value="netTotal" selected>Net (Vendite - Rimborsi)</option>
-        <option value="salesTotal">Vendite</option>
+        <option value="salesTotalInclPending" selected>Vendite Totali (incl. sospesi FBA)</option>
+        <option value="netInclPending">NET (incl. sospesi FBA)</option>
+        <option value="salesTotal">Vendite confermate</option>
         <option value="refundsTotal">Rimborsi</option>
-        <option value="units">Unità</option>
-        <option value="orders">Ordini</option>
+        <option value="netTotal">NET confermato</option>
+        <option value="unitsInclPending">Unità Totali (incl. sospesi)</option>
+        <option value="ordersInclPending">Ordini Totali (incl. sospesi)</option>
+        <option value="units">Unità confermate</option>
+        <option value="orders">Ordini confermati</option>
       </select>
 
       <select id="topMetric">
@@ -127,12 +131,12 @@
 
   <div class="kpis">
     <div class="kpi">
-      <div class="label">Oggi • NET</div>
+      <div class="label">Oggi • Unità Totali Totali</div>
       <div class="value" id="k_today_net">—</div>
       <div class="sub"><span class="pill" id="k_today_meta">—</span></div>
     </div>
     <div class="kpi">
-      <div class="label">Oggi • Vendite</div>
+      <div class="label">Oggi • Unità Totali</div>
       <div class="value" id="k_today_sales">—</div>
       <div class="sub"><span class="pill" id="k_today_sales_meta">—</span></div>
     </div>
@@ -142,7 +146,7 @@
       <div class="sub"><span class="pill" id="k_today_ref_meta">—</span></div>
     </div>
     <div class="kpi">
-      <div class="label">FBA in sospeso (oggi)</div>
+      <div class="label">FBA sospesi</div>
       <div class="value" id="k_pending">—</div>
       <div class="sub"><span class="pill" id="k_pending_meta">—</span></div>
     </div>
@@ -380,12 +384,12 @@
     kpi = await apiGet(`/kpi?fulfillment=${cfg.fulfillment}&business=${cfg.business}`, cfg);
     cur = kpi.currency || 'EUR';
 
-    $('k_today_net').textContent = money(kpi.today.netTotal, cur);
-    $('k_today_sales').textContent = money(kpi.today.salesTotal, cur);
+    $('k_today_net').textContent = money(kpi.today.salesTotalInclPending, cur);
+    $('k_today_sales').textContent = num(kpi.today.unitsInclPending);
     $('k_today_ref').textContent = money(kpi.today.refundsTotal, cur);
 
-    $('k_today_meta').textContent = `${num(kpi.today.orders)} ord • ${num(kpi.today.units)} unità • ${kpi.todayKey}`;
-    $('k_today_sales_meta').textContent = `Ieri: ${money(kpi.yesterday.salesTotal, cur)} • ${pct(kpi.deltaPct.salesTotal)}`;
+    $('k_today_meta').textContent = `${num(kpi.today.ordersInclPending)} ord • ${num(kpi.today.unitsInclPending)} unità • ${kpi.todayKey}`;
+    $('k_today_sales_meta').textContent = `Ieri: ${num(kpi.yesterday.unitsInclPending)} • ${pct(kpi.deltaPct.unitsInclPending)}`;
     $('k_today_ref_meta').textContent = `Ieri: ${money(kpi.yesterday.refundsTotal, cur)} • ${pct(kpi.deltaPct.refundsTotal)}`;
   } catch(e){
     $('lastUpdate').textContent = new Date().toLocaleTimeString('it-IT');
@@ -426,8 +430,8 @@
 
   // 4) Pending FBA (non bloccante)
   try{
-    const pend = await apiGet(`/pendingOrders?business=${cfg.business}&createdAfterDays=365&limit=25`, cfg);
-    const info = `${pend.cached ? 'cache' : 'live'} • last 365d • ${cfg.business}`;
+    const pend = await apiGet(`/pendingOrders?business=${cfg.business}&createdAfterDays=730&cacheSeconds=10&limit=25`, cfg);
+    const info = `${pend.cached ? 'cache' : 'live'} • last 730d • ${cfg.business} • cache ${pend.cacheSeconds}s`;
     $('pendSub').textContent = info;
     setPendingOrders(pend.orders, cur, pend.totalCount);
   } catch(e){
@@ -442,6 +446,18 @@
   setStatus(`OK • ${dimLabel} • range ${cfg.range} • updated ${new Date().toLocaleTimeString('it-IT')}`, false);
 }
 
+async function refreshPendingOnly(){
+  const cfg = readCfg();
+  try{
+    const pend = await apiGet(`/pendingOrders?business=${cfg.business}&createdAfterDays=730&cacheSeconds=10&limit=25`, cfg);
+    const info = `${pend.cached ? 'cache' : 'live'} • last 730d • ${cfg.business} • cache ${pend.cacheSeconds}s`;
+    $('pendSub').textContent = info;
+    setPendingOrders(pend.orders, (pend.currency || 'EUR'), pend.totalCount);
+  } catch(e){
+    console.warn('PendingOrders refresh error', e);
+  }
+}
+
 ['fulfillment','business','range','metric','topMetric'].forEach(id => {
     $(id).addEventListener('change', refreshAll);
   });
@@ -449,6 +465,8 @@
   window.addEventListener('resize', () => chart.resize());
 
   refreshAll();
+  refreshPendingOnly();
+  setInterval(refreshPendingOnly, 10000);
   setInterval(refreshAll, 30000);
 </script>
 </body>
