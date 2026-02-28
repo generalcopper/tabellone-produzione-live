@@ -2265,12 +2265,67 @@ Tip:
 
         
         function repairTitles(lines, rawText){
-          // Pulizia titoli + ricostruzione best-effort dal rawText (utile quando il PDF contiene header tipo data/“Invia ad Amazon”)
+          // Pulizia titoli + ricostruzione ROBUSTA dal rawText (anti mismatch SKU ↔ titolo/ASIN)
           const tRaw = String(rawText || "");
 
           // Pattern tipici che NON sono nomi prodotto
           const badTitleRe = /^\s*(\d{2}\/\d{2}\/\d{2},\s*\d{2}:\d{2}\s*\|\s*amazon)\s*$/i;
           const uiNoiseRe = /(amazon\s+seller\s+central|\b(inv(?:ia|iato)\s+ad\s+amazon)\b|https?:\/\/)/i;
+
+          const tokJaccard = (a,b)=>{
+            try{
+              const A = new Set(String(a||"").split(/\s+/).filter(Boolean));
+              const B = new Set(String(b||"").split(/\s+/).filter(Boolean));
+              if(!A.size || !B.size) return 0;
+              let inter = 0;
+              for(const x of A) if(B.has(x)) inter++;
+              const union = (A.size + B.size - inter) || 1;
+              return inter / union;
+            }catch(_e){ return 0; }
+          };
+
+          function __asinFromRaw(sku){
+            try{
+              const s = String(sku||"").trim();
+              if(!tRaw || !s) return "";
+              const re = new RegExp(`SKU\\s*:?\\s*${escapeRegex(s)}[\\s\\S]{0,240}?\\bASIN\\s*:?\\s*([A-Z0-9]{10})\\b`, "i");
+              const m = re.exec(tRaw);
+              return m && m[1] ? String(m[1]).trim() : "";
+            }catch(_e){ return ""; }
+          }
+
+          function __storageFromRaw(sku){
+            try{
+              const s = String(sku||"").trim();
+              if(!tRaw || !s) return "";
+              let m = null;
+              m = new RegExp(`SKU\\s*:?\\s*${escapeRegex(s)}[\\s\\S]{0,620}?Tipo\\s+di\\s+stoccaggio[^:]*:\\s*([^\\n\\r]+)`, "i").exec(tRaw);
+              if(m && m[1]) return squashWhitespace(m[1]);
+              m = new RegExp(`SKU\\s*:?\\s*${escapeRegex(s)}[\\s\\S]{0,620}?\\b(Dimensione\\s+standard|Fuori\\s+misura|Oversize|Standard)\\b`, "i").exec(tRaw);
+              if(m && m[1]) return squashWhitespace(m[1]);
+              return "";
+            }catch(_e){ return ""; }
+          }
+
+          function __canonicalFromRaw(sku){
+            try{
+              const s = toSkuId(sku||"");
+              if(!tRaw || !s) return "";
+              const main = squashWhitespace(guessTitleFromRaw(tRaw, s));
+              if(!main) return "";
+              if(uiNoiseRe.test(main)) return "";
+              // evita falsi positivi super corti
+              if(main.length < 12) return "";
+
+              const asin = __asinFromRaw(s);
+              const stor = __storageFromRaw(s);
+
+              const parts = [main, `SKU: ${s}`];
+              if(asin) parts.push(`ASIN: ${asin}`);
+              if(stor) parts.push(`Tipo di stoccaggio: ${stor}`);
+              return parts.join("\n");
+            }catch(_e){ return ""; }
+          }
 
           let out = (lines||[]).map((l0)=>{
             const l = { ...l0 };
@@ -2297,25 +2352,42 @@ Tip:
               t = t.replace(/[\|\-–•]+\s*$/g, "").trim();
             }
 
-            // Se il titolo è "spazzatura" (es. data | Amazon) oppure vuoto → prova a ricostruire dal rawText
             const looksBad = !t || badTitleRe.test(t) || uiNoiseRe.test(t) || /^amazon\s*$/i.test(t);
-            if(looksBad && sku && tRaw){
-              const guess = squashWhitespace(guessTitleFromRaw(tRaw, sku));
 
-              // Evita di "sporcare" i titoli con etichette/step UI del PDF
-              if(guess && !uiNoiseRe.test(guess) && !/pronto per la spedizione|venditore|stampa etichette/i.test(guess)){
-                l.title = guess;
-                return l;
-              }
-            }
+            // Ricostruzione robusta dal rawText:
+            // se l’ASIN non combacia o il titolo non è simile, preferisco la versione trovata vicino allo SKU nel PDF.
+            if(sku && tRaw){
+              const canon = __canonicalFromRaw(sku);
+              if(canon){
+                const canonMeta = parseTitleMeta(canon);
+                const canonMain = squashWhitespace(canonMeta.main || canon);
+                const canonAsin = String(canonMeta.asin || __asinFromRaw(sku) || "").trim();
 
-            // Se ho un titolo normale, ma il rawText contiene una versione più completa, preferiscila (best-effort)
-            if(t && sku && tRaw){
-              const guess = squashWhitespace(guessTitleFromRaw(tRaw, sku));
-              if(guess && !uiNoiseRe.test(guess) && !/pronto per la spedizione|venditore|stampa etichette/i.test(guess)){
-                if(guess.length > t.length + 8 && guess.toLowerCase().includes(t.toLowerCase())){
-                  l.title = guess;
+                const curMeta = parseTitleMeta(t);
+                const curMain = squashWhitespace(curMeta.main || t);
+                const curAsin = String(curMeta.asin || "").trim();
+
+                const sim = tokJaccard(normalizeText(curMain), normalizeText(canonMain));
+                const asinMismatch = !!(curAsin && canonAsin && curAsin !== canonAsin);
+
+                const shouldReplace =
+                  looksBad ||
+                  asinMismatch ||
+                  (canonMain && curMain && sim < 0.26);
+
+                if(shouldReplace){
+                  l.title = canon;
                   return l;
+                }
+
+                // upgrade: se il rawText ha una versione più completa, preferiscila
+                if(canonMain && curMain){
+                  const a = normalizeText(canonMain);
+                  const b = normalizeText(curMain);
+                  if(canonMain.length > curMain.length + 8 && a && b && a.includes(b)){
+                    l.title = canon;
+                    return l;
+                  }
                 }
               }
             }
