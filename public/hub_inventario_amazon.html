@@ -2195,7 +2195,45 @@ Tip:
     const escapeRegex = (s)=> String(s||"").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
     
-    function guessTitleFromRaw(rawText, sku){
+    
+// Pulizia forte: rimuove rumore Seller Central che a volte finisce nel "nome prodotto"
+function cleanProductMainName(s){
+  try{
+    let t = squashWhitespace(s || "");
+    if(!t) return "";
+
+    // header tabella Seller Central (capita che venga concatenato al titolo)
+    t = t.replace(/^\s*Dettagli\s+SKU\s+Informazioni\/azione\s+Quantit[aà]\s+da\s+inviare\s*/i, "");
+    t = t.replace(/^\s*(?:Dettagli\s+SKU\s+)?Informazioni\/azione\s+Quantit[aà]\s+da\s+inviare\s*/i, "");
+    t = t.replace(/^\s*Dettagli\s+SKU\s*/i, "");
+    t = t.replace(/^\s*Informazioni\/azione\s*/i, "");
+    t = t.replace(/^\s*Quantit[aà]\s+da\s+inviare\s*/i, "");
+
+    // prefissi quantità/pacchi (es: "Unità: 35 <titolo>")
+    t = t.replace(/^\s*(?:Pacchi|Unit[aà]|Unita)\s*:\s*\d+\s*/i, "");
+    t = t.replace(/^\s*(?:Pacchi|Unit[aà]|Unita)\s*:\s*\d+\s*/i, "");
+
+    // rumore "Unità per pacco: 24" (se per errore finisce nel nome)
+    t = t.replace(/^\s*Unit[aà]\s+per\s+pacco\s*:\s*\d+\s*/i, "");
+    t = t.replace(/^\s*Unit[aà]\s+per\s+pacco\s*:\s*\d+\s*/i, "");
+
+    // rumore generico (best effort)
+    t = t.replace(/\bPreparazione\s+non\s+richiesta\b/ig, "");
+    t = t.replace(/\bCodice\s+a\s+barre\s+del\s+produttore\b/ig, "");
+    t = t.replace(/\bPronto\s+per\s+la\s+spedizione\b/ig, "");
+    t = t.replace(/\bIdoneo\s+al\s+risparmio\s+sulla\s+tariffa\s+di\s+gestione\b/ig, "");
+
+    // separators
+    t = t.replace(/^[\|\-–•·]+\s*/g, "");
+    t = t.replace(/[\|\-–•·]+\s*$/g, "");
+
+    return squashWhitespace(t);
+  }catch(_e){
+    return squashWhitespace(s || "");
+  }
+}
+
+function guessTitleFromRaw(rawText, sku){
       try{
         const t = String(rawText||"");
         const s = String(sku||"").trim();
@@ -2227,7 +2265,7 @@ Tip:
         const rawLines = chunk.split(/[\r\n]+/).map(x=> squashWhitespace(x)).filter(Boolean);
 
         // Rumore tipico delle stampe Seller Central / step UI
-        const stopBoundary = /(amazon\s+seller\s+central|©|https?:\/\/|\b\d+\s*\/\s*\d+\b|commento|indicatore\s+di\s+capacità|altri\s+dettagli|pronto\s+per\s+la\s+spedizione|venditore|stampa\s*etichette|preparazione|codice\s+a\s+barre|\basin\b|\bsku\b|tipo\s+di\s+stoccaggio|unità\s+per\s+pacco|\bpacchi\b|\bunità\b|logistica\s+di\s+amazon|dimensione\s+standard|fuori\s+misura)/i;
+        const stopBoundary = /(amazon\s+seller\s+central|©|https?:\/\/|\b\d+\s*\/\s*\d+\b|commento|indicatore\s+di\s+capacità|altri\s+dettagli|dettagli\s+sku|informazioni\/azione|quantit[aà]\s+da\s+inviare|pronto\s+per\s+la\s+spedizione|venditore|stampa\s*etichette|preparazione|codice\s+a\s+barre|\basin\b|\bsku\b|tipo\s+di\s+stoccaggio|unità\s+per\s+pacco|\bpacchi\b|\bunità\b|logistica\s+di\s+amazon|dimensione\s+standard|fuori\s+misura)/i;
 
         const picked = [];
         let totalLen = 0;
@@ -2255,6 +2293,8 @@ Tip:
           const reRm = new RegExp(escapeRegex(s), "ig");
           guess = guess.replace(reRm, "").trim();
         }catch(_e){}
+
+        guess = cleanProductMainName(guess);
 
         return guess;
       }catch(_e){
@@ -2311,7 +2351,7 @@ Tip:
             try{
               const s = toSkuId(sku||"");
               if(!tRaw || !s) return "";
-              const main = squashWhitespace(guessTitleFromRaw(tRaw, s));
+              const main = cleanProductMainName(squashWhitespace(guessTitleFromRaw(tRaw, s)));
               if(!main) return "";
               if(uiNoiseRe.test(main)) return "";
               // evita falsi positivi super corti
@@ -2350,6 +2390,20 @@ Tip:
               t = t.replace(/\s+/g, " ").trim();
               t = t.replace(/^[\|\-–•]+\s*/g, "").trim();
               t = t.replace(/[\|\-–•]+\s*$/g, "").trim();
+
+              // pulizia specifica: header/quantità che finiscono nel titolo
+              try{
+                let cut = t.length;
+                for(const re of [/\bSKU\s*:/i, /\bASIN\s*:/i, /Tipo\s+di\s+stoccaggio/i]){
+                  const i = t.search(re);
+                  if(i > 0) cut = Math.min(cut, i);
+                }
+                const mainPart = t.slice(0, cut).trim();
+                const restPart = t.slice(cut).trim();
+                const mainClean = cleanProductMainName(mainPart);
+                t = (mainClean || mainPart) + (restPart ? (" " + restPart) : "");
+                t = t.replace(/\s+/g, " ").trim();
+              }catch(_e){}
             }
 
             const looksBad = !t || badTitleRe.test(t) || uiNoiseRe.test(t) || /^amazon\s*$/i.test(t);
@@ -2645,6 +2699,9 @@ Tip:
 
       let main = t.slice(0, cut).trim();
       main = main.replace(/[\|\-–•]+\s*$/g, "").trim();
+      const _main0 = main;
+      main = cleanProductMainName(main);
+      if(!main) main = _main0;
       if(!main) main = t;
 
       const mSku = t.match(/\bSKU\s*:\s*([A-Z0-9][A-Z0-9-]{3,})/i);
