@@ -1533,6 +1533,8 @@ const tpl = document.createElement("template");
           return;
         }
 
+        if (typeof __shouldIgnoreDelegatedClick === "function" && __shouldIgnoreDelegatedClick(e, "tr[data-mvid]")) return;
+
         var tr = e.target && e.target.closest ? e.target.closest("tr[data-mvid]") : null;
         if (!tr) return;
 
@@ -1558,7 +1560,7 @@ const tpl = document.createElement("template");
 
         // click fuori = chiudi
         els.modalMovementDetail.addEventListener("click", function(ev){
-          if (ev && ev.target === els.modalMovementDetail) __closeDetailModal();
+          if (typeof __isSafeBackdropClick === "function" ? __isSafeBackdropClick(ev, els.modalMovementDetail) : (ev && ev.target === els.modalMovementDetail)) __closeDetailModal();
         });
 
         if (els.movDetClose) els.movDetClose.addEventListener("click", function(e){ try{ e.preventDefault(); e.stopPropagation(); }catch(_){}
@@ -5416,6 +5418,7 @@ function bindEvents(){
             return;
           }
           if (tr){
+            if (typeof __shouldIgnoreDelegatedClick === "function" && __shouldIgnoreDelegatedClick(e, "tr.jsDaneaRow")) return;
             const k = tr.getAttribute("data-key") || "";
             const mode = tr.getAttribute("data-mode") || "verify";
             openDetailByKey(k, mode);
@@ -6491,6 +6494,7 @@ function renderList(){
     $("revTbody")?.addEventListener("click", (e) => {
       const btn = e.target?.closest?.("button.jsRevOpen");
       const tr = e.target?.closest?.("tr.jsRevRow");
+      if (!btn && typeof __shouldIgnoreDelegatedClick === "function" && __shouldIgnoreDelegatedClick(e, "tr.jsRevRow")) return;
       const key = String(btn?.getAttribute("data-key") || tr?.getAttribute("data-key") || "").trim();
       if (!key) return;
       if (btn){ try{ e.preventDefault(); e.stopPropagation(); }catch(_){ } }
@@ -7251,6 +7255,7 @@ function renderList(){
     $("catTbody")?.addEventListener("click", (e) => {
       const btn = e.target?.closest?.("button.jsCatOpen");
       const tr = e.target?.closest?.("tr[data-catkey]");
+      if (!btn && typeof __shouldIgnoreDelegatedClick === "function" && __shouldIgnoreDelegatedClick(e, "tr[data-catkey]")) return;
       const key = (btn?.getAttribute("data-catkey") || tr?.getAttribute("data-catkey") || "").trim();
       if (!key) return;
       if (btn) { e.preventDefault(); e.stopPropagation(); }
@@ -7264,7 +7269,8 @@ function renderList(){
     $("btnCatDone")?.addEventListener("click", () => { setDetailOpen(false); renderList(); });
     $("catModalClose")?.addEventListener("click", () => { setDetailOpen(false); renderList(); });
     $("modalCategory")?.addEventListener("click", (e) => {
-      if (e.target === $("modalCategory")) { setDetailOpen(false); renderList(); }
+      const modalEl = $("modalCategory");
+      if (typeof __isSafeBackdropClick === "function" ? __isSafeBackdropClick(e, modalEl) : (e.target === modalEl)) { setDetailOpen(false); renderList(); }
     });
     document.addEventListener("keydown", (e) => {
       if (e.key === "Escape" && $("modalCategory")?.classList.contains("open")) {
@@ -9285,6 +9291,7 @@ Verrà aggiornata anche la chiave su tutti i prodotti finiti.`);
     $("btnFpCatCreate")?.addEventListener("click", ()=> createCategory());
 
     $("fpCatTbody")?.addEventListener("click", (e) => {
+      if (typeof __shouldIgnoreDelegatedClick === "function" && __shouldIgnoreDelegatedClick(e, "tr.jsFpCatRow")) return;
       const tr = e.target?.closest?.("tr.jsFpCatRow");
       if (!tr) return;
       const key = String(tr.getAttribute("data-key") || "").trim();
@@ -9296,7 +9303,10 @@ Verrà aggiornata anche la chiave su tutti i prodotti finiti.`);
     // modal close
     $("btnFpCatDone")?.addEventListener("click", ()=> setDetailOpen(false));
     $("fpCatModalClose")?.addEventListener("click", ()=> setDetailOpen(false));
-    $("modalFPCategory")?.addEventListener("click", (e)=>{ if (e.target === $("modalFPCategory")) setDetailOpen(false); });
+    $("modalFPCategory")?.addEventListener("click", (e)=>{
+      const modalEl = $("modalFPCategory");
+      if (typeof __isSafeBackdropClick === "function" ? __isSafeBackdropClick(e, modalEl) : (e.target === modalEl)) setDetailOpen(false);
+    });
 
     // edit: nome + chiave (rinomina anche docId)
     try{
@@ -10286,6 +10296,128 @@ Verrà aggiornata anche la chiave su tutti i prodotti finiti.`);
 
 
 
+const __robustTapState = {
+  pointerId: null,
+  downTarget: null,
+  x: 0,
+  y: 0,
+  moved: false,
+  ts: 0
+};
+
+function __normalizeClickTarget(target){
+  return (target && target.nodeType === 3) ? target.parentElement : target;
+}
+
+function __sameNodeOrContains(a, b){
+  return !!(a && b && (a === b || (a.contains && a.contains(b)) || (b.contains && b.contains(a))));
+}
+
+function __isInteractiveClickTarget(target){
+  const el = __normalizeClickTarget(target);
+  if (!el || !el.closest) return false;
+  return !!el.closest([
+    "input",
+    "textarea",
+    "select",
+    "option",
+    "button",
+    "a",
+    "label",
+    "summary",
+    "[contenteditable='']",
+    "[contenteditable='true']",
+    "[role='button']",
+    "[role='link']",
+    ".btn",
+    ".iconBtn",
+    ".seg button",
+    ".qtyEditInput",
+    ".jsQtyEdit",
+    ".jsQtySave",
+    "[data-no-row-open='1']",
+    ".noRowOpen"
+  ].join(","));
+}
+
+function __resetRobustTapState(){
+  __robustTapState.pointerId = null;
+  __robustTapState.downTarget = null;
+  __robustTapState.x = 0;
+  __robustTapState.y = 0;
+  __robustTapState.moved = false;
+  __robustTapState.ts = 0;
+}
+
+function __installRobustTapState(){
+  try{
+    if (window.__hubRobustTapBound) return;
+    window.__hubRobustTapBound = true;
+
+    document.addEventListener("pointerdown", (e) => {
+      if (!e) return;
+      if (typeof e.button === "number" && e.button > 0) return;
+      const target = __normalizeClickTarget(e.target);
+      __robustTapState.pointerId = (typeof e.pointerId === "number") ? e.pointerId : null;
+      __robustTapState.downTarget = target || null;
+      __robustTapState.x = Number(e.clientX) || 0;
+      __robustTapState.y = Number(e.clientY) || 0;
+      __robustTapState.moved = false;
+      __robustTapState.ts = Date.now();
+    }, true);
+
+    document.addEventListener("pointermove", (e) => {
+      if (!__robustTapState.downTarget) return;
+      if (__robustTapState.pointerId != null && e && typeof e.pointerId === "number" && e.pointerId !== __robustTapState.pointerId) return;
+      const dx = Math.abs((Number(e && e.clientX) || 0) - __robustTapState.x);
+      const dy = Math.abs((Number(e && e.clientY) || 0) - __robustTapState.y);
+      if (dx > 10 || dy > 10) __robustTapState.moved = true;
+    }, true);
+
+    document.addEventListener("pointerup", (e) => {
+      if (__robustTapState.pointerId != null && e && typeof e.pointerId === "number" && e.pointerId !== __robustTapState.pointerId) return;
+      setTimeout(() => { try{ __resetRobustTapState(); }catch(_){ } }, 0);
+    }, true);
+
+    document.addEventListener("pointercancel", __resetRobustTapState, true);
+    window.addEventListener("blur", __resetRobustTapState, true);
+  }catch(_){ }
+}
+
+function __shouldIgnoreDelegatedClick(e, rowSelector){
+  const target = __normalizeClickTarget(e && e.target);
+  if (!target) return true;
+  if (__isInteractiveClickTarget(target)) return true;
+  if (__robustTapState.moved) return true;
+
+  const down = __robustTapState.downTarget;
+  if (!down) return false;
+  if (__isInteractiveClickTarget(down)) return true;
+
+  if (!rowSelector){
+    return !__sameNodeOrContains(down, target);
+  }
+
+  const clickRow = target && target.closest ? target.closest(rowSelector) : null;
+  const downRow = down && down.closest ? down.closest(rowSelector) : null;
+
+  if (clickRow && downRow && clickRow !== downRow) return true;
+  if (clickRow && down && !__sameNodeOrContains(down, clickRow) && !__sameNodeOrContains(clickRow, down)) return true;
+
+  return false;
+}
+
+function __isSafeBackdropClick(e, backdropEl){
+  const target = __normalizeClickTarget(e && e.target);
+  const down = __robustTapState.downTarget;
+  if (!backdropEl || target !== backdropEl) return false;
+  if (__robustTapState.moved) return false;
+  if (!down || down !== backdropEl) return false;
+  return true;
+}
+
+try{ __installRobustTapState(); }catch(_){ }
+
     function syncHeaderBackVisibility(){
       if (!__btnBack) return;
       const hasModal = !!document.querySelector(".modal.open");
@@ -10443,10 +10575,10 @@ Verrà aggiornata anche la chiave su tutti i prodotti finiti.`);
     });
     document.getElementById("btnCloseInv")?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
     // Close inventario anche con tap/click sul backdrop
-    document.getElementById("viewInventory")?.addEventListener("click", (e) => { try{ if (e.target === e.currentTarget) setView("home"); }catch(_){ } });
-    document.getElementById("viewFinishedInventory")?.addEventListener("click", (e) => { try{ if (e.target === e.currentTarget) setView("home"); }catch(_){ } });
-    document.getElementById("viewMovements")?.addEventListener("click", (e) => { try{ if (e.target === e.currentTarget) setView("home"); }catch(_){ } });
-    document.getElementById("viewMoveInventory")?.addEventListener("click", (e) => { try{ if (e.target === e.currentTarget) { resetMoveInvDirection(); setView("home"); } }catch(_){ } });
+    document.getElementById("viewInventory")?.addEventListener("click", (e) => { try{ if (typeof __isSafeBackdropClick === "function" ? __isSafeBackdropClick(e, e.currentTarget) : (e.target === e.currentTarget)) setView("home"); }catch(_){ } });
+    document.getElementById("viewFinishedInventory")?.addEventListener("click", (e) => { try{ if (typeof __isSafeBackdropClick === "function" ? __isSafeBackdropClick(e, e.currentTarget) : (e.target === e.currentTarget)) setView("home"); }catch(_){ } });
+    document.getElementById("viewMovements")?.addEventListener("click", (e) => { try{ if (typeof __isSafeBackdropClick === "function" ? __isSafeBackdropClick(e, e.currentTarget) : (e.target === e.currentTarget)) setView("home"); }catch(_){ } });
+    document.getElementById("viewMoveInventory")?.addEventListener("click", (e) => { try{ if (typeof __isSafeBackdropClick === "function" ? __isSafeBackdropClick(e, e.currentTarget) : (e.target === e.currentTarget)) { resetMoveInvDirection(); setView("home"); } }catch(_){ } });
     document.getElementById("btnCloseOcr")?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
     btnBackOcr?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
     document.getElementById("btnGoMoveInventory")?.addEventListener("click", () => {
@@ -10543,8 +10675,8 @@ document.getElementById("btnCloseSupplierInvoices")?.addEventListener("click", (
     });
 
     // Fatturato (DDT completati con movimenti)
-    document.getElementById("viewRevenue")?.addEventListener("click", (e) => { try{ if (e.target === e.currentTarget) setView("home"); }catch(_){ } });
-    document.getElementById("viewSupplierInvoices")?.addEventListener("click", (e) => { try{ if (e.target === e.currentTarget) setView("home"); }catch(_){ } });
+    document.getElementById("viewRevenue")?.addEventListener("click", (e) => { try{ if (typeof __isSafeBackdropClick === "function" ? __isSafeBackdropClick(e, e.currentTarget) : (e.target === e.currentTarget)) setView("home"); }catch(_){ } });
+    document.getElementById("viewSupplierInvoices")?.addEventListener("click", (e) => { try{ if (typeof __isSafeBackdropClick === "function" ? __isSafeBackdropClick(e, e.currentTarget) : (e.target === e.currentTarget)) setView("home"); }catch(_){ } });
     document.getElementById("btnCloseRevenue")?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopPropagation(); }catch(_){} setView("home"); });
     document.getElementById("btnBackRevenue")?.addEventListener("click", (e) => {
       try{ e.preventDefault(); e.stopPropagation(); }catch(_){ }
@@ -10662,7 +10794,9 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
     ["ocr","inventory","finishedInventory","flows","moveInv","anag"].forEach((k) => {
       const el = __views[k];
       if (!el) return;
-      el.addEventListener("click", (e) => { if (e.target === el) setView("home"); });
+      el.addEventListener("click", (e) => {
+        if (typeof __isSafeBackdropClick === "function" ? __isSafeBackdropClick(e, el) : (e.target === el)) setView("home");
+      });
     });
 
     if (docItemsTable) {
@@ -19960,6 +20094,7 @@ let __stockRowByKey = new Map();
 
         // table row click
         moveInvTbody?.addEventListener("click", (e) => {
+          if (typeof __shouldIgnoreDelegatedClick === "function" && __shouldIgnoreDelegatedClick(e, "tr[data-gk]")) return;
           const tr = e.target && e.target.closest ? e.target.closest("tr[data-gk]") : null;
           if (!tr) return;
           const gk = tr.getAttribute("data-gk") || "";
@@ -19970,7 +20105,9 @@ let __stockRowByKey = new Map();
         // modal close/cancel
         btnCloseMoveInvQty?.addEventListener("click", closeMoveInvQtyModal);
         btnMoveInvQtyCancel?.addEventListener("click", closeMoveInvQtyModal);
-        modalMoveInvQty?.addEventListener("click", (e) => { if (e.target === modalMoveInvQty) closeMoveInvQtyModal(); });
+        modalMoveInvQty?.addEventListener("click", (e) => {
+          if (typeof __isSafeBackdropClick === "function" ? __isSafeBackdropClick(e, modalMoveInvQty) : (e.target === modalMoveInvQty)) closeMoveInvQtyModal();
+        });
 
         // ok
         btnMoveInvQtyOk?.addEventListener("click", async () => {
@@ -23297,7 +23434,9 @@ async function handleFileSelection(fileList) {
     });
     if (newProdClose) newProdClose.addEventListener("click", __closeNewProductModal);
     if (newProdCancel) newProdCancel.addEventListener("click", __closeNewProductModal);
-    if (modalNewProduct) modalNewProduct.addEventListener("click", (e) => { if (e.target === modalNewProduct) __closeNewProductModal(); });
+    if (modalNewProduct) modalNewProduct.addEventListener("click", (e) => {
+      if (typeof __isSafeBackdropClick === "function" ? __isSafeBackdropClick(e, modalNewProduct) : (e.target === modalNewProduct)) __closeNewProductModal();
+    });
 
     if (newProdCode) newProdCode.addEventListener("keydown", (e) => {
       if (e.key === "Enter") { e.preventDefault(); try{ newProdCreate && newProdCreate.click(); }catch(_){ } }
@@ -23406,7 +23545,9 @@ async function handleFileSelection(fileList) {
 // Supplier modal
     if (supClose) supClose.addEventListener("click", closeSupplierModal);
     if (btnSupDone) btnSupDone.addEventListener("click", closeSupplierModal);
-    if (modalSupplier) modalSupplier.addEventListener("click", (e) => { if (e.target === modalSupplier) closeSupplierModal(); });
+    if (modalSupplier) modalSupplier.addEventListener("click", (e) => {
+      if (typeof __isSafeBackdropClick === "function" ? __isSafeBackdropClick(e, modalSupplier) : (e.target === modalSupplier)) closeSupplierModal();
+    });
     if (btnSupDelete) btnSupDelete.addEventListener("click", () => { if (currentSupplierId) deleteSupplierCascade(currentSupplierId); });
 
     // Edit / Salva
@@ -23415,6 +23556,7 @@ async function handleFileSelection(fileList) {
     if (btnSupSave) btnSupSave.addEventListener("click", () => { try { saveSupplierEdits(); } catch(e){ console.warn(e); } });
     if (supDocsTbody) supDocsTbody.addEventListener("click", (e) => {
       const btn = e.target.closest('button[data-open-doc]');
+      if (!btn && typeof __shouldIgnoreDelegatedClick === "function" && __shouldIgnoreDelegatedClick(e, "tr[data-dockey]")) return;
       const tr = e.target.closest('tr[data-dockey]');
       const key = (btn && btn.getAttribute("data-open-doc")) || (tr && tr.getAttribute("data-dockey")) || "";
       if (key) {
@@ -24210,18 +24352,24 @@ Nota: elimina SOLO l’anagrafica prodotti finiti e la sua distinta base.`);
 
     if (prodClose) prodClose.addEventListener("click", closeProductModal);
     if (btnProdDone) btnProdDone.addEventListener("click", closeProductModal);
-    if (modalProduct) modalProduct.addEventListener("click", (e) => { if (e.target === modalProduct) closeProductModal(); });
+    if (modalProduct) modalProduct.addEventListener("click", (e) => {
+      if (typeof __isSafeBackdropClick === "function" ? __isSafeBackdropClick(e, modalProduct) : (e.target === modalProduct)) closeProductModal();
+    });
 
     if (unifiedClose) unifiedClose.addEventListener("click", closeUnifiedModal);
     if (btnUnifiedDone) btnUnifiedDone.addEventListener("click", closeUnifiedModal);
-    if (modalUnified) modalUnified.addEventListener("click", (e) => { if (e.target === modalUnified) closeUnifiedModal(); });
+    if (modalUnified) modalUnified.addEventListener("click", (e) => {
+      if (typeof __isSafeBackdropClick === "function" ? __isSafeBackdropClick(e, modalUnified) : (e.target === modalUnified)) closeUnifiedModal();
+    });
 
     // Finished product modal
     const __fpCloseSafe = () => { try{ window.closeFinishedProductModal && window.closeFinishedProductModal(); }catch(_){ } };
     if (fpClose) fpClose.addEventListener("click", __fpCloseSafe);
     if (btnFpDone) btnFpDone.addEventListener("click", __fpCloseSafe);
     if (btnFpCancel) btnFpCancel.addEventListener("click", __fpCloseSafe);
-    if (modalFinishedProduct) modalFinishedProduct.addEventListener("click", (e) => { if (e.target === modalFinishedProduct) __fpCloseSafe(); });
+    if (modalFinishedProduct) modalFinishedProduct.addEventListener("click", (e) => {
+      if (typeof __isSafeBackdropClick === "function" ? __isSafeBackdropClick(e, modalFinishedProduct) : (e.target === modalFinishedProduct)) __fpCloseSafe();
+    });
     if (btnFpSave) btnFpSave.addEventListener("click", (e) => { e.preventDefault(); e.stopPropagation(); saveFinishedProduct(); });
     if (btnFpDelete) btnFpDelete.addEventListener("click", (e) => { e.preventDefault(); e.stopPropagation(); if (__fpCurrentId) deleteFinishedProductById(__fpCurrentId); });
 
@@ -24346,8 +24494,10 @@ if (fpCompPick){
         // Click riga (fornitori): apri dettaglio fornitore cliccando ovunque sulla riga
         // (escludi elementi interattivi come bottoni/link/input)
         if (activeAnagTab === "suppliers") {
-          const isInteractive = !!(targetEl && targetEl.closest && targetEl.closest("button, a, input, select, textarea, label"));
-          if (!isInteractive) {
+          const rowClickBlocked = (typeof __shouldIgnoreDelegatedClick === "function")
+            ? __shouldIgnoreDelegatedClick(e, "tr[data-supplier-id]")
+            : !!(targetEl && targetEl.closest && targetEl.closest("button, a, input, select, textarea, label"));
+          if (!rowClickBlocked) {
             const trSup = targetEl && targetEl.closest ? targetEl.closest("tr[data-supplier-id]") : null;
             const sid = trSup ? (trSup.getAttribute("data-supplier-id") || "") : "";
             if (sid) {
@@ -24359,8 +24509,11 @@ if (fpCompPick){
 
         // Click riga (prodotti): apri dettaglio prodotto (stesso modale Inventario)
         if (activeAnagTab === "products") {
+          const rowClickBlocked = (typeof __shouldIgnoreDelegatedClick === "function")
+            ? __shouldIgnoreDelegatedClick(e, "tr[data-pg]")
+            : (!targetEl || !targetEl.closest || !!targetEl.closest("button[data-action]"));
           const tr = targetEl && targetEl.closest ? targetEl.closest("tr[data-pg]") : null;
-          if (tr && (!targetEl || !targetEl.closest || !targetEl.closest("button[data-action]"))) {
+          if (tr && !rowClickBlocked) {
             const gid = tr.getAttribute("data-pg") || "";
             if (gid) {
               try{
@@ -24376,8 +24529,10 @@ if (fpCompPick){
 
         // Click riga (prodotti finiti): toggle selezione (niente modale componenti)
         if (activeAnagTab === "finished") {
-          const isInteractive = !!(targetEl && targetEl.closest && targetEl.closest("button, a, input, select, textarea, label"));
-          if (!isInteractive) {
+          const rowClickBlocked = (typeof __shouldIgnoreDelegatedClick === "function")
+            ? __shouldIgnoreDelegatedClick(e, "tr[data-fp-id]")
+            : !!(targetEl && targetEl.closest && targetEl.closest("button, a, input, select, textarea, label"));
+          if (!rowClickBlocked) {
             const trFp = targetEl && targetEl.closest ? targetEl.closest("tr[data-fp-id]") : null;
             const cb = trFp ? trFp.querySelector('input.jsFpSel') : null;
             if (cb) {
@@ -25153,11 +25308,15 @@ try {
     // Quick modal controls
     document.getElementById("modalClose").addEventListener("click", closeModal);
     document.getElementById("modalOk").addEventListener("click", closeModal);
-    modalQuick.addEventListener("click", (e) => { if (e.target === modalQuick) closeModal(); });
+    modalQuick.addEventListener("click", (e) => {
+      if (typeof __isSafeBackdropClick === "function" ? __isSafeBackdropClick(e, modalQuick) : (e.target === modalQuick)) closeModal();
+    });
 
     // DDT detail modal controls
     if (btnCloseDocDetail) btnCloseDocDetail.addEventListener("click", closeDocDetail);
-    if (modalDocDetail) modalDocDetail.addEventListener("click", (e) => { if (e.target === modalDocDetail) closeDocDetail(); });
+    if (modalDocDetail) modalDocDetail.addEventListener("click", (e) => {
+      if (typeof __isSafeBackdropClick === "function" ? __isSafeBackdropClick(e, modalDocDetail) : (e.target === modalDocDetail)) closeDocDetail();
+    });
 
     // Flow edit modal controls
     if (btnCloseFlowEdit) btnCloseFlowEdit.addEventListener("click", closeFlowEdit);
@@ -25166,7 +25325,9 @@ try {
     if (btnDeleteFlowFromEdit) btnDeleteFlowFromEdit.addEventListener("click", () => {
       if (__currentFlowEditKey) deleteFlowByKey(__currentFlowEditKey);
     });
-    if (modalFlowEdit) modalFlowEdit.addEventListener("click", (e) => { if (e.target === modalFlowEdit) closeFlowEdit(); });
+    if (modalFlowEdit) modalFlowEdit.addEventListener("click", (e) => {
+      if (typeof __isSafeBackdropClick === "function" ? __isSafeBackdropClick(e, modalFlowEdit) : (e.target === modalFlowEdit)) closeFlowEdit();
+    });
 
 // Flow edit: elimina singola riga (minus) + modifica quantità
 if (modalFlowEdit) {
@@ -25231,10 +25392,12 @@ if (modalFlowEdit) {
 
     // Document row click (Movimenti recenti / Flussi)
     if (movTbody) movTbody.addEventListener("click", (e) => {
+      if (typeof __shouldIgnoreDelegatedClick === "function" && __shouldIgnoreDelegatedClick(e, "tr[data-dockey]")) return;
       const tr = e.target.closest('tr[data-dockey]');
       if (tr) openDocDetail(tr.getAttribute("data-dockey"));
     });
     if (flowsTbody) flowsTbody.addEventListener("click", (e) => {
+      if (typeof __shouldIgnoreDelegatedClick === "function" && __shouldIgnoreDelegatedClick(e, "tr[data-dockey]")) return;
       const tr = e.target.closest('tr[data-dockey]');
       if (!tr) return;
       const key = tr.getAttribute("data-dockey");
@@ -25252,7 +25415,9 @@ if (modalFlowEdit) {
     }
     const __settingsClose = document.getElementById("settingsClose");
     if (__settingsClose) __settingsClose.addEventListener("click", closeSettings);
-    if (modalSettings) modalSettings.addEventListener("click", (e) => { if (e.target === modalSettings) closeSettings(); });
+    if (modalSettings) modalSettings.addEventListener("click", (e) => {
+      if (typeof __isSafeBackdropClick === "function" ? __isSafeBackdropClick(e, modalSettings) : (e.target === modalSettings)) closeSettings();
+    });
 
     const __btnSaveSettings = document.getElementById("btnSaveSettings");
     if (__btnSaveSettings) __btnSaveSettings.addEventListener("click", async () => {
@@ -25375,7 +25540,7 @@ searchStock.addEventListener("input", () => renderAll());
           return;
         }
 
-        if (e.target.closest("input.jsQtyEdit")) return;
+        if (typeof __shouldIgnoreDelegatedClick === "function" && __shouldIgnoreDelegatedClick(e, "tr[data-k]")) return;
 
         const tr = e.target.closest("tr[data-k]");
         if (!tr) return;
@@ -25537,7 +25702,9 @@ searchStock.addEventListener("input", () => renderAll());
     try{
       if (modalFpProduce && modalFpProduce.dataset.bound !== "1"){
         modalFpProduce.dataset.bound = "1";
-        modalFpProduce.addEventListener("click", (e) => { if (e.target === modalFpProduce) __closeFpProduceModal(); });
+        modalFpProduce.addEventListener("click", (e) => {
+          if (typeof __isSafeBackdropClick === "function" ? __isSafeBackdropClick(e, modalFpProduce) : (e.target === modalFpProduce)) __closeFpProduceModal();
+        });
         if (btnCloseFpProduce) btnCloseFpProduce.addEventListener("click", __closeFpProduceModal);
         if (btnFpProduceDo) btnFpProduceDo.addEventListener("click", __doFpProduceFromModal);
         if (fpProduceQty) {
@@ -25551,6 +25718,7 @@ searchStock.addEventListener("input", () => renderAll());
 
     if (fpStockTbody) {
       fpStockTbody.addEventListener("click", (e) => {
+        if (typeof __shouldIgnoreDelegatedClick === "function" && __shouldIgnoreDelegatedClick(e, "tr[data-k]")) return;
         const tr = e.target.closest("tr[data-k]");
         if (!tr) return;
         const k = tr.getAttribute("data-k") || "";
@@ -25599,7 +25767,9 @@ if (importMovementsInput) importMovementsInput.addEventListener("change", async 
 
     // Manual modal controls
     document.getElementById("movClose").addEventListener("click", closeMovementModal);
-    modalMovement.addEventListener("click", (e) => { if (e.target === modalMovement) closeMovementModal(); });
+    modalMovement.addEventListener("click", (e) => {
+      if (typeof __isSafeBackdropClick === "function" ? __isSafeBackdropClick(e, modalMovement) : (e.target === modalMovement)) closeMovementModal();
+    });
     movSegIn.addEventListener("click", () => setModalMovType("IN"));
     movSegOut.addEventListener("click", () => setModalMovType("OUT"));
     document.getElementById("btnSaveMovement").addEventListener("click", saveManualModalMovement);
