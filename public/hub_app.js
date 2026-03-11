@@ -12850,8 +12850,8 @@ async function deleteMovementsBulk(ids) {
           return;
         }
 
-        // Local fallback
-        saveLocalData();
+        // Nessun fallback locale per questo salvataggio: deve restare server-only
+        throw new Error("Salvataggio movimenti disponibile solo con Firebase attivo.");
       };
 
       // Helpers: code used?
@@ -12980,7 +12980,7 @@ async function deleteMovementsBulk(ids) {
                 if (oLow && state && state.productCategories && (oLow in state.productCategories) && !(newLow in state.productCategories)) {
                   state.productCategories[newLow] = state.productCategories[oLow];
                   delete state.productCategories[oLow];
-                  saveLocalData();
+                  // no local persistence here
                 }
               }catch(_){}
 
@@ -17335,6 +17335,287 @@ function __getLastSupplierInfoForCode(code){
       return String(fallbackName || "").trim();
     }
 
+    async function __runAsyncBatches(items, worker, batchSize){
+      const list = Array.isArray(items) ? items.filter(Boolean) : [];
+      const size = Math.max(1, Number(batchSize) || 100);
+      for (let i = 0; i < list.length; i += size){
+        const slice = list.slice(i, i + size);
+        await Promise.all(slice.map((it, idx) => worker(it, i + idx)));
+      }
+    }
+
+    function __renamePlainMapKeyNoPersist(obj, oldLow, newLow){
+      try{
+        if (!obj || typeof obj !== "object") return;
+        const o = String(oldLow || "").trim().toLowerCase();
+        const n = String(newLow || "").trim().toLowerCase();
+        if (!o || !n || o === n) return;
+        if (Object.prototype.hasOwnProperty.call(obj, o) && !Object.prototype.hasOwnProperty.call(obj, n)) {
+          obj[n] = obj[o];
+        }
+        if (Object.prototype.hasOwnProperty.call(obj, o)) delete obj[o];
+      }catch(_){ }
+    }
+
+    function __renameComponentCodeArray(arr, oldLow, newCode, newLow){
+      if (!Array.isArray(arr) || !oldLow || !newCode) return { changed:false, value: Array.isArray(arr) ? arr : [] };
+      let changed = false;
+      const next = arr.map((c) => {
+        const low = String(c && c.code || "").trim().toLowerCase();
+        if (low !== oldLow) return c;
+        changed = true;
+        const out = Object.assign({}, c || {});
+        out.code = newCode;
+        try{
+          const pid = String(out.productId || "").trim();
+          if (!pid || pid === keyToDocId(oldLow)) out.productId = keyToDocId(newLow);
+        }catch(_){
+          out.productId = keyToDocId(newLow);
+        }
+        return out;
+      });
+      return { changed, value: next };
+    }
+
+    async function renameProductCodeEverywhere(oldCode, newCode, opts){
+      const fromCode = String(oldCode || "").trim();
+      const toCode = String(newCode || "").trim();
+
+      if (!fromCode || !toCode) {
+        showToast("Codice non valido", "warn");
+        return false;
+      }
+      if (fromCode === toCode) return true;
+
+      if (!(fb.user && fb.db)) {
+        showToast("Accedi con Google per salvare", "warn");
+        return false;
+      }
+
+      const oldLow = fromCode.toLowerCase();
+      const newLow = toCode.toLowerCase();
+
+      const existingTarget = findProductByCode(toCode);
+      const existingTargetLow = String(existingTarget && (existingTarget.code || safeDecodeUri(existingTarget.id || "")) || "").trim().toLowerCase();
+      if (existingTarget && existingTargetLow && existingTargetLow !== oldLow) {
+        showToast("Esiste già un articolo con questo codice", "warn");
+        return false;
+      }
+
+      const oldProduct = findProductByCode(fromCode);
+      const nameFallback = String(
+        (opts && opts.nameFallback) ||
+        (oldProduct && oldProduct.name) ||
+        fromCode
+      ).trim() || toCode;
+
+      const userLabel = (fb.user && (fb.user.email || fb.user.uid)) ? (fb.user.email || fb.user.uid) : "";
+
+      // soglie esistenti legate al codice vecchio (anche se non ci sono movimenti in memoria)
+      const thresholdPairs = [];
+      const thresholdSeen = new Set();
+      const thresholdMaps = [thresholds, (state && state.thresholds) ? state.thresholds : null];
+      thresholdMaps.forEach((bag) => {
+        try{
+          Object.keys(bag || {}).forEach((k) => {
+            const kk = String(k || "");
+            if (!kk || !kk.endsWith("||" + oldLow)) return;
+            if (thresholdSeen.has(kk)) return;
+            thresholdSeen.add(kk);
+            const v = Number((bag || {})[kk]);
+            thresholdPairs.push({ oldKey: kk, newKey: kk.slice(0, -oldLow.length) + newLow, value: Number.isFinite(v) ? Math.floor(v) : null });
+          });
+        }catch(_){ }
+      });
+
+      const affectedMovements = (state && Array.isArray(state.movements) ? state.movements : [])
+        .filter((mv) => String(mv && mv.code || "").trim().toLowerCase() === oldLow);
+
+      const fpDocsToPatch = [];
+      try{
+        (Array.isArray(finishedProducts) ? finishedProducts : []).forEach((fp) => {
+          const arr0 = Array.isArray(fp && fp.components) ? fp.components
+            : (Array.isArray(fp && fp.bom) ? fp.bom
+            : (Array.isArray(fp && fp.distintaBase) ? fp.distintaBase : []));
+          const patched = __renameComponentCodeArray(arr0, oldLow, toCode, newLow);
+          if (patched.changed && fp && fp.id) {
+            fpDocsToPatch.push({ id: String(fp.id), components: patched.value });
+          }
+        });
+      }catch(_){ }
+
+      const fpCatDocsToPatch = [];
+      try{
+        (Array.isArray(finishedProductCategories) ? finishedProductCategories : []).forEach((cat) => {
+          const arr0 = Array.isArray(cat && cat.bom) ? cat.bom
+            : (Array.isArray(cat && cat.components) ? cat.components
+            : (Array.isArray(cat && cat.distintaBase) ? cat.distintaBase : []));
+          const patched = __renameComponentCodeArray(arr0, oldLow, toCode, newLow);
+          if (patched.changed && cat && cat.key) {
+            fpCatDocsToPatch.push({ key: String(cat.key), bom: patched.value });
+          }
+        });
+      }catch(_){ }
+
+      const newDocId = keyToDocId(newLow);
+      const oldDocId = keyToDocId(oldLow);
+
+      // prepara doc prodotto nuovo (server-first, nessun fallback locale)
+      const productPayload = {};
+      try{
+        const src = (oldProduct && typeof oldProduct === "object") ? oldProduct : {};
+        Object.keys(src || {}).forEach((k) => {
+          if (k === "id" || k === "code" || k === "codeLower") return;
+          productPayload[k] = src[k];
+        });
+      }catch(_){}
+
+      productPayload.code = toCode;
+      productPayload.codeLower = newLow;
+      productPayload.name = String(productPayload.name || nameFallback || toCode).trim() || toCode;
+      productPayload.nameLower = String(productPayload.name || toCode).trim().toLowerCase();
+      productPayload.updatedAt = serverTimestamp();
+      productPayload.updatedBy = userLabel;
+
+      try{
+        await setDoc(doc(fb.db, "orgs", ORG_ID, "products", newDocId), productPayload, { merge: true });
+
+        await __runAsyncBatches(affectedMovements, async (mv) => {
+          const mvId = String(mv && mv.id || "").trim();
+          if (!mvId) return;
+          await setDoc(doc(fb.db, "orgs", ORG_ID, "inventoryMovements", mvId), {
+            code: toCode,
+            updatedAt: serverTimestamp(),
+            updatedBy: userLabel
+          }, { merge: true });
+        }, 150);
+
+        await __runAsyncBatches(thresholdPairs, async (pair) => {
+          const oldKey = String(pair && pair.oldKey || "");
+          const newKey = String(pair && pair.newKey || "");
+          if (!oldKey) return;
+
+          if (newKey && newKey !== oldKey && Number.isFinite(Number(pair && pair.value))) {
+            const alreadyCloud = thresholds && Object.prototype.hasOwnProperty.call(thresholds, newKey) && Number.isFinite(Number(thresholds[newKey]));
+            const alreadyLocal = state && state.thresholds && Object.prototype.hasOwnProperty.call(state.thresholds, newKey) && Number.isFinite(Number(state.thresholds[newKey]));
+            if (!alreadyCloud && !alreadyLocal) {
+              await setDoc(doc(fb.db, "orgs", ORG_ID, "thresholds", keyToDocId(newKey)), {
+                value: Math.max(0, Math.floor(Number(pair.value) || 0)),
+                updatedAt: serverTimestamp(),
+                updatedBy: userLabel
+              }, { merge: true });
+            }
+          }
+
+          if (oldKey !== newKey) {
+            try{ await deleteDoc(doc(fb.db, "orgs", ORG_ID, "thresholds", keyToDocId(oldKey))); }catch(_){ }
+          }
+        }, 150);
+
+        await __runAsyncBatches(fpDocsToPatch, async (it) => {
+          await setDoc(doc(fb.db, "orgs", ORG_ID, "finishedProducts", String(it.id)), {
+            components: it.components,
+            updatedAt: serverTimestamp(),
+            updatedBy: userLabel
+          }, { merge: true });
+        }, 80);
+
+        await __runAsyncBatches(fpCatDocsToPatch, async (it) => {
+          await setDoc(doc(fb.db, "orgs", ORG_ID, "finishedProductCategories", keyToDocId(String(it.key || "").trim().toLowerCase())), {
+            bom: it.bom,
+            components: it.bom,
+            updatedAt: serverTimestamp(),
+            updatedBy: userLabel
+          }, { merge: true });
+        }, 80);
+
+        if (oldDocId !== newDocId) {
+          try{ await deleteDoc(doc(fb.db, "orgs", ORG_ID, "products", oldDocId)); }catch(_){ }
+        }
+      } catch (e) {
+        console.error("renameProductCodeEverywhere failed", e);
+        showToast("Errore salvataggio codice", "err");
+        return false;
+      }
+
+      // runtime patch immediata (senza persistenza locale)
+      try{
+        const updatedAtIso = new Date().toISOString();
+
+        products = (Array.isArray(products) ? products : []).filter((pp) => {
+          const c1 = String(pp && (pp.code || pp.id || "") || "").trim().toLowerCase();
+          const c2 = safeDecodeUri(String(pp && pp.id || "")).trim().toLowerCase();
+          return !(c1 === oldLow || c2 === oldLow);
+        });
+
+        const nextProd = Object.assign({}, (oldProduct && typeof oldProduct === "object") ? oldProduct : {}, productPayload, {
+          id: newDocId,
+          code: toCode,
+          codeLower: newLow,
+          updatedAtIso
+        });
+        products.push(nextProd);
+
+        (state && Array.isArray(state.movements) ? state.movements : []).forEach((mv) => {
+          if (String(mv && mv.code || "").trim().toLowerCase() !== oldLow) return;
+          mv.code = toCode;
+          mv.updatedAtIso = updatedAtIso;
+          mv.updatedBy = userLabel;
+        });
+
+        thresholdPairs.forEach((pair) => {
+          const oldKey = String(pair && pair.oldKey || "");
+          const newKey = String(pair && pair.newKey || "");
+          const value = Number.isFinite(Number(pair && pair.value)) ? Math.max(0, Math.floor(Number(pair.value) || 0)) : null;
+
+          try{
+            if (oldKey && thresholds && Object.prototype.hasOwnProperty.call(thresholds, oldKey)) delete thresholds[oldKey];
+            if (newKey && value != null && thresholds && !Object.prototype.hasOwnProperty.call(thresholds, newKey)) thresholds[newKey] = value;
+          }catch(_){ }
+
+          try{
+            if (oldKey && state && state.thresholds && Object.prototype.hasOwnProperty.call(state.thresholds, oldKey)) delete state.thresholds[oldKey];
+            if (newKey && value != null && state && state.thresholds && !Object.prototype.hasOwnProperty.call(state.thresholds, newKey)) state.thresholds[newKey] = value;
+          }catch(_){ }
+        });
+
+        if (oldLow !== newLow) {
+          try{ __renamePlainMapKeyNoPersist(state && state.productCategories ? state.productCategories : null, oldLow, newLow); }catch(_){ }
+          try{ __renamePlainMapKeyNoPersist(state && state.productUoms ? state.productUoms : null, oldLow, newLow); }catch(_){ }
+          try{ __renamePlainMapKeyNoPersist(state && state.productWarehouses ? state.productWarehouses : null, oldLow, newLow); }catch(_){ }
+        }
+
+        try{
+          (Array.isArray(finishedProducts) ? finishedProducts : []).forEach((fp) => {
+            const arr0 = Array.isArray(fp && fp.components) ? fp.components
+              : (Array.isArray(fp && fp.bom) ? fp.bom
+              : (Array.isArray(fp && fp.distintaBase) ? fp.distintaBase : null));
+            const patched = __renameComponentCodeArray(arr0, oldLow, toCode, newLow);
+            if (patched.changed) fp.components = patched.value;
+          });
+        }catch(_){ }
+
+        try{
+          (Array.isArray(finishedProductCategories) ? finishedProductCategories : []).forEach((cat) => {
+            const arr0 = Array.isArray(cat && cat.bom) ? cat.bom
+              : (Array.isArray(cat && cat.components) ? cat.components
+              : (Array.isArray(cat && cat.distintaBase) ? cat.distintaBase : null));
+            const patched = __renameComponentCodeArray(arr0, oldLow, toCode, newLow);
+            if (patched.changed) {
+              cat.bom = patched.value;
+              cat.components = patched.value;
+            }
+          });
+          finishedProductCategoriesMap = new Map((Array.isArray(finishedProductCategories) ? finishedProductCategories : []).map((c) => [String(c && c.key || "").trim().toLowerCase(), c]));
+        }catch(_){ }
+
+        try{ renderAll(); }catch(_){ }
+        try{ renderAnag(); }catch(_){ }
+      }catch(_){ }
+
+      return true;
+    }
+
     async function setProductNameForCode(code, name) {
       const key = String(code || "").trim();
       if (!key) return;
@@ -20892,12 +21173,25 @@ async function deleteSupplierCascade(supplierId){
         `);
       }
 
-      baseFields.push(`
-        <div class="field">
-          <label>Codice</label>
-          <input value="${h(code)}" />
-        </div>
-      `);
+      if (isAliasGroup) {
+        baseFields.push(`
+          <div class="field">
+            <label>Codici</label>
+            <input value="${escapeHtmlAttr((ctx && Array.isArray(ctx.__codes) ? ctx.__codes.join(", ") : code) || "")}" readonly />
+          </div>
+        `);
+      } else {
+        baseFields.push(`
+          <div class="field">
+            <label>Codice</label>
+            <div class="qty-editor" style="justify-content:flex-start;">
+              <input id="prodCodeEdit" class="qtyEditInput" type="text" value="${escapeHtmlAttr(code)}" />
+              <button id="prodCodeSave" class="btn btn-primary btn-xs" type="button" disabled>Salva</button>
+            </div>
+            <div class="td-muted" style="margin-top:6px;">Aggiorna anagrafica, movimenti, soglie e distinte base. Nessun fallback locale.</div>
+          </div>
+        `);
+      }
       baseFields.push(`
         <div class="field">
           <label>U.M.</label>
@@ -21336,6 +21630,73 @@ if (mode === "master") {
           if (!v) return;
           nSave.disabled = true;
           await setProductNameForCode(code, v);
+        });
+      }
+
+      // Codice save (server-only, nessun fallback locale)
+      const cInp = document.getElementById("prodCodeEdit");
+      const cSave = document.getElementById("prodCodeSave");
+      if (cInp && cSave && !isAliasGroup) {
+        const sync = () => {
+          const cur = String(cInp.value || "").trim();
+          cSave.disabled = (cur === code);
+        };
+        cInp.addEventListener("input", sync);
+        cInp.addEventListener("keydown", async (e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            if (!cSave.disabled) cSave.click();
+            else cInp.blur();
+          }
+          if (e.key === "Escape") {
+            e.preventDefault();
+            cInp.value = code;
+            sync();
+            try{ cInp.blur(); }catch(_){ }
+          }
+        });
+        sync();
+
+        cSave.addEventListener("click", async (e) => {
+          e.preventDefault(); e.stopPropagation();
+          const nextCode = String(cInp.value || "").trim();
+          if (!nextCode) {
+            showToast("Inserisci un codice articolo", "warn");
+            try{ cInp.focus(); }catch(_){ }
+            return;
+          }
+
+          const oldTxt = String(cSave.textContent || "Salva");
+          cInp.disabled = true;
+          cSave.disabled = true;
+          cSave.textContent = "Salvo…";
+          try{
+            const ok = await renameProductCodeEverywhere(code, nextCode, {
+              nameFallback: String((document.getElementById("prodNameEdit") && document.getElementById("prodNameEdit").value) || nameVal || title || nextCode).trim()
+            });
+            if (!ok) return;
+
+            const nextCtx = Object.assign({}, ctx || {}, { code: nextCode });
+            try{
+              if (nextCtx.__pickStockCerea && typeof nextCtx.__pickStockCerea === "object") {
+                nextCtx.__pickStockCerea = Object.assign({}, nextCtx.__pickStockCerea, { code: nextCode });
+              }
+              if (nextCtx.__pickStockConca && typeof nextCtx.__pickStockConca === "object") {
+                nextCtx.__pickStockConca = Object.assign({}, nextCtx.__pickStockConca, { code: nextCode });
+              }
+            }catch(_){}
+
+            try{ closeProductModal(); }catch(_){ }
+            try{ openProductModal(nextCode, nextCtx); }catch(_){ }
+            showToast("Codice salvato");
+          }catch(err){
+            console.error("prodCodeSave failed", err);
+            showToast("Errore salvataggio codice", "err");
+          }finally{
+            cInp.disabled = false;
+            cSave.textContent = oldTxt;
+            sync();
+          }
         });
       }
 
