@@ -11119,6 +11119,7 @@ function twEnsurePfState(){
   if(!Array.isArray(pf.agentiCompleted)) pf.agentiCompleted = [];
   if(!(pf.byKey instanceof Map)) pf.byKey = new Map();
   if(!(pf.agentiCodes instanceof Set)) pf.agentiCodes = new Set();
+  if(!(pf.agentiMetaByCode instanceof Map)) pf.agentiMetaByCode = new Map();
   pf.searchTerm = String(pf.searchTerm || "");
   pf.selectedKey = String(pf.selectedKey || "");
   pf.readyProducts = Boolean(pf.readyProducts);
@@ -11168,6 +11169,111 @@ function twPfDisplayQty(v){
   return String(Math.round(n * 1000) / 1000);
 }
 
+function twPfCollapseSpaces(v){
+  return String(v || "").replace(/\s+/g, " ").trim();
+}
+
+function twPfEscapeRe(v){
+  return String(v || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function twPfExtractMeasure(text){
+  const raw = twPfCollapseSpaces(String(text || "").replace(/,/g, "."));
+  if(!raw) return "";
+  let m = raw.match(/\b(\d+(?:\.\d+)?)\s*(ml|cl|cc)\b/i);
+  if(m){
+    const num = Number(m[1]);
+    const qty = Number.isInteger(num) ? String(num) : String(Math.round(num * 100) / 100).replace(/\.0+$/, "");
+    return `${qty} ${String(m[2] || "").toLowerCase()}`.trim();
+  }
+  m = raw.match(/\b(\d+(?:\.\d+)?)\s*(lt|ltr|l|litro|litri)\b/i);
+  if(m){
+    const num = Number(m[1]);
+    const qty = Number.isInteger(num) ? String(num) : String(Math.round(num * 100) / 100).replace(/\.0+$/, "");
+    return `${qty} lt`.trim();
+  }
+  return "";
+}
+
+function twPfBestRawNameFromRow(r){
+  return twPfCollapseSpaces(
+    r?.description ||
+    r?.desc ||
+    r?.item ||
+    r?.name ||
+    r?.article ||
+    r?.articolo ||
+    r?.label ||
+    ""
+  );
+}
+
+function twPfHasDryHint(text){
+  const s = twPfNorm(text);
+  if(!s) return false;
+  return /\b(sacco|sacchi|sacchetto|sacchetti|busta|buste|granulare|granulari|granulo|granuli|microgranulare|microgranulari|polvere|polveri|cristalli|pellet|pastiglia|pastiglie|tabs|compresse|capsule|fiocchi|scaglie|substrato|lettiera)\b/.test(s);
+}
+
+function twPfHasLiquidHint(text){
+  const raw = String(text || "");
+  const s = twPfNorm(raw);
+  if(!s) return false;
+  if(/\b\d+(?:[.,]\d+)?\s*(ml|cl|cc|lt|ltr|l|litro|litri)\b/i.test(raw)) return true;
+  return /\b(spray|trigger|spruzzino|flacone|bottiglia|tanica|liquido|liquida|soluzione|olio|gel|sapone)\b/.test(s);
+}
+
+function twPfCleanDisplayName(rawName, fallbackCode){
+  const source = twPfCollapseSpaces(rawName || fallbackCode || "");
+  if(!source) return String(fallbackCode || "PF").trim();
+
+  const measure = twPfExtractMeasure(source);
+  let s = ` ${source} `;
+
+  s = s
+    .replace(/[_|]+/g, " ")
+    .replace(/[–—]+/g, " ")
+    .replace(/\s*-\s*/g, " ")
+    .replace(/\((?:[^)(]+|\([^)(]*\))*\)/g, " ")
+    .replace(/\b\d+(?:[.,]\d+)?\s*(?:ml|cl|cc|lt|ltr|l|litro|litri)\b/gi, " ")
+    .replace(/\b(?:trigger|spruzzino|flacone|bottiglia|tanica|pronto\s+uso|uso\s+pronto|professionale|idrosolubile|filtrato|concentrat[oa]|liquid[oa]|soluzione|formato|conf(?:ezione)?|pack|bundle|kit|ricarica)\b/gi, " ");
+
+  const codeSafe = String(fallbackCode || "").trim();
+  if(codeSafe){
+    try{
+      const codeRe = new RegExp("\\b" + twPfEscapeRe(codeSafe).replace(/\\ /g, "\\s*") + "\\b", "ig");
+      s = s.replace(codeRe, " ");
+    }catch(_e){}
+  }
+
+  s = twPfCollapseSpaces(s);
+  if(!s) s = twPfCollapseSpaces(source);
+
+  if(measure){
+    try{
+      const measRe = new RegExp("\\b" + twPfEscapeRe(measure).replace(/\\ /g, "\\s*") + "\\b", "i");
+      if(!measRe.test(s)) s = `${s} ${measure}`.trim();
+    }catch(_e){
+      s = `${s} ${measure}`.trim();
+    }
+  }
+
+  return twPfCollapseSpaces(s);
+}
+
+function twPfIsLiquidCandidate(rec, meta){
+  const probe = [
+    rec?.code,
+    rec?.product,
+    rec?.categoryKey,
+    meta?.bestName,
+    meta?.sampleName
+  ].filter(Boolean).join(" ");
+
+  if(!probe) return false;
+  if(twPfHasDryHint(probe)) return false;
+  return twPfHasLiquidHint(probe);
+}
+
 function twPfIsAgentiWarehouseStr(warehouse){
   const s = String(warehouse || "").trim().toLowerCase().replace(/\s+/g, " ").trim();
   if(!s) return false;
@@ -11177,27 +11283,64 @@ function twPfIsAgentiWarehouseStr(warehouse){
   return false;
 }
 
-function twPfCollectAgentiCodes(list){
-  const set = new Set();
+function twPfCollectAgentiInfo(list){
+  const codes = new Set();
+  const metaByCode = new Map();
+
   for(const d of (Array.isArray(list) ? list : [])){
     if(!d) continue;
     const wh = String(d.warehouse || d.magazzino || d.site || "").trim();
     if(!twPfIsAgentiWarehouseStr(wh)) continue;
+
     const rows = Array.isArray(d.rows) ? d.rows : [];
     for(const r of rows){
-      const code = String((r && (r.code || r.codice)) || "").trim().toLowerCase();
-      if(code) set.add(code);
+      const codeRaw = String((r && (r.code || r.codice)) || "").trim();
+      const codeLow = codeRaw.toLowerCase();
+      if(!codeLow) continue;
+
+      codes.add(codeLow);
+
+      const rawName = twPfBestRawNameFromRow(r);
+      const rec = metaByCode.get(codeLow) || {
+        code: codeRaw,
+        sampleName: "",
+        bestName: "",
+        names: new Map()
+      };
+
+      if(codeRaw && !rec.code) rec.code = codeRaw;
+      if(rawName){
+        if(!rec.sampleName) rec.sampleName = rawName;
+        rec.names.set(rawName, (rec.names.get(rawName) || 0) + 1);
+      }
+      metaByCode.set(codeLow, rec);
     }
   }
-  return set;
+
+  for(const [codeLow, rec] of metaByCode.entries()){
+    const ranked = Array.from((rec.names instanceof Map ? rec.names.entries() : []))
+      .sort((a,b)=>{
+        if((b[1] || 0) !== (a[1] || 0)) return (b[1] || 0) - (a[1] || 0);
+        return String(a[0] || "").length - String(b[0] || "").length;
+      });
+    rec.bestName = String((ranked[0] && ranked[0][0]) || rec.sampleName || "").trim();
+    metaByCode.set(codeLow, rec);
+  }
+
+  return { codes, metaByCode };
 }
 
 function twPfRefreshAgentiCodes(){
   const pf = twEnsurePfState();
-  const set = twPfCollectAgentiCodes(pf.agentiDdts);
-  for(const code of twPfCollectAgentiCodes(pf.agentiCompleted)) set.add(code);
-  pf.agentiCodes = set;
+  const combined = []
+    .concat(Array.isArray(pf.agentiDdts) ? pf.agentiDdts : [])
+    .concat(Array.isArray(pf.agentiCompleted) ? pf.agentiCompleted : []);
+
+  const info = twPfCollectAgentiInfo(combined);
+  pf.agentiCodes = info.codes instanceof Set ? info.codes : new Set();
+  pf.agentiMetaByCode = info.metaByCode instanceof Map ? info.metaByCode : new Map();
   pf.readyAgenti = !!(pf.readyAgentiDdts && pf.readyAgentiCompleted);
+
   twPfRebuildIndex();
   twPfRenderStatus();
   twPfRenderSelectedMeta();
@@ -11280,25 +11423,37 @@ function twPfScoreItem(it, qNorm){
   if(!q) return 0;
 
   const code = twPfNorm(it.code || "");
+  const display = twPfNorm(it.displayName || "");
   const name = twPfNorm(it.product || it.item || "");
+  const agentName = twPfNorm(it.agentiName || "");
   const category = twPfNorm(it.categoryKey || "");
-  const hay = `${code} ${name} ${category}`.trim();
+  const hay = `${code} ${display} ${name} ${agentName} ${category}`.trim();
 
   let score = 0;
-  if(code && code === q) score += 1200;
+  if(code && code === q) score += 1250;
+  if(display && display === q) score += 1180;
   if(name && name === q) score += 1000;
-  if(code && code.startsWith(q)) score += 700;
+  if(agentName && agentName === q) score += 980;
+
+  if(code && code.startsWith(q)) score += 760;
+  if(display && display.startsWith(q)) score += 680;
   if(name && name.startsWith(q)) score += 560;
-  if(code && code.includes(q)) score += 420;
+  if(agentName && agentName.startsWith(q)) score += 520;
+
+  if(code && code.includes(q)) score += 450;
+  if(display && display.includes(q)) score += 380;
   if(name && name.includes(q)) score += 300;
+  if(agentName && agentName.includes(q)) score += 260;
   if(category && category.includes(q)) score += 80;
 
   const tokens = q.split(/\s+/).filter(Boolean);
   if(tokens.length > 1){
     for(const t of tokens){
       if(code && code.startsWith(t)) score += 180;
-      if(name && name.startsWith(t)) score += 160;
+      if(display && display.startsWith(t)) score += 170;
+      if(name && name.startsWith(t)) score += 150;
       else if(name && name.includes(t)) score += 90;
+      if(agentName && agentName.includes(t)) score += 80;
       if(category && category.includes(t)) score += 30;
     }
   }
@@ -11325,6 +11480,8 @@ function twPfRebuildIndex(){
       finishedProductId: "",
       code: "",
       product: "",
+      displayName: "",
+      agentiName: "",
       uom: "",
       categoryKey: "",
       stock: 0
@@ -11349,6 +11506,8 @@ function twPfRebuildIndex(){
       finishedProductId: "",
       code: "",
       product: "",
+      displayName: "",
+      agentiName: "",
       uom: "",
       categoryKey: "",
       stock: 0
@@ -11362,22 +11521,45 @@ function twPfRebuildIndex(){
   }
 
   const allowed = (pf.agentiCodes instanceof Set) ? pf.agentiCodes : new Set();
+  const agentiMeta = (pf.agentiMetaByCode instanceof Map) ? pf.agentiMetaByCode : new Map();
+
   const arr = Array.from(merged.values())
+    .map(rec => {
+      const codeLow = String(rec.code || "").trim().toLowerCase();
+      const meta = agentiMeta.get(codeLow) || null;
+      const baseName = String(meta?.bestName || meta?.sampleName || rec.product || rec.code || "").trim();
+      const cleanName = twPfCleanDisplayName(baseName, rec.code);
+      return {
+        ...rec,
+        agentiName: String(meta?.bestName || meta?.sampleName || "").trim(),
+        displayName: cleanName || String(rec.product || rec.code || "").trim(),
+        searchBlob: twPfNorm([
+          rec.code,
+          rec.product,
+          cleanName,
+          meta?.bestName,
+          meta?.sampleName,
+          rec.categoryKey
+        ].filter(Boolean).join(" "))
+      };
+    })
     .filter(rec => {
       if(!pf.readyAgenti) return false;
       const codeLow = String(rec.code || "").trim().toLowerCase();
-      return !!codeLow && allowed.has(codeLow);
-    })
-    .map(rec => ({
-      ...rec,
-      searchBlob: twPfNorm([rec.code, rec.product, rec.categoryKey].filter(Boolean).join(" "))
-    }));
+      if(!(codeLow && allowed.has(codeLow))) return false;
+      const meta = agentiMeta.get(codeLow) || null;
+      return twPfIsLiquidCandidate(rec, meta);
+    });
 
   arr.sort((a,b)=>{
-    const sa = twPfNum(a.stock);
     const sb = twPfNum(b.stock);
+    const sa = twPfNum(a.stock);
     if(sb !== sa) return sb - sa;
-    return String(a.product || a.code || "").localeCompare(String(b.product || b.code || ""), "it", { sensitivity:"base" });
+    return String(b.displayName || b.product || b.code || "").localeCompare(
+      String(a.displayName || a.product || a.code || ""),
+      "it",
+      { sensitivity:"base" }
+    ) * -1;
   });
 
   pf.searchIndex = arr;
@@ -11391,9 +11573,11 @@ function twPfRebuildIndex(){
         ...row,
         finishedProductId: row.finishedProductId || live.finishedProductId || "",
         code: row.code || live.code || "",
-        product: row.product || live.product || live.code || "",
+        product: row.product || live.displayName || live.product || live.code || "",
+        displayName: live.displayName || row.displayName || row.product || "",
         unit: row.unit || live.uom || "pz",
-        stock: live.stock,
+        uom: row.uom || live.uom || "pz",
+        stock: twPfNum(live.stock),
         categoryKey: row.categoryKey || live.categoryKey || ""
       };
     });
@@ -11414,7 +11598,11 @@ function twPfSearch(term){
         const sb = twPfNum(b.stock);
         const sa = twPfNum(a.stock);
         if(sb !== sa) return sb - sa;
-        return String(a.product || a.code || "").localeCompare(String(b.product || b.code || ""), "it", { sensitivity:"base" });
+        return String(a.displayName || a.product || a.code || "").localeCompare(
+          String(b.displayName || b.product || b.code || ""),
+          "it",
+          { sensitivity:"base" }
+        );
       })
       .slice(0, 8);
   }
@@ -11427,7 +11615,11 @@ function twPfSearch(term){
       const sb = twPfNum(b.it.stock);
       const sa = twPfNum(a.it.stock);
       if(sb !== sa) return sb - sa;
-      return String(a.it.product || a.it.code || "").localeCompare(String(b.it.product || b.it.code || ""), "it", { sensitivity:"base" });
+      return String(a.it.displayName || a.it.product || a.it.code || "").localeCompare(
+        String(b.it.displayName || b.it.product || b.it.code || ""),
+        "it",
+        { sensitivity:"base" }
+      );
     })
     .slice(0, 10)
     .map(x => x.it);
@@ -11463,14 +11655,14 @@ function twPfCompileItemsForSend(){
     if(!raw) continue;
     const qtyRaw = twPfNum(raw.qty);
     const qtyInt = Math.round(qtyRaw);
-    const label = String(raw.product || raw.code || "articolo PF").trim();
+    const label = String(raw.displayName || raw.product || raw.code || "articolo PF").trim();
     if(!(qtyInt > 0)) throw new Error(`Quantità PF non valida per ${label}`);
     if(Math.abs(qtyRaw - qtyInt) > 1e-9) throw new Error(`Per ${label} inserisci una quantità intera`);
     out.push({
       key: String(raw.key || twPfCodeKey(raw.code, raw.product, raw.finishedProductId)).trim(),
       finishedProductId: String(raw.finishedProductId || "").trim(),
       finishedProductCode: String(raw.code || "").trim(),
-      finishedProductName: String(raw.product || raw.code || "").trim(),
+      finishedProductName: String(raw.displayName || raw.product || raw.code || "").trim(),
       finishedProductUom: String(raw.unit || raw.uom || "pz").trim() || "pz",
       qty: qtyInt,
       unit: String(raw.unit || raw.uom || "pz").trim() || "pz",
@@ -11484,10 +11676,10 @@ function twPfCompileItemsForSend(){
 function twPfCompileStatusText(){
   const pf = twEnsurePfState();
   if(pf.error) return `Ricerca PF non disponibile: ${pf.error}`;
-  if(!pf.readyAgenti) return "Filtro PF magazzino agenti in caricamento…";
-  if(!pf.readyProducts && !pf.readyStock) return "Filtro magazzino agenti pronto • anagrafica PF in caricamento…";
-  if(!pf.readyStock) return `Solo PF magazzino agenti • candidati: ${(pf.searchIndex || []).length.toLocaleString("it-IT")} • scorte in aggiornamento…`;
-  return `Solo PF magazzino agenti • articoli candidati: ${(pf.searchIndex || []).length.toLocaleString("it-IT")}`;
+  if(!pf.readyAgenti) return "Filtro PF liquidi magazzino agenti in caricamento…";
+  if(!pf.readyProducts && !pf.readyStock) return "Filtro magazzino agenti pronto • PF liquidi in caricamento…";
+  if(!pf.readyStock) return `Solo PF liquidi magazzino agenti • candidati: ${(pf.searchIndex || []).length.toLocaleString("it-IT")} • scorte in aggiornamento…`;
+  return `Solo PF liquidi magazzino agenti • articoli candidati: ${(pf.searchIndex || []).length.toLocaleString("it-IT")}`;
 }
 
 function twPfRenderStatus(){
@@ -11503,7 +11695,8 @@ function twPfRenderSelectedMeta(){
   const item = twPfSelectedItem();
   if(item){
     const stockTxt = `${twPfDisplayQty(item.stock)} ${item.uom || item.finishedProductUom || "pz"}`.trim();
-    el.textContent = `Selezionato: ${[item.code, item.product].filter(Boolean).join(" — ")} • Scorta attuale: ${stockTxt}`;
+    const codeTxt = String(item.code || "").trim();
+    el.textContent = `Selezionato: ${twCompilePfCanonicalLabel(item)}${codeTxt ? ` • Codice: ${codeTxt}` : ""} • Scorta attuale: ${stockTxt}`;
     if(addBtn) addBtn.disabled = false;
     return;
   }
@@ -11525,14 +11718,16 @@ function twPfRenderResults(forceShow=true){
   }
 
   if(!results.length){
-    box.innerHTML = `<div class="twPfResultItem muted">Nessun PF trovato.</div>`;
+    box.innerHTML = `<div class="twPfResultItem muted">Nessun PF liquido trovato nel magazzino agenti.</div>`;
     box.style.display = "block";
     return;
   }
 
   box.innerHTML = results.map(it => {
-    const label = [it.code, it.product].filter(Boolean).join(" — ") || it.product || it.code || "PF";
-    const meta = [`Scorta ${twPfDisplayQty(it.stock)} ${it.uom || "pz"}`.trim()];
+    const label = twCompilePfCanonicalLabel(it);
+    const meta = [];
+    if(it.code) meta.push(`Codice ${it.code}`);
+    meta.push(`Scorta ${twPfDisplayQty(it.stock)} ${it.uom || "pz"}`.trim());
     if(it.categoryKey) meta.push(`Categoria ${it.categoryKey}`);
     return `
       <button class="twPfResultItem" type="button" data-tw-pf-pick="${escapeHtmlAttr(it.key)}">
@@ -11558,13 +11753,14 @@ function twPfRenderCompileList(){
 
   if(empty) empty.style.display = "none";
   out.innerHTML = items.map(it => {
-    const label = [it.code, it.product].filter(Boolean).join(" — ") || it.product || it.code || "PF";
+    const label = twCompilePfCanonicalLabel(it);
     const stockTxt = `${twPfDisplayQty(it.stock)} ${it.unit || "pz"}`.trim();
+    const codeTxt = String(it.code || "").trim();
     return `
       <div class="item pressCard twPfDraftRow" data-tw-pf-row="${escapeHtmlAttr(it.key)}">
         <div style="min-width:0; flex:1;">
           <div class="name">${escapeHtml(label)}</div>
-          <div class="sub" style="font-weight:800;">Scorta attuale: ${escapeHtml(stockTxt)}${it.categoryKey ? ` • Categoria: ${escapeHtml(it.categoryKey)}` : ``}</div>
+          <div class="sub" style="font-weight:800;">${codeTxt ? `Codice: ${escapeHtml(codeTxt)} • ` : ""}Scorta attuale: ${escapeHtml(stockTxt)}${it.categoryKey ? ` • Categoria: ${escapeHtml(it.categoryKey)}` : ``}</div>
         </div>
         <div class="twPfDraftActions">
           <input class="twPfQtyInline" data-tw-pf-qty="${escapeHtmlAttr(it.key)}" type="number" inputmode="numeric" step="1" min="1" value="${escapeHtmlAttr(String(Math.round(twPfNum(it.qty) || 0) || ""))}" />
@@ -11589,14 +11785,7 @@ function twPfClearSearch(){
 
 function twPfAddSelectedToDraft(){
   const pf = twEnsurePfState();
-  let item = twPfSelectedItem();
-  if(!item){
-    const first = twPfSearch($("twPfSearchInput")?.value || "")[0] || null;
-    if(first){
-      twPfSetSelected(first.key);
-      item = twPfSelectedItem();
-    }
-  }
+  const item = twPfSelectedItem();
   if(!item){
     showToast("Seleziona un PF", "Scegli prima un prodotto finito dalla ricerca.");
     return;
@@ -11617,12 +11806,14 @@ function twPfAddSelectedToDraft(){
     existing.qty = Math.round(twPfNum(existing.qty) + qtyInt);
     existing.stock = item.stock;
     existing.unit = item.uom || existing.unit || "pz";
+    existing.displayName = item.displayName || existing.displayName || existing.product || item.product || item.code || "";
   }else{
     pf.compileItems.push({
       key,
       finishedProductId: String(item.finishedProductId || "").trim(),
       code: String(item.code || "").trim(),
       product: String(item.product || item.code || "").trim(),
+      displayName: String(item.displayName || item.product || item.code || "").trim(),
       qty: qtyInt,
       unit: String(item.uom || "pz").trim() || "pz",
       stock: twPfNum(item.stock),
@@ -11717,7 +11908,9 @@ function twPfBindUiOnce(){
 
 
 function twCompilePfCanonicalLabel(it){
-  return [it?.code, it?.product].filter(Boolean).join(" — ") || it?.product || it?.code || "PF";
+  const display = String(it?.displayName || "").trim();
+  if(display) return display;
+  return twPfCleanDisplayName(it?.product || it?.agentiName || it?.code || "PF", it?.code || "");
 }
 
 function twCompilePfResolveExact(text){
@@ -11729,8 +11922,9 @@ function twCompilePfResolveExact(text){
     const code = twPfNorm(it.code || "");
     const name = twPfNorm(it.product || "");
     const label = twPfNorm(twCompilePfCanonicalLabel(it));
-    const combo = twPfNorm([it.code, it.product].filter(Boolean).join(" "));
-    if(q && (q === code || q === name || q === label || q === combo)) return it;
+    const agentName = twPfNorm(it.agentiName || "");
+    const combo = twPfNorm([it.code, it.product, it.displayName, it.agentiName].filter(Boolean).join(" "));
+    if(q && (q === code || q === name || q === label || q === agentName || q === combo)) return it;
   }
   return null;
 }
@@ -11836,7 +12030,7 @@ function twCompileExtractInlineDraft(text){
         key: String(info.item?.key || "").trim(),
         finishedProductId: String(info.item?.finishedProductId || "").trim(),
         finishedProductCode: String(info.item?.code || "").trim(),
-        finishedProductName: String(info.item?.product || info.item?.code || "").trim(),
+        finishedProductName: String(info.item?.displayName || info.item?.product || info.item?.code || "").trim(),
         finishedProductUom: String(info.item?.uom || "pz").trim() || "pz",
         qty: String(info.qtyNum),
         unit: String(info.item?.uom || "pz").trim() || "pz",
@@ -12067,6 +12261,7 @@ function twStartPfWatch(){
   pf.agentiDdts = [];
   pf.agentiCompleted = [];
   pf.agentiCodes = new Set();
+  pf.agentiMetaByCode = new Map();
   pf.error = "";
   twPfRebuildIndex();
   twPfRenderStatus();
