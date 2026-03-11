@@ -11115,14 +11115,22 @@ function twEnsurePfState(){
   if(!Array.isArray(pf.finishedMovements)) pf.finishedMovements = [];
   if(!Array.isArray(pf.searchIndex)) pf.searchIndex = [];
   if(!Array.isArray(pf.compileItems)) pf.compileItems = [];
+  if(!Array.isArray(pf.agentiDdts)) pf.agentiDdts = [];
+  if(!Array.isArray(pf.agentiCompleted)) pf.agentiCompleted = [];
   if(!(pf.byKey instanceof Map)) pf.byKey = new Map();
+  if(!(pf.agentiCodes instanceof Set)) pf.agentiCodes = new Set();
   pf.searchTerm = String(pf.searchTerm || "");
   pf.selectedKey = String(pf.selectedKey || "");
   pf.readyProducts = Boolean(pf.readyProducts);
   pf.readyStock = Boolean(pf.readyStock);
+  pf.readyAgenti = Boolean(pf.readyAgenti);
+  pf.readyAgentiDdts = Boolean(pf.readyAgentiDdts);
+  pf.readyAgentiCompleted = Boolean(pf.readyAgentiCompleted);
   pf.error = String(pf.error || "");
   pf.unsubProducts = pf.unsubProducts || null;
   pf.unsubMovements = pf.unsubMovements || null;
+  pf.unsubAgentiDdts = pf.unsubAgentiDdts || null;
+  pf.unsubAgentiCompleted = pf.unsubAgentiCompleted || null;
   return pf;
 }
 
@@ -11160,9 +11168,46 @@ function twPfDisplayQty(v){
   return String(Math.round(n * 1000) / 1000);
 }
 
+function twPfIsAgentiWarehouseStr(warehouse){
+  const s = String(warehouse || "").trim().toLowerCase().replace(/\s+/g, " ").trim();
+  if(!s) return false;
+  if(s === "magazzino agenti") return true;
+  if(s.includes("magazzino") && s.includes("agenti")) return true;
+  if(s === "agenti") return true;
+  return false;
+}
+
+function twPfCollectAgentiCodes(list){
+  const set = new Set();
+  for(const d of (Array.isArray(list) ? list : [])){
+    if(!d) continue;
+    const wh = String(d.warehouse || d.magazzino || d.site || "").trim();
+    if(!twPfIsAgentiWarehouseStr(wh)) continue;
+    const rows = Array.isArray(d.rows) ? d.rows : [];
+    for(const r of rows){
+      const code = String((r && (r.code || r.codice)) || "").trim().toLowerCase();
+      if(code) set.add(code);
+    }
+  }
+  return set;
+}
+
+function twPfRefreshAgentiCodes(){
+  const pf = twEnsurePfState();
+  const set = twPfCollectAgentiCodes(pf.agentiDdts);
+  for(const code of twPfCollectAgentiCodes(pf.agentiCompleted)) set.add(code);
+  pf.agentiCodes = set;
+  pf.readyAgenti = !!(pf.readyAgentiDdts && pf.readyAgentiCompleted);
+  twPfRebuildIndex();
+  twPfRenderStatus();
+  twPfRenderSelectedMeta();
+  try{ twPfRenderResults(false); }catch(_e){}
+  try{ twPfRenderCompileList(); }catch(_e){}
+}
+
 function twPfIsReady(){
   const pf = twEnsurePfState();
-  return !!(pf.readyProducts || pf.readyStock || (pf.searchIndex || []).length);
+  return !!(pf.readyAgenti && (pf.readyProducts || pf.readyStock || (pf.searchIndex || []).length));
 }
 
 function twIsManualFinishedProductRow(it){
@@ -11316,10 +11361,17 @@ function twPfRebuildIndex(){
     merged.set(key, rec);
   }
 
-  const arr = Array.from(merged.values()).map(rec => ({
-    ...rec,
-    searchBlob: twPfNorm([rec.code, rec.product, rec.categoryKey].filter(Boolean).join(" "))
-  }));
+  const allowed = (pf.agentiCodes instanceof Set) ? pf.agentiCodes : new Set();
+  const arr = Array.from(merged.values())
+    .filter(rec => {
+      if(!pf.readyAgenti) return false;
+      const codeLow = String(rec.code || "").trim().toLowerCase();
+      return !!codeLow && allowed.has(codeLow);
+    })
+    .map(rec => ({
+      ...rec,
+      searchBlob: twPfNorm([rec.code, rec.product, rec.categoryKey].filter(Boolean).join(" "))
+    }));
 
   arr.sort((a,b)=>{
     const sa = twPfNum(a.stock);
@@ -11432,9 +11484,10 @@ function twPfCompileItemsForSend(){
 function twPfCompileStatusText(){
   const pf = twEnsurePfState();
   if(pf.error) return `Ricerca PF non disponibile: ${pf.error}`;
-  if(!pf.readyProducts && !pf.readyStock) return "Ricerca PF live in caricamento…";
-  if(!pf.readyStock) return "Anagrafica PF live pronta • scorte PF in aggiornamento…";
-  return `Ricerca PF live pronta • articoli indicizzati: ${(pf.searchIndex || []).length.toLocaleString("it-IT")}`;
+  if(!pf.readyAgenti) return "Filtro PF magazzino agenti in caricamento…";
+  if(!pf.readyProducts && !pf.readyStock) return "Filtro magazzino agenti pronto • anagrafica PF in caricamento…";
+  if(!pf.readyStock) return `Solo PF magazzino agenti • candidati: ${(pf.searchIndex || []).length.toLocaleString("it-IT")} • scorte in aggiornamento…`;
+  return `Solo PF magazzino agenti • articoli candidati: ${(pf.searchIndex || []).length.toLocaleString("it-IT")}`;
 }
 
 function twPfRenderStatus(){
@@ -11987,8 +12040,12 @@ function twStartPfWatch(){
   if(!(state.user && state.user.isAdmin)){
     try{ pf.unsubProducts && pf.unsubProducts(); }catch(_e){}
     try{ pf.unsubMovements && pf.unsubMovements(); }catch(_e){}
+    try{ pf.unsubAgentiDdts && pf.unsubAgentiDdts(); }catch(_e){}
+    try{ pf.unsubAgentiCompleted && pf.unsubAgentiCompleted(); }catch(_e){}
     pf.unsubProducts = null;
     pf.unsubMovements = null;
+    pf.unsubAgentiDdts = null;
+    pf.unsubAgentiCompleted = null;
     return;
   }
   if(!state.firebase?.ok) return;
@@ -11999,10 +12056,19 @@ function twStartPfWatch(){
 
   try{ pf.unsubProducts && pf.unsubProducts(); }catch(_e){}
   try{ pf.unsubMovements && pf.unsubMovements(); }catch(_e){}
+  try{ pf.unsubAgentiDdts && pf.unsubAgentiDdts(); }catch(_e){}
+  try{ pf.unsubAgentiCompleted && pf.unsubAgentiCompleted(); }catch(_e){}
 
   pf.readyProducts = false;
   pf.readyStock = false;
+  pf.readyAgenti = false;
+  pf.readyAgentiDdts = false;
+  pf.readyAgentiCompleted = false;
+  pf.agentiDdts = [];
+  pf.agentiCompleted = [];
+  pf.agentiCodes = new Set();
   pf.error = "";
+  twPfRebuildIndex();
   twPfRenderStatus();
   twPfRenderSelectedMeta();
 
@@ -12078,14 +12144,78 @@ function twStartPfWatch(){
   }catch(err){
     console.warn("twStartPfWatch movements error:", err);
   }
+
+  try{
+    const ddtCol = fs.collection(db, "orgs", TW_HUB_ORG_ID, "daneaDdts");
+    pf.unsubAgentiDdts = fs.onSnapshot(
+      ddtCol,
+      (snap)=>{
+        pf.agentiDdts = (snap.docs || []).map(d => {
+          const v = d.data() || {};
+          return {
+            id: d.id,
+            warehouse: (v.warehouse || v.magazzino || v.site || "").toString().trim(),
+            rows: Array.isArray(v.rows) ? v.rows : []
+          };
+        });
+        pf.readyAgentiDdts = true;
+        twPfRefreshAgentiCodes();
+      },
+      (err)=>{
+        console.warn("tw daneaDdts snapshot error:", err);
+        pf.agentiDdts = [];
+        pf.readyAgentiDdts = true;
+        twPfRefreshAgentiCodes();
+      }
+    );
+  }catch(err){
+    console.warn("twStartPfWatch daneaDdts error:", err);
+    pf.agentiDdts = [];
+    pf.readyAgentiDdts = true;
+    twPfRefreshAgentiCodes();
+  }
+
+  try{
+    const doneCol = fs.collection(db, "orgs", TW_HUB_ORG_ID, "daneaDdtCompleted");
+    pf.unsubAgentiCompleted = fs.onSnapshot(
+      doneCol,
+      (snap)=>{
+        pf.agentiCompleted = (snap.docs || []).map(d => {
+          const v = d.data() || {};
+          return {
+            id: d.id,
+            warehouse: (v.warehouse || v.magazzino || v.site || "").toString().trim(),
+            rows: Array.isArray(v.rows) ? v.rows : []
+          };
+        });
+        pf.readyAgentiCompleted = true;
+        twPfRefreshAgentiCodes();
+      },
+      (err)=>{
+        console.warn("tw daneaDdtCompleted snapshot error:", err);
+        pf.agentiCompleted = [];
+        pf.readyAgentiCompleted = true;
+        twPfRefreshAgentiCodes();
+      }
+    );
+  }catch(err){
+    console.warn("twStartPfWatch daneaDdtCompleted error:", err);
+    pf.agentiCompleted = [];
+    pf.readyAgentiCompleted = true;
+    twPfRefreshAgentiCodes();
+  }
 }
 
 function twStopPfWatch(){
   const pf = twEnsurePfState();
   try{ pf.unsubProducts && pf.unsubProducts(); }catch(_e){}
   try{ pf.unsubMovements && pf.unsubMovements(); }catch(_e){}
+  try{ pf.unsubAgentiDdts && pf.unsubAgentiDdts(); }catch(_e){}
+  try{ pf.unsubAgentiCompleted && pf.unsubAgentiCompleted(); }catch(_e){}
   pf.unsubProducts = null;
   pf.unsubMovements = null;
+  pf.unsubAgentiDdts = null;
+  pf.unsubAgentiCompleted = null;
 }
 
 
