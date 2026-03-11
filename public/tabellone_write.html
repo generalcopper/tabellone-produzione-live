@@ -11100,6 +11100,749 @@ function ensureTabWriteState(){
 }
 
 
+
+const TW_HUB_ORG_ID = "generalcopper";
+
+function twEnsurePfState(){
+  const tw = ensureTabWriteState();
+  if(!tw.pf || typeof tw.pf !== "object") tw.pf = {};
+  const pf = tw.pf;
+  if(!Array.isArray(pf.finishedProducts)) pf.finishedProducts = [];
+  if(!Array.isArray(pf.finishedMovements)) pf.finishedMovements = [];
+  if(!Array.isArray(pf.searchIndex)) pf.searchIndex = [];
+  if(!Array.isArray(pf.compileItems)) pf.compileItems = [];
+  if(!(pf.byKey instanceof Map)) pf.byKey = new Map();
+  pf.searchTerm = String(pf.searchTerm || "");
+  pf.selectedKey = String(pf.selectedKey || "");
+  pf.readyProducts = Boolean(pf.readyProducts);
+  pf.readyStock = Boolean(pf.readyStock);
+  pf.error = String(pf.error || "");
+  pf.unsubProducts = pf.unsubProducts || null;
+  pf.unsubMovements = pf.unsubMovements || null;
+  return pf;
+}
+
+function twPfNorm(v){
+  try{
+    return String(v || "")
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, " ")
+      .trim();
+  }catch(_e){
+    return String(v || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  }
+}
+
+function twPfNum(v){
+  const n = Number(String(v ?? "").replace(",", "."));
+  return Number.isFinite(n) ? n : 0;
+}
+
+function twPfCodeKey(code, name, id){
+  const c = twPfNorm(code);
+  if(c) return c;
+  const n = twPfNorm(name);
+  if(n) return n;
+  const i = String(id || "").trim();
+  return i ? ("id:" + i) : "";
+}
+
+function twPfDisplayQty(v){
+  const n = twPfNum(v);
+  if(typeof twFmtNum === "function") return twFmtNum(n);
+  if(Number.isInteger(n)) return String(n);
+  return String(Math.round(n * 1000) / 1000);
+}
+
+function twPfIsReady(){
+  const pf = twEnsurePfState();
+  return !!(pf.readyProducts || pf.readyStock || (pf.searchIndex || []).length);
+}
+
+function twIsManualFinishedProductRow(it){
+  try{
+    if(!it) return false;
+    const src = String(it.source || "").trim().toLowerCase();
+    const kind = String(it.kind || "").trim().toLowerCase();
+    const target = String(it.inventoryTarget || "").trim().toLowerCase();
+    return src === "manual_finished_product" || kind === "finishedproduct" || target === "finished_product" || !!(it.finishedProductId || it.finishedProductCode);
+  }catch(_e){
+    return false;
+  }
+}
+
+function twPfMovementDocId(baseId){
+  return "twpf_" + twKeyToDocId(String(baseId || "")).slice(0, 860);
+}
+
+function twBuildFinishedInventoryLoadPayload(done, fs){
+  try{
+    if(!twIsManualFinishedProductRow(done)) return null;
+
+    const qtyNumRaw = twPfNum(done.qty);
+    const qtyNum = Math.round(qtyNumRaw);
+    if(!(qtyNum > 0)) throw new Error("Quantità PF non valida");
+    if(Math.abs(qtyNumRaw - qtyNum) > 1e-9) throw new Error("Per il carico PF inserisci una quantità intera");
+
+    const code = String(done.finishedProductCode || done.code || "").trim();
+    const item = String(done.finishedProductName || done.product || done.label || code || "").trim();
+    if(!code && !item) throw new Error("Articolo PF mancante");
+
+    const uom = String(done.finishedProductUom || done.unit || done.um || "pz").trim() || "pz";
+    const date = nowIso().slice(0,10);
+    const doneId = String(done.id || done.key || "").trim() || String(Date.now());
+    const movementId = String(done.finishedInventoryMovementId || twPfMovementDocId(doneId)).trim();
+    const label = item || code || "Prodotto finito";
+    const note = `Produzione PF da Tabellone WRITE: +${qtyNum} ${uom} • ${label}`.trim();
+
+    return {
+      movementId,
+      payload: {
+        type: "IN",
+        code,
+        item: item || code,
+        uom,
+        qty: qtyNum,
+        qtyRaw: `${qtyNum} ${uom}`.trim(),
+        date,
+        note,
+        source: "Produzione PF",
+        warehouse: "prodotti_finiti",
+        docType: "PRODUZIONE",
+        docNum: `TW-${twKeyToDocId(doneId).slice(0,60)}`,
+        docDateRaw: date,
+        createdAt: fs.serverTimestamp(),
+        createdBy: (state.user?.email || state.user?.uid || ""),
+        twDoneId: doneId,
+        sourceLine: TW_LINE_BUCKET,
+        finishedProductId: String(done.finishedProductId || "").trim(),
+        origin: "tabellone_write_manual_pf"
+      }
+    };
+  }catch(e){
+    throw e;
+  }
+}
+
+function twPfScoreItem(it, qNorm){
+  const q = String(qNorm || "").trim();
+  if(!q) return 0;
+
+  const code = twPfNorm(it.code || "");
+  const name = twPfNorm(it.product || it.item || "");
+  const category = twPfNorm(it.categoryKey || "");
+  const hay = `${code} ${name} ${category}`.trim();
+
+  let score = 0;
+  if(code && code === q) score += 1200;
+  if(name && name === q) score += 1000;
+  if(code && code.startsWith(q)) score += 700;
+  if(name && name.startsWith(q)) score += 560;
+  if(code && code.includes(q)) score += 420;
+  if(name && name.includes(q)) score += 300;
+  if(category && category.includes(q)) score += 80;
+
+  const tokens = q.split(/\s+/).filter(Boolean);
+  if(tokens.length > 1){
+    for(const t of tokens){
+      if(code && code.startsWith(t)) score += 180;
+      if(name && name.startsWith(t)) score += 160;
+      else if(name && name.includes(t)) score += 90;
+      if(category && category.includes(t)) score += 30;
+    }
+  }
+
+  if(hay && q && hay.includes(q)) score += 30;
+
+  const stock = twPfNum(it.stock);
+  if(stock > 0) score += Math.min(60, Math.round(Math.log10(stock + 1) * 18));
+
+  return score;
+}
+
+function twPfRebuildIndex(){
+  const pf = twEnsurePfState();
+  const merged = new Map();
+
+  for(const fp of (pf.finishedProducts || [])){
+    const code = String(fp.code || fp.codeLower || "").trim();
+    const product = String(fp.name || fp.nome || fp.description || code || "").trim();
+    const key = twPfCodeKey(code, product, fp.id);
+    if(!key) continue;
+    const rec = merged.get(key) || {
+      key,
+      finishedProductId: "",
+      code: "",
+      product: "",
+      uom: "",
+      categoryKey: "",
+      stock: 0
+    };
+    rec.finishedProductId = rec.finishedProductId || String(fp.id || "").trim();
+    if(code && !rec.code) rec.code = code;
+    if(product && !rec.product) rec.product = product;
+    if(fp.uom && !rec.uom) rec.uom = String(fp.uom || "").trim();
+    if(!rec.categoryKey){
+      rec.categoryKey = String(fp.categoryKeyLower || fp.categoryKey || fp.category || "").trim();
+    }
+    merged.set(key, rec);
+  }
+
+  for(const mv of (pf.finishedMovements || [])){
+    const code = String(mv.code || "").trim();
+    const product = String(mv.item || mv.name || code || "").trim();
+    const key = twPfCodeKey(code, product, mv.id);
+    if(!key) continue;
+    const rec = merged.get(key) || {
+      key,
+      finishedProductId: "",
+      code: "",
+      product: "",
+      uom: "",
+      categoryKey: "",
+      stock: 0
+    };
+    if(code && !rec.code) rec.code = code;
+    if(product && !rec.product) rec.product = product;
+    if(mv.uom && !rec.uom) rec.uom = String(mv.uom || "").trim();
+    const delta = String(mv.type || "").toUpperCase() === "OUT" ? -twPfNum(mv.qty) : twPfNum(mv.qty);
+    rec.stock = twPfNum(rec.stock) + delta;
+    merged.set(key, rec);
+  }
+
+  const arr = Array.from(merged.values()).map(rec => ({
+    ...rec,
+    searchBlob: twPfNorm([rec.code, rec.product, rec.categoryKey].filter(Boolean).join(" "))
+  }));
+
+  arr.sort((a,b)=>{
+    const sa = twPfNum(a.stock);
+    const sb = twPfNum(b.stock);
+    if(sb !== sa) return sb - sa;
+    return String(a.product || a.code || "").localeCompare(String(b.product || b.code || ""), "it", { sensitivity:"base" });
+  });
+
+  pf.searchIndex = arr;
+  pf.byKey = new Map(arr.map(it => [String(it.key || "").trim(), it]));
+
+  if(Array.isArray(pf.compileItems) && pf.byKey instanceof Map){
+    pf.compileItems = pf.compileItems.map(row => {
+      const live = pf.byKey.get(String(row?.key || "").trim()) || null;
+      if(!live) return row;
+      return {
+        ...row,
+        finishedProductId: row.finishedProductId || live.finishedProductId || "",
+        code: row.code || live.code || "",
+        product: row.product || live.product || live.code || "",
+        unit: row.unit || live.uom || "pz",
+        stock: live.stock,
+        categoryKey: row.categoryKey || live.categoryKey || ""
+      };
+    });
+  }
+
+  const selectedKey = String(pf.selectedKey || "").trim();
+  if(selectedKey && !pf.byKey.has(selectedKey)) pf.selectedKey = "";
+}
+
+function twPfSearch(term){
+  const pf = twEnsurePfState();
+  const list = Array.isArray(pf.searchIndex) ? pf.searchIndex.slice() : [];
+  const q = twPfNorm(term);
+  if(!q){
+    return list
+      .sort((a,b)=>{
+        const sb = twPfNum(b.stock);
+        const sa = twPfNum(a.stock);
+        if(sb !== sa) return sb - sa;
+        return String(a.product || a.code || "").localeCompare(String(b.product || b.code || ""), "it", { sensitivity:"base" });
+      })
+      .slice(0, 8);
+  }
+
+  return list
+    .map(it => ({ it, score: twPfScoreItem(it, q) }))
+    .filter(x => x.score > 0)
+    .sort((a,b)=>{
+      if(b.score !== a.score) return b.score - a.score;
+      const sb = twPfNum(b.it.stock);
+      const sa = twPfNum(a.it.stock);
+      if(sb !== sa) return sb - sa;
+      return String(a.it.product || a.it.code || "").localeCompare(String(b.it.product || b.it.code || ""), "it", { sensitivity:"base" });
+    })
+    .slice(0, 10)
+    .map(x => x.it);
+}
+
+function twPfSelectedItem(){
+  const pf = twEnsurePfState();
+  const key = String(pf.selectedKey || "").trim();
+  if(!key) return null;
+  return pf.byKey instanceof Map ? (pf.byKey.get(key) || null) : null;
+}
+
+function twPfSetSelected(key){
+  const pf = twEnsurePfState();
+  pf.selectedKey = String(key || "").trim();
+  const item = twPfSelectedItem();
+  const input = $("twPfSearchInput");
+  if(item && input){
+    input.value = [item.code, item.product].filter(Boolean).join(" — ") || item.product || item.code || "";
+  }
+  const box = $("twPfSearchResults");
+  if(box){
+    box.innerHTML = "";
+    box.style.display = "none";
+  }
+  twPfRenderSelectedMeta();
+}
+
+function twPfCompileItemsForSend(){
+  const pf = twEnsurePfState();
+  const out = [];
+  for(const raw of (pf.compileItems || [])){
+    if(!raw) continue;
+    const qtyRaw = twPfNum(raw.qty);
+    const qtyInt = Math.round(qtyRaw);
+    const label = String(raw.product || raw.code || "articolo PF").trim();
+    if(!(qtyInt > 0)) throw new Error(`Quantità PF non valida per ${label}`);
+    if(Math.abs(qtyRaw - qtyInt) > 1e-9) throw new Error(`Per ${label} inserisci una quantità intera`);
+    out.push({
+      key: String(raw.key || twPfCodeKey(raw.code, raw.product, raw.finishedProductId)).trim(),
+      finishedProductId: String(raw.finishedProductId || "").trim(),
+      finishedProductCode: String(raw.code || "").trim(),
+      finishedProductName: String(raw.product || raw.code || "").trim(),
+      finishedProductUom: String(raw.unit || raw.uom || "pz").trim() || "pz",
+      qty: qtyInt,
+      unit: String(raw.unit || raw.uom || "pz").trim() || "pz",
+      stock: twPfNum(raw.stock),
+      categoryKey: String(raw.categoryKey || "").trim()
+    });
+  }
+  return out;
+}
+
+function twPfCompileStatusText(){
+  const pf = twEnsurePfState();
+  if(pf.error) return `Ricerca PF non disponibile: ${pf.error}`;
+  if(!pf.readyProducts && !pf.readyStock) return "Ricerca PF live in caricamento…";
+  if(!pf.readyStock) return "Anagrafica PF live pronta • scorte PF in aggiornamento…";
+  return `Ricerca PF live pronta • articoli indicizzati: ${(pf.searchIndex || []).length.toLocaleString("it-IT")}`;
+}
+
+function twPfRenderStatus(){
+  const el = $("twPfCompileStatus");
+  if(!el) return;
+  el.textContent = twPfCompileStatusText();
+}
+
+function twPfRenderSelectedMeta(){
+  const el = $("twPfPickedMeta");
+  const addBtn = $("twPfAddBtn");
+  if(!el) return;
+  const item = twPfSelectedItem();
+  if(item){
+    const stockTxt = `${twPfDisplayQty(item.stock)} ${item.uom || item.finishedProductUom || "pz"}`.trim();
+    el.textContent = `Selezionato: ${[item.code, item.product].filter(Boolean).join(" — ")} • Scorta attuale: ${stockTxt}`;
+    if(addBtn) addBtn.disabled = false;
+    return;
+  }
+  el.textContent = twPfCompileStatusText();
+  if(addBtn) addBtn.disabled = true;
+}
+
+function twPfRenderResults(forceShow=true){
+  const box = $("twPfSearchResults");
+  const input = $("twPfSearchInput");
+  if(!box || !input) return;
+  const term = String(input.value || "").trim();
+  const results = twPfSearch(term);
+
+  if(!forceShow && !term){
+    box.innerHTML = "";
+    box.style.display = "none";
+    return;
+  }
+
+  if(!results.length){
+    box.innerHTML = `<div class="twPfResultItem muted">Nessun PF trovato.</div>`;
+    box.style.display = "block";
+    return;
+  }
+
+  box.innerHTML = results.map(it => {
+    const label = [it.code, it.product].filter(Boolean).join(" — ") || it.product || it.code || "PF";
+    const meta = [`Scorta ${twPfDisplayQty(it.stock)} ${it.uom || "pz"}`.trim()];
+    if(it.categoryKey) meta.push(`Categoria ${it.categoryKey}`);
+    return `
+      <button class="twPfResultItem" type="button" data-tw-pf-pick="${escapeHtmlAttr(it.key)}">
+        <span class="twPfResultTitle">${escapeHtml(label)}</span>
+        <span class="twPfResultMeta">${escapeHtml(meta.join(" • "))}</span>
+      </button>`;
+  }).join("");
+  box.style.display = "block";
+}
+
+function twPfRenderCompileList(){
+  const pf = twEnsurePfState();
+  const out = $("twPfCompileList");
+  const empty = $("twPfCompileEmpty");
+  if(!out) return;
+
+  const items = Array.isArray(pf.compileItems) ? pf.compileItems : [];
+  if(!items.length){
+    out.innerHTML = "";
+    if(empty) empty.style.display = "block";
+    return;
+  }
+
+  if(empty) empty.style.display = "none";
+  out.innerHTML = items.map(it => {
+    const label = [it.code, it.product].filter(Boolean).join(" — ") || it.product || it.code || "PF";
+    const stockTxt = `${twPfDisplayQty(it.stock)} ${it.unit || "pz"}`.trim();
+    return `
+      <div class="item pressCard twPfDraftRow" data-tw-pf-row="${escapeHtmlAttr(it.key)}">
+        <div style="min-width:0; flex:1;">
+          <div class="name">${escapeHtml(label)}</div>
+          <div class="sub" style="font-weight:800;">Scorta attuale: ${escapeHtml(stockTxt)}${it.categoryKey ? ` • Categoria: ${escapeHtml(it.categoryKey)}` : ``}</div>
+        </div>
+        <div class="twPfDraftActions">
+          <input class="twPfQtyInline" data-tw-pf-qty="${escapeHtmlAttr(it.key)}" type="number" inputmode="numeric" step="1" min="1" value="${escapeHtmlAttr(String(Math.round(twPfNum(it.qty) || 0) || ""))}" />
+          <span class="muted" style="font-weight:900;">${escapeHtml(it.unit || "pz")}</span>
+          <button class="btn bad" type="button" data-tw-pf-remove="${escapeHtmlAttr(it.key)}">Rimuovi</button>
+        </div>
+      </div>`;
+  }).join("");
+}
+
+function twPfClearSearch(){
+  const pf = twEnsurePfState();
+  pf.selectedKey = "";
+  pf.searchTerm = "";
+  const input = $("twPfSearchInput");
+  if(input) input.value = "";
+  const qty = $("twPfQtyInput");
+  if(qty) qty.value = "";
+  twPfRenderResults(false);
+  twPfRenderSelectedMeta();
+}
+
+function twPfAddSelectedToDraft(){
+  const pf = twEnsurePfState();
+  let item = twPfSelectedItem();
+  if(!item){
+    const first = twPfSearch($("twPfSearchInput")?.value || "")[0] || null;
+    if(first){
+      twPfSetSelected(first.key);
+      item = twPfSelectedItem();
+    }
+  }
+  if(!item){
+    showToast("Seleziona un PF", "Scegli prima un prodotto finito dalla ricerca.");
+    return;
+  }
+
+  const qtyRaw = twPfNum($("twPfQtyInput")?.value || "");
+  const qtyInt = Math.round(qtyRaw);
+  if(!(qtyInt > 0) || Math.abs(qtyRaw - qtyInt) > 1e-9){
+    showToast("Quantità non valida", "Per i PF inserisci una quantità intera maggiore di zero.");
+    $("twPfQtyInput")?.focus?.();
+    $("twPfQtyInput")?.select?.();
+    return;
+  }
+
+  const key = String(item.key || twPfCodeKey(item.code, item.product, item.finishedProductId)).trim();
+  const existing = (pf.compileItems || []).find(x => String(x?.key || "").trim() === key);
+  if(existing){
+    existing.qty = Math.round(twPfNum(existing.qty) + qtyInt);
+    existing.stock = item.stock;
+    existing.unit = item.uom || existing.unit || "pz";
+  }else{
+    pf.compileItems.push({
+      key,
+      finishedProductId: String(item.finishedProductId || "").trim(),
+      code: String(item.code || "").trim(),
+      product: String(item.product || item.code || "").trim(),
+      qty: qtyInt,
+      unit: String(item.uom || "pz").trim() || "pz",
+      stock: twPfNum(item.stock),
+      categoryKey: String(item.categoryKey || "").trim()
+    });
+  }
+
+  twPfRenderCompileList();
+  twPfClearSearch();
+  showToast("PF aggiunto", "Il prodotto finito è pronto per l’invio in coda.");
+}
+
+function twPfBindUiOnce(){
+  if(globalThis.__TW_PF_UI_BOUND__) return;
+  globalThis.__TW_PF_UI_BOUND__ = true;
+
+  const shell = document.getElementById("twPfCompileShell");
+  shell?.addEventListener("mousedown", (e)=>{
+    const btn = e.target?.closest?.("[data-tw-pf-pick]");
+    if(!btn) return;
+    e.preventDefault();
+    twPfSetSelected(btn.getAttribute("data-tw-pf-pick"));
+  });
+
+  $("twPfSearchInput")?.addEventListener("input", (e)=>{
+    const pf = twEnsurePfState();
+    pf.selectedKey = "";
+    pf.searchTerm = String(e?.target?.value || "").trim();
+    twPfRenderSelectedMeta();
+    twPfRenderResults(true);
+  });
+
+  $("twPfSearchInput")?.addEventListener("focus", ()=> twPfRenderResults(true));
+
+  $("twPfSearchInput")?.addEventListener("keydown", (e)=>{
+    if(e.key === "Enter"){
+      e.preventDefault();
+      const first = twPfSearch($("twPfSearchInput")?.value || "")[0] || null;
+      if(first){
+        twPfSetSelected(first.key);
+        $("twPfQtyInput")?.focus?.();
+        $("twPfQtyInput")?.select?.();
+      }
+    }
+    if(e.key === "Escape") twPfRenderResults(false);
+  });
+
+  $("twPfQtyInput")?.addEventListener("keydown", (e)=>{
+    if(e.key === "Enter"){
+      e.preventDefault();
+      twPfAddSelectedToDraft();
+    }
+  });
+
+  $("twPfAddBtn")?.addEventListener("click", (e)=>{
+    e.preventDefault();
+    twPfAddSelectedToDraft();
+  });
+
+  $("twPfClearBtn")?.addEventListener("click", (e)=>{
+    e.preventDefault();
+    twPfClearSearch();
+  });
+
+  $("twPfCompileList")?.addEventListener("click", (e)=>{
+    const btn = e.target?.closest?.("[data-tw-pf-remove]");
+    if(!btn) return;
+    const key = String(btn.getAttribute("data-tw-pf-remove") || "").trim();
+    const pf = twEnsurePfState();
+    pf.compileItems = (pf.compileItems || []).filter(x => String(x?.key || "").trim() !== key);
+    twPfRenderCompileList();
+  });
+
+  $("twPfCompileList")?.addEventListener("input", (e)=>{
+    const inp = e.target?.closest?.("[data-tw-pf-qty]");
+    if(!inp) return;
+    const key = String(inp.getAttribute("data-tw-pf-qty") || "").trim();
+    const pf = twEnsurePfState();
+    const row = (pf.compileItems || []).find(x => String(x?.key || "").trim() === key);
+    if(!row) return;
+    row.qty = String(inp.value || "").trim();
+  });
+
+  document.addEventListener("mousedown", (e)=>{
+    const shell = document.getElementById("twPfCompileShell");
+    const box = document.getElementById("twPfSearchResults");
+    if(!shell || !box) return;
+    if(shell.contains(e.target)) return;
+    box.style.display = "none";
+  });
+}
+
+function twMountPfCompileUi(){
+  const wrap = $("twCompileWrap");
+  if(!wrap) return;
+
+  if(!document.getElementById("twPfCompileStyle")){
+    const style = document.createElement("style");
+    style.id = "twPfCompileStyle";
+    style.textContent = `
+      .twPfCompileShell{margin:0 0 12px 0;padding:12px;border:1px solid var(--stroke);border-radius:16px;background:rgba(255,255,255,.72)}
+      .twPfSearchGrid{display:grid;grid-template-columns:minmax(0,1fr) 120px;gap:10px;align-items:start}
+      .twPfSearchWrap{position:relative}
+      .twPfSearchResults{display:none;position:absolute;left:0;right:0;top:calc(100% + 6px);z-index:25;max-height:260px;overflow:auto;border:1px solid var(--stroke);border-radius:14px;background:#fff;box-shadow:0 18px 30px rgba(15,23,42,.12)}
+      .twPfResultItem{width:100%;display:flex;flex-direction:column;align-items:flex-start;gap:3px;padding:10px 12px;border:none;background:#fff;cursor:pointer;text-align:left}
+      .twPfResultItem + .twPfResultItem{border-top:1px solid rgba(12,22,52,.08)}
+      .twPfResultItem:hover{background:rgba(10,132,255,.06)}
+      .twPfResultTitle{font-weight:900;color:var(--text)}
+      .twPfResultMeta{font-size:12px;font-weight:700;color:var(--muted)}
+      .twPfDraftRow{display:flex;align-items:center;justify-content:space-between;gap:12px}
+      .twPfDraftActions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+      .twPfQtyInline{width:92px;height:40px;border-radius:12px;border:1px solid var(--stroke);padding:0 10px;background:#fff;font-weight:800}
+      @media (max-width:680px){
+        .twPfSearchGrid{grid-template-columns:1fr}
+        .twPfDraftRow{flex-direction:column;align-items:flex-start}
+        .twPfDraftActions{width:100%}
+        .twPfQtyInline{width:100%}
+      }
+    `;
+    document.head.appendChild(style);
+  }
+
+  if(!document.getElementById("twPfCompileShell")){
+    const shell = document.createElement("div");
+    shell.id = "twPfCompileShell";
+    shell.className = "twPfCompileShell";
+    shell.innerHTML = `
+      <div class="stepTitle" style="margin:0 0 6px 0;">Aggiungi prodotto finito</div>
+      <div class="muted" style="margin-bottom:10px;">Ricerca intelligente live su tutto inventario PF. Nessun fallback locale.</div>
+      <div class="twPfSearchGrid">
+        <div class="field twPfSearchWrap" style="margin:0;">
+          <label for="twPfSearchInput">Cerca PF</label>
+          <input id="twPfSearchInput" type="text" autocomplete="off" placeholder="Codice, nome articolo, categoria…" />
+          <div id="twPfSearchResults" class="twPfSearchResults"></div>
+        </div>
+        <div class="field" style="margin:0;">
+          <label for="twPfQtyInput">Quantità</label>
+          <input id="twPfQtyInput" type="number" inputmode="numeric" step="1" min="1" placeholder="Es. 480" />
+        </div>
+      </div>
+      <div class="muted" id="twPfPickedMeta" style="margin-top:8px;">Ricerca PF live in caricamento…</div>
+      <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:10px;">
+        <button class="btn good" id="twPfAddBtn" type="button" disabled>Aggiungi PF alla lista</button>
+        <button class="btn ghost" id="twPfClearBtn" type="button">Pulisci ricerca</button>
+      </div>
+      <div class="stepTitle" style="margin:14px 0 6px 0;">PF pronti per l’invio</div>
+      <div id="twPfCompileList"></div>
+      <div class="muted" id="twPfCompileEmpty" style="margin-top:6px;">Nessun PF aggiunto.</div>
+      <div class="muted" id="twPfCompileStatus" style="margin-top:8px;">Ricerca PF live in caricamento…</div>
+    `;
+    const textarea = $("twLinesBox");
+    if(textarea && textarea.parentNode === wrap){
+      wrap.insertBefore(shell, textarea);
+      const gap = document.createElement("div");
+      gap.style.height = "12px";
+      gap.id = "twPfCompileGap";
+      wrap.insertBefore(gap, textarea);
+    }else{
+      wrap.appendChild(shell);
+    }
+  }
+
+  twPfBindUiOnce();
+  twPfRenderStatus();
+  twPfRenderSelectedMeta();
+  twPfRenderCompileList();
+}
+
+function twStartPfWatch(){
+  const pf = twEnsurePfState();
+  twMountPfCompileUi();
+
+  if(!(state.user && state.user.isAdmin)){
+    try{ pf.unsubProducts && pf.unsubProducts(); }catch(_e){}
+    try{ pf.unsubMovements && pf.unsubMovements(); }catch(_e){}
+    pf.unsubProducts = null;
+    pf.unsubMovements = null;
+    return;
+  }
+  if(!state.firebase?.ok) return;
+
+  const fs = state.firebase.api;
+  const db = state.firebase.db;
+  if(!fs || !db) return;
+
+  try{ pf.unsubProducts && pf.unsubProducts(); }catch(_e){}
+  try{ pf.unsubMovements && pf.unsubMovements(); }catch(_e){}
+
+  pf.readyProducts = false;
+  pf.readyStock = false;
+  pf.error = "";
+  twPfRenderStatus();
+  twPfRenderSelectedMeta();
+
+  try{
+    const prodCol = fs.collection(db, "orgs", TW_HUB_ORG_ID, "finishedProducts");
+    pf.unsubProducts = fs.onSnapshot(
+      fs.query(prodCol, fs.orderBy("nameLower", "asc")),
+      (snap)=>{
+        pf.finishedProducts = (snap.docs || []).map(d => {
+          const v = d.data() || {};
+          return {
+            id: d.id,
+            code: (v.code || v.codeLower || "").toString().trim(),
+            name: (v.name || v.nome || v.description || "").toString().trim(),
+            uom: (v.uom || "").toString().trim(),
+            categoryKey: (v.categoryKeyLower || v.categoryKey || v.category || "").toString().trim()
+          };
+        });
+        pf.readyProducts = true;
+        pf.error = "";
+        twPfRebuildIndex();
+        twPfRenderStatus();
+        twPfRenderSelectedMeta();
+        twPfRenderResults(false);
+        twPfRenderCompileList();
+      },
+      (err)=>{
+        console.warn("tw finishedProducts snapshot error:", err);
+        pf.readyProducts = false;
+        pf.error = err?.code || "permission-denied";
+        twPfRenderStatus();
+        twPfRenderSelectedMeta();
+      }
+    );
+  }catch(err){
+    console.warn("twStartPfWatch products error:", err);
+  }
+
+  try{
+    const movCol = fs.collection(db, "orgs", TW_HUB_ORG_ID, "finishedInventoryMovements");
+    let q = null;
+    try{ q = fs.query(movCol, fs.orderBy("createdAt", "asc")); }catch(_e){ q = movCol; }
+    pf.unsubMovements = fs.onSnapshot(
+      q,
+      (snap)=>{
+        pf.finishedMovements = (snap.docs || []).map(d => {
+          const v = d.data() || {};
+          return {
+            id: d.id,
+            type: (v.type || "IN").toString().trim(),
+            code: (v.code || "").toString().trim(),
+            item: (v.item || v.name || "").toString().trim(),
+            uom: (v.uom || "").toString().trim(),
+            qty: twPfNum(v.qty)
+          };
+        });
+        pf.readyStock = true;
+        pf.error = "";
+        twPfRebuildIndex();
+        twPfRenderStatus();
+        twPfRenderSelectedMeta();
+        twPfRenderResults(false);
+        twPfRenderCompileList();
+      },
+      (err)=>{
+        console.warn("tw finishedInventory snapshot error:", err);
+        pf.readyStock = false;
+        pf.error = err?.code || "permission-denied";
+        twPfRenderStatus();
+        twPfRenderSelectedMeta();
+      }
+    );
+  }catch(err){
+    console.warn("twStartPfWatch movements error:", err);
+  }
+}
+
+function twStopPfWatch(){
+  const pf = twEnsurePfState();
+  try{ pf.unsubProducts && pf.unsubProducts(); }catch(_e){}
+  try{ pf.unsubMovements && pf.unsubMovements(); }catch(_e){}
+  pf.unsubProducts = null;
+  pf.unsubMovements = null;
+}
+
+
+
 // --- Auto-sync: ordini "VAI IN PRODUZIONE" -> Tabellone WRITE queue (producedDays/linea_liquidi/queue)
 // Regole:
 // - Per ogni riga di produzione degli ordini (lineKey), se NON è conclusa e NON è già in coda/completati, crea/aggiorna una riga in queue (kind:"orderLine").
@@ -11296,6 +12039,7 @@ function twExcludeNonPiece(_qty, _unit, _um=""){
 function twHideInUi(it){
   try{
     if(!it) return true;
+    if(twIsManualFinishedProductRow(it)) return false;
     const desc = (it.product || it.label || it.rawLine || "");
     const code = (it.code || "");
     const um   = (it.um || it.unit || "");
@@ -12161,6 +12905,16 @@ async function twCompleteJob(){
       return;
     }
 
+    if(twIsManualFinishedProductRow(job)){
+      const qtyInt = Math.round(qtyNum);
+      if(Math.abs(qtyNum - qtyInt) > 1e-9){
+        if(fb) fb.textContent = "Per i PF inserisci una quantità intera.";
+        $("twQtyInput")?.focus?.();
+        $("twQtyInput")?.select?.();
+        return;
+      }
+    }
+
     if(!state.firebase?.ok) throw new Error("Firebase non disponibile");
     const fs = state.firebase.api;
     const db = state.firebase.db;
@@ -12169,22 +12923,30 @@ async function twCompleteJob(){
     const producedCol = fs.collection(db, "producedDays", TW_LINE_BUCKET, "items");
 
     const key = String(id);
-    const label = ((job.product||"") + (job.format ? (" • " + job.format) : "")).trim() || "Completato";
+    const doneDocId = twKeyToDocId(key);
+    const label = ((job.product||job.finishedProductName||"") + (job.format ? (" • " + job.format) : "")).trim() || "Completato";
+    const movementId = twIsManualFinishedProductRow(job) ? twPfMovementDocId(doneDocId) : "";
     const payload = {
       key,
       label,
-      qty: qtyNum,
-      unit: job.unit || "pz",
-      product: job.product || "",
+      qty: twIsManualFinishedProductRow(job) ? Math.round(qtyNum) : qtyNum,
+      unit: job.unit || job.finishedProductUom || "pz",
+      product: job.product || job.finishedProductName || "",
       format: job.format || "",
       kind: job.kind || "",
       source: job.source || "",
+      inventoryTarget: job.inventoryTarget || "",
+      finishedProductId: job.finishedProductId || "",
+      finishedProductCode: job.finishedProductCode || job.code || "",
+      finishedProductName: job.finishedProductName || job.product || "",
+      finishedProductUom: job.finishedProductUom || job.unit || job.um || "",
+      finishedInventoryMovementId: movementId,
       orderKey: job.orderKey || "",
       orderNo: job.orderNo || "",
       customer: job.customer || "",
       lineKey: job.lineKey || "",
-      code: job.code || "",
-      um: job.um || "",
+      code: job.code || job.finishedProductCode || "",
+      um: job.um || job.finishedProductUom || "",
       supplier: job.supplier || "",
       plannedQty: job.qty || "",
       rawLine: job.rawLine || "",
@@ -12198,14 +12960,25 @@ async function twCompleteJob(){
       completedAtClientMs: Date.now()
     };
 
+    const batch = fs.writeBatch(db);
+    batch.set(fs.doc(producedCol, doneDocId), payload, { merge:true });
+    batch.delete(fs.doc(queueCol, id));
+
+    if(twIsManualFinishedProductRow(job)){
+      const mov = twBuildFinishedInventoryLoadPayload({ ...payload, id: doneDocId, key }, fs);
+      if(mov){
+        batch.set(fs.doc(db, "orgs", TW_HUB_ORG_ID, "finishedInventoryMovements", mov.movementId), mov.payload, { merge:true });
+        payload.finishedInventoryMovementId = mov.movementId;
+      }
+    }
+
     twSetCloud("loading","scrivo…");
-    await fs.setDoc(fs.doc(producedCol, twKeyToDocId(key)), payload, { merge:true });
-    await fs.deleteDoc(fs.doc(queueCol, id));
+    await batch.commit();
 
     // WRITE -> HUB: chiudo la riga nell'ordine (real-time)
     try{
       await twApplyWriteCompletionToHub({
-        id: twKeyToDocId(key),
+        id: doneDocId,
         key,
         kind: payload.kind,
         orderNo: payload.orderNo,
@@ -12221,7 +12994,7 @@ async function twCompleteJob(){
         completedByEmail: payload.completedByEmail
       });
     }catch(_e){}
-    try{ ensureTabWriteState().localDoneIds.add(twKeyToDocId(key)); }catch(_e){}
+    try{ ensureTabWriteState().localDoneIds.add(doneDocId); }catch(_e){}
     try{ twScheduleOrdersSync(); }catch(_e){}
 
     try{
@@ -12239,7 +13012,7 @@ async function twCompleteJob(){
     }catch(_e){}
 
     twSetCloud("ok");
-    if(fb) fb.textContent = "Salvato ✅";
+    if(fb) fb.textContent = twIsManualFinishedProductRow(job) ? "Salvato e caricato in inventario PF ✅" : "Salvato ✅";
     setTimeout(()=> twCloseQtyModal(), 250);
   }catch(e){
     console.warn("twCompleteJob error:", e);
@@ -12453,8 +13226,19 @@ async function twClearAllCompletati(){
     let batch = fs.writeBatch(db);
     let ops = 0;
     for(const d of docs){
+      const data = d.data() || {};
       batch.delete(d.ref);
       ops++; deleted++;
+
+      const isPf = twIsManualFinishedProductRow(data);
+      if(isPf){
+        const movementId = String(data.finishedInventoryMovementId || twPfMovementDocId(d.id)).trim();
+        if(movementId){
+          batch.delete(fs.doc(db, "orgs", TW_HUB_ORG_ID, "finishedInventoryMovements", movementId));
+          ops++;
+        }
+      }
+
       if(ops >= 450){
         await batch.commit();
         batch = fs.writeBatch(db);
@@ -12488,16 +13272,23 @@ async function twUndoCompletato(it){
     const payload = {
       key: it.id,
       kind: it.kind || "orderLine",
+      source: it.source || "",
+      inventoryTarget: it.inventoryTarget || "",
+      finishedProductId: it.finishedProductId || "",
+      finishedProductCode: it.finishedProductCode || it.code || "",
+      finishedProductName: it.finishedProductName || it.product || "",
+      finishedProductUom: it.finishedProductUom || it.unit || it.um || "",
+      finishedInventoryMovementId: it.finishedInventoryMovementId || (twIsManualFinishedProductRow(it) ? twPfMovementDocId(it.id) : ""),
       orderNo: it.orderNo || "",
       customer: it.customer || "",
       lineKey: it.lineKey || "",
-      code: it.code || "",
-      um: it.um || "",
+      code: it.code || it.finishedProductCode || "",
+      um: it.um || it.finishedProductUom || "",
       supplier: it.supplier || "",
-      product: it.product || "",
+      product: it.product || it.finishedProductName || "",
       format: it.format || "",
       qty: it.qty || "",
-      unit: it.unit || "pz",
+      unit: it.unit || it.finishedProductUom || "pz",
       status: "DA PRODURRE",
       rawLine: it.rawLine || "",
       createdAt: fs.serverTimestamp(),
@@ -12508,8 +13299,14 @@ async function twUndoCompletato(it){
       createdByEmail: state.user?.email || null
     };
 
-    await fs.setDoc(fs.doc(queueCol, it.id), payload, { merge:true });
-    await fs.deleteDoc(fs.doc(producedCol, it.id));
+    const batch = fs.writeBatch(db);
+    batch.set(fs.doc(queueCol, it.id), payload, { merge:true });
+    batch.delete(fs.doc(producedCol, it.id));
+    if(twIsManualFinishedProductRow(it)){
+      const movementId = String(payload.finishedInventoryMovementId || twPfMovementDocId(it.id)).trim();
+      if(movementId) batch.delete(fs.doc(db, "orgs", TW_HUB_ORG_ID, "finishedInventoryMovements", movementId));
+    }
+    await batch.commit();
 
     // WRITE -> HUB: annullo conclusione riga
     try{ await twRemoveWriteCompletionFromHub(it); }catch(_e){}
@@ -12557,6 +13354,12 @@ function twStartQueueWatch(){
         id: d.id,
         kind: (v.kind || "").toString().trim(),
         source: (v.source || "").toString().trim(),
+        inventoryTarget: (v.inventoryTarget || "").toString().trim(),
+        finishedProductId: (v.finishedProductId || "").toString().trim(),
+        finishedProductCode: (v.finishedProductCode || "").toString().trim(),
+        finishedProductName: (v.finishedProductName || "").toString().trim(),
+        finishedProductUom: (v.finishedProductUom || "").toString().trim(),
+        finishedInventoryMovementId: (v.finishedInventoryMovementId || "").toString().trim(),
         orderKey: (v.orderKey || "").toString().trim(),
         orderNo: (v.orderNo || "").toString().trim(),
         customer: (v.customer || v.cliente || v.customerName || v.nomeCliente || "").toString().trim(),
@@ -12564,9 +13367,9 @@ function twStartQueueWatch(){
         code: (v.code || "").toString().trim(),
         um: (v.um || "").toString().trim(),
         supplier: (v.supplier || v.fornitore || "").toString().trim(),
-        product: (v.product || v.label || v.rawLine || "").toString().trim(),
+        product: (v.product || v.finishedProductName || v.label || v.rawLine || "").toString().trim(),
         qty: (v.qty || "").toString().trim(),
-        unit: (v.unit || "").toString().trim(),
+        unit: (v.unit || v.finishedProductUom || "").toString().trim(),
         format: (v.format || "").toString().trim(),
         status: (v.status || "DA PRODURRE").toString().trim(),
         createdAtMs,
@@ -12604,18 +13407,24 @@ function twStartDoneWatch(){
         id: d.id,
         kind: (v.kind || "").toString().trim(),
         source: (v.source || "").toString().trim(),
+        inventoryTarget: (v.inventoryTarget || "").toString().trim(),
+        finishedProductId: (v.finishedProductId || "").toString().trim(),
+        finishedProductCode: (v.finishedProductCode || "").toString().trim(),
+        finishedProductName: (v.finishedProductName || "").toString().trim(),
+        finishedProductUom: (v.finishedProductUom || "").toString().trim(),
+        finishedInventoryMovementId: (v.finishedInventoryMovementId || "").toString().trim(),
         orderKey: (v.orderKey || "").toString().trim(),
         orderNo: (v.orderNo || "").toString().trim(),
         customer: (v.customer || v.cliente || v.customerName || v.nomeCliente || "").toString().trim(),
         lineKey: (v.lineKey || "").toString().trim(),
-        code: (v.code || "").toString().trim(),
-        um: (v.um || "").toString().trim(),
+        code: (v.code || v.finishedProductCode || "").toString().trim(),
+        um: (v.um || v.finishedProductUom || "").toString().trim(),
         supplier: (v.supplier || v.fornitore || "").toString().trim(),
         label: (v.label || "").toString().trim(),
-        product: (v.product || v.label || "").toString().trim(),
+        product: (v.product || v.finishedProductName || v.label || "").toString().trim(),
         format: (v.format || "").toString().trim(),
         qty: (v.qty || "").toString().trim(),
-        unit: (v.unit || "").toString().trim(),
+        unit: (v.unit || v.finishedProductUom || "").toString().trim(),
         completedAtMs,
         completedByName: (v.completedByName || v.createdByName || "").toString().trim(),
         completedByEmail: (v.completedByEmail || v.createdByEmail || "").toString().trim(),
@@ -12639,7 +13448,15 @@ async function twSendLinesToQueue(){
   }
   const box = $("twLinesBox");
   const lines = twParseLines(box?.value || "");
-  if(!lines.length){ alert("Scrivi almeno una riga."); return; }
+  let pfDraft = [];
+  try{
+    pfDraft = twPfCompileItemsForSend();
+  }catch(err){
+    alert(err?.message || "Quantità PF non valida.");
+    return;
+  }
+
+  if(!lines.length && !pfDraft.length){ alert("Scrivi almeno una riga o aggiungi un PF."); return; }
 
   try{
     if(!state.firebase?.ok) throw new Error("Firebase non disponibile");
@@ -12649,9 +13466,11 @@ async function twSendLinesToQueue(){
 
     const batch = fs.writeBatch(db);
     let count = 0;
+    let manualPfCount = 0;
     let skipped = 0;
     let skippedSmall = 0;
     let skippedNonPiece = 0;
+
     for(const line of lines){
       const j = twParseJobLine(line);
 
@@ -12675,6 +13494,7 @@ async function twSendLinesToQueue(){
       }
 
       const ref = fs.doc(queueCol);
+      const nowMs = Date.now();
       const payload = {
         product: j.product || "",
         qty: j.qty || "",
@@ -12683,9 +13503,9 @@ async function twSendLinesToQueue(){
         status: j.status || "DA PRODURRE",
         rawLine: j.rawLine || line,
         createdAt: fs.serverTimestamp(),
-        createdAtMs: Date.now(),
+        createdAtMs: nowMs,
         createdAtOrig: fs.serverTimestamp(),
-        createdAtOrigMs: Date.now(),
+        createdAtOrigMs: nowMs,
         createdByUid: state.user?.uid || null,
         createdByEmail: state.user?.email || null
       };
@@ -12693,23 +13513,60 @@ async function twSendLinesToQueue(){
       count++;
     }
 
+    for(const it of pfDraft){
+      const ref = fs.doc(queueCol);
+      const nowMs = Date.now();
+      const codeLabel = String(it.finishedProductCode || "").trim();
+      const format = codeLabel ? (`PF • ${codeLabel}`) : "PF";
+      const payload = {
+        kind: "finishedProduct",
+        source: "manual_finished_product",
+        inventoryTarget: "finished_product",
+        finishedProductId: it.finishedProductId || "",
+        finishedProductCode: it.finishedProductCode || "",
+        finishedProductName: it.finishedProductName || it.finishedProductCode || "",
+        finishedProductUom: it.finishedProductUom || it.unit || "pz",
+        code: it.finishedProductCode || "",
+        product: it.finishedProductName || it.finishedProductCode || "",
+        qty: String(it.qty),
+        unit: it.unit || it.finishedProductUom || "pz",
+        format,
+        status: "DA PRODURRE",
+        rawLine: `${it.finishedProductName || it.finishedProductCode || "PF"} | ${it.qty} | ${it.unit || it.finishedProductUom || "pz"} | ${format}`,
+        createdAt: fs.serverTimestamp(),
+        createdAtMs: nowMs,
+        createdAtOrig: fs.serverTimestamp(),
+        createdAtOrigMs: nowMs,
+        createdByUid: state.user?.uid || null,
+        createdByEmail: state.user?.email || null
+      };
+      batch.set(ref, payload, { merge:true });
+      count++;
+      manualPfCount++;
+    }
+
     twSetCloud("loading","invio…");
     await batch.commit();
     if(box) box.value = "";
+    try{
+      const pf = twEnsurePfState();
+      pf.compileItems = [];
+      twPfRenderCompileList();
+      twPfClearSearch();
+    }catch(_e){}
     twSetCloud("ok");
     let extra = "";
-    if(skipped || skippedSmall || skippedNonPiece){
+    if(skipped || skippedSmall || skippedNonPiece || manualPfCount){
       extra = "\n\n(";
-      if(skipped) extra += "Escluse " + skipped + " righe: 5/10 kg/lt o tanica";
-      if((skipped || skippedNonPiece) && skippedSmall) extra += " · ";
-      if(skipped && skippedNonPiece) extra += " · ";
-      if(skippedNonPiece) extra += "Escluse " + skippedNonPiece + " righe: UM non a pezzi (kg/lt/ml ecc.)";
-      if(skippedNonPiece && skippedSmall) extra += " · ";
-      if(skippedSmall) extra += "Escluse " + skippedSmall + " righe: < 200 pz";
-      extra += ")";
+      const parts = [];
+      if(manualPfCount) parts.push("PF manuali inviati: " + manualPfCount);
+      if(skipped) parts.push("Escluse " + skipped + " righe: 5/10 kg/lt o tanica");
+      if(skippedNonPiece) parts.push("Escluse " + skippedNonPiece + " righe: UM non a pezzi (kg/lt/ml ecc.)");
+      if(skippedSmall) parts.push("Escluse " + skippedSmall + " righe: < 200 pz");
+      extra += parts.join(" · ") + ")";
     }
     alert("Inviate " + count + " righe al kiosk." + extra);
-}catch(e){
+  }catch(e){
     console.warn("twSendLines error:", e);
     twSetCloud("bad", e?.code || "error");
     alert("Errore invio: " + (e?.message || e?.code || "unknown"));
@@ -13067,6 +13924,8 @@ function ensureTabWriteHome(){
   if(!state.user) return;
   ensureTabWriteState();
   twBindUiOnce();
+  twMountPfCompileUi();
+  twStartPfWatch();
 
   if(globalThis.__TW_HOME_INIT__) return;
   globalThis.__TW_HOME_INIT__ = true;
@@ -13081,6 +13940,7 @@ function stopTabWriteHome(){
   const tw = state.tabWrite;
   try{ tw?._unsubQueue && tw._unsubQueue(); }catch(_e){}
   try{ tw?._unsubDone && tw._unsubDone(); }catch(_e){}
+  try{ twStopPfWatch(); }catch(_e){}
   if(state.tabWrite){
     state.tabWrite._unsubQueue = null;
     state.tabWrite._unsubDone = null;
@@ -13089,6 +13949,11 @@ function stopTabWriteHome(){
     state.tabWrite.lastQueueById = new Map();
     state.tabWrite.localDoneIds = new Set();
     state.tabWrite.pendingComplete = null;
+    if(state.tabWrite.pf){
+      state.tabWrite.pf.compileItems = [];
+      state.tabWrite.pf.selectedKey = "";
+      state.tabWrite.pf.searchTerm = "";
+    }
   }
   try{ twCloseQtyModal(); }catch(_e){}
   globalThis.__TW_HOME_INIT__ = false;
