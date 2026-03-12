@@ -10482,8 +10482,15 @@ try{ __installRobustTapState(); }catch(_){ }
       }
       syncHeaderBackVisibility();
       try{ __dockBackRowControls && __dockBackRowControls(); }catch(_){ }
-      try{ __syncDockedControlsVisibility && __syncDockedControlsVisibility(); }catch(_){}
-      try { window.scrollTo(0, 0); } catch(_){}
+      try{ __syncDockedControlsVisibility && __syncDockedControlsVisibility(); }catch(_){ }
+      try{ __syncBodyLockFromModals(); }catch(_){ }
+      try{
+        if (isOverlay){
+          const activeView = (__views && __views[key]) ? __views[key] : document.querySelector(".view.modalOverlay.active");
+          requestAnimationFrame(() => { try{ __scrollViewToTop(activeView); }catch(_){ } });
+        }
+      }catch(_){ }
+      try{ __scheduleResponsiveLayoutSync(); }catch(_){ }
     }
 
     function __isMobileDevice(){
@@ -12576,13 +12583,166 @@ function __setBodyLocked(locked){
   }catch(e){}
 }
 
+function __isCompactViewport(){
+  try{
+    return !!(window.matchMedia && window.matchMedia("(max-width: 959px)").matches);
+  }catch(_){
+    return (window.innerWidth || 0) <= 959;
+  }
+}
+
+function __hasActiveOverlayForScrollLock(){
+  try{
+    if (!__isCompactViewport()) return false;
+    return !!document.querySelector(".view.modalOverlay.active");
+  }catch(_){
+    return false;
+  }
+}
+
+let __responsiveLayoutSyncRaf = 0;
+let __responsiveLayoutSyncInstalled = false;
+
+function __updateAppViewportVars(){
+  try{
+    const root = document.documentElement;
+    if (!root) return;
+    const vv = window.visualViewport;
+    const vh = Math.round((vv && vv.height) ? vv.height : (window.innerHeight || 0));
+    const vw = Math.round((vv && vv.width) ? vv.width : (window.innerWidth || 0));
+    if (vh > 0) root.style.setProperty("--app-vh", `${vh}px`);
+    if (vw > 0) root.style.setProperty("--app-vw", `${vw}px`);
+  }catch(_){ }
+}
+
+function __getResponsiveTableHeadLabels(table){
+  try{
+    return Array.from(table.querySelectorAll("thead th")).map((th) => String((th && (th.getAttribute("data-label") || th.textContent)) || "").replace(/\s+/g, " ").trim());
+  }catch(_){
+    return [];
+  }
+}
+
+function __shouldStackResponsiveTable(table, labels){
+  try{
+    if (!__isCompactViewport()) return false;
+    if (!table || !labels || !labels.length) return false;
+
+    const wrap = (table.closest && table.closest(".tableWrap")) ? table.closest(".tableWrap") : null;
+    let mode = "";
+    try{ mode = String((table.getAttribute && table.getAttribute("data-mobile-stack")) || "").trim().toLowerCase(); }catch(_){ mode = ""; }
+    if (!mode && wrap){
+      try{ mode = String((wrap.getAttribute && wrap.getAttribute("data-mobile-stack")) || "").trim().toLowerCase(); }catch(_){ mode = ""; }
+    }
+
+    if (mode === "on") return true;
+    if (mode === "off") return false;
+
+    const cols = labels.filter(Boolean).length;
+    return cols > 0 && cols <= 5;
+  }catch(_){
+    return false;
+  }
+}
+
+function __syncResponsiveTableLabels(root){
+  try{
+    const scope = (root && root.querySelectorAll) ? root : document;
+    const tables = scope.querySelectorAll("table.dataGrid");
+    tables.forEach((table) => {
+      const labels = __getResponsiveTableHeadLabels(table);
+      if (!labels.length) return;
+
+      const rows = table.querySelectorAll("tbody tr");
+      rows.forEach((row) => {
+        const cells = Array.from(row.children || []).filter((el) => el && el.tagName === "TD");
+        cells.forEach((cell, idx) => {
+          try{
+            if (!cell || (cell.hasAttribute && cell.hasAttribute("colspan"))) return;
+            const label = String(labels[idx] || "").trim();
+            if (label && !String(cell.getAttribute("data-label") || "").trim()){
+              cell.setAttribute("data-label", label);
+            }
+          }catch(_){ }
+        });
+      });
+
+      const wrap = (table.closest && table.closest(".tableWrap")) ? table.closest(".tableWrap") : null;
+      if (wrap){
+        try{ wrap.classList.toggle("is-mobile-stack", __shouldStackResponsiveTable(table, labels)); }catch(_){ }
+      }
+    });
+  }catch(_){ }
+}
+
+function __scheduleResponsiveLayoutSync(){
+  try{
+    __updateAppViewportVars();
+    if (__responsiveLayoutSyncRaf) cancelAnimationFrame(__responsiveLayoutSyncRaf);
+    __responsiveLayoutSyncRaf = requestAnimationFrame(() => {
+      __responsiveLayoutSyncRaf = 0;
+      __syncResponsiveTableLabels(document);
+    });
+  }catch(_){ }
+}
+
+function __scrollViewToTop(viewEl){
+  try{
+    const view = viewEl || document.querySelector(".view.modalOverlay.active");
+    if (!view) return;
+
+    const queue = [];
+    const push = (el) => { if (el && queue.indexOf(el) < 0) queue.push(el); };
+
+    push(view);
+    if (view.querySelector){
+      push(view.querySelector("article.card"));
+      push(view.querySelector("article.card .bd"));
+      push(view.querySelector(".modalContent"));
+      push(view.querySelector(".modalScroll"));
+      view.querySelectorAll(".tableWrap").forEach((el) => push(el));
+    }
+
+    queue.forEach((el) => {
+      try{ el.scrollTop = 0; }catch(_){ }
+    });
+  }catch(_){ }
+}
+
+function __installResponsiveLayoutSync(){
+  if (__responsiveLayoutSyncInstalled) return;
+  __responsiveLayoutSyncInstalled = true;
+
+  __scheduleResponsiveLayoutSync();
+
+  try{ window.addEventListener("resize", __scheduleResponsiveLayoutSync, { passive: true }); }catch(_){ }
+  try{ window.addEventListener("orientationchange", __scheduleResponsiveLayoutSync, { passive: true }); }catch(_){ }
+  try{ document.addEventListener("visibilitychange", () => { if (!document.hidden) __scheduleResponsiveLayoutSync(); }); }catch(_){ }
+
+  try{
+    if (window.visualViewport){
+      window.visualViewport.addEventListener("resize", __scheduleResponsiveLayoutSync, { passive: true });
+      window.visualViewport.addEventListener("scroll", __scheduleResponsiveLayoutSync, { passive: true });
+    }
+  }catch(_){ }
+
+  try{
+    const mo = new MutationObserver(() => { __scheduleResponsiveLayoutSync(); });
+    mo.observe(document.body || document.documentElement, { childList: true, subtree: true });
+  }catch(_){ }
+}
+
 function __syncBodyLockFromModals(){
   try{
     const anyOpen = !!document.querySelector(".modal.open");
-    __setBodyLocked(anyOpen);
+    const anyOverlay = __hasActiveOverlayForScrollLock();
+    __setBodyLocked(anyOpen || anyOverlay);
     syncHeaderBackVisibility();
+    __scheduleResponsiveLayoutSync();
   }catch(e){}
 }
+
+__installResponsiveLayoutSync();
 
 
 function __shouldCenterPop(msg, kind){
