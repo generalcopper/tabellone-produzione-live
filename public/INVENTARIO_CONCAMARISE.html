@@ -374,6 +374,76 @@
       white-space:nowrap;
     }
 
+    .movements-head,
+    .movement-row{
+      display:grid;
+      grid-template-columns:minmax(0, 1.7fr) auto minmax(140px, .9fr);
+      gap:12px;
+      align-items:center;
+    }
+
+    .movements-head{
+      padding:0 4px;
+      font-size:12px;
+      font-weight:900;
+      letter-spacing:.06em;
+      text-transform:uppercase;
+      color:var(--muted);
+    }
+
+    .movements-list{
+      display:grid;
+      gap:10px;
+    }
+
+    .movement-row{
+      padding:14px 16px;
+      border-radius:18px;
+      background:#fff;
+      border:1px solid var(--line);
+      box-shadow:0 8px 18px rgba(15,23,42,.04);
+    }
+
+    .movement-main,
+    .movement-user{
+      min-width:0;
+      display:grid;
+      gap:4px;
+    }
+
+    .movement-name,
+    .movement-user-name{
+      font-size:15px;
+      font-weight:900;
+      color:var(--ink);
+      overflow-wrap:anywhere;
+    }
+
+    .movement-code,
+    .movement-user-meta{
+      font-size:12px;
+      font-weight:800;
+      color:var(--muted);
+      line-height:1.45;
+      overflow-wrap:anywhere;
+    }
+
+    .movement-qty{
+      display:inline-flex;
+      align-items:center;
+      justify-content:center;
+      min-width:96px;
+      min-height:42px;
+      padding:0 14px;
+      border-radius:14px;
+      background:#f8fbff;
+      border:1px solid rgba(28,111,230,.12);
+      font-size:15px;
+      font-weight:900;
+      color:var(--ink);
+      white-space:nowrap;
+    }
+
     .field{
       display:grid;
       gap:8px;
@@ -661,6 +731,23 @@
         justify-self:start;
       }
 
+      .movements-head{
+        display:none;
+      }
+
+      .movement-row{
+        grid-template-columns:1fr;
+        gap:10px;
+      }
+
+      .movement-qty{
+        justify-self:start;
+      }
+
+      .movement-user{
+        padding-top:2px;
+      }
+
       .modal-actions{
         grid-template-columns:1fr;
       }
@@ -716,6 +803,19 @@
       <div id="inventoryMeta" class="products-meta">Accedi per vedere i prodotti disponibili a Concamarise.</div>
       <div id="inventoryCategories" class="inventory-groups">
         <div class="empty">Accedi per vedere i prodotti disponibili a Concamarise.</div>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2 class="section-title">Movimenti</h2>
+      <div id="movementsMeta" class="products-meta">Accedi per vedere i movimenti di carico a Concamarise.</div>
+      <div class="movements-head" aria-hidden="true">
+        <div>Articolo caricato</div>
+        <div>Quantità</div>
+        <div>Utente</div>
+      </div>
+      <div id="movementsList" class="movements-list">
+        <div class="empty">Accedi per vedere i movimenti di carico a Concamarise.</div>
       </div>
     </section>
   </div>
@@ -797,6 +897,8 @@
       currentUser: document.getElementById("currentUser"),
       inventoryMeta: document.getElementById("inventoryMeta"),
       inventoryCategories: document.getElementById("inventoryCategories"),
+      movementsMeta: document.getElementById("movementsMeta"),
+      movementsList: document.getElementById("movementsList"),
       loadModal: document.getElementById("loadModal"),
       loadCommand: document.getElementById("loadCommand"),
       commandWrap: document.getElementById("commandWrap"),
@@ -1038,7 +1140,11 @@
         note: String(data.note || "").trim(),
         source: String(data.source || "").trim(),
         createdByName: String(data.createdByName || data.userName || data.displayName || "").trim(),
-        createdBy: String(data.createdBy || data.userEmail || data.user || data.author || "").trim()
+        createdBy: String(data.createdBy || data.userEmail || data.user || data.author || "").trim(),
+        createdByEmail: String(data.createdByEmail || data.userEmail || "").trim(),
+        createdByUid: String(data.createdByUid || data.uid || "").trim(),
+        docType: String(data.docType || "").trim(),
+        docNum: String(data.docNum || "").trim()
       };
     }
 
@@ -1146,8 +1252,18 @@
     }
 
     function isExplicitlyEnabledForConcamarise(product){
-      const list = normalizeWarehousesList(product?.warehouses);
-      return list.includes(WAREHOUSE_CONCA);
+      if (!product || typeof product !== "object") return false;
+
+      if (product.warehouses !== undefined && product.warehouses !== null){
+        const list = normalizeWarehousesList(product.warehouses);
+        return list.includes(WAREHOUSE_CONCA);
+      }
+
+      const direct = (product.concamarise !== undefined) ? product.concamarise : product.conca;
+      if (direct === true || direct === 1 || direct === "1") return true;
+      if (direct === false || direct === 0 || direct === "0") return false;
+
+      return true;
     }
 
     function buildLoadableProducts(){
@@ -1260,6 +1376,93 @@
       });
 
       return groups;
+    }
+
+    function buildConcamariseLoadMovements(){
+      const list = [];
+      for (const mv of (state.movements || [])){
+        if (!mv) continue;
+        if (normalizeWarehouse(mv.warehouse || "") !== WAREHOUSE_CONCA) continue;
+        if (String(mv.type || "").toUpperCase() !== "IN") continue;
+
+        const code = String(mv.code || "").trim();
+        const item = cleanSpaces(mv.item || code);
+        const qty = safeInt(mv.qty);
+        if (!code || !item || qty <= 0) continue;
+
+        const when = tsToDate(mv.createdAt) || tsToDate(mv.date);
+        const actor = prettifyUserLabel(mv.createdByName || mv.createdBy || mv.createdByEmail || mv.createdByUid || "Sistema");
+
+        list.push({
+          code,
+          item,
+          qty,
+          uom: normalizeUom(mv.uom || "") || "pz",
+          actor,
+          source: cleanSpaces(mv.source || ""),
+          docType: cleanSpaces(mv.docType || ""),
+          docNum: cleanSpaces(mv.docNum || ""),
+          when,
+          dateLabel: when ? when.toLocaleString("it-IT") : cleanSpaces(mv.date || "") || "—"
+        });
+      }
+
+      list.sort((a, b) => {
+        const at = a.when instanceof Date ? a.when.getTime() : 0;
+        const bt = b.when instanceof Date ? b.when.getTime() : 0;
+        if (bt !== at) return bt - at;
+        return String(b.code || "").localeCompare(String(a.code || ""), "it", { sensitivity: "base" });
+      });
+
+      return list;
+    }
+
+    function renderMovements(){
+      if (!state.user){
+        els.movementsMeta.textContent = "Accedi per vedere i movimenti di carico a Concamarise.";
+        els.movementsList.innerHTML = '<div class="empty">Accedi per vedere i movimenti di carico a Concamarise.</div>';
+        return;
+      }
+
+      if (state.movementsError){
+        els.movementsMeta.textContent = state.movementsError;
+        els.movementsList.innerHTML = `<div class="empty">${escapeHtml(state.movementsError)}</div>`;
+        return;
+      }
+
+      if (!state.movementsReady){
+        els.movementsMeta.textContent = "Caricamento movimenti in corso…";
+        els.movementsList.innerHTML = '<div class="empty">Caricamento movimenti in corso…</div>';
+        return;
+      }
+
+      const items = buildConcamariseLoadMovements();
+      if (!items.length){
+        els.movementsMeta.textContent = "Nessun movimento di carico trovato per Concamarise.";
+        els.movementsList.innerHTML = '<div class="empty">Nessun movimento di carico trovato per Concamarise.</div>';
+        return;
+      }
+
+      const shown = items.slice(0, 60);
+      els.movementsMeta.textContent = `${items.length.toLocaleString("it-IT")} movimenti di carico a Concamarise`;
+      els.movementsList.innerHTML = shown.map(item => {
+        const sourceMeta = [item.docType, item.docNum, item.source].filter(Boolean).join(' · ');
+        const articleMeta = [item.code, item.dateLabel].filter(Boolean).join(' · ');
+        const userMeta = sourceMeta || 'Carico registrato';
+        return `
+          <div class="movement-row">
+            <div class="movement-main">
+              <div class="movement-name">${escapeHtml(item.item)}</div>
+              <div class="movement-code">${escapeHtml(articleMeta)}</div>
+            </div>
+            <div class="movement-qty">${item.qty.toLocaleString("it-IT")} ${escapeHtml(item.uom)}</div>
+            <div class="movement-user">
+              <div class="movement-user-name">${escapeHtml(item.actor)}</div>
+              <div class="movement-user-meta">${escapeHtml(userMeta)}</div>
+            </div>
+          </div>
+        `;
+      }).join("");
     }
 
     function parseLoadCommand(raw){
@@ -1610,6 +1813,7 @@
     function render(){
       renderActionState();
       renderInventory();
+      renderMovements();
       renderLoadModal();
     }
 
