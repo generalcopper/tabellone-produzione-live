@@ -374,6 +374,111 @@
       white-space:nowrap;
     }
 
+    .inventory-qty-wrap{
+      justify-self:end;
+      display:grid;
+      gap:6px;
+      justify-items:end;
+    }
+
+    .inventory-qty-editor{
+      display:inline-flex;
+      align-items:center;
+      gap:10px;
+      min-width:148px;
+      min-height:46px;
+      padding:0 12px;
+      border-radius:16px;
+      background:
+        radial-gradient(circle at 14% 18%, rgba(255,255,255,.86), rgba(255,255,255,0) 44%),
+        linear-gradient(145deg, rgba(248,251,255,.98), rgba(240,247,255,.96));
+      border:1px solid rgba(28,111,230,.14);
+      box-shadow:
+        inset 0 1px 0 rgba(255,255,255,.92),
+        0 10px 22px rgba(15,23,42,.05);
+      transition:border-color .12s ease, box-shadow .12s ease, background .12s ease, transform .12s ease, opacity .12s ease;
+      cursor:text;
+    }
+
+    .inventory-qty-editor:hover{
+      border-color:rgba(28,111,230,.22);
+      box-shadow:
+        inset 0 1px 0 rgba(255,255,255,.94),
+        0 12px 26px rgba(28,111,230,.08);
+    }
+
+    .inventory-qty-editor:focus-within{
+      border-color:rgba(28,111,230,.46);
+      background:#fff;
+      box-shadow:
+        inset 0 1px 0 rgba(255,255,255,.96),
+        0 0 0 4px rgba(28,111,230,.11),
+        0 14px 28px rgba(28,111,230,.10);
+    }
+
+    .inventory-qty-editor.is-dirty{
+      border-color:rgba(217,119,6,.34);
+      background:#fffaf1;
+      box-shadow:
+        inset 0 1px 0 rgba(255,255,255,.96),
+        0 0 0 4px rgba(217,119,6,.09),
+        0 14px 28px rgba(217,119,6,.10);
+    }
+
+    .inventory-qty-editor.is-saving{
+      cursor:progress;
+      opacity:.82;
+      background:#f8fbff;
+      border-color:rgba(28,111,230,.28);
+      box-shadow:
+        inset 0 1px 0 rgba(255,255,255,.94),
+        0 0 0 4px rgba(28,111,230,.08),
+        0 12px 24px rgba(28,111,230,.08);
+    }
+
+    .inventory-qty-input{
+      width:82px;
+      min-width:0;
+      border:0;
+      outline:none;
+      background:transparent;
+      padding:0;
+      margin:0;
+      font-size:16px;
+      line-height:1;
+      font-weight:950;
+      letter-spacing:-.02em;
+      color:var(--ink);
+      text-align:right;
+      font-variant-numeric:tabular-nums;
+    }
+
+    .inventory-qty-input:disabled{
+      color:var(--muted);
+      cursor:progress;
+    }
+
+    .inventory-qty-input::-webkit-outer-spin-button,
+    .inventory-qty-input::-webkit-inner-spin-button{
+      -webkit-appearance:none;
+      margin:0;
+    }
+
+    .inventory-qty-input[type="number"]{
+      -moz-appearance:textfield;
+      appearance:textfield;
+    }
+
+    .inventory-qty-unit{
+      flex:0 0 auto;
+      font-size:12px;
+      font-weight:900;
+      letter-spacing:.06em;
+      text-transform:uppercase;
+      color:var(--muted);
+      white-space:nowrap;
+    }
+
     .movements-head,
     .movement-row{
       display:grid;
@@ -871,6 +976,16 @@
         justify-self:start;
       }
 
+      .inventory-qty-wrap{
+        justify-self:start;
+        justify-items:start;
+        width:100%;
+      }
+
+      .inventory-qty-editor{
+        min-width:152px;
+      }
+
       .movements-head{
         display:none;
       }
@@ -1062,6 +1177,10 @@
     const SOURCE = "Carica Concamarise HTML";
     const NOTE = "Carico inventario Concamarise da Cerea";
     const DOC_TYPE = "TRASFERIMENTO";
+    const RECTIFY_SOURCE = "Rettifica Concamarise HTML";
+    const RECTIFY_DOC_TYPE = "RETTIFICA";
+    const RECTIFY_NOTE = "Rettifica inventario attuale Concamarise";
+    const INVENTORY_PENDING_MS = 15000;
     const TZ = "Europe/Rome";
     const SUGGESTION_LIMIT = 80;
 
@@ -1104,7 +1223,10 @@
       categoriesError: "",
       loadCommand: "",
       loadSelectedCode: "",
-      loadSuggestionsVisible: false
+      loadSuggestionsVisible: false,
+      inventoryQtyDrafts: new Map(),
+      inventoryPendingQty: null,
+      inventorySavingCode: ""
     };
 
     const provider = new GoogleAuthProvider();
@@ -1533,6 +1655,7 @@
     function buildInventorySnapshot(){
       const totalsByCode = new Map();
       const cereaRowsByCode = new Map();
+      const concamariseRowsByCode = new Map();
 
       for (const mv of (state.movements || [])){
         const code = String(mv?.code || "").trim();
@@ -1561,9 +1684,8 @@
         if (uom) totalRec.uom = uom;
         totalsByCode.set(low, totalRec);
 
-        if (wh !== WAREHOUSE_CEREA) continue;
-
-        const byCustomer = cereaRowsByCode.get(low) || new Map();
+        const targetRowsByCode = (wh === WAREHOUSE_CONCA) ? concamariseRowsByCode : cereaRowsByCode;
+        const byCustomer = targetRowsByCode.get(low) || new Map();
         const rowKey = `${customer.toLowerCase()}||${low}`;
         const row = byCustomer.get(rowKey) || {
           customer,
@@ -1576,10 +1698,10 @@
         if (!row.item && item) row.item = item;
         if (uom) row.uom = uom;
         byCustomer.set(rowKey, row);
-        cereaRowsByCode.set(low, byCustomer);
+        targetRowsByCode.set(low, byCustomer);
       }
 
-      return { totalsByCode, cereaRowsByCode };
+      return { totalsByCode, cereaRowsByCode, concamariseRowsByCode };
     }
 
     function getResolvedUomForCode(code, product, snapshot){
@@ -2136,6 +2258,8 @@
         return;
       }
 
+      const snapshot = buildInventorySnapshot();
+      reconcilePendingInventoryQty(snapshot);
       const groups = buildConcamariseInventoryGroups();
       const totalProducts = groups.reduce((sum, group) => sum + group.items.length, 0);
 
@@ -2145,7 +2269,7 @@
         return;
       }
 
-      els.inventoryMeta.textContent = `${totalProducts.toLocaleString("it-IT")} articoli disponibili in ${groups.length.toLocaleString("it-IT")} categorie`;
+      els.inventoryMeta.textContent = `${totalProducts.toLocaleString("it-IT")} articoli disponibili in ${groups.length.toLocaleString("it-IT")} categorie · Tocca la quantità per rettificare.`;
       els.inventoryCategories.innerHTML = groups.map(group => {
         const colorStyle = group.color ? ` style="--cat-color:${escapeHtml(group.color)}"` : "";
         return `
@@ -2158,15 +2282,48 @@
               <div class="inventory-group-count">${group.items.length.toLocaleString("it-IT")} articoli</div>
             </div>
             <div class="inventory-list">
-              ${group.items.map(item => `
-                <div class="inventory-row">
-                  <div class="inventory-main">
-                    <div class="inventory-name">${escapeHtml(item.name)}</div>
-                    <div class="inventory-code">${escapeHtml(item.code)}</div>
+              ${group.items.map(item => {
+                const inputValue = getInventoryQtyInputValueForRender(item.code, item.qty);
+                const saving = isInventoryQtySaving(item.code);
+                const dirty = !saving && isInventoryQtyDirty(item.code, item.qty);
+                const editorClasses = [
+                  "inventory-qty-editor",
+                  dirty ? "is-dirty" : "",
+                  saving ? "is-saving" : ""
+                ].filter(Boolean).join(" ");
+                const disabled = saving || state.busy;
+                const currentQty = Math.max(0, safeInt(item.qty));
+                return `
+                  <div class="inventory-row">
+                    <div class="inventory-main">
+                      <div class="inventory-name">${escapeHtml(item.name)}</div>
+                      <div class="inventory-code">${escapeHtml(item.code)}</div>
+                    </div>
+                    <div class="inventory-qty-wrap">
+                      <div
+                        class="${editorClasses}"
+                        data-code="${escapeHtml(item.code)}"
+                        data-name="${escapeHtml(item.name)}"
+                        data-uom="${escapeHtml(item.uom)}"
+                        data-current="${currentQty}"
+                        title="Seleziona la quantità per rettificare"
+                      >
+                        <input
+                          class="inventory-qty-input"
+                          type="number"
+                          inputmode="numeric"
+                          min="0"
+                          step="1"
+                          value="${escapeHtml(inputValue)}"
+                          aria-label="Quantità ${escapeHtml(item.name)}"
+                          ${disabled ? "disabled" : ""}
+                        />
+                        <span class="inventory-qty-unit">${escapeHtml(item.uom)}</span>
+                      </div>
+                    </div>
                   </div>
-                  <div class="inventory-qty">${item.qty.toLocaleString("it-IT")} ${escapeHtml(item.uom)}</div>
-                </div>
-              `).join("")}
+                `;
+              }).join("")}
             </div>
           </div>
         `;
@@ -2360,6 +2517,7 @@
       state.loadCommand = "";
       state.loadSelectedCode = "";
       state.loadSuggestionsVisible = false;
+      clearInventoryQtyState();
       render();
     }
 
@@ -2374,6 +2532,7 @@
       state.productsError = "";
       state.movementsError = "";
       state.categoriesError = "";
+      clearInventoryQtyState();
 
       if (!(state.user && state.db)){
         render();
@@ -2399,6 +2558,7 @@
         state.movements = snap.docs.map(mapMovement);
         state.movementsReady = true;
         state.movementsError = "";
+        reconcilePendingInventoryQty(buildInventorySnapshot());
         syncLoadSelectionFromCommand();
         render();
       }, (err) => {
@@ -2451,14 +2611,318 @@
       }
     }
 
-    function getPositiveCereaRowsForCode(code){
+    function normalizeInventoryCodeKey(code){
+      return String(code || "").trim().toLowerCase();
+    }
+
+    function getInventoryQtyDraft(code){
+      const key = normalizeInventoryCodeKey(code);
+      if (!key) return "";
+      return state.inventoryQtyDrafts.has(key) ? String(state.inventoryQtyDrafts.get(key) ?? "") : "";
+    }
+
+    function hasInventoryQtyDraft(code){
+      const key = normalizeInventoryCodeKey(code);
+      return !!(key && state.inventoryQtyDrafts.has(key));
+    }
+
+    function setInventoryQtyDraft(code, value){
+      const key = normalizeInventoryCodeKey(code);
+      if (!key) return;
+      state.inventoryQtyDrafts.set(key, String(value ?? ""));
+    }
+
+    function clearInventoryQtyDraft(code){
+      const key = normalizeInventoryCodeKey(code);
+      if (!key) return;
+      state.inventoryQtyDrafts.delete(key);
+    }
+
+    function clearInventoryQtyState(){
+      state.inventoryPendingQty = null;
+      state.inventorySavingCode = "";
+      try{
+        state.inventoryQtyDrafts.clear();
+      }catch(_){
+        state.inventoryQtyDrafts = new Map();
+      }
+    }
+
+    function isInventoryQtySaving(code){
+      const key = normalizeInventoryCodeKey(code);
+      const pending = state.inventoryPendingQty;
+      if (!key) return false;
+      if (state.inventorySavingCode && state.inventorySavingCode === key) return true;
+      if (!(pending && pending.code === key)) return false;
+      return (Date.now() - safeInt(pending.startedAt)) <= INVENTORY_PENDING_MS;
+    }
+
+    function reconcilePendingInventoryQty(snapshot = null){
+      const pending = state.inventoryPendingQty;
+      if (!(pending && pending.code)) return;
+      const safeSnapshot = snapshot && snapshot.totalsByCode ? snapshot : buildInventorySnapshot();
+      const actual = safeInt(safeSnapshot?.totalsByCode?.get(pending.code)?.concamarise || 0);
+      const expired = (Date.now() - safeInt(pending.startedAt)) > INVENTORY_PENDING_MS;
+      if (actual === safeInt(pending.expectedQty) || expired){
+        state.inventoryPendingQty = null;
+      }
+    }
+
+    function getInventoryQtyInputValueForRender(code, actualQty){
+      const key = normalizeInventoryCodeKey(code);
+      if (key && state.inventoryQtyDrafts.has(key)){
+        return String(state.inventoryQtyDrafts.get(key) ?? "");
+      }
+      const pending = state.inventoryPendingQty;
+      if (key && pending && pending.code === key && (Date.now() - safeInt(pending.startedAt)) <= INVENTORY_PENDING_MS){
+        return String(Math.max(0, safeInt(pending.expectedQty)));
+      }
+      return String(Math.max(0, safeInt(actualQty)));
+    }
+
+    function isInventoryQtyDirty(code, actualQty){
+      if (!hasInventoryQtyDraft(code)) return false;
+      return safeInt(getInventoryQtyDraft(code)) !== safeInt(actualQty);
+    }
+
+    function syncInventoryQtyEditorState(input){
+      if (!input) return;
+      const editor = input.closest(".inventory-qty-editor");
+      if (!editor) return;
+      const current = safeInt(editor.dataset.current);
+      const next = safeInt(input.value);
+      editor.classList.toggle("is-dirty", next !== current);
+    }
+
+    function setInventoryQtyInputValue(input, nextQty){
+      if (!input) return;
+      const safeQty = Math.max(0, safeInt(nextQty));
+      input.value = String(safeQty);
+      const editor = input.closest(".inventory-qty-editor");
+      if (editor) editor.dataset.current = String(safeQty);
+      syncInventoryQtyEditorState(input);
+    }
+
+    function getPositiveRowsForCodeInWarehouse(code, warehouse){
       const snapshot = buildInventorySnapshot();
-      const low = String(code || "").trim().toLowerCase();
-      const rowsMap = snapshot.cereaRowsByCode.get(low);
+      const low = normalizeInventoryCodeKey(code);
+      const rowsMap = (warehouse === WAREHOUSE_CONCA)
+        ? snapshot.concamariseRowsByCode.get(low)
+        : snapshot.cereaRowsByCode.get(low);
       if (!rowsMap) return [];
       return Array.from(rowsMap.values())
         .filter(row => safeInt(row?.qty) > 0)
         .sort((a, b) => safeInt(b?.qty) - safeInt(a?.qty));
+    }
+
+    function getPositiveCereaRowsForCode(code){
+      return getPositiveRowsForCodeInWarehouse(code, WAREHOUSE_CEREA);
+    }
+
+    function getPositiveConcamariseRowsForCode(code){
+      return getPositiveRowsForCodeInWarehouse(code, WAREHOUSE_CONCA);
+    }
+
+    function getCurrentConcamariseQtyForCode(code){
+      const snapshot = buildInventorySnapshot();
+      const low = normalizeInventoryCodeKey(code);
+      return safeInt(snapshot?.totalsByCode?.get(low)?.concamarise || 0);
+    }
+
+    function makeInventoryAdjustError(code, message){
+      const err = new Error(message);
+      err.code = code;
+      return err;
+    }
+
+    function humanInventoryQtyErr(err){
+      const code = String(err?.code || "").trim().toLowerCase();
+      if (code === "inventory/not-auth") return "Accedi con Google per salvare la rettifica.";
+      if (code === "inventory/no-code") return "Articolo non valido.";
+      if (code === "inventory/no-stock-rows") return "Righe inventario Concamarise non trovate.";
+      if (code === "inventory/insufficient-stock") return "Disponibilità Concamarise insufficiente per la rettifica.";
+      return humanAuthErr(err);
+    }
+
+    async function adjustConcamariseInventoryAbsoluteByCode({ code, name, uom, newQty }){
+      if (!(state.user && state.db)){
+        throw makeInventoryAdjustError("inventory/not-auth", "Utente non autenticato.");
+      }
+
+      const productCode = String(code || "").trim();
+      if (!productCode){
+        throw makeInventoryAdjustError("inventory/no-code", "Codice articolo mancante.");
+      }
+
+      const normalizedUom = normalizeUom(uom || "") || "pz";
+      const desiredQty = Math.max(0, safeInt(newQty));
+      const currentQty = getCurrentConcamariseQtyForCode(productCode);
+      const delta = desiredQty - currentQty;
+      if (!delta){
+        return { oldQty: currentQty, newQty: desiredQty, uom: normalizedUom };
+      }
+
+      const positiveConcaRows = getPositiveConcamariseRowsForCode(productCode);
+      const fallbackCereaRow = getPositiveCereaRowsForCode(productCode)[0] || null;
+      const preferredRow = positiveConcaRows[0] || fallbackCereaRow || null;
+      if (!preferredRow){
+        throw makeInventoryAdjustError("inventory/no-stock-rows", "Righe inventario Concamarise non trovate.");
+      }
+
+      const date = todayYYYYMMDD();
+      const docNum = makeDocNum();
+      const userLabel = state.user.displayName || state.user.email || state.user.uid || "";
+      const userEmail = state.user.email || "";
+      const userUid = state.user.uid || "";
+      const movementCollection = orgCol("inventoryMovements");
+      const batch = writeBatch(state.db);
+      const noteText = `${RECTIFY_NOTE}: da ${currentQty} ${normalizedUom} a ${desiredQty} ${normalizedUom}`;
+      const rawText = "Rettifica manuale dal pannello Inventario attuale Concamarise";
+
+      function makeBasePayload(customer, item, qty, type){
+        return {
+          customer: String(customer || "").trim(),
+          code: productCode,
+          item: cleanSpaces(item || name || productCode) || productCode,
+          uom: normalizedUom,
+          qtyRaw: `${qty} ${normalizedUom}`.trim(),
+          qty,
+          date,
+          note: noteText,
+          source: RECTIFY_SOURCE,
+          rawText,
+          docType: RECTIFY_DOC_TYPE,
+          docNum,
+          docDateRaw: date,
+          createdAt: serverTimestamp(),
+          createdBy: userLabel,
+          createdByName: state.user.displayName || "",
+          createdByEmail: userEmail,
+          createdByUid: userUid,
+          type,
+          warehouse: WAREHOUSE_CONCA
+        };
+      }
+
+      if (delta > 0){
+        const ref = doc(movementCollection);
+        batch.set(ref, makeBasePayload(
+          preferredRow.customer || fallbackCereaRow?.customer || "",
+          preferredRow.item || fallbackCereaRow?.item || name || productCode,
+          Math.abs(delta),
+          "IN"
+        ));
+      }else{
+        let remaining = Math.abs(delta);
+        const available = positiveConcaRows.reduce((sum, row) => sum + safeInt(row?.qty), 0);
+        if (available < remaining){
+          throw makeInventoryAdjustError("inventory/insufficient-stock", "Disponibilità Concamarise insufficiente.");
+        }
+
+        for (const row of positiveConcaRows){
+          if (remaining <= 0) break;
+          const take = Math.min(safeInt(row.qty), remaining);
+          if (!take) continue;
+          const ref = doc(movementCollection);
+          batch.set(ref, makeBasePayload(
+            row.customer || preferredRow.customer || fallbackCereaRow?.customer || "",
+            row.item || preferredRow.item || fallbackCereaRow?.item || name || productCode,
+            take,
+            "OUT"
+          ));
+          remaining -= take;
+        }
+
+        if (remaining > 0){
+          throw makeInventoryAdjustError("inventory/insufficient-stock", "Disponibilità Concamarise insufficiente.");
+        }
+      }
+
+      await batch.commit();
+      return { oldQty: currentQty, newQty: desiredQty, uom: normalizedUom };
+    }
+
+    function buildInventoryAdjustConfirmMessage({ name, code, uom, displayedQty, liveQty, nextQty }){
+      const lines = [];
+      if (liveQty !== displayedQty){
+        lines.push("La quantità è cambiata nel frattempo.");
+        lines.push("");
+      }
+      lines.push(String(name || code || "Articolo").trim() || "Articolo");
+      if (code) lines.push(`Codice: ${code}`);
+      lines.push("");
+      lines.push(`Quantità attuale: ${liveQty.toLocaleString("it-IT")} ${uom}`);
+      lines.push(`Nuova quantità: ${nextQty.toLocaleString("it-IT")} ${uom}`);
+      lines.push("");
+      lines.push("Confermi la rettifica a Concamarise?");
+      return lines.join("\n");
+    }
+
+    async function commitInventoryQtyInput(input){
+      if (!input) return;
+      const editor = input.closest(".inventory-qty-editor");
+      if (!editor) return;
+      const code = String(editor.dataset.code || "").trim();
+      if (!code) return;
+
+      const name = String(editor.dataset.name || code).trim() || code;
+      const uom = normalizeUom(editor.dataset.uom || "") || "pz";
+      const displayedQty = safeInt(editor.dataset.current);
+      const liveQty = getCurrentConcamariseQtyForCode(code);
+      let nextQty = safeInt(input.value);
+      if (!Number.isFinite(nextQty) || nextQty < 0) nextQty = 0;
+
+      if (nextQty === liveQty){
+        clearInventoryQtyDraft(code);
+        setInventoryQtyInputValue(input, liveQty);
+        return;
+      }
+
+      const confirmed = window.confirm(buildInventoryAdjustConfirmMessage({
+        name,
+        code,
+        uom,
+        displayedQty,
+        liveQty,
+        nextQty
+      }));
+
+      if (!confirmed){
+        clearInventoryQtyDraft(code);
+        setInventoryQtyInputValue(input, liveQty);
+        return;
+      }
+
+      state.busy = true;
+      state.inventorySavingCode = normalizeInventoryCodeKey(code);
+      render();
+
+      try{
+        const result = await adjustConcamariseInventoryAbsoluteByCode({
+          code,
+          name,
+          uom,
+          newQty: nextQty
+        });
+
+        clearInventoryQtyDraft(code);
+        state.inventoryPendingQty = {
+          code: normalizeInventoryCodeKey(code),
+          expectedQty: result.newQty,
+          startedAt: Date.now()
+        };
+
+        showToast(`Quantità aggiornata (${result.oldQty.toLocaleString("it-IT")}→${result.newQty.toLocaleString("it-IT")}) ${result.uom}`, "ok");
+      }catch(err){
+        console.error("commitInventoryQtyInput failed", err);
+        clearInventoryQtyDraft(code);
+        state.inventoryPendingQty = null;
+        showToast(humanInventoryQtyErr(err), "err");
+      }finally{
+        state.busy = false;
+        state.inventorySavingCode = "";
+        render();
+      }
     }
 
     async function transferNow(){
@@ -2611,6 +3075,67 @@
       armedSuggestionCode = "";
       armedBackdropClose = false;
     }
+
+    els.inventoryCategories.addEventListener("click", (event) => {
+      const editor = event.target?.closest?.(".inventory-qty-editor");
+      if (!editor) return;
+      const input = editor.querySelector(".inventory-qty-input");
+      if (!input || input.disabled) return;
+      if (event.target !== input){
+        event.preventDefault();
+        try{
+          input.focus({ preventScroll: true });
+        }catch(_){
+          try{ input.focus(); }catch(__){ }
+        }
+        requestAnimationFrame(() => {
+          try{ input.select(); }catch(_){ }
+        });
+      }
+    });
+
+    els.inventoryCategories.addEventListener("focusin", (event) => {
+      const input = event.target?.matches?.(".inventory-qty-input") ? event.target : null;
+      if (!input) return;
+      requestAnimationFrame(() => {
+        try{ input.select(); }catch(_){ }
+      });
+    });
+
+    els.inventoryCategories.addEventListener("input", (event) => {
+      const input = event.target?.matches?.(".inventory-qty-input") ? event.target : null;
+      if (!input) return;
+      const editor = input.closest(".inventory-qty-editor");
+      const code = String(editor?.dataset.code || "").trim();
+      if (!code) return;
+      setInventoryQtyDraft(code, input.value);
+      syncInventoryQtyEditorState(input);
+    });
+
+    els.inventoryCategories.addEventListener("keydown", (event) => {
+      const input = event.target?.matches?.(".inventory-qty-input") ? event.target : null;
+      if (!input) return;
+      if (event.key === "Enter"){
+        event.preventDefault();
+        try{ input.blur(); }catch(_){ }
+        return;
+      }
+      if (event.key === "Escape"){
+        event.preventDefault();
+        const editor = input.closest(".inventory-qty-editor");
+        const code = String(editor?.dataset.code || "").trim();
+        const current = safeInt(editor?.dataset.current);
+        clearInventoryQtyDraft(code);
+        setInventoryQtyInputValue(input, current);
+        try{ input.blur(); }catch(_){ }
+      }
+    });
+
+    els.inventoryCategories.addEventListener("change", (event) => {
+      const input = event.target?.matches?.(".inventory-qty-input") ? event.target : null;
+      if (!input) return;
+      commitInventoryQtyInput(input);
+    });
 
     els.btnLogin.addEventListener("click", signIn);
 
