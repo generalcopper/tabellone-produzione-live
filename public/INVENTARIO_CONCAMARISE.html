@@ -1004,6 +1004,127 @@
         .replace(/\s+/g, " ");
     }
 
+    function searchTokens(value){
+      return normalizeSearch(value).split(" ").filter(Boolean);
+    }
+
+    function escapeRegExp(value){
+      return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    }
+
+    function levenshteinDistance(a, b, maxDistance = 2){
+      const s = String(a || "");
+      const t = String(b || "");
+      const m = s.length;
+      const n = t.length;
+      if (!m) return n;
+      if (!n) return m;
+      if (Math.abs(m - n) > maxDistance) return maxDistance + 1;
+
+      let prev = Array.from({ length: n + 1 }, (_, i) => i);
+      for (let i = 1; i <= m; i += 1){
+        const curr = [i];
+        let rowMin = curr[0];
+        const sc = s.charCodeAt(i - 1);
+        for (let j = 1; j <= n; j += 1){
+          const cost = sc === t.charCodeAt(j - 1) ? 0 : 1;
+          const value = Math.min(
+            prev[j] + 1,
+            curr[j - 1] + 1,
+            prev[j - 1] + cost
+          );
+          curr[j] = value;
+          if (value < rowMin) rowMin = value;
+        }
+        if (rowMin > maxDistance) return maxDistance + 1;
+        prev = curr;
+      }
+      return prev[n];
+    }
+
+    function normalizeUnitForDisplay(value){
+      const unit = normalizeUom(value);
+      if (!unit) return "";
+      if (unit === "pz") return "pz";
+      if (unit === "kg") return "kg";
+      if (unit === "ton") return "ton";
+      const low = unit.toLowerCase();
+      if (["l", "lt"].includes(low)) return "L";
+      if (["ml", "g"].includes(low)) return low;
+      return unit;
+    }
+
+    function prettifyProductName(value, code = ""){
+      let text = safeDecodeUri(String(value || ""));
+      if (!text) return "";
+
+      if (code){
+        const codeRx = escapeRegExp(String(code).trim());
+        if (codeRx){
+          text = text.replace(new RegExp(`(^|[\\s_\\-\\/])${codeRx}(?=$|[\\s_\\-\\/])`, "ig"), " ");
+        }
+      }
+
+      text = text
+        .replace(/[_]+/g, " ")
+        .replace(/[\\/]+/g, " ")
+        .replace(/\s*[-–—]+\s*/g, " ")
+        .replace(/\b(concamarise|conca|cerea)\b/gi, " ")
+        .replace(/\b(\d+)\s*(lt|l|ml|kg|gr|g|pz|pcs|pc)\b/gi, (_, qty, unit) => `${qty} ${normalizeUnitForDisplay(unit) || String(unit).toLowerCase()}`)
+        .replace(/\bq\.?\s*ta\b/gi, " ")
+        .replace(/\bqt[aà]\b/gi, " ")
+        .replace(/\bquantit[aà]\b/gi, " ");
+
+      text = cleanSpaces(text);
+      if (!text) return String(code || "").trim();
+
+      const minorWords = new Set(["di", "da", "de", "del", "della", "dello", "degli", "dei", "e", "ed", "con", "per", "in", "su", "a", "al", "alla", "alle", "agli"]);
+      const formatted = text
+        .split(" ")
+        .filter(Boolean)
+        .map((part, index) => {
+          if (/^\d+$/.test(part)) return part;
+          if (/^\d+[A-Za-z]+$/.test(part)){
+            const match = part.match(/^(\d+)([A-Za-z]+)$/);
+            if (match) return `${match[1]} ${normalizeUnitForDisplay(match[2]) || match[2].toLowerCase()}`;
+          }
+          if (/^[A-Za-z0-9]+$/.test(part) && /[A-Za-z]/.test(part) && /\d/.test(part)) return part.toUpperCase();
+
+          const low = part.toLowerCase();
+          const normalizedUnit = normalizeUnitForDisplay(low);
+          if (normalizedUnit) return normalizedUnit;
+          if (minorWords.has(low) && index > 0) return low;
+          if (part === part.toUpperCase() || part === part.toLowerCase()){
+            return low.charAt(0).toUpperCase() + low.slice(1);
+          }
+          return part;
+        })
+        .join(" ");
+
+      return cleanSpaces(formatted.replace(/\s{2,}/g, " "));
+    }
+
+    function buildProductSearchFields(product){
+      return {
+        code: normalizeSearch(product?.code || ""),
+        name: normalizeSearch(product?.name || ""),
+        alias: normalizeSearch(product?.alias || ""),
+        category: normalizeSearch(product?.categoryName || "")
+      };
+    }
+
+    function tokenWordScore(token, word){
+      if (!token || !word) return 0;
+      if (token === word) return 120;
+      if (word.startsWith(token)) return 102;
+      if (token.length >= 4 && word.includes(token)) return 82;
+      if (token.length >= 4 && word.length >= 4){
+        const distance = levenshteinDistance(token, word, 1);
+        if (distance <= 1) return 74;
+      }
+      return 0;
+    }
+
     function normalizeCategoryKey(value){
       return String(value || "").trim().toLowerCase();
     }
@@ -1108,11 +1229,14 @@
     }
 
     function getProductDisplayName(product, fallbackName){
-      const alias = String(product?.alias || product?.aliasName || "").trim();
+      const code = productCodeFromData(product);
+      const alias = prettifyProductName(product?.alias || product?.aliasName || "", code);
       if (alias) return alias;
-      const name = String(product?.name || "").trim();
+      const name = prettifyProductName(product?.name || "", code);
       if (name) return name;
-      return String(fallbackName || "").trim();
+      const fallback = prettifyProductName(fallbackName || "", code);
+      if (fallback) return fallback;
+      return code;
     }
 
     function getProductUom(product){
@@ -1266,6 +1390,21 @@
       return true;
     }
 
+    function isStrictlyLoadableForConcamarise(product){
+      if (!product || typeof product !== "object") return false;
+
+      if (product.warehouses !== undefined && product.warehouses !== null){
+        const list = normalizeWarehousesList(product.warehouses);
+        return list.includes(WAREHOUSE_CONCA);
+      }
+
+      const direct = (product.concamarise !== undefined) ? product.concamarise : product.conca;
+      if (direct === true || direct === 1 || direct === "1") return true;
+      if (direct === false || direct === 0 || direct === "0") return false;
+
+      return false;
+    }
+
     function buildLoadableProducts(){
       const snapshot = buildInventorySnapshot();
       const categoryMap = buildCategoryMap();
@@ -1274,7 +1413,7 @@
 
       for (const product of (state.products || [])){
         if (!isProductActive(product)) continue;
-        if (!isExplicitlyEnabledForConcamarise(product)) continue;
+        if (!isStrictlyLoadableForConcamarise(product)) continue;
 
         const code = productCodeFromData(product);
         if (!code) continue;
@@ -1386,7 +1525,7 @@
         if (String(mv.type || "").toUpperCase() !== "IN") continue;
 
         const code = String(mv.code || "").trim();
-        const item = cleanSpaces(mv.item || code);
+        const item = prettifyProductName(mv.item || code, code);
         const qty = safeInt(mv.qty);
         if (!code || !item || qty <= 0) continue;
 
@@ -1505,27 +1644,86 @@
       const q = normalizeSearch(query);
       if (!q) return 1;
 
-      const code = normalizeSearch(product?.code || "");
-      const name = normalizeSearch(product?.name || "");
-      const alias = normalizeSearch(product?.alias || "");
-      const category = normalizeSearch(product?.categoryName || "");
-      const hay = [name, alias, code, category].filter(Boolean).join(" ");
+      const fields = buildProductSearchFields(product);
+      const phrases = [fields.name, fields.alias, fields.code, fields.category].filter(Boolean);
+      const hay = phrases.join(" ");
+      const words = Array.from(new Set(hay.split(" ").filter(Boolean)));
+      const tokens = searchTokens(q);
+      const textTokens = tokens.filter(token => !/^\d+$/.test(token));
+      const numTokens = tokens.filter(token => /^\d+$/.test(token));
+      if (!tokens.length) return 1;
 
-      if (code === q) return 2200;
-      if (name === q || alias === q) return 2100;
-      if (name.startsWith(q) || alias.startsWith(q)) return 1800;
-      if (code.startsWith(q)) return 1700;
+      let score = 0;
+      let matchedText = 0;
+      let matchedNum = 0;
 
-      const tokens = q.split(" ").filter(Boolean);
-      const allIncluded = tokens.length && tokens.every(token => hay.includes(token));
-      if (allIncluded) return 1500 + tokens.length;
-      if (hay.includes(q)) return 1200;
+      if (fields.code === q) return 2800;
+      if (fields.name === q || fields.alias === q) return 2700;
+      if (fields.name.startsWith(q) || fields.alias.startsWith(q)) score += 900;
+      else if (fields.code.startsWith(q)) score += 760;
+      else if (fields.name.includes(q) || fields.alias.includes(q)) score += 560;
+      else if (fields.code.includes(q)) score += 420;
 
-      let partial = 0;
-      for (const token of tokens){
-        if (hay.includes(token)) partial += 1;
+      const importantTextTokens = textTokens.filter(token => token.length >= 3);
+      const relaxedTextTokens = textTokens.filter(token => token.length < 3);
+
+      for (const token of importantTextTokens){
+        let best = 0;
+        for (const word of words){
+          const current = tokenWordScore(token, word);
+          if (current > best) best = current;
+          if (best >= 120) break;
+        }
+        if (best > 0){
+          matchedText += 1;
+          score += best;
+        }else{
+          score -= 70;
+        }
       }
-      return partial ? (800 + partial) : -1;
+
+      for (const token of relaxedTextTokens){
+        const found = words.some(word => word === token || word.startsWith(token));
+        if (found){
+          matchedText += 1;
+          score += 48;
+        }else{
+          score -= 18;
+        }
+      }
+
+      for (const token of numTokens){
+        const found = words.some(word => word === token) || hay.includes(` ${token} `) || hay.startsWith(`${token} `) || hay.endsWith(` ${token}`) || hay === token;
+        if (found){
+          matchedNum += 1;
+          score += 90;
+        }else{
+          score -= 56;
+        }
+      }
+
+      if (textTokens.length && matchedText === 0) return -1;
+      if (tokens.length >= 3 && (matchedText + matchedNum) < 2) return -1;
+      if (numTokens.length && textTokens.length && matchedText === 0) return -1;
+
+      const textCoverage = textTokens.length ? (matchedText / textTokens.length) : 1;
+      const numCoverage = numTokens.length ? (matchedNum / numTokens.length) : 1;
+
+      if (textCoverage === 1 && numCoverage === 1) score += 280;
+      else if (textCoverage >= 0.75) score += 160;
+      else if (textCoverage >= 0.5) score += 70;
+
+      const orderedPhrase = textTokens.join(" ");
+      if (orderedPhrase){
+        if (fields.name.includes(orderedPhrase) || fields.alias.includes(orderedPhrase)) score += 180;
+        else {
+          const compactPhrase = orderedPhrase.replace(/\s+/g, "");
+          const compactName = `${fields.name} ${fields.alias}`.replace(/\s+/g, "");
+          if (compactPhrase && compactName.includes(compactPhrase)) score += 120;
+        }
+      }
+
+      return score > 0 ? score : -1;
     }
 
     function getLoadCandidates(query, limit = SUGGESTION_LIMIT){
@@ -1533,7 +1731,8 @@
       const q = normalizeSearch(query);
       if (!q) return all.slice(0, limit);
 
-      return all
+      const tokens = searchTokens(q);
+      const scored = all
         .map(product => ({ product, score: scoreLoadableProduct(product, q) }))
         .filter(entry => entry.score > 0)
         .sort((a, b) => {
@@ -1541,7 +1740,14 @@
           const an = String(a.product?.name || "").localeCompare(String(b.product?.name || ""), "it", { sensitivity: "base" });
           if (an !== 0) return an;
           return String(a.product?.code || "").localeCompare(String(b.product?.code || ""), "it", { sensitivity: "base" });
-        })
+        });
+
+      if (!scored.length) return [];
+
+      const topScore = scored[0].score;
+      const floor = Math.max(110, topScore - (tokens.length >= 3 ? 260 : (tokens.length === 2 ? 220 : 320)));
+      return scored
+        .filter(entry => entry.score >= floor)
         .slice(0, limit)
         .map(entry => entry.product);
     }
