@@ -2607,7 +2607,8 @@
     els.btnConfirm.addEventListener("click", transferNow);
 
     els.loadCommand.addEventListener("input", (event) => {
-      state.loadCommand = String(event.target?.value || "");
+      const rawValue = String(event.target?.value || "");
+      state.loadCommand = rawValue;
       state.loadSuggestionsVisible = true;
       syncLoadSelectionFromCommand();
       renderLoadModal();
@@ -2631,19 +2632,59 @@
       if (event.key === "Escape"){
         event.preventDefault();
         closeModal();
+        return;
+      }
+
+      if (event.key === "Enter"){
+        const validation = getLoadValidation();
+        if (validation.canSubmit){
+          event.preventDefault();
+          transferNow();
+          return;
+        }
+
+        const parsed = getEffectiveParsedCommand(state.loadCommand);
+        const query = parsed?.productText || parsed?.raw || "";
+        const first = getLoadCandidates(query, 1)[0];
+        if (first){
+          event.preventDefault();
+          applyLoadSuggestionByCode(first.code);
+        }
       }
     });
 
     function applyLoadSuggestionByCode(code){
       const product = getLoadableProductByCode(code);
       if (!product) return false;
+
       const parsed = getEffectiveParsedCommand(state.loadCommand);
-      const qtyTail = parsed.hasQty ? ` ${parsed.qty}` : " ";
+      const preservedQty = parsed.hasQty && safeInt(parsed.qty) > 0 ? String(safeInt(parsed.qty)) : "";
+      const nextValue = preservedQty ? `${product.name} ${preservedQty}` : `${product.name} `;
+
       state.loadSelectedCode = product.code;
-      state.loadCommand = `${product.name}${qtyTail}`;
+      state.loadCommand = nextValue;
       state.loadSuggestionsVisible = true;
+
+      const input = els.loadCommand;
+      if (input){
+        input.value = nextValue;
+      }
+
       renderLoadModal();
-      focusCommand(false);
+
+      requestAnimationFrame(() => {
+        try{
+          if (document.activeElement !== input){
+            input.focus({ preventScroll: true });
+          }
+        }catch(_){
+          try{ input.focus(); }catch(__){ }
+        }
+
+        const pos = nextValue.length;
+        try{ input.setSelectionRange(pos, pos); }catch(_){ }
+      });
+
       return true;
     }
 
