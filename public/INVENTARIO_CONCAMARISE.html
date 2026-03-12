@@ -456,16 +456,18 @@
 
     .command-control{
       position:relative;
+      display:grid;
+      gap:12px;
     }
 
     .command-control input{
       width:100%;
       appearance:none;
       border:2px solid var(--line);
-      border-radius:24px;
-      min-height:92px;
-      padding:0 24px;
-      font-size:22px;
+      border-radius:20px;
+      min-height:70px;
+      padding:0 22px;
+      font-size:20px;
       font-weight:900;
       letter-spacing:-.018em;
       color:var(--ink);
@@ -521,21 +523,18 @@
     .command-hint.is-muted{ color:var(--muted); }
 
     .suggestions{
-      position:absolute;
-      left:0;
-      right:0;
-      top:calc(100% + 10px);
-      z-index:20;
+      position:static;
+      z-index:1;
       display:none;
-      gap:8px;
-      max-height:320px;
+      gap:10px;
+      max-height:290px;
       overflow:auto;
       -webkit-overflow-scrolling:touch;
-      padding:10px;
-      border-radius:20px;
-      background:#fff;
-      border:1px solid rgba(15,23,42,.10);
-      box-shadow:0 24px 48px rgba(15,23,42,.14);
+      padding:2px 2px 4px;
+      border-radius:0;
+      background:transparent;
+      border:0;
+      box-shadow:none;
       touch-action:pan-y;
     }
 
@@ -547,8 +546,8 @@
     .suggestion{
       width:100%;
       text-align:left;
-      border:1px solid rgba(15,23,42,.08);
-      background:#fff;
+      border:1px solid rgba(220,38,38,.22);
+      background:#fff7f7;
       border-radius:18px;
       padding:14px 16px;
       min-height:66px;
@@ -558,17 +557,33 @@
       transition:border-color .12s ease, background .12s ease, box-shadow .12s ease;
     }
 
+    .suggestion.is-leading{
+      border-width:2px;
+      box-shadow:0 10px 24px rgba(220,38,38,.08);
+    }
+
+    .suggestion.is-good{
+      background:#f6fff8;
+      border-color:rgba(22,163,74,.32);
+      box-shadow:0 10px 24px rgba(22,163,74,.10);
+    }
+
+    .suggestion.is-empty-state{
+      min-height:58px;
+    }
+
     .suggestion-title{
       font-size:15px;
       font-weight:900;
-      color:var(--ink);
+      color:inherit;
       overflow-wrap:anywhere;
     }
 
     .suggestion-sub{
       font-size:12px;
       font-weight:800;
-      color:var(--muted);
+      color:inherit;
+      opacity:.86;
       line-height:1.45;
       overflow-wrap:anywhere;
     }
@@ -652,16 +667,17 @@
     }
 
     .modal-card{
-      width:min(680px, 100%);
-      max-height:min(88vh, 900px);
+      width:min(760px, 100%);
+      height:min(76vh, 680px);
       overflow:auto;
       background:#fff;
       border:1px solid rgba(255,255,255,.9);
       border-radius:24px;
       box-shadow:0 24px 64px rgba(15,23,42,.18);
-      padding:20px;
+      padding:22px;
       display:grid;
       gap:14px;
+      align-content:start;
     }
 
     .modal-card h2{
@@ -675,6 +691,7 @@
       display:grid;
       grid-template-columns:1fr 1fr;
       gap:10px;
+      margin-top:auto;
     }
 
     .empty{
@@ -769,6 +786,22 @@
         padding-top:2px;
       }
 
+      .modal-card{
+        height:min(84vh, 720px);
+        padding:18px;
+      }
+
+      .command-control input{
+        min-height:64px;
+        font-size:18px;
+        border-radius:18px;
+        padding:0 18px;
+      }
+
+      .suggestions{
+        max-height:240px;
+      }
+
       .modal-actions{
         grid-template-columns:1fr;
       }
@@ -850,7 +883,7 @@
           <input
             id="loadCommand"
             type="text"
-            placeholder="Cerca articolo e quantità finale. Es. flacone 1 lt 12"
+            placeholder="Scrivi articolo e quantità finale"
             autocomplete="off"
             autocapitalize="off"
             spellcheck="false"
@@ -910,7 +943,7 @@
     const NOTE = "Carico inventario Concamarise da Cerea";
     const DOC_TYPE = "TRASFERIMENTO";
     const TZ = "Europe/Rome";
-    const SUGGESTION_LIMIT = 8;
+    const SUGGESTION_LIMIT = 80;
 
     const els = {
       btnLogin: document.getElementById("btnLogin"),
@@ -1752,7 +1785,6 @@
       const q = normalizeSearch(query);
       if (!q) return [];
 
-      const tokens = searchTokens(q);
       const scored = all
         .map(product => ({ product, score: scoreLoadableProduct(product, q) }))
         .filter(entry => entry.score > 0)
@@ -1764,13 +1796,10 @@
         });
 
       if (!scored.length) return [];
-      if (raw) return scored.slice(0, limit);
-
-      const topScore = scored[0].score;
-      const floor = Math.max(110, topScore - (tokens.length >= 3 ? 260 : (tokens.length === 2 ? 220 : 320)));
-      return scored
-        .filter(entry => entry.score >= floor)
-        .slice(0, limit);
+      const max = Number.isFinite(limit) && limit > 0 ? limit : scored.length;
+      const trimmed = scored.slice(0, max);
+      if (raw) return trimmed;
+      return trimmed;
     }
 
     function getLoadCandidates(query, limit = SUGGESTION_LIMIT){
@@ -1966,7 +1995,9 @@
       const validation = getLoadValidation();
       const input = els.loadCommand;
       const typedQuery = normalizeSearch(validation.parts.productText || validation.parts.raw);
-      const candidates = typedQuery ? getLoadCandidates(validation.parts.productText || validation.parts.raw, SUGGESTION_LIMIT) : [];
+      const candidateEntries = typedQuery ? getLoadCandidateEntries(validation.parts.productText || validation.parts.raw, SUGGESTION_LIMIT, true) : [];
+      const candidates = candidateEntries.map(entry => entry.product);
+      const activeCode = String(validation.product?.codeLower || validation.product?.code || "").toLowerCase();
 
       if (document.activeElement !== input && input.value !== state.loadCommand){
         input.value = state.loadCommand;
@@ -1977,7 +2008,6 @@
       let controlState = "is-empty";
       if (!typedQuery) controlState = "is-empty";
       else if (validation.canSubmit) controlState = "is-valid";
-      else if ((validation.productValid && validation.product) || candidates.length) controlState = "is-pending";
       else controlState = "is-invalid";
       if (!ready || loadableCount <= 0) controlState = "is-invalid";
       els.commandWrap.className = `command-control ${controlState}`;
@@ -1986,77 +2016,66 @@
       els.validationCard.hidden = true;
       els.validationCard.className = "validation-card is-neutral";
       els.validationCard.innerHTML = "";
+      els.loadSuggestions.className = "suggestions";
+      els.loadSuggestions.innerHTML = "";
 
       if (!ready){
         els.btnConfirm.disabled = true;
         els.btnConfirm.textContent = state.busy ? "SALVO…" : "CARICA";
-        els.loadSuggestions.className = "suggestions";
-        els.loadSuggestions.innerHTML = "";
         return;
       }
 
       if (loadableCount <= 0){
-        els.validationCard.hidden = false;
-        els.validationCard.className = "validation-card is-invalid";
-        els.validationCard.innerHTML = '<div class="validation-title">Nessun articolo caricabile</div>';
+        els.loadSuggestions.className = "suggestions is-open";
+        els.loadSuggestions.innerHTML = `
+          <div class="suggestion is-empty-state">
+            <div class="suggestion-title">Nessun articolo caricabile</div>
+          </div>
+        `;
         els.btnConfirm.disabled = true;
         els.btnConfirm.textContent = state.busy ? "SALVO…" : "CARICA";
-        els.loadSuggestions.className = "suggestions";
-        els.loadSuggestions.innerHTML = "";
         return;
       }
 
       if (!typedQuery){
         els.btnConfirm.disabled = true;
         els.btnConfirm.textContent = state.busy ? "SALVO…" : "CARICA";
-        els.loadSuggestions.className = "suggestions";
-        els.loadSuggestions.innerHTML = "";
         return;
       }
 
-      if (validation.canSubmit && validation.product){
-        els.validationCard.hidden = false;
-        els.validationCard.className = "validation-card is-valid";
-        els.validationCard.innerHTML = `
-          <div class="validation-title">${escapeHtml(validation.product.name)}</div>
-          <div class="validation-meta">
-            ${escapeHtml(validation.product.code)} · ${escapeHtml(validation.product.categoryName)}<br>
-            Quantità: <span class="validation-strong">${validation.qty.toLocaleString("it-IT")} ${escapeHtml(validation.product.uom)}</span> ·
-            Disponibile Cerea: <span class="validation-strong">${validation.product.cereaQty.toLocaleString("it-IT")} ${escapeHtml(validation.product.uom)}</span>
-          </div>
-        `;
-        els.loadSuggestions.className = "suggestions";
-        els.loadSuggestions.innerHTML = "";
-      }else if (validation.productValid && validation.product){
-        els.validationCard.hidden = false;
-        if (validation.reasons.some(reason => String(reason || "").toLowerCase().includes("superiore al disponibile"))){
-          els.validationCard.className = "validation-card is-invalid";
-        }else{
-          els.validationCard.className = "validation-card is-neutral";
-        }
-        els.validationCard.innerHTML = `
-          <div class="validation-title">${escapeHtml(validation.product.name)}</div>
-          <div class="validation-meta">${escapeHtml(validation.product.code)} · ${escapeHtml(validation.product.categoryName)} · Cerea ${validation.product.cereaQty.toLocaleString("it-IT")} ${escapeHtml(validation.product.uom)}</div>
-        `;
-        els.loadSuggestions.className = "suggestions";
-        els.loadSuggestions.innerHTML = "";
-      }else if (candidates.length){
+      if (!candidates.length){
         els.loadSuggestions.className = "suggestions is-open";
-        els.loadSuggestions.innerHTML = candidates.map(product => `
-          <div class="suggestion" role="option" aria-disabled="true">
-            <div class="suggestion-title">${escapeHtml(product.name)}</div>
-            <div class="suggestion-sub">
-              ${escapeHtml(product.code)} · ${escapeHtml(product.categoryName)} · Cerea ${product.cereaQty.toLocaleString("it-IT")} ${escapeHtml(product.uom)}
-            </div>
+        els.loadSuggestions.innerHTML = `
+          <div class="suggestion is-empty-state">
+            <div class="suggestion-title">Nessun articolo trovato</div>
           </div>
-        `).join("");
-      }else{
-        els.validationCard.hidden = false;
-        els.validationCard.className = "validation-card is-invalid";
-        els.validationCard.innerHTML = '<div class="validation-title">Nessun articolo trovato</div>';
-        els.loadSuggestions.className = "suggestions";
-        els.loadSuggestions.innerHTML = "";
+        `;
+        els.btnConfirm.disabled = true;
+        els.btnConfirm.textContent = state.busy ? "SALVO…" : "CARICA";
+        return;
       }
+
+      els.loadSuggestions.className = "suggestions is-open";
+      els.loadSuggestions.innerHTML = candidates.map((product, index) => {
+        const productCode = String(product.codeLower || product.code || "").toLowerCase();
+        const isActive = !!activeCode && productCode === activeCode;
+        const isValid = validation.canSubmit && isActive;
+        const classes = ["suggestion"];
+        if (isValid) classes.push("is-good");
+        else if (index === 0) classes.push("is-leading");
+
+        const metaParts = [product.code, product.categoryName, `Cerea ${product.cereaQty.toLocaleString("it-IT")} ${product.uom}`].filter(Boolean);
+        if (isValid){
+          metaParts.push(`Carico ${validation.qty.toLocaleString("it-IT")} ${product.uom}`);
+        }
+
+        return `
+          <div class="${classes.join(" ")}" role="option" aria-disabled="true">
+            <div class="suggestion-title">${escapeHtml(product.name)}</div>
+            <div class="suggestion-sub">${metaParts.map(part => escapeHtml(part)).join(" · ")}</div>
+          </div>
+        `;
+      }).join("");
 
       els.btnConfirm.disabled = !(validation.canSubmit && state.user && state.db && !state.busy);
       els.btnConfirm.textContent = state.busy ? "SALVO…" : "CARICA";
