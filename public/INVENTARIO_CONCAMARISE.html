@@ -1506,7 +1506,8 @@
       return false;
     }
 
-    function buildLoadableProducts(){
+    function buildLoadableProducts(options = {}){
+      const includeZeroCerea = options?.includeZeroCerea !== false;
       const snapshot = buildInventorySnapshot();
       const categoryMap = buildCategoryMap();
       const seen = new Set();
@@ -1524,7 +1525,7 @@
 
         const totals = snapshot.totalsByCode.get(low);
         const cereaQty = safeInt(totals?.cerea || 0);
-        if (cereaQty <= 0) continue;
+        if (!includeZeroCerea && cereaQty <= 0) continue;
 
         const concaQty = safeInt(totals?.concamarise || 0);
         const name = getProductDisplayName(product, totals?.item || code);
@@ -1952,9 +1953,9 @@
         reasons.push("Aggiungi una quantità valida alla fine del testo.");
       }
 
+      const stockAvailable = !!(product && qtyValid && qty <= safeInt(product.cereaQty));
       if (product && qtyValid && qty > safeInt(product.cereaQty)){
-        qtyValid = false;
-        reasons.push(`Quantità superiore al disponibile a Cerea (${product.cereaQty.toLocaleString("it-IT")} ${product.uom}).`);
+        reasons.push(`Disponibilità Cerea insufficiente (${product.cereaQty.toLocaleString("it-IT")} ${product.uom}).`);
       }
 
       return {
@@ -1963,8 +1964,10 @@
         qty,
         productValid,
         qtyValid,
-        canSubmit: productValid && qtyValid
-      , reasons };
+        stockAvailable,
+        canSubmit: productValid && qtyValid,
+        reasons
+      };
     }
 
     function renderActionState(){
@@ -2332,8 +2335,12 @@
 
       const sourceRows = getPositiveCereaRowsForCode(product.code);
       const available = sourceRows.reduce((sum, row) => sum + safeInt(row.qty), 0);
-      if (!sourceRows.length || available < qty){
-        showToast("Disponibilità Cerea non sufficiente", "err");
+      if (!sourceRows.length || available <= 0){
+        showToast(`Articolo esaurito a Cerea (${product.code})`, "err");
+        return;
+      }
+      if (available < qty){
+        showToast(`Disponibilità Cerea insufficiente (${available.toLocaleString("it-IT")} ${product.uom})`, "err");
         return;
       }
 
