@@ -464,10 +464,10 @@
       width:100%;
       appearance:none;
       border:2px solid var(--line);
-      border-radius:20px;
-      min-height:70px;
-      padding:0 22px;
-      font-size:20px;
+      border-radius:18px;
+      min-height:62px;
+      padding:0 18px;
+      font-size:18px;
       font-weight:900;
       letter-spacing:-.018em;
       color:var(--ink);
@@ -669,15 +669,27 @@
     .modal-card{
       width:min(760px, 100%);
       height:min(76vh, 680px);
-      overflow:auto;
+      overflow:hidden;
       background:#fff;
       border:1px solid rgba(255,255,255,.9);
       border-radius:24px;
       box-shadow:0 24px 64px rgba(15,23,42,.18);
       padding:22px;
-      display:grid;
+      display:flex;
+      flex-direction:column;
       gap:14px;
+      align-content:stretch;
+    }
+
+    .modal-body{
+      flex:1 1 auto;
+      min-height:0;
+      overflow:auto;
+      display:grid;
       align-content:start;
+      gap:12px;
+      padding-right:2px;
+      -webkit-overflow-scrolling:touch;
     }
 
     .modal-card h2{
@@ -692,6 +704,10 @@
       grid-template-columns:1fr 1fr;
       gap:10px;
       margin-top:auto;
+      padding-top:12px;
+      background:linear-gradient(180deg, rgba(255,255,255,0), rgba(255,255,255,.96) 24%, #fff 56%);
+      border-top:1px solid rgba(148,163,184,.14);
+      flex:0 0 auto;
     }
 
     .empty{
@@ -877,26 +893,28 @@
   <div id="loadModal" class="modal" aria-hidden="true">
     <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
       <h2 id="modalTitle">Carica a Concamarise</h2>
-      <div class="field">
-        <label for="loadCommand">Ricerca articolo</label>
-        <div id="commandWrap" class="command-control is-empty">
-          <input
-            id="loadCommand"
-            type="text"
-            placeholder="Scrivi articolo e quantità finale"
-            autocomplete="off"
-            autocapitalize="off"
-            spellcheck="false"
-            enterkeyhint="search"
-            inputmode="search"
-            aria-describedby="loadCommandHelp"
-          />
-          <div id="loadSuggestions" class="suggestions" role="listbox" aria-label="Prodotti trovati"></div>
+      <div class="modal-body">
+        <div class="field">
+          <div id="commandWrap" class="command-control is-empty">
+            <input
+              id="loadCommand"
+              type="text"
+              placeholder="Scrivi articolo e quantità"
+              autocomplete="off"
+              autocapitalize="off"
+              spellcheck="false"
+              enterkeyhint="search"
+              inputmode="search"
+              aria-label="Ricerca articolo e quantità"
+              aria-describedby="loadCommandHelp"
+            />
+            <div id="loadSuggestions" class="suggestions" role="listbox" aria-label="Prodotti trovati"></div>
+          </div>
+          <div id="loadCommandHelp" class="field-help" aria-hidden="true"></div>
         </div>
-        <div id="loadCommandHelp" class="field-help" aria-hidden="true"></div>
+        <div id="commandHint" class="command-hint" hidden aria-hidden="true"></div>
+        <div id="validationCard" class="validation-card is-neutral" hidden></div>
       </div>
-      <div id="commandHint" class="command-hint" hidden aria-hidden="true"></div>
-      <div id="validationCard" class="validation-card is-neutral" hidden></div>
       <div class="modal-actions">
         <button id="btnCancel" class="btn" type="button">Annulla</button>
         <button id="btnConfirm" class="btn btn-primary" type="button" disabled>CARICA</button>
@@ -1158,13 +1176,42 @@
       return cleanSpaces(formatted.replace(/\s{2,}/g, " "));
     }
 
+    function deriveSmartSearchAliases(product){
+      const code = String(product?.code || "").trim().toUpperCase();
+      const raw = normalizeSearch([
+        product?.code || "",
+        product?.name || "",
+        product?.alias || "",
+        product?.categoryName || "",
+        product?.categoryKey || ""
+      ].join(" "));
+      const aliases = new Set();
+
+      function addTerms(value){
+        for (const token of searchTokens(value)){
+          aliases.add(token);
+        }
+      }
+
+      if (/\bflacon[ei]?\b|\bflaconi\b|\bbottigli[ae]\b|\bbottle\b/.test(raw)) addTerms("flacone flaconi bottiglia bottiglie");
+      if (/\bflaconi\b|\bflacone\b/.test(normalizeSearch(product?.categoryName || "")) || /\bflaconi\b|\bflacone\b/.test(normalizeSearch(product?.categoryKey || ""))) {
+        addTerms("flacone flaconi bottiglia bottiglie");
+      }
+      if (/^FBL/.test(code)) addTerms("flacone flaconi bottiglia bottiglie agro");
+      if (/^(BTL|BOT|BOTT)/.test(code)) addTerms("bottiglia bottiglie");
+
+      return Array.from(aliases).join(" ");
+    }
+
     function buildProductSearchFields(product){
-      return {
-        code: normalizeSearch(product?.code || ""),
-        name: normalizeSearch(product?.name || ""),
-        alias: normalizeSearch(product?.alias || ""),
-        category: normalizeSearch(product?.categoryName || "")
-      };
+      const categoryRaw = cleanSpaces(`${product?.categoryName || ""} ${product?.categoryKey || ""}`);
+      const extras = deriveSmartSearchAliases(product);
+      const code = normalizeSearch(product?.code || "");
+      const name = normalizeSearch(product?.name || "");
+      const alias = normalizeSearch(product?.alias || "");
+      const category = normalizeSearch(categoryRaw);
+      const blob = normalizeSearch([product?.name || "", product?.alias || "", product?.code || "", categoryRaw, extras].join(" "));
+      return { code, name, alias, category, extras, blob };
     }
 
     function tokenWordScore(token, word){
@@ -1699,7 +1746,7 @@
       if (!q) return 1;
 
       const fields = buildProductSearchFields(product);
-      const phrases = [fields.name, fields.alias, fields.code, fields.category].filter(Boolean);
+      const phrases = [fields.name, fields.alias, fields.code, fields.category, fields.extras].filter(Boolean);
       const hay = phrases.join(" ");
       const words = Array.from(new Set(hay.split(" ").filter(Boolean)));
       const tokens = searchTokens(q);
@@ -1713,10 +1760,13 @@
 
       if (fields.code === q) return 2800;
       if (fields.name === q || fields.alias === q) return 2700;
+      if (fields.category === q || fields.extras === q) score += 840;
       if (fields.name.startsWith(q) || fields.alias.startsWith(q)) score += 900;
       else if (fields.code.startsWith(q)) score += 760;
       else if (fields.name.includes(q) || fields.alias.includes(q)) score += 560;
+      else if (fields.category.includes(q) || fields.extras.includes(q)) score += 520;
       else if (fields.code.includes(q)) score += 420;
+      else if (fields.blob.includes(q)) score += 180;
 
       const importantTextTokens = textTokens.filter(token => token.length >= 3);
       const relaxedTextTokens = textTokens.filter(token => token.length < 3);
@@ -1769,10 +1819,10 @@
 
       const orderedPhrase = textTokens.join(" ");
       if (orderedPhrase){
-        if (fields.name.includes(orderedPhrase) || fields.alias.includes(orderedPhrase)) score += 180;
+        if (fields.name.includes(orderedPhrase) || fields.alias.includes(orderedPhrase) || fields.category.includes(orderedPhrase) || fields.extras.includes(orderedPhrase) || fields.blob.includes(orderedPhrase)) score += 180;
         else {
           const compactPhrase = orderedPhrase.replace(/\s+/g, "");
-          const compactName = `${fields.name} ${fields.alias}`.replace(/\s+/g, "");
+          const compactName = `${fields.name} ${fields.alias} ${fields.category} ${fields.extras}`.replace(/\s+/g, "");
           if (compactPhrase && compactName.includes(compactPhrase)) score += 120;
         }
       }
