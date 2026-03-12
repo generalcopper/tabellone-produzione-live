@@ -1182,6 +1182,7 @@
         product?.code || "",
         product?.name || "",
         product?.alias || "",
+        product?.searchText || "",
         product?.categoryName || "",
         product?.categoryKey || ""
       ].join(" "));
@@ -1209,9 +1210,21 @@
       const code = normalizeSearch(product?.code || "");
       const name = normalizeSearch(product?.name || "");
       const alias = normalizeSearch(product?.alias || "");
+      const search = normalizeSearch(product?.searchText || product?.fallbackName || product?.item || product?.label || product?.title || "");
       const category = normalizeSearch(categoryRaw);
-      const blob = normalizeSearch([product?.name || "", product?.alias || "", product?.code || "", categoryRaw, extras].join(" "));
-      return { code, name, alias, category, extras, blob };
+      const blob = normalizeSearch([
+        product?.name || "",
+        product?.alias || "",
+        product?.searchText || "",
+        product?.fallbackName || "",
+        product?.item || "",
+        product?.label || "",
+        product?.title || "",
+        product?.code || "",
+        categoryRaw,
+        extras
+      ].join(" "));
+      return { code, name, alias, search, category, extras, blob };
     }
 
     function tokenWordScore(token, word){
@@ -1503,7 +1516,7 @@
       if (direct === true || direct === 1 || direct === "1") return true;
       if (direct === false || direct === 0 || direct === "0") return false;
 
-      return false;
+      return true;
     }
 
     function buildLoadableProducts(options = {}){
@@ -1528,8 +1541,19 @@
         if (!includeZeroCerea && cereaQty <= 0) continue;
 
         const concaQty = safeInt(totals?.concamarise || 0);
-        const name = getProductDisplayName(product, totals?.item || code);
+        const movementName = cleanSpaces(totals?.item || "");
+        const name = getProductDisplayName(product, movementName || code);
         const alias = cleanSpaces(product?.alias || product?.aliasName || "");
+        const searchText = cleanSpaces([
+          movementName,
+          product?.searchText || "",
+          product?.search || "",
+          product?.searchName || "",
+          product?.label || "",
+          product?.title || "",
+          product?.description || "",
+          product?.item || ""
+        ].join(" "));
         const uom = getResolvedUomForCode(code, product, snapshot);
         const category = getProductCategoryInfo(product, categoryMap);
 
@@ -1538,6 +1562,8 @@
           codeLower: low,
           name,
           alias,
+          searchText,
+          fallbackName: movementName,
           uom,
           cereaQty,
           concamariseQty: concaQty,
@@ -1747,7 +1773,7 @@
       if (!q) return 1;
 
       const fields = buildProductSearchFields(product);
-      const phrases = [fields.name, fields.alias, fields.code, fields.category, fields.extras].filter(Boolean);
+      const phrases = [fields.name, fields.alias, fields.search, fields.code, fields.category, fields.extras].filter(Boolean);
       const hay = phrases.join(" ");
       const words = Array.from(new Set(hay.split(" ").filter(Boolean)));
       const tokens = searchTokens(q);
@@ -1760,11 +1786,11 @@
       let matchedNum = 0;
 
       if (fields.code === q) return 2800;
-      if (fields.name === q || fields.alias === q) return 2700;
+      if (fields.name === q || fields.alias === q || fields.search === q) return 2700;
       if (fields.category === q || fields.extras === q) score += 840;
-      if (fields.name.startsWith(q) || fields.alias.startsWith(q)) score += 900;
+      if (fields.name.startsWith(q) || fields.alias.startsWith(q) || fields.search.startsWith(q)) score += 900;
       else if (fields.code.startsWith(q)) score += 760;
-      else if (fields.name.includes(q) || fields.alias.includes(q)) score += 560;
+      else if (fields.name.includes(q) || fields.alias.includes(q) || fields.search.includes(q)) score += 560;
       else if (fields.category.includes(q) || fields.extras.includes(q)) score += 520;
       else if (fields.code.includes(q)) score += 420;
       else if (fields.blob.includes(q)) score += 180;
@@ -1820,10 +1846,10 @@
 
       const orderedPhrase = textTokens.join(" ");
       if (orderedPhrase){
-        if (fields.name.includes(orderedPhrase) || fields.alias.includes(orderedPhrase) || fields.category.includes(orderedPhrase) || fields.extras.includes(orderedPhrase) || fields.blob.includes(orderedPhrase)) score += 180;
+        if (fields.name.includes(orderedPhrase) || fields.alias.includes(orderedPhrase) || fields.search.includes(orderedPhrase) || fields.category.includes(orderedPhrase) || fields.extras.includes(orderedPhrase) || fields.blob.includes(orderedPhrase)) score += 180;
         else {
           const compactPhrase = orderedPhrase.replace(/\s+/g, "");
-          const compactName = `${fields.name} ${fields.alias} ${fields.category} ${fields.extras}`.replace(/\s+/g, "");
+          const compactName = `${fields.name} ${fields.alias} ${fields.search} ${fields.category} ${fields.extras}`.replace(/\s+/g, "");
           if (compactPhrase && compactName.includes(compactPhrase)) score += 120;
         }
       }
@@ -1885,20 +1911,20 @@
 
       const all = buildLoadableProducts();
       for (const product of all){
-        const fields = [product.code, product.name, product.alias].map(normalizeSearch).filter(Boolean);
+        const fields = [product.code, product.name, product.alias, product.searchText, product.fallbackName].map(normalizeSearch).filter(Boolean);
         if (fields.some(field => field === queryText)) return product;
       }
 
       const selected = getLoadableProductByCode(state.loadSelectedCode);
       if (selected){
-        const fields = [selected.code, selected.name, selected.alias].map(normalizeSearch).filter(Boolean);
+        const fields = [selected.code, selected.name, selected.alias, selected.searchText, selected.fallbackName].map(normalizeSearch).filter(Boolean);
         const compatible = fields.some(field => field === queryText || field.startsWith(queryText) || field.includes(queryText));
         if (compatible) return selected;
       }
 
       const clearBest = resolveClearBestLoadCandidate(parts?.productText || parts?.raw || "");
       if (clearBest){
-        const fields = [clearBest.code, clearBest.name, clearBest.alias].map(normalizeSearch).filter(Boolean);
+        const fields = [clearBest.code, clearBest.name, clearBest.alias, clearBest.searchText, clearBest.fallbackName].map(normalizeSearch).filter(Boolean);
         const strong = fields.some(field => field === queryText || field.startsWith(queryText) || field.includes(queryText));
         if (strong) return clearBest;
       }
@@ -1910,7 +1936,7 @@
       const q = normalizeSearch(text);
       if (!q) return null;
       return buildLoadableProducts().find(product => {
-        const fields = [product.code, product.name, product.alias].map(normalizeSearch).filter(Boolean);
+        const fields = [product.code, product.name, product.alias, product.searchText, product.fallbackName].map(normalizeSearch).filter(Boolean);
         return fields.includes(q);
       }) || null;
     }
