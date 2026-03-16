@@ -574,6 +574,9 @@
     const SOURCE = "Estrusore HTML";
     const NOTE = "Estrusore bottiglia agro 1 lt";
     const TZ = "Europe/Rome";
+    const MAIL_COLLECTION = "email";
+    const EMAIL_TO_MATTEO = "matteo@generalcoppersrl.com";
+    const EMAIL_LINE_TAG = "estrusore_flaconi_1lt";
 
     const els = {
       btnLogin: document.getElementById("btnLogin"),
@@ -710,6 +713,76 @@
         if (code.includes(key)) return map[key];
       }
       return "Operazione non riuscita.";
+    }
+
+    async function enqueueMatteoEmail(subject, textBody, htmlBody = ""){
+      try{
+        if (!state.db) return;
+        const safeText = String(textBody || "").trim() || "Evento registrato.";
+        const message = {
+          subject: String(subject || "Estrusore flaconi 1 lt").trim() || "Estrusore flaconi 1 lt",
+          text: safeText
+        };
+        if (String(htmlBody || "").trim()){
+          message.html = String(htmlBody);
+        }
+        await addDoc(collection(state.db, MAIL_COLLECTION), {
+          to: EMAIL_TO_MATTEO,
+          message,
+          createdAt: serverTimestamp(),
+          line: EMAIL_LINE_TAG,
+          source: SOURCE,
+          createdBy: prettifyUserLabel(state.user?.displayName || state.user?.email || state.user?.uid || "Sistema")
+        });
+      }catch(err){
+        console.warn("enqueueMatteoEmail failed", err);
+      }
+    }
+
+    function buildProductionEmail({ qty, docNum, date, createdAt, movementId, userLabel, userEmail }){
+      const operator = prettifyUserLabel(userLabel || userEmail || state.user?.uid || "Operatore");
+      const whenLabel = fmtDateTime(createdAt || new Date());
+      const qtyLabel = `${qty.toLocaleString("it-IT")} ${UOM}`;
+      const warehouseLabel = titleizeWords(WAREHOUSE);
+      const subject = `[Estrusore Flaconi 1 LT] Produzione registrata • ${ITEM_NAME} • ${qtyLabel}`;
+      const textBody = [
+        "È stata registrata una nuova produzione sull'Estrusore Flaconi 1 LT.",
+        "",
+        `Articolo: ${ITEM_NAME}`,
+        `Codice articolo: ${CODE}`,
+        `Quantità prodotta: ${qtyLabel}`,
+        `Linea: Estrusore Flaconi 1 LT`,
+        `Magazzino di carico: ${warehouseLabel}`,
+        `Operatore: ${operator}`,
+        `Email operatore: ${userEmail || "—"}`,
+        `Documento interno: ${docNum}`,
+        `Data operazione: ${date}`,
+        `Registrazione: ${whenLabel}`,
+        `ID movimento: ${movementId || "—"}`,
+        "",
+        "Messaggio generato automaticamente dal pannello Estrusore Flaconi 1 LT."
+      ].join("\n");
+      const htmlBody = `
+        <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;font-size:14px;color:#111;line-height:1.5;">
+          <div style="font-size:18px;font-weight:900;margin:0 0 10px;">Produzione registrata · Estrusore Flaconi 1 LT</div>
+          <div style="margin:0 0 14px;color:#374151;">È stata registrata una nuova produzione sull'estrusore.</div>
+          <div style="padding:14px 16px;border:1px solid #e5e7eb;border-radius:16px;background:#fafafa;">
+            <div><strong>Articolo:</strong> ${escapeHtml(ITEM_NAME)}</div>
+            <div><strong>Codice articolo:</strong> ${escapeHtml(CODE)}</div>
+            <div><strong>Quantità prodotta:</strong> ${escapeHtml(qtyLabel)}</div>
+            <div><strong>Linea:</strong> Estrusore Flaconi 1 LT</div>
+            <div><strong>Magazzino di carico:</strong> ${escapeHtml(warehouseLabel)}</div>
+            <div><strong>Operatore:</strong> ${escapeHtml(operator)}</div>
+            <div><strong>Email operatore:</strong> ${escapeHtml(userEmail || "—")}</div>
+            <div><strong>Documento interno:</strong> ${escapeHtml(docNum)}</div>
+            <div><strong>Data operazione:</strong> ${escapeHtml(date)}</div>
+            <div><strong>Registrazione:</strong> ${escapeHtml(whenLabel)}</div>
+            <div><strong>ID movimento:</strong> ${escapeHtml(movementId || "—")}</div>
+          </div>
+          <div style="margin-top:14px;font-size:12px;color:#6b7280;">Messaggio generato automaticamente dal pannello Estrusore Flaconi 1 LT.</div>
+        </div>
+      `;
+      return { subject, textBody, htmlBody };
     }
 
     function mapMovement(docSnap){
@@ -932,7 +1005,21 @@
       };
 
       try{
-        await addDoc(orgCol("inventoryMovements"), payload);
+        const movementRef = await addDoc(orgCol("inventoryMovements"), payload);
+        try{
+          const emailData = buildProductionEmail({
+            qty,
+            docNum,
+            date,
+            createdAt: new Date(),
+            movementId: movementRef?.id || "",
+            userLabel,
+            userEmail
+          });
+          await enqueueMatteoEmail(emailData.subject, emailData.textBody, emailData.htmlBody);
+        }catch(mailErr){
+          console.warn("production email failed", mailErr);
+        }
         closeModal();
         showToast(`Caricati ${qty.toLocaleString("it-IT")} ${UOM}`, "ok");
       }catch(err){
