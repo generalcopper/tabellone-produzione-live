@@ -1528,6 +1528,7 @@
       doc,
       onSnapshot,
       writeBatch,
+      addDoc,
       serverTimestamp
     } from "https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js";
 
@@ -1552,6 +1553,9 @@
     const INVENTORY_PENDING_MS = 15000;
     const TZ = "Europe/Rome";
     const SUGGESTION_LIMIT = 80;
+    const MAIL_COLLECTION = "email";
+    const EMAIL_TO_MATTEO = "matteo@generalcoppersrl.com";
+    const EMAIL_LINE_TAG = "inventario-concamarise";
 
     const els = {
       btnLogin: document.getElementById("btnLogin"),
@@ -1929,6 +1933,147 @@
         if (code.includes(key)) return map[key];
       }
       return "Operazione non riuscita.";
+    }
+
+    function fmtDateTime(value){
+      const date = tsToDate(value) || null;
+      if (!date) return "—";
+      try{
+        return date.toLocaleString("it-IT", {
+          timeZone: TZ,
+          year: "numeric",
+          month: "2-digit",
+          day: "2-digit",
+          hour: "2-digit",
+          minute: "2-digit"
+        });
+      }catch(_){
+        return date.toLocaleString("it-IT");
+      }
+    }
+
+    async function enqueueMatteoEmail(subject, textBody, htmlBody = ""){
+      try{
+        if (!state.db) return;
+        const safeText = String(textBody || "").trim() || "Evento registrato.";
+        const message = {
+          subject: String(subject || "Inventario Concamarise").trim() || "Inventario Concamarise",
+          text: safeText
+        };
+        if (String(htmlBody || "").trim()){
+          message.html = String(htmlBody);
+        }
+        await addDoc(collection(state.db, MAIL_COLLECTION), {
+          to: EMAIL_TO_MATTEO,
+          message,
+          createdAt: serverTimestamp(),
+          line: EMAIL_LINE_TAG,
+          source: SOURCE,
+          createdBy: prettifyUserLabel(state.user?.displayName || state.user?.email || state.user?.uid || "Sistema")
+        });
+      }catch(err){
+        console.warn("enqueueMatteoEmail failed", err);
+      }
+    }
+
+    function buildConcamariseLoadEmail({ product, qty, uom, docNum, date, createdAt, userLabel, userEmail }){
+      const operator = prettifyUserLabel(userLabel || userEmail || state.user?.uid || "Operatore");
+      const whenLabel = fmtDateTime(createdAt || new Date());
+      const qtyLabel = `${qty.toLocaleString("it-IT")} ${uom}`;
+      const itemLabel = String(product?.name || product?.code || "Articolo").trim() || "Articolo";
+      const codeLabel = String(product?.code || "").trim();
+      const originLabel = titleizeWords(WAREHOUSE_CEREA);
+      const destinationLabel = titleizeWords(WAREHOUSE_CONCA);
+      const subject = `[Inventario Concamarise] Carico registrato • ${itemLabel} • ${qtyLabel} • ${operator}`;
+      const textBody = [
+        "È stato registrato un nuovo carico verso Concamarise.",
+        "",
+        `Articolo: ${itemLabel}`,
+        `Codice articolo: ${codeLabel || "—"}`,
+        `Quantità caricata: ${qtyLabel}`,
+        `Da: ${originLabel}`,
+        `A: ${destinationLabel}`,
+        `Operatore: ${operator}`,
+        `Email operatore: ${userEmail || "—"}`,
+        `Documento interno: ${docNum}`,
+        `Data operazione: ${date}`,
+        `Registrazione: ${whenLabel}`,
+        `Origine evento: ${SOURCE}`
+      ].join("\n");
+      const htmlBody = `
+        <div style="font-family:Arial,sans-serif; font-size:14px; color:#111827; line-height:1.55;">
+          <div style="font-size:18px; font-weight:800; margin-bottom:12px;">Nuovo carico registrato a Concamarise</div>
+          <table style="border-collapse:collapse; width:100%; max-width:720px;">
+            <tr><td style="padding:6px 12px 6px 0; color:#6b7280;">Articolo</td><td style="padding:6px 0; font-weight:800;">${escapeHtml(itemLabel)}</td></tr>
+            <tr><td style="padding:6px 12px 6px 0; color:#6b7280;">Codice articolo</td><td style="padding:6px 0; font-weight:800;">${escapeHtml(codeLabel || "—")}</td></tr>
+            <tr><td style="padding:6px 12px 6px 0; color:#6b7280;">Quantità caricata</td><td style="padding:6px 0; font-weight:800;">${escapeHtml(qtyLabel)}</td></tr>
+            <tr><td style="padding:6px 12px 6px 0; color:#6b7280;">Da</td><td style="padding:6px 0;">${escapeHtml(originLabel)}</td></tr>
+            <tr><td style="padding:6px 12px 6px 0; color:#6b7280;">A</td><td style="padding:6px 0;">${escapeHtml(destinationLabel)}</td></tr>
+            <tr><td style="padding:6px 12px 6px 0; color:#6b7280;">Operatore</td><td style="padding:6px 0;">${escapeHtml(operator)}</td></tr>
+            <tr><td style="padding:6px 12px 6px 0; color:#6b7280;">Email operatore</td><td style="padding:6px 0;">${escapeHtml(userEmail || "—")}</td></tr>
+            <tr><td style="padding:6px 12px 6px 0; color:#6b7280;">Documento interno</td><td style="padding:6px 0;">${escapeHtml(docNum)}</td></tr>
+            <tr><td style="padding:6px 12px 6px 0; color:#6b7280;">Data operazione</td><td style="padding:6px 0;">${escapeHtml(date)}</td></tr>
+            <tr><td style="padding:6px 12px 6px 0; color:#6b7280;">Registrazione</td><td style="padding:6px 0;">${escapeHtml(whenLabel)}</td></tr>
+            <tr><td style="padding:6px 12px 6px 0; color:#6b7280;">Origine evento</td><td style="padding:6px 0;">${escapeHtml(SOURCE)}</td></tr>
+          </table>
+          <div style="margin-top:16px; font-size:12px; color:#6b7280;">Messaggio generato automaticamente da Inventario Concamarise.</div>
+        </div>
+      `.trim();
+      return { subject, textBody, htmlBody };
+    }
+
+    function buildConcamariseRectifyEmail({ code, name, uom, oldQty, newQty, delta, docNum, date, createdAt, userLabel, userEmail }){
+      const operator = prettifyUserLabel(userLabel || userEmail || state.user?.uid || "Operatore");
+      const itemLabel = cleanSpaces(name || code || "Articolo") || "Articolo";
+      const codeLabel = String(code || "").trim();
+      const normalizedUom = normalizeUom(uom || "") || "pz";
+      const previousQtyLabel = `${safeInt(oldQty).toLocaleString("it-IT")} ${normalizedUom}`;
+      const newQtyLabel = `${safeInt(newQty).toLocaleString("it-IT")} ${normalizedUom}`;
+      const deltaAbs = Math.abs(safeInt(delta));
+      const deltaSign = safeInt(delta) > 0 ? "+" : "-";
+      const deltaLabel = `${deltaSign}${deltaAbs.toLocaleString("it-IT")} ${normalizedUom}`;
+      const directionLabel = safeInt(delta) > 0 ? "Incremento" : "Decremento";
+      const whenLabel = fmtDateTime(createdAt || new Date());
+      const subject = `[Inventario Concamarise] Rettifica manuale • ${itemLabel} • ${previousQtyLabel} → ${newQtyLabel} • ${operator}`;
+      const textBody = [
+        "È stata registrata una rettifica manuale nell'inventario attuale di Concamarise.",
+        "",
+        `Articolo: ${itemLabel}`,
+        `Codice articolo: ${codeLabel || "—"}`,
+        `Tipo operazione: ${directionLabel}`,
+        `Variazione: ${deltaLabel}`,
+        `Quantità precedente: ${previousQtyLabel}`,
+        `Nuova quantità: ${newQtyLabel}`,
+        `Magazzino: ${titleizeWords(WAREHOUSE_CONCA)}`,
+        `Operatore: ${operator}`,
+        `Email operatore: ${userEmail || "—"}`,
+        `Documento interno: ${docNum}`,
+        `Data operazione: ${date}`,
+        `Registrazione: ${whenLabel}`,
+        `Origine evento: ${RECTIFY_SOURCE}`
+      ].join("\n");
+      const htmlBody = `
+        <div style="font-family:Arial,sans-serif; font-size:14px; color:#111827; line-height:1.55;">
+          <div style="font-size:18px; font-weight:800; margin-bottom:12px;">Rettifica manuale registrata a Concamarise</div>
+          <table style="border-collapse:collapse; width:100%; max-width:720px;">
+            <tr><td style="padding:6px 12px 6px 0; color:#6b7280;">Articolo</td><td style="padding:6px 0; font-weight:800;">${escapeHtml(itemLabel)}</td></tr>
+            <tr><td style="padding:6px 12px 6px 0; color:#6b7280;">Codice articolo</td><td style="padding:6px 0; font-weight:800;">${escapeHtml(codeLabel || "—")}</td></tr>
+            <tr><td style="padding:6px 12px 6px 0; color:#6b7280;">Tipo operazione</td><td style="padding:6px 0; font-weight:800;">${escapeHtml(directionLabel)}</td></tr>
+            <tr><td style="padding:6px 12px 6px 0; color:#6b7280;">Variazione</td><td style="padding:6px 0; font-weight:800;">${escapeHtml(deltaLabel)}</td></tr>
+            <tr><td style="padding:6px 12px 6px 0; color:#6b7280;">Quantità precedente</td><td style="padding:6px 0;">${escapeHtml(previousQtyLabel)}</td></tr>
+            <tr><td style="padding:6px 12px 6px 0; color:#6b7280;">Nuova quantità</td><td style="padding:6px 0; font-weight:800;">${escapeHtml(newQtyLabel)}</td></tr>
+            <tr><td style="padding:6px 12px 6px 0; color:#6b7280;">Magazzino</td><td style="padding:6px 0;">${escapeHtml(titleizeWords(WAREHOUSE_CONCA))}</td></tr>
+            <tr><td style="padding:6px 12px 6px 0; color:#6b7280;">Operatore</td><td style="padding:6px 0;">${escapeHtml(operator)}</td></tr>
+            <tr><td style="padding:6px 12px 6px 0; color:#6b7280;">Email operatore</td><td style="padding:6px 0;">${escapeHtml(userEmail || "—")}</td></tr>
+            <tr><td style="padding:6px 12px 6px 0; color:#6b7280;">Documento interno</td><td style="padding:6px 0;">${escapeHtml(docNum)}</td></tr>
+            <tr><td style="padding:6px 12px 6px 0; color:#6b7280;">Data operazione</td><td style="padding:6px 0;">${escapeHtml(date)}</td></tr>
+            <tr><td style="padding:6px 12px 6px 0; color:#6b7280;">Registrazione</td><td style="padding:6px 0;">${escapeHtml(whenLabel)}</td></tr>
+            <tr><td style="padding:6px 12px 6px 0; color:#6b7280;">Origine evento</td><td style="padding:6px 0;">${escapeHtml(RECTIFY_SOURCE)}</td></tr>
+          </table>
+          <div style="margin-top:16px; font-size:12px; color:#6b7280;">Messaggio generato automaticamente da Inventario Concamarise.</div>
+        </div>
+      `.trim();
+      return { subject, textBody, htmlBody };
     }
 
     function productCodeFromData(raw){
@@ -3164,6 +3309,8 @@
       const batch = writeBatch(state.db);
       const noteText = `${RECTIFY_NOTE}: da ${currentQty} ${normalizedUom} a ${desiredQty} ${normalizedUom}`;
       const rawText = "Rettifica manuale dal pannello Inventario attuale Concamarise";
+      const itemLabel = cleanSpaces(name || preferredRow?.item || fallbackCereaRow?.item || productCode) || productCode;
+      let movementCount = 0;
 
       function makeBasePayload(customer, item, qty, type){
         return {
@@ -3198,6 +3345,7 @@
           Math.abs(delta),
           "IN"
         ));
+        movementCount += 1;
       }else{
         let remaining = Math.abs(delta);
         const available = positiveConcaRows.reduce((sum, row) => sum + safeInt(row?.qty), 0);
@@ -3216,6 +3364,7 @@
             take,
             "OUT"
           ));
+          movementCount += 1;
           remaining -= take;
         }
 
@@ -3225,7 +3374,20 @@
       }
 
       await batch.commit();
-      return { oldQty: currentQty, newQty: desiredQty, uom: normalizedUom };
+      return {
+        oldQty: currentQty,
+        newQty: desiredQty,
+        uom: normalizedUom,
+        delta,
+        code: productCode,
+        name: itemLabel,
+        docNum,
+        date,
+        createdAt: new Date(),
+        userLabel,
+        userEmail,
+        movementCount
+      };
     }
 
     function buildInventoryAdjustConfirmMessage({ name, code, uom, displayedQty, liveQty, nextQty }){
@@ -3297,6 +3459,25 @@
           expectedQty: result.newQty,
           startedAt: Date.now()
         };
+
+        try{
+          const emailData = buildConcamariseRectifyEmail({
+            code: result.code || code,
+            name: result.name || name,
+            uom: result.uom || uom,
+            oldQty: result.oldQty,
+            newQty: result.newQty,
+            delta: result.delta,
+            docNum: result.docNum,
+            date: result.date,
+            createdAt: result.createdAt,
+            userLabel: result.userLabel,
+            userEmail: result.userEmail
+          });
+          await enqueueMatteoEmail(emailData.subject, emailData.textBody, emailData.htmlBody);
+        }catch(mailErr){
+          console.warn("concamarise rectify email failed", mailErr);
+        }
 
         showToast(`Quantità aggiornata (${result.oldQty.toLocaleString("it-IT")}→${result.newQty.toLocaleString("it-IT")}) ${result.uom}`, "ok");
       }catch(err){
@@ -3406,6 +3587,21 @@
         }
 
         await batch.commit();
+        try{
+          const emailData = buildConcamariseLoadEmail({
+            product,
+            qty,
+            uom,
+            docNum,
+            date,
+            createdAt: new Date(),
+            userLabel,
+            userEmail
+          });
+          await enqueueMatteoEmail(emailData.subject, emailData.textBody, emailData.htmlBody);
+        }catch(mailErr){
+          console.warn("concamarise load email failed", mailErr);
+        }
         state.loadCommand = "";
         state.loadSelectedCode = "";
         state.loadSuggestionsVisible = false;
