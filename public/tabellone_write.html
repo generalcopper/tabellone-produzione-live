@@ -11141,9 +11141,314 @@ function ensureTabWriteState(){
   if(!(tw.localDoneIds instanceof Set)) tw.localDoneIds = new Set();
   tw.cloud = tw.cloud || { state:"loading", detail:"" };
   tw.pendingComplete = tw.pendingComplete || null;
+  tw._repairOrderT = tw._repairOrderT || null;
+  tw._repairOrderBusy = !!tw._repairOrderBusy;
+  tw._pendingOrderRepair = !!tw._pendingOrderRepair;
+  tw._pendingQueueRenderAfterDrag = !!tw._pendingQueueRenderAfterDrag;
+  tw._queueBootstrapBusy = !!tw._queueBootstrapBusy;
+  tw._queueBootstrapDone = !!tw._queueBootstrapDone;
+  tw._queueWatchToken = Number(tw._queueWatchToken || 0);
   return tw;
 }
 
+
+const TW_ORDER_KEY_LEN = 16;
+const TW_ORDER_BASE = 36n;
+const TW_ORDER_STEP = 2821109907456n; // 36^8
+const TW_ORDER_MAX = (TW_ORDER_BASE ** BigInt(TW_ORDER_KEY_LEN)) - 1n;
+
+function twNormalizeOrderKey(raw){
+  const s = String(raw || "").trim().toUpperCase().replace(/[^0-9A-Z]/g, "");
+  if(!s) return "";
+  return s.slice(-TW_ORDER_KEY_LEN).padStart(TW_ORDER_KEY_LEN, "0");
+}
+
+function twOrderKeyToBig(raw){
+  const s = twNormalizeOrderKey(raw);
+  if(!s) return null;
+  let n = 0n;
+  for(const ch of s){
+    const code = ch.charCodeAt(0);
+    let v = -1;
+    if(code >= 48 && code <= 57) v = BigInt(code - 48);
+    else if(code >= 65 && code <= 90) v = BigInt(code - 55);
+    else return null;
+    n = (n * TW_ORDER_BASE) + v;
+  }
+  return n;
+}
+
+function twBigToOrderKey(value){
+  let n = BigInt(value || 0n);
+  if(n < 0n) n = 0n;
+  if(n > TW_ORDER_MAX) n = TW_ORDER_MAX;
+  let s = n.toString(36).toUpperCase();
+  if(s.length > TW_ORDER_KEY_LEN) s = s.slice(-TW_ORDER_KEY_LEN);
+  return s.padStart(TW_ORDER_KEY_LEN, "0");
+}
+
+function twQueueSortMs(it){
+  const orig = Number(it?.createdAtOrigMs || 0);
+  const cur = Number(it?.createdAtMs || 0);
+  if(Number.isFinite(orig) && orig > 0) return orig;
+  if(Number.isFinite(cur) && cur > 0) return cur;
+  return 0;
+}
+
+function twCompareQueueItemsStable(a, b){
+  const ak = twNormalizeOrderKey(a?.queueOrderKey);
+  const bk = twNormalizeOrderKey(b?.queueOrderKey);
+  if(ak && bk && ak !== bk) return ak < bk ? -1 : 1;
+  const ams = twQueueSortMs(a);
+  const bms = twQueueSortMs(b);
+  if(ams !== bms) return ams - bms;
+  const ao = String(a?.orderNo || "");
+  const bo = String(b?.orderNo || "");
+  if(ao !== bo) return ao.localeCompare(bo, "it");
+  const al = String(a?.lineKey || a?.id || "");
+  const bl = String(b?.lineKey || b?.id || "");
+  return al.localeCompare(bl, "it");
+}
+
+function twSortQueueItemsStable(items){
+  return (Array.isArray(items) ? items.slice() : []).sort(twCompareQueueItemsStable);
+}
+
+function twGetTailOrderBig(items){
+  let max = 0n;
+  for(const it of (Array.isArray(items) ? items : [])){
+    const n = twOrderKeyToBig(it?.queueOrderKey);
+    if(n != null && n > max) max = n;
+  }
+  return max;
+}
+
+function twOrderKeyBetween(prevKey, nextKey){
+  const prev = twOrderKeyToBig(prevKey);
+  const next = twOrderKeyToBig(nextKey);
+  if(prev == null && next == null) return twBigToOrderKey(TW_ORDER_STEP);
+  if(prev == null){
+    if(next == null || next <= 1n) return "";
+    return twBigToOrderKey(next / 2n);
+  }
+  if(next == null){
+    const tail = prev + TW_ORDER_STEP;
+    if(tail > TW_ORDER_MAX) return "";
+    return twBigToOrderKey(tail);
+  }
+  if(next <= prev + 1n) return "";
+  return twBigToOrderKey(prev + ((next - prev) / 2n));
+}
+
+function twBuildSequentialOrderPatch(ids){
+  const patch = new Map();
+  let cursor = 0n;
+  for(const id of (Array.isArray(ids) ? ids : [])){
+    const cleanId = String(id || "").trim();
+    if(!cleanId) continue;
+    cursor += TW_ORDER_STEP;
+    if(cursor > TW_ORDER_MAX) cursor = TW_ORDER_MAX;
+    patch.set(cleanId, twBigToOrderKey(cursor));
+  }
+  return patch;
+}
+
+function twFindMovedId(oldIds, newIds, preferredId=""){
+  const pref = String(preferredId || "").trim();
+  if(pref && oldIds.includes(pref) && newIds.includes(pref)) return pref;
+  const mismatched = newIds.filter((id, idx)=> oldIds[idx] !== id);
+  if(!mismatched.length) return "";
+  if(mismatched.length === 1) return mismatched[0];
+  let bestId = mismatched[0];
+  let bestDelta = -1;
+  for(const id of mismatched){
+    const oldIdx = oldIds.indexOf(id);
+    const newIdx = newIds.indexOf(id);
+    const delta = Math.abs(oldIdx - newIdx);
+    if(delta > bestDelta){
+      bestDelta = delta;
+      bestId = id;
+    }
+  }
+  return bestId;
+}
+
+function twApplyQueueOrderLocally(ids, patch){
+  const tw = ensureTabWriteState();
+  const map = new Map((tw.queueItems || []).map(it => [String(it?.id || ""), { ...it }]));
+  const next = [];
+  for(const rawId of (Array.isArray(ids) ? ids : [])){
+    const id = String(rawId || "").trim();
+    const item = map.get(id);
+    if(!item) continue;
+    const nextKey = patch instanceof Map ? patch.get(id) : "";
+    if(nextKey) item.queueOrderKey = nextKey;
+    next.push(item);
+    map.delete(id);
+  }
+  for(const item of map.values()) next.push(item);
+  tw.queueItems = twSortQueueItemsStable(next);
+  tw.lastQueueById = new Map(tw.queueItems.map(it => [String(it.id || ""), it]));
+  twRenderAll();
+}
+
+function twQueueOrderNeedsRepair(items){
+  const sorted = twSortQueueItemsStable(items);
+  const seen = new Set();
+  for(const it of sorted){
+    const key = twNormalizeOrderKey(it?.queueOrderKey);
+    if(!key || seen.has(key)) return true;
+    seen.add(key);
+  }
+  return false;
+}
+
+function twQueueDocToItem(d){
+  const v = d?.data ? (d.data() || {}) : (d || {});
+  const createdAtMs = (v.createdAt && v.createdAt.toMillis) ? v.createdAt.toMillis() : (v.createdAtMs || 0);
+  const createdAtOrigMs = (v.createdAtOrig && v.createdAtOrig.toMillis) ? v.createdAtOrig.toMillis() : (v.createdAtOrigMs || createdAtMs);
+  const hasOrig = !!(v.createdAtOrig || v.createdAtOrigMs);
+  return {
+    id: String(d?.id || v.id || "").trim(),
+    queueOrderKey: twNormalizeOrderKey(v.queueOrderKey || ""),
+    kind: (v.kind || "").toString().trim(),
+    source: (v.source || "").toString().trim(),
+    inventoryTarget: (v.inventoryTarget || "").toString().trim(),
+    finishedProductId: (v.finishedProductId || "").toString().trim(),
+    finishedProductCode: (v.finishedProductCode || "").toString().trim(),
+    finishedProductName: (v.finishedProductName || "").toString().trim(),
+    finishedProductUom: (v.finishedProductUom || "").toString().trim(),
+    finishedInventoryMovementId: (v.finishedInventoryMovementId || "").toString().trim(),
+    orderKey: (v.orderKey || "").toString().trim(),
+    orderNo: (v.orderNo || "").toString().trim(),
+    customer: (v.customer || v.cliente || v.customerName || v.nomeCliente || "").toString().trim(),
+    lineKey: (v.lineKey || "").toString().trim(),
+    code: (v.code || "").toString().trim(),
+    um: (v.um || "").toString().trim(),
+    supplier: (v.supplier || v.fornitore || "").toString().trim(),
+    product: (v.product || v.finishedProductName || v.label || v.rawLine || "").toString().trim(),
+    qty: (v.qty || "").toString().trim(),
+    unit: (v.unit || v.finishedProductUom || "").toString().trim(),
+    format: (v.format || "").toString().trim(),
+    status: (v.status || "DA PRODURRE").toString().trim(),
+    createdAtMs,
+    createdAtOrigMs,
+    hasOrig
+  };
+}
+
+async function twScanQueueItemsFromCloud(){
+  if(!state.firebase?.ok) return [];
+  const fs = state.firebase.api;
+  const db = state.firebase.db;
+  const queueCol = fs.collection(db, "producedDays", TW_LINE_BUCKET, "queue");
+
+  let q = null;
+  try{
+    q = fs.query(queueCol, fs.orderBy("createdAt","asc"));
+  }catch(_e){
+    q = fs.query(queueCol, fs.orderBy("createdAtMs","asc"));
+  }
+
+  const snap = await fs.getDocs(q);
+  const items = [];
+  snap.forEach(d=>{
+    const item = twQueueDocToItem(d);
+    if(item?.id) items.push(item);
+  });
+  return items;
+}
+
+async function twEnsureQueueOrderFieldsFromCloud(reason="bootstrap"){
+  const tw = ensureTabWriteState();
+  if(tw._queueBootstrapBusy || tw._repairOrderBusy) return false;
+  if(twDragCtx){
+    tw._pendingOrderRepair = true;
+    return false;
+  }
+  if(!state.firebase?.ok) return false;
+
+  tw._queueBootstrapBusy = true;
+  tw._repairOrderBusy = true;
+  try{
+    const fs = state.firebase.api;
+    const db = state.firebase.db;
+    const queueCol = fs.collection(db, "producedDays", TW_LINE_BUCKET, "queue");
+    const cloudItems = await twScanQueueItemsFromCloud();
+    if(!cloudItems.length){
+      tw._queueBootstrapDone = true;
+      return false;
+    }
+
+    const sorted = twSortQueueItemsStable(cloudItems);
+    const patch = new Map();
+    let cursor = 0n;
+    let needs = false;
+
+    for(const it of sorted){
+      const id = String(it?.id || "").trim();
+      if(!id) continue;
+      cursor += TW_ORDER_STEP;
+      if(cursor > TW_ORDER_MAX) cursor = TW_ORDER_MAX;
+      const nextKey = twBigToOrderKey(cursor);
+      const currentKey = twNormalizeOrderKey(it?.queueOrderKey || "");
+      if(currentKey !== nextKey){
+        patch.set(id, nextKey);
+        needs = true;
+      }
+    }
+
+    if(!needs){
+      tw._queueBootstrapDone = true;
+      return false;
+    }
+
+    const batch = fs.writeBatch(db);
+    const nowMs = Date.now();
+    twSetCloud("loading", reason === "watch_bootstrap" ? "ordino cloud…" : "riparo ordine…");
+
+    for(const [id, nextKey] of patch.entries()){
+      batch.set(fs.doc(queueCol, id), {
+        queueOrderKey: nextKey,
+        orderNormalizedAt: fs.serverTimestamp(),
+        orderNormalizedAtMs: nowMs,
+        orderUpdatedAt: fs.serverTimestamp(),
+        orderUpdatedAtMs: nowMs,
+        orderUpdatedByUid: state.user?.uid || null,
+        orderUpdatedByEmail: state.user?.email || null
+      }, { merge:true });
+    }
+
+    await batch.commit();
+    tw._queueBootstrapDone = true;
+    twSetCloud("ok");
+    return true;
+  }catch(e){
+    console.warn("twEnsureQueueOrderFieldsFromCloud error:", reason, e);
+    twSetCloud("bad", e?.code || "queue-order-sync");
+    return false;
+  }finally{
+    tw._queueBootstrapBusy = false;
+    tw._repairOrderBusy = false;
+  }
+}
+
+function twScheduleQueueOrderRepair(reason="snapshot"){
+  const tw = ensureTabWriteState();
+  if(twDragCtx){
+    tw._pendingOrderRepair = true;
+    return;
+  }
+  if(tw._repairOrderBusy || tw._repairOrderT || tw._queueBootstrapBusy) return;
+  tw._repairOrderT = setTimeout(()=>{
+    tw._repairOrderT = null;
+    twRepairQueueOrder(reason);
+  }, 180);
+}
+
+async function twRepairQueueOrder(reason="snapshot"){
+  await twEnsureQueueOrderFieldsFromCloud(reason || "snapshot");
+}
 
 
 const TW_HUB_ORG_ID = "generalcopper";
@@ -12915,6 +13220,7 @@ async function twSyncOrdersToWriteQueue(){
     };
 
     // Upserts (new or changed)
+    let tailOrderBig = twGetTailOrderBig(tw.queueItems);
     for(const [id, payload] of desired.entries()){
       const prev = existingMap.get(id) || null;
       // basic diff to avoid loops
@@ -12933,6 +13239,8 @@ async function twSyncOrdersToWriteQueue(){
       const base = { ...payload };
       // createdAt only if missing
       if(!prev){
+        tailOrderBig += TW_ORDER_STEP;
+        base.queueOrderKey = twBigToOrderKey(tailOrderBig);
         base.createdAt = fs.serverTimestamp ? fs.serverTimestamp() : nowIso();
         base.createdAtMs = Date.now();
         base.createdAtOrig = fs.serverTimestamp ? fs.serverTimestamp() : nowIso();
@@ -13407,7 +13715,12 @@ function twRenderAll(){
   if(emptyQ) emptyQ.style.display = qVis.length ? "none" : "block";
   if(emptyD) emptyD.style.display = dVis.length ? "none" : "block";
 
-  twRenderQueue(qVis);
+  if(twDragCtx){
+    tw._pendingQueueRenderAfterDrag = true;
+  }else{
+    tw._pendingQueueRenderAfterDrag = false;
+    twRenderQueue(qVis);
+  }
   twRenderDone(dVis);
 }
 
@@ -13650,6 +13963,7 @@ async function twCompleteJob(){
       supplier: job.supplier || "",
       plannedQty: job.qty || "",
       rawLine: job.rawLine || "",
+      queueOrderKey: twNormalizeOrderKey(job.queueOrderKey || ""),
       createdByUid: state.user?.uid || null,
       createdByEmail: state.user?.email || null,
       completedByUid: state.user?.uid || null,
@@ -13991,6 +14305,7 @@ async function twUndoCompletato(it){
       unit: it.unit || it.finishedProductUom || "pz",
       status: "DA PRODURRE",
       rawLine: it.rawLine || "",
+      queueOrderKey: twNormalizeOrderKey(it.queueOrderKey || "") || twBigToOrderKey(twGetTailOrderBig(ensureTabWriteState().queueItems) + TW_ORDER_STEP),
       createdAt: fs.serverTimestamp(),
       createdAtMs: Date.now(),
       createdAtOrig: fs.serverTimestamp(),
@@ -14032,60 +14347,54 @@ function twStartQueueWatch(){
   const db = state.firebase.db;
 
   try{ if(tw._unsubQueue) tw._unsubQueue(); }catch(_e){}
+  tw._unsubQueue = null;
+
   const queueCol = fs.collection(db, "producedDays", TW_LINE_BUCKET, "queue");
+  const watchToken = (tw._queueWatchToken || 0) + 1;
+  tw._queueWatchToken = watchToken;
+  twSetCloud("loading","sync cloud…");
 
-  let q = null;
-  try{
-    q = fs.query(queueCol, fs.orderBy("createdAt","asc"));
-  }catch(_e){
-    // fallback: createdAtMs
-    q = fs.query(queueCol, fs.orderBy("createdAtMs","asc"));
-  }
+  (async()=>{
+    try{
+      await twEnsureQueueOrderFieldsFromCloud("watch_bootstrap");
+    }catch(e){
+      console.warn("tw queue bootstrap error:", e);
+    }
+    if(tw._queueWatchToken !== watchToken) return;
 
-  twSetCloud("loading","sync…");
-  tw._unsubQueue = fs.onSnapshot(q, (snap)=>{
-    const items = [];
-    snap.forEach(d=>{
-      const v = d.data() || {};
-      const createdAtMs = (v.createdAt && v.createdAt.toMillis) ? v.createdAt.toMillis() : (v.createdAtMs || 0);
-      const createdAtOrigMs = (v.createdAtOrig && v.createdAtOrig.toMillis) ? v.createdAtOrig.toMillis() : (v.createdAtOrigMs || createdAtMs);
-      const hasOrig = !!(v.createdAtOrig || v.createdAtOrigMs);
-      items.push({
-        id: d.id,
-        kind: (v.kind || "").toString().trim(),
-        source: (v.source || "").toString().trim(),
-        inventoryTarget: (v.inventoryTarget || "").toString().trim(),
-        finishedProductId: (v.finishedProductId || "").toString().trim(),
-        finishedProductCode: (v.finishedProductCode || "").toString().trim(),
-        finishedProductName: (v.finishedProductName || "").toString().trim(),
-        finishedProductUom: (v.finishedProductUom || "").toString().trim(),
-        finishedInventoryMovementId: (v.finishedInventoryMovementId || "").toString().trim(),
-        orderKey: (v.orderKey || "").toString().trim(),
-        orderNo: (v.orderNo || "").toString().trim(),
-        customer: (v.customer || v.cliente || v.customerName || v.nomeCliente || "").toString().trim(),
-        lineKey: (v.lineKey || "").toString().trim(),
-        code: (v.code || "").toString().trim(),
-        um: (v.um || "").toString().trim(),
-        supplier: (v.supplier || v.fornitore || "").toString().trim(),
-        product: (v.product || v.finishedProductName || v.label || v.rawLine || "").toString().trim(),
-        qty: (v.qty || "").toString().trim(),
-        unit: (v.unit || v.finishedProductUom || "").toString().trim(),
-        format: (v.format || "").toString().trim(),
-        status: (v.status || "DA PRODURRE").toString().trim(),
-        createdAtMs,
-        createdAtOrigMs,
-        hasOrig
+    let q = null;
+    try{
+      q = fs.query(queueCol, fs.orderBy("queueOrderKey","asc"));
+    }catch(err){
+      console.warn("tw queue order query error:", err);
+      twSetCloud("bad", err?.code || "queue-order-query");
+      return;
+    }
+
+    tw._unsubQueue = fs.onSnapshot(q, (snap)=>{
+      const items = [];
+      snap.forEach(d=>{
+        const item = twQueueDocToItem(d);
+        if(item?.id) items.push(item);
       });
+      tw.queueItems = items;
+      tw.lastQueueById = new Map(items.map(it=>[it.id, it]));
+      twSetCloud("ok");
+      if(twDragCtx){
+        tw._pendingQueueRenderAfterDrag = true;
+      }else{
+        tw._pendingQueueRenderAfterDrag = false;
+        twRenderAll();
+      }
+      if(twQueueOrderNeedsRepair(items)){
+        try{ twScheduleQueueOrderRepair("snapshot"); }catch(_e){}
+      }
+      try{ twScheduleOrdersSync(); }catch(_e){}
+    }, (err)=>{
+      console.warn("tw queue snapshot error:", err);
+      twSetCloud("bad", err?.code || "permission-denied");
     });
-    tw.queueItems = items;
-    tw.lastQueueById = new Map(items.map(it=>[it.id, it]));
-    twSetCloud("ok");
-    twRenderAll();
-    try{ twScheduleOrdersSync(); }catch(_e){}
-  }, (err)=>{
-    console.warn("tw queue snapshot error:", err);
-    twSetCloud("bad", err?.code || "permission-denied");
-  });
+  })();
 }
 
 function twStartDoneWatch(){
@@ -14105,6 +14414,7 @@ function twStartDoneWatch(){
       const completedAtMs = (v.completedAt && v.completedAt.toMillis) ? v.completedAt.toMillis() : (v.completedAtClientMs || 0);
       items.push({
         id: d.id,
+        queueOrderKey: twNormalizeOrderKey(v.queueOrderKey || ""),
         kind: (v.kind || "").toString().trim(),
         source: (v.source || "").toString().trim(),
         inventoryTarget: (v.inventoryTarget || "").toString().trim(),
@@ -14184,6 +14494,7 @@ async function twSendLinesToQueue(){
     let skipped = 0;
     let skippedSmall = 0;
     let skippedNonPiece = 0;
+    let tailOrderBig = twGetTailOrderBig(ensureTabWriteState().queueItems);
 
     for(const line of lines){
       const j = twParseJobLine(line);
@@ -14206,7 +14517,9 @@ async function twSendLinesToQueue(){
 
       const ref = fs.doc(queueCol);
       const nowMs = Date.now();
+      tailOrderBig += TW_ORDER_STEP;
       const payload = {
+        queueOrderKey: twBigToOrderKey(tailOrderBig),
         product: j.product || "",
         qty: j.qty || "",
         unit: j.unit || "",
@@ -14229,7 +14542,9 @@ async function twSendLinesToQueue(){
       const nowMs = Date.now();
       const codeLabel = String(it.finishedProductCode || "").trim();
       const format = codeLabel ? (`PF • ${codeLabel}`) : "PF";
+      tailOrderBig += TW_ORDER_STEP;
       const payload = {
+        queueOrderKey: twBigToOrderKey(tailOrderBig),
         kind: "finishedProduct",
         source: "manual_finished_product",
         inventoryTarget: "finished_product",
@@ -14471,7 +14786,7 @@ function twBeginDrag(originalEl, startX, startY, fromTouch=false){
     document.removeEventListener("touchend", end);
     document.removeEventListener("touchcancel", end);
 
-    const { el, placeholder, startOrder, _prevTouchAction } = twDragCtx;
+    const { el, placeholder, startOrder, _prevTouchAction, id: draggedId } = twDragCtx;
 
     el.style.position = "";
     el.style.left = "";
@@ -14496,7 +14811,19 @@ function twBeginDrag(originalEl, startX, startY, fromTouch=false){
     twDragCtx = null;
 
     if(changed){
-      await twPersistQueueOrder(ids);
+      await twPersistQueueOrder(ids, draggedId, startOrder);
+    }else{
+      const tw = ensureTabWriteState();
+      if(tw._pendingQueueRenderAfterDrag){
+        tw._pendingQueueRenderAfterDrag = false;
+        twRenderAll();
+      }
+    }
+
+    const tw = ensureTabWriteState();
+    if(tw._pendingOrderRepair){
+      tw._pendingOrderRepair = false;
+      try{ twScheduleQueueOrderRepair("after_drag"); }catch(_e){}
     }
   };
 
@@ -14511,54 +14838,77 @@ function twBeginDrag(originalEl, startX, startY, fromTouch=false){
   }
 }
 
-async function twPersistQueueOrder(ids){
-  if(!ids || ids.length < 2) return;
+async function twPersistQueueOrder(ids, preferredMovedId="", baseOldIds=null){
+  if(!Array.isArray(ids) || ids.length < 2) return;
   try{
     if(!state.firebase?.ok) return;
     const fs = state.firebase.api;
     const db = state.firebase.db;
-
     const tw = ensureTabWriteState();
-    const oldIds = (tw.queueItems || []).map(x=>x.id);
-    if(ids.join("|") === oldIds.join("|")) return;
 
-    const msList = (tw.queueItems || [])
-      .map(it => Number(it.createdAtMs || 0))
-      .filter(n => Number.isFinite(n) && n > 0);
+    const oldIds = (Array.isArray(baseOldIds) && baseOldIds.length)
+      ? baseOldIds.map(x=>String(x || "")).filter(Boolean)
+      : (tw.queueItems || []).map(x=>String(x?.id || "")).filter(Boolean);
 
-    let base = msList.length ? Math.min(...msList) : (Date.now() - ids.length - 10);
-    if(!Number.isFinite(base)) base = Date.now() - ids.length - 10;
-
-    if(!fs.Timestamp || !fs.Timestamp.fromMillis){
-      showToast("Riordino non disponibile", "Timestamp non disponibile in questa build.");
+    if(ids.join("|") === oldIds.join("|")){
+      if(tw._pendingQueueRenderAfterDrag){
+        tw._pendingQueueRenderAfterDrag = false;
+        twRenderAll();
+      }
       return;
     }
 
-    twSetCloud("loading","riordino…");
-    const queueCol = fs.collection(db, "producedDays", TW_LINE_BUCKET, "queue");
-    const batch = fs.writeBatch(db);
-    const nowMs = Date.now();
+    const movedId = twFindMovedId(oldIds, ids, preferredMovedId);
+    if(!movedId) return;
 
-    ids.forEach((id, idx)=>{
-      const it = tw.lastQueueById.get(id) || {};
-      const newMs = base + idx;
-      const update = {
-        createdAt: fs.Timestamp.fromMillis(newMs),
-        createdAtMs: newMs,
+    const idx = ids.indexOf(movedId);
+    if(idx < 0) return;
+
+    const prevId = idx > 0 ? String(ids[idx - 1] || "") : "";
+    const nextId = idx < (ids.length - 1) ? String(ids[idx + 1] || "") : "";
+    const prevKey = prevId ? (tw.lastQueueById.get(prevId)?.queueOrderKey || "") : "";
+    const nextKey = nextId ? (tw.lastQueueById.get(nextId)?.queueOrderKey || "") : "";
+    const nowMs = Date.now();
+    const queueCol = fs.collection(db, "producedDays", TW_LINE_BUCKET, "queue");
+
+    let patch = null;
+    let writeAll = false;
+    let freshKey = twOrderKeyBetween(prevKey, nextKey);
+
+    if(!freshKey){
+      patch = twBuildSequentialOrderPatch(ids);
+      writeAll = true;
+    }else{
+      patch = new Map([[movedId, freshKey]]);
+    }
+
+    twApplyQueueOrderLocally(ids, patch);
+    twSetCloud("loading", "riordino…");
+
+    if(writeAll){
+      const batch = fs.writeBatch(db);
+      for(const id of ids){
+        batch.set(fs.doc(queueCol, id), {
+          queueOrderKey: patch.get(id),
+          orderNormalizedAt: fs.serverTimestamp(),
+          orderNormalizedAtMs: nowMs,
+          orderUpdatedAt: fs.serverTimestamp(),
+          orderUpdatedAtMs: nowMs,
+          orderUpdatedByUid: state.user?.uid || null,
+          orderUpdatedByEmail: state.user?.email || null
+        }, { merge:true });
+      }
+      await batch.commit();
+    }else{
+      await fs.setDoc(fs.doc(queueCol, movedId), {
+        queueOrderKey: patch.get(movedId),
         orderUpdatedAt: fs.serverTimestamp(),
         orderUpdatedAtMs: nowMs,
         orderUpdatedByUid: state.user?.uid || null,
         orderUpdatedByEmail: state.user?.email || null
-      };
-      if(!it.hasOrig){
-        const origMs = Number(it.createdAtMs || newMs);
-        update.createdAtOrig = fs.Timestamp.fromMillis(origMs);
-        update.createdAtOrigMs = origMs;
-      }
-      batch.set(fs.doc(queueCol, id), update, { merge:true });
-    });
+      }, { merge:true });
+    }
 
-    await batch.commit();
     twSetCloud("ok");
   }catch(e){
     console.warn("twPersistQueueOrder error:", e);
@@ -14664,6 +15014,10 @@ function stopTabWriteHome(){
     state.tabWrite.lastQueueById = new Map();
     state.tabWrite.localDoneIds = new Set();
     state.tabWrite.pendingComplete = null;
+    state.tabWrite._repairOrderT = null;
+    state.tabWrite._repairOrderBusy = false;
+    state.tabWrite._pendingOrderRepair = false;
+    state.tabWrite._pendingQueueRenderAfterDrag = false;
     if(state.tabWrite.pf){
       state.tabWrite.pf.compileItems = [];
       state.tabWrite.pf.selectedKey = "";
