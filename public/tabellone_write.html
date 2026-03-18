@@ -3714,12 +3714,8 @@ async function getAccessByEmail(email){
         const filtered = resetAfter ? hist.filter(h=> tsFromId(h.id||h.at||0) > resetAfter) : hist;
         state.history = dedupeHistory(filtered);
         state.historyReady = true;
-        try{ twScheduleOrdersSync(); }catch(_e){}
-        renderStats();
-        renderHeaderKpis();
+        refreshHistoryDrivenUi();
         bootMark("hist");
-        try{ renderCompletedSection(); }catch(_e){}
-        try{ renderPartialBanner && renderPartialBanner(); }catch(_e){}
         __fsBackoffMs = 1500;
       };
 
@@ -6355,6 +6351,28 @@ function dedupeHistory(arr){
   return [...byFp.values(), ...noFp];
 }
 
+function refreshHistoryDrivenUi(){
+  try{ renderHome(); }catch(_e){}
+  try{ renderStats(); }catch(_e){}
+  try{ renderHeaderKpis(); }catch(_e){}
+  try{ if($("runningModal")?.classList.contains("show")) renderRunning(); }catch(_e){}
+  try{ if($("partialModal")?.classList.contains("show")) renderPartialOrdersList(); }catch(_e){}
+  try{ if(typeof twScheduleOrdersSync === "function") twScheduleOrdersSync(); }catch(_e){}
+}
+
+function upsertHistoryLocal(entry){
+  if(!entry) return null;
+  const normalized = { ...entry };
+  if(!normalized.id){
+    normalized.id = `${Date.now()}_${djb2HashBase36(JSON.stringify({ orderNo: normalized.orderNo||"", twDoneId: normalized.twDoneId||"", lineKey: normalized.twLineKey||"", endedAt: normalized.endedAt||normalized.at||"" }))}`;
+  }
+  if(!normalized.at) normalized.at = normalized.concludedAt || normalized.endedAt || nowIso();
+  state.history = dedupeHistory([...(state.history||[]), normalized]);
+  state.historyReady = true;
+  refreshHistoryDrivenUi();
+  return normalized;
+}
+
 function renderCompletedSection(){
   const list = $("completedList");
   const empty = $("completedEmpty");
@@ -8865,14 +8883,11 @@ Linea: liquidi`, null); }catch(_e){}
                 });
               }catch(_e){}
 
-              state.history = dedupeHistory([...(state.history||[]), withId]);
-              state.historyReady = true;
+              upsertHistoryLocal(withId);
               try{ await bumpGlobalStats(1, kg); }catch(_e){}
-              try{ renderCompletedSection(); }catch(_e){}
               state.activeProductions = (state.activeProductions||[]).filter(x=>x.id!==p.id);
               try{ state.partialOrders = computePartialOrders().partial; }catch(_e){}
-              renderHome();
-              renderHeaderKpis();
+              refreshHistoryDrivenUi();
 
 
               try{
@@ -13413,18 +13428,28 @@ async function twApplyWriteCompletionToHub(done){
 
     const operator = (state.user?.fullName || done.completedByName || done.completedByEmail || "Operatore").toString().trim();
     const unit = String(done.unit || done.um || "").trim();
-    const plannedNum = Number(String((done.plannedQty ?? done.qty ?? "")).replace(",", "."));
+
+    let orderRef = null;
+    let orderLineRef = null;
+    try{
+      orderRef = (Array.isArray(state.powderOrders) ? state.powderOrders : []).find(o=> String(o?.orderNo || o?.number || "").trim() === orderNo && String(o?.customer || "").trim() === customer) || null;
+      orderLineRef = (Array.isArray(orderRef?.lines) ? orderRef.lines : []).find(l=> String(l?.lineKey || "").trim() === lineKey) || null;
+    }catch(_e){}
+
+    const plannedNumRaw = (orderLineRef && orderLineRef.qty != null) ? orderLineRef.qty : (done.plannedQty ?? done.qty ?? "");
+    const plannedNum = parseItNumber(plannedNumRaw);
     const producedBefore = twSumProducedForLineKey(lineKey);
     const remainingBefore = (Number.isFinite(plannedNum) && plannedNum>0) ? Math.max(0, plannedNum - producedBefore) : null;
-    const isFull = (remainingBefore==null) ? true : (qtyNum >= (remainingBefore - 1e-9));
-
+    const producedTotalAfter = Number.isFinite(producedBefore) ? (producedBefore + qtyNum) : qtyNum;
+    const isFull = (remainingBefore==null) ? true : (qtyNum >= (remainingBefore - 1e-9) || producedTotalAfter >= (plannedNum - 1e-9));
+    const orderKey = String(done.orderKey || orderRef?.__k || orderRef?.stableKey || (orderRef ? getOrderKey(orderRef) : "")).trim();
 
     const entry = {
       source: "tabellone_write",
       sourceLine: TW_LINE_BUCKET,
       twDoneId: String(done.id || done.key || ""),
       twLineKey: lineKey,
-      
+      orderKey,
       operator,
       operatorUid: state.user?.uid || "",
       customer,
@@ -13435,14 +13460,16 @@ async function twApplyWriteCompletionToHub(done){
       startedAt: nowIso(),
       endedAt: nowIso(),
       concludedLineKeys: (isFull ? [lineKey] : []),
-      totalKgOrder: 0,
+      totalKgOrder: Number(orderRef?.totalKg || 0),
       perLine: [{
         lineKey,
-        desc: String(done.product || done.desc || "").trim(),
-        code: String(done.code || "").trim(),
-        plannedKg: 0,
+        desc: String(done.product || done.desc || orderLineRef?.desc || "").trim(),
+        code: String(done.code || orderLineRef?.code || "").trim(),
+        plannedKg: Number(orderLineRef?.lineKg || 0),
+        plannedQty: Number.isFinite(plannedNum) ? plannedNum : 0,
+        producedQty: qtyNum,
         producedKg: qtyNum,
-        qty: done.plannedQty ?? done.qty ?? "",
+        qty: plannedNumRaw ?? "",
         um: unit
       }],
       signature: "",
@@ -13459,6 +13486,10 @@ async function twApplyWriteCompletionToHub(done){
 
     await fs.setDoc(fs.doc(db, "liquidProdHistory", docId), entry, { merge:true });
 
+    try{
+      upsertHistoryLocal({ ...entry, id: docId });
+    }catch(_e){}
+
     // log (best effort)
     try{
       await addActionLog({
@@ -13470,6 +13501,8 @@ async function twApplyWriteCompletionToHub(done){
         meta: `${String(done.product||"Riga")} · ${qtyNum} ${unit || ""}`.trim()
       });
     }catch(_e){}
+
+    return { ...entry, id: docId };
   }catch(e){
     console.warn("twApplyWriteCompletionToHub error:", e);
   }
@@ -13627,6 +13660,8 @@ async function twRemoveWriteCompletionFromHub(doneOrId){
         // anche se l'orderNo non combacia (es. string vs number), rimuovo comunque se la riga combacia
         return true;
       });
+      state.historyReady = true;
+      refreshHistoryDrivenUi();
     }catch(_e){}
   }catch(e){
     console.warn("twRemoveWriteCompletionFromHub error:", e);
@@ -13803,7 +13838,7 @@ function twRenderAll(){
   const tw = ensureTabWriteState();
 
   const qVis = (tw.queueItems || []).filter(it => !twHideInUi(it) && twAllowInTabWrite(it));
-  const dVis = (tw.doneItems  || []).filter(it => !twHideInUi(it) && twAllowInTabWrite(it));
+  const dVis = (tw.doneItems  || []).slice();
 
   const qBadge = $("twQueueBadge");
   if(qBadge) qBadge.textContent = String(qVis.length || 0);

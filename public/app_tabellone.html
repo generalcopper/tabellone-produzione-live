@@ -2437,23 +2437,49 @@ const BUCKET = "linea_liquidi";
   const PRODUCED_BACKUP_HISTORY_KEY = "TABELLONE_PRODUCED_BACKUP_HISTORY_V1";
 
   const QUEUE_BACKUP_KEY = "TABELLONE_QUEUE_BACKUP_V1";
+  const CLOUD_QUEUE_ORDER_KEY_LEN = 16;
 
-  function saveQueueBackupNow(jobs){
-    try{
-      if(!Array.isArray(jobs)) return;
-      const clean = jobs.map(j => ({
-        id: String(j?.id ?? j?.key ?? ""),
-        key: String(j?.key ?? j?.id ?? ""),
-        product: String(j?.product ?? ""),
-        format: String(j?.format ?? ""),
-        qty: (j?.qty ?? "—"),
-        unit: String(j?.unit ?? "pz"),
-        status: String(j?.status ?? "DA PRODURRE"),
-        createdAtMs: Number(j?.createdAtMs || 0) || 0
-      }));
-      const payload = { savedAtClientMs: Date.now(), count: clean.length, jobs: clean };
-      localStorage.setItem(QUEUE_BACKUP_KEY, JSON.stringify(payload));
-    }catch(_){}
+  function clearQueueBackupNow(){
+    try{ localStorage.removeItem(QUEUE_BACKUP_KEY); }catch(_){ }
+  }
+
+  function saveQueueBackupNow(_jobs){
+    // Queue backup locale disabilitato: l'app segue solo il cloud.
+    try{ clearQueueBackupNow(); }catch(_){ }
+  }
+
+  function normalizeCloudOrderKey(raw){
+    const s = String(raw || "").trim().toUpperCase().replace(/[^0-9A-Z]/g, "");
+    if(!s) return "";
+    return s.slice(-CLOUD_QUEUE_ORDER_KEY_LEN).padStart(CLOUD_QUEUE_ORDER_KEY_LEN, "0");
+  }
+
+  function queueSortMsFromCloud(it){
+    const orig = Number(it?.createdAtOrigMs || it?._raw?.createdAtOrigMs || 0);
+    const cur = Number(it?.createdAtMs || it?._raw?.createdAtMs || 0);
+    if(Number.isFinite(orig) && orig > 0) return orig;
+    if(Number.isFinite(cur) && cur > 0) return cur;
+    return 0;
+  }
+
+  function compareQueueJobsCloud(a, b){
+    const ak = normalizeCloudOrderKey(a?.queueOrderKey || a?._raw?.queueOrderKey || "");
+    const bk = normalizeCloudOrderKey(b?.queueOrderKey || b?._raw?.queueOrderKey || "");
+    if(ak && bk && ak !== bk) return ak < bk ? -1 : 1;
+    if(ak && !bk) return -1;
+    if(!ak && bk) return 1;
+
+    const ams = queueSortMsFromCloud(a);
+    const bms = queueSortMsFromCloud(b);
+    if(ams !== bms) return ams - bms;
+
+    const ao = String(a?.orderNo || a?._raw?.orderNo || "");
+    const bo = String(b?.orderNo || b?._raw?.orderNo || "");
+    if(ao !== bo) return ao.localeCompare(bo, "it");
+
+    const al = String(a?.lineKey || a?.id || a?._raw?.lineKey || "");
+    const bl = String(b?.lineKey || b?.id || b?._raw?.lineKey || "");
+    return al.localeCompare(bl, "it");
   }
 
   function restoreProducedBackupNow(){
@@ -2503,31 +2529,9 @@ const BUCKET = "linea_liquidi";
   }
 
   function restoreQueueBackupNow(){
-    try{
-      const raw = localStorage.getItem(QUEUE_BACKUP_KEY) || "";
-      if(!raw) return false;
-      const payload = JSON.parse(raw);
-      const jobs = Array.isArray(payload?.jobs) ? payload.jobs : [];
-      if(!jobs.length) return false;
-
-      // normalizza e riusa la stessa pipeline di render
-      lastJobs = jobs.map(j => ({
-        id: String(j?.id ?? j?.key ?? ""),
-        key: String(j?.key ?? j?.id ?? ""),
-        product: String(j?.product ?? ""),
-        format: String(j?.format ?? ""),
-        qty: (j?.qty ?? "—"),
-        unit: String(j?.unit ?? "pz"),
-        status: String(j?.status ?? "DA PRODURRE"),
-        createdAtMs: Number(j?.createdAtMs || 0) || 0
-      })).filter(j => !!j.key);
-
-      renderSoft(lastJobs);
-      try{ MobileUI.updateFromJobs(); }catch(_){}
-      return true;
-    }catch(_){
-      return false;
-    }
+    // Fallback locale disabilitato: la queue parte e si aggiorna solo dal cloud.
+    try{ clearQueueBackupNow(); }catch(_){ }
+    return false;
   }
 
 
@@ -2707,7 +2711,21 @@ const BUCKET = "linea_liquidi";
     const id = keyToDocId(key);
     const payload = { key, qty, label, ts: serverTimestamp() };
 
-    if(meta && meta.job){ payload.job = meta.job; }
+    if(meta && meta.job){
+      payload.job = meta.job;
+      const jqk = normalizeCloudOrderKey(meta.job?.queueOrderKey || meta.job?._raw?.queueOrderKey || "");
+      if(jqk) payload.queueOrderKey = jqk;
+      if(meta.job?.orderNo) payload.orderNo = String(meta.job.orderNo);
+      if(meta.job?.customer) payload.customer = String(meta.job.customer);
+      if(meta.job?.lineKey) payload.lineKey = String(meta.job.lineKey);
+      if(meta.job?.code) payload.code = String(meta.job.code);
+      if(meta.job?.supplier) payload.supplier = String(meta.job.supplier);
+      if(meta.job?.kind) payload.kind = String(meta.job.kind);
+      if(meta.job?.source) payload.source = String(meta.job.source);
+      if(Number.isFinite(meta.job?.createdAtMs)) payload.createdAtMs = Math.floor(meta.job.createdAtMs);
+      if(Number.isFinite(meta.job?.createdAtOrigMs)) payload.createdAtOrigMs = Math.floor(meta.job.createdAtOrigMs);
+      if(Number.isFinite(meta.job?.orderUpdatedAtMs)) payload.orderUpdatedAtMs = Math.floor(meta.job.orderUpdatedAtMs);
+    }
 
 
     if(meta && Number.isFinite(meta.durationMs)){
@@ -2922,7 +2940,7 @@ unmarkProducedCloud(it.key).then(() => {
   // ===== Realtime QUEUE (sync con tabellone WRITE) =====
   let _queueUnsub = null;
   function initQueueRealtime(){
-    try{ if(typeof _queueUnsub === "function") _queueUnsub(); }catch(_){}
+    try{ if(typeof _queueUnsub === "function") _queueUnsub(); }catch(_){ }
     try{
       _queueUnsub = onSnapshot(queueCol, (snap) => {
         const jobs = [];
@@ -2931,29 +2949,42 @@ unmarkProducedCloud(it.key).then(() => {
           const createdAtMs =
             (v.createdAt && typeof v.createdAt.toMillis === "function") ? v.createdAt.toMillis()
             : (Number(v.createdAtMs||0) || 0);
+          const createdAtOrigMs = Number(v.createdAtOrigMs || 0) || 0;
+          const orderUpdatedAtMs = Number(v.orderUpdatedAtMs || 0) || 0;
+          const queueOrderKey = normalizeCloudOrderKey(v.queueOrderKey || "");
 
           jobs.push({
             id: d.id,
             key: d.id,
+            queueOrderKey,
+            orderNo: (v.orderNo || "").toString(),
+            customer: (v.customer || v.cliente || v.customerName || v.nomeCliente || "").toString(),
+            lineKey: (v.lineKey || "").toString(),
+            code: (v.code || "").toString(),
+            supplier: (v.supplier || v.fornitore || "").toString(),
+            kind: (v.kind || "").toString(),
+            source: (v.source || "").toString(),
             product: (v.product || v.label || v.name || "").toString(),
             format: (v.format || v.variant || v.pack || "").toString(),
             qty: (v.qty ?? v.quantity ?? v.qta ?? "—"),
             unit: (v.unit || "pz").toString(),
             status: (v.status || "DA PRODURRE").toString(),
             createdAtMs,
-            _raw: v
+            createdAtOrigMs,
+            orderUpdatedAtMs,
+            _raw: { ...v, queueOrderKey, createdAtMs, createdAtOrigMs, orderUpdatedAtMs }
           });
         });
 
-        jobs.sort((a,b) => (a.createdAtMs||0) - (b.createdAtMs||0));
+        jobs.sort(compareQueueJobsCloud);
         lastJobs = jobs;
 
-        try{ saveQueueBackupNow(jobs); }catch(_){ }
+        try{ clearQueueBackupNow(); }catch(_){ }
         try{ Boot.mark('jobs'); }catch(_){ }
 
-        // Render usando la UI esistente
+        // Render usando solo ordine cloud del Tabellone WRITE
         try{
-          const h = stableHash(jobs.map(j => [j.id,j.product,j.format,j.qty,j.unit,j.status,j.createdAtMs]));
+          const h = stableHash(jobs.map(j => [j.id,j.queueOrderKey,j.product,j.format,j.qty,j.unit,j.status,j.createdAtOrigMs,j.createdAtMs,j.orderNo,j.lineKey]));
           if(h !== lastHash) { lastHash = h; renderSoft(jobs); }
           dbg("OK • realtime");
         }catch(_){
@@ -2988,30 +3019,54 @@ unmarkProducedCloud(it.key).then(() => {
 
   async function restoreToQueueFromPayload(key, payload){
     try{
-      const id = String(key || "");
+      const id = String(key || payload?.key || payload?.job?.key || "").trim();
       if(!id) return;
-      const job = payload?.job || payload?._job || null;
-      let product = job?.product || "";
-      let format  = job?.format || "";
-      let qty     = job?.qty ?? "—";
-      let unit    = job?.unit || "pz";
-      let status  = job?.status || "DA PRODURRE";
 
-      // fallback: prova a parsare dalla label "Prodotto • Formato"
+      const job = (payload?.job && typeof payload.job === "object") ? payload.job : {};
+      const pick = (...vals) => {
+        for(const v of vals){
+          if(v === undefined || v === null) continue;
+          if(typeof v === "string" && !v.trim()) continue;
+          return v;
+        }
+        return "";
+      };
+
+      let product = String(pick(job.product, payload?.product) || "");
+      let format  = String(pick(job.format, payload?.format) || "");
+      const qty   = pick(job.qty, payload?.qty, "—");
+      const unit  = String(pick(job.unit, payload?.unit, "pz") || "pz");
+      const status = String(pick(job.status, payload?.status, "DA PRODURRE") || "DA PRODURRE");
+
       if((!product || !format) && payload?.label){
         const parts = String(payload.label).split("•").map(s => s.trim());
         if(!product && parts[0]) product = parts[0];
         if(!format && parts[1])  format  = parts[1];
       }
 
+      const createdAtMs = Number(pick(job.createdAtMs, payload?.createdAtMs, job.createdAtOrigMs, payload?.createdAtOrigMs, Date.now()) || 0) || Date.now();
+      const createdAtOrigMs = Number(pick(job.createdAtOrigMs, payload?.createdAtOrigMs, createdAtMs) || 0) || createdAtMs;
+      const orderUpdatedAtMs = Number(pick(job.orderUpdatedAtMs, payload?.orderUpdatedAtMs, Date.now()) || 0) || Date.now();
+      const queueOrderKey = normalizeCloudOrderKey(pick(job.queueOrderKey, payload?.queueOrderKey));
+
       const out = {
         product,
         format,
         qty,
         unit,
-        status: status || "DA PRODURRE",
+        status,
+        queueOrderKey,
+        createdAtMs,
+        createdAtOrigMs,
+        orderUpdatedAtMs,
         restoredFromCompletedAtMs: Date.now(),
-        createdAtMs: Number(job?.createdAtMs||0) || Date.now()
+        orderNo: String(pick(job.orderNo, payload?.orderNo) || ""),
+        customer: String(pick(job.customer, payload?.customer, payload?.cliente) || ""),
+        lineKey: String(pick(job.lineKey, payload?.lineKey) || ""),
+        code: String(pick(job.code, payload?.code) || ""),
+        supplier: String(pick(job.supplier, payload?.supplier) || ""),
+        kind: String(pick(job.kind, payload?.kind) || ""),
+        source: String(pick(job.source, payload?.source) || "")
       };
 
       await setDoc(doc(queueCol, id), out, { merge:true });
@@ -3952,6 +4007,31 @@ doneShareEl?.addEventListener("click", async (ev) => {
 
   function makeKey(job, idx){ return String((job && (job.key || job.id || job._id)) || `${job.product}::${job.format}::${idx}`); }
 
+  function cloneQueueJobForUndo(job){
+    const raw = (job && job._raw && typeof job._raw === "object") ? job._raw : {};
+    return {
+      ...raw,
+      id: String(job?.id ?? raw.id ?? ""),
+      key: String(job?.key ?? job?.id ?? raw.key ?? raw.id ?? ""),
+      product: String(job?.product ?? raw.product ?? raw.label ?? raw.name ?? ""),
+      format: String(job?.format ?? raw.format ?? raw.variant ?? raw.pack ?? ""),
+      qty: (job?.qty ?? raw.qty ?? raw.quantity ?? raw.qta ?? "—"),
+      unit: String(job?.unit ?? raw.unit ?? "pz"),
+      status: String(job?.status ?? raw.status ?? "DA PRODURRE"),
+      queueOrderKey: normalizeCloudOrderKey(job?.queueOrderKey ?? raw.queueOrderKey ?? ""),
+      createdAtMs: Number(job?.createdAtMs ?? raw.createdAtMs ?? 0) || Date.now(),
+      createdAtOrigMs: Number(job?.createdAtOrigMs ?? raw.createdAtOrigMs ?? 0) || 0,
+      orderUpdatedAtMs: Number(job?.orderUpdatedAtMs ?? raw.orderUpdatedAtMs ?? 0) || 0,
+      orderNo: String(job?.orderNo ?? raw.orderNo ?? ""),
+      customer: String(job?.customer ?? raw.customer ?? raw.cliente ?? raw.customerName ?? raw.nomeCliente ?? ""),
+      lineKey: String(job?.lineKey ?? raw.lineKey ?? ""),
+      code: String(job?.code ?? raw.code ?? ""),
+      supplier: String(job?.supplier ?? raw.supplier ?? raw.fornitore ?? ""),
+      kind: String(job?.kind ?? raw.kind ?? ""),
+      source: String(job?.source ?? raw.source ?? "")
+    };
+  }
+
   async function forceRestartWipTimerToFirstActive(){ return; }
       function applyForcedStatuses(){
     if(!lastJobs || !lastJobs.length) return;
@@ -3973,10 +4053,8 @@ doneShareEl?.addEventListener("click", async (ev) => {
       if(!el) continue;
 
       el.dataset.key = k;
-      el.dataset.label = (`${lastJobs[i].product} • ${lastJobs[i].format}`).replace
-
       // attach job payload for completamento/undo
-      try{ el.__job = { product: lastJobs[i].product, format: lastJobs[i].format, qty: lastJobs[i].qty, unit: lastJobs[i].unit, status: lastJobs[i].status, createdAtMs: lastJobs[i].createdAtMs || Date.now() }; }catch(_){ }
+      try{ el.__job = cloneQueueJobForUndo(lastJobs[i]); }catch(_){ }
       
       el.dataset.label = (`${lastJobs[i].product} • ${lastJobs[i].format}`).replace(/\s+/g,' ').trim();
 
@@ -4027,6 +4105,8 @@ doneShareEl?.addEventListener("click", async (ev) => {
 
       el.dataset.key = key;
       el.dataset.label = (`${job.product} • ${job.format}`).replace(/\s+/g,' ').trim();
+
+      try{ el.__job = cloneQueueJobForUndo(job); }catch(_){ }
 
       if(producedCloud.has(key)) {
         el.style.display = "none";
@@ -4134,7 +4214,7 @@ async function refreshWeather(){
 
   // ===== Restore immediato (niente boot / niente 0) =====
   try{ restoreProducedBackupNow(); }catch(_){ }
-  try{ restoreQueueBackupNow(); }catch(_){ }
+  try{ clearQueueBackupNow(); }catch(_){ }
 
 
 
