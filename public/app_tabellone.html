@@ -2463,11 +2463,10 @@ const BUCKET = "linea_liquidi";
   }
 
   function compareQueueJobsCloud(a, b){
+    // Deve essere identico al comparatore del Tabellone WRITE.
     const ak = normalizeCloudOrderKey(a?.queueOrderKey || a?._raw?.queueOrderKey || "");
     const bk = normalizeCloudOrderKey(b?.queueOrderKey || b?._raw?.queueOrderKey || "");
     if(ak && bk && ak !== bk) return ak < bk ? -1 : 1;
-    if(ak && !bk) return -1;
-    if(!ak && bk) return 1;
 
     const ams = queueSortMsFromCloud(a);
     const bms = queueSortMsFromCloud(b);
@@ -2482,20 +2481,17 @@ const BUCKET = "linea_liquidi";
     return al.localeCompare(bl, "it");
   }
 
-  function restoreProducedBackupNow(){
-    try{
-      const raw = localStorage.getItem(PRODUCED_BACKUP_KEY) || "";
-      if(!raw) return false;
-      const payload = JSON.parse(raw);
-      const items = Array.isArray(payload?.items) ? payload.items : [];
-      if(!items.length) return false;
+  function clearProducedBackupNow(){
+    try{ localStorage.removeItem(PRODUCED_BACKUP_KEY); }catch(_){ }
+    try{ localStorage.removeItem(PRODUCED_BACKUP_HISTORY_KEY); }catch(_){ }
+  }
 
-      producedCloud.clear();
-      for(const it of items){
-        if(it && it.key) producedCloud.set(String(it.key), it);
-      }
-      renderProducedFromCloud();
-    
+  function restoreProducedBackupNow(){
+    // Fallback locale disabilitato: i completati devono seguire solo il cloud.
+    try{ clearProducedBackupNow(); }catch(_){ }
+    return false;
+  }
+
   // --- FIX: blocca larghezza badge stato come "DA PRODURRE" (evita allargamento in "IN PRODUZIONE") ---
   function lockStatusBadgeWidth(){
     try{
@@ -2517,16 +2513,9 @@ const BUCKET = "linea_liquidi";
       probe.remove();
 
       if(w > 0) root.style.setProperty("--statusBtnW", w + "px");
-    }catch(_){}
+    }catch(_){ }
   }
-  try{ lockStatusBadgeWidth(); }catch(_){}
-
-  try{ MobileUI.updateFromProduced(); }catch(_){}
-      return true;
-    }catch(_){
-      return false;
-    }
-  }
+  try{ lockStatusBadgeWidth(); }catch(_){ }
 
   function restoreQueueBackupNow(){
     // Fallback locale disabilitato: la queue parte e si aggiorna solo dal cloud.
@@ -2957,18 +2946,18 @@ unmarkProducedCloud(it.key).then(() => {
             id: d.id,
             key: d.id,
             queueOrderKey,
-            orderNo: (v.orderNo || "").toString(),
-            customer: (v.customer || v.cliente || v.customerName || v.nomeCliente || "").toString(),
-            lineKey: (v.lineKey || "").toString(),
-            code: (v.code || "").toString(),
-            supplier: (v.supplier || v.fornitore || "").toString(),
-            kind: (v.kind || "").toString(),
-            source: (v.source || "").toString(),
-            product: (v.product || v.label || v.name || "").toString(),
-            format: (v.format || v.variant || v.pack || "").toString(),
-            qty: (v.qty ?? v.quantity ?? v.qta ?? "—"),
-            unit: (v.unit || "pz").toString(),
-            status: (v.status || "DA PRODURRE").toString(),
+            orderNo: (v.orderNo || "").toString().trim(),
+            customer: (v.customer || v.cliente || v.customerName || v.nomeCliente || "").toString().trim(),
+            lineKey: (v.lineKey || "").toString().trim(),
+            code: (v.code || "").toString().trim(),
+            supplier: (v.supplier || v.fornitore || "").toString().trim(),
+            kind: (v.kind || "").toString().trim(),
+            source: (v.source || "").toString().trim(),
+            product: (v.product || v.finishedProductName || v.label || v.rawLine || "").toString().trim(),
+            format: (v.format || "").toString().trim(),
+            qty: (v.qty || "").toString().trim(),
+            unit: (v.unit || v.finishedProductUom || "").toString().trim(),
+            status: (v.status || "DA PRODURRE").toString().trim(),
             createdAtMs,
             createdAtOrigMs,
             orderUpdatedAtMs,
@@ -3032,11 +3021,11 @@ unmarkProducedCloud(it.key).then(() => {
         return "";
       };
 
-      let product = String(pick(job.product, payload?.product) || "");
+      let product = String(pick(job.product, payload?.product, job.finishedProductName, payload?.finishedProductName, payload?.rawLine) || "");
       let format  = String(pick(job.format, payload?.format) || "");
-      const qty   = pick(job.qty, payload?.qty, "—");
-      const unit  = String(pick(job.unit, payload?.unit, "pz") || "pz");
-      const status = String(pick(job.status, payload?.status, "DA PRODURRE") || "DA PRODURRE");
+      const qty   = String(pick(job.qty, payload?.qty, "") || "").trim();
+      const unit  = String(pick(job.unit, payload?.unit, job.finishedProductUom, payload?.finishedProductUom, "") || "").trim();
+      const status = String(pick(job.status, payload?.status, "DA PRODURRE") || "DA PRODURRE").trim();
 
       if((!product || !format) && payload?.label){
         const parts = String(payload.label).split("•").map(s => s.trim());
@@ -4212,8 +4201,8 @@ async function refreshWeather(){
   tickClock();
   setInterval(tickClock, 1000);
 
-  // ===== Restore immediato (niente boot / niente 0) =====
-  try{ restoreProducedBackupNow(); }catch(_){ }
+  // ===== Nessun fallback locale per righe/completati =====
+  try{ clearProducedBackupNow(); }catch(_){ }
   try{ clearQueueBackupNow(); }catch(_){ }
 
 
