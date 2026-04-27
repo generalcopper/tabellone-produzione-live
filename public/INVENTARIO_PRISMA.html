@@ -1742,10 +1742,7 @@
     const SUGGESTION_LIMIT = 80;
     const MAIL_COLLECTION = "email";
     const EMAIL_TO_MATTEO = "matteo@generalcoppersrl.com";
-    const EMAIL_TO_PRISMA = "francesco@prismalogistics.net";
-    const EMAIL_CC_INTERNAL = EMAIL_TO_MATTEO;
     const EMAIL_LINE_TAG = "inventario-prisma";
-    const PDF_LOGO_PATH = "/logo general copper.png";
 
     const COMPANY_GENERAL_COPPER = {
       label: "GENERAL COPPER SRL",
@@ -2296,12 +2293,12 @@
       return wh === WAREHOUSE_PRISMA ? COMPANY_PRISMA : COMPANY_GENERAL_COPPER;
     }
 
-    async function enqueueMatteoEmail(subject, textBody, htmlBody = "", attachments = [], toEmail = EMAIL_TO_MATTEO, ccEmail = ""){
+    async function enqueueMatteoEmail(subject, textBody, htmlBody = "", attachments = []){
       try{
-        if (!state.db) return "";
+        if (!state.db) return;
         const safeText = String(textBody || "").trim() || "Evento registrato.";
         const message = {
-          subject: String(subject || "HIGC - Comunicazione gestionale").trim() || "HIGC - Comunicazione gestionale",
+          subject: String(subject || "Inventario Prisma").trim() || "Inventario Prisma",
           text: safeText
         };
         if (String(htmlBody || "").trim()){
@@ -2323,8 +2320,8 @@
           message.attachments = safeAttachments;
         }
 
-        const emailDoc = {
-          to: cleanSpaces(toEmail || EMAIL_TO_MATTEO) || EMAIL_TO_MATTEO,
+        await addDoc(collection(state.db, MAIL_COLLECTION), {
+          to: EMAIL_TO_MATTEO,
           message,
           createdAt: serverTimestamp(),
           line: EMAIL_LINE_TAG,
@@ -2332,15 +2329,9 @@
           hasAttachments: safeAttachments.length > 0,
           attachmentCount: safeAttachments.length,
           createdBy: prettifyUserLabel(state.user?.displayName || state.user?.email || state.user?.uid || "Sistema")
-        };
-        const cc = cleanSpaces(ccEmail || "");
-        if (cc) emailDoc.cc = cc;
-
-        const ref = await addDoc(collection(state.db, MAIL_COLLECTION), emailDoc);
-        return ref?.id || "";
+        });
       }catch(err){
         console.warn("enqueueMatteoEmail failed", err);
-        throw err;
       }
     }
 
@@ -2393,8 +2384,7 @@
     function buildPrismaTransferEmail({ product, qty, uom, ddtNumber, date, createdAt, userLabel, userEmail, config }){
       const operator = prettifyUserLabel(userLabel || userEmail || state.user?.uid || "Operatore");
       const whenLabel = fmtDateTime(createdAt || new Date());
-      const normalizedQty = safeInt(qty);
-      const qtyLabel = `${normalizedQty.toLocaleString("it-IT")} ${uom}`;
+      const qtyLabel = `${qty.toLocaleString("it-IT")} ${uom}`;
       const itemLabel = String(product?.name || product?.code || "Articolo").trim() || "Articolo";
       const codeLabel = String(product?.code || "").trim();
       const senderWarehouse = config?.sourceLabel || warehouseLabel(config?.sourceWarehouse || WAREHOUSE_CEREA);
@@ -2403,51 +2393,61 @@
       const destinationWh = normalizeWarehouse(config?.destinationWarehouse || receiverWarehouse);
 
       const requestLine = sourceWh === WAREHOUSE_CEREA && destinationWh === WAREHOUSE_PRISMA
-        ? "con la presente si richiede il ritiro della merce presso il nostro magazzino di Cerea e il trasferimento presso Prisma."
+        ? "con la presente si richiede il ritiro della merce presso il nostro magazzino di Cerea e il trasferimento presso il magazzino Prisma."
         : sourceWh === WAREHOUSE_PRISMA && destinationWh === WAREHOUSE_CEREA
-          ? "con la presente si richiede la predisposizione della merce presso il magazzino Prisma e il trasferimento presso il nostro magazzino di Cerea."
+          ? "con la presente si richiede il ritiro della merce presso il magazzino Prisma e il trasferimento presso il nostro magazzino di Cerea."
           : `con la presente si richiede la gestione del trasferimento merce dal magazzino ${senderWarehouse} al magazzino ${receiverWarehouse}.`;
 
-      const subject = `DDT ${ddtNumber} - Richiesta ritiro merce ${senderWarehouse} / ${receiverWarehouse}`;
+      const subject = `HIGC - Richiesta ritiro merce - DDT ${ddtNumber} - ${senderWarehouse} / ${receiverWarehouse}`;
+
       const textBody = [
         "Buongiorno,",
         "",
         requestLine,
-        `Si invia in allegato il documento di trasporto ${ddtNumber} relativo alla movimentazione in oggetto.`,
         "",
+        `Si invia in allegato il documento di trasporto ${ddtNumber} relativo alla movimentazione indicata.`,
+        "",
+        "Dati principali:",
+        `DDT: ${ddtNumber}`,
+        `Data documento: ${date}`,
         `Magazzino mittente: ${senderWarehouse}`,
         `Magazzino destinatario: ${receiverWarehouse}`,
         `Articolo: ${itemLabel}`,
         `Codice articolo: ${codeLabel || "—"}`,
         `Quantità: ${qtyLabel}`,
-        `Data documento: ${date}`,
         "",
-        "Restiamo a disposizione per qualsiasi necessità.",
+        `Registrazione gestionale: ${whenLabel}`,
+        `Operatore: ${operator}`,
         "",
         "Cordiali saluti",
         "General Copper SRL",
         "",
-        `Riferimento gestionale: ${whenLabel} - ${operator}`
+        "HIGC - HUB INVENTARIO GENERAL COPPER"
       ].join("\n");
+
       const htmlBody = `
         <div style="font-family:Arial, Helvetica, sans-serif; font-size:14px; color:#111827; line-height:1.55;">
           <p>Buongiorno,</p>
           <p>${escapeHtml(requestLine)}</p>
-          <p>Si invia in allegato il documento di trasporto <strong>${escapeHtml(ddtNumber)}</strong> relativo alla movimentazione in oggetto.</p>
-          <p>
-            Magazzino mittente: <strong>${escapeHtml(senderWarehouse)}</strong><br>
-            Magazzino destinatario: <strong>${escapeHtml(receiverWarehouse)}</strong><br>
-            Articolo: <strong>${escapeHtml(itemLabel)}</strong><br>
-            Codice articolo: <strong>${escapeHtml(codeLabel || "—")}</strong><br>
-            Quantità: <strong>${escapeHtml(qtyLabel)}</strong><br>
-            Data documento: ${escapeHtml(date)}
-          </p>
-          <p>Restiamo a disposizione per qualsiasi necessità.</p>
-          <p>Cordiali saluti<br>General Copper SRL</p>
-          <p style="font-size:11px; color:#6b7280; margin-top:14px;">Riferimento gestionale: ${escapeHtml(whenLabel)} - ${escapeHtml(operator)}</p>
+          <p>Si invia in allegato il documento di trasporto <strong>${escapeHtml(ddtNumber)}</strong> relativo alla movimentazione indicata.</p>
+
+          <p style="margin-top:16px; margin-bottom:6px;"><strong>Dati principali</strong></p>
+          <table style="border-collapse:collapse; font-size:13px; line-height:1.45;">
+            <tr><td style="padding:3px 18px 3px 0; color:#4b5563;">DDT</td><td style="padding:3px 0;"><strong>${escapeHtml(ddtNumber)}</strong></td></tr>
+            <tr><td style="padding:3px 18px 3px 0; color:#4b5563;">Data documento</td><td style="padding:3px 0;">${escapeHtml(date)}</td></tr>
+            <tr><td style="padding:3px 18px 3px 0; color:#4b5563;">Magazzino mittente</td><td style="padding:3px 0;">${escapeHtml(senderWarehouse)}</td></tr>
+            <tr><td style="padding:3px 18px 3px 0; color:#4b5563;">Magazzino destinatario</td><td style="padding:3px 0;">${escapeHtml(receiverWarehouse)}</td></tr>
+            <tr><td style="padding:3px 18px 3px 0; color:#4b5563;">Articolo</td><td style="padding:3px 0;"><strong>${escapeHtml(itemLabel)}</strong></td></tr>
+            <tr><td style="padding:3px 18px 3px 0; color:#4b5563;">Codice articolo</td><td style="padding:3px 0;">${escapeHtml(codeLabel || "—")}</td></tr>
+            <tr><td style="padding:3px 18px 3px 0; color:#4b5563;">Quantità</td><td style="padding:3px 0;"><strong>${escapeHtml(qtyLabel)}</strong></td></tr>
+          </table>
+
+          <p style="margin-top:16px;">Cordiali saluti<br>General Copper SRL</p>
+          <p style="font-size:11px; color:#6b7280;">HIGC - HUB INVENTARIO GENERAL COPPER · ${escapeHtml(whenLabel)} · ${escapeHtml(operator)}</p>
         </div>
       `.trim();
-      return { subject, textBody, htmlBody, to: EMAIL_TO_PRISMA, cc: EMAIL_CC_INTERNAL };
+
+      return { subject, textBody, htmlBody };
     }
 
     function buildPrismaRectifyEmail({ code, name, uom, oldQty, newQty, delta, docNum, date, createdAt, userLabel, userEmail }){
@@ -3429,24 +3429,16 @@
       return lines.length ? lines : [""];
     }
 
-    function buildPdfDataUrl(commands, images = []){
+    function buildPdfDataUrl(commands){
       const stream = commands.join("\n");
-      const safeImages = Array.isArray(images) ? images.filter(img => img && img.data && img.width && img.height) : [];
-      const xObjectEntries = safeImages.map((_, index) => `/Im${index + 1} ${7 + index} 0 R`).join(" ");
-      const resources = `<< /Font << /F1 4 0 R /F2 5 0 R >>${xObjectEntries ? ` /XObject << ${xObjectEntries} >>` : ""} >>`;
       const objects = [
         "<< /Type /Catalog /Pages 2 0 R >>",
         "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-        `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources ${resources} /Contents 6 0 R >>`,
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 4 0 R /F2 5 0 R >> >> /Contents 6 0 R >>",
         "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
         "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>",
         `<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`
       ];
-
-      safeImages.forEach((img) => {
-        objects.push(`<< /Type /XObject /Subtype /Image /Width ${safeInt(img.width)} /Height ${safeInt(img.height)} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${String(img.data).length} >>\nstream\n${img.data}\nendstream`);
-      });
-
       let pdf = "%PDF-1.4\n%\xE2\xE3\xCF\xD3\n";
       const offsets = [0];
       objects.forEach((obj, index) => {
@@ -3462,83 +3454,7 @@
       return `data:application/pdf;base64,${btoa(pdf)}`;
     }
 
-    let pdfLogoImagePromise = null;
-    async function loadPdfLogoImage(){
-      if (pdfLogoImagePromise) return pdfLogoImagePromise;
-      pdfLogoImagePromise = new Promise(async (resolve) => {
-        const logoSources = [
-          PDF_LOGO_PATH,
-          encodeURI(PDF_LOGO_PATH),
-          `.${PDF_LOGO_PATH}`,
-          encodeURI(`.${PDF_LOGO_PATH}`)
-        ].filter((value, index, list) => value && list.indexOf(value) === index);
-
-        async function tryLoadLogo(src, useCors = false){
-          return new Promise((finish) => {
-            try{
-              const img = new Image();
-              let done = false;
-              const complete = (value) => {
-                if (done) return;
-                done = true;
-                finish(value || null);
-              };
-              const timer = setTimeout(() => complete(null), 2200);
-              if (useCors) img.crossOrigin = "anonymous";
-              img.onload = () => {
-                try{
-                  clearTimeout(timer);
-                  const naturalW = Math.max(1, img.naturalWidth || img.width || 1);
-                  const naturalH = Math.max(1, img.naturalHeight || img.height || 1);
-                  const maxW = 420;
-                  const scale = Math.min(1, maxW / naturalW);
-                  const canvas = document.createElement("canvas");
-                  canvas.width = Math.max(1, Math.round(naturalW * scale));
-                  canvas.height = Math.max(1, Math.round(naturalH * scale));
-                  const ctx = canvas.getContext("2d", { alpha:false });
-                  ctx.fillStyle = "#FFFFFF";
-                  ctx.fillRect(0, 0, canvas.width, canvas.height);
-                  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-                  const dataUrl = canvas.toDataURL("image/jpeg", .82);
-                  const base64 = String(dataUrl || "").split(",")[1] || "";
-                  if (!base64){ complete(null); return; }
-                  complete({ width: canvas.width, height: canvas.height, data: atob(base64), source: src });
-                }catch(err){
-                  console.warn("Logo PDF non disponibile", err);
-                  complete(null);
-                }
-              };
-              img.onerror = () => {
-                clearTimeout(timer);
-                complete(null);
-              };
-              img.src = src;
-            }catch(err){
-              console.warn("Logo PDF non disponibile", err);
-              finish(null);
-            }
-          });
-        }
-
-        for (const src of logoSources){
-          const sameOriginLogo = await tryLoadLogo(src, false);
-          if (sameOriginLogo){ resolve(sameOriginLogo); return; }
-        }
-        for (const src of logoSources){
-          const corsLogo = await tryLoadLogo(src, true);
-          if (corsLogo){ resolve(corsLogo); return; }
-        }
-        resolve(null);
-      });
-      return pdfLogoImagePromise;
-    }
-
-    async function buildDdtPdfDataUrlAsync(ddt){
-      const logoImage = await loadPdfLogoImage().catch(() => null);
-      return buildDdtPdfDataUrl(ddt, logoImage);
-    }
-
-    function buildDdtPdfDataUrl(ddt, logoImage = null){
+    function buildDdtPdfDataUrl(ddt){
       const W = 595;
       const H = 842;
       const margin = 36;
@@ -3582,9 +3498,6 @@
       function textCenter(centerX, top, value, size = 10, bold = false){
         const str = String(value ?? "");
         text(centerX - textWidth(str, size, bold) / 2, top, str, size, bold);
-      }
-      function drawImage(name, x, top, width, height){
-        cmds.push(`q ${Number(width).toFixed(2)} 0 0 ${Number(height).toFixed(2)} ${Number(x).toFixed(2)} ${Number(y(top + height)).toFixed(2)} cm /${name} Do Q`);
       }
       function wrapWidth(value, maxWidth, size = 8, bold = false){
         const input = cleanSpaces(value);
@@ -3685,35 +3598,16 @@
       fill(colors.white); rect(0, 0, W, H, "f");
       fill(colors.accent); rect(0, 0, W, 9, "f");
 
-      const logoBoxX = right - 178;
-      const logoBoxY = 24;
-      const logoBoxW = 178;
-      const logoBoxH = 50;
-      if (logoImage && logoImage.width && logoImage.height){
-        const ratio = logoImage.width / Math.max(1, logoImage.height);
-        let logoW = Math.min(logoBoxW, logoBoxH * ratio);
-        let logoH = logoW / Math.max(.1, ratio);
-        if (logoH > logoBoxH){
-          logoH = logoBoxH;
-          logoW = logoH * ratio;
-        }
-        drawImage("Im1", logoBoxX + logoBoxW - logoW, logoBoxY + (logoBoxH - logoH) / 2, logoW, logoH);
-      }else{
-        fill(colors.main);
-        textRight(right, 42, "GENERAL COPPER", 15, true);
-        fill(colors.muted);
-        textRight(right, 58, "HUB INVENTARIO", 7.8, true);
-      }
+      fill(colors.main);
+      text(margin, 37, "GENERAL COPPER SRL", 14, true);
+      fill(colors.muted);
+      text(margin, 54, "Documento generato dal gestionale", 8.2, false);
+      text(margin, 68, "Trasferimento merci tra magazzini", 8.2, false);
 
       fill(colors.main);
-      text(margin, 34, "DOCUMENTO DI TRASPORTO", 18.4, true);
+      text(right - 218, 37, "DOCUMENTO DI TRASPORTO", 17.5, true);
       fill(colors.accent);
-      rect(margin, 43, 214, 2.4, "f");
-      fill(colors.muted);
-      text(margin, 58, "DDT interno di trasferimento merce", 8.4, false);
-      text(margin, 70, "HIGC - Hub Inventario General Copper", 8.1, false);
-      stroke(colors.grid);
-      line(margin, 80, right, 80);
+      rect(right - 218, 46, 178, 2.4, "f");
 
       const metaTop = 84;
       fill(colors.white); stroke(colors.border); rect(margin, metaTop, 523, 64, "B");
@@ -3818,13 +3712,12 @@
       if (movements.length){
         movements.forEach((mv, index) => {
           const rowY = summaryTop + 37 + index * 14;
-          const rawMovementCode = cleanSpaces(mv.movementProgressive || `M${index + 1}`);
-          const shortMovementCode = cleanSpaces((rawMovementCode.match(/M\d+$/i) || [rawMovementCode])[0] || `M${index + 1}`);
+          const movementCode = cleanSpaces(mv.movementProgressive || `M${index + 1}`);
           const warehouse = cleanSpaces(mv.warehouseLabel || warehouseLabel(mv.warehouse));
           const quantity = `${safeInt(mv.qty).toLocaleString("it-IT")} ${cleanSpaces(mv.uom || ddt.uom || "pz")}`;
           fill(colors.main);
-          text(movX + 10, rowY, shortMovementCode, 7.2, true);
-          textWrapped(movX + 58, rowY, warehouse, 120, 7.2, false, 8.6, 1);
+          text(movX + 10, rowY, movementCode, 7.2, true);
+          textWrapped(movX + 68, rowY, warehouse, 112, 7.2, false, 8.6, 1);
           textRight(movX + movW - 10, rowY, quantity, 7.2, true);
         });
       }else{
@@ -3844,10 +3737,10 @@
       textCenter(margin + 360 + signW / 2, signTop + 18, "Firma destinatario", 7.8, true);
 
       fill(colors.muted);
-      text(margin, 824, "HIGC - DOCUMENTO GENERATO DA HUB INVENTARIO GENERAL COPPER", 7, false);
+      text(margin, 824, "Documento generato automaticamente dal gestionale", 7, false);
       textRight(right, 824, "Pag. 1", 8, true);
 
-      return buildPdfDataUrl(cmds, logoImage ? [logoImage] : []);
+      return buildPdfDataUrl(cmds);
     }
 
     function openPdfDataUrl(dataUrl, name = "documento-ddt.pdf"){
@@ -3876,10 +3769,10 @@
       }
     }
 
-    async function openDdtDocument(idOrNumber){
+    function openDdtDocument(idOrNumber){
       const docItem = findDdtDocument(idOrNumber);
       if (!docItem){ showToast("DDT non trovato", "err"); return; }
-      const pdf = await buildDdtPdfDataUrlAsync(docItem);
+      const pdf = docItem.pdfDataUrl || buildDdtPdfDataUrl(docItem);
       openPdfDataUrl(pdf, docItem.pdfFileName || `${docItem.ddtNumber || "DDT"}.pdf`);
     }
 
@@ -4727,19 +4620,95 @@
       };
     }
 
+    function formatConfirmQty(value, uom = "pz"){
+      return `${safeInt(value).toLocaleString("it-IT")} ${normalizeUom(uom || "") || "pz"}`.trim();
+    }
+
     function buildInventoryAdjustConfirmMessage({ name, code, uom, displayedQty, liveQty, nextQty }){
+      const delta = safeInt(nextQty) - safeInt(liveQty);
+      const absDelta = Math.abs(delta);
+      const typeLabel = delta > 0 ? "CARICO / aumento inventario Prisma" : "SCARICO / riduzione inventario Prisma";
+      const movementLabel = delta > 0 ? "movimento IN / carico su Prisma" : "movimento OUT / scarico da Prisma";
       const lines = [];
+
+      lines.push("CONFERMA OPERAZIONE DI MAGAZZINO");
+      lines.push("");
       if (liveQty !== displayedQty){
-        lines.push("La quantità è cambiata nel frattempo.");
+        lines.push("Attenzione: la quantità è cambiata nel frattempo.");
         lines.push("");
       }
-      lines.push(String(name || code || "Articolo").trim() || "Articolo");
+      lines.push(`Operazione: Rettifica inventario Prisma`);
+      lines.push(`Tipo: ${typeLabel}`);
+      lines.push("");
+      lines.push(`Articolo: ${String(name || code || "Articolo").trim() || "Articolo"}`);
       if (code) lines.push(`Codice: ${code}`);
       lines.push("");
-      lines.push(`Quantità attuale: ${liveQty.toLocaleString("it-IT")} ${uom}`);
-      lines.push(`Nuova quantità: ${nextQty.toLocaleString("it-IT")} ${uom}`);
+      lines.push(`Quantità attuale Prisma: ${formatConfirmQty(liveQty, uom)}`);
+      lines.push(`Nuova quantità Prisma: ${formatConfirmQty(nextQty, uom)}`);
+      lines.push(`Variazione: ${delta > 0 ? "+" : "-"}${formatConfirmQty(absDelta, uom)}`);
       lines.push("");
-      lines.push("Confermi la rettifica a Prisma?");
+      lines.push("Effetto gestionale:");
+      lines.push(`- crea ${movementLabel}`);
+      lines.push("- registra la rettifica inventario");
+      lines.push("- invia email gestionale a Matteo");
+      lines.push("");
+      lines.push("Procedere con l'operazione?");
+      return lines.join("\n");
+    }
+
+    function buildTransferConfirmMessage({ config, product, qty, uom, available, sourceRows }){
+      const normalizedUom = normalizeUom(uom || product?.uom || "") || "pz";
+      const sourceLabel = cleanSpaces(config?.sourceLabel || warehouseLabel(config?.sourceWarehouse));
+      const destinationLabel = cleanSpaces(config?.destinationLabel || warehouseLabel(config?.destinationWarehouse));
+      const itemName = cleanSpaces(product?.name || product?.code || "Articolo") || "Articolo";
+      const productCode = cleanSpaces(product?.code || "");
+      const rows = Array.isArray(sourceRows) ? sourceRows : [];
+      const allocations = [];
+      let remaining = safeInt(qty);
+
+      for (const row of rows){
+        if (remaining <= 0) break;
+        const take = Math.min(safeInt(row?.qty), remaining);
+        if (!take) continue;
+        allocations.push({
+          qty: take,
+          customer: cleanSpaces(row?.customer || ""),
+          item: cleanSpaces(row?.item || itemName)
+        });
+        remaining -= take;
+      }
+
+      const lines = [];
+      lines.push("CONFERMA OPERAZIONE DI MAGAZZINO");
+      lines.push("");
+      lines.push(`Operazione: ${cleanSpaces(config?.actionLabel || "Trasferimento inventario")}`);
+      lines.push(`Tipo: SCARICO da ${sourceLabel} + CARICO a ${destinationLabel}`);
+      lines.push("");
+      lines.push(`Articolo: ${itemName}`);
+      if (productCode) lines.push(`Codice: ${productCode}`);
+      lines.push(`Quantità da movimentare: ${formatConfirmQty(qty, normalizedUom)}`);
+      lines.push(`Disponibilità ${sourceLabel}: ${formatConfirmQty(available, normalizedUom)}`);
+      lines.push("");
+      lines.push("Effetto gestionale:");
+      lines.push(`- crea movimento OUT / scarico da ${sourceLabel}`);
+      lines.push(`- crea movimento IN / carico a ${destinationLabel}`);
+      lines.push("- genera Documento di Trasporto");
+      lines.push("- invia email gestionale a Matteo con DDT allegato");
+
+      if (allocations.length){
+        lines.push("");
+        lines.push("Prelievo previsto:");
+        allocations.slice(0, 6).forEach((row, index) => {
+          const customer = row.customer ? ` · ${row.customer}` : "";
+          lines.push(`${index + 1}) ${formatConfirmQty(row.qty, normalizedUom)}${customer}`);
+        });
+        if (allocations.length > 6){
+          lines.push(`... altre ${allocations.length - 6} righe`);
+        }
+      }
+
+      lines.push("");
+      lines.push("Procedere con l'operazione?");
       return lines.join("\n");
     }
 
@@ -4855,6 +4824,18 @@
       }
       if (available < qty){
         showToast(`Disponibilità ${config.sourceLabel} insufficiente (${available.toLocaleString("it-IT")} ${product.uom})`, "err");
+        return;
+      }
+
+      const confirmed = window.confirm(buildTransferConfirmMessage({
+        config,
+        product,
+        qty,
+        uom: product.uom || "pz",
+        available,
+        sourceRows
+      }));
+      if (!confirmed){
         return;
       }
 
@@ -5008,12 +4989,16 @@
           createdByEmail: userEmail,
           createdByUid: userUid
         };
-        const ddtPdfDataUrl = await buildDdtPdfDataUrlAsync(ddtPayload);
-        const ddtPdfBase64 = String(ddtPdfDataUrl || "").split(",")[1] || "";
+        ddtPayload.pdfDataUrl = buildDdtPdfDataUrl(ddtPayload);
+        ddtPayload.pdfBase64 = String(ddtPayload.pdfDataUrl || "").split(",")[1] || "";
         ddtPayload.pdfMimeType = "application/pdf";
         ddtPayload.pdfFilename = ddtPayload.pdfFileName;
-        ddtPayload.pdfGeneratedBy = "HIGC";
-        ddtPayload.pdfGeneratedAt = date;
+        ddtPayload.pdf = {
+          dataUrl: ddtPayload.pdfDataUrl,
+          base64: ddtPayload.pdfBase64,
+          fileName: ddtPayload.pdfFileName,
+          mimeType: "application/pdf"
+        };
 
         batch.set(ddtRef, ddtPayload);
         await batch.commit();
@@ -5032,13 +5017,12 @@
           });
           await enqueueMatteoEmail(emailData.subject, emailData.textBody, emailData.htmlBody, [{
             filename: ddtPayload.pdfFileName || `${reserved.ddtNumber}.pdf`,
-            content: ddtPdfBase64,
+            content: ddtPayload.pdfBase64 || String(ddtPayload.pdfDataUrl || "").split(",")[1] || "",
             contentType: "application/pdf",
             encoding: "base64"
-          }], emailData.to || EMAIL_TO_PRISMA, emailData.cc || EMAIL_CC_INTERNAL);
+          }]);
         }catch(mailErr){
           console.warn("prisma transfer email failed", mailErr);
-          showToast("DDT salvato, ma email non creata. Controlla permessi/rules della collection email.", "warn");
         }
         state.loadCommand = "";
         state.loadSelectedCode = "";
