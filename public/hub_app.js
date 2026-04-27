@@ -41,7 +41,7 @@
   try {
     if (document.getElementById("viewInventory")) return;
 
-    const html = "<div id=\"viewInventory\" class=\"view modalOverlay\">\n  <article class=\"card\" id=\"stockCard\">\n    <div class=\"hd\">\n      <div class=\"overlayHeaderTitle\">\n        <button class=\"iconBtn overlayBack\" id=\"btnBackInv\" type=\"button\" aria-label=\"Indietro\">\u2039</button>\n        <h2>Inventario</h2>\n      </div>\n      <div class=\"inlineRow\" style=\"gap:8px; justify-content:flex-end;\">\n        <div class=\"pill\" id=\"pillInvWarehouse\" style=\"display:none\">\u2014</div>\n        <div class=\"pill\" id=\"pillStock\">0 righe</div>\n        <button class=\"iconBtn\" id=\"btnCloseInv\" type=\"button\" aria-label=\"Chiudi\">\u00d7</button>\n      </div>\n    </div>\n    <div class=\"bd\">\n\n      <!-- Step 1: scelta inventario -->\n      <div id=\"invPicker\" class=\"stack\">\n        <div class=\"hero-sub\">Seleziona inventario</div>\n        <div class=\"homeActions\" style=\"grid-template-columns: 1fr; gap: 14px;\">\n          <button class=\"btn btn-primary homeTile\" id=\"btnPickCerea\" type=\"button\" aria-label=\"Inventario Cerea\">\n            <div class=\"homeTileTop\">\n              <svg class=\"homeTileIcon\" viewBox=\"0 0 24 24\" aria-hidden=\"true\">\n                <path d=\"M4 6a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v2a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6zm0 8a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-4z\"/>\n              </svg>\n              <span class=\"homeTileBadge\">CEREA</span>\n            </div>\n            <div class=\"homeTileText\">\n              <div class=\"homeTileTitle\">Inventario Cerea</div>\n              <div class=\"homeTileSub\">Apri stock e categorie</div>\n            </div>\n          </button>\n\n          <button class=\"btn btn-primary homeTile\" id=\"btnPickConcamarise\" type=\"button\" aria-label=\"Inventario Concamarise\">\n            <div class=\"homeTileTop\">\n              <svg class=\"homeTileIcon\" viewBox=\"0 0 24 24\" aria-hidden=\"true\">\n                <path d=\"M4 6a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v2a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6zm0 8a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-4z\"/>\n              </svg>\n              <span class=\"homeTileBadge\">CONCA</span>\n            </div>\n            <div class=\"homeTileText\">\n              <div class=\"homeTileTitle\">Inventario Concamarise</div>\n              <div class=\"homeTileSub\">Apri stock e categorie</div>\n            </div>\n          </button>\n        </div>\n      </div>\n\n      <!-- Step 2: dettaglio inventario selezionato -->\n      <div id=\"invDetail\" class=\"stack\" style=\"display:none;\">\n        <div class=\"inlineRow\" style=\"justify-content:space-between; align-items:flex-end; gap:12px;\">\n          <div class=\"stack\" style=\"flex:1; min-width: 220px;\">\n            <div class=\"hero-sub\" id=\"invDetailTitle\">Inventario</div>\n            <div class=\"muted\">Stock e categorie per sede</div>\n          </div>\n          <button class=\"btn btn-ghost btn-xs\" id=\"btnInvBackPicker\" type=\"button\">\u2190 Cambia inventario</button>\n        </div>\n\n        <div class=\"inlineRow listStickyBar\" style=\"justify-content: space-between;\">\n          <div class=\"inlineRow\" style=\"flex: 1 1 auto;\">\n            <div class=\"field\" style=\"min-width: 220px;\">\n              <label for=\"searchStock\">Cerca</label>\n              <input id=\"searchStock\" placeholder=\"Fornitore / codice / articolo\u2026\" />\n            </div>\n            <div class=\"field\" style=\"min-width: 180px;\">\n              <label for=\"filterCustomer\">Fornitore</label>\n              <select id=\"filterCustomer\">\n                <option value=\"\">Tutti</option>\n              </select>\n            </div>\n            <div class=\"field\" style=\"min-width: 180px;\">\n              <label for=\"filterLow\">Filtro</label>\n              <select id=\"filterLow\">\n                <option value=\"all\">Tutti</option>\n                <option value=\"low\">Solo scorta bassa</option>\n                <option value=\"zero\">Solo zero</option>\n              </select>\n            </div>\n            <div class=\"field\" style=\"min-width: 180px;\">\n              <label for=\"filterCategory\">Categoria</label>\n              <select id=\"filterCategory\">\n                <option value=\"\">Tutte</option>\n                <option value=\"__none\">Non assegnata</option>\n              </select>\n            </div>\n          </div>\n          <div class=\"inlineRow\" style=\"gap:8px; align-items:flex-end;\">\n            <button class=\"btn btn-secondary btn-xs\" id=\"btnPdfBackup\" type=\"button\">PDF backup</button>\n          </div>\n        </div>\n\n        <!-- STOCK (per inventario selezionato) -->\n        <div class=\"tableWrap\" style=\"max-height: 420px; overflow:auto; margin-top: 10px;\">\n          <table class=\"dataGrid\">\n            <thead>\n              <tr>\n                <th>Nome articolo</th>\n                <th>Cod. articolo</th>\n                <th>Categoria</th>\n                <th class=\"qty\">Q.tà</th>\n              </tr>\n            </thead>\n            <tbody id=\"stockTbody\">\n              <tr><td class=\"td-muted\" colspan=\"4\">Seleziona un inventario.</td></tr>\n            </tbody>\n          </table>\n        </div>\n      </div>\n\n    </div>\n  </article>\n</div>";
+    const html = "<div id=\"viewInventory\" class=\"view modalOverlay\">\n  <article class=\"card\" id=\"stockCard\">\n    <div class=\"hd\">\n      <div class=\"overlayHeaderTitle\">\n        <button class=\"iconBtn overlayBack\" id=\"btnBackInv\" type=\"button\" aria-label=\"Indietro\">\u2039</button>\n        <h2>Inventario</h2>\n      </div>\n      <div class=\"inlineRow\" style=\"gap:8px; justify-content:flex-end;\">\n        <div class=\"pill\" id=\"pillInvWarehouse\" style=\"display:none\">\u2014</div>\n        <div class=\"pill\" id=\"pillStock\">0 righe</div>\n        <button class=\"iconBtn\" id=\"btnCloseInv\" type=\"button\" aria-label=\"Chiudi\">\u00d7</button>\n      </div>\n    </div>\n    <div class=\"bd\">\n\n      <!-- Step 1: scelta inventario -->\n      <div id=\"invPicker\" class=\"stack\">\n        <div class=\"hero-sub\">Seleziona inventario</div>\n        <div class=\"homeActions\" style=\"grid-template-columns: 1fr; gap: 14px;\">\n          <button class=\"btn btn-primary homeTile\" id=\"btnPickCerea\" type=\"button\" aria-label=\"Inventario Cerea\">\n            <div class=\"homeTileTop\">\n              <svg class=\"homeTileIcon\" viewBox=\"0 0 24 24\" aria-hidden=\"true\">\n                <path d=\"M4 6a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v2a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6zm0 8a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-4z\"/>\n              </svg>\n              <span class=\"homeTileBadge\">CEREA</span>\n            </div>\n            <div class=\"homeTileText\">\n              <div class=\"homeTileTitle\">Inventario Cerea</div>\n              <div class=\"homeTileSub\">Apri stock e categorie</div>\n            </div>\n          </button>\n\n          <button class=\"btn btn-primary homeTile\" id=\"btnPickConcamarise\" type=\"button\" aria-label=\"Inventario Concamarise\">\n            <div class=\"homeTileTop\">\n              <svg class=\"homeTileIcon\" viewBox=\"0 0 24 24\" aria-hidden=\"true\">\n                <path d=\"M4 6a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v2a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6zm0 8a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-4z\"/>\n              </svg>\n              <span class=\"homeTileBadge\">CONCA</span>\n            </div>\n            <div class=\"homeTileText\">\n              <div class=\"homeTileTitle\">Inventario Concamarise</div>\n              <div class=\"homeTileSub\">Apri stock e categorie</div>\n            </div>\n          </button>\n\n          <button class=\"btn btn-primary homeTile\" id=\"btnPickPrisma\" type=\"button\" aria-label=\"Inventario Prisma\">\n            <div class=\"homeTileTop\">\n              <svg class=\"homeTileIcon\" viewBox=\"0 0 24 24\" aria-hidden=\"true\">\n                <path d=\"M4 6a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v2a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6zm0 8a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-4z\"/>\n              </svg>\n              <span class=\"homeTileBadge\">PRISMA</span>\n            </div>\n            <div class=\"homeTileText\">\n              <div class=\"homeTileTitle\">Inventario Prisma</div>\n              <div class=\"homeTileSub\">Apri stock e categorie</div>\n            </div>\n          </button>\n        </div>\n      </div>\n\n      <!-- Step 2: dettaglio inventario selezionato -->\n      <div id=\"invDetail\" class=\"stack\" style=\"display:none;\">\n        <div class=\"inlineRow\" style=\"justify-content:space-between; align-items:flex-end; gap:12px;\">\n          <div class=\"stack\" style=\"flex:1; min-width: 220px;\">\n            <div class=\"hero-sub\" id=\"invDetailTitle\">Inventario</div>\n            <div class=\"muted\">Stock e categorie per sede</div>\n          </div>\n          <button class=\"btn btn-ghost btn-xs\" id=\"btnInvBackPicker\" type=\"button\">\u2190 Cambia inventario</button>\n        </div>\n\n        <div class=\"inlineRow listStickyBar\" style=\"justify-content: space-between;\">\n          <div class=\"inlineRow\" style=\"flex: 1 1 auto;\">\n            <div class=\"field\" style=\"min-width: 220px;\">\n              <label for=\"searchStock\">Cerca</label>\n              <input id=\"searchStock\" placeholder=\"Fornitore / codice / articolo\u2026\" />\n            </div>\n            <div class=\"field\" style=\"min-width: 180px;\">\n              <label for=\"filterCustomer\">Fornitore</label>\n              <select id=\"filterCustomer\">\n                <option value=\"\">Tutti</option>\n              </select>\n            </div>\n            <div class=\"field\" style=\"min-width: 180px;\">\n              <label for=\"filterLow\">Filtro</label>\n              <select id=\"filterLow\">\n                <option value=\"all\">Tutti</option>\n                <option value=\"low\">Solo scorta bassa</option>\n                <option value=\"zero\">Solo zero</option>\n              </select>\n            </div>\n            <div class=\"field\" style=\"min-width: 180px;\">\n              <label for=\"filterCategory\">Categoria</label>\n              <select id=\"filterCategory\">\n                <option value=\"\">Tutte</option>\n                <option value=\"__none\">Non assegnata</option>\n              </select>\n            </div>\n          </div>\n          <div class=\"inlineRow\" style=\"gap:8px; align-items:flex-end;\">\n            <button class=\"btn btn-secondary btn-xs\" id=\"btnPdfBackup\" type=\"button\">PDF backup</button>\n          </div>\n        </div>\n\n        <!-- STOCK (per inventario selezionato) -->\n        <div class=\"tableWrap\" style=\"max-height: 420px; overflow:auto; margin-top: 10px;\">\n          <table class=\"dataGrid\">\n            <thead>\n              <tr>\n                <th>Nome articolo</th>\n                <th>Cod. articolo</th>\n                <th>Categoria</th>\n                <th class=\"qty\">Q.tà</th>\n              </tr>\n            </thead>\n            <tbody id=\"stockTbody\">\n              <tr><td class=\"td-muted\" colspan=\"4\">Seleziona un inventario.</td></tr>\n            </tbody>\n          </table>\n        </div>\n      </div>\n\n    </div>\n  </article>\n</div>";
 
     const tpl = document.createElement("template");
     tpl.innerHTML = html;
@@ -527,6 +527,7 @@ const tpl = document.createElement("template");
     if (api && typeof api.warehouseLabel === "function") return api.warehouseLabel(v);
     var s = String(v || "").toLowerCase();
     if (s === "prodotti_finiti" || s === "pf" || s.includes("finit")) return "Prodotti finiti";
+    if (s.includes("prisma")) return "Prisma";
     if (s.includes("conca")) return "Concamarise";
     return "Cerea";
   }
@@ -536,7 +537,22 @@ const tpl = document.createElement("template");
     s = String(s || "").trim().toLowerCase();
     if (s === "split") return "Split";
     if (s === "prodotti_finiti" || s === "pf" || s.includes("finit")) return "PF";
-    return (s === "concamarise") ? "Conca" : "Cerea";
+    if (s === "prisma" || s.includes("prisma")) return "Prisma";
+    if (s === "concamarise" || s.includes("conca")) return "Conca";
+    return "Cerea";
+  }
+
+  function whGroupLabel(g){
+    try{
+      if (g && g.warehouse === "split"){
+        var ws = Array.isArray(g._warehouses) ? g._warehouses.filter(Boolean) : [];
+        if (ws.length) return ws.map(function(w){ return whLabel(w); }).join(" + ");
+        return "Più sedi";
+      }
+      return whLabel(g && g.warehouse || "");
+    }catch(_){
+      return (g && g.warehouse === "split") ? "Più sedi" : whLabel(g && g.warehouse || "");
+    }
   }
 
   function renderTable(list, totalCount){
@@ -670,7 +686,7 @@ const tpl = document.createElement("template");
   function __setProdMode(on){
     try{ if (els.movDetProdWrap) els.movDetProdWrap.style.display = on ? "" : "none"; }catch(_){ }
     if (!on){
-      try{ if (els.movDetProdCompsTbody) els.movDetProdCompsTbody.innerHTML = '<tr><td class="td-muted" colspan="7">—</td></tr>'; }catch(_){ }
+      try{ if (els.movDetProdCompsTbody) els.movDetProdCompsTbody.innerHTML = '<tr><td class="td-muted" colspan="8">—</td></tr>'; }catch(_){ }
       try{ if (els.movDetProdHint) els.movDetProdHint.textContent = "Componenti scaricati per questa produzione."; }catch(_){ }
     }
   }
@@ -879,9 +895,10 @@ const tpl = document.createElement("template");
         if (!q) return;
         var wh = __normWh(mv.warehouse || "");
 
-        var rec = map.get(low) || { code: code, item: item || code, uom: uom, total: 0, cerea: 0, concamarise: 0 };
+        var rec = map.get(low) || { code: code, item: item || code, uom: uom, total: 0, cerea: 0, concamarise: 0, prisma: 0 };
         rec.total += q;
-        if (wh === "concamarise") rec.concamarise += q;
+        if (wh === "prisma") rec.prisma += q;
+        else if (wh === "concamarise") rec.concamarise += q;
         else rec.cerea += q;
         if (!rec.item) rec.item = item || code;
         if (!rec.uom) rec.uom = uom;
@@ -921,7 +938,7 @@ const tpl = document.createElement("template");
     if (!els.movDetDdtCompsTbody) return;
     var arr = Array.isArray(comps) ? comps.slice() : [];
     if (!arr.length){
-      els.movDetDdtCompsTbody.innerHTML = '<tr><td class="td-muted" colspan="7">Nessun componente scaricato.</td></tr>';
+      els.movDetDdtCompsTbody.innerHTML = '<tr><td class="td-muted" colspan="8">Nessun componente scaricato.</td></tr>';
       return;
     }
 
@@ -951,6 +968,7 @@ const tpl = document.createElement("template");
       var tot = Number(it.total || 0);
       var c = Number(it.cerea || 0);
       var k = Number(it.concamarise || 0);
+      var p = Number(it.prisma || 0);
       return '<tr>'
         + '<td data-label="Tipo">'+esc(tipo)+'</td>'
         + '<td data-label="Codice"><span class="kbd">'+esc(code || "—")+'</span></td>'
@@ -958,6 +976,7 @@ const tpl = document.createElement("template");
         + '<td data-label="Totale" class="qty" style="text-align:right;">'+tot.toLocaleString("it-IT")+'</td>'
         + '<td data-label="Cerea" class="qty" style="text-align:right;">'+c.toLocaleString("it-IT")+'</td>'
         + '<td data-label="Concamarise" class="qty" style="text-align:right;">'+k.toLocaleString("it-IT")+'</td>'
+        + '<td data-label="Prisma" class="qty" style="text-align:right;">'+p.toLocaleString("it-IT")+'</td>'
         + '<td data-label="U.M.">'+esc(uom)+'</td>'
         + '</tr>';
     }).join("");
@@ -967,7 +986,7 @@ const tpl = document.createElement("template");
     if (!els.movDetProdCompsTbody) return;
     var arr = Array.isArray(comps) ? comps.slice() : [];
     if (!arr.length){
-      els.movDetProdCompsTbody.innerHTML = '<tr><td class="td-muted" colspan="7">Nessun componente scaricato.</td></tr>';
+      els.movDetProdCompsTbody.innerHTML = '<tr><td class="td-muted" colspan="8">Nessun componente scaricato.</td></tr>';
       return;
     }
 
@@ -997,6 +1016,7 @@ const tpl = document.createElement("template");
       var tot = Number(it.total || 0);
       var c = Number(it.cerea || 0);
       var k = Number(it.concamarise || 0);
+      var p = Number(it.prisma || 0);
       return '<tr>'
         + '<td data-label="Tipo">'+esc(tipo)+'</td>'
         + '<td data-label="Codice"><span class="kbd">'+esc(code || "—")+'</span></td>'
@@ -1004,6 +1024,7 @@ const tpl = document.createElement("template");
         + '<td data-label="Totale" class="qty" style="text-align:right;">'+tot.toLocaleString("it-IT")+'</td>'
         + '<td data-label="Cerea" class="qty" style="text-align:right;">'+c.toLocaleString("it-IT")+'</td>'
         + '<td data-label="Concamarise" class="qty" style="text-align:right;">'+k.toLocaleString("it-IT")+'</td>'
+        + '<td data-label="Prisma" class="qty" style="text-align:right;">'+p.toLocaleString("it-IT")+'</td>'
         + '<td data-label="U.M.">'+esc(uom)+'</td>'
         + '</tr>';
     }).join("");
@@ -1175,7 +1196,7 @@ const tpl = document.createElement("template");
     try{
       if (els.movDetTitle) els.movDetTitle.textContent = "Dettaglio DDT (DaneaXML)";
       if (els.movDetSubtitle){
-        var whSum = (g.warehouse === "split") ? "Cerea + Concamarise" : whLabel(g.warehouse || "");
+        var whSum = whGroupLabel(g);
         els.movDetSubtitle.textContent = [
           ("DDT " + (g.docNum || g.key || "—")),
           (String(g.date || "").trim() || "—"),
@@ -1188,7 +1209,7 @@ const tpl = document.createElement("template");
     // campi base (KV)
     __setVal(els.movDetDate, String(g.date || "").trim() || "—");
     __setVal(els.movDetType, "OUT (scarico)");
-    __setVal(els.movDetWarehouse, (g.warehouse === "split") ? "Cerea + Concamarise" : whLabel(g.warehouse || ""));
+    __setVal(els.movDetWarehouse, whGroupLabel(g));
     __setVal(els.movDetSource, "DaneaXML");
     __setVal(els.movDetCustomer, "—");
     __setVal(els.movDetCode, String(g.code || "").trim() || "—");
@@ -1215,7 +1236,7 @@ const tpl = document.createElement("template");
     // Tabelle
     try{
       if (els.movDetDdtRowsTbody) els.movDetDdtRowsTbody.innerHTML = '<tr><td class="td-muted" colspan="4">Carico dettagli…</td></tr>';
-      if (els.movDetDdtCompsTbody) els.movDetDdtCompsTbody.innerHTML = '<tr><td class="td-muted" colspan="7">Carico…</td></tr>';
+      if (els.movDetDdtCompsTbody) els.movDetDdtCompsTbody.innerHTML = '<tr><td class="td-muted" colspan="8">Carico…</td></tr>';
       if (els.movDetDdtProdWrap) els.movDetDdtProdWrap.style.display = "none";
     }catch(_){ }
 
@@ -1248,7 +1269,7 @@ const tpl = document.createElement("template");
         var cust = String(ddtSrc.customer || "").trim();
         if (cust) __setVal(els.movDetCustomer, cust);
         if (els.movDetSubtitle){
-          var whSum = (g.warehouse === "split") ? "Cerea + Concamarise" : whLabel(g.warehouse || "");
+          var whSum = whGroupLabel(g);
           els.movDetSubtitle.textContent = [
             (cust || "—"),
             ("DDT " + (ddtSrc.number || g.docNum || g.key || "—")),
@@ -2075,7 +2096,7 @@ const tpl = document.createElement("template");
                 </tr>
               </thead>
               <tbody id="revTbody">
-                <tr><td class="td-muted" colspan="7">Carico…</td></tr>
+                <tr><td class="td-muted" colspan="8">Carico…</td></tr>
               </tbody>
             </table>
           </div>
@@ -3537,6 +3558,7 @@ Riallineare lo scarico aggiornando i movimenti?`);
       const _normWh = (w) => {
         try{ if (H && typeof H.normalizeWarehouse === "function") return H.normalizeWarehouse(w); }catch(_){ }
         const ss = String(w || "").trim().toLowerCase();
+        if (ss.includes("prisma")) return "prisma";
         if (ss.includes("conca") || ss.includes("concamarise")) return "concamarise";
         return "cerea";
       };
@@ -3545,9 +3567,11 @@ Riallineare lo scarico aggiornando i movimenti?`);
         return Number.isFinite(n) ? n : 0;
       };
 
-      const avail = { cerea: new Map(), concamarise: new Map() };
-      const availCust = { cerea: new Map(), concamarise: new Map() };
+      const avail = { cerea: new Map(), concamarise: new Map(), prisma: new Map() };
+      const availCust = { cerea: new Map(), concamarise: new Map(), prisma: new Map() };
       const anyCustomerByCode = new Map();
+      const _whKeys = ["cerea", "concamarise", "prisma"];
+      const _whMap = (box, wh) => box[(wh === "prisma" || wh === "concamarise" || wh === "cerea") ? wh : "cerea"] || box.cerea;
 
       for (const mv of (movs || [])){
         const id = String(mv && mv.id || "").trim();
@@ -3563,12 +3587,12 @@ Riallineare lo scarico aggiornando i movimenti?`);
         const q = _safeInt(mv.qty);
         if (!q) continue;
         const delta = (String(mv.type || "").toUpperCase() === "OUT") ? -q : q;
-        const m = (w === "concamarise") ? avail.concamarise : avail.cerea;
+        const m = _whMap(avail, w);
         m.set(low, (m.get(low) || 0) + delta);
 
         const custRaw = String((mv && (mv.customer || mv.supplierName || mv.supplier)) || "").trim();
         if (custRaw) anyCustomerByCode.set(low, custRaw);
-        const mCust = (w === "concamarise") ? availCust.concamarise : availCust.cerea;
+        const mCust = _whMap(availCust, w);
         let byCust = mCust.get(low);
         if (!byCust){ byCust = new Map(); mCust.set(low, byCust); }
         const ck = custRaw.toLowerCase();
@@ -3588,7 +3612,8 @@ Riallineare lo scarico aggiornando i movimenti?`);
         const low = String(it.code || "").trim().toLowerCase();
         const aC = Math.max(0, _safeInt(avail.cerea.get(low)));
         const aK = Math.max(0, _safeInt(avail.concamarise.get(low)));
-        const tot = aC + aK;
+        const aP = Math.max(0, _safeInt(avail.prisma.get(low)));
+        const tot = aC + aK + aP;
         if (tot < it.qtyInt){
           __toastDedup(`danea_resync_stock_${k}_${low}`, `Riallineamento: scorta insufficiente per ${it.code}`, "err", 60000);
           return false;
@@ -3604,34 +3629,39 @@ Riallineare lo scarico aggiornando i movimenti?`);
         const low = String(it.code || "").trim().toLowerCase();
         let need = it.qtyInt;
 
-        let aC = Math.max(0, _safeInt(avail.cerea.get(low)));
-        let aK = Math.max(0, _safeInt(avail.concamarise.get(low)));
+        const availableByWh = {};
+        _whKeys.forEach(wh => {
+          availableByWh[wh] = Math.max(0, _safeInt(_whMap(avail, wh).get(low)));
+        });
 
-        const first = (aK > aC) ? "concamarise" : "cerea";
-        const second = (first === "cerea") ? "concamarise" : "cerea";
+        const order = _whKeys.slice().sort((a,b) => ((availableByWh[b] || 0) - (availableByWh[a] || 0)) || a.localeCompare(b));
+        const taken = { cerea: 0, concamarise: 0, prisma: 0 };
 
         const takeFrom = (wh) => {
           if (need <= 0) return 0;
-          const cur = (wh === "concamarise") ? aK : aC;
+          const cur = Math.max(0, _safeInt(availableByWh[wh]));
           const take = Math.min(need, cur);
           if (take <= 0) return 0;
           need -= take;
-          if (wh === "concamarise") aK -= take;
-          else aC -= take;
+          availableByWh[wh] = cur - take;
+          taken[wh] = (taken[wh] || 0) + take;
           return take;
         };
 
-        const t1 = takeFrom(first);
-        const t2 = takeFrom(second);
+        for (const wh of order){
+          if (need <= 0) break;
+          takeFrom(wh);
+        }
 
-        avail.cerea.set(low, aC);
-        avail.concamarise.set(low, aK);
+        _whKeys.forEach(wh => {
+          _whMap(avail, wh).set(low, availableByWh[wh] || 0);
+        });
 
-        allocations.push({ code: it.code, name: it.name || it.code, uom: String(it.uom||"").trim(), qty: it.qtyInt, byWarehouse: { cerea: (first==="cerea"?t1:t2) || 0, concamarise: (first==="concamarise"?t1:t2) || 0 } });
+        allocations.push({ code: it.code, name: it.name || it.code, uom: String(it.uom||"").trim(), qty: it.qtyInt, byWarehouse: { cerea: taken.cerea || 0, concamarise: taken.concamarise || 0, prisma: taken.prisma || 0 } });
 
         const pickCustomerForWarehouse = (wh) => {
           try{
-            const mm = (wh === "concamarise") ? availCust.concamarise : availCust.cerea;
+            const mm = _whMap(availCust, wh);
             const byCust = mm.get(low);
             if (byCust && byCust.size){
               let bestKey = null;
@@ -3652,12 +3682,9 @@ Riallineare lo scarico aggiornando i movimenti?`);
           return { ck: fb.toLowerCase(), customer: fb };
         };
 
-        const cust1 = (t1 > 0) ? pickCustomerForWarehouse(first) : null;
-        const cust2 = (t2 > 0) ? pickCustomerForWarehouse(second) : null;
-
         const decAvailCust = (wh, sel, qtyOut) => {
           if (!sel || !qtyOut) return;
-          const mm = (wh === "concamarise") ? availCust.concamarise : availCust.cerea;
+          const mm = _whMap(availCust, wh);
           let byCust = mm.get(low);
           if (!byCust){ byCust = new Map(); mm.set(low, byCust); }
           const ck = (sel.ck != null) ? String(sel.ck) : String(sel.customer || "").trim().toLowerCase();
@@ -3666,8 +3693,15 @@ Riallineare lo scarico aggiornando i movimenti?`);
           if (!rec0.customer && sel.customer) rec0.customer = sel.customer;
           byCust.set(ck, rec0);
         };
-        decAvailCust(first, cust1, t1);
-        decAvailCust(second, cust2, t2);
+
+        const customerByWarehouse = {};
+        _whKeys.forEach(wh => {
+          const qtyTaken = taken[wh] || 0;
+          if (!qtyTaken) return;
+          const sel = pickCustomerForWarehouse(wh);
+          customerByWarehouse[wh] = sel;
+          decAvailCust(wh, sel, qtyTaken);
+        });
 
         const makePayload = (warehouse, qtyInt, customerName) => ({
           type: "OUT",
@@ -3690,8 +3724,12 @@ Riallineare lo scarico aggiornando i movimenti?`);
           createdBy: actor
         });
 
-        if (t1 > 0) compPayloads.push({ payload: makePayload(first, t1, (cust1 && cust1.customer) || "") });
-        if (t2 > 0) compPayloads.push({ payload: makePayload(second, t2, (cust2 && cust2.customer) || "") });
+        _whKeys.forEach(wh => {
+          const qtyTaken = taken[wh] || 0;
+          if (qtyTaken <= 0) return;
+          const sel = customerByWarehouse[wh] || { customer: "" };
+          compPayloads.push({ payload: makePayload(wh, qtyTaken, (sel && sel.customer) || "") });
+        });
       }
 
       const fpPayloads = [];
@@ -4602,6 +4640,7 @@ Per questo magazzino vengono scaricati SOLO componenti (imballaggi/materie prime
         const _normWh = (w) => {
           try{ if (H && typeof H.normalizeWarehouse === 'function') return H.normalizeWarehouse(w); }catch(_){ }
           const ss = String(w || '').trim().toLowerCase();
+          if (ss.includes('prisma')) return 'prisma';
           if (ss.includes('conca') || ss.includes('concamarise')) return 'concamarise';
           return 'cerea';
         };
@@ -4610,11 +4649,13 @@ Per questo magazzino vengono scaricati SOLO componenti (imballaggi/materie prime
           return Number.isFinite(n) ? n : 0;
         };
 
-        const avail = { cerea: new Map(), concamarise: new Map() };
+        const avail = { cerea: new Map(), concamarise: new Map(), prisma: new Map() };
         // Disponibilita' per customer: ci serve per fare OUT sullo stesso "Fornitore" della giacenza
         // (cosi' la riga in inventario scende davvero, es. 7 -> 5, invece di restare 7 e creare una riga "Scarico DDT")
-        const availCust = { cerea: new Map(), concamarise: new Map() }; // codeLower -> Map(customerKey -> {customer, qty})
+        const availCust = { cerea: new Map(), concamarise: new Map(), prisma: new Map() }; // codeLower -> Map(customerKey -> {customer, qty})
         const anyCustomerByCode = new Map(); // fallback best-effort: codeLower -> customer
+        const _whKeys = ['cerea', 'concamarise', 'prisma'];
+        const _whMap = (box, wh) => box[(wh === 'prisma' || wh === 'concamarise' || wh === 'cerea') ? wh : 'cerea'] || box.cerea;
         for (const mv of movs){
           const code = String(mv && mv.code || '').trim();
           if (!code) continue;
@@ -4623,13 +4664,13 @@ Per questo magazzino vengono scaricati SOLO componenti (imballaggi/materie prime
           const q = _safeInt(mv.qty);
           if (!q) continue;
           const delta = (String(mv.type || '').toUpperCase() === 'OUT') ? -q : q;
-          const m = (w === 'concamarise') ? avail.concamarise : avail.cerea;
+          const m = _whMap(avail, w);
           m.set(low, (m.get(low) || 0) + delta);
 
           // customer-aware availability
           const custRaw = String((mv && (mv.customer || mv.supplierName || mv.supplier)) || '').trim();
           if (custRaw) anyCustomerByCode.set(low, custRaw);
-          const mCust = (w === 'concamarise') ? availCust.concamarise : availCust.cerea;
+          const mCust = _whMap(availCust, w);
           let byCust = mCust.get(low);
           if (!byCust){ byCust = new Map(); mCust.set(low, byCust); }
           const ck = custRaw.toLowerCase();
@@ -4648,9 +4689,10 @@ Per questo magazzino vengono scaricati SOLO componenti (imballaggi/materie prime
           const low = String(it.code || '').trim().toLowerCase();
           const aC = Math.max(0, _safeInt(avail.cerea.get(low)));
           const aK = Math.max(0, _safeInt(avail.concamarise.get(low)));
-          const tot = aC + aK;
+          const aP = Math.max(0, _safeInt(avail.prisma.get(low)));
+          const tot = aC + aK + aP;
           if (tot < it.qtyInt){
-            alert(`Scorta insufficiente per ${it.code} — ${it.name || ''}\n\nRichiesti: ${it.qtyInt.toLocaleString('it-IT')} ${String(it.uom||'').trim()}\nDisponibili: ${(tot).toLocaleString('it-IT')} (Cerea ${aC.toLocaleString('it-IT')}, Concamarise ${aK.toLocaleString('it-IT')})`);
+            alert(`Scorta insufficiente per ${it.code} — ${it.name || ''}\n\nRichiesti: ${it.qtyInt.toLocaleString('it-IT')} ${String(it.uom||'').trim()}\nDisponibili: ${(tot).toLocaleString('it-IT')} (Cerea ${aC.toLocaleString('it-IT')}, Concamarise ${aK.toLocaleString('it-IT')}, Prisma ${aP.toLocaleString('it-IT')})`);
             return;
           }
         }
@@ -4663,34 +4705,39 @@ Per questo magazzino vengono scaricati SOLO componenti (imballaggi/materie prime
           const low = String(it.code || '').trim().toLowerCase();
           let need = it.qtyInt;
 
-          let aC = Math.max(0, _safeInt(avail.cerea.get(low)));
-          let aK = Math.max(0, _safeInt(avail.concamarise.get(low)));
+          const availableByWh = {};
+          _whKeys.forEach(wh => {
+            availableByWh[wh] = Math.max(0, _safeInt(_whMap(avail, wh).get(low)));
+          });
 
-          const first = (aK > aC) ? 'concamarise' : 'cerea';
-          const second = (first === 'cerea') ? 'concamarise' : 'cerea';
+          const order = _whKeys.slice().sort((a,b) => ((availableByWh[b] || 0) - (availableByWh[a] || 0)) || a.localeCompare(b));
+          const taken = { cerea: 0, concamarise: 0, prisma: 0 };
 
           const takeFrom = (wh) => {
             if (need <= 0) return 0;
-            const cur = (wh === 'concamarise') ? aK : aC;
+            const cur = Math.max(0, _safeInt(availableByWh[wh]));
             const take = Math.min(need, cur);
             if (take <= 0) return 0;
             need -= take;
-            if (wh === 'concamarise') aK -= take;
-            else aC -= take;
+            availableByWh[wh] = cur - take;
+            taken[wh] = (taken[wh] || 0) + take;
             return take;
           };
 
-          const t1 = takeFrom(first);
-          const t2 = takeFrom(second);
+          for (const wh of order){
+            if (need <= 0) break;
+            takeFrom(wh);
+          }
 
-          avail.cerea.set(low, aC);
-          avail.concamarise.set(low, aK);
+          _whKeys.forEach(wh => {
+            _whMap(avail, wh).set(low, availableByWh[wh] || 0);
+          });
 
-          allocations.push({ code: it.code, name: it.name || it.code, uom: String(it.uom||'').trim(), qty: it.qtyInt, byWarehouse: { cerea: (first==='cerea'?t1:t2) || 0, concamarise: (first==='concamarise'?t1:t2) || 0 } });
+          allocations.push({ code: it.code, name: it.name || it.code, uom: String(it.uom||'').trim(), qty: it.qtyInt, byWarehouse: { cerea: taken.cerea || 0, concamarise: taken.concamarise || 0, prisma: taken.prisma || 0 } });
 
           const pickCustomerForWarehouse = (wh) => {
             try{
-              const mm = (wh === 'concamarise') ? availCust.concamarise : availCust.cerea;
+              const mm = _whMap(availCust, wh);
               const byCust = mm.get(low);
               if (byCust && byCust.size){
                 let bestKey = null;
@@ -4711,13 +4758,10 @@ Per questo magazzino vengono scaricati SOLO componenti (imballaggi/materie prime
             return { ck: fb.toLowerCase(), customer: fb };
           };
 
-          const cust1 = (t1 > 0) ? pickCustomerForWarehouse(first) : null;
-          const cust2 = (t2 > 0) ? pickCustomerForWarehouse(second) : null;
-
           // aggiorna la disponibilita' per customer (best-effort) per restare coerenti in caso di piu' righe
           const decAvailCust = (wh, sel, qtyOut) => {
             if (!sel || !qtyOut) return;
-            const mm = (wh === 'concamarise') ? availCust.concamarise : availCust.cerea;
+            const mm = _whMap(availCust, wh);
             let byCust = mm.get(low);
             if (!byCust){ byCust = new Map(); mm.set(low, byCust); }
             const ck = (sel.ck != null) ? String(sel.ck) : String(sel.customer || '').trim().toLowerCase();
@@ -4726,8 +4770,15 @@ Per questo magazzino vengono scaricati SOLO componenti (imballaggi/materie prime
             if (!rec0.customer && sel.customer) rec0.customer = sel.customer;
             byCust.set(ck, rec0);
           };
-          decAvailCust(first, cust1, t1);
-          decAvailCust(second, cust2, t2);
+
+          const customerByWarehouse = {};
+          for (const wh of _whKeys){
+            const qtyTaken = taken[wh] || 0;
+            if (!qtyTaken) continue;
+            const sel = pickCustomerForWarehouse(wh);
+            customerByWarehouse[wh] = sel;
+            decAvailCust(wh, sel, qtyTaken);
+          }
 
           const makePayload = (warehouse, qtyInt, customerName) => ({
             type: 'OUT',
@@ -4751,12 +4802,11 @@ Per questo magazzino vengono scaricati SOLO componenti (imballaggi/materie prime
             createdBy: H.fb.user.email || H.fb.user.uid
           });
 
-          if (t1 > 0){
-            const ref = await addDoc(movCol, makePayload(first, t1, (cust1 && cust1.customer) || ''));
-            if (ref && ref.id) movementIds.push(ref.id);
-          }
-          if (t2 > 0){
-            const ref = await addDoc(movCol, makePayload(second, t2, (cust2 && cust2.customer) || ''));
+          for (const wh of _whKeys){
+            const qtyTaken = taken[wh] || 0;
+            if (qtyTaken <= 0) continue;
+            const sel = customerByWarehouse[wh] || { customer: '' };
+            const ref = await addDoc(movCol, makePayload(wh, qtyTaken, (sel && sel.customer) || ''));
             if (ref && ref.id) movementIds.push(ref.id);
           }
         }
@@ -4933,6 +4983,7 @@ Per questo magazzino vengono scaricati SOLO componenti (imballaggi/materie prime
       const _normWh = (w) => {
         try{ if (H && typeof H.normalizeWarehouse === "function") return H.normalizeWarehouse(w); }catch(_){ }
         const ss = String(w || "").trim().toLowerCase();
+        if (ss.includes("prisma")) return "prisma";
         if (ss.includes("conca") || ss.includes("concamarise")) return "concamarise";
         return "cerea";
       };
@@ -4942,10 +4993,12 @@ Per questo magazzino vengono scaricati SOLO componenti (imballaggi/materie prime
       };
 
       // Disponibilita' live componenti (cosi' non scarichi piu' del disponibile)
-      const avail = { cerea: new Map(), concamarise: new Map() };
+      const avail = { cerea: new Map(), concamarise: new Map(), prisma: new Map() };
       // Disponibilita' anche per customer (fornitore): serve per scalare la riga corretta in inventario
-      const availCust = { cerea: new Map(), concamarise: new Map() }; // codeLower -> Map(customerKey -> {customer, qty})
+      const availCust = { cerea: new Map(), concamarise: new Map(), prisma: new Map() }; // codeLower -> Map(customerKey -> {customer, qty})
       const anyCustomerByCode = new Map(); // fallback best-effort: codeLower -> customer
+      const _whKeys = ["cerea", "concamarise", "prisma"];
+      const _whMap = (box, wh) => box[(wh === "prisma" || wh === "concamarise" || wh === "cerea") ? wh : "cerea"] || box.cerea;
       for (const mv of (movs || [])){
         const code = String(mv && mv.code || "").trim();
         if (!code) continue;
@@ -4954,13 +5007,13 @@ Per questo magazzino vengono scaricati SOLO componenti (imballaggi/materie prime
         const q = _safeInt(mv.qty);
         if (!q) continue;
         const delta = (String(mv.type || "").toUpperCase() === "OUT") ? -q : q;
-        const m = (w === "concamarise") ? avail.concamarise : avail.cerea;
+        const m = _whMap(avail, w);
         m.set(low, (m.get(low) || 0) + delta);
 
         // customer-aware availability
         const custRaw = String((mv && (mv.customer || mv.supplierName || mv.supplier)) || "").trim();
         if (custRaw) anyCustomerByCode.set(low, custRaw);
-        const mCust = (w === "concamarise") ? availCust.concamarise : availCust.cerea;
+        const mCust = _whMap(availCust, w);
         let byCust = mCust.get(low);
         if (!byCust){ byCust = new Map(); mCust.set(low, byCust); }
         const ck = custRaw.toLowerCase();
@@ -5118,10 +5171,11 @@ Per questo magazzino vengono scaricati SOLO componenti (imballaggi/materie prime
           const low = String(it.code || "").trim().toLowerCase();
           const aC = Math.max(0, _safeInt(avail.cerea.get(low)));
           const aK = Math.max(0, _safeInt(avail.concamarise.get(low)));
-          const tot = aC + aK;
+          const aP = Math.max(0, _safeInt(avail.prisma.get(low)));
+          const tot = aC + aK + aP;
           if (tot < it.qtyInt){
             if (!silent){
-              alert(`Scarico interrotto\n\nScorta insufficiente per ${it.code} — ${it.name || ""}\nRichiesti: ${it.qtyInt}\nDisponibili: ${tot} (Cerea ${aC}, Concamarise ${aK})`);
+              alert(`Scarico interrotto\n\nScorta insufficiente per ${it.code} — ${it.name || ""}\nRichiesti: ${it.qtyInt}\nDisponibili: ${tot} (Cerea ${aC}, Concamarise ${aK}, Prisma ${aP})`);
             }
             return;
           }
@@ -5138,34 +5192,39 @@ Per questo magazzino vengono scaricati SOLO componenti (imballaggi/materie prime
           const low = String(it.code || "").trim().toLowerCase();
           let need = it.qtyInt;
 
-          let aC = Math.max(0, _safeInt(avail.cerea.get(low)));
-          let aK = Math.max(0, _safeInt(avail.concamarise.get(low)));
+          const availableByWh = {};
+          _whKeys.forEach(wh => {
+            availableByWh[wh] = Math.max(0, _safeInt(_whMap(avail, wh).get(low)));
+          });
 
-          const first = (aK > aC) ? "concamarise" : "cerea";
-          const second = (first === "cerea") ? "concamarise" : "cerea";
+          const order = _whKeys.slice().sort((a,b) => ((availableByWh[b] || 0) - (availableByWh[a] || 0)) || a.localeCompare(b));
+          const taken = { cerea: 0, concamarise: 0, prisma: 0 };
 
           const takeFrom = (wh) => {
             if (need <= 0) return 0;
-            const cur = (wh === "concamarise") ? aK : aC;
+            const cur = Math.max(0, _safeInt(availableByWh[wh]));
             const take = Math.min(need, cur);
             if (take <= 0) return 0;
             need -= take;
-            if (wh === "concamarise") aK -= take;
-            else aC -= take;
+            availableByWh[wh] = cur - take;
+            taken[wh] = (taken[wh] || 0) + take;
             return take;
           };
 
-          const t1 = takeFrom(first);
-          const t2 = takeFrom(second);
+          for (const wh of order){
+            if (need <= 0) break;
+            takeFrom(wh);
+          }
 
-          avail.cerea.set(low, aC);
-          avail.concamarise.set(low, aK);
+          _whKeys.forEach(wh => {
+            _whMap(avail, wh).set(low, availableByWh[wh] || 0);
+          });
 
-          allocations.push({ code: it.code, name: it.name || it.code, uom: String(it.uom||"").trim(), qty: it.qtyInt, byWarehouse: { cerea: (first==="cerea"?t1:t2) || 0, concamarise: (first==="concamarise"?t1:t2) || 0 } });
+          allocations.push({ code: it.code, name: it.name || it.code, uom: String(it.uom||"").trim(), qty: it.qtyInt, byWarehouse: { cerea: taken.cerea || 0, concamarise: taken.concamarise || 0, prisma: taken.prisma || 0 } });
 
           const pickCustomerForWarehouse = (wh) => {
             try{
-              const mm = (wh === "concamarise") ? availCust.concamarise : availCust.cerea;
+              const mm = _whMap(availCust, wh);
               const byCust = mm.get(low);
               if (byCust && byCust.size){
                 let bestKey = null;
@@ -5186,13 +5245,10 @@ Per questo magazzino vengono scaricati SOLO componenti (imballaggi/materie prime
             return { ck: fb.toLowerCase(), customer: fb };
           };
 
-          const cust1 = (t1 > 0) ? pickCustomerForWarehouse(first) : null;
-          const cust2 = (t2 > 0) ? pickCustomerForWarehouse(second) : null;
-
           // aggiorna la disponibilita' per customer (best-effort) per restare coerenti su scarichi multipli
           const decAvailCust = (wh, sel, qtyOut) => {
             if (!sel || !qtyOut) return;
-            const mm = (wh === "concamarise") ? availCust.concamarise : availCust.cerea;
+            const mm = _whMap(availCust, wh);
             let byCust = mm.get(low);
             if (!byCust){ byCust = new Map(); mm.set(low, byCust); }
             const ck = (sel.ck != null) ? String(sel.ck) : String(sel.customer || "").trim().toLowerCase();
@@ -5201,8 +5257,15 @@ Per questo magazzino vengono scaricati SOLO componenti (imballaggi/materie prime
             if (!rec0.customer && sel.customer) rec0.customer = sel.customer;
             byCust.set(ck, rec0);
           };
-          decAvailCust(first, cust1, t1);
-          decAvailCust(second, cust2, t2);
+
+          const customerByWarehouse = {};
+          for (const wh of _whKeys){
+            const qtyTaken = taken[wh] || 0;
+            if (!qtyTaken) continue;
+            const sel = pickCustomerForWarehouse(wh);
+            customerByWarehouse[wh] = sel;
+            decAvailCust(wh, sel, qtyTaken);
+          }
 
           const makePayload = (warehouse, qtyInt, customerName) => ({
             type: "OUT",
@@ -5226,12 +5289,11 @@ Per questo magazzino vengono scaricati SOLO componenti (imballaggi/materie prime
             createdBy: actor
           });
 
-          if (t1 > 0){
-            const ref = await addDoc(movCol, makePayload(first, t1, (cust1 && cust1.customer) || ""));
-            if (ref && ref.id) movementIds.push(ref.id);
-          }
-          if (t2 > 0){
-            const ref = await addDoc(movCol, makePayload(second, t2, (cust2 && cust2.customer) || ""));
+          for (const wh of _whKeys){
+            const qtyTaken = taken[wh] || 0;
+            if (qtyTaken <= 0) continue;
+            const sel = customerByWarehouse[wh] || { customer: "" };
+            const ref = await addDoc(movCol, makePayload(wh, qtyTaken, (sel && sel.customer) || ""));
             if (ref && ref.id) movementIds.push(ref.id);
           }
         }
@@ -10611,11 +10673,13 @@ try{ __installRobustTapState(); }catch(_){ }
     });
 document.getElementById("btnGoInvCerea")?.addEventListener("click", () => { openInventoryOverlay(WAREHOUSE_CEREA); });
     document.getElementById("btnGoInvConcamarise")?.addEventListener("click", () => { openInventoryOverlay(WAREHOUSE_CONCA); });
+    document.getElementById("btnGoInvPrisma")?.addEventListener("click", () => { openInventoryOverlay(WAREHOUSE_PRISMA); });
     document.getElementById("btnGoFinishedInventory")?.addEventListener("click", () => { openFinishedInventoryOverlay(); });
 document.getElementById("menuGoHome")?.addEventListener("click", () => { closeSideMenu(); setView("home"); });
     document.getElementById("menuGoOcr")?.addEventListener("click", () => { closeSideMenu(); startHomeOcr(); });
     document.getElementById("menuGoInvCerea")?.addEventListener("click", () => { closeSideMenu(); openInventoryOverlay(WAREHOUSE_CEREA); });
     document.getElementById("menuGoInvConcamarise")?.addEventListener("click", () => { closeSideMenu(); openInventoryOverlay(WAREHOUSE_CONCA); });
+    document.getElementById("menuGoInvPrisma")?.addEventListener("click", () => { closeSideMenu(); openInventoryOverlay(WAREHOUSE_PRISMA); });
     document.getElementById("menuGoFinishedInventory")?.addEventListener("click", () => { closeSideMenu(); openFinishedInventoryOverlay(); });
     document.getElementById("menuGoMoveInventory")?.addEventListener("click", () => { closeSideMenu(); try{ resetMoveInvDirection(); }catch(_){ } setView("moveInv"); try{ renderMoveInv && renderMoveInv(); }catch(_){ } });
     document.getElementById("menuGoFlows")?.addEventListener("click", () => { closeSideMenu(); setView("flows"); try{ renderFlowsTable(); }catch(_){ } });
@@ -10915,8 +10979,10 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
     const lowStockBoard = document.getElementById("lowStockBoard");
     const lowStockListCerea = document.getElementById("lowStockListCerea");
     const lowStockListConca = document.getElementById("lowStockListConca");
+    const lowStockListPrisma = document.getElementById("lowStockListPrisma");
     const lowStockCountCerea = document.getElementById("lowStockCountCerea");
     const lowStockCountConca = document.getElementById("lowStockCountConca");
+    const lowStockCountPrisma = document.getElementById("lowStockCountPrisma");
 
     // Home: riquadro Categorie (Dashboard)
     const categoryListCerea = document.getElementById("categoryListCerea");
@@ -10947,12 +11013,13 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
     const pillStock = document.getElementById("pillStock");
     const pillInvWarehouse = document.getElementById("pillInvWarehouse");
 
-    // Inventario: picker (Cerea / Concamarise)
+    // Inventario: picker (Cerea / Concamarise / Prisma)
     const invPicker = document.getElementById("invPicker");
     const invDetail = document.getElementById("invDetail");
     const invDetailTitle = document.getElementById("invDetailTitle");
     const btnPickCerea = document.getElementById("btnPickCerea");
     const btnPickConcamarise = document.getElementById("btnPickConcamarise");
+    const btnPickPrisma = document.getElementById("btnPickPrisma");
     const btnInvBackPicker = document.getElementById("btnInvBackPicker");
     const btnBackInv = document.getElementById("btnBackInv");
     const pillMov = document.getElementById("pillMov");
@@ -11008,6 +11075,11 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
 
       try{ __syncDockedControlsVisibility && __syncDockedControlsVisibility(); }catch(_){}
 
+      try{
+        const invView = document.getElementById("viewInventory");
+        if (invView && invView.dataset) invView.dataset.inventorySite = wh || "";
+      }catch(_){}
+
       if (pillInvWarehouse) {
         pillInvWarehouse.style.display = wh ? "inline-flex" : "none";
         pillInvWarehouse.textContent = wh ? warehouseLabel(wh) : "—";
@@ -11052,6 +11124,7 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
     try{
       btnPickCerea && btnPickCerea.addEventListener("click", () => { setInventoryWarehouse(WAREHOUSE_CEREA); renderAll(); });
       btnPickConcamarise && btnPickConcamarise.addEventListener("click", () => { setInventoryWarehouse(WAREHOUSE_CONCA); renderAll(); });
+      btnPickPrisma && btnPickPrisma.addEventListener("click", () => { setInventoryWarehouse(WAREHOUSE_PRISMA); renderAll(); });
       btnInvBackPicker && btnInvBackPicker.addEventListener("click", () => { setInventoryWarehouse(""); renderAll(); });
       btnBackInv && btnBackInv.addEventListener("click", () => {
         if (invDetail && invDetail.style.display !== "none") {
@@ -11081,6 +11154,7 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
       thresholds: {}, // per-item threshold overrides: key -> number
       productCategories: {}, // per-code categoria (offline fallback)
       productUoms: {}, // per-code unità di misura (offline fallback)
+      productWarehouses: {}, // per-code visibilità inventari (offline fallback)
       categories: [] // elenco categorie (offline fallback)
     };
 
@@ -13404,10 +13478,27 @@ async function deleteMovementsBulk(ids) {
       return `${(customer||"").trim().toLowerCase()}||${(code||"").trim().toLowerCase()}`;
     }
 
-    // ===== Inventari (Cerea / Concamarise) =====
+    // ===== Inventari (Cerea / Concamarise / Prisma) =====
     const WAREHOUSE_CEREA = "cerea";
     const WAREHOUSE_CONCA = "concamarise";
+    const WAREHOUSE_PRISMA = "prisma";
     const WAREHOUSE_FINISHED = "prodotti_finiti";
+    const RAW_INVENTORY_WAREHOUSES = [WAREHOUSE_CEREA, WAREHOUSE_CONCA, WAREHOUSE_PRISMA];
+
+    function isRawInventoryWarehouse(w){
+      const ww = String(w || "").trim().toLowerCase();
+      return RAW_INVENTORY_WAREHOUSES.includes(ww);
+    }
+
+    function emptyRawWarehouseQty(){
+      return { cerea: 0, concamarise: 0, prisma: 0 };
+    }
+
+    function rawWarehouseQtyTotal(info, list){
+      const src = info || {};
+      const whs = Array.isArray(list) && list.length ? list : RAW_INVENTORY_WAREHOUSES;
+      return whs.reduce((sum, wh) => sum + (Number(src[wh] || 0) || 0), 0);
+    }
 
     function normalizeWarehouse(v){
       const s = String(v || "").trim().toLowerCase();
@@ -13416,7 +13507,9 @@ async function deleteMovementsBulk(ids) {
       if (s === WAREHOUSE_FINISHED || s === "pf" || s === "finiti" || s === "prodotti finiti" || s === "prodotti_finiti" || s.includes("finit")) return WAREHOUSE_FINISHED;
       if (s === "concamarise") return WAREHOUSE_CONCA;
       if (s === "cerea") return WAREHOUSE_CEREA;
+      if (s === "prisma") return WAREHOUSE_PRISMA;
       if (s.includes("conca")) return WAREHOUSE_CONCA;
+      if (s.includes("prisma")) return WAREHOUSE_PRISMA;
       if (s.includes("cerea") || s.startsWith("cer")) return WAREHOUSE_CEREA;
       return WAREHOUSE_CEREA;
     }
@@ -13424,7 +13517,9 @@ async function deleteMovementsBulk(ids) {
     function warehouseLabel(v){
       const w = normalizeWarehouse(v);
       if (w === WAREHOUSE_FINISHED) return "Prodotti finiti";
-      return (w === WAREHOUSE_CONCA) ? "Inventario Concamarise" : "Inventario Cerea";
+      if (w === WAREHOUSE_CONCA) return "Inventario Concamarise";
+      if (w === WAREHOUSE_PRISMA) return "Inventario Prisma";
+      return "Inventario Cerea";
     }
 
     function stockRowKey(customer, code, warehouse){
@@ -13540,6 +13635,7 @@ async function deleteMovementsBulk(ids) {
           state.thresholds = parsed.thresholds && typeof parsed.thresholds === "object" ? parsed.thresholds : {};
           state.productCategories = parsed.productCategories && typeof parsed.productCategories === "object" ? parsed.productCategories : {};
           state.productUoms = parsed.productUoms && typeof parsed.productUoms === "object" ? parsed.productUoms : {};
+          state.productWarehouses = parsed.productWarehouses && typeof parsed.productWarehouses === "object" ? parsed.productWarehouses : {};
           state.categories = Array.isArray(parsed.categories) ? parsed.categories : (Array.isArray(state.categories) ? state.categories : []);
           // Categorie: default + indice runtime
           if (!Array.isArray(state.categories) || !state.categories.length) state.categories = DEFAULT_CATEGORIES.slice();
@@ -13558,6 +13654,7 @@ async function deleteMovementsBulk(ids) {
           thresholds: state.thresholds,
           productCategories: state.productCategories,
           productUoms: state.productUoms,
+          productWarehouses: state.productWarehouses,
           categories: state.categories
         }));
       } catch(_){}
@@ -14592,13 +14689,15 @@ function validateMovementFields(fields) {
 
 // === Inventario: righe per sede includendo prodotti senza movimenti ===
 // Regola visibilità:
-// - se un codice è 0 nella sede corrente MA >0 nell'altra sede => NON mostrare
-// - se un codice è 0 in entrambe le sedi => mostrare (utile per articoli nuovi / mai movimentati)
+// - se un codice è 0 nella sede corrente MA >0 in almeno un'altra sede => NON mostrare
+// - se un codice è 0 in tutte le sedi inventario => mostrare (utile per articoli nuovi / mai movimentati)
 function buildInventoryRowsForWarehouse(wh, stockByWh){
   const w = normalizeWarehouse(wh);
-  const other = (w === WAREHOUSE_CEREA) ? WAREHOUSE_CONCA : WAREHOUSE_CEREA;
+  const otherWarehouses = RAW_INVENTORY_WAREHOUSES.filter(x => x !== w);
 
-    let rows = (Array.isArray(stockByWh) ? stockByWh : []).filter(x => normalizeWarehouse(x.warehouse) === w).map(r => Object.assign({}, r));
+  let rows = (Array.isArray(stockByWh) ? stockByWh : [])
+    .filter(x => normalizeWarehouse(x.warehouse) === w)
+    .map(r => Object.assign({}, r));
 
   // Filtra per visibilità sede (solo se impostata in anagrafica)
   rows = rows.filter(r => {
@@ -14608,16 +14707,18 @@ function buildInventoryRowsForWarehouse(wh, stockByWh){
   });
 
   // Totali per codice (somma per sede, indipendente dal customer)
-  const totByCode = new Map(); // codeLower -> {cerea:number, concamarise:number}
+  const totByCode = new Map(); // codeLower -> {cerea:number, concamarise:number, prisma:number}
   for (const r of (Array.isArray(stockByWh) ? stockByWh : [])) {
     if (!r) continue;
     const code = String(r.code || "").trim();
     if (!code) continue;
     const low = code.toLowerCase();
     const ww = normalizeWarehouse(r.warehouse || "");
-    const info = totByCode.get(low) || { cerea: 0, concamarise: 0 };
+    const info = totByCode.get(low) || emptyRawWarehouseQty();
     const q = Number(r.qty);
-    info[ww] += (Number.isFinite(q) ? q : 0);
+    if (isRawInventoryWarehouse(ww)) {
+      info[ww] += (Number.isFinite(q) ? q : 0);
+    }
     totByCode.set(low, info);
   }
 
@@ -14630,14 +14731,14 @@ function buildInventoryRowsForWarehouse(wh, stockByWh){
     // Se l’articolo non è abilitato su questa sede, non inserirlo qui
     if (!isCodeVisibleInWarehouse(code, w)) continue;
     const low = code.toLowerCase();
-    const info = totByCode.get(low) || { cerea: 0, concamarise: 0 };
+    const info = totByCode.get(low) || emptyRawWarehouseQty();
     const curQty = Number(info[w] || 0);
-    const othQty = Number(info[other] || 0);
+    const othersQty = rawWarehouseQtyTotal(info, otherWarehouses);
 
     const hasInRows = rows.some(r => String(r.code || "").trim().toLowerCase() === low);
     if (!hasInRows) {
-      // Se entrambe le sedi sono a 0, vogliamo mostrarlo comunque in entrambe
-      if (curQty === 0 && othQty === 0) {
+      // Se tutte le sedi sono a 0, vogliamo mostrarlo comunque in tutte le sedi visibili
+      if (curQty === 0 && othersQty === 0) {
         const name = String(p.name || code).trim();
         const cust = String(p.customer || "").trim();
         const itemK = movementKey(cust, code);
@@ -14650,6 +14751,7 @@ function buildInventoryRowsForWarehouse(wh, stockByWh){
           qty: 0,
           lastMoveAt: "",
           threshold: getThresholdForKey(itemK),
+          __allZero: true,
           __bothZero: true
         });
       }
@@ -14661,16 +14763,19 @@ function buildInventoryRowsForWarehouse(wh, stockByWh){
     const code = String(r.code || "").trim();
     if (!code) return true;
     const low = code.toLowerCase();
-    const info = totByCode.get(low) || { cerea: 0, concamarise: 0 };
+    const info = totByCode.get(low) || emptyRawWarehouseQty();
     const cur = Number(info[w] || 0);
-    const oth = Number(info[other] || 0);
+    const others = rawWarehouseQtyTotal(info, otherWarehouses);
     const q = Number(r.qty) || 0;
 
-    // Marca "both zero" anche per righe esistenti (net 0 su entrambe)
-    if (cur === 0 && oth === 0) r.__bothZero = true;
+    // Marca "all zero" anche per righe esistenti (net 0 su tutte le sedi inventario)
+    if (cur === 0 && others === 0) {
+      r.__allZero = true;
+      r.__bothZero = true; // compat vecchio nome
+    }
 
     if (q !== 0) return true;
-    if (oth > 0) return false;
+    if (others > 0) return false;
     return true;
   });
 
@@ -15317,7 +15422,7 @@ async function deletePfProduction(batchId) {
             rows: 0,
             pieces: 0,
             codes: new Set(),
-            wh: { cerea: 0, concamarise: 0 }
+            wh: { cerea: 0, concamarise: 0, prisma: 0 }
           };
           byKey.set(key, g);
         }
@@ -15330,7 +15435,8 @@ async function deletePfProduction(batchId) {
         if (c) g.codes.add(c.toLowerCase());
 
         const w = normalizeWarehouse(mv.warehouse || "");
-        if (w === WAREHOUSE_CONCA) g.wh.concamarise += q;
+        if (w === WAREHOUSE_PRISMA) g.wh.prisma += q;
+        else if (w === WAREHOUSE_CONCA) g.wh.concamarise += q;
         else g.wh.cerea += q;
 
         const ca = String(mv.createdAt || "").trim();
@@ -15348,7 +15454,8 @@ async function deletePfProduction(batchId) {
         pieces: g.pieces || 0,
         codesCount: (g.codes && g.codes.size) ? g.codes.size : 0,
         whCerea: (g.wh && g.wh.cerea) ? g.wh.cerea : 0,
-        whConca: (g.wh && g.wh.concamarise) ? g.wh.concamarise : 0
+        whConca: (g.wh && g.wh.concamarise) ? g.wh.concamarise : 0,
+        whPrisma: (g.wh && g.wh.prisma) ? g.wh.prisma : 0
       }));
 
       arr.sort((a,b) => {
@@ -15755,7 +15862,7 @@ async function deletePfProduction(batchId) {
 
     function renderLowStockBoard(stockByWh) {
       try {
-        if (!lowStockBoard || !lowStockListCerea || !lowStockListConca) return;
+        if (!lowStockBoard || !lowStockListCerea || !lowStockListConca || !lowStockListPrisma) return;
 
         // reset cache (usata dal click sulle righe)
         __lowStockRowByKey = new Map();
@@ -15771,13 +15878,16 @@ async function deletePfProduction(batchId) {
 
         const cerea = arr.filter(r => normalizeWarehouse(r.warehouse) === WAREHOUSE_CEREA && isLow(r));
         const conca = arr.filter(r => normalizeWarehouse(r.warehouse) === WAREHOUSE_CONCA && isLow(r));
+        const prisma = arr.filter(r => normalizeWarehouse(r.warehouse) === WAREHOUSE_PRISMA && isLow(r));
 
         const sortFn = (a, b) => (Number(a && a.qty) || 0) - (Number(b && b.qty) || 0);
         cerea.sort(sortFn);
         conca.sort(sortFn);
+        prisma.sort(sortFn);
 
         if (lowStockCountCerea) lowStockCountCerea.textContent = String(cerea.length);
         if (lowStockCountConca) lowStockCountConca.textContent = String(conca.length);
+        if (lowStockCountPrisma) lowStockCountPrisma.textContent = String(prisma.length);
 
         const fmt = (n) => (Number(n) || 0).toLocaleString("it-IT");
 
@@ -15835,6 +15945,7 @@ async function deletePfProduction(batchId) {
 
         renderList(cerea, lowStockListCerea);
         renderList(conca, lowStockListConca);
+        renderList(prisma, lowStockListPrisma);
       } catch (e) {
         console.warn("renderLowStockBoard failed", e);
       }
@@ -18127,9 +18238,9 @@ function getMacroCategoryForCode(code) {
 
 
     
-    // ===== Prodotti: Visibilità sedi (Cerea / Concamarise) =====
-    // Se non impostata => default: visibile in entrambe le sedi.
-    // Campo prodotto: warehouses: ["cerea","concamarise"] (oppure [])
+    // ===== Prodotti: Visibilità sedi (Cerea / Concamarise / Prisma) =====
+    // Se non impostata => default: visibile in tutte le sedi inventario.
+    // Campo prodotto: warehouses: ["cerea","concamarise","prisma"] (oppure [])
     function __normalizeWarehousesList(raw){
       try{
         if (raw == null) return [];
@@ -18137,18 +18248,20 @@ function getMacroCategoryForCode(code) {
         if (Array.isArray(raw)) arr = raw.slice();
         else if (typeof raw === "string") arr = String(raw).split(/[;,\s]+/g).filter(Boolean);
         else if (raw && typeof raw === "object") {
-          // compat: {cerea:true, concamarise:false} / {cerea:1, conca:0}
+          // compat: {cerea:true, concamarise:false, prisma:true} / {cerea:1, conca:0}
           const out = [];
           const c = raw.cerea;
           const k = (raw.concamarise !== undefined) ? raw.concamarise : raw.conca;
+          const p = raw.prisma;
           if (c === true || c === 1 || c === "1") out.push(WAREHOUSE_CEREA);
           if (k === true || k === 1 || k === "1") out.push(WAREHOUSE_CONCA);
-          return Array.from(new Set(out.map(normalizeWarehouse))).filter(w => w === WAREHOUSE_CEREA || w === WAREHOUSE_CONCA);
+          if (p === true || p === 1 || p === "1") out.push(WAREHOUSE_PRISMA);
+          return Array.from(new Set(out.map(normalizeWarehouse))).filter(isRawInventoryWarehouse);
         }
         const out2 = [];
         for (const x of arr) {
           const w = normalizeWarehouse(x);
-          if (w === WAREHOUSE_CEREA || w === WAREHOUSE_CONCA) out2.push(w);
+          if (isRawInventoryWarehouse(w)) out2.push(w);
         }
         return Array.from(new Set(out2));
       }catch(_){ return []; }
@@ -18171,13 +18284,13 @@ function getMacroCategoryForCode(code) {
         }
       }catch(_){}
 
-      // default: entrambe
+      // default: tutte le sedi inventario
       return null;
     }
 
     function isCodeVisibleInWarehouse(code, wh){
       const setting = getWarehousesSettingForCode(code);
-      if (setting == null) return true; // default: show in both
+      if (setting == null) return true; // default: visibile in tutte le sedi
       const w = normalizeWarehouse(wh);
       return setting.includes(w);
     }
@@ -18903,7 +19016,7 @@ function __fpProdMovKey(customer, code){
 }
 
 function __fpBuildAvailByWhCustomerCode(){
-  const avail = { cerea: new Map(), concamarise: new Map() };
+  const avail = { cerea: new Map(), concamarise: new Map(), prisma: new Map() };
   const arr = (state && Array.isArray(state.movements)) ? state.movements : [];
 
   for (const mv of (arr || [])){
@@ -18916,7 +19029,7 @@ function __fpBuildAvailByWhCustomerCode(){
       const q = safeInt(mv.qty);
       if (!q) continue;
       const delta = (String(mv.type || "").toUpperCase() === "OUT") ? -q : q;
-      const m = (wh === WAREHOUSE_CONCA) ? avail.concamarise : avail.cerea;
+      const m = (wh === WAREHOUSE_PRISMA) ? avail.prisma : ((wh === WAREHOUSE_CONCA) ? avail.concamarise : avail.cerea);
       m.set(key, (m.get(key) || 0) + delta);
     }catch(_){ }
   }
@@ -19171,16 +19284,19 @@ async function produceFinishedProductFromRow(row, qtyToProduce){
     if (it.__isAliasGroup && Array.isArray(it.__members) && it.__members.length){
       let sumC = 0;
       let sumK = 0;
+      let sumP = 0;
 
       for (const m of it.__members){
         const key = __fpProdMovKey(m.customer, m.code);
         const aC = Math.max(0, safeInt(avail.cerea.get(key)));
         const aK = Math.max(0, safeInt(avail.concamarise.get(key)));
+        const aP = Math.max(0, safeInt(avail.prisma.get(key)));
         sumC += aC;
         sumK += aK;
+        sumP += aP;
       }
 
-      const tot = sumC + sumK;
+      const tot = sumC + sumK + sumP;
       if (tot < needInt){
         shortages.push({
           code: it.__displayCode || it.code,
@@ -19190,6 +19306,7 @@ async function produceFinishedProductFromRow(row, qtyToProduce){
           have: tot,
           cerea: sumC,
           concamarise: sumK,
+          prisma: sumP,
           __isAliasGroup: true,
           __codes: Array.isArray(it.__codes) ? it.__codes.slice() : []
         });
@@ -19198,7 +19315,8 @@ async function produceFinishedProductFromRow(row, qtyToProduce){
       const key = __fpProdMovKey(it.customer, it.code);
       const aC = Math.max(0, safeInt(avail.cerea.get(key)));
       const aK = Math.max(0, safeInt(avail.concamarise.get(key)));
-      const tot = aC + aK;
+      const aP = Math.max(0, safeInt(avail.prisma.get(key)));
+      const tot = aC + aK + aP;
       if (tot < needInt){
         shortages.push({
           code: it.code,
@@ -19207,7 +19325,8 @@ async function produceFinishedProductFromRow(row, qtyToProduce){
           need: needInt,
           have: tot,
           cerea: aC,
-          concamarise: aK
+          concamarise: aK,
+          prisma: aP
         });
       }
     }
@@ -19217,7 +19336,7 @@ async function produceFinishedProductFromRow(row, qtyToProduce){
   if (shortages.length){
     const sPrev = shortages.slice(0, 8).map(s => {
       const codeInfo = s.__isAliasGroup ? `${s.code} (alias)` : s.code;
-      return `${codeInfo}: richiesti ${s.need}, disponibili ${s.have} (Cerea ${s.cerea}, Conca ${s.concamarise})`;
+      return `${codeInfo}: richiesti ${s.need}, disponibili ${s.have} (Cerea ${s.cerea}, Conca ${s.concamarise}, Prisma ${s.prisma || 0})`;
     }).join(" • ");
     const moreS = (shortages.length > 8) ? ` … +${shortages.length - 8} altri` : "";
     try{ showToast("Scorte insufficienti: impossibile produrre. Riduci la quantità o carica i componenti.", "warn"); }catch(_){ }
@@ -19286,12 +19405,15 @@ async function produceFinishedProductFromRow(row, qtyToProduce){
     // Costruisci movimenti componenti (split su sede con più disponibilità + gestione alias)
     const movs = [];
 
+    const __fpRawWhKeys = [WAREHOUSE_CEREA, WAREHOUSE_CONCA, WAREHOUSE_PRISMA];
+    const availMapForWh = (wh) => (wh === WAREHOUSE_PRISMA) ? avail.prisma : ((wh === WAREHOUSE_CONCA) ? avail.concamarise : avail.cerea);
+
     const readAvail = (wh, key) => {
-      const m = (wh === WAREHOUSE_CONCA) ? avail.concamarise : avail.cerea;
+      const m = availMapForWh(wh);
       return Math.max(0, safeInt(m.get(key)));
     };
     const writeAvail = (wh, key, val) => {
-      const m = (wh === WAREHOUSE_CONCA) ? avail.concamarise : avail.cerea;
+      const m = availMapForWh(wh);
       m.set(key, val);
     };
 
@@ -19321,6 +19443,7 @@ async function produceFinishedProductFromRow(row, qtyToProduce){
         const key = __fpProdMovKey(customer, code);
         const aC = readAvail(WAREHOUSE_CEREA, key);
         const aK = readAvail(WAREHOUSE_CONCA, key);
+        const aP = readAvail(WAREHOUSE_PRISMA, key);
         srcState.push({
           code,
           customer,
@@ -19328,7 +19451,8 @@ async function produceFinishedProductFromRow(row, qtyToProduce){
           item: String(s && s.item || baseItem || code).trim() || code,
           uom: String(s && s.uom || baseUom || "").trim(),
           aC,
-          aK
+          aK,
+          aP
         });
       }
 
@@ -19362,24 +19486,25 @@ async function produceFinishedProductFromRow(row, qtyToProduce){
           return !used.has(kk);
         })
         .sort((a,b)=> (
-          (Math.max(0, safeInt(b.aC)) + Math.max(0, safeInt(b.aK))) -
-          (Math.max(0, safeInt(a.aC)) + Math.max(0, safeInt(a.aK)))
+          (Math.max(0, safeInt(b.aC)) + Math.max(0, safeInt(b.aK)) + Math.max(0, safeInt(b.aP))) -
+          (Math.max(0, safeInt(a.aC)) + Math.max(0, safeInt(a.aK)) + Math.max(0, safeInt(a.aP)))
         ));
       ordered.push(...rest);
 
       const takeFromSrc = (x, wh)=>{
         if (need <= 0) return;
 
-        const cur = (wh === WAREHOUSE_CONCA)
-          ? Math.max(0, safeInt(x.aK))
-          : Math.max(0, safeInt(x.aC));
+        const cur = (wh === WAREHOUSE_PRISMA)
+          ? Math.max(0, safeInt(x.aP))
+          : ((wh === WAREHOUSE_CONCA) ? Math.max(0, safeInt(x.aK)) : Math.max(0, safeInt(x.aC)));
 
         const take = Math.min(need, cur);
         if (take <= 0) return;
 
         need -= take;
 
-        if (wh === WAREHOUSE_CONCA) x.aK = cur - take;
+        if (wh === WAREHOUSE_PRISMA) x.aP = cur - take;
+        else if (wh === WAREHOUSE_CONCA) x.aK = cur - take;
         else x.aC = cur - take;
 
         // aggiorna disponibilità live (per i componenti successivi)
@@ -19392,21 +19517,26 @@ async function produceFinishedProductFromRow(row, qtyToProduce){
       for (const x of ordered){
         if (need <= 0) break;
 
-        const aC = Math.max(0, safeInt(x.aC));
-        const aK = Math.max(0, safeInt(x.aK));
-        const firstWh = (aK > aC) ? WAREHOUSE_CONCA : WAREHOUSE_CEREA;
-        const secondWh = (firstWh === WAREHOUSE_CEREA) ? WAREHOUSE_CONCA : WAREHOUSE_CEREA;
+        const whOrder = __fpRawWhKeys.slice().sort((a,b) => {
+          const qa = (a === WAREHOUSE_PRISMA) ? safeInt(x.aP) : ((a === WAREHOUSE_CONCA) ? safeInt(x.aK) : safeInt(x.aC));
+          const qb = (b === WAREHOUSE_PRISMA) ? safeInt(x.aP) : ((b === WAREHOUSE_CONCA) ? safeInt(x.aK) : safeInt(x.aC));
+          return Math.max(0, qb) - Math.max(0, qa);
+        });
 
-        takeFromSrc(x, firstWh);
-        takeFromSrc(x, secondWh);
+        for (const wh of whOrder){
+          if (need <= 0) break;
+          takeFromSrc(x, wh);
+        }
       }
 
       // safety: se rimane bisogno, scarica comunque sul primo preferito (ma in teoria non succede perché blocchiamo gli shortage)
       if (need > 0 && ordered.length){
         const x = ordered[0];
-        const aC = Math.max(0, safeInt(x.aC));
-        const aK = Math.max(0, safeInt(x.aK));
-        const wh = (aK > aC) ? WAREHOUSE_CONCA : WAREHOUSE_CEREA;
+        const wh = __fpRawWhKeys.slice().sort((a,b) => {
+          const qa = (a === WAREHOUSE_PRISMA) ? safeInt(x.aP) : ((a === WAREHOUSE_CONCA) ? safeInt(x.aK) : safeInt(x.aC));
+          const qb = (b === WAREHOUSE_PRISMA) ? safeInt(x.aP) : ((b === WAREHOUSE_CONCA) ? safeInt(x.aK) : safeInt(x.aC));
+          return Math.max(0, qb) - Math.max(0, qa);
+        })[0] || WAREHOUSE_CEREA;
 
         movs.push(makePayload(wh, x, need, baseItem, baseUom || x.uom));
 
@@ -19919,6 +20049,10 @@ let __stockRowByKey = new Map();
     const moveInvList = document.getElementById("moveInvList");
     const btnMoveFromCerea = document.getElementById("btnMoveFromCerea");
     const btnMoveFromConca = document.getElementById("btnMoveFromConca");
+    const btnMoveCereaToPrisma = document.getElementById("btnMoveCereaToPrisma");
+    const btnMovePrismaToCerea = document.getElementById("btnMovePrismaToCerea");
+    const btnMoveConcaToPrisma = document.getElementById("btnMoveConcaToPrisma");
+    const btnMovePrismaToConca = document.getElementById("btnMovePrismaToConca");
     const btnMoveInvBack = document.getElementById("btnMoveInvBack");
     const moveInvListTitle = document.getElementById("moveInvListTitle");
     const moveInvListSub = document.getElementById("moveInvListSub");
@@ -20139,6 +20273,10 @@ let __stockRowByKey = new Map();
 
       const from = normalizeWarehouse(__moveInvFromWh || "");
       const to = normalizeWarehouse(__moveInvToWh || "");
+      if (!isRawInventoryWarehouse(from) || !isRawInventoryWarehouse(to) || from === to){
+        showToast("Direzione spostamento non valida", "err");
+        return;
+      }
       const avail = safeInt(g.qty);
       if (q > avail){
         showToast("Quantità superiore al disponibile", "err");
@@ -20248,6 +20386,10 @@ let __stockRowByKey = new Map();
 
         btnMoveFromCerea?.addEventListener("click", () => { __setMoveInvDirection(WAREHOUSE_CEREA, WAREHOUSE_CONCA); });
         btnMoveFromConca?.addEventListener("click", () => { __setMoveInvDirection(WAREHOUSE_CONCA, WAREHOUSE_CEREA); });
+        btnMoveCereaToPrisma?.addEventListener("click", () => { __setMoveInvDirection(WAREHOUSE_CEREA, WAREHOUSE_PRISMA); });
+        btnMovePrismaToCerea?.addEventListener("click", () => { __setMoveInvDirection(WAREHOUSE_PRISMA, WAREHOUSE_CEREA); });
+        btnMoveConcaToPrisma?.addEventListener("click", () => { __setMoveInvDirection(WAREHOUSE_CONCA, WAREHOUSE_PRISMA); });
+        btnMovePrismaToConca?.addEventListener("click", () => { __setMoveInvDirection(WAREHOUSE_PRISMA, WAREHOUSE_CONCA); });
         btnMoveInvBack?.addEventListener("click", () => { resetMoveInvDirection(); });
 
         moveInvSearch?.addEventListener("input", () => { try{ renderMoveInv(); }catch(_){ } });
@@ -21381,7 +21523,10 @@ async function deleteSupplierCascade(supplierId){
               };
               const qC = sumForWh(WAREHOUSE_CEREA);
               const qK = sumForWh(WAREHOUSE_CONCA);
-              const bestWh = (qK > qC) ? WAREHOUSE_CONCA : WAREHOUSE_CEREA;
+              const qP = sumForWh(WAREHOUSE_PRISMA);
+              const bestWh = RAW_INVENTORY_WAREHOUSES
+                .slice()
+                .sort((a,b) => sumForWh(b) - sumForWh(a))[0] || WAREHOUSE_CEREA;
               __ctx.warehouse = bestWh;
 
               const mem = (stockByWh || []).filter(r => r &&
@@ -21390,7 +21535,7 @@ async function deleteSupplierCascade(supplierId){
               );
               __ctx.__members = mem;
 
-              __ctx.qty = (normalizeWarehouse(bestWh) === normalizeWarehouse(WAREHOUSE_CONCA)) ? qK : qC;
+              __ctx.qty = (bestWh === WAREHOUSE_CONCA) ? qK : (bestWh === WAREHOUSE_PRISMA ? qP : qC);
 
               let thrMin = null;
               let last = "";
@@ -21570,12 +21715,12 @@ if (mode === "master") {
 
 
       
-      // Visibilità sedi (Cerea / Concamarise)
+      // Visibilità sedi (Cerea / Concamarise / Prisma)
       if (!isAliasGroup) {
         baseFields.push(`
           <div class="field" style="grid-column: 1 / -1;">
             <label>Visibilità inventari</label>
-            <div class="inlineRow" style="gap:16px; align-items:center;">
+            <div class="inlineRow" style="gap:16px; align-items:center; flex-wrap:wrap;">
               <label class="inlineRow" style="gap:8px; font-weight:900; color: rgba(0,0,0,.82);">
                 <input id="prodVisCerea" type="checkbox" />
                 <span>Inventario Cerea</span>
@@ -21583,6 +21728,10 @@ if (mode === "master") {
               <label class="inlineRow" style="gap:8px; font-weight:900; color: rgba(0,0,0,.82);">
                 <input id="prodVisConca" type="checkbox" />
                 <span>Inventario Concamarise</span>
+              </label>
+              <label class="inlineRow" style="gap:8px; font-weight:900; color: rgba(0,0,0,.82);">
+                <input id="prodVisPrisma" type="checkbox" />
+                <span>Inventario Prisma</span>
               </label>
               <button id="prodVisSave" class="btn btn-primary btn-xs" type="button" disabled>Salva</button>
             </div>
@@ -21633,6 +21782,7 @@ if (mode === "master") {
 
           const qCerea = sumWh(WAREHOUSE_CEREA);
           const qConca = sumWh(WAREHOUSE_CONCA);
+          const qPrisma = sumWh(WAREHOUSE_PRISMA);
 
           const pickRow = (w) => {
             const ww = normalizeWarehouse(w);
@@ -21656,9 +21806,11 @@ if (mode === "master") {
 
           ctx.__pickStockCerea = pickRow(WAREHOUSE_CEREA);
           ctx.__pickStockConca = pickRow(WAREHOUSE_CONCA);
+          ctx.__pickStockPrisma = pickRow(WAREHOUSE_PRISMA);
 
           const canC = !!ctx.__pickStockCerea;
           const canK = !!ctx.__pickStockConca;
+          const canP = !!ctx.__pickStockPrisma;
 
           baseFields.push(`
             <div class="field" style="grid-column: 1 / -1;">
@@ -21677,6 +21829,13 @@ if (mode === "master") {
                     <div class="td-muted">Totale: ${Number(qConca||0).toLocaleString("it-IT")} ${h(uomLabel || "pz")}</div>
                   </div>
                   <button id="prodOpenStockConca" class="btn btn-secondary btn-xs" type="button" ${canK ? "" : "disabled"}>Apri dettaglio</button>
+                </div>
+                <div class="inlineRow" style="justify-content: space-between; gap:10px; align-items:center; flex-wrap:wrap;">
+                  <div>
+                    <div><strong>Inventario Prisma</strong></div>
+                    <div class="td-muted">Totale: ${Number(qPrisma||0).toLocaleString("it-IT")} ${h(uomLabel || "pz")}</div>
+                  </div>
+                  <button id="prodOpenStockPrisma" class="btn btn-secondary btn-xs" type="button" ${canP ? "" : "disabled"}>Apri dettaglio</button>
                 </div>
               </div>
             </div>
@@ -21767,7 +21926,7 @@ if (mode === "master") {
               <button id="prodThrSave" class="btn btn-primary btn-xs" type="button" disabled>Salva</button>
               <button id="prodThrReset" class="btn btn-ghost btn-xs" type="button">Default</button>
             </div>
-            <div class="td-muted" style="margin-top:6px;">Se non impostata: sotto scorta se &lt; 1000 ${h(uomLabel || "pz")}. (La soglia è per articolo, vale su entrambe le sedi)</div>
+            <div class="td-muted" style="margin-top:6px;">Se non impostata: sotto scorta se &lt; 1000 ${h(uomLabel || "pz")}. (La soglia è per articolo, vale su tutte le sedi)</div>
           </div>
 
           <div class="field">
@@ -21787,6 +21946,7 @@ if (mode === "master") {
               <select id="prodWarehouseSelect" style="flex: 1 1 220px; min-width: 220px;">
                 <option value="cerea">Inventario Cerea</option>
                 <option value="concamarise">Inventario Concamarise</option>
+                <option value="prisma">Inventario Prisma</option>
               </select>
               <button id="prodWarehouseMove" class="btn btn-secondary btn-xs" type="button" disabled>Sposta</button>
             </div>
@@ -21806,7 +21966,7 @@ if (mode === "master") {
               <button id="prodDeleteInventory" class="btn btn-danger" type="button">Elimina articolo</button>
             </div>
             <div class="td-muted" style="margin-top:6px;">
-              Elimina tutte le righe/movimenti per questo <strong>Fornitore + Codice</strong> (anche su entrambe le sedi). Operazione irreversibile.
+              Elimina tutte le righe/movimenti per questo <strong>Fornitore + Codice</strong> (su tutte le sedi). Operazione irreversibile.
               ${whLabel ? (" (Stai visualizzando: " + h(whLabel) + ")") : ""}
             </div>
           </div>
@@ -21853,31 +22013,36 @@ if (mode === "master") {
       }
 
 
-      // Visibilità sedi (Cerea / Concamarise)
+      // Visibilità sedi (Cerea / Concamarise / Prisma)
       const vC = document.getElementById("prodVisCerea");
       const vK = document.getElementById("prodVisConca");
+      const vP = document.getElementById("prodVisPrisma");
       const vSave = document.getElementById("prodVisSave");
-      if (vC && vK && vSave && !isAliasGroup) {
+      if (vC && vK && vP && vSave && !isAliasGroup) {
         const init = getWarehousesSettingForCode(code);
         const initC = (init == null) ? true : init.includes(WAREHOUSE_CEREA);
         const initK = (init == null) ? true : init.includes(WAREHOUSE_CONCA);
+        const initP = (init == null) ? true : init.includes(WAREHOUSE_PRISMA);
 
         vC.checked = !!initC;
         vK.checked = !!initK;
+        vP.checked = !!initP;
 
         vC.dataset.orig = vC.checked ? "1" : "0";
         vK.dataset.orig = vK.checked ? "1" : "0";
+        vP.dataset.orig = vP.checked ? "1" : "0";
 
         const sync = () => {
           const oc = (vC.dataset.orig === "1");
           const ok = (vK.dataset.orig === "1");
-          vSave.disabled = (vC.checked === oc) && (vK.checked === ok);
+          const op = (vP.dataset.orig === "1");
+          vSave.disabled = (vC.checked === oc) && (vK.checked === ok) && (vP.checked === op);
         };
 
-        vC.addEventListener("click", (e) => e.stopPropagation());
-        vK.addEventListener("click", (e) => e.stopPropagation());
-        vC.addEventListener("change", sync);
-        vK.addEventListener("change", sync);
+        [vC, vK, vP].forEach(el => {
+          el.addEventListener("click", (e) => e.stopPropagation());
+          el.addEventListener("change", sync);
+        });
         sync();
 
         vSave.addEventListener("click", async (e) => {
@@ -21886,9 +22051,10 @@ if (mode === "master") {
           const list = [];
           if (vC.checked) list.push(WAREHOUSE_CEREA);
           if (vK.checked) list.push(WAREHOUSE_CONCA);
+          if (vP.checked) list.push(WAREHOUSE_PRISMA);
 
           if (!list.length) {
-            const ok0 = confirm("Stai togliendo l’articolo da entrambe le sedi. Non sarà più visibile in Inventario. Continuare?");
+            const ok0 = confirm("Stai togliendo l’articolo da tutte le sedi. Non sarà più visibile in Inventario. Continuare?");
             if (!ok0) { sync(); return; }
           }
 
@@ -21899,6 +22065,7 @@ if (mode === "master") {
             await setProductWarehousesForCode(code, list, { silent: true });
             vC.dataset.orig = vC.checked ? "1" : "0";
             vK.dataset.orig = vK.checked ? "1" : "0";
+            vP.dataset.orig = vP.checked ? "1" : "0";
             showToast("Visibilità salvata");
             try{ renderAll(); }catch(_){}
           }catch(err){
@@ -22051,6 +22218,13 @@ if (mode === "master") {
         openK.addEventListener("click", (e) => {
           e.preventDefault(); e.stopPropagation();
           openProductModal(String(ctx.__pickStockConca.code || code), ctx.__pickStockConca);
+        });
+      }
+      const openP = document.getElementById("prodOpenStockPrisma");
+      if (openP && ctx && ctx.__pickStockPrisma) {
+        openP.addEventListener("click", (e) => {
+          e.preventDefault(); e.stopPropagation();
+          openProductModal(String(ctx.__pickStockPrisma.code || code), ctx.__pickStockPrisma);
         });
       }
 
@@ -22319,14 +22493,15 @@ if (mode === "master") {
           } catch(_) { ids = []; }
 
           // stock attuale per sede (best effort)
-          let qCerea = 0, qConca = 0;
+          let qCerea = 0, qConca = 0, qPrisma = 0;
           try{
             const rows = (typeof computeStockByWarehouse === "function") ? computeStockByWarehouse() : [];
             for (const r of (rows || [])) {
               if (!r) continue;
               if (movementKey(String(r.customer || ""), String(r.code || "")) !== itemK) continue;
               const w = normalizeWarehouse(r.warehouse || "");
-              if (w === WAREHOUSE_CONCA) qConca += safeInt(r.qty);
+              if (w === WAREHOUSE_PRISMA) qPrisma += safeInt(r.qty);
+              else if (w === WAREHOUSE_CONCA) qConca += safeInt(r.qty);
               else qCerea += safeInt(r.qty);
             }
           }catch(_){}
@@ -22336,9 +22511,9 @@ if (mode === "master") {
             `Fornitore: ${cust || "—"}\n` +
             `Codice: ${code}\n` +
             `Nome: ${title || "—"}\n\n` +
-            `Stock attuale: Cerea ${Number(qCerea||0).toLocaleString("it-IT")} • Concamarise ${Number(qConca||0).toLocaleString("it-IT")}\n` +
+            `Stock attuale: Cerea ${Number(qCerea||0).toLocaleString("it-IT")} • Concamarise ${Number(qConca||0).toLocaleString("it-IT")} • Prisma ${Number(qPrisma||0).toLocaleString("it-IT")}\n` +
             `Movimenti da eliminare: ${Number(ids.length||0).toLocaleString("it-IT")}\n\n` +
-            `Nota: verranno eliminate tutte le righe/movimenti per questo Fornitore+Codice (anche su entrambe le sedi).\n` +
+            `Nota: verranno eliminate tutte le righe/movimenti per questo Fornitore+Codice (su tutte le sedi).\n` +
             `Operazione irreversibile.`
           );
           if (!ok) return;
