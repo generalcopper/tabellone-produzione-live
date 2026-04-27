@@ -2293,23 +2293,41 @@
       return wh === WAREHOUSE_PRISMA ? COMPANY_PRISMA : COMPANY_GENERAL_COPPER;
     }
 
-    async function enqueueMatteoEmail(subject, textBody, htmlBody = ""){
+    async function enqueueMatteoEmail(subject, textBody, htmlBody = "", attachments = []){
       try{
         if (!state.db) return;
         const safeText = String(textBody || "").trim() || "Evento registrato.";
         const message = {
-          subject: String(subject || "Inventario Prisma").trim() || "Inventario Prisma",
+          subject: String(subject || "HIGC - Comunicazione gestionale").trim() || "HIGC - Comunicazione gestionale",
           text: safeText
         };
         if (String(htmlBody || "").trim()){
           message.html = String(htmlBody);
         }
+
+        const safeAttachments = Array.isArray(attachments)
+          ? attachments
+              .map((attachment) => ({
+                filename: cleanSpaces(attachment?.filename || attachment?.fileName || "documento.pdf") || "documento.pdf",
+                content: String(attachment?.content || attachment?.base64 || "").trim(),
+                contentType: cleanSpaces(attachment?.contentType || attachment?.mimeType || "application/pdf") || "application/pdf",
+                encoding: cleanSpaces(attachment?.encoding || "base64") || "base64"
+              }))
+              .filter((attachment) => attachment.content)
+          : [];
+
+        if (safeAttachments.length){
+          message.attachments = safeAttachments;
+        }
+
         await addDoc(collection(state.db, MAIL_COLLECTION), {
           to: EMAIL_TO_MATTEO,
           message,
           createdAt: serverTimestamp(),
           line: EMAIL_LINE_TAG,
           source: SOURCE,
+          hasAttachments: safeAttachments.length > 0,
+          attachmentCount: safeAttachments.length,
           createdBy: prettifyUserLabel(state.user?.displayName || state.user?.email || state.user?.uid || "Sistema")
         });
       }catch(err){
@@ -2369,40 +2387,98 @@
       const qtyLabel = `${qty.toLocaleString("it-IT")} ${uom}`;
       const itemLabel = String(product?.name || product?.code || "Articolo").trim() || "Articolo";
       const codeLabel = String(product?.code || "").trim();
-      const originLabel = config?.sourceLabel || warehouseLabel(config?.sourceWarehouse || WAREHOUSE_CEREA);
-      const destinationLabel = config?.destinationLabel || warehouseLabel(config?.destinationWarehouse || WAREHOUSE_PRISMA);
-      const subject = `[Inventario Prisma] DDT ${ddtNumber} • ${originLabel} → ${destinationLabel} • ${itemLabel} • ${qtyLabel}`;
+      const senderWarehouse = config?.sourceLabel || warehouseLabel(config?.sourceWarehouse || WAREHOUSE_CEREA);
+      const receiverWarehouse = config?.destinationLabel || warehouseLabel(config?.destinationWarehouse || WAREHOUSE_PRISMA);
+      const subject = `HIGC - Documento di trasporto ${ddtNumber} - ${senderWarehouse} / ${receiverWarehouse} - ${codeLabel || itemLabel}`;
       const textBody = [
-        "È stato generato un nuovo documento di trasporto per trasferimento inventario.",
+        `Documento di trasporto: ${ddtNumber}`,
+        `Operazione: trasferimento inventario`,
+        `Magazzino mittente: ${senderWarehouse}`,
+        `Magazzino destinatario: ${receiverWarehouse}`,
         "",
-        `DDT: ${ddtNumber}`,
         `Articolo: ${itemLabel}`,
         `Codice articolo: ${codeLabel || "—"}`,
-        `Quantità trasferita: ${qtyLabel}`,
-        `Da: ${originLabel}`,
-        `A: ${destinationLabel}`,
+        `Quantità: ${qtyLabel}`,
+        "",
+        `Data documento: ${date}`,
+        `Registrazione gestionale: ${whenLabel}`,
         `Operatore: ${operator}`,
         `Email operatore: ${userEmail || "—"}`,
-        `Data operazione: ${date}`,
-        `Registrazione: ${whenLabel}`,
-        `Origine evento: ${SOURCE}`
+        "",
+        "Il documento di trasporto è allegato alla presente comunicazione."
       ].join("\n");
       const htmlBody = `
-        <div style="font-family:Arial,sans-serif; font-size:14px; color:#111827; line-height:1.55;">
-          <div style="font-size:18px; font-weight:800; margin-bottom:12px;">Nuovo DDT inventario Prisma</div>
-          <table style="border-collapse:collapse; width:100%; max-width:720px;">
-            <tr><td style="padding:6px 12px 6px 0; color:#6b7280;">DDT</td><td style="padding:6px 0; font-weight:800;">${escapeHtml(ddtNumber)}</td></tr>
-            <tr><td style="padding:6px 12px 6px 0; color:#6b7280;">Articolo</td><td style="padding:6px 0; font-weight:800;">${escapeHtml(itemLabel)}</td></tr>
-            <tr><td style="padding:6px 12px 6px 0; color:#6b7280;">Codice articolo</td><td style="padding:6px 0; font-weight:800;">${escapeHtml(codeLabel || "—")}</td></tr>
-            <tr><td style="padding:6px 12px 6px 0; color:#6b7280;">Quantità trasferita</td><td style="padding:6px 0; font-weight:800;">${escapeHtml(qtyLabel)}</td></tr>
-            <tr><td style="padding:6px 12px 6px 0; color:#6b7280;">Da</td><td style="padding:6px 0;">${escapeHtml(originLabel)}</td></tr>
-            <tr><td style="padding:6px 12px 6px 0; color:#6b7280;">A</td><td style="padding:6px 0;">${escapeHtml(destinationLabel)}</td></tr>
-            <tr><td style="padding:6px 12px 6px 0; color:#6b7280;">Operatore</td><td style="padding:6px 0;">${escapeHtml(operator)}</td></tr>
-            <tr><td style="padding:6px 12px 6px 0; color:#6b7280;">Email operatore</td><td style="padding:6px 0;">${escapeHtml(userEmail || "—")}</td></tr>
-            <tr><td style="padding:6px 12px 6px 0; color:#6b7280;">Data operazione</td><td style="padding:6px 0;">${escapeHtml(date)}</td></tr>
-            <tr><td style="padding:6px 12px 6px 0; color:#6b7280;">Registrazione</td><td style="padding:6px 0;">${escapeHtml(whenLabel)}</td></tr>
-          </table>
-          <div style="margin-top:16px; font-size:12px; color:#6b7280;">Messaggio generato automaticamente da Inventario Prisma.</div>
+        <div style="margin:0; padding:0; background:#f6f8fb; font-family:Arial, Helvetica, sans-serif; color:#111827;">
+          <div style="max-width:760px; margin:0 auto; padding:24px 18px;">
+            <div style="background:#ffffff; border:1px solid #e5e7eb; border-radius:18px; overflow:hidden; box-shadow:0 10px 28px rgba(15,23,42,.06);">
+              <div style="padding:20px 24px; border-top:6px solid #1D4ED8; border-bottom:1px solid #e5e7eb;">
+                <div style="font-size:11px; line-height:1.2; font-weight:800; letter-spacing:.08em; color:#64748b; text-transform:uppercase;">HIGC · Hub Inventario General Copper</div>
+                <div style="margin-top:8px; font-size:22px; line-height:1.18; font-weight:800; color:#0f172a;">Documento di trasporto emesso</div>
+                <div style="margin-top:6px; font-size:13px; line-height:1.45; color:#475569;">Trasferimento inventario registrato da gestionale.</div>
+              </div>
+
+              <div style="padding:20px 24px 8px 24px;">
+                <table style="width:100%; border-collapse:collapse; table-layout:fixed;">
+                  <tr>
+                    <td style="width:33.33%; padding:0 12px 14px 0; vertical-align:top;">
+                      <div style="font-size:11px; font-weight:800; color:#64748b; text-transform:uppercase; letter-spacing:.04em;">Numero DDT</div>
+                      <div style="margin-top:5px; font-size:18px; font-weight:800; color:#0f172a; word-break:break-word;">${escapeHtml(ddtNumber)}</div>
+                    </td>
+                    <td style="width:33.33%; padding:0 12px 14px 0; vertical-align:top;">
+                      <div style="font-size:11px; font-weight:800; color:#64748b; text-transform:uppercase; letter-spacing:.04em;">Data documento</div>
+                      <div style="margin-top:5px; font-size:15px; font-weight:700; color:#0f172a;">${escapeHtml(date)}</div>
+                    </td>
+                    <td style="width:33.33%; padding:0 0 14px 0; vertical-align:top;">
+                      <div style="font-size:11px; font-weight:800; color:#64748b; text-transform:uppercase; letter-spacing:.04em;">Quantità</div>
+                      <div style="margin-top:5px; font-size:15px; font-weight:800; color:#0f172a;">${escapeHtml(qtyLabel)}</div>
+                    </td>
+                  </tr>
+                </table>
+
+                <div style="display:block; border:1px solid #e5e7eb; border-radius:14px; overflow:hidden; margin-top:4px;">
+                  <table style="width:100%; border-collapse:collapse; table-layout:fixed;">
+                    <tr>
+                      <td style="width:50%; padding:14px 16px; vertical-align:top; border-right:1px solid #e5e7eb; background:#f8fafc;">
+                        <div style="font-size:11px; font-weight:800; color:#64748b; text-transform:uppercase; letter-spacing:.04em;">Magazzino mittente</div>
+                        <div style="margin-top:6px; font-size:16px; font-weight:800; color:#0f172a; word-break:break-word;">${escapeHtml(senderWarehouse)}</div>
+                      </td>
+                      <td style="width:50%; padding:14px 16px; vertical-align:top; background:#f8fafc;">
+                        <div style="font-size:11px; font-weight:800; color:#64748b; text-transform:uppercase; letter-spacing:.04em;">Magazzino destinatario</div>
+                        <div style="margin-top:6px; font-size:16px; font-weight:800; color:#0f172a; word-break:break-word;">${escapeHtml(receiverWarehouse)}</div>
+                      </td>
+                    </tr>
+                  </table>
+                </div>
+
+                <table style="width:100%; border-collapse:collapse; margin-top:18px;">
+                  <tr>
+                    <td style="padding:9px 0; border-bottom:1px solid #eef2f7; color:#64748b; font-size:13px; font-weight:700; width:170px;">Articolo</td>
+                    <td style="padding:9px 0; border-bottom:1px solid #eef2f7; color:#0f172a; font-size:14px; font-weight:800; word-break:break-word;">${escapeHtml(itemLabel)}</td>
+                  </tr>
+                  <tr>
+                    <td style="padding:9px 0; border-bottom:1px solid #eef2f7; color:#64748b; font-size:13px; font-weight:700;">Codice articolo</td>
+                    <td style="padding:9px 0; border-bottom:1px solid #eef2f7; color:#0f172a; font-size:14px; font-weight:800; word-break:break-word;">${escapeHtml(codeLabel || "—")}</td>
+                  </tr>
+                  <tr>
+                    <td style="padding:9px 0; border-bottom:1px solid #eef2f7; color:#64748b; font-size:13px; font-weight:700;">Operatore</td>
+                    <td style="padding:9px 0; border-bottom:1px solid #eef2f7; color:#0f172a; font-size:14px; font-weight:700; word-break:break-word;">${escapeHtml(operator)}</td>
+                  </tr>
+                  <tr>
+                    <td style="padding:9px 0; border-bottom:1px solid #eef2f7; color:#64748b; font-size:13px; font-weight:700;">Registrazione</td>
+                    <td style="padding:9px 0; border-bottom:1px solid #eef2f7; color:#0f172a; font-size:14px; font-weight:700;">${escapeHtml(whenLabel)}</td>
+                  </tr>
+                </table>
+
+                <div style="margin:18px 0 2px 0; padding:13px 15px; border-radius:14px; background:#eff6ff; border:1px solid #bfdbfe; color:#1e3a8a; font-size:13px; line-height:1.45; font-weight:700;">
+                  Documento di trasporto allegato in formato PDF.
+                </div>
+              </div>
+
+              <div style="padding:14px 24px 18px 24px; border-top:1px solid #e5e7eb; color:#64748b; font-size:11px; line-height:1.4;">
+                HIGC - DOCUMENTO GENERATO DA HUB INVENTARIO GENERAL COPPER
+              </div>
+            </div>
+          </div>
         </div>
       `.trim();
       return { subject, textBody, htmlBody };
@@ -3559,13 +3635,21 @@
       fill(colors.main);
       text(margin, 37, "GENERAL COPPER SRL", 14, true);
       fill(colors.muted);
-      text(margin, 54, "Documento generato dal gestionale", 8.2, false);
+      text(margin, 54, "HIGC - Hub Inventario General Copper", 8.2, false);
       text(margin, 68, "Trasferimento merci tra magazzini", 8.2, false);
 
+      const headerTitle = "DOCUMENTO DI TRASPORTO";
+      const headerTitleSize = 17.5;
+      const headerTitleRight = right;
+      const headerRuleWidth = Math.min(204, textWidth(headerTitle, headerTitleSize, true));
       fill(colors.main);
-      text(right - 218, 37, "DOCUMENTO DI TRASPORTO", 17.5, true);
+      textRight(headerTitleRight, 37, headerTitle, headerTitleSize, true);
       fill(colors.accent);
-      rect(right - 218, 46, 178, 2.4, "f");
+      rect(headerTitleRight - headerRuleWidth, 46, headerRuleWidth, 2.4, "f");
+      fill(colors.muted);
+      textRight(headerTitleRight, 62, "DDT interno di trasferimento", 8.2, false);
+      stroke(colors.grid);
+      line(margin, 78, right, 78);
 
       const metaTop = 84;
       fill(colors.white); stroke(colors.border); rect(margin, metaTop, 523, 64, "B");
@@ -3670,12 +3754,13 @@
       if (movements.length){
         movements.forEach((mv, index) => {
           const rowY = summaryTop + 37 + index * 14;
-          const movementCode = cleanSpaces(mv.movementProgressive || `M${index + 1}`);
+          const rawMovementCode = cleanSpaces(mv.movementProgressive || `M${index + 1}`);
+          const shortMovementCode = cleanSpaces((rawMovementCode.match(/M\d+$/i) || [rawMovementCode])[0] || `M${index + 1}`);
           const warehouse = cleanSpaces(mv.warehouseLabel || warehouseLabel(mv.warehouse));
           const quantity = `${safeInt(mv.qty).toLocaleString("it-IT")} ${cleanSpaces(mv.uom || ddt.uom || "pz")}`;
           fill(colors.main);
-          text(movX + 10, rowY, movementCode, 7.2, true);
-          textWrapped(movX + 68, rowY, warehouse, 112, 7.2, false, 8.6, 1);
+          text(movX + 10, rowY, shortMovementCode, 7.2, true);
+          textWrapped(movX + 58, rowY, warehouse, 120, 7.2, false, 8.6, 1);
           textRight(movX + movW - 10, rowY, quantity, 7.2, true);
         });
       }else{
@@ -3695,7 +3780,7 @@
       textCenter(margin + 360 + signW / 2, signTop + 18, "Firma destinatario", 7.8, true);
 
       fill(colors.muted);
-      text(margin, 824, "Documento generato automaticamente dal gestionale", 7, false);
+      text(margin, 824, "HIGC - DOCUMENTO GENERATO DA HUB INVENTARIO GENERAL COPPER", 7, false);
       textRight(right, 824, "Pag. 1", 8, true);
 
       return buildPdfDataUrl(cmds);
@@ -4885,7 +4970,12 @@
             userEmail,
             config
           });
-          await enqueueMatteoEmail(emailData.subject, emailData.textBody, emailData.htmlBody);
+          await enqueueMatteoEmail(emailData.subject, emailData.textBody, emailData.htmlBody, [{
+            filename: ddtPayload.pdfFileName || `${reserved.ddtNumber}.pdf`,
+            content: ddtPayload.pdfBase64 || String(ddtPayload.pdfDataUrl || "").split(",")[1] || "",
+            contentType: "application/pdf",
+            encoding: "base64"
+          }]);
         }catch(mailErr){
           console.warn("prisma transfer email failed", mailErr);
         }
