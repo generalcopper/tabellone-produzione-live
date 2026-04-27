@@ -10673,7 +10673,6 @@ try{ __installRobustTapState(); }catch(_){ }
     });
 document.getElementById("btnGoInvCerea")?.addEventListener("click", () => { openInventoryOverlay(WAREHOUSE_CEREA); });
     document.getElementById("btnGoInvConcamarise")?.addEventListener("click", () => { openInventoryOverlay(WAREHOUSE_CONCA); });
-    document.getElementById("btnGoInvPrisma")?.addEventListener("click", () => { openInventoryOverlay(WAREHOUSE_PRISMA); });
     document.getElementById("btnGoFinishedInventory")?.addEventListener("click", () => { openFinishedInventoryOverlay(); });
 document.getElementById("menuGoHome")?.addEventListener("click", () => { closeSideMenu(); setView("home"); });
     document.getElementById("menuGoOcr")?.addEventListener("click", () => { closeSideMenu(); startHomeOcr(); });
