@@ -2586,22 +2586,7 @@
     }
 
     function isDdtMappedMovement(mv){
-      if (!mv || typeof mv !== "object") return false;
-      const kind = normalizeSearch(mv.recordKind || mv.kind || mv.recordType || mv.documentKind || "");
-      const docType = String(mv.docType || "").trim().toUpperCase();
-      return !!(
-        mv.isDdtDocument === true ||
-        kind === normalizeSearch(DDT_RECORD_KIND) ||
-        docType === `${DOC_TYPE}_HEADER` ||
-        docType.endsWith("_HEADER")
-      );
-    }
-
-    function isInventoryCountableMovement(mv){
-      if (!mv || typeof mv !== "object") return false;
-      if (isDdtMappedMovement(mv)) return false;
-      if (movementTouchesLegacyConcamarise(mv)) return false;
-      return true;
+      return !!(mv?.isDdtDocument || normalizeSearch(mv?.recordKind || "") === normalizeSearch(DDT_RECORD_KIND));
     }
 
     function normalizeDdtMovementSummary(mv, index, fallbackNumber = ""){
@@ -2740,7 +2725,6 @@
       const prismaRowsByCode = new Map();
 
       for (const mv of (state.movements || [])){
-        if (!isInventoryCountableMovement(mv)) continue;
         const code = String(mv?.code || "").trim();
         if (!code) continue;
         const low = code.toLowerCase();
@@ -3039,7 +3023,6 @@
       const list = [];
       for (const mv of (state.movements || [])){
         if (!mv) continue;
-        if (!isInventoryCountableMovement(mv)) continue;
         if (!isPrismaPanelMovement(mv)) continue;
 
         const code = String(mv.code || "").trim();
@@ -3388,12 +3371,35 @@
     }
 
     function wrapPdfText(value, maxChars = 44){
-      const words = cleanSpaces(value).split(" ").filter(Boolean);
+      const textValue = cleanSpaces(value);
+      if (!textValue) return [""];
+
+      const words = textValue.split(" ").filter(Boolean);
       const lines = [];
       let current = "";
-      for (const word of words){
+      const limit = Math.max(4, safeInt(maxChars) || 44);
+
+      function pushLongWord(word){
+        let rest = String(word || "");
+        while (rest.length > limit){
+          lines.push(rest.slice(0, limit));
+          rest = rest.slice(limit);
+        }
+        return rest;
+      }
+
+      for (const wordRaw of words){
+        let word = String(wordRaw || "");
+        if (word.length > limit){
+          if (current){
+            lines.push(current);
+            current = "";
+          }
+          word = pushLongWord(word);
+          if (!word) continue;
+        }
         const next = current ? `${current} ${word}` : word;
-        if (next.length > maxChars && current){
+        if (next.length > limit && current){
           lines.push(current);
           current = word;
         }else{
@@ -3402,6 +3408,61 @@
       }
       if (current) lines.push(current);
       return lines.length ? lines : [""];
+    }
+
+    function pdfApproxTextWidth(value, size = 8, bold = false){
+      const textValue = String(value ?? "");
+      const factor = bold ? .58 : .53;
+      return textValue.length * size * factor;
+    }
+
+    function wrapPdfTextWidth(value, maxWidth, size = 8, bold = false){
+      const textValue = cleanSpaces(value);
+      if (!textValue) return [""];
+      const width = Math.max(10, Number(maxWidth) || 10);
+      const lines = [];
+      let current = "";
+
+      function splitLongWord(word){
+        const parts = [];
+        let rest = String(word || "");
+        while (rest && pdfApproxTextWidth(rest, size, bold) > width){
+          let cut = Math.max(1, Math.floor(width / Math.max(1, size * (bold ? .58 : .53))));
+          cut = Math.max(1, Math.min(cut, rest.length));
+          while (cut > 1 && pdfApproxTextWidth(rest.slice(0, cut), size, bold) > width){
+            cut -= 1;
+          }
+          parts.push(rest.slice(0, cut));
+          rest = rest.slice(cut);
+        }
+        if (rest) parts.push(rest);
+        return parts;
+      }
+
+      for (const word of textValue.split(" ").filter(Boolean)){
+        const parts = pdfApproxTextWidth(word, size, bold) > width ? splitLongWord(word) : [word];
+        for (const part of parts){
+          const candidate = current ? `${current} ${part}` : part;
+          if (current && pdfApproxTextWidth(candidate, size, bold) > width){
+            lines.push(current);
+            current = part;
+          }else{
+            current = candidate;
+          }
+        }
+      }
+      if (current) lines.push(current);
+      return lines.length ? lines : [""];
+    }
+
+    function fitPdfLines(lines, maxLines = 2){
+      const arr = Array.isArray(lines) ? lines.slice() : [String(lines || "")];
+      const max = Math.max(1, safeInt(maxLines) || 1);
+      if (arr.length <= max) return arr;
+      const out = arr.slice(0, max);
+      const last = String(out[out.length - 1] || "");
+      out[out.length - 1] = last.length > 3 ? `${last.slice(0, Math.max(1, last.length - 3))}...` : "...";
+      return out;
     }
 
     function buildPdfDataUrl(commands){
@@ -3433,6 +3494,7 @@
       const W = 595;
       const H = 842;
       const margin = 38;
+      const right = 557;
       const cmds = [];
       const y = (top) => H - top;
       const esc = pdfEscape;
@@ -3456,60 +3518,138 @@
       }
       function textRight(x, top, value, size = 10, bold = false){
         const str = String(value ?? "");
-        const approx = str.length * size * .52;
+        const approx = pdfApproxTextWidth(str, size, bold);
         text(x - approx, top, str, size, bold);
       }
+      function textWrapped(x, top, value, maxWidth, size = 8, bold = false, lineGap = 10.2, maxLines = 2){
+        const rows = fitPdfLines(wrapPdfTextWidth(value, maxWidth, size, bold), maxLines);
+        rows.forEach((part, idx) => text(x, top + idx * lineGap, part, size, idx === 0 ? bold : false));
+        return rows.length;
+      }
+      function drawPartyBox(x, top, width, height, title, party){
+        fill("#FFFFFF"); stroke("#D7DEE8"); rect(x, top, width, height, "B");
+        fill("#1768E5"); textWrapped(x + 12, top + 20, title, width - 24, 7.4, true, 9, 2);
+        fill("#111827");
+        const rows = [
+          party?.label,
+          party?.attention,
+          party?.role,
+          party?.address,
+          party?.city,
+          party?.phone ? `Tel. ${party.phone}` : "",
+          party?.mobile ? `Mobile ${party.mobile}` : "",
+          party?.email,
+          party?.website
+        ].filter(Boolean);
+        let cursor = top + 41;
+        rows.forEach((row, idx) => {
+          if (cursor > top + height - 10) return;
+          const size = idx === 0 ? 9.1 : 7.3;
+          const lineGap = idx === 0 ? 10.2 : 8.6;
+          const remainingLines = Math.max(1, Math.floor((top + height - cursor - 5) / lineGap));
+          const used = textWrapped(x + 12, cursor, row, width - 24, size, idx === 0, lineGap, Math.min(idx === 0 ? 2 : 1, remainingLines));
+          cursor += used * lineGap;
+        });
+      }
+
+      const docNumber = ddt.ddtNumber || ddt.docNum || "DDT";
+      const progressive = padProgressive(ddt.ddtProgressive || ddt.progressive || 1, 6);
+      const totalQty = safeInt(ddt.totalQty || ddt.qty || 0);
+      const totalUom = ddt.uom || "pz";
 
       fill("#F8FAFC"); rect(0, 0, W, H, "f");
       fill("#0F172A"); rect(0, 0, W, 118, "f");
       fill("#1768E5"); rect(0, 110, W, 8, "f");
       fill("#1BD4A0"); rect(0, 118, W, 4, "f");
 
-      fill("#FFFFFF"); text(margin, 42, "GENERAL COPPER SRL", 12, true);
+      fill("#FFFFFF");
+      text(margin, 42, "GENERAL COPPER SRL", 12, true);
       text(margin, 60, "Prodotti per l'agricoltura e l'industria", 8, false);
-      text(margin, 90, "DOCUMENTO DI TRASPORTO", 30, true);
-      textRight(556, 48, ddt.ddtNumber || ddt.docNum || "DDT", 15, true);
-      textRight(556, 68, `Data ${formatDateIt(ddt.date)}`, 10, false);
-      textRight(556, 88, `Progressivo ${padProgressive(ddt.ddtProgressive || ddt.progressive || 1, 6)}`, 9, false);
+      textWrapped(margin, 90, "DOCUMENTO DI TRASPORTO", 330, 30, true, 30, 1);
+      textRight(556, 48, docNumber, 14, true);
+      textRight(556, 68, `Data ${formatDateIt(ddt.date)}`, 9.4, false);
+      textRight(556, 88, `Progressivo ${progressive}`, 8.6, false);
 
       const from = ddt.fromProfile || getDeliveryProfile(ddt.fromWarehouse);
       const to = ddt.toProfile || getDeliveryProfile(ddt.toWarehouse);
-      fill("#FFFFFF"); stroke("#D7DEE8"); rect(margin, 144, 255, 132, "B"); rect(304, 144, 253, 132, "B");
-      fill("#1768E5"); text(margin + 12, 164, `PARTENZA - ${ddt.fromLabel || warehouseLabel(ddt.fromWarehouse)}`, 8, true);
-      text(304 + 12, 164, `DESTINAZIONE - ${ddt.toLabel || warehouseLabel(ddt.toWarehouse)}`, 8, true);
-      fill("#111827");
-      const partyRows = (party) => [party?.label, party?.attention, party?.role, party?.address, party?.city, party?.phone ? `Tel. ${party.phone}` : "", party?.mobile ? `Mobile ${party.mobile}` : "", party?.email, party?.website].filter(Boolean);
-      partyRows(from).slice(0, 8).forEach((row, idx) => text(margin + 12, 184 + idx * 11.5, row, idx === 0 ? 9.5 : 7.8, idx === 0));
-      partyRows(to).slice(0, 9).forEach((row, idx) => text(304 + 12, 184 + idx * 11.5, row, idx === 0 ? 9.5 : 7.8, idx === 0));
+      drawPartyBox(margin, 144, 255, 136, `PARTENZA - ${ddt.fromLabel || warehouseLabel(ddt.fromWarehouse)}`, from);
+      drawPartyBox(304, 144, 253, 136, `DESTINAZIONE - ${ddt.toLabel || warehouseLabel(ddt.toWarehouse)}`, to);
 
-      fill("#EAF2FF"); stroke("#D7DEE8"); rect(margin, 288, 519, 26, "B");
-      fill("#334155"); text(margin + 8, 305, "Codice", 8, true); text(margin + 92, 305, "Descrizione", 8, true); text(margin + 370, 305, "Tratta", 8, true); textRight(548, 305, "Quantita", 8, true);
-      let top = 322;
-      const lines = Array.isArray(ddt.lines) && ddt.lines.length ? ddt.lines : [{ code: ddt.code, item: ddt.item, qty: ddt.totalQty, uom: ddt.uom, fromLabel: ddt.fromLabel, toLabel: ddt.toLabel }];
-      for (const row of lines.slice(0, 9)){
-        stroke("#E5E7EB"); line(margin, top - 5, 557, top - 5);
-        fill("#111827"); text(margin + 8, top + 12, row.code || ddt.code || "", 8.5, true);
-        const desc = wrapPdfText(row.item || ddt.item || "Articolo", 42).slice(0, 2);
-        desc.forEach((part, idx) => text(margin + 92, top + 12 + idx * 11, part, 8.5, idx === 0));
-        text(margin + 370, top + 12, `${row.fromLabel || ddt.fromLabel} -> ${row.toLabel || ddt.toLabel}`, 8.5, false);
-        textRight(548, top + 12, `${safeInt(row.qty).toLocaleString("it-IT")} ${row.uom || ddt.uom || "pz"}`, 8.5, true);
-        top += 40;
+      const tableTop = 294;
+      const col = {
+        codeX: margin + 8,
+        codeW: 82,
+        descX: margin + 98,
+        descW: 214,
+        routeX: margin + 324,
+        routeW: 112,
+        qtyRight: 548,
+        qtyW: 82
+      };
+
+      fill("#EAF2FF"); stroke("#D7DEE8"); rect(margin, tableTop, 519, 28, "B");
+      fill("#334155");
+      text(col.codeX, tableTop + 18, "Codice", 8, true);
+      text(col.descX, tableTop + 18, "Descrizione", 8, true);
+      text(col.routeX, tableTop + 18, "Tratta", 8, true);
+      textRight(col.qtyRight, tableTop + 18, "Quantita", 8, true);
+
+      let top = tableTop + 36;
+      const bottomLimit = 636;
+      const rawLines = Array.isArray(ddt.lines) && ddt.lines.length
+        ? ddt.lines
+        : [{ code: ddt.code, item: ddt.item, qty: ddt.totalQty, uom: ddt.uom, fromLabel: ddt.fromLabel, toLabel: ddt.toLabel }];
+      let printedLines = 0;
+      for (const row of rawLines){
+        if (printedLines >= 10 || top > bottomLimit) break;
+        const codeLines = fitPdfLines(wrapPdfTextWidth(row.code || ddt.code || "", col.codeW, 7.7, true), 3);
+        const descLines = fitPdfLines(wrapPdfTextWidth(row.item || ddt.item || "Articolo", col.descW, 7.8, true), 4);
+        const routeLabel = cleanSpaces(`${row.fromLabel || ddt.fromLabel || warehouseLabel(ddt.fromWarehouse)} -> ${row.toLabel || ddt.toLabel || warehouseLabel(ddt.toWarehouse)}`);
+        const routeLines = fitPdfLines(wrapPdfTextWidth(routeLabel, col.routeW, 7.4, false), 3);
+        const qtyLabel = `${safeInt(row.qty).toLocaleString("it-IT")} ${row.uom || ddt.uom || "pz"}`;
+        const qtyLines = fitPdfLines(wrapPdfTextWidth(qtyLabel, col.qtyW, 7.8, true), 2);
+        const lineCount = Math.max(codeLines.length, descLines.length, routeLines.length, qtyLines.length, 1);
+        const rowHeight = Math.max(34, 16 + lineCount * 10.5);
+        if (top + rowHeight > bottomLimit) break;
+
+        fill("#FFFFFF"); stroke("#E5E7EB"); rect(margin, top - 9, 519, rowHeight, "B");
+        fill("#111827");
+        codeLines.forEach((part, idx) => text(col.codeX, top + 7 + idx * 10.2, part, 7.7, idx === 0));
+        descLines.forEach((part, idx) => text(col.descX, top + 7 + idx * 10.2, part, 7.8, idx === 0));
+        routeLines.forEach((part, idx) => text(col.routeX, top + 7 + idx * 10.2, part, 7.4, false));
+        qtyLines.forEach((part, idx) => textRight(col.qtyRight, top + 7 + idx * 10.2, part, 7.8, idx === 0));
+        top += rowHeight;
+        printedLines += 1;
       }
 
-      const movementTop = Math.min(650, top + 12);
+      if (rawLines.length > printedLines){
+        fill("#64748B");
+        text(margin + 8, top + 6, `Altre righe non stampate: ${rawLines.length - printedLines}`, 7.4, false);
+        top += 18;
+      }
+
+      const movementTop = Math.min(652, Math.max(top + 14, 498));
       fill("#F8FAFC"); stroke("#E5E7EB"); rect(margin, movementTop, 519, 84, "B");
       fill("#334155"); text(margin + 10, movementTop + 18, "Movimenti generati", 9, true);
       const movements = Array.isArray(ddt.movements) ? ddt.movements : [];
+      const movCols = { progX: margin + 10, progW: 118, whX: margin + 140, whW: 116, itemX: margin + 264, itemW: 208 };
       movements.slice(0, 4).forEach((mv, index) => {
         const rowY = movementTop + 36 + index * 14;
-        text(margin + 10, rowY, mv.movementProgressive || `M${index + 1}`, 7.8, true);
-        text(margin + 142, rowY, `${mv.type || "IN"} ${mv.warehouseLabel || warehouseLabel(mv.warehouse)}`, 7.8, false);
-        text(margin + 260, rowY, `${mv.code || ddt.code || ""} - ${safeInt(mv.qty).toLocaleString("it-IT")} ${mv.uom || ddt.uom || "pz"}`, 7.8, false);
+        const prog = fitPdfLines(wrapPdfTextWidth(mv.movementProgressive || `M${index + 1}`, movCols.progW, 7.2, true), 1)[0];
+        const wh = fitPdfLines(wrapPdfTextWidth(`${mv.type || "IN"} ${mv.warehouseLabel || warehouseLabel(mv.warehouse)}`, movCols.whW, 7.2, false), 1)[0];
+        const item = fitPdfLines(wrapPdfTextWidth(`${mv.code || ddt.code || ""} - ${safeInt(mv.qty).toLocaleString("it-IT")} ${mv.uom || ddt.uom || "pz"}`, movCols.itemW, 7.2, false), 1)[0];
+        fill("#111827");
+        text(movCols.progX, rowY, prog, 7.2, true);
+        text(movCols.whX, rowY, wh, 7.2, false);
+        text(movCols.itemX, rowY, item, 7.2, false);
       });
 
-      fill("#FFFFFF"); stroke("#D7DEE8"); rect(margin, 744, 180, 48, "B"); rect(218, 744, 180, 48, "B"); fill("#16A34A"); rect(416, 744, 141, 48, "f");
-      fill("#334155"); text(margin + 8, 762, "Firma conducente", 8, true); text(226, 762, "Firma destinatario", 8, true);
-      fill("#FFFFFF"); text(426, 762, "Peso / totale", 8, true); text(426, 784, `${safeInt(ddt.totalQty).toLocaleString("it-IT")} ${ddt.uom || "pz"}`, 18, true);
+      const signaturesTop = 744;
+      fill("#FFFFFF"); stroke("#D7DEE8"); rect(margin, signaturesTop, 180, 48, "B"); rect(218, signaturesTop, 180, 48, "B");
+      fill("#16A34A"); rect(416, signaturesTop, 141, 48, "f");
+      fill("#334155"); text(margin + 8, signaturesTop + 18, "Firma conducente", 8, true); text(226, signaturesTop + 18, "Firma destinatario", 8, true);
+      fill("#FFFFFF"); text(426, signaturesTop + 18, "Peso / totale", 8, true);
+      textWrapped(426, signaturesTop + 40, `${totalQty.toLocaleString("it-IT")} ${totalUom}`, 120, 16, true, 16, 1);
       fill("#64748B"); text(margin, 818, "Documento gestionale generato automaticamente - Cloud Firestore", 7, false);
       textRight(557, 818, "Pag. 1", 8, true);
 
@@ -3545,7 +3685,7 @@
     function openDdtDocument(idOrNumber){
       const docItem = findDdtDocument(idOrNumber);
       if (!docItem){ showToast("DDT non trovato", "err"); return; }
-      const pdf = docItem.pdfDataUrl || buildDdtPdfDataUrl(docItem);
+      const pdf = buildDdtPdfDataUrl(docItem);
       openPdfDataUrl(pdf, docItem.pdfFileName || `${docItem.ddtNumber || "DDT"}.pdf`);
     }
 
