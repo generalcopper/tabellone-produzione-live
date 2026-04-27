@@ -1860,6 +1860,84 @@
       return "";
     }
 
+    function isPrismaWarehouse(value){
+      return normalizeWarehouse(value) === WAREHOUSE_PRISMA;
+    }
+
+    function isCereaWarehouse(value){
+      return normalizeWarehouse(value) === WAREHOUSE_CEREA;
+    }
+
+    function isLegacyConcamariseWarehouse(value){
+      return normalizeWarehouse(value) === LEGACY_WAREHOUSE_CONCA;
+    }
+
+    function textMentionsLegacyConcamarise(...parts){
+      const hay = normalizeSearch(parts.filter(part => part != null).join(" "));
+      return /\b(concamarise|conca)\b/.test(hay);
+    }
+
+    function movementTouchesLegacyConcamarise(mv){
+      if (!mv || typeof mv !== "object") return false;
+      const explicitWarehouseFields = [
+        mv.warehouse,
+        mv.site,
+        mv.magazzino,
+        mv.location,
+        mv.fromWarehouse,
+        mv.sourceWarehouse,
+        mv.originWarehouse,
+        mv.toWarehouse,
+        mv.destinationWarehouse
+      ];
+      if (explicitWarehouseFields.some(isLegacyConcamariseWarehouse)) return true;
+
+      return textMentionsLegacyConcamarise(
+        mv.warehouseLabel,
+        mv.fromLabel,
+        mv.originLabel,
+        mv.sourceLabel,
+        mv.toLabel,
+        mv.destinationLabel,
+        mv.transferDirection,
+        mv.ddtDirection,
+        mv.direction,
+        mv.note,
+        mv.source,
+        mv.rawText
+      );
+    }
+
+    function isPrismaPanelMovement(mv, options = {}){
+      if (!mv || typeof mv !== "object") return false;
+      if (movementTouchesLegacyConcamarise(mv)) return false;
+
+      const wh = normalizeWarehouse(mv.warehouse || mv.site || mv.magazzino || mv.location || "");
+      if (options.includeCerea === true){
+        return wh === WAREHOUSE_PRISMA || wh === WAREHOUSE_CEREA;
+      }
+      return wh === WAREHOUSE_PRISMA;
+    }
+
+    function isPrismaPanelDdtDocument(docItem){
+      if (!docItem || typeof docItem !== "object") return false;
+      if (movementTouchesLegacyConcamarise(docItem)) return false;
+
+      const fromWarehouse = normalizeWarehouse(docItem.fromWarehouse || docItem.sourceWarehouse || docItem.originWarehouse || "");
+      const toWarehouse = normalizeWarehouse(docItem.toWarehouse || docItem.destinationWarehouse || "");
+      const route = [fromWarehouse, toWarehouse].filter(Boolean);
+
+      if (route.includes(LEGACY_WAREHOUSE_CONCA)) return false;
+      if (route.length){
+        if (!route.includes(WAREHOUSE_PRISMA)) return false;
+        if (route.some(wh => wh !== WAREHOUSE_PRISMA && wh !== WAREHOUSE_CEREA)) return false;
+      }
+
+      const movements = Array.isArray(docItem.movements) ? docItem.movements : [];
+      if (movements.some(movementTouchesLegacyConcamarise)) return false;
+      return true;
+    }
+
     function normalizeWarehousesList(raw){
       try{
         if (raw == null) return [];
@@ -2424,6 +2502,10 @@
         date: String(data.date || "").trim(),
         note: String(data.note || "").trim(),
         source: String(data.source || "").trim(),
+        rawText: String(data.rawText || "").trim(),
+        warehouseLabel: cleanSpaces(data.warehouseLabel || data.magazzinoLabel || data.locationLabel || ""),
+        fromLabel: cleanSpaces(data.fromLabel || data.originLabel || data.sourceLabel || ""),
+        toLabel: cleanSpaces(data.toLabel || data.destinationLabel || ""),
         createdByName: String(data.createdByName || data.userName || data.displayName || "").trim(),
         createdBy: String(data.createdBy || data.userEmail || data.user || data.author || "").trim(),
         createdByEmail: String(data.createdByEmail || data.userEmail || "").trim(),
@@ -2533,6 +2615,7 @@
         const data = docSnap.data() || {};
         if (!isDdtDocumentData(data)) continue;
         const docItem = mapDdtDocument(docSnap);
+        if (!isPrismaPanelDdtDocument(docItem)) continue;
         const key = cleanSpaces(docItem.id || docItem.ddtNumber || docItem.docNum || docSnap.id);
         if (key) docsByKey.set(key, docItem);
       }
@@ -2540,6 +2623,7 @@
       for (const mv of (mappedMovements || [])){
         if (!mv || isDdtMappedMovement(mv)) continue;
         if (String(mv.docType || "").trim().toUpperCase() !== DOC_TYPE) continue;
+        if (!isPrismaPanelMovement(mv, { includeCerea: true })) continue;
         const key = cleanSpaces(mv.ddtId || mv.ddtNumber || mv.docNum || "");
         if (!key) continue;
         const list = groups.get(key) || [];
@@ -2588,7 +2672,7 @@
         });
       }
 
-      return Array.from(docsByKey.values());
+      return Array.from(docsByKey.values()).filter(isPrismaPanelDdtDocument);
     }
 
     function resolveUserLabel(){
@@ -2939,7 +3023,7 @@
       const list = [];
       for (const mv of (state.movements || [])){
         if (!mv) continue;
-        if (normalizeWarehouse(mv.warehouse || "") !== WAREHOUSE_PRISMA) continue;
+        if (!isPrismaPanelMovement(mv)) continue;
 
         const code = String(mv.code || "").trim();
         const item = prettifyProductName(mv.item || code, code);
@@ -4195,9 +4279,9 @@
         return { oldQty: currentQty, newQty: desiredQty, uom: normalizedUom };
       }
 
-      const positiveConcaRows = getPositivePrismaRowsForCode(productCode);
+      const positivePrismaRows = getPositivePrismaRowsForCode(productCode);
       const fallbackCereaRow = getPositiveCereaRowsForCode(productCode)[0] || null;
-      const preferredRow = positiveConcaRows[0] || fallbackCereaRow || null;
+      const preferredRow = positivePrismaRows[0] || fallbackCereaRow || null;
       if (!preferredRow){
         throw makeInventoryAdjustError("inventory/no-stock-rows", "Righe inventario Prisma non trovate.");
       }
@@ -4250,12 +4334,12 @@
         movementCount += 1;
       }else{
         let remaining = Math.abs(delta);
-        const available = positiveConcaRows.reduce((sum, row) => sum + safeInt(row?.qty), 0);
+        const available = positivePrismaRows.reduce((sum, row) => sum + safeInt(row?.qty), 0);
         if (available < remaining){
           throw makeInventoryAdjustError("inventory/insufficient-stock", "Disponibilità Prisma insufficiente.");
         }
 
-        for (const row of positiveConcaRows){
+        for (const row of positivePrismaRows){
           if (remaining <= 0) break;
           const take = Math.min(safeInt(row.qty), remaining);
           if (!take) continue;
