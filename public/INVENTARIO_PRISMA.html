@@ -1729,9 +1729,11 @@
     const SOURCE = "Inventario Prisma HTML";
     const NOTE = "Trasferimento inventario tra Cerea e Prisma";
     const DOC_TYPE = "DDT_TRASFERIMENTO";
-    const DDT_COLLECTION = "ddtDocuments";
-    const DDT_COUNTER_COLLECTION = "counters";
-    const DDT_COUNTER_ID = "ddtProgressive";
+    const DDT_COLLECTION = "inventoryMovements"; // DDT header salvati nella collection già autorizzata
+    const DDT_COUNTER_COLLECTION = "counters"; // legacy: non usato da questo pannello
+    const DDT_COUNTER_ID = "ddtProgressive"; // legacy: non usato da questo pannello
+    const DDT_RECORD_KIND = "ddtDocument";
+    const DDT_PROGRESSIVE_LOCAL_KEY = "inventario_prisma_last_ddt_progressive";
     const RECTIFY_SOURCE = "Rettifica Prisma HTML";
     const RECTIFY_DOC_TYPE = "RETTIFICA";
     const RECTIFY_NOTE = "Rettifica inventario attuale Prisma";
@@ -1850,10 +1852,90 @@
 
     function normalizeWarehouse(value){
       const s = String(value || "").trim().toLowerCase();
-      if (!s) return WAREHOUSE_CEREA;
-      if (s === WAREHOUSE_PRISMA || s === WAREHOUSE_CONCA || s === LEGACY_WAREHOUSE_CONCA || s.includes("prisma") || s.includes("conca")) return WAREHOUSE_PRISMA;
+      if (!s) return "";
+      if (s === WAREHOUSE_PRISMA || s.includes("prisma")) return WAREHOUSE_PRISMA;
       if (s === WAREHOUSE_CEREA || s.includes("cerea") || s.includes("masaccio") || s.includes("general copper")) return WAREHOUSE_CEREA;
-      return WAREHOUSE_CEREA;
+      // Importante: Concamarise/Conca non viene più sommato a Prisma.
+      if (s === LEGACY_WAREHOUSE_CONCA || s.includes("concamarise") || s.includes("conca")) return LEGACY_WAREHOUSE_CONCA;
+      return "";
+    }
+
+    function isPrismaWarehouse(value){
+      return normalizeWarehouse(value) === WAREHOUSE_PRISMA;
+    }
+
+    function isCereaWarehouse(value){
+      return normalizeWarehouse(value) === WAREHOUSE_CEREA;
+    }
+
+    function isLegacyConcamariseWarehouse(value){
+      return normalizeWarehouse(value) === LEGACY_WAREHOUSE_CONCA;
+    }
+
+    function textMentionsLegacyConcamarise(...parts){
+      const hay = normalizeSearch(parts.filter(part => part != null).join(" "));
+      return /\b(concamarise|conca)\b/.test(hay);
+    }
+
+    function movementTouchesLegacyConcamarise(mv){
+      if (!mv || typeof mv !== "object") return false;
+      const explicitWarehouseFields = [
+        mv.warehouse,
+        mv.site,
+        mv.magazzino,
+        mv.location,
+        mv.fromWarehouse,
+        mv.sourceWarehouse,
+        mv.originWarehouse,
+        mv.toWarehouse,
+        mv.destinationWarehouse
+      ];
+      if (explicitWarehouseFields.some(isLegacyConcamariseWarehouse)) return true;
+
+      return textMentionsLegacyConcamarise(
+        mv.warehouseLabel,
+        mv.fromLabel,
+        mv.originLabel,
+        mv.sourceLabel,
+        mv.toLabel,
+        mv.destinationLabel,
+        mv.transferDirection,
+        mv.ddtDirection,
+        mv.direction,
+        mv.note,
+        mv.source,
+        mv.rawText
+      );
+    }
+
+    function isPrismaPanelMovement(mv, options = {}){
+      if (!mv || typeof mv !== "object") return false;
+      if (movementTouchesLegacyConcamarise(mv)) return false;
+
+      const wh = normalizeWarehouse(mv.warehouse || mv.site || mv.magazzino || mv.location || "");
+      if (options.includeCerea === true){
+        return wh === WAREHOUSE_PRISMA || wh === WAREHOUSE_CEREA;
+      }
+      return wh === WAREHOUSE_PRISMA;
+    }
+
+    function isPrismaPanelDdtDocument(docItem){
+      if (!docItem || typeof docItem !== "object") return false;
+      if (movementTouchesLegacyConcamarise(docItem)) return false;
+
+      const fromWarehouse = normalizeWarehouse(docItem.fromWarehouse || docItem.sourceWarehouse || docItem.originWarehouse || "");
+      const toWarehouse = normalizeWarehouse(docItem.toWarehouse || docItem.destinationWarehouse || "");
+      const route = [fromWarehouse, toWarehouse].filter(Boolean);
+
+      if (route.includes(LEGACY_WAREHOUSE_CONCA)) return false;
+      if (route.length){
+        if (!route.includes(WAREHOUSE_PRISMA)) return false;
+        if (route.some(wh => wh !== WAREHOUSE_PRISMA && wh !== WAREHOUSE_CEREA)) return false;
+      }
+
+      const movements = Array.isArray(docItem.movements) ? docItem.movements : [];
+      if (movements.some(movementTouchesLegacyConcamarise)) return false;
+      return true;
     }
 
     function normalizeWarehousesList(raw){
@@ -1868,12 +1950,11 @@
           const out = [];
           const cerea = raw.cerea;
           const prisma = raw.prisma;
-          const legacy = raw.concamarise !== undefined ? raw.concamarise : raw.conca;
           if (cerea === true || cerea === 1 || cerea === "1") out.push(WAREHOUSE_CEREA);
-          if (prisma === true || prisma === 1 || prisma === "1" || legacy === true || legacy === 1 || legacy === "1") out.push(WAREHOUSE_PRISMA);
-          return Array.from(new Set(out.map(normalizeWarehouse))).filter(Boolean);
+          if (prisma === true || prisma === 1 || prisma === "1") out.push(WAREHOUSE_PRISMA);
+          return Array.from(new Set(out.map(normalizeWarehouse))).filter(wh => wh === WAREHOUSE_CEREA || wh === WAREHOUSE_PRISMA);
         }
-        return Array.from(new Set(arr.map(normalizeWarehouse))).filter(Boolean);
+        return Array.from(new Set(arr.map(normalizeWarehouse))).filter(wh => wh === WAREHOUSE_CEREA || wh === WAREHOUSE_PRISMA);
       }catch(_){
         return [];
       }
@@ -2130,21 +2211,6 @@
       return pretty.charAt(0).toUpperCase() + pretty.slice(1);
     }
 
-    function normalizeProductMacroGroup(value){
-      const key = normalizeSearch(value).replace(/\s+/g, "_");
-      if (["materie_prime", "materia_prima", "raw_material", "raw_materials", "mp"].includes(key)) return "materie_prime";
-      if (["imballaggi", "imballaggio", "packaging", "pack", "packing"].includes(key)) return "imballaggi";
-      return "";
-    }
-
-    function inferProductMacroGroup(key, name = ""){
-      const blob = normalizeSearch([key, name].join(" "));
-      if (!blob) return "";
-      if (/\b(materie?\s*prime?|materia\s*prima|raw\s*materials?|semilavorat(?:o|i)|principi?\s*attivi?|mp)\b/.test(blob)) return "materie_prime";
-      if (/\b(imballagg(?:io|i)|packaging|pack|scatol(?:a|e|oni)|carton(?:e|i)|flacon(?:e|i)|bottigli(?:a|e)|tapp(?:o|i)|trigger|spruzzator(?:e|i)|etichett(?:a|e)|label|bobin(?:a|e)|divisor(?:e|i)|bancal(?:e|i)|pallet|film|fust(?:o|i)|tanic(?:a|he)|secchi(?:o|elli)|capsul(?:a|e)|preform(?:a|e)|sleeve|termoretraibile|shrink)\b/.test(blob)) return "imballaggi";
-      return "";
-    }
-
     let toastTimer = null;
     function showToast(message, kind = ""){
       const el = els.toast;
@@ -2214,31 +2280,17 @@
       return `DDT-${year}-${padProgressive(progressive, 6)}`;
     }
 
-    function makeMovementNumber(progressive){
-      return `MOV-${padProgressive(progressive, 6)}`;
-    }
-
-    function movementProgressiveValue(value){
-      const direct = safeInt(value);
-      if (direct > 0) return direct;
-      const match = String(value || "").match(/(\d+)$/);
-      return match ? safeInt(match[1]) : 0;
-    }
-
-    function getMaxLocalMovementProgressive(){
-      return (state.movements || []).reduce((max, mv) => Math.max(
-        max,
-        safeInt(mv?.movementProgressiveNumber || 0),
-        movementProgressiveValue(mv?.movementProgressive || "")
-      ), 0);
-    }
-
     function warehouseLabel(warehouse){
-      return normalizeWarehouse(warehouse) === WAREHOUSE_PRISMA ? "Prisma" : "Cerea";
+      const wh = normalizeWarehouse(warehouse);
+      if (wh === WAREHOUSE_PRISMA) return "Prisma";
+      if (wh === WAREHOUSE_CEREA) return "Cerea";
+      if (wh === LEGACY_WAREHOUSE_CONCA) return "Concamarise";
+      return "—";
     }
 
     function getDeliveryProfile(warehouse){
-      return normalizeWarehouse(warehouse) === WAREHOUSE_PRISMA ? COMPANY_PRISMA : COMPANY_GENERAL_COPPER;
+      const wh = normalizeWarehouse(warehouse);
+      return wh === WAREHOUSE_PRISMA ? COMPANY_PRISMA : COMPANY_GENERAL_COPPER;
     }
 
     async function enqueueMatteoEmail(subject, textBody, htmlBody = ""){
@@ -2450,6 +2502,10 @@
         date: String(data.date || "").trim(),
         note: String(data.note || "").trim(),
         source: String(data.source || "").trim(),
+        rawText: String(data.rawText || "").trim(),
+        warehouseLabel: cleanSpaces(data.warehouseLabel || data.magazzinoLabel || data.locationLabel || ""),
+        fromLabel: cleanSpaces(data.fromLabel || data.originLabel || data.sourceLabel || ""),
+        toLabel: cleanSpaces(data.toLabel || data.destinationLabel || ""),
         createdByName: String(data.createdByName || data.userName || data.displayName || "").trim(),
         createdBy: String(data.createdBy || data.userEmail || data.user || data.author || "").trim(),
         createdByEmail: String(data.createdByEmail || data.userEmail || "").trim(),
@@ -2463,7 +2519,9 @@
         movementProgressiveNumber: safeInt(data.movementProgressiveNumber || data.movementSeq || 0),
         transferDirection: cleanSpaces(data.transferDirection || data.ddtDirection || ""),
         fromWarehouse: normalizeWarehouse(data.fromWarehouse || data.originWarehouse || ""),
-        toWarehouse: normalizeWarehouse(data.toWarehouse || data.destinationWarehouse || "")
+        toWarehouse: normalizeWarehouse(data.toWarehouse || data.destinationWarehouse || ""),
+        recordKind: cleanSpaces(data.recordKind || data.kind || data.recordType || ""),
+        isDdtDocument: data.isDdtDocument === true
       };
     }
 
@@ -2511,14 +2569,125 @@
         uom: normalizeUom(data.uom || "") || "pz",
         movements,
         lines,
-        pdfBase64: String(data.pdfBase64 || data.pdf?.base64 || ""),
-        pdfDataUrl: String(data.pdfDataUrl || data.pdf?.dataUrl || ((data.pdfBase64 || data.pdf?.base64) ? `data:application/pdf;base64,${data.pdfBase64 || data.pdf?.base64}` : "")),
+        pdfDataUrl: String(data.pdfDataUrl || data.pdf?.dataUrl || (data.pdfBase64 ? `data:application/pdf;base64,${data.pdfBase64}` : "")),
         pdfFileName: cleanSpaces(data.pdfFileName || data.pdfFilename || data.pdf?.fileName || `${ddtNumber}.pdf`),
         createdAt: data.createdAt || data.date || null,
         createdBy: cleanSpaces(data.createdBy || data.createdByEmail || ""),
         createdByName: cleanSpaces(data.createdByName || ""),
         createdByEmail: cleanSpaces(data.createdByEmail || "")
       };
+    }
+
+    function isDdtDocumentData(data){
+      if (!data || typeof data !== "object") return false;
+      const kind = normalizeSearch(data.recordKind || data.kind || data.recordType || data.documentKind || "");
+      const docType = String(data.docType || "").trim().toUpperCase();
+      return data.isDdtDocument === true || kind === normalizeSearch(DDT_RECORD_KIND) || docType === `${DOC_TYPE}_HEADER`;
+    }
+
+    function isDdtMappedMovement(mv){
+      if (!mv || typeof mv !== "object") return false;
+      const kind = normalizeSearch(mv.recordKind || mv.kind || mv.recordType || mv.documentKind || "");
+      const docType = String(mv.docType || "").trim().toUpperCase();
+      return !!(
+        mv.isDdtDocument === true ||
+        kind === normalizeSearch(DDT_RECORD_KIND) ||
+        docType === `${DOC_TYPE}_HEADER` ||
+        docType.endsWith("_HEADER")
+      );
+    }
+
+    function isInventoryCountableMovement(mv){
+      if (!mv || typeof mv !== "object") return false;
+      if (isDdtMappedMovement(mv)) return false;
+      if (movementTouchesLegacyConcamarise(mv)) return false;
+      return true;
+    }
+
+    function normalizeDdtMovementSummary(mv, index, fallbackNumber = ""){
+      const seq = safeInt(mv?.movementProgressiveNumber || index + 1) || (index + 1);
+      return {
+        id: cleanSpaces(mv?.id || mv?.inventoryMovementId || ""),
+        inventoryMovementId: cleanSpaces(mv?.inventoryMovementId || mv?.id || ""),
+        movementProgressive: cleanSpaces(mv?.movementProgressive || mv?.movementNum || makeMovementNumber(seq)),
+        movementProgressiveNumber: seq,
+        type: String(mv?.type || "IN").trim().toUpperCase() === "OUT" ? "OUT" : "IN",
+        warehouse: normalizeWarehouse(mv?.warehouse || ""),
+        warehouseLabel: cleanSpaces(mv?.warehouseLabel || warehouseLabel(mv?.warehouse || "")),
+        code: cleanSpaces(mv?.code || ""),
+        item: cleanSpaces(mv?.item || ""),
+        qty: safeInt(mv?.qty || 0),
+        uom: normalizeUom(mv?.uom || "") || "pz",
+        lineNo: safeInt(mv?.lineNo || 0)
+      };
+    }
+
+    function buildDdtDocumentsFromInventoryDocs(rawDocs, mappedMovements){
+      const docsByKey = new Map();
+      const groups = new Map();
+
+      for (const docSnap of (rawDocs || [])){
+        const data = docSnap.data() || {};
+        if (!isDdtDocumentData(data)) continue;
+        const docItem = mapDdtDocument(docSnap);
+        if (!isPrismaPanelDdtDocument(docItem)) continue;
+        const key = cleanSpaces(docItem.id || docItem.ddtNumber || docItem.docNum || docSnap.id);
+        if (key) docsByKey.set(key, docItem);
+      }
+
+      for (const mv of (mappedMovements || [])){
+        if (!mv || isDdtMappedMovement(mv)) continue;
+        if (String(mv.docType || "").trim().toUpperCase() !== DOC_TYPE) continue;
+        if (!isPrismaPanelMovement(mv, { includeCerea: true })) continue;
+        const key = cleanSpaces(mv.ddtId || mv.ddtNumber || mv.docNum || "");
+        if (!key) continue;
+        const list = groups.get(key) || [];
+        list.push(mv);
+        groups.set(key, list);
+      }
+
+      for (const [key, list] of groups.entries()){
+        const sorted = list.slice().sort((a, b) => safeInt(a.movementProgressiveNumber) - safeInt(b.movementProgressiveNumber));
+        const summaries = sorted.map((mv, index) => normalizeDdtMovementSummary(mv, index, mv.ddtNumber || mv.docNum || key));
+        const existing = docsByKey.get(key) || Array.from(docsByKey.values()).find(docItem => docItem.ddtNumber === key || docItem.docNum === key);
+        if (existing){
+          if (!Array.isArray(existing.movements) || !existing.movements.length) existing.movements = summaries;
+          continue;
+        }
+        const first = sorted[0] || {};
+        const incoming = sorted.find(mv => mv.type === "IN") || first;
+        const totalQty = summaries.filter(mv => mv.type === "IN").reduce((sum, mv) => sum + safeInt(mv.qty), 0) || safeInt(first.qty || 0);
+        const fromWarehouse = normalizeWarehouse(first.fromWarehouse || (first.type === "OUT" ? first.warehouse : "")) || WAREHOUSE_CEREA;
+        const toWarehouse = normalizeWarehouse(first.toWarehouse || incoming.warehouse || "") || WAREHOUSE_PRISMA;
+        const ddtNumber = cleanSpaces(first.ddtNumber || first.docNum || key);
+        docsByKey.set(key, {
+          id: key,
+          ddtNumber,
+          docNum: ddtNumber,
+          ddtProgressive: safeInt(first.ddtProgressive || parseDdtProgressive(ddtNumber)),
+          date: cleanSpaces(first.date || ""),
+          fromWarehouse,
+          toWarehouse,
+          fromLabel: warehouseLabel(fromWarehouse),
+          toLabel: warehouseLabel(toWarehouse),
+          fromProfile: getDeliveryProfile(fromWarehouse),
+          toProfile: getDeliveryProfile(toWarehouse),
+          code: cleanSpaces(first.code || ""),
+          item: cleanSpaces(first.item || "Articoli trasferiti"),
+          totalQty,
+          uom: normalizeUom(first.uom || "") || "pz",
+          movements: summaries,
+          lines: [{ code: cleanSpaces(first.code || ""), item: cleanSpaces(first.item || "Articoli trasferiti"), qty: totalQty, uom: normalizeUom(first.uom || "") || "pz", fromLabel: warehouseLabel(fromWarehouse), toLabel: warehouseLabel(toWarehouse) }],
+          pdfDataUrl: "",
+          pdfFileName: `${ddtNumber || "DDT"}.pdf`,
+          createdAt: first.createdAt || first.date || null,
+          createdBy: first.createdBy || "",
+          createdByName: first.createdByName || "",
+          createdByEmail: first.createdByEmail || ""
+        });
+      }
+
+      return Array.from(docsByKey.values()).filter(isPrismaPanelDdtDocument);
     }
 
     function resolveUserLabel(){
@@ -2541,13 +2710,11 @@
       for (const cat of (state.categories || [])){
         const key = normalizeCategoryKey(cat?.key || cat?.id || "");
         if (!key) continue;
-        const name = cleanSpaces(cat?.name || cat?.label || prettyCategoryLabel(key)) || prettyCategoryLabel(key);
-        const macro = normalizeProductMacroGroup(cat?.macro || cat?.macroGroup || cat?.group || cat?.macroCategory || cat?.categoryMacro || cat?.type || cat?.kind || "") || inferProductMacroGroup(key, name);
         map.set(key, {
           key,
-          name,
+          name: cleanSpaces(cat?.name || cat?.label || prettyCategoryLabel(key)) || prettyCategoryLabel(key),
           color: cleanSpaces(cat?.color || ""),
-          macro
+          macro: cleanSpaces(cat?.macro || cat?.macroCategory || cat?.type || cat?.kind || "")
         });
       }
       return map;
@@ -2555,17 +2722,15 @@
 
     function getProductCategoryInfo(product, categoryMap){
       const key = normalizeCategoryKey(product?.categoryKey || product?.category || product?.catKey || product?.categoryId || "");
-      const productMacro = normalizeProductMacroGroup(product?.macro || product?.macroGroup || product?.groupMacro || product?.macroCategory || product?.categoryMacro || product?.type || product?.kind || "");
       if (!key){
-        return { key: "", name: "Senza categoria", color: "", macro: productMacro };
+        return { key: "", name: "Senza categoria", color: "", macro: "" };
       }
       const found = categoryMap.get(key);
-      const name = cleanSpaces(found?.name || product?.categoryName || prettyCategoryLabel(key)) || prettyCategoryLabel(key);
       return {
         key,
-        name,
+        name: cleanSpaces(found?.name || prettyCategoryLabel(key)) || prettyCategoryLabel(key),
         color: cleanSpaces(found?.color || ""),
-        macro: normalizeProductMacroGroup(found?.macro || product?.macro || product?.macroGroup || product?.groupMacro || product?.macroCategory || product?.categoryMacro || product?.type || product?.kind || "") || productMacro || inferProductMacroGroup(key, name)
+        macro: cleanSpaces(found?.macro || product?.macro || product?.macroCategory || product?.type || product?.kind || "")
       };
     }
 
@@ -2575,10 +2740,12 @@
       const prismaRowsByCode = new Map();
 
       for (const mv of (state.movements || [])){
+        if (!isInventoryCountableMovement(mv)) continue;
         const code = String(mv?.code || "").trim();
         if (!code) continue;
         const low = code.toLowerCase();
         const wh = normalizeWarehouse(mv.warehouse || "");
+        if (wh !== WAREHOUSE_CEREA && wh !== WAREHOUSE_PRISMA) continue;
         const qty = safeInt(mv.qty);
         if (!qty) continue;
         const delta = (String(mv.type || "").toUpperCase() === "OUT") ? -qty : qty;
@@ -2594,14 +2761,14 @@
           uom: ""
         };
 
-        if (wh === WAREHOUSE_CONCA) totalRec.prisma += delta;
+        if (wh === WAREHOUSE_PRISMA) totalRec.prisma += delta;
         else totalRec.cerea += delta;
 
         if (!totalRec.item && item) totalRec.item = item;
         if (uom) totalRec.uom = uom;
         totalsByCode.set(low, totalRec);
 
-        const targetRowsByCode = (wh === WAREHOUSE_CONCA) ? prismaRowsByCode : cereaRowsByCode;
+        const targetRowsByCode = (wh === WAREHOUSE_PRISMA) ? prismaRowsByCode : cereaRowsByCode;
         const byCustomer = targetRowsByCode.get(low) || new Map();
         const rowKey = `${customer.toLowerCase()}||${low}`;
         const row = byCustomer.get(rowKey) || {
@@ -2663,13 +2830,9 @@
     function componentCategoryBlob(product, category){
       return normalizeSearch([
         product?.macro,
-        product?.macroGroup,
         product?.macroCategory,
-        product?.groupMacro,
         product?.type,
         product?.kind,
-        product?.group,
-        product?.department,
         product?.categoryType,
         product?.categoryMacro,
         category?.macro,
@@ -2678,34 +2841,66 @@
         product?.categoryKey,
         product?.category,
         product?.categoryName,
-        product?.code,
         product?.name,
         product?.alias,
-        product?.searchText,
-        product?.description
+        product?.searchText
       ].join(" "));
     }
 
     function isFinishedProductLike(product, category){
       const blob = componentCategoryBlob(product, category);
       if (!blob) return false;
-      if (/\b(prodotti?\s*finiti?|prodotto\s*finito|finished\s*goods?|finished\s*product|pf)\b/.test(blob)) return true;
-      if (/\b(formulati?|vendita|commerciale)\b/.test(blob) && !/\b(imball|materi|raw|packaging|flacon|tapp|etichet|carton|scatol|bobin|trigger|bancal|pallet)\b/.test(blob)) return true;
+      if (/\b(prodotto finito|prodotti finiti|finiti|finito|finished goods|finished product|pf)\b/.test(blob)) return true;
+      if (/\b(formulati|formulato|vendita|commerciale)\b/.test(blob) && !/\b(imball|materi|raw|packaging)\b/.test(blob)) return true;
       return false;
     }
 
     function isComponentProduct(product, category){
       if (!product || typeof product !== "object") return false;
       if (isFinishedProductLike(product, category)) return false;
-
-      const macro = normalizeProductMacroGroup(category?.macro || product?.macro || product?.macroGroup || product?.groupMacro || product?.macroCategory || product?.categoryMacro || product?.type || product?.kind || "")
-        || inferProductMacroGroup(category?.key || product?.categoryKey || product?.category || "", category?.name || product?.categoryName || "");
-      if (macro === "materie_prime" || macro === "imballaggi") return true;
-
       const blob = componentCategoryBlob(product, category);
-      const rawMaterial = /\b(materie?\s*prime?|materia\s*prima|materieprime|raw\s*materials?|principi?\s*attivi?|principio\s*attivo|semilavorat(?:o|i)|ingredienti?|ingrediente|lecitina|lecithin|olio|acido|solvente|tensioattiv(?:o|i)|estratto|glicerina|alcool|alcol|mp)\b/.test(blob);
-      const packaging = /\b(imballagg(?:io|i)|packaging|flacon(?:e|i)|bottigli(?:a|e)|carton(?:e|i)|scatol(?:a|e|oni)|capsul(?:a|e)|etichett(?:a|e)|labels?|tapp(?:o|i)|trigger|spruzzator(?:e|i)|tanic(?:a|he)|fustin(?:o|i)|fust(?:o|i)|bobin(?:a|e)|divisor(?:e|i)|bancal(?:e|i)|pallet|film|sleeve|termoretraibile|shrink|preform(?:a|e)|secchi(?:o|elli))\b/.test(blob);
+      const rawMaterial = /\b(materie prime|materia prima|materieprime|raw material|raw materials|mp|principi attivi|principio attivo|ingredienti|ingrediente|lecitina|lecithin|olio|acido|solvente|tensioattivo|tensioattivi|estratto|glicerina|alcool|alcol)\b/.test(blob);
+      const packaging = /\b(imballaggi|imballaggio|packaging|flaconi|flacone|bottiglie|bottiglia|cartoni|cartone|capsule|capsula|etichette|etichetta|tappi|tappo|taniche|tanica|fustini|fustino|pallet|film|scatola|scatole)\b/.test(blob);
       return rawMaterial || packaging;
+    }
+
+    function buildProductLookupByCode(){
+      const map = new Map();
+      for (const product of (state.products || [])){
+        const code = productCodeFromData(product);
+        if (!code) continue;
+        const low = code.toLowerCase();
+        const existing = map.get(low);
+        if (!existing || (isProductActive(product) && !isProductActive(existing))){
+          map.set(low, product);
+        }
+      }
+      return map;
+    }
+
+    function getMovementBackedCategory(product, categoryMap, fallbackName = "Da movimenti inventario"){
+      const category = product ? getProductCategoryInfo(product, categoryMap) : null;
+      if (category && category.key) return category;
+      return {
+        key: "__movement_inventory",
+        name: fallbackName,
+        color: "",
+        macro: ""
+      };
+    }
+
+    function getMovementBackedProduct(code, totals, product){
+      if (product) return product;
+      const fallbackName = cleanSpaces(totals?.item || code);
+      const uom = normalizeUom(totals?.uom || "") || "pz";
+      return {
+        id: code,
+        code,
+        name: fallbackName || code,
+        alias: "",
+        searchText: fallbackName || code,
+        uom
+      };
     }
 
     function buildLoadableProducts(options = {}){
@@ -2713,46 +2908,49 @@
       const includeZeroSource = options?.includeZeroSource === true;
       const snapshot = buildInventorySnapshot();
       const categoryMap = buildCategoryMap();
-      const seen = new Set();
+      const productsByCode = buildProductLookupByCode();
+      const codes = new Set();
       const list = [];
 
+      for (const [low] of snapshot.totalsByCode){
+        if (low) codes.add(low);
+      }
       for (const product of (state.products || [])){
-        if (!isProductActive(product)) continue;
-
         const code = productCodeFromData(product);
+        if (code) codes.add(code.toLowerCase());
+      }
+
+      for (const low of codes){
+        const totals = snapshot.totalsByCode.get(low) || null;
+        const product = productsByCode.get(low) || null;
+        const code = cleanSpaces(productCodeFromData(product) || totals?.code || low);
         if (!code) continue;
-        const low = code.toLowerCase();
-        if (seen.has(low)) continue;
-        seen.add(low);
 
-        const category = getProductCategoryInfo(product, categoryMap);
-        if (!isComponentProduct(product, category)) continue;
-
-        const totals = snapshot.totalsByCode.get(low);
         const cereaQty = safeInt(totals?.cerea || 0);
         const prismaQty = safeInt(totals?.prisma || 0);
         const sourceQty = getQtyForWarehouseFromTotals(totals, config.sourceWarehouse);
-
         if (!includeZeroSource && sourceQty <= 0) continue;
 
         const movementName = cleanSpaces(totals?.item || "");
-        const name = getProductDisplayName(product, movementName || code);
-        const alias = cleanSpaces(product?.alias || product?.aliasName || "");
+        const productRecord = getMovementBackedProduct(code, totals, product);
+        const name = getProductDisplayName(productRecord, movementName || code);
+        const alias = cleanSpaces(productRecord?.alias || productRecord?.aliasName || "");
+        const category = getMovementBackedCategory(product, categoryMap);
         const searchText = cleanSpaces([
           movementName,
-          product?.searchText || "",
-          product?.search || "",
-          product?.searchName || "",
-          product?.label || "",
-          product?.title || "",
-          product?.description || "",
-          product?.item || ""
+          productRecord?.searchText || "",
+          productRecord?.search || "",
+          productRecord?.searchName || "",
+          productRecord?.label || "",
+          productRecord?.title || "",
+          productRecord?.description || "",
+          productRecord?.item || ""
         ].join(" "));
-        const uom = getResolvedUomForCode(code, product, snapshot);
+        const uom = getResolvedUomForCode(code, productRecord, snapshot);
 
         list.push({
           code,
-          codeLower: low,
+          codeLower: code.toLowerCase(),
           name,
           alias,
           searchText,
@@ -2788,37 +2986,32 @@
     function buildPrismaInventoryGroups(){
       const snapshot = buildInventorySnapshot();
       const categoryMap = buildCategoryMap();
-      const seen = new Set();
+      const productsByCode = buildProductLookupByCode();
       const map = new Map();
 
-      for (const product of (state.products || [])){
-        if (!isProductActive(product)) continue;
+      for (const [low, totals] of snapshot.totalsByCode){
+        const prismaQty = safeInt(totals?.prisma || 0);
+        if (prismaQty <= 0) continue;
 
-        const code = productCodeFromData(product);
+        const product = productsByCode.get(low) || null;
+        const code = cleanSpaces(productCodeFromData(product) || totals?.code || low);
         if (!code) continue;
-        const low = code.toLowerCase();
-        if (seen.has(low)) continue;
-        seen.add(low);
 
-        const totals = snapshot.totalsByCode.get(low);
-        const concaQty = safeInt(totals?.prisma || 0);
-        if (concaQty <= 0) continue;
-
-        const category = getProductCategoryInfo(product, categoryMap);
-        if (!isComponentProduct(product, category)) continue;
-        const groupKey = category.key || "__none";
+        const productRecord = getMovementBackedProduct(code, totals, product);
+        const category = getMovementBackedCategory(product, categoryMap, "Da movimenti Prisma");
+        const groupKey = category.key || "__movement_inventory";
         const group = map.get(groupKey) || {
           key: groupKey,
-          name: category.name,
-          color: category.color,
+          name: category.name || "Da movimenti Prisma",
+          color: category.color || "",
           items: []
         };
 
         group.items.push({
           code,
-          name: getProductDisplayName(product, totals?.item || code),
-          uom: getResolvedUomForCode(code, product, snapshot),
-          qty: concaQty
+          name: getProductDisplayName(productRecord, totals?.item || code),
+          uom: getResolvedUomForCode(code, productRecord, snapshot),
+          qty: prismaQty
         });
 
         map.set(groupKey, group);
@@ -2834,8 +3027,8 @@
       }
 
       groups.sort((a, b) => {
-        if (a.key === "__none") return 1;
-        if (b.key === "__none") return -1;
+        if (a.key === "__movement_inventory") return 1;
+        if (b.key === "__movement_inventory") return -1;
         return String(a?.name || "").localeCompare(String(b?.name || ""), "it", { sensitivity: "base" });
       });
 
@@ -2846,7 +3039,8 @@
       const list = [];
       for (const mv of (state.movements || [])){
         if (!mv) continue;
-        if (normalizeWarehouse(mv.warehouse || "") !== WAREHOUSE_PRISMA) continue;
+        if (!isInventoryCountableMovement(mv)) continue;
+        if (!isPrismaPanelMovement(mv)) continue;
 
         const code = String(mv.code || "").trim();
         const item = prettifyProductName(mv.item || code, code);
@@ -3423,6 +3617,48 @@
       }).join("");
     }
 
+    function parseDdtProgressive(value){
+      const match = String(value || "").match(/(?:DDT[-_ ]?\d{4}[-_ ]?)?(\d{1,9})$/i);
+      return match ? safeInt(match[1]) : 0;
+    }
+
+    function parseMovementProgressive(value){
+      const match = String(value || "").match(/(?:MOV[-_ ]?|M)(\d{1,9})$/i);
+      return match ? safeInt(match[1]) : 0;
+    }
+
+    function makeMovementNumber(progressive){
+      return `MOV-${padProgressive(progressive, 6)}`;
+    }
+
+    function getStoredDdtProgressive(){
+      try{ return safeInt(window.localStorage?.getItem(DDT_PROGRESSIVE_LOCAL_KEY) || 0); }catch(_){ return 0; }
+    }
+
+    function getLargestKnownDdtProgressive(){
+      let max = getStoredDdtProgressive();
+      for (const docItem of (state.ddtDocuments || [])){
+        max = Math.max(max, safeInt(docItem?.ddtProgressive || docItem?.progressive || 0), parseDdtProgressive(docItem?.ddtNumber || docItem?.docNum || ""));
+      }
+      for (const mv of (state.movements || [])){
+        max = Math.max(max, safeInt(mv?.ddtProgressive || 0), parseDdtProgressive(mv?.ddtNumber || mv?.docNum || ""));
+      }
+      return max;
+    }
+
+    function getLargestKnownMovementProgressive(){
+      let max = 0;
+      for (const docItem of (state.ddtDocuments || [])){
+        for (const mv of (Array.isArray(docItem?.movements) ? docItem.movements : [])){
+          max = Math.max(max, safeInt(mv?.movementProgressiveNumber || 0), parseMovementProgressive(mv?.movementProgressive || mv?.movementNum || ""));
+        }
+      }
+      for (const mv of (state.movements || [])){
+        max = Math.max(max, safeInt(mv?.movementProgressiveNumber || 0), parseMovementProgressive(mv?.movementProgressive || ""));
+      }
+      return max;
+    }
+
     function countTransferMovementSlots(sourceRows, qty){
       let remaining = Math.max(0, safeInt(qty));
       let slots = 0;
@@ -3437,26 +3673,22 @@
     }
 
     async function reserveDdtProgressive(date, movementCount = 0){
-      const counterRef = doc(state.db, "orgs", ORG_ID, DDT_COUNTER_COLLECTION, DDT_COUNTER_ID);
-      const reservation = await runTransaction(state.db, async (transaction) => {
-        const snap = await transaction.get(counterRef);
-        const data = snap.exists() ? (snap.data() || {}) : {};
-        const currentDdt = Math.max(safeInt(data.lastDdtProgressive || 0), safeInt(data.lastProgressive || 0));
-        const currentMovement = Math.max(safeInt(data.lastMovementProgressive || 0), getMaxLocalMovementProgressive());
-        const slots = Math.max(0, safeInt(movementCount));
-        const nextDdt = currentDdt + 1;
-        const firstMovementProgressive = currentMovement + 1;
-        const lastMovementProgressive = currentMovement + slots;
-        transaction.set(counterRef, {
-          lastDdtProgressive: nextDdt,
-          lastProgressive: nextDdt,
-          lastMovementProgressive,
-          updatedAt: serverTimestamp(),
-          updatedBy: state.user?.email || state.user?.uid || ""
-        }, { merge:true });
-        return { progressive: nextDdt, firstMovementProgressive, lastMovementProgressive };
-      });
-      return { ...reservation, ddtNumber: makeDdtNumber(reservation.progressive, date) };
+      let progressive = getLargestKnownDdtProgressive() + 1;
+      let ddtNumber = makeDdtNumber(progressive, date);
+      const used = new Set((state.ddtDocuments || []).map(ddt => cleanSpaces(ddt?.ddtNumber || ddt?.docNum || "")).filter(Boolean));
+      while (used.has(ddtNumber)){
+        progressive += 1;
+        ddtNumber = makeDdtNumber(progressive, date);
+      }
+      try{ window.localStorage?.setItem(DDT_PROGRESSIVE_LOCAL_KEY, String(progressive)); }catch(_){ }
+      const slots = Math.max(0, safeInt(movementCount));
+      const firstMovementProgressive = getLargestKnownMovementProgressive() + 1;
+      return {
+        progressive,
+        ddtNumber,
+        firstMovementProgressive,
+        lastMovementProgressive: slots ? firstMovementProgressive + slots - 1 : firstMovementProgressive - 1
+      };
     }
 
     function getLoadValidation(){
@@ -3496,7 +3728,7 @@
     }
 
     function renderActionState(){
-      const ready = !!(state.user && state.db && state.productsReady && state.categoriesReady && state.movementsReady && !state.productsError && !state.categoriesError && !state.movementsError);
+      const ready = !!(state.user && state.db && state.movementsReady && !state.movementsError);
       const toPrismaCount = ready ? buildLoadableProducts({ direction: TRANSFER_TO_PRISMA }).length : 0;
       const toCereaCount = ready ? buildLoadableProducts({ direction: TRANSFER_TO_CEREA }).length : 0;
 
@@ -3515,27 +3747,15 @@
         return;
       }
 
-      if (state.productsError){
-        els.inventoryMeta.textContent = state.productsError;
-        els.inventoryCategories.innerHTML = `<div class="empty">${escapeHtml(state.productsError)}</div>`;
-        return;
-      }
-
-      if (state.categoriesError){
-        els.inventoryMeta.textContent = state.categoriesError;
-        els.inventoryCategories.innerHTML = `<div class="empty">${escapeHtml(state.categoriesError)}</div>`;
-        return;
-      }
-
       if (state.movementsError){
         els.inventoryMeta.textContent = state.movementsError;
         els.inventoryCategories.innerHTML = `<div class="empty">${escapeHtml(state.movementsError)}</div>`;
         return;
       }
 
-      if (!(state.productsReady && state.categoriesReady && state.movementsReady)){
-        els.inventoryMeta.textContent = "Caricamento inventario in corso…";
-        els.inventoryCategories.innerHTML = '<div class="empty">Caricamento inventario in corso…</div>';
+      if (!state.movementsReady){
+        els.inventoryMeta.textContent = "Caricamento inventario Prisma in corso…";
+        els.inventoryCategories.innerHTML = '<div class="empty">Caricamento inventario Prisma in corso…</div>';
         return;
       }
 
@@ -3545,12 +3765,13 @@
       const totalProducts = groups.reduce((sum, group) => sum + group.items.length, 0);
 
       if (!groups.length){
-        els.inventoryMeta.textContent = "Nessun imballaggio o materia prima disponibile a Prisma.";
-        els.inventoryCategories.innerHTML = '<div class="empty">Nessun imballaggio o materia prima disponibile a Prisma.</div>';
+        els.inventoryMeta.textContent = "Nessun articolo disponibile a Prisma.";
+        els.inventoryCategories.innerHTML = '<div class="empty">Nessun articolo disponibile a Prisma.</div>';
         return;
       }
 
-      els.inventoryMeta.textContent = `${totalProducts.toLocaleString("it-IT")} imballaggi/materie prime disponibili in ${groups.length.toLocaleString("it-IT")} categorie · Tocca la quantità per rettificare.`;
+      const metadataWarning = [state.productsError ? "anagrafica prodotti non disponibile" : "", state.categoriesError ? "categorie non disponibili" : ""].filter(Boolean).join(" · ");
+      els.inventoryMeta.textContent = `${totalProducts.toLocaleString("it-IT")} articoli disponibili a Prisma in ${groups.length.toLocaleString("it-IT")} gruppi · Tocca la quantità per rettificare.${metadataWarning ? " · " + metadataWarning : ""}`;
       els.inventoryCategories.innerHTML = groups.map(group => {
         const colorStyle = group.color ? ` style="--cat-color:${escapeHtml(group.color)}"` : "";
         return `
@@ -3613,8 +3834,8 @@
 
     function renderLoadModal(){
       const config = transferConfig();
-      const ready = !!(state.user && state.db && state.productsReady && state.categoriesReady && state.movementsReady && !state.productsError && !state.categoriesError && !state.movementsError);
-      const loadableCount = buildLoadableProducts({ direction: config.direction }).length;
+      const ready = !!(state.user && state.db && state.movementsReady && !state.movementsError);
+      const loadableCount = ready ? buildLoadableProducts({ direction: config.direction }).length : 0;
       const validation = getLoadValidation();
       const input = els.loadCommand;
       const typedQuery = normalizeSearch(validation.parts.productText || validation.parts.raw);
@@ -3860,16 +4081,22 @@
 
       state.unsubMovements = onSnapshot(orgCol("inventoryMovements"), (snap) => {
         state.movements = snap.docs.map(mapMovement);
+        state.ddtDocuments = buildDdtDocumentsFromInventoryDocs(snap.docs, state.movements);
         state.movementsReady = true;
+        state.ddtDocumentsReady = true;
         state.movementsError = "";
+        state.ddtDocumentsError = "";
         reconcilePendingInventoryQty(buildInventorySnapshot());
         syncLoadSelectionFromCommand();
         render();
       }, (err) => {
         console.error("inventory listener failed", err);
         state.movements = [];
+        state.ddtDocuments = [];
         state.movementsReady = true;
+        state.ddtDocumentsReady = true;
         state.movementsError = humanAuthErr(err);
+        state.ddtDocumentsError = state.movementsError;
         showToast(state.movementsError, "err");
         render();
       });
@@ -3896,18 +4123,6 @@
         render();
       });
 
-      state.unsubDdtDocuments = onSnapshot(orgCol(DDT_COLLECTION), (snap) => {
-        state.ddtDocuments = snap.docs.map(mapDdtDocument);
-        state.ddtDocumentsReady = true;
-        state.ddtDocumentsError = "";
-        render();
-      }, (err) => {
-        console.error("ddt listener failed", err);
-        state.ddtDocuments = [];
-        state.ddtDocumentsReady = true;
-        state.ddtDocumentsError = humanAuthErr(err);
-        render();
-      });
     }
 
     async function signIn(){
@@ -4024,9 +4239,10 @@
     function getPositiveRowsForCodeInWarehouse(code, warehouse){
       const snapshot = buildInventorySnapshot();
       const low = normalizeInventoryCodeKey(code);
-      const rowsMap = (warehouse === WAREHOUSE_CONCA)
+      const normalizedWarehouse = normalizeWarehouse(warehouse);
+      const rowsMap = (normalizedWarehouse === WAREHOUSE_PRISMA)
         ? snapshot.prismaRowsByCode.get(low)
-        : snapshot.cereaRowsByCode.get(low);
+        : (normalizedWarehouse === WAREHOUSE_CEREA ? snapshot.cereaRowsByCode.get(low) : null);
       if (!rowsMap) return [];
       return Array.from(rowsMap.values())
         .filter(row => safeInt(row?.qty) > 0)
@@ -4038,7 +4254,7 @@
     }
 
     function getPositivePrismaRowsForCode(code){
-      return getPositiveRowsForCodeInWarehouse(code, WAREHOUSE_CONCA);
+      return getPositiveRowsForCodeInWarehouse(code, WAREHOUSE_PRISMA);
     }
 
     function getCurrentPrismaQtyForCode(code){
@@ -4080,9 +4296,9 @@
         return { oldQty: currentQty, newQty: desiredQty, uom: normalizedUom };
       }
 
-      const positiveConcaRows = getPositivePrismaRowsForCode(productCode);
+      const positivePrismaRows = getPositivePrismaRowsForCode(productCode);
       const fallbackCereaRow = getPositiveCereaRowsForCode(productCode)[0] || null;
-      const preferredRow = positiveConcaRows[0] || fallbackCereaRow || null;
+      const preferredRow = positivePrismaRows[0] || fallbackCereaRow || null;
       if (!preferredRow){
         throw makeInventoryAdjustError("inventory/no-stock-rows", "Righe inventario Prisma non trovate.");
       }
@@ -4120,7 +4336,7 @@
           createdByEmail: userEmail,
           createdByUid: userUid,
           type,
-          warehouse: WAREHOUSE_CONCA
+          warehouse: WAREHOUSE_PRISMA
         };
       }
 
@@ -4135,12 +4351,12 @@
         movementCount += 1;
       }else{
         let remaining = Math.abs(delta);
-        const available = positiveConcaRows.reduce((sum, row) => sum + safeInt(row?.qty), 0);
+        const available = positivePrismaRows.reduce((sum, row) => sum + safeInt(row?.qty), 0);
         if (available < remaining){
           throw makeInventoryAdjustError("inventory/insufficient-stock", "Disponibilità Prisma insufficiente.");
         }
 
-        for (const row of positiveConcaRows){
+        for (const row of positivePrismaRows){
           if (remaining <= 0) break;
           const take = Math.min(safeInt(row.qty), remaining);
           if (!take) continue;
@@ -4324,10 +4540,9 @@
           throw new Error("Movimenti DDT non calcolabili.");
         }
         const reserved = await reserveDdtProgressive(date, movementSlots);
-        const ddtRef = doc(orgCol(DDT_COLLECTION));
-        const ddtMovementsCollection = collection(state.db, "orgs", ORG_ID, DDT_COLLECTION, ddtRef.id, "movements");
         const batch = writeBatch(state.db);
         const movementCollection = orgCol("inventoryMovements");
+        const ddtRef = doc(movementCollection);
         const movements = [];
         const lines = [];
         let movementProgressiveNumber = Math.max(0, safeInt(reserved.firstMovementProgressive || 1) - 1);
@@ -4414,14 +4629,6 @@
           ];
           for (const summary of movementSummaries){
             movements.push(summary);
-            batch.set(doc(ddtMovementsCollection), {
-              ...summary,
-              ddtId: ddtRef.id,
-              ddtNumber: reserved.ddtNumber,
-              ddtProgressive: reserved.progressive,
-              createdAt: serverTimestamp(),
-              createdByEmail: userEmail
-            });
           }
 
           remaining -= take;
@@ -4432,8 +4639,16 @@
         }
 
         const ddtPayload = {
-          docType: DOC_TYPE,
+          recordKind: DDT_RECORD_KIND,
+          isDdtDocument: true,
+          storageCollection: "inventoryMovements",
+          type: "IN",
+          warehouse: config.destinationWarehouse,
+          qty: 0,
+          qtyRaw: "0",
+          docType: `${DOC_TYPE}_HEADER`,
           docNum: reserved.ddtNumber,
+          ddtId: ddtRef.id,
           ddtNumber: reserved.ddtNumber,
           ddtProgressive: reserved.progressive,
           date,
@@ -4462,6 +4677,7 @@
         ddtPayload.pdfDataUrl = buildDdtPdfDataUrl(ddtPayload);
         ddtPayload.pdfBase64 = String(ddtPayload.pdfDataUrl || "").split(",")[1] || "";
         ddtPayload.pdfMimeType = "application/pdf";
+        ddtPayload.pdfFilename = ddtPayload.pdfFileName;
         ddtPayload.pdf = {
           dataUrl: ddtPayload.pdfDataUrl,
           base64: ddtPayload.pdfBase64,
@@ -4700,8 +4916,12 @@
         showToast("Accedi per spostare", "err");
         return;
       }
-      if (!(state.productsReady && state.categoriesReady && state.movementsReady)){
-        showToast("Caricamento dati in corso", "warn");
+      if (!state.movementsReady){
+        showToast("Caricamento inventario Prisma in corso", "warn");
+        return;
+      }
+      if (state.movementsError){
+        showToast(state.movementsError, "err");
         return;
       }
       if (buildLoadableProducts({ direction: config.direction }).length <= 0){
