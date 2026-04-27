@@ -2764,51 +2764,93 @@
       return rawMaterial || packaging;
     }
 
+    function buildProductLookupByCode(){
+      const map = new Map();
+      for (const product of (state.products || [])){
+        const code = productCodeFromData(product);
+        if (!code) continue;
+        const low = code.toLowerCase();
+        const existing = map.get(low);
+        if (!existing || (isProductActive(product) && !isProductActive(existing))){
+          map.set(low, product);
+        }
+      }
+      return map;
+    }
+
+    function getMovementBackedCategory(product, categoryMap, fallbackName = "Da movimenti inventario"){
+      const category = product ? getProductCategoryInfo(product, categoryMap) : null;
+      if (category && category.key) return category;
+      return {
+        key: "__movement_inventory",
+        name: fallbackName,
+        color: "",
+        macro: ""
+      };
+    }
+
+    function getMovementBackedProduct(code, totals, product){
+      if (product) return product;
+      const fallbackName = cleanSpaces(totals?.item || code);
+      const uom = normalizeUom(totals?.uom || "") || "pz";
+      return {
+        id: code,
+        code,
+        name: fallbackName || code,
+        alias: "",
+        searchText: fallbackName || code,
+        uom
+      };
+    }
+
     function buildLoadableProducts(options = {}){
       const config = transferConfig(options?.direction || state.transferDirection);
       const includeZeroSource = options?.includeZeroSource === true;
       const snapshot = buildInventorySnapshot();
       const categoryMap = buildCategoryMap();
-      const seen = new Set();
+      const productsByCode = buildProductLookupByCode();
+      const codes = new Set();
       const list = [];
 
+      for (const [low] of snapshot.totalsByCode){
+        if (low) codes.add(low);
+      }
       for (const product of (state.products || [])){
-        if (!isProductActive(product)) continue;
-
         const code = productCodeFromData(product);
+        if (code) codes.add(code.toLowerCase());
+      }
+
+      for (const low of codes){
+        const totals = snapshot.totalsByCode.get(low) || null;
+        const product = productsByCode.get(low) || null;
+        const code = cleanSpaces(productCodeFromData(product) || totals?.code || low);
         if (!code) continue;
-        const low = code.toLowerCase();
-        if (seen.has(low)) continue;
-        seen.add(low);
 
-        const category = getProductCategoryInfo(product, categoryMap);
-        if (!isComponentProduct(product, category)) continue;
-
-        const totals = snapshot.totalsByCode.get(low);
         const cereaQty = safeInt(totals?.cerea || 0);
         const prismaQty = safeInt(totals?.prisma || 0);
         const sourceQty = getQtyForWarehouseFromTotals(totals, config.sourceWarehouse);
-
         if (!includeZeroSource && sourceQty <= 0) continue;
 
         const movementName = cleanSpaces(totals?.item || "");
-        const name = getProductDisplayName(product, movementName || code);
-        const alias = cleanSpaces(product?.alias || product?.aliasName || "");
+        const productRecord = getMovementBackedProduct(code, totals, product);
+        const name = getProductDisplayName(productRecord, movementName || code);
+        const alias = cleanSpaces(productRecord?.alias || productRecord?.aliasName || "");
+        const category = getMovementBackedCategory(product, categoryMap);
         const searchText = cleanSpaces([
           movementName,
-          product?.searchText || "",
-          product?.search || "",
-          product?.searchName || "",
-          product?.label || "",
-          product?.title || "",
-          product?.description || "",
-          product?.item || ""
+          productRecord?.searchText || "",
+          productRecord?.search || "",
+          productRecord?.searchName || "",
+          productRecord?.label || "",
+          productRecord?.title || "",
+          productRecord?.description || "",
+          productRecord?.item || ""
         ].join(" "));
-        const uom = getResolvedUomForCode(code, product, snapshot);
+        const uom = getResolvedUomForCode(code, productRecord, snapshot);
 
         list.push({
           code,
-          codeLower: low,
+          codeLower: code.toLowerCase(),
           name,
           alias,
           searchText,
@@ -2844,37 +2886,32 @@
     function buildPrismaInventoryGroups(){
       const snapshot = buildInventorySnapshot();
       const categoryMap = buildCategoryMap();
-      const seen = new Set();
+      const productsByCode = buildProductLookupByCode();
       const map = new Map();
 
-      for (const product of (state.products || [])){
-        if (!isProductActive(product)) continue;
+      for (const [low, totals] of snapshot.totalsByCode){
+        const prismaQty = safeInt(totals?.prisma || 0);
+        if (prismaQty <= 0) continue;
 
-        const code = productCodeFromData(product);
+        const product = productsByCode.get(low) || null;
+        const code = cleanSpaces(productCodeFromData(product) || totals?.code || low);
         if (!code) continue;
-        const low = code.toLowerCase();
-        if (seen.has(low)) continue;
-        seen.add(low);
 
-        const totals = snapshot.totalsByCode.get(low);
-        const concaQty = safeInt(totals?.prisma || 0);
-        if (concaQty <= 0) continue;
-
-        const category = getProductCategoryInfo(product, categoryMap);
-        if (!isComponentProduct(product, category)) continue;
-        const groupKey = category.key || "__none";
+        const productRecord = getMovementBackedProduct(code, totals, product);
+        const category = getMovementBackedCategory(product, categoryMap, "Da movimenti Prisma");
+        const groupKey = category.key || "__movement_inventory";
         const group = map.get(groupKey) || {
           key: groupKey,
-          name: category.name,
-          color: category.color,
+          name: category.name || "Da movimenti Prisma",
+          color: category.color || "",
           items: []
         };
 
         group.items.push({
           code,
-          name: getProductDisplayName(product, totals?.item || code),
-          uom: getResolvedUomForCode(code, product, snapshot),
-          qty: concaQty
+          name: getProductDisplayName(productRecord, totals?.item || code),
+          uom: getResolvedUomForCode(code, productRecord, snapshot),
+          qty: prismaQty
         });
 
         map.set(groupKey, group);
@@ -2890,8 +2927,8 @@
       }
 
       groups.sort((a, b) => {
-        if (a.key === "__none") return 1;
-        if (b.key === "__none") return -1;
+        if (a.key === "__movement_inventory") return 1;
+        if (b.key === "__movement_inventory") return -1;
         return String(a?.name || "").localeCompare(String(b?.name || ""), "it", { sensitivity: "base" });
       });
 
@@ -3590,7 +3627,7 @@
     }
 
     function renderActionState(){
-      const ready = !!(state.user && state.db && state.productsReady && state.categoriesReady && state.movementsReady && !state.productsError && !state.categoriesError && !state.movementsError);
+      const ready = !!(state.user && state.db && state.movementsReady && !state.movementsError);
       const toPrismaCount = ready ? buildLoadableProducts({ direction: TRANSFER_TO_PRISMA }).length : 0;
       const toCereaCount = ready ? buildLoadableProducts({ direction: TRANSFER_TO_CEREA }).length : 0;
 
@@ -3609,27 +3646,15 @@
         return;
       }
 
-      if (state.productsError){
-        els.inventoryMeta.textContent = state.productsError;
-        els.inventoryCategories.innerHTML = `<div class="empty">${escapeHtml(state.productsError)}</div>`;
-        return;
-      }
-
-      if (state.categoriesError){
-        els.inventoryMeta.textContent = state.categoriesError;
-        els.inventoryCategories.innerHTML = `<div class="empty">${escapeHtml(state.categoriesError)}</div>`;
-        return;
-      }
-
       if (state.movementsError){
         els.inventoryMeta.textContent = state.movementsError;
         els.inventoryCategories.innerHTML = `<div class="empty">${escapeHtml(state.movementsError)}</div>`;
         return;
       }
 
-      if (!(state.productsReady && state.categoriesReady && state.movementsReady)){
-        els.inventoryMeta.textContent = "Caricamento inventario in corso…";
-        els.inventoryCategories.innerHTML = '<div class="empty">Caricamento inventario in corso…</div>';
+      if (!state.movementsReady){
+        els.inventoryMeta.textContent = "Caricamento inventario Prisma in corso…";
+        els.inventoryCategories.innerHTML = '<div class="empty">Caricamento inventario Prisma in corso…</div>';
         return;
       }
 
@@ -3639,12 +3664,13 @@
       const totalProducts = groups.reduce((sum, group) => sum + group.items.length, 0);
 
       if (!groups.length){
-        els.inventoryMeta.textContent = "Nessun imballaggio o materia prima disponibile a Prisma.";
-        els.inventoryCategories.innerHTML = '<div class="empty">Nessun imballaggio o materia prima disponibile a Prisma.</div>';
+        els.inventoryMeta.textContent = "Nessun articolo disponibile a Prisma.";
+        els.inventoryCategories.innerHTML = '<div class="empty">Nessun articolo disponibile a Prisma.</div>';
         return;
       }
 
-      els.inventoryMeta.textContent = `${totalProducts.toLocaleString("it-IT")} imballaggi/materie prime disponibili in ${groups.length.toLocaleString("it-IT")} categorie · Tocca la quantità per rettificare.`;
+      const metadataWarning = [state.productsError ? "anagrafica prodotti non disponibile" : "", state.categoriesError ? "categorie non disponibili" : ""].filter(Boolean).join(" · ");
+      els.inventoryMeta.textContent = `${totalProducts.toLocaleString("it-IT")} articoli disponibili a Prisma in ${groups.length.toLocaleString("it-IT")} gruppi · Tocca la quantità per rettificare.${metadataWarning ? " · " + metadataWarning : ""}`;
       els.inventoryCategories.innerHTML = groups.map(group => {
         const colorStyle = group.color ? ` style="--cat-color:${escapeHtml(group.color)}"` : "";
         return `
@@ -3707,8 +3733,8 @@
 
     function renderLoadModal(){
       const config = transferConfig();
-      const ready = !!(state.user && state.db && state.productsReady && state.categoriesReady && state.movementsReady && !state.productsError && !state.categoriesError && !state.movementsError);
-      const loadableCount = buildLoadableProducts({ direction: config.direction }).length;
+      const ready = !!(state.user && state.db && state.movementsReady && !state.movementsError);
+      const loadableCount = ready ? buildLoadableProducts({ direction: config.direction }).length : 0;
       const validation = getLoadValidation();
       const input = els.loadCommand;
       const typedQuery = normalizeSearch(validation.parts.productText || validation.parts.raw);
@@ -4789,8 +4815,12 @@
         showToast("Accedi per spostare", "err");
         return;
       }
-      if (!(state.productsReady && state.categoriesReady && state.movementsReady)){
-        showToast("Caricamento dati in corso", "warn");
+      if (!state.movementsReady){
+        showToast("Caricamento inventario Prisma in corso", "warn");
+        return;
+      }
+      if (state.movementsError){
+        showToast(state.movementsError, "err");
         return;
       }
       if (buildLoadableProducts({ direction: config.direction }).length <= 0){
