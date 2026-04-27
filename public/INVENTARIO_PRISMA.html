@@ -1743,6 +1743,7 @@
     const MAIL_COLLECTION = "email";
     const EMAIL_TO_MATTEO = "matteo@generalcoppersrl.com";
     const EMAIL_TO_PRISMA = "francesco@prismalogistics.net";
+    const EMAIL_CC_INTERNAL = EMAIL_TO_MATTEO;
     const EMAIL_LINE_TAG = "inventario-prisma";
     const PDF_LOGO_PATH = "/logo general copper.png";
 
@@ -2295,9 +2296,9 @@
       return wh === WAREHOUSE_PRISMA ? COMPANY_PRISMA : COMPANY_GENERAL_COPPER;
     }
 
-    async function enqueueMatteoEmail(subject, textBody, htmlBody = "", attachments = [], toEmail = EMAIL_TO_MATTEO){
+    async function enqueueMatteoEmail(subject, textBody, htmlBody = "", attachments = [], toEmail = EMAIL_TO_MATTEO, ccEmail = ""){
       try{
-        if (!state.db) return;
+        if (!state.db) return "";
         const safeText = String(textBody || "").trim() || "Evento registrato.";
         const message = {
           subject: String(subject || "HIGC - Comunicazione gestionale").trim() || "HIGC - Comunicazione gestionale",
@@ -2322,7 +2323,7 @@
           message.attachments = safeAttachments;
         }
 
-        await addDoc(collection(state.db, MAIL_COLLECTION), {
+        const emailDoc = {
           to: cleanSpaces(toEmail || EMAIL_TO_MATTEO) || EMAIL_TO_MATTEO,
           message,
           createdAt: serverTimestamp(),
@@ -2331,9 +2332,15 @@
           hasAttachments: safeAttachments.length > 0,
           attachmentCount: safeAttachments.length,
           createdBy: prettifyUserLabel(state.user?.displayName || state.user?.email || state.user?.uid || "Sistema")
-        });
+        };
+        const cc = cleanSpaces(ccEmail || "");
+        if (cc) emailDoc.cc = cc;
+
+        const ref = await addDoc(collection(state.db, MAIL_COLLECTION), emailDoc);
+        return ref?.id || "";
       }catch(err){
         console.warn("enqueueMatteoEmail failed", err);
+        throw err;
       }
     }
 
@@ -2394,78 +2401,53 @@
       const receiverWarehouse = config?.destinationLabel || warehouseLabel(config?.destinationWarehouse || WAREHOUSE_PRISMA);
       const sourceWh = normalizeWarehouse(config?.sourceWarehouse || senderWarehouse);
       const destinationWh = normalizeWarehouse(config?.destinationWarehouse || receiverWarehouse);
+
       const requestLine = sourceWh === WAREHOUSE_CEREA && destinationWh === WAREHOUSE_PRISMA
-        ? "con la presente si richiede il ritiro della merce presso il nostro magazzino di Cerea per trasferimento verso Prisma."
+        ? "con la presente si richiede il ritiro della merce presso il nostro magazzino di Cerea e il trasferimento presso Prisma."
         : sourceWh === WAREHOUSE_PRISMA && destinationWh === WAREHOUSE_CEREA
-          ? "con la presente si richiede la predisposizione e il trasferimento della merce dal vostro magazzino Prisma verso il nostro magazzino di Cerea."
+          ? "con la presente si richiede la predisposizione della merce presso il magazzino Prisma e il trasferimento presso il nostro magazzino di Cerea."
           : `con la presente si richiede la gestione del trasferimento merce dal magazzino ${senderWarehouse} al magazzino ${receiverWarehouse}.`;
-      const subject = `Richiesta ritiro merce - DDT ${ddtNumber} - ${senderWarehouse} verso ${receiverWarehouse}`;
+
+      const subject = `DDT ${ddtNumber} - Richiesta ritiro merce ${senderWarehouse} / ${receiverWarehouse}`;
       const textBody = [
         "Buongiorno,",
         "",
         requestLine,
-        `Si trasmette in allegato il documento di trasporto ${ddtNumber} relativo alla movimentazione indicata.`,
+        `Si invia in allegato il documento di trasporto ${ddtNumber} relativo alla movimentazione in oggetto.`,
         "",
-        "Dettagli documento:",
-        `DDT: ${ddtNumber}`,
-        `Data documento: ${date}`,
         `Magazzino mittente: ${senderWarehouse}`,
         `Magazzino destinatario: ${receiverWarehouse}`,
         `Articolo: ${itemLabel}`,
         `Codice articolo: ${codeLabel || "—"}`,
         `Quantità: ${qtyLabel}`,
+        `Data documento: ${date}`,
         "",
-        `Registrazione gestionale: ${whenLabel}`,
-        `Operatore: ${operator}`,
-        "",
-        "Il documento di trasporto è allegato in formato PDF.",
+        "Restiamo a disposizione per qualsiasi necessità.",
         "",
         "Cordiali saluti",
-        "General Copper SRL"
+        "General Copper SRL",
+        "",
+        `Riferimento gestionale: ${whenLabel} - ${operator}`
       ].join("\n");
       const htmlBody = `
         <div style="font-family:Arial, Helvetica, sans-serif; font-size:14px; color:#111827; line-height:1.55;">
           <p>Buongiorno,</p>
           <p>${escapeHtml(requestLine)}</p>
-          <p>Si trasmette in allegato il documento di trasporto <strong>${escapeHtml(ddtNumber)}</strong> relativo alla movimentazione indicata.</p>
-
-          <table style="border-collapse:collapse; width:100%; max-width:680px; margin:16px 0; font-size:13px;">
-            <tr>
-              <td style="padding:6px 12px 6px 0; color:#4b5563; width:190px;">DDT</td>
-              <td style="padding:6px 0; font-weight:700; color:#111827;">${escapeHtml(ddtNumber)}</td>
-            </tr>
-            <tr>
-              <td style="padding:6px 12px 6px 0; color:#4b5563;">Data documento</td>
-              <td style="padding:6px 0; color:#111827;">${escapeHtml(date)}</td>
-            </tr>
-            <tr>
-              <td style="padding:6px 12px 6px 0; color:#4b5563;">Magazzino mittente</td>
-              <td style="padding:6px 0; color:#111827;">${escapeHtml(senderWarehouse)}</td>
-            </tr>
-            <tr>
-              <td style="padding:6px 12px 6px 0; color:#4b5563;">Magazzino destinatario</td>
-              <td style="padding:6px 0; color:#111827;">${escapeHtml(receiverWarehouse)}</td>
-            </tr>
-            <tr>
-              <td style="padding:6px 12px 6px 0; color:#4b5563;">Articolo</td>
-              <td style="padding:6px 0; color:#111827; font-weight:700;">${escapeHtml(itemLabel)}</td>
-            </tr>
-            <tr>
-              <td style="padding:6px 12px 6px 0; color:#4b5563;">Codice articolo</td>
-              <td style="padding:6px 0; color:#111827; font-weight:700;">${escapeHtml(codeLabel || "—")}</td>
-            </tr>
-            <tr>
-              <td style="padding:6px 12px 6px 0; color:#4b5563;">Quantità</td>
-              <td style="padding:6px 0; color:#111827; font-weight:700;">${escapeHtml(qtyLabel)}</td>
-            </tr>
-          </table>
-
-          <p>Il documento di trasporto è allegato in formato PDF.</p>
+          <p>Si invia in allegato il documento di trasporto <strong>${escapeHtml(ddtNumber)}</strong> relativo alla movimentazione in oggetto.</p>
+          <p>
+            Magazzino mittente: <strong>${escapeHtml(senderWarehouse)}</strong><br>
+            Magazzino destinatario: <strong>${escapeHtml(receiverWarehouse)}</strong><br>
+            Articolo: <strong>${escapeHtml(itemLabel)}</strong><br>
+            Codice articolo: <strong>${escapeHtml(codeLabel || "—")}</strong><br>
+            Quantità: <strong>${escapeHtml(qtyLabel)}</strong><br>
+            Data documento: ${escapeHtml(date)}
+          </p>
+          <p>Restiamo a disposizione per qualsiasi necessità.</p>
           <p>Cordiali saluti<br>General Copper SRL</p>
-          <div style="margin-top:14px; font-size:11px; color:#6b7280;">HIGC - Hub Inventario General Copper</div>
+          <p style="font-size:11px; color:#6b7280; margin-top:14px;">Riferimento gestionale: ${escapeHtml(whenLabel)} - ${escapeHtml(operator)}</p>
         </div>
       `.trim();
-      return { subject, textBody, htmlBody, to: EMAIL_TO_PRISMA };
+      return { subject, textBody, htmlBody, to: EMAIL_TO_PRISMA, cc: EMAIL_CC_INTERNAL };
     }
 
     function buildPrismaRectifyEmail({ code, name, uom, oldQty, newQty, delta, docNum, date, createdAt, userLabel, userEmail }){
@@ -3483,49 +3465,70 @@
     let pdfLogoImagePromise = null;
     async function loadPdfLogoImage(){
       if (pdfLogoImagePromise) return pdfLogoImagePromise;
-      pdfLogoImagePromise = new Promise((resolve) => {
-        try{
-          const img = new Image();
-          let done = false;
-          const finish = (value) => {
-            if (done) return;
-            done = true;
-            resolve(value || null);
-          };
-          const timer = setTimeout(() => finish(null), 2200);
-          img.crossOrigin = "anonymous";
-          img.onload = () => {
+      pdfLogoImagePromise = new Promise(async (resolve) => {
+        const logoSources = [
+          PDF_LOGO_PATH,
+          encodeURI(PDF_LOGO_PATH),
+          `.${PDF_LOGO_PATH}`,
+          encodeURI(`.${PDF_LOGO_PATH}`)
+        ].filter((value, index, list) => value && list.indexOf(value) === index);
+
+        async function tryLoadLogo(src, useCors = false){
+          return new Promise((finish) => {
             try{
-              clearTimeout(timer);
-              const naturalW = Math.max(1, img.naturalWidth || img.width || 1);
-              const naturalH = Math.max(1, img.naturalHeight || img.height || 1);
-              const maxW = 900;
-              const scale = Math.min(1, maxW / naturalW);
-              const canvas = document.createElement("canvas");
-              canvas.width = Math.max(1, Math.round(naturalW * scale));
-              canvas.height = Math.max(1, Math.round(naturalH * scale));
-              const ctx = canvas.getContext("2d", { alpha:false });
-              ctx.fillStyle = "#FFFFFF";
-              ctx.fillRect(0, 0, canvas.width, canvas.height);
-              ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-              const dataUrl = canvas.toDataURL("image/jpeg", .92);
-              const base64 = String(dataUrl || "").split(",")[1] || "";
-              if (!base64){ finish(null); return; }
-              finish({ width: canvas.width, height: canvas.height, data: atob(base64) });
+              const img = new Image();
+              let done = false;
+              const complete = (value) => {
+                if (done) return;
+                done = true;
+                finish(value || null);
+              };
+              const timer = setTimeout(() => complete(null), 2200);
+              if (useCors) img.crossOrigin = "anonymous";
+              img.onload = () => {
+                try{
+                  clearTimeout(timer);
+                  const naturalW = Math.max(1, img.naturalWidth || img.width || 1);
+                  const naturalH = Math.max(1, img.naturalHeight || img.height || 1);
+                  const maxW = 420;
+                  const scale = Math.min(1, maxW / naturalW);
+                  const canvas = document.createElement("canvas");
+                  canvas.width = Math.max(1, Math.round(naturalW * scale));
+                  canvas.height = Math.max(1, Math.round(naturalH * scale));
+                  const ctx = canvas.getContext("2d", { alpha:false });
+                  ctx.fillStyle = "#FFFFFF";
+                  ctx.fillRect(0, 0, canvas.width, canvas.height);
+                  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                  const dataUrl = canvas.toDataURL("image/jpeg", .82);
+                  const base64 = String(dataUrl || "").split(",")[1] || "";
+                  if (!base64){ complete(null); return; }
+                  complete({ width: canvas.width, height: canvas.height, data: atob(base64), source: src });
+                }catch(err){
+                  console.warn("Logo PDF non disponibile", err);
+                  complete(null);
+                }
+              };
+              img.onerror = () => {
+                clearTimeout(timer);
+                complete(null);
+              };
+              img.src = src;
             }catch(err){
               console.warn("Logo PDF non disponibile", err);
               finish(null);
             }
-          };
-          img.onerror = () => {
-            clearTimeout(timer);
-            finish(null);
-          };
-          img.src = PDF_LOGO_PATH;
-        }catch(err){
-          console.warn("Logo PDF non disponibile", err);
-          resolve(null);
+          });
         }
+
+        for (const src of logoSources){
+          const sameOriginLogo = await tryLoadLogo(src, false);
+          if (sameOriginLogo){ resolve(sameOriginLogo); return; }
+        }
+        for (const src of logoSources){
+          const corsLogo = await tryLoadLogo(src, true);
+          if (corsLogo){ resolve(corsLogo); return; }
+        }
+        resolve(null);
       });
       return pdfLogoImagePromise;
     }
@@ -3844,7 +3847,7 @@
       text(margin, 824, "HIGC - DOCUMENTO GENERATO DA HUB INVENTARIO GENERAL COPPER", 7, false);
       textRight(right, 824, "Pag. 1", 8, true);
 
-      return buildPdfDataUrl(cmds);
+      return buildPdfDataUrl(cmds, logoImage ? [logoImage] : []);
     }
 
     function openPdfDataUrl(dataUrl, name = "documento-ddt.pdf"){
@@ -5005,16 +5008,12 @@
           createdByEmail: userEmail,
           createdByUid: userUid
         };
-        ddtPayload.pdfDataUrl = await buildDdtPdfDataUrlAsync(ddtPayload);
-        ddtPayload.pdfBase64 = String(ddtPayload.pdfDataUrl || "").split(",")[1] || "";
+        const ddtPdfDataUrl = await buildDdtPdfDataUrlAsync(ddtPayload);
+        const ddtPdfBase64 = String(ddtPdfDataUrl || "").split(",")[1] || "";
         ddtPayload.pdfMimeType = "application/pdf";
         ddtPayload.pdfFilename = ddtPayload.pdfFileName;
-        ddtPayload.pdf = {
-          dataUrl: ddtPayload.pdfDataUrl,
-          base64: ddtPayload.pdfBase64,
-          fileName: ddtPayload.pdfFileName,
-          mimeType: "application/pdf"
-        };
+        ddtPayload.pdfGeneratedBy = "HIGC";
+        ddtPayload.pdfGeneratedAt = date;
 
         batch.set(ddtRef, ddtPayload);
         await batch.commit();
@@ -5033,12 +5032,13 @@
           });
           await enqueueMatteoEmail(emailData.subject, emailData.textBody, emailData.htmlBody, [{
             filename: ddtPayload.pdfFileName || `${reserved.ddtNumber}.pdf`,
-            content: ddtPayload.pdfBase64 || String(ddtPayload.pdfDataUrl || "").split(",")[1] || "",
+            content: ddtPdfBase64,
             contentType: "application/pdf",
             encoding: "base64"
-          }], emailData.to || EMAIL_TO_PRISMA);
+          }], emailData.to || EMAIL_TO_PRISMA, emailData.cc || EMAIL_CC_INTERNAL);
         }catch(mailErr){
           console.warn("prisma transfer email failed", mailErr);
+          showToast("DDT salvato, ma email non creata. Controlla permessi/rules della collection email.", "warn");
         }
         state.loadCommand = "";
         state.loadSelectedCode = "";
