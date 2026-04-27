@@ -1543,9 +1543,7 @@
 
     const ORG_ID = "generalcopper";
     const WAREHOUSE_CEREA = "cerea";
-    const WAREHOUSE_CONCA = "concamarise";
     const WAREHOUSE_PRISMA = "prisma";
-    const TARGET_WAREHOUSE = WAREHOUSE_PRISMA;
     const SOURCE = "Carica Prisma HTML";
     const NOTE = "Carico inventario Prisma da Cerea";
     const DOC_TYPE = "TRASFERIMENTO";
@@ -1631,10 +1629,9 @@
     function normalizeWarehouse(value){
       const s = String(value || "").trim().toLowerCase();
       if (!s) return WAREHOUSE_CEREA;
-      if (s === WAREHOUSE_PRISMA || s.includes("prisma")) return WAREHOUSE_PRISMA;
-      if (s === WAREHOUSE_CONCA || s.includes("conca")) return WAREHOUSE_CONCA;
       if (s === WAREHOUSE_CEREA || s.includes("cerea") || s.startsWith("cer")) return WAREHOUSE_CEREA;
-      return WAREHOUSE_CEREA;
+      if (s === WAREHOUSE_PRISMA || s.includes("prisma")) return WAREHOUSE_PRISMA;
+      return "";
     }
 
     function normalizeWarehousesList(raw){
@@ -1648,10 +1645,8 @@
         }else if (raw && typeof raw === "object"){
           const out = [];
           const cerea = raw.cerea;
-          const conca = (raw.concamarise !== undefined) ? raw.concamarise : raw.conca;
           const prisma = raw.prisma;
           if (cerea === true || cerea === 1 || cerea === "1") out.push(WAREHOUSE_CEREA);
-          if (conca === true || conca === 1 || conca === "1") out.push(WAREHOUSE_CONCA);
           if (prisma === true || prisma === 1 || prisma === "1") out.push(WAREHOUSE_PRISMA);
           return Array.from(new Set(out.map(normalizeWarehouse))).filter(Boolean);
         }
@@ -1744,7 +1739,7 @@
         .replace(/[_]+/g, " ")
         .replace(/[\\/]+/g, " ")
         .replace(/\s*[-–—]+\s*/g, " ")
-        .replace(/\b(prisma|concamarise|conca|cerea)\b/gi, " ")
+        .replace(/\b(prisma|cerea)\b/gi, " ")
         .replace(/\b(\d+)\s*(lt|l|ml|kg|gr|g|pz|pcs|pc)\b/gi, (_, qty, unit) => `${qty} ${normalizeUnitForDisplay(unit) || String(unit).toLowerCase()}`)
         .replace(/\bq\.?\s*ta\b/gi, " ")
         .replace(/\bqt[aà]\b/gi, " ")
@@ -1844,6 +1839,67 @@
 
     function normalizeCategoryKey(value){
       return String(value || "").trim().toLowerCase();
+    }
+
+    function normalizeProductsMacroGroup(value){
+      const s = String(value || "").trim().toLowerCase();
+      if (s === "materie_prime" || s === "materie prime" || s === "raw" || s === "raw_materials" || s === "raw materials") return "materie_prime";
+      if (s === "imballaggi" || s === "imballaggio" || s === "packaging" || s === "packages") return "imballaggi";
+      return "";
+    }
+
+    function isFinishedProductLike(product, categoryInfo = null){
+      const raw = normalizeSearch([
+        product?.kind || "",
+        product?.type || "",
+        product?.macro || "",
+        product?.macroGroup || "",
+        product?.productMacroGroup || "",
+        product?.group || "",
+        product?.collection || "",
+        categoryInfo?.key || "",
+        categoryInfo?.name || ""
+      ].join(" "));
+      if (!raw) return false;
+      if (/\bprodott[io]?\s+finit[io]?\b/.test(raw)) return true;
+      if (/\bfinished\b/.test(raw)) return true;
+      if (/\bpf\b/.test(raw)) return true;
+      if (/\bsingolo\b/.test(raw)) return true;
+      return false;
+    }
+
+    function getComponentMacroGroup(product, categoryInfo = null){
+      const direct = normalizeProductsMacroGroup(
+        product?.macroGroup ||
+        product?.macro ||
+        product?.productMacroGroup ||
+        product?.group ||
+        categoryInfo?.macro ||
+        ""
+      );
+      if (direct) return direct;
+
+      const key = normalizeCategoryKey(
+        categoryInfo?.key ||
+        product?.categoryKeyLower ||
+        product?.categoryKey ||
+        product?.category ||
+        product?.catKey ||
+        product?.categoryId ||
+        ""
+      );
+      const label = normalizeSearch(categoryInfo?.name || "");
+      if (key === "materie_prime" || key.includes("materie") || label.includes("materie prime")) return "materie_prime";
+
+      // Nell'anagrafica prodotti del magazzino, tutte le categorie diverse da materie prime
+      // rappresentano imballaggi (scatole, flaconi, tappi, trigger, bobine, ecc.).
+      return "imballaggi";
+    }
+
+    function isLoadableCereaComponent(product, categoryInfo = null){
+      if (product && isFinishedProductLike(product, categoryInfo)) return false;
+      const macro = getComponentMacroGroup(product || {}, categoryInfo);
+      return macro === "imballaggi" || macro === "materie_prime";
     }
 
     function tsToDate(ts){
@@ -1989,7 +2045,7 @@
       const itemLabel = String(product?.name || product?.code || "Articolo").trim() || "Articolo";
       const codeLabel = String(product?.code || "").trim();
       const originLabel = titleizeWords(WAREHOUSE_CEREA);
-      const destinationLabel = titleizeWords(TARGET_WAREHOUSE);
+      const destinationLabel = titleizeWords(WAREHOUSE_PRISMA);
       const subject = `[Inventario Prisma] Carico registrato • ${itemLabel} • ${qtyLabel} • ${operator}`;
       const textBody = [
         "È stato registrato un nuovo carico verso Prisma.",
@@ -2050,7 +2106,7 @@
         `Variazione: ${deltaLabel}`,
         `Quantità precedente: ${previousQtyLabel}`,
         `Nuova quantità: ${newQtyLabel}`,
-        `Magazzino: ${titleizeWords(TARGET_WAREHOUSE)}`,
+        `Magazzino: ${titleizeWords(WAREHOUSE_PRISMA)}`,
         `Operatore: ${operator}`,
         `Email operatore: ${userEmail || "—"}`,
         `Documento interno: ${docNum}`,
@@ -2068,7 +2124,7 @@
             <tr><td style="padding:6px 12px 6px 0; color:#6b7280;">Variazione</td><td style="padding:6px 0; font-weight:800;">${escapeHtml(deltaLabel)}</td></tr>
             <tr><td style="padding:6px 12px 6px 0; color:#6b7280;">Quantità precedente</td><td style="padding:6px 0;">${escapeHtml(previousQtyLabel)}</td></tr>
             <tr><td style="padding:6px 12px 6px 0; color:#6b7280;">Nuova quantità</td><td style="padding:6px 0; font-weight:800;">${escapeHtml(newQtyLabel)}</td></tr>
-            <tr><td style="padding:6px 12px 6px 0; color:#6b7280;">Magazzino</td><td style="padding:6px 0;">${escapeHtml(titleizeWords(TARGET_WAREHOUSE))}</td></tr>
+            <tr><td style="padding:6px 12px 6px 0; color:#6b7280;">Magazzino</td><td style="padding:6px 0;">${escapeHtml(titleizeWords(WAREHOUSE_PRISMA))}</td></tr>
             <tr><td style="padding:6px 12px 6px 0; color:#6b7280;">Operatore</td><td style="padding:6px 0;">${escapeHtml(operator)}</td></tr>
             <tr><td style="padding:6px 12px 6px 0; color:#6b7280;">Email operatore</td><td style="padding:6px 0;">${escapeHtml(userEmail || "—")}</td></tr>
             <tr><td style="padding:6px 12px 6px 0; color:#6b7280;">Documento interno</td><td style="padding:6px 0;">${escapeHtml(docNum)}</td></tr>
@@ -2153,29 +2209,31 @@
         map.set(key, {
           key,
           name: cleanSpaces(cat?.name || cat?.label || prettyCategoryLabel(key)) || prettyCategoryLabel(key),
-          color: cleanSpaces(cat?.color || "")
+          color: cleanSpaces(cat?.color || ""),
+          macro: normalizeProductsMacroGroup(cat?.macro || cat?.macroGroup || cat?.group || "") || ((key === "materie_prime") ? "materie_prime" : "imballaggi")
         });
       }
       return map;
     }
 
     function getProductCategoryInfo(product, categoryMap){
-      const key = normalizeCategoryKey(product?.categoryKey || product?.category || product?.catKey || product?.categoryId || "");
+      const key = normalizeCategoryKey(product?.categoryKeyLower || product?.categoryKey || product?.category || product?.catKey || product?.categoryId || "");
+      const productMacro = normalizeProductsMacroGroup(product?.macroGroup || product?.macro || product?.productMacroGroup || product?.group || "");
       if (!key){
-        return { key: "", name: "Senza categoria", color: "" };
+        return { key: "", name: "Senza categoria", color: "", macro: productMacro || "imballaggi" };
       }
       const found = categoryMap.get(key);
       return {
         key,
         name: cleanSpaces(found?.name || prettyCategoryLabel(key)) || prettyCategoryLabel(key),
-        color: cleanSpaces(found?.color || "")
+        color: cleanSpaces(found?.color || ""),
+        macro: productMacro || normalizeProductsMacroGroup(found?.macro || "") || ((key === "materie_prime") ? "materie_prime" : "imballaggi")
       };
     }
 
     function buildInventorySnapshot(){
       const totalsByCode = new Map();
       const cereaRowsByCode = new Map();
-      const concamariseRowsByCode = new Map();
       const prismaRowsByCode = new Map();
 
       for (const mv of (state.movements || [])){
@@ -2183,6 +2241,7 @@
         if (!code) continue;
         const low = code.toLowerCase();
         const wh = normalizeWarehouse(mv.warehouse || "");
+        if (wh !== WAREHOUSE_CEREA && wh !== WAREHOUSE_PRISMA) continue;
         const qty = safeInt(mv.qty);
         if (!qty) continue;
         const delta = (String(mv.type || "").toUpperCase() === "OUT") ? -qty : qty;
@@ -2193,23 +2252,19 @@
         const totalRec = totalsByCode.get(low) || {
           code,
           cerea: 0,
-          concamarise: 0,
           prisma: 0,
           item: "",
           uom: ""
         };
 
         if (wh === WAREHOUSE_PRISMA) totalRec.prisma += delta;
-        else if (wh === WAREHOUSE_CONCA) totalRec.concamarise += delta;
         else totalRec.cerea += delta;
 
         if (!totalRec.item && item) totalRec.item = item;
         if (uom) totalRec.uom = uom;
         totalsByCode.set(low, totalRec);
 
-        const targetRowsByCode = (wh === WAREHOUSE_PRISMA)
-          ? prismaRowsByCode
-          : ((wh === WAREHOUSE_CONCA) ? concamariseRowsByCode : cereaRowsByCode);
+        const targetRowsByCode = (wh === WAREHOUSE_PRISMA) ? prismaRowsByCode : cereaRowsByCode;
         const byCustomer = targetRowsByCode.get(low) || new Map();
         const rowKey = `${customer.toLowerCase()}||${low}`;
         const row = byCustomer.get(rowKey) || {
@@ -2226,7 +2281,7 @@
         targetRowsByCode.set(low, byCustomer);
       }
 
-      return { totalsByCode, cereaRowsByCode, concamariseRowsByCode, prismaRowsByCode };
+      return { totalsByCode, cereaRowsByCode, prismaRowsByCode };
     }
 
     function getResolvedUomForCode(code, product, snapshot){
@@ -2243,7 +2298,7 @@
 
       if (product.warehouses !== undefined && product.warehouses !== null){
         const list = normalizeWarehousesList(product.warehouses);
-        return list.includes(TARGET_WAREHOUSE);
+        return list.includes(WAREHOUSE_PRISMA);
       }
 
       const direct = product.prisma;
@@ -2258,7 +2313,7 @@
 
       if (product.warehouses !== undefined && product.warehouses !== null){
         const list = normalizeWarehousesList(product.warehouses);
-        return list.includes(TARGET_WAREHOUSE);
+        return list.includes(WAREHOUSE_PRISMA);
       }
 
       const direct = product.prisma;
@@ -2269,32 +2324,50 @@
     }
 
     function buildLoadableProducts(options = {}){
-      const includeZeroCerea = options?.includeZeroCerea !== false;
-      const includeOnlyAvailableInPrisma = options?.includeOnlyAvailableInPrisma !== false;
+      // Default: carico verso Prisma = tutti gli imballaggi / materie prime con giacenza positiva a Cerea.
+      const includeZeroCerea = options?.includeZeroCerea === true;
+      const includeOnlyAvailableInPrisma = options?.includeOnlyAvailableInPrisma === true;
       const snapshot = buildInventorySnapshot();
       const categoryMap = buildCategoryMap();
-      const seen = new Set();
-      const list = [];
+      const listByCode = new Map();
+      const productByCode = new Map();
 
       for (const product of (state.products || [])){
-        if (!isProductActive(product)) continue;
-        if (!isStrictlyLoadableForPrisma(product)) continue;
-
         const code = productCodeFromData(product);
         if (!code) continue;
         const low = code.toLowerCase();
-        if (seen.has(low)) continue;
-        seen.add(low);
+        if (!productByCode.has(low)) productByCode.set(low, product);
+      }
+
+      function positiveCereaRows(low){
+        const rowsMap = snapshot.cereaRowsByCode.get(low);
+        if (!rowsMap) return [];
+        return Array.from(rowsMap.values()).filter(row => safeInt(row?.qty) > 0);
+      }
+
+      function addCandidate(code, product = null, movementRow = null){
+        const safeCode = String(code || productCodeFromData(product) || movementRow?.code || "").trim();
+        if (!safeCode) return;
+        const low = safeCode.toLowerCase();
+        if (listByCode.has(low)) return;
+
+        if (product && !isProductActive(product)) return;
 
         const totals = snapshot.totalsByCode.get(low);
-        const cereaQty = safeInt(totals?.cerea || 0);
+        const cereaRows = positiveCereaRows(low);
+        const firstCereaRow = movementRow || cereaRows[0] || null;
+        const cereaQty = safeInt(totals?.cerea || cereaRows.reduce((sum, row) => sum + safeInt(row?.qty), 0));
         const prismaQty = safeInt(totals?.prisma || 0);
 
-        if (includeOnlyAvailableInPrisma && prismaQty <= 0) continue;
-        if (!includeZeroCerea && cereaQty <= 0) continue;
+        if (includeOnlyAvailableInPrisma && prismaQty <= 0) return;
+        if (!includeZeroCerea && cereaQty <= 0) return;
 
-        const movementName = cleanSpaces(totals?.item || "");
-        const name = getProductDisplayName(product, movementName || code);
+        const category = getProductCategoryInfo(product || {}, categoryMap);
+        if (!isLoadableCereaComponent(product || null, category)) return;
+
+        const movementName = cleanSpaces(firstCereaRow?.item || totals?.item || "");
+        const productForDisplay = product || { code: safeCode, name: movementName, item: movementName };
+        const name = getProductDisplayName(productForDisplay, movementName || safeCode);
         const alias = cleanSpaces(product?.alias || product?.aliasName || "");
         const searchText = cleanSpaces([
           movementName,
@@ -2304,13 +2377,13 @@
           product?.label || "",
           product?.title || "",
           product?.description || "",
-          product?.item || ""
+          product?.item || "",
+          firstCereaRow?.customer || ""
         ].join(" "));
-        const uom = getResolvedUomForCode(code, product, snapshot);
-        const category = getProductCategoryInfo(product, categoryMap);
+        const uom = getResolvedUomForCode(safeCode, product || {}, snapshot);
 
-        list.push({
-          code,
+        listByCode.set(low, {
+          code: safeCode,
           codeLower: low,
           name,
           alias,
@@ -2321,11 +2394,32 @@
           prismaQty,
           categoryKey: category.key,
           categoryName: category.name,
-          categoryColor: category.color
+          categoryColor: category.color,
+          macroGroup: getComponentMacroGroup(product || {}, category)
         });
       }
 
+      // 1) Anagrafica prodotti: include solo quelli con giacenza positiva a Cerea.
+      for (const product of (state.products || [])){
+        const code = productCodeFromData(product);
+        if (!code) continue;
+        addCandidate(code, product, null);
+      }
+
+      // 2) Fallback da inventario Cerea: include anche righe movimentate non ancora presenti in anagrafica.
+      for (const [low, rowsMap] of snapshot.cereaRowsByCode.entries()){
+        const rows = Array.from(rowsMap.values()).filter(row => safeInt(row?.qty) > 0);
+        if (!rows.length) continue;
+        const product = productByCode.get(low) || null;
+        const row = rows[0];
+        addCandidate(row?.code || low, product, row);
+      }
+
+      const list = Array.from(listByCode.values());
       list.sort((a, b) => {
+        const mgA = a.macroGroup === "materie_prime" ? 1 : 0;
+        const mgB = b.macroGroup === "materie_prime" ? 1 : 0;
+        if (mgA !== mgB) return mgA - mgB;
         const an = String(a?.name || "").localeCompare(String(b?.name || ""), "it", { sensitivity: "base" });
         if (an !== 0) return an;
         return String(a?.code || "").localeCompare(String(b?.code || ""), "it", { sensitivity: "base" });
@@ -2345,22 +2439,30 @@
       const categoryMap = buildCategoryMap();
       const seen = new Set();
       const map = new Map();
+      const productByCode = new Map();
 
       for (const product of (state.products || [])){
-        if (!isProductActive(product)) continue;
-        if (!isExplicitlyEnabledForPrisma(product)) continue;
-
         const code = productCodeFromData(product);
         if (!code) continue;
         const low = code.toLowerCase();
-        if (seen.has(low)) continue;
-        seen.add(low);
+        if (!productByCode.has(low)) productByCode.set(low, product);
+      }
+
+      function addInventoryItem(code, product = null, movementRow = null){
+        const safeCode = String(code || productCodeFromData(product) || movementRow?.code || "").trim();
+        if (!safeCode) return;
+        const low = safeCode.toLowerCase();
+        if (seen.has(low)) return;
+
+        if (product && !isProductActive(product)) return;
 
         const totals = snapshot.totalsByCode.get(low);
         const prismaQty = safeInt(totals?.prisma || 0);
-        if (prismaQty <= 0) continue;
+        if (prismaQty <= 0) return;
 
-        const category = getProductCategoryInfo(product, categoryMap);
+        const category = getProductCategoryInfo(product || {}, categoryMap);
+        if (!isLoadableCereaComponent(product || null, category)) return;
+
         const groupKey = category.key || "__none";
         const group = map.get(groupKey) || {
           key: groupKey,
@@ -2369,14 +2471,30 @@
           items: []
         };
 
+        const movementName = cleanSpaces(movementRow?.item || totals?.item || "");
+        const productForDisplay = product || { code: safeCode, name: movementName, item: movementName };
         group.items.push({
-          code,
-          name: getProductDisplayName(product, totals?.item || code),
-          uom: getResolvedUomForCode(code, product, snapshot),
+          code: safeCode,
+          name: getProductDisplayName(productForDisplay, movementName || safeCode),
+          uom: getResolvedUomForCode(safeCode, product || {}, snapshot),
           qty: prismaQty
         });
 
+        seen.add(low);
         map.set(groupKey, group);
+      }
+
+      for (const product of (state.products || [])){
+        const code = productCodeFromData(product);
+        if (!code) continue;
+        addInventoryItem(code, product, null);
+      }
+
+      for (const [low, rowsMap] of snapshot.prismaRowsByCode.entries()){
+        const rows = Array.from(rowsMap.values()).filter(row => safeInt(row?.qty) > 0);
+        if (!rows.length) continue;
+        const product = productByCode.get(low) || null;
+        addInventoryItem(rows[0]?.code || low, product, rows[0]);
       }
 
       const groups = Array.from(map.values());
@@ -2401,7 +2519,7 @@
       const list = [];
       for (const mv of (state.movements || [])){
         if (!mv) continue;
-        if (normalizeWarehouse(mv.warehouse || "") !== TARGET_WAREHOUSE) continue;
+        if (normalizeWarehouse(mv.warehouse || "") !== WAREHOUSE_PRISMA) continue;
 
         const code = String(mv.code || "").trim();
         const item = prettifyProductName(mv.item || code, code);
@@ -2734,7 +2852,7 @@
 
       if (!productValid){
         if (!normalizeSearch(parts.productText || parts.raw)) reasons.push("Inserisci nome prodotto.");
-        else reasons.push("Prodotto non riconosciuto oppure non attivo a Prisma.");
+        else reasons.push("Prodotto non riconosciuto oppure non presente tra imballaggi/materie prime disponibili a Cerea.");
       }
 
       if (!qtyValid){
@@ -2753,7 +2871,7 @@
         productValid,
         qtyValid,
         stockAvailable,
-        canSubmit: productValid && qtyValid,
+        canSubmit: productValid && qtyValid && stockAvailable,
         reasons
       };
     }
@@ -3119,7 +3237,8 @@
             id: docSnap.id,
             key: safeDecodeUri(docSnap.id || ""),
             name: cleanSpaces(data.name || data.label || safeDecodeUri(docSnap.id || "")),
-            color: cleanSpaces(data.color || "")
+            color: cleanSpaces(data.color || ""),
+            macro: normalizeProductsMacroGroup(data.macro || data.macroGroup || data.group || "")
           };
         });
         state.categoriesReady = true;
@@ -3250,7 +3369,7 @@
       const low = normalizeInventoryCodeKey(code);
       const rowsMap = (warehouse === WAREHOUSE_PRISMA)
         ? snapshot.prismaRowsByCode.get(low)
-        : ((warehouse === WAREHOUSE_CONCA) ? snapshot.concamariseRowsByCode.get(low) : snapshot.cereaRowsByCode.get(low));
+        : snapshot.cereaRowsByCode.get(low);
       if (!rowsMap) return [];
       return Array.from(rowsMap.values())
         .filter(row => safeInt(row?.qty) > 0)
@@ -3262,7 +3381,7 @@
     }
 
     function getPositivePrismaRowsForCode(code){
-      return getPositiveRowsForCodeInWarehouse(code, TARGET_WAREHOUSE);
+      return getPositiveRowsForCodeInWarehouse(code, WAREHOUSE_PRISMA);
     }
 
     function getCurrentPrismaQtyForCode(code){
@@ -3344,7 +3463,7 @@
           createdByEmail: userEmail,
           createdByUid: userUid,
           type,
-          warehouse: TARGET_WAREHOUSE
+          warehouse: WAREHOUSE_PRISMA
         };
       }
 
@@ -3587,7 +3706,7 @@
           batch.set(inRef, {
             ...basePayload,
             type: "IN",
-            warehouse: TARGET_WAREHOUSE
+            warehouse: WAREHOUSE_PRISMA
           });
 
           remaining -= take;
