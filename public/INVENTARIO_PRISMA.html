@@ -3446,16 +3446,75 @@
       return lines.length ? lines : [""];
     }
 
-    function buildPdfDataUrl(commands){
+    // ---- Logo loader: carica /logo general copper.png e lo converte
+    //      in JPEG embeddabile in PDF (DCTDecode). Cache singleton.
+    const COMPANY_LOGO_URL = "/logo%20general%20copper.png";
+    let companyLogoCache = null;
+    let companyLogoPromise = null;
+    function loadCompanyLogo(){
+      if (companyLogoCache) return Promise.resolve(companyLogoCache);
+      if (companyLogoPromise) return companyLogoPromise;
+      companyLogoPromise = new Promise((resolve) => {
+        try{
+          const img = new Image();
+          img.crossOrigin = "anonymous";
+          img.onload = () => {
+            try{
+              const naturalW = Math.max(1, img.naturalWidth || img.width || 1);
+              const naturalH = Math.max(1, img.naturalHeight || img.height || 1);
+              const targetW = 320;
+              const ratio = naturalH / naturalW;
+              const w = targetW;
+              const h = Math.max(1, Math.round(w * ratio));
+              const canvas = document.createElement("canvas");
+              canvas.width = w;
+              canvas.height = h;
+              const ctx = canvas.getContext("2d");
+              if (!ctx){ resolve(null); return; }
+              // Sfondo bianco: il JPEG non supporta trasparenza
+              ctx.fillStyle = "#FFFFFF";
+              ctx.fillRect(0, 0, w, h);
+              ctx.drawImage(img, 0, 0, w, h);
+              const dataUrl = canvas.toDataURL("image/jpeg", 0.92);
+              const base64 = String(dataUrl).split(",")[1] || "";
+              if (!base64){ resolve(null); return; }
+              const binary = atob(base64);
+              companyLogoCache = { binary, width: w, height: h, naturalW, naturalH };
+              resolve(companyLogoCache);
+            }catch(err){
+              console.warn("Logo decode fallito", err);
+              resolve(null);
+            }
+          };
+          img.onerror = () => { console.warn("Logo non caricato:", COMPANY_LOGO_URL); resolve(null); };
+          img.src = COMPANY_LOGO_URL;
+        }catch(err){
+          console.warn("Logo init fallito", err);
+          resolve(null);
+        }
+      });
+      return companyLogoPromise;
+    }
+
+    function buildPdfDataUrl(commands, image){
       const stream = commands.join("\n");
+      const hasImage = !!(image && image.binary && image.width && image.height);
+      const pageObj = hasImage
+        ? "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 4 0 R /F2 5 0 R >> /XObject << /Im0 7 0 R >> >> /Contents 6 0 R >>"
+        : "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 4 0 R /F2 5 0 R >> >> /Contents 6 0 R >>";
       const objects = [
         "<< /Type /Catalog /Pages 2 0 R >>",
         "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 4 0 R /F2 5 0 R >> >> /Contents 6 0 R >>",
+        pageObj,
         "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
         "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>",
         `<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`
       ];
+      if (hasImage){
+        objects.push(
+          `<< /Type /XObject /Subtype /Image /Width ${image.width} /Height ${image.height} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${image.binary.length} >>\nstream\n${image.binary}\nendstream`
+        );
+      }
       let pdf = "%PDF-1.4\n%\xE2\xE3\xCF\xD3\n";
       const offsets = [0];
       objects.forEach((obj, index) => {
@@ -3471,7 +3530,7 @@
       return `data:application/pdf;base64,${btoa(pdf)}`;
     }
 
-    function buildDdtPdfDataUrl(ddt){
+    function buildDdtPdfDataUrl(ddt, logo){
       const W = 595;
       const H = 842;
       const margin = 36;
@@ -3568,7 +3627,7 @@
       }
       function drawLabelValue(x, top, label, value, width){
         fill(colors.muted);
-        text(x, top, label, 7.2, true);
+        text(x, top, String(label || "").toUpperCase(), 6.8, true);
         fill(colors.main);
         textWrapped(x, top + 15, value, width, 9.8, false, 11, 2);
       }
@@ -3577,28 +3636,32 @@
           label: cleanSpaces(party?.label || fallbackLabel || ""),
           address: cleanSpaces(party?.address || ""),
           city: cleanSpaces(party?.city || ""),
-          vat: cleanSpaces(party?.vat || party?.piva || party?.vatNumber || "")
+          vat: cleanSpaces(party?.vat || party?.piva || party?.vatNumber || ""),
+          phone: cleanSpaces(party?.phone || party?.tel || ""),
+          email: cleanSpaces(party?.email || "")
         };
       }
       function drawPartyCard(x, top, width, height, title, party){
         fill(colors.white); stroke(colors.border); rect(x, top, width, height, "B");
-        fill(colors.soft); rect(x, top, width, 24, "f");
-        stroke(colors.border); line(x, top + 24, x + width, top + 24);
-        fill(colors.main); text(x + 10, top + 15.5, title, 8.4, true);
+        fill(colors.soft); rect(x, top, width, 22, "f");
+        stroke(colors.border); line(x, top + 22, x + width, top + 22);
+        fill(colors.muted); text(x + 10, top + 14.5, String(title || "").toUpperCase(), 7.2, true);
 
         const rows = [
-          { value: party.label, size: 10.4, bold: true, maxLines: 2, gap: 11.4 },
-          { value: party.address, size: 8.3, bold: false, maxLines: 2, gap: 9.5 },
-          { value: party.city, size: 8.3, bold: false, maxLines: 2, gap: 9.5 },
-          { value: party.vat ? `P.IVA ${party.vat.replace(/^P\.?IVA\s*/i, "")}` : "", size: 8.1, bold: false, maxLines: 1, gap: 9.2 }
+          { value: party.label, size: 10.2, bold: true, maxLines: 2, gap: 11 },
+          { value: party.address, size: 8.2, bold: false, maxLines: 2, gap: 9 },
+          { value: party.city, size: 8.2, bold: false, maxLines: 2, gap: 9 },
+          { value: party.vat ? `P.IVA ${party.vat.replace(/^P\.?IVA\s*/i, "")}` : "", size: 7.8, bold: false, maxLines: 1, gap: 8.8 },
+          { value: party.phone ? `Tel. ${party.phone}` : "", size: 7.8, bold: false, maxLines: 1, gap: 8.8 },
+          { value: party.email, size: 7.8, bold: false, maxLines: 1, gap: 8.8 }
         ].filter((row) => row.value);
 
-        let cursor = top + 43;
+        let cursor = top + 38;
         rows.forEach((row) => {
-          if (cursor > top + height - 10) return;
-          const remaining = Math.max(1, Math.floor((top + height - cursor - 6) / row.gap));
+          if (cursor > top + height - 8) return;
+          const remaining = Math.max(1, Math.floor((top + height - cursor - 4) / row.gap));
           const used = textWrapped(x + 10, cursor, row.value, width - 20, row.size, row.bold, row.gap, Math.min(row.maxLines, remaining));
-          cursor += used * row.gap + 3;
+          cursor += used * row.gap + 1.5;
         });
       }
 
@@ -3613,19 +3676,44 @@
       const sender = cleanParty(ddt.fromProfile || getDeliveryProfile(ddt.fromWarehouse), fromLabel);
       const recipient = cleanParty(ddt.toProfile || getDeliveryProfile(ddt.toWarehouse), toLabel);
 
+      // Sfondo bianco + accent strip sottile in alto
       fill(colors.white); rect(0, 0, W, H, "f");
-      fill(colors.accent); rect(0, 0, W, 9, "f");
+      fill(colors.accent); rect(0, 0, W, 3, "f");
 
+      // ---- HEADER: logo + ragione sociale (sinistra), titolo documento (destra) ----
+      const logoMaxW = 64;
+      const logoMaxH = 54;
+      const logoTopY = 14;
+      let infoX = margin;
+      if (logo && logo.binary && logo.naturalW && logo.naturalH){
+        const aspect = logo.naturalW / logo.naturalH;
+        let drawW = logoMaxW;
+        let drawH = logoMaxW / aspect;
+        if (drawH > logoMaxH){ drawH = logoMaxH; drawW = logoMaxH * aspect; }
+        cmds.push("q");
+        cmds.push(`${drawW.toFixed(3)} 0 0 ${drawH.toFixed(3)} ${margin.toFixed(3)} ${(y(logoTopY + drawH)).toFixed(3)} cm`);
+        cmds.push("/Im0 Do");
+        cmds.push("Q");
+        infoX = margin + drawW + 12;
+      }
+
+      // Ragione sociale e dati anagrafici reali (da COMPANY_GENERAL_COPPER)
       fill(colors.main);
-      text(margin, 37, "GENERAL COPPER SRL", 14, true);
+      text(infoX, 28, "GENERAL COPPER SRL", 12.5, true);
       fill(colors.muted);
-      text(margin, 54, "Documento generato dal gestionale", 8.2, false);
-      text(margin, 68, "Trasferimento merci tra magazzini", 8.2, false);
+      text(infoX, 42, "Via Masaccio 30 - 37053 Cerea (VR)", 7.6, false);
+      text(infoX, 53, "Tel. +39 0442 1855849 - info@generalcoppersrl.com", 7.4, false);
+      text(infoX, 64, "P.IVA IT04588040235 - REA VR-430468", 7.4, false);
 
+      // Titolo documento (destra) con sottolineatura accent
       fill(colors.main);
-      text(right - 218, 37, "DOCUMENTO DI TRASPORTO", 17.5, true);
-      fill(colors.accent);
-      rect(right - 218, 46, 178, 2.4, "f");
+      textRight(right, 30, "DOCUMENTO DI TRASPORTO", 15, true);
+      fill(colors.accent); rect(right - 96, 36, 96, 2, "f");
+      fill(colors.muted);
+      textRight(right, 52, "Trasferimento interno tra magazzini", 7.6, false);
+
+      // Linea di separazione del masthead
+      stroke(colors.border); line(margin, 80, right, 80);
 
       const metaTop = 84;
       fill(colors.white); stroke(colors.border); rect(margin, metaTop, 523, 64, "B");
@@ -3661,17 +3749,17 @@
       const c5 = c4 + qtyW;
       const c6 = tableX + tableW;
 
-      fill(colors.accentSoft); stroke(colors.border); rect(tableX, tableTop, tableW, 27, "B");
-      [c1, c2, c3, c4, c5].forEach((x) => line(x, tableTop, x, tableTop + 27));
+      fill(colors.accentSoft); stroke(colors.border); rect(tableX, tableTop, tableW, 24, "B");
+      [c1, c2, c3, c4, c5].forEach((x) => line(x, tableTop, x, tableTop + 24));
       fill(colors.main);
-      text(tableX + 9, tableTop + 17, "Codice", 8, true);
-      text(c1 + 9, tableTop + 17, "Descrizione merce", 8, true);
-      text(c2 + 8, tableTop + 17, "Mittente", 8, true);
-      text(c3 + 8, tableTop + 17, "Destinatario", 8, true);
-      textRight(c5 - 9, tableTop + 17, "Quantita", 8, true);
-      textRight(c6 - 9, tableTop + 17, "Bancali", 8, true);
+      text(tableX + 9, tableTop + 15, "CODICE", 7.4, true);
+      text(c1 + 9, tableTop + 15, "DESCRIZIONE MERCE", 7.4, true);
+      text(c2 + 8, tableTop + 15, "MITTENTE", 7.4, true);
+      text(c3 + 8, tableTop + 15, "DESTINATARIO", 7.4, true);
+      textRight(c5 - 9, tableTop + 15, "QUANTITA", 7.4, true);
+      textRight(c6 - 9, tableTop + 15, "BANCALI", 7.4, true);
 
-      let top = tableTop + 27;
+      let top = tableTop + 24;
       const tableBottom = 626;
       const rawLines = Array.isArray(ddt.lines) && ddt.lines.length
         ? ddt.lines
@@ -3733,12 +3821,12 @@
       const movX = 303;
       const movW = 256;
       fill(colors.white); stroke(colors.border); rect(movX, summaryTop, movW, 82, "B");
-      fill(colors.soft); rect(movX, summaryTop, movW, 23, "f");
-      stroke(colors.border); line(movX, summaryTop + 23, movX + movW, summaryTop + 23);
-      fill(colors.main); text(movX + 10, summaryTop + 15, "Registrazioni di magazzino", 8.2, true);
+      fill(colors.soft); rect(movX, summaryTop, movW, 22, "f");
+      stroke(colors.border); line(movX, summaryTop + 22, movX + movW, summaryTop + 22);
+      fill(colors.muted); text(movX + 10, summaryTop + 14, "REGISTRAZIONI DI MAGAZZINO", 7.2, true);
       if (movements.length){
         movements.forEach((mv, index) => {
-          const rowY = summaryTop + 37 + index * 14;
+          const rowY = summaryTop + 36 + index * 14;
           const movementCode = cleanSpaces(mv.movementProgressive || `M${index + 1}`);
           const warehouse = cleanSpaces(mv.warehouseLabel || warehouseLabel(mv.warehouse));
           const quantity = `${safeInt(mv.qty).toLocaleString("it-IT")} ${cleanSpaces(mv.uom || ddt.uom || "pz")}`;
@@ -3749,7 +3837,7 @@
         });
       }else{
         fill(colors.muted);
-        text(movX + 10, summaryTop + 49, "Nessuna registrazione aggiuntiva", 7.4, false);
+        text(movX + 10, summaryTop + 48, "Nessuna registrazione aggiuntiva", 7.4, false);
       }
 
       const signTop = 754;
@@ -3759,15 +3847,17 @@
       rect(margin + 180, signTop, signW, 52, "B");
       rect(margin + 360, signTop, signW, 52, "B");
       fill(colors.muted);
-      textCenter(margin + signW / 2, signTop + 18, "Firma mittente", 7.8, true);
-      textCenter(margin + 180 + signW / 2, signTop + 18, "Firma vettore", 7.8, true);
-      textCenter(margin + 360 + signW / 2, signTop + 18, "Firma destinatario", 7.8, true);
+      textCenter(margin + signW / 2, signTop + 16, "FIRMA MITTENTE", 7.2, true);
+      textCenter(margin + 180 + signW / 2, signTop + 16, "FIRMA VETTORE", 7.2, true);
+      textCenter(margin + 360 + signW / 2, signTop + 16, "FIRMA DESTINATARIO", 7.2, true);
 
+      // Linea di separazione footer
+      stroke(colors.border); line(margin, 818, right, 818);
       fill(colors.muted);
-      text(margin, 824, "HIGC - DOCUMENTO GENERATO DA HUB INVENTARIO GENERAL COPPER", 7, false);
-      textRight(right, 824, "Pag. 1", 8, true);
+      text(margin, 830, "Documento di trasporto generato dal gestionale General Copper", 6.8, false);
+      textRight(right, 830, "Pag. 1 di 1", 7.2, true);
 
-      return buildPdfDataUrl(cmds);
+      return buildPdfDataUrl(cmds, logo);
     }
 
     function openPdfDataUrl(dataUrl, name = "documento-ddt.pdf"){
@@ -3796,10 +3886,11 @@
       }
     }
 
-    function openDdtDocument(idOrNumber){
+    async function openDdtDocument(idOrNumber){
       const docItem = findDdtDocument(idOrNumber);
       if (!docItem){ showToast("DDT non trovato", "err"); return; }
-      const pdf = buildDdtPdfDataUrl(docItem);
+      const logo = await loadCompanyLogo();
+      const pdf = buildDdtPdfDataUrl(docItem, logo);
       openPdfDataUrl(pdf, docItem.pdfFileName || `${docItem.ddtNumber || "DDT"}.pdf`);
     }
 
@@ -5095,7 +5186,8 @@
           createdByEmail: userEmail,
           createdByUid: userUid
         };
-        const ddtPdfDataUrl = buildDdtPdfDataUrl(ddtPayload);
+        const ddtPdfLogo = await loadCompanyLogo();
+        const ddtPdfDataUrl = buildDdtPdfDataUrl(ddtPayload, ddtPdfLogo);
         const ddtPdfBase64 = String(ddtPdfDataUrl || "").split(",")[1] || "";
         ddtPayload.pdfMimeType = "application/pdf";
         ddtPayload.pdfFilename = ddtPayload.pdfFileName;
@@ -5144,6 +5236,8 @@
 
     async function init(){
       try{
+        // Pre-carica il logo aziendale per inserirlo nei DDT (best-effort, non blocca)
+        loadCompanyLogo().catch(() => {});
         state.app = initializeApp(FIREBASE_CONFIG);
         state.auth = getAuth(state.app);
         await setPersistence(state.auth, browserLocalPersistence);
