@@ -1265,6 +1265,7 @@
     }
 
     .ddt-open-btn,
+    .ddt-delete-btn,
     .movement-ddt-btn{
       min-height:36px;
       padding:0 12px;
@@ -1277,6 +1278,12 @@
       cursor:pointer;
       box-shadow:0 6px 14px rgba(15,23,42,.04);
       white-space:nowrap;
+    }
+
+    .ddt-delete-btn{
+      border-color:rgba(220,38,38,.18);
+      background:#fff7f7;
+      color:#b42318;
     }
 
     .movement-ddt-btn{
@@ -2251,6 +2258,8 @@
       inventorySavingCode: ""
     };
 
+    const pendingOrphanDdtDeletes = new Set();
+
     const provider = new GoogleAuthProvider();
     provider.setCustomParameters({ prompt: "select_account" });
 
@@ -2977,7 +2986,12 @@
 
     function mapMovement(docSnap){
       const data = docSnap.data() || {};
-      const ddtNumber = cleanSpaces(data.ddtNumber || data.docNum || data.transportDocNumber || "");
+      const docType = String(data.docType || "").trim();
+      const explicitDdtNumber = cleanSpaces(data.ddtNumber || data.transportDocNumber || "");
+      const genericDocNumber = cleanSpaces(data.docNum || data.docNumber || "");
+      const ddtId = cleanSpaces(data.ddtId || data.ddtDocId || data.transportDocumentId || "");
+      const ddtNumber = explicitDdtNumber || (docType.toUpperCase() === DOC_TYPE ? genericDocNumber : "");
+      const docNumber = genericDocNumber || ddtNumber;
       return {
         id: docSnap.id,
         type: String(data.type || "IN").trim().toUpperCase() === "OUT" ? "OUT" : "IN",
@@ -3005,9 +3019,9 @@
         createdBy: String(data.createdBy || data.userEmail || data.user || data.author || "").trim(),
         createdByEmail: String(data.createdByEmail || data.userEmail || "").trim(),
         createdByUid: String(data.createdByUid || data.uid || "").trim(),
-        docType: String(data.docType || "").trim(),
-        docNum: ddtNumber,
-        ddtId: cleanSpaces(data.ddtId || data.ddtDocId || data.transportDocumentId || ""),
+        docType,
+        docNum: docNumber,
+        ddtId,
         ddtNumber,
         ddtProgressive: safeInt(data.ddtProgressive || data.documentProgressive || 0),
         movementProgressive: cleanSpaces(data.movementProgressive || data.movementNum || ""),
@@ -3055,6 +3069,10 @@
       })) : [];
       return {
         id: docSnap.id,
+        ddtId: cleanSpaces(data.ddtId || docSnap.id),
+        isPersistedDdtDocument: true,
+        source: cleanSpaces(data.source || ""),
+        storageCollection: cleanSpaces(data.storageCollection || ""),
         ddtNumber,
         docNum: ddtNumber,
         ddtProgressive: safeInt(data.ddtProgressive || data.progressive || 0),
@@ -3096,6 +3114,75 @@
       return !!(mv?.isDdtDocument || normalizeSearch(mv?.recordKind || "") === normalizeSearch(DDT_RECORD_KIND));
     }
 
+    function getDdtReferenceKeys(value, options = {}){
+      if (!value || typeof value !== "object") return [];
+      const includeOwnId = options.includeOwnId !== false;
+      const keys = [];
+      const add = (raw) => {
+        const key = cleanSpaces(raw || "");
+        if (key && !keys.includes(key)) keys.push(key);
+      };
+
+      if (includeOwnId) add(value.id);
+      add(value.ddtId);
+      add(value.ddtDocId);
+      add(value.transportDocumentId);
+      add(value.transportDocId);
+      add(value.ddtNumber);
+      add(value.docNum);
+      add(value.docNumber);
+      add(value.transportDocNumber);
+      return keys;
+    }
+
+    function hasAnyDdtReferenceKey(value, keySet, options = {}){
+      if (!(keySet instanceof Set) || keySet.size <= 0) return false;
+      return getDdtReferenceKeys(value, options).some(key => keySet.has(key));
+    }
+
+    function isDdtTransferMovement(mv){
+      if (!mv || isDdtMappedMovement(mv)) return false;
+      const docType = String(mv.docType || "").trim().toUpperCase();
+      return docType === DOC_TYPE || !!cleanSpaces(mv.ddtId || mv.ddtNumber || "");
+    }
+
+    function buildLiveDdtMovementIndex(mappedMovements){
+      const keys = new Set();
+      const groups = new Map();
+      const keyToGroupKey = new Map();
+
+      for (const mv of (mappedMovements || [])){
+        if (!isDdtTransferMovement(mv)) continue;
+        if (!isPrismaPanelMovement(mv, { includeCerea: true })) continue;
+
+        const referenceKeys = getDdtReferenceKeys(mv, { includeOwnId: false });
+        if (!referenceKeys.length) continue;
+        referenceKeys.forEach(key => keys.add(key));
+
+        const preferredKey = cleanSpaces(mv.ddtId || mv.ddtNumber || mv.docNum || referenceKeys[0] || "");
+        const knownKey = referenceKeys.find(key => keyToGroupKey.has(key));
+        const groupKey = knownKey ? keyToGroupKey.get(knownKey) : preferredKey;
+        if (!groupKey) continue;
+        referenceKeys.forEach(key => keyToGroupKey.set(key, groupKey));
+
+        const list = groups.get(groupKey) || [];
+        list.push(mv);
+        groups.set(groupKey, list);
+      }
+
+      return { keys, groups };
+    }
+
+    function findDdtDocumentInMapByReference(docsByKey, referenceKeys){
+      const keys = Array.from(new Set((referenceKeys || []).map(key => cleanSpaces(key || "")).filter(Boolean)));
+      for (const key of keys){
+        const direct = docsByKey.get(key);
+        if (direct) return direct;
+      }
+      const keySet = new Set(keys);
+      return Array.from(docsByKey.values()).find(docItem => hasAnyDdtReferenceKey(docItem, keySet)) || null;
+    }
+
     function normalizeDdtMovementSummary(mv, index, fallbackNumber = ""){
       const seq = safeInt(mv?.movementProgressiveNumber || index + 1) || (index + 1);
       return {
@@ -3118,46 +3205,115 @@
       };
     }
 
+    function buildDdtLinesFromMovementSummaries(summaries, fallbackDoc = {}){
+      const incoming = (summaries || []).filter(mv => String(mv?.type || "").toUpperCase() === "IN");
+      const source = incoming.length ? incoming : (summaries || []);
+      const grouped = new Map();
+
+      for (const mv of source){
+        const code = cleanSpaces(mv?.code || fallbackDoc.code || "");
+        const item = cleanSpaces(mv?.item || fallbackDoc.item || code || "Articolo");
+        const uom = normalizeUom(mv?.uom || fallbackDoc.uom || "") || "pz";
+        const lineNo = safeInt(mv?.lineNo || 0);
+        const key = [lineNo, code, item, uom].join("|");
+        const row = grouped.get(key) || {
+          lineNo,
+          code,
+          item,
+          qty: 0,
+          uom,
+          palletCount: 0,
+          palletCountTotal: normalizePositiveFloat(fallbackDoc.palletCount || fallbackDoc.bancali || 0),
+          palletUnitQty: normalizePositiveFloat(fallbackDoc.palletUnitQty || 0),
+          palletUnitUom: normalizeUom(fallbackDoc.palletUnitUom || fallbackDoc.uom || "") || uom,
+          fromLabel: cleanSpaces(fallbackDoc.fromLabel || warehouseLabel(fallbackDoc.fromWarehouse)),
+          toLabel: cleanSpaces(fallbackDoc.toLabel || warehouseLabel(fallbackDoc.toWarehouse))
+        };
+        row.qty += safeInt(mv?.qty || 0);
+        row.palletCount = Math.max(row.palletCount, normalizePositiveFloat(mv?.palletCount || 0));
+        row.palletCountTotal = Math.max(row.palletCountTotal, normalizePositiveFloat(mv?.palletCountTotal || 0));
+        row.palletUnitQty = Math.max(row.palletUnitQty, normalizePositiveFloat(mv?.palletUnitQty || 0));
+        row.palletUnitUom = normalizeUom(mv?.palletUnitUom || row.palletUnitUom || uom) || uom;
+        grouped.set(key, row);
+      }
+
+      return Array.from(grouped.values()).sort((a, b) => safeInt(a.lineNo) - safeInt(b.lineNo));
+    }
+
+    function syncDdtDocumentWithLiveMovements(docItem, summaries, sortedMovements){
+      if (!docItem) return docItem;
+      docItem.movements = summaries;
+
+      const lines = buildDdtLinesFromMovementSummaries(summaries, docItem);
+      if (lines.length){
+        docItem.lines = lines;
+        docItem.totalQty = lines.reduce((sum, line) => sum + safeInt(line.qty), 0);
+        const lineUoms = Array.from(new Set(lines.map(line => normalizeUom(line.uom || "")).filter(Boolean)));
+        docItem.uom = lineUoms.length === 1 ? lineUoms[0] : "varie";
+        if (lines.length === 1){
+          docItem.code = cleanSpaces(lines[0].code || docItem.code || "");
+          docItem.item = cleanSpaces(lines[0].item || docItem.item || "Articolo");
+        }else{
+          docItem.item = `${lines.length} articoli`;
+        }
+      }else{
+        docItem.totalQty = summaries.filter(mv => mv.type === "IN").reduce((sum, mv) => sum + safeInt(mv.qty), 0);
+      }
+
+      const first = (sortedMovements || [])[0] || {};
+      const incoming = (sortedMovements || []).find(mv => mv.type === "IN") || first;
+      if (!docItem.date) docItem.date = cleanSpaces(first.date || "");
+      docItem.fromWarehouse = normalizeWarehouse(docItem.fromWarehouse || first.fromWarehouse || (first.type === "OUT" ? first.warehouse : "")) || WAREHOUSE_CEREA;
+      docItem.toWarehouse = normalizeWarehouse(docItem.toWarehouse || first.toWarehouse || incoming.warehouse || "") || WAREHOUSE_PRISMA;
+      docItem.fromLabel = cleanSpaces(docItem.fromLabel || warehouseLabel(docItem.fromWarehouse));
+      docItem.toLabel = cleanSpaces(docItem.toLabel || warehouseLabel(docItem.toWarehouse));
+      return docItem;
+    }
+
     function buildDdtDocumentsFromInventoryDocs(rawDocs, mappedMovements){
       const docsByKey = new Map();
-      const groups = new Map();
+      const liveIndex = buildLiveDdtMovementIndex(mappedMovements);
 
       for (const docSnap of (rawDocs || [])){
         const data = docSnap.data() || {};
         if (!isDdtDocumentData(data)) continue;
         const docItem = mapDdtDocument(docSnap);
         if (!isPrismaPanelDdtDocument(docItem)) continue;
-        const key = cleanSpaces(docItem.id || docItem.ddtNumber || docItem.docNum || docSnap.id);
+        if (!hasAnyDdtReferenceKey(docItem, liveIndex.keys)) continue;
+        const docKeys = getDdtReferenceKeys(docItem);
+        const key = cleanSpaces(docKeys[0] || docItem.id || docItem.ddtNumber || docItem.docNum || docSnap.id);
         if (key) docsByKey.set(key, docItem);
       }
 
-      for (const mv of (mappedMovements || [])){
-        if (!mv || isDdtMappedMovement(mv)) continue;
-        if (String(mv.docType || "").trim().toUpperCase() !== DOC_TYPE) continue;
-        if (!isPrismaPanelMovement(mv, { includeCerea: true })) continue;
-        const key = cleanSpaces(mv.ddtId || mv.ddtNumber || mv.docNum || "");
-        if (!key) continue;
-        const list = groups.get(key) || [];
-        list.push(mv);
-        groups.set(key, list);
-      }
-
-      for (const [key, list] of groups.entries()){
+      for (const [key, list] of liveIndex.groups.entries()){
         const sorted = list.slice().sort((a, b) => safeInt(a.movementProgressiveNumber) - safeInt(b.movementProgressiveNumber));
         const summaries = sorted.map((mv, index) => normalizeDdtMovementSummary(mv, index, mv.ddtNumber || mv.docNum || key));
-        const existing = docsByKey.get(key) || Array.from(docsByKey.values()).find(docItem => docItem.ddtNumber === key || docItem.docNum === key);
+        const existing = findDdtDocumentInMapByReference(docsByKey, [key]);
         if (existing){
-          if (!Array.isArray(existing.movements) || !existing.movements.length) existing.movements = summaries;
+          syncDdtDocumentWithLiveMovements(existing, summaries, sorted);
           continue;
         }
+
         const first = sorted[0] || {};
         const incoming = sorted.find(mv => mv.type === "IN") || first;
-        const totalQty = summaries.filter(mv => mv.type === "IN").reduce((sum, mv) => sum + safeInt(mv.qty), 0) || safeInt(first.qty || 0);
         const fromWarehouse = normalizeWarehouse(first.fromWarehouse || (first.type === "OUT" ? first.warehouse : "")) || WAREHOUSE_CEREA;
         const toWarehouse = normalizeWarehouse(first.toWarehouse || incoming.warehouse || "") || WAREHOUSE_PRISMA;
         const ddtNumber = cleanSpaces(first.ddtNumber || first.docNum || key);
+        const lines = buildDdtLinesFromMovementSummaries(summaries, {
+          code: first.code,
+          item: first.item,
+          uom: first.uom,
+          fromWarehouse,
+          toWarehouse,
+          fromLabel: warehouseLabel(fromWarehouse),
+          toLabel: warehouseLabel(toWarehouse)
+        });
+        const totalQty = lines.reduce((sum, line) => sum + safeInt(line.qty), 0) || summaries.filter(mv => mv.type === "IN").reduce((sum, mv) => sum + safeInt(mv.qty), 0) || safeInt(first.qty || 0);
+        const lineUoms = Array.from(new Set(lines.map(line => normalizeUom(line.uom || "")).filter(Boolean)));
         docsByKey.set(key, {
           id: key,
+          ddtId: cleanSpaces(first.ddtId || ""),
+          isPersistedDdtDocument: false,
           ddtNumber,
           docNum: ddtNumber,
           ddtProgressive: safeInt(first.ddtProgressive || parseDdtProgressive(ddtNumber)),
@@ -3168,12 +3324,12 @@
           toLabel: warehouseLabel(toWarehouse),
           fromProfile: getDeliveryProfile(fromWarehouse),
           toProfile: getDeliveryProfile(toWarehouse),
-          code: cleanSpaces(first.code || ""),
-          item: cleanSpaces(first.item || "Articoli trasferiti"),
+          code: cleanSpaces(lines[0]?.code || first.code || ""),
+          item: lines.length > 1 ? `${lines.length} articoli` : cleanSpaces(lines[0]?.item || first.item || "Articoli trasferiti"),
           totalQty,
-          uom: normalizeUom(first.uom || "") || "pz",
+          uom: lineUoms.length === 1 ? lineUoms[0] : (normalizeUom(first.uom || "") || "pz"),
           movements: summaries,
-          lines: [{ code: cleanSpaces(first.code || ""), item: cleanSpaces(first.item || "Articoli trasferiti"), qty: totalQty, uom: normalizeUom(first.uom || "") || "pz", fromLabel: warehouseLabel(fromWarehouse), toLabel: warehouseLabel(toWarehouse) }],
+          lines: lines.length ? lines : [{ code: cleanSpaces(first.code || ""), item: cleanSpaces(first.item || "Articoli trasferiti"), qty: totalQty, uom: normalizeUom(first.uom || "") || "pz", fromLabel: warehouseLabel(fromWarehouse), toLabel: warehouseLabel(toWarehouse) }],
           pdfDataUrl: "",
           pdfFileName: makeDdtPdfFileName(ddtNumber || "DDT"),
           createdAt: first.createdAt || first.date || null,
@@ -3183,7 +3339,43 @@
         });
       }
 
-      return Array.from(docsByKey.values()).filter(isPrismaPanelDdtDocument);
+      const seen = new Set();
+      return Array.from(docsByKey.values()).filter(docItem => {
+        if (!isPrismaPanelDdtDocument(docItem)) return false;
+        const key = cleanSpaces(docItem.id || docItem.ddtId || docItem.ddtNumber || docItem.docNum || "");
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+    }
+
+    function isAutoSyncableDdtDocumentData(data, docSnap){
+      if (!data || typeof data !== "object") return false;
+      const source = normalizeSearch(data.source || "");
+      const storageCollection = normalizeSearch(data.storageCollection || "");
+      const ownDdtId = cleanSpaces(data.ddtId || "");
+      const docId = cleanSpaces(docSnap?.id || "");
+      return source === normalizeSearch(SOURCE) || storageCollection === normalizeSearch(DDT_COLLECTION) || (data.isDdtDocument === true && ownDdtId && ownDdtId === docId);
+    }
+
+    function findOrphanDdtDocumentIdsFromInventoryDocs(rawDocs, mappedMovements){
+      const liveIndex = buildLiveDdtMovementIndex(mappedMovements);
+      const ids = [];
+
+      for (const docSnap of (rawDocs || [])){
+        const data = docSnap.data() || {};
+        if (!isDdtDocumentData(data)) continue;
+        if (!isAutoSyncableDdtDocumentData(data, docSnap)) continue;
+
+        const docItem = mapDdtDocument(docSnap);
+        if (!isPrismaPanelDdtDocument(docItem)) continue;
+        if (!hasAnyDdtReferenceKey(docItem, liveIndex.keys)){
+          const id = cleanSpaces(docSnap.id || "");
+          if (id) ids.push(id);
+        }
+      }
+
+      return Array.from(new Set(ids));
     }
 
     function resolveUserLabel(){
@@ -3996,7 +4188,7 @@
     function findDdtDocument(idOrNumber){
       const key = cleanSpaces(idOrNumber || "");
       if (!key) return null;
-      return (state.ddtDocuments || []).find(docItem => docItem.id === key || docItem.ddtNumber === key || docItem.docNum === key) || null;
+      return (state.ddtDocuments || []).find(docItem => docItem.id === key || docItem.ddtId === key || docItem.ddtNumber === key || docItem.docNum === key) || null;
     }
 
     function pdfEscape(value){
@@ -4434,6 +4626,103 @@
       openPdfDataUrl(pdf, docItem.pdfFileName || makeDdtPdfFileName(docItem.ddtNumber || "DDT"));
     }
 
+    function collectLinkedDdtDocumentIds(docItem){
+      const ids = new Set();
+      const ddtKeys = new Set(getDdtReferenceKeys(docItem));
+
+      if (docItem?.isPersistedDdtDocument !== false){
+        const persistedId = cleanSpaces(docItem?.id || docItem?.ddtId || "");
+        if (persistedId) ids.add(persistedId);
+      }
+
+      for (const mv of (Array.isArray(docItem?.movements) ? docItem.movements : [])){
+        const movementId = cleanSpaces(mv?.inventoryMovementId || mv?.id || "");
+        if (movementId) ids.add(movementId);
+      }
+
+      for (const mv of (state.movements || [])){
+        if (!mv || !mv.id) continue;
+        const isHeader = isDdtMappedMovement(mv);
+        if (!isHeader && !isDdtTransferMovement(mv)) continue;
+        const mvKeys = getDdtReferenceKeys(mv, { includeOwnId: isHeader });
+        if (mvKeys.some(key => ddtKeys.has(key))){
+          ids.add(mv.id);
+        }
+      }
+
+      return Array.from(ids).filter(Boolean);
+    }
+
+    async function deleteInventoryMovementDocumentsByIds(ids){
+      const uniqueIds = Array.from(new Set((ids || []).map(id => cleanSpaces(id || "")).filter(Boolean)));
+      if (!uniqueIds.length || !(state.user && state.db)) return 0;
+
+      const movementCollection = orgCol(DDT_COLLECTION);
+      let deleted = 0;
+      for (let i = 0; i < uniqueIds.length; i += 450){
+        const batch = writeBatch(state.db);
+        const chunk = uniqueIds.slice(i, i + 450);
+        for (const id of chunk){
+          batch.delete(doc(movementCollection, id));
+        }
+        await batch.commit();
+        deleted += chunk.length;
+      }
+      return deleted;
+    }
+
+    async function cleanupOrphanDdtDocuments(ids){
+      const cleanIds = Array.from(new Set((ids || []).map(id => cleanSpaces(id || "")).filter(Boolean)))
+        .filter(id => !pendingOrphanDdtDeletes.has(id));
+      if (!cleanIds.length || !(state.user && state.db)) return;
+
+      cleanIds.forEach(id => pendingOrphanDdtDeletes.add(id));
+      try{
+        await deleteInventoryMovementDocumentsByIds(cleanIds);
+      }catch(err){
+        console.error("orphan DDT cleanup failed", err);
+      }finally{
+        cleanIds.forEach(id => pendingOrphanDdtDeletes.delete(id));
+      }
+    }
+
+    async function deleteDdtDocument(idOrNumber){
+      if (state.busy) return;
+      if (!(state.user && state.db)){
+        showToast("Accedi per eliminare il DDT", "err");
+        return;
+      }
+
+      const docItem = findDdtDocument(idOrNumber);
+      if (!docItem){
+        showToast("DDT non trovato", "err");
+        return;
+      }
+
+      const docNumber = cleanSpaces(docItem.ddtNumber || docItem.docNum || docItem.id || "DDT");
+      const ok = window.confirm(`Eliminare definitivamente il DDT ${docNumber} e tutti i movimenti collegati?\n\nL'operazione non può essere annullata.`);
+      if (!ok) return;
+
+      const idsToDelete = collectLinkedDdtDocumentIds(docItem);
+      if (!idsToDelete.length){
+        showToast("Nessun documento collegato da eliminare", "warn");
+        return;
+      }
+
+      state.busy = true;
+      render();
+      try{
+        await deleteInventoryMovementDocumentsByIds(idsToDelete);
+        showToast(`DDT ${docNumber} eliminato e movimenti sincronizzati`, "ok");
+      }catch(err){
+        console.error("delete DDT failed", err);
+        showToast(humanAuthErr(err), "err");
+      }finally{
+        state.busy = false;
+        render();
+      }
+    }
+
     function renderDdtDocuments(){
       if (!els.ddtMeta || !els.ddtList) return;
       if (!state.user){
@@ -4484,7 +4773,8 @@
                 <div class="ddt-meta">${escapeHtml(formatDateIt(docItem.date))} · ${escapeHtml(articleLabel)} · ${escapeHtml(qtyMeta)}${escapeHtml(palletMeta)}</div>
               </div>
               <div class="ddt-actions">
-                <button class="ddt-open-btn js-open-ddt" type="button" data-ddt-id="${escapeHtml(docItem.id)}">Apri PDF</button>
+                <button class="ddt-open-btn js-open-ddt" type="button" data-ddt-id="${escapeHtml(docItem.id)}" ${state.busy ? "disabled" : ""}>Apri PDF</button>
+                <button class="ddt-delete-btn js-delete-ddt" type="button" data-ddt-id="${escapeHtml(docItem.id)}" ${state.busy ? "disabled" : ""}>Elimina</button>
               </div>
             </div>
           </article>
@@ -5007,6 +5297,7 @@
 
       state.unsubMovements = onSnapshot(orgCol("inventoryMovements"), (snap) => {
         state.movements = snap.docs.map(mapMovement);
+        const orphanDdtIds = findOrphanDdtDocumentIdsFromInventoryDocs(snap.docs, state.movements);
         state.ddtDocuments = buildDdtDocumentsFromInventoryDocs(snap.docs, state.movements);
         state.movementsReady = true;
         state.ddtDocumentsReady = true;
@@ -5015,6 +5306,7 @@
         reconcilePendingInventoryQty(buildInventorySnapshot());
         syncLoadSelectionFromCommand();
         render();
+        if (orphanDdtIds.length) cleanupOrphanDdtDocuments(orphanDdtIds);
       }, (err) => {
         console.error("inventory listener failed", err);
         state.movements = [];
@@ -6037,6 +6329,15 @@
     els.btnConfirm.addEventListener("click", transferNow);
 
     els.ddtList.addEventListener("click", (event) => {
+      const deleteBtn = event.target?.closest?.(".js-delete-ddt");
+      if (deleteBtn){
+        const id = String(deleteBtn.dataset.ddtId || deleteBtn.dataset.ddtNumber || "").trim();
+        if (!id) return;
+        event.preventDefault();
+        deleteDdtDocument(id);
+        return;
+      }
+
       const btn = event.target?.closest?.(".js-open-ddt, .ddt-open-btn[data-ddt-id]");
       if (!btn) return;
       const id = String(btn.dataset.ddtId || btn.dataset.ddtNumber || "").trim();
