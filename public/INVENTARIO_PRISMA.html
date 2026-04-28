@@ -510,7 +510,7 @@
 
     .inventory-group-title h3{
       margin:0;
-      font-size:18px;
+      font-size:17px;
       line-height:1.1;
       letter-spacing:-.02em;
     }
@@ -806,62 +806,54 @@
       min-height:0;
     }
 
-    .command-control input,
     .command-control textarea{
       width:100%;
       appearance:none;
       border:1.5px solid rgba(17,24,39,.10);
       border-radius:18px;
-      min-height:64px;
+      min-height:124px;
+      max-height:230px;
       padding:14px 18px;
-      line-height:1.28;
-      font-size:18px;
+      line-height:1.32;
+      font-size:17px;
       font-weight:900;
       letter-spacing:-.018em;
       color:var(--ink);
       background:#fff;
       outline:none;
+      resize:vertical;
       box-shadow:0 10px 24px rgba(15,23,42,.05);
       transition:border-color .12s ease, box-shadow .12s ease, background .12s ease;
-      resize:none;
-      font-family:inherit;
-      overflow:auto;
     }
 
-    .command-control input::placeholder,
     .command-control textarea::placeholder{
       color:#94a3b8;
       font-weight:800;
     }
 
-    .command-control input:focus,
     .command-control textarea:focus{
       border-color:rgba(28,111,230,.55);
       box-shadow:0 0 0 4px rgba(28,111,230,.12);
     }
 
-    .command-control.is-empty input,
     .command-control.is-empty textarea{
       border-color:rgba(28,111,230,.16);
       background:#ffffff;
       box-shadow:0 8px 20px rgba(15,23,42,.04);
     }
 
-    .command-control.is-pending input,
     .command-control.is-pending textarea{
       border-color:rgba(28,111,230,.34);
       background:#f8fbff;
       box-shadow:0 0 0 4px rgba(28,111,230,.09);
     }
 
-    .command-control.is-invalid input,
     .command-control.is-invalid textarea{
       border-color:rgba(220,38,38,.48);
       background:#fff8f8;
       box-shadow:0 0 0 4px rgba(220,38,38,.10);
     }
 
-    .command-control.is-valid input,
     .command-control.is-valid textarea{
       border-color:rgba(22,163,74,.42);
       background:#f6fff8;
@@ -1215,9 +1207,9 @@
 
     .ddt-card{
       display:grid;
-      gap:12px;
-      padding:16px;
-      border-radius:20px;
+      gap:8px;
+      padding:13px 14px;
+      border-radius:18px;
       background:#ffffff;
       border:1px solid rgba(17,24,39,.07);
       box-shadow:0 10px 24px rgba(15,23,42,.045), inset 0 1px 0 rgba(255,255,255,.92);
@@ -1227,7 +1219,7 @@
       display:grid;
       grid-template-columns:minmax(0, 1fr) auto;
       gap:12px;
-      align-items:start;
+      align-items:center;
     }
 
     .ddt-title{
@@ -1464,8 +1456,7 @@
         padding:18px;
       }
 
-      .command-control input,
-    .command-control textarea{
+      .command-control textarea{
         min-height:70px;
         font-size:17px;
         border-radius:18px;
@@ -1584,8 +1575,7 @@
     textarea,
     [contenteditable="true"],
     .inventory-qty-input,
-    .command-control input,
-    .command-control textarea {
+    .command-control input {
       -webkit-user-select:text;
       user-select:text;
       -webkit-touch-callout:default;
@@ -1674,11 +1664,10 @@
             <textarea
               id="loadCommand"
               rows="4"
-              placeholder="Cerca articolo e quantità. Vai a capo per aggiungere altri articoli"
+              placeholder="Cerca articolo e quantità, uno per riga"
               autocomplete="off"
               autocapitalize="off"
               spellcheck="false"
-              enterkeyhint="enter"
               aria-label="Ricerca articoli e quantità"
               aria-describedby="loadCommandHelp"
             ></textarea>
@@ -1831,6 +1820,7 @@
       transferDirection: TRANSFER_TO_PRISMA,
       loadCommand: "",
       loadSelectedCode: "",
+      loadActiveLineIndex: 0,
       loadSuggestionsVisible: false,
       inventoryQtyDrafts: new Map(),
       inventoryPendingQty: null,
@@ -2410,16 +2400,24 @@
       return { subject, textBody, htmlBody };
     }
 
-    function buildPrismaTransferEmail({ product, qty, uom, items, ddtNumber, date, createdAt, userLabel, userEmail, config, palletInfo }){
+    function buildPrismaTransferEmail({ product, qty, uom, ddtNumber, date, createdAt, userLabel, userEmail, config, palletInfo, items }){
       const operator = prettifyUserLabel(userLabel || userEmail || state.user?.uid || "Operatore");
-      const transferItems = normalizeTransferEmailItems({ items, product, qty, uom });
-      const qtyLabel = buildTransferItemsQtyLabel(transferItems);
       const palletLabel = formatPalletLabel(palletInfo?.palletCount || 0);
-      const itemLabel = buildTransferItemsDisplayLabel(transferItems);
+      const itemRows = Array.isArray(items) && items.length ? items : [];
       const originLabel = config?.sourceLabel || warehouseLabel(config?.sourceWarehouse || WAREHOUSE_CEREA);
       const destinationLabel = config?.destinationLabel || warehouseLabel(config?.destinationWarehouse || WAREHOUSE_PRISMA);
-      const itemLines = buildTransferItemsPlainLines(transferItems, 20);
       const subject = `HIGC - Documento di trasporto ${ddtNumber} - ritiro merce ${originLabel} verso ${destinationLabel}`;
+      const totalQty = itemRows.length ? itemRows.reduce((sum, item) => sum + safeInt(item.qty), 0) : safeInt(qty);
+      const commonUom = itemRows.length ? getCommonUomForItems(itemRows, uom) : (uom || "pz");
+      const qtyLabel = `${totalQty.toLocaleString("it-IT")} ${commonUom}`;
+      const singularItemLabel = String(product?.name || product?.code || "Articolo").trim() || "Articolo";
+      const singularCodeLabel = String(product?.code || "").trim();
+      const detailLines = itemRows.length
+        ? itemRows.map(item => `- ${cleanSpaces(item.name || item.item || item.product?.name || item.code || "Articolo")}: ${safeInt(item.qty).toLocaleString("it-IT")} ${item.uom || item.product?.uom || commonUom}${item.code ? ` (${item.code})` : ""}`)
+        : [`- Articolo: ${singularItemLabel}`, `- Codice: ${singularCodeLabel || "—"}`, `- Quantità: ${qtyLabel}`];
+      const htmlRows = itemRows.length
+        ? `<ul style="margin:8px 0 0 18px; padding:0;">${itemRows.map(item => `<li><strong>${escapeHtml(cleanSpaces(item.name || item.item || item.product?.name || item.code || "Articolo"))}</strong> — ${escapeHtml(safeInt(item.qty).toLocaleString("it-IT"))} ${escapeHtml(item.uom || item.product?.uom || commonUom)}${item.code ? ` <span style="color:#6b7280;">(${escapeHtml(item.code)})</span>` : ""}</li>`).join("")}</ul>`
+        : `Articolo: ${escapeHtml(singularItemLabel)}<br>Codice: ${escapeHtml(singularCodeLabel || "—")}<br>Quantità: ${escapeHtml(qtyLabel)}<br>`;
       const textBody = [
         "Buongiorno,",
         "",
@@ -2428,12 +2426,10 @@
         `Si invia in allegato il documento di trasporto ${ddtNumber}.`,
         "",
         "Dettaglio merce:",
-        `- Articoli: ${itemLabel}`,
-        `- Quantità complessiva: ${qtyLabel}`,
+        ...detailLines,
+        `- Quantità totale: ${qtyLabel}`,
         `- Bancali totali DDT: ${palletLabel}`,
         `- Data documento: ${formatDateIt(date)}`,
-        "",
-        ...itemLines,
         "",
         `Operatore: ${operator}`,
         "",
@@ -2446,11 +2442,10 @@
           <p>con la presente si richiede il ritiro della merce presso il magazzino di <strong>${escapeHtml(originLabel)}</strong> e il trasferimento verso <strong>${escapeHtml(destinationLabel)}</strong>.</p>
           <p>Si invia in allegato il documento di trasporto <strong>${escapeHtml(ddtNumber)}</strong>.</p>
           <p><strong>Dettaglio merce</strong><br>
-          Articoli: ${escapeHtml(itemLabel)}<br>
-          Quantità complessiva: ${escapeHtml(qtyLabel)}<br>
+          ${htmlRows}
+          Quantità totale: ${escapeHtml(qtyLabel)}<br>
           Bancali totali DDT: ${escapeHtml(palletLabel)}<br>
           Data documento: ${escapeHtml(formatDateIt(date))}</p>
-          ${buildTransferItemsHtmlList(transferItems, 20)}
           <p>Operatore: ${escapeHtml(operator)}</p>
           <p>Cordiali saluti<br>Hub Inventario General Copper</p>
         </div>
@@ -2552,7 +2547,6 @@
         palletUnitQty: normalizePositiveFloat(data.palletUnitQty || data.qtyPerPallet || data.quantitaPerBancale || 0),
         palletUnitUom: normalizeUom(data.palletUnitUom || data.uom || ""),
         palletInfoSource: cleanSpaces(data.palletInfoSource || data.palletSource || ""),
-        palletScope: cleanSpaces(data.palletScope || data.bancaliScope || ""),
         palletSourceDdtNumber: cleanSpaces(data.palletSourceDdtNumber || ""),
         warehouse: normalizeWarehouse(data.warehouse || data.site || data.magazzino || data.location || ""),
         createdAt: data.createdAt || data.date || null,
@@ -2601,7 +2595,6 @@
         uom: normalizeUom(mv?.uom || data.uom || "") || "pz",
         palletCount: normalizePositiveFloat(mv?.palletCount || mv?.bancali || 0),
         palletCountTotal: normalizePositiveFloat(mv?.palletCountTotal || data.palletCount || data.bancali || 0),
-        palletScope: cleanSpaces(mv?.palletScope || data.palletScope || ""),
         palletUnitQty: normalizePositiveFloat(mv?.palletUnitQty || data.palletUnitQty || 0),
         palletUnitUom: normalizeUom(mv?.palletUnitUom || data.palletUnitUom || data.uom || "") || "pz"
       })) : [];
@@ -2631,18 +2624,16 @@
         code: cleanSpaces(data.code || ""),
         item: cleanSpaces(data.item || ""),
         totalQty: safeInt(data.totalQty || data.qty || 0),
-        totalQtyLabel: cleanSpaces(data.totalQtyLabel || data.qtyLabel || ""),
-        itemsCount: safeInt(data.itemsCount || data.lineCount || 0),
         uom: normalizeUom(data.uom || "") || "pz",
         palletCount: normalizePositiveFloat(data.palletCount || data.bancali || data.totalPallets || 0),
         palletUnitQty: normalizePositiveFloat(data.palletUnitQty || data.qtyPerPallet || data.quantitaPerBancale || 0),
         palletUnitUom: normalizeUom(data.palletUnitUom || data.uom || "") || "pz",
         palletInfoSource: cleanSpaces(data.palletInfoSource || data.palletSource || ""),
-        palletScope: cleanSpaces(data.palletScope || data.bancaliScope || ""),
         palletSourceDdtNumber: cleanSpaces(data.palletSourceDdtNumber || ""),
         movements,
         lines,
-        pdfDataUrl: String(data.pdfDataUrl || data.pdf?.dataUrl || (data.pdfBase64 ? `data:application/pdf;base64,${data.pdfBase64}` : "")),
+        // Il PDF viene sempre rigenerato dal DDT corrente, evitando PDF legacy con sezioni operative obsolete.
+        pdfDataUrl: "",
         pdfFileName: cleanSpaces(data.pdfFileName || data.pdfFilename || data.pdf?.fileName || `${ddtNumber}.pdf`),
         createdAt: data.createdAt || data.date || null,
         createdBy: cleanSpaces(data.createdBy || data.createdByEmail || ""),
@@ -2678,7 +2669,6 @@
         uom: normalizeUom(mv?.uom || "") || "pz",
         palletCount: normalizePositiveFloat(mv?.palletCount || mv?.bancali || 0),
         palletCountTotal: normalizePositiveFloat(mv?.palletCountTotal || mv?.bancaliTotali || 0),
-        palletScope: cleanSpaces(mv?.palletScope || mv?.bancaliScope || ""),
         palletUnitQty: normalizePositiveFloat(mv?.palletUnitQty || mv?.qtyPerPallet || 0),
         palletUnitUom: normalizeUom(mv?.palletUnitUom || mv?.uom || "") || "pz",
         lineNo: safeInt(mv?.lineNo || 0)
@@ -3237,161 +3227,43 @@
       return base;
     }
 
-    function splitLoadCommandRows(raw){
-      return String(raw ?? "")
-        .replace(/\r\n/g, "\n")
-        .replace(/\r/g, "\n")
-        .split("\n")
-        .map((line, index) => ({
-          lineIndex: index,
-          lineNo: index + 1,
-          raw: String(line || ""),
-          text: cleanSpaces(line)
-        }));
+    function splitLoadCommandLines(raw){
+      return String(raw || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
     }
 
-    function hasLoadCommandText(raw){
-      return splitLoadCommandRows(raw).some(row => !!row.text);
+    function getLoadActiveLineIndex(raw = state.loadCommand){
+      const lines = splitLoadCommandLines(raw);
+      const maxIndex = Math.max(0, lines.length - 1);
+      const idx = Math.max(0, Math.min(maxIndex, safeInt(state.loadActiveLineIndex || 0)));
+      return idx;
     }
 
-    function getActiveLoadLineInfo(raw, selectionStart){
-      const value = String(raw ?? "");
-      const numericPos = Number(selectionStart);
-      const pos = Number.isFinite(numericPos) ? Math.max(0, Math.min(value.length, numericPos)) : value.length;
-      const searchFrom = pos > 0 ? pos - 1 : -1;
-      const previousBreak = searchFrom >= 0 ? value.lastIndexOf("\n", searchFrom) : -1;
-      const lineStart = previousBreak >= 0 ? previousBreak + 1 : 0;
-      const nextBreak = value.indexOf("\n", pos);
-      const lineEnd = nextBreak >= 0 ? nextBreak : value.length;
-      const lineIndex = value.slice(0, lineStart).split("\n").length - 1;
-      const rawLine = value.slice(lineStart, lineEnd);
-      return {
-        lineIndex,
-        lineNo: lineIndex + 1,
-        lineStart,
-        lineEnd,
-        selectionStart: pos,
-        raw: rawLine,
-        text: cleanSpaces(rawLine)
-      };
+    function getLoadActiveLine(raw = state.loadCommand){
+      const lines = splitLoadCommandLines(raw);
+      return lines[getLoadActiveLineIndex(raw)] || "";
     }
 
-    function getActiveParsedLoadCommand(){
+    function updateLoadActiveLineIndexFromInput(){
       const input = els.loadCommand;
-      const selectionStart = input && typeof input.selectionStart === "number" ? input.selectionStart : String(state.loadCommand || "").length;
-      const activeLine = getActiveLoadLineInfo(state.loadCommand, selectionStart);
+      const value = String(input?.value ?? state.loadCommand ?? "");
+      const pos = Math.max(0, Math.min(value.length, safeInt(input?.selectionStart ?? value.length)));
+      state.loadActiveLineIndex = value.slice(0, pos).replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n").length - 1;
+      return state.loadActiveLineIndex;
+    }
+
+    function getEffectiveParsedCommandForLine(rawLine){
+      const parsed = parseLoadCommand(rawLine);
+      if (!(parsed.hasQty && parsed.qtyMode === "trailing")) return parsed;
+      const exactRaw = findExactLoadableProductByText(parsed.raw);
+      if (!exactRaw) return parsed;
       return {
-        ...getEffectiveParsedCommand(activeLine.text),
-        lineIndex: activeLine.lineIndex,
-        lineNo: activeLine.lineNo,
-        lineStart: activeLine.lineStart,
-        lineEnd: activeLine.lineEnd,
-        lineRaw: activeLine.raw,
-        lineText: activeLine.text
+        raw: parsed.raw,
+        productText: parsed.raw,
+        qty: 0,
+        qtyRaw: "",
+        hasQty: false,
+        qtyMode: ""
       };
-    }
-
-    function normalizeTransferItems(items){
-      return (Array.isArray(items) ? items : [])
-        .filter(item => item && item.product && safeInt(item.qty) > 0)
-        .map((item, index) => ({
-          ...item,
-          lineNo: safeInt(item.lineNo || index + 1),
-          qty: safeInt(item.qty),
-          uom: normalizeUom(item.uom || item.product?.uom || "") || "pz",
-          code: cleanSpaces(item.code || item.product?.code || ""),
-          itemName: cleanSpaces(item.itemName || item.product?.name || item.product?.code || "Articolo") || "Articolo"
-        }));
-    }
-
-    function buildTransferItemsFromLegacy({ product, qty, uom } = {}){
-      if (!product || safeInt(qty) <= 0) return [];
-      return normalizeTransferItems([{
-        lineNo: 1,
-        product,
-        code: product.code,
-        itemName: product.name || product.code,
-        qty: safeInt(qty),
-        uom: normalizeUom(uom || product.uom || "") || "pz"
-      }]);
-    }
-
-    function normalizeTransferEmailItems({ items, product, qty, uom } = {}){
-      const normalized = normalizeTransferItems(items);
-      return normalized.length ? normalized : buildTransferItemsFromLegacy({ product, qty, uom });
-    }
-
-    function getCommonTransferUom(items){
-      const normalized = normalizeTransferItems(items);
-      const uoms = Array.from(new Set(normalized.map(item => normalizeUom(item.uom || "") || "pz").filter(Boolean)));
-      return uoms.length === 1 ? uoms[0] : "";
-    }
-
-    function buildTransferItemsQtyLabel(items){
-      const normalized = normalizeTransferItems(items);
-      if (!normalized.length) return "0";
-      const totals = new Map();
-      for (const item of normalized){
-        const uom = normalizeUom(item.uom || "") || "pz";
-        totals.set(uom, safeInt(totals.get(uom) || 0) + safeInt(item.qty));
-      }
-      const chunks = Array.from(totals.entries()).map(([uom, qty]) => `${safeInt(qty).toLocaleString("it-IT")} ${uom}`);
-      return chunks.length <= 2 ? chunks.join(" + ") : `${normalized.length.toLocaleString("it-IT")} righe articolo`;
-    }
-
-    function buildTransferItemsDisplayLabel(items){
-      const normalized = normalizeTransferItems(items);
-      if (!normalized.length) return "Articoli trasferiti";
-      if (normalized.length === 1) return normalized[0].itemName || normalized[0].code || "Articolo";
-      return `${normalized.length.toLocaleString("it-IT")} articoli trasferiti`;
-    }
-
-    function buildTransferItemsPlainLines(items, limit = 12){
-      const normalized = normalizeTransferItems(items);
-      const max = Math.max(1, safeInt(limit) || 12);
-      const lines = normalized.slice(0, max).map(item => {
-        const code = item.code ? ` (${item.code})` : "";
-        return `- ${item.itemName}${code}: ${safeInt(item.qty).toLocaleString("it-IT")} ${item.uom}`;
-      });
-      if (normalized.length > max){
-        lines.push(`- altri ${normalized.length - max} articoli`);
-      }
-      return lines;
-    }
-
-    function buildTransferItemsHtmlList(items, limit = 12){
-      const normalized = normalizeTransferItems(items);
-      const max = Math.max(1, safeInt(limit) || 12);
-      if (!normalized.length) return "";
-      const rows = normalized.slice(0, max).map(item => {
-        const code = item.code ? ` <span style="color:#6b7280;">${escapeHtml(item.code)}</span>` : "";
-        return `<li><strong>${escapeHtml(item.itemName)}</strong>${code}: ${safeInt(item.qty).toLocaleString("it-IT")} ${escapeHtml(item.uom)}</li>`;
-      }).join("");
-      const more = normalized.length > max ? `<li>Altri ${normalized.length - max} articoli</li>` : "";
-      return `<ul style="margin:8px 0 0 18px; padding:0;">${rows}${more}</ul>`;
-    }
-
-    function buildLoadValidationCardHtml(validation){
-      const validItems = normalizeTransferItems(validation?.items || []);
-      const allRows = Array.isArray(validation?.allRows) ? validation.allRows : [];
-      const reasons = Array.isArray(validation?.reasons) ? validation.reasons : [];
-      if (validation?.canSubmit){
-        const itemLines = buildTransferItemsPlainLines(validItems, 5)
-          .map(line => `<div>${escapeHtml(line)}</div>`)
-          .join("");
-        return `
-          <div>Pronto: ${validItems.length.toLocaleString("it-IT")} articol${validItems.length === 1 ? "o" : "i"} · quantità ${escapeHtml(buildTransferItemsQtyLabel(validItems))}</div>
-          <div style="color:#64748b; font-weight:750;">Dopo la conferma verranno richiesti i bancali totali del DDT unico.</div>
-          ${itemLines ? `<div>${itemLines}</div>` : ""}
-        `.trim();
-      }
-      if (reasons.length){
-        return reasons.slice(0, 6).map(reason => `<div>${escapeHtml(reason)}</div>`).join("");
-      }
-      if (allRows.length){
-        return "Completa ogni riga con articolo e quantità.";
-      }
-      return "Inserisci articolo e quantità. Vai a capo per aggiungere altri articoli.";
     }
 
     function scoreLoadableProduct(product, query){
@@ -3531,7 +3403,7 @@
       return top.product;
     }
 
-    function resolveProductFromParsed(parts){
+    function resolveProductFromParsed(parts, options = {}){
       const queryText = normalizeSearch(parts?.productText || parts?.raw || "");
       if (!queryText) return null;
 
@@ -3541,12 +3413,13 @@
         if (fields.some(field => field === queryText)) return product;
       }
 
-      const selected = getLoadableProductByCode(state.loadSelectedCode);
-      if (selected){
-        const fields = [selected.code, selected.name, selected.alias, selected.searchText, selected.fallbackName].map(normalizeSearch).filter(Boolean);
-        const selectedQuerySpecific = queryText.length >= 4 || queryText.includes(" ") || /\d/.test(queryText);
-        const compatible = fields.some(field => field === queryText || field.startsWith(queryText) || (selectedQuerySpecific && field.includes(queryText)));
-        if (compatible) return selected;
+      if (options.useSelected !== false){
+        const selected = getLoadableProductByCode(state.loadSelectedCode);
+        if (selected){
+          const fields = [selected.code, selected.name, selected.alias, selected.searchText, selected.fallbackName].map(normalizeSearch).filter(Boolean);
+          const compatible = fields.some(field => field === queryText || field.startsWith(queryText) || field.includes(queryText));
+          if (compatible) return selected;
+        }
       }
 
       const clearBest = resolveClearBestLoadCandidate(parts?.productText || parts?.raw || "");
@@ -3569,22 +3442,11 @@
     }
 
     function getEffectiveParsedCommand(raw){
-      const parsed = parseLoadCommand(raw);
-      if (!(parsed.hasQty && parsed.qtyMode === "trailing")) return parsed;
-      const exactRaw = findExactLoadableProductByText(parsed.raw);
-      if (!exactRaw) return parsed;
-      return {
-        raw: parsed.raw,
-        productText: parsed.raw,
-        qty: 0,
-        qtyRaw: "",
-        hasQty: false,
-        qtyMode: ""
-      };
+      return getEffectiveParsedCommandForLine(getLoadActiveLine(raw));
     }
 
     function syncLoadSelectionFromCommand(){
-      const resolved = resolveProductFromParsed(getActiveParsedLoadCommand());
+      const resolved = resolveProductFromParsed(getEffectiveParsedCommand(state.loadCommand), { useSelected: true });
       state.loadSelectedCode = resolved ? resolved.code : "";
       return resolved;
     }
@@ -3594,6 +3456,19 @@
       if (!key) return null;
       return (state.ddtDocuments || []).find(docItem => docItem.id === key || docItem.ddtNumber === key || docItem.docNum === key) || null;
     }
+
+    function stripDdtPdfInternalRegistrations(ddt){
+      const source = ddt && typeof ddt === "object" ? ddt : {};
+      const clean = { ...source };
+      delete clean.movements;
+      delete clean.movementRows;
+      delete clean.inventoryMovements;
+      delete clean.registrazioni;
+      delete clean.registrazioniMagazzino;
+      delete clean.warehouseRegistrations;
+      return clean;
+    }
+
 
     function pdfEscape(value){
       return String(value ?? "")
@@ -3708,6 +3583,7 @@
     }
 
     function buildDdtPdfDataUrl(ddt, logo){
+      ddt = stripDdtPdfInternalRegistrations(ddt);
       const W = 595;
       const H = 842;
       const margin = 36;
@@ -3846,7 +3722,6 @@
       const progressive = padProgressive(ddt.ddtProgressive || ddt.progressive || 1, 6);
       const totalQty = safeInt(ddt.totalQty || ddt.qty || 0);
       const totalUom = cleanSpaces(ddt.uom || "pz");
-      const totalQtyLabel = cleanSpaces(ddt.totalQtyLabel || "") || `${totalQty.toLocaleString("it-IT")} ${totalUom}`;
       const totalPalletCount = normalizePositiveFloat(ddt.palletCount || ddt.bancali || ddt.totalPallets || 0);
       const issueDate = formatDateIt(ddt.date);
       const fromLabel = cleanSpaces(ddt.fromLabel || warehouseLabel(ddt.fromWarehouse));
@@ -3939,8 +3814,22 @@
 
       let top = tableTop + 24;
       const tableBottom = 626;
-      const rawLines = Array.isArray(ddt.lines) && ddt.lines.length
-        ? ddt.lines
+      // Nel PDF DDT stampiamo solo le righe articolo del documento.
+      // Le registrazioni interne di magazzino IN/OUT restano dati gestionali e non vengono mostrate.
+      const pdfArticleLines = (Array.isArray(ddt.lines) ? ddt.lines : [])
+        .filter(line => safeInt(line?.qty) > 0 || cleanSpaces(line?.code || line?.item || ""));
+      const rawLines = pdfArticleLines.length
+        ? pdfArticleLines.map(line => ({
+            code: cleanSpaces(line?.code || ddt.code || ""),
+            item: cleanSpaces(line?.item || ddt.item || "Articolo") || "Articolo",
+            qty: safeInt(line?.qty || 0),
+            uom: normalizeUom(line?.uom || ddt.uom || "") || "pz",
+            palletCount: normalizePositiveFloat(line?.palletCount || line?.bancali || 0),
+            palletUnitQty: normalizePositiveFloat(line?.palletUnitQty || ddt.palletUnitQty || 0),
+            palletUnitUom: normalizeUom(line?.palletUnitUom || ddt.palletUnitUom || ddt.uom || "") || "pz",
+            fromLabel: cleanSpaces(line?.fromLabel || ddt.fromLabel || fromLabel),
+            toLabel: cleanSpaces(line?.toLabel || ddt.toLabel || toLabel)
+          }))
         : [{ code: ddt.code, item: ddt.item, qty: ddt.totalQty, uom: ddt.uom, palletCount: ddt.palletCount, palletUnitQty: ddt.palletUnitQty, fromLabel: ddt.fromLabel, toLabel: ddt.toLabel }];
 
       let printedLines = 0;
@@ -3992,31 +3881,19 @@
       line(margin + 84, summaryTop, margin + 84, summaryTop + 52);
       line(margin + 168, summaryTop, margin + 168, summaryTop + 52);
       drawLabelValue(margin + 10, summaryTop + 15, "Righe", String(rawLines.length), 62);
-      drawLabelValue(margin + 94, summaryTop + 15, "Quantita", totalQtyLabel, 62);
+      drawLabelValue(margin + 94, summaryTop + 15, "Quantita", `${totalQty.toLocaleString("it-IT")} ${totalUom}`, 62);
       drawLabelValue(margin + 178, summaryTop + 15, "Bancali", totalPalletCount > 0 ? formatDecimalIt(totalPalletCount, 2) : "—", 62);
 
-      const movements = Array.isArray(ddt.movements) ? ddt.movements.slice(0, 3) : [];
-      const movX = 303;
-      const movW = 256;
-      fill(colors.white); stroke(colors.border); rect(movX, summaryTop, movW, 82, "B");
-      fill(colors.soft); rect(movX, summaryTop, movW, 22, "f");
-      stroke(colors.border); line(movX, summaryTop + 22, movX + movW, summaryTop + 22);
-      fill(colors.muted); text(movX + 10, summaryTop + 14, "REGISTRAZIONI DI MAGAZZINO", 7.2, true);
-      if (movements.length){
-        movements.forEach((mv, index) => {
-          const rowY = summaryTop + 36 + index * 14;
-          const movementCode = cleanSpaces(mv.movementProgressive || `M${index + 1}`);
-          const warehouse = cleanSpaces(mv.warehouseLabel || warehouseLabel(mv.warehouse));
-          const quantity = `${safeInt(mv.qty).toLocaleString("it-IT")} ${cleanSpaces(mv.uom || ddt.uom || "pz")}`;
-          fill(colors.main);
-          text(movX + 10, rowY, movementCode, 7.2, true);
-          textWrapped(movX + 68, rowY, warehouse, 112, 7.2, false, 8.6, 1);
-          textRight(movX + movW - 10, rowY, quantity, 7.2, true);
-        });
-      }else{
-        fill(colors.muted);
-        text(movX + 10, summaryTop + 48, "Nessuna registrazione aggiuntiva", 7.4, false);
-      }
+      const noteX = 303;
+      const noteW = 256;
+      fill(colors.white); stroke(colors.border); rect(noteX, summaryTop, noteW, 82, "B");
+      fill(colors.soft); rect(noteX, summaryTop, noteW, 22, "f");
+      stroke(colors.border); line(noteX, summaryTop + 22, noteX + noteW, summaryTop + 22);
+      fill(colors.muted); text(noteX + 10, summaryTop + 14, "NOTE DOCUMENTO", 7.2, true);
+      fill(colors.main);
+      textWrapped(noteX + 10, summaryTop + 40, `Trasferimento merce da ${fromLabel} a ${toLabel}.`, noteW - 20, 7.4, false, 9.2, 2);
+      fill(colors.muted);
+      textWrapped(noteX + 10, summaryTop + 63, "Bancali indicati come totale complessivo del documento.", noteW - 20, 7, false, 8.4, 2);
 
       const signTop = 754;
       const signW = 163;
@@ -4064,12 +3941,80 @@
       }
     }
 
+    function makeDdtPdfPayload(ddt){
+      const displayLines = getDdtDisplayLines(ddt);
+      const totalPalletCount = normalizePositiveFloat(ddt?.palletCount || ddt?.bancali || ddt?.totalPallets || 0);
+      const fromLabel = cleanSpaces(ddt?.fromLabel || warehouseLabel(ddt?.fromWarehouse));
+      const toLabel = cleanSpaces(ddt?.toLabel || warehouseLabel(ddt?.toWarehouse));
+      const pdfLines = displayLines.map((line, index) => ({
+        lineNo: index + 1,
+        code: cleanSpaces(line.code || ""),
+        item: cleanSpaces(line.item || "Articolo") || "Articolo",
+        qty: safeInt(line.qty),
+        uom: normalizeUom(line.uom || ddt?.uom || "") || "pz",
+        palletCount: displayLines.length === 1 ? totalPalletCount : 0,
+        palletCountTotal: totalPalletCount,
+        bancali: displayLines.length === 1 ? totalPalletCount : 0,
+        bancaliTotali: totalPalletCount,
+        fromWarehouse: ddt?.fromWarehouse || "",
+        toWarehouse: ddt?.toWarehouse || "",
+        fromLabel,
+        toLabel
+      })).filter(line => safeInt(line.qty) > 0);
+
+      return {
+        ...ddt,
+        lines: pdfLines.length ? pdfLines : (Array.isArray(ddt?.lines) ? ddt.lines : []),
+        movements: []
+      };
+    }
+
     async function openDdtDocument(idOrNumber){
       const docItem = findDdtDocument(idOrNumber);
       if (!docItem){ showToast("DDT non trovato", "err"); return; }
       const logo = await loadCompanyLogo();
-      const pdf = buildDdtPdfDataUrl(docItem, logo);
+      const pdf = buildDdtPdfDataUrl(makeDdtPdfPayload(docItem), logo);
       openPdfDataUrl(pdf, docItem.pdfFileName || `${docItem.ddtNumber || "DDT"}.pdf`);
+    }
+
+    function getDdtDisplayLines(docItem){
+      const directLines = Array.isArray(docItem?.lines) ? docItem.lines.filter(line => safeInt(line?.qty) > 0) : [];
+      if (directLines.length){
+        return directLines.map(line => ({
+          code: cleanSpaces(line.code || ""),
+          item: cleanSpaces(line.item || docItem.item || "Articolo") || "Articolo",
+          qty: safeInt(line.qty),
+          uom: normalizeUom(line.uom || docItem.uom || "") || "pz"
+        }));
+      }
+
+      const movements = Array.isArray(docItem?.movements) ? docItem.movements : [];
+      const preferred = movements.filter(mv => String(mv?.type || "").toUpperCase() === "IN");
+      const source = preferred.length ? preferred : movements;
+      const map = new Map();
+      for (const mv of source){
+        const qty = safeInt(mv?.qty || 0);
+        if (!qty) continue;
+        const code = cleanSpaces(mv?.code || "");
+        const item = cleanSpaces(mv?.item || docItem?.item || code || "Articolo") || "Articolo";
+        const uom = normalizeUom(mv?.uom || docItem?.uom || "") || "pz";
+        const key = `${code.toLowerCase()}||${item.toLowerCase()}||${uom.toLowerCase()}`;
+        const row = map.get(key) || { code, item, qty: 0, uom };
+        row.qty += qty;
+        map.set(key, row);
+      }
+      if (map.size) return Array.from(map.values());
+
+      const fallbackQty = safeInt(docItem?.totalQty || docItem?.qty || 0);
+      if (fallbackQty > 0){
+        return [{
+          code: cleanSpaces(docItem?.code || ""),
+          item: cleanSpaces(docItem?.item || "Articoli trasferiti") || "Articoli trasferiti",
+          qty: fallbackQty,
+          uom: normalizeUom(docItem?.uom || "") || "pz"
+        }];
+      }
+      return [];
     }
 
     function renderDdtDocuments(){
@@ -4101,45 +4046,33 @@
         els.ddtList.innerHTML = '<div class="empty">Nessun DDT generato.</div>';
         return;
       }
-      els.ddtMeta.textContent = `${docs.length.toLocaleString("it-IT")} DDT recenti · Documenti generati`;
+      els.ddtMeta.textContent = `${docs.length.toLocaleString("it-IT")} DDT recenti · Una riga per documento`;
       els.ddtList.innerHTML = docs.map(docItem => {
         const docNumber = docItem.ddtNumber || docItem.docNum || `DDT-${docItem.id}`;
-        const movements = Array.isArray(docItem.movements) ? docItem.movements : [];
-        const lines = Array.isArray(docItem.lines) ? docItem.lines : [];
-        const qty = safeInt(docItem.totalQty || movements.reduce((sum, mv) => sum + (mv.type === "IN" ? safeInt(mv.qty) : 0), 0));
-        const qtyMeta = cleanSpaces(docItem.totalQtyLabel || "") || `${qty.toLocaleString("it-IT")} ${docItem.uom || "pz"}`;
-        const itemMeta = cleanSpaces(docItem.item || "") || (lines.length ? `${lines.length.toLocaleString("it-IT")} articoli trasferiti` : "Articoli trasferiti");
+        const displayLines = getDdtDisplayLines(docItem);
+        const lineCount = displayLines.length;
+        const commonUom = getCommonUomForItems(displayLines, docItem.uom || "pz");
+        const qty = safeInt(docItem.totalQty || displayLines.reduce((sum, line) => sum + safeInt(line.qty), 0));
         const palletCount = normalizePositiveFloat(docItem.palletCount || docItem.bancali || 0);
-        const palletMeta = palletCount > 0 ? ` · ${formatPalletLabel(palletCount)}` : "";
-        const movementsHtml = movements.length ? movements.map(mv => {
-          const qtyLabel = `${safeInt(mv.qty).toLocaleString("it-IT")} ${mv.uom || docItem.uom || "pz"}`;
-          return `
-            <div class="ddt-movement-row">
-              <div>
-                <div class="ddt-movement-name">${escapeHtml(mv.movementProgressive || "Movimento")}</div>
-                <div class="ddt-movement-meta">${escapeHtml([mv.type, mv.warehouseLabel || warehouseLabel(mv.warehouse), mv.code, mv.item].filter(Boolean).join(" · "))}</div>
-              </div>
-              <span class="ddt-pill">${escapeHtml(qtyLabel)}</span>
-            </div>
-          `;
-        }).join("") : '<div class="ddt-movement-row"><div class="ddt-movement-meta">Movimenti non disponibili.</div></div>';
+        const palletMeta = palletCount > 0 ? formatPalletLabel(palletCount) : "Bancali —";
+        const articleLabel = lineCount > 1
+          ? `${lineCount.toLocaleString("it-IT")} articoli`
+          : cleanSpaces(displayLines[0]?.item || docItem.item || "Articolo trasferito");
+        const qtyLabel = qty > 0 ? `${qty.toLocaleString("it-IT")} ${commonUom}` : "Quantità —";
+        const route = `${docItem.fromLabel || warehouseLabel(docItem.fromWarehouse)} → ${docItem.toLabel || warehouseLabel(docItem.toWarehouse)}`;
         return `
           <article class="ddt-card">
             <div class="ddt-top">
               <div class="ddt-title">
                 <div class="ddt-kicker">Documento di trasporto</div>
                 <div class="ddt-number">${escapeHtml(docNumber)}</div>
-                <div class="ddt-route">${escapeHtml(docItem.fromLabel || warehouseLabel(docItem.fromWarehouse))} → ${escapeHtml(docItem.toLabel || warehouseLabel(docItem.toWarehouse))}</div>
-                <div class="ddt-meta">${escapeHtml(formatDateIt(docItem.date))} · ${escapeHtml(itemMeta)} · Totale ${escapeHtml(qtyMeta)}${escapeHtml(palletMeta)}</div>
+                <div class="ddt-route">${escapeHtml(route)}</div>
+                <div class="ddt-meta">${escapeHtml(formatDateIt(docItem.date))} · ${escapeHtml(articleLabel)} · ${escapeHtml(qtyLabel)} · ${escapeHtml(palletMeta)}</div>
               </div>
               <div class="ddt-actions">
-                <button class="ddt-open-btn js-open-ddt" type="button" data-ddt-id="${escapeHtml(docItem.id)}">Apri PDF</button>
+                <button class="ddt-open-btn js-open-ddt" type="button" data-ddt-id="${escapeHtml(docItem.id)}" data-ddt-number="${escapeHtml(docNumber)}">Apri PDF</button>
               </div>
             </div>
-            <details class="ddt-movements" open>
-              <summary>${movements.length.toLocaleString("it-IT")} movimenti collegati</summary>
-              <div class="ddt-movement-list">${movementsHtml}</div>
-            </details>
           </article>
         `;
       }).join("");
@@ -4200,6 +4133,10 @@
       return remaining > 0 ? 0 : slots;
     }
 
+    function countTransferMovementSlotsForItems(items){
+      return (items || []).reduce((sum, item) => sum + countTransferMovementSlots(item?.sourceRows || [], item?.qty || 0), 0);
+    }
+
     async function reserveDdtProgressive(date, movementCount = 0){
       let progressive = getLargestKnownDdtProgressive() + 1;
       let ddtNumber = makeDdtNumber(progressive, date);
@@ -4221,106 +4158,113 @@
 
     function getLoadValidation(){
       const config = transferConfig();
-      const activeParts = getActiveParsedLoadCommand();
-      const rows = splitLoadCommandRows(state.loadCommand).filter(row => !!row.text);
+      const lines = splitLoadCommandLines(state.loadCommand);
+      const activeParts = getEffectiveParsedCommand(state.loadCommand);
+      const activeProduct = resolveProductFromParsed(activeParts, { useSelected: true });
+      const activeQty = activeParts.hasQty ? safeInt(activeParts.qty) : 0;
+      const parsedRows = [];
       const reasons = [];
-      const allRows = [];
-      const items = [];
-      let allProductsValid = true;
-      let allQtyValid = true;
+      const aggregated = new Map();
+      let nonEmptyLineCount = 0;
 
-      if (!rows.length){
-        reasons.push("Inserisci almeno un articolo e quantità.");
-      }
-
-      for (const row of rows){
-        const parts = getEffectiveParsedCommand(row.text);
-        const product = resolveProductFromParsed(parts);
+      lines.forEach((rawLine, index) => {
+        const raw = cleanSpaces(rawLine);
+        if (!raw) return;
+        nonEmptyLineCount += 1;
+        const parts = getEffectiveParsedCommandForLine(raw);
+        const product = resolveProductFromParsed(parts, { useSelected: false });
         const qty = parts.hasQty ? safeInt(parts.qty) : 0;
         const productValid = !!product;
         const qtyValid = parts.hasQty && qty > 0;
-        const uom = normalizeUom(product?.uom || "") || "pz";
-        const itemName = cleanSpaces(product?.name || product?.code || parts.productText || row.text || "Articolo") || "Articolo";
-        const entry = {
-          lineIndex: row.lineIndex,
-          lineNo: row.lineNo,
-          raw: row.raw,
-          text: row.text,
-          parts,
-          product,
-          productValid,
-          qty,
-          qtyValid,
-          uom,
-          code: cleanSpaces(product?.code || ""),
-          itemName,
-          sourceQty: safeInt(product?.sourceQty || 0),
-          sourceLabel: config.sourceLabel
-        };
-        allRows.push(entry);
+        const rowReasons = [];
 
         if (!productValid){
-          allProductsValid = false;
-          const label = normalizeSearch(parts.productText || parts.raw) ? `Riga ${row.lineNo}: prodotto non riconosciuto, non movimentabile o non disponibile a ${config.sourceLabel}.` : `Riga ${row.lineNo}: inserisci nome prodotto.`;
-          reasons.push(label);
+          rowReasons.push(`Riga ${index + 1}: articolo non riconosciuto o non disponibile a ${config.sourceLabel}.`);
+        }
+        if (!qtyValid){
+          rowReasons.push(`Riga ${index + 1}: inserisci una quantità valida.`);
         }
 
-        if (!qtyValid){
-          allQtyValid = false;
-          reasons.push(`Riga ${row.lineNo}: inserisci una quantità valida.`);
-        }
+        const line = {
+          lineIndex: index,
+          lineNo: index + 1,
+          raw,
+          parts,
+          product,
+          qty,
+          productValid,
+          qtyValid,
+          stockAvailable: false,
+          reasons: rowReasons
+        };
+        parsedRows.push(line);
+        rowReasons.forEach(reason => reasons.push(reason));
 
         if (productValid && qtyValid){
-          items.push(entry);
+          const key = String(product.codeLower || product.code || "").toLowerCase();
+          const current = aggregated.get(key) || {
+            product,
+            code: product.code,
+            codeLower: key,
+            name: product.name,
+            uom: product.uom || "pz",
+            qty: 0,
+            lineNos: [],
+            sourceQty: safeInt(product.sourceQty || 0)
+          };
+          current.qty += qty;
+          current.lineNos.push(index + 1);
+          current.sourceQty = Math.max(current.sourceQty, safeInt(product.sourceQty || 0));
+          aggregated.set(key, current);
         }
-      }
+      });
 
-      const totalsByCode = new Map();
-      for (const item of items){
-        const codeKey = normalizeInventoryCodeKey(item.product?.code || item.code || "");
-        if (!codeKey) continue;
-        const current = totalsByCode.get(codeKey) || {
-          product: item.product,
-          code: item.product?.code || item.code,
-          itemName: item.itemName,
-          uom: item.uom,
-          qty: 0,
-          sourceQty: safeInt(item.product?.sourceQty || item.sourceQty || 0)
+      const items = Array.from(aggregated.values()).map(item => {
+        const sourceRows = getPositiveRowsForCodeInWarehouse(item.code, config.sourceWarehouse);
+        const available = sourceRows.reduce((sum, row) => sum + safeInt(row.qty), 0);
+        return {
+          ...item,
+          qty: safeInt(item.qty),
+          available,
+          sourceRows,
+          stockAvailable: available >= safeInt(item.qty)
         };
-        current.qty += safeInt(item.qty);
-        current.sourceQty = Math.max(current.sourceQty, safeInt(item.product?.sourceQty || item.sourceQty || 0));
-        totalsByCode.set(codeKey, current);
-      }
+      });
 
-      let stockAvailable = true;
-      for (const total of totalsByCode.values()){
-        if (safeInt(total.qty) > safeInt(total.sourceQty)){
-          stockAvailable = false;
-          reasons.push(`Disponibilità ${config.sourceLabel} insufficiente per ${total.itemName || total.code} (${safeInt(total.sourceQty).toLocaleString("it-IT")} ${total.uom}).`);
+      for (const item of items){
+        if (!item.stockAvailable){
+          const where = item.lineNos.length > 1 ? `righe ${item.lineNos.join(", ")}` : `riga ${item.lineNos[0] || ""}`;
+          reasons.push(`${where}: disponibilità ${config.sourceLabel} insufficiente per ${item.name} (${item.available.toLocaleString("it-IT")} ${item.uom}).`);
         }
       }
 
-      const firstItem = items[0] || null;
-      const product = firstItem?.product || resolveProductFromParsed(activeParts);
-      const qty = firstItem?.qty || 0;
+      if (!nonEmptyLineCount){
+        reasons.push("Inserisci almeno un articolo con quantità.");
+      }
+
       const totalQty = items.reduce((sum, item) => sum + safeInt(item.qty), 0);
-      const canSubmit = rows.length > 0 && allProductsValid && allQtyValid && stockAvailable && items.length === rows.length;
+      const productValid = !!activeProduct;
+      const qtyValid = activeParts.hasQty && activeQty > 0;
+      const activeSourceQty = safeInt(activeProduct?.sourceQty || 0);
+      const stockAvailable = !!(activeProduct && qtyValid && activeQty <= activeSourceQty);
+      const hasInvalidRows = parsedRows.some(row => !row.productValid || !row.qtyValid) || items.some(item => !item.stockAvailable);
 
       return {
         parts: activeParts,
         activeParts,
-        rows,
-        allRows,
-        items: normalizeTransferItems(items),
-        totalsByCode,
-        product,
-        qty,
-        totalQty,
-        totalQtyLabel: buildTransferItemsQtyLabel(items),
-        productValid: allProductsValid,
-        qtyValid: allQtyValid,
+        product: activeProduct,
+        activeProduct,
+        qty: activeQty,
+        activeQty,
+        productValid,
+        qtyValid,
         stockAvailable,
-        canSubmit,
+        rawLineCount: lines.length,
+        nonEmptyLineCount,
+        rows: parsedRows,
+        items,
+        totalQty,
+        canSubmit: nonEmptyLineCount > 0 && items.length > 0 && !hasInvalidRows,
         reasons
       };
     }
@@ -4430,21 +4374,42 @@
       }).join("");
     }
 
+    function buildLoadValidationCardHtml(validation, config){
+      const items = validation?.items || [];
+      const reasons = (validation?.reasons || []).filter(Boolean);
+      const totalQty = items.reduce((sum, item) => sum + safeInt(item.qty), 0);
+      const commonUom = getCommonUomForItems(items, "pz");
+      if (!items.length && !reasons.length) return "";
+      const itemHtml = items.length ? `
+        <div class="validation-meta">
+          ${items.slice(0, 6).map(item => `${escapeHtml(cleanSpaces(item.name || item.code || "Articolo"))}: <span class="validation-strong">${safeInt(item.qty).toLocaleString("it-IT")} ${escapeHtml(item.uom || commonUom)}</span>`).join("<br>")}
+          ${items.length > 6 ? `<br>Altri ${items.length - 6} articoli` : ""}
+        </div>
+      ` : "";
+      const reasonHtml = reasons.length ? `<div class="validation-meta">${reasons.slice(0, 4).map(escapeHtml).join("<br>")}</div>` : "";
+      const title = validation.canSubmit
+        ? `${items.length.toLocaleString("it-IT")} articol${items.length === 1 ? "o" : "i"} pront${items.length === 1 ? "o" : "i"}`
+        : "Completa le righe articolo";
+      const totalHtml = items.length ? `<div class="validation-meta">Totale DDT: <span class="validation-strong">${totalQty.toLocaleString("it-IT")} ${escapeHtml(commonUom)}</span></div>` : "";
+      return `
+        <div class="validation-title">${escapeHtml(title)}</div>
+        ${itemHtml}
+        ${totalHtml}
+        ${reasonHtml}
+      `;
+    }
+
     function renderLoadModal(){
       const config = transferConfig();
       const ready = !!(state.user && state.db && state.movementsReady && !state.movementsError);
       const loadableCount = ready ? buildLoadableProducts({ direction: config.direction }).length : 0;
       const validation = getLoadValidation();
       const input = els.loadCommand;
-      const activeParts = validation.activeParts || validation.parts || getActiveParsedLoadCommand();
-      const typedQueryRaw = activeParts.productText || activeParts.raw || "";
-      const typedQuery = normalizeSearch(typedQueryRaw);
-      const showSuggestions = !!(state.loadSuggestionsVisible && typedQuery);
-      const candidateEntries = showSuggestions ? getLoadCandidateEntries(typedQueryRaw, SUGGESTION_LIMIT, true) : [];
+      const activeText = validation.activeParts?.productText || validation.activeParts?.raw || "";
+      const typedQuery = normalizeSearch(activeText);
+      const candidateEntries = typedQuery ? getLoadCandidateEntries(activeText, SUGGESTION_LIMIT, true) : [];
       const candidates = candidateEntries.map(entry => entry.product);
-      const activeProduct = resolveProductFromParsed(activeParts);
-      const activeCode = String(activeProduct?.codeLower || activeProduct?.code || "").toLowerCase();
-      const hasAnyText = hasLoadCommandText(state.loadCommand);
+      const activeCode = String(validation.activeProduct?.codeLower || validation.activeProduct?.code || "").toLowerCase();
 
       if (els.modalTitle) els.modalTitle.textContent = config.modalTitle;
       if (document.activeElement !== input && input.value !== state.loadCommand){
@@ -4454,22 +4419,29 @@
       input.disabled = !ready || state.busy || loadableCount <= 0;
 
       let controlState = "is-empty";
-      if (!hasAnyText) controlState = "is-empty";
-      else if (validation.canSubmit) controlState = "is-valid";
-      else controlState = "is-invalid";
+      if (validation.canSubmit) controlState = "is-valid";
+      else if (typedQuery || validation.nonEmptyLineCount) controlState = "is-invalid";
       if (!ready || loadableCount <= 0) controlState = "is-invalid";
       els.commandWrap.className = `command-control ${controlState}`;
 
       els.commandHint.hidden = true;
       els.validationCard.hidden = true;
-      els.validationCard.className = validation.canSubmit ? "validation-card is-valid" : (hasAnyText ? "validation-card is-invalid" : "validation-card is-neutral");
+      els.validationCard.className = validation.canSubmit ? "validation-card is-valid" : "validation-card is-invalid";
       els.validationCard.innerHTML = "";
       els.loadSuggestions.className = "suggestions";
       els.loadSuggestions.innerHTML = "";
 
+      const cardHtml = ready && loadableCount > 0 ? buildLoadValidationCardHtml(validation, config) : "";
+      if (cardHtml && validation.nonEmptyLineCount){
+        els.validationCard.hidden = false;
+        els.validationCard.innerHTML = cardHtml;
+      }
+
+      els.btnConfirm.disabled = !(validation.canSubmit && state.user && state.db && !state.busy);
+      els.btnConfirm.textContent = state.busy ? "SALVO…" : config.actionLabel;
+
       if (!ready){
         els.btnConfirm.disabled = true;
-        els.btnConfirm.textContent = state.busy ? "SALVO…" : config.actionLabel;
         return;
       }
 
@@ -4481,63 +4453,57 @@
           </div>
         `;
         els.btnConfirm.disabled = true;
-        els.btnConfirm.textContent = state.busy ? "SALVO…" : config.actionLabel;
         return;
       }
 
-      if (hasAnyText){
-        els.validationCard.hidden = false;
-        els.validationCard.innerHTML = buildLoadValidationCardHtml(validation);
+      if (!typedQuery){
+        return;
       }
 
-      if (showSuggestions){
-        if (!candidates.length){
-          els.loadSuggestions.className = "suggestions is-open";
-          els.loadSuggestions.innerHTML = `
-            <div class="suggestion is-empty-state">
-              <div class="suggestion-title">Nessun articolo trovato</div>
-            </div>
-          `;
-        }else{
-          els.loadSuggestions.className = "suggestions is-open";
-          els.loadSuggestions.innerHTML = candidates.map((product, index) => {
-            const productCode = String(product.codeLower || product.code || "").toLowerCase();
-            const isActive = !!activeCode && productCode === activeCode;
-            const isValid = isActive && !!validation.allRows?.find?.(row => row.lineNo === activeParts.lineNo && row.productValid);
-            const classes = ["suggestion"];
-            if (isValid) classes.push("is-good");
-            else if (index === 0) classes.push("is-leading");
+      if (!candidates.length){
+        els.loadSuggestions.className = "suggestions is-open";
+        els.loadSuggestions.innerHTML = `
+          <div class="suggestion is-empty-state">
+            <div class="suggestion-title">Nessun articolo trovato</div>
+          </div>
+        `;
+        return;
+      }
 
-            const categoryStyle = product.categoryColor ? ` style="--cat-color:${escapeHtml(product.categoryColor)}"` : "";
-            return `
-              <button
-                class="${classes.join(" ")}"
-                type="button"
-                role="option"
-                aria-selected="${isActive ? "true" : "false"}"
-                data-code="${escapeHtml(product.code)}"
-              >
-                <div class="suggestion-top">
-                  <div class="suggestion-main">
-                    <div class="suggestion-title">${escapeHtml(product.name)}</div>
-                    <div class="suggestion-meta">
-                      <span class="suggestion-pill is-category"${categoryStyle}>
-                        <span class="suggestion-pill-dot"></span>
-                        ${escapeHtml(product.categoryName || "Articolo")}
-                      </span>
-                      <span class="suggestion-pill">${escapeHtml(product.code)}</span>
-                    </div>
-                  </div>
-                  <div class="suggestion-qty">${escapeHtml(config.sourceLabel)}: ${product.sourceQty.toLocaleString("it-IT")} ${escapeHtml(product.uom)}</div>
+      els.loadSuggestions.className = "suggestions is-open";
+      els.loadSuggestions.innerHTML = candidates.map((product, index) => {
+        const productCode = String(product.codeLower || product.code || "").toLowerCase();
+        const isActive = !!activeCode && productCode === activeCode;
+        const isValid = validation.canSubmit && isActive;
+        const classes = ["suggestion"];
+        if (isValid) classes.push("is-good");
+        else if (index === 0) classes.push("is-leading");
+
+        const categoryStyle = product.categoryColor ? ` style="--cat-color:${escapeHtml(product.categoryColor)}"` : "";
+        return `
+          <button
+            class="${classes.join(" ")}"
+            type="button"
+            role="option"
+            aria-selected="${isActive ? "true" : "false"}"
+            data-code="${escapeHtml(product.code)}"
+          >
+            <div class="suggestion-top">
+              <div class="suggestion-main">
+                <div class="suggestion-title">${escapeHtml(product.name)}</div>
+                <div class="suggestion-meta">
+                  <span class="suggestion-pill is-category"${categoryStyle}>
+                    <span class="suggestion-pill-dot"></span>
+                    ${escapeHtml(product.categoryName || "Articolo")}
+                  </span>
+                  <span class="suggestion-pill">${escapeHtml(product.code)}</span>
                 </div>
-              </button>
-            `;
-          }).join("");
-        }
-      }
-
-      els.btnConfirm.disabled = !(validation.canSubmit && state.user && state.db && !state.busy);
-      els.btnConfirm.textContent = state.busy ? "SALVO…" : config.actionLabel;
+              </div>
+              <div class="suggestion-qty">${escapeHtml(config.sourceLabel)}: ${product.sourceQty.toLocaleString("it-IT")} ${escapeHtml(product.uom)}</div>
+            </div>
+          </button>
+        `;
+      }).join("");
     }
 
     function render(){
@@ -4577,6 +4543,7 @@
       state.transferDirection = direction === TRANSFER_TO_CEREA ? TRANSFER_TO_CEREA : TRANSFER_TO_PRISMA;
       state.loadCommand = "";
       state.loadSelectedCode = "";
+      state.loadActiveLineIndex = 0;
       state.loadSuggestionsVisible = true;
       syncLoadSelectionFromCommand();
       lockBackgroundScroll();
@@ -5105,10 +5072,9 @@
         if (normalizeInventoryCodeKey(mv.code) !== low) continue;
         const unitQty = normalizePositiveFloat(mv.palletUnitQty || 0);
         const palletCount = normalizePositiveFloat(mv.palletCountTotal || mv.palletCount || 0);
-        const palletScope = cleanSpaces(mv.palletScope || "");
         const qty = safeInt(mv.qty || 0);
         let resolvedUnitQty = unitQty;
-        if (!resolvedUnitQty && palletScope !== "ddt_total" && palletCount > 0 && qty > 0){
+        if (!resolvedUnitQty && palletCount > 0 && qty > 0){
           resolvedUnitQty = normalizePositiveFloat(qty / palletCount);
         }
         if (!resolvedUnitQty) continue;
@@ -5126,53 +5092,74 @@
       return rows[0] || null;
     }
 
-    function buildPalletPromptMessage({ items, product, qty, uom, config, memory }){
-      const transferItems = normalizeTransferEmailItems({ items, product, qty, uom });
+    function getCommonUomForItems(items, fallback = "pz"){
+      const values = Array.from(new Set((items || []).map(item => normalizeUom(item?.uom || item?.product?.uom || "")).filter(Boolean)));
+      return values.length === 1 ? values[0] : (normalizeUom(fallback || "") || "pz");
+    }
+
+    function buildPalletPromptMessage({ product, qty, uom, config, memory, items }){
       const lines = [];
       const sourceLabel = cleanSpaces(config?.sourceLabel || warehouseLabel(config?.sourceWarehouse));
       const destinationLabel = cleanSpaces(config?.destinationLabel || warehouseLabel(config?.destinationWarehouse));
-      const singleItem = transferItems.length === 1 ? transferItems[0] : null;
-      lines.push("NUMERO BANCALI TOTALI DDT");
+      const itemRows = Array.isArray(items) && items.length ? items : [];
+      const totalQty = itemRows.length ? itemRows.reduce((sum, item) => sum + safeInt(item.qty), 0) : safeInt(qty);
+      const commonUom = itemRows.length ? getCommonUomForItems(itemRows, uom) : (uom || "pz");
+      lines.push("NUMERO BANCALI DDT");
       lines.push("");
       lines.push(`Operazione: ${sourceLabel} → ${destinationLabel}`);
-      lines.push(`Articoli selezionati: ${transferItems.length.toLocaleString("it-IT")}`);
-      lines.push(`Quantità: ${buildTransferItemsQtyLabel(transferItems)}`);
-      lines.push("");
-      buildTransferItemsPlainLines(transferItems, 10).forEach(line => lines.push(line));
-      lines.push("");
-      if (singleItem && memory?.palletUnitQty){
-        const suggested = normalizePositiveFloat(safeInt(singleItem.qty) / memory.palletUnitQty);
-        lines.push(`Memoria cloud: 1 bancale = ${formatDecimalIt(memory.palletUnitQty, 2)} ${memory.palletUnitUom || singleItem.uom}`);
-        if (memory.ddtNumber) lines.push(`Ultimo riferimento: ${memory.ddtNumber}`);
-        if (suggested > 0) lines.push(`Suggerimento: ${formatDecimalIt(suggested, 2)} bancali totali`);
+      if (itemRows.length > 1){
+        lines.push(`Articoli: ${itemRows.length.toLocaleString("it-IT")}`);
+        lines.push(`Quantità totale: ${totalQty.toLocaleString("it-IT")} ${commonUom}`);
         lines.push("");
+        lines.push("Articoli selezionati:");
+        itemRows.slice(0, 8).forEach((item) => {
+          lines.push(`- ${cleanSpaces(item.name || item.product?.name || item.code || "Articolo")}: ${safeInt(item.qty).toLocaleString("it-IT")} ${item.uom || item.product?.uom || commonUom}`);
+        });
+        if (itemRows.length > 8) lines.push(`- altri ${itemRows.length - 8} articoli`);
+        lines.push("");
+      }else{
+        const item = itemRows[0] || null;
+        const itemName = cleanSpaces(item?.name || item?.product?.name || product?.name || product?.code || "Articolo") || "Articolo";
+        const itemCode = cleanSpaces(item?.code || item?.product?.code || product?.code || "");
+        lines.push(`Articolo: ${itemName}`);
+        if (itemCode) lines.push(`Codice: ${itemCode}`);
+        lines.push(`Quantità: ${totalQty.toLocaleString("it-IT")} ${commonUom}`);
+        lines.push("");
+        if (memory?.palletUnitQty){
+          const suggested = normalizePositiveFloat(totalQty / memory.palletUnitQty);
+          lines.push(`Memoria cloud: 1 bancale = ${formatDecimalIt(memory.palletUnitQty, 2)} ${memory.palletUnitUom || commonUom}`);
+          if (memory.ddtNumber) lines.push(`Ultimo riferimento: ${memory.ddtNumber}`);
+          if (suggested > 0) lines.push(`Suggerimento: ${formatDecimalIt(suggested, 2)} bancali`);
+          lines.push("");
+        }
       }
-      lines.push("Inserisci il numero totale di bancali da riportare nel DDT unico.");
-      lines.push("Il valore è complessivo del documento, non per singolo articolo.");
+      lines.push("Inserisci il numero di bancali totali da riportare nel DDT.");
       return lines.join("\n");
     }
 
-    function promptPalletCountForTransfer({ items, product, qty, uom, config }){
-      const transferItems = normalizeTransferEmailItems({ items, product, qty, uom });
-      const singleItem = transferItems.length === 1 ? transferItems[0] : null;
-      const memory = singleItem ? getLatestPalletMemoryForCode(singleItem.code || singleItem.product?.code, singleItem.uom) : null;
-      const suggested = singleItem && memory?.palletUnitQty ? normalizePositiveFloat(safeInt(singleItem.qty) / memory.palletUnitQty) : 0;
+    function promptPalletCountForTransfer({ product, qty, uom, config, items }){
+      const itemRows = Array.isArray(items) ? items : [];
+      const singleItem = itemRows.length === 1 ? itemRows[0] : null;
+      const effectiveProduct = singleItem?.product || product || null;
+      const effectiveUom = singleItem?.uom || uom || "pz";
+      const effectiveQty = itemRows.length ? itemRows.reduce((sum, item) => sum + safeInt(item.qty), 0) : safeInt(qty);
+      const memory = itemRows.length <= 1 ? getLatestPalletMemoryForCode(effectiveProduct?.code, effectiveUom) : null;
+      const suggested = memory?.palletUnitQty ? normalizePositiveFloat(effectiveQty / memory.palletUnitQty) : 0;
       const defaultValue = suggested > 0 ? formatDecimalIt(suggested, 2) : "";
       while (true){
-        const answer = window.prompt(buildPalletPromptMessage({ items: transferItems, product, qty, uom, config, memory }), defaultValue);
+        const answer = window.prompt(buildPalletPromptMessage({ product: effectiveProduct, qty: effectiveQty, uom: effectiveUom, config, memory, items: itemRows }), defaultValue);
         if (answer === null) return null;
         const palletCount = normalizePositiveFloat(answer);
         if (palletCount > 0){
           return {
             palletCount,
-            palletUnitQty: singleItem ? normalizePositiveFloat(safeInt(singleItem.qty) / palletCount) : 0,
-            palletUnitUom: singleItem ? singleItem.uom : "",
-            palletInfoSource: singleItem && memory ? "manual_total_input_with_cloud_suggestion" : "manual_total_input",
-            palletSourceDdtNumber: cleanSpaces(memory?.ddtNumber || ""),
-            palletScope: "ddt_total"
+            palletUnitQty: normalizePositiveFloat(effectiveQty / palletCount),
+            palletUnitUom: effectiveUom,
+            palletInfoSource: memory ? "manual_input_with_cloud_suggestion" : "manual_input_total",
+            palletSourceDdtNumber: cleanSpaces(memory?.ddtNumber || "")
           };
         }
-        window.alert("Inserisci un numero totale di bancali valido maggiore di zero.");
+        window.alert("Inserisci un numero bancali valido maggiore di zero.");
       }
     }
 
@@ -5187,35 +5174,45 @@
     }
 
     function buildTransferConfirmMessage({ config, product, qty, uom, available, sourceRows, palletInfo, items }){
-      const transferItems = normalizeTransferEmailItems({ items, product, qty, uom });
       const sourceLabel = cleanSpaces(config?.sourceLabel || warehouseLabel(config?.sourceWarehouse));
       const destinationLabel = cleanSpaces(config?.destinationLabel || warehouseLabel(config?.destinationWarehouse));
+      const itemRows = Array.isArray(items) && items.length ? items : [];
       const rows = Array.isArray(sourceRows) ? sourceRows : [];
+      const totalQty = itemRows.length ? itemRows.reduce((sum, item) => sum + safeInt(item.qty), 0) : safeInt(qty);
+      const commonUom = itemRows.length ? getCommonUomForItems(itemRows, uom) : (uom || "pz");
       const lines = [];
       lines.push("CONFERMA OPERAZIONE DI MAGAZZINO");
       lines.push("");
       lines.push(`Operazione: ${sourceLabel} → ${destinationLabel}`);
-      lines.push(`Articoli nel DDT: ${transferItems.length.toLocaleString("it-IT")}`);
-      lines.push(`Quantità complessiva: ${buildTransferItemsQtyLabel(transferItems)}`);
-      lines.push(`Bancali totali DDT: ${formatPalletLabel(palletInfo?.palletCount || 0)}`);
-      lines.push("");
-      buildTransferItemsPlainLines(transferItems, 12).forEach(line => lines.push(line));
+      if (itemRows.length){
+        lines.push(`Articoli selezionati: ${itemRows.length.toLocaleString("it-IT")}`);
+        lines.push(`Quantità totale: ${totalQty.toLocaleString("it-IT")} ${commonUom}`);
+        lines.push(`Bancali totali DDT: ${formatPalletLabel(palletInfo?.palletCount || 0)}`);
+        lines.push("");
+        lines.push("Lista articoli nel DDT:");
+        itemRows.slice(0, 10).forEach((item) => {
+          lines.push(`- ${cleanSpaces(item.name || item.product?.name || item.code || "Articolo")}: ${safeInt(item.qty).toLocaleString("it-IT")} ${item.uom || item.product?.uom || commonUom}`);
+        });
+        if (itemRows.length > 10) lines.push(`- altri ${itemRows.length - 10} articoli`);
+      }else{
+        const itemName = cleanSpaces(product?.name || product?.code || "Articolo") || "Articolo";
+        lines.push(`Articolo: ${itemName}`);
+        if (product?.code) lines.push(`Codice: ${product.code}`);
+        lines.push(`Quantità da trasferire: ${safeInt(qty).toLocaleString("it-IT")} ${uom}`);
+        lines.push(`Bancali totali DDT: ${formatPalletLabel(palletInfo?.palletCount || 0)}`);
+        lines.push(`Disponibilità ${sourceLabel}: ${safeInt(available).toLocaleString("it-IT")} ${uom}`);
+      }
       lines.push("");
       lines.push("Effetto gestionale:");
-      lines.push(`- crea movimenti OUT da ${sourceLabel}`);
-      lines.push(`- crea movimenti IN su ${destinationLabel}`);
-      lines.push("- genera un unico DDT con la lista degli articoli scelti");
-      lines.push("- riporta i bancali come totale complessivo del DDT");
+      lines.push(`- registra il trasferimento da ${sourceLabel} a ${destinationLabel}`);
+      lines.push("- genera un unico DDT con la lista articoli");
       lines.push("- invia email gestionale a Matteo con DDT allegato");
-      if (rows.length){
+      if (!itemRows.length && rows.length){
         lines.push("");
         lines.push("Righe di prelievo previste:");
-        rows.slice(0, 8).forEach((row) => {
-          const rowItem = cleanSpaces(row.item || row.productName || row.code || "Articolo") || "Articolo";
-          const rowUom = normalizeUom(row.uom || "") || "pz";
-          lines.push(`- ${rowItem}: ${safeInt(row.qty).toLocaleString("it-IT")} ${rowUom}`);
+        rows.slice(0, 6).forEach((row) => {
+          lines.push(`- ${String(row.customer || "Riga inventario").trim() || "Riga inventario"}: ${safeInt(row.qty).toLocaleString("it-IT")} ${uom}`);
         });
-        if (rows.length > 8) lines.push(`- altre ${rows.length - 8} righe di prelievo`);
       }
       lines.push("");
       lines.push("Procedere con l'operazione?");
@@ -5229,81 +5226,29 @@
         return;
       }
 
+      updateLoadActiveLineIndexFromInput();
       const config = transferConfig();
       const validation = getLoadValidation();
-      const transferItems = normalizeTransferItems(validation.items || []);
+      const items = Array.isArray(validation.items) ? validation.items : [];
 
-      if (!(validation.canSubmit && transferItems.length)){
+      if (!(validation.canSubmit && items.length)){
         showToast(validation.reasons?.[0] || "Ricerca non valida", "err");
         try{ els.loadCommand.focus(); }catch(_){ }
         return;
       }
 
-      const sourcePools = new Map();
-      function getSourcePoolForItem(item){
-        const codeKey = normalizeInventoryCodeKey(item.code || item.product?.code || "");
-        if (!codeKey) return [];
-        if (!sourcePools.has(codeKey)){
-          const rows = getPositiveRowsForCodeInWarehouse(item.code || item.product?.code, config.sourceWarehouse)
-            .map((row, index) => ({
-              ...row,
-              poolIndex: index,
-              remainingQty: safeInt(row?.qty || 0)
-            }));
-          sourcePools.set(codeKey, rows);
-        }
-        return sourcePools.get(codeKey) || [];
-      }
-
-      const plannedItems = [];
-      let movementSlots = 0;
-      for (const item of transferItems){
-        const pool = getSourcePoolForItem(item);
-        let remaining = safeInt(item.qty);
-        const takes = [];
-        for (const row of pool){
-          if (remaining <= 0) break;
-          const take = Math.min(safeInt(row.remainingQty || 0), remaining);
-          if (take <= 0) continue;
-          row.remainingQty = safeInt(row.remainingQty) - take;
-          remaining -= take;
-          movementSlots += 2;
-          takes.push({ row, take });
-        }
-        if (remaining > 0){
-          showToast(`Disponibilità ${config.sourceLabel} insufficiente per ${item.itemName} (${item.code})`, "err");
-          return;
-        }
-        plannedItems.push({ ...item, takes });
-      }
-
-      if (movementSlots <= 0){
-        showToast("Movimenti DDT non calcolabili.", "err");
-        return;
-      }
-
-      const firstItem = plannedItems[0] || null;
-      const commonUom = getCommonTransferUom(plannedItems) || "righe";
-      const totalQty = plannedItems.reduce((sum, item) => sum + safeInt(item.qty), 0);
-      const totalQtyLabel = buildTransferItemsQtyLabel(plannedItems);
-      const itemLabel = buildTransferItemsDisplayLabel(plannedItems);
-      const confirmRows = plannedItems.flatMap(item => item.takes.map(take => ({
-        item: item.itemName,
-        code: item.code,
-        qty: take.take,
-        uom: item.uom,
-        customer: take.row?.customer || ""
-      })));
-
-      const palletInfo = promptPalletCountForTransfer({ items: plannedItems, config });
+      const totalQty = items.reduce((sum, item) => sum + safeInt(item.qty), 0);
+      const commonUom = getCommonUomForItems(items, "pz");
+      const palletInfo = promptPalletCountForTransfer({ items, qty: totalQty, uom: commonUom, config });
       if (!palletInfo){
         showToast("Operazione annullata: numero bancali non confermato.", "warn");
         return;
       }
       const confirmed = window.confirm(buildTransferConfirmMessage({
         config,
-        items: plannedItems,
-        sourceRows: confirmRows,
+        items,
+        qty: totalQty,
+        uom: commonUom,
         palletInfo
       }));
       if (!confirmed) return;
@@ -5317,6 +5262,10 @@
       const userUid = state.user.uid || "";
 
       try{
+        const movementSlots = countTransferMovementSlotsForItems(items);
+        if (movementSlots <= 0){
+          throw new Error("Movimenti DDT non calcolabili.");
+        }
         const reserved = await reserveDdtProgressive(date, movementSlots);
         const batch = writeBatch(state.db);
         const movementCollection = orgCol("inventoryMovements");
@@ -5324,46 +5273,47 @@
         const movements = [];
         const lines = [];
         let movementProgressiveNumber = Math.max(0, safeInt(reserved.firstMovementProgressive || 1) - 1);
-        const isSingleItem = plannedItems.length === 1;
+        let lineNo = 0;
 
-        for (const [itemIndex, planned] of plannedItems.entries()){
-          const lineNo = itemIndex + 1;
-          const product = planned.product;
-          const code = cleanSpaces(planned.code || product?.code || "");
-          const uom = normalizeUom(planned.uom || product?.uom || "") || "pz";
-          const itemName = cleanSpaces(planned.itemName || product?.name || code || "Articolo") || "Articolo";
-          const linePalletUnitQty = isSingleItem ? normalizePositiveFloat(palletInfo.palletUnitQty || 0) : 0;
-          const linePalletUnitUom = isSingleItem ? (palletInfo.palletUnitUom || uom) : "";
+        for (const entry of items){
+          const product = entry.product;
+          if (!product) continue;
+          const qty = safeInt(entry.qty);
+          if (!qty) continue;
 
+          lineNo += 1;
+          const uom = normalizeUom(entry.uom || product.uom || commonUom) || commonUom;
+          const itemName = cleanSpaces(entry.name || product.name || product.code || "Articolo") || "Articolo";
+          const code = cleanSpaces(entry.code || product.code || "");
+          const linePalletCount = items.length === 1 ? palletInfo.palletCount : 0;
           lines.push({
             lineNo,
-            customer: "",
             code,
             item: itemName,
-            qty: safeInt(planned.qty),
+            qty,
             uom,
-            palletCount: 0,
+            palletCount: linePalletCount,
             palletCountTotal: palletInfo.palletCount,
-            palletUnitQty: linePalletUnitQty,
-            palletUnitUom: linePalletUnitUom,
+            palletUnitQty: items.length === 1 ? palletInfo.palletUnitQty : 0,
+            palletUnitUom: items.length === 1 ? (palletInfo.palletUnitUom || uom) : uom,
             palletInfoSource: palletInfo.palletInfoSource,
-            palletScope: palletInfo.palletScope || "ddt_total",
             palletSourceDdtNumber: palletInfo.palletSourceDdtNumber || "",
-            bancali: 0,
+            bancali: linePalletCount,
             bancaliTotali: palletInfo.palletCount,
-            quantitaPerBancale: linePalletUnitQty,
+            quantitaPerBancale: items.length === 1 ? palletInfo.palletUnitQty : 0,
             fromWarehouse: config.sourceWarehouse,
             toWarehouse: config.destinationWarehouse,
             fromLabel: config.sourceLabel,
             toLabel: config.destinationLabel
           });
 
-          let splitNo = 0;
-          for (const takeInfo of planned.takes){
-            const row = takeInfo.row || {};
-            const take = safeInt(takeInfo.take || 0);
+          let remaining = qty;
+          const sourceRows = getPositiveRowsForCodeInWarehouse(code, config.sourceWarehouse);
+          for (const row of sourceRows){
+            if (remaining <= 0) break;
+            const take = Math.min(safeInt(row.qty), remaining);
             if (!take) continue;
-            splitNo += 1;
+
             const customer = String(row.customer || "").trim();
             const basePayload = {
               customer,
@@ -5374,14 +5324,13 @@
               qty: take,
               palletCount: 0,
               palletCountTotal: palletInfo.palletCount,
-              palletUnitQty: linePalletUnitQty,
-              palletUnitUom: linePalletUnitUom,
+              palletUnitQty: items.length === 1 ? palletInfo.palletUnitQty : 0,
+              palletUnitUom: items.length === 1 ? (palletInfo.palletUnitUom || uom) : uom,
               palletInfoSource: palletInfo.palletInfoSource,
-              palletScope: palletInfo.palletScope || "ddt_total",
               palletSourceDdtNumber: palletInfo.palletSourceDdtNumber || "",
               bancali: 0,
               bancaliTotali: palletInfo.palletCount,
-              quantitaPerBancale: linePalletUnitQty,
+              quantitaPerBancale: items.length === 1 ? palletInfo.palletUnitQty : 0,
               date,
               note: config.note || NOTE,
               source: SOURCE,
@@ -5398,7 +5347,6 @@
               toLabel: config.destinationLabel,
               docDateRaw: date,
               lineNo,
-              splitNo,
               createdAt: serverTimestamp(),
               createdBy: userLabel,
               createdByName: state.user.displayName || "",
@@ -5408,37 +5356,45 @@
 
             const outRef = doc(movementCollection);
             const inRef = doc(movementCollection);
-            const outNum = makeMovementNumber(++movementProgressiveNumber);
-            const inNum = makeMovementNumber(++movementProgressiveNumber);
+            const outProgressiveNumber = ++movementProgressiveNumber;
+            const inProgressiveNumber = ++movementProgressiveNumber;
+            const outNum = makeMovementNumber(outProgressiveNumber);
+            const inNum = makeMovementNumber(inProgressiveNumber);
 
             const outPayload = {
               ...basePayload,
               type: "OUT",
               warehouse: config.sourceWarehouse,
               movementProgressive: outNum,
-              movementProgressiveNumber: movementProgressiveNumber - 1
+              movementProgressiveNumber: outProgressiveNumber
             };
             const inPayload = {
               ...basePayload,
               type: "IN",
               warehouse: config.destinationWarehouse,
               movementProgressive: inNum,
-              movementProgressiveNumber
+              movementProgressiveNumber: inProgressiveNumber
             };
 
             batch.set(outRef, outPayload);
             batch.set(inRef, inPayload);
 
-            const movementSummaries = [
-              { id: outRef.id, inventoryMovementId: outRef.id, movementProgressive: outNum, movementProgressiveNumber: movementProgressiveNumber - 1, type:"OUT", warehouse: config.sourceWarehouse, warehouseLabel: config.sourceLabel, code, item: itemName, qty: take, uom, palletCount: 0, palletCountTotal: palletInfo.palletCount, palletUnitQty: linePalletUnitQty, palletUnitUom: linePalletUnitUom, lineNo, splitNo },
-              { id: inRef.id, inventoryMovementId: inRef.id, movementProgressive: inNum, movementProgressiveNumber, type:"IN", warehouse: config.destinationWarehouse, warehouseLabel: config.destinationLabel, code, item: itemName, qty: take, uom, palletCount: 0, palletCountTotal: palletInfo.palletCount, palletUnitQty: linePalletUnitQty, palletUnitUom: linePalletUnitUom, lineNo, splitNo }
-            ];
-            for (const summary of movementSummaries){
-              movements.push(summary);
-            }
+            movements.push(
+              { id: outRef.id, inventoryMovementId: outRef.id, movementProgressive: outNum, movementProgressiveNumber: outProgressiveNumber, type:"OUT", warehouse: config.sourceWarehouse, warehouseLabel: config.sourceLabel, code, item: itemName, qty: take, uom, palletCount: 0, palletCountTotal: palletInfo.palletCount, palletUnitQty: basePayload.palletUnitQty, palletUnitUom: basePayload.palletUnitUom, lineNo },
+              { id: inRef.id, inventoryMovementId: inRef.id, movementProgressive: inNum, movementProgressiveNumber: inProgressiveNumber, type:"IN", warehouse: config.destinationWarehouse, warehouseLabel: config.destinationLabel, code, item: itemName, qty: take, uom, palletCount: 0, palletCountTotal: palletInfo.palletCount, palletUnitQty: basePayload.palletUnitQty, palletUnitUom: basePayload.palletUnitUom, lineNo }
+            );
+
+            remaining -= take;
+          }
+
+          if (remaining > 0){
+            throw new Error(`Stock non allocato interamente per ${itemName}.`);
           }
         }
 
+        const firstLine = lines[0] || {};
+        const documentItemLabel = lines.length > 1 ? `${lines.length} articoli trasferiti` : (firstLine.item || "Articolo");
+        const documentCode = lines.length > 1 ? "MULTI" : (firstLine.code || "");
         const ddtPayload = {
           recordKind: DDT_RECORD_KIND,
           isDdtDocument: true,
@@ -5460,20 +5416,17 @@
           fromProfile: getDeliveryProfile(config.sourceWarehouse),
           toProfile: getDeliveryProfile(config.destinationWarehouse),
           direction: config.direction,
-          code: plannedItems.length === 1 ? (firstItem?.code || firstItem?.product?.code || "") : "",
-          item: itemLabel,
+          code: documentCode,
+          item: documentItemLabel,
           totalQty,
-          totalQtyLabel,
-          itemsCount: plannedItems.length,
           uom: commonUom,
           palletCount: palletInfo.palletCount,
-          palletUnitQty: plannedItems.length === 1 ? normalizePositiveFloat(palletInfo.palletUnitQty || 0) : 0,
-          palletUnitUom: plannedItems.length === 1 ? (palletInfo.palletUnitUom || firstItem?.uom || commonUom) : "",
+          palletUnitQty: palletInfo.palletUnitQty,
+          palletUnitUom: palletInfo.palletUnitUom || commonUom,
           palletInfoSource: palletInfo.palletInfoSource,
           palletSourceDdtNumber: palletInfo.palletSourceDdtNumber || "",
-          palletScope: palletInfo.palletScope || "ddt_total",
           bancali: palletInfo.palletCount,
-          quantitaPerBancale: plannedItems.length === 1 ? normalizePositiveFloat(palletInfo.palletUnitQty || 0) : 0,
+          quantitaPerBancale: palletInfo.palletUnitQty,
           lines,
           movements,
           source: SOURCE,
@@ -5486,7 +5439,7 @@
           createdByUid: userUid
         };
         const ddtPdfLogo = await loadCompanyLogo();
-        const ddtPdfDataUrl = buildDdtPdfDataUrl(ddtPayload, ddtPdfLogo);
+        const ddtPdfDataUrl = buildDdtPdfDataUrl(makeDdtPdfPayload(ddtPayload), ddtPdfLogo);
         const ddtPdfBase64 = String(ddtPdfDataUrl || "").split(",")[1] || "";
         ddtPayload.pdfMimeType = "application/pdf";
         ddtPayload.pdfFilename = ddtPayload.pdfFileName;
@@ -5498,8 +5451,7 @@
 
         try{
           const emailData = buildPrismaTransferEmail({
-            items: plannedItems,
-            product: firstItem?.product || null,
+            product: items[0]?.product || null,
             qty: totalQty,
             uom: commonUom,
             ddtNumber: reserved.ddtNumber,
@@ -5508,7 +5460,8 @@
             userLabel,
             userEmail,
             config,
-            palletInfo
+            palletInfo,
+            items: lines
           });
           await enqueueMatteoEmail(emailData.subject, emailData.textBody, emailData.htmlBody, [{
             filename: ddtPayload.pdfFileName || `${reserved.ddtNumber}.pdf`,
@@ -5522,9 +5475,10 @@
         }
         state.loadCommand = "";
         state.loadSelectedCode = "";
+        state.loadActiveLineIndex = 0;
         state.loadSuggestionsVisible = false;
         closeModal();
-        showToast(`${config.actionLabel}: ${plannedItems.length.toLocaleString("it-IT")} articol${plannedItems.length === 1 ? "o" : "i"} · ${formatPalletLabel(palletInfo.palletCount)} · ${reserved.ddtNumber}`, "ok");
+        showToast(`${config.actionLabel}: ${lines.length.toLocaleString("it-IT")} articol${lines.length === 1 ? "o" : "i"} · ${formatPalletLabel(palletInfo.palletCount)} · ${reserved.ddtNumber}`, "ok");
       }catch(err){
         console.error("transferNow failed", err);
         showToast(humanAuthErr(err), "err");
@@ -5776,6 +5730,7 @@
     els.loadCommand.addEventListener("input", (event) => {
       const rawValue = String(event.target?.value || "");
       state.loadCommand = rawValue;
+      updateLoadActiveLineIndexFromInput();
       state.loadSuggestionsVisible = true;
       syncLoadSelectionFromCommand();
       renderLoadModal();
@@ -5783,8 +5738,17 @@
 
     els.loadCommand.addEventListener("focus", () => {
       clearTimeout(blurTimer);
+      updateLoadActiveLineIndexFromInput();
       state.loadSuggestionsVisible = true;
       renderLoadModal();
+    });
+
+    ["click", "keyup", "select"].forEach((eventName) => {
+      els.loadCommand.addEventListener(eventName, () => {
+        updateLoadActiveLineIndexFromInput();
+        syncLoadSelectionFromCommand();
+        renderLoadModal();
+      });
     });
 
     els.loadCommand.addEventListener("blur", () => {
@@ -5803,51 +5767,50 @@
         return;
       }
 
-      if (event.key === "Enter" && (event.ctrlKey || event.metaKey)){
+      if ((event.ctrlKey || event.metaKey) && event.key === "Enter"){
         const validation = getLoadValidation();
         if (validation.canSubmit){
           event.preventDefault();
           transferNow();
         }
-        return;
-      }
-
-      if (event.key === "Tab"){
-        const parsed = getActiveParsedLoadCommand();
-        const query = parsed?.productText || parsed?.raw || "";
-        const first = getLoadCandidates(query, 1)[0];
-        if (first){
-          event.preventDefault();
-          applyLoadSuggestionByCode(first.code);
-        }
       }
     });
+
+    function replaceActiveLoadLine(nextLine){
+      const input = els.loadCommand;
+      const value = String(input?.value ?? state.loadCommand ?? "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+      const lines = value.split("\n");
+      const idx = getLoadActiveLineIndex(value);
+      while (lines.length <= idx) lines.push("");
+      lines[idx] = String(nextLine || "");
+      const nextValue = lines.join("\n");
+      const cursor = lines.slice(0, idx).join("\n").length + (idx > 0 ? 1 : 0) + String(nextLine || "").length;
+      state.loadCommand = nextValue;
+      if (input){
+        input.value = nextValue;
+        try{ input.setSelectionRange(cursor, cursor); }catch(_){ }
+      }
+      state.loadActiveLineIndex = idx;
+      return { nextValue, cursor };
+    }
 
     function applyLoadSuggestionByCode(code){
       const product = getLoadableProductByCode(code);
       if (!product) return false;
 
-      const input = els.loadCommand;
-      const currentValue = String(state.loadCommand || "");
-      const selectionStart = input && typeof input.selectionStart === "number" ? input.selectionStart : currentValue.length;
-      const activeLine = getActiveLoadLineInfo(currentValue, selectionStart);
-      const parsed = getEffectiveParsedCommand(activeLine.text);
+      updateLoadActiveLineIndexFromInput();
+      const parsed = getEffectiveParsedCommand(state.loadCommand);
       const preservedQty = parsed.hasQty && safeInt(parsed.qty) > 0 ? String(safeInt(parsed.qty)) : "";
-      const replacement = preservedQty ? `${product.name} ${preservedQty}` : `${product.name} `;
-      const nextValue = `${currentValue.slice(0, activeLine.lineStart)}${replacement}${currentValue.slice(activeLine.lineEnd)}`;
-      const nextPos = activeLine.lineStart + replacement.length;
+      const nextLine = preservedQty ? `${product.name} ${preservedQty}` : `${product.name} `;
 
       state.loadSelectedCode = product.code;
-      state.loadCommand = nextValue;
       state.loadSuggestionsVisible = true;
-
-      if (input){
-        input.value = nextValue;
-      }
+      const result = replaceActiveLoadLine(nextLine);
 
       renderLoadModal();
 
       requestAnimationFrame(() => {
+        const input = els.loadCommand;
         try{
           if (document.activeElement !== input){
             input.focus({ preventScroll: true });
@@ -5855,8 +5818,7 @@
         }catch(_){
           try{ input.focus(); }catch(__){ }
         }
-
-        try{ input.setSelectionRange(nextPos, nextPos); }catch(_){ }
+        try{ input.setSelectionRange(result.cursor, result.cursor); }catch(_){ }
       });
 
       armedSuggestionCode = "";
