@@ -11934,6 +11934,112 @@ function twBuildConcaInventoryLoadPayload(done, fs){
   }
 }
 
+const TW_CONCA_DDT_DOC_TYPE = "DDT_TRASFERIMENTO_CONCA";
+const TW_CONCA_DDT_HEADER_DOC_TYPE = "DDT_TRASFERIMENTO_CONCA_HEADER";
+const TW_CONCA_PROTECTED_DDT_RECORD_KIND = "ddtDocument";
+
+function twConcaNormSafe(v){
+  try{
+    return String(v || "")
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, " ")
+      .trim();
+  }catch(_e){
+    return String(v || "").toLowerCase().trim();
+  }
+}
+
+function twIsProtectedConcaDdtMovementData(data){
+  try{
+    const docType = String(data?.docType || "").trim().toUpperCase();
+    if(docType === TW_CONCA_DDT_DOC_TYPE || docType === TW_CONCA_DDT_HEADER_DOC_TYPE) return true;
+    if(String(data?.ddtId || "").trim()) return true;
+    if(String(data?.ddtNumber || "").trim()) return true;
+    const kind = twConcaNormSafe(data?.recordKind || data?.kind || data?.recordType || "");
+    if(kind === twConcaNormSafe(TW_CONCA_PROTECTED_DDT_RECORD_KIND)) return true;
+    const source = twConcaNormSafe(data?.source || "");
+    if(source.includes("inventario concamarise")) return true;
+    return false;
+  }catch(_e){
+    // In caso di dati strani non cancello: meglio proteggere i movimenti storici.
+    return true;
+  }
+}
+
+function twIsSafeConcaCompletionMovementSnap(snap, doneId="", expectedMovementId=""){
+  try{
+    if(!(snap && snap.exists && snap.exists())) return false;
+    const data = snap.data ? (snap.data() || {}) : {};
+
+    // Blocco assoluto: lo svuotamento globale dei completati WRITE non deve mai
+    // eliminare movimenti o header generati dai DDT Porta a Conca / Porta a Cerea.
+    if(twIsProtectedConcaDdtMovementData(data)) return false;
+
+    const snapId = String(snap.id || "").trim();
+    const did = String(doneId || "").trim();
+    const expectedId = String(expectedMovementId || "").trim();
+    const docType = String(data?.docType || "").trim().toUpperCase();
+    const source = String(data?.source || "").trim();
+    const origin = String(data?.origin || "").trim();
+    const twDoneId = String(data?.twDoneId || "").trim();
+
+    if(expectedId && snapId === expectedId && snapId.startsWith("twconca_")) return true;
+    if(did && twDoneId === did && origin === "tabellone_write_completed_to_conca") return true;
+    if(did && twDoneId === did && source === TW_CONCA_SOURCE && docType === TW_CONCA_DOC_TYPE) return true;
+    if(snapId.startsWith("twconca_") && source === TW_CONCA_SOURCE && docType === TW_CONCA_DOC_TYPE) return true;
+    if(snapId.startsWith("twconca_") && origin === "tabellone_write_completed_to_conca") return true;
+
+    return false;
+  }catch(e){
+    console.warn("twIsSafeConcaCompletionMovementSnap error:", e);
+    return false;
+  }
+}
+
+async function twFindSafeConcaCompletionMovementRefs(doneId, concaMovementId, fs, db){
+  const refs = [];
+  const seen = new Set();
+  const did = String(doneId || "").trim();
+  const expectedId = String(concaMovementId || "").trim();
+  if(!fs || !db) return refs;
+
+  function addRef(ref){
+    try{
+      const key = (ref && ref.path) ? ref.path : String(ref || "");
+      if(!key || seen.has(key)) return;
+      seen.add(key);
+      refs.push(ref);
+    }catch(_e){}
+  }
+
+  try{
+    if(expectedId){
+      const ref = fs.doc(db, "orgs", TW_HUB_ORG_ID, TW_CONCA_INVENTORY_COLLECTION, expectedId);
+      const snap = await fs.getDoc(ref);
+      if(twIsSafeConcaCompletionMovementSnap(snap, did, expectedId)) addRef(ref);
+    }
+  }catch(e){
+    console.warn("twFindSafeConcaCompletionMovementRefs exact read error:", e);
+  }
+
+  try{
+    if(did && fs.where && fs.query){
+      const col = fs.collection(db, "orgs", TW_HUB_ORG_ID, TW_CONCA_INVENTORY_COLLECTION);
+      const snap = await fs.getDocs(fs.query(col, fs.where("twDoneId", "==", did)));
+      for(const d of (snap?.docs || [])){
+        if(twIsSafeConcaCompletionMovementSnap(d, did, expectedId)) addRef(d.ref);
+      }
+    }
+  }catch(e){
+    console.warn("twFindSafeConcaCompletionMovementRefs query error:", e);
+  }
+
+  return refs;
+}
+
+
 function twConcaBackfillSignature(items){
   try{
     return (items || [])
@@ -14557,8 +14663,8 @@ async function twClearAllCompletati(){
     showToast("Accesso limitato", "Solo gli amministratori possono svuotare i completati.");
     return;
   }
-  if(!confirm("Svuotare la lista dei completati?\n\nI movimenti Conca collegati resteranno salvati in cloud e l’inventario non verrà toccato.")) return;
-  if(!confirm("Conferma definitiva: svuotare solo la lista COMPLETATI?")) return;
+  if(!confirm("Svuotare la lista dei completati?\n\nVerranno rimosse anche le righe visibili in Inventario Conca generate dai completati WRITE.\n\nI movimenti e i documenti generati dai DDT già creati NON verranno eliminati.")) return;
+  if(!confirm("Conferma definitiva: svuoto i completati e rimuovo solo i carichi Conca WRITE, mai movimenti DDT?")) return;
 
   try{
     if(!state.firebase?.ok) throw new Error("Firebase non disponibile");
@@ -14576,25 +14682,48 @@ async function twClearAllCompletati(){
     }
 
     let deleted = 0;
+    let concaDeleted = 0;
+    let protectedOrMissing = 0;
     let batch = fs.writeBatch(db);
     let ops = 0;
-    for(const d of docs){
-      // Svuota solo la lista COMPLETATI: non elimina movimenti Conca / PF.
-      // I movimenti restano in cloud nelle rispettive collection inventario.
-      batch.delete(d.ref);
-      ops += 1;
-      deleted += 1;
 
-      if(ops >= 450){
+    async function commitIfNeeded(force=false){
+      if(!ops) return;
+      if(force || ops >= 420){
         await batch.commit();
         batch = fs.writeBatch(db);
         ops = 0;
       }
     }
-    if(ops) await batch.commit();
+
+    for(const d of docs){
+      const data = d.data ? (d.data() || {}) : {};
+      const doneId = String(d.id || data.id || data.key || data.twDoneId || "").trim();
+      const concaMovementId = String(data.concaInventoryMovementId || twConcaMovementDocId(doneId)).trim();
+
+      // Cancello solo il carico Conca nato dal completato WRITE.
+      // Se il documento è un DDT o un movimento collegato a DDT, viene protetto.
+      const concaRefs = await twFindSafeConcaCompletionMovementRefs(doneId, concaMovementId, fs, db);
+      if(concaRefs.length){
+        for(const ref of concaRefs){
+          batch.delete(ref);
+          ops += 1;
+          concaDeleted += 1;
+          await commitIfNeeded(false);
+        }
+      }else if(concaMovementId){
+        protectedOrMissing += 1;
+      }
+
+      batch.delete(d.ref);
+      ops += 1;
+      deleted += 1;
+      await commitIfNeeded(false);
+    }
+    await commitIfNeeded(true);
 
     twSetCloud("ok");
-    alert("Lista completati svuotata: " + deleted + " righe. Movimenti Conca non eliminati.");
+    alert("Lista completati svuotata: " + deleted + " righe.\nRighe Inventario Conca WRITE rimosse: " + concaDeleted + ".\nMovimenti/DDT già creati non eliminati.");
   }catch(e){
     console.warn("twClearAllCompletati error:", e);
     twSetCloud("bad", e?.code || "error");

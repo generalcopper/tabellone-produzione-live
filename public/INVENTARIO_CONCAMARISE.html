@@ -2602,6 +2602,67 @@
     font-size:14px !important;
     font-weight:900 !important;
   }
+
+  /* DDT grouped by movement direction */
+  .ddt-group{
+    display:grid;
+    gap:12px;
+    padding:14px;
+    border-radius:22px;
+    background:linear-gradient(180deg, rgba(255,255,255,.82), rgba(248,251,255,.72));
+    border:1px solid rgba(15,23,42,.07);
+    box-shadow:0 12px 28px rgba(15,23,42,.05), inset 0 1px 0 rgba(255,255,255,.86);
+  }
+  .ddt-group + .ddt-group{
+    margin-top:14px;
+  }
+  .ddt-group-head{
+    display:flex;
+    align-items:flex-start;
+    justify-content:space-between;
+    gap:12px;
+    flex-wrap:wrap;
+    padding:2px 2px 4px;
+  }
+  .ddt-group-title{
+    display:grid;
+    gap:4px;
+    min-width:0;
+  }
+  .ddt-group-title strong{
+    font-size:16px;
+    line-height:1.1;
+    letter-spacing:-.02em;
+    color:var(--brand-deep);
+  }
+  .ddt-group-title span{
+    font-size:12px;
+    font-weight:850;
+    color:var(--muted);
+  }
+  .ddt-group-count{
+    display:inline-flex;
+    align-items:center;
+    justify-content:center;
+    min-height:30px;
+    padding:0 12px;
+    border-radius:999px;
+    background:#fff;
+    border:1px solid rgba(10,132,255,.12);
+    color:var(--blue);
+    font-size:12px;
+    font-weight:950;
+    box-shadow:0 8px 16px rgba(15,23,42,.04);
+  }
+  .ddt-group-body{
+    display:grid;
+    gap:12px;
+  }
+  .ddt-kicker .ddt-direction-label{
+    color:var(--muted);
+    font-weight:900;
+  }
+
 </style><!-- theme-premium-conca -->
 </head>
 <body>
@@ -4007,6 +4068,8 @@
         toWarehouse,
         fromLabel: cleanSpaces(data.fromLabel || data.originLabel || warehouseLabel(fromWarehouse)),
         toLabel: cleanSpaces(data.toLabel || data.destinationLabel || warehouseLabel(toWarehouse)),
+        direction: cleanSpaces(data.direction || data.transferDirection || data.ddtDirection || ""),
+        transferDirection: cleanSpaces(data.transferDirection || data.direction || data.ddtDirection || ""),
         fromProfile: data.fromProfile || getDeliveryProfile(fromWarehouse),
         toProfile: data.toProfile || getDeliveryProfile(toWarehouse),
         code: cleanSpaces(data.code || ""),
@@ -4226,6 +4289,8 @@
       docItem.toWarehouse = normalizeWarehouse(docItem.toWarehouse || first.toWarehouse || incoming.warehouse || "") || WAREHOUSE_CONCAMARISE;
       docItem.fromLabel = cleanSpaces(docItem.fromLabel || warehouseLabel(docItem.fromWarehouse));
       docItem.toLabel = cleanSpaces(docItem.toLabel || warehouseLabel(docItem.toWarehouse));
+      docItem.direction = cleanSpaces(docItem.direction || docItem.transferDirection || first.transferDirection || first.direction || first.ddtDirection || "") || (docItem.toWarehouse === WAREHOUSE_CONCAMARISE ? TRANSFER_TO_CONCAMARISE : TRANSFER_TO_CEREA);
+      docItem.transferDirection = cleanSpaces(docItem.transferDirection || docItem.direction || "");
       return docItem;
     }
 
@@ -4281,6 +4346,8 @@
           toWarehouse,
           fromLabel: warehouseLabel(fromWarehouse),
           toLabel: warehouseLabel(toWarehouse),
+          direction: cleanSpaces(first.transferDirection || first.direction || first.ddtDirection || "") || (toWarehouse === WAREHOUSE_CONCAMARISE ? TRANSFER_TO_CONCAMARISE : TRANSFER_TO_CEREA),
+          transferDirection: cleanSpaces(first.transferDirection || first.direction || first.ddtDirection || "") || (toWarehouse === WAREHOUSE_CONCAMARISE ? TRANSFER_TO_CONCAMARISE : TRANSFER_TO_CEREA),
           fromProfile: getDeliveryProfile(fromWarehouse),
           toProfile: getDeliveryProfile(toWarehouse),
           code: cleanSpaces(lines[0]?.code || first.code || ""),
@@ -5855,6 +5922,81 @@
       }
     }
 
+    function getDdtDirection(docItem){
+      const explicit = cleanSpaces(docItem?.direction || docItem?.transferDirection || docItem?.ddtDirection || "");
+      if (explicit === TRANSFER_TO_CONCAMARISE || explicit === TRANSFER_TO_CEREA) return explicit;
+      const fromWarehouse = normalizeWarehouse(docItem?.fromWarehouse || docItem?.sourceWarehouse || docItem?.originWarehouse || "");
+      const toWarehouse = normalizeWarehouse(docItem?.toWarehouse || docItem?.destinationWarehouse || "");
+      if (fromWarehouse === WAREHOUSE_CEREA && toWarehouse === WAREHOUSE_CONCAMARISE) return TRANSFER_TO_CONCAMARISE;
+      if (fromWarehouse === WAREHOUSE_CONCAMARISE && toWarehouse === WAREHOUSE_CEREA) return TRANSFER_TO_CEREA;
+      if (toWarehouse === WAREHOUSE_CONCAMARISE) return TRANSFER_TO_CONCAMARISE;
+      if (toWarehouse === WAREHOUSE_CEREA) return TRANSFER_TO_CEREA;
+      const routeText = normalizeSearch([docItem?.fromLabel, docItem?.toLabel, docItem?.note].join(" "));
+      if (routeText.includes("cerea concamarise") || routeText.includes("porta a conca")) return TRANSFER_TO_CONCAMARISE;
+      if (routeText.includes("concamarise cerea") || routeText.includes("porta a cerea")) return TRANSFER_TO_CEREA;
+      return "other";
+    }
+
+    function getDdtDirectionTitle(direction){
+      if (direction === TRANSFER_TO_CEREA) return "Porta a Cerea";
+      if (direction === TRANSFER_TO_CONCAMARISE) return "Porta a Conca";
+      return "Altri DDT";
+    }
+
+    function getDdtDirectionSubtitle(direction){
+      if (direction === TRANSFER_TO_CEREA) return "Trasferimenti da Concamarise verso Cerea";
+      if (direction === TRANSFER_TO_CONCAMARISE) return "Trasferimenti da Cerea verso Concamarise";
+      return "Documenti senza direzione riconosciuta";
+    }
+
+    function renderDdtCard(docItem){
+      const docNumber = docItem.ddtNumber || docItem.docNum || `DDT ${docItem.id}`;
+      const lines = Array.isArray(docItem.lines) ? docItem.lines : [];
+      const movements = Array.isArray(docItem.movements) ? docItem.movements : [];
+      const qty = safeInt(docItem.totalQty || lines.reduce((sum, line) => sum + safeInt(line.qty), 0) || movements.reduce((sum, mv) => sum + (mv.type === "IN" ? safeInt(mv.qty) : 0), 0));
+      const palletCount = normalizePositiveFloat(docItem.palletCount || docItem.bancali || 0);
+      const palletMeta = palletCount > 0 ? ` · ${formatPalletLabel(palletCount)}` : "";
+      const articleLabel = cleanSpaces(docItem.item || getTransferItemsSummaryLabel(lines)) || "Articoli trasferiti";
+      const ddtUom = cleanSpaces(docItem.uom || "pz");
+      const qtyMeta = ddtUom === "varie" ? "Quantità: vedi righe" : `Totale ${qty.toLocaleString("it-IT")} ${ddtUom}`;
+      const directionLabel = getDdtDirectionTitle(getDdtDirection(docItem));
+      return `
+        <article class="ddt-card">
+          <div class="ddt-top">
+            <div class="ddt-title">
+              <div class="ddt-kicker">Documento di trasporto <span class="ddt-direction-label">· ${escapeHtml(directionLabel)}</span></div>
+              <div class="ddt-number">${escapeHtml(docNumber)}</div>
+              <div class="ddt-route">${escapeHtml(docItem.fromLabel || warehouseLabel(docItem.fromWarehouse))} → ${escapeHtml(docItem.toLabel || warehouseLabel(docItem.toWarehouse))}</div>
+              <div class="ddt-meta">${escapeHtml(formatDateIt(docItem.date))} · ${escapeHtml(articleLabel)} · ${escapeHtml(qtyMeta)}${escapeHtml(palletMeta)}</div>
+            </div>
+            <div class="ddt-actions">
+              <button class="ddt-open-btn js-open-ddt" type="button" data-ddt-id="${escapeHtml(docItem.id)}" ${state.busy ? "disabled" : ""}>Apri PDF</button>
+              <button class="ddt-delete-btn js-delete-ddt" type="button" data-ddt-id="${escapeHtml(docItem.id)}" ${state.busy ? "disabled" : ""}>Elimina</button>
+            </div>
+          </div>
+        </article>
+      `;
+    }
+
+    function renderDdtGroup(direction, items){
+      const rows = Array.isArray(items) ? items : [];
+      const body = rows.length
+        ? rows.map(renderDdtCard).join("")
+        : `<div class="empty">Nessun DDT ${escapeHtml(getDdtDirectionTitle(direction))}.</div>`;
+      return `
+        <section class="ddt-group" data-ddt-direction="${escapeHtml(direction)}">
+          <div class="ddt-group-head">
+            <div class="ddt-group-title">
+              <strong>${escapeHtml(getDdtDirectionTitle(direction))}</strong>
+              <span>${escapeHtml(getDdtDirectionSubtitle(direction))}</span>
+            </div>
+            <div class="ddt-group-count">${rows.length.toLocaleString("it-IT")}</div>
+          </div>
+          <div class="ddt-group-body">${body}</div>
+        </section>
+      `;
+    }
+
     function renderDdtDocuments(){
       if (!els.ddtMeta || !els.ddtList) return;
       if (!state.user){
@@ -5878,40 +6020,26 @@
         const at = tsToDate(a.createdAt)?.getTime?.() || 0;
         const bt = tsToDate(b.createdAt)?.getTime?.() || 0;
         return bt - at;
-      }).slice(0, 30);
+      }).slice(0, 60);
       if (!docs.length){
         els.ddtMeta.textContent = "Nessun DDT generato.";
         els.ddtList.innerHTML = '<div class="empty">Nessun DDT generato.</div>';
         return;
       }
-      els.ddtMeta.textContent = `${docs.length.toLocaleString("it-IT")} DDT recenti · Documenti generati`;
-      els.ddtList.innerHTML = docs.map(docItem => {
-        const docNumber = docItem.ddtNumber || docItem.docNum || `DDT ${docItem.id}`;
-        const lines = Array.isArray(docItem.lines) ? docItem.lines : [];
-        const movements = Array.isArray(docItem.movements) ? docItem.movements : [];
-        const qty = safeInt(docItem.totalQty || lines.reduce((sum, line) => sum + safeInt(line.qty), 0) || movements.reduce((sum, mv) => sum + (mv.type === "IN" ? safeInt(mv.qty) : 0), 0));
-        const palletCount = normalizePositiveFloat(docItem.palletCount || docItem.bancali || 0);
-        const palletMeta = palletCount > 0 ? ` · ${formatPalletLabel(palletCount)}` : "";
-        const articleLabel = cleanSpaces(docItem.item || getTransferItemsSummaryLabel(lines)) || "Articoli trasferiti";
-        const ddtUom = cleanSpaces(docItem.uom || "pz");
-        const qtyMeta = ddtUom === "varie" ? "Quantità: vedi righe" : `Totale ${qty.toLocaleString("it-IT")} ${ddtUom}`;
-        return `
-          <article class="ddt-card">
-            <div class="ddt-top">
-              <div class="ddt-title">
-                <div class="ddt-kicker">Documento di trasporto</div>
-                <div class="ddt-number">${escapeHtml(docNumber)}</div>
-                <div class="ddt-route">${escapeHtml(docItem.fromLabel || warehouseLabel(docItem.fromWarehouse))} → ${escapeHtml(docItem.toLabel || warehouseLabel(docItem.toWarehouse))}</div>
-                <div class="ddt-meta">${escapeHtml(formatDateIt(docItem.date))} · ${escapeHtml(articleLabel)} · ${escapeHtml(qtyMeta)}${escapeHtml(palletMeta)}</div>
-              </div>
-              <div class="ddt-actions">
-                <button class="ddt-open-btn js-open-ddt" type="button" data-ddt-id="${escapeHtml(docItem.id)}" ${state.busy ? "disabled" : ""}>Apri PDF</button>
-                <button class="ddt-delete-btn js-delete-ddt" type="button" data-ddt-id="${escapeHtml(docItem.id)}" ${state.busy ? "disabled" : ""}>Elimina</button>
-              </div>
-            </div>
-          </article>
-        `;
-      }).join("");
+
+      const toConca = docs.filter(docItem => getDdtDirection(docItem) === TRANSFER_TO_CONCAMARISE);
+      const toCerea = docs.filter(docItem => getDdtDirection(docItem) === TRANSFER_TO_CEREA);
+      const other = docs.filter(docItem => {
+        const dir = getDdtDirection(docItem);
+        return dir !== TRANSFER_TO_CONCAMARISE && dir !== TRANSFER_TO_CEREA;
+      });
+
+      els.ddtMeta.textContent = `${docs.length.toLocaleString("it-IT")} DDT recenti · Porta a Conca: ${toConca.length.toLocaleString("it-IT")} · Porta a Cerea: ${toCerea.length.toLocaleString("it-IT")}`;
+      els.ddtList.innerHTML = [
+        renderDdtGroup(TRANSFER_TO_CONCAMARISE, toConca),
+        renderDdtGroup(TRANSFER_TO_CEREA, toCerea),
+        other.length ? renderDdtGroup("other", other) : ""
+      ].join("");
     }
 
     function normalizeDdtSeriesProgressive(number){
