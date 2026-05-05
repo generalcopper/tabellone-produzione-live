@@ -2825,6 +2825,20 @@
     const INVENTORY_PENDING_MS = 15000;
     const TZ = "Europe/Rome";
     const SUGGESTION_LIMIT = 80;
+    const ALWAYS_AVAILABLE_TO_CEREA_QTY = 999999;
+    const ALWAYS_AVAILABLE_TO_CEREA_PRODUCTS = Object.freeze([
+      {
+        code: "IBC",
+        name: "IBC vuoto",
+        alias: "IBC",
+        searchText: "IBC vuoto contenitore cisterna vuota",
+        uom: "pz",
+        defaultTransferQty: 1,
+        categoryKey: "__always_available_to_cerea",
+        categoryName: "Sempre disponibile",
+        categoryColor: "#0a84ff"
+      }
+    ]);
     const MAIL_COLLECTION = "email";
     const EMAIL_TO_MATTEO = "matteo@generalcoppersrl.com";
     const EMAIL_TO_LG_TRADING = "info@lgtrading.it";
@@ -3916,6 +3930,10 @@
         createdBy: String(data.createdBy || data.userEmail || data.user || data.author || "").trim(),
         createdByEmail: String(data.createdByEmail || data.userEmail || "").trim(),
         createdByUid: String(data.createdByUid || data.uid || "").trim(),
+        nonStockItem: data.nonStockItem === true,
+        inventoryNeutral: data.inventoryNeutral === true,
+        stockNeutral: data.stockNeutral === true,
+        alwaysAvailableItem: data.alwaysAvailableItem === true,
         docType,
         docNum: docNumber,
         ddtId,
@@ -4358,6 +4376,7 @@
       const concamariseRowsByCode = new Map();
 
       for (const mv of (state.movements || [])){
+        if (mv?.nonStockItem === true || mv?.inventoryNeutral === true || mv?.stockNeutral === true) continue;
         const code = String(mv?.code || "").trim();
         if (!code) continue;
         const low = code.toLowerCase();
@@ -4418,6 +4437,50 @@
       const info = snapshot && snapshot.totalsByCode ? snapshot.totalsByCode.get(low) : null;
       const fromMov = normalizeUom(info?.uom || "");
       return fromMov || "pz";
+    }
+
+    function isAlwaysAvailableToCereaProduct(product, direction = state.transferDirection){
+      const code = normalizeInventoryCodeKey(product?.code || product?.codeLower || "");
+      return direction === TRANSFER_TO_CEREA && (product?.isAlwaysAvailableToCerea === true || code === "ibc");
+    }
+
+    function buildAlwaysAvailableToCereaProduct(def, config = transferConfig(TRANSFER_TO_CEREA)){
+      const code = cleanSpaces(def?.code || "IBC").toUpperCase();
+      const name = cleanSpaces(def?.name || `${code} vuoto`) || `${code} vuoto`;
+      const uom = normalizeUom(def?.uom || "pz") || "pz";
+      return {
+        code,
+        codeLower: code.toLowerCase(),
+        name,
+        alias: cleanSpaces(def?.alias || code),
+        searchText: cleanSpaces(def?.searchText || `${code} ${name}`),
+        fallbackName: name,
+        uom,
+        cereaQty: 0,
+        concamariseQty: ALWAYS_AVAILABLE_TO_CEREA_QTY,
+        sourceQty: ALWAYS_AVAILABLE_TO_CEREA_QTY,
+        defaultTransferQty: Math.max(1, safeInt(def?.defaultTransferQty || 1)),
+        isAlwaysAvailableToCerea: true,
+        isVirtualAlwaysAvailable: true,
+        isTabWriteCompleted: false,
+        sourceLabel: config.sourceLabel,
+        destinationLabel: config.destinationLabel,
+        categoryKey: cleanSpaces(def?.categoryKey || "__always_available_to_cerea"),
+        categoryName: cleanSpaces(def?.categoryName || "Sempre disponibile"),
+        categoryColor: cleanSpaces(def?.categoryColor || "#0a84ff")
+      };
+    }
+
+    function buildAlwaysAvailableSourceRowsForProduct(product, qty){
+      const safeQty = Math.max(1, safeInt(qty || product?.defaultTransferQty || 1));
+      return [{
+        customer: "",
+        code: cleanSpaces(product?.code || "IBC"),
+        item: cleanSpaces(product?.name || product?.code || "IBC vuoto"),
+        uom: normalizeUom(product?.uom || "pz") || "pz",
+        qty: safeQty,
+        syntheticAlwaysAvailable: true
+      }];
     }
 
     function transferConfig(direction = state.transferDirection){
@@ -4561,6 +4624,7 @@
         const product = productsByCode.get(low) || null;
         const code = cleanSpaces(productCodeFromData(product) || totals?.code || low);
         if (!code) continue;
+        if (normalizeInventoryCodeKey(code) === "ibc" && config.direction !== TRANSFER_TO_CEREA) continue;
 
         const cereaQty = safeInt(totals?.cerea || 0);
         const concamariseQty = safeInt(totals?.concamarise || 0);
@@ -4605,7 +4669,36 @@
         });
       }
 
+      if (config.direction === TRANSFER_TO_CEREA){
+        for (const def of ALWAYS_AVAILABLE_TO_CEREA_PRODUCTS){
+          const virtualProduct = buildAlwaysAvailableToCereaProduct(def, config);
+          const idx = list.findIndex(product => normalizeInventoryCodeKey(product?.code || "") === virtualProduct.codeLower);
+          if (idx >= 0){
+            list[idx] = {
+              ...list[idx],
+              name: cleanSpaces(list[idx]?.name || virtualProduct.name),
+              alias: cleanSpaces(list[idx]?.alias || virtualProduct.alias),
+              searchText: cleanSpaces([list[idx]?.searchText || "", virtualProduct.searchText].join(" ")),
+              fallbackName: cleanSpaces(list[idx]?.fallbackName || virtualProduct.fallbackName),
+              uom: normalizeUom(list[idx]?.uom || virtualProduct.uom) || virtualProduct.uom,
+              sourceQty: Math.max(safeInt(list[idx]?.sourceQty || 0), virtualProduct.sourceQty),
+              defaultTransferQty: virtualProduct.defaultTransferQty,
+              isAlwaysAvailableToCerea: true,
+              isVirtualAlwaysAvailable: true,
+              categoryKey: cleanSpaces(list[idx]?.categoryKey || virtualProduct.categoryKey),
+              categoryName: cleanSpaces(list[idx]?.categoryName || virtualProduct.categoryName),
+              categoryColor: cleanSpaces(list[idx]?.categoryColor || virtualProduct.categoryColor)
+            };
+          }else{
+            list.push(virtualProduct);
+          }
+        }
+      }
+
       list.sort((a, b) => {
+        const aAlways = a?.isAlwaysAvailableToCerea === true ? 1 : 0;
+        const bAlways = b?.isAlwaysAvailableToCerea === true ? 1 : 0;
+        if (bAlways !== aAlways) return bAlways - aAlways;
         const an = String(a?.name || "").localeCompare(String(b?.name || ""), "it", { sensitivity: "base" });
         if (an !== 0) return an;
         return String(a?.code || "").localeCompare(String(b?.code || ""), "it", { sensitivity: "base" });
@@ -4938,6 +5031,7 @@
     function getDefaultToCereaCandidateEntries(){
       const all = buildLoadableProducts({ direction: TRANSFER_TO_CEREA });
       const selectable = all.filter(product => {
+        if (isAlwaysAvailableToCereaProduct(product, TRANSFER_TO_CEREA)) return true;
         const sourceQty = safeInt(product?.sourceQty || 0);
         if (sourceQty <= 0) return false;
         return getSelectedTransferQtyByCode(product.code) < sourceQty;
@@ -4951,6 +5045,8 @@
       const config = transferConfig();
       const explicit = safeInt(preservedQty || 0);
       if (explicit > 0) return explicit;
+      const defaultQty = safeInt(product?.defaultTransferQty || 0);
+      if (defaultQty > 0) return defaultQty;
       if (config.direction === TRANSFER_TO_CEREA){
         return Math.max(0, safeInt(product?.sourceQty || 0));
       }
@@ -6149,6 +6245,9 @@
         else if (index === 0) classes.push("is-leading");
 
         const categoryStyle = product.categoryColor ? ` style="--cat-color:${escapeHtml(product.categoryColor)}"` : "";
+        const qtyDisplay = product.isAlwaysAvailableToCerea === true
+          ? (defaultToCereaMode ? "Aggiungi al DDT · sempre disponibile" : "Sempre disponibile")
+          : (defaultToCereaMode ? "Aggiungi al DDT" : `${config.sourceLabel}: ${product.sourceQty.toLocaleString("it-IT")} ${product.uom}`);
         return `
           <button
             class="${classes.join(" ")}"
@@ -6168,7 +6267,7 @@
                   <span class="suggestion-pill">${escapeHtml(product.code)}</span>
                 </div>
               </div>
-              <div class="suggestion-qty">${defaultToCereaMode ? "Aggiungi al DDT" : escapeHtml(config.sourceLabel)}: ${product.sourceQty.toLocaleString("it-IT")} ${escapeHtml(product.uom)}</div>
+              <div class="suggestion-qty">${escapeHtml(qtyDisplay)}</div>
             </div>
           </button>
         `;
@@ -6892,8 +6991,12 @@
           showToast("Completa articolo e quantità.", "err");
           return;
         }
-        const sourceRows = getPositiveRowsForCodeInWarehouse(product.code, config.sourceWarehouse);
-        const available = sourceRows.reduce((sum, row) => sum + safeInt(row.qty), 0);
+        let sourceRows = getPositiveRowsForCodeInWarehouse(product.code, config.sourceWarehouse);
+        let available = sourceRows.reduce((sum, row) => sum + safeInt(row.qty), 0);
+        if (isAlwaysAvailableToCereaProduct(product, config.direction)){
+          sourceRows = buildAlwaysAvailableSourceRowsForProduct(product, qty);
+          available = qty;
+        }
         if (!sourceRows.length || available <= 0){
           showToast(`Articolo esaurito a ${config.sourceLabel} (${product.code})`, "err");
           return;
@@ -6907,6 +7010,7 @@
           product,
           sourceRows,
           available,
+          isAlwaysAvailableToCerea: isAlwaysAvailableToCereaProduct(product, config.direction),
           code: cleanSpaces(product.code || item.code || ""),
           item: cleanSpaces(product.name || item.item || product.code || "Articolo"),
           qty,
@@ -6977,7 +7081,9 @@
             fromWarehouse: config.sourceWarehouse,
             toWarehouse: config.destinationWarehouse,
             fromLabel: config.sourceLabel,
-            toLabel: config.destinationLabel
+            toLabel: config.destinationLabel,
+            nonStockItem: itemEntry.isAlwaysAvailableToCerea === true,
+            alwaysAvailableItem: itemEntry.isAlwaysAvailableToCerea === true
           });
 
           let remaining = requestedQty;
@@ -7008,6 +7114,10 @@
               note: config.note || NOTE,
               source: SOURCE,
               rawText: state.loadCommand,
+              nonStockItem: itemEntry.isAlwaysAvailableToCerea === true,
+              inventoryNeutral: itemEntry.isAlwaysAvailableToCerea === true,
+              stockNeutral: itemEntry.isAlwaysAvailableToCerea === true,
+              alwaysAvailableItem: itemEntry.isAlwaysAvailableToCerea === true,
               docType: DOC_TYPE,
               docNum: reserved.ddtNumber,
               ddtId: ddtRef.id,
