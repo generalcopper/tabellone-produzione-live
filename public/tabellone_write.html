@@ -14151,7 +14151,8 @@ function twRenderDone(items){
             <div class="sub" style="font-weight:800;">Cliente: ${escapeHtml(customerTxt)} · Pezzi: ${escapeHtml(qtyTxt)}</div>
           </div>
           <div style="display:flex; gap:8px; align-items:center; justify-content:flex-end; flex-wrap:wrap;">
-            <button class="btn ghost" data-tw-act="undo" type="button">Annulla</button>
+            <button class="btn ghost" data-tw-act="undo" type="button">Ripristina</button>
+            <button class="btn bad adminOnly" data-tw-act="delete_done" type="button">Elimina</button>
           </div>
         </div>
       `;
@@ -14166,7 +14167,8 @@ function twRenderDone(items){
             <div class="sub" style="font-weight:800;">Pezzi: ${escapeHtml(qtyTxt)} · Completato: ${escapeHtml(twFmtWhen(it.completedAtMs))}${who ? ` · Da: ${escapeHtml(who)}` : ``}</div>
           </div>
           <div style="display:flex; gap:8px; align-items:center; justify-content:flex-end; flex-wrap:wrap;">
-            <button class="btn ghost" data-tw-act="undo" type="button">Annulla</button>
+            <button class="btn ghost" data-tw-act="undo" type="button">Ripristina</button>
+            <button class="btn bad adminOnly" data-tw-act="delete_done" type="button">Elimina</button>
           </div>
         </div>
       `;
@@ -14538,8 +14540,8 @@ async function twClearAllCompletati(){
     showToast("Accesso limitato", "Solo gli amministratori possono svuotare i completati.");
     return;
   }
-  if(!confirm("ATTENZIONE: questa azione cancella TUTTI i COMPLETATI salvati per questa linea. Procedo?")) return;
-  if(!confirm("Conferma definitiva: svuotare COMPLETATI?")) return;
+  if(!confirm("Svuotare la lista dei completati?\n\nI movimenti Conca collegati resteranno salvati in cloud e l’inventario non verrà toccato.")) return;
+  if(!confirm("Conferma definitiva: svuotare solo la lista COMPLETATI?")) return;
 
   try{
     if(!state.firebase?.ok) throw new Error("Firebase non disponibile");
@@ -14547,12 +14549,12 @@ async function twClearAllCompletati(){
     const db = state.firebase.db;
     const producedCol = fs.collection(db, "producedDays", TW_LINE_BUCKET, "items");
 
-    twSetCloud("loading","cancello…");
+    twSetCloud("loading","svuoto lista…");
     const snap = await fs.getDocs(producedCol);
     const docs = snap.docs || [];
     if(!docs.length){
       twSetCloud("ok");
-      alert("Nessun completato da cancellare.");
+      alert("Nessun completato da svuotare.");
       return;
     }
 
@@ -14560,24 +14562,11 @@ async function twClearAllCompletati(){
     let batch = fs.writeBatch(db);
     let ops = 0;
     for(const d of docs){
-      const data = d.data() || {};
+      // Svuota solo la lista COMPLETATI: non elimina movimenti Conca / PF.
+      // I movimenti restano in cloud nelle rispettive collection inventario.
       batch.delete(d.ref);
-      ops++; deleted++;
-
-      const concaMovementId = String(data.concaInventoryMovementId || twConcaMovementDocId(d.id)).trim();
-      if(concaMovementId){
-        batch.delete(fs.doc(db, "orgs", TW_HUB_ORG_ID, TW_CONCA_INVENTORY_COLLECTION, concaMovementId));
-        ops++;
-      }
-
-      const isPf = twIsManualFinishedProductRow(data);
-      if(isPf){
-        const movementId = String(data.finishedInventoryMovementId || twPfMovementDocId(d.id)).trim();
-        if(movementId){
-          batch.delete(fs.doc(db, "orgs", TW_HUB_ORG_ID, "finishedInventoryMovements", movementId));
-          ops++;
-        }
-      }
+      ops += 1;
+      deleted += 1;
 
       if(ops >= 450){
         await batch.commit();
@@ -14588,11 +14577,60 @@ async function twClearAllCompletati(){
     if(ops) await batch.commit();
 
     twSetCloud("ok");
-    alert("Completati cancellati: " + deleted);
+    alert("Lista completati svuotata: " + deleted + " righe. Movimenti Conca non eliminati.");
   }catch(e){
     console.warn("twClearAllCompletati error:", e);
     twSetCloud("bad", e?.code || "error");
-    alert("Errore cancellazione completati: " + (e?.message || e?.code || "unknown"));
+    alert("Errore svuotamento completati: " + (e?.message || e?.code || "unknown"));
+  }
+}
+
+async function twDeleteCompletato(it){
+  if(!it || !it.id) return;
+  if(!(state.user && state.user.isAdmin)){
+    showToast("Accesso limitato", "Solo gli amministratori possono eliminare un completato.");
+    return;
+  }
+
+  const title = (it.product || it.label || "—") + (it.format ? (" • " + it.format) : "");
+  if(!confirm("Eliminare definitivamente questo completato?\n\nVerrà eliminato anche il movimento Conca collegato. La riga NON verrà riportata in coda.\n\n" + title)) return;
+
+  try{
+    if(!state.firebase?.ok) throw new Error("Firebase non disponibile");
+    const fs = state.firebase.api;
+    const db = state.firebase.db;
+    const producedCol = fs.collection(db, "producedDays", TW_LINE_BUCKET, "items");
+
+    twSetCloud("loading","elimino…");
+    const batch = fs.writeBatch(db);
+    batch.delete(fs.doc(producedCol, it.id));
+
+    const concaMovementId = String(it.concaInventoryMovementId || twConcaMovementDocId(it.id)).trim();
+    if(concaMovementId){
+      batch.delete(fs.doc(db, "orgs", TW_HUB_ORG_ID, TW_CONCA_INVENTORY_COLLECTION, concaMovementId));
+    }
+
+    if(twIsManualFinishedProductRow(it)){
+      const movementId = String(it.finishedInventoryMovementId || twPfMovementDocId(it.id)).trim();
+      if(movementId){
+        batch.delete(fs.doc(db, "orgs", TW_HUB_ORG_ID, "finishedInventoryMovements", movementId));
+      }
+    }
+
+    await batch.commit();
+
+    try{ await twRemoveWriteCompletionFromHub(it); }catch(_e){}
+    try{ ensureTabWriteState().localDoneIds.delete(String(it.id)); }catch(_e){}
+    try{ twScheduleOrdersSync(); }catch(_e){}
+    try{ state.partialOrders = computePartialOrders().partial; }catch(_e){}
+    try{ renderHome(); }catch(_e){}
+
+    twSetCloud("ok");
+    showToast("Completato eliminato", "Movimento Conca collegato eliminato in cloud.");
+  }catch(e){
+    console.warn("twDeleteCompletato error:", e);
+    twSetCloud("bad", e?.code || "error");
+    alert("Errore eliminazione completato: " + (e?.message || e?.code || "unknown"));
   }
 }
 
@@ -15292,7 +15330,14 @@ function twBindUiOnce(){
     if(!id) return;
     const tw = ensureTabWriteState();
     const it = (tw.doneItems || []).find(x=>x.id===id) || null;
-    if(act === "undo" && it) twUndoCompletato(it);
+    if(act === "undo" && it){
+      twUndoCompletato(it);
+      return;
+    }
+    if(act === "delete_done" && it){
+      twDeleteCompletato(it);
+      return;
+    }
   });
 
   // modal events
