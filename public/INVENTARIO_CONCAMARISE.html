@@ -4365,7 +4365,8 @@
         if (wh !== WAREHOUSE_CEREA && wh !== WAREHOUSE_CONCAMARISE) continue;
         const qty = safeInt(mv.qty);
         if (!qty) continue;
-        const delta = (String(mv.type || "").toUpperCase() === "OUT") ? -qty : qty;
+        const type = String(mv.type || "").trim().toUpperCase() === "OUT" ? "OUT" : "IN";
+        const delta = type === "OUT" ? -qty : qty;
         const item = String(mv.item || "").trim();
         const customer = String(mv.customer || "").trim();
         const uom = normalizeUom(mv.uom || "");
@@ -4375,11 +4376,16 @@
           cerea: 0,
           concamarise: 0,
           item: "",
-          uom: ""
+          uom: "",
+          hasTabWriteCompletion: false
         };
 
         if (wh === WAREHOUSE_CONCAMARISE) totalRec.concamarise += delta;
         else totalRec.cerea += delta;
+
+        if (wh === WAREHOUSE_CONCAMARISE && type !== "OUT" && isTabWriteCompletedMovement(mv)){
+          totalRec.hasTabWriteCompletion = true;
+        }
 
         if (!totalRec.item && item) totalRec.item = item;
         if (uom) totalRec.uom = uom;
@@ -4495,6 +4501,19 @@
       return map;
     }
 
+    function isTabWriteCompletedMovement(mv){
+      if (!mv || typeof mv !== "object") return false;
+      const source = normalizeSearch(mv.source || "");
+      const docType = String(mv.docType || "").trim().toUpperCase();
+      const origin = cleanSpaces(mv.origin || "");
+      return Boolean(
+        origin === TABWRITE_SYNC_ORIGIN ||
+        source === normalizeSearch(TABWRITE_SOURCE) ||
+        docType === TABWRITE_DOC_TYPE ||
+        cleanSpaces(mv.twDoneId || mv.sourceDoneId || "")
+      );
+    }
+
     function getMovementBackedCategory(product, categoryMap, fallbackName = "Da movimenti inventario"){
       const category = product ? getProductCategoryInfo(product, categoryMap) : null;
       if (category && category.key) return category;
@@ -4577,6 +4596,7 @@
           concamariseQty,
           concamariseQty: concamariseQty,
           sourceQty,
+          isTabWriteCompleted: Boolean(totals?.hasTabWriteCompletion && concamariseQty > 0),
           sourceLabel: config.sourceLabel,
           destinationLabel: config.destinationLabel,
           categoryKey: category.key,
@@ -4905,6 +4925,36 @@
 
     function getLoadCandidates(query, limit = SUGGESTION_LIMIT){
       return getLoadCandidateEntries(query, limit, false).map(entry => entry.product);
+    }
+
+    function getSelectedTransferQtyByCode(code){
+      const key = normalizeInventoryCodeKey(code);
+      if (!key) return 0;
+      const items = mergeTransferItems(buildTransferItemsFromCommand(state.loadCommand));
+      const found = items.find(item => normalizeInventoryCodeKey(item?.product?.code || item?.code || "") === key);
+      return safeInt(found?.qty || 0);
+    }
+
+    function getDefaultToCereaCandidateEntries(){
+      const all = buildLoadableProducts({ direction: TRANSFER_TO_CEREA });
+      const selectable = all.filter(product => {
+        const sourceQty = safeInt(product?.sourceQty || 0);
+        if (sourceQty <= 0) return false;
+        return getSelectedTransferQtyByCode(product.code) < sourceQty;
+      });
+      const completed = selectable.filter(product => product.isTabWriteCompleted);
+      const base = completed.length ? completed : selectable;
+      return base.map(product => ({ product, score: 0 }));
+    }
+
+    function resolveSuggestionDefaultQty(product, preservedQty = 0){
+      const config = transferConfig();
+      const explicit = safeInt(preservedQty || 0);
+      if (explicit > 0) return explicit;
+      if (config.direction === TRANSFER_TO_CEREA){
+        return Math.max(0, safeInt(product?.sourceQty || 0));
+      }
+      return 0;
     }
 
     function resolveClearBestLoadCandidate(query){
@@ -6002,7 +6052,10 @@
       const input = els.loadCommand;
       const activeParts = validation.activeParts || validation.parts;
       const typedQuery = normalizeSearch(activeParts.productText || activeParts.raw);
-      const candidateEntries = typedQuery ? getLoadCandidateEntries(activeParts.productText || activeParts.raw, SUGGESTION_LIMIT, true) : [];
+      const defaultToCereaMode = !typedQuery && config.direction === TRANSFER_TO_CEREA;
+      const candidateEntries = typedQuery
+        ? getLoadCandidateEntries(activeParts.productText || activeParts.raw, SUGGESTION_LIMIT, true)
+        : (defaultToCereaMode ? getDefaultToCereaCandidateEntries() : []);
       const candidates = candidateEntries.map(entry => entry.product);
       const activeCode = String(validation.activeProduct?.codeLower || validation.activeProduct?.code || "").toLowerCase();
       const hasAnyInput = !!cleanSpaces(state.loadCommand);
@@ -6013,6 +6066,9 @@
       }
 
       input.disabled = !ready || state.busy || loadableCount <= 0;
+      input.placeholder = config.direction === TRANSFER_TO_CEREA
+        ? "Seleziona i completati sotto oppure cerca articolo e quantità"
+        : "Cerca articolo e quantità. Vai a capo per aggiungere un altro articolo.";
 
       let controlState = "is-empty";
       if (!hasAnyInput) controlState = "is-empty";
@@ -6022,7 +6078,9 @@
       els.commandWrap.className = `command-control ${controlState}`;
 
       els.commandHint.hidden = false;
-      els.commandHint.textContent = "Scrivi un articolo per riga: nome articolo + quantità. Esempio: Prodotto A 20";
+      els.commandHint.textContent = config.direction === TRANSFER_TO_CEREA
+        ? "Seleziona uno o più completati disponibili a Conca: vengono aggiunti al DDT con la quantità disponibile."
+        : "Scrivi un articolo per riga: nome articolo + quantità. Esempio: Prodotto A 20";
       els.validationCard.hidden = true;
       els.validationCard.className = "validation-card is-neutral";
       els.validationCard.innerHTML = "";
@@ -6063,7 +6121,7 @@
         `;
       }
 
-      if (!typedQuery){
+      if (!typedQuery && !defaultToCereaMode){
         els.btnConfirm.disabled = !(validation.canSubmit && state.user && state.db && !state.busy);
         els.btnConfirm.textContent = state.busy ? "SALVO…" : config.actionLabel;
         return;
@@ -6073,7 +6131,7 @@
         els.loadSuggestions.className = "suggestions is-open";
         els.loadSuggestions.innerHTML = `
           <div class="suggestion is-empty-state">
-            <div class="suggestion-title">Nessun articolo trovato</div>
+            <div class="suggestion-title">${defaultToCereaMode ? "Nessun completato disponibile da aggiungere al DDT" : "Nessun articolo trovato"}</div>
           </div>
         `;
         els.btnConfirm.disabled = !(validation.canSubmit && state.user && state.db && !state.busy);
@@ -6105,12 +6163,12 @@
                 <div class="suggestion-meta">
                   <span class="suggestion-pill is-category"${categoryStyle}>
                     <span class="suggestion-pill-dot"></span>
-                    ${escapeHtml(product.categoryName || "Articolo")}
+                    ${escapeHtml(defaultToCereaMode && product.isTabWriteCompleted ? "Completato WRITE" : (product.categoryName || "Articolo"))}
                   </span>
                   <span class="suggestion-pill">${escapeHtml(product.code)}</span>
                 </div>
               </div>
-              <div class="suggestion-qty">${escapeHtml(config.sourceLabel)}: ${product.sourceQty.toLocaleString("it-IT")} ${escapeHtml(product.uom)}</div>
+              <div class="suggestion-qty">${defaultToCereaMode ? "Aggiungi al DDT" : escapeHtml(config.sourceLabel)}: ${product.sourceQty.toLocaleString("it-IT")} ${escapeHtml(product.uom)}</div>
             </div>
           </button>
         `;
@@ -6163,6 +6221,9 @@
       els.loadModal.classList.add("is-open");
       els.loadModal.setAttribute("aria-hidden", "false");
       renderLoadModal();
+      if (state.transferDirection === TRANSFER_TO_CEREA){
+        return;
+      }
       if (syncUserGesture){
         focusCommand(true);
         return;
@@ -7389,7 +7450,16 @@
 
       const active = getActiveLoadLineInfo(state.loadCommand);
       const preservedQty = active.parts.hasQty && safeInt(active.parts.qty) > 0 ? safeInt(active.parts.qty) : 0;
-      const nextLine = formatLoadCommandLine(product, preservedQty);
+      const selectedQty = getSelectedTransferQtyByCode(product.code);
+      const availableQty = safeInt(product.sourceQty || 0);
+      if (availableQty > 0 && selectedQty >= availableQty && !(active.parts.hasQty && active.parts.qty > 0)){
+        showToast("Articolo già aggiunto al DDT", "warn");
+        armedSuggestionCode = "";
+        return false;
+      }
+      const resolvedQty = resolveSuggestionDefaultQty(product, preservedQty);
+      const baseLine = formatLoadCommandLine(product, resolvedQty);
+      const nextLine = (transferConfig().direction === TRANSFER_TO_CEREA && resolvedQty > 0) ? `${baseLine}\n` : baseLine;
 
       state.loadSelectedCode = product.code;
       replaceActiveLoadLine(nextLine);
