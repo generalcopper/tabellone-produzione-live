@@ -11553,6 +11553,10 @@ async function twRepairQueueOrder(reason="snapshot"){
 
 
 const TW_HUB_ORG_ID = "generalcopper";
+const TW_CONCA_INVENTORY_COLLECTION = "inventoryMovements";
+const TW_CONCA_WAREHOUSE = "concamarise";
+const TW_CONCA_SOURCE = "Tabellone WRITE";
+const TW_CONCA_DOC_TYPE = "PRODUZIONE_WRITE";
 
 function twEnsurePfState(){
   const tw = ensureTabWriteState();
@@ -11845,6 +11849,182 @@ function twIsManualFinishedProductRow(it){
 
 function twPfMovementDocId(baseId){
   return "twpf_" + twKeyToDocId(String(baseId || "")).slice(0, 860);
+}
+
+function twConcaMovementDocId(baseId){
+  return "twconca_" + twKeyToDocId(String(baseId || "")).slice(0, 850);
+}
+
+function twBuildConcaInventoryLoadPayload(done, fs){
+  try{
+    if(!done) return null;
+
+    const qtyRaw = twPfNum(done.qty);
+    if(!(qtyRaw > 0)) return null;
+
+    const qty = Math.round(qtyRaw * 1000) / 1000;
+    const doneId = String(done.id || done.key || done.twDoneId || "").trim() || String(Date.now());
+    const code = String(done.finishedProductCode || done.code || done.product || done.label || doneId || "").trim();
+    const item = String(done.finishedProductName || done.product || done.label || done.rawLine || code || "").trim();
+    if(!code && !item) return null;
+
+    const uom = String(done.finishedProductUom || done.unit || done.um || "pz").trim() || "pz";
+    const date = nowIso().slice(0,10);
+    const movementId = String(done.concaInventoryMovementId || twConcaMovementDocId(doneId)).trim();
+    const label = item || code || "Prodotto completato";
+    const orderNo = String(done.orderNo || "").trim();
+    const customer = String(done.customer || "").trim();
+    const noteBits = [
+      `Produzione completata da Tabellone WRITE: +${qty} ${uom} • ${label}`.trim(),
+      orderNo ? `Ordine ${orderNo}` : "",
+      customer ? `Cliente ${customer}` : ""
+    ].filter(Boolean);
+
+    return {
+      movementId,
+      payload: {
+        type: "IN",
+        code: code || item,
+        item: item || code,
+        uom,
+        qty,
+        qtyRaw: `${qty} ${uom}`.trim(),
+        date,
+        note: noteBits.join(" · "),
+        source: TW_CONCA_SOURCE,
+        warehouse: TW_CONCA_WAREHOUSE,
+        docType: TW_CONCA_DOC_TYPE,
+        docNum: `TW-CONCA-${twKeyToDocId(doneId).slice(0,60)}`,
+        docDateRaw: date,
+        createdAt: fs.serverTimestamp(),
+        createdBy: (state.user?.email || state.user?.uid || "Sistema"),
+        createdByName: state.user?.fullName || "",
+        createdByEmail: state.user?.email || "",
+        createdByUid: state.user?.uid || "",
+        twDoneId: doneId,
+        sourceLine: TW_LINE_BUCKET,
+        orderNo,
+        customer,
+        lineKey: String(done.lineKey || "").trim(),
+        orderKey: String(done.orderKey || "").trim(),
+        queueOrderKey: String(done.queueOrderKey || "").trim(),
+        completedByName: String(done.completedByName || "").trim(),
+        completedByEmail: String(done.completedByEmail || "").trim(),
+        finishedProductId: String(done.finishedProductId || "").trim(),
+        origin: "tabellone_write_completed_to_conca"
+      }
+    };
+  }catch(e){
+    console.warn("twBuildConcaInventoryLoadPayload error:", e);
+    return null;
+  }
+}
+
+function twConcaBackfillSignature(items){
+  try{
+    return (items || [])
+      .map(it => [
+        String(it?.id || ""),
+        String(it?.qty || ""),
+        String(it?.unit || it?.finishedProductUom || it?.um || ""),
+        String(it?.finishedProductCode || it?.code || it?.product || it?.label || ""),
+        String(it?.finishedProductName || it?.product || it?.label || "")
+      ].join("|"))
+      .sort()
+      .join("§");
+  }catch(_e){
+    return String(Date.now());
+  }
+}
+
+let __TW_CONCA_BACKFILL_T = null;
+function twScheduleDoneConcaBackfill(items){
+  try{
+    const tw = ensureTabWriteState();
+    tw._pendingConcaDoneItems = Array.isArray(items) ? items.slice() : [];
+    if(__TW_CONCA_BACKFILL_T) return;
+    __TW_CONCA_BACKFILL_T = setTimeout(()=>{
+      __TW_CONCA_BACKFILL_T = null;
+      const latest = ensureTabWriteState()._pendingConcaDoneItems || [];
+      twSyncCompletedItemsToConcaInventory(latest);
+    }, 350);
+  }catch(_e){}
+}
+
+async function twSyncCompletedItemsToConcaInventory(items){
+  const tw = ensureTabWriteState();
+  try{
+    if(tw._concaBackfillBusy) return;
+    if(!state.firebase?.ok) return;
+
+    const list = (Array.isArray(items) ? items : []).filter(Boolean);
+    if(!list.length) return;
+
+    const sig = twConcaBackfillSignature(list);
+    if(tw._concaBackfillSig === sig) return;
+
+    const fs = state.firebase.api;
+    const db = state.firebase.db;
+    if(!fs || !db) return;
+
+    tw._concaBackfillBusy = true;
+    twSetCloud("loading", "sync Conca…");
+
+    const producedCol = fs.collection(db, "producedDays", TW_LINE_BUCKET, "items");
+    let batch = fs.writeBatch(db);
+    let ops = 0;
+    let synced = 0;
+
+    async function commitIfNeeded(force=false){
+      if(!ops) return;
+      if(force || ops >= 420){
+        await batch.commit();
+        batch = fs.writeBatch(db);
+        ops = 0;
+      }
+    }
+
+    for(const it of list){
+      const doneId = String(it.id || it.key || it.twDoneId || "").trim();
+      if(!doneId) continue;
+
+      const mov = twBuildConcaInventoryLoadPayload({ ...it, id: doneId, key: doneId }, fs);
+      if(!mov) continue;
+
+      batch.set(
+        fs.doc(db, "orgs", TW_HUB_ORG_ID, TW_CONCA_INVENTORY_COLLECTION, mov.movementId),
+        mov.payload,
+        { merge:true }
+      );
+      ops += 1;
+
+      batch.set(
+        fs.doc(producedCol, doneId),
+        {
+          concaInventoryMovementId: mov.movementId,
+          concaInventorySyncedAt: fs.serverTimestamp(),
+          concaInventoryWarehouse: TW_CONCA_WAREHOUSE
+        },
+        { merge:true }
+      );
+      ops += 1;
+      synced += 1;
+
+      await commitIfNeeded(false);
+    }
+
+    await commitIfNeeded(true);
+    tw._concaBackfillSig = sig;
+    twSetCloud("ok");
+    if(synced){
+      console.info(`Tabellone WRITE → Inventario Conca: ${synced} completati sincronizzati.`);
+    }
+  }catch(e){
+    console.warn("twSyncCompletedItemsToConcaInventory error:", e);
+    twSetCloud("bad", e?.code || "conca-sync");
+  }finally{
+    tw._concaBackfillBusy = false;
+  }
 }
 
 function twBuildFinishedInventoryLoadPayload(done, fs){
@@ -14072,6 +14252,7 @@ async function twCompleteJob(){
     const doneDocId = twKeyToDocId(key);
     const label = ((job.product||job.finishedProductName||"") + (job.format ? (" • " + job.format) : "")).trim() || "Completato";
     const movementId = twIsManualFinishedProductRow(job) ? twPfMovementDocId(doneDocId) : "";
+    const concaMovementId = twConcaMovementDocId(doneDocId);
     const payload = {
       key,
       label,
@@ -14087,6 +14268,7 @@ async function twCompleteJob(){
       finishedProductName: job.finishedProductName || job.product || "",
       finishedProductUom: job.finishedProductUom || job.unit || job.um || "",
       finishedInventoryMovementId: movementId,
+      concaInventoryMovementId: concaMovementId,
       orderKey: job.orderKey || "",
       orderNo: job.orderNo || "",
       customer: job.customer || "",
@@ -14110,6 +14292,11 @@ async function twCompleteJob(){
     const batch = fs.writeBatch(db);
     batch.set(fs.doc(producedCol, doneDocId), payload, { merge:true });
     batch.delete(fs.doc(queueCol, id));
+
+    const concaMov = twBuildConcaInventoryLoadPayload({ ...payload, id: doneDocId, key }, fs);
+    if(concaMov){
+      batch.set(fs.doc(db, "orgs", TW_HUB_ORG_ID, TW_CONCA_INVENTORY_COLLECTION, concaMov.movementId), concaMov.payload, { merge:true });
+    }
 
     if(twIsManualFinishedProductRow(job)){
       const mov = twBuildFinishedInventoryLoadPayload({ ...payload, id: doneDocId, key }, fs);
@@ -14159,7 +14346,7 @@ async function twCompleteJob(){
     }catch(_e){}
 
     twSetCloud("ok");
-    if(fb) fb.textContent = twIsManualFinishedProductRow(job) ? "Salvato e caricato in inventario PF ✅" : "Salvato ✅";
+    if(fb) fb.textContent = "Salvato e caricato in Inventario Conca ✅";
     setTimeout(()=> twCloseQtyModal(), 250);
   }catch(e){
     console.warn("twCompleteJob error:", e);
@@ -14377,6 +14564,12 @@ async function twClearAllCompletati(){
       batch.delete(d.ref);
       ops++; deleted++;
 
+      const concaMovementId = String(data.concaInventoryMovementId || twConcaMovementDocId(d.id)).trim();
+      if(concaMovementId){
+        batch.delete(fs.doc(db, "orgs", TW_HUB_ORG_ID, TW_CONCA_INVENTORY_COLLECTION, concaMovementId));
+        ops++;
+      }
+
       const isPf = twIsManualFinishedProductRow(data);
       if(isPf){
         const movementId = String(data.finishedInventoryMovementId || twPfMovementDocId(d.id)).trim();
@@ -14433,6 +14626,7 @@ async function twUndoCompletato(it){
       finishedProductName: it.finishedProductName || it.product || "",
       finishedProductUom: it.finishedProductUom || it.unit || it.um || "",
       finishedInventoryMovementId: it.finishedInventoryMovementId || (twIsManualFinishedProductRow(it) ? twPfMovementDocId(it.id) : ""),
+      concaInventoryMovementId: it.concaInventoryMovementId || twConcaMovementDocId(it.id),
       orderNo: it.orderNo || "",
       customer: it.customer || "",
       lineKey: it.lineKey || "",
@@ -14457,6 +14651,12 @@ async function twUndoCompletato(it){
     const batch = fs.writeBatch(db);
     batch.set(fs.doc(queueCol, it.id), payload, { merge:true });
     batch.delete(fs.doc(producedCol, it.id));
+
+    const concaMovementId = String(payload.concaInventoryMovementId || twConcaMovementDocId(it.id)).trim();
+    if(concaMovementId){
+      batch.delete(fs.doc(db, "orgs", TW_HUB_ORG_ID, TW_CONCA_INVENTORY_COLLECTION, concaMovementId));
+    }
+
     if(twIsManualFinishedProductRow(it)){
       const movementId = String(payload.finishedInventoryMovementId || twPfMovementDocId(it.id)).trim();
       if(movementId) batch.delete(fs.doc(db, "orgs", TW_HUB_ORG_ID, "finishedInventoryMovements", movementId));
@@ -14564,6 +14764,7 @@ function twStartDoneWatch(){
         finishedProductName: (v.finishedProductName || "").toString().trim(),
         finishedProductUom: (v.finishedProductUom || "").toString().trim(),
         finishedInventoryMovementId: (v.finishedInventoryMovementId || "").toString().trim(),
+        concaInventoryMovementId: (v.concaInventoryMovementId || "").toString().trim(),
         orderKey: (v.orderKey || "").toString().trim(),
         orderNo: (v.orderNo || "").toString().trim(),
         customer: (v.customer || v.cliente || v.customerName || v.nomeCliente || "").toString().trim(),
@@ -14585,6 +14786,7 @@ function twStartDoneWatch(){
     });
     tw.doneItems = items;
     twRenderAll();
+    try{ twScheduleDoneConcaBackfill(items); }catch(_e){}
     try{ twScheduleOrdersSync(); }catch(_e){}
   }, (err)=>{
     console.warn("tw done snapshot error:", err);
