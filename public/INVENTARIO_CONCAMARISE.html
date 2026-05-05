@@ -2395,6 +2395,16 @@
     box-shadow:inset 3px 0 0 #16a34a !important;
   }
 
+  .modal .suggestion.is-needs-qty{
+    background:#fff1f2 !important;
+    box-shadow:inset 3px 0 0 #ef4444 !important;
+  }
+
+  .modal .suggestion.is-needs-qty .suggestion-title,
+  .modal .suggestion.is-needs-qty .suggestion-qty{
+    color:#991b1b !important;
+  }
+
   /* Empty state row */
   .modal .suggestion.is-empty-state{
     padding:18px 16px !important;
@@ -2833,7 +2843,8 @@
         alias: "IBC",
         searchText: "IBC vuoto contenitore cisterna vuota",
         uom: "pz",
-        defaultTransferQty: 1,
+        defaultTransferQty: 0,
+        requiresManualTransferQty: true,
         categoryKey: "__always_available_to_cerea",
         categoryName: "Sempre disponibile",
         categoryColor: "#0a84ff"
@@ -4459,7 +4470,8 @@
         cereaQty: 0,
         concamariseQty: ALWAYS_AVAILABLE_TO_CEREA_QTY,
         sourceQty: ALWAYS_AVAILABLE_TO_CEREA_QTY,
-        defaultTransferQty: Math.max(1, safeInt(def?.defaultTransferQty || 1)),
+        defaultTransferQty: Math.max(0, safeInt(def?.defaultTransferQty || 0)),
+        requiresManualTransferQty: def?.requiresManualTransferQty === true,
         isAlwaysAvailableToCerea: true,
         isVirtualAlwaysAvailable: true,
         isTabWriteCompleted: false,
@@ -4683,6 +4695,7 @@
               uom: normalizeUom(list[idx]?.uom || virtualProduct.uom) || virtualProduct.uom,
               sourceQty: Math.max(safeInt(list[idx]?.sourceQty || 0), virtualProduct.sourceQty),
               defaultTransferQty: virtualProduct.defaultTransferQty,
+              requiresManualTransferQty: virtualProduct.requiresManualTransferQty === true,
               isAlwaysAvailableToCerea: true,
               isVirtualAlwaysAvailable: true,
               categoryKey: cleanSpaces(list[idx]?.categoryKey || virtualProduct.categoryKey),
@@ -5036,15 +5049,24 @@
         if (sourceQty <= 0) return false;
         return getSelectedTransferQtyByCode(product.code) < sourceQty;
       });
-      const completed = selectable.filter(product => product.isTabWriteCompleted);
-      const base = completed.length ? completed : selectable;
-      return base.map(product => ({ product, score: 0 }));
+      const always = selectable.filter(product => isAlwaysAvailableToCereaProduct(product, TRANSFER_TO_CEREA));
+      const regular = selectable.filter(product => !isAlwaysAvailableToCereaProduct(product, TRANSFER_TO_CEREA));
+      const completed = regular.filter(product => product.isTabWriteCompleted);
+      const base = completed.length ? [...always, ...completed] : [...always, ...regular];
+      const seen = new Set();
+      return base.filter(product => {
+        const key = normalizeInventoryCodeKey(product?.code || product?.codeLower || "");
+        if (!key || seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      }).map(product => ({ product, score: 0 }));
     }
 
     function resolveSuggestionDefaultQty(product, preservedQty = 0){
       const config = transferConfig();
       const explicit = safeInt(preservedQty || 0);
       if (explicit > 0) return explicit;
+      if (product?.requiresManualTransferQty === true) return 0;
       const defaultQty = safeInt(product?.defaultTransferQty || 0);
       if (defaultQty > 0) return defaultQty;
       if (config.direction === TRANSFER_TO_CEREA){
@@ -6241,13 +6263,15 @@
         const isActive = !!activeCode && productCode === activeCode;
         const isValid = validation.canSubmit && isActive;
         const classes = ["suggestion"];
-        if (isValid) classes.push("is-good");
+        const needsManualQty = product.requiresManualTransferQty === true && isActive && !validation.canSubmit;
+        if (needsManualQty) classes.push("is-needs-qty");
+        else if (isValid) classes.push("is-good");
         else if (index === 0) classes.push("is-leading");
 
         const categoryStyle = product.categoryColor ? ` style="--cat-color:${escapeHtml(product.categoryColor)}"` : "";
         const qtyDisplay = product.isAlwaysAvailableToCerea === true
-          ? (defaultToCereaMode ? "Aggiungi al DDT · sempre disponibile" : "Sempre disponibile")
-          : (defaultToCereaMode ? "Aggiungi al DDT" : `${config.sourceLabel}: ${product.sourceQty.toLocaleString("it-IT")} ${product.uom}`);
+          ? (product.requiresManualTransferQty === true ? "Quantità da inserire" : (defaultToCereaMode ? "Sempre disponibile" : "Sempre disponibile"))
+          : `${config.sourceLabel}: ${product.sourceQty.toLocaleString("it-IT")} ${product.uom}`;
         return `
           <button
             class="${classes.join(" ")}"
