@@ -2831,6 +2831,12 @@
     const EMAIL_RECIPIENTS = [EMAIL_TO_MATTEO, EMAIL_TO_LG_TRADING];
     const EMAIL_LINE_TAG = "inventario-concamarise";
 
+    // Sync cloud-only: completati Tabellone WRITE -> movimenti Inventario Concamarise
+    const TABWRITE_LINE_BUCKET = "linea_liquidi";
+    const TABWRITE_SOURCE = "Tabellone WRITE";
+    const TABWRITE_DOC_TYPE = "PRODUZIONE_WRITE";
+    const TABWRITE_SYNC_ORIGIN = "tabellone_write_completed_to_conca";
+
     const COMPANY_GENERAL_COPPER = {
       label: "GENERAL COPPER SRL",
       attention: "Magazzino Cerea",
@@ -2899,6 +2905,11 @@
       unsubMovements: null,
       unsubCategories: null,
       unsubDdtDocuments: null,
+      unsubTabWriteDone: null,
+      tabWriteDoneItems: [],
+      tabWriteConcaSyncBusy: false,
+      tabWriteConcaSyncQueued: false,
+      tabWriteConcaSyncSig: "",
       productsReady: false,
       movementsReady: false,
       categoriesReady: false,
@@ -3434,6 +3445,247 @@
         }
       }catch(err){
         console.warn("enqueueMatteoEmail failed", err);
+      }
+    }
+
+    function tabWriteKeyToDocId(key){
+      return String(key || "")
+        .replace(/[\/\\?#\[\]\*\x00-\x1F]/g, "_")
+        .slice(0, 900);
+    }
+
+    function tabWriteConcaMovementDocId(doneId){
+      return "twconca_" + tabWriteKeyToDocId(String(doneId || "")).slice(0, 850);
+    }
+
+    function tabWriteQtyNumber(value){
+      const direct = Number(String(value ?? "").trim().replace(",", "."));
+      if (Number.isFinite(direct)) return direct;
+      const match = String(value ?? "").replace(",", ".").match(/-?\d+(?:\.\d+)?/);
+      const parsed = match ? Number(match[0]) : 0;
+      return Number.isFinite(parsed) ? parsed : 0;
+    }
+
+    function mapTabWriteDoneItem(docSnap){
+      const data = docSnap.data() || {};
+      const completedAt = data.completedAt || data.ts || data.createdAt || null;
+      return {
+        id: String(docSnap.id || "").trim(),
+        key: String(data.key || docSnap.id || "").trim(),
+        orderKey: String(data.orderKey || "").trim(),
+        orderNo: String(data.orderNo || "").trim(),
+        customer: String(data.customer || data.cliente || data.customerName || data.nomeCliente || "").trim(),
+        lineKey: String(data.lineKey || "").trim(),
+        queueOrderKey: String(data.queueOrderKey || "").trim(),
+        code: String(data.code || data.finishedProductCode || "").trim(),
+        um: String(data.um || data.finishedProductUom || "").trim(),
+        qty: data.qty ?? "",
+        unit: String(data.unit || data.finishedProductUom || data.um || "").trim(),
+        product: String(data.product || data.finishedProductName || data.label || data.rawLine || "").trim(),
+        label: String(data.label || "").trim(),
+        rawLine: String(data.rawLine || "").trim(),
+        finishedProductId: String(data.finishedProductId || "").trim(),
+        finishedProductCode: String(data.finishedProductCode || data.code || "").trim(),
+        finishedProductName: String(data.finishedProductName || data.product || data.label || "").trim(),
+        finishedProductUom: String(data.finishedProductUom || data.unit || data.um || "").trim(),
+        concaInventoryMovementId: String(data.concaInventoryMovementId || "").trim(),
+        completedByName: String(data.completedByName || data.createdByName || "").trim(),
+        completedByEmail: String(data.completedByEmail || data.createdByEmail || "").trim(),
+        createdByEmail: String(data.createdByEmail || "").trim(),
+        createdByUid: String(data.createdByUid || "").trim(),
+        completedAt,
+        completedAtClientMs: safeInt(data.completedAtClientMs || 0)
+      };
+    }
+
+    function buildTabWriteConcaMovementPayload(done){
+      if (!done) return null;
+      const qtyRaw = tabWriteQtyNumber(done.qty);
+      if (!(qtyRaw > 0)) return null;
+
+      const qty = Math.round(qtyRaw * 1000) / 1000;
+      const doneId = String(done.id || done.key || done.twDoneId || "").trim();
+      if (!doneId) return null;
+
+      const code = cleanSpaces(done.finishedProductCode || done.code || done.product || done.label || doneId) || doneId;
+      const item = cleanSpaces(done.finishedProductName || done.product || done.label || done.rawLine || code) || code;
+      const uom = normalizeUom(done.finishedProductUom || done.unit || done.um || "") || "pz";
+      const date = todayYYYYMMDD();
+      const movementId = cleanSpaces(done.concaInventoryMovementId || tabWriteConcaMovementDocId(doneId));
+      const userLabel = prettifyUserLabel(done.completedByName || done.completedByEmail || done.createdByEmail || "Sistema");
+      const orderNo = cleanSpaces(done.orderNo || "");
+      const customer = cleanSpaces(done.customer || "");
+      const noteBits = [
+        `Produzione completata da Tabellone WRITE: +${qty.toLocaleString("it-IT")} ${uom} • ${item}`,
+        orderNo ? `Ordine ${orderNo}` : "",
+        customer ? `Cliente ${customer}` : ""
+      ].filter(Boolean);
+
+      return {
+        movementId,
+        payload: {
+          type: "IN",
+          customer,
+          code,
+          item,
+          uom,
+          qty,
+          qtyRaw: `${qty} ${uom}`.trim(),
+          date,
+          note: noteBits.join(" · "),
+          source: TABWRITE_SOURCE,
+          rawText: done.rawLine || done.label || item,
+          docType: TABWRITE_DOC_TYPE,
+          docNum: `TW-CONCA-${tabWriteKeyToDocId(doneId).slice(0, 60)}`,
+          docDateRaw: date,
+          warehouse: WAREHOUSE_CONCAMARISE,
+          warehouseLabel: warehouseLabel(WAREHOUSE_CONCAMARISE),
+          fromWarehouse: "",
+          toWarehouse: WAREHOUSE_CONCAMARISE,
+          fromLabel: TABWRITE_SOURCE,
+          toLabel: warehouseLabel(WAREHOUSE_CONCAMARISE),
+          createdAt: done.completedAt || serverTimestamp(),
+          createdBy: userLabel,
+          createdByName: done.completedByName || "",
+          createdByEmail: done.completedByEmail || done.createdByEmail || "",
+          createdByUid: done.createdByUid || "",
+          twDoneId: doneId,
+          sourceLine: TABWRITE_LINE_BUCKET,
+          orderNo,
+          customer,
+          lineKey: done.lineKey || "",
+          orderKey: done.orderKey || "",
+          queueOrderKey: done.queueOrderKey || "",
+          completedByName: done.completedByName || "",
+          completedByEmail: done.completedByEmail || "",
+          finishedProductId: done.finishedProductId || "",
+          origin: TABWRITE_SYNC_ORIGIN
+        }
+      };
+    }
+
+    function tabWriteConcaMovementExists(done){
+      const doneId = String(done?.id || done?.key || done?.twDoneId || "").trim();
+      if (!doneId) return false;
+      const movementId = cleanSpaces(done?.concaInventoryMovementId || tabWriteConcaMovementDocId(doneId));
+      return (state.movements || []).some(mv => {
+        if (!mv) return false;
+        if (String(mv.id || "").trim() === movementId) return true;
+        if (String(mv.twDoneId || "").trim() === doneId) return true;
+        return false;
+      });
+    }
+
+    function tabWriteConcaSyncSignature(items){
+      return (Array.isArray(items) ? items : [])
+        .map(item => [
+          item?.id || "",
+          item?.qty || "",
+          item?.unit || item?.finishedProductUom || item?.um || "",
+          item?.finishedProductCode || item?.code || item?.product || item?.label || "",
+          item?.finishedProductName || item?.product || item?.label || ""
+        ].join("|"))
+        .sort()
+        .join("§");
+    }
+
+    async function syncTabWriteDoneItemsToConcamarise(items, options = {}){
+      if (!(state.user && state.db)) return;
+      const sourceItems = Array.isArray(items) ? items : [];
+      const valid = sourceItems.filter(item => buildTabWriteConcaMovementPayload(item));
+      if (!valid.length) return;
+
+      if (state.tabWriteConcaSyncBusy){
+        state.tabWriteConcaSyncQueued = true;
+        return;
+      }
+
+      const force = options.force === true;
+      const missing = state.movementsReady ? valid.filter(item => !tabWriteConcaMovementExists(item)) : valid;
+      const sig = tabWriteConcaSyncSignature(valid);
+
+      // Se i movimenti esistono già, non riscriverli: mantengo createdAt/storico immutati.
+      if (state.movementsReady && !missing.length){
+        state.tabWriteConcaSyncSig = sig;
+        return;
+      }
+      if (!force && state.tabWriteConcaSyncSig === sig && !missing.length) return;
+
+      const toWrite = state.movementsReady ? missing : valid;
+      if (!toWrite.length) return;
+
+      state.tabWriteConcaSyncBusy = true;
+      state.tabWriteConcaSyncQueued = false;
+      try{
+        const movementCollection = orgCol("inventoryMovements");
+        let batch = writeBatch(state.db);
+        let ops = 0;
+        let written = 0;
+
+        async function commitMovements(forceCommit = false){
+          if (!ops) return;
+          if (forceCommit || ops >= 430){
+            await batch.commit();
+            batch = writeBatch(state.db);
+            ops = 0;
+          }
+        }
+
+        for (const item of toWrite){
+          const movement = buildTabWriteConcaMovementPayload(item);
+          if (!movement) continue;
+          batch.set(doc(movementCollection, movement.movementId), movement.payload, { merge:true });
+          ops += 1;
+          written += 1;
+          await commitMovements(false);
+        }
+        await commitMovements(true);
+        state.tabWriteConcaSyncSig = sig;
+
+        // Marcatura best-effort sul completato WRITE: se le regole non la permettono, il movimento è comunque già scritto in cloud.
+        try{
+          let markerBatch = writeBatch(state.db);
+          let markerOps = 0;
+          const doneCollection = collection(state.db, "producedDays", TABWRITE_LINE_BUCKET, "items");
+          async function commitMarkers(forceCommit = false){
+            if (!markerOps) return;
+            if (forceCommit || markerOps >= 430){
+              await markerBatch.commit();
+              markerBatch = writeBatch(state.db);
+              markerOps = 0;
+            }
+          }
+          for (const item of toWrite){
+            const doneId = String(item.id || item.key || "").trim();
+            if (!doneId) continue;
+            const movement = buildTabWriteConcaMovementPayload(item);
+            if (!movement) continue;
+            markerBatch.set(doc(doneCollection, doneId), {
+              concaInventoryMovementId: movement.movementId,
+              concaInventorySyncedAt: serverTimestamp(),
+              concaInventorySyncedAtMs: Date.now(),
+              concaInventoryWarehouse: WAREHOUSE_CONCAMARISE
+            }, { merge:true });
+            markerOps += 1;
+            await commitMarkers(false);
+          }
+          await commitMarkers(true);
+        }catch(markerErr){
+          console.warn("tabwrite conca marker skipped", markerErr);
+        }
+
+        if (written){
+          console.info(`Tabellone WRITE → Inventario Concamarise: ${written} completati allineati.`);
+        }
+      }catch(err){
+        console.error("syncTabWriteDoneItemsToConcamarise failed", err);
+        showToast("Sync completati WRITE non riuscito: " + humanAuthErr(err), "err");
+      }finally{
+        state.tabWriteConcaSyncBusy = false;
+        if (state.tabWriteConcaSyncQueued){
+          state.tabWriteConcaSyncQueued = false;
+          setTimeout(() => syncTabWriteDoneItemsToConcamarise(state.tabWriteDoneItems || [], { force:true }), 120);
+        }
       }
     }
 
@@ -5944,6 +6196,10 @@
         try{ state.unsubDdtDocuments(); }catch(_){ }
         state.unsubDdtDocuments = null;
       }
+      if (state.unsubTabWriteDone){
+        try{ state.unsubTabWriteDone(); }catch(_){ }
+        state.unsubTabWriteDone = null;
+      }
     }
 
     function resetDataForSignedOut(){
@@ -5957,6 +6213,10 @@
       state.movements = [];
       state.categories = [];
       state.ddtDocuments = [];
+      state.tabWriteDoneItems = [];
+      state.tabWriteConcaSyncBusy = false;
+      state.tabWriteConcaSyncQueued = false;
+      state.tabWriteConcaSyncSig = "";
       state.productsReady = false;
       state.movementsReady = false;
       state.categoriesReady = false;
@@ -5978,6 +6238,10 @@
       state.movements = [];
       state.categories = [];
       state.ddtDocuments = [];
+      state.tabWriteDoneItems = [];
+      state.tabWriteConcaSyncBusy = false;
+      state.tabWriteConcaSyncQueued = false;
+      state.tabWriteConcaSyncSig = "";
       state.productsReady = false;
       state.movementsReady = false;
       state.categoriesReady = false;
@@ -6018,6 +6282,9 @@
         state.ddtDocumentsError = "";
         reconcilePendingInventoryQty(buildInventorySnapshot());
         syncLoadSelectionFromCommand();
+        if ((state.tabWriteDoneItems || []).length){
+          syncTabWriteDoneItemsToConcamarise(state.tabWriteDoneItems).catch(err => console.error("tabellone write conca resync failed", err));
+        }
         render();
         if (orphanDdtIds.length) cleanupOrphanDdtDocuments(orphanDdtIds);
       }, (err) => {
@@ -6030,6 +6297,15 @@
         state.ddtDocumentsError = state.movementsError;
         showToast(state.movementsError, "err");
         render();
+      });
+
+      state.unsubTabWriteDone = onSnapshot(collection(state.db, "producedDays", TABWRITE_LINE_BUCKET, "items"), (snap) => {
+        state.tabWriteDoneItems = snap.docs.map(mapTabWriteDoneItem);
+        syncTabWriteDoneItemsToConcamarise(state.tabWriteDoneItems).catch(err => {
+          console.error("tabellone write done sync listener failed", err);
+        });
+      }, (err) => {
+        console.warn("tabellone write done listener failed", err);
       });
 
       state.unsubCategories = onSnapshot(orgCol("categories"), (snap) => {
