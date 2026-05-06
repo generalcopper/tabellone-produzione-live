@@ -1663,6 +1663,84 @@
   border-bottom: 0;
 }
 </style>
+
+<style id="amazon-row-fix-20260506">
+  /* Amazon SKU rows: metadata pulita e incolonnata, senza sovrapposizioni */
+  .qtyFmt{
+    flex-direction: column !important;
+    align-items: flex-end !important;
+    justify-content: center !important;
+    gap: 4px !important;
+    white-space: normal !important;
+    text-align: right !important;
+    max-width: 480px !important;
+    min-width: 0 !important;
+  }
+  .qtyFmt .qty{
+    line-height: 1 !important;
+    white-space: nowrap !important;
+  }
+  .qtyFmt .fmt{
+    display: block !important;
+    max-width: 100% !important;
+    white-space: normal !important;
+    overflow-wrap: anywhere !important;
+    word-break: break-word !important;
+    line-height: 1.08 !important;
+    text-align: right !important;
+  }
+  .product{
+    min-width: 0 !important;
+    overflow-wrap: anywhere !important;
+    word-break: break-word !important;
+  }
+  .mSub,
+  .mItemSub{
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: flex-start !important;
+    gap: 2px !important;
+    min-width: 0 !important;
+    max-width: 100% !important;
+    white-space: normal !important;
+    overflow: visible !important;
+    text-overflow: clip !important;
+  }
+  .mSubQty,
+  .mItemQty{
+    display: block !important;
+    font-weight: 1000 !important;
+    line-height: 1.12 !important;
+    white-space: nowrap !important;
+  }
+  .mSubFmt,
+  .mItemFmt{
+    display: block !important;
+    max-width: 100% !important;
+    line-height: 1.14 !important;
+    white-space: normal !important;
+    overflow-wrap: anywhere !important;
+    word-break: break-word !important;
+    opacity: .88 !important;
+  }
+  .mItemTimer{
+    display: block !important;
+    margin-top: 2px !important;
+  }
+  @media (max-width: 820px){
+    .qtyFmt{
+      align-items: flex-start !important;
+      text-align: left !important;
+      gap: 3px !important;
+      max-width: 100% !important;
+    }
+    .qtyFmt .fmt{
+      text-align: left !important;
+      font-size: 13px !important;
+      line-height: 1.12 !important;
+    }
+  }
+</style>
 </head>
 
 <body>
@@ -2614,7 +2692,7 @@ const BUCKET = "linea_liquidi";
 
     for(const it0 of items){
       const it = it0 || {};
-      const product = trunc((it.label || it.key || "—"), 52);
+      const product = trunc(cleanAmazonDisplayLabel(it.label || it.key || "—"), 52);
       const qty = (it.qty || it.qty === 0) ? String(it.qty) : "—";
       const lot = (lotFromItem(it) || it.lot || "—");
       const dur = (Number.isFinite(it.durationMs)) ? formatDur(it.durationMs) : "—";
@@ -2759,6 +2837,66 @@ const BUCKET = "linea_liquidi";
     }[m]));
   }
 
+  function cleanAmazonDisplayText(value){
+    let s = String(value ?? "");
+    if(!s) return "";
+
+    // Rimuove metadata Amazon che non devono comparire nel titolo dell'app tabellone.
+    s = s.replace(/\s*Tipo\s+di\s+stoccaggio\s+(?:di\s+)?Logistica\s+di\s+Amazon\s*:\s*Dimensione\s+standard\s*/gi, " ");
+    s = s.replace(/\s*Tipo\s+di\s+stoccaggio\s*:\s*Dimensione\s+standard\s*/gi, " ");
+    s = s.replace(/\s*Logistica\s+di\s+Amazon\s*:\s*Dimensione\s+standard\s*/gi, " ");
+    s = s.replace(/\s*Tipo\s+di\s+stoccaggio\s+(?:di\s+)?Logistica\s+di\s+Amazon\s*/gi, " ");
+
+    // Pulizia separatori rimasti dopo la rimozione del metadata.
+    s = s.replace(/\s+/g, " ").trim();
+    s = s.replace(/(?:\s*[•|·\-–—,:;]+\s*)+$/g, "").trim();
+    s = s.replace(/^(?:\s*[•|·\-–—,:;]+\s*)+/g, "").trim();
+    return s;
+  }
+
+  function cleanAmazonDisplayLabel(value){
+    return cleanAmazonDisplayText(value) || "—";
+  }
+
+  function displayQtyText(job){
+    const q = (job && job.qty != null) ? String(job.qty).trim() : "";
+    const u = (job && job.unit != null) ? String(job.unit).trim() : "";
+    return `${q} ${u}`.replace(/\s+/g, " ").trim() || "—";
+  }
+
+  function displayJobLabel(job){
+    const product = cleanAmazonDisplayText(job?.product || "");
+    const format = cleanAmazonDisplayText(job?.format || "");
+    return [product, format].filter(Boolean).join(" • ") || product || format || "—";
+  }
+
+  function setStackedMeta(el, qtyText, formatText, timerText){
+    if(!el) return;
+    el.textContent = "";
+
+    const q = document.createElement("span");
+    q.className = el.classList.contains("mItemSub") ? "mItemQty" : "mSubQty";
+    q.textContent = String(qtyText || "—");
+    el.appendChild(q);
+
+    const fmt = cleanAmazonDisplayText(formatText || "");
+    if(fmt){
+      const f = document.createElement("span");
+      f.className = el.classList.contains("mItemSub") ? "mItemFmt" : "mSubFmt";
+      f.textContent = fmt;
+      el.appendChild(f);
+    }
+
+    if(timerText){
+      const timer = document.createElement("span");
+      timer.className = "mItemTimer";
+      timer.textContent = String(timerText || "");
+      el.appendChild(timer);
+      return timer;
+    }
+    return null;
+  }
+
   async function confirmUndoWithPassword(){
     const ok = window.confirm("Sicuro che vuoi annullare?");
     if(!ok) return false;
@@ -2838,8 +2976,9 @@ const BUCKET = "linea_liquidi";
       const lot = lotFromItem(it);
       const lotHtml = lot ? ` <span class="prodLot">${escapeHtml(lot)}</span>` : "";
 
+      const producedTitle = cleanAmazonDisplayLabel(it.label || it.key);
       item.innerHTML = `
-        <div class="prodText">${escapeHtml(it.label || it.key)} • <span class="prodQty">${escapeHtml(String(it.qty))}</span>${durHtml}${lotHtml}</div>
+        <div class="prodText">${escapeHtml(producedTitle)} • <span class="prodQty">${escapeHtml(String(it.qty))}</span>${durHtml}${lotHtml}</div>
         <button class="undoBtn" type="button">Annulla</button>
       `;
 
@@ -3168,7 +3307,7 @@ let pendingKey = null;
     if(producedCloud.has(key)) return;
 
     pendingKey = key;
-    pendingLabelStatic = (rowEl.dataset.label || "Riga selezionata");
+    pendingLabelStatic = cleanAmazonDisplayLabel(rowEl.dataset.label || "Riga selezionata");
     const sub = document.getElementById("qtyModalSub");
     const input = document.getElementById("qtyInput");
     const modal = document.getElementById("qtyModal");
@@ -3203,7 +3342,7 @@ let pendingKey = null;
     const rowEl = rowNodes.get(pendingKey);
     if(!rowEl){ closeModal(); return; }
 
-    const label = rowEl.dataset.label || "Riga prodotta";
+    const label = cleanAmazonDisplayLabel(rowEl.dataset.label || "Riga prodotta");
 
     // Calcolo prossimo prodotto + messaggio
     let nextLabel = "";
@@ -3526,7 +3665,7 @@ try{
     if(!doneModalEl) return;
     window.__DONE_ITEM = it || null;
 
-    const label = (it?.label || it?.key || "—");
+    const label = cleanAmazonDisplayLabel(it?.label || it?.key || "—");
     const dur = (Number.isFinite(it?.durationMs)) ? formatDur(it.durationMs) : "";
     if(doneModalSubEl) doneModalSubEl.textContent = label;
 
@@ -3773,7 +3912,7 @@ try{
 
 </style></head><body>
 <h1>Riepilogo produzione</h1>
-<div class="row"><span class="k">Prodotto:</span> <strong>${it.label || it.key || "—"}</strong></div>
+<div class="row"><span class="k">Prodotto:</span> <strong>${cleanAmazonDisplayLabel(it.label || it.key || "—")}</strong></div>
 <div class="row"><span class="k">Quantità:</span> <strong>${it.qty ? (it.qty+" pz") : "—"}</strong></div>
 <div class="row"><span class="k">Tempo:</span> <strong>${Number.isFinite(it.durationMs) ? formatDur(it.durationMs) : "—"}</strong></div>
 <div class="row"><span class="k">Lotto:</span> <strong>${(lotFromItem(it) || it.lot || "—")}</strong></div>
@@ -3821,7 +3960,7 @@ ${sigHtml}
       doc.setLineWidth(1);
       doc.roundedRect(left, y, right-left, 210, 10, 10);
 
-      const product = (it?.label || it?.key || "—");
+      const product = cleanAmazonDisplayLabel(it?.label || it?.key || "—");
       const qty = (it?.qty ? (it.qty + " pz") : "—");
       const lot = (lotFromItem(it) || it?.lot || "—");
       const dur = (Number.isFinite(it?.durationMs) ? formatDur(it.durationMs) : "—");
@@ -3898,7 +4037,7 @@ doneShareEl?.addEventListener("click", async (ev) => {
 
       try{
         const pdfBlob = await _generateIndustryPDF(it);
-        const safeName = String(it.label || it.key || "produzione")
+        const safeName = String(cleanAmazonDisplayLabel(it.label || it.key || "produzione"))
           .replace(/[^\w\-]+/g, "_")
           .slice(0, 48);
         const pdfFile = new File([pdfBlob], `RIEPILOGO_${safeName}.pdf`, { type:"application/pdf" });
@@ -4017,9 +4156,15 @@ doneShareEl?.addEventListener("click", async (ev) => {
   }
 
   function updateRowEl(el, job){
-    el.querySelector(".product").textContent = job.product;
-    el.querySelector(".qty").textContent = `${job.qty} ${job.unit}`.trim();
-    el.querySelector(".fmt").textContent = job.format;
+    const productText = cleanAmazonDisplayText(job?.product || "") || (job?.product || "");
+    const qtyText = displayQtyText(job);
+    const formatText = cleanAmazonDisplayText(job?.format || "");
+
+    el.querySelector(".product").textContent = productText || "—";
+    el.querySelector(".qty").textContent = qtyText;
+    const fmtEl = el.querySelector(".fmt");
+    fmtEl.textContent = formatText;
+    fmtEl.style.display = formatText ? "" : "none";
 
     const badge = el.querySelector(".badge");
     const stSpan = el.querySelector(".st");
@@ -4095,7 +4240,7 @@ doneShareEl?.addEventListener("click", async (ev) => {
       // attach job payload for completamento/undo
       try{ el.__job = cloneQueueJobForUndo(lastJobs[i]); }catch(_){ }
       
-      el.dataset.label = (`${lastJobs[i].product} • ${lastJobs[i].format}`).replace(/\s+/g,' ').trim();
+      el.dataset.label = displayJobLabel(lastJobs[i]);
 
       if(producedCloud.has(k)){
         el.style.display = "none";
@@ -4144,7 +4289,7 @@ doneShareEl?.addEventListener("click", async (ev) => {
       }
 
       el.dataset.key = key;
-      el.dataset.label = (`${job.product} • ${job.format}`).replace(/\s+/g,' ').trim();
+      el.dataset.label = displayJobLabel(job);
 
       try{ el.__job = cloneQueueJobForUndo(job); }catch(_){ }
 
@@ -4958,7 +5103,7 @@ async function refreshWeather(){
           main.className = "mItemMain";
           const title = document.createElement("div");
           title.className = "mItemTitle";
-          title.textContent = job.product || key;
+          title.textContent = cleanAmazonDisplayText(job.product || "") || key;
 
           const sub = document.createElement("div");
           sub.className = "mItemSub";
@@ -4972,12 +5117,8 @@ async function refreshWeather(){
               t = " • ⏱ " + formatDur(elapsed);
             }
           }catch(_){}
-          sub.textContent = `${fmt}${fmt2 ? " • " + fmt2 : ""}`;
+          const timerSpan = setStackedMeta(sub, fmt, fmt2, (isActive ? (t || "") : ""));
           if(isActive){
-            const timerSpan = document.createElement("span");
-            timerSpan.className = "mItemTimer";
-            timerSpan.textContent = t || "";
-            sub.appendChild(timerSpan);
             _sheetActiveTimerEl = timerSpan;
           }
 
@@ -5020,7 +5161,7 @@ el.sheetList.appendChild(item);
 
           const title = document.createElement("div");
           title.className = "mItemTitle";
-          title.textContent = (it.label || it.key || "—");
+          title.textContent = cleanAmazonDisplayLabel(it.label || it.key || "—");
 
           const sub = document.createElement("div");
           sub.className = "mItemSub";
@@ -5106,7 +5247,7 @@ el.sheetList.appendChild(item);
         for(let i=0;i<jobs.length;i++){
           const k = makeKey(jobs[i], i);
           if(k === key){
-            label = `${jobs[i].product} • ${jobs[i].format}`.replace(/\s+/g,' ').trim();
+            label = displayJobLabel(jobs[i]);
             break;
           }
         }
@@ -5147,7 +5288,7 @@ el.sheetList.appendChild(item);
       const job = (firstActiveIdx >= 0) ? jobs[firstActiveIdx] : null;
       const key = job ? makeKey(job, firstActiveIdx) : null;
 
-      if(el.wipProd) el.wipProd.textContent = job?.product || "—";
+      if(el.wipProd) el.wipProd.textContent = cleanAmazonDisplayText(job?.product || "") || "—";
       if(el.wipSub){
         const q = job ? `${job.qty} ${job.unit}`.trim() : "—";
         const f = job?.format ? (" • " + job.format) : "";
@@ -5166,7 +5307,7 @@ el.sheetList.appendChild(item);
             }
           }
         }catch(_){}
-        el.wipSub.textContent = (q + f) || "—";
+        setStackedMeta(el.wipSub, q || "—", (job?.format || ""));
         if(el.wipRemainBadge) el.wipRemainBadge.textContent = String(remCount || 0);
 }
 
@@ -5193,7 +5334,7 @@ el.sheetList.appendChild(item);
         });
       }catch(_){ last = null; }
 
-      if(el.doneLast) el.doneLast.textContent = (last && last.label) ? String(last.label) : "—";
+      if(el.doneLast) el.doneLast.textContent = (last && last.label) ? cleanAmazonDisplayLabel(last.label) : "—";
       if(el.doneSub){
         const tail = (last && (last.qty!=null)) ? (" • Ultimo: " + String(last.qty) + " pz") : "";
         el.doneSub.textContent = "Righe completate: " + String(doneRows) + tail;
