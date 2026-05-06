@@ -14848,7 +14848,7 @@ function getThresholdForKey(k) {
         const keys = [
           "fromWarehouse", "toWarehouse", "sourceWarehouse", "destinationWarehouse",
           "transferDirection", "ddtDirection", "direction",
-          "moveInvGroupId", "movementGroupId", "linkedMovementId",
+          "moveInvGroupId", "movementGroupId", "linkedMovementId", "linkedDdtId", "linkedDdtNumber",
           "lineNo", "lineNumber",
           "alias", "aliasGroupKey", "displayCode", "sourceAlias",
           "estrusoreSync", "estrusoreLinkedMovementId", "estrusoreLinkedDdtId", "estrusoreLinkedDdtNumber",
@@ -20468,6 +20468,8 @@ let __stockRowByKey = new Map();
             rawText: "",
             docType: MOVE_INV_ESTRUSORE_DOC_TYPE,
             estrusoreSync: true,
+            linkedDdtId: moveInvGroupId,
+            linkedDdtNumber: moveInvGroupId,
             estrusoreLinkedDdtId: moveInvGroupId,
             estrusoreLinkedDdtNumber: moveInvGroupId,
             estrusoreMirrorFromCode: code,

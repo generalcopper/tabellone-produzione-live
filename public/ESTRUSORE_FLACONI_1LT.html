@@ -760,14 +760,69 @@
       return String(mv?.type || "IN").trim().toUpperCase() === "OUT" ? "OUT" : "IN";
     }
 
-    function isDdtToConcamariseFromCerea(mv){
+    function movementRouteCompactText(mv){
+      return compactLookupText([
+        mv?.source,
+        mv?.note,
+        mv?.rawText,
+        mv?.docType,
+        mv?.docNum,
+        mv?.ddtNumber,
+        mv?.fromWarehouse,
+        mv?.toWarehouse,
+        mv?.transferDirection,
+        mv?.ddtDirection,
+        mv?.direction
+      ].join(" "));
+    }
+
+    function isCereaToConcamariseTransfer(mv){
       if (!mv || typeof mv !== "object") return false;
-      const direction = cleanText(mv.transferDirection || mv.ddtDirection || mv.direction || "");
+      const direction = cleanText(mv.transferDirection || mv.ddtDirection || mv.direction || "").toLowerCase();
       const fromWarehouse = normalizeWarehouseStrict(mv.fromWarehouse || mv.sourceWarehouse || mv.originWarehouse || "");
       const toWarehouse = normalizeWarehouseStrict(mv.toWarehouse || mv.destinationWarehouse || "");
 
-      if (direction === "to_concamarise") return true;
+      if (direction === "to_concamarise" || direction === "cerea_to_concamarise") return true;
       if (fromWarehouse === WAREHOUSE && toWarehouse === "concamarise") return true;
+
+      const route = movementRouteCompactText(mv);
+      if (route.includes("portaaconca")) return true;
+      if (
+        route.includes("cerea") &&
+        (route.includes("concamarise") || route.includes("conca")) &&
+        (route.includes("spostamento") || route.includes("trasferimento") || route.includes("ddt") || route.includes("bolla"))
+      ) return true;
+
+      return false;
+    }
+
+    function isConcamariseToCereaTransfer(mv){
+      if (!mv || typeof mv !== "object") return false;
+      const direction = cleanText(mv.transferDirection || mv.ddtDirection || mv.direction || "").toLowerCase();
+      const fromWarehouse = normalizeWarehouseStrict(mv.fromWarehouse || mv.sourceWarehouse || mv.originWarehouse || "");
+      const toWarehouse = normalizeWarehouseStrict(mv.toWarehouse || mv.destinationWarehouse || "");
+
+      if (direction === "to_cerea" || direction === "concamarise_to_cerea" || direction === "conca_to_cerea") return true;
+      if (fromWarehouse === "concamarise" && toWarehouse === WAREHOUSE) return true;
+
+      const route = movementRouteCompactText(mv);
+      if (route.includes("portaacerea")) return true;
+      if (
+        route.includes("cerea") &&
+        (route.includes("concamarise") || route.includes("conca")) &&
+        (route.includes("spostamento") || route.includes("trasferimento") || route.includes("ddt") || route.includes("bolla"))
+      ) return true;
+
+      return false;
+    }
+
+    function isLinkedFblCereaTransferMovement(mv){
+      if (!isLinkedFbl1000Movement(mv)) return false;
+      if (normalizeWarehouseStrict(mv.warehouse) !== WAREHOUSE) return false;
+
+      const type = getMovementType(mv);
+      if (type === "OUT") return isCereaToConcamariseTransfer(mv);
+      if (type === "IN") return isConcamariseToCereaTransfer(mv);
       return false;
     }
 
@@ -1009,72 +1064,30 @@
       return keys;
     }
 
-    function buildCoveredFblTransferLineKeys(mirroredSourceIds){
-      const keys = buildPrimaryMirrorFblTransferLineKeys();
-      for (const mv of (state.codeMovements || [])){
-        if (!mv || isNeutralMovement(mv)) continue;
-        const key = getFblTransferLineKey(mv);
-        if (!key) continue;
-
-        if (isLinkedFbl1000Movement(mv) && normalizeWarehouseStrict(mv.warehouse) === WAREHOUSE && !mirroredSourceIds.has(String(mv.id || "").trim())){
-          keys.add(key);
-        }
-      }
-      return keys;
-    }
-
-    function toSyntheticEstrusoreOutMovement(mv){
-      return {
-        ...mv,
-        type: "OUT",
-        warehouse: WAREHOUSE,
-        item: mv.item || mv.estrusoreMirrorFromItem || ITEM_NAME,
-        syntheticEstrusoreDdtMovement: true
-      };
-    }
-
     function extractCereaMovements(){
       const mirroredSourceIds = buildMirroredSourceMovementIds();
       const primaryMirrorLineKeys = buildPrimaryMirrorFblTransferLineKeys();
-      const coveredFblTransferLineKeys = buildCoveredFblTransferLineKeys(mirroredSourceIds);
       const out = [];
 
       for (const mv of (state.codeMovements || [])){
         if (!mv || isNeutralMovement(mv)) continue;
 
+        // Fonte principale dell'estrusore: solo movimenti del codice interno a Cerea.
+        // Produzione = IN, mirror Porta a Conca = OUT.
         if (isPrimaryCode(mv.code)){
-          if (normalizeWarehouse(mv.warehouse) === WAREHOUSE) out.push(mv);
+          if (normalizeWarehouseStrict(mv.warehouse) === WAREHOUSE) out.push(mv);
           continue;
         }
 
-        if (!isLinkedFbl1000Movement(mv)) continue;
+        // Fallback storico: usa gli FBL solo se sono veri trasferimenti che toccano Cerea.
+        // NON deve sommare carichi manuali/iniziali FBL a Cerea, altrimenti lo stock raddoppia.
+        if (!isLinkedFblCereaTransferMovement(mv)) continue;
         if (mirroredSourceIds.has(String(mv.id || "").trim())) continue;
 
-        const wh = normalizeWarehouseStrict(mv.warehouse);
-        const movementType = getMovementType(mv);
         const lineKey = getFblTransferLineKey(mv);
+        if (lineKey && primaryMirrorLineKeys.has(lineKey)) continue;
 
-        // Movimenti storici del hub gestionale: lo spostamento Cerea → Conca
-        // crea una riga OUT a Cerea. Questa riga deve essere lo scarico Estrusore
-        // anche se non esiste ancora il mirror ST0090B03BI01E.
-        if (wh === WAREHOUSE){
-          if (lineKey && primaryMirrorLineKeys.has(lineKey)) continue;
-          out.push(mv);
-          continue;
-        }
-
-        // Recupero storico: alcune bolle/DDT hanno solo la riga IN a Concamarise.
-        // La trasformiamo in scarico Cerea solo quando è chiaramente una tratta
-        // Cerea → Concamarise e non esiste già una riga/mirror coprente.
-        if (
-          movementType === "IN" &&
-          isConcamariseWarehouse(wh) &&
-          isDdtToConcamariseFromCerea(mv) &&
-          lineKey &&
-          !coveredFblTransferLineKeys.has(lineKey)
-        ){
-          out.push(toSyntheticEstrusoreOutMovement(mv));
-        }
+        out.push(mv);
       }
 
       return out;
