@@ -3964,6 +3964,166 @@
       };
     }
 
+
+    function bulkDoneDocIdFromAny(value){
+      return tabWriteKeyToDocId(String(value || "").trim());
+    }
+
+    function bulkDoneQtyNumber(value){
+      const direct = tabWriteQtyNumber(value);
+      return Number.isFinite(direct) && direct > 0 ? direct : 0;
+    }
+
+    function getBulkDoneSortTime(done){
+      const fromTs = tsToDate(done?.completedAt)?.getTime?.() || 0;
+      return safeInt(done?.completedAtClientMs || 0) || fromTs || 0;
+    }
+
+    function bulkDoneMatchesTransferItem(done, itemEntry){
+      if (!(done && itemEntry)) return false;
+      const doneCode = normalizeInventoryCodeKey(done.code || done.finishedProductCode || "");
+      const transferCode = normalizeInventoryCodeKey(itemEntry?.product?.code || itemEntry?.code || "");
+      if (doneCode && transferCode && doneCode === transferCode) return true;
+
+      const doneName = normalizeSearch(done.product || done.itemName || done.label || done.rawLine || done.code || "");
+      const transferName = normalizeSearch(itemEntry.item || itemEntry?.product?.name || itemEntry?.product?.alias || itemEntry?.product?.searchText || itemEntry?.product?.code || "");
+      return !!(doneName && transferName && doneName === transferName);
+    }
+
+    function collectBulkDoneCandidatesForTransferItem(itemEntry){
+      const map = new Map();
+      const codeKey = normalizeInventoryCodeKey(itemEntry?.product?.code || itemEntry?.code || "");
+
+      function addCandidate(raw){
+        if (!raw) return;
+        const id = bulkDoneDocIdFromAny(raw.id || raw.key || raw.bulkDoneId || raw.doneId || "");
+        if (!id) return;
+        const qty = bulkDoneQtyNumber(raw.qty ?? raw.sourceQty ?? raw.qtyRaw ?? 0);
+        const next = {
+          id,
+          qty,
+          completedAtMs: getBulkDoneSortTime(raw),
+          code: cleanSpaces(raw.code || raw.finishedProductCode || itemEntry?.code || itemEntry?.product?.code || ""),
+          product: cleanSpaces(raw.product || raw.itemName || raw.item || itemEntry?.item || itemEntry?.product?.name || "")
+        };
+        const existing = map.get(id);
+        if (existing){
+          if (!existing.qty && next.qty) existing.qty = next.qty;
+          if (!existing.completedAtMs && next.completedAtMs) existing.completedAtMs = next.completedAtMs;
+          if (!existing.code && next.code) existing.code = next.code;
+          if (!existing.product && next.product) existing.product = next.product;
+          return;
+        }
+        map.set(id, next);
+      }
+
+      for (const done of (state.bulkWriteDoneItems || [])){
+        if (!done || done.ritirato === true) continue;
+        if (!bulkDoneMatchesTransferItem(done, itemEntry)) continue;
+        addCandidate(done);
+      }
+
+      for (const row of (Array.isArray(itemEntry?.sourceRows) ? itemEntry.sourceRows : [])){
+        for (const source of (Array.isArray(row?.bulkSourceItems) ? row.bulkSourceItems : [])){
+          const sourceCode = normalizeInventoryCodeKey(source?.code || row?.code || "");
+          if (codeKey && sourceCode && sourceCode !== codeKey) continue;
+          addCandidate(source);
+        }
+        for (const id of (Array.isArray(row?.bulkDoneIds) ? row.bulkDoneIds : [])){
+          addCandidate({
+            id,
+            qty: row.qty,
+            code: row.code || itemEntry?.code || itemEntry?.product?.code || "",
+            product: row.item || itemEntry?.item || itemEntry?.product?.name || ""
+          });
+        }
+      }
+
+      for (const mv of (state.movements || [])){
+        if (!mv || !isBulkWriteCompletedMovement(mv)) continue;
+        const doneId = cleanSpaces(mv.bulkDoneId || "");
+        if (!doneId) continue;
+        const wh = normalizeWarehouse(mv.warehouse || "");
+        const type = String(mv.type || "").trim().toUpperCase() === "OUT" ? "OUT" : "IN";
+        if (wh !== WAREHOUSE_CEREA || type !== "IN") continue;
+        const mvCode = normalizeInventoryCodeKey(mv.code || "");
+        if (codeKey && mvCode && mvCode !== codeKey) continue;
+        addCandidate({
+          id: doneId,
+          qty: mv.qty,
+          code: mv.code,
+          product: mv.item,
+          completedAt: mv.createdAt
+        });
+      }
+
+      return Array.from(map.values()).sort((a, b) => {
+        const at = safeInt(a.completedAtMs || 0);
+        const bt = safeInt(b.completedAtMs || 0);
+        if (at !== bt) return at - bt;
+        return String(a.id || "").localeCompare(String(b.id || ""));
+      });
+    }
+
+    function collectBulkDoneIdsToMarkPickedForTransfer(items, config){
+      if (!config || config.direction !== TRANSFER_TO_CONCAMARISE) return [];
+      const ids = new Set();
+
+      for (const itemEntry of (Array.isArray(items) ? items : [])){
+        const isBulk = itemEntry?.isBulkWriteCompleted === true || itemEntry?.product?.isBulkWriteCompleted === true;
+        if (!isBulk) continue;
+
+        let remaining = safeInt(itemEntry?.qty || 0);
+        if (remaining <= 0) continue;
+
+        const candidates = collectBulkDoneCandidatesForTransferItem(itemEntry);
+        for (const candidate of candidates){
+          if (remaining <= 0) break;
+          const candidateQty = Math.max(1, safeInt(Math.ceil(bulkDoneQtyNumber(candidate.qty) || 1)));
+          if (remaining >= candidateQty){
+            ids.add(candidate.id);
+            remaining -= candidateQty;
+          }
+        }
+      }
+
+      return Array.from(ids);
+    }
+
+    function markBulkDoneItemsAsPickedInBatch(batch, bulkDoneIds, context = {}){
+      if (!(batch && state.db)) return [];
+      const ids = Array.from(new Set((bulkDoneIds || []).map(bulkDoneDocIdFromAny).filter(Boolean)));
+      if (!ids.length) return [];
+
+      const pickedAtMs = Date.now();
+      const payload = {
+        ritirato: true,
+        ritiratoAt: serverTimestamp(),
+        ritiratoAtMs: pickedAtMs,
+        ritiratoByUid: context.userUid || state.user?.uid || "",
+        ritiratoByEmail: context.userEmail || state.user?.email || "",
+        ritiratoByName: context.userName || state.user?.displayName || "",
+        ritiratoSource: SOURCE,
+        ritiratoReason: "Porta a Conca da Inventario Concamarise",
+        ritiratoDdtId: context.ddtId || "",
+        ritiratoDdtNumber: context.ddtNumber || "",
+        concaTransferredAt: serverTimestamp(),
+        concaTransferredAtMs: pickedAtMs,
+        concaTransferredByUid: context.userUid || state.user?.uid || "",
+        concaTransferredByEmail: context.userEmail || state.user?.email || "",
+        concaTransferredByName: context.userName || state.user?.displayName || "",
+        concaInventoryDdtId: context.ddtId || "",
+        concaInventoryDdtNumber: context.ddtNumber || "",
+        concaInventoryTransferDirection: TRANSFER_TO_CONCAMARISE,
+        concaInventoryWarehouse: WAREHOUSE_CONCAMARISE
+      };
+
+      for (const id of ids){
+        batch.set(doc(state.db, "producedDays", BULKWRITE_LINE_BUCKET, "items", id), payload, { merge:true });
+      }
+      return ids;
+    }
+
     function buildBulkWriteConcaMovementPayload(done){
       if (!done || done.ritirato === true) return null;
       const qtyRaw = tabWriteQtyNumber(done.qty);
@@ -4946,7 +5106,9 @@
           hasTabWriteCompletion: false,
           hasBulkWriteCompletion: false,
           isTabWriteCompleted: false,
-          isBulkWriteCompleted: false
+          isBulkWriteCompleted: false,
+          bulkDoneIds: [],
+          bulkSourceItems: []
         };
 
         if (wh === WAREHOUSE_CONCAMARISE) totalRec.concamarise += delta;
@@ -4959,6 +5121,20 @@
         if (wh === WAREHOUSE_CEREA && type !== "OUT" && isBulkWriteCompletedMovement(mv)){
           totalRec.hasBulkWriteCompletion = true;
           totalRec.isBulkWriteCompleted = true;
+          const bulkDoneId = cleanSpaces(mv.bulkDoneId || "");
+          if (bulkDoneId && !totalRec.bulkDoneIds.includes(bulkDoneId)){
+            totalRec.bulkDoneIds.push(bulkDoneId);
+          }
+          if (bulkDoneId){
+            totalRec.bulkSourceItems.push({
+              id: bulkDoneId,
+              bulkDoneId,
+              qty,
+              code,
+              product: item,
+              completedAt: mv.createdAt
+            });
+          }
         }
 
         const ibcWeightLabel = getBulkIbcWeightLabelFromData(mv);
@@ -4978,13 +5154,31 @@
           qty: 0,
           bulkIbcWeightLabel: "",
           isTabWriteCompleted: false,
-          isBulkWriteCompleted: false
+          isBulkWriteCompleted: false,
+          bulkDoneIds: [],
+          bulkSourceItems: []
         };
         row.qty += delta;
         if (!row.item && item) row.item = item;
         if (uom) row.uom = uom;
         if (wh === WAREHOUSE_CONCAMARISE && type !== "OUT" && isTabWriteCompletedMovement(mv)) row.isTabWriteCompleted = true;
-        if (wh === WAREHOUSE_CEREA && type !== "OUT" && isBulkWriteCompletedMovement(mv)) row.isBulkWriteCompleted = true;
+        if (wh === WAREHOUSE_CEREA && type !== "OUT" && isBulkWriteCompletedMovement(mv)){
+          row.isBulkWriteCompleted = true;
+          const bulkDoneId = cleanSpaces(mv.bulkDoneId || "");
+          if (bulkDoneId && !row.bulkDoneIds.includes(bulkDoneId)){
+            row.bulkDoneIds.push(bulkDoneId);
+          }
+          if (bulkDoneId){
+            row.bulkSourceItems.push({
+              id: bulkDoneId,
+              bulkDoneId,
+              qty,
+              code,
+              product: item,
+              completedAt: mv.createdAt
+            });
+          }
+        }
         if (ibcWeightLabel) row.bulkIbcWeightLabel = ibcWeightLabel;
         byCustomer.set(rowKey, row);
         targetRowsByCode.set(low, byCustomer);
@@ -5246,6 +5440,8 @@
           bulkIbcWeightLabel: cleanSpaces(totals?.bulkIbcWeightLabel || productRecord?.bulkIbcWeightLabel || ""),
           ibcWeightLabel: cleanSpaces(totals?.bulkIbcWeightLabel || productRecord?.ibcWeightLabel || ""),
           pesoPerIbc: cleanSpaces(totals?.bulkIbcWeightLabel || productRecord?.pesoPerIbc || ""),
+          bulkDoneIds: Array.isArray(totals?.bulkDoneIds) ? totals.bulkDoneIds.slice() : [],
+          bulkSourceItems: Array.isArray(totals?.bulkSourceItems) ? totals.bulkSourceItems.slice() : [],
           cereaQty,
           concamariseQty,
           concamariseQty: concamariseQty,
@@ -7739,6 +7935,8 @@
           product,
           sourceRows,
           available,
+          bulkDoneIds: Array.isArray(product?.bulkDoneIds) ? product.bulkDoneIds.slice() : [],
+          bulkSourceItems: Array.isArray(product?.bulkSourceItems) ? product.bulkSourceItems.slice() : [],
           bulkIbcWeightLabel: getBulkIbcWeightLabelFromData(product) || getBulkIbcWeightLabelFromData(sourceRows.find(row => getBulkIbcWeightLabelFromData(row)) || {}),
           ibcWeightLabel: getBulkIbcWeightLabelFromData(product) || getBulkIbcWeightLabelFromData(sourceRows.find(row => getBulkIbcWeightLabelFromData(row)) || {}),
           pesoPerIbc: getBulkIbcWeightLabelFromData(product) || getBulkIbcWeightLabelFromData(sourceRows.find(row => getBulkIbcWeightLabelFromData(row)) || {}),
@@ -7783,6 +7981,7 @@
         const batch = writeBatch(state.db);
         const movementCollection = orgCol("inventoryMovements");
         const ddtRef = doc(movementCollection);
+        const bulkDoneIdsToMarkPicked = collectBulkDoneIdsToMarkPickedForTransfer(checkedItems, config);
         const movements = [];
         const lines = [];
         let movementProgressiveNumber = Math.max(0, safeInt(reserved.firstMovementProgressive || 1) - 1);
@@ -7964,6 +8163,8 @@
           quantitaPerBancale: palletInfo.palletUnitQty,
           lines,
           movements,
+          bulkDoneIdsRitirati: bulkDoneIdsToMarkPicked,
+          bulkDoneRitiratiCount: bulkDoneIdsToMarkPicked.length,
           source: SOURCE,
           note: config.note || NOTE,
           pdfFileName: makeDdtPdfFileName(reserved.ddtNumber),
@@ -7980,6 +8181,18 @@
         ddtPayload.pdfFilename = ddtPayload.pdfFileName;
         ddtPayload.pdfGeneratedBy = "Inventario Concamarise";
         ddtPayload.pdfGeneratedAt = date;
+
+        const markedBulkDoneIds = markBulkDoneItemsAsPickedInBatch(batch, bulkDoneIdsToMarkPicked, {
+          ddtId: ddtRef.id,
+          ddtNumber: reserved.ddtNumber,
+          userUid,
+          userEmail,
+          userName: state.user.displayName || userLabel
+        });
+        if (markedBulkDoneIds.length){
+          ddtPayload.bulkDoneIdsRitirati = markedBulkDoneIds;
+          ddtPayload.bulkDoneRitiratiCount = markedBulkDoneIds.length;
+        }
 
         batch.set(ddtRef, ddtPayload);
         await batch.commit();
