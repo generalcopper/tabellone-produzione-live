@@ -11435,6 +11435,11 @@ function twQueueDocToItem(d){
     finishedProductName: (v.finishedProductName || "").toString().trim(),
     finishedProductUom: (v.finishedProductUom || "").toString().trim(),
     finishedInventoryMovementId: (v.finishedInventoryMovementId || "").toString().trim(),
+    amazonInventoryMovementId: (v.amazonInventoryMovementId || "").toString().trim(),
+    amazonInventoryLocation: (v.amazonInventoryLocation || "").toString().trim(),
+    amazonInventorySku: (v.amazonInventorySku || "").toString().trim(),
+    amazonInventoryTitle: (v.amazonInventoryTitle || "").toString().trim(),
+    amazonInventoryUom: (v.amazonInventoryUom || "").toString().trim(),
     orderKey: (v.orderKey || "").toString().trim(),
     orderNo: (v.orderNo || "").toString().trim(),
     customer: (v.customer || v.cliente || v.customerName || v.nomeCliente || "").toString().trim(),
@@ -11557,6 +11562,13 @@ const TW_CONCA_INVENTORY_COLLECTION = "inventoryMovements";
 const TW_CONCA_WAREHOUSE = "concamarise";
 const TW_CONCA_SOURCE = "Tabellone WRITE";
 const TW_CONCA_DOC_TYPE = "PRODUZIONE_WRITE";
+const TW_AMZ_ROOT = "amzInventory";
+const TW_AMZ_LOC = "concamarise";
+const TW_AMZ_ITEMS_SUB = "items";
+const TW_AMZ_LOGS_SUB = "logs";
+const TW_AMZ_PRODUCTS_COL = "amzInventoryProducts";
+const TW_AMZ_SOURCE = "Tabellone WRITE";
+const TW_AMZ_DOC_TYPE = "PRODUZIONE_WRITE_AMAZON_CONCAMARISE";
 
 function twEnsurePfState(){
   const tw = ensureTabWriteState();
@@ -11932,6 +11944,483 @@ function twBuildConcaInventoryLoadPayload(done, fs){
     console.warn("twBuildConcaInventoryLoadPayload error:", e);
     return null;
   }
+}
+
+
+function twEnsureAmazonState(){
+  const tw = ensureTabWriteState();
+  if(!tw.amazon || typeof tw.amazon !== "object") tw.amazon = {};
+  const amz = tw.amazon;
+  if(!Array.isArray(amz.items)) amz.items = [];
+  if(!(amz.bySku instanceof Map)) amz.bySku = new Map();
+  amz.ready = Boolean(amz.ready);
+  amz.error = String(amz.error || "");
+  amz.unsub = amz.unsub || null;
+  return amz;
+}
+
+function twIsManualAmazonSkuRow(it){
+  try{
+    if(!it) return false;
+    const src = String(it.source || "").trim().toLowerCase();
+    const kind = String(it.kind || "").trim().toLowerCase();
+    const target = String(it.inventoryTarget || "").trim().toLowerCase();
+    return src === "manual_amazon_concamarise" ||
+      kind === "amazonsku" ||
+      kind === "amazon_sku" ||
+      target === "amazon_concamarise" ||
+      !!(it.amazonInventorySku || it.amazonInventoryLocation);
+  }catch(_e){
+    return false;
+  }
+}
+
+function twAmazonMovementDocId(baseId){
+  return "twamz_" + twKeyToDocId(String(baseId || "")).slice(0, 850);
+}
+
+function twAmazonDisplayTitle(raw, fallback=""){
+  let s = twPfCollapseSpaces(String(raw || fallback || ""));
+  if(!s) return String(fallback || "SKU Amazon").trim();
+  s = s
+    .replace(/\bSKU\s*:\s*[A-Z0-9][A-Z0-9-]{2,}\b/ig, " ")
+    .replace(/\bASIN\s*:\s*[A-Z0-9]{10}\b/ig, " ")
+    .replace(/Tipo\s+di\s+stoccaggio(?:\s+di\s+Logistica\s+di\s+Amazon)?\s*:\s*[^|\n\r]+/ig, " ")
+    .replace(/\bTipo\s+di\s+stoccaggio\s+di\s+Logistica\s+di\s+Amazon\b/ig, " ")
+    .replace(/\bTipo\s+di\s+stoccaggio\b/ig, " ")
+    .replace(/\bLogistica\s+di\s+Amazon\b/ig, " ")
+    .replace(/\bDimensione\s+standard\b/ig, " ")
+    .replace(/[_|]+/g, " ")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+  return s || String(fallback || "SKU Amazon").trim();
+}
+
+function twAmazonCanonicalLabel(it){
+  const sku = String(it?.sku || it?.id || it?.code || "").trim().toUpperCase();
+  const title = twAmazonDisplayTitle(it?.title || it?.name || it?.product || "", sku);
+  return title || sku || "SKU Amazon";
+}
+
+function twAmazonStatusText(){
+  const amz = twEnsureAmazonState();
+  if(amz.error) return `SKU Amazon Concamarise non disponibili: ${amz.error}`;
+  if(!amz.ready) return "SKU Amazon Concamarise in caricamento…";
+  return `SKU Amazon Concamarise: ${amz.items.length.toLocaleString("it-IT")} prodotti`;
+}
+
+function twCompileStatusText(){
+  const parts = [];
+  try{ parts.push(twPfCompileStatusText()); }catch(_e){}
+  try{ parts.push(twAmazonStatusText()); }catch(_e){}
+  return parts.filter(Boolean).join(" • ") || "Ricerca prodotti in caricamento…";
+}
+
+function twAmazonRefreshIndex(){
+  const amz = twEnsureAmazonState();
+  const arr = (amz.items || []).map(it=>{
+    const sku = String(it?.sku || it?.id || "").trim().toUpperCase();
+    const title = twAmazonDisplayTitle(it?.title || it?.name || it?.product || "", sku);
+    return {
+      ...it,
+      sku,
+      title,
+      qty: twPfNum(it?.qty),
+      searchBlob: twPfNorm([sku, title, it?.titleNorm].filter(Boolean).join(" "))
+    };
+  }).filter(it=> !!it.sku);
+  arr.sort((a,b)=>{
+    const qa = twPfNum(b.qty);
+    const qb = twPfNum(a.qty);
+    if(qa !== qb) return qa - qb;
+    return String(a.title || a.sku || "").localeCompare(String(b.title || b.sku || ""), "it", { sensitivity:"base" });
+  });
+  amz.items = arr;
+  amz.bySku = new Map(arr.map(it => [String(it.sku || "").trim().toUpperCase(), it]));
+}
+
+function twAmazonScoreItem(it, qNorm){
+  const q = String(qNorm || "").trim();
+  if(!q) return 0;
+  const sku = twPfNorm(it?.sku || "");
+  const title = twPfNorm(it?.title || "");
+  const hay = `${sku} ${title} ${twPfNorm(it?.titleNorm || "")}`.trim();
+  if(!hay) return 0;
+
+  let score = 0;
+  if(sku && sku === q) score += 1800;
+  if(title && title === q) score += 1400;
+  if(sku && sku.startsWith(q)) score += 980;
+  if(title && title.startsWith(q)) score += 860;
+  if(sku && sku.includes(q)) score += 720;
+  if(title && title.includes(q)) score += 540;
+
+  const tokens = twPfQueryTokens(q).filter(t => t.length >= 2);
+  if(tokens.length){
+    let matched = 0;
+    for(const t of tokens){
+      if(!t) continue;
+      if(hay.includes(t)){
+        matched += 1;
+        score += (twPfTokenStartsInHay(title, t) ? 220 : 140);
+      }
+    }
+    if(matched === tokens.length) score += 320;
+    else score += matched * 25;
+  }
+
+  const qNums = q.match(/\d+/g) || [];
+  if(qNums.length){
+    const nums = new Set(hay.match(/\d+/g) || []);
+    for(const n of qNums) if(nums.has(n)) score += 100;
+  }
+
+  const stock = twPfNum(it?.qty);
+  if(stock > 0) score += Math.min(60, Math.round(Math.log10(stock + 1) * 18));
+  return score;
+}
+
+function twAmazonSearch(term){
+  const amz = twEnsureAmazonState();
+  const list = Array.isArray(amz.items) ? amz.items.slice() : [];
+  const q = twPfNorm(String(term || "").replace(/^\s*(?:amz|amazon|sku)\s*:\s*/i, ""));
+  if(!q){
+    return list
+      .sort((a,b)=>{
+        const qa = twPfNum(b.qty);
+        const qb = twPfNum(a.qty);
+        if(qa !== qb) return qa - qb;
+        return String(a.title || a.sku || "").localeCompare(String(b.title || b.sku || ""), "it", { sensitivity:"base" });
+      })
+      .slice(0, 10);
+  }
+  return list
+    .map(it => ({ it, score: twAmazonScoreItem(it, q) }))
+    .filter(x => x.score > 0)
+    .sort((a,b)=>{
+      if(b.score !== a.score) return b.score - a.score;
+      const qa = twPfNum(b.it.qty);
+      const qb = twPfNum(a.it.qty);
+      if(qa !== qb) return qa - qb;
+      return String(a.it.title || a.it.sku || "").localeCompare(String(b.it.title || b.it.sku || ""), "it", { sensitivity:"base" });
+    })
+    .slice(0, 12)
+    .map(x => x.it);
+}
+
+function twAmazonResolveExact(text){
+  const amz = twEnsureAmazonState();
+  const raw = String(text || "").replace(/^\s*(?:amz|amazon|sku)\s*:\s*/i, "").trim();
+  if(!raw) return null;
+
+  const bySku = amz.bySku instanceof Map ? amz.bySku : new Map();
+  const skuToken = (raw.match(/\b([A-Za-z0-9]{2,}(?:-[A-Za-z0-9]{2,}){1,})\b/) || [])[1] || raw.split(/\s*(?:—|-|\||;)\s*/)[0] || raw;
+  const sku = String(skuToken || "").trim().toUpperCase();
+  if(sku && bySku.has(sku)) return bySku.get(sku);
+
+  const q = twPfNorm(raw);
+  if(!q) return null;
+  for(const it of (amz.items || [])){
+    const s = twPfNorm(it.sku || "");
+    const title = twPfNorm(it.title || "");
+    const combo = twPfNorm([it.sku, it.title].filter(Boolean).join(" "));
+    if(q === s || q === title || q === combo) return it;
+  }
+
+  const best = twAmazonSearch(raw)[0] || null;
+  if(best && twAmazonScoreItem(best, q) >= 900) return best;
+  return null;
+}
+
+function twCompileInlineApplyAmazonSuggestion(sku){
+  const amz = twEnsureAmazonState();
+  const item = (amz.bySku instanceof Map) ? (amz.bySku.get(String(sku || "").trim().toUpperCase()) || null) : null;
+  const info = twCompileGetActiveLineInfo();
+  if(!item || !info) return;
+  const qty = twCompileQtyFromLine(info.lineText);
+  const nextLine = `AMZ: ${item.sku || sku} | ${qty}`.trimEnd();
+  const nextValue = info.value.slice(0, info.start) + nextLine + info.value.slice(info.end);
+  info.box.value = nextValue;
+  const caretPos = info.start + (`AMZ: ${item.sku || sku} | `.length + (qty ? String(qty).length : 0));
+  try{
+    info.box.focus();
+    info.box.setSelectionRange(caretPos, caretPos);
+  }catch(_e){}
+  twCompileInlineRefresh();
+}
+
+function twAmazonLineFromClassified(info){
+  const item = info?.item || null;
+  const sku = String(item?.sku || "").trim().toUpperCase();
+  if(!sku) return null;
+  return {
+    sku,
+    title: twAmazonCanonicalLabel(item),
+    qty: String(info.qtyNum || ""),
+    unit: "pz",
+    stock: twPfNum(item.qty),
+    loc: TW_AMZ_LOC
+  };
+}
+
+function twBuildAmazonInventoryLoadPlan(done){
+  try{
+    if(!twIsManualAmazonSkuRow(done)) return null;
+    const qtyRaw = twConcaQtyNum(done.qty);
+    if(!(qtyRaw > 0)) return null;
+    const qty = Math.round(qtyRaw * 1000) / 1000;
+    const doneId = String(done.id || done.key || done.twDoneId || "").trim() || String(Date.now());
+    const sku = String(done.amazonInventorySku || done.code || done.finishedProductCode || done.product || "").trim().toUpperCase();
+    if(!sku) return null;
+    const title = twAmazonDisplayTitle(done.amazonInventoryTitle || done.product || done.label || done.rawLine || sku, sku);
+    const movementId = String(done.amazonInventoryMovementId || twAmazonMovementDocId(doneId)).trim();
+    const tsClient = Number(done.completedAtClientMs || Date.now());
+    const who = state.user?.email || state.user?.uid || "Sistema";
+    const line = { sku, title: title || sku, qty };
+    return { doneId, movementId, sku, title: title || sku, qty, tsClient, who, line };
+  }catch(e){
+    console.warn("twBuildAmazonInventoryLoadPlan error:", e);
+    return null;
+  }
+}
+
+function twApplyAmazonInventoryBatchWrite(batch, fs, db, done, opts={}){
+  const plan = twBuildAmazonInventoryLoadPlan(done);
+  if(!plan || !batch || !fs || !db) return null;
+  const reverse = opts && opts.reverse === true;
+  const delta = (reverse ? -1 : 1) * plan.qty;
+  const itemRef = fs.doc(db, TW_AMZ_ROOT, TW_AMZ_LOC, TW_AMZ_ITEMS_SUB, plan.sku);
+  const logRef = fs.doc(db, TW_AMZ_ROOT, TW_AMZ_LOC, TW_AMZ_LOGS_SUB, plan.movementId);
+
+  batch.set(itemRef, {
+    sku: plan.sku,
+    title: plan.title,
+    titleNorm: twPfNorm(plan.title || plan.sku),
+    qty: fs.increment(delta),
+    location: TW_AMZ_LOC,
+    updatedAt: fs.serverTimestamp(),
+    updatedAtClient: Date.now(),
+    updatedBy: plan.who,
+    lastWriteSource: TW_AMZ_SOURCE,
+    lastWriteTwDoneId: plan.doneId
+  }, { merge:true });
+
+  if(reverse){
+    batch.delete(logRef);
+  }else{
+    batch.set(logRef, {
+      kind: "carica",
+      location: TW_AMZ_LOC,
+      fileName: "TABELLONE_WRITE",
+      appliedAt: fs.serverTimestamp(),
+      appliedAtClient: plan.tsClient,
+      appliedBy: plan.who,
+      status: "DONE",
+      doneAt: fs.serverTimestamp(),
+      doneAtClient: Date.now(),
+      totalLines: 1,
+      totalPieces: plan.qty,
+      lines: [plan.line],
+      workflow: null,
+      workflowId: null,
+      workflowLabel: `Tabellone WRITE • ${plan.title}`.slice(0, 180),
+      source: TW_AMZ_SOURCE,
+      docType: TW_AMZ_DOC_TYPE,
+      twDoneId: plan.doneId,
+      sourceLine: TW_LINE_BUCKET,
+      orderNo: String(done.orderNo || "").trim(),
+      customer: String(done.customer || "").trim(),
+      origin: "tabellone_write_amazon_concamarise"
+    }, { merge:true });
+
+    batch.set(fs.doc(db, TW_AMZ_PRODUCTS_COL, plan.sku), {
+      sku: plan.sku,
+      title: plan.title,
+      titleNorm: twPfNorm(plan.title || plan.sku),
+      lastSeenAt: fs.serverTimestamp(),
+      lastSeenAtClient: Date.now(),
+      lastSeenBy: plan.who,
+      lastSeenLocation: TW_AMZ_LOC,
+      lastSeenKind: "tabellone_write",
+      seenCount: fs.increment(1)
+    }, { merge:true });
+  }
+
+  return plan;
+}
+
+let __TW_AMZ_BACKFILL_T = null;
+function twScheduleDoneAmazonBackfill(items){
+  try{
+    const tw = ensureTabWriteState();
+    tw._pendingAmazonDoneItems = Array.isArray(items) ? items.slice() : [];
+    if(__TW_AMZ_BACKFILL_T) return;
+    __TW_AMZ_BACKFILL_T = setTimeout(()=>{
+      __TW_AMZ_BACKFILL_T = null;
+      const latest = ensureTabWriteState()._pendingAmazonDoneItems || [];
+      twSyncCompletedAmazonItemsToInventory(latest);
+    }, 420);
+  }catch(_e){}
+}
+
+async function twSyncCompletedAmazonItemsToInventory(items){
+  const tw = ensureTabWriteState();
+  try{
+    if(tw._amazonBackfillBusy) return;
+    if(!state.firebase?.ok) return;
+    const list = (Array.isArray(items) ? items : []).filter(it => twIsManualAmazonSkuRow(it));
+    if(!list.length) return;
+    const fs = state.firebase.api;
+    const db = state.firebase.db;
+    if(!fs || !db || !fs.runTransaction) return;
+
+    tw._amazonBackfillBusy = true;
+
+    for(const it of list){
+      const doneId = String(it.id || it.key || it.twDoneId || "").trim();
+      if(!doneId) continue;
+      const plan = twBuildAmazonInventoryLoadPlan({ ...it, id: doneId, key: doneId });
+      if(!plan) continue;
+
+      const logRef = fs.doc(db, TW_AMZ_ROOT, TW_AMZ_LOC, TW_AMZ_LOGS_SUB, plan.movementId);
+      const itemRef = fs.doc(db, TW_AMZ_ROOT, TW_AMZ_LOC, TW_AMZ_ITEMS_SUB, plan.sku);
+      const productRef = fs.doc(db, TW_AMZ_PRODUCTS_COL, plan.sku);
+      const producedRef = fs.doc(db, "producedDays", TW_LINE_BUCKET, "items", doneId);
+
+      await fs.runTransaction(db, async(tx)=>{
+        const logSnap = await tx.get(logRef);
+        if(logSnap.exists()) return;
+
+        tx.set(itemRef, {
+          sku: plan.sku,
+          title: plan.title,
+          titleNorm: twPfNorm(plan.title || plan.sku),
+          qty: fs.increment(plan.qty),
+          location: TW_AMZ_LOC,
+          updatedAt: fs.serverTimestamp(),
+          updatedAtClient: Date.now(),
+          updatedBy: plan.who,
+          lastWriteSource: TW_AMZ_SOURCE,
+          lastWriteTwDoneId: plan.doneId
+        }, { merge:true });
+
+        tx.set(logRef, {
+          kind: "carica",
+          location: TW_AMZ_LOC,
+          fileName: "TABELLONE_WRITE",
+          appliedAt: fs.serverTimestamp(),
+          appliedAtClient: plan.tsClient,
+          appliedBy: plan.who,
+          status: "DONE",
+          doneAt: fs.serverTimestamp(),
+          doneAtClient: Date.now(),
+          totalLines: 1,
+          totalPieces: plan.qty,
+          lines: [plan.line],
+          workflow: null,
+          workflowId: null,
+          workflowLabel: `Tabellone WRITE • ${plan.title}`.slice(0, 180),
+          source: TW_AMZ_SOURCE,
+          docType: TW_AMZ_DOC_TYPE,
+          twDoneId: plan.doneId,
+          sourceLine: TW_LINE_BUCKET,
+          origin: "tabellone_write_amazon_concamarise"
+        }, { merge:true });
+
+        tx.set(productRef, {
+          sku: plan.sku,
+          title: plan.title,
+          titleNorm: twPfNorm(plan.title || plan.sku),
+          lastSeenAt: fs.serverTimestamp(),
+          lastSeenAtClient: Date.now(),
+          lastSeenBy: plan.who,
+          lastSeenLocation: TW_AMZ_LOC,
+          lastSeenKind: "tabellone_write",
+          seenCount: fs.increment(1)
+        }, { merge:true });
+
+        tx.set(producedRef, {
+          amazonInventoryMovementId: plan.movementId,
+          amazonInventorySyncedAt: fs.serverTimestamp(),
+          amazonInventorySyncedAtMs: Date.now(),
+          amazonInventoryLocation: TW_AMZ_LOC,
+          amazonInventorySku: plan.sku
+        }, { merge:true });
+      });
+    }
+  }catch(e){
+    console.warn("twSyncCompletedAmazonItemsToInventory error:", e);
+  }finally{
+    tw._amazonBackfillBusy = false;
+  }
+}
+
+function twStartAmazonWatch(){
+  const amz = twEnsureAmazonState();
+  if(!(state.user && state.user.isAdmin)){
+    try{ amz.unsub && amz.unsub(); }catch(_e){}
+    amz.unsub = null;
+    amz.items = [];
+    amz.bySku = new Map();
+    amz.ready = false;
+    amz.error = "";
+    return;
+  }
+  if(!state.firebase?.ok) return;
+  const fs = state.firebase.api;
+  const db = state.firebase.db;
+  if(!fs || !db) return;
+
+  try{ amz.unsub && amz.unsub(); }catch(_e){}
+  amz.unsub = null;
+  amz.ready = false;
+  amz.error = "";
+  twAmazonRefreshIndex();
+  try{ twCompileInlineRefresh(); }catch(_e){}
+
+  try{
+    const col = fs.collection(db, TW_AMZ_ROOT, TW_AMZ_LOC, TW_AMZ_ITEMS_SUB);
+    let q = null;
+    try{ q = fs.query(col, fs.orderBy("sku", "asc")); }catch(_e){ q = col; }
+    amz.unsub = fs.onSnapshot(q, (snap)=>{
+      amz.items = (snap.docs || []).map(d=>{
+        const v = d.data() || {};
+        return {
+          id: d.id,
+          sku: String(v.sku || d.id || "").trim().toUpperCase(),
+          title: String(v.title || v.name || v.product || v.descrizione || "").trim(),
+          titleNorm: String(v.titleNorm || "").trim(),
+          qty: twPfNum(v.qty),
+          location: TW_AMZ_LOC,
+          updatedAtClient: Number(v.updatedAtClient || 0)
+        };
+      });
+      amz.ready = true;
+      amz.error = "";
+      twAmazonRefreshIndex();
+      try{ twPfRenderStatus(); }catch(_e){}
+      try{ twPfRenderSelectedMeta(); }catch(_e){}
+      try{ twCompileInlineRefresh(); }catch(_e){}
+    }, (err)=>{
+      console.warn("tw amazon inventory snapshot error:", err);
+      amz.ready = false;
+      amz.error = err?.code || "permission-denied";
+      try{ twCompileInlineRefresh(); }catch(_e){}
+    });
+  }catch(err){
+    console.warn("twStartAmazonWatch error:", err);
+    amz.error = err?.code || err?.message || "error";
+  }
+}
+
+function twStopAmazonWatch(){
+  const amz = twEnsureAmazonState();
+  try{ amz.unsub && amz.unsub(); }catch(_e){}
+  amz.unsub = null;
+  amz.items = [];
+  amz.bySku = new Map();
+  amz.ready = false;
+  amz.error = "";
 }
 
 const TW_CONCA_DDT_DOC_TYPE = "DDT_TRASFERIMENTO_CONCA";
@@ -12435,8 +12924,7 @@ function twPfSetSelected(key){
   const item = twPfSelectedItem();
   const input = $("twPfSearchInput");
   if(item && input){
-    const cleanProduct = twCleanAmazonInventoryTitle(item.product || item.displayName || "");
-    input.value = [item.code, cleanProduct].filter(Boolean).join(" — ") || cleanProduct || item.code || "";
+    input.value = [item.code, item.product].filter(Boolean).join(" — ") || item.product || item.code || "";
   }
   const box = $("twPfSearchResults");
   if(box){
@@ -12453,14 +12941,14 @@ function twPfCompileItemsForSend(){
     if(!raw) continue;
     const qtyRaw = twPfNum(raw.qty);
     const qtyInt = Math.round(qtyRaw);
-    const label = twCleanAmazonInventoryTitle(String(raw.displayName || raw.product || raw.code || "articolo PF").trim());
+    const label = String(raw.displayName || raw.product || raw.code || "articolo PF").trim();
     if(!(qtyInt > 0)) throw new Error(`Quantità PF non valida per ${label}`);
     if(Math.abs(qtyRaw - qtyInt) > 1e-9) throw new Error(`Per ${label} inserisci una quantità intera`);
     out.push({
       key: String(raw.key || twPfCodeKey(raw.code, raw.product, raw.finishedProductId)).trim(),
       finishedProductId: String(raw.finishedProductId || "").trim(),
       finishedProductCode: String(raw.code || "").trim(),
-      finishedProductName: twCleanAmazonInventoryTitle(String(raw.displayName || raw.product || raw.code || "").trim()),
+      finishedProductName: String(raw.displayName || raw.product || raw.code || "").trim(),
       finishedProductUom: String(raw.unit || raw.uom || "pz").trim() || "pz",
       qty: qtyInt,
       unit: String(raw.unit || raw.uom || "pz").trim() || "pz",
@@ -12604,14 +13092,14 @@ function twPfAddSelectedToDraft(){
     existing.qty = Math.round(twPfNum(existing.qty) + qtyInt);
     existing.stock = item.stock;
     existing.unit = item.uom || existing.unit || "pz";
-    existing.displayName = twCleanAmazonInventoryTitle(item.displayName || existing.displayName || existing.product || item.product || item.code || "");
+    existing.displayName = item.displayName || existing.displayName || existing.product || item.product || item.code || "";
   }else{
     pf.compileItems.push({
       key,
       finishedProductId: String(item.finishedProductId || "").trim(),
       code: String(item.code || "").trim(),
-      product: twCleanAmazonInventoryTitle(String(item.product || item.code || "").trim()),
-      displayName: twCleanAmazonInventoryTitle(String(item.displayName || item.product || item.code || "").trim()),
+      product: String(item.product || item.code || "").trim(),
+      displayName: String(item.displayName || item.product || item.code || "").trim(),
       qty: qtyInt,
       unit: String(item.uom || "pz").trim() || "pz",
       stock: twPfNum(item.stock),
@@ -12706,9 +13194,9 @@ function twPfBindUiOnce(){
 
 
 function twCompilePfCanonicalLabel(it){
-  const display = twCleanAmazonInventoryTitle(String(it?.displayName || "").trim());
+  const display = String(it?.displayName || "").trim();
   if(display) return display;
-  return twCleanAmazonInventoryTitle(twPfCleanDisplayName(it?.product || it?.agentiName || it?.code || "PF", it?.code || ""));
+  return twPfCleanDisplayName(it?.product || it?.agentiName || it?.code || "PF", it?.code || "");
 }
 
 function twCompilePfResolveExact(text){
@@ -12749,7 +13237,7 @@ function twCompileGetActiveLineInfo(textarea){
 }
 
 function twCompileParseFreeLine(lineText){
-  const raw = String(lineText || "").replace(/^\s*pf\s*:\s*/i, "").trim();
+  const raw = String(lineText || "").replace(/^\s*(?:pf|amz|amazon|sku)\s*:\s*/i, "").trim();
   const parts = raw.split(/\s*(?:\||;|\t)\s*/);
   if(parts.length > 1){
     return {
@@ -12784,6 +13272,30 @@ function twCompileQtyFromLine(lineText){
 function twCompileClassifyRawLine(raw, lineNo){
   const line = String(raw || "").trim();
   if(!line) return null;
+
+  const isAmazon = /^\s*(?:amz|amazon|sku)\s*:/i.test(line);
+  if(isAmazon){
+    const strippedAmazon = line.replace(/^\s*(?:amz|amazon|sku)\s*:\s*/i, "");
+    const parts = strippedAmazon.split(/\s*(?:\||;|\t)\s*/).map(s => String(s || "").trim());
+    const amzText = String(parts[0] || "").trim();
+    const amzQtyText = String(parts[1] || "").trim();
+    const amzQtyNum = Number(String(amzQtyText || "").replace(",", "."));
+    const amzItem = twAmazonResolveExact(amzText);
+    const amzQtyOk = amzQtyText !== "" && Number.isFinite(amzQtyNum) && amzQtyNum > 0;
+    return {
+      kind: "amazon",
+      ok: !!amzItem && amzQtyOk,
+      lineNo,
+      raw: line,
+      label: amzItem ? twAmazonCanonicalLabel(amzItem) : (amzText || "SKU Amazon"),
+      qtyText: amzQtyText,
+      qtyNum: amzQtyNum,
+      unit: "pz",
+      stock: twPfNum(amzItem?.qty),
+      item: amzItem,
+      reason: !amzItem ? "SKU Amazon non selezionato correttamente" : (!amzQtyOk ? "Quantità SKU mancante o non valida" : "")
+    };
+  }
 
   const isPf = /^\s*pf\s*:/i.test(line);
   const stripped = line.replace(/^\s*pf\s*:\s*/i, "");
@@ -12832,11 +13344,22 @@ function twCompileExtractInlineDraft(text){
   const rows = twParseLines(text || "");
   const genericLines = [];
   const pfLines = [];
+  const amazonLines = [];
   const errors = [];
 
   rows.forEach((raw, idx) => {
     const info = twCompileClassifyRawLine(raw, idx + 1);
     if(!info) return;
+    if(info.kind === "amazon"){
+      if(!info.ok){
+        errors.push(`Riga ${info.lineNo}: ${info.reason}`);
+        return;
+      }
+      const amz = twAmazonLineFromClassified(info);
+      if(amz) amazonLines.push(amz);
+      else errors.push(`Riga ${info.lineNo}: SKU Amazon non valido`);
+      return;
+    }
     if(info.kind === "pf"){
       if(!info.ok){
         errors.push(`Riga ${info.lineNo}: ${info.reason}`);
@@ -12846,7 +13369,7 @@ function twCompileExtractInlineDraft(text){
         key: String(info.item?.key || "").trim(),
         finishedProductId: String(info.item?.finishedProductId || "").trim(),
         finishedProductCode: String(info.item?.code || "").trim(),
-        finishedProductName: twCleanAmazonInventoryTitle(String(info.item?.displayName || info.item?.product || info.item?.code || "").trim()),
+        finishedProductName: String(info.item?.displayName || info.item?.product || info.item?.code || "").trim(),
         finishedProductUom: String(info.item?.uom || "pz").trim() || "pz",
         qty: String(info.qtyNum),
         unit: String(info.item?.uom || "pz").trim() || "pz",
@@ -12862,7 +13385,7 @@ function twCompileExtractInlineDraft(text){
     genericLines.push(raw);
   });
 
-  return { genericLines, pfLines, errors };
+  return { genericLines, pfLines, amazonLines, errors };
 }
 
 function twCompileInlineApplySuggestion(key){
@@ -12894,6 +13417,12 @@ function twCompileInlineBindOnce(){
 
   document.addEventListener("selectionchange", refreshIfTarget, true);
   document.addEventListener("click", (e)=>{
+    const amzBtn = e.target?.closest?.("[data-tw-inline-amz-pick]");
+    if(amzBtn){
+      e.preventDefault();
+      twCompileInlineApplyAmazonSuggestion(amzBtn.getAttribute("data-tw-inline-amz-pick"));
+      return;
+    }
     const btn = e.target?.closest?.("[data-tw-inline-pf-pick]");
     if(btn){
       e.preventDefault();
@@ -12915,7 +13444,7 @@ function twCompileInlineRefresh(){
   const status = $("twCompileInlineStatus");
   if(!box || !hint || !results || !status) return;
 
-  hint.textContent = twPfCompileStatusText();
+  hint.textContent = twCompileStatusText();
 
   const rows = twParseLines(box.value || "");
   if(!rows.length){
@@ -12925,13 +13454,20 @@ function twCompileInlineRefresh(){
       const info = twCompileClassifyRawLine(raw, idx + 1);
       if(!info) return "";
       const cls = info.ok ? "ok" : "bad";
-      const side = info.kind === "pf"
-        ? (info.ok
-            ? `PF pronto • ${escapeHtml(twPfDisplayQty(info.stock))} ${escapeHtml(info.unit || "pz")}`
-            : escapeHtml(info.reason || "PF non valido"))
-        : (info.ok
-            ? `Riga pronta • ${escapeHtml(info.qtyText)} ${escapeHtml(info.unit || "pz")}`.trim()
-            : escapeHtml(info.reason || "Riga non valida"));
+      let side = "";
+      if(info.kind === "amazon"){
+        side = info.ok
+          ? `SKU Amazon pronto • stock attuale: ${escapeHtml(twPfDisplayQty(info.stock))} pz`
+          : escapeHtml(info.reason || "SKU Amazon non valido");
+      }else if(info.kind === "pf"){
+        side = info.ok
+          ? `PF pronto • ${escapeHtml(twPfDisplayQty(info.stock))} ${escapeHtml(info.unit || "pz")}`
+          : escapeHtml(info.reason || "PF non valido");
+      }else{
+        side = info.ok
+          ? `Riga pronta • ${escapeHtml(info.qtyText)} ${escapeHtml(info.unit || "pz")}`.trim()
+          : escapeHtml(info.reason || "Riga non valida");
+      }
       return `
         <div class="twCompileLineState ${cls}">
           <div class="twCompileLineMain">
@@ -12948,7 +13484,8 @@ function twCompileInlineRefresh(){
   const activeParts = activeLine.split(/\s*(?:\||;|\t)\s*/).filter(Boolean);
   const q = twCompileSearchQueryFromLine(activeLine);
   const isPfLine = /^\s*pf\s*:/i.test(activeLine);
-  const looksCompleteClassic = (!isPfLine && activeParts.length >= 2);
+  const isAmzLine = /^\s*(?:amz|amazon|sku)\s*:/i.test(activeLine);
+  const looksCompleteClassic = (!isPfLine && !isAmzLine && activeParts.length >= 2);
   const shouldShow = !!String(activeLine || "").trim() && (!!q || !looksCompleteClassic);
 
   if(!shouldShow){
@@ -12957,26 +13494,42 @@ function twCompileInlineRefresh(){
     return;
   }
 
-  const matches = twPfSearch(q || activeLine).slice(0, 10);
-  const header = `<div class="twCompileInlineHead">Candidati PF</div>`;
+  const searchTerm = q || activeLine;
+  const pfMatches = isAmzLine ? [] : twPfSearch(searchTerm).slice(0, isPfLine ? 10 : 6);
+  const amzMatches = isPfLine ? [] : twAmazonSearch(searchTerm).slice(0, isAmzLine ? 12 : 8);
+  const chunks = [];
 
-  if(!matches.length){
-    results.style.display = "block";
-    results.innerHTML = `${header}<div class="twCompileInlineEmpty">Nessun prodotto trovato</div>`;
-    return;
+  if(amzMatches.length){
+    chunks.push(`<div class="twCompileInlineHead">SKU Hub Inventario Amazon · Concamarise</div>` + amzMatches.map(it => {
+      const label = twAmazonCanonicalLabel(it);
+      const meta = [`SKU ${it.sku}`, `Stock ${twPfDisplayQty(it.qty)} pz`].filter(Boolean).join(" • ");
+      return `
+        <button type="button" class="twCompileInlinePick" data-tw-inline-amz-pick="${escapeHtmlAttr(it.sku)}">
+          <span class="twCompileInlinePickTitle">${escapeHtml(label)}</span>
+          <span class="twCompileInlinePickMeta">${escapeHtml(meta)}</span>
+        </button>`;
+    }).join(""));
+  }
+
+  if(pfMatches.length){
+    chunks.push(`<div class="twCompileInlineHead">PF liquidi magazzino agenti</div>` + pfMatches.map(it => {
+      const label = twCompilePfCanonicalLabel(it);
+      const stockTxt = `${twPfDisplayQty(it.stock)} ${it.uom || "pz"}`.trim();
+      const meta = [String(it.code || "").trim(), stockTxt].filter(Boolean).join(" • ");
+      return `
+        <button type="button" class="twCompileInlinePick" data-tw-inline-pf-pick="${escapeHtmlAttr(it.key)}">
+          <span class="twCompileInlinePickTitle">${escapeHtml(label)}</span>
+          <span class="twCompileInlinePickMeta">${escapeHtml(meta)}</span>
+        </button>`;
+    }).join(""));
   }
 
   results.style.display = "block";
-  results.innerHTML = header + matches.map(it => {
-    const label = twCompilePfCanonicalLabel(it);
-    const stockTxt = `${twPfDisplayQty(it.stock)} ${it.uom || "pz"}`.trim();
-    const meta = [String(it.code || "").trim(), stockTxt].filter(Boolean).join(" • ");
-    return `
-      <button type="button" class="twCompileInlinePick" data-tw-inline-pf-pick="${escapeHtmlAttr(it.key)}">
-        <span class="twCompileInlinePickTitle">${escapeHtml(label)}</span>
-        <span class="twCompileInlinePickMeta">${escapeHtml(meta)}</span>
-      </button>`;
-  }).join("");
+  if(!chunks.length){
+    results.innerHTML = `<div class="twCompileInlineHead">Risultati</div><div class="twCompileInlineEmpty">Nessun prodotto trovato</div>`;
+    return;
+  }
+  results.innerHTML = chunks.join("");
 }
 
 function twMountPfCompileUi(){
@@ -13042,7 +13595,7 @@ function twMountPfCompileUi(){
     assist.id = "twCompileInlineAssist";
     assist.className = "twCompileInlineAssist";
     assist.innerHTML = `
-      <div class="muted" id="twCompileInlineHint">PF liquidi magazzino agenti</div>
+      <div class="muted" id="twCompileInlineHint">PF liquidi magazzino agenti • SKU Amazon Concamarise</div>
       <div id="twCompileInlineResults" class="twCompileInlineResults"></div>
       <div id="twCompileInlineStatus" class="twCompileInlineStatus"></div>
     `;
@@ -14040,41 +14593,8 @@ function twInferSupplier(rawText){
   return "";
 }
 
-
-function twCleanAmazonInventoryTitle(raw){
-  try{
-    let s = String(raw == null ? "" : raw);
-    if(!s.trim()) return "";
-
-    // Pulizia titoli provenienti da Hub Inventario Amazon:
-    // i dati tecnici di logistica/stoccaggio non devono comparire nel titolo prodotto.
-    s = s.replace(/\r/g, "\n");
-    s = s.split(/\n+/)
-      .map(x => String(x || "").trim())
-      .filter(line => {
-        if(!line) return false;
-        if(/^tipo\s+di\s+stoccaggio\b/i.test(line)) return false;
-        if(/^logistica\s+di\s+amazon\b/i.test(line)) return false;
-        return true;
-      })
-      .join(" ");
-
-    s = s
-      .replace(/\bTipo\s+di\s+stoccaggio\s*:?\s*(?:Logistica\s+di\s+Amazon\s*)?(?:Dimensione\s+standard|Standard|Fuori\s+misura|Oversize)?\b/ig, " ")
-      .replace(/\bLogistica\s+di\s+Amazon\s*(?:Dimensione\s+standard|Standard|Fuori\s+misura|Oversize)?\b/ig, " ")
-      .replace(/\s*(?:[•·|;]+)\s*(?:[•·|;]+\s*)+/g, " • ")
-      .replace(/\s*[-–—]\s*$/g, "")
-      .replace(/\s{2,}/g, " ")
-      .trim();
-
-    return s;
-  }catch(_e){
-    return String(raw == null ? "" : raw).replace(/\s+/g, " ").trim();
-  }
-}
-
 function twCompactProductName(raw){
-  let s = twCleanAmazonInventoryTitle(String(raw==null ? "" : raw)).trim();
+  let s = String(raw==null ? "" : raw).trim();
   if(!s) return "—";
 
   let left = s;
@@ -14242,9 +14762,8 @@ function twRenderQueue(items){
         </div>
       `;
     }else{
-      const displayProduct = twCompactProductName(it.product || it.label || it.rawLine || "—");
-      const displayFormat = twCleanAmazonInventoryTitle(it.format || "");
-      const title = (orderLbl ? (orderLbl + " · ") : "") + displayProduct + (displayFormat ? (" • " + displayFormat) : "");
+      const isAmz = twIsManualAmazonSkuRow(it);
+      const title = isAmz ? (twAmazonDisplayTitle(it.amazonInventoryTitle || it.product || it.label || it.code || "", it.code || it.amazonInventorySku || "") || "SKU Amazon") : ((orderLbl ? (orderLbl + " · ") : "") + (it.product || "—") + (it.format ? (" • " + it.format) : ""));
       const st = (it.status || "DA PRODURRE").toUpperCase();
       const created = twFmtWhen(it.createdAtOrigMs || it.createdAtMs);
       div.title = "";
@@ -14252,7 +14771,7 @@ function twRenderQueue(items){
         <div class="top" style="gap:10px; align-items:flex-start;">
           <div style="min-width:0;">
             <div class="name">${escapeHtml(title)}</div>
-            <div class="sub" style="font-weight:800;">Pezzi: ${escapeHtml(qtyTxt)} · Stato: ${escapeHtml(st)} · Creato: ${escapeHtml(created)}</div>
+            <div class="sub" style="font-weight:800;">${isAmz ? `SKU: ${escapeHtml(it.amazonInventorySku || it.code || "")} · Hub Amazon Concamarise · ` : ``}Pezzi: ${escapeHtml(qtyTxt)} · Stato: ${escapeHtml(st)} · Creato: ${escapeHtml(created)}</div>
           </div>
           <div style="display:flex; gap:8px; align-items:center; justify-content:flex-end; flex-wrap:wrap;">
             <button class="btn good" data-tw-act="done" type="button">Completa</button>
@@ -14314,16 +14833,15 @@ function twRenderDone(items){
         </div>
       `;
     }else{
-      const displayProduct = twCompactProductName(it.product || it.label || it.rawLine || "—");
-      const displayFormat = twCleanAmazonInventoryTitle(it.format || "");
-      const title = (orderLbl ? (orderLbl + " · ") : "") + displayProduct + (displayFormat ? (" • " + displayFormat) : "");
+      const isAmz = twIsManualAmazonSkuRow(it);
+      const title = isAmz ? (twAmazonDisplayTitle(it.amazonInventoryTitle || it.product || it.label || it.code || "", it.code || it.amazonInventorySku || "") || "SKU Amazon") : ((orderLbl ? (orderLbl + " · ") : "") + (it.product || it.label || "—") + (it.format ? (" • " + it.format) : ""));
       const who = (it.completedByName || it.completedByEmail || it.createdByEmail || "").trim();
       div.title = "";
       div.innerHTML = `
         <div class="top" style="gap:10px; align-items:flex-start;">
           <div style="min-width:0;">
             <div class="name">${escapeHtml(title)}</div>
-            <div class="sub" style="font-weight:800;">Pezzi: ${escapeHtml(qtyTxt)} · Completato: ${escapeHtml(twFmtWhen(it.completedAtMs))}${who ? ` · Da: ${escapeHtml(who)}` : ``}</div>
+            <div class="sub" style="font-weight:800;">${isAmz ? `SKU: ${escapeHtml(it.amazonInventorySku || it.code || "")} · Hub Amazon Concamarise · ` : ``}Pezzi: ${escapeHtml(qtyTxt)} · Completato: ${escapeHtml(twFmtWhen(it.completedAtMs))}${who ? ` · Da: ${escapeHtml(who)}` : ``}</div>
           </div>
           <div style="display:flex; gap:8px; align-items:center; justify-content:flex-end; flex-wrap:wrap;">
             <button class="btn ghost" data-tw-act="undo" type="button">Ripristina</button>
@@ -14347,9 +14865,7 @@ function twOpenQtyModal(jobId, job){
   tw.pendingComplete = { id: jobId, job };
   const modal = $("twQtyModal");
   if(!modal) return;
-  const qtyModalProduct = twCompactProductName(job.product || job.finishedProductName || job.label || "—");
-  const qtyModalFormat = twCleanAmazonInventoryTitle(job.format || "");
-  $("twQtySub").textContent = (qtyModalProduct + (qtyModalFormat ? (" • " + qtyModalFormat) : "")).trim();
+  $("twQtySub").textContent = ((job.product||"—") + (job.format ? (" • " + job.format) : "")).trim();
   const inp = $("twQtyInput");
   if(inp) inp.value = (job.qty || "").toString().trim();
   const fb = $("twQtyFeedback");
@@ -14394,10 +14910,10 @@ async function twCompleteJob(){
       return;
     }
 
-    if(twIsManualFinishedProductRow(job)){
+    if(twIsManualFinishedProductRow(job) || twIsManualAmazonSkuRow(job)){
       const qtyInt = Math.round(qtyNum);
       if(Math.abs(qtyNum - qtyInt) > 1e-9){
-        if(fb) fb.textContent = "Per i PF inserisci una quantità intera.";
+        if(fb) fb.textContent = twIsManualAmazonSkuRow(job) ? "Per gli SKU Amazon inserisci una quantità intera." : "Per i PF inserisci una quantità intera.";
         $("twQtyInput")?.focus?.();
         $("twQtyInput")?.select?.();
         return;
@@ -14413,26 +14929,30 @@ async function twCompleteJob(){
 
     const key = String(id);
     const doneDocId = twKeyToDocId(key);
-    const cleanJobProduct = twCleanAmazonInventoryTitle(job.product || job.finishedProductName || job.label || "");
-    const cleanJobFormat = twCleanAmazonInventoryTitle(job.format || "");
-    const label = (cleanJobProduct + (cleanJobFormat ? (" • " + cleanJobFormat) : "")).trim() || "Completato";
+    const label = ((job.product||job.finishedProductName||"") + (job.format ? (" • " + job.format) : "")).trim() || "Completato";
     const movementId = twIsManualFinishedProductRow(job) ? twPfMovementDocId(doneDocId) : "";
+    const amazonMovementId = twIsManualAmazonSkuRow(job) ? twAmazonMovementDocId(doneDocId) : "";
     const concaMovementId = twConcaMovementDocId(doneDocId);
     const payload = {
       key,
       label,
-      qty: twIsManualFinishedProductRow(job) ? Math.round(qtyNum) : qtyNum,
+      qty: (twIsManualFinishedProductRow(job) || twIsManualAmazonSkuRow(job)) ? Math.round(qtyNum) : qtyNum,
       unit: job.unit || job.finishedProductUom || "pz",
-      product: cleanJobProduct,
-      format: cleanJobFormat,
+      product: job.product || job.finishedProductName || "",
+      format: job.format || "",
       kind: job.kind || "",
       source: job.source || "",
       inventoryTarget: job.inventoryTarget || "",
       finishedProductId: job.finishedProductId || "",
       finishedProductCode: job.finishedProductCode || job.code || "",
-      finishedProductName: twCleanAmazonInventoryTitle(job.finishedProductName || job.product || ""),
+      finishedProductName: job.finishedProductName || job.product || "",
       finishedProductUom: job.finishedProductUom || job.unit || job.um || "",
       finishedInventoryMovementId: movementId,
+      amazonInventoryMovementId: amazonMovementId,
+      amazonInventoryLocation: job.amazonInventoryLocation || (twIsManualAmazonSkuRow(job) ? TW_AMZ_LOC : ""),
+      amazonInventorySku: job.amazonInventorySku || (twIsManualAmazonSkuRow(job) ? (job.code || "") : ""),
+      amazonInventoryTitle: job.amazonInventoryTitle || (twIsManualAmazonSkuRow(job) ? (job.product || job.label || "") : ""),
+      amazonInventoryUom: job.amazonInventoryUom || (twIsManualAmazonSkuRow(job) ? "pz" : ""),
       concaInventoryMovementId: concaMovementId,
       concaInventorySyncedAt: fs.serverTimestamp(),
       concaInventorySyncedAtMs: Date.now(),
@@ -14444,7 +14964,7 @@ async function twCompleteJob(){
       um: job.um || job.finishedProductUom || "",
       supplier: job.supplier || "",
       plannedQty: job.qty || "",
-      rawLine: twCleanAmazonInventoryTitle(job.rawLine || ""),
+      rawLine: job.rawLine || "",
       queueOrderKey: twNormalizeOrderKey(job.queueOrderKey || ""),
       createdByUid: state.user?.uid || null,
       createdByEmail: state.user?.email || null,
@@ -14463,6 +14983,26 @@ async function twCompleteJob(){
     const concaMov = twBuildConcaInventoryLoadPayload({ ...payload, id: doneDocId, key }, fs);
     if(concaMov){
       batch.set(fs.doc(db, "orgs", TW_HUB_ORG_ID, TW_CONCA_INVENTORY_COLLECTION, concaMov.movementId), concaMov.payload, { merge:true });
+    }
+
+    if(twIsManualAmazonSkuRow(job)){
+      const amzPlan = twApplyAmazonInventoryBatchWrite(batch, fs, db, { ...payload, id: doneDocId, key });
+      if(amzPlan){
+        payload.amazonInventoryMovementId = amzPlan.movementId;
+        payload.amazonInventorySku = amzPlan.sku;
+        payload.amazonInventoryTitle = amzPlan.title;
+        payload.amazonInventoryLocation = TW_AMZ_LOC;
+        payload.amazonInventoryUom = "pz";
+        batch.set(fs.doc(producedCol, doneDocId), {
+          amazonInventoryMovementId: amzPlan.movementId,
+          amazonInventorySku: amzPlan.sku,
+          amazonInventoryTitle: amzPlan.title,
+          amazonInventoryLocation: TW_AMZ_LOC,
+          amazonInventoryUom: "pz",
+          amazonInventorySyncedAt: fs.serverTimestamp(),
+          amazonInventorySyncedAtMs: Date.now()
+        }, { merge:true });
+      }
     }
 
     if(twIsManualFinishedProductRow(job)){
@@ -14566,7 +15106,7 @@ function twBuildCompletionMailText(it){
   lines.push(lineSep);
 
   const row = [
-    trunc(twCleanAmazonInventoryTitle(it.product || it.label || ""), cols[0].w),
+    trunc(it.product || it.label || "", cols[0].w),
     trunc(it.format || "", cols[1].w),
     padL(it.qty || "", cols[2].w),
     trunc(it.unit || "", cols[3].w),
@@ -14590,7 +15130,7 @@ async function twQueueCompletionEmail(done){
     const db = state.firebase.db;
 
     const to = "matteo@generalcoppersrl.com";
-    const subjProd = twClip(twCleanAmazonInventoryTitle(done.product || done.label || "Ordine"), 54);
+    const subjProd = twClip(done.product || done.label || "Ordine", 54);
     const subjQty  = `${String(done.qty ?? "").trim()} ${String(done.unit ?? "").trim()}`.trim();
     const subject = `Linea liquidi Automatica — Completato: ${subjProd}${subjQty ? " ("+subjQty+")" : ""}`;
 
@@ -14671,7 +15211,7 @@ function twBuildDoneReport(items){
     const completed = twFmtWhen(it.completedAtMs);
     const who = (it.completedByName || it.completedByEmail || it.createdByEmail || "").toString().trim();
     const row = [
-      trunc(twCleanAmazonInventoryTitle(it.product || it.label || ""), cols[0].w),
+      trunc(it.product || it.label || "", cols[0].w),
       trunc(it.format || "", cols[1].w),
       padL(it.qty || "", cols[2].w),
       trunc(it.unit || "", cols[3].w),
@@ -14705,8 +15245,7 @@ async function twClearAllCompletati(){
     showToast("Accesso limitato", "Solo gli amministratori possono svuotare i completati.");
     return;
   }
-  if(!confirm("Svuotare la lista dei completati?\n\nVerranno rimosse anche le righe visibili in Inventario Conca generate dai completati WRITE.\n\nI movimenti e i documenti generati dai DDT già creati NON verranno eliminati.")) return;
-  if(!confirm("Conferma definitiva: svuoto i completati e rimuovo solo i carichi Conca WRITE, mai movimenti DDT?")) return;
+  if(!confirm("Svuotare solo la lista dei completati?\n\nI movimenti di inventario già generati restano in cloud: Inventario Conca, PF e Hub Inventario Amazon non verranno toccati.\n\nSe vuoi eliminare anche il relativo movimento, usa Elimina sulla singola riga completata.")) return;
 
   try{
     if(!state.firebase?.ok) throw new Error("Firebase non disponibile");
@@ -14724,14 +15263,12 @@ async function twClearAllCompletati(){
     }
 
     let deleted = 0;
-    let concaDeleted = 0;
-    let protectedOrMissing = 0;
     let batch = fs.writeBatch(db);
     let ops = 0;
 
     async function commitIfNeeded(force=false){
       if(!ops) return;
-      if(force || ops >= 420){
+      if(force || ops >= 450){
         await batch.commit();
         batch = fs.writeBatch(db);
         ops = 0;
@@ -14739,24 +15276,6 @@ async function twClearAllCompletati(){
     }
 
     for(const d of docs){
-      const data = d.data ? (d.data() || {}) : {};
-      const doneId = String(d.id || data.id || data.key || data.twDoneId || "").trim();
-      const concaMovementId = String(data.concaInventoryMovementId || twConcaMovementDocId(doneId)).trim();
-
-      // Cancello solo il carico Conca nato dal completato WRITE.
-      // Se il documento è un DDT o un movimento collegato a DDT, viene protetto.
-      const concaRefs = await twFindSafeConcaCompletionMovementRefs(doneId, concaMovementId, fs, db);
-      if(concaRefs.length){
-        for(const ref of concaRefs){
-          batch.delete(ref);
-          ops += 1;
-          concaDeleted += 1;
-          await commitIfNeeded(false);
-        }
-      }else if(concaMovementId){
-        protectedOrMissing += 1;
-      }
-
       batch.delete(d.ref);
       ops += 1;
       deleted += 1;
@@ -14764,8 +15283,13 @@ async function twClearAllCompletati(){
     }
     await commitIfNeeded(true);
 
+    try{ ensureTabWriteState().localDoneIds = new Set(); }catch(_e){}
+    try{ twScheduleOrdersSync(); }catch(_e){}
+    try{ state.partialOrders = computePartialOrders().partial; }catch(_e){}
+    try{ renderHome(); }catch(_e){}
+
     twSetCloud("ok");
-    alert("Lista completati svuotata: " + deleted + " righe.\nRighe Inventario Conca WRITE rimosse: " + concaDeleted + ".\nMovimenti/DDT già creati non eliminati.");
+    alert("Lista completati svuotata: " + deleted + " righe.\nI movimenti già generati in cloud sono rimasti invariati.");
   }catch(e){
     console.warn("twClearAllCompletati error:", e);
     twSetCloud("bad", e?.code || "error");
@@ -14780,8 +15304,8 @@ async function twDeleteCompletato(it){
     return;
   }
 
-  const title = twCompactProductName(it.product || it.label || "—") + (twCleanAmazonInventoryTitle(it.format || "") ? (" • " + twCleanAmazonInventoryTitle(it.format || "")) : "");
-  if(!confirm("Eliminare definitivamente questo completato?\n\nVerrà eliminato anche il movimento Conca collegato. La riga NON verrà riportata in coda.\n\n" + title)) return;
+  const title = (it.product || it.label || "—") + (it.format ? (" • " + it.format) : "");
+  if(!confirm("Eliminare definitivamente questo completato?\n\nVerrà eliminato/annullato anche il movimento cloud collegato (Conca, PF o Hub Inventario Amazon). La riga NON verrà riportata in coda.\n\n" + title)) return;
 
   try{
     if(!state.firebase?.ok) throw new Error("Firebase non disponibile");
@@ -14805,6 +15329,10 @@ async function twDeleteCompletato(it){
       }
     }
 
+    if(twIsManualAmazonSkuRow(it)){
+      twApplyAmazonInventoryBatchWrite(batch, fs, db, { ...it, id: it.id, key: it.id }, { reverse:true });
+    }
+
     await batch.commit();
 
     try{ await twRemoveWriteCompletionFromHub(it); }catch(_e){}
@@ -14814,7 +15342,7 @@ async function twDeleteCompletato(it){
     try{ renderHome(); }catch(_e){}
 
     twSetCloud("ok");
-    showToast("Completato eliminato", "Movimento Conca collegato eliminato in cloud.");
+    showToast("Completato eliminato", "Movimento cloud collegato eliminato/annullato.");
   }catch(e){
     console.warn("twDeleteCompletato error:", e);
     twSetCloud("bad", e?.code || "error");
@@ -14824,7 +15352,7 @@ async function twDeleteCompletato(it){
 
 async function twUndoCompletato(it){
   if(!it || !it.id) return;
-  const title = twCompactProductName(it.product || it.label || "—") + (twCleanAmazonInventoryTitle(it.format || "") ? (" • " + twCleanAmazonInventoryTitle(it.format || "")) : "");
+  const title = (it.product || it.label || "—") + (it.format ? (" • " + it.format) : "");
   if(!confirm("Eliminare questo completato e riportare la riga tra gli ordini da fare?\n\nNOTA: verranno azzerate anche eventuali quantità parziali già registrate.\n\n" + title)) return;
 
   try{
@@ -14849,9 +15377,14 @@ async function twUndoCompletato(it){
       inventoryTarget: it.inventoryTarget || "",
       finishedProductId: it.finishedProductId || "",
       finishedProductCode: it.finishedProductCode || it.code || "",
-      finishedProductName: twCleanAmazonInventoryTitle(it.finishedProductName || it.product || ""),
+      finishedProductName: it.finishedProductName || it.product || "",
       finishedProductUom: it.finishedProductUom || it.unit || it.um || "",
       finishedInventoryMovementId: it.finishedInventoryMovementId || (twIsManualFinishedProductRow(it) ? twPfMovementDocId(it.id) : ""),
+      amazonInventoryMovementId: it.amazonInventoryMovementId || (twIsManualAmazonSkuRow(it) ? twAmazonMovementDocId(it.id) : ""),
+      amazonInventoryLocation: it.amazonInventoryLocation || (twIsManualAmazonSkuRow(it) ? TW_AMZ_LOC : ""),
+      amazonInventorySku: it.amazonInventorySku || (twIsManualAmazonSkuRow(it) ? (it.code || "") : ""),
+      amazonInventoryTitle: it.amazonInventoryTitle || (twIsManualAmazonSkuRow(it) ? (it.product || it.label || "") : ""),
+      amazonInventoryUom: it.amazonInventoryUom || (twIsManualAmazonSkuRow(it) ? "pz" : ""),
       concaInventoryMovementId: it.concaInventoryMovementId || twConcaMovementDocId(it.id),
       orderNo: it.orderNo || "",
       customer: it.customer || "",
@@ -14859,7 +15392,7 @@ async function twUndoCompletato(it){
       code: it.code || it.finishedProductCode || "",
       um: it.um || it.finishedProductUom || "",
       supplier: it.supplier || "",
-      product: twCleanAmazonInventoryTitle(it.product || it.finishedProductName || ""),
+      product: it.product || it.finishedProductName || "",
       format: it.format || "",
       qty: it.qty || "",
       unit: it.unit || it.finishedProductUom || "pz",
@@ -14886,6 +15419,10 @@ async function twUndoCompletato(it){
     if(twIsManualFinishedProductRow(it)){
       const movementId = String(payload.finishedInventoryMovementId || twPfMovementDocId(it.id)).trim();
       if(movementId) batch.delete(fs.doc(db, "orgs", TW_HUB_ORG_ID, "finishedInventoryMovements", movementId));
+    }
+
+    if(twIsManualAmazonSkuRow(it)){
+      twApplyAmazonInventoryBatchWrite(batch, fs, db, { ...it, id: it.id, key: it.id }, { reverse:true });
     }
     await batch.commit();
 
@@ -14992,6 +15529,12 @@ function twStartDoneWatch(){
         finishedInventoryMovementId: (v.finishedInventoryMovementId || "").toString().trim(),
         concaInventoryMovementId: (v.concaInventoryMovementId || "").toString().trim(),
         concaInventorySyncedAtMs: Number(v.concaInventorySyncedAtMs || 0),
+        amazonInventoryMovementId: (v.amazonInventoryMovementId || "").toString().trim(),
+        amazonInventoryLocation: (v.amazonInventoryLocation || "").toString().trim(),
+        amazonInventorySku: (v.amazonInventorySku || "").toString().trim(),
+        amazonInventoryTitle: (v.amazonInventoryTitle || "").toString().trim(),
+        amazonInventoryUom: (v.amazonInventoryUom || "").toString().trim(),
+        amazonInventorySyncedAtMs: Number(v.amazonInventorySyncedAtMs || 0),
         orderKey: (v.orderKey || "").toString().trim(),
         orderNo: (v.orderNo || "").toString().trim(),
         customer: (v.customer || v.cliente || v.customerName || v.nomeCliente || "").toString().trim(),
@@ -15014,6 +15557,7 @@ function twStartDoneWatch(){
     tw.doneItems = items;
     twRenderAll();
     try{ twScheduleDoneConcaBackfill(items); }catch(_e){}
+    try{ twScheduleDoneAmazonBackfill(items); }catch(_e){}
     try{ twScheduleOrdersSync(); }catch(_e){}
   }, (err)=>{
     console.warn("tw done snapshot error:", err);
@@ -15038,6 +15582,7 @@ async function twSendLinesToQueue(){
 
   const lines = inlineDraft.genericLines.slice();
   let pfDraft = inlineDraft.pfLines.slice();
+  const amazonDraft = (inlineDraft.amazonLines || []).slice();
 
   try{
     const extraPf = twPfCompileItemsForSend();
@@ -15047,7 +15592,7 @@ async function twSendLinesToQueue(){
     return;
   }
 
-  if(!lines.length && !pfDraft.length){
+  if(!lines.length && !pfDraft.length && !amazonDraft.length){
     alert("Scrivi almeno una riga valida prima di inviare al kiosk.");
     return;
   }
@@ -15061,6 +15606,7 @@ async function twSendLinesToQueue(){
     const batch = fs.writeBatch(db);
     let count = 0;
     let manualPfCount = 0;
+    let manualAmazonCount = 0;
     let skipped = 0;
     let skippedSmall = 0;
     let skippedNonPiece = 0;
@@ -15088,7 +15634,7 @@ async function twSendLinesToQueue(){
       filteredLines.push({ line, job:j });
     }
 
-    const totalNewRows = filteredLines.length + pfDraft.length;
+    const totalNewRows = filteredLines.length + pfDraft.length + amazonDraft.length;
     const reservedOrderKeys = await twReserveQueueOrderKeys(totalNewRows, twGetTailOrderBig(ensureTabWriteState().queueItems));
     if(reservedOrderKeys.length !== totalNewRows) throw new Error("ordine cloud non assegnato");
     let orderKeyIdx = 0;
@@ -15100,16 +15646,14 @@ async function twSendLinesToQueue(){
       const nowMs = Date.now();
       const queueOrderKey = twNormalizeOrderKey(reservedOrderKeys[orderKeyIdx++] || "");
       if(!queueOrderKey) throw new Error("ordine cloud non assegnato");
-      const cleanLineProduct = twCleanAmazonInventoryTitle(j.product || "");
-      const cleanLineFormat = twCleanAmazonInventoryTitle(j.format || "");
       const payload = {
         queueOrderKey,
-        product: cleanLineProduct,
+        product: j.product || "",
         qty: j.qty || "",
         unit: j.unit || "",
-        format: cleanLineFormat,
+        format: j.format || "",
         status: j.status || "DA PRODURRE",
-        rawLine: twCleanAmazonInventoryTitle(j.rawLine || line),
+        rawLine: j.rawLine || line,
         createdAt: fs.serverTimestamp(),
         createdAtMs: nowMs,
         createdAtOrig: fs.serverTimestamp(),
@@ -15135,15 +15679,15 @@ async function twSendLinesToQueue(){
         inventoryTarget: "finished_product",
         finishedProductId: it.finishedProductId || "",
         finishedProductCode: it.finishedProductCode || "",
-        finishedProductName: twCleanAmazonInventoryTitle(it.finishedProductName || it.finishedProductCode || ""),
+        finishedProductName: it.finishedProductName || it.finishedProductCode || "",
         finishedProductUom: it.finishedProductUom || it.unit || "pz",
         code: it.finishedProductCode || "",
-        product: twCleanAmazonInventoryTitle(it.finishedProductName || it.finishedProductCode || ""),
+        product: it.finishedProductName || it.finishedProductCode || "",
         qty: String(it.qty),
         unit: it.unit || it.finishedProductUom || "pz",
         format,
         status: "DA PRODURRE",
-        rawLine: `${twCleanAmazonInventoryTitle(it.finishedProductName || it.finishedProductCode || "PF")} | ${it.qty} | ${it.unit || it.finishedProductUom || "pz"} | ${format}`,
+        rawLine: `${it.finishedProductName || it.finishedProductCode || "PF"} | ${it.qty} | ${it.unit || it.finishedProductUom || "pz"} | ${format}`,
         createdAt: fs.serverTimestamp(),
         createdAtMs: nowMs,
         createdAtOrig: fs.serverTimestamp(),
@@ -15154,6 +15698,43 @@ async function twSendLinesToQueue(){
       batch.set(ref, payload, { merge:true });
       count++;
       manualPfCount++;
+    }
+
+    for(const it of amazonDraft){
+      const ref = fs.doc(queueCol);
+      const nowMs = Date.now();
+      const sku = String(it.sku || "").trim().toUpperCase();
+      const title = twAmazonDisplayTitle(it.title || sku, sku);
+      const qtyInt = Math.round(twPfNum(it.qty));
+      if(!sku || !(qtyInt > 0)) continue;
+      const queueOrderKey = twNormalizeOrderKey(reservedOrderKeys[orderKeyIdx++] || "");
+      if(!queueOrderKey) throw new Error("ordine cloud non assegnato");
+      const payload = {
+        queueOrderKey,
+        kind: "amazonSku",
+        source: "manual_amazon_concamarise",
+        inventoryTarget: "amazon_concamarise",
+        amazonInventoryLocation: TW_AMZ_LOC,
+        amazonInventorySku: sku,
+        amazonInventoryTitle: title,
+        amazonInventoryUom: "pz",
+        code: sku,
+        product: title || sku,
+        qty: String(qtyInt),
+        unit: "pz",
+        format: "SKU Amazon • Concamarise",
+        status: "DA PRODURRE",
+        rawLine: `AMZ: ${sku} | ${qtyInt}`,
+        createdAt: fs.serverTimestamp(),
+        createdAtMs: nowMs,
+        createdAtOrig: fs.serverTimestamp(),
+        createdAtOrigMs: nowMs,
+        createdByUid: state.user?.uid || null,
+        createdByEmail: state.user?.email || null
+      };
+      batch.set(ref, payload, { merge:true });
+      count++;
+      manualAmazonCount++;
     }
 
     twSetCloud("loading","invio…");
@@ -15168,10 +15749,11 @@ async function twSendLinesToQueue(){
     try{ twCompileInlineRefresh(); }catch(_e){}
     twSetCloud("ok");
     let extra = "";
-    if(skipped || skippedSmall || skippedNonPiece || manualPfCount){
+    if(skipped || skippedSmall || skippedNonPiece || manualPfCount || manualAmazonCount){
       extra = "\n\n(";
       const parts = [];
       if(manualPfCount) parts.push("PF manuali inviati: " + manualPfCount);
+      if(manualAmazonCount) parts.push("SKU Amazon inviati: " + manualAmazonCount);
       if(skipped) parts.push("Escluse " + skipped + " righe: 5/10 kg/lt o tanica");
       if(skippedNonPiece) parts.push("Escluse " + skippedNonPiece + " righe: UM non a pezzi (kg/lt/ml ecc.)");
       if(skippedSmall) parts.push("Escluse " + skippedSmall + " righe: < 200 pz");
@@ -15549,6 +16131,7 @@ function ensureTabWriteHome(){
   twBindUiOnce();
   twMountPfCompileUi();
   twStartPfWatch();
+  twStartAmazonWatch();
 
   if(globalThis.__TW_HOME_INIT__) return;
   globalThis.__TW_HOME_INIT__ = true;
@@ -15564,6 +16147,7 @@ function stopTabWriteHome(){
   try{ tw?._unsubQueue && tw._unsubQueue(); }catch(_e){}
   try{ tw?._unsubDone && tw._unsubDone(); }catch(_e){}
   try{ twStopPfWatch(); }catch(_e){}
+  try{ twStopAmazonWatch(); }catch(_e){}
   if(state.tabWrite){
     state.tabWrite._unsubQueue = null;
     state.tabWrite._unsubDone = null;
@@ -15580,6 +16164,12 @@ function stopTabWriteHome(){
       state.tabWrite.pf.compileItems = [];
       state.tabWrite.pf.selectedKey = "";
       state.tabWrite.pf.searchTerm = "";
+    }
+    if(state.tabWrite.amazon){
+      state.tabWrite.amazon.items = [];
+      state.tabWrite.amazon.bySku = new Map();
+      state.tabWrite.amazon.ready = false;
+      state.tabWrite.amazon.error = "";
     }
   }
   try{ twCloseQtyModal(); }catch(_e){}
