@@ -826,6 +826,31 @@
       return false;
     }
 
+    function isLinkedFblCereaInventoryCorrectionMovement(mv){
+      if (!isLinkedFbl1000Movement(mv)) return false;
+      if (normalizeWarehouseStrict(mv.warehouse) !== WAREHOUSE) return false;
+
+      // Rettifica dal gestionale/hub: quando l'inventario Cerea viene modificato
+      // manualmente, viene creato un movimento IN/OUT sul codice reale FBL.
+      // Estrusore deve seguirlo perché rappresenta lo stock attuale Cerea.
+      const text = compactLookupText([
+        mv?.source,
+        mv?.docType,
+        mv?.note,
+        mv?.rawText
+      ].join(" "));
+
+      return Boolean(
+        text.includes("rettifica") ||
+        text.includes("rettificarapida") ||
+        text.includes("rettificainventario") ||
+        text.includes("correzioneinventario") ||
+        text.includes("modificainventario") ||
+        text.includes("inventoryadjust") ||
+        text.includes("adjuststock")
+      );
+    }
+
     function getFblTransferLineKey(mv){
       if (!mv) return "";
       const ddtKey = cleanText(mv.linkedDdtId || mv.ddtId || mv.transportDocumentId || mv.linkedDdtNumber || mv.ddtNumber || mv.docNum || mv.docNumber || "");
@@ -1079,13 +1104,20 @@
           continue;
         }
 
-        // Fallback storico: usa gli FBL solo se sono veri trasferimenti che toccano Cerea.
+        // Fallback storico: usa gli FBL solo in due casi:
+        // 1) veri trasferimenti che toccano Cerea (Porta a Conca / Porta a Cerea),
+        // 2) rettifiche inventario del gestionale/hub su Cerea.
         // NON deve sommare carichi manuali/iniziali FBL a Cerea, altrimenti lo stock raddoppia.
-        if (!isLinkedFblCereaTransferMovement(mv)) continue;
-        if (mirroredSourceIds.has(String(mv.id || "").trim())) continue;
+        const isTransfer = isLinkedFblCereaTransferMovement(mv);
+        const isCorrection = isLinkedFblCereaInventoryCorrectionMovement(mv);
+        if (!(isTransfer || isCorrection)) continue;
 
-        const lineKey = getFblTransferLineKey(mv);
-        if (lineKey && primaryMirrorLineKeys.has(lineKey)) continue;
+        if (isTransfer){
+          if (mirroredSourceIds.has(String(mv.id || "").trim())) continue;
+
+          const lineKey = getFblTransferLineKey(mv);
+          if (lineKey && primaryMirrorLineKeys.has(lineKey)) continue;
+        }
 
         out.push(mv);
       }
