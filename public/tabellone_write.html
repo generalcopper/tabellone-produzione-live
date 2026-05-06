@@ -15552,6 +15552,7 @@ function twBuildCompletionMailText(it){
   const lines = [];
   lines.push(header1);
   lines.push(header2);
+  lines.push("Totale completati: " + (Array.isArray(items) ? items.length : 0));
   lines.push("");
   lines.push(lineHdr);
   lines.push(lineSep);
@@ -15621,63 +15622,255 @@ async function twQueueCompletionEmail(done){
 // ===== Export completati (testo) =====
 function twBuildDoneReport(items){
   const now = new Date();
-  const header1 = "LINEA LIQUIDI AUTOMATICA (WRITE)";
-  const header2 = "REPORT COMPLETATI - " + now.toLocaleString("it-IT");
-  const cols = [
-    { title:"PRODOTTO", w:36 },
-    { title:"FORMATO", w:16 },
-    { title:"QTY", w:6 },
-    { title:"UNIT", w:5 },
-    { title:"COMPLETATO IL", w:19 },
-    { title:"DA", w:26 },
-  ];
+  const list = Array.isArray(items) ? items.slice() : [];
   const clean = (v)=>String(v ?? "").replace(/\s+/g," ").trim();
-  const trunc = (s,w)=>{
-    s = clean(s);
-    if(s.length <= w) return s.padEnd(w, " ");
-    return s.slice(0, Math.max(0, w-1)) + "…";
+  const valueOrDash = (v)=> clean(v) || "—";
+  const toNum = (v)=>{
+    const raw = clean(v);
+    if(!raw) return null;
+    let s = raw.replace(/[^0-9,\.\-]/g, "");
+    if(!s || s === "-" || s === "." || s === ",") return null;
+    if(s.includes(",") && s.includes(".")){
+      s = s.replace(/\./g, "").replace(",", ".");
+    } else if(s.includes(",")){
+      s = s.replace(",", ".");
+    } else if(/^\-?\d{1,3}(?:\.\d{3})+$/.test(s)){
+      s = s.replace(/\./g, "");
+    }
+    const n = Number(s);
+    return Number.isFinite(n) ? n : null;
   };
-  const padL = (s,w)=>{
-    s = clean(s);
-    if(s.length <= w) return s.padStart(w, " ");
-    return s.slice(0, w);
+  const fmtNum = (n)=>{
+    const val = Number(n);
+    if(!Number.isFinite(val)) return "0";
+    return val.toLocaleString("it-IT", { minimumFractionDigits: 0, maximumFractionDigits: 2 });
   };
-  const lineHdr = cols.map(c => trunc(c.title, c.w)).join(" | ");
-  const lineSep = cols.map(c => "-".repeat(c.w)).join("-+-");
+  const fmtQty = (n, unit)=>{
+    const u = clean(unit);
+    return `${fmtNum(n)}${u ? " " + u : ""}`;
+  };
+  const keyLabel = (product, format, unit)=> [product, format, unit].map(clean).join("||");
+  const productOf = (it)=> valueOrDash(it.product || it.finishedProductName || it.label || it.rawLine);
+  const formatOf = (it)=> clean(it.format || it.finishedProductCode || it.code || "");
+  const unitOf = (it)=> clean(it.unit || it.um || it.finishedProductUom || "");
+  const qtyOf = (it)=> toNum(it.qty);
+  const whoOf = (it)=> valueOrDash(it.completedByName || it.completedByEmail || it.createdByEmail);
+  const customerOf = (it)=> valueOrDash(it.customer || it.cliente || it.customerName || it.nomeCliente);
+  const orderOf = (it)=> valueOrDash(it.orderNo || it.orderKey || it.queueOrderKey || it.orderId || it.id);
+  const completedMsOf = (it)=> Number(it.completedAtMs || 0);
+  const completedTextOf = (it)=> twFmtWhen(completedMsOf(it));
+
+  const byUnit = new Map();
+  const byProduct = new Map();
+  const byOperator = new Map();
+  const dates = [];
+  let concaSyncCount = 0;
+  let amazonSyncCount = 0;
+
+  for(const it of list){
+    const product = productOf(it);
+    const format = formatOf(it);
+    const unit = unitOf(it) || "unità";
+    const qty = qtyOf(it);
+    const who = whoOf(it);
+    const ms = completedMsOf(it);
+
+    if(ms > 0) dates.push(ms);
+    if(it.concaInventoryMovementId || Number(it.concaInventorySyncedAtMs || 0) > 0 || it.finishedInventoryMovementId) concaSyncCount++;
+    if(it.amazonInventoryMovementId || Number(it.amazonInventorySyncedAtMs || 0) > 0) amazonSyncCount++;
+
+    const op = byOperator.get(who) || { count:0 };
+    op.count += 1;
+    byOperator.set(who, op);
+
+    const prodKey = keyLabel(product, format, unit);
+    const prod = byProduct.get(prodKey) || { product, format, unit, qty:0, count:0, hasQty:false };
+    prod.count += 1;
+    if(qty != null){ prod.qty += qty; prod.hasQty = true; }
+    byProduct.set(prodKey, prod);
+
+    if(qty != null){
+      byUnit.set(unit, (byUnit.get(unit) || 0) + qty);
+    }
+  }
+
+  const productRows = Array.from(byProduct.values()).sort((a,b)=>{
+    const qa = a.hasQty ? a.qty : 0;
+    const qb = b.hasQty ? b.qty : 0;
+    if(qb !== qa) return qb - qa;
+    if(b.count !== a.count) return b.count - a.count;
+    return a.product.localeCompare(b.product, "it", { sensitivity:"base" });
+  });
+  const operatorRows = Array.from(byOperator.entries()).sort((a,b)=> (b[1].count||0) - (a[1].count||0));
+  const minDate = dates.length ? Math.min(...dates) : 0;
+  const maxDate = dates.length ? Math.max(...dates) : 0;
+  const distinctProducts = productRows.length;
+  const distinctOperators = operatorRows.length;
 
   const lines = [];
-  lines.push(header1);
-  lines.push(header2);
-  lines.push("");
-  lines.push(lineHdr);
-  lines.push(lineSep);
+  const sep = "=".repeat(78);
+  const thin = "-".repeat(78);
 
-  if(!items || !items.length){
-    lines.push("(nessun completato)");
+  lines.push(sep);
+  lines.push("LINEA LIQUIDI AUTOMATICA (WRITE)");
+  lines.push("REPORT COMPLETATI");
+  lines.push(`Generato il: ${now.toLocaleString("it-IT")}`);
+  lines.push(sep);
+  lines.push("");
+
+  if(!list.length){
+    lines.push("Nessun completato presente nel report.");
     lines.push("");
     return lines.join("\n");
   }
 
-  for(const it of items){
-    const completed = twFmtWhen(it.completedAtMs);
-    const who = (it.completedByName || it.completedByEmail || it.createdByEmail || "").toString().trim();
-    const row = [
-      trunc(it.product || it.label || "", cols[0].w),
-      trunc(it.format || "", cols[1].w),
-      padL(it.qty || "", cols[2].w),
-      trunc(it.unit || "", cols[3].w),
-      trunc(completed, cols[4].w),
-      trunc(who, cols[5].w),
-    ].join(" | ");
-    lines.push(row);
+  lines.push("PANORAMICA");
+  lines.push(thin);
+  lines.push(`Totale completati        : ${list.length}`);
+  lines.push(`Prodotti/formati distinti: ${distinctProducts}`);
+  lines.push(`Operatori coinvolti      : ${distinctOperators}`);
+  lines.push(`Primo completamento      : ${minDate ? twFmtWhen(minDate) : "—"}`);
+  lines.push(`Ultimo completamento     : ${maxDate ? twFmtWhen(maxDate) : "—"}`);
+  lines.push(`Sync Inventario Conca    : ${concaSyncCount}/${list.length}`);
+  lines.push(`Sync Inventario Amazon   : ${amazonSyncCount}/${list.length}`);
+  lines.push("");
+
+  lines.push("QUANTITÀ TOTALI PER UNITÀ");
+  lines.push(thin);
+  if(byUnit.size){
+    Array.from(byUnit.entries())
+      .sort((a,b)=> String(a[0]).localeCompare(String(b[0]), "it", { sensitivity:"base" }))
+      .forEach(([unit,total])=> lines.push(`- ${fmtQty(total, unit)}`));
+  } else {
+    lines.push("- Quantità non disponibili");
   }
+  lines.push("");
+
+  lines.push("TOTALE PER PRODOTTO / FORMATO");
+  lines.push(thin);
+  productRows.forEach((row, idx)=>{
+    lines.push(`${String(idx+1).padStart(2,"0")}. ${row.product}`);
+    lines.push(`    Formato    : ${row.format || "—"}`);
+    lines.push(`    Totale     : ${row.hasQty ? fmtQty(row.qty, row.unit) : "quantità non indicata"}`);
+    lines.push(`    Completati : ${row.count}`);
+  });
+  lines.push("");
+
+  lines.push("TOTALE PER OPERATORE");
+  lines.push(thin);
+  operatorRows.forEach(([who,data], idx)=>{
+    lines.push(`${String(idx+1).padStart(2,"0")}. ${who}: ${data.count} completati`);
+  });
+  lines.push("");
+
+  lines.push("DETTAGLIO COMPLETATI");
+  lines.push(thin);
+  list.forEach((it, idx)=>{
+    const qty = qtyOf(it);
+    const unit = unitOf(it);
+    const conca = (it.concaInventoryMovementId || Number(it.concaInventorySyncedAtMs || 0) > 0 || it.finishedInventoryMovementId) ? "OK" : "—";
+    const amazon = (it.amazonInventoryMovementId || Number(it.amazonInventorySyncedAtMs || 0) > 0) ? "OK" : "—";
+    lines.push(`[${String(idx+1).padStart(3,"0")}] ${completedTextOf(it)}`);
+    lines.push(`Prodotto  : ${productOf(it)}`);
+    lines.push(`Formato   : ${formatOf(it) || "—"}`);
+    lines.push(`Quantità  : ${qty != null ? fmtQty(qty, unit) : valueOrDash(it.qty)}`);
+    lines.push(`Ordine    : ${orderOf(it)}`);
+    lines.push(`Cliente   : ${customerOf(it)}`);
+    lines.push(`Operatore : ${whoOf(it)}`);
+    lines.push(`Cloud     : Conca ${conca} · Amazon ${amazon}`);
+    if(clean(it.rawLine)) lines.push(`Riga      : ${clean(it.rawLine)}`);
+    lines.push("");
+  });
+
+  lines.push(sep);
+  lines.push(`Fine report · Totale completati: ${list.length}`);
+  lines.push(sep);
   lines.push("");
   return lines.join("\n");
 }
 
-function twOpenDoneReport(){
+async function twLoadAllDoneItemsForReport(){
   const tw = ensureTabWriteState();
-  const items = (tw.doneItems || []).filter(it => !twHideInUi(it));
+  const cacheItems = Array.isArray(tw.doneItems) ? tw.doneItems.slice() : [];
+
+  // Il report deve contenere TUTTI i completati Cloud visibili in Ordini conclusi.
+  // Non usare twHideInUi(): quel filtro serve alla coda/produzione e può escludere
+  // righe già concluse, causando report incompleti.
+  if(!state.firebase?.ok){
+    return cacheItems;
+  }
+
+  try{
+    const fs = state.firebase.api;
+    const db = state.firebase.db;
+    const producedCol = fs.collection(db, "producedDays", TW_LINE_BUCKET, "items");
+
+    let snap = null;
+    try{
+      snap = await fs.getDocs(fs.query(producedCol, fs.orderBy("completedAt", "desc")));
+    }catch(_orderErr){
+      // Fallback robusto se manca indice/campo: leggo tutta la collection e ordino lato client.
+      snap = await fs.getDocs(producedCol);
+    }
+
+    const items = [];
+    snap.forEach(d=>{
+      const v = d.data() || {};
+      const completedAtMs = (v.completedAt && v.completedAt.toMillis) ? v.completedAt.toMillis() : (v.completedAtClientMs || v.createdAtMs || 0);
+      items.push({
+        id: d.id,
+        queueOrderKey: twNormalizeOrderKey(v.queueOrderKey || ""),
+        kind: (v.kind || "").toString().trim(),
+        source: (v.source || "").toString().trim(),
+        inventoryTarget: (v.inventoryTarget || "").toString().trim(),
+        finishedProductId: (v.finishedProductId || "").toString().trim(),
+        finishedProductCode: (v.finishedProductCode || "").toString().trim(),
+        finishedProductName: (v.finishedProductName || "").toString().trim(),
+        finishedProductUom: (v.finishedProductUom || "").toString().trim(),
+        finishedInventoryMovementId: (v.finishedInventoryMovementId || "").toString().trim(),
+        concaInventoryMovementId: (v.concaInventoryMovementId || "").toString().trim(),
+        concaInventorySyncedAtMs: Number(v.concaInventorySyncedAtMs || 0),
+        amazonInventoryMovementId: (v.amazonInventoryMovementId || "").toString().trim(),
+        amazonInventoryLocation: (v.amazonInventoryLocation || "").toString().trim(),
+        amazonInventorySku: (v.amazonInventorySku || "").toString().trim(),
+        amazonInventoryTitle: (v.amazonInventoryTitle || "").toString().trim(),
+        amazonInventoryUom: (v.amazonInventoryUom || "").toString().trim(),
+        amazonInventorySyncedAtMs: Number(v.amazonInventorySyncedAtMs || 0),
+        orderKey: (v.orderKey || "").toString().trim(),
+        orderNo: (v.orderNo || "").toString().trim(),
+        customer: (v.customer || v.cliente || v.customerName || v.nomeCliente || "").toString().trim(),
+        lineKey: (v.lineKey || "").toString().trim(),
+        code: (v.code || v.finishedProductCode || "").toString().trim(),
+        um: (v.um || v.finishedProductUom || "").toString().trim(),
+        supplier: (v.supplier || v.fornitore || "").toString().trim(),
+        label: (v.label || "").toString().trim(),
+        product: (v.product || v.finishedProductName || v.label || "").toString().trim(),
+        format: (v.format || "").toString().trim(),
+        qty: (v.qty || "").toString().trim(),
+        unit: (v.unit || v.finishedProductUom || "").toString().trim(),
+        completedAtMs,
+        completedByName: (v.completedByName || v.createdByName || "").toString().trim(),
+        completedByEmail: (v.completedByEmail || v.createdByEmail || "").toString().trim(),
+        createdByEmail: (v.createdByEmail || "").toString().trim(),
+        rawLine: (v.rawLine || "").toString().trim()
+      });
+    });
+
+    items.sort((a,b)=> Number(b.completedAtMs||0) - Number(a.completedAtMs||0));
+
+    // Allineo anche la cache locale, così pagina e report restano coerenti dopo il click.
+    tw.doneItems = items;
+    try{ twRenderAll(); }catch(_e){}
+
+    return items;
+  }catch(e){
+    console.warn("twLoadAllDoneItemsForReport error:", e);
+    return cacheItems;
+  }
+}
+
+async function twOpenDoneReport(){
+  const items = await twLoadAllDoneItemsForReport();
   const content = twBuildDoneReport(items);
   const blob = new Blob([content], { type:"text/plain;charset=utf-8" });
   const url = URL.createObjectURL(blob);
