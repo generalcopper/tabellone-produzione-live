@@ -744,7 +744,6 @@
 body.twDragging{user-select:none;}
 .twDragEl{background:#fff; box-shadow: 0 18px 45px rgba(15,23,42,.18); transform: scale(1.02);}
 #opsCard,
-#completedCard,
 #callMatteoCard,
 #warehouseCard,
 #desktopSummaryCard,
@@ -1370,15 +1369,7 @@ body[data-active-page] [data-page]:not(.is-page-active){
 
     <nav class="sl-sidebar-nav">
       <div class="sl-nav-section-label">Lavoro</div>
-
-      <button class="sl-nav-btn is-active" type="button" data-nav="operativita">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M3 12h3l3-9 4 18 3-9h5"/>
-        </svg>
-        <span class="sl-nav-btn-label">Operatività</span>
-      </button>
-
-      <button class="sl-nav-btn" type="button" data-nav="coda">
+      <button class="sl-nav-btn is-active" type="button" data-nav="coda">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <rect x="3" y="4" width="18" height="4" rx="1"/>
           <rect x="3" y="10" width="18" height="4" rx="1"/>
@@ -1412,22 +1403,6 @@ body[data-active-page] [data-page]:not(.is-page-active){
         </svg>
         <span class="sl-nav-btn-label">Compila &amp; invia</span>
       </button>
-
-      <button class="sl-nav-btn" type="button" data-nav="statistiche" data-admin="1">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M3 3v18h18"/>
-          <path d="M7 14l3-3 4 4 5-6"/>
-        </svg>
-        <span class="sl-nav-btn-label">Statistiche</span>
-      </button>
-
-      <button class="sl-nav-btn" type="button" data-nav="avvisi" data-admin="1">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/>
-          <path d="M13.7 21a2 2 0 0 1-3.4 0"/>
-        </svg>
-        <span class="sl-nav-btn-label">Avvisi</span>
-      </button>
     </nav>
 
     <div class="sl-sidebar-footer">
@@ -1446,7 +1421,7 @@ body[data-active-page] [data-page]:not(.is-page-active){
           <path d="M4 7h16"/><path d="M4 12h16"/><path d="M4 17h16"/>
         </svg>
       </button>
-      <h1 class="sl-page-title" id="sl-pageTitle">Operatività</h1>
+      <h1 class="sl-page-title" id="sl-pageTitle">Coda WRITE</h1>
       <div class="sl-topbar-actions" id="sl-topbarActions">
         <!-- the existing status pills + refresh button get moved here -->
       </div>
@@ -2826,36 +2801,14 @@ body[data-active-page] [data-page]:not(.is-page-active){
   function relocateCompletedCard(){
     const card = $("completedCard");
     const mainCol = document.querySelector(".desktopCol.mainCol");
-    const sideCol = document.querySelector(".desktopCol.sideCol");
-    if(!card || !mainCol || !sideCol) return;
+    if(!card || !mainCol) return;
 
-
-    if(!state._completedHome){
-      state._completedHome = { parent: card.parentElement, next: card.nextElementSibling };
-    }
-
-    const isAdmin = Boolean(state.user && state.user.isAdmin);
-    const isDesktop = (typeof window !== "undefined") ? window.innerWidth >= 1025 : false;
-
-    if(isAdmin && !isMobile() && isDesktop){
-
-      if(card.parentElement !== sideCol || card !== sideCol.firstElementChild){
-        sideCol.insertBefore(card, sideCol.firstElementChild);
-      }
-    }else{
-      const home = state._completedHome;
-      const parent = home?.parent || mainCol;
-      const next = home?.next || null;
-
-      if(next && next.parentElement === parent){
-        if(card.parentElement !== parent || card.nextElementSibling !== next){
-          parent.insertBefore(card, next);
-        }
-      }else{
-        if(card.parentElement !== parent){
-          parent.appendChild(card);
-        }
-      }
+    // Ordini conclusi usa i completati live del Tabellone WRITE.
+    // Manteniamo la card nella colonna principale: la sideCol è nascosta da questa UI.
+    const tabWriteCard = $("tabWriteCard");
+    const ref = tabWriteCard ? tabWriteCard.nextSibling : null;
+    if(card.parentElement !== mainCol){
+      mainCol.insertBefore(card, ref || null);
     }
   }
 
@@ -6865,83 +6818,23 @@ function renderCompletedSection(){
   const badge = $("completedBadge");
   if(!list || !empty || !badge) return;
 
-  const hist = Array.isArray(state.history) ? state.history.slice() : [];
-  hist.sort((a,b)=> tsFromId(b.id||b.at||0) - tsFromId(a.id||a.at||0));
-
-  const entries = hist.filter(h=>h && (h.orderNo || h.customer || h.operator)).slice(0, 10);
-  badge.textContent = entries.length ? String(entries.length) : "0";
-
-  list.innerHTML = "";
-  if(!entries.length){
-    empty.style.display = "block";
-    return;
-  }
-  empty.style.display = "none";
-  const isAdmin = Boolean(state.user && state.user.isAdmin);
-  let adminBox = document.getElementById("completedAdmin");
-  if(isAdmin){
-    if(!adminBox){
-      adminBox = document.createElement("div");
-      adminBox.id = "completedAdmin";
-      adminBox.style.margin = "10px 0";
-      adminBox.innerHTML = `<button class="btn bad" id="btnClearCompleted" style="width:100%;">Cancella tutti conclusi</button>`;
-      list.parentElement.appendChild(adminBox);
-    }
-    const btn = adminBox.querySelector("#btnClearCompleted");
-    if(btn) btn.onclick = ()=> clearCompletedHistory();
-    adminBox.style.display = "block";
-  } else if(adminBox){
-    adminBox.style.display = "none";
-  }
-
-
-  let partialSet = new Set(), fullSet = new Set();
+  let doneItems = [];
   try{
-    const { partial, full } = computePartialOrders();
-    for(const p of partial) partialSet.add(String(p.orderNo));
-    for(const f of full) fullSet.add(String(f.orderNo));
-  }catch(_e){}
+    const tw = (typeof ensureTabWriteState === "function") ? ensureTabWriteState() : null;
+    doneItems = Array.isArray(tw?.doneItems) ? tw.doneItems.slice() : [];
+  }catch(_e){
+    doneItems = [];
+  }
 
-  for(const h of entries){
-    const orderNo = h.orderNo ? String(h.orderNo) : "—";
-    const customer = h.customer || "";
-    const operator = h.operator || h.operatorName || (h.userName||"") || "Operatore";
-    const at = h.at ? fmtDateTime(h.at) : "";
-    const unit = displayUm(h.unit || (()=>{ try{ return inferOrderUm(Array.isArray(h.perLine)?h.perLine:[]); }catch(_e){} return ""; })() || "");
+  badge.textContent = String(doneItems.length || 0);
+  empty.style.display = doneItems.length ? "none" : "block";
+  const adminBox = document.getElementById("completedAdmin");
+  if(adminBox) adminBox.remove();
 
-    const qty = (()=>{
-      try{
-        if(Array.isArray(h.perLine) && h.perLine.length){
-          return h.perLine.reduce((a,x)=>a + (Number(x.producedKg||0)||0), 0);
-        }
-        if(h.kg!=null) return Number(h.kg)||0;
-      }catch(_e){}
-      return null;
-    })();
-    const qtyTxt = qty!=null ? formatQtyWithKg(qty, unit) : null;
-
-    let status = "Produzione registrata";
-    if(fullSet.has(orderNo)) status = "Ordine concluso";
-    else if(partialSet.has(orderNo)) status = "Ordine parzialmente concluso";
-
-    const div = document.createElement("div");
-    div.className = "item completedItem rowPress";
-    div.innerHTML = `
-      <div class="top">
-        <div>
-          <div class="name ellipsis" title="Ordine n. ${escapeHtml(orderNo)} ${customer?`· ${escapeHtml(customer)}`:""}">Ordine n. ${escapeHtml(orderNo)} ${customer?`· ${escapeHtml(customer)}`:""}</div>
-          <div class="completedMeta">
-            <div><b>${escapeHtml(operator)}</b></div>
-            ${at?`<div class="kv">${escapeHtml(at)}</div>`:""}
-            ${qtyTxt!=null?`<div class="kv"><b>${escapeHtml(qtyTxt)}</b></div>`:""}
-            <div>${escapeHtml(status)}</div>
-          </div>
-        </div>
-        <div class="badge">Dettagli</div>
-      </div>
-    `;
-    div.addEventListener("click", ()=> openHistModal(h.id));
-    list.appendChild(div);
+  if(typeof twRenderDoneInto === "function"){
+    twRenderDoneInto(list, doneItems);
+  }else{
+    list.innerHTML = "";
   }
 }
 
@@ -15281,13 +15174,25 @@ function twRenderQueue(items){
 
 
 function twRenderDone(items){
-  const out = $("twDoneList");
+  const safeItems = Array.isArray(items) ? items : [];
+  twRenderDoneInto($("twDoneList"), safeItems);
+  twRenderDoneInto($("completedList"), safeItems);
+
+  const completedBadge = $("completedBadge");
+  if(completedBadge) completedBadge.textContent = String(safeItems.length || 0);
+
+  const completedEmpty = $("completedEmpty");
+  if(completedEmpty) completedEmpty.style.display = safeItems.length ? "none" : "block";
+}
+
+function twRenderDoneInto(out, items){
   if(!out) return;
+  const safeItems = Array.isArray(items) ? items : [];
 
   const firstRects = twCaptureRects(out);
 
   const frag = document.createDocumentFragment();
-  for(const it of items){
+  for(const it of safeItems){
     const div = document.createElement("div");
     div.className = "item pressCard";
     div.dataset.id = it.id;
@@ -16580,7 +16485,7 @@ function twBindUiOnce(){
   });
 
   // done actions (delegation)
-  $("twDoneList")?.addEventListener("click", (e)=>{
+  function twHandleDoneListClick(e){
     const btn = e.target?.closest?.("[data-tw-act]");
     if(!btn) return;
     const act = btn.getAttribute("data-tw-act");
@@ -16597,6 +16502,9 @@ function twBindUiOnce(){
       twDeleteCompletato(it);
       return;
     }
+  }
+  ["twDoneList", "completedList"].forEach((id)=>{
+    $(id)?.addEventListener("click", twHandleDoneListClick);
   });
 
   // modal events
@@ -16842,7 +16750,7 @@ window.addEventListener("resize", onScroll, {passive:true});
   refreshSidebarUser();
 
   /* Default page */
-  setActivePage('operativita');
+  setActivePage('coda');
 })();
 </script>
 </body></html>
