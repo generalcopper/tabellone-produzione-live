@@ -574,6 +574,8 @@
       "FBL1000UN00501102532",
       "FBL1000",
       "fbl1000",
+      "FBL",
+      "fbl",
       "FBL-1000",
       "FBL 1000"
     ]);
@@ -607,7 +609,13 @@
       user: null,
       busy: false,
       codeMovements: [],
-      unsubMovements: null
+      productRecords: [],
+      trackedCodes: [],
+      movementBuckets: new Map(),
+      movementSubscribeSig: "",
+      movementUnsubs: [],
+      unsubMovements: null,
+      unsubProducts: null
     };
 
     const provider = new GoogleAuthProvider();
@@ -638,6 +646,92 @@
       const key = normalizeCodeKey(value);
       if (!key) return false;
       return LINKED_FBL1000_CODES.some(code => normalizeCodeKey(code) === key) || key.startsWith("fbl1000");
+    }
+
+    function normalizeLookupText(value){
+      return String(value || "")
+        .toLowerCase()
+        .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+        .replace(/[^a-z0-9]+/g, " ")
+        .trim()
+        .replace(/\s+/g, " ");
+    }
+
+    function compactLookupText(value){
+      return normalizeLookupText(value).replace(/\s+/g, "");
+    }
+
+    function getProductCodeFromData(data, id = ""){
+      return String(data?.code || data?.sku || data?.codice || id || "").trim();
+    }
+
+    function mapProductRecord(docSnap){
+      const data = docSnap.data() || {};
+      return {
+        id: String(docSnap.id || "").trim(),
+        code: getProductCodeFromData(data, docSnap.id),
+        name: String(data.name || data.nome || data.item || data.title || "").trim(),
+        alias: String(data.alias || data.aliasName || data.aliasLower || "").trim(),
+        searchText: String(data.searchText || data.description || data.category || data.categoryKey || "").trim()
+      };
+    }
+
+    function isEstrusoreFblProductRecord(product){
+      if (!product || typeof product !== "object") return false;
+      const code = String(product.code || product.id || "").trim();
+      const alias = String(product.alias || "").trim();
+      const blob = compactLookupText([code, alias, product.name, product.searchText].join(" "));
+
+      if (isPrimaryCode(code)) return true;
+      if (isLinkedFbl1000Code(code) || isLinkedFbl1000Code(alias)) return true;
+      if (blob.includes("fbl1000") || blob.includes("fbl1000un00501102532")) return true;
+      if (blob.includes("bottigliaagro1lt") || blob.includes("bottigliaagro1l") || blob.includes("flaconeagro1lt")) return true;
+      if (compactLookupText(alias) === "fbl" && normalizeCodeKey(code).startsWith("fbl")) return true;
+      return false;
+    }
+
+    function buildTrackedCodes(){
+      const set = new Set();
+      for (const code of TRACKED_CODES){
+        const clean = String(code || "").trim();
+        if (clean) set.add(clean);
+      }
+
+      for (const product of (state.productRecords || [])){
+        if (!isEstrusoreFblProductRecord(product)) continue;
+        const code = String(product.code || product.id || "").trim();
+        if (code) set.add(code);
+        const id = String(product.id || "").trim();
+        if (id && isLinkedFbl1000Code(id)) set.add(id);
+        const alias = String(product.alias || "").trim();
+        if (alias && compactLookupText(alias).startsWith("fbl")) set.add(alias);
+      }
+
+      return Array.from(set)
+        .map(value => String(value || "").trim())
+        .filter(Boolean)
+        .filter((value, index, arr) => arr.findIndex(v => v === value) === index);
+    }
+
+    function isLinkedFbl1000Movement(mv){
+      if (!mv || typeof mv !== "object") return false;
+      if (isLinkedFbl1000Code(mv.code) || isLinkedFbl1000Code(mv.estrusoreMirrorFromCode)) return true;
+      const compact = compactLookupText([
+        mv.code,
+        mv.item,
+        mv.source,
+        mv.note,
+        mv.rawText,
+        mv.customer,
+        mv.estrusoreMirrorFromCode,
+        mv.estrusoreMirrorFromItem,
+        mv.docType,
+        mv.docNum,
+        mv.ddtNumber
+      ].join(" "));
+      if (compact.includes("fbl1000") || compact.includes("fbl1000un00501102532")) return true;
+      if (compact.includes("bottigliaagro1lt") || compact.includes("bottigliaagro1l") || compact.includes("flaconeagro1lt")) return true;
+      return false;
     }
 
     function isNeutralMovement(mv){
@@ -858,6 +952,8 @@
         type: String(data.type || "IN").trim(),
         code: String(data.code || "").trim(),
         item: String(data.item || data.product || data.name || "").trim(),
+        customer: String(data.customer || data.supplier || data.supplierName || "").trim(),
+        rawText: String(data.rawText || "").trim(),
         qty: safeInt(data.qty),
         uom: String(data.uom || UOM).trim() || UOM,
         warehouse: String(data.warehouse || data.site || data.magazzino || data.location || "").trim(),
@@ -878,6 +974,7 @@
         estrusoreSync: data.estrusoreSync === true,
         estrusoreLinkedMovementId: String(data.estrusoreLinkedMovementId || data.linkedMovementId || "").trim(),
         estrusoreMirrorFromCode: String(data.estrusoreMirrorFromCode || data.mirrorFromCode || "").trim(),
+        estrusoreMirrorFromItem: String(data.estrusoreMirrorFromItem || data.mirrorFromItem || "").trim(),
         estrusoreMirrorQty: safeInt(data.estrusoreMirrorQty || data.mirrorQty || data.qty || 0),
         linkedDdtId: String(data.linkedDdtId || data.estrusoreLinkedDdtId || "").trim(),
         linkedDdtNumber: String(data.linkedDdtNumber || data.estrusoreLinkedDdtNumber || "").trim(),
@@ -902,24 +999,24 @@
       return ids;
     }
 
-    function buildCoveredFblTransferLineKeys(mirroredSourceIds){
+    function buildPrimaryMirrorFblTransferLineKeys(){
       const keys = new Set();
+      for (const mv of (state.codeMovements || [])){
+        if (!mv || !isPrimaryCode(mv.code) || mv.estrusoreSync !== true) continue;
+        const key = getFblTransferLineKey(mv);
+        if (key) keys.add(key);
+      }
+      return keys;
+    }
+
+    function buildCoveredFblTransferLineKeys(mirroredSourceIds){
+      const keys = buildPrimaryMirrorFblTransferLineKeys();
       for (const mv of (state.codeMovements || [])){
         if (!mv || isNeutralMovement(mv)) continue;
         const key = getFblTransferLineKey(mv);
         if (!key) continue;
 
-        if (isPrimaryCode(mv.code) && mv.estrusoreSync === true){
-          keys.add(key);
-          continue;
-        }
-
-        if (
-          isLinkedFbl1000Code(mv.code) &&
-          normalizeWarehouseStrict(mv.warehouse) === WAREHOUSE &&
-          isDdtToConcamariseFromCerea(mv) &&
-          !mirroredSourceIds.has(String(mv.id || "").trim())
-        ){
+        if (isLinkedFbl1000Movement(mv) && normalizeWarehouseStrict(mv.warehouse) === WAREHOUSE && !mirroredSourceIds.has(String(mv.id || "").trim())){
           keys.add(key);
         }
       }
@@ -931,13 +1028,14 @@
         ...mv,
         type: "OUT",
         warehouse: WAREHOUSE,
-        item: mv.item || ITEM_NAME,
+        item: mv.item || mv.estrusoreMirrorFromItem || ITEM_NAME,
         syntheticEstrusoreDdtMovement: true
       };
     }
 
     function extractCereaMovements(){
       const mirroredSourceIds = buildMirroredSourceMovementIds();
+      const primaryMirrorLineKeys = buildPrimaryMirrorFblTransferLineKeys();
       const coveredFblTransferLineKeys = buildCoveredFblTransferLineKeys(mirroredSourceIds);
       const out = [];
 
@@ -949,20 +1047,25 @@
           continue;
         }
 
-        if (!isLinkedFbl1000Code(mv.code)) continue;
+        if (!isLinkedFbl1000Movement(mv)) continue;
         if (mirroredSourceIds.has(String(mv.id || "").trim())) continue;
 
         const wh = normalizeWarehouseStrict(mv.warehouse);
         const movementType = getMovementType(mv);
+        const lineKey = getFblTransferLineKey(mv);
+
+        // Movimenti storici del hub gestionale: lo spostamento Cerea → Conca
+        // crea una riga OUT a Cerea. Questa riga deve essere lo scarico Estrusore
+        // anche se non esiste ancora il mirror ST0090B03BI01E.
         if (wh === WAREHOUSE){
+          if (lineKey && primaryMirrorLineKeys.has(lineKey)) continue;
           out.push(mv);
           continue;
         }
 
-        // Recupero storico: alcune bolle/DDT già create hanno la riga visibile a Concamarise
-        // ma non hanno il movimento mirror ST0090B03BI01E. Per l'estrusore quella riga
-        // equivale comunque a uno scarico da Cerea.
-        const lineKey = getFblTransferLineKey(mv);
+        // Recupero storico: alcune bolle/DDT hanno solo la riga IN a Concamarise.
+        // La trasformiamo in scarico Cerea solo quando è chiaramente una tratta
+        // Cerea → Concamarise e non esiste già una riga/mirror coprente.
         if (
           movementType === "IN" &&
           isConcamariseWarehouse(wh) &&
@@ -1084,33 +1187,96 @@
       els.produceModal.setAttribute("aria-hidden", "true");
     }
 
-    function subscribeCodeMovements(){
+    function clearMovementSubscriptions(){
       if (state.unsubMovements){
         try{ state.unsubMovements(); }catch(_){ }
         state.unsubMovements = null;
       }
+      for (const unsub of (state.movementUnsubs || [])){
+        try{ unsub(); }catch(_){ }
+      }
+      state.movementUnsubs = [];
+      state.movementBuckets = new Map();
+      state.movementSubscribeSig = "";
+    }
 
+    function rebuildCodeMovementsFromBuckets(){
+      const byId = new Map();
+      for (const bucket of (state.movementBuckets || new Map()).values()){
+        for (const movement of (bucket || [])){
+          if (!movement?.id) continue;
+          if (!(isPrimaryCode(movement.code) || isLinkedFbl1000Movement(movement))) continue;
+          byId.set(movement.id, movement);
+        }
+      }
+      state.codeMovements = Array.from(byId.values());
+      render();
+    }
+
+    function refreshMovementSubscriptions(){
+      if (!(state.user && state.db)) return;
+
+      const codes = buildTrackedCodes();
+      state.trackedCodes = codes;
+      const sig = codes.slice().sort().join("|");
+      if (sig === state.movementSubscribeSig && (state.movementUnsubs || []).length) return;
+
+      clearMovementSubscriptions();
+      state.movementSubscribeSig = sig;
+
+      if (!codes.length){
+        state.codeMovements = [];
+        render();
+        return;
+      }
+
+      const chunks = [];
+      for (let i = 0; i < codes.length; i += 10){
+        chunks.push(codes.slice(i, i + 10));
+      }
+
+      chunks.forEach((chunk, index) => {
+        const q = chunk.length === 1
+          ? query(orgCol("inventoryMovements"), where("code", "==", chunk[0]))
+          : query(orgCol("inventoryMovements"), where("code", "in", chunk));
+
+        const unsub = onSnapshot(q, (snap) => {
+          state.movementBuckets.set(String(index), snap.docs.map(mapMovement));
+          rebuildCodeMovementsFromBuckets();
+        }, (err) => {
+          console.error("inventoryMovements listener failed", err);
+          showToast(humanAuthErr(err), "err");
+        });
+        state.movementUnsubs.push(unsub);
+      });
+    }
+
+    function subscribeCodeMovements(){
+      if (state.unsubProducts){
+        try{ state.unsubProducts(); }catch(_){ }
+        state.unsubProducts = null;
+      }
+      clearMovementSubscriptions();
       state.codeMovements = [];
+      state.productRecords = [];
+      state.trackedCodes = [];
 
       if (!(state.user && state.db)){
         render();
         return;
       }
 
-      // Niente query per codice esatto: i DDT storici possono avere codici FBL1000 completi
-      // o varianti salvate in bolla. Ascoltiamo la collection autorizzata e filtriamo lato UI.
-      state.unsubMovements = onSnapshot(orgCol("inventoryMovements"), (snap) => {
-        const byId = new Map();
-        for (const movement of snap.docs.map(mapMovement)){
-          if (!movement?.id) continue;
-          if (!(isPrimaryCode(movement.code) || isLinkedFbl1000Code(movement.code))) continue;
-          byId.set(movement.id, movement);
-        }
-        state.codeMovements = Array.from(byId.values());
-        render();
+      // Primo aggancio immediato sui codici noti, così anche le bolle già create
+      // vengono lette senza aspettare l'anagrafica prodotti.
+      refreshMovementSubscriptions();
+
+      // Poi allarghiamo i codici leggibili usando l'anagrafica prodotti del hub:
+      // se FBL è un alias, prendiamo tutti i codici reali collegati a quell'alias.
+      state.unsubProducts = onSnapshot(orgCol("products"), (snap) => {
+        state.productRecords = snap.docs.map(mapProductRecord);
+        refreshMovementSubscriptions();
       }, (err) => {
-        console.error("inventoryMovements listener failed", err);
-        showToast(humanAuthErr(err), "err");
+        console.warn("products listener failed", err);
       });
     }
 
@@ -1227,11 +1393,14 @@
           if (state.user){
             subscribeCodeMovements();
           }else{
-            if (state.unsubMovements){
-              try{ state.unsubMovements(); }catch(_){ }
-              state.unsubMovements = null;
+            if (state.unsubProducts){
+              try{ state.unsubProducts(); }catch(_){ }
+              state.unsubProducts = null;
             }
+            clearMovementSubscriptions();
             state.codeMovements = [];
+            state.productRecords = [];
+            state.trackedCodes = [];
             render();
           }
           render();

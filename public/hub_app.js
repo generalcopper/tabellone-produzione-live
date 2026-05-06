@@ -14842,6 +14842,38 @@ function getThresholdForKey(k) {
 
 
 
+    function copyMovementExtraFields(mv, payload){
+      try{
+        if (!mv || !payload) return payload;
+        const keys = [
+          "fromWarehouse", "toWarehouse", "sourceWarehouse", "destinationWarehouse",
+          "transferDirection", "ddtDirection", "direction",
+          "moveInvGroupId", "movementGroupId", "linkedMovementId",
+          "lineNo", "lineNumber",
+          "alias", "aliasGroupKey", "displayCode", "sourceAlias",
+          "estrusoreSync", "estrusoreLinkedMovementId", "estrusoreLinkedDdtId", "estrusoreLinkedDdtNumber",
+          "estrusoreMirrorFromCode", "estrusoreMirrorFromItem", "estrusoreMirrorQty",
+          "mirrorFromCode", "mirrorFromItem", "mirrorQty"
+        ];
+        for (const key of keys){
+          if (!(key in mv)) continue;
+          const value = mv[key];
+          if (value === undefined || value === null) continue;
+          if (typeof value === "string" && !value.trim()) continue;
+          if (/Warehouse$/i.test(key)){
+            payload[key] = normalizeWarehouse(value);
+          }else if (key === "lineNo" || key === "lineNumber"){
+            payload[key] = String(value || "").trim();
+          }else if (key === "estrusoreMirrorQty" || key === "mirrorQty"){
+            payload[key] = safeInt(value);
+          }else{
+            payload[key] = value;
+          }
+        }
+      }catch(_){ }
+      return payload;
+    }
+
     // Aggiunge più movimenti in un colpo solo (utile per rettifiche su articoli unificati)
     async function addMovementsBatch(movements) {
       const list = (Array.isArray(movements) ? movements : []).filter(Boolean);
@@ -14878,6 +14910,7 @@ function getThresholdForKey(k) {
               createdAt: serverTimestamp(),
               createdBy: fb.user.email || fb.user.uid
             };
+            copyMovementExtraFields(mv, payload);
             await addDoc(orgCol("inventoryMovements"), payload);
           } catch (e) {
             console.error("movement batch write failed, fallback local", e);
@@ -14928,6 +14961,7 @@ docPages: __sanitizeDocPages(mv.docPages || mv.docImages),
             createdAt: serverTimestamp(),
             createdBy: fb.user.email || fb.user.uid
           };
+          copyMovementExtraFields(mv, payload);
           await addDoc(orgCol("inventoryMovements"), payload);
           return; // listener aggiorna UI
         } catch (e) {
@@ -20262,6 +20296,50 @@ let __stockRowByKey = new Map();
       }
     }
 
+    const MOVE_INV_TRANSFER_DOC_TYPE = "SPOSTAMENTO_HUB";
+    const MOVE_INV_ESTRUSORE_CODE = "ST0090B03BI01E";
+    const MOVE_INV_ESTRUSORE_ITEM = "Bottiglia agro 1 lt";
+    const MOVE_INV_ESTRUSORE_SOURCE = "Spostamento → Estrusore flaconi 1 lt";
+    const MOVE_INV_ESTRUSORE_DOC_TYPE = "ESTRUSORE_SPOSTAMENTO_SYNC";
+
+    function __moveInvCompactText(value){
+      return String(value || "")
+        .toLowerCase()
+        .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+        .replace(/[^a-z0-9]+/g, "")
+        .trim();
+    }
+
+    function __moveInvIsFbl1000ForEstrusore(code, item, ctx){
+      const parts = [
+        code,
+        item,
+        ctx && ctx.__alias,
+        ctx && ctx.__displayCode,
+        ctx && ctx.__groupKey,
+        ...(Array.isArray(ctx && ctx.__codes) ? ctx.__codes : []),
+        ...(Array.isArray(ctx && ctx.__members) ? ctx.__members.map(m => [m && m.code, m && m.item].join(" ")) : [])
+      ].join(" ");
+      const compact = __moveInvCompactText(parts);
+      if (!compact) return false;
+      if (compact.includes("fbl1000") || compact.includes("fbl1000un00501102532")) return true;
+      if (compact.includes("bottigliaagro1lt") || compact.includes("bottigliaagro1l") || compact.includes("flaconeagro1lt")) return true;
+      return false;
+    }
+
+    function __moveInvTransferDirection(from, to){
+      if (from === WAREHOUSE_CEREA && to === WAREHOUSE_CONCA) return "to_concamarise";
+      if (from === WAREHOUSE_CONCA && to === WAREHOUSE_CEREA) return "to_cerea";
+      if (to === WAREHOUSE_PRISMA) return "to_prisma";
+      if (from === WAREHOUSE_PRISMA && to === WAREHOUSE_CEREA) return "prisma_to_cerea";
+      if (from === WAREHOUSE_PRISMA && to === WAREHOUSE_CONCA) return "prisma_to_concamarise";
+      return `${from}_to_${to}`;
+    }
+
+    function __moveInvShouldMirrorToEstrusore(from, to, code, item, ctx){
+      return from === WAREHOUSE_CEREA && to === WAREHOUSE_CONCA && __moveInvIsFbl1000ForEstrusore(code, item, ctx);
+    }
+
     async function __doMoveInvTransferFromRow(row, qty){
       const g = row || {};
       const q = safeInt(qty);
@@ -20284,6 +20362,10 @@ let __stockRowByKey = new Map();
 
       const uom = __normalizeUom(g.uom || "") || getUomResolvedForCodes(g.__codes || []) || getUomResolvedForCode(g.code || "") || "pz";
       const note = `Spostamento inventario: ${warehouseLabel(from)} → ${warehouseLabel(to)}`;
+      const movementDate = todayYYYYMMDD();
+      const transferDirection = __moveInvTransferDirection(from, to);
+      const moveInvGroupId = `MOVE-${movementDate}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
+      let moveInvLineNo = 0;
 
       // membri (per alias group) — se non presenti, fallback su riga singola
       const membersRaw = Array.isArray(g.__members) ? g.__members.slice() : [g];
@@ -20322,14 +20404,29 @@ let __stockRowByKey = new Map();
         const cust = m.customer || custFallback || String(g.customer || "").trim();
         const code = m.code || String(g.code || "").trim();
         const item = m.item || String(g.item || "") || code;
+        const lineNo = String(++moveInvLineNo);
+        const baseMoveMeta = {
+          docType: MOVE_INV_TRANSFER_DOC_TYPE,
+          docNum: moveInvGroupId,
+          docDateRaw: movementDate,
+          fromWarehouse: from,
+          toWarehouse: to,
+          transferDirection,
+          moveInvGroupId,
+          lineNo,
+          alias: String(g.__alias || "").trim(),
+          aliasGroupKey: String(g.__groupKey || "").trim(),
+          displayCode: String(g.__displayCode || "").trim()
+        };
 
         mvs.push(makeMovement({
+          ...baseMoveMeta,
           type: "OUT",
           customer: cust,
           code,
           item,
           qty: take,
-          date: todayYYYYMMDD(),
+          date: movementDate,
           note,
           uom,
           qtyRaw: `${take} ${uom}`.trim(),
@@ -20339,12 +20436,13 @@ let __stockRowByKey = new Map();
         }));
 
         mvs.push(makeMovement({
+          ...baseMoveMeta,
           type: "IN",
           customer: cust,
           code,
           item,
           qty: take,
-          date: todayYYYYMMDD(),
+          date: movementDate,
           note,
           uom,
           qtyRaw: `${take} ${uom}`.trim(),
@@ -20352,6 +20450,31 @@ let __stockRowByKey = new Map();
           source: "Spostamento",
           rawText: ""
         }));
+
+        if (__moveInvShouldMirrorToEstrusore(from, to, code, item, g)){
+          mvs.push(makeMovement({
+            ...baseMoveMeta,
+            type: "OUT",
+            customer: cust,
+            code: MOVE_INV_ESTRUSORE_CODE,
+            item: MOVE_INV_ESTRUSORE_ITEM,
+            qty: take,
+            date: movementDate,
+            note: `Scarico automatico estrusore da spostamento FBL1000 (${code})`,
+            uom: "pz",
+            qtyRaw: `${take} pz`,
+            warehouse: from,
+            source: MOVE_INV_ESTRUSORE_SOURCE,
+            rawText: "",
+            docType: MOVE_INV_ESTRUSORE_DOC_TYPE,
+            estrusoreSync: true,
+            estrusoreLinkedDdtId: moveInvGroupId,
+            estrusoreLinkedDdtNumber: moveInvGroupId,
+            estrusoreMirrorFromCode: code,
+            estrusoreMirrorFromItem: item,
+            estrusoreMirrorQty: take
+          }));
+        }
 
         remaining -= take;
       }
