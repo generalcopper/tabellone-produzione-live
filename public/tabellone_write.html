@@ -11440,6 +11440,7 @@ function twQueueDocToItem(d){
     amazonInventorySku: (v.amazonInventorySku || "").toString().trim(),
     amazonInventoryTitle: (v.amazonInventoryTitle || "").toString().trim(),
     amazonInventoryUom: (v.amazonInventoryUom || "").toString().trim(),
+    amazonInventoryStockAtQueue: twAmazonParseStockValue(v.amazonInventoryStockAtQueue),
     orderKey: (v.orderKey || "").toString().trim(),
     orderNo: (v.orderNo || "").toString().trim(),
     customer: (v.customer || v.cliente || v.customerName || v.nomeCliente || "").toString().trim(),
@@ -12025,12 +12026,7 @@ function twAmazonRefreshIndex(){
       searchBlob: twPfNorm([sku, title, it?.titleNorm].filter(Boolean).join(" "))
     };
   }).filter(it=> !!it.sku);
-  arr.sort((a,b)=>{
-    const qa = twPfNum(b.qty);
-    const qb = twPfNum(a.qty);
-    if(qa !== qb) return qa - qb;
-    return String(a.title || a.sku || "").localeCompare(String(b.title || b.sku || ""), "it", { sensitivity:"base" });
-  });
+  arr.sort((a,b)=> twCompareAmazonInventoryPreview(a, b));
   amz.items = arr;
   amz.bySku = new Map(arr.map(it => [String(it.sku || "").trim().toUpperCase(), it]));
 }
@@ -12082,22 +12078,22 @@ function twAmazonSearch(term){
   const q = twPfNorm(String(term || "").replace(/^\s*(?:amz|amazon|sku)\s*:\s*/i, ""));
   if(!q){
     return list
-      .sort((a,b)=>{
-        const qa = twPfNum(b.qty);
-        const qb = twPfNum(a.qty);
-        if(qa !== qb) return qa - qb;
-        return String(a.title || a.sku || "").localeCompare(String(b.title || b.sku || ""), "it", { sensitivity:"base" });
-      })
+      .sort((a,b)=> twCompareAmazonInventoryPreview(a, b))
       .slice(0, 10);
   }
   return list
     .map(it => ({ it, score: twAmazonScoreItem(it, q) }))
     .filter(x => x.score > 0)
     .sort((a,b)=>{
+      const ap = twAmazonStockPriorityQty(a.it?.qty);
+      const bp = twAmazonStockPriorityQty(b.it?.qty);
+      if(ap !== bp) return ap - bp;
       if(b.score !== a.score) return b.score - a.score;
-      const qa = twPfNum(b.it.qty);
-      const qb = twPfNum(a.it.qty);
-      if(qa !== qb) return qa - qb;
+      if(ap === 0){
+        const aq = twAmazonParseStockValue(a.it?.qty);
+        const bq = twAmazonParseStockValue(b.it?.qty);
+        if(Number.isFinite(aq) && Number.isFinite(bq) && aq !== bq) return aq - bq;
+      }
       return String(a.it.title || a.it.sku || "").localeCompare(String(b.it.title || b.it.sku || ""), "it", { sensitivity:"base" });
     })
     .slice(0, 12)
@@ -12157,6 +12153,82 @@ function twAmazonLineFromClassified(info){
     stock: twPfNum(item.qty),
     loc: TW_AMZ_LOC
   };
+}
+
+function twAmazonParseStockValue(raw){
+  try{
+    if(raw === null || raw === undefined) return null;
+    const txt = String(raw).trim();
+    if(!txt) return null;
+    const n = Number(txt.replace(",", "."));
+    return Number.isFinite(n) ? n : null;
+  }catch(_e){
+    return null;
+  }
+}
+
+function twAmazonStockPriorityQty(raw){
+  const n = twAmazonParseStockValue(raw);
+  return Number.isFinite(n) && n <= 0 ? 0 : 1;
+}
+
+function twAmazonSkuFromQueueRow(it){
+  return String(it?.amazonInventorySku || it?.code || it?.sku || "").trim().toUpperCase();
+}
+
+function twAmazonCurrentStockBySku(sku, fallback=null){
+  const skuId = String(sku || "").trim().toUpperCase();
+  const amz = twEnsureAmazonState();
+  const bySku = amz.bySku instanceof Map ? amz.bySku : new Map();
+  const item = skuId ? (bySku.get(skuId) || null) : null;
+  if(item){
+    const current = twAmazonParseStockValue(item.qty);
+    if(Number.isFinite(current)) return current;
+  }
+  return twAmazonParseStockValue(fallback);
+}
+
+function twAmazonStockForQueueRow(it){
+  if(!twIsManualAmazonSkuRow(it)) return null;
+  const sku = twAmazonSkuFromQueueRow(it);
+  return twAmazonCurrentStockBySku(sku, it?.amazonInventoryStockAtQueue);
+}
+
+function twAmazonQueueRowHasZeroOrNegativeStock(it){
+  const stock = twAmazonStockForQueueRow(it);
+  return Number.isFinite(stock) && stock <= 0;
+}
+
+function twSortQueuePreviewItems(items){
+  const arr = (Array.isArray(items) ? items : []).map((it, idx)=>({ it, idx }));
+  arr.sort((a,b)=>{
+    const ap = twAmazonQueueRowHasZeroOrNegativeStock(a.it) ? 0 : 1;
+    const bp = twAmazonQueueRowHasZeroOrNegativeStock(b.it) ? 0 : 1;
+    if(ap !== bp) return ap - bp;
+
+    if(ap === 0){
+      const aq = twAmazonStockForQueueRow(a.it);
+      const bq = twAmazonStockForQueueRow(b.it);
+      if(Number.isFinite(aq) && Number.isFinite(bq) && aq !== bq) return aq - bq;
+    }
+
+    return a.idx - b.idx;
+  });
+  return arr.map(x=>x.it);
+}
+
+function twCompareAmazonInventoryPreview(a, b){
+  const ap = twAmazonStockPriorityQty(a?.qty);
+  const bp = twAmazonStockPriorityQty(b?.qty);
+  if(ap !== bp) return ap - bp;
+
+  if(ap === 0){
+    const aq = twAmazonParseStockValue(a?.qty);
+    const bq = twAmazonParseStockValue(b?.qty);
+    if(Number.isFinite(aq) && Number.isFinite(bq) && aq !== bq) return aq - bq;
+  }
+
+  return String(a?.title || a?.sku || "").localeCompare(String(b?.title || b?.sku || ""), "it", { sensitivity:"base" });
 }
 
 function twBuildAmazonInventoryLoadPlan(done){
@@ -12397,6 +12469,7 @@ function twStartAmazonWatch(){
       try{ twPfRenderStatus(); }catch(_e){}
       try{ twPfRenderSelectedMeta(); }catch(_e){}
       try{ twCompileInlineRefresh(); }catch(_e){}
+      try{ twRenderAll(); }catch(_e){}
     }, (err)=>{
       console.warn("tw amazon inventory snapshot error:", err);
       amz.ready = false;
@@ -14688,7 +14761,8 @@ function twSetCloud(stateName, detail=""){
 function twRenderAll(){
   const tw = ensureTabWriteState();
 
-  const qVis = (tw.queueItems || []).filter(it => !twHideInUi(it) && twAllowInTabWrite(it));
+  const qVisRaw = (tw.queueItems || []).filter(it => !twHideInUi(it) && twAllowInTabWrite(it));
+  const qVis = twSortQueuePreviewItems(qVisRaw);
   const dVis = (tw.doneItems  || []).slice();
 
   const qBadge = $("twQueueBadge");
@@ -14759,6 +14833,10 @@ function twRenderQueue(items){
       `;
     }else{
       const isAmz = twIsManualAmazonSkuRow(it);
+      const amzSku = isAmz ? twAmazonSkuFromQueueRow(it) : "";
+      const amzStock = isAmz ? twAmazonStockForQueueRow(it) : null;
+      const amzStockMeta = (isAmz && Number.isFinite(amzStock)) ? `Stock: ${escapeHtml(twPfDisplayQty(amzStock))} pz · ` : "";
+      const amzCriticalBadge = (isAmz && Number.isFinite(amzStock) && amzStock <= 0) ? `<span class="badge bad">Stock ≤ 0</span>` : "";
       const title = isAmz ? (twAmazonDisplayTitle(it.amazonInventoryTitle || it.product || it.label || it.code || "", it.code || it.amazonInventorySku || "") || "SKU Amazon") : ((orderLbl ? (orderLbl + " · ") : "") + (it.product || "—") + (it.format ? (" • " + it.format) : ""));
       const st = (it.status || "DA PRODURRE").toUpperCase();
       const created = twFmtWhen(it.createdAtOrigMs || it.createdAtMs);
@@ -14767,9 +14845,10 @@ function twRenderQueue(items){
         <div class="top" style="gap:10px; align-items:flex-start;">
           <div style="min-width:0;">
             <div class="name">${escapeHtml(title)}</div>
-            <div class="sub" style="font-weight:800;">${isAmz ? `SKU: ${escapeHtml(it.amazonInventorySku || it.code || "")} · Hub Amazon Concamarise · ` : ``}Pezzi: ${escapeHtml(qtyTxt)} · Stato: ${escapeHtml(st)} · Creato: ${escapeHtml(created)}</div>
+            <div class="sub" style="font-weight:800;">${isAmz ? `SKU: ${escapeHtml(amzSku)} · Hub Amazon Concamarise · ${amzStockMeta}` : ``}Pezzi: ${escapeHtml(qtyTxt)} · Stato: ${escapeHtml(st)} · Creato: ${escapeHtml(created)}</div>
           </div>
           <div style="display:flex; gap:8px; align-items:center; justify-content:flex-end; flex-wrap:wrap;">
+            ${amzCriticalBadge}
             <button class="btn good" data-tw-act="done" type="button">Completa</button>
             ${delBtn}
           </div>
@@ -15702,6 +15781,7 @@ async function twSendLinesToQueue(){
       const sku = String(it.sku || "").trim().toUpperCase();
       const title = twAmazonDisplayTitle(it.title || sku, sku);
       const qtyInt = Math.round(twPfNum(it.qty));
+      const stockNow = twAmazonCurrentStockBySku(sku, it.stock);
       if(!sku || !(qtyInt > 0)) continue;
       const queueOrderKey = twNormalizeOrderKey(reservedOrderKeys[orderKeyIdx++] || "");
       if(!queueOrderKey) throw new Error("ordine cloud non assegnato");
@@ -15714,6 +15794,7 @@ async function twSendLinesToQueue(){
         amazonInventorySku: sku,
         amazonInventoryTitle: title,
         amazonInventoryUom: "pz",
+        amazonInventoryStockAtQueue: Number.isFinite(stockNow) ? stockNow : null,
         code: sku,
         product: title || sku,
         qty: String(qtyInt),
