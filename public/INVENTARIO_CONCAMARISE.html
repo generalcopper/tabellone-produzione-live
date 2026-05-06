@@ -3790,16 +3790,75 @@
       return "bulkcerea_" + tabWriteKeyToDocId(String(doneId || "")).slice(0, 850);
     }
 
+    function isBulkWriteFormatOnlyValue(value, format = ""){
+      const text = cleanSpaces(value || "");
+      if (!text) return false;
+      const n = normalizeSearch(text);
+      const f = normalizeSearch(format || "");
+      if (f && n === f) return true;
+      return ["1000 l", "1000 lt", "1000l", "1000lt", "1 ibc", "ibc"].includes(n);
+    }
+
+    function stripBulkWriteFormatFromName(value, format = ""){
+      let text = cleanSpaces(value || "");
+      if (!text) return "";
+      const fmt = cleanSpaces(format || "");
+
+      const splitSeparators = ["•", "|", ";", "	"];
+      for (const sep of splitSeparators){
+        if (!text.includes(sep)) continue;
+        const parts = text.split(sep).map(cleanSpaces).filter(Boolean);
+        const good = parts.find(part => !isBulkWriteFormatOnlyValue(part, fmt) && !/^\d+(?:[,.]\d+)?\s*(?:ibc|l|lt|litri|kg|g|ml|pz|pezzi|pcs|pc)\.?$/i.test(part));
+        if (good) return stripBulkWriteFormatFromName(good, fmt);
+      }
+
+      const suffixes = Array.from(new Set([fmt, "1000 L", "1000 Lt", "1000L", "1000LT"].map(cleanSpaces).filter(Boolean)));
+      for (const suffix of suffixes){
+        const rx = new RegExp(`\s*(?:${escapeRegExp(suffix)})\s*$`, "i");
+        text = cleanSpaces(text.replace(rx, ""));
+      }
+      text = cleanSpaces(text.replace(/\s+\d+(?:[,.]\d+)?\s*(?:ibc|l|lt|litri|kg|g|ml|pz|pezzi|pcs|pc)\.?$/i, ""));
+      return text;
+    }
+
+    function getBulkWriteCompletedProductNameFromData(data = {}, fallbackId = ""){
+      const format = cleanSpaces(data?.format || "");
+      const candidates = [
+        data?.product,
+        data?.finishedProductName,
+        data?.productName,
+        data?.name,
+        data?.itemName,
+        data?.item,
+        data?.label,
+        data?.rawLine,
+        data?.rawText,
+        fallbackId
+      ];
+      for (const candidate of candidates){
+        const cleaned = stripBulkWriteFormatFromName(candidate, format);
+        if (cleaned && !isBulkWriteFormatOnlyValue(cleaned, format)) return cleaned;
+      }
+      return cleanSpaces(fallbackId || "");
+    }
+
+    function normalizeBulkWriteCompletedCode(value, productName = "", format = ""){
+      const code = cleanSpaces(value || "");
+      if (code && !isBulkWriteFormatOnlyValue(code, format)) return code;
+      return cleanSpaces(productName || code);
+    }
+
     function mapBulkWriteDoneItem(docSnap){
       const data = docSnap.data() || {};
       const completedAt = data.completedAt || data.ts || data.createdAt || null;
-      const product = cleanSpaces(data.product || data.label || data.rawLine || "");
       const format = cleanSpaces(data.format || "");
-      const itemName = cleanSpaces(format && !normalizeSearch(product).includes(normalizeSearch(format)) ? `${product} • ${format}` : product) || product || cleanSpaces(data.label || docSnap.id);
+      const product = getBulkWriteCompletedProductNameFromData(data, docSnap.id);
+      const itemName = product || cleanSpaces(data.label || data.rawLine || docSnap.id);
+      const code = normalizeBulkWriteCompletedCode(data.code || data.finishedProductCode || product || data.label || docSnap.id, product, format);
       return {
         id: String(docSnap.id || "").trim(),
         key: String(data.key || docSnap.id || "").trim(),
-        code: String(data.code || data.finishedProductCode || product || data.label || docSnap.id || "").trim(),
+        code,
         product,
         label: String(data.label || "").trim(),
         itemName,
@@ -3829,8 +3888,9 @@
       const doneId = String(done.id || done.key || done.bulkDoneId || "").trim();
       if (!doneId) return null;
 
-      const code = cleanSpaces(done.code || done.product || done.label || doneId) || doneId;
-      const item = cleanSpaces(done.itemName || done.product || done.label || done.rawLine || code) || code;
+      const productName = getBulkWriteCompletedProductNameFromData(done, doneId);
+      const code = normalizeBulkWriteCompletedCode(done.code || done.finishedProductCode || productName || done.label || doneId, productName, done.format || "") || doneId;
+      const item = cleanSpaces(productName || stripBulkWriteFormatFromName(done.itemName || done.product || done.label || done.rawLine || code, done.format || "") || code) || code;
       const uom = normalizeUom(done.unit || "") || "IBC";
       const date = todayYYYYMMDD();
       const movementId = cleanSpaces(done.cereaInventoryMovementId || bulkWriteConcaMovementDocId(doneId));
@@ -3847,6 +3907,8 @@
           customer: "Bulk Produzioni",
           code,
           item,
+          product: item,
+          bulkDisplayVersion: 2,
           uom,
           qty,
           qtyRaw: `${qty} ${uom}`.trim(),
@@ -3878,11 +3940,11 @@
       };
     }
 
-    function bulkWriteConcaMovementExists(done){
+    function findBulkWriteConcaMovement(done){
       const doneId = String(done?.id || done?.key || done?.bulkDoneId || "").trim();
-      if (!doneId) return false;
+      if (!doneId) return null;
       const movementId = cleanSpaces(done?.cereaInventoryMovementId || bulkWriteConcaMovementDocId(doneId));
-      return (state.movements || []).some(mv => {
+      return (state.movements || []).find(mv => {
         if (!mv) return false;
         const wh = normalizeWarehouse(mv.warehouse || "");
         const type = String(mv.type || "").trim().toUpperCase() === "OUT" ? "OUT" : "IN";
@@ -3890,13 +3952,29 @@
         if (String(mv.id || "").trim() === movementId) return true;
         if (String(mv.bulkDoneId || "").trim() === doneId && isBulkWriteCompletedMovement(mv)) return true;
         return false;
-      });
+      }) || null;
+    }
+
+    function bulkWriteConcaMovementExists(done){
+      return !!findBulkWriteConcaMovement(done);
+    }
+
+    function bulkWriteConcaMovementNeedsRewrite(done){
+      const movement = findBulkWriteConcaMovement(done);
+      if (!movement) return true;
+      const productName = getBulkWriteCompletedProductNameFromData(done, done?.id || done?.key || done?.bulkDoneId || "");
+      if (safeInt(movement.bulkDisplayVersion || 0) < 2) return true;
+      if (isBulkWriteFormatOnlyValue(movement.item || "", done?.format || "")) return true;
+      if (isBulkWriteFormatOnlyValue(movement.code || "", done?.format || "")) return true;
+      if (productName && normalizeSearch(movement.item || "") !== normalizeSearch(productName)) return true;
+      return false;
     }
 
     function bulkWriteConcaSyncSignature(items){
       return (Array.isArray(items) ? items : [])
         .filter(item => item && item.ritirato !== true)
         .map(item => [
+          "bulkDisplayV2",
           item?.id || "",
           item?.qty || "",
           item?.unit || "",
@@ -3919,16 +3997,16 @@
       }
 
       const force = options.force === true;
-      const missing = state.movementsReady ? valid.filter(item => !bulkWriteConcaMovementExists(item)) : valid;
+      const needsSync = state.movementsReady ? valid.filter(item => force || bulkWriteConcaMovementNeedsRewrite(item)) : valid;
       const sig = bulkWriteConcaSyncSignature(valid);
 
-      if (state.movementsReady && !missing.length){
+      if (state.movementsReady && !needsSync.length){
         state.bulkWriteConcaSyncSig = sig;
         return;
       }
-      if (!force && state.bulkWriteConcaSyncSig === sig && !missing.length) return;
+      if (!force && state.bulkWriteConcaSyncSig === sig && !needsSync.length) return;
 
-      const toWrite = state.movementsReady ? missing : valid;
+      const toWrite = state.movementsReady ? needsSync : valid;
       if (!toWrite.length) return;
 
       state.bulkWriteConcaSyncBusy = true;
@@ -4206,12 +4284,20 @@
       const ddtId = cleanSpaces(data.ddtId || data.ddtDocId || data.transportDocumentId || "");
       const ddtNumber = explicitDdtNumber || (docType.toUpperCase() === DOC_TYPE ? genericDocNumber : "");
       const docNumber = genericDocNumber || ddtNumber;
+      const isBulkMovement = isBulkWriteCompletedMovement(data);
+      const bulkProductName = isBulkMovement ? getBulkWriteCompletedProductNameFromData(data, docSnap.id) : "";
+      const rawCode = String(data.code || "").trim();
+      const rawItem = String(data.item || "").trim();
+      const mappedCode = isBulkMovement ? normalizeBulkWriteCompletedCode(rawCode, bulkProductName || rawItem, data.format || "") : rawCode;
+      const mappedItem = isBulkMovement ? (bulkProductName || stripBulkWriteFormatFromName(rawItem, data.format || "") || rawItem || mappedCode) : rawItem;
       return {
         id: docSnap.id,
         type: String(data.type || "IN").trim().toUpperCase() === "OUT" ? "OUT" : "IN",
         customer: String(data.customer || "").trim(),
-        code: String(data.code || "").trim(),
-        item: String(data.item || "").trim(),
+        code: mappedCode,
+        item: mappedItem,
+        product: String(data.product || data.productName || "").trim(),
+        bulkDisplayVersion: safeInt(data.bulkDisplayVersion || 0),
         qty: safeInt(data.qty),
         uom: normalizeUom(data.uom || ""),
         palletCount: normalizePositiveFloat(data.palletCount || data.bancali || 0),
