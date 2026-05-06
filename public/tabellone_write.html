@@ -11229,6 +11229,62 @@ function twSortQueueItemsStable(items){
   return (Array.isArray(items) ? items.slice() : []).sort(twCompareQueueItemsStable);
 }
 
+function twStockNumOrNull(v){
+  try{
+    if(v === null || v === undefined) return null;
+    const raw = String(v).trim();
+    if(!raw) return null;
+    const n = Number(raw.replace(/\./g, "").replace(",", "."));
+    if(Number.isFinite(n)) return n;
+    const n2 = twPfNum(v);
+    return Number.isFinite(n2) ? n2 : null;
+  }catch(_e){
+    return null;
+  }
+}
+
+function twQueueAmazonLiveStock(it){
+  try{
+    if(!twIsManualAmazonSkuRow(it)) return null;
+    const sku = String(it?.amazonInventorySku || it?.code || it?.finishedProductCode || it?.product || "").trim().toUpperCase();
+    if(!sku) return null;
+
+    const amz = twEnsureAmazonState();
+    const bySku = amz.bySku instanceof Map ? amz.bySku : null;
+    const live = bySku ? (bySku.get(sku) || null) : null;
+    if(live){
+      const n = twStockNumOrNull(live.qty);
+      if(n !== null) return n;
+    }
+
+    for(const k of ["amazonInventoryStock", "amazonInventoryStockAtQueue", "amazonInventoryLiveStock", "stock"]){
+      if(Object.prototype.hasOwnProperty.call(it || {}, k)){
+        const n = twStockNumOrNull(it[k]);
+        if(n !== null) return n;
+      }
+    }
+    return null;
+  }catch(_e){
+    return null;
+  }
+}
+
+function twQueueAmazonDepletedRank(it){
+  const stock = twQueueAmazonLiveStock(it);
+  return (twIsManualAmazonSkuRow(it) && stock !== null && stock <= 0) ? 0 : 1;
+}
+
+function twCompareQueueItemsDisplay(a, b){
+  const ar = twQueueAmazonDepletedRank(a);
+  const br = twQueueAmazonDepletedRank(b);
+  if(ar !== br) return ar - br;
+  return twCompareQueueItemsStable(a, b);
+}
+
+function twSortQueueItemsDisplay(items){
+  return (Array.isArray(items) ? items.slice() : []).sort(twCompareQueueItemsDisplay);
+}
+
 function twGetTailOrderBig(items){
   let max = 0n;
   for(const it of (Array.isArray(items) ? items : [])){
@@ -11440,6 +11496,10 @@ function twQueueDocToItem(d){
     amazonInventorySku: (v.amazonInventorySku || "").toString().trim(),
     amazonInventoryTitle: (v.amazonInventoryTitle || "").toString().trim(),
     amazonInventoryUom: (v.amazonInventoryUom || "").toString().trim(),
+    amazonInventoryStock: Number.isFinite(Number(v.amazonInventoryStock)) ? Number(v.amazonInventoryStock) : null,
+    amazonInventoryStockAtQueue: Number.isFinite(Number(v.amazonInventoryStockAtQueue)) ? Number(v.amazonInventoryStockAtQueue) : null,
+    amazonInventoryDepleted: v.amazonInventoryDepleted === true,
+    amazonInventoryStockUpdatedAtMs: Number(v.amazonInventoryStockUpdatedAtMs || 0) || 0,
     orderKey: (v.orderKey || "").toString().trim(),
     orderNo: (v.orderNo || "").toString().trim(),
     customer: (v.customer || v.cliente || v.customerName || v.nomeCliente || "").toString().trim(),
@@ -12030,9 +12090,13 @@ function twAmazonRefreshIndex(){
     };
   }).filter(it=> !!it.sku);
   arr.sort((a,b)=>{
-    const qa = twPfNum(b.qty);
-    const qb = twPfNum(a.qty);
-    if(qa !== qb) return qa - qb;
+    const da = twPfNum(a.qty) <= 0 ? 0 : 1;
+    const db = twPfNum(b.qty) <= 0 ? 0 : 1;
+    if(da !== db) return da - db;
+    const qa = twPfNum(a.qty);
+    const qb = twPfNum(b.qty);
+    if(da === 0 && qa !== qb) return qa - qb;
+    if(qa !== qb) return qb - qa;
     return String(a.title || a.sku || "").localeCompare(String(b.title || b.sku || ""), "it", { sensitivity:"base" });
   });
   amz.items = arr;
@@ -12087,9 +12151,13 @@ function twAmazonSearch(term){
   if(!q){
     return list
       .sort((a,b)=>{
-        const qa = twPfNum(b.qty);
-        const qb = twPfNum(a.qty);
-        if(qa !== qb) return qa - qb;
+        const da = twPfNum(a.qty) <= 0 ? 0 : 1;
+        const db = twPfNum(b.qty) <= 0 ? 0 : 1;
+        if(da !== db) return da - db;
+        const qa = twPfNum(a.qty);
+        const qb = twPfNum(b.qty);
+        if(da === 0 && qa !== qb) return qa - qb;
+        if(qa !== qb) return qb - qa;
         return String(a.title || a.sku || "").localeCompare(String(b.title || b.sku || ""), "it", { sensitivity:"base" });
       })
       .slice(0, 10);
@@ -12099,9 +12167,13 @@ function twAmazonSearch(term){
     .filter(x => x.score > 0)
     .sort((a,b)=>{
       if(b.score !== a.score) return b.score - a.score;
-      const qa = twPfNum(b.it.qty);
-      const qb = twPfNum(a.it.qty);
-      if(qa !== qb) return qa - qb;
+      const da = twPfNum(a.it.qty) <= 0 ? 0 : 1;
+      const db = twPfNum(b.it.qty) <= 0 ? 0 : 1;
+      if(da !== db) return da - db;
+      const qa = twPfNum(a.it.qty);
+      const qb = twPfNum(b.it.qty);
+      if(da === 0 && qa !== qb) return qa - qb;
+      if(qa !== qb) return qb - qa;
       return String(a.it.title || a.it.sku || "").localeCompare(String(b.it.title || b.it.sku || ""), "it", { sensitivity:"base" });
     })
     .slice(0, 12)
@@ -12401,6 +12473,8 @@ function twStartAmazonWatch(){
       try{ twPfRenderStatus(); }catch(_e){}
       try{ twPfRenderSelectedMeta(); }catch(_e){}
       try{ twCompileInlineRefresh(); }catch(_e){}
+      try{ twRenderAll(); }catch(_e){}
+      try{ twScheduleQueueAmazonStockBackfill(); }catch(_e){}
     }, (err)=>{
       console.warn("tw amazon inventory snapshot error:", err);
       amz.ready = false;
@@ -12421,6 +12495,63 @@ function twStopAmazonWatch(){
   amz.bySku = new Map();
   amz.ready = false;
   amz.error = "";
+}
+
+let __TW_AMZ_QUEUE_STOCK_T = null;
+async function twBackfillQueueAmazonStock(){
+  try{
+    if(!(state.user && state.user.isAdmin)) return;
+    if(!state.firebase?.ok) return;
+    const tw = ensureTabWriteState();
+    const amz = twEnsureAmazonState();
+    if(!amz.ready || !(amz.bySku instanceof Map)) return;
+    const rows = (tw.queueItems || []).filter(it => twIsManualAmazonSkuRow(it));
+    if(!rows.length) return;
+    const fs = state.firebase.api;
+    const db = state.firebase.db;
+    const queueCol = fs.collection(db, "producedDays", TW_LINE_BUCKET, "queue");
+    let batch = fs.writeBatch(db);
+    let ops = 0;
+    const nowMs = Date.now();
+    for(const it of rows){
+      const id = String(it?.id || "").trim();
+      const sku = String(it?.amazonInventorySku || it?.code || "").trim().toUpperCase();
+      if(!id || !sku) continue;
+      const live = amz.bySku.get(sku);
+      if(!live) continue;
+      const stock = twStockNumOrNull(live.qty);
+      if(stock === null) continue;
+      const prev = twStockNumOrNull(it.amazonInventoryStock);
+      const prevDepl = it.amazonInventoryDepleted === true;
+      const nextDepl = stock <= 0;
+      if(prev === stock && prevDepl === nextDepl) continue;
+      batch.set(fs.doc(queueCol, id), {
+        amazonInventoryStock: stock,
+        amazonInventoryStockAtQueue: it.amazonInventoryStockAtQueue ?? stock,
+        amazonInventoryDepleted: nextDepl,
+        amazonInventoryStockUpdatedAtMs: nowMs
+      }, { merge:true });
+      ops++;
+      if(ops >= 430){
+        await batch.commit();
+        batch = fs.writeBatch(db);
+        ops = 0;
+      }
+    }
+    if(ops) await batch.commit();
+  }catch(e){
+    console.warn("twBackfillQueueAmazonStock error:", e);
+  }
+}
+
+function twScheduleQueueAmazonStockBackfill(){
+  try{
+    if(__TW_AMZ_QUEUE_STOCK_T) clearTimeout(__TW_AMZ_QUEUE_STOCK_T);
+    __TW_AMZ_QUEUE_STOCK_T = setTimeout(()=>{
+      __TW_AMZ_QUEUE_STOCK_T = null;
+      twBackfillQueueAmazonStock();
+    }, 900);
+  }catch(_e){}
 }
 
 const TW_CONCA_DDT_DOC_TYPE = "DDT_TRASFERIMENTO_CONCA";
@@ -14692,7 +14823,8 @@ function twSetCloud(stateName, detail=""){
 function twRenderAll(){
   const tw = ensureTabWriteState();
 
-  const qVis = (tw.queueItems || []).filter(it => !twHideInUi(it) && twAllowInTabWrite(it));
+  const qVisBase = (tw.queueItems || []).filter(it => !twHideInUi(it) && twAllowInTabWrite(it));
+  const qVis = twSortQueueItemsDisplay(qVisBase);
   const dVis = (tw.doneItems  || []).slice();
 
   const qBadge = $("twQueueBadge");
@@ -15483,6 +15615,7 @@ function twStartQueueWatch(){
       const orderedItems = twSortQueueItemsStable(items);
       tw.queueItems = orderedItems;
       tw.lastQueueById = new Map(orderedItems.map(it=>[it.id, it]));
+      try{ twScheduleQueueAmazonStockBackfill(); }catch(_e){}
       twSetCloud("ok");
       if(twDragCtx){
         tw._pendingQueueRenderAfterDrag = true;
@@ -15706,6 +15839,7 @@ async function twSendLinesToQueue(){
       const sku = String(it.sku || "").trim().toUpperCase();
       const title = twAmazonDisplayTitle(it.title || sku, sku);
       const qtyInt = Math.round(twPfNum(it.qty));
+      const stockNow = twStockNumOrNull(it.stock);
       if(!sku || !(qtyInt > 0)) continue;
       const queueOrderKey = twNormalizeOrderKey(reservedOrderKeys[orderKeyIdx++] || "");
       if(!queueOrderKey) throw new Error("ordine cloud non assegnato");
@@ -15718,6 +15852,10 @@ async function twSendLinesToQueue(){
         amazonInventorySku: sku,
         amazonInventoryTitle: title,
         amazonInventoryUom: "pz",
+        amazonInventoryStock: stockNow,
+        amazonInventoryStockAtQueue: stockNow,
+        amazonInventoryDepleted: stockNow !== null && stockNow <= 0,
+        amazonInventoryStockUpdatedAtMs: nowMs,
         code: sku,
         product: title || sku,
         qty: String(qtyInt),
@@ -15893,7 +16031,9 @@ function twBeginDrag(originalEl, startX, startY, fromTouch=false){
     placeholder: ph,
     offsetY,
     moved: false,
-    startOrder: (tw.queueItems || []).map(x=>x.id),
+    startOrder: Array.from(out.querySelectorAll(".item"))
+      .map(x=>x && x.dataset ? String(x.dataset.id || "") : "")
+      .filter(Boolean),
     lockLeft: rect.left,
     width: rect.width,
     _prevTouchAction,
