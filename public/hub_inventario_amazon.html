@@ -3129,16 +3129,51 @@ ${textLines.join("\n")}
       return out;
     }
 
-    // trigger email SOLO dopo aggiornamenti reali (carica/scarica/undo/edit), NON all'accesso
+    // trigger email dopo aggiornamenti reali: locali + realtime Firestore (anche da altri hub), NON all'accesso
     let __lowMailSeq = 0;
     let __lowMailT1 = null;
     let __lowMailT2 = null;
 
-    function scheduleLowStockEmailAfterUpdate(reason){
+    let __lowStockRealtimeReady = false;
+    let __lowStockRealtimeKey = "";
+    let __lowStockRealtimeTimer = null;
+
+    function __lowStockFingerprintPayload(items){
+      try{
+        return (items||[]).slice().map(it=>({
+          loc: String(it.loc||""),
+          sku: String(toSkuId(it.sku||"")||""),
+          qty: Number.isFinite(it.qty) ? Number(it.qty) : null
+        })).sort((a,b)=>{
+          if(a.loc!==b.loc) return a.loc.localeCompare(b.loc);
+          if(a.sku!==b.sku) return a.sku.localeCompare(b.sku);
+          return (a.qty||0) - (b.qty||0);
+        });
+      }catch(_e){
+        return [];
+      }
+    }
+
+    function __lowStockRealtimeSnapshotKey(items){
+      try{ return JSON.stringify(__lowStockFingerprintPayload(items||__getLowStockBoth())); }
+      catch(_e){ return ""; }
+    }
+
+    function resetLowStockRealtimeWatcher(){
+      __lowStockRealtimeReady = false;
+      __lowStockRealtimeKey = "";
+      try{
+        if(__lowStockRealtimeTimer) clearTimeout(__lowStockRealtimeTimer);
+      }catch(_e){}
+      __lowStockRealtimeTimer = null;
+    }
+
+    function scheduleLowStockEmailAfterUpdate(reason, opts = {}){
       if(!state.user?.isAdmin) return;
       __lowMailSeq++;
       const seq = __lowMailSeq;
       const r = String(reason || "inventory_update");
+      const immediate = !!(opts && opts.immediate);
 
       try{
         if(__lowMailT1) clearTimeout(__lowMailT1);
@@ -3151,9 +3186,47 @@ ${textLines.join("\n")}
         void __enqueueLowStockEmailIfNeeded(items, { reason: r });
       };
 
-      // 2 tentativi: il primo quasi subito, il secondo dopo qualche secondo (snapshot realtime)
-      __lowMailT1 = setTimeout(run, 1600);
-      __lowMailT2 = setTimeout(run, 6500);
+      // 2 tentativi: immediato per snapshot realtime, secondo tentativo dopo assestamento snapshot
+      __lowMailT1 = setTimeout(run, immediate ? 350 : 1600);
+      __lowMailT2 = setTimeout(run, immediate ? 2600 : 6500);
+    }
+
+    function triggerLowStockMailFromRealtime(reason){
+      try{
+        // Serve solo a intercettare aggiornamenti arrivati da Firestore (anche altri hub).
+        // Non invia nulla sul primo caricamento: il primo snapshot completo diventa baseline.
+        if(!state.user?.isAdmin || !state.user?.isWhitelisted) return;
+        if(!(state.inventory?.cerea?.meta?.loaded && state.inventory?.concamarise?.meta?.loaded)) return;
+
+        const items = __getLowStockBoth();
+        const key = __lowStockRealtimeSnapshotKey(items);
+        if(!key) return;
+
+        if(!__lowStockRealtimeReady){
+          __lowStockRealtimeReady = true;
+          __lowStockRealtimeKey = key;
+          return;
+        }
+
+        if(key === __lowStockRealtimeKey) return;
+        __lowStockRealtimeKey = key;
+
+        // Se non c'è più nessun prodotto sotto soglia, aggiorno baseline ma non mando mail vuota.
+        if(!items.length) return;
+
+        try{ if(__lowStockRealtimeTimer) clearTimeout(__lowStockRealtimeTimer); }catch(_e){}
+        const r = String(reason || "realtime_low_stock_update");
+        __lowStockRealtimeTimer = setTimeout(()=>{
+          const latest = __getLowStockBoth();
+          const latestKey = __lowStockRealtimeSnapshotKey(latest);
+          if(latestKey) __lowStockRealtimeKey = latestKey;
+          if(latest && latest.length){
+            scheduleLowStockEmailAfterUpdate(r, { immediate:true });
+          }
+        }, 220);
+      }catch(err){
+        console.warn("low-stock realtime trigger error:", err);
+      }
     }
 
 async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
@@ -3527,6 +3600,7 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
     }
 
     function stopAllRealtime(){
+      resetLowStockRealtimeWatcher();
       for(const loc of ["cerea","concamarise"]){
         try{ state.inventory[loc].unsub && state.inventory[loc].unsub(); }catch(_e){}
         state.inventory[loc].unsub = null;
@@ -3598,6 +3672,8 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
         if(state.ui.sheet==="productDetails" && state.route.loc===loc){
           renderProductDetailsSheet();
         }
+
+        triggerLowStockMailFromRealtime("realtime_low_stock_" + loc);
       }, (err)=>{
         console.warn("inventory watch error", err);
         showToast("Permessi insufficienti", err?.message || String(err));
