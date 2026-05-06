@@ -306,23 +306,6 @@
       overflow-wrap:anywhere;
     }
 
-    .movement-detail{
-      display:flex;
-      align-items:center;
-      flex-wrap:wrap;
-      gap:7px;
-      font-size:13px;
-      line-height:1.45;
-      font-weight:850;
-      color:var(--ink);
-      overflow-wrap:anywhere;
-    }
-
-    .movement-detail span{
-      color:var(--muted);
-      font-weight:800;
-    }
-
     .movement-date{
       font-size:13px;
       font-weight:700;
@@ -591,8 +574,6 @@
       "FBL1000UN00501102532",
       "FBL1000",
       "fbl1000",
-      "FBL",
-      "fbl",
       "FBL-1000",
       "FBL 1000"
     ]);
@@ -626,13 +607,7 @@
       user: null,
       busy: false,
       codeMovements: [],
-      productRecords: [],
-      trackedCodes: [],
-      movementBuckets: new Map(),
-      movementSubscribeSig: "",
-      movementUnsubs: [],
-      unsubMovements: null,
-      unsubProducts: null
+      unsubMovements: null
     };
 
     const provider = new GoogleAuthProvider();
@@ -645,10 +620,6 @@
     function safeInt(value){
       const n = parseInt(String(value ?? "").replace(/[^\d-]/g, ""), 10);
       return Number.isFinite(n) ? n : 0;
-    }
-
-    function cleanText(value){
-      return String(value || "").replace(/\s+/g, " ").trim();
     }
 
     function normalizeCodeKey(value){
@@ -665,92 +636,6 @@
       return LINKED_FBL1000_CODES.some(code => normalizeCodeKey(code) === key) || key.startsWith("fbl1000");
     }
 
-    function normalizeLookupText(value){
-      return String(value || "")
-        .toLowerCase()
-        .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
-        .replace(/[^a-z0-9]+/g, " ")
-        .trim()
-        .replace(/\s+/g, " ");
-    }
-
-    function compactLookupText(value){
-      return normalizeLookupText(value).replace(/\s+/g, "");
-    }
-
-    function getProductCodeFromData(data, id = ""){
-      return String(data?.code || data?.sku || data?.codice || id || "").trim();
-    }
-
-    function mapProductRecord(docSnap){
-      const data = docSnap.data() || {};
-      return {
-        id: String(docSnap.id || "").trim(),
-        code: getProductCodeFromData(data, docSnap.id),
-        name: String(data.name || data.nome || data.item || data.title || "").trim(),
-        alias: String(data.alias || data.aliasName || data.aliasLower || "").trim(),
-        searchText: String(data.searchText || data.description || data.category || data.categoryKey || "").trim()
-      };
-    }
-
-    function isEstrusoreFblProductRecord(product){
-      if (!product || typeof product !== "object") return false;
-      const code = String(product.code || product.id || "").trim();
-      const alias = String(product.alias || "").trim();
-      const blob = compactLookupText([code, alias, product.name, product.searchText].join(" "));
-
-      if (isPrimaryCode(code)) return true;
-      if (isLinkedFbl1000Code(code) || isLinkedFbl1000Code(alias)) return true;
-      if (blob.includes("fbl1000") || blob.includes("fbl1000un00501102532")) return true;
-      if (blob.includes("bottigliaagro1lt") || blob.includes("bottigliaagro1l") || blob.includes("flaconeagro1lt")) return true;
-      if (compactLookupText(alias) === "fbl" && normalizeCodeKey(code).startsWith("fbl")) return true;
-      return false;
-    }
-
-    function buildTrackedCodes(){
-      const set = new Set();
-      for (const code of TRACKED_CODES){
-        const clean = String(code || "").trim();
-        if (clean) set.add(clean);
-      }
-
-      for (const product of (state.productRecords || [])){
-        if (!isEstrusoreFblProductRecord(product)) continue;
-        const code = String(product.code || product.id || "").trim();
-        if (code) set.add(code);
-        const id = String(product.id || "").trim();
-        if (id && isLinkedFbl1000Code(id)) set.add(id);
-        const alias = String(product.alias || "").trim();
-        if (alias && compactLookupText(alias).startsWith("fbl")) set.add(alias);
-      }
-
-      return Array.from(set)
-        .map(value => String(value || "").trim())
-        .filter(Boolean)
-        .filter((value, index, arr) => arr.findIndex(v => v === value) === index);
-    }
-
-    function isLinkedFbl1000Movement(mv){
-      if (!mv || typeof mv !== "object") return false;
-      if (isLinkedFbl1000Code(mv.code) || isLinkedFbl1000Code(mv.estrusoreMirrorFromCode)) return true;
-      const compact = compactLookupText([
-        mv.code,
-        mv.item,
-        mv.source,
-        mv.note,
-        mv.rawText,
-        mv.customer,
-        mv.estrusoreMirrorFromCode,
-        mv.estrusoreMirrorFromItem,
-        mv.docType,
-        mv.docNum,
-        mv.ddtNumber
-      ].join(" "));
-      if (compact.includes("fbl1000") || compact.includes("fbl1000un00501102532")) return true;
-      if (compact.includes("bottigliaagro1lt") || compact.includes("bottigliaagro1l") || compact.includes("flaconeagro1lt")) return true;
-      return false;
-    }
-
     function isNeutralMovement(mv){
       return mv?.nonStockItem === true || mv?.inventoryNeutral === true || mv?.stockNeutral === true || mv?.alwaysAvailableItem === true;
     }
@@ -759,123 +644,7 @@
       const s = String(value || "").trim().toLowerCase();
       if (!s) return WAREHOUSE;
       if (s === "cerea" || s.startsWith("cer") || s.includes("cerea")) return WAREHOUSE;
-      if (s === "concamarise" || s === "conca" || s.includes("concamarise") || /\bconca\b/.test(s)) return "concamarise";
       return s;
-    }
-
-    function normalizeWarehouseStrict(value){
-      const raw = String(value || "").trim();
-      if (!raw) return "";
-      return normalizeWarehouse(raw);
-    }
-
-    function isConcamariseWarehouse(value){
-      return normalizeWarehouseStrict(value) === "concamarise";
-    }
-
-    function getMovementType(mv){
-      return String(mv?.type || "IN").trim().toUpperCase() === "OUT" ? "OUT" : "IN";
-    }
-
-    function movementRouteCompactText(mv){
-      return compactLookupText([
-        mv?.source,
-        mv?.note,
-        mv?.rawText,
-        mv?.docType,
-        mv?.docNum,
-        mv?.ddtNumber,
-        mv?.fromWarehouse,
-        mv?.toWarehouse,
-        mv?.transferDirection,
-        mv?.ddtDirection,
-        mv?.direction
-      ].join(" "));
-    }
-
-    function isCereaToConcamariseTransfer(mv){
-      if (!mv || typeof mv !== "object") return false;
-      const direction = cleanText(mv.transferDirection || mv.ddtDirection || mv.direction || "").toLowerCase();
-      const fromWarehouse = normalizeWarehouseStrict(mv.fromWarehouse || mv.sourceWarehouse || mv.originWarehouse || "");
-      const toWarehouse = normalizeWarehouseStrict(mv.toWarehouse || mv.destinationWarehouse || "");
-
-      if (direction === "to_concamarise" || direction === "cerea_to_concamarise") return true;
-      if (fromWarehouse === WAREHOUSE && toWarehouse === "concamarise") return true;
-
-      const route = movementRouteCompactText(mv);
-      if (route.includes("portaaconca")) return true;
-      if (
-        route.includes("cerea") &&
-        (route.includes("concamarise") || route.includes("conca")) &&
-        (route.includes("spostamento") || route.includes("trasferimento") || route.includes("ddt") || route.includes("bolla"))
-      ) return true;
-
-      return false;
-    }
-
-    function isConcamariseToCereaTransfer(mv){
-      if (!mv || typeof mv !== "object") return false;
-      const direction = cleanText(mv.transferDirection || mv.ddtDirection || mv.direction || "").toLowerCase();
-      const fromWarehouse = normalizeWarehouseStrict(mv.fromWarehouse || mv.sourceWarehouse || mv.originWarehouse || "");
-      const toWarehouse = normalizeWarehouseStrict(mv.toWarehouse || mv.destinationWarehouse || "");
-
-      if (direction === "to_cerea" || direction === "concamarise_to_cerea" || direction === "conca_to_cerea") return true;
-      if (fromWarehouse === "concamarise" && toWarehouse === WAREHOUSE) return true;
-
-      const route = movementRouteCompactText(mv);
-      if (route.includes("portaacerea")) return true;
-      if (
-        route.includes("cerea") &&
-        (route.includes("concamarise") || route.includes("conca")) &&
-        (route.includes("spostamento") || route.includes("trasferimento") || route.includes("ddt") || route.includes("bolla"))
-      ) return true;
-
-      return false;
-    }
-
-    function isLinkedFblCereaTransferMovement(mv){
-      if (!isLinkedFbl1000Movement(mv)) return false;
-      if (normalizeWarehouseStrict(mv.warehouse) !== WAREHOUSE) return false;
-
-      const type = getMovementType(mv);
-      if (type === "OUT") return isCereaToConcamariseTransfer(mv);
-      if (type === "IN") return isConcamariseToCereaTransfer(mv);
-      return false;
-    }
-
-    function isLinkedFblCereaInventoryCorrectionMovement(mv){
-      if (!isLinkedFbl1000Movement(mv)) return false;
-      if (normalizeWarehouseStrict(mv.warehouse) !== WAREHOUSE) return false;
-
-      // Rettifica dal gestionale/hub: quando l'inventario Cerea viene modificato
-      // manualmente, viene creato un movimento IN/OUT sul codice reale FBL.
-      // Estrusore deve seguirlo perché rappresenta lo stock attuale Cerea.
-      const text = compactLookupText([
-        mv?.source,
-        mv?.docType,
-        mv?.note,
-        mv?.rawText
-      ].join(" "));
-
-      return Boolean(
-        text.includes("rettifica") ||
-        text.includes("rettificarapida") ||
-        text.includes("rettificainventario") ||
-        text.includes("correzioneinventario") ||
-        text.includes("modificainventario") ||
-        text.includes("inventoryadjust") ||
-        text.includes("adjuststock")
-      );
-    }
-
-    function getFblTransferLineKey(mv){
-      if (!mv) return "";
-      const ddtKey = cleanText(mv.linkedDdtId || mv.ddtId || mv.transportDocumentId || mv.linkedDdtNumber || mv.ddtNumber || mv.docNum || mv.docNumber || "");
-      if (!ddtKey) return "";
-      const codeKey = normalizeCodeKey(mv.estrusoreMirrorFromCode || mv.mirrorFromCode || mv.code || "");
-      const lineNo = cleanText(mv.lineNo || mv.lineNumber || "");
-      const qty = safeInt(mv.estrusoreMirrorQty || mv.qty || 0);
-      return [ddtKey, lineNo, codeKey, qty].join("|");
     }
 
     function tsToDate(ts){
@@ -1048,22 +817,9 @@
         id: docSnap.id,
         type: String(data.type || "IN").trim(),
         code: String(data.code || "").trim(),
-        item: String(data.item || data.product || data.name || "").trim(),
-        customer: String(data.customer || data.supplier || data.supplierName || "").trim(),
-        rawText: String(data.rawText || "").trim(),
         qty: safeInt(data.qty),
         uom: String(data.uom || UOM).trim() || UOM,
-        warehouse: String(data.warehouse || data.site || data.magazzino || data.location || "").trim(),
-        fromWarehouse: String(data.fromWarehouse || data.sourceWarehouse || data.originWarehouse || "").trim(),
-        toWarehouse: String(data.toWarehouse || data.destinationWarehouse || "").trim(),
-        transferDirection: String(data.transferDirection || data.ddtDirection || data.direction || "").trim(),
-        docType: String(data.docType || "").trim(),
-        docNum: String(data.docNum || data.docNumber || "").trim(),
-        ddtId: String(data.ddtId || data.ddtDocId || data.transportDocumentId || "").trim(),
-        ddtNumber: String(data.ddtNumber || data.transportDocNumber || "").trim(),
-        lineNo: String(data.lineNo || data.lineNumber || "").trim(),
-        source: String(data.source || "").trim(),
-        note: String(data.note || "").trim(),
+        warehouse: String(data.warehouse || "").trim(),
         nonStockItem: data.nonStockItem === true,
         inventoryNeutral: data.inventoryNeutral === true,
         stockNeutral: data.stockNeutral === true,
@@ -1071,8 +827,6 @@
         estrusoreSync: data.estrusoreSync === true,
         estrusoreLinkedMovementId: String(data.estrusoreLinkedMovementId || data.linkedMovementId || "").trim(),
         estrusoreMirrorFromCode: String(data.estrusoreMirrorFromCode || data.mirrorFromCode || "").trim(),
-        estrusoreMirrorFromItem: String(data.estrusoreMirrorFromItem || data.mirrorFromItem || "").trim(),
-        estrusoreMirrorQty: safeInt(data.estrusoreMirrorQty || data.mirrorQty || data.qty || 0),
         linkedDdtId: String(data.linkedDdtId || data.estrusoreLinkedDdtId || "").trim(),
         linkedDdtNumber: String(data.linkedDdtNumber || data.estrusoreLinkedDdtNumber || "").trim(),
         createdAt: data.createdAt || data.date || null,
@@ -1096,50 +850,19 @@
       return ids;
     }
 
-    function buildPrimaryMirrorFblTransferLineKeys(){
-      const keys = new Set();
-      for (const mv of (state.codeMovements || [])){
-        if (!mv || !isPrimaryCode(mv.code) || mv.estrusoreSync !== true) continue;
-        const key = getFblTransferLineKey(mv);
-        if (key) keys.add(key);
-      }
-      return keys;
-    }
-
     function extractCereaMovements(){
       const mirroredSourceIds = buildMirroredSourceMovementIds();
-      const primaryMirrorLineKeys = buildPrimaryMirrorFblTransferLineKeys();
-      const out = [];
-
-      for (const mv of (state.codeMovements || [])){
-        if (!mv || isNeutralMovement(mv)) continue;
-
-        // Fonte principale dell'estrusore: solo movimenti del codice interno a Cerea.
-        // Produzione = IN, mirror Porta a Conca = OUT.
-        if (isPrimaryCode(mv.code)){
-          if (normalizeWarehouseStrict(mv.warehouse) === WAREHOUSE) out.push(mv);
-          continue;
+      return (state.codeMovements || []).filter(mv => {
+        if (!mv || normalizeWarehouse(mv.warehouse) !== WAREHOUSE) return false;
+        if (isNeutralMovement(mv)) return false;
+        if (isPrimaryCode(mv.code)) return true;
+        if (isLinkedFbl1000Code(mv.code)){
+          // Storico: mostra anche gli scarichi FBL1000 già creati da Porta a Conca.
+          // Futuro: se Inventario ha scritto il mirror ST0090B03BI01E, non contare due volte.
+          return !mirroredSourceIds.has(String(mv.id || "").trim());
         }
-
-        // Fallback storico: usa gli FBL solo in due casi:
-        // 1) veri trasferimenti che toccano Cerea (Porta a Conca / Porta a Cerea),
-        // 2) rettifiche inventario del gestionale/hub su Cerea.
-        // NON deve sommare carichi manuali/iniziali FBL a Cerea, altrimenti lo stock raddoppia.
-        const isTransfer = isLinkedFblCereaTransferMovement(mv);
-        const isCorrection = isLinkedFblCereaInventoryCorrectionMovement(mv);
-        if (!(isTransfer || isCorrection)) continue;
-
-        if (isTransfer){
-          if (mirroredSourceIds.has(String(mv.id || "").trim())) continue;
-
-          const lineKey = getFblTransferLineKey(mv);
-          if (lineKey && primaryMirrorLineKeys.has(lineKey)) continue;
-        }
-
-        out.push(mv);
-      }
-
-      return out;
+        return false;
+      });
     }
 
     function resolveUom(){
@@ -1155,93 +878,6 @@
         const qty = safeInt(mv.qty);
         return sum + (String(mv.type || "").toUpperCase() === "OUT" ? -qty : qty);
       }, 0);
-    }
-
-    function getMovementDocumentNumber(mv){
-      return cleanText(
-        mv?.linkedDdtNumber ||
-        mv?.ddtNumber ||
-        mv?.docNum ||
-        mv?.linkedDdtId ||
-        mv?.ddtId ||
-        ""
-      );
-    }
-
-    function getMovementOriginalCode(mv){
-      const code = cleanText(mv?.estrusoreMirrorFromCode || mv?.mirrorFromCode || "");
-      if (code) return code;
-      if (!isPrimaryCode(mv?.code) && isLinkedFbl1000Movement(mv)) return cleanText(mv?.code || "");
-      return "";
-    }
-
-    function isPortaAConcaMovement(mv){
-      if (!mv) return false;
-      const type = getMovementType(mv);
-      if (type !== "OUT") return false;
-      if (isPrimaryCode(mv.code) && mv.estrusoreSync === true){
-        return isCereaToConcamariseTransfer(mv) || compactLookupText([mv.source, mv.note, mv.docType].join(" ")).includes("portaconca");
-      }
-      return isLinkedFblCereaTransferMovement(mv) && isCereaToConcamariseTransfer(mv);
-    }
-
-    function isPortaACereaMovement(mv){
-      if (!mv) return false;
-      const type = getMovementType(mv);
-      if (type !== "IN") return false;
-      if (isPrimaryCode(mv.code) && mv.estrusoreSync === true){
-        return isConcamariseToCereaTransfer(mv) || compactLookupText([mv.source, mv.note, mv.docType].join(" ")).includes("portacerea");
-      }
-      return isLinkedFblCereaTransferMovement(mv) && isConcamariseToCereaTransfer(mv);
-    }
-
-    function isProductionMovement(mv){
-      if (!mv || !isPrimaryCode(mv.code)) return false;
-      if (mv.estrusoreSync === true) return false;
-      const type = getMovementType(mv);
-      const text = compactLookupText([mv.source, mv.docType, mv.note].join(" "));
-      return type === "IN" && (text.includes("estrusore") || text.includes("produzione"));
-    }
-
-    function resolveMovementDetailLabel(mv){
-      if (!mv) return "";
-
-      const docNumber = getMovementDocumentNumber(mv);
-      const originalCode = getMovementOriginalCode(mv);
-      const pieces = [];
-
-      if (isPortaAConcaMovement(mv)){
-        pieces.push("Movimento generato da bolla Porta a Conca");
-        if (docNumber) pieces.push(`Bolla/DDT ${docNumber}`);
-        if (originalCode) pieces.push(`Codice origine ${originalCode}`);
-        return pieces.join(" · ");
-      }
-
-      if (isPortaACereaMovement(mv)){
-        pieces.push("Movimento generato da bolla Porta a Cerea");
-        if (docNumber) pieces.push(`Bolla/DDT ${docNumber}`);
-        if (originalCode) pieces.push(`Codice origine ${originalCode}`);
-        return pieces.join(" · ");
-      }
-
-      if (isLinkedFblCereaInventoryCorrectionMovement(mv)){
-        pieces.push("Rettifica gestionale inventario Cerea");
-        if (docNumber) pieces.push(`Documento ${docNumber}`);
-        if (originalCode || cleanText(mv.code)) pieces.push(`Codice ${originalCode || cleanText(mv.code)}`);
-        return pieces.join(" · ");
-      }
-
-      if (isProductionMovement(mv)){
-        pieces.push("Produzione estrusore");
-        if (docNumber) pieces.push(`Documento ${docNumber}`);
-        return pieces.join(" · ");
-      }
-
-      const source = cleanText(mv.source || mv.note || mv.docType || "Movimento inventario Cerea");
-      if (source) pieces.push(source);
-      if (docNumber) pieces.push(`Documento ${docNumber}`);
-      if (originalCode) pieces.push(`Codice origine ${originalCode}`);
-      return pieces.join(" · ");
     }
 
     function renderMovements(){
@@ -1266,14 +902,12 @@
       els.movements.innerHTML = list.map(mv => {
         const sign = String(mv.type || "IN").toUpperCase() === "OUT" ? "-" : "+";
         const who = prettifyUserLabel(mv.createdByName || mv.createdBy);
-        const detail = resolveMovementDetailLabel(mv);
         return `
           <div class="movement">
             <div class="movement-top">
               <div class="movement-qty">${escapeHtml(sign + " " + mv.qty.toLocaleString("it-IT") + " " + (mv.uom || UOM))}</div>
               <div class="movement-user">${escapeHtml(who)}</div>
             </div>
-            ${detail ? `<div class="movement-detail">${escapeHtml(detail)}</div>` : ""}
             <div class="movement-date">${escapeHtml(fmtDateTime(mv.createdAt))}</div>
           </div>
         `;
@@ -1338,96 +972,31 @@
       els.produceModal.setAttribute("aria-hidden", "true");
     }
 
-    function clearMovementSubscriptions(){
+    function subscribeCodeMovements(){
       if (state.unsubMovements){
         try{ state.unsubMovements(); }catch(_){ }
         state.unsubMovements = null;
       }
-      for (const unsub of (state.movementUnsubs || [])){
-        try{ unsub(); }catch(_){ }
-      }
-      state.movementUnsubs = [];
-      state.movementBuckets = new Map();
-      state.movementSubscribeSig = "";
-    }
 
-    function rebuildCodeMovementsFromBuckets(){
-      const byId = new Map();
-      for (const bucket of (state.movementBuckets || new Map()).values()){
-        for (const movement of (bucket || [])){
-          if (!movement?.id) continue;
-          if (!(isPrimaryCode(movement.code) || isLinkedFbl1000Movement(movement))) continue;
-          byId.set(movement.id, movement);
-        }
-      }
-      state.codeMovements = Array.from(byId.values());
-      render();
-    }
-
-    function refreshMovementSubscriptions(){
-      if (!(state.user && state.db)) return;
-
-      const codes = buildTrackedCodes();
-      state.trackedCodes = codes;
-      const sig = codes.slice().sort().join("|");
-      if (sig === state.movementSubscribeSig && (state.movementUnsubs || []).length) return;
-
-      clearMovementSubscriptions();
-      state.movementSubscribeSig = sig;
-
-      if (!codes.length){
-        state.codeMovements = [];
-        render();
-        return;
-      }
-
-      const chunks = [];
-      for (let i = 0; i < codes.length; i += 10){
-        chunks.push(codes.slice(i, i + 10));
-      }
-
-      chunks.forEach((chunk, index) => {
-        const q = chunk.length === 1
-          ? query(orgCol("inventoryMovements"), where("code", "==", chunk[0]))
-          : query(orgCol("inventoryMovements"), where("code", "in", chunk));
-
-        const unsub = onSnapshot(q, (snap) => {
-          state.movementBuckets.set(String(index), snap.docs.map(mapMovement));
-          rebuildCodeMovementsFromBuckets();
-        }, (err) => {
-          console.error("inventoryMovements listener failed", err);
-          showToast(humanAuthErr(err), "err");
-        });
-        state.movementUnsubs.push(unsub);
-      });
-    }
-
-    function subscribeCodeMovements(){
-      if (state.unsubProducts){
-        try{ state.unsubProducts(); }catch(_){ }
-        state.unsubProducts = null;
-      }
-      clearMovementSubscriptions();
       state.codeMovements = [];
-      state.productRecords = [];
-      state.trackedCodes = [];
 
       if (!(state.user && state.db)){
         render();
         return;
       }
 
-      // Primo aggancio immediato sui codici noti, così anche le bolle già create
-      // vengono lette senza aspettare l'anagrafica prodotti.
-      refreshMovementSubscriptions();
-
-      // Poi allarghiamo i codici leggibili usando l'anagrafica prodotti del hub:
-      // se FBL è un alias, prendiamo tutti i codici reali collegati a quell'alias.
-      state.unsubProducts = onSnapshot(orgCol("products"), (snap) => {
-        state.productRecords = snap.docs.map(mapProductRecord);
-        refreshMovementSubscriptions();
+      const q = query(orgCol("inventoryMovements"), where("code", "in", TRACKED_CODES));
+      state.unsubMovements = onSnapshot(q, (snap) => {
+        const byId = new Map();
+        for (const movement of snap.docs.map(mapMovement)){
+          if (!movement?.id) continue;
+          byId.set(movement.id, movement);
+        }
+        state.codeMovements = Array.from(byId.values());
+        render();
       }, (err) => {
-        console.warn("products listener failed", err);
+        console.error("inventoryMovements listener failed", err);
+        showToast(humanAuthErr(err), "err");
       });
     }
 
@@ -1544,14 +1113,11 @@
           if (state.user){
             subscribeCodeMovements();
           }else{
-            if (state.unsubProducts){
-              try{ state.unsubProducts(); }catch(_){ }
-              state.unsubProducts = null;
+            if (state.unsubMovements){
+              try{ state.unsubMovements(); }catch(_){ }
+              state.unsubMovements = null;
             }
-            clearMovementSubscriptions();
             state.codeMovements = [];
-            state.productRecords = [];
-            state.trackedCodes = [];
             render();
           }
           render();
