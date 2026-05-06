@@ -3646,6 +3646,8 @@
           createdByUid: done.createdByUid || "",
           twDoneId: doneId,
           sourceLine: TABWRITE_LINE_BUCKET,
+          isTabWriteCompleted: true,
+          noIbcWeightDetail: true,
           orderNo,
           customer,
           lineKey: done.lineKey || "",
@@ -3863,14 +3865,55 @@
       return "";
     }
 
-    function getBulkIbcWeightLabelFromData(data = {}){
+    function getBulkIbcExplicitWeightLabelFromData(data = {}){
       return normalizeBulkIbcWeightLabel(
         data?.bulkIbcWeightLabel,
         data?.ibcWeightLabel,
         data?.perIbcWeightLabel,
         data?.pesoPerIbc,
         data?.pesoPerIBC,
-        data?.pesoIbc,
+        data?.pesoIbc
+      );
+    }
+
+    function isCereaToConcamariseTransferData(data = {}){
+      const direction = cleanSpaces(data?.direction || data?.transferDirection || data?.ddtDirection || "");
+      const fromWarehouse = normalizeWarehouse(data?.fromWarehouse || data?.sourceWarehouse || data?.originWarehouse || "");
+      const toWarehouse = normalizeWarehouse(data?.toWarehouse || data?.destinationWarehouse || "");
+      return direction === TRANSFER_TO_CONCAMARISE || (fromWarehouse === WAREHOUSE_CEREA && toWarehouse === WAREHOUSE_CONCAMARISE);
+    }
+
+    function isConcamariseToCereaTransferData(data = {}){
+      const direction = cleanSpaces(data?.direction || data?.transferDirection || data?.ddtDirection || "");
+      const fromWarehouse = normalizeWarehouse(data?.fromWarehouse || data?.sourceWarehouse || data?.originWarehouse || "");
+      const toWarehouse = normalizeWarehouse(data?.toWarehouse || data?.destinationWarehouse || "");
+      return direction === TRANSFER_TO_CEREA || (fromWarehouse === WAREHOUSE_CONCAMARISE && toWarehouse === WAREHOUSE_CEREA);
+    }
+
+    function canShowBulkIbcWeightForData(data = {}, options = {}){
+      if (!data || typeof data !== "object") return Boolean(options.forceBulk === true);
+      if (data?.noIbcWeightDetail === true) return false;
+
+      // I completati del Tabellone WRITE non sono IBC: non devono mai mostrare “Peso per IBC”,
+      // nemmeno se nel nome prodotto compare 1 kg / 5 L ecc.
+      if (data?.isTabWriteCompleted === true || isTabWriteCompletedMovement(data) || isConcamariseToCereaTransferData(data)) return false;
+
+      if (options.forceBulk === true) return true;
+      if (data?.isBulkWriteCompleted === true || isBulkWriteCompletedMovement(data)) return true;
+
+      // Nei DDT già generati i dettagli Bulk viaggiano come campi espliciti sulle righe.
+      // Li mostriamo solo sulla tratta Cerea → Concamarise, cioè Porta a Conca.
+      if (isCereaToConcamariseTransferData(data) && getBulkIbcExplicitWeightLabelFromData(data)) return true;
+
+      return false;
+    }
+
+    function getBulkIbcWeightLabelFromData(data = {}, options = {}){
+      if (!canShowBulkIbcWeightForData(data, options)) return "";
+      const explicit = getBulkIbcExplicitWeightLabelFromData(data);
+      if (explicit) return explicit;
+      if (options.explicitOnly === true) return "";
+      return normalizeBulkIbcWeightLabel(
         data?.format,
         data?.bulkFormat,
         data?.rawLine,
@@ -3891,7 +3934,7 @@
       const product = getBulkWriteCompletedProductNameFromData(data, docSnap.id);
       const itemName = product || cleanSpaces(data.label || data.rawLine || docSnap.id);
       const code = normalizeBulkWriteCompletedCode(data.code || data.finishedProductCode || product || data.label || docSnap.id, product, format);
-      const bulkIbcWeightLabel = getBulkIbcWeightLabelFromData(data);
+      const bulkIbcWeightLabel = getBulkIbcWeightLabelFromData(data, { forceBulk:true });
       return {
         id: String(docSnap.id || "").trim(),
         key: String(data.key || docSnap.id || "").trim(),
@@ -3906,6 +3949,8 @@
         ibcWeightLabel: bulkIbcWeightLabel,
         pesoPerIbc: bulkIbcWeightLabel,
         rawLine: String(data.rawLine || "").trim(),
+        isBulkWriteCompleted: true,
+        sourceLine: BULKWRITE_LINE_BUCKET,
         ritirato: data.ritirato === true,
         cereaInventoryMovementId: String(data.cereaInventoryMovementId || data.bulkCereaInventoryMovementId || "").trim(),
         // Campi legacy ignorati per il nuovo flusso: i vecchi bulkconca_* erano destinati a Conca e non devono bloccare il sync corretto a Cerea.
@@ -3978,6 +4023,7 @@
           createdByUid: done.createdByUid || "",
           bulkDoneId: doneId,
           sourceLine: BULKWRITE_LINE_BUCKET,
+          isBulkWriteCompleted: true,
           format: done.format || "",
           completedByName: done.completedByName || "",
           completedByEmail: done.completedByEmail || "",
@@ -4417,9 +4463,12 @@
         palletCountTotal: normalizePositiveFloat(mv?.palletCountTotal || data.palletCount || data.bancali || 0),
         palletUnitQty: normalizePositiveFloat(mv?.palletUnitQty || data.palletUnitQty || 0),
         palletUnitUom: normalizeUom(mv?.palletUnitUom || data.palletUnitUom || data.uom || "") || "pz",
-        bulkIbcWeightLabel: getBulkIbcWeightLabelFromData(mv) || getBulkIbcWeightLabelFromData(data),
-        ibcWeightLabel: getBulkIbcWeightLabelFromData(mv) || getBulkIbcWeightLabelFromData(data),
-        pesoPerIbc: getBulkIbcWeightLabelFromData(mv) || getBulkIbcWeightLabelFromData(data)
+        bulkIbcWeightLabel: getBulkIbcWeightLabelFromData({ ...mv, fromWarehouse, toWarehouse, transferDirection: data.transferDirection || data.direction || data.ddtDirection }) || getBulkIbcWeightLabelFromData(data),
+        ibcWeightLabel: getBulkIbcWeightLabelFromData({ ...mv, fromWarehouse, toWarehouse, transferDirection: data.transferDirection || data.direction || data.ddtDirection }) || getBulkIbcWeightLabelFromData(data),
+        pesoPerIbc: getBulkIbcWeightLabelFromData({ ...mv, fromWarehouse, toWarehouse, transferDirection: data.transferDirection || data.direction || data.ddtDirection }) || getBulkIbcWeightLabelFromData(data),
+        fromWarehouse,
+        toWarehouse,
+        transferDirection: cleanSpaces(data.transferDirection || data.direction || data.ddtDirection || "")
       })) : [];
       const lines = Array.isArray(data.lines) ? data.lines.map(line => ({
         code: cleanSpaces(line?.code || data.code || ""),
@@ -4429,9 +4478,12 @@
         palletCount: normalizePositiveFloat(line?.palletCount || line?.bancali || 0),
         palletUnitQty: normalizePositiveFloat(line?.palletUnitQty || data.palletUnitQty || 0),
         palletUnitUom: normalizeUom(line?.palletUnitUom || data.palletUnitUom || data.uom || "") || "pz",
-        bulkIbcWeightLabel: getBulkIbcWeightLabelFromData(line) || getBulkIbcWeightLabelFromData(data),
-        ibcWeightLabel: getBulkIbcWeightLabelFromData(line) || getBulkIbcWeightLabelFromData(data),
-        pesoPerIbc: getBulkIbcWeightLabelFromData(line) || getBulkIbcWeightLabelFromData(data),
+        bulkIbcWeightLabel: getBulkIbcWeightLabelFromData({ ...line, fromWarehouse, toWarehouse, transferDirection: data.transferDirection || data.direction || data.ddtDirection }) || getBulkIbcWeightLabelFromData(data),
+        ibcWeightLabel: getBulkIbcWeightLabelFromData({ ...line, fromWarehouse, toWarehouse, transferDirection: data.transferDirection || data.direction || data.ddtDirection }) || getBulkIbcWeightLabelFromData(data),
+        pesoPerIbc: getBulkIbcWeightLabelFromData({ ...line, fromWarehouse, toWarehouse, transferDirection: data.transferDirection || data.direction || data.ddtDirection }) || getBulkIbcWeightLabelFromData(data),
+        fromWarehouse,
+        toWarehouse,
+        transferDirection: cleanSpaces(data.transferDirection || data.direction || data.ddtDirection || ""),
         fromLabel: cleanSpaces(line?.fromLabel || warehouseLabel(fromWarehouse)),
         toLabel: cleanSpaces(line?.toLabel || warehouseLabel(toWarehouse))
       })) : [];
@@ -4607,6 +4659,12 @@
         palletCountTotal: normalizePositiveFloat(mv?.palletCountTotal || mv?.bancaliTotali || 0),
         palletUnitQty: normalizePositiveFloat(mv?.palletUnitQty || mv?.qtyPerPallet || 0),
         palletUnitUom: normalizeUom(mv?.palletUnitUom || mv?.uom || "") || "pz",
+        fromWarehouse: normalizeWarehouse(mv?.fromWarehouse || mv?.sourceWarehouse || mv?.originWarehouse || ""),
+        toWarehouse: normalizeWarehouse(mv?.toWarehouse || mv?.destinationWarehouse || ""),
+        transferDirection: cleanSpaces(mv?.transferDirection || mv?.direction || mv?.ddtDirection || ""),
+        isTabWriteCompleted: mv?.isTabWriteCompleted === true,
+        isBulkWriteCompleted: mv?.isBulkWriteCompleted === true,
+        noIbcWeightDetail: mv?.noIbcWeightDetail === true,
         bulkIbcWeightLabel: getBulkIbcWeightLabelFromData(mv),
         ibcWeightLabel: getBulkIbcWeightLabelFromData(mv),
         pesoPerIbc: getBulkIbcWeightLabelFromData(mv),
@@ -4638,6 +4696,12 @@
           bulkIbcWeightLabel: getBulkIbcWeightLabelFromData(fallbackDoc),
           ibcWeightLabel: getBulkIbcWeightLabelFromData(fallbackDoc),
           pesoPerIbc: getBulkIbcWeightLabelFromData(fallbackDoc),
+          fromWarehouse: normalizeWarehouse(fallbackDoc.fromWarehouse || ""),
+          toWarehouse: normalizeWarehouse(fallbackDoc.toWarehouse || ""),
+          transferDirection: cleanSpaces(fallbackDoc.transferDirection || fallbackDoc.direction || fallbackDoc.ddtDirection || ""),
+          isBulkWriteCompleted: fallbackDoc.isBulkWriteCompleted === true,
+          isTabWriteCompleted: fallbackDoc.isTabWriteCompleted === true,
+          noIbcWeightDetail: fallbackDoc.noIbcWeightDetail === true,
           fromLabel: cleanSpaces(fallbackDoc.fromLabel || warehouseLabel(fallbackDoc.fromWarehouse)),
           toLabel: cleanSpaces(fallbackDoc.toLabel || warehouseLabel(fallbackDoc.toWarehouse))
         };
@@ -4646,6 +4710,12 @@
         row.palletCountTotal = Math.max(row.palletCountTotal, normalizePositiveFloat(mv?.palletCountTotal || 0));
         row.palletUnitQty = Math.max(row.palletUnitQty, normalizePositiveFloat(mv?.palletUnitQty || 0));
         row.palletUnitUom = normalizeUom(mv?.palletUnitUom || row.palletUnitUom || uom) || uom;
+        row.fromWarehouse = normalizeWarehouse(row.fromWarehouse || mv?.fromWarehouse || "");
+        row.toWarehouse = normalizeWarehouse(row.toWarehouse || mv?.toWarehouse || "");
+        row.transferDirection = cleanSpaces(row.transferDirection || mv?.transferDirection || mv?.direction || mv?.ddtDirection || "");
+        row.isBulkWriteCompleted = row.isBulkWriteCompleted || mv?.isBulkWriteCompleted === true;
+        row.isTabWriteCompleted = row.isTabWriteCompleted || mv?.isTabWriteCompleted === true;
+        row.noIbcWeightDetail = row.noIbcWeightDetail || mv?.noIbcWeightDetail === true;
         row.bulkIbcWeightLabel = cleanSpaces(row.bulkIbcWeightLabel || getBulkIbcWeightLabelFromData(mv));
         row.ibcWeightLabel = cleanSpaces(row.ibcWeightLabel || row.bulkIbcWeightLabel);
         row.pesoPerIbc = cleanSpaces(row.pesoPerIbc || row.bulkIbcWeightLabel);
@@ -4874,7 +4944,9 @@
           uom: "",
           bulkIbcWeightLabel: "",
           hasTabWriteCompletion: false,
-          hasBulkWriteCompletion: false
+          hasBulkWriteCompletion: false,
+          isTabWriteCompleted: false,
+          isBulkWriteCompleted: false
         };
 
         if (wh === WAREHOUSE_CONCAMARISE) totalRec.concamarise += delta;
@@ -4882,9 +4954,11 @@
 
         if (wh === WAREHOUSE_CONCAMARISE && type !== "OUT" && isTabWriteCompletedMovement(mv)){
           totalRec.hasTabWriteCompletion = true;
+          totalRec.isTabWriteCompleted = true;
         }
         if (wh === WAREHOUSE_CEREA && type !== "OUT" && isBulkWriteCompletedMovement(mv)){
           totalRec.hasBulkWriteCompletion = true;
+          totalRec.isBulkWriteCompleted = true;
         }
 
         const ibcWeightLabel = getBulkIbcWeightLabelFromData(mv);
@@ -4902,11 +4976,15 @@
           item,
           uom: uom || "",
           qty: 0,
-          bulkIbcWeightLabel: ""
+          bulkIbcWeightLabel: "",
+          isTabWriteCompleted: false,
+          isBulkWriteCompleted: false
         };
         row.qty += delta;
         if (!row.item && item) row.item = item;
         if (uom) row.uom = uom;
+        if (wh === WAREHOUSE_CONCAMARISE && type !== "OUT" && isTabWriteCompletedMovement(mv)) row.isTabWriteCompleted = true;
+        if (wh === WAREHOUSE_CEREA && type !== "OUT" && isBulkWriteCompletedMovement(mv)) row.isBulkWriteCompleted = true;
         if (ibcWeightLabel) row.bulkIbcWeightLabel = ibcWeightLabel;
         byCustomer.set(rowKey, row);
         targetRowsByCode.set(low, byCustomer);
@@ -7664,6 +7742,9 @@
           bulkIbcWeightLabel: getBulkIbcWeightLabelFromData(product) || getBulkIbcWeightLabelFromData(sourceRows.find(row => getBulkIbcWeightLabelFromData(row)) || {}),
           ibcWeightLabel: getBulkIbcWeightLabelFromData(product) || getBulkIbcWeightLabelFromData(sourceRows.find(row => getBulkIbcWeightLabelFromData(row)) || {}),
           pesoPerIbc: getBulkIbcWeightLabelFromData(product) || getBulkIbcWeightLabelFromData(sourceRows.find(row => getBulkIbcWeightLabelFromData(row)) || {}),
+          isBulkWriteCompleted: product?.isBulkWriteCompleted === true,
+          isTabWriteCompleted: product?.isTabWriteCompleted === true,
+          noIbcWeightDetail: product?.isTabWriteCompleted === true,
           isAlwaysAvailableToCerea: isAlwaysAvailableToCereaProduct(product, config.direction),
           code: cleanSpaces(product.code || item.code || ""),
           item: cleanSpaces(product.name || item.item || product.code || "Articolo"),
@@ -7734,6 +7815,9 @@
             ibcWeightLabel,
             pesoPerIbc: ibcWeightLabel,
             perIbcWeightLabel: ibcWeightLabel,
+            isBulkWriteCompleted: itemEntry.isBulkWriteCompleted === true || product?.isBulkWriteCompleted === true,
+            isTabWriteCompleted: itemEntry.isTabWriteCompleted === true || product?.isTabWriteCompleted === true,
+            noIbcWeightDetail: itemEntry.noIbcWeightDetail === true || product?.isTabWriteCompleted === true,
             bancali: 0,
             bancaliTotali: palletInfo.palletCount,
             quantitaPerBancale: palletInfo.palletUnitQty,
@@ -7770,6 +7854,9 @@
               ibcWeightLabel,
               pesoPerIbc: ibcWeightLabel,
               perIbcWeightLabel: ibcWeightLabel,
+              isBulkWriteCompleted: itemEntry.isBulkWriteCompleted === true || product?.isBulkWriteCompleted === true,
+              isTabWriteCompleted: itemEntry.isTabWriteCompleted === true || product?.isTabWriteCompleted === true,
+              noIbcWeightDetail: itemEntry.noIbcWeightDetail === true || product?.isTabWriteCompleted === true,
               bancali: 0,
               bancaliTotali: palletInfo.palletCount,
               quantitaPerBancale: palletInfo.palletUnitQty,
@@ -7824,8 +7911,8 @@
             batch.set(inRef, inPayload);
 
             movements.push(
-              { id: outRef.id, inventoryMovementId: outRef.id, movementProgressive: outNum, movementProgressiveNumber: movementProgressiveNumber - 1, type:"OUT", warehouse: config.sourceWarehouse, warehouseLabel: config.sourceLabel, code: productCode, item: movementItemName, qty: take, uom, palletCount: 0, palletCountTotal: palletInfo.palletCount, palletUnitQty: palletInfo.palletUnitQty, palletUnitUom: palletInfo.palletUnitUom || commonUom, bulkIbcWeightLabel: ibcWeightLabel, ibcWeightLabel, pesoPerIbc: ibcWeightLabel, lineNo: articleLineNo },
-              { id: inRef.id, inventoryMovementId: inRef.id, movementProgressive: inNum, movementProgressiveNumber, type:"IN", warehouse: config.destinationWarehouse, warehouseLabel: config.destinationLabel, code: productCode, item: movementItemName, qty: take, uom, palletCount: 0, palletCountTotal: palletInfo.palletCount, palletUnitQty: palletInfo.palletUnitQty, palletUnitUom: palletInfo.palletUnitUom || commonUom, bulkIbcWeightLabel: ibcWeightLabel, ibcWeightLabel, pesoPerIbc: ibcWeightLabel, lineNo: articleLineNo }
+              { id: outRef.id, inventoryMovementId: outRef.id, movementProgressive: outNum, movementProgressiveNumber: movementProgressiveNumber - 1, type:"OUT", warehouse: config.sourceWarehouse, warehouseLabel: config.sourceLabel, code: productCode, item: movementItemName, qty: take, uom, palletCount: 0, palletCountTotal: palletInfo.palletCount, palletUnitQty: palletInfo.palletUnitQty, palletUnitUom: palletInfo.palletUnitUom || commonUom, bulkIbcWeightLabel: ibcWeightLabel, ibcWeightLabel, pesoPerIbc: ibcWeightLabel, isBulkWriteCompleted: itemEntry.isBulkWriteCompleted === true || product?.isBulkWriteCompleted === true, isTabWriteCompleted: itemEntry.isTabWriteCompleted === true || product?.isTabWriteCompleted === true, noIbcWeightDetail: itemEntry.noIbcWeightDetail === true || product?.isTabWriteCompleted === true, fromWarehouse: config.sourceWarehouse, toWarehouse: config.destinationWarehouse, transferDirection: config.direction, lineNo: articleLineNo },
+              { id: inRef.id, inventoryMovementId: inRef.id, movementProgressive: inNum, movementProgressiveNumber, type:"IN", warehouse: config.destinationWarehouse, warehouseLabel: config.destinationLabel, code: productCode, item: movementItemName, qty: take, uom, palletCount: 0, palletCountTotal: palletInfo.palletCount, palletUnitQty: palletInfo.palletUnitQty, palletUnitUom: palletInfo.palletUnitUom || commonUom, bulkIbcWeightLabel: ibcWeightLabel, ibcWeightLabel, pesoPerIbc: ibcWeightLabel, isBulkWriteCompleted: itemEntry.isBulkWriteCompleted === true || product?.isBulkWriteCompleted === true, isTabWriteCompleted: itemEntry.isTabWriteCompleted === true || product?.isTabWriteCompleted === true, noIbcWeightDetail: itemEntry.noIbcWeightDetail === true || product?.isTabWriteCompleted === true, fromWarehouse: config.sourceWarehouse, toWarehouse: config.destinationWarehouse, transferDirection: config.direction, lineNo: articleLineNo }
             );
 
             remaining -= take;
@@ -7870,6 +7957,9 @@
           bulkIbcWeightLabel: checkedItems.length === 1 ? getBulkIbcWeightLabelFromData(checkedItems[0]) : "",
           ibcWeightLabel: checkedItems.length === 1 ? getBulkIbcWeightLabelFromData(checkedItems[0]) : "",
           pesoPerIbc: checkedItems.length === 1 ? getBulkIbcWeightLabelFromData(checkedItems[0]) : "",
+          isBulkWriteCompleted: checkedItems.some(item => item?.isBulkWriteCompleted === true || item?.product?.isBulkWriteCompleted === true),
+          isTabWriteCompleted: checkedItems.some(item => item?.isTabWriteCompleted === true || item?.product?.isTabWriteCompleted === true),
+          noIbcWeightDetail: checkedItems.some(item => item?.noIbcWeightDetail === true || item?.product?.isTabWriteCompleted === true),
           bancali: palletInfo.palletCount,
           quantitaPerBancale: palletInfo.palletUnitQty,
           lines,
