@@ -570,6 +570,8 @@
     const CODE = "ST0090B03BI01E";
     const ITEM_NAME = "Bottiglia agro 1 lt";
     const UOM = "pz";
+    const LINKED_FBL1000_CODES = Object.freeze(["FBL1000", "fbl1000", "FBL-1000", "FBL 1000"]);
+    const TRACKED_CODES = Object.freeze(Array.from(new Set([CODE, ...LINKED_FBL1000_CODES].map(value => String(value || "").trim()).filter(Boolean))));
     const WAREHOUSE = "cerea";
     const SOURCE = "Estrusore HTML";
     const NOTE = "Estrusore bottiglia agro 1 lt";
@@ -612,6 +614,23 @@
     function safeInt(value){
       const n = parseInt(String(value ?? "").replace(/[^\d-]/g, ""), 10);
       return Number.isFinite(n) ? n : 0;
+    }
+
+    function normalizeCodeKey(value){
+      return String(value || "").trim().toLowerCase();
+    }
+
+    function isPrimaryCode(value){
+      return normalizeCodeKey(value) === normalizeCodeKey(CODE);
+    }
+
+    function isLinkedFbl1000Code(value){
+      const key = normalizeCodeKey(value);
+      return LINKED_FBL1000_CODES.some(code => normalizeCodeKey(code) === key);
+    }
+
+    function isNeutralMovement(mv){
+      return mv?.nonStockItem === true || mv?.inventoryNeutral === true || mv?.stockNeutral === true || mv?.alwaysAvailableItem === true;
     }
 
     function normalizeWarehouse(value){
@@ -794,6 +813,15 @@
         qty: safeInt(data.qty),
         uom: String(data.uom || UOM).trim() || UOM,
         warehouse: String(data.warehouse || "").trim(),
+        nonStockItem: data.nonStockItem === true,
+        inventoryNeutral: data.inventoryNeutral === true,
+        stockNeutral: data.stockNeutral === true,
+        alwaysAvailableItem: data.alwaysAvailableItem === true,
+        estrusoreSync: data.estrusoreSync === true,
+        estrusoreLinkedMovementId: String(data.estrusoreLinkedMovementId || data.linkedMovementId || "").trim(),
+        estrusoreMirrorFromCode: String(data.estrusoreMirrorFromCode || data.mirrorFromCode || "").trim(),
+        linkedDdtId: String(data.linkedDdtId || data.estrusoreLinkedDdtId || "").trim(),
+        linkedDdtNumber: String(data.linkedDdtNumber || data.estrusoreLinkedDdtNumber || "").trim(),
         createdAt: data.createdAt || data.date || null,
         createdByName: String(data.createdByName || data.userName || data.displayName || "").trim(),
         createdBy: String(data.createdBy || data.userEmail || data.user || data.author || "").trim()
@@ -805,8 +833,29 @@
       return prettifyUserLabel(state.user.displayName || state.user.email || state.user.uid || "Connesso");
     }
 
+    function buildMirroredSourceMovementIds(){
+      const ids = new Set();
+      for (const mv of (state.codeMovements || [])){
+        if (!mv || !isPrimaryCode(mv.code) || mv.estrusoreSync !== true) continue;
+        const sourceId = String(mv.estrusoreLinkedMovementId || "").trim();
+        if (sourceId) ids.add(sourceId);
+      }
+      return ids;
+    }
+
     function extractCereaMovements(){
-      return (state.codeMovements || []).filter(mv => normalizeWarehouse(mv.warehouse) === WAREHOUSE);
+      const mirroredSourceIds = buildMirroredSourceMovementIds();
+      return (state.codeMovements || []).filter(mv => {
+        if (!mv || normalizeWarehouse(mv.warehouse) !== WAREHOUSE) return false;
+        if (isNeutralMovement(mv)) return false;
+        if (isPrimaryCode(mv.code)) return true;
+        if (isLinkedFbl1000Code(mv.code)){
+          // Storico: mostra anche gli scarichi FBL1000 già creati da Porta a Conca.
+          // Futuro: se Inventario ha scritto il mirror ST0090B03BI01E, non contare due volte.
+          return !mirroredSourceIds.has(String(mv.id || "").trim());
+        }
+        return false;
+      });
     }
 
     function resolveUom(){
@@ -929,9 +978,14 @@
         return;
       }
 
-      const q = query(orgCol("inventoryMovements"), where("code", "==", CODE));
+      const q = query(orgCol("inventoryMovements"), where("code", "in", TRACKED_CODES));
       state.unsubMovements = onSnapshot(q, (snap) => {
-        state.codeMovements = snap.docs.map(mapMovement);
+        const byId = new Map();
+        for (const movement of snap.docs.map(mapMovement)){
+          if (!movement?.id) continue;
+          byId.set(movement.id, movement);
+        }
+        state.codeMovements = Array.from(byId.values());
         render();
       }, (err) => {
         console.error("inventoryMovements listener failed", err);

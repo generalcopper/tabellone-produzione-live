@@ -3082,6 +3082,15 @@
     const BULKWRITE_DOC_TYPE = "PRODUZIONE_BULK_WRITE";
     const BULKWRITE_SYNC_ORIGIN = "bulk_write_completed_to_cerea";
 
+    // Sync diretto verso la pagina ESTRUSORE_FLACONI_1LT.html:
+    // quando FBL1000 viene portato a Conca deve scaricare subito anche
+    // il contatore dell'estrusore, che lavora sul codice interno ST0090B03BI01E.
+    const ESTRUSORE_FLACONI_1LT_CODE = "ST0090B03BI01E";
+    const ESTRUSORE_FLACONI_1LT_ITEM = "Bottiglia agro 1 lt";
+    const ESTRUSORE_FLACONI_1LT_UOM = "pz";
+    const ESTRUSORE_SYNC_SOURCE = "Inventario Concamarise → Estrusore flaconi 1 lt";
+    const ESTRUSORE_SYNC_DOC_TYPE = "ESTRUSORE_PORTA_CONCA_SYNC";
+
     const COMPANY_GENERAL_COPPER = {
       label: "GENERAL COPPER SRL",
       attention: "Magazzino Cerea",
@@ -4750,6 +4759,12 @@
         bulkDoneId: String(data.bulkDoneId || "").trim(),
         sourceLine: String(data.sourceLine || "").trim(),
         origin: String(data.origin || "").trim(),
+        estrusoreSync: data.estrusoreSync === true,
+        estrusoreLinkedMovementId: cleanSpaces(data.estrusoreLinkedMovementId || data.linkedMovementId || ""),
+        estrusoreMirrorFromCode: cleanSpaces(data.estrusoreMirrorFromCode || data.mirrorFromCode || ""),
+        estrusoreMirrorFromItem: cleanSpaces(data.estrusoreMirrorFromItem || data.mirrorFromItem || ""),
+        linkedDdtId: cleanSpaces(data.linkedDdtId || data.estrusoreLinkedDdtId || ""),
+        linkedDdtNumber: cleanSpaces(data.linkedDdtNumber || data.estrusoreLinkedDdtNumber || ""),
         docType,
         docNum: docNumber,
         ddtId,
@@ -6827,6 +6842,13 @@
 
       for (const mv of (state.movements || [])){
         if (!mv || !mv.id) continue;
+        const linkedKeys = [mv.linkedDdtId, mv.linkedDdtNumber, mv.estrusoreLinkedDdtId, mv.estrusoreLinkedDdtNumber]
+          .map(value => cleanSpaces(value || ""))
+          .filter(Boolean);
+        if (mv.estrusoreSync === true && linkedKeys.some(key => ddtKeys.has(key))){
+          ids.add(mv.id);
+          continue;
+        }
         const isHeader = isDdtMappedMovement(mv);
         if (!isHeader && !isDdtTransferMovement(mv)) continue;
         const mvKeys = getDdtReferenceKeys(mv, { includeOwnId: isHeader });
@@ -7710,6 +7732,38 @@
       return String(code || "").trim().toLowerCase();
     }
 
+    function isFbl1000EstrusoreProduct(...values){
+      const blob = normalizeSearch(values.map(value => {
+        if (!value || typeof value !== "object") return value;
+        return [
+          value.code,
+          value.name,
+          value.alias,
+          value.searchText,
+          value.fallbackName,
+          value.item,
+          value.product,
+          value.label,
+          value.rawLine,
+          value.rawText,
+          value.finishedProductCode,
+          value.finishedProductName,
+          value.categoryKey,
+          value.categoryName
+        ].join(" ");
+      }).join(" "));
+      const compact = blob.replace(/\s+/g, "");
+      return compact.includes("fbl1000");
+    }
+
+    function shouldMirrorFbl1000ToEstrusore(config, itemEntry, productCode, articleName){
+      if (!config || config.direction !== TRANSFER_TO_CONCAMARISE) return false;
+      if (normalizeWarehouse(config.sourceWarehouse) !== WAREHOUSE_CEREA) return false;
+      if (itemEntry?.isAlwaysAvailableToCerea === true) return false;
+      if (normalizeInventoryCodeKey(productCode) === normalizeInventoryCodeKey(ESTRUSORE_FLACONI_1LT_CODE)) return false;
+      return isFbl1000EstrusoreProduct(productCode, articleName, itemEntry, itemEntry?.product);
+    }
+
     function getInventoryQtyDraft(code){
       const key = normalizeInventoryCodeKey(code);
       if (!key) return "";
@@ -8513,6 +8567,45 @@
 
             batch.set(outRef, outPayload);
             batch.set(inRef, inPayload);
+
+            if (shouldMirrorFbl1000ToEstrusore(config, itemEntry, productCode, articleName)){
+              const estrusoreRef = doc(movementCollection);
+              const estrusoreQty = take;
+              batch.set(estrusoreRef, {
+                type: "OUT",
+                customer,
+                code: ESTRUSORE_FLACONI_1LT_CODE,
+                item: ESTRUSORE_FLACONI_1LT_ITEM,
+                uom: ESTRUSORE_FLACONI_1LT_UOM,
+                qtyRaw: `${estrusoreQty} ${ESTRUSORE_FLACONI_1LT_UOM}`.trim(),
+                qty: estrusoreQty,
+                date,
+                note: `Scarico automatico estrusore da Porta a Conca FBL1000 (${productCode})`,
+                source: ESTRUSORE_SYNC_SOURCE,
+                rawText: movementItemName,
+                docType: ESTRUSORE_SYNC_DOC_TYPE,
+                docNum: `ESTR-CONCA-${reserved.ddtNumber}`,
+                docDateRaw: date,
+                warehouse: WAREHOUSE_CEREA,
+                warehouseLabel: warehouseLabel(WAREHOUSE_CEREA),
+                fromWarehouse: config.sourceWarehouse,
+                toWarehouse: config.destinationWarehouse,
+                fromLabel: config.sourceLabel,
+                toLabel: config.destinationLabel,
+                linkedDdtId: ddtRef.id,
+                linkedDdtNumber: reserved.ddtNumber,
+                estrusoreSync: true,
+                estrusoreLinkedMovementId: outRef.id,
+                estrusoreMirrorFromCode: productCode,
+                estrusoreMirrorFromItem: movementItemName,
+                estrusoreMirrorQty: estrusoreQty,
+                createdAt: serverTimestamp(),
+                createdBy: userLabel,
+                createdByName: state.user.displayName || "",
+                createdByEmail: userEmail,
+                createdByUid: userUid
+              });
+            }
 
             movements.push(
               { id: outRef.id, inventoryMovementId: outRef.id, movementProgressive: outNum, movementProgressiveNumber: movementProgressiveNumber - 1, type:"OUT", warehouse: config.sourceWarehouse, warehouseLabel: config.sourceLabel, code: productCode, item: movementItemName, qty: take, uom, palletCount: 0, palletCountTotal: palletInfo.palletCount, palletUnitQty: palletInfo.palletUnitQty, palletUnitUom: palletInfo.palletUnitUom || commonUom, bulkIbcWeightLabel: ibcWeightLabel, ibcWeightLabel, pesoPerIbc: ibcWeightLabel, isBulkWriteCompleted: itemEntry.isBulkWriteCompleted === true || product?.isBulkWriteCompleted === true, isTabWriteCompleted: itemEntry.isTabWriteCompleted === true || product?.isTabWriteCompleted === true, noIbcWeightDetail: itemEntry.noIbcWeightDetail === true || product?.isTabWriteCompleted === true, fromWarehouse: config.sourceWarehouse, toWarehouse: config.destinationWarehouse, transferDirection: config.direction, lineNo: articleLineNo },
