@@ -306,6 +306,23 @@
       overflow-wrap:anywhere;
     }
 
+    .movement-detail{
+      display:flex;
+      align-items:center;
+      flex-wrap:wrap;
+      gap:7px;
+      font-size:13px;
+      line-height:1.45;
+      font-weight:850;
+      color:var(--ink);
+      overflow-wrap:anywhere;
+    }
+
+    .movement-detail span{
+      color:var(--muted);
+      font-weight:800;
+    }
+
     .movement-date{
       font-size:13px;
       font-weight:700;
@@ -1140,6 +1157,93 @@
       }, 0);
     }
 
+    function getMovementDocumentNumber(mv){
+      return cleanText(
+        mv?.linkedDdtNumber ||
+        mv?.ddtNumber ||
+        mv?.docNum ||
+        mv?.linkedDdtId ||
+        mv?.ddtId ||
+        ""
+      );
+    }
+
+    function getMovementOriginalCode(mv){
+      const code = cleanText(mv?.estrusoreMirrorFromCode || mv?.mirrorFromCode || "");
+      if (code) return code;
+      if (!isPrimaryCode(mv?.code) && isLinkedFbl1000Movement(mv)) return cleanText(mv?.code || "");
+      return "";
+    }
+
+    function isPortaAConcaMovement(mv){
+      if (!mv) return false;
+      const type = getMovementType(mv);
+      if (type !== "OUT") return false;
+      if (isPrimaryCode(mv.code) && mv.estrusoreSync === true){
+        return isCereaToConcamariseTransfer(mv) || compactLookupText([mv.source, mv.note, mv.docType].join(" ")).includes("portaconca");
+      }
+      return isLinkedFblCereaTransferMovement(mv) && isCereaToConcamariseTransfer(mv);
+    }
+
+    function isPortaACereaMovement(mv){
+      if (!mv) return false;
+      const type = getMovementType(mv);
+      if (type !== "IN") return false;
+      if (isPrimaryCode(mv.code) && mv.estrusoreSync === true){
+        return isConcamariseToCereaTransfer(mv) || compactLookupText([mv.source, mv.note, mv.docType].join(" ")).includes("portacerea");
+      }
+      return isLinkedFblCereaTransferMovement(mv) && isConcamariseToCereaTransfer(mv);
+    }
+
+    function isProductionMovement(mv){
+      if (!mv || !isPrimaryCode(mv.code)) return false;
+      if (mv.estrusoreSync === true) return false;
+      const type = getMovementType(mv);
+      const text = compactLookupText([mv.source, mv.docType, mv.note].join(" "));
+      return type === "IN" && (text.includes("estrusore") || text.includes("produzione"));
+    }
+
+    function resolveMovementDetailLabel(mv){
+      if (!mv) return "";
+
+      const docNumber = getMovementDocumentNumber(mv);
+      const originalCode = getMovementOriginalCode(mv);
+      const pieces = [];
+
+      if (isPortaAConcaMovement(mv)){
+        pieces.push("Movimento generato da bolla Porta a Conca");
+        if (docNumber) pieces.push(`Bolla/DDT ${docNumber}`);
+        if (originalCode) pieces.push(`Codice origine ${originalCode}`);
+        return pieces.join(" · ");
+      }
+
+      if (isPortaACereaMovement(mv)){
+        pieces.push("Movimento generato da bolla Porta a Cerea");
+        if (docNumber) pieces.push(`Bolla/DDT ${docNumber}`);
+        if (originalCode) pieces.push(`Codice origine ${originalCode}`);
+        return pieces.join(" · ");
+      }
+
+      if (isLinkedFblCereaInventoryCorrectionMovement(mv)){
+        pieces.push("Rettifica gestionale inventario Cerea");
+        if (docNumber) pieces.push(`Documento ${docNumber}`);
+        if (originalCode || cleanText(mv.code)) pieces.push(`Codice ${originalCode || cleanText(mv.code)}`);
+        return pieces.join(" · ");
+      }
+
+      if (isProductionMovement(mv)){
+        pieces.push("Produzione estrusore");
+        if (docNumber) pieces.push(`Documento ${docNumber}`);
+        return pieces.join(" · ");
+      }
+
+      const source = cleanText(mv.source || mv.note || mv.docType || "Movimento inventario Cerea");
+      if (source) pieces.push(source);
+      if (docNumber) pieces.push(`Documento ${docNumber}`);
+      if (originalCode) pieces.push(`Codice origine ${originalCode}`);
+      return pieces.join(" · ");
+    }
+
     function renderMovements(){
       if (!state.user){
         els.movements.innerHTML = '<div class="empty">Accedi per vedere i movimenti.</div>';
@@ -1162,12 +1266,14 @@
       els.movements.innerHTML = list.map(mv => {
         const sign = String(mv.type || "IN").toUpperCase() === "OUT" ? "-" : "+";
         const who = prettifyUserLabel(mv.createdByName || mv.createdBy);
+        const detail = resolveMovementDetailLabel(mv);
         return `
           <div class="movement">
             <div class="movement-top">
               <div class="movement-qty">${escapeHtml(sign + " " + mv.qty.toLocaleString("it-IT") + " " + (mv.uom || UOM))}</div>
               <div class="movement-user">${escapeHtml(who)}</div>
             </div>
+            ${detail ? `<div class="movement-detail">${escapeHtml(detail)}</div>` : ""}
             <div class="movement-date">${escapeHtml(fmtDateTime(mv.createdAt))}</div>
           </div>
         `;

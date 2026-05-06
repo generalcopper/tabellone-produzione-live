@@ -20460,7 +20460,7 @@ let __stockRowByKey = new Map();
             item: MOVE_INV_ESTRUSORE_ITEM,
             qty: take,
             date: movementDate,
-            note: `Scarico automatico estrusore da spostamento FBL1000 (${code})`,
+            note: `Movimento generato da bolla Porta a Conca · Scarico automatico estrusore FBL1000 (${code})`,
             uom: "pz",
             qtyRaw: `${take} pz`,
             warehouse: from,
