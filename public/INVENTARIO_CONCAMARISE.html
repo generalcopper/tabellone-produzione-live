@@ -2533,6 +2533,74 @@
     display:none !important;
   }
 
+  /* Removable rows in Porta a Cerea: side mini line, separated from the row click */
+  .modal .suggestion-line{
+    display:grid !important;
+    grid-template-columns:minmax(0, 1fr) 34px !important;
+    align-items:stretch !important;
+    gap:0 !important;
+    width:100% !important;
+    max-width:100% !important;
+    border-bottom:1px solid #eef2f7 !important;
+    background:#ffffff !important;
+    overflow:hidden !important;
+  }
+
+  .modal .suggestion-line:nth-child(even){
+    background:#fafbfc !important;
+  }
+
+  .modal .suggestion-line:last-child{
+    border-bottom:0 !important;
+  }
+
+  .modal .suggestion-line .suggestion{
+    border-bottom:0 !important;
+    background:transparent !important;
+  }
+
+  .modal .suggestion-line .suggestion:hover{
+    background:#eef4ff !important;
+  }
+
+  .modal .suggestion-remove-btn{
+    appearance:none !important;
+    width:34px !important;
+    min-width:34px !important;
+    height:auto !important;
+    align-self:stretch !important;
+    border:0 !important;
+    border-left:1px solid #eef2f7 !important;
+    background:transparent !important;
+    color:#9ca3af !important;
+    display:flex !important;
+    align-items:center !important;
+    justify-content:center !important;
+    cursor:pointer !important;
+    font-size:0 !important;
+    line-height:1 !important;
+    box-shadow:none !important;
+    padding:0 !important;
+  }
+
+  .modal .suggestion-remove-btn::before{
+    content:"";
+    width:13px;
+    height:2px;
+    border-radius:999px;
+    background:currentColor;
+  }
+
+  .modal .suggestion-remove-btn:hover{
+    background:#fff7f7 !important;
+    color:#b42318 !important;
+  }
+
+  .modal .suggestion-remove-btn:disabled{
+    opacity:.38 !important;
+    cursor:not-allowed !important;
+  }
+
   /* Narrow viewports: keep it tabular but allow the code pill to hide
      so name + qty always stay visible and aligned */
   @media (max-width: 480px){
@@ -2922,6 +2990,8 @@
     const TABWRITE_SOURCE = "Tabellone WRITE";
     const TABWRITE_DOC_TYPE = "PRODUZIONE_WRITE";
     const TABWRITE_SYNC_ORIGIN = "tabellone_write_completed_to_conca";
+    const TABWRITE_REMOVE_SOURCE = "Inventario Concamarise - rimozione completato WRITE";
+    const TABWRITE_REMOVE_DOC_TYPE = "RIMOZIONE_COMPLETATO_WRITE";
     const BULKWRITE_LINE_BUCKET = "bulk_produzioni";
     const BULKWRITE_SOURCE = "Bulk Produzioni WRITE";
     const BULKWRITE_DOC_TYPE = "PRODUZIONE_BULK_WRITE";
@@ -4554,6 +4624,14 @@
         code: mappedCode,
         item: mappedItem,
         product: String(data.product || data.productName || "").trim(),
+        label: String(data.label || "").trim(),
+        lineKey: String(data.lineKey || "").trim(),
+        orderKey: String(data.orderKey || "").trim(),
+        queueOrderKey: String(data.queueOrderKey || "").trim(),
+        finishedProductId: String(data.finishedProductId || "").trim(),
+        finishedProductCode: String(data.finishedProductCode || "").trim(),
+        finishedProductName: String(data.finishedProductName || "").trim(),
+        isAmazonSku: data.isAmazonSku === true || data.amazonSku === true || data.skuAmazon === true,
         bulkDisplayVersion: safeInt(data.bulkDisplayVersion || 0),
         bulkIbcWeightLabel: getBulkIbcWeightLabelFromData(data),
         ibcWeightLabel: getBulkIbcWeightLabelFromData(data),
@@ -5105,8 +5183,10 @@
           bulkIbcWeightLabel: "",
           hasTabWriteCompletion: false,
           hasBulkWriteCompletion: false,
+          hasAmazonSkuCompletion: false,
           isTabWriteCompleted: false,
           isBulkWriteCompleted: false,
+          isAmazonSku: false,
           bulkDoneIds: [],
           bulkSourceItems: []
         };
@@ -5117,6 +5197,10 @@
         if (wh === WAREHOUSE_CONCAMARISE && type !== "OUT" && isTabWriteCompletedMovement(mv)){
           totalRec.hasTabWriteCompletion = true;
           totalRec.isTabWriteCompleted = true;
+          if (isAmazonSkuLikeProduct(mv)){
+            totalRec.hasAmazonSkuCompletion = true;
+            totalRec.isAmazonSku = true;
+          }
         }
         if (wh === WAREHOUSE_CEREA && type !== "OUT" && isBulkWriteCompletedMovement(mv)){
           totalRec.hasBulkWriteCompletion = true;
@@ -5155,13 +5239,17 @@
           bulkIbcWeightLabel: "",
           isTabWriteCompleted: false,
           isBulkWriteCompleted: false,
+          isAmazonSku: false,
           bulkDoneIds: [],
           bulkSourceItems: []
         };
         row.qty += delta;
         if (!row.item && item) row.item = item;
         if (uom) row.uom = uom;
-        if (wh === WAREHOUSE_CONCAMARISE && type !== "OUT" && isTabWriteCompletedMovement(mv)) row.isTabWriteCompleted = true;
+        if (wh === WAREHOUSE_CONCAMARISE && type !== "OUT" && isTabWriteCompletedMovement(mv)){
+          row.isTabWriteCompleted = true;
+          if (isAmazonSkuLikeProduct(mv)) row.isAmazonSku = true;
+        }
         if (wh === WAREHOUSE_CEREA && type !== "OUT" && isBulkWriteCompletedMovement(mv)){
           row.isBulkWriteCompleted = true;
           const bulkDoneId = cleanSpaces(mv.bulkDoneId || "");
@@ -5322,6 +5410,57 @@
       return map;
     }
 
+    function isAmazonSkuLikeProduct(value){
+      if (!value || typeof value !== "object") return false;
+      if (value.isAmazonSku === true || value.amazonSku === true || value.skuAmazon === true || value.isSkuAmazon === true) return true;
+
+      const code = normalizeSearch(value.code || value.finishedProductCode || value.sku || value.skuCode || "");
+      if (/\b(amazon|asin|fba|fbm|amz)\b/.test(code)) return true;
+
+      const blob = normalizeSearch([
+        value.name,
+        value.alias,
+        value.searchText,
+        value.fallbackName,
+        value.categoryKey,
+        value.categoryName,
+        value.category,
+        value.macro,
+        value.macroCategory,
+        value.product,
+        value.productName,
+        value.finishedProductName,
+        value.item,
+        value.label,
+        value.title,
+        value.rawLine,
+        value.rawText,
+        value.customer,
+        value.docType,
+        value.source,
+        value.sourceLine,
+        value.lineKey,
+        value.orderKey,
+        value.queueOrderKey,
+        value.finishedProductId,
+        value.type,
+        value.kind
+      ].join(" "));
+
+      return Boolean(
+        /\bsku amazon\b/.test(blob) ||
+        /\bamazon sku\b/.test(blob) ||
+        /\bskuamazon\b/.test(blob) ||
+        /\bamazonsku\b/.test(blob) ||
+        /\bamazon\b/.test(blob) ||
+        /\basin\b/.test(blob) ||
+        /\bfba\b/.test(blob) ||
+        /\bfbm\b/.test(blob) ||
+        /\blogistica di amazon\b/.test(blob) ||
+        /\bseller central\b/.test(blob)
+      );
+    }
+
     function isTabWriteCompletedMovement(mv){
       if (!mv || typeof mv !== "object") return false;
       const source = normalizeSearch(mv.source || "");
@@ -5379,7 +5518,8 @@
         uom,
         bulkIbcWeightLabel: cleanSpaces(totals?.bulkIbcWeightLabel || ""),
         ibcWeightLabel: cleanSpaces(totals?.bulkIbcWeightLabel || ""),
-        pesoPerIbc: cleanSpaces(totals?.bulkIbcWeightLabel || "")
+        pesoPerIbc: cleanSpaces(totals?.bulkIbcWeightLabel || ""),
+        isAmazonSku: Boolean(totals?.hasAmazonSkuCompletion || totals?.isAmazonSku)
       };
     }
 
@@ -5428,6 +5568,27 @@
           productRecord?.item || ""
         ].join(" "));
         const uom = getResolvedUomForCode(code, productRecord, snapshot);
+        const isAmazonSku = Boolean(
+          totals?.hasAmazonSkuCompletion ||
+          totals?.isAmazonSku ||
+          productRecord?.isAmazonSku === true ||
+          product?.isAmazonSku === true ||
+          isAmazonSkuLikeProduct({
+            ...(productRecord || {}),
+            ...(product || {}),
+            code,
+            name,
+            alias,
+            searchText,
+            categoryKey: category.key,
+            categoryName: category.name,
+            macro: category.macro
+          })
+        );
+
+        if (config.direction === TRANSFER_TO_CEREA && isAmazonSku){
+          continue;
+        }
 
         list.push({
           code,
@@ -5448,6 +5609,7 @@
           sourceQty,
           isTabWriteCompleted: Boolean(totals?.hasTabWriteCompletion && concamariseQty > 0),
           isBulkWriteCompleted: Boolean(totals?.hasBulkWriteCompletion && cereaQty > 0),
+          isAmazonSku,
           isWriteCompleted: Boolean((totals?.hasTabWriteCompletion && concamariseQty > 0) || (totals?.hasBulkWriteCompletion && cereaQty > 0)),
           sourceLabel: config.sourceLabel,
           destinationLabel: config.destinationLabel,
@@ -5828,7 +5990,7 @@
       const always = selectable.filter(product => isAlwaysAvailableToCereaProduct(product, TRANSFER_TO_CEREA));
       const regular = selectable.filter(product => !isAlwaysAvailableToCereaProduct(product, TRANSFER_TO_CEREA));
       // Porta a Cerea deve restare la lista dei completati del Tabellone WRITE, più gli articoli sempre disponibili come IBC.
-      const completed = regular.filter(product => product.isTabWriteCompleted);
+      const completed = regular.filter(product => product.isTabWriteCompleted && !isAmazonSkuLikeProduct(product));
       const base = [...always, ...completed];
       const seen = new Set();
       return base.filter(product => {
@@ -7143,7 +7305,7 @@
         const qtyDisplay = product.isAlwaysAvailableToCerea === true
           ? (product.requiresManualTransferQty === true ? "Quantità da inserire" : (defaultToCereaMode ? "Sempre disponibile" : "Sempre disponibile"))
           : `${config.sourceLabel}: ${product.sourceQty.toLocaleString("it-IT")} ${product.uom}${ibcWeightDetail ? ` · ${ibcWeightDetail}` : ""}`;
-        return `
+        const suggestionButton = `
           <button
             class="${classes.join(" ")}"
             type="button"
@@ -7165,6 +7327,24 @@
               <div class="suggestion-qty">${escapeHtml(qtyDisplay)}</div>
             </div>
           </button>
+        `;
+        const canRemoveFromCereaList = config.direction === TRANSFER_TO_CEREA
+          && product.isTabWriteCompleted === true
+          && product.isAlwaysAvailableToCerea !== true
+          && !isAmazonSkuLikeProduct(product);
+        if (!canRemoveFromCereaList) return suggestionButton;
+        return `
+          <div class="suggestion-line">
+            ${suggestionButton}
+            <button
+              class="suggestion-remove-btn js-remove-cerea-completed"
+              type="button"
+              data-code="${escapeHtml(product.code)}"
+              aria-label="Rimuovi ${escapeHtml(product.name)} da Porta a Cerea"
+              title="Rimuovi da Porta a Cerea"
+              ${state.busy ? "disabled" : ""}
+            >Rimuovi</button>
+          </div>
         `;
       }).join("");
 
@@ -7891,6 +8071,140 @@
       return lines.join("\n");
     }
 
+    function buildRemoveCereaCompletedConfirmMessage(product, qty, uom){
+      const name = cleanSpaces(product?.name || product?.code || "Articolo") || "Articolo";
+      const code = cleanSpaces(product?.code || "");
+      return [
+        "Rimuovere questa riga da Porta a Cerea?",
+        "",
+        name,
+        code ? `Codice: ${code}` : "",
+        `Quantità da rimuovere dalla disponibilità Concamarise: ${safeInt(qty).toLocaleString("it-IT")} ${uom}`,
+        "",
+        "Il completamento nel Tabellone WRITE resterà invariato.",
+        "Verrà registrata solo una rettifica cloud dell’inventario Concamarise."
+      ].filter(Boolean).join("\n");
+    }
+
+    async function removeCereaCompletedFromTransferList(code){
+      if (state.busy) return;
+      if (!(state.user && state.db)){
+        showToast("Accedi per rimuovere la riga", "err");
+        return;
+      }
+
+      const product = getLoadableProductByCode(code);
+      if (!product || !product.isTabWriteCompleted || product.isAlwaysAvailableToCerea === true){
+        showToast("Riga non removibile", "warn");
+        return;
+      }
+      if (isAmazonSkuLikeProduct(product)){
+        showToast("Gli SKU Amazon non vengono rimossi da Porta a Cerea", "warn");
+        return;
+      }
+
+      const productCode = cleanSpaces(product.code || code || "");
+      const uom = normalizeUom(product.uom || "") || "pz";
+      const sourceRows = getPositiveRowsForCodeInWarehouse(productCode, WAREHOUSE_CONCAMARISE);
+      const totalQty = sourceRows.reduce((sum, row) => sum + safeInt(row.qty), 0);
+      if (!(totalQty > 0)){
+        showToast("Riga già rimossa o non più disponibile", "warn");
+        return;
+      }
+
+      const confirmed = window.confirm(buildRemoveCereaCompletedConfirmMessage(product, totalQty, uom));
+      if (!confirmed) return;
+
+      state.busy = true;
+      render();
+
+      try{
+        const date = todayYYYYMMDD();
+        const docNum = `REMOVE-TW-${date}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
+        const movementCollection = orgCol("inventoryMovements");
+        const batch = writeBatch(state.db);
+        const userLabel = state.user.displayName || state.user.email || state.user.uid || "";
+        const userEmail = state.user.email || "";
+        const userUid = state.user.uid || "";
+        let written = 0;
+
+        for (const row of sourceRows){
+          const qty = safeInt(row.qty);
+          if (!(qty > 0)) continue;
+          const ref = doc(movementCollection);
+          const itemName = cleanSpaces(product.name || row.item || productCode) || productCode;
+          batch.set(ref, {
+            type: "OUT",
+            customer: cleanSpaces(row.customer || ""),
+            code: productCode,
+            item: itemName,
+            uom,
+            qty,
+            qtyRaw: `${qty} ${uom}`.trim(),
+            date,
+            note: "Rimozione dalla lista Porta a Cerea: completamento Tabellone WRITE mantenuto invariato",
+            source: TABWRITE_REMOVE_SOURCE,
+            rawText: itemName,
+            docType: TABWRITE_REMOVE_DOC_TYPE,
+            docNum,
+            docDateRaw: date,
+            warehouse: WAREHOUSE_CONCAMARISE,
+            warehouseLabel: warehouseLabel(WAREHOUSE_CONCAMARISE),
+            fromWarehouse: WAREHOUSE_CONCAMARISE,
+            toWarehouse: "",
+            fromLabel: warehouseLabel(WAREHOUSE_CONCAMARISE),
+            toLabel: "Riga rimossa da Porta a Cerea",
+            isTabWriteCompletedRemoval: true,
+            tabWriteCompletionKept: true,
+            doesNotUpdateTabWriteDone: true,
+            removedFromPortaCerea: true,
+            removedFromPortaCereaAtClientMs: Date.now(),
+            createdAt: serverTimestamp(),
+            createdBy: userLabel,
+            createdByName: state.user.displayName || "",
+            createdByEmail: userEmail,
+            createdByUid: userUid
+          });
+          written += 1;
+        }
+
+        if (!written){
+          showToast("Nessuna quantità da rimuovere", "warn");
+          return;
+        }
+
+        await batch.commit();
+        state.loadCommand = removeProductFromLoadCommandByCode(state.loadCommand, productCode);
+        state.loadSelectedCode = "";
+        showToast(`Riga rimossa da Porta a Cerea · ${totalQty.toLocaleString("it-IT")} ${uom}`, "ok");
+      }catch(err){
+        console.error("removeCereaCompletedFromTransferList failed", err);
+        showToast(humanAuthErr(err), "err");
+      }finally{
+        state.busy = false;
+        render();
+      }
+    }
+
+    function removeProductFromLoadCommandByCode(raw, code){
+      const key = normalizeInventoryCodeKey(code);
+      if (!key) return String(raw || "");
+      const rows = getCommandRawLines(raw);
+      const kept = [];
+      for (const row of rows){
+        const line = cleanSpaces(row);
+        if (!line){
+          kept.push(row);
+          continue;
+        }
+        const parsed = getEffectiveParsedCommand(line);
+        const product = resolveProductFromParsed(parsed);
+        if (product && normalizeInventoryCodeKey(product.code) === key) continue;
+        kept.push(row);
+      }
+      return kept.join("\n").replace(/\n{3,}/g, "\n\n");
+    }
+
     async function transferNow(){
       if (state.busy) return;
       if (!(state.user && state.db)){
@@ -8574,6 +8888,13 @@
     }
 
     els.loadSuggestions.addEventListener("pointerdown", (event) => {
+      const removeBtn = event.target?.closest?.(".js-remove-cerea-completed");
+      if (removeBtn){
+        armedSuggestionCode = "";
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
       const btn = event.target?.closest?.("button[data-code]");
       armedSuggestionCode = btn ? String(btn.dataset.code || "").trim() : "";
       if (armedSuggestionCode){
@@ -8591,6 +8912,16 @@
     });
 
     els.loadSuggestions.addEventListener("click", (event) => {
+      const removeBtn = event.target?.closest?.(".js-remove-cerea-completed");
+      if (removeBtn){
+        const removeCode = String(removeBtn.dataset.code || "").trim();
+        event.preventDefault();
+        event.stopPropagation();
+        armedSuggestionCode = "";
+        if (removeCode) removeCereaCompletedFromTransferList(removeCode);
+        return;
+      }
+
       const btn = event.target?.closest?.("button[data-code]");
       const code = btn ? String(btn.dataset.code || "").trim() : "";
       if (!code) return;
