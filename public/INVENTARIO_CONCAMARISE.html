@@ -2917,11 +2917,15 @@
     const EMAIL_RECIPIENTS = [EMAIL_TO_MATTEO, EMAIL_TO_LG_TRADING];
     const EMAIL_LINE_TAG = "inventario-concamarise";
 
-    // Sync cloud-only: completati Tabellone WRITE -> movimenti Inventario Concamarise
+    // Sync cloud-only: completati WRITE -> movimenti Inventario Concamarise
     const TABWRITE_LINE_BUCKET = "linea_liquidi";
     const TABWRITE_SOURCE = "Tabellone WRITE";
     const TABWRITE_DOC_TYPE = "PRODUZIONE_WRITE";
     const TABWRITE_SYNC_ORIGIN = "tabellone_write_completed_to_conca";
+    const BULKWRITE_LINE_BUCKET = "bulk_produzioni";
+    const BULKWRITE_SOURCE = "Bulk Produzioni WRITE";
+    const BULKWRITE_DOC_TYPE = "PRODUZIONE_BULK_WRITE";
+    const BULKWRITE_SYNC_ORIGIN = "bulk_write_completed_to_cerea";
 
     const COMPANY_GENERAL_COPPER = {
       label: "GENERAL COPPER SRL",
@@ -2992,10 +2996,15 @@
       unsubCategories: null,
       unsubDdtDocuments: null,
       unsubTabWriteDone: null,
+      unsubBulkWriteDone: null,
       tabWriteDoneItems: [],
+      bulkWriteDoneItems: [],
       tabWriteConcaSyncBusy: false,
       tabWriteConcaSyncQueued: false,
       tabWriteConcaSyncSig: "",
+      bulkWriteConcaSyncBusy: false,
+      bulkWriteConcaSyncQueued: false,
+      bulkWriteConcaSyncSig: "",
       productsReady: false,
       movementsReady: false,
       categoriesReady: false,
@@ -3775,6 +3784,228 @@
       }
     }
 
+    function bulkWriteConcaMovementDocId(doneId){
+      // I completati Bulk nascono a Cerea: poi vengono spediti con “Porta a Conca”.
+      // Prefisso nuovo per non riusare i vecchi movimenti errati bulkconca_* eventualmente già creati.
+      return "bulkcerea_" + tabWriteKeyToDocId(String(doneId || "")).slice(0, 850);
+    }
+
+    function mapBulkWriteDoneItem(docSnap){
+      const data = docSnap.data() || {};
+      const completedAt = data.completedAt || data.ts || data.createdAt || null;
+      const product = cleanSpaces(data.product || data.label || data.rawLine || "");
+      const format = cleanSpaces(data.format || "");
+      const itemName = cleanSpaces(format && !normalizeSearch(product).includes(normalizeSearch(format)) ? `${product} • ${format}` : product) || product || cleanSpaces(data.label || docSnap.id);
+      return {
+        id: String(docSnap.id || "").trim(),
+        key: String(data.key || docSnap.id || "").trim(),
+        code: String(data.code || data.finishedProductCode || product || data.label || docSnap.id || "").trim(),
+        product,
+        label: String(data.label || "").trim(),
+        itemName,
+        format,
+        qty: data.qty ?? "",
+        unit: String(data.unit || data.finishedProductUom || data.um || "IBC").trim(),
+        rawLine: String(data.rawLine || "").trim(),
+        ritirato: data.ritirato === true,
+        cereaInventoryMovementId: String(data.cereaInventoryMovementId || data.bulkCereaInventoryMovementId || "").trim(),
+        // Campi legacy ignorati per il nuovo flusso: i vecchi bulkconca_* erano destinati a Conca e non devono bloccare il sync corretto a Cerea.
+        legacyConcaInventoryMovementId: String(data.concaInventoryMovementId || data.bulkConcaInventoryMovementId || "").trim(),
+        completedByName: String(data.completedByName || data.createdByName || "").trim(),
+        completedByEmail: String(data.completedByEmail || data.createdByEmail || "").trim(),
+        createdByEmail: String(data.createdByEmail || "").trim(),
+        createdByUid: String(data.createdByUid || "").trim(),
+        completedAt,
+        completedAtClientMs: safeInt(data.completedAtClientMs || 0)
+      };
+    }
+
+    function buildBulkWriteConcaMovementPayload(done){
+      if (!done || done.ritirato === true) return null;
+      const qtyRaw = tabWriteQtyNumber(done.qty);
+      if (!(qtyRaw > 0)) return null;
+
+      const qty = Math.round(qtyRaw * 1000) / 1000;
+      const doneId = String(done.id || done.key || done.bulkDoneId || "").trim();
+      if (!doneId) return null;
+
+      const code = cleanSpaces(done.code || done.product || done.label || doneId) || doneId;
+      const item = cleanSpaces(done.itemName || done.product || done.label || done.rawLine || code) || code;
+      const uom = normalizeUom(done.unit || "") || "IBC";
+      const date = todayYYYYMMDD();
+      const movementId = cleanSpaces(done.cereaInventoryMovementId || bulkWriteConcaMovementDocId(doneId));
+      const userLabel = prettifyUserLabel(done.completedByName || done.completedByEmail || done.createdByEmail || "Sistema");
+      const noteBits = [
+        `Produzione completata da Bulk Produzioni WRITE: +${qty.toLocaleString("it-IT")} ${uom} • ${item} · disponibile a Cerea per Porta a Conca`,
+        done.format ? `Formato ${done.format}` : ""
+      ].filter(Boolean);
+
+      return {
+        movementId,
+        payload: {
+          type: "IN",
+          customer: "Bulk Produzioni",
+          code,
+          item,
+          uom,
+          qty,
+          qtyRaw: `${qty} ${uom}`.trim(),
+          date,
+          note: noteBits.join(" · "),
+          source: BULKWRITE_SOURCE,
+          rawText: done.rawLine || done.label || item,
+          docType: BULKWRITE_DOC_TYPE,
+          docNum: `BULK-CEREA-${tabWriteKeyToDocId(doneId).slice(0, 60)}`,
+          docDateRaw: date,
+          warehouse: WAREHOUSE_CEREA,
+          warehouseLabel: warehouseLabel(WAREHOUSE_CEREA),
+          fromWarehouse: "",
+          toWarehouse: WAREHOUSE_CEREA,
+          fromLabel: BULKWRITE_SOURCE,
+          toLabel: warehouseLabel(WAREHOUSE_CEREA),
+          createdAt: done.completedAt || serverTimestamp(),
+          createdBy: userLabel,
+          createdByName: done.completedByName || "",
+          createdByEmail: done.completedByEmail || done.createdByEmail || "",
+          createdByUid: done.createdByUid || "",
+          bulkDoneId: doneId,
+          sourceLine: BULKWRITE_LINE_BUCKET,
+          format: done.format || "",
+          completedByName: done.completedByName || "",
+          completedByEmail: done.completedByEmail || "",
+          origin: BULKWRITE_SYNC_ORIGIN
+        }
+      };
+    }
+
+    function bulkWriteConcaMovementExists(done){
+      const doneId = String(done?.id || done?.key || done?.bulkDoneId || "").trim();
+      if (!doneId) return false;
+      const movementId = cleanSpaces(done?.cereaInventoryMovementId || bulkWriteConcaMovementDocId(doneId));
+      return (state.movements || []).some(mv => {
+        if (!mv) return false;
+        const wh = normalizeWarehouse(mv.warehouse || "");
+        const type = String(mv.type || "").trim().toUpperCase() === "OUT" ? "OUT" : "IN";
+        if (wh !== WAREHOUSE_CEREA || type !== "IN") return false;
+        if (String(mv.id || "").trim() === movementId) return true;
+        if (String(mv.bulkDoneId || "").trim() === doneId && isBulkWriteCompletedMovement(mv)) return true;
+        return false;
+      });
+    }
+
+    function bulkWriteConcaSyncSignature(items){
+      return (Array.isArray(items) ? items : [])
+        .filter(item => item && item.ritirato !== true)
+        .map(item => [
+          item?.id || "",
+          item?.qty || "",
+          item?.unit || "",
+          item?.code || item?.product || item?.label || "",
+          item?.format || ""
+        ].join("|"))
+        .sort()
+        .join("§");
+    }
+
+    async function syncBulkWriteDoneItemsToConcamarise(items, options = {}){
+      if (!(state.user && state.db)) return;
+      const sourceItems = Array.isArray(items) ? items : [];
+      const valid = sourceItems.filter(item => buildBulkWriteConcaMovementPayload(item));
+      if (!valid.length) return;
+
+      if (state.bulkWriteConcaSyncBusy){
+        state.bulkWriteConcaSyncQueued = true;
+        return;
+      }
+
+      const force = options.force === true;
+      const missing = state.movementsReady ? valid.filter(item => !bulkWriteConcaMovementExists(item)) : valid;
+      const sig = bulkWriteConcaSyncSignature(valid);
+
+      if (state.movementsReady && !missing.length){
+        state.bulkWriteConcaSyncSig = sig;
+        return;
+      }
+      if (!force && state.bulkWriteConcaSyncSig === sig && !missing.length) return;
+
+      const toWrite = state.movementsReady ? missing : valid;
+      if (!toWrite.length) return;
+
+      state.bulkWriteConcaSyncBusy = true;
+      state.bulkWriteConcaSyncQueued = false;
+      try{
+        const movementCollection = orgCol("inventoryMovements");
+        let batch = writeBatch(state.db);
+        let ops = 0;
+        let written = 0;
+
+        async function commitMovements(forceCommit = false){
+          if (!ops) return;
+          if (forceCommit || ops >= 430){
+            await batch.commit();
+            batch = writeBatch(state.db);
+            ops = 0;
+          }
+        }
+
+        for (const item of toWrite){
+          const movement = buildBulkWriteConcaMovementPayload(item);
+          if (!movement) continue;
+          batch.set(doc(movementCollection, movement.movementId), movement.payload, { merge:true });
+          ops += 1;
+          written += 1;
+          await commitMovements(false);
+        }
+        await commitMovements(true);
+        state.bulkWriteConcaSyncSig = sig;
+
+        try{
+          let markerBatch = writeBatch(state.db);
+          let markerOps = 0;
+          const doneCollection = collection(state.db, "producedDays", BULKWRITE_LINE_BUCKET, "items");
+          async function commitMarkers(forceCommit = false){
+            if (!markerOps) return;
+            if (forceCommit || markerOps >= 430){
+              await markerBatch.commit();
+              markerBatch = writeBatch(state.db);
+              markerOps = 0;
+            }
+          }
+          for (const item of toWrite){
+            const doneId = String(item.id || item.key || "").trim();
+            if (!doneId) continue;
+            const movement = buildBulkWriteConcaMovementPayload(item);
+            if (!movement) continue;
+            markerBatch.set(doc(doneCollection, doneId), {
+              cereaInventoryMovementId: movement.movementId,
+              bulkCereaInventoryMovementId: movement.movementId,
+              cereaInventorySyncedAt: serverTimestamp(),
+              cereaInventorySyncedAtMs: Date.now(),
+              cereaInventoryWarehouse: WAREHOUSE_CEREA
+            }, { merge:true });
+            markerOps += 1;
+            await commitMarkers(false);
+          }
+          await commitMarkers(true);
+        }catch(markerErr){
+          console.warn("bulk write cerea marker skipped", markerErr);
+        }
+
+        if (written){
+          console.info(`Bulk Produzioni WRITE → Inventario Cerea: ${written} completati allineati per Porta a Conca.`);
+        }
+      }catch(err){
+        console.error("syncBulkWriteDoneItemsToConcamarise failed", err);
+        showToast("Sync completati BULK non riuscito: " + humanAuthErr(err), "err");
+      }finally{
+        state.bulkWriteConcaSyncBusy = false;
+        if (state.bulkWriteConcaSyncQueued){
+          state.bulkWriteConcaSyncQueued = false;
+          setTimeout(() => syncBulkWriteDoneItemsToConcamarise(state.bulkWriteDoneItems || [], { force:true }), 120);
+        }
+      }
+    }
+
     function buildConcamariseLoadEmail({ product, qty, uom, docNum, date, createdAt, userLabel, userEmail }){
       const operator = prettifyUserLabel(userLabel || userEmail || state.user?.uid || "Operatore");
       const whenLabel = fmtDateTime(createdAt || new Date());
@@ -4006,6 +4237,10 @@
         inventoryNeutral: data.inventoryNeutral === true,
         stockNeutral: data.stockNeutral === true,
         alwaysAvailableItem: data.alwaysAvailableItem === true,
+        twDoneId: String(data.twDoneId || "").trim(),
+        bulkDoneId: String(data.bulkDoneId || "").trim(),
+        sourceLine: String(data.sourceLine || "").trim(),
+        origin: String(data.origin || "").trim(),
         docType,
         docNum: docNumber,
         ddtId,
@@ -4463,6 +4698,11 @@
         const qty = safeInt(mv.qty);
         if (!qty) continue;
         const type = String(mv.type || "").trim().toUpperCase() === "OUT" ? "OUT" : "IN";
+        // Hotfix: eventuali movimenti creati dalla patch errata “bulk → Conca” non devono aumentare lo stock Conca.
+        // I bulk corretti entrano a Cerea e poi vengono trasferiti con DDT tramite “Porta a Conca”.
+        if (wh === WAREHOUSE_CONCAMARISE && type === "IN" && isBulkWriteCompletedMovement(mv) && String(mv.docType || "").trim().toUpperCase() === BULKWRITE_DOC_TYPE){
+          continue;
+        }
         const delta = type === "OUT" ? -qty : qty;
         const item = String(mv.item || "").trim();
         const customer = String(mv.customer || "").trim();
@@ -4474,7 +4714,8 @@
           concamarise: 0,
           item: "",
           uom: "",
-          hasTabWriteCompletion: false
+          hasTabWriteCompletion: false,
+          hasBulkWriteCompletion: false
         };
 
         if (wh === WAREHOUSE_CONCAMARISE) totalRec.concamarise += delta;
@@ -4482,6 +4723,9 @@
 
         if (wh === WAREHOUSE_CONCAMARISE && type !== "OUT" && isTabWriteCompletedMovement(mv)){
           totalRec.hasTabWriteCompletion = true;
+        }
+        if (wh === WAREHOUSE_CEREA && type !== "OUT" && isBulkWriteCompletedMovement(mv)){
+          totalRec.hasBulkWriteCompletion = true;
         }
 
         if (!totalRec.item && item) totalRec.item = item;
@@ -4656,6 +4900,26 @@
       );
     }
 
+    function isBulkWriteCompletedMovement(mv){
+      if (!mv || typeof mv !== "object") return false;
+      const source = normalizeSearch(mv.source || "");
+      const docType = String(mv.docType || "").trim().toUpperCase();
+      const origin = cleanSpaces(mv.origin || "");
+      return Boolean(
+        origin === BULKWRITE_SYNC_ORIGIN ||
+        source === normalizeSearch(BULKWRITE_SOURCE) ||
+        docType === BULKWRITE_DOC_TYPE ||
+        cleanSpaces(mv.bulkDoneId || "") ||
+        cleanSpaces(mv.sourceLine || "") === BULKWRITE_LINE_BUCKET
+      );
+    }
+
+    function getCompletedSuggestionLabel(product){
+      if (product?.isBulkWriteCompleted) return "Completato BULK";
+      if (product?.isTabWriteCompleted) return "Completato WRITE";
+      return product?.categoryName || "Articolo";
+    }
+
     function getMovementBackedCategory(product, categoryMap, fallbackName = "Da movimenti inventario"){
       const category = product ? getProductCategoryInfo(product, categoryMap) : null;
       if (category && category.key) return category;
@@ -4740,6 +5004,8 @@
           concamariseQty: concamariseQty,
           sourceQty,
           isTabWriteCompleted: Boolean(totals?.hasTabWriteCompletion && concamariseQty > 0),
+          isBulkWriteCompleted: Boolean(totals?.hasBulkWriteCompletion && cereaQty > 0),
+          isWriteCompleted: Boolean((totals?.hasTabWriteCompletion && concamariseQty > 0) || (totals?.hasBulkWriteCompletion && cereaQty > 0)),
           sourceLabel: config.sourceLabel,
           destinationLabel: config.destinationLabel,
           categoryKey: category.key,
@@ -5118,10 +5384,28 @@
       });
       const always = selectable.filter(product => isAlwaysAvailableToCereaProduct(product, TRANSFER_TO_CEREA));
       const regular = selectable.filter(product => !isAlwaysAvailableToCereaProduct(product, TRANSFER_TO_CEREA));
+      // Porta a Cerea deve restare la lista dei completati del Tabellone WRITE, più gli articoli sempre disponibili come IBC.
       const completed = regular.filter(product => product.isTabWriteCompleted);
-      const base = completed.length ? [...always, ...completed] : [...always, ...regular];
+      const base = [...always, ...completed];
       const seen = new Set();
       return base.filter(product => {
+        const key = normalizeInventoryCodeKey(product?.code || product?.codeLower || "");
+        if (!key || seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      }).map(product => ({ product, score: 0 }));
+    }
+
+    function getDefaultToConcaBulkCandidateEntries(){
+      const all = buildLoadableProducts({ direction: TRANSFER_TO_CONCAMARISE });
+      const selectable = all.filter(product => {
+        const sourceQty = safeInt(product?.sourceQty || 0);
+        if (sourceQty <= 0) return false;
+        if (product?.isBulkWriteCompleted !== true) return false;
+        return getSelectedTransferQtyByCode(product.code) < sourceQty;
+      });
+      const seen = new Set();
+      return selectable.filter(product => {
         const key = normalizeInventoryCodeKey(product?.code || product?.codeLower || "");
         if (!key || seen.has(key)) return false;
         seen.add(key);
@@ -5134,6 +5418,9 @@
       const explicit = safeInt(preservedQty || 0);
       if (explicit > 0) return explicit;
       if (product?.requiresManualTransferQty === true) return 0;
+      if (config.direction === TRANSFER_TO_CONCAMARISE && product?.isBulkWriteCompleted === true){
+        return Math.max(0, safeInt(product?.sourceQty || 0));
+      }
       const defaultQty = safeInt(product?.defaultTransferQty || 0);
       if (defaultQty > 0) return defaultQty;
       if (config.direction === TRANSFER_TO_CEREA){
@@ -6299,9 +6586,11 @@
       const activeParts = validation.activeParts || validation.parts;
       const typedQuery = normalizeSearch(activeParts.productText || activeParts.raw);
       const defaultToCereaMode = !typedQuery && config.direction === TRANSFER_TO_CEREA;
+      const defaultToConcaBulkMode = !typedQuery && config.direction === TRANSFER_TO_CONCAMARISE;
+      const defaultCompletedMode = defaultToCereaMode || defaultToConcaBulkMode;
       const candidateEntries = typedQuery
         ? getLoadCandidateEntries(activeParts.productText || activeParts.raw, SUGGESTION_LIMIT, true)
-        : (defaultToCereaMode ? getDefaultToCereaCandidateEntries() : []);
+        : (defaultToCereaMode ? getDefaultToCereaCandidateEntries() : (defaultToConcaBulkMode ? getDefaultToConcaBulkCandidateEntries() : []));
       const candidates = candidateEntries.map(entry => entry.product);
       const activeCode = String(validation.activeProduct?.codeLower || validation.activeProduct?.code || "").toLowerCase();
       const hasAnyInput = !!cleanSpaces(state.loadCommand);
@@ -6313,8 +6602,8 @@
 
       input.disabled = !ready || state.busy || loadableCount <= 0;
       input.placeholder = config.direction === TRANSFER_TO_CEREA
-        ? "Seleziona i completati sotto oppure cerca articolo e quantità"
-        : "Cerca articolo e quantità. Vai a capo per aggiungere un altro articolo.";
+        ? "Seleziona i completati del Tabellone WRITE sotto oppure cerca articolo e quantità"
+        : "Seleziona i completati Bulk sotto oppure cerca articolo e quantità.";
 
       let controlState = "is-empty";
       if (!hasAnyInput) controlState = "is-empty";
@@ -6325,8 +6614,8 @@
 
       els.commandHint.hidden = false;
       els.commandHint.textContent = config.direction === TRANSFER_TO_CEREA
-        ? "Seleziona uno o più completati disponibili a Conca: vengono aggiunti al DDT con la quantità disponibile."
-        : "Scrivi un articolo per riga: nome articolo + quantità. Esempio: Prodotto A 20";
+        ? "Seleziona uno o più completati Tabellone WRITE disponibili a Conca: vengono aggiunti al DDT con la quantità disponibile."
+        : "Seleziona i completati Bulk disponibili a Cerea oppure scrivi un articolo per riga: nome articolo + quantità.";
       els.validationCard.hidden = true;
       els.validationCard.className = "validation-card is-neutral";
       els.validationCard.innerHTML = "";
@@ -6367,7 +6656,7 @@
         `;
       }
 
-      if (!typedQuery && !defaultToCereaMode){
+      if (!typedQuery && !defaultCompletedMode){
         els.btnConfirm.disabled = !(validation.canSubmit && state.user && state.db && !state.busy);
         els.btnConfirm.textContent = state.busy ? "SALVO…" : config.actionLabel;
         return;
@@ -6377,7 +6666,7 @@
         els.loadSuggestions.className = "suggestions is-open";
         els.loadSuggestions.innerHTML = `
           <div class="suggestion is-empty-state">
-            <div class="suggestion-title">${defaultToCereaMode ? "Nessun completato disponibile da aggiungere al DDT" : "Nessun articolo trovato"}</div>
+            <div class="suggestion-title">${defaultToCereaMode ? "Nessun completato Tabellone WRITE disponibile da aggiungere al DDT" : (defaultToConcaBulkMode ? "Nessun completato Bulk disponibile da aggiungere al DDT" : "Nessun articolo trovato")}</div>
           </div>
         `;
         els.btnConfirm.disabled = !(validation.canSubmit && state.user && state.db && !state.busy);
@@ -6414,7 +6703,7 @@
                 <div class="suggestion-meta">
                   <span class="suggestion-pill is-category"${categoryStyle}>
                     <span class="suggestion-pill-dot"></span>
-                    ${escapeHtml(defaultToCereaMode && product.isTabWriteCompleted ? "Completato WRITE" : (product.categoryName || "Articolo"))}
+                    ${escapeHtml(defaultCompletedMode ? getCompletedSuggestionLabel(product) : (product.categoryName || "Articolo"))}
                   </span>
                   <span class="suggestion-pill">${escapeHtml(product.code)}</span>
                 </div>
@@ -6475,6 +6764,9 @@
       if (state.transferDirection === TRANSFER_TO_CEREA){
         return;
       }
+      if (state.transferDirection === TRANSFER_TO_CONCAMARISE && getDefaultToConcaBulkCandidateEntries().length){
+        return;
+      }
       if (syncUserGesture){
         focusCommand(true);
         return;
@@ -6512,6 +6804,10 @@
         try{ state.unsubTabWriteDone(); }catch(_){ }
         state.unsubTabWriteDone = null;
       }
+      if (state.unsubBulkWriteDone){
+        try{ state.unsubBulkWriteDone(); }catch(_){ }
+        state.unsubBulkWriteDone = null;
+      }
     }
 
     function resetDataForSignedOut(){
@@ -6526,9 +6822,13 @@
       state.categories = [];
       state.ddtDocuments = [];
       state.tabWriteDoneItems = [];
+      state.bulkWriteDoneItems = [];
       state.tabWriteConcaSyncBusy = false;
       state.tabWriteConcaSyncQueued = false;
       state.tabWriteConcaSyncSig = "";
+      state.bulkWriteConcaSyncBusy = false;
+      state.bulkWriteConcaSyncQueued = false;
+      state.bulkWriteConcaSyncSig = "";
       state.productsReady = false;
       state.movementsReady = false;
       state.categoriesReady = false;
@@ -6551,9 +6851,13 @@
       state.categories = [];
       state.ddtDocuments = [];
       state.tabWriteDoneItems = [];
+      state.bulkWriteDoneItems = [];
       state.tabWriteConcaSyncBusy = false;
       state.tabWriteConcaSyncQueued = false;
       state.tabWriteConcaSyncSig = "";
+      state.bulkWriteConcaSyncBusy = false;
+      state.bulkWriteConcaSyncQueued = false;
+      state.bulkWriteConcaSyncSig = "";
       state.productsReady = false;
       state.movementsReady = false;
       state.categoriesReady = false;
@@ -6597,6 +6901,9 @@
         if ((state.tabWriteDoneItems || []).length){
           syncTabWriteDoneItemsToConcamarise(state.tabWriteDoneItems).catch(err => console.error("tabellone write conca resync failed", err));
         }
+        if ((state.bulkWriteDoneItems || []).length){
+          syncBulkWriteDoneItemsToConcamarise(state.bulkWriteDoneItems).catch(err => console.error("bulk write conca resync failed", err));
+        }
         render();
         if (orphanDdtIds.length) cleanupOrphanDdtDocuments(orphanDdtIds);
       }, (err) => {
@@ -6618,6 +6925,17 @@
         });
       }, (err) => {
         console.warn("tabellone write done listener failed", err);
+      });
+
+      state.unsubBulkWriteDone = onSnapshot(collection(state.db, "producedDays", BULKWRITE_LINE_BUCKET, "items"), (snap) => {
+        state.bulkWriteDoneItems = snap.docs
+          .map(mapBulkWriteDoneItem)
+          .filter(item => item.ritirato !== true);
+        syncBulkWriteDoneItemsToConcamarise(state.bulkWriteDoneItems).catch(err => {
+          console.error("bulk write done sync listener failed", err);
+        });
+      }, (err) => {
+        console.warn("bulk write done listener failed", err);
       });
 
       state.unsubCategories = onSnapshot(orgCol("categories"), (snap) => {
@@ -7721,7 +8039,8 @@
       }
       const resolvedQty = resolveSuggestionDefaultQty(product, preservedQty);
       const baseLine = formatLoadCommandLine(product, resolvedQty);
-      const nextLine = (transferConfig().direction === TRANSFER_TO_CEREA && resolvedQty > 0) ? `${baseLine}\n` : baseLine;
+      const shouldAppendLineAfterSuggestion = resolvedQty > 0 && (transferConfig().direction === TRANSFER_TO_CEREA || product?.isBulkWriteCompleted === true);
+      const nextLine = shouldAppendLineAfterSuggestion ? `${baseLine}\n` : baseLine;
 
       state.loadSelectedCode = product.code;
       replaceActiveLoadLine(nextLine);
