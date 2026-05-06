@@ -1627,7 +1627,7 @@
             <div class="miniTop">
               <div>
                 <div class="miniTitle">Sotto scorta</div>
-                <div class="miniSub">Policy: &lt;100 pz (5kg ≤20) • Cerea + Concamarise</div>
+                <div class="miniSub">Soglie sottoscorta personalizzabili per SKU • Cerea + Concamarise</div>
               </div>
               <div class="pill warn" id="homeLowStockCount">—</div>
             </div>
@@ -1684,7 +1684,7 @@
             <div class="miniTop">
               <div style="min-width:0">
                 <div class="miniTitle">Sotto scorta (policy variabile)</div>
-                <div class="miniSub">Articoli sotto scorta: default <100 pz (solo 5kg: ≤20 pz). Tocca una riga per aprire l’anagrafica.</div>
+                <div class="miniSub">Articoli sotto scorta: soglia personalizzabile per SKU. Tocca una riga per aprire l’anagrafica.</div>
               </div>
               <div class="pill" id="lowStockCount">—</div>
             </div>
@@ -1869,7 +1869,7 @@ Tip:
       <div class="sheetTop">
         <div style="min-width:0">
           <p class="sheetTitle">Sottoscorta</p>
-          <div class="sheetSub">Tutti i prodotti sotto scorta (soglia: <100 pz — solo 5kg: ≤20 pz) su Concamarise e Cerea.</div>
+          <div class="sheetSub">Tutti i prodotti sotto scorta con soglia personalizzabile per SKU su Concamarise e Cerea.</div>
         </div>
         <button class="btn" id="btnCloseSottoscorta" type="button">Chiudi</button>
       </div>
@@ -2798,20 +2798,68 @@ function guessTitleFromRaw(rawText, sku){
       }
     }
 
+    function parseLowStockThresholdInput(v){
+      const raw = (v === null || v === undefined) ? "" : String(v).trim();
+      if(!raw) return { ok:true, value:null }; // vuoto = soglia automatica
+      const n = parseSignedQtyStrict(raw);
+      if(n === null || !Number.isFinite(n) || n < 0){
+        return { ok:false, value:null };
+      }
+      return { ok:true, value: Math.round(n) };
+    }
+
+    function __parseLowStockThresholdValue(v){
+      const p = parseLowStockThresholdInput(v);
+      return p.ok ? p.value : null;
+    }
+
+    function __getCustomLowStockThreshold(it){
+      try{
+        if(!it) return null;
+        const keys = ["lowStockThreshold", "sottoscortaThreshold", "sottoScortaThreshold", "sottoscorta", "sottoScorta"];
+        for(const k of keys){
+          if(Object.prototype.hasOwnProperty.call(it, k)){
+            const n = __parseLowStockThresholdValue(it[k]);
+            if(n !== null) return n;
+          }
+        }
+        return null;
+      }catch(_e){
+        return null;
+      }
+    }
+
     function __lowStockThreshold(it){
+      const custom = __getCustomLowStockThreshold(it);
+      if(custom !== null) return custom;
       return __isFiveKgItem(it) ? LOW_STOCK_5KG : LOW_STOCK_DEFAULT;
     }
 
     function __isLowStockItem(it){
       const qty = Number.isFinite(it && it.qty) ? Number(it.qty) : 0;
-      const th = __lowStockThreshold(it);
-      // regola speciale: 5kg => sotto scorta solo quando resta <= 20
+      const custom = __getCustomLowStockThreshold(it);
+      const th = (custom !== null) ? custom : __lowStockThreshold(it);
+      // soglia personalizzata: sotto scorta quando la giacenza è <= soglia impostata
+      if(custom !== null) return qty <= th;
+      // fallback storico: 5kg <=20, tutti gli altri <100
       if(__isFiveKgItem(it)) return qty <= th;
       return qty < th;
     }
 
+    function __lowStockThresholdLabel(it){
+      const custom = __getCustomLowStockThreshold(it);
+      if(custom !== null) return `${custom} pz`;
+      return __isFiveKgItem(it) ? `Automatica: ≤ ${LOW_STOCK_5KG} pz` : `Automatica: < ${LOW_STOCK_DEFAULT} pz`;
+    }
+
+    function __lowStockThresholdShort(it){
+      const custom = __getCustomLowStockThreshold(it);
+      if(custom !== null) return String(custom);
+      return __isFiveKgItem(it) ? `≤${LOW_STOCK_5KG}` : `<${LOW_STOCK_DEFAULT}`;
+    }
+
     function __lowStockPolicyLabel(){
-      return `< ${LOW_STOCK_DEFAULT} pz (solo 5kg: ≤ ${LOW_STOCK_5KG} pz)`;
+      return `personalizzata per SKU (fallback: < ${LOW_STOCK_DEFAULT} pz; 5kg ≤ ${LOW_STOCK_5KG} pz)`;
     }
 
 
@@ -2831,7 +2879,8 @@ function guessTitleFromRaw(rawText, sku){
             const main = (meta && meta.main) ? String(meta.main).trim() : String(it.title||"").trim();
             const product = main || "(senza nome)";
             const qty = __fmtQty(it.qty);
-            return { product, qty };
+            const threshold = __lowStockThresholdShort(it);
+            return { product, qty, threshold };
           })
           .sort((a,b)=>{
             const qa = Number(a.qty);
@@ -2852,12 +2901,12 @@ function guessTitleFromRaw(rawText, sku){
 (nessun prodotto sotto soglia)
 `;
         const maxLen = Math.min(46, rows.reduce((m,r)=> Math.max(m, String(r.product||"").length), 0) || 18);
-        const headerLine = `${"Prodotto".padEnd(maxLen, " ")}  |  Scorta`;
-        const sepLine = `${"-".repeat(maxLen)}--|--------`;
+        const headerLine = `${"Prodotto".padEnd(maxLen, " ")}  |  Scorta  | Soglia`;
+        const sepLine = `${"-".repeat(maxLen)}--|----------|--------`;
         const textLines = rows.map(r=>{
           const p = String(r.product||"");
           const name = (p.length>maxLen) ? (p.slice(0, Math.max(0, maxLen-1)) + "…") : p;
-          return `${name.padEnd(maxLen, " ")}  |  ${String(r.qty)}`;
+          return `${name.padEnd(maxLen, " ")}  |  ${String(r.qty).padStart(6, " ")}  | ${String(r.threshold||"—")}`;
         });
         return `${label}:
 ${headerLine}
@@ -2887,6 +2936,9 @@ ${textLines.join("\n")}
             <td style="padding:10px 12px; border-bottom:1px solid #e9eef2; vertical-align:top; text-align:right; white-space:nowrap; font-size:14px; font-weight:700; color:#111">
               ${escapeHtml(String(r.qty))}
             </td>
+            <td style="padding:10px 12px; border-bottom:1px solid #e9eef2; vertical-align:top; text-align:right; white-space:nowrap; font-size:14px; color:#111">
+              ${escapeHtml(String(r.threshold || "—"))}
+            </td>
           </tr>
         `).join("");
 
@@ -2900,12 +2952,15 @@ ${textLines.join("\n")}
                 <th style="text-align:right; padding:10px 12px; font-size:12px; letter-spacing:.04em; text-transform:uppercase; color:#556; background:#fbfcfd; border-bottom:1px solid #e9eef2; white-space:nowrap">
                   Scorta
                 </th>
+                <th style="text-align:right; padding:10px 12px; font-size:12px; letter-spacing:.04em; text-transform:uppercase; color:#556; background:#fbfcfd; border-bottom:1px solid #e9eef2; white-space:nowrap">
+                  Soglia
+                </th>
               </tr>
             </thead>
             <tbody>
               ${htmlRows || `
                 <tr>
-                  <td colspan="2" style="padding:12px; font-size:14px; color:#556">Nessun prodotto sotto soglia 🎯</td>
+                  <td colspan="3" style="padding:12px; font-size:14px; color:#556">Nessun prodotto sotto soglia 🎯</td>
                 </tr>
               `}
             </tbody>
@@ -2953,14 +3008,16 @@ ${textLines.join("\n")}
         const m = parseTitleMeta(it.title || "");
         const title = (m.main || it.title || sku || "").slice(0, 120);
         const qty = Number.isFinite(it.qty) ? Math.round(it.qty) : 0;
-        return { sku, title, qty };
+        const threshold = __lowStockThresholdShort(it);
+        return { sku, title, qty, threshold };
       });
       const previewCerea = (cerea || []).slice(0, 250).map(it=>{
         const sku = toSkuId(it.sku || "");
         const m = parseTitleMeta(it.title || "");
         const title = (m.main || it.title || sku || "").slice(0, 120);
         const qty = Number.isFinite(it.qty) ? Math.round(it.qty) : 0;
-        return { sku, title, qty };
+        const threshold = __lowStockThresholdShort(it);
+        return { sku, title, qty, threshold };
       });
 
       const counts = { concamarise: (concamarise || []).length, cerea: (cerea || []).length };
@@ -3006,11 +3063,13 @@ ${textLines.join("\n")}
         const list = (items||[]).slice().map(it=>({
           loc: String(it.loc||""),
           sku: String(toSkuId(it.sku||"")||""),
-          qty: Number.isFinite(it.qty) ? Number(it.qty) : null
+          qty: Number.isFinite(it.qty) ? Number(it.qty) : null,
+          threshold: __lowStockThreshold(it)
         })).sort((a,b)=>{
           if(a.loc!==b.loc) return a.loc.localeCompare(b.loc);
           if(a.sku!==b.sku) return a.sku.localeCompare(b.sku);
-          return (a.qty||0) - (b.qty||0);
+          if((a.qty||0) !== (b.qty||0)) return (a.qty||0) - (b.qty||0);
+          return (a.threshold||0) - (b.threshold||0);
         });
 
         const fingerprint = await stableHashHex(JSON.stringify(list));
@@ -3143,11 +3202,13 @@ ${textLines.join("\n")}
         return (items||[]).slice().map(it=>({
           loc: String(it.loc||""),
           sku: String(toSkuId(it.sku||"")||""),
-          qty: Number.isFinite(it.qty) ? Number(it.qty) : null
+          qty: Number.isFinite(it.qty) ? Number(it.qty) : null,
+          threshold: __lowStockThreshold(it)
         })).sort((a,b)=>{
           if(a.loc!==b.loc) return a.loc.localeCompare(b.loc);
           if(a.sku!==b.sku) return a.sku.localeCompare(b.sku);
-          return (a.qty||0) - (b.qty||0);
+          if((a.qty||0) !== (b.qty||0)) return (a.qty||0) - (b.qty||0);
+          return (a.threshold||0) - (b.threshold||0);
         });
       }catch(_e){
         return [];
@@ -3649,6 +3710,8 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
             title,
             titleNorm: d.titleNorm || normalizeText(title || sku),
             qty,
+            lowStockThreshold: __parseLowStockThresholdValue(d.lowStockThreshold),
+            note: d.note || d.notes || "",
             updatedAt,
             updatedAtClient
           });
@@ -3656,6 +3719,7 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
           if(!last || t > last) last = t;
         });
         inv.items = arr;
+        try{ if(state.cache) state.cache.invIndexForMatch = null; }catch(_e){}
         inv.meta.count = arr.length;
         inv.meta.lastUpdatedAt = last ? new Date(last) : null;
         inv.meta.loaded = true;
@@ -3907,10 +3971,11 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
           const title = escapeHtml(String(it.title||"").trim() || "(senza nome)");
           const sku = escapeHtml(toSkuId(it.sku||""));
           const qty = Number.isFinite(it.qty) ? it.qty : 0;
+          const threshold = it.threshold ? String(it.threshold) : "—";
           return `<div class="row" style="padding:8px 10px; border-top:1px solid rgba(0,0,0,.06);">
             <div class="rowMain">
               <p class="rowTitle" style="font-size:13px">${title}</p>
-              <div class="rowSub"><span class="mono">${sku}</span> · <span class="muted">${escapeHtml(locLabel)}</span></div>
+              <div class="rowSub"><span class="mono">${sku}</span> · <span class="muted">${escapeHtml(locLabel)}</span> · Soglia: ${escapeHtml(threshold)}</div>
             </div>
             <div class="badge warn">${escapeHtml(String(qty))}</div>
           </div>`;
@@ -4486,7 +4551,7 @@ function currentInv(){
         <button class="btn small lowStockBtn" type="button" data-action="openLocSottoscorta">
           Apri sotto scorta (${low.length})
         </button>
-        <div class="hint" style="margin-top:10px">Le righe sotto-scorta seguono la soglia <100 pz (solo 5kg: ≤20 pz).</div>
+        <div class="hint" style="margin-top:10px">Le righe sotto-scorta seguono la soglia personalizzata per SKU; se vuota resta il fallback automatico.</div>
       `;
     }
 
@@ -4512,7 +4577,7 @@ function currentInv(){
           if(__isLowStockItem({ ...it, qty })){
             const sku = toSkuId(it.sku || it.id || "");
             if(!sku) continue;
-            out.push({ loc, sku, title: it.title || "", qty });
+            out.push({ loc, sku, title: it.title || "", qty, lowStockThreshold: it.lowStockThreshold });
           }
         }
       };
@@ -4556,6 +4621,7 @@ function currentInv(){
         const qty = Number.isFinite(it.qty) ? it.qty : 0;
         const badgeClass = qty>0 ? (__isLowStockItem({ ...it, qty }) ? "warn" : "ok") : "bad";
         const locLabel = escapeHtml(prettyLoc(it.loc));
+        const sogliaLabel = escapeHtml(__lowStockThresholdLabel(it));
 
         return `
           <div class="row gridRow" role="button" tabindex="0"
@@ -4563,7 +4629,7 @@ function currentInv(){
             <div class="gridCell gridSku">${sku}</div>
             <div class="gridCell">
               <div class="gridProdMain">${titleMain}</div>
-              <div class="gridProdSub">${locLabel}</div>
+              <div class="gridProdSub">${locLabel} • Soglia: ${sogliaLabel}</div>
             </div>
             <div class="gridCell gridRight"><span class="badge ${badgeClass}">${qty}</span></div>
           </div>`;
@@ -4687,19 +4753,20 @@ function currentInv(){
           const qty = Number.isFinite(it.qty) ? it.qty : 0;
           const badgeClass = qty>0 ? (__isLowStockItem({ ...it, qty }) ? "warn" : "ok") : "bad";
           const locLabel = escapeHtml(prettyLoc(it.loc));
+          const sogliaLabel = escapeHtml(__lowStockThresholdLabel(it));
           return `
             <div class="row gridRow" role="button" tabindex="0" data-sku="${sku}" data-loc="${it.loc}" data-action="openHomeSottoscortaItem">
               <div class="gridCell gridSku">${sku}</div>
               <div class="gridCell">
                 <div class="gridProdMain">${titleMain}</div>
-                <div class="gridProdSub">${locLabel}</div>
+                <div class="gridProdSub">${locLabel} • Soglia: ${sogliaLabel}</div>
               </div>
               <div class="badge ${badgeClass}">${qty}</div>
             </div>`;
         });
 
         lowList.innerHTML = `<div class="row gridHead"><div class="gridCell">SKU</div><div class="gridCell">Prodotto</div><div class="gridCell gridRight">Q.tà</div></div>` + rows.join("");
-        if(lowHint) lowHint.textContent = "Tocca una riga per aprire i dettagli articolo.";
+        if(lowHint) lowHint.textContent = "Tocca una riga per aprire i dettagli articolo e modificare la soglia.";
       }
 
       // log ultimo invio mail sotto scorta (da meta Firestore)
@@ -4774,8 +4841,10 @@ function currentInv(){
         const metaSmall = buildMetaSmall(meta);
         const sku = escapeHtml(it.sku || it.id || meta.skuInTitle || "");
         const qty = Number.isFinite(it.qty) ? it.qty : 0;
-        const badgeClass = qty>0 ? "ok" : (qty===0 ? "warn" : "bad");
-        const metaHtml = metaSmall ? `<div class="rowMeta">${escapeHtml(metaSmall)}</div>` : ``;
+        const badgeClass = __isLowStockItem(it) ? (qty>0 ? "warn" : "bad") : "ok";
+        const thresholdSmall = `Soglia: ${__lowStockThresholdLabel(it)}`;
+        const metaLine = [metaSmall, thresholdSmall].filter(Boolean).join(" • ");
+        const metaHtml = metaLine ? `<div class="rowMeta">${escapeHtml(metaLine)}</div>` : ``;
         return `
           <div class="row">
             <div class="rowMain">
@@ -5427,7 +5496,7 @@ function closeSheet(kind){
         const metaSmall = buildMetaSmall(meta);
         const sku = escapeHtml(toSkuId(row.sku || it.sku || ""));
         const qty = Number.isFinite(row.qty) ? row.qty : (Number.isFinite(it.qty) ? it.qty : 0);
-        const badgeClass = __isLowStockItem({ sku: (row.sku || it.sku || ""), title: (row.title || it.title || ""), qty }) ? (qty>0 ? "warn" : "bad") : "ok";
+        const badgeClass = __isLowStockItem({ sku: (row.sku || it.sku || ""), title: (row.title || it.title || ""), qty, lowStockThreshold: it.lowStockThreshold }) ? (qty>0 ? "warn" : "bad") : "ok";
         const locLab = escapeHtml(prettyLoc(row.loc || it.loc || ""));
         const sub = `${locLab}${metaSmall ? " • " + escapeHtml(metaSmall) : ""}`;
 
@@ -5824,7 +5893,6 @@ function closeSheet(kind){
   if(!loc || !sku){
     if(titleEl) titleEl.textContent = "Dettagli articolo";
     if(sub) sub.textContent = "—";
-        if(piecesSub) piecesSub.textContent = "—";
     if(btnToggle){
       btnToggle.textContent = "Modifica";
       btnToggle.disabled = true;
@@ -5842,9 +5910,12 @@ function closeSheet(kind){
   const titleMain = (it && it.title) ? String(it.title) : sku;
   const qty = (it && typeof it.qty !== "undefined") ? it.qty : 0;
   const note = (it && (it.note || it.notes)) ? String(it.note || it.notes) : "";
+  const lowStockThreshold = __getCustomLowStockThreshold(it);
+  const lowStockThresholdValue = (lowStockThreshold !== null) ? String(lowStockThreshold) : "";
+  const lowStockThresholdLabel = __lowStockThresholdLabel(it || { sku, title: titleMain });
 
   if(titleEl) titleEl.textContent = titleMain;
-  if(sub) sub.textContent = `${sku} • ${prettyLoc(loc)}`;
+  if(sub) sub.textContent = `${sku} • ${prettyLoc(loc)} • Soglia: ${lowStockThresholdLabel}`;
 
   const isAdmin = !!state.user?.isAdmin;
   const editMode = !!state.ui.productDetailsEditMode;
@@ -5894,6 +5965,7 @@ function closeSheet(kind){
           <div class="pdSectionTitle">Quantità</div>
           ${roLine("Disponibile", String(qty))}
           ${roLine("Pezzi da spostare (default)", String(qty))}
+          ${roLine("Soglia sottoscorta", lowStockThresholdLabel)}
         </div>
 
         <div class="pdSection">
@@ -5950,6 +6022,12 @@ function closeSheet(kind){
               <input class="input" inputmode="text" data-field="moveQty" value="${escapeHtml(String(qty))}" ${canEdit ? "" : "disabled"} />
               <div class="fieldError" data-err="moveQty" style="display:none;"></div>
             </div>
+            <div class="field">
+              <label class="fieldLabel">Soglia sottoscorta</label>
+              <input class="input" inputmode="numeric" data-field="lowStockThreshold" value="${escapeHtml(lowStockThresholdValue)}" placeholder="Vuoto = automatica" ${canEdit ? "" : "disabled"} />
+              <div class="fieldError" data-err="lowStockThreshold" style="display:none;"></div>
+              <div class="hint" style="margin-top:6px">Vuoto = ${escapeHtml(__lowStockThresholdLabel({ sku, title: titleMain }))}. Se inserisci un numero, l’articolo va sotto scorta a quantità ≤ soglia.</div>
+            </div>
           </div>
         </div>
 
@@ -5999,6 +6077,7 @@ function closeSheet(kind){
       setPdFieldError("sku", "");
       setPdFieldError("qty", "");
       setPdFieldError("moveQty", "");
+      setPdFieldError("lowStockThreshold", "");
     }
 
     function readProductDetailsFields(){
@@ -6007,6 +6086,7 @@ function closeSheet(kind){
   const qtyEl = wrap?.querySelector?.('[data-field="qty"]');
   const titleEl = wrap?.querySelector?.('[data-field="title"]');
   const moveQtyEl = wrap?.querySelector?.('[data-field="moveQty"]');
+  const lowStockThresholdEl = wrap?.querySelector?.('[data-field="lowStockThreshold"]');
   const noteEl = wrap?.querySelector?.('[data-field="note"]');
 
   const sku = toSkuId(skuEl?.value || "");
@@ -6014,13 +6094,16 @@ function closeSheet(kind){
 
   const qtyRaw = (qtyEl?.value ?? "");
   const moveQtyRaw = (moveQtyEl?.value ?? "");
+  const lowStockThresholdRaw = (lowStockThresholdEl?.value ?? "");
   const noteRaw = (noteEl?.value ?? "");
 
   const qty = parseSignedQtyStrict(qtyRaw);
   const moveQty = parseSignedQtyStrict(moveQtyRaw);
+  const lowStockParsed = parseLowStockThresholdInput(lowStockThresholdRaw);
+  const lowStockThreshold = lowStockParsed.ok ? lowStockParsed.value : null;
   const note = String(noteRaw).trim();
 
-  return { sku, title, qty, moveQty, note, qtyRaw: String(qtyRaw), moveQtyRaw: String(moveQtyRaw) };
+  return { sku, title, qty, moveQty, lowStockThreshold, lowStockThresholdOk: lowStockParsed.ok, note, qtyRaw: String(qtyRaw), moveQtyRaw: String(moveQtyRaw), lowStockThresholdRaw: String(lowStockThresholdRaw) };
 }
 
 
@@ -6150,7 +6233,7 @@ async function saveProductFromDetails(){
 
       const oldSku = toSkuId(state.ui.productDetailsSku||"");
       clearPdFieldErrors();
-      const { sku, title, qty, note } = readProductDetailsFields();
+      const { sku, title, qty, lowStockThreshold, lowStockThresholdOk, note } = readProductDetailsFields();
 
       if(!oldSku){
         setPdFieldError("sku", "SKU non valido.");
@@ -6167,6 +6250,11 @@ async function saveProductFromDetails(){
         showToast("Errore", "Quantità non valida.", 2200);
         return;
       }
+      if(!lowStockThresholdOk){
+        setPdFieldError("lowStockThreshold", "Inserisci un numero intero positivo oppure lascia vuoto.");
+        showToast("Errore", "Soglia sottoscorta non valida.", 2200);
+        return;
+      }
 
       const api = state.firebase.api;
       const db = state.firebase.db;
@@ -6181,9 +6269,20 @@ async function saveProductFromDetails(){
         await api.runTransaction(db, async (tx)=>{
           const sOld = await tx.get(oldRef);
           if(!sOld.exists()) throw new Error("Prodotto non trovato.");
+
+          let pNewSnap = null;
+          let siblingSnap = null;
+          let siblingRef = null;
+
           if(sku!==oldSku){
             const sNew = await tx.get(newRef);
             if(sNew.exists()) throw new Error("SKU già esistente.");
+            pNewSnap = await tx.get(newP);
+            if(pNewSnap.exists()) throw new Error("SKU già esistente (anagrafica).");
+          }else{
+            const siblingLoc = (loc === "cerea") ? "concamarise" : "cerea";
+            siblingRef = api.doc(db, COL_ROOT, siblingLoc, SUB_ITEMS, sku);
+            siblingSnap = await tx.get(siblingRef);
           }
 
           const nowClient = Date.now();
@@ -6193,6 +6292,7 @@ async function saveProductFromDetails(){
             titleNorm: normalizeText(title || sku),
             note: note || "",
             qty,
+            lowStockThreshold: lowStockThreshold,
             updatedAt: api.serverTimestamp(),
             updatedAtClient: nowClient,
             updatedBy: state.user.email || "",
@@ -6212,6 +6312,7 @@ async function saveProductFromDetails(){
             title: title || "",
             titleNorm: normalizeText(title || sku),
             note: note || "",
+            lowStockThreshold: lowStockThreshold,
             lastSeenAt: api.serverTimestamp(),
             lastSeenAtClient: nowClient,
             lastSeenBy: state.user.email || "",
@@ -6222,9 +6323,17 @@ async function saveProductFromDetails(){
 
           if(sku===oldSku){
             tx.set(oldP, pData, { merge:true });
+
+            // Soglia sotto-scorta per SKU: aggiorna anche l’altro magazzino se lo stesso SKU esiste lì.
+            if(siblingRef && siblingSnap && siblingSnap.exists()){
+              tx.set(siblingRef, {
+                lowStockThreshold: lowStockThreshold,
+                updatedAt: api.serverTimestamp(),
+                updatedAtClient: nowClient,
+                updatedBy: state.user.email || ""
+              }, { merge:true });
+            }
           }else{
-            const pNewSnap = await tx.get(newP);
-            if(pNewSnap.exists()) throw new Error("SKU già esistente (anagrafica).");
             tx.set(newP, pData, { merge:true });
             tx.delete(oldP);
           }
@@ -6245,6 +6354,7 @@ async function saveProductFromDetails(){
             qtySigned: deltaSigned,
             beforeQty: oldQty,
             afterQty: qty,
+            lowStockThreshold: lowStockThreshold,
             fromWarehouse: loc,
             toWarehouse: loc,
             source: "manuale",
@@ -6304,7 +6414,7 @@ async function saveProductFromDetails(){
       clearPdFieldErrors();
 
       const oldSku = toSkuId(state.ui.productDetailsSku||"");
-      const { sku:newSku, title, moveQty } = readProductDetailsFields();
+      const { sku:newSku, title, moveQty, lowStockThreshold, lowStockThresholdOk } = readProductDetailsFields();
 
       if(!oldSku){
         setPdFieldError("sku", "SKU non valido.");
@@ -6319,6 +6429,11 @@ async function saveProductFromDetails(){
       if(moveQty===null){
         setPdFieldError("moveQty", "Inserisci un numero valido (es. -200).");
         showToast("Errore", "Pezzi da spostare non validi.", 2200);
+        return;
+      }
+      if(!lowStockThresholdOk){
+        setPdFieldError("lowStockThreshold", "Inserisci un numero intero positivo oppure lascia vuoto.");
+        showToast("Errore", "Soglia sottoscorta non valida.", 2200);
         return;
       }
 
@@ -6373,6 +6488,7 @@ async function saveProductFromDetails(){
             title: finalTitle,
             titleNorm: normalizeText(finalTitle || oldSku),
             note: (fromData.note || fromData.notes || toData.note || toData.notes || ""),
+            lowStockThreshold: lowStockThreshold,
             qty: toNewQty,
             updatedAt: api.serverTimestamp(),
             updatedAtClient: nowClient,
@@ -6391,6 +6507,7 @@ async function saveProductFromDetails(){
               sku: oldSku,
               title: finalTitle,
               titleNorm: normalizeText(finalTitle || oldSku),
+              lowStockThreshold: lowStockThreshold,
               qty: remaining,
               updatedAt: api.serverTimestamp(),
               updatedAtClient: nowClient,
@@ -6416,6 +6533,7 @@ async function saveProductFromDetails(){
             afterFromQty: remaining,
             beforeToQty: toPrev,
             afterToQty: toNewQty,
+            lowStockThreshold: lowStockThreshold,
             source: "manuale",
             note: "Spostamento da Anagrafica Prodotto",
             createdAt: api.serverTimestamp(),
@@ -6429,6 +6547,7 @@ async function saveProductFromDetails(){
             sku: oldSku,
             title: finalTitle,
             titleNorm: normalizeText(finalTitle || oldSku),
+            lowStockThreshold: lowStockThreshold,
             updatedAt: api.serverTimestamp(),
             updatedAtClient: nowClient,
             updatedBy: who
@@ -6527,7 +6646,8 @@ function renderProductsSheet(){
           const meta = parseTitleMeta(it.title || "");
           const titleMain = meta.main ? escapeHtml(meta.main) : (it.title ? escapeHtml(it.title) : "<span class='muted'>(senza nome)</span>");
           const metaSmall = buildMetaSmall(meta);
-          const badgeClass = __isLowStockItem({ sku, title: (it.title||""), qty }) ? (qty>0 ? "warn" : "bad") : "ok";
+          const badgeClass = __isLowStockItem(it) ? (qty>0 ? "warn" : "bad") : "ok";
+          const sogliaSmall = `Soglia: ${__lowStockThresholdLabel(it)}`;
 
           if(editingSku && editingSku===sku){
             editHtml = `
@@ -6563,7 +6683,7 @@ function renderProductsSheet(){
               <div class="gridCell gridSku">${escapeHtml(sku)}</div>
               <div class="gridCell">
                 <div class="gridProdMain">${titleMain}</div>
-                <div class="gridProdSub">${metaSmall ? escapeHtml(metaSmall) : "&nbsp;"}</div>
+                <div class="gridProdSub">${escapeHtml([metaSmall, sogliaSmall].filter(Boolean).join(" • "))}</div>
               </div>
               <div class="gridCell gridRight"><span class="badge ${badgeClass}">${qty}</span></div>
             </div>`;
