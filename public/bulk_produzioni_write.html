@@ -353,6 +353,101 @@
       font-weight:900;
     }
 
+    /* Suggerimenti prodotti già salvati: Formule + Compila coda */
+    .productSuggestBox{
+      display:none;
+      flex-direction:column;
+      gap:8px;
+      margin-top:10px;
+      padding:8px;
+      border:1px solid rgba(10,132,255,.16);
+      border-radius:16px;
+      background:#fff;
+      box-shadow:0 12px 26px rgba(15,23,42,.10);
+      max-height:260px;
+      overflow:auto;
+      -webkit-overflow-scrolling:touch;
+    }
+    .productSuggestBox.is-open{display:flex;}
+    .productSuggestBoxInline{
+      max-height:220px;
+      margin-top:8px;
+    }
+    .productSuggestHead{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:10px;
+      padding:2px 2px 4px;
+      font-size:12px;
+      font-weight:950;
+      color:var(--muted);
+      text-transform:uppercase;
+      letter-spacing:.04em;
+    }
+    .productSuggestRow{
+      width:100%;
+      display:flex;
+      align-items:flex-start;
+      justify-content:space-between;
+      gap:12px;
+      padding:10px 11px;
+      border-radius:14px;
+      border:1px solid var(--line);
+      background:#F8FBFF;
+      color:var(--ink);
+      cursor:pointer;
+      text-align:left;
+      box-shadow:0 6px 14px rgba(15,23,42,.045);
+    }
+    .productSuggestRow:active{transform:scale(.985);}
+    .productSuggestName{
+      font-weight:950;
+      font-size:14px;
+      line-height:1.25;
+      overflow-wrap:anywhere;
+    }
+    .productSuggestMeta{
+      margin-top:4px;
+      font-size:12px;
+      font-weight:850;
+      color:var(--muted);
+      display:flex;
+      gap:7px;
+      flex-wrap:wrap;
+      align-items:center;
+    }
+    .productSuggestAction{
+      flex:0 0 auto;
+      display:inline-flex;
+      align-items:center;
+      justify-content:center;
+      min-height:28px;
+      padding:0 9px;
+      border-radius:999px;
+      background:rgba(10,132,255,.10);
+      border:1px solid rgba(10,132,255,.16);
+      color:var(--primary);
+      font-size:11px;
+      font-weight:950;
+      white-space:nowrap;
+    }
+    .productDuplicateHint{
+      margin-top:8px;
+      padding:9px 10px;
+      border-radius:14px;
+      background:rgba(220,38,38,.08);
+      border:1px solid rgba(220,38,38,.18);
+      color:#B3261E;
+      font-weight:900;
+      line-height:1.35;
+    }
+    @media (max-width:560px){
+      .productSuggestBox{max-height:230px;}
+      .productSuggestRow{padding:11px 10px;}
+      .productSuggestAction{font-size:10px;}
+    }
+
     /* Versioni (formula) */
     .vList{display:flex; flex-direction:column; gap:8px;}
     .vRow{
@@ -533,6 +628,7 @@ Zolfo liquido 1 IBC
 
 Oppure formato con separatori:
 Acqua rame | 2 | IBC | 1000 L | DA PRODURRE"></textarea>
+            <div id="linesProductSuggestions" class="productSuggestBox" aria-live="polite"></div>
 
             <button id="sendLines" class="btn wide">INVIA IN CODA</button>
           </div>
@@ -644,7 +740,9 @@ Acqua rame | 2 | IBC | 1000 L | DA PRODURRE"></textarea>
         <div class="row" style="margin-top:0;">
           <div style="flex: 1 1 260px;">
             <div class="label" style="margin-bottom:6px;">NOME PRODOTTO</div>
-            <input id="fName" class="input" placeholder="Es. Acqua rame" />
+            <input id="fName" class="input" placeholder="Es. Acqua rame" autocomplete="off" />
+            <div id="fNameSuggestions" class="productSuggestBox productSuggestBoxInline" aria-live="polite"></div>
+            <div id="fNameDuplicateHint" class="hint productDuplicateHint hide"></div>
           </div>
           <div style="flex: 1 1 200px;">
             <div class="label" style="margin-bottom:6px;">CATEGORIA (AUTO)</div>
@@ -786,6 +884,7 @@ Acqua rame | 2 | IBC | 1000 L | DA PRODURRE"></textarea>
 
   const linesBox  = document.getElementById("linesBox");
   const sendLines = document.getElementById("sendLines");
+  const linesProductSuggestions = document.getElementById("linesProductSuggestions");
 
   const queueEl   = document.getElementById("queue");
   const emptyQueue= document.getElementById("emptyQueue");
@@ -814,6 +913,8 @@ Acqua rame | 2 | IBC | 1000 L | DA PRODURRE"></textarea>
   const fTitle  = document.getElementById("fTitle");
   const fSub    = document.getElementById("fSub");
   const fName   = document.getElementById("fName");
+  const fNameSuggestions = document.getElementById("fNameSuggestions");
+  const fNameDuplicateHint = document.getElementById("fNameDuplicateHint");
   const fCat    = document.getElementById("fCat");
   const fNotes  = document.getElementById("fNotes");
   const fTableBody = document.getElementById("fTableBody");
@@ -876,6 +977,7 @@ Acqua rame | 2 | IBC | 1000 L | DA PRODURRE"></textarea>
       const id = formulaDocIdFromName(name);
       if(!id) continue;
       if(formulasById.has(id)) continue;
+      if(findExactFormulaDuplicate(name) || findFormulaForProduct(name)) continue;
       if(!_ensureFormulasPending.has(id)) _ensureFormulasPending.set(id, name);
     }
 
@@ -1310,10 +1412,271 @@ Acqua rame | 2 | IBC | 1000 L | DA PRODURRE"></textarea>
   }
 
 
+  function formulaDuplicateKey(name){
+    return normalizeKey(simplifyForMatch(name || "")) || normalizeKey(name || "");
+  }
+
+  function getFormulaSearchBlob(f){
+    return normalizeKey([
+      f?.name || "",
+      f?.category || "",
+      f?.categoryAuto || "",
+      f?.nameKey || "",
+      f?.matchKey || ""
+    ].join(" "));
+  }
+
+  function findExactFormulaDuplicate(name, excludeId=""){
+    const key = formulaDuplicateKey(name);
+    const rawKey = normalizeKey(name || "");
+    if(!key && !rawKey) return null;
+    for(const f of (formulas || [])){
+      if(excludeId && f.id === excludeId) continue;
+      const fKey = formulaDuplicateKey(f.name || "");
+      const fRawKey = normalizeKey(f.name || "");
+      if((key && fKey === key) || (rawKey && fRawKey === rawKey) || (key && f.matchKey === key) || (rawKey && f.nameKey === rawKey)){
+        return f;
+      }
+    }
+    return null;
+  }
+
+  function getFormulaSuggestions(queryText, excludeId="", max=7){
+    const raw = String(queryText || "").trim();
+    if(!raw) return [];
+
+    const qKey = normalizeKey(raw);
+    const qSmart = formulaDuplicateKey(raw);
+    const qTokens = tokens(raw);
+    if(!qKey && !qSmart && !qTokens.length) return [];
+
+    const ranked = [];
+    for(const f of (formulas || [])){
+      if(!f || !f.name) continue;
+      if(excludeId && f.id === excludeId) continue;
+
+      const fKey = normalizeKey(f.name || "");
+      const fSmart = formulaDuplicateKey(f.name || "");
+      const blob = getFormulaSearchBlob(f);
+      const fTokens = tokens(f.name || "");
+      let score = 0;
+
+      if(qSmart && fSmart === qSmart) score += 1000;
+      if(qKey && fKey === qKey) score += 900;
+      if(qSmart && fSmart.startsWith(qSmart)) score += 720;
+      if(qKey && fKey.startsWith(qKey)) score += 680;
+      if(qSmart && blob.includes(qSmart)) score += 460;
+      if(qKey && blob.includes(qKey)) score += 420;
+
+      let tokenHits = 0;
+      for(const t of qTokens){
+        if(!t) continue;
+        if(blob.includes(t)){
+          tokenHits += 1;
+          score += 60;
+        }
+      }
+      if(qTokens.length && tokenHits === qTokens.length) score += 180;
+      score += Math.round(jaccard(qTokens, fTokens) * 260);
+
+      if(score > 0){
+        ranked.push({ f, score });
+      }
+    }
+
+    ranked.sort((a,b)=>{
+      if(b.score !== a.score) return b.score - a.score;
+      return (a.f.name || "").localeCompare((b.f.name || ""), "it", { sensitivity:"base" });
+    });
+    return ranked.slice(0, max).map(x => x.f);
+  }
+
+  function closeFormulaSuggestBoxes(){
+    fNameSuggestions?.classList.remove("is-open");
+    if(fNameSuggestions) fNameSuggestions.innerHTML = "";
+    linesProductSuggestions?.classList.remove("is-open");
+    if(linesProductSuggestions) linesProductSuggestions.innerHTML = "";
+  }
+
+  function formulaSuggestionRowHtml(f, actionLabel="Usa"){
+    const ingCount = (Array.isArray(f?.ingredients) ? f.ingredients.length : 0);
+    const ver = Number(f?.version || 0);
+    const cat = (f?.category || f?.categoryAuto || "—").toString().trim() || "—";
+    return `
+      <div style="min-width:0;">
+        <div class="productSuggestName">${escapeHtml(f?.name || "—")}</div>
+        <div class="productSuggestMeta">
+          <span>${escapeHtml(cat)}</span>
+          <span class="sep">•</span>
+          <span>v${ver || 0}</span>
+          <span class="sep">•</span>
+          <span>${ingCount} righe</span>
+        </div>
+      </div>
+      <span class="productSuggestAction">${escapeHtml(actionLabel)}</span>
+    `;
+  }
+
+  function openFormulaFromNameSuggestion(f){
+    if(!f || !f.id) return;
+    if(f.id === editingFormulaId){
+      fNameSuggestions?.classList.remove("is-open");
+      return;
+    }
+    if(formulaEditMode){
+      const ok = confirm("Questo prodotto è già presente nelle Formule.\\n\\nVuoi aprire la scheda esistente? Le modifiche non salvate andranno perse.");
+      if(!ok) return;
+    }
+    setFormulaEditMode(false);
+    openFormulaEditor(f.id);
+  }
+
+  function renderFNameSuggestions(){
+    if(!fNameSuggestions || !fName) return;
+    const value = (fName.value || "").trim();
+    const exact = value ? findExactFormulaDuplicate(value, editingFormulaId || "") : null;
+
+    if(fNameDuplicateHint){
+      if(exact && formulaEditMode){
+        fNameDuplicateHint.classList.remove("hide");
+        fNameDuplicateHint.textContent = `Prodotto già presente: ${exact.name}. Apri quello esistente per evitare doppioni.`;
+      }else{
+        fNameDuplicateHint.classList.add("hide");
+        fNameDuplicateHint.textContent = "";
+      }
+    }
+
+    if(!formulaEditMode || !value){
+      fNameSuggestions.classList.remove("is-open");
+      fNameSuggestions.innerHTML = "";
+      return;
+    }
+
+    const list = getFormulaSuggestions(value, editingFormulaId || "", 6);
+    if(!list.length){
+      fNameSuggestions.classList.remove("is-open");
+      fNameSuggestions.innerHTML = "";
+      return;
+    }
+
+    const frag = document.createDocumentFragment();
+    const head = document.createElement("div");
+    head.className = "productSuggestHead";
+    head.innerHTML = `<span>Prodotti già salvati</span><span>${list.length}</span>`;
+    frag.appendChild(head);
+
+    for(const f of list){
+      const row = document.createElement("button");
+      row.type = "button";
+      row.className = "productSuggestRow";
+      row.innerHTML = formulaSuggestionRowHtml(f, "Apri");
+      row.addEventListener("mousedown", (e)=>{ e.preventDefault(); });
+      row.addEventListener("click", (e)=>{
+        e.preventDefault();
+        openFormulaFromNameSuggestion(f);
+      });
+      frag.appendChild(row);
+    }
+
+    fNameSuggestions.replaceChildren(frag);
+    fNameSuggestions.classList.add("is-open");
+  }
+
+  function getActiveTextareaLineInfo(textarea){
+    const value = String(textarea?.value || "");
+    const pos = Number.isFinite(textarea?.selectionStart) ? textarea.selectionStart : value.length;
+    const start = value.lastIndexOf("\n", Math.max(0, pos - 1)) + 1;
+    const nextBreak = value.indexOf("\n", pos);
+    const end = nextBreak === -1 ? value.length : nextBreak;
+    return { value, pos, start, end, line: value.slice(start, end) };
+  }
+
+  function extractProductQueryFromLine(line){
+    const raw = String(line || "").trim();
+    if(!raw) return "";
+    if(/[|;\t]/.test(raw)){
+      return raw.split(/\s*(?:\||;|\t)\s*/)[0] || "";
+    }
+    const m = raw.match(/^(.*?)(?:\s+)(\d+(?:[\.,]\d+)?)\s*(ibc|l|lt|litri|kg|g|ml|pz|pezzi|pcs|pc)\.?$/i);
+    if(m) return (m[1] || "").trim();
+    return raw;
+  }
+
+  function replaceCurrentLineProduct(productName){
+    if(!linesBox) return;
+    const info = getActiveTextareaLineInfo(linesBox);
+    const line = info.line || "";
+    const name = String(productName || "").trim();
+    if(!name) return;
+
+    let nextLine = name;
+    if(/[|;\t]/.test(line)){
+      const sepMatch = line.match(/\s*(\||;|\t)\s*/);
+      const sep = sepMatch ? sepMatch[1] : "|";
+      const parts = line.split(/\s*(?:\||;|\t)\s*/);
+      parts[0] = name;
+      nextLine = parts.join(` ${sep === "\t" ? "|" : sep} `);
+    }else{
+      const m = line.trim().match(/^(.*?)(\s+\d+(?:[\.,]\d+)?\s*(?:ibc|l|lt|litri|kg|g|ml|pz|pezzi|pcs|pc)\.?)$/i);
+      nextLine = m ? `${name}${m[2]}` : name;
+    }
+
+    const before = info.value.slice(0, info.start);
+    const after = info.value.slice(info.end);
+    linesBox.value = before + nextLine + after;
+    const caret = (before + nextLine).length;
+    try{ linesBox.setSelectionRange(caret, caret); }catch(_){ }
+    linesProductSuggestions?.classList.remove("is-open");
+    if(linesProductSuggestions) linesProductSuggestions.innerHTML = "";
+    linesBox.focus();
+  }
+
+  function renderLinesProductSuggestions(){
+    if(!linesProductSuggestions || !linesBox || !isAdmin) return;
+    const info = getActiveTextareaLineInfo(linesBox);
+    const q = extractProductQueryFromLine(info.line);
+
+    if(!q || q.trim().length < 2){
+      linesProductSuggestions.classList.remove("is-open");
+      linesProductSuggestions.innerHTML = "";
+      return;
+    }
+
+    const list = getFormulaSuggestions(q, "", 7);
+    if(!list.length){
+      linesProductSuggestions.classList.remove("is-open");
+      linesProductSuggestions.innerHTML = "";
+      return;
+    }
+
+    const frag = document.createDocumentFragment();
+    const head = document.createElement("div");
+    head.className = "productSuggestHead";
+    head.innerHTML = `<span>Prodotti già salvati nelle Formule</span><span>${list.length}</span>`;
+    frag.appendChild(head);
+
+    for(const f of list){
+      const row = document.createElement("button");
+      row.type = "button";
+      row.className = "productSuggestRow";
+      row.innerHTML = formulaSuggestionRowHtml(f, "Usa");
+      row.addEventListener("mousedown", (e)=>{ e.preventDefault(); });
+      row.addEventListener("click", (e)=>{
+        e.preventDefault();
+        replaceCurrentLineProduct(f.name || "");
+      });
+      frag.appendChild(row);
+    }
+
+    linesProductSuggestions.replaceChildren(frag);
+    linesProductSuggestions.classList.add("is-open");
+  }
+
   function updateAutoCategory(){
     const n = (fName?.value || "").trim();
     const cat = inferCategory(n || "");
     if(fCat) fCat.value = cat;
+    renderFNameSuggestions();
   }
 
   function setFormulaEditMode(on){
@@ -1339,6 +1702,15 @@ Acqua rame | 2 | IBC | 1000 L | DA PRODURRE"></textarea>
 
     if(fEdit){
       fEdit.textContent = formulaEditMode ? "Annulla modifiche" : "Modifica formula";
+    }
+
+    if(formulaEditMode){
+      renderFNameSuggestions();
+    }else{
+      fNameSuggestions?.classList.remove("is-open");
+      if(fNameSuggestions) fNameSuggestions.innerHTML = "";
+      fNameDuplicateHint?.classList.add("hide");
+      if(fNameDuplicateHint) fNameDuplicateHint.textContent = "";
     }
   }
 
@@ -1484,6 +1856,7 @@ Acqua rame | 2 | IBC | 1000 L | DA PRODURRE"></textarea>
 
   function closeFormulaEditor(){
     setFormulaEditMode(false);
+    closeFormulaSuggestBoxes();
     formulaModal.classList.remove("show");
     formulaModal.setAttribute("aria-hidden","true");
     editingFormulaId = null;
@@ -1668,6 +2041,13 @@ Verrà eliminata SOLO la formula (non il prodotto in coda/completati).`);
       return;
     }
 
+    const duplicate = findExactFormulaDuplicate(name, editingFormulaId || "");
+    if(duplicate){
+      alert(`Prodotto già presente nelle Formule: ${duplicate.name}.\n\nApri quello esistente invece di creare/modificare un doppione.`);
+      openFormulaFromNameSuggestion(duplicate);
+      return;
+    }
+
     const nowMs = Date.now();
 
     const payload = {
@@ -1772,6 +2152,8 @@ Verrà eliminata SOLO la formula (non il prodotto in coda/completati).`);
       }));
 
       renderFormulaList();
+      renderFNameSuggestions();
+      renderLinesProductSuggestions();
     }, (err) => {
       console.warn("formulas snapshot error:", err);
       // non blocco l'app
@@ -2949,6 +3331,20 @@ Verrà eliminata SOLO la formula (non il prodotto in coda/completati).`);
 
   formulaSearch?.addEventListener("input", () => renderFormulaList());
   fName?.addEventListener("input", () => { updateAutoCategory(); });
+  fName?.addEventListener("focus", () => { renderFNameSuggestions(); });
+  fName?.addEventListener("blur", () => { setTimeout(()=>{ fNameSuggestions?.classList.remove("is-open"); }, 180); });
+
+  linesBox?.addEventListener("input", () => renderLinesProductSuggestions());
+  linesBox?.addEventListener("keyup", () => renderLinesProductSuggestions());
+  linesBox?.addEventListener("click", () => renderLinesProductSuggestions());
+  linesBox?.addEventListener("focus", () => renderLinesProductSuggestions());
+  linesBox?.addEventListener("blur", () => { setTimeout(()=>{ linesProductSuggestions?.classList.remove("is-open"); }, 180); });
+
+  document.addEventListener("click", (e)=>{
+    const target = e.target;
+    if(target && target.closest && target.closest("#fName, #fNameSuggestions, #linesBox, #linesProductSuggestions")) return;
+    closeFormulaSuggestBoxes();
+  });
 
   openFormuleBtn?.addEventListener("click", (e)=>{ e.preventDefault(); openFormuleListModal(); });
   closeFormuleBtn?.addEventListener("click", (e)=>{ e.preventDefault(); closeFormuleListModal(); });
