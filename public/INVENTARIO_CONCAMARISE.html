@@ -3848,6 +3848,42 @@
       return cleanSpaces(productName || code);
     }
 
+    function normalizeBulkIbcWeightLabel(...values){
+      for (const value of values){
+        const raw = cleanSpaces(value || "");
+        if (!raw) continue;
+        const match = raw.match(/(\d+(?:[.,]\d+)?)\s*(kg|kgs|chili|kili|chilogrammi|chilogrammo|l|lt|litri|litro)\b/i);
+        if (!match) continue;
+        const num = parseItNumber(match[1]);
+        if (!(num > 0)) continue;
+        const unitRaw = String(match[2] || "").toLowerCase();
+        const unit = /^(kg|kgs|chili|kili|chilogrammi|chilogrammo)$/.test(unitRaw) ? "kg" : "L";
+        return `${formatDecimalIt(num, 2)} ${unit}`;
+      }
+      return "";
+    }
+
+    function getBulkIbcWeightLabelFromData(data = {}){
+      return normalizeBulkIbcWeightLabel(
+        data?.bulkIbcWeightLabel,
+        data?.ibcWeightLabel,
+        data?.perIbcWeightLabel,
+        data?.pesoPerIbc,
+        data?.pesoPerIBC,
+        data?.pesoIbc,
+        data?.format,
+        data?.bulkFormat,
+        data?.rawLine,
+        data?.rawText,
+        data?.label
+      );
+    }
+
+    function getIbcWeightDetailLabel(data = {}){
+      const label = getBulkIbcWeightLabelFromData(data);
+      return label ? `Peso per IBC: ${label}` : "";
+    }
+
     function mapBulkWriteDoneItem(docSnap){
       const data = docSnap.data() || {};
       const completedAt = data.completedAt || data.ts || data.createdAt || null;
@@ -3855,6 +3891,7 @@
       const product = getBulkWriteCompletedProductNameFromData(data, docSnap.id);
       const itemName = product || cleanSpaces(data.label || data.rawLine || docSnap.id);
       const code = normalizeBulkWriteCompletedCode(data.code || data.finishedProductCode || product || data.label || docSnap.id, product, format);
+      const bulkIbcWeightLabel = getBulkIbcWeightLabelFromData(data);
       return {
         id: String(docSnap.id || "").trim(),
         key: String(data.key || docSnap.id || "").trim(),
@@ -3865,6 +3902,9 @@
         format,
         qty: data.qty ?? "",
         unit: String(data.unit || data.finishedProductUom || data.um || "IBC").trim(),
+        bulkIbcWeightLabel,
+        ibcWeightLabel: bulkIbcWeightLabel,
+        pesoPerIbc: bulkIbcWeightLabel,
         rawLine: String(data.rawLine || "").trim(),
         ritirato: data.ritirato === true,
         cereaInventoryMovementId: String(data.cereaInventoryMovementId || data.bulkCereaInventoryMovementId || "").trim(),
@@ -3892,12 +3932,14 @@
       const code = normalizeBulkWriteCompletedCode(done.code || done.finishedProductCode || productName || done.label || doneId, productName, done.format || "") || doneId;
       const item = cleanSpaces(productName || stripBulkWriteFormatFromName(done.itemName || done.product || done.label || done.rawLine || code, done.format || "") || code) || code;
       const uom = normalizeUom(done.unit || "") || "IBC";
+      const bulkIbcWeightLabel = getBulkIbcWeightLabelFromData(done);
       const date = todayYYYYMMDD();
       const movementId = cleanSpaces(done.cereaInventoryMovementId || bulkWriteConcaMovementDocId(doneId));
       const userLabel = prettifyUserLabel(done.completedByName || done.completedByEmail || done.createdByEmail || "Sistema");
       const noteBits = [
         `Produzione completata da Bulk Produzioni WRITE: +${qty.toLocaleString("it-IT")} ${uom} • ${item} · disponibile a Cerea per Porta a Conca`,
-        done.format ? `Formato ${done.format}` : ""
+        done.format ? `Formato ${done.format}` : "",
+        bulkIbcWeightLabel ? `Peso per IBC ${bulkIbcWeightLabel}` : ""
       ].filter(Boolean);
 
       return {
@@ -3908,7 +3950,11 @@
           code,
           item,
           product: item,
-          bulkDisplayVersion: 2,
+          bulkDisplayVersion: 3,
+          bulkIbcWeightLabel,
+          ibcWeightLabel: bulkIbcWeightLabel,
+          pesoPerIbc: bulkIbcWeightLabel,
+          perIbcWeightLabel: bulkIbcWeightLabel,
           uom,
           qty,
           qtyRaw: `${qty} ${uom}`.trim(),
@@ -3963,7 +4009,9 @@
       const movement = findBulkWriteConcaMovement(done);
       if (!movement) return true;
       const productName = getBulkWriteCompletedProductNameFromData(done, done?.id || done?.key || done?.bulkDoneId || "");
-      if (safeInt(movement.bulkDisplayVersion || 0) < 2) return true;
+      const bulkIbcWeightLabel = getBulkIbcWeightLabelFromData(done);
+      if (safeInt(movement.bulkDisplayVersion || 0) < 3) return true;
+      if (bulkIbcWeightLabel && getBulkIbcWeightLabelFromData(movement) !== bulkIbcWeightLabel) return true;
       if (isBulkWriteFormatOnlyValue(movement.item || "", done?.format || "")) return true;
       if (isBulkWriteFormatOnlyValue(movement.code || "", done?.format || "")) return true;
       if (productName && normalizeSearch(movement.item || "") !== normalizeSearch(productName)) return true;
@@ -3974,12 +4022,13 @@
       return (Array.isArray(items) ? items : [])
         .filter(item => item && item.ritirato !== true)
         .map(item => [
-          "bulkDisplayV2",
+          "bulkDisplayV3",
           item?.id || "",
           item?.qty || "",
           item?.unit || "",
           item?.code || item?.product || item?.label || "",
-          item?.format || ""
+          item?.format || "",
+          getBulkIbcWeightLabelFromData(item)
         ].join("|"))
         .sort()
         .join("§");
@@ -4137,7 +4186,8 @@
             name: cleanSpaces(item.item || item.product?.name || item.product?.code || "Articolo") || "Articolo",
             code: cleanSpaces(item.code || item.product?.code || ""),
             qty: safeInt(item.qty || 0),
-            uom: normalizeUom(item.uom || item.product?.uom || "") || "pz"
+            uom: normalizeUom(item.uom || item.product?.uom || "") || "pz",
+            bulkIbcWeightLabel: getBulkIbcWeightLabelFromData(item) || getBulkIbcWeightLabelFromData(item.product || {})
           })).filter(item => item.qty > 0)
         : [{
             name: cleanSpaces(product?.name || product?.code || "Articolo") || "Articolo",
@@ -4150,12 +4200,13 @@
       const subject = `Documento di trasporto ${ddtNumber} - ${originLabel} verso ${destinationLabel}`;
       const itemLines = safeItems.map((item, index) => {
         const code = item.code ? ` (${item.code})` : "";
-        return `${index + 1}. ${item.name}${code} - ${item.qty.toLocaleString("it-IT")} ${item.uom}`;
+        const ibcWeightDetail = getIbcWeightDetailLabel(item);
+        return `${index + 1}. ${item.name}${code} - ${item.qty.toLocaleString("it-IT")} ${item.uom}${ibcWeightDetail ? ` - ${ibcWeightDetail}` : ""}`;
       });
       const htmlRows = safeItems.length ? safeItems.map(item => `
             <tr>
               <td style="padding:8px 10px; border-bottom:1px solid #e5e7eb; font-weight:700;">${escapeHtml(item.code || "—")}</td>
-              <td style="padding:8px 10px; border-bottom:1px solid #e5e7eb;">${escapeHtml(item.name)}</td>
+              <td style="padding:8px 10px; border-bottom:1px solid #e5e7eb;">${escapeHtml(item.name)}${getIbcWeightDetailLabel(item) ? `<br><span style="font-size:12px; color:#64748b;">${escapeHtml(getIbcWeightDetailLabel(item))}</span>` : ""}</td>
               <td style="padding:8px 10px; border-bottom:1px solid #e5e7eb; text-align:right; font-weight:700;">${escapeHtml(item.qty.toLocaleString("it-IT"))} ${escapeHtml(item.uom)}</td>
             </tr>`).join("") : `<tr><td colspan="3" style="padding:8px 10px; border-bottom:1px solid #e5e7eb;">Nessun articolo indicato</td></tr>`;
 
@@ -4298,6 +4349,9 @@
         item: mappedItem,
         product: String(data.product || data.productName || "").trim(),
         bulkDisplayVersion: safeInt(data.bulkDisplayVersion || 0),
+        bulkIbcWeightLabel: getBulkIbcWeightLabelFromData(data),
+        ibcWeightLabel: getBulkIbcWeightLabelFromData(data),
+        pesoPerIbc: getBulkIbcWeightLabelFromData(data),
         qty: safeInt(data.qty),
         uom: normalizeUom(data.uom || ""),
         palletCount: normalizePositiveFloat(data.palletCount || data.bancali || 0),
@@ -4362,7 +4416,10 @@
         palletCount: normalizePositiveFloat(mv?.palletCount || mv?.bancali || 0),
         palletCountTotal: normalizePositiveFloat(mv?.palletCountTotal || data.palletCount || data.bancali || 0),
         palletUnitQty: normalizePositiveFloat(mv?.palletUnitQty || data.palletUnitQty || 0),
-        palletUnitUom: normalizeUom(mv?.palletUnitUom || data.palletUnitUom || data.uom || "") || "pz"
+        palletUnitUom: normalizeUom(mv?.palletUnitUom || data.palletUnitUom || data.uom || "") || "pz",
+        bulkIbcWeightLabel: getBulkIbcWeightLabelFromData(mv) || getBulkIbcWeightLabelFromData(data),
+        ibcWeightLabel: getBulkIbcWeightLabelFromData(mv) || getBulkIbcWeightLabelFromData(data),
+        pesoPerIbc: getBulkIbcWeightLabelFromData(mv) || getBulkIbcWeightLabelFromData(data)
       })) : [];
       const lines = Array.isArray(data.lines) ? data.lines.map(line => ({
         code: cleanSpaces(line?.code || data.code || ""),
@@ -4372,6 +4429,9 @@
         palletCount: normalizePositiveFloat(line?.palletCount || line?.bancali || 0),
         palletUnitQty: normalizePositiveFloat(line?.palletUnitQty || data.palletUnitQty || 0),
         palletUnitUom: normalizeUom(line?.palletUnitUom || data.palletUnitUom || data.uom || "") || "pz",
+        bulkIbcWeightLabel: getBulkIbcWeightLabelFromData(line) || getBulkIbcWeightLabelFromData(data),
+        ibcWeightLabel: getBulkIbcWeightLabelFromData(line) || getBulkIbcWeightLabelFromData(data),
+        pesoPerIbc: getBulkIbcWeightLabelFromData(line) || getBulkIbcWeightLabelFromData(data),
         fromLabel: cleanSpaces(line?.fromLabel || warehouseLabel(fromWarehouse)),
         toLabel: cleanSpaces(line?.toLabel || warehouseLabel(toWarehouse))
       })) : [];
@@ -4402,6 +4462,9 @@
         palletUnitUom: normalizeUom(data.palletUnitUom || data.uom || "") || "pz",
         palletInfoSource: cleanSpaces(data.palletInfoSource || data.palletSource || ""),
         palletSourceDdtNumber: cleanSpaces(data.palletSourceDdtNumber || ""),
+        bulkIbcWeightLabel: getBulkIbcWeightLabelFromData(data),
+        ibcWeightLabel: getBulkIbcWeightLabelFromData(data),
+        pesoPerIbc: getBulkIbcWeightLabelFromData(data),
         movements,
         lines,
         pdfDataUrl: String(data.pdfDataUrl || data.pdf?.dataUrl || (data.pdfBase64 ? `data:application/pdf;base64,${data.pdfBase64}` : "")),
@@ -4544,6 +4607,9 @@
         palletCountTotal: normalizePositiveFloat(mv?.palletCountTotal || mv?.bancaliTotali || 0),
         palletUnitQty: normalizePositiveFloat(mv?.palletUnitQty || mv?.qtyPerPallet || 0),
         palletUnitUom: normalizeUom(mv?.palletUnitUom || mv?.uom || "") || "pz",
+        bulkIbcWeightLabel: getBulkIbcWeightLabelFromData(mv),
+        ibcWeightLabel: getBulkIbcWeightLabelFromData(mv),
+        pesoPerIbc: getBulkIbcWeightLabelFromData(mv),
         lineNo: safeInt(mv?.lineNo || 0)
       };
     }
@@ -4569,6 +4635,9 @@
           palletCountTotal: normalizePositiveFloat(fallbackDoc.palletCount || fallbackDoc.bancali || 0),
           palletUnitQty: normalizePositiveFloat(fallbackDoc.palletUnitQty || 0),
           palletUnitUom: normalizeUom(fallbackDoc.palletUnitUom || fallbackDoc.uom || "") || uom,
+          bulkIbcWeightLabel: getBulkIbcWeightLabelFromData(fallbackDoc),
+          ibcWeightLabel: getBulkIbcWeightLabelFromData(fallbackDoc),
+          pesoPerIbc: getBulkIbcWeightLabelFromData(fallbackDoc),
           fromLabel: cleanSpaces(fallbackDoc.fromLabel || warehouseLabel(fallbackDoc.fromWarehouse)),
           toLabel: cleanSpaces(fallbackDoc.toLabel || warehouseLabel(fallbackDoc.toWarehouse))
         };
@@ -4577,6 +4646,9 @@
         row.palletCountTotal = Math.max(row.palletCountTotal, normalizePositiveFloat(mv?.palletCountTotal || 0));
         row.palletUnitQty = Math.max(row.palletUnitQty, normalizePositiveFloat(mv?.palletUnitQty || 0));
         row.palletUnitUom = normalizeUom(mv?.palletUnitUom || row.palletUnitUom || uom) || uom;
+        row.bulkIbcWeightLabel = cleanSpaces(row.bulkIbcWeightLabel || getBulkIbcWeightLabelFromData(mv));
+        row.ibcWeightLabel = cleanSpaces(row.ibcWeightLabel || row.bulkIbcWeightLabel);
+        row.pesoPerIbc = cleanSpaces(row.pesoPerIbc || row.bulkIbcWeightLabel);
         grouped.set(key, row);
       }
 
@@ -4800,6 +4872,7 @@
           concamarise: 0,
           item: "",
           uom: "",
+          bulkIbcWeightLabel: "",
           hasTabWriteCompletion: false,
           hasBulkWriteCompletion: false
         };
@@ -4814,8 +4887,10 @@
           totalRec.hasBulkWriteCompletion = true;
         }
 
+        const ibcWeightLabel = getBulkIbcWeightLabelFromData(mv);
         if (!totalRec.item && item) totalRec.item = item;
         if (uom) totalRec.uom = uom;
+        if (ibcWeightLabel) totalRec.bulkIbcWeightLabel = ibcWeightLabel;
         totalsByCode.set(low, totalRec);
 
         const targetRowsByCode = (wh === WAREHOUSE_CONCAMARISE) ? concamariseRowsByCode : cereaRowsByCode;
@@ -4826,11 +4901,13 @@
           code,
           item,
           uom: uom || "",
-          qty: 0
+          qty: 0,
+          bulkIbcWeightLabel: ""
         };
         row.qty += delta;
         if (!row.item && item) row.item = item;
         if (uom) row.uom = uom;
+        if (ibcWeightLabel) row.bulkIbcWeightLabel = ibcWeightLabel;
         byCustomer.set(rowKey, row);
         targetRowsByCode.set(low, byCustomer);
       }
@@ -5027,7 +5104,10 @@
         name: fallbackName || code,
         alias: "",
         searchText: fallbackName || code,
-        uom
+        uom,
+        bulkIbcWeightLabel: cleanSpaces(totals?.bulkIbcWeightLabel || ""),
+        ibcWeightLabel: cleanSpaces(totals?.bulkIbcWeightLabel || ""),
+        pesoPerIbc: cleanSpaces(totals?.bulkIbcWeightLabel || "")
       };
     }
 
@@ -5085,6 +5165,9 @@
           searchText,
           fallbackName: movementName,
           uom,
+          bulkIbcWeightLabel: cleanSpaces(totals?.bulkIbcWeightLabel || productRecord?.bulkIbcWeightLabel || ""),
+          ibcWeightLabel: cleanSpaces(totals?.bulkIbcWeightLabel || productRecord?.ibcWeightLabel || ""),
+          pesoPerIbc: cleanSpaces(totals?.bulkIbcWeightLabel || productRecord?.pesoPerIbc || ""),
           cereaQty,
           concamariseQty,
           concamariseQty: concamariseQty,
@@ -5668,7 +5751,10 @@
           code: cleanSpaces(product?.code || ""),
           item: cleanSpaces(product?.name || parts.productText || parts.raw || "Articolo"),
           qty,
-          uom: normalizeUom(product?.uom || "") || "pz"
+          uom: normalizeUom(product?.uom || "") || "pz",
+          bulkIbcWeightLabel: getBulkIbcWeightLabelFromData(product),
+          ibcWeightLabel: getBulkIbcWeightLabelFromData(product),
+          pesoPerIbc: getBulkIbcWeightLabelFromData(product)
         });
       });
       return items;
@@ -5690,6 +5776,9 @@
             code: cleanSpaces(item.product.code || item.code || ""),
             item: cleanSpaces(item.product.name || item.item || item.product.code || "Articolo"),
             uom: normalizeUom(item.product.uom || item.uom || "") || "pz",
+            bulkIbcWeightLabel: getBulkIbcWeightLabelFromData(item.product) || getBulkIbcWeightLabelFromData(item),
+            ibcWeightLabel: getBulkIbcWeightLabelFromData(item.product) || getBulkIbcWeightLabelFromData(item),
+            pesoPerIbc: getBulkIbcWeightLabelFromData(item.product) || getBulkIbcWeightLabelFromData(item),
             inputLines: [item.inputLine]
           });
         }
@@ -6097,7 +6186,10 @@
       let printedLines = 0;
       for (const row of rawLines){
         const codeLines = fitLines(wrapWidth(cleanSpaces(row.code || ddt.code || ""), codeW - 18, 7.8, true), 3);
-        const descLines = fitLines(wrapWidth(cleanSpaces(row.item || ddt.item || "Articolo"), descW - 18, 8, false), 5);
+        const descBase = cleanSpaces(row.item || ddt.item || "Articolo");
+        const ibcWeightDetail = getIbcWeightDetailLabel(row) || getIbcWeightDetailLabel(ddt);
+        const descText = cleanSpaces([descBase, ibcWeightDetail].filter(Boolean).join(" · "));
+        const descLines = fitLines(wrapWidth(descText, descW - 18, 8, false), 6);
         const qtyLabel = `${safeInt(row.qty).toLocaleString("it-IT")} ${cleanSpaces(row.uom || ddt.uom || "pz")}`;
         const qtyLines = fitLines(wrapWidth(qtyLabel, qtyW - 18, 7.8, true), 2);
         const lineCount = Math.max(codeLines.length, descLines.length, qtyLines.length, 1);
@@ -6730,7 +6822,8 @@
         const title = validation.canSubmit ? "DDT pronto" : "Controlla le righe inserite";
         const itemRows = validation.items.slice(0, 6).map(item => {
           const name = cleanSpaces(item.product?.name || item.item || item.code || "Articolo") || "Articolo";
-          return `<div>• ${escapeHtml(name)} <span class="validation-strong">${safeInt(item.qty).toLocaleString("it-IT")} ${escapeHtml(item.uom || "pz")}</span></div>`;
+          const ibcWeightDetail = getIbcWeightDetailLabel(item) || getIbcWeightDetailLabel(item.product || {});
+          return `<div>• ${escapeHtml(name)} <span class="validation-strong">${safeInt(item.qty).toLocaleString("it-IT")} ${escapeHtml(item.uom || "pz")}${ibcWeightDetail ? ` · ${escapeHtml(ibcWeightDetail)}` : ""}</span></div>`;
         }).join("");
         const extra = validation.items.length > 6 ? `<div>• altri ${(validation.items.length - 6).toLocaleString("it-IT")} articoli</div>` : "";
         const errors = validation.reasons.slice(0, 4).map(reason => `<div>• ${escapeHtml(reason)}</div>`).join("");
@@ -6772,9 +6865,10 @@
         else if (index === 0) classes.push("is-leading");
 
         const categoryStyle = product.categoryColor ? ` style="--cat-color:${escapeHtml(product.categoryColor)}"` : "";
+        const ibcWeightDetail = getIbcWeightDetailLabel(product);
         const qtyDisplay = product.isAlwaysAvailableToCerea === true
           ? (product.requiresManualTransferQty === true ? "Quantità da inserire" : (defaultToCereaMode ? "Sempre disponibile" : "Sempre disponibile"))
-          : `${config.sourceLabel}: ${product.sourceQty.toLocaleString("it-IT")} ${product.uom}`;
+          : `${config.sourceLabel}: ${product.sourceQty.toLocaleString("it-IT")} ${product.uom}${ibcWeightDetail ? ` · ${ibcWeightDetail}` : ""}`;
         return `
           <button
             class="${classes.join(" ")}"
@@ -7464,7 +7558,8 @@
         const name = cleanSpaces(item?.item || item?.product?.name || item?.code || "Articolo");
         const code = cleanSpaces(item?.code || item?.product?.code || "");
         const qtyLabel = `${safeInt(item?.qty || 0).toLocaleString("it-IT")} ${cleanSpaces(item?.uom || item?.product?.uom || "pz")}`;
-        lines.push(`${index + 1}. ${name}${code ? ` (${code})` : ""} - ${qtyLabel}`);
+        const ibcWeightDetail = getIbcWeightDetailLabel(item) || getIbcWeightDetailLabel(item?.product || {});
+        lines.push(`${index + 1}. ${name}${code ? ` (${code})` : ""} - ${qtyLabel}${ibcWeightDetail ? ` - ${ibcWeightDetail}` : ""}`);
       });
       if (list.length > 12){
         lines.push(`... altri ${list.length - 12} articoli`);
@@ -7566,6 +7661,9 @@
           product,
           sourceRows,
           available,
+          bulkIbcWeightLabel: getBulkIbcWeightLabelFromData(product) || getBulkIbcWeightLabelFromData(sourceRows.find(row => getBulkIbcWeightLabelFromData(row)) || {}),
+          ibcWeightLabel: getBulkIbcWeightLabelFromData(product) || getBulkIbcWeightLabelFromData(sourceRows.find(row => getBulkIbcWeightLabelFromData(row)) || {}),
+          pesoPerIbc: getBulkIbcWeightLabelFromData(product) || getBulkIbcWeightLabelFromData(sourceRows.find(row => getBulkIbcWeightLabelFromData(row)) || {}),
           isAlwaysAvailableToCerea: isAlwaysAvailableToCereaProduct(product, config.direction),
           code: cleanSpaces(product.code || item.code || ""),
           item: cleanSpaces(product.name || item.item || product.code || "Articolo"),
@@ -7615,6 +7713,7 @@
           const articleName = cleanSpaces(product.name || itemEntry.item || productCode || "Articolo");
           const uom = normalizeUom(product.uom || itemEntry.uom || "") || "pz";
           const requestedQty = safeInt(itemEntry.qty || 0);
+          const ibcWeightLabel = getBulkIbcWeightLabelFromData(itemEntry) || getBulkIbcWeightLabelFromData(product) || getBulkIbcWeightLabelFromData(itemEntry.sourceRows.find(row => getBulkIbcWeightLabelFromData(row)) || {});
           lineNo += 1;
           const articleLineNo = lineNo;
 
@@ -7631,6 +7730,10 @@
             palletUnitUom: palletInfo.palletUnitUom || commonUom,
             palletInfoSource: palletInfo.palletInfoSource,
             palletSourceDdtNumber: "",
+            bulkIbcWeightLabel: ibcWeightLabel,
+            ibcWeightLabel,
+            pesoPerIbc: ibcWeightLabel,
+            perIbcWeightLabel: ibcWeightLabel,
             bancali: 0,
             bancaliTotali: palletInfo.palletCount,
             quantitaPerBancale: palletInfo.palletUnitQty,
@@ -7663,6 +7766,10 @@
               palletUnitUom: palletInfo.palletUnitUom || commonUom,
               palletInfoSource: palletInfo.palletInfoSource,
               palletSourceDdtNumber: "",
+              bulkIbcWeightLabel: ibcWeightLabel,
+              ibcWeightLabel,
+              pesoPerIbc: ibcWeightLabel,
+              perIbcWeightLabel: ibcWeightLabel,
               bancali: 0,
               bancaliTotali: palletInfo.palletCount,
               quantitaPerBancale: palletInfo.palletUnitQty,
@@ -7717,8 +7824,8 @@
             batch.set(inRef, inPayload);
 
             movements.push(
-              { id: outRef.id, inventoryMovementId: outRef.id, movementProgressive: outNum, movementProgressiveNumber: movementProgressiveNumber - 1, type:"OUT", warehouse: config.sourceWarehouse, warehouseLabel: config.sourceLabel, code: productCode, item: movementItemName, qty: take, uom, palletCount: 0, palletCountTotal: palletInfo.palletCount, palletUnitQty: palletInfo.palletUnitQty, palletUnitUom: palletInfo.palletUnitUom || commonUom, lineNo: articleLineNo },
-              { id: inRef.id, inventoryMovementId: inRef.id, movementProgressive: inNum, movementProgressiveNumber, type:"IN", warehouse: config.destinationWarehouse, warehouseLabel: config.destinationLabel, code: productCode, item: movementItemName, qty: take, uom, palletCount: 0, palletCountTotal: palletInfo.palletCount, palletUnitQty: palletInfo.palletUnitQty, palletUnitUom: palletInfo.palletUnitUom || commonUom, lineNo: articleLineNo }
+              { id: outRef.id, inventoryMovementId: outRef.id, movementProgressive: outNum, movementProgressiveNumber: movementProgressiveNumber - 1, type:"OUT", warehouse: config.sourceWarehouse, warehouseLabel: config.sourceLabel, code: productCode, item: movementItemName, qty: take, uom, palletCount: 0, palletCountTotal: palletInfo.palletCount, palletUnitQty: palletInfo.palletUnitQty, palletUnitUom: palletInfo.palletUnitUom || commonUom, bulkIbcWeightLabel: ibcWeightLabel, ibcWeightLabel, pesoPerIbc: ibcWeightLabel, lineNo: articleLineNo },
+              { id: inRef.id, inventoryMovementId: inRef.id, movementProgressive: inNum, movementProgressiveNumber, type:"IN", warehouse: config.destinationWarehouse, warehouseLabel: config.destinationLabel, code: productCode, item: movementItemName, qty: take, uom, palletCount: 0, palletCountTotal: palletInfo.palletCount, palletUnitQty: palletInfo.palletUnitQty, palletUnitUom: palletInfo.palletUnitUom || commonUom, bulkIbcWeightLabel: ibcWeightLabel, ibcWeightLabel, pesoPerIbc: ibcWeightLabel, lineNo: articleLineNo }
             );
 
             remaining -= take;
@@ -7760,6 +7867,9 @@
           palletUnitUom: palletInfo.palletUnitUom || commonUom,
           palletInfoSource: palletInfo.palletInfoSource,
           palletSourceDdtNumber: "",
+          bulkIbcWeightLabel: checkedItems.length === 1 ? getBulkIbcWeightLabelFromData(checkedItems[0]) : "",
+          ibcWeightLabel: checkedItems.length === 1 ? getBulkIbcWeightLabelFromData(checkedItems[0]) : "",
+          pesoPerIbc: checkedItems.length === 1 ? getBulkIbcWeightLabelFromData(checkedItems[0]) : "",
           bancali: palletInfo.palletCount,
           quantitaPerBancale: palletInfo.palletUnitQty,
           lines,
