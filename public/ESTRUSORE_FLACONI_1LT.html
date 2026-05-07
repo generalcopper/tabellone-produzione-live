@@ -975,25 +975,32 @@
 
     function isEstrusoreProductionMovement(mv){
       if (!mv || !isPrimaryCode(mv.code)) return false;
+      if (normalizeWarehouse(mv.warehouse) !== WAREHOUSE) return false;
       if (isNeutralMovement(mv)) return false;
+      if (mv.estrusoreSync === true) return false;
+      if (String(mv.estrusoreLinkedMovementId || "").trim()) return false;
+      if (String(mv.estrusoreMirrorFromCode || "").trim()) return false;
       if (String(mv.type || "").toUpperCase() !== "IN") return false;
 
       const source = String(mv.source || "").trim().toLowerCase();
-      const docType = String(mv.docType || "").trim().toUpperCase();
-      const customer = String(mv.customer || "").trim().toLowerCase();
       const docNum = String(mv.docNum || "").trim().toUpperCase();
-      const note = String(mv.note || "").trim().toLowerCase();
 
-      return source === SOURCE.toLowerCase()
-        || docType === "PRODUZIONE"
-        || customer === "produzione"
-        || docNum.startsWith("ESTR-")
-        || note.includes("estrusore");
+      // Contatore "prodotti da sempre": conta solo le produzioni dirette
+      // create da questo pannello Estrusore, evitando carichi manuali,
+      // rettifiche positive, movimenti generati da hub/DDT o codici collegati FBL1000.
+      return source === SOURCE.toLowerCase() || docNum.startsWith("ESTR-");
     }
 
     function computeLifetimeProduced(){
+      const countedIds = new Set();
       return (state.codeMovements || []).reduce((sum, mv) => {
-        return isEstrusoreProductionMovement(mv) ? sum + Math.max(0, safeInt(mv.qty)) : sum;
+        if (!isEstrusoreProductionMovement(mv)) return sum;
+        const key = String(mv.id || "").trim();
+        if (key){
+          if (countedIds.has(key)) return sum;
+          countedIds.add(key);
+        }
+        return sum + Math.max(0, safeInt(mv.qty));
       }, 0);
     }
 
