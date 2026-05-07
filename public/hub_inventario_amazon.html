@@ -3320,6 +3320,47 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
     const COL_PRODUCTS = "amzInventoryProducts"; // anagrafica prodotti (globale)
     const SUB_MOVES = "movements"; // storico movimenti per prodotto
 
+
+    function movementTypeLabelFromKind(kind, direction){
+      const k = String(kind || "").toLowerCase();
+      const d = Number(direction || 1);
+      if(k === "carica") return d >= 0 ? "carico" : "rettifica";
+      if(k === "scarica") return d >= 0 ? "scarico" : "rettifica";
+      return k || "movimento";
+    }
+
+    function movementQtySignedFromKind(kind, qty, direction){
+      const q = Math.abs(parseQty(qty) || 0);
+      const base = (String(kind || "").toLowerCase() === "scarica") ? -1 : 1;
+      return base * (Number(direction || 1)) * q;
+    }
+
+    function addProductMovementToBatch(batch, api, db, { sku, title="", loc="", type="movimento", qtySigned=0, source="", note="", flowId="", fileName="", beforeQty=null, afterQty=null, fromWarehouse="", toWarehouse="", createdAtClient=Date.now() }){
+      const s = toSkuId(sku || "");
+      if(!batch || !api || !db || !s) return;
+      const ref = api.doc(api.collection(db, COL_PRODUCTS, s, SUB_MOVES));
+      const data = {
+        type: String(type || "movimento"),
+        sku: s,
+        title: squashWhitespace(title || ""),
+        qtySigned: Number.isFinite(Number(qtySigned)) ? Math.round(Number(qtySigned)) : 0,
+        location: loc || fromWarehouse || toWarehouse || "",
+        fromWarehouse: fromWarehouse || loc || "",
+        toWarehouse: toWarehouse || loc || "",
+        source: String(source || ""),
+        note: String(note || ""),
+        flowId: String(flowId || ""),
+        fileName: String(fileName || ""),
+        createdAt: api.serverTimestamp(),
+        createdAtClient,
+        createdByUid: state.user?.uid || "",
+        createdByEmail: state.user?.email || ""
+      };
+      if(Number.isFinite(Number(beforeQty))) data.beforeQty = Math.round(Number(beforeQty));
+      if(Number.isFinite(Number(afterQty))) data.afterQty = Math.round(Number(afterQty));
+      batch.set(ref, data);
+    }
+
     // --- PDF workflow parsing ---
     function parseWorkflowFromText(text){
       const t = String(text||"");
@@ -4363,7 +4404,7 @@ function startAllLogs(){
       const who = state.user?.emailLower || state.user?.email || "";
 
       // Batch limits
-      const CHUNK = 450;
+      const CHUNK = 220;
       for(let i=0; i<lines.length; i+=CHUNK){
         const chunk = lines.slice(i, i+CHUNK);
         const batch = api.writeBatch(db);
@@ -4387,6 +4428,17 @@ function startAllLogs(){
             updatedAtClient: nowClient,
             updatedBy: who
           }, { merge:true });
+
+          addProductMovementToBatch(batch, api, db, {
+            sku,
+            title: title || sku,
+            loc,
+            type: "rettifica",
+            qtySigned: delta,
+            source: "storico_flussi",
+            note: direction < 0 ? `Ripristino/annullamento ${kind}` : `Applicazione ${kind}`,
+            createdAtClient: nowClient
+          });
         }
 
         await batch.commit();
@@ -5727,7 +5779,7 @@ function closeSheet(kind){
           const aggregated = p.aggregated;
 
           const chunks = [];
-          const CHUNK = 450;
+          const CHUNK = 220;
           for(let i=0;i<aggregated.length;i+=CHUNK){
             chunks.push(aggregated.slice(i, i+CHUNK));
           }
@@ -5749,6 +5801,19 @@ function closeSheet(kind){
                 updatedBy: state.user.email || "",
                 location: p.loc
               }, { merge:true });
+
+              addProductMovementToBatch(batch, api, db, {
+                sku,
+                title: title || sku,
+                loc: p.loc,
+                type: "carico",
+                qtySigned: delta,
+                source: "campo_libero",
+                note: "Carico manuale da campo libero",
+                flowId: p.flowDocId,
+                fileName: "MANUAL",
+                createdAtClient: tsClient
+              });
             }
             await batch.commit();
             p.committedBatches++;
@@ -6189,7 +6254,11 @@ function closeSheet(kind){
         const who = m.createdByEmail || m.createdByUid || "—";
         const typeRaw = m.type || "";
         const type = (typeRaw==="move") ? "Spostamento"
-          : (typeRaw==="manual_edit") ? "Modifica"
+          : (typeRaw==="carico") ? "Carico"
+          : (typeRaw==="scarico") ? "Scarico"
+          : (typeRaw==="rettifica") ? "Rettifica"
+          : (typeRaw==="delete") ? "Eliminazione"
+          : (typeRaw==="manual_edit") ? "Rettifica / modifica"
           : (typeRaw==="manual_rename") ? "Rinomina SKU"
           : (typeRaw || "—");
 
@@ -6804,10 +6873,32 @@ function renderProductsSheet(){
       const db = state.firebase.db;
 
       try{
-        await api.deleteDoc(api.doc(db, COL_ROOT, loc, SUB_ITEMS, s));
-        // best effort: rimuovi anagrafica globale
-        try{ await api.deleteDoc(api.doc(db, COL_PRODUCTS, s)); }catch(_e){}
-        showToast("Eliminato", "Prodotto rimosso.", 1600);
+        const nowClient = Date.now();
+        const current = getProductBySku(loc, s) || {};
+        const batch = api.writeBatch(db);
+        batch.delete(api.doc(db, COL_ROOT, loc, SUB_ITEMS, s));
+        batch.set(api.doc(db, COL_PRODUCTS, s), {
+          sku: s,
+          title: current.title || s,
+          titleNorm: normalizeText(current.title || s),
+          deletedAt: api.serverTimestamp(),
+          deletedAtClient: nowClient,
+          deletedBy: state.user?.email || "",
+          lastSeenKind: "delete",
+          lastSeenLocation: loc
+        }, { merge:true });
+        addProductMovementToBatch(batch, api, db, {
+          sku: s,
+          title: current.title || s,
+          loc,
+          type: "delete",
+          qtySigned: -(Number.isFinite(current.qty) ? Number(current.qty) : 0),
+          source: "manuale",
+          note: "Eliminazione prodotto da inventario",
+          createdAtClient: nowClient
+        });
+        await batch.commit();
+        showToast("Eliminato", "Prodotto rimosso. Storico movimenti mantenuto.", 1600);
         scheduleLowStockEmailAfterUpdate("product_delete");
 
         state.ui.productEditSku = null;
@@ -6903,7 +6994,7 @@ async function applyFlow(kind){
 
       if(!plans.length) return showToast("Nessuna riga valida","");
 
-      const CHUNK = 450; // < 500 (limite batch firestore)
+      const CHUNK = 220; // 2 scritture per riga: inventario + storico movimenti
       const planChunks = plans.map(p=>{
         const chunks = [];
         for(let i=0;i<p.aggregated.length;i+=CHUNK){
@@ -6979,6 +7070,19 @@ async function applyFlow(kind){
                 updatedBy: state.user.email || "",
                 location: p.loc
               }, { merge:true });
+
+              addProductMovementToBatch(batch, api, db, {
+                sku,
+                title: title || sku,
+                loc: p.loc,
+                type: kind === "scarica" ? "scarico" : "carico",
+                qtySigned: delta,
+                source: "pdf",
+                note: kind === "scarica" ? "Scarico da PDF" : "Carico da PDF",
+                flowId: p.flowDocId,
+                fileName: flow.file?.name || "",
+                createdAtClient: tsClient
+              });
             }
 
             await batch.commit();
