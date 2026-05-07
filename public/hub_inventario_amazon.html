@@ -3321,44 +3321,42 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
     const SUB_MOVES = "movements"; // storico movimenti per prodotto
 
 
-    function movementTypeLabelFromKind(kind, direction){
-      const k = String(kind || "").toLowerCase();
-      const d = Number(direction || 1);
-      if(k === "carica") return d >= 0 ? "carico" : "rettifica";
-      if(k === "scarica") return d >= 0 ? "scarico" : "rettifica";
-      return k || "movimento";
+    function addProductMovementToBatch(batch, api, db, sku, data = {}){
+      const s = toSkuId(sku || data?.sku || "");
+      if(!batch || !api || !db) throw new Error("Movimenti: Firestore non inizializzato.");
+      if(!s) throw new Error("Movimenti: SKU mancante.");
+
+      const nowClient = (data && typeof data.createdAtClient === "number") ? data.createdAtClient : Date.now();
+      const q = Number(data?.qtySigned ?? data?.deltaSigned ?? 0);
+      const qtySigned = Number.isFinite(q) ? Math.round(q) : 0;
+
+      const payload = Object.assign({}, data || {});
+      payload.sku = s;
+      payload.type = payload.type || "rettifica";
+      payload.qtySigned = qtySigned;
+      payload.deltaSigned = Number.isFinite(Number(payload.deltaSigned)) ? Math.round(Number(payload.deltaSigned)) : qtySigned;
+      payload.createdAt = api.serverTimestamp();
+      payload.createdAtClient = nowClient;
+      payload.createdByUid = payload.createdByUid || state.user?.uid || "";
+      payload.createdByEmail = payload.createdByEmail || state.user?.email || state.user?.emailLower || "";
+
+      const moveRef = api.doc(api.collection(db, COL_PRODUCTS, s, SUB_MOVES));
+      batch.set(moveRef, payload);
+      return true;
     }
 
-    function movementQtySignedFromKind(kind, qty, direction){
-      const q = Math.abs(parseQty(qty) || 0);
-      const base = (String(kind || "").toLowerCase() === "scarica") ? -1 : 1;
-      return base * (Number(direction || 1)) * q;
+    function flowMovementType(kind, direction){
+      const dir = Number(direction || 1);
+      if(dir < 0) return "rettifica";
+      return (kind === "scarica") ? "scarica" : "carica";
     }
 
-    function addProductMovementToBatch(batch, api, db, { sku, title="", loc="", type="movimento", qtySigned=0, source="", note="", flowId="", fileName="", beforeQty=null, afterQty=null, fromWarehouse="", toWarehouse="", createdAtClient=Date.now() }){
-      const s = toSkuId(sku || "");
-      if(!batch || !api || !db || !s) return;
-      const ref = api.doc(api.collection(db, COL_PRODUCTS, s, SUB_MOVES));
-      const data = {
-        type: String(type || "movimento"),
-        sku: s,
-        title: squashWhitespace(title || ""),
-        qtySigned: Number.isFinite(Number(qtySigned)) ? Math.round(Number(qtySigned)) : 0,
-        location: loc || fromWarehouse || toWarehouse || "",
-        fromWarehouse: fromWarehouse || loc || "",
-        toWarehouse: toWarehouse || loc || "",
-        source: String(source || ""),
-        note: String(note || ""),
-        flowId: String(flowId || ""),
-        fileName: String(fileName || ""),
-        createdAt: api.serverTimestamp(),
-        createdAtClient,
-        createdByUid: state.user?.uid || "",
-        createdByEmail: state.user?.email || ""
-      };
-      if(Number.isFinite(Number(beforeQty))) data.beforeQty = Math.round(Number(beforeQty));
-      if(Number.isFinite(Number(afterQty))) data.afterQty = Math.round(Number(afterQty));
-      batch.set(ref, data);
+    function flowMovementNote(kind, direction, label){
+      const dir = Number(direction || 1);
+      const base = (kind === "scarica") ? "scarico" : "carico";
+      const suffix = label ? ` • ${label}` : "";
+      if(dir < 0) return `Rettifica / annullamento ${base}${suffix}`;
+      return `${base.charAt(0).toUpperCase()}${base.slice(1)} inventario${suffix}`;
     }
 
     // --- PDF workflow parsing ---
@@ -4389,7 +4387,7 @@ function startAllLogs(){
       listEl.innerHTML = `<div class="gridTable ${colsClass}">${tableHead}${rows}</div>`;
     }
 
-    async function adjustInventoryWithLines(loc, kind, lines, direction){
+    async function adjustInventoryWithLines(loc, kind, lines, direction, opts = {}){
       // direction: +1 = applica, -1 = annulla (inverte l'effetto)
       const api = state.firebase.api;
       const db = state.firebase.db;
@@ -4402,8 +4400,12 @@ function startAllLogs(){
 
       const nowClient = Date.now();
       const who = state.user?.emailLower || state.user?.email || "";
+      const flowLabel = opts?.flowName || opts?.flowLabel || "";
+      const moveType = opts?.type || flowMovementType(kind, direction);
+      const moveSource = opts?.reason || (Number(direction) < 0 ? "rettifica_flusso" : "flusso");
+      const moveNote = opts?.note || flowMovementNote(kind, direction, flowLabel || opts?.flowId || "");
 
-      // Batch limits
+      // Batch limits: 2 scritture per riga (inventario + movimento prodotto)
       const CHUNK = 220;
       for(let i=0; i<lines.length; i+=CHUNK){
         const chunk = lines.slice(i, i+CHUNK);
@@ -4429,14 +4431,17 @@ function startAllLogs(){
             updatedBy: who
           }, { merge:true });
 
-          addProductMovementToBatch(batch, api, db, {
-            sku,
-            title: title || sku,
-            loc,
-            type: "rettifica",
+          addProductMovementToBatch(batch, api, db, sku, {
+            type: moveType,
             qtySigned: delta,
-            source: "storico_flussi",
-            note: direction < 0 ? `Ripristino/annullamento ${kind}` : `Applicazione ${kind}`,
+            deltaSigned: delta,
+            fromWarehouse: loc,
+            toWarehouse: loc,
+            source: moveSource,
+            note: moveNote,
+            flowKind: kind || "",
+            flowId: opts?.flowId || "",
+            flowName: flowLabel,
             createdAtClient: nowClient
           });
         }
@@ -4457,7 +4462,7 @@ function startAllLogs(){
 
       try{
         showToast("Operazione in corso", "Sto annullando il flusso…");
-        await adjustInventoryWithLines(loc, flow.kind, flow.lines || [], -1);
+        await adjustInventoryWithLines(loc, flow.kind, flow.lines || [], -1, { reason:"undo_flow", note:`Annullamento flusso ${flowDisplayName(flow)}`, flowId: flow.id, flowName: flowDisplayName(flow) });
 
         const api = state.firebase.api;
         const db = state.firebase.db;
@@ -4490,7 +4495,7 @@ function startAllLogs(){
       try{
         showToast("Operazione in corso", "Sto eliminando il flusso…");
         if(!flow.voided){
-          await adjustInventoryWithLines(loc, flow.kind, flow.lines || [], -1);
+          await adjustInventoryWithLines(loc, flow.kind, flow.lines || [], -1, { reason:"delete_flow", note:`Eliminazione flusso ${flowDisplayName(flow)}`, flowId: flow.id, flowName: flowDisplayName(flow) });
         }
         const api = state.firebase.api;
         const db = state.firebase.db;
@@ -4538,7 +4543,7 @@ function startAllLogs(){
 
       try{
         showToast("Operazione in corso", "Sto eliminando la riga…");
-        await adjustInventoryWithLines(loc, flow.kind, [line], -1);
+        await adjustInventoryWithLines(loc, flow.kind, [line], -1, { reason:"remove_line_flow", note:`Eliminazione riga dal flusso ${flowDisplayName(flow)}`, flowId: flow.id, flowName: flowDisplayName(flow) });
 
         const newLines = lines.filter(l=> String(l?.sku||"").trim()!==sku);
         const totalPieces = newLines.reduce((s,l)=> s + parseQty(l?.qty || 0), 0);
@@ -5779,6 +5784,7 @@ function closeSheet(kind){
           const aggregated = p.aggregated;
 
           const chunks = [];
+          // 2 scritture per riga: inventario + storico movimento prodotto
           const CHUNK = 220;
           for(let i=0;i<aggregated.length;i+=CHUNK){
             chunks.push(aggregated.slice(i, i+CHUNK));
@@ -5802,16 +5808,17 @@ function closeSheet(kind){
                 location: p.loc
               }, { merge:true });
 
-              addProductMovementToBatch(batch, api, db, {
-                sku,
-                title: title || sku,
-                loc: p.loc,
-                type: "carico",
+              addProductMovementToBatch(batch, api, db, sku, {
+                type: "carica",
                 qtySigned: delta,
+                deltaSigned: delta,
+                fromWarehouse: p.loc,
+                toWarehouse: p.loc,
                 source: "campo_libero",
-                note: "Carico manuale da campo libero",
-                flowId: p.flowDocId,
-                fileName: "MANUAL",
+                note: "Carico da campo libero",
+                flowKind: "carica",
+                flowId: p.flowDocId || "",
+                flowName: "MANUAL",
                 createdAtClient: tsClient
               });
             }
@@ -6047,7 +6054,9 @@ function closeSheet(kind){
         </div>
       </div>
     `;
-    actions.innerHTML = "";
+    actions.innerHTML = `
+      <button class="btn primary" data-action="pdLoad" ${canEdit ? "" : "disabled"}>Carica</button>
+    `;
   }else{
     content.innerHTML = `
       <div class="pd">
@@ -6116,6 +6125,7 @@ function closeSheet(kind){
 
     actions.innerHTML = `
       <button class="btn primary" data-action="pdSave" ${canEdit ? "" : "disabled"}>Salva</button>
+      <button class="btn amazon" data-action="pdLoad" ${canEdit ? "" : "disabled"}>Carica</button>
       <button class="btn" data-action="pdCancel" ${canEdit ? "" : "disabled"}>Annulla</button>
       <button class="btn" data-action="pdMove" data-to="cerea" ${(canEdit && loc!=="cerea") ? "" : "disabled"}>Sposta in Cerea</button>
       <button class="btn" data-action="pdMove" data-to="concamarise" ${(canEdit && loc!=="concamarise") ? "" : "disabled"}>Sposta in Concamarise</button>
@@ -6254,11 +6264,10 @@ function closeSheet(kind){
         const who = m.createdByEmail || m.createdByUid || "—";
         const typeRaw = m.type || "";
         const type = (typeRaw==="move") ? "Spostamento"
-          : (typeRaw==="carico") ? "Carico"
-          : (typeRaw==="scarico") ? "Scarico"
+          : (typeRaw==="carica") ? "Carico"
+          : (typeRaw==="scarica") ? "Scarico"
           : (typeRaw==="rettifica") ? "Rettifica"
-          : (typeRaw==="delete") ? "Eliminazione"
-          : (typeRaw==="manual_edit") ? "Rettifica / modifica"
+          : (typeRaw==="manual_edit") ? ((Number(m.qtySigned || m.deltaSigned || 0) !== 0) ? "Rettifica" : "Modifica")
           : (typeRaw==="manual_rename") ? "Rinomina SKU"
           : (typeRaw || "—");
 
@@ -6271,7 +6280,7 @@ function closeSheet(kind){
           : ((m.deltaSigned !== undefined && m.deltaSigned !== null) ? Number(m.deltaSigned) : NaN);
         const qtyStr = Number.isFinite(qty) ? String(Math.round(qty)) : "—";
 
-        const origin = [m.source, m.note].filter(Boolean).join(" • ");
+        const origin = [m.source, m.note, m.flowName || m.fileName].filter(Boolean).join(" • ");
 
         const metaLine1 = `${escapeHtml(dt)} • <span class="mono">${escapeHtml(who)}</span>`;
         const metaLine2 = [arrow && escapeHtml(arrow), origin && escapeHtml(origin)].filter(Boolean).join(" • ");
@@ -6289,6 +6298,106 @@ function closeSheet(kind){
           </div>
         `;
       }).join("");
+    }
+
+
+async function loadProductFromDetails(){
+      const loc = state.route.loc;
+      const sku = toSkuId(state.ui.productDetailsSku||"");
+      if(!loc || !sku) return;
+
+      if(!state.user?.isAdmin){
+        showToast("Permessi", "Solo Admin può caricare.", 2200);
+        return;
+      }
+
+      const raw = prompt(`Quantità da caricare per ${sku}:`, "");
+      if(raw === null) return;
+
+      const qtyToLoad = parseSignedQtyStrict(raw);
+      if(qtyToLoad === null || !Number.isFinite(qtyToLoad) || qtyToLoad <= 0){
+        showToast("Quantità non valida", "Inserisci un numero intero positivo.", 2400);
+        return;
+      }
+
+      const api = state.firebase.api;
+      const db = state.firebase.db;
+      if(!api || !db){
+        showToast("Errore", "Firebase non inizializzato.", 2200);
+        return;
+      }
+
+      const itemRef = api.doc(db, COL_ROOT, loc, SUB_ITEMS, sku);
+      const productRef = api.doc(db, COL_PRODUCTS, sku);
+
+      try{
+        const res = await api.runTransaction(db, async (tx)=>{
+          const snap = await tx.get(itemRef);
+          if(!snap.exists()) throw new Error("Prodotto non trovato.");
+
+          const data = snap.data() || {};
+          const beforeQty = Number.isFinite(data.qty) ? Math.round(data.qty) : (parseSignedQtyStrict(data.qty) || 0);
+          const afterQty = beforeQty + qtyToLoad;
+          const title = squashWhitespace(data.title || data.name || sku) || sku;
+          const nowClient = Date.now();
+          const who = state.user?.email || state.user?.uid || "";
+
+          tx.set(itemRef, {
+            sku,
+            title,
+            titleNorm: normalizeText(title || sku),
+            qty: api.increment(qtyToLoad),
+            location: loc,
+            updatedAt: api.serverTimestamp(),
+            updatedAtClient: nowClient,
+            updatedBy: who,
+            lastSeenAt: api.serverTimestamp(),
+            lastSeenAtClient: nowClient,
+            lastSeenKind: "manual_load",
+            seenCount: api.increment(1)
+          }, { merge:true });
+
+          tx.set(productRef, {
+            sku,
+            title,
+            titleNorm: normalizeText(title || sku),
+            lastSeenAt: api.serverTimestamp(),
+            lastSeenAtClient: nowClient,
+            lastSeenBy: who,
+            lastSeenLocation: loc,
+            lastSeenKind: "carica",
+            seenCount: api.increment(1)
+          }, { merge:true });
+
+          const moveRef = api.doc(api.collection(db, COL_PRODUCTS, sku, SUB_MOVES));
+          tx.set(moveRef, {
+            type: "carica",
+            sku,
+            qtySigned: qtyToLoad,
+            beforeQty,
+            afterQty,
+            fromWarehouse: loc,
+            toWarehouse: loc,
+            source: "manuale",
+            note: "Carico manuale da modale prodotto",
+            createdAt: api.serverTimestamp(),
+            createdAtClient: nowClient,
+            createdByUid: state.user?.uid || "",
+            createdByEmail: state.user?.email || ""
+          });
+
+          return { beforeQty, afterQty, title };
+        });
+
+        showToast("Carico registrato", `+${qtyToLoad} pz • Totale: ${res.afterQty}`, 2200);
+        scheduleLowStockEmailAfterUpdate("product_manual_load");
+        renderProductDetailsSheet();
+        renderProductsSheet();
+        renderInventoryList();
+      }catch(err){
+        console.error(err);
+        showToast("Errore carico", String(err?.message || err).slice(0, 200), 3000);
+      }
     }
 
 async function saveProductFromDetails(){
@@ -6382,6 +6491,7 @@ async function saveProductFromDetails(){
             titleNorm: normalizeText(title || sku),
             note: note || "",
             lowStockThreshold: lowStockThreshold,
+            active: true,
             lastSeenAt: api.serverTimestamp(),
             lastSeenAtClient: nowClient,
             lastSeenBy: state.user.email || "",
@@ -6404,7 +6514,16 @@ async function saveProductFromDetails(){
             }
           }else{
             tx.set(newP, pData, { merge:true });
-            tx.delete(oldP);
+            // Mantengo il vecchio documento globale come radice cloud dello storico movimenti.
+            tx.set(oldP, {
+              sku: oldSku,
+              active: false,
+              renamedTo: sku,
+              renamedAt: api.serverTimestamp(),
+              renamedAtClient: nowClient,
+              renamedBy: state.user.email || "",
+              lastSeenKind: "manual_rename"
+            }, { merge:true });
           }
 
           // Log "movimento" (storico prodotto) — include anche modifiche qty/titolo/sku
@@ -6625,33 +6744,6 @@ async function saveProductFromDetails(){
           return { moved: qtyToMove, remaining, toNewQty, title: finalTitle, dst, nowClient };
         });
 
-        // aggiorna cache locale (best-effort)
-        try{
-          const fromArr = state.inventories?.[fromLoc] || [];
-          const toArr = state.inventories?.[res.dst] || [];
-
-          const iFrom = fromArr.findIndex(x=> x.sku===oldSku);
-          if(res.remaining === 0){
-            if(iFrom>=0) fromArr.splice(iFrom, 1);
-          }else{
-            if(iFrom>=0){
-              fromArr[iFrom] = { ...fromArr[iFrom], title: res.title, titleNorm: normalizeText(res.title || oldSku), qty: res.remaining, updatedAtClient: res.nowClient, updatedBy: state.user.email||"" };
-            }else{
-              fromArr.push({ sku: oldSku, title: res.title, titleNorm: normalizeText(res.title || oldSku), qty: res.remaining, updatedAtClient: res.nowClient, updatedBy: state.user.email||"", location: fromLoc });
-            }
-          }
-
-          const iTo = toArr.findIndex(x=> x.sku===oldSku);
-          if(res.toNewQty === 0){
-            if(iTo>=0) toArr.splice(iTo, 1);
-          }else{
-            if(iTo>=0){
-              toArr[iTo] = { ...toArr[iTo], title: res.title, titleNorm: normalizeText(res.title || oldSku), qty: res.toNewQty, updatedAtClient: res.nowClient, updatedBy: state.user.email||"" };
-            }else{
-              toArr.push({ sku: oldSku, title: res.title, titleNorm: normalizeText(res.title || oldSku), qty: res.toNewQty, updatedAtClient: res.nowClient, updatedBy: state.user.email||"", location: res.dst });
-            }
-          }
-        }catch(e){ /* no-op */ }
 
         if(res.remaining !== 0){
           showToast("Spostati", `${res.moved} pz in ${prettyLoc(res.dst)}.`, 2000);
@@ -6801,52 +6893,86 @@ function renderProductsSheet(){
           if(sku!==oldSku){
             const sNew = await tx.get(newRef);
             if(sNew.exists()) throw new Error("SKU già esistente.");
+            const pNewSnap = await tx.get(newP);
+            if(pNewSnap.exists()) throw new Error("SKU già esistente (anagrafica).");
           }
 
+          const oldData = sOld.data() || {};
+          const oldQty = Number.isFinite(oldData.qty) ? Math.round(oldData.qty) : (parseQty(oldData.qty) ?? 0);
+          const finalTitle = title || squashWhitespace(oldData.title || oldData.name || sku) || sku;
           const nowClient = Date.now();
+          const who = state.user?.email || state.user?.emailLower || state.user?.uid || "";
           const baseData = {
             sku,
-            title: title || "",
-            titleNorm: normalizeText(title || sku),
+            title: finalTitle,
+            titleNorm: normalizeText(finalTitle || sku),
             qty,
             updatedAt: api.serverTimestamp(),
             updatedAtClient: nowClient,
-            updatedBy: state.user.email || "",
+            updatedBy: who,
             location: loc
           };
 
           if(sku===oldSku){
             tx.set(oldRef, baseData, { merge:true });
           }else{
-            // copia su nuovo e cancella vecchio
             tx.set(newRef, baseData, { merge:true });
             tx.delete(oldRef);
           }
 
-          // aggiorna anche anagrafica globale (best effort ma in tx)
           const pData = {
             sku,
-            title: title || "",
-            titleNorm: normalizeText(title || sku),
+            title: finalTitle,
+            titleNorm: normalizeText(finalTitle || sku),
             lastSeenAt: api.serverTimestamp(),
             lastSeenAtClient: nowClient,
-            lastSeenBy: state.user.email || "",
+            lastSeenBy: who,
             lastSeenLocation: loc,
             lastSeenKind: "manual_edit",
+            active: true,
             seenCount: api.increment(1)
           };
 
           if(sku===oldSku){
             tx.set(oldP, pData, { merge:true });
           }else{
-            const pNewSnap = await tx.get(newP);
-            if(pNewSnap.exists()) throw new Error("SKU già esistente (anagrafica).");
             tx.set(newP, pData, { merge:true });
-            tx.delete(oldP);
+            // Mantengo il vecchio documento globale come traccia cloud della rinomina/storico.
+            tx.set(oldP, {
+              sku: oldSku,
+              active: false,
+              renamedTo: sku,
+              renamedAt: api.serverTimestamp(),
+              renamedAtClient: nowClient,
+              renamedBy: who,
+              lastSeenKind: "manual_rename"
+            }, { merge:true });
           }
+
+          const deltaSigned = qty - oldQty;
+          const moveRef = api.doc(api.collection(db, COL_PRODUCTS, sku, SUB_MOVES));
+          tx.set(moveRef, {
+            type: (sku===oldSku) ? "manual_edit" : "manual_rename",
+            sku,
+            oldSku,
+            newSku: sku,
+            qtySigned: deltaSigned,
+            deltaSigned,
+            beforeQty: oldQty,
+            afterQty: qty,
+            fromWarehouse: loc,
+            toWarehouse: loc,
+            source: "manuale",
+            note: (sku===oldSku) ? "Modifica prodotto da lista articoli" : `Rinomina SKU da lista articoli: ${oldSku} → ${sku}`,
+            createdAt: api.serverTimestamp(),
+            createdAtClient: nowClient,
+            createdByUid: state.user?.uid || "",
+            createdByEmail: state.user?.email || ""
+          });
         });
 
-        showToast("Salvato", "Prodotto aggiornato.", 1400);
+        showToast("Salvato", "Prodotto aggiornato e movimento registrato in cloud.", 1600);
+        scheduleLowStockEmailAfterUpdate("product_row_edit");
         state.ui.productEditSku = null;
         renderProductsSheet();
         renderInventoryList();
@@ -6866,39 +6992,68 @@ function renderProductsSheet(){
       const s = toSkuId(sku||"");
       if(!s) return;
 
-      const ok = confirm(`Eliminare definitivamente questo prodotto?\n\nSKU: ${s}\n\n(Operazione irreversibile)`);
+      const ok = confirm(`Eliminare definitivamente questo prodotto dall'inventario?
+
+SKU: ${s}
+
+Verrà creato anche il movimento di rettifica nello storico cloud.`);
       if(!ok) return;
 
       const api = state.firebase.api;
       const db = state.firebase.db;
 
       try{
-        const nowClient = Date.now();
-        const current = getProductBySku(loc, s) || {};
-        const batch = api.writeBatch(db);
-        batch.delete(api.doc(db, COL_ROOT, loc, SUB_ITEMS, s));
-        batch.set(api.doc(db, COL_PRODUCTS, s), {
-          sku: s,
-          title: current.title || s,
-          titleNorm: normalizeText(current.title || s),
-          deletedAt: api.serverTimestamp(),
-          deletedAtClient: nowClient,
-          deletedBy: state.user?.email || "",
-          lastSeenKind: "delete",
-          lastSeenLocation: loc
-        }, { merge:true });
-        addProductMovementToBatch(batch, api, db, {
-          sku: s,
-          title: current.title || s,
-          loc,
-          type: "delete",
-          qtySigned: -(Number.isFinite(current.qty) ? Number(current.qty) : 0),
-          source: "manuale",
-          note: "Eliminazione prodotto da inventario",
-          createdAtClient: nowClient
+        await api.runTransaction(db, async (tx)=>{
+          const itemRef = api.doc(db, COL_ROOT, loc, SUB_ITEMS, s);
+          const productRef = api.doc(db, COL_PRODUCTS, s);
+          const snap = await tx.get(itemRef);
+          if(!snap.exists()) throw new Error("Prodotto non trovato.");
+
+          const d = snap.data() || {};
+          const beforeQty = Number.isFinite(d.qty) ? Math.round(d.qty) : (parseSignedQtyStrict(d.qty) || parseQty(d.qty) || 0);
+          const title = squashWhitespace(d.title || d.name || s) || s;
+          const nowClient = Date.now();
+          const who = state.user?.email || state.user?.emailLower || state.user?.uid || "";
+
+          tx.delete(itemRef);
+
+          // Non cancelliamo il documento globale prodotto: serve come radice cloud dello storico movimenti.
+          tx.set(productRef, {
+            sku: s,
+            title,
+            titleNorm: normalizeText(title || s),
+            active: false,
+            deletedAt: api.serverTimestamp(),
+            deletedAtClient: nowClient,
+            deletedBy: who,
+            lastSeenAt: api.serverTimestamp(),
+            lastSeenAtClient: nowClient,
+            lastSeenBy: who,
+            lastSeenLocation: loc,
+            lastSeenKind: "manual_delete",
+            lastDeletedLocation: loc
+          }, { merge:true });
+
+          const moveRef = api.doc(api.collection(db, COL_PRODUCTS, s, SUB_MOVES));
+          tx.set(moveRef, {
+            type: "rettifica",
+            sku: s,
+            qtySigned: -beforeQty,
+            deltaSigned: -beforeQty,
+            beforeQty,
+            afterQty: 0,
+            fromWarehouse: loc,
+            toWarehouse: loc,
+            source: "manuale",
+            note: "Eliminazione prodotto da anagrafica",
+            createdAt: api.serverTimestamp(),
+            createdAtClient: nowClient,
+            createdByUid: state.user?.uid || "",
+            createdByEmail: state.user?.email || ""
+          });
         });
-        await batch.commit();
-        showToast("Eliminato", "Prodotto rimosso. Storico movimenti mantenuto.", 1600);
+
+        showToast("Eliminato", "Prodotto rimosso e movimento registrato in cloud.", 1800);
         scheduleLowStockEmailAfterUpdate("product_delete");
 
         state.ui.productEditSku = null;
@@ -6994,7 +7149,7 @@ async function applyFlow(kind){
 
       if(!plans.length) return showToast("Nessuna riga valida","");
 
-      const CHUNK = 220; // 2 scritture per riga: inventario + storico movimenti
+      const CHUNK = 220; // 2 scritture per riga: inventario + storico movimento prodotto
       const planChunks = plans.map(p=>{
         const chunks = [];
         for(let i=0;i<p.aggregated.length;i+=CHUNK){
@@ -7071,15 +7226,17 @@ async function applyFlow(kind){
                 location: p.loc
               }, { merge:true });
 
-              addProductMovementToBatch(batch, api, db, {
-                sku,
-                title: title || sku,
-                loc: p.loc,
-                type: kind === "scarica" ? "scarico" : "carico",
+              addProductMovementToBatch(batch, api, db, sku, {
+                type: (kind === "scarica") ? "scarica" : "carica",
                 qtySigned: delta,
-                source: "pdf",
-                note: kind === "scarica" ? "Scarico da PDF" : "Carico da PDF",
-                flowId: p.flowDocId,
+                deltaSigned: delta,
+                fromWarehouse: p.loc,
+                toWarehouse: p.loc,
+                source: "flusso_pdf",
+                note: flowMovementNote(kind, 1, wfLabel || (flow.file?.name || p.flowDocId || "")),
+                flowKind: kind,
+                flowId: p.flowDocId || wfId || "",
+                flowName: wfLabel || flow.file?.name || "",
                 fileName: flow.file?.name || "",
                 createdAtClient: tsClient
               });
@@ -7406,6 +7563,7 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
         const aEdit = e.target?.closest?.("[data-action='pdEdit']");
         const aCancel = e.target?.closest?.("[data-action='pdCancel']");
         const aSave = e.target?.closest?.("[data-action='pdSave']");
+        const aLoad = e.target?.closest?.("[data-action='pdLoad']");
         const aDelete = e.target?.closest?.("[data-action='pdDelete']");
         const aMove = e.target?.closest?.("[data-action='pdMove']");
 
@@ -7422,6 +7580,7 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
           renderProductDetailsSheet();
           return;
         }
+        if(aLoad){ loadProductFromDetails(); return; }
 
         // blocca azioni "modificanti" se non sei in edit-mode
         if(!state.ui.productDetailsEditMode) return;
@@ -7736,6 +7895,7 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
     Firestore data model:
       amzInventory/{loc}/items/{SKU} { sku, title, titleNorm, qty, updatedAt, updatedAtClient, updatedBy, location }
       amzInventoryProducts/{SKU} { sku, title, titleNorm, lastSeenAt, lastSeenAtClient, lastSeenBy, lastSeenLocation, lastSeenKind, seenCount }
+      amzInventoryProducts/{SKU}/movements/{autoId} { type, qtySigned, beforeQty?, afterQty?, fromWarehouse?, toWarehouse?, source, note, createdAt, createdAtClient, createdByEmail }
       amzInventory/{loc}/logs/{autoId} { kind, location, fileName, appliedAt, appliedBy, totalLines, totalPieces, workflow?, lines[] }
 
     Whitelist:
