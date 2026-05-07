@@ -182,6 +182,14 @@
     }
 
     /* ============ LIFETIME COUNTER (header) ============ */
+    .header-metrics{
+      display:flex;
+      align-items:center;
+      gap:8px;
+      flex-wrap:wrap;
+      max-width:100%;
+    }
+
     .lifetime-counter{
       display:inline-flex;
       align-items:center;
@@ -258,6 +266,28 @@
       letter-spacing:.10em;
       text-transform:uppercase;
       color:var(--muted);
+    }
+
+    .weekly-counter{
+      background:
+        radial-gradient(circle at 18% 22%, rgba(255,255,255,.95), rgba(255,255,255,0) 54%),
+        linear-gradient(135deg, rgba(22,163,74,.11), rgba(28,111,230,.06));
+      border-color:rgba(22,163,74,.18);
+      box-shadow:
+        inset 0 1px 0 rgba(255,255,255,.96),
+        0 6px 16px rgba(22,163,74,.08),
+        0 1px 2px rgba(15,23,42,.04);
+    }
+
+    .weekly-counter .lifetime-counter-dot{
+      background:linear-gradient(145deg, #22c55e, #15803d);
+      box-shadow:
+        inset 0 1px 0 rgba(255,255,255,.45),
+        0 2px 6px rgba(22,163,74,.30);
+    }
+
+    .weekly-counter .lifetime-counter-dot::after{
+      background:rgba(22,163,74,.20);
     }
 
     .top-actions{
@@ -787,12 +817,21 @@
         <div class="brand-title">
           <div class="brand-headline">
             <h1>ESTRUSORE BOTTIGLIA AGRO 1 LT</h1>
-            <div class="lifetime-counter" title="Flaconi prodotti da sempre">
-              <span class="lifetime-counter-dot" aria-hidden="true">Σ</span>
-              <span class="lifetime-counter-text">
-                <span id="lifetimeProduced" class="lifetime-counter-value" aria-live="polite">—</span>
-                <span class="lifetime-counter-label">prodotti da sempre</span>
-              </span>
+            <div class="header-metrics">
+              <div class="lifetime-counter" title="Flaconi prodotti da sempre">
+                <span class="lifetime-counter-dot" aria-hidden="true">Σ</span>
+                <span class="lifetime-counter-text">
+                  <span id="lifetimeProduced" class="lifetime-counter-value" aria-live="polite">—</span>
+                  <span class="lifetime-counter-label">prodotti da sempre</span>
+                </span>
+              </div>
+              <div class="lifetime-counter weekly-counter" title="Media settimanale prodotta, calcolata dalla prima produzione registrata a oggi">
+                <span class="lifetime-counter-dot" aria-hidden="true">Ø</span>
+                <span class="lifetime-counter-text">
+                  <span id="weeklyAverageProduced" class="lifetime-counter-value" aria-live="polite">—</span>
+                  <span class="lifetime-counter-label">media settimanale</span>
+                </span>
+              </div>
             </div>
           </div>
         </div>
@@ -901,6 +940,7 @@
       stockQty: document.getElementById("stockQty"),
       stockMeta: document.getElementById("stockMeta"),
       lifetimeProduced: document.getElementById("lifetimeProduced"),
+      weeklyAverageProduced: document.getElementById("weeklyAverageProduced"),
       movements: document.getElementById("movements"),
       produceModal: document.getElementById("produceModal"),
       qtyInput: document.getElementById("qtyInput"),
@@ -1212,17 +1252,44 @@
       return source === SOURCE.toLowerCase() || docNum.startsWith("ESTR-");
     }
 
-    function computeLifetimeProduced(){
+    function getEstrusoreProductionMovements(){
       const countedIds = new Set();
-      return (state.codeMovements || []).reduce((sum, mv) => {
-        if (!isEstrusoreProductionMovement(mv)) return sum;
+      return (state.codeMovements || []).filter(mv => {
+        if (!isEstrusoreProductionMovement(mv)) return false;
         const key = String(mv.id || "").trim();
-        if (key){
-          if (countedIds.has(key)) return sum;
-          countedIds.add(key);
-        }
+        if (!key) return true;
+        if (countedIds.has(key)) return false;
+        countedIds.add(key);
+        return true;
+      });
+    }
+
+    function computeLifetimeProduced(){
+      return getEstrusoreProductionMovements().reduce((sum, mv) => {
         return sum + Math.max(0, safeInt(mv.qty));
       }, 0);
+    }
+
+    function computeWeeklyAverageProduced(){
+      const list = getEstrusoreProductionMovements();
+      if (!list.length) return 0;
+
+      const total = list.reduce((sum, mv) => sum + Math.max(0, safeInt(mv.qty)), 0);
+      if (total <= 0) return 0;
+
+      const dates = list
+        .map(mv => tsToDate(mv.createdAt))
+        .filter(date => date && Number.isFinite(date.getTime()))
+        .map(date => date.getTime());
+
+      // Media da sempre: dalla prima produzione valida registrata a oggi.
+      // Usa almeno 1 settimana per evitare valori gonfiati quando le prime registrazioni sono recenti.
+      if (!dates.length) return Math.round(total);
+
+      const firstProductionAt = Math.min(...dates);
+      const weekMs = 7 * 24 * 60 * 60 * 1000;
+      const elapsedWeeks = Math.max(1, (Date.now() - firstProductionAt) / weekMs);
+      return Math.round(total / elapsedWeeks);
     }
 
     function renderMovements(){
@@ -1323,6 +1390,7 @@
       }
 
       setNumericDisplay(els.lifetimeProduced, state.user ? computeLifetimeProduced() : null);
+      setNumericDisplay(els.weeklyAverageProduced, state.user ? computeWeeklyAverageProduced() : null);
 
       els.btnLogin.hidden = !!state.user;
       els.btnProduce.disabled = !(state.user && state.db) || state.busy;
