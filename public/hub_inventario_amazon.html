@@ -821,6 +821,24 @@
       overflow:hidden;
       text-overflow:ellipsis;
     }
+
+    .reorderedTiny{
+      display:inline-flex;
+      align-items:center;
+      margin-left:6px;
+      padding:2px 6px;
+      border-radius:999px;
+      border:1px solid rgba(22,163,74,.24);
+      background:rgba(22,163,74,.10);
+      color:rgba(22,101,52,.96);
+      font-size:10px;
+      font-weight:900;
+      letter-spacing:.06em;
+      line-height:1;
+      text-transform:uppercase;
+      vertical-align:middle;
+      white-space:nowrap;
+    }
     .gridRight{ text-align:right; }
     .gridTable .badge{ justify-self:end; }
 
@@ -2858,6 +2876,26 @@ function guessTitleFromRaw(rawText, sku){
       return __isFiveKgItem(it) ? `≤${LOW_STOCK_5KG}` : `<${LOW_STOCK_DEFAULT}`;
     }
 
+    function __isReorderedItem(it){
+      try{
+        if(!it) return false;
+        return !!(
+          it.reordered === true ||
+          String(it.reorderStatus || "").toLowerCase() === "riordinato" ||
+          it.reorderedAtClient ||
+          it.reorderedAt ||
+          it.reorderedQty ||
+          it.reorderedQueueId
+        );
+      }catch(_e){
+        return false;
+      }
+    }
+
+    function __reorderedTinyBadge(it){
+      return __isReorderedItem(it) ? `<span class="reorderedTiny">RIORDINATO</span>` : "";
+    }
+
     function __lowStockPolicyLabel(){
       return `personalizzata per SKU (fallback: < ${LOW_STOCK_DEFAULT} pz; 5kg ≤ ${LOW_STOCK_5KG} pz)`;
     }
@@ -3761,6 +3799,13 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
             titleNorm: d.titleNorm || normalizeText(title || sku),
             qty,
             lowStockThreshold: __parseLowStockThresholdValue(d.lowStockThreshold),
+            reordered: d.reordered === true,
+            reorderStatus: d.reorderStatus || "",
+            reorderedAt: d.reorderedAt || null,
+            reorderedAtClient: d.reorderedAtClient || null,
+            reorderedQty: Number.isFinite(Number(d.reorderedQty)) ? Number(d.reorderedQty) : null,
+            reorderedQueueId: d.reorderedQueueId || "",
+            reorderedQueueOrderKey: d.reorderedQueueOrderKey || "",
             note: d.note || d.notes || "",
             updatedAt,
             updatedAtClient
@@ -4645,7 +4690,7 @@ function currentInv(){
           if(__isLowStockItem({ ...it, qty })){
             const sku = toSkuId(it.sku || it.id || "");
             if(!sku) continue;
-            out.push({ loc, sku, title: it.title || "", qty, lowStockThreshold: it.lowStockThreshold });
+            out.push({ ...it, loc, sku, title: it.title || "", qty, lowStockThreshold: it.lowStockThreshold });
           }
         }
       };
@@ -4690,13 +4735,14 @@ function currentInv(){
         const badgeClass = qty>0 ? (__isLowStockItem({ ...it, qty }) ? "warn" : "ok") : "bad";
         const locLabel = escapeHtml(prettyLoc(it.loc));
         const sogliaLabel = escapeHtml(__lowStockThresholdLabel(it));
+        const reorderBadge = __reorderedTinyBadge(it);
 
         return `
           <div class="row gridRow" role="button" tabindex="0"
                data-sku="${sku}" data-loc="${escapeHtml(it.loc||"")}" data-action="openSottoscortaItem">
             <div class="gridCell gridSku">${sku}</div>
             <div class="gridCell">
-              <div class="gridProdMain">${titleMain}</div>
+              <div class="gridProdMain">${titleMain}${reorderBadge}</div>
               <div class="gridProdSub">${locLabel} • Soglia: ${sogliaLabel}</div>
             </div>
             <div class="gridCell gridRight"><span class="badge ${badgeClass}">${qty}</span></div>
@@ -4822,11 +4868,12 @@ function currentInv(){
           const badgeClass = qty>0 ? (__isLowStockItem({ ...it, qty }) ? "warn" : "ok") : "bad";
           const locLabel = escapeHtml(prettyLoc(it.loc));
           const sogliaLabel = escapeHtml(__lowStockThresholdLabel(it));
+          const reorderBadge = __reorderedTinyBadge(it);
           return `
             <div class="row gridRow" role="button" tabindex="0" data-sku="${sku}" data-loc="${it.loc}" data-action="openHomeSottoscortaItem">
               <div class="gridCell gridSku">${sku}</div>
               <div class="gridCell">
-                <div class="gridProdMain">${titleMain}</div>
+                <div class="gridProdMain">${titleMain}${reorderBadge}</div>
                 <div class="gridProdSub">${locLabel} • Soglia: ${sogliaLabel}</div>
               </div>
               <div class="badge ${badgeClass}">${qty}</div>
@@ -6455,7 +6502,10 @@ async function reorderProductToTabelloneWrite(){
     const who = state.user?.email || state.user?.uid || "";
     const availableQty = Number.isFinite(Number(it?.qty)) ? Math.round(Number(it.qty)) : null;
 
-    await api.setDoc(ref, {
+    const batch = api.writeBatch(db);
+    const itemRef = api.doc(db, COL_ROOT, loc, SUB_ITEMS, sku);
+
+    batch.set(ref, {
       queueOrderKey,
       kind: "amazonSku",
       source: "manual_amazon_concamarise",
@@ -6482,6 +6532,20 @@ async function reorderProductToTabelloneWrite(){
       createdByUid: state.user?.uid || null,
       createdByEmail: who || null
     }, { merge:true });
+
+    batch.set(itemRef, {
+      reordered: true,
+      reorderStatus: "riordinato",
+      reorderedAt: api.serverTimestamp(),
+      reorderedAtClient: nowClient,
+      reorderedQty: qty,
+      reorderedQueueId: ref.id,
+      reorderedQueueOrderKey: queueOrderKey,
+      reorderedByUid: state.user?.uid || null,
+      reorderedByEmail: who || null
+    }, { merge:true });
+
+    await batch.commit();
 
     showToast("Riordino creato", `${qty} pz aggiunti alla coda Tabellone WRITE.`, 2600);
   }catch(err){
