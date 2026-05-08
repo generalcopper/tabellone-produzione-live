@@ -7567,7 +7567,7 @@ function renderHome(){
     }catch(_e){}
 
 
-    try{ renderCompletedSection(); }catch(_e){}
+    try{ if(twShouldRenderCompletedNow()) renderCompletedSection(); }catch(_e){}
 
     const active = state.activeProductions || [];
     const strip = $("prodStrip");
@@ -7597,10 +7597,10 @@ function renderHome(){
       }
     }catch(_e){}
 
-    renderStats();
+    if(twShouldRenderStatsNow()) renderStats();
     renderHeaderKpis();
-    renderMagazzino();
-    renderActionLogPanel();
+    if(twShouldRenderMagazzinoNow()) renderMagazzino();
+    if(twIsCurrentUserAdmin()) renderActionLogPanel();
     if(isMobile()){
       checkMobileEvents({ partialCount, prodKey, alertKey });
     }
@@ -10223,6 +10223,15 @@ Linea: liquidi`, null); }catch(_e){}
     window.addEventListener("orientationchange", syncAlertSpacerHeight);
     try{ kioskAspectMq && kioskAspectMq.addEventListener("change", updateKioskAdminMode); }catch(_e){ try{ kioskAspectMq && kioskAspectMq.addListener(updateKioskAdminMode); }catch(_e2){} }
     wireStatsClearAction();
+    try{
+      window.addEventListener('tw:pagechange', (ev)=>{
+        const page = ev?.detail?.page || twActivePageName();
+        if(page === 'magazzino') try{ renderMagazzino(); }catch(_e){}
+        if(page === 'statistiche') try{ renderStats(); }catch(_e){}
+        if(page === 'conclusi') try{ renderCompletedSection(); }catch(_e){}
+        if(page === 'coda') try{ twScheduleRenderAll('page_coda', 20); }catch(_e){}
+      });
+    }catch(_e){}
 
     // ===============================
     // HOME interactions
@@ -12065,6 +12074,68 @@ function ensureTabWriteState(){
 }
 
 
+// Performance guard WRITE:
+// gli operatori/non-admin devono leggere e completare la coda, ma NON devono fare
+// sync/repair/backfill globali della coda. Quelle operazioni restano admin-only.
+function twIsCurrentUserAdmin(){
+  return Boolean(state && state.user && state.user.isAdmin);
+}
+function twCanManageQueueCloud(){
+  return twIsCurrentUserAdmin();
+}
+function twActivePageName(){
+  try{ return String(document.body?.dataset?.activePage || "coda").trim() || "coda"; }catch(_e){ return "coda"; }
+}
+function twPageIsActive(name){
+  return twActivePageName() === String(name || "");
+}
+function twIsWarehouseOpen(){
+  try{
+    const modal = $("warehouseModal");
+    return Boolean(modal && (modal.classList.contains("show") || modal.style.display === "flex" || modal.style.display === "block"));
+  }catch(_e){ return false; }
+}
+function twShouldRenderMagazzinoNow(){
+  return twPageIsActive("magazzino") || twIsWarehouseOpen();
+}
+function twShouldRenderStatsNow(){
+  return twIsCurrentUserAdmin() || twPageIsActive("statistiche");
+}
+function twShouldRenderCompletedNow(){
+  return twPageIsActive("conclusi");
+}
+let __TW_RENDER_ALL_T = null;
+function twScheduleRenderAll(reason="", delay=70){
+  try{
+    const tw = ensureTabWriteState();
+    tw._lastRenderReason = String(reason || "");
+    if(__TW_RENDER_ALL_T) return;
+    __TW_RENDER_ALL_T = setTimeout(()=>{
+      __TW_RENDER_ALL_T = null;
+      twRenderAll();
+    }, Math.max(20, Number(delay)||70));
+  }catch(_e){
+    try{ twRenderAll(); }catch(_e2){}
+  }
+}
+const __TW_ORDER_KEY_CACHE = { ordersRef:null, map:new Map() };
+function twOrderKeyByOrderNo(orderNo){
+  const ordNo = String(orderNo || "").trim();
+  if(!ordNo) return "";
+  const orders = Array.isArray(state.powderOrders) ? state.powderOrders : [];
+  if(__TW_ORDER_KEY_CACHE.ordersRef !== orders){
+    const m = new Map();
+    for(const o of orders){
+      const on = String(o?.orderNo || o?.number || "").trim();
+      if(on && !m.has(on)) m.set(on, getOrderKey(o));
+    }
+    __TW_ORDER_KEY_CACHE.ordersRef = orders;
+    __TW_ORDER_KEY_CACHE.map = m;
+  }
+  return __TW_ORDER_KEY_CACHE.map.get(ordNo) || "";
+}
+
+
 const TW_ORDER_KEY_LEN = 16;
 const TW_ORDER_BASE = 36n;
 const TW_ORDER_STEP = 2821109907456n; // 36^8
@@ -12379,6 +12450,7 @@ async function twScanQueueItemsFromCloud(){
 }
 
 async function twEnsureQueueOrderFieldsFromCloud(reason="bootstrap"){
+  if(!twCanManageQueueCloud()) return false;
   const tw = ensureTabWriteState();
   if(tw._queueBootstrapBusy || tw._repairOrderBusy) return false;
   if(twDragCtx){
@@ -12438,6 +12510,7 @@ async function twEnsureQueueOrderFieldsFromCloud(reason="bootstrap"){
 }
 
 function twScheduleQueueOrderRepair(reason="snapshot"){
+  if(!twCanManageQueueCloud()) return;
   const tw = ensureTabWriteState();
   if(twDragCtx){
     tw._pendingOrderRepair = true;
@@ -12451,6 +12524,7 @@ function twScheduleQueueOrderRepair(reason="snapshot"){
 }
 
 async function twRepairQueueOrder(reason="snapshot"){
+  if(!twCanManageQueueCloud()) return;
   await twEnsureQueueOrderFieldsFromCloud(reason || "snapshot");
 }
 
@@ -13150,6 +13224,7 @@ function twApplyAmazonInventoryBatchWrite(batch, fs, db, done, opts={}){
 let __TW_AMZ_BACKFILL_T = null;
 function twScheduleDoneAmazonBackfill(items){
   try{
+    if(!twCanManageQueueCloud()) return;
     const tw = ensureTabWriteState();
     tw._pendingAmazonDoneItems = Array.isArray(items) ? items.slice() : [];
     if(__TW_AMZ_BACKFILL_T) return;
@@ -13162,6 +13237,7 @@ function twScheduleDoneAmazonBackfill(items){
 }
 
 async function twSyncCompletedAmazonItemsToInventory(items){
+  if(!twCanManageQueueCloud()) return;
   const tw = ensureTabWriteState();
   try{
     if(tw._amazonBackfillBusy) return;
@@ -13447,6 +13523,7 @@ function twConcaBackfillSignature(items){
 let __TW_CONCA_BACKFILL_T = null;
 function twScheduleDoneConcaBackfill(items){
   try{
+    if(!twCanManageQueueCloud()) return;
     const tw = ensureTabWriteState();
     tw._pendingConcaDoneItems = Array.isArray(items) ? items.slice() : [];
     if(__TW_CONCA_BACKFILL_T) return;
@@ -13459,6 +13536,7 @@ function twScheduleDoneConcaBackfill(items){
 }
 
 async function twSyncCompletedItemsToConcaInventory(items){
+  if(!twCanManageQueueCloud()) return;
   const tw = ensureTabWriteState();
   try{
     if(tw._concaBackfillBusy) return;
@@ -14712,6 +14790,7 @@ let __TW_ORDERS_SYNC_T = null;
 
 function twScheduleOrdersSync(){
   try{
+    if(!twCanManageQueueCloud()) return;
     if(__TW_ORDERS_SYNC_T) return;
     __TW_ORDERS_SYNC_T = setTimeout(()=>{
       __TW_ORDERS_SYNC_T = null;
@@ -14935,17 +15014,7 @@ function twAllowInTabWrite(it){
 
     let k = String(it.orderKey || "").trim();
     if(!k){
-      const ordNo = String(it.orderNo || "").trim();
-      if(ordNo){
-        const orders = Array.isArray(state.powderOrders) ? state.powderOrders : [];
-        for(const o of orders){
-          const on = String(o?.orderNo || o?.number || "").trim();
-          if(on && on === ordNo){
-            k = getOrderKey(o);
-            break;
-          }
-        }
-      }
+      k = twOrderKeyByOrderNo(it.orderNo || "");
     }
     if(!k) return false;
     return allowKeySet.has(k);
@@ -14958,6 +15027,7 @@ function twAllowInTabWrite(it){
 
 
 async function twSyncOrdersToWriteQueue(){
+  if(!twCanManageQueueCloud()) return;
   const tw = ensureTabWriteState();
   if(tw._syncBusy) return;
   tw._syncBusy = true;
@@ -15694,15 +15764,38 @@ function twRenderQueue(items){
 
 function twRenderDone(items){
   const safeItems = Array.isArray(items) ? items : [];
-  twRenderDoneInto($("twDoneList"), safeItems);
-  twRenderDoneInto($("completedList"), safeItems);
+
+  // La lista inline dei completati in Coda WRITE deve restare leggera: il report completo
+  // resta nella pagina "Ordini conclusi" e nel PDF. Così gli operatori non admin non
+  // renderizzano centinaia/migliaia di righe nascoste ad ogni snapshot Firestore.
+  const inlineLimit = twIsCurrentUserAdmin() ? 160 : 80;
+  const shouldRenderInlineDone = twPageIsActive("coda");
+  const shouldRenderFullDone = twShouldRenderCompletedNow();
+
+  if(shouldRenderInlineDone){
+    const inlineItems = safeItems.slice(0, inlineLimit);
+    twRenderDoneInto($("twDoneList"), inlineItems);
+    const list = $("twDoneList");
+    if(list && safeItems.length > inlineItems.length){
+      const note = document.createElement("div");
+      note.className = "muted";
+      note.style.marginTop = "8px";
+      note.style.fontWeight = "900";
+      note.textContent = `Mostrati ultimi ${inlineItems.length} completati. Apri Ordini conclusi o PDF per il report completo (${safeItems.length}).`;
+      list.appendChild(note);
+    }
+  }
+
+  if(shouldRenderFullDone){
+    twRenderDoneInto($("completedList"), safeItems);
+  }
 
   const completedBadge = $("completedBadge");
   if(completedBadge) completedBadge.textContent = String(safeItems.length || 0);
 
   const completedEmpty = $("completedEmpty");
   if(completedEmpty) completedEmpty.style.display = safeItems.length ? "none" : "block";
-  try{ renderMagazzino(); }catch(_e){}
+  try{ if(twShouldRenderMagazzinoNow()) renderMagazzino(); }catch(_e){}
 }
 
 function twRenderDoneInto(out, items){
@@ -16814,10 +16907,13 @@ function twStartQueueWatch(){
   twSetCloud("loading","sync cloud…");
 
   (async()=>{
-    try{
-      await twEnsureQueueOrderFieldsFromCloud("watch_bootstrap");
-    }catch(e){
-      console.warn("tw queue bootstrap error:", e);
+    const canRepair = twCanManageQueueCloud();
+    if(canRepair){
+      try{
+        await twEnsureQueueOrderFieldsFromCloud("watch_bootstrap");
+      }catch(e){
+        console.warn("tw queue bootstrap error:", e);
+      }
     }
     if(tw._queueWatchToken !== watchToken) return;
 
@@ -16844,12 +16940,14 @@ function twStartQueueWatch(){
         tw._pendingQueueRenderAfterDrag = true;
       }else{
         tw._pendingQueueRenderAfterDrag = false;
-        twRenderAll();
+        twScheduleRenderAll("queue_snapshot", 70);
       }
-      if(twQueueOrderNeedsRepair(items)){
+      if(twCanManageQueueCloud() && twQueueOrderNeedsRepair(items)){
         try{ twScheduleQueueOrderRepair("snapshot"); }catch(_e){}
       }
-      try{ twScheduleOrdersSync(); }catch(_e){}
+      if(twCanManageQueueCloud()){
+        try{ twScheduleOrdersSync(); }catch(_e){}
+      }
     }, (err)=>{
       console.warn("tw queue snapshot error:", err);
       twSetCloud("bad", err?.code || "permission-denied");
@@ -16911,10 +17009,12 @@ function twStartDoneWatch(){
       });
     });
     tw.doneItems = items;
-    twRenderAll();
-    try{ twScheduleDoneConcaBackfill(items); }catch(_e){}
-    try{ twScheduleDoneAmazonBackfill(items); }catch(_e){}
-    try{ twScheduleOrdersSync(); }catch(_e){}
+    twScheduleRenderAll("done_snapshot", 70);
+    if(twCanManageQueueCloud()){
+      try{ twScheduleDoneConcaBackfill(items); }catch(_e){}
+      try{ twScheduleDoneAmazonBackfill(items); }catch(_e){}
+      try{ twScheduleOrdersSync(); }catch(_e){}
+    }
   }, (err)=>{
     console.warn("tw done snapshot error:", err);
   });
@@ -17490,9 +17590,14 @@ function ensureTabWriteHome(){
   if(!state.user) return;
   ensureTabWriteState();
   twBindUiOnce();
-  twMountPfCompileUi();
-  twStartPfWatch();
-  twStartAmazonWatch();
+  if(twIsCurrentUserAdmin()){
+    twMountPfCompileUi();
+    twStartPfWatch();
+    twStartAmazonWatch();
+  }else{
+    try{ twStopPfWatch(); }catch(_e){}
+    try{ twStopAmazonWatch(); }catch(_e){}
+  }
 
   if(globalThis.__TW_HOME_INIT__) return;
   globalThis.__TW_HOME_INIT__ = true;
@@ -17640,6 +17745,7 @@ window.addEventListener("resize", onScroll, {passive:true});
       pageTitleEl.textContent = PAGE_TITLES[name] || name;
     }
     try{ window.scrollTo(0, 0); }catch(_){}
+    try{ window.dispatchEvent(new CustomEvent('tw:pagechange', { detail:{ page:name } })); }catch(_){}
   }
 
   /* Wire nav buttons */
