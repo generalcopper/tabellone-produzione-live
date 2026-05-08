@@ -2078,6 +2078,16 @@ Tip:
 
       movements: { unsub: null, sku: null, items: [], error: "" },
 
+      // Riordini Tabellone WRITE: lettura cloud live + backfill flag RIORDINATO sui pregressi
+      twReorders: {
+        unsub: null,
+        bySku: new Map(),
+        ready: false,
+        error: "",
+        backfillTimer: null,
+        backfilledKeys: new Set()
+      },
+
       mail: {
         lowStock: { unsub:null, meta:null, error:"", emailDocId:"", emailDoc:null, emailDocError:"", emailDocBusy:false }
       }
@@ -2879,6 +2889,8 @@ function guessTitleFromRaw(rawText, sku){
     function __isReorderedItem(it){
       try{
         if(!it) return false;
+        const sku = toSkuId(it.sku || it.id || "");
+        if(sku && state.twReorders?.bySku instanceof Map && state.twReorders.bySku.has(sku)) return true;
         return !!(
           it.reordered === true ||
           String(it.reorderStatus || "").toLowerCase() === "riordinato" ||
@@ -3746,10 +3758,12 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
       startRealtimeFor("concamarise");
       startAllLogs();
       startLowStockEmailMetaWatch();
+      startTwReordersWatch();
     }
 
     function stopAllRealtime(){
       resetLowStockRealtimeWatcher();
+      stopTwReordersWatch();
       for(const loc of ["cerea","concamarise"]){
         try{ state.inventory[loc].unsub && state.inventory[loc].unsub(); }catch(_e){}
         state.inventory[loc].unsub = null;
@@ -3833,6 +3847,7 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
         }
 
         triggerLowStockMailFromRealtime("realtime_low_stock_" + loc);
+        scheduleTwReordersBackfillFromState("inventory_" + loc);
       }, (err)=>{
         console.warn("inventory watch error", err);
         showToast("Permessi insufficienti", err?.message || String(err));
@@ -4104,6 +4119,203 @@ function startAllLogs(){
         state.logs[loc].meta = { count:0 };
       }
       if(state.route.view==="location") renderFlowsList();
+    }
+
+
+
+    // --- Riordini Tabellone WRITE: live cloud + backfill pregresso ---
+    function twQueueReorderMarkerFromDoc(docSnap){
+      try{
+        const d = docSnap?.data?.() || {};
+        const sku = toSkuId(d.amazonInventorySku || d.sku || d.code || "");
+        if(!sku) return null;
+
+        const hay = [
+          d.origin,
+          d.source,
+          d.note,
+          d.kind,
+          d.inventoryTarget,
+          d.rawLine,
+          d.format
+        ].map(x=>String(x||"").toLowerCase()).join(" ");
+
+        const looksAmazonSku = !!(
+          d.amazonInventorySku ||
+          d.kind === "amazonSku" ||
+          String(d.inventoryTarget || "") === "amazon_concamarise" ||
+          String(d.amazonInventoryLocation || "") === TW_WRITE_AMZ_TARGET_LOC
+        );
+        const looksReorder = !!(
+          hay.includes("hub_inventario_amazon_riordino") ||
+          hay.includes("riordino") ||
+          d.reordered === true ||
+          d.reorder === true ||
+          String(d.reorderStatus || "").toLowerCase() === "riordinato"
+        );
+        if(!looksAmazonSku || !looksReorder) return null;
+
+        const locRaw = String(d.hubInventorySourceLocation || d.amazonInventoryLocation || TW_WRITE_AMZ_TARGET_LOC).toLowerCase();
+        const loc = (locRaw === "cerea" || locRaw === "concamarise") ? locRaw : TW_WRITE_AMZ_TARGET_LOC;
+        const qty = Number(d.qty || d.reorderedQty || d.amazonInventoryQty || 0);
+        const createdAtClient = Number(d.createdAtMs || d.createdAtOrigMs || d.reorderedAtClient || 0) || 0;
+        return {
+          id: docSnap.id,
+          sku,
+          loc,
+          qty: Number.isFinite(qty) ? Math.round(qty) : null,
+          title: d.amazonInventoryTitle || d.product || d.title || "",
+          queueOrderKey: d.queueOrderKey || "",
+          createdAtClient,
+          createdByEmail: d.createdByEmail || d.createdBy || ""
+        };
+      }catch(_e){
+        return null;
+      }
+    }
+
+    function startTwReordersWatch(){
+      try{
+        if(!state.firebase.ok || !state.user?.isWhitelisted) return;
+        if(state.twReorders?.unsub) return;
+        const api = state.firebase.api;
+        const db = state.firebase.db;
+        if(!api || !db) return;
+
+        if(!state.twReorders){
+          state.twReorders = { unsub:null, bySku:new Map(), ready:false, error:"", backfillTimer:null, backfilledKeys:new Set() };
+        }
+
+        const colRef = api.collection(db, "producedDays", TW_WRITE_LINE_BUCKET, "queue");
+        const q = api.query(colRef, api.limit(1000));
+        state.twReorders.unsub = api.onSnapshot(q, (snap)=>{
+          const bySku = new Map();
+          const markers = [];
+          snap.forEach((docSnap)=>{
+            const marker = twQueueReorderMarkerFromDoc(docSnap);
+            if(!marker) return;
+            markers.push(marker);
+            const prev = bySku.get(marker.sku);
+            if(!prev || (marker.createdAtClient || 0) > (prev.createdAtClient || 0)){
+              bySku.set(marker.sku, marker);
+            }
+          });
+
+          state.twReorders.bySku = bySku;
+          state.twReorders.ready = true;
+          state.twReorders.error = "";
+
+          if(state.route.view === "home") renderHomeDashboard();
+          if(state.route.view === "location") renderInventoryList();
+          if(state.ui.sheet === "sottoscorta") renderSottoscortaSheet();
+          if(state.ui.sheet === "productDetails") renderProductDetailsSheet();
+
+          scheduleTwReordersBackfill(markers, "queue_snapshot");
+        }, (err)=>{
+          if(state.twReorders){
+            state.twReorders.error = err?.message || String(err);
+            state.twReorders.ready = false;
+          }
+          console.warn("tw reorder watch error", err);
+        });
+      }catch(err){
+        console.warn("startTwReordersWatch", err);
+      }
+    }
+
+    function stopTwReordersWatch(){
+      try{ state.twReorders?.unsub && state.twReorders.unsub(); }catch(_e){}
+      try{ state.twReorders?.backfillTimer && clearTimeout(state.twReorders.backfillTimer); }catch(_e){}
+      if(state.twReorders){
+        state.twReorders.unsub = null;
+        state.twReorders.bySku = new Map();
+        state.twReorders.ready = false;
+        state.twReorders.error = "";
+        state.twReorders.backfillTimer = null;
+        state.twReorders.backfilledKeys = new Set();
+      }
+    }
+
+    function scheduleTwReordersBackfillFromState(reason){
+      try{
+        const markers = Array.from((state.twReorders?.bySku instanceof Map) ? state.twReorders.bySku.values() : []);
+        scheduleTwReordersBackfill(markers, reason || "state");
+      }catch(_e){}
+    }
+
+    function scheduleTwReordersBackfill(markers, reason){
+      try{
+        if(!state.user?.isAdmin || !state.user?.isWhitelisted) return;
+        if(!Array.isArray(markers) || !markers.length) return;
+        if(!(state.inventory?.cerea?.meta?.loaded && state.inventory?.concamarise?.meta?.loaded)) return;
+        if(!state.twReorders) return;
+        if(state.twReorders.backfillTimer) clearTimeout(state.twReorders.backfillTimer);
+        state.twReorders.backfillTimer = setTimeout(()=>{
+          state.twReorders.backfillTimer = null;
+          void backfillTwReorderFlags(markers, reason || "scheduled");
+        }, 800);
+      }catch(err){
+        console.warn("scheduleTwReordersBackfill", err);
+      }
+    }
+
+    async function backfillTwReorderFlags(markers, reason){
+      try{
+        if(!state.user?.isAdmin || !state.user?.isWhitelisted) return;
+        const api = state.firebase?.api;
+        const db = state.firebase?.db;
+        if(!api || !db) return;
+        if(!Array.isArray(markers) || !markers.length) return;
+
+        const newestBySku = new Map();
+        for(const m of markers){
+          const sku = toSkuId(m?.sku || "");
+          if(!sku) continue;
+          const prev = newestBySku.get(sku);
+          if(!prev || (Number(m.createdAtClient||0) > Number(prev.createdAtClient||0))) newestBySku.set(sku, m);
+        }
+
+        const writes = [];
+        for(const [sku, marker] of newestBySku.entries()){
+          const locCandidates = [marker.loc, "concamarise", "cerea"].filter(Boolean);
+          const locs = Array.from(new Set(locCandidates.filter(x=>x === "cerea" || x === "concamarise")));
+          for(const loc of locs){
+            const item = getProductBySku(loc, sku);
+            if(!item) continue; // non creare documenti inventario nuovi durante il backfill
+            if(__isReorderedItem({ ...item, sku })) continue;
+            const key = `${loc}::${sku}::${marker.id || marker.queueOrderKey || "queue"}`;
+            if(state.twReorders.backfilledKeys?.has(key)) continue;
+            writes.push({ loc, sku, marker, key });
+          }
+        }
+        if(!writes.length) return;
+
+        const chunks = [];
+        for(let i=0; i<writes.length; i+=400) chunks.push(writes.slice(i, i+400));
+
+        for(const chunk of chunks){
+          const batch = api.writeBatch(db);
+          for(const w of chunk){
+            const itemRef = api.doc(db, COL_ROOT, w.loc, SUB_ITEMS, w.sku);
+            batch.set(itemRef, {
+              reordered: true,
+              reorderStatus: "riordinato",
+              reorderedAt: api.serverTimestamp(),
+              reorderedAtClient: Date.now(),
+              reorderedQty: Number.isFinite(Number(w.marker.qty)) ? Number(w.marker.qty) : null,
+              reorderedQueueId: w.marker.id || "",
+              reorderedQueueOrderKey: w.marker.queueOrderKey || "",
+              reorderedByEmail: w.marker.createdByEmail || "",
+              reorderedBackfill: true,
+              reorderedBackfillReason: String(reason || "pregresso")
+            }, { merge:true });
+            try{ state.twReorders.backfilledKeys.add(w.key); }catch(_e){}
+          }
+          await batch.commit();
+        }
+      }catch(err){
+        console.warn("backfillTwReorderFlags", err);
+      }
     }
 
     function startLogsFor(loc){
