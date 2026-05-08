@@ -3320,6 +3320,16 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
     const COL_PRODUCTS = "amzInventoryProducts"; // anagrafica prodotti (globale)
     const SUB_MOVES = "movements"; // storico movimenti per prodotto
 
+    // Tabellone WRITE: stessa coda usata da tabellone_write.html
+    const TW_WRITE_LINE_BUCKET = "linea_liquidi";
+    const TW_WRITE_QUEUE_META_COL = "meta";
+    const TW_WRITE_QUEUE_META_DOC = "queueState";
+    const TW_WRITE_AMZ_TARGET_LOC = "concamarise";
+    const TW_WRITE_ORDER_KEY_LEN = 16;
+    const TW_WRITE_ORDER_BASE = 36n;
+    const TW_WRITE_ORDER_STEP = 2821109907456n; // 36^8
+    const TW_WRITE_ORDER_MAX = (TW_WRITE_ORDER_BASE ** BigInt(TW_WRITE_ORDER_KEY_LEN)) - 1n;
+
 
     function addProductMovementToBatch(batch, api, db, sku, data = {}){
       const s = toSkuId(sku || data?.sku || "");
@@ -3511,6 +3521,7 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
             doc: fsMod.doc,
             addDoc: fsMod.addDoc,
             getDoc: fsMod.getDoc,
+            getDocs: fsMod.getDocs,
             setDoc: fsMod.setDoc,
             updateDoc: fsMod.updateDoc,
             serverTimestamp: fsMod.serverTimestamp,
@@ -6056,6 +6067,7 @@ function closeSheet(kind){
     `;
     actions.innerHTML = `
       <button class="btn primary" data-action="pdLoad" ${canEdit ? "" : "disabled"}>Carica</button>
+      <button class="btn amazon" data-action="pdReorder" ${canEdit ? "" : "disabled"}>Riordina</button>
     `;
   }else{
     content.innerHTML = `
@@ -6126,6 +6138,7 @@ function closeSheet(kind){
     actions.innerHTML = `
       <button class="btn primary" data-action="pdSave" ${canEdit ? "" : "disabled"}>Salva</button>
       <button class="btn amazon" data-action="pdLoad" ${canEdit ? "" : "disabled"}>Carica</button>
+      <button class="btn amazon" data-action="pdReorder" ${canEdit ? "" : "disabled"}>Riordina</button>
       <button class="btn" data-action="pdCancel" ${canEdit ? "" : "disabled"}>Annulla</button>
       <button class="btn" data-action="pdMove" data-to="cerea" ${(canEdit && loc!=="cerea") ? "" : "disabled"}>Sposta in Cerea</button>
       <button class="btn" data-action="pdMove" data-to="concamarise" ${(canEdit && loc!=="concamarise") ? "" : "disabled"}>Sposta in Concamarise</button>
@@ -6299,6 +6312,183 @@ function closeSheet(kind){
         `;
       }).join("");
     }
+
+
+function hubWriteNormalizeOrderKey(raw){
+  const s = String(raw || "").trim().toUpperCase().replace(/[^0-9A-Z]/g, "");
+  if(!s) return "";
+  return s.slice(-TW_WRITE_ORDER_KEY_LEN).padStart(TW_WRITE_ORDER_KEY_LEN, "0");
+}
+
+function hubWriteOrderKeyToBig(raw){
+  const s = hubWriteNormalizeOrderKey(raw);
+  if(!s) return null;
+  let n = 0n;
+  for(const ch of s){
+    const code = ch.charCodeAt(0);
+    let v = -1n;
+    if(code >= 48 && code <= 57) v = BigInt(code - 48);
+    else if(code >= 65 && code <= 90) v = BigInt(code - 55);
+    else return null;
+    n = (n * TW_WRITE_ORDER_BASE) + v;
+  }
+  return n;
+}
+
+function hubWriteBigToOrderKey(value){
+  let n = BigInt(value || 0n);
+  if(n < 0n) n = 0n;
+  if(n > TW_WRITE_ORDER_MAX) n = TW_WRITE_ORDER_MAX;
+  let s = n.toString(36).toUpperCase();
+  if(s.length > TW_WRITE_ORDER_KEY_LEN) s = s.slice(-TW_WRITE_ORDER_KEY_LEN);
+  return s.padStart(TW_WRITE_ORDER_KEY_LEN, "0");
+}
+
+function hubWriteQueueMetaDocRef(){
+  const api = state.firebase?.api;
+  const db = state.firebase?.db;
+  if(!api || !db) return null;
+  return api.doc(db, "producedDays", TW_WRITE_LINE_BUCKET, TW_WRITE_QUEUE_META_COL, TW_WRITE_QUEUE_META_DOC);
+}
+
+async function hubWriteGetQueueTailFallbackBig(){
+  try{
+    const api = state.firebase?.api;
+    const db = state.firebase?.db;
+    if(!api || !db || !api.getDocs) return 0n;
+    const queueCol = api.collection(db, "producedDays", TW_WRITE_LINE_BUCKET, "queue");
+    const q = api.query(queueCol, api.orderBy("queueOrderKey", "desc"), api.limit(1));
+    const snap = await api.getDocs(q);
+    let out = 0n;
+    snap.forEach((d)=>{
+      const data = d.data() || {};
+      const n = hubWriteOrderKeyToBig(data.queueOrderKey || "");
+      if(n !== null && n > out) out = n;
+    });
+    return out;
+  }catch(_e){
+    return 0n;
+  }
+}
+
+async function hubWriteReserveQueueOrderKeys(count){
+  const total = Math.max(0, Math.floor(Number(count || 0)));
+  if(!total) return [];
+  const api = state.firebase?.api;
+  const db = state.firebase?.db;
+  if(!api || !db || !api.runTransaction) throw new Error("Firebase non inizializzato.");
+
+  const metaRef = hubWriteQueueMetaDocRef();
+  const fallbackTail = await hubWriteGetQueueTailFallbackBig();
+  const nowClient = Date.now();
+
+  return await api.runTransaction(db, async (tx)=>{
+    let tail = fallbackTail;
+    if(metaRef){
+      const metaSnap = await tx.get(metaRef);
+      if(metaSnap.exists()){
+        const meta = metaSnap.data() || {};
+        const storedTail = hubWriteOrderKeyToBig(meta.queueOrderTailKey || "");
+        if(storedTail !== null && storedTail > tail) tail = storedTail;
+      }
+    }
+
+    const keys = [];
+    let cursor = tail;
+    for(let i = 0; i < total; i++){
+      cursor += TW_WRITE_ORDER_STEP;
+      if(cursor > TW_WRITE_ORDER_MAX) throw new Error("Limite ordine coda raggiunto.");
+      keys.push(hubWriteBigToOrderKey(cursor));
+    }
+
+    if(metaRef){
+      tx.set(metaRef, {
+        queueOrderTailKey: keys[keys.length - 1] || hubWriteBigToOrderKey(cursor),
+        queueOrderTailUpdatedAt: api.serverTimestamp(),
+        queueOrderTailUpdatedAtMs: nowClient,
+        queueOrderTailUpdatedByUid: state.user?.uid || null,
+        queueOrderTailUpdatedByEmail: state.user?.email || null,
+        queueOrderTailUpdatedFrom: "hub_inventario_amazon"
+      }, { merge:true });
+    }
+
+    return keys;
+  });
+}
+
+async function reorderProductToTabelloneWrite(){
+  const loc = state.route.loc;
+  const sku = toSkuId(state.ui.productDetailsSku || "");
+  if(!loc || !sku) return;
+
+  if(!state.user?.isAdmin){
+    showToast("Permessi", "Solo Admin può creare un riordino.", 2200);
+    return;
+  }
+
+  const it = getProductBySku(loc, sku) || getProductBySku("concamarise", sku) || getProductBySku("cerea", sku) || null;
+  const title = squashWhitespace(it?.title || $("productDetailsTitle")?.textContent || sku) || sku;
+  const raw = prompt(`Quantità da riordinare per:\n${title}\n\nSKU: ${sku}`, "480");
+  if(raw === null) return;
+
+  const qty = parseSignedQtyStrict(raw);
+  if(qty === null || !Number.isFinite(qty) || qty <= 0){
+    showToast("Quantità non valida", "Inserisci un numero intero positivo.", 2400);
+    return;
+  }
+
+  const api = state.firebase?.api;
+  const db = state.firebase?.db;
+  if(!api || !db){
+    showToast("Errore", "Firebase non inizializzato.", 2200);
+    return;
+  }
+
+  try{
+    const keys = await hubWriteReserveQueueOrderKeys(1);
+    const queueOrderKey = hubWriteNormalizeOrderKey(keys[0] || "");
+    if(!queueOrderKey) throw new Error("Ordine coda non assegnato.");
+
+    const queueCol = api.collection(db, "producedDays", TW_WRITE_LINE_BUCKET, "queue");
+    const ref = api.doc(queueCol);
+    const nowClient = Date.now();
+    const who = state.user?.email || state.user?.uid || "";
+    const availableQty = Number.isFinite(Number(it?.qty)) ? Math.round(Number(it.qty)) : null;
+
+    await api.setDoc(ref, {
+      queueOrderKey,
+      kind: "amazonSku",
+      source: "manual_amazon_concamarise",
+      origin: "hub_inventario_amazon_riordino",
+      inventoryTarget: "amazon_concamarise",
+      amazonInventoryLocation: TW_WRITE_AMZ_TARGET_LOC,
+      amazonInventorySku: sku,
+      amazonInventoryTitle: title,
+      amazonInventoryUom: "pz",
+      code: sku,
+      product: title,
+      qty: String(qty),
+      unit: "pz",
+      format: "SKU Amazon • Concamarise",
+      status: "DA PRODURRE",
+      rawLine: `AMZ: ${sku} | ${qty}`,
+      hubInventorySourceLocation: loc,
+      hubInventorySourceQty: availableQty,
+      note: "Riordino creato da Hub Inventario Amazon",
+      createdAt: api.serverTimestamp(),
+      createdAtMs: nowClient,
+      createdAtOrig: api.serverTimestamp(),
+      createdAtOrigMs: nowClient,
+      createdByUid: state.user?.uid || null,
+      createdByEmail: who || null
+    }, { merge:true });
+
+    showToast("Riordino creato", `${qty} pz aggiunti alla coda Tabellone WRITE.`, 2600);
+  }catch(err){
+    console.error("reorderProductToTabelloneWrite", err);
+    showToast("Errore riordino", String(err?.message || err).slice(0, 220), 3200);
+  }
+}
 
 
 async function loadProductFromDetails(){
@@ -7564,6 +7754,7 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
         const aCancel = e.target?.closest?.("[data-action='pdCancel']");
         const aSave = e.target?.closest?.("[data-action='pdSave']");
         const aLoad = e.target?.closest?.("[data-action='pdLoad']");
+        const aReorder = e.target?.closest?.("[data-action='pdReorder']");
         const aDelete = e.target?.closest?.("[data-action='pdDelete']");
         const aMove = e.target?.closest?.("[data-action='pdMove']");
 
@@ -7581,6 +7772,7 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
           return;
         }
         if(aLoad){ loadProductFromDetails(); return; }
+        if(aReorder){ reorderProductToTabelloneWrite(); return; }
 
         // blocca azioni "modificanti" se non sei in edit-mode
         if(!state.ui.productDetailsEditMode) return;
