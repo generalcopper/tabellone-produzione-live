@@ -2210,6 +2210,40 @@ Tip:
     </div>
   </div>
 
+  <!-- SHEET COMBO PRODOTTO -->
+  <div class="sheet" id="sheetCombo" aria-hidden="true">
+    <div class="sheetCard" role="dialog" aria-modal="true" aria-label="Combo prodotto">
+      <div class="sheetTop">
+        <div style="min-width:0">
+          <p class="sheetTitle" id="comboTitle">Combo</p>
+          <div class="sheetSub" id="comboSub">Fino a 3 prodotti collegati • quantità standard 1 per prodotto.</div>
+        </div>
+        <button class="btn" id="btnCloseCombo" type="button">Chiudi</button>
+      </div>
+
+      <div class="sheetBody">
+        <div class="hint" id="comboHint">—</div>
+
+        <div class="pdSection" style="margin:0">
+          <div class="pdSectionTitle">Prodotti combo aggiunti</div>
+          <div class="list compact" id="comboSelectedList"></div>
+        </div>
+
+        <div class="search" style="grid-template-columns: 1fr; margin-top:0">
+          <input class="input" id="comboSearch" placeholder="Cerca prodotto da aggiungere alla combo…" />
+        </div>
+
+        <div class="sheetScroll">
+          <div class="list" id="comboResultsList"></div>
+        </div>
+
+        <div class="rowActions">
+          <button class="btn primary" id="btnSaveCombo" type="button">Salva combo</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- SHEET PICK SKU (per campo libero) -->
   <div class="sheet" id="sheetSkuPick" aria-hidden="true">
     <div class="sheetCard" role="dialog" aria-modal="true" aria-label="Seleziona prodotto">
@@ -2274,6 +2308,18 @@ Tip:
       manual: { carica:{ text:"", lines:[], busy:false } },
 
       movements: { unsub: null, sku: null, items: [], error: "" },
+      combo: {
+        unsub: null,
+        sku: null,
+        doc: null,
+        children: [],
+        draft: [],
+        dirty: false,
+        search: "",
+        saving: false,
+        error: ""
+      },
+      comboCache: new Map(),
 
       // Riordini Tabellone WRITE: lettura cloud live + backfill flag RIORDINATO sui pregressi
       twReorders: {
@@ -3567,103 +3613,6 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
     const COL_PRODUCTS = "amzInventoryProducts"; // anagrafica prodotti (globale)
     const SUB_MOVES = "movements"; // storico movimenti per prodotto
 
-    const BOM_PARENT_SKU = "96-G01P-94FF";
-    const BOM_COMPONENTS = Object.freeze([
-      { sku: "ZS-UPI1-K2E7", qtyPerUnit: 1 },
-      { sku: "SAP1", qtyPerUnit: 1 }
-    ]);
-
-    function isBomParentSku(sku){
-      return toSkuId(sku || "") === BOM_PARENT_SKU;
-    }
-
-    function addBomComponentMovementsToWriter(writer, api, db, opts = {}){
-      // Distinta base speciale: quando aumenta lo SKU 96-G01P-94FF, scarica 1:1 i componenti.
-      // Se la modifica viene annullata/corretta in negativo, registra il movimento inverso sui componenti.
-      const parentSku = toSkuId(opts.parentSku || "");
-      if(parentSku !== BOM_PARENT_SKU) return 0;
-      if(!writer || !api || !db) return 0;
-
-      const signedRaw = Number(opts.parentQtySigned ?? opts.parentQty ?? opts.qty ?? 0);
-      const parentQtySigned = Number.isFinite(signedRaw) ? Math.round(signedRaw) : 0;
-      if(parentQtySigned === 0) return 0;
-
-      const absParentQty = Math.abs(parentQtySigned);
-      const loc = (opts.loc === "cerea" || opts.loc === "concamarise") ? opts.loc : "concamarise";
-      const nowClient = (typeof opts.createdAtClient === "number") ? opts.createdAtClient : Date.now();
-      const who = opts.updatedBy || state.user?.email || state.user?.emailLower || state.user?.uid || "";
-      const parentTitle = squashWhitespace(opts.parentTitle || "");
-      const flowName = opts.flowName || opts.fileName || "";
-      const baseSource = opts.source || "distinta_base_96-G01P-94FF";
-      const isConsume = parentQtySigned > 0;
-      const componentDeltaSign = isConsume ? -1 : 1;
-      const movementType = isConsume ? "scarica" : "carica";
-      const note = opts.note || (isConsume
-        ? `Scarico automatico componenti per creazione/carico ${absParentQty} pz di ${BOM_PARENT_SKU}`
-        : `Ripristino automatico componenti per rettifica ${absParentQty} pz di ${BOM_PARENT_SKU}`);
-
-      let writes = 0;
-      for(const comp of BOM_COMPONENTS){
-        const componentSku = toSkuId(comp.sku || "");
-        const factor = Number.isFinite(Number(comp.qtyPerUnit)) ? Number(comp.qtyPerUnit) : 1;
-        const componentQty = Math.round(absParentQty * factor);
-        if(!componentSku || !componentQty) continue;
-
-        const componentDelta = componentDeltaSign * componentQty;
-        const itemRef = api.doc(db, COL_ROOT, loc, SUB_ITEMS, componentSku);
-        writer.set(itemRef, {
-          sku: componentSku,
-          qty: api.increment(componentDelta),
-          location: loc,
-          updatedAt: api.serverTimestamp(),
-          updatedAtClient: nowClient,
-          updatedBy: who,
-          lastSeenAt: api.serverTimestamp(),
-          lastSeenAtClient: nowClient,
-          lastSeenKind: isConsume ? "bom_component_scarico" : "bom_component_ripristino",
-          bomParentSku: BOM_PARENT_SKU
-        }, { merge:true });
-        writes++;
-
-        // Mantiene viva l'anagrafica globale senza sovrascrivere titolo/nome già presenti.
-        writer.set(api.doc(db, COL_PRODUCTS, componentSku), {
-          sku: componentSku,
-          active: true,
-          lastSeenAt: api.serverTimestamp(),
-          lastSeenAtClient: nowClient,
-          lastSeenBy: who,
-          lastSeenLocation: loc,
-          lastSeenKind: isConsume ? "bom_component_scarico" : "bom_component_ripristino",
-          seenCount: api.increment(1)
-        }, { merge:true });
-        writes++;
-
-        addProductMovementToBatch(writer, api, db, componentSku, {
-          type: movementType,
-          qtySigned: componentDelta,
-          deltaSigned: componentDelta,
-          fromWarehouse: loc,
-          toWarehouse: loc,
-          source: baseSource,
-          note,
-          parentSku: BOM_PARENT_SKU,
-          parentTitle,
-          parentQty: parentQtySigned,
-          componentSku,
-          componentQty,
-          componentRatio: factor,
-          flowKind: opts.flowKind || "",
-          flowId: opts.flowId || "",
-          flowName,
-          fileName: opts.fileName || "",
-          createdAtClient: nowClient
-        });
-        writes++;
-      }
-      return writes;
-    }
-
-
     // Tabellone WRITE: stessa coda usata da tabellone_write.html
     const TW_WRITE_LINE_BUCKET = "linea_liquidi";
     const TW_WRITE_QUEUE_META_COL = "meta";
@@ -4066,6 +4015,8 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
       }
       stopAllLogs();
       stopLowStockEmailMetaWatch();
+      stopProductComboWatch();
+      try{ state.comboCache instanceof Map && state.comboCache.clear(); }catch(_e){}
       if(state.mail && state.mail.lowStock){
         state.mail.lowStock.meta = null;
         state.mail.lowStock.error = "";
@@ -4638,7 +4589,10 @@ function startAllLogs(){
             workflow: d.workflow || null,
             workflowId: d.workflowId || ((d.workflow && d.workflow.id) ? d.workflow.id : ""),
             workflowLabel: d.workflowLabel || ((d.workflow && d.workflow.label) ? d.workflow.label : ""),
-            bomComponentScaricoApplied: d.bomComponentScaricoApplied === true,
+            comboApplied: d.comboApplied === true,
+            comboVersion: Number.isFinite(Number(d.comboVersion)) ? Number(d.comboVersion) : 0,
+            comboLines: Array.isArray(d.comboLines) ? d.comboLines : [],
+            comboTotalPieces: Number.isFinite(Number(d.comboTotalPieces)) ? Number(d.comboTotalPieces) : 0,
             voided: d.voided === true,
             voidedAtClient: (typeof d.voidedAtClient==="number") ? d.voidedAtClient : 0,
             voidedBy: d.voidedBy || "",
@@ -4959,7 +4913,8 @@ function startAllLogs(){
       if(!Array.isArray(lines) || !lines.length) return;
 
       const base = (kind==="scarica") ? -1 : 1;
-      const mult = base * (Number(direction) || 0);
+      const dir = (Number(direction) || 0);
+      const mult = base * dir;
 
       const nowClient = Date.now();
       const who = state.user?.emailLower || state.user?.email || "";
@@ -4967,12 +4922,14 @@ function startAllLogs(){
       const moveType = opts?.type || flowMovementType(kind, direction);
       const moveSource = opts?.reason || (Number(direction) < 0 ? "rettifica_flusso" : "flusso");
       const moveNote = opts?.note || flowMovementNote(kind, direction, flowLabel || opts?.flowId || "");
+      const storedComboLines = Array.isArray(opts?.comboLines) ? opts.comboLines : [];
 
-      // Batch limits: 2 scritture per riga (inventario + movimento prodotto)
-      const CHUNK = 220;
+      // Batch limits: 2 scritture per riga madre + fino a 3 combo (8 write/riga) => 60 resta sotto 500.
+      const CHUNK = 60;
       for(let i=0; i<lines.length; i+=CHUNK){
         const chunk = lines.slice(i, i+CHUNK);
         const batch = api.writeBatch(db);
+        const parentSkus = [];
 
         for(const l of chunk){
           const sku = String(l?.sku || "").trim();
@@ -4981,6 +4938,7 @@ function startAllLogs(){
           const qty = parseQty(l?.qty || 0);
           if(!qty) continue;
 
+          parentSkus.push(sku);
           const delta = mult * qty;
           const docRef = api.doc(db, COL_ROOT, loc, SUB_ITEMS, sku);
           batch.set(docRef, {
@@ -5007,24 +4965,26 @@ function startAllLogs(){
             flowName: flowLabel,
             createdAtClient: nowClient
           });
+        }
 
-          if(kind === "carica" && opts?.bomComponentScaricoApplied === true){
-            addBomComponentMovementsToWriter(batch, api, db, {
-              loc,
-              parentSku: sku,
-              parentTitle: title,
-              parentQtySigned: delta,
-              source: "rettifica_flusso_bom_componenti",
-              note: delta > 0
-                ? `Scarico automatico componenti da carico flusso ${sku}`
-                : `Ripristino automatico componenti da annullamento carico flusso ${sku}`,
-              flowKind: kind || "",
-              flowId: opts?.flowId || "",
-              flowName: flowLabel,
-              createdAtClient: nowClient,
-              updatedBy: who
-            });
-          }
+        if(storedComboLines.length){
+          const partComboLines = storedComboLinesForParentSkus(storedComboLines, parentSkus);
+          const comboEffects = comboLinesToEffects(partComboLines, dir, {
+            source: moveSource,
+            note: (dir < 0) ? "Ripristino combo da flusso" : "Scarico combo da flusso",
+            flowKind: kind || "",
+            flowId: opts?.flowId || "",
+            flowName: flowLabel,
+            createdAtClient: nowClient
+          });
+          writeComboEffectsToBatch(batch, api, db, comboEffects, {
+            source: moveSource,
+            note: (dir < 0) ? "Ripristino combo da flusso" : "Scarico combo da flusso",
+            flowKind: kind || "",
+            flowId: opts?.flowId || "",
+            flowName: flowLabel,
+            createdAtClient: nowClient
+          });
         }
 
         await batch.commit();
@@ -5043,7 +5003,7 @@ function startAllLogs(){
 
       try{
         showToast("Operazione in corso", "Sto annullando il flusso…");
-        await adjustInventoryWithLines(loc, flow.kind, flow.lines || [], -1, { reason:"undo_flow", note:`Annullamento flusso ${flowDisplayName(flow)}`, flowId: flow.id, flowName: flowDisplayName(flow), bomComponentScaricoApplied: flow.bomComponentScaricoApplied === true });
+        await adjustInventoryWithLines(loc, flow.kind, flow.lines || [], -1, { reason:"undo_flow", note:`Annullamento flusso ${flowDisplayName(flow)}`, flowId: flow.id, flowName: flowDisplayName(flow), comboLines: flow.comboLines || [] });
 
         const api = state.firebase.api;
         const db = state.firebase.db;
@@ -5076,7 +5036,7 @@ function startAllLogs(){
       try{
         showToast("Operazione in corso", "Sto eliminando il flusso…");
         if(!flow.voided){
-          await adjustInventoryWithLines(loc, flow.kind, flow.lines || [], -1, { reason:"delete_flow", note:`Eliminazione flusso ${flowDisplayName(flow)}`, flowId: flow.id, flowName: flowDisplayName(flow), bomComponentScaricoApplied: flow.bomComponentScaricoApplied === true });
+          await adjustInventoryWithLines(loc, flow.kind, flow.lines || [], -1, { reason:"delete_flow", note:`Eliminazione flusso ${flowDisplayName(flow)}`, flowId: flow.id, flowName: flowDisplayName(flow), comboLines: flow.comboLines || [] });
         }
         const api = state.firebase.api;
         const db = state.firebase.db;
@@ -5124,10 +5084,17 @@ function startAllLogs(){
 
       try{
         showToast("Operazione in corso", "Sto eliminando la riga…");
-        await adjustInventoryWithLines(loc, flow.kind, [line], -1, { reason:"remove_line_flow", note:`Eliminazione riga dal flusso ${flowDisplayName(flow)}`, flowId: flow.id, flowName: flowDisplayName(flow), bomComponentScaricoApplied: flow.bomComponentScaricoApplied === true });
+        await adjustInventoryWithLines(loc, flow.kind, [line], -1, { reason:"remove_line_flow", note:`Eliminazione riga dal flusso ${flowDisplayName(flow)}`, flowId: flow.id, flowName: flowDisplayName(flow), comboLines: flow.comboLines || [] });
 
         const newLines = lines.filter(l=> String(l?.sku||"").trim()!==sku);
         const totalPieces = newLines.reduce((s,l)=> s + parseQty(l?.qty || 0), 0);
+        const newComboLines = (Array.isArray(flow.comboLines) ? flow.comboLines : []).filter(c=>{
+          const pSku = toSkuId(c?.parentSku || "");
+          if(pSku && pSku === toSkuId(sku)) return false;
+          const arr = Array.isArray(c?.parentSkus) ? c.parentSkus : [];
+          return !arr.some(x=>toSkuId(x) === toSkuId(sku));
+        });
+        const comboTotalPieces = newComboLines.reduce((a,x)=> a + Math.abs(Number(x?.qtySigned || 0)), 0);
 
         const api = state.firebase.api;
         const db = state.firebase.db;
@@ -5136,6 +5103,9 @@ function startAllLogs(){
           lines: newLines,
           totalLines: newLines.length,
           totalPieces: totalPieces,
+          comboLines: newComboLines,
+          comboApplied: newComboLines.length > 0,
+          comboTotalPieces: comboTotalPieces,
           updatedAtClient: Date.now(),
           updatedAt: api.serverTimestamp(),
           updatedBy: state.user?.emailLower || state.user?.email || ""
@@ -5544,6 +5514,7 @@ function currentInv(){
       if(kind==="flows") return $("sheetFlows");
       if(kind==="products") return $("sheetProducts");
       if(kind==="productDetails") return $("sheetProductDetails");
+      if(kind==="combo") return $("sheetCombo");
       if(kind==="skuPick") return $("sheetSkuPick");
       if(kind==="sottoscorta") return $("sheetSottoscorta");
       return null;
@@ -5593,6 +5564,7 @@ function closeAllSheets(){
   state.ui.sheet = null;
   state.ui.sheetStack = [];
   stopPdMovementsWatch();
+  stopProductComboWatch();
   __unlockBody();
 }
 
@@ -5642,7 +5614,7 @@ function closeSheet(kind){
     sheet.setAttribute("aria-hidden","true");
   }
 
-  if(kind==="productDetails") stopPdMovementsWatch();
+  if(kind==="productDetails"){ stopPdMovementsWatch(); stopProductComboWatch(); }
 
   // se sto chiudendo il top, torna allo sheet precedente (se in stack)
   if(state.ui.sheet===kind){
@@ -6381,7 +6353,6 @@ function closeSheet(kind){
                 status: "PENDING",
                 totalLines: p.aggregated.length,
                 totalPieces: p.totalPieces,
-                bomComponentScaricoApplied: p.aggregated.some(x=>isBomParentSku(x.sku)),
                 lines: p.aggregated.slice(0, 800).map(x=>({ sku:x.sku, title:x.title||"", qty: Math.abs(parseQty(x.qty)||0) })),
                 workflow: null,
                 workflowId: null,
@@ -6440,20 +6411,6 @@ function closeSheet(kind){
                 flowId: p.flowDocId || "",
                 flowName: "MANUAL",
                 createdAtClient: tsClient
-              });
-
-              addBomComponentMovementsToWriter(batch, api, db, {
-                loc: p.loc,
-                parentSku: sku,
-                parentTitle: title,
-                parentQtySigned: delta,
-                source: "campo_libero_bom_componenti",
-                note: `Scarico automatico componenti da carico campo libero ${sku}`,
-                flowKind: "carica",
-                flowId: p.flowDocId || "",
-                flowName: "MANUAL",
-                createdAtClient: tsClient,
-                updatedBy: state.user.email || ""
               });
             }
             await batch.commit();
@@ -6583,6 +6540,481 @@ function closeSheet(kind){
       return (inv.items||[]).find(x => toSkuId(x.sku) === s) || null;
     }
 
+    // --- Combo prodotto: configurazione cloud + scarichi componenti ---
+    function normalizeComboChildren(children, parentSku=""){
+      const parent = toSkuId(parentSku || "");
+      const out = [];
+      const seen = new Set();
+      const raw = Array.isArray(children) ? children : [];
+      for(const c0 of raw){
+        const c = c0 || {};
+        const sku = toSkuId(c.sku || c.code || c.id || "");
+        if(!sku || sku === parent || seen.has(sku)) continue;
+        seen.add(sku);
+        const title = squashWhitespace(c.title || c.name || c.product || "");
+        out.push({
+          sku,
+          title,
+          qty: 1,
+          multiplier: 1
+        });
+        if(out.length >= 3) break;
+      }
+      return out;
+    }
+
+    function comboChildrenFromDocData(d, parentSku=""){
+      if(!d || typeof d !== "object") return [];
+      const raw = Array.isArray(d.comboChildren)
+        ? d.comboChildren
+        : (Array.isArray(d.combo?.children) ? d.combo.children : []);
+      return normalizeComboChildren(raw, parentSku);
+    }
+
+    function getComboChildrenForSku(sku){
+      const s = toSkuId(sku || "");
+      if(!s) return [];
+      if(state.combo?.sku === s) return normalizeComboChildren(state.combo.children || [], s);
+      const cached = state.comboCache instanceof Map ? state.comboCache.get(s) : null;
+      return normalizeComboChildren(cached || [], s);
+    }
+
+    function stopProductComboWatch(){
+      try{ state.combo?.unsub?.(); }catch(_e){}
+      if(state.combo){
+        state.combo.unsub = null;
+        state.combo.sku = null;
+        state.combo.doc = null;
+        state.combo.children = [];
+        state.combo.draft = [];
+        state.combo.dirty = false;
+        state.combo.search = "";
+        state.combo.error = "";
+      }
+    }
+
+    function startProductComboWatch(sku){
+      const s = toSkuId(sku || "");
+      if(!s || !state.firebase?.ok || !state.firebase?.api || !state.firebase?.db) return;
+      if(state.combo?.sku === s && typeof state.combo?.unsub === "function") return;
+
+      stopProductComboWatch();
+      state.combo.sku = s;
+
+      const api = state.firebase.api;
+      const db = state.firebase.db;
+      const ref = api.doc(db, COL_PRODUCTS, s);
+
+      state.combo.unsub = api.onSnapshot(ref, (snap)=>{
+        const d = snap.exists() ? (snap.data() || {}) : {};
+        const children = comboChildrenFromDocData(d, s);
+        state.combo.doc = d;
+        state.combo.children = children;
+        state.combo.error = "";
+        if(state.comboCache instanceof Map) state.comboCache.set(s, children);
+
+        if(state.ui.productDetailsSku === s){
+          renderProductDetailsSheet();
+        }
+        if(state.ui.sheet === "combo" && state.combo?.sku === s){
+          if(!state.combo.dirty){
+            state.combo.draft = children.map(x=>({ ...x }));
+          }
+          renderComboSheet();
+        }
+      }, (err)=>{
+        state.combo.error = err?.message || String(err || "Errore combo");
+        if(state.ui.sheet === "combo") renderComboSheet();
+      });
+    }
+
+    async function fetchComboChildrenMap(skus){
+      const api = state.firebase?.api;
+      const db = state.firebase?.db;
+      if(!api || !db) throw new Error("Combo: Firebase non inizializzato.");
+
+      const uniq = Array.from(new Set((skus || []).map(x=>toSkuId(x)).filter(Boolean)));
+      const out = new Map();
+      await Promise.all(uniq.map(async (sku)=>{
+        const snap = await api.getDoc(api.doc(db, COL_PRODUCTS, sku));
+        const d = snap?.exists?.() ? (snap.data() || {}) : {};
+        const children = comboChildrenFromDocData(d, sku);
+        out.set(sku, children);
+        if(state.comboCache instanceof Map) state.comboCache.set(sku, children);
+      }));
+      return out;
+    }
+
+    function buildComboEffectsFromDeltas(parentDeltas, comboMap, opts = {}){
+      const raw = [];
+      const nowClient = Number(opts.createdAtClient || Date.now());
+      const source = String(opts.source || "combo");
+      const noteBase = String(opts.note || "Scarico combo");
+
+      for(const p of (parentDeltas || [])){
+        const parentSku = toSkuId(p?.sku || "");
+        const qtySigned = Number(p?.qtySigned || 0);
+        if(!parentSku || !Number.isFinite(qtySigned) || qtySigned === 0) continue;
+
+        const children = normalizeComboChildren(comboMap?.get?.(parentSku) || [], parentSku);
+        if(!children.length) continue;
+
+        for(const child of children){
+          const childSku = toSkuId(child.sku || "");
+          if(!childSku || childSku === parentSku) continue;
+          const childLoc = resolveLocForSkuAny(childSku, p.loc || state.route.loc || "");
+          const invInfo = getItemBySkuAny(childSku, childLoc);
+          const title = squashWhitespace(child.title || invInfo?.it?.title || childSku) || childSku;
+          const childQtySigned = qtySigned; // standard: 1 prodotto per tipo
+          raw.push({
+            sku: childSku,
+            title,
+            loc: childLoc,
+            qtySigned: childQtySigned,
+            parentSku,
+            parentTitle: squashWhitespace(p.title || ""),
+            parentQtySigned: qtySigned,
+            multiplier: 1,
+            source,
+            note: noteBase,
+            flowKind: opts.flowKind || "",
+            flowId: opts.flowId || "",
+            flowName: opts.flowName || "",
+            createdAtClient: nowClient
+          });
+        }
+      }
+      return raw;
+    }
+
+    function aggregateComboEffects(effects){
+      const map = new Map();
+      for(const e of (effects || [])){
+        const sku = toSkuId(e?.sku || "");
+        const loc = (e?.loc === "cerea" || e?.loc === "concamarise") ? e.loc : resolveLocForSkuAny(sku, state.route.loc || "");
+        const q = Number(e?.qtySigned || 0);
+        if(!sku || !loc || !Number.isFinite(q) || q === 0) continue;
+        const key = `${loc}::${sku}`;
+        const prev = map.get(key) || {
+          sku,
+          loc,
+          title: squashWhitespace(e.title || sku),
+          qtySigned: 0,
+          parentSkus: [],
+          parentTitles: [],
+          source: e.source || "combo",
+          note: e.note || "Scarico combo",
+          flowKind: e.flowKind || "",
+          flowId: e.flowId || "",
+          flowName: e.flowName || "",
+          createdAtClient: e.createdAtClient || Date.now()
+        };
+        prev.qtySigned += q;
+        if(e.parentSku && !prev.parentSkus.includes(e.parentSku)) prev.parentSkus.push(e.parentSku);
+        if(e.parentTitle && !prev.parentTitles.includes(e.parentTitle)) prev.parentTitles.push(e.parentTitle);
+        if(!prev.title && e.title) prev.title = e.title;
+        map.set(key, prev);
+      }
+      return Array.from(map.values()).filter(x=> Number.isFinite(x.qtySigned) && x.qtySigned !== 0);
+    }
+
+    function writeComboEffectsToBatch(batch, api, db, effects, defaults = {}){
+      const nowClient = Number(defaults.createdAtClient || Date.now());
+      const who = state.user?.email || state.user?.emailLower || state.user?.uid || "";
+      const agg = aggregateComboEffects(effects);
+
+      for(const e of agg){
+        const sku = toSkuId(e.sku || "");
+        const loc = (e.loc === "cerea" || e.loc === "concamarise") ? e.loc : resolveLocForSkuAny(sku, state.route.loc || "");
+        const title = squashWhitespace(e.title || sku) || sku;
+        const qtySigned = Math.round(Number(e.qtySigned || 0));
+        if(!sku || !loc || !qtySigned) continue;
+
+        const ref = api.doc(db, COL_ROOT, loc, SUB_ITEMS, sku);
+        batch.set(ref, {
+          sku,
+          title,
+          titleNorm: normalizeText(title || sku),
+          qty: api.increment(qtySigned),
+          location: loc,
+          updatedAt: api.serverTimestamp(),
+          updatedAtClient: nowClient,
+          updatedBy: who,
+          comboUpdated: true,
+          comboParentSkus: e.parentSkus || []
+        }, { merge:true });
+
+        const parentLabel = (e.parentSkus && e.parentSkus.length) ? e.parentSkus.join(", ") : "madre";
+        const type = qtySigned < 0 ? "combo_scarica" : "combo_ripristino";
+        addProductMovementToBatch(batch, api, db, sku, {
+          type,
+          qtySigned,
+          deltaSigned: qtySigned,
+          fromWarehouse: loc,
+          toWarehouse: loc,
+          source: e.source || defaults.source || "combo",
+          note: `${e.note || defaults.note || "Scarico combo"} • madre: ${parentLabel}`,
+          comboParentSkus: e.parentSkus || [],
+          comboParentTitles: e.parentTitles || [],
+          flowKind: e.flowKind || defaults.flowKind || "",
+          flowId: e.flowId || defaults.flowId || "",
+          flowName: e.flowName || defaults.flowName || "",
+          createdAtClient: nowClient
+        });
+      }
+      return agg.length;
+    }
+
+    function storedComboLinesForParentSkus(comboLines, skus){
+      const set = new Set((skus || []).map(x=>toSkuId(x)).filter(Boolean));
+      if(!set.size) return [];
+      return (Array.isArray(comboLines) ? comboLines : []).filter((c)=>{
+        const parentSku = toSkuId(c.parentSku || "");
+        if(parentSku && set.has(parentSku)) return true;
+        const arr = Array.isArray(c.parentSkus) ? c.parentSkus : [];
+        return arr.some(x=>set.has(toSkuId(x)));
+      });
+    }
+
+    function comboLinesToEffects(comboLines, direction, defaults = {}){
+      const dir = Number(direction || 1);
+      const out = [];
+      for(const c of (Array.isArray(comboLines) ? comboLines : [])){
+        const sku = toSkuId(c.sku || "");
+        const q = Math.round(Number(c.qtySigned || 0) * dir);
+        if(!sku || !q) continue;
+        out.push({
+          sku,
+          title: squashWhitespace(c.title || sku),
+          loc: (c.loc === "cerea" || c.loc === "concamarise") ? c.loc : resolveLocForSkuAny(sku, state.route.loc || ""),
+          qtySigned: q,
+          parentSku: toSkuId(c.parentSku || ""),
+          parentSkus: Array.isArray(c.parentSkus) ? c.parentSkus.map(x=>toSkuId(x)).filter(Boolean) : (c.parentSku ? [toSkuId(c.parentSku)] : []),
+          parentTitle: squashWhitespace(c.parentTitle || ""),
+          source: defaults.source || c.source || "combo",
+          note: defaults.note || c.note || "Ripristino combo",
+          flowKind: defaults.flowKind || c.flowKind || "",
+          flowId: defaults.flowId || c.flowId || "",
+          flowName: defaults.flowName || c.flowName || "",
+          createdAtClient: defaults.createdAtClient || Date.now()
+        });
+      }
+      return out;
+    }
+
+    function serializeComboLines(effects){
+      return (effects || []).map(e=>({
+        sku: toSkuId(e.sku || ""),
+        title: squashWhitespace(e.title || ""),
+        loc: (e.loc === "cerea" || e.loc === "concamarise") ? e.loc : "",
+        qtySigned: Math.round(Number(e.qtySigned || 0)),
+        parentSku: toSkuId(e.parentSku || ""),
+        parentTitle: squashWhitespace(e.parentTitle || ""),
+        multiplier: 1,
+        source: e.source || "combo",
+        note: e.note || "Scarico combo",
+        flowKind: e.flowKind || "",
+        flowId: e.flowId || "",
+        flowName: e.flowName || "",
+        createdAtClient: e.createdAtClient || Date.now()
+      })).filter(x=> x.sku && x.qtySigned);
+    }
+
+    function renderProductComboSummaryHtml(sku){
+      const children = getComboChildrenForSku(sku);
+      if(state.combo?.sku === toSkuId(sku) && state.combo.error){
+        return `<div class="movesHint">Errore lettura combo: ${escapeHtml(state.combo.error)}</div>`;
+      }
+      if(!children.length){
+        return `<div class="movesHint">Nessun prodotto combo collegato. Quando configuri una combo, gli SKU collegati vengono scaricati in cloud quando la madre viene scaricata.</div>`;
+      }
+      const rows = children.map(c=>{
+        const info = getItemBySkuAny(c.sku, state.route.loc || "");
+        const title = squashWhitespace(c.title || info?.it?.title || c.sku);
+        const loc = info?.loc ? ` • ${prettyLoc(info.loc)}` : "";
+        return `
+          <div class="moveRow">
+            <div class="moveTop">
+              <div class="moveType"><span class="mono">${escapeHtml(c.sku)}</span></div>
+              <div class="moveQty mono">1</div>
+            </div>
+            <div class="moveMeta">${escapeHtml(title)}${escapeHtml(loc)}</div>
+          </div>
+        `;
+      }).join("");
+      return `
+        <div class="movesBox">${rows}</div>
+        <div class="pdMeta">Standard: <b>1 pz</b> per ogni prodotto collegato, massimo 3 SKU.</div>
+      `;
+    }
+
+    function openComboSheet(){
+      const parentSku = toSkuId(state.ui.productDetailsSku || "");
+      if(!parentSku) return;
+      if(!state.user?.isAdmin){
+        showToast("Permessi", "Solo Admin può modificare la combo.", 2200);
+        return;
+      }
+      startProductComboWatch(parentSku);
+      state.combo.sku = parentSku;
+      state.combo.draft = getComboChildrenForSku(parentSku).map(x=>({ ...x }));
+      state.combo.dirty = false;
+      state.combo.search = "";
+      const search = $("comboSearch");
+      if(search) search.value = "";
+      renderComboSheet();
+      openSheet("combo", { stack:true });
+      setTimeout(()=>{ try{ search?.focus?.(); }catch(_e){} }, 80);
+    }
+
+    function renderComboSheet(){
+      const parentSku = toSkuId(state.combo?.sku || state.ui.productDetailsSku || "");
+      const titleEl = $("comboTitle");
+      const subEl = $("comboSub");
+      const hint = $("comboHint");
+      const selected = $("comboSelectedList");
+      const results = $("comboResultsList");
+      const saveBtn = $("btnSaveCombo");
+      if(!hint || !selected || !results) return;
+
+      const parentItem = getProductBySku(state.route.loc || "", parentSku) || getProductBySku("concamarise", parentSku) || getProductBySku("cerea", parentSku);
+      const parentTitle = squashWhitespace(parentItem?.title || parentSku) || parentSku;
+      const draft = normalizeComboChildren(state.combo?.draft || [], parentSku);
+      state.combo.draft = draft;
+
+      if(titleEl) titleEl.textContent = `Combo • ${parentSku}`;
+      if(subEl) subEl.textContent = `${parentTitle} • fino a 3 prodotti • quantità standard 1`;
+      if(saveBtn){
+        saveBtn.disabled = !state.user?.isAdmin || !!state.combo?.saving;
+        saveBtn.textContent = state.combo?.saving ? "Salvataggio…" : "Salva combo";
+      }
+
+      hint.innerHTML = state.combo?.error
+        ? `Errore lettura cloud: <b>${escapeHtml(state.combo.error)}</b>`
+        : `Aggiunti: <b>${draft.length}/3</b>. Ogni prodotto aggiunto vale sempre <b>1 pz</b> per tipo.`;
+
+      if(!draft.length){
+        selected.innerHTML = `<div class="hint">Nessun prodotto aggiunto alla combo.</div>`;
+      }else{
+        selected.innerHTML = draft.map(c=>{
+          const info = getItemBySkuAny(c.sku, state.route.loc || "");
+          const title = squashWhitespace(c.title || info?.it?.title || c.sku);
+          const loc = info?.loc ? ` • ${prettyLoc(info.loc)}` : "";
+          return `
+            <div class="row" data-sku="${escapeHtml(c.sku)}">
+              <div class="rowMain">
+                <p class="rowTitle"><span class="mono">${escapeHtml(c.sku)}</span> <span class="badge ok">1</span></p>
+                <div class="rowSub">${escapeHtml(title)}${escapeHtml(loc)}</div>
+              </div>
+              <button class="btn small danger" type="button" data-action="comboRemove" data-sku="${escapeHtml(c.sku)}">Rimuovi</button>
+            </div>
+          `;
+        }).join("");
+      }
+
+      const q = normalizeText($("comboSearch")?.value || state.combo?.search || "");
+      const idx = getInvIndexForMatch();
+      const used = new Set(draft.map(x=>toSkuId(x.sku)));
+      used.add(parentSku);
+      const bySku = new Map();
+      for(const row of (idx.all || [])){
+        const sku = toSkuId(row.sku || row.it?.sku || "");
+        if(!sku || used.has(sku) || bySku.has(sku)) continue;
+        const hay = normalizeText(`${sku} ${row.it?.title || ""} ${row.it?.titleNorm || ""}`);
+        if(q && !hay.includes(q)) continue;
+        bySku.set(sku, row);
+      }
+      const candidates = Array.from(bySku.values()).slice(0, 80);
+
+      if(!q){
+        results.innerHTML = `<div class="hint">Cerca uno SKU o un nome prodotto, poi premi + per aggiungerlo.</div>`;
+        return;
+      }
+      if(!candidates.length){
+        results.innerHTML = `<div class="hint">Nessun prodotto trovato.</div>`;
+        return;
+      }
+
+      const tableHead = `
+        <div class="row gridHead gridRow">
+          <div class="gridCell">SKU</div>
+          <div class="gridCell">Prodotto</div>
+          <div class="gridCell gridRight">+</div>
+        </div>`;
+      const full = draft.length >= 3;
+      const rows = candidates.map(row=>{
+        const sku = toSkuId(row.sku || row.it?.sku || "");
+        const meta = parseTitleMeta(row.it?.title || "");
+        const title = meta.main || row.it?.title || sku;
+        const loc = prettyLoc(row.loc || "");
+        const qty = Number.isFinite(row.it?.qty) ? row.it.qty : 0;
+        return `
+          <div class="row gridRow">
+            <div class="gridCell gridSku">${escapeHtml(sku)}</div>
+            <div class="gridCell">
+              <div class="gridProdMain">${escapeHtml(title)}</div>
+              <div class="gridProdSub">${escapeHtml(loc)} • Q.tà: ${escapeHtml(String(qty))}</div>
+            </div>
+            <div class="gridCell gridRight">
+              <button class="btn small" type="button" data-action="comboAdd" data-sku="${escapeHtml(sku)}" data-loc="${escapeHtml(row.loc || "")}" ${full ? "disabled" : ""}>+</button>
+            </div>
+          </div>
+        `;
+      }).join("");
+      results.innerHTML = `<div class="gridTable cols3">${tableHead}${rows}</div>`;
+    }
+
+    async function saveComboDraft(){
+      const parentSku = toSkuId(state.combo?.sku || state.ui.productDetailsSku || "");
+      if(!parentSku) return;
+      if(!state.user?.isAdmin){
+        showToast("Permessi", "Solo Admin può salvare la combo.", 2200);
+        return;
+      }
+      const children = normalizeComboChildren(state.combo?.draft || [], parentSku);
+      const api = state.firebase?.api;
+      const db = state.firebase?.db;
+      if(!api || !db){
+        showToast("Errore", "Firebase non inizializzato.", 2200);
+        return;
+      }
+
+      state.combo.saving = true;
+      renderComboSheet();
+      try{
+        const nowClient = Date.now();
+        const ref = api.doc(db, COL_PRODUCTS, parentSku);
+        await api.setDoc(ref, {
+          sku: parentSku,
+          comboChildren: children,
+          combo: {
+            enabled: children.length > 0,
+            children,
+            maxChildren: 3,
+            mode: "scarico_madre",
+            unitPerChild: 1,
+            updatedAt: api.serverTimestamp(),
+            updatedAtClient: nowClient,
+            updatedBy: state.user?.email || state.user?.emailLower || ""
+          },
+          updatedAt: api.serverTimestamp(),
+          updatedAtClient: nowClient,
+          updatedBy: state.user?.email || state.user?.emailLower || ""
+        }, { merge:true });
+        if(state.comboCache instanceof Map) state.comboCache.set(parentSku, children);
+        state.combo.children = children;
+        state.combo.dirty = false;
+        showToast("Combo salvata", `${children.length}/3 prodotti collegati in cloud.`, 1800);
+        renderProductDetailsSheet();
+      }catch(err){
+        console.error(err);
+        showToast("Errore combo", String(err?.message || err).slice(0, 220), 3000);
+      }finally{
+        state.combo.saving = false;
+        renderComboSheet();
+      }
+    }
+
     function renderProductDetailsSheet(){
   const loc = state.route.loc;
   const sku = toSkuId(state.ui.productDetailsSku||"");
@@ -6619,9 +7051,12 @@ function closeSheet(kind){
   const lowStockThreshold = __getCustomLowStockThreshold(it);
   const lowStockThresholdValue = (lowStockThreshold !== null) ? String(lowStockThreshold) : "";
   const lowStockThresholdLabel = __lowStockThresholdLabel(it || { sku, title: titleMain });
+  startProductComboWatch(sku);
+  const comboChildren = getComboChildrenForSku(sku);
+  const comboLabel = comboChildren.length ? `Combo: ${comboChildren.length}/3` : "Combo: nessuna";
 
   if(titleEl) titleEl.textContent = titleMain;
-  if(sub) sub.textContent = `${sku} • ${prettyLoc(loc)} • Soglia: ${lowStockThresholdLabel}`;
+  if(sub) sub.textContent = `${sku} • ${prettyLoc(loc)} • Soglia: ${lowStockThresholdLabel} • ${comboLabel}`;
 
   const isAdmin = !!state.user?.isAdmin;
   const editMode = !!state.ui.productDetailsEditMode;
@@ -6675,6 +7110,11 @@ function closeSheet(kind){
         </div>
 
         <div class="pdSection">
+          <div class="pdSectionTitle">Combo</div>
+          ${renderProductComboSummaryHtml(sku)}
+        </div>
+
+        <div class="pdSection">
           <div class="pdSectionTitle">Movimenti</div>
           <div id="pdMovesHint" class="muted" style="font-size:12px; margin-bottom:8px;">Carico movimenti…</div>
           <div class="movesBox">
@@ -6690,6 +7130,7 @@ function closeSheet(kind){
     `;
     actions.innerHTML = `
       <button class="btn primary" data-action="pdLoad" ${canEdit ? "" : "disabled"}>Carica</button>
+      <button class="btn" data-action="pdCombo" ${canEdit ? "" : "disabled"}>Combo</button>
       <button class="btn amazon" data-action="pdReorder" ${canEdit ? "" : "disabled"}>Riordina</button>
     `;
   }else{
@@ -6741,6 +7182,11 @@ function closeSheet(kind){
         </div>
 
         <div class="pdSection">
+          <div class="pdSectionTitle">Combo</div>
+          ${renderProductComboSummaryHtml(sku)}
+        </div>
+
+        <div class="pdSection">
           <div class="pdSectionTitle">Movimenti</div>
           <div id="pdMovesHint" class="muted" style="font-size:12px; margin-bottom:8px;">Carico movimenti…</div>
           <div class="movesBox">
@@ -6761,6 +7207,7 @@ function closeSheet(kind){
     actions.innerHTML = `
       <button class="btn primary" data-action="pdSave" ${canEdit ? "" : "disabled"}>Salva</button>
       <button class="btn amazon" data-action="pdLoad" ${canEdit ? "" : "disabled"}>Carica</button>
+      <button class="btn" data-action="pdCombo" ${canEdit ? "" : "disabled"}>Combo</button>
       <button class="btn amazon" data-action="pdReorder" ${canEdit ? "" : "disabled"}>Riordina</button>
       <button class="btn" data-action="pdCancel" ${canEdit ? "" : "disabled"}>Annulla</button>
       <button class="btn" data-action="pdMove" data-to="cerea" ${(canEdit && loc!=="cerea") ? "" : "disabled"}>Sposta in Cerea</button>
@@ -6902,6 +7349,8 @@ function closeSheet(kind){
         const type = (typeRaw==="move") ? "Spostamento"
           : (typeRaw==="carica") ? "Carico"
           : (typeRaw==="scarica") ? "Scarico"
+          : (typeRaw==="combo_scarica") ? "Combo scarico"
+          : (typeRaw==="combo_ripristino") ? "Combo ripristino"
           : (typeRaw==="rettifica") ? "Rettifica"
           : (typeRaw==="manual_edit") ? ((Number(m.qtySigned || m.deltaSigned || 0) !== 0) ? "Rettifica" : "Modifica")
           : (typeRaw==="manual_rename") ? "Rinomina SKU"
@@ -7216,20 +7665,6 @@ async function loadProductFromDetails(){
             createdByEmail: state.user?.email || ""
           });
 
-          addBomComponentMovementsToWriter(tx, api, db, {
-            loc,
-            parentSku: sku,
-            parentTitle: title,
-            parentQtySigned: qtyToLoad,
-            source: "manuale_bom_componenti",
-            note: `Scarico automatico componenti da carico manuale ${sku}`,
-            flowKind: "carica",
-            flowId: "manual_load",
-            flowName: "Carico manuale da modale prodotto",
-            createdAtClient: nowClient,
-            updatedBy: who
-          });
-
           return { beforeQty, afterQty, title };
         });
 
@@ -7288,6 +7723,7 @@ async function saveProductFromDetails(){
       const newP = api.doc(db, COL_PRODUCTS, sku);
 
       try{
+        const comboMap = await fetchComboChildrenMap([oldSku]);
         await api.runTransaction(db, async (tx)=>{
           const sOld = await tx.get(oldRef);
           if(!sOld.exists()) throw new Error("Prodotto non trovato.");
@@ -7375,6 +7811,29 @@ async function saveProductFromDetails(){
           const oldQty = (Number.isFinite(oldData.qty) ? Math.round(oldData.qty) : (parseQty(oldData.qty) ?? 0));
           const deltaSigned = (Number.isFinite(qty) ? qty : 0) - oldQty;
 
+          if(sku === oldSku && deltaSigned < 0){
+            const comboEffects = buildComboEffectsFromDeltas([{
+              sku: oldSku,
+              title: title || oldData.title || oldSku,
+              loc,
+              qtySigned: deltaSigned
+            }], comboMap, {
+              source: "manuale",
+              note: "Scarico combo da rettifica prodotto",
+              flowKind: "manual_edit",
+              flowId: "",
+              flowName: "Modifica prodotto",
+              createdAtClient: nowClient
+            });
+            writeComboEffectsToBatch(tx, api, db, comboEffects, {
+              source: "manuale",
+              note: "Scarico combo da rettifica prodotto",
+              flowKind: "manual_edit",
+              flowName: "Modifica prodotto",
+              createdAtClient: nowClient
+            });
+          }
+
           const movesCol = api.collection(db, COL_PRODUCTS, sku, SUB_MOVES);
           const moveRef = api.doc(movesCol);
 
@@ -7395,22 +7854,6 @@ async function saveProductFromDetails(){
             createdAtClient: nowClient,
             createdByUid: state.user?.uid || "",
             createdByEmail: state.user?.email || ""
-          });
-
-          addBomComponentMovementsToWriter(tx, api, db, {
-            loc,
-            parentSku: sku,
-            parentTitle: title || "",
-            parentQtySigned: deltaSigned,
-            source: "manuale_bom_componenti",
-            note: deltaSigned > 0
-              ? `Scarico automatico componenti da aumento quantità ${sku}`
-              : `Ripristino automatico componenti da riduzione quantità ${sku}`,
-            flowKind: "manual_edit",
-            flowId: "manual_qty_edit",
-            flowName: "Modifica quantità prodotto",
-            createdAtClient: nowClient,
-            updatedBy: state.user.email || ""
           });
         });
 
@@ -7747,6 +8190,7 @@ function renderProductsSheet(){
       const newP = api.doc(db, COL_PRODUCTS, sku);
 
       try{
+        const comboMap = await fetchComboChildrenMap([oldSku]);
         await api.runTransaction(db, async (tx)=>{
           const sOld = await tx.get(oldRef);
           if(!sOld.exists()) throw new Error("Prodotto non trovato.");
@@ -7810,6 +8254,29 @@ function renderProductsSheet(){
           }
 
           const deltaSigned = qty - oldQty;
+
+          if(sku === oldSku && deltaSigned < 0){
+            const comboEffects = buildComboEffectsFromDeltas([{
+              sku: oldSku,
+              title: finalTitle || oldSku,
+              loc,
+              qtySigned: deltaSigned
+            }], comboMap, {
+              source: "manuale",
+              note: "Scarico combo da rettifica prodotto",
+              flowKind: "manual_edit",
+              flowName: "Modifica prodotto da lista",
+              createdAtClient: nowClient
+            });
+            writeComboEffectsToBatch(tx, api, db, comboEffects, {
+              source: "manuale",
+              note: "Scarico combo da rettifica prodotto",
+              flowKind: "manual_edit",
+              flowName: "Modifica prodotto da lista",
+              createdAtClient: nowClient
+            });
+          }
+
           const moveRef = api.doc(api.collection(db, COL_PRODUCTS, sku, SUB_MOVES));
           tx.set(moveRef, {
             type: (sku===oldSku) ? "manual_edit" : "manual_rename",
@@ -7828,22 +8295,6 @@ function renderProductsSheet(){
             createdAtClient: nowClient,
             createdByUid: state.user?.uid || "",
             createdByEmail: state.user?.email || ""
-          });
-
-          addBomComponentMovementsToWriter(tx, api, db, {
-            loc,
-            parentSku: sku,
-            parentTitle: finalTitle,
-            parentQtySigned: deltaSigned,
-            source: "manuale_bom_componenti",
-            note: deltaSigned > 0
-              ? `Scarico automatico componenti da aumento quantità ${sku}`
-              : `Ripristino automatico componenti da riduzione quantità ${sku}`,
-            flowKind: "manual_edit",
-            flowId: "manual_row_qty_edit",
-            flowName: "Modifica quantità da lista articoli",
-            createdAtClient: nowClient,
-            updatedBy: who
           });
         });
 
@@ -7879,6 +8330,7 @@ Verrà creato anche il movimento di rettifica nello storico cloud.`);
       const db = state.firebase.db;
 
       try{
+        const comboMap = await fetchComboChildrenMap([s]);
         await api.runTransaction(db, async (tx)=>{
           const itemRef = api.doc(db, COL_ROOT, loc, SUB_ITEMS, s);
           const productRef = api.doc(db, COL_PRODUCTS, s);
@@ -7927,6 +8379,28 @@ Verrà creato anche il movimento di rettifica nello storico cloud.`);
             createdByUid: state.user?.uid || "",
             createdByEmail: state.user?.email || ""
           });
+
+          if(beforeQty > 0){
+            const comboEffects = buildComboEffectsFromDeltas([{
+              sku: s,
+              title,
+              loc,
+              qtySigned: -beforeQty
+            }], comboMap, {
+              source: "manuale",
+              note: "Scarico combo da eliminazione prodotto",
+              flowKind: "manual_delete",
+              flowName: "Eliminazione prodotto",
+              createdAtClient: nowClient
+            });
+            writeComboEffectsToBatch(tx, api, db, comboEffects, {
+              source: "manuale",
+              note: "Scarico combo da eliminazione prodotto",
+              flowKind: "manual_delete",
+              flowName: "Eliminazione prodotto",
+              createdAtClient: nowClient
+            });
+          }
         });
 
         showToast("Eliminato", "Prodotto rimosso e movimento registrato in cloud.", 1800);
@@ -8025,7 +8499,30 @@ async function applyFlow(kind){
 
       if(!plans.length) return showToast("Nessuna riga valida","");
 
-      const CHUNK = 220; // 2 scritture per riga: inventario + storico movimento prodotto
+      // Combo cloud: sugli scarichi del prodotto madre, scala automaticamente gli SKU collegati.
+      if(kind === "scarica"){
+        for(const p of plans){
+          p.comboMap = await fetchComboChildrenMap(p.aggregated.map(x=>x.sku));
+          const parentDeltas = p.aggregated.map(x=>({
+            sku: x.sku,
+            title: x.title || "",
+            loc: p.loc,
+            qtySigned: -Math.abs(parseQty(x.qty) || 0)
+          }));
+          const comboEffects = buildComboEffectsFromDeltas(parentDeltas, p.comboMap, {
+            source: "flusso_pdf",
+            note: "Scarico combo da flusso",
+            flowKind: kind,
+            flowId: p.flowDocId || wfId || "",
+            flowName: wfLabel || flow.file?.name || "",
+            createdAtClient: tsClient
+          });
+          p.comboLines = serializeComboLines(comboEffects);
+          p.comboTotalPieces = p.comboLines.reduce((a,x)=> a + Math.abs(Number(x.qtySigned || 0)), 0);
+        }
+      }
+
+      const CHUNK = 60; // 2 scritture per riga + fino a 3 combo (max sicurezza batch < 500)
       const planChunks = plans.map(p=>{
         const chunks = [];
         for(let i=0;i<p.aggregated.length;i+=CHUNK){
@@ -8063,8 +8560,11 @@ async function applyFlow(kind){
                 status: "PENDING",
                 totalLines: p.aggregated.length,
                 totalPieces: p.totalPieces,
-                bomComponentScaricoApplied: kind === "carica" && p.aggregated.some(x=>isBomParentSku(x.sku)),
                 lines: p.aggregated.slice(0, 800).map(x=>({ sku:x.sku, title:x.title||"", qty: Math.abs(parseQty(x.qty)||0) })),
+                comboApplied: kind === "scarica" && Array.isArray(p.comboLines) && p.comboLines.length > 0,
+                comboVersion: 1,
+                comboLines: Array.isArray(p.comboLines) ? p.comboLines.slice(0, 800) : [],
+                comboTotalPieces: Number.isFinite(Number(p.comboTotalPieces)) ? Number(p.comboTotalPieces) : 0,
                 workflow: flow.workflow || null,
                 workflowId: wfId || null,
                 workflowLabel: wfLabel || null
@@ -8117,23 +8617,31 @@ async function applyFlow(kind){
                 fileName: flow.file?.name || "",
                 createdAtClient: tsClient
               });
+            }
 
-              if(kind === "carica"){
-                addBomComponentMovementsToWriter(batch, api, db, {
-                  loc: p.loc,
-                  parentSku: sku,
-                  parentTitle: title,
-                  parentQtySigned: delta,
-                  source: "flusso_pdf_bom_componenti",
-                  note: `Scarico automatico componenti da carico PDF ${sku}`,
-                  flowKind: kind,
-                  flowId: p.flowDocId || wfId || "",
-                  flowName: wfLabel || flow.file?.name || "",
-                  fileName: flow.file?.name || "",
-                  createdAtClient: tsClient,
-                  updatedBy: state.user.email || ""
-                });
-              }
+            if(kind === "scarica" && p.comboMap){
+              const parentDeltas = part.map(x=>({
+                sku: x.sku,
+                title: x.title || "",
+                loc: p.loc,
+                qtySigned: -Math.abs(parseQty(x.qty) || 0)
+              }));
+              const comboEffects = buildComboEffectsFromDeltas(parentDeltas, p.comboMap, {
+                source: "flusso_pdf",
+                note: "Scarico combo da flusso",
+                flowKind: kind,
+                flowId: p.flowDocId || wfId || "",
+                flowName: wfLabel || flow.file?.name || "",
+                createdAtClient: tsClient
+              });
+              writeComboEffectsToBatch(batch, api, db, comboEffects, {
+                source: "flusso_pdf",
+                note: "Scarico combo da flusso",
+                flowKind: kind,
+                flowId: p.flowDocId || wfId || "",
+                flowName: wfLabel || flow.file?.name || "",
+                createdAtClient: tsClient
+              });
             }
 
             await batch.commit();
@@ -8182,6 +8690,10 @@ async function applyFlow(kind){
                 workflowId: wfId || null,
                 workflowLabel: wfLabel || null,
                 lines: p.aggregated.slice(0, 800).map(x=>({ sku:x.sku, title:x.title||"", qty: Math.abs(parseQty(x.qty)||0) })),
+                comboApplied: kind === "scarica" && Array.isArray(p.comboLines) && p.comboLines.length > 0,
+                comboVersion: 1,
+                comboLines: Array.isArray(p.comboLines) ? p.comboLines.slice(0, 800) : [],
+                comboTotalPieces: Number.isFinite(Number(p.comboTotalPieces)) ? Number(p.comboTotalPieces) : 0,
                 doneAt: api.serverTimestamp(),
                 doneAtClient: Date.now()
               });
@@ -8432,7 +8944,7 @@ async function applyFlow(kind){
       $("btnCloseProducts")?.addEventListener("click", ()=> closeSheet("products"));
       $("sheetProducts")?.addEventListener("click", (e)=>{ if(e.target?.id==="sheetProducts") closeSheet("products"); });
 
-      $("btnCloseProductDetails")?.addEventListener("click", ()=>{ state.ui.productDetailsSku = null; state.ui.productDetailsEditMode = false; clearPdFieldErrors(); stopPdMovementsWatch(); closeSheet("productDetails"); });
+      $("btnCloseProductDetails")?.addEventListener("click", ()=>{ state.ui.productDetailsSku = null; state.ui.productDetailsEditMode = false; clearPdFieldErrors(); stopPdMovementsWatch(); stopProductComboWatch(); closeSheet("productDetails"); });
 $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
   if(!state.ui.productDetailsSku) return;
   if(!state.user?.isAdmin){
@@ -8451,13 +8963,14 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
   }
 });
 
-      $("sheetProductDetails")?.addEventListener("click", (e)=>{ if(e.target?.id==="sheetProductDetails"){ state.ui.productDetailsSku = null; state.ui.productDetailsEditMode = false; clearPdFieldErrors(); stopPdMovementsWatch(); closeSheet("productDetails"); } });
+      $("sheetProductDetails")?.addEventListener("click", (e)=>{ if(e.target?.id==="sheetProductDetails"){ state.ui.productDetailsSku = null; state.ui.productDetailsEditMode = false; clearPdFieldErrors(); stopPdMovementsWatch(); stopProductComboWatch(); closeSheet("productDetails"); } });
 
       $("productDetailsActions")?.addEventListener("click", (e)=>{
         const aEdit = e.target?.closest?.("[data-action='pdEdit']");
         const aCancel = e.target?.closest?.("[data-action='pdCancel']");
         const aSave = e.target?.closest?.("[data-action='pdSave']");
         const aLoad = e.target?.closest?.("[data-action='pdLoad']");
+        const aCombo = e.target?.closest?.("[data-action='pdCombo']");
         const aReorder = e.target?.closest?.("[data-action='pdReorder']");
         const aDelete = e.target?.closest?.("[data-action='pdDelete']");
         const aMove = e.target?.closest?.("[data-action='pdMove']");
@@ -8476,6 +8989,7 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
           return;
         }
         if(aLoad){ loadProductFromDetails(); return; }
+        if(aCombo){ openComboSheet(); return; }
         if(aReorder){ reorderProductToTabelloneWrite(); return; }
 
         // blocca azioni "modificanti" se non sei in edit-mode
@@ -8485,6 +8999,44 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
         if(aDelete){ deleteProductFromDetails(); return; }
         if(aMove){ moveProductFromDetails(aMove.getAttribute("data-to") || ""); return; }
       });
+
+      $("btnCloseCombo")?.addEventListener("click", ()=> closeSheet("combo"));
+      $("sheetCombo")?.addEventListener("click", (e)=>{ if(e.target?.id==="sheetCombo") closeSheet("combo"); });
+      $("comboSearch")?.addEventListener("input", ()=>{
+        state.combo.search = $("comboSearch")?.value || "";
+        renderComboSheet();
+      });
+      $("comboSelectedList")?.addEventListener("click", (e)=>{
+        const btn = e.target?.closest?.("[data-action='comboRemove']");
+        if(!btn) return;
+        const sku = toSkuId(btn.getAttribute("data-sku") || "");
+        state.combo.draft = normalizeComboChildren(state.combo?.draft || [], state.combo?.sku || "").filter(x=>x.sku !== sku);
+        state.combo.dirty = true;
+        renderComboSheet();
+      });
+      $("comboResultsList")?.addEventListener("click", (e)=>{
+        const btn = e.target?.closest?.("[data-action='comboAdd']");
+        if(!btn) return;
+        const parentSku = toSkuId(state.combo?.sku || state.ui.productDetailsSku || "");
+        const sku = toSkuId(btn.getAttribute("data-sku") || "");
+        if(!sku || sku === parentSku) return;
+        const current = normalizeComboChildren(state.combo?.draft || [], parentSku);
+        if(current.length >= 3){
+          showToast("Limite combo", "Puoi aggiungere massimo 3 prodotti.", 2000);
+          return;
+        }
+        if(current.some(x=>x.sku===sku)){
+          showToast("Già aggiunto", "Questo SKU è già presente nella combo.", 1800);
+          return;
+        }
+        const loc = btn.getAttribute("data-loc") || state.route.loc || "";
+        const info = getItemBySkuAny(sku, loc);
+        current.push({ sku, title: squashWhitespace(info?.it?.title || sku), qty:1, multiplier:1 });
+        state.combo.draft = normalizeComboChildren(current, parentSku);
+        state.combo.dirty = true;
+        renderComboSheet();
+      });
+      $("btnSaveCombo")?.addEventListener("click", ()=> saveComboDraft());
 
       $("btnCloseSkuPick")?.addEventListener("click", ()=> closeSheet("skuPick"));
       $("sheetSkuPick")?.addEventListener("click", (e)=>{ if(e.target?.id==="sheetSkuPick") closeSheet("skuPick"); });
