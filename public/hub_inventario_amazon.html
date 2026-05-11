@@ -3567,6 +3567,103 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
     const COL_PRODUCTS = "amzInventoryProducts"; // anagrafica prodotti (globale)
     const SUB_MOVES = "movements"; // storico movimenti per prodotto
 
+    const BOM_PARENT_SKU = "96-G01P-94FF";
+    const BOM_COMPONENTS = Object.freeze([
+      { sku: "ZS-UPI1-K2E7", qtyPerUnit: 1 },
+      { sku: "SAP1", qtyPerUnit: 1 }
+    ]);
+
+    function isBomParentSku(sku){
+      return toSkuId(sku || "") === BOM_PARENT_SKU;
+    }
+
+    function addBomComponentMovementsToWriter(writer, api, db, opts = {}){
+      // Distinta base speciale: quando aumenta lo SKU 96-G01P-94FF, scarica 1:1 i componenti.
+      // Se la modifica viene annullata/corretta in negativo, registra il movimento inverso sui componenti.
+      const parentSku = toSkuId(opts.parentSku || "");
+      if(parentSku !== BOM_PARENT_SKU) return 0;
+      if(!writer || !api || !db) return 0;
+
+      const signedRaw = Number(opts.parentQtySigned ?? opts.parentQty ?? opts.qty ?? 0);
+      const parentQtySigned = Number.isFinite(signedRaw) ? Math.round(signedRaw) : 0;
+      if(parentQtySigned === 0) return 0;
+
+      const absParentQty = Math.abs(parentQtySigned);
+      const loc = (opts.loc === "cerea" || opts.loc === "concamarise") ? opts.loc : "concamarise";
+      const nowClient = (typeof opts.createdAtClient === "number") ? opts.createdAtClient : Date.now();
+      const who = opts.updatedBy || state.user?.email || state.user?.emailLower || state.user?.uid || "";
+      const parentTitle = squashWhitespace(opts.parentTitle || "");
+      const flowName = opts.flowName || opts.fileName || "";
+      const baseSource = opts.source || "distinta_base_96-G01P-94FF";
+      const isConsume = parentQtySigned > 0;
+      const componentDeltaSign = isConsume ? -1 : 1;
+      const movementType = isConsume ? "scarica" : "carica";
+      const note = opts.note || (isConsume
+        ? `Scarico automatico componenti per creazione/carico ${absParentQty} pz di ${BOM_PARENT_SKU}`
+        : `Ripristino automatico componenti per rettifica ${absParentQty} pz di ${BOM_PARENT_SKU}`);
+
+      let writes = 0;
+      for(const comp of BOM_COMPONENTS){
+        const componentSku = toSkuId(comp.sku || "");
+        const factor = Number.isFinite(Number(comp.qtyPerUnit)) ? Number(comp.qtyPerUnit) : 1;
+        const componentQty = Math.round(absParentQty * factor);
+        if(!componentSku || !componentQty) continue;
+
+        const componentDelta = componentDeltaSign * componentQty;
+        const itemRef = api.doc(db, COL_ROOT, loc, SUB_ITEMS, componentSku);
+        writer.set(itemRef, {
+          sku: componentSku,
+          qty: api.increment(componentDelta),
+          location: loc,
+          updatedAt: api.serverTimestamp(),
+          updatedAtClient: nowClient,
+          updatedBy: who,
+          lastSeenAt: api.serverTimestamp(),
+          lastSeenAtClient: nowClient,
+          lastSeenKind: isConsume ? "bom_component_scarico" : "bom_component_ripristino",
+          bomParentSku: BOM_PARENT_SKU
+        }, { merge:true });
+        writes++;
+
+        // Mantiene viva l'anagrafica globale senza sovrascrivere titolo/nome già presenti.
+        writer.set(api.doc(db, COL_PRODUCTS, componentSku), {
+          sku: componentSku,
+          active: true,
+          lastSeenAt: api.serverTimestamp(),
+          lastSeenAtClient: nowClient,
+          lastSeenBy: who,
+          lastSeenLocation: loc,
+          lastSeenKind: isConsume ? "bom_component_scarico" : "bom_component_ripristino",
+          seenCount: api.increment(1)
+        }, { merge:true });
+        writes++;
+
+        addProductMovementToBatch(writer, api, db, componentSku, {
+          type: movementType,
+          qtySigned: componentDelta,
+          deltaSigned: componentDelta,
+          fromWarehouse: loc,
+          toWarehouse: loc,
+          source: baseSource,
+          note,
+          parentSku: BOM_PARENT_SKU,
+          parentTitle,
+          parentQty: parentQtySigned,
+          componentSku,
+          componentQty,
+          componentRatio: factor,
+          flowKind: opts.flowKind || "",
+          flowId: opts.flowId || "",
+          flowName,
+          fileName: opts.fileName || "",
+          createdAtClient: nowClient
+        });
+        writes++;
+      }
+      return writes;
+    }
+
+
     // Tabellone WRITE: stessa coda usata da tabellone_write.html
     const TW_WRITE_LINE_BUCKET = "linea_liquidi";
     const TW_WRITE_QUEUE_META_COL = "meta";
@@ -4541,6 +4638,7 @@ function startAllLogs(){
             workflow: d.workflow || null,
             workflowId: d.workflowId || ((d.workflow && d.workflow.id) ? d.workflow.id : ""),
             workflowLabel: d.workflowLabel || ((d.workflow && d.workflow.label) ? d.workflow.label : ""),
+            bomComponentScaricoApplied: d.bomComponentScaricoApplied === true,
             voided: d.voided === true,
             voidedAtClient: (typeof d.voidedAtClient==="number") ? d.voidedAtClient : 0,
             voidedBy: d.voidedBy || "",
@@ -4909,6 +5007,24 @@ function startAllLogs(){
             flowName: flowLabel,
             createdAtClient: nowClient
           });
+
+          if(kind === "carica" && opts?.bomComponentScaricoApplied === true){
+            addBomComponentMovementsToWriter(batch, api, db, {
+              loc,
+              parentSku: sku,
+              parentTitle: title,
+              parentQtySigned: delta,
+              source: "rettifica_flusso_bom_componenti",
+              note: delta > 0
+                ? `Scarico automatico componenti da carico flusso ${sku}`
+                : `Ripristino automatico componenti da annullamento carico flusso ${sku}`,
+              flowKind: kind || "",
+              flowId: opts?.flowId || "",
+              flowName: flowLabel,
+              createdAtClient: nowClient,
+              updatedBy: who
+            });
+          }
         }
 
         await batch.commit();
@@ -4927,7 +5043,7 @@ function startAllLogs(){
 
       try{
         showToast("Operazione in corso", "Sto annullando il flusso…");
-        await adjustInventoryWithLines(loc, flow.kind, flow.lines || [], -1, { reason:"undo_flow", note:`Annullamento flusso ${flowDisplayName(flow)}`, flowId: flow.id, flowName: flowDisplayName(flow) });
+        await adjustInventoryWithLines(loc, flow.kind, flow.lines || [], -1, { reason:"undo_flow", note:`Annullamento flusso ${flowDisplayName(flow)}`, flowId: flow.id, flowName: flowDisplayName(flow), bomComponentScaricoApplied: flow.bomComponentScaricoApplied === true });
 
         const api = state.firebase.api;
         const db = state.firebase.db;
@@ -4960,7 +5076,7 @@ function startAllLogs(){
       try{
         showToast("Operazione in corso", "Sto eliminando il flusso…");
         if(!flow.voided){
-          await adjustInventoryWithLines(loc, flow.kind, flow.lines || [], -1, { reason:"delete_flow", note:`Eliminazione flusso ${flowDisplayName(flow)}`, flowId: flow.id, flowName: flowDisplayName(flow) });
+          await adjustInventoryWithLines(loc, flow.kind, flow.lines || [], -1, { reason:"delete_flow", note:`Eliminazione flusso ${flowDisplayName(flow)}`, flowId: flow.id, flowName: flowDisplayName(flow), bomComponentScaricoApplied: flow.bomComponentScaricoApplied === true });
         }
         const api = state.firebase.api;
         const db = state.firebase.db;
@@ -5008,7 +5124,7 @@ function startAllLogs(){
 
       try{
         showToast("Operazione in corso", "Sto eliminando la riga…");
-        await adjustInventoryWithLines(loc, flow.kind, [line], -1, { reason:"remove_line_flow", note:`Eliminazione riga dal flusso ${flowDisplayName(flow)}`, flowId: flow.id, flowName: flowDisplayName(flow) });
+        await adjustInventoryWithLines(loc, flow.kind, [line], -1, { reason:"remove_line_flow", note:`Eliminazione riga dal flusso ${flowDisplayName(flow)}`, flowId: flow.id, flowName: flowDisplayName(flow), bomComponentScaricoApplied: flow.bomComponentScaricoApplied === true });
 
         const newLines = lines.filter(l=> String(l?.sku||"").trim()!==sku);
         const totalPieces = newLines.reduce((s,l)=> s + parseQty(l?.qty || 0), 0);
@@ -6265,6 +6381,7 @@ function closeSheet(kind){
                 status: "PENDING",
                 totalLines: p.aggregated.length,
                 totalPieces: p.totalPieces,
+                bomComponentScaricoApplied: p.aggregated.some(x=>isBomParentSku(x.sku)),
                 lines: p.aggregated.slice(0, 800).map(x=>({ sku:x.sku, title:x.title||"", qty: Math.abs(parseQty(x.qty)||0) })),
                 workflow: null,
                 workflowId: null,
@@ -6323,6 +6440,20 @@ function closeSheet(kind){
                 flowId: p.flowDocId || "",
                 flowName: "MANUAL",
                 createdAtClient: tsClient
+              });
+
+              addBomComponentMovementsToWriter(batch, api, db, {
+                loc: p.loc,
+                parentSku: sku,
+                parentTitle: title,
+                parentQtySigned: delta,
+                source: "campo_libero_bom_componenti",
+                note: `Scarico automatico componenti da carico campo libero ${sku}`,
+                flowKind: "carica",
+                flowId: p.flowDocId || "",
+                flowName: "MANUAL",
+                createdAtClient: tsClient,
+                updatedBy: state.user.email || ""
               });
             }
             await batch.commit();
@@ -7085,6 +7216,20 @@ async function loadProductFromDetails(){
             createdByEmail: state.user?.email || ""
           });
 
+          addBomComponentMovementsToWriter(tx, api, db, {
+            loc,
+            parentSku: sku,
+            parentTitle: title,
+            parentQtySigned: qtyToLoad,
+            source: "manuale_bom_componenti",
+            note: `Scarico automatico componenti da carico manuale ${sku}`,
+            flowKind: "carica",
+            flowId: "manual_load",
+            flowName: "Carico manuale da modale prodotto",
+            createdAtClient: nowClient,
+            updatedBy: who
+          });
+
           return { beforeQty, afterQty, title };
         });
 
@@ -7250,6 +7395,22 @@ async function saveProductFromDetails(){
             createdAtClient: nowClient,
             createdByUid: state.user?.uid || "",
             createdByEmail: state.user?.email || ""
+          });
+
+          addBomComponentMovementsToWriter(tx, api, db, {
+            loc,
+            parentSku: sku,
+            parentTitle: title || "",
+            parentQtySigned: deltaSigned,
+            source: "manuale_bom_componenti",
+            note: deltaSigned > 0
+              ? `Scarico automatico componenti da aumento quantità ${sku}`
+              : `Ripristino automatico componenti da riduzione quantità ${sku}`,
+            flowKind: "manual_edit",
+            flowId: "manual_qty_edit",
+            flowName: "Modifica quantità prodotto",
+            createdAtClient: nowClient,
+            updatedBy: state.user.email || ""
           });
         });
 
@@ -7668,6 +7829,22 @@ function renderProductsSheet(){
             createdByUid: state.user?.uid || "",
             createdByEmail: state.user?.email || ""
           });
+
+          addBomComponentMovementsToWriter(tx, api, db, {
+            loc,
+            parentSku: sku,
+            parentTitle: finalTitle,
+            parentQtySigned: deltaSigned,
+            source: "manuale_bom_componenti",
+            note: deltaSigned > 0
+              ? `Scarico automatico componenti da aumento quantità ${sku}`
+              : `Ripristino automatico componenti da riduzione quantità ${sku}`,
+            flowKind: "manual_edit",
+            flowId: "manual_row_qty_edit",
+            flowName: "Modifica quantità da lista articoli",
+            createdAtClient: nowClient,
+            updatedBy: who
+          });
         });
 
         showToast("Salvato", "Prodotto aggiornato e movimento registrato in cloud.", 1600);
@@ -7886,6 +8063,7 @@ async function applyFlow(kind){
                 status: "PENDING",
                 totalLines: p.aggregated.length,
                 totalPieces: p.totalPieces,
+                bomComponentScaricoApplied: kind === "carica" && p.aggregated.some(x=>isBomParentSku(x.sku)),
                 lines: p.aggregated.slice(0, 800).map(x=>({ sku:x.sku, title:x.title||"", qty: Math.abs(parseQty(x.qty)||0) })),
                 workflow: flow.workflow || null,
                 workflowId: wfId || null,
@@ -7939,6 +8117,23 @@ async function applyFlow(kind){
                 fileName: flow.file?.name || "",
                 createdAtClient: tsClient
               });
+
+              if(kind === "carica"){
+                addBomComponentMovementsToWriter(batch, api, db, {
+                  loc: p.loc,
+                  parentSku: sku,
+                  parentTitle: title,
+                  parentQtySigned: delta,
+                  source: "flusso_pdf_bom_componenti",
+                  note: `Scarico automatico componenti da carico PDF ${sku}`,
+                  flowKind: kind,
+                  flowId: p.flowDocId || wfId || "",
+                  flowName: wfLabel || flow.file?.name || "",
+                  fileName: flow.file?.name || "",
+                  createdAtClient: tsClient,
+                  updatedBy: state.user.email || ""
+                });
+              }
             }
 
             await batch.commit();
