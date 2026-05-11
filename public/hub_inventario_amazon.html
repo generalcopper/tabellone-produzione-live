@@ -1363,6 +1363,24 @@
     }
     .moveType{ font-weight:600; color: var(--ink); }
     .moveQty{ font-weight:800; color: var(--ink); }
+    .moveActions{
+      display:flex;
+      align-items:center;
+      justify-content:flex-end;
+      gap:8px;
+      flex:0 0 auto;
+    }
+    .moveDeleteBtn{
+      width:28px;
+      height:28px;
+      min-width:28px;
+      padding:0;
+      border-radius:999px;
+      font-size:18px;
+      line-height:1;
+      font-weight:800;
+    }
+    .moveDeleteBtn:disabled{ opacity:.35; cursor:default; }
     .moveMeta{
       margin-top:4px;
       font-size:12px;
@@ -3811,6 +3829,7 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
           authApi: authMod,
           api: {
             collection: fsMod.collection,
+            collectionGroup: fsMod.collectionGroup,
             doc: fsMod.doc,
             addDoc: fsMod.addDoc,
             getDoc: fsMod.getDoc,
@@ -3826,6 +3845,7 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
             deleteDoc: fsMod.deleteDoc,
             writeBatch: fsMod.writeBatch,
             increment: fsMod.increment,
+            arrayUnion: fsMod.arrayUnion,
             runTransaction: fsMod.runTransaction,
           }
         };
@@ -7310,6 +7330,398 @@ function closeSheet(kind){
       renderProductDetailsMovements();
     }
 
+    function movementQtySigned(m){
+      const q = Number(m?.qtySigned ?? m?.deltaSigned ?? 0);
+      return Number.isFinite(q) ? Math.round(q) : 0;
+    }
+
+    function movementTypeLabel(m){
+      const typeRaw = String(m?.type || "");
+      const q = movementQtySigned(m);
+      return (typeRaw==="move") ? "Spostamento"
+        : (typeRaw==="carica") ? "Carico"
+        : (typeRaw==="scarica") ? "Scarico"
+        : (typeRaw==="combo_scarica") ? "Combo scarico"
+        : (typeRaw==="combo_ripristino") ? "Combo ripristino"
+        : (typeRaw==="rettifica") ? "Rettifica"
+        : (typeRaw==="manual_edit") ? (q !== 0 ? "Rettifica" : "Modifica")
+        : (typeRaw==="manual_rename") ? "Rinomina SKU"
+        : (typeRaw || "—");
+    }
+
+    function normalizeInventoryLoc(v){
+      const s = String(v || "").trim().toLowerCase();
+      return (s === "cerea" || s === "concamarise") ? s : "";
+    }
+
+    function movementTargetLoc(m, fallbackLoc=""){
+      return normalizeInventoryLoc(m?.toWarehouse)
+        || normalizeInventoryLoc(m?.fromWarehouse)
+        || normalizeInventoryLoc(m?.location)
+        || normalizeInventoryLoc(m?.loc)
+        || normalizeInventoryLoc(fallbackLoc)
+        || normalizeInventoryLoc(state.route?.loc)
+        || "concamarise";
+    }
+
+    function canDeleteProductMovement(m){
+      if(!m || !m.id) return false;
+      const type = String(m.type || "");
+      // Rinomina SKU: eliminarla richiederebbe rinominare a ritroso l’anagrafica, quindi resta protetta.
+      if(type === "manual_rename") return false;
+      if(m.locked === true || m.deleteLocked === true) return false;
+      return true;
+    }
+
+    function movementTitleForInventory(sku, loc, m){
+      try{
+        const info = getItemBySkuAny(sku, loc);
+        return squashWhitespace(m?.title || m?.productTitle || info?.it?.title || sku) || sku;
+      }catch(_e){
+        return squashWhitespace(m?.title || m?.productTitle || sku) || sku;
+      }
+    }
+
+    function touchInventoryDeltaToBatch(batch, api, db, loc, sku, delta, title, nowClient, who, reason){
+      const l = normalizeInventoryLoc(loc);
+      const s = toSkuId(sku || "");
+      const q = Number(delta || 0);
+      if(!l || !s || !Number.isFinite(q) || q === 0) return false;
+      const ref = api.doc(db, COL_ROOT, l, SUB_ITEMS, s);
+      const finalTitle = squashWhitespace(title || s) || s;
+      batch.set(ref, {
+        sku: s,
+        title: finalTitle,
+        titleNorm: normalizeText(finalTitle || s),
+        qty: api.increment(Math.round(q)),
+        location: l,
+        updatedAt: api.serverTimestamp(),
+        updatedAtClient: nowClient,
+        updatedBy: who,
+        lastSeenAt: api.serverTimestamp(),
+        lastSeenAtClient: nowClient,
+        lastSeenKind: reason || "delete_movement_rollback"
+      }, { merge:true });
+      return true;
+    }
+
+    function reverseMovementInventoryToBatch(batch, api, db, sku, m, opts = {}){
+      const s = toSkuId(sku || m?.sku || "");
+      if(!s) throw new Error("SKU movimento mancante.");
+      const q = movementQtySigned(m);
+      const type = String(m?.type || "");
+      const nowClient = Number(opts.nowClient || Date.now());
+      const who = opts.who || state.user?.email || state.user?.emailLower || state.user?.uid || "";
+      const reason = opts.reason || "delete_movement_rollback";
+
+      if(type === "move"){
+        const from = normalizeInventoryLoc(m?.fromWarehouse);
+        const to = normalizeInventoryLoc(m?.toWarehouse);
+        if(!from || !to) throw new Error("Movimento spostamento senza magazzino origine/destinazione.");
+        const title = movementTitleForInventory(s, from || to, m);
+        touchInventoryDeltaToBatch(batch, api, db, from, s, q, title, nowClient, who, reason);
+        touchInventoryDeltaToBatch(batch, api, db, to, s, -q, title, nowClient, who, reason);
+        return;
+      }
+
+      const loc = movementTargetLoc(m, opts.fallbackLoc || state.route?.loc || "");
+      const title = movementTitleForInventory(s, loc, m);
+      touchInventoryDeltaToBatch(batch, api, db, loc, s, -q, title, nowClient, who, reason);
+    }
+
+    function getArraySkusFromAny(value){
+      const out = [];
+      const push = (x)=>{
+        const sku = toSkuId((x && typeof x === "object") ? (x.sku || x.id || x.code || x.childSku || x.productSku || "") : x);
+        if(sku && !out.includes(sku)) out.push(sku);
+      };
+      if(Array.isArray(value)) value.forEach(push);
+      else if(value) push(value);
+      return out;
+    }
+
+    function childMovementMatchesParentCombo(childMove, parentSku, parentMove){
+      const p = toSkuId(parentSku || "");
+      if(!p || !childMove) return false;
+      const type = String(childMove.type || "").toLowerCase();
+      const parentArr = [
+        ...getArraySkusFromAny(childMove.comboParentSkus),
+        ...getArraySkusFromAny(childMove.parentSkus),
+        ...getArraySkusFromAny(childMove.comboParentSku),
+        ...getArraySkusFromAny(childMove.parentSku)
+      ];
+      if(parentArr.includes(p)) return true;
+
+      // fallback prudente: stesso timestamp + movimento combo + nota con SKU madre.
+      const sameTs = Number(childMove.createdAtClient || 0) && Number(childMove.createdAtClient || 0) === Number(parentMove?.createdAtClient || 0);
+      const noteHasParent = String(childMove.note || "").toUpperCase().includes(p);
+      if(sameTs && type.startsWith("combo_") && noteHasParent) return true;
+
+      return false;
+    }
+
+    function movementLooksComboParent(m){
+      const type = String(m?.type || "").toLowerCase();
+      if(!m || type.startsWith("combo_") || type === "move" || type === "manual_rename") return false;
+      const q = movementQtySigned(m);
+      if(q === 0) return false;
+      const txt = [type, m?.source, m?.note, m?.flowKind, m?.flowName, m?.fileName].map(x=>String(x||"").toLowerCase()).join(" ");
+      if(type === "scarica" || String(m?.flowKind || "").toLowerCase() === "scarica") return true;
+      return txt.includes("flusso_pdf") || txt.includes("scarico") || txt.includes("combo") || txt.includes("delete_flow") || txt.includes("remove_line_flow") || txt.includes("undo_flow") || txt.includes("annullamento scarico") || txt.includes("ripristino combo");
+    }
+
+    async function comboCandidateSkusForMovement(parentSku, m){
+      const parent = toSkuId(parentSku || "");
+      const set = new Set();
+      const addMany = (arr)=> getArraySkusFromAny(arr).forEach(x=>{ if(x && x!==parent) set.add(x); });
+
+      addMany(m?.comboChildSkus);
+      addMany(m?.comboChildren);
+      if(Array.isArray(m?.comboLines)){
+        m.comboLines.forEach(x=>{
+          const sku = toSkuId(x?.sku || "");
+          if(sku && sku !== parent) set.add(sku);
+        });
+      }
+
+      // combo attuale da cloud: è la fonte principale quando il movimento madre non salvava ancora i figli.
+      try{
+        const cached = getComboChildrenForSku(parent);
+        normalizeComboChildren(cached, parent).forEach(c=>{ if(c.sku) set.add(c.sku); });
+      }catch(_e){}
+
+      try{
+        const map = await fetchComboChildrenMap([parent]);
+        normalizeComboChildren(map.get(parent) || [], parent).forEach(c=>{ if(c.sku) set.add(c.sku); });
+      }catch(_e){}
+
+      return Array.from(set);
+    }
+
+    async function findComboChildMovementMatches(parentSku, parentMove, candidateSkus){
+      const api = state.firebase?.api;
+      const db = state.firebase?.db;
+      if(!api || !db) return [];
+      const ts = Number(parentMove?.createdAtClient || 0);
+      if(!ts) return [];
+
+      const out = [];
+      const seen = new Set();
+      const addMatch = (childSku, docSnap)=>{
+        try{
+          const data = docSnap.data ? (docSnap.data() || {}) : (docSnap.data || {});
+          const id = docSnap.id || "";
+          const s = toSkuId(childSku || data.sku || "");
+          if(!s || !id) return;
+          const move = { id, ...data };
+          if(!childMovementMatchesParentCombo(move, parentSku, parentMove)) return;
+          const key = `${s}::${id}`;
+          if(seen.has(key)) return;
+          seen.add(key);
+          const ref = docSnap.ref || api.doc(db, COL_PRODUCTS, s, SUB_MOVES, id);
+          out.push({ sku:s, id, ref, data: move });
+        }catch(_e){}
+      };
+
+      // Prima ricerca globale collectionGroup: trova anche figli se la combo è stata modificata dopo.
+      if(api.collectionGroup){
+        try{
+          const cg = api.collectionGroup(db, SUB_MOVES);
+          const q = api.query(cg, api.where("createdAtClient", "==", ts), api.limit(120));
+          const snap = await api.getDocs(q);
+          snap.forEach((docSnap)=>{
+            const parentDoc = docSnap?.ref?.parent?.parent;
+            const childSku = parentDoc?.id || "";
+            addMatch(childSku, docSnap);
+          });
+        }catch(err){
+          console.warn("combo movement collectionGroup lookup skipped:", err);
+        }
+      }
+
+      // Fallback per SKU candidati (non richiede collectionGroup).
+      for(const childSku0 of (candidateSkus || [])){
+        const childSku = toSkuId(childSku0 || "");
+        if(!childSku) continue;
+        try{
+          const col = api.collection(db, COL_PRODUCTS, childSku, SUB_MOVES);
+          const q = api.query(col, api.where("createdAtClient", "==", ts), api.limit(50));
+          const snap = await api.getDocs(q);
+          snap.forEach((docSnap)=> addMatch(childSku, docSnap));
+        }catch(err){
+          console.warn("combo child movement lookup skipped:", childSku, err);
+        }
+      }
+
+      return out;
+    }
+
+    function applyComboChildRollbackToBatch(batch, api, db, parentSku, parentMove, match, opts = {}){
+      const childSku = toSkuId(match?.sku || match?.data?.sku || "");
+      const childMove = match?.data || {};
+      if(!childSku || !match?.ref) return 0;
+
+      const childQty = movementQtySigned(childMove);
+      const parentQty = movementQtySigned(parentMove);
+      if(!Number.isFinite(childQty) || childQty === 0) return 0;
+
+      const parentAbs = Math.abs(parentQty || childQty);
+      const parentPart = (parentAbs && Math.abs(childQty) >= parentAbs)
+        ? (Math.sign(childQty) * parentAbs)
+        : childQty;
+      const reverseDelta = -parentPart;
+
+      const loc = movementTargetLoc(childMove, match.loc || state.route?.loc || "");
+      const title = movementTitleForInventory(childSku, loc, childMove);
+      touchInventoryDeltaToBatch(batch, api, db, loc, childSku, reverseDelta, title, opts.nowClient, opts.who, "delete_parent_movement_combo_rollback");
+
+      const existingParents = getArraySkusFromAny(childMove.comboParentSkus || childMove.parentSkus);
+      const nextParents = existingParents.filter(x=> x !== toSkuId(parentSku));
+      const newQty = childQty - parentPart;
+      const shouldDelete = !nextParents.length || Math.abs(newQty) < 1;
+
+      if(shouldDelete){
+        batch.delete(match.ref);
+      }else{
+        batch.set(match.ref, {
+          qtySigned: Math.round(newQty),
+          deltaSigned: Math.round(newQty),
+          comboParentSkus: nextParents,
+          parentSkus: nextParents,
+          partialDeletedParentSkus: api.arrayUnion ? api.arrayUnion(toSkuId(parentSku)) : [toSkuId(parentSku)],
+          updatedAt: api.serverTimestamp(),
+          updatedAtClient: opts.nowClient,
+          updatedBy: opts.who
+        }, { merge:true });
+      }
+      return 1;
+    }
+
+    function fallbackComboRollbackToBatch(batch, api, db, parentSku, parentMove, childSkus, opts = {}){
+      if(!movementLooksComboParent(parentMove)) return 0;
+      const parentQty = movementQtySigned(parentMove);
+      if(!parentQty || !Array.isArray(childSkus) || !childSkus.length) return 0;
+
+      let count = 0;
+      const reverseDelta = -parentQty;
+      const nowClient = Number(opts.nowClient || Date.now());
+      for(const childSku0 of childSkus){
+        const childSku = toSkuId(childSku0 || "");
+        if(!childSku || childSku === toSkuId(parentSku)) continue;
+        const loc = resolveLocForSkuAny(childSku, state.route?.loc || "");
+        const title = movementTitleForInventory(childSku, loc, {});
+        touchInventoryDeltaToBatch(batch, api, db, loc, childSku, reverseDelta, title, nowClient, opts.who, "delete_parent_movement_combo_fallback");
+        addProductMovementToBatch(batch, api, db, childSku, {
+          type: reverseDelta < 0 ? "combo_scarica" : "combo_ripristino",
+          qtySigned: reverseDelta,
+          deltaSigned: reverseDelta,
+          fromWarehouse: loc,
+          toWarehouse: loc,
+          source: "delete_parent_movement",
+          note: `Aggiornamento combo da eliminazione movimento madre: ${toSkuId(parentSku)}`,
+          comboParentSkus: [toSkuId(parentSku)],
+          linkedDeletedMoveId: parentMove?.id || "",
+          createdAtClient: nowClient
+        });
+        count++;
+      }
+      return count;
+    }
+
+    async function deleteProductMovementFromDetails(moveId){
+      const parentSku = toSkuId(state.ui.productDetailsSku || state.movements?.sku || "");
+      const id = String(moveId || "").trim();
+      if(!parentSku || !id) return;
+
+      if(!state.user?.isAdmin){
+        showToast("Permessi", "Solo Admin può eliminare i movimenti.", 2200);
+        return;
+      }
+
+      if(state.movements?.deletingId){
+        showToast("Operazione in corso", "Attendi la fine dell’eliminazione precedente.", 1800);
+        return;
+      }
+
+      const cached = (state.movements?.items || []).find(x=> x.id === id) || null;
+      if(cached && !canDeleteProductMovement(cached)){
+        showToast("Movimento protetto", "Questo movimento non può essere eliminato dal tasto meno.", 2400);
+        return;
+      }
+
+      const qtyPreview = cached ? movementQtySigned(cached) : 0;
+      const typePreview = cached ? movementTypeLabel(cached) : "movimento";
+      const ok = confirm(`Eliminare questo movimento?\n\n${typePreview} • ${qtyPreview}\n\nVerrà aggiornato subito l’inventario in cloud. Se il movimento è della madre di una combo, verranno aggiornati anche i figli collegati.`);
+      if(!ok) return;
+
+      const api = state.firebase?.api;
+      const db = state.firebase?.db;
+      if(!api || !db){
+        showToast("Errore", "Firebase non inizializzato.", 2200);
+        return;
+      }
+
+      state.movements.deletingId = id;
+      renderProductDetailsMovements();
+
+      try{
+        const moveRef = api.doc(db, COL_PRODUCTS, parentSku, SUB_MOVES, id);
+        const snap = await api.getDoc(moveRef);
+        if(!snap.exists()) throw new Error("Movimento già eliminato o non trovato.");
+        const move = { id, ...(snap.data() || {}) };
+        if(!canDeleteProductMovement(move)) throw new Error("Movimento protetto: non può essere eliminato dal tasto meno.");
+
+        const nowClient = Date.now();
+        const who = state.user?.email || state.user?.emailLower || state.user?.uid || "";
+        const candidateChildren = await comboCandidateSkusForMovement(parentSku, move);
+        const childMatches = await findComboChildMovementMatches(parentSku, move, candidateChildren);
+
+        const batch = api.writeBatch(db);
+
+        // 1) rollback inventario del movimento selezionato
+        reverseMovementInventoryToBatch(batch, api, db, parentSku, move, {
+          fallbackLoc: state.route?.loc || "",
+          nowClient,
+          who,
+          reason: "delete_product_movement"
+        });
+
+        // 2) cancella il movimento madre/attuale
+        batch.delete(moveRef);
+
+        // 3) se era un movimento madre combo, rollback dei figli collegati.
+        let comboTouched = 0;
+        if(!String(move.type || "").startsWith("combo_")){
+          for(const match of childMatches){
+            comboTouched += applyComboChildRollbackToBatch(batch, api, db, parentSku, move, match, { nowClient, who });
+          }
+
+          // Se non esisteva ancora un movimento figlio tracciato, applica comunque la rettifica sui figli attuali.
+          if(!comboTouched && candidateChildren.length){
+            comboTouched += fallbackComboRollbackToBatch(batch, api, db, parentSku, move, candidateChildren, { nowClient, who });
+          }
+        }
+
+        await batch.commit();
+
+        showToast(
+          "Movimento eliminato",
+          comboTouched ? `Inventario aggiornato • combo: ${comboTouched} figlio/i aggiornati.` : "Inventario aggiornato in cloud.",
+          2600
+        );
+        scheduleLowStockEmailAfterUpdate("delete_product_movement");
+        renderProductDetailsSheet();
+        renderProductsSheet();
+        renderInventoryList();
+      }catch(err){
+        console.error("delete movement", err);
+        showToast("Errore eliminazione", String(err?.message || err).slice(0, 240), 3200);
+      }finally{
+        if(state.movements) state.movements.deletingId = null;
+        renderProductDetailsMovements();
+      }
+    }
+
     function renderProductDetailsMovements(){
       const list = $("pdMovesList");
       const hint = $("pdMovesHint");
@@ -7341,44 +7753,52 @@ function closeSheet(kind){
         return;
       }
 
-      hint.textContent = "";
+      hint.textContent = state.user?.isAdmin
+        ? "Tasto −: elimina il movimento e applica il rollback inventario in cloud."
+        : "Movimenti in sola lettura.";
+
+      const deletingId = state.movements?.deletingId || "";
       list.innerHTML = items.map((m)=>{
         const dt = m.createdAtClient ? new Date(m.createdAtClient).toLocaleString("it-IT") : "—";
         const who = m.createdByEmail || m.createdByUid || "—";
-        const typeRaw = m.type || "";
-        const type = (typeRaw==="move") ? "Spostamento"
-          : (typeRaw==="carica") ? "Carico"
-          : (typeRaw==="scarica") ? "Scarico"
-          : (typeRaw==="combo_scarica") ? "Combo scarico"
-          : (typeRaw==="combo_ripristino") ? "Combo ripristino"
-          : (typeRaw==="rettifica") ? "Rettifica"
-          : (typeRaw==="manual_edit") ? ((Number(m.qtySigned || m.deltaSigned || 0) !== 0) ? "Rettifica" : "Modifica")
-          : (typeRaw==="manual_rename") ? "Rinomina SKU"
-          : (typeRaw || "—");
+        const type = movementTypeLabel(m);
+        const typeRaw = String(m.type || "");
 
         const from = m.fromWarehouse ? prettyLoc(m.fromWarehouse) : "";
         const to = m.toWarehouse ? prettyLoc(m.toWarehouse) : "";
         const arrow = (from || to) ? `${from || "—"} → ${to || "—"}` : "";
 
-        const qty = (m.qtySigned !== undefined && m.qtySigned !== null)
-          ? Number(m.qtySigned)
-          : ((m.deltaSigned !== undefined && m.deltaSigned !== null) ? Number(m.deltaSigned) : NaN);
+        const qty = movementQtySigned(m);
         const qtyStr = Number.isFinite(qty) ? String(Math.round(qty)) : "—";
 
         const origin = [m.source, m.note, m.flowName || m.fileName].filter(Boolean).join(" • ");
+        const comboBits = [];
+        const parents = getArraySkusFromAny(m.comboParentSkus || m.parentSkus);
+        if(parents.length) comboBits.push(`madre: ${parents.join(", ")}`);
+        const children = getArraySkusFromAny(m.comboChildSkus || m.comboChildren);
+        if(children.length) comboBits.push(`figli: ${children.join(", ")}`);
 
         const metaLine1 = `${escapeHtml(dt)} • <span class="mono">${escapeHtml(who)}</span>`;
-        const metaLine2 = [arrow && escapeHtml(arrow), origin && escapeHtml(origin)].filter(Boolean).join(" • ");
+        const metaLine2 = [arrow && escapeHtml(arrow), origin && escapeHtml(origin), comboBits.length && escapeHtml(comboBits.join(" • "))].filter(Boolean).join(" • ");
+
+        const canDelete = !!state.user?.isAdmin && canDeleteProductMovement(m);
+        const isDeleting = deletingId && deletingId === m.id;
+        const deleteBtn = canDelete ? `<button class="btn small danger moveDeleteBtn" type="button" data-action="pdDeleteMove" data-moveid="${escapeHtml(m.id)}" title="Elimina movimento" ${isDeleting ? "disabled" : ""}>−</button>` : "";
+        const protectedHint = (!canDelete && state.user?.isAdmin && typeRaw === "manual_rename") ? `<div style="margin-top:4px;">Movimento protetto: rinomina SKU.</div>` : "";
 
         return `
-          <div class="moveRow">
+          <div class="moveRow" data-moveid="${escapeHtml(m.id || "")}">
             <div class="moveTop">
               <div class="moveType">${escapeHtml(type)}</div>
-              <div class="moveQty mono">${escapeHtml(qtyStr)}</div>
+              <div class="moveActions">
+                <div class="moveQty mono">${escapeHtml(qtyStr)}</div>
+                ${deleteBtn}
+              </div>
             </div>
             <div class="moveMeta">
               <div>${metaLine1}</div>
               ${metaLine2 ? `<div style="margin-top:4px;">${metaLine2}</div>` : ``}
+              ${protectedHint}
             </div>
           </div>
         `;
@@ -8964,6 +9384,15 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
 });
 
       $("sheetProductDetails")?.addEventListener("click", (e)=>{ if(e.target?.id==="sheetProductDetails"){ state.ui.productDetailsSku = null; state.ui.productDetailsEditMode = false; clearPdFieldErrors(); stopPdMovementsWatch(); stopProductComboWatch(); closeSheet("productDetails"); } });
+
+      $("productDetailsContent")?.addEventListener("click", (e)=>{
+        const btn = e.target?.closest?.("[data-action='pdDeleteMove']");
+        if(!btn) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const moveId = btn.getAttribute("data-moveid") || "";
+        if(moveId) deleteProductMovementFromDetails(moveId);
+      });
 
       $("productDetailsActions")?.addEventListener("click", (e)=>{
         const aEdit = e.target?.closest?.("[data-action='pdEdit']");
