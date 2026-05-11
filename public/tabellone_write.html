@@ -12539,8 +12539,10 @@ const TW_AMZ_LOC = "concamarise";
 const TW_AMZ_ITEMS_SUB = "items";
 const TW_AMZ_LOGS_SUB = "logs";
 const TW_AMZ_PRODUCTS_COL = "amzInventoryProducts";
+const TW_AMZ_MOVES_SUB = "movements";
 const TW_AMZ_SOURCE = "Tabellone WRITE";
 const TW_AMZ_DOC_TYPE = "PRODUZIONE_WRITE_AMAZON_CONCAMARISE";
+const TW_AMZ_COMBO_VERSION = 2;
 
 function twEnsurePfState(){
   const tw = ensureTabWriteState();
@@ -13135,6 +13137,240 @@ function twAmazonLineFromClassified(info){
   };
 }
 
+
+function twAmazonSafeDocPart(v){
+  return String(v || "")
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9_-]+/g, "_")
+    .replace(/_+/g, "_")
+    .slice(0, 120) || "DOC";
+}
+
+function twAmazonProductMovementDocId(movementId){
+  return "twload_" + twAmazonSafeDocPart(movementId || Date.now());
+}
+
+function twAmazonComboMovementDocId(movementId, childSku){
+  return "twcombo_" + twAmazonSafeDocPart(movementId || Date.now()) + "_" + twAmazonSafeDocPart(childSku || "child");
+}
+
+function twAmazonComboChildrenFromData(data, parentSku=""){
+  try{
+    const parent = String(parentSku || "").trim().toUpperCase();
+    const raw = Array.isArray(data?.comboChildren)
+      ? data.comboChildren
+      : (Array.isArray(data?.combo?.children) ? data.combo.children : []);
+    const out = [];
+    const seen = new Set();
+    for(const c0 of raw){
+      const c = c0 || {};
+      const sku = String(c.sku || c.code || c.id || c.childSku || "").trim().toUpperCase();
+      if(!sku || sku === parent || seen.has(sku)) continue;
+      seen.add(sku);
+      const multRaw = Number(c.qty ?? c.multiplier ?? c.unitPerParent ?? 1);
+      const multiplier = Number.isFinite(multRaw) && multRaw > 0 ? Math.round(multRaw * 1000) / 1000 : 1;
+      const info = (typeof twEnsureAmazonState === "function" ? twEnsureAmazonState() : null);
+      const cached = info?.bySku instanceof Map ? info.bySku.get(sku) : null;
+      const title = String(c.title || c.name || cached?.title || sku).trim();
+      out.push({ sku, title, multiplier });
+      if(out.length >= 3) break;
+    }
+    return out;
+  }catch(_e){
+    return [];
+  }
+}
+
+async function twFetchAmazonComboChildren(parentSku){
+  try{
+    const sku = String(parentSku || "").trim().toUpperCase();
+    if(!sku || !state.firebase?.ok) return [];
+    const fs = state.firebase.api;
+    const db = state.firebase.db;
+    if(!fs || !db || !fs.getDoc) return [];
+    const snap = await fs.getDoc(fs.doc(db, TW_AMZ_PRODUCTS_COL, sku));
+    const data = snap?.exists?.() ? (snap.data() || {}) : {};
+    return twAmazonComboChildrenFromData(data, sku);
+  }catch(e){
+    console.warn("twFetchAmazonComboChildren error:", e);
+    return [];
+  }
+}
+
+function twAmazonComboLinesFromPlan(plan, children){
+  const list = twAmazonComboChildrenFromData({ comboChildren: children || [] }, plan?.sku || "");
+  return list.map(c=>{
+    const multiplier = Number.isFinite(Number(c.multiplier)) && Number(c.multiplier) > 0 ? Number(c.multiplier) : 1;
+    const q = -Math.round(Number(plan?.qty || 0) * multiplier * 1000) / 1000;
+    return {
+      sku: c.sku,
+      title: String(c.title || c.sku || "").trim(),
+      loc: TW_AMZ_LOC,
+      qtySigned: q,
+      deltaSigned: q,
+      parentSku: plan?.sku || "",
+      parentTitle: plan?.title || "",
+      parentQtySigned: Number(plan?.qty || 0),
+      multiplier,
+      source: TW_AMZ_SOURCE,
+      note: `Scarico combo da Tabellone WRITE • madre: ${plan?.sku || ""}`,
+      flowKind: "tabellone_write",
+      flowId: plan?.movementId || "",
+      flowName: `Tabellone WRITE • ${plan?.title || plan?.sku || ""}`.slice(0, 180),
+      twDoneId: plan?.doneId || "",
+      twMovementId: plan?.movementId || "",
+      createdAtClient: Number(plan?.tsClient || Date.now())
+    };
+  }).filter(x=> x.sku && Number.isFinite(Number(x.qtySigned)) && Number(x.qtySigned) !== 0);
+}
+
+function twAmazonComboLinesFromDone(done, plan, opts={}){
+  const raw = Array.isArray(done?.amazonInventoryComboLines)
+    ? done.amazonInventoryComboLines
+    : (Array.isArray(done?.comboLines) ? done.comboLines : []);
+  if(raw.length){
+    return raw.map(x=>({
+      sku: String(x?.sku || x?.childSku || "").trim().toUpperCase(),
+      title: String(x?.title || x?.name || x?.sku || "").trim(),
+      loc: (String(x?.loc || x?.location || "").trim().toLowerCase() === "cerea") ? "cerea" : TW_AMZ_LOC,
+      qtySigned: Number(x?.qtySigned ?? x?.deltaSigned ?? 0),
+      deltaSigned: Number(x?.deltaSigned ?? x?.qtySigned ?? 0),
+      parentSku: String(x?.parentSku || plan?.sku || "").trim().toUpperCase(),
+      parentTitle: String(x?.parentTitle || plan?.title || "").trim(),
+      parentQtySigned: Number(x?.parentQtySigned || plan?.qty || 0),
+      multiplier: Number(x?.multiplier || 1),
+      source: x?.source || TW_AMZ_SOURCE,
+      note: x?.note || `Scarico combo da Tabellone WRITE • madre: ${plan?.sku || ""}`,
+      flowKind: x?.flowKind || "tabellone_write",
+      flowId: x?.flowId || plan?.movementId || "",
+      flowName: x?.flowName || `Tabellone WRITE • ${plan?.title || plan?.sku || ""}`.slice(0, 180),
+      twDoneId: x?.twDoneId || plan?.doneId || "",
+      twMovementId: x?.twMovementId || plan?.movementId || "",
+      createdAtClient: Number(x?.createdAtClient || plan?.tsClient || Date.now())
+    })).filter(x=> x.sku && Number.isFinite(Number(x.qtySigned)) && Number(x.qtySigned) !== 0);
+  }
+  if(opts && Array.isArray(opts.comboChildren) && opts.comboChildren.length){
+    return twAmazonComboLinesFromPlan(plan, opts.comboChildren);
+  }
+  return [];
+}
+
+function twAmazonComboTotalPieces(lines){
+  return (Array.isArray(lines) ? lines : []).reduce((a,x)=> a + Math.abs(Number(x?.qtySigned || 0)), 0);
+}
+
+function twAmazonProductMovementPayload(plan, fs, comboLines=[]){
+  return {
+    type: "carica",
+    sku: plan.sku,
+    title: plan.title,
+    qtySigned: plan.qty,
+    deltaSigned: plan.qty,
+    fromWarehouse: TW_AMZ_LOC,
+    toWarehouse: TW_AMZ_LOC,
+    location: TW_AMZ_LOC,
+    source: "tabellone_write",
+    note: "Carico da Tabellone WRITE",
+    flowKind: "tabellone_write",
+    flowId: plan.movementId,
+    flowName: `Tabellone WRITE • ${plan.title}`.slice(0, 180),
+    fileName: "TABELLONE_WRITE",
+    twDoneId: plan.doneId,
+    twMovementId: plan.movementId,
+    comboChildSkus: (comboLines || []).map(x=>x.sku).filter(Boolean),
+    createdAt: fs.serverTimestamp(),
+    createdAtClient: plan.tsClient,
+    createdByUid: state.user?.uid || "",
+    createdByEmail: plan.who || state.user?.email || ""
+  };
+}
+
+function twAmazonApplyProductMovement(writer, fs, db, plan, comboLines=[]){
+  const ref = fs.doc(db, TW_AMZ_PRODUCTS_COL, plan.sku, TW_AMZ_MOVES_SUB, twAmazonProductMovementDocId(plan.movementId));
+  writer.set(ref, twAmazonProductMovementPayload(plan, fs, comboLines), { merge:true });
+  return ref;
+}
+
+function twAmazonApplyComboEffects(writer, fs, db, plan, comboLines, opts={}){
+  const reverse = !!opts.reverse;
+  const lines = Array.isArray(comboLines) ? comboLines : [];
+  let count = 0;
+  for(const line0 of lines){
+    const line = line0 || {};
+    const sku = String(line.sku || "").trim().toUpperCase();
+    if(!sku || sku === String(plan?.sku || "").trim().toUpperCase()) continue;
+    const storedQty = Number(line.qtySigned ?? line.deltaSigned ?? 0);
+    if(!Number.isFinite(storedQty) || storedQty === 0) continue;
+    const delta = reverse ? -storedQty : storedQty;
+    const loc = (String(line.loc || line.location || "").trim().toLowerCase() === "cerea") ? "cerea" : TW_AMZ_LOC;
+    const title = String(line.title || sku).trim() || sku;
+    const itemRef = fs.doc(db, TW_AMZ_ROOT, loc, TW_AMZ_ITEMS_SUB, sku);
+    const productRef = fs.doc(db, TW_AMZ_PRODUCTS_COL, sku);
+    const moveRef = fs.doc(db, TW_AMZ_PRODUCTS_COL, sku, TW_AMZ_MOVES_SUB, twAmazonComboMovementDocId(plan.movementId, sku));
+
+    writer.set(itemRef, {
+      sku,
+      title,
+      titleNorm: twPfNorm(title || sku),
+      qty: fs.increment(delta),
+      location: loc,
+      updatedAt: fs.serverTimestamp(),
+      updatedAtClient: Date.now(),
+      updatedBy: plan.who,
+      lastWriteSource: TW_AMZ_SOURCE,
+      lastWriteTwDoneId: plan.doneId,
+      lastComboParentSku: plan.sku
+    }, { merge:true });
+
+    if(reverse){
+      writer.delete(moveRef);
+    }else{
+      writer.set(moveRef, {
+        type: storedQty < 0 ? "combo_scarica" : "combo_ripristino",
+        sku,
+        title,
+        qtySigned: storedQty,
+        deltaSigned: storedQty,
+        fromWarehouse: loc,
+        toWarehouse: loc,
+        location: loc,
+        source: "tabellone_write",
+        note: line.note || `Scarico combo da Tabellone WRITE • madre: ${plan.sku}`,
+        comboParentSkus: [plan.sku],
+        parentSkus: [plan.sku],
+        parentSku: plan.sku,
+        parentTitle: plan.title,
+        parentQtySigned: plan.qty,
+        multiplier: Number(line.multiplier || 1),
+        flowKind: "tabellone_write",
+        flowId: plan.movementId,
+        flowName: `Tabellone WRITE • ${plan.title}`.slice(0, 180),
+        twDoneId: plan.doneId,
+        twMovementId: plan.movementId,
+        createdAt: fs.serverTimestamp(),
+        createdAtClient: line.createdAtClient || plan.tsClient,
+        createdByUid: state.user?.uid || "",
+        createdByEmail: plan.who || state.user?.email || ""
+      }, { merge:true });
+    }
+
+    writer.set(productRef, {
+      sku,
+      title,
+      titleNorm: twPfNorm(title || sku),
+      lastSeenAt: fs.serverTimestamp(),
+      lastSeenAtClient: Date.now(),
+      lastSeenBy: plan.who,
+      lastSeenLocation: loc,
+      lastSeenKind: reverse ? "tabellone_write_combo_rollback" : "tabellone_write_combo_scarico",
+      seenCount: fs.increment(1)
+    }, { merge:true });
+    count++;
+  }
+  return count;
+}
+
 function twBuildAmazonInventoryLoadPlan(done){
   try{
     if(!twIsManualAmazonSkuRow(done)) return null;
@@ -13163,6 +13399,10 @@ function twApplyAmazonInventoryBatchWrite(batch, fs, db, done, opts={}){
   const delta = (reverse ? -1 : 1) * plan.qty;
   const itemRef = fs.doc(db, TW_AMZ_ROOT, TW_AMZ_LOC, TW_AMZ_ITEMS_SUB, plan.sku);
   const logRef = fs.doc(db, TW_AMZ_ROOT, TW_AMZ_LOC, TW_AMZ_LOGS_SUB, plan.movementId);
+  const productRef = fs.doc(db, TW_AMZ_PRODUCTS_COL, plan.sku);
+  const productMovementRef = fs.doc(db, TW_AMZ_PRODUCTS_COL, plan.sku, TW_AMZ_MOVES_SUB, twAmazonProductMovementDocId(plan.movementId));
+  const comboLines = reverse ? twAmazonComboLinesFromDone(done, plan, opts) : twAmazonComboLinesFromDone(done, plan, opts);
+  const comboTotalPieces = twAmazonComboTotalPieces(comboLines);
 
   batch.set(itemRef, {
     sku: plan.sku,
@@ -13179,6 +13419,10 @@ function twApplyAmazonInventoryBatchWrite(batch, fs, db, done, opts={}){
 
   if(reverse){
     batch.delete(logRef);
+    batch.delete(productMovementRef);
+    if(comboLines.length){
+      twAmazonApplyComboEffects(batch, fs, db, plan, comboLines, { reverse:true });
+    }
   }else{
     batch.set(logRef, {
       kind: "carica",
@@ -13202,10 +13446,14 @@ function twApplyAmazonInventoryBatchWrite(batch, fs, db, done, opts={}){
       sourceLine: TW_LINE_BUCKET,
       orderNo: String(done.orderNo || "").trim(),
       customer: String(done.customer || "").trim(),
-      origin: "tabellone_write_amazon_concamarise"
+      origin: "tabellone_write_amazon_concamarise",
+      comboApplied: comboLines.length > 0,
+      comboVersion: TW_AMZ_COMBO_VERSION,
+      comboLines,
+      comboTotalPieces
     }, { merge:true });
 
-    batch.set(fs.doc(db, TW_AMZ_PRODUCTS_COL, plan.sku), {
+    batch.set(productRef, {
       sku: plan.sku,
       title: plan.title,
       titleNorm: twPfNorm(plan.title || plan.sku),
@@ -13216,9 +13464,21 @@ function twApplyAmazonInventoryBatchWrite(batch, fs, db, done, opts={}){
       lastSeenKind: "tabellone_write",
       seenCount: fs.increment(1)
     }, { merge:true });
+
+    twAmazonApplyProductMovement(batch, fs, db, plan, comboLines);
+    if(comboLines.length){
+      twAmazonApplyComboEffects(batch, fs, db, plan, comboLines, { reverse:false });
+    }
   }
 
-  return plan;
+  return {
+    ...plan,
+    productMovementId: productMovementRef.id,
+    comboApplied: comboLines.length > 0,
+    comboVersion: TW_AMZ_COMBO_VERSION,
+    comboLines,
+    comboTotalPieces
+  };
 }
 
 let __TW_AMZ_BACKFILL_T = null;
@@ -13259,47 +13519,70 @@ async function twSyncCompletedAmazonItemsToInventory(items){
       const logRef = fs.doc(db, TW_AMZ_ROOT, TW_AMZ_LOC, TW_AMZ_LOGS_SUB, plan.movementId);
       const itemRef = fs.doc(db, TW_AMZ_ROOT, TW_AMZ_LOC, TW_AMZ_ITEMS_SUB, plan.sku);
       const productRef = fs.doc(db, TW_AMZ_PRODUCTS_COL, plan.sku);
+      const productMoveRef = fs.doc(db, TW_AMZ_PRODUCTS_COL, plan.sku, TW_AMZ_MOVES_SUB, twAmazonProductMovementDocId(plan.movementId));
       const producedRef = fs.doc(db, "producedDays", TW_LINE_BUCKET, "items", doneId);
 
       await fs.runTransaction(db, async(tx)=>{
         const logSnap = await tx.get(logRef);
-        if(logSnap.exists()) return;
+        const productSnap = await tx.get(productRef);
+        const producedSnap = await tx.get(producedRef);
+        const productMoveSnap = await tx.get(productMoveRef);
 
-        tx.set(itemRef, {
-          sku: plan.sku,
-          title: plan.title,
-          titleNorm: twPfNorm(plan.title || plan.sku),
-          qty: fs.increment(plan.qty),
-          location: TW_AMZ_LOC,
-          updatedAt: fs.serverTimestamp(),
-          updatedAtClient: Date.now(),
-          updatedBy: plan.who,
-          lastWriteSource: TW_AMZ_SOURCE,
-          lastWriteTwDoneId: plan.doneId
-        }, { merge:true });
+        const productData = productSnap.exists() ? (productSnap.data() || {}) : {};
+        const producedData = producedSnap.exists() ? (producedSnap.data() || {}) : {};
+        const comboChildren = twAmazonComboChildrenFromData(productData, plan.sku);
+        const comboLines = twAmazonComboLinesFromPlan(plan, comboChildren);
+        const comboTotalPieces = twAmazonComboTotalPieces(comboLines);
+        const comboAlreadyApplied = !!(
+          producedData.amazonInventoryComboApplied === true ||
+          producedData.comboApplied === true ||
+          Number(producedData.amazonInventoryComboTotalPieces || producedData.comboTotalPieces || 0) > 0 ||
+          (Array.isArray(producedData.amazonInventoryComboLines) && producedData.amazonInventoryComboLines.length) ||
+          (Array.isArray(producedData.comboLines) && producedData.comboLines.length)
+        );
 
-        tx.set(logRef, {
-          kind: "carica",
-          location: TW_AMZ_LOC,
-          fileName: "TABELLONE_WRITE",
-          appliedAt: fs.serverTimestamp(),
-          appliedAtClient: plan.tsClient,
-          appliedBy: plan.who,
-          status: "DONE",
-          doneAt: fs.serverTimestamp(),
-          doneAtClient: Date.now(),
-          totalLines: 1,
-          totalPieces: plan.qty,
-          lines: [plan.line],
-          workflow: null,
-          workflowId: null,
-          workflowLabel: `Tabellone WRITE • ${plan.title}`.slice(0, 180),
-          source: TW_AMZ_SOURCE,
-          docType: TW_AMZ_DOC_TYPE,
-          twDoneId: plan.doneId,
-          sourceLine: TW_LINE_BUCKET,
-          origin: "tabellone_write_amazon_concamarise"
-        }, { merge:true });
+        const needInventoryLoad = !logSnap.exists();
+        const needProductMovement = !productMoveSnap.exists();
+        const needCombo = comboLines.length > 0 && !comboAlreadyApplied;
+        if(!needInventoryLoad && !needProductMovement && !needCombo) return;
+
+        if(needInventoryLoad){
+          tx.set(itemRef, {
+            sku: plan.sku,
+            title: plan.title,
+            titleNorm: twPfNorm(plan.title || plan.sku),
+            qty: fs.increment(plan.qty),
+            location: TW_AMZ_LOC,
+            updatedAt: fs.serverTimestamp(),
+            updatedAtClient: Date.now(),
+            updatedBy: plan.who,
+            lastWriteSource: TW_AMZ_SOURCE,
+            lastWriteTwDoneId: plan.doneId
+          }, { merge:true });
+
+          tx.set(logRef, {
+            kind: "carica",
+            location: TW_AMZ_LOC,
+            fileName: "TABELLONE_WRITE",
+            appliedAt: fs.serverTimestamp(),
+            appliedAtClient: plan.tsClient,
+            appliedBy: plan.who,
+            status: "DONE",
+            doneAt: fs.serverTimestamp(),
+            doneAtClient: Date.now(),
+            totalLines: 1,
+            totalPieces: plan.qty,
+            lines: [plan.line],
+            workflow: null,
+            workflowId: null,
+            workflowLabel: `Tabellone WRITE • ${plan.title}`.slice(0, 180),
+            source: TW_AMZ_SOURCE,
+            docType: TW_AMZ_DOC_TYPE,
+            twDoneId: plan.doneId,
+            sourceLine: TW_LINE_BUCKET,
+            origin: "tabellone_write_amazon_concamarise"
+          }, { merge:true });
+        }
 
         tx.set(productRef, {
           sku: plan.sku,
@@ -13313,12 +13596,40 @@ async function twSyncCompletedAmazonItemsToInventory(items){
           seenCount: fs.increment(1)
         }, { merge:true });
 
+        if(needProductMovement){
+          twAmazonApplyProductMovement(tx, fs, db, plan, comboLines);
+        }
+
+        if(needCombo){
+          twAmazonApplyComboEffects(tx, fs, db, plan, comboLines, { reverse:false });
+        }
+
+        tx.set(logRef, {
+          comboApplied: comboLines.length > 0,
+          comboVersion: TW_AMZ_COMBO_VERSION,
+          comboLines,
+          comboTotalPieces,
+          comboBackfilledAt: fs.serverTimestamp(),
+          comboBackfilledAtMs: Date.now()
+        }, { merge:true });
+
         tx.set(producedRef, {
           amazonInventoryMovementId: plan.movementId,
+          amazonInventoryProductMovementId: productMoveRef.id,
           amazonInventorySyncedAt: fs.serverTimestamp(),
           amazonInventorySyncedAtMs: Date.now(),
           amazonInventoryLocation: TW_AMZ_LOC,
-          amazonInventorySku: plan.sku
+          amazonInventorySku: plan.sku,
+          amazonInventoryTitle: plan.title,
+          amazonInventoryUom: "pz",
+          amazonInventoryComboApplied: comboLines.length > 0,
+          amazonInventoryComboVersion: TW_AMZ_COMBO_VERSION,
+          amazonInventoryComboLines: comboLines,
+          amazonInventoryComboTotalPieces: comboTotalPieces,
+          comboApplied: comboLines.length > 0,
+          comboVersion: TW_AMZ_COMBO_VERSION,
+          comboLines,
+          comboTotalPieces
         }, { merge:true });
       });
     }
@@ -16180,6 +16491,12 @@ async function twCompleteJob(){
       completedAtClientMs: Date.now()
     };
 
+    let amazonComboChildren = [];
+    if(twIsManualAmazonSkuRow(job)){
+      const amzSkuForCombo = String(payload.amazonInventorySku || payload.code || job.amazonInventorySku || job.code || "").trim().toUpperCase();
+      amazonComboChildren = await twFetchAmazonComboChildren(amzSkuForCombo);
+    }
+
     const batch = fs.writeBatch(db);
     batch.set(fs.doc(producedCol, doneDocId), payload, { merge:true });
     batch.delete(fs.doc(queueCol, id));
@@ -16190,7 +16507,7 @@ async function twCompleteJob(){
     }
 
     if(twIsManualAmazonSkuRow(job)){
-      const amzPlan = twApplyAmazonInventoryBatchWrite(batch, fs, db, { ...payload, id: doneDocId, key });
+      const amzPlan = twApplyAmazonInventoryBatchWrite(batch, fs, db, { ...payload, id: doneDocId, key }, { comboChildren: amazonComboChildren });
       if(amzPlan){
         payload.amazonInventoryMovementId = amzPlan.movementId;
         payload.amazonInventorySku = amzPlan.sku;
@@ -16204,7 +16521,16 @@ async function twCompleteJob(){
           amazonInventoryLocation: TW_AMZ_LOC,
           amazonInventoryUom: "pz",
           amazonInventorySyncedAt: fs.serverTimestamp(),
-          amazonInventorySyncedAtMs: Date.now()
+          amazonInventorySyncedAtMs: Date.now(),
+          amazonInventoryProductMovementId: amzPlan.productMovementId || "",
+          amazonInventoryComboApplied: amzPlan.comboApplied === true,
+          amazonInventoryComboVersion: amzPlan.comboVersion || TW_AMZ_COMBO_VERSION,
+          amazonInventoryComboLines: Array.isArray(amzPlan.comboLines) ? amzPlan.comboLines : [],
+          amazonInventoryComboTotalPieces: Number(amzPlan.comboTotalPieces || 0),
+          comboApplied: amzPlan.comboApplied === true,
+          comboVersion: amzPlan.comboVersion || TW_AMZ_COMBO_VERSION,
+          comboLines: Array.isArray(amzPlan.comboLines) ? amzPlan.comboLines : [],
+          comboTotalPieces: Number(amzPlan.comboTotalPieces || 0)
         }, { merge:true });
       }
     }
@@ -16641,6 +16967,15 @@ async function twLoadAllDoneItemsForReport(){
         amazonInventoryTitle: (v.amazonInventoryTitle || "").toString().trim(),
         amazonInventoryUom: (v.amazonInventoryUom || "").toString().trim(),
         amazonInventorySyncedAtMs: Number(v.amazonInventorySyncedAtMs || 0),
+        amazonInventoryProductMovementId: (v.amazonInventoryProductMovementId || "").toString().trim(),
+        amazonInventoryComboApplied: v.amazonInventoryComboApplied === true || v.comboApplied === true,
+        amazonInventoryComboVersion: Number(v.amazonInventoryComboVersion || v.comboVersion || 0),
+        amazonInventoryComboLines: Array.isArray(v.amazonInventoryComboLines) ? v.amazonInventoryComboLines : (Array.isArray(v.comboLines) ? v.comboLines : []),
+        amazonInventoryComboTotalPieces: Number(v.amazonInventoryComboTotalPieces || v.comboTotalPieces || 0),
+        comboApplied: v.comboApplied === true || v.amazonInventoryComboApplied === true,
+        comboVersion: Number(v.comboVersion || v.amazonInventoryComboVersion || 0),
+        comboLines: Array.isArray(v.comboLines) ? v.comboLines : (Array.isArray(v.amazonInventoryComboLines) ? v.amazonInventoryComboLines : []),
+        comboTotalPieces: Number(v.comboTotalPieces || v.amazonInventoryComboTotalPieces || 0),
         orderKey: (v.orderKey || "").toString().trim(),
         orderNo: (v.orderNo || "").toString().trim(),
         customer: (v.customer || v.cliente || v.customerName || v.nomeCliente || "").toString().trim(),
@@ -16989,6 +17324,15 @@ function twStartDoneWatch(){
         amazonInventoryTitle: (v.amazonInventoryTitle || "").toString().trim(),
         amazonInventoryUom: (v.amazonInventoryUom || "").toString().trim(),
         amazonInventorySyncedAtMs: Number(v.amazonInventorySyncedAtMs || 0),
+        amazonInventoryProductMovementId: (v.amazonInventoryProductMovementId || "").toString().trim(),
+        amazonInventoryComboApplied: v.amazonInventoryComboApplied === true || v.comboApplied === true,
+        amazonInventoryComboVersion: Number(v.amazonInventoryComboVersion || v.comboVersion || 0),
+        amazonInventoryComboLines: Array.isArray(v.amazonInventoryComboLines) ? v.amazonInventoryComboLines : (Array.isArray(v.comboLines) ? v.comboLines : []),
+        amazonInventoryComboTotalPieces: Number(v.amazonInventoryComboTotalPieces || v.comboTotalPieces || 0),
+        comboApplied: v.comboApplied === true || v.amazonInventoryComboApplied === true,
+        comboVersion: Number(v.comboVersion || v.amazonInventoryComboVersion || 0),
+        comboLines: Array.isArray(v.comboLines) ? v.comboLines : (Array.isArray(v.amazonInventoryComboLines) ? v.amazonInventoryComboLines : []),
+        comboTotalPieces: Number(v.comboTotalPieces || v.amazonInventoryComboTotalPieces || 0),
         orderKey: (v.orderKey || "").toString().trim(),
         orderNo: (v.orderNo || "").toString().trim(),
         customer: (v.customer || v.cliente || v.customerName || v.nomeCliente || "").toString().trim(),
