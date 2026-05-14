@@ -12911,6 +12911,7 @@ function twBuildConcaInventoryLoadPayload(done, fs){
         completedByName: String(done.completedByName || "").trim(),
         completedByEmail: String(done.completedByEmail || "").trim(),
         finishedProductId: String(done.finishedProductId || "").trim(),
+        ...twBuildCompletedProductTriggerPayload(done),
         origin: "tabellone_write_completed_to_conca"
       }
     };
@@ -12946,6 +12947,43 @@ function twIsManualAmazonSkuRow(it){
       !!(it.amazonInventorySku || it.amazonInventoryLocation);
   }catch(_e){
     return false;
+  }
+}
+
+function twCompletionProductKind(it){
+  try{
+    if(twIsManualAmazonSkuRow(it)) return "amazonSku";
+    if(twIsManualFinishedProductRow(it)) return "finishedProduct";
+    const kind = String(it?.kind || "").trim();
+    if(kind) return kind;
+    const src = String(it?.source || "").trim();
+    if(src) return src;
+    if(it && (it.orderNo || it.lineKey)) return "orderLine";
+  }catch(_e){}
+  return "completedProduct";
+}
+
+function twBuildCompletedProductTriggerPayload(it){
+  try{
+    const kind = twCompletionProductKind(it);
+    const product = String(it?.product || it?.finishedProductName || it?.amazonInventoryTitle || it?.label || it?.rawLine || it?.code || "").trim();
+    const code = String(it?.amazonInventorySku || it?.finishedProductCode || it?.code || "").trim();
+    const qtyRaw = (it?.qty != null ? it.qty : (it?.plannedQty != null ? it.plannedQty : ""));
+    const qty = Number(String(qtyRaw || "").replace(",", "."));
+    return {
+      completionTrigger: true,
+      completedProductTrigger: true,
+      completedProductKind: kind || "completedProduct",
+      completedProductCode: code,
+      completedProductName: product,
+      completedProductQty: Number.isFinite(qty) ? qty : qtyRaw,
+      completedProductUnit: String(it?.unit || it?.um || it?.finishedProductUom || it?.amazonInventoryUom || "pz").trim() || "pz",
+      completedProductSource: String(it?.source || "").trim(),
+      completedProductTarget: String(it?.inventoryTarget || "").trim(),
+      completedProductAtClientMs: Number(it?.completedAtClientMs || Date.now())
+    };
+  }catch(_e){
+    return { completionTrigger:true, completedProductTrigger:true, completedProductKind:"completedProduct", completedProductAtClientMs:Date.now() };
   }
 }
 
@@ -13965,6 +14003,7 @@ function twBuildFinishedInventoryLoadPayload(done, fs){
         twDoneId: doneId,
         sourceLine: TW_LINE_BUCKET,
         finishedProductId: String(done.finishedProductId || "").trim(),
+        ...twBuildCompletedProductTriggerPayload(done),
         origin: "tabellone_write_manual_pf"
       }
     };
@@ -16204,7 +16243,7 @@ function twMagIsAmazon(it){
 function twMagIsPf(it){
   const kind = twMagClean(it.kind);
   const src = twMagClean(it.source);
-  return kind === "finishedProduct" || src === "manual_finished_products" || !!twMagClean(it.finishedProductCode) || !!twMagClean(it.finishedProductName);
+  return kind === "finishedProduct" || src === "manual_finished_product" || src === "manual_finished_products" || !!twMagClean(it.finishedProductCode) || !!twMagClean(it.finishedProductName);
 }
 function twMagIsManual(it){
   const src = twMagClean(it.source).toLowerCase();
@@ -16233,10 +16272,12 @@ function twMagCounters(it){
   const hasFlacone = twMagIsSpray(it) || twMagIsBottle1Lt(it) || /\b(flacone|flaconi|bottiglia|bottiglie|tanica|taniche)\b/.test(t);
   const hasTrigger = twMagIsSpray(it) || /\b(trigger|spruzzino|spruzzini|erogatore|erogatori|nebulizzatore|nebulizzatori)\b/.test(t);
   const hasTappo = twMagIsBottle1Lt(it) || /\b(tappo|tappi|bottiglia|bottiglie|flacone|flaconi|tanica|taniche)\b/.test(t);
+  // Trigger prodotti completati: conta il trigger su ogni completato a pezzi, indipendentemente dal tipo (SKU, PF, manuale, ordine Easyfatt).
+  const triggerQty = isPiece ? qty : 0;
   return {
     qty,
     flaconi: (isPiece && hasFlacone) ? qty : 0,
-    trigger: (isPiece && hasTrigger) ? qty : 0,
+    trigger: triggerQty,
     tappi: (isPiece && hasTappo && !hasTrigger) ? qty : 0
   };
 }
@@ -16490,6 +16531,7 @@ async function twCompleteJob(){
       completedAt: fs.serverTimestamp(),
       completedAtClientMs: Date.now()
     };
+    Object.assign(payload, twBuildCompletedProductTriggerPayload(payload));
 
     let amazonComboChildren = [];
     if(twIsManualAmazonSkuRow(job)){
@@ -16562,7 +16604,14 @@ async function twCompleteJob(){
         unit: payload.unit,
         plannedQty: payload.plannedQty,
         completedByName: payload.completedByName,
-        completedByEmail: payload.completedByEmail
+        completedByEmail: payload.completedByEmail,
+        completionTrigger: payload.completionTrigger,
+        completedProductTrigger: payload.completedProductTrigger,
+        completedProductKind: payload.completedProductKind,
+        completedProductCode: payload.completedProductCode,
+        completedProductName: payload.completedProductName,
+        completedProductQty: payload.completedProductQty,
+        completedProductUnit: payload.completedProductUnit
       });
     }catch(_e){}
     try{ ensureTabWriteState().localDoneIds.add(doneDocId); }catch(_e){}
