@@ -16750,227 +16750,442 @@ async function twQueueCompletionEmail(done){
 }
 
 // ===== Export completati (testo) =====
-function twBuildDoneReport(items){
-  const now = new Date();
-  const list = Array.isArray(items) ? items.slice() : [];
-  const clean = (v)=>String(v ?? "").replace(/\s+/g," ").trim();
-  const valueOrDash = (v)=> clean(v) || "—";
-  const toNum = (v)=>{
-    const raw = clean(v);
-    if(!raw) return null;
-    let s = raw.replace(/[^0-9,\.\-]/g, "");
-    if(!s || s === "-" || s === "." || s === ",") return null;
-    if(s.includes(",") && s.includes(".")){
-      s = s.replace(/\./g, "").replace(",", ".");
-    } else if(s.includes(",")){
-      s = s.replace(",", ".");
-    } else if(/^\-?\d{1,3}(?:\.\d{3})+$/.test(s)){
-      s = s.replace(/\./g, "");
-    }
-    const n = Number(s);
-    return Number.isFinite(n) ? n : null;
-  };
-  const fmtNum = (n)=>{
-    const val = Number(n);
-    if(!Number.isFinite(val)) return "0";
-    return val.toLocaleString("it-IT", { minimumFractionDigits: 0, maximumFractionDigits: 2 });
-  };
-  const fmtQty = (n, unit)=>{
-    const u = clean(unit);
-    return `${fmtNum(n)}${u ? " " + u : ""}`;
-  };
-  const keyLabel = (product, format, unit)=> [product, format, unit].map(clean).join("||");
-  const productOf = (it)=> valueOrDash(it.product || it.finishedProductName || it.label || it.rawLine);
-  const formatOf = (it)=> clean(it.format || it.finishedProductCode || it.code || "");
-  const unitOf = (it)=> clean(it.unit || it.um || it.finishedProductUom || "");
-  const qtyOf = (it)=> toNum(it.qty);
-  const whoOf = (it)=> valueOrDash(it.completedByName || it.completedByEmail || it.createdByEmail);
-  const customerOf = (it)=> valueOrDash(it.customer || it.cliente || it.customerName || it.nomeCliente);
-  const orderOf = (it)=> valueOrDash(it.orderNo || it.orderKey || it.queueOrderKey || it.orderId || it.id);
-  const completedMsOf = (it)=> Number(it.completedAtMs || 0);
-  const completedTextOf = (it)=> twFmtWhen(completedMsOf(it));
-  const qtyTextOf = (it)=>{
-    const qty = qtyOf(it);
-    const unit = unitOf(it);
-    if(qty != null) return fmtQty(qty, unit);
-    return valueOrDash(it.qty);
-  };
-  const cloudTextOf = (it)=>{
-    const conca = (it.concaInventoryMovementId || Number(it.concaInventorySyncedAtMs || 0) > 0 || it.finishedInventoryMovementId) ? "OK" : "—";
-    const amazon = (it.amazonInventoryMovementId || Number(it.amazonInventorySyncedAtMs || 0) > 0) ? "OK" : "—";
-    return `C:${conca} A:${amazon}`;
-  };
 
-  const ellipsis = "…";
-  const clip = (v,w)=>{
-    let s = clean(v) || "—";
-    if(s.length <= w) return s;
-    if(w <= 1) return s.slice(0, w);
-    return s.slice(0, Math.max(0, w - 1)) + ellipsis;
-  };
-  const cell = (v,w,align="left")=>{
-    const s = clip(v,w);
-    return align === "right" ? s.padStart(w," ") : s.padEnd(w," ");
-  };
-  const tableLine = (cols)=> cols.map(c=>"-".repeat(c.w)).join("-+-");
-  const tableHeader = (cols)=> cols.map(c=>cell(c.title,c.w,c.align)).join(" | ");
-  const rowLine = (cols,row)=> cols.map(c=>cell(row[c.key],c.w,c.align)).join(" | ");
-  const pushTable = (out, title, cols, rows)=>{
-    out.push(title);
-    out.push(tableLine(cols));
-    out.push(tableHeader(cols));
-    out.push(tableLine(cols));
-    if(rows.length){
-      rows.forEach(r=>out.push(rowLine(cols,r)));
-    } else {
-      out.push(cell("—", cols.reduce((a,c)=>a+c.w,0) + ((cols.length - 1) * 3)));
-    }
-    out.push(tableLine(cols));
-    out.push("");
-  };
-
-  list.sort((a,b)=> completedMsOf(b) - completedMsOf(a));
-
-  const byUnit = new Map();
-  const byProduct = new Map();
-  const byOperator = new Map();
-  const dates = [];
-  let concaSyncCount = 0;
-  let amazonSyncCount = 0;
-
-  for(const it of list){
-    const product = productOf(it);
-    const format = formatOf(it);
-    const unit = unitOf(it) || "unità";
-    const qty = qtyOf(it);
-    const who = whoOf(it);
-    const ms = completedMsOf(it);
-
-    if(ms > 0) dates.push(ms);
-    if(it.concaInventoryMovementId || Number(it.concaInventorySyncedAtMs || 0) > 0 || it.finishedInventoryMovementId) concaSyncCount++;
-    if(it.amazonInventoryMovementId || Number(it.amazonInventorySyncedAtMs || 0) > 0) amazonSyncCount++;
-
-    const op = byOperator.get(who) || { count:0 };
-    op.count += 1;
-    byOperator.set(who, op);
-
-    const prodKey = keyLabel(product, format, unit);
-    const prod = byProduct.get(prodKey) || { product, format, unit, qty:0, count:0, hasQty:false };
-    prod.count += 1;
-    if(qty != null){ prod.qty += qty; prod.hasQty = true; }
-    byProduct.set(prodKey, prod);
-
-    if(qty != null){
-      byUnit.set(unit, (byUnit.get(unit) || 0) + qty);
-    }
-  }
-
-  const productRows = Array.from(byProduct.values()).sort((a,b)=>{
-    const qa = a.hasQty ? a.qty : 0;
-    const qb = b.hasQty ? b.qty : 0;
-    if(qb !== qa) return qb - qa;
-    if(b.count !== a.count) return b.count - a.count;
-    return a.product.localeCompare(b.product, "it", { sensitivity:"base" });
-  });
-  const operatorRows = Array.from(byOperator.entries()).sort((a,b)=> (b[1].count||0) - (a[1].count||0));
-  const minDate = dates.length ? Math.min(...dates) : 0;
-  const maxDate = dates.length ? Math.max(...dates) : 0;
-  const distinctProducts = productRows.length;
-  const distinctOperators = operatorRows.length;
-
-  const lines = [];
-  const sep = "=".repeat(185);
-  const thin = "-".repeat(185);
-
-  lines.push(sep);
-  lines.push("LINEA LIQUIDI AUTOMATICA (WRITE) · REPORT COMPLETATI");
-  lines.push(`Generato il: ${now.toLocaleString("it-IT")}`);
-  lines.push(sep);
-  lines.push("");
-
-  if(!list.length){
-    lines.push("Nessun completato presente nel report.");
-    lines.push("");
-    return lines.join("\n");
-  }
-
-  const overviewCols = [
-    { key:"metric", title:"VOCE", w:34 },
-    { key:"value", title:"VALORE", w:46 }
-  ];
-  pushTable(lines, "PANORAMICA", overviewCols, [
-    { metric:"Totale completati", value:list.length },
-    { metric:"Prodotti/formati distinti", value:distinctProducts },
-    { metric:"Operatori coinvolti", value:distinctOperators },
-    { metric:"Primo completamento", value:minDate ? twFmtWhen(minDate) : "—" },
-    { metric:"Ultimo completamento", value:maxDate ? twFmtWhen(maxDate) : "—" },
-    { metric:"Sync Inventario Conca", value:`${concaSyncCount}/${list.length}` },
-    { metric:"Sync Inventario Amazon", value:`${amazonSyncCount}/${list.length}` }
-  ]);
-
-  const unitCols = [
-    { key:"unit", title:"UNITÀ", w:16 },
-    { key:"total", title:"TOTALE", w:18, align:"right" }
-  ];
-  const unitRows = Array.from(byUnit.entries())
-    .sort((a,b)=> String(a[0]).localeCompare(String(b[0]), "it", { sensitivity:"base" }))
-    .map(([unit,total])=>({ unit, total:fmtQty(total, unit) }));
-  pushTable(lines, "QUANTITÀ TOTALI PER UNITÀ", unitCols, unitRows.length ? unitRows : [{ unit:"—", total:"quantità non disponibili" }]);
-
-  const productCols = [
-    { key:"n", title:"N", w:4, align:"right" },
-    { key:"product", title:"PRODOTTO", w:62 },
-    { key:"format", title:"FORMATO/CODICE", w:22 },
-    { key:"total", title:"TOTALE", w:18, align:"right" },
-    { key:"count", title:"COMPLETATI", w:10, align:"right" }
-  ];
-  pushTable(lines, "TOTALE PER PRODOTTO / FORMATO", productCols, productRows.map((row, idx)=>({
-    n:String(idx+1),
-    product:row.product,
-    format:row.format || "—",
-    total:row.hasQty ? fmtQty(row.qty, row.unit) : "quantità n/d",
-    count:row.count
-  })));
-
-  const operatorCols = [
-    { key:"n", title:"N", w:4, align:"right" },
-    { key:"operator", title:"OPERATORE", w:38 },
-    { key:"count", title:"COMPLETATI", w:10, align:"right" }
-  ];
-  pushTable(lines, "TOTALE PER OPERATORE", operatorCols, operatorRows.map(([who,data], idx)=>({
-    n:String(idx+1), operator:who, count:data.count
-  })));
-
-  const detailCols = [
-    { key:"n", title:"N", w:4, align:"right" },
-    { key:"date", title:"DATA", w:17 },
-    { key:"product", title:"PRODOTTO", w:48 },
-    { key:"format", title:"FORMATO/CODICE", w:18 },
-    { key:"qty", title:"Q.TÀ", w:13, align:"right" },
-    { key:"order", title:"ORDINE", w:16 },
-    { key:"customer", title:"CLIENTE", w:30 },
-    { key:"operator", title:"OPERATORE", w:23 },
-    { key:"cloud", title:"CLOUD", w:11 }
-  ];
-  pushTable(lines, "DETTAGLIO COMPLETATI", detailCols, list.map((it, idx)=>({
-    n:String(idx+1),
-    date:completedTextOf(it),
-    product:productOf(it),
-    format:formatOf(it) || "—",
-    qty:qtyTextOf(it),
-    order:orderOf(it),
-    customer:customerOf(it),
-    operator:whoOf(it),
-    cloud:cloudTextOf(it)
-  })));
-
-  lines.push(thin);
-  lines.push(`Fine report · Totale completati: ${list.length}`);
-  lines.push(sep);
-  lines.push("");
-  return lines.join("\n");
+function twDoneReportClean(v){
+  return String(v ?? "").replace(/\s+/g," ").trim();
 }
+function twDoneReportValue(v, fallback="—"){
+  const s = twDoneReportClean(v);
+  return s || fallback;
+}
+function twDoneReportNum(v){
+  const raw = twDoneReportClean(v);
+  if(!raw) return null;
+  let s = raw.replace(/[^0-9,\.\-]/g, "");
+  if(!s || s === "-" || s === "." || s === ",") return null;
+  if(s.includes(",") && s.includes(".")) s = s.replace(/\./g, "").replace(",", ".");
+  else if(s.includes(",")) s = s.replace(",", ".");
+  else if(/^\-?\d{1,3}(?:\.\d{3})+$/.test(s)) s = s.replace(/\./g, "");
+  const n = Number(s);
+  return Number.isFinite(n) ? n : null;
+}
+function twDoneReportFmtNum(n){
+  const val = Number(n);
+  if(!Number.isFinite(val)) return "0";
+  return val.toLocaleString("it-IT", { minimumFractionDigits:0, maximumFractionDigits:2 });
+}
+function twDoneReportFmtQty(qty, unit=""){
+  const u = twDoneReportClean(unit);
+  return `${twDoneReportFmtNum(qty)}${u ? " " + u : ""}`;
+}
+function twDoneReportHtml(v){
+  return escapeHtml(twDoneReportValue(v, ""));
+}
+function twDoneReportCategory(it){
+  try{
+    if(twIsManualAmazonSkuRow(it)) return "amazonSku";
+    if(twIsManualFinishedProductRow(it)) return "finishedProduct";
+    const kind = twDoneReportClean(it?.kind).toLowerCase();
+    const src = twDoneReportClean(it?.source).toLowerCase();
+    const target = twDoneReportClean(it?.inventoryTarget).toLowerCase();
+    if(src.includes("manual") || kind.includes("manual") || target.includes("manual")) return "manual";
+    if(kind === "orderline" || src === "vai_in_produzione" || it?.orderNo || it?.lineKey) return "orderLine";
+  }catch(_e){}
+  return "other";
+}
+function twDoneReportCategoryMeta(key){
+  const meta = {
+    amazonSku: {
+      order: 10,
+      short: "SKU Amazon",
+      title: "SKU AMAZON / CONCAMARISE",
+      subtitle: "Completati creati dalla compilazione manuale AMZ e caricati/scaricati sul magazzino Amazon Concamarise."
+    },
+    finishedProduct: {
+      order: 20,
+      short: "PF",
+      title: "PF / PRODOTTI FINITI",
+      subtitle: "Completati creati come PF liquidi, con movimento dedicato su magazzino prodotti finiti."
+    },
+    manual: {
+      order: 30,
+      short: "Manuale",
+      title: "MANUALI / ALTRO",
+      subtitle: "Righe manuali non classificate come SKU Amazon o PF."
+    },
+    orderLine: {
+      order: 40,
+      short: "Ordini",
+      title: "ORDINI CLIENTE / EASYFATT",
+      subtitle: "Righe completate partendo dagli ordini cliente importati nel tabellone."
+    },
+    other: {
+      order: 50,
+      short: "Altro",
+      title: "ALTRO / NON CLASSIFICATO",
+      subtitle: "Completati senza origine precisa o con dati non standard."
+    }
+  };
+  return meta[key] || meta.other;
+}
+function twDoneReportProduct(it){
+  const cat = twDoneReportCategory(it);
+  if(cat === "amazonSku"){
+    return twDoneReportValue(twAmazonDisplayTitle(it?.amazonInventoryTitle || it?.product || it?.label || it?.rawLine || it?.code || "", it?.amazonInventorySku || it?.code || ""));
+  }
+  if(cat === "finishedProduct"){
+    return twDoneReportValue(it?.finishedProductName || it?.product || it?.label || it?.rawLine || it?.code);
+  }
+  return twDoneReportValue(twCompactProductName(it?.product || it?.label || it?.rawLine || it?.finishedProductName || it?.amazonInventoryTitle || it?.code));
+}
+function twDoneReportCode(it){
+  const cat = twDoneReportCategory(it);
+  if(cat === "amazonSku") return twDoneReportValue(it?.amazonInventorySku || it?.code || it?.finishedProductCode, "—").toUpperCase();
+  if(cat === "finishedProduct") return twDoneReportValue(it?.finishedProductCode || it?.code || it?.format, "—");
+  return twDoneReportValue(it?.code || it?.finishedProductCode || it?.amazonInventorySku || it?.format, "—");
+}
+function twDoneReportUnit(it){
+  return twDoneReportValue(it?.unit || it?.um || it?.finishedProductUom || it?.amazonInventoryUom, "");
+}
+function twDoneReportQtyNum(it){
+  return twDoneReportNum(it?.qty);
+}
+function twDoneReportQtyText(it){
+  const q = twDoneReportQtyNum(it);
+  const unit = twDoneReportUnit(it);
+  if(q != null) return twDoneReportFmtQty(q, unit);
+  return twDoneReportValue(it?.qty, "—") + (unit ? " " + unit : "");
+}
+function twDoneReportCompletedMs(it){
+  return Number(it?.completedAtMs || it?.completedAtClientMs || it?.createdAtMs || 0);
+}
+function twDoneReportCompletedText(it){
+  const ms = twDoneReportCompletedMs(it);
+  return ms ? twFmtWhen(ms) : "—";
+}
+function twDoneReportOperator(it){
+  return twDoneReportValue(it?.completedByName || it?.completedByEmail || it?.createdByEmail, "—");
+}
+function twDoneReportOrder(it){
+  return twDoneReportValue(it?.orderNo || it?.orderKey || it?.queueOrderKey || it?.orderId || it?.id, "—");
+}
+function twDoneReportCustomer(it){
+  return twDoneReportValue(it?.customer || it?.cliente || it?.customerName || it?.nomeCliente, "—");
+}
+function twDoneReportMovements(it){
+  const out = [];
+  if(it?.concaInventoryMovementId || Number(it?.concaInventorySyncedAtMs || 0) > 0) out.push("Conca");
+  if(it?.amazonInventoryMovementId || Number(it?.amazonInventorySyncedAtMs || 0) > 0) out.push("Amazon");
+  if(it?.finishedInventoryMovementId) out.push("PF");
+  if(it?.amazonInventoryComboApplied || it?.comboApplied || Number(it?.amazonInventoryComboTotalPieces || it?.comboTotalPieces || 0) > 0) out.push("Combo");
+  return out.length ? out.join(" + ") : "—";
+}
+function twDoneReportComboText(it){
+  const lines = Array.isArray(it?.amazonInventoryComboLines) ? it.amazonInventoryComboLines : (Array.isArray(it?.comboLines) ? it.comboLines : []);
+  if(!lines.length) return "";
+  return lines.map(x=>{
+    const sku = twDoneReportClean(x?.sku || x?.childSku || "").toUpperCase();
+    const title = twDoneReportClean(x?.title || x?.name || "");
+    const qty = twDoneReportNum(x?.qty || x?.qtySigned || x?.multiplier);
+    return [sku || title, qty != null ? twDoneReportFmtQty(Math.abs(qty), "pz") : ""].filter(Boolean).join(" · ");
+  }).filter(Boolean).join("; ");
+}
+function twDoneReportSourceText(it){
+  const bits = [it?.source, it?.kind, it?.inventoryTarget].map(twDoneReportClean).filter(Boolean);
+  return bits.length ? bits.join(" / ") : "—";
+}
+function twDoneReportPrepare(items){
+  const list = Array.isArray(items) ? items.slice() : [];
+  const rows = list.map((it, idx)=>{
+    const categoryKey = twDoneReportCategory(it);
+    const meta = twDoneReportCategoryMeta(categoryKey);
+    const qtyNum = twDoneReportQtyNum(it);
+    const unit = twDoneReportUnit(it) || "unità";
+    return {
+      idx,
+      it,
+      categoryKey,
+      category: meta.short,
+      categoryTitle: meta.title,
+      categoryOrder: meta.order,
+      dateMs: twDoneReportCompletedMs(it),
+      date: twDoneReportCompletedText(it),
+      product: twDoneReportProduct(it),
+      code: twDoneReportCode(it),
+      qtyNum,
+      qty: twDoneReportQtyText(it),
+      unit,
+      order: twDoneReportOrder(it),
+      customer: twDoneReportCustomer(it),
+      operator: twDoneReportOperator(it),
+      movements: twDoneReportMovements(it),
+      source: twDoneReportSourceText(it),
+      combo: twDoneReportComboText(it)
+    };
+  }).sort((a,b)=> (b.dateMs||0) - (a.dateMs||0));
 
+  const byCategory = new Map();
+  const byProduct = new Map();
+  const byUnit = new Map();
+  let concaSyncCount = 0, amazonSyncCount = 0, pfSyncCount = 0, comboCount = 0;
+  const dates = [];
+
+  for(const r of rows){
+    if(r.dateMs > 0) dates.push(r.dateMs);
+    if(r.it?.concaInventoryMovementId || Number(r.it?.concaInventorySyncedAtMs || 0) > 0) concaSyncCount++;
+    if(r.it?.amazonInventoryMovementId || Number(r.it?.amazonInventorySyncedAtMs || 0) > 0) amazonSyncCount++;
+    if(r.it?.finishedInventoryMovementId) pfSyncCount++;
+    if(r.it?.amazonInventoryComboApplied || r.it?.comboApplied || Number(r.it?.amazonInventoryComboTotalPieces || r.it?.comboTotalPieces || 0) > 0) comboCount++;
+
+    if(!byCategory.has(r.categoryKey)){
+      byCategory.set(r.categoryKey, { key:r.categoryKey, meta:twDoneReportCategoryMeta(r.categoryKey), rows:[], unitTotals:new Map(), count:0 });
+    }
+    const c = byCategory.get(r.categoryKey);
+    c.rows.push(r);
+    c.count += 1;
+    if(r.qtyNum != null){
+      c.unitTotals.set(r.unit, (c.unitTotals.get(r.unit) || 0) + r.qtyNum);
+      byUnit.set(r.unit, (byUnit.get(r.unit) || 0) + r.qtyNum);
+    }
+
+    const prodKey = [r.categoryKey, r.product, r.code, r.unit].map(twDoneReportClean).join("||");
+    const p = byProduct.get(prodKey) || { categoryKey:r.categoryKey, category:r.category, categoryOrder:r.categoryOrder, product:r.product, code:r.code, unit:r.unit, qty:0, count:0, hasQty:false, movements:new Set() };
+    p.count += 1;
+    if(r.qtyNum != null){ p.qty += r.qtyNum; p.hasQty = true; }
+    if(r.movements && r.movements !== "—") r.movements.split("+").forEach(x=>{ const v=twDoneReportClean(x); if(v) p.movements.add(v); });
+    byProduct.set(prodKey, p);
+  }
+
+  const categoryGroups = Array.from(byCategory.values()).sort((a,b)=> (a.meta.order||0) - (b.meta.order||0));
+  const productRows = Array.from(byProduct.values()).sort((a,b)=>{
+    if((a.categoryOrder||0) !== (b.categoryOrder||0)) return (a.categoryOrder||0) - (b.categoryOrder||0);
+    if((b.hasQty ? b.qty : 0) !== (a.hasQty ? a.qty : 0)) return (b.hasQty ? b.qty : 0) - (a.hasQty ? a.qty : 0);
+    if((b.count||0) !== (a.count||0)) return (b.count||0) - (a.count||0);
+    return String(a.product||"").localeCompare(String(b.product||""), "it", { sensitivity:"base" });
+  });
+
+  return {
+    rows,
+    categoryGroups,
+    productRows,
+    byUnit,
+    counts: { total:rows.length, concaSyncCount, amazonSyncCount, pfSyncCount, comboCount, distinctProducts:productRows.length },
+    dates: { min:dates.length ? Math.min(...dates) : 0, max:dates.length ? Math.max(...dates) : 0 },
+    generatedAt: new Date()
+  };
+}
+function twDoneReportUnitTotalsText(unitTotals){
+  const arr = Array.from((unitTotals instanceof Map ? unitTotals : new Map()).entries())
+    .filter(([_,v])=> Number.isFinite(Number(v)))
+    .sort((a,b)=> String(a[0]).localeCompare(String(b[0]), "it", { sensitivity:"base" }));
+  return arr.length ? arr.map(([unit,total])=>twDoneReportFmtQty(total, unit)).join(" · ") : "—";
+}
+function twBuildDoneReport(items){
+  const data = twDoneReportPrepare(items);
+  const out = [];
+  const line = "=".repeat(132);
+  const thin = "-".repeat(132);
+  out.push(line);
+  out.push("LINEA LIQUIDI AUTOMATICA (WRITE) · REPORT COMPLETATI");
+  out.push(`Generato il: ${data.generatedAt.toLocaleString("it-IT")}`);
+  out.push(line);
+  out.push("");
+  if(!data.rows.length){
+    out.push("Nessun completato presente nel report.");
+    return out.join("\n");
+  }
+  out.push(`Totale completati: ${data.counts.total}`);
+  out.push(`Prodotti distinti: ${data.counts.distinctProducts}`);
+  out.push(`Primo completamento: ${data.dates.min ? twFmtWhen(data.dates.min) : "—"}`);
+  out.push(`Ultimo completamento: ${data.dates.max ? twFmtWhen(data.dates.max) : "—"}`);
+  out.push(`Movimenti: Conca ${data.counts.concaSyncCount}/${data.counts.total} · Amazon ${data.counts.amazonSyncCount}/${data.counts.total} · PF ${data.counts.pfSyncCount}/${data.counts.total} · Combo ${data.counts.comboCount}`);
+  out.push("");
+  out.push("RIEPILOGO PER CREAZIONE");
+  out.push(thin);
+  for(const g of data.categoryGroups){
+    out.push(`${g.meta.title.padEnd(30," ")}  Righe: ${String(g.count).padStart(4," ")}  Totali: ${twDoneReportUnitTotalsText(g.unitTotals)}`);
+  }
+  out.push("");
+  for(const g of data.categoryGroups){
+    out.push(line);
+    out.push(`${g.meta.title} · ${g.count} righe · ${twDoneReportUnitTotalsText(g.unitTotals)}`);
+    out.push(g.meta.subtitle);
+    out.push(thin);
+    out.push(["N".padStart(3," "), "DATA".padEnd(17," "), "PRODOTTO".padEnd(46," "), "COD/SKU/PF".padEnd(18," "), "Q.TÀ".padStart(12," "), "ORDINE".padEnd(12," "), "CLIENTE".padEnd(22," "), "MOVIMENTI"].join(" | "));
+    out.push(thin);
+    g.rows.forEach((r, i)=>{
+      const clip = (s,w)=>{ s=twDoneReportClean(s)||"—"; return s.length>w ? s.slice(0,w-1)+"…" : s.padEnd(w," "); };
+      const clipR = (s,w)=>{ s=twDoneReportClean(s)||"—"; return s.length>w ? s.slice(0,w) : s.padStart(w," "); };
+      out.push([
+        String(i+1).padStart(3," "),
+        clip(r.date,17),
+        clip(r.product,46),
+        clip(r.code,18),
+        clipR(r.qty,12),
+        clip(r.order,12),
+        clip(r.customer,22),
+        clip(r.movements,18)
+      ].join(" | "));
+      if(r.combo) out.push(`    Combo: ${r.combo}`);
+    });
+    out.push("");
+  }
+  out.push(line);
+  out.push(`Fine report · Totale completati: ${data.counts.total}`);
+  out.push(line);
+  return out.join("\n");
+}
+function twBuildDoneReportHtml(items){
+  const data = twDoneReportPrepare(items);
+  const unitTotals = twDoneReportUnitTotalsText(data.byUnit);
+  const kpi = (label, value, hint="")=>`
+    <div class="kpi"><div class="kpi-label">${twDoneReportHtml(label)}</div><div class="kpi-value">${twDoneReportHtml(value)}</div>${hint ? `<div class="kpi-hint">${twDoneReportHtml(hint)}</div>` : ""}</div>`;
+  const categorySummaryRows = data.categoryGroups.map(g=>`
+    <tr>
+      <td><span class="pill">${twDoneReportHtml(g.meta.short)}</span></td>
+      <td>${twDoneReportHtml(g.meta.title)}</td>
+      <td class="num">${twDoneReportHtml(g.count)}</td>
+      <td>${twDoneReportHtml(twDoneReportUnitTotalsText(g.unitTotals))}</td>
+    </tr>`).join("") || `<tr><td colspan="4" class="empty">Nessun dato</td></tr>`;
+
+  const productRows = data.productRows.map((r, idx)=>`
+    <tr>
+      <td class="num">${idx+1}</td>
+      <td><span class="pill">${twDoneReportHtml(r.category)}</span></td>
+      <td class="wrap-text">${twDoneReportHtml(r.product)}</td>
+      <td>${twDoneReportHtml(r.code)}</td>
+      <td class="num">${r.hasQty ? twDoneReportHtml(twDoneReportFmtQty(r.qty, r.unit)) : "—"}</td>
+      <td class="num">${twDoneReportHtml(r.count)}</td>
+      <td>${twDoneReportHtml(Array.from(r.movements || []).join(" + ") || "—")}</td>
+    </tr>`).join("") || `<tr><td colspan="7" class="empty">Nessun prodotto</td></tr>`;
+
+  const groupSections = data.categoryGroups.map(g=>{
+    const rows = g.rows.map((r, idx)=>`
+      <tr>
+        <td class="num">${idx+1}</td>
+        <td>${twDoneReportHtml(r.date)}</td>
+        <td class="wrap-text strong">${twDoneReportHtml(r.product)}${r.combo ? `<div class="combo">Combo: ${twDoneReportHtml(r.combo)}</div>` : ""}</td>
+        <td>${twDoneReportHtml(r.code)}</td>
+        <td class="num strong">${twDoneReportHtml(r.qty)}</td>
+        <td>${twDoneReportHtml(r.order)}</td>
+        <td class="wrap-text">${twDoneReportHtml(r.customer)}</td>
+        <td class="wrap-text">${twDoneReportHtml(r.operator)}</td>
+        <td>${twDoneReportHtml(r.movements)}</td>
+      </tr>`).join("");
+    return `
+      <section class="report-section">
+        <div class="section-head">
+          <div>
+            <h2>${twDoneReportHtml(g.meta.title)}</h2>
+            <p>${twDoneReportHtml(g.meta.subtitle)}</p>
+          </div>
+          <div class="section-total">${twDoneReportHtml(g.count)} righe<br><span>${twDoneReportHtml(twDoneReportUnitTotalsText(g.unitTotals))}</span></div>
+        </div>
+        <table class="detail-table">
+          <colgroup>
+            <col style="width:3%"><col style="width:10%"><col style="width:29%"><col style="width:11%"><col style="width:8%"><col style="width:9%"><col style="width:13%"><col style="width:9%"><col style="width:8%">
+          </colgroup>
+          <thead><tr><th>N</th><th>Data</th><th>Prodotto</th><th>Codice / SKU / PF</th><th>Q.tà</th><th>Ordine</th><th>Cliente</th><th>Operatore</th><th>Movimenti</th></tr></thead>
+          <tbody>${rows || `<tr><td colspan="9" class="empty">Nessuna riga</td></tr>`}</tbody>
+        </table>
+      </section>`;
+  }).join("");
+
+  const emptyMessage = data.rows.length ? "" : `<div class="empty-block">Nessun completato presente nel report.</div>`;
+  const generated = data.generatedAt.toLocaleString("it-IT");
+  const css = `
+    @page{size:A4 landscape;margin:8mm}
+    *{box-sizing:border-box}
+    body{margin:0;background:#fff;color:#111;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;font-size:9pt;line-height:1.25}
+    .page{padding:0}
+    .no-print{position:sticky;top:0;z-index:10;padding:10px 12px;background:#ffffff;border-bottom:1px solid #d9e2ef;display:flex;justify-content:space-between;gap:10px;align-items:center}
+    .no-print button{border:0;border-radius:10px;background:#0a84ff;color:#fff;font-weight:900;padding:10px 14px;cursor:pointer}
+    .cover{border:1px solid #d9e2ef;border-radius:14px;padding:16px;margin-bottom:12px;background:linear-gradient(135deg,#f8fbff,#eef6ff)}
+    .eyebrow{font-size:8pt;text-transform:uppercase;letter-spacing:.11em;font-weight:900;color:#0a5fd4;margin-bottom:4px}
+    h1{font-size:20pt;line-height:1.05;margin:0;color:#0f172a;letter-spacing:-.02em}
+    .subtitle{margin-top:6px;color:#475569;font-weight:700}
+    .kpi-grid{display:grid;grid-template-columns:repeat(6,1fr);gap:8px;margin-top:12px}
+    .kpi{border:1px solid #d9e2ef;border-radius:12px;background:#fff;padding:9px 10px;min-height:56px}
+    .kpi-label{font-size:7.5pt;text-transform:uppercase;letter-spacing:.06em;color:#64748b;font-weight:900}
+    .kpi-value{font-size:13pt;font-weight:950;color:#0f172a;margin-top:3px;word-break:break-word}
+    .kpi-hint{font-size:7.5pt;color:#64748b;font-weight:700;margin-top:2px}
+    .report-section{break-inside:avoid;margin:12px 0 0}
+    .section-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-end;margin:0 0 6px;padding:8px 10px;border-left:5px solid #0a84ff;background:#f8fafc;border-radius:10px}
+    h2{font-size:12pt;margin:0;color:#0f172a;letter-spacing:-.01em}
+    .section-head p{margin:3px 0 0;color:#64748b;font-weight:700;font-size:8.2pt}
+    .section-total{text-align:right;font-weight:950;color:#0f172a;min-width:150px}
+    .section-total span{font-size:8pt;color:#64748b;font-weight:800}
+    table{width:100%;border-collapse:collapse;table-layout:fixed;margin:0 0 8px}
+    th{background:#0f172a;color:#fff;text-align:left;font-size:7.2pt;text-transform:uppercase;letter-spacing:.04em;padding:6px 5px;border:1px solid #0f172a;vertical-align:top}
+    td{padding:5px 5px;border:1px solid #d9e2ef;vertical-align:top;overflow-wrap:anywhere;word-break:break-word}
+    tbody tr:nth-child(even) td{background:#f8fafc}
+    .num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+    .strong{font-weight:900}.wrap-text{white-space:normal}
+    .pill{display:inline-block;border:1px solid #bfdbfe;background:#eff6ff;color:#0a5fd4;border-radius:999px;padding:2px 7px;font-size:7.1pt;font-weight:900;white-space:nowrap}
+    .combo{margin-top:3px;color:#7c2d12;background:#fff7ed;border:1px solid #fed7aa;border-radius:7px;padding:3px 5px;font-size:7.2pt;font-weight:800}
+    .empty,.empty-block{color:#64748b;font-weight:800;text-align:center;padding:14px;border:1px dashed #cbd5e1;border-radius:12px;background:#f8fafc}
+    .summary-table th:nth-child(1),.summary-table td:nth-child(1){width:15%}.summary-table th:nth-child(3),.summary-table td:nth-child(3){width:8%}
+    .footer{margin-top:12px;border-top:1px solid #d9e2ef;padding-top:7px;color:#64748b;font-size:7.5pt;font-weight:700;display:flex;justify-content:space-between;gap:10px}
+    @media print{.no-print{display:none}.cover{break-inside:avoid}.report-section{break-inside:avoid}body{font-size:8.5pt}th{font-size:6.8pt}td{padding:4px 4px}.kpi-grid{grid-template-columns:repeat(6,1fr)}}
+  `;
+
+  return `<!doctype html><html lang="it"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Report completati · Linea Liquidi</title><style>${css}</style></head><body>
+    <div class="no-print"><div><strong>Report completati</strong> · ${twDoneReportHtml(generated)}</div><button type="button" onclick="window.print()">Stampa / salva PDF</button></div>
+    <main class="page">
+      <section class="cover">
+        <div class="eyebrow">General Copper · Linea liquidi automatica</div>
+        <h1>Report completati WRITE</h1>
+        <div class="subtitle">Generato il ${twDoneReportHtml(generated)} · Report ordinato per creazione: SKU Amazon, PF, manuali e ordini cliente.</div>
+        <div class="kpi-grid">
+          ${kpi("Completati", data.counts.total)}
+          ${kpi("Prodotti distinti", data.counts.distinctProducts)}
+          ${kpi("Quantità totali", unitTotals)}
+          ${kpi("Sync Conca", `${data.counts.concaSyncCount}/${data.counts.total}`)}
+          ${kpi("Sync Amazon", `${data.counts.amazonSyncCount}/${data.counts.total}`)}
+          ${kpi("Sync PF / Combo", `${data.counts.pfSyncCount} / ${data.counts.comboCount}`)}
+        </div>
+      </section>
+      ${emptyMessage}
+      <section class="report-section">
+        <div class="section-head"><div><h2>Riepilogo per creazione</h2><p>Controllo rapido per separare i prodotti completati in base a origine e destinazione.</p></div></div>
+        <table class="summary-table"><thead><tr><th>Tipo</th><th>Creazione</th><th>Righe</th><th>Quantità totali</th></tr></thead><tbody>${categorySummaryRows}</tbody></table>
+      </section>
+      <section class="report-section">
+        <div class="section-head"><div><h2>Totale per prodotto / codice</h2><p>Aggregazione incolonnata per prodotto, SKU o codice PF.</p></div></div>
+        <table><colgroup><col style="width:4%"><col style="width:10%"><col style="width:39%"><col style="width:15%"><col style="width:10%"><col style="width:8%"><col style="width:14%"></colgroup><thead><tr><th>N</th><th>Tipo</th><th>Prodotto</th><th>Codice / SKU / PF</th><th>Totale</th><th>Righe</th><th>Movimenti</th></tr></thead><tbody>${productRows}</tbody></table>
+      </section>
+      ${groupSections}
+      <div class="footer"><span>Fine report · Totale completati: ${twDoneReportHtml(data.counts.total)}</span><span>Uso interno · Hub Linea Liquidi</span></div>
+    </main>
+  </body></html>`;
+}
+function twPrintDoneReportHtml(html){
+  try{
+    const frame = document.createElement("iframe");
+    frame.setAttribute("aria-hidden", "true");
+    frame.style.position = "fixed";
+    frame.style.right = "0";
+    frame.style.bottom = "0";
+    frame.style.width = "0";
+    frame.style.height = "0";
+    frame.style.border = "0";
+    frame.onload = () => {
+      setTimeout(()=>{
+        try{
+          frame.contentWindow.focus();
+          frame.contentWindow.print();
+        }catch(_e){}
+      }, 120);
+      setTimeout(()=>{ try{ frame.remove(); }catch(_e){} }, 90000);
+    };
+    document.body.appendChild(frame);
+    frame.srcdoc = html;
+    return true;
+  }catch(e){
+    console.warn("twPrintDoneReportHtml error:", e);
+    return false;
+  }
+}
 async function twLoadAllDoneItemsForReport(){
   const tw = ensureTabWriteState();
   const cacheItems = Array.isArray(tw.doneItems) ? tw.doneItems.slice() : [];
@@ -17062,8 +17277,13 @@ async function twLoadAllDoneItemsForReport(){
 
 async function twOpenDoneReport(){
   const items = await twLoadAllDoneItemsForReport();
-  const content = twBuildDoneReport(items);
-  const blob = new Blob([content], { type:"text/plain;charset=utf-8" });
+  const html = twBuildDoneReportHtml(items);
+  const printed = twPrintDoneReportHtml(html);
+  if(printed){
+    try{ showToast("Report PDF", "Report ordinato aperto: scegli Salva come PDF dalla finestra di stampa.", 3200); }catch(_e){}
+    return;
+  }
+  const blob = new Blob([html], { type:"text/html;charset=utf-8" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
