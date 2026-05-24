@@ -16750,6 +16750,7 @@ async function twQueueCompletionEmail(done){
 }
 
 // ===== Export completati (testo) =====
+// REPORT_COMPLETATI_2_COLONNE_WRAP_COMPLETO_20260524
 function twBuildDoneReport(items){
   const now = new Date();
   const list = Array.isArray(items) ? items.slice() : [];
@@ -16820,7 +16821,7 @@ function twBuildDoneReport(items){
     return "altro";
   };
 
-  const labelType = (kind)=> kind === "amazon" ? "SKU Amazon" : (kind === "pf" ? "PF" : (kind === "ordine" ? "Ordine" : "Altro"));
+  const labelType = (kind)=> kind === "amazon" ? "SKU Amazon" : (kind === "pf" ? "PF" : (kind === "ordine" ? "Ordine" : "Altro/manuale"));
   const amazonTextOf = (it)=>{
     const sku = skuOf(it);
     const title = clean(twAmazonDisplayTitle(it.amazonInventoryTitle || it.product || it.label || it.rawLine || sku, sku));
@@ -16852,34 +16853,65 @@ function twBuildDoneReport(items){
   }
 
   list.sort((a,b)=> completedMsOf(b) - completedMsOf(a));
+  const amazonItems = list.filter((it)=>kindOf(it) === "amazon");
+  const otherItems = list.filter((it)=>kindOf(it) !== "amazon");
 
-  const clip = (v,w)=>{
-    let s = clean(v) || "—";
-    if(s.length <= w) return s;
-    if(w <= 1) return s.slice(0, w);
-    return s.slice(0, Math.max(0, w - 1)) + "…";
+  // Report testuale con due colonne REALI.
+  // Nessun testo viene tagliato: ogni cella va a capo su più righe quando supera la larghezza.
+  const COL_W = 50; // larghezza colonne report TXT: 2 colonne leggibili con wrap completo
+  const padRight = (v,w)=>{
+    const s = String(v ?? "");
+    return s.length >= w ? s : s + " ".repeat(w - s.length);
   };
-  const cell = (v,w,align="left")=>{
-    const s = clip(v,w);
-    return align === "right" ? s.padStart(w," ") : s.padEnd(w," ");
+  const normalizeCellText = (v)=>String(v ?? "").replace(/\r/g, "").replace(/\t/g, "    ").trim();
+  const wrapLine = (line,w)=>{
+    let s = String(line ?? "").replace(/\s+/g, " ").trim();
+    if(!s) return [""];
+    const out = [];
+    while(s.length > w){
+      let cut = s.lastIndexOf(" ", w);
+      if(cut < Math.floor(w * 0.55)) cut = w; // parole/codici molto lunghi: split controllato, senza ellissi
+      out.push(s.slice(0, cut).trimEnd());
+      s = s.slice(cut).trimStart();
+    }
+    out.push(s);
+    return out;
   };
-  const line = (cols)=> cols.map(c=>"-".repeat(c.w)).join("-+-");
-  const header = (cols)=> cols.map(c=>cell(c.title,c.w,c.align)).join(" | ");
-  const row = (cols,data)=> cols.map(c=>cell(data[c.key],c.w,c.align)).join(" | ");
-  const pushTable = (out, title, cols, rows)=>{
-    out.push(title);
-    out.push(line(cols));
-    out.push(header(cols));
-    out.push(line(cols));
-    if(rows.length) rows.forEach(r=>out.push(row(cols,r)));
-    else out.push(cell("—", cols.reduce((a,c)=>a+c.w,0) + ((cols.length - 1) * 3)));
-    out.push(line(cols));
-    out.push("");
+  const wrapCell = (text,w)=>{
+    const raw = normalizeCellText(text);
+    if(!raw) return [""];
+    const chunks = raw.split(/\n+/);
+    const out = [];
+    chunks.forEach((chunk)=>{
+      const wrapped = wrapLine(chunk, w);
+      wrapped.forEach(x=>out.push(x));
+    });
+    return out.length ? out : [""];
+  };
+  const twoColSep = `${"-".repeat(COL_W)}-+-${"-".repeat(COL_W)}`;
+  const twoColHeader = `${padRight("SKU AMAZON", COL_W)} | ${padRight("ALTRI / PF / MANUALI / ORDINI", COL_W)}`;
+  const pushTwoCol = (out, left, right)=>{
+    const L = wrapCell(left, COL_W);
+    const R = wrapCell(right, COL_W);
+    const h = Math.max(L.length, R.length);
+    for(let i=0;i<h;i++){
+      out.push(`${padRight(L[i] || "", COL_W)} | ${padRight(R[i] || "", COL_W)}`);
+    }
+  };
+  const entryText = (it, index, side)=>{
+    if(!it) return "";
+    const main = side === "amazon" ? amazonTextOf(it) : otherTextOf(it);
+    const meta = [
+      `Q.tà: ${qtyTextOf(it)}`,
+      `Data: ${completedTextOf(it)}`,
+      `Operatore: ${whoOf(it)}`
+    ].filter(Boolean).join(" · ");
+    return `${String(index + 1).padStart(2,"0")}) ${main}\n${meta}`;
   };
 
   const lines = [];
-  const sep = "=".repeat(150);
-  const thin = "-".repeat(150);
+  const sep = "=".repeat((COL_W * 2) + 3);
+  const thin = "-".repeat((COL_W * 2) + 3);
 
   lines.push(sep);
   lines.push("LINEA LIQUIDI AUTOMATICA · REPORT COMPLETATI");
@@ -16893,48 +16925,35 @@ function twBuildDoneReport(items){
     return lines.join("\n");
   }
 
-  const summaryCols = [
-    { key:"metric", title:"VOCE", w:34 },
-    { key:"value", title:"VALORE", w:36 }
-  ];
-  pushTable(lines, "RIEPILOGO", summaryCols, [
-    { metric:"Totale completati", value:list.length },
-    { metric:"SKU Amazon", value:counts.amazon || 0 },
-    { metric:"Altri (PF/manuali/ordini)", value:(counts.pf || 0) + (counts.ordine || 0) + (counts.altro || 0) },
-    { metric:"PF", value:counts.pf || 0 },
-    { metric:"Ordini", value:counts.ordine || 0 },
-    { metric:"Altro/manuali", value:counts.altro || 0 }
-  ]);
+  lines.push("RIEPILOGO");
+  lines.push(thin);
+  lines.push(`Totale completati: ${list.length}`);
+  lines.push(`SKU Amazon: ${counts.amazon || 0}`);
+  lines.push(`Altri (PF/manuali/ordini): ${(counts.pf || 0) + (counts.ordine || 0) + (counts.altro || 0)}`);
+  lines.push(`PF: ${counts.pf || 0} · Ordini: ${counts.ordine || 0} · Altro/manuali: ${counts.altro || 0}`);
+  lines.push("");
 
   const unitRows = Array.from(byUnit.entries())
     .sort((a,b)=> String(a[0]).localeCompare(String(b[0]), "it", { sensitivity:"base" }))
-    .map(([unit,total])=>({ unit, total:fmtQty(total, unit) }));
-  pushTable(lines, "QUANTITÀ TOTALI", [
-    { key:"unit", title:"UNITÀ", w:18 },
-    { key:"total", title:"TOTALE", w:18, align:"right" }
-  ], unitRows.length ? unitRows : [{ unit:"—", total:"quantità non disponibili" }]);
+    .map(([unit,total])=>`${unit}: ${fmtQty(total, unit)}`);
+  lines.push("QUANTITÀ TOTALI");
+  lines.push(thin);
+  lines.push(unitRows.length ? unitRows.join(" · ") : "quantità non disponibili");
+  lines.push("");
 
-  const detailCols = [
-    { key:"n", title:"N", w:4, align:"right" },
-    { key:"date", title:"DATA", w:16 },
-    { key:"amazon", title:"SKU AMAZON", w:50 },
-    { key:"other", title:"ALTRI / PF / MANUALI / ORDINI", w:62 },
-    { key:"qty", title:"Q.TÀ", w:13, align:"right" },
-    { key:"operator", title:"OPERATORE", w:22 }
-  ];
+  lines.push("DETTAGLIO COMPLETATI · 2 COLONNE");
+  lines.push(twoColSep);
+  lines.push(twoColHeader);
+  lines.push(twoColSep);
 
-  pushTable(lines, "DETTAGLIO COMPLETATI", detailCols, list.map((it, idx)=>{
-    const kind = kindOf(it);
-    return {
-      n:String(idx + 1),
-      date:completedTextOf(it),
-      amazon:kind === "amazon" ? amazonTextOf(it) : "—",
-      other:kind === "amazon" ? "—" : otherTextOf(it),
-      qty:qtyTextOf(it),
-      operator:whoOf(it)
-    };
-  }));
+  const maxRows = Math.max(amazonItems.length, otherItems.length);
+  for(let i=0;i<maxRows;i++){
+    pushTwoCol(lines, entryText(amazonItems[i], i, "amazon"), entryText(otherItems[i], i, "other"));
+    if(i < maxRows - 1) lines.push(twoColSep);
+  }
 
+  lines.push(twoColSep);
+  lines.push("");
   lines.push(thin);
   lines.push(`Fine report · Totale completati: ${list.length}`);
   lines.push(sep);
@@ -17038,6 +17057,7 @@ async function twOpenDoneReport(){
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
+  a.download = "report_completati_linea_liquidi.txt";
   a.target = "_blank";
   a.rel = "noopener";
   document.body.appendChild(a);
