@@ -16777,6 +16777,9 @@ function twBuildDoneReport(items){
     return `${fmtNum(n)}${u ? " " + u : ""}`;
   };
 
+  const collator = new Intl.Collator("it", { numeric:true, sensitivity:"base" });
+  const cmp = (a,b)=> collator.compare(clean(a), clean(b));
+  const cmpNumDesc = (a,b)=> Number(b||0) - Number(a||0);
   const completedMsOf = (it)=> Number(it?.completedAtMs || 0);
   const completedTextOf = (it)=>{
     const ms = completedMsOf(it);
@@ -16789,20 +16792,20 @@ function twBuildDoneReport(items){
       return twFmtWhen(ms);
     }
   };
-  const productOf = (it)=> valueOrDash(it.product || it.finishedProductName || it.amazonInventoryTitle || it.label || it.rawLine || it.code);
-  const unitOf = (it)=> clean(it.unit || it.um || it.finishedProductUom || it.amazonInventoryUom || "");
-  const qtyOf = (it)=> toNum(it.qty);
+  const productOf = (it)=> valueOrDash(it.product || it.finishedProductName || it.completedProductName || it.amazonInventoryTitle || it.label || it.rawLine || it.code);
+  const unitOf = (it)=> clean(it.unit || it.um || it.finishedProductUom || it.amazonInventoryUom || it.completedProductUnit || "");
+  const qtyOf = (it)=> toNum(it.qty ?? it.completedProductQty ?? it.plannedQty ?? "");
   const qtyTextOf = (it)=>{
     const qty = qtyOf(it);
     const unit = unitOf(it);
     if(qty != null) return fmtQty(qty, unit);
-    return valueOrDash(it.qty);
+    return valueOrDash(it.qty ?? it.completedProductQty ?? "");
   };
-  const whoOf = (it)=> valueOrDash(it.completedByName || it.completedByEmail || it.createdByEmail);
-  const orderOf = (it)=> clean(it.orderNo || it.orderKey || it.queueOrderKey || it.orderId || it.id);
-  const customerOf = (it)=> clean(it.customer || it.cliente || it.customerName || it.nomeCliente);
+  const whoOf = (it)=> valueOrDash(it.completedByName || it.completedByEmail || it.createdByEmail || it.updatedBy || it.operator || it.operatorName);
+  const orderOf = (it)=> clean(it.orderNo || it.orderKey || it.queueOrderKey || it.orderId || "");
+  const customerOf = (it)=> clean(it.customer || it.cliente || it.customerName || it.nomeCliente || "");
   const codeOf = (it)=> clean(it.finishedProductCode || it.completedProductCode || it.code || it.format || "");
-  const skuOf = (it)=> clean(it.amazonInventorySku || (twIsManualAmazonSkuRow(it) ? it.code : "") || "").toUpperCase();
+  const skuOf = (it)=> clean(it.amazonInventorySku || (twIsManualAmazonSkuRow(it) ? it.code : "") || it.completedProductCode || "").toUpperCase();
 
   const kindOf = (it)=>{
     try{
@@ -16810,48 +16813,86 @@ function twBuildDoneReport(items){
       const src = clean(it?.source).toLowerCase();
       const target = clean(it?.inventoryTarget).toLowerCase();
       const completedKind = clean(it?.completedProductKind).toLowerCase();
-      const isAmazon = twIsManualAmazonSkuRow(it) || skuOf(it) || completedKind === "amazonsku" || kind === "amazonsku" || kind === "amazon_sku" || target.includes("amazon");
-      const isExplicitPf = src === "manual_finished_product" || kind === "finishedproduct" || completedKind === "finishedproduct" || target.includes("finished_product") || clean(it?.finishedProductId);
-      const isOrder = kind === "orderline" || src === "vai_in_produzione" || clean(it?.orderNo) || clean(it?.lineKey);
+      const isAmazon = twIsManualAmazonSkuRow(it) || clean(it?.amazonInventorySku) || completedKind === "amazonsku" || kind === "amazonsku" || kind === "amazon_sku" || target.includes("amazon");
+      const isExplicitPf = src === "manual_finished_product" || src === "manual_finished_products" || kind === "finishedproduct" || kind === "finished_product" || completedKind === "finishedproduct" || completedKind === "finished_product" || target.includes("finished_product") || clean(it?.finishedProductId);
+      const isOrder = kind === "orderline" || kind === "order_line" || src === "vai_in_produzione" || clean(it?.orderNo) || clean(it?.lineKey);
+      const isManual = src.includes("manual") || kind.includes("manual") || target.includes("manual");
       if(isAmazon) return "amazon";
       if(isOrder && !isExplicitPf) return "ordine";
       if(isExplicitPf || (!isOrder && clean(it?.finishedProductCode))) return "pf";
+      if(isManual) return "manuale";
     }catch(_e){}
     return "altro";
   };
 
-  const labelType = (kind)=> kind === "amazon" ? "SKU Amazon" : (kind === "pf" ? "PF" : (kind === "ordine" ? "Ordine" : "Altro"));
-  const amazonTextOf = (it)=>{
+  const labelType = (kind)=>{
+    if(kind === "amazon") return "SKU AMAZON";
+    if(kind === "pf") return "PF";
+    if(kind === "ordine") return "ORDINI";
+    if(kind === "manuale") return "MANUALI";
+    return "ALTRI";
+  };
+  const typeRank = (type)=>({ "ALTRI":0, "PF":1, "MANUALI":2, "ORDINI":3 }[clean(type).toUpperCase()] ?? 99);
+  const amazonDescriptionOf = (it)=>{
     const sku = skuOf(it);
-    const title = clean(twAmazonDisplayTitle(it.amazonInventoryTitle || it.product || it.label || it.rawLine || sku, sku));
-    return [sku, title && title !== sku ? title : ""].filter(Boolean).join(" · ") || "—";
+    const raw = it.amazonInventoryTitle || it.product || it.label || it.rawLine || sku;
+    const title = clean(twAmazonDisplayTitle(raw, sku));
+    return title || sku || "SKU Amazon";
   };
-  const otherTextOf = (it)=>{
-    const kind = kindOf(it);
-    const type = labelType(kind);
-    const code = kind === "pf" ? codeOf(it) : clean(it.code || it.format || "");
-    const product = productOf(it);
-    const order = orderOf(it);
-    const customer = customerOf(it);
-    const parts = [type];
-    if(code && code !== product) parts.push(code);
-    if(product) parts.push(product);
-    if(order) parts.push(`Ord. ${order}`);
-    if(customer) parts.push(customer);
-    return parts.filter(Boolean).join(" · ") || "—";
+  const otherRefOf = (it, kind)=>{
+    if(kind === "pf") return codeOf(it) || "PF";
+    if(kind === "ordine"){
+      const order = orderOf(it);
+      const customer = customerOf(it);
+      return [order ? `Ord. ${order}` : "", customer].filter(Boolean).join(" · ") || "Ordine";
+    }
+    return codeOf(it) || clean(it.source || it.kind || it.id) || labelType(kind);
   };
+  const otherDescriptionOf = (it)=> productOf(it);
 
-  const counts = { amazon:0, pf:0, ordine:0, altro:0 };
+  const amazonRows = [];
+  const otherRows = [];
+  const counts = { amazon:0, pf:0, ordine:0, manuale:0, altro:0 };
   const byUnit = new Map();
+  let nonNumericQty = 0;
+
   for(const it of list){
     const kind = kindOf(it);
     counts[kind] = (counts[kind] || 0) + 1;
     const qty = qtyOf(it);
     const unit = unitOf(it) || "unità";
+    const qtyText = qty != null ? fmtQty(qty, unit) : qtyTextOf(it);
     if(qty != null) byUnit.set(unit, (byUnit.get(unit) || 0) + qty);
+    else nonNumericQty += 1;
+
+    if(kind === "amazon"){
+      amazonRows.push({
+        sku: skuOf(it) || "—",
+        desc: amazonDescriptionOf(it),
+        qty,
+        unit,
+        qtyText,
+        operator: whoOf(it),
+        completedMs: completedMsOf(it),
+        date: completedTextOf(it)
+      });
+    }else{
+      otherRows.push({
+        type: labelType(kind),
+        ref: otherRefOf(it, kind),
+        desc: otherDescriptionOf(it),
+        qty,
+        unit,
+        qtyText,
+        operator: whoOf(it),
+        completedMs: completedMsOf(it),
+        date: completedTextOf(it)
+      });
+    }
   }
 
-  list.sort((a,b)=> completedMsOf(b) - completedMsOf(a));
+  amazonRows.sort((a,b)=> cmp(a.sku,b.sku) || cmp(a.desc,b.desc) || cmp(a.operator,b.operator) || cmpNumDesc(a.completedMs,b.completedMs));
+  otherRows.sort((a,b)=> (typeRank(a.type) - typeRank(b.type)) || cmp(a.desc,b.desc) || cmp(a.ref,b.ref) || cmp(a.operator,b.operator) || cmpNumDesc(a.completedMs,b.completedMs));
 
   const clip = (v,w)=>{
     let s = clean(v) || "—";
@@ -16876,6 +16917,37 @@ function twBuildDoneReport(items){
     out.push(line(cols));
     out.push("");
   };
+  const sortedOperatorsText = (set)=> Array.from(set || []).filter(Boolean).sort((a,b)=>cmp(a,b)).join(", ") || "—";
+  const addTotal = (map, key, base, qty, operator)=>{
+    if(qty == null) return;
+    const cur = map.get(key) || { ...base, total:0, operators:new Set() };
+    cur.total += Number(qty||0);
+    const op = clean(operator);
+    if(op && op !== "—") cur.operators.add(op);
+    map.set(key, cur);
+  };
+
+  const amazonTotalsMap = new Map();
+  for(const r of amazonRows){
+    const key = `${r.sku}\u0001${r.desc}\u0001${r.unit}`;
+    addTotal(amazonTotalsMap, key, { sku:r.sku, desc:r.desc, unit:r.unit }, r.qty, r.operator);
+  }
+  const amazonTotalsRows = Array.from(amazonTotalsMap.values())
+    .sort((a,b)=> cmp(a.sku,b.sku) || cmp(a.desc,b.desc) || cmp(a.unit,b.unit))
+    .map(x=>({ sku:x.sku, desc:x.desc, total:fmtQty(x.total, x.unit), operators:sortedOperatorsText(x.operators) }));
+
+  const otherTotalsMap = new Map();
+  for(const r of otherRows){
+    const key = `${r.type}\u0001${r.ref}\u0001${r.desc}\u0001${r.unit}`;
+    addTotal(otherTotalsMap, key, { type:r.type, ref:r.ref, desc:r.desc, unit:r.unit }, r.qty, r.operator);
+  }
+  const otherTotalsRows = Array.from(otherTotalsMap.values())
+    .sort((a,b)=> (typeRank(a.type) - typeRank(b.type)) || cmp(a.desc,b.desc) || cmp(a.ref,b.ref) || cmp(a.unit,b.unit))
+    .map(x=>({ type:x.type, ref:x.ref, desc:x.desc, total:fmtQty(x.total, x.unit), operators:sortedOperatorsText(x.operators) }));
+
+  const unitTotalsRows = Array.from(byUnit.entries())
+    .sort((a,b)=> cmp(a[0],b[0]))
+    .map(([unit,total])=>({ unit, total:fmtQty(total, unit) }));
 
   const lines = [];
   const sep = "=".repeat(150);
@@ -16893,47 +16965,63 @@ function twBuildDoneReport(items){
     return lines.join("\n");
   }
 
-  const summaryCols = [
-    { key:"metric", title:"VOCE", w:34 },
-    { key:"value", title:"VALORE", w:36 }
-  ];
-  pushTable(lines, "RIEPILOGO", summaryCols, [
+  pushTable(lines, "RIEPILOGO", [
+    { key:"metric", title:"VOCE", w:40 },
+    { key:"value", title:"VALORE", w:24, align:"right" }
+  ], [
     { metric:"Totale completati", value:list.length },
-    { metric:"SKU Amazon", value:counts.amazon || 0 },
-    { metric:"Altri (PF/manuali/ordini)", value:(counts.pf || 0) + (counts.ordine || 0) + (counts.altro || 0) },
+    { metric:"Righe SKU Amazon", value:counts.amazon || 0 },
+    { metric:"Righe ALTRI / PF / MANUALI / ORDINI", value:otherRows.length || 0 },
     { metric:"PF", value:counts.pf || 0 },
+    { metric:"Manuali", value:counts.manuale || 0 },
     { metric:"Ordini", value:counts.ordine || 0 },
-    { metric:"Altro/manuali", value:counts.altro || 0 }
+    { metric:"Altri", value:counts.altro || 0 }
   ]);
 
-  const unitRows = Array.from(byUnit.entries())
-    .sort((a,b)=> String(a[0]).localeCompare(String(b[0]), "it", { sensitivity:"base" }))
-    .map(([unit,total])=>({ unit, total:fmtQty(total, unit) }));
-  pushTable(lines, "QUANTITÀ TOTALI", [
+  pushTable(lines, "SKU AMAZON · TABELLA TESTO ORDINATA", [
+    { key:"sku", title:"SKU", w:22 },
+    { key:"desc", title:"DESCRIZIONE", w:74 },
+    { key:"qty", title:"QUANTITÀ", w:18, align:"right" },
+    { key:"operator", title:"OPERATORE", w:24 }
+  ], amazonRows.map(r=>({ sku:r.sku, desc:r.desc, qty:r.qtyText, operator:r.operator })));
+
+  pushTable(lines, "ALTRI / PF / MANUALI / ORDINI · TABELLA TESTO ORDINATA", [
+    { key:"type", title:"TIPO", w:12 },
+    { key:"ref", title:"RIF.", w:24 },
+    { key:"desc", title:"DESCRIZIONE", w:64 },
+    { key:"qty", title:"QUANTITÀ", w:18, align:"right" },
+    { key:"operator", title:"OPERATORE", w:22 }
+  ], otherRows.map(r=>({ type:r.type, ref:r.ref, desc:r.desc, qty:r.qtyText, operator:r.operator })));
+
+  lines.push(thin);
+  lines.push("TOTALI ORDINATI");
+  lines.push(thin);
+  lines.push("");
+
+  pushTable(lines, "TOTALI SKU AMAZON · ORDINATI PER SKU", [
+    { key:"sku", title:"SKU", w:22 },
+    { key:"desc", title:"DESCRIZIONE", w:74 },
+    { key:"total", title:"TOTALE", w:18, align:"right" },
+    { key:"operators", title:"OPERATORI", w:24 }
+  ], amazonTotalsRows);
+
+  pushTable(lines, "TOTALI ALTRI / PF / MANUALI / ORDINI · ORDINATI PER TIPO E DESCRIZIONE", [
+    { key:"type", title:"TIPO", w:12 },
+    { key:"ref", title:"RIF.", w:24 },
+    { key:"desc", title:"DESCRIZIONE", w:64 },
+    { key:"total", title:"TOTALE", w:18, align:"right" },
+    { key:"operators", title:"OPERATORI", w:22 }
+  ], otherTotalsRows);
+
+  pushTable(lines, "TOTALI GENERALI PER UNITÀ · ORDINATI", [
     { key:"unit", title:"UNITÀ", w:18 },
     { key:"total", title:"TOTALE", w:18, align:"right" }
-  ], unitRows.length ? unitRows : [{ unit:"—", total:"quantità non disponibili" }]);
+  ], unitTotalsRows.length ? unitTotalsRows : [{ unit:"—", total:"quantità non disponibili" }]);
 
-  const detailCols = [
-    { key:"n", title:"N", w:4, align:"right" },
-    { key:"date", title:"DATA", w:16 },
-    { key:"amazon", title:"SKU AMAZON", w:50 },
-    { key:"other", title:"ALTRI / PF / MANUALI / ORDINI", w:62 },
-    { key:"qty", title:"Q.TÀ", w:13, align:"right" },
-    { key:"operator", title:"OPERATORE", w:22 }
-  ];
-
-  pushTable(lines, "DETTAGLIO COMPLETATI", detailCols, list.map((it, idx)=>{
-    const kind = kindOf(it);
-    return {
-      n:String(idx + 1),
-      date:completedTextOf(it),
-      amazon:kind === "amazon" ? amazonTextOf(it) : "—",
-      other:kind === "amazon" ? "—" : otherTextOf(it),
-      qty:qtyTextOf(it),
-      operator:whoOf(it)
-    };
-  }));
+  if(nonNumericQty > 0){
+    lines.push(`Nota: ${nonNumericQty} righe senza quantità numerica sono state mostrate nel dettaglio ma escluse dai totali numerici.`);
+    lines.push("");
+  }
 
   lines.push(thin);
   lines.push(`Fine report · Totale completati: ${list.length}`);
