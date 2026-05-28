@@ -12215,6 +12215,92 @@ function twQueueMetaDocRef(){
   return fs.doc(db, "producedDays", TW_LINE_BUCKET, "meta", "queueState");
 }
 
+// Ordine coda WRITE:
+// l'ordine è salvato SOLO in Cloud Firestore.
+// Ogni cambio ordine scrive sia queueOrderKey sulle righe queue,
+// sia una fotografia/audit in producedDays/linea_liquidi/meta/queueState.
+// Nessun localStorage/sessionStorage e nessun fallback locale per l'ordine.
+function twQueueOrderHash(ids){
+  try{
+    let h = 2166136261;
+    const list = Array.isArray(ids) ? ids : [];
+    for(const raw of list){
+      const s = String(raw || "");
+      for(let i=0;i<s.length;i++){
+        h ^= s.charCodeAt(i);
+        h = Math.imul(h, 16777619);
+      }
+      h ^= 124;
+      h = Math.imul(h, 16777619);
+    }
+    return (h >>> 0).toString(36);
+  }catch(_e){
+    return String(Date.now());
+  }
+}
+
+function twQueueOrderRowsSnapshot(orderedIds, patch){
+  const tw = ensureTabWriteState();
+  const byId = new Map((tw.queueItems || []).map(it => [String(it?.id || ""), it]));
+  const rows = [];
+  const seen = new Set();
+  let pos = 0;
+  for(const rawId of (Array.isArray(orderedIds) ? orderedIds : [])){
+    const id = String(rawId || "").trim();
+    if(!id || seen.has(id)) continue;
+    seen.add(id);
+    const it = byId.get(id) || {};
+    const nextKey = patch instanceof Map ? (patch.get(id) || it.queueOrderKey || "") : (it.queueOrderKey || "");
+    rows.push({
+      position: pos++,
+      id,
+      queueOrderKey: twNormalizeOrderKey(nextKey),
+      kind: String(it.kind || ""),
+      source: String(it.source || ""),
+      orderNo: String(it.orderNo || ""),
+      customer: String(it.customer || ""),
+      lineKey: String(it.lineKey || ""),
+      code: String(it.code || ""),
+      product: String(it.product || it.rawLine || it.label || "").slice(0, 240),
+      qty: String(it.qty || ""),
+      unit: String(it.unit || it.um || "")
+    });
+  }
+  return rows;
+}
+
+function twBuildQueueOrderAuditPayload(opts={}){
+  const patch = opts.patch instanceof Map ? opts.patch : new Map();
+  const orderedIds = (Array.isArray(opts.orderedIds) ? opts.orderedIds : [])
+    .map(x=>String(x || "").trim())
+    .filter(Boolean);
+  const previousIds = (Array.isArray(opts.previousIds) ? opts.previousIds : [])
+    .map(x=>String(x || "").trim())
+    .filter(Boolean);
+  const nowMs = Number(opts.nowMs || Date.now());
+  const reason = String(opts.reason || "reorder");
+  const patchEntries = Array.from(patch.entries()).map(([id, key])=>({
+    id: String(id || ""),
+    queueOrderKey: twNormalizeOrderKey(key)
+  }));
+  return {
+    queueOrderCloudOnly: true,
+    queueOrderStorage: "firestore",
+    queueOrderVersion: 2,
+    queueOrderIds: orderedIds,
+    queueOrderRows: twQueueOrderRowsSnapshot(orderedIds, patch),
+    queueOrderPatch: patchEntries,
+    queueOrderPreviousIds: previousIds,
+    queueOrderCount: orderedIds.length,
+    queueOrderHash: twQueueOrderHash(orderedIds),
+    queueOrderMovedId: String(opts.movedId || ""),
+    queueOrderLastRevisionReason: reason,
+    queueOrderLastRevisionAtMs: nowMs,
+    queueOrderLastRevisionByUid: state.user?.uid || null,
+    queueOrderLastRevisionByEmail: state.user?.email || null
+  };
+}
+
 async function twReserveQueueOrderKeys(count, fallbackTailBig=0n){
   const total = Math.max(0, Math.floor(Number(count || 0)));
   if(!total) return [];
@@ -12258,7 +12344,7 @@ async function twReserveQueueOrderKeys(count, fallbackTailBig=0n){
   });
 }
 
-async function twWriteQueueOrderPatch(patch, reason="reorder"){
+async function twWriteQueueOrderPatch(patch, reason="reorder", options={}){
   if(!(patch instanceof Map) || !patch.size) return false;
   if(!state.firebase?.ok) throw new Error("Firebase non disponibile");
   const fs = state.firebase.api;
@@ -12266,6 +12352,7 @@ async function twWriteQueueOrderPatch(patch, reason="reorder"){
   const queueCol = fs.collection(db, "producedDays", TW_LINE_BUCKET, "queue");
   const metaRef = twQueueMetaDocRef();
   const nowMs = Date.now();
+  const cleanPatch = new Map();
 
   let batch = fs.writeBatch(db);
   let ops = 0;
@@ -12280,6 +12367,7 @@ async function twWriteQueueOrderPatch(patch, reason="reorder"){
     const id = String(rawId || "").trim();
     const key = twNormalizeOrderKey(rawKey);
     if(!id || !key) continue;
+    cleanPatch.set(id, key);
     batch.set(fs.doc(queueCol, id), {
       queueOrderKey: key,
       orderUpdatedAt: fs.serverTimestamp(),
@@ -12293,8 +12381,23 @@ async function twWriteQueueOrderPatch(patch, reason="reorder"){
     if(ops >= 430) await commitIfNeeded(true);
   }
 
+  if(!cleanPatch.size) return false;
+
   if(metaRef){
+    const explicitIds = Array.isArray(options.orderedIds) ? options.orderedIds : [];
+    const orderedIds = explicitIds.length
+      ? explicitIds.map(x=>String(x || "").trim()).filter(Boolean)
+      : Array.from(cleanPatch.keys());
+    const audit = twBuildQueueOrderAuditPayload({
+      orderedIds,
+      previousIds: options.previousIds || [],
+      patch: cleanPatch,
+      reason: String(reason || "reorder"),
+      movedId: options.movedId || "",
+      nowMs
+    });
     batch.set(metaRef, {
+      ...audit,
       queueOrderLastRevisionAt: fs.serverTimestamp(),
       queueOrderLastRevisionAtMs: nowMs,
       queueOrderLastRevisionByUid: state.user?.uid || null,
@@ -12307,6 +12410,7 @@ async function twWriteQueueOrderPatch(patch, reason="reorder"){
   await commitIfNeeded(true);
   return true;
 }
+
 
 function twOrderKeyBetween(prevKey, nextKey){
   const prev = twOrderKeyToBig(prevKey);
@@ -12495,7 +12599,12 @@ async function twEnsureQueueOrderFieldsFromCloud(reason="bootstrap"){
     }
 
     twSetCloud("loading", reason === "watch_bootstrap" ? "ordino cloud…" : "riparo ordine…");
-    await twWriteQueueOrderPatch(patch, reason === "watch_bootstrap" ? "watch_bootstrap" : String(reason || "repair"));
+    const orderedIds = sorted.map(it=>String(it?.id || "").trim()).filter(Boolean);
+    const previousIds = cloudItems.map(it=>String(it?.id || "").trim()).filter(Boolean);
+    await twWriteQueueOrderPatch(patch, reason === "watch_bootstrap" ? "watch_bootstrap" : String(reason || "repair"), {
+      orderedIds,
+      previousIds
+    });
     tw._queueBootstrapDone = true;
     twSetCloud("ok");
     return true;
@@ -17949,9 +18058,14 @@ async function twPersistQueueOrder(ids, preferredMovedId="", baseOldIds=null){
     }
 
     const patch = twBuildSequentialOrderPatch(orderedVisibleIds);
-    twApplyQueueOrderLocally(orderedVisibleIds, patch);
+    const movedId = twFindMovedId(oldIds, orderedVisibleIds, preferredMovedId);
     twSetCloud("loading", "riordino live…");
-    await twWriteQueueOrderPatch(patch, "drag_reorder");
+    await twWriteQueueOrderPatch(patch, "drag_reorder", {
+      orderedIds: orderedVisibleIds,
+      previousIds: oldIds,
+      movedId
+    });
+    // UI cloud-only: la lista definitiva viene dal realtime Firestore, non da cache locale.
     twSetCloud("ok");
   }catch(e){
     console.warn("twPersistQueueOrder error:", e);
