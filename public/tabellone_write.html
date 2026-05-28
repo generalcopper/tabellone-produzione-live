@@ -12252,7 +12252,8 @@ function twQueueOrderRowsSnapshot(orderedIds, patch){
     const it = byId.get(id) || {};
     const nextKey = patch instanceof Map ? (patch.get(id) || it.queueOrderKey || "") : (it.queueOrderKey || "");
     rows.push({
-      position: pos++,
+      position: pos,
+      queueOrderIndex: pos++,
       id,
       queueOrderKey: twNormalizeOrderKey(nextKey),
       kind: String(it.kind || ""),
@@ -12354,6 +12355,13 @@ async function twWriteQueueOrderPatch(patch, reason="reorder", options={}){
   const nowMs = Date.now();
   const cleanPatch = new Map();
 
+  const orderedIdsForIndex = Array.isArray(options.orderedIds) ? options.orderedIds : [];
+  const queueOrderIndexById = new Map();
+  orderedIdsForIndex.forEach((rawId, idx)=>{
+    const id = String(rawId || "").trim();
+    if(id && !queueOrderIndexById.has(id)) queueOrderIndexById.set(id, idx);
+  });
+
   let batch = fs.writeBatch(db);
   let ops = 0;
   const commitIfNeeded = async(force=false)=>{
@@ -12370,6 +12378,7 @@ async function twWriteQueueOrderPatch(patch, reason="reorder", options={}){
     cleanPatch.set(id, key);
     batch.set(fs.doc(queueCol, id), {
       queueOrderKey: key,
+      queueOrderIndex: queueOrderIndexById.has(id) ? queueOrderIndexById.get(id) : null,
       orderUpdatedAt: fs.serverTimestamp(),
       orderUpdatedAtMs: nowMs,
       orderUpdatedByUid: state.user?.uid || null,
@@ -12500,6 +12509,7 @@ function twQueueDocToItem(d){
   return {
     id: String(d?.id || v.id || "").trim(),
     queueOrderKey: twNormalizeOrderKey(v.queueOrderKey || ""),
+    queueOrderIndex: Number(v.queueOrderIndex || 0),
     kind: (v.kind || "").toString().trim(),
     source: (v.source || "").toString().trim(),
     inventoryTarget: (v.inventoryTarget || "").toString().trim(),

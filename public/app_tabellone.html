@@ -3985,6 +3985,7 @@ async function playCue(kind){
 const BUCKET = "linea_liquidi";
   const producedCol = collection(db, "producedDays", BUCKET, "items");
   const queueCol   = collection(db, "producedDays", BUCKET, "queue");
+  const queueMetaDoc = doc(db, "producedDays", BUCKET, "meta", "queueState");
   const stateDoc = null; // disabilitato
 
   const shiftAlarmDoc = doc(db, "producedDays", BUCKET, "settings", "shiftAlarms");
@@ -4679,6 +4680,94 @@ const BUCKET = "linea_liquidi";
     return al.localeCompare(bl, "it");
   }
 
+
+  function cleanCloudQueueOrderIds(rawIds){
+    const out = [];
+    const seen = new Set();
+    const list = Array.isArray(rawIds) ? rawIds : [];
+    for(const raw of list){
+      const id = String(raw || "").trim();
+      if(!id || seen.has(id)) continue;
+      seen.add(id);
+      out.push(id);
+    }
+    return out;
+  }
+
+  function setCloudQueueOrderIds(rawIds, revisionMs=0){
+    const ids = cleanCloudQueueOrderIds(rawIds);
+    const rev = Number(revisionMs || 0) || 0;
+    const nextHash = ids.join("|") + "@" + rev;
+    if(nextHash === cloudQueueOrderHash) return false;
+
+    cloudQueueOrderIds = ids;
+    cloudQueueOrderRevisionMs = rev;
+    cloudQueueOrderHash = nextHash;
+
+    const rank = new Map();
+    ids.forEach((id, idx)=> rank.set(id, idx));
+    cloudQueueOrderRank = rank;
+    return true;
+  }
+
+  function applyCloudQueueOrder(jobs){
+    const arr = Array.isArray(jobs) ? jobs.slice() : [];
+    const rank = (cloudQueueOrderRank instanceof Map) ? cloudQueueOrderRank : new Map();
+    if(!rank.size) return arr.sort(compareQueueJobsCloud);
+
+    return arr.sort((a,b)=>{
+      const aid = String(a?.id || a?.key || a?._raw?.id || "").trim();
+      const bid = String(b?.id || b?.key || b?._raw?.id || "").trim();
+      const ah = aid && rank.has(aid);
+      const bh = bid && rank.has(bid);
+      if(ah && bh && rank.get(aid) !== rank.get(bid)) return rank.get(aid) - rank.get(bid);
+      if(ah && !bh) return -1;
+      if(!ah && bh) return 1;
+      return compareQueueJobsCloud(a,b);
+    });
+  }
+
+  function queueVisibleHash(visibleJobs){
+    return stableHash((Array.isArray(visibleJobs) ? visibleJobs : []).map(j => [
+      j.id,
+      j.queueOrderKey,
+      j.product,
+      j.format,
+      j.qty,
+      j.unit,
+      j.status,
+      j.createdAtOrigMs,
+      j.createdAtMs,
+      j.orderUpdatedAtMs,
+      j.orderNo,
+      j.lineKey,
+      cloudQueueOrderRevisionMs
+    ]));
+  }
+
+  function renderQueueFromCloudDocs(reason="queue"){
+    const base = Array.isArray(lastQueueDocs) ? lastQueueDocs : [];
+    if(!base.length && reason === "queue_meta") return;
+    const orderedJobs = applyCloudQueueOrder(base);
+    const visibleJobs = filterQueueJobsForBoard(orderedJobs);
+    lastJobs = visibleJobs;
+
+    try{ clearQueueBackupNow(); }catch(_){ }
+    try{ Boot.mark('jobs'); }catch(_){ }
+
+    try{
+      const h = queueVisibleHash(visibleJobs);
+      if(h !== lastHash){
+        lastHash = h;
+        renderSoft(visibleJobs);
+      }
+      if(reason === "queue_meta") dbg("OK • ordine cloud live");
+      else dbg("OK • realtime");
+    }catch(_){
+      renderSoft(visibleJobs);
+    }
+  }
+
   function clearProducedBackupNow(){
     try{ localStorage.removeItem(PRODUCED_BACKUP_KEY); }catch(_){ }
     try{ localStorage.removeItem(PRODUCED_BACKUP_HISTORY_KEY); }catch(_){ }
@@ -5237,6 +5326,11 @@ unmarkProducedCloud(it.key).then(() => {
   let inFlight = false;
   let lastHash = "";
   let lastJobs = [];
+  let lastQueueDocs = [];
+  let cloudQueueOrderIds = [];
+  let cloudQueueOrderRank = new Map();
+  let cloudQueueOrderHash = "";
+  let cloudQueueOrderRevisionMs = 0;
   const MIN_VISIBLE_QUEUE_QTY = 400;
 
   function parseQueueQtyForVisibility(value){
@@ -5290,9 +5384,27 @@ unmarkProducedCloud(it.key).then(() => {
   // initFirestoreRealtime(): avviato dopo AUTH
   // ===== Realtime QUEUE (sync con tabellone WRITE) =====
   let _queueUnsub = null;
+  let _queueMetaUnsub = null;
   function initQueueRealtime(){
     try{ if(typeof _queueUnsub === "function") _queueUnsub(); }catch(_){ }
+    try{ if(typeof _queueMetaUnsub === "function") _queueMetaUnsub(); }catch(_){ }
     try{
+      _queueMetaUnsub = onSnapshot(queueMetaDoc, (snap) => {
+        try{
+          if(!snap.exists()) return;
+          const v = snap.data() || {};
+          const ids = Array.isArray(v.queueOrderIds) ? v.queueOrderIds : [];
+          const rev = Number(v.queueOrderLastRevisionAtMs || v.queueOrderLastRevisionMs || 0) || 0;
+          if(setCloudQueueOrderIds(ids, rev)){
+            renderQueueFromCloudDocs("queue_meta");
+          }
+        }catch(e){
+          console.log("queue meta snapshot error:", e);
+        }
+      }, (err)=>{
+        console.log("queue meta snapshot error:", err);
+      });
+
       _queueUnsub = onSnapshot(queueCol, (snap) => {
         const jobs = [];
         snap.forEach(d => {
@@ -5327,21 +5439,13 @@ unmarkProducedCloud(it.key).then(() => {
           });
         });
 
-        jobs.sort(compareQueueJobsCloud);
-        const visibleJobs = filterQueueJobsForBoard(jobs);
-        lastJobs = visibleJobs;
+        lastQueueDocs = jobs;
 
-        try{ clearQueueBackupNow(); }catch(_){ }
-        try{ Boot.mark('jobs'); }catch(_){ }
-
-        // Render usando solo ordine cloud del Tabellone WRITE
-        try{
-          const h = stableHash(visibleJobs.map(j => [j.id,j.queueOrderKey,j.product,j.format,j.qty,j.unit,j.status,j.createdAtOrigMs,j.createdAtMs,j.orderNo,j.lineKey]));
-          if(h !== lastHash) { lastHash = h; renderSoft(visibleJobs); }
-          dbg("OK • realtime");
-        }catch(_){
-          renderSoft(visibleJobs);
-        }
+        // Render usando solo ordine cloud del Tabellone WRITE:
+        // 1) queueState.queueOrderIds quando disponibile (broadcast immediato ordine)
+        // 2) queueOrderKey sulle righe queue come ordinamento persistente
+        // 3) nessun fallback locale / nessun localStorage per l'ordine coda
+        renderQueueFromCloudDocs("queue_snapshot");
       }, (err) => {
         console.log("queue snapshot error:", err);
         {
@@ -6268,8 +6372,29 @@ doneShareEl?.addEventListener("click", async (ev) => {
 
   function dbg(msg){ debugEl.textContent = msg + "   |   BUILD: 2026-05-28 LOGISTICA 4.0"; }
 
-  function stableHash(jobs){
-    return jobs.map(j => [j.product,j.qty,j.unit,j.format,j.status].join("|")).join("§");
+  function stableHash(items){
+    return (Array.isArray(items) ? items : []).map((j)=>{
+      if(Array.isArray(j)){
+        return j.map(v => String(v ?? "")).join("|");
+      }
+      if(j && typeof j === "object"){
+        return [
+          j.id || j.key || "",
+          j.queueOrderKey || "",
+          j.product || "",
+          j.qty || "",
+          j.unit || "",
+          j.format || "",
+          j.status || "",
+          j.createdAtOrigMs || "",
+          j.createdAtMs || "",
+          j.orderUpdatedAtMs || "",
+          j.orderNo || "",
+          j.lineKey || ""
+        ].map(v => String(v ?? "")).join("|");
+      }
+      return String(j ?? "");
+    }).join("§");
   }
 
   function tickClock(){
