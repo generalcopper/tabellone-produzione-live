@@ -12215,6 +12215,66 @@ function twQueueMetaDocRef(){
   return fs.doc(db, "producedDays", TW_LINE_BUCKET, "meta", "queueState");
 }
 
+function twBuildQueueLivePatch(action, ids=[], extra={}){
+  const fs = state.firebase?.api || null;
+  const nowMs = Number(extra.nowMs || Date.now()) || Date.now();
+  const cleanIds = (Array.isArray(ids) ? ids : [ids])
+    .map(x => String(x || "").trim())
+    .filter(Boolean);
+  const firstId = cleanIds[0] || String(extra.id || "").trim();
+  const patch = {
+    queueLiveVersion: 1,
+    queueLiveAction: String(action || "queue_change"),
+    queueLiveActionId: firstId,
+    queueLiveActionIds: cleanIds,
+    queueLiveActionAtMs: nowMs,
+    queueLiveNonce: String(nowMs) + "_" + Math.random().toString(36).slice(2, 8),
+    queueMutationRevisionMs: nowMs,
+    queueOrderLastRevisionAtMs: nowMs,
+    queueOrderLastRevisionReason: String(action || "queue_change"),
+    queueOrderLastRevisionByUid: state.user?.uid || null,
+    queueOrderLastRevisionByEmail: state.user?.email || null
+  };
+  if(fs && typeof fs.serverTimestamp === "function"){
+    patch.queueLiveActionAt = fs.serverTimestamp();
+    patch.queueOrderLastRevisionAt = fs.serverTimestamp();
+  }
+  if(action === "completed") patch.queueLiveCompletedAtMs = nowMs;
+  if(action === "restored") patch.queueLiveRestoredAtMs = nowMs;
+  if(extra && typeof extra === "object"){
+    for(const [k,v] of Object.entries(extra)){
+      if(k === "nowMs" || k === "id") continue;
+      patch[k] = v;
+    }
+  }
+  return patch;
+}
+
+function twBatchTouchQueueLive(batch, action, ids=[], extra={}){
+  try{
+    const metaRef = twQueueMetaDocRef();
+    if(!batch || !metaRef) return false;
+    batch.set(metaRef, twBuildQueueLivePatch(action, ids, extra), { merge:true });
+    return true;
+  }catch(e){
+    console.warn("twBatchTouchQueueLive error:", e);
+    return false;
+  }
+}
+
+async function twTouchQueueLive(action, ids=[], extra={}){
+  try{
+    const metaRef = twQueueMetaDocRef();
+    if(!metaRef || !state.firebase?.api) return false;
+    const fs = state.firebase.api;
+    await fs.setDoc(metaRef, twBuildQueueLivePatch(action, ids, extra), { merge:true });
+    return true;
+  }catch(e){
+    console.warn("twTouchQueueLive error:", e);
+    return false;
+  }
+}
+
 // Ordine coda WRITE:
 // l'ordine è salvato SOLO in Cloud Firestore.
 // Ogni cambio ordine scrive sia queueOrderKey sulle righe queue,
@@ -16648,7 +16708,9 @@ async function twCompleteJob(){
       completedByName: state.user?.fullName || null,
       ts: fs.serverTimestamp(),
       completedAt: fs.serverTimestamp(),
-      completedAtClientMs: Date.now()
+      completedAtClientMs: Date.now(),
+      queueLiveAction: "completed",
+      completedVisibilityRevisionMs: Date.now()
     };
     Object.assign(payload, twBuildCompletedProductTriggerPayload(payload));
 
@@ -16661,6 +16723,10 @@ async function twCompleteJob(){
     const batch = fs.writeBatch(db);
     batch.set(fs.doc(producedCol, doneDocId), payload, { merge:true });
     batch.delete(fs.doc(queueCol, id));
+    twBatchTouchQueueLive(batch, "completed", [id], {
+      completedDocId: doneDocId,
+      completedLabel: label
+    });
 
     const concaMov = twBuildConcaInventoryLoadPayload({ ...payload, id: doneDocId, key }, fs);
     if(concaMov){
@@ -17295,6 +17361,7 @@ async function twClearAllCompletati(){
       await commitIfNeeded(false);
     }
     await commitIfNeeded(true);
+    try{ await twTouchQueueLive("completed_clear", docs.map(d => d.id)); }catch(_e){}
 
     try{ ensureTabWriteState().localDoneIds = new Set(); }catch(_e){}
     try{ twScheduleOrdersSync(); }catch(_e){}
@@ -17329,6 +17396,7 @@ async function twDeleteCompletato(it){
     twSetCloud("loading","elimino…");
     const batch = fs.writeBatch(db);
     batch.delete(fs.doc(producedCol, it.id));
+    twBatchTouchQueueLive(batch, "completed_deleted", [it.id]);
 
     const concaMovementId = String(it.concaInventoryMovementId || twConcaMovementDocId(it.id)).trim();
     if(concaMovementId){
@@ -17412,6 +17480,9 @@ async function twUndoCompletato(it){
       status: "DA PRODURRE",
       rawLine: it.rawLine || "",
       queueOrderKey: undoQueueOrderKey,
+      restoredFromCompletedAtMs: Date.now(),
+      restoreActionAtMs: Date.now(),
+      queueLiveAction: "restored",
       createdAt: fs.serverTimestamp(),
       createdAtMs: Date.now(),
       createdAtOrig: fs.serverTimestamp(),
@@ -17423,6 +17494,9 @@ async function twUndoCompletato(it){
     const batch = fs.writeBatch(db);
     batch.set(fs.doc(queueCol, it.id), payload, { merge:true });
     batch.delete(fs.doc(producedCol, it.id));
+    twBatchTouchQueueLive(batch, "restored", [it.id], {
+      restoredLabel: title
+    });
 
     const concaMovementId = String(payload.concaInventoryMovementId || twConcaMovementDocId(it.id)).trim();
     if(concaMovementId){
@@ -18123,6 +18197,7 @@ function twBindUiOnce(){
         const db = state.firebase.db;
         const queueCol = fs.collection(db, "producedDays", TW_LINE_BUCKET, "queue");
         await fs.deleteDoc(fs.doc(queueCol, id));
+        try{ await twTouchQueueLive("queue_deleted", [id]); }catch(_e){}
       }catch(err){
         alert("Errore eliminazione: " + (err?.message || err?.code || "unknown"));
       }

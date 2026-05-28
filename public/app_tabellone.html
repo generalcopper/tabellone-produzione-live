@@ -4739,9 +4739,13 @@ const BUCKET = "linea_liquidi";
       j.createdAtOrigMs,
       j.createdAtMs,
       j.orderUpdatedAtMs,
+      j.restoredFromCompletedAtMs,
+      j.restoreActionAtMs,
+      j.queueLiveAction,
       j.orderNo,
       j.lineKey,
-      cloudQueueOrderRevisionMs
+      cloudQueueOrderRevisionMs,
+      cloudQueueLiveHash
     ]));
   }
 
@@ -5302,6 +5306,9 @@ unmarkProducedCloud(it.key).then(() => {
       try{ saveProducedBackupNow(); }catch(_){ }
       renderProducedFromCloud();
 
+      // Completamenti/ripristini provenienti da WRITE devono riflettersi subito
+      // anche sul tabellone: forzo il ricalcolo della coda corrente dal cloud.
+      try{ lastHash = ""; renderQueueFromCloudDocs("produced_snapshot"); }catch(_){ }
       applyForcedStatuses();
       updateAllWipTimers();
     }, (err) => {
@@ -5331,6 +5338,7 @@ unmarkProducedCloud(it.key).then(() => {
   let cloudQueueOrderRank = new Map();
   let cloudQueueOrderHash = "";
   let cloudQueueOrderRevisionMs = 0;
+  let cloudQueueLiveHash = "";
   const MIN_VISIBLE_QUEUE_QTY = 400;
 
   function parseQueueQtyForVisibility(value){
@@ -5372,6 +5380,9 @@ unmarkProducedCloud(it.key).then(() => {
   }
 
   function shouldShowQueueJob(job){
+    // Righe ripristinate da WRITE: devono rientrare subito nel tabellone,
+    // anche se la quantità è sotto la soglia storica di visualizzazione.
+    if(job && (job.restoredFromCompletedAtMs || job.restoreActionAtMs || job.queueLiveAction === "restored")) return true;
     const qty = parseQueueQtyForVisibility(job?.qty);
     if(!Number.isFinite(qty)) return true;
     return qty >= MIN_VISIBLE_QUEUE_QTY;
@@ -5394,9 +5405,29 @@ unmarkProducedCloud(it.key).then(() => {
           if(!snap.exists()) return;
           const v = snap.data() || {};
           const ids = Array.isArray(v.queueOrderIds) ? v.queueOrderIds : [];
-          const rev = Number(v.queueOrderLastRevisionAtMs || v.queueOrderLastRevisionMs || 0) || 0;
-          if(setCloudQueueOrderIds(ids, rev)){
+          const rev = Math.max(
+            Number(v.queueOrderLastRevisionAtMs || v.queueOrderLastRevisionMs || 0) || 0,
+            Number(v.queueMutationRevisionMs || 0) || 0,
+            Number(v.queueLiveActionAtMs || 0) || 0,
+            Number(v.queueLiveCompletedAtMs || 0) || 0,
+            Number(v.queueLiveRestoredAtMs || 0) || 0
+          );
+          const liveHash = [
+            ids.join("|"),
+            rev,
+            String(v.queueLiveAction || ""),
+            String(v.queueLiveActionId || ""),
+            String(v.queueLiveNonce || "")
+          ].join("@");
+          const orderChanged = setCloudQueueOrderIds(ids, rev);
+          const liveChanged = liveHash !== cloudQueueLiveHash;
+          if(liveChanged) cloudQueueLiveHash = liveHash;
+          if(orderChanged || liveChanged){
+            lastHash = "";
             renderQueueFromCloudDocs("queue_meta");
+            try{ renderProducedFromCloud(); }catch(_){ }
+            try{ applyForcedStatuses(); }catch(_){ }
+            try{ MobileUI.updateFromJobs(); MobileUI.updateFromProduced(); }catch(_){ }
           }
         }catch(e){
           console.log("queue meta snapshot error:", e);
@@ -5415,6 +5446,8 @@ unmarkProducedCloud(it.key).then(() => {
           const createdAtOrigMs = Number(v.createdAtOrigMs || 0) || 0;
           const orderUpdatedAtMs = Number(v.orderUpdatedAtMs || 0) || 0;
           const queueOrderKey = normalizeCloudOrderKey(v.queueOrderKey || "");
+          const restoredFromCompletedAtMs = Number(v.restoredFromCompletedAtMs || 0) || 0;
+          const restoreActionAtMs = Number(v.restoreActionAtMs || 0) || 0;
 
           jobs.push({
             id: d.id,
@@ -5435,7 +5468,10 @@ unmarkProducedCloud(it.key).then(() => {
             createdAtMs,
             createdAtOrigMs,
             orderUpdatedAtMs,
-            _raw: { ...v, queueOrderKey, createdAtMs, createdAtOrigMs, orderUpdatedAtMs }
+            restoredFromCompletedAtMs,
+            restoreActionAtMs,
+            queueLiveAction: (v.queueLiveAction || "").toString().trim(),
+            _raw: { ...v, queueOrderKey, createdAtMs, createdAtOrigMs, orderUpdatedAtMs, restoredFromCompletedAtMs, restoreActionAtMs }
           });
         });
 
