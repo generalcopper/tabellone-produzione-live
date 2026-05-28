@@ -2153,7 +2153,7 @@
         <div class="subtitle">
           <span class="chip live"><span class="liveDot"></span>LIVE</span>
           <span class="chip">Aggiornamento: 60s</span>
-          <span class="chip">Versione: 2026-05-28 HD</span>
+          <span class="chip">Versione: 2026-05-28 LOGISTICA 4.0</span>
         </div>
       </div>
     </div>
@@ -2441,8 +2441,8 @@
     <div class="shiftAlarmSoundPanel">
       <div class="shiftAlarmSoundTop">
         <div>
-          <div class="shiftAlarmSoundTitle">Sirena allarme</div>
-          <div class="shiftAlarmSoundSub">Scegli il suono, provalo, e imposta per quanti secondi deve suonare prima della voce.</div>
+          <div class="shiftAlarmSoundTitle">Suoni Logistica 4.0</div>
+          <div class="shiftAlarmSoundSub">Pacchetto sintetico stile magazzino fulfillment/logistica 4.0: scanner, sorter, gate, AMR e chiamate reparto. Scegli, prova e imposta la durata prima della voce.</div>
         </div>
         <label class="shiftAlarmDurationWrap">
           <span>Durata</span>
@@ -2459,7 +2459,7 @@
 
     <div class="modalActions shiftAlarmActions">
       <button class="btnGhost" id="shiftAlarmReset" type="button">Preimpostati</button>
-      <button class="btnGhost" id="shiftAlarmTest" type="button">Test voce + sirena</button>
+      <button class="btnGhost" id="shiftAlarmTest" type="button">Test voce + suono</button>
       <button class="btnGhost" id="shiftAlarmStopSound" type="button">Stop suono</button>
       <button class="btnOk" id="shiftAlarmClose" type="button">Chiudi</button>
     </div>
@@ -2793,7 +2793,7 @@ async function playCue(kind){
   }
 
   function getShiftSirenConfig(soundId, durationSec){
-    const id = String(soundId || SHIFT_ALARM_SETTINGS?.soundId || SHIFT_ALARM_DEFAULTS?.soundId || "factory");
+    const id = String(soundId || SHIFT_ALARM_SETTINGS?.soundId || SHIFT_ALARM_DEFAULTS?.soundId || "logi_shift");
     const list = (typeof SHIFT_SIREN_SOUNDS !== "undefined" ? SHIFT_SIREN_SOUNDS : []);
     const found = list.find(s => s.id === id);
     return {
@@ -2873,97 +2873,104 @@ async function playCue(kind){
   function scheduleShiftSirenPattern(ctx, master, nodes, soundId, durationSec){
     const start = ctx.currentTime + 0.035;
     const end = start + clampShiftDuration(durationSec);
-    const id = String(soundId || "factory");
+    const id = normalizeSirenId(soundId || "");
 
-    if(id === "hd_factory"){
-      for(let t=start; t<end; t+=0.72){
-        scheduleSirenOsc(ctx, master, nodes, t, Math.min(0.62, end-t), { type:"sawtooth", f1:360, f2:1120, gain:.46 });
-        scheduleSirenOsc(ctx, master, nodes, t+0.015, Math.min(0.58, end-(t+0.015)), { type:"square", f1:720, f2:980, gain:.14 });
-        scheduleSirenOsc(ctx, master, nodes, t+0.04, Math.min(0.52, end-(t+0.04)), { type:"triangle", f1:180, f2:280, gain:.16 });
-        scheduleSirenNoise(ctx, master, nodes, t, Math.min(0.20, end-t), { freq:1700, q:3.4, gain:.065 });
+    const stepLoop = (step, cb) => {
+      let i = 0;
+      for(let t=start; t<end; t+=step, i++){
+        const osc = (offset, dur, opts) => {
+          const tt = t + Number(offset || 0);
+          if(tt >= end) return;
+          scheduleSirenOsc(ctx, master, nodes, tt, Math.min(Number(dur || 0.12), end - tt), opts || {});
+        };
+        const noise = (offset, dur, opts) => {
+          const tt = t + Number(offset || 0);
+          if(tt >= end) return;
+          scheduleSirenNoise(ctx, master, nodes, tt, Math.min(Number(dur || 0.10), end - tt), opts || {});
+        };
+        cb(t, i, osc, noise);
       }
+    };
+
+    // Logistica 4.0 • Inizio turno: triade chiara + ping operativo, non aggressivo.
+    if(id === "logi_shift"){
+      stepLoop(1.32, (_t, _i, osc, noise) => {
+        osc(0.00, 0.16, { type:"sine",     f1:660,  f2:660,  gain:.30 });
+        osc(0.18, 0.16, { type:"triangle", f1:990,  f2:1010, gain:.24 });
+        osc(0.36, 0.22, { type:"sine",     f1:1320, f2:1260, gain:.20 });
+        osc(0.02, 0.50, { type:"triangle", f1:220,  f2:260,  gain:.075 });
+        noise(0.00, 0.055, { freq:3200, q:5.2, gain:.022 });
+      });
       return;
     }
 
-    if(id === "hd_airhorn"){
-      for(let t=start; t<end; t+=1.18){
-        scheduleSirenOsc(ctx, master, nodes, t, Math.min(0.52, end-t), { type:"sawtooth", f1:240, f2:250, gain:.58 });
-        scheduleSirenOsc(ctx, master, nodes, t+0.01, Math.min(0.50, end-(t+0.01)), { type:"square", f1:480, f2:470, gain:.18 });
-        scheduleSirenOsc(ctx, master, nodes, t+0.02, Math.min(0.48, end-(t+0.02)), { type:"triangle", f1:720, f2:690, gain:.12 });
-        scheduleSirenNoise(ctx, master, nodes, t, Math.min(0.18, end-t), { freq:900, q:1.2, gain:.10 });
-      }
+    // Logistica 4.0 • Pick & Pack: doppio beep scanner, secco e riconoscibile.
+    if(id === "logi_pickpack"){
+      stepLoop(0.92, (_t, i, osc, noise) => {
+        const base = i % 2 ? 1540 : 1480;
+        osc(0.00, 0.085, { type:"square",   f1:base,     f2:base + 80, gain:.30 });
+        osc(0.13, 0.075, { type:"triangle", f1:base+280, f2:base+240, gain:.22 });
+        osc(0.01, 0.11,  { type:"sine",     f1:740,      f2:760,      gain:.07 });
+        noise(0.00, 0.035, { freq:4200, q:7.0, gain:.018 });
+      });
       return;
     }
 
-    if(id === "hd_alarm"){
-      for(let t=start; t<end; t+=0.42){
-        scheduleSirenOsc(ctx, master, nodes, t, Math.min(0.13, end-t), { type:"square", f1:1240, f2:1380, gain:.36 });
-        scheduleSirenOsc(ctx, master, nodes, t+0.15, Math.min(0.12, end-(t+0.15)), { type:"triangle", f1:760, f2:920, gain:.28 });
-        scheduleSirenNoise(ctx, master, nodes, t, Math.min(0.08, end-t), { freq:2600, q:4.2, gain:.045 });
-      }
+    // Logistica 4.0 • Sorter: sequenza tipo nastro/smistamento, elettronica e moderna.
+    if(id === "logi_sorter"){
+      stepLoop(0.68, (_t, i, osc, noise) => {
+        const a = 860 + (i % 4) * 70;
+        osc(0.00, 0.11, { type:"triangle", f1:a,      f2:a+260, gain:.24 });
+        osc(0.16, 0.10, { type:"triangle", f1:a+180,  f2:a+420, gain:.20 });
+        osc(0.32, 0.09, { type:"square",   f1:a+420,  f2:a+300, gain:.13 });
+        osc(0.00, 0.42, { type:"sawtooth", f1:120,    f2:132,   gain:.045 });
+        noise(0.00, 0.055, { freq:2100, q:2.6, gain:.020 });
+      });
       return;
     }
 
-    if(id === "hd_evac"){
-      for(let t=start; t<end; t+=0.52){
-        const high = Math.floor((t-start)/0.52) % 2 === 0;
-        scheduleSirenOsc(ctx, master, nodes, t, Math.min(0.40, end-t), { type:"square", f1: high ? 1040 : 520, f2: high ? 1040 : 520, gain:.38 });
-        scheduleSirenOsc(ctx, master, nodes, t+0.015, Math.min(0.36, end-(t+0.015)), { type:"sawtooth", f1: high ? 1560 : 780, f2: high ? 1510 : 760, gain:.13 });
-      }
+    // Logistica 4.0 • Baia carico: clacson dock più controllato, forte ma non evacuazione.
+    if(id === "logi_dock"){
+      stepLoop(1.18, (_t, _i, osc, noise) => {
+        osc(0.00, 0.34, { type:"sawtooth", f1:240, f2:238, gain:.48 });
+        osc(0.01, 0.31, { type:"square",   f1:480, f2:468, gain:.12 });
+        osc(0.39, 0.10, { type:"triangle", f1:1180,f2:1320,gain:.18 });
+        osc(0.54, 0.09, { type:"triangle", f1:1320,f2:1180,gain:.16 });
+        noise(0.00, 0.16, { freq:780, q:1.1, gain:.07 });
+      });
       return;
     }
 
-    if(id === "hd_bell"){
-      for(let t=start; t<end; t+=1.35){
-        scheduleHdBell(ctx, master, nodes, t, Math.min(1.04, end-t));
-      }
+    // Logistica 4.0 • Dispatch: chiusura/fine turno, tono positivo da spedizione completata.
+    if(id === "logi_dispatch"){
+      stepLoop(1.45, (_t, _i, osc, noise) => {
+        osc(0.00, 0.14, { type:"sine",     f1:520,  f2:520,  gain:.26 });
+        osc(0.16, 0.14, { type:"sine",     f1:780,  f2:790,  gain:.23 });
+        osc(0.32, 0.26, { type:"triangle", f1:1040, f2:1160, gain:.20 });
+        osc(0.58, 0.18, { type:"sine",     f1:1560, f2:1500, gain:.14 });
+        noise(0.02, 0.050, { freq:3600, q:5.5, gain:.018 });
+      });
       return;
     }
 
-    if(id === "evac"){
-      for(let t=start; t<end; t+=0.38){
-        const high = Math.floor((t-start)/0.38) % 2 === 0;
-        scheduleSirenOsc(ctx, master, nodes, t, Math.min(0.30, end-t), { type:"square", f1: high ? 980 : 660, f2: high ? 980 : 660, gain:.44 });
-      }
+    // Logistica 4.0 • Alert operativo: pulsazione chiara per richiamo attenzione area.
+    if(id === "logi_urgent"){
+      stepLoop(0.54, (_t, i, osc, noise) => {
+        const high = (i % 2) === 0;
+        osc(0.00, 0.18, { type:"square",   f1: high ? 1180 : 760,  f2: high ? 1280 : 720, gain:.34 });
+        osc(0.02, 0.16, { type:"triangle", f1: high ? 590  : 380,  f2: high ? 620  : 360, gain:.11 });
+        noise(0.00, 0.055, { freq: high ? 3000 : 1800, q:4.4, gain:.028 });
+      });
       return;
     }
 
-    if(id === "pulse"){
-      for(let t=start; t<end; t+=1.05){
-        scheduleSirenOsc(ctx, master, nodes, t, Math.min(0.17, end-t), { type:"square", f1:880, f2:940, gain:.48 });
-        scheduleSirenOsc(ctx, master, nodes, t+0.25, Math.min(0.17, end-(t+0.25)), { type:"square", f1:880, f2:940, gain:.48 });
-        scheduleSirenOsc(ctx, master, nodes, t+0.50, Math.min(0.17, end-(t+0.50)), { type:"square", f1:880, f2:940, gain:.48 });
-      }
-      return;
-    }
-
-    if(id === "classic"){
-      for(let t=start; t<end; t+=0.64){
-        scheduleSirenOsc(ctx, master, nodes, t, Math.min(0.58, end-t), { type:"sine", f1:520, f2:860, gain:.58 });
-        scheduleSirenOsc(ctx, master, nodes, t+0.31, Math.min(0.29, end-(t+0.31)), { type:"sine", f1:860, f2:520, gain:.44 });
-      }
-      return;
-    }
-
-    if(id === "digital"){
-      for(let t=start; t<end; t+=0.22){
-        scheduleSirenOsc(ctx, master, nodes, t, Math.min(0.10, end-t), { type:"triangle", f1:1180, f2:1380, gain:.42 });
-      }
-      return;
-    }
-
-    if(id === "long"){
-      for(let t=start; t<end; t+=1.15){
-        scheduleSirenOsc(ctx, master, nodes, t, Math.min(1.08, end-t), { type:"sawtooth", f1:340, f2:1180, gain:.62 });
-      }
-      return;
-    }
-
-    // default: sirena fabbrica, sweep ripetuto
-    for(let t=start; t<end; t+=0.78){
-      scheduleSirenOsc(ctx, master, nodes, t, Math.min(0.68, end-t), { type:"sawtooth", f1:420, f2:980, gain:.56 });
-      scheduleSirenOsc(ctx, master, nodes, t+0.34, Math.min(0.34, end-(t+0.34)), { type:"square", f1:620, f2:920, gain:.18 });
-    }
+    // Default: inizio turno logistica 4.0.
+    stepLoop(1.32, (_t, _i, osc, noise) => {
+      osc(0.00, 0.16, { type:"sine",     f1:660,  f2:660,  gain:.30 });
+      osc(0.18, 0.16, { type:"triangle", f1:990,  f2:1010, gain:.24 });
+      osc(0.36, 0.22, { type:"sine",     f1:1320, f2:1260, gain:.20 });
+      noise(0.00, 0.055, { freq:3200, q:5.2, gain:.022 });
+    });
   }
 
   async function playShiftSiren(soundId, durationSec){
@@ -3264,23 +3271,47 @@ const BUCKET = "linea_liquidi";
   const shiftAlarmDoc = doc(db, "producedDays", BUCKET, "settings", "shiftAlarms");
 
   const SHIFT_SIREN_SOUNDS = [
-    { id: "hd_factory", label: "HD sirena fabbrica", desc: "Sweep stereo sintetico, più pieno e potente" },
-    { id: "hd_airhorn", label: "HD tromba reparto", desc: "Tromba industriale corta, molto riconoscibile" },
-    { id: "hd_alarm", label: "HD allarme digitale", desc: "Impulsi moderni con corpo e presenza" },
-    { id: "hd_evac", label: "HD evacuazione", desc: "Alternanza alta/bassa da emergenza" },
-    { id: "hd_bell", label: "HD campana turno", desc: "Campana metallica pulita per cambio turno" },
-    { id: "classic", label: "Sirena classica", desc: "Avviso industriale bilanciato" },
-    { id: "factory", label: "Sirena fabbrica", desc: "Sweep forte da reparto" },
-    { id: "pulse", label: "Bip emergenza", desc: "Impulsi rapidi e secchi" },
-    { id: "evac", label: "Evacuazione", desc: "Salita lunga molto evidente" },
-    { id: "chime", label: "Campana turno", desc: "Più morbida e riconoscibile" }
+    { id: "logi_shift",    label: "Logistica 4.0 • Inizio turno",   desc: "Triade pulita da fulfillment center, moderna e non aggressiva" },
+    { id: "logi_pickpack", label: "Logistica 4.0 • Pick & Pack",     desc: "Doppio beep scanner, secco e riconoscibile in reparto" },
+    { id: "logi_sorter",   label: "Logistica 4.0 • Sorter",          desc: "Sequenza elettronica tipo smistamento/nastro automatico" },
+    { id: "logi_dock",     label: "Logistica 4.0 • Baia carico",     desc: "Clacson dock controllato per pausa o richiamo area" },
+    { id: "logi_dispatch", label: "Logistica 4.0 • Dispatch",        desc: "Chime positivo da spedizione/fine turno completata" },
+    { id: "logi_urgent",   label: "Logistica 4.0 • Alert operativo", desc: "Pulse moderno per attenzione immediata, senza effetto evacuazione" }
   ];
-  const DEFAULT_SHIFT_SIREN_ID = "classic";
+  const DEFAULT_SHIFT_SIREN_ID = "logi_shift";
   const DEFAULT_SHIFT_SIREN_DURATION_SEC = 5;
 
   function normalizeSirenId(v){
     const id = String(v || "").trim();
-    return SHIFT_SIREN_SOUNDS.some(s => s.id === id) ? id : DEFAULT_SHIFT_SIREN_ID;
+    const legacyMap = {
+      hd_factory: "logi_shift",
+      factory: "logi_shift",
+      classic: "logi_shift",
+      hd_airhorn: "logi_dock",
+      long: "logi_dock",
+      hd_alarm: "logi_sorter",
+      digital: "logi_sorter",
+      pulse: "logi_pickpack",
+      hd_evac: "logi_urgent",
+      evac: "logi_urgent",
+      hd_bell: "logi_dispatch",
+      chime: "logi_dispatch",
+      logi_fulfillment: "logi_shift",
+      logi_scanner: "logi_pickpack",
+      logi_gate: "logi_dock",
+      logi_agv: "logi_sorter",
+      logi_priority: "logi_urgent",
+      logi_shift_bell: "logi_dispatch",
+      logi_soft_chime: "logi_dock",
+      logi_40_dispatch: "logi_dispatch",
+      logi_40_scanner: "logi_pickpack",
+      logi_40_gate: "logi_dock",
+      logi_40_dock: "logi_dock",
+      logi_40_sorter: "logi_sorter",
+      logi_40_alert: "logi_urgent"
+    };
+    const mapped = legacyMap[id] || id;
+    return SHIFT_SIREN_SOUNDS.some(s => s.id === mapped) ? mapped : DEFAULT_SHIFT_SIREN_ID;
   }
 
   function normalizeSirenDuration(v){
@@ -3290,11 +3321,11 @@ const BUCKET = "linea_liquidi";
   }
 
   const SHIFT_ALARM_DEFAULTS = {
-    version: 2,
+    version: 4,
     enabled: true,
     timezone: "Europe/Rome",
     days: [1,2,3,4,5],
-    soundId: "classic",
+    soundId: "logi_shift",
     soundDurationSec: 5,
     alarms: [
       {
@@ -3303,7 +3334,7 @@ const BUCKET = "linea_liquidi";
         time: "08:00:00",
         title: "Inizio turno",
         voice: "Inizio turno. Buon lavoro a tutti. Operatività attiva sulla linea liquidi automatica.",
-        soundId: "classic",
+        soundId: "logi_shift",
         soundDurationSec: 5
       },
       {
@@ -3312,7 +3343,7 @@ const BUCKET = "linea_liquidi";
         time: "13:00:00",
         title: "Pausa turno",
         voice: "Pausa turno. Fermata programmata.",
-        soundId: "factory",
+        soundId: "logi_dock",
         soundDurationSec: 5
       },
       {
@@ -3321,7 +3352,7 @@ const BUCKET = "linea_liquidi";
         time: "14:00:00",
         title: "Reinizio turno",
         voice: "Reinizio turno. Ripartenza della linea liquidi automatica.",
-        soundId: "pulse",
+        soundId: "logi_sorter",
         soundDurationSec: 4
       },
       {
@@ -3330,7 +3361,7 @@ const BUCKET = "linea_liquidi";
         time: "18:00:00",
         title: "Fine turno",
         voice: "Fine turno. Turno concluso. Buon lavoro.",
-        soundId: "chime",
+        soundId: "logi_dispatch",
         soundDurationSec: 6
       }
     ]
@@ -4356,20 +4387,21 @@ unmarkProducedCloud(it.key).then(() => {
 
   function buildRemoteCompletionSpeech(v, docId){
     try{
-      const rawLabel = String(v?.label || findJobLabelForCompletion(v?.key || docId) || v?.key || docId || "Riga").trim();
+      const product = cleanAmazonDisplayText(v?.job?.product || v?.product || v?.finishedProductName || "");
+      const rawLabel = String(product || v?.label || findJobLabelForCompletion(v?.key || docId) || v?.key || docId || "Riga").trim();
       const label = cleanAmazonDisplayLabel(rawLabel);
-      const qtyRaw = (v?.qty ?? v?.quantity ?? v?.pezzi ?? "");
+      const qtyRaw = (v?.qty ?? v?.quantity ?? v?.pezzi ?? v?.job?.qty ?? "");
       const qty = String(qtyRaw).trim();
       if(qty) return `${label} completati ${qty} pezzi.`.replace(/\s+/g, " ");
-      return `${label} completato.`.replace(/\s+/g, " ");
+      return `${label}. completato.`.replace(/\s+/g, " ");
     }catch(_){
       return "Produzione completata.";
     }
   }
 
   function completionFromThisDevice(v){
-    const by = String(v?.announceBy || v?.signatureBy || v?.updatedBy || "").trim();
-    return !!by && by === DEVICE_ID;
+    const ids = [v?.announceBy, v?.signatureBy, v?.completedBy, v?.updatedBy].map(x => String(x || "").trim());
+    return ids.some(id => id && id === DEVICE_ID);
   }
 
   function initFirestoreRealtime(){
@@ -4382,7 +4414,11 @@ unmarkProducedCloud(it.key).then(() => {
           if(v?.announceClientMs){
             PLAYED_ANNOUNCEMENTS.add(d.id + "@" + v.announceClientMs);
           }
-          try{ REMOTE_COMPLETION_SPOKEN.add(d.id); }catch(_){ }
+          try{
+            REMOTE_COMPLETION_SPOKEN.add(d.id);
+            const initCompletionKey = String(v?.key || d.id || "");
+            REMOTE_COMPLETION_SPOKEN.add(d.id + "|" + initCompletionKey);
+          }catch(_){ }
         });
         firstSnap = false;
         try{ Boot.mark('cloud'); }catch(_){}
@@ -4402,6 +4438,7 @@ unmarkProducedCloud(it.key).then(() => {
             if(completionKey && !wasAlreadyProduced && !isOwnCompletion && !REMOTE_COMPLETION_SPOKEN.has(remoteToken)){
               PLAYED_ANNOUNCEMENTS.add(token);
               REMOTE_COMPLETION_SPOKEN.add(remoteToken);
+              try{ _audioUnlocked = true; }catch(_){ }
               speak(buildRemoteCompletionSpeech(v, ch.doc.id));
               continue;
             }
@@ -4411,7 +4448,8 @@ unmarkProducedCloud(it.key).then(() => {
             if(isOwnCompletion) { PLAYED_ANNOUNCEMENTS.add(token); continue; }
 
             PLAYED_ANNOUNCEMENTS.add(token);
-            speak(v.announceText);
+            try{ _audioUnlocked = true; }catch(_){ }
+            speak(buildRemoteCompletionSpeech(v, ch.doc.id));
           }
         }catch(e){
           console.log("announce handler error:", e);
@@ -5479,7 +5517,7 @@ doneShareEl?.addEventListener("click", async (ev) => {
 
 
 
-  function dbg(msg){ debugEl.textContent = msg + "   |   BUILD: 2026-05-28 HD"; }
+  function dbg(msg){ debugEl.textContent = msg + "   |   BUILD: 2026-05-28 LOGISTICA 4.0"; }
 
   function stableHash(jobs){
     return jobs.map(j => [j.product,j.qty,j.unit,j.format,j.status].join("|")).join("§");
