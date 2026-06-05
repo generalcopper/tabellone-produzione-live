@@ -3830,6 +3830,108 @@ async function playCue(kind){
     }
   }
 
+
+  // ===== Voce completamenti: modalità kiosk senza mouse/input =====
+  // I completamenti arrivano dal cloud: il kiosk deve annunciarli senza bisogno di click o focus.
+  let _completionSpeechQueue = Promise.resolve();
+
+  function _completionSpeechStampFromData(v){
+    try{
+      const serverCompleted = v?.completedAt?.toMillis?.();
+      const serverTs = v?.ts?.toMillis?.();
+      const stamp = v?.announceClientMs
+        || v?.completedAtClientMs
+        || v?.signatureClientMs
+        || v?.updatedClientMs
+        || serverCompleted
+        || serverTs
+        || "";
+      return String(stamp || "");
+    }catch(_){
+      return String(v?.announceClientMs || v?.completedAtClientMs || v?.signatureClientMs || v?.updatedClientMs || "");
+    }
+  }
+
+  function completionSpeechTokenFromDoc(docId, v){
+    const key = String(v?.key || docId || "").trim();
+    const stamp = _completionSpeechStampFromData(v);
+    return `${String(docId || "")}|${key}|${stamp || "nostamp"}`;
+  }
+
+  async function _runCompletionSpeechKiosk(text){
+    const msg = String(text || "").trim();
+    if(!msg) return;
+
+    const safeMsg = (msg.length > 520) ? (msg.slice(0, 520).trim() + "…") : msg;
+
+    try{ _audioUnlocked = true; }catch(_){}
+    try{ await _unlockAudioOnce(); }catch(_){}
+    try{ primeKioskSpeechSynthesis(); }catch(_){}
+    try{ playCue("start"); }catch(_){}
+
+    try{
+      if(!("speechSynthesis" in window)) return;
+      _ensureGoogleVoice();
+
+      await new Promise((resolve) => {
+        let done = false;
+        let keepAliveTimer = null;
+        let hardTimer = null;
+
+        const finish = (ev) => {
+          if(done) return;
+          done = true;
+          try{ clearInterval(keepAliveTimer); }catch(_){}
+          try{ clearTimeout(hardTimer); }catch(_){}
+          try{ playCue("end"); }catch(_){}
+          if(ev?.error) noteKioskAudioBlocked("completion-speech", ev.error);
+          resolve();
+        };
+
+        try{ window.speechSynthesis.cancel(); }catch(_){}
+
+        const u = new SpeechSynthesisUtterance(safeMsg);
+        u.lang = "it-IT";
+        u.rate = 0.92;
+        u.pitch = 0.95;
+        u.volume = 1;
+        if(_googleVoice) u.voice = _googleVoice;
+        u.onend = finish;
+        u.onerror = finish;
+
+        keepAliveTimer = setInterval(() => {
+          try{ window.speechSynthesis.resume(); }catch(_){}
+        }, 700);
+
+        hardTimer = setTimeout(finish, Math.max(9000, safeMsg.length * 170));
+
+        setTimeout(() => {
+          try{
+            window.speechSynthesis.resume();
+            window.speechSynthesis.speak(u);
+          }catch(e){
+            noteKioskAudioBlocked("completion-speech-start", e);
+            finish();
+          }
+        }, 80);
+      });
+    }catch(e){
+      console.log("Completion kiosk TTS error:", e);
+      noteKioskAudioBlocked("completion-speech-error", e);
+    }
+  }
+
+  function speakCompletionKiosk(text){
+    const msg = String(text || "").trim();
+    if(!msg) return Promise.resolve();
+
+    _completionSpeechQueue = _completionSpeechQueue
+      .catch(() => {})
+      .then(() => _runCompletionSpeechKiosk(msg));
+
+    return _completionSpeechQueue;
+  }
+
   const ANNOUNCE_TEMPLATES = {
     completed: [
       "Operazione completata. Registrati {QTY} pezzi: {LABEL}.",
@@ -5253,13 +5355,15 @@ unmarkProducedCloud(it.key).then(() => {
       if(firstSnap){
         snap.forEach(d => {
           const v = d.data() || {};
+          const initToken = completionSpeechTokenFromDoc(d.id, v);
           if(v?.announceClientMs){
             PLAYED_ANNOUNCEMENTS.add(d.id + "@" + v.announceClientMs);
           }
+          PLAYED_ANNOUNCEMENTS.add(initToken);
           try{
-            REMOTE_COMPLETION_SPOKEN.add(d.id);
-            const initCompletionKey = String(v?.key || d.id || "");
-            REMOTE_COMPLETION_SPOKEN.add(d.id + "|" + initCompletionKey);
+            // Prima fotografia: non annunciare completamenti già presenti, ma non bloccare
+            // una futura nuova chiusura della stessa riga con timestamp diverso.
+            REMOTE_COMPLETION_SPOKEN.add(initToken);
           }catch(_){ }
         });
         firstSnap = false;
@@ -5273,25 +5377,30 @@ unmarkProducedCloud(it.key).then(() => {
             if(PLAYED_ANNOUNCEMENTS.has(token)) continue;
 
             const completionKey = String(v?.key || ch.doc.id || "");
-            const wasAlreadyProduced = !!(completionKey && producedCloud.has(completionKey));
             const isOwnCompletion = completionFromThisDevice(v);
-            const remoteToken = ch.doc.id + "|" + completionKey;
+            const remoteToken = completionSpeechTokenFromDoc(ch.doc.id, v);
 
-            if(completionKey && !wasAlreadyProduced && !isOwnCompletion && !REMOTE_COMPLETION_SPOKEN.has(remoteToken)){
+            // KIOSK FIX:
+            // non dipendere dalla mappa producedCloud già popolata né dal ramo announceText.
+            // Se un completamento arriva dal cloud con timestamp nuovo, il tabellone lo annuncia.
+            if(completionKey && !isOwnCompletion && !REMOTE_COMPLETION_SPOKEN.has(remoteToken)){
               PLAYED_ANNOUNCEMENTS.add(token);
+              PLAYED_ANNOUNCEMENTS.add(remoteToken);
               REMOTE_COMPLETION_SPOKEN.add(remoteToken);
               try{ _audioUnlocked = true; }catch(_){ }
-              speak(buildRemoteCompletionSpeech(v, ch.doc.id));
+              speakCompletionKiosk(buildRemoteCompletionSpeech(v, ch.doc.id));
               continue;
             }
 
             if(!v?.announceText) continue;
-            if(IS_MOBILE) { PLAYED_ANNOUNCEMENTS.add(token); continue; }
             if(isOwnCompletion) { PLAYED_ANNOUNCEMENTS.add(token); continue; }
+            if(PLAYED_ANNOUNCEMENTS.has(remoteToken)) continue;
 
             PLAYED_ANNOUNCEMENTS.add(token);
+            PLAYED_ANNOUNCEMENTS.add(remoteToken);
+            REMOTE_COMPLETION_SPOKEN.add(remoteToken);
             try{ _audioUnlocked = true; }catch(_){ }
-            speak(buildRemoteCompletionSpeech(v, ch.doc.id));
+            speakCompletionKiosk(buildRemoteCompletionSpeech(v, ch.doc.id));
           }
         }catch(e){
           console.log("announce handler error:", e);
@@ -5712,7 +5821,7 @@ try{
         applyForcedStatuses();
       }catch(_){}
 
-      if(!IS_MOBILE) speak(msg);
+      if(!IS_MOBILE) speakCompletionKiosk(msg);
     }catch(e){
       console.log("Firestore write error:", e);
     }finally{
