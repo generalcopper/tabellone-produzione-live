@@ -7250,7 +7250,7 @@ function closeSheet(kind){
         return `<div class="movesHint">Errore lettura combo: ${escapeHtml(state.combo.error)}</div>`;
       }
       if(!children.length){
-        return `<div class="movesHint">Nessun prodotto combo collegato. Quando configuri una combo, gli SKU collegati vengono scaricati in cloud quando la madre viene scaricata.</div>`;
+        return `<div class="movesHint">Nessun prodotto combo collegato. I PDF scaricano solo lo SKU padre; i figli combo vengono scalati solo quando arriva un carico padre dal Tabellone WRITE / app esterne.</div>`;
       }
       const rows = children.map(c=>{
         const info = getItemBySkuAny(c.sku, state.route.loc || "");
@@ -7315,7 +7315,7 @@ function closeSheet(kind){
 
       hint.innerHTML = state.combo?.error
         ? `Errore lettura cloud: <b>${escapeHtml(state.combo.error)}</b>`
-        : `Aggiunti: <b>${draft.length}/3</b>. Ogni prodotto aggiunto vale sempre <b>1 pz</b> per tipo.`;
+        : `Aggiunti: <b>${draft.length}/3</b>. Ogni prodotto aggiunto vale <b>1 pz</b> per tipo; lo scarico automatico figli avviene solo sui carichi padre da Tabellone WRITE / app esterne.`;
 
       if(!draft.length){
         selected.innerHTML = `<div class="hint">Nessun prodotto aggiunto alla combo.</div>`;
@@ -9352,30 +9352,16 @@ async function applyFlow(kind){
 
       if(!plans.length) return showToast("Nessuna riga valida","");
 
-      // Combo cloud: sugli scarichi del prodotto madre, scala automaticamente gli SKU collegati.
-      if(kind === "scarica"){
-        for(const p of plans){
-          p.comboMap = await fetchComboChildrenMap(p.aggregated.map(x=>x.sku));
-          const parentDeltas = p.aggregated.map(x=>({
-            sku: x.sku,
-            title: x.title || "",
-            loc: p.loc,
-            qtySigned: -Math.abs(parseQty(x.qty) || 0)
-          }));
-          const comboEffects = buildComboEffectsFromDeltas(parentDeltas, p.comboMap, {
-            source: "flusso_pdf",
-            note: "Scarico combo da flusso",
-            flowKind: kind,
-            flowId: p.flowDocId || wfId || "",
-            flowName: wfLabel || flow.file?.name || "",
-            createdAtClient: tsClient
-          });
-          p.comboLines = serializeComboLines(comboEffects);
-          p.comboTotalPieces = p.comboLines.reduce((a,x)=> a + Math.abs(Number(x.qtySigned || 0)), 0);
-        }
+      // Regola combo PDF: lo scarico inventario da PDF deve scaricare SOLO lo SKU padre.
+      // I figli combo restano intatti qui; lo scarico automatico figli rimane attivo solo per carichi esterni
+      // del padre provenienti dal Tabellone WRITE / app esterne.
+      for(const p of plans){
+        p.comboMap = null;
+        p.comboLines = [];
+        p.comboTotalPieces = 0;
       }
 
-      const CHUNK = 60; // 2 scritture per riga + fino a 3 combo (max sicurezza batch < 500)
+      const CHUNK = 220; // 2 scritture per riga (inventario + movimento prodotto). Nessuno scarico combo da PDF.
       const planChunks = plans.map(p=>{
         const chunks = [];
         for(let i=0;i<p.aggregated.length;i+=CHUNK){
@@ -9472,30 +9458,7 @@ async function applyFlow(kind){
               });
             }
 
-            if(kind === "scarica" && p.comboMap){
-              const parentDeltas = part.map(x=>({
-                sku: x.sku,
-                title: x.title || "",
-                loc: p.loc,
-                qtySigned: -Math.abs(parseQty(x.qty) || 0)
-              }));
-              const comboEffects = buildComboEffectsFromDeltas(parentDeltas, p.comboMap, {
-                source: "flusso_pdf",
-                note: "Scarico combo da flusso",
-                flowKind: kind,
-                flowId: p.flowDocId || wfId || "",
-                flowName: wfLabel || flow.file?.name || "",
-                createdAtClient: tsClient
-              });
-              writeComboEffectsToBatch(batch, api, db, comboEffects, {
-                source: "flusso_pdf",
-                note: "Scarico combo da flusso",
-                flowKind: kind,
-                flowId: p.flowDocId || wfId || "",
-                flowName: wfLabel || flow.file?.name || "",
-                createdAtClient: tsClient
-              });
-            }
+            // Non scrivere effetti combo per scarichi PDF: il padre viene scaricato, i figli non vengono toccati.
 
             await batch.commit();
             p.committedBatches++;
