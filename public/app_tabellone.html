@@ -2741,7 +2741,7 @@ body:before{
         <div class="subtitle">
           <span class="chip live"><span class="liveDot"></span>LIVE</span>
           <span class="chip">Aggiornamento: 60s</span>
-          <span class="chip">Versione: 2026-05-28 ANNUNCIO PREMIUM</span>
+          <span class="chip">Versione: 2026-06-12 VOCE FEMMINILE NATURALE</span>
         </div>
       </div>
     </div>
@@ -3313,84 +3313,322 @@ async function playCue(kind){
 
 
 
-    // ===== Google AI Voice (Web Speech API / Chrome "Google" voices) =====
-  let _googleVoice = null;
+    // ===== Kiosk Natural Female Voice =====
+  // Priorità voce:
+  // 1) endpoint cloud TTS premium, se disponibile;
+  // 2) voce italiana femminile/natural del browser (Edge/Chrome/macOS);
+  // 3) fallback italiano generico, senza bloccare l'automatismo kiosk.
+  const KIOSK_TTS_PREMIUM_ENABLED = true;
+  const KIOSK_TTS_FETCH_TIMEOUT_MS = 4500;
+  const KIOSK_TTS_FALLBACK_COOLDOWN_MS = 30000;
+  const KIOSK_TTS_BROWSER_RATE = 0.90;
+  const KIOSK_TTS_BROWSER_PITCH = 1.08;
 
-  function _pickGoogleVoice(){
+  let _googleVoice = null;
+  let _femaleVoice = null;
+  let _premiumTTSDisabledUntil = 0;
+
+  function _voiceNorm(s){
+    return String(s || "").toLowerCase();
+  }
+
+  function _scoreKioskFemaleVoice(v){
+    if(!v) return -9999;
+    const name = _voiceNorm(v.name);
+    const lang = _voiceNorm(v.lang);
+    let score = 0;
+
+    if(lang === "it-it") score += 1000;
+    else if(lang.startsWith("it")) score += 850;
+
+    // Voci femminili italiane comuni su Edge/Windows, Chrome, macOS/iOS.
+    if(/elsa|isabella|silvia|alice|lucia|federica|bianca|carla|francesca|paola|giorgia|giulia|elsa multilingual|it-it-female/i.test(name)) score += 420;
+
+    // Voci naturali/neural/online sono molto meno robotiche.
+    if(/natural|neural|online|multilingual|premium/i.test(name)) score += 180;
+    if(/microsoft|google|apple/i.test(name)) score += 65;
+    if(v.localService === false) score += 35;
+
+    // Penalizza nomi maschili italiani comuni.
+    if(/cosimo|diego|luca|giorgio|marco|male|uomo|maschio/i.test(name)) score -= 520;
+
+    return score;
+  }
+
+  function _pickFemaleVoice(){
     try{
       if(!("speechSynthesis" in window)) return null;
       const voices = window.speechSynthesis.getVoices() || [];
       if(!voices.length) return null;
 
-      const norm = (s)=> String(s||"").toLowerCase();
-      const isIt = (v)=> norm(v.lang).startsWith("it");
-      const isGoogle = (v)=> norm(v.name).includes("google");
+      const sorted = voices
+        .slice()
+        .sort((a,b) => _scoreKioskFemaleVoice(b) - _scoreKioskFemaleVoice(a));
 
-      // Prefer: Google Italian -> any Italian -> Google any -> first available
-      return voices.find(v => isIt(v) && isGoogle(v))
-          || voices.find(v => isIt(v))
-          || voices.find(v => isGoogle(v))
+      const best = sorted[0] || null;
+      if(best && _scoreKioskFemaleVoice(best) > 0) return best;
+
+      const norm = _voiceNorm;
+      return voices.find(v => norm(v.lang) === "it-it")
+          || voices.find(v => norm(v.lang).startsWith("it"))
+          || voices.find(v => /female|woman|donna|elsa|isabella|alice/i.test(norm(v.name)))
           || voices[0];
     }catch(_){
       return null;
     }
   }
 
-  function _ensureGoogleVoice(){
-    if(_googleVoice) return;
-    _googleVoice = _pickGoogleVoice();
+  // Compatibilità: altre parti del file chiamano ancora _ensureGoogleVoice().
+  function _pickGoogleVoice(){
+    return _pickFemaleVoice();
   }
 
-  // Voices are often loaded asynchronously
-  if("speechSynthesis" in window){
-    try{ _googleVoice = _pickGoogleVoice(); }catch(_){}
+  function _ensureGoogleVoice(){
+    if(!_femaleVoice) _femaleVoice = _pickFemaleVoice();
+    _googleVoice = _femaleVoice;
+  }
+
+  function _refreshFemaleVoice(){
     try{
-      window.speechSynthesis.onvoiceschanged = () => { try{ _googleVoice = _pickGoogleVoice(); }catch(_){ } };
-    }catch(_){}
-    setTimeout(() => { try{ _googleVoice = _pickGoogleVoice(); }catch(_){ } }, 0);
+      _femaleVoice = _pickFemaleVoice();
+      _googleVoice = _femaleVoice;
+      if(_femaleVoice){
+        console.log("Kiosk voice selected:", _femaleVoice.name, _femaleVoice.lang);
+      }
+    }catch(_){ }
+  }
+
+  if("speechSynthesis" in window){
+    try{ _refreshFemaleVoice(); }catch(_){ }
+    try{
+      window.speechSynthesis.onvoiceschanged = () => { try{ _refreshFemaleVoice(); }catch(_){ } };
+    }catch(_){ }
+    setTimeout(() => { try{ _refreshFemaleVoice(); }catch(_){ } }, 0);
+    setTimeout(() => { try{ _refreshFemaleVoice(); }catch(_){ } }, 900);
+  }
+
+  function _makeFemaleUtterance(text){
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = "it-IT";
+    u.rate = KIOSK_TTS_BROWSER_RATE;
+    u.pitch = KIOSK_TTS_BROWSER_PITCH;
+    u.volume = 1;
+    _ensureGoogleVoice();
+    if(_femaleVoice) u.voice = _femaleVoice;
+    return u;
+  }
+
+  function _jsonToAudioUrl(data){
+    if(!data || typeof data !== "object") return "";
+    const direct = data.audioUrl || data.url || data.downloadUrl || data.dataUrl;
+    if(direct) return String(direct);
+
+    const b64 = data.audioBase64 || data.audioContent || data.base64;
+    if(b64){
+      const mime = data.mimeType || data.contentType || "audio/mpeg";
+      return `data:${mime};base64,${String(b64)}`;
+    }
+    return "";
+  }
+
+  async function _playAudioUrlNaturalFemale(audioUrl, opts){
+    if(!audioUrl) return false;
+
+    if(!_ttsAudio) _ttsAudio = new Audio();
+    _ttsAudio.preload = "auto";
+    _ttsAudio.autoplay = true;
+    _ttsAudio.volume = 1;
+    _ttsAudio.src = audioUrl;
+
+    return await new Promise((resolve, reject) => {
+      let done = false;
+      const hardTimer = setTimeout(() => finish(false, new Error("premium-audio-timeout")), 90000);
+
+      const cleanup = () => {
+        try{ clearTimeout(hardTimer); }catch(_){ }
+        try{ _ttsAudio.onended = null; _ttsAudio.onerror = null; _ttsAudio.onabort = null; }catch(_){ }
+      };
+
+      const finish = (ok, err) => {
+        if(done) return;
+        done = true;
+        cleanup();
+        if(ok){
+          try{ opts?.onend?.(); }catch(_){ }
+          resolve(true);
+        }else{
+          try{ opts?.onerror?.(err); }catch(_){ }
+          reject(err || new Error("premium-audio-error"));
+        }
+      };
+
+      _ttsAudio.onended = () => finish(true);
+      _ttsAudio.onerror = (ev) => finish(false, ev?.error || ev || new Error("premium-audio-error"));
+      _ttsAudio.onabort = (ev) => finish(false, ev?.error || ev || new Error("premium-audio-abort"));
+
+      try{
+        const playPromise = _ttsAudio.play();
+        if(playPromise && typeof playPromise.catch === "function"){
+          playPromise.catch(err => finish(false, err));
+        }
+      }catch(e){
+        finish(false, e);
+      }
+    });
+  }
+
+  async function _tryPremiumCloudFemaleTTS(text, opts){
+    const msg = String(text || "").trim();
+    if(!msg || !KIOSK_TTS_PREMIUM_ENABLED || !TTS_ELEVEN_PROXY_URL) return false;
+    if(Date.now() < _premiumTTSDisabledUntil) return false;
+
+    let timeout = null;
+    let objectUrl = "";
+
+    try{
+      _ttsAbort = new AbortController();
+      timeout = setTimeout(() => {
+        try{ _ttsAbort?.abort(); }catch(_){ }
+      }, KIOSK_TTS_FETCH_TIMEOUT_MS);
+
+      const res = await fetch(TTS_ELEVEN_PROXY_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          text: msg,
+          language: "it-IT",
+          lang: "it-IT",
+          voice: "female",
+          voiceGender: "female",
+          style: "natural",
+          source: "kiosk_tabellone"
+        }),
+        signal: _ttsAbort.signal,
+        cache: "no-store"
+      });
+
+      try{ clearTimeout(timeout); }catch(_){ }
+      timeout = null;
+
+      if(!res.ok) throw new Error("premium-tts-http-" + res.status);
+
+      const ct = String(res.headers.get("content-type") || "").toLowerCase();
+      let audioUrl = "";
+
+      if(ct.includes("application/json")){
+        const data = await res.json();
+        audioUrl = _jsonToAudioUrl(data);
+      }else{
+        const blob = await res.blob();
+        if(!blob || !blob.size) throw new Error("premium-tts-empty-audio");
+        objectUrl = URL.createObjectURL(blob);
+        audioUrl = objectUrl;
+        _ttsLastUrl = objectUrl;
+      }
+
+      if(!audioUrl) throw new Error("premium-tts-missing-audio-url");
+      await _playAudioUrlNaturalFemale(audioUrl, opts);
+      return true;
+    }catch(e){
+      console.log("Premium female TTS fallback:", e);
+      _premiumTTSDisabledUntil = Date.now() + KIOSK_TTS_FALLBACK_COOLDOWN_MS;
+      return false;
+    }finally{
+      try{ clearTimeout(timeout); }catch(_){ }
+      _ttsAbort = null;
+      if(objectUrl){
+        try{ URL.revokeObjectURL(objectUrl); }catch(_){ }
+        if(_ttsLastUrl === objectUrl) _ttsLastUrl = null;
+      }
+    }
+  }
+
+  async function _speakBrowserFemale(text, opts={}){
+    const msg = String(text || "").trim();
+    if(!msg || !("speechSynthesis" in window)) return false;
+
+    await new Promise((resolve) => {
+      let done = false;
+      let keepAliveTimer = null;
+      let hardTimer = null;
+
+      const finish = (ev) => {
+        if(done) return;
+        done = true;
+        try{ clearInterval(keepAliveTimer); }catch(_){ }
+        try{ clearTimeout(hardTimer); }catch(_){ }
+        if(ev?.error){
+          try{ opts?.onerror?.(ev); }catch(_){ }
+        }else{
+          try{ opts?.onend?.(); }catch(_){ }
+        }
+        resolve(true);
+      };
+
+      try{ window.speechSynthesis.cancel(); }catch(_){ }
+
+      const u = _makeFemaleUtterance(msg);
+      u.onend = finish;
+      u.onerror = finish;
+
+      if(opts.keepAlive){
+        keepAliveTimer = setInterval(() => {
+          try{ window.speechSynthesis.resume(); }catch(_){ }
+        }, 700);
+      }
+
+      hardTimer = setTimeout(() => finish({ error:"browser-tts-hard-timeout" }), Math.max(9000, msg.length * 170));
+
+      setTimeout(() => {
+        try{
+          window.speechSynthesis.resume();
+          window.speechSynthesis.speak(u);
+        }catch(e){
+          finish({ error:e });
+        }
+      }, Number.isFinite(opts.delayMs) ? opts.delayMs : 60);
+    });
+
+    return true;
+  }
+
+  async function speakNaturalFemale(text, opts={}){
+    const msg = String(text || "").trim();
+    if(!msg) return false;
+
+    // Prima prova il TTS cloud naturale; se non risponde, resta automatico con voce femminile browser.
+    const premiumOk = await _tryPremiumCloudFemaleTTS(msg, opts);
+    if(premiumOk) return true;
+
+    return await _speakBrowserFemale(msg, opts);
   }
 
   async function speak(text){
     const msg = String(text || "").trim();
     if(!msg) return;
 
-    // Guard: evita messaggi enormi (che spesso arrivano da concatenazioni/HTML/JSON per errore)
     const safeMsg = (msg.length > 520) ? (msg.slice(0, 520).trim() + "…") : msg;
 
-    // cue inizio annuncio
-    try{ await playCue("start"); }catch(_){}
-
-    // Stop eventuali TTS/Audio precedenti
-    try{ stopTTS(); }catch(_){}
-    try{ if("speechSynthesis" in window) window.speechSynthesis.cancel(); }catch(_){}
+    try{ await playCue("start"); }catch(_){ }
+    try{ stopTTS(); }catch(_){ }
+    try{ if("speechSynthesis" in window) window.speechSynthesis.cancel(); }catch(_){ }
 
     try{
-      if(!("speechSynthesis" in window)) return;
-
-      _ensureGoogleVoice();
-
-      const u = new SpeechSynthesisUtterance(safeMsg);
-      u.lang = "it-IT";
-      u.rate = 0.92;
-      u.pitch = 0.95;
-
-      if(_googleVoice) u.voice = _googleVoice;
-
-      // cue fine annuncio
-      u.onend = () => { try{ playCue("end"); }catch(_){ } };
-      u.onerror = (ev) => {
-        try{ playCue("end"); }catch(_){ }
-        const err = (ev && ev.error) ? String(ev.error) : "";
-        const autoplayBlocked = /not-allowed|gesture|autoplay/i.test(err);
-        if(autoplayBlocked){
-          noteKioskAudioBlocked("speech", err);
-          scheduleTTSRetry(safeMsg);
+      const ok = await speakNaturalFemale(safeMsg, {
+        onend: () => { try{ playCue("end"); }catch(_){ } },
+        onerror: (ev) => {
+          try{ playCue("end"); }catch(_){ }
+          const err = (ev && ev.error) ? String(ev.error) : String(ev || "");
+          const autoplayBlocked = /not-allowed|gesture|autoplay/i.test(err);
+          if(autoplayBlocked){
+            noteKioskAudioBlocked("speech", err);
+            scheduleTTSRetry(safeMsg);
+          }
         }
-      };
-
-      window.speechSynthesis.speak(u);
+      });
+      if(!ok) try{ playCue("end"); }catch(_){ }
     }catch(e){
-      console.log("TTS (Google/WebSpeech) error:", e);
+      console.log("TTS female/natural error:", e);
       try{ playCue("end"); }catch(_){ }
     }
   }
@@ -3813,20 +4051,15 @@ async function playCue(kind){
     try{ if("speechSynthesis" in window) window.speechSynthesis.cancel(); }catch(_){ }
 
     try{
-      if(!("speechSynthesis" in window)) return;
-      _ensureGoogleVoice();
-
-      const u = new SpeechSynthesisUtterance(safeMsg);
-      u.lang = "it-IT";
-      u.rate = 0.92;
-      u.pitch = 0.95;
-      u.volume = 1;
-      if(_googleVoice) u.voice = _googleVoice;
-      u.onend = () => { try{ setTimeout(hideShiftAlarmOverlay, 2600); }catch(_){ } };
-      u.onerror = (ev) => { try{ setTimeout(hideShiftAlarmOverlay, 4200); }catch(_){ } noteKioskAudioBlocked("shift-speech", ev?.error || ev); };
-      window.speechSynthesis.speak(u);
+      await speakNaturalFemale(safeMsg, {
+        onend: () => { try{ setTimeout(hideShiftAlarmOverlay, 2600); }catch(_){ } },
+        onerror: (ev) => {
+          try{ setTimeout(hideShiftAlarmOverlay, 4200); }catch(_){ }
+          noteKioskAudioBlocked("shift-speech", ev?.error || ev);
+        }
+      });
     }catch(e){
-      console.log("Shift alarm TTS error:", e);
+      console.log("Shift alarm female TTS error:", e);
     }
   }
 
@@ -3868,55 +4101,21 @@ async function playCue(kind){
     try{ await _unlockAudioOnce(); }catch(_){}
     try{ primeKioskSpeechSynthesis(); }catch(_){}
     try{ playCue("start"); }catch(_){}
+    try{ stopTTS(); }catch(_){}
+    try{ if("speechSynthesis" in window) window.speechSynthesis.cancel(); }catch(_){}
 
     try{
-      if(!("speechSynthesis" in window)) return;
-      _ensureGoogleVoice();
-
-      await new Promise((resolve) => {
-        let done = false;
-        let keepAliveTimer = null;
-        let hardTimer = null;
-
-        const finish = (ev) => {
-          if(done) return;
-          done = true;
-          try{ clearInterval(keepAliveTimer); }catch(_){}
-          try{ clearTimeout(hardTimer); }catch(_){}
+      await speakNaturalFemale(safeMsg, {
+        keepAlive: true,
+        delayMs: 80,
+        onend: () => { try{ playCue("end"); }catch(_){} },
+        onerror: (ev) => {
           try{ playCue("end"); }catch(_){}
-          if(ev?.error) noteKioskAudioBlocked("completion-speech", ev.error);
-          resolve();
-        };
-
-        try{ window.speechSynthesis.cancel(); }catch(_){}
-
-        const u = new SpeechSynthesisUtterance(safeMsg);
-        u.lang = "it-IT";
-        u.rate = 0.92;
-        u.pitch = 0.95;
-        u.volume = 1;
-        if(_googleVoice) u.voice = _googleVoice;
-        u.onend = finish;
-        u.onerror = finish;
-
-        keepAliveTimer = setInterval(() => {
-          try{ window.speechSynthesis.resume(); }catch(_){}
-        }, 700);
-
-        hardTimer = setTimeout(finish, Math.max(9000, safeMsg.length * 170));
-
-        setTimeout(() => {
-          try{
-            window.speechSynthesis.resume();
-            window.speechSynthesis.speak(u);
-          }catch(e){
-            noteKioskAudioBlocked("completion-speech-start", e);
-            finish();
-          }
-        }, 80);
+          noteKioskAudioBlocked("completion-speech", ev?.error || ev);
+        }
       });
     }catch(e){
-      console.log("Completion kiosk TTS error:", e);
+      console.log("Completion kiosk female TTS error:", e);
       noteKioskAudioBlocked("completion-speech-error", e);
     }
   }
@@ -6515,7 +6714,7 @@ doneShareEl?.addEventListener("click", async (ev) => {
 
 
 
-  function dbg(msg){ debugEl.textContent = msg + "   |   BUILD: 2026-05-28 LOGISTICA 4.0"; }
+  function dbg(msg){ debugEl.textContent = msg + "   |   BUILD: 2026-06-12 VOCE FEMMINILE NATURALE"; }
 
   function stableHash(items){
     return (Array.isArray(items) ? items : []).map((j)=>{
