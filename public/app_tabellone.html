@@ -4167,18 +4167,13 @@ async function playCue(kind){
   }
 
   function buildAnnouncement({ qty, label, nextLabel }){
-    const QTY = String(qty);
-    const LABEL = String(label || "").trim();
-    const NEXT = String(nextLabel || "").trim();
+    const QTY = String(qty || "").trim() || "0";
+    const LABEL = cleanVoiceProductLabel(label) || "riga selezionata";
+    const NEXT = cleanVoiceProductLabel(nextLabel);
 
-    let base = _pick(ANNOUNCE_TEMPLATES.completed)
-      .replaceAll("{QTY}", QTY)
-      .replaceAll("{LABEL}", LABEL || "riga selezionata");
-
+    const base = `Completati ${QTY} pezzi di ${LABEL}.`;
     if(NEXT){
-      const nx = _pick(ANNOUNCE_TEMPLATES.next).replaceAll("{NEXT}", NEXT);
-      const end = _pick(ANNOUNCE_TEMPLATES.close);
-      return `${base} ${nx} ${end}`.replace(/\s+/g," ").trim();
+      return `${base} Prossimo prodotto: ${NEXT}.`.replace(/\s+/g," ").trim();
     }else{
       const tail = _pick(ANNOUNCE_TEMPLATES.noNext) || _pick(ANNOUNCE_TEMPLATES.close);
       return `${base} ${tail}`.replace(/\s+/g," ").trim();
@@ -5372,6 +5367,37 @@ const BUCKET = "linea_liquidi";
     return cleanAmazonDisplayText(value) || "—";
   }
 
+  function cleanVoiceProductLabel(value){
+    let s = cleanAmazonDisplayText(value);
+    if(!s) return "";
+
+    // Solo per la voce: taglia codici e dettagli marketplace, senza cambiare testo a schermo o logiche kiosk.
+    s = s.replace(/\s*\b(?:SKU|ASIN|FNSKU|MSKU|EAN|UPC|GTIN)\b\s*[:#]?\s*.*$/i, " ");
+    s = s.replace(/\s*\b(?:Codice\s+a\s+barre|Codice|Barcode)\b\s*[:#]?\s*.*$/i, " ");
+    s = s.replace(/\s+/g, " ").trim();
+
+    const sizeRe = /\b\d+(?:[,.]\d+)?\s*(?:ml|mL|l|L|lt|litri?|kg|g|gr|mg|pz|pezzi|capsule|compresse)\b/i;
+    const parts = s.split(/\s*(?:[–—]|[|•·])\s*|\s+-\s+/).map(p => p.trim()).filter(Boolean);
+
+    if(parts.length > 1){
+      const keep = [];
+      for(const part of parts){
+        if(/\b(?:SKU|ASIN|FNSKU|MSKU|EAN|UPC|GTIN)\b/i.test(part)) break;
+        keep.push(part);
+
+        const joined = keep.join(" ").trim();
+        if(sizeRe.test(joined)) break;
+        if(keep.length >= 2 && joined.length > 65) break;
+      }
+      if(keep.length) s = keep.join(" ");
+    }
+
+    s = s.replace(/\s+/g, " ").trim();
+    s = s.replace(/\s+([.,;:])/g, "$1").trim();
+    s = s.replace(/(?:\s*[•|·\-–—,:;]+\s*)+$/g, "").trim();
+    return s || "";
+  }
+
   function displayQtyText(job){
     const q = (job && job.qty != null) ? String(job.qty).trim() : "";
     const u = (job && job.unit != null) ? String(job.unit).trim() : "";
@@ -5532,10 +5558,10 @@ unmarkProducedCloud(it.key).then(() => {
     try{
       const product = cleanAmazonDisplayText(v?.job?.product || v?.product || v?.finishedProductName || "");
       const rawLabel = String(product || v?.label || findJobLabelForCompletion(v?.key || docId) || v?.key || docId || "Riga").trim();
-      const label = cleanAmazonDisplayLabel(rawLabel);
+      const label = cleanVoiceProductLabel(rawLabel) || "riga selezionata";
       const qtyRaw = (v?.qty ?? v?.quantity ?? v?.pezzi ?? v?.job?.qty ?? "");
       const qty = String(qtyRaw).trim();
-      if(qty) return `${label} completati ${qty} pezzi.`.replace(/\s+/g, " ");
+      if(qty) return `Completati ${qty} pezzi di ${label}.`.replace(/\s+/g, " ");
       return `${label}. completato.`.replace(/\s+/g, " ");
     }catch(_){
       return "Produzione completata.";
