@@ -4095,19 +4095,23 @@ async function playCue(kind){
     const msg = String(text || "").trim();
     if(!msg) return;
 
-    const safeMsg = (msg.length > 520) ? (msg.slice(0, 520).trim() + "…") : msg;
+    const safeMsg = cleanCompletionSpeechText(msg);
+    if(!safeMsg) return;
 
     try{ _audioUnlocked = true; }catch(_){}
     try{ await _unlockAudioOnce(); }catch(_){}
     try{ primeKioskSpeechSynthesis(); }catch(_){}
-    try{ playCue("start"); }catch(_){}
     try{ stopTTS(); }catch(_){}
     try{ if("speechSynthesis" in window) window.speechSynthesis.cancel(); }catch(_){}
+    try{ playCue("start"); }catch(_){}
+
+    // Piccolo buffer dopo il cue: evita che il jingle copra o tagli l'inizio frase su Edge/kiosk.
+    try{ await new Promise(resolve => setTimeout(resolve, 260)); }catch(_){}
 
     try{
       await speakNaturalFemale(safeMsg, {
         keepAlive: true,
-        delayMs: 80,
+        delayMs: 120,
         onend: () => { try{ playCue("end"); }catch(_){} },
         onerror: (ev) => {
           try{ playCue("end"); }catch(_){}
@@ -5371,7 +5375,7 @@ const BUCKET = "linea_liquidi";
     let s = cleanAmazonDisplayText(value);
     if(!s) return "";
 
-    // Solo per la voce: taglia codici e dettagli marketplace, senza cambiare testo a schermo o logiche kiosk.
+    // Solo voce: taglia codici e dettagli marketplace. UI e logiche kiosk restano invariate.
     s = s.replace(/\s*\b(?:SKU|ASIN|FNSKU|MSKU|EAN|UPC|GTIN)\b\s*[:#]?\s*.*$/i, " ");
     s = s.replace(/\s*\b(?:Codice\s+a\s+barre|Codice|Barcode)\b\s*[:#]?\s*.*$/i, " ");
     s = s.replace(/\s+/g, " ").trim();
@@ -5395,7 +5399,37 @@ const BUCKET = "linea_liquidi";
     s = s.replace(/\s+/g, " ").trim();
     s = s.replace(/\s+([.,;:])/g, "$1").trim();
     s = s.replace(/(?:\s*[•|·\-–—,:;]+\s*)+$/g, "").trim();
+
+    // Riduce il rischio che il TTS tronchi la frase su nomi ancora lunghi.
+    const maxVoiceLen = 88;
+    if(s.length > maxVoiceLen){
+      const cut = s.slice(0, maxVoiceLen).trim();
+      const lastSpace = cut.lastIndexOf(" ");
+      s = (lastSpace > 45 ? cut.slice(0, lastSpace) : cut).trim();
+      s = s.replace(/(?:\s*[•|·\-–—,:;]+\s*)+$/g, "").trim();
+    }
+
     return s || "";
+  }
+
+  function cleanCompletionSpeechText(value){
+    let s = String(value || "").trim();
+    if(!s) return "";
+
+    // Se arriva una frase già generata dal cloud, la ricostruiamo in forma stabile e breve.
+    const m = s.match(/^\s*Completati\s+(.+?)\s+pezzi\s+di\s+([^.]*)\.\s*(?:Prossimo\s+prodotto\s*:\s*([^.]*)\.)?/i);
+    if(m){
+      return buildAnnouncement({
+        qty: String(m[1] || "").trim(),
+        label: String(m[2] || "").trim(),
+        nextLabel: String(m[3] || "").trim()
+      });
+    }
+
+    // Fallback: rimuove comunque SKU/ASIN e limita lunghezza senza toccare UI/logiche.
+    s = s.replace(/\s*\b(?:SKU|ASIN|FNSKU|MSKU|EAN|UPC|GTIN)\b\s*[:#]?\s*[^.]*\.?/gi, " ");
+    s = s.replace(/\s+/g, " ").trim();
+    return (s.length > 260) ? (s.slice(0, 260).trim() + ".") : s;
   }
 
   function displayQtyText(job){
@@ -5554,14 +5588,37 @@ unmarkProducedCloud(it.key).then(() => {
     return "";
   }
 
+  function findNextLabelForCompletion(completedKey){
+    const completed = String(completedKey || "").trim();
+    try{
+      const jobs = Array.isArray(lastJobs) ? lastJobs : [];
+      for(let i=0;i<jobs.length;i++){
+        const k = makeKey(jobs[i], i);
+        if(completed && k === completed) continue;
+        if(producedCloud.has(k)) continue;
+        const label = displayJobLabel(jobs[i]);
+        if(label) return label;
+      }
+    }catch(_){ }
+    return "";
+  }
+
   function buildRemoteCompletionSpeech(v, docId){
     try{
+      // Usa prima l'annuncio completo salvato in cloud: così anche i kiosk remoti dicono completato + prossimo prodotto.
+      if(v?.announceText){
+        const full = cleanCompletionSpeechText(v.announceText);
+        if(full) return full;
+      }
+
       const product = cleanAmazonDisplayText(v?.job?.product || v?.product || v?.finishedProductName || "");
       const rawLabel = String(product || v?.label || findJobLabelForCompletion(v?.key || docId) || v?.key || docId || "Riga").trim();
       const label = cleanVoiceProductLabel(rawLabel) || "riga selezionata";
       const qtyRaw = (v?.qty ?? v?.quantity ?? v?.pezzi ?? v?.job?.qty ?? "");
       const qty = String(qtyRaw).trim();
-      if(qty) return `Completati ${qty} pezzi di ${label}.`.replace(/\s+/g, " ");
+      const nextLabel = findNextLabelForCompletion(v?.key || docId);
+
+      if(qty) return buildAnnouncement({ qty, label, nextLabel });
       return `${label}. completato.`.replace(/\s+/g, " ");
     }catch(_){
       return "Produzione completata.";
