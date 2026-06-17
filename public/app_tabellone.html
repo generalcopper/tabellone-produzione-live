@@ -3319,14 +3319,24 @@ async function playCue(kind){
   // 2) voce italiana femminile/natural del browser (Edge/Chrome/macOS);
   // 3) fallback italiano generico, senza bloccare l'automatismo kiosk.
   const KIOSK_TTS_PREMIUM_ENABLED = true;
-  const KIOSK_TTS_FETCH_TIMEOUT_MS = 4500;
-  const KIOSK_TTS_FALLBACK_COOLDOWN_MS = 30000;
+  // Più paziente col TTS premium: evita di passare troppo spesso alla voce browser/fallback.
+  const KIOSK_TTS_FETCH_TIMEOUT_MS = 8000;
+  const KIOSK_TTS_FALLBACK_COOLDOWN_MS = 6000;
+  const KIOSK_TTS_PREMIUM_RETRY_COUNT = 1;
+  const KIOSK_TTS_PREMIUM_RETRY_DELAY_MS = 650;
+  const KIOSK_TTS_BROWSER_FALLBACK_AFTER_FAILURES = 2;
   const KIOSK_TTS_BROWSER_RATE = 0.90;
   const KIOSK_TTS_BROWSER_PITCH = 1.08;
 
   let _googleVoice = null;
   let _femaleVoice = null;
   let _premiumTTSDisabledUntil = 0;
+  let _premiumTTSConsecutiveFailures = 0;
+  let _browserFallbackLastSpokenAt = 0;
+
+  function _waitMs(ms){
+    return new Promise(resolve => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
+  }
 
   function _voiceNorm(s){
     return String(s || "").toLowerCase();
@@ -3528,10 +3538,15 @@ async function playCue(kind){
 
       if(!audioUrl) throw new Error("premium-tts-missing-audio-url");
       await _playAudioUrlNaturalFemale(audioUrl, opts);
+      _premiumTTSConsecutiveFailures = 0;
+      _premiumTTSDisabledUntil = 0;
       return true;
     }catch(e){
-      console.log("Premium female TTS fallback:", e);
-      _premiumTTSDisabledUntil = Date.now() + KIOSK_TTS_FALLBACK_COOLDOWN_MS;
+      _premiumTTSConsecutiveFailures++;
+      console.log("Premium female TTS non disponibile, retry/fallback controllato:", e, "failures:", _premiumTTSConsecutiveFailures);
+      if(_premiumTTSConsecutiveFailures >= 4){
+        _premiumTTSDisabledUntil = Date.now() + KIOSK_TTS_FALLBACK_COOLDOWN_MS;
+      }
       return false;
     }finally{
       try{ clearTimeout(timeout); }catch(_){ }
@@ -3596,10 +3611,44 @@ async function playCue(kind){
     const msg = String(text || "").trim();
     if(!msg) return false;
 
-    // Prima prova il TTS cloud naturale; se non risponde, resta automatico con voce femminile browser.
-    const premiumOk = await _tryPremiumCloudFemaleTTS(msg, opts);
-    if(premiumOk) return true;
+    // Prima prova il TTS cloud naturale. Solo dopo retry/fallimenti reali passa alla voce browser.
+    const retryCount = Number.isFinite(Number(opts.premiumRetries))
+      ? Math.max(0, Number(opts.premiumRetries))
+      : KIOSK_TTS_PREMIUM_RETRY_COUNT;
 
+    for(let attempt = 0; attempt <= retryCount; attempt++){
+      const premiumOk = await _tryPremiumCloudFemaleTTS(msg, opts);
+      if(premiumOk) return true;
+
+      if(Date.now() < _premiumTTSDisabledUntil) break;
+      if(attempt < retryCount){
+        await _waitMs(KIOSK_TTS_PREMIUM_RETRY_DELAY_MS * (attempt + 1));
+      }
+    }
+
+    if(opts.allowBrowserFallback === false) return false;
+
+    const minFailures = Number.isFinite(Number(opts.browserFallbackAfterPremiumFailures))
+      ? Math.max(1, Number(opts.browserFallbackAfterPremiumFailures))
+      : KIOSK_TTS_BROWSER_FALLBACK_AFTER_FAILURES;
+
+    if(_premiumTTSConsecutiveFailures < minFailures){
+      console.log("Browser TTS fallback rimandato: attendo il TTS premium.");
+      try{ opts?.onerror?.({ error:"premium-tts-waiting" }); }catch(_){ }
+      return false;
+    }
+
+    const minInterval = Number.isFinite(Number(opts.browserFallbackMinIntervalMs))
+      ? Math.max(0, Number(opts.browserFallbackMinIntervalMs))
+      : 0;
+
+    if(minInterval > 0 && _browserFallbackLastSpokenAt && (Date.now() - _browserFallbackLastSpokenAt) < minInterval){
+      console.log("Browser TTS fallback limitato: voce fallback non ripetuta troppo spesso.");
+      try{ opts?.onerror?.({ error:"browser-fallback-limited" }); }catch(_){ }
+      return false;
+    }
+
+    _browserFallbackLastSpokenAt = Date.now();
     return await _speakBrowserFemale(msg, opts);
   }
 
@@ -4112,6 +4161,10 @@ async function playCue(kind){
       await speakNaturalFemale(safeMsg, {
         keepAlive: true,
         delayMs: 120,
+        // Completamenti: fallback browser meno insistente. Prima retry premium, poi fallback max ogni 2 minuti.
+        premiumRetries: 1,
+        browserFallbackAfterPremiumFailures: 2,
+        browserFallbackMinIntervalMs: 120000,
         onend: () => { try{ playCue("end"); }catch(_){} },
         onerror: (ev) => {
           try{ playCue("end"); }catch(_){}
@@ -5417,7 +5470,7 @@ const BUCKET = "linea_liquidi";
     if(!s) return "";
 
     // Se arriva una frase già generata dal cloud, la ricostruiamo in forma stabile e breve.
-    const m = s.match(/^\s*Completati\s+(.+?)\s+pezzi\s+di\s+([^.]*)\.\s*(?:Prossimo\s+prodotto\s*:\s*([^.]*)\.)?/i);
+    const m = s.match(/^\s*Completati\s+(.+?)\s+pezzi\s+di\s+(.+?)(?:\.\s*Prossimo\s+prodotto\s*:\s*(.+?))?(?:\.\s*)?$/i);
     if(m){
       return buildAnnouncement({
         qty: String(m[1] || "").trim(),
