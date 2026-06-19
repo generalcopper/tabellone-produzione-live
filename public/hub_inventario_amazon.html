@@ -1869,6 +1869,19 @@
             <div class="hint" id="homeLowStockMailLog" style="margin-top:6px; opacity:.85"></div>
 
           </div>
+
+          <!-- Prodotti da ubicare: arrivano da produzione / carichi cloud e non hanno ancora posti assegnati -->
+          <div class="miniCard" id="homeNoLocationBox">
+            <div class="miniTop">
+              <div>
+                <div class="miniTitle">Da ubicare</div>
+                <div class="miniSub">Prodotti caricati/prodotti senza ubicazione assegnata • cloud live</div>
+              </div>
+              <div class="pill" id="homeNoLocationCount">—</div>
+            </div>
+            <div class="gridTable" id="homeNoLocationList" style="margin-top:12px;"></div>
+            <div class="hint" id="homeNoLocationHint" style="margin-top:10px"></div>
+          </div>
 </div>
       </div>
     </div>
@@ -3085,6 +3098,8 @@ function guessTitleFromRaw(rawText, sku){
     const LOW_STOCK_5KG_SKUS = new Set(["q6-kwh6-owul"]); // esempio: Poltiglia 5kg
 
     // --- Ubicazioni scaffale (WMS): scrittura solo cloud, nessun salvataggio locale ---
+    const RACK_PALLET_CAPACITY = 480;
+
     function buildRackLocationOptions(){
       const out = [];
       const addBay = (rack, bay, pallets)=>{
@@ -3114,24 +3129,68 @@ function guessTitleFromRaw(rawText, sku){
     function normalizeRackLocation(v){
       return String(v || "").trim().toUpperCase().replace(/\s+/g, "");
     }
-    function isValidRackLocation(v){
-      const s = normalizeRackLocation(v);
-      return !s || RACK_LOCATION_SET.has(s);
+
+    function normalizeRackLocationsList(value){
+      const raw = Array.isArray(value) ? value : String(value || "").split(/[;,\n]+/g);
+      const out = [];
+      const seen = new Set();
+      for(const x of raw){
+        const code = normalizeRackLocation(x);
+        if(!code || seen.has(code)) continue;
+        seen.add(code);
+        out.push(code);
+      }
+      return out;
     }
+
+    function isPositiveStockDoc(d){
+      try{
+        if(!d || !Object.prototype.hasOwnProperty.call(d, "qty")) return true;
+        const q = Number.isFinite(Number(d.qty)) ? Number(d.qty) : parseSignedQtyStrict(d.qty);
+        return Number.isFinite(q) && q > 0;
+      }catch(_e){
+        return true;
+      }
+    }
+
+    function readRackLocationsFromDoc(d){
+      if(d && !isPositiveStockDoc(d)) return [];
+      const raw = (d && Object.prototype.hasOwnProperty.call(d, "rackLocations"))
+        ? d.rackLocations
+        : (d?.rackLocation || d?.shelfLocation || d?.storageSlot || d?.warehouseSlot || d?.ubicazione || "");
+      return normalizeRackLocationsList(raw);
+    }
+
+    function readRackLocationFromDoc(d){
+      return readRackLocationsFromDoc(d)[0] || "";
+    }
+
+    function rackLocationsLabel(value){
+      const list = normalizeRackLocationsList(value);
+      return list.length ? list.join(", ") : "—";
+    }
+
     function rackLocationLabel(v){
       const s = normalizeRackLocation(v);
       return s || "—";
     }
-    function readRackLocationFromDoc(d){
-      return normalizeRackLocation(
-        d?.rackLocation ||
-        d?.shelfLocation ||
-        d?.storageSlot ||
-        d?.warehouseSlot ||
-        d?.ubicazione ||
-        ""
-      );
+
+    function rackLocationDisplayFromItem(it){
+      return rackLocationsLabel(readRackLocationsFromDoc(it || {}));
     }
+
+    function rackLocationSearchText(it){
+      return readRackLocationsFromDoc(it || {}).join(" ");
+    }
+
+    function sanitizeRackLocationsForQty(value, qty){
+      const list = normalizeRackLocationsList(value);
+      const q = Number.isFinite(Number(qty)) ? Number(qty) : parseSignedQtyStrict(qty);
+      if(Number.isFinite(q) && q <= 0) return [];
+      if(Number.isFinite(q) && Math.abs(q) <= RACK_PALLET_CAPACITY) return list.slice(0, 1);
+      return list;
+    }
+
     function rackLocationOccupantInfo(code, currentSku="", currentLoc=""){
       const target = normalizeRackLocation(code);
       if(!target) return null;
@@ -3142,11 +3201,13 @@ function guessTitleFromRaw(rawText, sku){
       for(const loc of ["concamarise", "cerea"]){
         const items = (state.inventory?.[loc]?.items || []);
         for(const it of items){
-          const value = readRackLocationFromDoc(it || {});
-          if(value !== target) continue;
+          if(!isPositiveStockDoc(it || {})) continue;
+          const values = readRackLocationsFromDoc(it || {});
+          if(!values.includes(target)) continue;
 
           const itemSku = toSkuId(it?.sku || it?.id || "");
-          // La posizione già assegnata all’articolo aperto resta selezionabile.
+          // Tutte le ubicazioni già assegnate allo stesso articolo nello stesso magazzino
+          // restano selezionabili: sopra 480 pz lo SKU può occupare più posti.
           if(itemSku === curSku && loc === curLoc) continue;
 
           return { sku:itemSku, loc, title: it?.title || "" };
@@ -3162,40 +3223,67 @@ function guessTitleFromRaw(rawText, sku){
       return !rackLocationOccupantInfo(s, currentSku, currentLoc);
     }
 
-    function countAvailableRackLocations(currentSku="", currentLoc="", selected=""){
-      const sel = normalizeRackLocation(selected);
-      return RACK_LOCATION_OPTIONS.filter(code => code === sel || isRackLocationAvailableForItem(code, currentSku, currentLoc)).length;
+    function isValidRackLocation(v){
+      const s = normalizeRackLocation(v);
+      return !s || RACK_LOCATION_SET.has(s);
     }
 
-    function rackLocationSelectOptions(selected, currentSku="", currentLoc=""){
-      const sel = normalizeRackLocation(selected);
+    function isValidRackLocations(value){
+      const list = normalizeRackLocationsList(value);
+      return list.every(code => RACK_LOCATION_SET.has(code));
+    }
+
+    function areRackLocationsAvailableForItem(value, currentSku="", currentLoc=""){
+      const list = normalizeRackLocationsList(value);
+      return list.every(code => isRackLocationAvailableForItem(code, currentSku, currentLoc));
+    }
+
+    function countAvailableRackLocations(currentSku="", currentLoc="", selected=""){
+      const selectedSet = new Set(normalizeRackLocationsList(selected));
+      return RACK_LOCATION_OPTIONS.filter(code => selectedSet.has(code) || isRackLocationAvailableForItem(code, currentSku, currentLoc)).length;
+    }
+
+    function rackLocationSelectOptions(selected, currentSku="", currentLoc="", opts={}){
+      const selectedSet = new Set(normalizeRackLocationsList(selected));
       const groups = ["A","B","C","D","E","F"];
-      const opts = [`<option value=""${sel ? "" : " selected"}>Non assegnata</option>`];
+      const isMultiple = !!(opts && opts.multiple);
+      const out = isMultiple ? [] : [`<option value=""${selectedSet.size ? "" : " selected"}>Non assegnata</option>`];
       let visibleCount = 0;
 
       for(const g of groups){
         const codes = RACK_LOCATION_OPTIONS
           .filter(x=>x.startsWith(g))
-          .filter(code => code === sel || isRackLocationAvailableForItem(code, currentSku, currentLoc));
+          .filter(code => selectedSet.has(code) || isRackLocationAvailableForItem(code, currentSku, currentLoc));
 
         if(!codes.length) continue;
-        opts.push(`<optgroup label="Scaffalatura ${escapeHtml(g)}">`);
+        out.push(`<optgroup label="Scaffalatura ${escapeHtml(g)}">`);
         for(const code of codes){
           visibleCount++;
-          opts.push(`<option value="${escapeHtml(code)}"${code===sel ? " selected" : ""}>${escapeHtml(code)}</option>`);
+          out.push(`<option value="${escapeHtml(code)}"${selectedSet.has(code) ? " selected" : ""}>${escapeHtml(code)}</option>`);
         }
-        opts.push(`</optgroup>`);
+        out.push(`</optgroup>`);
       }
 
-      if(sel && !RACK_LOCATION_SET.has(sel)){
-        opts.push(`<optgroup label="Attuale non in lista">`);
-        opts.push(`<option value="${escapeHtml(sel)}" selected>${escapeHtml(sel)}</option>`);
-        opts.push(`</optgroup>`);
-      }else if(!visibleCount){
-        opts.push(`<option value="" disabled>Nessuna ubicazione libera</option>`);
+      const invalidSelected = Array.from(selectedSet).filter(code => !RACK_LOCATION_SET.has(code));
+      if(invalidSelected.length){
+        out.push(`<optgroup label="Attuale non in lista">`);
+        for(const code of invalidSelected){
+          out.push(`<option value="${escapeHtml(code)}" selected>${escapeHtml(code)}</option>`);
+        }
+        out.push(`</optgroup>`);
+      }else if(!visibleCount && !isMultiple){
+        out.push(`<option value="" disabled>Nessuna ubicazione libera</option>`);
+      }else if(!visibleCount && isMultiple){
+        out.push(`<option value="" disabled>Nessuna ubicazione libera</option>`);
       }
 
-      return opts.join("");
+      return out.join("");
+    }
+
+    function shouldAllowMultipleRackLocations(qty, selected=""){
+      const list = normalizeRackLocationsList(selected);
+      const q = Number.isFinite(Number(qty)) ? Number(qty) : parseSignedQtyStrict(qty);
+      return list.length > 1 || (Number.isFinite(q) && Math.abs(q) > RACK_PALLET_CAPACITY);
     }
 
     function __isFiveKgItem(it){
@@ -4202,6 +4290,7 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
             titleNorm: d.titleNorm || normalizeText(title || sku),
             qty,
             lowStockThreshold: __parseLowStockThresholdValue(d.lowStockThreshold),
+            rackLocations: readRackLocationsFromDoc(d),
             rackLocation: readRackLocationFromDoc(d),
             reordered: d.reordered === true,
             reorderStatus: d.reorderStatus || "",
@@ -5772,7 +5861,8 @@ function currentInv(){
         const qty = Number.isFinite(it.qty) ? it.qty : 0;
         const badgeClass = qty>0 ? (__isLowStockItem({ ...it, qty }) ? "warn" : "ok") : "bad";
         const locLabel = escapeHtml(prettyLoc(it.loc));
-        const rackLabel = it.rackLocation ? ` • Ubicazione: ${escapeHtml(it.rackLocation)}` : "";
+        const rackText = rackLocationDisplayFromItem(it);
+        const rackLabel = rackText !== "—" ? ` • Ubicazione: ${escapeHtml(rackText)}` : "";
         const sogliaLabel = escapeHtml(__lowStockThresholdLabel(it));
         const reorderBadge = __reorderedTinyBadge(it);
         const isReord = __isReorderedItem(it);
@@ -5834,6 +5924,73 @@ function currentInv(){
       };
     }
 
+    function getItemsWithoutRackLocations(){
+      const out = [];
+      const pushLoc = (loc)=>{
+        const items = (state.inventory?.[loc]?.items || []);
+        for(const it of items){
+          const q = Number.isFinite(Number(it?.qty)) ? Number(it.qty) : 0;
+          if(q <= 0) continue;
+          if(readRackLocationsFromDoc(it || {}).length) continue;
+          out.push({ ...it, loc, qty:q });
+        }
+      };
+      pushLoc("concamarise");
+      pushLoc("cerea");
+      out.sort((a,b)=>{
+        const ta = Number(a.updatedAtClient || 0) || (a.updatedAt?.toMillis?.() || 0);
+        const tb = Number(b.updatedAtClient || 0) || (b.updatedAt?.toMillis?.() || 0);
+        if(ta !== tb) return tb - ta;
+        return String(a.sku || "").localeCompare(String(b.sku || ""));
+      });
+      return out;
+    }
+
+    function renderHomeNoLocationBox(){
+      const list = $("homeNoLocationList");
+      const count = $("homeNoLocationCount");
+      const hint = $("homeNoLocationHint");
+      if(!list || !count) return;
+
+      if(!state.user?.isWhitelisted){
+        count.textContent = "—";
+        list.innerHTML = `<div class="hint">Accedi per vedere i prodotti da ubicare.</div>`;
+        if(hint) hint.textContent = "";
+        return;
+      }
+
+      const out = getItemsWithoutRackLocations();
+      count.textContent = fmtN(out.length);
+
+      if(!out.length){
+        list.innerHTML = `<div class="hint">Tutti i prodotti con stock positivo hanno già un’ubicazione assegnata.</div>`;
+        if(hint) hint.textContent = "";
+        return;
+      }
+
+      const rows = out.slice(0, 120).map(it=>{
+        const meta = parseTitleMeta(it.title || "");
+        const titleMain = meta.main ? escapeHtml(meta.main) : (it.title ? escapeHtml(it.title) : "<span class='muted'>(senza nome)</span>");
+        const sku = escapeHtml(toSkuId(it.sku || it.id || ""));
+        const locLabel = escapeHtml(prettyLoc(it.loc));
+        const qty = Number.isFinite(Number(it.qty)) ? Number(it.qty) : 0;
+        const when = it.updatedAtClient ? fmtDate(it.updatedAtClient) : (it.updatedAt ? fmtDate(it.updatedAt) : "");
+        const metaLine = [locLabel, when ? `Agg.: ${when}` : "", `Da produzione/carico cloud`].filter(Boolean).join(" • ");
+        return `
+          <div class="row gridRow" role="button" tabindex="0" data-sku="${sku}" data-loc="${escapeHtml(it.loc || "")}" data-action="openHomeNoLocationItem">
+            <div class="gridCell gridSku">${sku}</div>
+            <div class="gridCell">
+              <div class="gridProdMain">${titleMain}</div>
+              <div class="gridProdSub">${escapeHtml(metaLine)}</div>
+            </div>
+            <div class="badge warn">${escapeHtml(String(qty))}</div>
+          </div>`;
+      }).join("");
+
+      list.innerHTML = `<div class="row gridHead gridRow"><div class="gridCell">SKU</div><div class="gridCell">Prodotto</div><div class="gridCell gridRight">Q.tà</div></div>` + rows;
+      if(hint) hint.textContent = `Mostrati ${Math.min(out.length, 120).toLocaleString("it-IT")} di ${out.length.toLocaleString("it-IT")}. Tocca una riga per assegnare l’ubicazione.`;
+    }
+
     function renderHomeDashboard(){
       const tSku = $("homeTotalSku");
       const tLow = $("homeTotalLow");
@@ -5845,9 +6002,10 @@ function currentInv(){
       const lowList = $("homeLowStockList");
       const lowCount = $("homeLowStockCount");
       const lowHint = $("homeLowStockHint");
+      const noLocList = $("homeNoLocationList");
 
       // se non siamo in home, aggiorniamo solo se gli elementi esistono (es: sheet aperti)
-      if(!tSku && !lowList) return;
+      if(!tSku && !lowList && !noLocList) return;
 
       if(!state.user?.isWhitelisted){
         if(tSku) tSku.textContent = "—";
@@ -5859,6 +6017,7 @@ function currentInv(){
         if(lowCount) lowCount.textContent = "—";
         if(lowList) lowList.innerHTML = `<div class="hint">Accedi per vedere la sotto-scorta.</div>`;
         if(lowHint) lowHint.textContent = "";
+        renderHomeNoLocationBox();
         return;
       }
 
@@ -5910,6 +6069,7 @@ function currentInv(){
           lowList.innerHTML = `<div class="hint">Nessun articolo sotto scorta 🎯</div>`;
           if(lowHint) lowHint.textContent = "";
           renderHomeLowStockMailLog();
+          renderHomeNoLocationBox();
           return;
         }
 
@@ -5924,7 +6084,8 @@ function currentInv(){
           const qty = Number.isFinite(it.qty) ? it.qty : 0;
           const badgeClass = qty>0 ? (__isLowStockItem({ ...it, qty }) ? "warn" : "ok") : "bad";
           const locLabel = escapeHtml(prettyLoc(it.loc));
-          const rackLabel = it.rackLocation ? ` • Ubicazione: ${escapeHtml(it.rackLocation)}` : "";
+          const rackText = rackLocationDisplayFromItem(it);
+          const rackLabel = rackText !== "—" ? ` • Ubicazione: ${escapeHtml(rackText)}` : "";
           const sogliaLabel = escapeHtml(__lowStockThresholdLabel(it));
           const reorderBadge = __reorderedTinyBadge(it);
           const isReord = __isReorderedItem(it);
@@ -5958,6 +6119,7 @@ function currentInv(){
 
       // log ultimo invio mail sotto scorta (da meta Firestore)
       renderHomeLowStockMailLog();
+      renderHomeNoLocationBox();
     }
 
     // --- inventory render ---
@@ -5993,7 +6155,7 @@ function currentInv(){
       let items = [];
       if(s){
         items = allItems.filter(it=>{
-          const key = `${it.sku} ${it.title} ${it.titleNorm} ${it.rackLocation || ""}`;
+          const key = `${it.sku} ${it.title} ${it.titleNorm} ${rackLocationSearchText(it)}`;
           return normalizeText(key).includes(s);
         });
       }
@@ -6030,7 +6192,8 @@ function currentInv(){
         const qty = Number.isFinite(it.qty) ? it.qty : 0;
         const badgeClass = __isLowStockItem(it) ? (qty>0 ? "warn" : "bad") : "ok";
         const thresholdSmall = `Soglia: ${__lowStockThresholdLabel(it)}`;
-        const rackSmall = it.rackLocation ? `Ubicazione: ${it.rackLocation}` : "";
+        const rackText = rackLocationDisplayFromItem(it);
+        const rackSmall = rackText !== "—" ? `Ubicazione: ${rackText}` : "";
         const metaLine = [metaSmall, rackSmall, thresholdSmall].filter(Boolean).join(" • ");
         const metaHtml = metaLine ? `<div class="rowMeta">${escapeHtml(metaLine)}</div>` : ``;
         return `
@@ -6662,7 +6825,7 @@ function closeSheet(kind){
       const idx = getInvIndexForMatch();
       const q = normalizeText(String($("skuPickSearch")?.value || state.ui.skuPick?.q || ""));
       const filtered = q
-        ? idx.all.filter(row => normalizeText(`${row.sku} ${row.it?.title||""} ${row.it?.titleNorm||""} ${row.it?.rackLocation || ""} ${row.loc}`).includes(q))
+        ? idx.all.filter(row => normalizeText(`${row.sku} ${row.it?.title||""} ${row.it?.titleNorm||""} ${rackLocationSearchText(row.it || {})} ${row.loc}`).includes(q))
         : idx.all;
 
       hint.textContent = `Prodotti: ${filtered.length}${q ? " • filtro attivo" : ""}`;
@@ -7462,7 +7625,7 @@ function closeSheet(kind){
       for(const row of (idx.all || [])){
         const sku = toSkuId(row.sku || row.it?.sku || "");
         if(!sku || used.has(sku) || bySku.has(sku)) continue;
-        const hay = normalizeText(`${sku} ${row.it?.title || ""} ${row.it?.titleNorm || ""} ${row.it?.rackLocation || ""}`);
+        const hay = normalizeText(`${sku} ${row.it?.title || ""} ${row.it?.titleNorm || ""} ${rackLocationSearchText(row.it || {})}`);
         if(q && !hay.includes(q)) continue;
         bySku.set(sku, row);
       }
@@ -7590,9 +7753,12 @@ function closeSheet(kind){
   const titleMain = (it && it.title) ? String(it.title) : sku;
   const qty = (it && typeof it.qty !== "undefined") ? it.qty : 0;
   const note = (it && (it.note || it.notes)) ? String(it.note || it.notes) : "";
-  const rackLocation = readRackLocationFromDoc(it || {});
-  const rackLocationValue = rackLocation || "";
+  const rackLocations = readRackLocationsFromDoc(it || {});
+  const rackLocation = rackLocations[0] || "";
+  const rackLocationValue = rackLocations;
+  const rackLocationsText = rackLocationsLabel(rackLocations);
   const rackLocationAvailableCount = countAvailableRackLocations(sku, loc, rackLocationValue);
+  const canUseMultipleRackLocations = shouldAllowMultipleRackLocations(qty, rackLocations);
   const lowStockThreshold = __getCustomLowStockThreshold(it);
   const lowStockThresholdValue = (lowStockThreshold !== null) ? String(lowStockThreshold) : "";
   const lowStockThresholdLabel = __lowStockThresholdLabel(it || { sku, title: titleMain });
@@ -7601,7 +7767,7 @@ function closeSheet(kind){
   const comboLabel = comboChildren.length ? `Combo: ${comboChildren.length}/3` : "Combo: nessuna";
 
   if(titleEl) titleEl.textContent = titleMain;
-  if(sub) sub.textContent = `${sku} • ${prettyLoc(loc)} • Ubicazione: ${rackLocation || "—"} • Soglia: ${lowStockThresholdLabel} • ${comboLabel}`;
+  if(sub) sub.textContent = `${sku} • ${prettyLoc(loc)} • Ubicazione: ${rackLocationsText} • Soglia: ${lowStockThresholdLabel} • ${comboLabel}`;
 
   const isAdmin = !!state.user?.isAdmin;
   const editMode = !!state.ui.productDetailsEditMode;
@@ -7644,7 +7810,7 @@ function closeSheet(kind){
         <div class="pdSection">
           <div class="pdSectionTitle">Posizione / Magazzino</div>
           ${roLine("Magazzino", prettyLoc(loc))}
-          ${roLine("Ubicazione scaffale", rackLocation ? rackLocationLabel(rackLocation) : "—", rackLocation ? "mono" : "")}
+          ${roLine("Ubicazione scaffale", rackLocationsText, rackLocations.length ? "mono" : "")}
           ${metaLine ? `<div class="pdMeta">${metaLine}</div>` : ``}
         </div>
 
@@ -7704,11 +7870,17 @@ function closeSheet(kind){
           <div class="pdGrid" style="margin-top:10px">
             <div class="field">
               <label class="fieldLabel">Ubicazione scaffale</label>
-              <select class="input mono" data-field="rackLocation" ${canEdit ? "" : "disabled"}>
-                ${rackLocationSelectOptions(rackLocationValue, sku, loc)}
-              </select>
+              ${canUseMultipleRackLocations ? `
+                <select class="input mono" data-field="rackLocations" multiple size="8" ${canEdit ? "" : "disabled"}>
+                  ${rackLocationSelectOptions(rackLocationValue, sku, loc, { multiple:true })}
+                </select>
+              ` : `
+                <select class="input mono" data-field="rackLocation" ${canEdit ? "" : "disabled"}>
+                  ${rackLocationSelectOptions(rackLocationValue, sku, loc)}
+                </select>
+              `}
               <div class="fieldError" data-err="rackLocation" style="display:none;"></div>
-              <div class="hint" style="margin-top:6px">Mostra solo ubicazioni libere: ${rackLocationAvailableCount}/${RACK_LOCATION_OPTIONS.length} disponibili. Salvataggio solo cloud Firestore.</div>
+              <div class="hint" style="margin-top:6px">Mostra solo ubicazioni libere: ${rackLocationAvailableCount}/${RACK_LOCATION_OPTIONS.length} disponibili. Più ubicazioni sono consentite sopra ${RACK_PALLET_CAPACITY} pz. Salvataggio solo cloud Firestore.</div>
             </div>
           </div>
           ${metaLine ? `<div class="pdMeta">${metaLine}</div>` : ``}
@@ -7803,6 +7975,7 @@ function closeSheet(kind){
   const moveQtyEl = wrap?.querySelector?.('[data-field="moveQty"]');
   const lowStockThresholdEl = wrap?.querySelector?.('[data-field="lowStockThreshold"]');
   const rackLocationEl = wrap?.querySelector?.('[data-field="rackLocation"]');
+  const rackLocationsEl = wrap?.querySelector?.('[data-field="rackLocations"]');
   const noteEl = wrap?.querySelector?.('[data-field="note"]');
 
   const sku = toSkuId(skuEl?.value || "");
@@ -7812,17 +7985,21 @@ function closeSheet(kind){
   const moveQtyRaw = (moveQtyEl?.value ?? "");
   const lowStockThresholdRaw = (lowStockThresholdEl?.value ?? "");
   const rackLocationRaw = (rackLocationEl?.value ?? "");
+  const rackLocationsRaw = rackLocationsEl
+    ? Array.from(rackLocationsEl.selectedOptions || []).map(opt => opt.value)
+    : rackLocationRaw;
   const noteRaw = (noteEl?.value ?? "");
 
   const qty = parseSignedQtyStrict(qtyRaw);
   const moveQty = parseSignedQtyStrict(moveQtyRaw);
   const lowStockParsed = parseLowStockThresholdInput(lowStockThresholdRaw);
   const lowStockThreshold = lowStockParsed.ok ? lowStockParsed.value : null;
-  const rackLocation = normalizeRackLocation(rackLocationRaw);
-  const rackLocationOk = isValidRackLocation(rackLocation);
+  const rackLocations = normalizeRackLocationsList(rackLocationsRaw);
+  const rackLocation = rackLocations[0] || "";
+  const rackLocationOk = isValidRackLocations(rackLocations);
   const note = String(noteRaw).trim();
 
-  return { sku, title, qty, moveQty, lowStockThreshold, lowStockThresholdOk: lowStockParsed.ok, rackLocation, rackLocationOk, note, qtyRaw: String(qtyRaw), moveQtyRaw: String(moveQtyRaw), lowStockThresholdRaw: String(lowStockThresholdRaw), rackLocationRaw: String(rackLocationRaw) };
+  return { sku, title, qty, moveQty, lowStockThreshold, lowStockThresholdOk: lowStockParsed.ok, rackLocation, rackLocations, rackLocationOk, note, qtyRaw: String(qtyRaw), moveQtyRaw: String(moveQtyRaw), lowStockThresholdRaw: String(lowStockThresholdRaw), rackLocationRaw: Array.isArray(rackLocationsRaw) ? rackLocationsRaw.join(",") : String(rackLocationsRaw) };
 }
 
 
@@ -8559,6 +8736,7 @@ async function loadProductFromDetails(){
         showToast("Quantità non valida", "Inserisci un numero intero positivo.", 2400);
         return;
       }
+      if(!confirm(`Confermi carico cloud per ${sku}?\n\n+${qtyToLoad} pz`)) return;
 
       const api = state.firebase.api;
       const db = state.firebase.db;
@@ -8584,6 +8762,7 @@ async function loadProductFromDetails(){
           const nowClient = Date.now();
           const who = state.user?.email || state.user?.uid || "";
 
+          const rackClearData = beforeQty <= 0 ? { rackLocation: "", rackLocations: [] } : {};
           tx.set(itemRef, {
             sku,
             title,
@@ -8596,7 +8775,8 @@ async function loadProductFromDetails(){
             lastSeenAt: api.serverTimestamp(),
             lastSeenAtClient: nowClient,
             lastSeenKind: "manual_load",
-            seenCount: api.increment(1)
+            seenCount: api.increment(1),
+            ...rackClearData
           }, { merge:true });
 
           tx.set(productRef, {
@@ -8676,7 +8856,7 @@ async function saveProductFromDetails(){
 
       const oldSku = toSkuId(state.ui.productDetailsSku||"");
       clearPdFieldErrors();
-      const { sku, title, qty, lowStockThreshold, lowStockThresholdOk, rackLocation, rackLocationOk, note } = readProductDetailsFields();
+      const { sku, title, qty, lowStockThreshold, lowStockThresholdOk, rackLocation, rackLocations, rackLocationOk, note } = readProductDetailsFields();
 
       if(!oldSku){
         setPdFieldError("sku", "SKU non valido.");
@@ -8699,16 +8879,27 @@ async function saveProductFromDetails(){
         return;
       }
       if(!rackLocationOk){
-        setPdFieldError("rackLocation", "Seleziona un’ubicazione valida oppure lascia vuoto.");
+        setPdFieldError("rackLocation", "Seleziona ubicazioni valide oppure lascia vuoto.");
         showToast("Errore", "Ubicazione scaffale non valida.", 2200);
         return;
       }
-      if(rackLocation && !isRackLocationAvailableForItem(rackLocation, oldSku, loc)){
-        const occ = rackLocationOccupantInfo(rackLocation, oldSku, loc);
-        setPdFieldError("rackLocation", occ ? `Ubicazione già occupata da ${occ.sku} (${prettyLoc(occ.loc)}).` : "Ubicazione non disponibile.");
-        showToast("Ubicazione occupata", "Scegli un’altra ubicazione libera.", 2400);
+      if(qty > 0 && Math.abs(qty) <= RACK_PALLET_CAPACITY && normalizeRackLocationsList(rackLocations).length > 1){
+        setPdFieldError("rackLocation", `Più ubicazioni sono consentite solo sopra ${RACK_PALLET_CAPACITY} pz.`);
+        showToast("Ubicazioni", `Sopra ${RACK_PALLET_CAPACITY} pz puoi assegnare più posti.`, 2600);
         return;
       }
+      if(!areRackLocationsAvailableForItem(rackLocations, oldSku, loc)){
+        const occ = normalizeRackLocationsList(rackLocations).map(code => rackLocationOccupantInfo(code, oldSku, loc)).find(Boolean);
+        setPdFieldError("rackLocation", occ ? `Ubicazione già occupata da ${occ.sku} (${prettyLoc(occ.loc)}).` : "Ubicazione non disponibile.");
+        showToast("Ubicazione occupata", "Scegli solo ubicazioni libere.", 2400);
+        return;
+      }
+
+      const finalRackLocations = sanitizeRackLocationsForQty(rackLocations, qty);
+      const finalRackLocation = finalRackLocations[0] || "";
+
+      const okConfirm = confirm(`Confermi modifica cloud per ${oldSku}?\n\nDisponibile: ${qty} pz\nUbicazione: ${rackLocationsLabel(finalRackLocations)}`);
+      if(!okConfirm) return;
 
       const api = state.firebase.api;
       const db = state.firebase.db;
@@ -8748,7 +8939,8 @@ async function saveProductFromDetails(){
             note: note || "",
             qty,
             lowStockThreshold: lowStockThreshold,
-            rackLocation: rackLocation,
+            rackLocation: finalRackLocation,
+            rackLocations: finalRackLocations,
             updatedAt: api.serverTimestamp(),
             updatedAtClient: nowClient,
             updatedBy: state.user.email || "",
@@ -8769,7 +8961,8 @@ async function saveProductFromDetails(){
             titleNorm: normalizeText(title || sku),
             note: note || "",
             lowStockThreshold: lowStockThreshold,
-            rackLocation: rackLocation,
+            rackLocation: finalRackLocation,
+            rackLocations: finalRackLocations,
             active: true,
             lastSeenAt: api.serverTimestamp(),
             lastSeenAtClient: nowClient,
@@ -8846,7 +9039,8 @@ async function saveProductFromDetails(){
             beforeQty: oldQty,
             afterQty: qty,
             lowStockThreshold: lowStockThreshold,
-            rackLocation: rackLocation,
+            rackLocation: finalRackLocation,
+            rackLocations: finalRackLocations,
             comboChildSkus: normalizeComboChildren(comboMap.get(oldSku) || [], oldSku).map(c=>c.sku),
             fromWarehouse: loc,
             toWarehouse: loc,
@@ -8907,7 +9101,7 @@ async function saveProductFromDetails(){
       clearPdFieldErrors();
 
       const oldSku = toSkuId(state.ui.productDetailsSku||"");
-      const { sku:newSku, title, moveQty, lowStockThreshold, lowStockThresholdOk, rackLocation, rackLocationOk } = readProductDetailsFields();
+      const { sku:newSku, title, moveQty, lowStockThreshold, lowStockThresholdOk, rackLocation, rackLocations, rackLocationOk } = readProductDetailsFields();
 
       if(!oldSku){
         setPdFieldError("sku", "SKU non valido.");
@@ -8930,14 +9124,19 @@ async function saveProductFromDetails(){
         return;
       }
       if(!rackLocationOk){
-        setPdFieldError("rackLocation", "Seleziona un’ubicazione valida oppure lascia vuoto.");
+        setPdFieldError("rackLocation", "Seleziona ubicazioni valide oppure lascia vuoto.");
         showToast("Errore", "Ubicazione scaffale non valida.", 2200);
         return;
       }
-      if(rackLocation && !isRackLocationAvailableForItem(rackLocation, oldSku, fromLoc)){
-        const occ = rackLocationOccupantInfo(rackLocation, oldSku, fromLoc);
+      if(Math.abs(moveQty || 0) <= RACK_PALLET_CAPACITY && normalizeRackLocationsList(rackLocations).length > 1){
+        setPdFieldError("rackLocation", `Più ubicazioni sono consentite solo sopra ${RACK_PALLET_CAPACITY} pz.`);
+        showToast("Ubicazioni", `Sopra ${RACK_PALLET_CAPACITY} pz puoi assegnare più posti.`, 2600);
+        return;
+      }
+      if(!areRackLocationsAvailableForItem(rackLocations, oldSku, fromLoc)){
+        const occ = normalizeRackLocationsList(rackLocations).map(code => rackLocationOccupantInfo(code, oldSku, fromLoc)).find(Boolean);
         setPdFieldError("rackLocation", occ ? `Ubicazione già occupata da ${occ.sku} (${prettyLoc(occ.loc)}).` : "Ubicazione non disponibile.");
-        showToast("Ubicazione occupata", "Scegli un’altra ubicazione libera.", 2400);
+        showToast("Ubicazione occupata", "Scegli solo ubicazioni libere.", 2400);
         return;
       }
 
@@ -8947,6 +9146,8 @@ async function saveProductFromDetails(){
         showToast("Info", "Nessun pezzo da spostare.", 1700);
         return;
       }
+
+      if(!confirm(`Confermi spostamento cloud?\n\n${oldSku} → ${prettyLoc(dst)}\nQuantità: ${qtyToMove} pz\nUbicazione destinazione: ${rackLocationsLabel(rackLocations)}`)) return;
 
       const api = state.firebase.api;
       const db = state.firebase.db;
@@ -8976,8 +9177,8 @@ async function saveProductFromDetails(){
           const who = state.user?.email || state.user?.uid || "";
 
           const finalTitle = squashWhitespace(title || fromData.title || newSku || oldSku);
-          const originRackLocation = readRackLocationFromDoc(fromData);
-          let destRackLocation = rackLocation || "";
+          const originRackLocations = readRackLocationsFromDoc(fromData);
+          const originRackLocation = originRackLocations[0] || "";
 
           const sTo = await tx.get(toRef);
           const toData = sTo.exists() ? (sTo.data() || {}) : {};
@@ -8987,12 +9188,18 @@ async function saveProductFromDetails(){
 
           const toNewQty = toPrev + qtyToMove;
           const remaining = fromQty - qtyToMove;
+          let destRackLocations = sanitizeRackLocationsForQty(rackLocations, toNewQty);
+          let destRackLocation = destRackLocations[0] || "";
 
-          // Se sposto solo una parte, l’origine mantiene la sua ubicazione: la destinazione resta senza ubicazione
-          // per evitare due righe cloud con la stessa posizione fisica.
-          if(remaining !== 0 && destRackLocation && destRackLocation === originRackLocation){
-            destRackLocation = "";
+          // Se sposto solo una parte, l’origine mantiene le sue ubicazioni: la destinazione
+          // non può riusare gli stessi posti fisici finché l’origine ha ancora stock.
+          if(remaining !== 0 && destRackLocations.length){
+            const originSet = new Set(originRackLocations);
+            destRackLocations = destRackLocations.filter(code => !originSet.has(code));
+            destRackLocation = destRackLocations[0] || "";
           }
+          const remainingRackLocations = sanitizeRackLocationsForQty(originRackLocations, remaining);
+          const remainingRackLocation = remainingRackLocations[0] || "";
 
           // aggiorna destinazione
           tx.set(toRef, {
@@ -9002,6 +9209,7 @@ async function saveProductFromDetails(){
             note: (fromData.note || fromData.notes || toData.note || toData.notes || ""),
             lowStockThreshold: lowStockThreshold,
             rackLocation: destRackLocation,
+            rackLocations: destRackLocations,
             qty: toNewQty,
             updatedAt: api.serverTimestamp(),
             updatedAtClient: nowClient,
@@ -9021,7 +9229,8 @@ async function saveProductFromDetails(){
               title: finalTitle,
               titleNorm: normalizeText(finalTitle || oldSku),
               lowStockThreshold: lowStockThreshold,
-              rackLocation: originRackLocation,
+              rackLocation: remainingRackLocation,
+              rackLocations: remainingRackLocations,
               qty: remaining,
               updatedAt: api.serverTimestamp(),
               updatedAtClient: nowClient,
@@ -9049,6 +9258,7 @@ async function saveProductFromDetails(){
             afterToQty: toNewQty,
             lowStockThreshold: lowStockThreshold,
             rackLocation: destRackLocation,
+            rackLocations: destRackLocations,
             source: "manuale",
             note: "Spostamento da Anagrafica Prodotto",
             createdAt: api.serverTimestamp(),
@@ -9064,6 +9274,7 @@ async function saveProductFromDetails(){
             titleNorm: normalizeText(finalTitle || oldSku),
             lowStockThreshold: lowStockThreshold,
             rackLocation: destRackLocation,
+            rackLocations: destRackLocations,
             updatedAt: api.serverTimestamp(),
             updatedAtClient: nowClient,
             updatedBy: who
@@ -9105,7 +9316,7 @@ function renderProductsSheet(){
       const all = inv.items || [];
       const q = normalizeText(String($("productsSearch")?.value || state.ui.productsSearch || ""));
       const filtered = q
-        ? all.filter(it=> normalizeText(`${it.sku} ${it.title} ${it.titleNorm} ${it.rackLocation || ""}`).includes(q))
+        ? all.filter(it=> normalizeText(`${it.sku} ${it.title} ${it.titleNorm} ${rackLocationSearchText(it)}`).includes(q))
         : all;
 
       const isAdmin = !!state.user?.isAdmin;
@@ -9137,7 +9348,8 @@ function renderProductsSheet(){
           const metaSmall = buildMetaSmall(meta);
           const badgeClass = __isLowStockItem(it) ? (qty>0 ? "warn" : "bad") : "ok";
           const sogliaSmall = `Soglia: ${__lowStockThresholdLabel(it)}`;
-          const rackSmall = it.rackLocation ? `Ubicazione: ${it.rackLocation}` : "";
+          const rackText = rackLocationDisplayFromItem(it);
+        const rackSmall = rackText !== "—" ? `Ubicazione: ${rackText}` : "";
 
           if(editingSku && editingSku===sku){
             editHtml = `
@@ -9606,11 +9818,17 @@ async function applyFlow(kind){
               const title = squashWhitespace(it.title||"") || sku;
               const delta = deltaSign * Math.abs(parseQty(it.qty) || 0);
               const ref = api.doc(db, COL_ROOT, p.loc, SUB_ITEMS, sku);
+              const currentMap = p.loc === "concamarise" ? mapConca : mapCerea;
+              const currentItem = currentMap.get(sku) || {};
+              const beforeQty = Number.isFinite(Number(currentItem.qty)) ? Number(currentItem.qty) : 0;
+              const afterQty = beforeQty + delta;
+              const rackClearData = afterQty <= 0 ? { rackLocation: "", rackLocations: [] } : {};
               batch.set(ref, {
                 sku,
                 title: title || "",
                 titleNorm: normalizeText(title || sku),
                 qty: api.increment(delta),
+                ...rackClearData,
                 updatedAt: api.serverTimestamp(),
                 updatedAtClient: tsClient,
                 updatedBy: state.user.email || "",
@@ -10223,6 +10441,28 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
         homeLow.addEventListener("keydown", (e)=>{
           if(e.key!=="Enter" && e.key!==" ") return;
           const row = e.target?.closest?.("[data-action='openHomeSottoscortaItem']");
+          if(!row) return;
+          e.preventDefault();
+          const sku = row.getAttribute("data-sku") || "";
+          const loc = row.getAttribute("data-loc") || "";
+          if(loc) state.route.loc = loc;
+          openProductDetailsSheet(sku);
+        });
+      }
+
+      const homeNoLoc = $("homeNoLocationList");
+      if(homeNoLoc){
+        homeNoLoc.addEventListener("click", (e)=>{
+          const row = e.target?.closest?.("[data-action='openHomeNoLocationItem']");
+          if(!row) return;
+          const sku = row.getAttribute("data-sku") || "";
+          const loc = row.getAttribute("data-loc") || "";
+          if(loc) state.route.loc = loc;
+          openProductDetailsSheet(sku);
+        });
+        homeNoLoc.addEventListener("keydown", (e)=>{
+          if(e.key!=="Enter" && e.key!==" ") return;
+          const row = e.target?.closest?.("[data-action='openHomeNoLocationItem']");
           if(!row) return;
           e.preventDefault();
           const sku = row.getAttribute("data-sku") || "";
