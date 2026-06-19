@@ -1863,8 +1863,14 @@
       cursor: pointer;
     }
 
-    #homeLogsList .gridProdMain{ font-weight:600; }
-    #homeLogsList .gridProdSub{ white-space:normal; overflow:visible; text-overflow:clip; }
+    #homeLogsList .gridProdMain{
+      font-weight: 600;
+    }
+    #homeLogsList .gridProdSub{
+      white-space: normal;
+      overflow: visible;
+      text-overflow: clip;
+    }
 
     #btnToggleProductDetailsEdit{
       display:none !important;
@@ -2521,7 +2527,12 @@ Tip:
         cerea: { unsub:null, flows:[], meta:{ count:0 } },
         concamarise: { unsub:null, flows:[], meta:{ count:0 } }
       },
-      activityLogs: { unsubMovements:null, movements:[], error:"", loaded:false },
+      activityLogs: {
+        unsubMovements: null,
+        movements: [],
+        error: "",
+        loaded: false
+      },
       flows: {
         carica: { file:null, lines:[], busy:false, workflow:null },
         scarica: { file:null, lines:[], busy:false, workflow:null }
@@ -3691,9 +3702,8 @@ function guessTitleFromRaw(rawText, sku){
 
     function rackLocationSearchText(it){
       const d = it || {};
-      const alloc = readRackAllocationsFromDoc(d).map(x=>`${x.code} ${x.qty} ${lotLabelFromId(x.lot)}`).join(" ");
-      const lots = readStockLotsFromDoc(d).map(x=>`${x.lot} ${lotLabelFromId(x.lot)} ${lotDateLabelFromId(x.lot)}`).join(" ");
-      return [readRackLocationsFromDoc(d).join(" "), alloc, lots].filter(Boolean).join(" ");
+      const alloc = readRackAllocationsFromDoc(d).map(x=>`${x.code} ${x.qty}`).join(" ");
+      return [readRackLocationsFromDoc(d).join(" "), alloc].filter(Boolean).join(" ");
     }
 
     function sanitizeRackLocationsForQty(value, qty){
@@ -4411,6 +4421,22 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
     const TW_WRITE_ORDER_MAX = (TW_WRITE_ORDER_BASE ** BigInt(TW_WRITE_ORDER_KEY_LEN)) - 1n;
 
 
+    function sanitizeFirestoreDocId(v, maxLen = 900){
+      const input = String(v || "").trim();
+      if(!input) return "";
+      const out = [];
+      for(const ch of Array.from(input)){
+        const code = ch.charCodeAt(0);
+        if(ch === "/" || ch === "\\" || ch === "?" || ch === "#" || ch === "[" || ch === "]" || ch === "*" || code < 32 || code === 127){
+          out.push("_");
+        }else{
+          out.push(ch);
+        }
+      }
+      return out.join("").slice(0, maxLen);
+    }
+
+
     function addProductMovementToBatch(batch, api, db, sku, data = {}){
       const s = toSkuId(sku || data?.sku || "");
       if(!batch || !api || !db) throw new Error("Movimenti: Firestore non inizializzato.");
@@ -4420,28 +4446,25 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
       const q = Number(data?.qtySigned ?? data?.deltaSigned ?? 0);
       const qtySigned = Number.isFinite(q) ? Math.round(q) : 0;
 
-      const requestedId = String(data?.movementId || data?.movementKey || data?.writeKey || data?.docId || "").trim().replace(/[\/#[\]?* -]/g, "_");
-      const movesCol = api.collection(db, COL_PRODUCTS, s, SUB_MOVES);
-      const moveRef = requestedId ? api.doc(movesCol, requestedId) : api.doc(movesCol);
-      const movementId = moveRef.id;
-
       const payload = Object.assign({}, data || {});
       payload.sku = s;
       payload.type = payload.type || "rettifica";
       payload.qtySigned = qtySigned;
       payload.deltaSigned = Number.isFinite(Number(payload.deltaSigned)) ? Math.round(Number(payload.deltaSigned)) : qtySigned;
-      payload.movementId = movementId;
-      payload.movementKey = movementId;
-      payload.writeKey = movementId;
-      payload.docId = movementId;
-      payload.firestorePath = `${COL_PRODUCTS}/${s}/${SUB_MOVES}/${movementId}`;
       payload.createdAt = api.serverTimestamp();
       payload.createdAtClient = nowClient;
       payload.createdByUid = payload.createdByUid || state.user?.uid || "";
       payload.createdByEmail = payload.createdByEmail || state.user?.email || state.user?.emailLower || "";
 
+      const requestedKey = sanitizeFirestoreDocId(payload.movementKey || payload.movementId || payload.writeKey || "", 900);
+      const movesCol = api.collection(db, COL_PRODUCTS, s, SUB_MOVES);
+      const moveRef = requestedKey ? api.doc(movesCol, requestedKey) : api.doc(movesCol);
+      const movementKey = requestedKey || moveRef.id;
+      payload.movementId = movementKey;
+      payload.movementKey = movementKey;
+      payload.writeKey = String(payload.writeKey || movementKey || "");
       batch.set(moveRef, payload);
-      return movementId;
+      return movementKey;
     }
 
     function flowMovementType(kind, direction){
@@ -5302,7 +5325,7 @@ function startAllLogs(){
     }
 
     function hubTwKeyToDocId(v){
-      return String(v || "").replace(/[\/\\?#\[\]\*\x00-\x1F]/g, "_").slice(0, 900);
+      return sanitizeFirestoreDocId(v, 900);
     }
 
     function hubTwAmazonMovementDocId(doneId){
@@ -5597,7 +5620,6 @@ function startAllLogs(){
                 title: plan.title,
                 titleNorm: normalizeText(plan.title || plan.sku),
                 qty: api.increment(plan.qty),
-                ...stockLotPatchForWrite(api, plan.qty, plan.tsClient, "tabellone_write", plan.movementId),
                 location: TW_WRITE_AMZ_TARGET_LOC,
                 updatedAt: api.serverTimestamp(),
                 updatedAtClient: Date.now(),
@@ -5826,6 +5848,7 @@ function startAllLogs(){
       });
     }
 
+
     // --- Logs home: movimenti cloud live + flussi PDF ---
     function startActivityLogWatch(){
       try{
@@ -5834,6 +5857,7 @@ function startAllLogs(){
         const api = state.firebase.api;
         const db = state.firebase.db;
         if(!api?.collectionGroup || !api?.query || !api?.orderBy || !api?.limit || !api?.onSnapshot) return;
+
         const col = api.collectionGroup(db, SUB_MOVES);
         const q = api.query(col, api.orderBy("createdAtClient", "desc"), api.limit(120));
         state.activityLogs.unsubMovements = api.onSnapshot(q, (snap)=>{
@@ -5841,7 +5865,13 @@ function startAllLogs(){
           snap.forEach((docSnap)=>{
             const d = docSnap.data() || {};
             const parentDoc = docSnap?.ref?.parent?.parent;
-            arr.push({ id:docSnap.id, path:docSnap?.ref?.path || "", productSku:parentDoc?.id || "", ...d });
+            const skuFromPath = parentDoc?.id || "";
+            arr.push({
+              id: docSnap.id,
+              path: docSnap?.ref?.path || "",
+              productSku: skuFromPath,
+              ...d
+            });
           });
           state.activityLogs.movements = arr;
           state.activityLogs.error = "";
@@ -5876,9 +5906,9 @@ function startAllLogs(){
     }
 
     function shortLogId(v){
-      const val = String(v || "").trim();
-      if(!val) return "—";
-      return val.length > 18 ? (val.slice(0, 8) + "…" + val.slice(-6)) : val;
+      const s = String(v || "").trim();
+      if(!s) return "—";
+      return s.length > 18 ? (s.slice(0, 8) + "…" + s.slice(-6)) : s;
     }
 
     function signedLogQty(m){
@@ -5934,25 +5964,38 @@ function startAllLogs(){
       const from = normalizeInventoryLoc(m?.fromWarehouse || "");
       const to = normalizeInventoryLoc(m?.toWarehouse || "");
       const rack = normalizeRackLocation(m?.rackLocation || "") || normalizeRackLocationsList(m?.rackLocations || [])[0] || "";
-      const id = String(m?.movementKey || m?.movementId || m?.writeKey || m?.docId || m?.flowId || m?.twMovementId || m?.id || "").trim();
+      const id = String(m?.movementKey || m?.movementId || m?.writeKey || m?.flowId || m?.twMovementId || m?.id || "").trim();
       const titleRaw = squashWhitespace(m?.title || m?.productTitle || m?.parentTitle || "");
       const parsed = parseTitleMeta(titleRaw || sku);
       const title = parsed.main || titleRaw || sku || "—";
       const flowName = squashWhitespace(m?.flowName || m?.fileName || "");
       const note = squashWhitespace(m?.note || "");
-      const bits = [];
-      if(sku) bits.push(`SKU ${sku}`);
-      if(title && title !== sku) bits.push(title);
-      if(rack) bits.push(`Ubicazione ${rack}`);
+      const detailBits = [];
+      if(sku) detailBits.push(`SKU ${sku}`);
+      if(title && title !== sku) detailBits.push(title);
+      if(rack) detailBits.push(`Ubicazione ${rack}`);
       if(from || to){
-        bits.push(`${from ? prettyLoc(from) : "—"} → ${to ? prettyLoc(to) : "—"}`);
+        const moveLabel = `${from ? prettyLoc(from) : "—"} → ${to ? prettyLoc(to) : "—"}`;
+        detailBits.push(moveLabel);
       }else if(loc){
-        bits.push(prettyLoc(loc));
+        detailBits.push(prettyLoc(loc));
       }
-      if(flowName) bits.push(flowName);
-      if(source && source !== "ubicazione") bits.push(source);
-      if(note && type !== "ubicazione") bits.push(note);
-      return { kind:"movement", ts:Number(m?.createdAtClient || m?.updatedAtClient || m?.appliedAtClient || 0) || 0, action:`${actor} ${verb}`, details:bits.filter(Boolean).join(" • "), qty, lot:logLotFromMovement(m), id, badgeClass: qty < 0 ? "warn" : (qty > 0 ? "ok" : "") };
+      if(flowName) detailBits.push(flowName);
+      if(source && source !== "ubicazione") detailBits.push(source);
+      if(note && type !== "ubicazione") detailBits.push(note);
+
+      return {
+        kind: "movement",
+        ts: Number(m?.createdAtClient || m?.updatedAtClient || m?.appliedAtClient || 0) || 0,
+        actor,
+        action: `${actor} ${verb}`,
+        details: detailBits.filter(Boolean).join(" • "),
+        qty,
+        lot: logLotFromMovement(m),
+        id: id || m?.id || "",
+        badgeClass: qty < 0 ? "warn" : (qty > 0 ? "ok" : ""),
+        raw: m
+      };
     }
 
     function homeLogEntryFromFlow(flow){
@@ -5970,7 +6013,18 @@ function startAllLogs(){
       if(flow?.fileName) bits.push(flow.fileName);
       if(flow?.totalLines) bits.push(`${flow.totalLines} righe`);
       if(flow?.voided) bits.push("ANNULLATO");
-      return { kind:"flow", ts:Number(flow?.appliedAtClient || flow?.voidedAtClient || 0) || 0, action:`${actor} ${verb}`, details:bits.join(" • "), qty, lot:"—", id:flowId, badgeClass:flow?.voided ? "warn" : (qty < 0 ? "warn" : "ok") };
+      return {
+        kind: "flow",
+        ts: Number(flow?.appliedAtClient || flow?.voidedAtClient || 0) || 0,
+        actor,
+        action: `${actor} ${verb}`,
+        details: bits.join(" • "),
+        qty,
+        lot: "—",
+        id: flowId,
+        badgeClass: flow?.voided ? "warn" : (qty < 0 ? "warn" : "ok"),
+        raw: flow
+      };
     }
 
     function getHomeLogEntries(){
@@ -5987,41 +6041,63 @@ function startAllLogs(){
           if(e && (e.ts || e.details || e.id)) entries.push(e);
         }
       }
+
       const seen = new Set();
-      return entries.filter(e=>{
-        const key = `${e.kind}::${e.id || ""}::${e.ts || ""}::${e.details || ""}`;
-        if(seen.has(key)) return false;
-        seen.add(key);
-        return true;
-      }).sort((a,b)=> (b.ts || 0) - (a.ts || 0)).slice(0, 80);
+      return entries
+        .filter(e=>{
+          const key = `${e.kind}::${e.id || ""}::${e.ts || ""}::${e.details || ""}`;
+          if(seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        })
+        .sort((a,b)=> (b.ts || 0) - (a.ts || 0))
+        .slice(0, 80);
     }
 
     function renderHomeLogsBox(){
+      const box = $("homeLogsBox");
       const list = $("homeLogsList");
       const count = $("homeLogsCount");
       const hint = $("homeLogsHint");
-      if(!list || !count) return;
+      if(!box || !list || !count) return;
+
       if(!state.user?.isWhitelisted){
         count.textContent = "—";
         list.innerHTML = `<div class="hint">Accedi per vedere i log.</div>`;
         if(hint) hint.textContent = "";
         return;
       }
+
       const entries = getHomeLogEntries();
       count.textContent = fmtN(entries.length);
+
       if(!entries.length){
         list.innerHTML = `<div class="hint">Nessun log ancora. Appena viene fatta un’azione cloud compare qui in tempo reale.</div>`;
         if(hint){
-          hint.textContent = state.activityLogs?.error ? `Movimenti live non disponibili: ${state.activityLogs.error}. Restano visibili i flussi.` : "In ascolto su Firestore: movimenti prodotto + ultimi flussi.";
+          hint.textContent = state.activityLogs?.error
+            ? `Movimenti live non disponibili: ${state.activityLogs.error}. Restano visibili i flussi.`
+            : "In ascolto su Firestore: movimenti prodotto + ultimi flussi.";
         }
         return;
       }
+
       const rows = entries.slice(0, 50).map(e=>{
         const time = e.ts ? fmtDate(e.ts) : "—";
         const qtyText = Number.isFinite(Number(e.qty)) && Number(e.qty) !== 0 ? String(Math.round(Number(e.qty))) : "—";
         const badge = qtyText !== "—" ? `<span class="badge ${escapeHtml(e.badgeClass || "")}">${escapeHtml(qtyText)}</span>` : `<span class="badge">—</span>`;
-        return `<div class="row gridRow"><div class="gridCell gridSku">${escapeHtml(time)}</div><div class="gridCell"><div class="gridProdMain">${escapeHtml(e.action || "Azione")}</div><div class="gridProdSub">${escapeHtml(e.details || "—")}</div></div><div class="gridCell gridRight">${badge}</div><div class="gridCell gridRight"><span class="badge">${escapeHtml(e.lot || "—")}</span></div><div class="gridCell gridRight"><span class="badge mono" title="${escapeHtml(e.id || "")}">${escapeHtml(shortLogId(e.id || ""))}</span></div></div>`;
+        return `
+          <div class="row gridRow">
+            <div class="gridCell gridSku">${escapeHtml(time)}</div>
+            <div class="gridCell">
+              <div class="gridProdMain">${escapeHtml(e.action || "Azione")}</div>
+              <div class="gridProdSub">${escapeHtml(e.details || "—")}</div>
+            </div>
+            <div class="gridCell gridRight">${badge}</div>
+            <div class="gridCell gridRight"><span class="badge">${escapeHtml(e.lot || "—")}</span></div>
+            <div class="gridCell gridRight"><span class="badge mono" title="${escapeHtml(e.id || "")}">${escapeHtml(shortLogId(e.id || ""))}</span></div>
+          </div>`;
       }).join("");
+
       list.innerHTML = `<div class="row gridHead gridRow"><div class="gridCell">Ora</div><div class="gridCell">Azione</div><div class="gridCell gridRight">Q.tà</div><div class="gridCell gridRight">Lotto</div><div class="gridCell gridRight">ID</div></div>` + rows;
       if(hint){
         const err = state.activityLogs?.error ? ` • Movimenti: ${state.activityLogs.error}` : "";
@@ -6712,7 +6788,9 @@ function currentInv(){
         for(const it of items){
           const totalQty = stockQtyFromDoc(it || {});
           if(totalQty <= 0) continue;
-          out.push(...getUnallocatedLotRowsFromItem(it || {}, loc));
+          const remainingQty = rackUnallocatedQtyFromDoc(it || {});
+          if(remainingQty <= 0) continue;
+          out.push({ ...it, loc, qty:remainingQty, totalQty, remainingQty, allocatedQty: rackAllocatedQtyFromDoc(it || {}) });
         }
       };
       pushLoc("concamarise");
@@ -6721,9 +6799,6 @@ function currentInv(){
         const ta = Number(a.updatedAtClient || 0) || (a.updatedAt?.toMillis?.() || 0);
         const tb = Number(b.updatedAtClient || 0) || (b.updatedAt?.toMillis?.() || 0);
         if(ta !== tb) return tb - ta;
-        const la = String(a.lot || "");
-        const lb = String(b.lot || "");
-        if(la !== lb) return lb.localeCompare(la);
         return String(a.sku || "").localeCompare(String(b.sku || ""));
       });
       return out;
@@ -6734,8 +6809,7 @@ function currentInv(){
       const count = $("homeNoLocationCount");
       const hint = $("homeNoLocationHint");
       if(!list || !count) return;
-      list.classList.remove("cols4");
-      list.classList.add("cols5");
+      list.classList.add("cols4");
 
       if(!state.user?.isWhitelisted){
         count.textContent = "—";
@@ -6761,25 +6835,23 @@ function currentInv(){
         const remainingQty = Number.isFinite(Number(it.remainingQty)) ? Math.round(Number(it.remainingQty)) : (Number.isFinite(Number(it.qty)) ? Math.round(Number(it.qty)) : 0);
         const totalQty = Number.isFinite(Number(it.totalQty)) ? Math.round(Number(it.totalQty)) : remainingQty;
         const allocatedQty = Number.isFinite(Number(it.allocatedQty)) ? Math.round(Number(it.allocatedQty)) : 0;
-        const lotLabel = escapeHtml(it.lotLabel || lotLabelFromId(it.lot));
-        const rackText = rackLocationDisplayFromItemForLot(it, it.lot);
+        const rackText = rackLocationDisplayFromItem(it);
         const rackShown = rackText !== "—" ? rackText : "—";
         const when = it.updatedAtClient ? fmtDate(it.updatedAtClient) : (it.updatedAt ? fmtDate(it.updatedAt) : "");
         const metaLine = [locLabel, `Totale: ${totalQty}`, allocatedQty ? `Ubicato: ${allocatedQty}` : "", when ? `Agg.: ${when}` : ""].filter(Boolean).join(" • ");
         return `
-          <div class="row gridRow" role="button" tabindex="0" data-sku="${sku}" data-loc="${escapeHtml(it.loc || "")}" data-lot="${escapeHtml(it.lot || "")}" data-action="openHomeNoLocationItem">
+          <div class="row gridRow" role="button" tabindex="0" data-sku="${sku}" data-loc="${escapeHtml(it.loc || "")}" data-action="openHomeNoLocationItem">
             <div class="gridCell gridSku">${sku}</div>
             <div class="gridCell">
               <div class="gridProdMain">${titleMain}</div>
               <div class="gridProdSub">${escapeHtml(metaLine)}</div>
             </div>
             <div class="gridCell gridRight"><span class="badge warn">${escapeHtml(String(remainingQty))}</span></div>
-            <div class="gridCell gridRight"><span class="badge">${lotLabel}</span></div>
             <div class="gridCell gridRight"><span class="badge">${escapeHtml(rackShown)}</span></div>
           </div>`;
       }).join("");
 
-      list.innerHTML = `<div class="row gridHead gridRow"><div class="gridCell">SKU</div><div class="gridCell">Prodotto</div><div class="gridCell gridRight">Da ubicare</div><div class="gridCell gridRight">Lotto</div><div class="gridCell gridRight">Ubicazione</div></div>` + rows;
+      list.innerHTML = `<div class="row gridHead gridRow"><div class="gridCell">SKU</div><div class="gridCell">Prodotto</div><div class="gridCell gridRight">Da ubicare</div><div class="gridCell gridRight">Ubicazione</div></div>` + rows;
       if(hint) hint.textContent = `Mostrati ${Math.min(out.length, 120).toLocaleString("it-IT")} di ${out.length.toLocaleString("it-IT")}. Tocca una riga per assegnare una posizione. Se restano più di ${RACK_PALLET_CAPACITY} pz, puoi confermare tutti i pezzi nella stessa posizione oppure scegliere una quantità parziale.`;
     }
 
@@ -6791,7 +6863,11 @@ function currentInv(){
         for(const it of items){
           const totalQty = stockQtyFromDoc(it || {});
           if(totalQty <= 0) continue;
-          out.push(...getAllocatedLotRowsFromItem(it || {}, loc));
+          const allocatedQty = rackAllocatedQtyFromDoc(it || {});
+          if(allocatedQty <= 0) continue;
+          const rackLocations = readRackLocationsFromDoc(it || {});
+          if(!rackLocations.length) continue;
+          out.push({ ...it, loc, qty:allocatedQty, totalQty, allocatedQty, remainingQty: rackUnallocatedQtyFromDoc(it || {}), rackLocations });
         }
       };
       pushLoc("concamarise");
@@ -6803,9 +6879,6 @@ function currentInv(){
         const la = String(a.loc || "");
         const lb = String(b.loc || "");
         if(la !== lb) return la.localeCompare(lb);
-        const lotA = String(a.lot || "");
-        const lotB = String(b.lot || "");
-        if(lotA !== lotB) return lotB.localeCompare(lotA);
         return String(a.sku || "").localeCompare(String(b.sku || ""));
       });
       return out;
@@ -6816,8 +6889,6 @@ function currentInv(){
       const count = $("homeLocatedCount");
       const hint = $("homeLocatedHint");
       if(!list || !count) return;
-      list.classList.remove("cols4");
-      list.classList.add("cols5");
 
       if(!state.user?.isWhitelisted){
         count.textContent = "—";
@@ -6843,23 +6914,21 @@ function currentInv(){
         const allocatedQty = Number.isFinite(Number(it.allocatedQty)) ? Math.round(Number(it.allocatedQty)) : (Number.isFinite(Number(it.qty)) ? Math.round(Number(it.qty)) : 0);
         const totalQty = Number.isFinite(Number(it.totalQty)) ? Math.round(Number(it.totalQty)) : allocatedQty;
         const remainingQty = Number.isFinite(Number(it.remainingQty)) ? Math.round(Number(it.remainingQty)) : 0;
-        const lotLabel = escapeHtml(it.lotLabel || lotLabelFromId(it.lot));
-        const rackText = rackLocationDisplayFromItemForLot(it, it.lot);
-        const metaLine = [locLabel, `Totale SKU: ${totalQty}`, `Lotto: ${it.lotDateLabel || lotDateLabelFromId(it.lot)}`, remainingQty ? `Da ubicare lotto: ${remainingQty}` : ""].filter(Boolean).join(" • ");
+        const rackText = rackLocationDisplayFromItem(it);
+        const metaLine = [locLabel, `Totale: ${totalQty}`, remainingQty ? `Da ubicare: ${remainingQty}` : ""].filter(Boolean).join(" • ");
         return `
-          <div class="row gridRow" role="button" tabindex="0" data-sku="${sku}" data-loc="${escapeHtml(it.loc || "")}" data-lot="${escapeHtml(it.lot || "")}" data-action="openHomeLocatedItem">
+          <div class="row gridRow" role="button" tabindex="0" data-sku="${sku}" data-loc="${escapeHtml(it.loc || "")}" data-action="openHomeLocatedItem">
             <div class="gridCell gridSku">${sku}</div>
             <div class="gridCell">
               <div class="gridProdMain">${titleMain}</div>
               <div class="gridProdSub">${escapeHtml(metaLine)}</div>
             </div>
             <div class="gridCell gridRight"><span class="badge ok">${escapeHtml(String(allocatedQty))}</span></div>
-            <div class="gridCell gridRight"><span class="badge">${lotLabel}</span></div>
             <div class="gridCell gridRight"><span class="badge">${escapeHtml(rackText)}</span></div>
           </div>`;
       }).join("");
 
-      list.innerHTML = `<div class="row gridHead gridRow"><div class="gridCell">SKU</div><div class="gridCell">Prodotto</div><div class="gridCell gridRight">Ubicato</div><div class="gridCell gridRight">Lotto</div><div class="gridCell gridRight">Ubicazione</div></div>` + rows;
+      list.innerHTML = `<div class="row gridHead gridRow"><div class="gridCell">SKU</div><div class="gridCell">Prodotto</div><div class="gridCell gridRight">Ubicato</div><div class="gridCell gridRight">Ubicazione</div></div>` + rows;
       if(hint) hint.textContent = `Mostrati ${Math.min(out.length, 300).toLocaleString("it-IT")} di ${out.length.toLocaleString("it-IT")}. Tocca una riga per vedere o modificare l’ubicazione.`;
     }
 
@@ -7978,7 +8047,6 @@ function closeSheet(kind){
                 title: title || "",
                 titleNorm: normalizeText(title || sku),
                 qty: api.increment(delta),
-                ...stockLotPatchForWrite(api, delta, tsClient, "campo_libero", p.flowDocId || "MANUAL"),
                 updatedAt: api.serverTimestamp(),
                 updatedAtClient: tsClient,
                 updatedBy: state.user.email || "",
@@ -8109,11 +8177,10 @@ function closeSheet(kind){
 
     
     // --- Dettagli articolo (sheet) ---
-    function openProductDetailsSheet(sku, lot=""){
+    function openProductDetailsSheet(sku){
       const s = toSkuId(sku||"");
       if(!s) return;
       state.ui.productDetailsSku = s;
-      state.ui.productDetailsLot = normalizeLotId(lot || "");
       state.ui.productDetailsEditMode = LOCATION_ONLY_MODE ? true : false;
       clearPdFieldErrors();
       renderProductDetailsSheet();
@@ -8649,22 +8716,17 @@ function closeSheet(kind){
       const pickerExclude = remainingQty > 0 ? readRackLocationsFromDoc(it || {}) : rackLocations;
       const excludeSet = new Set(normalizeRackLocationsList(pickerExclude));
       const availableCount = RACK_LOCATION_OPTIONS.filter(code => !excludeSet.has(code) && isRackLocationAvailableForItem(code, sku, loc)).length;
-      const updated = it?.updatedAtClient ? fmtDate(it.updatedAtClient) : (it?.updatedAt ? fmtDate(it.updatedAt) : "—");
       const canEdit = !!state.user?.isAdmin;
 
       if(titleEl) titleEl.textContent = titleMain;
-      if(sub) sub.textContent = `${sku} • ${prettyLoc(loc)} • Lotto: ${lotLabelFromId(selectedLot)} (${lotDateLabelFromId(selectedLot)}) • Disponibilità lotto: ${qty} • Da ubicare: ${remainingQty} • Ubicazione: ${rackText}`;
+      if(sub) sub.textContent = `${sku} • ${prettyLoc(loc)} • Lotto: ${lotLabelFromId(selectedLot)} (${lotDateLabelFromId(selectedLot)}) • Disponibilità lotto: ${qty} • Ubicato lotto: ${allocatedQty} • Da ubicare: ${remainingQty} • Ubicazione: ${rackText}`;
 
       const cereaTransferNotice = (loc === "cerea") ? " Il prodotto è in Cerea: la quantità confermata viene spostata automaticamente in Concamarise." : "";
       hint.innerHTML = canEdit
         ? (remainingQty > RACK_PALLET_CAPACITY
-            ? `Scegli una posizione: appena la selezioni puoi confermare tutti i pezzi nella stessa scaffalatura oppure scegliere una quantità parziale. Il resto rimane da ubicare in cloud.${cereaTransferNotice}`
+            ? `Scegli una posizione: puoi confermare tutti i pezzi nella stessa scaffalatura oppure scegliere una quantità parziale anche superiore a ${RACK_PALLET_CAPACITY} pz. Il residuo rimane in Da ubicare in cloud.${cereaTransferNotice}`
             : `Scegli una posizione: appena la selezioni parte la conferma browser e salva subito in cloud.${cereaTransferNotice}`)
         : "Sola lettura: modifica ubicazione disponibile solo per Admin.";
-
-      const alreadyLine = rackText !== "—"
-        ? `<div class="pdLine"><div class="pdLabel">Già ubicato</div><div class="pdValue mono">${escapeHtml(rackText)}</div></div>`
-        : `<div class="pdLine"><div class="pdLabel">Già ubicato</div><div class="pdValue">—</div></div>`;
 
       content.innerHTML = `
         <div class="pd">
@@ -8672,10 +8734,14 @@ function closeSheet(kind){
             <div class="pdSectionTitle">Ubicazione</div>
             <div class="pdLine"><div class="pdLabel">Lotto</div><div class="pdValue mono">${escapeHtml(lotLabelFromId(selectedLot))}</div></div>
             <div class="pdLine"><div class="pdLabel">Data produzione / approvvigionamento</div><div class="pdValue">${escapeHtml(lotDateLabelFromId(selectedLot))}</div></div>
+            <div class="pdLine"><div class="pdLabel">Disponibilità lotto</div><div class="pdValue">${escapeHtml(String(qty))} pz</div></div>
+            <div class="pdLine"><div class="pdLabel">Già ubicato lotto</div><div class="pdValue">${escapeHtml(String(allocatedQty))} pz</div></div>
+            <div class="pdLine"><div class="pdLabel">Da ubicare lotto</div><div class="pdValue">${escapeHtml(String(remainingQty))} pz</div></div>
             <div class="field" style="margin-top:10px">
               <label class="fieldLabel">Ubicazione scaffale</label>
               ${rackLocationPickerHtml(pickerSelected, sku, loc, { multiple:false, disabled: !canEdit, exclude: pickerExclude, hideEmpty:true })}
               <div class="fieldError" data-err="rackLocation" style="display:none;"></div>
+              <div class="hint" style="margin-top:6px">Ubicazioni libere: ${availableCount}/${RACK_LOCATION_OPTIONS.length}. Ogni assegnazione crea un movimento Firestore con ID/chiave movimento.</div>
             </div>
           </div>
         </div>
@@ -8782,7 +8848,7 @@ function closeSheet(kind){
       }else if(remainingBefore > 0){
         qtyToAssign = remainingBefore;
       }else{
-        // Prodotto già completamente ubicato: cambio posizione unica e assegno tutta la disponibilità.
+        // Lotto già completamente ubicato: cambio posizione unica e assegno tutta la disponibilità del lotto.
         qtyToAssign = qty;
       }
 
@@ -8809,6 +8875,7 @@ function closeSheet(kind){
           const nowClient = Date.now();
           const who = state.user?.email || state.user?.emailLower || state.user?.uid || "";
           const title = squashWhitespace(it.title || sku) || sku;
+          const transferMovementId = api.doc(api.collection(db, COL_PRODUCTS, sku, SUB_MOVES)).id;
 
           let movedQty = qtyToAssign;
           let finalRemaining = remainingAfterPreview;
@@ -8852,7 +8919,7 @@ function closeSheet(kind){
 
             const destCleanAllocations = normalizeRackAllocationsForWrite([
               ...destAllocations,
-              { code:selectedCode, lot, qty:movedQty }
+              { code:selectedCode, lot, qty:movedQty, movementId:transferMovementId, movementKey:transferMovementId, createdAtClient:nowClient }
             ]);
             const destCleanLocations = normalizeRackLocationsList(destCleanAllocations.map(x=>x.code));
             const destCleanLocation = destCleanLocations[0] || "";
@@ -8860,8 +8927,8 @@ function closeSheet(kind){
 
             const sourceNewQty = sourceQty - movedQty;
             const movingAllocatedLot = sourceRemaining <= 0;
-            const sourceCleanStockLots = stockLotsWithDeltaForWrite(sourceFresh, lot, -movedQty, nowClient, "ubicazione_transfer", selectedCode);
-            const destCleanStockLots = stockLotsWithDeltaForWrite(destFresh, lot, movedQty, nowClient, "ubicazione_transfer", selectedCode);
+            const sourceCleanStockLots = stockLotsWithDeltaForWrite(sourceFresh, lot, -movedQty, nowClient, "ubicazione_transfer", transferMovementId);
+            const destCleanStockLots = stockLotsWithDeltaForWrite(destFresh, lot, movedQty, nowClient, "ubicazione_transfer", transferMovementId);
             if(sourceNewQty > 0){
               const sourceCleanAllocations = movingAllocatedLot ? sourceAllocations.filter(x=> (normalizeLotId(x.lot) || LOT_LEGACY_ID) !== lot) : sourceAllocations;
               const sourceCleanLocations = normalizeRackLocationsList(sourceCleanAllocations.map(x=>x.code));
@@ -8874,6 +8941,9 @@ function closeSheet(kind){
                 rackLocations: sourceCleanLocations,
                 rackAllocations: sourceCleanAllocations,
                 stockLots: sourceCleanStockLots,
+                lastRackMovementId: transferMovementId,
+                lastRackMovementKey: transferMovementId,
+                lastRackMovementLot: lot,
                 updatedAt: api.serverTimestamp(),
                 updatedAtClient: nowClient,
                 updatedBy: who,
@@ -8892,6 +8962,9 @@ function closeSheet(kind){
               rackLocations: destCleanLocations,
               rackAllocations: destCleanAllocations,
               stockLots: destCleanStockLots,
+              lastRackMovementId: transferMovementId,
+              lastRackMovementKey: transferMovementId,
+              lastRackMovementLot: lot,
               lastProductionLot: lot,
               lastProductionAtClient: nowClient,
               updatedAt: api.serverTimestamp(),
@@ -8907,6 +8980,9 @@ function closeSheet(kind){
               rackLocation: destCleanLocation,
               rackLocations: destCleanLocations,
               rackAllocations: destCleanAllocations,
+              lastRackMovementId: transferMovementId,
+              lastRackMovementKey: transferMovementId,
+              lastRackMovementLot: lot,
               lastProductionLot: lot,
               lastProductionAtClient: nowClient,
               lastSeenAt: api.serverTimestamp(),
@@ -8918,6 +8994,9 @@ function closeSheet(kind){
 
             addProductMovementToBatch(tx, api, db, sku, {
               type: "move",
+              movementId: transferMovementId,
+              movementKey: transferMovementId,
+              writeKey: transferMovementId,
               qtySigned: movedQty,
               deltaSigned: movedQty,
               beforeFromQty: sourceQty,
@@ -8930,6 +9009,8 @@ function closeSheet(kind){
               note: `Ubicazione ${selectedCode} con trasferimento automatico Cerea → Concamarise`,
               rackLocation: selectedCode,
               rackLocations: destCleanLocations,
+              assignedQty: movedQty,
+              remainingQty: finalRemaining,
               lot,
               lotLabel: lotLabelFromId(lot),
               createdAtClient: nowClient
@@ -8943,6 +9024,7 @@ function closeSheet(kind){
           state.ui.productDetailsEditMode = false;
           closeSheet("productDetails");
           renderHomeDashboard();
+          renderHomeLogsBox();
           return;
         }
 
@@ -8951,8 +9033,10 @@ function closeSheet(kind){
         const nowClient = Date.now();
         const who = state.user?.email || state.user?.emailLower || state.user?.uid || "";
         const title = squashWhitespace(it.title || sku) || sku;
+        const locationMovementId = api.doc(api.collection(db, COL_PRODUCTS, sku, SUB_MOVES)).id;
 
         let finalRemaining = remainingAfterPreview;
+        let assignedQtyFinal = qtyToAssign;
         await api.runTransaction(db, async (tx)=>{
           const snap = await tx.get(itemRef);
           if(!snap.exists()) throw new Error("Prodotto non trovato.");
@@ -8964,25 +9048,31 @@ function closeSheet(kind){
           const freshLotQty = stockLotQtyFromDoc(fresh, lot);
           const freshRemaining = rackUnallocatedQtyByLotFromDoc(fresh, lot);
           let cleanAllocations;
+          let beforeAllocatedQty = rackAllocatedQtyByLotFromDoc(fresh, lot);
+          let afterAllocatedQty = beforeAllocatedQty;
 
           if(freshLotQty <= 0) throw new Error("Lotto non trovato o senza disponibilità.");
 
           if(freshRemaining > 0){
             if(freshAllocations.some(x=>x.code === selectedCode)) throw new Error("Questa posizione è già usata per questo prodotto. Scegli una nuova posizione libera.");
             if(qtyToAssign > freshRemaining) throw new Error(`Restano da ubicare ${freshRemaining} pz per questo lotto.`);
+            assignedQtyFinal = qtyToAssign;
             cleanAllocations = normalizeRackAllocationsForWrite([
               ...freshAllocations,
-              { code:selectedCode, lot, qty:qtyToAssign }
+              { code:selectedCode, lot, qty:assignedQtyFinal, movementId:locationMovementId, movementKey:locationMovementId, createdAtClient:nowClient }
             ]);
-            finalRemaining = Math.max(0, freshRemaining - qtyToAssign);
+            finalRemaining = Math.max(0, freshRemaining - assignedQtyFinal);
+            afterAllocatedQty = beforeAllocatedQty + assignedQtyFinal;
           }else{
             // Riposizionamento del singolo lotto già interamente ubicato.
+            assignedQtyFinal = freshLotQty;
             const otherLotAllocations = freshAllocations.filter(x=> (normalizeLotId(x.lot) || LOT_LEGACY_ID) !== lot);
             cleanAllocations = normalizeRackAllocationsForWrite([
               ...otherLotAllocations,
-              { code:selectedCode, lot, qty:freshLotQty }
+              { code:selectedCode, lot, qty:assignedQtyFinal, movementId:locationMovementId, movementKey:locationMovementId, createdAtClient:nowClient }
             ]);
             finalRemaining = 0;
+            afterAllocatedQty = assignedQtyFinal;
           }
 
           const cleanLocations = normalizeRackLocationsList(cleanAllocations.map(x=>x.code));
@@ -8995,6 +9085,9 @@ function closeSheet(kind){
             rackLocation: cleanLocation,
             rackLocations: cleanLocations,
             rackAllocations: cleanAllocations,
+            lastRackMovementId: locationMovementId,
+            lastRackMovementKey: locationMovementId,
+            lastRackMovementLot: lot,
             updatedAt: api.serverTimestamp(),
             updatedAtClient: nowClient,
             updatedBy: who,
@@ -9008,6 +9101,9 @@ function closeSheet(kind){
             rackLocation: cleanLocation,
             rackLocations: cleanLocations,
             rackAllocations: cleanAllocations,
+            lastRackMovementId: locationMovementId,
+            lastRackMovementKey: locationMovementId,
+            lastRackMovementLot: lot,
             lastProductionLot: lot,
             lastProductionAtClient: nowClient,
             lastSeenAt: api.serverTimestamp(),
@@ -9016,10 +9112,36 @@ function closeSheet(kind){
             lastSeenLocation: loc,
             lastSeenKind: "location_update"
           }, { merge:true });
+
+          addProductMovementToBatch(tx, api, db, sku, {
+            type: "ubicazione",
+            movementId: locationMovementId,
+            movementKey: locationMovementId,
+            writeKey: locationMovementId,
+            qtySigned: assignedQtyFinal,
+            deltaSigned: 0,
+            assignedQty: assignedQtyFinal,
+            beforeAllocatedQty,
+            afterAllocatedQty,
+            remainingQty: finalRemaining,
+            fromWarehouse: loc,
+            toWarehouse: loc,
+            location: loc,
+            source: "ubicazione",
+            note: `Ubicazione ${selectedCode} • lotto ${lotLabelFromId(lot)}`,
+            rackLocation: selectedCode,
+            rackLocations: cleanLocations,
+            lot,
+            lotLabel: lotLabelFromId(lot),
+            deleteLocked: true,
+            locked: true,
+            createdAtClient: nowClient
+          });
         });
 
-        showToast("Ubicazione salvata", `${sku} → ${selectedCode} • ${qtyToAssign} pz${finalRemaining ? ` • restano ${finalRemaining}` : ""}`, 2400);
+        showToast("Ubicazione salvata", `${sku} → ${selectedCode} • ${assignedQtyFinal} pz${finalRemaining ? ` • restano ${finalRemaining}` : ""}`, 2400);
         state.ui.productDetailsSku = null;
+        state.ui.productDetailsLot = "";
         state.ui.productDetailsEditMode = false;
         closeSheet("productDetails");
         renderHomeDashboard();
@@ -9390,8 +9512,8 @@ function closeSheet(kind){
     function canDeleteProductMovement(m){
       if(!m || !m.id) return false;
       const type = String(m.type || "");
-      // Rinomina SKU: eliminarla richiederebbe rinominare a ritroso l’anagrafica, quindi resta protetta.
-      if(type === "manual_rename") return false;
+      // Rinomina SKU e ubicazioni pure: eliminarle richiederebbe ricostruire lo stato scaffale, quindi restano protette.
+      if(type === "manual_rename" || type === "ubicazione" || type === "location_assign") return false;
       if(m.locked === true || m.deleteLocked === true) return false;
       return true;
     }
@@ -10073,7 +10195,6 @@ async function loadProductFromDetails(){
             title,
             titleNorm: normalizeText(title || sku),
             qty: api.increment(qtyToLoad),
-            ...stockLotPatchForWrite(api, qtyToLoad, nowClient, "manual_load", "modale_prodotto"),
             location: loc,
             updatedAt: api.serverTimestamp(),
             updatedAtClient: nowClient,
@@ -10597,7 +10718,6 @@ async function saveProductFromDetails(){
         }else{
           showToast("Spostato", `${res.moved} pz spostati in ${prettyLoc(res.dst)}.`, 2000);
           state.ui.productDetailsSku = null;
-          state.ui.productDetailsLot = "";
           state.ui.productDetailsEditMode = false;
           state.ui.productEditSku = null;
           closeSheet("productDetails");
@@ -11135,7 +11255,6 @@ async function applyFlow(kind){
                 title: title || "",
                 titleNorm: normalizeText(title || sku),
                 qty: api.increment(delta),
-                ...(kind === "carica" ? stockLotPatchForWrite(api, delta, tsClient, "flusso_pdf", p.flowDocId || wfId || "") : {}),
                 ...rackClearData,
                 updatedAt: api.serverTimestamp(),
                 updatedAtClient: tsClient,
@@ -11461,7 +11580,7 @@ async function applyFlow(kind){
       $("btnCloseProducts")?.addEventListener("click", ()=> closeSheet("products"));
       $("sheetProducts")?.addEventListener("click", (e)=>{ if(e.target?.id==="sheetProducts") closeSheet("products"); });
 
-      $("btnCloseProductDetails")?.addEventListener("click", ()=>{ state.ui.productDetailsSku = null; state.ui.productDetailsLot = ""; state.ui.productDetailsEditMode = false; clearPdFieldErrors(); stopPdMovementsWatch(); stopProductComboWatch(); closeSheet("productDetails"); });
+      $("btnCloseProductDetails")?.addEventListener("click", ()=>{ state.ui.productDetailsSku = null; state.ui.productDetailsEditMode = false; clearPdFieldErrors(); stopPdMovementsWatch(); stopProductComboWatch(); closeSheet("productDetails"); });
 $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
   if(!state.ui.productDetailsSku) return;
   if(!state.user?.isAdmin){
@@ -11480,7 +11599,7 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
   }
 });
 
-      $("sheetProductDetails")?.addEventListener("click", (e)=>{ if(e.target?.id==="sheetProductDetails"){ state.ui.productDetailsSku = null; state.ui.productDetailsLot = ""; state.ui.productDetailsEditMode = false; clearPdFieldErrors(); stopPdMovementsWatch(); stopProductComboWatch(); closeSheet("productDetails"); } });
+      $("sheetProductDetails")?.addEventListener("click", (e)=>{ if(e.target?.id==="sheetProductDetails"){ state.ui.productDetailsSku = null; state.ui.productDetailsEditMode = false; clearPdFieldErrors(); stopPdMovementsWatch(); stopProductComboWatch(); closeSheet("productDetails"); } });
 
       $("productDetailsContent")?.addEventListener("click", (e)=>{
         const btn = e.target?.closest?.("[data-action='pdDeleteMove']");
@@ -11527,7 +11646,6 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
         if(aSaveLocationOnly){ saveLocationOnlyFromDetails(); return; }
         if(aCloseLocationOnly){
           state.ui.productDetailsSku = null;
-          state.ui.productDetailsLot = "";
           state.ui.productDetailsEditMode = false;
           clearPdFieldErrors();
           closeSheet("productDetails");
@@ -11754,9 +11872,8 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
           if(!row) return;
           const sku = row.getAttribute("data-sku") || "";
           const loc = row.getAttribute("data-loc") || "";
-          const lot = row.getAttribute("data-lot") || "";
           if(loc) state.route.loc = loc;
-          openProductDetailsSheet(sku, lot);
+          openProductDetailsSheet(sku);
         });
         sottList.addEventListener("keydown", (e)=>{
           if(e.key!=="Enter" && e.key!==" ") return;
@@ -11765,9 +11882,8 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
           e.preventDefault();
           const sku = row.getAttribute("data-sku") || "";
           const loc = row.getAttribute("data-loc") || "";
-          const lot = row.getAttribute("data-lot") || "";
           if(loc) state.route.loc = loc;
-          openProductDetailsSheet(sku, lot);
+          openProductDetailsSheet(sku);
         });
       }
       const homeLow = $("homeLowStockList");
@@ -11777,9 +11893,8 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
           if(!row) return;
           const sku = row.getAttribute("data-sku") || "";
           const loc = row.getAttribute("data-loc") || "";
-          const lot = row.getAttribute("data-lot") || "";
           if(loc) state.route.loc = loc;
-          openProductDetailsSheet(sku, lot);
+          openProductDetailsSheet(sku);
         });
         homeLow.addEventListener("keydown", (e)=>{
           if(e.key!=="Enter" && e.key!==" ") return;
@@ -11788,9 +11903,8 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
           e.preventDefault();
           const sku = row.getAttribute("data-sku") || "";
           const loc = row.getAttribute("data-loc") || "";
-          const lot = row.getAttribute("data-lot") || "";
           if(loc) state.route.loc = loc;
-          openProductDetailsSheet(sku, lot);
+          openProductDetailsSheet(sku);
         });
       }
 
@@ -11801,9 +11915,8 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
           if(!row) return;
           const sku = row.getAttribute("data-sku") || "";
           const loc = row.getAttribute("data-loc") || "";
-          const lot = row.getAttribute("data-lot") || "";
           if(loc) state.route.loc = loc;
-          openProductDetailsSheet(sku, lot);
+          openProductDetailsSheet(sku);
         });
         homeNoLoc.addEventListener("keydown", (e)=>{
           if(e.key!=="Enter" && e.key!==" ") return;
@@ -11812,9 +11925,8 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
           e.preventDefault();
           const sku = row.getAttribute("data-sku") || "";
           const loc = row.getAttribute("data-loc") || "";
-          const lot = row.getAttribute("data-lot") || "";
           if(loc) state.route.loc = loc;
-          openProductDetailsSheet(sku, lot);
+          openProductDetailsSheet(sku);
         });
       }
 
@@ -11825,9 +11937,8 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
           if(!row) return;
           const sku = row.getAttribute("data-sku") || "";
           const loc = row.getAttribute("data-loc") || "";
-          const lot = row.getAttribute("data-lot") || "";
           if(loc) state.route.loc = loc;
-          openProductDetailsSheet(sku, lot);
+          openProductDetailsSheet(sku);
         });
         homeLocated.addEventListener("keydown", (e)=>{
           if(e.key!=="Enter" && e.key!==" ") return;
@@ -11836,9 +11947,8 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
           e.preventDefault();
           const sku = row.getAttribute("data-sku") || "";
           const loc = row.getAttribute("data-loc") || "";
-          const lot = row.getAttribute("data-lot") || "";
           if(loc) state.route.loc = loc;
-          openProductDetailsSheet(sku, lot);
+          openProductDetailsSheet(sku);
         });
       }
 
