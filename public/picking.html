@@ -2,13 +2,23 @@
 <html lang="it" translate="no">
 <head>
 
-
+  <link rel="preconnect" href="https://www.gstatic.com" crossorigin>
+<link rel="dns-prefetch" href="//www.gstatic.com">
+<link rel="preconnect" href="https://firestore.googleapis.com" crossorigin>
+<link rel="dns-prefetch" href="//firestore.googleapis.com">
+<link rel="modulepreload" href="https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js" crossorigin>
+<link rel="modulepreload" href="https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js" crossorigin>
+<link rel="modulepreload" href="https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js" crossorigin>
+<link rel="stylesheet" href="/public1/app.css">
+<script src="/public1/app.js" defer></script>
 
   <!-- iOS Google Auth stabilizer (files in /public1) -->
+<link rel="stylesheet" href="/public1/auth_ios.css?v=5">
+<script defer src="/public1/auth_ios.js?v=5"></script>
+
+  <!-- Picking performance helpers (files in /public1) -->
 <link rel="stylesheet" href="/public1/gc_perf.css">
 <script defer src="/public1/gc_perf.js"></script>
-
-
 
   
   <meta charset="utf-8" />
@@ -20,12 +30,12 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" />
 
-  <link rel="manifest" href="./manifest.webmanifest" />
+  <link rel="manifest" href="/manifest.webmanifest?v=20260118" />
   <meta name="mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <meta name="apple-mobile-web-app-title" content="Hub Inventario Amazon" />
-  <link rel="apple-touch-icon" href="./icons/icon-180.png" />
+  <link rel="apple-touch-icon" href="/icons/icon-180.png" />
   <meta name="format-detection" content="telephone=no" />
 
   <script>
@@ -5092,12 +5102,9 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
         const __FORCE_REDIRECT = __IS_APPLE_MOBILE || __IS_STANDALONE;
 
         async function setBestAuthPersistence(){
-          const ua = navigator.userAgent || "";
-          const isAppleMobile = /iPad|iPhone|iPod/.test(ua) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
-          const candidates = (isAppleMobile
-            ? [authMod.browserLocalPersistence, authMod.indexedDBLocalPersistence]
-            : [authMod.indexedDBLocalPersistence, authMod.browserLocalPersistence]
-          ).filter(Boolean);
+          // Deve essere identica a Index: browserLocalPersistence prima.
+          // Così, se accedi da Picking, tornando su Index la stessa sessione Firebase viene letta subito.
+          const candidates = [authMod.browserLocalPersistence, authMod.indexedDBLocalPersistence].filter(Boolean);
 
           for(const p of candidates){
             try{
@@ -5190,9 +5197,23 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
         try{ await authMod.getRedirectResult(auth); }catch(_e){}
 
         // auth state
+        const __AUTH_ONCE_KEYS = ["gc_webapp_signed_once", "gc_hub_signed_once", "amz_inventory_last_authed_v1"];
+        function __readSignedOnce(){
+          try{
+            return __AUTH_ONCE_KEYS.some((k)=>localStorage.getItem(k) === "1");
+          }catch(_e){
+            return false;
+          }
+        }
+        function __markSignedOnce(){
+          try{
+            __AUTH_ONCE_KEYS.forEach((k)=>localStorage.setItem(k, "1"));
+          }catch(_e){}
+        }
+
         state.authGateState = "restoring";
         state.authGateMessage = "Ripristino sessione…";
-        const __hadSession = (()=>{ try{ return localStorage.getItem("amz_inventory_last_authed_v1")==="1"; }catch(_e){ return false; } })();
+        const __hadSession = __readSignedOnce();
         toggleAuthOverlay(__hadSession);
         syncHeaderSub();
 
@@ -5224,7 +5245,7 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
               setView("home");
               showToast("Account non abilitato", "Contatta l’admin per l’accesso a questo hub.");
             }
-            try{ localStorage.setItem("amz_inventory_last_authed_v1", "1"); }catch(_e){}
+            __markSignedOnce();
             return;
           }
 
@@ -12595,6 +12616,55 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
     bindUI();
     initFirebase();
   </script>
+
+
+<script>
+/* Keep navigation inside standalone/app mode (iOS A2HS + PWA) */
+(function(){
+  var isStandalone = false;
+  try{
+    isStandalone = (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) || !!window.navigator.standalone;
+  }catch(e){}
+  if(!isStandalone) return;
+
+  document.addEventListener('click', function(e){
+    var a = e.target && (e.target.closest ? e.target.closest('a[href]') : null);
+    if(!a) return;
+    if(a.target && a.target.toLowerCase() === '_blank') return;
+
+    var href = a.getAttribute('href') || '';
+    if(!href || href.startsWith('#') || href.startsWith('mailto:') || href.startsWith('tel:')) return;
+
+    try{
+      var url = new URL(a.href, location.href);
+      if(url.origin === location.origin){
+        e.preventDefault();
+        location.href = url.href;
+      }
+    }catch(_e){}
+  }, true);
+})();
+
+/* Register shared Service Worker so app-mode navigation/cache/auth helpers stay consistent with Index */
+(function(){
+  if(!('serviceWorker' in navigator)) return;
+  const registerSw = function(){
+    navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(function(){});
+  };
+  const schedule = function(){
+    if('requestIdleCallback' in window){
+      requestIdleCallback(registerSw, { timeout: 2500 });
+      return;
+    }
+    setTimeout(registerSw, 1200);
+  };
+  if(document.readyState === 'complete'){
+    schedule();
+    return;
+  }
+  window.addEventListener('load', schedule, { once:true });
+})();
+</script>
 
   <!--
     Firestore data model:
