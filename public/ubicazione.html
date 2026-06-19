@@ -1737,16 +1737,19 @@
       padding: 4px !important;
     }
 
-    #homeNoLocationBox{
+    #homeNoLocationBox,
+    #homeLocatedBox{
       margin-top: 14px;
     }
 
-    #homeNoLocationBox .miniTitle{
+    #homeNoLocationBox .miniTitle,
+    #homeLocatedBox .miniTitle{
       font-size: 18px;
       letter-spacing: -0.02em;
     }
 
-    #homeNoLocationList .row.gridRow{
+    #homeNoLocationList .row.gridRow,
+    #homeLocatedList .row.gridRow{
       cursor: pointer;
     }
 
@@ -1770,7 +1773,7 @@
         </div>
         <div class="brandText">
           <div class="brandTitle">Hub Inventario Amazon</div>
-          <div class="brandSub" id="brandSub">Da ubicare • cloud live</div>
+          <div class="brandSub" id="brandSub">Ubicazioni • cloud live</div>
         </div>
       </div>
 
@@ -1927,8 +1930,21 @@
               </div>
               <div class="pill" id="homeNoLocationCount">—</div>
             </div>
-            <div class="gridTable" id="homeNoLocationList" style="margin-top:12px;"></div>
+            <div class="gridTable cols4" id="homeNoLocationList" style="margin-top:12px;"></div>
             <div class="hint" id="homeNoLocationHint" style="margin-top:10px"></div>
+          </div>
+
+          <!-- Prodotti ubicati: prodotti con disponibilità positiva e ubicazione già assegnata -->
+          <div class="miniCard" id="homeLocatedBox">
+            <div class="miniTop">
+              <div>
+                <div class="miniTitle">Ubicati</div>
+                <div class="miniSub">Prodotti con disponibilità positiva e ubicazione assegnata • cloud live</div>
+              </div>
+              <div class="pill" id="homeLocatedCount">—</div>
+            </div>
+            <div class="gridTable cols4" id="homeLocatedList" style="margin-top:12px;"></div>
+            <div class="hint" id="homeLocatedHint" style="margin-top:10px"></div>
           </div>
 </div>
       </div>
@@ -6000,6 +6016,7 @@ function currentInv(){
       const count = $("homeNoLocationCount");
       const hint = $("homeNoLocationHint");
       if(!list || !count) return;
+      list.classList.add("cols4");
 
       if(!state.user?.isWhitelisted){
         count.textContent = "—";
@@ -6023,6 +6040,7 @@ function currentInv(){
         const sku = escapeHtml(toSkuId(it.sku || it.id || ""));
         const locLabel = escapeHtml(prettyLoc(it.loc));
         const qty = Number.isFinite(Number(it.qty)) ? Number(it.qty) : 0;
+        const rackText = rackLocationDisplayFromItem(it);
         const when = it.updatedAtClient ? fmtDate(it.updatedAtClient) : (it.updatedAt ? fmtDate(it.updatedAt) : "");
         const metaLine = [locLabel, when ? `Agg.: ${when}` : "", `Da produzione/carico cloud`].filter(Boolean).join(" • ");
         return `
@@ -6032,12 +6050,85 @@ function currentInv(){
               <div class="gridProdMain">${titleMain}</div>
               <div class="gridProdSub">${escapeHtml(metaLine)}</div>
             </div>
-            <div class="badge warn">${escapeHtml(String(qty))}</div>
+            <div class="gridCell gridRight"><span class="badge warn">${escapeHtml(String(qty))}</span></div>
+            <div class="gridCell gridRight"><span class="badge">${escapeHtml(rackText)}</span></div>
           </div>`;
       }).join("");
 
-      list.innerHTML = `<div class="row gridHead gridRow"><div class="gridCell">SKU</div><div class="gridCell">Prodotto</div><div class="gridCell gridRight">Q.tà</div></div>` + rows;
+      list.innerHTML = `<div class="row gridHead gridRow"><div class="gridCell">SKU</div><div class="gridCell">Prodotto</div><div class="gridCell gridRight">Q.tà</div><div class="gridCell gridRight">Ubicazione</div></div>` + rows;
       if(hint) hint.textContent = `Mostrati ${Math.min(out.length, 120).toLocaleString("it-IT")} di ${out.length.toLocaleString("it-IT")}. Tocca una riga per assegnare l’ubicazione.`;
+    }
+
+
+    function getItemsWithRackLocations(){
+      const out = [];
+      const pushLoc = (loc)=>{
+        const items = (state.inventory?.[loc]?.items || []);
+        for(const it of items){
+          const q = Number.isFinite(Number(it?.qty)) ? Number(it.qty) : 0;
+          if(q <= 0) continue;
+          const rackLocations = readRackLocationsFromDoc(it || {});
+          if(!rackLocations.length) continue;
+          out.push({ ...it, loc, qty:q, rackLocations });
+        }
+      };
+      pushLoc("concamarise");
+      pushLoc("cerea");
+      out.sort((a,b)=>{
+        const ra = (a.rackLocations || []).join(",");
+        const rb = (b.rackLocations || []).join(",");
+        if(ra !== rb) return ra.localeCompare(rb);
+        const la = String(a.loc || "");
+        const lb = String(b.loc || "");
+        if(la !== lb) return la.localeCompare(lb);
+        return String(a.sku || "").localeCompare(String(b.sku || ""));
+      });
+      return out;
+    }
+
+    function renderHomeLocatedBox(){
+      const list = $("homeLocatedList");
+      const count = $("homeLocatedCount");
+      const hint = $("homeLocatedHint");
+      if(!list || !count) return;
+
+      if(!state.user?.isWhitelisted){
+        count.textContent = "—";
+        list.innerHTML = `<div class="hint">Accedi per vedere i prodotti ubicati.</div>`;
+        if(hint) hint.textContent = "";
+        return;
+      }
+
+      const out = getItemsWithRackLocations();
+      count.textContent = fmtN(out.length);
+
+      if(!out.length){
+        list.innerHTML = `<div class="hint">Nessun prodotto ubicato.</div>`;
+        if(hint) hint.textContent = "";
+        return;
+      }
+
+      const rows = out.slice(0, 300).map(it=>{
+        const meta = parseTitleMeta(it.title || "");
+        const titleMain = meta.main ? escapeHtml(meta.main) : (it.title ? escapeHtml(it.title) : "<span class='muted'>(senza nome)</span>");
+        const sku = escapeHtml(toSkuId(it.sku || it.id || ""));
+        const locLabel = escapeHtml(prettyLoc(it.loc));
+        const qty = Number.isFinite(Number(it.qty)) ? Number(it.qty) : 0;
+        const rackText = rackLocationsLabel(it.rackLocations || readRackLocationsFromDoc(it || {}));
+        return `
+          <div class="row gridRow" role="button" tabindex="0" data-sku="${sku}" data-loc="${escapeHtml(it.loc || "")}" data-action="openHomeLocatedItem">
+            <div class="gridCell gridSku">${sku}</div>
+            <div class="gridCell">
+              <div class="gridProdMain">${titleMain}</div>
+              <div class="gridProdSub">${locLabel}</div>
+            </div>
+            <div class="gridCell gridRight"><span class="badge ok">${escapeHtml(String(qty))}</span></div>
+            <div class="gridCell gridRight"><span class="badge">${escapeHtml(rackText)}</span></div>
+          </div>`;
+      }).join("");
+
+      list.innerHTML = `<div class="row gridHead gridRow"><div class="gridCell">SKU</div><div class="gridCell">Prodotto</div><div class="gridCell gridRight">Q.tà</div><div class="gridCell gridRight">Ubicazione</div></div>` + rows;
+      if(hint) hint.textContent = `Mostrati ${Math.min(out.length, 300).toLocaleString("it-IT")} di ${out.length.toLocaleString("it-IT")}. Tocca una riga per modificare l’ubicazione.`;
     }
 
     function renderHomeDashboard(){
@@ -6052,9 +6143,10 @@ function currentInv(){
       const lowCount = $("homeLowStockCount");
       const lowHint = $("homeLowStockHint");
       const noLocList = $("homeNoLocationList");
+      const locatedList = $("homeLocatedList");
 
       // se non siamo in home, aggiorniamo solo se gli elementi esistono (es: sheet aperti)
-      if(!tSku && !lowList && !noLocList) return;
+      if(!tSku && !lowList && !noLocList && !locatedList) return;
 
       if(!state.user?.isWhitelisted){
         if(tSku) tSku.textContent = "—";
@@ -6067,6 +6159,7 @@ function currentInv(){
         if(lowList) lowList.innerHTML = `<div class="hint">Accedi per vedere la sotto-scorta.</div>`;
         if(lowHint) lowHint.textContent = "";
         renderHomeNoLocationBox();
+        renderHomeLocatedBox();
         return;
       }
 
@@ -6119,6 +6212,7 @@ function currentInv(){
           if(lowHint) lowHint.textContent = "";
           renderHomeLowStockMailLog();
           renderHomeNoLocationBox();
+          renderHomeLocatedBox();
           return;
         }
 
@@ -6169,6 +6263,7 @@ function currentInv(){
       // log ultimo invio mail sotto scorta (da meta Firestore)
       renderHomeLowStockMailLog();
       renderHomeNoLocationBox();
+      renderHomeLocatedBox();
     }
 
     // --- inventory render ---
@@ -10742,6 +10837,28 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
         homeNoLoc.addEventListener("keydown", (e)=>{
           if(e.key!=="Enter" && e.key!==" ") return;
           const row = e.target?.closest?.("[data-action='openHomeNoLocationItem']");
+          if(!row) return;
+          e.preventDefault();
+          const sku = row.getAttribute("data-sku") || "";
+          const loc = row.getAttribute("data-loc") || "";
+          if(loc) state.route.loc = loc;
+          openProductDetailsSheet(sku);
+        });
+      }
+
+      const homeLocated = $("homeLocatedList");
+      if(homeLocated){
+        homeLocated.addEventListener("click", (e)=>{
+          const row = e.target?.closest?.("[data-action='openHomeLocatedItem']");
+          if(!row) return;
+          const sku = row.getAttribute("data-sku") || "";
+          const loc = row.getAttribute("data-loc") || "";
+          if(loc) state.route.loc = loc;
+          openProductDetailsSheet(sku);
+        });
+        homeLocated.addEventListener("keydown", (e)=>{
+          if(e.key!=="Enter" && e.key!==" ") return;
+          const row = e.target?.closest?.("[data-action='openHomeLocatedItem']");
           if(!row) return;
           e.preventDefault();
           const sku = row.getAttribute("data-sku") || "";
