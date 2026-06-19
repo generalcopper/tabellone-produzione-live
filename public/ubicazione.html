@@ -1706,6 +1706,84 @@
     }
 
 
+    /* Ubicazione: chiusa di default, lista aperta solo al click */
+    .rackPicker{
+      width:100%;
+      border:1px solid var(--line);
+      border-radius: 10px;
+      background: var(--surface);
+      box-shadow: 0 1px 2px rgba(15,17,17,.04) inset;
+      overflow:hidden;
+    }
+    .rackPicker[open]{
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(249,115,22,.12);
+    }
+    .rackPickerSummary{
+      min-height: 42px;
+      padding: 10px 12px;
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap: 10px;
+      cursor:pointer;
+      list-style:none;
+      user-select:text;
+    }
+    .rackPickerSummary::-webkit-details-marker{ display:none; }
+    .rackPickerValue{
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      font-size: 14px;
+      color: var(--ink);
+      overflow:hidden;
+      text-overflow:ellipsis;
+      white-space:nowrap;
+      min-width:0;
+    }
+    .rackPickerValue.empty{
+      color: var(--muted2);
+    }
+    .rackPickerChevron{
+      color: var(--muted);
+      flex:0 0 auto;
+      font-weight:700;
+    }
+    .rackPickerPanel{
+      border-top:1px solid var(--line2);
+      max-height: min(44vh, 340px);
+      overflow:auto;
+      padding: 8px;
+      background: var(--surfaceAlt);
+    }
+    .rackPickerGroup{
+      padding: 8px 6px 4px;
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing:.05em;
+      color: var(--muted);
+      text-transform: uppercase;
+    }
+    .rackPickerOption{
+      display:flex;
+      align-items:center;
+      gap: 10px;
+      padding: 9px 10px;
+      border-radius: 8px;
+      cursor:pointer;
+      background: var(--surface);
+      border:1px solid var(--line2);
+      margin: 6px 0;
+      font-size: 14px;
+    }
+    .rackPickerOption:hover{ border-color:#d8dce2; background:#fff; }
+    .rackPickerOption input{ margin:0; width:16px; height:16px; }
+    .rackPickerOption.disabled{
+      opacity:.55;
+      cursor:default;
+      background: var(--surfaceAlt);
+    }
+
+
 
     /* === SOLO DA UBICARE ===
        UI ridotta: resta visibile solo la sezione prodotti da ubicare.
@@ -1921,19 +1999,6 @@
 
           </div>
 
-          <!-- Prodotti da ubicare: arrivano da produzione / carichi cloud e non hanno ancora posti assegnati -->
-          <div class="miniCard" id="homeNoLocationBox">
-            <div class="miniTop">
-              <div>
-                <div class="miniTitle">Da ubicare</div>
-                <div class="miniSub">Prodotti con disponibilità positiva senza ubicazione assegnata • cloud live</div>
-              </div>
-              <div class="pill" id="homeNoLocationCount">—</div>
-            </div>
-            <div class="gridTable cols4" id="homeNoLocationList" style="margin-top:12px;"></div>
-            <div class="hint" id="homeNoLocationHint" style="margin-top:10px"></div>
-          </div>
-
           <!-- Prodotti ubicati: prodotti con disponibilità positiva e ubicazione già assegnata -->
           <div class="miniCard" id="homeLocatedBox">
             <div class="miniTop">
@@ -1945,6 +2010,19 @@
             </div>
             <div class="gridTable cols4" id="homeLocatedList" style="margin-top:12px;"></div>
             <div class="hint" id="homeLocatedHint" style="margin-top:10px"></div>
+          </div>
+
+          <!-- Prodotti da ubicare: arrivano da produzione / carichi cloud e non hanno ancora posti assegnati -->
+          <div class="miniCard" id="homeNoLocationBox">
+            <div class="miniTop">
+              <div>
+                <div class="miniTitle">Da ubicare</div>
+                <div class="miniSub">Prodotti con disponibilità positiva senza ubicazione assegnata • cloud live</div>
+              </div>
+              <div class="pill" id="homeNoLocationCount">—</div>
+            </div>
+            <div class="gridTable cols4" id="homeNoLocationList" style="margin-top:12px;"></div>
+            <div class="hint" id="homeNoLocationHint" style="margin-top:10px"></div>
           </div>
 </div>
       </div>
@@ -3218,8 +3296,58 @@ function guessTitleFromRaw(rawText, sku){
       }
     }
 
+    function stockQtyFromDoc(d){
+      try{
+        const raw = d && Object.prototype.hasOwnProperty.call(d, "qty") ? d.qty : 0;
+        const q = Number.isFinite(Number(raw)) ? Math.round(Number(raw)) : parseSignedQtyStrict(raw);
+        return Number.isFinite(q) ? q : 0;
+      }catch(_e){
+        return 0;
+      }
+    }
+
+    function rawRackAllocationsFromDoc(d){
+      return (d && Array.isArray(d.rackAllocations)) ? d.rackAllocations : [];
+    }
+
+    function normalizeRackAllocationsForWrite(value){
+      const arr = Array.isArray(value) ? value : [];
+      const map = new Map();
+      for(const x of arr){
+        const code = normalizeRackLocation((x && typeof x === "object") ? (x.code || x.location || x.rackLocation || x.ubicazione || "") : "");
+        const q0 = (x && typeof x === "object") ? (x.qty ?? x.quantity ?? x.pieces ?? x.qta ?? 0) : 0;
+        const qty = Number.isFinite(Number(q0)) ? Math.round(Number(q0)) : parseSignedQtyStrict(q0);
+        if(!code || !RACK_LOCATION_SET.has(code) || !Number.isFinite(qty) || qty <= 0) continue;
+        const prev = map.get(code) || 0;
+        map.set(code, prev + qty);
+      }
+      return Array.from(map.entries()).map(([code, qty])=>({ code, qty }));
+    }
+
+    function hasExplicitRackAllocations(d){
+      return normalizeRackAllocationsForWrite(rawRackAllocationsFromDoc(d)).length > 0;
+    }
+
+    function readRackAllocationsFromDoc(d){
+      if(d && !isPositiveStockDoc(d)) return [];
+      const q = stockQtyFromDoc(d || {});
+      const explicit = normalizeRackAllocationsForWrite(rawRackAllocationsFromDoc(d));
+      if(explicit.length) return explicit;
+
+      // Compatibilità con dati vecchi: se c'erano solo rackLocation/rackLocations,
+      // considero il prodotto già completamente ubicato, senza inventare righe residue.
+      const raw = (d && Object.prototype.hasOwnProperty.call(d, "rackLocations"))
+        ? d.rackLocations
+        : (d?.rackLocation || d?.shelfLocation || d?.storageSlot || d?.warehouseSlot || d?.ubicazione || "");
+      const locs = normalizeRackLocationsList(raw);
+      if(!locs.length || q <= 0) return [];
+      return locs.map((code, idx)=>({ code, qty: idx === 0 ? q : 0, legacy:true }));
+    }
+
     function readRackLocationsFromDoc(d){
       if(d && !isPositiveStockDoc(d)) return [];
+      const explicit = normalizeRackAllocationsForWrite(rawRackAllocationsFromDoc(d));
+      if(explicit.length) return explicit.map(x=>x.code);
       const raw = (d && Object.prototype.hasOwnProperty.call(d, "rackLocations"))
         ? d.rackLocations
         : (d?.rackLocation || d?.shelfLocation || d?.storageSlot || d?.warehouseSlot || d?.ubicazione || "");
@@ -3228,6 +3356,24 @@ function guessTitleFromRaw(rawText, sku){
 
     function readRackLocationFromDoc(d){
       return readRackLocationsFromDoc(d)[0] || "";
+    }
+
+    function rackAllocatedQtyFromDoc(d){
+      const q = stockQtyFromDoc(d || {});
+      if(q <= 0) return 0;
+      const explicit = normalizeRackAllocationsForWrite(rawRackAllocationsFromDoc(d));
+      if(explicit.length){
+        const total = explicit.reduce((a,x)=> a + (Number.isFinite(Number(x.qty)) ? Number(x.qty) : 0), 0);
+        return Math.max(0, Math.min(q, Math.round(total)));
+      }
+      // Dati legacy: una o più ubicazioni senza quantità = considerato tutto ubicato.
+      return readRackLocationsFromDoc(d || {}).length ? q : 0;
+    }
+
+    function rackUnallocatedQtyFromDoc(d){
+      const q = stockQtyFromDoc(d || {});
+      if(q <= 0) return 0;
+      return Math.max(0, q - rackAllocatedQtyFromDoc(d || {}));
     }
 
     function rackLocationsLabel(value){
@@ -3241,11 +3387,18 @@ function guessTitleFromRaw(rawText, sku){
     }
 
     function rackLocationDisplayFromItem(it){
-      return rackLocationsLabel(readRackLocationsFromDoc(it || {}));
+      const d = it || {};
+      const explicit = normalizeRackAllocationsForWrite(rawRackAllocationsFromDoc(d));
+      if(explicit.length){
+        return explicit.map(x=>`${x.code} (${Math.round(x.qty)} pz)`).join(", ");
+      }
+      return rackLocationsLabel(readRackLocationsFromDoc(d));
     }
 
     function rackLocationSearchText(it){
-      return readRackLocationsFromDoc(it || {}).join(" ");
+      const d = it || {};
+      const alloc = readRackAllocationsFromDoc(d).map(x=>`${x.code} ${x.qty}`).join(" ");
+      return [readRackLocationsFromDoc(d).join(" "), alloc].filter(Boolean).join(" ");
     }
 
     function sanitizeRackLocationsForQty(value, qty){
@@ -3318,7 +3471,7 @@ function guessTitleFromRaw(rawText, sku){
       for(const g of groups){
         const codes = RACK_LOCATION_OPTIONS
           .filter(x=>x.startsWith(g))
-          .filter(code => selectedSet.has(code) || isRackLocationAvailableForItem(code, currentSku, currentLoc));
+          .filter(code => selectedSet.has(code) || (!excludedSet.has(code) && isRackLocationAvailableForItem(code, currentSku, currentLoc)));
 
         if(!codes.length) continue;
         out.push(`<optgroup label="Scaffalatura ${escapeHtml(g)}">`);
@@ -3343,6 +3496,103 @@ function guessTitleFromRaw(rawText, sku){
       }
 
       return out.join("");
+    }
+
+    function rackLocationPickerHtml(selected, currentSku="", currentLoc="", opts={}){
+      const selectedList = normalizeRackLocationsList(selected);
+      const selectedSet = new Set(selectedList);
+      const excludedSet = new Set(normalizeRackLocationsList(opts && opts.exclude ? opts.exclude : []));
+      const multiple = !!(opts && opts.multiple);
+      const disabled = !!(opts && opts.disabled);
+      const currentLabel = selectedList.length ? selectedList.join(", ") : "—";
+      const currentClass = selectedList.length ? "rackPickerValue" : "rackPickerValue empty";
+      const inputType = multiple ? "checkbox" : "radio";
+      const name = `rackLocation_${String(currentSku||"").replace(/[^A-Za-z0-9_-]/g,"_")}_${String(currentLoc||"").replace(/[^A-Za-z0-9_-]/g,"_")}`;
+      const groups = ["A","B","C","D","E","F"];
+      const disabledAttr = disabled ? " disabled" : "";
+      const out = [];
+      let visibleCount = 0;
+
+      if(!multiple){
+        out.push(`
+          <label class="rackPickerOption">
+            <input type="radio" data-field="rackLocationChoice" name="${escapeHtml(name)}" value=""${selectedSet.size ? "" : " checked"}${disabledAttr} />
+            <span class="mono">—</span>
+          </label>
+        `);
+      }
+
+      for(const g of groups){
+        const codes = RACK_LOCATION_OPTIONS
+          .filter(x=>x.startsWith(g))
+          .filter(code => selectedSet.has(code) || isRackLocationAvailableForItem(code, currentSku, currentLoc));
+        if(!codes.length) continue;
+        out.push(`<div class="rackPickerGroup">Scaffalatura ${escapeHtml(g)}</div>`);
+        for(const code of codes){
+          visibleCount++;
+          out.push(`
+            <label class="rackPickerOption">
+              <input type="${inputType}" data-field="rackLocationChoice" name="${escapeHtml(name)}" value="${escapeHtml(code)}"${selectedSet.has(code) ? " checked" : ""}${disabledAttr} />
+              <span class="mono">${escapeHtml(code)}</span>
+            </label>
+          `);
+        }
+      }
+
+      const invalidSelected = selectedList.filter(code => !RACK_LOCATION_SET.has(code));
+      if(invalidSelected.length){
+        out.push(`<div class="rackPickerGroup">Attuale non in lista</div>`);
+        for(const code of invalidSelected){
+          out.push(`
+            <label class="rackPickerOption">
+              <input type="${inputType}" data-field="rackLocationChoice" name="${escapeHtml(name)}" value="${escapeHtml(code)}" checked${disabledAttr} />
+              <span class="mono">${escapeHtml(code)}</span>
+            </label>
+          `);
+        }
+      }else if(!visibleCount && multiple){
+        out.push(`<div class="rackPickerOption disabled">Nessuna ubicazione libera</div>`);
+      }
+
+      if(disabled){
+        return `
+          <div class="rackPicker" data-rack-picker="1" aria-disabled="true">
+            <div class="rackPickerSummary">
+              <span class="${currentClass}" data-rack-picker-value>${escapeHtml(currentLabel)}</span>
+            </div>
+          </div>
+        `;
+      }
+
+      return `
+        <details class="rackPicker" data-rack-picker="1" data-rack-multiple="${multiple ? "1" : "0"}">
+          <summary class="rackPickerSummary">
+            <span class="${currentClass}" data-rack-picker-value>${escapeHtml(currentLabel)}</span>
+            <span class="rackPickerChevron" aria-hidden="true">⌄</span>
+          </summary>
+          <div class="rackPickerPanel">
+            ${out.join("")}
+          </div>
+        </details>
+      `;
+    }
+
+    function readRackPickerSelection(root){
+      const wrap = root || document;
+      const choices = Array.from(wrap.querySelectorAll?.('[data-field="rackLocationChoice"]:checked') || []);
+      return normalizeRackLocationsList(choices.map(x=>x.value));
+    }
+
+    function updateRackPickerSummary(picker){
+      try{
+        if(!picker) return;
+        const valueEl = picker.querySelector?.('[data-rack-picker-value]');
+        if(!valueEl) return;
+        const list = readRackPickerSelection(picker);
+        const label = list.length ? list.join(", ") : "—";
+        valueEl.textContent = label;
+        valueEl.classList.toggle("empty", !list.length);
+      }catch(_e){}
     }
 
     function shouldAllowMultipleRackLocations(qty, selected=""){
@@ -4356,6 +4606,7 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
             qty,
             lowStockThreshold: __parseLowStockThresholdValue(d.lowStockThreshold),
             rackLocations: readRackLocationsFromDoc(d),
+            rackAllocations: readRackAllocationsFromDoc(d),
             rackLocation: readRackLocationFromDoc(d),
             reordered: d.reordered === true,
             reorderStatus: d.reorderStatus || "",
@@ -5994,10 +6245,11 @@ function currentInv(){
       const pushLoc = (loc)=>{
         const items = (state.inventory?.[loc]?.items || []);
         for(const it of items){
-          const q = Number.isFinite(Number(it?.qty)) ? Number(it.qty) : 0;
-          if(q <= 0) continue;
-          if(readRackLocationsFromDoc(it || {}).length) continue;
-          out.push({ ...it, loc, qty:q });
+          const totalQty = stockQtyFromDoc(it || {});
+          if(totalQty <= 0) continue;
+          const remainingQty = rackUnallocatedQtyFromDoc(it || {});
+          if(remainingQty <= 0) continue;
+          out.push({ ...it, loc, qty:remainingQty, totalQty, remainingQty, allocatedQty: rackAllocatedQtyFromDoc(it || {}) });
         }
       };
       pushLoc("concamarise");
@@ -6039,10 +6291,13 @@ function currentInv(){
         const titleMain = meta.main ? escapeHtml(meta.main) : (it.title ? escapeHtml(it.title) : "<span class='muted'>(senza nome)</span>");
         const sku = escapeHtml(toSkuId(it.sku || it.id || ""));
         const locLabel = escapeHtml(prettyLoc(it.loc));
-        const qty = Number.isFinite(Number(it.qty)) ? Number(it.qty) : 0;
+        const remainingQty = Number.isFinite(Number(it.remainingQty)) ? Math.round(Number(it.remainingQty)) : (Number.isFinite(Number(it.qty)) ? Math.round(Number(it.qty)) : 0);
+        const totalQty = Number.isFinite(Number(it.totalQty)) ? Math.round(Number(it.totalQty)) : remainingQty;
+        const allocatedQty = Number.isFinite(Number(it.allocatedQty)) ? Math.round(Number(it.allocatedQty)) : 0;
         const rackText = rackLocationDisplayFromItem(it);
+        const rackShown = rackText !== "—" ? rackText : "—";
         const when = it.updatedAtClient ? fmtDate(it.updatedAtClient) : (it.updatedAt ? fmtDate(it.updatedAt) : "");
-        const metaLine = [locLabel, when ? `Agg.: ${when}` : "", `Da produzione/carico cloud`].filter(Boolean).join(" • ");
+        const metaLine = [locLabel, `Totale: ${totalQty}`, allocatedQty ? `Ubicato: ${allocatedQty}` : "", when ? `Agg.: ${when}` : ""].filter(Boolean).join(" • ");
         return `
           <div class="row gridRow" role="button" tabindex="0" data-sku="${sku}" data-loc="${escapeHtml(it.loc || "")}" data-action="openHomeNoLocationItem">
             <div class="gridCell gridSku">${sku}</div>
@@ -6050,13 +6305,13 @@ function currentInv(){
               <div class="gridProdMain">${titleMain}</div>
               <div class="gridProdSub">${escapeHtml(metaLine)}</div>
             </div>
-            <div class="gridCell gridRight"><span class="badge warn">${escapeHtml(String(qty))}</span></div>
-            <div class="gridCell gridRight"><span class="badge">${escapeHtml(rackText)}</span></div>
+            <div class="gridCell gridRight"><span class="badge warn">${escapeHtml(String(remainingQty))}</span></div>
+            <div class="gridCell gridRight"><span class="badge">${escapeHtml(rackShown)}</span></div>
           </div>`;
       }).join("");
 
-      list.innerHTML = `<div class="row gridHead gridRow"><div class="gridCell">SKU</div><div class="gridCell">Prodotto</div><div class="gridCell gridRight">Q.tà</div><div class="gridCell gridRight">Ubicazione</div></div>` + rows;
-      if(hint) hint.textContent = `Mostrati ${Math.min(out.length, 120).toLocaleString("it-IT")} di ${out.length.toLocaleString("it-IT")}. Tocca una riga per assegnare l’ubicazione.`;
+      list.innerHTML = `<div class="row gridHead gridRow"><div class="gridCell">SKU</div><div class="gridCell">Prodotto</div><div class="gridCell gridRight">Da ubicare</div><div class="gridCell gridRight">Ubicazione</div></div>` + rows;
+      if(hint) hint.textContent = `Mostrati ${Math.min(out.length, 120).toLocaleString("it-IT")} di ${out.length.toLocaleString("it-IT")}. Tocca una riga per assegnare una posizione. Se restano più di ${RACK_PALLET_CAPACITY} pz, viene chiesta la quantità per quella posizione.`;
     }
 
 
@@ -6065,11 +6320,13 @@ function currentInv(){
       const pushLoc = (loc)=>{
         const items = (state.inventory?.[loc]?.items || []);
         for(const it of items){
-          const q = Number.isFinite(Number(it?.qty)) ? Number(it.qty) : 0;
-          if(q <= 0) continue;
+          const totalQty = stockQtyFromDoc(it || {});
+          if(totalQty <= 0) continue;
+          const allocatedQty = rackAllocatedQtyFromDoc(it || {});
+          if(allocatedQty <= 0) continue;
           const rackLocations = readRackLocationsFromDoc(it || {});
           if(!rackLocations.length) continue;
-          out.push({ ...it, loc, qty:q, rackLocations });
+          out.push({ ...it, loc, qty:allocatedQty, totalQty, allocatedQty, remainingQty: rackUnallocatedQtyFromDoc(it || {}), rackLocations });
         }
       };
       pushLoc("concamarise");
@@ -6113,22 +6370,25 @@ function currentInv(){
         const titleMain = meta.main ? escapeHtml(meta.main) : (it.title ? escapeHtml(it.title) : "<span class='muted'>(senza nome)</span>");
         const sku = escapeHtml(toSkuId(it.sku || it.id || ""));
         const locLabel = escapeHtml(prettyLoc(it.loc));
-        const qty = Number.isFinite(Number(it.qty)) ? Number(it.qty) : 0;
-        const rackText = rackLocationsLabel(it.rackLocations || readRackLocationsFromDoc(it || {}));
+        const allocatedQty = Number.isFinite(Number(it.allocatedQty)) ? Math.round(Number(it.allocatedQty)) : (Number.isFinite(Number(it.qty)) ? Math.round(Number(it.qty)) : 0);
+        const totalQty = Number.isFinite(Number(it.totalQty)) ? Math.round(Number(it.totalQty)) : allocatedQty;
+        const remainingQty = Number.isFinite(Number(it.remainingQty)) ? Math.round(Number(it.remainingQty)) : 0;
+        const rackText = rackLocationDisplayFromItem(it);
+        const metaLine = [locLabel, `Totale: ${totalQty}`, remainingQty ? `Da ubicare: ${remainingQty}` : ""].filter(Boolean).join(" • ");
         return `
           <div class="row gridRow" role="button" tabindex="0" data-sku="${sku}" data-loc="${escapeHtml(it.loc || "")}" data-action="openHomeLocatedItem">
             <div class="gridCell gridSku">${sku}</div>
             <div class="gridCell">
               <div class="gridProdMain">${titleMain}</div>
-              <div class="gridProdSub">${locLabel}</div>
+              <div class="gridProdSub">${escapeHtml(metaLine)}</div>
             </div>
-            <div class="gridCell gridRight"><span class="badge ok">${escapeHtml(String(qty))}</span></div>
+            <div class="gridCell gridRight"><span class="badge ok">${escapeHtml(String(allocatedQty))}</span></div>
             <div class="gridCell gridRight"><span class="badge">${escapeHtml(rackText)}</span></div>
           </div>`;
       }).join("");
 
-      list.innerHTML = `<div class="row gridHead gridRow"><div class="gridCell">SKU</div><div class="gridCell">Prodotto</div><div class="gridCell gridRight">Q.tà</div><div class="gridCell gridRight">Ubicazione</div></div>` + rows;
-      if(hint) hint.textContent = `Mostrati ${Math.min(out.length, 300).toLocaleString("it-IT")} di ${out.length.toLocaleString("it-IT")}. Tocca una riga per modificare l’ubicazione.`;
+      list.innerHTML = `<div class="row gridHead gridRow"><div class="gridCell">SKU</div><div class="gridCell">Prodotto</div><div class="gridCell gridRight">Ubicato</div><div class="gridCell gridRight">Ubicazione</div></div>` + rows;
+      if(hint) hint.textContent = `Mostrati ${Math.min(out.length, 300).toLocaleString("it-IT")} di ${out.length.toLocaleString("it-IT")}. Tocca una riga per vedere o modificare l’ubicazione.`;
     }
 
     function renderHomeDashboard(){
@@ -7899,24 +8159,35 @@ function closeSheet(kind){
       if(loc === "cerea" || loc === "concamarise") state.route.loc = loc;
 
       const titleMain = squashWhitespace(it?.title || sku) || sku;
-      const qty = Number.isFinite(Number(it?.qty)) ? Math.round(Number(it.qty)) : 0;
+      const qty = stockQtyFromDoc(it || {});
+      const allocatedQty = rackAllocatedQtyFromDoc(it || {});
+      const remainingQty = rackUnallocatedQtyFromDoc(it || {});
       const rackLocations = readRackLocationsFromDoc(it || {});
-      const canUseMultiple = shouldAllowMultipleRackLocations(qty, rackLocations);
-      const availableCount = countAvailableRackLocations(sku, loc, rackLocations);
+      const rackText = rackLocationDisplayFromItem(it || {});
+      const pickerSelected = remainingQty > 0 ? [] : rackLocations;
+      const pickerExclude = remainingQty > 0 ? rackLocations : [];
+      const excludeSet = new Set(normalizeRackLocationsList(pickerExclude));
+      const availableCount = RACK_LOCATION_OPTIONS.filter(code => !excludeSet.has(code) && isRackLocationAvailableForItem(code, sku, loc)).length;
       const updated = it?.updatedAtClient ? fmtDate(it.updatedAtClient) : (it?.updatedAt ? fmtDate(it.updatedAt) : "—");
       const canEdit = !!state.user?.isAdmin;
 
       if(titleEl) titleEl.textContent = titleMain;
-      if(sub) sub.textContent = `${sku} • ${prettyLoc(loc)} • Disponibilità: ${qty} • Ubicazione: ${rackLocationsLabel(rackLocations)}`;
+      if(sub) sub.textContent = `${sku} • ${prettyLoc(loc)} • Disponibilità: ${qty} • Da ubicare: ${remainingQty} • Ubicazione: ${rackText}`;
 
       hint.innerHTML = canEdit
-        ? "Assegna l’ubicazione e salva. Il selettore mostra solo posizioni libere."
+        ? (remainingQty > RACK_PALLET_CAPACITY
+            ? `Scegli una posizione. Al salvataggio ti chiedo quanti pezzi mettere lì. Il resto rimane da ubicare in cloud.`
+            : `Scegli una posizione e salva. Il selettore si apre solo al click e mostra posizioni libere.`)
         : "Sola lettura: modifica ubicazione disponibile solo per Admin.";
+
+      const alreadyLine = rackText !== "—"
+        ? `<div class="pdLine"><div class="pdLabel">Già ubicato</div><div class="pdValue mono">${escapeHtml(rackText)}</div></div>`
+        : `<div class="pdLine"><div class="pdLabel">Già ubicato</div><div class="pdValue">—</div></div>`;
 
       content.innerHTML = `
         <div class="pd">
           <div class="pdSection">
-            <div class="pdSectionTitle">Prodotto da ubicare</div>
+            <div class="pdSectionTitle">Prodotto</div>
             <div class="pdLine">
               <div class="pdLabel">SKU</div>
               <div class="pdValue mono">${escapeHtml(sku)}</div>
@@ -7926,13 +8197,22 @@ function closeSheet(kind){
               <div class="pdValue">${escapeHtml(titleMain)}</div>
             </div>
             <div class="pdLine">
-              <div class="pdLabel">Disponibilità</div>
+              <div class="pdLabel">Disponibilità totale</div>
               <div class="pdValue">${escapeHtml(String(qty))}</div>
+            </div>
+            <div class="pdLine">
+              <div class="pdLabel">Ubicato</div>
+              <div class="pdValue">${escapeHtml(String(allocatedQty))}</div>
+            </div>
+            <div class="pdLine">
+              <div class="pdLabel">Da ubicare</div>
+              <div class="pdValue">${escapeHtml(String(remainingQty))}</div>
             </div>
             <div class="pdLine">
               <div class="pdLabel">Magazzino</div>
               <div class="pdValue">${escapeHtml(prettyLoc(loc))}</div>
             </div>
+            ${alreadyLine}
             <div class="pdMeta">Ultimo aggiornamento: <b>${escapeHtml(updated)}</b></div>
           </div>
 
@@ -7940,17 +8220,9 @@ function closeSheet(kind){
             <div class="pdSectionTitle">Ubicazione</div>
             <div class="field">
               <label class="fieldLabel">Ubicazione scaffale</label>
-              ${canUseMultiple ? `
-                <select class="input mono" data-field="rackLocations" multiple size="8" ${canEdit ? "" : "disabled"}>
-                  ${rackLocationSelectOptions(rackLocations, sku, loc, { multiple:true })}
-                </select>
-              ` : `
-                <select class="input mono" data-field="rackLocation" ${canEdit ? "" : "disabled"}>
-                  ${rackLocationSelectOptions(rackLocations, sku, loc)}
-                </select>
-              `}
+              ${rackLocationPickerHtml(pickerSelected, sku, loc, { multiple:false, disabled: !canEdit, exclude: pickerExclude })}
               <div class="fieldError" data-err="rackLocation" style="display:none;"></div>
-              <div class="hint" style="margin-top:6px">Disponibili: ${availableCount}/${RACK_LOCATION_OPTIONS.length}. Più ubicazioni consentite solo sopra ${RACK_PALLET_CAPACITY} pz.</div>
+              <div class="hint" style="margin-top:6px">Disponibili: ${availableCount}/${RACK_LOCATION_OPTIONS.length}. Una posizione vale massimo ${RACK_PALLET_CAPACITY} pz.</div>
             </div>
           </div>
         </div>
@@ -7964,6 +8236,8 @@ function closeSheet(kind){
 
     function readLocationOnlySelection(){
       const wrap = $("productDetailsContent");
+      const pickerChoices = wrap?.querySelectorAll?.('[data-field="rackLocationChoice"]');
+      if(pickerChoices && pickerChoices.length) return readRackPickerSelection(wrap);
       const single = wrap?.querySelector?.('[data-field="rackLocation"]');
       const multiple = wrap?.querySelector?.('[data-field="rackLocations"]');
       const raw = multiple
@@ -7991,37 +8265,74 @@ function closeSheet(kind){
         return;
       }
 
-      const qty = Number.isFinite(Number(it.qty)) ? Math.round(Number(it.qty)) : 0;
-      let selected = readLocationOnlySelection();
+      const qty = stockQtyFromDoc(it || {});
+      const remainingBefore = rackUnallocatedQtyFromDoc(it || {});
+      const existingAllocationsBefore = normalizeRackAllocationsForWrite(readRackAllocationsFromDoc(it || {}));
+      const existingCodesBefore = new Set(existingAllocationsBefore.map(x=>x.code));
+      const selected = readLocationOnlySelection();
+      const selectedCode = selected[0] || "";
 
       setPdFieldError("rackLocation", "");
 
-      if(qty > 0 && !selected.length){
+      if(qty <= 0){
+        setPdFieldError("rackLocation", "Disponibilità zero: nessuna ubicazione da assegnare.");
+        showToast("Disponibilità zero", "Il prodotto non ha pezzi da ubicare.", 2200);
+        return;
+      }
+      if(!selectedCode){
         setPdFieldError("rackLocation", "Seleziona un’ubicazione.");
         showToast("Ubicazione mancante", "Seleziona una posizione libera.", 2200);
         return;
       }
-      if(!isValidRackLocations(selected)){
+      if(selected.length > 1){
+        setPdFieldError("rackLocation", "Seleziona una sola ubicazione per volta.");
+        showToast("Una posizione per volta", `Sopra ${RACK_PALLET_CAPACITY} pz viene chiesta la quantità per ogni posizione.`, 2600);
+        return;
+      }
+      if(!RACK_LOCATION_SET.has(selectedCode)){
         setPdFieldError("rackLocation", "Ubicazione non valida.");
         showToast("Ubicazione non valida", "Scegli una posizione dalla lista.", 2200);
         return;
       }
-      if(qty > 0 && Math.abs(qty) <= RACK_PALLET_CAPACITY && selected.length > 1){
-        setPdFieldError("rackLocation", `Più ubicazioni sono consentite solo sopra ${RACK_PALLET_CAPACITY} pz.`);
-        showToast("Ubicazioni", `Sopra ${RACK_PALLET_CAPACITY} pz puoi assegnare più posti.`, 2600);
-        return;
-      }
-      if(!areRackLocationsAvailableForItem(selected, sku, loc)){
-        const occ = selected.map(code => rackLocationOccupantInfo(code, sku, loc)).find(Boolean);
+      if(!isRackLocationAvailableForItem(selectedCode, sku, loc)){
+        const occ = rackLocationOccupantInfo(selectedCode, sku, loc);
         setPdFieldError("rackLocation", occ ? `Ubicazione già occupata da ${occ.sku} (${prettyLoc(occ.loc)}).` : "Ubicazione non disponibile.");
         showToast("Ubicazione occupata", "Scegli solo ubicazioni libere.", 2400);
         return;
       }
+      if(remainingBefore > 0 && existingCodesBefore.has(selectedCode)){
+        setPdFieldError("rackLocation", "Questa posizione è già usata per questo prodotto. Scegli una nuova posizione libera.");
+        showToast("Posizione già usata", "Per la quantità residua scegli un’altra ubicazione.", 2600);
+        return;
+      }
 
-      const finalRackLocations = sanitizeRackLocationsForQty(selected, qty);
-      const finalRackLocation = finalRackLocations[0] || "";
+      let qtyToAssign = 0;
+      if(remainingBefore > RACK_PALLET_CAPACITY){
+        const raw = prompt(`Disponibilità da ubicare: ${remainingBefore} pz.\nQuanti pezzi vuoi mettere in ${selectedCode}?\nMassimo per posizione: ${RACK_PALLET_CAPACITY} pz`, String(RACK_PALLET_CAPACITY));
+        if(raw === null) return;
+        const parsed = parseSignedQtyStrict(raw);
+        if(parsed === null || !Number.isFinite(parsed) || parsed <= 0){
+          showToast("Quantità non valida", "Inserisci un numero intero positivo.", 2400);
+          return;
+        }
+        if(parsed > RACK_PALLET_CAPACITY){
+          showToast("Troppi pezzi", `Una posizione può contenere massimo ${RACK_PALLET_CAPACITY} pz.`, 2600);
+          return;
+        }
+        if(parsed > remainingBefore){
+          showToast("Quantità eccessiva", `Restano da ubicare ${remainingBefore} pz.`, 2600);
+          return;
+        }
+        qtyToAssign = parsed;
+      }else if(remainingBefore > 0){
+        qtyToAssign = remainingBefore;
+      }else{
+        // Prodotto già completamente ubicato: cambio posizione unica e assegno tutta la disponibilità.
+        qtyToAssign = qty;
+      }
 
-      const ok = confirm(`Confermi ubicazione cloud?\n\n${sku}\n${prettyLoc(loc)}\nUbicazione: ${rackLocationsLabel(finalRackLocations)}`);
+      const remainingAfterPreview = Math.max(0, remainingBefore > 0 ? remainingBefore - qtyToAssign : 0);
+      const ok = confirm(`Confermi ubicazione cloud?\n\n${sku}\n${prettyLoc(loc)}\nPosizione: ${selectedCode}\nPezzi in questa posizione: ${qtyToAssign}\nDa ubicare dopo: ${remainingAfterPreview}`);
       if(!ok) return;
 
       const api = state.firebase.api;
@@ -8038,12 +8349,35 @@ function closeSheet(kind){
         const who = state.user?.email || state.user?.emailLower || state.user?.uid || "";
         const title = squashWhitespace(it.title || sku) || sku;
 
+        let finalRemaining = remainingAfterPreview;
         await api.runTransaction(db, async (tx)=>{
           const snap = await tx.get(itemRef);
           if(!snap.exists()) throw new Error("Prodotto non trovato.");
           const fresh = snap.data() || {};
-          const freshQty = Number.isFinite(Number(fresh.qty)) ? Math.round(Number(fresh.qty)) : qty;
-          const cleanLocations = sanitizeRackLocationsForQty(finalRackLocations, freshQty);
+          const freshQty = stockQtyFromDoc(fresh);
+          if(freshQty <= 0) throw new Error("Disponibilità zero: nessuna ubicazione da assegnare.");
+
+          const freshAllocations = normalizeRackAllocationsForWrite(readRackAllocationsFromDoc(fresh));
+          const freshAllocated = rackAllocatedQtyFromDoc(fresh);
+          const freshRemaining = Math.max(0, freshQty - freshAllocated);
+          let cleanAllocations;
+
+          if(freshRemaining > 0){
+            if(freshAllocations.some(x=>x.code === selectedCode)) throw new Error("Questa posizione è già usata per questo prodotto. Scegli una nuova posizione libera.");
+            if(qtyToAssign > freshRemaining) throw new Error(`Restano da ubicare ${freshRemaining} pz.`);
+            if(qtyToAssign > RACK_PALLET_CAPACITY) throw new Error(`Una posizione può contenere massimo ${RACK_PALLET_CAPACITY} pz.`);
+            cleanAllocations = normalizeRackAllocationsForWrite([
+              ...freshAllocations,
+              { code:selectedCode, qty:qtyToAssign }
+            ]);
+            finalRemaining = Math.max(0, freshRemaining - qtyToAssign);
+          }else{
+            // Riposizionamento prodotto già interamente ubicato.
+            cleanAllocations = normalizeRackAllocationsForWrite([{ code:selectedCode, qty:freshQty }]);
+            finalRemaining = 0;
+          }
+
+          const cleanLocations = cleanAllocations.map(x=>x.code);
           const cleanLocation = cleanLocations[0] || "";
 
           tx.set(itemRef, {
@@ -8052,6 +8386,7 @@ function closeSheet(kind){
             titleNorm: normalizeText(title || sku),
             rackLocation: cleanLocation,
             rackLocations: cleanLocations,
+            rackAllocations: cleanAllocations,
             updatedAt: api.serverTimestamp(),
             updatedAtClient: nowClient,
             updatedBy: who,
@@ -8064,6 +8399,7 @@ function closeSheet(kind){
             titleNorm: normalizeText(title || sku),
             rackLocation: cleanLocation,
             rackLocations: cleanLocations,
+            rackAllocations: cleanAllocations,
             lastSeenAt: api.serverTimestamp(),
             lastSeenAtClient: nowClient,
             lastSeenBy: who,
@@ -8072,7 +8408,7 @@ function closeSheet(kind){
           }, { merge:true });
         });
 
-        showToast("Ubicazione salvata", `${sku} → ${rackLocationsLabel(finalRackLocations)}`, 1800);
+        showToast("Ubicazione salvata", `${sku} → ${selectedCode} • ${qtyToAssign} pz${finalRemaining ? ` • restano ${finalRemaining}` : ""}`, 2400);
         state.ui.productDetailsSku = null;
         state.ui.productDetailsEditMode = false;
         closeSheet("productDetails");
@@ -8234,15 +8570,7 @@ function closeSheet(kind){
           <div class="pdGrid" style="margin-top:10px">
             <div class="field">
               <label class="fieldLabel">Ubicazione scaffale</label>
-              ${canUseMultipleRackLocations ? `
-                <select class="input mono" data-field="rackLocations" multiple size="8" ${canEdit ? "" : "disabled"}>
-                  ${rackLocationSelectOptions(rackLocationValue, sku, loc, { multiple:true })}
-                </select>
-              ` : `
-                <select class="input mono" data-field="rackLocation" ${canEdit ? "" : "disabled"}>
-                  ${rackLocationSelectOptions(rackLocationValue, sku, loc)}
-                </select>
-              `}
+              ${rackLocationPickerHtml(rackLocationValue, sku, loc, { multiple: canUseMultipleRackLocations, disabled: !canEdit })}
               <div class="fieldError" data-err="rackLocation" style="display:none;"></div>
               <div class="hint" style="margin-top:6px">Mostra solo ubicazioni libere: ${rackLocationAvailableCount}/${RACK_LOCATION_OPTIONS.length} disponibili. Più ubicazioni sono consentite sopra ${RACK_PALLET_CAPACITY} pz. Salvataggio solo cloud Firestore.</div>
             </div>
@@ -8348,10 +8676,13 @@ function closeSheet(kind){
   const qtyRaw = (qtyEl?.value ?? "");
   const moveQtyRaw = (moveQtyEl?.value ?? "");
   const lowStockThresholdRaw = (lowStockThresholdEl?.value ?? "");
+  const rackPickerChoices = wrap?.querySelectorAll?.('[data-field="rackLocationChoice"]');
   const rackLocationRaw = (rackLocationEl?.value ?? "");
-  const rackLocationsRaw = rackLocationsEl
-    ? Array.from(rackLocationsEl.selectedOptions || []).map(opt => opt.value)
-    : rackLocationRaw;
+  const rackLocationsRaw = (rackPickerChoices && rackPickerChoices.length)
+    ? readRackPickerSelection(wrap)
+    : (rackLocationsEl
+      ? Array.from(rackLocationsEl.selectedOptions || []).map(opt => opt.value)
+      : rackLocationRaw);
   const noteRaw = (noteEl?.value ?? "");
 
   const qty = parseSignedQtyStrict(qtyRaw);
@@ -9126,7 +9457,7 @@ async function loadProductFromDetails(){
           const nowClient = Date.now();
           const who = state.user?.email || state.user?.uid || "";
 
-          const rackClearData = beforeQty <= 0 ? { rackLocation: "", rackLocations: [] } : {};
+          const rackClearData = beforeQty <= 0 ? { rackLocation: "", rackLocations: [], rackAllocations: [] } : {};
           tx.set(itemRef, {
             sku,
             title,
@@ -10186,7 +10517,7 @@ async function applyFlow(kind){
               const currentItem = currentMap.get(sku) || {};
               const beforeQty = Number.isFinite(Number(currentItem.qty)) ? Number(currentItem.qty) : 0;
               const afterQty = beforeQty + delta;
-              const rackClearData = afterQty <= 0 ? { rackLocation: "", rackLocations: [] } : {};
+              const rackClearData = afterQty <= 0 ? { rackLocation: "", rackLocations: [], rackAllocations: [] } : {};
               batch.set(ref, {
                 sku,
                 title: title || "",
@@ -10545,6 +10876,16 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
         e.stopPropagation();
         const moveId = btn.getAttribute("data-moveid") || "";
         if(moveId) deleteProductMovementFromDetails(moveId);
+      });
+
+      $("productDetailsContent")?.addEventListener("change", (e)=>{
+        const choice = e.target?.closest?.('[data-field="rackLocationChoice"]');
+        if(!choice) return;
+        const picker = choice.closest?.('[data-rack-picker]');
+        updateRackPickerSummary(picker);
+        if(choice.type === "radio" && picker && picker.tagName && picker.tagName.toLowerCase() === "details"){
+          picker.open = false;
+        }
       });
 
       $("productDetailsActions")?.addEventListener("click", (e)=>{
