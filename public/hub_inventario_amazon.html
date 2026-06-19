@@ -3084,6 +3084,120 @@ function guessTitleFromRaw(rawText, sku){
     const LOW_STOCK_5KG = 20;
     const LOW_STOCK_5KG_SKUS = new Set(["q6-kwh6-owul"]); // esempio: Poltiglia 5kg
 
+    // --- Ubicazioni scaffale (WMS): scrittura solo cloud, nessun salvataggio locale ---
+    function buildRackLocationOptions(){
+      const out = [];
+      const addBay = (rack, bay, pallets)=>{
+        const b = String(bay).padStart(2, "0");
+        for(let l=1; l<=3; l++){
+          for(let p=1; p<=pallets; p++){
+            out.push(`${rack}${b}-L${l}-P${p}`);
+          }
+        }
+      };
+      // A: A04 da 2 pallet
+      for(let bay=1; bay<=4; bay++) addBay("A", bay, bay===4 ? 2 : 3);
+      // B: tutte da 3
+      for(let bay=1; bay<=4; bay++) addBay("B", bay, 3);
+      // C: C01 da 2 pallet
+      for(let bay=1; bay<=4; bay++) addBay("C", bay, bay===1 ? 2 : 3);
+      // D: D04 da 2 pallet
+      for(let bay=1; bay<=4; bay++) addBay("D", bay, bay===4 ? 2 : 3);
+      // E/F: due campate da 3 pallet
+      for(let bay=1; bay<=2; bay++) addBay("E", bay, 3);
+      for(let bay=1; bay<=2; bay++) addBay("F", bay, 3);
+      return out;
+    }
+    const RACK_LOCATION_OPTIONS = buildRackLocationOptions();
+    const RACK_LOCATION_SET = new Set(RACK_LOCATION_OPTIONS);
+
+    function normalizeRackLocation(v){
+      return String(v || "").trim().toUpperCase().replace(/\s+/g, "");
+    }
+    function isValidRackLocation(v){
+      const s = normalizeRackLocation(v);
+      return !s || RACK_LOCATION_SET.has(s);
+    }
+    function rackLocationLabel(v){
+      const s = normalizeRackLocation(v);
+      return s || "—";
+    }
+    function readRackLocationFromDoc(d){
+      return normalizeRackLocation(
+        d?.rackLocation ||
+        d?.shelfLocation ||
+        d?.storageSlot ||
+        d?.warehouseSlot ||
+        d?.ubicazione ||
+        ""
+      );
+    }
+    function rackLocationOccupantInfo(code, currentSku="", currentLoc=""){
+      const target = normalizeRackLocation(code);
+      if(!target) return null;
+
+      const curSku = toSkuId(currentSku || "");
+      const curLoc = (currentLoc === "cerea" || currentLoc === "concamarise") ? currentLoc : "";
+
+      for(const loc of ["concamarise", "cerea"]){
+        const items = (state.inventory?.[loc]?.items || []);
+        for(const it of items){
+          const value = readRackLocationFromDoc(it || {});
+          if(value !== target) continue;
+
+          const itemSku = toSkuId(it?.sku || it?.id || "");
+          // La posizione già assegnata all’articolo aperto resta selezionabile.
+          if(itemSku === curSku && loc === curLoc) continue;
+
+          return { sku:itemSku, loc, title: it?.title || "" };
+        }
+      }
+      return null;
+    }
+
+    function isRackLocationAvailableForItem(code, currentSku="", currentLoc=""){
+      const s = normalizeRackLocation(code);
+      if(!s) return true;
+      if(!RACK_LOCATION_SET.has(s)) return false;
+      return !rackLocationOccupantInfo(s, currentSku, currentLoc);
+    }
+
+    function countAvailableRackLocations(currentSku="", currentLoc="", selected=""){
+      const sel = normalizeRackLocation(selected);
+      return RACK_LOCATION_OPTIONS.filter(code => code === sel || isRackLocationAvailableForItem(code, currentSku, currentLoc)).length;
+    }
+
+    function rackLocationSelectOptions(selected, currentSku="", currentLoc=""){
+      const sel = normalizeRackLocation(selected);
+      const groups = ["A","B","C","D","E","F"];
+      const opts = [`<option value=""${sel ? "" : " selected"}>Non assegnata</option>`];
+      let visibleCount = 0;
+
+      for(const g of groups){
+        const codes = RACK_LOCATION_OPTIONS
+          .filter(x=>x.startsWith(g))
+          .filter(code => code === sel || isRackLocationAvailableForItem(code, currentSku, currentLoc));
+
+        if(!codes.length) continue;
+        opts.push(`<optgroup label="Scaffalatura ${escapeHtml(g)}">`);
+        for(const code of codes){
+          visibleCount++;
+          opts.push(`<option value="${escapeHtml(code)}"${code===sel ? " selected" : ""}>${escapeHtml(code)}</option>`);
+        }
+        opts.push(`</optgroup>`);
+      }
+
+      if(sel && !RACK_LOCATION_SET.has(sel)){
+        opts.push(`<optgroup label="Attuale non in lista">`);
+        opts.push(`<option value="${escapeHtml(sel)}" selected>${escapeHtml(sel)}</option>`);
+        opts.push(`</optgroup>`);
+      }else if(!visibleCount){
+        opts.push(`<option value="" disabled>Nessuna ubicazione libera</option>`);
+      }
+
+      return opts.join("");
+    }
+
     function __isFiveKgItem(it){
       try{
         const sku = toSkuId((it && (it.sku || it.id)) ? (it.sku || it.id) : "");
@@ -4088,6 +4202,7 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
             titleNorm: d.titleNorm || normalizeText(title || sku),
             qty,
             lowStockThreshold: __parseLowStockThresholdValue(d.lowStockThreshold),
+            rackLocation: readRackLocationFromDoc(d),
             reordered: d.reordered === true,
             reorderStatus: d.reorderStatus || "",
             reorderedAt: d.reorderedAt || null,
@@ -5657,6 +5772,7 @@ function currentInv(){
         const qty = Number.isFinite(it.qty) ? it.qty : 0;
         const badgeClass = qty>0 ? (__isLowStockItem({ ...it, qty }) ? "warn" : "ok") : "bad";
         const locLabel = escapeHtml(prettyLoc(it.loc));
+        const rackLabel = it.rackLocation ? ` • Ubicazione: ${escapeHtml(it.rackLocation)}` : "";
         const sogliaLabel = escapeHtml(__lowStockThresholdLabel(it));
         const reorderBadge = __reorderedTinyBadge(it);
         const isReord = __isReorderedItem(it);
@@ -5669,7 +5785,7 @@ function currentInv(){
             <div class="gridCell gridSku">${sku}</div>
             <div class="gridCell">
               <div class="gridProdMain">${titleMain}${reorderBadge}</div>
-              <div class="gridProdSub">${locLabel} • Soglia: ${sogliaLabel}</div>
+              <div class="gridProdSub">${locLabel}${rackLabel} • Soglia: ${sogliaLabel}</div>
             </div>
             <div class="gridCell gridRight"><span class="badge ${badgeClass}">${qty}</span></div>
           </div>`;
@@ -5808,6 +5924,7 @@ function currentInv(){
           const qty = Number.isFinite(it.qty) ? it.qty : 0;
           const badgeClass = qty>0 ? (__isLowStockItem({ ...it, qty }) ? "warn" : "ok") : "bad";
           const locLabel = escapeHtml(prettyLoc(it.loc));
+          const rackLabel = it.rackLocation ? ` • Ubicazione: ${escapeHtml(it.rackLocation)}` : "";
           const sogliaLabel = escapeHtml(__lowStockThresholdLabel(it));
           const reorderBadge = __reorderedTinyBadge(it);
           const isReord = __isReorderedItem(it);
@@ -5818,7 +5935,7 @@ function currentInv(){
               <div class="gridCell gridSku">${sku}</div>
               <div class="gridCell">
                 <div class="gridProdMain">${titleMain}${reorderBadge}</div>
-                <div class="gridProdSub">${locLabel} • Soglia: ${sogliaLabel}</div>
+                <div class="gridProdSub">${locLabel}${rackLabel} • Soglia: ${sogliaLabel}</div>
               </div>
               <div class="badge ${badgeClass}">${qty}</div>
             </div>`;
@@ -5876,7 +5993,7 @@ function currentInv(){
       let items = [];
       if(s){
         items = allItems.filter(it=>{
-          const key = `${it.sku} ${it.title} ${it.titleNorm}`;
+          const key = `${it.sku} ${it.title} ${it.titleNorm} ${it.rackLocation || ""}`;
           return normalizeText(key).includes(s);
         });
       }
@@ -5913,7 +6030,8 @@ function currentInv(){
         const qty = Number.isFinite(it.qty) ? it.qty : 0;
         const badgeClass = __isLowStockItem(it) ? (qty>0 ? "warn" : "bad") : "ok";
         const thresholdSmall = `Soglia: ${__lowStockThresholdLabel(it)}`;
-        const metaLine = [metaSmall, thresholdSmall].filter(Boolean).join(" • ");
+        const rackSmall = it.rackLocation ? `Ubicazione: ${it.rackLocation}` : "";
+        const metaLine = [metaSmall, rackSmall, thresholdSmall].filter(Boolean).join(" • ");
         const metaHtml = metaLine ? `<div class="rowMeta">${escapeHtml(metaLine)}</div>` : ``;
         return `
           <div class="row">
@@ -6544,7 +6662,7 @@ function closeSheet(kind){
       const idx = getInvIndexForMatch();
       const q = normalizeText(String($("skuPickSearch")?.value || state.ui.skuPick?.q || ""));
       const filtered = q
-        ? idx.all.filter(row => normalizeText(`${row.sku} ${row.it?.title||""} ${row.it?.titleNorm||""} ${row.loc}`).includes(q))
+        ? idx.all.filter(row => normalizeText(`${row.sku} ${row.it?.title||""} ${row.it?.titleNorm||""} ${row.it?.rackLocation || ""} ${row.loc}`).includes(q))
         : idx.all;
 
       hint.textContent = `Prodotti: ${filtered.length}${q ? " • filtro attivo" : ""}`;
@@ -7344,7 +7462,7 @@ function closeSheet(kind){
       for(const row of (idx.all || [])){
         const sku = toSkuId(row.sku || row.it?.sku || "");
         if(!sku || used.has(sku) || bySku.has(sku)) continue;
-        const hay = normalizeText(`${sku} ${row.it?.title || ""} ${row.it?.titleNorm || ""}`);
+        const hay = normalizeText(`${sku} ${row.it?.title || ""} ${row.it?.titleNorm || ""} ${row.it?.rackLocation || ""}`);
         if(q && !hay.includes(q)) continue;
         bySku.set(sku, row);
       }
@@ -7472,6 +7590,9 @@ function closeSheet(kind){
   const titleMain = (it && it.title) ? String(it.title) : sku;
   const qty = (it && typeof it.qty !== "undefined") ? it.qty : 0;
   const note = (it && (it.note || it.notes)) ? String(it.note || it.notes) : "";
+  const rackLocation = readRackLocationFromDoc(it || {});
+  const rackLocationValue = rackLocation || "";
+  const rackLocationAvailableCount = countAvailableRackLocations(sku, loc, rackLocationValue);
   const lowStockThreshold = __getCustomLowStockThreshold(it);
   const lowStockThresholdValue = (lowStockThreshold !== null) ? String(lowStockThreshold) : "";
   const lowStockThresholdLabel = __lowStockThresholdLabel(it || { sku, title: titleMain });
@@ -7480,7 +7601,7 @@ function closeSheet(kind){
   const comboLabel = comboChildren.length ? `Combo: ${comboChildren.length}/3` : "Combo: nessuna";
 
   if(titleEl) titleEl.textContent = titleMain;
-  if(sub) sub.textContent = `${sku} • ${prettyLoc(loc)} • Soglia: ${lowStockThresholdLabel} • ${comboLabel}`;
+  if(sub) sub.textContent = `${sku} • ${prettyLoc(loc)} • Ubicazione: ${rackLocation || "—"} • Soglia: ${lowStockThresholdLabel} • ${comboLabel}`;
 
   const isAdmin = !!state.user?.isAdmin;
   const editMode = !!state.ui.productDetailsEditMode;
@@ -7523,6 +7644,7 @@ function closeSheet(kind){
         <div class="pdSection">
           <div class="pdSectionTitle">Posizione / Magazzino</div>
           ${roLine("Magazzino", prettyLoc(loc))}
+          ${roLine("Ubicazione scaffale", rackLocation ? rackLocationLabel(rackLocation) : "—", rackLocation ? "mono" : "")}
           ${metaLine ? `<div class="pdMeta">${metaLine}</div>` : ``}
         </div>
 
@@ -7579,6 +7701,16 @@ function closeSheet(kind){
         <div class="pdSection">
           <div class="pdSectionTitle">Posizione / Magazzino</div>
           ${roLine("Magazzino", prettyLoc(loc))}
+          <div class="pdGrid" style="margin-top:10px">
+            <div class="field">
+              <label class="fieldLabel">Ubicazione scaffale</label>
+              <select class="input mono" data-field="rackLocation" ${canEdit ? "" : "disabled"}>
+                ${rackLocationSelectOptions(rackLocationValue, sku, loc)}
+              </select>
+              <div class="fieldError" data-err="rackLocation" style="display:none;"></div>
+              <div class="hint" style="margin-top:6px">Mostra solo ubicazioni libere: ${rackLocationAvailableCount}/${RACK_LOCATION_OPTIONS.length} disponibili. Salvataggio solo cloud Firestore.</div>
+            </div>
+          </div>
           ${metaLine ? `<div class="pdMeta">${metaLine}</div>` : ``}
           <div class="pdMeta">Spostamenti e modifiche si applicano solo dopo <b>Salva</b>. Per trasferire, imposta i pezzi da spostare e usa i pulsanti in basso.</div>
         </div>
@@ -7660,6 +7792,7 @@ function closeSheet(kind){
       setPdFieldError("qty", "");
       setPdFieldError("moveQty", "");
       setPdFieldError("lowStockThreshold", "");
+      setPdFieldError("rackLocation", "");
     }
 
     function readProductDetailsFields(){
@@ -7669,6 +7802,7 @@ function closeSheet(kind){
   const titleEl = wrap?.querySelector?.('[data-field="title"]');
   const moveQtyEl = wrap?.querySelector?.('[data-field="moveQty"]');
   const lowStockThresholdEl = wrap?.querySelector?.('[data-field="lowStockThreshold"]');
+  const rackLocationEl = wrap?.querySelector?.('[data-field="rackLocation"]');
   const noteEl = wrap?.querySelector?.('[data-field="note"]');
 
   const sku = toSkuId(skuEl?.value || "");
@@ -7677,15 +7811,18 @@ function closeSheet(kind){
   const qtyRaw = (qtyEl?.value ?? "");
   const moveQtyRaw = (moveQtyEl?.value ?? "");
   const lowStockThresholdRaw = (lowStockThresholdEl?.value ?? "");
+  const rackLocationRaw = (rackLocationEl?.value ?? "");
   const noteRaw = (noteEl?.value ?? "");
 
   const qty = parseSignedQtyStrict(qtyRaw);
   const moveQty = parseSignedQtyStrict(moveQtyRaw);
   const lowStockParsed = parseLowStockThresholdInput(lowStockThresholdRaw);
   const lowStockThreshold = lowStockParsed.ok ? lowStockParsed.value : null;
+  const rackLocation = normalizeRackLocation(rackLocationRaw);
+  const rackLocationOk = isValidRackLocation(rackLocation);
   const note = String(noteRaw).trim();
 
-  return { sku, title, qty, moveQty, lowStockThreshold, lowStockThresholdOk: lowStockParsed.ok, note, qtyRaw: String(qtyRaw), moveQtyRaw: String(moveQtyRaw), lowStockThresholdRaw: String(lowStockThresholdRaw) };
+  return { sku, title, qty, moveQty, lowStockThreshold, lowStockThresholdOk: lowStockParsed.ok, rackLocation, rackLocationOk, note, qtyRaw: String(qtyRaw), moveQtyRaw: String(moveQtyRaw), lowStockThresholdRaw: String(lowStockThresholdRaw), rackLocationRaw: String(rackLocationRaw) };
 }
 
 
@@ -8539,7 +8676,7 @@ async function saveProductFromDetails(){
 
       const oldSku = toSkuId(state.ui.productDetailsSku||"");
       clearPdFieldErrors();
-      const { sku, title, qty, lowStockThreshold, lowStockThresholdOk, note } = readProductDetailsFields();
+      const { sku, title, qty, lowStockThreshold, lowStockThresholdOk, rackLocation, rackLocationOk, note } = readProductDetailsFields();
 
       if(!oldSku){
         setPdFieldError("sku", "SKU non valido.");
@@ -8559,6 +8696,17 @@ async function saveProductFromDetails(){
       if(!lowStockThresholdOk){
         setPdFieldError("lowStockThreshold", "Inserisci un numero intero positivo oppure lascia vuoto.");
         showToast("Errore", "Soglia sottoscorta non valida.", 2200);
+        return;
+      }
+      if(!rackLocationOk){
+        setPdFieldError("rackLocation", "Seleziona un’ubicazione valida oppure lascia vuoto.");
+        showToast("Errore", "Ubicazione scaffale non valida.", 2200);
+        return;
+      }
+      if(rackLocation && !isRackLocationAvailableForItem(rackLocation, oldSku, loc)){
+        const occ = rackLocationOccupantInfo(rackLocation, oldSku, loc);
+        setPdFieldError("rackLocation", occ ? `Ubicazione già occupata da ${occ.sku} (${prettyLoc(occ.loc)}).` : "Ubicazione non disponibile.");
+        showToast("Ubicazione occupata", "Scegli un’altra ubicazione libera.", 2400);
         return;
       }
 
@@ -8600,6 +8748,7 @@ async function saveProductFromDetails(){
             note: note || "",
             qty,
             lowStockThreshold: lowStockThreshold,
+            rackLocation: rackLocation,
             updatedAt: api.serverTimestamp(),
             updatedAtClient: nowClient,
             updatedBy: state.user.email || "",
@@ -8620,6 +8769,7 @@ async function saveProductFromDetails(){
             titleNorm: normalizeText(title || sku),
             note: note || "",
             lowStockThreshold: lowStockThreshold,
+            rackLocation: rackLocation,
             active: true,
             lastSeenAt: api.serverTimestamp(),
             lastSeenAtClient: nowClient,
@@ -8696,6 +8846,7 @@ async function saveProductFromDetails(){
             beforeQty: oldQty,
             afterQty: qty,
             lowStockThreshold: lowStockThreshold,
+            rackLocation: rackLocation,
             comboChildSkus: normalizeComboChildren(comboMap.get(oldSku) || [], oldSku).map(c=>c.sku),
             fromWarehouse: loc,
             toWarehouse: loc,
@@ -8756,7 +8907,7 @@ async function saveProductFromDetails(){
       clearPdFieldErrors();
 
       const oldSku = toSkuId(state.ui.productDetailsSku||"");
-      const { sku:newSku, title, moveQty, lowStockThreshold, lowStockThresholdOk } = readProductDetailsFields();
+      const { sku:newSku, title, moveQty, lowStockThreshold, lowStockThresholdOk, rackLocation, rackLocationOk } = readProductDetailsFields();
 
       if(!oldSku){
         setPdFieldError("sku", "SKU non valido.");
@@ -8776,6 +8927,17 @@ async function saveProductFromDetails(){
       if(!lowStockThresholdOk){
         setPdFieldError("lowStockThreshold", "Inserisci un numero intero positivo oppure lascia vuoto.");
         showToast("Errore", "Soglia sottoscorta non valida.", 2200);
+        return;
+      }
+      if(!rackLocationOk){
+        setPdFieldError("rackLocation", "Seleziona un’ubicazione valida oppure lascia vuoto.");
+        showToast("Errore", "Ubicazione scaffale non valida.", 2200);
+        return;
+      }
+      if(rackLocation && !isRackLocationAvailableForItem(rackLocation, oldSku, fromLoc)){
+        const occ = rackLocationOccupantInfo(rackLocation, oldSku, fromLoc);
+        setPdFieldError("rackLocation", occ ? `Ubicazione già occupata da ${occ.sku} (${prettyLoc(occ.loc)}).` : "Ubicazione non disponibile.");
+        showToast("Ubicazione occupata", "Scegli un’altra ubicazione libera.", 2400);
         return;
       }
 
@@ -8814,6 +8976,8 @@ async function saveProductFromDetails(){
           const who = state.user?.email || state.user?.uid || "";
 
           const finalTitle = squashWhitespace(title || fromData.title || newSku || oldSku);
+          const originRackLocation = readRackLocationFromDoc(fromData);
+          let destRackLocation = rackLocation || "";
 
           const sTo = await tx.get(toRef);
           const toData = sTo.exists() ? (sTo.data() || {}) : {};
@@ -8824,6 +8988,12 @@ async function saveProductFromDetails(){
           const toNewQty = toPrev + qtyToMove;
           const remaining = fromQty - qtyToMove;
 
+          // Se sposto solo una parte, l’origine mantiene la sua ubicazione: la destinazione resta senza ubicazione
+          // per evitare due righe cloud con la stessa posizione fisica.
+          if(remaining !== 0 && destRackLocation && destRackLocation === originRackLocation){
+            destRackLocation = "";
+          }
+
           // aggiorna destinazione
           tx.set(toRef, {
             sku: oldSku,
@@ -8831,6 +9001,7 @@ async function saveProductFromDetails(){
             titleNorm: normalizeText(finalTitle || oldSku),
             note: (fromData.note || fromData.notes || toData.note || toData.notes || ""),
             lowStockThreshold: lowStockThreshold,
+            rackLocation: destRackLocation,
             qty: toNewQty,
             updatedAt: api.serverTimestamp(),
             updatedAtClient: nowClient,
@@ -8850,6 +9021,7 @@ async function saveProductFromDetails(){
               title: finalTitle,
               titleNorm: normalizeText(finalTitle || oldSku),
               lowStockThreshold: lowStockThreshold,
+              rackLocation: originRackLocation,
               qty: remaining,
               updatedAt: api.serverTimestamp(),
               updatedAtClient: nowClient,
@@ -8876,6 +9048,7 @@ async function saveProductFromDetails(){
             beforeToQty: toPrev,
             afterToQty: toNewQty,
             lowStockThreshold: lowStockThreshold,
+            rackLocation: destRackLocation,
             source: "manuale",
             note: "Spostamento da Anagrafica Prodotto",
             createdAt: api.serverTimestamp(),
@@ -8890,6 +9063,7 @@ async function saveProductFromDetails(){
             title: finalTitle,
             titleNorm: normalizeText(finalTitle || oldSku),
             lowStockThreshold: lowStockThreshold,
+            rackLocation: destRackLocation,
             updatedAt: api.serverTimestamp(),
             updatedAtClient: nowClient,
             updatedBy: who
@@ -8931,7 +9105,7 @@ function renderProductsSheet(){
       const all = inv.items || [];
       const q = normalizeText(String($("productsSearch")?.value || state.ui.productsSearch || ""));
       const filtered = q
-        ? all.filter(it=> normalizeText(`${it.sku} ${it.title} ${it.titleNorm}`).includes(q))
+        ? all.filter(it=> normalizeText(`${it.sku} ${it.title} ${it.titleNorm} ${it.rackLocation || ""}`).includes(q))
         : all;
 
       const isAdmin = !!state.user?.isAdmin;
@@ -8963,6 +9137,7 @@ function renderProductsSheet(){
           const metaSmall = buildMetaSmall(meta);
           const badgeClass = __isLowStockItem(it) ? (qty>0 ? "warn" : "bad") : "ok";
           const sogliaSmall = `Soglia: ${__lowStockThresholdLabel(it)}`;
+          const rackSmall = it.rackLocation ? `Ubicazione: ${it.rackLocation}` : "";
 
           if(editingSku && editingSku===sku){
             editHtml = `
@@ -8998,7 +9173,7 @@ function renderProductsSheet(){
               <div class="gridCell gridSku">${escapeHtml(sku)}</div>
               <div class="gridCell">
                 <div class="gridProdMain">${titleMain}</div>
-                <div class="gridProdSub">${escapeHtml([metaSmall, sogliaSmall].filter(Boolean).join(" • "))}</div>
+                <div class="gridProdSub">${escapeHtml([metaSmall, rackSmall, sogliaSmall].filter(Boolean).join(" • "))}</div>
               </div>
               <div class="gridCell gridRight"><span class="badge ${badgeClass}">${qty}</span></div>
             </div>`;
