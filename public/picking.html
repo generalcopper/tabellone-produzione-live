@@ -3504,6 +3504,7 @@ function guessTitleFromRaw(rawText, sku){
       const excludedSet = new Set(normalizeRackLocationsList(opts && opts.exclude ? opts.exclude : []));
       const multiple = !!(opts && opts.multiple);
       const disabled = !!(opts && opts.disabled);
+      const hideEmpty = !!(opts && opts.hideEmpty);
       const currentLabel = selectedList.length ? selectedList.join(", ") : "—";
       const currentClass = selectedList.length ? "rackPickerValue" : "rackPickerValue empty";
       const inputType = multiple ? "checkbox" : "radio";
@@ -3513,7 +3514,7 @@ function guessTitleFromRaw(rawText, sku){
       const out = [];
       let visibleCount = 0;
 
-      if(!multiple){
+      if(!multiple && !hideEmpty){
         out.push(`
           <label class="rackPickerOption">
             <input type="radio" data-field="rackLocationChoice" name="${escapeHtml(name)}" value=""${selectedSet.size ? "" : " checked"}${disabledAttr} />
@@ -8174,10 +8175,11 @@ function closeSheet(kind){
       if(titleEl) titleEl.textContent = titleMain;
       if(sub) sub.textContent = `${sku} • ${prettyLoc(loc)} • Disponibilità: ${qty} • Da ubicare: ${remainingQty} • Ubicazione: ${rackText}`;
 
+      const cereaTransferNotice = (loc === "cerea") ? " Il prodotto è in Cerea: la quantità confermata viene spostata automaticamente in Concamarise." : "";
       hint.innerHTML = canEdit
         ? (remainingQty > RACK_PALLET_CAPACITY
-            ? `Scegli una posizione. Al salvataggio ti chiedo quanti pezzi mettere lì. Il resto rimane da ubicare in cloud.`
-            : `Scegli una posizione e salva. Il selettore si apre solo al click e mostra posizioni libere.`)
+            ? `Scegli una posizione: appena la selezioni ti chiede quanti pezzi mettere lì e poi la conferma browser. Il resto rimane da ubicare in cloud.${cereaTransferNotice}`
+            : `Scegli una posizione: appena la selezioni parte la conferma browser e salva subito in cloud.${cereaTransferNotice}`)
         : "Sola lettura: modifica ubicazione disponibile solo per Admin.";
 
       const alreadyLine = rackText !== "—"
@@ -8187,40 +8189,10 @@ function closeSheet(kind){
       content.innerHTML = `
         <div class="pd">
           <div class="pdSection">
-            <div class="pdSectionTitle">Prodotto</div>
-            <div class="pdLine">
-              <div class="pdLabel">SKU</div>
-              <div class="pdValue mono">${escapeHtml(sku)}</div>
-            </div>
-            <div class="pdLine">
-              <div class="pdLabel">Prodotto</div>
-              <div class="pdValue">${escapeHtml(titleMain)}</div>
-            </div>
-            <div class="pdLine">
-              <div class="pdLabel">Disponibilità totale</div>
-              <div class="pdValue">${escapeHtml(String(qty))}</div>
-            </div>
-            <div class="pdLine">
-              <div class="pdLabel">Ubicato</div>
-              <div class="pdValue">${escapeHtml(String(allocatedQty))}</div>
-            </div>
-            <div class="pdLine">
-              <div class="pdLabel">Da ubicare</div>
-              <div class="pdValue">${escapeHtml(String(remainingQty))}</div>
-            </div>
-            <div class="pdLine">
-              <div class="pdLabel">Magazzino</div>
-              <div class="pdValue">${escapeHtml(prettyLoc(loc))}</div>
-            </div>
-            ${alreadyLine}
-            <div class="pdMeta">Ultimo aggiornamento: <b>${escapeHtml(updated)}</b></div>
-          </div>
-
-          <div class="pdSection">
             <div class="pdSectionTitle">Ubicazione</div>
             <div class="field">
               <label class="fieldLabel">Ubicazione scaffale</label>
-              ${rackLocationPickerHtml(pickerSelected, sku, loc, { multiple:false, disabled: !canEdit, exclude: pickerExclude })}
+              ${rackLocationPickerHtml(pickerSelected, sku, loc, { multiple:false, disabled: !canEdit, exclude: pickerExclude, hideEmpty:true })}
               <div class="fieldError" data-err="rackLocation" style="display:none;"></div>
               <div class="hint" style="margin-top:6px">Disponibili: ${availableCount}/${RACK_LOCATION_OPTIONS.length}. Una posizione vale massimo ${RACK_PALLET_CAPACITY} pz.</div>
             </div>
@@ -8228,10 +8200,7 @@ function closeSheet(kind){
         </div>
       `;
 
-      actions.innerHTML = `
-        <button class="btn primary" data-action="pdSaveLocationOnly" ${canEdit ? "" : "disabled"}>Salva ubicazione</button>
-        <button class="btn" data-action="pdCloseLocationOnly">Chiudi</button>
-      `;
+      actions.innerHTML = "";
     }
 
     function readLocationOnlySelection(){
@@ -8309,7 +8278,7 @@ function closeSheet(kind){
       let qtyToAssign = 0;
       if(remainingBefore > RACK_PALLET_CAPACITY){
         const raw = prompt(`Disponibilità da ubicare: ${remainingBefore} pz.\nQuanti pezzi vuoi mettere in ${selectedCode}?\nMassimo per posizione: ${RACK_PALLET_CAPACITY} pz`, String(RACK_PALLET_CAPACITY));
-        if(raw === null) return;
+        if(raw === null){ renderProductDetailsSheet(); return; }
         const parsed = parseSignedQtyStrict(raw);
         if(parsed === null || !Number.isFinite(parsed) || parsed <= 0){
           showToast("Quantità non valida", "Inserisci un numero intero positivo.", 2400);
@@ -8332,8 +8301,10 @@ function closeSheet(kind){
       }
 
       const remainingAfterPreview = Math.max(0, remainingBefore > 0 ? remainingBefore - qtyToAssign : 0);
-      const ok = confirm(`Confermi ubicazione cloud?\n\n${sku}\n${prettyLoc(loc)}\nPosizione: ${selectedCode}\nPezzi in questa posizione: ${qtyToAssign}\nDa ubicare dopo: ${remainingAfterPreview}`);
-      if(!ok) return;
+      const transferLabel = (loc === "cerea") ? `${prettyLoc(loc)} → ${prettyLoc("concamarise")}` : prettyLoc(loc);
+      const remainingLabel = (loc === "cerea") ? "Da ubicare dopo in Cerea" : "Da ubicare dopo";
+      const ok = confirm(`Confermi ubicazione cloud?\n\n${sku}\n${transferLabel}\nPosizione: ${selectedCode}\nPezzi in questa posizione: ${qtyToAssign}\n${remainingLabel}: ${remainingAfterPreview}`);
+      if(!ok){ renderProductDetailsSheet(); return; }
 
       const api = state.firebase.api;
       const db = state.firebase.db;
@@ -8343,6 +8314,139 @@ function closeSheet(kind){
       }
 
       try{
+        if(loc === "cerea"){
+          const sourceLoc = "cerea";
+          const destLoc = "concamarise";
+          const sourceRef = api.doc(db, COL_ROOT, sourceLoc, SUB_ITEMS, sku);
+          const destRef = api.doc(db, COL_ROOT, destLoc, SUB_ITEMS, sku);
+          const productRef = api.doc(db, COL_PRODUCTS, sku);
+          const nowClient = Date.now();
+          const who = state.user?.email || state.user?.emailLower || state.user?.uid || "";
+          const title = squashWhitespace(it.title || sku) || sku;
+
+          let movedQty = qtyToAssign;
+          let finalRemaining = remainingAfterPreview;
+          let destTotal = 0;
+
+          await api.runTransaction(db, async (tx)=>{
+            const sourceSnap = await tx.get(sourceRef);
+            const destSnap = await tx.get(destRef);
+
+            if(!sourceSnap.exists()) throw new Error("Prodotto non trovato in Cerea.");
+            const sourceFresh = sourceSnap.data() || {};
+            const sourceQty = stockQtyFromDoc(sourceFresh);
+            if(sourceQty <= 0) throw new Error("Disponibilità zero: nessuna ubicazione da assegnare.");
+
+            const sourceAllocations = normalizeRackAllocationsForWrite(readRackAllocationsFromDoc(sourceFresh));
+            const sourceAllocated = rackAllocatedQtyFromDoc(sourceFresh);
+            const sourceRemaining = Math.max(0, sourceQty - sourceAllocated);
+
+            if(sourceRemaining > 0){
+              if(sourceAllocations.some(x=>x.code === selectedCode)) throw new Error("Questa posizione è già usata per questo prodotto. Scegli una nuova posizione libera.");
+              if(qtyToAssign > sourceRemaining) throw new Error(`Restano da ubicare ${sourceRemaining} pz in Cerea.`);
+              if(qtyToAssign > RACK_PALLET_CAPACITY) throw new Error(`Una posizione può contenere massimo ${RACK_PALLET_CAPACITY} pz.`);
+              movedQty = qtyToAssign;
+              finalRemaining = Math.max(0, sourceRemaining - movedQty);
+            }else{
+              // Se un prodotto già ubicato in Cerea viene salvato, viene trasferito tutto a Concamarise.
+              movedQty = sourceQty;
+              finalRemaining = 0;
+            }
+
+            if(movedQty <= 0) throw new Error("Quantità da trasferire non valida.");
+
+            const destFresh = destSnap.exists() ? (destSnap.data() || {}) : {};
+            const destQty = stockQtyFromDoc(destFresh);
+            const destAllocations = normalizeRackAllocationsForWrite(readRackAllocationsFromDoc(destFresh));
+
+            if(destAllocations.some(x=>x.code === selectedCode)){
+              throw new Error("Questa posizione è già usata per questo prodotto in Concamarise. Scegli una nuova posizione libera.");
+            }
+
+            const destCleanAllocations = normalizeRackAllocationsForWrite([
+              ...destAllocations,
+              { code:selectedCode, qty:movedQty }
+            ]);
+            const destCleanLocations = destCleanAllocations.map(x=>x.code);
+            const destCleanLocation = destCleanLocations[0] || "";
+            destTotal = destQty + movedQty;
+
+            const sourceNewQty = sourceQty - movedQty;
+            if(sourceNewQty > 0){
+              const sourceCleanAllocations = sourceAllocations;
+              const sourceCleanLocations = sourceCleanAllocations.map(x=>x.code);
+              tx.set(sourceRef, {
+                sku,
+                title,
+                titleNorm: normalizeText(title || sku),
+                qty: sourceNewQty,
+                rackLocation: sourceCleanLocations[0] || "",
+                rackLocations: sourceCleanLocations,
+                rackAllocations: sourceCleanAllocations,
+                updatedAt: api.serverTimestamp(),
+                updatedAtClient: nowClient,
+                updatedBy: who,
+                location: sourceLoc
+              }, { merge:true });
+            }else{
+              tx.delete(sourceRef);
+            }
+
+            tx.set(destRef, {
+              sku,
+              title,
+              titleNorm: normalizeText(title || sku),
+              qty: destTotal,
+              rackLocation: destCleanLocation,
+              rackLocations: destCleanLocations,
+              rackAllocations: destCleanAllocations,
+              updatedAt: api.serverTimestamp(),
+              updatedAtClient: nowClient,
+              updatedBy: who,
+              location: destLoc
+            }, { merge:true });
+
+            tx.set(productRef, {
+              sku,
+              title,
+              titleNorm: normalizeText(title || sku),
+              rackLocation: destCleanLocation,
+              rackLocations: destCleanLocations,
+              rackAllocations: destCleanAllocations,
+              lastSeenAt: api.serverTimestamp(),
+              lastSeenAtClient: nowClient,
+              lastSeenBy: who,
+              lastSeenLocation: destLoc,
+              lastSeenKind: "location_transfer_from_cerea"
+            }, { merge:true });
+
+            addProductMovementToBatch(tx, api, db, sku, {
+              type: "move",
+              qtySigned: movedQty,
+              deltaSigned: movedQty,
+              beforeFromQty: sourceQty,
+              afterFromQty: sourceNewQty,
+              beforeToQty: destQty,
+              afterToQty: destTotal,
+              fromWarehouse: sourceLoc,
+              toWarehouse: destLoc,
+              source: "ubicazione",
+              note: `Ubicazione ${selectedCode} con trasferimento automatico Cerea → Concamarise`,
+              rackLocation: selectedCode,
+              rackLocations: destCleanLocations,
+              createdAtClient: nowClient
+            });
+          });
+
+          showToast("Ubicazione salvata", `${sku} → ${selectedCode} • ${movedQty} pz spostati in Concamarise${finalRemaining ? ` • restano ${finalRemaining} in Cerea` : ""}`, 2600);
+          state.route.loc = destLoc;
+          state.ui.productDetailsSku = null;
+          state.ui.productDetailsEditMode = false;
+          closeSheet("productDetails");
+          renderHomeDashboard();
+          return;
+        }
+
         const itemRef = api.doc(db, COL_ROOT, loc, SUB_ITEMS, sku);
         const productRef = api.doc(db, COL_PRODUCTS, sku);
         const nowClient = Date.now();
@@ -10885,6 +10989,9 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
         updateRackPickerSummary(picker);
         if(choice.type === "radio" && picker && picker.tagName && picker.tagName.toLowerCase() === "details"){
           picker.open = false;
+        }
+        if(LOCATION_ONLY_MODE && choice.checked && normalizeRackLocation(choice.value)){
+          window.setTimeout(()=> saveLocationOnlyFromDetails(), 0);
         }
       });
 
