@@ -3463,9 +3463,20 @@ function guessTitleFromRaw(rawText, sku){
 
     function rackLocationSelectOptions(selected, currentSku="", currentLoc="", opts={}){
       const selectedSet = new Set(normalizeRackLocationsList(selected));
+      const excludedSet = new Set(normalizeRackLocationsList(opts && opts.exclude ? opts.exclude : []));
       const groups = ["A","B","C","D","E","F"];
       const isMultiple = !!(opts && opts.multiple);
-      const out = isMultiple ? [] : [`<option value=""${selectedSet.size ? "" : " selected"}>Non assegnata</option>`];
+      const hideEmpty = !!(opts && opts.hideEmpty);
+      const out = [];
+
+      if(!isMultiple){
+        if(hideEmpty){
+          out.push(`<option value=""${selectedSet.size ? "" : " selected"} disabled>Scegli ubicazione</option>`);
+        }else{
+          out.push(`<option value=""${selectedSet.size ? "" : " selected"}>Non assegnata</option>`);
+        }
+      }
+
       let visibleCount = 0;
 
       for(const g of groups){
@@ -3498,87 +3509,24 @@ function guessTitleFromRaw(rawText, sku){
       return out.join("");
     }
 
-    function rackLocationPickerHtml(selected, currentSku="", currentLoc="", opts={}){
+
+function rackLocationPickerHtml(selected, currentSku="", currentLoc="", opts={}){
       const selectedList = normalizeRackLocationsList(selected);
-      const selectedSet = new Set(selectedList);
-      const excludedSet = new Set(normalizeRackLocationsList(opts && opts.exclude ? opts.exclude : []));
       const multiple = !!(opts && opts.multiple);
       const disabled = !!(opts && opts.disabled);
-      const hideEmpty = !!(opts && opts.hideEmpty);
-      const currentLabel = selectedList.length ? selectedList.join(", ") : "—";
-      const currentClass = selectedList.length ? "rackPickerValue" : "rackPickerValue empty";
-      const inputType = multiple ? "checkbox" : "radio";
-      const name = `rackLocation_${String(currentSku||"").replace(/[^A-Za-z0-9_-]/g,"_")}_${String(currentLoc||"").replace(/[^A-Za-z0-9_-]/g,"_")}`;
-      const groups = ["A","B","C","D","E","F"];
       const disabledAttr = disabled ? " disabled" : "";
-      const out = [];
-      let visibleCount = 0;
-
-      if(!multiple && !hideEmpty){
-        out.push(`
-          <label class="rackPickerOption">
-            <input type="radio" data-field="rackLocationChoice" name="${escapeHtml(name)}" value=""${selectedSet.size ? "" : " checked"}${disabledAttr} />
-            <span class="mono">—</span>
-          </label>
-        `);
-      }
-
-      for(const g of groups){
-        const codes = RACK_LOCATION_OPTIONS
-          .filter(x=>x.startsWith(g))
-          .filter(code => selectedSet.has(code) || isRackLocationAvailableForItem(code, currentSku, currentLoc));
-        if(!codes.length) continue;
-        out.push(`<div class="rackPickerGroup">Scaffalatura ${escapeHtml(g)}</div>`);
-        for(const code of codes){
-          visibleCount++;
-          out.push(`
-            <label class="rackPickerOption">
-              <input type="${inputType}" data-field="rackLocationChoice" name="${escapeHtml(name)}" value="${escapeHtml(code)}"${selectedSet.has(code) ? " checked" : ""}${disabledAttr} />
-              <span class="mono">${escapeHtml(code)}</span>
-            </label>
-          `);
-        }
-      }
-
-      const invalidSelected = selectedList.filter(code => !RACK_LOCATION_SET.has(code));
-      if(invalidSelected.length){
-        out.push(`<div class="rackPickerGroup">Attuale non in lista</div>`);
-        for(const code of invalidSelected){
-          out.push(`
-            <label class="rackPickerOption">
-              <input type="${inputType}" data-field="rackLocationChoice" name="${escapeHtml(name)}" value="${escapeHtml(code)}" checked${disabledAttr} />
-              <span class="mono">${escapeHtml(code)}</span>
-            </label>
-          `);
-        }
-      }else if(!visibleCount && multiple){
-        out.push(`<div class="rackPickerOption disabled">Nessuna ubicazione libera</div>`);
-      }
-
-      if(disabled){
-        return `
-          <div class="rackPicker" data-rack-picker="1" aria-disabled="true">
-            <div class="rackPickerSummary">
-              <span class="${currentClass}" data-rack-picker-value>${escapeHtml(currentLabel)}</span>
-            </div>
-          </div>
-        `;
-      }
+      const multipleAttr = multiple ? " multiple size=\"8\"" : "";
+      const fieldName = multiple ? "rackLocations" : "rackLocation";
 
       return `
-        <details class="rackPicker" data-rack-picker="1" data-rack-multiple="${multiple ? "1" : "0"}">
-          <summary class="rackPickerSummary">
-            <span class="${currentClass}" data-rack-picker-value>${escapeHtml(currentLabel)}</span>
-            <span class="rackPickerChevron" aria-hidden="true">⌄</span>
-          </summary>
-          <div class="rackPickerPanel">
-            ${out.join("")}
-          </div>
-        </details>
+        <select class="input" data-field="${fieldName}"${multipleAttr}${disabledAttr}>
+          ${rackLocationSelectOptions(selectedList, currentSku, currentLoc, opts)}
+        </select>
       `;
     }
 
-    function readRackPickerSelection(root){
+
+function readRackPickerSelection(root){
       const wrap = root || document;
       const choices = Array.from(wrap.querySelectorAll?.('[data-field="rackLocationChoice"]:checked') || []);
       return normalizeRackLocationsList(choices.map(x=>x.value));
@@ -8194,7 +8142,6 @@ function closeSheet(kind){
               <label class="fieldLabel">Ubicazione scaffale</label>
               ${rackLocationPickerHtml(pickerSelected, sku, loc, { multiple:false, disabled: !canEdit, exclude: pickerExclude, hideEmpty:true })}
               <div class="fieldError" data-err="rackLocation" style="display:none;"></div>
-              <div class="hint" style="margin-top:6px">Disponibili: ${availableCount}/${RACK_LOCATION_OPTIONS.length}. Una posizione vale massimo ${RACK_PALLET_CAPACITY} pz.</div>
             </div>
           </div>
         </div>
@@ -10983,14 +10930,22 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
       });
 
       $("productDetailsContent")?.addEventListener("change", (e)=>{
-        const choice = e.target?.closest?.('[data-field="rackLocationChoice"]');
+        const choice = e.target?.closest?.('[data-field="rackLocationChoice"], [data-field="rackLocation"], [data-field="rackLocations"]');
         if(!choice) return;
-        const picker = choice.closest?.('[data-rack-picker]');
-        updateRackPickerSummary(picker);
-        if(choice.type === "radio" && picker && picker.tagName && picker.tagName.toLowerCase() === "details"){
-          picker.open = false;
+
+        if(choice.matches?.('[data-field="rackLocationChoice"]')){
+          const picker = choice.closest?.('[data-rack-picker]');
+          updateRackPickerSummary(picker);
+          if(choice.type === "radio" && picker && picker.tagName && picker.tagName.toLowerCase() === "details"){
+            picker.open = false;
+          }
+          if(LOCATION_ONLY_MODE && choice.checked && normalizeRackLocation(choice.value)){
+            window.setTimeout(()=> saveLocationOnlyFromDetails(), 0);
+          }
+          return;
         }
-        if(LOCATION_ONLY_MODE && choice.checked && normalizeRackLocation(choice.value)){
+
+        if(LOCATION_ONLY_MODE && choice.matches?.('[data-field="rackLocation"]') && normalizeRackLocation(choice.value)){
           window.setTimeout(()=> saveLocationOnlyFromDetails(), 0);
         }
       });
