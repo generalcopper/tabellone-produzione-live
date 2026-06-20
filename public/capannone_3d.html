@@ -999,7 +999,6 @@ initKioskSettingsUi();
       if(realtimeStarted) return;
       realtimeStarted = true;
       startInventoryRealtime(fs, db);
-      startCapannone3dFocusRealtime(fs, db);
     }
 
     authMod.onAuthStateChanged(auth, async (user)=>{
@@ -1022,49 +1021,24 @@ initKioskSettingsUi();
   }
 })();
 
-// avvia il listener realtime del comando Trova (Picking -> tutti i Capannone 3D aperti)
-function startCapannone3dFocusRealtime(fs, db){
-  try{
-    const ref = fs.doc(db, "amzInventoryProducts", CAPANNONE_3D_FOCUS_DOC_ID);
-    let firstFocusSnapshot = true;
-    fs.onSnapshot(ref, (snap)=>{
-      if(!snap.exists()){ firstFocusSnapshot = false; return; }
-      const data = snap.data() || {};
-      const code = normalizeRackCode(data.rackLocation || data.code || data.find || data.targetRackLocation || "");
-      const seq = String(data.focusSeq || data.commandId || data.focusAtClient || data.updatedAtClient || "");
-      const key = `${seq}::${code}`;
-
-      // Evita replay del vecchio comando quando il kiosk apre/ricarica Capannone 3D.
-      // Da qui in poi ogni update cloud ricevuto viene eseguito immediatamente.
-      if(firstFocusSnapshot){
-        firstFocusSnapshot = false;
-        if(key) LAST_CAPANNONE_3D_FOCUS_KEY = key;
-        return;
-      }
-
-      handleCapannone3dFocusCommand(data);
-    }, (err)=>{
-      console.error('Focus command Firestore error', err);
-      if(err && err.code === 'permission-denied'){
-        setCloudStatus('Permessi comando Trova mancanti • apri ⚙ UID', '#ef4444');
-      }
-    });
-  }catch(e){
-    console.error('Focus realtime init error', e);
-  }
-}
-
 // avvia il listener realtime sulle ubicazioni (dopo auth valida)
 function startInventoryRealtime(fs, db){
   setCloudStatus('Lettura ubicazioni…', '#f59e0b');
   // anagrafica prodotti globale: collezione piatta amzInventoryProducts/{sku}
   // ogni doc ha rackAllocations:[{code,lot,qty}], scritta da picking.html.
+  const focusRef = fs.doc(db, "amzInventoryProducts", CAPANNONE_3D_FOCUS_DOC_ID);
+  fs.onSnapshot(focusRef, (snap)=>{
+    if(snap.exists()) handleCapannone3dFocusCommand(snap.data() || {});
+  }, (err)=>{
+    console.error('Firestore focus error', err);
+    if(err && err.code === 'permission-denied') setCloudStatus('Permessi comando Trova mancanti • apri ⚙ UID', '#ef4444');
+  });
+
   const colRef = fs.collection(db, "amzInventoryProducts");
   fs.onSnapshot(colRef, (snap)=>{
     const perCode = {};
     snap.forEach(docSnap=>{
       const d = docSnap.data() || {};
-      if(docSnap.id === CAPANNONE_3D_FOCUS_DOC_ID || d._type === 'capannone3dFocus' || d.type === 'capannone3dFocus') return;
       const allocs = Array.isArray(d.rackAllocations) ? d.rackAllocations : [];
       const title = d.title || d.name || d.sku || docSnap.id;
       for(const a of allocs){
