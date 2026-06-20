@@ -2916,7 +2916,7 @@
               <div class="miniTop" style="padding:0; border:0; background:transparent; box-shadow:none;">
                 <div>
                   <div class="miniTitle" style="font-size:15px">Storico prelievi</div>
-                  <div class="miniSub">SKU già prelevati dai flussi recenti</div>
+                  <div class="miniSub">Flussi e SKU già prelevati dai flussi recenti</div>
                 </div>
                 <div class="pill" id="homePickedHistoryCount">—</div>
               </div>
@@ -8306,15 +8306,50 @@ function currentInv(){
       return getProductBySku(loc, sku) || getItemBySkuAny(sku, loc)?.it || null;
     }
 
-    function pickingLinePositionHtml(flow, sku){
+    function pickingLinePositionParts(flow, sku){
       const it = pickingLineProduct(flow, sku);
-      if(it && readRackLocationsFromDoc(it || {}).length) return rackLocationStackHtml(it);
-      return `<span class="badge rackStackEmpty">—</span>`;
+      if(!it) return [];
+
+      // Picking: qui servono solo posizione + quantità presente.
+      // Niente lotto/storico/movimenti nella colonna operativa.
+      const grouped = new Map();
+      const allocations = readRackAllocationsFromDoc(it || {});
+      for(const a of allocations){
+        const code = normalizeRackLocation(a?.code || "");
+        const qty = Math.round(Number(a?.qty || 0));
+        if(!code) continue;
+        const prev = grouped.get(code) || { code, qty:0 };
+        if(Number.isFinite(qty) && qty > 0) prev.qty += qty;
+        grouped.set(code, prev);
+      }
+
+      if(!grouped.size){
+        for(const code of readRackLocationsFromDoc(it || {})){
+          if(code) grouped.set(code, { code, qty:0 });
+        }
+      }
+
+      return Array.from(grouped.values()).sort((a,b)=>String(a.code).localeCompare(String(b.code)));
+    }
+
+    function pickingLinePositionHtml(flow, sku){
+      const parts = pickingLinePositionParts(flow, sku);
+      if(!parts.length) return `<span class="badge rackStackEmpty">—</span>`;
+      return `<div class="rackStack">${parts.map(x=>{
+        const qtyHtml = (Number.isFinite(Number(x.qty)) && Number(x.qty) > 0)
+          ? `<span class="rackStackQty">${escapeHtml(String(Math.round(Number(x.qty))))} pz</span>`
+          : `<span class="rackStackQty">— pz</span>`;
+        return `<span class="rackStackLine"><span class="rackStackCode">${escapeHtml(x.code)}</span>${qtyHtml}</span>`;
+      }).join("")}</div>`;
     }
 
     function pickingLinePositionText(flow, sku){
-      const it = pickingLineProduct(flow, sku);
-      return it ? rackLocationDisplayFromItem(it) : "—";
+      const parts = pickingLinePositionParts(flow, sku);
+      if(!parts.length) return "—";
+      return parts.map(x=>{
+        const q = (Number.isFinite(Number(x.qty)) && Number(x.qty) > 0) ? ` (${Math.round(Number(x.qty))} pz)` : "";
+        return `${x.code}${q}`;
+      }).join(", ");
     }
 
     function pickingLineTitle(line, flow){
@@ -8377,13 +8412,19 @@ function currentInv(){
       if(!flows.length){
         list.innerHTML = `<div class="hint">Nessun flusso di scarico da prelevare nei flussi recenti.</div>`;
         if(hint) hint.textContent = "";
+      }else if(!activeFlows.length){
+        list.innerHTML = `<div class="hint">Nessun flusso da prelevare. I flussi già prelevati sono nello storico prelievi.</div>`;
+        if(hint) hint.textContent = `Flussi ordinati dal più recente: ${flows.length.toLocaleString("it-IT")} • ancora da prelevare: 0. I flussi prelevati spariscono dalla lista operativa e restano nello storico.`;
       }else{
-        const cards = flows.slice(0, 40).map(flow=>{
+        const cards = activeFlows.slice(0, 40).map(flow=>{
           const st = pickingFlowStats(flow);
           const loc = (flow.location === "cerea" || flow.location === "concamarise") ? flow.location : "concamarise";
           const flowName = flowDisplayName(flow);
           const flowId = String(flow.id || "");
-          const rows = (flow.lines || []).filter(l=>toSkuId(l?.sku || "")).map(line=>{
+          const rows = (flow.lines || []).filter(l=>{
+            const sku = toSkuId(l?.sku || "");
+            return sku && !isPickingLinePicked(flow, sku);
+          }).map(line=>{
             const sku = toSkuId(line.sku || "");
             const qty = Math.abs(parseQty(line.qty || 0) || 0);
             const picked = isPickingLinePicked(flow, sku);
@@ -8430,7 +8471,7 @@ function currentInv(){
             </div>`;
         }).join("");
         list.innerHTML = cards;
-        if(hint) hint.textContent = `Flussi ordinati dal più recente: ${flows.length.toLocaleString("it-IT")} • ancora da prelevare: ${activeFlows.length.toLocaleString("it-IT")}. La colonna Posizione legge le ubicazioni SKU già presenti in cloud.`;
+        if(hint) hint.textContent = `Flussi ordinati dal più recente: ${flows.length.toLocaleString("it-IT")} • ancora da prelevare: ${activeFlows.length.toLocaleString("it-IT")}. La colonna Posizione mostra solo posizione e quantità.`;
       }
 
       const hist = pickingPickedHistoryEntries();
@@ -8502,6 +8543,21 @@ function currentInv(){
           flowPickedBy: allPicked ? who : ""
         }
       }, { merge:true });
+
+      // Aggiornamento UI immediato: lo SKU prelevato sparisce dalla lista operativa
+      // e passa nello storico, senza attendere il prossimo snapshot Firestore.
+      flow.picking = {
+        ...(flow.picking || {}),
+        status: allPicked ? "prelevato" : "parziale",
+        pickedLines: pickedMap,
+        updatedAtClient: nowClient,
+        updatedBy: who,
+        events: [...(Array.isArray(flow.picking?.events) ? flow.picking.events : []), event],
+        flowPicked: allPicked,
+        flowPickedAtClient: allPicked ? nowClient : (flow.picking?.flowPickedAtClient || null),
+        flowPickedBy: allPicked ? who : (flow.picking?.flowPickedBy || "")
+      };
+
       showToast("SKU prelevato", `${s} • ${position} • ${qty} pz`, 1800);
       renderHomePickingBox();
     }
@@ -8554,6 +8610,21 @@ function currentInv(){
           flowPickedBy: who
         }
       }, { merge:true });
+
+      // Aggiornamento UI immediato: il flusso prelevato sparisce dalla lista operativa
+      // e resta consultabile nello storico prelievi.
+      flow.picking = {
+        ...(flow.picking || {}),
+        status:"prelevato",
+        pickedLines,
+        updatedAtClient: nowClient,
+        updatedBy: who,
+        events: [...(Array.isArray(flow.picking?.events) ? flow.picking.events : []), event],
+        flowPicked:true,
+        flowPickedAtClient: nowClient,
+        flowPickedBy: who
+      };
+
       showToast("Flusso prelevato", `${flowDisplayName(flow)} • ${skuList.length} SKU`, 2000);
       renderHomePickingBox();
     }
