@@ -2149,6 +2149,7 @@
       </div>
 
       <div class="hdrActions">
+        <a class="btn small" id="btnBackIndex" href="index.html" title="Torna a Index" aria-label="Torna a Index">← Index</a>
         <div class="pill" id="pillAuth" title="Stato accesso">
           <span class="dot" id="dotAuth"></span>
           <span class="pillText" id="authStatus">Accesso non attivo</span>
@@ -3375,7 +3376,7 @@ function guessTitleFromRaw(rawText, sku){
         dot?.classList.add("ok");
         if(status) status.textContent = `${state.user.displayName || state.user.email || "utente"}`;
         if(sub){
-          const role = state.user.isAdmin ? "Admin" : "Operatore";
+          const role = state.user.isAdmin ? "Admin" : (state.user.isUser ? "User" : "Operatore");
           sub.textContent = state.route.view==="location"
             ? `Magazzino: ${prettyLoc(state.route.loc)} • Ruolo: ${role}`
             : `Ruolo: ${role}`;
@@ -4053,8 +4054,8 @@ function guessTitleFromRaw(rawText, sku){
       const sku = toSkuId(state.ui.productDetailsSku || "");
       const data = readRackAllocationEditor(btn);
 
-      if(!state.user?.isAdmin){
-        showToast("Permessi", "Solo Admin può modificare le ubicazioni.", 2200);
+      if(!canUsePickingActions()){
+        showToast("Permessi", "Utente non abilitato al picking.", 2200);
         return;
       }
       if(!(loc === "cerea" || loc === "concamarise") || !sku || !data){
@@ -5246,6 +5247,9 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
               emailLower: (user.email||"").toLowerCase(),
               displayName: user.displayName || user.email || "Utente",
               isAdmin: false,
+              isUser: false,
+              role: "",
+              roles: [],
               isWhitelisted: null
             };
             state.authGateState = "signed_in";
@@ -5303,9 +5307,20 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
         const emailLower = (authUser?.email || "").toLowerCase();
 
         let isAdmin = !!(emailLower && ADMIN_EMAILS.includes(emailLower));
+        let isUser = false;
         let isWhitelisted = false;
+        let resolvedRole = "";
+        let resolvedRoles = [];
 
-        // whitelist: amzInventoryDirectory/{emailLower} + fallback payrollDirectory/{emailLower}
+        const readRoles = (d = {})=>{
+          const role = String(d.role || d.userRole || d.type || "").trim().toLowerCase();
+          const roles = Array.isArray(d.roles) ? d.roles.map(x=>String(x||"").trim().toLowerCase()).filter(Boolean) : [];
+          if(role && !roles.includes(role)) roles.push(role);
+          return { role, roles };
+        };
+        const hasAnyRole = (roles, wanted)=> wanted.some(r => roles.includes(r));
+
+        // whitelist dedicata: amzInventoryDirectory/{emailLower} + fallback payrollDirectory/{emailLower}
         const dirs = ["amzInventoryDirectory", "payrollDirectory"];
         for(const col of dirs){
           if(!emailLower) continue;
@@ -5313,21 +5328,46 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
             const snap = await api.getDoc(api.doc(db, col, emailLower));
             if(snap?.exists()){
               const d = snap.data() || {};
-              isWhitelisted = (d.enabled !== false);
-              if(isWhitelisted) break;
+              const enabled = d.enabled !== false && d.disabled !== true;
+              const rr = readRoles(d);
+              if(enabled){
+                isWhitelisted = true;
+                if(rr.role) resolvedRole = rr.role;
+                resolvedRoles = Array.from(new Set([...resolvedRoles, ...rr.roles]));
+                if(hasAnyRole(rr.roles, ["user", "operatore", "operator", "picking", "warehouse"])){
+                  isUser = true;
+                }
+                if(hasAnyRole(rr.roles, ["admin", "administrator"]) || d.isAdmin===true || d.admin===true){
+                  isAdmin = true;
+                }
+                break;
+              }
             }
           }catch(_e){}
         }
 
-        // admin fallback: powderUsers/{uid} or powderUsers/{emailLower}
+        // utenti generali: powderUsers/{uid} oppure powderUsers/{emailLower}
+        // Ruolo user/operator/picking = accesso a Picking; admin mantiene i permessi avanzati.
         const ids = [authUser?.uid, emailLower].filter(Boolean);
         for(const id of ids){
           try{
             const puSnap = await api.getDoc(api.doc(db, "powderUsers", id));
             if(puSnap?.exists()){
               const d = puSnap.data() || {};
-              if(d.isAdmin===true || d.admin===true || d.role==="admin" || (Array.isArray(d.roles) && d.roles.includes("admin"))){
-                isAdmin = true;
+              const enabled = d.enabled !== false && d.disabled !== true;
+              const rr = readRoles(d);
+              if(enabled){
+                if(rr.role) resolvedRole = rr.role;
+                resolvedRoles = Array.from(new Set([...resolvedRoles, ...rr.roles]));
+
+                const adminByRole = hasAnyRole(rr.roles, ["admin", "administrator"]) || d.isAdmin===true || d.admin===true;
+                const userByRole = hasAnyRole(rr.roles, ["user", "operatore", "operator", "picking", "warehouse"]) || d.isUser===true || d.user===true;
+
+                if(adminByRole) isAdmin = true;
+                if(userByRole) isUser = true;
+                if(adminByRole || userByRole || d.enabled === true || d.accessPicking === true || d.canUsePicking === true){
+                  isWhitelisted = true;
+                }
               }
               break;
             }
@@ -5336,11 +5376,18 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
 
         if(state.user){
           state.user.isAdmin = !!isAdmin;
-          state.user.isWhitelisted = !!(isWhitelisted || isAdmin);
+          state.user.isUser = !!isUser;
+          state.user.role = resolvedRole || (isAdmin ? "admin" : (isUser ? "user" : ""));
+          state.user.roles = Array.from(new Set(resolvedRoles));
+          state.user.isWhitelisted = !!(isWhitelisted || isAdmin || isUser);
         }
       }catch(err){
         console.warn("resolveUserRole", err);
       }
+    }
+
+    function canUsePickingActions(){
+      return !!(state.user?.isAdmin || state.user?.isUser || state.user?.role === "user" || (Array.isArray(state.user?.roles) && state.user.roles.includes("user")));
     }
 
     // --- realtime inventory watchers ---
@@ -9386,7 +9433,7 @@ function closeSheet(kind){
       const allRemainingQty = rackUnallocatedQtyFromDoc(it || {});
       const rackText = rackLocationDisplayFromItem(it || {});
       const allAllocations = rackAllocationRowsForDetails(it || {});
-      const canEdit = !!state.user?.isAdmin;
+      const canEdit = canUsePickingActions();
 
       const pickerExclude = readRackLocationsFromDoc(it || {});
       const excludeSet = new Set(normalizeRackLocationsList(pickerExclude));
@@ -9398,7 +9445,7 @@ function closeSheet(kind){
       const cereaTransferNotice = (loc === "cerea") ? " Il prodotto è in Cerea: una nuova ubicazione sposta automaticamente la quantità confermata in Concamarise." : "";
       hint.innerHTML = canEdit
         ? `Le ubicazioni assegnate sono modificabili riga per riga: posizione e quantità. Le quantità liberate tornano in Da ubicare.${cereaTransferNotice}`
-        : "Sola lettura: modifica ubicazione disponibile solo per Admin.";
+        : "Sola lettura: utente non abilitato al picking.";
 
       const addSectionHtml = remainingQty > 0 ? `
         <div class="pdSection">
@@ -9459,8 +9506,8 @@ function closeSheet(kind){
       const loc = state.route.loc;
       const sku = toSkuId(state.ui.productDetailsSku || "");
 
-      if(!state.user?.isAdmin){
-        showToast("Permessi", "Solo Admin può modificare l’ubicazione.", 2200);
+      if(!canUsePickingActions()){
+        showToast("Permessi", "Utente non abilitato al picking.", 2200);
         return;
       }
       if(!(loc === "cerea" || loc === "concamarise") || !sku){
@@ -12837,9 +12884,10 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
       amzInventoryProducts/{SKU}/movements/{autoId} { type, qtySigned, beforeQty?, afterQty?, fromWarehouse?, toWarehouse?, source, note, createdAt, createdAtClient, createdByEmail }
       amzInventory/{loc}/logs/{autoId} { kind, location, fileName, appliedAt, appliedBy, totalLines, totalPieces, workflow?, lines[] }
 
-    Whitelist:
+    Accesso Picking:
       amzInventoryDirectory/{emailLower} { enabled: true }
-    (fallback: payrollDirectory/{emailLower})
+      payrollDirectory/{emailLower} { enabled: true }
+      powderUsers/{uid OR emailLower} con role="user"/"operator"/"picking" oppure accessPicking=true
 
     Admin:
       powderUsers/{uid OR emailLower} con isAdmin=true/role="admin"
