@@ -4239,7 +4239,6 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
 
     function stopAllRealtime(){
       resetLowStockRealtimeWatcher();
-      stopProductNamesWatch();
       stopTwReordersWatch();
       stopTwCompletedAmazonWatch();
       for(const loc of ["cerea","concamarise"]){
@@ -4250,6 +4249,7 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
       }
       stopAllLogs();
       stopLowStockEmailMetaWatch();
+      stopProductNamesWatch();
       stopProductComboWatch();
       try{ state.comboCache instanceof Map && state.comboCache.clear(); }catch(_e){}
       if(state.mail && state.mail.lowStock){
@@ -4269,7 +4269,6 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
 
     // --- Anagrafica prodotti live: nome unico cloud per SKU ---
     // Fonte unica del nome: amzInventoryProducts/{SKU}.title.
-    // I documenti di magazzino possono avere copie vecchie del titolo, ma la UI usa sempre questo catalogo live.
     function getProductCatalogMeta(sku){
       try{
         const s = toSkuId(sku || "");
@@ -4280,12 +4279,49 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
       }
     }
 
-    function canonicalTitleForSku(sku, fallback=""){
+    function fallbackInventoryTitleForSku(sku, locHint=""){
+      try{
+        const s = toSkuId(sku || "");
+        if(!s) return "";
+        const loc = (locHint === "cerea" || locHint === "concamarise") ? locHint : "";
+        const getFrom = (l)=>{
+          const arr = state.inventory?.[l]?.items || [];
+          const it = arr.find(x=>toSkuId(x?.sku || x?.id || "") === s) || null;
+          return squashWhitespace(it?.title || it?.name || "");
+        };
+        if(loc){
+          const v = getFrom(loc);
+          if(v) return v;
+        }
+        return getFrom("concamarise") || getFrom("cerea") || "";
+      }catch(_e){
+        return "";
+      }
+    }
+
+    function canonicalTitleForSku(sku, fallback="", locHint=""){
       const s = toSkuId(sku || "");
       const meta = getProductCatalogMeta(s);
       const cloudTitle = squashWhitespace(meta?.title || "");
       if(cloudTitle) return cloudTitle;
-      return squashWhitespace(fallback || "") || s;
+      const invTitle = fallbackInventoryTitleForSku(s, locHint);
+      if(invTitle) return invTitle;
+      const raw = squashWhitespace(fallback || "");
+      if(raw){
+        const parsed = parseTitleMeta(raw);
+        return squashWhitespace(parsed.main || raw) || s;
+      }
+      return s;
+    }
+
+    function flowLineDisplayMeta(line, flow=null){
+      const raw = squashWhitespace(line?.title || "");
+      const rawMeta = parseTitleMeta(raw);
+      const sku = toSkuId(line?.sku || rawMeta.skuInTitle || "");
+      const loc = (flow?.location === "cerea" || flow?.location === "concamarise") ? flow.location : "";
+      const canonical = canonicalTitleForSku(sku, raw, loc);
+      const main = squashWhitespace(parseTitleMeta(canonical).main || canonical || rawMeta.main || raw || sku);
+      return { sku, main, raw, rawMeta };
     }
 
     function syncInventoryTitlesWithProductCatalog(){
@@ -4317,12 +4353,10 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
         if(!state.firebase.ok || !state.user?.isWhitelisted) return;
         if(state.productNames?.unsub) return;
         if(!state.productNames) state.productNames = { unsub:null, bySku:new Map(), loaded:false, error:"" };
-
         const api = state.firebase.api;
         const db = state.firebase.db;
         const colRef = api.collection(db, COL_PRODUCTS);
         const q = api.query(colRef, api.limit(5000));
-
         state.productNames.unsub = api.onSnapshot(q, (snap)=>{
           const map = new Map();
           snap.forEach(docSnap=>{
@@ -4335,7 +4369,7 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
             map.set(sku, {
               sku,
               title,
-              titleNorm: d.titleNorm || normalizeText(title || sku),
+              titleNorm: normalizeText(title || sku),
               updatedAt: d.lastSeenAt || d.updatedAt || null,
               updatedAtClient: d.lastSeenAtClient || d.updatedAtClient || 0,
               active: d.active !== false
@@ -4344,10 +4378,11 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
           state.productNames.bySku = map;
           state.productNames.loaded = true;
           state.productNames.error = "";
-
           syncInventoryTitlesWithProductCatalog();
           if(state.route.view === "home") renderHomeDashboard();
           if(state.route.view === "location") renderInventoryList();
+          if(state.ui.sheet === "flow") renderFlowDetails();
+          if(state.ui.sheet === "flows") renderFlowsModal();
           if(state.ui.sheet === "products") renderProductsSheet();
           if(state.ui.sheet === "productDetails") renderProductDetailsSheet();
           if(state.ui.sheet === "sottoscorta") renderSottoscortaSheet();
@@ -4388,16 +4423,14 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
           const d = docSnap.data() || {};
           const sku = d.sku || docSnap.id;
           const qty = Number.isFinite(d.qty) ? d.qty : 0;
-          const localTitle = d.title || d.name || "";
-          const productMeta = getProductCatalogMeta(sku);
-          const title = (productMeta && productMeta.title) ? productMeta.title : localTitle;
+          const title = canonicalTitleForSku(sku, d.title || d.name || "", loc);
           const updatedAt = d.updatedAt || null;
           const updatedAtClient = d.updatedAtClient || null;
           arr.push({
             id: docSnap.id,
             sku,
             title,
-            titleNorm: productMeta?.titleNorm || d.titleNorm || normalizeText(title || sku),
+            titleNorm: d.titleNorm || normalizeText(title || sku),
             qty,
             lowStockThreshold: __parseLowStockThresholdValue(d.lowStockThreshold),
             rackLocations: readRackLocationsFromDoc(d),
@@ -5580,7 +5613,8 @@ function startAllLogs(){
       let lines = allLines;
       if(q){
         lines = allLines.filter(l=>{
-          const s = normalizeText(`${l?.sku || ""} ${l?.title || ""}`);
+          const display = flowLineDisplayMeta(l, flow);
+          const s = normalizeText(`${display.sku || l?.sku || ""} ${display.main || ""} ${l?.title || ""}`);
           return s.includes(q);
         });
       }
@@ -5616,12 +5650,11 @@ function startAllLogs(){
         </div>`;
 
       const rows = lines.map(l=>{
-        const sku = String(l?.sku || "").trim();
-        const title = String(l?.title || "").trim();
-        const tmeta = parseTitleMeta(title);
-        const titleMain = tmeta.main || title;
+        const display = flowLineDisplayMeta(l, flow);
+        const tmeta = display.rawMeta || parseTitleMeta(display.raw || "");
+        const titleMain = display.main || tmeta.main || display.raw;
         const metaSmall = buildMetaSmall(tmeta);
-        const skuShow = sku || tmeta.skuInTitle || "";
+        const skuShow = display.sku || tmeta.skuInTitle || "";
         const qtyN = Math.max(0, parseQty(l?.qty || 0));
         const badge = `<span class="badge ${flow.kind==="scarica" ? "warn" : "ok"}">${effSign}${qtyN}</span>`;
         const delBtn = showActions ? `<button class="btn small danger" data-action="removeLine" data-sku="${escapeHtml(skuShow)}" type="button">Elimina</button>` : ``;
@@ -5672,7 +5705,7 @@ function startAllLogs(){
         for(const l of chunk){
           const sku = String(l?.sku || "").trim();
           if(!sku) continue;
-          const title = String(l?.title || "").trim();
+          const title = canonicalTitleForSku(sku, String(l?.title || "").trim(), loc);
           const qty = parseQty(l?.qty || 0);
           if(!qty) continue;
 
@@ -6543,8 +6576,9 @@ function closeSheet(kind){
 
       const rows = lines.slice(0, 300).map(l=>{
         const ok = !!l.sku && Number.isFinite(l.qty) && l.qty!==0;
-        const meta = parseTitleMeta(l.title || "");
-        const titleMain = meta.main ? escapeHtml(meta.main) : (l.title ? escapeHtml(l.title) : "<span class='muted'>(senza nome)</span>");
+        const display = flowLineDisplayMeta(l, { location: state.route?.loc || "" });
+        const meta = display.rawMeta || parseTitleMeta(l.title || "");
+        const titleMain = display.main ? escapeHtml(display.main) : (l.title ? escapeHtml(l.title) : "<span class='muted'>(senza nome)</span>");
         const metaSmall = buildMetaSmall(meta);
         const sku = l.sku ? escapeHtml(l.sku) : "<span class='muted'>(SKU?)</span>";
         const qtyN = Number.isFinite(l.qty) ? Math.abs(parseQty(l.qty)||0) : 0;
@@ -9042,11 +9076,10 @@ async function saveProductFromDetails(){
           }
 
           const nowClient = Date.now();
-          const canonicalTitle = title || sku;
           const baseData = {
             sku,
-            title: canonicalTitle,
-            titleNorm: normalizeText(canonicalTitle || sku),
+            title: title || "",
+            titleNorm: normalizeText(title || sku),
             note: note || "",
             qty,
             lowStockThreshold: lowStockThreshold,
@@ -9068,8 +9101,8 @@ async function saveProductFromDetails(){
           // anagrafica globale (best effort ma in tx)
           const pData = {
             sku,
-            title: canonicalTitle,
-            titleNorm: normalizeText(canonicalTitle || sku),
+            title: title || "",
+            titleNorm: normalizeText(title || sku),
             note: note || "",
             lowStockThreshold: lowStockThreshold,
             rackLocation: finalRackLocation,
@@ -9089,8 +9122,6 @@ async function saveProductFromDetails(){
             // Soglia sotto-scorta per SKU: aggiorna anche l’altro magazzino se lo stesso SKU esiste lì.
             if(siblingRef && siblingSnap && siblingSnap.exists()){
               tx.set(siblingRef, {
-                title: canonicalTitle,
-                titleNorm: normalizeText(canonicalTitle || sku),
                 lowStockThreshold: lowStockThreshold,
                 updatedAt: api.serverTimestamp(),
                 updatedAtClient: nowClient,
@@ -9120,7 +9151,7 @@ async function saveProductFromDetails(){
             const comboNote = deltaSigned > 0 ? "Scarico combo da aumento madre" : "Ripristino combo da diminuzione madre";
             const comboEffects = buildComboEffectsFromDeltas([{
               sku: oldSku,
-              title: canonicalTitle || oldData.title || oldSku,
+              title: title || oldData.title || oldSku,
               loc,
               qtySigned: -deltaSigned
             }], comboMap, {
@@ -9545,17 +9576,11 @@ function renderProductsSheet(){
         await api.runTransaction(db, async (tx)=>{
           const sOld = await tx.get(oldRef);
           if(!sOld.exists()) throw new Error("Prodotto non trovato.");
-          let siblingRef = null;
-          let siblingSnap = null;
           if(sku!==oldSku){
             const sNew = await tx.get(newRef);
             if(sNew.exists()) throw new Error("SKU già esistente.");
             const pNewSnap = await tx.get(newP);
             if(pNewSnap.exists()) throw new Error("SKU già esistente (anagrafica).");
-          }else{
-            const siblingLoc = (loc === "cerea") ? "concamarise" : "cerea";
-            siblingRef = api.doc(db, COL_ROOT, siblingLoc, SUB_ITEMS, sku);
-            siblingSnap = await tx.get(siblingRef);
           }
 
           const oldData = sOld.data() || {};
@@ -9576,15 +9601,6 @@ function renderProductsSheet(){
 
           if(sku===oldSku){
             tx.set(oldRef, baseData, { merge:true });
-            if(siblingRef && siblingSnap && siblingSnap.exists()){
-              tx.set(siblingRef, {
-                title: finalTitle,
-                titleNorm: normalizeText(finalTitle || sku),
-                updatedAt: api.serverTimestamp(),
-                updatedAtClient: nowClient,
-                updatedBy: who
-              }, { merge:true });
-            }
           }else{
             tx.set(newRef, baseData, { merge:true });
             tx.delete(oldRef);
@@ -9804,9 +9820,10 @@ async function applyFlow(kind){
         const sku = toSkuId(l.sku);
         const qty = parseQty(l.qty);
         if(!sku || !Number.isFinite(qty) || qty===0) continue;
-        const prev = agg.get(sku) || { sku, title:l.title||"", qty:0 };
+        const cleanTitle = canonicalTitleForSku(sku, l.title || "", locHint || "");
+        const prev = agg.get(sku) || { sku, title: cleanTitle || "", qty:0 };
         prev.qty += qty;
-        if(!prev.title && l.title) prev.title = l.title;
+        if(!prev.title && cleanTitle) prev.title = cleanTitle;
         agg.set(sku, prev);
       }
       const aggregatedAll = Array.from(agg.values()).filter(x=>x.sku && Number.isFinite(x.qty) && x.qty!==0);
