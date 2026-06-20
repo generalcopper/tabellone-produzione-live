@@ -1955,6 +1955,17 @@
       }
     }
 
+    .homeSmartSearch{
+      margin-top:12px;
+      display:flex;
+      gap:8px;
+      align-items:center;
+    }
+    .homeSmartSearch .input{
+      flex:1 1 100%;
+      width:100%;
+    }
+
     /* Scheda prodotto: ubicazioni assegnate modificabili */
     .rackAllocList{
       display:flex;
@@ -2290,6 +2301,9 @@
               </div>
               <div class="pill" id="homeLocatedCount">—</div>
             </div>
+            <div class="homeSmartSearch">
+              <input class="input" id="homeLocatedSearch" placeholder="Cerca ubicati: SKU, prodotto, ubicazione, lotto…" autocomplete="off" spellcheck="false" />
+            </div>
             <div class="gridTable cols4" id="homeLocatedList" style="margin-top:12px;"></div>
             <div class="hint" id="homeLocatedHint" style="margin-top:10px"></div>
           </div>
@@ -2302,6 +2316,9 @@
                 <div class="miniSub">Prodotti con disponibilità positiva senza ubicazione assegnata • cloud live</div>
               </div>
               <div class="pill" id="homeNoLocationCount">—</div>
+            </div>
+            <div class="homeSmartSearch">
+              <input class="input" id="homeNoLocationSearch" placeholder="Cerca da ubicare: SKU, prodotto, magazzino, lotto…" autocomplete="off" spellcheck="false" />
             </div>
             <div class="gridTable cols4" id="homeNoLocationList" style="margin-top:12px;"></div>
             <div class="hint" id="homeNoLocationHint" style="margin-top:10px"></div>
@@ -2778,7 +2795,7 @@ Tip:
         carica: { file:null, lines:[], busy:false, workflow:null },
         scarica: { file:null, lines:[], busy:false, workflow:null }
       },
-      ui: { sheet:null, sheetStack:[], sottoscortaLoc:null, wfOpen:false, flowId:null, flowSearch:"", productsSearch:"", productEditSku:null, productDetailsSku:null, productDetailsLot:"", productDetailsEditMode:false, caricaMode:"pdf", flowsModalLoc:"concamarise", skuPick:{ lineIdx:null, q:"" } },
+      ui: { sheet:null, sheetStack:[], sottoscortaLoc:null, wfOpen:false, flowId:null, flowSearch:"", productsSearch:"", homeLocatedSearch:"", homeNoLocationSearch:"", productEditSku:null, productDetailsSku:null, productDetailsLot:"", productDetailsEditMode:false, caricaMode:"pdf", flowsModalLoc:"concamarise", skuPick:{ lineIdx:null, q:"" } },
       manual: { carica:{ text:"", lines:[], busy:false } },
 
       movements: { unsub: null, sku: null, items: [], error: "" },
@@ -7326,6 +7343,110 @@ function currentInv(){
       return out;
     }
 
+    function getHomeSmartSearchValue(inputId, stateKey){
+      try{
+        const el = $(inputId);
+        const v = String(el ? (el.value || "") : (state.ui?.[stateKey] || "")).trim();
+        if(state.ui) state.ui[stateKey] = v;
+        return v;
+      }catch(_e){
+        return "";
+      }
+    }
+
+    function homeSmartSearchText(it, section=""){
+      try{
+        const meta = parseTitleMeta(it?.title || "");
+        const sku = toSkuId(it?.sku || it?.id || meta.skuInTitle || "");
+        const loc = (it?.loc === "cerea" || it?.loc === "concamarise") ? it.loc : "";
+        const rackText = rackLocationDisplayFromItem(it || {});
+        const rackCodes = readRackLocationsFromDoc(it || {}).join(" ");
+        const lots = readStockLotsFromDoc(it || {}).map(l=>`${l.lot} ${lotLabelFromId(l.lot)} ${lotDateLabelFromId(l.lot)} ${l.qty}`).join(" ");
+        const allocations = readRackAllocationsFromDoc(it || {}).map(a=>`${a.code} ${a.lot} ${lotLabelFromId(a.lot)} ${a.qty}`).join(" ");
+        const qtys = [it?.qty, it?.totalQty, it?.remainingQty, it?.allocatedQty, stockQtyFromDoc(it || {}), rackAllocatedQtyFromDoc(it || {}), rackUnallocatedQtyFromDoc(it || {})]
+          .filter(v=>Number.isFinite(Number(v)))
+          .map(v=>String(Math.round(Number(v))))
+          .join(" ");
+        return [
+          section,
+          sku,
+          it?.title || "",
+          meta.main || "",
+          meta.asin || "",
+          meta.storage || "",
+          loc,
+          loc ? prettyLoc(loc) : "",
+          rackText,
+          rackCodes,
+          lots,
+          allocations,
+          qtys
+        ].filter(Boolean).join(" ");
+      }catch(_e){
+        return String(it?.sku || it?.title || "");
+      }
+    }
+
+    function homeSmartCandidateScore(it, query, section=""){
+      const raw = String(query || "").trim();
+      if(!raw) return 0;
+
+      const qNorm = normalizeText(raw);
+      const tokens = qNorm.split(/\s+/).filter(Boolean);
+      if(!tokens.length) return 0;
+
+      const hayText = homeSmartSearchText(it, section);
+      const hay = normalizeText(hayText);
+      if(!hay) return -1;
+
+      // Match intelligente: tutte le parole devono comparire, anche se in ordine diverso.
+      // Esempio: “neem a01” trova i candidati Neem ubicati in A01.
+      for(const token of tokens){
+        if(!hay.includes(token)) return -1;
+      }
+
+      const meta = parseTitleMeta(it?.title || "");
+      const skuNorm = normalizeText(toSkuId(it?.sku || it?.id || meta.skuInTitle || ""));
+      const titleNorm = normalizeText(meta.main || it?.title || "");
+      const rackNorm = normalizeText(rackLocationDisplayFromItem(it || {}));
+      const locNorm = normalizeText(prettyLoc(it?.loc || ""));
+
+      let score = 0;
+      if(skuNorm === qNorm) score += 120;
+      else if(skuNorm.startsWith(qNorm)) score += 85;
+      else if(skuNorm.includes(qNorm)) score += 65;
+
+      if(titleNorm === qNorm) score += 70;
+      else if(titleNorm.startsWith(qNorm)) score += 48;
+      else if(titleNorm.includes(qNorm)) score += 32;
+
+      if(rackNorm && rackNorm.includes(qNorm)) score += 38;
+      if(locNorm && locNorm.includes(qNorm)) score += 12;
+
+      // Più parole coincidono in campi importanti, più il candidato sale.
+      for(const token of tokens){
+        if(skuNorm && skuNorm.includes(token)) score += 18;
+        if(titleNorm && titleNorm.includes(token)) score += 12;
+        if(rackNorm && rackNorm.includes(token)) score += 10;
+        if(locNorm && locNorm.includes(token)) score += 4;
+      }
+
+      return score;
+    }
+
+    function homeSmartCandidates(items, query, section=""){
+      const raw = String(query || "").trim();
+      if(!raw) return Array.isArray(items) ? items : [];
+      return (Array.isArray(items) ? items : [])
+        .map((it, idx)=>({ it, idx, score: homeSmartCandidateScore(it, raw, section) }))
+        .filter(x=>x.score >= 0)
+        .sort((a,b)=>{
+          if(b.score !== a.score) return b.score - a.score;
+          return a.idx - b.idx;
+        })
+        .map(x=>x.it);
+    }
+
     function renderHomeNoLocationBox(){
       const list = $("homeNoLocationList");
       const count = $("homeNoLocationCount");
@@ -7340,12 +7461,20 @@ function currentInv(){
         return;
       }
 
-      const out = getItemsWithoutRackLocations();
-      count.textContent = fmtN(out.length);
+      const all = getItemsWithoutRackLocations();
+      const q = getHomeSmartSearchValue("homeNoLocationSearch", "homeNoLocationSearch");
+      const out = homeSmartCandidates(all, q, "da ubicare");
+      count.textContent = q ? `${fmtN(out.length)}/${fmtN(all.length)}` : fmtN(all.length);
 
-      if(!out.length){
+      if(!all.length){
         list.innerHTML = `<div class="hint">Tutti i prodotti con stock positivo hanno già un’ubicazione assegnata.</div>`;
         if(hint) hint.textContent = "";
+        return;
+      }
+
+      if(!out.length){
+        list.innerHTML = `<div class="hint">Nessun candidato trovato per questa ricerca.</div>`;
+        if(hint) hint.textContent = q ? `Ricerca attiva: “${q}” • 0 candidati su ${all.length.toLocaleString("it-IT")}.` : "";
         return;
       }
 
@@ -7359,7 +7488,9 @@ function currentInv(){
         const allocatedQty = Number.isFinite(Number(it.allocatedQty)) ? Math.round(Number(it.allocatedQty)) : 0;
         const rackHtml = rackLocationStackHtml(it);
         const when = it.updatedAtClient ? fmtDate(it.updatedAtClient) : (it.updatedAt ? fmtDate(it.updatedAt) : "");
-        const metaLine = [locLabel, `Totale: ${totalQty}`, allocatedQty ? `Ubicato: ${allocatedQty}` : "", when ? `Agg.: ${when}` : ""].filter(Boolean).join(" • ");
+        const lot = normalizeLotId(it.lot || "") || getDefaultLotForItem(it || {});
+        const lotLine = lot ? `${lotLabelFromId(lot)} • ${lotDateLabelFromId(lot)}` : "";
+        const metaLine = [locLabel, lotLine, `Totale: ${totalQty}`, allocatedQty ? `Ubicato: ${allocatedQty}` : "", when ? `Agg.: ${when}` : ""].filter(Boolean).join(" • ");
         return `
           <div class="row gridRow" role="button" tabindex="0" data-sku="${sku}" data-loc="${escapeHtml(it.loc || "")}" data-action="openHomeNoLocationItem">
             <div class="gridCell gridSku">${sku}</div>
@@ -7373,7 +7504,11 @@ function currentInv(){
       }).join("");
 
       list.innerHTML = `<div class="row gridHead gridRow"><div class="gridCell">SKU</div><div class="gridCell">Prodotto</div><div class="gridCell gridRight">Da ubicare</div><div class="gridCell gridRight">Ubicazioni</div></div>` + rows;
-      if(hint) hint.textContent = `Mostrati ${Math.min(out.length, 120).toLocaleString("it-IT")} di ${out.length.toLocaleString("it-IT")}. Tocca una riga per assegnare una posizione. Se restano più di ${RACK_PALLET_CAPACITY} pz, puoi confermare tutti i pezzi nella stessa posizione oppure scegliere una quantità parziale.`;
+      if(hint){
+        hint.textContent = q
+          ? `Ricerca attiva: “${q}” • mostrati ${Math.min(out.length, 120).toLocaleString("it-IT")} candidati su ${out.length.toLocaleString("it-IT")} risultati (${all.length.toLocaleString("it-IT")} totali). Tocca una riga per assegnare una posizione.`
+          : `Mostrati ${Math.min(all.length, 120).toLocaleString("it-IT")} di ${all.length.toLocaleString("it-IT")}. Tocca una riga per assegnare una posizione. Se restano più di ${RACK_PALLET_CAPACITY} pz, puoi confermare tutti i pezzi nella stessa posizione oppure scegliere una quantità parziale.`;
+      }
     }
 
 
@@ -7418,12 +7553,20 @@ function currentInv(){
         return;
       }
 
-      const out = getItemsWithRackLocations();
-      count.textContent = fmtN(out.length);
+      const all = getItemsWithRackLocations();
+      const q = getHomeSmartSearchValue("homeLocatedSearch", "homeLocatedSearch");
+      const out = homeSmartCandidates(all, q, "ubicati");
+      count.textContent = q ? `${fmtN(out.length)}/${fmtN(all.length)}` : fmtN(all.length);
 
-      if(!out.length){
+      if(!all.length){
         list.innerHTML = `<div class="hint">Nessun prodotto ubicato.</div>`;
         if(hint) hint.textContent = "";
+        return;
+      }
+
+      if(!out.length){
+        list.innerHTML = `<div class="hint">Nessun candidato trovato per questa ricerca.</div>`;
+        if(hint) hint.textContent = q ? `Ricerca attiva: “${q}” • 0 candidati su ${all.length.toLocaleString("it-IT")}.` : "";
         return;
       }
 
@@ -7436,7 +7579,9 @@ function currentInv(){
         const totalQty = Number.isFinite(Number(it.totalQty)) ? Math.round(Number(it.totalQty)) : allocatedQty;
         const remainingQty = Number.isFinite(Number(it.remainingQty)) ? Math.round(Number(it.remainingQty)) : 0;
         const rackHtml = rackLocationStackHtml(it);
-        const metaLine = [locLabel, `Totale: ${totalQty}`, remainingQty ? `Da ubicare: ${remainingQty}` : ""].filter(Boolean).join(" • ");
+        const allocations = readRackAllocationsFromDoc(it || {});
+        const lotsLine = allocations.length ? Array.from(new Set(allocations.map(a=>lotLabelFromId(a.lot)))).join(", ") : "";
+        const metaLine = [locLabel, lotsLine ? `Lotti: ${lotsLine}` : "", `Totale: ${totalQty}`, remainingQty ? `Da ubicare: ${remainingQty}` : ""].filter(Boolean).join(" • ");
         return `
           <div class="row gridRow" role="button" tabindex="0" data-sku="${sku}" data-loc="${escapeHtml(it.loc || "")}" data-action="openHomeLocatedItem">
             <div class="gridCell gridSku">${sku}</div>
@@ -7450,8 +7595,13 @@ function currentInv(){
       }).join("");
 
       list.innerHTML = `<div class="row gridHead gridRow"><div class="gridCell">SKU</div><div class="gridCell">Prodotto</div><div class="gridCell gridRight">Ubicato</div><div class="gridCell gridRight">Ubicazioni</div></div>` + rows;
-      if(hint) hint.textContent = `Mostrati ${Math.min(out.length, 300).toLocaleString("it-IT")} di ${out.length.toLocaleString("it-IT")}. Tocca una riga per vedere o modificare l’ubicazione.`;
+      if(hint){
+        hint.textContent = q
+          ? `Ricerca attiva: “${q}” • mostrati ${Math.min(out.length, 300).toLocaleString("it-IT")} candidati su ${out.length.toLocaleString("it-IT")} risultati (${all.length.toLocaleString("it-IT")} totali). Tocca una riga per vedere o modificare l’ubicazione.`
+          : `Mostrati ${Math.min(all.length, 300).toLocaleString("it-IT")} di ${all.length.toLocaleString("it-IT")}. Tocca una riga per vedere o modificare l’ubicazione.`;
+      }
     }
+
 
     function renderHomeDashboard(){
       const tSku = $("homeTotalSku");
@@ -12465,6 +12615,20 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
           openProductDetailsSheet(sku);
         });
       }
+
+      let __homeNoLocationSearchT = null;
+      $("homeNoLocationSearch")?.addEventListener("input", ()=>{
+        state.ui.homeNoLocationSearch = $("homeNoLocationSearch")?.value || "";
+        if(__homeNoLocationSearchT) clearTimeout(__homeNoLocationSearchT);
+        __homeNoLocationSearchT = setTimeout(()=> renderHomeNoLocationBox(), 80);
+      });
+
+      let __homeLocatedSearchT = null;
+      $("homeLocatedSearch")?.addEventListener("input", ()=>{
+        state.ui.homeLocatedSearch = $("homeLocatedSearch")?.value || "";
+        if(__homeLocatedSearchT) clearTimeout(__homeLocatedSearchT);
+        __homeLocatedSearchT = setTimeout(()=> renderHomeLocatedBox(), 80);
+      });
 
       const homeNoLoc = $("homeNoLocationList");
       if(homeNoLoc){
