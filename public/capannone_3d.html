@@ -855,6 +855,30 @@ quota(CUT_X,SZ0+0.3, SX0,SZ0+0.3, null, 1.2);         // tra cartongesso e soppa
 
 dims.visible=true;
 
+const CAPANNONE_3D_FOCUS_DOC_ID = "__CAPANNONE_3D_FOCUS__";
+let LAST_CAPANNONE_3D_FOCUS_KEY = "";
+
+function handleCapannone3dFocusCommand(data){
+  try{
+    const d = data || {};
+    const code = normalizzaCodiceVano(d.rackLocation || d.code || d.find || d.targetRackLocation || "");
+    if(!code) return;
+    const seq = String(d.focusSeq || d.commandId || d.focusAtClient || d.updatedAtClient || "");
+    const key = `${seq}::${code}`;
+    if(key && key === LAST_CAPANNONE_3D_FOCUS_KEY) return;
+    LAST_CAPANNONE_3D_FOCUS_KEY = key;
+
+    // Lascia terminare l'aggiornamento grafico dei bancali, poi vola sulla posizione.
+    setTimeout(()=>{
+      const ok = findAndHighlightRackCode(code);
+      if(ok) setCloudStatus('Trova ricevuto • ' + code, '#22d3ee');
+      else setCloudStatus('Trova non trovato • ' + code, '#ef4444');
+    }, 80);
+  }catch(e){
+    console.warn('focus command error', e);
+  }
+}
+
 window.illuminaVano=code=>findAndHighlightRackCode(code);
 
 function startupFindCode(){
@@ -1029,8 +1053,17 @@ function startInventoryRealtime(fs, db){
   const colRef = fs.collection(db, "amzInventoryProducts");
   fs.onSnapshot(colRef, (snap)=>{
     const perCode = {};
+    let focusCommand = null;
     snap.forEach(docSnap=>{
       const d = docSnap.data() || {};
+
+      // Documento di comando scritto dal tasto Trova in picking.html.
+      // Non è un prodotto: serve solo a muovere live tutti i Capannone 3D già aperti.
+      if(docSnap.id === CAPANNONE_3D_FOCUS_DOC_ID || d._type === "capannone3dFocus" || d.type === "capannone3dFocus"){
+        focusCommand = d;
+        return;
+      }
+
       const allocs = Array.isArray(d.rackAllocations) ? d.rackAllocations : [];
       const title = d.title || d.name || d.sku || docSnap.id;
       for(const a of allocs){
@@ -1047,6 +1080,7 @@ function startInventoryRealtime(fs, db){
     }
     const n = Object.keys(perCode).length;
     setCloudStatus(`Cloud live • ${n} ubicazioni`, '#22c55e');
+    if(focusCommand) handleCapannone3dFocusCommand(focusCommand);
   }, (err)=>{
     console.error('Firestore error', err);
     if(err && err.code === 'permission-denied'){

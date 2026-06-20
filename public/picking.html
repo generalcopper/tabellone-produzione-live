@@ -8907,25 +8907,9 @@ function currentInv(){
       }
     }
 
-    function capannone3dTargetFile(){
-      try{
-        const current = decodeURIComponent(String(location.pathname || "").split("/").pop() || "");
-        // Se stai testando direttamente i file scaricati con parentesi, usa il file 3D caricato insieme.
-        // In produzione (picking.html) apre invece capannone_3d.html.
-        if(/^picking\([^)]*\)\.html$/i.test(current)) return "capannone_3d(2).html";
-      }catch(_e){}
-      return "capannone_3d.html";
-    }
+    const CAPANNONE_3D_FOCUS_DOC_ID = "__CAPANNONE_3D_FOCUS__";
 
-    function capannone3dUrlForRack(code){
-      const c = normalizeRackLocation(code || "");
-      const u = new URL(capannone3dTargetFile(), location.href);
-      u.searchParams.set("find", c);
-      u.hash = c;
-      return u.toString();
-    }
-
-    function openCapannone3dFind(code){
+    async function openCapannone3dFind(code){
       const c = normalizeRackLocation(code || "");
       if(!c){
         showToast("Non posizionato", "Questo SKU non ha ancora una posizione bancale.", 2200);
@@ -8936,32 +8920,36 @@ function currentInv(){
         return;
       }
 
-      const msg = { type:"capannone3d:find", code:c, rackLocation:c };
-      let win = null;
-      try{ win = window.__capannone3dWindow || null; }catch(_e){ win = null; }
-
-      if(win && !win.closed){
-        try{ win.postMessage(msg, "*"); }catch(_e){}
-        try{ win.focus(); }catch(_e){}
-        setTimeout(()=>{ try{ win.postMessage(msg, "*"); }catch(_e){} }, 160);
-        showToast("Trova", `Capannone 3D → ${c}`, 1200);
+      const api = state.firebase?.api;
+      const db = state.firebase?.db;
+      if(!api || !db || !state.user?.isWhitelisted){
+        showToast("Cloud non pronto", "Accesso o Firestore non ancora disponibile.", 2200);
         return;
       }
 
-      const url = capannone3dUrlForRack(c);
+      const nowClient = Date.now();
+      const focusSeq = `${nowClient}-${Math.random().toString(36).slice(2, 8)}`;
+      const who = state.user?.emailLower || state.user?.email || state.user?.uid || "";
+
       try{
-        win = window.open(url, "capannone_3d");
-        window.__capannone3dWindow = win;
-        if(win){
-          try{ win.focus(); }catch(_e){}
-          setTimeout(()=>{ try{ win.postMessage(msg, "*"); }catch(_e){} }, 850);
-          showToast("Trova", `Capannone 3D → ${c}`, 1200);
-        }else{
-          showToast("Popup bloccato", "Consenti l'apertura del Capannone 3D dal browser.", 2600);
-        }
+        const ref = api.doc(db, COL_PRODUCTS, CAPANNONE_3D_FOCUS_DOC_ID);
+        await api.setDoc(ref, {
+          _type: "capannone3dFocus",
+          type: "capannone3dFocus",
+          rackLocation: c,
+          code: c,
+          focusSeq,
+          focusAt: api.serverTimestamp(),
+          focusAtClient: nowClient,
+          focusBy: who,
+          source: "picking",
+          note: "Comando Trova da Picking: tutti i Capannone 3D aperti si muovono su questo bancale."
+        }, { merge:true });
+
+        showToast("Trova inviato", `Capannone 3D → ${c}`, 1200);
       }catch(err){
-        console.warn("open capannone 3d", err);
-        showToast("Errore apertura", "Non riesco ad aprire Capannone 3D.", 2400);
+        console.warn("capannone 3d focus command", err);
+        showToast("Errore Trova", String(err?.message || err).slice(0, 180), 3000);
       }
     }
 
