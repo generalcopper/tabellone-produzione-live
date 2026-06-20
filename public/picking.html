@@ -8362,10 +8362,72 @@ function currentInv(){
       return meta.main || raw || sku;
     }
 
+    function pickingUniqueLines(flow){
+      const lines = Array.isArray(flow?.lines) ? flow.lines.filter(l=>toSkuId(l?.sku || "")) : [];
+      const uniq = [];
+      const seen = new Set();
+      for(const l of lines){
+        const sku = toSkuId(l?.sku || "");
+        if(!sku || seen.has(sku)) continue;
+        seen.add(sku);
+        uniq.push(l);
+      }
+      return uniq;
+    }
+
+    function pickingFlowWasPickedAsGroup(flow){
+      const p = (flow?.picking && typeof flow.picking === "object") ? flow.picking : {};
+      if(p.flowPicked !== true) return false;
+      if(p.flowPickMode === "flow" || p.flowPickGroup === true) return true;
+      const events = Array.isArray(p.events) ? p.events : [];
+      return events.some(e=>String(e?.type || "").toLowerCase() === "flow");
+    }
+
+    function pickingFlowGroupHistoryEntry(flow){
+      const lines = pickingUniqueLines(flow);
+      const loc = (flow?.location === "cerea" || flow?.location === "concamarise") ? flow.location : "concamarise";
+      const picked = pickingLineMap(flow);
+      let maxPickedAt = Number(flow?.picking?.flowPickedAtClient || 0) || 0;
+      let pickedBy = String(flow?.picking?.flowPickedBy || flow?.picking?.updatedBy || "");
+      let totalQty = 0;
+      const skus = [];
+      for(const line of lines){
+        const sku = toSkuId(line?.sku || "");
+        if(!sku) continue;
+        skus.push(sku);
+        const qty = Math.abs(parseQty(line?.qty || 0) || 0);
+        totalQty += qty;
+        const rec = picked[pickingSkuKey(sku)] || {};
+        const at = Number(rec.pickedAtClient || rec.atClient || 0) || 0;
+        if(at > maxPickedAt) maxPickedAt = at;
+        if(!pickedBy && (rec.pickedBy || rec.by)) pickedBy = String(rec.pickedBy || rec.by || "");
+      }
+      return {
+        type:"flow",
+        flow,
+        flowId: String(flow?.id || ""),
+        loc,
+        sku:"FLUSSO",
+        title: flowDisplayName(flow),
+        qty: Math.round(totalQty),
+        count: skus.length,
+        skus,
+        position: `${skus.length} SKU`,
+        at: maxPickedAt || Number(flow?.appliedAtClient || 0) || 0,
+        by: pickedBy
+      };
+    }
+
     function pickingPickedHistoryEntries(){
       const out = [];
       const flows = getPickingCandidateFlows();
       for(const flow of flows){
+        const st = pickingFlowStats(flow);
+        if(st.done && pickingFlowWasPickedAsGroup(flow)){
+          out.push(pickingFlowGroupHistoryEntry(flow));
+          continue;
+        }
+
         const picked = pickingLineMap(flow);
         for(const [key, rec0] of Object.entries(picked || {})){
           const rec = rec0 || {};
@@ -8373,6 +8435,7 @@ function currentInv(){
           const sku = toSkuId(rec.sku || key || "");
           if(!sku) continue;
           out.push({
+            type:"sku",
             flow,
             flowId: String(flow?.id || ""),
             loc: (flow?.location === "cerea" || flow?.location === "concamarise") ? flow.location : "concamarise",
@@ -8410,8 +8473,10 @@ function currentInv(){
 
       const flows = getPickingCandidateFlows();
       const activeFlows = flows.filter(f=>!pickingFlowStats(f).done);
-      count.textContent = fmtN(activeFlows.length);
-      setPickingNavCount("picking", fmtN(activeFlows.length));
+      const visibleActiveFlows = activeFlows.slice(0, 8);
+      const activeFlowCountLabel = activeFlows.length > 8 ? `${fmtN(visibleActiveFlows.length)}/${fmtN(activeFlows.length)}` : fmtN(activeFlows.length);
+      count.textContent = activeFlowCountLabel;
+      setPickingNavCount("picking", activeFlowCountLabel);
 
       if(!flows.length){
         list.innerHTML = `<div class="hint">Nessun flusso di scarico da prelevare nei flussi recenti.</div>`;
@@ -8420,7 +8485,7 @@ function currentInv(){
         list.innerHTML = `<div class="hint">Nessun flusso da prelevare. I flussi già prelevati sono nello storico prelievi.</div>`;
         if(hint) hint.textContent = `Flussi ordinati dal più recente: ${flows.length.toLocaleString("it-IT")} • ancora da prelevare: 0. I flussi prelevati spariscono dalla lista operativa e restano nello storico.`;
       }else{
-        const cards = activeFlows.slice(0, 40).map(flow=>{
+        const cards = visibleActiveFlows.map(flow=>{
           const st = pickingFlowStats(flow);
           const loc = (flow.location === "cerea" || flow.location === "concamarise") ? flow.location : "concamarise";
           const flowName = flowDisplayName(flow);
@@ -8472,7 +8537,7 @@ function currentInv(){
             </div>`;
         }).join("");
         list.innerHTML = cards;
-        if(hint) hint.textContent = `Flussi ordinati dal più recente: ${flows.length.toLocaleString("it-IT")} • ancora da prelevare: ${activeFlows.length.toLocaleString("it-IT")}. La colonna Posizione mostra solo posizione e quantità.`;
+        if(hint) hint.textContent = `Visibili solo gli ultimi ${visibleActiveFlows.length.toLocaleString("it-IT")} flussi da prelevare, ordinati dal più recente. Totali da prelevare: ${activeFlows.length.toLocaleString("it-IT")} • Flussi scarico recenti: ${flows.length.toLocaleString("it-IT")}. La colonna Posizione mostra solo posizione e quantità.`;
       }
 
       const hist = pickingPickedHistoryEntries();
@@ -8483,6 +8548,17 @@ function currentInv(){
         }else{
           histList.innerHTML = hist.slice(0, 80).map(h=>{
             const flowName = flowDisplayName(h.flow);
+            if(h.type === "flow"){
+              const meta = [flowName ? `Flusso: ${flowName}` : "", h.count ? `${h.count} SKU` : "", h.at ? fmtDate(h.at) : "", h.by || ""].filter(Boolean).join(" • ");
+              return `
+                <div class="pickingHistoryRow">
+                  <div class="mono">FLUSSO</div>
+                  <div class="pickingHistoryMain">${escapeHtml(flowName || h.title || h.flowId || "Flusso")}</div>
+                  <div class="pickingHistoryMeta">${escapeHtml(meta)}</div>
+                  <span class="badge ok">${escapeHtml(String(h.qty || "—"))} pz</span>
+                  <button class="btn small danger pickingHistoryAction" type="button" data-action="undoPickFlow" data-flowid="${escapeHtml(h.flowId || h.flow?.id || "")}" data-loc="${escapeHtml(h.loc || h.flow?.location || "")}">Annulla flusso</button>
+                </div>`;
+            }
             const meta = [h.position ? `Posizione: ${h.position}` : "", flowName ? `Flusso: ${flowName}` : "", h.at ? fmtDate(h.at) : "", h.by || ""].filter(Boolean).join(" • ");
             return `
               <div class="pickingHistoryRow">
@@ -8540,6 +8616,8 @@ function currentInv(){
           updatedBy: who,
           events: api.arrayUnion(event),
           flowPicked: allPicked,
+          flowPickMode: allPicked ? "sku" : "",
+          flowPickGroup: false,
           flowPickedAt: allPicked ? api.serverTimestamp() : null,
           flowPickedAtClient: allPicked ? nowClient : null,
           flowPickedBy: allPicked ? who : ""
@@ -8592,6 +8670,10 @@ function currentInv(){
           updatedBy: who,
           events: api.arrayUnion(event),
           flowPicked:true,
+          flowPickMode:"flow",
+          flowPickGroup:true,
+          flowPickedCount:skuList.length,
+          flowPickedSkus:skuList,
           flowPickedAt: api.serverTimestamp(),
           flowPickedAtClient: nowClient,
           flowPickedBy: who
@@ -8680,6 +8762,99 @@ function currentInv(){
       }catch(_e){}
 
       showToast("Prelievo annullato", `${s} è tornato da prelevare.`, 1800);
+      renderHomePickingBox();
+    }
+
+
+    async function undoPickingFlow(flowId, loc){
+      if(!canUsePickingActions()){
+        showToast("Permessi", "Utente non abilitato al picking.", 2200);
+        return;
+      }
+      const id = String(flowId || "").trim();
+      const l = (loc === "cerea" || loc === "concamarise") ? loc : "concamarise";
+      if(!id){ showToast("Errore", "Flusso non valido.", 2200); return; }
+
+      const flow = (state.logs?.[l]?.flows || []).find(f=>String(f.id||"") === id) || null;
+      if(!flow){ showToast("Flusso non trovato", "Riprova tra un attimo.", 2200); return; }
+
+      const api = state.firebase.api;
+      const db = state.firebase.db;
+      if(!api || !db){ showToast("Errore", "Firebase non inizializzato.", 2200); return; }
+
+      const nowClient = Date.now();
+      const who = state.user?.email || state.user?.emailLower || state.user?.uid || "";
+      const validLines = pickingUniqueLines(flow);
+      const currentMap = pickingLineMap(flow);
+      const nextMap = { ...currentMap };
+      const skuList = [];
+
+      for(const line of validLines){
+        const sku = toSkuId(line?.sku || "");
+        if(!sku) continue;
+        const key = pickingSkuKey(sku);
+        const old = nextMap[key] || { sku, title:pickingLineTitle(line, flow), qty:Math.abs(parseQty(line?.qty || 0) || 0), position:pickingLinePositionText(flow, sku) };
+        nextMap[key] = {
+          ...old,
+          sku,
+          picked:false,
+          status:"annullato",
+          undoneAtClient:nowClient,
+          undoneBy:who
+        };
+        skuList.push(sku);
+      }
+
+      for(const [key, rec0] of Object.entries(currentMap || {})){
+        const rec = rec0 || {};
+        if(rec.picked === true || rec.status === "prelevato"){
+          nextMap[key] = {
+            ...rec,
+            picked:false,
+            status:"annullato",
+            undoneAtClient:nowClient,
+            undoneBy:who
+          };
+        }
+      }
+
+      const event = { type:"undo_flow", skus:skuList, count:skuList.length, atClient:nowClient, by:who };
+      const ref = api.doc(db, COL_ROOT, l, SUB_LOGS, id);
+
+      await api.setDoc(ref, {
+        picking: {
+          status:"da_prelevare",
+          pickedLines: nextMap,
+          updatedAt: api.serverTimestamp(),
+          updatedAtClient: nowClient,
+          updatedBy: who,
+          events: api.arrayUnion(event),
+          flowPicked:false,
+          flowPickMode:"",
+          flowPickGroup:false,
+          flowPickedAt:null,
+          flowPickedAtClient:null,
+          flowPickedBy:""
+        }
+      }, { merge:true });
+
+      // UI immediata dopo scrittura cloud riuscita: nessun localStorage, solo stato runtime allineato alla write.
+      try{
+        flow.picking = {
+          ...(flow.picking || {}),
+          status:"da_prelevare",
+          pickedLines: nextMap,
+          updatedAtClient: nowClient,
+          updatedBy: who,
+          flowPicked:false,
+          flowPickMode:"",
+          flowPickGroup:false,
+          flowPickedAtClient:null,
+          flowPickedBy:""
+        };
+      }catch(_e){}
+
+      showToast("Flusso annullato", `${flowDisplayName(flow)} è tornato da prelevare.`, 1800);
       renderHomePickingBox();
     }
 
@@ -13951,15 +14126,20 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
       const homePickedHistoryList = $("homePickedHistoryList");
       if(homePickedHistoryList){
         homePickedHistoryList.addEventListener("click", async (e)=>{
-          const btn = e.target?.closest?.("[data-action='undoPickSku']");
+          const btn = e.target?.closest?.("[data-action='undoPickSku'], [data-action='undoPickFlow']");
           if(!btn) return;
           e.preventDefault(); e.stopPropagation();
           btn.disabled = true;
+          const action = btn.getAttribute("data-action") || "";
           const flowId = btn.getAttribute("data-flowid") || "";
           const loc = btn.getAttribute("data-loc") || "";
-          const sku = btn.getAttribute("data-sku") || "";
           try{
-            await undoPickingSku(flowId, loc, sku);
+            if(action === "undoPickFlow"){
+              await undoPickingFlow(flowId, loc);
+            }else{
+              const sku = btn.getAttribute("data-sku") || "";
+              await undoPickingSku(flowId, loc, sku);
+            }
           }finally{
             btn.disabled = false;
           }
