@@ -2911,7 +2911,10 @@
                 <div class="miniTitle">Picking</div>
                 <div class="miniSub">Flussi da prelevare ordinati dal più recente • visual operativo cloud</div>
               </div>
-              <div class="pill" id="homePickingCount">—</div>
+              <div class="actionsRow" style="gap:8px; align-items:center; justify-content:flex-end">
+                <button class="btn primary small" id="btnPickAllFlows" type="button" disabled>Preleva tutti i flussi</button>
+                <div class="pill" id="homePickingCount">—</div>
+              </div>
             </div>
             <div class="pickingFlowsWrap" id="homePickingList"></div>
             <div class="pickingPickedHistory">
@@ -3416,7 +3419,6 @@ Tip:
         error: ""
       },
       comboCache: new Map(),
-      productNames: { unsub:null, bySku:new Map(), loaded:false, error:"" },
 
       // Riordini Tabellone WRITE: lettura cloud live + backfill flag RIORDINATO sui pregressi
       twReorders: {
@@ -5997,7 +5999,6 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
 
     // --- realtime inventory watchers ---
     function startAllRealtime(){
-      startProductNamesWatch();
       startRealtimeFor("cerea");
       startRealtimeFor("concamarise");
       startAllLogs();
@@ -6020,7 +6021,6 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
       stopAllLogs();
       stopActivityLogWatch();
       stopLowStockEmailMetaWatch();
-      stopProductNamesWatch();
       stopProductComboWatch();
       try{ state.comboCache instanceof Map && state.comboCache.clear(); }catch(_e){}
       if(state.mail && state.mail.lowStock){
@@ -6035,155 +6035,6 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
       if(state.route.view==="home") renderHomeDashboard();
       if(state.ui.sheet==="sottoscorta") renderSottoscortaSheet();
       if(state.ui.sheet==="productDetails") renderProductDetailsSheet();
-    }
-
-
-    // --- Anagrafica prodotti live: nome unico cloud per SKU ---
-    // Fonte unica del nome: amzInventoryProducts/{SKU}.title.
-    // I PDF/flussi possono contenere titoli vecchi/sporchi: la UI li risolve sempre dal cloud.
-    function getProductCatalogMeta(sku){
-      try{
-        const s = toSkuId(sku || "");
-        if(!s || !(state.productNames?.bySku instanceof Map)) return null;
-        return state.productNames.bySku.get(s) || null;
-      }catch(_e){
-        return null;
-      }
-    }
-
-    function fallbackInventoryTitleForSku(sku, locHint=""){
-      try{
-        const s = toSkuId(sku || "");
-        if(!s) return "";
-        const loc = (locHint === "cerea" || locHint === "concamarise") ? locHint : "";
-        const getFrom = (l)=>{
-          const arr = state.inventory?.[l]?.items || [];
-          const it = arr.find(x=>toSkuId(x?.sku || x?.id || "") === s) || null;
-          return squashWhitespace(it?.title || it?.name || "");
-        };
-        if(loc){
-          const v = getFrom(loc);
-          if(v) return v;
-        }
-        return getFrom("concamarise") || getFrom("cerea") || "";
-      }catch(_e){
-        return "";
-      }
-    }
-
-    function canonicalTitleForSku(sku, fallback="", locHint=""){
-      const s = toSkuId(sku || "");
-      const meta = getProductCatalogMeta(s);
-      const cloudTitle = squashWhitespace(meta?.title || "");
-      if(cloudTitle) return cloudTitle;
-      const invTitle = fallbackInventoryTitleForSku(s, locHint);
-      if(invTitle) return invTitle;
-      const raw = squashWhitespace(fallback || "");
-      if(raw){
-        const parsed = parseTitleMeta(raw);
-        return squashWhitespace(parsed.main || raw) || s;
-      }
-      return s;
-    }
-
-    function flowLineDisplayMeta(line, flow=null){
-      const raw = squashWhitespace(line?.title || "");
-      const rawMeta = parseTitleMeta(raw);
-      const sku = toSkuId(line?.sku || rawMeta.skuInTitle || "");
-      const loc = (flow?.location === "cerea" || flow?.location === "concamarise") ? flow.location : "";
-      const canonical = canonicalTitleForSku(sku, raw, loc);
-      const main = squashWhitespace(parseTitleMeta(canonical).main || canonical || rawMeta.main || raw || sku);
-      return { sku, main, raw, rawMeta };
-    }
-
-    function flowLineDisplayTitle(line, flow=null){
-      return flowLineDisplayMeta(line, flow).main;
-    }
-
-    function syncInventoryTitlesWithProductCatalog(){
-      let changed = false;
-      try{
-        for(const loc of ["cerea", "concamarise"]){
-          const inv = state.inventory?.[loc];
-          if(!inv || !Array.isArray(inv.items)) continue;
-          for(const it of inv.items){
-            const sku = toSkuId(it?.sku || it?.id || "");
-            const meta = getProductCatalogMeta(sku);
-            const title = squashWhitespace(meta?.title || "");
-            if(!sku || !title) continue;
-            const norm = meta?.titleNorm || normalizeText(title || sku);
-            if(it.title !== title || it.titleNorm !== norm){
-              it.title = title;
-              it.titleNorm = norm;
-              changed = true;
-            }
-          }
-        }
-        if(changed && state.cache) state.cache.invIndexForMatch = null;
-      }catch(_e){}
-      return changed;
-    }
-
-    function startProductNamesWatch(){
-      try{
-        if(!state.firebase.ok || !state.user?.isWhitelisted) return;
-        if(state.productNames?.unsub) return;
-        if(!state.productNames) state.productNames = { unsub:null, bySku:new Map(), loaded:false, error:"" };
-
-        const api = state.firebase.api;
-        const db = state.firebase.db;
-        const colRef = api.collection(db, COL_PRODUCTS);
-        const q = api.query(colRef, api.limit(5000));
-
-        state.productNames.unsub = api.onSnapshot(q, (snap)=>{
-          const map = new Map();
-          snap.forEach(docSnap=>{
-            const d = docSnap.data() || {};
-            if(d.active === false && d.renamedTo) return;
-            const sku = toSkuId(d.sku || docSnap.id || "");
-            if(!sku) return;
-            const title = squashWhitespace(d.title || d.name || "");
-            if(!title) return;
-            map.set(sku, {
-              sku,
-              title,
-              titleNorm: normalizeText(title || sku),
-              updatedAt: d.lastSeenAt || d.updatedAt || null,
-              updatedAtClient: d.lastSeenAtClient || d.updatedAtClient || 0,
-              active: d.active !== false
-            });
-          });
-
-          state.productNames.bySku = map;
-          state.productNames.loaded = true;
-          state.productNames.error = "";
-
-          syncInventoryTitlesWithProductCatalog();
-          if(state.route.view === "home") renderHomeDashboard();
-          if(state.route.view === "location") renderInventoryList();
-          if(state.ui.sheet === "flow") renderFlowDetails();
-          if(state.ui.sheet === "flows") renderFlowsModal();
-          if(state.ui.sheet === "products") renderProductsSheet();
-          if(state.ui.sheet === "productDetails") renderProductDetailsSheet();
-          if(state.ui.sheet === "sottoscorta") renderSottoscortaSheet();
-        }, (err)=>{
-          if(!state.productNames) state.productNames = { unsub:null, bySku:new Map(), loaded:false, error:"" };
-          state.productNames.error = err?.message || String(err || "Errore anagrafica prodotti");
-          console.warn("product catalog watch error", err);
-        });
-      }catch(err){
-        console.warn("startProductNamesWatch", err);
-      }
-    }
-
-    function stopProductNamesWatch(){
-      try{ state.productNames?.unsub && state.productNames.unsub(); }catch(_e){}
-      if(state.productNames){
-        state.productNames.unsub = null;
-        state.productNames.bySku = new Map();
-        state.productNames.loaded = false;
-        state.productNames.error = "";
-      }
     }
 
     function startRealtimeFor(loc){
@@ -6203,7 +6054,7 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
           const d = docSnap.data() || {};
           const sku = d.sku || docSnap.id;
           const qty = Number.isFinite(d.qty) ? d.qty : 0;
-          const title = canonicalTitleForSku(sku, d.title || d.name || "", loc);
+          const title = d.title || d.name || "";
           const updatedAt = d.updatedAt || null;
           const updatedAtClient = d.updatedAtClient || null;
           arr.push({
@@ -7301,7 +7152,7 @@ function startAllLogs(){
       const id = String(m?.movementKey || m?.movementId || m?.writeKey || m?.flowId || m?.twMovementId || m?.id || "").trim();
       const titleRaw = squashWhitespace(m?.title || m?.productTitle || m?.parentTitle || "");
       const parsed = parseTitleMeta(titleRaw || sku);
-      const title = canonicalTitleForSku(sku, parsed.main || titleRaw || sku, loc) || parsed.main || titleRaw || sku || "—";
+      const title = parsed.main || titleRaw || sku || "—";
       const flowName = squashWhitespace(m?.flowName || m?.fileName || "");
       const note = squashWhitespace(m?.note || "");
       const detailBits = [];
@@ -7756,8 +7607,7 @@ function startAllLogs(){
       let lines = allLines;
       if(q){
         lines = allLines.filter(l=>{
-          const display = flowLineDisplayMeta(l, flow);
-          const s = normalizeText(`${display.sku || l?.sku || ""} ${display.main || ""} ${l?.title || ""}`);
+          const s = normalizeText(`${l?.sku || ""} ${l?.title || ""}`);
           return s.includes(q);
         });
       }
@@ -7793,11 +7643,12 @@ function startAllLogs(){
         </div>`;
 
       const rows = lines.map(l=>{
-        const display = flowLineDisplayMeta(l, flow);
-        const tmeta = display.rawMeta || parseTitleMeta(display.raw || "");
-        const titleMain = display.main || tmeta.main || display.raw;
+        const sku = String(l?.sku || "").trim();
+        const title = String(l?.title || "").trim();
+        const tmeta = parseTitleMeta(title);
+        const titleMain = tmeta.main || title;
         const metaSmall = buildMetaSmall(tmeta);
-        const skuShow = display.sku || tmeta.skuInTitle || "";
+        const skuShow = sku || tmeta.skuInTitle || "";
         const qtyN = Math.max(0, parseQty(l?.qty || 0));
         const badge = `<span class="badge ${flow.kind==="scarica" ? "warn" : "ok"}">${effSign}${qtyN}</span>`;
         const delBtn = showActions ? `<button class="btn small danger" data-action="removeLine" data-sku="${escapeHtml(skuShow)}" type="button">Elimina</button>` : ``;
@@ -7848,7 +7699,7 @@ function startAllLogs(){
         for(const l of chunk){
           const sku = String(l?.sku || "").trim();
           if(!sku) continue;
-          const title = canonicalTitleForSku(sku, String(l?.title || "").trim(), loc);
+          const title = String(l?.title || "").trim();
           const qty = parseQty(l?.qty || 0);
           if(!qty) continue;
 
@@ -8589,10 +8440,10 @@ function currentInv(){
 
     function pickingLineTitle(line, flow){
       const sku = toSkuId(line?.sku || "");
-      const loc = (flow?.location === "cerea" || flow?.location === "concamarise") ? flow.location : "";
       const it = pickingLineProduct(flow, sku);
-      const raw = squashWhitespace(it?.title || line?.title || sku);
-      return canonicalTitleForSku(sku, raw, loc);
+      const raw = squashWhitespace(line?.title || it?.title || sku);
+      const meta = parseTitleMeta(raw);
+      return meta.main || raw || sku;
     }
 
     function pickingUniqueLines(flow){
@@ -8673,7 +8524,7 @@ function currentInv(){
             flowId: String(flow?.id || ""),
             loc: (flow?.location === "cerea" || flow?.location === "concamarise") ? flow.location : "concamarise",
             sku,
-            title: pickingLineTitle({ sku, title: rec.title || "" }, flow) || sku,
+            title: squashWhitespace(rec.title || pickingLineTitle({ sku }, flow) || sku),
             qty: Number.isFinite(Number(rec.qty)) ? Math.round(Number(rec.qty)) : 0,
             position: squashWhitespace(rec.position || rec.rackLocation || pickingLinePositionText(flow, sku) || "—"),
             at: Number(rec.pickedAtClient || rec.atClient || flow?.picking?.flowPickedAtClient || 0) || 0,
@@ -8692,6 +8543,7 @@ function currentInv(){
       const hint = $("homePickingHint");
       const histList = $("homePickedHistoryList");
       const histCount = $("homePickedHistoryCount");
+      const btnPickAll = $("btnPickAllFlows");
       if(!box || !list || !count) return;
 
       if(!state.user?.isWhitelisted){
@@ -8700,6 +8552,7 @@ function currentInv(){
         list.innerHTML = `<div class="hint">Accedi per vedere il picking.</div>`;
         if(histList) histList.innerHTML = "";
         if(histCount) histCount.textContent = "—";
+        if(btnPickAll){ btnPickAll.disabled = true; btnPickAll.textContent = "Preleva tutti i flussi"; btnPickAll.title = ""; }
         if(hint) hint.textContent = "";
         return;
       }
@@ -8710,6 +8563,13 @@ function currentInv(){
       const activeFlowCountLabel = activeFlows.length > 8 ? `${fmtN(visibleActiveFlows.length)}/${fmtN(activeFlows.length)}` : fmtN(activeFlows.length);
       count.textContent = activeFlowCountLabel;
       setPickingNavCount("picking", activeFlowCountLabel);
+      if(btnPickAll){
+        btnPickAll.disabled = activeFlows.length <= 0;
+        btnPickAll.textContent = activeFlows.length ? `Preleva tutti i flussi (${fmtN(activeFlows.length)})` : "Preleva tutti i flussi";
+        btnPickAll.title = activeFlows.length
+          ? `Preleva tutti i flussi da prelevare attualmente caricati dal cloud (${activeFlows.length.toLocaleString("it-IT")}).`
+          : "Nessun flusso da prelevare.";
+      }
 
       if(!flows.length){
         list.innerHTML = `<div class="hint">Nessun flusso di scarico da prelevare nei flussi recenti.</div>`;
@@ -8914,6 +8774,133 @@ function currentInv(){
       }, { merge:true });
       showToast("Flusso prelevato", `${flowDisplayName(flow)} • ${skuList.length} SKU`, 2000);
       renderHomePickingBox();
+    }
+
+
+    async function savePickingAllFlows(){
+      if(!canUsePickingActions()){
+        showToast("Permessi", "Utente non abilitato al picking.", 2200);
+        return;
+      }
+
+      const flows = getPickingCandidateFlows();
+      const activeFlows = flows.filter(f=>!pickingFlowStats(f).done);
+      if(!activeFlows.length){
+        showToast("Nessun flusso", "Non ci sono flussi da prelevare.", 1800);
+        return;
+      }
+
+      let totalSku = 0;
+      let totalPieces = 0;
+      for(const flow of activeFlows){
+        const validLines = pickingUniqueLines(flow);
+        totalSku += validLines.length;
+        for(const line of validLines){
+          totalPieces += Math.abs(parseQty(line?.qty || 0) || 0);
+        }
+      }
+
+      const ok = confirm(`Confermi prelievo di tutti i flussi da prelevare?\n\nFlussi: ${activeFlows.length}\nSKU totali: ${totalSku}\nPezzi totali: ${totalPieces}`);
+      if(!ok) return;
+
+      const api = state.firebase.api;
+      const db = state.firebase.db;
+      if(!api || !db || !api.writeBatch){
+        showToast("Errore", "Firebase non inizializzato.", 2200);
+        return;
+      }
+
+      const nowClient = Date.now();
+      const bulkId = `bulk_pick_${nowClient}`;
+      const who = state.user?.email || state.user?.emailLower || state.user?.uid || "";
+      const btn = $("btnPickAllFlows");
+      if(btn) btn.disabled = true;
+
+      try{
+        const batch = api.writeBatch(db);
+        const runtimePatches = [];
+
+        for(const flow of activeFlows){
+          const id = String(flow?.id || "").trim();
+          const l = (flow?.location === "cerea" || flow?.location === "concamarise") ? flow.location : "concamarise";
+          if(!id) continue;
+
+          const validLines = pickingUniqueLines(flow);
+          if(!validLines.length) continue;
+
+          const pickedLines = {};
+          const skuList = [];
+          for(const line of validLines){
+            const sku = toSkuId(line?.sku || "");
+            if(!sku) continue;
+            const key = pickingSkuKey(sku);
+            const qty = Math.abs(parseQty(line?.qty || 0) || 0);
+            const title = pickingLineTitle(line, flow);
+            const position = pickingLinePositionText(flow, sku);
+            pickedLines[key] = { picked:true, status:"prelevato", sku, title, qty, position, rackLocation:position, pickedAtClient:nowClient, pickedBy:who, bulkId };
+            if(!skuList.includes(sku)) skuList.push(sku);
+          }
+
+          if(!skuList.length) continue;
+
+          const event = {
+            type:"flow",
+            bulk:true,
+            bulkId,
+            skus:skuList,
+            count:skuList.length,
+            atClient:nowClient,
+            by:who
+          };
+          const ref = api.doc(db, COL_ROOT, l, SUB_LOGS, id);
+          const pickingPatch = {
+            status:"prelevato",
+            pickedLines,
+            updatedAt: api.serverTimestamp(),
+            updatedAtClient: nowClient,
+            updatedBy: who,
+            events: api.arrayUnion(event),
+            flowPicked:true,
+            flowPickMode:"flow",
+            flowPickGroup:true,
+            flowPickedCount:skuList.length,
+            flowPickedSkus:skuList,
+            flowPickedAt: api.serverTimestamp(),
+            flowPickedAtClient: nowClient,
+            flowPickedBy: who,
+            bulkPickId: bulkId
+          };
+          batch.set(ref, { picking: pickingPatch }, { merge:true });
+          runtimePatches.push({ loc:l, id, pickingPatch });
+        }
+
+        if(!runtimePatches.length){
+          showToast("Nessun flusso", "Non ci sono righe valide da prelevare.", 1800);
+          return;
+        }
+
+        await batch.commit();
+
+        // UI immediata dopo scrittura cloud riuscita: nessun localStorage, solo stato runtime allineato alla write.
+        for(const patch of runtimePatches){
+          try{
+            const original = (state.logs?.[patch.loc]?.flows || []).find(f=>String(f?.id || "") === patch.id);
+            if(original){
+              original.picking = { ...(original.picking || {}), ...patch.pickingPatch };
+            }
+          }catch(_e){}
+        }
+
+        showToast("Tutti i flussi prelevati", `${runtimePatches.length} flussi • ${totalSku} SKU`, 2400);
+        renderHomePickingBox();
+        renderHomeLogsBox();
+      }catch(err){
+        console.error("pick all flows", err);
+        showToast("Errore prelievo", String(err?.message || err).slice(0, 240), 3200);
+      }finally{
+        if(btn) btn.disabled = false;
+        renderHomePickingBox();
+      }
     }
 
 
@@ -9611,9 +9598,8 @@ function closeSheet(kind){
 
       const rows = lines.slice(0, 300).map(l=>{
         const ok = !!l.sku && Number.isFinite(l.qty) && l.qty!==0;
-        const display = flowLineDisplayMeta(l, { location: state.route?.loc || "" });
-        const meta = display.rawMeta || parseTitleMeta(l.title || "");
-        const titleMain = display.main ? escapeHtml(display.main) : (l.title ? escapeHtml(l.title) : "<span class='muted'>(senza nome)</span>");
+        const meta = parseTitleMeta(l.title || "");
+        const titleMain = meta.main ? escapeHtml(meta.main) : (l.title ? escapeHtml(l.title) : "<span class='muted'>(senza nome)</span>");
         const metaSmall = buildMetaSmall(meta);
         const sku = l.sku ? escapeHtml(l.sku) : "<span class='muted'>(SKU?)</span>";
         const qtyN = Number.isFinite(l.qty) ? Math.abs(parseQty(l.qty)||0) : 0;
@@ -10072,7 +10058,7 @@ function closeSheet(kind){
       }
       line.sku = s;
       line.loc = (loc==="cerea" || loc==="concamarise") ? loc : "";
-      line.title = canonicalTitleForSku(s, it?.title || line.title || "", line.loc || loc);
+      line.title = it?.title || line.title || "";
       line.ambiguous = false;
       line.ambReason = "";
       closeSheet("skuPick");
@@ -10112,8 +10098,7 @@ function closeSheet(kind){
         const ok = !!l.sku && !!l.qty && !l.ambiguous;
         const badgeClass = ok ? "ok" : (l.sku && l.qty ? "warn" : "bad");
 
-        const titleClean = l.sku ? canonicalTitleForSku(l.sku, l.title || l.name || l.raw || "", l.loc || "") : (parseTitleMeta(l.title || "").main || l.title || l.name || l.raw);
-        const titleShown = titleClean ? escapeHtml(titleClean) : escapeHtml(l.name || l.raw);
+        const titleShown = l.title ? escapeHtml(parseTitleMeta(l.title).main || l.title) : escapeHtml(l.name || l.raw);
         const skuShown = l.sku ? escapeHtml(l.sku) : "<span class='muted'>(SKU?)</span>";
         const qtyVal = l.qty ? Math.abs(parseQty(l.qty)||0) : null;
 
@@ -10181,10 +10166,9 @@ function closeSheet(kind){
         const loc = locFromLine || resolveLocForSkuAny(sku, locHint, idx);
         const bucket = (loc==="cerea") ? buckets.cerea : buckets.concamarise;
 
-        const cleanTitle = canonicalTitleForSku(sku, l.title || "", loc);
-        const prev = bucket.get(sku) || { sku, title: cleanTitle || "", qty: 0 };
+        const prev = bucket.get(sku) || { sku, title: l.title || "", qty: 0 };
         prev.qty += qty;
-        if(!prev.title && cleanTitle) prev.title = cleanTitle;
+        if(!prev.title && l.title) prev.title = l.title;
         bucket.set(sku, prev);
       }
 
@@ -13445,10 +13429,9 @@ async function applyFlow(kind){
         const sku = toSkuId(l.sku);
         const qty = parseQty(l.qty);
         if(!sku || !Number.isFinite(qty) || qty===0) continue;
-        const cleanTitle = canonicalTitleForSku(sku, l.title || "", locHint || "");
-        const prev = agg.get(sku) || { sku, title: cleanTitle || "", qty:0 };
+        const prev = agg.get(sku) || { sku, title:l.title||"", qty:0 };
         prev.qty += qty;
-        if(!prev.title && cleanTitle) prev.title = cleanTitle;
+        if(!prev.title && l.title) prev.title = l.title;
         agg.set(sku, prev);
       }
       const aggregatedAll = Array.from(agg.values()).filter(x=>x.sku && Number.isFinite(x.qty) && x.qty!==0);
@@ -14359,6 +14342,11 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
           }
         });
       }
+
+      $("btnPickAllFlows")?.addEventListener("click", async (e)=>{
+        e.preventDefault();
+        await savePickingAllFlows();
+      });
 
       const homePickedHistoryList = $("homePickedHistoryList");
       if(homePickedHistoryList){

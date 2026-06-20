@@ -2351,7 +2351,6 @@ Tip:
         error: ""
       },
       comboCache: new Map(),
-      productNames: { unsub:null, bySku:new Map(), loaded:false, error:"" },
 
       // Riordini Tabellone WRITE: lettura cloud live + backfill flag RIORDINATO sui pregressi
       twReorders: {
@@ -4228,7 +4227,6 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
 
     // --- realtime inventory watchers ---
     function startAllRealtime(){
-      startProductNamesWatch();
       startRealtimeFor("cerea");
       startRealtimeFor("concamarise");
       startAllLogs();
@@ -4249,7 +4247,6 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
       }
       stopAllLogs();
       stopLowStockEmailMetaWatch();
-      stopProductNamesWatch();
       stopProductComboWatch();
       try{ state.comboCache instanceof Map && state.comboCache.clear(); }catch(_e){}
       if(state.mail && state.mail.lowStock){
@@ -4264,146 +4261,6 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
       if(state.route.view==="home") renderHomeDashboard();
       if(state.ui.sheet==="sottoscorta") renderSottoscortaSheet();
       if(state.ui.sheet==="productDetails") renderProductDetailsSheet();
-    }
-
-
-    // --- Anagrafica prodotti live: nome unico cloud per SKU ---
-    // Fonte unica del nome: amzInventoryProducts/{SKU}.title.
-    function getProductCatalogMeta(sku){
-      try{
-        const s = toSkuId(sku || "");
-        if(!s || !(state.productNames?.bySku instanceof Map)) return null;
-        return state.productNames.bySku.get(s) || null;
-      }catch(_e){
-        return null;
-      }
-    }
-
-    function fallbackInventoryTitleForSku(sku, locHint=""){
-      try{
-        const s = toSkuId(sku || "");
-        if(!s) return "";
-        const loc = (locHint === "cerea" || locHint === "concamarise") ? locHint : "";
-        const getFrom = (l)=>{
-          const arr = state.inventory?.[l]?.items || [];
-          const it = arr.find(x=>toSkuId(x?.sku || x?.id || "") === s) || null;
-          return squashWhitespace(it?.title || it?.name || "");
-        };
-        if(loc){
-          const v = getFrom(loc);
-          if(v) return v;
-        }
-        return getFrom("concamarise") || getFrom("cerea") || "";
-      }catch(_e){
-        return "";
-      }
-    }
-
-    function canonicalTitleForSku(sku, fallback="", locHint=""){
-      const s = toSkuId(sku || "");
-      const meta = getProductCatalogMeta(s);
-      const cloudTitle = squashWhitespace(meta?.title || "");
-      if(cloudTitle) return cloudTitle;
-      const invTitle = fallbackInventoryTitleForSku(s, locHint);
-      if(invTitle) return invTitle;
-      const raw = squashWhitespace(fallback || "");
-      if(raw){
-        const parsed = parseTitleMeta(raw);
-        return squashWhitespace(parsed.main || raw) || s;
-      }
-      return s;
-    }
-
-    function flowLineDisplayMeta(line, flow=null){
-      const raw = squashWhitespace(line?.title || "");
-      const rawMeta = parseTitleMeta(raw);
-      const sku = toSkuId(line?.sku || rawMeta.skuInTitle || "");
-      const loc = (flow?.location === "cerea" || flow?.location === "concamarise") ? flow.location : "";
-      const canonical = canonicalTitleForSku(sku, raw, loc);
-      const main = squashWhitespace(parseTitleMeta(canonical).main || canonical || rawMeta.main || raw || sku);
-      return { sku, main, raw, rawMeta };
-    }
-
-    function syncInventoryTitlesWithProductCatalog(){
-      let changed = false;
-      try{
-        for(const loc of ["cerea", "concamarise"]){
-          const inv = state.inventory?.[loc];
-          if(!inv || !Array.isArray(inv.items)) continue;
-          for(const it of inv.items){
-            const sku = toSkuId(it?.sku || it?.id || "");
-            const meta = getProductCatalogMeta(sku);
-            const title = squashWhitespace(meta?.title || "");
-            if(!sku || !title) continue;
-            const norm = meta?.titleNorm || normalizeText(title || sku);
-            if(it.title !== title || it.titleNorm !== norm){
-              it.title = title;
-              it.titleNorm = norm;
-              changed = true;
-            }
-          }
-        }
-        if(changed && state.cache) state.cache.invIndexForMatch = null;
-      }catch(_e){}
-      return changed;
-    }
-
-    function startProductNamesWatch(){
-      try{
-        if(!state.firebase.ok || !state.user?.isWhitelisted) return;
-        if(state.productNames?.unsub) return;
-        if(!state.productNames) state.productNames = { unsub:null, bySku:new Map(), loaded:false, error:"" };
-        const api = state.firebase.api;
-        const db = state.firebase.db;
-        const colRef = api.collection(db, COL_PRODUCTS);
-        const q = api.query(colRef, api.limit(5000));
-        state.productNames.unsub = api.onSnapshot(q, (snap)=>{
-          const map = new Map();
-          snap.forEach(docSnap=>{
-            const d = docSnap.data() || {};
-            if(d.active === false && d.renamedTo) return;
-            const sku = toSkuId(d.sku || docSnap.id || "");
-            if(!sku) return;
-            const title = squashWhitespace(d.title || d.name || "");
-            if(!title) return;
-            map.set(sku, {
-              sku,
-              title,
-              titleNorm: normalizeText(title || sku),
-              updatedAt: d.lastSeenAt || d.updatedAt || null,
-              updatedAtClient: d.lastSeenAtClient || d.updatedAtClient || 0,
-              active: d.active !== false
-            });
-          });
-          state.productNames.bySku = map;
-          state.productNames.loaded = true;
-          state.productNames.error = "";
-          syncInventoryTitlesWithProductCatalog();
-          if(state.route.view === "home") renderHomeDashboard();
-          if(state.route.view === "location") renderInventoryList();
-          if(state.ui.sheet === "flow") renderFlowDetails();
-          if(state.ui.sheet === "flows") renderFlowsModal();
-          if(state.ui.sheet === "products") renderProductsSheet();
-          if(state.ui.sheet === "productDetails") renderProductDetailsSheet();
-          if(state.ui.sheet === "sottoscorta") renderSottoscortaSheet();
-        }, (err)=>{
-          if(!state.productNames) state.productNames = { unsub:null, bySku:new Map(), loaded:false, error:"" };
-          state.productNames.error = err?.message || String(err || "Errore anagrafica prodotti");
-          console.warn("product catalog watch error", err);
-        });
-      }catch(err){
-        console.warn("startProductNamesWatch", err);
-      }
-    }
-
-    function stopProductNamesWatch(){
-      try{ state.productNames?.unsub && state.productNames.unsub(); }catch(_e){}
-      if(state.productNames){
-        state.productNames.unsub = null;
-        state.productNames.bySku = new Map();
-        state.productNames.loaded = false;
-        state.productNames.error = "";
-      }
     }
 
     function startRealtimeFor(loc){
@@ -4423,7 +4280,7 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
           const d = docSnap.data() || {};
           const sku = d.sku || docSnap.id;
           const qty = Number.isFinite(d.qty) ? d.qty : 0;
-          const title = canonicalTitleForSku(sku, d.title || d.name || "", loc);
+          const title = d.title || d.name || "";
           const updatedAt = d.updatedAt || null;
           const updatedAtClient = d.updatedAtClient || null;
           arr.push({
@@ -5613,8 +5470,7 @@ function startAllLogs(){
       let lines = allLines;
       if(q){
         lines = allLines.filter(l=>{
-          const display = flowLineDisplayMeta(l, flow);
-          const s = normalizeText(`${display.sku || l?.sku || ""} ${display.main || ""} ${l?.title || ""}`);
+          const s = normalizeText(`${l?.sku || ""} ${l?.title || ""}`);
           return s.includes(q);
         });
       }
@@ -5650,11 +5506,12 @@ function startAllLogs(){
         </div>`;
 
       const rows = lines.map(l=>{
-        const display = flowLineDisplayMeta(l, flow);
-        const tmeta = display.rawMeta || parseTitleMeta(display.raw || "");
-        const titleMain = display.main || tmeta.main || display.raw;
+        const sku = String(l?.sku || "").trim();
+        const title = String(l?.title || "").trim();
+        const tmeta = parseTitleMeta(title);
+        const titleMain = tmeta.main || title;
         const metaSmall = buildMetaSmall(tmeta);
-        const skuShow = display.sku || tmeta.skuInTitle || "";
+        const skuShow = sku || tmeta.skuInTitle || "";
         const qtyN = Math.max(0, parseQty(l?.qty || 0));
         const badge = `<span class="badge ${flow.kind==="scarica" ? "warn" : "ok"}">${effSign}${qtyN}</span>`;
         const delBtn = showActions ? `<button class="btn small danger" data-action="removeLine" data-sku="${escapeHtml(skuShow)}" type="button">Elimina</button>` : ``;
@@ -5705,7 +5562,7 @@ function startAllLogs(){
         for(const l of chunk){
           const sku = String(l?.sku || "").trim();
           if(!sku) continue;
-          const title = canonicalTitleForSku(sku, String(l?.title || "").trim(), loc);
+          const title = String(l?.title || "").trim();
           const qty = parseQty(l?.qty || 0);
           if(!qty) continue;
 
@@ -6576,9 +6433,8 @@ function closeSheet(kind){
 
       const rows = lines.slice(0, 300).map(l=>{
         const ok = !!l.sku && Number.isFinite(l.qty) && l.qty!==0;
-        const display = flowLineDisplayMeta(l, { location: state.route?.loc || "" });
-        const meta = display.rawMeta || parseTitleMeta(l.title || "");
-        const titleMain = display.main ? escapeHtml(display.main) : (l.title ? escapeHtml(l.title) : "<span class='muted'>(senza nome)</span>");
+        const meta = parseTitleMeta(l.title || "");
+        const titleMain = meta.main ? escapeHtml(meta.main) : (l.title ? escapeHtml(l.title) : "<span class='muted'>(senza nome)</span>");
         const metaSmall = buildMetaSmall(meta);
         const sku = l.sku ? escapeHtml(l.sku) : "<span class='muted'>(SKU?)</span>";
         const qtyN = Number.isFinite(l.qty) ? Math.abs(parseQty(l.qty)||0) : 0;
@@ -9820,10 +9676,9 @@ async function applyFlow(kind){
         const sku = toSkuId(l.sku);
         const qty = parseQty(l.qty);
         if(!sku || !Number.isFinite(qty) || qty===0) continue;
-        const cleanTitle = canonicalTitleForSku(sku, l.title || "", locHint || "");
-        const prev = agg.get(sku) || { sku, title: cleanTitle || "", qty:0 };
+        const prev = agg.get(sku) || { sku, title:l.title||"", qty:0 };
         prev.qty += qty;
-        if(!prev.title && cleanTitle) prev.title = cleanTitle;
+        if(!prev.title && l.title) prev.title = l.title;
         agg.set(sku, prev);
       }
       const aggregatedAll = Array.from(agg.values()).filter(x=>x.sku && Number.isFinite(x.qty) && x.qty!==0);
