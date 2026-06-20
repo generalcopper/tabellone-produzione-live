@@ -7209,6 +7209,83 @@ function startAllLogs(){
       };
     }
 
+    function homeLogEntriesFromPickingFlow(flow){
+      const out = [];
+      try{
+        const p = (flow?.picking && typeof flow.picking === "object") ? flow.picking : {};
+        const events = Array.isArray(p.events) ? p.events : [];
+        const loc = normalizeInventoryLoc(flow?.location || "") || "concamarise";
+        const flowId = String(flow?.workflowId || flow?.id || "").trim();
+        const name = flowDisplayName(flow);
+        const totalPieces = Math.abs(Math.round(Number(flow?.totalPieces || 0))) || 0;
+        const totalSku = (()=>{
+          try{
+            if(typeof pickingUniqueLines === "function") return pickingUniqueLines(flow).length;
+          }catch(_e){}
+          return Array.isArray(flow?.lines) ? flow.lines.filter(l=>toSkuId(l?.sku || "")).length : 0;
+        })();
+
+        const buildEntry = (ev0, idx, fallbackType="")=>{
+          const ev = ev0 || {};
+          const type = String(ev.type || fallbackType || "").toLowerCase();
+          if(!["flow", "undo_flow", "sku", "undo_sku"].includes(type)) return null;
+
+          const isUndo = type.startsWith("undo");
+          const isFlow = type === "flow" || type === "undo_flow";
+          const sku = toSkuId(ev.sku || "");
+          const skus = Array.isArray(ev.skus) ? ev.skus.map(x=>toSkuId(x)).filter(Boolean) : [];
+          const count = Number.isFinite(Number(ev.count)) ? Math.round(Number(ev.count)) : (skus.length || (isFlow ? totalSku : 0));
+          const baseQty = isFlow ? totalPieces : (Math.abs(Math.round(Number(ev.qty || 0))) || 0);
+          const qty = isUndo ? -baseQty : baseQty;
+          const ts = Number(ev.atClient || ev.pickedAtClient || ev.undoneAtClient || p.flowPickedAtClient || p.updatedAtClient || 0) || 0;
+          const by = String(ev.by || ev.pickedBy || ev.undoneBy || p.flowPickedBy || p.updatedBy || "").trim();
+          const actor = by || "Operatore";
+          const verb = isFlow
+            ? (isUndo ? "ha annullato prelievo flusso" : "ha prelevato flusso")
+            : (isUndo ? "ha annullato prelievo SKU" : "ha prelevato SKU");
+
+          const bits = [];
+          if(name) bits.push(name);
+          if(loc) bits.push(prettyLoc(loc));
+          if(isFlow){
+            if(count) bits.push(`${count} SKU`);
+          }else{
+            if(sku) bits.push(`SKU ${sku}`);
+            if(ev.position) bits.push(`Posizione ${ev.position}`);
+          }
+          if(isUndo) bits.push("ANNULLATO");
+
+          return {
+            kind: "picking",
+            ts,
+            actor,
+            action: `${actor} ${verb}`,
+            details: bits.filter(Boolean).join(" • "),
+            qty,
+            lot: "—",
+            id: `${flowId || flow?.id || "flow"}:picking:${type}:${ts || idx}:${sku || count || ""}`,
+            badgeClass: isUndo ? "warn" : "ok",
+            raw: { flow, event: ev }
+          };
+        };
+
+        events.forEach((ev, idx)=>{
+          const e = buildEntry(ev, idx);
+          if(e && (e.ts || e.details || e.id)) out.push(e);
+        });
+
+        // Fallback per eventuali flussi prelevati prima dell'introduzione del log eventi.
+        const hasFlowEvent = out.some(e=>String(e?.raw?.event?.type || "").toLowerCase() === "flow");
+        if(p.flowPicked === true && (p.flowPickMode === "flow" || p.flowPickGroup === true) && !hasFlowEvent){
+          const e = buildEntry({ type:"flow", count:Number(p.flowPickedCount || totalSku), skus:Array.isArray(p.flowPickedSkus) ? p.flowPickedSkus : [], atClient:Number(p.flowPickedAtClient || p.updatedAtClient || 0), by:String(p.flowPickedBy || p.updatedBy || "") }, 0, "flow");
+          if(e && (e.ts || e.details || e.id)) out.push(e);
+        }
+      }catch(err){
+        console.warn("picking log entry error", err);
+      }
+      return out;
+    }
+
     function getHomeLogEntries(){
       const entries = [];
       const movements = Array.isArray(state.activityLogs?.movements) ? state.activityLogs.movements : [];
@@ -7219,8 +7296,12 @@ function startAllLogs(){
       for(const loc of ["concamarise", "cerea"]){
         const flows = state.logs?.[loc]?.flows || [];
         for(const f of flows){
-          const e = homeLogEntryFromFlow({ ...f, location: f.location || loc });
+          const flowWithLoc = { ...f, location: f.location || loc };
+          const e = homeLogEntryFromFlow(flowWithLoc);
           if(e && (e.ts || e.details || e.id)) entries.push(e);
+          for(const pe of homeLogEntriesFromPickingFlow(flowWithLoc)){
+            if(pe && (pe.ts || pe.details || pe.id)) entries.push(pe);
+          }
         }
       }
 
