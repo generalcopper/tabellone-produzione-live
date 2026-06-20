@@ -79,6 +79,27 @@
 
   @media (max-width:480px){.panel{top:12px;left:12px;width:calc(100vw - 24px)}.hint{display:none}}
 
+  /* ===== COCKPIT IDLE ===== */
+  #cockpit{position:fixed; inset:0; z-index:25; display:flex; align-items:center; justify-content:center;
+    pointer-events:none; opacity:0; transition:opacity 1.1s ease;
+    background:radial-gradient(ellipse at 50% 60%, rgba(6,10,16,.0) 30%, rgba(4,7,12,.55) 100%);}
+  #cockpit.show{opacity:1;}
+  #cockpit .ck-inner{text-align:center; transform:translateY(14px); transition:transform 1.1s ease;
+    font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif; color:#eaf3ff;
+    text-shadow:0 2px 18px rgba(0,0,0,.8); padding:0 24px;}
+  #cockpit.show .ck-inner{transform:translateY(0);}
+  #cockpit .ck-logo{font-weight:800; letter-spacing:.14em; font-size:clamp(34px,7vw,72px); line-height:1;
+    background:linear-gradient(180deg,#ffffff, #9fc4ff); -webkit-background-clip:text; background-clip:text; color:transparent;}
+  #cockpit .ck-sub{margin-top:6px; font-weight:600; letter-spacing:.32em; font-size:clamp(13px,2.4vw,20px); color:#9fb6d6;}
+  #cockpit .ck-line{width:120px; height:2px; margin:22px auto; border-radius:2px;
+    background:linear-gradient(90deg,transparent,rgba(120,180,255,.9),transparent);}
+  #cockpit .ck-claim{font-weight:600; font-size:clamp(15px,2.8vw,24px); letter-spacing:.02em; color:#d6e3f5;}
+  #cockpit .ck-meta{margin-top:18px; font-variant-numeric:tabular-nums; font-weight:700; letter-spacing:.06em;
+    font-size:clamp(16px,3.2vw,28px); color:#bfe0ff; display:flex; gap:14px; align-items:center; justify-content:center;}
+  #cockpit .ck-dot{opacity:.5;}
+  #cockpit .ck-hint{margin-top:26px; font-size:clamp(11px,2vw,15px); letter-spacing:.22em; text-transform:uppercase;
+    color:rgba(159,182,214,.7); font-weight:600;}
+
 </style>
 </head>
 <body>
@@ -106,6 +127,22 @@
 <div class="panel" id="panel">
   <div class="body">
     <div class="info" id="info"></div>
+  </div>
+</div>
+
+<!-- COCKPIT IDLE: appare dopo 30s di inattività con info aziendali -->
+<div id="cockpit" aria-hidden="true">
+  <div class="ck-inner">
+    <div class="ck-logo">LG&nbsp;TRADING</div>
+    <div class="ck-sub">S.r.l.</div>
+    <div class="ck-line"></div>
+    <div class="ck-claim">E-commerce · Logistica · Software su misura</div>
+    <div class="ck-meta">
+      <span id="ckClock">--:--</span>
+      <span class="ck-dot">•</span>
+      <span id="ckDate">—</span>
+    </div>
+    <div class="ck-hint">Magazzino digitale in tempo reale</div>
   </div>
 </div>
 
@@ -873,20 +910,29 @@ const Voce = (function(){
   let audio = null;            // elemento <audio> riutilizzato
   let lastUrl = null;
   let abort = null;
-  let primed = false;
+  let unlocked = false;        // l'autoplay è stato concesso?
+  let pending = null;          // ultima frase in attesa di sblocco
+  let actx = null;             // AudioContext per forzare lo sblocco
 
-  // sblocca/prepara l'audio (necessario su alcuni browser): chiamato all'avvio e su ogni evento
-  async function prime(){
+  function ensureAudio(){ if(!audio){ audio=new Audio(); audio.preload="auto"; audio.autoplay=true; } return audio; }
+
+  // tenta di sbloccare l'audio: AudioContext.resume() + play silenzioso.
+  async function tryUnlock(){
     try{
-      if(!audio) audio = new Audio();
-      audio.preload = "auto"; audio.autoplay = true;
-      // wav silenzioso brevissimo per "scaldare" l'elemento audio
-      audio.volume = 0.0001;
-      audio.src = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=";
-      await audio.play().catch(()=>{});
-      audio.pause(); audio.currentTime = 0; audio.volume = 1;
-      primed = true;
-    }catch(_){ /* verrà ritentato */ }
+      if(!actx){ const AC=window.AudioContext||window.webkitAudioContext; if(AC) actx=new AC(); }
+      if(actx && actx.state!=='running'){ await actx.resume().catch(()=>{}); }
+    }catch(_){}
+    try{
+      const a=ensureAudio();
+      a.muted=true;
+      a.src="data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=";
+      await a.play();
+      a.pause(); a.currentTime=0; a.muted=false;
+      unlocked=true;
+      // se c'era una frase in attesa, riproducila ora
+      if(pending){ const t=pending; pending=null; parla(t); }
+      return true;
+    }catch(_){ return false; }
   }
 
   function _jsonToUrl(data){
@@ -898,7 +944,6 @@ const Voce = (function(){
     return "";
   }
 
-  // TTS cloud (ElevenLabs via proxy)
   async function _cloud(text){
     try{
       if(abort) try{ abort.abort(); }catch(_){}
@@ -917,9 +962,15 @@ const Voce = (function(){
       if(ct.includes("application/json")){ url=_jsonToUrl(await res.json()); }
       else { const blob=await res.blob(); if(!blob||!blob.size) throw new Error("empty"); url=URL.createObjectURL(blob); lastUrl=url; }
       if(!url) throw new Error("no-url");
-      if(!audio) audio=new Audio();
-      audio.preload="auto"; audio.autoplay=true; audio.volume=1; audio.src=url;
-      await audio.play();
+      const a=ensureAudio(); a.volume=1; a.muted=false; a.src=url;
+      try{
+        await a.play();
+        unlocked=true;            // se è partito, l'autoplay è ok
+      }catch(err){
+        // autoplay bloccato: metti in coda e ritenta appena sbloccato
+        if(String(err&&err.name)==='NotAllowedError'){ pending=text; tryUnlock(); }
+        throw err;
+      }
       return true;
     }catch(e){
       console.log("TTS cloud non disponibile:", e);
@@ -927,7 +978,6 @@ const Voce = (function(){
     }
   }
 
-  // fallback voce browser (solo se il cloud fallisce)
   function _browser(text){
     const synth=window.speechSynthesis; if(!synth) return false;
     try{
@@ -951,19 +1001,25 @@ const Voce = (function(){
     try{ if(window.speechSynthesis) window.speechSynthesis.cancel(); }catch(_){}
     if(lastUrl){ try{ URL.revokeObjectURL(lastUrl); }catch(_){} lastUrl=null; }
     const ok = await _cloud(msg);
-    if(!ok) _browser(msg);          // ripiego sulla voce browser
+    if(!ok){
+      // se non è partito per autoplay bloccato, è già in coda; altrimenti prova la voce browser
+      if(!pending) _browser(msg);
+    }
   }
   function toggle(on){ abilitata=(on!==undefined)?!!on:!abilitata;
     if(!abilitata){ try{audio&&audio.pause();}catch(_){} try{window.speechSynthesis&&window.speechSynthesis.cancel();}catch(_){} }
     return abilitata; }
 
-  // prime automatico all'avvio + su qualsiasi evento (kiosk senza mouse: ci pensa il primo render)
-  prime();
-  const ev=['pointerdown','keydown','touchstart','click'];
-  const onEv=()=>{ if(!primed) prime(); };
-  ev.forEach(e=>window.addEventListener(e,onEv,{passive:true}));
+  // tenta lo sblocco subito e ad ogni possibile occasione finché non riesce
+  tryUnlock();
+  const evts=['pointerdown','touchstart','keydown','click','visibilitychange','focus'];
+  const onEv=()=>{ if(!unlocked) tryUnlock(); };
+  evts.forEach(e=>window.addEventListener(e,onEv,{passive:true}));
+  document.addEventListener('visibilitychange',onEv,{passive:true});
+  // ritenta periodicamente all'avvio (alcuni kiosk concedono l'audio dopo il primo render)
+  let _t=0; const _iv=setInterval(()=>{ if(unlocked||_t++>20){ clearInterval(_iv); return; } tryUnlock(); }, 1200);
 
-  return { parla, toggle, prime, get abilitata(){return abilitata;} };
+  return { parla, toggle, prime:tryUnlock, get abilitata(){return abilitata;} };
 })();
 
 // compone la frase parlata per un vano
@@ -1053,7 +1109,7 @@ function highlightVano(v, opts={}){
   document.getElementById('info').innerHTML=txt;
 }
 const cam=(innerWidth<innerHeight)
-  ? {theta:Math.PI*0.14,phi:Math.PI*0.20,r:34*Math.min(1.85,1+(1-innerWidth/innerHeight)*1.1),tx:0,ty:2.4,tz:1}
+  ? {theta:Math.PI*0.13,phi:Math.PI*0.115,r:23,tx:0,ty:2.8,tz:4}
   : {theta:Math.PI*0.16,phi:Math.PI*0.10,r:34,tx:0,ty:1.8,tz:1};
 const camS={...cam};   // versione interpolata per movimento fluido
 let tween=null;
@@ -1080,22 +1136,22 @@ function detailTheta(target,vano){
 function detailPose(target,vano){
   return {tx:target.x, ty:target.y+0.3, tz:target.z, r:8.5, theta:detailTheta(target,vano), phi:Math.PI*0.30};
 }
-// fattore di adattamento allo schermo verticale: in portrait arretro la camera e
-// alzo un po' lo sguardo così il capannone (sviluppato in larghezza) non viene tagliato.
+// fattore di adattamento allo schermo verticale: in portrait arretro la camera quanto
+// basta a contenere la larghezza del capannone con il FOV (ora più contenuto e stabile).
 function portraitBoost(){
   const a = innerWidth/innerHeight;
   if(a >= 1) return 1;                 // landscape: nessun boost
-  // portrait: più è stretto, più arretro (fino a ~1.8x su 9:16)
-  return Math.min(1.85, 1 + (1-a)*1.1);
+  // su 9:16 (a≈0.56) → ~1.35; cresce dolcemente, cappato per non allontanare troppo
+  return Math.min(1.5, 1 + (1-a)*0.78);
 }
 function isPortrait(){ return innerWidth < innerHeight; }
 
 // posa panoramica di riposo: vista d'insieme cinematografica, adattata all'orientamento
 function panoramaPose(){
-  const k=portraitBoost();
   if(isPortrait()){
-    // schermo verticale: vista più dall'alto e arretrata per contenere tutta la larghezza
-    return {tx:0, ty:2.4, tz:1, r:34*k, theta:Math.PI*0.14, phi:Math.PI*0.20};
+    // verticale: camera ravvicinata e bassa davanti al capannone. Le file di scaffali
+    // fuggono in prospettiva e riempiono il frame alto (niente vuoto/barre nere).
+    return {tx:0, ty:2.8, tz:4, r:23, theta:Math.PI*0.13, phi:Math.PI*0.115};
   }
   return {tx:0, ty:1.8, tz:1, r:34, theta:Math.PI*0.16, phi:Math.PI*0.10};
 }
@@ -1124,12 +1180,11 @@ function ease(t){return t<.5?4*t*t*t:1-Math.pow(-2*t+2,3)/2;}
 let tour=null;
 const TOUR_DURATION=30000;     // durata totale del loop (ms)
 
-/* ===== IDLE DRIFT: quando non è selezionato nulla, la camera si muove lentamente
-   in modo cinematico per un po', poi rallenta e si ferma. Tutto smooth. ===== */
+/* ===== IDLE DRIFT: quando non è selezionato nulla, la camera orbita lentamente
+   in modo cinematico, PER SEMPRE (non si ferma). Oscillazioni sinusoidali dolci. ===== */
 let idle=null;                 // {start, baseTheta, basePhi, baseR, baseTy}
 let lastInteract=performance.now();
-const IDLE_WAIT=2200;          // attesa prima che parta il drift (ms)
-const IDLE_DRIFT_MS=16000;     // durata del lento movimento prima di pausarsi (ms)
+const IDLE_WAIT=2000;          // attesa prima che parta il drift (ms)
 function markInteract(){ lastInteract=performance.now(); idle=null; }
 
 function updateIdle(now){
@@ -1137,19 +1192,41 @@ function updateIdle(now){
   if(selectedVano||tour||tween){ idle=null; return; }
   if(now-lastInteract < IDLE_WAIT){ idle=null; return; }
   if(!idle){
-    // ancora la base del drift alla posa di riposo corrente
     idle={ start:now, baseTheta:cam.theta, basePhi:cam.phi, baseR:cam.r, baseTy:cam.ty };
   }
-  const elapsed=now-idle.start;
-  // progresso 0→1 sul tempo di drift; oltre 1 resta fermo (pausa)
-  const p=Math.min(1, elapsed/IDLE_DRIFT_MS);
-  // ease-out: parte lento, accelera appena, poi decelera fino a fermarsi
-  const e=1-Math.pow(1-p,3);
-  // ampiezze contenute: lieve arco orbitale + respiro di altezza/zoom, niente di brusco
-  cam.theta = idle.baseTheta + e*0.55;                 // ruota dolcemente di ~31°
-  cam.phi   = idle.basePhi   + Math.sin(e*Math.PI)*0.05; // sale e riscende impercettibilmente
-  cam.r     = idle.baseR     - Math.sin(e*Math.PI)*3.0;  // si avvicina e poi torna
-  cam.ty    = idle.baseTy    + Math.sin(e*Math.PI)*0.4;
+  const t=(now-idle.start)/1000;       // secondi dall'inizio del drift
+  // ramp-in dolce: il movimento parte da fermo e cresce nei primi ~4s, poi resta continuo
+  const ramp=Math.min(1, t/4);
+  // orbita perpetua: lenta deriva angolare + respiro di quota/zoom, mai ferma
+  cam.theta = idle.baseTheta + Math.sin(t*0.10)*0.42*ramp;   // oscilla avanti/indietro ~24°
+  cam.phi   = idle.basePhi   + Math.sin(t*0.07+1.0)*0.05*ramp;
+  cam.r     = idle.baseR     + Math.sin(t*0.055+0.5)*2.6*ramp; // si avvicina e allontana piano
+  cam.ty    = idle.baseTy    + Math.sin(t*0.08+2.0)*0.35*ramp;
+}
+
+/* ===== COCKPIT IDLE: dopo 30s senza selezione/interazione mostra info aziendali ===== */
+const COCKPIT_DELAY=30000;
+let _cockpitOn=false;
+const _ckEl=()=>document.getElementById('cockpit');
+function updateCockpit(now){
+  // condizioni per mostrarlo: nessun bancale selezionato e inattività ≥ 30s
+  const inattivo = !selectedVano && (now-lastInteract >= COCKPIT_DELAY);
+  if(inattivo && !_cockpitOn){
+    _cockpitOn=true; const el=_ckEl(); if(el){ el.classList.add('show'); el.setAttribute('aria-hidden','false'); }
+  } else if(!inattivo && _cockpitOn){
+    _cockpitOn=false; const el=_ckEl(); if(el){ el.classList.remove('show'); el.setAttribute('aria-hidden','true'); }
+  }
+  // aggiorna orologio/data quando visibile (una volta al secondo)
+  if(_cockpitOn){
+    if(!updateCockpit._t || now-updateCockpit._t>1000){
+      updateCockpit._t=now;
+      const d=new Date();
+      const hh=String(d.getHours()).padStart(2,'0'), mm=String(d.getMinutes()).padStart(2,'0');
+      const cl=document.getElementById('ckClock'); if(cl) cl.textContent=`${hh}:${mm}`;
+      const dt=document.getElementById('ckDate');
+      if(dt) dt.textContent=d.toLocaleDateString('it-IT',{weekday:'long',day:'numeric',month:'long'});
+    }
+  }
 }
 
 function buildShots(target,vano){
@@ -1237,6 +1314,11 @@ function updateTour(now){
   if(now>=tour.endAt){
     tweenTo(panoramaPose(),3200);   // chiusura lunga e morbida sulla panoramica
     tour=null;
+    // fine ciclo: deseleziona e spegni l'illuminazione, riparte il conteggio inattività
+    clearHighlight();
+    selectedVano=null;
+    lastInteract=now;               // da qui parte il timer dei 30s per il cockpit
+    const info=document.getElementById('info'); if(info) info.innerHTML='';
     return;
   }
   if(now<tour.until) return;
@@ -1281,23 +1363,28 @@ el.addEventListener('pointermove',e=>{
 });
 addEventListener('pointerup',()=>{dragging=panning=false;});
 el.addEventListener('contextmenu',e=>e.preventDefault());
-el.addEventListener('wheel',e=>{e.preventDefault();cam.r=Math.max(7,Math.min(95,cam.r+e.deltaY*0.03));tween=null;tour=null;markInteract();},{passive:false});
+const R_MIN=7, R_MAX=110;
+// zoom proporzionale alla distanza: passo coerente sia da vicino che da lontano
+el.addEventListener('wheel',e=>{e.preventDefault();
+  const f=Math.exp(e.deltaY*0.0012);                 // fattore moltiplicativo dolce
+  cam.r=Math.max(R_MIN,Math.min(R_MAX,cam.r*f));
+  tween=null;tour=null;markInteract();},{passive:false});
 let pinch=0;
 el.addEventListener('touchmove',e=>{if(e.touches.length===2){
   const d=Math.hypot(e.touches[0].clientX-e.touches[1].clientX,e.touches[0].clientY-e.touches[1].clientY);
-  if(pinch)cam.r=Math.max(7,Math.min(95,cam.r+(pinch-d)*0.06)); pinch=d; tween=null; tour=null; markInteract();}},{passive:true});
+  if(pinch){ const f=pinch/Math.max(1,d); cam.r=Math.max(R_MIN,Math.min(R_MAX,cam.r*f)); }
+  pinch=d; tween=null; tour=null; markInteract();}},{passive:true});
 el.addEventListener('touchend',()=>pinch=0);
 
-// FOV orizzontale di riferimento: manteniamo costante la larghezza inquadrata.
-// In portrait (schermo verticale) l'aspect<1 farebbe restringere il FOV orizzontale e
-// taglierebbe il capannone ai lati: compensiamo allargando il FOV verticale.
-const HFOV_REF = 62 * Math.PI/180;     // ~62° orizzontali di riferimento
+// FOV orizzontale di riferimento: manteniamo una larghezza inquadrata coerente.
+// In portrait NON gonfiamo troppo il FOV verticale (causerebbe grandangolo instabile e
+// zoom impreciso): lo teniamo contenuto e recuperiamo la larghezza arretrando la camera.
+const HFOV_REF = 60 * Math.PI/180;
 function applyFov(){
   const aspect = innerWidth/innerHeight;
-  // vfov tale che l'orizzontale resti ~HFOV_REF; in landscape limitiamo per non sfondare
   let vfov = 2*Math.atan(Math.tan(HFOV_REF/2)/Math.max(aspect, 0.0001));
-  vfov = Math.min(vfov, 92*Math.PI/180);   // cap per evitare distorsioni estreme in portrait spinto
-  vfov = Math.max(vfov, 34*Math.PI/180);   // minimo ragionevole in landscape largo
+  vfov = Math.min(vfov, 70*Math.PI/180);    // cap più basso: prospettiva naturale e stabile
+  vfov = Math.max(vfov, 34*Math.PI/180);
   camera.fov = vfov*180/Math.PI;
   camera.aspect = aspect;
   camera.updateProjectionMatrix();
@@ -1341,10 +1428,12 @@ function clampCameraXZ(x,z){
   return [x,z];
 }
 
+
 function tick(now){
   perfWatch(now);
   updateTour(now);
   updateIdle(now);
+  updateCockpit(now);
   if(tween){const k=ease(Math.min(1,(now-tween.start)/tween.dur));
     for(const key in tween.to)cam[key]=tween.from[key]+(tween.to[key]-tween.from[key])*k;
     if(k>=1)tween=null;}
@@ -1385,9 +1474,14 @@ function tick(now){
   let cpx=camS.tx+(camS.r+bR)*Math.cos(camS.phi+bPhi)*Math.sin(camS.theta);
   let cpy=camS.ty+bTy+(camS.r+bR)*Math.sin(camS.phi+bPhi)+0.001;
   let cpz=camS.tz+(camS.r+bR)*Math.cos(camS.phi+bPhi)*Math.cos(camS.theta);
-  // CONFINAMENTO: la camera non oltrepassa i muri (perimetro a L + cartongesso)
-  [cpx,cpz]=clampCameraXZ(cpx,cpz);
-  cpy=Math.min(cpy, H_HIGH-0.15);                 // non sopra il soffitto
+  // CONFINAMENTO: vale solo quando la camera è DENTRO il capannone (navigazione interna).
+  // Nelle viste d'insieme la camera sta fuori/sopra: in quel caso non va confinata né
+  // schiacciata sotto il soffitto, altrimenti l'inquadratura "salta".
+  const dentro = (cpx>-LX/2 && cpx<LX/2 && cpz>-LZ/2 && cpz<LZ/2 && cpy < H_HIGH);
+  if(dentro){
+    [cpx,cpz]=clampCameraXZ(cpx,cpz);
+    cpy=Math.min(cpy, H_HIGH-0.15);
+  }
   camera.position.set(cpx,cpy,cpz);
   camera.lookAt(camS.tx,camS.ty,camS.tz);
   if(wallsAuto){
