@@ -1969,6 +1969,20 @@
       justify-content:center;
       border-radius:7px;
     }
+    .qtyEditBadge{
+      cursor:pointer;
+      font-family: inherit;
+      margin:0;
+      outline:none;
+    }
+    .qtyEditBadge:hover{
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(249,115,22,.12);
+    }
+    .qtyEditBadge:focus-visible{
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(249,115,22,.18);
+    }
     @media(max-width:520px){
       #homeNoLocationList .gridCell:nth-child(4),
       #homeLocatedList .gridCell:nth-child(4){
@@ -4719,7 +4733,6 @@ function guessTitleFromRaw(rawText, sku){
         const nowClient = Date.now();
         const who = state.user?.email || state.user?.emailLower || state.user?.uid || "";
         let saved = { oldQty:0, newQty, newCode, remainingQty:0 };
-        let runtimeInventoryPatch = null;
 
         await api.runTransaction(db, async (tx)=>{
           const snap = await tx.get(itemRef);
@@ -4756,19 +4769,6 @@ function guessTitleFromRaw(rawText, sku){
           const remainingQty = Math.max(0, lotQty - nextAllocations
             .filter(x=> (normalizeLotId(x.lot) || LOT_LEGACY_ID) === lot)
             .reduce((a,x)=> a + Math.round(Number(x.qty || 0)), 0));
-
-          runtimeInventoryPatch = {
-            sku,
-            title,
-            titleNorm: normalizeText(title || sku),
-            rackLocation: cleanLocation,
-            rackLocations: cleanLocations,
-            rackAllocations: nextAllocations,
-            lastRackMovementLot: lot,
-            updatedAtClient: nowClient,
-            updatedBy: who,
-            location: loc
-          };
 
           tx.set(itemRef, {
             sku,
@@ -4824,10 +4824,6 @@ function guessTitleFromRaw(rawText, sku){
 
           saved = { oldQty, newQty, newCode, remainingQty };
         });
-
-        if(runtimeInventoryPatch){
-          patchRuntimeInventoryItem(loc, sku, runtimeInventoryPatch);
-        }
 
         showToast(
           opts.remove === true ? "Ubicazione rimossa" : "Ubicazione aggiornata",
@@ -7150,6 +7146,7 @@ function startAllLogs(){
       const type = String(m?.type || "").toLowerCase();
       const source = String(m?.source || "").toLowerCase();
       if(type === "ubicazione" || type === "location_assign") return "ha ubicato";
+      if(type === "quantita_da_ubicare") return "ha modificato quantità da ubicare";
       if(type === "move") return "ha spostato";
       if(type === "carica") return source.includes("tabellone_write") ? "ha prodotto" : "ha caricato";
       if(type === "scarica") return "ha scaricato";
@@ -7992,6 +7989,287 @@ function currentInv(){
       }
     }
 
+
+    function buildStockLotsForUnallocatedQty(fresh, newUnallocatedQty, opts = {}){
+      const targetUnallocated = Math.max(0, Math.round(Number(newUnallocatedQty) || 0));
+      const tsClient = Number(opts.tsClient || Date.now());
+      const source = String(opts.source || "quantita_da_ubicare");
+      const refId = String(opts.refId || "");
+      const preferredLot = normalizeLotId(opts.preferredLot || fresh?.lastProductionLot || "", fresh?.lastProductionAtClient || null) || "";
+
+      const allocations = normalizeRackAllocationsForWrite(readRackAllocationsFromDoc(fresh || {}));
+      const allocatedByLot = new Map();
+      for(const a of allocations){
+        const lot = normalizeLotId(a.lot) || LOT_LEGACY_ID;
+        const q = Math.max(0, Math.round(Number(a.qty || 0)));
+        allocatedByLot.set(lot, (allocatedByLot.get(lot) || 0) + q);
+      }
+
+      const currentLots = readStockLotsFromDoc(fresh || {}).map(l=>({
+        lot: normalizeLotId(l.lot) || LOT_LEGACY_ID,
+        qty: Math.max(0, Math.round(Number(l.qty || 0))),
+        createdAtClient: Number(l.createdAtClient || l.producedAtClient || tsClient) || tsClient,
+        producedAtClient: Number(l.producedAtClient || l.createdAtClient || tsClient) || tsClient,
+        source: String(l.source || ""),
+        refId: String(l.refId || "")
+      }));
+
+      // Ogni lotto con pallet già ubicati deve restare almeno alla sua quantità ubicata.
+      for(const [lot, q] of allocatedByLot.entries()){
+        if(!currentLots.some(l=>l.lot === lot)){
+          currentLots.push({ lot, qty:q, createdAtClient:tsClient, producedAtClient:tsClient, source, refId });
+        }
+      }
+
+      let fallbackLot = preferredLot;
+      if(!fallbackLot){
+        const withFree = currentLots.find(l=> Math.max(0, l.qty - (allocatedByLot.get(l.lot) || 0)) > 0);
+        fallbackLot = withFree?.lot || currentLots[0]?.lot || LOT_LEGACY_ID;
+      }
+
+      const result = new Map();
+      for(const lot of currentLots){
+        const allocQty = allocatedByLot.get(lot.lot) || 0;
+        result.set(lot.lot, {
+          lot: lot.lot,
+          qty: Math.max(0, Math.round(allocQty)),
+          createdAtClient: lot.createdAtClient || tsClient,
+          producedAtClient: lot.producedAtClient || lot.createdAtClient || tsClient,
+          source: lot.source || source,
+          refId: lot.refId || refId
+        });
+      }
+
+      let remaining = targetUnallocated;
+      const orderedLots = currentLots.slice().sort((a,b)=>{
+        if(a.lot === fallbackLot) return -1;
+        if(b.lot === fallbackLot) return 1;
+        return (a.createdAtClient || 0) - (b.createdAtClient || 0) || String(a.lot).localeCompare(String(b.lot));
+      });
+
+      // Mantieni la distribuzione esistente finché basta, ma il totale finale resta sempre quello scelto dal prompt.
+      for(const lot of orderedLots){
+        if(remaining <= 0) break;
+        const allocQty = allocatedByLot.get(lot.lot) || 0;
+        const currentFree = Math.max(0, Math.round(Number(lot.qty || 0)) - allocQty);
+        if(currentFree <= 0) continue;
+        const add = Math.min(currentFree, remaining);
+        const rec = result.get(lot.lot) || { lot: lot.lot, qty:0, createdAtClient:lot.createdAtClient || tsClient, producedAtClient:lot.producedAtClient || tsClient, source:lot.source || source, refId:lot.refId || refId };
+        rec.qty = Math.max(0, Math.round(Number(rec.qty || 0))) + add;
+        result.set(lot.lot, rec);
+        remaining -= add;
+      }
+
+      // Se la nuova quantità è maggiore dell'attuale residuo, aggiungo l'extra al lotto preferito/default.
+      if(remaining > 0){
+        const rec = result.get(fallbackLot) || { lot:fallbackLot, qty:0, createdAtClient:tsClient, producedAtClient:tsClient, source, refId };
+        rec.qty = Math.max(0, Math.round(Number(rec.qty || 0))) + remaining;
+        if(!rec.source) rec.source = source;
+        if(!rec.refId) rec.refId = refId;
+        result.set(fallbackLot, rec);
+      }
+
+      return Array.from(result.values())
+        .filter(x=> Number.isFinite(Number(x.qty)) && Math.round(Number(x.qty)) > 0)
+        .map(x=>({
+          lot: normalizeLotId(x.lot) || LOT_LEGACY_ID,
+          qty: Math.round(Number(x.qty) || 0),
+          createdAtClient: Number(x.createdAtClient || x.producedAtClient || tsClient) || tsClient,
+          producedAtClient: Number(x.producedAtClient || x.createdAtClient || tsClient) || tsClient,
+          source: String(x.source || source),
+          refId: String(x.refId || refId)
+        }));
+    }
+
+    async function editHomeNoLocationQtyPrompt(skuRaw, locRaw){
+      const sku = toSkuId(skuRaw || "");
+      const loc = (locRaw === "cerea" || locRaw === "concamarise") ? locRaw : state.route.loc;
+
+      if(!canUsePickingActions()){
+        showToast("Permessi", "Utente non abilitato al picking.", 2200);
+        return;
+      }
+      if(!sku || !(loc === "cerea" || loc === "concamarise")){
+        showToast("Errore", "Prodotto o magazzino non valido.", 2200);
+        return;
+      }
+
+      const currentItem = getProductBySku(loc, sku);
+      if(!currentItem){
+        showToast("Errore", "Prodotto non trovato.", 2200);
+        return;
+      }
+
+      const currentUnallocated = rackUnallocatedQtyFromDoc(currentItem || {});
+      const raw = prompt(
+        `Modifica quantità disponibile da ubicare\n\nSKU: ${sku}\nMagazzino: ${prettyLoc(loc)}\nQuantità attuale: ${currentUnallocated} pz\n\nInserisci nuova quantità disponibile:`,
+        String(Math.max(0, Math.round(Number(currentUnallocated) || 0)))
+      );
+      if(raw === null) return;
+
+      const parsed = parseSignedQtyStrict(raw);
+      if(parsed === null || !Number.isFinite(parsed) || parsed < 0){
+        showToast("Quantità non valida", "Inserisci un numero intero positivo o zero.", 2400);
+        return;
+      }
+
+      const api = state.firebase.api;
+      const db = state.firebase.db;
+      if(!api || !db || !api.runTransaction){
+        showToast("Errore", "Firebase non inizializzato.", 2200);
+        return;
+      }
+
+      const itemRef = api.doc(db, COL_ROOT, loc, SUB_ITEMS, sku);
+      const productRef = api.doc(db, COL_PRODUCTS, sku);
+      const nowClient = Date.now();
+      const who = state.user?.email || state.user?.emailLower || state.user?.uid || "";
+      const movementId = api.doc(api.collection(db, COL_PRODUCTS, sku, SUB_MOVES)).id;
+
+      let runtimePatch = null;
+      let shouldRemove = false;
+      let beforeUnallocated = currentUnallocated;
+      let afterUnallocated = parsed;
+      let beforeTotal = stockQtyFromDoc(currentItem || {});
+      let afterTotal = beforeTotal;
+
+      try{
+        await api.runTransaction(db, async (tx)=>{
+          const snap = await tx.get(itemRef);
+          if(!snap.exists()) throw new Error("Prodotto non trovato.");
+          const fresh = snap.data() || {};
+          const title = squashWhitespace(fresh.title || fresh.name || currentItem.title || sku) || sku;
+          const freshTotal = stockQtyFromDoc(fresh);
+          const allocations = normalizeRackAllocationsForWrite(readRackAllocationsFromDoc(fresh));
+          const allocatedTotal = rackAllocatedQtyFromDoc(fresh);
+          const freshUnallocated = Math.max(0, freshTotal - allocatedTotal);
+          const newUnallocated = Math.max(0, Math.round(Number(parsed) || 0));
+          const finalQty = allocatedTotal + newUnallocated;
+          const cleanLocations = normalizeRackLocationsList(allocations.map(x=>x.code));
+          const cleanLocation = cleanLocations[0] || "";
+          const preferredLot = normalizeLotId(state.ui.productDetailsLot || fresh.lastProductionLot || "", fresh.lastProductionAtClient || null) || getDefaultLotForItem(fresh || {});
+          const cleanStockLots = buildStockLotsForUnallocatedQty(fresh, newUnallocated, { tsClient:nowClient, source:"quantita_da_ubicare", refId:movementId, preferredLot });
+          const delta = newUnallocated - freshUnallocated;
+
+          beforeUnallocated = freshUnallocated;
+          afterUnallocated = newUnallocated;
+          beforeTotal = freshTotal;
+          afterTotal = finalQty;
+
+          if(delta === 0){
+            runtimePatch = {
+              sku,
+              title,
+              qty: freshTotal,
+              stockLots: cleanStockLots,
+              rackLocation: cleanLocation,
+              rackLocations: cleanLocations,
+              rackAllocations: allocations,
+              updatedAtClient: nowClient
+            };
+            return;
+          }
+
+          if(finalQty <= 0 && allocations.length === 0){
+            tx.delete(itemRef);
+            shouldRemove = true;
+          }else{
+            tx.set(itemRef, {
+              sku,
+              title,
+              titleNorm: normalizeText(title || sku),
+              qty: finalQty,
+              stockLots: cleanStockLots,
+              rackLocation: cleanLocation,
+              rackLocations: cleanLocations,
+              rackAllocations: allocations,
+              lastNoLocationQtyEditId: movementId,
+              updatedAt: api.serverTimestamp(),
+              updatedAtClient: nowClient,
+              updatedBy: who,
+              location: loc
+            }, { merge:true });
+          }
+
+          tx.set(productRef, {
+            sku,
+            title,
+            titleNorm: normalizeText(title || sku),
+            rackLocation: cleanLocation,
+            rackLocations: cleanLocations,
+            rackAllocations: allocations,
+            lastNoLocationQtyEditId: movementId,
+            lastNoLocationQtyBefore: freshUnallocated,
+            lastNoLocationQtyAfter: newUnallocated,
+            lastSeenAt: api.serverTimestamp(),
+            lastSeenAtClient: nowClient,
+            lastSeenBy: who,
+            lastSeenLocation: loc,
+            lastSeenKind: "no_location_qty_update"
+          }, { merge:true });
+
+          addProductMovementToBatch(tx, api, db, sku, {
+            type: "quantita_da_ubicare",
+            movementId,
+            movementKey: movementId,
+            writeKey: movementId,
+            qtySigned: delta,
+            deltaSigned: delta,
+            beforeQty: freshTotal,
+            afterQty: finalQty,
+            beforeUnallocatedQty: freshUnallocated,
+            afterUnallocatedQty: newUnallocated,
+            allocatedQty: allocatedTotal,
+            fromWarehouse: loc,
+            toWarehouse: loc,
+            location: loc,
+            source: "da_ubicare",
+            note: `Modifica quantità da ubicare ${freshUnallocated} → ${newUnallocated} pz`,
+            rackLocation: cleanLocation,
+            rackLocations: cleanLocations,
+            lot: preferredLot,
+            lotLabel: lotLabelFromId(preferredLot),
+            deleteLocked: true,
+            locked: true,
+            createdAtClient: nowClient
+          });
+
+          runtimePatch = {
+            sku,
+            title,
+            qty: finalQty,
+            stockLots: cleanStockLots,
+            rackLocation: cleanLocation,
+            rackLocations: cleanLocations,
+            rackAllocations: allocations,
+            updatedAtClient: nowClient,
+            updatedBy: who,
+            location: loc
+          };
+        });
+
+        if(shouldRemove){
+          patchRuntimeInventoryItem(loc, sku, {}, { remove:true });
+        }else if(runtimePatch){
+          patchRuntimeInventoryItem(loc, sku, runtimePatch);
+        }
+
+        renderHomeDashboard();
+        renderInventoryList();
+        if(state.ui.sheet === "productDetails") renderProductDetailsSheet();
+        renderHomeLogsBox();
+        if(afterUnallocated === beforeUnallocated){
+          showToast("Quantità invariata", `${sku} resta a ${afterUnallocated} pz da ubicare.`, 1800);
+        }else{
+          showToast("Quantità aggiornata", `${sku}: ${beforeUnallocated} → ${afterUnallocated} pz da ubicare`, 2200);
+          scheduleLowStockEmailAfterUpdate("edit_no_location_qty");
+        }
+      }catch(err){
+        console.error("edit no-location qty", err);
+        showToast("Errore quantità", String(err?.message || err).slice(0, 220), 3000);
+      }
+    }
+
     function renderLowStockBox(allItems){
       const box = $("lowStockBox");
       const list = $("lowStockList");
@@ -8406,7 +8684,7 @@ function currentInv(){
               <div class="gridProdMain">${titleMain}</div>
               <div class="gridProdSub">${escapeHtml(metaLine)}</div>
             </div>
-            <div class="gridCell gridRight"><span class="badge warn">${escapeHtml(String(remainingQty))}</span></div>
+            <div class="gridCell gridRight"><button class="badge warn qtyEditBadge" type="button" data-action="editHomeNoLocationQty" data-sku="${sku}" data-loc="${escapeHtml(it.loc || "")}" data-current="${escapeHtml(String(remainingQty))}" title="Modifica quantità disponibile da ubicare">${escapeHtml(String(remainingQty))}</button></div>
             <div class="gridCell gridRight">${rackHtml}</div>
           </div>`;
       }).join("");
@@ -11339,9 +11617,6 @@ function closeSheet(kind){
           let movedQty = qtyToAssign;
           let finalRemaining = remainingAfterPreview;
           let destTotal = 0;
-          let sourceRuntimePatch = null;
-          let destRuntimePatch = null;
-          let removeSourceRuntime = false;
 
           await api.runTransaction(db, async (tx)=>{
             const sourceSnap = await tx.get(sourceRef);
@@ -11394,22 +11669,6 @@ function closeSheet(kind){
             if(sourceNewQty > 0){
               const sourceCleanAllocations = movingAllocatedLot ? sourceAllocations.filter(x=> (normalizeLotId(x.lot) || LOT_LEGACY_ID) !== lot) : sourceAllocations;
               const sourceCleanLocations = normalizeRackLocationsList(sourceCleanAllocations.map(x=>x.code));
-              sourceRuntimePatch = {
-                sku,
-                title,
-                titleNorm: normalizeText(title || sku),
-                qty: sourceNewQty,
-                rackLocation: sourceCleanLocations[0] || "",
-                rackLocations: sourceCleanLocations,
-                rackAllocations: sourceCleanAllocations,
-                stockLots: sourceCleanStockLots,
-                lastRackMovementId: transferMovementId,
-                lastRackMovementKey: transferMovementId,
-                lastRackMovementLot: lot,
-                updatedAtClient: nowClient,
-                updatedBy: who,
-                location: sourceLoc
-              };
               tx.set(sourceRef, {
                 sku,
                 title,
@@ -11428,28 +11687,8 @@ function closeSheet(kind){
                 location: sourceLoc
               }, { merge:true });
             }else{
-              removeSourceRuntime = true;
               tx.delete(sourceRef);
             }
-
-            destRuntimePatch = {
-              sku,
-              title,
-              titleNorm: normalizeText(title || sku),
-              qty: destTotal,
-              rackLocation: destCleanLocation,
-              rackLocations: destCleanLocations,
-              rackAllocations: destCleanAllocations,
-              stockLots: destCleanStockLots,
-              lastRackMovementId: transferMovementId,
-              lastRackMovementKey: transferMovementId,
-              lastRackMovementLot: lot,
-              lastProductionLot: lot,
-              lastProductionAtClient: nowClient,
-              updatedAtClient: nowClient,
-              updatedBy: who,
-              location: destLoc
-            };
 
             tx.set(destRef, {
               sku,
@@ -11515,11 +11754,56 @@ function closeSheet(kind){
             });
           });
 
-          if(removeSourceRuntime) patchRuntimeInventoryItem(sourceLoc, sku, {}, { remove:true });
-          else if(sourceRuntimePatch) patchRuntimeInventoryItem(sourceLoc, sku, sourceRuntimePatch);
-          if(destRuntimePatch) patchRuntimeInventoryItem(destLoc, sku, destRuntimePatch);
-
           showToast("Ubicazione salvata", `${sku} → ${selectedCode} • ${movedQty} pz spostati in Concamarise${finalRemaining ? ` • restano ${finalRemaining} in Cerea` : ""}`, 2600);
+          try{
+            const sourceFreshRuntime = getProductBySku(sourceLoc, sku) || it || {};
+            const sourceQtyRuntime = stockQtyFromDoc(sourceFreshRuntime || {});
+            const sourceNewQtyRuntime = Math.max(0, sourceQtyRuntime - movedQty);
+            const sourceAllocRuntime = normalizeRackAllocationsForWrite(readRackAllocationsFromDoc(sourceFreshRuntime || {}));
+            const sourceStockLotsRuntime = stockLotsWithDeltaForWrite(sourceFreshRuntime || {}, lot, -movedQty, nowClient, "ubicazione_transfer", transferMovementId);
+            const movedAllocatedLot = rackUnallocatedQtyByLotFromDoc(sourceFreshRuntime || {}, lot) <= 0;
+            const sourceAllocNextRuntime = movedAllocatedLot ? sourceAllocRuntime.filter(x=> (normalizeLotId(x.lot) || LOT_LEGACY_ID) !== lot) : sourceAllocRuntime;
+            const sourceLocsNextRuntime = normalizeRackLocationsList(sourceAllocNextRuntime.map(x=>x.code));
+            if(sourceNewQtyRuntime > 0){
+              patchRuntimeInventoryItem(sourceLoc, sku, {
+                sku,
+                title,
+                qty: sourceNewQtyRuntime,
+                stockLots: sourceStockLotsRuntime,
+                rackAllocations: sourceAllocNextRuntime,
+                rackLocations: sourceLocsNextRuntime,
+                rackLocation: sourceLocsNextRuntime[0] || "",
+                updatedAtClient: nowClient,
+                updatedBy: who,
+                location: sourceLoc
+              });
+            }else{
+              patchRuntimeInventoryItem(sourceLoc, sku, {}, { remove:true });
+            }
+
+            const destFreshRuntime = getProductBySku(destLoc, sku) || {};
+            const destAllocRuntime = normalizeRackAllocationsForWrite(readRackAllocationsFromDoc(destFreshRuntime || {}));
+            const destAllocNextRuntime = normalizeRackAllocationsForWrite([
+              ...destAllocRuntime,
+              { code:selectedCode, lot, qty:movedQty, movementId:transferMovementId, movementKey:transferMovementId, createdAtClient:nowClient }
+            ]);
+            const destLocsRuntime = normalizeRackLocationsList(destAllocNextRuntime.map(x=>x.code));
+            const destStockLotsRuntime = stockLotsWithDeltaForWrite(destFreshRuntime || {}, lot, movedQty, nowClient, "ubicazione_transfer", transferMovementId);
+            patchRuntimeInventoryItem(destLoc, sku, {
+              sku,
+              title,
+              qty: destTotal,
+              stockLots: destStockLotsRuntime,
+              rackAllocations: destAllocNextRuntime,
+              rackLocations: destLocsRuntime,
+              rackLocation: destLocsRuntime[0] || "",
+              lastProductionLot: lot,
+              lastProductionAtClient: nowClient,
+              updatedAtClient: nowClient,
+              updatedBy: who,
+              location: destLoc
+            });
+          }catch(_e){}
           state.route.loc = destLoc;
           state.ui.productDetailsSku = null;
           state.ui.productDetailsLot = "";
@@ -11540,7 +11824,6 @@ function closeSheet(kind){
 
         let finalRemaining = remainingAfterPreview;
         let assignedQtyFinal = qtyToAssign;
-        let runtimeInventoryPatch = null;
         await api.runTransaction(db, async (tx)=>{
           const snap = await tx.get(itemRef);
           if(!snap.exists()) throw new Error("Prodotto non trovato.");
@@ -11581,22 +11864,6 @@ function closeSheet(kind){
 
           const cleanLocations = normalizeRackLocationsList(cleanAllocations.map(x=>x.code));
           const cleanLocation = cleanLocations[0] || "";
-
-          runtimeInventoryPatch = {
-            sku,
-            title,
-            titleNorm: normalizeText(title || sku),
-            qty: freshQty,
-            rackLocation: cleanLocation,
-            rackLocations: cleanLocations,
-            rackAllocations: cleanAllocations,
-            lastRackMovementId: locationMovementId,
-            lastRackMovementKey: locationMovementId,
-            lastRackMovementLot: lot,
-            updatedAtClient: nowClient,
-            updatedBy: who,
-            location: loc
-          };
 
           tx.set(itemRef, {
             sku,
@@ -11659,11 +11926,38 @@ function closeSheet(kind){
           });
         });
 
-        if(runtimeInventoryPatch){
-          patchRuntimeInventoryItem(loc, sku, runtimeInventoryPatch);
-        }
-
         showToast("Ubicazione salvata", `${sku} → ${selectedCode} • ${assignedQtyFinal} pz${finalRemaining ? ` • restano ${finalRemaining}` : ""}`, 2400);
+        try{
+          const baseRuntime = getProductBySku(loc, sku) || it || {};
+          const freshAllocRuntime = normalizeRackAllocationsForWrite(readRackAllocationsFromDoc(baseRuntime || {}));
+          const hadRemainingRuntime = rackUnallocatedQtyByLotFromDoc(baseRuntime || {}, lot) > 0;
+          let cleanAllocRuntime;
+          if(hadRemainingRuntime){
+            cleanAllocRuntime = normalizeRackAllocationsForWrite([
+              ...freshAllocRuntime,
+              { code:selectedCode, lot, qty:assignedQtyFinal, movementId:locationMovementId, movementKey:locationMovementId, createdAtClient:nowClient }
+            ]);
+          }else{
+            const otherLotAllocRuntime = freshAllocRuntime.filter(x=> (normalizeLotId(x.lot) || LOT_LEGACY_ID) !== lot);
+            cleanAllocRuntime = normalizeRackAllocationsForWrite([
+              ...otherLotAllocRuntime,
+              { code:selectedCode, lot, qty:assignedQtyFinal, movementId:locationMovementId, movementKey:locationMovementId, createdAtClient:nowClient }
+            ]);
+          }
+          const cleanLocsRuntime = normalizeRackLocationsList(cleanAllocRuntime.map(x=>x.code));
+          patchRuntimeInventoryItem(loc, sku, {
+            sku,
+            title,
+            qty: stockQtyFromDoc(baseRuntime || {}),
+            stockLots: readStockLotsFromDoc(baseRuntime || {}),
+            rackAllocations: cleanAllocRuntime,
+            rackLocations: cleanLocsRuntime,
+            rackLocation: cleanLocsRuntime[0] || "",
+            updatedAtClient: nowClient,
+            updatedBy: who,
+            location: loc
+          });
+        }catch(_e){}
         state.ui.productDetailsSku = null;
         state.ui.productDetailsLot = "";
         state.ui.productDetailsEditMode = false;
@@ -14479,7 +14773,17 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
 
       const homeNoLoc = $("homeNoLocationList");
       if(homeNoLoc){
-        homeNoLoc.addEventListener("click", (e)=>{
+        homeNoLoc.addEventListener("click", async (e)=>{
+          const qtyBtn = e.target?.closest?.("[data-action='editHomeNoLocationQty']");
+          if(qtyBtn){
+            e.preventDefault();
+            e.stopPropagation();
+            const sku = qtyBtn.getAttribute("data-sku") || "";
+            const loc = qtyBtn.getAttribute("data-loc") || "";
+            await editHomeNoLocationQtyPrompt(sku, loc || state.route.loc);
+            return;
+          }
+
           const row = e.target?.closest?.("[data-action='openHomeNoLocationItem']");
           if(!row) return;
           const sku = row.getAttribute("data-sku") || "";
@@ -14489,6 +14793,7 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
           openProductDetailsSheet(sku);
         });
         homeNoLoc.addEventListener("keydown", (e)=>{
+          if(e.target?.closest?.("[data-action='editHomeNoLocationQty']")) return;
           if(e.key!=="Enter" && e.key!==" ") return;
           const row = e.target?.closest?.("[data-action='openHomeNoLocationItem']");
           if(!row) return;
