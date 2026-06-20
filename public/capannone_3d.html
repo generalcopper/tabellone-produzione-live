@@ -100,6 +100,24 @@
   #cockpit .ck-hint{margin-top:26px; font-size:clamp(11px,2vw,15px); letter-spacing:.22em; text-transform:uppercase;
     color:rgba(159,182,214,.7); font-weight:600;}
 
+  /* pagina PREPARAZIONE AMAZON */
+  #cockpit .ck-amz{ width:min(86vw,560px); }
+  #cockpit .ck-amz-head{ display:flex; align-items:center; justify-content:center; gap:14px; margin-bottom:22px; }
+  #cockpit .ck-amz-badge{ font-weight:800; letter-spacing:.16em; font-size:clamp(15px,3vw,26px);
+    background:linear-gradient(180deg,#ffd9a0,#ff9d2e); -webkit-background-clip:text; background-clip:text; color:transparent; }
+  #cockpit .ck-amz-count{ font-weight:700; font-size:clamp(12px,2.2vw,16px); color:#bfe0ff;
+    border:1px solid rgba(159,182,214,.35); border-radius:999px; padding:3px 12px; }
+  #cockpit .ck-amz-list{ display:flex; flex-direction:column; gap:10px; text-align:left; }
+  #cockpit .ck-amz-row{ display:flex; align-items:center; gap:12px; padding:11px 16px; border-radius:14px;
+    background:rgba(16,22,32,.55); border:1px solid rgba(120,160,220,.18);
+    animation:ckRowIn .5s ease both; }
+  #cockpit .ck-amz-row .qty{ font-weight:800; font-size:clamp(16px,3vw,24px); color:#ff9d2e; min-width:54px; }
+  #cockpit .ck-amz-row .prod{ flex:1; min-width:0; font-weight:600; font-size:clamp(13px,2.4vw,18px); color:#eaf3ff;
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  #cockpit .ck-amz-row .pos{ font-weight:700; font-size:clamp(12px,2.2vw,16px); color:#9fb6d6; font-variant-numeric:tabular-nums; }
+  #cockpit .ck-amz-empty{ font-size:clamp(15px,2.6vw,22px); color:#9fb6d6; padding:30px 0; }
+  @keyframes ckRowIn{ from{opacity:0; transform:translateY(10px);} to{opacity:1; transform:translateY(0);} }
+
 </style>
 </head>
 <body>
@@ -132,7 +150,7 @@
 
 <!-- COCKPIT IDLE: appare dopo 30s di inattività con info aziendali -->
 <div id="cockpit" aria-hidden="true">
-  <div class="ck-inner">
+  <div class="ck-inner" id="ckPageAzienda">
     <div class="ck-logo">LG&nbsp;TRADING</div>
     <div class="ck-sub">S.r.l.</div>
     <div class="ck-line"></div>
@@ -143,6 +161,14 @@
       <span id="ckDate">—</span>
     </div>
     <div class="ck-hint">Magazzino digitale in tempo reale</div>
+  </div>
+  <div class="ck-inner ck-amz" id="ckPageAmazon" style="display:none">
+    <div class="ck-amz-head">
+      <span class="ck-amz-badge">PREPARAZIONE AMAZON</span>
+      <span class="ck-amz-count" id="ckAmzCount">0 SKU</span>
+    </div>
+    <div class="ck-amz-list" id="ckAmzList"></div>
+    <div class="ck-hint" id="ckAmzFoot">Da prelevare e preparare</div>
   </div>
 </div>
 
@@ -819,8 +845,14 @@ const CARTELLO_COLORI={
     const alongX = lenX>lenZ;                    // fila sviluppata lungo X o lungo Z
     const col=CARTELLO_COLORI[id]||['#FFD300','#1A1A1A'];
     const tex=makeCartelloTexture(id, col[0], col[1]);
-    const faceMat=new THREE.MeshStandardMaterial({map:tex, roughness:.55, metalness:.05});
-    const sideMat=new THREE.MeshStandardMaterial({color:col[0], roughness:.7});
+    // emissività con la stessa grafica: i colori restano fluo e brillanti anche in ombra
+    const faceMat=new THREE.MeshStandardMaterial({
+      map:tex, emissiveMap:tex, emissive:0xffffff, emissiveIntensity:0.55,
+      roughness:.5, metalness:.0
+    });
+    const sideMat=new THREE.MeshStandardMaterial({
+      color:col[0], emissive:new THREE.Color(col[0]), emissiveIntensity:0.35, roughness:.6
+    });
     // BoxGeometry materiali: [+X,-X,+Y,-Y,+Z,-Z]. Poster ⟂ all'asse della fila.
 
     let px,pz,sign;
@@ -1157,9 +1189,101 @@ function _buildGlow(v, withLabel){
   return gs;
 }
 
+/* ===== PRELIEVI (flussi picking): illumina i bancali da piccare in ARANCIONE,
+   mostrando la quantità da prelevare. Si aggiorna in tempo reale. ===== */
+// glow per un bancale "da prelevare" (colore caldo) con etichetta "× N da prelevare"
+function _buildPrelievoGlow(v, qtyToPick, title){
+  const meshes=[];
+  v.obj.traverse(o=>{
+    if(o.isMesh && o.material){
+      const original=o.material;
+      const clone=original.clone();
+      if(clone.emissive){ clone.emissive.setHex(0xff8a1e); clone.emissiveIntensity=0.6; }
+      o.material=clone;
+      meshes.push({mesh:o, original, clone});
+    }
+  });
+  const light=new THREE.PointLight(0xffb060, 7, 2.5, 2.4);
+  light.position.set(v.center.x, v.center.y+0.9, v.center.z);
+  scene.add(light);
+  const gs={meshes, light};
+  // etichetta con quantità da prelevare
+  const txt=`▼ ${qtyToPick} da prelevare${title? ' · '+nomeProdottoPulito(title):''}`;
+  const label=makeLabelSprite(txt);
+  const box=new THREE.Box3().setFromObject(v.obj);
+  const topY=isFinite(box.max.y)?box.max.y:(v.center.y+0.6);
+  const baseY=topY+0.55;
+  label.position.set(v.center.x, baseY, v.center.z);
+  label.material.opacity=0;
+  scene.add(label);
+  gs.label=label; gs.labelBaseY=baseY; gs.labelStart=performance.now();
+  return gs;
+}
+
+// estrae dai flussi attivi gli SKU NON ancora prelevati e le relative quantità
+function calcolaPrelievi(){
+  const out=[];           // {code, sku, title, qty, v}
+  const perCode={};       // code -> {sku,title,qty}
+  for(const loc in FLOWS_BY_LOC){
+    for(const flow of (FLOWS_BY_LOC[loc]||[])){
+      if(flow.voided) continue;
+      const picking = (flow.picking && typeof flow.picking==='object') ? flow.picking : {};
+      if(picking.flowPicked===true) continue;        // flusso già completato
+      const pickedMap = (picking.lines && typeof picking.lines==='object') ? picking.lines : {};
+      const lines = Array.isArray(flow.lines) ? flow.lines : [];
+      for(const line of lines){
+        const sku = String(line.sku||'').trim().toUpperCase();
+        if(!sku) continue;
+        const rec = pickedMap[sku] || pickedMap[String(line.sku||'')] ;
+        const isPicked = rec && (rec.picked===true || rec.status==='prelevato');
+        if(isPicked) continue;                        // SKU già prelevato
+        const qty = Math.abs(Math.round(Number(line.qty||0)))||0;
+        if(qty<=0) continue;
+        // bancali di questo SKU (da SKU_ALLOCS): distribuisco la qty sui bancali
+        const alloc = SKU_ALLOCS[sku];
+        if(!alloc || !alloc.list.length) continue;
+        let restante=qty;
+        // ordino per codice; prelevo prima dai bancali con più scorta
+        const list=[...alloc.list].sort((a,b)=>b.qty-a.qty);
+        for(const a of list){
+          if(restante<=0) break;
+          const prendi=Math.min(restante, a.qty);
+          restante-=prendi;
+          const code=a.code;
+          if(!perCode[code]) perCode[code]={sku, title:alloc.title, qty:0};
+          perCode[code].qty+=prendi;
+        }
+      }
+    }
+  }
+  for(const code in perCode){
+    const v=VANI_MAP[code];
+    if(!v) continue;
+    out.push({ code, sku:perCode[code].sku, title:perCode[code].title, qty:perCode[code].qty, v });
+  }
+  return out;
+}
+
+// (ri)applica l'illuminazione dei prelievi (solo quando non c'è un Trova attivo)
+function aggiornaPrelievi(){
+  PRELIEVI = calcolaPrelievi();
+  // se c'è una selezione/tour utente in corso, non sovrascrivo: aggiorno solo i dati
+  if(selectedVano || tour) { return; }
+  applicaPrelievoGlow();
+}
+function clearPrelievoGlow(){
+  if(prelievoGlow){ for(const gs of prelievoGlow) _disposeGlow(gs); prelievoGlow=null; }
+}
+function applicaPrelievoGlow(){
+  clearPrelievoGlow();
+  if(!PRELIEVI.length) return;
+  prelievoGlow = PRELIEVI.map(p=>_buildPrelievoGlow(p.v, p.qty, p.title));
+}
+
 function highlightVano(v, opts={}){
   clearHighlight();
   if(!opts.silent) clearMultiTour();   // una selezione singola interrompe un eventuale tour multi-ubicazione
+  clearPrelievoGlow();                 // nasconde i prelievi mentre c'è un Trova attivo
   glowState=_buildGlow(v, true);
   startCinematicTour(v); pulse=0;
   selectedVano=v;
@@ -1394,23 +1518,67 @@ function updateIdle(now){
 }
 
 /* ===== COCKPIT IDLE: mostra info aziendali quando non c'è nulla di selezionato.
-   All'avvio appare presto (schermata di benvenuto); poi, dopo un Trova, ricompare dopo 30s. ===== */
+   Alterna due pagine: AZIENDA (LG Trading) e PREPARAZIONE AMAZON (lista da prelevare). ===== */
 const COCKPIT_DELAY=30000;
 const COCKPIT_DELAY_FIRST=4000;     // al primissimo avvio compare dopo pochi secondi
-let _cockpitOn=false, _cockpitEverShown=false;
+const CK_PAGE_MS=12000;             // durata di ogni pagina prima di alternare
+let _cockpitOn=false, _cockpitEverShown=false, _ckPage='azienda', _ckPageStart=0, _ckAmzSig='';
 const _ckEl=()=>document.getElementById('cockpit');
+function renderAmazonPrep(){
+  const list=document.getElementById('ckAmzList');
+  const count=document.getElementById('ckAmzCount');
+  const foot=document.getElementById('ckAmzFoot');
+  if(!list) return;
+  // firma per ridisegnare solo quando cambia
+  const sig=PRELIEVI.map(p=>`${p.code}:${p.qty}`).join('|');
+  if(sig===_ckAmzSig) return;
+  _ckAmzSig=sig;
+  if(!PRELIEVI.length){
+    list.innerHTML='<div class="ck-amz-empty">Nessuna preparazione in corso ✓</div>';
+    if(count) count.textContent='0 SKU';
+    if(foot) foot.textContent='Tutto prelevato';
+    return;
+  }
+  // ordino per quantità desc, mostro fino a 6 righe
+  const rows=[...PRELIEVI].sort((a,b)=>b.qty-a.qty);
+  const totPz=rows.reduce((s,p)=>s+p.qty,0);
+  const shown=rows.slice(0,6);
+  list.innerHTML=shown.map(p=>`
+    <div class="ck-amz-row">
+      <span class="qty">${p.qty}</span>
+      <span class="prod">${escapeHtmlCk(nomeProdottoPulito(p.title)||p.sku)}</span>
+      <span class="pos">${escapeHtmlCk(p.code)}</span>
+    </div>`).join('') + (rows.length>6? `<div class="ck-amz-empty" style="padding:8px 0;font-size:14px">+${rows.length-6} altri…</div>`:'');
+  if(count) count.textContent=`${rows.length} SKU · ${totPz} pz`;
+  if(foot) foot.textContent='Da prelevare e preparare';
+}
+function escapeHtmlCk(s){ return String(s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function setCockpitPage(p){
+  _ckPage=p;
+  const az=document.getElementById('ckPageAzienda'), am=document.getElementById('ckPageAmazon');
+  if(az) az.style.display = (p==='azienda')?'':'none';
+  if(am) am.style.display = (p==='amazon')?'':'none';
+  if(p==='amazon'){ _ckAmzSig=''; renderAmazonPrep(); }
+}
 function updateCockpit(now){
   const delay = _cockpitEverShown ? COCKPIT_DELAY : COCKPIT_DELAY_FIRST;
   const inattivo = !selectedVano && (now-lastInteract >= delay);
   if(inattivo && !_cockpitOn){
     _cockpitOn=true; _cockpitEverShown=true;
+    _ckPageStart=now; setCockpitPage('azienda');
     const el=_ckEl(); if(el){ el.classList.add('show'); el.setAttribute('aria-hidden','false'); }
   } else if(!inattivo && _cockpitOn){
     _cockpitOn=false; const el=_ckEl(); if(el){ el.classList.remove('show'); el.setAttribute('aria-hidden','true'); }
   }
-  // aggiorna orologio/data quando visibile (una volta al secondo)
   if(_cockpitOn){
-    if(!updateCockpit._t || now-updateCockpit._t>1000){
+    // alterna le pagine: salta la pagina Amazon se non c'è nulla da preparare
+    if(now-_ckPageStart >= CK_PAGE_MS){
+      _ckPageStart=now;
+      const haveAmz=PRELIEVI.length>0;
+      setCockpitPage((_ckPage==='azienda' && haveAmz) ? 'amazon' : 'azienda');
+    }
+    // aggiorna orologio/data quando visibile (pagina azienda)
+    if(_ckPage==='azienda' && (!updateCockpit._t || now-updateCockpit._t>1000)){
       updateCockpit._t=now;
       const d=new Date();
       const hh=String(d.getHours()).padStart(2,'0'), mm=String(d.getMinutes()).padStart(2,'0');
@@ -1418,6 +1586,8 @@ function updateCockpit(now){
       const dt=document.getElementById('ckDate');
       if(dt) dt.textContent=d.toLocaleDateString('it-IT',{weekday:'long',day:'numeric',month:'long'});
     }
+    // se la lista Amazon è visibile, tienila aggiornata in tempo reale
+    if(_ckPage==='amazon') renderAmazonPrep();
   }
 }
 
@@ -1511,6 +1681,7 @@ function updateTour(now){
     selectedVano=null;
     lastInteract=now;               // da qui parte il timer dei 30s per il cockpit
     const info=document.getElementById('info'); if(info) info.innerHTML='';
+    applicaPrelievoGlow();          // ripristina l'illuminazione dei bancali da prelevare
     return;
   }
   if(now<tour.until) return;
@@ -1630,7 +1801,7 @@ function tick(now){
     for(const key in tween.to)cam[key]=tween.from[key]+(tween.to[key]-tween.from[key])*k;
     if(k>=1)tween=null;}
   // animazione glow del/dei bancale/i selezionato/i
-  if(glowState || glowList){
+  if(glowState || glowList || prelievoGlow){
     pulse+=0.05;
     const s=Math.sin(pulse);
     const inten=0.45+s*0.18;
@@ -1650,6 +1821,7 @@ function tick(now){
     };
     if(glowState) animaGlow(glowState);
     if(glowList) for(const gs of glowList) animaGlow(gs);
+    if(prelievoGlow) for(const gs of prelievoGlow) animaGlow(gs);
   }
   // smoothing camera: camS insegue cam con easing continuo
   // tour/tween/idle usano uno smoothing più dolce per movimenti fluidi e filmici
@@ -1837,6 +2009,9 @@ const VANI_MAP = {};
 for(const v of VANI) VANI_MAP[v.code] = v;
 let CODE_TO_SKU = {};     // codice ubicazione -> sku
 let SKU_ALLOCS = {};      // sku -> {title, list:[{code,qty}]}
+let FLOWS_BY_LOC = {};    // loc -> [flussi]
+let PRELIEVI = [];        // [{code, sku, title, qty, v}] bancali da prelevare ora
+let prelievoGlow = null;  // glow attivo per i prelievi
 
 // deduce i pezzi per scatola dal formato prodotto.
 // multipli noti: 12 (litro), 24 (500 ml), 48 (100 ml). Default 12.
@@ -2074,6 +2249,8 @@ function startInventoryRealtime(fs, db){
     if(changed) requestShadowUpdate(2);   // ricalcola le ombre solo se la merce è cambiata
     const n = Object.keys(perCode).length;
     setCloudStatus(`Cloud live • ${n} ubicazioni`, '#22c55e');
+    // ricalcola l'illuminazione dei bancali da prelevare (le quantità potrebbero essere cambiate)
+    aggiornaPrelievi();
   }, (err)=>{
     console.error('Firestore error', err);
     if(err && err.code === 'permission-denied'){
@@ -2084,6 +2261,21 @@ function startInventoryRealtime(fs, db){
       setCloudStatus('Cloud non raggiungibile', '#ef4444');
     }
   });
+
+  // ===== FLUSSI DA PRELEVARE (picking) =====
+  // legge i flussi attivi non prelevati da amzInventory/{loc}/logs e illumina i bancali.
+  for(const loc of ['concamarise','cerea']){
+    try{
+      const logsRef = fs.collection(db, "amzInventory", loc, "logs");
+      const q = fs.query(logsRef, fs.orderBy("appliedAtClient","desc"), fs.limit(80));
+      fs.onSnapshot(q, (snap)=>{
+        const flows=[];
+        snap.forEach(ds=>{ const d=ds.data()||{}; flows.push({ id:ds.id, ...d }); });
+        FLOWS_BY_LOC[loc]=flows;
+        aggiornaPrelievi();
+      }, (err)=>{ console.warn('flussi '+loc, err && err.code); });
+    }catch(e){ console.warn('listener flussi '+loc, e); }
+  }
 }
 </script>
 </body>
