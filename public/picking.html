@@ -2293,7 +2293,7 @@
     .pickingPickedHistory{ margin-top:16px; }
     .pickingHistoryRow{
       display:grid;
-      grid-template-columns: 150px minmax(0,1fr) minmax(150px,.6fr) 92px;
+      grid-template-columns: 150px minmax(0,1fr) minmax(150px,.6fr) 92px 92px;
       gap:10px;
       align-items:center;
       padding:9px 10px;
@@ -2329,12 +2329,14 @@
         grid-template-areas:
           "sku qty"
           "main main"
-          "meta meta";
+          "meta meta"
+          "act act";
       }
       .pickingHistoryRow .mono{ grid-area:sku; }
       .pickingHistoryMain{ grid-area:main; white-space:normal; }
       .pickingHistoryMeta{ grid-area:meta; white-space:normal; }
       .pickingHistoryRow .badge{ grid-area:qty; }
+      .pickingHistoryRow .pickingHistoryAction{ grid-area:act; width:100%; justify-content:center; }
     }
 
     /* -------- MOBILE: drawer a scomparsa -------- */
@@ -8372,6 +8374,8 @@ function currentInv(){
           if(!sku) continue;
           out.push({
             flow,
+            flowId: String(flow?.id || ""),
+            loc: (flow?.location === "cerea" || flow?.location === "concamarise") ? flow.location : "concamarise",
             sku,
             title: squashWhitespace(rec.title || pickingLineTitle({ sku }, flow) || sku),
             qty: Number.isFinite(Number(rec.qty)) ? Math.round(Number(rec.qty)) : 0,
@@ -8421,7 +8425,7 @@ function currentInv(){
           const loc = (flow.location === "cerea" || flow.location === "concamarise") ? flow.location : "concamarise";
           const flowName = flowDisplayName(flow);
           const flowId = String(flow.id || "");
-          const rows = (flow.lines || []).filter(l=>toSkuId(l?.sku || "")).map(line=>{
+          const rows = (flow.lines || []).filter(l=>toSkuId(l?.sku || "") && !isPickingLinePicked(flow, l?.sku || "")).map(line=>{
             const sku = toSkuId(line.sku || "");
             const qty = Math.abs(parseQty(line.qty || 0) || 0);
             const picked = isPickingLinePicked(flow, sku);
@@ -8486,6 +8490,7 @@ function currentInv(){
                 <div class="pickingHistoryMain">${escapeHtml(h.title || h.sku)}</div>
                 <div class="pickingHistoryMeta">${escapeHtml(meta)}</div>
                 <span class="badge ok">${escapeHtml(String(h.qty || "—"))}</span>
+                <button class="btn small danger pickingHistoryAction" type="button" data-action="undoPickSku" data-flowid="${escapeHtml(h.flowId || h.flow?.id || "")}" data-loc="${escapeHtml(h.loc || h.flow?.location || "")}" data-sku="${escapeHtml(h.sku)}">Annulla</button>
               </div>`;
           }).join("");
         }
@@ -8593,6 +8598,88 @@ function currentInv(){
         }
       }, { merge:true });
       showToast("Flusso prelevato", `${flowDisplayName(flow)} • ${skuList.length} SKU`, 2000);
+      renderHomePickingBox();
+    }
+
+
+
+    async function undoPickingSku(flowId, loc, sku){
+      if(!canUsePickingActions()){
+        showToast("Permessi", "Utente non abilitato al picking.", 2200);
+        return;
+      }
+      const id = String(flowId || "").trim();
+      const l = (loc === "cerea" || loc === "concamarise") ? loc : "concamarise";
+      const s = toSkuId(sku || "");
+      if(!id || !s){ showToast("Errore", "Flusso o SKU non valido.", 2200); return; }
+
+      const flow = (state.logs?.[l]?.flows || []).find(f=>String(f.id||"") === id) || null;
+      if(!flow){ showToast("Flusso non trovato", "Riprova tra un attimo.", 2200); return; }
+
+      const key = pickingSkuKey(s);
+      const currentMap = pickingLineMap(flow);
+      const currentRec = currentMap[key] || null;
+      if(!(flow?.picking?.flowPicked === true || currentRec?.picked === true || currentRec?.status === "prelevato")){
+        showToast("Già annullato", `${s} è già tornato da prelevare.`, 1600);
+        return;
+      }
+
+      const api = state.firebase.api;
+      const db = state.firebase.db;
+      if(!api || !db){ showToast("Errore", "Firebase non inizializzato.", 2200); return; }
+
+      const nowClient = Date.now();
+      const who = state.user?.email || state.user?.emailLower || state.user?.uid || "";
+      const validLines = (flow.lines || []).filter(x=>toSkuId(x?.sku || ""));
+      const nextMap = { ...currentMap };
+      const old = nextMap[key] || { sku:s };
+      nextMap[key] = {
+        ...old,
+        picked:false,
+        status:"annullato",
+        undoneAtClient:nowClient,
+        undoneBy:who
+      };
+
+      const stillPicked = validLines.filter(x=>{
+        const k = pickingSkuKey(x.sku);
+        const rec = nextMap[k] || {};
+        return rec.picked === true || rec.status === "prelevato";
+      }).length;
+      const nextStatus = stillPicked <= 0 ? "da_prelevare" : "parziale";
+      const event = { type:"undo_sku", sku:s, atClient:nowClient, by:who };
+      const ref = api.doc(db, COL_ROOT, l, SUB_LOGS, id);
+
+      await api.setDoc(ref, {
+        picking: {
+          status: nextStatus,
+          pickedLines: { [key]: nextMap[key] },
+          updatedAt: api.serverTimestamp(),
+          updatedAtClient: nowClient,
+          updatedBy: who,
+          events: api.arrayUnion(event),
+          flowPicked:false,
+          flowPickedAt:null,
+          flowPickedAtClient:null,
+          flowPickedBy:""
+        }
+      }, { merge:true });
+
+      // UI immediata dopo scrittura cloud riuscita: nessun localStorage, solo stato runtime allineato alla write.
+      try{
+        flow.picking = {
+          ...(flow.picking || {}),
+          status: nextStatus,
+          pickedLines: nextMap,
+          updatedAtClient: nowClient,
+          updatedBy: who,
+          flowPicked:false,
+          flowPickedAtClient:null,
+          flowPickedBy:""
+        };
+      }catch(_e){}
+
+      showToast("Prelievo annullato", `${s} è tornato da prelevare.`, 1800);
       renderHomePickingBox();
     }
 
@@ -13857,6 +13944,24 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
           }
           if(action === "pickFlow"){
             await savePickingFlow(flowId, loc);
+          }
+        });
+      }
+
+      const homePickedHistoryList = $("homePickedHistoryList");
+      if(homePickedHistoryList){
+        homePickedHistoryList.addEventListener("click", async (e)=>{
+          const btn = e.target?.closest?.("[data-action='undoPickSku']");
+          if(!btn) return;
+          e.preventDefault(); e.stopPropagation();
+          btn.disabled = true;
+          const flowId = btn.getAttribute("data-flowid") || "";
+          const loc = btn.getAttribute("data-loc") || "";
+          const sku = btn.getAttribute("data-sku") || "";
+          try{
+            await undoPickingSku(flowId, loc, sku);
+          }finally{
+            btn.disabled = false;
           }
         });
       }
