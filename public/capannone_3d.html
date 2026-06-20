@@ -780,6 +780,75 @@ const built={};
   built.E=buildRack({id:'E',x:Ecx,z:EFcz,bays:RACKS.E,empty:true});
 }
 
+/* ===== CARTELLI IDENTIFICATIVI scaffalature (A–F) =====
+   Replica del poster 100×50 cm: fondo giallo #FFD300, bordo scuro #1A1A1A, lettera scura.
+   Montati in cima ai montanti ESTERNI lato corsia (verso il centro capannone), ~30 cm
+   sopra la sommità dei montanti blu. */
+function makeCartelloTexture(lettera, bg, fg){
+  const W=1024, H=512;                 // 2:1 come il poster (100×50)
+  const cv=document.createElement('canvas'); cv.width=W; cv.height=H;
+  const ctx=cv.getContext('2d');
+  // fondo fluo della fila
+  ctx.fillStyle=bg||'#FFD300'; ctx.fillRect(0,0,W,H);
+  // lettera centrata nel colore del testo (nessun bordo/cornice)
+  ctx.fillStyle=fg||'#1A1A1A'; ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.font=`800 ${Math.round(H*0.78)}px Arial, Helvetica, sans-serif`;
+  ctx.fillText(lettera, W/2, H*0.54);
+  const tex=new THREE.CanvasTexture(cv); tex.anisotropy=8; tex.colorSpace=THREE.SRGBColorSpace;
+  return tex;
+}
+// colori cartelli per scaffalatura: [sfondo fluo, colore lettera]
+const CARTELLO_COLORI={
+  A:['#FFD300','#1A1A1A'],   // giallo / nero
+  B:['#00C853','#0A2E14'],   // verde / verde scuro
+  C:['#FF6D00','#2B1400'],   // arancione / marrone scuro
+  D:['#FF2D87','#2E0014'],   // rosa-magenta / bordeaux
+  E:['#00B0FF','#002233'],   // azzurro / blu notte
+  F:['#B388FF','#1A0033'],   // viola / viola scuro
+};
+(function addCartelli(){
+  const SIGN_W=1.0, SIGN_H=0.5, SIGN_T=0.003;  // 100×50 cm, spessore 3 mm
+  const GAP=0.30;                               // bordo superiore del cartello 30 cm SOTTO la cima
+  const topY=RACK_TOTH+0.2;                     // sommità montanti (upH)
+  const signCenterY=topY-GAP-SIGN_H/2;          // a filo, sotto la cima del montante
+  for(const id of ['A','B','C','D','E','F']){
+    const grp=built[id]; if(!grp) continue;
+    const box=new THREE.Box3().setFromObject(grp);
+    const cx=(box.min.x+box.max.x)/2, cz=(box.min.z+box.max.z)/2;
+    const lenX=box.max.x-box.min.x, lenZ=box.max.z-box.min.z;
+    const alongX = lenX>lenZ;                    // fila sviluppata lungo X o lungo Z
+    const col=CARTELLO_COLORI[id]||['#FFD300','#1A1A1A'];
+    const tex=makeCartelloTexture(id, col[0], col[1]);
+    const faceMat=new THREE.MeshStandardMaterial({map:tex, roughness:.55, metalness:.05});
+    const sideMat=new THREE.MeshStandardMaterial({color:col[0], roughness:.7});
+    // BoxGeometry materiali: [+X,-X,+Y,-Y,+Z,-Z]. Poster ⟂ all'asse della fila.
+
+    let px,pz,sign;
+    if(alongX){
+      // fila lungo X: cartello alla TESTATA (estremità X), incassato nel piano del montante.
+      const xEnd = (Math.abs(box.min.x) <= Math.abs(box.max.x)) ? box.min.x : box.max.x;
+      // sporge appena oltre la faccia del montante di testata, verso l'esterno della fila
+      px = xEnd + (xEnd<=cx ? -SIGN_T/2 : SIGN_T/2);
+      pz = cz;
+      sign=new THREE.Mesh(new THREE.BoxGeometry(SIGN_T,SIGN_H,SIGN_W),
+        [faceMat,faceMat,sideMat,sideMat,sideMat,sideMat]);  // poster su ±X
+    } else {
+      // fila lungo Z: cartello alla TESTATA (estremità Z), incassato nel piano del montante.
+      // default: estremità più vicina al centro; la A va sull'estremità OPPOSTA.
+      const nearZ = (Math.abs(box.min.z) <= Math.abs(box.max.z)) ? box.min.z : box.max.z;
+      const farZ  = (nearZ===box.min.z) ? box.max.z : box.min.z;
+      const zEnd = (id==='A') ? farZ : nearZ;
+      px = cx;
+      pz = zEnd + (zEnd<=cz ? -SIGN_T/2 : SIGN_T/2);
+      sign=new THREE.Mesh(new THREE.BoxGeometry(SIGN_W,SIGN_H,SIGN_T),
+        [sideMat,sideMat,sideMat,sideMat,faceMat,faceMat]);  // poster su ±Z
+    }
+    sign.position.set(px, signCenterY, pz);
+    sign.castShadow=true;
+    scene.add(sign);
+  }
+})();
+
 
 /* ===== AREA LINEA LIQUIDI (solo pavimento blu) =====
    Pavimento blu 15x3.54 nell'angolo muro fronte (Z=+LZ/2) + muro sinistro (X=-LX/2).
@@ -1112,6 +1181,7 @@ const cam=(innerWidth<innerHeight)
   ? {theta:Math.PI*0.12,phi:Math.PI*0.13,r:9.5,tx:1,ty:3.2,tz:1}
   : {theta:Math.PI*0.16,phi:Math.PI*0.10,r:34,tx:0,ty:1.8,tz:1};
 const camS={...cam};   // versione interpolata per movimento fluido
+let camPushed=null;    // stato della spinta graduale fuori dagli scaffali
 let tween=null;
 
 /* Lato dal quale inquadrare ogni fila, scelto sulla CORSIA LIBERA così la camera
@@ -1285,8 +1355,10 @@ function updateIdle(now){
   if(now-lastInteract < IDLE_WAIT){ idle=null; return; }
   if(!_scenes || _scenes.length===0) _scenes=buildScenes();
   if(!idle){
-    // sceglie una scena di partenza casuale, così non parte sempre dallo stesso punto
-    idle={ start:now, sceneIdx:Math.floor(Math.random()*_scenes.length), sceneStart:now };
+    // sceglie una scena di partenza casuale e fa un blend MORBIDO dalla posa corrente
+    // (così, quando finisce il Trova o si avvia, non ci sono salti bruschi)
+    idle={ start:now, sceneIdx:Math.floor(Math.random()*_scenes.length), sceneStart:now,
+           blendStart:now, prevPose:{tx:cam.tx,tz:cam.tz,ty:cam.ty,r:cam.r,theta:cam.theta,phi:cam.phi} };
   }
   const scene=_scenes[idle.sceneIdx];
   let p=(now-idle.sceneStart)/scene.dur;     // 0..1 nella scena
@@ -1306,7 +1378,7 @@ function updateIdle(now){
   let TX=lerpScene('tx'), TZ=lerpScene('tz'), TY=lerpScene('ty')+Math.sin(t*0.5)*0.04,
       R=lerpScene('r')+Math.sin(t*0.3)*0.15, TH=lerpScene('theta'), PH=lerpScene('phi')+Math.sin(t*0.25)*0.004;
   // BLEND tra scene: nei primi BLEND_MS interpola dalla posa precedente alla nuova scena
-  const BLEND_MS=3500;
+  const BLEND_MS=5000;
   if(idle.blendStart && idle.prevPose){
     const bt=Math.min(1,(now-idle.blendStart)/BLEND_MS);
     if(bt<1){
@@ -1321,15 +1393,18 @@ function updateIdle(now){
   cam.tx=TX; cam.tz=TZ; cam.ty=TY; cam.r=R; cam.theta=TH; cam.phi=PH;
 }
 
-/* ===== COCKPIT IDLE: dopo 30s senza selezione/interazione mostra info aziendali ===== */
+/* ===== COCKPIT IDLE: mostra info aziendali quando non c'è nulla di selezionato.
+   All'avvio appare presto (schermata di benvenuto); poi, dopo un Trova, ricompare dopo 30s. ===== */
 const COCKPIT_DELAY=30000;
-let _cockpitOn=false;
+const COCKPIT_DELAY_FIRST=4000;     // al primissimo avvio compare dopo pochi secondi
+let _cockpitOn=false, _cockpitEverShown=false;
 const _ckEl=()=>document.getElementById('cockpit');
 function updateCockpit(now){
-  // condizioni per mostrarlo: nessun bancale selezionato e inattività ≥ 30s
-  const inattivo = !selectedVano && (now-lastInteract >= COCKPIT_DELAY);
+  const delay = _cockpitEverShown ? COCKPIT_DELAY : COCKPIT_DELAY_FIRST;
+  const inattivo = !selectedVano && (now-lastInteract >= delay);
   if(inattivo && !_cockpitOn){
-    _cockpitOn=true; const el=_ckEl(); if(el){ el.classList.add('show'); el.setAttribute('aria-hidden','false'); }
+    _cockpitOn=true; _cockpitEverShown=true;
+    const el=_ckEl(); if(el){ el.classList.add('show'); el.setAttribute('aria-hidden','false'); }
   } else if(!inattivo && _cockpitOn){
     _cockpitOn=false; const el=_ckEl(); if(el){ el.classList.remove('show'); el.setAttribute('aria-hidden','true'); }
   }
@@ -1577,8 +1652,8 @@ function tick(now){
     if(glowList) for(const gs of glowList) animaGlow(gs);
   }
   // smoothing camera: camS insegue cam con easing continuo
-  // durante il tour cinematico uso uno smoothing più dolce per movimenti fluidi e filmici
-  const sm=tour?0.075:(tween?0.11:0.16);
+  // tour/tween/idle usano uno smoothing più dolce per movimenti fluidi e filmici
+  const sm=tour?0.075:(tween?0.11:(idle?0.05:0.16));
   for(const k of ['theta','phi','r','tx','ty','tz']) camS[k]+=(cam[k]-camS[k])*sm;
   // micro-respiro cinematografico: lievissima oscillazione viva durante la cinematica
   let bPhi=0,bR=0,bTy=0;
@@ -1592,14 +1667,20 @@ function tick(now){
   let cpy=camS.ty+bTy+(camS.r+bR)*Math.sin(camS.phi+bPhi)+0.001;
   let cpz=camS.tz+(camS.r+bR)*Math.cos(camS.phi+bPhi)*Math.cos(camS.theta);
   // CONFINAMENTO: vale solo quando la camera è DENTRO il capannone (navigazione interna).
-  // Nelle viste d'insieme la camera sta fuori/sopra: in quel caso non va confinata né
-  // schiacciata sotto il soffitto, altrimenti l'inquadratura "salta".
   const dentro = (cpx>-LX/2 && cpx<LX/2 && cpz>-LZ/2 && cpz<LZ/2 && cpy < H_HIGH);
   if(dentro){
     [cpx,cpz]=clampCameraXZ(cpx,cpz);
     cpy=Math.min(cpy, H_HIGH-0.15);
-    [cpx,cpz]=pushOutOfRacks(cpx,cpy,cpz);   // non entrare/scontrare gli scaffali
-  }
+    // spinta GRADUALE fuori dagli scaffali: applico la correzione interpolata su camPos
+    // (così non c'è teletrasporto/scatto secco quando la camera sfiora un bancale)
+    const [px,pz]=pushOutOfRacks(cpx,cpy,cpz);
+    if(px!==cpx||pz!==cpz){
+      if(!camPushed) camPushed={x:cpx,z:cpz};
+      camPushed.x += (px-camPushed.x)*0.2;
+      camPushed.z += (pz-camPushed.z)*0.2;
+      cpx=camPushed.x; cpz=camPushed.z;
+    } else { camPushed=null; }
+  } else { camPushed=null; }
   camera.position.set(cpx,cpy,cpz);
   camera.lookAt(camS.tx,camS.ty,camS.tz);
   if(wallsAuto){
@@ -1943,8 +2024,20 @@ function startInventoryRealtime(fs, db){
   // anagrafica prodotti globale: collezione piatta amzInventoryProducts/{sku}
   // ogni doc ha rackAllocations:[{code,lot,qty}], scritta da picking.html.
   const focusRef = fs.doc(db, "amzInventoryProducts", CAPANNONE_3D_FOCUS_DOC_ID);
+  let _focusFirstSnap = true;
   fs.onSnapshot(focusRef, (snap)=>{
-    if(snap.exists()) handleCapannone3dFocusCommand(snap.data() || {});
+    if(!snap.exists()) return;
+    const data = snap.data() || {};
+    if(_focusFirstSnap){
+      // all'apertura NON eseguire il comando Trova già presente nel documento:
+      // registralo come "già visto" così la scena parte pulita (panoramica/cockpit).
+      _focusFirstSnap = false;
+      const code = normalizeRackCode(data.rackLocation || data.code || data.find || data.targetRackLocation || "");
+      const seq = String(data.focusSeq || data.commandId || data.focusAtClient || data.updatedAtClient || "");
+      LAST_CAPANNONE_3D_FOCUS_KEY = `${seq}::${code}`;
+      return;
+    }
+    handleCapannone3dFocusCommand(data);
   }, (err)=>{
     console.error('Firestore focus error', err);
     if(err && err.code === 'permission-denied') setCloudStatus('Permessi comando Trova mancanti • apri ⚙ UID', '#ef4444');
