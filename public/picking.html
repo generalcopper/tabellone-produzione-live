@@ -3416,6 +3416,7 @@ Tip:
         error: ""
       },
       comboCache: new Map(),
+      productNames: { unsub:null, bySku:new Map(), loaded:false, error:"" },
 
       // Riordini Tabellone WRITE: lettura cloud live + backfill flag RIORDINATO sui pregressi
       twReorders: {
@@ -5996,6 +5997,7 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
 
     // --- realtime inventory watchers ---
     function startAllRealtime(){
+      startProductNamesWatch();
       startRealtimeFor("cerea");
       startRealtimeFor("concamarise");
       startAllLogs();
@@ -6007,6 +6009,7 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
 
     function stopAllRealtime(){
       resetLowStockRealtimeWatcher();
+      stopProductNamesWatch();
       stopTwReordersWatch();
       stopTwCompletedAmazonWatch();
       for(const loc of ["cerea","concamarise"]){
@@ -6034,6 +6037,111 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
       if(state.ui.sheet==="productDetails") renderProductDetailsSheet();
     }
 
+
+    // --- Anagrafica prodotti live: nome unico cloud per SKU ---
+    // Fonte unica del nome: amzInventoryProducts/{SKU}.title.
+    // I documenti di magazzino possono avere copie vecchie del titolo, ma la UI usa sempre questo catalogo live.
+    function getProductCatalogMeta(sku){
+      try{
+        const s = toSkuId(sku || "");
+        if(!s || !(state.productNames?.bySku instanceof Map)) return null;
+        return state.productNames.bySku.get(s) || null;
+      }catch(_e){
+        return null;
+      }
+    }
+
+    function canonicalTitleForSku(sku, fallback=""){
+      const s = toSkuId(sku || "");
+      const meta = getProductCatalogMeta(s);
+      const cloudTitle = squashWhitespace(meta?.title || "");
+      if(cloudTitle) return cloudTitle;
+      return squashWhitespace(fallback || "") || s;
+    }
+
+    function syncInventoryTitlesWithProductCatalog(){
+      let changed = false;
+      try{
+        for(const loc of ["cerea", "concamarise"]){
+          const inv = state.inventory?.[loc];
+          if(!inv || !Array.isArray(inv.items)) continue;
+          for(const it of inv.items){
+            const sku = toSkuId(it?.sku || it?.id || "");
+            const meta = getProductCatalogMeta(sku);
+            const title = squashWhitespace(meta?.title || "");
+            if(!sku || !title) continue;
+            const norm = meta?.titleNorm || normalizeText(title || sku);
+            if(it.title !== title || it.titleNorm !== norm){
+              it.title = title;
+              it.titleNorm = norm;
+              changed = true;
+            }
+          }
+        }
+        if(changed && state.cache) state.cache.invIndexForMatch = null;
+      }catch(_e){}
+      return changed;
+    }
+
+    function startProductNamesWatch(){
+      try{
+        if(!state.firebase.ok || !state.user?.isWhitelisted) return;
+        if(state.productNames?.unsub) return;
+        if(!state.productNames) state.productNames = { unsub:null, bySku:new Map(), loaded:false, error:"" };
+
+        const api = state.firebase.api;
+        const db = state.firebase.db;
+        const colRef = api.collection(db, COL_PRODUCTS);
+        const q = api.query(colRef, api.limit(5000));
+
+        state.productNames.unsub = api.onSnapshot(q, (snap)=>{
+          const map = new Map();
+          snap.forEach(docSnap=>{
+            const d = docSnap.data() || {};
+            if(d.active === false && d.renamedTo) return;
+            const sku = toSkuId(d.sku || docSnap.id || "");
+            if(!sku) return;
+            const title = squashWhitespace(d.title || d.name || "");
+            if(!title) return;
+            map.set(sku, {
+              sku,
+              title,
+              titleNorm: d.titleNorm || normalizeText(title || sku),
+              updatedAt: d.lastSeenAt || d.updatedAt || null,
+              updatedAtClient: d.lastSeenAtClient || d.updatedAtClient || 0,
+              active: d.active !== false
+            });
+          });
+          state.productNames.bySku = map;
+          state.productNames.loaded = true;
+          state.productNames.error = "";
+
+          syncInventoryTitlesWithProductCatalog();
+          if(state.route.view === "home") renderHomeDashboard();
+          if(state.route.view === "location") renderInventoryList();
+          if(state.ui.sheet === "products") renderProductsSheet();
+          if(state.ui.sheet === "productDetails") renderProductDetailsSheet();
+          if(state.ui.sheet === "sottoscorta") renderSottoscortaSheet();
+        }, (err)=>{
+          if(!state.productNames) state.productNames = { unsub:null, bySku:new Map(), loaded:false, error:"" };
+          state.productNames.error = err?.message || String(err || "Errore anagrafica prodotti");
+          console.warn("product catalog watch error", err);
+        });
+      }catch(err){
+        console.warn("startProductNamesWatch", err);
+      }
+    }
+
+    function stopProductNamesWatch(){
+      try{ state.productNames?.unsub && state.productNames.unsub(); }catch(_e){}
+      if(state.productNames){
+        state.productNames.unsub = null;
+        state.productNames.bySku = new Map();
+        state.productNames.loaded = false;
+        state.productNames.error = "";
+      }
+    }
+
     function startRealtimeFor(loc){
       if(!state.firebase.ok || !state.user?.isWhitelisted) return;
       const inv = state.inventory[loc];
@@ -6051,14 +6159,16 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
           const d = docSnap.data() || {};
           const sku = d.sku || docSnap.id;
           const qty = Number.isFinite(d.qty) ? d.qty : 0;
-          const title = d.title || d.name || "";
+          const localTitle = d.title || d.name || "";
+          const productMeta = getProductCatalogMeta(sku);
+          const title = (productMeta && productMeta.title) ? productMeta.title : localTitle;
           const updatedAt = d.updatedAt || null;
           const updatedAtClient = d.updatedAtClient || null;
           arr.push({
             id: docSnap.id,
             sku,
             title,
-            titleNorm: d.titleNorm || normalizeText(title || sku),
+            titleNorm: productMeta?.titleNorm || d.titleNorm || normalizeText(title || sku),
             qty,
             lowStockThreshold: __parseLowStockThresholdValue(d.lowStockThreshold),
             rackLocations: readRackLocationsFromDoc(d),
@@ -12546,10 +12656,11 @@ async function saveProductFromDetails(){
           }
 
           const nowClient = Date.now();
+          const canonicalTitle = title || sku;
           const baseData = {
             sku,
-            title: title || "",
-            titleNorm: normalizeText(title || sku),
+            title: canonicalTitle,
+            titleNorm: normalizeText(canonicalTitle || sku),
             note: note || "",
             qty,
             lowStockThreshold: lowStockThreshold,
@@ -12571,8 +12682,8 @@ async function saveProductFromDetails(){
           // anagrafica globale (best effort ma in tx)
           const pData = {
             sku,
-            title: title || "",
-            titleNorm: normalizeText(title || sku),
+            title: canonicalTitle,
+            titleNorm: normalizeText(canonicalTitle || sku),
             note: note || "",
             lowStockThreshold: lowStockThreshold,
             rackLocation: finalRackLocation,
@@ -12592,6 +12703,8 @@ async function saveProductFromDetails(){
             // Soglia sotto-scorta per SKU: aggiorna anche l’altro magazzino se lo stesso SKU esiste lì.
             if(siblingRef && siblingSnap && siblingSnap.exists()){
               tx.set(siblingRef, {
+                title: canonicalTitle,
+                titleNorm: normalizeText(canonicalTitle || sku),
                 lowStockThreshold: lowStockThreshold,
                 updatedAt: api.serverTimestamp(),
                 updatedAtClient: nowClient,
@@ -12621,7 +12734,7 @@ async function saveProductFromDetails(){
             const comboNote = deltaSigned > 0 ? "Scarico combo da aumento madre" : "Ripristino combo da diminuzione madre";
             const comboEffects = buildComboEffectsFromDeltas([{
               sku: oldSku,
-              title: title || oldData.title || oldSku,
+              title: canonicalTitle || oldData.title || oldSku,
               loc,
               qtySigned: -deltaSigned
             }], comboMap, {
@@ -13046,11 +13159,17 @@ function renderProductsSheet(){
         await api.runTransaction(db, async (tx)=>{
           const sOld = await tx.get(oldRef);
           if(!sOld.exists()) throw new Error("Prodotto non trovato.");
+          let siblingRef = null;
+          let siblingSnap = null;
           if(sku!==oldSku){
             const sNew = await tx.get(newRef);
             if(sNew.exists()) throw new Error("SKU già esistente.");
             const pNewSnap = await tx.get(newP);
             if(pNewSnap.exists()) throw new Error("SKU già esistente (anagrafica).");
+          }else{
+            const siblingLoc = (loc === "cerea") ? "concamarise" : "cerea";
+            siblingRef = api.doc(db, COL_ROOT, siblingLoc, SUB_ITEMS, sku);
+            siblingSnap = await tx.get(siblingRef);
           }
 
           const oldData = sOld.data() || {};
@@ -13071,6 +13190,15 @@ function renderProductsSheet(){
 
           if(sku===oldSku){
             tx.set(oldRef, baseData, { merge:true });
+            if(siblingRef && siblingSnap && siblingSnap.exists()){
+              tx.set(siblingRef, {
+                title: finalTitle,
+                titleNorm: normalizeText(finalTitle || sku),
+                updatedAt: api.serverTimestamp(),
+                updatedAtClient: nowClient,
+                updatedBy: who
+              }, { merge:true });
+            }
           }else{
             tx.set(newRef, baseData, { merge:true });
             tx.delete(oldRef);
