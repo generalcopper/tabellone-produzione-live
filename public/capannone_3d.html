@@ -1109,7 +1109,7 @@ function highlightVano(v, opts={}){
   document.getElementById('info').innerHTML=txt;
 }
 const cam=(innerWidth<innerHeight)
-  ? {theta:Math.PI*0.13,phi:Math.PI*0.115,r:23,tx:0,ty:2.8,tz:4}
+  ? {theta:Math.PI*0.12,phi:Math.PI*0.13,r:9.5,tx:1,ty:3.2,tz:1}
   : {theta:Math.PI*0.16,phi:Math.PI*0.10,r:34,tx:0,ty:1.8,tz:1};
 const camS={...cam};   // versione interpolata per movimento fluido
 let tween=null;
@@ -1149,9 +1149,8 @@ function isPortrait(){ return innerWidth < innerHeight; }
 // posa panoramica di riposo: vista d'insieme cinematografica, adattata all'orientamento
 function panoramaPose(){
   if(isPortrait()){
-    // verticale: camera ravvicinata e bassa davanti al capannone. Le file di scaffali
-    // fuggono in prospettiva e riempiono il frame alto (niente vuoto/barre nere).
-    return {tx:0, ty:2.8, tz:4, r:23, theta:Math.PI*0.13, phi:Math.PI*0.115};
+    // verticale: camera vicina e bassa, punta al cuore degli scaffali → riempie il monitor.
+    return {tx:1, ty:3.2, tz:1, r:9.5, theta:Math.PI*0.12, phi:Math.PI*0.13};
   }
   return {tx:0, ty:1.8, tz:1, r:34, theta:Math.PI*0.16, phi:Math.PI*0.10};
 }
@@ -1180,28 +1179,107 @@ function ease(t){return t<.5?4*t*t*t:1-Math.pow(-2*t+2,3)/2;}
 let tour=null;
 const TOUR_DURATION=30000;     // durata totale del loop (ms)
 
-/* ===== IDLE DRIFT: quando non è selezionato nulla, la camera orbita lentamente
-   in modo cinematico, PER SEMPRE (non si ferma). Oscillazioni sinusoidali dolci. ===== */
-let idle=null;                 // {start, baseTheta, basePhi, baseR, baseTy}
+/* ===== PANORAMICA CINEMATICA A SCENE: una regia che alterna inquadrature diverse del
+   capannone (vista d'insieme, dentro la corsia B-C dal basso, corsie laterali, carrellate
+   lungo le file...). Ogni scena è un lento dolly da posa A a posa B; tra una scena e l'altra
+   c'è una transizione morbida. Tutto lento, fluido, mai fermo. ===== */
+let idle=null;
 let lastInteract=performance.now();
-const IDLE_WAIT=2000;          // attesa prima che parta il drift (ms)
+const IDLE_WAIT=2000;
 function markInteract(){ lastInteract=performance.now(); idle=null; }
 
+// centroidi delle file dai vani (coordinate mondo)
+function rowCentroid(row){
+  const vs=VANI.filter(v=>v.row===row);
+  if(!vs.length) return null;
+  const c={x:0,y:0,z:0};
+  for(const v of vs){ c.x+=v.center.x; c.y+=v.center.y; c.z+=v.center.z; }
+  c.x/=vs.length; c.y/=vs.length; c.z/=vs.length;
+  // estensione lungo gli assi (per sapere la lunghezza della fila)
+  let minx=1e9,maxx=-1e9,minz=1e9,maxz=-1e9;
+  for(const v of vs){ minx=Math.min(minx,v.center.x);maxx=Math.max(maxx,v.center.x);minz=Math.min(minz,v.center.z);maxz=Math.max(maxz,v.center.z); }
+  return {c, lenX:maxx-minx, lenZ:maxz-minz, minx,maxx,minz,maxz};
+}
+
+// costruisce la lista di scene panoramiche (lazy: dopo che i vani esistono)
+let _scenes=null;
+function buildScenes(){
+  const portrait=isPortrait();
+  const B=rowCentroid('B'), C=rowCentroid('C'), E=rowCentroid('E'), F=rowCentroid('F'), A=rowCentroid('A'), D=rowCentroid('D');
+  const scenes=[];
+  const midPhi = portrait? Math.PI*0.12 : Math.PI*0.11;
+
+  // 1) PANORAMICA D'INSIEME (la posa di riposo): lenta carrellata laterale
+  scenes.push({
+    dur: 26000,
+    from:{tx:-6, ty:3.0, tz: portrait?1:1, r: portrait?10:30, theta:Math.PI*0.10, phi:midPhi},
+    to:  {tx: 6, ty:3.2, tz: portrait?1:1, r: portrait?10.5:31, theta:Math.PI*0.17, phi:midPhi+0.02},
+  });
+
+  // 2) DENTRO LA CORSIA B-C, dal basso verso l'alto: camera bassa che guarda in su gli scaffali
+  if(B&&C){
+    const aisleZ=(B.c.z+C.c.z)/2;            // centro corsia B-C
+    scenes.push({
+      dur: 22000,
+      // entra dalla corsia da un capo e scivola verso l'altro; phi negativo = camera SOTTO il
+      // target (alto sugli scaffali) → sguardo dal basso verso l'alto
+      from:{tx:B.minx+1.5, ty:4.2, tz:aisleZ, r:4.5, theta:Math.PI*0.5, phi:-Math.PI*0.12},
+      to:  {tx:B.maxx-1.5, ty:4.6, tz:aisleZ, r:5.0, theta:Math.PI*0.5, phi:-Math.PI*0.06},
+    });
+  }
+  // 3) CORSIA E-F dal basso (lato opposto)
+  if(E&&F){
+    const aisleZ=(E.c.z+F.c.z)/2, aisleX=(E.c.x+F.c.x)/2;
+    scenes.push({
+      dur: 20000,
+      from:{tx:aisleX, ty:4.2, tz:E.minz+1.5, r:4.5, theta:0, phi:-Math.PI*0.11},
+      to:  {tx:aisleX, ty:4.6, tz:E.maxz-1.5, r:5.0, theta:0, phi:-Math.PI*0.05},
+    });
+  }
+  // 4) CARRELLATA bassa lungo la fila A (di lato, scaffali che sfilano)
+  if(A){
+    scenes.push({
+      dur: 22000,
+      from:{tx:A.c.x-1, ty:3.6, tz:A.minz+1, r:6, theta:-Math.PI*0.5, phi:-Math.PI*0.04},
+      to:  {tx:A.c.x-1, ty:3.8, tz:A.maxz-1, r:7, theta:-Math.PI*0.5, phi:Math.PI*0.02},
+    });
+  }
+  // 5) VISTA ALTA d'insieme che scende (establishing), poi resta dolce
+  scenes.push({
+    dur: 24000,
+    from:{tx:0, ty:4.5, tz: portrait?2:2, r: portrait?13:36, theta:Math.PI*0.22, phi:Math.PI*0.30},
+    to:  {tx:0, ty:3.0, tz: portrait?1:1, r: portrait?10:30, theta:Math.PI*0.12, phi:midPhi},
+  });
+  return scenes;
+}
+
 function updateIdle(now){
-  // attivo solo se: nessun bancale selezionato, nessun tour, nessun tween in corso
   if(selectedVano||tour||tween){ idle=null; return; }
   if(now-lastInteract < IDLE_WAIT){ idle=null; return; }
+  if(!_scenes || _scenes.length===0) _scenes=buildScenes();
   if(!idle){
-    idle={ start:now, baseTheta:cam.theta, basePhi:cam.phi, baseR:cam.r, baseTy:cam.ty };
+    // sceglie una scena di partenza casuale, così non parte sempre dallo stesso punto
+    idle={ start:now, sceneIdx:Math.floor(Math.random()*_scenes.length), sceneStart:now };
   }
-  const t=(now-idle.start)/1000;       // secondi dall'inizio del drift
-  // ramp-in dolce: il movimento parte da fermo e cresce nei primi ~4s, poi resta continuo
-  const ramp=Math.min(1, t/4);
-  // orbita perpetua: lenta deriva angolare + respiro di quota/zoom, mai ferma
-  cam.theta = idle.baseTheta + Math.sin(t*0.10)*0.42*ramp;   // oscilla avanti/indietro ~24°
-  cam.phi   = idle.basePhi   + Math.sin(t*0.07+1.0)*0.05*ramp;
-  cam.r     = idle.baseR     + Math.sin(t*0.055+0.5)*2.6*ramp; // si avvicina e allontana piano
-  cam.ty    = idle.baseTy    + Math.sin(t*0.08+2.0)*0.35*ramp;
+  const scene=_scenes[idle.sceneIdx];
+  let p=(now-idle.sceneStart)/scene.dur;     // 0..1 nella scena
+  if(p>=1){
+    // passa alla scena successiva (casuale ma diversa dalla corrente)
+    let ni=idle.sceneIdx; if(_scenes.length>1){ while(ni===idle.sceneIdx) ni=Math.floor(Math.random()*_scenes.length); }
+    idle.sceneIdx=ni; idle.sceneStart=now; p=0;
+  }
+  // easing morbido in-out per il dolly della scena
+  const e=p<0.5?2*p*p:1-Math.pow(-2*p+2,2)/2;
+  const a=scene.from, b=scene.to;
+  const lerp=(k)=>a[k]+(b[k]-a[k])*e;
+  // micro respiro continuo sovrapposto (vita anche a metà scena)
+  const t=(now-idle.start)/1000;
+  cam.tx = lerp('tx');
+  cam.tz = lerp('tz');
+  cam.ty = lerp('ty') + Math.sin(t*0.5)*0.04;
+  cam.r  = lerp('r')  + Math.sin(t*0.3)*0.15;
+  cam.theta = lerp('theta');
+  cam.phi = lerp('phi') + Math.sin(t*0.25)*0.004;
 }
 
 /* ===== COCKPIT IDLE: dopo 30s senza selezione/interazione mostra info aziendali ===== */

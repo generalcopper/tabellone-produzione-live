@@ -3092,6 +3092,119 @@ function guessTitleFromRaw(rawText, sku){
       return Number.isFinite(n) ? String(Math.round(n*1000)/1000) : "0";
     }
 
+
+    // Quantità prenotata da flussi di scarico in attesa picking.
+    // La giacenza fisica resta in qty; la sotto-scorta lavora sulla disponibilità: qty - reservedQty.
+    function reservedQtyFromItem(it){
+      try{
+        const raw = (it && (it.reservedQty ?? it.pendingPickQty ?? it.reservationQty)) ?? 0;
+        const n = Number(raw);
+        if(!Number.isFinite(n)) return 0;
+        return Math.max(0, Math.round(n));
+      }catch(_e){
+        return 0;
+      }
+    }
+
+    function lowStockQtyValue(it){
+      try{
+        const q = Number(it && it.qty);
+        const physical = Number.isFinite(q) ? Math.round(q) : 0;
+        const reserved = reservedQtyFromItem(it);
+        return Math.max(0, physical - reserved);
+      }catch(_e){
+        return 0;
+      }
+    }
+
+    function lowStockQtyMetaLabel(it){
+      const physical = Number.isFinite(Number(it?.qty)) ? Math.round(Number(it.qty)) : 0;
+      const reserved = reservedQtyFromItem(it);
+      if(reserved <= 0) return "";
+      const available = Math.max(0, physical - reserved);
+      return `Disponibile: ${available} • Fisica: ${physical} • Prenotata: ${reserved}`;
+    }
+
+
+    // Aggiornamento ottimistico immediato dopo prenotazione scarico:
+    // Firestore resta la fonte ufficiale, ma la UI/sottoscorta non aspetta il prossimo snapshot.
+    function applyReservationToLocalInventory(plans, opts = {}){
+      try{
+        const nowClient = Number(opts.tsClient || Date.now());
+        const nowDate = new Date(nowClient);
+        const flowId = String(opts.flowId || "");
+        const fileName = String(opts.fileName || "");
+        const arrPlans = Array.isArray(plans) ? plans : [];
+
+        for(const p of arrPlans){
+          const loc = (p && (p.loc === "cerea" || p.loc === "concamarise")) ? p.loc : "concamarise";
+          const inv = state.inventory?.[loc];
+          if(!inv || !Array.isArray(inv.items)) continue;
+
+          const bySku = new Map();
+          inv.items.forEach((item, idx)=>{
+            const s = toSkuId(item?.sku || item?.id || "");
+            if(s) bySku.set(s, { item, idx });
+          });
+
+          for(const line of (Array.isArray(p?.aggregated) ? p.aggregated : [])){
+            const sku = toSkuId(line?.sku || "");
+            const qtyAbs = Math.abs(parseQty(line?.qty || 0) || 0);
+            if(!sku || !qtyAbs) continue;
+
+            const title = squashWhitespace(line?.title || sku) || sku;
+            const hit = bySku.get(sku);
+            if(hit && hit.item){
+              const item = hit.item;
+              const prevReserved = reservedQtyFromItem(item);
+              const prevPending = Number.isFinite(Number(item.pendingPickQty)) ? Math.max(0, Math.round(Number(item.pendingPickQty))) : prevReserved;
+              item.sku = item.sku || sku;
+              item.title = item.title || title;
+              item.titleNorm = item.titleNorm || normalizeText(item.title || sku);
+              item.reservedQty = prevReserved + qtyAbs;
+              item.pendingPickQty = prevPending + qtyAbs;
+              item.availableQty = lowStockQtyValue(item);
+              item.reservationStatus = "in_attesa_picking";
+              item.lastReservationFlowId = flowId || p.flowDocId || item.lastReservationFlowId || "";
+              item.lastReservationFileName = fileName || item.lastReservationFileName || "";
+              item.updatedAtClient = nowClient;
+              item.location = loc;
+            }else{
+              const item = {
+                id: sku,
+                sku,
+                title,
+                titleNorm: normalizeText(title || sku),
+                qty: 0,
+                reservedQty: qtyAbs,
+                pendingPickQty: qtyAbs,
+                availableQty: 0,
+                reservationStatus: "in_attesa_picking",
+                lastReservationFlowId: flowId || p.flowDocId || "",
+                lastReservationFileName: fileName,
+                updatedAtClient: nowClient,
+                location: loc
+              };
+              inv.items.push(item);
+              bySku.set(sku, { item, idx: inv.items.length - 1 });
+            }
+          }
+
+          if(inv.meta){
+            inv.meta.loaded = true;
+            inv.meta.lastUpdatedAt = nowDate;
+          }
+        }
+
+        if(typeof renderHomeDashboard === "function") renderHomeDashboard();
+        if(typeof renderInventoryList === "function") renderInventoryList();
+        if(typeof renderSottoscortaSheet === "function" && state.ui?.sheet === "sottoscorta") renderSottoscortaSheet();
+        if(typeof renderProductDetailsSheet === "function" && state.ui?.sheet === "productDetails") renderProductDetailsSheet();
+      }catch(err){
+        console.warn("reservation optimistic update", err);
+      }
+    }
+
     // --- policy sotto-scorta ---
     const LOW_STOCK_DEFAULT = 100;
     const LOW_STOCK_5KG = 20;
@@ -3335,7 +3448,7 @@ function guessTitleFromRaw(rawText, sku){
     }
 
     function __isLowStockItem(it){
-      const qty = Number.isFinite(it && it.qty) ? Number(it.qty) : 0;
+      const qty = lowStockQtyValue(it);
       const custom = __getCustomLowStockThreshold(it);
       const th = (custom !== null) ? custom : __lowStockThreshold(it);
       // soglia personalizzata: sotto scorta quando la giacenza è <= soglia impostata
@@ -3399,9 +3512,11 @@ function guessTitleFromRaw(rawText, sku){
             const meta = parseTitleMeta(it.title || "");
             const main = (meta && meta.main) ? String(meta.main).trim() : String(it.title||"").trim();
             const product = main || "(senza nome)";
-            const qty = __fmtQty(it.qty);
+            const qty = __fmtQty(lowStockQtyValue(it));
+            const physicalQty = __fmtQty(Number.isFinite(Number(it.qty)) ? Math.round(Number(it.qty)) : 0);
+            const reservedQty = __fmtQty(reservedQtyFromItem(it));
             const threshold = __lowStockThresholdShort(it);
-            return { product, qty, threshold };
+            return { product, qty, physicalQty, reservedQty, threshold };
           })
           .sort((a,b)=>{
             const qa = Number(a.qty);
@@ -3421,13 +3536,13 @@ function guessTitleFromRaw(rawText, sku){
         if(!rows.length) return `${label}:
 (nessun prodotto sotto soglia)
 `;
-        const maxLen = Math.min(46, rows.reduce((m,r)=> Math.max(m, String(r.product||"").length), 0) || 18);
-        const headerLine = `${"Prodotto".padEnd(maxLen, " ")}  |  Scorta  | Soglia`;
-        const sepLine = `${"-".repeat(maxLen)}--|----------|--------`;
+        const maxLen = Math.min(42, rows.reduce((m,r)=> Math.max(m, String(r.product||"").length), 0) || 18);
+        const headerLine = `${"Prodotto".padEnd(maxLen, " ")}  |  Disp. | Fisica | Prenot. | Soglia`;
+        const sepLine = `${"-".repeat(maxLen)}--|--------|--------|---------|--------`;
         const textLines = rows.map(r=>{
           const p = String(r.product||"");
           const name = (p.length>maxLen) ? (p.slice(0, Math.max(0, maxLen-1)) + "…") : p;
-          return `${name.padEnd(maxLen, " ")}  |  ${String(r.qty).padStart(6, " ")}  | ${String(r.threshold||"—")}`;
+          return `${name.padEnd(maxLen, " ")}  |  ${String(r.qty).padStart(5, " ")} | ${String(r.physicalQty||"0").padStart(6, " ")} | ${String(r.reservedQty||"0").padStart(7, " ")} | ${String(r.threshold||"—")}`;
         });
         return `${label}:
 ${headerLine}
@@ -3458,6 +3573,12 @@ ${textLines.join("\n")}
               ${escapeHtml(String(r.qty))}
             </td>
             <td style="padding:10px 12px; border-bottom:1px solid #e9eef2; vertical-align:top; text-align:right; white-space:nowrap; font-size:14px; color:#111">
+              ${escapeHtml(String(r.physicalQty || "0"))}
+            </td>
+            <td style="padding:10px 12px; border-bottom:1px solid #e9eef2; vertical-align:top; text-align:right; white-space:nowrap; font-size:14px; color:#111">
+              ${escapeHtml(String(r.reservedQty || "0"))}
+            </td>
+            <td style="padding:10px 12px; border-bottom:1px solid #e9eef2; vertical-align:top; text-align:right; white-space:nowrap; font-size:14px; color:#111">
               ${escapeHtml(String(r.threshold || "—"))}
             </td>
           </tr>
@@ -3471,7 +3592,13 @@ ${textLines.join("\n")}
                   Prodotto
                 </th>
                 <th style="text-align:right; padding:10px 12px; font-size:12px; letter-spacing:.04em; text-transform:uppercase; color:#556; background:#fbfcfd; border-bottom:1px solid #e9eef2; white-space:nowrap">
-                  Scorta
+                  Disponibile
+                </th>
+                <th style="text-align:right; padding:10px 12px; font-size:12px; letter-spacing:.04em; text-transform:uppercase; color:#556; background:#fbfcfd; border-bottom:1px solid #e9eef2; white-space:nowrap">
+                  Fisica
+                </th>
+                <th style="text-align:right; padding:10px 12px; font-size:12px; letter-spacing:.04em; text-transform:uppercase; color:#556; background:#fbfcfd; border-bottom:1px solid #e9eef2; white-space:nowrap">
+                  Prenotata
                 </th>
                 <th style="text-align:right; padding:10px 12px; font-size:12px; letter-spacing:.04em; text-transform:uppercase; color:#556; background:#fbfcfd; border-bottom:1px solid #e9eef2; white-space:nowrap">
                   Soglia
@@ -3481,7 +3608,7 @@ ${textLines.join("\n")}
             <tbody>
               ${htmlRows || `
                 <tr>
-                  <td colspan="3" style="padding:12px; font-size:14px; color:#556">Nessun prodotto sotto soglia 🎯</td>
+                  <td colspan="5" style="padding:12px; font-size:14px; color:#556">Nessun prodotto sotto soglia 🎯</td>
                 </tr>
               `}
             </tbody>
@@ -3528,17 +3655,21 @@ ${textLines.join("\n")}
         const sku = toSkuId(it.sku || "");
         const m = parseTitleMeta(it.title || "");
         const title = (m.main || it.title || sku || "").slice(0, 120);
-        const qty = Number.isFinite(it.qty) ? Math.round(it.qty) : 0;
+        const qty = lowStockQtyValue(it);
+        const physicalQty = Number.isFinite(Number(it.qty)) ? Math.round(Number(it.qty)) : 0;
+        const reservedQty = reservedQtyFromItem(it);
         const threshold = __lowStockThresholdShort(it);
-        return { sku, title, qty, threshold };
+        return { sku, title, qty, physicalQty, reservedQty, threshold };
       });
       const previewCerea = (cerea || []).slice(0, 250).map(it=>{
         const sku = toSkuId(it.sku || "");
         const m = parseTitleMeta(it.title || "");
         const title = (m.main || it.title || sku || "").slice(0, 120);
-        const qty = Number.isFinite(it.qty) ? Math.round(it.qty) : 0;
+        const qty = lowStockQtyValue(it);
+        const physicalQty = Number.isFinite(Number(it.qty)) ? Math.round(Number(it.qty)) : 0;
+        const reservedQty = reservedQtyFromItem(it);
         const threshold = __lowStockThresholdShort(it);
-        return { sku, title, qty, threshold };
+        return { sku, title, qty, physicalQty, reservedQty, threshold };
       });
 
       const counts = { concamarise: (concamarise || []).length, cerea: (cerea || []).length };
@@ -3584,7 +3715,8 @@ ${textLines.join("\n")}
         const list = (items||[]).slice().map(it=>({
           loc: String(it.loc||""),
           sku: String(toSkuId(it.sku||"")||""),
-          qty: Number.isFinite(it.qty) ? Number(it.qty) : null,
+          qty: lowStockQtyValue(it),
+          reservedQty: reservedQtyFromItem(it),
           threshold: __lowStockThreshold(it)
         })).sort((a,b)=>{
           if(a.loc!==b.loc) return a.loc.localeCompare(b.loc);
@@ -3705,7 +3837,7 @@ ${textLines.join("\n")}
       };
       pushLoc("cerea");
       pushLoc("concamarise");
-      out.sort((x,y)=> (x.qty||0) - (y.qty||0));
+      out.sort((x,y)=> lowStockQtyValue(x) - lowStockQtyValue(y));
       return out;
     }
 
@@ -3723,7 +3855,8 @@ ${textLines.join("\n")}
         return (items||[]).slice().map(it=>({
           loc: String(it.loc||""),
           sku: String(toSkuId(it.sku||"")||""),
-          qty: Number.isFinite(it.qty) ? Number(it.qty) : null,
+          qty: lowStockQtyValue(it),
+          reservedQty: reservedQtyFromItem(it),
           threshold: __lowStockThreshold(it)
         })).sort((a,b)=>{
           if(a.loc!==b.loc) return a.loc.localeCompare(b.loc);
@@ -4289,6 +4422,8 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
             title,
             titleNorm: d.titleNorm || normalizeText(title || sku),
             qty,
+            reservedQty: Number.isFinite(Number(d.reservedQty)) ? Math.max(0, Math.round(Number(d.reservedQty))) : 0,
+            availableQty: Math.max(0, (Number.isFinite(Number(qty)) ? Math.round(Number(qty)) : 0) - (Number.isFinite(Number(d.reservedQty)) ? Math.max(0, Math.round(Number(d.reservedQty))) : 0)),
             lowStockThreshold: __parseLowStockThresholdValue(d.lowStockThreshold),
             rackLocations: readRackLocationsFromDoc(d),
             rackLocation: readRackLocationFromDoc(d),
@@ -4559,12 +4694,15 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
         const list = (arr||[]).slice(0, 120).map(it=>{
           const title = escapeHtml(String(it.title||"").trim() || "(senza nome)");
           const sku = escapeHtml(toSkuId(it.sku||""));
-          const qty = Number.isFinite(it.qty) ? it.qty : 0;
+          const qty = Number.isFinite(Number(it.qty)) ? Math.round(Number(it.qty)) : 0;
+          const physicalQty = Number.isFinite(Number(it.physicalQty)) ? Math.round(Number(it.physicalQty)) : "—";
+          const reservedQty = Number.isFinite(Number(it.reservedQty)) ? Math.round(Number(it.reservedQty)) : 0;
           const threshold = it.threshold ? String(it.threshold) : "—";
+          const qtyMeta = `Disp: ${qty}${physicalQty !== "—" ? ` · Fisica: ${physicalQty}` : ""}${reservedQty ? ` · Prenotata: ${reservedQty}` : ""}`;
           return `<div class="row" style="padding:8px 10px; border-top:1px solid rgba(0,0,0,.06);">
             <div class="rowMain">
               <p class="rowTitle" style="font-size:13px">${title}</p>
-              <div class="rowSub"><span class="mono">${sku}</span> · <span class="muted">${escapeHtml(locLabel)}</span> · Soglia: ${escapeHtml(threshold)}</div>
+              <div class="rowSub"><span class="mono">${sku}</span> · <span class="muted">${escapeHtml(locLabel)}</span> · ${escapeHtml(qtyMeta)} · Soglia: ${escapeHtml(threshold)}</div>
             </div>
             <div class="badge warn">${escapeHtml(String(qty))}</div>
           </div>`;
@@ -5619,6 +5757,109 @@ function startAllLogs(){
       }
     }
 
+
+
+    function flowReservationPickedMap(flow){
+      try{
+        const p = (flow?.picking && typeof flow.picking === "object") ? flow.picking : {};
+        return (p.pickedLines && typeof p.pickedLines === "object") ? p.pickedLines : {};
+      }catch(_e){
+        return {};
+      }
+    }
+
+    function isReservedScaricaFlow(flow){
+      try{
+        if(String(flow?.kind || "").toLowerCase() !== "scarica") return false;
+        const st = String(flow?.status || "").toUpperCase();
+        const r = (flow?.reservation && typeof flow.reservation === "object") ? flow.reservation : {};
+        return !!(r.active === true || st === "RESERVED" || st === "PRENOTATO" || st === "IN_ATTESA_PICKING");
+      }catch(_e){
+        return false;
+      }
+    }
+
+    function isReservedFlowLinePicked(flow, sku){
+      const rawKey = toSkuId(sku || "");
+      const key = (typeof sanitizeFirestoreDocId === "function" ? sanitizeFirestoreDocId(rawKey, 180) : String(rawKey || "").replace(/[^A-Z0-9_-]+/g, "_").slice(0, 180)) || "SKU";
+      const picked = flowReservationPickedMap(flow);
+      const rec = picked[key] || {};
+      return !!(flow?.picking?.flowPicked === true || rec.picked === true || rec.status === "prelevato");
+    }
+
+    function splitReservationFlowLines(flow, lines){
+      const picked = [];
+      const unpicked = [];
+      const seen = new Set();
+      for(const line of (Array.isArray(lines) ? lines : [])){
+        const sku = toSkuId(line?.sku || "");
+        if(!sku || seen.has(sku)) continue;
+        seen.add(sku);
+        (isReservedFlowLinePicked(flow, sku) ? picked : unpicked).push(line);
+      }
+      return { picked, unpicked };
+    }
+
+    async function releaseReservationWithLines(loc, flow, lines, opts = {}){
+      const api = state.firebase.api;
+      const db = state.firebase.db;
+      if(!api || !db) throw new Error("Firebase non inizializzato.");
+      if(!loc) throw new Error("Location mancante.");
+      if(!Array.isArray(lines) || !lines.length) return;
+
+      const nowClient = Date.now();
+      const who = state.user?.emailLower || state.user?.email || "";
+      const flowLabel = opts?.flowName || opts?.flowLabel || flowDisplayName(flow) || opts?.flowId || "";
+      const flowId = opts?.flowId || flow?.id || "";
+      const CHUNK = 220;
+
+      for(let i=0; i<lines.length; i+=CHUNK){
+        const chunk = lines.slice(i, i+CHUNK);
+        const batch = api.writeBatch(db);
+        for(const l of chunk){
+          const sku = toSkuId(l?.sku || "");
+          if(!sku) continue;
+          const title = squashWhitespace(l?.title || "") || sku;
+          const qty = Math.abs(parseQty(l?.qty || 0) || 0);
+          if(!qty) continue;
+          const docRef = api.doc(db, COL_ROOT, loc, SUB_ITEMS, sku);
+          batch.set(docRef, {
+            sku,
+            title,
+            titleNorm: normalizeText(title || sku),
+            reservedQty: api.increment(-qty),
+            pendingPickQty: api.increment(-qty),
+            reservationStatus: "rilasciata",
+            lastReservationReleaseFlowId: flowId || "",
+            reservationReleasedAt: api.serverTimestamp(),
+            reservationReleasedAtClient: nowClient,
+            reservationReleasedBy: who,
+            location: loc,
+            updatedAt: api.serverTimestamp(),
+            updatedAtClient: nowClient,
+            updatedBy: who
+          }, { merge:true });
+
+          addProductMovementToBatch(batch, api, db, sku, {
+            type: "annulla_prenotazione_scarico",
+            qtySigned: 0,
+            deltaSigned: 0,
+            reservationQty: -qty,
+            reservedQtySigned: -qty,
+            fromWarehouse: loc,
+            toWarehouse: loc,
+            source: opts?.reason || "rilascio_prenotazione",
+            note: opts?.note || `Rilascio prenotazione scarico${flowLabel ? " • " + flowLabel : ""}`,
+            flowKind: "scarica",
+            flowId,
+            flowName: flowLabel,
+            createdAtClient: nowClient
+          });
+        }
+        await batch.commit();
+      }
+    }
+
     async function handleUndoFlow(flowId){
       if(!state.user?.isAdmin) return;
       const loc = state.route.loc;
@@ -5631,7 +5872,17 @@ function startAllLogs(){
 
       try{
         showToast("Operazione in corso", "Sto annullando il flusso…");
-        await adjustInventoryWithLines(loc, flow.kind, flow.lines || [], -1, { reason:"undo_flow", note:`Annullamento flusso ${flowDisplayName(flow)}`, flowId: flow.id, flowName: flowDisplayName(flow), comboLines: flow.comboLines || [] });
+        if(isReservedScaricaFlow(flow)){
+          const split = splitReservationFlowLines(flow, flow.lines || []);
+          if(split.unpicked.length){
+            await releaseReservationWithLines(loc, flow, split.unpicked, { reason:"undo_flow_prenotazione", note:`Annullamento prenotazione flusso ${flowDisplayName(flow)}`, flowId: flow.id, flowName: flowDisplayName(flow) });
+          }
+          if(split.picked.length){
+            await adjustInventoryWithLines(loc, flow.kind, split.picked, -1, { reason:"undo_flow_picking", note:`Ripristino prelievo flusso ${flowDisplayName(flow)}`, flowId: flow.id, flowName: flowDisplayName(flow), comboLines: flow.comboLines || [] });
+          }
+        }else{
+          await adjustInventoryWithLines(loc, flow.kind, flow.lines || [], -1, { reason:"undo_flow", note:`Annullamento flusso ${flowDisplayName(flow)}`, flowId: flow.id, flowName: flowDisplayName(flow), comboLines: flow.comboLines || [] });
+        }
 
         const api = state.firebase.api;
         const db = state.firebase.db;
@@ -5664,7 +5915,17 @@ function startAllLogs(){
       try{
         showToast("Operazione in corso", "Sto eliminando il flusso…");
         if(!flow.voided){
-          await adjustInventoryWithLines(loc, flow.kind, flow.lines || [], -1, { reason:"delete_flow", note:`Eliminazione flusso ${flowDisplayName(flow)}`, flowId: flow.id, flowName: flowDisplayName(flow), comboLines: flow.comboLines || [] });
+          if(isReservedScaricaFlow(flow)){
+            const split = splitReservationFlowLines(flow, flow.lines || []);
+            if(split.unpicked.length){
+              await releaseReservationWithLines(loc, flow, split.unpicked, { reason:"delete_flow_prenotazione", note:`Eliminazione prenotazione flusso ${flowDisplayName(flow)}`, flowId: flow.id, flowName: flowDisplayName(flow) });
+            }
+            if(split.picked.length){
+              await adjustInventoryWithLines(loc, flow.kind, split.picked, -1, { reason:"delete_flow_picking", note:`Ripristino prelievo flusso ${flowDisplayName(flow)}`, flowId: flow.id, flowName: flowDisplayName(flow), comboLines: flow.comboLines || [] });
+            }
+          }else{
+            await adjustInventoryWithLines(loc, flow.kind, flow.lines || [], -1, { reason:"delete_flow", note:`Eliminazione flusso ${flowDisplayName(flow)}`, flowId: flow.id, flowName: flowDisplayName(flow), comboLines: flow.comboLines || [] });
+          }
         }
         const api = state.firebase.api;
         const db = state.firebase.db;
@@ -5712,7 +5973,15 @@ function startAllLogs(){
 
       try{
         showToast("Operazione in corso", "Sto eliminando la riga…");
-        await adjustInventoryWithLines(loc, flow.kind, [line], -1, { reason:"remove_line_flow", note:`Eliminazione riga dal flusso ${flowDisplayName(flow)}`, flowId: flow.id, flowName: flowDisplayName(flow), comboLines: flow.comboLines || [] });
+        if(isReservedScaricaFlow(flow)){
+          if(isReservedFlowLinePicked(flow, sku)){
+            await adjustInventoryWithLines(loc, flow.kind, [line], -1, { reason:"remove_line_flow_picking", note:`Ripristino riga prelevata dal flusso ${flowDisplayName(flow)}`, flowId: flow.id, flowName: flowDisplayName(flow), comboLines: flow.comboLines || [] });
+          }else{
+            await releaseReservationWithLines(loc, flow, [line], { reason:"remove_line_flow_prenotazione", note:`Rilascio prenotazione riga dal flusso ${flowDisplayName(flow)}`, flowId: flow.id, flowName: flowDisplayName(flow) });
+          }
+        }else{
+          await adjustInventoryWithLines(loc, flow.kind, [line], -1, { reason:"remove_line_flow", note:`Eliminazione riga dal flusso ${flowDisplayName(flow)}`, flowId: flow.id, flowName: flowDisplayName(flow), comboLines: flow.comboLines || [] });
+        }
 
         const newLines = lines.filter(l=> String(l?.sku||"").trim()!==sku);
         const totalPieces = newLines.reduce((s,l)=> s + parseQty(l?.qty || 0), 0);
@@ -5809,11 +6078,11 @@ function currentInv(){
       const pushLoc = (loc)=>{
         const items = (state.inventory[loc] && state.inventory[loc].items) ? state.inventory[loc].items : [];
         for(const it of items){
-          const qty = Number.isFinite(it.qty) ? it.qty : 0;
-          if(__isLowStockItem({ ...it, qty })){
+          const qty = lowStockQtyValue(it);
+          if(__isLowStockItem(it)){
             const sku = toSkuId(it.sku || it.id || "");
             if(!sku) continue;
-            out.push({ ...it, loc, sku, title: it.title || "", qty, lowStockThreshold: it.lowStockThreshold });
+            out.push({ ...it, loc, sku, title: it.title || "", qty, physicalQty: Number.isFinite(Number(it.qty)) ? Math.round(Number(it.qty)) : 0, reservedQty: reservedQtyFromItem(it), lowStockThreshold: it.lowStockThreshold });
           }
         }
       };
@@ -5858,8 +6127,9 @@ function currentInv(){
         const meta = parseTitleMeta(it.title || "");
         const titleMain = meta.main ? escapeHtml(meta.main) : (it.title ? escapeHtml(it.title) : "<span class='muted'>(senza nome)</span>");
         const sku = escapeHtml(toSkuId(it.sku||""));
-        const qty = Number.isFinite(it.qty) ? it.qty : 0;
-        const badgeClass = qty>0 ? (__isLowStockItem({ ...it, qty }) ? "warn" : "ok") : "bad";
+        const qty = lowStockQtyValue(it);
+        const reservedInfo = lowStockQtyMetaLabel(it);
+        const badgeClass = qty>0 ? (__isLowStockItem(it) ? "warn" : "ok") : "bad";
         const locLabel = escapeHtml(prettyLoc(it.loc));
         const rackText = rackLocationDisplayFromItem(it);
         const rackLabel = rackText !== "—" ? ` • Ubicazione: ${escapeHtml(rackText)}` : "";
@@ -5875,7 +6145,7 @@ function currentInv(){
             <div class="gridCell gridSku">${sku}</div>
             <div class="gridCell">
               <div class="gridProdMain">${titleMain}${reorderBadge}</div>
-              <div class="gridProdSub">${locLabel}${rackLabel} • Soglia: ${sogliaLabel}</div>
+              <div class="gridProdSub">${locLabel}${rackLabel} • Soglia: ${sogliaLabel}${reservedInfo ? ` • ${escapeHtml(reservedInfo)}` : ""}</div>
             </div>
             <div class="gridCell gridRight"><span class="badge ${badgeClass}">${qty}</span></div>
           </div>`;
@@ -6061,7 +6331,7 @@ function currentInv(){
         pushLoc("cerea");
         pushLoc("concamarise");
 
-        out.sort((x,y)=> (x.qty||0) - (y.qty||0));
+        out.sort((x,y)=> lowStockQtyValue(x) - lowStockQtyValue(y));
         lowCount.textContent = fmtN(out.length);
 
 
@@ -6081,8 +6351,9 @@ function currentInv(){
           const meta = parseTitleMeta(it.title || "");
           const titleMain = meta.main ? escapeHtml(meta.main) : (it.title ? escapeHtml(it.title) : "<span class='muted'>(senza nome)</span>");
           const sku = escapeHtml(toSkuId(it.sku||""));
-          const qty = Number.isFinite(it.qty) ? it.qty : 0;
-          const badgeClass = qty>0 ? (__isLowStockItem({ ...it, qty }) ? "warn" : "ok") : "bad";
+          const qty = lowStockQtyValue(it);
+          const reservedInfo = lowStockQtyMetaLabel(it);
+          const badgeClass = qty>0 ? (__isLowStockItem(it) ? "warn" : "ok") : "bad";
           const locLabel = escapeHtml(prettyLoc(it.loc));
           const rackText = rackLocationDisplayFromItem(it);
           const rackLabel = rackText !== "—" ? ` • Ubicazione: ${escapeHtml(rackText)}` : "";
@@ -6096,7 +6367,7 @@ function currentInv(){
               <div class="gridCell gridSku">${sku}</div>
               <div class="gridCell">
                 <div class="gridProdMain">${titleMain}${reorderBadge}</div>
-                <div class="gridProdSub">${locLabel}${rackLabel} • Soglia: ${sogliaLabel}</div>
+                <div class="gridProdSub">${locLabel}${rackLabel} • Soglia: ${sogliaLabel}${reservedInfo ? ` • ${escapeHtml(reservedInfo)}` : ""}</div>
               </div>
               <div class="badge ${badgeClass}">${qty}</div>
             </div>`;
@@ -6190,11 +6461,13 @@ function currentInv(){
         const metaSmall = buildMetaSmall(meta);
         const sku = escapeHtml(it.sku || it.id || meta.skuInTitle || "");
         const qty = Number.isFinite(it.qty) ? it.qty : 0;
-        const badgeClass = __isLowStockItem(it) ? (qty>0 ? "warn" : "bad") : "ok";
+        const availableQty = lowStockQtyValue(it);
+        const reservedInfo = lowStockQtyMetaLabel(it);
+        const badgeClass = __isLowStockItem(it) ? (availableQty>0 ? "warn" : "bad") : "ok";
         const thresholdSmall = `Soglia: ${__lowStockThresholdLabel(it)}`;
         const rackText = rackLocationDisplayFromItem(it);
         const rackSmall = rackText !== "—" ? `Ubicazione: ${rackText}` : "";
-        const metaLine = [metaSmall, rackSmall, thresholdSmall].filter(Boolean).join(" • ");
+        const metaLine = [metaSmall, rackSmall, reservedInfo, thresholdSmall].filter(Boolean).join(" • ");
         const metaHtml = metaLine ? `<div class="rowMeta">${escapeHtml(metaLine)}</div>` : ``;
         return `
           <div class="row">
@@ -6203,7 +6476,7 @@ function currentInv(){
               <div class="rowSub"><span class="mono">${sku}</span></div>
               ${metaHtml}
             </div>
-            <div class="badge ${badgeClass}">Q.tà: ${qty}</div>
+            <div class="badge ${badgeClass}">Q.tà: ${qty}${reservedInfo ? ` • Disp: ${availableQty}` : ""}</div>
           </div>
         `;
       }).join("");
@@ -8059,6 +8332,10 @@ function closeSheet(kind){
       return (typeRaw==="move") ? "Spostamento"
         : (typeRaw==="carica") ? "Carico"
         : (typeRaw==="scarica") ? "Scarico"
+        : (typeRaw==="prenotazione_scarico") ? "Prenotazione scarico"
+        : (typeRaw==="annulla_prenotazione_scarico") ? "Annulla prenotazione"
+        : (typeRaw==="prelievo_picking") ? "Prelievo picking"
+        : (typeRaw==="annulla_prelievo_picking") ? "Annulla prelievo"
         : (typeRaw==="combo_scarica") ? "Combo scarico"
         : (typeRaw==="combo_ripristino") ? "Combo ripristino"
         : (typeRaw==="rettifica") ? "Rettifica"
@@ -9739,9 +10016,9 @@ async function applyFlow(kind){
 
       if(!plans.length) return showToast("Nessuna riga valida","");
 
-      // Regola combo PDF: lo scarico inventario da PDF deve scaricare SOLO lo SKU padre.
-      // I figli combo restano intatti qui; lo scarico automatico figli rimane attivo solo per carichi esterni
-      // del padre provenienti dal Tabellone WRITE / app esterne.
+      // Regola combo PDF: lo scarico da PDF non scala subito niente; crea solo la prenotazione dello SKU padre.
+      // Il vero scarico avviene con la piccata nel Picking. I figli combo restano intatti qui;
+      // lo scarico automatico figli rimane attivo solo per carichi esterni dal Tabellone WRITE / app esterne.
       for(const p of plans){
         p.comboMap = null;
         p.comboLines = [];
@@ -9783,9 +10060,11 @@ async function applyFlow(kind){
                 appliedAt: api.serverTimestamp(),
                 appliedAtClient: tsClient,
                 appliedBy: state.user.email || "",
-                status: "PENDING",
+                status: kind === "scarica" ? "RESERVED" : "PENDING",
                 totalLines: p.aggregated.length,
                 totalPieces: p.totalPieces,
+                reservation: kind === "scarica" ? { active:true, status:"in_attesa_picking", reservedAtClient: tsClient, reservedBy: state.user.email || "", totalPieces: p.totalPieces } : null,
+                picking: kind === "scarica" ? { status:"da_prelevare", managedByPicking:true, pickedLines:{}, flowPicked:false, updatedAtClient: tsClient, updatedBy: state.user.email || "" } : null,
                 lines: p.aggregated.slice(0, 800).map(x=>({ sku:x.sku, title:x.title||"", qty: Math.abs(parseQty(x.qty)||0) })),
                 comboApplied: kind === "scarica" && Array.isArray(p.comboLines) && p.comboLines.length > 0,
                 comboVersion: 1,
@@ -9807,7 +10086,8 @@ async function applyFlow(kind){
           throw err;
         }
 
-        // Applica inventario per ciascun magazzino, in batch
+        // Applica inventario per carichi; per scarichi da PDF crea SOLO prenotazione cloud.
+        // Lo scarico fisico degli SKU avviene dopo, dalla piccata nel Picking.
         for(const p of planChunks){
           for(const part of p.chunks){
             const batch = api.writeBatch(db);
@@ -9816,42 +10096,84 @@ async function applyFlow(kind){
               const sku = toSkuId(it.sku);
               if(!sku) continue;
               const title = squashWhitespace(it.title||"") || sku;
-              const delta = deltaSign * Math.abs(parseQty(it.qty) || 0);
+              const qtyAbs = Math.abs(parseQty(it.qty) || 0);
+              if(!qtyAbs) continue;
               const ref = api.doc(db, COL_ROOT, p.loc, SUB_ITEMS, sku);
               const currentMap = p.loc === "concamarise" ? mapConca : mapCerea;
               const currentItem = currentMap.get(sku) || {};
-              const beforeQty = Number.isFinite(Number(currentItem.qty)) ? Number(currentItem.qty) : 0;
-              const afterQty = beforeQty + delta;
-              const rackClearData = afterQty <= 0 ? { rackLocation: "", rackLocations: [] } : {};
-              batch.set(ref, {
-                sku,
-                title: title || "",
-                titleNorm: normalizeText(title || sku),
-                qty: api.increment(delta),
-                ...rackClearData,
-                updatedAt: api.serverTimestamp(),
-                updatedAtClient: tsClient,
-                updatedBy: state.user.email || "",
-                location: p.loc
-              }, { merge:true });
 
-              addProductMovementToBatch(batch, api, db, sku, {
-                type: (kind === "scarica") ? "scarica" : "carica",
-                qtySigned: delta,
-                deltaSigned: delta,
-                fromWarehouse: p.loc,
-                toWarehouse: p.loc,
-                source: "flusso_pdf",
-                note: flowMovementNote(kind, 1, wfLabel || (flow.file?.name || p.flowDocId || "")),
-                flowKind: kind,
-                flowId: p.flowDocId || wfId || "",
-                flowName: wfLabel || flow.file?.name || "",
-                fileName: flow.file?.name || "",
-                createdAtClient: tsClient
-              });
+              if(kind === "scarica"){
+                batch.set(ref, {
+                  sku,
+                  title: title || "",
+                  titleNorm: normalizeText(title || sku),
+                  reservedQty: api.increment(qtyAbs),
+                  pendingPickQty: api.increment(qtyAbs),
+                  reservationStatus: "in_attesa_picking",
+                  lastReservationFlowId: p.flowDocId || wfId || "",
+                  lastReservationWorkflowId: wfId || null,
+                  lastReservationFileName: flow.file?.name || "",
+                  reservedAt: api.serverTimestamp(),
+                  reservedAtClient: tsClient,
+                  reservedBy: state.user.email || "",
+                  updatedAt: api.serverTimestamp(),
+                  updatedAtClient: tsClient,
+                  updatedBy: state.user.email || "",
+                  location: p.loc
+                }, { merge:true });
+
+                addProductMovementToBatch(batch, api, db, sku, {
+                  type: "prenotazione_scarico",
+                  qtySigned: 0,
+                  deltaSigned: 0,
+                  reservationQty: qtyAbs,
+                  reservedQtySigned: qtyAbs,
+                  fromWarehouse: p.loc,
+                  toWarehouse: p.loc,
+                  source: "flusso_pdf_prenotazione",
+                  note: `Prenotazione scarico${wfLabel ? " • " + wfLabel : (flow.file?.name ? " • " + flow.file.name : "")}`,
+                  flowKind: kind,
+                  flowId: p.flowDocId || wfId || "",
+                  flowName: wfLabel || flow.file?.name || "",
+                  fileName: flow.file?.name || "",
+                  reservationStatus: "in_attesa_picking",
+                  createdAtClient: tsClient
+                });
+              }else{
+                const delta = deltaSign * qtyAbs;
+                const beforeQty = Number.isFinite(Number(currentItem.qty)) ? Number(currentItem.qty) : 0;
+                const afterQty = beforeQty + delta;
+                const rackClearData = afterQty <= 0 ? { rackLocation: "", rackLocations: [], rackAllocations: [] } : {};
+                batch.set(ref, {
+                  sku,
+                  title: title || "",
+                  titleNorm: normalizeText(title || sku),
+                  qty: api.increment(delta),
+                  ...rackClearData,
+                  updatedAt: api.serverTimestamp(),
+                  updatedAtClient: tsClient,
+                  updatedBy: state.user.email || "",
+                  location: p.loc
+                }, { merge:true });
+
+                addProductMovementToBatch(batch, api, db, sku, {
+                  type: "carica",
+                  qtySigned: delta,
+                  deltaSigned: delta,
+                  fromWarehouse: p.loc,
+                  toWarehouse: p.loc,
+                  source: "flusso_pdf",
+                  note: flowMovementNote(kind, 1, wfLabel || (flow.file?.name || p.flowDocId || "")),
+                  flowKind: kind,
+                  flowId: p.flowDocId || wfId || "",
+                  flowName: wfLabel || flow.file?.name || "",
+                  fileName: flow.file?.name || "",
+                  createdAtClient: tsClient
+                });
+              }
             }
 
-            // Non scrivere effetti combo per scarichi PDF: il padre viene scaricato, i figli non vengono toccati.
+            // Non scrivere effetti combo per scarichi PDF: il padre viene prenotato, i figli non vengono toccati.
 
             await batch.commit();
             p.committedBatches++;
@@ -9892,9 +10214,11 @@ async function applyFlow(kind){
           if(reservedLogs){
             for(const p of planChunks){
               await api.updateDoc(p.logRef, {
-                status: "DONE",
+                status: kind === "scarica" ? "RESERVED" : "DONE",
                 totalLines: p.aggregated.length,
                 totalPieces: p.totalPieces,
+                reservation: kind === "scarica" ? { active:true, status:"in_attesa_picking", reservedAtClient: tsClient, reservedBy: state.user.email || "", totalPieces: p.totalPieces } : null,
+                picking: kind === "scarica" ? { status:"da_prelevare", managedByPicking:true, pickedLines:{}, flowPicked:false, updatedAtClient: tsClient, updatedBy: state.user.email || "" } : null,
                 workflow: flow.workflow || null,
                 workflowId: wfId || null,
                 workflowLabel: wfLabel || null,
@@ -9910,10 +10234,23 @@ async function applyFlow(kind){
           }
         }catch(_e){}
 
+        // Se è uno scarico PDF/ID flusso, il sottoscorta deve scattare subito sulla disponibilità già prenotata.
+        if(kind === "scarica"){
+          applyReservationToLocalInventory(planChunks, {
+            tsClient,
+            flowId: wfId || "",
+            fileName: flow.file?.name || ""
+          });
+        }
+
         // toast riepilogo
         const parts = planChunks.map(p=> `${prettyLoc(p.loc)}: ${p.aggregated.length} righe • ${p.totalPieces} pz`).join(" · ");
-        showToast("Applicato", parts || "OK", 2400);
-        scheduleLowStockEmailAfterUpdate("flow_" + kind);
+        showToast(kind === "scarica" ? "Prenotato" : "Applicato", parts || "OK", 2400);
+        if(kind === "scarica"){
+          scheduleLowStockEmailAfterUpdate("flow_scarica_prenotazione", { immediate:true });
+        }else{
+          scheduleLowStockEmailAfterUpdate("flow_" + kind);
+        }
 
 
         // reset flow UI
