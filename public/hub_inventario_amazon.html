@@ -1860,7 +1860,7 @@
             <div class="miniTop">
               <div>
                 <div class="miniTitle">Sotto scorta</div>
-                <div class="miniSub">Soglie personalizzabili per SKU • Cerea + Concamarise</div>
+                <div class="miniSub">Disponibile reale = giacenza fisica - prenotati • Cerea + Concamarise</div>
               </div>
               <div class="pill warn" id="homeLowStockCount">—</div>
             </div>
@@ -2115,7 +2115,7 @@ Tip:
       <div class="sheetTop">
         <div style="min-width:0">
           <p class="sheetTitle">Sottoscorta</p>
-          <div class="sheetSub">Tutti i prodotti sotto scorta con soglia personalizzabile per SKU su Concamarise e Cerea.</div>
+          <div class="sheetSub">Sotto scorta calcolata sul disponibile reale: giacenza fisica meno pezzi prenotati da scarichi ID flusso/PDF in attesa picking.</div>
         </div>
         <button class="btn" id="btnCloseSottoscorta" type="button">Chiudi</button>
       </div>
@@ -3117,92 +3117,32 @@ function guessTitleFromRaw(rawText, sku){
       }
     }
 
+    function physicalQtyFromItem(it){
+      try{
+        const q = Number(it && it.qty);
+        return Number.isFinite(q) ? Math.round(q) : 0;
+      }catch(_e){
+        return 0;
+      }
+    }
+
     function lowStockQtyMetaLabel(it){
-      const physical = Number.isFinite(Number(it?.qty)) ? Math.round(Number(it.qty)) : 0;
+      const physical = physicalQtyFromItem(it);
       const reserved = reservedQtyFromItem(it);
       if(reserved <= 0) return "";
       const available = Math.max(0, physical - reserved);
-      return `Disponibile: ${available} • Fisica: ${physical} • Prenotata: ${reserved}`;
+      return `Disponibile reale: ${available} • Fisica: ${physical} • Prenotati: ${reserved}`;
     }
 
+    function reservedMeaningText(){
+      return "Prenotati = pezzi già richiesti da uno scarico tramite ID flusso/PDF, ma non ancora prelevati. Restano fisicamente a magazzino finché il Picking non li preleva; intanto abbassano il disponibile reale e fanno scattare il sottoscorta.";
+    }
 
-    // Aggiornamento ottimistico immediato dopo prenotazione scarico:
-    // Firestore resta la fonte ufficiale, ma la UI/sottoscorta non aspetta il prossimo snapshot.
-    function applyReservationToLocalInventory(plans, opts = {}){
-      try{
-        const nowClient = Number(opts.tsClient || Date.now());
-        const nowDate = new Date(nowClient);
-        const flowId = String(opts.flowId || "");
-        const fileName = String(opts.fileName || "");
-        const arrPlans = Array.isArray(plans) ? plans : [];
-
-        for(const p of arrPlans){
-          const loc = (p && (p.loc === "cerea" || p.loc === "concamarise")) ? p.loc : "concamarise";
-          const inv = state.inventory?.[loc];
-          if(!inv || !Array.isArray(inv.items)) continue;
-
-          const bySku = new Map();
-          inv.items.forEach((item, idx)=>{
-            const s = toSkuId(item?.sku || item?.id || "");
-            if(s) bySku.set(s, { item, idx });
-          });
-
-          for(const line of (Array.isArray(p?.aggregated) ? p.aggregated : [])){
-            const sku = toSkuId(line?.sku || "");
-            const qtyAbs = Math.abs(parseQty(line?.qty || 0) || 0);
-            if(!sku || !qtyAbs) continue;
-
-            const title = squashWhitespace(line?.title || sku) || sku;
-            const hit = bySku.get(sku);
-            if(hit && hit.item){
-              const item = hit.item;
-              const prevReserved = reservedQtyFromItem(item);
-              const prevPending = Number.isFinite(Number(item.pendingPickQty)) ? Math.max(0, Math.round(Number(item.pendingPickQty))) : prevReserved;
-              item.sku = item.sku || sku;
-              item.title = item.title || title;
-              item.titleNorm = item.titleNorm || normalizeText(item.title || sku);
-              item.reservedQty = prevReserved + qtyAbs;
-              item.pendingPickQty = prevPending + qtyAbs;
-              item.availableQty = lowStockQtyValue(item);
-              item.reservationStatus = "in_attesa_picking";
-              item.lastReservationFlowId = flowId || p.flowDocId || item.lastReservationFlowId || "";
-              item.lastReservationFileName = fileName || item.lastReservationFileName || "";
-              item.updatedAtClient = nowClient;
-              item.location = loc;
-            }else{
-              const item = {
-                id: sku,
-                sku,
-                title,
-                titleNorm: normalizeText(title || sku),
-                qty: 0,
-                reservedQty: qtyAbs,
-                pendingPickQty: qtyAbs,
-                availableQty: 0,
-                reservationStatus: "in_attesa_picking",
-                lastReservationFlowId: flowId || p.flowDocId || "",
-                lastReservationFileName: fileName,
-                updatedAtClient: nowClient,
-                location: loc
-              };
-              inv.items.push(item);
-              bySku.set(sku, { item, idx: inv.items.length - 1 });
-            }
-          }
-
-          if(inv.meta){
-            inv.meta.loaded = true;
-            inv.meta.lastUpdatedAt = nowDate;
-          }
-        }
-
-        if(typeof renderHomeDashboard === "function") renderHomeDashboard();
-        if(typeof renderInventoryList === "function") renderInventoryList();
-        if(typeof renderSottoscortaSheet === "function" && state.ui?.sheet === "sottoscorta") renderSottoscortaSheet();
-        if(typeof renderProductDetailsSheet === "function" && state.ui?.sheet === "productDetails") renderProductDetailsSheet();
-      }catch(err){
-        console.warn("reservation optimistic update", err);
-      }
+    function reservedFormulaText(it){
+      const physical = physicalQtyFromItem(it);
+      const reserved = reservedQtyFromItem(it);
+      const available = Math.max(0, physical - reserved);
+      return `Disponibile reale: ${available} = Fisica: ${physical} - Prenotati: ${reserved}`;
     }
 
     // --- policy sotto-scorta ---
@@ -3513,10 +3453,8 @@ function guessTitleFromRaw(rawText, sku){
             const main = (meta && meta.main) ? String(meta.main).trim() : String(it.title||"").trim();
             const product = main || "(senza nome)";
             const qty = __fmtQty(lowStockQtyValue(it));
-            const physicalQty = __fmtQty(Number.isFinite(Number(it.qty)) ? Math.round(Number(it.qty)) : 0);
-            const reservedQty = __fmtQty(reservedQtyFromItem(it));
             const threshold = __lowStockThresholdShort(it);
-            return { product, qty, physicalQty, reservedQty, threshold };
+            return { product, qty, threshold };
           })
           .sort((a,b)=>{
             const qa = Number(a.qty);
@@ -3536,13 +3474,13 @@ function guessTitleFromRaw(rawText, sku){
         if(!rows.length) return `${label}:
 (nessun prodotto sotto soglia)
 `;
-        const maxLen = Math.min(42, rows.reduce((m,r)=> Math.max(m, String(r.product||"").length), 0) || 18);
-        const headerLine = `${"Prodotto".padEnd(maxLen, " ")}  |  Disp. | Fisica | Prenot. | Soglia`;
-        const sepLine = `${"-".repeat(maxLen)}--|--------|--------|---------|--------`;
+        const maxLen = Math.min(46, rows.reduce((m,r)=> Math.max(m, String(r.product||"").length), 0) || 18);
+        const headerLine = `${"Prodotto".padEnd(maxLen, " ")}  |  Scorta  | Soglia`;
+        const sepLine = `${"-".repeat(maxLen)}--|----------|--------`;
         const textLines = rows.map(r=>{
           const p = String(r.product||"");
           const name = (p.length>maxLen) ? (p.slice(0, Math.max(0, maxLen-1)) + "…") : p;
-          return `${name.padEnd(maxLen, " ")}  |  ${String(r.qty).padStart(5, " ")} | ${String(r.physicalQty||"0").padStart(6, " ")} | ${String(r.reservedQty||"0").padStart(7, " ")} | ${String(r.threshold||"—")}`;
+          return `${name.padEnd(maxLen, " ")}  |  ${String(r.qty).padStart(6, " ")}  | ${String(r.threshold||"—")}`;
         });
         return `${label}:
 ${headerLine}
@@ -3573,12 +3511,6 @@ ${textLines.join("\n")}
               ${escapeHtml(String(r.qty))}
             </td>
             <td style="padding:10px 12px; border-bottom:1px solid #e9eef2; vertical-align:top; text-align:right; white-space:nowrap; font-size:14px; color:#111">
-              ${escapeHtml(String(r.physicalQty || "0"))}
-            </td>
-            <td style="padding:10px 12px; border-bottom:1px solid #e9eef2; vertical-align:top; text-align:right; white-space:nowrap; font-size:14px; color:#111">
-              ${escapeHtml(String(r.reservedQty || "0"))}
-            </td>
-            <td style="padding:10px 12px; border-bottom:1px solid #e9eef2; vertical-align:top; text-align:right; white-space:nowrap; font-size:14px; color:#111">
               ${escapeHtml(String(r.threshold || "—"))}
             </td>
           </tr>
@@ -3592,13 +3524,7 @@ ${textLines.join("\n")}
                   Prodotto
                 </th>
                 <th style="text-align:right; padding:10px 12px; font-size:12px; letter-spacing:.04em; text-transform:uppercase; color:#556; background:#fbfcfd; border-bottom:1px solid #e9eef2; white-space:nowrap">
-                  Disponibile
-                </th>
-                <th style="text-align:right; padding:10px 12px; font-size:12px; letter-spacing:.04em; text-transform:uppercase; color:#556; background:#fbfcfd; border-bottom:1px solid #e9eef2; white-space:nowrap">
-                  Fisica
-                </th>
-                <th style="text-align:right; padding:10px 12px; font-size:12px; letter-spacing:.04em; text-transform:uppercase; color:#556; background:#fbfcfd; border-bottom:1px solid #e9eef2; white-space:nowrap">
-                  Prenotata
+                  Scorta
                 </th>
                 <th style="text-align:right; padding:10px 12px; font-size:12px; letter-spacing:.04em; text-transform:uppercase; color:#556; background:#fbfcfd; border-bottom:1px solid #e9eef2; white-space:nowrap">
                   Soglia
@@ -3608,7 +3534,7 @@ ${textLines.join("\n")}
             <tbody>
               ${htmlRows || `
                 <tr>
-                  <td colspan="5" style="padding:12px; font-size:14px; color:#556">Nessun prodotto sotto soglia 🎯</td>
+                  <td colspan="3" style="padding:12px; font-size:14px; color:#556">Nessun prodotto sotto soglia 🎯</td>
                 </tr>
               `}
             </tbody>
@@ -3656,20 +3582,18 @@ ${textLines.join("\n")}
         const m = parseTitleMeta(it.title || "");
         const title = (m.main || it.title || sku || "").slice(0, 120);
         const qty = lowStockQtyValue(it);
-        const physicalQty = Number.isFinite(Number(it.qty)) ? Math.round(Number(it.qty)) : 0;
         const reservedQty = reservedQtyFromItem(it);
         const threshold = __lowStockThresholdShort(it);
-        return { sku, title, qty, physicalQty, reservedQty, threshold };
+        return { sku, title, qty, reservedQty, threshold };
       });
       const previewCerea = (cerea || []).slice(0, 250).map(it=>{
         const sku = toSkuId(it.sku || "");
         const m = parseTitleMeta(it.title || "");
         const title = (m.main || it.title || sku || "").slice(0, 120);
         const qty = lowStockQtyValue(it);
-        const physicalQty = Number.isFinite(Number(it.qty)) ? Math.round(Number(it.qty)) : 0;
         const reservedQty = reservedQtyFromItem(it);
         const threshold = __lowStockThresholdShort(it);
-        return { sku, title, qty, physicalQty, reservedQty, threshold };
+        return { sku, title, qty, reservedQty, threshold };
       });
 
       const counts = { concamarise: (concamarise || []).length, cerea: (cerea || []).length };
@@ -4694,15 +4618,12 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
         const list = (arr||[]).slice(0, 120).map(it=>{
           const title = escapeHtml(String(it.title||"").trim() || "(senza nome)");
           const sku = escapeHtml(toSkuId(it.sku||""));
-          const qty = Number.isFinite(Number(it.qty)) ? Math.round(Number(it.qty)) : 0;
-          const physicalQty = Number.isFinite(Number(it.physicalQty)) ? Math.round(Number(it.physicalQty)) : "—";
-          const reservedQty = Number.isFinite(Number(it.reservedQty)) ? Math.round(Number(it.reservedQty)) : 0;
+          const qty = Number.isFinite(it.qty) ? it.qty : 0;
           const threshold = it.threshold ? String(it.threshold) : "—";
-          const qtyMeta = `Disp: ${qty}${physicalQty !== "—" ? ` · Fisica: ${physicalQty}` : ""}${reservedQty ? ` · Prenotata: ${reservedQty}` : ""}`;
           return `<div class="row" style="padding:8px 10px; border-top:1px solid rgba(0,0,0,.06);">
             <div class="rowMain">
               <p class="rowTitle" style="font-size:13px">${title}</p>
-              <div class="rowSub"><span class="mono">${sku}</span> · <span class="muted">${escapeHtml(locLabel)}</span> · ${escapeHtml(qtyMeta)} · Soglia: ${escapeHtml(threshold)}</div>
+              <div class="rowSub"><span class="mono">${sku}</span> · <span class="muted">${escapeHtml(locLabel)}</span> · Soglia: ${escapeHtml(threshold)}</div>
             </div>
             <div class="badge warn">${escapeHtml(String(qty))}</div>
           </div>`;
@@ -6105,7 +6026,7 @@ function currentInv(){
       });
 
       const scopeLabel = filterLoc ? prettyLoc(filterLoc) : "Concamarise + Cerea";
-      hint.textContent = `Sotto scorta: ${out.length} articoli (soglia: ${__lowStockPolicyLabel()}) • ${scopeLabel}`;
+      hint.textContent = `Sotto scorta: ${out.length} articoli • ${scopeLabel} • Quantità = disponibile reale (fisica - prenotati). Prenotati = scarichi ID flusso/PDF in attesa picking.`;
 
       if(!out.length){
         list.innerHTML = `<div class="hint">Nessun articolo sotto scorta 🎉</div>`;
@@ -6116,7 +6037,8 @@ function currentInv(){
         <div class="row gridHead gridRow">
           <div class="gridCell">SKU</div>
           <div class="gridCell">Prodotto</div>
-          <div class="gridCell gridRight">Q.tà</div>
+          <div class="gridCell gridRight">Disp.</div>
+          <div class="gridCell gridRight">Prenotati</div>
         </div>`;
 
       // Conteggio riordinati / da riordinare per riga TOTALE
@@ -6128,8 +6050,11 @@ function currentInv(){
         const titleMain = meta.main ? escapeHtml(meta.main) : (it.title ? escapeHtml(it.title) : "<span class='muted'>(senza nome)</span>");
         const sku = escapeHtml(toSkuId(it.sku||""));
         const qty = lowStockQtyValue(it);
-        const reservedInfo = lowStockQtyMetaLabel(it);
+        const physicalQty = physicalQtyFromItem(it);
+        const reservedQty = reservedQtyFromItem(it);
+        const reservedInfo = reservedFormulaText(it);
         const badgeClass = qty>0 ? (__isLowStockItem(it) ? "warn" : "ok") : "bad";
+        const reservedBadgeClass = reservedQty > 0 ? "warn" : "";
         const locLabel = escapeHtml(prettyLoc(it.loc));
         const rackText = rackLocationDisplayFromItem(it);
         const rackLabel = rackText !== "—" ? ` • Ubicazione: ${escapeHtml(rackText)}` : "";
@@ -6145,9 +6070,10 @@ function currentInv(){
             <div class="gridCell gridSku">${sku}</div>
             <div class="gridCell">
               <div class="gridProdMain">${titleMain}${reorderBadge}</div>
-              <div class="gridProdSub">${locLabel}${rackLabel} • Soglia: ${sogliaLabel}${reservedInfo ? ` • ${escapeHtml(reservedInfo)}` : ""}</div>
+              <div class="gridProdSub">${locLabel}${rackLabel} • Fisica: ${physicalQty} • Soglia: ${sogliaLabel}${reservedInfo ? ` • ${escapeHtml(reservedInfo)}` : ""}</div>
             </div>
             <div class="gridCell gridRight"><span class="badge ${badgeClass}">${qty}</span></div>
+            <div class="gridCell gridRight"><span class="badge ${reservedBadgeClass}">${reservedQty}</span></div>
           </div>`;
       });
 
@@ -6162,7 +6088,7 @@ function currentInv(){
           <div class="gridTotalVal"><span class="badge">${out.length}</span></div>
         </div>`;
 
-      list.innerHTML = `<div class="gridTable cols3">${tableHead}${rows.join("")}${totalRow}</div>`;
+      list.innerHTML = `<div class="gridTable cols4">${tableHead}${rows.join("")}${totalRow}</div>`;
     }
 
 
@@ -6352,8 +6278,11 @@ function currentInv(){
           const titleMain = meta.main ? escapeHtml(meta.main) : (it.title ? escapeHtml(it.title) : "<span class='muted'>(senza nome)</span>");
           const sku = escapeHtml(toSkuId(it.sku||""));
           const qty = lowStockQtyValue(it);
-          const reservedInfo = lowStockQtyMetaLabel(it);
+          const physicalQty = physicalQtyFromItem(it);
+          const reservedQty = reservedQtyFromItem(it);
+          const reservedInfo = reservedFormulaText(it);
           const badgeClass = qty>0 ? (__isLowStockItem(it) ? "warn" : "ok") : "bad";
+          const reservedBadgeClass = reservedQty > 0 ? "warn" : "";
           const locLabel = escapeHtml(prettyLoc(it.loc));
           const rackText = rackLocationDisplayFromItem(it);
           const rackLabel = rackText !== "—" ? ` • Ubicazione: ${escapeHtml(rackText)}` : "";
@@ -6367,9 +6296,10 @@ function currentInv(){
               <div class="gridCell gridSku">${sku}</div>
               <div class="gridCell">
                 <div class="gridProdMain">${titleMain}${reorderBadge}</div>
-                <div class="gridProdSub">${locLabel}${rackLabel} • Soglia: ${sogliaLabel}${reservedInfo ? ` • ${escapeHtml(reservedInfo)}` : ""}</div>
+                <div class="gridProdSub">${locLabel}${rackLabel} • Fisica: ${physicalQty} • Soglia: ${sogliaLabel}${reservedInfo ? ` • ${escapeHtml(reservedInfo)}` : ""}</div>
               </div>
-              <div class="badge ${badgeClass}">${qty}</div>
+              <div class="gridCell gridRight"><span class="badge ${badgeClass}">${qty}</span></div>
+              <div class="gridCell gridRight"><span class="badge ${reservedBadgeClass}">${reservedQty}</span></div>
             </div>`;
         });
 
@@ -6384,8 +6314,9 @@ function currentInv(){
             <div class="gridTotalVal"><span class="badge">${out.length}</span></div>
           </div>`;
 
-        lowList.innerHTML = `<div class="row gridHead gridRow"><div class="gridCell">SKU</div><div class="gridCell">Prodotto</div><div class="gridCell gridRight">Q.tà</div></div>` + rows.join("") + totalRow;
-        if(lowHint) lowHint.textContent = "Tocca una riga per aprire i dettagli articolo e modificare la soglia.";
+        lowList.classList.add("cols4");
+        lowList.innerHTML = `<div class="row gridHead gridRow"><div class="gridCell">SKU</div><div class="gridCell">Prodotto</div><div class="gridCell gridRight">Disp.</div><div class="gridCell gridRight">Prenotati</div></div>` + rows.join("") + totalRow;
+        if(lowHint) lowHint.textContent = "Disponibile reale = giacenza fisica - prenotati. Prenotati = scarichi ID flusso/PDF in attesa picking. Tocca una riga per aprire la scheda SKU.";
       }
 
       // log ultimo invio mail sotto scorta (da meta Firestore)
@@ -6476,7 +6407,7 @@ function currentInv(){
               <div class="rowSub"><span class="mono">${sku}</span></div>
               ${metaHtml}
             </div>
-            <div class="badge ${badgeClass}">Q.tà: ${qty}${reservedInfo ? ` • Disp: ${availableQty}` : ""}</div>
+            <div class="badge ${badgeClass}">Fisica: ${qty}${reservedInfo ? ` • Disp: ${availableQty}` : ""}</div>
           </div>
         `;
       }).join("");
@@ -8025,6 +7956,12 @@ function closeSheet(kind){
 
   const titleMain = (it && it.title) ? String(it.title) : sku;
   const qty = (it && typeof it.qty !== "undefined") ? it.qty : 0;
+  const physicalQty = physicalQtyFromItem(it || { qty });
+  const reservedQty = reservedQtyFromItem(it || {});
+  const availableQty = lowStockQtyValue(it || { qty });
+  const reservedOriginLabel = reservedQty > 0
+    ? "Scarichi ID flusso/PDF in attesa picking"
+    : "Nessuna prenotazione attiva";
   const note = (it && (it.note || it.notes)) ? String(it.note || it.notes) : "";
   const rackLocations = readRackLocationsFromDoc(it || {});
   const rackLocation = rackLocations[0] || "";
@@ -8040,7 +7977,7 @@ function closeSheet(kind){
   const comboLabel = comboChildren.length ? `Combo: ${comboChildren.length}/3` : "Combo: nessuna";
 
   if(titleEl) titleEl.textContent = titleMain;
-  if(sub) sub.textContent = `${sku} • ${prettyLoc(loc)} • Ubicazione: ${rackLocationsText} • Soglia: ${lowStockThresholdLabel} • ${comboLabel}`;
+  if(sub) sub.textContent = `${sku} • ${prettyLoc(loc)} • Disp: ${availableQty} • Fisica: ${physicalQty} • Prenotati: ${reservedQty} • Ubicazione: ${rackLocationsText} • Soglia: ${lowStockThresholdLabel} • ${comboLabel}`;
 
   const isAdmin = !!state.user?.isAdmin;
   const editMode = !!state.ui.productDetailsEditMode;
@@ -8071,6 +8008,16 @@ function closeSheet(kind){
     </div>
   `;
 
+  const prenotatiSectionHtml = `
+    <div class="pdSection">
+      <div class="pdSectionTitle">Prenotati</div>
+      ${roLine("Pezzi prenotati", String(reservedQty))}
+      ${roLine("Origine", reservedOriginLabel)}
+      ${roLine("Formula sottoscorta", `Disponibile reale ${availableQty} = fisica ${physicalQty} - prenotati ${reservedQty}`)}
+      <div class="pdMeta">${escapeHtml(reservedMeaningText())}</div>
+    </div>
+  `;
+
   if(!editMode){
     content.innerHTML = `
       <div class="pd">
@@ -8089,10 +8036,14 @@ function closeSheet(kind){
 
         <div class="pdSection">
           <div class="pdSectionTitle">Quantità</div>
-          ${roLine("Disponibile", String(qty))}
+          ${roLine("Disponibile reale", String(availableQty))}
+          ${roLine("Giacenza fisica", String(physicalQty))}
           ${roLine("Pezzi da spostare (default)", String(qty))}
           ${roLine("Soglia sottoscorta", lowStockThresholdLabel)}
+          <div class="pdMeta">Il sottoscorta usa il disponibile reale, non la sola giacenza fisica.</div>
         </div>
+
+        ${prenotatiSectionHtml}
 
         <div class="pdSection">
           <div class="pdSectionTitle">Combo</div>
@@ -8164,9 +8115,19 @@ function closeSheet(kind){
           <div class="pdSectionTitle">Quantità</div>
           <div class="pdGrid">
             <div class="field">
-              <label class="fieldLabel">Disponibile</label>
+              <label class="fieldLabel">Disponibile reale</label>
+              <input class="input" value="${escapeHtml(String(availableQty))}" disabled />
+              <div class="hint" style="margin-top:6px">Calcolato: fisica - prenotati. È il numero usato dal sottoscorta.</div>
+            </div>
+            <div class="field">
+              <label class="fieldLabel">Giacenza fisica</label>
               <input class="input" inputmode="text" data-field="qty" value="${escapeHtml(String(qty))}" ${canEdit ? "" : "disabled"} />
               <div class="fieldError" data-err="qty" style="display:none;"></div>
+            </div>
+            <div class="field">
+              <label class="fieldLabel">Prenotati</label>
+              <input class="input" value="${escapeHtml(String(reservedQty))}" disabled />
+              <div class="hint" style="margin-top:6px">${escapeHtml(reservedOriginLabel)}</div>
             </div>
             <div class="field">
               <label class="fieldLabel">Pezzi da spostare</label>
@@ -8177,10 +8138,12 @@ function closeSheet(kind){
               <label class="fieldLabel">Soglia sottoscorta</label>
               <input class="input" inputmode="numeric" data-field="lowStockThreshold" value="${escapeHtml(lowStockThresholdValue)}" placeholder="Vuoto = automatica" ${canEdit ? "" : "disabled"} />
               <div class="fieldError" data-err="lowStockThreshold" style="display:none;"></div>
-              <div class="hint" style="margin-top:6px">Vuoto = ${escapeHtml(__lowStockThresholdLabel({ sku, title: titleMain }))}. Se inserisci un numero, l’articolo va sotto scorta a quantità ≤ soglia.</div>
+              <div class="hint" style="margin-top:6px">Vuoto = ${escapeHtml(__lowStockThresholdLabel({ sku, title: titleMain }))}. Se inserisci un numero, l’articolo va sotto scorta a quantità disponibile reale ≤ soglia.</div>
             </div>
           </div>
         </div>
+
+        ${prenotatiSectionHtml}
 
         <div class="pdSection">
           <div class="pdSectionTitle">Combo</div>
@@ -10234,23 +10197,10 @@ async function applyFlow(kind){
           }
         }catch(_e){}
 
-        // Se è uno scarico PDF/ID flusso, il sottoscorta deve scattare subito sulla disponibilità già prenotata.
-        if(kind === "scarica"){
-          applyReservationToLocalInventory(planChunks, {
-            tsClient,
-            flowId: wfId || "",
-            fileName: flow.file?.name || ""
-          });
-        }
-
         // toast riepilogo
         const parts = planChunks.map(p=> `${prettyLoc(p.loc)}: ${p.aggregated.length} righe • ${p.totalPieces} pz`).join(" · ");
         showToast(kind === "scarica" ? "Prenotato" : "Applicato", parts || "OK", 2400);
-        if(kind === "scarica"){
-          scheduleLowStockEmailAfterUpdate("flow_scarica_prenotazione", { immediate:true });
-        }else{
-          scheduleLowStockEmailAfterUpdate("flow_" + kind);
-        }
+        scheduleLowStockEmailAfterUpdate(kind === "scarica" ? "flow_scarica_prenotazione" : ("flow_" + kind));
 
 
         // reset flow UI
