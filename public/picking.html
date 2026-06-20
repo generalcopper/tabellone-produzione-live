@@ -2278,7 +2278,7 @@
     .pickingFlowTable{ width:100%; }
     .pickingFlowRow{
       display:grid;
-      grid-template-columns: 132px minmax(0,1.3fr) minmax(170px,.8fr) 88px 142px;
+      grid-template-columns: 132px minmax(0,1.3fr) minmax(170px,.8fr) 88px 190px;
       min-height:48px;
       border-bottom:1px solid var(--line2);
       align-items:stretch;
@@ -2305,6 +2305,46 @@
     .pickingFlowCell + .pickingFlowCell{ border-left:1px solid var(--line2); }
     .pickingFlowCell.right{ align-items:flex-end; text-align:right; }
     .pickingFlowCell .rackStack{ justify-content:flex-start; }
+    .pickingSkuActions{
+      display:flex;
+      align-items:center;
+      justify-content:flex-end;
+      gap:6px;
+      flex-wrap:wrap;
+      width:100%;
+    }
+    .pickingSkuActions .btn{ white-space:nowrap; }
+    .pickingFindBtn{
+      background: var(--surface);
+      color: var(--amazonBlue);
+      border-color: var(--infoLine);
+    }
+    .pickingFindBtn:hover{
+      background: var(--infoBg);
+      border-color: var(--infoLine);
+    }
+    .pickingFindBtn:disabled{
+      color: var(--muted2);
+      background: var(--surfaceAlt);
+      border-color: var(--line);
+      box-shadow:none;
+      opacity:.48;
+      cursor:not-allowed;
+    }
+    #homeLocatedList.findCols .row.gridRow,
+    #homeLocatedList.findCols .row.gridHead{
+      display:grid;
+      gap:0;
+      grid-template-columns: var(--col-sku) 1fr var(--col-qty) minmax(180px, var(--col-extra)) 96px;
+      grid-template-areas: "c1 c2 c3 c4 c5";
+      align-items:stretch;
+    }
+    #homeLocatedList.findCols .row.gridHead.gridRow{
+      grid-template-areas: "h1 h2 h3 h4 h5";
+    }
+    #homeLocatedList.findCols .row.gridRow .gridCell:nth-child(5){ grid-area:c5; }
+    #homeLocatedList.findCols .row.gridHead.gridRow .gridCell:nth-child(5){ grid-area:h5; }
+    #homeLocatedList.findCols .gridCell:nth-child(5){ align-items:flex-end; }
     .pickingPickedHistory{ margin-top:16px; }
     .pickingHistoryRow{
       display:grid;
@@ -2339,6 +2379,27 @@
       .pickingFlowCell:nth-child(4){ grid-area:qty; align-items:flex-end; }
       .pickingFlowCell:nth-child(5){ grid-area:act; align-items:flex-start; text-align:left; }
       .pickingFlowCell .rackStack{ justify-content:flex-start; }
+      .pickingSkuActions{ justify-content:flex-start; }
+      #homeLocatedList.findCols .row.gridHead{ display:none !important; }
+      #homeLocatedList.findCols .row.gridRow{
+        display:grid;
+        grid-template-columns: minmax(0,1fr) auto;
+        grid-template-areas:
+          "c1 c3"
+          "c2 c2"
+          "c4 c4"
+          "c5 c5";
+        column-gap:10px;
+        row-gap:6px;
+        padding:11px 14px;
+        align-items:center;
+      }
+      #homeLocatedList.findCols .row.gridRow .gridCell{ padding:0; border-left:0 !important; }
+      #homeLocatedList.findCols .row.gridRow .gridCell:nth-child(1){ grid-area:c1; }
+      #homeLocatedList.findCols .row.gridRow .gridCell:nth-child(2){ grid-area:c2; }
+      #homeLocatedList.findCols .row.gridRow .gridCell:nth-child(3){ grid-area:c3; justify-self:end; align-items:flex-end; }
+      #homeLocatedList.findCols .row.gridRow .gridCell:nth-child(4){ grid-area:c4; justify-self:stretch; align-items:flex-start; }
+      #homeLocatedList.findCols .row.gridRow .gridCell:nth-child(5){ grid-area:c5; justify-self:stretch; align-items:flex-start; }
       .pickingHistoryRow{
         grid-template-columns:1fr auto;
         grid-template-areas:
@@ -8824,6 +8885,93 @@ function currentInv(){
       }).join(", ");
     }
 
+    function firstRackLocationCodeFromItem(it){
+      try{
+        const allocations = readRackAllocationsFromDoc(it || {});
+        const withQty = allocations.find(x=> normalizeRackLocation(x?.code || "") && Number(x?.qty || 0) > 0);
+        const anyAlloc = withQty || allocations.find(x=> normalizeRackLocation(x?.code || ""));
+        if(anyAlloc) return normalizeRackLocation(anyAlloc.code || "");
+        const locs = readRackLocationsFromDoc(it || {});
+        return normalizeRackLocation(locs[0] || "");
+      }catch(_e){
+        return "";
+      }
+    }
+
+    function firstRackLocationCodeFromPicking(flow, sku){
+      try{
+        const parts = pickingLinePositionParts(flow, sku);
+        return normalizeRackLocation(parts?.[0]?.code || "");
+      }catch(_e){
+        return "";
+      }
+    }
+
+    function capannone3dTargetFile(){
+      try{
+        const current = decodeURIComponent(String(location.pathname || "").split("/").pop() || "");
+        // Se stai testando direttamente i file scaricati con parentesi, usa il file 3D caricato insieme.
+        // In produzione (picking.html) apre invece capannone_3d.html.
+        if(/^picking\([^)]*\)\.html$/i.test(current)) return "capannone_3d(2).html";
+      }catch(_e){}
+      return "capannone_3d.html";
+    }
+
+    function capannone3dUrlForRack(code){
+      const c = normalizeRackLocation(code || "");
+      const u = new URL(capannone3dTargetFile(), location.href);
+      u.searchParams.set("find", c);
+      u.hash = c;
+      return u.toString();
+    }
+
+    function openCapannone3dFind(code){
+      const c = normalizeRackLocation(code || "");
+      if(!c){
+        showToast("Non posizionato", "Questo SKU non ha ancora una posizione bancale.", 2200);
+        return;
+      }
+      if(!RACK_LOCATION_SET.has(c)){
+        showToast("Posizione non valida", `${c} non è nella mappa del capannone 3D.`, 2600);
+        return;
+      }
+
+      const msg = { type:"capannone3d:find", code:c, rackLocation:c };
+      let win = null;
+      try{ win = window.__capannone3dWindow || null; }catch(_e){ win = null; }
+
+      if(win && !win.closed){
+        try{ win.postMessage(msg, "*"); }catch(_e){}
+        try{ win.focus(); }catch(_e){}
+        setTimeout(()=>{ try{ win.postMessage(msg, "*"); }catch(_e){} }, 160);
+        showToast("Trova", `Capannone 3D → ${c}`, 1200);
+        return;
+      }
+
+      const url = capannone3dUrlForRack(c);
+      try{
+        win = window.open(url, "capannone_3d");
+        window.__capannone3dWindow = win;
+        if(win){
+          try{ win.focus(); }catch(_e){}
+          setTimeout(()=>{ try{ win.postMessage(msg, "*"); }catch(_e){} }, 850);
+          showToast("Trova", `Capannone 3D → ${c}`, 1200);
+        }else{
+          showToast("Popup bloccato", "Consenti l'apertura del Capannone 3D dal browser.", 2600);
+        }
+      }catch(err){
+        console.warn("open capannone 3d", err);
+        showToast("Errore apertura", "Non riesco ad aprire Capannone 3D.", 2400);
+      }
+    }
+
+    function findPalletButtonHtml(code){
+      const c = normalizeRackLocation(code || "");
+      const disabled = c ? "" : ' disabled aria-disabled="true"';
+      const title = c ? `Trova ${c} in Capannone 3D` : "SKU non posizionato";
+      return `<button class="btn small pickingFindBtn" type="button" data-action="findPallet" data-code="${escapeHtml(c)}" title="${escapeHtml(title)}"${disabled}>Trova</button>`;
+    }
+
     function pickingLineTitle(line, flow){
       const sku = toSkuId(line?.sku || "");
       const it = pickingLineProduct(flow, sku);
@@ -8975,16 +9123,18 @@ function currentInv(){
             const picked = isPickingLinePicked(flow, sku);
             const title = pickingLineTitle(line, flow);
             const posHtml = pickingLinePositionHtml(flow, sku);
+            const findCode = firstRackLocationCodeFromPicking(flow, sku);
             const statusHtml = picked
               ? `<span class="badge ok">Prelevato</span>`
               : `<button class="btn small amazon" type="button" data-action="pickSku" data-flowid="${escapeHtml(flowId)}" data-loc="${escapeHtml(loc)}" data-sku="${escapeHtml(sku)}">Preleva SKU</button>`;
+            const findHtml = findPalletButtonHtml(findCode);
             return `
               <div class="pickingFlowRow ${picked ? "picked" : ""}">
                 <div class="pickingFlowCell gridSku">${escapeHtml(sku)}</div>
                 <div class="pickingFlowCell"><div class="gridProdMain">${escapeHtml(title || sku)}</div><div class="gridProdSub">${escapeHtml(prettyLoc(loc))}</div></div>
                 <div class="pickingFlowCell">${posHtml}</div>
                 <div class="pickingFlowCell right"><span class="badge warn">${escapeHtml(String(qty))}</span></div>
-                <div class="pickingFlowCell right">${statusHtml}</div>
+                <div class="pickingFlowCell right"><div class="pickingSkuActions">${statusHtml}${findHtml}</div></div>
               </div>`;
           }).join("");
           const progressCls = st.done ? "done" : "";
@@ -9009,7 +9159,7 @@ function currentInv(){
                   <div class="pickingFlowCell">Prodotto</div>
                   <div class="pickingFlowCell">Posizione</div>
                   <div class="pickingFlowCell right">Q.tà</div>
-                  <div class="pickingFlowCell right">Prelievo</div>
+                  <div class="pickingFlowCell right">Azioni</div>
                 </div>
                 ${rows || `<div class="hint" style="padding:12px">Nessuna riga valida.</div>`}
               </div>
@@ -9494,6 +9644,7 @@ function currentInv(){
       const count = $("homeLocatedCount");
       const hint = $("homeLocatedHint");
       if(!list || !count) return;
+      list.classList.add("findCols");
 
       if(!state.user?.isWhitelisted){
         count.textContent = "—";
@@ -9530,6 +9681,8 @@ function currentInv(){
         const totalQty = Number.isFinite(Number(it.totalQty)) ? Math.round(Number(it.totalQty)) : allocatedQty;
         const remainingQty = Number.isFinite(Number(it.remainingQty)) ? Math.round(Number(it.remainingQty)) : 0;
         const rackHtml = rackLocationStackHtml(it);
+        const findCode = firstRackLocationCodeFromItem(it);
+        const findHtml = findPalletButtonHtml(findCode);
         const allocations = readRackAllocationsFromDoc(it || {});
         const lotsLine = allocations.length ? Array.from(new Set(allocations.map(a=>lotLabelFromId(a.lot)))).join(", ") : "";
         const metaLine = [locLabel, lotsLine ? `Lotti: ${lotsLine}` : "", `Totale: ${totalQty}`, remainingQty ? `Da ubicare: ${remainingQty}` : ""].filter(Boolean).join(" • ");
@@ -9542,10 +9695,11 @@ function currentInv(){
             </div>
             <div class="gridCell gridRight"><span class="badge ok">${escapeHtml(String(allocatedQty))}</span></div>
             <div class="gridCell gridRight">${rackHtml}</div>
+            <div class="gridCell gridRight">${findHtml}</div>
           </div>`;
       }).join("");
 
-      list.innerHTML = `<div class="row gridHead gridRow"><div class="gridCell">SKU</div><div class="gridCell">Prodotto</div><div class="gridCell gridRight">Ubicato</div><div class="gridCell gridRight">Ubicazioni</div></div>` + rows;
+      list.innerHTML = `<div class="row gridHead gridRow"><div class="gridCell">SKU</div><div class="gridCell">Prodotto</div><div class="gridCell gridRight">Ubicato</div><div class="gridCell gridRight">Ubicazioni</div><div class="gridCell gridRight">Trova</div></div>` + rows;
       if(hint){
         hint.textContent = q
           ? `Ricerca attiva: “${q}” • mostrati ${Math.min(out.length, 300).toLocaleString("it-IT")} candidati su ${out.length.toLocaleString("it-IT")} risultati (${all.length.toLocaleString("it-IT")} totali). Tocca una riga per vedere o modificare l’ubicazione.`
@@ -14808,6 +14962,15 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
       const homeLocated = $("homeLocatedList");
       if(homeLocated){
         homeLocated.addEventListener("click", (e)=>{
+          const findBtn = e.target?.closest?.("[data-action='findPallet']");
+          if(findBtn){
+            e.preventDefault();
+            e.stopPropagation();
+            if(findBtn.disabled) return;
+            openCapannone3dFind(findBtn.getAttribute("data-code") || "");
+            return;
+          }
+
           const row = e.target?.closest?.("[data-action='openHomeLocatedItem']");
           if(!row) return;
           const sku = row.getAttribute("data-sku") || "";
@@ -14816,6 +14979,7 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
           openProductDetailsSheet(sku);
         });
         homeLocated.addEventListener("keydown", (e)=>{
+          if(e.target?.closest?.("[data-action='findPallet']")) return;
           if(e.key!=="Enter" && e.key!==" ") return;
           const row = e.target?.closest?.("[data-action='openHomeLocatedItem']");
           if(!row) return;
@@ -14830,10 +14994,15 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
       const homePickingList = $("homePickingList");
       if(homePickingList){
         homePickingList.addEventListener("click", async (e)=>{
-          const btn = e.target?.closest?.("[data-action='pickSku'], [data-action='pickFlow']");
+          const btn = e.target?.closest?.("[data-action='pickSku'], [data-action='pickFlow'], [data-action='findPallet']");
           if(!btn) return;
           e.preventDefault(); e.stopPropagation();
           const action = btn.getAttribute("data-action") || "";
+          if(action === "findPallet"){
+            if(btn.disabled) return;
+            openCapannone3dFind(btn.getAttribute("data-code") || "");
+            return;
+          }
           const flowId = btn.getAttribute("data-flowid") || "";
           const loc = btn.getAttribute("data-loc") || "";
           if(action === "pickSku"){
