@@ -681,25 +681,10 @@ const legend=document.getElementById('legend');
   c.onclick=()=>{const v=VANI.find(x=>x.row===id); if(v)highlightVano(v);};
   legend.appendChild(c);
 });
-function normalizzaCodiceVano(code){
-  return String(code||'').trim().toUpperCase().replace(/\s+/g,'');
-}
-function trovaVanoDaCodice(code){
-  const q=normalizzaCodiceVano(code); if(!q) return null;
-  return VANI.find(x=>x.code===q)||VANI.find(x=>x.code.startsWith(q))||VANI.find(x=>x.row===q)||null;
-}
-function findAndHighlightRackCode(code){
-  const q=normalizzaCodiceVano(code); if(!q) return false;
-  const input=document.getElementById('q'); if(input) input.value=q;
-  const v=trovaVanoDaCodice(q);
-  if(v){ highlightVano(v); return true; }
-  const info=document.getElementById('info');
-  if(info) info.textContent='Pallet non trovato: '+q;
-  return false;
-}
 function doSearch(){
-  const q=document.getElementById('q').value; if(!String(q||'').trim())return;
-  findAndHighlightRackCode(q);
+  const q=document.getElementById('q').value.trim().toUpperCase(); if(!q)return;
+  let v=VANI.find(x=>x.code===q)||VANI.find(x=>x.code.startsWith(q))||VANI.find(x=>x.row===q);
+  if(v)highlightVano(v); else document.getElementById('info').textContent='Pallet non trovato: '+q;
 }
 document.getElementById('go').onclick=doSearch;
 document.getElementById('q').addEventListener('keydown',e=>{if(e.key==='Enter')doSearch();});
@@ -855,24 +840,41 @@ quota(CUT_X,SZ0+0.3, SX0,SZ0+0.3, null, 1.2);         // tra cartongesso e soppa
 
 dims.visible=true;
 
-const CAPANNONE_3D_FOCUS_DOC_ID = "__CAPANNONE_3D_FOCUS__";
+const CAPANNONE_3D_FOCUS_DOC_ID = "capannone3dFocus";
 let LAST_CAPANNONE_3D_FOCUS_KEY = "";
+
+function normalizeRackCode(code){
+  return String(code || "").trim().toUpperCase().replace(/\s+/g, "");
+}
+
+function findAndHighlightRackCode(code, opts={}){
+  const c = normalizeRackCode(code);
+  if(!c) return false;
+  const v = VANI_MAP[c] || VANI.find(x=>x.code===c) || VANI.find(x=>String(x.code||"").startsWith(c));
+  if(v){
+    highlightVano(v);
+    return true;
+  }
+  const info = document.getElementById('info');
+  if(info) info.textContent = 'Pallet non trovato: ' + c;
+  if(opts && opts.fromCloud) setCloudStatus('Comando Trova non trovato • ' + c, '#ef4444');
+  return false;
+}
 
 function handleCapannone3dFocusCommand(data){
   try{
     const d = data || {};
-    const code = normalizzaCodiceVano(d.rackLocation || d.code || d.find || d.targetRackLocation || "");
+    const code = normalizeRackCode(d.rackLocation || d.code || d.find || d.targetRackLocation || "");
     if(!code) return;
     const seq = String(d.focusSeq || d.commandId || d.focusAtClient || d.updatedAtClient || "");
     const key = `${seq}::${code}`;
     if(key && key === LAST_CAPANNONE_3D_FOCUS_KEY) return;
     LAST_CAPANNONE_3D_FOCUS_KEY = key;
 
-    // Lascia terminare l'aggiornamento grafico dei bancali, poi vola sulla posizione.
+    // piccolo delay: lascia terminare il refresh grafico dei bancali, poi vola sulla posizione
     setTimeout(()=>{
-      const ok = findAndHighlightRackCode(code);
+      const ok = findAndHighlightRackCode(code, { fromCloud:true });
       if(ok) setCloudStatus('Trova ricevuto • ' + code, '#22d3ee');
-      else setCloudStatus('Trova non trovato • ' + code, '#ef4444');
     }, 80);
   }catch(e){
     console.warn('focus command error', e);
@@ -881,32 +883,6 @@ function handleCapannone3dFocusCommand(data){
 
 window.illuminaVano=code=>findAndHighlightRackCode(code);
 
-function startupFindCode(){
-  try{
-    const u=new URL(location.href);
-    return u.searchParams.get('find') || u.searchParams.get('pallet') || u.searchParams.get('code') || u.searchParams.get('slot') || (location.hash ? decodeURIComponent(location.hash.slice(1)) : '');
-  }catch(_){
-    return location.hash ? decodeURIComponent(location.hash.slice(1)) : '';
-  }
-}
-function runStartupFind(){
-  const code=startupFindCode();
-  if(code) findAndHighlightRackCode(code);
-}
-window.addEventListener('message',(event)=>{
-  const data=event && event.data;
-  let code='';
-  if(data && typeof data==='object'){
-    const type=String(data.type||'');
-    if(type==='capannone3d:find' || type==='capannone:find' || type==='findPallet'){
-      code=data.code || data.rackLocation || data.pallet || data.slot || '';
-    }
-  }else if(typeof data==='string' && data.startsWith('find:')){
-    code=data.slice(5);
-  }
-  if(code) findAndHighlightRackCode(code);
-});
-setTimeout(runStartupFind,220);
 
 /* ===================================================================
    COLLEGAMENTO CLOUD (Firebase Firestore) — SOLA LETTURA, REALTIME
@@ -1023,6 +999,7 @@ initKioskSettingsUi();
       if(realtimeStarted) return;
       realtimeStarted = true;
       startInventoryRealtime(fs, db);
+      startCapannone3dFocusRealtime(fs, db);
     }
 
     authMod.onAuthStateChanged(auth, async (user)=>{
@@ -1045,6 +1022,38 @@ initKioskSettingsUi();
   }
 })();
 
+// avvia il listener realtime del comando Trova (Picking -> tutti i Capannone 3D aperti)
+function startCapannone3dFocusRealtime(fs, db){
+  try{
+    const ref = fs.doc(db, "amzInventoryProducts", CAPANNONE_3D_FOCUS_DOC_ID);
+    let firstFocusSnapshot = true;
+    fs.onSnapshot(ref, (snap)=>{
+      if(!snap.exists()){ firstFocusSnapshot = false; return; }
+      const data = snap.data() || {};
+      const code = normalizeRackCode(data.rackLocation || data.code || data.find || data.targetRackLocation || "");
+      const seq = String(data.focusSeq || data.commandId || data.focusAtClient || data.updatedAtClient || "");
+      const key = `${seq}::${code}`;
+
+      // Evita replay del vecchio comando quando il kiosk apre/ricarica Capannone 3D.
+      // Da qui in poi ogni update cloud ricevuto viene eseguito immediatamente.
+      if(firstFocusSnapshot){
+        firstFocusSnapshot = false;
+        if(key) LAST_CAPANNONE_3D_FOCUS_KEY = key;
+        return;
+      }
+
+      handleCapannone3dFocusCommand(data);
+    }, (err)=>{
+      console.error('Focus command Firestore error', err);
+      if(err && err.code === 'permission-denied'){
+        setCloudStatus('Permessi comando Trova mancanti • apri ⚙ UID', '#ef4444');
+      }
+    });
+  }catch(e){
+    console.error('Focus realtime init error', e);
+  }
+}
+
 // avvia il listener realtime sulle ubicazioni (dopo auth valida)
 function startInventoryRealtime(fs, db){
   setCloudStatus('Lettura ubicazioni…', '#f59e0b');
@@ -1053,17 +1062,9 @@ function startInventoryRealtime(fs, db){
   const colRef = fs.collection(db, "amzInventoryProducts");
   fs.onSnapshot(colRef, (snap)=>{
     const perCode = {};
-    let focusCommand = null;
     snap.forEach(docSnap=>{
       const d = docSnap.data() || {};
-
-      // Documento di comando scritto dal tasto Trova in picking.html.
-      // Non è un prodotto: serve solo a muovere live tutti i Capannone 3D già aperti.
-      if(docSnap.id === CAPANNONE_3D_FOCUS_DOC_ID || d._type === "capannone3dFocus" || d.type === "capannone3dFocus"){
-        focusCommand = d;
-        return;
-      }
-
+      if(docSnap.id === CAPANNONE_3D_FOCUS_DOC_ID || d._type === 'capannone3dFocus' || d.type === 'capannone3dFocus') return;
       const allocs = Array.isArray(d.rackAllocations) ? d.rackAllocations : [];
       const title = d.title || d.name || d.sku || docSnap.id;
       for(const a of allocs){
@@ -1080,7 +1081,6 @@ function startInventoryRealtime(fs, db){
     }
     const n = Object.keys(perCode).length;
     setCloudStatus(`Cloud live • ${n} ubicazioni`, '#22c55e');
-    if(focusCommand) handleCapannone3dFocusCommand(focusCommand);
   }, (err)=>{
     console.error('Firestore error', err);
     if(err && err.code === 'permission-denied'){
