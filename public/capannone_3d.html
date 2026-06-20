@@ -773,6 +773,7 @@ if(SHOW_IBC){for(let i=0;i<3;i++)for(let j=0;j<2;j++) ibc(-9+i*1.3,-0.7+j*1.4);}
 let highlightMesh=null,pulse=0;
 let selectedVano=null;   // vano attualmente selezionato
 let glowState=null;       // {meshes, light, label, labelBaseY, labelStart}
+let glowList=null;        // array di glow per illuminazione multi-ubicazione simultanea
 
 // crea uno sprite-etichetta (billboard) col nome prodotto, stile glass premium
 function makeLabelSprite(text){
@@ -837,79 +838,132 @@ function roundRectPath(ctx,x,y,w,h,r){
   ctx.closePath();
 }
 
-// pulisce il glow precedente sul bancale (ripristina i materiali condivisi originali)
-function clearGlow(){
-  if(!glowState) return;
-  for(const it of glowState.meshes){
+// pulisce un singolo oggetto glow (ripristina materiali, rimuove luce ed etichetta)
+function _disposeGlow(gs){
+  if(!gs) return;
+  for(const it of (gs.meshes||[])){
     if(it.mesh && it.original){
       it.mesh.material = it.original;
       if(it.clone && it.clone.dispose) it.clone.dispose();
     }
   }
-  if(glowState.light){ scene.remove(glowState.light); }
-  if(glowState.label){
-    scene.remove(glowState.label);
-    if(glowState.label.material){ if(glowState.label.material.map) glowState.label.material.map.dispose(); glowState.label.material.dispose(); }
+  if(gs.light){ scene.remove(gs.light); }
+  if(gs.label){
+    scene.remove(gs.label);
+    if(gs.label.material){ if(gs.label.material.map) gs.label.material.map.dispose(); gs.label.material.dispose(); }
   }
-  glowState=null;
+}
+// pulisce il glow precedente sul/sui bancale/i
+function clearGlow(){
+  if(glowState){ _disposeGlow(glowState); glowState=null; }
+  if(glowList){ for(const gs of glowList) _disposeGlow(gs); glowList=null; }
 }
 
 function clearHighlight(){
   clearGlow();
   if(highlightMesh){scene.remove(highlightMesh);highlightMesh.traverse(o=>{if(o.geometry)o.geometry.dispose();});highlightMesh=null;}
 }
-
-/* ===== VOCE IA (femminile, italiana) — Web Speech API ===== */
+/* ===== VOCE IA (femminile, naturale) — stesso TTS di app_tabellone =====
+   Usa la Cloud Function proxy ElevenLabs già deployata sul progetto Firebase.
+   Riproduce audio reale (non la voce robotica del browser). Fallback a speechSynthesis
+   solo se il TTS cloud non è raggiungibile. */
+const TTS_ELEVEN_PROXY_URL = "https://us-central1-tabellone-produzione-liv-e313e.cloudfunctions.net/ttsEleven";
 const Voce = (function(){
-  const synth = window.speechSynthesis || null;
-  let voce = null, pronta = false, abilitata = true;
-  function scegliVoce(){
-    if(!synth) return;
-    const voices = synth.getVoices() || [];
-    if(!voices.length) return;
-    const it = voices.filter(v=>/it(-|_)?/i.test(v.lang) || /italian|ital/i.test(v.name));
-    // preferenze: nomi tipicamente femminili IT, poi qualsiasi voce IT, poi default
-    const preferite = ['Alice','Elsa','Federica','Giulia','Carla','Google italiano','Microsoft Elsa'];
-    let scelta = null;
-    for(const p of preferite){ scelta = it.find(v=>v.name.toLowerCase().includes(p.toLowerCase())); if(scelta) break; }
-    if(!scelta){
-      // euristica: evita nomi maschili noti, prendi la prima IT
-      scelta = it.find(v=>!/(luca|cosimo|diego|paolo|male|uomo)/i.test(v.name)) || it[0];
-    }
-    voce = scelta || voices[0];
-    pronta = true;
-  }
-  if(synth){
-    scegliVoce();
-    synth.onvoiceschanged = scegliVoce;
-  }
-  function parla(testo){
-    if(!synth || !abilitata || !testo) return;
-    try{
-      synth.cancel();                       // interrompe l'annuncio precedente
-      const u = new SpeechSynthesisUtterance(testo);
-      if(voce) u.voice = voce;
-      u.lang = (voce && voce.lang) || 'it-IT';
-      u.rate = 1.0; u.pitch = 1.05; u.volume = 1.0;
-      synth.speak(u);
-    }catch(e){ console.warn('TTS error', e); }
-  }
-  function toggle(on){ abilitata = (on!==undefined)? !!on : !abilitata; if(!abilitata && synth) synth.cancel(); return abilitata; }
-  return { parla, toggle, get pronta(){return pronta;}, get abilitata(){return abilitata;} };
-})();
+  let abilitata = true;
+  let audio = null;            // elemento <audio> riutilizzato
+  let lastUrl = null;
+  let abort = null;
+  let primed = false;
 
-// sblocco audio: i browser bloccano la sintesi finché non c'è un'interazione utente.
-// Al primo tocco/click/tasto faccio un'enunciazione silenziosa per abilitare la voce.
-(function unlockSpeech(){
-  let done=false;
-  const unlock=()=>{
-    if(done) return; done=true;
-    try{ const u=new SpeechSynthesisUtterance(' '); u.volume=0; (window.speechSynthesis||{speak(){}}).speak(u); }catch(_){}
-    window.removeEventListener('pointerdown',unlock); window.removeEventListener('keydown',unlock); window.removeEventListener('touchstart',unlock);
-  };
-  window.addEventListener('pointerdown',unlock,{once:false});
-  window.addEventListener('keydown',unlock,{once:false});
-  window.addEventListener('touchstart',unlock,{once:false});
+  // sblocca/prepara l'audio (necessario su alcuni browser): chiamato all'avvio e su ogni evento
+  async function prime(){
+    try{
+      if(!audio) audio = new Audio();
+      audio.preload = "auto"; audio.autoplay = true;
+      // wav silenzioso brevissimo per "scaldare" l'elemento audio
+      audio.volume = 0.0001;
+      audio.src = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=";
+      await audio.play().catch(()=>{});
+      audio.pause(); audio.currentTime = 0; audio.volume = 1;
+      primed = true;
+    }catch(_){ /* verrà ritentato */ }
+  }
+
+  function _jsonToUrl(data){
+    if(!data || typeof data!=="object") return "";
+    const direct = data.audioUrl||data.url||data.downloadUrl||data.dataUrl;
+    if(direct) return String(direct);
+    const b64 = data.audioBase64||data.audioContent||data.base64;
+    if(b64){ const mime=data.mimeType||data.contentType||"audio/mpeg"; return `data:${mime};base64,${b64}`; }
+    return "";
+  }
+
+  // TTS cloud (ElevenLabs via proxy)
+  async function _cloud(text){
+    try{
+      if(abort) try{ abort.abort(); }catch(_){}
+      abort = new AbortController();
+      const to = setTimeout(()=>{ try{abort.abort();}catch(_){} }, 8000);
+      const res = await fetch(TTS_ELEVEN_PROXY_URL, {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({ text, language:"it-IT", lang:"it-IT", voice:"female",
+          voiceGender:"female", style:"natural", source:"kiosk_capannone3d" }),
+        signal: abort.signal, cache:"no-store"
+      });
+      clearTimeout(to);
+      if(!res.ok) throw new Error("tts-http-"+res.status);
+      const ct=String(res.headers.get("content-type")||"").toLowerCase();
+      let url="";
+      if(ct.includes("application/json")){ url=_jsonToUrl(await res.json()); }
+      else { const blob=await res.blob(); if(!blob||!blob.size) throw new Error("empty"); url=URL.createObjectURL(blob); lastUrl=url; }
+      if(!url) throw new Error("no-url");
+      if(!audio) audio=new Audio();
+      audio.preload="auto"; audio.autoplay=true; audio.volume=1; audio.src=url;
+      await audio.play();
+      return true;
+    }catch(e){
+      console.log("TTS cloud non disponibile:", e);
+      return false;
+    }
+  }
+
+  // fallback voce browser (solo se il cloud fallisce)
+  function _browser(text){
+    const synth=window.speechSynthesis; if(!synth) return false;
+    try{
+      synth.cancel();
+      const voices=synth.getVoices()||[];
+      const it=voices.filter(v=>/it/i.test(v.lang));
+      const pref=['Alice','Elsa','Federica','Giulia','Google italiano','Microsoft Elsa'];
+      let voce=null; for(const p of pref){ voce=it.find(v=>v.name.toLowerCase().includes(p.toLowerCase())); if(voce)break; }
+      if(!voce) voce=it[0]||voices[0];
+      const u=new SpeechSynthesisUtterance(text);
+      if(voce) u.voice=voce; u.lang=(voce&&voce.lang)||'it-IT'; u.rate=1.0; u.pitch=1.05;
+      synth.speak(u);
+      return true;
+    }catch(_){ return false; }
+  }
+
+  async function parla(testo){
+    const msg=String(testo||'').trim();
+    if(!abilitata || !msg) return;
+    try{ if(audio){ audio.pause(); audio.currentTime=0; } }catch(_){}
+    try{ if(window.speechSynthesis) window.speechSynthesis.cancel(); }catch(_){}
+    if(lastUrl){ try{ URL.revokeObjectURL(lastUrl); }catch(_){} lastUrl=null; }
+    const ok = await _cloud(msg);
+    if(!ok) _browser(msg);          // ripiego sulla voce browser
+  }
+  function toggle(on){ abilitata=(on!==undefined)?!!on:!abilitata;
+    if(!abilitata){ try{audio&&audio.pause();}catch(_){} try{window.speechSynthesis&&window.speechSynthesis.cancel();}catch(_){} }
+    return abilitata; }
+
+  // prime automatico all'avvio + su qualsiasi evento (kiosk senza mouse: ci pensa il primo render)
+  prime();
+  const ev=['pointerdown','keydown','touchstart','click'];
+  const onEv=()=>{ if(!primed) prime(); };
+  ev.forEach(e=>window.addEventListener(e,onEv,{passive:true}));
+
+  return { parla, toggle, prime, get abilitata(){return abilitata;} };
 })();
 
 // compone la frase parlata per un vano
@@ -948,12 +1002,9 @@ function fraseVano(v){
   return s;
 }
 
-function highlightVano(v){
-  clearHighlight();
-
-  // ===== ILLUMINAZIONE ISOLATA DEL BANCALE SELEZIONATO =====
-  // i materiali sono condivisi tra tutti i bancali: per illuminare SOLO il selezionato
-  // clono il materiale di ogni suo mesh e applico l'emissive sul clone.
+// crea l'illuminazione di UN bancale (materiali clonati con emissive + point light + etichetta)
+// ritorna l'oggetto glow; NON tocca lo stato globale.
+function _buildGlow(v, withLabel){
   const meshes=[];
   v.obj.traverse(o=>{
     if(o.isMesh && o.material){
@@ -964,32 +1015,30 @@ function highlightVano(v){
       meshes.push({mesh:o, original, clone});
     }
   });
-
-  // luce puntuale MOLTO contenuta e a corto raggio: tocca solo il bancale, non i vicini
   const light=new THREE.PointLight(0xbfe0ff, 6, 2.3, 2.5);
   light.position.set(v.center.x, v.center.y+0.9, v.center.z);
   scene.add(light);
-
-  glowState={meshes, light};
-
-  // ===== ETICHETTA PRODOTTO in sovraimpressione (billboard cinematico) =====
-  if(v.cont && v.cont.title){
+  const gs={meshes, light};
+  if(withLabel && v.cont && v.cont.title){
     const label=makeLabelSprite(v.cont.title);
-    // posiziona sopra la pila: uso il bounding box del bancale per stare sopra le scatole
     const box=new THREE.Box3().setFromObject(v.obj);
     const topY=isFinite(box.max.y)?box.max.y:(v.center.y+0.6);
-    const baseY=topY+0.55;                 // quota finale dell'etichetta
+    const baseY=topY+0.55;
     label.position.set(v.center.x, baseY, v.center.z);
-    label.material.opacity=0;              // parte invisibile (fade-in cinematico)
+    label.material.opacity=0;
     scene.add(label);
-    glowState.label=label;
-    glowState.labelBaseY=baseY;
-    glowState.labelStart=performance.now();
+    gs.label=label; gs.labelBaseY=baseY; gs.labelStart=performance.now();
   }
+  return gs;
+}
 
+function highlightVano(v, opts={}){
+  clearHighlight();
+  if(!opts.silent) clearMultiTour();   // una selezione singola interrompe un eventuale tour multi-ubicazione
+  glowState=_buildGlow(v, true);
   startCinematicTour(v); pulse=0;
   selectedVano=v;
-  Voce.parla(fraseVano(v));   // annuncio IA femminile in contemporanea col movimento
+  if(!opts.silent) Voce.parla(fraseVano(v));   // annuncio IA femminile in contemporanea col movimento
   const m=v.code.match(/^([A-F])(\d{2})-L(\d)-P(\d)$/);
   let txt = m ? `Pallet <b>${v.code}</b> · fila <b>${m[1]}</b> — campata ${m[2]}, liv. ${m[3]}, pos. ${m[4]}` : `Pallet <b>${v.code}</b>`;
   if(v.cont){
@@ -1003,7 +1052,9 @@ function highlightVano(v){
   }
   document.getElementById('info').innerHTML=txt;
 }
-const cam={theta:Math.PI*0.16,phi:Math.PI*0.10,r:34,tx:0,ty:1.8,tz:1};
+const cam=(innerWidth<innerHeight)
+  ? {theta:Math.PI*0.14,phi:Math.PI*0.20,r:34*Math.min(1.85,1+(1-innerWidth/innerHeight)*1.1),tx:0,ty:2.4,tz:1}
+  : {theta:Math.PI*0.16,phi:Math.PI*0.10,r:34,tx:0,ty:1.8,tz:1};
 const camS={...cam};   // versione interpolata per movimento fluido
 let tween=null;
 
@@ -1029,8 +1080,23 @@ function detailTheta(target,vano){
 function detailPose(target,vano){
   return {tx:target.x, ty:target.y+0.3, tz:target.z, r:8.5, theta:detailTheta(target,vano), phi:Math.PI*0.30};
 }
-// posa panoramica di riposo: vista d'insieme ravvicinata e bassa (cinematografica)
+// fattore di adattamento allo schermo verticale: in portrait arretro la camera e
+// alzo un po' lo sguardo così il capannone (sviluppato in larghezza) non viene tagliato.
+function portraitBoost(){
+  const a = innerWidth/innerHeight;
+  if(a >= 1) return 1;                 // landscape: nessun boost
+  // portrait: più è stretto, più arretro (fino a ~1.8x su 9:16)
+  return Math.min(1.85, 1 + (1-a)*1.1);
+}
+function isPortrait(){ return innerWidth < innerHeight; }
+
+// posa panoramica di riposo: vista d'insieme cinematografica, adattata all'orientamento
 function panoramaPose(){
+  const k=portraitBoost();
+  if(isPortrait()){
+    // schermo verticale: vista più dall'alto e arretrata per contenere tutta la larghezza
+    return {tx:0, ty:2.4, tz:1, r:34*k, theta:Math.PI*0.14, phi:Math.PI*0.20};
+  }
   return {tx:0, ty:1.8, tz:1, r:34, theta:Math.PI*0.16, phi:Math.PI*0.10};
 }
 // avvia un tween verso una posa, scegliendo il cammino angolare più breve
@@ -1107,7 +1173,8 @@ function buildShots(target,vano){
     // 3) RESPIRO: si allontana con eleganza per mostrare il contesto, poi resta
     { name:'breath',
       from:P({r:14, phi:Math.PI*0.34, ty:ty+1.5}),
-      to  :{tx:tx*0.45, ty:3.0, tz:tz*0.45, r:30, theta:dt*0.3+Math.PI*0.12, phi:Math.PI*0.36},
+      to  :{tx:tx*0.45, ty:isPortrait()?3.4:3.0, tz:tz*0.45, r:30*portraitBoost(),
+            theta:dt*0.3+Math.PI*0.12, phi:isPortrait()?Math.PI*0.46:Math.PI*0.36},
       dur:5500, hold:1200 },
   ];
 }
@@ -1115,6 +1182,43 @@ function buildShots(target,vano){
 function startCinematicTour(v){
   const target=v.center.clone ? v.center.clone() : v.center;
   tour={ vano:v, target, shots:buildShots(target,v), idx:0, sub:'in',
+         endAt:performance.now()+TOUR_DURATION, until:0 };
+  applyShot(performance.now());
+}
+
+// shot cinematici per un GRUPPO di ubicazioni (centro + raggio d'insieme)
+function buildGroupShots(center, spread){
+  const tx=center.x, ty=Math.max(1.5,center.y), tz=center.z;
+  const k=portraitBoost();
+  const baseR=Math.min(48*k, Math.max(15, spread*1.5 + 11)*k);    // distanza per inquadrare tutti
+  const phiBase=isPortrait()?0.52:0.40;                            // più dall'alto in verticale
+  const t0=Math.PI*0.10;
+  const P=(o)=>Object.assign({tx,ty,tz,theta:t0,r:baseR,phi:phiBase},o);
+  return [
+    // 1) AVVICINAMENTO d'insieme: scende e si avvicina mostrando tutto il gruppo
+    { name:'group-approach',
+      from:P({r:baseR+10, phi:phiBase+0.18, ty:ty+3.0}),
+      to  :P({r:baseR,    phi:phiBase,      ty:ty+0.6}),
+      dur:5200, hold:1400 },
+    // 2) ORBITA AMPIA: gira lentamente attorno al gruppo (mostra ogni bancale illuminato)
+    { name:'group-orbit',
+      from:P({theta:t0-0.9, phi:phiBase-0.04}),
+      to  :P({theta:t0+1.1, phi:phiBase+0.04}),
+      dur:9000, hold:1200 },
+    // 3) CARRELLATA ALTA: si alza e abbraccia l'intera scena, poi resta
+    { name:'group-breath',
+      from:P({r:baseR+4,  phi:phiBase+0.02, ty:ty+1.5}),
+      to  :P({r:baseR+12, phi:phiBase+0.12, ty:ty+3.2, theta:t0+0.2}),
+      dur:6000, hold:1600 },
+  ];
+}
+function startGroupCinematicTour(centers){
+  const box=new THREE.Box3();
+  for(const p of centers) box.expandByPoint(p);
+  const center=box.getCenter(new THREE.Vector3());
+  const size=box.getSize(new THREE.Vector3());
+  const spread=Math.max(size.x,size.z,size.y);
+  tour={ vano:null, target:center, shots:buildGroupShots(center,spread), idx:0, sub:'in',
          endAt:performance.now()+TOUR_DURATION, until:0 };
   applyShot(performance.now());
 }
@@ -1184,8 +1288,22 @@ el.addEventListener('touchmove',e=>{if(e.touches.length===2){
   if(pinch)cam.r=Math.max(7,Math.min(95,cam.r+(pinch-d)*0.06)); pinch=d; tween=null; tour=null; markInteract();}},{passive:true});
 el.addEventListener('touchend',()=>pinch=0);
 
-function resize(){renderer.setSize(innerWidth,innerHeight);camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();}
-addEventListener('resize',resize); resize();
+// FOV orizzontale di riferimento: manteniamo costante la larghezza inquadrata.
+// In portrait (schermo verticale) l'aspect<1 farebbe restringere il FOV orizzontale e
+// taglierebbe il capannone ai lati: compensiamo allargando il FOV verticale.
+const HFOV_REF = 62 * Math.PI/180;     // ~62° orizzontali di riferimento
+function applyFov(){
+  const aspect = innerWidth/innerHeight;
+  // vfov tale che l'orizzontale resti ~HFOV_REF; in landscape limitiamo per non sfondare
+  let vfov = 2*Math.atan(Math.tan(HFOV_REF/2)/Math.max(aspect, 0.0001));
+  vfov = Math.min(vfov, 92*Math.PI/180);   // cap per evitare distorsioni estreme in portrait spinto
+  vfov = Math.max(vfov, 34*Math.PI/180);   // minimo ragionevole in landscape largo
+  camera.fov = vfov*180/Math.PI;
+  camera.aspect = aspect;
+  camera.updateProjectionMatrix();
+}
+function resize(){ renderer.setSize(innerWidth,innerHeight); applyFov(); }
+addEventListener('resize',resize); addEventListener('orientationchange',resize); resize();
 
 // monitor prestazioni: se il framerate resta basso, abbassa il pixelRatio una volta sola
 let _fpsSamples=0,_fpsSlow=0,_lastNow=0,_degraded=false;
@@ -1230,32 +1348,43 @@ function tick(now){
   if(tween){const k=ease(Math.min(1,(now-tween.start)/tween.dur));
     for(const key in tween.to)cam[key]=tween.from[key]+(tween.to[key]-tween.from[key])*k;
     if(k>=1)tween=null;}
-  // animazione glow del bancale selezionato
-  if(glowState){
+  // animazione glow del/dei bancale/i selezionato/i
+  if(glowState || glowList){
     pulse+=0.05;
     const s=Math.sin(pulse);
     const inten=0.45+s*0.18;
-    for(const it of glowState.meshes){
-      if(it.mesh.material && it.mesh.material.emissive) it.mesh.material.emissiveIntensity=inten;
-    }
-    if(glowState.light) glowState.light.intensity=5+s*2.5;
-    // etichetta prodotto: entrata cinematica (fade + slide dall'alto) poi leggero bob
-    if(glowState.label){
-      const t=Math.min(1,(now-glowState.labelStart)/700);   // 0.7s di entrata
-      const e=1-Math.pow(1-t,3);                              // ease-out
-      glowState.label.material.opacity=e;
-      const slide=(1-e)*0.5;                                 // scende leggermente in posizione
-      const bob=Math.sin(pulse*0.6)*0.04;                    // respiro continuo dopo l'entrata
-      glowState.label.position.y=glowState.labelBaseY + slide + bob;
-    }
+    const animaGlow=(gs)=>{
+      for(const it of gs.meshes){
+        if(it.mesh.material && it.mesh.material.emissive) it.mesh.material.emissiveIntensity=inten;
+      }
+      if(gs.light) gs.light.intensity=5+s*2.5;
+      if(gs.label){
+        const t=Math.min(1,(now-gs.labelStart)/700);
+        const e=1-Math.pow(1-t,3);
+        gs.label.material.opacity=e;
+        const slide=(1-e)*0.5;
+        const bob=Math.sin(pulse*0.6)*0.04;
+        gs.label.position.y=gs.labelBaseY + slide + bob;
+      }
+    };
+    if(glowState) animaGlow(glowState);
+    if(glowList) for(const gs of glowList) animaGlow(gs);
   }
   // smoothing camera: camS insegue cam con easing continuo
-  // durante il tour cinematico uso uno smoothing più dolce per movimenti fluidi
-  const sm=tour?0.10:0.16;
+  // durante il tour cinematico uso uno smoothing più dolce per movimenti fluidi e filmici
+  const sm=tour?0.075:(tween?0.11:0.16);
   for(const k of ['theta','phi','r','tx','ty','tz']) camS[k]+=(cam[k]-camS[k])*sm;
-  let cpx=camS.tx+camS.r*Math.cos(camS.phi)*Math.sin(camS.theta);
-  let cpy=camS.ty+camS.r*Math.sin(camS.phi)+0.001;
-  let cpz=camS.tz+camS.r*Math.cos(camS.phi)*Math.cos(camS.theta);
+  // micro-respiro cinematografico: lievissima oscillazione viva durante la cinematica
+  let bPhi=0,bR=0,bTy=0;
+  if(tour||tween){
+    const tt=now*0.001;
+    bPhi=Math.sin(tt*0.42)*0.006;
+    bR  =Math.sin(tt*0.31+1.3)*0.18;
+    bTy =Math.sin(tt*0.5+0.7)*0.05;
+  }
+  let cpx=camS.tx+(camS.r+bR)*Math.cos(camS.phi+bPhi)*Math.sin(camS.theta);
+  let cpy=camS.ty+bTy+(camS.r+bR)*Math.sin(camS.phi+bPhi)+0.001;
+  let cpz=camS.tz+(camS.r+bR)*Math.cos(camS.phi+bPhi)*Math.cos(camS.theta);
   // CONFINAMENTO: la camera non oltrepassa i muri (perimetro a L + cartongesso)
   [cpx,cpz]=clampCameraXZ(cpx,cpz);
   cpy=Math.min(cpy, H_HIGH-0.15);                 // non sopra il soffitto
@@ -1292,6 +1421,18 @@ function normalizeRackCode(code){
 function findAndHighlightRackCode(code, opts={}){
   const c = normalizeRackCode(code);
   if(!c) return false;
+  // se il codice appartiene a uno SKU presente su PIÙ ubicazioni, visitale tutte
+  const sku = CODE_TO_SKU[c];
+  if(sku && SKU_ALLOCS[sku] && SKU_ALLOCS[sku].list.length>1){
+    const stops = SKU_ALLOCS[sku].list
+      .map(a=>({ code:a.code, qty:a.qty, v:VANI_MAP[a.code] }))
+      .filter(o=>o.v);
+    if(stops.length>1){
+      startMultiTour(stops, SKU_ALLOCS[sku].title);
+      return true;
+    }
+  }
+  // singola ubicazione
   const v = VANI_MAP[c] || VANI.find(x=>x.code===c) || VANI.find(x=>String(x.code||"").startsWith(c));
   if(v){
     highlightVano(v);
@@ -1301,6 +1442,74 @@ function findAndHighlightRackCode(code, opts={}){
   if(info) info.textContent = 'Pallet non trovato: ' + c;
   if(opts && opts.fromCloud) setCloudStatus('Comando Trova non trovato • ' + c, '#ef4444');
   return false;
+}
+
+/* ===== MULTI-UBICAZIONE: illumina CONTEMPORANEAMENTE tutti i bancali di uno SKU ===== */
+let multiTour = null;   // mantenuto per compatibilità con clearMultiTour
+function clearMultiTour(){
+  if(multiTour && multiTour.timer){ clearTimeout(multiTour.timer); }
+  multiTour=null;
+}
+function startMultiTour(stops, title){
+  highlightMulti(stops, title);
+}
+function highlightMulti(stops, title){
+  clearHighlight();
+  clearMultiTour();
+  // ordina per codice (percorso visivo coerente)
+  stops=stops.filter(o=>o && o.v).sort((a,b)=> String(a.code).localeCompare(String(b.code)));
+  if(stops.length===0) return;
+  if(stops.length===1){ highlightVano(stops[0].v); return; }
+
+  // illumina TUTTI i bancali insieme
+  glowList = stops.map(o=>_buildGlow(o.v, true));
+  selectedVano = stops[0].v;
+
+  // CINEMATICA d'insieme: orbita lenta attorno a tutte le ubicazioni illuminate
+  startGroupCinematicTour(stops.map(o=>o.v.center));
+  pulse=0;
+
+  // testo pannello: elenco ubicazioni
+  const n=stops.length;
+  const totale=stops.reduce((s,o)=>s+(o.qty||0),0);
+  const righe=stops.map(o=>{
+    const m=o.v.code.match(/^([A-F])(\d{2})-L(\d)-P(\d)$/);
+    const dove=m?`${m[1]}${m[2]} · L${m[3]} P${m[4]}`:o.v.code;
+    return `<span style="opacity:.85">${dove} → <b>${o.qty}</b> pz</span>`;
+  }).join('<br>');
+  const prodHtml = title?`<span style="opacity:.7">${title}</span><br>`:'';
+  document.getElementById('info').innerHTML =
+    `${prodHtml}Presente in <b>${n}</b> ubicazioni · totale <b>${totale}</b> pz<br>${righe}`;
+
+  // ANNUNCIO VOCALE: dice tutte le posizioni in un'unica frase
+  const prod=nomeProdottoPulito(title);
+  const elenco=stops.map(o=>{
+    const m=o.v.code.match(/^([A-F])(\d{2})-L(\d)-P(\d)$/);
+    const dove=m?`scaffalatura ${m[1]}, campata ${parseInt(m[2],10)}, livello ${parseInt(m[3],10)}, posizione ${parseInt(m[4],10)}`:`ubicazione ${o.v.code}`;
+    const pezzi=o.qty===1?'1 pezzo':`${o.qty} pezzi`;
+    return `${dove}, ${pezzi}`;
+  });
+  let frase = `${prod?prod+'. ':''}Articolo presente in ${n} ubicazioni, per un totale di ${totale} pezzi. `;
+  frase += 'Le trovi tutte illuminate: ' + elenco.join('; ') + '.';
+  Voce.parla(frase);
+}
+
+/* posiziona la camera per inquadrare un insieme di punti (centri dei bancali) */
+function framePositions(points){
+  if(!points || !points.length) return;
+  const box=new THREE.Box3();
+  for(const p of points) box.expandByPoint(p);
+  const c=box.getCenter(new THREE.Vector3());
+  const size=box.getSize(new THREE.Vector3());
+  const spread=Math.max(size.x,size.z,size.y);
+  // raggio proporzionale all'estensione del gruppo (più sono distanti, più mi allontano)
+  const r=Math.min(46, Math.max(13, spread*1.6 + 9));
+  tour=null;                       // niente tour cinematico: vista d'insieme stabile
+  tween={ from:{...cam}, to:{
+    theta:Math.PI*0.18, phi:0.42, r,
+    tx:c.x, ty:Math.max(1.4,c.y), tz:c.z
+  }, start:performance.now(), dur:1500 };
+  markInteract && markInteract();
 }
 
 function handleCapannone3dFocusCommand(data){
@@ -1333,6 +1542,8 @@ window.illuminaVano=code=>findAndHighlightRackCode(code);
    =================================================================== */
 const VANI_MAP = {};
 for(const v of VANI) VANI_MAP[v.code] = v;
+let CODE_TO_SKU = {};     // codice ubicazione -> sku
+let SKU_ALLOCS = {};      // sku -> {title, list:[{code,qty}]}
 
 // deduce i pezzi per scatola dal formato prodotto.
 // multipli noti: 12 (litro), 24 (500 ml), 48 (100 ml). Default 12.
@@ -1530,9 +1741,12 @@ function startInventoryRealtime(fs, db){
   const colRef = fs.collection(db, "amzInventoryProducts");
   fs.onSnapshot(colRef, (snap)=>{
     const perCode = {};
+    const codeToSku = {};      // codice ubicazione -> sku (per multi-ubicazione)
+    const skuAllocs = {};      // sku -> [{code, qty, title}]
     snap.forEach(docSnap=>{
       const d = docSnap.data() || {};
       const allocs = Array.isArray(d.rackAllocations) ? d.rackAllocations : [];
+      const sku = d.sku || docSnap.id;
       const title = d.title || d.name || d.sku || docSnap.id;
       for(const a of allocs){
         const code = String(a.code||a.location||'').trim().toUpperCase();
@@ -1540,8 +1754,13 @@ function startInventoryRealtime(fs, db){
         if(!code || qty<=0) continue;
         if(!perCode[code]) perCode[code] = { qty:0, title };
         perCode[code].qty += qty;
+        codeToSku[code] = sku;
+        if(!skuAllocs[sku]) skuAllocs[sku] = { title, list:[] };
+        skuAllocs[sku].list.push({ code, qty });
       }
     });
+    CODE_TO_SKU = codeToSku;
+    SKU_ALLOCS = skuAllocs;
     let changed=false;
     for(const code in VANI_MAP){
       const data = perCode[code];
