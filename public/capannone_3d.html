@@ -1203,6 +1203,33 @@ function rowCentroid(row){
 
 // costruisce la lista di scene panoramiche (lazy: dopo che i vani esistono)
 let _scenes=null;
+// bounding box (AABB) di ogni scaffalatura, per impedire alla camera di entrarci dentro
+let _rackBoxes=null;
+function buildRackBoxes(){
+  const boxes=[];
+  for(const child of racksGroup.children){
+    const b=new THREE.Box3().setFromObject(child);
+    if(isFinite(b.min.x)&&isFinite(b.max.x)) boxes.push(b);
+  }
+  return boxes;
+}
+// se (x,z) cade dentro un box scaffale (a una certa quota y), spinge fuori dal lato più vicino.
+const RACK_MARGIN=0.45;     // distanza minima dagli scaffali
+function pushOutOfRacks(x,y,z){
+  if(!_rackBoxes) _rackBoxes=buildRackBoxes();
+  for(const b of _rackBoxes){
+    // considera solo se la quota camera interseca l'altezza dello scaffale
+    if(y < b.min.y-RACK_MARGIN || y > b.max.y+RACK_MARGIN) continue;
+    const x0=b.min.x-RACK_MARGIN, x1=b.max.x+RACK_MARGIN, z0=b.min.z-RACK_MARGIN, z1=b.max.z+RACK_MARGIN;
+    if(x>x0 && x<x1 && z>z0 && z<z1){
+      // dentro il volume espanso: esci dal lato più vicino (X o Z)
+      const dxl=x-x0, dxr=x1-x, dzl=z-z0, dzr=z1-z;
+      const m=Math.min(dxl,dxr,dzl,dzr);
+      if(m===dxl) x=x0; else if(m===dxr) x=x1; else if(m===dzl) z=z0; else z=z1;
+    }
+  }
+  return [x,z];
+}
 function buildScenes(){
   const portrait=isPortrait();
   const B=rowCentroid('B'), C=rowCentroid('C'), E=rowCentroid('E'), F=rowCentroid('F'), A=rowCentroid('A'), D=rowCentroid('D');
@@ -1264,22 +1291,34 @@ function updateIdle(now){
   const scene=_scenes[idle.sceneIdx];
   let p=(now-idle.sceneStart)/scene.dur;     // 0..1 nella scena
   if(p>=1){
-    // passa alla scena successiva (casuale ma diversa dalla corrente)
+    // passa alla scena successiva (casuale ma diversa); memorizza la posa attuale per il blend
     let ni=idle.sceneIdx; if(_scenes.length>1){ while(ni===idle.sceneIdx) ni=Math.floor(Math.random()*_scenes.length); }
-    idle.sceneIdx=ni; idle.sceneStart=now; p=0;
+    idle.prevPose={tx:cam.tx,tz:cam.tz,ty:cam.ty,r:cam.r,theta:cam.theta,phi:cam.phi};
+    idle.sceneIdx=ni; idle.sceneStart=now; idle.blendStart=now; p=0;
   }
+  const scn=_scenes[idle.sceneIdx];
+  const a=scn.from, b=scn.to;
   // easing morbido in-out per il dolly della scena
   const e=p<0.5?2*p*p:1-Math.pow(-2*p+2,2)/2;
-  const a=scene.from, b=scene.to;
-  const lerp=(k)=>a[k]+(b[k]-a[k])*e;
-  // micro respiro continuo sovrapposto (vita anche a metà scena)
+  const lerpScene=(k)=>a[k]+(b[k]-a[k])*e;
   const t=(now-idle.start)/1000;
-  cam.tx = lerp('tx');
-  cam.tz = lerp('tz');
-  cam.ty = lerp('ty') + Math.sin(t*0.5)*0.04;
-  cam.r  = lerp('r')  + Math.sin(t*0.3)*0.15;
-  cam.theta = lerp('theta');
-  cam.phi = lerp('phi') + Math.sin(t*0.25)*0.004;
+  // posa-obiettivo di questa scena
+  let TX=lerpScene('tx'), TZ=lerpScene('tz'), TY=lerpScene('ty')+Math.sin(t*0.5)*0.04,
+      R=lerpScene('r')+Math.sin(t*0.3)*0.15, TH=lerpScene('theta'), PH=lerpScene('phi')+Math.sin(t*0.25)*0.004;
+  // BLEND tra scene: nei primi BLEND_MS interpola dalla posa precedente alla nuova scena
+  const BLEND_MS=3500;
+  if(idle.blendStart && idle.prevPose){
+    const bt=Math.min(1,(now-idle.blendStart)/BLEND_MS);
+    if(bt<1){
+      const be=bt<0.5?2*bt*bt:1-Math.pow(-2*bt+2,2)/2;   // ease-in-out
+      const pp=idle.prevPose;
+      // interpolo theta sul cammino più breve
+      let dth=TH-pp.theta; while(dth>Math.PI)dth-=2*Math.PI; while(dth<-Math.PI)dth+=2*Math.PI;
+      TX=pp.tx+(TX-pp.tx)*be; TZ=pp.tz+(TZ-pp.tz)*be; TY=pp.ty+(TY-pp.ty)*be;
+      R=pp.r+(R-pp.r)*be; TH=pp.theta+dth*be; PH=pp.phi+(PH-pp.phi)*be;
+    } else { idle.blendStart=0; idle.prevPose=null; }
+  }
+  cam.tx=TX; cam.tz=TZ; cam.ty=TY; cam.r=R; cam.theta=TH; cam.phi=PH;
 }
 
 /* ===== COCKPIT IDLE: dopo 30s senza selezione/interazione mostra info aziendali ===== */
@@ -1559,6 +1598,7 @@ function tick(now){
   if(dentro){
     [cpx,cpz]=clampCameraXZ(cpx,cpz);
     cpy=Math.min(cpy, H_HIGH-0.15);
+    [cpx,cpz]=pushOutOfRacks(cpx,cpy,cpz);   // non entrare/scontrare gli scaffali
   }
   camera.position.set(cpx,cpy,cpz);
   camera.lookAt(camS.tx,camS.ty,camS.tz);
