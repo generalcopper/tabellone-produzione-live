@@ -2193,6 +2193,7 @@
     .pickingContent #homeNoLocationBox,
     .pickingContent #homeLocatedBox,
     .pickingContent #homePickingBox,
+    .pickingContent #homePickingHistoryBox,
     .pickingContent #homeLogsBox{ margin-top:0; }
     .pickingSection{ display:none; }
     .pickingSection.is-active{ display:block; }
@@ -2693,6 +2694,13 @@
         <span class="pickingNavLabel">Picking</span>
         <span class="pickingNavCount" id="pickingFlowNavCount">—</span>
       </button>
+      <button class="pickingNavBtn" id="btnPickingHistory" type="button" data-picking-view="pickingHistory" aria-controls="homePickingHistoryBox" aria-pressed="false">
+        <span class="pickingNavIcon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8v5l3 2"/><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/></svg>
+        </span>
+        <span class="pickingNavLabel">Storico prelievi</span>
+        <span class="pickingNavCount" id="pickingHistoryNavCount">—</span>
+      </button>
       <button class="pickingNavBtn" id="btnPickingLogs" type="button" data-picking-view="logs" aria-controls="homeLogsBox" aria-pressed="false">
         <span class="pickingNavIcon" aria-hidden="true">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
@@ -2917,17 +2925,20 @@
               </div>
             </div>
             <div class="pickingFlowsWrap" id="homePickingList"></div>
-            <div class="pickingPickedHistory">
-              <div class="miniTop" style="padding:0; border:0; background:transparent; box-shadow:none;">
-                <div>
-                  <div class="miniTitle" style="font-size:15px">Storico prelievi</div>
-                  <div class="miniSub">Flussi e SKU già prelevati dai flussi recenti</div>
-                </div>
-                <div class="pill" id="homePickedHistoryCount">—</div>
-              </div>
-              <div class="gridTable" id="homePickedHistoryList" style="margin-top:10px;"></div>
-            </div>
             <div class="hint" id="homePickingHint" style="margin-top:10px"></div>
+          </div>
+
+          <!-- Storico prelievi: flussi e SKU già prelevati -->
+          <div class="miniCard pickingSection" id="homePickingHistoryBox">
+            <div class="miniTop">
+              <div>
+                <div class="miniTitle">Storico prelievi</div>
+                <div class="miniSub">Flussi e SKU già prelevati dai flussi recenti • cloud live</div>
+              </div>
+              <div class="pill" id="homePickedHistoryCount">—</div>
+            </div>
+            <div class="gridTable" id="homePickedHistoryList" style="margin-top:12px;"></div>
+            <div class="hint" id="homePickedHistoryHint" style="margin-top:10px"></div>
           </div>
 
           <!-- Logs: ultimi movimenti cloud live -->
@@ -8098,11 +8109,17 @@ function currentInv(){
 
     function pickingHomeView(){
       const v = state.ui?.pickingHomeView || "noLocation";
-      return (v === "located" || v === "logs" || v === "picking") ? v : "noLocation";
+      return (v === "located" || v === "logs" || v === "picking" || v === "pickingHistory") ? v : "noLocation";
     }
 
     function setPickingNavCount(kind, value){
-      const id = kind === "located" ? "pickingLocatedNavCount" : (kind === "logs" ? "pickingLogsNavCount" : (kind === "picking" ? "pickingFlowNavCount" : "pickingNoLocationNavCount"));
+      const id = kind === "located"
+        ? "pickingLocatedNavCount"
+        : (kind === "logs"
+          ? "pickingLogsNavCount"
+          : (kind === "picking"
+            ? "pickingFlowNavCount"
+            : (kind === "pickingHistory" ? "pickingHistoryNavCount" : "pickingNoLocationNavCount")));
       const el = $(id);
       if(el) el.textContent = (value === null || value === undefined || value === "") ? "—" : String(value);
     }
@@ -8127,6 +8144,7 @@ function currentInv(){
         { key:"noLocation", box:"homeNoLocationBox", btn:"btnPickingNoLocation" },
         { key:"located", box:"homeLocatedBox", btn:"btnPickingLocated" },
         { key:"picking", box:"homePickingBox", btn:"btnPickingFlow" },
+        { key:"pickingHistory", box:"homePickingHistoryBox", btn:"btnPickingHistory" },
         { key:"logs", box:"homeLogsBox", btn:"btnPickingLogs" }
       ];
 
@@ -8147,7 +8165,7 @@ function currentInv(){
 
     function setPickingHomeView(view){
       if(!state.ui) state.ui = {};
-      state.ui.pickingHomeView = (view === "located" || view === "logs" || view === "picking") ? view : "noLocation";
+      state.ui.pickingHomeView = (view === "located" || view === "logs" || view === "picking" || view === "pickingHistory") ? view : "noLocation";
       syncPickingHomeView();
       setPickingMobileMenu(false);
     }
@@ -8541,19 +8559,19 @@ function currentInv(){
       const list = $("homePickingList");
       const count = $("homePickingCount");
       const hint = $("homePickingHint");
-      const histList = $("homePickedHistoryList");
-      const histCount = $("homePickedHistoryCount");
       const btnPickAll = $("btnPickAllFlows");
-      if(!box || !list || !count) return;
+      if(!box || !list || !count){
+        renderHomePickingHistoryBox();
+        return;
+      }
 
       if(!state.user?.isWhitelisted){
         count.textContent = "—";
         setPickingNavCount("picking", "—");
         list.innerHTML = `<div class="hint">Accedi per vedere il picking.</div>`;
-        if(histList) histList.innerHTML = "";
-        if(histCount) histCount.textContent = "—";
         if(btnPickAll){ btnPickAll.disabled = true; btnPickAll.textContent = "Preleva tutti i flussi"; btnPickAll.title = ""; }
         if(hint) hint.textContent = "";
+        renderHomePickingHistoryBox();
         return;
       }
 
@@ -8633,36 +8651,60 @@ function currentInv(){
         if(hint) hint.textContent = `Visibili solo gli ultimi ${visibleActiveFlows.length.toLocaleString("it-IT")} flussi da prelevare, ordinati dal più recente. Totali da prelevare: ${activeFlows.length.toLocaleString("it-IT")} • Flussi scarico recenti: ${flows.length.toLocaleString("it-IT")}. La colonna Posizione mostra solo posizione e quantità.`;
       }
 
+      renderHomePickingHistoryBox();
+    }
+
+    function renderHomePickingHistoryBox(){
+      const box = $("homePickingHistoryBox");
+      const histList = $("homePickedHistoryList");
+      const histCount = $("homePickedHistoryCount");
+      const histHint = $("homePickedHistoryHint");
+      if(!box || !histList || !histCount) return;
+
+      if(!state.user?.isWhitelisted){
+        histCount.textContent = "—";
+        setPickingNavCount("pickingHistory", "—");
+        histList.innerHTML = `<div class="hint" style="padding:12px">Accedi per vedere lo storico prelievi.</div>`;
+        if(histHint) histHint.textContent = "";
+        return;
+      }
+
       const hist = pickingPickedHistoryEntries();
-      if(histCount) histCount.textContent = fmtN(hist.length);
-      if(histList){
-        if(!hist.length){
-          histList.innerHTML = `<div class="hint" style="padding:12px">Nessun prelievo confermato.</div>`;
-        }else{
-          histList.innerHTML = hist.slice(0, 80).map(h=>{
-            const flowName = flowDisplayName(h.flow);
-            if(h.type === "flow"){
-              const meta = [flowName ? `Flusso: ${flowName}` : "", h.count ? `${h.count} SKU` : "", h.at ? fmtDate(h.at) : "", h.by || ""].filter(Boolean).join(" • ");
-              return `
-                <div class="pickingHistoryRow">
-                  <div class="mono">FLUSSO</div>
-                  <div class="pickingHistoryMain">${escapeHtml(flowName || h.title || h.flowId || "Flusso")}</div>
-                  <div class="pickingHistoryMeta">${escapeHtml(meta)}</div>
-                  <span class="badge ok">${escapeHtml(String(h.qty || "—"))} pz</span>
-                  <button class="btn small danger pickingHistoryAction" type="button" data-action="undoPickFlow" data-flowid="${escapeHtml(h.flowId || h.flow?.id || "")}" data-loc="${escapeHtml(h.loc || h.flow?.location || "")}">Annulla flusso</button>
-                </div>`;
-            }
-            const meta = [h.position ? `Posizione: ${h.position}` : "", flowName ? `Flusso: ${flowName}` : "", h.at ? fmtDate(h.at) : "", h.by || ""].filter(Boolean).join(" • ");
-            return `
-              <div class="pickingHistoryRow">
-                <div class="mono">${escapeHtml(h.sku)}</div>
-                <div class="pickingHistoryMain">${escapeHtml(h.title || h.sku)}</div>
-                <div class="pickingHistoryMeta">${escapeHtml(meta)}</div>
-                <span class="badge ok">${escapeHtml(String(h.qty || "—"))}</span>
-                <button class="btn small danger pickingHistoryAction" type="button" data-action="undoPickSku" data-flowid="${escapeHtml(h.flowId || h.flow?.id || "")}" data-loc="${escapeHtml(h.loc || h.flow?.location || "")}" data-sku="${escapeHtml(h.sku)}">Annulla</button>
-              </div>`;
-          }).join("");
+      histCount.textContent = fmtN(hist.length);
+      setPickingNavCount("pickingHistory", fmtN(hist.length));
+
+      if(!hist.length){
+        histList.innerHTML = `<div class="hint" style="padding:12px">Nessun prelievo confermato.</div>`;
+        if(histHint) histHint.textContent = "Qui finiranno i flussi e gli SKU già prelevati. Da qui puoi annullare e farli tornare subito da prelevare.";
+        return;
+      }
+
+      histList.innerHTML = hist.slice(0, 80).map(h=>{
+        const flowName = flowDisplayName(h.flow);
+        if(h.type === "flow"){
+          const meta = [flowName ? `Flusso: ${flowName}` : "", h.count ? `${h.count} SKU` : "", h.at ? fmtDate(h.at) : "", h.by || ""].filter(Boolean).join(" • ");
+          return `
+            <div class="pickingHistoryRow">
+              <div class="mono">FLUSSO</div>
+              <div class="pickingHistoryMain">${escapeHtml(flowName || h.title || h.flowId || "Flusso")}</div>
+              <div class="pickingHistoryMeta">${escapeHtml(meta)}</div>
+              <span class="badge ok">${escapeHtml(String(h.qty || "—"))} pz</span>
+              <button class="btn small danger pickingHistoryAction" type="button" data-action="undoPickFlow" data-flowid="${escapeHtml(h.flowId || h.flow?.id || "")}" data-loc="${escapeHtml(h.loc || h.flow?.location || "")}">Annulla flusso</button>
+            </div>`;
         }
+        const meta = [h.position ? `Posizione: ${h.position}` : "", flowName ? `Flusso: ${flowName}` : "", h.at ? fmtDate(h.at) : "", h.by || ""].filter(Boolean).join(" • ");
+        return `
+          <div class="pickingHistoryRow">
+            <div class="mono">${escapeHtml(h.sku)}</div>
+            <div class="pickingHistoryMain">${escapeHtml(h.title || h.sku)}</div>
+            <div class="pickingHistoryMeta">${escapeHtml(meta)}</div>
+            <span class="badge ok">${escapeHtml(String(h.qty || "—"))}</span>
+            <button class="btn small danger pickingHistoryAction" type="button" data-action="undoPickSku" data-flowid="${escapeHtml(h.flowId || h.flow?.id || "")}" data-loc="${escapeHtml(h.loc || h.flow?.location || "")}" data-sku="${escapeHtml(h.sku)}">Annulla</button>
+          </div>`;
+      }).join("");
+
+      if(histHint){
+        histHint.textContent = `Mostrati gli ultimi ${Math.min(hist.length, 80).toLocaleString("it-IT")} prelievi. I flussi prelevati spariscono dal menu Picking e restano qui nello storico.`;
       }
     }
 
@@ -9176,6 +9218,7 @@ function currentInv(){
         renderHomeNoLocationBox();
         renderHomeLocatedBox();
         renderHomePickingBox();
+        renderHomePickingHistoryBox();
         renderHomeLogsBox();
         return;
       }
@@ -9231,6 +9274,7 @@ function currentInv(){
           renderHomeNoLocationBox();
           renderHomeLocatedBox();
           renderHomePickingBox();
+          renderHomePickingHistoryBox();
           renderHomeLogsBox();
           return;
         }
@@ -9284,6 +9328,7 @@ function currentInv(){
       renderHomeNoLocationBox();
       renderHomeLocatedBox();
       renderHomePickingBox();
+      renderHomePickingHistoryBox();
       renderHomeLogsBox();
     }
 
