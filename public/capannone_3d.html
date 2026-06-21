@@ -2048,6 +2048,7 @@ function applicaPrelievoGlow(){
 }
 
 function highlightVano(v, opts={}){
+  _cockpitStartup=false;               // una selezione conta come interazione: fine fase avvio
   clearHighlight();
   if(!opts.silent) clearMultiTour();   // una selezione singola interrompe un eventuale tour multi-ubicazione
   clearPrelievoGlow();                 // nasconde i prelievi mentre c'è un Trova attivo
@@ -2147,7 +2148,7 @@ const TOUR_DURATION=30000;     // durata totale del loop (ms)
 let idle=null;
 let lastInteract=performance.now();
 const IDLE_WAIT=2000;
-function markInteract(){ lastInteract=performance.now(); idle=null; }
+function markInteract(){ lastInteract=performance.now(); idle=null; _cockpitStartup=false; }
 
 // centroidi delle file dai vani (coordinate mondo)
 function rowCentroid(row){
@@ -2325,7 +2326,7 @@ function updateIdle(now){
 const COCKPIT_DELAY=30000;
 const COCKPIT_DELAY_FIRST=0;        // al primissimo avvio il cockpit compare subito
 const CK_PAGE_MS=12000;             // durata di ogni pagina prima di alternare
-let _cockpitOn=false, _cockpitEverShown=false, _ckPage='azienda', _ckPageStart=0, _ckAmzSig='';
+let _cockpitOn=false, _cockpitEverShown=false, _cockpitStartup=true, _ckPage='azienda', _ckPageStart=0, _ckAmzSig='';
 const _ckEl=()=>document.getElementById('cockpit');
 
 // ordine ciclico delle pagine disponibili in base ai prelievi presenti per canale
@@ -2559,11 +2560,14 @@ function updateCockpit(now){
   // al primo avvio il cockpit compare subito; dopo la prima interazione torna ai 30s di inattività
   const delay = _cockpitEverShown ? COCKPIT_DELAY : COCKPIT_DELAY_FIRST;
   const inattivo = !selectedVano && (now-lastInteract >= delay);
-  if(inattivo && !_cockpitOn){
+  // se è in corso la fase di avvio (cockpit forzato, nessuna interazione ancora avvenuta),
+  // lo tengo aperto: non deve chiudersi per il timer finché l'utente non tocca lo schermo
+  const startupHold = _cockpitStartup && !selectedVano;
+  if((inattivo || startupHold) && !_cockpitOn){
     _cockpitOn=true; _cockpitEverShown=true;
     _ckPageStart=now; setCockpitPage('azienda');
     const el=_ckEl(); if(el){ el.classList.add('show'); el.setAttribute('aria-hidden','false'); }
-  } else if(!inattivo && _cockpitOn){
+  } else if(!inattivo && !startupHold && _cockpitOn){
     _cockpitOn=false; const el=_ckEl(); if(el){ el.classList.remove('show'); el.setAttribute('aria-hidden','true'); }
   }
   if(_cockpitOn){
@@ -2894,6 +2898,19 @@ function tick(now){
 }
 requestAnimationFrame(tick);
 requestShadowUpdate(3);   // calcola le ombre della scena statica nei primi frame
+
+// COCKPIT SUBITO ALL'AVVIO: mostra la pagina azienda appena la pagina è pronta,
+// senza attendere il timer di inattività. Dopo la prima interazione il comportamento
+// torna normale (riappare dopo 30s di inattività).
+function _showCockpitAtStartup(){
+  if(selectedVano || _cockpitOn) return;
+  _cockpitOn=true; _cockpitEverShown=true;
+  _ckPageStart=performance.now(); setCockpitPage('azienda');
+  const el=_ckEl(); if(el){ el.classList.add('show'); el.setAttribute('aria-hidden','false'); }
+}
+// avvia appena possibile (e comunque al primo frame utile)
+if(document.readyState==='complete' || document.readyState==='interactive') requestAnimationFrame(_showCockpitAtStartup);
+else window.addEventListener('DOMContentLoaded', ()=>requestAnimationFrame(_showCockpitAtStartup), {once:true});
 
 const CAPANNONE_3D_FOCUS_DOC_ID = "capannone3dFocus";
 let LAST_CAPANNONE_3D_FOCUS_KEY = "";
