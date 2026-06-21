@@ -2483,56 +2483,58 @@ function renderOrdiniPage(force){
   const list=document.getElementById('ckOrdiniList');
   const sub=document.getElementById('ckOrdiniSub');
   const pill=document.getElementById('ckOrdiniPill');
+  const title=document.getElementById('ckOrdiniTitle');
+  const chanLbl=document.querySelector('#ckOrdiniChan span:last-child');
   if(!list) return;
-  const ordini=calcolaOrdini();
-  const sig=ordini.map(o=>`${o.id}:${o.righe}:${o.pezzi}`).join('|');
+  const skus=calcolaSkuRaggruppati();
+  const sig=skus.map(s=>`${s.canale}|${s.sku}:${s.pezzi}:${s.ordini}`).join('|');
   if(!force && sig===_ckOrdiniSig) return;   // ridisegna solo se cambia (o se forzato all'ingresso pagina)
   _ckOrdiniSig=sig;
   _stopOrdScroll();
-  if(!ordini.length){
-    list.innerHTML='<div class="ck-amz-empty">Nessun ordine attivo da preparare</div>';
+  if(title) title.textContent='Prodotti da preparare';
+  if(chanLbl) chanLbl.textContent='RAGGRUPPATO PER SKU';
+  if(!skus.length){
+    list.innerHTML='<div class="ck-amz-empty">Nessun prodotto da preparare</div>';
     if(sub) sub.textContent='Tutti gli ordini sono stati preparati';
     if(pill) pill.hidden=true;
     return;
   }
-  const nFba=ordini.filter(o=>o.canale==='fba').length;
-  const nFbm=ordini.filter(o=>o.canale==='fbm').length;
+  let nFba=0, nFbm=0, totPezzi=0;
+  for(const s of skus){ totPezzi+=s.pezzi; if(s.canale==='fbm') nFbm++; else nFba++; }
 
-  const rowHtml=(o,idx)=>{
-    const prod = o.prodottoPrincipale || (o.prodotti[0]||'') || `${o.righe} articoli`;
-    const extra = o.righe>1 ? ` <i class="more">+${o.righe-1}</i>` : '';
+  const rowHtml=(s,idx)=>{
+    const ordLabel = s.ordini>1 ? `×${s.ordini} ordini` : `1 ordine`;
     return `
-    <div class="ck-ord-item ${o.canale}" style="--d:${(idx%9)*90}ms">
+    <div class="ck-ord-item ${s.canale}" style="--d:${(idx%9)*90}ms">
       <span class="idx">${String(idx+1).padStart(2,'0')}</span>
-      <span class="badge"><b>${o.canale==='fbm'?'FBM':'FBA'}</b></span>
+      <span class="badge"><b>${s.canale==='fbm'?'FBM':'FBA'}</b></span>
       <span class="oinfo">
-        <span class="oname" title="${escapeHtmlCk(prod)}">${escapeHtmlCk(prod)}${extra}</span>
-        <span class="ocont">${escapeHtmlCk(o.nome)}</span>
+        <span class="oname" title="${escapeHtmlCk(s.nome)}">${escapeHtmlCk(s.nome)}</span>
+        <span class="ocont">${escapeHtmlCk(s.sku)} · ${ordLabel}</span>
       </span>
       <span class="ometa">
-        <span class="pz">${o.pezzi}<small>pz</small></span>
+        <span class="pz">${s.pezzi}<small>pz</small></span>
       </span>
     </div>`;
   };
 
-  // se ci sono molti ordini, scorrimento cinematico in loop; altrimenti lista statica con entrata a cascata
+  // molti prodotti → scorrimento cinematico in loop; pochi → lista statica con entrata a cascata
   const SOGLIA=6;
-  if(ordini.length>SOGLIA){
-    // duplico la sequenza per un loop continuo senza stacco
-    const seq=ordini.concat(ordini);
-    list.innerHTML=`<div class="ck-ord-track" id="ckOrdTrack">${seq.map((o,i)=>rowHtml(o,i%ordini.length)).join('')}</div>`;
+  if(skus.length>SOGLIA){
+    const seq=skus.concat(skus);   // duplico per loop continuo senza stacco
+    list.innerHTML=`<div class="ck-ord-track" id="ckOrdTrack">${seq.map((s,i)=>rowHtml(s,i%skus.length)).join('')}</div>`;
     list.classList.add('scrolling');
-    _avviaOrdScroll(ordini.length);
+    _avviaOrdScroll(skus.length);
   }else{
     list.classList.remove('scrolling');
-    list.innerHTML=`<div class="ck-ord-track in">${ordini.map((o,i)=>rowHtml(o,i)).join('')}</div>`;
+    list.innerHTML=`<div class="ck-ord-track in">${skus.map((s,i)=>rowHtml(s,i)).join('')}</div>`;
   }
 
   const bits=[];
   if(nFba>0) bits.push(`${nFba} F B A`);
   if(nFbm>0) bits.push(`${nFbm} F B M`);
-  if(sub) sub.textContent = `${ordini.length} ordini attivi · ${bits.join(' · ')}`;
-  if(pill){ pill.hidden=false; pill.innerHTML=`<b>${ordini.length}</b> ordini`; }
+  if(sub) sub.textContent = `${skus.length} ${skus.length===1?'prodotto':'prodotti'} · ${totPezzi} pezzi · ${bits.join(' · ')}`;
+  if(pill){ pill.hidden=false; pill.innerHTML=`<b>${skus.length}</b> SKU`; }
 }
 // scorrimento verticale fluido e continuo (carosello cinematico)
 function _avviaOrdScroll(nUnici){
@@ -2629,6 +2631,44 @@ function calcolaOrdini(){
   }
   // più recenti in cima
   out.sort((a,b)=> (b.ts-a.ts) || String(a.id).localeCompare(String(b.id)));
+  return out;
+}
+// AGGREGA PER SKU: una riga per prodotto, con totale pezzi e in quanti ordini compare.
+// (un SKU presente in più ordini diventa una sola riga con il conteggio ordini)
+function calcolaSkuRaggruppati(){
+  const map={};   // `${canale}|${sku}` -> {sku,nome,canale,pezzi,ordini:Set,ts}
+  for(const loc in FLOWS_BY_LOC){
+    for(const flow of (FLOWS_BY_LOC[loc]||[])){
+      if(flow.voided) continue;
+      if(String(flow.kind||'').toLowerCase()!=='scarica') continue;
+      if(!_isManagedFlow(flow)) continue;
+      if(flow?.picking?.flowPicked===true) continue;
+      const canale=_isFbmFlow(flow)?'fbm':'fba';
+      const fid=flow.id||'';
+      const ts=Number(flow.appliedAtClient||flow.createdAtClient||0);
+      const lines=Array.isArray(flow.lines)?flow.lines:[];
+      for(const l of lines){
+        const sku=_toSkuId(l.sku||''); if(!sku) continue;
+        const qty=Math.abs(Math.round(Number(l.qty||0)))||0; if(qty<=0) continue;
+        if(_isLinePicked(flow, l.sku||sku)) continue;   // riga già prelevata
+        const raw = l.title || l.item || l.name || SKU_ALLOCS[sku]?.title || sku;
+        const nome = nomeProdottoDisplay(raw) || String(raw||sku).trim() || sku;
+        const key=canale+'|'+sku;
+        if(!map[key]) map[key]={ sku, nome, canale, pezzi:0, ordini:new Set(), ts:0 };
+        map[key].pezzi += qty;
+        if(fid) map[key].ordini.add(fid);
+        if(ts>map[key].ts) map[key].ts=ts;
+        // preferisci un nome "vero" se quello salvato era solo lo SKU
+        if(map[key].nome===map[key].sku && nome!==sku) map[key].nome=nome;
+      }
+    }
+  }
+  const out=Object.values(map).map(r=>({
+    sku:r.sku, nome:r.nome, canale:r.canale,
+    pezzi:r.pezzi, ordini:r.ordini.size, ts:r.ts
+  }));
+  // ordina: prima quelli con più ordini, poi più pezzi, poi più recenti
+  out.sort((a,b)=> (b.ordini-a.ordini) || (b.pezzi-a.pezzi) || (b.ts-a.ts) || String(a.sku).localeCompare(String(b.sku)));
   return out;
 }
 // animazione "tabellone": il numero sale fluido dal valore corrente al target con easing morbido
