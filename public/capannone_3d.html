@@ -1191,7 +1191,12 @@ const CARTELLO_COLORI={
       const labTop=new THREE.Mesh(new THREE.CylinderGeometry(R*1.03,R*1.03,H*0.12,20,1,true),
         new THREE.MeshStandardMaterial({color:0xf2f4f3,roughness:.7,side:THREE.DoubleSide}));
       labTop.position.y=H*0.72; labTop.visible=false; b.add(labTop);
-      b.userData={liq,cap,capRing,lab,labTop};
+      // raccogli i materiali per poter modulare l'opacità (fade in/out morbidi)
+      const mats=[];
+      b.traverse(o=>{ if(o.isMesh && o.material){ o.material.transparent=true; mats.push({m:o.material,base:o.material.opacity}); } });
+      b.userData={liq,cap,capRing,lab,labTop,mats,
+        setOpacity:(k)=>{ for(const it of mats){ it.m.opacity=it.base*k; it.m.depthWrite=(k>=0.99); } }
+      };
       b.traverse(o=>{if(o.isMesh)o.castShadow=true;});
       return b;
     }
@@ -1220,8 +1225,8 @@ const CARTELLO_COLORI={
       }
     })();
     // scatola in uscita verso il pallet (animata)
-    const outBox=new THREE.Mesh(new THREE.BoxGeometry(0.4,0.28,0.46),M.box);
-    outBox.castShadow=true; L.add(outBox);
+    const outBox=new THREE.Mesh(new THREE.BoxGeometry(0.4,0.28,0.46),M.box.clone());
+    outBox.material.transparent=true; outBox.castShadow=true; L.add(outBox);
 
     // --- OPERAI: MAX 2 ---
     function makeWorker(x,z,rotY,shirt){
@@ -1367,12 +1372,24 @@ const CARTELLO_COLORI={
           ud.lab.scale.y=1; ud.labTop.scale.y=1;
         }
         b.position.y += drop + Math.sin(t*12+u*40)*0.004;
-        b.visible = true;
+        // FADE morbidi: dissolvenza in entrata (deposito dalla tramoggia) e in uscita
+        // (assorbimento nell'inscatolatrice) → niente più "pop" di comparsa/sparizione.
+        const FIN=0.06, FOUT=0.06;
+        let op=1;
+        if(phase<FIN)            op=phase/FIN;                 // fade-in al deposito
+        else if(phase>1-FOUT)    op=(1-phase)/FOUT;           // fade-out all'inscatolamento
+        op=Math.max(0,Math.min(1,op)); op=op*op*(3-2*op);     // smoothstep
+        ud.setOpacity(op);
+        b.visible = op>0.01;
       }
       const bt=(t*0.25)%1;
       const sb=lsample(SU.box), sp=lsample(0.93);
-      outBox.visible=bt<0.85;
       outBox.position.set(sb.p.x+(sp.p.x-sb.p.x)*bt, beltY+0.05+Math.sin(bt*Math.PI)*0.15, sb.p.z+(sp.p.z-sb.p.z)*bt);
+      // fade morbido della scatola in uscita (niente pop)
+      let boxOp=1;
+      if(bt<0.08) boxOp=bt/0.08; else if(bt>0.82) boxOp=(1-bt)/0.18;
+      boxOp=Math.max(0,Math.min(1,boxOp));
+      outBox.material.opacity=boxOp; outBox.visible=boxOp>0.02;
       // OPERAI AL LAVORO: ciclo di azioni discrete (controlla linea → preme PLC → pausa)
       workers.forEach((w,i)=>{
         const ud=w.userData; const seed=ud.seed;
