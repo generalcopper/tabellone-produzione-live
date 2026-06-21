@@ -1823,7 +1823,7 @@ const Voce = (function(){
     return "";
   }
 
-  async function _cloud(text, onStart){
+  async function _cloud(text){
     try{
       if(abort) try{ abort.abort(); }catch(_){}
       abort = new AbortController();
@@ -1845,16 +1845,9 @@ const Voce = (function(){
       else { const blob=await res.blob(); if(!blob||!blob.size) throw new Error("empty"); url=URL.createObjectURL(blob); lastUrl=url; }
       if(!url) throw new Error("no-url");
       const a=ensureAudio(); a.volume=1; a.muted=false; a.src=url;
-      // aggancia l'inizio REALE della riproduzione (evento 'playing'): è qui
-      // che movimento camera e audio devono partire insieme, non al fetch.
-      let _started=false;
-      const _fireStart=()=>{ if(_started) return; _started=true; try{ onStart&&onStart(); }catch(_){} };
-      try{ a.addEventListener('playing', _fireStart, { once:true }); }catch(_){}
       try{
         await a.play();
         unlocked=true;            // se è partito, l'autoplay è ok
-        // se 'playing' non scatta (alcuni kiosk), sblocca comunque al play riuscito
-        _fireStart();
       }catch(err){
         // autoplay bloccato: metti in coda e ritenta appena sbloccato
         if(String(err&&err.name)==='NotAllowedError'){ pending=text; tryUnlock(); }
@@ -1867,7 +1860,7 @@ const Voce = (function(){
     }
   }
 
-  function _browser(text, onStart){
+  function _browser(text){
     const synth=window.speechSynthesis; if(!synth) return false;
     try{
       synth.cancel();
@@ -1878,27 +1871,21 @@ const Voce = (function(){
       if(!voce) voce=it[0]||voices[0];
       const u=new SpeechSynthesisUtterance(text);
       if(voce) u.voice=voce; u.lang=(voce&&voce.lang)||'it-IT'; u.rate=1.0; u.pitch=1.05;
-      let _started=false;
-      const _fireStart=()=>{ if(_started) return; _started=true; try{ onStart&&onStart(); }catch(_){} };
-      u.onstart=_fireStart;
       synth.speak(u);
       return true;
     }catch(_){ return false; }
   }
 
-  async function parla(testo, onStart){
+  async function parla(testo){
     const msg=String(testo||'').trim();
-    if(!abilitata || !msg){ try{ onStart&&onStart(); }catch(_){} return; }
-    // garantisce che onStart venga chiamato UNA sola volta, dal primo che parte
-    let _fired=false;
-    const start=()=>{ if(_fired) return; _fired=true; try{ onStart&&onStart(); }catch(_){} };
+    if(!abilitata || !msg) return;
     try{ if(audio){ audio.pause(); audio.currentTime=0; } }catch(_){}
     try{ if(window.speechSynthesis) window.speechSynthesis.cancel(); }catch(_){}
     if(lastUrl){ try{ URL.revokeObjectURL(lastUrl); }catch(_){} lastUrl=null; }
-    const ok = await _cloud(msg, start);
+    const ok = await _cloud(msg);
     if(!ok){
       // se non è partito per autoplay bloccato, è già in coda; altrimenti prova la voce browser
-      if(!pending){ if(!_browser(msg, start)) start(); }
+      if(!pending) _browser(msg);
     }
   }
   function toggle(on){ abilitata=(on!==undefined)?!!on:!abilitata;
@@ -2153,18 +2140,9 @@ function highlightVano(v, opts={}){
   if(!opts.silent) clearMultiTour();   // una selezione singola interrompe un eventuale tour multi-ubicazione
   clearPrelievoGlow();                 // nasconde i prelievi mentre c'è un Trova attivo
   glowState=_buildGlow(v, true);
+  startCinematicTour(v); pulse=0;
   selectedVano=v;
-  pulse=0;
-  // avvia il movimento camera ESATTAMENTE quando parte l'audio (no sfasamento di rete),
-  // con un tetto di sicurezza così il Trova non resta in attesa se il TTS tarda.
-  let _camGo=false;
-  const startCam=()=>{ if(_camGo) return; _camGo=true; if(selectedVano===v) startCinematicTour(v); };
-  if(opts.silent){
-    startCam();
-  }else{
-    const cap=setTimeout(startCam, 900);   // fallback: parti comunque entro 0,9s
-    Voce.parla(fraseVano(v), ()=>{ clearTimeout(cap); startCam(); });   // audio + camera insieme
-  }
+  if(!opts.silent) Voce.parla(fraseVano(v));   // annuncio IA femminile in contemporanea col movimento
   const m=v.code.match(/^([A-F])(\d{2})-L(\d)-P(\d)$/);
   let txt = m ? `Pallet <b>${v.code}</b> · fila <b>${m[1]}</b> — campata ${m[2]}, liv. ${m[3]}, pos. ${m[4]}` : `Pallet <b>${v.code}</b>`;
   if(v.cont){
