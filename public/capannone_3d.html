@@ -173,6 +173,30 @@
     transition:.35s cubic-bezier(.2,.7,.2,1);}
   #cockpit .ck-dots i.on{width:22px; border-radius:4px; background:linear-gradient(90deg,#7aa2ff,#ff9d2e);}
 
+  /* pagina ORDINI ATTIVI (singoli ordini) */
+  #cockpit .ck-chan.ord{color:#c7b3ff; background:rgba(150,110,255,.12); border-color:rgba(160,120,255,.34);}
+  #cockpit .ck-ord-list{margin-top:24px; display:flex; flex-direction:column; gap:9px; text-align:left;}
+  #cockpit .ck-ord-item{display:grid; grid-template-columns:auto 1fr auto; align-items:center; gap:14px;
+    padding:13px 16px; border-radius:16px;
+    background:linear-gradient(180deg,rgba(22,26,40,.62),rgba(13,16,26,.62));
+    border:1px solid rgba(120,160,220,.16); box-shadow:0 6px 22px rgba(0,0,0,.28);
+    animation:ckRowIn .55s cubic-bezier(.2,.7,.2,1) both;}
+  #cockpit .ck-ord-item .badge{display:flex; flex-direction:column; align-items:center; line-height:1;
+    min-width:52px; padding:7px 8px; border-radius:12px; font-weight:800;}
+  #cockpit .ck-ord-item .badge b{font-size:clamp(15px,2.8vw,19px);}
+  #cockpit .ck-ord-item .badge span{font-weight:800; font-size:8px; letter-spacing:.12em; margin-top:3px; opacity:.9;}
+  #cockpit .ck-ord-item.fba .badge{background:linear-gradient(180deg,#ffb259,#ff8a1f); color:#1a1206;}
+  #cockpit .ck-ord-item.fbm .badge{background:linear-gradient(180deg,#7da0ff,#4a6bff); color:#0a0f1f;}
+  #cockpit .ck-ord-item .oinfo{min-width:0; display:flex; flex-direction:column; gap:3px;}
+  #cockpit .ck-ord-item .oname{font-weight:700; font-size:clamp(14px,2.5vw,18px); color:#f1f6ff;
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
+  #cockpit .ck-ord-item .ocont{font-weight:500; font-size:clamp(11px,2vw,13px); color:rgba(165,188,218,.82);
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
+  #cockpit .ck-ord-item .ometa{display:flex; flex-direction:column; align-items:flex-end; gap:3px; white-space:nowrap;}
+  #cockpit .ck-ord-item .ometa .pz{font-weight:800; font-size:clamp(14px,2.5vw,18px); color:#eaf2ff; font-variant-numeric:tabular-nums;}
+  #cockpit .ck-ord-item .ometa .rg{font-weight:600; font-size:10px; letter-spacing:.04em; color:rgba(165,188,218,.7);}
+  #cockpit .ck-ord-more{margin-top:4px; text-align:center; font-weight:600; font-size:13px; color:rgba(159,182,214,.75);}
+
   /* ===== AVVISO CARICO IN ARRIVO DA CEREA ===== */
   #incomingAlert{position:fixed; left:50%; top:clamp(14px,3.5vh,34px); transform:translateX(-50%) translateY(-18px);
     z-index:40; opacity:0; pointer-events:none; transition:opacity .5s cubic-bezier(.2,.7,.2,1), transform .5s cubic-bezier(.2,.7,.2,1);
@@ -251,6 +275,15 @@
         <span class="ck-ord-l">ordini FBM in coda</span>
       </div>
     </div>
+  </div>
+  <div class="ck-inner ck-ord-page" id="ckPageOrdini">
+    <div class="ck-amz-head">
+      <span class="ck-chan ord" id="ckOrdiniChan"><span class="dot"></span><span>ORDINI ATTIVI</span></span>
+      <span class="ck-pill" id="ckOrdiniPill" hidden></span>
+    </div>
+    <div class="ck-amz-title" id="ckOrdiniTitle">Ordini da preparare</div>
+    <div class="ck-amz-sub" id="ckOrdiniSub">—</div>
+    <div class="ck-ord-list" id="ckOrdiniList"></div>
   </div>
   <div class="ck-inner ck-amz" id="ckPageAmazon">
     <div class="ck-amz-head">
@@ -2332,6 +2365,9 @@ const _ckEl=()=>document.getElementById('cockpit');
 // ordine ciclico delle pagine disponibili in base ai prelievi presenti per canale
 function _ckPages(){
   const pages=['azienda'];
+  // pagina ordini dettagliati: solo se c'è almeno un ordine attivo
+  const hasOrdini=PRELIEVI.length>0;
+  if(hasOrdini) pages.push('ordini');
   const hasFba=PRELIEVI.some(p=>p.canale!=='fbm');
   const hasFbm=PRELIEVI.some(p=>p.canale==='fbm');
   if(hasFba) pages.push('fba');
@@ -2390,6 +2426,50 @@ function renderAmazonPrep(canale){
   if(pill){ pill.hidden=false; pill.innerHTML=`<b>${totPz}</b> pz · <b>${nBancali}</b> ${nBancali===1?'pos':'pos'}`; }
 }
 function escapeHtmlCk(s){ return String(s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+// render della pagina ORDINI ATTIVI: un ordine (flusso) per riga, con contenuto
+let _ckOrdiniSig='';
+function renderOrdiniPage(){
+  const list=document.getElementById('ckOrdiniList');
+  const sub=document.getElementById('ckOrdiniSub');
+  const pill=document.getElementById('ckOrdiniPill');
+  if(!list) return;
+  const ordini=calcolaOrdini();
+  const sig=ordini.map(o=>`${o.id}:${o.righe}:${o.pezzi}`).join('|');
+  if(sig===_ckOrdiniSig) return;   // ridisegna solo se cambia
+  _ckOrdiniSig=sig;
+  if(!ordini.length){
+    list.innerHTML='<div class="ck-amz-empty">Nessun ordine attivo da preparare</div>';
+    if(sub) sub.textContent='Tutti gli ordini sono stati preparati';
+    if(pill) pill.hidden=true;
+    return;
+  }
+  const nFba=ordini.filter(o=>o.canale==='fba').length;
+  const nFbm=ordini.filter(o=>o.canale==='fbm').length;
+  const shown=ordini.slice(0,5);
+  list.innerHTML = shown.map((o,i)=>{
+    let contenuto = o.prodotti.join(' · ');
+    if(o.altri>0) contenuto += (contenuto?' · ':'')+`+${o.altri} altri`;
+    if(!contenuto) contenuto = `${o.righe} ${o.righe===1?'articolo':'articoli'}`;
+    return `
+    <div class="ck-ord-item ${o.canale}" style="animation-delay:${i*70}ms">
+      <span class="badge"><b>${o.canale==='fbm'?'FBM':'FBA'}</b><span>ordine</span></span>
+      <span class="oinfo">
+        <span class="oname">${escapeHtmlCk(o.nome)}</span>
+        <span class="ocont">${escapeHtmlCk(contenuto)}</span>
+      </span>
+      <span class="ometa">
+        <span class="pz">${o.pezzi} pz</span>
+        <span class="rg">${o.righe} ${o.righe===1?'riga':'righe'}</span>
+      </span>
+    </div>`;
+  }).join('')
+    + (ordini.length>5 ? `<div class="ck-ord-more">e altri ${ordini.length-5} ordini…</div>` : '');
+  const bits=[];
+  if(nFba>0) bits.push(`${nFba} F B A`);
+  if(nFbm>0) bits.push(`${nFbm} F B M`);
+  if(sub) sub.textContent = `${ordini.length} ordini attivi · ${bits.join(' · ')}`;
+  if(pill){ pill.hidden=false; pill.innerHTML=`<b>${ordini.length}</b> ordini`; }
+}
 // conta gli ORDINI (flussi) ancora da prelevare, divisi per canale FBA/FBM
 function _contaOrdini(){
   let fba=0, fbm=0;
@@ -2403,6 +2483,60 @@ function _contaOrdini(){
     }
   }
   return {fba, fbm};
+}
+// nome leggibile dell'ordine/flusso (allineato a picking.html)
+function _flowDisplayName(flow){
+  const label=(flow&&flow.workflow&&flow.workflow.label)?String(flow.workflow.label):String(flow?.workflowLabel||'');
+  if(label) return label;
+  const wfId=(flow&&flow.workflow&&flow.workflow.id)?String(flow.workflow.id):'';
+  if(wfId) return wfId;
+  const fn=String(flow?.fileName||'').trim();
+  if(fn) return fn;
+  return flow?.id ? String(flow.id).slice(0,8) : '—';
+}
+// estrae i SINGOLI ordini (flussi) ancora da preparare, con canale, righe e contenuto
+function calcolaOrdini(){
+  const out=[];
+  for(const loc in FLOWS_BY_LOC){
+    for(const flow of (FLOWS_BY_LOC[loc]||[])){
+      if(flow.voided) continue;
+      if(String(flow.kind||'').toLowerCase()!=='scarica') continue;
+      if(!_isManagedFlow(flow)) continue;
+      if(flow?.picking?.flowPicked===true) continue;
+      const canale=_isFbmFlow(flow)?'fbm':'fba';
+      const lines=Array.isArray(flow.lines)?flow.lines:[];
+      // righe NON ancora prelevate
+      const pend=lines.filter(l=>{
+        const sku=_toSkuId(l.sku||''); if(!sku) return false;
+        const qty=Math.abs(Math.round(Number(l.qty||0)))||0; if(qty<=0) return false;
+        return !_isLinePicked(flow, l.sku||sku);
+      });
+      if(!pend.length) continue;
+      const pezzi=pend.reduce((s,l)=>s+(Math.abs(Math.round(Number(l.qty||0)))||0),0);
+      // anteprima contenuto: primi prodotti
+      const prodotti=[];
+      for(const l of pend){
+        const sku=_toSkuId(l.sku||'');
+        const alloc=SKU_ALLOCS[sku];
+        const nome=nomeProdottoPulito(alloc?.title)||sku;
+        if(nome && !prodotti.includes(nome)) prodotti.push(nome);
+        if(prodotti.length>=3) break;
+      }
+      out.push({
+        id: flow.id||'',
+        nome: _flowDisplayName(flow),
+        canale,
+        righe: pend.length,
+        pezzi,
+        prodotti,
+        altri: Math.max(0, pend.length-prodotti.length),
+        ts: Number(flow.appliedAtClient||flow.createdAtClient||0)
+      });
+    }
+  }
+  // più recenti in cima
+  out.sort((a,b)=> (b.ts-a.ts) || String(a.id).localeCompare(String(b.id)));
+  return out;
 }
 function renderCockpitOrders(){
   const box=document.getElementById('ckOrders'); if(!box) return;
@@ -2576,11 +2710,14 @@ function refreshIncomingAlert(){
 function setCockpitPage(p){
   _ckPage=p;
   const az=document.getElementById('ckPageAzienda'), am=document.getElementById('ckPageAmazon');
+  const or=document.getElementById('ckPageOrdini');
   const isAmz = (p==='fba'||p==='fbm');
   if(isAmz){ _ckAmzSig=''; renderAmazonPrep(p); }
+  if(p==='ordini'){ _ckOrdiniSig=''; renderOrdiniPage(); }
   if(p==='azienda'){ renderCockpitOrders(); }
   // cross-fade: attivo solo l'opacità della pagina scelta (le pagine restano sovrapposte)
   if(az) az.classList.toggle('ck-active', p==='azienda');
+  if(or) or.classList.toggle('ck-active', p==='ordini');
   if(am) am.classList.toggle('ck-active', isAmz);
   _renderDots(_ckPages(), p);
 }
@@ -2621,6 +2758,7 @@ function updateCockpit(now){
     }
     // se una lista prelievi è visibile, tienila aggiornata in tempo reale
     if(_ckPage==='fba'||_ckPage==='fbm') renderAmazonPrep(_ckPage);
+    if(_ckPage==='ordini') renderOrdiniPage();
   }
 }
 
