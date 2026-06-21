@@ -3607,6 +3607,12 @@ Tip:
         touchedKeys: new Set()
       },
 
+      shopifySync: {
+        unsub: null,
+        meta: null,
+        error: ""
+      },
+
       mail: {
         lowStock: { unsub:null, meta:null, error:"", emailDocId:"", emailDoc:null, emailDocError:"", emailDocBusy:false }
       }
@@ -5829,6 +5835,7 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
     // --- Firestore paths ---
     const COL_META = "amzInventoryMeta";
     const DOC_LOWSTOCK_EMAIL_STATE = "lowStockEmailState";
+    const DOC_SHOPIFY_FBM_SYNC = "shopifyFbmSync";
     
     const COL_ROOT = "amzInventory";
     const SUB_ITEMS = "items";
@@ -6306,6 +6313,7 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
       startAllLogs();
       startActivityLogWatch();
       startLowStockEmailMetaWatch();
+      startShopifyFbmSyncMetaWatch();
       startTwReordersWatch();
       startTwCompletedAmazonWatch();
     }
@@ -6323,8 +6331,13 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
       stopAllLogs();
       stopActivityLogWatch();
       stopLowStockEmailMetaWatch();
+      stopShopifyFbmSyncMetaWatch();
       stopProductComboWatch();
       try{ state.comboCache instanceof Map && state.comboCache.clear(); }catch(_e){}
+      if(state.shopifySync){
+        state.shopifySync.meta = null;
+        state.shopifySync.error = "";
+      }
       if(state.mail && state.mail.lowStock){
         state.mail.lowStock.meta = null;
         state.mail.lowStock.error = "";
@@ -6418,6 +6431,44 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
     
     // --- realtime flows (logs) ---
     
+
+    // --- Shopify FBM sync meta watch (ultimo controllo scheduler) ---
+    function startShopifyFbmSyncMetaWatch(){
+      try{
+        if(!state.firebase.ok || !state.user?.isWhitelisted) return;
+        if(state.shopifySync?.unsub) return;
+
+        const api = state.firebase.api;
+        const db = state.firebase.db;
+        const ref = api.doc(db, COL_META, DOC_SHOPIFY_FBM_SYNC);
+
+        state.shopifySync.unsub = api.onSnapshot(ref, (snap)=>{
+          state.shopifySync.meta = snap.exists() ? (snap.data() || null) : null;
+          state.shopifySync.error = "";
+          if(state.route.view === "home") renderHomePickingBox();
+        }, (err)=>{
+          state.shopifySync.meta = null;
+          state.shopifySync.error = err?.message || String(err || "Errore sync Shopify");
+          if(state.route.view === "home") renderHomePickingBox();
+        });
+      }catch(err){
+        try{
+          state.shopifySync.meta = null;
+          state.shopifySync.error = err?.message || String(err || "Errore sync Shopify");
+        }catch(_e){}
+      }
+    }
+
+    function stopShopifyFbmSyncMetaWatch(){
+      try{ state.shopifySync?.unsub && state.shopifySync.unsub(); }catch(_e){}
+      try{
+        if(state.shopifySync){
+          state.shopifySync.unsub = null;
+          state.shopifySync.meta = null;
+          state.shopifySync.error = "";
+        }
+      }catch(_e){}
+    }
 
     // --- low-stock email meta watch (log ultimo invio) ---
     function startLowStockEmailMetaWatch(){
@@ -9798,14 +9849,51 @@ function currentInv(){
       return out;
     }
 
+    function shopifySyncMetaTimestamp(meta){
+      try{
+        const m = meta || {};
+        return Math.max(
+          readFlowLogTimestamp(m.lastCheckAtClient),
+          readFlowLogTimestamp(m.lastCompletedAtClient),
+          readFlowLogTimestamp(m.lastStartedAtClient),
+          readFlowLogTimestamp(m.lastFailedAtClient),
+          readFlowLogTimestamp(m.updatedAtClient),
+          readFlowLogTimestamp(m.lastCheckAt),
+          readFlowLogTimestamp(m.lastCompletedAt),
+          readFlowLogTimestamp(m.lastStartedAt),
+          readFlowLogTimestamp(m.lastFailedAt),
+          readFlowLogTimestamp(m.updatedAt)
+        );
+      }catch(_e){
+        return 0;
+      }
+    }
+
     function shopifyFbmSyncCaption(){
       try{
         const flows = getAllShopifyFbmFlows();
-        const lastTs = flows.reduce((max, f)=> Math.max(max, flowLogTimestamp(f)), 0);
-        if(lastTs){
-          return `Ultimo scarico ordini Shopify: ${fmtDate(lastTs)} • controllo automatico ogni 5 min`;
+        const lastOrderTs = flows.reduce((max, f)=> Math.max(max, flowLogTimestamp(f)), 0);
+        const meta = state.shopifySync?.meta || null;
+        const lastCheckTs = shopifySyncMetaTimestamp(meta);
+        const status = String(meta?.status || "").toLowerCase();
+        const err = state.shopifySync?.error || "";
+        const summary = (meta?.lastSummary && typeof meta.lastSummary === "object") ? meta.lastSummary : null;
+
+        const checkPart = lastCheckTs
+          ? `Ultimo controllo Shopify: ${fmtDate(lastCheckTs)}`
+          : "Ultimo controllo Shopify: in attesa primo sync tracciato";
+        const orderPart = lastOrderTs
+          ? `ultimo ordine importato: ${fmtDate(lastOrderTs)}`
+          : "nessun ordine importato";
+
+        let tail = "automatico ogni 5 min";
+        if(status === "failed" || err){
+          tail = "ultimo controllo con errore";
+        }else if(summary && Number.isFinite(Number(summary.totalOrdersFetched))){
+          tail = `${Math.round(Number(summary.totalOrdersFetched))} ordini verificati • automatico ogni 5 min`;
         }
-        return "Ultimo scarico ordini Shopify: nessun ordine importato • controllo automatico ogni 5 min";
+
+        return `${checkPart} • ${orderPart} • ${tail}`;
       }catch(_e){
         return "Controllo automatico Shopify ogni 5 min";
       }
