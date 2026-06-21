@@ -2276,6 +2276,61 @@
       border-color:var(--okLine);
     }
     .pickingFlowTable{ width:100%; }
+
+    .pickingBucketCard{
+      border:1px solid var(--line);
+      background:var(--surfaceAlt);
+      border-radius:14px;
+      padding:12px;
+      box-shadow:var(--shadow);
+      display:flex;
+      flex-direction:column;
+      gap:12px;
+    }
+    .pickingBucketCard + .pickingBucketCard{ margin-top:12px; }
+    .pickingBucketTop{
+      display:flex;
+      align-items:flex-start;
+      justify-content:space-between;
+      gap:12px;
+      padding:4px 2px 0;
+    }
+    .pickingBucketTitle{
+      font-size:15px;
+      font-weight:800;
+      letter-spacing:-.02em;
+      color:var(--ink);
+      line-height:1.2;
+    }
+    .pickingBucketSub{
+      margin-top:4px;
+      font-size:12px;
+      color:var(--muted);
+      line-height:1.35;
+    }
+    .pickingBucketActions{
+      display:flex;
+      align-items:center;
+      justify-content:flex-end;
+      gap:8px;
+      flex-wrap:wrap;
+      flex:0 0 auto;
+    }
+    .pickingBucketCard.fbm{
+      background:var(--accentSoft);
+      border-color:var(--accentSoft2);
+    }
+    .pickingBucketCard.fba{
+      background:var(--surfaceAlt);
+    }
+    .pickingBucketCard .pickingFlowCard{
+      background:var(--surface);
+    }
+    @media(max-width:760px){
+      .pickingBucketTop{ flex-direction:column; align-items:stretch; }
+      .pickingBucketActions{ justify-content:flex-start; }
+      .pickingBucketActions .btn{ width:100%; }
+    }
     .pickingFlowRow{
       display:grid;
       grid-template-columns: 132px minmax(0,1.3fr) minmax(170px,.8fr) 88px 190px;
@@ -9081,7 +9136,7 @@ function currentInv(){
     }
 
     function shopifyFbmPickingBadge(){
-      return `<span class="badge warn" title="Scarico controllato da Shopify: resta prenotato finché Shopify non restituisce spedito">In attesa Shopify spedito</span>`;
+      return `<span class="badge warn" title="FBM: il prelievo è solo operativo. Lo scarico inventario resta comandato da Shopify quando l'ordine risulta spedito/evaso.">Scarico Shopify separato</span>`;
     }
 
     function getPickingCandidateFlows(){
@@ -9553,7 +9608,7 @@ function currentInv(){
         count.textContent = "—";
         setPickingNavCount("picking", "—");
         list.innerHTML = `<div class="hint">Accedi per vedere il picking.</div>`;
-        if(btnPickAll){ btnPickAll.disabled = true; btnPickAll.textContent = "Preleva tutti i flussi"; btnPickAll.title = ""; }
+        if(btnPickAll){ btnPickAll.disabled = true; btnPickAll.textContent = "Preleva tutti FBA/PDF"; btnPickAll.title = ""; }
         if(hint) hint.textContent = "";
         renderHomePickingHistoryBox();
         return;
@@ -9561,27 +9616,26 @@ function currentInv(){
 
       const flows = getPickingCandidateFlows();
       const activeFlows = flows.filter(f=>!pickingFlowStats(f).done);
-      const pickableActiveFlows = activeFlows.filter(f=>!isShopifyFbmFlow(f));
-      const visibleActiveFlows = activeFlows.slice(0, 8);
-      const activeFlowCountLabel = activeFlows.length > 8 ? `${fmtN(visibleActiveFlows.length)}/${fmtN(activeFlows.length)}` : fmtN(activeFlows.length);
+      const fbmActiveFlows = activeFlows.filter(f=>isShopifyFbmFlow(f));
+      const fbaActiveFlows = activeFlows.filter(f=>!isShopifyFbmFlow(f));
+      const visibleFbmFlows = fbmActiveFlows.slice(0, 8);
+      const visibleFbaFlows = fbaActiveFlows.slice(0, 8);
+      const activeFlowCountLabel = activeFlows.length > 0
+        ? `${fmtN(activeFlows.length)} • FBM ${fmtN(fbmActiveFlows.length)} / FBA ${fmtN(fbaActiveFlows.length)}`
+        : "0";
       count.textContent = activeFlowCountLabel;
-      setPickingNavCount("picking", activeFlowCountLabel);
+      setPickingNavCount("picking", activeFlows.length ? fmtN(activeFlows.length) : "0");
+
       if(btnPickAll){
-        btnPickAll.disabled = pickableActiveFlows.length <= 0;
-        btnPickAll.textContent = pickableActiveFlows.length ? `Preleva flussi prelevabili (${fmtN(pickableActiveFlows.length)})` : "Preleva flussi prelevabili";
-        btnPickAll.title = pickableActiveFlows.length
-          ? `Preleva solo i flussi non Shopify. I flussi Shopify FBM restano prenotati finché Shopify non restituisce spedito (${pickableActiveFlows.length.toLocaleString("it-IT")}).`
-          : "Nessun flusso prelevabile manualmente. I flussi Shopify FBM sono controllati da Shopify.";
+        btnPickAll.disabled = fbaActiveFlows.length <= 0;
+        btnPickAll.textContent = fbaActiveFlows.length ? `Preleva tutti FBA/PDF (${fmtN(fbaActiveFlows.length)})` : "Preleva tutti FBA/PDF";
+        btnPickAll.title = fbaActiveFlows.length
+          ? `Preleva tutti i flussi FBA/PDF. Gli FBM Shopify hanno un riquadro separato e non scaricano inventario dal picking.`
+          : "Nessun flusso FBA/PDF da prelevare.";
       }
 
-      if(!flows.length){
-        list.innerHTML = `<div class="hint">Nessun flusso di scarico da prelevare nei flussi recenti.</div>`;
-        if(hint) hint.textContent = "";
-      }else if(!activeFlows.length){
-        list.innerHTML = `<div class="hint">Nessun flusso da prelevare. I flussi già prelevati sono nello storico prelievi.</div>`;
-        if(hint) hint.textContent = `Flussi ordinati dal più recente: ${flows.length.toLocaleString("it-IT")} • ancora da prelevare: 0. I flussi prelevati spariscono dalla lista operativa e restano nello storico.`;
-      }else{
-        const cards = visibleActiveFlows.map(flow=>{
+      const renderFlowCards = (sectionFlows, kind)=>{
+        return sectionFlows.map(flow=>{
           const st = pickingFlowStats(flow);
           const isShopifyFlow = isShopifyFbmFlow(flow);
           const loc = (flow.location === "cerea" || flow.location === "concamarise") ? flow.location : "concamarise";
@@ -9596,14 +9650,12 @@ function currentInv(){
             const findBtnHtml = findPalletButtonHtml(firstRackLocationCodeFromPicking(flow, sku));
             const statusHtml = picked
               ? `<span class="badge ok">Prelevato</span>`
-              : (isShopifyFlow
-                ? shopifyFbmPickingBadge()
-                : `<button class="btn small amazon" type="button" data-action="pickSku" data-flowid="${escapeHtml(flowId)}" data-loc="${escapeHtml(loc)}" data-sku="${escapeHtml(sku)}">Preleva SKU</button>`);
+              : `<button class="btn small amazon" type="button" data-action="pickSku" data-flowid="${escapeHtml(flowId)}" data-loc="${escapeHtml(loc)}" data-sku="${escapeHtml(sku)}">Preleva SKU</button>`;
             const actionsHtml = `<div class="pickingSkuActions">${findBtnHtml}${statusHtml}</div>`;
             return `
               <div class="pickingFlowRow ${picked ? "picked" : ""}">
                 <div class="pickingFlowCell gridSku">${escapeHtml(sku)}</div>
-                <div class="pickingFlowCell"><div class="gridProdMain">${escapeHtml(title || sku)}</div><div class="gridProdSub">${escapeHtml(prettyLoc(loc))}</div></div>
+                <div class="pickingFlowCell"><div class="gridProdMain">${escapeHtml(title || sku)}</div><div class="gridProdSub">${isShopifyFlow ? "FBM Shopify" : "FBA/PDF"} • ${escapeHtml(prettyLoc(loc))}</div></div>
                 <div class="pickingFlowCell">${posHtml}</div>
                 <div class="pickingFlowCell right"><span class="badge warn">${escapeHtml(String(qty))}</span></div>
                 <div class="pickingFlowCell right">${actionsHtml}</div>
@@ -9612,18 +9664,21 @@ function currentInv(){
           const progressCls = st.done ? "done" : "";
           const btnFlow = st.done
             ? `<span class="badge ok">Flusso prelevato</span>`
-            : (isShopifyFlow
-              ? shopifyFbmPickingBadge()
-              : `<button class="btn primary small" type="button" data-action="pickFlow" data-flowid="${escapeHtml(flowId)}" data-loc="${escapeHtml(loc)}">Preleva flusso</button>`);
+            : `<button class="btn primary small" type="button" data-action="pickFlow" data-flowid="${escapeHtml(flowId)}" data-loc="${escapeHtml(loc)}">Preleva flusso</button>`;
+          const metaPrefix = isShopifyFlow ? "Shopify FBM" : "FBA/PDF";
+          const metaSuffix = isShopifyFlow
+            ? " • prelievo operativo, scarico inventario da Shopify spedito/evaso"
+            : " • scarico inventario da Picking";
           return `
-            <div class="pickingFlowCard" data-flowid="${escapeHtml(flowId)}" data-loc="${escapeHtml(loc)}">
+            <div class="pickingFlowCard" data-flowid="${escapeHtml(flowId)}" data-loc="${escapeHtml(loc)}" data-kind="${escapeHtml(kind || "")}">
               <div class="pickingFlowTop">
                 <div style="min-width:0">
                   <div class="pickingFlowName">${escapeHtml(flowName)}</div>
-                  <div class="pickingFlowMeta">${isShopifyFlow ? "Shopify FBM • " : ""}${escapeHtml(prettyLoc(loc))} • ${escapeHtml(fmtDate(flow.appliedAtClient))} • ${escapeHtml(String(flow.totalPieces || 0))} pz • ${escapeHtml(String(st.total))} SKU${isShopifyFlow ? " • prenotato fino a Shopify spedito" : ""}</div>
+                  <div class="pickingFlowMeta">${escapeHtml(metaPrefix)} • ${escapeHtml(prettyLoc(loc))} • ${escapeHtml(fmtDate(flow.appliedAtClient))} • ${escapeHtml(String(flow.totalPieces || 0))} pz • ${escapeHtml(String(st.total))} SKU${escapeHtml(metaSuffix)}</div>
                 </div>
                 <div class="pickingFlowActions">
                   <span class="pickingFlowProgress ${progressCls}">${escapeHtml(String(st.picked))}/${escapeHtml(String(st.total))} prelevati</span>
+                  ${isShopifyFlow ? shopifyFbmPickingBadge() : ""}
                   ${btnFlow}
                 </div>
               </div>
@@ -9639,8 +9694,56 @@ function currentInv(){
               </div>
             </div>`;
         }).join("");
-        list.innerHTML = cards;
-        if(hint) hint.textContent = `Visibili solo gli ultimi ${visibleActiveFlows.length.toLocaleString("it-IT")} flussi da prelevare, ordinati dal più recente. Totali da prelevare: ${activeFlows.length.toLocaleString("it-IT")} • Flussi scarico recenti: ${flows.length.toLocaleString("it-IT")}. La colonna Posizione mostra solo posizione e quantità.`;
+      };
+
+      const renderBucket = ({ cls, title, sub, flows, visibleFlows, empty, actionHtml })=>{
+        const hidden = flows.length > visibleFlows.length ? `<div class="hint" style="padding:0 4px 4px">Mostrati ${visibleFlows.length.toLocaleString("it-IT")} di ${flows.length.toLocaleString("it-IT")} flussi.</div>` : "";
+        return `
+          <div class="pickingBucketCard ${cls || ""}">
+            <div class="pickingBucketTop">
+              <div style="min-width:0">
+                <div class="pickingBucketTitle">${escapeHtml(title)}</div>
+                <div class="pickingBucketSub">${escapeHtml(sub)}</div>
+              </div>
+              <div class="pickingBucketActions">
+                <span class="pickingFlowProgress ${flows.length ? "" : "done"}">${escapeHtml(String(flows.length))} flussi</span>
+                ${actionHtml || ""}
+              </div>
+            </div>
+            ${visibleFlows.length ? renderFlowCards(visibleFlows, cls) : `<div class="hint" style="padding:12px">${escapeHtml(empty)}</div>`}
+            ${hidden}
+          </div>`;
+      };
+
+      if(!flows.length){
+        list.innerHTML = `<div class="hint">Nessun flusso di scarico da prelevare nei flussi recenti.</div>`;
+        if(hint) hint.textContent = "";
+      }else if(!activeFlows.length){
+        list.innerHTML = `<div class="hint">Nessun flusso da prelevare. I flussi già prelevati sono nello storico prelievi.</div>`;
+        if(hint) hint.textContent = `Flussi ordinati dal più recente: ${flows.length.toLocaleString("it-IT")} • ancora da prelevare: 0. I flussi prelevati spariscono dalla lista operativa e restano nello storico.`;
+      }else{
+        const fbmAction = `<button class="btn amazon small" type="button" data-action="pickAllShopifyFbm" ${fbmActiveFlows.length ? "" : "disabled"}>Preleva tutti FBM</button>`;
+        const fbaAction = `<button class="btn primary small" type="button" data-action="pickAllFbaPdf" ${fbaActiveFlows.length ? "" : "disabled"}>Preleva tutti FBA/PDF</button>`;
+        list.innerHTML =
+          renderBucket({
+            cls:"fbm",
+            title:"FBM Shopify",
+            sub:"Ordini Shopify da preparare. Il prelievo qui è operativo: non scarica inventario. Lo scarico reale resta collegato allo stato spedito/evaso di Shopify.",
+            flows: fbmActiveFlows,
+            visibleFlows: visibleFbmFlows,
+            empty:"Nessun ordine FBM Shopify da prelevare.",
+            actionHtml: fbmAction
+          }) +
+          renderBucket({
+            cls:"fba",
+            title:"FBA / PDF",
+            sub:"Flussi PDF FBA da prelevare. Qui il prelievo continua a scaricare l'inventario come prima.",
+            flows: fbaActiveFlows,
+            visibleFlows: visibleFbaFlows,
+            empty:"Nessun flusso FBA/PDF da prelevare.",
+            actionHtml: fbaAction
+          });
+        if(hint) hint.textContent = `Picking diviso in FBM Shopify e FBA/PDF. Totali da prelevare: ${activeFlows.length.toLocaleString("it-IT")} • FBM: ${fbmActiveFlows.length.toLocaleString("it-IT")} • FBA/PDF: ${fbaActiveFlows.length.toLocaleString("it-IT")}.`;
       }
 
       renderHomePickingHistoryBox();
@@ -9677,7 +9780,7 @@ function currentInv(){
         if(h.type === "flow"){
           const meta = [isShopifyHistory ? "Shopify FBM" : "", flowName ? `Flusso: ${flowName}` : "", h.count ? `${h.count} SKU` : "", h.at ? fmtDate(h.at) : "", h.by || ""].filter(Boolean).join(" • ");
           const actionHtml = isShopifyHistory
-            ? `<span class="badge ok pickingHistoryAction">Shopify spedito</span>`
+            ? `<span class="badge ok pickingHistoryAction">Prelevato FBM</span>`
             : `<button class="btn small danger pickingHistoryAction" type="button" data-action="undoPickFlow" data-flowid="${escapeHtml(h.flowId || h.flow?.id || "")}" data-loc="${escapeHtml(h.loc || h.flow?.location || "")}">Annulla flusso</button>`;
           return `
             <div class="pickingHistoryRow">
@@ -9690,7 +9793,7 @@ function currentInv(){
         }
         const meta = [isShopifyHistory ? "Shopify FBM" : "", h.position ? `Posizione: ${h.position}` : "", flowName ? `Flusso: ${flowName}` : "", h.at ? fmtDate(h.at) : "", h.by || ""].filter(Boolean).join(" • ");
         const actionHtml = isShopifyHistory
-          ? `<span class="badge ok pickingHistoryAction">Shopify spedito</span>`
+          ? `<span class="badge ok pickingHistoryAction">Prelevato FBM</span>`
           : `<button class="btn small danger pickingHistoryAction" type="button" data-action="undoPickSku" data-flowid="${escapeHtml(h.flowId || h.flow?.id || "")}" data-loc="${escapeHtml(h.loc || h.flow?.location || "")}" data-sku="${escapeHtml(h.sku)}">Annulla</button>`;
         return `
           <div class="pickingHistoryRow">
@@ -9705,6 +9808,210 @@ function currentInv(){
       if(histHint){
         histHint.textContent = `Mostrati gli ultimi ${Math.min(hist.length, 80).toLocaleString("it-IT")} prelievi. I flussi prelevati spariscono dal menu Picking e restano qui nello storico.`;
       }
+    }
+
+    function buildShopifyFbmPickedLine(flow, line, sku, qty, nowClient, who, extra = {}){
+      const s = toSkuId(sku || line?.sku || "");
+      const title = pickingLineTitle(line || { sku:s }, flow) || s;
+      const position = pickingLinePositionText(flow, s);
+      return {
+        picked:true,
+        status:"prelevato",
+        sku:s,
+        title,
+        qty:Math.abs(parseQty(qty || line?.qty || 0) || 0),
+        position,
+        rackLocation:position,
+        pickedAllocations:[],
+        stockControlledBy:"shopify",
+        stockDelta:0,
+        reservationDelta:0,
+        shopifyOperationalPick:true,
+        pickedAtClient:nowClient,
+        pickedBy:who,
+        ...extra
+      };
+    }
+
+    async function saveShopifyFbmPickingSkuOnly(flow, loc, sku, opts = {}){
+      const api = state.firebase.api;
+      const db = state.firebase.db;
+      if(!api || !db){ showToast("Errore", "Firebase non inizializzato.", 2200); return; }
+      const id = String(flow?.id || "").trim();
+      const l = (loc === "cerea" || loc === "concamarise") ? loc : ((flow?.location === "cerea" || flow?.location === "concamarise") ? flow.location : "concamarise");
+      const s = toSkuId(sku || "");
+      if(!id || !s){ showToast("Errore", "Flusso o SKU non valido.", 2200); return; }
+      const line = (flow.lines || []).find(x=>toSkuId(x?.sku || "") === s) || { sku:s, qty:0, title:s };
+      if(isPickingLinePicked(flow, s) && !opts.force){ showToast("Già prelevato", `${s} risulta già prelevato.`, 1800); return; }
+      const qty = Math.abs(parseQty(line.qty || 0) || 0);
+      if(!qty){ showToast("Quantità non valida", `${s} ha quantità zero nel flusso.`, 2200); return; }
+      const title = pickingLineTitle(line, flow);
+      const position = pickingLinePositionText(flow, s);
+      if(!opts.skipConfirm){
+        const ok = confirm(`Confermi prelievo operativo FBM?\n\nFlusso: ${flowDisplayName(flow)}\nSKU: ${s}\nPosizione: ${position}\nQuantità: ${qty} pz\n\nNota: il picking NON scarica inventario. Lo scarico avverrà solo quando Shopify restituisce spedito/evaso.`);
+        if(!ok) return;
+      }
+      const nowClient = Date.now();
+      const who = state.user?.email || state.user?.emailLower || state.user?.uid || "";
+      const key = pickingSkuKey(s);
+      const pickedLine = buildShopifyFbmPickedLine(flow, line, s, qty, nowClient, who);
+      const pickedMap = { ...pickingLineMap(flow), [key]: pickedLine };
+      const validLines = (flow.lines || []).filter(x=>toSkuId(x?.sku || ""));
+      const allPicked = validLines.length > 0 && validLines.every(x=>{
+        const k = pickingSkuKey(x.sku);
+        return !!pickedMap[k]?.picked;
+      });
+      const event = { type:"sku", shopifyFbm:true, sku:s, qty, position, stockDelta:0, reservationDelta:0, atClient:nowClient, by:who };
+      const ref = api.doc(db, COL_ROOT, l, SUB_LOGS, id);
+      const pickingPatch = {
+        status: allPicked ? "prelevato_attesa_shopify" : "parziale_attesa_shopify",
+        managedByPicking:true,
+        shopifyControlled:true,
+        pickedLines: { [key]: pickedLine },
+        updatedAt: api.serverTimestamp(),
+        updatedAtClient: nowClient,
+        updatedBy: who,
+        events: api.arrayUnion(event),
+        flowPicked: allPicked,
+        flowPickMode: allPicked ? "sku" : "",
+        flowPickGroup: false,
+        flowPickedAt: allPicked ? api.serverTimestamp() : null,
+        flowPickedAtClient: allPicked ? nowClient : null,
+        flowPickedBy: allPicked ? who : ""
+      };
+      await api.setDoc(ref, {
+        status: allPicked ? "SHOPIFY_PICKED_WAITING_SHIPMENT" : "SHOPIFY_PARTIAL_PICKED_WAITING_SHIPMENT",
+        reservation: { active:true, status: allPicked ? "prelevato_attesa_shopify_spedito" : "parziale_prelevato_attesa_shopify_spedito", pickedAtClient: allPicked ? nowClient : null, updatedAtClient: nowClient, updatedBy: who },
+        picking: pickingPatch
+      }, { merge:true });
+      try{
+        flow.status = allPicked ? "SHOPIFY_PICKED_WAITING_SHIPMENT" : "SHOPIFY_PARTIAL_PICKED_WAITING_SHIPMENT";
+        flow.reservation = { ...(flow.reservation || {}), active:true, status: allPicked ? "prelevato_attesa_shopify_spedito" : "parziale_prelevato_attesa_shopify_spedito", updatedAtClient: nowClient, updatedBy: who };
+        flow.picking = { ...(flow.picking || {}), ...pickingPatch, pickedLines: pickedMap };
+      }catch(_e){}
+      showToast("FBM prelevato", `${s} • ${position} • ${qty} pz. Scarico inventario da Shopify.`, 2200);
+      renderHomePickingBox();
+      renderHomeLogsBox();
+    }
+
+    async function saveShopifyFbmPickingFlowOnly(flow, loc, opts = {}){
+      const api = state.firebase.api;
+      const db = state.firebase.db;
+      if(!api || !db){ showToast("Errore", "Firebase non inizializzato.", 2200); return; }
+      const id = String(flow?.id || "").trim();
+      const l = (loc === "cerea" || loc === "concamarise") ? loc : ((flow?.location === "cerea" || flow?.location === "concamarise") ? flow.location : "concamarise");
+      if(!id){ showToast("Errore", "Flusso non valido.", 2200); return; }
+      const st = pickingFlowStats(flow);
+      if(st.done){ showToast("Già prelevato", "Questo flusso FBM risulta già prelevato.", 1800); return; }
+      const validLines = pickingUniqueLines(flow);
+      const linesToPick = validLines.filter(x=>!isPickingLinePicked(flow, toSkuId(x?.sku || "")));
+      if(!linesToPick.length){ showToast("Nessuna riga", "Il flusso FBM non contiene SKU da prelevare.", 1800); return; }
+      let pieces = 0;
+      for(const line of linesToPick){ pieces += Math.abs(parseQty(line?.qty || 0) || 0); }
+      if(!opts.skipConfirm){
+        const ok = confirm(`Confermi prelievo operativo intero FBM?\n\n${flowDisplayName(flow)}\nSKU da prelevare: ${linesToPick.length}/${st.total}\nPezzi: ${pieces}\n\nNota: il picking NON scarica inventario. Lo scarico avverrà solo quando Shopify restituisce spedito/evaso.`);
+        if(!ok) return;
+      }
+      const nowClient = Date.now();
+      const who = state.user?.email || state.user?.emailLower || state.user?.uid || "";
+      const pickedLines = {};
+      const nextPickedMap = { ...pickingLineMap(flow) };
+      const skuList = [];
+      let flowPieces = 0;
+      for(const line of linesToPick){
+        const sku = toSkuId(line?.sku || "");
+        if(!sku) continue;
+        const qty = Math.abs(parseQty(line?.qty || 0) || 0);
+        if(!qty) continue;
+        const key = pickingSkuKey(sku);
+        const rec = buildShopifyFbmPickedLine(flow, line, sku, qty, nowClient, who, opts.bulkId ? { bulkId:opts.bulkId } : {});
+        pickedLines[key] = rec;
+        nextPickedMap[key] = rec;
+        flowPieces += qty;
+        if(!skuList.includes(sku)) skuList.push(sku);
+      }
+      if(!skuList.length){ showToast("Nessuna riga", "Il flusso FBM non contiene SKU validi da prelevare.", 1800); return; }
+      const allPicked = validLines.length > 0 && validLines.every(x=>{
+        const k = pickingSkuKey(x.sku);
+        return !!nextPickedMap[k]?.picked;
+      });
+      const event = { type:"flow", shopifyFbm:true, skus:skuList, count:skuList.length, pieces:flowPieces, stockDelta:0, reservationDelta:0, atClient:nowClient, by:who, ...(opts.bulkId ? { bulk:true, bulkId:opts.bulkId } : {}) };
+      const ref = api.doc(db, COL_ROOT, l, SUB_LOGS, id);
+      const pickingPatch = {
+        status: allPicked ? "prelevato_attesa_shopify" : "parziale_attesa_shopify",
+        managedByPicking:true,
+        shopifyControlled:true,
+        pickedLines,
+        updatedAt: api.serverTimestamp(),
+        updatedAtClient: nowClient,
+        updatedBy: who,
+        events: api.arrayUnion(event),
+        flowPicked: allPicked,
+        flowPickMode:"flow",
+        flowPickGroup:true,
+        flowPickedCount:skuList.length,
+        flowPickedSkus:skuList,
+        flowPickedAt: allPicked ? api.serverTimestamp() : null,
+        flowPickedAtClient: allPicked ? nowClient : null,
+        flowPickedBy: allPicked ? who : "",
+        ...(opts.bulkId ? { bulkPickId:opts.bulkId } : {})
+      };
+      await api.setDoc(ref, {
+        status: allPicked ? "SHOPIFY_PICKED_WAITING_SHIPMENT" : "SHOPIFY_PARTIAL_PICKED_WAITING_SHIPMENT",
+        reservation: { active:true, status: allPicked ? "prelevato_attesa_shopify_spedito" : "parziale_prelevato_attesa_shopify_spedito", pickedAtClient: allPicked ? nowClient : null, updatedAtClient: nowClient, updatedBy: who },
+        picking: pickingPatch
+      }, { merge:true });
+      try{
+        flow.status = allPicked ? "SHOPIFY_PICKED_WAITING_SHIPMENT" : "SHOPIFY_PARTIAL_PICKED_WAITING_SHIPMENT";
+        flow.reservation = { ...(flow.reservation || {}), active:true, status: allPicked ? "prelevato_attesa_shopify_spedito" : "parziale_prelevato_attesa_shopify_spedito", updatedAtClient: nowClient, updatedBy: who };
+        flow.picking = { ...(flow.picking || {}), ...pickingPatch, pickedLines: nextPickedMap };
+      }catch(_e){}
+      if(!opts.silent) showToast("Flusso FBM prelevato", `${flowDisplayName(flow)} • ${skuList.length} SKU • ${flowPieces} pz. Scarico inventario da Shopify.`, 2400);
+      renderHomePickingBox();
+      renderHomeLogsBox();
+      return { flowId:id, skuCount:skuList.length, pieces:flowPieces, pickedMap:nextPickedMap, pickingPatch };
+    }
+
+    async function savePickingAllShopifyFbmFlows(){
+      if(!canUsePickingActions()){
+        showToast("Permessi", "Utente non abilitato al picking.", 2200);
+        return;
+      }
+      const flows = getPickingCandidateFlows();
+      const activeFlows = flows.filter(f=>!pickingFlowStats(f).done && isShopifyFbmFlow(f));
+      if(!activeFlows.length){
+        showToast("Nessun FBM", "Non ci sono ordini Shopify FBM da prelevare.", 1800);
+        return;
+      }
+      let totalSku = 0;
+      let totalPieces = 0;
+      for(const flow of activeFlows){
+        const validLines = pickingUniqueLines(flow).filter(line=>!isPickingLinePicked(flow, toSkuId(line?.sku || "")));
+        totalSku += validLines.length;
+        for(const line of validLines){ totalPieces += Math.abs(parseQty(line?.qty || 0) || 0); }
+      }
+      const ok = confirm(`Confermi prelievo operativo di tutti gli FBM Shopify?\n\nOrdini/flussi FBM: ${activeFlows.length}\nSKU totali: ${totalSku}\nPezzi totali: ${totalPieces}\n\nNota: il picking NON scarica inventario. Shopify scaricherà quando l'ordine sarà spedito/evaso.`);
+      if(!ok) return;
+      const bulkId = `bulk_fbm_pick_${Date.now()}`;
+      let doneFlows = 0;
+      let doneSku = 0;
+      let donePieces = 0;
+      for(const flow of activeFlows){
+        try{
+          const loc = (flow?.location === "cerea" || flow?.location === "concamarise") ? flow.location : "concamarise";
+          const res = await saveShopifyFbmPickingFlowOnly(flow, loc, { skipConfirm:true, silent:true, bulkId });
+          if(res){
+            doneFlows++;
+            doneSku += Number(res.skuCount || 0);
+            donePieces += Number(res.pieces || 0);
+          }
+        }catch(err){
+          console.warn("pick all shopify fbm flow", err);
+        }
+      }
+      showToast("FBM prelevati", `${doneFlows} flussi • ${doneSku} SKU • ${donePieces} pz. Scarico inventario da Shopify.`, 2600);
+      renderHomePickingBox();
+      renderHomeLogsBox();
     }
 
     async function savePickingSku(flowId, loc, sku, opts = {}){
@@ -9723,7 +10030,7 @@ function currentInv(){
         return;
       }
       if(isShopifyFbmFlow(flow)){
-        showToast("Shopify controlla lo scarico", "Questo ordine resta prenotato nel Picking fino a quando Shopify restituisce stato spedito.", 3400);
+        await saveShopifyFbmPickingSkuOnly(flow, l, s, opts);
         return;
       }
       const line = (flow.lines || []).find(x=>toSkuId(x?.sku || "") === s) || { sku:s, qty:0, title:s };
@@ -9814,7 +10121,7 @@ function currentInv(){
         return;
       }
       if(isShopifyFbmFlow(flow)){
-        showToast("Shopify controlla lo scarico", "Questo ordine resta prenotato nel Picking fino a quando Shopify restituisce stato spedito.", 3400);
+        await saveShopifyFbmPickingFlowOnly(flow, l);
         return;
       }
       const st = pickingFlowStats(flow);
@@ -9906,7 +10213,7 @@ function currentInv(){
       const activeFlows = flows.filter(f=>!pickingFlowStats(f).done && !isShopifyFbmFlow(f));
       if(!activeFlows.length){
         const msg = waitingShopifyFlows.length
-          ? "Ci sono solo flussi Shopify FBM: restano prenotati finché Shopify non restituisce spedito."
+          ? "Ci sono solo flussi Shopify FBM: usa il tasto Preleva tutti FBM nel riquadro Shopify."
           : "Non ci sono flussi da prelevare.";
         showToast("Nessun flusso prelevabile", msg, 2600);
         return;
@@ -9922,7 +10229,7 @@ function currentInv(){
         }
       }
 
-      const ok = confirm(`Confermi prelievo di tutti i flussi prelevabili?\n\nFlussi: ${activeFlows.length}\nSKU totali: ${totalSku}\nPezzi totali: ${totalPieces}\n\nI flussi Shopify FBM vengono esclusi: restano prenotati fino a Shopify spedito.`);
+      const ok = confirm(`Confermi prelievo di tutti i flussi FBA/PDF?\n\nFlussi: ${activeFlows.length}\nSKU totali: ${totalSku}\nPezzi totali: ${totalPieces}\n\nQuesti flussi scaricano inventario dal Picking. Gli FBM Shopify hanno riquadro separato e scarico Shopify.`);
       if(!ok) return;
 
       const api = state.firebase.api;
@@ -15701,10 +16008,18 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
             await openCapannone3dFind(findBtn.getAttribute("data-code") || "");
             return;
           }
-          const btn = e.target?.closest?.("[data-action='pickSku'], [data-action='pickFlow']");
+          const btn = e.target?.closest?.("[data-action='pickSku'], [data-action='pickFlow'], [data-action='pickAllShopifyFbm'], [data-action='pickAllFbaPdf']");
           if(!btn) return;
           e.preventDefault(); e.stopPropagation();
           const action = btn.getAttribute("data-action") || "";
+          if(action === "pickAllShopifyFbm"){
+            await savePickingAllShopifyFbmFlows();
+            return;
+          }
+          if(action === "pickAllFbaPdf"){
+            await savePickingAllFlows();
+            return;
+          }
           const flowId = btn.getAttribute("data-flowid") || "";
           const loc = btn.getAttribute("data-loc") || "";
           if(action === "pickSku"){
