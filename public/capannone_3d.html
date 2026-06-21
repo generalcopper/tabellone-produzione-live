@@ -2481,9 +2481,9 @@ function tick(now){
   if(tween){const k=ease(Math.min(1,(now-tween.start)/tween.dur));
     for(const key in tween.to)cam[key]=tween.from[key]+(tween.to[key]-tween.from[key])*k;
     if(k>=1)tween=null;}
-  // animazione glow del/dei bancale/i selezionato/i
+  // animazione glow del/dei bancale/i selezionato/i (frame-rate indipendente)
   if(glowState || glowList || prelievoGlow){
-    pulse+=0.05;
+    pulse=now*0.003;
     const s=Math.sin(pulse);
     const inten=0.45+s*0.18;
     const animaGlow=(gs)=>{
@@ -2508,9 +2508,13 @@ function tick(now){
   // resta identico e fluido a qualsiasi frame rate (no scatti su kiosk).
   if(_lastTickT===null) _lastTickT=now;
   let _dt=(now-_lastTickT)/1000; _lastTickT=now;
-  if(_dt<0) _dt=0; if(_dt>0.1) _dt=0.1;          // clamp anti-scatti
-  // "rate" = frazione recuperata in 1/60s; convertita in fattore continuo via dt
-  const rate=tour?0.075:(tween?0.11:(idle?0.05:0.16));
+  if(_dt<0) _dt=0; if(_dt>0.05) _dt=0.05;        // clamp anti-scatti (50ms)
+  // "rate" = frazione recuperata in 1/60s; convertita in fattore continuo via dt.
+  // Durante le cinematiche (idle/tour/tween) "cam" è GIÀ mosso da un easing morbido:
+  // un secondo lerp in serie aggiunge lag variabile e micro-scatti, quindi qui il
+  // smoothing è quasi pass-through. Lo smoothing forte serve solo al drag manuale.
+  const inCine = tour||tween||idle;
+  const rate=inCine?0.5:0.16;
   const sm=1-Math.pow(1-rate, _dt*60);           // lerp esponenziale stabile
   for(const k of ['theta','phi','r','tx','ty','tz']) camS[k]+=(cam[k]-camS[k])*sm;
   // micro-respiro cinematografico: lievissima oscillazione viva durante la cinematica
@@ -2554,9 +2558,12 @@ function tick(now){
       if(w.visible){w.material.opacity+=(0.92-w.material.opacity)*0.18;w.material.transparent=true;} }
   }
   // ombre: ricalcolate quando richiesto (scena statica) + refresh periodico leggero
-  // per dare ombre vive alla linea animata senza ricalcolare ogni frame.
-  _shadowTick=(_shadowTick+1)%5;
-  if(_shadowFrames>0 || _shadowTick===0){ renderer.shadowMap.needsUpdate=true; if(_shadowFrames>0)_shadowFrames--; }
+  // per la linea animata. Durante le cinematiche la geometria della scena è statica
+  // (si muove solo la camera): il refresh periodico provocherebbe un hitch visibile
+  // ogni N frame, quindi lo sospendo e tengo solo i frame esplicitamente richiesti.
+  _shadowTick=(_shadowTick+1)%8;
+  const periodicShadow = !inCine && _shadowTick===0;
+  if(_shadowFrames>0 || periodicShadow){ renderer.shadowMap.needsUpdate=true; if(_shadowFrames>0)_shadowFrames--; }
   renderer.render(scene,camera);
   requestAnimationFrame(tick);
 }
