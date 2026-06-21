@@ -2296,68 +2296,67 @@ function buildScenes(){
   const scenes=[];
   const rnd=(a,b)=>a+Math.random()*(b-a);
 
-  // 1) CARRELLATA D'INSIEME (riposo): lenta dolly laterale
-  scenes.push({ dur:rnd(24000,28000),
-    from:{tx:-6, ty:3.0, tz:1, r:portrait?10:30, theta:Math.PI*0.10, phi:midPhi},
-    to:  {tx: 6, ty:3.2, tz:1, r:portrait?10.5:31, theta:Math.PI*0.17, phi:midPhi+0.02} });
+  // ============================================================================
+  //  GENERATORE PROCEDURALE DI INQUADRATURE — ogni chiamata produce un set diverso.
+  //  Vincolo di sicurezza: theta sempre nell'ARCO FRONTALE/LATERALE, mai dietro
+  //  (il retro è il lato cartongesso / zona tecnica). La camera può uscire FUORI
+  //  dalle mura (raggi grandi) e orbitare attorno al capannone su quel mezzo giro.
+  // ============================================================================
+  const TAU=Math.PI*2;
+  // theta consentito: l'arco che guarda da fronte e dai due lati, escludendo il retro.
+  // 0 ≈ fronte; valori verso ±0.48π = lati; |theta|>0.5π porterebbe dietro (vietato).
+  const THETA_MIN=-Math.PI*0.48, THETA_MAX=Math.PI*0.48;
+  const clampTheta=(t)=>Math.max(THETA_MIN, Math.min(THETA_MAX, t));
+  // phi: da quasi a livello del pavimento fino a vista dall'alto
+  const clampPhi=(p)=>Math.max(0.05, Math.min(Math.PI*0.46, p));
 
-  // 1b) carrellata d'insieme inversa (per varietà)
-  scenes.push({ dur:rnd(24000,28000),
-    from:{tx: 6, ty:3.2, tz:1, r:portrait?10.5:31, theta:Math.PI*0.20, phi:midPhi+0.02},
-    to:  {tx:-6, ty:3.0, tz:1, r:portrait?10:29, theta:Math.PI*0.08, phi:midPhi} });
+  // un "soggetto" su cui puntare la camera (target tx,tz e quota ty)
+  const targets=[
+    {tx:0,   tz:1,  ty:3.0, lbl:'insieme'},
+    {tx:0,   tz:1,  ty:2.4, lbl:'insieme-basso'},
+    B&&{tx:B.c.x, tz:0,      ty:3.0, lbl:'B'},
+    C&&{tx:C.c.x, tz:0,      ty:3.0, lbl:'C'},
+    D&&{tx:D.c.x, tz:0,      ty:3.0, lbl:'D'},
+    E&&{tx:E.c.x+1, tz:E.c.z, ty:3.0, lbl:'E'},
+    A&&{tx:A.c.x-2, tz:A.c.z, ty:3.0, lbl:'A'},
+    {tx:-LX/2+7.5, tz:LZ/2-1.9, ty:2.6, lbl:'linea'},   // zona linea produzione
+  ].filter(Boolean);
 
-  // 2) CARRELLATA RAVVICINATA lungo il fronte delle file B-C-D (dall'esterno della corsia,
-  //    camera nel corridoio centrale che guarda il fronte degli scaffali mentre sfilano)
-  if(B){
-    scenes.push({ dur:rnd(20000,24000),
-      from:{tx:B.minx+1, ty:3.2, tz:0, r:portrait?9:12, theta:Math.PI*0.30, phi:Math.PI*0.12},
-      to:  {tx:B.maxx-1, ty:3.4, tz:0, r:portrait?9.5:13, theta:Math.PI*0.34, phi:Math.PI*0.10} });
-  }
-  // 3) PIANO sulle file E-F: la camera sta nel CENTRO del capannone (lontano dal cartongesso)
-  //    e guarda verso le file E-F che sfilano. Mai dal lato testata (dove c'è il cartongesso).
-  if(E){
-    scenes.push({ dur:rnd(19000,23000),
-      from:{tx:E.c.x+1, ty:3.2, tz:E.c.z, r:portrait?9:12, theta:-Math.PI*0.30, phi:Math.PI*0.12},
-      to:  {tx:E.c.x+1, ty:3.4, tz:E.c.z, r:portrait?9.5:13, theta:-Math.PI*0.40, phi:Math.PI*0.10} });
-  }
-  // 4) CARRELLATA lungo la fila A: camera nel corridoio centrale che guarda verso destra la A
-  if(A){
-    scenes.push({ dur:rnd(20000,24000),
-      from:{tx:A.c.x-3, ty:3.2, tz:A.c.z, r:portrait?8:11, theta:-Math.PI*0.32, phi:Math.PI*0.11},
-      to:  {tx:A.c.x-3, ty:3.5, tz:A.c.z, r:portrait?8.5:12, theta:-Math.PI*0.42, phi:Math.PI*0.09} });
-  }
-  // 4b) carrellata d'insieme ravvicinata sul lato opposto
-  scenes.push({ dur:rnd(22000,26000),
-    from:{tx: 5, ty:3.0, tz:1, r:portrait?9.5:28, theta:Math.PI*0.22, phi:midPhi},
-    to:  {tx:-5, ty:3.3, tz:1, r:portrait?10:30, theta:Math.PI*0.06, phi:midPhi+0.02} });
-
-  // 5) VISTA ALTA d'insieme che scende dolcemente (establishing)
-  scenes.push({ dur:rnd(22000,26000),
-    from:{tx:0, ty:4.5, tz:2, r:portrait?13:36, theta:Math.PI*0.22, phi:Math.PI*0.30},
-    to:  {tx:0, ty:3.0, tz:1, r:portrait?10:30, theta:Math.PI*0.12, phi:midPhi} });
-
-  // 6) SCENA CINEMATICA SULLA LINEA DI PRODUZIONE (zona blu, angolo muro fronte)
-  //    camera bassa che percorre la linea a U. Raggi contenuti e target sulla zona
-  //    linea: la camera resta nell'angolo muro-fronte, lontana dalle scaffalature.
-  {
-    const lineCx=-LX/2+7.5;          // centro X della zona linea (15m da bx0)
-    const lineCz= LZ/2-1.9;          // verso il muro fronte (profondità zona)
-    // ingresso: dolly laterale lungo la linea, camera più arretrata (zoom contenuto)
-    scenes.push({ dur:rnd(22000,26000),
-      from:{tx:lineCx+5.0, ty:2.4, tz:lineCz, r:portrait?10.5:13.0, theta:Math.PI*0.52, phi:Math.PI*0.10},
-      to:  {tx:lineCx-5.0, ty:2.6, tz:lineCz, r:portrait?10.8:13.4, theta:Math.PI*0.60, phi:Math.PI*0.12} });
-    // 6b) carrellata di ritorno leggermente più alta che scopre la U e il pallet
-    scenes.push({ dur:rnd(20000,24000),
-      from:{tx:lineCx-4.0, ty:3.0, tz:lineCz, r:portrait?11.5:14.0, theta:Math.PI*0.62, phi:Math.PI*0.18},
-      to:  {tx:lineCx+4.0, ty:3.2, tz:lineCz, r:portrait?11.8:14.4, theta:Math.PI*0.50, phi:Math.PI*0.20} });
-    // 6c) vista d'insieme della linea (riempimento/tappatura) senza primo piano
-    scenes.push({ dur:rnd(18000,22000),
-      from:{tx:lineCx-1.0, ty:2.6, tz:lineCz, r:portrait?9.5:11.5, theta:Math.PI*0.56, phi:Math.PI*0.11},
-      to:  {tx:lineCx+1.5, ty:2.8, tz:lineCz, r:portrait?9.8:11.8, theta:Math.PI*0.62, phi:Math.PI*0.13} });
+  // crea UNA scena casuale: sceglie un target, un mezzo-giro di partenza/arrivo entro
+  // l'arco sicuro, raggio (interno o esterno alle mura), quota e inclinazione variabili.
+  function randScene(opts={}){
+    const tg=opts.target || targets[(Math.random()*targets.length)|0];
+    const outside = opts.outside!==undefined ? opts.outside : (Math.random()<0.45);
+    // raggio: dentro le mura (8..16) oppure fuori, orbita larga (22..58)
+    const rBase = outside ? rnd(portrait?22:30, portrait?40:58)
+                          : rnd(portrait?8:11, portrait?15:18);
+    const r1=rBase*rnd(0.92,1.0), r2=rBase*rnd(1.0,1.12);
+    // due theta diversi entro l'arco sicuro → la camera ruota (orbita) durante la scena
+    const center=clampTheta(rnd(THETA_MIN+0.1, THETA_MAX-0.1));
+    let swing = rnd(0.18, 0.40) * (Math.random()<0.5?1:-1);     // ampiezza e verso giro (ampia)
+    if(Math.abs(swing)<0.16) swing = (swing<0?-0.16:0.16);      // mai troppo poco: sempre in moto
+    const th1=clampTheta(center - swing/2), th2=clampTheta(center + swing/2);
+    // quote e inclinazioni indipendenti → panoramiche dal basso verso l'alto e viceversa
+    const phLo = outside ? rnd(0.06,0.14) : rnd(0.07,0.16);
+    const phHi = rnd(0.16, 0.40);
+    const ph1 = Math.random()<0.5 ? clampPhi(phLo) : clampPhi(phHi);
+    const ph2 = Math.random()<0.5 ? clampPhi(phLo) : clampPhi(phHi);
+    const ty1=tg.ty+rnd(-0.6, outside?2.2:1.4), ty2=tg.ty+rnd(-0.6, outside?2.2:1.4);
+    const tx1=tg.tx+rnd(-1.2,1.2), tx2=tg.tx+rnd(-1.2,1.2);
+    return { dur:rnd(18000,27000), outside,
+      from:{tx:tx1, ty:Math.max(1.3,ty1), tz:tg.tz, r:r1, theta:th1, phi:ph1},
+      to:  {tx:tx2, ty:Math.max(1.3,ty2), tz:tg.tz, r:r2, theta:th2, phi:ph2} };
   }
 
-  // 7) SCENA FINALE DI RIPOSO: vista da lontano e dal punto più basso, inquadra tutto
-  //    il capannone. È l'ultima scena: dopo questa il sistema resta fermo qui, in attesa.
+  // quante scene per ciclo (numero variabile → ritmo del tour mai identico)
+  const N = 6 + ((Math.random()*4)|0);   // 6..9 scene
+  for(let i=0;i<N;i++) scenes.push(randScene());
+  // garantisci sempre almeno un paio di orbite esterne ampie
+  scenes.push(randScene({outside:true, target:targets[0]}));
+  scenes.push(randScene({outside:true}));
+
+  // ===== SCENA FINALE DI RIPOSO: vista da lontano e dal punto più basso, inquadra tutto.
+  //   È sempre l'ultima: dopo questa il sistema resta fermo qui, in attesa. =====
   scenes.push({ rest:true, dur:rnd(16000,20000),
     from:{tx:0, ty:2.2, tz:1, r:portrait?17:46, theta:Math.PI*0.16, phi:Math.PI*0.060},
     to:  {tx:0, ty:2.0, tz:1, r:portrait?18:48, theta:Math.PI*0.15, phi:Math.PI*0.050} });
@@ -2377,6 +2376,7 @@ function updateIdle(now){
   if(now-lastInteract < IDLE_WAIT){ idle=null; return; }
   if(!_scenes || _scenes.length===0) _scenes=buildScenes();
   if(!idle){
+    _scenes=buildScenes();          // nuova generazione: ogni risveglio è un tour diverso
     const order=_buildIdleOrder();
     idle={ start:now, order, oi:0, sceneIdx:order[0], sceneStart:now, resting:false,
            blendStart:now, prevPose:{tx:cam.tx,tz:cam.tz,ty:cam.ty,r:cam.r,theta:cam.theta,phi:cam.phi} };
@@ -2400,20 +2400,25 @@ function updateIdle(now){
   }
   const scn=_scenes[idle.sceneIdx];
   const a=scn.from, b=scn.to;
-  // easing morbido cubico in-out per il dolly della scena (più fluido del quadratico)
-  const e=p<0.5?4*p*p*p:1-Math.pow(-2*p+2,3)/2;
+  // DOLLY interno alla scena: easing quasi-lineare (smoothstep molto blando) così la
+  // velocità non va a zero a inizio/fine scena → niente stalli, sempre in traslazione.
+  const e = idle.resting
+    ? (p<0.5?4*p*p*p:1-Math.pow(-2*p+2,3)/2)   // in riposo: ease-in-out per fermarsi dolce
+    : (0.15*(p<0.5?4*p*p*p:1-Math.pow(-2*p+2,3)/2) + 0.85*p);  // 85% lineare → moto costante
   const lerpScene=(k)=>a[k]+(b[k]-a[k])*e;
   const t=(now-idle.start)/1000;
   // in riposo niente oscillazione: posa perfettamente ferma
   const breath = idle.resting ? 0 : 1;
   let TX=lerpScene('tx'), TZ=lerpScene('tz'), TY=lerpScene('ty')+Math.sin(t*0.5)*0.04*breath,
       R=lerpScene('r')+Math.sin(t*0.3)*0.15*breath, TH=lerpScene('theta'), PH=lerpScene('phi')+Math.sin(t*0.25)*0.004*breath;
-  // BLEND tra scene: nei primi BLEND_MS interpola dalla posa precedente alla nuova scena
-  const BLEND_MS=6500;
+  // BLEND tra scene: transizione morbida dalla posa precedente alla nuova scena. Più lungo
+  // del moto interno, così il cambio scena è un'unica traslazione continua senza pause.
+  const BLEND_MS = idle.resting ? 5000 : 9000;
   if(idle.blendStart && idle.prevPose){
     const bt=Math.min(1,(now-idle.blendStart)/BLEND_MS);
     if(bt<1){
-      const be=bt<0.5?4*bt*bt*bt:1-Math.pow(-2*bt+2,3)/2;   // ease-in-out cubico
+      // ease-out morbido (parte alla velocità del moto precedente, decelera dolce sul nuovo)
+      const be=1-Math.pow(1-bt,3);
       const pp=idle.prevPose;
       // interpolo theta sul cammino più breve
       let dth=TH-pp.theta; while(dth>Math.PI)dth-=2*Math.PI; while(dth<-Math.PI)dth+=2*Math.PI;
