@@ -9780,7 +9780,7 @@ function currentInv(){
         if(h.type === "flow"){
           const meta = [isShopifyHistory ? "Shopify FBM" : "", flowName ? `Flusso: ${flowName}` : "", h.count ? `${h.count} SKU` : "", h.at ? fmtDate(h.at) : "", h.by || ""].filter(Boolean).join(" • ");
           const actionHtml = isShopifyHistory
-            ? `<span class="badge ok pickingHistoryAction">Prelevato FBM</span>`
+            ? `<button class="btn small danger pickingHistoryAction" type="button" data-action="undoPickFlow" data-flowid="${escapeHtml(h.flowId || h.flow?.id || "")}" data-loc="${escapeHtml(h.loc || h.flow?.location || "")}">Annulla flusso FBM</button>`
             : `<button class="btn small danger pickingHistoryAction" type="button" data-action="undoPickFlow" data-flowid="${escapeHtml(h.flowId || h.flow?.id || "")}" data-loc="${escapeHtml(h.loc || h.flow?.location || "")}">Annulla flusso</button>`;
           return `
             <div class="pickingHistoryRow">
@@ -9793,7 +9793,7 @@ function currentInv(){
         }
         const meta = [isShopifyHistory ? "Shopify FBM" : "", h.position ? `Posizione: ${h.position}` : "", flowName ? `Flusso: ${flowName}` : "", h.at ? fmtDate(h.at) : "", h.by || ""].filter(Boolean).join(" • ");
         const actionHtml = isShopifyHistory
-          ? `<span class="badge ok pickingHistoryAction">Prelevato FBM</span>`
+          ? `<button class="btn small danger pickingHistoryAction" type="button" data-action="undoPickSku" data-flowid="${escapeHtml(h.flowId || h.flow?.id || "")}" data-loc="${escapeHtml(h.loc || h.flow?.location || "")}" data-sku="${escapeHtml(h.sku)}">Annulla FBM</button>`
           : `<button class="btn small danger pickingHistoryAction" type="button" data-action="undoPickSku" data-flowid="${escapeHtml(h.flowId || h.flow?.id || "")}" data-loc="${escapeHtml(h.loc || h.flow?.location || "")}" data-sku="${escapeHtml(h.sku)}">Annulla</button>`;
         return `
           <div class="pickingHistoryRow">
@@ -10384,6 +10384,214 @@ function currentInv(){
 
 
 
+
+    function isShopifyFbmAlreadyShippedByShopify(flow){
+      try{
+        const rs = String(flow?.reservation?.status || "").toLowerCase();
+        const ps = String(flow?.picking?.status || "").toLowerCase();
+        const shop = (flow?.shopify && typeof flow.shopify === "object") ? flow.shopify : {};
+        const shippedTotal = Number(shop.shippedTotal || 0);
+        return !!(
+          rs === "shopify_spedito" ||
+          rs === "parziale_shopify_spedito" ||
+          ps === "shopify_spedito" ||
+          ps === "parziale_shopify_spedito" ||
+          String(shop.lastShipmentKey || "").trim() ||
+          (Number.isFinite(shippedTotal) && shippedTotal > 0)
+        );
+      }catch(_e){
+        return false;
+      }
+    }
+
+    async function undoShopifyFbmPickingSkuOnly(flow, loc, sku){
+      if(!canUsePickingActions()){
+        showToast("Permessi", "Utente non abilitato al picking.", 2200);
+        return;
+      }
+      const api = state.firebase.api;
+      const db = state.firebase.db;
+      if(!api || !db){ showToast("Errore", "Firebase non inizializzato.", 2200); return; }
+
+      const id = String(flow?.id || "").trim();
+      const l = (loc === "cerea" || loc === "concamarise") ? loc : ((flow?.location === "cerea" || flow?.location === "concamarise") ? flow.location : "concamarise");
+      const s = toSkuId(sku || "");
+      if(!id || !s){ showToast("Errore", "Flusso o SKU non valido.", 2200); return; }
+
+      if(isShopifyFbmAlreadyShippedByShopify(flow)){
+        showToast("Ordine già spedito", "Shopify ha già segnato questo ordine come spedito/evaso: non annullo il picking operativo.", 3600);
+        return;
+      }
+
+      const key = pickingSkuKey(s);
+      const currentMap = pickingLineMap(flow);
+      const currentRec = currentMap[key] || null;
+      if(!(currentRec?.picked === true || currentRec?.status === "prelevato")){
+        showToast("Già annullato", `${s} è già tornato da prelevare.`, 1600);
+        return;
+      }
+
+      const ok = confirm(`Annullare il prelievo operativo FBM?\n\nFlusso: ${flowDisplayName(flow)}\nSKU: ${s}\n\nNota: non verrà modificato inventario. Restano i prenotati Shopify.`);
+      if(!ok) return;
+
+      const nowClient = Date.now();
+      const who = state.user?.email || state.user?.emailLower || state.user?.uid || "";
+      const validLines = pickingUniqueLines(flow);
+      const line = validLines.find(x=>toSkuId(x?.sku || "") === s) || { sku:s, title:currentRec.title || s, qty:currentRec.qty || 0 };
+      const nextMap = { ...currentMap };
+      const old = nextMap[key] || { sku:s };
+      nextMap[key] = {
+        ...old,
+        sku:s,
+        picked:false,
+        status:"annullato_operativo_fbm",
+        stockDelta:0,
+        reservationDelta:0,
+        undoneAtClient:nowClient,
+        undoneBy:who
+      };
+
+      const stillPicked = validLines.filter(x=>{
+        const k = pickingSkuKey(x.sku);
+        const rec = nextMap[k] || {};
+        return rec.picked === true || rec.status === "prelevato";
+      }).length;
+      const nextStatus = stillPicked <= 0 ? "in_attesa_shopify_spedito" : "parziale_attesa_shopify";
+      const event = { type:"undo_sku", shopifyFbm:true, sku:s, qty:Math.abs(parseQty(line?.qty || currentRec?.qty || 0) || 0), stockDelta:0, reservationDelta:0, atClient:nowClient, by:who };
+      const ref = api.doc(db, COL_ROOT, l, SUB_LOGS, id);
+      const pickingPatch = {
+        status: nextStatus,
+        managedByPicking:true,
+        shopifyControlled:true,
+        pickedLines: { [key]: nextMap[key] },
+        updatedAt: api.serverTimestamp(),
+        updatedAtClient: nowClient,
+        updatedBy: who,
+        events: api.arrayUnion(event),
+        flowPicked:false,
+        flowPickedAt:null,
+        flowPickedAtClient:null,
+        flowPickedBy:"",
+        flowPickMode: stillPicked <= 0 ? "" : (flow?.picking?.flowPickMode || "sku"),
+        flowPickGroup: stillPicked <= 0 ? false : !!flow?.picking?.flowPickGroup
+      };
+
+      await api.setDoc(ref, {
+        status: stillPicked <= 0 ? "RESERVED" : "SHOPIFY_PARTIAL_PICKED_WAITING_SHIPMENT",
+        reservation: { active:true, status: stillPicked <= 0 ? "in_attesa_shopify_spedito" : "parziale_prelevato_attesa_shopify_spedito", updatedAtClient: nowClient, updatedBy: who },
+        picking: pickingPatch
+      }, { merge:true });
+
+      try{
+        flow.status = stillPicked <= 0 ? "RESERVED" : "SHOPIFY_PARTIAL_PICKED_WAITING_SHIPMENT";
+        flow.reservation = { ...(flow.reservation || {}), active:true, status: stillPicked <= 0 ? "in_attesa_shopify_spedito" : "parziale_prelevato_attesa_shopify_spedito", updatedAtClient:nowClient, updatedBy:who };
+        flow.picking = { ...(flow.picking || {}), ...pickingPatch, pickedLines: nextMap };
+      }catch(_e){}
+
+      showToast("FBM annullato", `${s} è tornato da prelevare. Inventario invariato.`, 2200);
+      renderHomePickingBox();
+      renderHomeLogsBox();
+    }
+
+    async function undoShopifyFbmPickingFlowOnly(flow, loc){
+      if(!canUsePickingActions()){
+        showToast("Permessi", "Utente non abilitato al picking.", 2200);
+        return;
+      }
+      const api = state.firebase.api;
+      const db = state.firebase.db;
+      if(!api || !db){ showToast("Errore", "Firebase non inizializzato.", 2200); return; }
+
+      const id = String(flow?.id || "").trim();
+      const l = (loc === "cerea" || loc === "concamarise") ? loc : ((flow?.location === "cerea" || flow?.location === "concamarise") ? flow.location : "concamarise");
+      if(!id){ showToast("Errore", "Flusso non valido.", 2200); return; }
+
+      if(isShopifyFbmAlreadyShippedByShopify(flow)){
+        showToast("Ordine già spedito", "Shopify ha già segnato questo ordine come spedito/evaso: non annullo il picking operativo.", 3600);
+        return;
+      }
+
+      const validLines = pickingUniqueLines(flow);
+      const currentMap = pickingLineMap(flow);
+      const nextMap = { ...currentMap };
+      const skuList = [];
+      let pieces = 0;
+
+      for(const line of validLines){
+        const s = toSkuId(line?.sku || "");
+        if(!s) continue;
+        const key = pickingSkuKey(s);
+        const old = nextMap[key] || { sku:s, title:pickingLineTitle(line, flow), qty:Math.abs(parseQty(line?.qty || 0) || 0), position:pickingLinePositionText(flow, s) };
+        if(!(old.picked === true || old.status === "prelevato")) continue;
+        const q = Math.abs(parseQty(line?.qty || old.qty || 0) || 0);
+        nextMap[key] = {
+          ...old,
+          sku:s,
+          picked:false,
+          status:"annullato_operativo_fbm",
+          stockDelta:0,
+          reservationDelta:0,
+          undoneAtClient:Date.now(),
+          undoneBy:state.user?.email || state.user?.emailLower || state.user?.uid || ""
+        };
+        pieces += q;
+        skuList.push(s);
+      }
+
+      if(!skuList.length){
+        showToast("Già annullato", "Questo FBM è già tornato da prelevare.", 1800);
+        return;
+      }
+
+      const ok = confirm(`Annullare il prelievo operativo dell'intero FBM?\n\n${flowDisplayName(flow)}\nSKU: ${skuList.length}\nPezzi: ${pieces}\n\nNota: non verrà modificato inventario. Restano i prenotati Shopify.`);
+      if(!ok) return;
+
+      const nowClient = Date.now();
+      const who = state.user?.email || state.user?.emailLower || state.user?.uid || "";
+      for(const s of skuList){
+        const key = pickingSkuKey(s);
+        if(nextMap[key]){
+          nextMap[key].undoneAtClient = nowClient;
+          nextMap[key].undoneBy = who;
+        }
+      }
+
+      const event = { type:"undo_flow", shopifyFbm:true, skus:skuList, count:skuList.length, pieces, stockDelta:0, reservationDelta:0, atClient:nowClient, by:who };
+      const ref = api.doc(db, COL_ROOT, l, SUB_LOGS, id);
+      const pickingPatch = {
+        status:"in_attesa_shopify_spedito",
+        managedByPicking:true,
+        shopifyControlled:true,
+        pickedLines: nextMap,
+        updatedAt: api.serverTimestamp(),
+        updatedAtClient: nowClient,
+        updatedBy: who,
+        events: api.arrayUnion(event),
+        flowPicked:false,
+        flowPickMode:"",
+        flowPickGroup:false,
+        flowPickedAt:null,
+        flowPickedAtClient:null,
+        flowPickedBy:""
+      };
+
+      await api.setDoc(ref, {
+        status:"RESERVED",
+        reservation: { active:true, status:"in_attesa_shopify_spedito", updatedAtClient:nowClient, updatedBy:who },
+        picking: pickingPatch
+      }, { merge:true });
+
+      try{
+        flow.status = "RESERVED";
+        flow.reservation = { ...(flow.reservation || {}), active:true, status:"in_attesa_shopify_spedito", updatedAtClient:nowClient, updatedBy:who };
+        flow.picking = { ...(flow.picking || {}), ...pickingPatch, pickedLines: nextMap };
+      }catch(_e){}
+
+      showToast("FBM annullato", `${flowDisplayName(flow)} è tornato da prelevare. Inventario invariato.`, 2200);
+      renderHomePickingBox();
+      renderHomeLogsBox();
+    }
+
     async function undoPickingSku(flowId, loc, sku){
       if(!canUsePickingActions()){
         showToast("Permessi", "Utente non abilitato al picking.", 2200);
@@ -10397,7 +10605,7 @@ function currentInv(){
       const flow = (state.logs?.[l]?.flows || []).find(f=>String(f.id||"") === id) || null;
       if(!flow){ showToast("Flusso non trovato", "Riprova tra un attimo.", 2200); return; }
       if(isShopifyFbmFlow(flow)){
-        showToast("Shopify controlla lo scarico", "I prelievi Shopify FBM non si annullano dal Picking: seguono lo stato ordine Shopify.", 3400);
+        await undoShopifyFbmPickingSkuOnly(flow, l, s);
         return;
       }
 
@@ -10492,7 +10700,7 @@ function currentInv(){
       const flow = (state.logs?.[l]?.flows || []).find(f=>String(f.id||"") === id) || null;
       if(!flow){ showToast("Flusso non trovato", "Riprova tra un attimo.", 2200); return; }
       if(isShopifyFbmFlow(flow)){
-        showToast("Shopify controlla lo scarico", "I flussi Shopify FBM non si annullano dal Picking: seguono lo stato ordine Shopify.", 3400);
+        await undoShopifyFbmPickingFlowOnly(flow, l);
         return;
       }
 
