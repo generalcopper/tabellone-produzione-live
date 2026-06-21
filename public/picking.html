@@ -2309,14 +2309,40 @@
       line-height:1.2;
     }
     .pickingBucketMiniCaption{
-      margin-top:4px;
+      margin-top:3px;
       font-size:11px;
       color:var(--muted);
-      line-height:1.25;
+      line-height:1.15;
+      white-space:nowrap;
+      overflow:hidden;
+      text-overflow:ellipsis;
+      max-width: min(420px, 58vw);
     }
     .pickingBucketCard.fbm .pickingBucketMiniCaption{
       color:var(--accentDark);
-      opacity:.88;
+      opacity:.86;
+    }
+    .shopifySyncBtn{
+      width:30px;
+      height:30px;
+      min-width:30px;
+      padding:0;
+      border-radius:999px;
+      font-size:15px;
+      line-height:1;
+      font-weight:800;
+    }
+    .shopifySyncBtn.is-spinning{
+      pointer-events:none;
+      opacity:.72;
+    }
+    .shopifySyncBtn.is-spinning .shopifySyncIcon{
+      display:inline-block;
+      animation: shopifySyncSpin .85s linear infinite;
+    }
+    @keyframes shopifySyncSpin{ from{ transform:rotate(0deg); } to{ transform:rotate(360deg); } }
+    @media(max-width:760px){
+      .pickingBucketMiniCaption{ max-width:100%; }
     }
     .pickingBucketActions{
       display:flex;
@@ -3544,6 +3570,7 @@ Tip:
 
     // === Backend endpoint (API separata) ===
     const DEFAULT_EXTRACT_ENDPOINT = "https://amz-inventory-backend-537555699968.europe-west1.run.app/extract";
+    const SHOPIFY_FBM_SYNC_ENDPOINT = "https://shopify-fbm-webhook-zxiqbo2osa-ew.a.run.app/sync-now";
 
     // === Auth/roles ===
     const ADMIN_EMAILS = ["ludovico@generalcoppersrl.com"];
@@ -3610,7 +3637,9 @@ Tip:
       shopifySync: {
         unsub: null,
         meta: null,
-        error: ""
+        error: "",
+        busy: false,
+        lastManualAtClient: 0
       },
 
       mail: {
@@ -6337,6 +6366,8 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
       if(state.shopifySync){
         state.shopifySync.meta = null;
         state.shopifySync.error = "";
+        state.shopifySync.busy = false;
+        state.shopifySync.lastManualAtClient = 0;
       }
       if(state.mail && state.mail.lowStock){
         state.mail.lowStock.meta = null;
@@ -9869,33 +9900,88 @@ function currentInv(){
       }
     }
 
+    function shopifyFbmSyncLastCheckTs(){
+      try{
+        const meta = state.shopifySync?.meta || null;
+        return shopifySyncMetaTimestamp(meta);
+      }catch(_e){
+        return 0;
+      }
+    }
+
+    function fmtTimeShort(ts){
+      try{
+        if(!ts) return "—";
+        return new Date(ts).toLocaleTimeString("it-IT", { hour:"2-digit", minute:"2-digit" });
+      }catch(_e){
+        return "—";
+      }
+    }
+
     function shopifyFbmSyncCaption(){
       try{
-        const flows = getAllShopifyFbmFlows();
-        const lastOrderTs = flows.reduce((max, f)=> Math.max(max, flowLogTimestamp(f)), 0);
-        const meta = state.shopifySync?.meta || null;
-        const lastCheckTs = shopifySyncMetaTimestamp(meta);
-        const status = String(meta?.status || "").toLowerCase();
         const err = state.shopifySync?.error || "";
-        const summary = (meta?.lastSummary && typeof meta.lastSummary === "object") ? meta.lastSummary : null;
-
-        const checkPart = lastCheckTs
-          ? `Ultimo controllo Shopify: ${fmtDate(lastCheckTs)}`
-          : "Ultimo controllo Shopify: in attesa primo sync tracciato";
-        const orderPart = lastOrderTs
-          ? `ultimo ordine importato: ${fmtDate(lastOrderTs)}`
-          : "nessun ordine importato";
-
-        let tail = "automatico ogni 5 min";
+        const meta = state.shopifySync?.meta || null;
+        const status = String(meta?.status || "").toLowerCase();
         if(status === "failed" || err){
-          tail = "ultimo controllo con errore";
-        }else if(summary && Number.isFinite(Number(summary.totalOrdersFetched))){
-          tail = `${Math.round(Number(summary.totalOrdersFetched))} ordini verificati • automatico ogni 5 min`;
+          return "Ultimo controllo: errore";
+        }
+        const ts = shopifyFbmSyncLastCheckTs();
+        return ts ? `Ultimo controllo alle ${fmtTimeShort(ts)}` : "Ultimo controllo: —";
+      }catch(_e){
+        return "Ultimo controllo: —";
+      }
+    }
+
+    function shopifyFbmSyncRefreshButtonHtml(){
+      const busy = !!state.shopifySync?.busy;
+      const cls = busy ? " is-spinning" : "";
+      const disabled = busy ? ' disabled aria-disabled="true"' : "";
+      const title = busy ? "Controllo Shopify in corso" : "Controlla subito Shopify";
+      return `<button class="btn small shopifySyncBtn${cls}" type="button" data-action="refreshShopifyFbm" title="${escapeHtml(title)}" aria-label="${escapeHtml(title)}"${disabled}><span class="shopifySyncIcon">↻</span></button>`;
+    }
+
+    async function triggerShopifyFbmManualSync(){
+      if(state.shopifySync?.busy) return;
+      if(!state.user?.isWhitelisted){
+        showToast("Accesso richiesto", "Accedi per aggiornare Shopify.", 1800);
+        return;
+      }
+      try{
+        if(state.shopifySync){
+          state.shopifySync.busy = true;
+          state.shopifySync.lastManualAtClient = Date.now();
+        }
+        renderHomePickingBox();
+        showToast("Controllo Shopify", "Refresh inviato.", 1200);
+
+        try{
+          await fetch(`${SHOPIFY_FBM_SYNC_ENDPOINT}?source=picking_refresh&t=${Date.now()}`, {
+            method:"POST",
+            mode:"no-cors",
+            cache:"no-store",
+            keepalive:true
+          });
+        }catch(_err){
+          // Fallback senza CORS: la GET parte comunque e il backend aggiorna Firestore.
+          try{
+            const img = new Image();
+            img.referrerPolicy = "no-referrer";
+            img.src = `${SHOPIFY_FBM_SYNC_ENDPOINT}?source=picking_refresh_img&t=${Date.now()}`;
+          }catch(_e){}
         }
 
-        return `${checkPart} • ${orderPart} • ${tail}`;
-      }catch(_e){
-        return "Controllo automatico Shopify ogni 5 min";
+        // Il metadato reale arriva dal listener Firestore. Tolgo solo la rotellina dopo un attimo.
+        setTimeout(()=>{
+          try{
+            if(state.shopifySync) state.shopifySync.busy = false;
+            renderHomePickingBox();
+          }catch(_e){}
+        }, 3500);
+      }catch(err){
+        if(state.shopifySync) state.shopifySync.busy = false;
+        renderHomePickingBox();
+        showToast("Errore Shopify", String(err?.message || err).slice(0, 180), 2600);
       }
     }
 
@@ -10028,7 +10114,7 @@ function currentInv(){
         list.innerHTML = `<div class="hint">Nessun flusso da prelevare. I flussi già prelevati sono nello storico prelievi.</div>`;
         if(hint) hint.textContent = `Flussi ordinati dal più recente: ${flows.length.toLocaleString("it-IT")} • ancora da prelevare: 0. I flussi prelevati spariscono dalla lista operativa e restano nello storico.`;
       }else{
-        const fbmAction = `<button class="btn amazon small" type="button" data-action="pickAllShopifyFbm" ${fbmActiveFlows.length ? "" : "disabled"}>Preleva tutti FBM</button>`;
+        const fbmAction = `${shopifyFbmSyncRefreshButtonHtml()}<button class="btn amazon small" type="button" data-action="pickAllShopifyFbm" ${fbmActiveFlows.length ? "" : "disabled"}>Preleva tutti FBM</button>`;
         const fbaAction = `<button class="btn primary small" type="button" data-action="pickAllFbaPdf" ${fbaActiveFlows.length ? "" : "disabled"}>Preleva tutti FBA/PDF</button>`;
         list.innerHTML =
           renderBucket({
@@ -16528,10 +16614,14 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
             await openCapannone3dFind(findBtn.getAttribute("data-code") || "");
             return;
           }
-          const btn = e.target?.closest?.("[data-action='pickSku'], [data-action='pickFlow'], [data-action='pickAllShopifyFbm'], [data-action='pickAllFbaPdf']");
+          const btn = e.target?.closest?.("[data-action='refreshShopifyFbm'], [data-action='pickSku'], [data-action='pickFlow'], [data-action='pickAllShopifyFbm'], [data-action='pickAllFbaPdf']");
           if(!btn) return;
           e.preventDefault(); e.stopPropagation();
           const action = btn.getAttribute("data-action") || "";
+          if(action === "refreshShopifyFbm"){
+            await triggerShopifyFbmManualSync();
+            return;
+          }
           if(action === "pickAllShopifyFbm"){
             await savePickingAllShopifyFbmFlows();
             return;
