@@ -2501,7 +2501,35 @@ const Annunci = (()=>{
     lastCarico=id;
     enqueue(pick(VAR_CARICO,'car')(info));
   }
-  return { onOrders, onCarico };
+
+  // ===== SALUTO DEL MATTINO (ore 8:00) con riepilogo ordini in coda =====
+  const SALUTO_ORA=8, SALUTO_MIN=0, SALUTO_FINESTRA_MIN=5;  // scatta tra 8:00 e 8:05
+  let _salutoFatto='';                                      // 'YYYY-MM-DD' dell'ultimo saluto dato
+  const SALUTI=['Buongiorno', 'Buongiorno a tutti', 'Buongiorno e buon lavoro'];
+  let _si=0;
+  function _frasiOrdini(fba, fbm){
+    if(fba<=0 && fbm<=0) return 'Al momento non ci sono ordini in coda: si parte con il magazzino in pari.';
+    const parti=[];
+    if(fba>0) parti.push(`${fba} ${fba===1?'ordine':'ordini'} F B A`);
+    if(fbm>0) parti.push(`${fbm} ${fbm===1?'ordine':'ordini'} F B M`);
+    const lista = parti.length===2 ? parti.join(' e ') : parti[0];
+    const tot = fba+fbm;
+    return `Ci ${tot===1?'è':'sono'} ${lista} da preparare. Le posizioni sono illuminate in magazzino.`;
+  }
+  function onTick(now){
+    // usa l'ora reale del dispositivo
+    const d=new Date();
+    const oggi=`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+    if(_salutoFatto===oggi) return;                         // già salutato oggi
+    const minutiDalleOtto = (d.getHours()-SALUTO_ORA)*60 + (d.getMinutes()-SALUTO_MIN);
+    if(minutiDalleOtto<0 || minutiDalleOtto>SALUTO_FINESTRA_MIN) return;  // fuori dalla finestra 8:00–8:05
+    _salutoFatto=oggi;                                      // segna fatto (anche se la voce è muta, niente ripetizioni)
+    let fba=0, fbm=0;
+    try{ const o=_contaOrdini(); fba=o.fba; fbm=o.fbm; }catch(_){}
+    const saluto=SALUTI[_si++%SALUTI.length];
+    enqueue(`${saluto}. ${_frasiOrdini(fba, fbm)}`);
+  }
+  return { onOrders, onCarico, onTick };
 })();
 
 
@@ -2808,6 +2836,7 @@ function tick(now){
   updateIdle(now);
   updateCockpit(now);
   if(!tick._iaT || now-tick._iaT>5000){ tick._iaT=now; refreshIncomingAlert(); }
+  if(!tick._salT || now-tick._salT>20000){ tick._salT=now; try{ if(typeof Annunci!=='undefined') Annunci.onTick(now); }catch(_){} }
   if(tween){const k=ease(Math.min(1,(now-tween.start)/tween.dur));
     for(const key in tween.to)cam[key]=tween.from[key]+(tween.to[key]-tween.from[key])*k;
     if(k>=1)tween=null;}
