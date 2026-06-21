@@ -903,6 +903,168 @@ const CARTELLO_COLORI={
   const floorBlue=new THREE.Mesh(new THREE.BoxGeometry(bw,0.04,bd),M.lineFloor);
   floorBlue.position.set(cx,0.02,cz); floorBlue.receiveShadow=true; g.add(floorBlue);
   scene.add(g);
+
+  /* ===== FLUSSO A U SOSPESO — LIQUIDO IN ASSENZA DI GRAVITÀ =====
+     Massa liquida coesa sospesa in aria lungo la U, che ondeggia morbida come
+     in zero-g e scorre a senso unico ORARIO lungo il percorso. */
+  (function(){
+    const yF=0.95;                 // ALTEZZA: sospesa
+    const mx=1.1, mz=0.85;         // margini interni
+    const xA=bx0+mx, xB=bx1-mx;    // estremi lungo X (rami lunghi)
+    const zFront=bz0+mz;           // ramo verso scaffalature
+    const zBack =bz1-mz;           // ramo verso muro fronte
+    // U sospesa: due rami lunghi (lato Front e Back) raccordati da un FONDO
+    // ampio e ben curvo sul lato corto. Un solo apice profondo → niente forma a W.
+    const zMid=(zFront+zBack)/2;
+    const xApex=bx0+0.35;          // apice del fondo vicino al bordo sinistro (dentro la zona)
+    const path=[
+      new THREE.Vector3(xB,           yF, zBack),
+      new THREE.Vector3(xA+2.6,       yF, zBack),
+      new THREE.Vector3(xApex+0.5,    yF, zBack-0.15),    // entra nella curva
+      new THREE.Vector3(xApex,        yF, zMid),          // APICE del fondo (unico)
+      new THREE.Vector3(xApex+0.5,    yF, zFront+0.15),   // esce dalla curva
+      new THREE.Vector3(xA+2.6,       yF, zFront),
+      new THREE.Vector3(xB,           yF, zFront),
+    ];
+    const curve=new THREE.CatmullRomCurve3(path,false,'catmullrom',0.5);
+    const SAMPLES=800;
+    const pts=curve.getSpacedPoints(SAMPLES);
+    const tans=[];
+    for(let i=0;i<=SAMPLES;i++){
+      const a=pts[(i-1+SAMPLES)%SAMPLES], b=pts[(i+1)%SAMPLES];
+      tans.push(new THREE.Vector3(b.x-a.x,0,b.z-a.z).normalize());
+    }
+    function sampleAt(t){
+      t=((t%1)+1)%1;
+      const f=t*SAMPLES; const i=Math.floor(f)%SAMPLES; const fr=f-Math.floor(f);
+      const a=pts[i], b=pts[(i+1)%pts.length];
+      return {p:new THREE.Vector3(a.x+(b.x-a.x)*fr,a.y+(b.y-a.y)*fr,a.z+(b.z-a.z)*fr), tan:tans[i]};
+    }
+
+    // 1) CORPO LIQUIDO: tube spesso, semi-trasparente, look fluido/glass.
+    //    Sfumatura alle estremità via vertex-color (additive → bordi che svaniscono).
+    function fadeTubeEnds(geo, segs, fadeFrac){
+      const cnt=geo.attributes.position.count;
+      const radSeg = cnt/(segs+1);             // vertici per anello
+      const colors=new Float32Array(cnt*3);
+      for(let i=0;i<cnt;i++){
+        const ring=Math.floor(i/radSeg);
+        const u=ring/segs;                      // 0..1 lungo il tubo
+        let e=1;
+        if(u<fadeFrac) e=u/fadeFrac;
+        else if(u>1-fadeFrac) e=(1-u)/fadeFrac;
+        e=Math.max(0,e); e=e*e*(3-2*e);
+        colors[i*3]=e; colors[i*3+1]=e; colors[i*3+2]=e;
+      }
+      geo.setAttribute('color',new THREE.BufferAttribute(colors,3));
+    }
+    const tubeGeo=new THREE.TubeGeometry(curve,360,0.16,16,false);
+    fadeTubeEnds(tubeGeo,360,0.16);
+    const tube=new THREE.Mesh(
+      tubeGeo,
+      new THREE.MeshBasicMaterial({color:0xff7a3c,transparent:true,opacity:0.22,blending:THREE.AdditiveBlending,depthWrite:false,vertexColors:true})
+    );
+    tube.renderOrder=4; g.add(tube);
+    // alone esterno morbido (bordo del liquido che sfuma)
+    const glowGeo=new THREE.TubeGeometry(curve,360,0.24,16,false);
+    fadeTubeEnds(glowGeo,360,0.18);
+    const tubeGlow=new THREE.Mesh(
+      glowGeo,
+      new THREE.MeshBasicMaterial({color:0xa05cff,transparent:true,opacity:0.08,blending:THREE.AdditiveBlending,depthWrite:false,vertexColors:true})
+    );
+    tubeGlow.renderOrder=3; g.add(tubeGlow);
+
+    // 2) texture goccia: nucleo morbido bianco-caldo (il colore viene dai vertici)
+    const pc=document.createElement('canvas'); pc.width=pc.height=64;
+    const pcx=pc.getContext('2d');
+    const rg=pcx.createRadialGradient(32,32,0,32,32,32);
+    rg.addColorStop(0,'rgba(255,250,245,1)');
+    rg.addColorStop(0.4,'rgba(255,235,220,0.7)');
+    rg.addColorStop(1,'rgba(255,220,200,0)');
+    pcx.fillStyle=rg; pcx.beginPath(); pcx.arc(32,32,32,0,Math.PI*2); pcx.fill();
+    const ptex=new THREE.CanvasTexture(pc); ptex.colorSpace=THREE.SRGBColorSpace;
+
+    // 3) PARTICELLE LIQUIDE: riempiono il volume del tubo, distribuite sull'intera U.
+    //    Ogni particella ha una posizione lungo il path (u0) + offset radiale nella
+    //    sezione (raggio, angolo). Tutte scorrono insieme in senso ORARIO.
+    const N=900;
+    const pg=new THREE.BufferGeometry();
+    const pos=new Float32Array(N*3);
+    const col=new Float32Array(N*3);
+    pg.setAttribute('position',new THREE.BufferAttribute(pos,3));
+    pg.setAttribute('color',new THREE.BufferAttribute(col,3));
+    const pMat=new THREE.PointsMaterial({
+      size:0.30, map:ptex, transparent:true, opacity:0.9,
+      blending:THREE.AdditiveBlending, depthWrite:false, depthTest:true,
+      sizeAttenuation:true, vertexColors:true
+    });
+    const points=new THREE.Points(pg,pMat);
+    points.renderOrder=6; g.add(points);
+    // parametri per-particella
+    const u0=new Float32Array(N);     // posizione base lungo il path
+    const rad=new Float32Array(N);    // raggio nella sezione del tubo
+    const ang=new Float32Array(N);    // angolo nella sezione
+    const wob=new Float32Array(N);    // fase di ondeggiamento individuale
+    for(let i=0;i<N;i++){
+      u0[i]=Math.random();
+      rad[i]=Math.pow(Math.random(),0.6)*0.15;   // distribuzione verso il bordo per dare corpo
+      ang[i]=Math.random()*Math.PI*2;
+      wob[i]=Math.random()*Math.PI*2;
+    }
+    const up=new THREE.Vector3(0,1,0);
+    const _n=new THREE.Vector3(), _b=new THREE.Vector3();
+
+    // updater globale agganciato nel tick principale
+    window.__uFlowUpdate=function(now){
+      const t=now*0.001;
+      // scorrimento ORARIO, più LENTO e cinematico; respira ma mai inverte
+      const flow=(0.0085 + 0.0022*Math.sin(t*0.22))*t; // avanzamento cumulativo monotono
+      const posArr=pg.attributes.position.array;
+      const colArr=pg.attributes.color.array;
+      // palette: arancione caldo ↔ viola
+      // ORANGE rgb(255,138,60) ~ (1.0,0.54,0.24) | VIOLET rgb(150,70,255) ~ (0.59,0.27,1.0)
+      for(let i=0;i<N;i++){
+        const u=(u0[i] + flow)%1;
+        const sm=sampleAt(u);
+        const p=sm.p, tan=sm.tan;
+        _n.crossVectors(tan,up).normalize();
+        _b.crossVectors(tan,_n).normalize();
+        // ondeggiamento zero-g più ricco: due onde sfasate + rotazione lenta → mai uguale
+        const swell=1 + 0.30*Math.sin(u*Math.PI*4 - t*0.55 + wob[i]*0.2)
+                      + 0.18*Math.sin(u*Math.PI*9 + t*0.33 + wob[i]);
+        const r = rad[i]*swell + 0.022*Math.sin(t*0.45 + wob[i]);
+        const a = ang[i] + 0.22*Math.sin(t*0.32 + wob[i]) + u*0.7 + 0.15*Math.sin(t*0.18+u*6);
+        const ox=Math.cos(a)*r, oy=Math.sin(a)*r;
+        posArr[i*3+0]=p.x + _n.x*ox + _b.x*oy;
+        posArr[i*3+1]=p.y + _n.y*ox + _b.y*oy + 0.035*Math.sin(t*0.4 + wob[i]);
+        posArr[i*3+2]=p.z + _n.z*ox + _b.z*oy;
+        // COLORE arancio↔viola: mix che varia lungo il path e nel tempo, mai uniforme
+        const mix=0.5+0.5*Math.sin(u*Math.PI*3 - t*0.35 + wob[i]*0.6);
+        const core=1 - Math.min(1, r/0.18);     // centro più chiaro/caldo
+        // SFUMATURA ALLE ESTREMITÀ: il liquido svanisce dolcemente vicino a u=0 e u=1
+        // (additive blending → moltiplicare il colore verso 0 = dissolvenza morbida)
+        const FADE=0.14;                         // ampiezza zona di sfumatura
+        let edge=1;
+        if(u<FADE)      edge=u/FADE;
+        else if(u>1-FADE) edge=(1-u)/FADE;
+        edge=edge*edge*(3-2*edge);               // smoothstep per transizione morbida
+        const R=(1.00*(1-mix)+0.59*mix);
+        const G=(0.54*(1-mix)+0.27*mix);
+        const B=(0.24*(1-mix)+1.00*mix);
+        colArr[i*3+0]=(R + core*0.25)*edge;
+        colArr[i*3+1]=(G + core*0.20)*edge;
+        colArr[i*3+2]=(B + core*0.10)*edge;
+      }
+      pg.attributes.position.needsUpdate=true;
+      pg.attributes.color.needsUpdate=true;
+      // il corpo liquido cambia tinta lentamente arancio↔viola e respira
+      const gm=0.5+0.5*Math.sin(t*0.25);
+      tube.material.color.setRGB(1.00*(1-gm)+0.59*gm, 0.48*(1-gm)+0.27*gm, 0.24*(1-gm)+1.00*gm);
+      tubeGlow.material.color.setRGB(1.00*(1-gm)+0.63*gm, 0.55*(1-gm)+0.36*gm, 0.30*(1-gm)+1.00*gm);
+      tube.material.opacity=0.20+0.05*Math.sin(t*0.4);
+      tubeGlow.material.opacity=0.06+0.03*Math.sin(t*0.4+1.0);
+    };
+  })();
 })();
 
 function ibc(x,z){const g=new THREE.Group();
@@ -1838,6 +2000,7 @@ function clampCameraXZ(x,z){
 
 function tick(now){
   perfWatch(now);
+  if(window.__uFlowUpdate) window.__uFlowUpdate(now);
   updateTour(now);
   updateIdle(now);
   updateCockpit(now);
