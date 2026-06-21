@@ -631,6 +631,9 @@ const CONTENUTI = {};
 
 const M_BOX = new THREE.MeshStandardMaterial({color:0xc49a6c, roughness:.85});
 const M_BOXEDGE = new THREE.MeshStandardMaterial({color:0x9a7444, roughness:.9});
+// variante BIANCA (prodotti da 1 litro non-spray): cartone bianco neutro
+const M_BOX_WHITE = new THREE.MeshStandardMaterial({color:0xeef0f0, roughness:.82});
+const M_BOXEDGE_WHITE = new THREE.MeshStandardMaterial({color:0xc9ccce, roughness:.88});
 
 // materiali flaconi agricoli (HDPE) — condivisi
 const M_FLACONE = new THREE.MeshStandardMaterial({color:0xf3f5f2, roughness:.45, metalness:.02});
@@ -688,8 +691,11 @@ function buildFlacone(R,H,tipo){
    - pzPerScatola: capienza scatola (per disporre la griglia dei flaconi).
    - tipoTappo: 'spray' (spruzzino) | 'tappo' (tappo semplice).
    - maxH: altezza utile sopra il pallet entro cui la merce deve stare. */
-function buildBancale({scatolePiene=0, aperta=0, fillFrac=0, restoPz=0, pzPerScatola=12, tipoTappo='tappo', maxH=1.75}){
+function buildBancale({scatolePiene=0, aperta=0, fillFrac=0, restoPz=0, pzPerScatola=12, tipoTappo='tappo', coloreScatola='marrone', maxH=1.75}){
   const g=new THREE.Group();
+  // materiali scatola secondo il colore richiesto (bianco per 1L non-spray, altrimenti marrone)
+  const boxMat     = (coloreScatola==='bianco') ? M_BOX_WHITE : M_BOX;
+  const boxEdgeMat = (coloreScatola==='bianco') ? M_BOXEDGE_WHITE : M_BOXEDGE;
   // ===== BANCALE EPAL realistico (1200 x 800 x 144 mm) =====
   const PW=0.80, PL=1.20;
   const deckT=0.022;
@@ -753,7 +759,7 @@ function buildBancale({scatolePiene=0, aperta=0, fillFrac=0, restoPz=0, pzPerSca
     const within=n % perFila;
     const [x,z]=slotPos(within);
     const y=palTopY + layer*boxH + boxH/2;
-    const box=new THREE.Mesh(new THREE.BoxGeometry(boxW,boxH*0.96,boxL),M_BOX);
+    const box=new THREE.Mesh(new THREE.BoxGeometry(boxW,boxH*0.96,boxL),boxMat);
     box.position.set(x,y,z); box.castShadow=true; g.add(box);
   }
 
@@ -767,7 +773,7 @@ function buildBancale({scatolePiene=0, aperta=0, fillFrac=0, restoPz=0, pzPerSca
     const wall=0.014;                      // spessore pareti cartone
     const open=new THREE.Group();
     open.position.set(x,baseY,z);
-    const cartoneMat=M_BOXEDGE;
+    const cartoneMat=boxEdgeMat;
     const h=boxH*0.96;                     // altezza nominale della scatola
     const wallH=h*0.55;                    // PARETI PIÙ BASSE: i flaconi sporgono e si vedono
     // fondo
@@ -1798,8 +1804,22 @@ const Voce = (function(){
   let unlocked = false;        // l'autoplay è stato concesso?
   let pending = null;          // ultima frase in attesa di sblocco
   let actx = null;             // AudioContext per forzare lo sblocco
+  let speakSeq = 0;            // id incrementale: solo l'ultima chiamata a parla() è valida
+  let cloudPlaying = false;    // true mentre un audio TTS cloud sta effettivamente suonando
+  let cloudOk = false;         // la voce cloud ha funzionato almeno una volta in questa sessione
 
-  function ensureAudio(){ if(!audio){ audio=new Audio(); audio.preload="auto"; audio.autoplay=true; } return audio; }
+  function ensureAudio(){
+    if(!audio){
+      audio=new Audio(); audio.preload="auto"; audio.autoplay=true;
+      // tieni traccia di quando l'audio cloud è in riproduzione, così la Web Speech
+      // non può MAI partire mentre la voce cloud sta parlando.
+      audio.addEventListener('playing', ()=>{ cloudPlaying=true; });
+      audio.addEventListener('ended',   ()=>{ cloudPlaying=false; });
+      audio.addEventListener('pause',   ()=>{ cloudPlaying=false; });
+      audio.addEventListener('error',   ()=>{ cloudPlaying=false; });
+    }
+    return audio;
+  }
 
   // tenta di sbloccare l'audio: AudioContext.resume() + play silenzioso.
   async function tryUnlock(){
@@ -1854,6 +1874,7 @@ const Voce = (function(){
       try{
         await a.play();
         unlocked=true;            // se è partito, l'autoplay è ok
+        cloudOk=true;             // la voce cloud funziona: la Web Speech non serve più
       }catch(err){
         // autoplay bloccato: metti in coda e ritenta appena sbloccato
         if(String(err&&err.name)==='NotAllowedError'){ pending=text; tryUnlock(); }
@@ -1885,14 +1906,29 @@ const Voce = (function(){
   async function parla(testo){
     const msg=String(testo||'').trim();
     if(!abilitata || !msg) return;
+    // ogni nuova frase invalida le precedenti: il fallback browser parte solo se
+    // questa è ANCORA l'ultima richiesta quando il cloud ha finito di tentare.
+    const mySeq = ++speakSeq;
+    // interrompi qualsiasi voce in corso (cloud o browser) prima di parlare
     try{ if(audio){ audio.pause(); audio.currentTime=0; } }catch(_){}
+    cloudPlaying=false;
     try{ if(window.speechSynthesis) window.speechSynthesis.cancel(); }catch(_){}
     if(lastUrl){ try{ URL.revokeObjectURL(lastUrl); }catch(_){} lastUrl=null; }
+
     const ok = await _cloud(msg);
-    if(!ok){
-      // se non è partito per autoplay bloccato, è già in coda; altrimenti prova la voce browser
-      if(!pending) _browser(msg);
-    }
+
+    // se nel frattempo è arrivata una frase più recente, abbandona: non sovrapporre nulla
+    if(mySeq !== speakSeq) return;
+
+    if(ok) return;                 // cloud OK → fine, niente Web Speech
+    // CLOUD FALLITO. La Web Speech è l'ULTIMA SPIAGGIA: la uso solo se
+    //  - non è un blocco autoplay (in quel caso la frase è già in coda come pending), e
+    //  - non c'è un audio cloud che sta suonando, e
+    //  - questa è ancora la richiesta corrente.
+    if(pending) return;            // autoplay bloccato: ritenterà il cloud, non parlare col browser
+    if(cloudPlaying) return;       // un audio cloud sta già parlando: non sovrapporre
+    if(mySeq !== speakSeq) return;
+    _browser(msg);
   }
   function toggle(on){ abilitata=(on!==undefined)?!!on:!abilitata;
     if(!abilitata){ try{audio&&audio.pause();}catch(_){} try{window.speechSynthesis&&window.speechSynthesis.cancel();}catch(_){} }
@@ -3462,6 +3498,19 @@ function tipoTappoProdotto(title, info){
   return 'tappo';   // default tappo a vite
 }
 
+// decide il COLORE delle scatole del bancale in base al prodotto:
+//  - se è SPRAY → scatole MARRONI (cartone standard)
+//  - se è da 1 LITRO (1l / 1lt / 1 litro / 1000 ml…) e NON spray → scatole BIANCHE
+//  - altrimenti → marroni
+function coloreScatolaProdotto(title, info, tipoTappo){
+  if(tipoTappo==='spray') return 'marrone';     // spray → sempre marrone
+  const hay = (String(title||'') + ' ' + String((info&&(info.contenuto||info.formato||info.size))||'')).toLowerCase();
+  // riconosce "1 litro", "1l", "1 l", "1lt", "1 lt", "1000ml", "1000 ml"
+  const unLitro = /(^|[^\d.,])1\s*(l\b|lt\b|litro|litri|liter|litre)/.test(hay)
+               || /\b1000\s*ml\b/.test(hay);
+  return unLitro ? 'bianco' : 'marrone';
+}
+
 // aggiorna (crea/sostituisce/svuota) il bancale di un vano con PRECISIONE FISICA.
 // DIFF: se qty/title non sono cambiati rispetto all'ultimo stato, non ricostruisce nulla
 // (evita rebuild inutili a ogni snapshot cloud → niente lag periodici).
@@ -3482,8 +3531,9 @@ function aggiornaVano(code, qty, info){
     const aperta = restoPz>0 ? 1 : 0;
     const fillFrac = restoPz>0 ? (restoPz/pzScat) : 0;
     const tipoTappo = tipoTappoProdotto(title, info);
+    const coloreScatola = coloreScatolaProdotto(title, info, tipoTappo);
 
-    const bancale = buildBancale({ scatolePiene, aperta, fillFrac, restoPz, pzPerScatola:pzScat, tipoTappo, maxH:VANO_MAXH });
+    const bancale = buildBancale({ scatolePiene, aperta, fillFrac, restoPz, pzPerScatola:pzScat, tipoTappo, coloreScatola, maxH:VANO_MAXH });
     bancale.rotation.y = Math.PI/2;
     v.obj.add(bancale);
     v._cargo = bancale;
