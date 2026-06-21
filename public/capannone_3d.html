@@ -2032,6 +2032,8 @@ function calcolaPrelievi(){
 // (ri)applica l'illuminazione dei prelievi (solo quando non c'è un Trova attivo)
 function aggiornaPrelievi(){
   PRELIEVI = calcolaPrelievi();
+  // annuncio vocale discreto se sono entrati nuovi ordini FBA/FBM (edge-trigger, non invasivo)
+  try{ const o=_contaOrdini(); if(typeof Annunci!=='undefined') Annunci.onOrders(o.fba, o.fbm); }catch(_){}
   // se c'è una selezione/tour utente in corso, non sovrascrivo: aggiorno solo i dati
   if(selectedVano || tour) { return; }
   applicaPrelievoGlow();
@@ -2410,6 +2412,98 @@ function renderCockpitOrders(){
   box.hidden = (fba+fbm)===0;   // niente didascalia quando non c'è nulla in coda
 }
 
+/* ===== ANNUNCI VOCALI (ElevenLabs via Voce) — discreti e non invasivi =====
+   Regole anti-fastidio:
+   - parla SOLO quando compare lavoro NUOVO (edge-trigger), mai a ogni snapshot;
+   - il primo aggiornamento dopo l'avvio inizializza i contatori in silenzio (niente arretrato letto all'apertura);
+   - una sola voce alla volta, con cooldown e coda; eventi ravvicinati vengono accorpati;
+   - il carico in arrivo si annuncia una volta sola per bolla;
+   - copy premium a rotazione per non risultare ripetitivo; rispetta il toggle 🔊. */
+const Annunci = (()=>{
+  let primed=false;                 // true dopo il primo conteggio (silenzioso)
+  let prevFba=0, prevFbm=0;         // ultimi contatori noti
+  let lastCarico='';               // ddtNumber dell'ultimo carico già annunciato
+  const queue=[];                   // frasi in attesa
+  let speaking=false, lastSpokeAt=0;
+  const COOLDOWN_MS=9000;           // pausa minima tra due annunci
+
+  // copy premium a rotazione
+  const VAR_FBA=[
+    n=> n===1 ? 'Nuovo ordine F B A da preparare. Trovi la posizione illuminata in magazzino.'
+              : `${n} nuovi ordini F B A in coda. Le posizioni sono illuminate in magazzino.`,
+    n=> n===1 ? 'È entrato un ordine F B A. Quando puoi, procedi col prelievo.'
+              : `Sono entrati ${n} ordini F B A. Quando puoi, procedi coi prelievi.`
+  ];
+  const VAR_FBM=[
+    n=> n===1 ? 'Nuovo ordine F B M da preparare. Prelievo operativo, senza scarico immediato.'
+              : `${n} nuovi ordini F B M in coda, pronti per la preparazione.`,
+    n=> n===1 ? 'È arrivato un ordine F B M. Puoi prepararlo quando sei pronto.'
+              : `Sono arrivati ${n} ordini F B M da preparare.`
+  ];
+  const VAR_CARICO=[
+    info=>{
+      const b=[];
+      if(info.palletCount>0) b.push(`${info.palletCount} ${info.palletCount===1?'bancale':'bancali'}`);
+      if(info.articleCount>0) b.push(`${info.articleCount} ${info.articleCount===1?'articolo':'articoli'}`);
+      const det=b.length? ' con '+b.join(' e ') : '';
+      return `Carico in arrivo da Cerea${det}. Preparati a riceverlo in magazzino.`;
+    },
+    info=> 'In arrivo un trasferimento da Cerea. La merce sarà presto in magazzino.'
+  ];
+  let _vi={fba:0,fbm:0,car:0};
+  const pick=(arr,k)=>{ const f=arr[_vi[k]%arr.length]; _vi[k]++; return f; };
+
+  function enqueue(text){
+    const t=String(text||'').trim(); if(!t) return;
+    queue.push(t);
+    if(queue.length>3) queue.splice(0, queue.length-3);   // non accumulare troppo
+    pump();
+  }
+  function pump(){
+    if(speaking) return;
+    if(!queue.length) return;
+    if(typeof Voce==='undefined' || !Voce.abilitata) { queue.length=0; return; } // muto → scarta
+    const now=performance.now();
+    const wait=Math.max(0, COOLDOWN_MS-(now-lastSpokeAt));
+    speaking=true;
+    setTimeout(()=>{
+      const text=queue.shift();
+      try{ Voce.parla(text); }catch(_){}
+      lastSpokeAt=performance.now();
+      // stima durata: ~0.38s a parola, minimo 3.5s, poi libera la coda
+      const words=text.split(/\s+/).length;
+      const dur=Math.min(12000, Math.max(3500, words*380));
+      setTimeout(()=>{ speaking=false; pump(); }, dur);
+    }, wait);
+  }
+
+  // chiamata a ogni refresh contatori ordini
+  function onOrders(fba, fbm){
+    if(!primed){ primed=true; prevFba=fba; prevFbm=fbm; return; }   // avvio silenzioso
+    const dFba=fba-prevFba, dFbm=fbm-prevFbm;
+    if(dFba>0) enqueue(pick(VAR_FBA,'fba')(dFba));
+    if(dFbm>0) enqueue(pick(VAR_FBM,'fbm')(dFbm));
+    prevFba=fba; prevFbm=fbm;
+  }
+  // chiamata quando arriva/aggiorna l'avviso carico da Cerea
+  function onCarico(info){
+    if(!info || info.active===false) return;
+    const exp=Number(info.expiresAtMs||0);
+    if(exp && exp<=Date.now()) return;                  // già scaduto: niente voce
+    const id=String(info.ddtNumber||info.createdAtMs||'');
+    if(!id || id===lastCarico) return;                  // stessa bolla: non ripetere
+    // se il sistema non è ancora "primed" (kiosk appena aperto), annuncia SOLO se la bolla
+    // è stata creata pochissimo fa (carico realmente nuovo, non arretrato dei 30 minuti)
+    const createdMs=Number(info.createdAtMs||0);
+    const appenaCreato = createdMs>0 && (Date.now()-createdMs) < 60000;
+    if(!primed && !appenaCreato){ lastCarico=id; return; } // marca come visto, in silenzio
+    lastCarico=id;
+    enqueue(pick(VAR_CARICO,'car')(info));
+  }
+  return { onOrders, onCarico };
+})();
+
+
 /* ===== AVVISO CARICO IN ARRIVO DA CEREA (dura 30 minuti dalla generazione bolla) ===== */
 let _incomingData=null;          // ultimo documento avviso ricevuto da Firestore
 function setIncomingAlert(d){
@@ -2424,6 +2518,8 @@ function setIncomingAlert(d){
     sub.textContent = bits.length ? bits.join(' · ') : 'Bolla di trasferimento generata';
   }
   refreshIncomingAlert();
+  // annuncio vocale (una volta per bolla, non invasivo)
+  try{ if(typeof Annunci!=='undefined') Annunci.onCarico(_incomingData); }catch(_){}
 }
 function _incomingExpiry(){
   if(!_incomingData || _incomingData.active===false) return 0;
