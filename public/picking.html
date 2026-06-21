@@ -2280,33 +2280,33 @@
     .pickingBucketCard{
       border:1px solid var(--line);
       background:var(--surfaceAlt);
-      border-radius:14px;
-      padding:12px;
+      border-radius:12px;
+      padding:8px;
       box-shadow:var(--shadow);
       display:flex;
       flex-direction:column;
-      gap:12px;
+      gap:8px;
     }
-    .pickingBucketCard + .pickingBucketCard{ margin-top:12px; }
+    .pickingBucketCard + .pickingBucketCard{ margin-top:10px; }
     .pickingBucketTop{
       display:flex;
-      align-items:flex-start;
+      align-items:center;
       justify-content:space-between;
-      gap:12px;
-      padding:4px 2px 0;
+      gap:10px;
+      padding:2px 2px 0;
     }
     .pickingBucketTitle{
       font-size:15px;
       font-weight:800;
       letter-spacing:-.02em;
       color:var(--ink);
-      line-height:1.2;
+      line-height:1.15;
     }
     .pickingBucketSub{
-      margin-top:4px;
-      font-size:12px;
+      margin-top:2px;
+      font-size:11px;
       color:var(--muted);
-      line-height:1.35;
+      line-height:1.2;
     }
     .pickingBucketActions{
       display:flex;
@@ -2325,6 +2325,23 @@
     }
     .pickingBucketCard .pickingFlowCard{
       background:var(--surface);
+    }
+    .pickingBucketCard .pickingFlowTop{
+      padding:10px 12px;
+    }
+    .pickingBucketCard .pickingFlowMeta{
+      margin-top:2px;
+      font-size:11.5px;
+    }
+    .pickingBucketCard .pickingFlowRow{
+      min-height:42px;
+    }
+    .pickingBucketCard .pickingFlowCell{
+      padding:8px 10px;
+    }
+    .pickingBucketCard .gridProdSub{
+      margin-top:1px;
+      font-size:11px;
     }
     @media(max-width:760px){
       .pickingBucketTop{ flex-direction:column; align-items:stretch; }
@@ -7270,6 +7287,11 @@ function startAllLogs(){
             fileName: d.fileName || "",
             appliedAtClient: (typeof d.appliedAtClient==="number") ? d.appliedAtClient : 0,
             appliedBy: d.appliedBy || "",
+            status: d.status || "",
+            source: d.source || "",
+            reservation: (d.reservation && typeof d.reservation === "object") ? d.reservation : {},
+            shopify: (d.shopify && typeof d.shopify === "object") ? d.shopify : {},
+            updatedAtClient: (typeof d.updatedAtClient === "number") ? d.updatedAtClient : 0,
             totalLines: Number.isFinite(d.totalLines) ? d.totalLines : (Array.isArray(d.lines)? d.lines.length : 0),
             totalPieces: Number.isFinite(d.totalPieces) ? d.totalPieces : 0,
             workflow: d.workflow || null,
@@ -9135,8 +9157,35 @@ function currentInv(){
       }
     }
 
+    function isShopifyFbmCompletedByShopify(flow){
+      try{
+        if(!isShopifyFbmFlow(flow)) return false;
+        const status = String(flow?.status || "").toUpperCase();
+        const rs = String(flow?.reservation?.status || "").toLowerCase();
+        const p = (flow?.picking && typeof flow.picking === "object") ? flow.picking : {};
+        const ps = String(p.status || "").toLowerCase();
+        const mode = String(p.flowPickMode || "").toLowerCase();
+        const shop = (flow?.shopify && typeof flow.shopify === "object") ? flow.shopify : {};
+        const fulfillmentStatus = String(shop.fulfillmentStatus || shop.fulfillment_status || "").toLowerCase();
+        const shippedTotal = Number(shop.shippedTotal || 0);
+        const reservedTotal = Number(shop.reservedTotal || flow?.totalPieces || 0);
+        const shipmentKey = String(shop.lastShipmentKey || "").trim();
+
+        return !!(
+          rs === "shopify_spedito" ||
+          ps === "shopify_spedito" ||
+          fulfillmentStatus === "fulfilled" ||
+          (status === "PICKED" && (mode === "shopify" || ps === "shopify_spedito" || rs === "shopify_spedito")) ||
+          (p.flowPicked === true && mode === "shopify") ||
+          (shipmentKey && Number.isFinite(shippedTotal) && Number.isFinite(reservedTotal) && reservedTotal > 0 && shippedTotal >= reservedTotal)
+        );
+      }catch(_e){
+        return false;
+      }
+    }
+
     function shopifyFbmPickingBadge(){
-      return `<span class="badge warn" title="FBM: il prelievo è solo operativo. Lo scarico inventario resta comandato da Shopify quando l'ordine risulta spedito/evaso.">Scarico Shopify separato</span>`;
+      return "";
     }
 
     function getPickingCandidateFlows(){
@@ -9164,6 +9213,7 @@ function currentInv(){
     }
 
     function isPickingLinePicked(flow, sku){
+      if(isShopifyFbmCompletedByShopify(flow)) return true;
       const key = pickingSkuKey(sku);
       const picked = pickingLineMap(flow);
       return !!(flow?.picking?.flowPicked === true || picked[key]?.picked === true || picked[key]?.status === "prelevato");
@@ -9517,6 +9567,7 @@ function currentInv(){
     }
 
     function pickingFlowWasPickedAsGroup(flow){
+      if(isShopifyFbmCompletedByShopify(flow)) return true;
       const p = (flow?.picking && typeof flow.picking === "object") ? flow.picking : {};
       if(p.flowPicked !== true) return false;
       if(p.flowPickMode === "flow" || p.flowPickGroup === true) return true;
@@ -9528,8 +9579,10 @@ function currentInv(){
       const lines = pickingUniqueLines(flow);
       const loc = (flow?.location === "cerea" || flow?.location === "concamarise") ? flow.location : "concamarise";
       const picked = pickingLineMap(flow);
-      let maxPickedAt = Number(flow?.picking?.flowPickedAtClient || 0) || 0;
+      const completedByShopify = isShopifyFbmCompletedByShopify(flow);
+      let maxPickedAt = Number(flow?.picking?.flowPickedAtClient || flow?.updatedAtClient || 0) || 0;
       let pickedBy = String(flow?.picking?.flowPickedBy || flow?.picking?.updatedBy || "");
+      if(completedByShopify && !pickedBy) pickedBy = "Shopify";
       let totalQty = 0;
       const skus = [];
       for(const line of lines){
@@ -9555,7 +9608,9 @@ function currentInv(){
         skus,
         position: `${skus.length} SKU`,
         at: maxPickedAt || Number(flow?.appliedAtClient || 0) || 0,
-        by: pickedBy
+        by: pickedBy,
+        completedByShopify,
+        completedLabel: completedByShopify ? "Completato Shopify" : ""
       };
     }
 
@@ -9630,7 +9685,7 @@ function currentInv(){
         btnPickAll.disabled = fbaActiveFlows.length <= 0;
         btnPickAll.textContent = fbaActiveFlows.length ? `Preleva tutti FBA/PDF (${fmtN(fbaActiveFlows.length)})` : "Preleva tutti FBA/PDF";
         btnPickAll.title = fbaActiveFlows.length
-          ? `Preleva tutti i flussi FBA/PDF. Gli FBM Shopify hanno un riquadro separato e non scaricano inventario dal picking.`
+          ? `Preleva tutti i flussi FBA/PDF.`
           : "Nessun flusso FBA/PDF da prelevare.";
       }
 
@@ -9655,7 +9710,7 @@ function currentInv(){
             return `
               <div class="pickingFlowRow ${picked ? "picked" : ""}">
                 <div class="pickingFlowCell gridSku">${escapeHtml(sku)}</div>
-                <div class="pickingFlowCell"><div class="gridProdMain">${escapeHtml(title || sku)}</div><div class="gridProdSub">${isShopifyFlow ? "FBM Shopify" : "FBA/PDF"} • ${escapeHtml(prettyLoc(loc))}</div></div>
+                <div class="pickingFlowCell"><div class="gridProdMain">${escapeHtml(title || sku)}</div><div class="gridProdSub">${escapeHtml(prettyLoc(loc))}</div></div>
                 <div class="pickingFlowCell">${posHtml}</div>
                 <div class="pickingFlowCell right"><span class="badge warn">${escapeHtml(String(qty))}</span></div>
                 <div class="pickingFlowCell right">${actionsHtml}</div>
@@ -9665,10 +9720,8 @@ function currentInv(){
           const btnFlow = st.done
             ? `<span class="badge ok">Flusso prelevato</span>`
             : `<button class="btn primary small" type="button" data-action="pickFlow" data-flowid="${escapeHtml(flowId)}" data-loc="${escapeHtml(loc)}">Preleva flusso</button>`;
-          const metaPrefix = isShopifyFlow ? "Shopify FBM" : "FBA/PDF";
-          const metaSuffix = isShopifyFlow
-            ? " • prelievo operativo, scarico inventario da Shopify spedito/evaso"
-            : " • scarico inventario da Picking";
+          const metaPrefix = isShopifyFlow ? "FBM" : "FBA/PDF";
+          const metaSuffix = "";
           return `
             <div class="pickingFlowCard" data-flowid="${escapeHtml(flowId)}" data-loc="${escapeHtml(loc)}" data-kind="${escapeHtml(kind || "")}">
               <div class="pickingFlowTop">
@@ -9697,7 +9750,7 @@ function currentInv(){
       };
 
       const renderBucket = ({ cls, title, sub, flows, visibleFlows, empty, actionHtml })=>{
-        const hidden = flows.length > visibleFlows.length ? `<div class="hint" style="padding:0 4px 4px">Mostrati ${visibleFlows.length.toLocaleString("it-IT")} di ${flows.length.toLocaleString("it-IT")} flussi.</div>` : "";
+        const hidden = flows.length > visibleFlows.length ? `<div class="hint" style="padding:0 4px 4px">${visibleFlows.length.toLocaleString("it-IT")}/${flows.length.toLocaleString("it-IT")}</div>` : "";
         return `
           <div class="pickingBucketCard ${cls || ""}">
             <div class="pickingBucketTop">
@@ -9728,7 +9781,7 @@ function currentInv(){
           renderBucket({
             cls:"fbm",
             title:"FBM Shopify",
-            sub:"Ordini Shopify da preparare. Il prelievo qui è operativo: non scarica inventario. Lo scarico reale resta collegato allo stato spedito/evaso di Shopify.",
+            sub:"Ordini Shopify da preparare",
             flows: fbmActiveFlows,
             visibleFlows: visibleFbmFlows,
             empty:"Nessun ordine FBM Shopify da prelevare.",
@@ -9737,13 +9790,13 @@ function currentInv(){
           renderBucket({
             cls:"fba",
             title:"FBA / PDF",
-            sub:"Flussi PDF FBA da prelevare. Qui il prelievo continua a scaricare l'inventario come prima.",
+            sub:"Flussi PDF FBA",
             flows: fbaActiveFlows,
             visibleFlows: visibleFbaFlows,
             empty:"Nessun flusso FBA/PDF da prelevare.",
             actionHtml: fbaAction
           });
-        if(hint) hint.textContent = `Picking diviso in FBM Shopify e FBA/PDF. Totali da prelevare: ${activeFlows.length.toLocaleString("it-IT")} • FBM: ${fbmActiveFlows.length.toLocaleString("it-IT")} • FBA/PDF: ${fbaActiveFlows.length.toLocaleString("it-IT")}.`;
+        if(hint) hint.textContent = `Da prelevare: ${activeFlows.length.toLocaleString("it-IT")} • FBM ${fbmActiveFlows.length.toLocaleString("it-IT")} • FBA/PDF ${fbaActiveFlows.length.toLocaleString("it-IT")}`;
       }
 
       renderHomePickingHistoryBox();
@@ -9778,10 +9831,13 @@ function currentInv(){
         const flowName = flowDisplayName(h.flow);
         const isShopifyHistory = isShopifyFbmFlow(h.flow);
         if(h.type === "flow"){
-          const meta = [isShopifyHistory ? "Shopify FBM" : "", flowName ? `Flusso: ${flowName}` : "", h.count ? `${h.count} SKU` : "", h.at ? fmtDate(h.at) : "", h.by || ""].filter(Boolean).join(" • ");
-          const actionHtml = isShopifyHistory
-            ? `<button class="btn small danger pickingHistoryAction" type="button" data-action="undoPickFlow" data-flowid="${escapeHtml(h.flowId || h.flow?.id || "")}" data-loc="${escapeHtml(h.loc || h.flow?.location || "")}">Annulla flusso FBM</button>`
-            : `<button class="btn small danger pickingHistoryAction" type="button" data-action="undoPickFlow" data-flowid="${escapeHtml(h.flowId || h.flow?.id || "")}" data-loc="${escapeHtml(h.loc || h.flow?.location || "")}">Annulla flusso</button>`;
+          const completedShopify = isShopifyFbmCompletedByShopify(h.flow) || h.completedByShopify === true;
+          const meta = [isShopifyHistory ? "Shopify FBM" : "", completedShopify ? "Completato Shopify" : "", flowName ? `Flusso: ${flowName}` : "", h.count ? `${h.count} SKU` : "", h.at ? fmtDate(h.at) : "", h.by || ""].filter(Boolean).join(" • ");
+          const actionHtml = completedShopify
+            ? `<span class="badge ok pickingHistoryAction">Completato Shopify</span>`
+            : (isShopifyHistory
+              ? `<button class="btn small danger pickingHistoryAction" type="button" data-action="undoPickFlow" data-flowid="${escapeHtml(h.flowId || h.flow?.id || "")}" data-loc="${escapeHtml(h.loc || h.flow?.location || "")}">Annulla flusso FBM</button>`
+              : `<button class="btn small danger pickingHistoryAction" type="button" data-action="undoPickFlow" data-flowid="${escapeHtml(h.flowId || h.flow?.id || "")}" data-loc="${escapeHtml(h.loc || h.flow?.location || "")}">Annulla flusso</button>`);
           return `
             <div class="pickingHistoryRow">
               <div class="mono">FLUSSO</div>
@@ -9791,10 +9847,13 @@ function currentInv(){
               ${actionHtml}
             </div>`;
         }
-        const meta = [isShopifyHistory ? "Shopify FBM" : "", h.position ? `Posizione: ${h.position}` : "", flowName ? `Flusso: ${flowName}` : "", h.at ? fmtDate(h.at) : "", h.by || ""].filter(Boolean).join(" • ");
-        const actionHtml = isShopifyHistory
-          ? `<button class="btn small danger pickingHistoryAction" type="button" data-action="undoPickSku" data-flowid="${escapeHtml(h.flowId || h.flow?.id || "")}" data-loc="${escapeHtml(h.loc || h.flow?.location || "")}" data-sku="${escapeHtml(h.sku)}">Annulla FBM</button>`
-          : `<button class="btn small danger pickingHistoryAction" type="button" data-action="undoPickSku" data-flowid="${escapeHtml(h.flowId || h.flow?.id || "")}" data-loc="${escapeHtml(h.loc || h.flow?.location || "")}" data-sku="${escapeHtml(h.sku)}">Annulla</button>`;
+        const completedShopify = isShopifyFbmCompletedByShopify(h.flow);
+        const meta = [isShopifyHistory ? "Shopify FBM" : "", completedShopify ? "Completato Shopify" : "", h.position ? `Posizione: ${h.position}` : "", flowName ? `Flusso: ${flowName}` : "", h.at ? fmtDate(h.at) : "", h.by || ""].filter(Boolean).join(" • ");
+        const actionHtml = completedShopify
+          ? `<span class="badge ok pickingHistoryAction">Completato Shopify</span>`
+          : (isShopifyHistory
+            ? `<button class="btn small danger pickingHistoryAction" type="button" data-action="undoPickSku" data-flowid="${escapeHtml(h.flowId || h.flow?.id || "")}" data-loc="${escapeHtml(h.loc || h.flow?.location || "")}" data-sku="${escapeHtml(h.sku)}">Annulla FBM</button>`
+            : `<button class="btn small danger pickingHistoryAction" type="button" data-action="undoPickSku" data-flowid="${escapeHtml(h.flowId || h.flow?.id || "")}" data-loc="${escapeHtml(h.loc || h.flow?.location || "")}" data-sku="${escapeHtml(h.sku)}">Annulla</button>`);
         return `
           <div class="pickingHistoryRow">
             <div class="mono">${escapeHtml(h.sku)}</div>
@@ -9889,7 +9948,7 @@ function currentInv(){
         flow.reservation = { ...(flow.reservation || {}), active:true, status: allPicked ? "prelevato_attesa_shopify_spedito" : "parziale_prelevato_attesa_shopify_spedito", updatedAtClient: nowClient, updatedBy: who };
         flow.picking = { ...(flow.picking || {}), ...pickingPatch, pickedLines: pickedMap };
       }catch(_e){}
-      showToast("FBM prelevato", `${s} • ${position} • ${qty} pz. Scarico inventario da Shopify.`, 2200);
+      showToast("FBM prelevato", `${s} • ${position} • ${qty} pz.`, 2200);
       renderHomePickingBox();
       renderHomeLogsBox();
     }
@@ -9966,7 +10025,7 @@ function currentInv(){
         flow.reservation = { ...(flow.reservation || {}), active:true, status: allPicked ? "prelevato_attesa_shopify_spedito" : "parziale_prelevato_attesa_shopify_spedito", updatedAtClient: nowClient, updatedBy: who };
         flow.picking = { ...(flow.picking || {}), ...pickingPatch, pickedLines: nextPickedMap };
       }catch(_e){}
-      if(!opts.silent) showToast("Flusso FBM prelevato", `${flowDisplayName(flow)} • ${skuList.length} SKU • ${flowPieces} pz. Scarico inventario da Shopify.`, 2400);
+      if(!opts.silent) showToast("Flusso FBM prelevato", `${flowDisplayName(flow)} • ${skuList.length} SKU • ${flowPieces} pz.`, 2400);
       renderHomePickingBox();
       renderHomeLogsBox();
       return { flowId:id, skuCount:skuList.length, pieces:flowPieces, pickedMap:nextPickedMap, pickingPatch };
@@ -10009,7 +10068,7 @@ function currentInv(){
           console.warn("pick all shopify fbm flow", err);
         }
       }
-      showToast("FBM prelevati", `${doneFlows} flussi • ${doneSku} SKU • ${donePieces} pz. Scarico inventario da Shopify.`, 2600);
+      showToast("FBM prelevati", `${doneFlows} flussi • ${doneSku} SKU • ${donePieces} pz.`, 2600);
       renderHomePickingBox();
       renderHomeLogsBox();
     }
@@ -10387,14 +10446,13 @@ function currentInv(){
 
     function isShopifyFbmAlreadyShippedByShopify(flow){
       try{
+        if(isShopifyFbmCompletedByShopify(flow)) return true;
         const rs = String(flow?.reservation?.status || "").toLowerCase();
         const ps = String(flow?.picking?.status || "").toLowerCase();
         const shop = (flow?.shopify && typeof flow.shopify === "object") ? flow.shopify : {};
         const shippedTotal = Number(shop.shippedTotal || 0);
         return !!(
-          rs === "shopify_spedito" ||
           rs === "parziale_shopify_spedito" ||
-          ps === "shopify_spedito" ||
           ps === "parziale_shopify_spedito" ||
           String(shop.lastShipmentKey || "").trim() ||
           (Number.isFinite(shippedTotal) && shippedTotal > 0)
