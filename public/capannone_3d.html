@@ -2342,46 +2342,61 @@ function buildScenes(){
   {
     const lineCx=-LX/2+7.5;          // centro X della zona linea (15m da bx0)
     const lineCz= LZ/2-1.9;          // verso il muro fronte (profondità zona)
-    // ingresso: dolly laterale lungo la linea, camera bassa e ravvicinata
+    // ingresso: dolly laterale lungo la linea, camera più arretrata (zoom contenuto)
     scenes.push({ dur:rnd(22000,26000),
-      from:{tx:lineCx+5.0, ty:1.5, tz:lineCz, r:portrait?6.2:7.4, theta:Math.PI*0.52, phi:Math.PI*0.06},
-      to:  {tx:lineCx-5.0, ty:1.7, tz:lineCz, r:portrait?6.4:7.6, theta:Math.PI*0.60, phi:Math.PI*0.08} });
+      from:{tx:lineCx+5.0, ty:2.4, tz:lineCz, r:portrait?10.5:13.0, theta:Math.PI*0.52, phi:Math.PI*0.10},
+      to:  {tx:lineCx-5.0, ty:2.6, tz:lineCz, r:portrait?10.8:13.4, theta:Math.PI*0.60, phi:Math.PI*0.12} });
     // 6b) carrellata di ritorno leggermente più alta che scopre la U e il pallet
     scenes.push({ dur:rnd(20000,24000),
-      from:{tx:lineCx-4.0, ty:2.1, tz:lineCz, r:portrait?7.0:8.4, theta:Math.PI*0.62, phi:Math.PI*0.16},
-      to:  {tx:lineCx+4.0, ty:2.4, tz:lineCz, r:portrait?7.2:8.7, theta:Math.PI*0.50, phi:Math.PI*0.19} });
-    // 6c) dettaglio ravvicinato sulle stazioni centrali (riempimento/tappatura)
+      from:{tx:lineCx-4.0, ty:3.0, tz:lineCz, r:portrait?11.5:14.0, theta:Math.PI*0.62, phi:Math.PI*0.18},
+      to:  {tx:lineCx+4.0, ty:3.2, tz:lineCz, r:portrait?11.8:14.4, theta:Math.PI*0.50, phi:Math.PI*0.20} });
+    // 6c) vista d'insieme della linea (riempimento/tappatura) senza primo piano
     scenes.push({ dur:rnd(18000,22000),
-      from:{tx:lineCx-1.0, ty:1.3, tz:lineCz, r:portrait?4.8:6.0, theta:Math.PI*0.56, phi:Math.PI*0.05},
-      to:  {tx:lineCx+1.5, ty:1.5, tz:lineCz, r:portrait?5.0:6.2, theta:Math.PI*0.62, phi:Math.PI*0.09} });
+      from:{tx:lineCx-1.0, ty:2.6, tz:lineCz, r:portrait?9.5:11.5, theta:Math.PI*0.56, phi:Math.PI*0.11},
+      to:  {tx:lineCx+1.5, ty:2.8, tz:lineCz, r:portrait?9.8:11.8, theta:Math.PI*0.62, phi:Math.PI*0.13} });
   }
+
+  // 7) SCENA FINALE DI RIPOSO: vista da lontano e dal punto più basso, inquadra tutto
+  //    il capannone. È l'ultima scena: dopo questa il sistema resta fermo qui, in attesa.
+  scenes.push({ rest:true, dur:rnd(16000,20000),
+    from:{tx:0, ty:2.2, tz:1, r:portrait?17:46, theta:Math.PI*0.16, phi:Math.PI*0.060},
+    to:  {tx:0, ty:2.0, tz:1, r:portrait?18:48, theta:Math.PI*0.15, phi:Math.PI*0.050} });
 
   return scenes;
 }
 
+function _buildIdleOrder(){
+  // mescola solo le scene NON di riposo; la scena rest va sempre per ultima.
+  const normal=[], rest=[];
+  _scenes.forEach((s,i)=>{ (s.rest?rest:normal).push(i); });
+  for(let i=normal.length-1;i>0;i--){const j=(Math.random()*(i+1))|0;[normal[i],normal[j]]=[normal[j],normal[i]];}
+  return normal.concat(rest);
+}
 function updateIdle(now){
   if(selectedVano||tour||tween){ idle=null; return; }
   if(now-lastInteract < IDLE_WAIT){ idle=null; return; }
   if(!_scenes || _scenes.length===0) _scenes=buildScenes();
   if(!idle){
-    // ordine di riproduzione mescolato; a fine lista si rigenerano scene nuove (mai identiche)
-    const order=_scenes.map((_,i)=>i); for(let i=order.length-1;i>0;i--){const j=(Math.random()*(i+1))|0;[order[i],order[j]]=[order[j],order[i]];}
-    idle={ start:now, order, oi:0, sceneIdx:order[0], sceneStart:now,
+    const order=_buildIdleOrder();
+    idle={ start:now, order, oi:0, sceneIdx:order[0], sceneStart:now, resting:false,
            blendStart:now, prevPose:{tx:cam.tx,tz:cam.tz,ty:cam.ty,r:cam.r,theta:cam.theta,phi:cam.phi} };
   }
   const scene=_scenes[idle.sceneIdx];
   let p=(now-idle.sceneStart)/scene.dur;     // 0..1 nella scena
-  if(p>=1){
-    // avanza nell'ordine; quando finisce, rigenera scene fresche e rimescola
+  // se siamo nella scena di riposo, alla fine ci si ferma: la camera resta qui in attesa
+  if(idle.resting){ p=Math.min(p,1); }
+  if(p>=1 && !idle.resting){
+    // avanza nell'ordine
     idle.oi++;
     if(idle.oi>=idle.order.length){
-      _scenes=buildScenes();                 // nuovi valori random → evoluzioni sempre diverse
-      idle.order=_scenes.map((_,i)=>i);
-      for(let i=idle.order.length-1;i>0;i--){const j=(Math.random()*(i+1))|0;[idle.order[i],idle.order[j]]=[idle.order[j],idle.order[i]];}
-      idle.oi=0;
+      // tutte le scene percorse: l'ultima è quella di riposo → fermati lì (non rigenerare)
+      idle.oi=idle.order.length-1;
+      idle.sceneIdx=idle.order[idle.oi];
+      if(_scenes[idle.sceneIdx]?.rest) idle.resting=true;
+    } else {
+      idle.prevPose={tx:cam.tx,tz:cam.tz,ty:cam.ty,r:cam.r,theta:cam.theta,phi:cam.phi};
+      idle.sceneIdx=idle.order[idle.oi]; idle.sceneStart=now; idle.blendStart=now; p=0;
     }
-    idle.prevPose={tx:cam.tx,tz:cam.tz,ty:cam.ty,r:cam.r,theta:cam.theta,phi:cam.phi};
-    idle.sceneIdx=idle.order[idle.oi]; idle.sceneStart=now; idle.blendStart=now; p=0;
   }
   const scn=_scenes[idle.sceneIdx];
   const a=scn.from, b=scn.to;
@@ -2389,9 +2404,10 @@ function updateIdle(now){
   const e=p<0.5?4*p*p*p:1-Math.pow(-2*p+2,3)/2;
   const lerpScene=(k)=>a[k]+(b[k]-a[k])*e;
   const t=(now-idle.start)/1000;
-  // posa-obiettivo di questa scena
-  let TX=lerpScene('tx'), TZ=lerpScene('tz'), TY=lerpScene('ty')+Math.sin(t*0.5)*0.04,
-      R=lerpScene('r')+Math.sin(t*0.3)*0.15, TH=lerpScene('theta'), PH=lerpScene('phi')+Math.sin(t*0.25)*0.004;
+  // in riposo niente oscillazione: posa perfettamente ferma
+  const breath = idle.resting ? 0 : 1;
+  let TX=lerpScene('tx'), TZ=lerpScene('tz'), TY=lerpScene('ty')+Math.sin(t*0.5)*0.04*breath,
+      R=lerpScene('r')+Math.sin(t*0.3)*0.15*breath, TH=lerpScene('theta'), PH=lerpScene('phi')+Math.sin(t*0.25)*0.004*breath;
   // BLEND tra scene: nei primi BLEND_MS interpola dalla posa precedente alla nuova scena
   const BLEND_MS=6500;
   if(idle.blendStart && idle.prevPose){
