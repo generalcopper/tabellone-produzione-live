@@ -3520,6 +3520,7 @@ Tip:
     </div>
   </div>
 
+<!-- fix: Shopify FBM realtime picking visibility v20260621 -->
 <script type="module">
     // === Firebase config ===
     const firebaseConfig = {
@@ -7266,6 +7267,130 @@ function startAllLogs(){
       }
     }
 
+    function readFlowLogTimestamp(v){
+      try{
+        if(v === null || v === undefined || v === "") return 0;
+        if(typeof v === "number" && Number.isFinite(v)) return v;
+        if(typeof v === "string"){
+          const n = Number(v);
+          if(Number.isFinite(n) && n > 1000000000) return n;
+          const d = Date.parse(v);
+          return Number.isFinite(d) ? d : 0;
+        }
+        if(v && typeof v.toMillis === "function") return v.toMillis();
+        if(v && typeof v.seconds === "number") return v.seconds * 1000;
+        return 0;
+      }catch(_e){
+        return 0;
+      }
+    }
+
+    function flowLogTimestamp(flow){
+      const f = flow || {};
+      const s = (f.shopify && typeof f.shopify === "object") ? f.shopify : {};
+      const r = (f.reservation && typeof f.reservation === "object") ? f.reservation : {};
+      const p = (f.picking && typeof f.picking === "object") ? f.picking : {};
+      return Math.max(
+        readFlowLogTimestamp(f.appliedAtClient),
+        readFlowLogTimestamp(f.updatedAtClient),
+        readFlowLogTimestamp(f.doneAtClient),
+        readFlowLogTimestamp(f.createdAtClient),
+        readFlowLogTimestamp(f.importedAtClient),
+        readFlowLogTimestamp(f.orderCreatedAtClient),
+        readFlowLogTimestamp(f.appliedAt),
+        readFlowLogTimestamp(f.updatedAt),
+        readFlowLogTimestamp(f.createdAt),
+        readFlowLogTimestamp(s.updatedAtClient),
+        readFlowLogTimestamp(s.createdAtClient),
+        readFlowLogTimestamp(s.orderCreatedAtClient),
+        readFlowLogTimestamp(s.created_at),
+        readFlowLogTimestamp(s.createdAt),
+        readFlowLogTimestamp(r.reservedAtClient),
+        readFlowLogTimestamp(r.updatedAtClient),
+        readFlowLogTimestamp(p.updatedAtClient),
+        readFlowLogTimestamp(p.flowPickedAtClient)
+      );
+    }
+
+    function shopifyFlowLinesFromData(d){
+      const src = d || {};
+      const shop = (src.shopify && typeof src.shopify === "object") ? src.shopify : {};
+      const candidates = [src.lines, src.lineItems, src.items, src.orderLines, src.products, shop.lines, shop.lineItems, shop.items, shop.orderLines];
+      const raw = candidates.find(x => Array.isArray(x)) || [];
+      const out = [];
+      for(const x0 of raw){
+        const x = (x0 && typeof x0 === "object") ? x0 : {};
+        const sku = toSkuId(x.sku || x.SKU || x.code || x.productSku || x.variantSku || x.amazonSku || x.amazonInventorySku || "");
+        const qty = parseQty(x.qty ?? x.quantity ?? x.quantityOrdered ?? x.fulfillableQuantity ?? x.currentQuantity ?? x.pieces ?? x.qta ?? 0);
+        if(!sku || !Number.isFinite(qty) || qty === 0) continue;
+        const title = squashWhitespace(x.title || x.name || x.productTitle || x.variantTitle || x.amazonInventoryTitle || sku) || sku;
+        out.push({ sku, title, qty: Math.abs(qty) });
+      }
+      return out;
+    }
+
+    function normalizeFlowLogDoc(docSnap, loc){
+      const d = docSnap.data() || {};
+      const shop = (d.shopify && typeof d.shopify === "object") ? d.shopify : {};
+      const lines = Array.isArray(d.lines) ? d.lines : shopifyFlowLinesFromData(d);
+      const ts = flowLogTimestamp(d);
+      const shopId = String(shop.orderId || shop.admin_graphql_api_id || shop.id || d.shopifyOrderId || d.orderId || d.name || "").trim();
+      const shopName = String(shop.name || d.orderName || d.shopifyOrderName || shopId || "").trim();
+      const src = String(d.source || shop.source || "").trim();
+      const looksShopify = !!(shopId || shopName || src.toLowerCase().includes("shopify") || String(d.fileName || "").toUpperCase() === "SHOPIFY_FBM");
+      const workflowId = d.workflowId || ((d.workflow && d.workflow.id) ? d.workflow.id : "") || (looksShopify ? `SHOPIFY-${shopName || shopId || docSnap.id}` : "");
+      const workflowLabel = d.workflowLabel || ((d.workflow && d.workflow.label) ? d.workflow.label : "") || (looksShopify ? `Shopify ${shopName || shopId || docSnap.id}` : "");
+      const totalPieces = Number.isFinite(Number(d.totalPieces)) ? Number(d.totalPieces) : lines.reduce((a,x)=> a + (Math.abs(parseQty(x.qty)||0)), 0);
+      const totalLines = Number.isFinite(Number(d.totalLines)) ? Number(d.totalLines) : lines.length;
+      const reservation = (d.reservation && typeof d.reservation === "object") ? d.reservation : (looksShopify ? { active:true, status:"in_attesa_shopify_spedito", totalPieces } : {});
+      const picking = (d.picking && typeof d.picking === "object") ? d.picking : (looksShopify ? { status:"da_prelevare", managedByPicking:true, shopifyControlled:true, pickedLines:{}, flowPicked:false } : {});
+      return {
+        ...d,
+        id: docSnap.id,
+        kind: looksShopify ? "scarica" : (d.kind || ""),
+        location: d.location || loc,
+        fileName: d.fileName || (looksShopify ? "SHOPIFY_FBM" : ""),
+        appliedAtClient: readFlowLogTimestamp(d.appliedAtClient) || ts,
+        appliedBy: d.appliedBy || d.createdBy || d.createdByEmail || "",
+        status: d.status || (looksShopify ? "RESERVED" : ""),
+        source: d.source || shop.source || (looksShopify ? "shopify_fbm" : ""),
+        reservation,
+        shopify: shop,
+        updatedAtClient: readFlowLogTimestamp(d.updatedAtClient) || ts,
+        createdAtClient: readFlowLogTimestamp(d.createdAtClient) || readFlowLogTimestamp(shop.createdAtClient),
+        totalLines,
+        totalPieces,
+        workflow: d.workflow || null,
+        workflowId,
+        workflowLabel,
+        comboApplied: d.comboApplied === true,
+        comboVersion: Number.isFinite(Number(d.comboVersion)) ? Number(d.comboVersion) : 0,
+        comboLines: Array.isArray(d.comboLines) ? d.comboLines : [],
+        comboTotalPieces: Number.isFinite(Number(d.comboTotalPieces)) ? Number(d.comboTotalPieces) : 0,
+        voided: d.voided === true,
+        voidedAtClient: (typeof d.voidedAtClient === "number") ? d.voidedAtClient : 0,
+        voidedBy: d.voidedBy || "",
+        picking,
+        lines
+      };
+    }
+
+    function renderLogsForLoc(loc){
+      if(state.route.view==="location" && state.route.loc===loc){
+        renderFlowsList();
+        if(state.ui.sheet==="flow" && state.ui.flowId){
+          renderFlowDetails();
+        }
+      }
+      if(state.ui.sheet==="flows" && (state.ui.flowsModalLoc===loc)){
+        renderFlowsModal();
+      }
+      if(state.route.view==="home"){
+        renderHomeLogsBox();
+        renderHomePickingBox();
+      }
+    }
+
     function startLogsFor(loc){
       if(!state.firebase.ok || !state.user?.isWhitelisted) return;
       const lg = state.logs[loc];
@@ -7273,65 +7398,53 @@ function startAllLogs(){
 
       const api = state.firebase.api;
       const db = state.firebase.db;
-
       const colRef = api.collection(db, COL_ROOT, loc, SUB_LOGS);
-      const q = api.query(colRef, api.orderBy("appliedAtClient","desc"), api.limit(80));
-      lg.unsub = api.onSnapshot(q, (snap)=>{
-        const flows = [];
-        snap.forEach(docSnap=>{
-          const d = docSnap.data() || {};
-          flows.push({
-            id: docSnap.id,
-            kind: d.kind || "",
-            location: d.location || loc,
-            fileName: d.fileName || "",
-            appliedAtClient: (typeof d.appliedAtClient==="number") ? d.appliedAtClient : 0,
-            appliedBy: d.appliedBy || "",
-            status: d.status || "",
-            source: d.source || "",
-            reservation: (d.reservation && typeof d.reservation === "object") ? d.reservation : {},
-            shopify: (d.shopify && typeof d.shopify === "object") ? d.shopify : {},
-            updatedAtClient: (typeof d.updatedAtClient === "number") ? d.updatedAtClient : 0,
-            totalLines: Number.isFinite(d.totalLines) ? d.totalLines : (Array.isArray(d.lines)? d.lines.length : 0),
-            totalPieces: Number.isFinite(d.totalPieces) ? d.totalPieces : 0,
-            workflow: d.workflow || null,
-            workflowId: d.workflowId || ((d.workflow && d.workflow.id) ? d.workflow.id : ""),
-            workflowLabel: d.workflowLabel || ((d.workflow && d.workflow.label) ? d.workflow.label : ""),
-            comboApplied: d.comboApplied === true,
-            comboVersion: Number.isFinite(Number(d.comboVersion)) ? Number(d.comboVersion) : 0,
-            comboLines: Array.isArray(d.comboLines) ? d.comboLines : [],
-            comboTotalPieces: Number.isFinite(Number(d.comboTotalPieces)) ? Number(d.comboTotalPieces) : 0,
-            voided: d.voided === true,
-            voidedAtClient: (typeof d.voidedAtClient==="number") ? d.voidedAtClient : 0,
-            voidedBy: d.voidedBy || "",
-            picking: (d.picking && typeof d.picking === "object") ? d.picking : {},
-            lines: Array.isArray(d.lines) ? d.lines : []
-          });
-        });
-        lg.flows = flows;
-        lg.meta.count = flows.length;
+      const maps = { applied:new Map(), updated:new Map(), raw:new Map() };
 
-        if(state.route.view==="location" && state.route.loc===loc){
-          renderFlowsList();
-          // keep details updated if open
-          if(state.ui.sheet==="flow" && state.ui.flowId){
-            renderFlowDetails();
+      const mergeMaps = ()=>{
+        const merged = new Map();
+        for(const m of Object.values(maps)){
+          for(const [id, flow] of m.entries()){
+            const prev = merged.get(id) || {};
+            merged.set(id, { ...prev, ...flow });
           }
         }
+        const flows = Array.from(merged.values())
+          .filter(f => f && !f.__invalid)
+          .sort((a,b)=> (flowLogTimestamp(b) - flowLogTimestamp(a)) || String(b.id||"").localeCompare(String(a.id||"")))
+          .slice(0, 1000);
+        lg.flows = flows;
+        lg.meta.count = flows.length;
+        renderLogsForLoc(loc);
+      };
 
-        // aggiorna anche la modale flussi (HOME)
-        if(state.ui.sheet==="flows" && (state.ui.flowsModalLoc===loc)){
-          renderFlowsModal();
-        }
-        if(state.route.view==="home"){
-          renderHomeLogsBox();
-          renderHomePickingBox();
-        }
+      const attach = (key, q, noisy)=> api.onSnapshot(q, (snap)=>{
+        const m = maps[key] || new Map();
+        m.clear();
+        snap.forEach(docSnap=>{
+          const flow = normalizeFlowLogDoc(docSnap, loc);
+          m.set(flow.id, flow);
+        });
+        maps[key] = m;
+        mergeMaps();
       }, (err)=>{
-        console.warn("logs watch error", err);
-        showToast("Errore flussi", err?.message || String(err));
+        console.warn(`logs watch ${key} ${loc}`, err);
+        if(noisy) showToast("Errore flussi", err?.message || String(err));
         if(state.route.view==="home") renderHomeLogsBox();
       });
+
+      const unsubs = [];
+      unsubs.push(attach("applied", api.query(colRef, api.orderBy("appliedAtClient","desc"), api.limit(300)), true));
+      // Shopify/FBM automatico può essere scritto con updatedAtClient/createdAtClient invece di appliedAtClient.
+      // Questi listener secondari recuperano quei documenti e li fondono con lo storico normale.
+      try{ unsubs.push(attach("updated", api.query(colRef, api.orderBy("updatedAtClient","desc"), api.limit(300)), false)); }catch(_e){}
+      try{ unsubs.push(attach("shopifySource", api.query(colRef, api.where("source", "==", "shopify_fbm"), api.limit(1000)), false)); }catch(_e){}
+      try{ unsubs.push(attach("shopifySourcePlain", api.query(colRef, api.where("source", "==", "shopify"), api.limit(1000)), false)); }catch(_e){}
+      try{ unsubs.push(attach("shopifyFile", api.query(colRef, api.where("fileName", "==", "SHOPIFY_FBM"), api.limit(1000)), false)); }catch(_e){}
+      try{ unsubs.push(attach("raw", api.query(colRef, api.limit(400)), false)); }catch(_e){}
+      lg.unsub = ()=>{
+        for(const fn of unsubs){ try{ fn && fn(); }catch(_e){} }
+      };
     }
 
 
@@ -9141,14 +9254,23 @@ function currentInv(){
 
     function isShopifyFbmFlow(flow){
       try{
-        const src = String(flow?.source || flow?.shopify?.source || flow?.reservation?.source || "").toLowerCase();
+        const shop = (flow?.shopify && typeof flow.shopify === "object") ? flow.shopify : {};
+        const src = String(flow?.source || shop.source || flow?.reservation?.source || "").toLowerCase();
         const fileName = String(flow?.fileName || "").toUpperCase();
         const workflow = String(flow?.workflowId || flow?.workflowLabel || "").toUpperCase();
+        const tags = [flow?.tags, shop.tags, flow?.tag]
+          .flatMap(v => Array.isArray(v) ? v : String(v || "").split(","))
+          .map(v => String(v || "").trim().toLowerCase())
+          .filter(Boolean);
         return !!(
           src === "shopify_fbm" ||
           src.includes("shopify_fbm") ||
+          src.includes("shopify") ||
           fileName === "SHOPIFY_FBM" ||
           workflow.startsWith("SHOPIFY-") ||
+          tags.includes("fbm") ||
+          tags.includes("shopify_fbm") ||
+          !!(shop.orderId || shop.id || shop.name || flow?.shopifyOrderId || flow?.shopifyOrderName) ||
           flow?.picking?.shopifyControlled === true ||
           flow?.shopifyControlled === true
         );
@@ -9166,10 +9288,10 @@ function currentInv(){
         const ps = String(p.status || "").toLowerCase();
         const mode = String(p.flowPickMode || "").toLowerCase();
         const shop = (flow?.shopify && typeof flow.shopify === "object") ? flow.shopify : {};
-        const fulfillmentStatus = String(shop.fulfillmentStatus || shop.fulfillment_status || "").toLowerCase();
-        const shippedTotal = Number(shop.shippedTotal || 0);
-        const reservedTotal = Number(shop.reservedTotal || flow?.totalPieces || 0);
-        const shipmentKey = String(shop.lastShipmentKey || "").trim();
+        const fulfillmentStatus = String(shop.fulfillmentStatus || shop.fulfillment_status || flow?.fulfillmentStatus || flow?.fulfillment_status || "").toLowerCase();
+        const shippedTotal = Number(shop.shippedTotal || flow?.shippedTotal || 0);
+        const reservedTotal = Number(shop.reservedTotal || flow?.reservedTotal || flow?.totalPieces || 0);
+        const shipmentKey = String(shop.lastShipmentKey || flow?.lastShipmentKey || flow?.trackingNumber || "").trim();
 
         return !!(
           rs === "shopify_spedito" ||
@@ -9203,7 +9325,7 @@ function currentInv(){
           out.push({ ...f, location: f.location || loc, lines });
         }
       }
-      out.sort((a,b)=> (Number(b.appliedAtClient || 0) - Number(a.appliedAtClient || 0)) || String(b.id||"").localeCompare(String(a.id||"")));
+      out.sort((a,b)=> (flowLogTimestamp(b) - flowLogTimestamp(a)) || String(b.id||"").localeCompare(String(a.id||"")));
       return out;
     }
 
@@ -9289,6 +9411,9 @@ function currentInv(){
 
     function isPickingManagedFlow(flow){
       try{
+        // Gli ordini Shopify FBM sono flussi operativi di picking anche quando il backend
+        // li scrive senza reservation/picking.managedByPicking: lo scarico inventario resta separato.
+        if(isShopifyFbmFlow(flow)) return true;
         if(isReservedScaricaFlow(flow)) return true;
         const p = (flow?.picking && typeof flow.picking === "object") ? flow.picking : {};
         const st = String(flow?.status || p.status || "").toUpperCase();
@@ -10451,11 +10576,11 @@ function currentInv(){
         const rs = String(flow?.reservation?.status || "").toLowerCase();
         const ps = String(flow?.picking?.status || "").toLowerCase();
         const shop = (flow?.shopify && typeof flow.shopify === "object") ? flow.shopify : {};
-        const shippedTotal = Number(shop.shippedTotal || 0);
+        const shippedTotal = Number(shop.shippedTotal || flow?.shippedTotal || 0);
         return !!(
           rs === "parziale_shopify_spedito" ||
           ps === "parziale_shopify_spedito" ||
-          String(shop.lastShipmentKey || "").trim() ||
+          String(shop.lastShipmentKey || flow?.lastShipmentKey || flow?.trackingNumber || "").trim() ||
           (Number.isFinite(shippedTotal) && shippedTotal > 0)
         );
       }catch(_e){
