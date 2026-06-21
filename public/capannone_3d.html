@@ -670,10 +670,53 @@ function buildRack({id,x,z,bays,faceDir,empty,alongX,codeBays}){
   const g=new THREE.Group(); g.position.set(x,0,z);
   if(alongX) g.rotation.y=Math.PI/2;             // campate lungo X invece che lungo Z
   const len=bays.reduce((s,b)=>s+b.w,0);
-  const upH=RACK_TOTH+0.2, upGeo=new THREE.BoxGeometry(0.12,upH,0.12);
+  const upH=RACK_TOTH+0.2;
+  // tono leggermente diverso per le nervature → si staccano otticamente (ombre/contrasto)
+  const ribMat=M.up.clone(); ribMat.color=M.up.color.clone().offsetHSL(0,0,-0.12); ribMat.metalness=Math.min(1,(M.up.metalness||0.6)+0.1);
+  const edgeMat=M.up.clone(); edgeMat.color=M.up.color.clone().offsetHSL(0,0,0.10);
+  // ---- MONTANTE pressopiegato dettagliato: profilo a C con NERVATURE in rilievo ----
+  function buildUpright(){
+    const u=new THREE.Group();
+    const W=0.12, D=0.12, tk=0.014;     // larghezza, profondità, spessore lamiera
+    const mat=M.up;
+    // ANIMA (faccia frontale forata)
+    const web=new THREE.Mesh(new THREE.BoxGeometry(W,upH,tk),mat);
+    web.position.set(0,upH/2,D/2-tk/2); u.add(web);
+    // NERVATURA CENTRALE in rilievo (sporge davanti all'anima → crea spigoli e ombra)
+    const rib=new THREE.Mesh(new THREE.BoxGeometry(W*0.30,upH,tk*2.2),ribMat);
+    rib.position.set(0,upH/2,D/2+tk*0.6); u.add(rib);
+    // smussi laterali della nervatura (le "pareti" della scanalatura, in tono chiaro)
+    for(const sx of [-1,1]){
+      const wall=new THREE.Mesh(new THREE.BoxGeometry(tk*0.9,upH,tk*2.4),edgeMat);
+      wall.position.set(sx*W*0.15,upH/2,D/2+tk*0.4); u.add(wall);
+    }
+    // due NERVATURE laterali in rilievo (venature longitudinali ai bordi dell'anima)
+    for(const sx of [-1,1]){
+      const v=new THREE.Mesh(new THREE.BoxGeometry(tk*1.8,upH,tk*1.8),ribMat);
+      v.position.set(sx*W*0.32,upH/2,D/2+tk*0.3); u.add(v);
+    }
+    // ALI laterali (i due fianchi del profilo)
+    for(const sx of [-1,1]){
+      const fl=new THREE.Mesh(new THREE.BoxGeometry(tk,upH,D),mat);
+      fl.position.set(sx*(W/2-tk/2),upH/2,0); u.add(fl);
+      // RITORNO d'ala (piega interna a 90° verso l'anima)
+      const ret=new THREE.Mesh(new THREE.BoxGeometry(W*0.22,upH,tk),mat);
+      ret.position.set(sx*(W/2-W*0.11-tk),upH/2,-D/2+tk/2); u.add(ret);
+      // NERVATURA sul fianco in rilievo (venatura laterale)
+      const fv=new THREE.Mesh(new THREE.BoxGeometry(tk*2.0,upH,D*0.42),ribMat);
+      fv.position.set(sx*(W/2+tk*0.3),upH/2,0); u.add(fv);
+    }
+    // anima posteriore parziale (chiude il profilo, look scatolato)
+    const back=new THREE.Mesh(new THREE.BoxGeometry(W*0.5,upH,tk),mat);
+    back.position.set(0,upH/2,-D/2+tk/2); u.add(back);
+    u.traverse(o=>{if(o.isMesh){o.castShadow=true;o.receiveShadow=true;}});
+    return u;
+  }
   let edges=[-len/2]; for(const b of bays) edges.push(edges[edges.length-1]+b.w);
   for(const lz of edges) for(const dx of [-RACK_DEPTH/2,RACK_DEPTH/2]){
-    const u=new THREE.Mesh(upGeo,M.up); u.position.set(dx,upH/2,lz); u.castShadow=true; g.add(u);
+    const u=buildUpright(); u.position.set(dx,0,lz);
+    // orienta l'apertura del profilo a C verso l'interno della spalla
+    u.rotation.y=(dx<0)?0:Math.PI; g.add(u);
   }
   // crociere diagonali (zig-zag) su ogni telaio: collegano i 2 montanti lungo la profondità
   const diagN=6;                              // numero di segmenti zig-zag
@@ -904,6 +947,322 @@ const CARTELLO_COLORI={
   floorBlue.position.set(cx,0.02,cz); floorBlue.receiveShadow=true; g.add(floorBlue);
   scene.add(g);
 
+  /* ===== LINEA DI PRODUZIONE BOTTIGLIE — disposta lungo la U =====
+     Le stazioni seguono il percorso a U: 1) ingresso bottiglie vuote
+     2) riempimento 3) tappatura 4) etichettatura 5) inscatolatrice
+     6) pallettizzatore (bancali EPAL finiti). Bottiglie animate sul nastro a U. */
+  (function(){
+    const L=new THREE.Group();
+    const beltY=0.62;
+
+    // --- MATERIALI PREMIUM: acciaio inox lucido + plexiglass/vetro lucido ---
+    const inox=new THREE.MeshStandardMaterial({color:0xf2f6fa,roughness:0.06,metalness:1.0,envMap:scene.environment||null,envMapIntensity:1.8});
+    const inoxDark=new THREE.MeshStandardMaterial({color:0xbac6d2,roughness:0.12,metalness:1.0,envMap:scene.environment||null,envMapIntensity:1.5});
+    const inoxBrushed=new THREE.MeshStandardMaterial({color:0xdde4ea,roughness:0.22,metalness:0.98,envMap:scene.environment||null,envMapIntensity:1.3});
+    const plexi=new THREE.MeshPhysicalMaterial({color:0xbfe6ff,roughness:0.05,metalness:0.0,transmission:0.9,transparent:true,opacity:0.4,thickness:0.4,clearcoat:1.0,clearcoatRoughness:0.05,envMap:scene.environment||null,envMapIntensity:1.2,side:THREE.DoubleSide});
+    const beltRubber=new THREE.MeshStandardMaterial({color:0x2b2f36,roughness:0.55,metalness:0.3});
+
+    // --- PERCORSO A U del nastro ---
+    const mxL=1.3, mzL=1.05;
+    const xAi=bx0+mxL, xBi=bx1-mxL;
+    const zFi=bz0+mzL, zBi=bz1-mzL;
+    const zMidi=(zFi+zBi)/2;
+    const xApexi=bx0+0.85;            // apice del fondo della U (lato corto sinistro)
+    const lpath=[
+      new THREE.Vector3(xBi,         beltY, zBi),
+      new THREE.Vector3(xAi+2.4,     beltY, zBi),
+      new THREE.Vector3(xApexi+0.5,  beltY, zBi-0.15),
+      new THREE.Vector3(xApexi,      beltY, zMidi),
+      new THREE.Vector3(xApexi+0.5,  beltY, zFi+0.15),
+      new THREE.Vector3(xAi+2.4,     beltY, zFi),
+      new THREE.Vector3(xBi,         beltY, zFi),
+    ];
+    const lcurve=new THREE.CatmullRomCurve3(lpath,false,'catmullrom',0.5);
+    const LSAMP=600;
+    const lpts=lcurve.getSpacedPoints(LSAMP);
+    const ltans=[];
+    for(let i=0;i<=LSAMP;i++){
+      const a=lpts[Math.max(0,i-1)], b=lpts[Math.min(LSAMP,i+1)];
+      ltans.push(new THREE.Vector3(b.x-a.x,0,b.z-a.z).normalize());
+    }
+    function lsample(u){
+      u=Math.max(0,Math.min(0.99999,u));
+      const f=u*LSAMP; const i=Math.floor(f); const fr=f-i;
+      const a=lpts[i], b=lpts[Math.min(LSAMP,i+1)];
+      return {p:new THREE.Vector3(a.x+(b.x-a.x)*fr,a.y+(b.y-a.y)*fr,a.z+(b.z-a.z)*fr), tan:ltans[i]};
+    }
+    const up=new THREE.Vector3(0,1,0), _n=new THREE.Vector3();
+    function perpAt(u){ const s=lsample(u); _n.crossVectors(s.tan,up).normalize(); return _n.clone(); }
+
+    // Il NASTRO FISICO finisce prima della fine della U: l'ultimo tratto è "tagliato"
+    // e al suo posto stanno i bancali (pallettizzazione). U con lato finale aperto.
+    const BELT_END=0.84;             // il nastro si ferma qui (~2m prima della fine)
+
+    // --- NASTRO TRASPORTATORE che segue la U fino a BELT_END (alta suddivisione) ---
+    const SEG=140;
+    for(let i=0;i<SEG;i++){
+      const u=i/SEG, un=(i+1)/SEG;
+      if(un>BELT_END) break;         // taglia il nastro prima dei pallet
+      const a=lsample(u).p, b=lsample(un).p;
+      const mid=a.clone().add(b).multiplyScalar(0.5);
+      const len=a.distanceTo(b)+0.02;
+      const ang=Math.atan2(b.x-a.x,b.z-a.z);
+      // piano nastro in gomma + telaio inox sotto
+      const belt=new THREE.Mesh(new THREE.BoxGeometry(0.5,0.05,len),beltRubber);
+      belt.position.set(mid.x,beltY+0.035,mid.z); belt.rotation.y=ang;
+      belt.castShadow=belt.receiveShadow=true; L.add(belt);
+      const frame=new THREE.Mesh(new THREE.BoxGeometry(0.56,0.08,len),inoxBrushed);
+      frame.position.set(mid.x,beltY-0.02,mid.z); frame.rotation.y=ang; L.add(frame);
+      // sponde inox lucide arrotondate
+      for(const dz of [-0.28,0.28]){
+        const pp=perpAt(u);
+        const rail=new THREE.Mesh(new THREE.CylinderGeometry(0.025,0.025,len,12),inox);
+        rail.rotation.x=Math.PI/2; rail.position.set(mid.x+pp.x*dz,beltY+0.11,mid.z+pp.z*dz);
+        rail.rotation.z=0; rail.rotation.y=0;
+        // orienta il cilindro lungo il segmento
+        rail.quaternion.setFromUnitVectors(new THREE.Vector3(0,1,0), new THREE.Vector3(b.x-a.x,0,b.z-a.z).normalize());
+        L.add(rail);
+      }
+    }
+    // rulli motorizzati inox visibili sotto il nastro (dettaglio)
+    for(let i=0;i<=46;i++){
+      const u=i/46; if(u>BELT_END) break;
+      const s=lsample(u); const pp=perpAt(u);
+      const roll=new THREE.Mesh(new THREE.CylinderGeometry(0.05,0.05,0.52,16),inoxDark);
+      roll.quaternion.setFromUnitVectors(new THREE.Vector3(0,1,0), pp);
+      roll.position.set(s.p.x,beltY-0.01,s.p.z); L.add(roll);
+    }
+    // gambe del telaio inox con piedini (fino al nastro)
+    for(let i=0;i<=24;i++){
+      const u=i/24; if(u>BELT_END) break;
+      const s=lsample(u);
+      const leg=new THREE.Mesh(new THREE.CylinderGeometry(0.035,0.045,beltY,16),inoxBrushed);
+      leg.position.set(s.p.x,beltY/2,s.p.z); leg.castShadow=true; L.add(leg);
+      const foot=new THREE.Mesh(new THREE.CylinderGeometry(0.07,0.07,0.03,16),inoxDark);
+      foot.position.set(s.p.x,0.015,s.p.z); L.add(foot);
+    }
+
+    // --- POSIZIONE STAZIONI come frazione u lungo la U ---
+    const SU={ empty:0.05, fill:0.22, cap:0.40, label:0.58, box:0.80, pallet:0.95 };
+
+    // helper: macchina-portale orientata lungo il nastro a una certa u (montanti tornati)
+    function portalAt(u,w,h,col){
+      const s=lsample(u); const ang=Math.atan2(s.tan.x,s.tan.z);
+      const grp=new THREE.Group();
+      const top=new THREE.Mesh(new THREE.BoxGeometry(w,0.16,0.85),col); top.position.y=h; grp.add(top);
+      // smussi superiori del traversone
+      const cap1=new THREE.Mesh(new THREE.CylinderGeometry(0.08,0.08,w,16),col);
+      cap1.rotation.z=Math.PI/2; cap1.position.set(0,h+0.06,0.40); grp.add(cap1);
+      const cap2=cap1.clone(); cap2.position.z=-0.40; grp.add(cap2);
+      const pp=new THREE.Vector3().crossVectors(s.tan,up).normalize();
+      for(const dz of [-0.40,0.40]){
+        const post=new THREE.Mesh(new THREE.CylinderGeometry(0.07,0.08,h,20),inox);
+        post.position.set(pp.x*dz,h/2,pp.z*dz); grp.add(post);
+        const base=new THREE.Mesh(new THREE.CylinderGeometry(0.11,0.11,0.05,20),inoxDark);
+        base.position.set(pp.x*dz,0.025,pp.z*dz); grp.add(base);
+      }
+      grp.position.set(s.p.x,0,s.p.z); grp.rotation.y=ang;
+      grp.traverse(o=>o.castShadow=true); return grp;
+    }
+    // cabina/box laterale a una u, spostato di `side` in perpendicolare
+    function boxAt(u,w,hh,d,side,col){
+      const s=lsample(u); const pp=new THREE.Vector3().crossVectors(s.tan,up).normalize();
+      const ang=Math.atan2(s.tan.x,s.tan.z);
+      const m=new THREE.Mesh(new THREE.BoxGeometry(w,hh,d),col||inox);
+      m.position.set(s.p.x+pp.x*side,hh/2,s.p.z+pp.z*side); m.rotation.y=ang;
+      m.castShadow=true; L.add(m); return s;
+    }
+
+    // 1) INGRESSO bottiglie vuote — cabina inox + tramoggia plexi
+    (function(){ const s=boxAt(SU.empty,0.9,1.2,1.0,-0.55,inox);
+      const hop=new THREE.Mesh(new THREE.BoxGeometry(0.7,0.35,0.7),plexi);
+      hop.position.set(s.p.x,1.35,s.p.z); L.add(hop); })();
+    // 2) RIEMPITRICE — portale inox + serbatoio plexi + carter plexi
+    L.add(portalAt(SU.fill,1.2,1.55,inox));
+    (function(){ const s=lsample(SU.fill); const pp=perpAt(SU.fill);
+      const tank=new THREE.Mesh(new THREE.CylinderGeometry(0.38,0.38,1.0,24),plexi);
+      tank.position.set(s.p.x+pp.x*-0.8,1.95,s.p.z+pp.z*-0.8); L.add(tank);
+      // ugelli inox sopra il nastro
+      for(let i=-1;i<=1;i++){
+        const noz=new THREE.Mesh(new THREE.CylinderGeometry(0.025,0.025,0.22,10),inoxDark);
+        noz.position.set(s.p.x+pp.x*i*0.18,1.25,s.p.z+pp.z*i*0.18); L.add(noz);
+      }
+      // carter di protezione plexiglass attorno alla zona
+      const guard=new THREE.Mesh(new THREE.BoxGeometry(1.0,0.9,0.04),plexi);
+      guard.position.set(s.p.x+pp.x*0.55,1.0,s.p.z+pp.z*0.55); guard.rotation.y=Math.atan2(s.tan.x,s.tan.z); L.add(guard);
+    })();
+    // 3) TAPPATRICE — portale inox compatto + testa inox
+    L.add(portalAt(SU.cap,0.9,1.5,inox));
+    (function(){ const s=lsample(SU.cap);
+      const head=new THREE.Mesh(new THREE.CylinderGeometry(0.16,0.16,0.2,20),inox);
+      head.position.set(s.p.x,1.18,s.p.z); L.add(head); })();
+    // 4) ETICHETTATRICE — modulo inox con rulli + carter plexi
+    (function(){ const s=boxAt(SU.label,0.8,1.0,0.7,0.6,inox);
+      const pp=perpAt(SU.label);
+      for(const dx of [-0.18,0.18]){
+        const roll=new THREE.Mesh(new THREE.CylinderGeometry(0.15,0.15,0.5,20),inoxDark);
+        roll.rotation.z=Math.PI/2; roll.position.set(s.p.x+pp.x*0.25,0.95,s.p.z+pp.z*0.25); L.add(roll);
+      }
+      const guard=new THREE.Mesh(new THREE.BoxGeometry(0.04,0.7,0.7),plexi);
+      guard.position.set(s.p.x+pp.x*0.1,0.95,s.p.z+pp.z*0.1); guard.rotation.y=Math.atan2(s.tan.x,s.tan.z); L.add(guard);
+    })();
+    // 5) INSCATOLATRICE — cabina inox con grande finestra plexi
+    (function(){ const s=boxAt(SU.box,1.4,1.5,1.2,-0.2,inox);
+      const win=new THREE.Mesh(new THREE.BoxGeometry(0.9,0.7,0.03),plexi);
+      const pp=perpAt(SU.box);
+      win.position.set(s.p.x+pp.x*0.6,0.95,s.p.z+pp.z*0.6); win.rotation.y=Math.atan2(s.tan.x,s.tan.z); L.add(win); })();
+
+    // --- BOTTIGLIE animate lungo la U ---
+    function makeBottle(){
+      const b=new THREE.Group();
+      const body=new THREE.Mesh(new THREE.CylinderGeometry(0.075,0.075,0.26,14),M.lineGlass.clone());
+      body.position.y=0.13; b.add(body);
+      const sh=new THREE.Mesh(new THREE.CylinderGeometry(0.04,0.075,0.07,14),M.lineGlass.clone());
+      sh.position.y=0.295; b.add(sh);
+      const neck=new THREE.Mesh(new THREE.CylinderGeometry(0.028,0.028,0.06,10),M.lineGlass.clone());
+      neck.position.y=0.355; b.add(neck);
+      const liq=new THREE.Mesh(new THREE.CylinderGeometry(0.066,0.066,0.24,14),
+        new THREE.MeshStandardMaterial({color:0xffa53c,roughness:.3,metalness:.1,transparent:true,opacity:.85,emissive:0x3a2200,emissiveIntensity:.3}));
+      liq.position.y=0.12; liq.scale.y=0.001; b.add(liq);
+      const cap=new THREE.Mesh(new THREE.CylinderGeometry(0.03,0.03,0.04,10),
+        new THREE.MeshStandardMaterial({color:0x222831,roughness:.5,metalness:.4}));
+      cap.position.y=0.40; cap.visible=false; b.add(cap);
+      const lab=new THREE.Mesh(new THREE.CylinderGeometry(0.0765,0.0765,0.12,14,1,true),
+        new THREE.MeshStandardMaterial({color:0xf2efe6,roughness:.85,side:THREE.DoubleSide}));
+      lab.position.y=0.12; lab.visible=false; b.add(lab);
+      b.userData={liq,cap,lab};
+      b.traverse(o=>{if(o.isMesh)o.castShadow=true;});
+      return b;
+    }
+    const NB=16, bottles=[];
+    for(let i=0;i<NB;i++){ const b=makeBottle(); b.userData.u=i/NB; L.add(b); bottles.push(b); }
+
+    // --- BANCALE EPAL finito DOVE FINISCE LA U (uno solo) ---
+    (function(){
+      const sEnd=lsample(BELT_END);
+      const sP1 =lsample(0.93);
+      const p1=buildBancale({scatolePiene:30, pzPerScatola:12, tipoTappo:'tappo', maxH:1.6});
+      p1.position.set(sP1.p.x, 0, sP1.p.z); p1.rotation.y=Math.atan2(sP1.tan.x,sP1.tan.z); L.add(p1);
+      // rulliera di scarico inox tra fine nastro e pallet
+      const a=sEnd.p, b=sP1.p; const mid=a.clone().add(b).multiplyScalar(0.5);
+      const len=a.distanceTo(b);
+      const roll=new THREE.Mesh(new THREE.BoxGeometry(0.5,0.06,len),inoxBrushed);
+      roll.position.set(mid.x,beltY,mid.z); roll.rotation.y=Math.atan2(b.x-a.x,b.z-a.z); L.add(roll);
+      // rulli inox sulla rulliera
+      const n=Math.max(2,Math.floor(len/0.18));
+      for(let i=0;i<=n;i++){
+        const tt=i/n; const px=a.x+(b.x-a.x)*tt, pz=a.z+(b.z-a.z)*tt;
+        const pp=perpAt(BELT_END);
+        const rr=new THREE.Mesh(new THREE.CylinderGeometry(0.04,0.04,0.5,14),inoxDark);
+        rr.quaternion.setFromUnitVectors(new THREE.Vector3(0,1,0), pp);
+        rr.position.set(px,beltY+0.03,pz); L.add(rr);
+      }
+    })();
+    // scatola in uscita verso il pallet (animata)
+    const outBox=new THREE.Mesh(new THREE.BoxGeometry(0.4,0.28,0.46),M.box);
+    outBox.castShadow=true; L.add(outBox);
+
+    // --- OPERAI: MAX 2 ---
+    function makeWorker(x,z,rotY,shirt){
+      const w=new THREE.Group();
+      const matBody=new THREE.MeshStandardMaterial({color:shirt,roughness:.75});
+      const matVest=new THREE.MeshStandardMaterial({color:0xf5d020,roughness:.6,emissive:0x4a3a00,emissiveIntensity:.25}); // gilet alta visibilità
+      const matSkin=new THREE.MeshStandardMaterial({color:0xe0aa78,roughness:.65});
+      const matLeg =new THREE.MeshStandardMaterial({color:0x2b3550,roughness:.85});
+      const matHat =new THREE.MeshStandardMaterial({color:0xf2b500,roughness:.45,metalness:.1});
+      const matShoe=new THREE.MeshStandardMaterial({color:0x1a1d22,roughness:.6});
+      const matRefl=new THREE.MeshStandardMaterial({color:0xdfe6ee,roughness:.3,metalness:.2,emissive:0x556070,emissiveIntensity:.3}); // bande rifrangenti
+
+      // --- BACINO + GAMBE (due segmenti con scarpe) ---
+      const hips=new THREE.Mesh(new THREE.CylinderGeometry(0.14,0.13,0.18,16),matLeg);
+      hips.position.y=0.86; w.add(hips);
+      const legRefs=[];
+      for(const sgn of [-1,1]){
+        const thigh=new THREE.Mesh(new THREE.CylinderGeometry(0.07,0.06,0.44,12),matLeg);
+        thigh.position.set(sgn*0.075,0.6,0); w.add(thigh);
+        const shin=new THREE.Mesh(new THREE.CylinderGeometry(0.055,0.045,0.42,12),matLeg);
+        shin.position.set(sgn*0.075,0.2,0.01); w.add(shin);
+        const shoe=new THREE.Mesh(new THREE.BoxGeometry(0.10,0.07,0.22),matShoe);
+        shoe.position.set(sgn*0.075,0.035,0.04); w.add(shoe);
+        legRefs.push(thigh);
+      }
+      // --- BUSTO affusolato + gilet ---
+      const torso=new THREE.Mesh(new THREE.CylinderGeometry(0.17,0.15,0.5,16),matBody);
+      torso.position.y=1.18; w.add(torso);
+      const vest=new THREE.Mesh(new THREE.CylinderGeometry(0.185,0.165,0.42,16,1,true),matVest);
+      vest.position.y=1.20; w.add(vest);
+      // bande rifrangenti orizzontali sul gilet
+      for(const yy of [1.10,1.28]){
+        const band=new THREE.Mesh(new THREE.CylinderGeometry(0.188,0.188,0.035,16,1,true),matRefl);
+        band.position.y=yy; w.add(band);
+      }
+      // spalle arrotondate
+      const shoulders=new THREE.Mesh(new THREE.SphereGeometry(0.17,16,10),matBody);
+      shoulders.scale.set(1.0,0.5,0.8); shoulders.position.y=1.42; w.add(shoulders);
+      // --- COLLO + TESTA + ELMETTO con visiera ---
+      const neck=new THREE.Mesh(new THREE.CylinderGeometry(0.05,0.06,0.08,12),matSkin);
+      neck.position.y=1.5; w.add(neck);
+      const head=new THREE.Mesh(new THREE.SphereGeometry(0.12,20,16),matSkin);
+      head.scale.set(0.95,1.05,0.95); head.position.y=1.62; w.add(head);
+      const hat=new THREE.Mesh(new THREE.SphereGeometry(0.135,20,10,0,Math.PI*2,0,Math.PI*0.55),matHat);
+      hat.position.y=1.66; w.add(hat);
+      const brim=new THREE.Mesh(new THREE.CylinderGeometry(0.145,0.145,0.02,20),matHat);
+      brim.position.set(0,1.655,0.04); w.add(brim);
+      // --- BRACCIA a due segmenti (spalla + avambraccio + mano) ---
+      const armRefs=[];
+      for(const sgn of [-1,1]){
+        const upper=new THREE.Mesh(new THREE.CylinderGeometry(0.05,0.045,0.34,12),matBody);
+        upper.position.set(sgn*0.21,1.28,0.03); upper.rotation.x=-0.35; w.add(upper);
+        const fore=new THREE.Mesh(new THREE.CylinderGeometry(0.042,0.038,0.32,12),matSkin);
+        fore.position.set(sgn*0.23,1.02,0.16); fore.rotation.x=-0.7; w.add(fore);
+        const hand=new THREE.Mesh(new THREE.SphereGeometry(0.05,12,10),matSkin);
+        hand.position.set(sgn*0.24,0.9,0.26); w.add(hand);
+        armRefs.push(upper);
+      }
+      w.position.set(x,0,z); w.rotation.y=rotY;
+      w.traverse(o=>{if(o.isMesh){o.castShadow=true;o.receiveShadow=true;}});
+      w.userData={arms:armRefs,legs:legRefs};
+      return w;
+    }
+    // 2 operai: uno alla riempitrice/tappatura, uno all'inscatolamento, sul lato interno della U
+    const wA=lsample(SU.cap),  ppA=perpAt(SU.cap);
+    const wB=lsample(SU.box),  ppB=perpAt(SU.box);
+    const workers=[
+      makeWorker(wA.p.x+ppA.x*0.95, wA.p.z+ppA.z*0.95, Math.atan2(-ppA.x,-ppA.z), 0x2f6fd0),
+      makeWorker(wB.p.x+ppB.x*0.95, wB.p.z+ppB.z*0.95, Math.atan2(-ppB.x,-ppB.z), 0xd0552f),
+    ];
+    workers.forEach(w=>L.add(w));
+
+    scene.add(L);
+
+    // --- ANIMAZIONE linea ---
+    window.__lineUpdate=function(now){
+      const t=now*0.001;
+      const spd=0.030;
+      for(const b of bottles){
+        let u=(b.userData.u + t*spd)%1;
+        const s=lsample(u);
+        b.position.set(s.p.x,beltY+0.05,s.p.z);
+        const ud=b.userData;
+        if(u<SU.fill){ ud.liq.scale.y=0.001; ud.cap.visible=false; ud.lab.visible=false; }
+        else if(u<SU.fill+0.05){ const k=(u-SU.fill)/0.05; ud.liq.scale.y=Math.max(0.001,k); ud.liq.position.y=0.12*k+0.005; }
+        else { ud.liq.scale.y=1; ud.liq.position.y=0.12; }
+        ud.cap.visible=(u>SU.cap);
+        ud.lab.visible=(u>SU.label);
+        b.position.y += Math.sin(t*12+u*40)*0.004;
+        b.visible=(u<SU.box);
+      }
+      const bt=(t*0.25)%1;
+      const sb=lsample(SU.box), sp=lsample(0.93);
+      outBox.visible=bt<0.85;
+      outBox.position.set(sb.p.x+(sp.p.x-sb.p.x)*bt, beltY+0.05+Math.sin(bt*Math.PI)*0.15, sb.p.z+(sp.p.z-sb.p.z)*bt);
+      workers.forEach((w,i)=>{
+        w.position.y=Math.sin(t*1.5+i)*0.01;
+        w.userData.arms.forEach((a,j)=>{ a.rotation.x=-0.5+Math.sin(t*2.2+i+j)*0.25; });
+      });
+    };
+  })();
+
   /* ===== FLUSSO A U SOSPESO — LIQUIDO IN ASSENZA DI GRAVITÀ =====
      Massa liquida coesa sospesa in aria lungo la U, che ondeggia morbida come
      in zero-g e scorre a senso unico ORARIO lungo il percorso. */
@@ -941,128 +1300,89 @@ const CARTELLO_COLORI={
       return {p:new THREE.Vector3(a.x+(b.x-a.x)*fr,a.y+(b.y-a.y)*fr,a.z+(b.z-a.z)*fr), tan:tans[i]};
     }
 
-    // 1) CORPO LIQUIDO: tube spesso, semi-trasparente, look fluido/glass.
-    //    Sfumatura alle estremità via vertex-color (additive → bordi che svaniscono).
-    function fadeTubeEnds(geo, segs, fadeFrac){
-      const cnt=geo.attributes.position.count;
-      const radSeg = cnt/(segs+1);             // vertici per anello
-      const colors=new Float32Array(cnt*3);
-      for(let i=0;i<cnt;i++){
-        const ring=Math.floor(i/radSeg);
-        const u=ring/segs;                      // 0..1 lungo il tubo
-        let e=1;
-        if(u<fadeFrac) e=u/fadeFrac;
-        else if(u>1-fadeFrac) e=(1-u)/fadeFrac;
-        e=Math.max(0,e); e=e*e*(3-2*e);
-        colors[i*3]=e; colors[i*3+1]=e; colors[i*3+2]=e;
+    // ===== ILLUMINAZIONE CINEMATICA della linea (solo luce, niente tubo) =====
+    // Una serie di luci reali distribuite lungo la U proietta un bagliore morbido
+    // arancio↔viola sui macchinari inox e sul pavimento (look ray-traced grazie al PBR).
+    const U_START=0.05, U_END=0.86;
+    const NL=9;                                  // numero di luci lungo il percorso
+    const lineLights=[];
+    for(let i=0;i<NL;i++){
+      const u=U_START+(U_END-U_START)*(i/(NL-1));
+      const s=sampleAt(u);
+      const lt=new THREE.PointLight(0xff8a3c, 0, 6.5, 1.6);  // raggio ampio, decadimento dolce
+      lt.position.set(s.p.x, 1.05, s.p.z);       // appena sopra il nastro
+      lt.userData={u};
+      g.add(lt); lineLights.push(lt);
+    }
+    // emettitori luminosi VOLUMETRICI (sfere emissive 3D) con alone multi-strato
+    // additivo: l'additive blending NON viene compresso dal tone mapping ACES,
+    // quindi il bagliore resta brillante e visibile (look ray-traced).
+    const emitGroup=new THREE.Group();
+    const emitMeshes=[];
+    const emitGeoS=new THREE.SphereGeometry(0.08,18,14);
+    for(let i=0;i<NL;i++){
+      const lt=lineLights[i];
+      const m=new THREE.MeshStandardMaterial({color:0xfff0e0,emissive:0xff8a3c,emissiveIntensity:3.0,roughness:0.25,metalness:0});
+      const sp=new THREE.Mesh(emitGeoS,m);
+      sp.position.copy(lt.position); sp.userData={u:lt.userData.u,mat:m,halos:[]};
+      // 3 aloni additivi concentrici di dimensione crescente → glow morbido e ampio
+      const sizes=[0.22,0.42,0.75], ops=[0.45,0.22,0.10];
+      for(let h=0;h<3;h++){
+        const halo=new THREE.Mesh(new THREE.SphereGeometry(sizes[h],18,14),
+          new THREE.MeshBasicMaterial({color:0xffa860,transparent:true,opacity:ops[h],blending:THREE.AdditiveBlending,depthWrite:false}));
+        halo.userData={baseOp:ops[h]};
+        sp.add(halo); sp.userData.halos.push(halo);
       }
-      geo.setAttribute('color',new THREE.BufferAttribute(colors,3));
+      emitGroup.add(sp); emitMeshes.push(sp);
     }
-    const tubeGeo=new THREE.TubeGeometry(curve,360,0.16,16,false);
-    fadeTubeEnds(tubeGeo,360,0.16);
-    const tube=new THREE.Mesh(
-      tubeGeo,
-      new THREE.MeshBasicMaterial({color:0xff7a3c,transparent:true,opacity:0.22,blending:THREE.AdditiveBlending,depthWrite:false,vertexColors:true})
-    );
-    tube.renderOrder=4; g.add(tube);
-    // alone esterno morbido (bordo del liquido che sfuma)
-    const glowGeo=new THREE.TubeGeometry(curve,360,0.24,16,false);
-    fadeTubeEnds(glowGeo,360,0.18);
-    const tubeGlow=new THREE.Mesh(
-      glowGeo,
-      new THREE.MeshBasicMaterial({color:0xa05cff,transparent:true,opacity:0.08,blending:THREE.AdditiveBlending,depthWrite:false,vertexColors:true})
-    );
-    tubeGlow.renderOrder=3; g.add(tubeGlow);
-
-    // 2) texture goccia: nucleo morbido bianco-caldo (il colore viene dai vertici)
-    const pc=document.createElement('canvas'); pc.width=pc.height=64;
-    const pcx=pc.getContext('2d');
-    const rg=pcx.createRadialGradient(32,32,0,32,32,32);
-    rg.addColorStop(0,'rgba(255,250,245,1)');
-    rg.addColorStop(0.4,'rgba(255,235,220,0.7)');
-    rg.addColorStop(1,'rgba(255,220,200,0)');
-    pcx.fillStyle=rg; pcx.beginPath(); pcx.arc(32,32,32,0,Math.PI*2); pcx.fill();
-    const ptex=new THREE.CanvasTexture(pc); ptex.colorSpace=THREE.SRGBColorSpace;
-
-    // 3) PARTICELLE LIQUIDE: riempiono il volume del tubo, distribuite sull'intera U.
-    //    Ogni particella ha una posizione lungo il path (u0) + offset radiale nella
-    //    sezione (raggio, angolo). Tutte scorrono insieme in senso ORARIO.
-    const N=900;
-    const pg=new THREE.BufferGeometry();
-    const pos=new Float32Array(N*3);
-    const col=new Float32Array(N*3);
-    pg.setAttribute('position',new THREE.BufferAttribute(pos,3));
-    pg.setAttribute('color',new THREE.BufferAttribute(col,3));
-    const pMat=new THREE.PointsMaterial({
-      size:0.30, map:ptex, transparent:true, opacity:0.9,
-      blending:THREE.AdditiveBlending, depthWrite:false, depthTest:true,
-      sizeAttenuation:true, vertexColors:true
-    });
-    const points=new THREE.Points(pg,pMat);
-    points.renderOrder=6; g.add(points);
-    // parametri per-particella
-    const u0=new Float32Array(N);     // posizione base lungo il path
-    const rad=new Float32Array(N);    // raggio nella sezione del tubo
-    const ang=new Float32Array(N);    // angolo nella sezione
-    const wob=new Float32Array(N);    // fase di ondeggiamento individuale
-    for(let i=0;i<N;i++){
-      u0[i]=Math.random();
-      rad[i]=Math.pow(Math.random(),0.6)*0.15;   // distribuzione verso il bordo per dare corpo
-      ang[i]=Math.random()*Math.PI*2;
-      wob[i]=Math.random()*Math.PI*2;
-    }
-    const up=new THREE.Vector3(0,1,0);
-    const _n=new THREE.Vector3(), _b=new THREE.Vector3();
+    emitGroup.renderOrder=7; g.add(emitGroup);
 
     // updater globale agganciato nel tick principale
+    // la linea è ACCESA dal lunedì al venerdì, dalle 8:00 alle 18:00.
+    // fuori orario le luci e gli emettitori si spengono (con dissolvenza morbida).
+    // Override manuale: window.__lineForceOn = true|false per forzare acceso/spento.
+    // null = segui l'orario reale (lun–ven 8–18). Default true per demo/anteprima:
+    // per usare l'orario reale in produzione impostare a null.
+    window.__lineForceOn = true;
+    function lineOn(){
+      if(window.__lineForceOn===true) return true;
+      if(window.__lineForceOn===false) return false;
+      const d=new Date();
+      const day=d.getDay();                 // 0=domenica … 6=sabato
+      const h=d.getHours()+d.getMinutes()/60;
+      return (day>=1 && day<=5) && (h>=8 && h<18);
+    }
+    let __onFactor=0;                        // 0=spenta, 1=accesa (interpolata)
     window.__uFlowUpdate=function(now){
       const t=now*0.001;
-      // scorrimento ORARIO, più LENTO e cinematico; respira ma mai inverte
-      const flow=(0.0085 + 0.0022*Math.sin(t*0.22))*t; // avanzamento cumulativo monotono
-      const posArr=pg.attributes.position.array;
-      const colArr=pg.attributes.color.array;
-      // palette: arancione caldo ↔ viola
-      // ORANGE rgb(255,138,60) ~ (1.0,0.54,0.24) | VIOLET rgb(150,70,255) ~ (0.59,0.27,1.0)
-      for(let i=0;i<N;i++){
-        const u=(u0[i] + flow)%1;
-        const sm=sampleAt(u);
-        const p=sm.p, tan=sm.tan;
-        _n.crossVectors(tan,up).normalize();
-        _b.crossVectors(tan,_n).normalize();
-        // ondeggiamento zero-g più ricco: due onde sfasate + rotazione lenta → mai uguale
-        const swell=1 + 0.30*Math.sin(u*Math.PI*4 - t*0.55 + wob[i]*0.2)
-                      + 0.18*Math.sin(u*Math.PI*9 + t*0.33 + wob[i]);
-        const r = rad[i]*swell + 0.022*Math.sin(t*0.45 + wob[i]);
-        const a = ang[i] + 0.22*Math.sin(t*0.32 + wob[i]) + u*0.7 + 0.15*Math.sin(t*0.18+u*6);
-        const ox=Math.cos(a)*r, oy=Math.sin(a)*r;
-        posArr[i*3+0]=p.x + _n.x*ox + _b.x*oy;
-        posArr[i*3+1]=p.y + _n.y*ox + _b.y*oy + 0.035*Math.sin(t*0.4 + wob[i]);
-        posArr[i*3+2]=p.z + _n.z*ox + _b.z*oy;
-        // COLORE arancio↔viola: mix che varia lungo il path e nel tempo, mai uniforme
-        const mix=0.5+0.5*Math.sin(u*Math.PI*3 - t*0.35 + wob[i]*0.6);
-        const core=1 - Math.min(1, r/0.18);     // centro più chiaro/caldo
-        // SFUMATURA ALLE ESTREMITÀ: il liquido svanisce dolcemente vicino a u=0 e u=1
-        // (additive blending → moltiplicare il colore verso 0 = dissolvenza morbida)
-        const FADE=0.14;                         // ampiezza zona di sfumatura
-        let edge=1;
-        if(u<FADE)      edge=u/FADE;
-        else if(u>1-FADE) edge=(1-u)/FADE;
-        edge=edge*edge*(3-2*edge);               // smoothstep per transizione morbida
-        const R=(1.00*(1-mix)+0.59*mix);
-        const G=(0.54*(1-mix)+0.27*mix);
-        const B=(0.24*(1-mix)+1.00*mix);
-        colArr[i*3+0]=(R + core*0.25)*edge;
-        colArr[i*3+1]=(G + core*0.20)*edge;
-        colArr[i*3+2]=(B + core*0.10)*edge;
+      // interpolazione morbida verso lo stato orario (accensione/spegnimento graduale)
+      const target=lineOn()?1:0;
+      __onFactor += (target-__onFactor)*0.04;
+      const on=__onFactor;
+      // tinta globale che scivola lentamente arancio↔viola
+      const gm=0.5+0.5*Math.sin(t*0.22);
+      const cr=1.00*(1-gm)+0.62*gm, cg=0.55*(1-gm)+0.30*gm, cb=0.28*(1-gm)+1.00*gm;
+      // luci reali: ogni punto pulsa con un'onda che scorre lungo la U (bagliore ray-traced)
+      for(const lt of lineLights){
+        const u=lt.userData.u;
+        const wave=0.5+0.5*Math.sin(u*Math.PI*3 - t*1.1);   // impulso che viaggia
+        lt.color.setRGB(cr,cg,cb);
+        lt.intensity=(3.5 + wave*5.0)*on;                     // bagliore più intenso
       }
-      pg.attributes.position.needsUpdate=true;
-      pg.attributes.color.needsUpdate=true;
-      // il corpo liquido cambia tinta lentamente arancio↔viola e respira
-      const gm=0.5+0.5*Math.sin(t*0.25);
-      tube.material.color.setRGB(1.00*(1-gm)+0.59*gm, 0.48*(1-gm)+0.27*gm, 0.24*(1-gm)+1.00*gm);
-      tubeGlow.material.color.setRGB(1.00*(1-gm)+0.63*gm, 0.55*(1-gm)+0.36*gm, 0.30*(1-gm)+1.00*gm);
-      tube.material.opacity=0.20+0.05*Math.sin(t*0.4);
-      tubeGlow.material.opacity=0.06+0.03*Math.sin(t*0.4+1.0);
+      // sfere emissive 3D: stesso impulso, colore e glow sincronizzati
+      for(const sp of emitMeshes){
+        const u=sp.userData.u;
+        const wave=0.5+0.5*Math.sin(u*Math.PI*3 - t*1.1);
+        sp.userData.mat.emissive.setRGB(cr,cg,cb);
+        sp.userData.mat.emissiveIntensity=(3.0+wave*4.5)*on;
+        const sc=0.9+wave*0.6;
+        for(const halo of sp.userData.halos){
+          halo.material.color.setRGB(cr,cg,cb);
+          halo.material.opacity=halo.userData.baseOp*(0.6+wave*0.9)*on;
+          halo.scale.setScalar(sc);
+        }
+      }
+      emitGroup.visible = on>0.01;
     };
   })();
 })();
@@ -1601,7 +1921,7 @@ function buildRackBoxes(){
   return boxes;
 }
 // se (x,z) cade dentro un box scaffale (a una certa quota y), spinge fuori dal lato più vicino.
-const RACK_MARGIN=0.7;      // distanza minima dagli scaffali
+const RACK_MARGIN=0.95;      // distanza minima dagli scaffali (margine di sicurezza camera)
 // zona tecnica dietro il cartongesso (angolo fondo-destra nel mondo): la camera non deve entrarci
 const CARTON_ZONE={ x0:5.0, x1:LX/2, z0:-LZ/2, z1:-3.7 };
 function pushOutOfRacks(x,y,z){
@@ -1672,6 +1992,26 @@ function buildScenes(){
   scenes.push({ dur:rnd(22000,26000),
     from:{tx:0, ty:4.5, tz:2, r:portrait?13:36, theta:Math.PI*0.22, phi:Math.PI*0.30},
     to:  {tx:0, ty:3.0, tz:1, r:portrait?10:30, theta:Math.PI*0.12, phi:midPhi} });
+
+  // 6) SCENA CINEMATICA SULLA LINEA DI PRODUZIONE (zona blu, angolo muro fronte)
+  //    camera bassa che percorre la linea a U. Raggi contenuti e target sulla zona
+  //    linea: la camera resta nell'angolo muro-fronte, lontana dalle scaffalature.
+  {
+    const lineCx=-LX/2+7.5;          // centro X della zona linea (15m da bx0)
+    const lineCz= LZ/2-1.9;          // verso il muro fronte (profondità zona)
+    // ingresso: dolly laterale lungo la linea, camera bassa e ravvicinata
+    scenes.push({ dur:rnd(22000,26000),
+      from:{tx:lineCx+5.0, ty:1.5, tz:lineCz, r:portrait?5.0:6.0, theta:Math.PI*0.52, phi:Math.PI*0.06},
+      to:  {tx:lineCx-5.0, ty:1.7, tz:lineCz, r:portrait?5.2:6.2, theta:Math.PI*0.60, phi:Math.PI*0.08} });
+    // 6b) carrellata di ritorno leggermente più alta che scopre la U e il pallet
+    scenes.push({ dur:rnd(20000,24000),
+      from:{tx:lineCx-4.0, ty:2.1, tz:lineCz, r:portrait?5.8:7.0, theta:Math.PI*0.62, phi:Math.PI*0.16},
+      to:  {tx:lineCx+4.0, ty:2.4, tz:lineCz, r:portrait?6.0:7.3, theta:Math.PI*0.50, phi:Math.PI*0.19} });
+    // 6c) dettaglio ravvicinato sulle stazioni centrali (riempimento/tappatura)
+    scenes.push({ dur:rnd(18000,22000),
+      from:{tx:lineCx-1.0, ty:1.3, tz:lineCz, r:portrait?3.8:4.8, theta:Math.PI*0.56, phi:Math.PI*0.05},
+      to:  {tx:lineCx+1.5, ty:1.5, tz:lineCz, r:portrait?4.0:5.0, theta:Math.PI*0.62, phi:Math.PI*0.09} });
+  }
 
   return scenes;
 }
@@ -2001,6 +2341,7 @@ function clampCameraXZ(x,z){
 function tick(now){
   perfWatch(now);
   if(window.__uFlowUpdate) window.__uFlowUpdate(now);
+  if(window.__lineUpdate) window.__lineUpdate(now);
   updateTour(now);
   updateIdle(now);
   updateCockpit(now);
