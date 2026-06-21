@@ -1776,6 +1776,14 @@ function clearHighlight(){
    Riproduce audio reale (non la voce robotica del browser). Fallback a speechSynthesis
    solo se il TTS cloud non è raggiungibile. */
 const TTS_ELEVEN_PROXY_URL = "https://us-central1-tabellone-produzione-liv-e313e.cloudfunctions.net/ttsEleven";
+let _fbAuth = null;   // riferimento all'auth Firebase (impostato dopo l'init) per autenticare il TTS
+async function _ttsAuthToken(){
+  try{
+    const u = _fbAuth && _fbAuth.currentUser;
+    if(u && u.getIdToken) return await u.getIdToken();
+  }catch(_){}
+  return "";
+}
 const Voce = (function(){
   let abilitata = true;
   let audio = null;            // elemento <audio> riutilizzato
@@ -1820,8 +1828,11 @@ const Voce = (function(){
       if(abort) try{ abort.abort(); }catch(_){}
       abort = new AbortController();
       const to = setTimeout(()=>{ try{abort.abort();}catch(_){} }, 8000);
+      const headers={"Content-Type":"application/json"};
+      const tok = await _ttsAuthToken();
+      if(tok) headers["Authorization"]="Bearer "+tok;   // autentica la Cloud Function (evita 401)
       const res = await fetch(TTS_ELEVEN_PROXY_URL, {
-        method:"POST", headers:{"Content-Type":"application/json"},
+        method:"POST", headers,
         body: JSON.stringify({ text, language:"it-IT", lang:"it-IT", voice:"female",
           voiceGender:"female", style:"natural", source:"kiosk_capannone3d" }),
         signal: abort.signal, cache:"no-store"
@@ -3547,6 +3558,7 @@ initKioskSettingsUi();
 
     // --- AUTH come app_tabellone: persistenza locale + anonimo dentro onAuthStateChanged ---
     const auth = authMod.getAuth(app);
+    _fbAuth = auth;                      // reso disponibile alla voce per autenticare il TTS
     try{ await authMod.setPersistence(auth, authMod.browserLocalPersistence); }catch(_){}
 
     let realtimeStarted = false;
