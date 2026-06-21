@@ -2067,6 +2067,19 @@ function aggiornaPrelievi(){
   PRELIEVI = calcolaPrelievi();
   // annuncio vocale discreto se sono entrati nuovi ordini FBA/FBM (edge-trigger, non invasivo)
   try{ const o=_contaOrdini(); if(typeof Annunci!=='undefined') Annunci.onOrders(o.fba, o.fbm); }catch(_){}
+  // conteggio animato SOLO quando arriva un nuovo ordine (il totale aumenta) e la didascalia è visibile
+  try{
+    const o=_contaOrdini();
+    const aumentato = (_lastFba!==null && o.fba>_lastFba) || (_lastFbm!==null && o.fbm>_lastFbm);
+    if(_cockpitOn && _ckPage==='azienda'){
+      renderCockpitOrders({animate: aumentato});   // anima se è cresciuto, altrimenti aggiorna fisso
+    } else {
+      // pagina non visibile: aggiorno solo i valori memorizzati, niente animazione
+      _lastFba=o.fba; _lastFbm=o.fbm;
+      const box=document.getElementById('ckOrders');
+      if(box) box.hidden=(o.fba+o.fbm)===0;
+    }
+  }catch(_){}
   // se c'è una selezione/tour utente in corso, non sovrascrivo: aggiorno solo i dati
   if(selectedVano || tour) { return; }
   applicaPrelievoGlow();
@@ -2557,6 +2570,8 @@ function _animaConteggio(el, to, opts={}){
   };
   el._countRAF=requestAnimationFrame(step);
 }
+// memoria ultimi valori mostrati nella didascalia azienda (per animare solo i cambiamenti reali)
+let _lastFba=null, _lastFbm=null, _contatoreMaiMostrato=true;
 function renderCockpitOrders(opts={}){
   const box=document.getElementById('ckOrders'); if(!box) return;
   const {fba, fbm}=_contaOrdini();
@@ -2565,12 +2580,23 @@ function renderCockpitOrders(opts={}){
   if(box.hidden){
     if(nf){ if(nf._countRAF) cancelAnimationFrame(nf._countRAF); nf._countRAF=0; nf.textContent='0'; }
     if(nm){ if(nm._countRAF) cancelAnimationFrame(nm._countRAF); nm._countRAF=0; nm.textContent='0'; }
+    _lastFba=fba; _lastFbm=fbm;
     return;
   }
-  // all'ingresso pagina (reset=true) parte da 0; in aggiornamento live parte dal valore mostrato
-  const from0 = opts.reset ? 0 : undefined;
-  _animaConteggio(nf, fba, {from: from0});
-  _animaConteggio(nm, fbm, {from: from0});
+  // decido se animare:
+  //  - opts.animate === true  → forza l'animazione (primo avvio o nuovo ordine)
+  //  - altrimenti aggiorna il testo senza animare (es. quando la pagina ricompare nella rotazione)
+  const animate = opts.animate === true;
+  if(animate){
+    // al primissimo avvio i numeri salgono da 0; sui nuovi ordini partono dal valore precedente
+    const base0 = (_lastFba===null && _lastFbm===null);
+    _animaConteggio(nf, fba, base0 ? {from:0} : {from: _lastFba ?? 0});
+    _animaConteggio(nm, fbm, base0 ? {from:0} : {from: _lastFbm ?? 0});
+  } else {
+    if(nf){ if(nf._countRAF){cancelAnimationFrame(nf._countRAF);nf._countRAF=0;} nf.textContent=String(fba); }
+    if(nm){ if(nm._countRAF){cancelAnimationFrame(nm._countRAF);nm._countRAF=0;} nm.textContent=String(fbm); }
+  }
+  _lastFba=fba; _lastFbm=fbm;
 }
 
 /* ===== ANNUNCI VOCALI (ElevenLabs via Voce) — discreti e non invasivi =====
@@ -2740,7 +2766,12 @@ function setCockpitPage(p){
   const isAmz = (p==='fba'||p==='fbm');
   if(isAmz){ _ckAmzSig=''; renderAmazonPrep(p); }
   if(p==='ordini'){ _ckOrdiniSig=''; renderOrdiniPage(); }
-  if(p==='azienda'){ renderCockpitOrders({reset:true}); }
+  if(p==='azienda'){
+    // alla prima comparsa in assoluto i numeri salgono da 0; nelle ricomparse restano fissi
+    const primaVolta = _contatoreMaiMostrato;
+    _contatoreMaiMostrato=false;
+    renderCockpitOrders({animate: primaVolta});
+  }
   // cross-fade: attivo solo l'opacità della pagina scelta (le pagine restano sovrapposte)
   if(az) az.classList.toggle('ck-active', p==='azienda');
   if(or) or.classList.toggle('ck-active', p==='ordini');
@@ -2780,7 +2811,6 @@ function updateCockpit(now){
       const cl=document.getElementById('ckClock'); if(cl) cl.textContent=`${hh}:${mm}`;
       const dt=document.getElementById('ckDate');
       if(dt) dt.textContent=d.toLocaleDateString('it-IT',{weekday:'long',day:'numeric',month:'long'});
-      renderCockpitOrders();
     }
     // se una lista prelievi è visibile, tienila aggiornata in tempo reale
     if(_ckPage==='fba'||_ckPage==='fbm') renderAmazonPrep(_ckPage);
