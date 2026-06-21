@@ -1065,52 +1065,95 @@ const CARTELLO_COLORI={
       grp.traverse(o=>o.castShadow=true); return grp;
     }
     // cabina/box laterale a una u, spostato di `side` in perpendicolare
-    function boxAt(u,w,hh,d,side,col){
+    const BELT_HALF=0.28;            // semi-larghezza nastro (sponde comprese)
+    // posiziona una cabina/box A LATO del nastro: `sgn` lato (+1/-1), `gap` spazio
+    // libero tra bordo nastro e fianco macchina. Il centro è calcolato così che
+    // la macchina NON invada mai il nastro.
+    function boxAt(u,w,hh,d,sgn,gap,col){
       const s=lsample(u); const pp=new THREE.Vector3().crossVectors(s.tan,up).normalize();
       const ang=Math.atan2(s.tan.x,s.tan.z);
+      const offset=sgn*(BELT_HALF + (gap||0.12) + d/2);
       const m=new THREE.Mesh(new THREE.BoxGeometry(w,hh,d),col||inox);
-      m.position.set(s.p.x+pp.x*side,hh/2,s.p.z+pp.z*side); m.rotation.y=ang;
-      m.castShadow=true; L.add(m); return s;
+      m.position.set(s.p.x+pp.x*offset,hh/2,s.p.z+pp.z*offset); m.rotation.y=ang;
+      m.castShadow=true; L.add(m);
+      return {s,pp,offset};
     }
 
-    // 1) INGRESSO bottiglie vuote — cabina inox + tramoggia plexi
-    (function(){ const s=boxAt(SU.empty,0.9,1.2,1.0,-0.55,inox);
-      const hop=new THREE.Mesh(new THREE.BoxGeometry(0.7,0.35,0.7),plexi);
-      hop.position.set(s.p.x,1.35,s.p.z); L.add(hop); })();
+    // 1) TRAMOGGIA + ORIENTATORE bottiglie vuote
+    //    Grande tramoggia all'esterno con bottiglie alla rinfusa; il macchinario le
+    //    raddrizza e le deposita DRITTE sul nastro. Le bottiglie sul nastro partono da qui.
+    (function(){
+      const sB=lsample(SU.empty); const pp=perpAt(SU.empty);
+      const ang=Math.atan2(sB.tan.x,sB.tan.z);
+      // corpo macchinario inox (cabina dell'orientatore)
+      const m=new THREE.Mesh(new THREE.BoxGeometry(1.1,1.3,1.1),inox);
+      const mOff=BELT_HALF+0.15+0.55;
+      m.position.set(sB.p.x+pp.x*-mOff,0.65,sB.p.z+pp.z*-mOff); m.rotation.y=ang; m.castShadow=true; L.add(m);
+      // TRAMOGGIA a tronco di piramide (bin) sopra il macchinario, in plexi
+      const hop=new THREE.Mesh(new THREE.CylinderGeometry(0.62,0.30,0.55,4),plexi);
+      hop.rotation.y=Math.PI/4;
+      const hx=sB.p.x+pp.x*-mOff, hz=sB.p.z+pp.z*-mOff;
+      hop.position.set(hx,1.65,hz); L.add(hop);
+      // bordo superiore tramoggia inox
+      const rim=new THREE.Mesh(new THREE.TorusGeometry(0.6,0.03,8,4),inox);
+      rim.rotation.x=Math.PI/2; rim.rotation.z=Math.PI/4; rim.position.set(hx,1.92,hz); L.add(rim);
+      // BOTTIGLIE ALLA RINFUSA dentro la tramoggia (sdraiate, orientamenti casuali)
+      const bulkMat=new THREE.MeshStandardMaterial({color:0xf4f6f7,roughness:.5,metalness:.05});
+      for(let i=0;i<14;i++){
+        const bb=new THREE.Mesh(new THREE.CylinderGeometry(0.05,0.05,0.18,10),bulkMat);
+        const a=Math.random()*Math.PI*2, rr=Math.random()*0.32;
+        bb.position.set(hx+Math.cos(a)*rr, 1.55+Math.random()*0.18, hz+Math.sin(a)*rr);
+        bb.rotation.set(Math.random()*Math.PI,Math.random()*Math.PI,Math.random()*Math.PI);
+        bb.castShadow=true; L.add(bb);
+      }
+      // canale/scivolo di uscita inox dal macchinario verso il nastro (le raddrizza)
+      const chute=new THREE.Mesh(new THREE.BoxGeometry(mOff*0.9,0.10,0.34),inoxDark);
+      chute.position.set(sB.p.x+pp.x*-mOff*0.55,0.62,sB.p.z+pp.z*-mOff*0.55); chute.rotation.y=ang; L.add(chute);
+    })();
     // 2) RIEMPITRICE — portale inox + serbatoio plexi + carter plexi
     L.add(portalAt(SU.fill,1.2,1.55,inox));
     (function(){ const s=lsample(SU.fill); const pp=perpAt(SU.fill);
       const tank=new THREE.Mesh(new THREE.CylinderGeometry(0.38,0.38,1.0,24),plexi);
-      tank.position.set(s.p.x+pp.x*-0.8,1.95,s.p.z+pp.z*-0.8); L.add(tank);
-      // ugelli inox sopra il nastro
+      tank.position.set(s.p.x+pp.x*-1.05,1.95,s.p.z+pp.z*-1.05); L.add(tank);
+      // ugelli inox sopra il nastro (riempiono le bottiglie)
       for(let i=-1;i<=1;i++){
         const noz=new THREE.Mesh(new THREE.CylinderGeometry(0.025,0.025,0.22,10),inoxDark);
-        noz.position.set(s.p.x+pp.x*i*0.18,1.25,s.p.z+pp.z*i*0.18); L.add(noz);
+        noz.position.set(s.p.x+pp.x*i*0.12,1.25,s.p.z+pp.z*i*0.12); L.add(noz);
       }
-      // carter di protezione plexiglass attorno alla zona
+      // carter di protezione plexiglass all'esterno (oltre la sponda)
       const guard=new THREE.Mesh(new THREE.BoxGeometry(1.0,0.9,0.04),plexi);
-      guard.position.set(s.p.x+pp.x*0.55,1.0,s.p.z+pp.z*0.55); guard.rotation.y=Math.atan2(s.tan.x,s.tan.z); L.add(guard);
+      guard.position.set(s.p.x+pp.x*0.42,1.0,s.p.z+pp.z*0.42); guard.rotation.y=Math.atan2(s.tan.x,s.tan.z); L.add(guard);
     })();
     // 3) TAPPATRICE — portale inox compatto + testa inox
     L.add(portalAt(SU.cap,0.9,1.5,inox));
     (function(){ const s=lsample(SU.cap);
       const head=new THREE.Mesh(new THREE.CylinderGeometry(0.16,0.16,0.2,20),inox);
       head.position.set(s.p.x,1.18,s.p.z); L.add(head); })();
-    // 4) ETICHETTATRICE — modulo inox con rulli + carter plexi
-    (function(){ const s=boxAt(SU.label,0.8,1.0,0.7,0.6,inox);
-      const pp=perpAt(SU.label);
-      for(const dx of [-0.18,0.18]){
-        const roll=new THREE.Mesh(new THREE.CylinderGeometry(0.15,0.15,0.5,20),inoxDark);
-        roll.rotation.z=Math.PI/2; roll.position.set(s.p.x+pp.x*0.25,0.95,s.p.z+pp.z*0.25); L.add(roll);
+    // 4) ETICHETTATRICE — TUNNEL che scavalca il nastro: le bottiglie passano DENTRO
+    //    e ne escono etichettate. Rulli applicatori ai due lati + bobina etichette.
+    L.add(portalAt(SU.label,1.0,1.35,inox));
+    (function(){
+      const s=lsample(SU.label); const pp=perpAt(SU.label);
+      // rulli applicatori verticali ai due lati del nastro (premono l'etichetta)
+      for(const sgn of [-1,1]){
+        const roll=new THREE.Mesh(new THREE.CylinderGeometry(0.10,0.10,0.45,18),inoxDark);
+        roll.position.set(s.p.x+pp.x*sgn*0.34,0.85,s.p.z+pp.z*sgn*0.34); L.add(roll);
       }
-      const guard=new THREE.Mesh(new THREE.BoxGeometry(0.04,0.7,0.7),plexi);
-      guard.position.set(s.p.x+pp.x*0.1,0.95,s.p.z+pp.z*0.1); guard.rotation.y=Math.atan2(s.tan.x,s.tan.z); L.add(guard);
+      // bobina di etichette (rotolo) sul lato esterno
+      const reelOff=BELT_HALF+0.55;
+      const reel=new THREE.Mesh(new THREE.CylinderGeometry(0.22,0.22,0.12,24),
+        new THREE.MeshStandardMaterial({color:0x1f7a6b,roughness:.6}));
+      reel.rotation.z=Math.PI/2; reel.position.set(s.p.x+pp.x*reelOff,1.15,s.p.z+pp.z*reelOff); L.add(reel);
+      const reelHub=new THREE.Mesh(new THREE.CylinderGeometry(0.05,0.05,0.14,16),inox);
+      reelHub.rotation.z=Math.PI/2; reelHub.position.copy(reel.position); L.add(reelHub);
+      // cabina di supporto inox all'esterno
+      const m=new THREE.Mesh(new THREE.BoxGeometry(0.7,0.9,0.6),inox);
+      m.position.set(s.p.x+pp.x*(reelOff),0.45,s.p.z+pp.z*(reelOff)); m.rotation.y=Math.atan2(s.tan.x,s.tan.z); m.castShadow=true; L.add(m);
     })();
-    // 5) INSCATOLATRICE — cabina inox con grande finestra plexi
-    (function(){ const s=boxAt(SU.box,1.4,1.5,1.2,-0.2,inox);
+    // 5) INSCATOLATRICE — cabina inox all'ESTERNO con finestra verso il nastro
+    (function(){ const {s,pp}=boxAt(SU.box,1.4,1.5,1.2,-1,0.15,inox);
       const win=new THREE.Mesh(new THREE.BoxGeometry(0.9,0.7,0.03),plexi);
-      const pp=perpAt(SU.box);
-      win.position.set(s.p.x+pp.x*0.6,0.95,s.p.z+pp.z*0.6); win.rotation.y=Math.atan2(s.tan.x,s.tan.z); L.add(win); })();
+      win.position.set(s.p.x+pp.x*-0.35,0.95,s.p.z+pp.z*-0.35); win.rotation.y=Math.atan2(s.tan.x,s.tan.z); L.add(win); })();
 
     // --- BOTTIGLIE animate lungo la U ---
     function makeBottle(){
@@ -1235,21 +1278,53 @@ const CARTELLO_COLORI={
         fore.position.set(sgn*0.23,1.02,0.16); fore.rotation.x=-0.7; w.add(fore);
         const hand=new THREE.Mesh(new THREE.SphereGeometry(0.05,12,10),matSkin);
         hand.position.set(sgn*0.24,0.9,0.26); w.add(hand);
-        armRefs.push(upper);
+        armRefs.push({upper,fore,hand,sgn,baseUpperX:-0.35,baseForeX:-0.7});
       }
       w.position.set(x,0,z); w.rotation.y=rotY;
       w.traverse(o=>{if(o.isMesh){o.castShadow=true;o.receiveShadow=true;}});
-      w.userData={arms:armRefs,legs:legRefs};
+      w.userData={arms:armRefs,legs:legRefs,seed:Math.random()*100};
       return w;
     }
-    // 2 operai: uno alla riempitrice/tappatura, uno all'inscatolamento, sul lato interno della U
+    // 2 operai sul lato interno della U, ciascuno con un PLC/quadro davanti
+    function makePLC(x,z,rotY){
+      const p=new THREE.Group();
+      const cab=new THREE.Mesh(new THREE.BoxGeometry(0.5,0.95,0.25),inox);
+      cab.position.y=0.95; p.add(cab);
+      // pannello scuro con schermo + pulsanti
+      const panel=new THREE.Mesh(new THREE.BoxGeometry(0.42,0.5,0.03),
+        new THREE.MeshStandardMaterial({color:0x14181d,roughness:.5,metalness:.3}));
+      panel.position.set(0,1.15,0.14); panel.rotation.x=-0.3; p.add(panel);
+      const screen=new THREE.Mesh(new THREE.BoxGeometry(0.26,0.18,0.01),
+        new THREE.MeshStandardMaterial({color:0x123a2e,emissive:0x1f8a5a,emissiveIntensity:.6,roughness:.3}));
+      screen.position.set(0,1.21,0.156); screen.rotation.x=-0.3; p.add(screen);
+      const btns=[];
+      const bcol=[0x35d07f,0xff5a3c,0xffd23c];
+      for(let i=0;i<3;i++){
+        const btn=new THREE.Mesh(new THREE.CylinderGeometry(0.025,0.025,0.02,16),
+          new THREE.MeshStandardMaterial({color:bcol[i],emissive:bcol[i],emissiveIntensity:.3,roughness:.4}));
+        btn.rotation.x=Math.PI/2-0.3; btn.position.set(-0.1+i*0.1,1.04,0.16); p.add(btn); btns.push(btn);
+      }
+      const legs=new THREE.Mesh(new THREE.BoxGeometry(0.45,0.48,0.2),inoxDark);
+      legs.position.y=0.24; p.add(legs);
+      p.position.set(x,0,z); p.rotation.y=rotY;
+      p.traverse(o=>{if(o.isMesh)o.castShadow=true;});
+      p.userData={btns,screen};
+      return p;
+    }
     const wA=lsample(SU.cap),  ppA=perpAt(SU.cap);
     const wB=lsample(SU.box),  ppB=perpAt(SU.box);
+    const plcs=[];
     const workers=[
       makeWorker(wA.p.x+ppA.x*0.95, wA.p.z+ppA.z*0.95, Math.atan2(-ppA.x,-ppA.z), 0x2f6fd0),
       makeWorker(wB.p.x+ppB.x*0.95, wB.p.z+ppB.z*0.95, Math.atan2(-ppB.x,-ppB.z), 0xd0552f),
     ];
     workers.forEach(w=>L.add(w));
+    // PLC davanti a ciascun operaio (verso il nastro, dove guarda)
+    {
+      const pA=makePLC(wA.p.x+ppA.x*0.45, wA.p.z+ppA.z*0.45, Math.atan2(ppA.x,ppA.z));
+      const pB=makePLC(wB.p.x+ppB.x*0.45, wB.p.z+ppB.z*0.45, Math.atan2(ppB.x,ppB.z));
+      L.add(pA); L.add(pB); plcs.push(pA,pB);
+    }
 
     scene.add(L);
 
@@ -1258,11 +1333,18 @@ const CARTELLO_COLORI={
       const t=now*0.001;
       const spd=0.030;
       for(const b of bottles){
-        let u=(b.userData.u + t*spd)%1;
+        // ciclo [0..1] di ogni bottiglia rimappato sul tratto ATTIVO del nastro:
+        // da SU.empty (uscita orientatore) a SU.box (inscatolamento).
+        const phase=(b.userData.u + t*spd)%1;
+        const uA=SU.empty, uB=SU.box;
+        const u=uA + phase*(uB-uA);
         const s=lsample(u);
         b.position.set(s.p.x,beltY+0.05,s.p.z);
         const ud=b.userData;
         const H=0.30, liqFullY=H*0.46;
+        // DEPOSITO: appena uscita dall'orientatore la bottiglia "scende" sul nastro
+        let drop=0;
+        if(phase<0.04){ const k=phase/0.04; drop=(1-k)*0.35; }
         // riempimento: il liquido cresce in altezza alla riempitrice
         if(u<SU.fill){ ud.liq.scale.y=0.001; }
         else if(u<SU.fill+0.05){ const k=(u-SU.fill)/0.05; ud.liq.scale.y=Math.max(0.001,k); ud.liq.position.y=liqFullY*k; }
@@ -1270,19 +1352,62 @@ const CARTELLO_COLORI={
         // tappo a vite dopo la tappatrice
         const capped=(u>SU.cap);
         ud.cap.visible=capped; ud.capRing.visible=capped;
-        // etichetta dopo l'etichettatrice
-        const labeled=(u>SU.label);
-        ud.lab.visible=labeled; ud.labTop.visible=labeled;
-        b.position.y += Math.sin(t*12+u*40)*0.004;
-        b.visible=(u<SU.box);
+        // ETICHETTA applicata mentre la bottiglia ATTRAVERSA il tunnel etichettatrice:
+        // appare e si avvolge gradualmente nella finestra [SU.label .. SU.label+0.05].
+        const LW=0.05;
+        if(u<SU.label){ ud.lab.visible=false; ud.labTop.visible=false; }
+        else if(u<SU.label+LW){
+          const k=(u-SU.label)/LW;             // 0→1 durante il passaggio nel tunnel
+          ud.lab.visible=true; ud.labTop.visible=true;
+          // l'etichetta cresce in altezza avvolgendo il corpo (effetto applicazione)
+          ud.lab.scale.y=Math.max(0.001,k);
+          ud.labTop.scale.y=Math.max(0.001,k);
+        } else {
+          ud.lab.visible=true; ud.labTop.visible=true;
+          ud.lab.scale.y=1; ud.labTop.scale.y=1;
+        }
+        b.position.y += drop + Math.sin(t*12+u*40)*0.004;
+        b.visible = true;
       }
       const bt=(t*0.25)%1;
       const sb=lsample(SU.box), sp=lsample(0.93);
       outBox.visible=bt<0.85;
       outBox.position.set(sb.p.x+(sp.p.x-sb.p.x)*bt, beltY+0.05+Math.sin(bt*Math.PI)*0.15, sb.p.z+(sp.p.z-sb.p.z)*bt);
+      // OPERAI AL LAVORO: ciclo di azioni discrete (controlla linea → preme PLC → pausa)
       workers.forEach((w,i)=>{
-        w.position.y=Math.sin(t*1.5+i)*0.01;
-        w.userData.arms.forEach((a,j)=>{ a.rotation.x=-0.5+Math.sin(t*2.2+i+j)*0.25; });
+        const ud=w.userData; const seed=ud.seed;
+        // micro-bilanciamento del peso (mai del tutto immobile)
+        w.position.y=Math.sin(t*1.2+seed)*0.008;
+        w.rotation.z=Math.sin(t*0.5+seed)*0.01;
+        // fase del ciclo lavoro (periodo ~6s, sfasato per operaio)
+        const cyc=((t*0.16+seed)%1);
+        const arms=ud.arms;
+        const left=arms[0], right=arms[1];   // sgn -1 e +1
+        // braccio SINISTRO: lieve oscillazione di "controllo" continua
+        left.upper.rotation.x = left.baseUpperX + Math.sin(t*1.1+seed)*0.10;
+        left.fore.rotation.x  = left.baseForeX  + Math.sin(t*1.1+seed)*0.08;
+        // braccio DESTRO: gesto di PRESSIONE PULSANTE in una finestra del ciclo
+        let press=0;
+        if(cyc>0.30 && cyc<0.48){
+          // affondo verso il PLC e ritorno (campana)
+          const k=(cyc-0.30)/0.18; press=Math.sin(k*Math.PI);
+        } else if(cyc>0.60 && cyc<0.72){
+          // secondo tocco rapido
+          const k=(cyc-0.60)/0.12; press=Math.sin(k*Math.PI)*0.8;
+        }
+        right.upper.rotation.x = right.baseUpperX - press*0.55;
+        right.fore.rotation.x  = right.baseForeX  - press*0.85;
+        // pulsante del PLC premuto + lampeggio schermo durante la pressione
+        const plc=plcs[i];
+        if(plc){
+          const which=(Math.floor(t*0.16+seed))%3;
+          plc.userData.btns.forEach((btn,bi)=>{
+            const down=(press>0.4 && bi===which)?press*0.012:0;
+            btn.position.z = 0.16 - down;     // pulsante che si abbassa
+          });
+          // schermo che pulsa quando "lavora"
+          plc.userData.screen.material.emissiveIntensity = 0.4 + press*0.6 + 0.1*Math.sin(t*4+seed);
+        }
       });
     };
   })();
