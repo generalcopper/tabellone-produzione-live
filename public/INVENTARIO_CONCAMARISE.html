@@ -3212,6 +3212,7 @@
       initializeFirestore,
       collection,
       doc,
+      setDoc,
       onSnapshot,
       writeBatch,
       runTransaction,
@@ -3402,6 +3403,32 @@
 
     function orgCol(name){
       return collection(state.db, "orgs", ORG_ID, name);
+    }
+
+    // Avviso "carico in arrivo da Cerea" per il kiosk 3D (capannone_3d.html).
+    // Pubblica un documento con scadenza a 30 minuti quando si genera una bolla Cerea→Conca.
+    const KIOSK_ALERT_TTL_MS = 30 * 60 * 1000; // durata avviso: 30 minuti
+    async function publishIncomingFromCereaAlert(info = {}){
+      try{
+        if (!state.db) return;
+        const now = Date.now();
+        const ref = doc(state.db, "amzInventory", WAREHOUSE_CONCAMARISE, "kioskAlerts", "incomingFromCerea");
+        await setDoc(ref, {
+          active: true,
+          type: "incomingFromCerea",
+          ddtNumber: cleanSpaces(info.ddtNumber || ""),
+          articleCount: safeInt(info.articleCount || 0),
+          palletCount: safeInt(info.palletCount || 0),
+          totalQty: safeInt(info.totalQty || 0),
+          uom: cleanSpaces(info.uom || ""),
+          createdAtMs: now,
+          expiresAtMs: now + KIOSK_ALERT_TTL_MS,
+          createdAt: serverTimestamp(),
+          by: state.user?.displayName || state.user?.email || ""
+        }, { merge: true });
+      }catch(err){
+        console.warn("publishIncomingFromCereaAlert failed", err);
+      }
     }
 
     function safeInt(value){
@@ -9067,6 +9094,17 @@
 
         batch.set(ddtRef, ddtPayload);
         await batch.commit();
+
+        // Bolla Cerea → Conca: segnala al kiosk 3D un carico in arrivo (avviso valido 30 min).
+        if (config.direction === TRANSFER_TO_CONCAMARISE){
+          publishIncomingFromCereaAlert({
+            ddtNumber: reserved.ddtNumber,
+            articleCount: checkedItems.length,
+            palletCount: palletInfo.palletCount,
+            totalQty,
+            uom: commonUom
+          });
+        }
 
         try{
           const emailData = buildConcamariseTransferEmail({

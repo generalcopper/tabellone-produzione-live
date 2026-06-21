@@ -173,6 +173,30 @@
     transition:.35s cubic-bezier(.2,.7,.2,1);}
   #cockpit .ck-dots i.on{width:22px; border-radius:4px; background:linear-gradient(90deg,#7aa2ff,#ff9d2e);}
 
+  /* ===== AVVISO CARICO IN ARRIVO DA CEREA ===== */
+  #incomingAlert{position:fixed; left:50%; top:clamp(14px,3.5vh,34px); transform:translateX(-50%) translateY(-18px);
+    z-index:40; opacity:0; pointer-events:none; transition:opacity .5s cubic-bezier(.2,.7,.2,1), transform .5s cubic-bezier(.2,.7,.2,1);
+    width:min(440px, calc(100vw - 28px));}
+  #incomingAlert.show{opacity:1; transform:translateX(-50%) translateY(0);}
+  #incomingAlert .ia-card{display:flex; align-items:center; gap:14px; padding:14px 18px; border-radius:18px;
+    background:linear-gradient(135deg, rgba(24,40,30,.94), rgba(16,28,22,.94));
+    border:1px solid rgba(80,210,140,.34);
+    box-shadow:0 12px 40px rgba(0,0,0,.45), 0 0 0 1px rgba(80,210,140,.10), inset 0 1px 0 rgba(255,255,255,.05);
+    -webkit-backdrop-filter:blur(8px); backdrop-filter:blur(8px);}
+  #incomingAlert .ia-icon{flex:none; width:46px; height:46px; border-radius:13px; display:flex; align-items:center; justify-content:center;
+    color:#0a1810; background:linear-gradient(180deg,#62e6a0,#22c06f); box-shadow:0 4px 16px rgba(40,200,120,.4);
+    animation:iaTruck 2.4s ease-in-out infinite;}
+  #incomingAlert .ia-body{flex:1; min-width:0; text-align:left;}
+  #incomingAlert .ia-kicker{font-weight:800; letter-spacing:.16em; text-transform:uppercase; font-size:11px; color:#79e6ab;}
+  #incomingAlert .ia-title{margin-top:2px; font-weight:800; font-size:clamp(17px,3vw,21px); color:#eafff3; letter-spacing:-.01em;}
+  #incomingAlert .ia-sub{margin-top:2px; font-weight:600; font-size:clamp(12px,2.2vw,14px); color:rgba(180,225,200,.82);
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
+  #incomingAlert .ia-eta{flex:none; font-weight:800; font-variant-numeric:tabular-nums; font-size:13px; color:#bff3d6;
+    padding:7px 11px; border-radius:11px; background:rgba(80,210,140,.14); border:1px solid rgba(80,210,140,.26);
+    white-space:nowrap;}
+  @keyframes iaTruck{0%,100%{transform:translateX(-2px);} 50%{transform:translateX(2px);}}
+  @media (max-width:480px){ #incomingAlert .ia-eta{display:none;} #incomingAlert .ia-icon{width:40px; height:40px;} }
+
 </style>
 </head>
 <body>
@@ -224,7 +248,7 @@
       <span class="ck-ord-div"></span>
       <div class="ck-ord fbm">
         <span class="ck-ord-n" id="ckOrdFbm">0</span>
-        <span class="ck-ord-l">ordini FBM Shopify</span>
+        <span class="ck-ord-l">ordini FBM in coda</span>
       </div>
     </div>
   </div>
@@ -238,6 +262,23 @@
     <div class="ck-amz-list" id="ckAmzList"></div>
   </div>
   <div class="ck-dots" id="ckDots" aria-hidden="true"></div>
+</div>
+
+<!-- AVVISO CARICO IN ARRIVO DA CEREA: appare quando l'inventario Concamarise genera una bolla (dura 30 min) -->
+<div id="incomingAlert" aria-hidden="true">
+  <div class="ia-card">
+    <div class="ia-icon">
+      <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M1 3h15v13H1z"/><path d="M16 8h4l3 3v5h-7V8z"/><circle cx="5.5" cy="18.5" r="2.5"/><circle cx="18.5" cy="18.5" r="2.5"/>
+      </svg>
+    </div>
+    <div class="ia-body">
+      <div class="ia-kicker">Carico in arrivo</div>
+      <div class="ia-title">In arrivo da Cerea</div>
+      <div class="ia-sub" id="iaSub">Bolla di trasferimento generata</div>
+    </div>
+    <div class="ia-eta" id="iaEta"></div>
+  </div>
 </div>
 
 <script type="importmap">
@@ -2301,7 +2342,7 @@ function _renderDots(pages, current){
 
 const CK_CHAN={
   fba:{ lbl:'DA PRELEVARE · FBA', cls:'fba', note:'vedi luci arancioni in magazzino' },
-  fbm:{ lbl:'DA PRELEVARE · FBM SHOPIFY', cls:'fbm', note:'prelievo operativo · scarico Shopify' }
+  fbm:{ lbl:'DA PRELEVARE · FBM', cls:'fbm', note:'prelievo operativo · scarico separato' }
 };
 function renderAmazonPrep(canale){
   const list=document.getElementById('ckAmzList');
@@ -2367,6 +2408,45 @@ function renderCockpitOrders(){
   if(nf) nf.textContent=fba;
   if(nm) nm.textContent=fbm;
   box.hidden = (fba+fbm)===0;   // niente didascalia quando non c'è nulla in coda
+}
+
+/* ===== AVVISO CARICO IN ARRIVO DA CEREA (dura 30 minuti dalla generazione bolla) ===== */
+let _incomingData=null;          // ultimo documento avviso ricevuto da Firestore
+function setIncomingAlert(d){
+  _incomingData = d || null;
+  // aggiorna subito sottotitolo (numero bolla / articoli / bancali) quando arriva
+  const sub=document.getElementById('iaSub');
+  if(sub && _incomingData){
+    const bits=[];
+    if(_incomingData.articleCount>0) bits.push(`${_incomingData.articleCount} articol${_incomingData.articleCount===1?'o':'i'}`);
+    if(_incomingData.palletCount>0) bits.push(`${_incomingData.palletCount} bancal${_incomingData.palletCount===1?'e':'i'}`);
+    if(_incomingData.ddtNumber) bits.push(`bolla ${_incomingData.ddtNumber}`);
+    sub.textContent = bits.length ? bits.join(' · ') : 'Bolla di trasferimento generata';
+  }
+  refreshIncomingAlert();
+}
+function _incomingExpiry(){
+  if(!_incomingData || _incomingData.active===false) return 0;
+  const exp = Number(_incomingData.expiresAtMs||0);
+  if(exp>0) return exp;
+  // fallback: 30 min dalla creazione se manca expiresAtMs
+  const cr = Number(_incomingData.createdAtMs||0);
+  return cr>0 ? cr + 30*60*1000 : 0;
+}
+function refreshIncomingAlert(){
+  const el=document.getElementById('incomingAlert'); if(!el) return;
+  const exp=_incomingExpiry();
+  const now=Date.now();
+  const visible = exp>now;
+  el.classList.toggle('show', visible);
+  el.setAttribute('aria-hidden', visible?'false':'true');
+  if(visible){
+    const eta=document.getElementById('iaEta');
+    if(eta){
+      const mins=Math.max(0, Math.ceil((exp-now)/60000));
+      eta.textContent = mins>1 ? `tra ~${mins} min` : 'in arrivo';
+    }
+  }
 }
 function setCockpitPage(p){
   _ckPage=p;
@@ -2626,6 +2706,7 @@ function tick(now){
   updateTour(now);
   updateIdle(now);
   updateCockpit(now);
+  if(!tick._iaT || now-tick._iaT>5000){ tick._iaT=now; refreshIncomingAlert(); }
   if(tween){const k=ease(Math.min(1,(now-tween.start)/tween.dur));
     for(const key in tween.to)cam[key]=tween.from[key]+(tween.to[key]-tween.from[key])*k;
     if(k>=1)tween=null;}
@@ -3117,6 +3198,16 @@ function startInventoryRealtime(fs, db){
       }, (err)=>{ console.warn('flussi '+loc, err && err.code); });
     }catch(e){ console.warn('listener flussi '+loc, e); }
   }
+
+  // ===== AVVISO CARICO IN ARRIVO DA CEREA =====
+  // ascolta il documento scritto dall'inventario Concamarise quando genera una bolla Cerea→Conca.
+  try{
+    const alertRef = fs.doc(db, "amzInventory", "concamarise", "kioskAlerts", "incomingFromCerea");
+    fs.onSnapshot(alertRef, (snap)=>{
+      const d = snap.exists() ? (snap.data()||{}) : null;
+      setIncomingAlert(d);
+    }, (err)=>{ console.warn('avviso carico', err && err.code); });
+  }catch(e){ console.warn('listener avviso carico', e); }
 }
 </script>
 </body>
