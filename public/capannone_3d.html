@@ -2538,13 +2538,39 @@ function calcolaOrdini(){
   out.sort((a,b)=> (b.ts-a.ts) || String(a.id).localeCompare(String(b.id)));
   return out;
 }
-function renderCockpitOrders(){
+// animazione "tabellone": il numero sale fluido dal valore corrente al target con easing morbido
+function _animaConteggio(el, to, opts={}){
+  if(!el) return;
+  to = Math.max(0, Math.round(Number(to)||0));
+  const from = (opts.from!==undefined) ? Math.max(0, Math.round(opts.from)) : (parseInt(el.textContent,10)||0);
+  if(el._countRAF){ cancelAnimationFrame(el._countRAF); el._countRAF=0; }
+  if(from===to){ el.textContent=String(to); return; }
+  const dur = Math.min(1400, Math.max(600, Math.abs(to-from)*90)); // più salto = un filo più lungo
+  const t0 = performance.now();
+  const easeOut = x => 1-Math.pow(1-x, 3);                          // decelerazione morbida
+  const step = (now)=>{
+    const k = Math.min(1,(now-t0)/dur);
+    const val = Math.round(from + (to-from)*easeOut(k));
+    el.textContent = String(val);
+    if(k<1){ el._countRAF=requestAnimationFrame(step); }
+    else { el._countRAF=0; el.textContent=String(to); }
+  };
+  el._countRAF=requestAnimationFrame(step);
+}
+function renderCockpitOrders(opts={}){
   const box=document.getElementById('ckOrders'); if(!box) return;
   const {fba, fbm}=_contaOrdini();
   const nf=document.getElementById('ckOrdFba'), nm=document.getElementById('ckOrdFbm');
-  if(nf) nf.textContent=fba;
-  if(nm) nm.textContent=fbm;
   box.hidden = (fba+fbm)===0;   // niente didascalia quando non c'è nulla in coda
+  if(box.hidden){
+    if(nf){ if(nf._countRAF) cancelAnimationFrame(nf._countRAF); nf._countRAF=0; nf.textContent='0'; }
+    if(nm){ if(nm._countRAF) cancelAnimationFrame(nm._countRAF); nm._countRAF=0; nm.textContent='0'; }
+    return;
+  }
+  // all'ingresso pagina (reset=true) parte da 0; in aggiornamento live parte dal valore mostrato
+  const from0 = opts.reset ? 0 : undefined;
+  _animaConteggio(nf, fba, {from: from0});
+  _animaConteggio(nm, fbm, {from: from0});
 }
 
 /* ===== ANNUNCI VOCALI (ElevenLabs via Voce) — discreti e non invasivi =====
@@ -2714,7 +2740,7 @@ function setCockpitPage(p){
   const isAmz = (p==='fba'||p==='fbm');
   if(isAmz){ _ckAmzSig=''; renderAmazonPrep(p); }
   if(p==='ordini'){ _ckOrdiniSig=''; renderOrdiniPage(); }
-  if(p==='azienda'){ renderCockpitOrders(); }
+  if(p==='azienda'){ renderCockpitOrders({reset:true}); }
   // cross-fade: attivo solo l'opacità della pagina scelta (le pagine restano sovrapposte)
   if(az) az.classList.toggle('ck-active', p==='azienda');
   if(or) or.classList.toggle('ck-active', p==='ordini');
