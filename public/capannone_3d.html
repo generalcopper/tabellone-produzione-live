@@ -114,6 +114,7 @@
     background-clip:text; -webkit-background-clip:text; color:transparent;}
   #cockpit .ck-ord.fba .ck-ord-n{background-image:linear-gradient(180deg,#ffd9a0,#ff9d2e);}
   #cockpit .ck-ord.fbm .ck-ord-n{background-image:linear-gradient(180deg,#cfe0ff,#6f8dff);}
+  #cockpit .ck-ord.ss .ck-ord-n{background-image:linear-gradient(180deg,#ffb98a,#ee5b22);}
   #cockpit .ck-ord-l{font-weight:600; letter-spacing:.10em; text-transform:uppercase;
     font-size:clamp(9px,1.7vw,12px); color:rgba(159,182,214,.78);}
   #cockpit .ck-ord-div{width:1px; align-self:stretch; margin:4px 0;
@@ -363,6 +364,11 @@
       <div class="ck-ord fbm">
         <span class="ck-ord-n" id="ckOrdFbm">0</span>
         <span class="ck-ord-l">ordini FBM in coda</span>
+      </div>
+      <span class="ck-ord-div" id="ckOrdDivSs" hidden></span>
+      <div class="ck-ord ss" id="ckOrdSsWrap" hidden>
+        <span class="ck-ord-n" id="ckOrdSs">0</span>
+        <span class="ck-ord-l">articoli da produrre</span>
       </div>
     </div>
   </div>
@@ -2982,32 +2988,44 @@ function _animaConteggio(el, to, opts={}){
   el._countRAF=requestAnimationFrame(step);
 }
 // memoria ultimi valori mostrati nella didascalia azienda (per animare solo i cambiamenti reali)
-let _lastFba=null, _lastFbm=null, _contatoreMaiMostrato=true;
+let _lastFba=null, _lastFbm=null, _lastSs=null, _contatoreMaiMostrato=true;
+function _contaSottoscorta(){ return (LOWSTOCK.cerea.length + LOWSTOCK.concamarise.length); }
 function renderCockpitOrders(opts={}){
   const box=document.getElementById('ckOrders'); if(!box) return;
   const {fba, fbm}=_contaOrdini();
-  const nf=document.getElementById('ckOrdFba'), nm=document.getElementById('ckOrdFbm');
-  box.hidden = (fba+fbm)===0;   // niente didascalia quando non c'è nulla in coda
+  const ss=_contaSottoscorta();
+  const nf=document.getElementById('ckOrdFba'), nm=document.getElementById('ckOrdFbm'), ns=document.getElementById('ckOrdSs');
+  const ssWrap=document.getElementById('ckOrdSsWrap'), ssDiv=document.getElementById('ckOrdDivSs');
+  const fbaWrap=nf?nf.closest('.ck-ord'):null, fbmWrap=nm?nm.closest('.ck-ord'):null;
+  const ordDiv=box.querySelector('.ck-ord-div:not(#ckOrdDivSs)');
+  const hasOrd=(fba+fbm)>0, hasSs=ss>0;
+  box.hidden = !hasOrd && !hasSs;   // riga visibile se c'è lavoro in coda OPPURE articoli da produrre
   if(box.hidden){
     if(nf){ if(nf._countRAF) cancelAnimationFrame(nf._countRAF); nf._countRAF=0; nf.textContent='0'; }
     if(nm){ if(nm._countRAF) cancelAnimationFrame(nm._countRAF); nm._countRAF=0; nm.textContent='0'; }
-    _lastFba=fba; _lastFbm=fbm;
+    if(ns){ if(ns._countRAF) cancelAnimationFrame(ns._countRAF); ns._countRAF=0; ns.textContent='0'; }
+    _lastFba=fba; _lastFbm=fbm; _lastSs=ss;
     return;
   }
-  // decido se animare:
-  //  - opts.animate === true  → forza l'animazione (primo avvio o nuovo ordine)
-  //  - altrimenti aggiorna il testo senza animare (es. quando la pagina ricompare nella rotazione)
+  // visibilità dei singoli blocchi: ordini solo se >0, sotto scorta solo se >0
+  if(fbaWrap) fbaWrap.hidden = !hasOrd;
+  if(fbmWrap) fbmWrap.hidden = !hasOrd;
+  if(ordDiv)  ordDiv.hidden  = !hasOrd;     // divisore tra FBA e FBM
+  if(ssWrap)  ssWrap.hidden  = !hasSs;
+  if(ssDiv)   ssDiv.hidden   = !(hasOrd && hasSs);   // divisore prima del sotto scorta solo se entrambi presenti
+
   const animate = opts.animate === true;
   if(animate){
-    // al primissimo avvio i numeri salgono da 0; sui nuovi ordini partono dal valore precedente
-    const base0 = (_lastFba===null && _lastFbm===null);
+    const base0 = (_lastFba===null && _lastFbm===null && _lastSs===null);
     _animaConteggio(nf, fba, base0 ? {from:0} : {from: _lastFba ?? 0});
     _animaConteggio(nm, fbm, base0 ? {from:0} : {from: _lastFbm ?? 0});
+    if(ns) _animaConteggio(ns, ss, base0 ? {from:0} : {from: _lastSs ?? 0});
   } else {
     if(nf){ if(nf._countRAF){cancelAnimationFrame(nf._countRAF);nf._countRAF=0;} nf.textContent=String(fba); }
     if(nm){ if(nm._countRAF){cancelAnimationFrame(nm._countRAF);nm._countRAF=0;} nm.textContent=String(fbm); }
+    if(ns){ if(ns._countRAF){cancelAnimationFrame(ns._countRAF);ns._countRAF=0;} ns.textContent=String(ss); }
   }
-  _lastFba=fba; _lastFbm=fbm;
+  _lastFba=fba; _lastFbm=fbm; _lastSs=ss;
 }
 
 /* ===== ANNUNCI VOCALI (ElevenLabs via Voce) — discreti e non invasivi =====
@@ -4110,6 +4128,12 @@ function startInventoryRealtime(fs, db){
   // ascolta il documento scritto dalla produzione di Cerea quando un lotto SKU è pronto.
   try{
     const readyRef = fs.doc(db, "amzInventory", "cerea", "kioskAlerts", "skuReady");
+    fs.onSnapshot(readyRef, (snap)=>{
+      const d = snap.exists() ? (snap.data()||{}) : null;
+      setReadyAlert(d);
+    }, (err)=>{ console.warn('avviso pronto Cerea', err && err.code); });
+  }catch(e){ console.warn('listener avviso pronto', e); }
+
   // ===== SOTTO SCORTA (da produrre) — Cerea + Concamarise =====
   // legge l'anagrafica per magazzino (amzInventory/{loc}/items), calcola gli articoli sotto scorta
   // e li mostra nella pagina cockpit dedicata; avviso vocale all'ingresso di nuovi sotto scorta.
@@ -4122,6 +4146,13 @@ function startInventoryRealtime(fs, db){
         snap.forEach(ds=>{ const d=ds.data()||{}; docs.push({ sku:d.sku||ds.id, ...d }); });
         _ssCompute(loc, docs);
         if(_ckPage==='sottoscorta'){ _ckSsSig=''; renderSottoscortaPage(true); }
+        // aggiorna anche il contatore "da produrre" nella pagina principale (azienda)
+        try{
+          if(_cockpitOn && _ckPage==='azienda'){
+            const aumentato = (_lastSs!==null && _contaSottoscorta()>_lastSs);
+            renderCockpitOrders({animate: aumentato});
+          } else { _lastSs=_contaSottoscorta(); }
+        }catch(_){}
         try{ if(typeof Annunci!=='undefined') Annunci.onSottoscorta(loc, LOWSTOCK[loc]); }catch(_){}
       }, (err)=>{ console.warn('sotto scorta '+loc, err && err.code); });
     }catch(e){ console.warn('listener sotto scorta '+loc, e); }
