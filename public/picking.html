@@ -7986,23 +7986,6 @@ function startAllLogs(){
       const shopName = String(shop.name || d.orderName || d.shopifyOrderName || shopId || "").trim();
       const src = String(d.source || shop.source || "").trim();
       const looksShopify = !!(shopId || shopName || src.toLowerCase().includes("shopify") || String(d.fileName || "").toUpperCase() === "SHOPIFY_FBM");
-      const stableAppliedAtClient = readFlowLogTimestamp(d.appliedAtClient)
-        || readFlowLogTimestamp(d.doneAtClient)
-        || readFlowLogTimestamp(d.createdAtClient)
-        || readFlowLogTimestamp(d.importedAtClient)
-        || readFlowLogTimestamp(d.orderCreatedAtClient)
-        || readFlowLogTimestamp(shop.createdAtClient)
-        || readFlowLogTimestamp(shop.orderCreatedAtClient)
-        || readFlowLogTimestamp(shop.created_at)
-        || readFlowLogTimestamp(shop.createdAt)
-        || readFlowLogTimestamp(d.createdAt)
-        || (looksShopify ? 0 : ts);
-      const stableCreatedAtClient = readFlowLogTimestamp(d.createdAtClient)
-        || readFlowLogTimestamp(shop.createdAtClient)
-        || readFlowLogTimestamp(shop.orderCreatedAtClient)
-        || readFlowLogTimestamp(shop.created_at)
-        || readFlowLogTimestamp(shop.createdAt)
-        || stableAppliedAtClient;
       const workflowId = d.workflowId || ((d.workflow && d.workflow.id) ? d.workflow.id : "") || (looksShopify ? `SHOPIFY-${shopName || shopId || docSnap.id}` : "");
       const workflowLabel = d.workflowLabel || ((d.workflow && d.workflow.label) ? d.workflow.label : "") || (looksShopify ? `Shopify ${shopName || shopId || docSnap.id}` : "");
       const totalPieces = Number.isFinite(Number(d.totalPieces)) ? Number(d.totalPieces) : lines.reduce((a,x)=> a + (Math.abs(parseQty(x.qty)||0)), 0);
@@ -8015,14 +7998,14 @@ function startAllLogs(){
         kind: looksShopify ? "scarica" : (d.kind || ""),
         location: d.location || loc,
         fileName: d.fileName || (looksShopify ? "SHOPIFY_FBM" : ""),
-        appliedAtClient: stableAppliedAtClient,
+        appliedAtClient: readFlowLogTimestamp(d.appliedAtClient) || ts,
         appliedBy: d.appliedBy || d.createdBy || d.createdByEmail || "",
         status: d.status || (looksShopify ? "RESERVED" : ""),
         source: d.source || shop.source || (looksShopify ? "shopify_fbm" : ""),
         reservation,
         shopify: shop,
         updatedAtClient: readFlowLogTimestamp(d.updatedAtClient) || ts,
-        createdAtClient: stableCreatedAtClient,
+        createdAtClient: readFlowLogTimestamp(d.createdAtClient) || readFlowLogTimestamp(shop.createdAtClient),
         totalLines,
         totalPieces,
         workflow: d.workflow || null,
@@ -8472,6 +8455,166 @@ function startAllLogs(){
       return 0;
     }
 
+    function pickingEventStableClientTsList(flow, opts = {}){
+      const out = [];
+      try{
+        const p = (flow?.picking && typeof flow.picking === "object") ? flow.picking : {};
+        const events = Array.isArray(p.events) ? p.events : [];
+        const wantSku = toSkuId(opts?.sku || "");
+        const wantFlow = !!opts?.flowOnly;
+        const shopifyOnly = !!opts?.shopifyOnly;
+        for(const ev0 of events){
+          const ev = ev0 || {};
+          const type = String(ev.type || "").toLowerCase();
+          if(!["flow", "sku", "undo_flow", "undo_sku"].includes(type)) continue;
+          if(wantFlow && type !== "flow") continue;
+          if(wantSku){
+            const evSku = toSkuId(ev.sku || "");
+            const evSkus = Array.isArray(ev.skus) ? ev.skus.map(x=>toSkuId(x)).filter(Boolean) : [];
+            if(evSku !== wantSku && !evSkus.includes(wantSku)) continue;
+          }
+          if(shopifyOnly){
+            const by = String(ev.by || ev.pickedBy || ev.undoneBy || ev.operator || "").toLowerCase();
+            const src = String(ev.source || ev.origin || "").toLowerCase();
+            const isShopify = ev.shopifyFbm === true || by.includes("shopify") || src.includes("shopify");
+            if(!isShopify) continue;
+          }
+          const ts = homeLogStableClientTs(
+            ev.atClient,
+            ev.pickedAtClient,
+            ev.undoneAtClient,
+            ev.createdAtClient,
+            ev.tsClient,
+            ev.timestampClient
+          );
+          if(ts) out.push(ts);
+        }
+      }catch(_e){}
+      return out.filter(n=>Number.isFinite(Number(n)) && Number(n) > 0).map(n=>Number(n));
+    }
+
+    function pickingExplicitShopifyCompletionTs(flow){
+      try{
+        const shop = (flow?.shopify && typeof flow.shopify === "object") ? flow.shopify : {};
+        // Solo campi evento Shopify: niente updatedAt/updatedAtClient, perché cambiano a ogni sync.
+        return homeLogStableClientTs(
+          shop.shippedAtClient,
+          shop.shipped_at,
+          shop.lastShipmentAtClient,
+          shop.lastShipmentAt,
+          shop.fulfilledAtClient,
+          shop.fulfilled_at,
+          shop.fulfillmentAtClient,
+          shop.fulfillment_at,
+          shop.fulfillmentCreatedAtClient,
+          shop.fulfillment_created_at,
+          shop.lastFulfillmentAtClient,
+          shop.lastFulfillmentAt,
+          shop.closedAtClient,
+          shop.closed_at,
+          flow?.shippedAtClient,
+          flow?.shipped_at,
+          flow?.fulfilledAtClient,
+          flow?.fulfilled_at,
+          flow?.lastShipmentAtClient,
+          flow?.lastShipmentAt,
+          flow?.lastFulfillmentAtClient,
+          flow?.lastFulfillmentAt,
+          flow?.closedAtClient,
+          flow?.closed_at
+        );
+      }catch(_e){
+        return 0;
+      }
+    }
+
+    function pickingFlowStableBaseTs(flow){
+      try{
+        const shop = (flow?.shopify && typeof flow.shopify === "object") ? flow.shopify : {};
+        // Fallback immutabile: quando manca un vero timestamp di spedizione/prelievo,
+        // usiamo la nascita/import del flusso, non l'ultimo aggiornamento del documento.
+        return homeLogStableClientTs(
+          flow?.appliedAtClient,
+          flow?.importedAtClient,
+          flow?.createdAtClient,
+          flow?.orderCreatedAtClient,
+          shop.orderCreatedAtClient,
+          shop.createdAtClient,
+          shop.created_at,
+          shop.createdAt,
+          flow?.appliedAt,
+          flow?.createdAt
+        );
+      }catch(_e){
+        return 0;
+      }
+    }
+
+    function pickingLineStableClientTs(flow, sku, rec = {}, completedByShopify = false){
+      try{
+        const p = (flow?.picking && typeof flow.picking === "object") ? flow.picking : {};
+        const r = (flow?.reservation && typeof flow.reservation === "object") ? flow.reservation : {};
+        const s = toSkuId(sku || rec?.sku || "");
+
+        if(completedByShopify){
+          let evShopify = pickingEventStableClientTsList(flow, { sku:s, shopifyOnly:true });
+          if(evShopify.length) return Math.min(...evShopify);
+          let evAny = pickingEventStableClientTsList(flow, { sku:s });
+          if(evAny.length) return Math.min(...evAny);
+          const shipTs = pickingExplicitShopifyCompletionTs(flow);
+          if(shipTs) return shipTs;
+          return pickingFlowStableBaseTs(flow);
+        }
+
+        const direct = homeLogStableClientTs(rec?.pickedAtClient, rec?.atClient, rec?.createdAtClient);
+        if(direct) return direct;
+        const ev = pickingEventStableClientTsList(flow, { sku:s });
+        if(ev.length) return Math.max(...ev);
+        return homeLogStableClientTs(p.flowPickedAtClient, r.pickedAtClient, p.pickedAtClient) || pickingFlowStableBaseTs(flow);
+      }catch(_e){
+        return 0;
+      }
+    }
+
+    function pickingFlowStableClientTs(flow, completedByShopify = false){
+      try{
+        const p = (flow?.picking && typeof flow.picking === "object") ? flow.picking : {};
+        const r = (flow?.reservation && typeof flow.reservation === "object") ? flow.reservation : {};
+        const picked = pickingLineMap(flow);
+        const lineTs = [];
+        for(const rec of Object.values(picked || {})){
+          if(!rec || !(rec.picked === true || rec.status === "prelevato")) continue;
+          const ts = pickingLineStableClientTs(flow, rec.sku || "", rec, completedByShopify);
+          if(ts) lineTs.push(ts);
+        }
+
+        if(completedByShopify){
+          const evShopify = pickingEventStableClientTsList(flow, { flowOnly:true, shopifyOnly:true });
+          if(evShopify.length) return Math.min(...evShopify);
+          const evAny = pickingEventStableClientTsList(flow, { flowOnly:true });
+          if(evAny.length) return Math.min(...evAny);
+          if(lineTs.length) return Math.min(...lineTs);
+          const shipTs = pickingExplicitShopifyCompletionTs(flow);
+          if(shipTs) return shipTs;
+          return pickingFlowStableBaseTs(flow);
+        }
+
+        const direct = homeLogStableClientTs(p.flowPickedAtClient, r.pickedAtClient, p.pickedAtClient);
+        const ev = pickingEventStableClientTsList(flow, { flowOnly:true });
+        const candidates = [direct, ...ev, ...lineTs].filter(n=>Number.isFinite(Number(n)) && Number(n) > 0).map(n=>Number(n));
+        if(candidates.length) return Math.max(...candidates);
+        return pickingFlowStableBaseTs(flow);
+      }catch(_e){
+        return 0;
+      }
+    }
+
+    function pickingStableOperatorLabel(value, completedByShopify = false){
+      const raw = String(value || "").trim();
+      if(completedByShopify && (!raw || raw.toLowerCase() === "shopify")) return "Shopify";
+      return raw;
+    }
+
     function homeLogEntriesFromPickingFlow(flow){
       const out = [];
       try{
@@ -8569,34 +8712,6 @@ function startAllLogs(){
       }catch(err){
         console.warn("picking log entry error", err);
       }
-
-      // Protezione extra: se il backend Shopify riscrive lo stesso esito su sync successivi,
-      // non mostriamo la stessa riga come se fosse un nuovo log. Manteniamo il primo timestamp.
-      try{
-        const byImmutableKey = new Map();
-        const stableOut = [];
-        for(const e of out){
-          const ev = e?.raw?.event || {};
-          const type = String(ev.type || "").toLowerCase();
-          const actorNorm = String(e?.actor || "").toLowerCase();
-          const isAutoShopify = (ev.shopifyFbm === true || actorNorm.includes("shopify")) && (type === "flow" || type === "sku");
-          if(!isAutoShopify){
-            stableOut.push(e);
-            continue;
-          }
-          const skuKey = toSkuId(ev.sku || "");
-          const skusKey = Array.isArray(ev.skus) ? ev.skus.map(x=>toSkuId(x)).filter(Boolean).sort().join(",") : "";
-          const key = `shopify-pick:${String(flow?.workflowId || flow?.id || "flow").trim()}:${type}:${skuKey || skusKey}:${Number(ev.count || 0) || ""}`;
-          const prev = byImmutableKey.get(key);
-          if(!prev || (Number(e.ts || 0) && Number(e.ts || 0) < Number(prev.ts || Infinity))){
-            byImmutableKey.set(key, e);
-          }
-        }
-        for(const e of byImmutableKey.values()) stableOut.push(e);
-        stableOut.sort((a,b)=> (Number(a.ts || 0) - Number(b.ts || 0)));
-        return stableOut;
-      }catch(_e){}
-
       return out;
     }
 
@@ -10620,9 +10735,8 @@ function currentInv(){
       const loc = (flow?.location === "cerea" || flow?.location === "concamarise") ? flow.location : "concamarise";
       const picked = pickingLineMap(flow);
       const completedByShopify = isShopifyFbmCompletedByShopify(flow);
-      let maxPickedAt = Number(flow?.picking?.flowPickedAtClient || flow?.updatedAtClient || 0) || 0;
-      let pickedBy = String(flow?.picking?.flowPickedBy || flow?.picking?.updatedBy || "");
-      if(completedByShopify && !pickedBy) pickedBy = "Shopify";
+      let maxPickedAt = pickingFlowStableClientTs(flow, completedByShopify);
+      let pickedBy = pickingStableOperatorLabel(flow?.picking?.flowPickedBy || flow?.picking?.updatedBy || "", completedByShopify);
       let totalQty = 0;
       const skus = [];
       for(const line of lines){
@@ -10632,9 +10746,15 @@ function currentInv(){
         const qty = Math.abs(parseQty(line?.qty || 0) || 0);
         totalQty += qty;
         const rec = picked[pickingSkuKey(sku)] || {};
-        const at = Number(rec.pickedAtClient || rec.atClient || 0) || 0;
-        if(at > maxPickedAt) maxPickedAt = at;
-        if(!pickedBy && (rec.pickedBy || rec.by)) pickedBy = String(rec.pickedBy || rec.by || "");
+        const at = pickingLineStableClientTs(flow, sku, rec, completedByShopify);
+        if(at){
+          if(completedByShopify){
+            if(!maxPickedAt || at < maxPickedAt) maxPickedAt = at;
+          }else if(at > maxPickedAt){
+            maxPickedAt = at;
+          }
+        }
+        if(!pickedBy && (rec.pickedBy || rec.by)) pickedBy = pickingStableOperatorLabel(rec.pickedBy || rec.by || "", completedByShopify);
       }
       return {
         type:"flow",
@@ -10679,8 +10799,8 @@ function currentInv(){
             title: squashWhitespace(rec.title || pickingLineTitle({ sku }, flow) || sku),
             qty: Number.isFinite(Number(rec.qty)) ? Math.round(Number(rec.qty)) : 0,
             position: squashWhitespace(rec.position || rec.rackLocation || pickingLinePositionText(flow, sku) || "—"),
-            at: Number(rec.pickedAtClient || rec.atClient || flow?.picking?.flowPickedAtClient || 0) || 0,
-            by: String(rec.pickedBy || rec.by || flow?.picking?.flowPickedBy || "")
+            at: pickingLineStableClientTs(flow, sku, rec, isShopifyFbmCompletedByShopify(flow)),
+            by: pickingStableOperatorLabel(rec.pickedBy || rec.by || flow?.picking?.flowPickedBy || "", isShopifyFbmCompletedByShopify(flow))
           });
         }
       }
