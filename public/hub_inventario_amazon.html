@@ -3236,6 +3236,193 @@ function guessTitleFromRaw(rawText, sku){
       return readRackLocationsFromDoc(it || {}).join(" ");
     }
 
+    // --- Area di produzione (diversa da sede/magazzino) ---
+    const PRODUCTION_AREA_DEFAULT = "concamarise";
+    const PRODUCTION_READY_CEREA_EMAIL_TO = ["matteo@generalcoppersrl.com"];
+
+    function normalizeProductionArea(v){
+      const s = String(v || "").trim().toLowerCase();
+      return (s === "cerea") ? "cerea" : PRODUCTION_AREA_DEFAULT;
+    }
+
+    function defaultProductionAreaForLocation(loc){
+      return String(loc || "").trim().toLowerCase() === "cerea" ? "cerea" : PRODUCTION_AREA_DEFAULT;
+    }
+
+    function readProductionAreaFromDoc(d, fallbackLoc=""){
+      const fallback = defaultProductionAreaForLocation(fallbackLoc);
+      if(!d || typeof d !== "object") return fallback;
+
+      const raw = (
+        d.productionArea ??
+        d.areaProduzione ??
+        d.produzioneArea ??
+        d.productionLocation ??
+        d.productionSite ??
+        ""
+      );
+      if(raw === null || raw === undefined || String(raw).trim() === "") return fallback;
+      return normalizeProductionArea(raw);
+    }
+
+    function productionAreaLabel(v){
+      return prettyLoc(normalizeProductionArea(v));
+    }
+
+    function productionAreaSelectOptions(selected){
+      const v = normalizeProductionArea(selected);
+      return [
+        `<option value="concamarise"${v === "concamarise" ? " selected" : ""}>Concamarise</option>`,
+        `<option value="cerea"${v === "cerea" ? " selected" : ""}>Cerea</option>`
+      ].join("");
+    }
+
+    function productionAreaCloudPatch(area, nowClient, who){
+      const v = normalizeProductionArea(area);
+      const api = state.firebase?.api;
+      const patch = {
+        productionArea: v,
+        areaProduzione: v,
+        productionAreaUpdatedAtClient: nowClient || Date.now(),
+        productionAreaUpdatedBy: who || state.user?.email || state.user?.uid || ""
+      };
+      if(api?.serverTimestamp) patch.productionAreaUpdatedAt = api.serverTimestamp();
+      return patch;
+    }
+
+    function productionAreaMetaLabel(it){
+      const loc = it?.loc || it?.location || it?.lastSeenLocation || "";
+      return `Area prod.: ${productionAreaLabel(readProductionAreaFromDoc(it || {}, loc))}`;
+    }
+
+    function productionReadyCereaRowFromLoad(row, fallbackLoc=""){
+      const sku = toSkuId(row?.sku || row?.id || "");
+      const qty = Math.abs(parseQty(row?.qty ?? row?.qtySigned ?? row?.deltaSigned ?? 0) || 0);
+      const loc = (row?.loc === "cerea" || row?.loc === "concamarise") ? row.loc : (fallbackLoc || row?.location || "");
+      const productionArea = normalizeProductionArea(row?.productionArea || row?.areaProduzione || readProductionAreaFromDoc(row || {}, loc));
+      if(!sku || qty <= 0 || productionArea !== "cerea") return null;
+      return {
+        sku,
+        title: squashWhitespace(row?.title || row?.name || row?.product || sku) || sku,
+        qty,
+        loc: (loc === "cerea" || loc === "concamarise") ? loc : "",
+        productionArea
+      };
+    }
+
+    async function enqueueProductionReadyCereaEmail(rows, context = {}){
+      try{
+        if(!state.user?.isWhitelisted) return false;
+        const api = state.firebase?.api;
+        const db = state.firebase?.db;
+        if(!api || !db) return false;
+
+        const bySku = new Map();
+        for(const raw of (Array.isArray(rows) ? rows : [])){
+          const r = productionReadyCereaRowFromLoad(raw, context?.loc || "");
+          if(!r) continue;
+          const prev = bySku.get(r.sku) || { ...r, qty: 0 };
+          prev.qty += r.qty;
+          if(!prev.title && r.title) prev.title = r.title;
+          if(!prev.loc && r.loc) prev.loc = r.loc;
+          bySku.set(r.sku, prev);
+        }
+
+        const list = Array.from(bySku.values()).sort((a,b)=> a.sku.localeCompare(b.sku));
+        if(!list.length) return false;
+
+        const nowClient = Date.now();
+        const stamp = fmtDate(nowClient);
+        const source = squashWhitespace(context?.source || "Hub Inventario Amazon");
+        const flowId = squashWhitespace(Array.isArray(context?.flowIds) ? context.flowIds.filter(Boolean).join(", ") : (context?.flowId || ""));
+        const fileName = squashWhitespace(context?.fileName || "");
+        const who = state.user?.emailLower || state.user?.email || state.user?.uid || "";
+
+        const subject = list.length === 1
+          ? `Completato SKU ${list[0].sku} • disponibile a Cerea per il ritiro`
+          : `Completati ${list.length} SKU • disponibili a Cerea per il ritiro`;
+
+        const lineText = list.map(r=>{
+          const sede = r.loc ? ` • Sede inventario: ${prettyLoc(r.loc)}` : "";
+          return `- ${r.sku} • ${r.title} • ${r.qty} pz${sede}`;
+        }).join("\\n");
+
+        const text = [
+          "Completato SKU e disponibile a Cerea per il ritiro.",
+          `Generato: ${stamp}`,
+          `Origine: ${source}`,
+          fileName ? `File: ${fileName}` : "",
+          flowId ? `Flusso: ${flowId}` : "",
+          "",
+          lineText,
+          "",
+          "Area di produzione: Cerea",
+          "Messaggio automatico da Hub Inventario Amazon."
+        ].filter(Boolean).join("\\n");
+
+        const htmlRows = list.map(r=>`
+          <tr>
+            <td style="padding:10px 12px;border-bottom:1px solid #e9eef2;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px;color:#0f172a;white-space:nowrap">${escapeHtml(r.sku)}</td>
+            <td style="padding:10px 12px;border-bottom:1px solid #e9eef2;font-size:14px;color:#0f172a">${escapeHtml(r.title)}</td>
+            <td style="padding:10px 12px;border-bottom:1px solid #e9eef2;text-align:right;font-weight:800;color:#0f172a;white-space:nowrap">${escapeHtml(String(r.qty))}</td>
+            <td style="padding:10px 12px;border-bottom:1px solid #e9eef2;font-size:13px;color:#475569;white-space:nowrap">${escapeHtml(r.loc ? prettyLoc(r.loc) : "—")}</td>
+          </tr>
+        `).join("");
+
+        const html = `
+          <div style="font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Arial,sans-serif;line-height:1.45;background:#ffffff;margin:0;padding:0;color:#0f172a">
+            <div style="max-width:760px;margin:0 auto;border:1px solid #e9eef2;border-radius:14px;overflow:hidden">
+              <div style="padding:16px 18px;background:#f8fafc;border-bottom:1px solid #e9eef2">
+                <div style="font-size:17px;font-weight:800;margin:0 0 4px 0">Completato SKU • disponibile a Cerea per il ritiro</div>
+                <div style="font-size:13px;color:#64748b">Generato: <b>${escapeHtml(stamp)}</b> • Origine: <b>${escapeHtml(source)}</b>${fileName ? ` • File: <b>${escapeHtml(fileName)}</b>` : ""}</div>
+              </div>
+              <div style="padding:16px 18px">
+                <p style="margin:0 0 12px 0;font-size:14px">I seguenti SKU risultano completati con <b>area di produzione Cerea</b> e sono disponibili per il ritiro.</p>
+                <table style="width:100%;border-collapse:collapse;border:1px solid #e9eef2;border-radius:12px;overflow:hidden">
+                  <thead>
+                    <tr>
+                      <th style="padding:10px 12px;text-align:left;font-size:11px;letter-spacing:.04em;text-transform:uppercase;color:#64748b;background:#fbfcfd;border-bottom:1px solid #e9eef2">SKU</th>
+                      <th style="padding:10px 12px;text-align:left;font-size:11px;letter-spacing:.04em;text-transform:uppercase;color:#64748b;background:#fbfcfd;border-bottom:1px solid #e9eef2">Prodotto</th>
+                      <th style="padding:10px 12px;text-align:right;font-size:11px;letter-spacing:.04em;text-transform:uppercase;color:#64748b;background:#fbfcfd;border-bottom:1px solid #e9eef2">Q.tà</th>
+                      <th style="padding:10px 12px;text-align:left;font-size:11px;letter-spacing:.04em;text-transform:uppercase;color:#64748b;background:#fbfcfd;border-bottom:1px solid #e9eef2">Sede inv.</th>
+                    </tr>
+                  </thead>
+                  <tbody>${htmlRows}</tbody>
+                </table>
+                ${flowId ? `<div style="margin-top:12px;font-size:12px;color:#64748b">Flusso: <span style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace">${escapeHtml(flowId)}</span></div>` : ""}
+                <div style="margin-top:12px;font-size:12px;color:#64748b">Messaggio automatico da Hub Inventario Amazon.</div>
+              </div>
+            </div>
+          </div>`;
+
+        await api.addDoc(api.collection(db, "email"), {
+          to: PRODUCTION_READY_CEREA_EMAIL_TO,
+          message: { subject, text, html },
+          createdAt: api.serverTimestamp(),
+          createdAtClient: nowClient,
+          kind: "production_ready_cerea_pickup",
+          productionReady: {
+            area: "cerea",
+            status: "disponibile_per_ritiro",
+            source,
+            flowId: flowId || null,
+            fileName: fileName || null,
+            totalSkus: list.length,
+            totalPieces: list.reduce((a,r)=>a + (Number(r.qty)||0), 0),
+            rows: list.slice(0, 200)
+          },
+          createdBy: who
+        });
+
+        showToast("Mail ritiro Cerea", list.length === 1 ? `${list[0].sku} disponibile a Cerea.` : `${list.length} SKU disponibili a Cerea.`, 2200);
+        return true;
+      }catch(err){
+        console.warn("production ready cerea email", err);
+        showToast("Carico OK", "Mail ritiro Cerea non inviata: controlla permessi email/connessione.", 3200);
+        return false;
+      }
+    }
+
     function sanitizeRackLocationsForQty(value, qty){
       const list = normalizeRackLocationsList(value);
       const q = Number.isFinite(Number(qty)) ? Number(qty) : parseSignedQtyStrict(qty);
@@ -4352,6 +4539,8 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
             reservedQty: Number.isFinite(Number(d.reservedQty)) ? Math.max(0, Math.round(Number(d.reservedQty))) : 0,
             availableQty: Math.max(0, (Number.isFinite(Number(qty)) ? Math.round(Number(qty)) : 0) - (Number.isFinite(Number(d.reservedQty)) ? Math.max(0, Math.round(Number(d.reservedQty))) : 0)),
             lowStockThreshold: __parseLowStockThresholdValue(d.lowStockThreshold),
+            productionArea: readProductionAreaFromDoc(d, loc),
+            areaProduzione: readProductionAreaFromDoc(d, loc),
             rackLocations: readRackLocationsFromDoc(d),
             rackLocation: readRackLocationFromDoc(d),
             reordered: d.reordered === true,
@@ -7303,11 +7492,15 @@ function closeSheet(kind){
               const title = String(it.title||"").trim();
               const delta = deltaSign * Math.abs(parseQty(it.qty) || 0);
               const ref = api.doc(db, COL_ROOT, p.loc, SUB_ITEMS, sku);
+              const currentItem = ((p.loc === "cerea" ? idx.mapCerea : idx.mapConca).get(sku)) || {};
+              const productionArea = readProductionAreaFromDoc(currentItem, p.loc);
+              const productionPatch = productionAreaCloudPatch(productionArea, tsClient, state.user.email || "");
               batch.set(ref, {
                 sku,
                 title: title || "",
                 titleNorm: normalizeText(title || sku),
                 qty: api.increment(delta),
+                ...productionPatch,
                 updatedAt: api.serverTimestamp(),
                 updatedAtClient: tsClient,
                 updatedBy: state.user.email || "",
@@ -7318,6 +7511,8 @@ function closeSheet(kind){
                 type: "carica",
                 qtySigned: delta,
                 deltaSigned: delta,
+                productionArea: productionArea,
+                areaProduzione: productionArea,
                 fromWarehouse: p.loc,
                 toWarehouse: p.loc,
                 source: "campo_libero",
@@ -7341,11 +7536,15 @@ function closeSheet(kind){
               for(const it of part){
                 const sku = toSkuId(it.sku);
                 const title = String(it.title||"").trim();
+                const currentItem = ((p.loc === "cerea" ? idx.mapCerea : idx.mapConca).get(sku)) || {};
+                const productionArea = readProductionAreaFromDoc(currentItem, p.loc);
+                const productionPatch = productionAreaCloudPatch(productionArea, tsClient, state.user.email || "");
                 const refP = api.doc(db, COL_PRODUCTS, sku);
                 batchP.set(refP, {
                   sku,
                   title: title || "",
                   titleNorm: normalizeText(title || sku),
+                  ...productionPatch,
                   lastSeenAt: api.serverTimestamp(),
                   lastSeenAtClient: tsClient,
                   lastSeenBy: state.user.email || "",
@@ -7371,6 +7570,15 @@ function closeSheet(kind){
         showToast("Carico applicato", `Aggiornati ${parts.join(" • ")}`, 2400);
         scheduleLowStockEmailAfterUpdate("manual_carica_text");
 
+        await enqueueProductionReadyCereaEmail(plans.flatMap(p=>{
+          const invMap = p.loc === "cerea" ? idx.mapCerea : idx.mapConca;
+          return (p.aggregated || []).map(x=>{
+            const sku = toSkuId(x.sku || "");
+            const currentItem = invMap.get(sku) || {};
+            const productionArea = readProductionAreaFromDoc(currentItem, p.loc);
+            return { sku, title: x.title || currentItem.title || sku, qty: Math.abs(parseQty(x.qty)||0), loc: p.loc, productionArea };
+          });
+        }), { source:"Campo libero", flowIds: plans.map(p=>p.flowDocId).filter(Boolean) });
 
         // reset campo
         state.manual.carica.text = "";
@@ -7971,6 +8179,8 @@ function closeSheet(kind){
   const reservedOriginLabel = reservedQty > 0
     ? "Scarichi ID flusso/PDF in attesa picking"
     : "Nessuna prenotazione attiva";
+  const productionArea = readProductionAreaFromDoc(it || {}, loc);
+  const productionAreaText = productionAreaLabel(productionArea);
   const note = (it && (it.note || it.notes)) ? String(it.note || it.notes) : "";
   const rackLocations = readRackLocationsFromDoc(it || {});
   const rackLocation = rackLocations[0] || "";
@@ -7986,7 +8196,7 @@ function closeSheet(kind){
   const comboLabel = comboChildren.length ? `Combo: ${comboChildren.length}/3` : "Combo: nessuna";
 
   if(titleEl) titleEl.textContent = titleMain;
-  if(sub) sub.textContent = `${sku} • ${prettyLoc(loc)} • Disp: ${availableQty} • Fisica: ${physicalQty} • Prenotati: ${reservedQty} • Ubicazione: ${rackLocationsText} • Soglia: ${lowStockThresholdLabel} • ${comboLabel}`;
+  if(sub) sub.textContent = `${sku} • Sede: ${prettyLoc(loc)} • Area prod: ${productionAreaText} • Disp: ${availableQty} • Fisica: ${physicalQty} • Prenotati: ${reservedQty} • Ubicazione: ${rackLocationsText} • Soglia: ${lowStockThresholdLabel} • ${comboLabel}`;
 
   const isAdmin = !!state.user?.isAdmin;
   const editMode = !!state.ui.productDetailsEditMode;
@@ -8038,7 +8248,14 @@ function closeSheet(kind){
 
         <div class="pdSection">
           <div class="pdSectionTitle">Posizione / Magazzino</div>
-          ${roLine("Magazzino", prettyLoc(loc))}
+          ${roLine("Sede / magazzino", prettyLoc(loc))}
+          <div class="pdLine">
+            <div class="pdLabel">Area di produzione</div>
+            <select class="input" data-field="productionAreaImmediate" ${canEdit ? "" : "disabled"}>
+              ${productionAreaSelectOptions(productionArea)}
+            </select>
+            <div class="pdMeta">Default: Concamarise. Campo diverso dalla sede/magazzino; appena cambi valore viene scritto subito in Firestore.</div>
+          </div>
           ${roLine("Ubicazione scaffale", rackLocationsText, rackLocations.length ? "mono" : "")}
           ${metaLine ? `<div class="pdMeta">${metaLine}</div>` : ``}
         </div>
@@ -8099,8 +8316,15 @@ function closeSheet(kind){
 
         <div class="pdSection">
           <div class="pdSectionTitle">Posizione / Magazzino</div>
-          ${roLine("Magazzino", prettyLoc(loc))}
+          ${roLine("Sede / magazzino", prettyLoc(loc))}
           <div class="pdGrid" style="margin-top:10px">
+            <div class="field">
+              <label class="fieldLabel">Area di produzione</label>
+              <select class="input" data-field="productionAreaImmediate" ${canEdit ? "" : "disabled"}>
+                ${productionAreaSelectOptions(productionArea)}
+              </select>
+              <div class="hint" style="margin-top:6px">Default: Concamarise. Campo diverso dalla sede; scrittura cloud immediata al cambio.</div>
+            </div>
             <div class="field">
               <label class="fieldLabel">Ubicazione scaffale</label>
               ${canUseMultipleRackLocations ? `
@@ -8219,6 +8443,7 @@ function closeSheet(kind){
   const titleEl = wrap?.querySelector?.('[data-field="title"]');
   const moveQtyEl = wrap?.querySelector?.('[data-field="moveQty"]');
   const lowStockThresholdEl = wrap?.querySelector?.('[data-field="lowStockThreshold"]');
+  const productionAreaEl = wrap?.querySelector?.('[data-field="productionAreaImmediate"]');
   const rackLocationEl = wrap?.querySelector?.('[data-field="rackLocation"]');
   const rackLocationsEl = wrap?.querySelector?.('[data-field="rackLocations"]');
   const noteEl = wrap?.querySelector?.('[data-field="note"]');
@@ -8229,6 +8454,7 @@ function closeSheet(kind){
   const qtyRaw = (qtyEl?.value ?? "");
   const moveQtyRaw = (moveQtyEl?.value ?? "");
   const lowStockThresholdRaw = (lowStockThresholdEl?.value ?? "");
+  const productionArea = normalizeProductionArea(productionAreaEl?.value || "");
   const rackLocationRaw = (rackLocationEl?.value ?? "");
   const rackLocationsRaw = rackLocationsEl
     ? Array.from(rackLocationsEl.selectedOptions || []).map(opt => opt.value)
@@ -8244,7 +8470,82 @@ function closeSheet(kind){
   const rackLocationOk = isValidRackLocations(rackLocations);
   const note = String(noteRaw).trim();
 
-  return { sku, title, qty, moveQty, lowStockThreshold, lowStockThresholdOk: lowStockParsed.ok, rackLocation, rackLocations, rackLocationOk, note, qtyRaw: String(qtyRaw), moveQtyRaw: String(moveQtyRaw), lowStockThresholdRaw: String(lowStockThresholdRaw), rackLocationRaw: Array.isArray(rackLocationsRaw) ? rackLocationsRaw.join(",") : String(rackLocationsRaw) };
+  return { sku, title, qty, moveQty, lowStockThreshold, lowStockThresholdOk: lowStockParsed.ok, productionArea, rackLocation, rackLocations, rackLocationOk, note, qtyRaw: String(qtyRaw), moveQtyRaw: String(moveQtyRaw), lowStockThresholdRaw: String(lowStockThresholdRaw), rackLocationRaw: Array.isArray(rackLocationsRaw) ? rackLocationsRaw.join(",") : String(rackLocationsRaw) };
+}
+
+async function updateProductProductionAreaImmediate(area){
+  const loc = state.route.loc;
+  const sku = toSkuId(state.ui.productDetailsSku || "");
+  const productionArea = normalizeProductionArea(area);
+
+  if(!loc || !sku) return;
+  if(!state.user?.isAdmin){
+    showToast("Permessi", "Solo Admin può modificare l’area di produzione.", 2200);
+    renderProductDetailsSheet();
+    return;
+  }
+
+  const api = state.firebase?.api;
+  const db = state.firebase?.db;
+  if(!api || !db){
+    showToast("Errore", "Firebase non inizializzato.", 2200);
+    renderProductDetailsSheet();
+    return;
+  }
+
+  const selects = Array.from(document.querySelectorAll('#productDetailsContent [data-field="productionAreaImmediate"]'));
+  selects.forEach(el => { try{ el.disabled = true; }catch(_e){} });
+
+  try{
+    const nowClient = Date.now();
+    const who = state.user?.email || state.user?.emailLower || state.user?.uid || "";
+    const currentLoc = (loc === "cerea" || loc === "concamarise") ? loc : "concamarise";
+    const otherLoc = currentLoc === "cerea" ? "concamarise" : "cerea";
+
+    const itemRef = api.doc(db, COL_ROOT, currentLoc, SUB_ITEMS, sku);
+    const otherRef = api.doc(db, COL_ROOT, otherLoc, SUB_ITEMS, sku);
+    const productRef = api.doc(db, COL_PRODUCTS, sku);
+    const patch = productionAreaCloudPatch(productionArea, nowClient, who);
+
+    await api.runTransaction(db, async (tx)=>{
+      const itemSnap = await tx.get(itemRef);
+      const otherSnap = await tx.get(otherRef);
+      if(!itemSnap.exists()) throw new Error("Prodotto non trovato.");
+      tx.set(itemRef, {
+        ...patch,
+        updatedAt: api.serverTimestamp(),
+        updatedAtClient: nowClient,
+        updatedBy: who
+      }, { merge:true });
+      if(otherSnap.exists()){
+        tx.set(otherRef, {
+          ...patch,
+          updatedAt: api.serverTimestamp(),
+          updatedAtClient: nowClient,
+          updatedBy: who
+        }, { merge:true });
+      }
+      tx.set(productRef, {
+        sku,
+        ...patch,
+        updatedAt: api.serverTimestamp(),
+        updatedAtClient: nowClient,
+        updatedBy: who,
+        lastSeenAt: api.serverTimestamp(),
+        lastSeenAtClient: nowClient,
+        lastSeenBy: who,
+        lastSeenKind: "production_area_edit"
+      }, { merge:true });
+    });
+
+    showToast("Area produzione aggiornata", `${sku} • ${productionAreaLabel(productionArea)}`, 1600);
+  }catch(err){
+    console.error("update production area", err);
+    showToast("Errore area produzione", String(err?.message || err).slice(0, 220), 3000);
+    renderProductDetailsSheet();
+  }finally{
+    selects.forEach(el => { try{ el.disabled = !state.user?.isAdmin; }catch(_e){} });
+  }
 }
 
 
@@ -9010,6 +9311,8 @@ async function loadProductFromDetails(){
           const title = squashWhitespace(data.title || data.name || sku) || sku;
           const nowClient = Date.now();
           const who = state.user?.email || state.user?.uid || "";
+          const productionArea = readProductionAreaFromDoc(data, loc);
+          const productionPatch = productionAreaCloudPatch(productionArea, nowClient, who);
 
           const rackClearData = beforeQty <= 0 ? { rackLocation: "", rackLocations: [] } : {};
           tx.set(itemRef, {
@@ -9017,6 +9320,7 @@ async function loadProductFromDetails(){
             title,
             titleNorm: normalizeText(title || sku),
             qty: api.increment(qtyToLoad),
+            ...productionPatch,
             location: loc,
             updatedAt: api.serverTimestamp(),
             updatedAtClient: nowClient,
@@ -9032,6 +9336,7 @@ async function loadProductFromDetails(){
             sku,
             title,
             titleNorm: normalizeText(title || sku),
+            ...productionPatch,
             lastSeenAt: api.serverTimestamp(),
             lastSeenAtClient: nowClient,
             lastSeenBy: who,
@@ -9047,6 +9352,8 @@ async function loadProductFromDetails(){
             qtySigned: qtyToLoad,
             beforeQty,
             afterQty,
+            productionArea: productionArea,
+            areaProduzione: productionArea,
             fromWarehouse: loc,
             toWarehouse: loc,
             source: "manuale",
@@ -9080,11 +9387,12 @@ async function loadProductFromDetails(){
             });
           }
 
-          return { beforeQty, afterQty, title };
+          return { beforeQty, afterQty, title, productionArea };
         });
 
         showToast("Carico registrato", `+${qtyToLoad} pz • Totale: ${res.afterQty}`, 2200);
         scheduleLowStockEmailAfterUpdate("product_manual_load");
+        await enqueueProductionReadyCereaEmail([{ sku, title: res.title, qty: qtyToLoad, loc, productionArea: res.productionArea }], { source:"Scheda prodotto", loc });
         renderProductDetailsSheet();
         renderProductsSheet();
         renderInventoryList();
@@ -10073,6 +10381,8 @@ async function applyFlow(kind){
               const ref = api.doc(db, COL_ROOT, p.loc, SUB_ITEMS, sku);
               const currentMap = p.loc === "concamarise" ? mapConca : mapCerea;
               const currentItem = currentMap.get(sku) || {};
+              const productionArea = readProductionAreaFromDoc(currentItem, p.loc);
+              const productionPatch = productionAreaCloudPatch(productionArea, tsClient, state.user.email || "");
 
               if(kind === "scarica"){
                 batch.set(ref, {
@@ -10081,6 +10391,7 @@ async function applyFlow(kind){
                   titleNorm: normalizeText(title || sku),
                   reservedQty: api.increment(qtyAbs),
                   pendingPickQty: api.increment(qtyAbs),
+                  ...productionPatch,
                   reservationStatus: "in_attesa_picking",
                   lastReservationFlowId: p.flowDocId || wfId || "",
                   lastReservationWorkflowId: wfId || null,
@@ -10100,6 +10411,8 @@ async function applyFlow(kind){
                   deltaSigned: 0,
                   reservationQty: qtyAbs,
                   reservedQtySigned: qtyAbs,
+                  productionArea: productionArea,
+                  areaProduzione: productionArea,
                   fromWarehouse: p.loc,
                   toWarehouse: p.loc,
                   source: "flusso_pdf_prenotazione",
@@ -10121,6 +10434,7 @@ async function applyFlow(kind){
                   title: title || "",
                   titleNorm: normalizeText(title || sku),
                   qty: api.increment(delta),
+                  ...productionPatch,
                   ...rackClearData,
                   updatedAt: api.serverTimestamp(),
                   updatedAtClient: tsClient,
@@ -10132,6 +10446,8 @@ async function applyFlow(kind){
                   type: "carica",
                   qtySigned: delta,
                   deltaSigned: delta,
+                  productionArea: productionArea,
+                  areaProduzione: productionArea,
                   fromWarehouse: p.loc,
                   toWarehouse: p.loc,
                   source: "flusso_pdf",
@@ -10164,11 +10480,17 @@ async function applyFlow(kind){
               const sku = toSkuId(it.sku);
               if(!sku) continue;
               const title = squashWhitespace(it.title||"") || sku;
+              const locForProduct = (it.__loc === "cerea" || it.__loc === "concamarise") ? it.__loc : "concamarise";
+              const currentMap = locForProduct === "cerea" ? mapCerea : mapConca;
+              const currentItem = currentMap.get(sku) || {};
+              const productionArea = readProductionAreaFromDoc(currentItem, locForProduct);
+              const productionPatch = productionAreaCloudPatch(productionArea, tsClient, state.user?.emailLower || state.user?.email || "");
               const refP = api.doc(db, COL_PRODUCTS, sku);
               batchP.set(refP, {
                 sku,
                 title,
                 titleNorm: normalizeText(title),
+                ...productionPatch,
                 lastSeenAt: api.serverTimestamp(),
                 lastSeenAtClient: tsClient,
                 lastSeenBy: state.user?.emailLower || state.user?.email || "",
@@ -10211,6 +10533,17 @@ async function applyFlow(kind){
         showToast(kind === "scarica" ? "Prenotato" : "Applicato", parts || "OK", 2400);
         scheduleLowStockEmailAfterUpdate(kind === "scarica" ? "flow_scarica_prenotazione" : ("flow_" + kind));
 
+        if(kind === "carica"){
+          await enqueueProductionReadyCereaEmail(planChunks.flatMap(p=>{
+            const invMap = p.loc === "cerea" ? mapCerea : mapConca;
+            return (p.aggregated || []).map(x=>{
+              const sku = toSkuId(x.sku || "");
+              const currentItem = invMap.get(sku) || {};
+              const productionArea = readProductionAreaFromDoc(currentItem, p.loc);
+              return { sku, title: x.title || currentItem.title || sku, qty: Math.abs(parseQty(x.qty)||0), loc: p.loc, productionArea };
+            });
+          }), { source:"PDF carica", fileName: flow.file?.name || "", flowIds: planChunks.map(p=>p.flowDocId).filter(Boolean) });
+        }
 
         // reset flow UI
         flow.file = null;
@@ -10477,6 +10810,12 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
         e.stopPropagation();
         const moveId = btn.getAttribute("data-moveid") || "";
         if(moveId) deleteProductMovementFromDetails(moveId);
+      });
+
+      $("productDetailsContent")?.addEventListener("change", (e)=>{
+        const sel = e.target?.closest?.('[data-field="productionAreaImmediate"]');
+        if(!sel) return;
+        updateProductProductionAreaImmediate(sel.value);
       });
 
       $("productDetailsActions")?.addEventListener("click", (e)=>{
