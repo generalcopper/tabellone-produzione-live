@@ -6820,6 +6820,7 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
 
         triggerLowStockMailFromRealtime("realtime_low_stock_" + loc);
         scheduleTwReordersBackfillFromState("inventory_" + loc);
+        refreshActivityLogSkuWatchers("inventory_" + loc);
       }, (err)=>{
         console.warn("inventory watch error", err);
         showToast("Permessi insufficienti", err?.message || String(err));
@@ -7874,6 +7875,7 @@ function startAllLogs(){
           .slice(0, 1000);
         lg.flows = flows;
         lg.meta.count = flows.length;
+        refreshActivityLogSkuWatchers("logs_" + loc);
         renderLogsForLoc(loc);
       };
 
@@ -7908,40 +7910,210 @@ function startAllLogs(){
 
 
     // --- Logs home: movimenti cloud live + flussi PDF ---
+    // Non usa più collectionGroup("movements") ordinata: quella query richiede un indice
+    // Collection Group creato da Console Firebase. Qui leggiamo direttamente le sottocollezioni
+    // /amzInventoryProducts/{sku}/movements, così il Picking funziona senza creare indici.
+    const ACTIVITY_MOVEMENT_SKU_LIMIT = 420;
+    const ACTIVITY_MOVEMENT_PER_SKU_LIMIT = 8;
+    const ACTIVITY_MOVEMENT_TOTAL_LIMIT = 120;
+
+    function activityLogSkuTsFromItem(it){
+      try{
+        return Math.max(
+          Number(it?.updatedAtClient || 0) || 0,
+          Number(it?.lastPickingAtClient || 0) || 0,
+          Number(it?.lastSeenAtClient || 0) || 0,
+          Number(it?.reorderedAtClient || 0) || 0,
+          it?.updatedAt?.toMillis?.() || 0
+        );
+      }catch(_e){ return 0; }
+    }
+
+    function getActivityLogSkuCandidates(){
+      const map = new Map();
+      const put = (skuRaw, tsRaw=0)=>{
+        const sku = toSkuId(skuRaw || "");
+        if(!sku) return;
+        const ts = Number(tsRaw || 0) || 0;
+        const prev = map.get(sku) || { sku, ts:0 };
+        if(ts > prev.ts) prev.ts = ts;
+        map.set(sku, prev);
+      };
+
+      for(const loc of ["concamarise", "cerea"]){
+        for(const it of (state.inventory?.[loc]?.items || [])){
+          put(it?.sku || it?.id || "", activityLogSkuTsFromItem(it));
+        }
+      }
+
+      // Aggiungo anche gli SKU presenti nei flussi recenti: se un prodotto è stato appena scaricato
+      // ma la lista inventario non ha ancora fatto snapshot, il log resta comunque agganciato.
+      for(const loc of ["concamarise", "cerea"]){
+        for(const f of (state.logs?.[loc]?.flows || [])){
+          const fTs = flowLogTimestamp(f) || 0;
+          for(const line of (Array.isArray(f?.lines) ? f.lines : [])){
+            put(line?.sku || "", fTs);
+          }
+        }
+      }
+
+      return Array.from(map.values())
+        .sort((a,b)=> (b.ts || 0) - (a.ts || 0) || String(a.sku).localeCompare(String(b.sku)))
+        .slice(0, ACTIVITY_MOVEMENT_SKU_LIMIT)
+        .map(x=>x.sku);
+    }
+
+    function scheduleActivityLogMerge(){
+      try{
+        if(!state.activityLogs) return;
+        if(state.activityLogs._mergeTimer) clearTimeout(state.activityLogs._mergeTimer);
+        state.activityLogs._mergeTimer = setTimeout(()=>{
+          state.activityLogs._mergeTimer = null;
+          mergeActivityLogMovementMaps();
+        }, 80);
+      }catch(_e){}
+    }
+
+    function mergeActivityLogMovementMaps(){
+      try{
+        if(!state.activityLogs) return;
+        const byKey = new Map();
+        const maps = state.activityLogs._movementMaps || new Map();
+        for(const arr of maps.values()){
+          for(const m of (Array.isArray(arr) ? arr : [])){
+            const key = String(m?.path || `${m?.productSku || ""}/${m?.id || ""}`);
+            if(!key) continue;
+            const prev = byKey.get(key);
+            const ts = Number(m?.createdAtClient || m?.updatedAtClient || 0) || 0;
+            const prevTs = prev ? (Number(prev.createdAtClient || prev.updatedAtClient || 0) || 0) : -1;
+            if(!prev || ts >= prevTs) byKey.set(key, m);
+          }
+        }
+        const arr = Array.from(byKey.values())
+          .sort((a,b)=>{
+            const ta = Number(a?.createdAtClient || a?.updatedAtClient || 0) || 0;
+            const tb = Number(b?.createdAtClient || b?.updatedAtClient || 0) || 0;
+            if(tb !== ta) return tb - ta;
+            return String(b?.id || "").localeCompare(String(a?.id || ""));
+          })
+          .slice(0, ACTIVITY_MOVEMENT_TOTAL_LIMIT);
+
+        const errors = state.activityLogs._watchErrors || new Map();
+        const firstErr = errors.size ? Array.from(errors.values()).find(Boolean) : "";
+        state.activityLogs.movements = arr;
+        state.activityLogs.error = firstErr || "";
+        state.activityLogs.loaded = true;
+        renderHomeLogsBox();
+      }catch(err){
+        console.warn("mergeActivityLogMovementMaps", err);
+        if(state.activityLogs){
+          state.activityLogs.error = err?.message || String(err || "Errore log movimenti");
+          state.activityLogs.loaded = false;
+        }
+        renderHomeLogsBox();
+      }
+    }
+
+    function clearActivityLogSkuWatchers(){
+      try{
+        const watchers = state.activityLogs?._skuWatchers || [];
+        for(const fn of watchers){ try{ fn && fn(); }catch(_e){} }
+      }catch(_e){}
+      try{ if(state.activityLogs?._mergeTimer) clearTimeout(state.activityLogs._mergeTimer); }catch(_e){}
+      if(state.activityLogs){
+        state.activityLogs._skuWatchers = [];
+        state.activityLogs._movementMaps = new Map();
+        state.activityLogs._watchErrors = new Map();
+        state.activityLogs._watchKey = "";
+        state.activityLogs._mergeTimer = null;
+      }
+    }
+
+    function refreshActivityLogSkuWatchers(reason=""){
+      try{
+        if(!state.firebase.ok || !state.user?.isWhitelisted) return;
+        if(!state.activityLogs?.unsubMovements) return;
+        const api = state.firebase.api;
+        const db = state.firebase.db;
+        if(!api?.collection || !api?.query || !api?.orderBy || !api?.limit || !api?.onSnapshot) return;
+
+        const skus = getActivityLogSkuCandidates();
+        const key = skus.join("|");
+        if(key && key === state.activityLogs._watchKey) return;
+
+        clearActivityLogSkuWatchers();
+        state.activityLogs._watchKey = key;
+
+        if(!skus.length){
+          state.activityLogs.movements = [];
+          state.activityLogs.error = "";
+          state.activityLogs.loaded = true;
+          renderHomeLogsBox();
+          return;
+        }
+
+        const watchers = [];
+        const maps = state.activityLogs._movementMaps || new Map();
+        const errors = state.activityLogs._watchErrors || new Map();
+
+        for(const sku of skus){
+          try{
+            const colRef = api.collection(db, COL_PRODUCTS, sku, SUB_MOVES);
+            const q = api.query(colRef, api.orderBy("createdAtClient", "desc"), api.limit(ACTIVITY_MOVEMENT_PER_SKU_LIMIT));
+            const unsub = api.onSnapshot(q, (snap)=>{
+              const arr = [];
+              snap.forEach((docSnap)=>{
+                const d = docSnap.data() || {};
+                arr.push({
+                  id: docSnap.id,
+                  path: docSnap?.ref?.path || `${COL_PRODUCTS}/${sku}/${SUB_MOVES}/${docSnap.id}`,
+                  productSku: sku,
+                  ...d
+                });
+              });
+              maps.set(sku, arr);
+              errors.delete(sku);
+              scheduleActivityLogMerge();
+            }, (err)=>{
+              console.warn("activity movement watch error", sku, err);
+              maps.set(sku, []);
+              errors.set(sku, `${sku}: ${err?.message || String(err || "Errore log movimenti")}`);
+              scheduleActivityLogMerge();
+            });
+            watchers.push(unsub);
+          }catch(err){
+            errors.set(sku, `${sku}: ${err?.message || String(err || "Errore log movimenti")}`);
+          }
+        }
+
+        state.activityLogs._skuWatchers = watchers;
+        state.activityLogs._movementMaps = maps;
+        state.activityLogs._watchErrors = errors;
+        state.activityLogs.loaded = true;
+        scheduleActivityLogMerge();
+      }catch(err){
+        console.warn("refreshActivityLogSkuWatchers", err);
+        if(state.activityLogs){
+          state.activityLogs.error = err?.message || String(err || "Errore log movimenti");
+          state.activityLogs.loaded = false;
+        }
+        renderHomeLogsBox();
+      }
+    }
+
     function startActivityLogWatch(){
       try{
         if(!state.firebase.ok || !state.user?.isWhitelisted) return;
         if(state.activityLogs?.unsubMovements) return;
-        const api = state.firebase.api;
-        const db = state.firebase.db;
-        if(!api?.collectionGroup || !api?.query || !api?.orderBy || !api?.limit || !api?.onSnapshot) return;
 
-        const col = api.collectionGroup(db, SUB_MOVES);
-        const q = api.query(col, api.orderBy("createdAtClient", "desc"), api.limit(120));
-        state.activityLogs.unsubMovements = api.onSnapshot(q, (snap)=>{
-          const arr = [];
-          snap.forEach((docSnap)=>{
-            const d = docSnap.data() || {};
-            const parentDoc = docSnap?.ref?.parent?.parent;
-            const skuFromPath = parentDoc?.id || "";
-            arr.push({
-              id: docSnap.id,
-              path: docSnap?.ref?.path || "",
-              productSku: skuFromPath,
-              ...d
-            });
-          });
-          state.activityLogs.movements = arr;
-          state.activityLogs.error = "";
-          state.activityLogs.loaded = true;
-          renderHomeLogsBox();
-        }, (err)=>{
-          console.warn("activity logs watch error", err);
-          state.activityLogs.movements = [];
-          state.activityLogs.error = err?.message || String(err || "Errore log movimenti");
-          state.activityLogs.loaded = false;
-          renderHomeLogsBox();
-        });
+        if(!state.activityLogs._skuWatchers) state.activityLogs._skuWatchers = [];
+        if(!state.activityLogs._movementMaps) state.activityLogs._movementMaps = new Map();
+        if(!state.activityLogs._watchErrors) state.activityLogs._watchErrors = new Map();
+        state.activityLogs.unsubMovements = ()=>clearActivityLogSkuWatchers();
+        state.activityLogs.error = "";
+        state.activityLogs.loaded = false;
+
+        refreshActivityLogSkuWatchers("start");
       }catch(err){
         console.warn("startActivityLogWatch", err);
         if(state.activityLogs){
@@ -7959,6 +8131,7 @@ function startAllLogs(){
         state.activityLogs.movements = [];
         state.activityLogs.error = "";
         state.activityLogs.loaded = false;
+        state.activityLogs._watchKey = "";
       }
       renderHomeLogsBox();
     }
