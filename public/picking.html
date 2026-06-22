@@ -2333,12 +2333,12 @@
       font-weight:800;
     }
     .shopifySyncBtn.is-spinning{
-      pointer-events:none;
-      opacity:.72;
+      pointer-events:auto;
+      opacity:1;
     }
     .shopifySyncBtn.is-spinning .shopifySyncIcon{
       display:inline-block;
-      animation: shopifySyncSpin .85s linear infinite;
+      animation: shopifySyncSpin .55s linear 1;
     }
     @keyframes shopifySyncSpin{ from{ transform:rotate(0deg); } to{ transform:rotate(360deg); } }
     @media(max-width:760px){
@@ -2977,30 +2977,26 @@
       justify-content: center !important;
     }
 
-    /* Stato in caricamento: l'icona ↻ sparisce e compare un anello che gira fluido */
+    /* Click refresh: un giro solo, poi stop. Il sync continua via cloud senza UI bloccata. */
     .shopifySyncBtn.is-spinning{
       opacity: 1 !important;
       background: var(--accentSoft) !important;
       border-color: var(--accentSoft2) !important;
-      pointer-events: none !important;
+      pointer-events: auto !important;
     }
     .shopifySyncBtn.is-spinning .shopifySyncIcon{
-      font-size: 0 !important;            /* nasconde il glifo ↻ */
-      animation: none !important;
-      position: relative !important;
-      width: 18px !important;
-      height: 18px !important;
+      font-size: 17px !important;
+      line-height: 1 !important;
+      display: inline-flex !important;
+      animation: shopifySyncOneTurn .55s linear 1 !important;
+      will-change: transform !important;
     }
     .shopifySyncBtn.is-spinning .shopifySyncIcon::after{
-      content: "" !important;
-      position: absolute !important;
-      inset: 0 !important;
-      border-radius: 999px !important;
-      border: 2.5px solid var(--accentSoft2) !important;
-      border-top-color: var(--accent) !important;
-      animation: shopifySyncRing .7s cubic-bezier(.5,.15,.5,.85) infinite !important;
+      content: none !important;
+      display: none !important;
+      animation: none !important;
     }
-    @keyframes shopifySyncRing{
+    @keyframes shopifySyncOneTurn{
       from{ transform: rotate(0deg); }
       to{ transform: rotate(360deg); }
     }
@@ -3141,15 +3137,15 @@
       contain: layout paint !important;
       transition: background .12s ease, border-color .12s ease, transform .08s ease !important;
     }
-    .shopifySyncBtn.is-spinning .shopifySyncIcon::after{
-      border-width: 2px !important;
-      animation: shopifySyncRingSmooth .9s linear infinite !important;
+    .shopifySyncBtn.is-spinning .shopifySyncIcon{
+      animation: shopifySyncOneTurn .55s linear 1 !important;
       will-change: transform !important;
       transform: translateZ(0) !important;
     }
-    @keyframes shopifySyncRingSmooth{
-      from{ transform: translateZ(0) rotate(0deg); }
-      to{ transform: translateZ(0) rotate(360deg); }
+    .shopifySyncBtn.is-spinning .shopifySyncIcon::after{
+      content:none !important;
+      display:none !important;
+      animation:none !important;
     }
 
     @media(max-width:760px){
@@ -10305,50 +10301,63 @@ function currentInv(){
     }
 
     function shopifyFbmSyncRefreshButtonHtml(){
-      const busy = !!state.shopifySync?.busy;
-      const cls = busy ? " is-spinning" : "";
-      const disabled = busy ? ' disabled aria-disabled="true"' : "";
-      const title = busy ? "Controllo Shopify in corso" : "Controlla subito Shopify";
-      return `<button class="btn small shopifySyncBtn${cls}" type="button" data-action="refreshShopifyFbm" title="${escapeHtml(title)}" aria-label="${escapeHtml(title)}"${disabled}><span class="shopifySyncIcon">↻</span></button>`;
+      const title = "Controlla subito Shopify";
+      return `<button class="btn small shopifySyncBtn" type="button" data-action="refreshShopifyFbm" title="${escapeHtml(title)}" aria-label="${escapeHtml(title)}"><span class="shopifySyncIcon">↻</span></button>`;
     }
 
     function setShopifySyncUiBusy(busy){
       try{
-        const isBusy = !!busy;
-        if(state.shopifySync) state.shopifySync.busy = isBusy;
-        const title = isBusy ? "Controllo Shopify in corso" : "Controlla subito Shopify";
+        const title = "Controlla subito Shopify";
+        // Non usiamo più busy come stato visivo: al click fa un solo giro e stop.
+        if(state.shopifySync) state.shopifySync.busy = false;
         const buttons = Array.from(document.querySelectorAll('.shopifySyncBtn[data-action="refreshShopifyFbm"]'));
         for(const btn of buttons){
-          btn.classList.toggle("is-spinning", isBusy);
-          btn.disabled = isBusy;
-          btn.setAttribute("aria-disabled", isBusy ? "true" : "false");
+          btn.disabled = false;
+          btn.setAttribute("aria-disabled", "false");
           btn.setAttribute("title", title);
           btn.setAttribute("aria-label", title);
+
+          if(busy){
+            btn.classList.remove("is-spinning");
+            // forza restart animazione senza re-render della lista
+            void btn.offsetWidth;
+            btn.classList.add("is-spinning");
+            const runId = String(Date.now()) + Math.random().toString(16).slice(2);
+            btn.dataset.spinRun = runId;
+            setTimeout(()=>{
+              try{
+                if(btn.dataset.spinRun === runId){
+                  btn.classList.remove("is-spinning");
+                }
+              }catch(_e){}
+            }, 620);
+          }else{
+            btn.classList.remove("is-spinning");
+          }
         }
       }catch(_e){}
     }
 
     async function triggerShopifyFbmManualSync(){
-      if(state.shopifySync?.busy) return;
       if(!state.user?.isWhitelisted){
         showToast("Accesso richiesto", "Accedi per aggiornare Shopify.", 1800);
         return;
       }
       try{
         if(state.shopifySync){
-          state.shopifySync.busy = true;
+          state.shopifySync.busy = false;
           state.shopifySync.lastManualAtClient = Date.now();
         }
         setShopifySyncUiBusy(true);
-        showToast("Controllo Shopify", "Refresh inviato.", 1200);
+        showToast("Controllo Shopify", "Refresh inviato.", 900);
 
         try{
-          await fetch(`${SHOPIFY_FBM_SYNC_ENDPOINT}?source=picking_refresh&t=${Date.now()}`, {
+          fetch(`${SHOPIFY_FBM_SYNC_ENDPOINT}?source=picking_refresh&t=${Date.now()}`, {
             method:"POST",
             mode:"no-cors",
             cache:"no-store",
             keepalive:true
-          });
+          }).catch(()=>{});
         }catch(_err){
           // Fallback senza CORS: la GET parte comunque e il backend aggiorna Firestore.
           try{
@@ -10358,12 +10367,10 @@ function currentInv(){
           }catch(_e){}
         }
 
-        // Il metadato reale arriva dal listener Firestore. Tolgo solo la rotellina dopo un attimo.
+        // Il sync continua via backend/Firestore; la UI non resta in loading.
         setTimeout(()=>{
-          try{
-            setShopifySyncUiBusy(false);
-          }catch(_e){}
-        }, 3500);
+          try{ setShopifySyncUiBusy(false); }catch(_e){}
+        }, 650);
       }catch(err){
         setShopifySyncUiBusy(false);
         showToast("Errore Shopify", String(err?.message || err).slice(0, 180), 2600);
