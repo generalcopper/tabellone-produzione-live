@@ -236,6 +236,33 @@
   @keyframes iaTruck{0%,100%{transform:translateX(-2px);} 50%{transform:translateX(2px);}}
   @media (max-width:480px){ #incomingAlert .ia-eta{display:none;} #incomingAlert .ia-icon{width:40px; height:40px;} }
 
+  /* ===== AVVISO SKU PRODOTTO A CEREA — PRONTO PER IL RITIRO ===== */
+  /* Stesso linguaggio cinematic dell'avviso carico, ma accento ambra (distinto dal verde "in arrivo"). */
+  #readyAlert{position:fixed; left:50%; top:clamp(14px,3.5vh,34px); transform:translateX(-50%) translateY(-18px);
+    z-index:41; opacity:0; pointer-events:none; transition:opacity .5s cubic-bezier(.2,.7,.2,1), transform .5s cubic-bezier(.2,.7,.2,1);
+    width:min(460px, calc(100vw - 28px));}
+  #readyAlert.show{opacity:1; transform:translateX(-50%) translateY(0);}
+  /* quando l'avviso carico (verde) è già a video, questo scende sotto: mai sovrapposti */
+  #readyAlert.stacked{top:clamp(86px,12vh,118px);}
+  #readyAlert .ra-card{display:flex; align-items:center; gap:14px; padding:14px 18px; border-radius:18px;
+    background:linear-gradient(135deg, rgba(42,33,16,.95), rgba(30,23,11,.95));
+    border:1px solid rgba(245,180,70,.36);
+    box-shadow:0 12px 40px rgba(0,0,0,.48), 0 0 0 1px rgba(245,180,70,.10), 0 0 26px rgba(245,170,60,.16), inset 0 1px 0 rgba(255,255,255,.06);
+    -webkit-backdrop-filter:blur(8px); backdrop-filter:blur(8px);}
+  #readyAlert .ra-icon{flex:none; width:46px; height:46px; border-radius:13px; display:flex; align-items:center; justify-content:center;
+    color:#1c1404; background:linear-gradient(180deg,#ffcf6a,#f5a623); box-shadow:0 4px 16px rgba(245,170,50,.45);
+    animation:raPulse 2.2s ease-in-out infinite;}
+  #readyAlert .ra-body{flex:1; min-width:0; text-align:left;}
+  #readyAlert .ra-kicker{font-weight:800; letter-spacing:.16em; text-transform:uppercase; font-size:11px; color:#ffd98a;}
+  #readyAlert .ra-title{margin-top:2px; font-weight:800; font-size:clamp(16px,2.8vw,20px); color:#fff6e6; letter-spacing:-.01em;
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
+  #readyAlert .ra-sub{margin-top:2px; font-weight:600; font-size:clamp(12px,2.2vw,14px); color:rgba(240,220,180,.84);
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
+  #readyAlert .ra-pcs{flex:none; font-weight:800; font-variant-numeric:tabular-nums; font-size:13px; color:#ffe3ab;
+    padding:7px 11px; border-radius:11px; background:rgba(245,180,70,.15); border:1px solid rgba(245,180,70,.28); white-space:nowrap;}
+  @keyframes raPulse{0%,100%{transform:scale(1);} 50%{transform:scale(1.08);}}
+  @media (max-width:480px){ #readyAlert .ra-pcs{display:none;} #readyAlert .ra-icon{width:40px; height:40px;} }
+
 </style>
 </head>
 <body>
@@ -321,6 +348,23 @@
       <div class="ia-sub" id="iaSub">Bolla di trasferimento generata</div>
     </div>
     <div class="ia-eta" id="iaEta"></div>
+  </div>
+</div>
+
+<!-- AVVISO SKU PRODOTTO A CEREA, PRONTO PER IL RITIRO: documento amzInventory/cerea/kioskAlerts/skuReady -->
+<div id="readyAlert" aria-hidden="true">
+  <div class="ra-card">
+    <div class="ra-icon">
+      <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M20 7l-8-4-8 4 8 4 8-4z"/><path d="M4 7v10l8 4 8-4V7"/><path d="M12 11v10"/>
+      </svg>
+    </div>
+    <div class="ra-body">
+      <div class="ra-kicker">Produzione Cerea</div>
+      <div class="ra-title" id="raTitle">SKU pronto per il ritiro</div>
+      <div class="ra-sub" id="raSub">Prodotto a Cerea, pronto in spedizione</div>
+    </div>
+    <div class="ra-pcs" id="raPcs"></div>
   </div>
 </div>
 
@@ -2839,8 +2883,20 @@ const Annunci = (()=>{
     },
     info=> 'In arrivo un trasferimento da Cerea. La merce sarà presto in magazzino.'
   ];
-  let _vi={fba:0,fbm:0,car:0};
+  const VAR_READY=[
+    info=>{
+      const sku=info.sku?` ${String(info.sku).replace(/[-_]/g,' ')}`:'';
+      const pz=info.pieces>0?` ${info.pieces} ${info.pieces===1?'pezzo':'pezzi'},`:'';
+      return `Produzione completata a Cerea.${sku?` S K U${sku},`:''}${pz} pronto per il ritiro.`;
+    },
+    info=>{
+      const pz=info.pieces>0?` ${info.pieces} ${info.pieces===1?'pezzo':'pezzi'} pronti`:'Lotto pronto';
+      return `${pz} dalla produzione di Cerea. Pronto per il ritiro in spedizione.`;
+    }
+  ];
+  let _vi={fba:0,fbm:0,car:0,rdy:0};
   const pick=(arr,k)=>{ const f=arr[_vi[k]%arr.length]; _vi[k]++; return f; };
+  let lastReady='';   // id dell'ultimo lotto "pronto" già annunciato
 
   function enqueue(text){
     const t=String(text||'').trim(); if(!t) return;
@@ -2890,6 +2946,20 @@ const Annunci = (()=>{
     enqueue(pick(VAR_CARICO,'car')(info));
   }
 
+  // chiamata quando un SKU prodotto a Cerea diventa pronto per il ritiro
+  function onReady(info){
+    if(!info || info.active===false) return;
+    const exp=Number(info.expiresAtMs||0);
+    if(exp && exp<=Date.now()) return;                  // già scaduto: niente voce
+    const id=String(info.batchId||info.sku||info.createdAtMs||'');
+    if(!id || id===lastReady) return;                   // stesso lotto: non ripetere
+    const createdMs=Number(info.createdAtMs||0);
+    const appenaCreato = createdMs>0 && (Date.now()-createdMs) < 60000;
+    if(!primed && !appenaCreato){ lastReady=id; return; } // arretrato all'avvio: marca, in silenzio
+    lastReady=id;
+    enqueue(pick(VAR_READY,'rdy')(info));
+  }
+
   // ===== SALUTO DEL MATTINO (ore 8:00) con riepilogo ordini in coda =====
   const SALUTO_ORA=8, SALUTO_MIN=0, SALUTO_FINESTRA_MIN=5;  // scatta tra 8:00 e 8:05
   let _salutoFatto='';                                      // 'YYYY-MM-DD' dell'ultimo saluto dato
@@ -2917,7 +2987,7 @@ const Annunci = (()=>{
     const saluto=SALUTI[_si++%SALUTI.length];
     enqueue(`${saluto}. ${_frasiOrdini(fba, fbm)}`);
   }
-  return { onOrders, onCarico, onTick };
+  return { onOrders, onCarico, onTick, onReady };
 })();
 
 
@@ -2961,6 +3031,56 @@ function refreshIncomingAlert(){
     }
   }
 }
+/* ===== AVVISO SKU PRODOTTO A CEREA — PRONTO PER IL RITIRO ===== */
+let _readyData=null;             // ultimo documento avviso "pronto" ricevuto da Firestore
+function setReadyAlert(d){
+  _readyData = d || null;
+  const titleEl=document.getElementById('raTitle');
+  const subEl=document.getElementById('raSub');
+  if(_readyData){
+    if(titleEl){
+      const sku=_readyData.sku ? String(_readyData.sku) : '';
+      titleEl.textContent = sku ? `${sku} pronto per il ritiro` : 'SKU pronto per il ritiro';
+    }
+    if(subEl){
+      const bits=[];
+      const t=_readyData.title||_readyData.name;
+      if(t) bits.push(String(t));
+      else bits.push('Prodotto a Cerea, pronto in spedizione');
+      if(_readyData.batchId) bits.push(`lotto ${_readyData.batchId}`);
+      subEl.textContent = bits.join(' · ');
+    }
+  }
+  refreshReadyAlert();
+  // annuncio vocale (una volta per lotto, condivide coda e cooldown: niente sovrapposizioni)
+  try{ if(typeof Annunci!=='undefined') Annunci.onReady(_readyData); }catch(_){}
+}
+function _readyExpiry(){
+  if(!_readyData || _readyData.active===false) return 0;
+  const exp = Number(_readyData.expiresAtMs||0);
+  if(exp>0) return exp;
+  const cr = Number(_readyData.createdAtMs||0);
+  return cr>0 ? cr + 30*60*1000 : 0;   // fallback: visibile 30 min dalla creazione
+}
+function refreshReadyAlert(){
+  const el=document.getElementById('readyAlert'); if(!el) return;
+  const exp=_readyExpiry();
+  const now=Date.now();
+  const visible = exp>now;
+  el.classList.toggle('show', visible);
+  el.setAttribute('aria-hidden', visible?'false':'true');
+  // anti-sovrapposizione: se l'avviso carico (verde) è a video, questo scende sotto
+  const incomingVisible = (typeof _incomingExpiry==='function') && _incomingExpiry()>now;
+  el.classList.toggle('stacked', visible && incomingVisible);
+  if(visible){
+    const pcs=document.getElementById('raPcs');
+    if(pcs){
+      const n=Number(_readyData && _readyData.pieces||0);
+      pcs.textContent = n>0 ? `${n} pz` : 'pronto';
+    }
+  }
+}
+
 function setCockpitPage(p){
   _ckPage=p;
   const az=document.getElementById('ckPageAzienda'), am=document.getElementById('ckPageAmazon');
@@ -3232,7 +3352,7 @@ function tick(now){
   updateTour(now);
   updateIdle(now);
   updateCockpit(now);
-  if(!tick._iaT || now-tick._iaT>5000){ tick._iaT=now; refreshIncomingAlert(); }
+  if(!tick._iaT || now-tick._iaT>5000){ tick._iaT=now; refreshIncomingAlert(); refreshReadyAlert(); }
   if(!tick._salT || now-tick._salT>20000){ tick._salT=now; try{ if(typeof Annunci!=='undefined') Annunci.onTick(now); }catch(_){} }
   if(tween){const k=ease(Math.min(1,(now-tween.start)/tween.dur));
     for(const key in tween.to)cam[key]=tween.from[key]+(tween.to[key]-tween.from[key])*k;
@@ -3765,6 +3885,16 @@ function startInventoryRealtime(fs, db){
       setIncomingAlert(d);
     }, (err)=>{ console.warn('avviso carico', err && err.code); });
   }catch(e){ console.warn('listener avviso carico', e); }
+
+  // ===== AVVISO SKU PRODOTTO A CEREA — PRONTO PER IL RITIRO =====
+  // ascolta il documento scritto dalla produzione di Cerea quando un lotto SKU è pronto.
+  try{
+    const readyRef = fs.doc(db, "amzInventory", "cerea", "kioskAlerts", "skuReady");
+    fs.onSnapshot(readyRef, (snap)=>{
+      const d = snap.exists() ? (snap.data()||{}) : null;
+      setReadyAlert(d);
+    }, (err)=>{ console.warn('avviso pronto Cerea', err && err.code); });
+  }catch(e){ console.warn('listener avviso pronto', e); }
 }
 </script>
 </body>
