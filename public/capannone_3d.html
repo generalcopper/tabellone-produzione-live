@@ -236,14 +236,6 @@
   @keyframes iaTruck{0%,100%{transform:translateX(-2px);} 50%{transform:translateX(2px);}}
   @media (max-width:480px){ #incomingAlert .ia-eta{display:none;} #incomingAlert .ia-icon{width:40px; height:40px;} }
 
-  /* === VIEW-ONLY (iframe mobile): nascondi UI kiosk e cockpit, solo cinematica === */
-  html.viewOnly .kioskGear,
-  html.viewOnly #voiceToggle,
-  html.viewOnly .panel,
-  html.viewOnly #cockpit,
-  html.viewOnly .hint,
-  html.viewOnly #incomingAlert{ display:none !important; }
-  html.viewOnly, html.viewOnly body{ touch-action:none; -webkit-user-select:none; user-select:none; }
 </style>
 </head>
 <body>
@@ -337,15 +329,6 @@
 </script>
 <script type="module">
 import * as THREE from 'three';
-
-/* === MODALITÀ VIEW-ONLY (iframe da picking, mobile) — dichiarata in cima ===
-   ?view=CODICE → solo cinematica, nessuna gesture; il kiosk normale resta invariato. */
-const _Q = (()=>{ try{ return new URLSearchParams(location.search); }catch(_e){ return new URLSearchParams(); } })();
-const VIEW_ONLY = _Q.has('view');
-const VIEW_CODE = _Q.get('view') || '';
-if(VIEW_ONLY){
-  try{ document.documentElement.classList.add('viewOnly'); }catch(_e){}
-}
 
 const LX=28.40, LZ=21.45, H_LOW=6.14, H_HIGH=7.30, VAULTS=9;
 const GAP_TEC=1.76, CARTON_TH=0.12;
@@ -2999,7 +2982,6 @@ function setCockpitPage(p){
   _renderDots(_ckPages(), p);
 }
 function updateCockpit(now){
-  if(typeof VIEW_ONLY!=='undefined' && VIEW_ONLY) return;   // view-only: niente cockpit
   // al primo avvio il cockpit compare subito; dopo la prima interazione torna ai 30s di inattività
   const delay = _cockpitEverShown ? COCKPIT_DELAY : COCKPIT_DELAY_FIRST;
   const inattivo = !selectedVano && (now-lastInteract >= delay);
@@ -3146,15 +3128,9 @@ function updateTour(now){
   }
 }
 
-/* === MODALITÀ VIEW-ONLY (iframe da mobile) ===
-   Attivata da ?view=CODICE: solo cinematica, nessuna gesture (no rotazione/zoom/pan/tap).
-   Il kiosk normale (senza ?view) resta invariato.
-   La dichiarazione di VIEW_ONLY/VIEW_CODE è in cima al modulo. */
-
 const ray=new THREE.Raycaster(),mouse=new THREE.Vector2(); let downXY=null;
-renderer.domElement.addEventListener('pointerdown',e=>{ if(VIEW_ONLY) return; downXY=[e.clientX,e.clientY]; });
+renderer.domElement.addEventListener('pointerdown',e=>downXY=[e.clientX,e.clientY]);
 renderer.domElement.addEventListener('pointerup',e=>{
-  if(VIEW_ONLY) return;
   if(!downXY)return; const moved=Math.hypot(e.clientX-downXY[0],e.clientY-downXY[1]); downXY=null;
   if(moved>6)return;
   mouse.x=(e.clientX/innerWidth)*2-1; mouse.y=-(e.clientY/innerHeight)*2+1;
@@ -3169,10 +3145,9 @@ renderer.domElement.addEventListener('pointerup',e=>{
 const mode='persp';
 
 let dragging=false,panning=false,px=0,py=0; const el=renderer.domElement;
-el.addEventListener('pointerdown',e=>{ if(VIEW_ONLY) return; el.setPointerCapture(e.pointerId);
+el.addEventListener('pointerdown',e=>{el.setPointerCapture(e.pointerId);
   if(e.button===2||e.shiftKey)panning=true; else dragging=true; px=e.clientX;py=e.clientY; tween=null; tour=null; markInteract();});
 el.addEventListener('pointermove',e=>{
-  if(VIEW_ONLY) return;
   if(!dragging&&!panning)return; const dx=e.clientX-px,dy=e.clientY-py; px=e.clientX;py=e.clientY; markInteract();
   if(dragging&&mode==='persp'){cam.theta-=dx*0.005;cam.phi=Math.max(0.05,Math.min(Math.PI/2-0.02,cam.phi-dy*0.005));}
   else if(panning){const f=cam.r*0.0016;
@@ -3183,12 +3158,12 @@ addEventListener('pointerup',()=>{dragging=panning=false;});
 el.addEventListener('contextmenu',e=>e.preventDefault());
 const R_MIN=7, R_MAX=200;
 // zoom proporzionale alla distanza: passo coerente sia da vicino che da lontano
-el.addEventListener('wheel',e=>{ if(VIEW_ONLY){ e.preventDefault(); return; } e.preventDefault();
+el.addEventListener('wheel',e=>{e.preventDefault();
   const f=Math.exp(e.deltaY*0.0012);                 // fattore moltiplicativo dolce
   cam.r=Math.max(R_MIN,Math.min(R_MAX,cam.r*f));
   tween=null;tour=null;markInteract();},{passive:false});
 let pinch=0;
-el.addEventListener('touchmove',e=>{ if(VIEW_ONLY) return; if(e.touches.length===2){
+el.addEventListener('touchmove',e=>{if(e.touches.length===2){
   const d=Math.hypot(e.touches[0].clientX-e.touches[1].clientX,e.touches[0].clientY-e.touches[1].clientY);
   if(pinch){ const f=pinch/Math.max(1,d); cam.r=Math.max(R_MIN,Math.min(R_MAX,cam.r*f)); }
   pinch=d; tween=null; tour=null; markInteract();}},{passive:true});
@@ -3350,26 +3325,10 @@ function tick(now){
 requestAnimationFrame(tick);
 requestShadowUpdate(3);   // calcola le ombre della scena statica nei primi frame
 
-/* === VIEW-ONLY: focus cinematico automatico sul codice passato in ?view= ===
-   Parte appena la scena è pronta. Riprova brevemente per dare tempo ai dati cloud
-   (caso multi-ubicazione); per una singola ubicazione funziona subito da geometria. */
-if(VIEW_ONLY && VIEW_CODE){
-  let _vTries=0;
-  const _doViewFocus=()=>{
-    _vTries++;
-    let ok=false;
-    try{ ok=findAndHighlightRackCode(VIEW_CODE, { fromCloud:true }); }catch(_e){ ok=false; }
-    // riprova se non ancora trovato (max ~3.5s), poi si ferma
-    if(!ok && _vTries<14){ setTimeout(_doViewFocus, 250); }
-  };
-  setTimeout(_doViewFocus, 350);
-}
-
 // COCKPIT SUBITO ALL'AVVIO: mostra la pagina azienda appena la pagina è pronta,
 // senza attendere il timer di inattività. Dopo la prima interazione il comportamento
 // torna normale (riappare dopo 30s di inattività).
 function _showCockpitAtStartup(){
-  if(typeof VIEW_ONLY!=='undefined' && VIEW_ONLY) return;   // view-only: niente cockpit
   if(selectedVano || _cockpitOn) return;
   _cockpitOn=true; _cockpitEverShown=true;
   _ckPageStart=performance.now(); setCockpitPage('azienda');
