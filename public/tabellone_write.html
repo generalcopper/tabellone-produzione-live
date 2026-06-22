@@ -12722,6 +12722,10 @@ const TW_AMZ_MOVES_SUB = "movements";
 const TW_AMZ_SOURCE = "Tabellone WRITE";
 const TW_AMZ_DOC_TYPE = "PRODUZIONE_WRITE_AMAZON_CONCAMARISE";
 const TW_AMZ_COMBO_VERSION = 2;
+// Amazon inventory/Combo: da ora la sincronizzazione vera la fa il trigger backend
+// syncTabelloneWriteAmazonCombo su producedDays/linea_liquidi/items/{doneId}.
+// Questo NON tocca PF, Conca/DDT o altri hub: spegne solo il vecchio backfill Amazon lato browser.
+const TW_AMZ_BACKEND_TRIGGER_ONLY = true;
 
 function twEnsurePfState(){
   const tw = ensureTabWriteState();
@@ -13612,6 +13616,11 @@ function twBuildAmazonInventoryLoadPlan(done){
 function twApplyAmazonInventoryBatchWrite(batch, fs, db, done, opts={}){
   const plan = twBuildAmazonInventoryLoadPlan(done);
   if(!plan || !batch || !fs || !db) return null;
+  if(typeof TW_AMZ_BACKEND_TRIGGER_ONLY !== "undefined" && TW_AMZ_BACKEND_TRIGGER_ONLY){
+    // Non scrivere più amzInventory dal browser: evita doppi scarichi combo.
+    // Il completato contiene già amazonInventorySku/movementId e viene processato dal trigger backend.
+    return null;
+  }
   const reverse = opts && opts.reverse === true;
   const delta = (reverse ? -1 : 1) * plan.qty;
   const itemRef = fs.doc(db, TW_AMZ_ROOT, TW_AMZ_LOC, TW_AMZ_ITEMS_SUB, plan.sku);
@@ -13701,6 +13710,7 @@ function twApplyAmazonInventoryBatchWrite(batch, fs, db, done, opts={}){
 let __TW_AMZ_BACKFILL_T = null;
 function twScheduleDoneAmazonBackfill(items){
   try{
+    if(typeof TW_AMZ_BACKEND_TRIGGER_ONLY !== "undefined" && TW_AMZ_BACKEND_TRIGGER_ONLY) return;
     if(!twCanManageQueueCloud()) return;
     const tw = ensureTabWriteState();
     tw._pendingAmazonDoneItems = Array.isArray(items) ? items.slice() : [];
@@ -13714,6 +13724,7 @@ function twScheduleDoneAmazonBackfill(items){
 }
 
 async function twSyncCompletedAmazonItemsToInventory(items){
+  if(typeof TW_AMZ_BACKEND_TRIGGER_ONLY !== "undefined" && TW_AMZ_BACKEND_TRIGGER_ONLY) return;
   if(!twCanManageQueueCloud()) return;
   const tw = ensureTabWriteState();
   try{
@@ -16714,11 +16725,9 @@ async function twCompleteJob(){
     };
     Object.assign(payload, twBuildCompletedProductTriggerPayload(payload));
 
+    // Amazon SKU: il browser NON scarica più inventario/figli combo.
+    // Lascia sul completato tutti i dati necessari; il trigger backend farà il carico padre + scarico figli.
     let amazonComboChildren = [];
-    if(twIsManualAmazonSkuRow(job)){
-      const amzSkuForCombo = String(payload.amazonInventorySku || payload.code || job.amazonInventorySku || job.code || "").trim().toUpperCase();
-      amazonComboChildren = await twFetchAmazonComboChildren(amzSkuForCombo);
-    }
 
     const batch = fs.writeBatch(db);
     batch.set(fs.doc(producedCol, doneDocId), payload, { merge:true });
@@ -16734,32 +16743,25 @@ async function twCompleteJob(){
     }
 
     if(twIsManualAmazonSkuRow(job)){
-      const amzPlan = twApplyAmazonInventoryBatchWrite(batch, fs, db, { ...payload, id: doneDocId, key }, { comboChildren: amazonComboChildren });
-      if(amzPlan){
-        payload.amazonInventoryMovementId = amzPlan.movementId;
-        payload.amazonInventorySku = amzPlan.sku;
-        payload.amazonInventoryTitle = amzPlan.title;
-        payload.amazonInventoryLocation = TW_AMZ_LOC;
-        payload.amazonInventoryUom = "pz";
-        batch.set(fs.doc(producedCol, doneDocId), {
-          amazonInventoryMovementId: amzPlan.movementId,
-          amazonInventorySku: amzPlan.sku,
-          amazonInventoryTitle: amzPlan.title,
-          amazonInventoryLocation: TW_AMZ_LOC,
-          amazonInventoryUom: "pz",
-          amazonInventorySyncedAt: fs.serverTimestamp(),
-          amazonInventorySyncedAtMs: Date.now(),
-          amazonInventoryProductMovementId: amzPlan.productMovementId || "",
-          amazonInventoryComboApplied: amzPlan.comboApplied === true,
-          amazonInventoryComboVersion: amzPlan.comboVersion || TW_AMZ_COMBO_VERSION,
-          amazonInventoryComboLines: Array.isArray(amzPlan.comboLines) ? amzPlan.comboLines : [],
-          amazonInventoryComboTotalPieces: Number(amzPlan.comboTotalPieces || 0),
-          comboApplied: amzPlan.comboApplied === true,
-          comboVersion: amzPlan.comboVersion || TW_AMZ_COMBO_VERSION,
-          comboLines: Array.isArray(amzPlan.comboLines) ? amzPlan.comboLines : [],
-          comboTotalPieces: Number(amzPlan.comboTotalPieces || 0)
-        }, { merge:true });
-      }
+      const amzSku = String(payload.amazonInventorySku || payload.code || job.amazonInventorySku || job.code || "").trim().toUpperCase();
+      const amzTitle = String(payload.amazonInventoryTitle || payload.product || payload.label || job.product || job.label || amzSku || "").trim();
+      payload.amazonInventorySku = amzSku;
+      payload.amazonInventoryTitle = amzTitle;
+      payload.amazonInventoryLocation = TW_AMZ_LOC;
+      payload.amazonInventoryUom = "pz";
+      payload.amazonInventorySyncMode = "backend_trigger";
+      payload.amazonInventoryTriggerPending = true;
+      payload.amazonInventoryFrontendSyncDisabled = true;
+      batch.set(fs.doc(producedCol, doneDocId), {
+        amazonInventoryMovementId: payload.amazonInventoryMovementId || amazonMovementId || twAmazonMovementDocId(doneDocId),
+        amazonInventorySku: amzSku,
+        amazonInventoryTitle: amzTitle,
+        amazonInventoryLocation: TW_AMZ_LOC,
+        amazonInventoryUom: "pz",
+        amazonInventorySyncMode: "backend_trigger",
+        amazonInventoryTriggerPending: true,
+        amazonInventoryFrontendSyncDisabled: true
+      }, { merge:true });
     }
 
     if(twIsManualFinishedProductRow(job)){
