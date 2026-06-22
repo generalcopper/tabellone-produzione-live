@@ -39,25 +39,47 @@
 (async function(){
   const Q = new URLSearchParams(location.search);
   const VIEW_CODE = Q.get('view') || '';
-  const PARENT_URL = 'capannone_3d.html';
 
-  function fail(msg){
+  // Candidati per il padre: assoluto dalla root, relativo alla lite, e nome semplice.
+  // Il primo che risponde 200 viene usato. Robusto a sottocartelle/redirect.
+  const PARENT_CANDIDATES = [
+    new URL('capannone_3d.html', location.href).href,   // relativo alla posizione della lite
+    location.origin + '/capannone_3d.html',             // assoluto dalla root del dominio
+    'capannone_3d.html'                                  // nudo
+  ];
+
+  function showErr(msg){
+    const e=document.getElementById('liteErr');
+    if(e){
+      e.innerHTML = 'Impossibile caricare la vista 3D.<br><span style="opacity:.6;font-size:11px">'+
+                    String(msg).replace(/</g,'&lt;')+'</span>';
+      e.style.display='flex';
+    }
     console.error('[lite]', msg);
-    const e=document.getElementById('liteErr'); if(e) e.style.display='flex';
   }
 
   document.documentElement.classList.add('viewOnly');
 
-  let html;
-  try{
-    const res = await fetch(PARENT_URL, { cache:'no-cache' });
-    if(!res.ok) throw new Error('HTTP '+res.status);
-    html = await res.text();
-  }catch(err){ return fail('fetch padre: '+err.message); }
+  // --- fetch del padre, provando i candidati in ordine ---
+  let html=null, usedUrl='', lastErr='';
+  for(const u of PARENT_CANDIDATES){
+    try{
+      const res = await fetch(u, { cache:'no-cache', credentials:'same-origin' });
+      if(!res.ok){ lastErr='HTTP '+res.status+' su '+u; continue; }
+      const t = await res.text();
+      if(t && /type="module"/.test(t)){ html=t; usedUrl=u; break; }
+      lastErr='contenuto inatteso da '+u;
+    }catch(err){ lastErr=(err&&err.message||err)+' su '+u; }
+  }
+  if(!html){ return showErr('fetch padre fallito • '+lastErr); }
 
-  const m = html.match(/<script\s+type="module"\s*>([\s\S]*?)<\/script>/i);
-  if(!m){ return fail('script module non trovato nel padre'); }
-  let code = m[1];
+  // --- estrai il blocco <script type="module"> del motore (NON l'importmap) ---
+  // prende l'ULTIMO script type=module (l'importmap è type=importmap, non match)
+  const re = /<script[^>]*type=["']module["'][^>]*>([\s\S]*?)<\/script>/gi;
+  let m, last=null;
+  while((m = re.exec(html)) !== null){ last = m; }
+  if(!last){ return showErr('script module non trovato nel padre ('+usedUrl+')'); }
+  let code = last[1];
 
   /* === PATCH RUNTIME (solo in memoria; il file padre NON viene toccato) === */
 
@@ -148,13 +170,29 @@ try{ document.documentElement.classList.add('viewOnly'); }catch(_e){}
     "const Annunci = LITE ? { onOrders(){}, onCarico(){}, onTick(){}, prime(){}, say(){} } : (()=>{"
   );
 
+  // 8) IMPORT 'three' → URL assoluto. Un modulo eseguito da Blob URL non eredita
+  //    l'importmap della pagina, quindi il bare specifier 'three' fallirebbe.
+  //    Ricavo l'URL reale dall'importmap del PADRE (così segue la versione del padre);
+  //    in mancanza, uso il CDN di default.
+  let threeUrl = 'https://cdnjs.cloudflare.com/ajax/libs/three.js/0.160.0/three.module.min.js';
+  try{
+    const im = html.match(/<script[^>]*type=["']importmap["'][^>]*>([\s\S]*?)<\/script>/i);
+    if(im){
+      const map = JSON.parse(im[1]);
+      if(map && map.imports && map.imports.three) threeUrl = map.imports.three;
+    }
+  }catch(_e){}
+  // sostituisci tutte le forme di import di 'three'
+  code = code.replace(/from\s*['"]three['"]/g, `from ${JSON.stringify(threeUrl)}`);
+  code = code.replace(/import\s*\(\s*['"]three['"]\s*\)/g, `import(${JSON.stringify(threeUrl)})`);
+
   try{
     const blob = new Blob([code], { type:'text/javascript' });
     const url = URL.createObjectURL(blob);
     await import(url);
     setTimeout(()=>{ try{ URL.revokeObjectURL(url); }catch(_e){} }, 5000);
   }catch(err){
-    fail('exec module: '+(err && err.message || err));
+    showErr('exec module: '+(err && err.message || err));
   }
 })();
 </script>
