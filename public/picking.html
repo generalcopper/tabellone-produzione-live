@@ -7986,6 +7986,23 @@ function startAllLogs(){
       const shopName = String(shop.name || d.orderName || d.shopifyOrderName || shopId || "").trim();
       const src = String(d.source || shop.source || "").trim();
       const looksShopify = !!(shopId || shopName || src.toLowerCase().includes("shopify") || String(d.fileName || "").toUpperCase() === "SHOPIFY_FBM");
+      const stableAppliedAtClient = readFlowLogTimestamp(d.appliedAtClient)
+        || readFlowLogTimestamp(d.doneAtClient)
+        || readFlowLogTimestamp(d.createdAtClient)
+        || readFlowLogTimestamp(d.importedAtClient)
+        || readFlowLogTimestamp(d.orderCreatedAtClient)
+        || readFlowLogTimestamp(shop.createdAtClient)
+        || readFlowLogTimestamp(shop.orderCreatedAtClient)
+        || readFlowLogTimestamp(shop.created_at)
+        || readFlowLogTimestamp(shop.createdAt)
+        || readFlowLogTimestamp(d.createdAt)
+        || (looksShopify ? 0 : ts);
+      const stableCreatedAtClient = readFlowLogTimestamp(d.createdAtClient)
+        || readFlowLogTimestamp(shop.createdAtClient)
+        || readFlowLogTimestamp(shop.orderCreatedAtClient)
+        || readFlowLogTimestamp(shop.created_at)
+        || readFlowLogTimestamp(shop.createdAt)
+        || stableAppliedAtClient;
       const workflowId = d.workflowId || ((d.workflow && d.workflow.id) ? d.workflow.id : "") || (looksShopify ? `SHOPIFY-${shopName || shopId || docSnap.id}` : "");
       const workflowLabel = d.workflowLabel || ((d.workflow && d.workflow.label) ? d.workflow.label : "") || (looksShopify ? `Shopify ${shopName || shopId || docSnap.id}` : "");
       const totalPieces = Number.isFinite(Number(d.totalPieces)) ? Number(d.totalPieces) : lines.reduce((a,x)=> a + (Math.abs(parseQty(x.qty)||0)), 0);
@@ -7998,14 +8015,14 @@ function startAllLogs(){
         kind: looksShopify ? "scarica" : (d.kind || ""),
         location: d.location || loc,
         fileName: d.fileName || (looksShopify ? "SHOPIFY_FBM" : ""),
-        appliedAtClient: readFlowLogTimestamp(d.appliedAtClient) || ts,
+        appliedAtClient: stableAppliedAtClient,
         appliedBy: d.appliedBy || d.createdBy || d.createdByEmail || "",
         status: d.status || (looksShopify ? "RESERVED" : ""),
         source: d.source || shop.source || (looksShopify ? "shopify_fbm" : ""),
         reservation,
         shopify: shop,
         updatedAtClient: readFlowLogTimestamp(d.updatedAtClient) || ts,
-        createdAtClient: readFlowLogTimestamp(d.createdAtClient) || readFlowLogTimestamp(shop.createdAtClient),
+        createdAtClient: stableCreatedAtClient,
         totalLines,
         totalPieces,
         workflow: d.workflow || null,
@@ -8447,10 +8464,19 @@ function startAllLogs(){
       };
     }
 
+    function homeLogStableClientTs(...values){
+      for(const v of values){
+        const n = readFlowLogTimestamp(v);
+        if(n) return n;
+      }
+      return 0;
+    }
+
     function homeLogEntriesFromPickingFlow(flow){
       const out = [];
       try{
         const p = (flow?.picking && typeof flow.picking === "object") ? flow.picking : {};
+        const r = (flow?.reservation && typeof flow.reservation === "object") ? flow.reservation : {};
         const events = Array.isArray(p.events) ? p.events : [];
         const loc = normalizeInventoryLoc(flow?.location || "") || "concamarise";
         const flowId = String(flow?.workflowId || flow?.id || "").trim();
@@ -8475,8 +8501,20 @@ function startAllLogs(){
           const count = Number.isFinite(Number(ev.count)) ? Math.round(Number(ev.count)) : (skus.length || (isFlow ? totalSku : 0));
           const baseQty = isFlow ? totalPieces : (Math.abs(Math.round(Number(ev.qty || 0))) || 0);
           const qty = isUndo ? -baseQty : baseQty;
-          const ts = Number(ev.atClient || ev.pickedAtClient || ev.undoneAtClient || p.flowPickedAtClient || p.updatedAtClient || 0) || 0;
-          const by = String(ev.by || ev.pickedBy || ev.undoneBy || p.flowPickedBy || p.updatedBy || "").trim();
+
+          // LOG IMMUTABILE: mai usare updatedAtClient come orario del log.
+          // updatedAtClient cambia ad ogni sync Shopify/snapshot e farebbe sembrare il log ristampato.
+          const ts = homeLogStableClientTs(
+            ev.atClient,
+            ev.pickedAtClient,
+            ev.undoneAtClient,
+            ev.createdAtClient,
+            ev.tsClient,
+            ev.timestampClient
+          );
+          if(!ts) return null;
+
+          const by = String(ev.by || ev.pickedBy || ev.undoneBy || p.flowPickedBy || "").trim();
           const actor = by || "Operatore";
           const verb = isFlow
             ? (isUndo ? "ha annullato prelievo flusso" : "ha prelevato flusso")
@@ -8501,7 +8539,7 @@ function startAllLogs(){
             details: bits.filter(Boolean).join(" • "),
             qty,
             lot: "—",
-            id: `${flowId || flow?.id || "flow"}:picking:${type}:${ts || idx}:${sku || count || ""}`,
+            id: `${flowId || flow?.id || "flow"}:picking:${type}:${ts}:${sku || count || ""}`,
             badgeClass: isUndo ? "warn" : "ok",
             raw: { flow, event: ev }
           };
@@ -8512,15 +8550,53 @@ function startAllLogs(){
           if(e && (e.ts || e.details || e.id)) out.push(e);
         });
 
-        // Fallback per eventuali flussi prelevati prima dell'introduzione del log eventi.
+        // Fallback legacy: solo con timestamp storico stabile.
+        // Se manca un orario di prelievo vero, non inventiamo una riga dai campi updated*.
         const hasFlowEvent = out.some(e=>String(e?.raw?.event?.type || "").toLowerCase() === "flow");
         if(p.flowPicked === true && (p.flowPickMode === "flow" || p.flowPickGroup === true) && !hasFlowEvent){
-          const e = buildEntry({ type:"flow", count:Number(p.flowPickedCount || totalSku), skus:Array.isArray(p.flowPickedSkus) ? p.flowPickedSkus : [], atClient:Number(p.flowPickedAtClient || p.updatedAtClient || 0), by:String(p.flowPickedBy || p.updatedBy || "") }, 0, "flow");
-          if(e && (e.ts || e.details || e.id)) out.push(e);
+          const legacyTs = homeLogStableClientTs(p.flowPickedAtClient, r.pickedAtClient, p.pickedAtClient);
+          if(legacyTs){
+            const e = buildEntry({
+              type:"flow",
+              count:Number(p.flowPickedCount || totalSku),
+              skus:Array.isArray(p.flowPickedSkus) ? p.flowPickedSkus : [],
+              atClient:legacyTs,
+              by:String(p.flowPickedBy || r.updatedBy || "")
+            }, 0, "flow");
+            if(e && (e.ts || e.details || e.id)) out.push(e);
+          }
         }
       }catch(err){
         console.warn("picking log entry error", err);
       }
+
+      // Protezione extra: se il backend Shopify riscrive lo stesso esito su sync successivi,
+      // non mostriamo la stessa riga come se fosse un nuovo log. Manteniamo il primo timestamp.
+      try{
+        const byImmutableKey = new Map();
+        const stableOut = [];
+        for(const e of out){
+          const ev = e?.raw?.event || {};
+          const type = String(ev.type || "").toLowerCase();
+          const actorNorm = String(e?.actor || "").toLowerCase();
+          const isAutoShopify = (ev.shopifyFbm === true || actorNorm.includes("shopify")) && (type === "flow" || type === "sku");
+          if(!isAutoShopify){
+            stableOut.push(e);
+            continue;
+          }
+          const skuKey = toSkuId(ev.sku || "");
+          const skusKey = Array.isArray(ev.skus) ? ev.skus.map(x=>toSkuId(x)).filter(Boolean).sort().join(",") : "";
+          const key = `shopify-pick:${String(flow?.workflowId || flow?.id || "flow").trim()}:${type}:${skuKey || skusKey}:${Number(ev.count || 0) || ""}`;
+          const prev = byImmutableKey.get(key);
+          if(!prev || (Number(e.ts || 0) && Number(e.ts || 0) < Number(prev.ts || Infinity))){
+            byImmutableKey.set(key, e);
+          }
+        }
+        for(const e of byImmutableKey.values()) stableOut.push(e);
+        stableOut.sort((a,b)=> (Number(a.ts || 0) - Number(b.ts || 0)));
+        return stableOut;
+      }catch(_e){}
+
       return out;
     }
 
@@ -10903,7 +10979,7 @@ function currentInv(){
             <div class="pickingFlowTop">
               <div style="min-width:0">
                 <div class="pickingFlowName">SKU</div>
-                <div class="pickingFlowMeta">${escapeHtml(String(totalPieces))} pz</div>
+                <div class="pickingFlowMeta">${escapeHtml(String(totalPieces))} pz totali</div>
               </div>
               <div class="pickingFlowActions">
                 <span class="pickingFlowProgress">${escapeHtml(String(groups.length))} SKU</span>
