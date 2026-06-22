@@ -4104,6 +4104,82 @@ Tip:
     </div>
   </div>
 
+  <!-- SHEET MAPPA 2D — posizione "Trova" nel capannone -->
+  <div class="sheet" id="sheetTrova3d" aria-hidden="true">
+    <div class="sheetCard" role="dialog" aria-modal="true" aria-label="Mappa posizione bancale">
+      <div class="sheetTop">
+        <div style="min-width:0">
+          <p class="sheetTitle">Mappa magazzino • <span id="trova3dCode">—</span></p>
+          <div class="sheetSub" id="trova3dSub">Posizione esatta del bancale nel capannone Concamarise.</div>
+        </div>
+        <button class="btn" id="btnCloseTrova3d" type="button">Chiudi</button>
+      </div>
+
+      <div class="sheetBody">
+        <div class="trova3dWrap">
+          <div class="trova3dRow">
+            <div class="trova3dMapBox">
+              <div class="t3boxLab">Pianta dall'alto</div>
+              <div id="trova3dMap" class="trova3dMap"></div>
+            </div>
+            <div class="trova3dSideBox">
+              <div class="t3boxLab">Vista laterale fila</div>
+              <div id="trova3dSide" class="trova3dSide"></div>
+            </div>
+          </div>
+          <div class="trova3dInfo" id="trova3dInfo"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <style>
+    /* === Mappa 2D "Trova" === */
+    #sheetTrova3d .sheetCard{ max-width: 820px; }
+    .trova3dWrap{ display:flex; flex-direction:column; gap:14px; }
+    .trova3dRow{ display:grid; grid-template-columns: 1fr 200px; gap:14px; align-items:stretch; }
+    .trova3dMapBox, .trova3dSideBox{
+      background:
+        radial-gradient(120% 120% at 50% 0%, #fbfcfe 0%, #f1f4f8 100%);
+      border:1px solid var(--line);
+      border-radius:18px;
+      padding:14px;
+      box-shadow: inset 0 1px 0 #ffffff;
+    }
+    .t3boxLab{
+      font-size:10px; letter-spacing:.08em; text-transform:uppercase;
+      color:var(--muted); font-weight:700; margin-bottom:9px;
+    }
+    .trova3dMap, .trova3dSide{ width:100%; }
+    .trova3dMap svg, .trova3dSide svg{ width:100%; height:auto; display:block; border-radius:12px; }
+    .trova3dInfo{
+      display:grid; grid-template-columns: repeat(auto-fit, minmax(120px,1fr));
+      gap:10px;
+    }
+    .trova3dInfo .t3card{
+      background:var(--card); border:1px solid var(--line); border-radius:14px;
+      padding:11px 13px;
+    }
+    .trova3dInfo .t3card .t3lab{
+      font-size:10px; letter-spacing:.08em; text-transform:uppercase;
+      color:var(--muted); font-weight:700; margin-bottom:3px;
+    }
+    .trova3dInfo .t3card .t3val{
+      font-size:18px; font-weight:800; color:var(--ink); font-variant-numeric:tabular-nums;
+    }
+    .trova3dInfo .t3card.accent{
+      background: var(--accentSoft); border-color: var(--accentSoft2);
+    }
+    .trova3dInfo .t3card.accent .t3val{ color: var(--accentDark); }
+    @media (max-width:680px){
+      .trova3dRow{ grid-template-columns: 1fr; }
+      .trova3dSideBox{ max-width:280px; margin:0 auto; width:100%; }
+    }
+    @media (max-width:520px){
+      .trova3dInfo{ grid-template-columns: 1fr 1fr; }
+    }
+  </style>
+
 <!-- fix: Shopify FBM realtime picking visibility v20260621 -->
 <script type="module">
     // === Firebase config ===
@@ -10432,6 +10508,283 @@ function currentInv(){
 
     const CAPANNONE_3D_FOCUS_DOC_ID = "capannone3dFocus";
 
+    /* ===========================================================
+       MAPPA 2D CAPANNONE — replica fedele del layout di capannone_3d.html.
+       Coordinate mondo (metri) prese 1:1 dal file 3D. Vista dall'alto:
+       asse X mondo → orizzontale, asse Z mondo → verticale.
+       =========================================================== */
+    const CAP_MAP = (function(){
+      const LX=28.40, LZ=21.45;
+      const CARTON_W_=6.90, GAP_=1.76;
+      const CUT_X=-(LX/2-18-GAP_);   // 5.56
+      const CUT_Z=-LZ/2+CARTON_W_;   // -3.825
+      const SOP={x0:LX/2-18, x1:LX/2, z0:-LZ/2, z1:-LZ/2+6};
+      const RACK_DEPTH=1.10, W3=2.70, W2=1.80;
+
+      // bays per fila (w = larghezza campata, pal = n. pallet)
+      const C3={w:W3,pal:3}, C2={w:W2,pal:2};
+      const BAYS={
+        A:[C3,C3,C3,C2], B:[C3,C3,C3,C3], C:[C2,C3,C3,C3],
+        D:[C3,C3,C3,C2], E:[C3,C3], F:[C3,C3]
+      };
+      // centro e orientamento di ciascuna fila (dal calcolo del file 3D)
+      const RACKS={
+        A:{cx:13.45,  cz:1.45,   alongX:false},
+        B:{cx:-7.395, cz:-3.975, alongX:true },
+        C:{cx:-7.845, cz:1.125,  alongX:true, flip:true, codeBays:[4,3,2,1]},
+        D:{cx:-7.845, cz:2.425,  alongX:true },
+        E:{cx:6.85,   cz:-0.875, alongX:false},
+        F:{cx:8.15,   cz:-0.875, alongX:false}
+      };
+      // colori cartelli fila (uguali al 3D)
+      const COL={
+        A:'#FFD300', B:'#00C853', C:'#FF6D00',
+        D:'#FF2D87', E:'#00B0FF', F:'#B388FF'
+      };
+
+      // Contorno del capannone (shape a L, coordinate mondo identiche al 3D)
+      const OUTLINE=[
+        [-LX/2,-LZ/2],[CUT_X,-LZ/2],[CUT_X,CUT_Z],
+        [LX/2,CUT_Z],[LX/2,LZ/2],[-LX/2,LZ/2]
+      ];
+
+      // Calcola, per ogni slot pallet, codice + rettangolo (in coord mondo).
+      // Ritorna {slots:[{code,row,bay,level,pal,x0,z0,x1,z1,cx,cz}], rowMeta}
+      function buildSlots(){
+        const slots=[];
+        const rowMeta={};
+        for(const id of Object.keys(RACKS)){
+          const r=RACKS[id];
+          let bays=BAYS[id].slice();
+          if(r.flip) bays=bays.slice().reverse();
+          const len=bays.reduce((s,b)=>s+b.w,0);
+          // edges lungo l'asse della fila, centrati su 0
+          const edges=[-len/2];
+          for(const b of bays) edges.push(edges[edges.length-1]+b.w);
+
+          // bounding box della fila (per cartello e label)
+          let bxMin=Infinity,bxMax=-Infinity,bzMin=Infinity,bzMax=-Infinity;
+
+          bays.forEach((b,bi)=>{
+            const a0=edges[bi];          // inizio campata sull'asse fila
+            const slot=b.w/b.pal;
+            const bayNum = r.codeBays ? r.codeBays[bi] : (bi+1);
+            for(let p=1;p<=b.pal;p++){
+              const ac=a0+slot*(p-1)+slot/2;   // centro slot sull'asse fila
+              // mappa asse-fila → mondo X,Z secondo orientamento
+              let cx,cz,wx,wz;
+              if(r.alongX){
+                // fila ruotata: asse fila = X mondo, profondità = Z mondo
+                cx=r.cx+ac; cz=r.cz;
+                wx=slot;    wz=RACK_DEPTH;
+              }else{
+                // fila lungo Z: asse fila = Z mondo, profondità = X mondo
+                cx=r.cx;    cz=r.cz+ac;
+                wx=RACK_DEPTH; wz=slot;
+              }
+              const x0=cx-wx/2, x1=cx+wx/2, z0=cz-wz/2, z1=cz+wz/2;
+              bxMin=Math.min(bxMin,x0); bxMax=Math.max(bxMax,x1);
+              bzMin=Math.min(bzMin,z0); bzMax=Math.max(bzMax,z1);
+              // un solo livello in pianta (i 3 livelli si sovrappongono in vista dall'alto)
+              slots.push({
+                code:`${id}${String(bayNum).padStart(2,'0')}`,
+                row:id, bay:bayNum, pal:p,
+                x0,z0,x1,z1, cx, cz
+              });
+            }
+          });
+          rowMeta[id]={x0:bxMin,x1:bxMax,z0:bzMin,z1:bzMax,
+                       cx:(bxMin+bxMax)/2,cz:(bzMin+bzMax)/2,
+                       alongX:r.alongX, col:COL[id]};
+        }
+        return {slots,rowMeta};
+      }
+
+      const GEO = buildSlots();
+
+      // Estrae fila + campata da un codice "A03-L2-P1" → {row:'A',bay:3,level:2,pal:1}
+      function parseCode(code){
+        const c=String(code||"").trim().toUpperCase();
+        const m=c.match(/^([A-F])\s*(\d{1,2})(?:-?L\s*(\d))?(?:-?P\s*(\d))?/);
+        if(!m) return null;
+        return {row:m[1], bay:parseInt(m[2],10),
+                level:m[3]?parseInt(m[3],10):null,
+                pal:m[4]?parseInt(m[4],10):null,
+                bayCode:`${m[1]}${String(parseInt(m[2],10)).padStart(2,'0')}`};
+      }
+
+      // Costruisce l'SVG completo. target = parsed code (può avere pal o no).
+      function renderSVG(parsed){
+        // viewbox: mondo → svg con margine. Y svg cresce verso il basso = Z mondo.
+        const PAD=1.6;                    // metri di margine
+        const minX=-LX/2-PAD, maxX=LX/2+PAD;
+        const minZ=-LZ/2-PAD, maxZ=LZ/2+PAD;
+        const W=maxX-minX, Hh=maxZ-minZ;
+        const SCALE=26;                   // px per metro
+        const px = x => ((x-minX)*SCALE).toFixed(1);
+        const py = z => ((z-minZ)*SCALE).toFixed(1);
+        const pw = w => (w*SCALE).toFixed(1);
+        const svgW=(W*SCALE).toFixed(0), svgH=(Hh*SCALE).toFixed(0);
+
+        const parts=[];
+        parts.push(`<svg viewBox="0 0 ${svgW} ${svgH}" xmlns="http://www.w3.org/2000/svg" font-family="Inter, system-ui, sans-serif">`);
+        // sfondo pavimento (contorno a L)
+        const outPts=OUTLINE.map(([x,z])=>`${px(x)},${py(z)}`).join(' ');
+        parts.push(`<polygon points="${outPts}" fill="#f8fafc" stroke="#cbd5e1" stroke-width="2.5"/>`);
+
+        // soppalco (area uffici) — tratteggio leggero
+        parts.push(`<rect x="${px(SOP.x0)}" y="${py(SOP.z0)}" width="${pw(SOP.x1-SOP.x0)}" height="${pw(SOP.z1-SOP.z0)}" fill="#eef2f7" stroke="#cbd5e1" stroke-width="1" stroke-dasharray="4 4"/>`);
+        parts.push(`<text x="${px((SOP.x0+SOP.x1)/2)}" y="${py((SOP.z0+SOP.z1)/2)}" fill="#94a3b8" font-size="11" font-weight="700" text-anchor="middle" dominant-baseline="middle" letter-spacing="1">UFFICI</text>`);
+
+        // slot non target (chiari)
+        const targetBay = parsed?.bayCode;
+        for(const s of GEO.slots){
+          const isTargetBay = targetBay && s.code===targetBay;
+          const isTargetPal = isTargetBay && (!parsed.pal || s.pal===parsed.pal);
+          if(isTargetPal) continue; // disegnati sopra dopo
+          const fill = isTargetBay ? '#fde9d4' : '#e2e8f0';
+          const stroke = isTargetBay ? '#fb923c' : '#cbd5e1';
+          parts.push(`<rect x="${px(s.x0)}" y="${py(s.z0)}" width="${pw(s.x1-s.x0)}" height="${pw(s.z1-s.z0)}" fill="${fill}" stroke="${stroke}" stroke-width="0.8" rx="1.5"/>`);
+        }
+
+        // etichette fila (lettera colorata sul cartello, alla testata verso il centro)
+        for(const id of Object.keys(GEO.rowMeta)){
+          const m=GEO.rowMeta[id];
+          let lx,lz;
+          if(m.alongX){ lx=m.cx; lz=m.z0-1.0; }
+          else        { lx=m.x0-1.0; lz=m.cz; }
+          // clamp dentro la vista
+          lx=Math.max(minX+0.7,Math.min(maxX-0.7,lx));
+          lz=Math.max(minZ+0.7,Math.min(maxZ-0.7,lz));
+          parts.push(`<g>`);
+          parts.push(`<rect x="${px(lx)-13}" y="${py(lz)-9}" width="26" height="18" rx="4" fill="${m.col}" stroke="#1a1a1a" stroke-width="1"/>`);
+          parts.push(`<text x="${px(lx)}" y="${py(lz)+1}" fill="#1a1a1a" font-size="13" font-weight="800" text-anchor="middle" dominant-baseline="middle">${id}</text>`);
+          parts.push(`</g>`);
+        }
+
+        // slot TARGET (evidenziato, sopra a tutto) + pulse
+        const tgt = GEO.slots.filter(s=> targetBay && s.code===targetBay &&
+                                         (!parsed.pal || s.pal===parsed.pal));
+        for(const s of tgt){
+          const cx=px(s.cx), cy=py(s.cz);
+          parts.push(`<rect x="${px(s.x0)}" y="${py(s.z0)}" width="${pw(s.x1-s.x0)}" height="${pw(s.z1-s.z0)}" fill="#f97316" stroke="#c2410c" stroke-width="1.6" rx="2"/>`);
+          // alone pulsante
+          parts.push(`<circle cx="${cx}" cy="${cy}" r="9" fill="none" stroke="#f97316" stroke-width="2.5" opacity="0.9">`);
+          parts.push(`<animate attributeName="r" values="9;22;9" dur="1.6s" repeatCount="indefinite"/>`);
+          parts.push(`<animate attributeName="opacity" values="0.9;0;0.9" dur="1.6s" repeatCount="indefinite"/>`);
+          parts.push(`</circle>`);
+          // pin
+          parts.push(`<circle cx="${cx}" cy="${cy}" r="4.5" fill="#fff" stroke="#c2410c" stroke-width="2"/>`);
+        }
+        // se nessuno slot target (codice non valido) niente da evidenziare
+        parts.push(`</svg>`);
+        return parts.join('');
+      }
+
+      /* === Vista laterale (elevazione) della fila ===
+         Mostra i 3 livelli sovrapposti con il vano target evidenziato.
+         Quote reali dal 3D: LEVEL_Y=[0,2,4] m, altezza vano ~2 m, telaio 5.5 m. */
+      const LEVEL_Y=[0.0, 2.00, 4.00];   // quota appoggio pallet per livello
+      const RACK_TOTH=5.50;
+      const VANO_H=2.00;                 // passo verticale tra livelli
+
+      function renderSideSVG(parsed){
+        const id = parsed?.row;
+        const meta = id ? GEO.rowMeta[id] : null;
+        // larghezza della fila (lato lungo) → quante campate mostrare
+        const bays = id ? (BAYS[id]?BAYS[id].length:0) : 0;
+        const cols = Math.max(1, bays);
+
+        const SCALE_Y=28;                  // px per metro (verticale)
+        const PAD=14;
+        const colW=34, gap=6;
+        const baseY=10;                    // top margin
+        const floorH=RACK_TOTH*SCALE_Y;
+        const W = PAD*2 + cols*colW + (cols-1)*gap + 26; // +26 per asse quote
+        const H = baseY + floorH + 30;     // +30 pavimento+label
+        const axX = PAD+18;                // x dell'asse quote
+        const gx = axX;                    // origine griglia campate
+
+        const p=[];
+        p.push(`<svg viewBox="0 0 ${W.toFixed(0)} ${H.toFixed(0)}" xmlns="http://www.w3.org/2000/svg" font-family="Inter, system-ui, sans-serif">`);
+        const floorYpx = baseY+floorH;
+        // pavimento
+        p.push(`<line x1="${axX-4}" y1="${floorYpx.toFixed(1)}" x2="${(W-PAD).toFixed(1)}" y2="${floorYpx.toFixed(1)}" stroke="#94a3b8" stroke-width="2"/>`);
+        // montanti laterali (telaio)
+        const frameTop = baseY;
+        // quote livelli (etichette L1..L3) e linee correnti
+        for(let lv=1; lv<=3; lv++){
+          const yTop = floorYpx - (LEVEL_Y[lv-1]+VANO_H)*SCALE_Y;
+          const yBot = floorYpx - LEVEL_Y[lv-1]*SCALE_Y;
+          // corrente (beam) a quota appoggio (tranne L1 a terra)
+          if(lv>1){
+            p.push(`<line x1="${axX-2}" y1="${yBot.toFixed(1)}" x2="${(gx+cols*colW+(cols-1)*gap).toFixed(1)}" y2="${yBot.toFixed(1)}" stroke="#cbd5e1" stroke-width="2"/>`);
+          }
+          // label livello
+          p.push(`<text x="${(axX-8).toFixed(1)}" y="${((yTop+yBot)/2).toFixed(1)}" fill="#94a3b8" font-size="9" font-weight="700" text-anchor="end" dominant-baseline="middle">L${lv}</text>`);
+        }
+        // montanti
+        p.push(`<line x1="${gx.toFixed(1)}" y1="${frameTop}" x2="${gx.toFixed(1)}" y2="${floorYpx.toFixed(1)}" stroke="#cbd5e1" stroke-width="2.5"/>`);
+        const rightX = gx+cols*colW+(cols-1)*gap;
+        p.push(`<line x1="${rightX.toFixed(1)}" y1="${frameTop}" x2="${rightX.toFixed(1)}" y2="${floorYpx.toFixed(1)}" stroke="#cbd5e1" stroke-width="2.5"/>`);
+
+        // celle: per ogni campata (colonna) e livello (riga) disegna il vano
+        // ordina le campate per numero crescente da sinistra
+        const bayNums = id ? (RACKS[id].codeBays
+            ? RACKS[id].codeBays.slice().sort((a,b)=>a-b)
+            : Array.from({length:cols},(_,i)=>i+1)) : [];
+        for(let ci=0; ci<cols; ci++){
+          const x0 = gx + ci*(colW+gap);
+          const bayNum = bayNums[ci];
+          for(let lv=1; lv<=3; lv++){
+            const yTop = floorYpx - (LEVEL_Y[lv-1]+VANO_H)*SCALE_Y;
+            const cellH = VANO_H*SCALE_Y - 3;
+            const isTarget = parsed && parsed.bay===bayNum &&
+                             (parsed.level==null || parsed.level===lv);
+            const fill = isTarget ? '#f97316' : '#e2e8f0';
+            const stroke = isTarget ? '#c2410c' : '#cbd5e1';
+            p.push(`<rect x="${x0.toFixed(1)}" y="${yTop.toFixed(1)}" width="${colW}" height="${cellH.toFixed(1)}" rx="2" fill="${fill}" stroke="${stroke}" stroke-width="${isTarget?1.6:0.8}"/>`);
+            if(isTarget){
+              const cx=(x0+colW/2).toFixed(1), cy=(yTop+cellH/2).toFixed(1);
+              p.push(`<circle cx="${cx}" cy="${cy}" r="3.5" fill="#fff" stroke="#c2410c" stroke-width="1.6"/>`);
+            }
+          }
+          // numero campata sotto il pavimento
+          p.push(`<text x="${(x0+colW/2).toFixed(1)}" y="${(floorYpx+13).toFixed(1)}" fill="${id&&parsed&&parsed.bay===bayNum?'#c2410c':'#94a3b8'}" font-size="9" font-weight="${id&&parsed&&parsed.bay===bayNum?'800':'700'}" text-anchor="middle">${id||''}${String(bayNum).padStart(2,'0')}</text>`);
+        }
+        p.push(`</svg>`);
+        return p.join('');
+      }
+
+      return { renderSVG, renderSideSVG, parseCode, RACKS, COL };
+    })();
+
+    function renderTrova3dMap(code){
+      const parsed = CAP_MAP.parseCode(code);
+      const mapEl = $("trova3dMap");
+      const sideEl = $("trova3dSide");
+      const infoEl = $("trova3dInfo");
+      const codeEl = $("trova3dCode");
+      if(codeEl) codeEl.textContent = code || "—";
+
+      if(mapEl) mapEl.innerHTML = CAP_MAP.renderSVG(parsed || {});
+      if(sideEl) sideEl.innerHTML = parsed ? CAP_MAP.renderSideSVG(parsed) : "";
+
+      if(infoEl){
+        if(parsed){
+          const lvl = parsed.level!=null ? `L${parsed.level}` : "—";
+          const pal = parsed.pal!=null ? `P${parsed.pal}` : "—";
+          infoEl.innerHTML =
+            `<div class="t3card accent"><div class="t3lab">Fila</div><div class="t3val">${escapeHtml(parsed.row)}</div></div>`+
+            `<div class="t3card"><div class="t3lab">Campata</div><div class="t3val">${escapeHtml(String(parsed.bay).padStart(2,'0'))}</div></div>`+
+            `<div class="t3card"><div class="t3lab">Livello</div><div class="t3val">${escapeHtml(lvl)}</div></div>`+
+            `<div class="t3card"><div class="t3lab">Pallet</div><div class="t3val">${escapeHtml(pal)}</div></div>`;
+        } else {
+          infoEl.innerHTML = `<div class="t3card"><div class="t3lab">Posizione</div><div class="t3val">Non valida</div></div>`;
+        }
+      }
+    }
+
     async function openCapannone3dFind(code){
       const c = normalizeRackLocation(code || "");
       if(!c){
@@ -10453,6 +10806,9 @@ function currentInv(){
       const nowClient = Date.now();
       const focusSeq = `${nowClient}-${Math.random().toString(36).slice(2, 8)}`;
       const who = state.user?.emailLower || state.user?.email || state.user?.uid || "";
+
+      // apri SUBITO la mappa 2D con la posizione esatta (indipendente dal cloud)
+      try{ renderTrova3dMap(c); openSheet("trova3d"); }catch(_e){ console.warn("trova3d map", _e); }
 
       try{
         const ref = api.doc(db, COL_PRODUCTS, CAPANNONE_3D_FOCUS_DOC_ID);
@@ -12279,6 +12635,7 @@ function currentInv(){
       if(kind==="combo") return $("sheetCombo");
       if(kind==="skuPick") return $("sheetSkuPick");
       if(kind==="sottoscorta") return $("sheetSottoscorta");
+      if(kind==="trova3d") return $("sheetTrova3d");
       return null;
     }
 
@@ -17093,6 +17450,9 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
 
       $("btnCloseSkuPick")?.addEventListener("click", ()=> closeSheet("skuPick"));
       $("sheetSkuPick")?.addEventListener("click", (e)=>{ if(e.target?.id==="sheetSkuPick") closeSheet("skuPick"); });
+
+      $("btnCloseTrova3d")?.addEventListener("click", ()=> closeSheet("trova3d"));
+      $("sheetTrova3d")?.addEventListener("click", (e)=>{ if(e.target?.id==="sheetTrova3d") closeSheet("trova3d"); });
 
       // Carica mode switch
       $("btnCaricaModePdf")?.addEventListener("click", ()=> setCaricaMode("pdf"));
