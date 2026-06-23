@@ -285,7 +285,7 @@
   /* ===== STRISCIA LOG DI SISTEMA (sovraimpressione, in basso, full width) ===== */
   #sysLog{position:fixed; left:0; right:0; bottom:0; z-index:35; pointer-events:none;
     background:linear-gradient(0deg, rgba(5,8,13,.96) 0%, rgba(5,8,13,.9) 55%, rgba(5,8,13,.55) 80%, rgba(5,8,13,0) 100%);
-    padding:34px 0 clamp(34px,5vh,64px); opacity:0;
+    padding:34px 0 clamp(34px,5vh,64px); opacity:0; transition:opacity .45s ease;
     font-family:'SF Mono','JetBrains Mono','Roboto Mono',ui-monospace,Menlo,Consolas,monospace;}
   #sysLog.show{opacity:1;}
   /* stream: ancorato in basso; le righe entrano dal fondo e spingono su le precedenti */
@@ -2972,9 +2972,22 @@ const LogFeed = (()=>{
     if(typingEntry) rows.push(_rowHTML(typingEntry, partial));       // riga in battitura in fondo
     stream.innerHTML=rows.join('');
   }
-  function _showBox(on){
+  let _hidden=false;       // forzatura esterna (es. durante "Trova"): nasconde la striscia
+  function _applyVisibility(){
     const box=document.getElementById('sysLog'); if(!box) return;
-    if(on!==shown){ shown=on; box.classList.toggle('show',on); box.setAttribute('aria-hidden', on?'false':'true'); }
+    const on = shown && !_hidden;
+    box.classList.toggle('show', on);
+    box.setAttribute('aria-hidden', on?'false':'true');
+  }
+  function _showBox(on){
+    if(on!==shown){ shown=on; _applyVisibility(); }
+  }
+  // controllo esterno: nascondi/mostra la striscia (es. quando è attivo un "Trova").
+  // Lo stato dei log resta intatto: niente fade-out distruttivo, niente ri-typing.
+  function setHidden(h){
+    h=!!h;
+    if(h===_hidden) return;
+    _hidden=h; _applyVisibility();
   }
   function _typeNext(){
     if(!_queue.length){ _typing=false; return; }
@@ -3049,7 +3062,7 @@ const LogFeed = (()=>{
     if(!_typing) _typeNext();
   }
 
-  return { refresh };
+  return { refresh, setHidden };
 })();
 
 // conta gli ORDINI (flussi) ancora da prelevare, divisi per canale FBA/FBM
@@ -3782,6 +3795,9 @@ function tick(now){
   updateCockpit(now);
   if(!tick._iaT || now-tick._iaT>5000){ tick._iaT=now; refreshIncomingAlert(); refreshReadyAlert(); }
   if(!tick._slT || now-tick._slT>8000){ tick._slT=now; try{ if(typeof LogFeed!=='undefined') LogFeed.refresh(); }catch(_){} }
+  // durante un "Trova" (vano selezionato o tour cinematografico in corso) nascondo la striscia
+  // log così non copre la vista 3D; lo stato dei log resta intatto e ricompare poi senza glitch.
+  try{ if(typeof LogFeed!=='undefined') LogFeed.setHidden(!!(selectedVano || tour)); }catch(_){}
   if(!tick._salT || now-tick._salT>20000){ tick._salT=now; try{ if(typeof Annunci!=='undefined') Annunci.onTick(now); }catch(_){} }
   if(tween){const k=ease(Math.min(1,(now-tween.start)/tween.dur));
     for(const key in tween.to)cam[key]=tween.from[key]+(tween.to[key]-tween.from[key])*k;
