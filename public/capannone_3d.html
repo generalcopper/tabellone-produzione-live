@@ -2877,7 +2877,7 @@ const LogFeed = (()=>{
           const verbo = isFlow ? (undo?'Annullato prelievo flusso':'Prelievo flusso')
                                : (undo?'Annullato prelievo SKU':'Prelievo SKU');
           const nm = isFlow ? name : (sku||name);
-          out.push({ id:`pick:${f.id}:${t}:${ts||i}:${sku||''}`, ts, tag:'out',
+          out.push({ id:`pick:${f.id}:${t}:${sku||i}`, ts, tag:'out',
             msg:_line(verbo, nm, [
               ['sede', _loc(f.location||loc)],
               ['sku', isFlow?'':sku],
@@ -2892,7 +2892,7 @@ const LogFeed = (()=>{
         if(p.flowPicked===true && (p.flowPickMode==='flow' || p.flowPickGroup===true) && !hasFlowEvent){
           const ts=Number(p.flowPickedAtClient||p.updatedAtClient||ts0)||0;
           const who=String(p.flowPickedBy||p.updatedBy||'').trim()||'Operatore';
-          out.push({ id:`pick:${f.id}:flowlegacy:${ts}`, ts, tag:'out',
+          out.push({ id:`pick:${f.id}:flowlegacy`, ts, tag:'out',
             msg:_line('Prelievo flusso', name, [
               ['sede', sede], ['op', who], ['flusso', wfId||f.id]
             ]) });
@@ -2907,7 +2907,7 @@ const LogFeed = (()=>{
     try{
       if(typeof _incomingData!=='undefined' && _incomingData && _incomingData.active!==false){
         const ts=Number(_incomingData.createdAtMs||0)||0;
-        out.push({ id:`alert:incoming:${_incomingData.ddtNumber||ts}`, ts, tag:'in',
+        out.push({ id:`alert:incoming:${_incomingData.ddtNumber||'cerea'}`, ts, tag:'in',
           msg:_line('Carico in arrivo', 'da Cerea', [
             ['ddt', _incomingData.ddtNumber||''],
             ['art', _incomingData.articleCount>0?_incomingData.articleCount:''],
@@ -2920,7 +2920,7 @@ const LogFeed = (()=>{
       if(typeof _readyData!=='undefined' && _readyData && _readyData.active!==false){
         const ts=Number(_readyData.createdAtMs||0)||0;
         const sku=_readyData.sku?String(_readyData.sku):'';
-        out.push({ id:`alert:ready:${_readyData.batchId||sku||ts}`, ts, tag:'in',
+        out.push({ id:`alert:ready:${_readyData.batchId||sku||'lotto'}`, ts, tag:'in',
           msg:_line('Pronto a Cerea', sku||'lotto', [
             ['sku', sku],
             ['pz', _readyData.pieces>0?_readyData.pieces:''],
@@ -2963,6 +2963,9 @@ const LogFeed = (()=>{
   let _view=[];           // voci a video, dalla PIÙ VECCHIA (in alto) alla PIÙ RECENTE (in basso)
   let _queue=[];          // voci nuove in attesa, dalla più vecchia alla più recente
   let _typing=false;
+  let _primed=false;      // true dopo la prima popolazione: da lì in poi solo i NUOVI vengono battuti
+  const _everSeen=new Set();   // id già visti PER SEMPRE: niente ri-typing né doppioni
+  const _firstTs=new Map();    // primo orario di arrivo per id: conta solo il primo, non gli update
   // costruisce le righe: le vecchie in alto, eventuale riga in battitura in fondo.
   // markEnter = true sull'ultima riga consolidata per l'animazione swipe-up.
   function _paint(typingEntry, partial){
@@ -3027,38 +3030,42 @@ const LogFeed = (()=>{
   function refresh(){
     const stream=document.getElementById('slStream'); if(!stream) return;
     const all=[..._fromFlows(), ..._fromAlerts()];
+    // dedup per id; per ogni id CONGELO il primo orario visto (gli update non lo cambiano)
     const seen=new Set(); const uniq=[];
-    for(const e of all){ if(e.id&&seen.has(e.id))continue; seen.add(e.id); uniq.push(e); }
+    for(const e of all){
+      if(!e.id || seen.has(e.id)) continue;
+      seen.add(e.id);
+      if(_firstTs.has(e.id)) e.ts=_firstTs.get(e.id);     // usa SEMPRE il primo orario di arrivo
+      else _firstTs.set(e.id, e.ts||0);
+      uniq.push(e);
+    }
     uniq.sort((a,b)=>(b.ts||0)-(a.ts||0));
-    // candidati: ultimi 10; ne mostriamo fino a MAX
     const cand=uniq.slice(0,10);
-    const sig=cand.map(e=>e.id+':'+e.ts).join('|');
+    // firma basata SOLO sugli id (non sul ts): un update dello stesso log non rivaluta nulla
+    const sig=cand.map(e=>e.id).join('|');
     if(sig===_sig) return;
     _sig=sig;
 
     if(!cand.length){
-      // vuoto transitorio (es. uno snapshot della doppia query che azzera la sua mappa
-      // prima del merge): NON svuotiamo la lista né nascondiamo nulla. Restiamo com'eravamo.
-      // Nascondiamo solo se non abbiamo mai mostrato niente.
       if(_view.length===0 && !_typing) _showBox(false);
       return;
     }
     _showBox(true);
 
-    // quali sono NUOVE (non già a video, non già in coda)?
-    const known=new Set([..._view.map(e=>e.id), ..._queue.map(e=>e.id)]);
-    const fresh=cand.filter(e=>!known.has(e.id));
-    // rimuovo dalla vista le voci sparite dai candidati SOLO se non stiamo battendo
-    // (così una ricerca che cambia il set non fa sparire/riapparire tutto).
-    if(!fresh.length) return;           // niente di nuovo: lascio tutto com'è
-
-    if(_view.length===0 && !_typing){
-      // AVVIO: batto in sequenza gli ultimi (max MAX), dal più vecchio al più recente
-      _queue = fresh.slice(0, MAX).reverse();
-    }else{
-      // a regime: le novità entrano in coda, una battitura ciascuna, più vecchia → più recente
-      _queue.push(...fresh.reverse());
+    // PRIMER: alla primissima popolazione i log esistenti compaiono GIÀ STATICI (niente typing).
+    if(!_primed){
+      _primed=true;
+      _view = cand.slice(0, MAX).reverse();
+      cand.forEach(e=>_everSeen.add(e.id));     // tutti i log iniziali: già visti, mai più ribattuti
+      _paint();
+      return;
     }
+
+    // NUOVI = id mai visti prima (né a video, né in coda, né nello storico)
+    const fresh=cand.filter(e=> !_everSeen.has(e.id) && !_queue.some(q=>q.id===e.id));
+    if(!fresh.length) return;
+    fresh.forEach(e=>_everSeen.add(e.id));
+    _queue.push(...fresh.slice().reverse());   // più vecchio → più recente (l'ultimo resta in fondo)
     if(!_typing) _typeNext();
   }
 
