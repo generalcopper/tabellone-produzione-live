@@ -2813,21 +2813,23 @@ const LogFeed = (()=>{
         const name=_flowDisplayName(f);
         const pezzi=Math.abs(Math.round(Number(f.totalPieces||0)))||0;
         const wfId=String((f.workflow&&f.workflow.id)||f.workflowId||f.id||'').trim();
+        const ts0=Number(f.appliedAtClient||f.updatedAtClient||f.createdAtClient||0)||0;
         // movimento flusso (scarico/carico)
         if(kind==='scarica' || kind==='carica'){
-          const ts=Number(f.appliedAtClient||f.createdAtClient||0)||0;
           const tag = kind==='scarica' ? 'out':'in';
           const verbo = kind==='scarica' ? 'Scarico' : 'Carico';
           const meta = _loc(f.location||loc) + (pezzi?` · ${pezzi} pz`:'');
-          out.push({ id:`flow:${kind}:${f.id}`, ts, tag,
+          out.push({ id:`flow:${kind}:${f.id}`, ts:ts0, tag,
             msg:`${verbo} <b>${_esc(name)}</b>`, meta });
-        } else {
-          // altri movimenti registrati (ubicazioni, rettifiche, ecc.): comunque a log
-          const ts=Number(f.appliedAtClient||f.createdAtClient||f.updatedAtClient||0)||0;
-          if(ts){
-            out.push({ id:`flow:mov:${f.id}`, ts, tag:'sys',
-              msg:`Movimento <b>${_esc(name)}</b>`, meta:_loc(f.location||loc)+(pezzi?` · ${pezzi} pz`:'') });
-          }
+        } else if(ts0){
+          // altri movimenti (ubicazioni, rettifiche, trasferimenti, ecc.): comunque a log
+          const verbo = kind==='ubicazione' ? 'Ubicazione'
+                      : kind==='rettifica' ? 'Rettifica'
+                      : kind==='trasferimento' ? 'Trasferimento'
+                      : 'Movimento';
+          const tag = kind==='trasferimento' ? 'in' : 'sys';
+          out.push({ id:`flow:${kind||'mov'}:${f.id}`, ts:ts0, tag,
+            msg:`${verbo} <b>${_esc(name)}</b>`, meta:_loc(f.location||loc)+(pezzi?` · ${pezzi} pz`:'') });
         }
         // eventi di picking annidati
         const p=(f.picking&&typeof f.picking==='object')?f.picking:{};
@@ -4206,19 +4208,38 @@ function startInventoryRealtime(fs, db){
     }
   });
 
-  // ===== FLUSSI DA PRELEVARE (picking) =====
-  // legge i flussi attivi non prelevati da amzInventory/{loc}/logs e illumina i bancali.
+  // ===== FLUSSI (picking + carichi + movimenti) =====
+  // legge amzInventory/{loc}/logs con DUE query (appliedAtClient e updatedAtClient) e le UNISCE,
+  // come fa picking.html: così compaiono anche carichi/movimenti che hanno solo updatedAtClient.
   for(const loc of ['concamarise','cerea']){
     try{
       const logsRef = fs.collection(db, "amzInventory", loc, "logs");
-      const q = fs.query(logsRef, fs.orderBy("appliedAtClient","desc"), fs.limit(80));
-      fs.onSnapshot(q, (snap)=>{
-        const flows=[];
-        snap.forEach(ds=>{ const d=ds.data()||{}; flows.push({ id:ds.id, ...d }); });
+      const maps = { applied:new Map(), updated:new Map() };
+      const merge = ()=>{
+        const m=new Map();
+        for(const src of [maps.applied, maps.updated]){
+          for(const [id,flow] of src.entries()){ m.set(id, { ...(m.get(id)||{}), ...flow }); }
+        }
+        const flows=Array.from(m.values())
+          .sort((a,b)=> (Number(b.appliedAtClient||b.updatedAtClient||b.createdAtClient||0))
+                       -(Number(a.appliedAtClient||a.updatedAtClient||a.createdAtClient||0)))
+          .slice(0,300);
         FLOWS_BY_LOC[loc]=flows;
         aggiornaPrelievi();
         try{ LogFeed.refresh(); }catch(_){}
-      }, (err)=>{ console.warn('flussi '+loc, err && err.code); });
+      };
+      const attach=(key, field)=>{
+        try{
+          const q = fs.query(logsRef, fs.orderBy(field,"desc"), fs.limit(200));
+          fs.onSnapshot(q, (snap)=>{
+            const mp=maps[key]; mp.clear();
+            snap.forEach(ds=>{ mp.set(ds.id, { id:ds.id, ...(ds.data()||{}) }); });
+            merge();
+          }, (err)=>{ console.warn('flussi '+loc+' '+key, err && err.code); });
+        }catch(e){ console.warn('attach flussi '+loc+' '+key, e); }
+      };
+      attach('applied','appliedAtClient');
+      attach('updated','updatedAtClient');
     }catch(e){ console.warn('listener flussi '+loc, e); }
   }
 
