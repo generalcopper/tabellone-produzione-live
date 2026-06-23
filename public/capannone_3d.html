@@ -291,9 +291,7 @@
   /* stream: ancorato in basso; le righe entrano dal fondo e spingono su le precedenti */
   #sysLog .sl-stream{display:flex; flex-direction:column; justify-content:flex-end; width:100%;
     overflow:hidden;}
-  /* riga nuova: entra con una piccola traslazione verso l'alto (non da fuori schermo) */
-  #sysLog .sl-line.enter{animation:slUp .42s cubic-bezier(.2,.7,.2,1) both;}
-  @keyframes slUp{from{opacity:0; transform:translateY(45%);} to{opacity:1; transform:translateY(0);}}
+  /* nessuna animazione di entrata: l'effetto di comparsa è il typing stesso */
   /* riga: prefisso (ora+tag) non va a capo, il messaggio SÌ (wrap se non ci sta) */
   #sysLog .sl-line{display:flex; align-items:baseline; gap:8px; width:100%; box-sizing:border-box;
     padding:2px clamp(12px,2.4vw,30px); line-height:1.35;}
@@ -2937,10 +2935,10 @@ const LogFeed = (()=>{
   const _tagTxt=t=> t==='in'?'IN':(t==='out'?'OUT':'SYS');
   // riga completa; se "partial" è passato, mostra il messaggio tagliato + cursore.
   // "enter"=true aggiunge la classe per l'animazione swipe-up.
-  function _rowHTML(e, partial, enter){
+  function _rowHTML(e, partial){
     const typing = partial!=null;
     const msg = typing ? partial : e.msg;
-    return `<div class="sl-line ${typing?'typing':''}${enter?' enter':''}">`
+    return `<div class="sl-line ${typing?'typing':''}">`
       + `<span class="sl-t">${_fmtT(e.ts)}</span>`
       + `<span class="sl-tag ${e.tag}">${_tagTxt(e.tag)}</span>`
       + `<span class="sl-msg">${msg}${typing?'<span class="sl-caret"></span>':''}</span>`
@@ -2967,14 +2965,11 @@ const LogFeed = (()=>{
   let _typing=false;
   // costruisce le righe: le vecchie in alto, eventuale riga in battitura in fondo.
   // markEnter = true sull'ultima riga consolidata per l'animazione swipe-up.
-  function _paint(typingEntry, partial, enterLastView){
+  function _paint(typingEntry, partial){
     const stream=document.getElementById('slStream'); if(!stream) return;
     const rows=[];
-    _view.forEach((e, idx)=>{
-      const isLast = idx===_view.length-1;
-      rows.push(_rowHTML(e, undefined, (enterLastView && isLast)));   // entra l'ultima consolidata
-    });
-    if(typingEntry) rows.push(_rowHTML(typingEntry, partial, true));  // riga in battitura in fondo, entra dal basso
+    for(const e of _view) rows.push(_rowHTML(e));                    // righe già complete
+    if(typingEntry) rows.push(_rowHTML(typingEntry, partial));       // riga in battitura in fondo
     stream.innerHTML=rows.join('');
   }
   function _showBox(on){
@@ -2987,19 +2982,32 @@ const LogFeed = (()=>{
     const e=_queue.shift();            // prossima voce da battere (più vecchia prima)
     const full=e.msg, total=_plainLen(full);
     let i=0;
-    _paint(e, '');                     // la nuova riga compare in fondo (swipe up) e inizia a battere
+    // disegno UNA volta la lista con la nuova riga vuota in fondo, poi aggiorno SOLO il testo:
+    // niente ridisegno per-frame → niente glitch, niente animazioni che ripartono.
+    _paint(e, '');
+    const stream=document.getElementById('slStream');
+    const lastLine = stream && stream.lastElementChild;
+    const msgEl = lastLine && lastLine.querySelector('.sl-msg');
+    if(!msgEl){ // fallback robusto
+      _typeTimer=setInterval(()=>{ i+=Math.max(1,Math.round(total/20));
+        if(i>=total){ clearInterval(_typeTimer);_typeTimer=null; _view.push(e); if(_view.length>MAX)_view.shift(); _paint(); setTimeout(_typeNext,300); return; }
+        _paint(e,_typeSlice(full,i)); }, 40);
+      return;
+    }
     _typeTimer=setInterval(()=>{
-      i+=Math.max(1, Math.round(total/20));
+      i+=Math.max(1, Math.round(total/24));
       if(i>=total){
         clearInterval(_typeTimer); _typeTimer=null;
-        _view.push(e);                  // consolidata in fondo (la più recente)
-        if(_view.length>MAX) _view.shift();   // se eccede, cade la più vecchia (in alto)
-        _paint();                       // ridisegno stabile, senza animazione
-        setTimeout(_typeNext, 320);     // pausa tra una riga e l'altra
+        msgEl.innerHTML=full;                 // testo completo
+        lastLine.classList.remove('typing');  // via il cursore
+        _view.push(e);                         // consolidata in fondo
+        if(_view.length>MAX) _view.shift();    // se eccede, cade la più vecchia
+        setTimeout(_typeNext, 300);
         return;
       }
-      _paint(e, _typeSlice(full, i));
-    }, 38);
+      // aggiorno SOLO il contenuto del messaggio (più il cursore), senza toccare il resto
+      msgEl.innerHTML=_typeSlice(full, i)+'<span class="sl-caret"></span>';
+    }, 34);
   }
 
   let _sig='';
