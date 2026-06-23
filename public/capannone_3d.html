@@ -288,10 +288,14 @@
     padding:30px 0 8px; opacity:0;
     font-family:'SF Mono','JetBrains Mono','Roboto Mono',ui-monospace,Menlo,Consolas,monospace;}
   #sysLog.show{opacity:1;}
-  /* stream: fino a 5 righe, full width, niente intestazione/separatore */
-  #sysLog .sl-stream{display:flex; flex-direction:column; width:100%;}
+  /* stream: ancorato in basso; le righe entrano dal fondo e spingono su le precedenti */
+  #sysLog .sl-stream{display:flex; flex-direction:column; justify-content:flex-end; width:100%;
+    overflow:hidden;}
   #sysLog .sl-line{display:flex; align-items:baseline; gap:9px; width:100%; box-sizing:border-box;
     padding:2px clamp(14px,2.6vw,34px); line-height:1.3; white-space:nowrap; overflow:hidden;}
+  /* nuova riga: entra dal basso (swipe up) */
+  #sysLog .sl-line.enter{animation:slUp .42s cubic-bezier(.2,.7,.2,1) both;}
+  @keyframes slUp{from{opacity:0; transform:translateY(100%);} to{opacity:1; transform:translateY(0);}}
   #sysLog .sl-t{color:#5f7596; font-variant-numeric:tabular-nums; flex:none; opacity:.85;}
   #sysLog .sl-tag{font-weight:800; letter-spacing:.05em; flex:none; min-width:38px;}
   #sysLog .sl-tag.in{color:#5fd699;}      /* carico / arrivo */
@@ -2899,11 +2903,12 @@ const LogFeed = (()=>{
   }
   function _esc(s){ return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
   const _tagTxt=t=> t==='in'?'IN':(t==='out'?'OUT':'SYS');
-  // riga completa; se "partial" è passato, mostra il messaggio tagliato + cursore
-  function _rowHTML(e, partial){
+  // riga completa; se "partial" è passato, mostra il messaggio tagliato + cursore.
+  // "enter"=true aggiunge la classe per l'animazione swipe-up.
+  function _rowHTML(e, partial, enter){
     const typing = partial!=null;
     const msg = typing ? partial : e.msg;
-    return `<div class="sl-line ${typing?'typing':''}">`
+    return `<div class="sl-line ${typing?'typing':''}${enter?' enter':''}">`
       + `<span class="sl-t">${_fmtT(e.ts)}</span>`
       + `<span class="sl-tag ${e.tag}">${_tagTxt(e.tag)}</span>`
       + `<span class="sl-msg">${msg}${typing?'<span class="sl-caret"></span>':''}</span>`
@@ -2923,14 +2928,19 @@ const LogFeed = (()=>{
     return out;
   }
 
-  let _view=[];           // voci attualmente a video (già battute), dal più recente
-  let _queue=[];          // voci nuove in attesa di essere battute (dal più vecchio al più recente)
+  let _view=[];           // voci a video, dalla PIÙ VECCHIA (in alto) alla PIÙ RECENTE (in basso)
+  let _queue=[];          // voci nuove in attesa, dalla più vecchia alla più recente
   let _typing=false;
-  function _paint(typingEntry, partial){
+  // costruisce le righe: le vecchie in alto, eventuale riga in battitura in fondo.
+  // markEnter = true sull'ultima riga consolidata per l'animazione swipe-up.
+  function _paint(typingEntry, partial, enterLastView){
     const stream=document.getElementById('slStream'); if(!stream) return;
     const rows=[];
-    if(typingEntry) rows.push(_rowHTML(typingEntry, partial));     // riga in battitura in cima
-    for(const e of _view) rows.push(_rowHTML(e));                  // righe già complete sotto
+    _view.forEach((e, idx)=>{
+      const isLast = idx===_view.length-1;
+      rows.push(_rowHTML(e, undefined, (enterLastView && isLast)));   // entra l'ultima consolidata
+    });
+    if(typingEntry) rows.push(_rowHTML(typingEntry, partial, true));  // riga in battitura in fondo, entra dal basso
     stream.innerHTML=rows.join('');
   }
   function _showBox(on){
@@ -2943,14 +2953,14 @@ const LogFeed = (()=>{
     const e=_queue.shift();            // prossima voce da battere (più vecchia prima)
     const full=e.msg, total=_plainLen(full);
     let i=0;
-    _paint(e, '');
+    _paint(e, '');                     // la nuova riga compare in fondo (swipe up) e inizia a battere
     _typeTimer=setInterval(()=>{
       i+=Math.max(1, Math.round(total/20));
       if(i>=total){
         clearInterval(_typeTimer); _typeTimer=null;
-        _view.unshift(e);               // consolidata in cima
-        if(_view.length>MAX) _view.length=MAX;
-        _paint();
+        _view.push(e);                  // consolidata in fondo (la più recente)
+        if(_view.length>MAX) _view.shift();   // se eccede, cade la più vecchia (in alto)
+        _paint();                       // ridisegno stabile, senza animazione
         setTimeout(_typeNext, 320);     // pausa tra una riga e l'altra
         return;
       }
