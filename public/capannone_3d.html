@@ -613,7 +613,7 @@ const scene=new THREE.Scene();
 scene.background=new THREE.Color(0x070a0f);
 scene.fog=new THREE.FogExp2(0x070a0f, 0.0045);
 const renderer=new THREE.WebGLRenderer({antialias:true, powerPreference:'high-performance', stencil:false, premultipliedAlpha:true});
-renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+renderer.setPixelRatio(Math.min(devicePixelRatio,1.5));
 renderer.shadowMap.enabled=true; renderer.shadowMap.type=THREE.PCFSoftShadowMap;
 // la scena è quasi statica: le ombre non vanno ricalcolate ogni frame.
 // Le aggiorno solo quando qualcosa cambia (vedi requestShadowUpdate()).
@@ -3924,7 +3924,7 @@ addEventListener('resize',resize); addEventListener('orientationchange',resize);
 
 // monitor prestazioni: riduce progressivamente la risoluzione se il framerate resta basso.
 let _fpsSamples=0,_fpsSlow=0,_lastNow=0,_degradeStep=0;
-const _PR_STEPS=[Math.min(devicePixelRatio,2), Math.min(devicePixelRatio,1.5), 1];
+const _PR_STEPS=[Math.min(devicePixelRatio,1.5), Math.min(devicePixelRatio,1.25), 1];
 function perfWatch(now){
   if(_lastNow){ const dt=now-_lastNow; if(dt>20) _fpsSlow++; _fpsSamples++; }   // >20ms ≈ sotto i 50fps
   _lastNow=now;
@@ -4039,6 +4039,26 @@ function tick(now){
       cpx=camPushed.x; cpz=camPushed.z;
     } else { camPushed=null; }
   } else { camPushed=null; }
+  // ----- RENDER ON-DEMAND -----
+  // Quando nulla si muove (nessuna cinematica, glow, parete in transizione,
+  // interazione recente), la scena è IDENTICA frame su frame: ridisegnarla a 60fps
+  // tiene GPU+CPU sempre cariche → ventola sempre su. In stato statico scendo a
+  // ~12fps (basta per i refresh dei pannelli) e risalgo all'istante quando serve.
+  const camMoving = Math.abs(cpx-tick._px)>1e-4 || Math.abs(cpy-tick._py)>1e-4 || Math.abs(cpz-tick._pz)>1e-4;
+  tick._px=cpx; tick._py=cpy; tick._pz=cpz;
+  const wallsMoving = (function(){ for(const w of WALLS){ const o=w.material.opacity; if(o>0.02 && o<0.91) return true; } return false; })();
+  const recentInteract = (now-lastInteract) < 600;
+  const sceneActive = inCine || glowState || glowList || prelievoGlow || camMoving || wallsMoving || recentInteract || _shadowFrames>0;
+  if(sceneActive){
+    tick._idleAccum=0;
+  } else {
+    tick._idleAccum=(tick._idleAccum||0)+_dt;
+    if(tick._idleAccum < (1/12)){          // throttle a ~12fps a riposo
+      requestAnimationFrame(tick);
+      return;
+    }
+    tick._idleAccum=0;
+  }
   camera.position.set(cpx,cpy,cpz);
   camera.lookAt(camS.tx,camS.ty,camS.tz);
   if(wallsAuto){
@@ -4065,6 +4085,7 @@ function tick(now){
 }
 requestAnimationFrame(tick);
 requestShadowUpdate(3);   // calcola le ombre della scena statica nei primi frame
+tick._px=tick._py=tick._pz=0; tick._idleAccum=0;
 
 // COCKPIT SUBITO ALL'AVVIO: mostra la pagina azienda appena la pagina è pronta,
 // senza attendere il timer di inattività. Dopo la prima interazione il comportamento
