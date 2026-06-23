@@ -261,7 +261,10 @@
   #cockpit #ckPageAzienda .ck-eyebrow::before{content:""; width:9px; height:9px; border-radius:50%;
     background:#34d27a; box-shadow:0 0 12px #34d27a; animation:ckLive 1.9s ease-in-out infinite;}
   @keyframes ckLive{0%,100%{opacity:1;} 50%{opacity:.35;}}
-  #cockpit #ckPageAzienda .ck-logorow{display:flex; align-items:baseline; gap:clamp(12px,1.6vw,22px); flex-wrap:nowrap;}
+  #cockpit #ckPageAzienda .ck-logorow{display:flex; align-items:flex-start; justify-content:flex-start; gap:clamp(12px,1.6vw,22px); flex-wrap:nowrap;}
+  #cockpit #ckPageAzienda .ck-logo-img{display:block; width:auto;
+    height:clamp(72px,11vw,180px); max-width:min(86vw,860px); object-fit:contain;
+    align-self:flex-start; filter:drop-shadow(0 4px 34px rgba(0,0,0,.55));}
   #cockpit #ckPageAzienda .ck-logo{background:none; -webkit-background-clip:border-box; background-clip:border-box;
     color:#ffffff; font-weight:800; letter-spacing:-.01em; font-size:clamp(66px,9.4vw,150px); line-height:.95;
     text-shadow:0 4px 34px rgba(0,0,0,.92); white-space:nowrap;}
@@ -355,6 +358,11 @@
     text-shadow:0 1px 12px rgba(0,0,0,.6);}
   #cockpit #slStream .sl-msg b{color:#ffffff; font-weight:700;}
   #cockpit #slStream .sl-msg i{color:rgba(255,255,255,.5); font-style:normal; font-weight:600;}
+  /* messaggio log troppo lungo: scorre orizzontalmente in loop (come le colonne) */
+  #cockpit #slStream .sl-msg.scroll{text-overflow:clip;}
+  #cockpit #slStream .sl-msg.scroll > .mq, #sysLog .sl-msg.scroll > .mq{display:inline-block; white-space:nowrap;
+    padding-right:var(--mq-gap,48px); animation:ckMarquee var(--mq-dur,12s) linear infinite; will-change:transform;}
+  #sysLog .sl-msg.scroll{white-space:nowrap; overflow:hidden;}
   #cockpit #slStream .sl-caret{display:none;}
   #cockpit #slStream .sl-line.typing .sl-caret{display:inline-block; width:.5em; height:1em; vertical-align:-.12em;
     margin-left:2px; background:#7fe0b0; border-radius:1px; animation:slBlink .55s steps(1) infinite;}
@@ -558,7 +566,7 @@
 <div id="cockpit" aria-hidden="true">
   <div class="ck-inner" id="ckPageAzienda">
     <div class="ck-eyebrow">Magazzino · live</div>
-    <div class="ck-logorow"><span class="ck-logo">LG&nbsp;TRADING</span><span class="ck-sub">S.r.l.</span></div>
+    <div class="ck-logorow"><img class="ck-logo-img" src="LG%20TRADING%20LOGO.%20trasp.png" alt="LG Trading"></div>
     <div class="ck-line"></div>
     <div class="ck-claim">E-commerce · Logistica · Software su misura</div>
     <div class="ck-meta">
@@ -2305,6 +2313,16 @@ const Voce = (function(){
   let speakSeq = 0;            // id incrementale: solo l'ultima chiamata a parla() è valida
   let cloudPlaying = false;    // true mentre un audio TTS cloud sta effettivamente suonando
   let cloudOk = false;         // la voce cloud ha funzionato almeno una volta in questa sessione
+  let busy = false;            // true mentre QUALSIASI voce (cloud o browser) sta parlando
+  let _onDone = null;          // callback a fine voce corrente
+  let _browserTimer = null;    // stima fine voce browser
+  function _finish(){
+    if(busy){
+      busy=false;
+      const cb=_onDone; _onDone=null;
+      if(cb) try{ cb(); }catch(_){}
+    }
+  }
 
   function ensureAudio(){
     if(!audio){
@@ -2312,9 +2330,9 @@ const Voce = (function(){
       // tieni traccia di quando l'audio cloud è in riproduzione, così la Web Speech
       // non può MAI partire mentre la voce cloud sta parlando.
       audio.addEventListener('playing', ()=>{ cloudPlaying=true; });
-      audio.addEventListener('ended',   ()=>{ cloudPlaying=false; });
+      audio.addEventListener('ended',   ()=>{ cloudPlaying=false; _finish(); });
       audio.addEventListener('pause',   ()=>{ cloudPlaying=false; });
-      audio.addEventListener('error',   ()=>{ cloudPlaying=false; });
+      audio.addEventListener('error',   ()=>{ cloudPlaying=false; _finish(); });
     }
     return audio;
   }
@@ -2396,40 +2414,63 @@ const Voce = (function(){
       if(!voce) voce=it[0]||voices[0];
       const u=new SpeechSynthesisUtterance(text);
       if(voce) u.voice=voce; u.lang=(voce&&voce.lang)||'it-IT'; u.rate=1.0; u.pitch=1.05;
+      // fine voce browser → libera (con fallback a timer, alcuni motori non emettono onend)
+      if(_browserTimer){ clearTimeout(_browserTimer); _browserTimer=null; }
+      u.onend = ()=>{ if(_browserTimer){ clearTimeout(_browserTimer); _browserTimer=null; } _finish(); };
+      u.onerror = ()=>{ if(_browserTimer){ clearTimeout(_browserTimer); _browserTimer=null; } _finish(); };
+      const words=text.split(/\s+/).length;
+      const est=Math.min(14000, Math.max(3000, words*420));
+      _browserTimer=setTimeout(()=>{ _browserTimer=null; _finish(); }, est+800);
       synth.speak(u);
       return true;
     }catch(_){ return false; }
   }
 
-  async function parla(testo){
+  async function parla(testo, opts){
     const msg=String(testo||'').trim();
-    if(!abilitata || !msg) return;
+    if(!abilitata || !msg) return false;
+    opts = opts || {};
+    const priority = opts.priority || 'high';   // default: comportamento storico (interrompe)
+    const onDone = (typeof opts.onDone==='function') ? opts.onDone : null;
+
+    // PRIORITÀ: una voce di servizio (es. nuovo ordine) NON deve coprire né interrompere
+    // una voce in corso (es. annuncio "Trova"). Se c'è già qualcosa che parla, la scarto.
+    if(priority==='low' && busy){
+      return false;   // chiamante (Annunci) reinserirà/ritenterà più tardi
+    }
+
     // ogni nuova frase invalida le precedenti: il fallback browser parte solo se
     // questa è ANCORA l'ultima richiesta quando il cloud ha finito di tentare.
     const mySeq = ++speakSeq;
     // interrompi qualsiasi voce in corso (cloud o browser) prima di parlare
+    if(_browserTimer){ clearTimeout(_browserTimer); _browserTimer=null; }
     try{ if(audio){ audio.pause(); audio.currentTime=0; } }catch(_){}
     cloudPlaying=false;
     try{ if(window.speechSynthesis) window.speechSynthesis.cancel(); }catch(_){}
     if(lastUrl){ try{ URL.revokeObjectURL(lastUrl); }catch(_){} lastUrl=null; }
+    // questa frase prende possesso della voce
+    busy=true; _onDone=onDone;
 
     const ok = await _cloud(msg);
 
     // se nel frattempo è arrivata una frase più recente, abbandona: non sovrapporre nulla
-    if(mySeq !== speakSeq) return;
+    if(mySeq !== speakSeq) return false;
 
-    if(ok) return;                 // cloud OK → fine, niente Web Speech
+    if(ok) return true;            // cloud OK → fine, niente Web Speech (busy si libera su 'ended')
     // CLOUD FALLITO. La Web Speech è l'ULTIMA SPIAGGIA: la uso solo se
     //  - non è un blocco autoplay (in quel caso la frase è già in coda come pending), e
     //  - non c'è un audio cloud che sta suonando, e
     //  - questa è ancora la richiesta corrente.
-    if(pending) return;            // autoplay bloccato: ritenterà il cloud, non parlare col browser
-    if(cloudPlaying) return;       // un audio cloud sta già parlando: non sovrapporre
-    if(mySeq !== speakSeq) return;
-    _browser(msg);
+    if(pending){ _finish(); return false; }     // autoplay bloccato: ritenterà il cloud
+    if(cloudPlaying){ return true; }             // un audio cloud sta già parlando
+    if(mySeq !== speakSeq) return false;
+    const b=_browser(msg);
+    if(!b) _finish();              // nessun motore disponibile: libera subito
+    return b;
   }
   function toggle(on){ abilitata=(on!==undefined)?!!on:!abilitata;
-    if(!abilitata){ try{audio&&audio.pause();}catch(_){} try{window.speechSynthesis&&window.speechSynthesis.cancel();}catch(_){} }
+    if(!abilitata){ try{audio&&audio.pause();}catch(_){} try{window.speechSynthesis&&window.speechSynthesis.cancel();}catch(_){}
+      if(_browserTimer){ clearTimeout(_browserTimer); _browserTimer=null; } _finish(); }
     return abilitata; }
 
   // tenta lo sblocco subito e ad ogni possibile occasione finché non riesce
@@ -2441,7 +2482,7 @@ const Voce = (function(){
   // ritenta periodicamente all'avvio (alcuni kiosk concedono l'audio dopo il primo render)
   let _t=0; const _iv=setInterval(()=>{ if(unlocked||_t++>20){ clearInterval(_iv); return; } tryUnlock(); }, 1200);
 
-  return { parla, toggle, prime:tryUnlock, get abilitata(){return abilitata;} };
+  return { parla, toggle, prime:tryUnlock, get abilitata(){return abilitata;}, isBusy(){ return busy; } };
 })();
 
 // compone la frase parlata per un vano
@@ -2706,7 +2747,7 @@ function highlightVano(v, opts={}){
   glowState=_buildGlow(v, true);
   startCinematicTour(v); pulse=0;
   selectedVano=v;
-  if(!opts.silent) Voce.parla(fraseVano(v));   // annuncio IA femminile in contemporanea col movimento
+  if(!opts.silent) Voce.parla(fraseVano(v), {priority:'high'});   // annuncio IA femminile in contemporanea col movimento
   const m=v.code.match(/^([A-F])(\d{2})-L(\d)-P(\d)$/);
   const rowHexHero = (typeof CARTELLO_COLORI!=='undefined' && v.row && CARTELLO_COLORI[v.row]) ? CARTELLO_COLORI[v.row][0] : '#3b82f6';
   // HERO TROVA: posto e quantità in evidenza, come una schermata cockpit dedicata.
@@ -3405,6 +3446,26 @@ const LogFeed = (()=>{
     stream.innerHTML=rows.join('');
     const c=document.getElementById('ckBdLogCount');
     if(c) c.textContent=String(_view.length + (typingEntry?1:0));
+    _marqueeMsgs();   // applica lo scroll orizzontale ai messaggi lunghi già completi
+  }
+  // messaggi log più lunghi della larghezza: scorrono in orizzontale (loop), come le colonne.
+  // Salta le righe ancora in "typing" (il marquee partirebbe a metà battitura).
+  function _marqueeMsgs(){
+    const stream=document.getElementById('slStream'); if(!stream) return;
+    stream.querySelectorAll('.sl-line').forEach(line=>{
+      const el=line.querySelector('.sl-msg'); if(!el) return;
+      if(line.classList.contains('typing')){ el.classList.remove('scroll'); return; }
+      el.classList.remove('scroll');
+      const overflow=el.scrollWidth-el.clientWidth;
+      if(overflow<=2) return;
+      const txt=el.innerHTML;
+      const shift=overflow+24;
+      el.classList.add('scroll');
+      el.innerHTML='<span class="mq">'+txt+'</span>';
+      const dur=Math.max(16, Math.round(shift/13));   // lento, come il marquee delle colonne
+      el.style.setProperty('--mq-shift', (-shift)+'px');
+      el.style.setProperty('--mq-dur', dur+'s');
+    });
   }
   let _hidden=false;       // forzatura esterna (es. durante "Trova"): nasconde la striscia
   function _applyVisibility(){
@@ -3447,6 +3508,7 @@ const LogFeed = (()=>{
         clearInterval(_typeTimer); _typeTimer=null;
         msgEl.innerHTML=full;                 // testo completo
         lastLine.classList.remove('typing');  // via il cursore
+        _marqueeMsgs();                        // riga completa → eventuale scroll orizzontale
         _view.push(e);                         // consolidata in fondo
         if(_view.length>MAX) _view.shift();    // se eccede, cade la più vecchia
         setTimeout(_typeNext, 300);
@@ -3760,17 +3822,35 @@ const Annunci = (()=>{
     if(speaking) return;
     if(!queue.length) return;
     if(typeof Voce==='undefined' || !Voce.abilitata) { queue.length=0; return; } // muto → scarta
+    // se una voce sta già parlando (es. annuncio "Trova"), NON sovrapporre:
+    // aspetta e ritenta, lasciando la frase in coda finché la voce si libera.
+    if(Voce.isBusy && Voce.isBusy()){
+      setTimeout(pump, 700);
+      return;
+    }
     const now=performance.now();
     const wait=Math.max(0, COOLDOWN_MS-(now-lastSpokeAt));
     speaking=true;
     setTimeout(()=>{
-      const text=queue.shift();
-      try{ Voce.parla(text); }catch(_){}
+      // ricontrollo: tra il timeout e ora potrebbe essere partito un "Trova"
+      if(Voce.isBusy && Voce.isBusy()){ speaking=false; setTimeout(pump, 700); return; }
+      const text=queue[0];
       lastSpokeAt=performance.now();
-      // stima durata: ~0.38s a parola, minimo 3.5s, poi libera la coda
+      // fallback di durata se onDone non arriva (motore senza eventi affidabili)
       const words=text.split(/\s+/).length;
       const dur=Math.min(12000, Math.max(3500, words*380));
-      setTimeout(()=>{ speaking=false; pump(); }, dur);
+      let released=false;
+      const release=()=>{ if(released) return; released=true; speaking=false; pump(); };
+      const fb=setTimeout(release, dur+1500);
+      const ok = Voce.parla(text, { priority:'low', onDone:()=>{ clearTimeout(fb); release(); } });
+      Promise.resolve(ok).then(started=>{
+        if(started===false){
+          // scartata perché la voce era occupata: rimetti in attesa, non consumare
+          clearTimeout(fb); released=true; speaking=false; setTimeout(pump, 700);
+        }else{
+          queue.shift();   // consumata davvero
+        }
+      }).catch(()=>{ /* in caso di errore lascia che il fallback timer liberi */ });
     }, wait);
   }
 
@@ -4470,7 +4550,7 @@ function highlightMulti(stops, title){
   });
   let frase = `${prod?prod+'. ':''}Articolo presente in ${n} ubicazioni, per un totale di ${totale} pezzi. `;
   frase += 'Le trovi tutte illuminate: ' + elenco.join('; ') + '.';
-  Voce.parla(frase);
+  Voce.parla(frase, {priority:'high'});
 }
 
 /* posiziona la camera per inquadrare un insieme di punti (centri dei bancali) */
