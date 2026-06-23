@@ -759,8 +759,67 @@ function capShape(){
 const floor=new THREE.Mesh(new THREE.ShapeGeometry(capShape()),M.floor);
 floor.rotation.x=Math.PI/2; floor.receiveShadow=true; fixed.add(floor);
 M.floor.side=THREE.DoubleSide; M.vault.side=THREE.DoubleSide;
-// pavimento interno: cemento levigato/resinato grigio, lucido con riflessi premium
-M.floor.color.setHex(0x9a9ea3); M.floor.roughness=0.34; M.floor.metalness=0.32; M.floor.envMapIntensity=0.85;
+
+// ===== PAVIMENTO INDUSTRIALE AL QUARZO (texture procedurale) =====
+// resina/cemento al quarzo levigato: base chiara con grana fine di scaglie di quarzo,
+// macchie morbide di variazione tonale e micro-rilievo (normal map) per riflesso satinato vivo.
+(function quartzFloor(){
+  const S=1024;
+  // --- mappa colore: base + scaglie di quarzo + nuvole tonali ---
+  const cv=document.createElement('canvas'); cv.width=cv.height=S;
+  const c=cv.getContext('2d');
+  c.fillStyle='#b9bcc0'; c.fillRect(0,0,S,S);
+  // nuvole tonali morbide (variazione di getto/posa della resina)
+  for(let i=0;i<140;i++){
+    const x=Math.random()*S, y=Math.random()*S, r=40+Math.random()*150;
+    const g=c.createRadialGradient(x,y,0,x,y,r);
+    const dark=Math.random()<0.5;
+    const a=0.05+Math.random()*0.06;
+    g.addColorStop(0, dark?`rgba(150,154,158,${a})`:`rgba(208,210,213,${a})`);
+    g.addColorStop(1,'rgba(0,0,0,0)');
+    c.fillStyle=g; c.beginPath(); c.arc(x,y,r,0,Math.PI*2); c.fill();
+  }
+  // scaglie di quarzo: tanti puntini fini chiari e scuri
+  const flakes=Math.floor(S*S*0.012);
+  for(let i=0;i<flakes;i++){
+    const x=Math.random()*S, y=Math.random()*S;
+    const sz=Math.random()<0.85 ? (0.6+Math.random()*1.2) : (1.4+Math.random()*1.8);
+    const t=Math.random();
+    let col;
+    if(t<0.45) col=`rgba(238,240,242,${0.5+Math.random()*0.4})`;      // quarzo chiaro brillante
+    else if(t<0.78) col=`rgba(120,124,130,${0.35+Math.random()*0.35})`; // grigio scuro
+    else if(t<0.9) col=`rgba(90,94,102,${0.4+Math.random()*0.35})`;     // antracite
+    else col=`rgba(170,150,120,${0.25+Math.random()*0.3})`;            // qualche scaglia ambrata
+    c.fillStyle=col; c.beginPath(); c.arc(x,y,sz,0,Math.PI*2); c.fill();
+  }
+  const tex=new THREE.CanvasTexture(cv);
+  tex.wrapS=tex.wrapT=THREE.RepeatWrapping; tex.colorSpace=THREE.SRGBColorSpace;
+  tex.anisotropy=8; tex.repeat.set(0.18,0.18);   // ~ una piastrella texture ogni ~5.5m
+
+  // --- normal map: micro-grana in rilievo, ricavata da rumore fine ---
+  const nv=document.createElement('canvas'); nv.width=nv.height=S;
+  const nc=nv.getContext('2d');
+  const img=nc.createImageData(S,S); const d=img.data;
+  // altezza pseudo-casuale fine -> normal approssimata
+  for(let y=0;y<S;y++)for(let x=0;x<S;x++){
+    const i=(y*S+x)*4;
+    // rumore granuloso leggero
+    const n=(Math.random()*2-1)*0.5;
+    // normal mappata: blu dominante, leggere deviazioni su R/G
+    d[i]=128+n*40; d[i+1]=128+((Math.random()*2-1)*0.5)*40; d[i+2]=235; d[i+3]=255;
+  }
+  nc.putImageData(img,0,0);
+  const nrm=new THREE.CanvasTexture(nv);
+  nrm.wrapS=nrm.wrapT=THREE.RepeatWrapping; nrm.anisotropy=8;
+  nrm.repeat.set(2.4,2.4);   // grana molto più fitta del colore
+
+  M.floor.map=tex;
+  M.floor.normalMap=nrm; M.floor.normalScale=new THREE.Vector2(0.35,0.35);
+  M.floor.color.setHex(0xffffff);   // bianco: lascia parlare la texture
+  M.floor.roughness=0.3; M.floor.metalness=0.18; M.floor.envMapIntensity=0.7;
+  M.floor.needsUpdate=true;
+})();
+
 // piano esterno (showroom): piazzale grigio chiaro che si estende oltre la vista.
 // Grande abbastanza da non mostrare MAI il bordo: il fog lo dissolve nel cielo (orizzonte infinito).
 const stage=new THREE.Mesh(new THREE.PlaneGeometry(4000,4000),
