@@ -2814,22 +2814,37 @@ const LogFeed = (()=>{
         const pezzi=Math.abs(Math.round(Number(f.totalPieces||0)))||0;
         const wfId=String((f.workflow&&f.workflow.id)||f.workflowId||f.id||'').trim();
         const ts0=Number(f.appliedAtClient||f.updatedAtClient||f.createdAtClient||0)||0;
+        const voided = f.voided===true;
+        const operatore = String(f.appliedBy||f.createdBy||'').trim();
+        const extra = [];
+        if(operatore) extra.push(operatore);
+        if(f.totalLines>0) extra.push(`${f.totalLines} righe`);
+        const baseMeta = (bits)=> bits.filter(Boolean).join(' · ');
+        // flusso annullato: lo segnaliamo a parte
+        if(voided){
+          const tsv=Number(f.voidedAtClient||ts0)||0;
+          out.push({ id:`flow:void:${f.id}`, ts:tsv, tag:'sys',
+            msg:`Flusso annullato <b>${_esc(name)}</b>`, meta:baseMeta([_loc(f.location||loc), pezzi?`${pezzi} pz`:'']) });
+        }
         // movimento flusso (scarico/carico)
-        if(kind==='scarica' || kind==='carica'){
+        else if(kind==='scarica' || kind==='carica'){
           const tag = kind==='scarica' ? 'out':'in';
           const verbo = kind==='scarica' ? 'Scarico' : 'Carico';
-          const meta = _loc(f.location||loc) + (pezzi?` · ${pezzi} pz`:'');
           out.push({ id:`flow:${kind}:${f.id}`, ts:ts0, tag,
-            msg:`${verbo} <b>${_esc(name)}</b>`, meta });
-        } else if(ts0){
-          // altri movimenti (ubicazioni, rettifiche, trasferimenti, ecc.): comunque a log
+            msg:`${verbo} <b>${_esc(name)}</b>`, meta:baseMeta([_loc(f.location||loc), pezzi?`${pezzi} pz`:'', ...extra]) });
+        } else {
+          // qualsiasi altro flusso ("ha registrato" in picking): ubicazioni, rettifiche,
+          // trasferimenti, ordini shopify_fbm registrati, ecc. Mostrato anche senza timestamp.
+          const isShopifyFbm = /shopify[_-]?fbm/i.test(name) || /shopify[_-]?fbm/i.test(wfId);
           const verbo = kind==='ubicazione' ? 'Ubicazione'
                       : kind==='rettifica' ? 'Rettifica'
                       : kind==='trasferimento' ? 'Trasferimento'
-                      : 'Movimento';
-          const tag = kind==='trasferimento' ? 'in' : 'sys';
-          out.push({ id:`flow:${kind||'mov'}:${f.id}`, ts:ts0, tag,
-            msg:`${verbo} <b>${_esc(name)}</b>`, meta:_loc(f.location||loc)+(pezzi?` · ${pezzi} pz`:'') });
+                      : isShopifyFbm ? 'Ordine FBM registrato'
+                      : kind ? ('Registrato '+kind)
+                      : 'Registrato';
+          const tag = kind==='trasferimento' ? 'in' : (isShopifyFbm ? 'out' : 'sys');
+          out.push({ id:`flow:${kind||'reg'}:${f.id}`, ts:ts0, tag,
+            msg:`${verbo} <b>${_esc(name)}</b>`, meta:baseMeta([_loc(f.location||loc), pezzi?`${pezzi} pz`:'', ...extra]) });
         }
         // eventi di picking annidati
         const p=(f.picking&&typeof f.picking==='object')?f.picking:{};
@@ -2846,6 +2861,14 @@ const LogFeed = (()=>{
           const det = isFlow ? _esc(name) : (sku?_esc(sku):_esc(name));
           out.push({ id:`pick:${f.id}:${t}:${ts||i}:${sku||''}`, ts, tag:'out',
             msg:`${verbo} <b>${det}</b>`, meta:`${_esc(who)} · ${_loc(f.location||loc)}` });
+        }
+        // fallback: flussi prelevati "in blocco" prima del log eventi (come picking.html)
+        const hasFlowEvent = events.some(ev=>String(ev&&ev.type||'').toLowerCase()==='flow');
+        if(p.flowPicked===true && (p.flowPickMode==='flow' || p.flowPickGroup===true) && !hasFlowEvent){
+          const ts=Number(p.flowPickedAtClient||p.updatedAtClient||ts0)||0;
+          const who=String(p.flowPickedBy||p.updatedBy||'').trim()||'Operatore';
+          out.push({ id:`pick:${f.id}:flowlegacy:${ts}`, ts, tag:'out',
+            msg:`Prelievo flusso <b>${_esc(name)}</b>`, meta:`${_esc(who)} · ${_loc(f.location||loc)}` });
         }
       }
     }
