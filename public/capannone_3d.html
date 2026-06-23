@@ -497,10 +497,29 @@
   @keyframes raPulse{0%,100%{transform:scale(1);} 50%{transform:scale(1.08);}}
   @media (max-width:480px){ #readyAlert .ra-pcs{display:none;} #readyAlert .ra-icon{width:40px; height:40px;} }
 
+  /* ===== MAPPA OFFLINE (standby fuori orario) ===== */
+  #mapOffline{position:fixed; inset:0; z-index:24; display:flex; align-items:center; justify-content:center;
+    background:#000; opacity:0; visibility:hidden; transition:opacity .5s ease, visibility .5s ease; pointer-events:none;}
+  #mapOffline.show{opacity:1; visibility:visible;}
+  #mapOffline .mo-inner{text-align:center; color:#fff;}
+  #mapOffline .mo-title{font-weight:700; letter-spacing:.04em; font-size:clamp(40px,8vw,84px); line-height:1; margin-bottom:clamp(28px,5vh,48px);}
+  #mapOffline .mo-row{display:flex; justify-content:space-between; gap:clamp(40px,10vw,120px);
+    font-size:clamp(18px,3vw,28px); font-weight:500; padding:6px 0;}
+  #mapOffline .mo-row b{font-weight:700; font-variant-numeric:tabular-nums;}
+
 </style>
 </head>
 <body>
 <div id="app"></div>
+
+<!-- MAPPA OFFLINE: fuori orario la scena 3D viene sospesa (GPU a riposo). -->
+<div id="mapOffline" aria-hidden="true">
+  <div class="mo-inner">
+    <div class="mo-title">Mappa offline</div>
+    <div class="mo-row"><span>Lun – Ven</span><b>08:00 – 18:00</b></div>
+    <div class="mo-row"><span>Sab – Dom</span><b>Chiuso</b></div>
+  </div>
+</div>
 
 <button class="kioskGear" id="kioskGear" type="button" title="Impostazioni kiosk" aria-label="Impostazioni kiosk">⚙︎</button>
 <button class="kioskGear" id="voiceToggle" type="button" title="Voce on/off" aria-label="Voce on/off" style="right:36px">🔊</button>
@@ -639,6 +658,34 @@ function lineOn(){
   return (day>=1 && day<=5) && (h>=8 && h<18);
 }
 let __onFactor=0;                       // 0=linea spenta, 1=accesa (interpolata) — condiviso
+
+// ===== MAPPA OFFLINE (standby fuori orario) =====
+// Fuori orario aziendale la scena 3D viene sospesa: niente render WebGL, GPU a riposo.
+// Cockpit e messaggi (DOM) restano vivi. Un comando Trova riaccende tutto all'istante;
+// a fine Trova, se siamo ancora fuori orario, si torna offline.
+// Override manuale: window.__mapForceOnline = true|false; null = orario reale.
+if(typeof window.__mapForceOnline==='undefined') window.__mapForceOnline = null;
+let _mapOffline = false;                // true = scena sospesa, overlay visibile
+function businessOpen(){
+  if(window.__mapForceOnline===true) return true;
+  if(window.__mapForceOnline===false) return false;
+  const d=new Date();
+  const day=d.getDay();                 // 0=domenica … 6=sabato
+  const h=d.getHours()+d.getMinutes()/60;
+  return (day>=1 && day<=5) && (h>=8 && h<18);
+}
+function _moEl(){ return document.getElementById('mapOffline'); }
+function setMapOffline(off){
+  if(off===_mapOffline) return;
+  _mapOffline = off;
+  const el=_moEl();
+  if(el){ el.classList.toggle('show', off); el.setAttribute('aria-hidden', off?'false':'true'); }
+  if(!off){
+    // rientro online: forza un refresh completo (ombre + qualche frame attivo)
+    lastInteract = performance.now();
+    requestShadowUpdate(3);
+  }
+}
 const scene=new THREE.Scene();
 scene.background=new THREE.Color(0x070a0f);
 scene.fog=new THREE.FogExp2(0x070a0f, 0.0045);
@@ -4110,6 +4157,22 @@ function clampCameraXZ(x,z){
 
 function tick(now){
   perfWatch(now);
+  // ===== STATO MAPPA OFFLINE =====
+  // Un Trova in corso (vano selezionato o tour cinematografico) tiene SEMPRE la mappa online.
+  // Altrimenti: offline se fuori orario. Cockpit e messaggi restano attivi in entrambi i casi.
+  const trovaInCorso = !!(selectedVano || tour || tween);
+  const shouldOffline = !businessOpen() && !trovaInCorso;
+  setMapOffline(shouldOffline);
+  if(_mapOffline){
+    // scena sospesa: aggiorno SOLO cockpit, messaggi e log (DOM, leggeri), niente WebGL.
+    updateCockpit(now);
+    if(!tick._iaT || now-tick._iaT>5000){ tick._iaT=now; refreshIncomingAlert(); refreshReadyAlert(); }
+    if(!tick._slT || now-tick._slT>8000){ tick._slT=now; try{ if(typeof LogFeed!=='undefined') LogFeed.refresh(); }catch(_){} }
+    if(!tick._salT || now-tick._salT>20000){ tick._salT=now; try{ if(typeof Annunci!=='undefined') Annunci.onTick(now); }catch(_){} }
+    _lastTickT=now;                 // evita un delta-time enorme al risveglio
+    setTimeout(()=>requestAnimationFrame(tick), 200);   // ~5fps: basta per orologio e pannelli
+    return;
+  }
   if(window.__uFlowUpdate) window.__uFlowUpdate(now);
   if(window.__lineUpdate) window.__lineUpdate(now);
   updateTour(now);
@@ -4364,6 +4427,9 @@ function handleCapannone3dFocusCommand(data){
     if(key && key === LAST_CAPANNONE_3D_FOCUS_KEY) return;
     LAST_CAPANNONE_3D_FOCUS_KEY = key;
 
+    // riattivazione IMMEDIATA della mappa se eravamo offline (fuori orario):
+    // esci subito dallo standby così il volo sulla posizione parte senza ritardo.
+    if(_mapOffline) setMapOffline(false);
     // piccolo delay: lascia terminare il refresh grafico dei bancali, poi vola sulla posizione
     setTimeout(()=>{
       const ok = findAndHighlightRackCode(code, { fromCloud:true });
