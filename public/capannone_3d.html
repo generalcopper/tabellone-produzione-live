@@ -381,6 +381,14 @@
   #cockpit .ck-bd-meta{min-width:0; overflow:hidden;}
   #cockpit .ck-bd-name{display:block; font-weight:650; font-size:clamp(12px,1.3vw,14.5px); color:#ffffff; line-height:1.3;
     white-space:nowrap; overflow:hidden; text-overflow:ellipsis; letter-spacing:-.005em; text-shadow:0 1px 14px rgba(0,0,0,.7);}
+  /* nome troppo lungo per la colonna: scorre orizzontalmente in loop (marquee) */
+  #cockpit .ck-bd-name.scroll{text-overflow:clip;}
+  #cockpit .ck-bd-name.scroll > .mq{display:inline-block; white-space:nowrap; padding-right:var(--mq-gap,48px);
+    animation:ckMarquee var(--mq-dur,12s) linear infinite; will-change:transform;}
+  @keyframes ckMarquee{
+    0%,8%{transform:translateX(0);}
+    92%,100%{transform:translateX(var(--mq-shift,0));}
+  }
   #cockpit .ck-bd-sub{display:block; margin-top:2px; font-weight:500; font-size:clamp(9px,.95vw,11px); letter-spacing:.01em;
     color:rgba(255,255,255,.56); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; text-shadow:0 1px 10px rgba(0,0,0,.6);}
   #cockpit .ck-bd-sub .res{color:#ffcf94; font-weight:600;}
@@ -3150,6 +3158,67 @@ function renderBoard(force){
       return termRow(cls, tok, escapeHtmlCk(nomeProdottoPulito(x.title)||x.sku), sub, x.avail, 'disp.', true);
     }).join('');
   }
+
+  // se le liste sono più lunghe del contenitore, scorrono da sole (ogni tot secondi)
+  autoScrollList(prepList);
+  autoScrollList(prodList);
+  // nomi prodotto troppo lunghi per la colonna: scorrono in orizzontale (loop)
+  applyNameMarquee(prepList);
+  applyNameMarquee(prodList);
+}
+
+/* ===== MARQUEE nomi prodotto =============================================
+   Per ogni .ck-bd-name che sfora la larghezza disponibile, avvolge il testo
+   in uno <span class="mq"> che scorre da sinistra a destra e torna, in loop.
+   I nomi che ci stanno restano invariati (niente animazione inutile). */
+function applyNameMarquee(root){
+  if(!root) return;
+  const names=root.querySelectorAll('.ck-bd-name');
+  names.forEach(el=>{
+    // reset eventuale stato precedente (il contenuto è appena stato ridisegnato)
+    el.classList.remove('scroll');
+    const overflow = el.scrollWidth - el.clientWidth;
+    if(overflow <= 2) return;                    // ci sta: nessun marquee
+    const txt=el.innerHTML;
+    const shift = overflow + 24;                 // quanto deve scorrere (+ margine)
+    el.classList.add('scroll');
+    el.innerHTML='<span class="mq">'+txt+'</span>';
+    // durata proporzionale alla lunghezza: ~26px/s, minimo 8s
+    const dur=Math.max(8, Math.round(shift/26));
+    el.style.setProperty('--mq-shift', (-shift)+'px');
+    el.style.setProperty('--mq-dur', dur+'s');
+  });
+}
+
+/* ===== AUTO-SCROLL liste board ============================================
+   Quando il contenuto supera l'altezza visibile, la lista scorre da sola:
+   pausa in cima, scende a step morbidi, pausa in fondo, risale e riparte.
+   Se il contenuto entra tutto (o cambia), si resetta e si ferma. */
+function autoScrollList(el){
+  if(!el) return;
+  // stop e reset del ciclo precedente su questo elemento
+  if(el._asTimer){ clearTimeout(el._asTimer); el._asTimer=null; }
+  el.scrollTop=0;
+  const overflow = el.scrollHeight - el.clientHeight;
+  if(overflow <= 4) return;            // ci sta tutto: niente auto-scroll
+
+  const TOP_PAUSE=2600;                // pausa iniziale in cima
+  const BOT_PAUSE=2600;                // pausa in fondo prima di risalire
+  const STEP_MS=2200;                  // intervallo tra uno step e l'altro
+  const PAGE=()=> Math.max(40, el.clientHeight*0.85);  // quanto scorre per step
+
+  const goTop=()=>{ el.scrollTo({top:0, behavior:'smooth'}); el._asTimer=setTimeout(step, TOP_PAUSE); };
+  const step=()=>{
+    const max = el.scrollHeight - el.clientHeight;
+    if(max <= 4){ el._asTimer=null; return; }          // non scorre più: ferma
+    if(el.scrollTop >= max-4){                          // arrivati in fondo
+      el._asTimer=setTimeout(goTop, BOT_PAUSE);
+      return;
+    }
+    el.scrollTo({top: Math.min(max, el.scrollTop+PAGE()), behavior:'smooth'});
+    el._asTimer=setTimeout(step, STEP_MS);
+  };
+  el._asTimer=setTimeout(step, TOP_PAUSE);
 }
 
 /* ===== LOG DI SISTEMA (striscia in basso) =====
