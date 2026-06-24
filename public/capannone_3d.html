@@ -4510,11 +4510,22 @@ function tick(now){
   // la posizione è quella del drone, lo sguardo va in avanti secondo l'heading.
   let droneLook = null;
   if(droneActive && _droneFPReady){
-    cpx = droneFP.x; cpy = droneFP.y; cpz = droneFP.z;
+    // smoothing frame-rate independente: il rendered (droneFPS) insegue il target
+    // (droneFP). Questo toglie la scattosità e dà l'inerzia morbida di un drone.
+    const sm = 1 - Math.pow(1 - 0.22, _dt*60);     // ~morbido ma reattivo
+    droneFPS.x += (droneFP.x - droneFPS.x) * sm;
+    droneFPS.y += (droneFP.y - droneFPS.y) * sm;
+    droneFPS.z += (droneFP.z - droneFPS.z) * sm;
+    // yaw: interpolo sull'angolo più corto (evita giri di 360° allo wrap)
+    let dyaw = droneFP.yaw - droneFPS.yaw;
+    while(dyaw >  Math.PI) dyaw -= Math.PI*2;
+    while(dyaw < -Math.PI) dyaw += Math.PI*2;
+    droneFPS.yaw += dyaw * sm;
+    cpx = droneFPS.x; cpy = droneFPS.y; cpz = droneFPS.z;
     droneLook = {
-      x: droneFP.x + Math.sin(droneFP.yaw),
-      y: droneFP.y,                       // sguardo orizzontale (volo stabile)
-      z: droneFP.z + Math.cos(droneFP.yaw)
+      x: droneFPS.x + Math.sin(droneFPS.yaw),
+      y: droneFPS.y,                       // sguardo orizzontale (volo stabile)
+      z: droneFPS.z + Math.cos(droneFPS.yaw)
     };
   }
   // CONFINAMENTO: vale solo quando la camera è DENTRO il capannone (navigazione interna).
@@ -4631,6 +4642,7 @@ let _droneFirstSnap = true;
 // MODELLO DRONE FPV: la camera È il drone. yaw ruota la testa SUL POSTO
 // (il target gira attorno al drone, non il drone attorno al capannone).
 let droneFP = { x:0, y:2.0, z:0, yaw:0 };   // posizione drone + heading (rad)
+let droneFPS = { x:0, y:2.0, z:0, yaw:0 };  // versione interpolata (resa fluida)
 let _droneFPReady = false;
 function initDroneFP(){
   // parto dalla posizione REALE della camera in questo istante, così l'ingresso
@@ -4641,6 +4653,7 @@ function initDroneFP(){
   // heading iniziale = direzione attuale di sguardo, proiettata sul piano
   const dir = new THREE.Vector3(); camera.getWorldDirection(dir);
   droneFP.yaw = Math.atan2(dir.x, dir.z);   // 0 = verso +Z
+  droneFPS = { x:droneFP.x, y:droneFP.y, z:droneFP.z, yaw:droneFP.yaw };
   _droneFPReady = true;
 }
 
