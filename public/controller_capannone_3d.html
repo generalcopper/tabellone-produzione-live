@@ -225,19 +225,7 @@
     display:flex; align-items:center; justify-content:space-between; gap:12px;
     padding-top:6px;
   }
-  .hint{ font-family:var(--mono); font-size:10px; letter-spacing:.4px; color:var(--ink-faint); }
-  .armbtn{
-    display:inline-flex; align-items:center; gap:9px; cursor:pointer;
-    font-family:var(--mono); font-size:12px; font-weight:700; letter-spacing:1.5px;
-    color:var(--green); text-transform:uppercase;
-    padding:10px 18px; border-radius:12px;
-    background:rgba(70,224,160,.08); border:1px solid rgba(70,224,160,.3);
-    transition:.15s;
-  }
-  .armbtn:active{ transform:scale(.97); }
-  .armbtn.armed{ color:var(--red); background:rgba(255,90,82,.08); border-color:rgba(255,90,82,.32); }
-  .armbtn .pulse{ width:8px; height:8px; border-radius:50%; background:currentColor; }
-  .armbtn.armed .pulse{ animation:beat 1s ease-in-out infinite; }
+  .hint{ font-family:var(--mono); font-size:10px; letter-spacing:.4px; color:var(--ink-faint); text-align:center; width:100%; }
 
   /* ============ SETUP OVERLAY ============ */
   .setup{
@@ -365,8 +353,7 @@
   </div>
 
   <div class="foot">
-    <div class="hint" id="hint">Ogni kiosk con il Capannone 3D aperto segue questo comando.</div>
-    <button class="armbtn" id="btnArm" type="button"><span class="pulse"></span><span id="armLabel">Attiva volo</span></button>
+    <div class="hint" id="hint">Ogni kiosk con il Capannone 3D aperto segue questo comando in tempo reale.</div>
   </div>
 
   <div class="rotate-note">⤺ Ruota in orizzontale per pilotare meglio</div>
@@ -527,16 +514,14 @@ function bindStick(stickId, knobId, apply){
 bindStick("stickL","knobL",(x,y)=>{ axes.yaw=x; axes.thr=y; });
 bindStick("stickR","knobR",(x,y)=>{ axes.roll=x; axes.pitch=y; });
 
-/* ---------- ARM ---------- */
+/* ---------- ARM automatico ----------
+   Il radiocomando è attivo appena si entra: non serve un tasto. Trasmette
+   active:true non appena la connessione è pronta; gli stick muovono subito il drone. */
 function setArmed(on){
   armed = !!on;
-  const b = $("btnArm");
-  b.classList.toggle("armed", armed);
-  $("armLabel").textContent = armed ? "Disattiva" : "Attiva volo";
   if(!armed){ axes.thr=axes.yaw=axes.pitch=axes.roll=0; refreshHud(); }
-  flush(true);   // press/release immediato
+  flush(true);   // invio immediato del cambio di stato
 }
-$("btnArm").addEventListener("click",()=> setArmed(!armed));
 
 /* ---------- status helper ---------- */
 function setStatus(text, cls){
@@ -597,7 +582,8 @@ async function connect(reinit){
         return;
       }
       fb = { setDoc:fs.setDoc, doc:fs.doc, db, serverTimestamp:fs.serverTimestamp };
-      setStatus("Connesso · pronto","online");
+      setStatus("Connesso · radiocomando attivo","online");
+      setArmed(true);            // attivo all'ingresso: nessun tasto da premere
     });
   }catch(e){
     console.error(e);
@@ -613,9 +599,13 @@ document.addEventListener("touchmove",(e)=>{ if(e.touches&&e.touches.length>1) e
 let _lastTouch=0;
 document.addEventListener("touchend",(e)=>{ const n=Date.now(); if(n-_lastTouch<300) e.preventDefault(); _lastTouch=n; },{passive:false});
 
-/* failsafe: se la pagina passa in background, disarma (stop kiosk) */
-document.addEventListener("visibilitychange",()=>{ if(document.hidden && armed) setArmed(false); });
+/* failsafe: in background fermo gli stick e disarmo (stop kiosk); al ritorno ri-attivo. */
+document.addEventListener("visibilitychange",()=>{
+  if(document.hidden){ if(armed) setArmed(false); }
+  else if(fb && !armed){ setArmed(true); }
+});
 window.addEventListener("blur",()=>{ if(armed) setArmed(false); });
+window.addEventListener("focus",()=>{ if(fb && !armed) setArmed(true); });
 
 /* ridisegna posizione knob al resize (orientamento) */
 window.addEventListener("resize",()=>{ refreshHud(); });
