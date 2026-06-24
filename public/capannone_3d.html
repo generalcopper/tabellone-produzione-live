@@ -4313,7 +4313,7 @@ function tick(now){
   // ===== STATO MAPPA OFFLINE =====
   // Un Trova in corso (vano selezionato o tour cinematografico) tiene SEMPRE la mappa online.
   // Altrimenti: offline se fuori orario. Cockpit e messaggi restano attivi in entrambi i casi.
-  const trovaInCorso = !!(selectedVano || tour || tween);
+  const trovaInCorso = !!(selectedVano || tour || tween || droneActive);
   const shouldOffline = !businessOpen() && !trovaInCorso;
   setMapOffline(shouldOffline);
   if(_mapOffline){
@@ -4373,6 +4373,8 @@ function tick(now){
   if(_lastTickT===null) _lastTickT=now;
   let _dt=(now-_lastTickT)/1000; _lastTickT=now;
   if(_dt<0) _dt=0; if(_dt>0.05) _dt=0.05;        // clamp anti-scatti (50ms)
+  // MODALITÀ DRONE: integra il volo prima dello smoothing camera.
+  updateDrone(now, _dt);
   // "rate" = frazione recuperata in 1/60s; convertita in fattore continuo via dt.
   // Durante le cinematiche "cam" è GIÀ mosso da un easing morbido: un secondo lerp
   // in serie aggiunge lag e micro-scatti. Qui lo smoothing è quasi pass-through
@@ -4415,7 +4417,7 @@ function tick(now){
   tick._px=cpx; tick._py=cpy; tick._pz=cpz;
   const wallsMoving = (function(){ for(const w of WALLS){ const o=w.material.opacity; if(o>0.02 && o<0.91) return true; } return false; })();
   const recentInteract = (now-lastInteract) < 600;
-  const sceneActive = inCine || glowState || glowList || prelievoGlow || camMoving || wallsMoving || recentInteract || _shadowFrames>0;
+  const sceneActive = inCine || droneActive || glowState || glowList || prelievoGlow || camMoving || wallsMoving || recentInteract || _shadowFrames>0;
   if(sceneActive){
     tick._idleAccum=0;
   } else {
@@ -4469,6 +4471,89 @@ else window.addEventListener('DOMContentLoaded', ()=>requestAnimationFrame(_show
 
 const CAPANNONE_3D_FOCUS_DOC_ID = "capannone3dFocus";
 let LAST_CAPANNONE_3D_FOCUS_KEY = "";
+
+/* ===================================================================
+   MODALITÀ DRONE — controllo remoto live dal picking
+   picking.html scrive lo stick state nel doc amzInventoryProducts/capannone3dDrone.
+   Il kiosk integra le velocità nella camera ad ogni frame: pilotaggio in tempo reale.
+   Schema comandi DJI Mode 2:
+     • stick SX  → throttle (su/giù quota) + yaw (rotazione)
+     • stick DX  → pitch (avanti/indietro) + roll (laterale)
+   =================================================================== */
+const CAPANNONE_3D_DRONE_DOC_ID = "capannone3dDrone";
+const DRONE_INPUT_TIMEOUT_MS = 1400;   // se non arrivano aggiornamenti, il drone si ferma
+// guadagni di volo (unità mondo al secondo / radianti al secondo)
+const DRONE_GAIN = {
+  throttle: 4.2,   // m/s verticali
+  yaw: 1.5,        // rad/s rotazione
+  pitch: 7.0,      // m/s avanti/indietro
+  roll: 7.0        // m/s laterale
+};
+const DRONE_TY_MIN = 0.6, DRONE_TY_MAX = H_HIGH + 4.0;   // quota target consentita
+let droneInput = { thr:0, yaw:0, pitch:0, roll:0 };       // -1..1 per asse
+let droneActive = false;          // true mentre il picking sta pilotando
+let _droneLastInputAt = 0;        // performance.now() ultimo input valido
+let _droneFirstSnap = true;
+
+function applyDroneState(d){
+  try{
+    const o = d || {};
+    const clamp1 = (v)=>{ const n=Number(v); return Number.isFinite(n) ? Math.max(-1, Math.min(1, n)) : 0; };
+    droneInput.thr   = clamp1(o.thr);
+    droneInput.yaw   = clamp1(o.yaw);
+    droneInput.pitch = clamp1(o.pitch);
+    droneInput.roll  = clamp1(o.roll);
+    const on = (o.active === true);
+    if(on){
+      _droneLastInputAt = performance.now();
+      if(!droneActive){
+        droneActive = true;
+        // entrando in pilotaggio: interrompo tour/idle e porto la camera a una quota di volo
+        tour=null; tween=null; idle=null; selectedVano=null;
+        clearMultiTour && clearMultiTour();
+        if(_mapOffline) setMapOffline(false);
+        cam.ty = Math.max(DRONE_TY_MIN, Math.min(DRONE_TY_MAX, cam.ty));
+        cam.r  = Math.max(R_MIN, Math.min(28, cam.r));
+        setCloudStatus('Modalità drone attiva', '#22d3ee');
+      }
+    } else if(droneActive){
+      droneActive = false;
+      droneInput = { thr:0, yaw:0, pitch:0, roll:0 };
+      setCloudStatus('Drone disinnestato', '#9fb6d6');
+    }
+  }catch(e){ console.warn('drone state error', e); }
+}
+
+// integrazione del volo: chiamata ad ogni frame con dt in secondi
+function updateDrone(now, dt){
+  if(!droneActive) return false;
+  // failsafe: se il picking smette di inviare input, fermati (ma resta in modalità)
+  if(now - _droneLastInputAt > DRONE_INPUT_TIMEOUT_MS){
+    droneInput.thr=droneInput.yaw=droneInput.pitch=droneInput.roll=0;
+  }
+  const i = droneInput;
+  if(!i.thr && !i.yaw && !i.pitch && !i.roll) return false;
+  const step = Math.min(0.05, Math.max(0.001, dt||0.016));
+  // YAW: ruota la testa del drone
+  cam.theta -= i.yaw * DRONE_GAIN.yaw * step;
+  // THROTTLE: quota
+  cam.ty += i.thr * DRONE_GAIN.throttle * step;
+  cam.ty = Math.max(DRONE_TY_MIN, Math.min(DRONE_TY_MAX, cam.ty));
+  // PITCH/ROLL: trasla il punto target sul piano, relativo all'orientamento corrente.
+  // heading forward = direzione in cui guarda la camera (proiettata sul piano XZ).
+  const fx = -Math.sin(cam.theta), fz = -Math.cos(cam.theta);   // avanti
+  const rx =  Math.cos(cam.theta), rz = -Math.sin(cam.theta);   // destra
+  const fwd = i.pitch * DRONE_GAIN.pitch * step;
+  const lat = i.roll  * DRONE_GAIN.roll  * step;
+  cam.tx += fx*fwd + rx*lat;
+  cam.tz += fz*fwd + rz*lat;
+  // confinamento morbido del target dentro l'area capannone (con margine)
+  const mX = LX/2 + 6, mZ = LZ/2 + 6;
+  cam.tx = Math.max(-mX, Math.min(mX, cam.tx));
+  cam.tz = Math.max(-mZ, Math.min(mZ, cam.tz));
+  lastInteract = now;   // tiene la scena a piena frequenza durante il volo
+  return true;
+}
 
 function normalizeRackCode(code){
   return String(code || "").trim().toUpperCase().replace(/\s+/g, "");
@@ -4830,6 +4915,23 @@ function startInventoryRealtime(fs, db){
   }, (err)=>{
     console.error('Firestore focus error', err);
     if(err && err.code === 'permission-denied') setCloudStatus('Permessi comando Trova mancanti • apri ⚙ UID', '#ef4444');
+  });
+
+  // --- MODALITÀ DRONE: stick live dal picking ---
+  const droneRef = fs.doc(db, "amzInventoryProducts", CAPANNONE_3D_DRONE_DOC_ID);
+  fs.onSnapshot(droneRef, (snap)=>{
+    if(!snap.exists()) return;
+    const data = snap.data() || {};
+    if(_droneFirstSnap){
+      // all'apertura non eseguire uno stato vecchio: se "active" era rimasto true,
+      // lo ignoriamo finché il picking non invia un nuovo comando esplicito.
+      _droneFirstSnap = false;
+      if(data.active !== true) applyDroneState(data);
+      return;
+    }
+    applyDroneState(data);
+  }, (err)=>{
+    console.error('Firestore drone error', err);
   });
 
   const colRef = fs.collection(db, "amzInventoryProducts");
