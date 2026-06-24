@@ -1,0 +1,626 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Drone RC">
+<meta name="theme-color" content="#05080c">
+<title>Capannone 3D · Radiocomando</title>
+<style>
+  :root{
+    --void:#05080c;          /* fondo carbonio */
+    --panel:#0c1219;
+    --line:rgba(126,160,190,.14);
+    --line-strong:rgba(126,160,190,.28);
+    --ink:#e8f1f8;
+    --ink-dim:#7790a6;
+    --ink-faint:#465a6e;
+    --amber:#ffb13c;         /* strumentazione attiva */
+    --cyan:#34d5ec;          /* link / orizzonte */
+    --green:#46e0a0;         /* live */
+    --red:#ff5a52;
+    --mono:'SF Mono',ui-monospace,'Menlo','Roboto Mono',monospace;
+    --sans:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;
+  }
+
+  *{ box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html,body{
+    margin:0; height:100%;
+    background:var(--void); color:var(--ink);
+    font-family:var(--sans);
+    overflow:hidden;
+    overscroll-behavior:none;
+    -webkit-user-select:none; user-select:none; touch-action:none;
+  }
+  /* iOS: blocca il bounce e usa l'intera viewport reale */
+  body{ position:fixed; inset:0; }
+
+  #app{
+    position:absolute; inset:0;
+    display:flex; flex-direction:column;
+    padding:
+      max(10px, env(safe-area-inset-top)) max(14px, env(safe-area-inset-right))
+      max(12px, env(safe-area-inset-bottom)) max(14px, env(safe-area-inset-left));
+    background:
+      radial-gradient(120% 80% at 50% -20%, #0e1722 0%, #070c12 50%, #04070b 100%);
+  }
+  #app::before{   /* griglia tecnica appena percettibile */
+    content:""; position:absolute; inset:0; pointer-events:none; opacity:.5;
+    background:
+      linear-gradient(rgba(120,160,190,.025) 1px, transparent 1px) 0 0/100% 34px,
+      linear-gradient(90deg, rgba(120,160,190,.025) 1px, transparent 1px) 0 0/34px 100%;
+    mask:radial-gradient(120% 100% at 50% 50%, #000 40%, transparent 100%);
+    -webkit-mask:radial-gradient(120% 100% at 50% 50%, #000 40%, transparent 100%);
+  }
+
+  /* ============ TOPBAR ============ */
+  .bar{
+    position:relative; z-index:3;
+    display:flex; align-items:center; justify-content:space-between; gap:12px;
+    padding-bottom:4px;
+  }
+  .ident{ display:flex; align-items:center; gap:11px; min-width:0; }
+  .led{
+    width:10px; height:10px; border-radius:50%; flex:none;
+    background:var(--ink-faint); transition:background .2s, box-shadow .2s;
+  }
+  .led.online{ background:var(--cyan); box-shadow:0 0 12px var(--cyan); }
+  .led.flying{ background:var(--green); box-shadow:0 0 14px var(--green); animation:beat 1.1s ease-in-out infinite; }
+  .led.error{ background:var(--red); box-shadow:0 0 12px var(--red); }
+  @keyframes beat{ 0%,100%{ transform:scale(1); } 50%{ transform:scale(1.35); } }
+  .ident .txt{ display:flex; flex-direction:column; line-height:1.2; min-width:0; }
+  .ident .t1{ font-size:13px; font-weight:700; letter-spacing:.3px; }
+  .ident .t2{
+    font-family:var(--mono); font-size:10px; letter-spacing:.5px;
+    color:var(--ink-dim); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+  }
+  .bar .right{ display:flex; align-items:center; gap:9px; flex:none; }
+  .tag{
+    font-family:var(--mono); font-size:10px; font-weight:600; letter-spacing:1.5px;
+    color:var(--amber); padding:5px 10px; border-radius:8px;
+    background:rgba(255,177,60,.07); border:1px solid rgba(255,177,60,.22);
+  }
+  .iconbtn{
+    width:38px; height:38px; border-radius:11px; cursor:pointer;
+    display:grid; place-items:center;
+    color:var(--ink-dim); background:rgba(255,255,255,.04);
+    border:1px solid var(--line);
+    transition:.15s;
+  }
+  .iconbtn:active{ transform:scale(.94); background:rgba(255,255,255,.08); }
+  .iconbtn svg{ width:18px; height:18px; }
+
+  /* ============ STAGE ============ */
+  .stage{
+    position:relative; z-index:2; flex:1 1 auto; min-height:0;
+    display:grid;
+    grid-template-columns:1fr minmax(0,1.15fr) 1fr;
+    align-items:center; gap:clamp(6px,2vw,26px);
+    padding:clamp(4px,1.5vh,16px) 0;
+  }
+
+  /* ---- HORIZON / HUD (signature) ---- */
+  .horizon{
+    position:relative; align-self:stretch;
+    border-radius:18px; overflow:hidden;
+    border:1px solid var(--line);
+    background:#060a0f;
+    display:flex; flex-direction:column;
+    min-height:0;
+  }
+  .horizon .sky{
+    position:absolute; inset:-40% -20%;
+    background:
+      linear-gradient(180deg, #0a2233 0%, #0a2233 49.6%, #0d0f08 50.4%, #0d0f08 100%);
+    transform-origin:center;
+    transition:transform .08s linear;
+  }
+  /* linea orizzonte + ladder pitch */
+  .horizon .ladder{
+    position:absolute; inset:0; pointer-events:none;
+    transform-origin:center;
+    transition:transform .08s linear;
+  }
+  .horizon .hline{
+    position:absolute; left:8%; right:8%; top:50%; height:2px;
+    background:linear-gradient(90deg, transparent, var(--cyan), transparent);
+    box-shadow:0 0 10px rgba(52,213,236,.5);
+  }
+  .horizon .pitch{
+    position:absolute; left:24%; right:24%; height:1px;
+    background:rgba(180,210,230,.28);
+  }
+  .horizon .pitch span{
+    position:absolute; top:-6px; font-family:var(--mono); font-size:8px; color:var(--ink-dim);
+  }
+  .horizon .pitch .l{ left:-22px; } .horizon .pitch .r{ right:-22px; }
+  /* mirino fisso */
+  .horizon .reticle{
+    position:absolute; left:50%; top:50%; transform:translate(-50%,-50%);
+    width:60px; height:18px; pointer-events:none; z-index:4;
+  }
+  .horizon .reticle::before,.horizon .reticle::after{
+    content:""; position:absolute; top:50%; width:18px; height:2px; background:var(--amber);
+    box-shadow:0 0 6px rgba(255,177,60,.6);
+  }
+  .horizon .reticle::before{ left:0; } .horizon .reticle::after{ right:0; }
+  .horizon .dot{
+    position:absolute; left:50%; top:50%; transform:translate(-50%,-50%);
+    width:5px; height:5px; border-radius:50%; background:var(--amber); z-index:4;
+    box-shadow:0 0 8px rgba(255,177,60,.7);
+  }
+  /* readout telemetria sotto l'orizzonte */
+  .tel-strip{
+    position:relative; z-index:5; margin-top:auto;
+    display:grid; grid-template-columns:repeat(4,1fr);
+    border-top:1px solid var(--line);
+    background:rgba(5,9,14,.6);
+    backdrop-filter:blur(4px); -webkit-backdrop-filter:blur(4px);
+  }
+  .tel{ padding:8px 4px; text-align:center; border-right:1px solid var(--line); }
+  .tel:last-child{ border-right:0; }
+  .tel b{ display:block; font-family:var(--mono); font-size:15px; font-weight:700; color:var(--ink); letter-spacing:.5px; font-variant-numeric:tabular-nums; }
+  .tel span{ display:block; font-family:var(--mono); font-size:8px; letter-spacing:1.5px; color:var(--ink-dim); margin-top:2px; }
+
+  /* ---- STICKS ---- */
+  .gimbal{ display:flex; flex-direction:column; align-items:center; gap:11px; }
+  .stick{
+    position:relative;
+    width:min(40vw, 36vh, 290px); aspect-ratio:1;
+    border-radius:50%;
+    background:
+      radial-gradient(circle at 50% 34%, #16222e 0%, #0a121a 64%, #060a0f 100%);
+    border:1px solid var(--line-strong);
+    box-shadow:
+      inset 0 3px 36px rgba(0,0,0,.6),
+      inset 0 0 0 1px rgba(255,255,255,.03),
+      0 22px 60px -20px rgba(0,0,0,.7);
+    touch-action:none;
+  }
+  .stick .ring{ position:absolute; inset:13%; border-radius:50%; border:1px dashed rgba(126,160,190,.16); }
+  .stick .ring.inner{ inset:34%; border-style:solid; border-color:rgba(126,160,190,.10); }
+  .stick .cross{
+    position:absolute; inset:8%; pointer-events:none; opacity:.55;
+    background:
+      linear-gradient(90deg,transparent calc(50% - .5px),rgba(126,160,190,.3) 50%,transparent calc(50% + .5px)),
+      linear-gradient(0deg,transparent calc(50% - .5px),rgba(126,160,190,.3) 50%,transparent calc(50% + .5px));
+  }
+  /* etichette assi sul quadrante */
+  .axlab{ position:absolute; font-family:var(--mono); font-size:9px; letter-spacing:1px; color:var(--ink-faint); pointer-events:none; }
+  .axlab.up{ top:7%; left:50%; transform:translateX(-50%); }
+  .axlab.dn{ bottom:7%; left:50%; transform:translateX(-50%); }
+  .axlab.lf{ left:7%; top:50%; transform:translateY(-50%); }
+  .axlab.rt{ right:7%; top:50%; transform:translateY(-50%); }
+  .knob{
+    position:absolute; left:50%; top:50%;
+    width:36%; aspect-ratio:1; border-radius:50%;
+    transform:translate(-50%,-50%);
+    background:
+      radial-gradient(circle at 42% 34%, #6fe0f4 0%, #25a6c6 52%, #0c6f8f 100%);
+    box-shadow:
+      0 12px 28px rgba(0,0,0,.55),
+      inset 0 3px 9px rgba(255,255,255,.4),
+      inset 0 -9px 18px rgba(0,0,0,.32),
+      0 0 0 6px rgba(52,213,236,.08);
+    transition:box-shadow .14s, background .14s;
+    will-change:transform;
+    z-index:2;
+  }
+  .knob::after{ content:""; position:absolute; inset:30%; border-radius:50%; background:rgba(255,255,255,.12); }
+  .stick.active .knob{
+    background:radial-gradient(circle at 42% 34%, #ffd27a 0%, #ffb13c 52%, #d98510 100%);
+    box-shadow:
+      0 14px 32px rgba(0,0,0,.6),
+      inset 0 3px 9px rgba(255,255,255,.45),
+      inset 0 -9px 18px rgba(0,0,0,.34),
+      0 0 0 8px rgba(255,177,60,.16);
+  }
+  .gimbal .name{ font-family:var(--mono); font-size:10px; letter-spacing:2px; color:var(--ink-dim); text-transform:uppercase; }
+
+  /* ============ FOOTER ============ */
+  .foot{
+    position:relative; z-index:3;
+    display:flex; align-items:center; justify-content:space-between; gap:12px;
+    padding-top:6px;
+  }
+  .hint{ font-family:var(--mono); font-size:10px; letter-spacing:.4px; color:var(--ink-faint); }
+  .armbtn{
+    display:inline-flex; align-items:center; gap:9px; cursor:pointer;
+    font-family:var(--mono); font-size:12px; font-weight:700; letter-spacing:1.5px;
+    color:var(--green); text-transform:uppercase;
+    padding:10px 18px; border-radius:12px;
+    background:rgba(70,224,160,.08); border:1px solid rgba(70,224,160,.3);
+    transition:.15s;
+  }
+  .armbtn:active{ transform:scale(.97); }
+  .armbtn.armed{ color:var(--red); background:rgba(255,90,82,.08); border-color:rgba(255,90,82,.32); }
+  .armbtn .pulse{ width:8px; height:8px; border-radius:50%; background:currentColor; }
+  .armbtn.armed .pulse{ animation:beat 1s ease-in-out infinite; }
+
+  /* ============ SETUP OVERLAY ============ */
+  .setup{
+    position:absolute; inset:0; z-index:20; display:none;
+    align-items:center; justify-content:center; padding:24px;
+    background:rgba(4,7,11,.86); backdrop-filter:blur(8px); -webkit-backdrop-filter:blur(8px);
+  }
+  .setup.show{ display:flex; }
+  .card{
+    width:min(420px,100%); border-radius:20px; padding:22px;
+    background:var(--panel); border:1px solid var(--line-strong);
+    box-shadow:0 30px 80px rgba(0,0,0,.6);
+  }
+  .card h2{ margin:0 0 4px; font-size:17px; letter-spacing:.2px; }
+  .card p{ margin:0 0 16px; font-size:12.5px; line-height:1.5; color:var(--ink-dim); }
+  .card label{ display:block; font-family:var(--mono); font-size:10px; letter-spacing:1px; color:var(--ink-dim); margin:14px 0 6px; text-transform:uppercase; }
+  .card input{
+    width:100%; padding:12px 13px; border-radius:11px;
+    background:#070c11; border:1px solid var(--line-strong); color:var(--ink);
+    font-family:var(--mono); font-size:13px;
+  }
+  .card input:focus{ outline:none; border-color:var(--cyan); }
+  .card .actions{ display:flex; gap:10px; margin-top:20px; }
+  .card button{
+    flex:1; padding:13px; border-radius:12px; cursor:pointer;
+    font-size:13px; font-weight:700; letter-spacing:.3px; border:1px solid var(--line-strong);
+    background:rgba(255,255,255,.05); color:var(--ink);
+  }
+  .card button.go{ background:linear-gradient(135deg,var(--cyan),#1f8fb0); border:none; color:#04161c; }
+  .card button:active{ transform:scale(.98); }
+  .err{ color:var(--red); font-family:var(--mono); font-size:11px; min-height:14px; margin-top:10px; }
+
+  /* ============ LAYOUT MOBILE / LANDSCAPE ============ */
+  @media (max-height:560px){
+    .gimbal .name{ display:none; }
+    .stage{ padding:2px 0; }
+  }
+  @media (max-width:680px) and (orientation:portrait){
+    .stage{ grid-template-columns:1fr 1fr; grid-template-rows:auto 1fr; }
+    .horizon{ grid-column:1 / -1; grid-row:1; min-height:34vh; }
+    .gimbal:first-of-type{ grid-column:1; grid-row:2; }
+    .gimbal:last-of-type{ grid-column:2; grid-row:2; }
+    .stick{ width:min(44vw,300px); }
+  }
+  /* suggerimento rotazione in portrait stretto */
+  .rotate-note{ display:none; }
+  @media (max-width:520px) and (orientation:portrait){
+    .rotate-note{
+      display:flex; align-items:center; gap:8px;
+      position:absolute; left:50%; bottom:calc(12px + env(safe-area-inset-bottom)); transform:translateX(-50%);
+      z-index:6; font-family:var(--mono); font-size:10px; letter-spacing:.5px; color:var(--amber);
+      padding:7px 12px; border-radius:999px; background:rgba(255,177,60,.08); border:1px solid rgba(255,177,60,.22);
+      white-space:nowrap;
+    }
+  }
+
+  @media (prefers-reduced-motion:reduce){
+    *{ animation:none !important; }
+    .horizon .sky,.horizon .ladder{ transition:none; }
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <div class="bar">
+    <div class="ident">
+      <span class="led" id="led"></span>
+      <div class="txt">
+        <div class="t1">Capannone 3D · Radiocomando</div>
+        <div class="t2" id="status">Connessione cloud…</div>
+      </div>
+    </div>
+    <div class="right">
+      <span class="tag">DJI · MODE 2</span>
+      <button class="iconbtn" id="btnSetup" title="Impostazioni connessione" aria-label="Impostazioni">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+      </button>
+    </div>
+  </div>
+
+  <div class="stage">
+    <!-- STICK SX: throttle (quota) + yaw (rotazione) -->
+    <div class="gimbal">
+      <div class="stick" id="stickL">
+        <div class="ring"></div><div class="ring inner"></div><div class="cross"></div>
+        <span class="axlab up">SALI</span>
+        <span class="axlab dn">SCENDI</span>
+        <span class="axlab lf">↺</span>
+        <span class="axlab rt">↻</span>
+        <div class="knob" id="knobL"></div>
+      </div>
+      <div class="name">Throttle · Yaw</div>
+    </div>
+
+    <!-- HUD ORIZZONTE -->
+    <div class="horizon" id="horizon">
+      <div class="sky" id="sky"></div>
+      <div class="ladder" id="ladder">
+        <div class="hline"></div>
+        <div class="pitch" style="top:34%"><span class="l">10</span><span class="r">10</span></div>
+        <div class="pitch" style="top:66%"><span class="l">-10</span><span class="r">-10</span></div>
+      </div>
+      <div class="reticle"></div>
+      <div class="dot"></div>
+      <div class="tel-strip">
+        <div class="tel"><b id="telThr">0</b><span>QUOTA</span></div>
+        <div class="tel"><b id="telYaw">0</b><span>YAW</span></div>
+        <div class="tel"><b id="telPitch">0</b><span>AVANTI</span></div>
+        <div class="tel"><b id="telRoll">0</b><span>LAT</span></div>
+      </div>
+    </div>
+
+    <!-- STICK DX: pitch (avanti/indietro) + roll (laterale) -->
+    <div class="gimbal">
+      <div class="stick" id="stickR">
+        <div class="ring"></div><div class="ring inner"></div><div class="cross"></div>
+        <span class="axlab up">AVANTI</span>
+        <span class="axlab dn">INDIETRO</span>
+        <span class="axlab lf">◄</span>
+        <span class="axlab rt">►</span>
+        <div class="knob" id="knobR"></div>
+      </div>
+      <div class="name">Pitch · Roll</div>
+    </div>
+  </div>
+
+  <div class="foot">
+    <div class="hint" id="hint">Ogni kiosk con il Capannone 3D aperto segue questo comando.</div>
+    <button class="armbtn" id="btnArm" type="button"><span class="pulse"></span><span id="armLabel">Attiva volo</span></button>
+  </div>
+
+  <div class="rotate-note">⤺ Ruota in orizzontale per pilotare meglio</div>
+</div>
+
+<!-- SETUP -->
+<div class="setup" id="setup">
+  <div class="card">
+    <h2>Connessione kiosk</h2>
+    <p>Il radiocomando scrive lo stato degli stick su Firestore; ogni Capannone 3D in ascolto si muove in tempo reale. I valori predefiniti puntano già al progetto LG Trading.</p>
+    <label for="inProj">Project ID</label>
+    <input id="inProj" autocomplete="off" autocapitalize="off" spellcheck="false">
+    <label for="inKey">API key</label>
+    <input id="inKey" autocomplete="off" autocapitalize="off" spellcheck="false">
+    <div class="err" id="setupErr"></div>
+    <div class="actions">
+      <button id="btnSetupClose" type="button">Annulla</button>
+      <button id="btnSetupSave" class="go" type="button">Connetti</button>
+    </div>
+  </div>
+</div>
+
+<script type="module">
+/* ===================================================================
+   RADIOCOMANDO CAPANNONE 3D — single-file, iOS friendly, schema DJI Mode 2.
+   Wire-compatibile col kiosk: scrive amzInventoryProducts/capannone3dDrone
+   { thr, yaw, pitch, roll, active } esattamente come picking.html.
+   =================================================================== */
+
+const DRONE_DOC_COL = "amzInventoryProducts";
+const DRONE_DOC_ID  = "capannone3dDrone";
+
+// config predefinita (stessa di picking.html / capannone_3d.html)
+const DEFAULT_CFG = {
+  apiKey: "AIzaSyBiyB4pilnPpVj8vImD4PI6LF2_RtyDnv4",
+  authDomain: "tabellone-produzione-liv-e313e.firebaseapp.com",
+  projectId: "tabellone-produzione-liv-e313e",
+  storageBucket: "tabellone-produzione-liv-e313e.firebasestorage.app",
+  messagingSenderId: "537555699968",
+  appId: "1:537555699968:web:4d04cb9596b67bfb0e4be5"
+};
+
+const $ = (id)=>document.getElementById(id);
+
+/* ---------- stato comando ---------- */
+const axes = { thr:0, yaw:0, pitch:0, roll:0 };
+let armed = false;
+let fb = null;            // { setDoc, doc, db, serverTimestamp }
+
+/* ---------- input curve ---------- */
+const DEADZONE = 0.06, EXPO = 1.35;
+function shape(v){
+  const s = Math.sign(v), a = Math.abs(v);
+  if(a < DEADZONE) return 0;
+  return s * Math.pow((a - DEADZONE)/(1 - DEADZONE), EXPO);
+}
+
+/* ---------- scrittura Firestore (throttle ~8Hz, stop immediato) ---------- */
+const WRITE_MS = 120;
+let lastSent = { thr:0, yaw:0, pitch:0, roll:0, active:false };
+let lastWriteAt = 0, writeTimer = null;
+
+function changed(){
+  if(armed !== lastSent.active) return true;
+  const e = 0.02;
+  return Math.abs(axes.thr-lastSent.thr)>e || Math.abs(axes.yaw-lastSent.yaw)>e ||
+         Math.abs(axes.pitch-lastSent.pitch)>e || Math.abs(axes.roll-lastSent.roll)>e;
+}
+
+async function flush(force){
+  if(!fb){ return; }
+  const now = Date.now();
+  if(!force){
+    if(!changed()) return;
+    if(now - lastWriteAt < WRITE_MS){
+      if(!writeTimer){
+        writeTimer = setTimeout(()=>{ writeTimer=null; flush(false); }, WRITE_MS-(now-lastWriteAt));
+      }
+      return;
+    }
+  }
+  lastWriteAt = now;
+  const r = (v)=>Math.round(v*1000)/1000;
+  const payload = { thr:r(axes.thr), yaw:r(axes.yaw), pitch:r(axes.pitch), roll:r(axes.roll), active:!!armed };
+  lastSent = { ...payload };
+  try{
+    await fb.setDoc(fb.doc(fb.db, DRONE_DOC_COL, DRONE_DOC_ID), {
+      _type:"capannone3dDrone", type:"capannone3dDrone",
+      ...payload,
+      seq:`${now}-${Math.random().toString(36).slice(2,6)}`,
+      updatedAt: fb.serverTimestamp(),
+      updatedAtClient: now,
+      source:"radiocomando"
+    }, { merge:true });
+    setStatus(armed ? "Volo · trasmissione attiva" : "Connesso · pronto", armed?"flying":"online");
+  }catch(err){
+    console.warn("write", err);
+    setStatus("Errore trasmissione: "+(err?.code||"sconosciuto"), "error");
+  }
+}
+
+/* ---------- UI: telemetria + orizzonte ---------- */
+function pct(v){ return `${Math.round(v*100)}`; }
+function refreshHud(){
+  $("telThr").textContent   = pct(axes.thr);
+  $("telYaw").textContent   = pct(axes.yaw);
+  $("telPitch").textContent = pct(axes.pitch);
+  $("telRoll").textContent  = pct(axes.roll);
+  // orizzonte: roll banca lo sky, pitch lo trasla verticalmente, yaw lo slitta
+  const rollDeg = axes.roll * 22;          // banking
+  const pitchPx = axes.pitch * 14;         // % verso l'alto = naso giù visivamente
+  const yawShift = axes.yaw * 8;
+  $("sky").style.transform = `rotate(${rollDeg}deg) translateY(${pitchPx}%) translateX(${yawShift}%)`;
+  $("ladder").style.transform = `rotate(${rollDeg}deg) translateY(${pitchPx}%)`;
+  const live = (Math.abs(axes.thr)+Math.abs(axes.yaw)+Math.abs(axes.pitch)+Math.abs(axes.roll))>0.01;
+  $("led").classList.toggle("flying", armed && live);
+  $("led").classList.toggle("online", !!fb && !(armed && live));
+}
+
+/* ---------- joystick (pointer events, multitouch-safe) ---------- */
+function bindStick(stickId, knobId, apply){
+  const stick = $(stickId), knob = $(knobId);
+  let pid = null;
+  const MAXF = 0.32;     // escursione knob
+
+  function place(nx,ny){
+    const R = stick.clientWidth*0.5*MAXF;
+    knob.style.transform = `translate(calc(-50% + ${nx*R}px), calc(-50% + ${ny*R}px))`;
+  }
+  function read(cx,cy){
+    const b = stick.getBoundingClientRect();
+    const rad = b.width/2;
+    let dx = (cx-(b.left+b.width/2))/rad;
+    let dy = (cy-(b.top+b.height/2))/rad;
+    const m = Math.hypot(dx,dy); if(m>1){ dx/=m; dy/=m; }
+    place(dx,dy);
+    apply(shape(dx), shape(-dy));      // y schermo invertito → su = +1
+    refreshHud(); flush(false);
+  }
+  function reset(){
+    pid=null; stick.classList.remove("active");
+    knob.style.transform="translate(-50%,-50%)";
+    apply(0,0); refreshHud(); flush(false);
+  }
+  stick.addEventListener("pointerdown",(e)=>{
+    if(pid!==null) return;
+    pid=e.pointerId; stick.classList.add("active");
+    try{ stick.setPointerCapture(pid); }catch(_){}
+    read(e.clientX,e.clientY); e.preventDefault();
+  });
+  stick.addEventListener("pointermove",(e)=>{ if(e.pointerId!==pid) return; read(e.clientX,e.clientY); e.preventDefault(); });
+  const end=(e)=>{ if(e.pointerId!==pid) return; reset(); };
+  stick.addEventListener("pointerup",end);
+  stick.addEventListener("pointercancel",end);
+  stick.addEventListener("lostpointercapture",()=>{ if(pid!==null) reset(); });
+}
+
+bindStick("stickL","knobL",(x,y)=>{ axes.yaw=x; axes.thr=y; });
+bindStick("stickR","knobR",(x,y)=>{ axes.roll=x; axes.pitch=y; });
+
+/* ---------- ARM ---------- */
+function setArmed(on){
+  armed = !!on;
+  const b = $("btnArm");
+  b.classList.toggle("armed", armed);
+  $("armLabel").textContent = armed ? "Disattiva" : "Attiva volo";
+  if(!armed){ axes.thr=axes.yaw=axes.pitch=axes.roll=0; refreshHud(); }
+  flush(true);   // press/release immediato
+}
+$("btnArm").addEventListener("click",()=> setArmed(!armed));
+
+/* ---------- status helper ---------- */
+function setStatus(text, cls){
+  $("status").textContent = text;
+  const led = $("led");
+  led.classList.remove("online","flying","error");
+  if(cls) led.classList.add(cls);
+}
+
+/* ---------- setup overlay ---------- */
+function loadCfg(){
+  try{
+    const raw = localStorage.getItem("drone_rc_cfg");
+    if(raw) return { ...DEFAULT_CFG, ...JSON.parse(raw) };
+  }catch(_){}
+  return { ...DEFAULT_CFG };
+}
+function saveCfg(c){ try{ localStorage.setItem("drone_rc_cfg", JSON.stringify(c)); }catch(_){} }
+let CFG = loadCfg();
+
+$("btnSetup").addEventListener("click",()=>{
+  $("inProj").value = CFG.projectId || "";
+  $("inKey").value  = CFG.apiKey || "";
+  $("setupErr").textContent = "";
+  $("setup").classList.add("show");
+});
+$("btnSetupClose").addEventListener("click",()=> $("setup").classList.remove("show"));
+$("btnSetupSave").addEventListener("click",()=>{
+  const proj = $("inProj").value.trim(), key = $("inKey").value.trim();
+  if(!proj || !key){ $("setupErr").textContent = "Project ID e API key sono obbligatori."; return; }
+  CFG = { ...CFG, projectId:proj, apiKey:key,
+          authDomain:`${proj}.firebaseapp.com`, storageBucket:`${proj}.firebasestorage.app` };
+  saveCfg(CFG);
+  $("setup").classList.remove("show");
+  connect(true);
+});
+
+/* ---------- connessione Firebase ---------- */
+async function connect(reinit){
+  setStatus("Connessione cloud…","");
+  try{
+    const [{ initializeApp, getApps, deleteApp }, authMod, fs] = await Promise.all([
+      import("https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js"),
+      import("https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js"),
+      import("https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js")
+    ]);
+    if(reinit){ for(const a of getApps()){ try{ await deleteApp(a); }catch(_){} } }
+    const app = initializeApp(CFG);
+    const db = fs.getFirestore(app);
+    const auth = authMod.getAuth(app);
+    try{ await authMod.setPersistence(auth, authMod.browserLocalPersistence); }catch(_){}
+
+    authMod.onAuthStateChanged(auth, async (user)=>{
+      if(!user){
+        setStatus("Autenticazione kiosk…","");
+        try{ await authMod.signInAnonymously(auth); }
+        catch(e){ setStatus("Auth fallita: "+(e?.code||"errore"),"error"); }
+        return;
+      }
+      fb = { setDoc:fs.setDoc, doc:fs.doc, db, serverTimestamp:fs.serverTimestamp };
+      setStatus("Connesso · pronto","online");
+    });
+  }catch(e){
+    console.error(e);
+    setStatus("Cloud offline — controlla la rete","error");
+  }
+}
+connect(false);
+
+/* ---------- iOS: blocca scroll/zoom/gesture ---------- */
+["gesturestart","gesturechange","gestureend"].forEach(ev=>
+  document.addEventListener(ev,(e)=>e.preventDefault(),{passive:false}));
+document.addEventListener("touchmove",(e)=>{ if(e.touches&&e.touches.length>1) e.preventDefault(); },{passive:false});
+let _lastTouch=0;
+document.addEventListener("touchend",(e)=>{ const n=Date.now(); if(n-_lastTouch<300) e.preventDefault(); _lastTouch=n; },{passive:false});
+
+/* failsafe: se la pagina passa in background, disarma (stop kiosk) */
+document.addEventListener("visibilitychange",()=>{ if(document.hidden && armed) setArmed(false); });
+window.addEventListener("blur",()=>{ if(armed) setArmed(false); });
+
+/* ridisegna posizione knob al resize (orientamento) */
+window.addEventListener("resize",()=>{ refreshHud(); });
+
+refreshHud();
+</script>
+</body>
+</html>
