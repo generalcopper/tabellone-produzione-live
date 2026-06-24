@@ -258,28 +258,44 @@
   .card button:active{ transform:scale(.98); }
   .err{ color:var(--red); font-family:var(--mono); font-size:11px; min-height:14px; margin-top:10px; }
 
-  /* ============ LAYOUT MOBILE / LANDSCAPE ============ */
+  /* ============ LAYOUT LANDSCAPE ============ */
   @media (max-height:560px){
     .gimbal .name{ display:none; }
     .stage{ padding:2px 0; }
   }
-  @media (max-width:680px) and (orientation:portrait){
-    .stage{ grid-template-columns:1fr 1fr; grid-template-rows:auto 1fr; }
-    .horizon{ grid-column:1 / -1; grid-row:1; min-height:34vh; }
-    .gimbal:first-of-type{ grid-column:1; grid-row:2; }
-    .gimbal:last-of-type{ grid-column:2; grid-row:2; }
-    .stick{ width:min(44vw,300px); }
+
+  /* ============ SOLO ORIZZONTALE ============
+     Il radiocomando si usa esclusivamente in orizzontale: in verticale
+     l'intera plancia viene coperta e la trasmissione è sospesa (vedi JS). */
+  #rotate{
+    position:absolute; inset:0; z-index:50; display:none;
+    flex-direction:column; align-items:center; justify-content:center; gap:22px;
+    padding:32px; text-align:center;
+    background:
+      radial-gradient(120% 80% at 50% 0%, #0e1722 0%, #070c12 55%, #04070b 100%);
   }
-  /* suggerimento rotazione in portrait stretto */
-  .rotate-note{ display:none; }
-  @media (max-width:520px) and (orientation:portrait){
-    .rotate-note{
-      display:flex; align-items:center; gap:8px;
-      position:absolute; left:50%; bottom:calc(12px + env(safe-area-inset-bottom)); transform:translateX(-50%);
-      z-index:6; font-family:var(--mono); font-size:10px; letter-spacing:.5px; color:var(--amber);
-      padding:7px 12px; border-radius:999px; background:rgba(255,177,60,.08); border:1px solid rgba(255,177,60,.22);
-      white-space:nowrap;
-    }
+  #rotate .phone{
+    width:62px; height:108px; border-radius:14px;
+    border:2px solid var(--cyan); position:relative;
+    box-shadow:0 0 30px rgba(52,213,236,.25);
+    animation:rotateHint 2.4s ease-in-out infinite;
+  }
+  #rotate .phone::before{
+    content:""; position:absolute; left:50%; top:8px; transform:translateX(-50%);
+    width:18px; height:3px; border-radius:2px; background:rgba(52,213,236,.5);
+  }
+  @keyframes rotateHint{
+    0%,30%{ transform:rotate(0deg); }
+    60%,100%{ transform:rotate(-90deg); }
+  }
+  #rotate .rt-title{ font-size:18px; font-weight:700; letter-spacing:.3px; color:var(--ink); }
+  #rotate .rt-sub{ font-family:var(--mono); font-size:11px; letter-spacing:.5px; color:var(--ink-dim); max-width:280px; line-height:1.6; }
+
+  /* Mostra il blocco e nascondi la plancia quando NON si è in orizzontale.
+     Copre sia i telefoni (portrait) sia il caso desktop troppo stretto. */
+  @media (orientation:portrait){
+    #rotate{ display:flex; }
+    #app{ visibility:hidden; pointer-events:none; }
   }
 
   @media (prefers-reduced-motion:reduce){
@@ -355,8 +371,13 @@
   <div class="foot">
     <div class="hint" id="hint">Ogni kiosk con il Capannone 3D aperto segue questo comando in tempo reale.</div>
   </div>
+</div>
 
-  <div class="rotate-note">⤺ Ruota in orizzontale per pilotare meglio</div>
+<!-- BLOCCO SOLO ORIZZONTALE -->
+<div id="rotate" aria-hidden="true">
+  <div class="phone"></div>
+  <div class="rt-title">Ruota il dispositivo</div>
+  <div class="rt-sub">Il radiocomando si usa solo in orizzontale. Gira il telefono in landscape per pilotare il Capannone 3D.</div>
 </div>
 
 <!-- SETUP -->
@@ -583,7 +604,7 @@ async function connect(reinit){
       }
       fb = { setDoc:fs.setDoc, doc:fs.doc, db, serverTimestamp:fs.serverTimestamp };
       setStatus("Connesso · radiocomando attivo","online");
-      setArmed(true);            // attivo all'ingresso: nessun tasto da premere
+      syncFly();                 // attivo solo se in orizzontale e in primo piano
     });
   }catch(e){
     console.error(e);
@@ -600,15 +621,44 @@ let _lastTouch=0;
 document.addEventListener("touchend",(e)=>{ const n=Date.now(); if(n-_lastTouch<300) e.preventDefault(); _lastTouch=n; },{passive:false});
 
 /* failsafe: in background fermo gli stick e disarmo (stop kiosk); al ritorno ri-attivo. */
-document.addEventListener("visibilitychange",()=>{
-  if(document.hidden){ if(armed) setArmed(false); }
-  else if(fb && !armed){ setArmed(true); }
-});
-window.addEventListener("blur",()=>{ if(armed) setArmed(false); });
-window.addEventListener("focus",()=>{ if(fb && !armed) setArmed(true); });
+function isLandscape(){
+  // priorità all'API Screen Orientation, fallback su dimensioni viewport
+  try{
+    if(screen.orientation && typeof screen.orientation.type === "string")
+      return screen.orientation.type.startsWith("landscape");
+  }catch(_){}
+  if(window.matchMedia) return window.matchMedia("(orientation: landscape)").matches;
+  return window.innerWidth >= window.innerHeight;
+}
+// può pilotare solo se: connesso + in primo piano + in orizzontale
+function canFly(){ return !!fb && !document.hidden && isLandscape(); }
+// porta lo stato di volo in linea con le condizioni correnti
+function syncFly(){
+  if(canFly()){ if(!armed) setArmed(true); }
+  else{ if(armed) setArmed(false); }
+}
 
-/* ridisegna posizione knob al resize (orientamento) */
-window.addEventListener("resize",()=>{ refreshHud(); });
+document.addEventListener("visibilitychange", syncFly);
+window.addEventListener("blur",()=>{ if(armed) setArmed(false); });
+window.addEventListener("focus", syncFly);
+
+/* SOLO ORIZZONTALE: in verticale sospendo la trasmissione e ri-attivo in landscape */
+function onOrient(){ refreshHud(); syncFly(); }
+window.addEventListener("resize", onOrient);
+window.addEventListener("orientationchange", onOrient);
+try{ if(screen.orientation && screen.orientation.addEventListener) screen.orientation.addEventListener("change", onOrient); }catch(_){}
+
+/* best-effort: su Android/PWA prova a bloccare l'orientamento in landscape al primo tocco.
+   iOS Safari non lo supporta: lì il blocco CSS "Ruota il dispositivo" copre il caso. */
+let _lockTried = false;
+function tryLockLandscape(){
+  if(_lockTried) return; _lockTried = true;
+  try{
+    if(screen.orientation && screen.orientation.lock)
+      screen.orientation.lock("landscape").catch(()=>{});
+  }catch(_){}
+}
+document.addEventListener("pointerdown", tryLockLandscape, { once:true });
 
 refreshHud();
 </script>
