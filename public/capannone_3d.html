@@ -539,6 +539,35 @@
   @keyframes dbBeat{ 0%,100%{ transform:scale(1); opacity:1; } 50%{ transform:scale(1.5); opacity:.6; } }
   #droneBadge .db-text{ line-height:1; }
 
+  /* MIRINO drone: visibile solo in volo, al centro schermo */
+  #droneCrosshair{
+    position:fixed; left:50%; top:50%; transform:translate(-50%,-50%);
+    width:clamp(64px,9vw,104px); height:clamp(64px,9vw,104px);
+    z-index:39; pointer-events:none;
+    opacity:0; visibility:hidden; transition:opacity .25s ease;
+  }
+  body.drone-flying #droneCrosshair{ opacity:1; visibility:visible; }
+  #droneCrosshair .xh-ring{ fill:none; stroke:rgba(190,220,235,.5); stroke-width:1.5; }
+  #droneCrosshair .xh-l{ stroke:rgba(190,220,235,.6); stroke-width:2; stroke-linecap:round; }
+  #droneCrosshair .xh-dot{ fill:rgba(190,220,235,.7); }
+  /* stato AGGANCIABILE: si mira un bancale → mirino ambra + anello che pulsa */
+  #droneCrosshair.lockable .xh-ring{ stroke:#ffb13c; stroke-width:2; animation:xhPulse 1.1s ease-in-out infinite; }
+  #droneCrosshair.lockable .xh-l{ stroke:#ffb13c; }
+  #droneCrosshair.lockable .xh-dot{ fill:#ffb13c; }
+  /* stato AGGANCIATO: bancale acceso (lock attivo) → verde */
+  #droneCrosshair.locked .xh-ring{ stroke:#46e0a0; stroke-width:2.5; animation:none; }
+  #droneCrosshair.locked .xh-l{ stroke:#46e0a0; }
+  #droneCrosshair.locked .xh-dot{ fill:#46e0a0; }
+  @keyframes xhPulse{ 0%,100%{ stroke-opacity:1; } 50%{ stroke-opacity:.35; } }
+  #droneCrosshair .xh-label{
+    position:absolute; left:50%; top:calc(100% + 8px); transform:translateX(-50%);
+    font-family:ui-monospace,Menlo,monospace; font-size:12px; font-weight:700; letter-spacing:.12em;
+    white-space:nowrap; color:#ffd27a; text-shadow:0 1px 6px rgba(0,0,0,.6); opacity:0; transition:opacity .2s;
+  }
+  #droneCrosshair.lockable .xh-label,
+  #droneCrosshair.locked .xh-label{ opacity:1; }
+  #droneCrosshair.locked .xh-label{ color:#7ff0c0; }
+
   /* mentre il drone vola: niente cockpit, alert, log, loghi, ingranaggi → vista pulita */
   body.drone-flying #cockpit,
   body.drone-flying #incomingAlert,
@@ -567,6 +596,18 @@
 <div id="droneBadge" aria-hidden="true">
   <span class="db-dot"></span>
   <span class="db-text">DRONE MODE</span>
+</div>
+
+<div id="droneCrosshair" aria-hidden="true">
+  <svg viewBox="0 0 100 100" width="100%" height="100%">
+    <circle class="xh-ring" cx="50" cy="50" r="26"/>
+    <line class="xh-l" x1="50" y1="14" x2="50" y2="34"/>
+    <line class="xh-l" x1="50" y1="66" x2="50" y2="86"/>
+    <line class="xh-l" x1="14" y1="50" x2="34" y2="50"/>
+    <line class="xh-l" x1="66" y1="50" x2="86" y2="50"/>
+    <circle class="xh-dot" cx="50" cy="50" r="2.4"/>
+  </svg>
+  <div class="xh-label" id="droneCrosshairLabel"></div>
 </div>
 
 <button class="kioskGear" id="kioskGear" type="button" title="Impostazioni kiosk" aria-label="Impostazioni kiosk">⚙︎</button>
@@ -2776,9 +2817,15 @@ function highlightVano(v, opts={}){
   if(!opts.silent) clearMultiTour();   // una selezione singola interrompe un eventuale tour multi-ubicazione
   clearPrelievoGlow();                 // nasconde i prelievi mentre c'è un Trova attivo
   glowState=_buildGlow(v, true);
-  startCinematicTour(v); pulse=0;
-  selectedVano=v;
-  if(!opts.silent) Voce.parla(fraseVano(v), {priority:'high'});   // annuncio IA femminile in contemporanea col movimento
+  // In modalità drone NON eseguo cinematiche né prendo possesso della camera:
+  // accendo solo il bancale mirato (lock-on) e lascio il pilotaggio all'utente.
+  if(!opts.noCinematic){
+    startCinematicTour(v); pulse=0;
+    selectedVano=v;
+  } else {
+    pulse=0;
+  }
+  if(!opts.silent && !opts.noCinematic) Voce.parla(fraseVano(v), {priority:'high'});   // annuncio IA femminile in contemporanea col movimento
   const m=v.code.match(/^([A-F])(\d{2})-L(\d)-P(\d)$/);
   const rowHexHero = (typeof CARTELLO_COLORI!=='undefined' && v.row && CARTELLO_COLORI[v.row]) ? CARTELLO_COLORI[v.row][0] : '#3b82f6';
   // HERO TROVA: posto e quantità in evidenza, come una schermata cockpit dedicata.
@@ -4408,6 +4455,7 @@ function tick(now){
   if(_dt<0) _dt=0; if(_dt>0.05) _dt=0.05;        // clamp anti-scatti (50ms)
   // MODALITÀ DRONE: integra il volo prima dello smoothing camera.
   updateDrone(now, _dt);
+  updateDroneAim(now);   // mirino: aggiorna quale bancale si sta puntando
   // "rate" = frazione recuperata in 1/60s; convertita in fattore continuo via dt.
   // Durante le cinematiche "cam" è GIÀ mosso da un easing morbido: un secondo lerp
   // in serie aggiunge lag e micro-scatti. Qui lo smoothing è quasi pass-through
@@ -4433,6 +4481,9 @@ function tick(now){
   if(dentro){
     [cpx,cpz]=clampCameraXZ(cpx,cpz);
     cpy=Math.min(cpy, H_HIGH-0.15);
+    // PAVIMENTO: la camera (drone) può scendere fino a sfiorare il suolo ma non
+    // attraversarlo. Margine minimo dal pavimento per non clippare dentro il piano.
+    cpy=Math.max(cpy, DRONE_FLOOR_MIN);
     const [px,pz]=pushOutOfRacks(cpx,cpy,cpz);
     if(px!==cpx||pz!==cpz){
       if(!camPushed) camPushed={x:cpx,z:cpz};
@@ -4524,12 +4575,20 @@ const DRONE_GAIN = {
 };
 // Verso di ogni asse: +1 normale, -1 invertito. Tarati così che gli stick
 // corrispondano al movimento reale visto a schermo (correzione "comandi al contrario").
-const DRONE_DIR = { throttle:1, yaw:-1, pitch:-1, roll:-1 };
-const DRONE_TY_MIN = 0.6, DRONE_TY_MAX = H_HIGH + 4.0;   // quota target consentita
+const DRONE_DIR = { throttle:1, yaw:-1, pitch:1, roll:-1 };
+const DRONE_TY_MIN = 0.0, DRONE_TY_MAX = H_HIGH + 4.0;   // quota target consentita (fino al pavimento)
+const DRONE_FLOOR_MIN = 0.28;                            // altezza minima reale della camera dal pavimento
 let droneInput = { thr:0, yaw:0, pitch:0, roll:0 };       // -1..1 per asse
 let droneActive = false;          // true mentre il picking sta pilotando
 let _droneLastInputAt = 0;        // performance.now() ultimo input valido
 let _droneFirstSnap = true;
+
+// --- MIRINO / AGGANCIO ---
+const _droneRay = new THREE.Raycaster();
+let _droneAimVano = null;         // bancale attualmente mirato dal centro schermo (o null)
+let _droneLockedVano = null;      // bancale agganciato (acceso, lock-on attivo)
+let _lastLockSeq = "";            // dedup del comando "aggancia" dal controller
+let _droneAimT = 0;               // throttle del raycast di mira
 
 // nasconde/ripristina tutta la UI del kiosk durante il volo (badge "DRONE MODE").
 function setDroneChrome(on){
@@ -4573,9 +4632,18 @@ function applyDroneState(d){
         setDroneChrome(true);     // nascondi cockpit/loghi/log → mostra "DRONE MODE"
         setCloudStatus('Modalità drone attiva', '#22d3ee');
       }
+      // COMANDO AGGANCIA: scatta quando lockSeq cambia (nuova pressione sul controller).
+      const lockSeq = String(o.lockSeq || "");
+      if(lockSeq && lockSeq !== _lastLockSeq){
+        _lastLockSeq = lockSeq;
+        if(o.lockOn === false) droneLockOff();
+        else droneLockOn();
+      }
     } else if(droneActive){
       droneActive = false;
       droneInput = { thr:0, yaw:0, pitch:0, roll:0 };
+      droneLockOff();           // sgancio l'eventuale bancale acceso
+      _lastLockSeq = "";
       setDroneChrome(false);    // ripristina tutta la UI come prima del volo
       // al disarmo: se siamo fuori orario, il prossimo tick rimette la mappa
       // in standby offline automaticamente (shouldOffline torna true).
@@ -4613,6 +4681,56 @@ function updateDrone(now, dt){
   cam.tz = Math.max(-mZ, Math.min(mZ, cam.tz));
   lastInteract = now;   // tiene la scena a piena frequenza durante il volo
   return true;
+}
+
+// MIRINO: raycast dal centro schermo per capire quale bancale si sta mirando.
+// Aggiorna lo stato del mirino (idle / agganciabile) ~10 volte/sec.
+function updateDroneAim(now){
+  if(!droneActive){ return; }
+  if(now - _droneAimT < 90) return;     // ~11Hz
+  _droneAimT = now;
+  let vano = null;
+  try{
+    _droneRay.setFromCamera({ x:0, y:0 }, camera);   // centro esatto del viewport
+    const hits = _droneRay.intersectObjects(racksGroup.children, true);
+    for(const h of hits){
+      let o = h.object; while(o && !o.userData.code) o = o.parent;
+      if(o && o.userData.code){ vano = VANI.find(x=>x.obj===o) || null; break; }
+    }
+  }catch(_){}
+  _droneAimVano = vano;
+  const xh = document.getElementById('droneCrosshair');
+  const lab = document.getElementById('droneCrosshairLabel');
+  if(xh){
+    const locked = !!_droneLockedVano;
+    const lockable = !!vano && !locked;
+    xh.classList.toggle('lockable', lockable);
+    xh.classList.toggle('locked', locked);
+    if(lab){
+      if(locked) lab.textContent = _droneLockedVano.code + ' · AGGANCIATO';
+      else if(vano) lab.textContent = vano.code;
+      else lab.textContent = '';
+    }
+  }
+}
+
+// AGGANCIA: accende il bancale mirato (lock-on stile Trova ma SENZA cinematiche,
+// perché si è in volo). Premuto di nuovo senza mira valida, sgancia.
+function droneLockOn(){
+  if(!droneActive) return;
+  if(_droneAimVano){
+    _droneLockedVano = _droneAimVano;
+    highlightVano(_droneLockedVano, { noCinematic:true, silent:true });
+    setCloudStatus('Agganciato • ' + _droneLockedVano.code, '#46e0a0');
+  } else {
+    droneLockOff();
+  }
+}
+function droneLockOff(){
+  _droneLockedVano = null;
+  try{ clearHighlight(); }catch(_){}
+  const xh = document.getElementById('droneCrosshair');
+  if(xh) xh.classList.remove('locked');
 }
 
 function normalizeRackCode(code){
