@@ -4532,7 +4532,10 @@ function tick(now){
   // Nelle viste d'insieme la camera sta fuori/sopra: in quel caso non va confinata.
   const dentro = (cpx>-LX/2 && cpx<LX/2 && cpz>-LZ/2 && cpz<LZ/2 && cpy < H_HIGH);
   if(dentro){
-    [cpx,cpz]=clampCameraXZ(cpx,cpz);
+    // Per il DRONE non applico il clamp perimetrale rigido: il confinamento (con
+    // possibilità di USCIRE dall'area, come la camera originale) è già gestito in
+    // updateDrone. Per le altre viste resta il clamp classico dentro il perimetro.
+    if(!droneActive){ [cpx,cpz]=clampCameraXZ(cpx,cpz); }
     cpy=Math.min(cpy, H_HIGH-0.15);
     // PAVIMENTO: la camera (drone) può scendere fino a sfiorare il suolo ma non
     // attraversarlo. Margine minimo dal pavimento per non clippare dentro il piano.
@@ -4771,9 +4774,9 @@ function updateDrone(now, dt){
   // YAW: ruota la testa del drone SUL POSTO (cambia solo l'heading)
   droneFP.yaw += DRONE_DIR.yaw * i.yaw * DRONE_GAIN.yaw * step;
 
-  // THROTTLE: quota del drone
+  // THROTTLE: quota del drone (può salire SOPRA il tetto per uscire in vista d'insieme)
   droneFP.y += DRONE_DIR.throttle * i.thr * DRONE_GAIN.throttle * step;
-  droneFP.y = Math.max(DRONE_FLOOR_MIN, Math.min(H_HIGH-0.2, droneFP.y));
+  droneFP.y = Math.max(DRONE_FLOOR_MIN, Math.min(H_HIGH + 16, droneFP.y));
 
   // PITCH/ROLL: trasla il drone lungo avanti/destra RELATIVI al suo heading.
   // forward(yaw): (sin,  cos) ; right(yaw): (cos, -sin)  [con yaw=0 → +Z]
@@ -4784,17 +4787,21 @@ function updateDrone(now, dt){
   let nx = droneFP.x + fx*fwd + rx*lat;
   let nz = droneFP.z + fz*fwd + rz*lat;
 
-  // confinamento: dentro il capannone evita i muri e i pallet, fuori lascio un margine.
-  const insideX = (nx>-LX/2 && nx<LX/2 && nz>-LZ/2 && nz<LZ/2);
-  if(insideX){
-    [nx,nz] = clampCameraXZ(nx,nz);
+  // CONFINAMENTO come la camera originale: si PUÒ uscire dall'area.
+  // - se il drone è BEN dentro al capannone (sotto il tetto e dentro il perimetro)
+  //   evito solo che attraversi i pallet (push fuori dagli scaffali);
+  // - non c'è più un muro invisibile sul perimetro: oltrepassando il bordo si esce,
+  //   con un ampio margine esterno come limite estremo (vista d'insieme).
+  const underRoof = (droneFP.y < H_HIGH);
+  const wellInside = underRoof && (nx>CX0+0.2 && nx<CX1-0.2 && nz>CZ0+0.2 && nz<CZ1-0.2);
+  if(wellInside){
     const [px,pz] = pushOutOfRacks(nx, droneFP.y, nz);
     nx=px; nz=pz;
-  } else {
-    const mX = LX/2 + 6, mZ = LZ/2 + 6;
-    nx = Math.max(-mX, Math.min(mX, nx));
-    nz = Math.max(-mZ, Math.min(mZ, nz));
   }
+  // limite estremo esterno (per non perdersi all'infinito): ampio margine attorno all'edificio
+  const mX = LX/2 + 24, mZ = LZ/2 + 24;
+  nx = Math.max(-mX, Math.min(mX, nx));
+  nz = Math.max(-mZ, Math.min(mZ, nz));
   droneFP.x = nx; droneFP.z = nz;
 
   lastInteract = now;   // tiene la scena a piena frequenza durante il volo
