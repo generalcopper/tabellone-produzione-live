@@ -568,8 +568,31 @@
   #droneCrosshair.locked .xh-label{ opacity:1; }
   #droneCrosshair.locked .xh-label{ color:#7ff0c0; }
 
+  /* dati del bancale agganciato, in sovraimpressione (no takeover della vista) */
+  #droneLockData{
+    position:fixed; left:max(18px, env(safe-area-inset-left)); bottom:max(18px, env(safe-area-inset-bottom));
+    z-index:41; pointer-events:none; max-width:min(360px, 80vw);
+    padding:14px 18px; border-radius:16px;
+    background:rgba(8,16,13,.78); border:1px solid rgba(70,224,160,.32);
+    box-shadow:0 10px 34px rgba(0,0,0,.5);
+    backdrop-filter:blur(12px); -webkit-backdrop-filter:blur(12px);
+    color:#dfeee8; opacity:0; visibility:hidden; transform:translateY(8px);
+    transition:opacity .25s ease, transform .25s ease, visibility .25s ease;
+  }
+  #droneLockData.show{ opacity:1; visibility:visible; transform:translateY(0); }
+  #droneLockData .dl-kick{ font-size:10px; font-weight:700; letter-spacing:.22em; text-transform:uppercase; color:#5fd6a8; margin-bottom:6px; display:flex; align-items:center; gap:7px; }
+  #droneLockData .dl-kick::before{ content:""; width:8px; height:8px; border-radius:50%; background:#46e0a0; box-shadow:0 0 10px #46e0a0; }
+  #droneLockData .dl-code{ font-size:26px; font-weight:800; letter-spacing:.5px; line-height:1; color:#eafff6; margin-bottom:8px; }
+  #droneLockData .dl-qty{ display:flex; align-items:baseline; gap:8px; margin-bottom:4px; }
+  #droneLockData .dl-qty b{ font-size:30px; font-weight:800; color:#fff; font-variant-numeric:tabular-nums; }
+  #droneLockData .dl-qty span{ font-size:11px; letter-spacing:.12em; text-transform:uppercase; color:#86a89a; }
+  #droneLockData .dl-det{ font-size:12px; color:#9bc2b3; line-height:1.5; }
+  #droneLockData .dl-prod{ font-size:12.5px; color:#cfe7dc; margin-top:6px; font-weight:600; }
+  #droneLockData .dl-empty{ font-size:13px; color:#86a89a; font-style:italic; }
+
   /* mentre il drone vola: niente cockpit, alert, log, loghi, ingranaggi → vista pulita */
   body.drone-flying #cockpit,
+  body.drone-flying #panel,
   body.drone-flying #incomingAlert,
   body.drone-flying #readyAlert,
   body.drone-flying #sysLog,
@@ -609,6 +632,8 @@
   </svg>
   <div class="xh-label" id="droneCrosshairLabel"></div>
 </div>
+
+<div id="droneLockData" aria-hidden="true"></div>
 
 <button class="kioskGear" id="kioskGear" type="button" title="Impostazioni kiosk" aria-label="Impostazioni kiosk">⚙︎</button>
 <button class="kioskGear" id="voiceToggle" type="button" title="Voce on/off" aria-label="Voce on/off" style="right:36px">🔊</button>
@@ -2852,8 +2877,13 @@ function highlightVano(v, opts={}){
       detBlock+
       prodBlock+
     `</div>`;
-  document.getElementById('info').innerHTML=txt;
-  const panel=document.getElementById('panel'); if(panel) panel.classList.add('trova-on');
+  if(opts.noCinematic){
+    // In volo: niente takeover del cockpit. Mostro solo i dati compatti accanto al mirino.
+    fillDroneLockData(v);
+  } else {
+    document.getElementById('info').innerHTML=txt;
+    const panel=document.getElementById('panel'); if(panel) panel.classList.add('trova-on');
+  }
 }
 const cam=(innerWidth<innerHeight)
   ? {theta:Math.PI*0.13,phi:Math.PI*0.085,r:15.5,tx:0.5,ty:3.6,tz:1}
@@ -4575,7 +4605,7 @@ const DRONE_GAIN = {
 };
 // Verso di ogni asse: +1 normale, -1 invertito. Tarati così che gli stick
 // corrispondano al movimento reale visto a schermo (correzione "comandi al contrario").
-const DRONE_DIR = { throttle:1, yaw:-1, pitch:1, roll:-1 };
+const DRONE_DIR = { throttle:1, yaw:-1, pitch:1, roll:1 };
 const DRONE_TY_MIN = 0.0, DRONE_TY_MAX = H_HIGH + 4.0;   // quota target consentita (fino al pavimento)
 const DRONE_FLOOR_MIN = 0.28;                            // altezza minima reale della camera dal pavimento
 let droneInput = { thr:0, yaw:0, pitch:0, roll:0 };       // -1..1 per asse
@@ -4731,6 +4761,28 @@ function droneLockOff(){
   try{ clearHighlight(); }catch(_){}
   const xh = document.getElementById('droneCrosshair');
   if(xh) xh.classList.remove('locked');
+  const dl = document.getElementById('droneLockData');
+  if(dl){ dl.classList.remove('show'); dl.setAttribute('aria-hidden','true'); }
+}
+
+// compone la card dati del bancale agganciato (sovraimpressione, senza spostare la vista)
+function fillDroneLockData(v){
+  const dl = document.getElementById('droneLockData');
+  if(!dl || !v) return;
+  let html = `<div class="dl-kick">Agganciato</div><div class="dl-code">${v.code}</div>`;
+  if(v.cont){
+    const c = v.cont;
+    html += `<div class="dl-qty"><b>${c.qty}</b><span>pezzi</span></div>`;
+    let dett = `${c.scatolePiene} scatole`;
+    if(c.aperta) dett += ` + 1 aperta (${c.restoPz}/${c.pzPerScatola})`;
+    html += `<div class="dl-det">EPAL 80×120 · ${dett} · ${c.pzPerScatola} pz/scatola</div>`;
+    if(c.title) html += `<div class="dl-prod">${c.title}</div>`;
+  } else {
+    html += `<div class="dl-empty">Bancale vuoto</div>`;
+  }
+  dl.innerHTML = html;
+  dl.classList.add('show');
+  dl.setAttribute('aria-hidden','false');
 }
 
 function normalizeRackCode(code){
