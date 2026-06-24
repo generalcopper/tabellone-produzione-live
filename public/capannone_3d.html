@@ -4311,8 +4311,9 @@ function clampCameraXZ(x,z){
 function tick(now){
   perfWatch(now);
   // ===== STATO MAPPA OFFLINE =====
-  // Un Trova in corso (vano selezionato o tour cinematografico) tiene SEMPRE la mappa online.
-  // Altrimenti: offline se fuori orario. Cockpit e messaggi restano attivi in entrambi i casi.
+  // Un Trova in corso O la modalità drone tengono SEMPRE la mappa online: il drone
+  // può volare a qualsiasi orario, anche fuori orario. Al disarmo, se siamo fuori
+  // orario, la mappa torna automaticamente in standby offline al tick successivo.
   const trovaInCorso = !!(selectedVano || tour || tween || droneActive);
   const shouldOffline = !businessOpen() && !trovaInCorso;
   setMapOffline(shouldOffline);
@@ -4511,7 +4512,13 @@ function applyDroneState(d){
         // entrando in pilotaggio: interrompo tour/idle e porto la camera a una quota di volo
         tour=null; tween=null; idle=null; selectedVano=null;
         clearMultiTour && clearMultiTour();
-        if(_mapOffline) setMapOffline(false);
+        // il drone vola a QUALSIASI orario: se la mappa era in standby (fuori orario)
+        // la riattivo subito e forzo un frame immediato, senza attendere il tick lento.
+        if(_mapOffline){
+          setMapOffline(false);
+          _lastTickT = null;                 // evita un delta-time enorme al risveglio
+          try{ requestAnimationFrame(tick); }catch(_){}
+        }
         cam.ty = Math.max(DRONE_TY_MIN, Math.min(DRONE_TY_MAX, cam.ty));
         cam.r  = Math.max(R_MIN, Math.min(28, cam.r));
         setCloudStatus('Modalità drone attiva', '#22d3ee');
@@ -4519,7 +4526,9 @@ function applyDroneState(d){
     } else if(droneActive){
       droneActive = false;
       droneInput = { thr:0, yaw:0, pitch:0, roll:0 };
-      setCloudStatus('Drone disinnestato', '#9fb6d6');
+      // al disarmo: se siamo fuori orario, il prossimo tick rimette la mappa
+      // in standby offline automaticamente (shouldOffline torna true).
+      setCloudStatus(businessOpen() ? 'Drone disinnestato' : 'Drone disinnestato • ritorno standby', '#9fb6d6');
     }
   }catch(e){ console.warn('drone state error', e); }
 }
