@@ -263,7 +263,7 @@
   @keyframes ckLive{0%,100%{opacity:1;} 50%{opacity:.35;}}
   #cockpit #ckPageAzienda .ck-logorow{display:flex; align-items:flex-start; justify-content:flex-start; gap:clamp(12px,1.6vw,22px); flex-wrap:nowrap;}
   #cockpit #ckPageAzienda .ck-logo-img{display:block; width:auto;
-    height:clamp(288px,44vw,720px); max-width:min(96vw,1600px); object-fit:contain;
+    height:clamp(202px,30.8vw,504px); max-width:min(96vw,1600px); object-fit:contain;
     align-self:flex-start; filter:drop-shadow(0 4px 34px rgba(0,0,0,.55));}
   #cockpit #ckPageAzienda .ck-logo{background:none; -webkit-background-clip:border-box; background-clip:border-box;
     color:#ffffff; font-weight:800; letter-spacing:-.01em; font-size:clamp(66px,9.4vw,150px); line-height:.95;
@@ -4388,20 +4388,61 @@ function applyFov(){
 function resize(){ renderer.setSize(innerWidth,innerHeight); applyFov(); }
 addEventListener('resize',resize); addEventListener('orientationchange',resize); resize();
 
-// monitor prestazioni: riduce progressivamente la risoluzione se il framerate resta basso.
-let _fpsSamples=0,_fpsSlow=0,_lastNow=0,_degradeStep=0;
-const _PR_STEPS=[Math.min(devicePixelRatio,1.5), Math.min(devicePixelRatio,1.25), 1];
+// monitor prestazioni: degrada progressivamente il carico GPU se il framerate resta
+// basso, e RISALE se invece la macchina regge. Ordine dei tagli pensato per impatto
+// visivo crescente: prima le ombre (il costo maggiore su GPU integrate da kiosk),
+// poi la risoluzione. I gradini sono cumulativi.
+//
+//  step 0: ombre soft 2048 + PR pieno              (qualità massima)
+//  step 1: ombre soft 1024
+//  step 2: ombre basic 1024 (niente PCF soft)
+//  step 3: ombre basic 512
+//  step 4: ombre OFF + PR 1.25
+//  step 5: ombre OFF + PR 1.0                       (massima fluidità)
+let _fpsSamples=0,_fpsSlow=0,_fpsFast=0,_lastNow=0,_perfStep=0;
+const _PR_MAX=Math.min(devicePixelRatio,1.5);
+const _PERF_STEPS=[
+  { shadow:true,  soft:true,  map:2048, pr:_PR_MAX },
+  { shadow:true,  soft:true,  map:1024, pr:_PR_MAX },
+  { shadow:true,  soft:false, map:1024, pr:_PR_MAX },
+  { shadow:true,  soft:false, map:512,  pr:_PR_MAX },
+  { shadow:false, soft:false, map:512,  pr:Math.min(devicePixelRatio,1.25) },
+  { shadow:false, soft:false, map:512,  pr:1 },
+];
+function _applyPerfStep(i){
+  i=Math.max(0,Math.min(_PERF_STEPS.length-1,i));
+  const s=_PERF_STEPS[i]; _perfStep=i;
+  // tipo di filtro ombre (richiede needsUpdate per rigenerare la map col nuovo filtro)
+  renderer.shadowMap.type = s.soft ? THREE.PCFSoftShadowMap : THREE.BasicShadowMap;
+  renderer.shadowMap.enabled = s.shadow;
+  // risoluzione della shadow map del sole (l'unica luce che proietta ombre)
+  try{
+    if(sun && sun.shadow){
+      if(sun.shadow.mapSize.x !== s.map){
+        sun.shadow.mapSize.set(s.map, s.map);
+        if(sun.shadow.map){ sun.shadow.map.dispose(); sun.shadow.map=null; }  // forza realloc
+      }
+    }
+  }catch(_){}
+  renderer.setPixelRatio(s.pr);
+  renderer.shadowMap.needsUpdate=true;
+  requestShadowUpdate(2);
+}
 function perfWatch(now){
-  if(_lastNow){ const dt=now-_lastNow; if(dt>20) _fpsSlow++; _fpsSamples++; }   // >20ms ≈ sotto i 50fps
+  if(_lastNow){
+    const dt=now-_lastNow;
+    if(dt>20) _fpsSlow++;        // >20ms ≈ sotto i 50fps
+    else if(dt<15) _fpsFast++;   // <15ms ≈ sopra i 66fps: margine per risalire
+    _fpsSamples++;
+  }
   _lastNow=now;
   if(_fpsSamples>=45){
-    // se molti frame sono lenti e c'è margine, scendi subito di un gradino di risoluzione
-    if(_fpsSlow>20 && _degradeStep < _PR_STEPS.length-1){
-      _degradeStep++;
-      renderer.setPixelRatio(_PR_STEPS[_degradeStep]);
-      requestShadowUpdate(2);
+    if(_fpsSlow>20 && _perfStep < _PERF_STEPS.length-1){
+      _applyPerfStep(_perfStep+1);          // troppi frame lenti → alleggerisci
+    } else if(_fpsFast>40 && _fpsSlow===0 && _perfStep > 0){
+      _applyPerfStep(_perfStep-1);          // gira liscio e c'è margine → rialza la qualità
     }
-    _fpsSamples=0; _fpsSlow=0;
+    _fpsSamples=0; _fpsSlow=0; _fpsFast=0;
   }
 }
 
@@ -4606,8 +4647,8 @@ function tick(now){
   // ombre: durante le cinematiche la geometria è statica (si muove solo la camera):
   // il refresh periodico provocherebbe un hitch ogni N frame. Lo sospendo e tengo
   // solo i frame esplicitamente richiesti (cambio merce) + refresh per la linea a riposo.
-  _shadowTick=(_shadowTick+1)%8;
-  const periodicShadow = !inCine && _shadowTick===0;
+  _shadowTick=(_shadowTick+1)%30;   // refresh ombre periodico più rado (la linea a riposo
+  const periodicShadow = !inCine && _shadowTick===0;   // si muove lenta: ~ogni mezzo secondo basta)
   if(_shadowFrames>0 || periodicShadow){ renderer.shadowMap.needsUpdate=true; if(_shadowFrames>0)_shadowFrames--; }
   renderer.render(scene,camera);
   requestAnimationFrame(tick);
