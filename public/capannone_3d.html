@@ -4446,6 +4446,63 @@ function perfWatch(now){
   }
 }
 
+/* ===== OVERLAY DIAGNOSTICO PRESTAZIONI =====
+   Attivabile con ?perf nell'URL o premendo il tasto P. Mostra FPS, tempo CPU del
+   tick (JS), tempo stimato GPU, draw call e triangoli, gradino di degrade corrente.
+   Serve per capire se il kiosk è CPU-bound (troppe animazioni/draw call) o
+   GPU-bound (fill-rate/ombre). Zero costo quando spento. */
+const _perfHud=(function(){
+  let on = /[?&]perf\b/.test(location.search);
+  let el=null, _cpu=0, _frames=0, _acc=0, _last=performance.now(), _fps=0;
+  let _cpuAvg=0, _drawAvg=0, _triAvg=0;
+  function ensure(){
+    if(el) return el;
+    el=document.createElement('div');
+    el.style.cssText='position:fixed;top:8px;left:8px;z-index:99999;'+
+      'font:12px/1.45 ui-monospace,Menlo,Consolas,monospace;color:#9effa0;'+
+      'background:rgba(6,10,16,.82);border:1px solid rgba(120,255,150,.25);'+
+      'padding:8px 11px;border-radius:8px;white-space:pre;pointer-events:none;'+
+      'backdrop-filter:blur(6px);letter-spacing:.02em;text-shadow:0 1px 2px #000';
+    document.body.appendChild(el);
+    return el;
+  }
+  function destroy(){ if(el){ el.remove(); el=null; } }
+  addEventListener('keydown',e=>{
+    if(e.key==='p'||e.key==='P'){ on=!on; if(!on) destroy(); }
+  });
+  // marca l'inizio del lavoro CPU del frame
+  function begin(){ if(on) _cpu=performance.now(); }
+  // chiude il conteggio e aggiorna l'HUD (chiamato a fine tick, dopo il render)
+  function end(now){
+    if(!on){ return; }
+    const cpu = performance.now() - _cpu;       // ms di JS+submit di questo frame
+    _frames++; _acc += (now - _last); _last = now;
+    // medie esponenziali per numeri stabili
+    _cpuAvg = _cpuAvg*0.9 + cpu*0.1;
+    const info = renderer.info.render;
+    _drawAvg = _drawAvg*0.9 + info.calls*0.1;
+    _triAvg  = _triAvg*0.9 + info.triangles*0.1;
+    if(_acc>=250){                              // aggiorna il testo 4×/sec
+      _fps = Math.round(1000*_frames/_acc);
+      _frames=0; _acc=0;
+      const gpuApprox = Math.max(0, (1000/Math.max(_fps,1)) - _cpuAvg);
+      const stepLbl=['SOFT 2048','SOFT 1024','BASIC 1024','BASIC 512','NO-SHADOW 1.25','NO-SHADOW 1.0'][_perfStep]||('step '+_perfStep);
+      const lineLbl = (typeof lineOn==='function' && lineOn()) ? 'ON' : 'off';
+      ensure().textContent =
+        `FPS   ${_fps}\n`+
+        `CPU   ${_cpuAvg.toFixed(1)} ms  (JS/tick)\n`+
+        `GPU~  ${gpuApprox.toFixed(1)} ms  (frame - cpu)\n`+
+        `draw  ${Math.round(_drawAvg)} calls\n`+
+        `tris  ${(_triAvg/1000).toFixed(0)}k\n`+
+        `perf  ${stepLbl}\n`+
+        `PR    ${renderer.getPixelRatio().toFixed(2)}\n`+
+        `linea ${lineLbl}\n`+
+        `[P] toggle`;
+    }
+  }
+  return { begin, end, get on(){return on;} };
+})();
+
 /* Confina la posizione (x,z) della camera dentro il perimetro a L del capannone,
    con un margine dai muri. Esclude anche l'angolo del vano cartongesso. */
 const MWALL=0.6;                                  // distanza minima dai muri
@@ -4470,6 +4527,7 @@ function clampCameraXZ(x,z){
 
 
 function tick(now){
+  _perfHud.begin();
   perfWatch(now);
   // ===== STATO MAPPA OFFLINE =====
   // Un Trova in corso O la modalità drone tengono SEMPRE la mappa online: il drone
@@ -4651,6 +4709,7 @@ function tick(now){
   const periodicShadow = !inCine && _shadowTick===0;   // si muove lenta: ~ogni mezzo secondo basta)
   if(_shadowFrames>0 || periodicShadow){ renderer.shadowMap.needsUpdate=true; if(_shadowFrames>0)_shadowFrames--; }
   renderer.render(scene,camera);
+  _perfHud.end(now);
   requestAnimationFrame(tick);
 }
 requestAnimationFrame(tick);
