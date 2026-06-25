@@ -5157,75 +5157,112 @@ function setCloudStatus(txt, color){
 }
 
 
-/* ===== Impostazioni kiosk + AUTH STABILE =====
-   Il vecchio accesso anonimo Firebase funziona solo se Edge conserva lo storage locale.
-   In Kiosk/riavvio quello storage può essere cancellato: Firebase crea un anonimo nuovo
-   e quindi cambia UID. Per evitare di rompere le regole attuali, manteniamo il vecchio
-   fallback anonimo, ma aggiungiamo un accesso email/password opzionale: stesso account,
-   stesso UID, anche dopo riavvio completo.
-
-   Uso consigliato nel kiosk Edge:
-   capannone_3d.html#kioskEmail=kiosk-capannone%40lgtrading.local&kioskPassword=PASSWORD
-   Il frammento # non viene inviato al server; JS lo legge e lo usa per il login.
-   In alternativa puoi compilare qui sotto KIOSK_FIXED_AUTH.
+/* ===== Impostazioni kiosk + AUTH GOOGLE OBBLIGATORIO =====
+   Niente accesso anonimo: se non esiste una sessione Firebase valida, il kiosk
+   resta bloccato sulla schermata Accesso Google. Con browserLocalPersistence,
+   l'account Google resta persistente finché Edge conserva i dati profilo.
 */
-const KIOSK_FIXED_AUTH = {
-  email: "",
-  password: ""
-};
-const KIOSK_AUTH_STORAGE_KEYS = {
-  email: "capannone3d_kiosk_auth_email",
-  password: "capannone3d_kiosk_auth_password"
-};
 let KIOSK_UID = "";
-let KIOSK_AUTH_LABEL = "anonimo locale";
-let KIOSK_AUTH_STABLE = false;
+let KIOSK_AUTH_LABEL = "Google";
+let _googleAuthCtx = null; // { authMod, auth, provider }
 function _normEmail(v){ return String(v||'').trim().toLowerCase(); }
-function _safeStorageGet(k){ try{ return localStorage.getItem(k) || ""; }catch(_){ return ""; } }
-function _safeStorageSet(k,v){ try{ if(v) localStorage.setItem(k,v); }catch(_){} }
-function _readKioskHashParams(){
-  try{
-    const raw = String(location.hash || '').replace(/^#/, '');
-    if(!raw) return new URLSearchParams();
-    return new URLSearchParams(raw);
-  }catch(_){ return new URLSearchParams(); }
-}
-function readKioskAuthCredentials(){
-  const fixedEmail = _normEmail(KIOSK_FIXED_AUTH.email);
-  const fixedPassword = String(KIOSK_FIXED_AUTH.password || '').trim();
-  if(fixedEmail && fixedPassword) return { email:fixedEmail, password:fixedPassword, source:'codice' };
 
-  const hp = _readKioskHashParams();
-  const hashEmail = _normEmail(hp.get('kioskEmail') || hp.get('email'));
-  const hashPassword = String(hp.get('kioskPassword') || hp.get('password') || '').trim();
-  if(hashEmail && hashPassword){
-    // cache utile se Edge conserva lo storage; se lo cancella, l'hash del launch URL basta comunque.
-    _safeStorageSet(KIOSK_AUTH_STORAGE_KEYS.email, hashEmail);
-    _safeStorageSet(KIOSK_AUTH_STORAGE_KEYS.password, hashPassword);
-    return { email:hashEmail, password:hashPassword, source:'url' };
+function ensureKioskLoginGate(){
+  let style = document.getElementById('kioskLoginStyle');
+  if(!style){
+    style = document.createElement('style');
+    style.id = 'kioskLoginStyle';
+    style.textContent = `
+      #kioskLoginGate{position:fixed;inset:0;z-index:9999;display:none;align-items:center;justify-content:center;
+        background:radial-gradient(circle at 50% 20%,rgba(35,70,130,.35),rgba(3,6,12,.98) 52%,#020409 100%);
+        color:#eef2f8;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;padding:24px;text-align:center;}
+      #kioskLoginGate.open{display:flex;}
+      #kioskLoginGate .kg-card{width:min(430px,calc(100vw - 32px));border-radius:26px;border:1px solid rgba(255,255,255,.12);
+        background:rgba(14,18,28,.78);box-shadow:0 30px 100px rgba(0,0,0,.62),inset 0 1px 0 rgba(255,255,255,.06);
+        -webkit-backdrop-filter:blur(24px) saturate(160%);backdrop-filter:blur(24px) saturate(160%);padding:30px 28px;}
+      #kioskLoginGate .kg-logo{font-weight:850;letter-spacing:.12em;text-transform:uppercase;font-size:13px;color:#9fc4ff;margin-bottom:18px;}
+      #kioskLoginGate .kg-title{font-weight:850;letter-spacing:-.03em;font-size:clamp(34px,5vw,48px);line-height:1;margin-bottom:12px;color:#fff;}
+      #kioskLoginGate .kg-text{font-size:15px;line-height:1.48;color:#aab7ca;margin:0 auto 24px;max-width:340px;}
+      #kioskLoginGate .kg-btn{width:100%;height:54px;border-radius:16px;border:0;background:#fff;color:#172033;font-size:15px;font-weight:800;
+        display:flex;align-items:center;justify-content:center;gap:12px;cursor:pointer;box-shadow:0 10px 30px rgba(0,0,0,.28);}
+      #kioskLoginGate .kg-btn:active{transform:scale(.985);}
+      #kioskLoginGate .kg-btn[disabled]{opacity:.65;cursor:default;transform:none;}
+      #kioskLoginGate .kg-g{width:20px;height:20px;display:inline-block;}
+      #kioskLoginGate .kg-status{min-height:18px;margin-top:16px;font-size:12px;line-height:1.4;color:#7f8ca4;}
+      #kioskLoginGate .kg-status.err{color:#ff9f9f;}
+      #kioskLoginGate .kg-foot{margin-top:18px;font-size:11px;color:#607089;line-height:1.45;}
+      @media (max-width:520px){#kioskLoginGate .kg-card{padding:26px 22px;border-radius:22px}}
+    `;
+    document.head.appendChild(style);
   }
-
-  const storedEmail = _normEmail(_safeStorageGet(KIOSK_AUTH_STORAGE_KEYS.email));
-  const storedPassword = String(_safeStorageGet(KIOSK_AUTH_STORAGE_KEYS.password) || '').trim();
-  if(storedEmail && storedPassword) return { email:storedEmail, password:storedPassword, source:'locale' };
-
-  return null;
+  let gate = document.getElementById('kioskLoginGate');
+  if(!gate){
+    gate = document.createElement('div');
+    gate.id = 'kioskLoginGate';
+    gate.setAttribute('aria-hidden','true');
+    gate.innerHTML = `
+      <div class="kg-card" role="dialog" aria-modal="true" aria-labelledby="kgTitle">
+        <div class="kg-logo">LG Trading Kiosk</div>
+        <div class="kg-title" id="kgTitle">Accesso richiesto</div>
+        <p class="kg-text">Accedi con Google per autorizzare questo dispositivo su Firebase e avviare il magazzino 3D.</p>
+        <button class="kg-btn" id="kioskGoogleLoginBtn" type="button">
+          <svg class="kg-g" viewBox="0 0 24 24" aria-hidden="true"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l3.66-2.84z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/></svg>
+          Accedi con Google
+        </button>
+        <div class="kg-status" id="kioskLoginStatus">Sessione Firebase non presente.</div>
+        <div class="kg-foot">Dopo il login copia l'UID da ⚙︎ e crea/lascia il documento <b>kiosks/UID</b> in Firestore.</div>
+      </div>`;
+    document.body.appendChild(gate);
+    const btn = gate.querySelector('#kioskGoogleLoginBtn');
+    btn?.addEventListener('click', async (e)=>{
+      e.preventDefault(); e.stopPropagation();
+      await signInWithGoogleKiosk();
+    });
+  }
+  return gate;
 }
-function setKioskAuthInfo(creds){
-  KIOSK_AUTH_STABLE = !!creds;
-  KIOSK_AUTH_LABEL = creds ? ('account stabile ' + creds.email) : 'anonimo locale';
+function showKioskLogin(message, isError){
+  const gate = ensureKioskLoginGate();
+  const st = document.getElementById('kioskLoginStatus');
+  const btn = document.getElementById('kioskGoogleLoginBtn');
+  if(st){ st.textContent = message || 'Sessione Firebase non presente.'; st.classList.toggle('err', !!isError); }
+  if(btn) btn.disabled = false;
+  gate.classList.add('open');
+  gate.setAttribute('aria-hidden','false');
 }
-function setKioskUid(uid){
+function hideKioskLogin(){
+  const gate = document.getElementById('kioskLoginGate');
+  if(gate){ gate.classList.remove('open'); gate.setAttribute('aria-hidden','true'); }
+}
+async function signInWithGoogleKiosk(){
+  const st = document.getElementById('kioskLoginStatus');
+  const btn = document.getElementById('kioskGoogleLoginBtn');
+  if(!_googleAuthCtx){ if(st) st.textContent='Firebase Auth non ancora pronto.'; return; }
+  try{
+    if(btn) btn.disabled = true;
+    if(st){ st.textContent='Apertura accesso Google…'; st.classList.remove('err'); }
+    setCloudStatus('Accesso Google…', '#f59e0b');
+    await _googleAuthCtx.authMod.signInWithRedirect(_googleAuthCtx.auth, _googleAuthCtx.provider);
+  }catch(e){
+    console.error('accesso Google fallito', e);
+    const code = e?.code || 'unknown';
+    if(st){ st.textContent='Errore accesso Google: '+code; st.classList.add('err'); }
+    if(btn) btn.disabled = false;
+    setCloudStatus('Errore accesso Google: '+code, '#ef4444');
+  }
+}
+function setKioskUid(uid, user){
   KIOSK_UID = String(uid || "").trim();
+  KIOSK_AUTH_LABEL = user && user.email ? ('Google • ' + user.email) : 'Google';
   const uidBox = document.getElementById('kioskUidBox');
   const pathBox = document.getElementById('kioskPathBox');
   const statusBox = document.getElementById('kioskMiniStatus');
-  if(uidBox) uidBox.textContent = KIOSK_UID || 'In attesa di autenticazione…';
+  if(uidBox) uidBox.textContent = KIOSK_UID || 'Accesso Google richiesto…';
   if(pathBox) pathBox.textContent = KIOSK_UID ? ('kiosks / ' + KIOSK_UID) : 'kiosks / —';
   if(statusBox && KIOSK_UID){
-    statusBox.textContent = KIOSK_AUTH_STABLE
-      ? ('UID stabile con ' + KIOSK_AUTH_LABEL + '. Crea/lascia in Firestore kiosks/' + KIOSK_UID + '.')
-      : ('UID anonimo locale: se Edge cancella lo storage può cambiare. Per renderlo fisso usa kioskEmail/kioskPassword. Documento: kiosks/' + KIOSK_UID + '.');
+    statusBox.textContent = 'UID Google persistente con ' + KIOSK_AUTH_LABEL + '. Documento Firestore: kiosks/' + KIOSK_UID + '.';
+  }else if(statusBox){
+    statusBox.textContent = 'Accedi con Google per generare l’UID Firebase del kiosk.';
   }
 }
 function openKioskSettings(){
@@ -5248,31 +5285,31 @@ function initKioskSettingsUi(){
     e.preventDefault(); e.stopPropagation();
     const on = Voce.toggle();
     vbtn.textContent = on ? '🔊' : '🔇';
-    if(on && selectedVano) Voce.parla(fraseVano(selectedVano));   // riprova l'annuncio corrente
+    if(on && selectedVano) Voce.parla(fraseVano(selectedVano));
   });
   close?.addEventListener('click', closeKioskSettings);
   modal?.addEventListener('click', (e)=>{ if(e.target === modal) closeKioskSettings(); });
   copy?.addEventListener('click', async ()=>{
     const statusBox = document.getElementById('kioskMiniStatus');
-    if(!KIOSK_UID){ if(statusBox) statusBox.textContent = 'UID non ancora disponibile. Attendi accesso kiosk…'; return; }
+    if(!KIOSK_UID){ if(statusBox) statusBox.textContent = 'UID non disponibile: accedi con Google.'; return; }
     try{
       await navigator.clipboard.writeText(KIOSK_UID);
-      if(statusBox) statusBox.textContent = 'UID copiato. Crea il documento kiosks/' + KIOSK_UID + '.';
+      if(statusBox) statusBox.textContent = 'UID copiato. Crea/lascia il documento kiosks/' + KIOSK_UID + '.';
     }catch(_){
       if(statusBox) statusBox.textContent = 'Copia manualmente l’UID mostrato sopra.';
     }
   });
   refresh?.addEventListener('click', ()=>{
-    setKioskUid(KIOSK_UID);
+    setKioskUid(KIOSK_UID, _fbAuth && _fbAuth.currentUser);
     const statusBox = document.getElementById('kioskMiniStatus');
-    if(statusBox) statusBox.textContent = KIOSK_UID ? ('UID attuale confermato: kiosks/' + KIOSK_UID) : 'UID non ancora disponibile.';
+    if(statusBox) statusBox.textContent = KIOSK_UID ? ('UID attuale confermato: kiosks/' + KIOSK_UID) : 'Accedi con Google per ottenere l’UID.';
   });
-  setKioskUid(KIOSK_UID);
+  setKioskUid('', null);
 }
 initKioskSettingsUi();
 
 (async function connectCloud(){
-  setCloudStatus('Autenticazione…', '#f59e0b');
+  setCloudStatus('Controllo accesso Google…', '#f59e0b');
   try{
     const firebaseConfig = {
       apiKey: "AIzaSyBiyB4pilnPpVj8vImD4PI6LF2_RtyDnv4",
@@ -5290,67 +5327,43 @@ initKioskSettingsUi();
     const app = initializeApp(firebaseConfig);
     const db = fs.getFirestore(app);
 
-    // --- AUTH kiosk stabile: email/password se configurato, anonimo solo come fallback storico ---
     const auth = authMod.getAuth(app);
-    _fbAuth = auth;                      // reso disponibile alla voce per autenticare il TTS
-    try{ await authMod.setPersistence(auth, authMod.browserLocalPersistence); }catch(_){}
+    _fbAuth = auth;
+    await authMod.setPersistence(auth, authMod.browserLocalPersistence);
 
-    const kioskCreds = readKioskAuthCredentials();
-    setKioskAuthInfo(kioskCreds);
+    const provider = new authMod.GoogleAuthProvider();
+    provider.setCustomParameters({ prompt: 'select_account' });
+    _googleAuthCtx = { authMod, auth, provider };
+
+    try{ await authMod.getRedirectResult(auth); }
+    catch(e){
+      console.warn('redirect Google', e);
+      showKioskLogin('Errore accesso Google: '+(e?.code||'unknown'), true);
+    }
 
     let realtimeStarted = false;
-    let authInFlight = false;
     function startRealtimeOnce(){
       if(realtimeStarted) return;
       realtimeStarted = true;
       startInventoryRealtime(fs, db);
     }
-    async function signInKiosk(){
-      if(authInFlight) return;
-      authInFlight = true;
-      try{
-        if(kioskCreds){
-          setKioskUid('');
-          setCloudStatus('Accesso kiosk stabile…', '#f59e0b');
-          await authMod.signInWithEmailAndPassword(auth, kioskCreds.email, kioskCreds.password);
-        }else{
-          setKioskUid('');
-          setCloudStatus('Accesso kiosk anonimo…', '#f59e0b');
-          await authMod.signInAnonymously(auth);
-        }
-      }catch(e){
-        console.error('auth kiosk fallita', e);
-        const code = e?.code || 'unknown';
-        const msg = kioskCreds
-          ? ('Errore auth kiosk stabile: ' + code + ' • verifica email/password')
-          : ('Errore auth anonima: ' + code);
-        setCloudStatus(msg, '#ef4444');
-        const statusBox = document.getElementById('kioskMiniStatus');
-        if(statusBox) statusBox.textContent = msg;
-      }finally{
-        authInFlight = false;
-      }
-    }
 
-    authMod.onAuthStateChanged(auth, async (user)=>{
-      // Se è configurato un account kiosk stabile ma Edge aveva ancora in cache un anonimo,
-      // esco e rientro con l'account corretto: niente UID casuale, niente whitelist rotta.
-      if(user && kioskCreds && _normEmail(user.email) !== kioskCreds.email){
-        setKioskUid('');
-        setCloudStatus('Cambio account kiosk…', '#f59e0b');
-        try{ await authMod.signOut(auth); }catch(e){ console.warn('signOut kiosk', e); }
-        return;
-      }
+    authMod.onAuthStateChanged(auth, (user)=>{
       if(!user){
-        await signInKiosk();
+        setKioskUid('', null);
+        setCloudStatus('Accesso Google richiesto', '#f59e0b');
+        showKioskLogin('Sessione Firebase non presente. Accedi con Google.', false);
         return;
       }
-      setKioskUid(user.uid);
+      hideKioskLogin();
+      setKioskUid(user.uid, user);
+      setCloudStatus('Google Auth OK • lettura cloud…', '#22c55e');
       startRealtimeOnce();
     });
   }catch(e){
     console.error('Connessione cloud fallita', e);
     setCloudStatus('Cloud offline', '#ef4444');
+    showKioskLogin('Cloud offline: '+(e?.code||e?.message||'errore sconosciuto'), true);
   }
 })();
 
