@@ -5157,8 +5157,64 @@ function setCloudStatus(txt, color){
 }
 
 
-/* ===== Impostazioni kiosk: mostra UID anonimo per whitelist Firestore ===== */
+/* ===== Impostazioni kiosk + AUTH STABILE =====
+   Il vecchio accesso anonimo Firebase funziona solo se Edge conserva lo storage locale.
+   In Kiosk/riavvio quello storage può essere cancellato: Firebase crea un anonimo nuovo
+   e quindi cambia UID. Per evitare di rompere le regole attuali, manteniamo il vecchio
+   fallback anonimo, ma aggiungiamo un accesso email/password opzionale: stesso account,
+   stesso UID, anche dopo riavvio completo.
+
+   Uso consigliato nel kiosk Edge:
+   capannone_3d.html#kioskEmail=kiosk-capannone%40lgtrading.local&kioskPassword=PASSWORD
+   Il frammento # non viene inviato al server; JS lo legge e lo usa per il login.
+   In alternativa puoi compilare qui sotto KIOSK_FIXED_AUTH.
+*/
+const KIOSK_FIXED_AUTH = {
+  email: "",
+  password: ""
+};
+const KIOSK_AUTH_STORAGE_KEYS = {
+  email: "capannone3d_kiosk_auth_email",
+  password: "capannone3d_kiosk_auth_password"
+};
 let KIOSK_UID = "";
+let KIOSK_AUTH_LABEL = "anonimo locale";
+let KIOSK_AUTH_STABLE = false;
+function _normEmail(v){ return String(v||'').trim().toLowerCase(); }
+function _safeStorageGet(k){ try{ return localStorage.getItem(k) || ""; }catch(_){ return ""; } }
+function _safeStorageSet(k,v){ try{ if(v) localStorage.setItem(k,v); }catch(_){} }
+function _readKioskHashParams(){
+  try{
+    const raw = String(location.hash || '').replace(/^#/, '');
+    if(!raw) return new URLSearchParams();
+    return new URLSearchParams(raw);
+  }catch(_){ return new URLSearchParams(); }
+}
+function readKioskAuthCredentials(){
+  const fixedEmail = _normEmail(KIOSK_FIXED_AUTH.email);
+  const fixedPassword = String(KIOSK_FIXED_AUTH.password || '').trim();
+  if(fixedEmail && fixedPassword) return { email:fixedEmail, password:fixedPassword, source:'codice' };
+
+  const hp = _readKioskHashParams();
+  const hashEmail = _normEmail(hp.get('kioskEmail') || hp.get('email'));
+  const hashPassword = String(hp.get('kioskPassword') || hp.get('password') || '').trim();
+  if(hashEmail && hashPassword){
+    // cache utile se Edge conserva lo storage; se lo cancella, l'hash del launch URL basta comunque.
+    _safeStorageSet(KIOSK_AUTH_STORAGE_KEYS.email, hashEmail);
+    _safeStorageSet(KIOSK_AUTH_STORAGE_KEYS.password, hashPassword);
+    return { email:hashEmail, password:hashPassword, source:'url' };
+  }
+
+  const storedEmail = _normEmail(_safeStorageGet(KIOSK_AUTH_STORAGE_KEYS.email));
+  const storedPassword = String(_safeStorageGet(KIOSK_AUTH_STORAGE_KEYS.password) || '').trim();
+  if(storedEmail && storedPassword) return { email:storedEmail, password:storedPassword, source:'locale' };
+
+  return null;
+}
+function setKioskAuthInfo(creds){
+  KIOSK_AUTH_STABLE = !!creds;
+  KIOSK_AUTH_LABEL = creds ? ('account stabile ' + creds.email) : 'anonimo locale';
+}
 function setKioskUid(uid){
   KIOSK_UID = String(uid || "").trim();
   const uidBox = document.getElementById('kioskUidBox');
@@ -5166,7 +5222,11 @@ function setKioskUid(uid){
   const statusBox = document.getElementById('kioskMiniStatus');
   if(uidBox) uidBox.textContent = KIOSK_UID || 'In attesa di autenticazione…';
   if(pathBox) pathBox.textContent = KIOSK_UID ? ('kiosks / ' + KIOSK_UID) : 'kiosks / —';
-  if(statusBox && KIOSK_UID) statusBox.textContent = 'Crea in Firestore il documento kiosks/' + KIOSK_UID + ' anche vuoto.';
+  if(statusBox && KIOSK_UID){
+    statusBox.textContent = KIOSK_AUTH_STABLE
+      ? ('UID stabile con ' + KIOSK_AUTH_LABEL + '. Crea/lascia in Firestore kiosks/' + KIOSK_UID + '.')
+      : ('UID anonimo locale: se Edge cancella lo storage può cambiare. Per renderlo fisso usa kioskEmail/kioskPassword. Documento: kiosks/' + KIOSK_UID + '.');
+  }
 }
 function openKioskSettings(){
   const modal = document.getElementById('kioskSettings');
@@ -5230,27 +5290,59 @@ initKioskSettingsUi();
     const app = initializeApp(firebaseConfig);
     const db = fs.getFirestore(app);
 
-    // --- AUTH come app_tabellone: persistenza locale + anonimo dentro onAuthStateChanged ---
+    // --- AUTH kiosk stabile: email/password se configurato, anonimo solo come fallback storico ---
     const auth = authMod.getAuth(app);
     _fbAuth = auth;                      // reso disponibile alla voce per autenticare il TTS
     try{ await authMod.setPersistence(auth, authMod.browserLocalPersistence); }catch(_){}
 
+    const kioskCreds = readKioskAuthCredentials();
+    setKioskAuthInfo(kioskCreds);
+
     let realtimeStarted = false;
+    let authInFlight = false;
     function startRealtimeOnce(){
       if(realtimeStarted) return;
       realtimeStarted = true;
       startInventoryRealtime(fs, db);
     }
+    async function signInKiosk(){
+      if(authInFlight) return;
+      authInFlight = true;
+      try{
+        if(kioskCreds){
+          setKioskUid('');
+          setCloudStatus('Accesso kiosk stabile…', '#f59e0b');
+          await authMod.signInWithEmailAndPassword(auth, kioskCreds.email, kioskCreds.password);
+        }else{
+          setKioskUid('');
+          setCloudStatus('Accesso kiosk anonimo…', '#f59e0b');
+          await authMod.signInAnonymously(auth);
+        }
+      }catch(e){
+        console.error('auth kiosk fallita', e);
+        const code = e?.code || 'unknown';
+        const msg = kioskCreds
+          ? ('Errore auth kiosk stabile: ' + code + ' • verifica email/password')
+          : ('Errore auth anonima: ' + code);
+        setCloudStatus(msg, '#ef4444');
+        const statusBox = document.getElementById('kioskMiniStatus');
+        if(statusBox) statusBox.textContent = msg;
+      }finally{
+        authInFlight = false;
+      }
+    }
 
     authMod.onAuthStateChanged(auth, async (user)=>{
-      if(!user){
+      // Se è configurato un account kiosk stabile ma Edge aveva ancora in cache un anonimo,
+      // esco e rientro con l'account corretto: niente UID casuale, niente whitelist rotta.
+      if(user && kioskCreds && _normEmail(user.email) !== kioskCreds.email){
         setKioskUid('');
-        setCloudStatus('Accesso kiosk…', '#f59e0b');
-        try{ await authMod.signInAnonymously(auth); }
-        catch(e){
-          console.error('auth anonima fallita', e);
-          setCloudStatus('Errore auth: '+(e?.code||'unknown'), '#ef4444');
-        }
+        setCloudStatus('Cambio account kiosk…', '#f59e0b');
+        try{ await authMod.signOut(auth); }catch(e){ console.warn('signOut kiosk', e); }
+        return;
+      }
+      if(!user){
+        await signInKiosk();
         return;
       }
       setKioskUid(user.uid);
