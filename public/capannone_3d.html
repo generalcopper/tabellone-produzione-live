@@ -2403,6 +2403,22 @@ async function _ttsAuthToken(){
   }catch(_){}
   return "";
 }
+
+
+/* ===== KIOSK AUDIO STARTUP — procedura allineata ad app_tabellone =====
+   Warm-up immediato + load/pageshow/visibility + retry cadenzati. Non modifica dati,
+   non scrive in cloud: serve solo a rendere la voce pronta già all'avvio del kiosk. */
+let _kioskAudioLastBlockedAt = 0;
+function noteKioskAudioBlocked(reason, err){
+  try{
+    const now = Date.now();
+    if(now - _kioskAudioLastBlockedAt < 2500) return;
+    _kioskAudioLastBlockedAt = now;
+    const msg = "Audio kiosk: se resta muto, Edge sta bloccando autoplay audio.";
+    try{ if(typeof setCloudStatus === "function") setCloudStatus(msg, '#f59e0b'); }catch(_){ }
+    console.log("Kiosk audio blocked", reason || "audio", err || "");
+  }catch(_){ }
+}
 const Voce = (function(){
   let abilitata = true;
   let audio = null;            // elemento <audio> riutilizzato
@@ -2454,7 +2470,10 @@ const Voce = (function(){
       // se c'era una frase in attesa, riproducila ora
       if(pending){ const t=pending; pending=null; parla(t); }
       return true;
-    }catch(_){ return false; }
+    }catch(e){
+      noteKioskAudioBlocked("voce-prime", e);
+      return false;
+    }
   }
 
   function _jsonToUrl(data){
@@ -2574,16 +2593,56 @@ const Voce = (function(){
       if(_browserTimer){ clearTimeout(_browserTimer); _browserTimer=null; } _finish(); }
     return abilitata; }
 
-  // tenta lo sblocco subito e ad ogni possibile occasione finché non riesce
-  tryUnlock();
-  const evts=['pointerdown','touchstart','keydown','click','visibilitychange','focus'];
-  const onEv=()=>{ if(!unlocked) tryUnlock(); };
-  evts.forEach(e=>window.addEventListener(e,onEv,{passive:true}));
-  document.addEventListener('visibilitychange',onEv,{passive:true});
-  // ritenta periodicamente all'avvio (alcuni kiosk concedono l'audio dopo il primo render)
-  let _t=0; const _iv=setInterval(()=>{ if(unlocked||_t++>20){ clearInterval(_iv); return; } tryUnlock(); }, 1200);
+  function primeKioskSpeechSynthesis(){
+    try{
+      if(!("speechSynthesis" in window)) return;
+      const u = new SpeechSynthesisUtterance(" ");
+      u.lang = "it-IT";
+      u.volume = 0;
+      u.onerror = (ev) => noteKioskAudioBlocked("speech-prime", ev?.error || ev);
+      window.speechSynthesis.speak(u);
+    }catch(e){ noteKioskAudioBlocked("speech-prime-call", e); }
+  }
 
-  return { parla, toggle, prime:tryUnlock, get abilitata(){return abilitata;}, isBusy(){ return busy; } };
+  async function primeStandaloneKioskAudio(){
+    // Come app_tabellone: usa un audio silenzioso separato, così non interrompe mai
+    // un eventuale annuncio già in corso sul player TTS principale.
+    try{
+      const a = new Audio("data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=");
+      a.muted = true;
+      a.preload = "auto";
+      await a.play();
+      a.pause();
+    }catch(e){ noteKioskAudioBlocked("html-audio-prime", e); }
+  }
+
+  function runKioskAudioWarmup(){
+    try{ primeStandaloneKioskAudio(); }catch(_){ }
+    try{ primeKioskSpeechSynthesis(); }catch(_){ }
+    try{ if(!unlocked && !busy) tryUnlock(); }catch(_){ }
+  }
+
+  // Stessa procedura pratica di app_tabellone: non aspetta click/touch, prova subito,
+  // riprova a pagina mostrata e mantiene un warm-up per i primi secondi del kiosk.
+  runKioskAudioWarmup();
+  try{ window.addEventListener("load", runKioskAudioWarmup, { once:true }); }catch(_){ }
+  try{ window.addEventListener("pageshow", runKioskAudioWarmup); }catch(_){ }
+  try{ document.addEventListener("visibilitychange", () => { if(document.visibilityState === "visible") runKioskAudioWarmup(); }); }catch(_){ }
+
+  let _warmTries = 0;
+  const _warmTimer = setInterval(() => {
+    _warmTries++;
+    runKioskAudioWarmup();
+    if(unlocked || _warmTries >= 12) clearInterval(_warmTimer);
+  }, 2500);
+
+  // Mantiene anche il rinforzo da gesture, ma non dipende più dal click dell'utente.
+  window.addEventListener("pointerdown", runKioskAudioWarmup, { once:true, passive:true, capture:true });
+  window.addEventListener("touchstart", runKioskAudioWarmup, { once:true, passive:true, capture:true });
+  window.addEventListener("mousedown", runKioskAudioWarmup, { once:true, passive:true, capture:true });
+  window.addEventListener("keydown", runKioskAudioWarmup, { once:true, capture:true });
+
+  return { parla, toggle, prime:tryUnlock, get abilitata(){return abilitata;}, isBusy(){ return busy; }, isUnlocked(){ return unlocked; } };
 })();
 
 // compone la frase parlata per un vano
@@ -2812,6 +2871,8 @@ function aggiornaPrelievi(){
   PRELIEVI = calcolaPrelievi();
   // annuncio vocale discreto se sono entrati nuovi ordini FBA/FBM (edge-trigger, non invasivo)
   try{ const o=_contaOrdini(); if(typeof Annunci!=='undefined') Annunci.onOrders(o.fba, o.fbm); }catch(_){}
+  // voce di avvio kiosk: una sola volta, dopo la prima lettura utile dei dati cloud
+  try{ maybeSpeakKioskStartup('inventory'); }catch(_){}
   // conteggio animato SOLO quando arriva un nuovo ordine (il totale aumenta) e la didascalia è visibile
   try{
     const o=_contaOrdini();
@@ -4064,6 +4125,42 @@ const Annunci = (()=>{
   }
   return { onOrders, onCarico, onTick, onReady, onSottoscorta };
 })();
+
+/* ===== VOCE DI AVVIO KIOSK =====
+   Una sola volta per caricamento pagina. Usa i dati già letti dal cockpit se disponibili;
+   se il cloud non ha ancora risposto, parte comunque con una frase neutra. */
+let _kioskStartupVoiceSpoken = false;
+let _kioskStartupVoiceTimer = 0;
+function _buildKioskStartupAnnouncement(){
+  let fba=0, fbm=0, ss=0;
+  try{ const o=_contaOrdini(); fba=Math.max(0, Number(o.fba)||0); fbm=Math.max(0, Number(o.fbm)||0); }catch(_){ }
+  try{ ss=Math.max(0, Number(_contaSottoscorta())||0); }catch(_){ }
+  const parts=[];
+  if(fba>0) parts.push(`${fba} ${fba===1?'ordine':'ordini'} F B A in coda`);
+  if(fbm>0) parts.push(`${fbm} ${fbm===1?'ordine':'ordini'} F B M in coda`);
+  if(ss>0) parts.push(`${ss} ${ss===1?'articolo sotto scorta':'articoli sotto scorta'} da controllare`);
+  const riepilogo = parts.length
+    ? `Situazione attuale: ${parts.join(', ')}.`
+    : 'Al momento il magazzino risulta in pari, senza ordini in coda.';
+  return `Capannone tre D online. Magazzino digitale in tempo reale. ${riepilogo} Buon lavoro.`.replace(/\s+/g,' ').trim();
+}
+function maybeSpeakKioskStartup(reason){
+  if(_kioskStartupVoiceSpoken) return;
+  if(typeof Voce==='undefined' || !Voce.abilitata) return;
+  if(document.visibilityState && document.visibilityState === 'hidden') return;
+  if(selectedVano || tour || document.body.classList.contains('drone-flying')) return;
+  _kioskStartupVoiceSpoken = true;
+  try{ clearTimeout(_kioskStartupVoiceTimer); }catch(_){ }
+  _kioskStartupVoiceTimer = setTimeout(()=>{
+    try{
+      if(!Voce.abilitata) return;
+      if(selectedVano || tour || document.body.classList.contains('drone-flying')) return;
+      if(Voce.isBusy && Voce.isBusy()) return;
+      try{ if(Voce.isUnlocked && !Voce.isUnlocked() && Voce.prime) Voce.prime(); }catch(_){ }
+      Voce.parla(_buildKioskStartupAnnouncement(), { priority:'high' });
+    }catch(e){ console.log('voce avvio kiosk non partita', reason || '', e); }
+  }, 1800);
+}
 
 
 /* ===== AVVISO CARICO IN ARRIVO DA CEREA (dura 30 minuti dalla generazione bolla) ===== */
@@ -5390,6 +5487,8 @@ initKioskSettingsUi();
       }
       setKioskUid(user.uid);
       startRealtimeOnce();
+      // fallback: se non arriva subito uno snapshot inventory, parla comunque all'avvio kiosk
+      setTimeout(()=>{ try{ maybeSpeakKioskStartup('auth'); }catch(_){} }, 3500);
     });
   }catch(e){
     console.error('Connessione cloud fallita', e);
