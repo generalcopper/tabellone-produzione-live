@@ -10919,9 +10919,50 @@ function currentInv(){
       }
     }
 
+    // Tutte le ubicazioni valide di un prodotto (più posizioni): codici normalizzati,
+    // ordinati mettendo prima quelle con quantità > 0. Usato dalla mappa Trova per
+    // mostrare ogni posizione del prodotto, non solo la prima.
+    function allRackLocationCodesFromItem(it){
+      try{
+        const out = [];
+        const seen = new Set();
+        const push = (codeRaw)=>{
+          const c = normalizeRackLocation(codeRaw || "");
+          if(!c || seen.has(c) || !RACK_LOCATION_SET.has(c)) return;
+          seen.add(c); out.push(c);
+        };
+        const allocations = readRackAllocationsFromDoc(it || {})
+          .slice()
+          .sort((a,b)=> (Number(b?.qty||0) - Number(a?.qty||0)));
+        for(const a of allocations) push(a?.code);
+        for(const code of readRackLocationsFromDoc(it || {})) push(code);
+        return out;
+      }catch(_e){
+        return [];
+      }
+    }
+
+    function allRackLocationCodesFromPicking(flow, sku){
+      try{
+        const out = [];
+        const seen = new Set();
+        const parts = (pickingLinePositionParts(flow, sku) || [])
+          .slice()
+          .sort((a,b)=> (Number(b?.qty||0) - Number(a?.qty||0)));
+        for(const p of parts){
+          const c = normalizeRackLocation(p?.code || "");
+          if(!c || seen.has(c) || !RACK_LOCATION_SET.has(c)) continue;
+          seen.add(c); out.push(c);
+        }
+        return out;
+      }catch(_e){
+        return [];
+      }
+    }
+
     const CAPANNONE_3D_FOCUS_DOC_ID = "capannone3dFocus";
 
-    async function openCapannone3dFind(code){
+    async function openCapannone3dFind(code, codes){
       const c = normalizeRackLocation(code || "");
       if(!c){
         showToast("Non posizionato", "Questo SKU non ha ancora una posizione bancale.", 2200);
@@ -10965,11 +11006,23 @@ function currentInv(){
       }
     }
 
-    function findPalletButtonHtml(code){
+    function findPalletButtonHtml(code, codes){
       const c = normalizeRackLocation(code || "");
-      const disabled = c ? "" : ' disabled aria-disabled="true"';
-      const title = c ? `Trova ${c} in Capannone 3D` : "SKU non posizionato";
-      return `<button class="btn small pickingFindBtn" type="button" data-action="findPallet" data-code="${escapeHtml(c)}" title="${escapeHtml(title)}"${disabled}>Trova</button>`;
+      // lista completa (più posizioni); il primo elemento resta quello principale
+      let list = Array.isArray(codes) ? codes.map(x=>normalizeRackLocation(x)).filter(Boolean) : [];
+      if(c && !list.includes(c)) list = [c, ...list];
+      // dedup mantenendo l'ordine
+      const seen = new Set();
+      list = list.filter(x=>{ if(seen.has(x)) return false; seen.add(x); return true; });
+      const primary = c || list[0] || "";
+      const disabled = primary ? "" : ' disabled aria-disabled="true"';
+      const multi = list.length > 1;
+      const title = primary
+        ? (multi ? `Trova ${primary} (+${list.length-1}) in Capannone 3D` : `Trova ${primary} in Capannone 3D`)
+        : "SKU non posizionato";
+      const codesAttr = list.length ? ` data-codes="${escapeHtml(list.join(","))}"` : "";
+      const label = multi ? `Trova · ${list.length}` : "Trova";
+      return `<button class="btn small pickingFindBtn" type="button" data-action="findPallet" data-code="${escapeHtml(primary)}"${codesAttr} title="${escapeHtml(title)}"${disabled}>${label}</button>`;
     }
 
     function pickingLineTitle(line, flow){
@@ -11355,7 +11408,11 @@ function currentInv(){
           const locLabel = group.locs.length ? group.locs.map(x=>prettyLoc(x)).join(" + ") : "—";
           const orderLabel = group.flowCount === 1 ? "1 ordine" : `${group.flowCount} ordini`;
           const metaLine = [locLabel, orderLabel].filter(Boolean).join(" • ");
-          const findBtnHtml = findPalletButtonHtml(group.firstCode || "");
+          const groupCodes = (group.positions || [])
+            .slice()
+            .sort((a,b)=> (Number(b?.qty||0) - Number(a?.qty||0)))
+            .map(p=>p.code);
+          const findBtnHtml = findPalletButtonHtml(group.firstCode || "", groupCodes);
           return `
             <div class="pickingFlowRow fbmSkuGroupRow">
               <div class="pickingFlowCell gridSku">${escapeHtml(group.sku)}</div>
@@ -11426,7 +11483,7 @@ function currentInv(){
             const picked = isPickingLinePicked(flow, sku);
             const title = pickingLineTitle(line, flow);
             const posHtml = pickingLinePositionHtml(flow, sku);
-            const findBtnHtml = findPalletButtonHtml(firstRackLocationCodeFromPicking(flow, sku));
+            const findBtnHtml = findPalletButtonHtml(firstRackLocationCodeFromPicking(flow, sku), allRackLocationCodesFromPicking(flow, sku));
             const statusHtml = picked
               ? `<span class="badge ok">Prelevato</span>`
               : `<button class="btn small amazon" type="button" data-action="pickSku" data-flowid="${escapeHtml(flowId)}" data-loc="${escapeHtml(loc)}" data-sku="${escapeHtml(sku)}">Preleva SKU</button>`;
@@ -12662,7 +12719,7 @@ function renderHomePickingHistoryBox(){
         const totalQty = Number.isFinite(Number(it.totalQty)) ? Math.round(Number(it.totalQty)) : allocatedQty;
         const remainingQty = Number.isFinite(Number(it.remainingQty)) ? Math.round(Number(it.remainingQty)) : 0;
         const rackHtml = rackLocationStackHtml(it);
-        const findBtnHtml = findPalletButtonHtml(firstRackLocationCodeFromItem(it));
+        const findBtnHtml = findPalletButtonHtml(firstRackLocationCodeFromItem(it), allRackLocationCodesFromItem(it));
         const allocations = readRackAllocationsFromDoc(it || {});
         const lotsLine = allocations.length ? Array.from(new Set(allocations.map(a=>lotLabelFromId(a.lot)))).join(", ") : "";
         const metaLine = [locLabel, lotsLine ? `Lotti: ${lotsLine}` : "", `Totale: ${totalQty}`, remainingQty ? `Da ubicare: ${remainingQty}` : ""].filter(Boolean).join(" • ");
@@ -18025,7 +18082,7 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
           if(findBtn){
             e.preventDefault();
             e.stopPropagation();
-            await openCapannone3dFind(findBtn.getAttribute("data-code") || "");
+            await openCapannone3dFind(findBtn.getAttribute("data-code") || "", findBtn.getAttribute("data-codes") || "");
             return;
           }
           const row = e.target?.closest?.("[data-action='openHomeLocatedItem']");
@@ -18055,7 +18112,7 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
           if(findBtn){
             e.preventDefault();
             e.stopPropagation();
-            await openCapannone3dFind(findBtn.getAttribute("data-code") || "");
+            await openCapannone3dFind(findBtn.getAttribute("data-code") || "", findBtn.getAttribute("data-codes") || "");
             return;
           }
           const btn = e.target?.closest?.("[data-action='refreshShopifyFbm'], [data-action='pickSku'], [data-action='pickFlow'], [data-action='pickAllShopifyFbm'], [data-action='pickAllFbaPdf']");
@@ -18305,7 +18362,7 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
       // --- proiezione mondo→SVG (pianta vista dall'alto) ---
       // viewBox in metri: perimetro edificio centrato in 0. world X → svgX, world Z → svgY.
       // Z reale cresce verso il fronte (linea liquidi): lo lascio in basso → svgY = +z.
-      const PAD = 0.6;
+      const PAD = 0.4;
       const VB = { x:-LX/2 - PAD, y:-LZ/2 - PAD, w:LX + 2*PAD, h:LZ + 2*PAD };
       const sx = (x)=> x;          // metri = unità svg
       const sy = (z)=> z;
@@ -18317,92 +18374,144 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
         css.textContent = `
           #trovaMapOverlay{
             position:fixed; inset:0; z-index:99999; display:none; flex-direction:column;
-            background:var(--bg,#f6f7f9);
-            padding:0; animation:trovaMapFade .16s ease;
+            background:
+              radial-gradient(1200px 600px at 80% -10%, rgba(249,115,22,.10), transparent 60%),
+              radial-gradient(900px 500px at -10% 110%, rgba(37,99,235,.08), transparent 60%),
+              #0b0f17;
+            padding:0; animation:trovaMapFade .18s ease;
+            --tmInk:#0b0f17; --tmCard:#11161f; --tmCard2:#161c27;
+            --tmLine:rgba(255,255,255,.08); --tmLine2:rgba(255,255,255,.05);
+            --tmText:#f3f5f8; --tmMuted:#9aa6b8; --tmMuted2:#697587;
+            --tmAccent:#f97316; --tmAccent2:#ffae5c;
           }
           #trovaMapOverlay.is-open{ display:flex; }
-          @keyframes trovaMapFade{ from{opacity:0} to{opacity:1} }
+          @keyframes trovaMapFade{ from{opacity:0; transform:scale(.992)} to{opacity:1; transform:none} }
           #trovaMapOverlay .tm-card{
             margin:0; width:100%; height:100%; max-height:none;
             display:flex; flex-direction:column;
-            background:var(--bg,#f6f7f9); border:0; border-radius:0; box-shadow:none; overflow:hidden;
+            background:transparent; border:0; border-radius:0; box-shadow:none; overflow:hidden;
           }
+
+          /* HEADER premium scuro */
           #trovaMapOverlay .tm-head{
-            display:flex; align-items:center; gap:12px;
-            padding:max(12px, env(safe-area-inset-top)) clamp(14px,3vw,28px) 12px;
-            border-bottom:1px solid var(--line,#e6e8ec); background:var(--card,#fff); flex:none;
+            display:flex; align-items:center; gap:14px;
+            padding:max(14px, env(safe-area-inset-top)) clamp(16px,3vw,30px) 14px;
+            border-bottom:1px solid var(--tmLine); flex:none;
+            background:linear-gradient(180deg, rgba(255,255,255,.03), transparent);
           }
           #trovaMapOverlay .tm-badge{
-            font-weight:800; font-size:15px; color:#fff; padding:8px 12px; border-radius:12px;
-            font-variant-numeric:tabular-nums; flex:none;
+            font-weight:800; font-size:clamp(15px,4.5vw,18px); color:#fff;
+            padding:10px 14px; border-radius:14px; flex:none; letter-spacing:.01em;
+            font-variant-numeric:tabular-nums; box-shadow:0 6px 18px rgba(0,0,0,.35), inset 0 0 0 1px rgba(255,255,255,.18);
           }
           #trovaMapOverlay .tm-titles{ display:flex; flex-direction:column; min-width:0; flex:1; }
-          #trovaMapOverlay .tm-t1{ font-size:11px; font-weight:700; letter-spacing:.14em; text-transform:uppercase; color:var(--muted,#64748b); }
-          #trovaMapOverlay .tm-t2{ font-size:15px; font-weight:700; color:var(--text,#0f1111); margin-top:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+          #trovaMapOverlay .tm-t1{ font-size:10px; font-weight:800; letter-spacing:.18em; text-transform:uppercase; color:var(--tmMuted2); }
+          #trovaMapOverlay .tm-t2{ font-size:clamp(14px,4vw,17px); font-weight:700; color:var(--tmText); margin-top:3px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
           #trovaMapOverlay .tm-close{
-            flex:none; width:40px; height:40px; border-radius:11px; cursor:pointer;
-            border:1px solid var(--line,#e6e8ec); background:var(--bg,#f6f7f9);
-            color:var(--muted,#64748b); font-size:21px; line-height:1; font-weight:600;
-            display:flex; align-items:center; justify-content:center;
+            flex:none; width:44px; height:44px; border-radius:13px; cursor:pointer;
+            border:1px solid var(--tmLine); background:var(--tmCard);
+            color:var(--tmMuted); font-size:22px; line-height:1; font-weight:500;
+            display:flex; align-items:center; justify-content:center; transition:background .15s, color .15s;
           }
-          #trovaMapOverlay .tm-close:hover{ background:rgba(15,17,17,.05); color:var(--text,#0f1111); }
+          #trovaMapOverlay .tm-close:active,
+          #trovaMapOverlay .tm-close:hover{ background:var(--tmCard2); color:var(--tmText); }
 
-          /* corpo: pianta a sinistra (dominante) + colonna laterale info/prospetto */
+          /* CORPO: mobile = colonna (mappa dominante in alto); desktop = mappa + pannello */
           #trovaMapOverlay .tm-body{
-            flex:1; min-height:0; display:grid; gap:clamp(12px,2vw,20px);
-            grid-template-columns:1fr; grid-template-rows:1fr auto;
-            padding:clamp(14px,2.5vw,24px) clamp(14px,3vw,28px) calc(clamp(14px,2.5vw,24px) + env(safe-area-inset-bottom));
-            overflow:auto;
-          }
-          @media (min-width:840px){
-            #trovaMapOverlay .tm-body{
-              grid-template-columns:minmax(0,1fr) clamp(260px,26vw,360px);
-              grid-template-rows:1fr; align-items:stretch; overflow:hidden;
-            }
+            flex:1; min-height:0; display:flex; flex-direction:column; gap:14px;
+            padding:14px clamp(14px,3vw,28px) calc(16px + env(safe-area-inset-bottom));
+            overflow:auto; -webkit-overflow-scrolling:touch;
           }
 
-          /* PIANTA — riempie la cella, SVG centrato e contenuto in altezza */
+          /* MAPPA — protagonista, riempie lo spazio disponibile */
           #trovaMapOverlay .tm-planwrap{
-            position:relative; min-height:0; min-width:0;
-            border:1px solid var(--line,#e6e8ec); border-radius:16px; overflow:hidden;
-            background:var(--card,#fff);
-            display:flex; align-items:center; justify-content:center; padding:clamp(8px,1.5vw,16px);
+            position:relative; min-height:0; min-width:0; flex:1 1 auto;
+            border:1px solid var(--tmLine); border-radius:20px; overflow:hidden;
+            background:
+              radial-gradient(120% 120% at 50% 0%, rgba(255,255,255,.04), transparent 55%),
+              var(--tmCard);
+            display:flex; align-items:center; justify-content:center; padding:clamp(10px,2.5vw,18px);
+            box-shadow:0 10px 30px rgba(0,0,0,.35), inset 0 0 0 1px rgba(255,255,255,.02);
           }
           #trovaMapOverlay svg.tm-plan{ display:block; width:100%; height:100%; max-height:100%; }
-
-          /* COLONNA LATERALE */
-          #trovaMapOverlay .tm-side{
-            min-height:0; min-width:0; display:flex; flex-direction:column; gap:clamp(10px,1.5vw,16px);
-            overflow:auto;
+          /* su mobile la mappa prende almeno mezzo schermo */
+          @media (max-width:839px){
+            #trovaMapOverlay .tm-planwrap{ flex:1 1 auto; min-height:50vh; padding:10px; }
           }
+
+          /* INFO — pill compatte in striscia (stile app magazzino) */
+          #trovaMapOverlay .tm-meta{
+            display:grid; grid-template-columns:repeat(4,1fr); gap:8px; flex:none;
+          }
+          #trovaMapOverlay .tm-chip{
+            display:flex; flex-direction:column; gap:3px; min-width:0;
+            background:var(--tmCard); border:1px solid var(--tmLine); border-radius:14px;
+            padding:10px 12px;
+          }
+          #trovaMapOverlay .tm-chip.is-target{ border-color:rgba(249,115,22,.45); background:linear-gradient(180deg, rgba(249,115,22,.10), var(--tmCard)); }
+          #trovaMapOverlay .tm-chip .k{ font-size:9px; font-weight:800; letter-spacing:.12em; text-transform:uppercase; color:var(--tmMuted2); }
+          #trovaMapOverlay .tm-chip .v{ font-size:clamp(15px,4.5vw,19px); font-weight:800; color:var(--tmText); font-variant-numeric:tabular-nums; line-height:1.1; }
+
+          /* lista posizioni multiple del prodotto */
+          #trovaMapOverlay .tm-others{ flex:none; }
+          #trovaMapOverlay .tm-othershead{
+            font-size:10px; font-weight:800; letter-spacing:.12em; text-transform:uppercase;
+            color:var(--tmMuted); margin:2px 2px 8px;
+          }
+          #trovaMapOverlay .tm-poslist{ display:flex; flex-wrap:wrap; gap:8px; }
+          #trovaMapOverlay .tm-poschip{
+            display:inline-flex; align-items:center; gap:8px; cursor:pointer;
+            background:var(--tmCard); border:1px solid var(--tmLine); border-radius:12px;
+            padding:8px 12px; color:var(--tmText); font-weight:700; font-size:13px;
+            font-variant-numeric:tabular-nums; transition:border-color .15s, background .15s, transform .1s;
+          }
+          #trovaMapOverlay .tm-poschip:active{ transform:scale(.97); }
+          #trovaMapOverlay .tm-poschip.is-active{ border-color:var(--pc,var(--tmAccent)); background:linear-gradient(180deg, rgba(255,255,255,.05), var(--tmCard)); box-shadow:0 0 0 1px var(--pc,var(--tmAccent)) inset; }
+          #trovaMapOverlay .tm-poschip:hover{ border-color:rgba(255,255,255,.2); }
+          #trovaMapOverlay .tm-posdot{ width:9px; height:9px; border-radius:50%; flex:none; box-shadow:0 0 0 2px rgba(255,255,255,.12); }
+          #trovaMapOverlay .tm-poscode{ letter-spacing:.01em; }
+
+          /* PROSPETTO — card dedicata */
           #trovaMapOverlay .tm-panel{
-            border:1px solid var(--line,#e6e8ec); border-radius:16px; overflow:hidden;
-            background:var(--card,#fff); display:flex; flex-direction:column; flex:none;
+            border:1px solid var(--tmLine); border-radius:20px; overflow:hidden;
+            background:var(--tmCard); display:flex; flex-direction:column; flex:none;
+            box-shadow:0 10px 30px rgba(0,0,0,.30);
           }
           #trovaMapOverlay .tm-panel .tm-phead{
-            font-size:10px; font-weight:700; letter-spacing:.12em; text-transform:uppercase;
-            color:var(--muted,#64748b); padding:11px 14px 4px;
+            font-size:10px; font-weight:800; letter-spacing:.14em; text-transform:uppercase;
+            color:var(--tmMuted); padding:13px 16px 2px;
           }
-          /* prospetto: vincolato in ALTEZZA così resta proporzionato e non gigante */
           #trovaMapOverlay .tm-elevbox{
-            display:flex; align-items:center; justify-content:center;
-            padding:8px 12px 14px;
+            display:flex; align-items:center; justify-content:center; padding:10px 14px 16px;
           }
-          #trovaMapOverlay svg.tm-elev{ display:block; width:auto; height:clamp(240px,38vh,360px); max-width:100%; }
+          #trovaMapOverlay svg.tm-elev{ display:block; width:auto; height:clamp(230px,34vh,330px); max-width:100%; }
 
-          #trovaMapOverlay .tm-meta{ display:flex; flex-wrap:wrap; gap:8px; }
-          #trovaMapOverlay .tm-chip{
-            display:flex; flex-direction:column; gap:2px; flex:1 1 0; min-width:72px;
-            background:var(--card,#fff); border:1px solid var(--line,#e6e8ec); border-radius:12px; padding:9px 12px;
+          /* DESKTOP: mappa grande a sinistra, colonna info+prospetto a destra */
+          @media (min-width:840px){
+            #trovaMapOverlay .tm-body{
+              display:grid; gap:18px; overflow:hidden;
+              grid-template-columns:minmax(0,1fr) clamp(300px,28vw,400px);
+              grid-template-rows:1fr; align-items:stretch;
+              padding:18px clamp(18px,3vw,30px) calc(20px + env(safe-area-inset-bottom));
+            }
+            #trovaMapOverlay .tm-planwrap{ grid-row:1; grid-column:1; }
+            #trovaMapOverlay .tm-side{
+              grid-row:1; grid-column:2; min-height:0; min-width:0;
+              display:flex; flex-direction:column; gap:14px; overflow:auto;
+            }
+            #trovaMapOverlay .tm-meta{ grid-template-columns:1fr 1fr; }
           }
-          #trovaMapOverlay .tm-chip .k{ font-size:10px; font-weight:700; letter-spacing:.1em; text-transform:uppercase; color:var(--muted2,#94a3b8); }
-          #trovaMapOverlay .tm-chip .v{ font-size:17px; font-weight:800; color:var(--text,#0f1111); font-variant-numeric:tabular-nums; }
+          /* mobile: .tm-side è solo un contenitore lineare */
+          @media (max-width:839px){
+            #trovaMapOverlay .tm-side{ display:contents; }
+          }
 
-          #trovaMapOverlay .tm-targetcell{ animation:tmPulse 1.4s ease-in-out infinite; transform-box:fill-box; transform-origin:center; }
-          #trovaMapOverlay .tm-elevcell{ animation:tmPulse 1.4s ease-in-out infinite; transform-box:fill-box; transform-origin:center; }
-          @keyframes tmPulse{ 0%,100%{ filter:brightness(1) } 50%{ filter:brightness(1.22) } }
-          #trovaMapOverlay .tm-pin{ animation:tmDrop .4s cubic-bezier(.2,.9,.25,1.2); transform-box:fill-box; transform-origin:center bottom; }
-          @keyframes tmDrop{ from{ transform:translateY(-3px); opacity:0 } to{ transform:translateY(0); opacity:1 } }
+          /* animazioni evidenza */
+          #trovaMapOverlay .tm-targetcell{ animation:tmPulse 1.5s ease-in-out infinite; transform-box:fill-box; transform-origin:center; }
+          #trovaMapOverlay .tm-elevcell{ animation:tmPulse 1.5s ease-in-out infinite; transform-box:fill-box; transform-origin:center; }
+          @keyframes tmPulse{ 0%,100%{ filter:brightness(1) } 50%{ filter:brightness(1.25) } }
+          #trovaMapOverlay .tm-pin{ animation:tmDrop .45s cubic-bezier(.2,.9,.25,1.2); transform-box:fill-box; transform-origin:center bottom; }
+          @keyframes tmDrop{ from{ transform:translateY(-4px); opacity:0 } to{ transform:translateY(0); opacity:1 } }
         `;
         document.head.appendChild(css);
       }
@@ -18479,13 +18588,16 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
 
       function esc(s){ return String(s).replace(/[&<>"]/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[c])); }
 
-      function buildPlanSVG(parsed){
+      function buildPlanSVG(parsed, positions){
         const NS = "http://www.w3.org/2000/svg";
         const f = (n)=> (Math.round(n*1000)/1000);
+        const posList = (Array.isArray(positions) && positions.length) ? positions : [parsed];
+        // mappa: bayCode -> set di pallet coinvolti, e quale bay è la principale
+        const bayInvolved = new Set(posList.map(p=>p.bayCode));
         let s = "";
+        // foglio planimetria (superficie chiara) che incornicia la pianta sul fondo scuro
+        s += `<rect x="${f(VB.x)}" y="${f(VB.y)}" width="${f(VB.w)}" height="${f(VB.h)}" rx="0.9" fill="#f4f6fa"/>`;
         // perimetro edificio con angolo cartongesso tagliato nell'angolo FONDO-DESTRA
-        // (orientamento corretto della planimetria). Solo il riquadro è speculare;
-        // soppalco, rack e linea liquidi restano nelle loro posizioni.
         const x0=-LX/2, x1=LX/2, z0=-LZ/2, z1=LZ/2;
         const perim = [
           [x0,z0],[CUT_X_PERIM,z0],[CUT_X_PERIM,CUT_Z],[x1,CUT_Z],[x1,z1],[x0,z1]
@@ -18506,19 +18618,19 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
         for(const rid of ["A","B","C","D","E","F"]){
           const arr = byRack[rid]; if(!arr) continue;
           const col = RACK_COLORS[rid];
-          // bounding fila
           let mnx=1e9,mxx=-1e9,mnz=1e9,mxz=-1e9;
           for(const b of arr){ mnx=Math.min(mnx,b.cx-b.wx/2); mxx=Math.max(mxx,b.cx+b.wx/2); mnz=Math.min(mnz,b.cz-b.wz/2); mxz=Math.max(mxz,b.cz+b.wz/2); }
           const vertical = (mxz-mnz) > (mxx-mnx);
 
           for(const b of arr){
             const bx = b.cx - b.wx/2, bz = b.cz - b.wz/2;
-            const isTarget = (b.code === parsed.bayCode);
-            const fill = isTarget ? col[0] : "rgba(15,23,42,.045)";
-            const stroke = isTarget ? "rgba(0,0,0,.35)" : "rgba(15,23,42,.28)";
-            const cls = isTarget ? ' class="tm-targetcell"' : "";
-            s += `<rect${cls} x="${f(bx)}" y="${f(bz)}" width="${f(b.wx)}" height="${f(b.wz)}" rx="0.08" fill="${fill}" stroke="${stroke}" stroke-width="${isTarget?0.14:0.07}"/>`;
-            // suddivisione pallet (linee sottili)
+            const isPrimary = (b.code === parsed.bayCode);
+            const isInvolved = bayInvolved.has(b.code);
+            const fill = isInvolved ? col[0] : "rgba(15,23,42,.045)";
+            const stroke = isInvolved ? "rgba(0,0,0,.35)" : "rgba(15,23,42,.28)";
+            const cls = isPrimary ? ' class="tm-targetcell"' : "";
+            const fillOpacity = isInvolved && !isPrimary ? ' fill-opacity="0.55"' : "";
+            s += `<rect${cls} x="${f(bx)}" y="${f(bz)}" width="${f(b.wx)}" height="${f(b.wz)}" rx="0.08" fill="${fill}"${fillOpacity} stroke="${stroke}" stroke-width="${isInvolved?0.14:0.07}"/>`;
             for(let p=1;p<b.pal;p++){
               if(vertical){
                 const yy = bz + (b.wz/b.pal)*p;
@@ -18528,20 +18640,22 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
                 s += `<line x1="${f(xx)}" y1="${f(bz)}" x2="${f(xx)}" y2="${f(bz+b.wz)}" stroke="rgba(15,23,42,.22)" stroke-width="0.03"/>`;
               }
             }
-            // codice campata
-            const tcol = isTarget ? col[1] : "rgba(15,23,42,.55)";
+            const tcol = isInvolved ? col[1] : "rgba(15,23,42,.55)";
             s += `<text x="${f(b.cx)}" y="${f(b.cz)}" font-size="${vertical?0.42:0.46}" fill="${tcol}" text-anchor="middle" dominant-baseline="middle" font-weight="800" transform="rotate(${vertical?-90:0} ${f(b.cx)} ${f(b.cz)})">${b.code}</text>`;
-            // evidenzia pallet target dentro la campata
-            if(isTarget){
-              const slot = (vertical ? b.wz : b.wx) / b.pal;
-              let pcx, pcz, pw, ph;
-              if(vertical){ pw=b.wx*0.9; ph=slot*0.82; pcx=b.cx; pcz=bz + slot*(parsed.pallet-0.5); }
-              else        { pw=slot*0.82; ph=b.wz*0.9; pcx=bx + slot*(parsed.pallet-0.5); pcz=b.cz; }
-              s += `<rect x="${f(pcx-pw/2)}" y="${f(pcz-ph/2)}" width="${f(pw)}" height="${f(ph)}" rx="0.05" fill="rgba(255,255,255,.35)" stroke="#0f1111" stroke-width="0.05" stroke-dasharray="0.18 0.12"/>`;
+            // riquadro tratteggiato sul pallet di ogni posizione coinvolta in questa campata
+            if(isInvolved){
+              for(const pos of posList){
+                if(pos.bayCode !== b.code) continue;
+                const slot = (vertical ? b.wz : b.wx) / b.pal;
+                let pcx, pcz, pw, ph;
+                if(vertical){ pw=b.wx*0.9; ph=slot*0.82; pcx=b.cx; pcz=bz + slot*(pos.pallet-0.5); }
+                else        { pw=slot*0.82; ph=b.wz*0.9; pcx=bx + slot*(pos.pallet-0.5); pcz=b.cz; }
+                s += `<rect x="${f(pcx-pw/2)}" y="${f(pcz-ph/2)}" width="${f(pw)}" height="${f(ph)}" rx="0.05" fill="rgba(255,255,255,.35)" stroke="#0f1111" stroke-width="0.05" stroke-dasharray="0.18 0.12"/>`;
+              }
             }
           }
 
-          // cartello fila (badge sul lato corsia)
+          // cartello fila
           let lx, lz;
           if(vertical){ lx = (mnx+mxx)/2; lz = mnz - 0.7; }
           else        { lx = mnx - 0.7;   lz = (mnz+mxz)/2; }
@@ -18551,22 +18665,28 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
           s += `</g>`;
         }
 
-        // PIN sulla campata target (centro pallet)
-        const tb = BAY_BY_CODE[parsed.bayCode];
-        if(tb){
+        // PIN per ogni posizione: secondari prima (più piccoli), principale per ultimo (sopra).
+        const pinAt = (pos, primary)=>{
+          const tb = BAY_BY_CODE[pos.bayCode];
+          if(!tb) return "";
           let px = tb.cx, pz = tb.cz;
           const vertical = (tb.wz > tb.wx);
           const slot = (vertical ? tb.wz : tb.wx) / tb.pal;
-          if(vertical){ pz = (tb.cz - tb.wz/2) + slot*(parsed.pallet-0.5); }
-          else        { px = (tb.cx - tb.wx/2) + slot*(parsed.pallet-0.5); }
-          const r = 0.55;
-          s += `<g class="tm-pin">`;
-          s += `<path d="M ${f(px)} ${f(pz)} L ${f(px-r*0.7)} ${f(pz-r*1.5)} A ${f(r)} ${f(r)} 0 1 1 ${f(px+r*0.7)} ${f(pz-r*1.5)} Z" fill="var(--accent,#f97316)" stroke="#fff" stroke-width="0.09"/>`;
-          s += `<circle cx="${f(px)}" cy="${f(pz-r*1.55)}" r="${f(r*0.45)}" fill="#fff"/>`;
-          s += `</g>`;
-        }
+          if(vertical){ pz = (tb.cz - tb.wz/2) + slot*(pos.pallet-0.5); }
+          else        { px = (tb.cx - tb.wx/2) + slot*(pos.pallet-0.5); }
+          const r = primary ? 0.55 : 0.4;
+          const fillc = primary ? "var(--accent,#f97316)" : "#475569";
+          const cls = primary ? ' class="tm-pin"' : "";
+          let g = `<g${cls}>`;
+          g += `<path d="M ${f(px)} ${f(pz)} L ${f(px-r*0.7)} ${f(pz-r*1.5)} A ${f(r)} ${f(r)} 0 1 1 ${f(px+r*0.7)} ${f(pz-r*1.5)} Z" fill="${fillc}" stroke="#fff" stroke-width="${primary?0.09:0.07}"/>`;
+          g += `<circle cx="${f(px)}" cy="${f(pz-r*1.55)}" r="${f(r*0.42)}" fill="#fff"/>`;
+          g += `</g>`;
+          return g;
+        };
+        for(const pos of posList){ if(pos.code !== parsed.code) s += pinAt(pos, false); }
+        s += pinAt(parsed, true);
 
-        // bussola / scala
+        // scala
         s += `<g opacity="0.8">`;
         s += `<line x1="${f(x0+0.4)}" y1="${f(z1-0.5)}" x2="${f(x0+5.4)}" y2="${f(z1-0.5)}" stroke="rgba(15,23,42,.6)" stroke-width="0.06"/>`;
         s += `<line x1="${f(x0+0.4)}" y1="${f(z1-0.7)}" x2="${f(x0+0.4)}" y2="${f(z1-0.3)}" stroke="rgba(15,23,42,.6)" stroke-width="0.06"/>`;
@@ -18595,6 +18715,8 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
         const x0 = cx - colW/2, x1 = cx + colW/2;
 
         let s = "";
+        // foglio chiaro di sfondo (coerente con la pianta) per leggibilità su card scura
+        s += `<rect x="-0.1" y="-0.1" width="${f(VW+0.2)}" height="${f(VH+0.2)}" rx="0.18" fill="#f4f6fa"/>`;
         // pavimento
         s += `<line x1="${f(0.35)}" y1="${f(groundY)}" x2="${f(x1+0.25)}" y2="${f(groundY)}" stroke="rgba(15,23,42,.55)" stroke-width="0.045"/>`;
         // montanti (2)
@@ -18639,46 +18761,113 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
         return `<svg class="tm-elev" viewBox="0 0 ${f(VW)} ${f(VH)}" xmlns="${NS}" role="img" aria-label="Prospetto campata ${esc(parsed.bayCode)}, livello L${parsed.level}">${s}</svg>`;
       }
 
-      function renderMap(parsed){
+      function renderMap(parsed, allCodes){
         const ov = buildOverlay();
         const wrap = ov.querySelector("#tmPlanWrap");
         const meta = ov.querySelector("#tmMeta");
         const badge = ov.querySelector("#tmBadge");
         const title = ov.querySelector("#tmTitle");
 
+        // posizioni multiple: parso tutti i codici validi; il primo è il principale.
+        let positions = [];
+        const seenPos = new Set();
+        const addPos = (p)=>{ if(p && !seenPos.has(p.code)){ seenPos.add(p.code); positions.push(p); } };
+        addPos(parsed);
+        for(const cc of (Array.isArray(allCodes) ? allCodes : [])){
+          const p = parseLocationCode(cc);
+          if(p) addPos(p);
+        }
+        // stato condiviso per lo switch tra posizioni
+        ov._positions = positions;
+
         const col = RACK_COLORS[parsed.rack] || ["#f97316","#fff"];
         badge.textContent = parsed.code;
         badge.style.background = col[0];
         badge.style.color = col[1];
-        title.textContent = `Concamarise · Fila ${parsed.rack} · Campata ${parsed.bayCode}`;
+        const multi = positions.length > 1;
+        title.textContent = multi
+          ? `Concamarise · ${positions.length} posizioni · ${parsed.bayCode}`
+          : `Concamarise · Fila ${parsed.rack} · Campata ${parsed.bayCode}`;
 
-        wrap.innerHTML = buildPlanSVG(parsed);
+        wrap.innerHTML = buildPlanSVG(parsed, positions);
         const elev = ov.querySelector("#tmElev");
         if(elev) elev.innerHTML = buildElevationSVG(parsed);
 
         const palCount = palletsForBay(parsed.rack, parsed.bay);
-        meta.innerHTML = `
+        let html = `
           <div class="tm-chip"><span class="k">Fila</span><span class="v">${parsed.rack}</span></div>
-          <div class="tm-chip"><span class="k">Campata</span><span class="v">${parsed.bayCode}</span></div>
+          <div class="tm-chip is-target"><span class="k">Campata</span><span class="v">${parsed.bayCode}</span></div>
           <div class="tm-chip"><span class="k">Livello</span><span class="v">L${parsed.level}</span></div>
           <div class="tm-chip"><span class="k">Pallet</span><span class="v">P${parsed.pallet} / ${palCount}</span></div>
         `;
+        meta.innerHTML = html;
+
+        // lista "altre posizioni" cliccabili (più ubicazioni)
+        renderOtherPositions(ov, positions, parsed);
 
         ov.classList.add("is-open");
         lockScroll();
+      }
+
+      function renderOtherPositions(ov, positions, current){
+        let box = ov.querySelector("#tmOthers");
+        if(!box){
+          box = document.createElement("div");
+          box.id = "tmOthers";
+          box.className = "tm-others";
+          // inserisco dopo le chip (meta), dentro .tm-side su desktop / nel flow su mobile
+          const meta = ov.querySelector("#tmMeta");
+          if(meta && meta.parentNode){ meta.parentNode.insertBefore(box, meta.nextSibling); }
+        }
+        if(!positions || positions.length <= 1){ box.innerHTML = ""; box.style.display = "none"; return; }
+        box.style.display = "";
+        const items = positions.map((p, i)=>{
+          const c = RACK_COLORS[p.rack] || ["#f97316","#fff"];
+          const active = (p.code === current.code) ? " is-active" : "";
+          return `<button type="button" class="tm-poschip${active}" data-poscode="${esc(p.code)}" style="--pc:${c[0]}">
+            <span class="tm-posdot" style="background:${c[0]}"></span>
+            <span class="tm-poscode">${esc(p.code)}</span>
+          </button>`;
+        }).join("");
+        box.innerHTML = `<div class="tm-othershead">Posizioni del prodotto · ${positions.length}</div><div class="tm-poslist">${items}</div>`;
+        // click → centra la mappa su quella posizione (senza re-inviare il comando 3D)
+        box.querySelectorAll(".tm-poschip").forEach(btn=>{
+          btn.addEventListener("click", ()=>{
+            const code = btn.getAttribute("data-poscode") || "";
+            const p = parseLocationCode(code);
+            if(!p) return;
+            const all = (ov._positions || []).map(x=>x.code);
+            renderMap(p, all);
+          });
+        });
       }
 
       // wrapping non distruttivo: chiama l'originale (comando Firestore al Capannone 3D
       // INVARIATO), poi apre la pianta fullscreen.
       if(typeof openCapannone3dFind === "function" && !openCapannone3dFind.__trovaWrapped){
         const original = openCapannone3dFind;
-        openCapannone3dFind = async function(code){
+        openCapannone3dFind = async function(code, codes){
           let res;
           try{ res = await original.apply(this, arguments); }
           catch(err){ console.warn("openCapannone3dFind (orig)", err); }
           try{
             const parsed = parseLocationCode(code);
-            if(parsed) renderMap(parsed);
+            if(parsed){
+              // lista completa delle posizioni del prodotto (più ubicazioni), codici completi A04-L3-P2
+              const rawList = Array.isArray(codes)
+                ? codes
+                : String(codes || "").split(/[,\s;]+/g);
+              const all = [];
+              const seen = new Set();
+              const pushCode = (cc)=>{
+                const n = normalizeRackLocation(cc || "");
+                if(!n || seen.has(n)) return;
+                seen.add(n); all.push(n);
+              };
+              pushCode(parsed.code);
+              for(const cc of rawList) pushCode(cc);
+              renderMap(parsed, all);
+            }
           }catch(err){ console.warn("trova plan render", err); }
           return res;
         };
