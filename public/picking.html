@@ -4318,8 +4318,8 @@ Tip:
         concamarise: { unsub:null, items:[], meta:{ count:0, lastUpdatedAt:null, loaded:false } }
       },
       logs: {
-        cerea: { unsub:null, flows:[], meta:{ count:0 } },
-        concamarise: { unsub:null, flows:[], meta:{ count:0 } }
+        cerea: { unsub:null, flows:[], meta:{ count:0 }, _mergeTimer:null },
+        concamarise: { unsub:null, flows:[], meta:{ count:0 }, _mergeTimer:null }
       },
       activityLogs: {
         unsubMovements: null,
@@ -8227,7 +8227,7 @@ function startAllLogs(){
       const colRef = api.collection(db, COL_ROOT, loc, SUB_LOGS);
       const maps = { applied:new Map(), updated:new Map(), raw:new Map() };
 
-      const mergeMaps = ()=>{
+      const mergeMapsNow = ()=>{
         const merged = new Map();
         for(const m of Object.values(maps)){
           for(const [id, flow] of m.entries()){
@@ -8243,6 +8243,13 @@ function startAllLogs(){
         lg.meta.count = flows.length;
         refreshActivityLogSkuWatchers("logs_" + loc);
         renderLogsForLoc(loc);
+      };
+
+      // Debounce: i 6 listener producono snapshot ravvicinati (soprattutto all'avvio).
+      // Collasso i merge in uno solo per evitare sort/merge/render ripetuti inutilmente.
+      const mergeMaps = ()=>{
+        try{ if(lg._mergeTimer) clearTimeout(lg._mergeTimer); }catch(_e){}
+        lg._mergeTimer = setTimeout(()=>{ lg._mergeTimer = null; mergeMapsNow(); }, 120);
       };
 
       const attach = (key, q, noisy)=> api.onSnapshot(q, (snap)=>{
@@ -8265,11 +8272,12 @@ function startAllLogs(){
       // Shopify/FBM automatico può essere scritto con updatedAtClient/createdAtClient invece di appliedAtClient.
       // Questi listener secondari recuperano quei documenti e li fondono con lo storico normale.
       try{ unsubs.push(attach("updated", api.query(colRef, api.orderBy("updatedAtClient","desc"), api.limit(300)), false)); }catch(_e){}
-      try{ unsubs.push(attach("shopifySource", api.query(colRef, api.where("source", "==", "shopify_fbm"), api.limit(1000)), false)); }catch(_e){}
-      try{ unsubs.push(attach("shopifySourcePlain", api.query(colRef, api.where("source", "==", "shopify"), api.limit(1000)), false)); }catch(_e){}
-      try{ unsubs.push(attach("shopifyFile", api.query(colRef, api.where("fileName", "==", "SHOPIFY_FBM"), api.limit(1000)), false)); }catch(_e){}
+      try{ unsubs.push(attach("shopifySource", api.query(colRef, api.where("source", "==", "shopify_fbm"), api.limit(400)), false)); }catch(_e){}
+      try{ unsubs.push(attach("shopifySourcePlain", api.query(colRef, api.where("source", "==", "shopify"), api.limit(400)), false)); }catch(_e){}
+      try{ unsubs.push(attach("shopifyFile", api.query(colRef, api.where("fileName", "==", "SHOPIFY_FBM"), api.limit(400)), false)); }catch(_e){}
       try{ unsubs.push(attach("raw", api.query(colRef, api.limit(400)), false)); }catch(_e){}
       lg.unsub = ()=>{
+        try{ if(lg._mergeTimer){ clearTimeout(lg._mergeTimer); lg._mergeTimer = null; } }catch(_e){}
         for(const fn of unsubs){ try{ fn && fn(); }catch(_e){} }
       };
     }
