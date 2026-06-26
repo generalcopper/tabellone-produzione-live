@@ -2619,7 +2619,7 @@ const Voce = (function(){
   let abort = null;
   let unlocked = false;        // autoplay concesso?
   let pendingPlay = null;      // { url, text, opts, seq } se autoplay blocca la riproduzione
-  let actx = null;             // AudioContext per forzare lo sblocco
+  // Niente AudioContext in warm-up automatico: Chrome/Edge lo bloccano senza gesture e stampano warning. La voce cloud usa solo <audio>.
   let speakSeq = 0;            // id incrementale: solo l'ultima chiamata a parla() è valida
   let cloudPlaying = false;
   let busy = false;
@@ -2672,26 +2672,29 @@ const Voce = (function(){
     }
   }
 
-  // tenta di sbloccare l'audio senza perdere l'URL cloud eventualmente già generato.
+  // Warm-up audio come app_tabellone: solo elemento <audio>, niente WebAudio.
+  // Questo evita il warning "AudioContext was not allowed to start" e lascia il TTS cloud/cache invariato.
   async function tryUnlock(){
     try{
-      if(!actx){ const AC=window.AudioContext||window.webkitAudioContext; if(AC) actx=new AC(); }
-      if(actx && actx.state!=='running'){ await actx.resume().catch(()=>{}); }
-    }catch(_){}
-    try{
-      const a=new Audio("data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=");
-      a.muted=true; a.preload="auto";
+      const a = new Audio("data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=");
+      a.muted = true;
+      a.preload = "auto";
+
       await a.play();
-      a.pause(); a.currentTime=0;
-      unlocked=true;
-      if(pendingPlay && pendingPlay.seq===speakSeq){
-        const p=pendingPlay;
-        pendingPlay=null;
+      a.pause();
+      a.currentTime = 0;
+
+      unlocked = true;
+
+      if(pendingPlay && pendingPlay.seq === speakSeq){
+        const p = pendingPlay;
+        pendingPlay = null;
         _playUrl(p.url, p.text, p.opts, p.seq).catch(e=>{
           console.warn("TTS cloud play retry non riuscito:", e);
           _finish();
         });
       }
+
       return true;
     }catch(e){
       noteKioskAudioBlocked("voce-prime", e);
@@ -2810,7 +2813,10 @@ const Voce = (function(){
 
   function runKioskAudioWarmup(){
     try{ primeStandaloneKioskAudio(); }catch(_){ }
-    try{ if(!unlocked && !busy) tryUnlock(); }catch(_){ }
+    try{
+      // Se c'è un audio cloud già generato ma bloccato da autoplay, una gesture deve poterlo riprovare anche se busy=true.
+      if((!unlocked && !busy) || pendingPlay) tryUnlock();
+    }catch(_){ }
   }
 
   runKioskAudioWarmup();
