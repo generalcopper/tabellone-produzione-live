@@ -3064,7 +3064,7 @@ body:before{
   import {
     getAuth, setPersistence, browserLocalPersistence, signInAnonymously, onAuthStateChanged
   } from "https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js";
-const TTS_ELEVEN_PROXY_URL = "https://us-central1-tabellone-produzione-liv-e313e.cloudfunctions.net/ttsEleven";
+const TTS_KIOSK_CACHED_URL = "https://us-central1-tabellone-produzione-liv-e313e.cloudfunctions.net/ttsKioskCached";
 
   const Boot = { start(){}, mark(){}, finish(){} };
 const DEVICE_ID = (() => {
@@ -3314,10 +3314,9 @@ async function playCue(kind){
 
 
     // ===== Kiosk Natural Female Voice =====
-  // Priorità voce:
-  // 1) endpoint cloud TTS premium, se disponibile;
-  // 2) voce italiana femminile/natural del browser (Edge/Chrome/macOS);
-  // 3) fallback italiano generico, senza bloccare l'automatismo kiosk.
+  // Voce kiosk:
+  // 1) endpoint cloud/cache ttsKioskCached;
+  // 2) nessun fallback locale browser.
   const KIOSK_TTS_PREMIUM_ENABLED = true;
   // Più paziente col TTS premium: evita di passare troppo spesso alla voce browser/fallback.
   const KIOSK_TTS_FETCH_TIMEOUT_MS = 8000;
@@ -3441,6 +3440,15 @@ async function playCue(kind){
     return "";
   }
 
+  async function _ttsCloudAuthToken(){
+    try{
+      if(typeof auth !== "undefined" && auth && auth.currentUser && auth.currentUser.getIdToken){
+        return await auth.currentUser.getIdToken();
+      }
+    }catch(_){ }
+    return "";
+  }
+
   async function _playAudioUrlNaturalFemale(audioUrl, opts){
     if(!audioUrl) return false;
 
@@ -3489,7 +3497,7 @@ async function playCue(kind){
 
   async function _tryPremiumCloudFemaleTTS(text, opts){
     const msg = String(text || "").trim();
-    if(!msg || !KIOSK_TTS_PREMIUM_ENABLED || !TTS_ELEVEN_PROXY_URL) return false;
+    if(!msg || !KIOSK_TTS_PREMIUM_ENABLED || !TTS_KIOSK_CACHED_URL) return false;
     if(Date.now() < _premiumTTSDisabledUntil) return false;
 
     let timeout = null;
@@ -3501,9 +3509,14 @@ async function playCue(kind){
         try{ _ttsAbort?.abort(); }catch(_){ }
       }, KIOSK_TTS_FETCH_TIMEOUT_MS);
 
-      const res = await fetch(TTS_ELEVEN_PROXY_URL, {
+      const headers = { "Content-Type": "application/json" };
+      const token = await _ttsCloudAuthToken();
+      if(!token) throw new Error("premium-tts-auth-token-missing");
+      headers["Authorization"] = "Bearer " + token;
+
+      const res = await fetch(TTS_KIOSK_CACHED_URL, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify({
           text: msg,
           language: "it-IT",
@@ -3611,7 +3624,7 @@ async function playCue(kind){
     const msg = String(text || "").trim();
     if(!msg) return false;
 
-    // Prima prova il TTS cloud naturale. Solo dopo retry/fallimenti reali passa alla voce browser.
+    // Voce solo cloud/cache: niente fallback locale browser.
     const retryCount = Number.isFinite(Number(opts.premiumRetries))
       ? Math.max(0, Number(opts.premiumRetries))
       : KIOSK_TTS_PREMIUM_RETRY_COUNT;
@@ -3626,30 +3639,9 @@ async function playCue(kind){
       }
     }
 
-    if(opts.allowBrowserFallback === false) return false;
-
-    const minFailures = Number.isFinite(Number(opts.browserFallbackAfterPremiumFailures))
-      ? Math.max(1, Number(opts.browserFallbackAfterPremiumFailures))
-      : KIOSK_TTS_BROWSER_FALLBACK_AFTER_FAILURES;
-
-    if(_premiumTTSConsecutiveFailures < minFailures){
-      console.log("Browser TTS fallback rimandato: attendo il TTS premium.");
-      try{ opts?.onerror?.({ error:"premium-tts-waiting" }); }catch(_){ }
-      return false;
-    }
-
-    const minInterval = Number.isFinite(Number(opts.browserFallbackMinIntervalMs))
-      ? Math.max(0, Number(opts.browserFallbackMinIntervalMs))
-      : 0;
-
-    if(minInterval > 0 && _browserFallbackLastSpokenAt && (Date.now() - _browserFallbackLastSpokenAt) < minInterval){
-      console.log("Browser TTS fallback limitato: voce fallback non ripetuta troppo spesso.");
-      try{ opts?.onerror?.({ error:"browser-fallback-limited" }); }catch(_){ }
-      return false;
-    }
-
-    _browserFallbackLastSpokenAt = Date.now();
-    return await _speakBrowserFemale(msg, opts);
+    console.log("Voce cloud/cache non disponibile: nessun fallback locale eseguito.");
+    try{ opts?.onerror?.({ error:"cloud-tts-unavailable" }); }catch(_){ }
+    return false;
   }
 
   async function speak(text){
