@@ -2586,11 +2586,11 @@ function clearHighlight(){
   clearGlow();
   if(highlightMesh){scene.remove(highlightMesh);highlightMesh.traverse(o=>{if(o.geometry)o.geometry.dispose();});highlightMesh=null;}
 }
-/* ===== VOCE IA CLOUD (ElevenLabs via endpoint app_tabellone) =====
+/* ===== VOCE IA CLOUD (stile app_tabellone + cache ttsKioskCached) =====
    Cloud-only: il kiosk non usa Web Speech / speechSynthesis come fallback locale.
    Tutte le frasi passano dall'endpoint Firebase già usato dal tabellone; il browser
    riproduce solo l'audio ricevuto dal cloud. */
-const TTS_ELEVEN_PROXY_URL = "https://us-central1-tabellone-produzione-liv-e313e.cloudfunctions.net/ttsKioskCached";
+const TTS_KIOSK_CACHED_URL = "https://us-central1-tabellone-produzione-liv-e313e.cloudfunctions.net/ttsKioskCached";
 let _fbAuth = null;   // riferimento all'auth Firebase (impostato dopo l'init) per autenticare il TTS
 async function _ttsAuthToken(){
   try{
@@ -2598,6 +2598,14 @@ async function _ttsAuthToken(){
     if(u && u.getIdToken) return await u.getIdToken();
   }catch(_){}
   return "";
+}
+
+// Stessi parametri voce dell'app tabellone: endpoint cache, stesso source, stesso timeout/retry.
+const KIOSK_TTS_FETCH_TIMEOUT_MS = 8000;
+const KIOSK_TTS_PREMIUM_RETRY_COUNT = 1;
+const KIOSK_TTS_PREMIUM_RETRY_DELAY_MS = 650;
+function _waitMs(ms){
+  return new Promise(resolve => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
 }
 
 /* ===== KIOSK AUDIO STARTUP — allineato ad app_tabellone, cloud-only =====
@@ -2654,6 +2662,7 @@ const Voce = (function(){
     if(seq !== speakSeq) return false;
     const a=ensureAudio();
     a.volume=1;
+    a.playbackRate = 1;
     a.muted=false;
     a.src=url;
     try{
@@ -2716,22 +2725,22 @@ const Voce = (function(){
     try{
       if(abort) try{ abort.abort(); }catch(_){}
       abort = new AbortController();
-      to = setTimeout(()=>{ try{abort.abort();}catch(_){} }, 10000);
+      to = setTimeout(()=>{ try{abort.abort();}catch(_){} }, KIOSK_TTS_FETCH_TIMEOUT_MS);
       const headers={"Content-Type":"application/json"};
       const tok = await _ttsAuthToken();
-      if(tok) headers["Authorization"]="Bearer "+tok;
-      const res = await fetch(TTS_ELEVEN_PROXY_URL, {
+      if(!tok) throw new Error("premium-tts-auth-token-missing");
+      headers["Authorization"]="Bearer "+tok;
+      const res = await fetch(TTS_KIOSK_CACHED_URL, {
         method:"POST",
         headers,
         body: JSON.stringify({
           text,
           language:"it-IT",
           lang:"it-IT",
-          provider:"elevenlabs",
           voice:"female",
           voiceGender:"female",
           style:"natural",
-          source:"kiosk_capannone3d"
+          source:"kiosk_tabellone"
         }),
         signal: abort.signal,
         cache:"no-store"
@@ -2773,19 +2782,32 @@ const Voce = (function(){
     _revokeBlobUrl();
     busy=true; _onDone=onDone;
 
-    try{
-      const url = await _cloudUrl(msg);
-      if(mySeq !== speakSeq) return false;
-      const started = await _playUrl(url, msg, opts, mySeq);
-      if(!started && pendingPlay) return false;  // autoplay bloccato: riprova dopo unlock, senza rigenerare audio
-      return started;
-    }catch(e){
-      if(mySeq !== speakSeq) return false;
-      console.warn("TTS cloud ElevenLabs non disponibile:", e);
-      pendingPlay=null;
-      _finish();
-      return false;
+    const retryCount = Number.isFinite(Number(opts.premiumRetries))
+      ? Math.max(0, Number(opts.premiumRetries))
+      : KIOSK_TTS_PREMIUM_RETRY_COUNT;
+
+    let lastErr = null;
+    for(let attempt = 0; attempt <= retryCount; attempt++){
+      try{
+        const url = await _cloudUrl(msg);
+        if(mySeq !== speakSeq) return false;
+        const started = await _playUrl(url, msg, opts, mySeq);
+        if(!started && pendingPlay) return false;  // autoplay bloccato: riprova dopo unlock, senza rigenerare audio
+        return started;
+      }catch(e){
+        lastErr = e;
+        if(mySeq !== speakSeq) return false;
+        if(attempt < retryCount){
+          await _waitMs(KIOSK_TTS_PREMIUM_RETRY_DELAY_MS * (attempt + 1));
+          continue;
+        }
+      }
     }
+
+    console.warn("TTS cloud/cache non disponibile:", lastErr);
+    pendingPlay=null;
+    _finish();
+    return false;
   }
 
   function toggle(on){
