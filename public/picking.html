@@ -4325,7 +4325,8 @@ Tip:
         unsubMovements: null,
         movements: [],
         error: "",
-        loaded: false
+        loaded: false,
+        _refreshTimer: null
       },
       flows: {
         carica: { file:null, lines:[], busy:false, workflow:null },
@@ -8278,7 +8279,7 @@ function startAllLogs(){
     // Non usa più collectionGroup("movements") ordinata: quella query richiede un indice
     // Collection Group creato da Console Firebase. Qui leggiamo direttamente le sottocollezioni
     // /amzInventoryProducts/{sku}/movements, così il Picking funziona senza creare indici.
-    const ACTIVITY_MOVEMENT_SKU_LIMIT = 420;
+    const ACTIVITY_MOVEMENT_SKU_LIMIT = 120;
     const ACTIVITY_MOVEMENT_PER_SKU_LIMIT = 8;
     const ACTIVITY_MOVEMENT_TOTAL_LIMIT = 120;
 
@@ -8394,7 +8395,28 @@ function startAllLogs(){
       }
     }
 
+    // Wrapper con debounce: le chiamate in cascata dagli snapshot (inventory/logs)
+    // vengono collassate in una sola ricostruzione dei watcher, evitando di
+    // smontare/rimontare di continuo decine/centinaia di listener (causa di lentezza).
+    // La chiamata di avvio ("start") resta immediata.
     function refreshActivityLogSkuWatchers(reason=""){
+      if(reason === "start"){
+        try{ if(state.activityLogs?._refreshTimer){ clearTimeout(state.activityLogs._refreshTimer); state.activityLogs._refreshTimer = null; } }catch(_e){}
+        return refreshActivityLogSkuWatchersNow(reason);
+      }
+      try{
+        if(!state.activityLogs) return refreshActivityLogSkuWatchersNow(reason);
+        if(state.activityLogs._refreshTimer) clearTimeout(state.activityLogs._refreshTimer);
+        state.activityLogs._refreshTimer = setTimeout(()=>{
+          state.activityLogs._refreshTimer = null;
+          refreshActivityLogSkuWatchersNow(reason);
+        }, 250);
+      }catch(_e){
+        refreshActivityLogSkuWatchersNow(reason);
+      }
+    }
+
+    function refreshActivityLogSkuWatchersNow(reason=""){
       try{
         if(!state.firebase.ok || !state.user?.isWhitelisted) return;
         if(!state.activityLogs?.unsubMovements) return;
@@ -8490,6 +8512,7 @@ function startAllLogs(){
     }
 
     function stopActivityLogWatch(){
+      try{ if(state.activityLogs?._refreshTimer){ clearTimeout(state.activityLogs._refreshTimer); } }catch(_e){}
       try{ state.activityLogs?.unsubMovements && state.activityLogs.unsubMovements(); }catch(_e){}
       if(state.activityLogs){
         state.activityLogs.unsubMovements = null;
@@ -8497,6 +8520,7 @@ function startAllLogs(){
         state.activityLogs.error = "";
         state.activityLogs.loaded = false;
         state.activityLogs._watchKey = "";
+        state.activityLogs._refreshTimer = null;
       }
       renderHomeLogsBox();
     }
@@ -18405,11 +18429,44 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
             </div>
           </div>`;
         document.body.appendChild(ov);
-        const close = ()=> ov.classList.remove("is-open");
+        const close = ()=>{ ov.classList.remove("is-open"); unlockScroll(); };
         ov.querySelector("#tmClose").addEventListener("click", close);
         ov.addEventListener("click", (e)=>{ if(e.target === ov) close(); });
         document.addEventListener("keydown", (e)=>{ if(e.key==="Escape" && ov.classList.contains("is-open")) close(); });
+        // blocca lo scroll della pagina (consente lo scroll interno alle aree .tm-side/.tm-body)
+        ov.addEventListener("touchmove", (e)=>{
+          if(!e.target?.closest?.(".tm-side, .tm-body")){ e.preventDefault(); }
+        }, { passive:false });
         return ov;
+      }
+
+      let _scrollLock = null;
+      function lockScroll(){
+        if(_scrollLock) return;
+        const sy = window.scrollY || window.pageYOffset || 0;
+        _scrollLock = {
+          sy,
+          htmlOverflow: document.documentElement.style.overflow,
+          bodyOverflow: document.body.style.overflow,
+          bodyPos: document.body.style.position,
+          bodyTop: document.body.style.top,
+          bodyWidth: document.body.style.width
+        };
+        document.documentElement.style.overflow = "hidden";
+        document.body.style.overflow = "hidden";
+        document.body.style.position = "fixed";
+        document.body.style.top = `-${sy}px`;
+        document.body.style.width = "100%";
+      }
+      function unlockScroll(){
+        if(!_scrollLock) return;
+        const L = _scrollLock; _scrollLock = null;
+        document.documentElement.style.overflow = L.htmlOverflow;
+        document.body.style.overflow = L.bodyOverflow;
+        document.body.style.position = L.bodyPos;
+        document.body.style.top = L.bodyTop;
+        document.body.style.width = L.bodyWidth;
+        window.scrollTo(0, L.sy);
       }
 
       function esc(s){ return String(s).replace(/[&<>"]/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[c])); }
@@ -18600,6 +18657,7 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
         `;
 
         ov.classList.add("is-open");
+        lockScroll();
       }
 
       // wrapping non distruttivo: chiama l'originale (comando Firestore al Capannone 3D
