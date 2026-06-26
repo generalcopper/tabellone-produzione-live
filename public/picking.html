@@ -18189,6 +18189,414 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
     renderFlowList("scarica");
     bindUI();
     initFirebase();
+
+    /* ============================================================
+       TROVA → PIANTA IN SCALA FULLSCREEN (capannone Concamarise)
+       - Estende openCapannone3dFind senza toccarne la logica:
+         il comando Firestore al Capannone 3D resta INVARIATO,
+         in più apre una schermata fullscreen con la pianta in scala
+         reale e la posizione del prodotto evidenziata.
+       - Geometria (coordinate mondo, metri) replicata da capannone_3d.html.
+       - Nessuna modifica a Firebase, ID, classi o funzioni esistenti.
+       ============================================================ */
+    (function setupTrovaMapPlan(){
+      // --- dimensioni edificio (metri) dal modello 3D ---
+      const LX = 28.40, LZ = 21.45;
+      const CARTON_W_ = 6.90;
+      const CUT_Z = -LZ/2 + CARTON_W_;            // -3.825
+      const GAP_ = 1.76;
+      const CUT_X = -(LX/2 - 18 - GAP_);          // 5.56
+      const SOP = { x0:LX/2-18, x1:LX/2, z0:-LZ/2, z1:-LZ/2+6 };
+      const LIQ = { x0:-LX/2, x1:-LX/2+15, z0:LZ/2-3.75, z1:LZ/2 };
+
+      // colori cartelli identici al modello 3D (CARTELLO_COLORI)
+      const RACK_COLORS = {
+        A:["#FFD300","#1A1A1A"], B:["#00C853","#0A2E14"], C:["#FF6D00","#2B1400"],
+        D:["#FF2D87","#2E0014"], E:["#00B0FF","#002233"], F:["#B388FF","#1A0033"]
+      };
+      const RACK_BAYS = { A:4, B:4, C:4, D:4, E:2, F:2 };
+
+      // quote reali livelli (metri) dal modello 3D
+      const LEVEL_Y = [0.0, 2.00, 4.00];   // appoggio pallet L1,L2,L3
+      const RACK_TOTH = 5.50;              // altezza totale telaio
+      const PAL_H = 0.144;                 // spessore EPAL
+      const VANO_H = 1.74;                 // altezza utile vano (VANO_MAXH)
+
+      function palletsForBay(rack, bay){
+        if(rack==="A") return bay===4 ? 2 : 3;
+        if(rack==="C") return bay===1 ? 2 : 3;
+        if(rack==="D") return bay===4 ? 2 : 3;
+        return 3;
+      }
+
+      // --- campate in coordinate mondo (centro cx,cz; estensioni wx,wz; metri) ---
+      // pal = pallet per campata; calcolato replicando buildRack del 3D.
+      const BAYS = [
+        {id:"A",code:"A01",bay:1,cx:13.45,cz:-2.15,wx:1.1,wz:2.7,pal:3},
+        {id:"A",code:"A02",bay:2,cx:13.45,cz:0.55,wx:1.1,wz:2.7,pal:3},
+        {id:"A",code:"A03",bay:3,cx:13.45,cz:3.25,wx:1.1,wz:2.7,pal:3},
+        {id:"A",code:"A04",bay:4,cx:13.45,cz:5.5,wx:1.1,wz:1.8,pal:2},
+        {id:"B",code:"B01",bay:1,cx:-11.445,cz:-3.975,wx:2.7,wz:1.1,pal:3},
+        {id:"B",code:"B02",bay:2,cx:-8.745,cz:-3.975,wx:2.7,wz:1.1,pal:3},
+        {id:"B",code:"B03",bay:3,cx:-6.045,cz:-3.975,wx:2.7,wz:1.1,pal:3},
+        {id:"B",code:"B04",bay:4,cx:-3.345,cz:-3.975,wx:2.7,wz:1.1,pal:3},
+        {id:"C",code:"C04",bay:4,cx:-11.445,cz:1.125,wx:2.7,wz:1.1,pal:3},
+        {id:"C",code:"C03",bay:3,cx:-8.745,cz:1.125,wx:2.7,wz:1.1,pal:3},
+        {id:"C",code:"C02",bay:2,cx:-6.045,cz:1.125,wx:2.7,wz:1.1,pal:3},
+        {id:"C",code:"C01",bay:1,cx:-3.795,cz:1.125,wx:1.8,wz:1.1,pal:2},
+        {id:"D",code:"D01",bay:1,cx:-11.445,cz:2.425,wx:2.7,wz:1.1,pal:3},
+        {id:"D",code:"D02",bay:2,cx:-8.745,cz:2.425,wx:2.7,wz:1.1,pal:3},
+        {id:"D",code:"D03",bay:3,cx:-6.045,cz:2.425,wx:2.7,wz:1.1,pal:3},
+        {id:"D",code:"D04",bay:4,cx:-3.795,cz:2.425,wx:1.8,wz:1.1,pal:2},
+        {id:"F",code:"F01",bay:1,cx:8.15,cz:-2.225,wx:1.1,wz:2.7,pal:3},
+        {id:"F",code:"F02",bay:2,cx:8.15,cz:0.475,wx:1.1,wz:2.7,pal:3},
+        {id:"E",code:"E01",bay:1,cx:6.85,cz:-2.225,wx:1.1,wz:2.7,pal:3},
+        {id:"E",code:"E02",bay:2,cx:6.85,cz:0.475,wx:1.1,wz:2.7,pal:3}
+      ];
+      const BAY_BY_CODE = (()=>{ const m={}; for(const b of BAYS) m[b.code]=b; return m; })();
+
+      function parseLocationCode(code){
+        const c = normalizeRackLocation(code || "");
+        const m = c.match(/^([A-F])(\d{2})-L(\d)-P(\d+)$/);
+        if(!m) return null;
+        const rack=m[1], bay=parseInt(m[2],10), level=parseInt(m[3],10), pallet=parseInt(m[4],10);
+        const bayCode = `${rack}${String(bay).padStart(2,"0")}`;
+        if(!BAY_BY_CODE[bayCode]) return null;
+        return { code:c, rack, bay, level, pallet, bayCode };
+      }
+
+      // --- proiezione mondo→SVG (pianta vista dall'alto) ---
+      // viewBox in metri: perimetro edificio centrato in 0. world X → svgX, world Z → svgY.
+      // Z reale cresce verso il fronte (linea liquidi): lo lascio in basso → svgY = +z.
+      const PAD = 1.0;
+      const VB = { x:-LX/2 - PAD, y:-LZ/2 - PAD, w:LX + 2*PAD, h:LZ + 2*PAD };
+      const sx = (x)=> x;          // metri = unità svg
+      const sy = (z)=> z;
+
+      function ensureMapStyles(){
+        if(document.getElementById("trovaMapPlanStyles")) return;
+        const css = document.createElement("style");
+        css.id = "trovaMapPlanStyles";
+        css.textContent = `
+          #trovaMapOverlay{
+            position:fixed; inset:0; z-index:99999; display:none; flex-direction:column;
+            background:rgba(8,11,16,.80);
+            backdrop-filter:saturate(140%) blur(8px); -webkit-backdrop-filter:saturate(140%) blur(8px);
+            padding:max(14px, env(safe-area-inset-top)) 14px calc(14px + env(safe-area-inset-bottom));
+            animation:trovaMapFade .18s ease;
+          }
+          #trovaMapOverlay.is-open{ display:flex; }
+          @keyframes trovaMapFade{ from{opacity:0} to{opacity:1} }
+          #trovaMapOverlay .tm-card{
+            margin:auto; width:min(1000px,100%); max-height:100%;
+            display:flex; flex-direction:column;
+            background:var(--card,#fff); border:1px solid var(--line,#e6e8ec);
+            border-radius:20px; overflow:hidden; box-shadow:0 24px 70px rgba(0,0,0,.35);
+          }
+          #trovaMapOverlay .tm-head{
+            display:flex; align-items:center; gap:12px; padding:14px 16px;
+            border-bottom:1px solid var(--line2,#eef0f3);
+          }
+          #trovaMapOverlay .tm-badge{
+            font-weight:800; font-size:15px; color:#fff; padding:8px 12px; border-radius:12px;
+            font-variant-numeric:tabular-nums;
+          }
+          #trovaMapOverlay .tm-titles{ display:flex; flex-direction:column; min-width:0; flex:1; }
+          #trovaMapOverlay .tm-t1{ font-size:11px; font-weight:700; letter-spacing:.14em; text-transform:uppercase; color:var(--muted,#64748b); }
+          #trovaMapOverlay .tm-t2{ font-size:15px; font-weight:700; color:var(--text,#0f1111); margin-top:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+          #trovaMapOverlay .tm-close{
+            flex:none; width:38px; height:38px; border-radius:11px; cursor:pointer;
+            border:1px solid var(--line,#e6e8ec); background:var(--bg,#f6f7f9);
+            color:var(--muted,#64748b); font-size:20px; line-height:1; font-weight:600;
+            display:flex; align-items:center; justify-content:center;
+          }
+          #trovaMapOverlay .tm-close:hover{ background:rgba(15,17,17,.05); color:var(--text,#0f1111); }
+          #trovaMapOverlay .tm-body{ padding:16px; overflow:auto; }
+          #trovaMapOverlay .tm-planwrap{
+            position:relative; width:100%; border:1px solid var(--line,#e6e8ec);
+            border-radius:14px; overflow:hidden; background:var(--bg,#f6f7f9);
+          }
+          #trovaMapOverlay svg.tm-plan{ display:block; width:100%; height:auto; }
+          #trovaMapOverlay .tm-meta{ display:flex; flex-wrap:wrap; gap:8px; margin-top:14px; }
+          #trovaMapOverlay .tm-chip{
+            display:flex; flex-direction:column; gap:2px; background:var(--bg,#f6f7f9);
+            border:1px solid var(--line,#e6e8ec); border-radius:12px; padding:9px 13px; min-width:84px;
+          }
+          #trovaMapOverlay .tm-chip .k{ font-size:10px; font-weight:700; letter-spacing:.1em; text-transform:uppercase; color:var(--muted2,#94a3b8); }
+          #trovaMapOverlay .tm-chip .v{ font-size:17px; font-weight:800; color:var(--text,#0f1111); font-variant-numeric:tabular-nums; }
+          #trovaMapOverlay .tm-levels{ display:flex; gap:6px; align-items:flex-end; margin-top:14px; }
+          #trovaMapOverlay .tm-lv{
+            flex:1; border:1px solid var(--line,#e6e8ec); border-radius:10px; background:var(--bg,#f6f7f9);
+            text-align:center; padding:8px 4px; font-size:12px; font-weight:700; color:var(--muted,#64748b);
+          }
+          #trovaMapOverlay .tm-lv.on{ background:linear-gradient(135deg,var(--accent,#f97316),var(--accentHover,#ea580c)); color:#fff; border-color:transparent; }
+          #trovaMapOverlay .tm-lv small{ display:block; font-size:10px; font-weight:600; opacity:.8; margin-top:2px; }
+          #trovaMapOverlay .tm-views{ display:grid; grid-template-columns:1fr; gap:12px; margin-top:14px; }
+          @media (min-width:720px){ #trovaMapOverlay .tm-views{ grid-template-columns:2fr 1fr; align-items:stretch; } }
+          #trovaMapOverlay .tm-panel{ border:1px solid var(--line,#e6e8ec); border-radius:14px; overflow:hidden; background:var(--bg,#f6f7f9); display:flex; flex-direction:column; }
+          #trovaMapOverlay .tm-panel .tm-phead{ font-size:10px; font-weight:700; letter-spacing:.12em; text-transform:uppercase; color:var(--muted,#64748b); padding:9px 12px 0; }
+          #trovaMapOverlay svg.tm-elev{ display:block; width:100%; height:auto; padding:8px 10px 10px; }
+          #trovaMapOverlay .tm-elevcell{ animation:tmPulse 1.4s ease-in-out infinite; transform-box:fill-box; transform-origin:center; }
+          #trovaMapOverlay .tm-targetcell{ animation:tmPulse 1.4s ease-in-out infinite; transform-box:fill-box; transform-origin:center; }
+          @keyframes tmPulse{ 0%,100%{ filter:brightness(1) } 50%{ filter:brightness(1.22) } }
+          #trovaMapOverlay .tm-pin{ animation:tmDrop .4s cubic-bezier(.2,.9,.25,1.2); transform-box:fill-box; transform-origin:center bottom; }
+          @keyframes tmDrop{ from{ transform:translateY(-3px); opacity:0 } to{ transform:translateY(0); opacity:1 } }
+        `;
+        document.head.appendChild(css);
+      }
+
+      function buildOverlay(){
+        let ov = document.getElementById("trovaMapOverlay");
+        if(ov) return ov;
+        ensureMapStyles();
+        ov = document.createElement("div");
+        ov.id = "trovaMapOverlay";
+        ov.setAttribute("role","dialog");
+        ov.setAttribute("aria-modal","true");
+        ov.innerHTML = `
+          <div class="tm-card">
+            <div class="tm-head">
+              <div class="tm-badge" id="tmBadge">—</div>
+              <div class="tm-titles">
+                <div class="tm-t1">Posizione bancale · pianta in scala</div>
+                <div class="tm-t2" id="tmTitle">Capannone Concamarise</div>
+              </div>
+              <button type="button" class="tm-close" id="tmClose" aria-label="Chiudi">&times;</button>
+            </div>
+            <div class="tm-body">
+              <div class="tm-views">
+                <div class="tm-planwrap" id="tmPlanWrap"></div>
+                <div class="tm-panel">
+                  <div class="tm-phead">Prospetto campata · altezza</div>
+                  <div id="tmElev"></div>
+                </div>
+              </div>
+              <div class="tm-meta" id="tmMeta"></div>
+              <div class="tm-levels" id="tmLevels"></div>
+            </div>
+          </div>`;
+        document.body.appendChild(ov);
+        const close = ()=> ov.classList.remove("is-open");
+        ov.querySelector("#tmClose").addEventListener("click", close);
+        ov.addEventListener("click", (e)=>{ if(e.target === ov) close(); });
+        document.addEventListener("keydown", (e)=>{ if(e.key==="Escape" && ov.classList.contains("is-open")) close(); });
+        return ov;
+      }
+
+      function esc(s){ return String(s).replace(/[&<>"]/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[c])); }
+
+      function buildPlanSVG(parsed){
+        const NS = "http://www.w3.org/2000/svg";
+        const f = (n)=> (Math.round(n*1000)/1000);
+        let s = "";
+        // perimetro edificio con angolo tagliato (cartongesso) in alto a destra del fondo
+        // poligono: parte dal vertice e segue il taglio (replica makeShape del 3D, semplificato).
+        const x0=-LX/2, x1=LX/2, z0=-LZ/2, z1=LZ/2;
+        const perim = [
+          [x0,z0],[CUT_X,z0],[CUT_X,CUT_Z],[x1,CUT_Z],[x1,z1],[x0,z1]
+        ].map(p=>`${f(sx(p[0]))},${f(sy(p[1]))}`).join(" ");
+        s += `<polygon points="${perim}" fill="#ffffff" stroke="rgba(15,23,42,.55)" stroke-width="0.16"/>`;
+
+        // soppalco (riferimento leggero)
+        s += `<rect x="${f(SOP.x0)}" y="${f(SOP.z0)}" width="${f(SOP.x1-SOP.x0)}" height="${f(SOP.z1-SOP.z0)}" fill="rgba(100,116,139,.10)" stroke="rgba(100,116,139,.30)" stroke-width="0.08" stroke-dasharray="0.4 0.3"/>`;
+        s += `<text x="${f((SOP.x0+SOP.x1)/2)}" y="${f((SOP.z0+SOP.z1)/2)}" font-size="0.85" fill="rgba(100,116,139,.65)" text-anchor="middle" dominant-baseline="middle" font-weight="700">SOPPALCO</text>`;
+        // area linea liquidi
+        s += `<rect x="${f(LIQ.x0)}" y="${f(LIQ.z0)}" width="${f(LIQ.x1-LIQ.x0)}" height="${f(LIQ.z1-LIQ.z0)}" fill="rgba(30,90,208,.10)" stroke="rgba(30,90,208,.30)" stroke-width="0.08"/>`;
+        s += `<text x="${f((LIQ.x0+LIQ.x1)/2)}" y="${f((LIQ.z0+LIQ.z1)/2)}" font-size="0.78" fill="rgba(30,90,208,.7)" text-anchor="middle" dominant-baseline="middle" font-weight="700">LINEA LIQUIDI</text>`;
+
+        // scaffalature: una per fila, con suddivisione campate e pallet
+        const byRack = {};
+        for(const b of BAYS){ (byRack[b.id]=byRack[b.id]||[]).push(b); }
+
+        for(const rid of ["A","B","C","D","E","F"]){
+          const arr = byRack[rid]; if(!arr) continue;
+          const col = RACK_COLORS[rid];
+          // bounding fila
+          let mnx=1e9,mxx=-1e9,mnz=1e9,mxz=-1e9;
+          for(const b of arr){ mnx=Math.min(mnx,b.cx-b.wx/2); mxx=Math.max(mxx,b.cx+b.wx/2); mnz=Math.min(mnz,b.cz-b.wz/2); mxz=Math.max(mxz,b.cz+b.wz/2); }
+          const vertical = (mxz-mnz) > (mxx-mnx);
+
+          for(const b of arr){
+            const bx = b.cx - b.wx/2, bz = b.cz - b.wz/2;
+            const isTarget = (b.code === parsed.bayCode);
+            const fill = isTarget ? col[0] : "rgba(15,23,42,.045)";
+            const stroke = isTarget ? "rgba(0,0,0,.35)" : "rgba(15,23,42,.28)";
+            const cls = isTarget ? ' class="tm-targetcell"' : "";
+            s += `<rect${cls} x="${f(bx)}" y="${f(bz)}" width="${f(b.wx)}" height="${f(b.wz)}" rx="0.08" fill="${fill}" stroke="${stroke}" stroke-width="${isTarget?0.14:0.07}"/>`;
+            // suddivisione pallet (linee sottili)
+            for(let p=1;p<b.pal;p++){
+              if(vertical){
+                const yy = bz + (b.wz/b.pal)*p;
+                s += `<line x1="${f(bx)}" y1="${f(yy)}" x2="${f(bx+b.wx)}" y2="${f(yy)}" stroke="rgba(15,23,42,.22)" stroke-width="0.03"/>`;
+              }else{
+                const xx = bx + (b.wx/b.pal)*p;
+                s += `<line x1="${f(xx)}" y1="${f(bz)}" x2="${f(xx)}" y2="${f(bz+b.wz)}" stroke="rgba(15,23,42,.22)" stroke-width="0.03"/>`;
+              }
+            }
+            // codice campata
+            const tcol = isTarget ? col[1] : "rgba(15,23,42,.55)";
+            s += `<text x="${f(b.cx)}" y="${f(b.cz)}" font-size="${vertical?0.42:0.46}" fill="${tcol}" text-anchor="middle" dominant-baseline="middle" font-weight="800" transform="rotate(${vertical?-90:0} ${f(b.cx)} ${f(b.cz)})">${b.code}</text>`;
+            // evidenzia pallet target dentro la campata
+            if(isTarget){
+              const slot = (vertical ? b.wz : b.wx) / b.pal;
+              let pcx, pcz, pw, ph;
+              if(vertical){ pw=b.wx*0.9; ph=slot*0.82; pcx=b.cx; pcz=bz + slot*(parsed.pallet-0.5); }
+              else        { pw=slot*0.82; ph=b.wz*0.9; pcx=bx + slot*(parsed.pallet-0.5); pcz=b.cz; }
+              s += `<rect x="${f(pcx-pw/2)}" y="${f(pcz-ph/2)}" width="${f(pw)}" height="${f(ph)}" rx="0.05" fill="rgba(255,255,255,.35)" stroke="#0f1111" stroke-width="0.05" stroke-dasharray="0.18 0.12"/>`;
+            }
+          }
+
+          // cartello fila (badge sul lato corsia)
+          let lx, lz;
+          if(vertical){ lx = (mnx+mxx)/2; lz = mnz - 0.7; }
+          else        { lx = mnx - 0.7;   lz = (mnz+mxz)/2; }
+          s += `<g>`;
+          s += `<rect x="${f(lx-0.65)}" y="${f(lz-0.5)}" width="1.3" height="1.0" rx="0.18" fill="${col[0]}" stroke="rgba(0,0,0,.25)" stroke-width="0.05"/>`;
+          s += `<text x="${f(lx)}" y="${f(lz)}" font-size="0.85" fill="${col[1]}" text-anchor="middle" dominant-baseline="central" font-weight="900">${rid}</text>`;
+          s += `</g>`;
+        }
+
+        // PIN sulla campata target (centro pallet)
+        const tb = BAY_BY_CODE[parsed.bayCode];
+        if(tb){
+          let px = tb.cx, pz = tb.cz;
+          const vertical = (tb.wz > tb.wx);
+          const slot = (vertical ? tb.wz : tb.wx) / tb.pal;
+          if(vertical){ pz = (tb.cz - tb.wz/2) + slot*(parsed.pallet-0.5); }
+          else        { px = (tb.cx - tb.wx/2) + slot*(parsed.pallet-0.5); }
+          const r = 0.55;
+          s += `<g class="tm-pin">`;
+          s += `<path d="M ${f(px)} ${f(pz)} L ${f(px-r*0.7)} ${f(pz-r*1.5)} A ${f(r)} ${f(r)} 0 1 1 ${f(px+r*0.7)} ${f(pz-r*1.5)} Z" fill="var(--accent,#f97316)" stroke="#fff" stroke-width="0.09"/>`;
+          s += `<circle cx="${f(px)}" cy="${f(pz-r*1.55)}" r="${f(r*0.45)}" fill="#fff"/>`;
+          s += `</g>`;
+        }
+
+        // bussola / scala
+        s += `<g opacity="0.8">`;
+        s += `<line x1="${f(x0+0.4)}" y1="${f(z1-0.5)}" x2="${f(x0+5.4)}" y2="${f(z1-0.5)}" stroke="rgba(15,23,42,.6)" stroke-width="0.06"/>`;
+        s += `<line x1="${f(x0+0.4)}" y1="${f(z1-0.7)}" x2="${f(x0+0.4)}" y2="${f(z1-0.3)}" stroke="rgba(15,23,42,.6)" stroke-width="0.06"/>`;
+        s += `<line x1="${f(x0+5.4)}" y1="${f(z1-0.7)}" x2="${f(x0+5.4)}" y2="${f(z1-0.3)}" stroke="rgba(15,23,42,.6)" stroke-width="0.06"/>`;
+        s += `<text x="${f(x0+2.9)}" y="${f(z1-0.85)}" font-size="0.55" fill="rgba(15,23,42,.6)" text-anchor="middle" font-weight="700">5 m</text>`;
+        s += `</g>`;
+
+        return `<svg class="tm-plan" viewBox="${f(VB.x)} ${f(VB.y)} ${f(VB.w)} ${f(VB.h)}" xmlns="${NS}" role="img" aria-label="Pianta capannone, posizione ${esc(parsed.code)}">${s}</svg>`;
+      }
+
+      // --- prospetto laterale (alzato) della campata target, in scala sull'altezza reale ---
+      function buildElevationSVG(parsed){
+        const NS = "http://www.w3.org/2000/svg";
+        const f = (n)=> (Math.round(n*1000)/1000);
+        const tb = BAY_BY_CODE[parsed.bayCode];
+        const palCount = tb ? tb.pal : 3;
+        const col = RACK_COLORS[parsed.rack] || ["#f97316","#fff"];
+
+        // viewBox metrico: larghezza = ingombro vano (1 pallet 1.20) + margini; altezza = telaio + quota.
+        const VW = 3.2, VH = RACK_TOTH + 1.3;
+        // funzioni di proiezione: world height → svgY (invertito, 0 a terra in basso)
+        const groundY = RACK_TOTH + 0.65;     // linea pavimento nello spazio svg
+        const yOf = (h)=> groundY - h;        // altezza reale → y svg
+        const cx = 1.3;
+        const colW = 1.55;                    // larghezza montanti in vista
+        const x0 = cx - colW/2, x1 = cx + colW/2;
+
+        let s = "";
+        // pavimento
+        s += `<line x1="${f(0.35)}" y1="${f(groundY)}" x2="${f(x1+0.25)}" y2="${f(groundY)}" stroke="rgba(15,23,42,.55)" stroke-width="0.045"/>`;
+        // montanti (2)
+        for(const mx of [x0, x1]){
+          s += `<rect x="${f(mx-0.05)}" y="${f(yOf(RACK_TOTH))}" width="0.10" height="${f(RACK_TOTH)}" rx="0.03" fill="rgba(15,23,42,.10)" stroke="rgba(15,23,42,.30)" stroke-width="0.03"/>`;
+        }
+        // correnti di livello (a quota LEVEL_Y) + vani
+        for(let lv=1; lv<=3; lv++){
+          const baseY = LEVEL_Y[lv-1];
+          const isTarget = (lv === parsed.level);
+          // ripiano/corrente
+          const beamY = (lv===1) ? 0 : baseY;
+          s += `<rect x="${f(x0)}" y="${f(yOf(beamY)-0.03)}" width="${f(colW)}" height="0.06" fill="rgba(242,106,30,.55)"/>`;
+          // vano evidenziato se target
+          const vanoTop = baseY + VANO_H;
+          if(isTarget){
+            s += `<rect class="tm-elevcell" x="${f(x0+0.04)}" y="${f(yOf(vanoTop))}" width="${f(colW-0.08)}" height="${f(VANO_H)}" rx="0.05" fill="${col[0]}" fill-opacity="0.35" stroke="${col[0]}" stroke-width="0.05"/>`;
+          }
+          // pallet del livello (uno schematico, o evidenzia il target sul livello giusto)
+          const palY = (lv===1) ? 0 : baseY;
+          // EPAL
+          s += `<rect x="${f(cx-0.6)}" y="${f(yOf(palY+PAL_H))}" width="1.2" height="${f(PAL_H)}" fill="${isTarget?'#c99a5b':'rgba(201,154,91,.45)'}" stroke="rgba(120,80,40,.5)" stroke-width="0.02"/>`;
+          if(isTarget){
+            // carico sul pallet target
+            const ch = Math.min(VANO_H-0.2, 1.0);
+            s += `<rect x="${f(cx-0.52)}" y="${f(yOf(palY+PAL_H+ch))}" width="1.04" height="${f(ch)}" rx="0.04" fill="rgba(198,154,106,.9)" stroke="rgba(120,80,40,.5)" stroke-width="0.02"/>`;
+            // pin sopra
+            const py = yOf(palY+PAL_H+ch) - 0.15;
+            const r = 0.32;
+            s += `<path d="M ${f(cx)} ${f(py)} L ${f(cx-r*0.7)} ${f(py-r*1.5)} A ${f(r)} ${f(r)} 0 1 1 ${f(cx+r*0.7)} ${f(py-r*1.5)} Z" fill="var(--accent,#f97316)" stroke="#fff" stroke-width="0.05"/>`;
+            s += `<circle cx="${f(cx)}" cy="${f(py-r*1.55)}" r="${f(r*0.45)}" fill="#fff"/>`;
+          }
+          // etichetta livello a sinistra
+          const lblY = yOf(baseY + VANO_H/2);
+          s += `<text x="${f(x0-0.18)}" y="${f(lblY)}" font-size="0.32" fill="${isTarget?col[0]:'rgba(15,23,42,.55)'}" text-anchor="end" dominant-baseline="middle" font-weight="800">L${lv}</text>`;
+          // quota in metri a destra
+          s += `<text x="${f(x1+0.16)}" y="${f(yOf(baseY))}" font-size="0.26" fill="rgba(15,23,42,.45)" text-anchor="start" dominant-baseline="middle" font-weight="600">${baseY.toFixed(1)} m</text>`;
+        }
+        // scala altezza (quota totale)
+        s += `<text x="${f(cx)}" y="${f(yOf(RACK_TOTH)-0.18)}" font-size="0.28" fill="rgba(15,23,42,.5)" text-anchor="middle" font-weight="700">h ${RACK_TOTH.toFixed(2)} m</text>`;
+
+        return `<svg class="tm-elev" viewBox="0 0 ${f(VW)} ${f(VH)}" xmlns="${NS}" role="img" aria-label="Prospetto campata ${esc(parsed.bayCode)}, livello L${parsed.level}">${s}</svg>`;
+      }
+
+      function renderMap(parsed){
+        const ov = buildOverlay();
+        const wrap = ov.querySelector("#tmPlanWrap");
+        const meta = ov.querySelector("#tmMeta");
+        const levelsEl = ov.querySelector("#tmLevels");
+        const badge = ov.querySelector("#tmBadge");
+        const title = ov.querySelector("#tmTitle");
+
+        const col = RACK_COLORS[parsed.rack] || ["#f97316","#fff"];
+        badge.textContent = parsed.code;
+        badge.style.background = col[0];
+        badge.style.color = col[1];
+        title.textContent = `Concamarise · Fila ${parsed.rack} · Campata ${parsed.bayCode}`;
+
+        wrap.innerHTML = buildPlanSVG(parsed);
+        const elev = ov.querySelector("#tmElev");
+        if(elev) elev.innerHTML = buildElevationSVG(parsed);
+
+        const palCount = palletsForBay(parsed.rack, parsed.bay);
+        meta.innerHTML = `
+          <div class="tm-chip"><span class="k">Fila</span><span class="v">${parsed.rack}</span></div>
+          <div class="tm-chip"><span class="k">Campata</span><span class="v">${parsed.bayCode}</span></div>
+          <div class="tm-chip"><span class="k">Livello</span><span class="v">L${parsed.level}</span></div>
+          <div class="tm-chip"><span class="k">Pallet</span><span class="v">P${parsed.pallet} / ${palCount}</span></div>
+        `;
+
+        levelsEl.innerHTML = "";
+        for(let lv=3; lv>=1; lv--){
+          const d = document.createElement("div");
+          d.className = "tm-lv" + (lv===parsed.level ? " on" : "");
+          d.innerHTML = `L${lv}<small>${lv===3?"alto":lv===1?"terra":"medio"}</small>`;
+          levelsEl.appendChild(d);
+        }
+        ov.classList.add("is-open");
+      }
+
+      // wrapping non distruttivo: chiama l'originale (comando Firestore al Capannone 3D
+      // INVARIATO), poi apre la pianta fullscreen.
+      if(typeof openCapannone3dFind === "function" && !openCapannone3dFind.__trovaWrapped){
+        const original = openCapannone3dFind;
+        openCapannone3dFind = async function(code){
+          let res;
+          try{ res = await original.apply(this, arguments); }
+          catch(err){ console.warn("openCapannone3dFind (orig)", err); }
+          try{
+            const parsed = parseLocationCode(code);
+            if(parsed) renderMap(parsed);
+          }catch(err){ console.warn("trova plan render", err); }
+          return res;
+        };
+        openCapannone3dFind.__trovaWrapped = true;
+      }
+    })();
   </script>
 
 

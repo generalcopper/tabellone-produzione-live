@@ -2586,10 +2586,10 @@ function clearHighlight(){
   clearGlow();
   if(highlightMesh){scene.remove(highlightMesh);highlightMesh.traverse(o=>{if(o.geometry)o.geometry.dispose();});highlightMesh=null;}
 }
-/* ===== VOCE IA (femminile, naturale) — stesso TTS di app_tabellone =====
-   Usa la Cloud Function proxy ElevenLabs già deployata sul progetto Firebase.
-   Riproduce audio reale (non la voce robotica del browser). Fallback a speechSynthesis
-   solo se il TTS cloud non è raggiungibile. */
+/* ===== VOCE IA CLOUD (ElevenLabs via endpoint app_tabellone) =====
+   Cloud-only: il kiosk non usa Web Speech / speechSynthesis come fallback locale.
+   Tutte le frasi passano dall'endpoint Firebase già usato dal tabellone; il browser
+   riproduce solo l'audio ricevuto dal cloud. */
 const TTS_ELEVEN_PROXY_URL = "https://us-central1-tabellone-produzione-liv-e313e.cloudfunctions.net/ttsOpenAIKiosk";
 let _fbAuth = null;   // riferimento all'auth Firebase (impostato dopo l'init) per autenticare il TTS
 async function _ttsAuthToken(){
@@ -2600,34 +2600,31 @@ async function _ttsAuthToken(){
   return "";
 }
 
-
-/* ===== KIOSK AUDIO STARTUP — procedura allineata ad app_tabellone =====
-   Warm-up immediato + load/pageshow/visibility + retry cadenzati. Non modifica dati,
-   non scrive in cloud: serve solo a rendere la voce pronta già all'avvio del kiosk. */
+/* ===== KIOSK AUDIO STARTUP — allineato ad app_tabellone, cloud-only =====
+   Warm-up immediato + load/pageshow/visibility + retry cadenzati. Non scrive dati,
+   non usa cache/fallback locali: serve solo a sbloccare l'uscita audio HTML del kiosk. */
 let _kioskAudioLastBlockedAt = 0;
 function noteKioskAudioBlocked(reason, err){
   try{
     const now = Date.now();
     if(now - _kioskAudioLastBlockedAt < 2500) return;
     _kioskAudioLastBlockedAt = now;
-    // Didascalia a video rimossa su richiesta: la diagnostica resta solo in console.
     console.log("Kiosk audio blocked", reason || "audio", err || "");
   }catch(_){ }
 }
 const Voce = (function(){
   let abilitata = true;
-  let audio = null;            // elemento <audio> riutilizzato
-  let lastUrl = null;
+  let audio = null;            // elemento <audio> riutilizzato per l'audio cloud
+  let lastBlobUrl = null;       // URL temporaneo creato da blob response (revocato al cambio frase)
   let abort = null;
-  let unlocked = false;        // l'autoplay è stato concesso?
-  let pending = null;          // ultima frase in attesa di sblocco
+  let unlocked = false;        // autoplay concesso?
+  let pendingPlay = null;      // { url, text, opts, seq } se autoplay blocca la riproduzione
   let actx = null;             // AudioContext per forzare lo sblocco
   let speakSeq = 0;            // id incrementale: solo l'ultima chiamata a parla() è valida
-  let cloudPlaying = false;    // true mentre un audio TTS cloud sta effettivamente suonando
-  let cloudOk = false;         // la voce cloud ha funzionato almeno una volta in questa sessione
-  let busy = false;            // true mentre QUALSIASI voce (cloud o browser) sta parlando
-  let _onDone = null;          // callback a fine voce corrente
-  let _browserTimer = null;    // stima fine voce browser
+  let cloudPlaying = false;
+  let busy = false;
+  let _onDone = null;
+
   function _finish(){
     if(busy){
       busy=false;
@@ -2636,34 +2633,65 @@ const Voce = (function(){
     }
   }
 
+  function _revokeBlobUrl(){
+    if(lastBlobUrl){ try{ URL.revokeObjectURL(lastBlobUrl); }catch(_){} lastBlobUrl=null; }
+  }
+
   function ensureAudio(){
     if(!audio){
-      audio=new Audio(); audio.preload="auto"; audio.autoplay=true;
-      // tieni traccia di quando l'audio cloud è in riproduzione, così la Web Speech
-      // non può MAI partire mentre la voce cloud sta parlando.
+      audio=new Audio();
+      audio.preload="auto";
+      audio.autoplay=true;
       audio.addEventListener('playing', ()=>{ cloudPlaying=true; });
-      audio.addEventListener('ended',   ()=>{ cloudPlaying=false; _finish(); });
+      audio.addEventListener('ended',   ()=>{ cloudPlaying=false; pendingPlay=null; _finish(); });
       audio.addEventListener('pause',   ()=>{ cloudPlaying=false; });
-      audio.addEventListener('error',   ()=>{ cloudPlaying=false; _finish(); });
+      audio.addEventListener('error',   ()=>{ cloudPlaying=false; pendingPlay=null; _finish(); });
     }
     return audio;
   }
 
-  // tenta di sbloccare l'audio: AudioContext.resume() + play silenzioso.
+  async function _playUrl(url, text, opts, seq){
+    if(seq !== speakSeq) return false;
+    const a=ensureAudio();
+    a.volume=1;
+    a.muted=false;
+    a.src=url;
+    try{
+      await a.play();
+      unlocked=true;
+      pendingPlay=null;
+      return true;
+    }catch(err){
+      if(String(err&&err.name)==='NotAllowedError'){
+        pendingPlay={ url, text, opts:opts||{}, seq };
+        noteKioskAudioBlocked("voce-play", err);
+        tryUnlock();
+        return false;
+      }
+      throw err;
+    }
+  }
+
+  // tenta di sbloccare l'audio senza perdere l'URL cloud eventualmente già generato.
   async function tryUnlock(){
     try{
       if(!actx){ const AC=window.AudioContext||window.webkitAudioContext; if(AC) actx=new AC(); }
       if(actx && actx.state!=='running'){ await actx.resume().catch(()=>{}); }
     }catch(_){}
     try{
-      const a=ensureAudio();
-      a.muted=true;
-      a.src="data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=";
+      const a=new Audio("data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=");
+      a.muted=true; a.preload="auto";
       await a.play();
-      a.pause(); a.currentTime=0; a.muted=false;
+      a.pause(); a.currentTime=0;
       unlocked=true;
-      // se c'era una frase in attesa, riproducila ora
-      if(pending){ const t=pending; pending=null; parla(t); }
+      if(pendingPlay && pendingPlay.seq===speakSeq){
+        const p=pendingPlay;
+        pendingPlay=null;
+        _playUrl(p.url, p.text, p.opts, p.seq).catch(e=>{
+          console.warn("TTS cloud play retry non riuscito:", e);
+          _finish();
+        });
+      }
       return true;
     }catch(e){
       noteKioskAudioBlocked("voce-prime", e);
@@ -2680,128 +2708,97 @@ const Voce = (function(){
     return "";
   }
 
-  async function _cloud(text){
+  async function _cloudUrl(text){
+    let to=null;
     try{
       if(abort) try{ abort.abort(); }catch(_){}
       abort = new AbortController();
-      const to = setTimeout(()=>{ try{abort.abort();}catch(_){} }, 8000);
+      to = setTimeout(()=>{ try{abort.abort();}catch(_){} }, 10000);
       const headers={"Content-Type":"application/json"};
       const tok = await _ttsAuthToken();
-      if(tok) headers["Authorization"]="Bearer "+tok;   // autentica la Cloud Function (evita 401)
+      if(tok) headers["Authorization"]="Bearer "+tok;
       const res = await fetch(TTS_ELEVEN_PROXY_URL, {
-        method:"POST", headers,
-        body: JSON.stringify({ text, language:"it-IT", lang:"it-IT", voice:"female",
-          voiceGender:"female", style:"natural", source:"kiosk_capannone3d" }),
-        signal: abort.signal, cache:"no-store"
+        method:"POST",
+        headers,
+        body: JSON.stringify({
+          text,
+          language:"it-IT",
+          lang:"it-IT",
+          provider:"elevenlabs",
+          voice:"female",
+          voiceGender:"female",
+          style:"natural",
+          source:"kiosk_capannone3d"
+        }),
+        signal: abort.signal,
+        cache:"no-store"
       });
-      clearTimeout(to);
       if(!res.ok) throw new Error("tts-http-"+res.status);
       const ct=String(res.headers.get("content-type")||"").toLowerCase();
       let url="";
-      if(ct.includes("application/json")){ url=_jsonToUrl(await res.json()); }
-      else { const blob=await res.blob(); if(!blob||!blob.size) throw new Error("empty"); url=URL.createObjectURL(blob); lastUrl=url; }
-      if(!url) throw new Error("no-url");
-      const a=ensureAudio(); a.volume=1; a.muted=false; a.src=url;
-      try{
-        await a.play();
-        unlocked=true;            // se è partito, l'autoplay è ok
-        cloudOk=true;             // la voce cloud funziona: la Web Speech non serve più
-      }catch(err){
-        // autoplay bloccato: metti in coda e ritenta appena sbloccato
-        if(String(err&&err.name)==='NotAllowedError'){ pending=text; tryUnlock(); }
-        throw err;
+      if(ct.includes("application/json")){
+        url=_jsonToUrl(await res.json());
+      }else{
+        const blob=await res.blob();
+        if(!blob||!blob.size) throw new Error("empty-audio");
+        _revokeBlobUrl();
+        lastBlobUrl=URL.createObjectURL(blob);
+        url=lastBlobUrl;
       }
-      return true;
-    }catch(e){
-      console.log("TTS cloud non disponibile:", e);
-      return false;
+      if(!url) throw new Error("no-audio-url");
+      return url;
+    }finally{
+      if(to) clearTimeout(to);
     }
-  }
-
-  function _browser(text){
-    const synth=window.speechSynthesis; if(!synth) return false;
-    try{
-      synth.cancel();
-      const voices=synth.getVoices()||[];
-      const it=voices.filter(v=>/it/i.test(v.lang));
-      const pref=['Alice','Elsa','Federica','Giulia','Google italiano','Microsoft Elsa'];
-      let voce=null; for(const p of pref){ voce=it.find(v=>v.name.toLowerCase().includes(p.toLowerCase())); if(voce)break; }
-      if(!voce) voce=it[0]||voices[0];
-      const u=new SpeechSynthesisUtterance(text);
-      if(voce) u.voice=voce; u.lang=(voce&&voce.lang)||'it-IT'; u.rate=1.0; u.pitch=1.05;
-      // fine voce browser → libera (con fallback a timer, alcuni motori non emettono onend)
-      if(_browserTimer){ clearTimeout(_browserTimer); _browserTimer=null; }
-      u.onend = ()=>{ if(_browserTimer){ clearTimeout(_browserTimer); _browserTimer=null; } _finish(); };
-      u.onerror = ()=>{ if(_browserTimer){ clearTimeout(_browserTimer); _browserTimer=null; } _finish(); };
-      const words=text.split(/\s+/).length;
-      const est=Math.min(14000, Math.max(3000, words*420));
-      _browserTimer=setTimeout(()=>{ _browserTimer=null; _finish(); }, est+800);
-      synth.speak(u);
-      return true;
-    }catch(_){ return false; }
   }
 
   async function parla(testo, opts){
     const msg=String(testo||'').trim();
     if(!abilitata || !msg) return false;
     opts = opts || {};
-    const priority = opts.priority || 'high';   // default: comportamento storico (interrompe)
+    const priority = opts.priority || 'high';
     const onDone = (typeof opts.onDone==='function') ? opts.onDone : null;
 
-    // PRIORITÀ: una voce di servizio (es. nuovo ordine) NON deve coprire né interrompere
-    // una voce in corso (es. annuncio "Trova"). Se c'è già qualcosa che parla, la scarto.
-    if(priority==='low' && busy){
-      return false;   // chiamante (Annunci) reinserirà/ritenterà più tardi
-    }
+    // Annunci di servizio: non coprono mai una voce già in corso.
+    if(priority==='low' && busy) return false;
 
-    // ogni nuova frase invalida le precedenti: il fallback browser parte solo se
-    // questa è ANCORA l'ultima richiesta quando il cloud ha finito di tentare.
     const mySeq = ++speakSeq;
-    // interrompi qualsiasi voce in corso (cloud o browser) prima di parlare
-    if(_browserTimer){ clearTimeout(_browserTimer); _browserTimer=null; }
+    pendingPlay=null;
+    try{ if(abort) abort.abort(); }catch(_){}
     try{ if(audio){ audio.pause(); audio.currentTime=0; } }catch(_){}
     cloudPlaying=false;
-    try{ if(window.speechSynthesis) window.speechSynthesis.cancel(); }catch(_){}
-    if(lastUrl){ try{ URL.revokeObjectURL(lastUrl); }catch(_){} lastUrl=null; }
-    // questa frase prende possesso della voce
+    _revokeBlobUrl();
     busy=true; _onDone=onDone;
 
-    const ok = await _cloud(msg);
-
-    // se nel frattempo è arrivata una frase più recente, abbandona: non sovrapporre nulla
-    if(mySeq !== speakSeq) return false;
-
-    if(ok) return true;            // cloud OK → fine, niente Web Speech (busy si libera su 'ended')
-    // CLOUD FALLITO. La Web Speech è l'ULTIMA SPIAGGIA: la uso solo se
-    //  - non è un blocco autoplay (in quel caso la frase è già in coda come pending), e
-    //  - non c'è un audio cloud che sta suonando, e
-    //  - questa è ancora la richiesta corrente.
-    if(pending){ _finish(); return false; }     // autoplay bloccato: ritenterà il cloud
-    if(cloudPlaying){ return true; }             // un audio cloud sta già parlando
-    if(mySeq !== speakSeq) return false;
-    const b=_browser(msg);
-    if(!b) _finish();              // nessun motore disponibile: libera subito
-    return b;
-  }
-  function toggle(on){ abilitata=(on!==undefined)?!!on:!abilitata;
-    if(!abilitata){ try{audio&&audio.pause();}catch(_){} try{window.speechSynthesis&&window.speechSynthesis.cancel();}catch(_){}
-      if(_browserTimer){ clearTimeout(_browserTimer); _browserTimer=null; } _finish(); }
-    return abilitata; }
-
-  function primeKioskSpeechSynthesis(){
     try{
-      if(!("speechSynthesis" in window)) return;
-      const u = new SpeechSynthesisUtterance(" ");
-      u.lang = "it-IT";
-      u.volume = 0;
-      u.onerror = (ev) => noteKioskAudioBlocked("speech-prime", ev?.error || ev);
-      window.speechSynthesis.speak(u);
-    }catch(e){ noteKioskAudioBlocked("speech-prime-call", e); }
+      const url = await _cloudUrl(msg);
+      if(mySeq !== speakSeq) return false;
+      const started = await _playUrl(url, msg, opts, mySeq);
+      if(!started && pendingPlay) return false;  // autoplay bloccato: riprova dopo unlock, senza rigenerare audio
+      return started;
+    }catch(e){
+      if(mySeq !== speakSeq) return false;
+      console.warn("TTS cloud ElevenLabs non disponibile:", e);
+      pendingPlay=null;
+      _finish();
+      return false;
+    }
+  }
+
+  function toggle(on){
+    abilitata=(on!==undefined)?!!on:!abilitata;
+    if(!abilitata){
+      try{ if(abort) abort.abort(); }catch(_){}
+      try{audio&&audio.pause();}catch(_){}
+      pendingPlay=null;
+      cloudPlaying=false;
+      _revokeBlobUrl();
+      _finish();
+    }
+    return abilitata;
   }
 
   async function primeStandaloneKioskAudio(){
-    // Come app_tabellone: usa un audio silenzioso separato, così non interrompe mai
-    // un eventuale annuncio già in corso sul player TTS principale.
     try{
       const a = new Audio("data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=");
       a.muted = true;
@@ -2813,12 +2810,9 @@ const Voce = (function(){
 
   function runKioskAudioWarmup(){
     try{ primeStandaloneKioskAudio(); }catch(_){ }
-    try{ primeKioskSpeechSynthesis(); }catch(_){ }
     try{ if(!unlocked && !busy) tryUnlock(); }catch(_){ }
   }
 
-  // Stessa procedura pratica di app_tabellone: non aspetta click/touch, prova subito,
-  // riprova a pagina mostrata e mantiene un warm-up per i primi secondi del kiosk.
   runKioskAudioWarmup();
   try{ window.addEventListener("load", runKioskAudioWarmup, { once:true }); }catch(_){ }
   try{ window.addEventListener("pageshow", runKioskAudioWarmup); }catch(_){ }
@@ -2831,7 +2825,6 @@ const Voce = (function(){
     if(unlocked || _warmTries >= 12) clearInterval(_warmTimer);
   }, 2500);
 
-  // Mantiene anche il rinforzo da gesture, ma non dipende più dal click dell'utente.
   window.addEventListener("pointerdown", runKioskAudioWarmup, { once:true, passive:true, capture:true });
   window.addEventListener("touchstart", runKioskAudioWarmup, { once:true, passive:true, capture:true });
   window.addEventListener("mousedown", runKioskAudioWarmup, { once:true, passive:true, capture:true });
