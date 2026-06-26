@@ -2672,29 +2672,27 @@ const Voce = (function(){
       return true;
     }catch(err){
       if(String(err&&err.name)==='NotAllowedError'){
+        // Autoplay realmente bloccato sul file audio cloud. Non ritentare in automatico:
+        // Chrome/Edge genererebbe NotAllowedError a raffica senza gesture. Si ritenta solo
+        // se arriva una gesture reale oppure se il kiosk/browser ha autoplay già consentito.
         pendingPlay={ url, text, opts:opts||{}, seq };
         noteKioskAudioBlocked("voce-play", err);
-        tryUnlock();
+        _finish();
         return false;
       }
       throw err;
     }
   }
 
-  // Warm-up audio come app_tabellone: solo elemento <audio>, niente WebAudio.
-  // Questo evita il warning "AudioContext was not allowed to start" e lascia il TTS cloud/cache invariato.
-  async function tryUnlock(){
+  // Sblocco solo da gesture reale: nessun play() silenzioso automatico all'avvio.
+  // In kiosk con autoplay consentito, il vero MP3 cloud parte direttamente; se il browser
+  // blocca davvero l'audio, un tap/tasto riprova l'audio già scaricato senza rigenerarlo.
+  async function tryUnlock(ev){
+    const isGesture = !!(ev && ev.isTrusted && /^(pointerdown|touchstart|mousedown|keydown)$/i.test(String(ev.type||"")));
+    if(!isGesture && !pendingPlay) return false;
+
     try{
-      const a = new Audio("data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=");
-      a.muted = true;
-      a.preload = "auto";
-
-      await a.play();
-      a.pause();
-      a.currentTime = 0;
-
       unlocked = true;
-
       if(pendingPlay && pendingPlay.seq === speakSeq){
         const p = pendingPlay;
         pendingPlay = null;
@@ -2703,7 +2701,6 @@ const Voce = (function(){
           _finish();
         });
       }
-
       return true;
     }catch(e){
       noteKioskAudioBlocked("voce-prime", e);
@@ -2823,35 +2820,13 @@ const Voce = (function(){
     return abilitata;
   }
 
-  async function primeStandaloneKioskAudio(){
+  function runKioskAudioWarmup(ev){
     try{
-      const a = new Audio("data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=");
-      a.muted = true;
-      a.preload = "auto";
-      await a.play();
-      a.pause();
-    }catch(e){ noteKioskAudioBlocked("html-audio-prime", e); }
-  }
-
-  function runKioskAudioWarmup(){
-    try{ primeStandaloneKioskAudio(); }catch(_){ }
-    try{
-      // Se c'è un audio cloud già generato ma bloccato da autoplay, una gesture deve poterlo riprovare anche se busy=true.
-      if((!unlocked && !busy) || pendingPlay) tryUnlock();
+      // Solo una gesture reale può sbloccare audio se il browser lo ha bloccato.
+      // Nessun play() silenzioso automatico: elimina il warning di prime audio.
+      tryUnlock(ev);
     }catch(_){ }
   }
-
-  runKioskAudioWarmup();
-  try{ window.addEventListener("load", runKioskAudioWarmup, { once:true }); }catch(_){ }
-  try{ window.addEventListener("pageshow", runKioskAudioWarmup); }catch(_){ }
-  try{ document.addEventListener("visibilitychange", () => { if(document.visibilityState === "visible") runKioskAudioWarmup(); }); }catch(_){ }
-
-  let _warmTries = 0;
-  const _warmTimer = setInterval(() => {
-    _warmTries++;
-    runKioskAudioWarmup();
-    if(unlocked || _warmTries >= 12) clearInterval(_warmTimer);
-  }, 2500);
 
   window.addEventListener("pointerdown", runKioskAudioWarmup, { once:true, passive:true, capture:true });
   window.addEventListener("touchstart", runKioskAudioWarmup, { once:true, passive:true, capture:true });
@@ -4388,7 +4363,6 @@ function maybeSpeakKioskStartup(reason){
       if(!Voce.abilitata) return;
       if(selectedVano || tour || document.body.classList.contains('drone-flying')) return;
       if(Voce.isBusy && Voce.isBusy()) return;
-      try{ if(Voce.isUnlocked && !Voce.isUnlocked() && Voce.prime) Voce.prime(); }catch(_){ }
       Voce.parla(_buildKioskStartupAnnouncement(), { priority:'high' });
     }catch(e){ console.log('voce avvio kiosk non partita', reason || '', e); }
   }, 1800);
