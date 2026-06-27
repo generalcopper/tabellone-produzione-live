@@ -4334,6 +4334,7 @@ Tip:
       },
       ui: { sheet:null, sheetStack:[], sottoscortaLoc:null, wfOpen:false, flowId:null, flowSearch:"", productsSearch:"", homeLocatedSearch:"", homeNoLocationSearch:"", pickingHomeView:"noLocation", productEditSku:null, productDetailsSku:null, productDetailsLot:"", productDetailsEditMode:false, caricaMode:"pdf", flowsModalLoc:"concamarise", skuPick:{ lineIdx:null, q:"" } },
       manual: { carica:{ text:"", lines:[], busy:false } },
+      actionLocks: new Set(),
 
       movements: { unsub: null, sku: null, items: [], error: "" },
       combo: {
@@ -7068,12 +7069,40 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
       return !!(state.user?.isWhitelisted || state.user?.isAdmin || state.user?.isUser || state.user?.role === "user" || (Array.isArray(state.user?.roles) && state.user.roles.includes("user")));
     }
 
+    function pickingActionKey(parts){
+      try{ return (Array.isArray(parts) ? parts : [parts]).map(x=>String(x || "")).join(":"); }
+      catch(_e){ return String(parts || "picking"); }
+    }
+
+    async function withPickingActionLock(key, btn, fn){
+      const k = pickingActionKey(key || "picking");
+      if(!state.actionLocks) state.actionLocks = new Set();
+      if(state.actionLocks.has(k)){
+        showToast("Operazione in corso", "Attendi la conferma cloud prima di ripremere.", 1400);
+        return null;
+      }
+      state.actionLocks.add(k);
+      const hadBtn = !!btn;
+      const oldDisabled = hadBtn ? !!btn.disabled : false;
+      if(hadBtn) btn.disabled = true;
+      try{
+        return await fn();
+      }catch(err){
+        console.error("picking action", k, err);
+        showToast("Errore picking", String(err?.message || err).slice(0, 240), 3200);
+        return null;
+      }finally{
+        state.actionLocks.delete(k);
+        if(hadBtn && document.contains(btn)) btn.disabled = oldDisabled;
+      }
+    }
+
     // --- realtime inventory watchers ---
     function startAllRealtime(){
       startRealtimeFor("cerea");
       startRealtimeFor("concamarise");
       startAllLogs();
-      startActivityLogWatch();
+      // Movimenti prodotto: listener pesanti, avviati solo quando l’utente apre la sezione Logs.
       startLowStockEmailMetaWatch();
       startShopifyFbmSyncMetaWatch();
       startTwReordersWatch();
@@ -8160,6 +8189,9 @@ function startAllLogs(){
       const shop = (d.shopify && typeof d.shopify === "object") ? d.shopify : {};
       const lines = Array.isArray(d.lines) ? d.lines : shopifyFlowLinesFromData(d);
       const ts = flowLogTimestamp(d);
+      // Timestamp stabile: gli updatedAtClient cambiano a ogni sync Shopify e non devono
+      // far "saltare" i flussi o ristampare lo storico come se fossero nuovi.
+      const stableTs = pickingFlowStableBaseTs(d) || readFlowLogTimestamp(d.appliedAtClient) || readFlowLogTimestamp(d.createdAtClient) || ts;
       const shopId = String(shop.orderId || shop.admin_graphql_api_id || shop.id || d.shopifyOrderId || d.orderId || d.name || "").trim();
       const shopName = String(shop.name || d.orderName || d.shopifyOrderName || shopId || "").trim();
       const src = String(d.source || shop.source || "").trim();
@@ -8176,14 +8208,14 @@ function startAllLogs(){
         kind: looksShopify ? "scarica" : (d.kind || ""),
         location: d.location || loc,
         fileName: d.fileName || (looksShopify ? "SHOPIFY_FBM" : ""),
-        appliedAtClient: readFlowLogTimestamp(d.appliedAtClient) || ts,
+        appliedAtClient: readFlowLogTimestamp(d.appliedAtClient) || stableTs || ts,
         appliedBy: d.appliedBy || d.createdBy || d.createdByEmail || "",
         status: d.status || (looksShopify ? "RESERVED" : ""),
         source: d.source || shop.source || (looksShopify ? "shopify_fbm" : ""),
         reservation,
         shopify: shop,
-        updatedAtClient: readFlowLogTimestamp(d.updatedAtClient) || ts,
-        createdAtClient: readFlowLogTimestamp(d.createdAtClient) || readFlowLogTimestamp(shop.createdAtClient),
+        updatedAtClient: readFlowLogTimestamp(d.updatedAtClient) || stableTs || ts,
+        createdAtClient: readFlowLogTimestamp(d.createdAtClient) || readFlowLogTimestamp(shop.createdAtClient) || stableTs || 0,
         totalLines,
         totalPieces,
         workflow: d.workflow || null,
@@ -8268,14 +8300,14 @@ function startAllLogs(){
       });
 
       const unsubs = [];
-      unsubs.push(attach("applied", api.query(colRef, api.orderBy("appliedAtClient","desc"), api.limit(300)), true));
+      unsubs.push(attach("applied", api.query(colRef, api.orderBy("appliedAtClient","desc"), api.limit(180)), true));
       // Shopify/FBM automatico può essere scritto con updatedAtClient/createdAtClient invece di appliedAtClient.
-      // Questi listener secondari recuperano quei documenti e li fondono con lo storico normale.
-      try{ unsubs.push(attach("updated", api.query(colRef, api.orderBy("updatedAtClient","desc"), api.limit(300)), false)); }catch(_e){}
-      try{ unsubs.push(attach("shopifySource", api.query(colRef, api.where("source", "==", "shopify_fbm"), api.limit(400)), false)); }catch(_e){}
-      try{ unsubs.push(attach("shopifySourcePlain", api.query(colRef, api.where("source", "==", "shopify"), api.limit(400)), false)); }catch(_e){}
-      try{ unsubs.push(attach("shopifyFile", api.query(colRef, api.where("fileName", "==", "SHOPIFY_FBM"), api.limit(400)), false)); }catch(_e){}
-      try{ unsubs.push(attach("raw", api.query(colRef, api.limit(400)), false)); }catch(_e){}
+      // Limiti più stretti: meno memoria/listener traffic sul kiosk, stessa logica di merge.
+      try{ unsubs.push(attach("updated", api.query(colRef, api.orderBy("updatedAtClient","desc"), api.limit(120)), false)); }catch(_e){}
+      try{ unsubs.push(attach("shopifySource", api.query(colRef, api.where("source", "==", "shopify_fbm"), api.limit(180)), false)); }catch(_e){}
+      try{ unsubs.push(attach("shopifySourcePlain", api.query(colRef, api.where("source", "==", "shopify"), api.limit(120)), false)); }catch(_e){}
+      try{ unsubs.push(attach("shopifyFile", api.query(colRef, api.where("fileName", "==", "SHOPIFY_FBM"), api.limit(180)), false)); }catch(_e){}
+      try{ unsubs.push(attach("raw", api.query(colRef, api.limit(90)), false)); }catch(_e){}
       lg.unsub = ()=>{
         try{ if(lg._mergeTimer){ clearTimeout(lg._mergeTimer); lg._mergeTimer = null; } }catch(_e){}
         for(const fn of unsubs){ try{ fn && fn(); }catch(_e){} }
@@ -8287,9 +8319,9 @@ function startAllLogs(){
     // Non usa più collectionGroup("movements") ordinata: quella query richiede un indice
     // Collection Group creato da Console Firebase. Qui leggiamo direttamente le sottocollezioni
     // /amzInventoryProducts/{sku}/movements, così il Picking funziona senza creare indici.
-    const ACTIVITY_MOVEMENT_SKU_LIMIT = 120;
-    const ACTIVITY_MOVEMENT_PER_SKU_LIMIT = 8;
-    const ACTIVITY_MOVEMENT_TOTAL_LIMIT = 120;
+    const ACTIVITY_MOVEMENT_SKU_LIMIT = 36;
+    const ACTIVITY_MOVEMENT_PER_SKU_LIMIT = 5;
+    const ACTIVITY_MOVEMENT_TOTAL_LIMIT = 80;
 
     function activityLogSkuTsFromItem(it){
       try{
@@ -8324,7 +8356,7 @@ function startAllLogs(){
       // ma la lista inventario non ha ancora fatto snapshot, il log resta comunque agganciato.
       for(const loc of ["concamarise", "cerea"]){
         for(const f of (state.logs?.[loc]?.flows || [])){
-          const fTs = flowLogTimestamp(f) || 0;
+          const fTs = pickingFlowStableBaseTs(f) || flowLogTimestamp(f) || 0;
           for(const line of (Array.isArray(f?.lines) ? f.lines : [])){
             put(line?.sku || "", fTs);
           }
@@ -8519,7 +8551,7 @@ function startAllLogs(){
       }
     }
 
-    function stopActivityLogWatch(){
+    function stopActivityLogWatch(opts = {}){
       try{ if(state.activityLogs?._refreshTimer){ clearTimeout(state.activityLogs._refreshTimer); } }catch(_e){}
       try{ state.activityLogs?.unsubMovements && state.activityLogs.unsubMovements(); }catch(_e){}
       if(state.activityLogs){
@@ -8530,7 +8562,7 @@ function startAllLogs(){
         state.activityLogs._watchKey = "";
         state.activityLogs._refreshTimer = null;
       }
-      renderHomeLogsBox();
+      if(!opts || opts.render !== false) renderHomeLogsBox();
     }
 
     function shortLogId(v){
@@ -10345,6 +10377,11 @@ function currentInv(){
       }
     }
 
+    function isPickingLogsViewActive(){
+      try{ return state.route?.view === "home" && pickingHomeView() === "logs"; }
+      catch(_e){ return false; }
+    }
+
     function setPickingHomeView(view){
       if(!state.ui) state.ui = {};
       const next = (view === "picking") ? "pickingFbm" : view;
@@ -10355,9 +10392,12 @@ function currentInv(){
       }
       state.ui.pickingHomeView = (next === "located" || next === "logs" || next === "pickingFbm" || next === "pickingFba" || next === "pickingHistory") ? next : "noLocation";
       syncPickingHomeView();
+      if(isPickingLogsViewActive()) startActivityLogWatch();
+      else if(state.activityLogs?.unsubMovements) stopActivityLogWatch({ render:false });
       if(state.route?.view === "home" && (state.ui.pickingHomeView === "pickingFbm" || state.ui.pickingHomeView === "pickingFba")){
         renderHomePickingBox();
       }
+      if(state.route?.view === "home" && state.ui.pickingHomeView === "logs") renderHomeLogsBox();
       setPickingMobileMenu(false);
     }
 
@@ -10627,7 +10667,7 @@ function currentInv(){
           out.push({ ...f, location: f.location || loc, lines });
         }
       }
-      out.sort((a,b)=> (flowLogTimestamp(b) - flowLogTimestamp(a)) || String(b.id||"").localeCompare(String(a.id||"")));
+      out.sort((a,b)=> (pickingFlowStableBaseTs(b) - pickingFlowStableBaseTs(a)) || String(b.id||"").localeCompare(String(a.id||"")));
       return out;
     }
 
@@ -10828,6 +10868,10 @@ function currentInv(){
       const title = opts.title || pickingLineTitle(line, flow) || sku;
       const item = getProductBySku(loc, sku) || getItemBySkuAny(sku, loc)?.it || {};
       const beforeQty = Number.isFinite(Number(item?.qty)) ? Math.round(Number(item.qty)) : 0;
+      const beforeReserved = reservedQtyFromItem(item);
+      if(direction > 0 && beforeQty < qty){
+        throw new Error(`${sku}: stock insufficiente per il prelievo (${beforeQty} disponibili, richiesti ${qty}).`);
+      }
       const itemRef = api.doc(db, COL_ROOT, loc, SUB_ITEMS, sku);
       const delta = direction > 0 ? -qty : qty;
       const reservedDelta = delta;
@@ -10839,19 +10883,24 @@ function currentInv(){
       if(direction > 0){
         allocationResult = consumeRackAllocationsForPicking(item, qty);
         consumedAllocations = allocationResult.consumedAllocations || [];
+        if((allocationResult.missingQty || 0) > 0){
+          throw new Error(`${sku}: ubicazioni insufficienti per il prelievo (mancano ${allocationResult.missingQty} pz ubicati).`);
+        }
       }else{
         consumedAllocations = Array.isArray(opts.consumedAllocations) ? opts.consumedAllocations : [];
         allocationResult = restoreRackAllocationsForPicking(item, consumedAllocations);
       }
 
       const afterQty = beforeQty + delta;
+      const reservedFieldValue = (direction > 0 && beforeReserved <= qty) ? 0 : api.increment(reservedDelta);
+      const pendingFieldValue = (direction > 0 && beforeReserved <= qty) ? 0 : api.increment(reservedDelta);
       const itemPatch = pickingItemPatchFromAllocations({
         sku,
         title,
         titleNorm: normalizeText(title || sku),
         qty: api.increment(delta),
-        reservedQty: api.increment(reservedDelta),
-        pendingPickQty: api.increment(reservedDelta),
+        reservedQty: reservedFieldValue,
+        pendingPickQty: pendingFieldValue,
         reservationStatus: direction > 0 ? "prelevata" : "in_attesa_picking",
         lastPickingFlowId: flow?.id || opts.flowId || "",
         lastPickingAt: api.serverTimestamp(),
@@ -10889,6 +10938,7 @@ function currentInv(){
         delta,
         beforeQty,
         afterQty,
+        beforeReserved,
         reservedDelta,
         nextAllocations: allocationResult.nextAllocations || [],
         cleanLocations: allocationResult.cleanLocations || [],
@@ -11035,15 +11085,21 @@ function currentInv(){
 
     function pickingUniqueLines(flow){
       const lines = Array.isArray(flow?.lines) ? flow.lines.filter(l=>toSkuId(l?.sku || "")) : [];
-      const uniq = [];
-      const seen = new Set();
+      const map = new Map();
       for(const l of lines){
         const sku = toSkuId(l?.sku || "");
-        if(!sku || seen.has(sku)) continue;
-        seen.add(sku);
-        uniq.push(l);
+        if(!sku) continue;
+        const qty = Math.abs(parseQty(l?.qty || 0) || 0);
+        const title = squashWhitespace(l?.title || l?.name || sku) || sku;
+        const prev = map.get(sku);
+        if(prev){
+          prev.qty = Math.round((Number(prev.qty || 0) + qty) * 1000) / 1000;
+          if(title && (!prev.title || title.length > String(prev.title).length)) prev.title = title;
+        }else{
+          map.set(sku, { ...l, sku, title, qty });
+        }
       }
-      return uniq;
+      return Array.from(map.values());
     }
 
     function pickingFlowWasPickedAsGroup(flow){
@@ -11245,9 +11301,14 @@ function currentInv(){
         return;
       }
       try{
+        const nowManual = Date.now();
+        if(state.shopifySync?.busy || (nowManual - Number(state.shopifySync?.lastManualAtClient || 0)) < 1800){
+          showToast("Controllo Shopify", "Refresh già inviato, attendi un attimo.", 1200);
+          return;
+        }
         if(state.shopifySync){
-          state.shopifySync.busy = false;
-          state.shopifySync.lastManualAtClient = Date.now();
+          state.shopifySync.busy = true;
+          state.shopifySync.lastManualAtClient = nowManual;
         }
         setShopifySyncUiBusy(true);
         showToast("Controllo Shopify", "Refresh inviato.", 900);
@@ -11271,9 +11332,11 @@ function currentInv(){
         // Il sync continua via backend/Firestore; la UI non resta in loading.
         setTimeout(()=>{
           try{ setShopifySyncUiBusy(false); }catch(_e){}
+          try{ if(state.shopifySync) state.shopifySync.busy = false; }catch(_e){}
         }, 650);
       }catch(err){
         setShopifySyncUiBusy(false);
+        try{ if(state.shopifySync) state.shopifySync.busy = false; }catch(_e){}
         showToast("Errore Shopify", String(err?.message || err).slice(0, 180), 2600);
       }
     }
@@ -11316,7 +11379,7 @@ function currentInv(){
           const loc = (flow?.location === "cerea" || flow?.location === "concamarise") ? flow.location : "concamarise";
           const flowId = String(flow?.id || "");
           const flowName = flowDisplayName(flow);
-          const flowTs = flowLogTimestamp(flow) || Number(flow?.appliedAtClient || 0) || 0;
+          const flowTs = pickingFlowStableBaseTs(flow) || Number(flow?.appliedAtClient || 0) || flowLogTimestamp(flow) || 0;
           const lines = Array.isArray(flow?.lines) ? flow.lines : [];
           for(const line of lines){
             const sku = toSkuId(line?.sku || "");
@@ -18120,33 +18183,34 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
           e.preventDefault(); e.stopPropagation();
           const action = btn.getAttribute("data-action") || "";
           if(action === "refreshShopifyFbm"){
-            await triggerShopifyFbmManualSync();
+            await withPickingActionLock(["shopifyRefresh"], btn, ()=>triggerShopifyFbmManualSync());
             return;
           }
           if(action === "pickAllShopifyFbm"){
-            await savePickingAllShopifyFbmFlows();
+            await withPickingActionLock(["pickAllShopifyFbm"], btn, ()=>savePickingAllShopifyFbmFlows());
             return;
           }
           if(action === "pickAllFbaPdf"){
-            await savePickingAllFlows();
+            await withPickingActionLock(["pickAllFbaPdf"], btn, ()=>savePickingAllFlows());
             return;
           }
           const flowId = btn.getAttribute("data-flowid") || "";
           const loc = btn.getAttribute("data-loc") || "";
           if(action === "pickSku"){
             const sku = btn.getAttribute("data-sku") || "";
-            await savePickingSku(flowId, loc, sku, { skipConfirm: true });
+            await withPickingActionLock(["pickSku", loc, flowId, sku], btn, ()=>savePickingSku(flowId, loc, sku, { skipConfirm: true }));
             return;
           }
           if(action === "pickFlow"){
-            await savePickingFlow(flowId, loc);
+            await withPickingActionLock(["pickFlow", loc, flowId], btn, ()=>savePickingFlow(flowId, loc));
           }
         });
       }
 
       $("btnPickAllFlows")?.addEventListener("click", async (e)=>{
         e.preventDefault();
-        await savePickingAllFlows();
+        await withPickingActionLock(["pickAllFbaPdf"], e.currentTarget, ()=>savePickingAllFlows());
+        renderHomePickingBox();
       });
 
       const homePickedHistoryList = $("homePickedHistoryList");
@@ -18161,13 +18225,13 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
           const loc = btn.getAttribute("data-loc") || "";
           try{
             if(action === "undoPickFlow"){
-              await undoPickingFlow(flowId, loc);
+              await withPickingActionLock(["undoPickFlow", loc, flowId], btn, ()=>undoPickingFlow(flowId, loc));
             }else{
               const sku = btn.getAttribute("data-sku") || "";
-              await undoPickingSku(flowId, loc, sku);
+              await withPickingActionLock(["undoPickSku", loc, flowId, sku], btn, ()=>undoPickingSku(flowId, loc, sku));
             }
           }finally{
-            btn.disabled = false;
+            if(document.contains(btn)) btn.disabled = false;
           }
         });
       }
