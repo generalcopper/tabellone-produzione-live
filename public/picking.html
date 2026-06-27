@@ -124,7 +124,7 @@
     *{ box-sizing:border-box; }
     html, body{ height:100%; }
     html{
-      scroll-behavior: smooth;
+      scroll-behavior: auto;
       -webkit-text-size-adjust: 100%;
     }
     body{
@@ -1226,6 +1226,46 @@
     }
     @keyframes spin{ from{ transform: rotate(0deg); } to{ transform: rotate(360deg);} }
     .authFoot{ font-size: 12px; color: var(--muted); line-height: 1.4; }
+
+    /* Avvio pulito: durante ripristino/sessione/dati si vede solo uno spinner reale. */
+    .authOverlay.spinnerOnly{
+      background: rgba(255,255,255,.96);
+      backdrop-filter: none;
+      -webkit-backdrop-filter: none;
+    }
+    .authOverlay.spinnerOnly .authShell{
+      width: 70px;
+      height: 70px;
+      padding: 0;
+      border-radius: 999px;
+      display:grid;
+      place-items:center;
+      gap:0;
+      background: rgba(255,255,255,.92);
+      border:1px solid var(--line);
+      box-shadow: 0 8px 28px rgba(15,23,42,.10);
+    }
+    .authOverlay.spinnerOnly .authBrand{
+      width:100%;
+      height:100%;
+      display:grid;
+      place-items:center;
+      gap:0;
+    }
+    .authOverlay.spinnerOnly .authBrand > div:not(.authSpinner),
+    .authOverlay.spinnerOnly .authTitle,
+    .authOverlay.spinnerOnly .authSub,
+    .authOverlay.spinnerOnly .authFoot,
+    .authOverlay.spinnerOnly #btnGoogleLoginOverlay{
+      display:none !important;
+    }
+    .authOverlay.spinnerOnly .authSpinner{
+      display:block !important;
+      margin:0;
+      width:28px;
+      height:28px;
+      border-width:3px;
+    }
 
     /* Sheets (full screen) */
     .sheet{
@@ -2614,7 +2654,7 @@
         box-shadow:22px 0 50px -18px rgba(15,23,42,.30);
       }
       body.picking-menu-open .pickingSideNav{ transform:translateX(0); }
-      body.picking-menu-open{ overflow:hidden; }
+      body.picking-menu-open{ overflow-y:auto; }
 
       .pickingSideClose{ display:inline-flex; }
       .pickingNavBtn{ padding:13px 12px; font-size:15px; }
@@ -3527,6 +3567,49 @@
       .droneModeFullscreenShell{ transition:none !important; transform:none !important; }
     }
 
+
+    /* === SCROLL NATURALE CLASSICO v20260627 === */
+    html,
+    body{
+      height:auto !important;
+      min-height:100%;
+      overflow-x:hidden;
+      overflow-y:auto;
+      scroll-behavior:auto !important;
+      overscroll-behavior:auto !important;
+    }
+    body{
+      -webkit-overflow-scrolling:touch;
+      touch-action:pan-x pan-y;
+    }
+    .wrap{
+      min-height:100dvh;
+    }
+    .authOverlay,
+    .sheet{
+      overscroll-behavior:auto !important;
+    }
+    .pickingSideNav,
+    .sheetScroll,
+    .rackPickerPanel,
+    #sheetSottoscorta,
+    #sheetSottoscorta .sheetScroll,
+    #homeLogsList .terminalStream,
+    #trovaMapOverlay .tm-side,
+    #trovaMapOverlay .tm-body{
+      -webkit-overflow-scrolling:touch;
+      overscroll-behavior:auto !important;
+    }
+    @supports (height: 100dvh){
+      .sheetCard{ height:min(900px, calc(100dvh - 24px)); }
+      @media (max-width: 720px){
+        .sheetCard{ height:100dvh; }
+      }
+    }
+    body.picking-menu-open{
+      overflow-y:auto !important;
+    }
+
 </style>
 </head>
 
@@ -4161,17 +4244,15 @@ Tip:
     <div class="authShell" role="dialog" aria-modal="true" aria-label="Accesso">
       <div class="authBrand">
         <div style="min-width:0">
-          <div class="authTitle">Accesso richiesto</div>
-          <div class="authSub" id="authOverlayMessage">Accedi con Google per continuare.</div>
+          <div class="authTitle"></div>
+          <div class="authSub" id="authOverlayMessage"></div>
         </div>
         <div class="authSpinner" id="authOverlaySpinner" aria-hidden="true"></div>
       </div>
 
       <button class="btn primary" id="btnGoogleLoginOverlay" type="button">Accedi con Google</button>
 
-      <div class="authFoot">
-        Se eri già loggato, la sessione può ripristinarsi lentamente: qui vedi solo la rotellina e poi entri.
-      </div>
+      <div class="authFoot"></div>
     </div>
   </div>
 
@@ -4312,14 +4393,15 @@ Tip:
       authGateState: "unknown", // unknown | restoring | signed_out | signed_in
       authGateMessage: "",
       firebase: { ok:false, app:null, auth:null, db:null, api:null, authApi:null },
+      boot: { waitingForData:false, ready:false, readyTimer:null, startedAt:0 },
       route: { view:"home", loc:null },
       inventory: {
         cerea: { unsub:null, items:[], meta:{ count:0, lastUpdatedAt:null, loaded:false } },
         concamarise: { unsub:null, items:[], meta:{ count:0, lastUpdatedAt:null, loaded:false } }
       },
       logs: {
-        cerea: { unsub:null, flows:[], meta:{ count:0 }, _mergeTimer:null },
-        concamarise: { unsub:null, flows:[], meta:{ count:0 }, _mergeTimer:null }
+        cerea: { unsub:null, flows:[], meta:{ count:0, loaded:false, expected:0, seen:0 }, _mergeTimer:null },
+        concamarise: { unsub:null, flows:[], meta:{ count:0, loaded:false, expected:0, seen:0 }, _mergeTimer:null }
       },
       activityLogs: {
         unsubMovements: null,
@@ -4874,23 +4956,97 @@ function guessTitleFromRaw(rawText, sku){
       const ov = $("authOverlay");
       if(!ov) return;
 
+      const isBusy = !!(
+        state.boot?.waitingForData ||
+        state.authGateState === "restoring" ||
+        state.authGateState === "loading_data" ||
+        (!state.firebase.ok && state.authGateState !== "signed_out")
+      );
+
+      ov.classList.toggle("spinnerOnly", isBusy);
       ov.setAttribute("aria-hidden", show ? "false" : "true");
+      if(!show){
+        // sicurezza: all'uscita dallo spinner l'avvio non deve lasciare scroll bloccati.
+        try{
+          document.documentElement.style.overflow = "";
+          document.body.style.overflow = "";
+          document.body.style.position = "";
+          document.body.style.top = "";
+          document.body.style.width = "";
+        }catch(_e){}
+      }
 
       const sp = $("authOverlaySpinner");
       const btn = $("btnGoogleLoginOverlay");
       const msg = $("authOverlayMessage");
+      const title = ov.querySelector?.(".authTitle");
+      const foot = ov.querySelector?.(".authFoot");
 
-      const isRestoring = (state.authGateState === "restoring" || !state.firebase.ok);
+      // Avvio pulito: nessuna didascalia durante restore/auth/data-load.
+      if(title) title.textContent = "";
+      if(msg) msg.textContent = "";
+      if(foot) foot.textContent = "";
 
-      if(sp) sp.style.display = isRestoring ? "block" : "none";
-      if(btn) btn.style.display = isRestoring ? "none" : "inline-flex";
+      if(sp) sp.style.display = isBusy ? "block" : "none";
+      if(btn) btn.style.display = isBusy ? "none" : "inline-flex";
+    }
 
-      if(msg){
-        const m =
-          state.authGateMessage ||
-          (isRestoring ? "Ripristino sessione…" : "Accedi con Google per continuare.");
-        msg.textContent = m;
+    function isInitialDataReady(){
+      try{
+        if(!state.user?.isWhitelisted) return false;
+        const invReady = !!(state.inventory?.cerea?.meta?.loaded && state.inventory?.concamarise?.meta?.loaded);
+        const logsReady = !!(state.logs?.cerea?.meta?.loaded && state.logs?.concamarise?.meta?.loaded);
+        return invReady && logsReady;
+      }catch(_e){
+        return false;
       }
+    }
+
+    function beginStartupDataGate(){
+      try{
+        if(!state.boot) state.boot = {};
+        state.boot.waitingForData = true;
+        state.boot.ready = false;
+        state.boot.startedAt = Date.now();
+        if(state.boot.readyTimer){ clearTimeout(state.boot.readyTimer); state.boot.readyTimer = null; }
+        state.authGateState = "loading_data";
+        syncHeaderSub();
+        toggleAuthOverlay(true);
+      }catch(_e){}
+    }
+
+    function cancelStartupDataGate(){
+      try{
+        if(state.boot?.readyTimer){ clearTimeout(state.boot.readyTimer); }
+        if(!state.boot) state.boot = {};
+        state.boot.readyTimer = null;
+        state.boot.waitingForData = false;
+        state.boot.ready = false;
+      }catch(_e){}
+    }
+
+    function checkStartupDataGate(reason=""){
+      try{
+        if(!state.boot?.waitingForData) return;
+        toggleAuthOverlay(true);
+        if(!isInitialDataReady()) return;
+
+        if(state.boot.readyTimer) clearTimeout(state.boot.readyTimer);
+        state.boot.readyTimer = setTimeout(()=>{
+          try{
+            if(!state.boot?.waitingForData || !isInitialDataReady()) return;
+            state.boot.waitingForData = false;
+            state.boot.ready = true;
+            state.boot.readyTimer = null;
+            state.authGateState = "signed_in";
+            if(typeof renderHomeDashboard === "function") renderHomeDashboard();
+            if(typeof renderHomePickingBox === "function") renderHomePickingBox();
+            if(typeof renderHomeLogsBox === "function") renderHomeLogsBox();
+            syncHeaderSub();
+            toggleAuthOverlay(false);
+          }catch(_e){}
+        }, 120);
+      }catch(_e){}
     }
 
     function setView(view){
@@ -4930,9 +5086,10 @@ function guessTitleFromRaw(rawText, sku){
         pill?.classList.add("ok");
       }else{
         dot?.classList.remove("ok");
-        if(status) status.textContent = (state.authGateState==="restoring") ? "Verifica accesso…" : "Accesso non attivo";
-        if(sub) sub.textContent = "Accesso richiesto";
-        if(btnLogin) btnLogin.style.display = "";
+        const busy = (state.authGateState === "restoring" || state.authGateState === "loading_data");
+        if(status) status.textContent = busy ? "" : "Accesso non attivo";
+        if(sub) sub.textContent = busy ? "" : "";
+        if(btnLogin) btnLogin.style.display = busy ? "none" : "";
         pill?.classList.remove("ok");
       }
     }
@@ -6851,7 +7008,7 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
         async function signInWithGoogle(){
           try{
             state.authGateState = "restoring";
-            state.authGateMessage = "Apertura accesso Google…";
+            state.authGateMessage = "";
             syncHeaderSub();
             toggleAuthOverlay(true);
 
@@ -6909,7 +7066,7 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
         }
 
         state.authGateState = "restoring";
-        state.authGateMessage = "Ripristino sessione…";
+        state.authGateMessage = "";
         const __hadSession = __readSignedOnce();
         toggleAuthOverlay(__hadSession);
         syncHeaderSub();
@@ -6935,14 +7092,17 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
             state.authGateMessage = "";
             await resolveUserRole(user);
             syncHeaderSub();
-            toggleAuthOverlay(false);
 
             if(state.user.isWhitelisted){
+              beginStartupDataGate();
               startAllRealtime();
               setView("home");
+              checkStartupDataGate("auth_ready");
             }else{
+              cancelStartupDataGate();
               stopAllRealtime();
               setView("home");
+              toggleAuthOverlay(false);
               showToast("Account non abilitato", "Contatta l’admin per l’accesso a questo hub.");
             }
             __markSignedOnce();
@@ -6951,9 +7111,10 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
 
           const finalizeSignedOut = ()=>{
             state.user = null;
+            cancelStartupDataGate();
             stopAllRealtime();
             state.authGateState = "signed_out";
-            state.authGateMessage = "Sessione non attiva. Accedi con Google per continuare.";
+            state.authGateMessage = "";
             syncHeaderSub();
             toggleAuthOverlay(true);
             setView("home");
@@ -7110,6 +7271,7 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
     }
 
     function stopAllRealtime(){
+      cancelStartupDataGate();
       resetLowStockRealtimeWatcher();
       stopTwReordersWatch();
       stopTwCompletedAmazonWatch();
@@ -7216,6 +7378,7 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
         triggerLowStockMailFromRealtime("realtime_low_stock_" + loc);
         scheduleTwReordersBackfillFromState("inventory_" + loc);
         refreshActivityLogSkuWatchers("inventory_" + loc);
+        checkStartupDataGate("inventory_" + loc);
       }, (err)=>{
         console.warn("inventory watch error", err);
         showToast("Permessi insufficienti", err?.message || String(err));
@@ -7525,7 +7688,7 @@ function startAllLogs(){
         try{ state.logs[loc].unsub && state.logs[loc].unsub(); }catch(_e){}
         state.logs[loc].unsub = null;
         state.logs[loc].flows = [];
-        state.logs[loc].meta = { count:0 };
+        state.logs[loc].meta = { count:0, loaded:false, expected:0, seen:0 };
       }
       if(state.route.view==="location") renderFlowsList();
       if(state.route.view==="home") renderHomeLogsBox();
@@ -8145,26 +8308,39 @@ function startAllLogs(){
       const s = (f.shopify && typeof f.shopify === "object") ? f.shopify : {};
       const r = (f.reservation && typeof f.reservation === "object") ? f.reservation : {};
       const p = (f.picking && typeof f.picking === "object") ? f.picking : {};
-      return Math.max(
-        readFlowLogTimestamp(f.appliedAtClient),
-        readFlowLogTimestamp(f.updatedAtClient),
-        readFlowLogTimestamp(f.doneAtClient),
-        readFlowLogTimestamp(f.createdAtClient),
-        readFlowLogTimestamp(f.importedAtClient),
-        readFlowLogTimestamp(f.orderCreatedAtClient),
-        readFlowLogTimestamp(f.appliedAt),
-        readFlowLogTimestamp(f.updatedAt),
-        readFlowLogTimestamp(f.createdAt),
-        readFlowLogTimestamp(s.updatedAtClient),
-        readFlowLogTimestamp(s.createdAtClient),
-        readFlowLogTimestamp(s.orderCreatedAtClient),
-        readFlowLogTimestamp(s.created_at),
-        readFlowLogTimestamp(s.createdAt),
-        readFlowLogTimestamp(r.reservedAtClient),
-        readFlowLogTimestamp(r.updatedAtClient),
-        readFlowLogTimestamp(p.updatedAtClient),
-        readFlowLogTimestamp(p.flowPickedAtClient)
-      );
+
+      // IMPORTANTE: timestamp log = data evento, NON data aggiornamento documento.
+      // updatedAtClient/updatedAt cambiano a ogni sync/realtime e facevano sembrare
+      // tutti i log appena scaricati/ristampati all'avvio del kiosk.
+      const candidates = [
+        f.appliedAtClient,
+        f.doneAtClient,
+        f.createdAtClient,
+        f.importedAtClient,
+        f.orderCreatedAtClient,
+        f.completedAtClient,
+        f.appliedAt,
+        f.doneAt,
+        f.createdAt,
+        s.createdAtClient,
+        s.orderCreatedAtClient,
+        s.created_at,
+        s.createdAt,
+        s.orderCreatedAt,
+        r.reservedAtClient,
+        r.pickedAtClient,
+        p.flowPickedAtClient,
+        p.pickedAtClient
+      ];
+
+      if(Array.isArray(p.events)){
+        for(const ev0 of p.events){
+          const ev = ev0 || {};
+          candidates.push(ev.atClient, ev.pickedAtClient, ev.undoneAtClient, ev.createdAtClient, ev.tsClient, ev.timestampClient);
+        }
+      }
+
+      return candidates.reduce((max, v)=> Math.max(max, readFlowLogTimestamp(v)), 0);
     }
 
     function shopifyFlowLinesFromData(d){
@@ -8191,7 +8367,7 @@ function startAllLogs(){
       const ts = flowLogTimestamp(d);
       // Timestamp stabile: gli updatedAtClient cambiano a ogni sync Shopify e non devono
       // far "saltare" i flussi o ristampare lo storico come se fossero nuovi.
-      const stableTs = pickingFlowStableBaseTs(d) || readFlowLogTimestamp(d.appliedAtClient) || readFlowLogTimestamp(d.createdAtClient) || ts;
+      const stableTs = readFlowLogTimestamp(d.appliedAtClient) || pickingFlowStableBaseTs(d) || readFlowLogTimestamp(d.createdAtClient) || readFlowLogTimestamp(d.createdAt) || ts;
       const shopId = String(shop.orderId || shop.admin_graphql_api_id || shop.id || d.shopifyOrderId || d.orderId || d.name || "").trim();
       const shopName = String(shop.name || d.orderName || d.shopifyOrderName || shopId || "").trim();
       const src = String(d.source || shop.source || "").trim();
@@ -8214,7 +8390,8 @@ function startAllLogs(){
         source: d.source || shop.source || (looksShopify ? "shopify_fbm" : ""),
         reservation,
         shopify: shop,
-        updatedAtClient: readFlowLogTimestamp(d.updatedAtClient) || stableTs || ts,
+        // Mantengo updatedAtClient come dato tecnico, ma non viene usato per ordinare/mostrare il log.
+        updatedAtClient: readFlowLogTimestamp(d.updatedAtClient) || 0,
         createdAtClient: readFlowLogTimestamp(d.createdAtClient) || readFlowLogTimestamp(shop.createdAtClient) || stableTs || 0,
         totalLines,
         totalPieces,
@@ -8258,6 +8435,17 @@ function startAllLogs(){
       const db = state.firebase.db;
       const colRef = api.collection(db, COL_ROOT, loc, SUB_LOGS);
       const maps = { applied:new Map(), updated:new Map(), raw:new Map() };
+      const bootExpected = new Set();
+      const bootSeen = new Set();
+      lg.meta = { ...(lg.meta || {}), count:0, loaded:false, expected:0, seen:0 };
+      const markLogsBootSeen = (key)=>{
+        try{
+          bootSeen.add(key);
+          lg.meta.expected = bootExpected.size;
+          lg.meta.seen = bootSeen.size;
+          lg.meta.loaded = bootExpected.size > 0 && bootSeen.size >= bootExpected.size;
+        }catch(_e){}
+      };
 
       const mergeMapsNow = ()=>{
         const merged = new Map();
@@ -8273,8 +8461,10 @@ function startAllLogs(){
           .slice(0, 1000);
         lg.flows = flows;
         lg.meta.count = flows.length;
+        if(bootExpected.size > 0 && bootSeen.size >= bootExpected.size) lg.meta.loaded = true;
         refreshActivityLogSkuWatchers("logs_" + loc);
         renderLogsForLoc(loc);
+        checkStartupDataGate("logs_" + loc);
       };
 
       // Debounce: i 6 listener producono snapshot ravvicinati (soprattutto all'avvio).
@@ -8284,7 +8474,12 @@ function startAllLogs(){
         lg._mergeTimer = setTimeout(()=>{ lg._mergeTimer = null; mergeMapsNow(); }, 120);
       };
 
-      const attach = (key, q, noisy)=> api.onSnapshot(q, (snap)=>{
+      const attach = (key, q, noisy)=>{
+        bootExpected.add(key);
+        lg.meta.expected = bootExpected.size;
+        try{
+        return api.onSnapshot(q, (snap)=>{
+        markLogsBootSeen(key);
         const m = maps[key] || new Map();
         m.clear();
         snap.forEach(docSnap=>{
@@ -8294,10 +8489,20 @@ function startAllLogs(){
         maps[key] = m;
         mergeMaps();
       }, (err)=>{
+        markLogsBootSeen(key);
         console.warn(`logs watch ${key} ${loc}`, err);
         if(noisy) showToast("Errore flussi", err?.message || String(err));
         if(state.route.view==="home") renderHomeLogsBox();
+        checkStartupDataGate("logs_error_" + loc);
       });
+        }catch(err){
+          markLogsBootSeen(key);
+          console.warn(`logs watch init ${key} ${loc}`, err);
+          if(noisy) showToast("Errore flussi", err?.message || String(err));
+          checkStartupDataGate("logs_init_error_" + loc);
+          return ()=>{};
+        }
+      };
 
       const unsubs = [];
       unsubs.push(attach("applied", api.query(colRef, api.orderBy("appliedAtClient","desc"), api.limit(180)), true));
@@ -8308,6 +8513,9 @@ function startAllLogs(){
       try{ unsubs.push(attach("shopifySourcePlain", api.query(colRef, api.where("source", "==", "shopify"), api.limit(120)), false)); }catch(_e){}
       try{ unsubs.push(attach("shopifyFile", api.query(colRef, api.where("fileName", "==", "SHOPIFY_FBM"), api.limit(180)), false)); }catch(_e){}
       try{ unsubs.push(attach("raw", api.query(colRef, api.limit(90)), false)); }catch(_e){}
+      lg.meta.expected = bootExpected.size;
+      lg.meta.loaded = bootExpected.size === 0 ? true : (bootSeen.size >= bootExpected.size);
+      checkStartupDataGate("logs_attached_" + loc);
       lg.unsub = ()=>{
         try{ if(lg._mergeTimer){ clearTimeout(lg._mergeTimer); lg._mergeTimer = null; } }catch(_e){}
         for(const fn of unsubs){ try{ fn && fn(); }catch(_e){} }
@@ -8390,15 +8598,15 @@ function startAllLogs(){
             const key = String(m?.path || `${m?.productSku || ""}/${m?.id || ""}`);
             if(!key) continue;
             const prev = byKey.get(key);
-            const ts = Number(m?.createdAtClient || m?.updatedAtClient || 0) || 0;
-            const prevTs = prev ? (Number(prev.createdAtClient || prev.updatedAtClient || 0) || 0) : -1;
+            const ts = movementLogTimestamp(m) || 0;
+            const prevTs = prev ? (movementLogTimestamp(prev) || 0) : -1;
             if(!prev || ts >= prevTs) byKey.set(key, m);
           }
         }
         const arr = Array.from(byKey.values())
           .sort((a,b)=>{
-            const ta = Number(a?.createdAtClient || a?.updatedAtClient || 0) || 0;
-            const tb = Number(b?.createdAtClient || b?.updatedAtClient || 0) || 0;
+            const ta = movementLogTimestamp(a) || 0;
+            const tb = movementLogTimestamp(b) || 0;
             if(tb !== ta) return tb - ta;
             return String(b?.id || "").localeCompare(String(a?.id || ""));
           })
@@ -8614,6 +8822,28 @@ function startAllLogs(){
       return lot ? lotLabelFromId(lot) : "—";
     }
 
+    function movementLogTimestamp(m){
+      const x = m || {};
+      // Anche per i movimenti prodotto: data evento stabile, mai updatedAtClient.
+      // updatedAtClient può essere riscritto da backfill/sync e non deve far apparire vecchi log come nuovi.
+      return Math.max(
+        readFlowLogTimestamp(x.createdAtClient),
+        readFlowLogTimestamp(x.createdAt),
+        readFlowLogTimestamp(x.appliedAtClient),
+        readFlowLogTimestamp(x.appliedAt),
+        readFlowLogTimestamp(x.atClient),
+        readFlowLogTimestamp(x.pickedAtClient),
+        readFlowLogTimestamp(x.undoneAtClient),
+        readFlowLogTimestamp(x.assignedAtClient),
+        readFlowLogTimestamp(x.movedAtClient),
+        readFlowLogTimestamp(x.reservedAtClient),
+        readFlowLogTimestamp(x.reorderedAtClient),
+        readFlowLogTimestamp(x.completedAtClient),
+        readFlowLogTimestamp(x.tsClient),
+        readFlowLogTimestamp(x.timestampClient)
+      );
+    }
+
     function homeLogEntryFromMovement(m){
       const sku = toSkuId(m?.sku || m?.productSku || m?.amazonInventorySku || "");
       const qty = signedLogQty(m);
@@ -8647,7 +8877,7 @@ function startAllLogs(){
 
       return {
         kind: "movement",
-        ts: Number(m?.createdAtClient || m?.updatedAtClient || m?.appliedAtClient || 0) || 0,
+        ts: movementLogTimestamp(m),
         actor,
         action: `${actor} ${verb}`,
         details: detailBits.filter(Boolean).join(" • "),
@@ -13076,13 +13306,21 @@ function __anySheetOpen(){
 }
 
 function __lockBody(){
-  document.documentElement.style.overflow = "hidden";
-  document.body.style.overflow = "hidden";
+  // Scroll naturale: non blocco più html/body con overflow:hidden.
+  // Lo sheet resta sopra come overlay, ma lo scroll mantiene il comportamento classico del browser.
+  try{
+    document.documentElement.classList.add("sheet-open");
+    document.body.classList.add("sheet-open");
+  }catch(_e){}
 }
 
 function __unlockBody(){
-  document.documentElement.style.overflow = "";
-  document.body.style.overflow = "";
+  try{
+    document.documentElement.classList.remove("sheet-open");
+    document.body.classList.remove("sheet-open");
+    document.documentElement.style.overflow = "";
+    document.body.style.overflow = "";
+  }catch(_e){}
 }
 
 function __unlockBodyIfNone(){
@@ -18623,31 +18861,23 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
 
       let _scrollLock = null;
       function lockScroll(){
+        // Scroll naturale classico: niente position:fixed sul body.
+        // L'overlay intercetta i tocchi, le aree interne scrollano con inerzia nativa.
         if(_scrollLock) return;
-        const sy = window.scrollY || window.pageYOffset || 0;
-        _scrollLock = {
-          sy,
-          htmlOverflow: document.documentElement.style.overflow,
-          bodyOverflow: document.body.style.overflow,
-          bodyPos: document.body.style.position,
-          bodyTop: document.body.style.top,
-          bodyWidth: document.body.style.width
-        };
-        document.documentElement.style.overflow = "hidden";
-        document.body.style.overflow = "hidden";
-        document.body.style.position = "fixed";
-        document.body.style.top = `-${sy}px`;
-        document.body.style.width = "100%";
+        _scrollLock = { active:true };
+        try{ document.body.classList.add("map-overlay-open"); }catch(_e){}
       }
       function unlockScroll(){
         if(!_scrollLock) return;
-        const L = _scrollLock; _scrollLock = null;
-        document.documentElement.style.overflow = L.htmlOverflow;
-        document.body.style.overflow = L.bodyOverflow;
-        document.body.style.position = L.bodyPos;
-        document.body.style.top = L.bodyTop;
-        document.body.style.width = L.bodyWidth;
-        window.scrollTo(0, L.sy);
+        _scrollLock = null;
+        try{
+          document.body.classList.remove("map-overlay-open");
+          document.documentElement.style.overflow = "";
+          document.body.style.overflow = "";
+          document.body.style.position = "";
+          document.body.style.top = "";
+          document.body.style.width = "";
+        }catch(_e){}
       }
 
       function esc(s){ return String(s).replace(/[&<>"]/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[c])); }
