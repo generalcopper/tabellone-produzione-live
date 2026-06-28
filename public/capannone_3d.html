@@ -2860,7 +2860,8 @@ function _disposeGlow(gs){
   for(const it of (gs.meshes||[])){
     if(it.mesh && it.original){
       it.mesh.material = it.original;
-      if(it.clone && it.clone.dispose) it.clone.dispose();
+      // I glow dei prelievi usano materiali condivisi/cache: non vanno distrutti ad ogni refresh.
+      if(it.clone && it.clone.dispose && !it.shared) it.clone.dispose();
     }
   }
   if(gs.light){ scene.remove(gs.light); }
@@ -3520,30 +3521,88 @@ function _buildGlow(v, withLabel){
 
 /* ===== PRELIEVI (flussi picking): illumina i bancali da piccare, con COLORE per canale:
    FBA = arancione/ambra, FBM = blu (coerente coi colori del cockpit). ===== */
-// glow per un bancale "da prelevare": SOLO illuminazione, nessuna etichetta/sprite sopra il bancale
-// (i billboard dinamici canvas/sprite mangiano GPU sul kiosk).
-function _buildPrelievoGlow(v, qtyToPick, title, canale){
-  // colori per canale, allineati al cockpit (FBA ambra, FBM blu)
+// glow per un bancale "da prelevare": SOLO materiale emissivo statico, zero luci reali per-pallet.
+// Motivo: con molti ordini FBA, decine di PointLight + pulse per-frame moltiplicano il costo GPU.
+// L'effetto resta: il bancale appare acceso/illuminato, ma senza luci dinamiche sulla scena.
+const PRELIEVO_GLOW_POINT_LIGHTS = false;   // non riattivare sul kiosk: tante luci = scatti
+const PRELIEVO_GLOW_STATIC = true;          // niente pulse frame-per-frame sui prelievi
+const _prelievoGlowMaterialCache = new Map();
+let _prelievoGlowSig = "";
+
+function _prelievoMatKey(original, canale){
+  try{
+    const base = original && (original.uuid || original.name || original.type) ? (original.uuid || original.name || original.type) : "mat";
+    return String(canale || "fba") + "|" + String(base);
+  }catch(_e){
+    return String(canale || "fba") + "|mat";
+  }
+}
+
+function _sharedPrelievoGlowMaterial(original, canale){
   const isFbm = canale==='fbm';
-  const EMI  = isFbm ? 0x4d7bff : 0xff8a1e;   // emissive sui materiali del bancale
-  const LIGHT= isFbm ? 0x6f96ff : 0xffb060;   // colore della point light
+  const EMI  = isFbm ? 0x4d7bff : 0xff8a1e;
+  const key = _prelievoMatKey(original, canale);
+  let mat = _prelievoGlowMaterialCache.get(key);
+  if(mat) return mat;
+
+  mat = original && original.clone ? original.clone() : new THREE.MeshStandardMaterial({color:0xffffff});
+  // Mantengo la texture/colore originale ma aggiungo emissive forte: sembra illuminato senza PointLight.
+  if(mat.emissive){
+    mat.emissive.setHex(EMI);
+    mat.emissiveIntensity = isFbm ? 0.72 : 0.78;
+  }
+  if('toneMapped' in mat) mat.toneMapped = false;
+  mat.needsUpdate = true;
+  mat.userData = mat.userData || {};
+  mat.userData.__sharedPrelievoGlow = true;
+  _prelievoGlowMaterialCache.set(key, mat);
+  return mat;
+}
+
+function _normalizePrelieviForGlow(list){
+  // Collasso eventuali doppioni sullo stesso vano: un solo passaggio materiali per bancale.
+  const byCode = new Map();
+  for(const p of (list||[])){
+    const code = String(p?.code || p?.v?.code || '').trim().toUpperCase();
+    if(!code || !p?.v) continue;
+    const prev = byCode.get(code);
+    if(!prev){
+      byCode.set(code, { ...p, code, qty: Math.max(0, Number(p.qty)||0) });
+    }else{
+      prev.qty += Math.max(0, Number(p.qty)||0);
+      // Se sullo stesso bancale convivono FBA e FBM, tengo l'ambra FBA: priorità visiva agli Amazon/FBA.
+      if(prev.canale !== 'fba' && p.canale === 'fba') prev.canale = 'fba';
+      if(!prev.title && p.title) prev.title = p.title;
+    }
+  }
+  return Array.from(byCode.values()).sort((a,b)=>String(a.code).localeCompare(String(b.code)));
+}
+
+function _prelievoGlowSignature(list){
+  return (list||[]).map(p=>`${p.code}:${p.canale||'fba'}:${Math.round(Number(p.qty)||0)}`).join('|');
+}
+
+function _buildPrelievoGlow(v, qtyToPick, title, canale){
   const meshes=[];
   v.obj.traverse(o=>{
     if(o.isMesh && o.material){
       const original=o.material;
-      const clone=original.clone();
-      if(clone.emissive){ clone.emissive.setHex(EMI); clone.emissiveIntensity=0.6; }
+      const clone=_sharedPrelievoGlowMaterial(original, canale);
       o.material=clone;
-      meshes.push({mesh:o, original, clone});
+      meshes.push({mesh:o, original, clone, shared:true});
     }
   });
-  const light=new THREE.PointLight(LIGHT, 7, 2.5, 2.4);
-  light.position.set(v.center.x, v.center.y+0.9, v.center.z);
-  scene.add(light);
-  const gs={meshes, light, canale};
-  // [DISATTIVATO] niente riquadri dinamici sopra i bancali:
-  // restano emissive + point light, quindi i bancali rimangono illuminati senza sprite/canvas extra.
-  return gs;
+
+  let light=null;
+  if(PRELIEVO_GLOW_POINT_LIGHTS){
+    const isFbm = canale==='fbm';
+    const LIGHT= isFbm ? 0x6f96ff : 0xffb060;
+    light=new THREE.PointLight(LIGHT, 2.5, 1.8, 2.4);
+    light.position.set(v.center.x, v.center.y+0.9, v.center.z);
+    scene.add(light);
+  }
+
+  return {meshes, light, canale, static:true};
 }
 
 // --- helper allineati a picking.html per leggere correttamente lo stato di prelievo ---
@@ -3659,11 +3718,18 @@ function aggiornaPrelievi(){
 }
 function clearPrelievoGlow(){
   if(prelievoGlow){ for(const gs of prelievoGlow) _disposeGlow(gs); prelievoGlow=null; }
+  _prelievoGlowSig = "";
 }
 function applicaPrelievoGlow(){
+  const glowItems = _normalizePrelieviForGlow(PRELIEVI);
+  const sig = _prelievoGlowSignature(glowItems);
+  // Se Firestore manda snapshot uguali, non ricreo materiali/luci: evita micro-scatti gratuiti.
+  if(prelievoGlow && sig && sig === _prelievoGlowSig) return;
+
   clearPrelievoGlow();
-  if(!PRELIEVI.length) return;
-  prelievoGlow = PRELIEVI.map(p=>_buildPrelievoGlow(p.v, p.qty, p.title, p.canale));
+  if(!glowItems.length) return;
+  prelievoGlow = glowItems.map(p=>_buildPrelievoGlow(p.v, p.qty, p.title, p.canale));
+  _prelievoGlowSig = sig;
 }
 
 function highlightVano(v, opts={}){
@@ -5574,8 +5640,9 @@ function tick(now){
   if(tween){const k=ease(Math.min(1,(now-tween.start)/tween.dur));
     for(const key in tween.to)cam[key]=tween.from[key]+(tween.to[key]-tween.from[key])*k;
     if(k>=1)tween=null;}
-  // animazione glow del/dei bancale/i selezionato/i (frame-rate indipendente)
-  if(glowState || glowList || prelievoGlow){
+  // animazione glow del/dei bancale/i selezionato/i (frame-rate indipendente).
+  // I prelievi FBA/FBM restano statici: niente pulse su decine di bancali, niente scatti GPU.
+  if(glowState || glowList){
     pulse=now*0.003;
     const s=Math.sin(pulse);
     const inten=0.45+s*0.18;
@@ -5600,7 +5667,6 @@ function tick(now){
     };
     if(glowState) animaGlow(glowState);
     if(glowList) for(const gs of glowList) animaGlow(gs);
-    if(prelievoGlow) for(const gs of prelievoGlow) animaGlow(gs);
   }
   // smoothing camera FRAME-RATE INDIPENDENTE: usa il delta-time così il movimento
   // resta identico e fluido a qualsiasi frame rate (no scatti su kiosk).
