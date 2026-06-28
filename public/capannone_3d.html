@@ -71,7 +71,7 @@
     max-width:90%;line-height:1.35}
 
   /* ---- palette UBI (assistente IA) ---- */
-  :root{--ubi:#a855f7;--ubi-bright:#c084fc;--ubi-soft:#d8b4fe;--ubi-deep:#7c3aed;--ubi-glow:168,85,247}
+  :root{--ubi:#0a84ff;--ubi-bright:#4da6ff;--ubi-soft:#9ecbff;--ubi-deep:#0050d0;--ubi-glow:10,132,255}
 
   /* ===== ONDE PERIMETRALI — corrono lungo tutto il bordo a tempo con la voce di UBI ===== */
   #ubiWave{position:fixed;inset:0;z-index:55;pointer-events:none;
@@ -3036,7 +3036,7 @@ const UbiWave = (function(){
   let level=0;            // livello udito (0..1) lisciato
   let phase=0;           // fase di scorrimento delle onde
   let usingAnalyser=false;
-  const COL='168,85,247';   // viola UBI
+  const COL='10,132,255';   // blu LED UBI
 
   function _ensureCanvas(){
     if(canvas) return true;
@@ -3107,16 +3107,19 @@ const UbiWave = (function(){
     level += (target-level)*0.18;
   }
 
-  // disegna una banda d'onda lungo un lato.
+  // disegna una banda d'onda pulita lungo un lato.
   // (ox,oy): origine; (dx,dy): direzione lungo il lato; (nx,ny): normale verso l'interno; len: lunghezza lato
-  function _side(ox,oy,dx,dy,nx,ny,len,amp,k,speed){
-    const steps=Math.max(40, Math.floor(len/9));
+  // wavelenPx: lunghezza d'onda in PIXEL (uguale su tutti i lati → densità uniforme).
+  function _side(ox,oy,dx,dy,nx,ny,len,amp,wavelenPx){
+    const steps=Math.max(48, Math.floor(len/6));
+    const k=(2*Math.PI)/wavelenPx;       // numero d'onda spaziale costante in px
     ctx.beginPath();
     for(let i=0;i<=steps;i++){
       const f=i/steps;
       const along=f*len;
-      const w=Math.sin(f*Math.PI*k + phase*speed) * amp
-            + Math.sin(f*Math.PI*k*2.7 - phase*speed*1.6) * amp*0.35;
+      // inviluppo: ampiezza a 0 agli estremi del lato, piena al centro → niente scontri agli angoli
+      const env=Math.sin(f*Math.PI);
+      const w=Math.sin(along*k + phase) * amp * env;
       const px=ox+dx*along + nx*w;
       const py=oy+dy*along + ny*w;
       if(i===0) ctx.moveTo(px,py); else ctx.lineTo(px,py);
@@ -3127,34 +3130,32 @@ const UbiWave = (function(){
   function _draw(){
     ctx.clearRect(0,0,W,H);
     const lv=level;
-    if(lv>0.012){
-      const amp=6 + lv*52;                 // ampiezza onda (px) guidata dalla voce
-      const glow=10 + lv*34;
-      const aMain=0.30 + lv*0.60;
-      // due passate: alone largo + linea netta
-      for(let pass=0; pass<2; pass++){
-        const isGlow = pass===0;
-        ctx.lineWidth = isGlow ? (2.5+lv*5) : (1.6+lv*2.2);
-        ctx.strokeStyle = `rgba(${COL},${isGlow? aMain*0.45 : aMain})`;
-        ctx.shadowColor = `rgba(${COL},${0.9})`;
-        ctx.shadowBlur = isGlow ? glow*2.2 : glow;
-        const inset = isGlow ? 3 : 7;      // distanza dal bordo
-        // TOP (→), normale verso il basso
-        _side(0, inset, 1,0, 0,1, W, amp, 9, 1.0);
-        // RIGHT (↓), normale verso sinistra
-        _side(W-inset, 0, 0,1, -1,0, H, amp, 7, 1.18);
-        // BOTTOM (←), normale verso l'alto
-        _side(W, H-inset, -1,0, 0,-1, W, amp, 9, 0.92);
-        // LEFT (↑), normale verso destra
-        _side(inset, H, 0,-1, 1,0, H, amp, 7, 1.32);
-      }
-      ctx.shadowBlur=0;
+    if(lv<=0.012) return;
+    const amp=4 + lv*46;                  // ampiezza onda (px) guidata dalla voce
+    const glow=8 + lv*30;
+    const aMain=0.32 + lv*0.55;
+    const WL=210;                         // lunghezza d'onda uniforme su tutti i lati (px)
+    ctx.lineJoin='round'; ctx.lineCap='round';
+    // due passate: alone morbido largo + linea LED netta sopra
+    for(let pass=0; pass<2; pass++){
+      const isGlow = pass===0;
+      ctx.lineWidth = isGlow ? (3+lv*6) : (1.8+lv*2);
+      ctx.strokeStyle = isGlow ? `rgba(${COL},${aMain*0.40})` : `rgba(${COL},${aMain})`;
+      ctx.shadowColor = `rgba(${COL},0.95)`;
+      ctx.shadowBlur = isGlow ? glow*2.4 : glow;
+      const inset = isGlow ? 4 : 8;       // distanza dal bordo
+      // tutti i lati con stessa WL e stesso verso di scorrimento (phase comune) → perimetro coerente
+      _side(0,       inset,   1, 0,  0, 1, W, amp, WL);   // TOP    →  normale ↓
+      _side(W-inset, 0,       0, 1, -1, 0, H, amp, WL);   // RIGHT  ↓  normale ←
+      _side(W,       H-inset, -1,0,  0,-1, W, amp, WL);   // BOTTOM ←  normale ↑
+      _side(inset,   H,       0,-1,  1, 0, H, amp, WL);   // LEFT   ↑  normale →
     }
+    ctx.shadowBlur=0;
   }
 
   function _loop(){
     _readLevel();
-    phase += 0.05 + level*0.10;            // scorre più veloce quando la voce è forte
+    phase += 1.6 + level*3.4;             // scorrimento onde: più veloce quando la voce è forte
     _draw();
     if(active || level>0.02){
       raf=requestAnimationFrame(_loop);
