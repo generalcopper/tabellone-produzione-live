@@ -73,10 +73,15 @@
   /* ---- palette UBI (assistente IA) ---- */
   :root{--ubi:#0a84ff;--ubi-bright:#4da6ff;--ubi-soft:#9ecbff;--ubi-deep:#0050d0;--ubi-glow:10,132,255}
 
-  /* ===== UBI AURA — visualizzazione scenica premium durante la voce ===== */
-  #ubiWave{position:fixed;inset:0;z-index:55;pointer-events:none;
-    opacity:0;transition:opacity .36s ease;mix-blend-mode:screen;filter:saturate(1.18);contain:strict;}
+  /* ===== UBI SIGNAL — minimale, moderno e leggero quando parla =====
+     Canvas piccolo al centro della scena: niente cornici/bordi full-screen, niente onde pesanti. */
+  #ubiWave{position:fixed;left:50%;top:50%;width:min(520px,56vw);height:74px;
+    transform:translate(-50%,-50%);z-index:55;pointer-events:none;
+    opacity:0;transition:opacity .28s ease;mix-blend-mode:screen;
+    contain:layout paint size;will-change:opacity;}
   body.ubi-speaking #ubiWave{opacity:1;}
+  body.drone-flying #ubiWave{display:none;}
+  @media (max-aspect-ratio:3/4){#ubiWave{width:min(520px,82vw);height:82px;top:49%;}}
   .collapse{position:absolute;top:18px;right:18px;width:28px;height:28px;border-radius:10px;
     border:1px solid var(--line);background:rgba(255,255,255,.05);color:var(--muted);cursor:pointer;
     font-size:16px;line-height:1;display:flex;align-items:center;justify-content:center;transition:.2s}
@@ -3002,19 +3007,17 @@ const Chime = (function(){
   return { apertura, chiusura, _resume(){ const c=_ctx(); if(c){ try{ if(c.state==='suspended') c.resume(); }catch(_){} } } };
 })();
 
-/* ===== UBI AURA — visualizzazione scenica premium quando parla =====
-   Niente onde sinusoidali grezze: il canvas disegna un'aura cinematica sui bordi,
-   corner HUD, scanner luminosi e micro‑equalizer laterali. Il livello resta guidato
-   dall'audio reale quando disponibile; se l'analyser è muto usa un parlato procedurale. */
+/* ===== UBI SIGNAL — visualizzazione voce minimale e moderna =====
+   Niente cornici né onde perimetrali: solo una barra audio compatta al centro della
+   scena. È pensata per kiosk: canvas piccolo, DPR limitato, max ~30fps e pochi draw. */
 const UbiWave = (function(){
   let canvas=null, ctx=null, raf=0, active=false;
   let ac=null, analyser=null, srcNode=null, timeData=null, freqData=null, attachedEl=null;
-  let dpr=1, W=0, H=0;
-  let level=0, detail=0, phase=0;
-  let usingAnalyser=false;
+  let dpr=1, W=1, H=1;
+  let level=0, detail=0, phase=0, usingAnalyser=false, lastFrame=0;
+  const FPS_MS=1000/30;                 // limite prestazioni: massimo ~30fps mentre UBI parla
   const BLUE='10,132,255';
   const CYAN='86,214,255';
-  const VIOLET='132,92,255';
 
   function _ensureCanvas(){
     if(canvas) return true;
@@ -3025,12 +3028,17 @@ const UbiWave = (function(){
     window.addEventListener('resize', _resize, {passive:true});
     return true;
   }
+
   function _resize(){
     if(!canvas) return;
-    dpr=Math.min(1.5, window.devicePixelRatio||1);       // bello ma leggero anche su kiosk/4K
-    W=window.innerWidth; H=window.innerHeight;
-    canvas.width=Math.floor(W*dpr); canvas.height=Math.floor(H*dpr);
-    canvas.style.width=W+'px'; canvas.style.height=H+'px';
+    const r=canvas.getBoundingClientRect();
+    W=Math.max(1, Math.round(r.width || 520));
+    H=Math.max(1, Math.round(r.height || 74));
+    dpr=Math.min(1.15, window.devicePixelRatio||1);   // cap basso: il WebGL resta prioritario
+    canvas.width=Math.floor(W*dpr);
+    canvas.height=Math.floor(H*dpr);
+    canvas.style.width=W+'px';
+    canvas.style.height=H+'px';
     if(ctx){ ctx.setTransform(dpr,0,0,dpr,0,0); }
   }
 
@@ -3046,15 +3054,16 @@ const UbiWave = (function(){
       try{
         srcNode=ac.createMediaElementSource(el);
         analyser=ac.createAnalyser();
-        analyser.fftSize=512;
-        analyser.smoothingTimeConstant=0.78;
+        analyser.fftSize=256;
+        analyser.smoothingTimeConstant=0.72;
         timeData=new Uint8Array(analyser.fftSize);
         freqData=new Uint8Array(analyser.frequencyBinCount);
         srcNode.connect(analyser);
-        analyser.connect(ac.destination);
-        attachedEl=el; usingAnalyser=true;
+        analyser.connect(ac.destination);      // mantiene l'audio udibile
+        attachedEl=el;
+        usingAnalyser=true;
       }catch(e){
-        usingAnalyser=false;
+        usingAnalyser=false;                   // elemento già sorgentato/CORS: fallback visivo
       }
     }catch(_){ usingAnalyser=false; }
   }
@@ -3065,16 +3074,20 @@ const UbiWave = (function(){
       analyser.getByteTimeDomainData(timeData);
       analyser.getByteFrequencyData(freqData);
       let sum=0;
-      for(let i=0;i<timeData.length;i++){ const v=(timeData[i]-128)/128; sum+=v*v; }
+      for(let i=0;i<timeData.length;i++){
+        const v=(timeData[i]-128)/128;
+        sum+=v*v;
+      }
       const rms=Math.sqrt(sum/timeData.length);
       let band=0;
-      for(let i=8;i<Math.min(70,freqData.length);i++) band+=freqData[i];
-      band = band / Math.max(1, Math.min(70,freqData.length)-8) / 255;
-      const target=Math.min(1, rms*2.8 + band*0.45);
+      const b0=6, b1=Math.min(58,freqData.length);
+      for(let i=b0;i<b1;i++) band+=freqData[i];
+      band = band / Math.max(1,b1-b0) / 255;
+      const target=Math.min(1, rms*2.7 + band*0.38);
       if(target>0.012){
         _muteFrames=0;
-        level += (target-level)*0.30;
-        detail += (band-detail)*0.22;
+        level += (target-level)*0.28;
+        detail += (band-detail)*0.20;
         return;
       }
       _muteFrames++;
@@ -3085,10 +3098,12 @@ const UbiWave = (function(){
     }
     _proc();
   }
+
+  // fallback leggero: movimento pseudo-parlato solo mentre UBI è in riproduzione.
   function _proc(){
     const t=performance.now()/1000;
-    const syll=Math.abs(Math.sin(t*5.8))*0.55 + Math.abs(Math.sin(t*9.7+1.1))*0.22;
-    const target=active ? (0.28 + syll*0.56) : 0;
+    const syll=Math.abs(Math.sin(t*5.7))*0.55 + Math.abs(Math.sin(t*9.2+1.4))*0.22;
+    const target=active ? (0.22 + syll*0.58) : 0;
     level += (target-level)*0.16;
     detail += ((active?syll:0)-detail)*0.14;
   }
@@ -3101,182 +3116,120 @@ const UbiWave = (function(){
     ctx.lineTo(x+w,y+h-r); ctx.quadraticCurveTo(x+w,y+h,x+w-r,y+h);
     ctx.lineTo(x+r,y+h); ctx.quadraticCurveTo(x,y+h,x,y+h-r);
     ctx.lineTo(x,y+r); ctx.quadraticCurveTo(x,y,x+r,y);
-  }
-  function _pointOnRect(t,inset){
-    t=((t%1)+1)%1;
-    const w=Math.max(1,W-inset*2), h=Math.max(1,H-inset*2);
-    const p=2*(w+h);
-    let d=t*p;
-    if(d<w) return {x:inset+d,y:inset,dx:1,dy:0};
-    d-=w;
-    if(d<h) return {x:W-inset,y:inset+d,dx:0,dy:1};
-    d-=h;
-    if(d<w) return {x:W-inset-d,y:H-inset,dx:-1,dy:0};
-    d-=w;
-    return {x:inset,y:H-inset-d,dx:0,dy:-1};
+    ctx.closePath();
   }
 
-  function _edgeAura(lv){
-    const thick=Math.min(260, Math.max(120, Math.min(W,H)*0.20));
-    const a=0.06 + lv*0.22;
-    let g;
-    g=ctx.createLinearGradient(0,0,0,thick);
-    g.addColorStop(0,`rgba(${BLUE},${a})`); g.addColorStop(.42,`rgba(${CYAN},${a*.34})`); g.addColorStop(1,'rgba(0,0,0,0)');
-    ctx.fillStyle=g; ctx.fillRect(0,0,W,thick);
-    g=ctx.createLinearGradient(0,H,0,H-thick);
-    g.addColorStop(0,`rgba(${BLUE},${a*.92})`); g.addColorStop(.45,`rgba(${VIOLET},${a*.24})`); g.addColorStop(1,'rgba(0,0,0,0)');
-    ctx.fillStyle=g; ctx.fillRect(0,H-thick,W,thick);
-    g=ctx.createLinearGradient(0,0,thick,0);
-    g.addColorStop(0,`rgba(${BLUE},${a*.7})`); g.addColorStop(1,'rgba(0,0,0,0)');
-    ctx.fillStyle=g; ctx.fillRect(0,0,thick,H);
-    g=ctx.createLinearGradient(W,0,W-thick,0);
-    g.addColorStop(0,`rgba(${CYAN},${a*.75})`); g.addColorStop(1,'rgba(0,0,0,0)');
-    ctx.fillStyle=g; ctx.fillRect(W-thick,0,thick,H);
-
-    // bagliori angolari molto morbidi, più “cinema” che oscilloscopio
-    const corners=[[0,0],[W,0],[W,H],[0,H]];
-    for(let i=0;i<corners.length;i++){
-      const [x,y]=corners[i];
-      const rg=ctx.createRadialGradient(x,y,0,x,y,thick*1.15);
-      rg.addColorStop(0,`rgba(${i%2?CYAN:BLUE},${a*.95})`);
-      rg.addColorStop(.38,`rgba(${VIOLET},${a*.20})`);
-      rg.addColorStop(1,'rgba(0,0,0,0)');
-      ctx.fillStyle=rg;
-      ctx.fillRect(x===0?0:W-thick*1.15,y===0?0:H-thick*1.15,thick*1.15,thick*1.15);
+  function _barValue(i, bars){
+    if(usingAnalyser && freqData){
+      const start=7, end=Math.min(74,freqData.length-1);
+      const idx=Math.max(0, Math.min(freqData.length-1, Math.round(start+(end-start)*(i/(bars-1)))));
+      return freqData[idx]/255;
     }
-  }
-
-  function _premiumFrame(lv){
-    const inset=16;
-    const r=Math.min(38, Math.max(18, Math.min(W,H)*0.035));
-    ctx.save();
-    ctx.lineJoin='round'; ctx.lineCap='round';
-    _rr(inset,inset,W-inset*2,H-inset*2,r);
-    ctx.shadowColor=`rgba(${BLUE},${0.75+lv*.25})`;
-    ctx.shadowBlur=18+lv*28;
-    ctx.strokeStyle=`rgba(${BLUE},${0.16+lv*.20})`;
-    ctx.lineWidth=22+lv*18;
-    ctx.stroke();
-    ctx.shadowBlur=0;
-    _rr(inset+8,inset+8,W-(inset+8)*2,H-(inset+8)*2,r-8);
-    ctx.strokeStyle=`rgba(${CYAN},${0.22+lv*.45})`;
-    ctx.lineWidth=1.2+lv*1.1;
-    ctx.stroke();
-    _rr(inset+18,inset+18,W-(inset+18)*2,H-(inset+18)*2,Math.max(10,r-18));
-    ctx.strokeStyle=`rgba(${VIOLET},${0.08+lv*.16})`;
-    ctx.lineWidth=1;
-    ctx.stroke();
-    ctx.restore();
-  }
-
-  function _corners(lv){
-    const inset=22, len=Math.min(170, Math.max(86, Math.min(W,H)*0.14));
-    const pulse=0.72 + 0.28*Math.sin(phase*0.018);
-    ctx.save();
-    ctx.lineCap='round'; ctx.lineJoin='round';
-    ctx.shadowColor=`rgba(${CYAN},${0.70})`;
-    ctx.shadowBlur=14+lv*18;
-    ctx.strokeStyle=`rgba(${CYAN},${(0.38+lv*.42)*pulse})`;
-    ctx.lineWidth=2.2+lv*2.0;
-    function L(x,y,sx,sy){
-      ctx.beginPath();
-      ctx.moveTo(x+sx*len,y); ctx.lineTo(x,y); ctx.lineTo(x,y+sy*len);
-      ctx.stroke();
-      ctx.beginPath();
-      ctx.arc(x+sx*28,y+sy*28,24, sx<0?Math.PI*1.5:Math.PI, sy<0?Math.PI*2:Math.PI*.5, sx*sy<0);
-      ctx.stroke();
-    }
-    L(inset,inset, 1, 1);
-    L(W-inset,inset, -1, 1);
-    L(W-inset,H-inset, -1, -1);
-    L(inset,H-inset, 1, -1);
-    ctx.restore();
-  }
-
-  function _scanners(lv){
-    const count=10;
-    const speed=0.00018 + lv*0.00022;
-    ctx.save();
-    ctx.lineCap='round'; ctx.lineJoin='round';
-    for(let i=0;i<count;i++){
-      const t=phase*speed + i/count + (i%3)*0.019;
-      const p=_pointOnRect(t, 28 + (i%2)*11);
-      const q=_pointOnRect(t-0.020-(detail*0.012), 28 + (i%2)*11);
-      const a=(0.18+lv*0.52) * (0.75+0.25*Math.sin(phase*0.012+i));
-      const grad=ctx.createLinearGradient(q.x,q.y,p.x,p.y);
-      grad.addColorStop(0,'rgba(0,0,0,0)');
-      grad.addColorStop(.55,`rgba(${BLUE},${a*.45})`);
-      grad.addColorStop(1,`rgba(${CYAN},${a})`);
-      ctx.strokeStyle=grad;
-      ctx.shadowColor=`rgba(${CYAN},${a})`;
-      ctx.shadowBlur=10+lv*16;
-      ctx.lineWidth=1.2 + lv*2.2;
-      ctx.beginPath(); ctx.moveTo(q.x,q.y); ctx.lineTo(p.x,p.y); ctx.stroke();
-      ctx.fillStyle=`rgba(230,248,255,${Math.min(0.9,a+0.25)})`;
-      ctx.beginPath(); ctx.arc(p.x,p.y,1.6+lv*2.1,0,Math.PI*2); ctx.fill();
-    }
-    ctx.restore();
-  }
-
-  function _microBars(lv){
-    const bars=22;
-    const mid=H*0.50;
-    const span=Math.min(H*0.54, 420);
-    ctx.save();
-    ctx.lineCap='round';
-    ctx.shadowColor=`rgba(${BLUE},0.85)`;
-    ctx.shadowBlur=8+lv*10;
-    for(let side=0; side<2; side++){
-      const x=side?W-20:20;
-      const dir=side?-1:1;
-      for(let i=0;i<bars;i++){
-        const y=mid-span/2 + (i/(bars-1))*span;
-        const w=(12 + 58*lv) * (0.32 + 0.68*Math.abs(Math.sin(phase*0.023+i*.73+side)));
-        const a=0.10 + lv*0.40;
-        ctx.strokeStyle=`rgba(${i%3===0?CYAN:BLUE},${a})`;
-        ctx.lineWidth=1.1 + lv*1.2;
-        ctx.beginPath(); ctx.moveTo(x,y); ctx.lineTo(x+dir*w,y); ctx.stroke();
-      }
-    }
-    ctx.restore();
-  }
-
-  function _breathLens(lv){
-    // alone basso centrale, discreto: dà presenza scenica senza coprire la mappa 3D
-    const cx=W/2, cy=H+40;
-    const r=Math.min(W,H)*0.48 + lv*90;
-    const g=ctx.createRadialGradient(cx,cy,0,cx,cy,r);
-    g.addColorStop(0,`rgba(${CYAN},${0.07+lv*.13})`);
-    g.addColorStop(.35,`rgba(${BLUE},${0.05+lv*.09})`);
-    g.addColorStop(1,'rgba(0,0,0,0)');
-    ctx.fillStyle=g; ctx.fillRect(0,Math.max(0,H-r),W,r);
+    return 0.30 + 0.70*Math.abs(Math.sin(phase*0.085 + i*0.78));
   }
 
   function _draw(){
     if(!ctx) return;
     ctx.clearRect(0,0,W,H);
-    const lv=level;
+    const lv=Math.max(0, Math.min(1, level));
     if(lv<=0.010) return;
+
+    const cx=W/2, cy=H/2;
+    const beamW=W*0.76;
+    const x0=cx-beamW/2, x1=cx+beamW/2;
+    const shellH=42;
+
     ctx.save();
     ctx.globalCompositeOperation='lighter';
-    _edgeAura(lv);
-    _breathLens(lv);
-    _premiumFrame(lv);
-    _corners(lv);
-    _microBars(lv);
-    _scanners(lv);
+
+    // ombra/glow centrale compatto, non full-screen
+    let rg=ctx.createRadialGradient(cx,cy,0,cx,cy,beamW*0.55);
+    rg.addColorStop(0,`rgba(${CYAN},${0.10+lv*0.18})`);
+    rg.addColorStop(.38,`rgba(${BLUE},${0.055+lv*0.11})`);
+    rg.addColorStop(1,'rgba(0,0,0,0)');
+    ctx.fillStyle=rg;
+    ctx.fillRect(0,0,W,H);
+
+    // capsula quasi invisibile: solo contrasto, non cornice
+    _rr(cx-beamW*0.47, cy-shellH/2, beamW*0.94, shellH, shellH/2);
+    ctx.fillStyle=`rgba(5,10,18,${0.12+lv*0.10})`;
+    ctx.fill();
+
+    // linea LED principale
+    const lineGrad=ctx.createLinearGradient(x0,cy,x1,cy);
+    lineGrad.addColorStop(0,'rgba(0,0,0,0)');
+    lineGrad.addColorStop(.18,`rgba(${BLUE},${0.24+lv*0.38})`);
+    lineGrad.addColorStop(.50,`rgba(${CYAN},${0.40+lv*0.52})`);
+    lineGrad.addColorStop(.82,`rgba(${BLUE},${0.24+lv*0.38})`);
+    lineGrad.addColorStop(1,'rgba(0,0,0,0)');
+    ctx.shadowColor=`rgba(${CYAN},${0.70})`;
+    ctx.shadowBlur=10+lv*16;
+    ctx.strokeStyle=lineGrad;
+    ctx.lineWidth=1.2+lv*1.8;
+    ctx.beginPath(); ctx.moveTo(x0,cy); ctx.lineTo(x1,cy); ctx.stroke();
+
+    // micro equalizer centrale: poche barre, arrotondate, sincronizzate all'audio
+    const bars=21;
+    const gap=Math.min(12, beamW/(bars+8));
+    const barW=Math.max(1.4, Math.min(3.2, gap*0.34));
+    const totalGap=gap*(bars-1);
+    const bx0=cx-totalGap/2;
+    for(let i=0;i<bars;i++){
+      const dist=Math.abs(i-(bars-1)/2)/((bars-1)/2);
+      const env=1-Math.pow(dist,1.7)*0.72;
+      const v=_barValue(i,bars);
+      const h=(5 + (22+detail*16)*lv*v) * env;
+      const x=bx0+i*gap-barW/2;
+      const y=cy-h/2;
+      _rr(x,y,barW,h,barW/2);
+      ctx.fillStyle=`rgba(${i%2?BLUE:CYAN},${0.26+lv*0.56})`;
+      ctx.shadowBlur=6+lv*10;
+      ctx.fill();
+    }
+
+    // due scan piccoli sulla linea: movimento moderno, non onda/cornice
+    for(let s=0;s<2;s++){
+      const t=((phase*0.006 + s*0.52)%1);
+      const px=x0 + beamW*t;
+      const seg=Math.min(96, beamW*0.24) * (0.65+lv*0.40);
+      const g=ctx.createLinearGradient(px-seg,cy,px+seg,cy);
+      g.addColorStop(0,'rgba(0,0,0,0)');
+      g.addColorStop(.50,`rgba(230,248,255,${0.18+lv*0.58})`);
+      g.addColorStop(1,'rgba(0,0,0,0)');
+      ctx.strokeStyle=g;
+      ctx.lineWidth=1.1+lv*1.2;
+      ctx.shadowColor=`rgba(${CYAN},${0.8})`;
+      ctx.shadowBlur=12+lv*14;
+      ctx.beginPath(); ctx.moveTo(px-seg,cy); ctx.lineTo(px+seg,cy); ctx.stroke();
+    }
+
+    // core minimale al centro
+    const core=ctx.createRadialGradient(cx,cy,0,cx,cy,18+lv*14);
+    core.addColorStop(0,`rgba(255,255,255,${0.25+lv*0.55})`);
+    core.addColorStop(.30,`rgba(${CYAN},${0.18+lv*0.46})`);
+    core.addColorStop(1,'rgba(0,0,0,0)');
+    ctx.fillStyle=core;
+    ctx.fillRect(cx-34,cy-34,68,68);
+
     ctx.restore();
   }
 
-  function _loop(){
-    _readLevel();
-    phase += 1 + level*3.2 + detail*1.2;
-    _draw();
+  function _loop(now){
+    if(!ctx){ raf=0; return; }
+    if(!lastFrame) lastFrame=now;
+    const dt=now-lastFrame;
+    if(dt>=FPS_MS){
+      lastFrame=now;
+      _readLevel();
+      phase += dt*(0.045 + level*0.035 + detail*0.012);
+      _draw();
+    }
     if(active || level>0.018){
       raf=requestAnimationFrame(_loop);
     }else{
       raf=0;
-      ctx && ctx.clearRect(0,0,W,H);
+      lastFrame=0;
+      ctx.clearRect(0,0,W,H);
     }
   }
 
@@ -3284,6 +3237,7 @@ const UbiWave = (function(){
     if(!_ensureCanvas()) return;
     active=!!on;
     if(active){
+      _resize();
       if(ac && ac.state==='suspended'){ try{ ac.resume(); }catch(_){} }
       if(!raf) raf=requestAnimationFrame(_loop);
     }
