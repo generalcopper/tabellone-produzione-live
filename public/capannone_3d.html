@@ -4492,237 +4492,326 @@ function renderCockpitOrders(opts={}){
   _lastFba=fba; _lastFbm=fbm; _lastSs=ss;
 }
 
-/* ===== ANNUNCI VOCALI (ElevenLabs via Voce) — discreti e non invasivi =====
-   Regole anti-fastidio:
-   - parla SOLO quando compare lavoro NUOVO (edge-trigger), mai a ogni snapshot;
-   - il primo aggiornamento dopo l'avvio inizializza i contatori in silenzio (niente arretrato letto all'apertura);
-   - una sola voce alla volta, con cooldown e coda; eventi ravvicinati vengono accorpati;
-   - il carico in arrivo si annuncia una volta sola per bolla;
-   - copy premium a rotazione per non risultare ripetitivo; rispetta il toggle 🔊. */
+/* ===== CAPANNONE VOICE AGENT — annunciatore intelligente, cloud-only =====
+   Non usa un LLM nel browser e non genera frasi casuali infinite: legge lo stato reale
+   già presente nel capannone (ordini, SKU, sotto scorta, carichi, produzione, flussi)
+   e decide COSA dire, QUANDO dirlo e COSA evitare. La voce resta quella esistente:
+   Voce.parla() → ttsKioskCached, quindi gli MP3 vengono salvati/cacheati lato cloud. */
 const Annunci = (()=>{
-  let primed=false;                 // true dopo il primo conteggio (silenzioso)
-  let prevFba=0, prevFbm=0;         // ultimi contatori noti
-  let lastCarico='';               // ddtNumber dell'ultimo carico già annunciato
-  const queue=[];                   // frasi in attesa
+  const COOLDOWN_MS = 12000;                 // niente mitragliate vocali
+  const PRIORITY_COOLDOWN_MS = 4500;         // eventi importanti più rapidi
+  const QUEUE_MAX = 5;                       // coda corta: mai accumulo infinito
+  const MESSAGE_TTL_MS = 90000;              // avvisi vecchi non vengono letti dopo troppo tempo
+  const DEDUPE_TTL_MS = 10*60*1000;          // stessa firma: max una volta ogni 10 min
+  const PERIODIC_STATUS_MS = 12*60*1000;     // riepilogo operativo, solo se cambia qualcosa
+  const DEDUP_ECHO_MS = 45000;                // evita doppioni identici ravvicinati
+
+  let primed=false;
+  let prevFba=0, prevFbm=0;
+  let prevSkuMap={};
+  let queue=[];
   let speaking=false, lastSpokeAt=0, lastSpokenText='';
-  const COOLDOWN_MS=9000;           // pausa minima tra due annunci
+  let lastStatusAt=0, lastStatusSig='';
+  let lastCarico='', lastReady='';
+  let ssPrimed=false;
+  const ssSeen=new Set();
+  const dedupe=new Map();
+  let _salutoFatto='';
 
-  // copy premium a rotazione
-  const VAR_FBA=[
-    n=> n===1 ? 'In arrivo un Full truckload Amazon. È entrato un nuovo ordine Fulfillment by Amazon da preparare. La posizione è illuminata in magazzino.'
-              : `In arrivo un Full truckload Amazon. Sono entrati ${n} nuovi ordini Fulfillment by Amazon da preparare. Le posizioni sono illuminate in magazzino.`,
-    n=> n===1 ? 'In arrivo un Full truckload Amazon. C\'è un ordine Fulfillment by Amazon appena entrato da preparare.'
-              : `In arrivo un Full truckload Amazon. Ci sono ${n} ordini Fulfillment by Amazon appena entrati da preparare.`
-  ];
-  const VAR_FBM=[
-    n=> n===1 ? 'Nuovo ordine F B M da preparare. La posizione è illuminata in magazzino.'
-              : `${n} nuovi ordini F B M in coda, pronti per la preparazione.`,
-    n=> n===1 ? 'È arrivato un ordine F B M da preparare.'
-              : `Sono arrivati ${n} ordini F B M da preparare.`
-  ];
-  const VAR_CARICO=[
-    info=>{
-      const b=[];
-      if(info.palletCount>0) b.push(`${info.palletCount} ${info.palletCount===1?'bancale':'bancali'}`);
-      if(info.articleCount>0) b.push(`${info.articleCount} ${info.articleCount===1?'articolo':'articoli'}`);
-      const det=b.length? ' con '+b.join(' e ') : '';
-      return `Carico in arrivo da Cerea${det}. In arrivo in magazzino a breve.`;
-    },
-    info=> 'In arrivo un trasferimento da Cerea. La merce sarà presto in magazzino.'
-  ];
-  const VAR_READY=[
-    info=>{
-      const sku=info.sku?` ${String(info.sku).replace(/[-_]/g,' ')}`:'';
-      const pz=info.pieces>0?` ${info.pieces} ${info.pieces===1?'pezzo':'pezzi'},`:'';
-      return `Produzione completata a Cerea.${sku?` S K U${sku},`:''}${pz} pronto per il ritiro.`;
-    },
-    info=>{
-      const pz=info.pieces>0?` ${info.pieces} ${info.pieces===1?'pezzo':'pezzi'} pronti`:'Lotto pronto';
-      return `${pz} dalla produzione di Cerea. Pronto per il ritiro in spedizione.`;
-    }
-  ];
-  let _vi={fba:0,fbm:0,car:0,rdy:0,ss:0};
-  const pick=(arr,k)=>{ const f=arr[_vi[k]%arr.length]; _vi[k]++; return f; };
-  let lastReady='';   // id dell'ultimo lotto "pronto" già annunciato
-  let ssPrimed=false;            // true dopo il primo conteggio sotto scorta (silenzioso)
-  const ssSeen=new Set();        // chiavi loc|sku già annunciate (evita ripetizioni)
-  const VAR_SS=[
-    info=>{
-      const dove = info.loc==='cerea' ? 'a Cerea' : 'a Concamarise';
-      // clausola "da produrre": dipende dall'area di produzione, NON dal magazzino dove manca
-      const prod = info.prodLabel ? ` Da produrre ${info.prodLabel}.` : ' Va messo in produzione.';
-      if(info.count===1){
-        const nm = info.sample ? ` ${String(info.sample).replace(/[-_]/g,' ')}` : '';
-        return `Attenzione: nuovo articolo sotto scorta ${dove}.${nm?` Si tratta di${nm}.`:''}${prod}`;
-      }
-      return `Attenzione: ${info.count} nuovi articoli sotto scorta ${dove}.${prod} La lista è aggiornata sul cockpit.`;
-    },
-    info=>{
-      const dove = info.loc==='cerea' ? 'nel magazzino di Cerea' : 'nel magazzino di Concamarise';
-      const prod = info.prodLabel ? ` ${info.prodLabel}` : '';
-      return info.count===1
-        ? `Scorta in esaurimento ${dove}. Un articolo è da produrre${prod}.`
-        : `Scorta in esaurimento ${dove}. ${info.count} articoli da produrre${prod}.`;
-    }
-  ];
+  function _now(){ return (typeof performance!=='undefined' && performance.now) ? performance.now() : Date.now(); }
+  function _wallNow(){ return Date.now(); }
+  function _safe(fn, fallback){ try{ return fn(); }catch(_){ return fallback; } }
+  function _cleanSpaces(s){ return String(s||'').replace(/\s+/g,' ').trim(); }
+  function _sentence(s, max=260){ return _cleanSpaces(s).slice(0,max).replace(/\s+([,.])/g,'$1'); }
+  function _hash(s){ let h=2166136261; s=String(s||''); for(let i=0;i<s.length;i++){ h^=s.charCodeAt(i); h=Math.imul(h,16777619); } return String(h>>>0); }
+  function _locName(loc){ return loc==='cerea' ? 'Cerea' : (loc==='concamarise' ? 'Concamarise' : String(loc||'')); }
+  function _prodName(raw, fallback){
+    const t = _safe(()=> nomeProdottoPulito(raw), '') || _safe(()=> nomeProdottoDisplay(raw, 46), '') || fallback || '';
+    return _cleanSpaces(t).slice(0,72);
+  }
+  function _num(n){ n=Number(n)||0; return Math.max(0, Math.round(n)); }
+  function _canSpeakBase(){ return (typeof Voce!=='undefined' && Voce.abilitata); }
+  function _isUiBusy(){
+    return !!(selectedVano || tour || droneActive || (document.body && document.body.classList.contains('drone-flying')));
+  }
+  function _canSpeakNow(){
+    if(!_canSpeakBase()) return false;
+    if(document.visibilityState && document.visibilityState==='hidden') return false;
+    if(_isUiBusy()) return false;
+    return true;
+  }
+  function _cleanupDedupe(){
+    const t=_wallNow();
+    for(const [k,v] of dedupe.entries()) if(t-v>DEDUPE_TTL_MS) dedupe.delete(k);
+  }
+  function _rememberSig(sig){ _cleanupDedupe(); dedupe.set(sig, _wallNow()); }
+  function _seenRecently(sig){ _cleanupDedupe(); return dedupe.has(sig); }
 
-  function enqueue(text){
-    const t=String(text||'').trim(); if(!t) return;
-    // dedup: se la STESSA frase è già in coda o appena detta, non accodarla di nuovo
-    if(queue.some(q=> q.text===t)) return;
-    if(t===lastSpokenText && (performance.now()-lastSpokeAt) < COOLDOWN_MS) return;
-    queue.push({ text:t, _chimed:false });
-    if(queue.length>3) queue.splice(0, queue.length-3);   // non accumulare troppo
+  function _skuMap(list){
+    const m={};
+    for(const r of (Array.isArray(list)?list:[])){
+      const key=(r.canale||'')+'|'+(r.sku||'');
+      m[key]={ pezzi:_num(r.pezzi), ordini:_num(r.ordini), nome:r.nome||r.sku||'', canale:r.canale||'', sku:r.sku||'', ts:Number(r.ts||0) };
+    }
+    return m;
+  }
+  function _readState(){
+    const ord = _safe(()=>_contaOrdini(), {fba:0,fbm:0});
+    const sku = _safe(()=>calcolaSkuRaggruppati(), []);
+    const low = _safe(()=>[...LOWSTOCK.cerea, ...LOWSTOCK.concamarise], []);
+    const incoming = _safe(()=>_incomingData, null);
+    const ready = _safe(()=>_readyData, null);
+    const flows = _safe(()=>Object.values(FLOWS_BY_LOC||{}).reduce((s,a)=>s+(Array.isArray(a)?a.length:0),0), 0);
+    const state={
+      fba:_num(ord.fba), fbm:_num(ord.fbm), sku, low, incoming, ready, flows,
+      ss:_num(_safe(()=>_contaSottoscorta(), 0))
+    };
+    state.pendingPieces = sku.reduce((s,x)=>s+_num(x.pezzi),0);
+    state.topSku = [...sku].sort((a,b)=>(_num(b.pezzi)-_num(a.pezzi))||(_num(b.ordini)-_num(a.ordini)))[0] || null;
+    state.topLow = [...low].sort((a,b)=>_num(a.avail)-_num(b.avail))[0] || null;
+    return state;
+  }
+  function _stateSig(st){
+    const skuSig=(st.sku||[]).slice(0,8).map(x=>`${x.canale}:${x.sku}:${_num(x.pezzi)}:${_num(x.ordini)}`).join('|');
+    const ssSig=(st.low||[]).slice(0,8).map(x=>`${x.loc}:${x.sku}:${_num(x.avail)}:${_num(x.res)}`).join('|');
+    const inSig=st.incoming && st.incoming.active!==false ? String(st.incoming.ddtNumber||st.incoming.createdAtMs||'') : '';
+    const rdSig=st.ready && st.ready.active!==false ? String(st.ready.batchId||st.ready.sku||st.ready.createdAtMs||'') : '';
+    return `f${st.fba}-m${st.fbm}-s${st.ss}-p${st.pendingPieces}|${skuSig}|${ssSig}|${inSig}|${rdSig}`;
+  }
+
+  function _ordersText(st){
+    const parts=[];
+    if(st.fba>0) parts.push(`${st.fba} ${st.fba===1?'ordine F B A':'ordini F B A'}`);
+    if(st.fbm>0) parts.push(`${st.fbm} ${st.fbm===1?'ordine F B M':'ordini F B M'}`);
+    if(!parts.length) return 'nessun ordine in coda';
+    let out = parts.join(' e ');
+    if(st.topSku){
+      out += `. Priorità: ${_prodName(st.topSku.nome, st.topSku.sku)}, ${_num(st.topSku.pezzi)} pezzi`;
+      if(_num(st.topSku.ordini)>1) out += ` su ${_num(st.topSku.ordini)} ordini`;
+    }
+    return out;
+  }
+  function _lowText(st){
+    if(!st.ss) return '';
+    const x=st.topLow;
+    if(!x) return `${st.ss} articoli sotto scorta`;
+    const prodArea = x.prodArea==='cerea' ? 'Cerea' : 'Concamarise';
+    return `${st.ss} ${st.ss===1?'articolo sotto scorta':'articoli sotto scorta'}. Primo: ${_prodName(x.title, x.sku)}, disponibile ${_num(x.avail)}, da produrre a ${prodArea}`;
+  }
+  function buildStatusSentence(mode){
+    const st=_readState();
+    const chunks=[];
+    if(mode==='startup') chunks.push('Capannone tre D online.');
+    else if(mode==='morning') chunks.push('Buongiorno. Capannone operativo.');
+    else chunks.push('Aggiornamento capannone.');
+
+    const hasWork = (st.fba+st.fbm+st.ss)>0;
+    if(!hasWork){
+      chunks.push('Magazzino in pari: nessun ordine in coda e nessuna scorta critica.');
+    }else{
+      chunks.push(`Da preparare: ${_ordersText(st)}.`);
+      const low=_lowText(st); if(low) chunks.push(`Da produrre: ${low}.`);
+    }
+    if(st.incoming && st.incoming.active!==false && _safe(()=>_incomingExpiry()>Date.now(), false)){
+      const a=[];
+      if(_num(st.incoming.palletCount)>0) a.push(`${_num(st.incoming.palletCount)} bancali`);
+      if(_num(st.incoming.articleCount)>0) a.push(`${_num(st.incoming.articleCount)} articoli`);
+      chunks.push(`Carico da Cerea attivo${a.length?': '+a.join(', '):''}.`);
+    }
+    if(st.ready && st.ready.active!==false && _safe(()=>_readyExpiry()>Date.now(), false)){
+      const sku=st.ready.sku?String(st.ready.sku):'lotto';
+      chunks.push(`Produzione Cerea pronta per il ritiro: ${sku}.`);
+    }
+    if(mode==='startup' || mode==='morning') chunks.push('Buon lavoro.');
+    return _sentence(chunks.join(' '), 360);
+  }
+
+  function enqueue(text, opts={}){
+    if (typeof CAPANNONE_USE_BACKEND_VOICE_AGENT !== "undefined" && CAPANNONE_USE_BACKEND_VOICE_AGENT) return; // backend UBI attivo: gli annunci locali non parlano
+    const t=_sentence(text, opts.maxLen || 300);
+    if(!t) return;
+    if(!_canSpeakBase()) return;
+    const sig=opts.sig || _hash(t);
+    if(_seenRecently(sig)) return;
+    if(queue.some(q=>q.sig===sig)) return;
+    if(t===lastSpokenText && (_now()-lastSpokeAt)<DEDUP_ECHO_MS) return;
+    _rememberSig(sig);
+    const item={ text:t, sig, priority:Number.isFinite(Number(opts.priority))?Number(opts.priority):2, createdAt:_now(), _chimed:false };
+    queue.push(item);
+    queue.sort((a,b)=>(a.priority-b.priority)||(a.createdAt-b.createdAt));
+    if(queue.length>QUEUE_MAX) queue=queue.slice(0,QUEUE_MAX);
     pump();
   }
+
   function pump(){
     if(speaking) return;
     if(!queue.length) return;
-    if(typeof Voce==='undefined' || !Voce.abilitata) { queue.length=0; return; } // muto → scarta
-    // se una voce sta già parlando (es. annuncio "Trova"), NON sovrapporre:
-    // aspetta e ritenta, lasciando la frase in coda finché la voce si libera.
-    if(Voce.isBusy && Voce.isBusy()){
-      setTimeout(pump, 700);
-      return;
-    }
-    const now=performance.now();
-    const wait=Math.max(0, COOLDOWN_MS-(now-lastSpokeAt));
+    if(!_canSpeakBase()){ queue.length=0; return; }
+    if(!_canSpeakNow() || (Voce.isBusy && Voce.isBusy())){ setTimeout(pump, 900); return; }
+
+    let item=queue[0];
+    if(!item){ return; }
+    if(item.priority>1 && (_now()-item.createdAt)>MESSAGE_TTL_MS){ queue.shift(); setTimeout(pump,50); return; }
+    const wait=Math.max(0, (item.priority<=1?PRIORITY_COOLDOWN_MS:COOLDOWN_MS)-(_now()-lastSpokeAt));
     speaking=true;
     setTimeout(()=>{
-      // ricontrollo: tra il timeout e ora potrebbe essere partito un "Trova"
-      if(Voce.isBusy && Voce.isBusy()){ speaking=false; setTimeout(pump, 700); return; }
-      const item=queue[0];
-      const text=(item && typeof item==='object') ? item.text : String(item||'');
-      lastSpokeAt=performance.now();
-      lastSpokenText=text;
-      // fallback di durata se onDone non arriva (motore senza eventi affidabili)
+      if(!queue.length){ speaking=false; return; }
+      item=queue[0];
+      if(!_canSpeakNow() || (Voce.isBusy && Voce.isBusy())){ speaking=false; setTimeout(pump,900); return; }
+      const text=item.text;
+      lastSpokeAt=_now(); lastSpokenText=text;
       const words=text.split(/\s+/).length;
-      const dur=Math.min(12000, Math.max(3500, words*380));
+      const dur=Math.min(14000, Math.max(3800, words*360));
       let released=false;
-      const release=()=>{ if(released) return; released=true;
-        try{ Chime.chiusura(); }catch(_){}   // segnale di chiusura a fine annuncio
-        speaking=false; pump(); };
-      const fb=setTimeout(release, dur+2200);   // +ritardo chime apertura (~0.6s) e margine
+      const release=()=>{
+        if(released) return;
+        released=true;
+        try{ Chime.chiusura(); }catch(_){}
+        speaking=false;
+        pump();
+      };
+      const fb=setTimeout(release, dur+2400);
       const avvia=()=>{
-        const ok = Voce.parla(text, { priority:'low', onDone:()=>{ clearTimeout(fb); release(); } });
+        let ok=false;
+        try{ ok=Voce.parla(text,{ priority:'low', onDone:()=>{ clearTimeout(fb); release(); } }); }
+        catch(_){ clearTimeout(fb); release(); return; }
         Promise.resolve(ok).then(started=>{
           if(started===false){
-            // scartata perché la voce era occupata: rimetti in attesa, non consumare.
-            // azzero il flag chime così, quando la frase verrà davvero pronunciata, avrà il suo chime
-            const q0=queue[0]; if(q0 && typeof q0==='object') q0._chimed=false;
-            clearTimeout(fb); released=true; speaking=false; setTimeout(pump, 700);
+            clearTimeout(fb);
+            if(queue[0] && queue[0].sig===item.sig) queue[0]._chimed=false;
+            released=true; speaking=false; setTimeout(pump,900);
           }else{
-            queue.shift();   // consumata davvero
+            if(queue[0] && queue[0].sig===item.sig) queue.shift();
           }
-        }).catch(()=>{ /* in caso di errore lascia che il fallback timer liberi */ });
+        }).catch(()=>{ /* fallback timer libera comunque */ });
       };
-      // chime di apertura UNA sola volta per annuncio: evita il suono ripetuto sullo stesso discorso
-      if(item && typeof item==='object' && item._chimed){ avvia(); }
-      else{
-        if(item && typeof item==='object') item._chimed=true;
-        try{ Chime.apertura(avvia); }catch(_){ avvia(); }
-      }
+      if(item._chimed) avvia();
+      else{ item._chimed=true; try{ Chime.apertura(avvia); }catch(_){ avvia(); } }
     }, wait);
   }
 
-  // chiamata a ogni refresh contatori ordini
-  function onOrders(fba, fbm){
-    if(!primed){ primed=true; prevFba=fba; prevFbm=fbm; return; }   // avvio silenzioso
-    const dFba=fba-prevFba, dFbm=fbm-prevFbm;
-    if(dFba>0) enqueue(pick(VAR_FBA,'fba')(dFba));
-    if(dFbm>0) enqueue(pick(VAR_FBM,'fbm')(dFbm));
-    prevFba=fba; prevFbm=fbm;
+  function _orderDeltaText(curr, dFba, dFbm){
+    const added=[];
+    const currMap=_skuMap(curr);
+    for(const key in currMap){
+      const now=currMap[key];
+      const before=prevSkuMap[key] || {pezzi:0,ordini:0};
+      const deltaP=_num(now.pezzi)-_num(before.pezzi);
+      const deltaO=_num(now.ordini)-_num(before.ordini);
+      if(deltaP>0 || deltaO>0) added.push({ ...now, deltaP:Math.max(0,deltaP), deltaO:Math.max(0,deltaO) });
+    }
+    added.sort((a,b)=>(b.deltaP-a.deltaP)||(b.deltaO-a.deltaO));
+    const parts=[];
+    if(dFba>0) parts.push(`${dFba} ${dFba===1?'nuovo F B A':'nuovi F B A'}`);
+    if(dFbm>0) parts.push(`${dFbm} ${dFbm===1?'nuovo F B M':'nuovi F B M'}`);
+    let text = parts.length ? `Nuovo lavoro da preparare: ${parts.join(' e ')}.` : 'Nuovo lavoro da preparare.';
+    const top=added.slice(0,2).map(x=>`${_prodName(x.nome,x.sku)}, ${x.deltaP>0?x.deltaP:_num(x.pezzi)} pezzi`);
+    if(top.length) text += ` Focus: ${top.join('; ')}.`;
+    const st=_readState();
+    if(st.fba+st.fbm>0) text += ` Totale in coda: ${st.fba} F B A e ${st.fbm} F B M.`;
+    return _sentence(text, 320);
   }
-  // chiamata quando arriva/aggiorna l'avviso carico da Cerea
+
+  function onOrders(fba, fbm){
+    const curr=_safe(()=>calcolaSkuRaggruppati(), []);
+    const currMap=_skuMap(curr);
+    fba=_num(fba); fbm=_num(fbm);
+    if(!primed){ primed=true; prevFba=fba; prevFbm=fbm; prevSkuMap=currMap; return; }
+    const dFba=fba-prevFba, dFbm=fbm-prevFbm;
+    if(dFba>0 || dFbm>0){
+      const sig='orders:'+_stateSig(_readState());
+      enqueue(_orderDeltaText(curr, dFba, dFbm), { priority:1, sig });
+    }
+    prevFba=fba; prevFbm=fbm; prevSkuMap=currMap;
+  }
+
   function onCarico(info){
     if(!info || info.active===false) return;
-    const createdMs0=Number(info.createdAtMs||0);
-    // scadenza allineata al display (24h dalla creazione), non più ai 30 min di Firestore
-    const expEffettiva = createdMs0>0 ? createdMs0 + 24*60*60*1000 : Number(info.expiresAtMs||0);
-    if(expEffettiva && expEffettiva<=Date.now()) return;  // già scaduto: niente voce
+    const createdMs=_num(info.createdAtMs);
+    const expEffettiva = createdMs>0 ? createdMs + 24*60*60*1000 : _num(info.expiresAtMs);
+    if(expEffettiva && expEffettiva<=Date.now()) return;
     const id=String(info.ddtNumber||info.createdAtMs||'');
-    if(!id || id===lastCarico) return;                  // stessa bolla: non ripetere
-    // se il sistema non è ancora "primed" (kiosk appena aperto), annuncia SOLO se la bolla
-    // è stata creata pochissimo fa (carico realmente nuovo, non arretrato già visto)
-    const createdMs=createdMs0;
-    const appenaCreato = createdMs>0 && (Date.now()-createdMs) < 60000;
-    if(!primed && !appenaCreato){ lastCarico=id; return; } // marca come visto, in silenzio
+    if(!id || id===lastCarico) return;
+    const appenaCreato = createdMs>0 && (Date.now()-createdMs)<90000;
+    if(!primed && !appenaCreato){ lastCarico=id; return; }
     lastCarico=id;
-    enqueue(pick(VAR_CARICO,'car')(info));
+    const bits=[];
+    if(_num(info.palletCount)>0) bits.push(`${_num(info.palletCount)} ${_num(info.palletCount)===1?'bancale':'bancali'}`);
+    if(_num(info.articleCount)>0) bits.push(`${_num(info.articleCount)} ${_num(info.articleCount)===1?'articolo':'articoli'}`);
+    const dest=_locName(info.destination||'concamarise');
+    const ddt=info.ddtNumber ? ` Bolla ${info.ddtNumber}.` : '';
+    enqueue(`Carico in arrivo da Cerea${bits.length?' con '+bits.join(' e '):''}, destinazione ${dest}.${ddt} Preparare ricezione e spazio di scarico.`, { priority:0, sig:'carico:'+id, maxLen:300 });
   }
 
-  // chiamata quando un SKU prodotto a Cerea diventa pronto per il ritiro
   function onReady(info){
     if(!info || info.active===false) return;
-    const exp=Number(info.expiresAtMs||0);
-    if(exp && exp<=Date.now()) return;                  // già scaduto: niente voce
+    const exp=_num(info.expiresAtMs);
+    if(exp && exp<=Date.now()) return;
     const id=String(info.batchId||info.sku||info.createdAtMs||'');
-    if(!id || id===lastReady) return;                   // stesso lotto: non ripetere
-    const createdMs=Number(info.createdAtMs||0);
-    const appenaCreato = createdMs>0 && (Date.now()-createdMs) < 60000;
-    if(!primed && !appenaCreato){ lastReady=id; return; } // arretrato all'avvio: marca, in silenzio
+    if(!id || id===lastReady) return;
+    const createdMs=_num(info.createdAtMs);
+    const appenaCreato = createdMs>0 && (Date.now()-createdMs)<90000;
+    if(!primed && !appenaCreato){ lastReady=id; return; }
     lastReady=id;
-    enqueue(pick(VAR_READY,'rdy')(info));
+    const name=_prodName(info.title||info.name||info.sku, info.sku||'lotto');
+    const pcs=_num(info.pieces)>0 ? `${_num(info.pieces)} ${_num(info.pieces)===1?'pezzo':'pezzi'}` : 'lotto pronto';
+    enqueue(`Produzione completata a Cerea: ${name}, ${pcs}. Pronto per il ritiro e il trasferimento in spedizione.`, { priority:1, sig:'ready:'+id, maxLen:300 });
   }
 
-  // chiamata a ogni ricalcolo del sotto scorta: annuncia SOLO i NUOVI articoli entrati sotto scorta
   function onSottoscorta(loc, list){
-    const arr = Array.isArray(list) ? list : [];
-    const keysNow = arr.map(x=> loc+'|'+String(x.sku||'').toUpperCase());
+    const arr=Array.isArray(list)?list:[];
+    const keysNow=arr.map(x=>loc+'|'+String(x.sku||'').toUpperCase());
     if(!ssPrimed){
-      // primo giro: registra lo stato corrente in silenzio (niente arretrato letto all'avvio)
       keysNow.forEach(k=>ssSeen.add(k));
-      // marca primed solo dopo che entrambi i magazzini hanno fatto almeno un giro
       onSottoscorta._seen=(onSottoscorta._seen||new Set()); onSottoscorta._seen.add(loc);
       if(onSottoscorta._seen.has('cerea') && onSottoscorta._seen.has('concamarise')) ssPrimed=true;
       return;
     }
-    const nuovi = arr.filter(x=> !ssSeen.has(loc+'|'+String(x.sku||'').toUpperCase()));
-    // aggiorna lo stato visto: rimuovi quelli rientrati, aggiungi quelli nuovi di questo loc
+    const nuovi=arr.filter(x=>!ssSeen.has(loc+'|'+String(x.sku||'').toUpperCase()));
     for(const k of Array.from(ssSeen)){ if(k.startsWith(loc+'|') && !keysNow.includes(k)) ssSeen.delete(k); }
     keysNow.forEach(k=>ssSeen.add(k));
-    if(nuovi.length>0){
-      // raggruppo i NUOVI per area di produzione: "sotto scorta a X" resta legato al magazzino (loc),
-      // mentre "da produrre a Y" segue l'area di produzione del singolo articolo.
-      const byArea={ cerea:[], concamarise:[] };
-      for(const x of nuovi){ (byArea[x.prodArea]||byArea.concamarise).push(x); }
-      const order = (loc==='cerea') ? ['cerea','concamarise'] : ['concamarise','cerea'];
-      for(const area of order){
-        const grp=byArea[area]; if(!grp.length) continue;
-        const prodLabel = area==='cerea' ? 'a Cerea' : 'a Concamarise';
-        enqueue(pick(VAR_SS,'ss')({ loc, count:grp.length, sample:grp[0] && (grp[0].title||grp[0].sku), prodLabel }));
+    if(!nuovi.length) return;
+    const byArea={cerea:[], concamarise:[]};
+    for(const x of nuovi){ (byArea[x.prodArea]||byArea.concamarise).push(x); }
+    const chunks=[];
+    for(const area of ['cerea','concamarise']){
+      const grp=byArea[area]; if(!grp.length) continue;
+      const sample=grp[0];
+      const where=_locName(loc);
+      const prodArea=area==='cerea'?'Cerea':'Concamarise';
+      if(grp.length===1){
+        chunks.push(`${_prodName(sample.title,sample.sku)} sotto scorta a ${where}, disponibile ${_num(sample.avail)}, da produrre a ${prodArea}`);
+      }else{
+        chunks.push(`${grp.length} nuovi articoli sotto scorta a ${where}, da produrre a ${prodArea}`);
       }
     }
+    if(chunks.length) enqueue(`Attenzione scorte. ${chunks.join('. ')}.`, { priority:1, sig:'ss:'+loc+':'+nuovi.map(x=>x.sku).join('|'), maxLen:340 });
   }
 
-  // ===== SALUTO DEL MATTINO (ore 8:00) con riepilogo ordini in coda =====
-  const SALUTO_ORA=8, SALUTO_MIN=0, SALUTO_FINESTRA_MIN=5;  // scatta tra 8:00 e 8:05
-  let _salutoFatto='';                                      // 'YYYY-MM-DD' dell'ultimo saluto dato
-  const SALUTI=['Buongiorno', 'Buongiorno a tutti', 'Buongiorno e buon lavoro'];
-  let _si=0;
-  function _frasiOrdini(fba, fbm){
-    if(fba<=0 && fbm<=0) return 'Al momento non ci sono ordini in coda: si parte con il magazzino in pari.';
-    const parti=[];
-    if(fba>0) parti.push(`${fba} ${fba===1?'ordine':'ordini'} Fulfillment by Amazon`);
-    if(fbm>0) parti.push(`${fbm} ${fbm===1?'ordine':'ordini'} F B M`);
-    const lista = parti.length===2 ? parti.join(' e ') : parti[0];
-    const tot = fba+fbm;
-    return `Ci ${tot===1?'è':'sono'} ${lista} da preparare. Le posizioni sono illuminate in magazzino.`;
-  }
+  const SALUTO_ORA=8, SALUTO_MIN=0, SALUTO_FINESTRA_MIN=5;
   function onTick(now){
-    // usa l'ora reale del dispositivo
     const d=new Date();
     const oggi=`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
-    if(_salutoFatto===oggi) return;                         // già salutato oggi
-    const minutiDalleOtto = (d.getHours()-SALUTO_ORA)*60 + (d.getMinutes()-SALUTO_MIN);
-    if(minutiDalleOtto<0 || minutiDalleOtto>SALUTO_FINESTRA_MIN) return;  // fuori dalla finestra 8:00–8:05
-    _salutoFatto=oggi;                                      // segna fatto (anche se la voce è muta, niente ripetizioni)
-    let fba=0, fbm=0;
-    try{ const o=_contaOrdini(); fba=o.fba; fbm=o.fbm; }catch(_){}
-    const saluto=SALUTI[_si++%SALUTI.length];
-    enqueue(`${saluto}. ${_frasiOrdini(fba, fbm)}`);
+    const minutiDalleOtto=(d.getHours()-SALUTO_ORA)*60+(d.getMinutes()-SALUTO_MIN);
+    if(_salutoFatto!==oggi && minutiDalleOtto>=0 && minutiDalleOtto<=SALUTO_FINESTRA_MIN){
+      _salutoFatto=oggi;
+      enqueue(buildStatusSentence('morning'), { priority:1, sig:'morning:'+oggi, maxLen:360 });
+      return;
+    }
+    // Riepilogo operativo intelligente: solo se c'è lavoro, se lo stato è cambiato e non più spesso di 12 min.
+    const st=_readState();
+    if((st.fba+st.fbm+st.ss)<=0) return;
+    const sig=_stateSig(st);
+    if(sig===lastStatusSig) return;
+    if((_now()-lastStatusAt)<PERIODIC_STATUS_MS) return;
+    lastStatusAt=_now(); lastStatusSig=sig;
+    enqueue(buildStatusSentence('periodic'), { priority:3, sig:'periodic:'+sig, maxLen:360 });
   }
-  return { onOrders, onCarico, onTick, onReady, onSottoscorta };
+
+  function getStartupMessage(){ return buildStatusSentence('startup'); }
+  function describe(){ return buildStatusSentence('periodic'); }
+
+  return { onOrders, onCarico, onTick, onReady, onSottoscorta, getStartupMessage, describe, enqueue };
 })();
 
 /* ===== VOCE DI AVVIO KIOSK =====
@@ -4731,19 +4820,21 @@ const Annunci = (()=>{
 let _kioskStartupVoiceSpoken = false;
 let _kioskStartupVoiceTimer = 0;
 function _buildKioskStartupAnnouncement(){
+  try{
+    if(typeof Annunci!=='undefined' && Annunci.getStartupMessage) return Annunci.getStartupMessage();
+  }catch(_){}
   let fba=0, fbm=0, ss=0;
   try{ const o=_contaOrdini(); fba=Math.max(0, Number(o.fba)||0); fbm=Math.max(0, Number(o.fbm)||0); }catch(_){ }
   try{ ss=Math.max(0, Number(_contaSottoscorta())||0); }catch(_){ }
   const parts=[];
-  if(fba>0) parts.push(`${fba} ${fba===1?'ordine':'ordini'} Fulfillment by Amazon in coda`);
-  if(fbm>0) parts.push(`${fbm} ${fbm===1?'ordine':'ordini'} F B M in coda`);
+  if(fba>0) parts.push(`${fba} ${fba===1?'ordine F B A':'ordini F B A'} in coda`);
+  if(fbm>0) parts.push(`${fbm} ${fbm===1?'ordine F B M':'ordini F B M'} in coda`);
   if(ss>0) parts.push(`${ss} ${ss===1?'articolo sotto scorta':'articoli sotto scorta'} da controllare`);
-  const riepilogo = parts.length
-    ? `Situazione attuale: ${parts.join(', ')}.`
-    : 'Al momento il magazzino risulta in pari, senza ordini in coda.';
-  return `Capannone tre D online. Magazzino digitale in tempo reale. ${riepilogo} Buon lavoro.`.replace(/\s+/g,' ').trim();
+  const riepilogo = parts.length ? `Situazione attuale: ${parts.join(', ')}.` : 'Magazzino in pari: nessun ordine in coda e nessuna scorta critica.';
+  return `Capannone tre D online. ${riepilogo} Buon lavoro.`.replace(/\s+/g,' ').trim();
 }
 function maybeSpeakKioskStartup(reason){
+  if (typeof CAPANNONE_USE_BACKEND_VOICE_AGENT !== "undefined" && CAPANNONE_USE_BACKEND_VOICE_AGENT) return; // startup voce gestito da backend UBI / app esterna
   if(_kioskStartupVoiceSpoken) return;
   if(typeof Voce==='undefined' || !Voce.abilitata) return;
   if(document.visibilityState && document.visibilityState === 'hidden') return;
@@ -5483,6 +5574,17 @@ else window.addEventListener('DOMContentLoaded', ()=>requestAnimationFrame(_show
 const CAPANNONE_3D_FOCUS_DOC_ID = "capannone3dFocus";
 let LAST_CAPANNONE_3D_FOCUS_KEY = "";
 
+/* ===== BACKEND VOICE AGENT UBI =====
+   Capannone non genera più annunci locali: ascolta solo il documento cloud
+   amzInventoryProducts/capannoneVoiceAgent. Il backend viene chiamato da app esterne
+   (es. Picking) e scrive announcement.speakSeq + announcement.text; qui si riproduce
+   l'MP3 tramite il sistema TTS/cache già esistente. */
+const CAPANNONE_USE_BACKEND_VOICE_AGENT = true;
+const CAPANNONE_VOICE_AGENT_DOC_ID = "capannoneVoiceAgent";
+let LAST_CAPANNONE_AGENT_SPEAK_SEQ = "";
+let _capannoneAgentPendingAnnouncement = null;
+let _capannoneAgentRetryTimer = null;
+
 /* ===================================================================
    MODALITÀ DRONE — controllo remoto live dal picking
    picking.html scrive lo stick state nel doc amzInventoryProducts/capannone3dDrone.
@@ -5876,6 +5978,61 @@ function framePositions(points){
   markInteract && markInteract();
 }
 
+
+function queueCapannoneAgentAnnouncement(ann){
+  try{
+    if(!ann || !ann.speakSeq || !ann.text) return;
+    const seq = String(ann.speakSeq || "");
+    if(!seq || seq === LAST_CAPANNONE_AGENT_SPEAK_SEQ) return;
+    _capannoneAgentPendingAnnouncement = {
+      speakSeq: seq,
+      text: String(ann.text || "").trim(),
+      priority: String(ann.priority || "low"),
+      createdAtMs: Number(ann.createdAtMs || Date.now()) || Date.now(),
+      reason: String(ann.reason || "")
+    };
+    trySpeakCapannoneAgentAnnouncement();
+  }catch(e){ console.warn('queue backend voice agent', e); }
+}
+
+function trySpeakCapannoneAgentAnnouncement(){
+  try{
+    const ann = _capannoneAgentPendingAnnouncement;
+    if(!ann || !ann.text || !ann.speakSeq) return;
+    if(ann.speakSeq === LAST_CAPANNONE_AGENT_SPEAK_SEQ){
+      _capannoneAgentPendingAnnouncement = null;
+      return;
+    }
+    // non parla sopra Trova, Drone Mode o una voce già in corso: aspetta e riprova.
+    if(selectedVano || tour || droneActive || (typeof Voce !== 'undefined' && Voce.isBusy && Voce.isBusy())){
+      if(_capannoneAgentRetryTimer) clearTimeout(_capannoneAgentRetryTimer);
+      _capannoneAgentRetryTimer = setTimeout(trySpeakCapannoneAgentAnnouncement, 1400);
+      return;
+    }
+    if(typeof Voce !== 'undefined' && !Voce.abilitata){
+      // se la voce è muta, considero l'annuncio consumato: non deve partire dopo ore.
+      LAST_CAPANNONE_AGENT_SPEAK_SEQ = ann.speakSeq;
+      _capannoneAgentPendingAnnouncement = null;
+      return;
+    }
+
+    LAST_CAPANNONE_AGENT_SPEAK_SEQ = ann.speakSeq;
+    _capannoneAgentPendingAnnouncement = null;
+    setCloudStatus('UBI IA • annuncio in corso', '#22d3ee');
+
+    const startVoice = () => {
+      try{
+        Voce.parla(ann.text, {
+          priority: ann.priority === 'high' ? 'high' : 'low',
+          onDone: () => { try{ Chime.chiusura(); }catch(_){} }
+        });
+      }catch(e){ console.warn('backend voice agent play', e); }
+    };
+    try{ Chime.apertura(startVoice); }
+    catch(_){ startVoice(); }
+  }catch(e){ console.warn('try backend voice agent', e); }
+}
+
 function handleCapannone3dFocusCommand(data){
   try{
     const d = data || {};
@@ -6140,6 +6297,32 @@ function startInventoryRealtime(fs, db){
     console.error('Firestore focus error', err);
     if(err && err.code === 'permission-denied') setCloudStatus('Permessi comando Trova mancanti • apri ⚙ UID', '#ef4444');
   });
+
+
+  // listener backend voice agent UBI: nessuna UI, ascolta solo announcement.speakSeq
+  try{
+    const agentRef = fs.doc(db, "amzInventoryProducts", CAPANNONE_VOICE_AGENT_DOC_ID);
+    let _agentFirstSnap = true;
+    fs.onSnapshot(agentRef, (snap)=>{
+      if(!snap.exists()) return;
+      const data = snap.data() || {};
+      const ann = data.announcement || {};
+      if(!ann.speakSeq || !ann.text) return;
+      if(_agentFirstSnap){
+        _agentFirstSnap = false;
+        const age = Date.now() - Number(ann.createdAtMs || 0);
+        // all'apertura non riproduco vecchi annunci già presenti nel documento.
+        if(age > 2 * 60 * 1000){
+          LAST_CAPANNONE_AGENT_SPEAK_SEQ = String(ann.speakSeq || "");
+          return;
+        }
+      }
+      queueCapannoneAgentAnnouncement(ann);
+    }, (err)=>{
+      console.warn('backend voice agent listener', err && err.code);
+      if(err && err.code === 'permission-denied') setCloudStatus('Permessi UBI mancanti • voice agent', '#ef4444');
+    });
+  }catch(e){ console.warn('listener backend voice agent non attivo', e); }
 
   // --- MODALITÀ DRONE: stick live dal picking ---
   const droneRef = fs.doc(db, "amzInventoryProducts", CAPANNONE_3D_DRONE_DOC_ID);
