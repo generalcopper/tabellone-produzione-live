@@ -4713,7 +4713,9 @@ Tip:
     const SHOPIFY_FBM_SYNC_ENDPOINT = "https://shopify-fbm-webhook-zxiqbo2osa-ew.a.run.app/sync-now";
     const CAPANNONE_VOICE_AGENT_URL = "https://us-central1-tabellone-produzione-liv-e313e.cloudfunctions.net/capannoneVoiceAgentNow";
     const UBI_VOICE_DIALOG_URL = "https://us-central1-tabellone-produzione-liv-e313e.cloudfunctions.net/ubiVoiceDialog";
+    const CAPANNONE_VOICE_AGENT_DOC_ID = "capannoneVoiceAgent";
     let _ubiVoiceAgentLastClickAt = 0;
+    let _ubiInterruptLastSentAt = 0;
     let _ubiRecorder = null;
     let _ubiAudioStream = null;
     let _ubiAudioChunks = [];
@@ -5339,6 +5341,43 @@ function guessTitleFromRaw(rawText, sku){
     }
     function ubiTalkBtn(){ return $("btnUbiTalk"); }
 
+    // Se UBI sta già parlando sul Capannone 3D, quando l'operatore riclicca "Parla"
+    // mando subito un comando cloud di interruzione. Poi la nuova registrazione continua normalmente.
+    async function interruptCapannoneUbiSpeech(reason = "new_ubi_talk"){
+      try{
+        const now = Date.now();
+        if(now - _ubiInterruptLastSentAt < 650) return false;
+        _ubiInterruptLastSentAt = now;
+
+        const api = state.firebase?.api;
+        const db = state.firebase?.db;
+        if(!api || !db) return false;
+
+        const ref = api.doc(db, "amzInventoryProducts", CAPANNONE_VOICE_AGENT_DOC_ID);
+        const user = state.firebase?.auth?.currentUser || {};
+        const byEmail = state.user?.email || state.user?.emailLower || user.email || "";
+        const byUid = state.user?.uid || user.uid || "";
+        const seq = `${now}-${Math.random().toString(36).slice(2, 8)}`;
+
+        await api.setDoc(ref, {
+          control: {
+            interruptSeq: seq,
+            interruptAt: api.serverTimestamp ? api.serverTimestamp() : null,
+            interruptAtClient: now,
+            reason: String(reason || "new_ubi_talk"),
+            source: "picking_ubi_talk",
+            byEmail,
+            byUid
+          }
+        }, { merge:true });
+
+        return true;
+      }catch(err){
+        console.warn("UBI interrupt capannone voice", err);
+        return false;
+      }
+    }
+
     function openUbiModeFullscreen(){
       try{
         setPickingMobileMenu(false);
@@ -5416,6 +5455,10 @@ function guessTitleFromRaw(rawText, sku){
           showToast("Microfono non disponibile", "Il browser non supporta MediaRecorder.", 2600);
           return;
         }
+
+        // Click su "Parla" = interrompi subito l'audio UBI eventualmente in corso sul kiosk.
+        // Non blocco l'apertura del microfono: se la write cloud fallisce, la registrazione parte comunque.
+        void interruptCapannoneUbiSpeech("new_ubi_recording");
 
         ubiSetTranscript("Sto ascoltando…");
         ubiSetReply("—");
