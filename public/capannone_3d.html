@@ -1677,6 +1677,107 @@ function buildFlacone(R,H,tipo){
   return f;
 }
 
+/* ===== OTTIMIZZAZIONE GEOMETRIA BANCALE =====================================
+   Problema: con tanti bancali il collo di bottiglia non è la camera ma il numero
+   di Mesh/draw call. Prima ogni bancale aveva decine di oggetti (assi EPAL,
+   blocchetti, scatole, flaconi). Qui manteniamo ESATTAMENTE la stessa geometria
+   visiva, ma la fondiamo per materiale: un bancale diventa pochi mesh statici.
+   Qualità invariata, GPU molto più leggera. */
+const BANCALE_MERGE_ENABLED = true;
+function mergeBufferGeometriesLocal(geometries){
+  if(!geometries || !geometries.length) return null;
+  let totalVerts=0,totalIdx=0,hasUv=false;
+  for(const g of geometries){
+    const pos=g.getAttribute('position'); if(!pos) continue;
+    totalVerts += pos.count;
+    totalIdx += g.index ? g.index.count : pos.count;
+    if(g.getAttribute('uv')) hasUv=true;
+  }
+  if(!totalVerts || !totalIdx) return null;
+  const posOut=new Float32Array(totalVerts*3);
+  const norOut=new Float32Array(totalVerts*3);
+  const uvOut=hasUv?new Float32Array(totalVerts*2):null;
+  const IdxArray = totalVerts>65535 ? Uint32Array : Uint16Array;
+  const idxOut=new IdxArray(totalIdx);
+  let vOff=0,iOff=0;
+
+  for(const g of geometries){
+    const pos=g.getAttribute('position'); if(!pos) continue;
+    const nor=g.getAttribute('normal');
+    const uv=g.getAttribute('uv');
+    posOut.set(pos.array, vOff*3);
+    if(nor) norOut.set(nor.array, vOff*3);
+    if(uvOut && uv) uvOut.set(uv.array, vOff*2);
+    if(g.index){
+      const ia=g.index.array;
+      for(let i=0;i<ia.length;i++) idxOut[iOff+i]=ia[i]+vOff;
+      iOff += ia.length;
+    }else{
+      for(let i=0;i<pos.count;i++) idxOut[iOff+i]=vOff+i;
+      iOff += pos.count;
+    }
+    vOff += pos.count;
+  }
+
+  const merged=new THREE.BufferGeometry();
+  merged.setAttribute('position', new THREE.BufferAttribute(posOut,3));
+  merged.setAttribute('normal', new THREE.BufferAttribute(norOut,3));
+  if(uvOut) merged.setAttribute('uv', new THREE.BufferAttribute(uvOut,2));
+  merged.setIndex(new THREE.BufferAttribute(idxOut,1));
+  merged.computeBoundingBox();
+  merged.computeBoundingSphere();
+  return merged;
+}
+
+function optimizeBancaleGroup(root){
+  if(!BANCALE_MERGE_ENABLED || !root) return root;
+  root.updateMatrixWorld(true);
+
+  const rootInv=new THREE.Matrix4().copy(root.matrixWorld).invert();
+  const batches=new Map();
+  const originalGeometries=new Set();
+  let meshCount=0, skipped=false;
+
+  root.traverse(o=>{
+    if(!o || !o.isMesh || !o.geometry || !o.material) return;
+    if(Array.isArray(o.material)){ skipped=true; return; } // sicurezza: nessun materiale multi-slot nei bancali
+    meshCount++;
+    originalGeometries.add(o.geometry);
+    const mat=o.material;
+    const key=mat.uuid || String(mat.id);
+    let b=batches.get(key);
+    if(!b){ b={material:mat, geometries:[], cast:false, receive:false}; batches.set(key,b); }
+    const m=new THREE.Matrix4().multiplyMatrices(rootInv, o.matrixWorld);
+    const geom=o.geometry.clone();
+    geom.applyMatrix4(m);
+    b.geometries.push(geom);
+    b.cast = b.cast || !!o.castShadow;
+    b.receive = b.receive || !!o.receiveShadow;
+  });
+
+  if(skipped || meshCount<5) return root;
+
+  // elimina la gerarchia vecchia: la geometria è già stata bakeata nello spazio locale di root
+  const old=[...root.children];
+  for(const child of old) root.remove(child);
+  for(const geom of originalGeometries){ try{geom.dispose();}catch(_){} }
+
+  for(const b of batches.values()){
+    const geom=mergeBufferGeometriesLocal(b.geometries);
+    for(const g of b.geometries){ try{g.dispose();}catch(_){} }
+    if(!geom) continue;
+    const mesh=new THREE.Mesh(geom,b.material);
+    mesh.castShadow=b.cast;
+    mesh.receiveShadow=b.receive;
+    mesh.matrixAutoUpdate=false;
+    mesh.updateMatrix();
+    root.add(mesh);
+  }
+
+  root.userData.optimizedBancale=true;
+  return root;
+}
+
 /* Costruisce un bancale EPAL con NUMERO ESATTO di scatole, ADATTANDO la disposizione
    in modo che la pila NON superi l'altezza disponibile del vano (`maxH`).
    - scatolePiene / aperta / fillFrac: come prima.
@@ -1811,7 +1912,7 @@ function buildBancale({scatolePiene=0, aperta=0, fillFrac=0, restoPz=0, pzPerSca
     open.traverse(o=>{if(o.isMesh)o.castShadow=true;});
     g.add(open);
   }
-  return g;
+  return optimizeBancaleGroup(g);
 }
 
 function buildRack({id,x,z,bays,faceDir,empty,alongX,codeBays}){
@@ -5899,7 +6000,7 @@ function tick(now){
   tick._px=cpx; tick._py=cpy; tick._pz=cpz;
   const wallsMoving = (function(){ for(const w of WALLS){ const o=w.material.opacity; if(o>0.02 && o<0.91) return true; } return false; })();
   const recentInteract = (now-lastInteract) < 600;
-  const sceneActive = inCine || droneActive || glowState || glowList || prelievoGlow || camMoving || wallsMoving || recentInteract || _shadowFrames>0;
+  const sceneActive = inCine || droneActive || glowState || glowList || camMoving || wallsMoving || recentInteract || _shadowFrames>0;
   if(sceneActive){
     tick._idleAccum=0;
   } else {
