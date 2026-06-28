@@ -73,9 +73,9 @@
   /* ---- palette UBI (assistente IA) ---- */
   :root{--ubi:#0a84ff;--ubi-bright:#4da6ff;--ubi-soft:#9ecbff;--ubi-deep:#0050d0;--ubi-glow:10,132,255}
 
-  /* ===== ONDE PERIMETRALI — corrono lungo tutto il bordo a tempo con la voce di UBI ===== */
+  /* ===== UBI AURA — visualizzazione scenica premium durante la voce ===== */
   #ubiWave{position:fixed;inset:0;z-index:55;pointer-events:none;
-    opacity:0;transition:opacity .45s ease;mix-blend-mode:screen;}
+    opacity:0;transition:opacity .36s ease;mix-blend-mode:screen;filter:saturate(1.18);contain:strict;}
   body.ubi-speaking #ubiWave{opacity:1;}
   .collapse{position:absolute;top:18px;right:18px;width:28px;height:28px;border-radius:10px;
     border:1px solid var(--line);background:rgba(255,255,255,.05);color:var(--muted);cursor:pointer;
@@ -1124,7 +1124,7 @@
 <body>
 <div id="app"></div>
 
-<!-- UBI PARLA: onde perimetrali sincronizzate con la voce (canvas full-screen) -->
+<!-- UBI PARLA: aura scenica premium sincronizzata con la voce (canvas full-screen) -->
 <canvas id="ubiWave" aria-hidden="true"></canvas>
 
 
@@ -3002,42 +3002,38 @@ const Chime = (function(){
   return { apertura, chiusura, _resume(){ const c=_ctx(); if(c){ try{ if(c.state==='suspended') c.resume(); }catch(_){} } } };
 })();
 
-/* ===== UBI WAVE — onde lungo TUTTO il perimetro dello schermo, a tempo con la voce =====
-   Un canvas full-screen disegna 4 onde (una per lato) che corrono lungo i bordi. L'ampiezza
-   è guidata dal livello audio REALE di UBI (AnalyserNode sull'<audio> cloud). Se il server
-   TTS non concede CORS, l'analyser resta muto: si attiva un fallback procedurale così le
-   onde si vedono comunque mentre UBI parla. Nessun impatto sulla riproduzione vocale. */
+/* ===== UBI AURA — visualizzazione scenica premium quando parla =====
+   Niente onde sinusoidali grezze: il canvas disegna un'aura cinematica sui bordi,
+   corner HUD, scanner luminosi e micro‑equalizer laterali. Il livello resta guidato
+   dall'audio reale quando disponibile; se l'analyser è muto usa un parlato procedurale. */
 const UbiWave = (function(){
   let canvas=null, ctx=null, raf=0, active=false;
-  let ac=null, analyser=null, srcNode=null, data=null, attachedEl=null;
+  let ac=null, analyser=null, srcNode=null, timeData=null, freqData=null, attachedEl=null;
   let dpr=1, W=0, H=0;
-  let level=0;            // livello udito (0..1) lisciato
-  let phase=0;           // fase di scorrimento delle onde
+  let level=0, detail=0, phase=0;
   let usingAnalyser=false;
-  const COL='10,132,255';   // blu LED UBI
+  const BLUE='10,132,255';
+  const CYAN='86,214,255';
+  const VIOLET='132,92,255';
 
   function _ensureCanvas(){
     if(canvas) return true;
     canvas=document.getElementById('ubiWave');
     if(!canvas) return false;
-    ctx=canvas.getContext('2d');
+    ctx=canvas.getContext('2d',{alpha:true});
     _resize();
     window.addEventListener('resize', _resize, {passive:true});
     return true;
   }
   function _resize(){
     if(!canvas) return;
-    dpr=Math.min(2, window.devicePixelRatio||1);
+    dpr=Math.min(1.5, window.devicePixelRatio||1);       // bello ma leggero anche su kiosk/4K
     W=window.innerWidth; H=window.innerHeight;
     canvas.width=Math.floor(W*dpr); canvas.height=Math.floor(H*dpr);
     canvas.style.width=W+'px'; canvas.style.height=H+'px';
     if(ctx){ ctx.setTransform(dpr,0,0,dpr,0,0); }
   }
 
-  // collega l'AnalyserNode all'elemento <audio> (una sola volta per elemento).
-  // SICUREZZA VOCE: dirotto l'audio nel grafo Web Audio SOLO se il context è già 'running'
-  // (sbloccato da una gesture). Se è 'suspended', non tocco l'elemento — la voce esce
-  // normalmente e le onde usano il fallback procedurale. Così la voce non rischia il silenzio.
   function attach(el){
     if(!el || usingAnalyser) return;
     try{
@@ -3045,100 +3041,242 @@ const UbiWave = (function(){
       if(!AC) return;
       if(!ac){ ac=new AC(); }
       if(ac.state==='suspended'){ try{ ac.resume(); }catch(_){} }
-      if(ac.state!=='running') return;      // non ancora sbloccato: resto sul procedurale
+      if(ac.state!=='running') return;
       if(attachedEl===el) return;
       try{
         srcNode=ac.createMediaElementSource(el);
         analyser=ac.createAnalyser();
-        analyser.fftSize=256; analyser.smoothingTimeConstant=0.75;
-        data=new Uint8Array(analyser.frequencyBinCount);
+        analyser.fftSize=512;
+        analyser.smoothingTimeConstant=0.78;
+        timeData=new Uint8Array(analyser.fftSize);
+        freqData=new Uint8Array(analyser.frequencyBinCount);
         srcNode.connect(analyser);
-        analyser.connect(ac.destination);   // mantengo l'audio udibile
+        analyser.connect(ac.destination);
         attachedEl=el; usingAnalyser=true;
       }catch(e){
-        usingAnalyser=false;                // già sorgentato o CORS negato → fallback
+        usingAnalyser=false;
       }
     }catch(_){ usingAnalyser=false; }
   }
 
   let _muteFrames=0;
   function _readLevel(){
-    if(usingAnalyser && analyser && data){
-      analyser.getByteTimeDomainData(data);
+    if(usingAnalyser && analyser && timeData && freqData){
+      analyser.getByteTimeDomainData(timeData);
+      analyser.getByteFrequencyData(freqData);
       let sum=0;
-      for(let i=0;i<data.length;i++){ const v=(data[i]-128)/128; sum+=v*v; }
-      const rms=Math.sqrt(sum/data.length);
-      const target=Math.min(1, rms*2.4);
-      if(target>0.012){ _muteFrames=0; level += (target-level)*0.35; return; }
-      // analyser muto (probabile CORS): dopo pochi frame uso il procedurale come riempimento
+      for(let i=0;i<timeData.length;i++){ const v=(timeData[i]-128)/128; sum+=v*v; }
+      const rms=Math.sqrt(sum/timeData.length);
+      let band=0;
+      for(let i=8;i<Math.min(70,freqData.length);i++) band+=freqData[i];
+      band = band / Math.max(1, Math.min(70,freqData.length)-8) / 255;
+      const target=Math.min(1, rms*2.8 + band*0.45);
+      if(target>0.012){
+        _muteFrames=0;
+        level += (target-level)*0.30;
+        detail += (band-detail)*0.22;
+        return;
+      }
       _muteFrames++;
       if(active && _muteFrames>10){ _proc(); return; }
       level += (0-level)*0.18;
+      detail += (0-detail)*0.18;
       return;
     }
     _proc();
   }
-  // livello procedurale: pseudo-parlato animato finché active (fallback senza analyser)
   function _proc(){
     const t=performance.now()/1000;
-    const target = active ? (0.42 + 0.34*Math.abs(Math.sin(t*5.1)) * (0.6+0.4*Math.sin(t*1.7))) : 0;
-    level += (target-level)*0.18;
+    const syll=Math.abs(Math.sin(t*5.8))*0.55 + Math.abs(Math.sin(t*9.7+1.1))*0.22;
+    const target=active ? (0.28 + syll*0.56) : 0;
+    level += (target-level)*0.16;
+    detail += ((active?syll:0)-detail)*0.14;
   }
 
-  // disegna una banda d'onda pulita lungo un lato.
-  // (ox,oy): origine; (dx,dy): direzione lungo il lato; (nx,ny): normale verso l'interno; len: lunghezza lato
-  // wavelenPx: lunghezza d'onda in PIXEL (uguale su tutti i lati → densità uniforme).
-  function _side(ox,oy,dx,dy,nx,ny,len,amp,wavelenPx){
-    const steps=Math.max(48, Math.floor(len/6));
-    const k=(2*Math.PI)/wavelenPx;       // numero d'onda spaziale costante in px
+  function _rr(x,y,w,h,r){
+    r=Math.min(r,w/2,h/2);
     ctx.beginPath();
-    for(let i=0;i<=steps;i++){
-      const f=i/steps;
-      const along=f*len;
-      // inviluppo: ampiezza a 0 agli estremi del lato, piena al centro → niente scontri agli angoli
-      const env=Math.sin(f*Math.PI);
-      const w=Math.sin(along*k + phase) * amp * env;
-      const px=ox+dx*along + nx*w;
-      const py=oy+dy*along + ny*w;
-      if(i===0) ctx.moveTo(px,py); else ctx.lineTo(px,py);
+    ctx.moveTo(x+r,y);
+    ctx.lineTo(x+w-r,y); ctx.quadraticCurveTo(x+w,y,x+w,y+r);
+    ctx.lineTo(x+w,y+h-r); ctx.quadraticCurveTo(x+w,y+h,x+w-r,y+h);
+    ctx.lineTo(x+r,y+h); ctx.quadraticCurveTo(x,y+h,x,y+h-r);
+    ctx.lineTo(x,y+r); ctx.quadraticCurveTo(x,y,x+r,y);
+  }
+  function _pointOnRect(t,inset){
+    t=((t%1)+1)%1;
+    const w=Math.max(1,W-inset*2), h=Math.max(1,H-inset*2);
+    const p=2*(w+h);
+    let d=t*p;
+    if(d<w) return {x:inset+d,y:inset,dx:1,dy:0};
+    d-=w;
+    if(d<h) return {x:W-inset,y:inset+d,dx:0,dy:1};
+    d-=h;
+    if(d<w) return {x:W-inset-d,y:H-inset,dx:-1,dy:0};
+    d-=w;
+    return {x:inset,y:H-inset-d,dx:0,dy:-1};
+  }
+
+  function _edgeAura(lv){
+    const thick=Math.min(260, Math.max(120, Math.min(W,H)*0.20));
+    const a=0.06 + lv*0.22;
+    let g;
+    g=ctx.createLinearGradient(0,0,0,thick);
+    g.addColorStop(0,`rgba(${BLUE},${a})`); g.addColorStop(.42,`rgba(${CYAN},${a*.34})`); g.addColorStop(1,'rgba(0,0,0,0)');
+    ctx.fillStyle=g; ctx.fillRect(0,0,W,thick);
+    g=ctx.createLinearGradient(0,H,0,H-thick);
+    g.addColorStop(0,`rgba(${BLUE},${a*.92})`); g.addColorStop(.45,`rgba(${VIOLET},${a*.24})`); g.addColorStop(1,'rgba(0,0,0,0)');
+    ctx.fillStyle=g; ctx.fillRect(0,H-thick,W,thick);
+    g=ctx.createLinearGradient(0,0,thick,0);
+    g.addColorStop(0,`rgba(${BLUE},${a*.7})`); g.addColorStop(1,'rgba(0,0,0,0)');
+    ctx.fillStyle=g; ctx.fillRect(0,0,thick,H);
+    g=ctx.createLinearGradient(W,0,W-thick,0);
+    g.addColorStop(0,`rgba(${CYAN},${a*.75})`); g.addColorStop(1,'rgba(0,0,0,0)');
+    ctx.fillStyle=g; ctx.fillRect(W-thick,0,thick,H);
+
+    // bagliori angolari molto morbidi, più “cinema” che oscilloscopio
+    const corners=[[0,0],[W,0],[W,H],[0,H]];
+    for(let i=0;i<corners.length;i++){
+      const [x,y]=corners[i];
+      const rg=ctx.createRadialGradient(x,y,0,x,y,thick*1.15);
+      rg.addColorStop(0,`rgba(${i%2?CYAN:BLUE},${a*.95})`);
+      rg.addColorStop(.38,`rgba(${VIOLET},${a*.20})`);
+      rg.addColorStop(1,'rgba(0,0,0,0)');
+      ctx.fillStyle=rg;
+      ctx.fillRect(x===0?0:W-thick*1.15,y===0?0:H-thick*1.15,thick*1.15,thick*1.15);
     }
+  }
+
+  function _premiumFrame(lv){
+    const inset=16;
+    const r=Math.min(38, Math.max(18, Math.min(W,H)*0.035));
+    ctx.save();
+    ctx.lineJoin='round'; ctx.lineCap='round';
+    _rr(inset,inset,W-inset*2,H-inset*2,r);
+    ctx.shadowColor=`rgba(${BLUE},${0.75+lv*.25})`;
+    ctx.shadowBlur=18+lv*28;
+    ctx.strokeStyle=`rgba(${BLUE},${0.16+lv*.20})`;
+    ctx.lineWidth=22+lv*18;
     ctx.stroke();
+    ctx.shadowBlur=0;
+    _rr(inset+8,inset+8,W-(inset+8)*2,H-(inset+8)*2,r-8);
+    ctx.strokeStyle=`rgba(${CYAN},${0.22+lv*.45})`;
+    ctx.lineWidth=1.2+lv*1.1;
+    ctx.stroke();
+    _rr(inset+18,inset+18,W-(inset+18)*2,H-(inset+18)*2,Math.max(10,r-18));
+    ctx.strokeStyle=`rgba(${VIOLET},${0.08+lv*.16})`;
+    ctx.lineWidth=1;
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function _corners(lv){
+    const inset=22, len=Math.min(170, Math.max(86, Math.min(W,H)*0.14));
+    const pulse=0.72 + 0.28*Math.sin(phase*0.018);
+    ctx.save();
+    ctx.lineCap='round'; ctx.lineJoin='round';
+    ctx.shadowColor=`rgba(${CYAN},${0.70})`;
+    ctx.shadowBlur=14+lv*18;
+    ctx.strokeStyle=`rgba(${CYAN},${(0.38+lv*.42)*pulse})`;
+    ctx.lineWidth=2.2+lv*2.0;
+    function L(x,y,sx,sy){
+      ctx.beginPath();
+      ctx.moveTo(x+sx*len,y); ctx.lineTo(x,y); ctx.lineTo(x,y+sy*len);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(x+sx*28,y+sy*28,24, sx<0?Math.PI*1.5:Math.PI, sy<0?Math.PI*2:Math.PI*.5, sx*sy<0);
+      ctx.stroke();
+    }
+    L(inset,inset, 1, 1);
+    L(W-inset,inset, -1, 1);
+    L(W-inset,H-inset, -1, -1);
+    L(inset,H-inset, 1, -1);
+    ctx.restore();
+  }
+
+  function _scanners(lv){
+    const count=10;
+    const speed=0.00018 + lv*0.00022;
+    ctx.save();
+    ctx.lineCap='round'; ctx.lineJoin='round';
+    for(let i=0;i<count;i++){
+      const t=phase*speed + i/count + (i%3)*0.019;
+      const p=_pointOnRect(t, 28 + (i%2)*11);
+      const q=_pointOnRect(t-0.020-(detail*0.012), 28 + (i%2)*11);
+      const a=(0.18+lv*0.52) * (0.75+0.25*Math.sin(phase*0.012+i));
+      const grad=ctx.createLinearGradient(q.x,q.y,p.x,p.y);
+      grad.addColorStop(0,'rgba(0,0,0,0)');
+      grad.addColorStop(.55,`rgba(${BLUE},${a*.45})`);
+      grad.addColorStop(1,`rgba(${CYAN},${a})`);
+      ctx.strokeStyle=grad;
+      ctx.shadowColor=`rgba(${CYAN},${a})`;
+      ctx.shadowBlur=10+lv*16;
+      ctx.lineWidth=1.2 + lv*2.2;
+      ctx.beginPath(); ctx.moveTo(q.x,q.y); ctx.lineTo(p.x,p.y); ctx.stroke();
+      ctx.fillStyle=`rgba(230,248,255,${Math.min(0.9,a+0.25)})`;
+      ctx.beginPath(); ctx.arc(p.x,p.y,1.6+lv*2.1,0,Math.PI*2); ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  function _microBars(lv){
+    const bars=22;
+    const mid=H*0.50;
+    const span=Math.min(H*0.54, 420);
+    ctx.save();
+    ctx.lineCap='round';
+    ctx.shadowColor=`rgba(${BLUE},0.85)`;
+    ctx.shadowBlur=8+lv*10;
+    for(let side=0; side<2; side++){
+      const x=side?W-20:20;
+      const dir=side?-1:1;
+      for(let i=0;i<bars;i++){
+        const y=mid-span/2 + (i/(bars-1))*span;
+        const w=(12 + 58*lv) * (0.32 + 0.68*Math.abs(Math.sin(phase*0.023+i*.73+side)));
+        const a=0.10 + lv*0.40;
+        ctx.strokeStyle=`rgba(${i%3===0?CYAN:BLUE},${a})`;
+        ctx.lineWidth=1.1 + lv*1.2;
+        ctx.beginPath(); ctx.moveTo(x,y); ctx.lineTo(x+dir*w,y); ctx.stroke();
+      }
+    }
+    ctx.restore();
+  }
+
+  function _breathLens(lv){
+    // alone basso centrale, discreto: dà presenza scenica senza coprire la mappa 3D
+    const cx=W/2, cy=H+40;
+    const r=Math.min(W,H)*0.48 + lv*90;
+    const g=ctx.createRadialGradient(cx,cy,0,cx,cy,r);
+    g.addColorStop(0,`rgba(${CYAN},${0.07+lv*.13})`);
+    g.addColorStop(.35,`rgba(${BLUE},${0.05+lv*.09})`);
+    g.addColorStop(1,'rgba(0,0,0,0)');
+    ctx.fillStyle=g; ctx.fillRect(0,Math.max(0,H-r),W,r);
   }
 
   function _draw(){
+    if(!ctx) return;
     ctx.clearRect(0,0,W,H);
     const lv=level;
-    if(lv<=0.012) return;
-    const amp=4 + lv*46;                  // ampiezza onda (px) guidata dalla voce
-    const glow=8 + lv*30;
-    const aMain=0.32 + lv*0.55;
-    const WL=210;                         // lunghezza d'onda uniforme su tutti i lati (px)
-    ctx.lineJoin='round'; ctx.lineCap='round';
-    // due passate: alone morbido largo + linea LED netta sopra
-    for(let pass=0; pass<2; pass++){
-      const isGlow = pass===0;
-      ctx.lineWidth = isGlow ? (3+lv*6) : (1.8+lv*2);
-      ctx.strokeStyle = isGlow ? `rgba(${COL},${aMain*0.40})` : `rgba(${COL},${aMain})`;
-      ctx.shadowColor = `rgba(${COL},0.95)`;
-      ctx.shadowBlur = isGlow ? glow*2.4 : glow;
-      const inset = isGlow ? 4 : 8;       // distanza dal bordo
-      // tutti i lati con stessa WL e stesso verso di scorrimento (phase comune) → perimetro coerente
-      _side(0,       inset,   1, 0,  0, 1, W, amp, WL);   // TOP    →  normale ↓
-      _side(W-inset, 0,       0, 1, -1, 0, H, amp, WL);   // RIGHT  ↓  normale ←
-      _side(W,       H-inset, -1,0,  0,-1, W, amp, WL);   // BOTTOM ←  normale ↑
-      _side(inset,   H,       0,-1,  1, 0, H, amp, WL);   // LEFT   ↑  normale →
-    }
-    ctx.shadowBlur=0;
+    if(lv<=0.010) return;
+    ctx.save();
+    ctx.globalCompositeOperation='lighter';
+    _edgeAura(lv);
+    _breathLens(lv);
+    _premiumFrame(lv);
+    _corners(lv);
+    _microBars(lv);
+    _scanners(lv);
+    ctx.restore();
   }
 
   function _loop(){
     _readLevel();
-    phase += 1.6 + level*3.4;             // scorrimento onde: più veloce quando la voce è forte
+    phase += 1 + level*3.2 + detail*1.2;
     _draw();
-    if(active || level>0.02){
+    if(active || level>0.018){
       raf=requestAnimationFrame(_loop);
     }else{
-      raf=0; ctx && ctx.clearRect(0,0,W,H);
+      raf=0;
+      ctx && ctx.clearRect(0,0,W,H);
     }
   }
 
@@ -3149,7 +3287,6 @@ const UbiWave = (function(){
       if(ac && ac.state==='suspended'){ try{ ac.resume(); }catch(_){} }
       if(!raf) raf=requestAnimationFrame(_loop);
     }
-    // allo spegnimento il loop continua finché level non scende a 0 (dissolvenza onde), poi si ferma da solo
   }
 
   return { setActive, attach };
