@@ -5584,6 +5584,7 @@ const CAPANNONE_VOICE_AGENT_DOC_ID = "capannoneVoiceAgent";
 let LAST_CAPANNONE_AGENT_SPEAK_SEQ = "";
 let _capannoneAgentPendingAnnouncement = null;
 let _capannoneAgentRetryTimer = null;
+let _capannoneAgentSpeakingAttempt = false;
 
 /* ===================================================================
    MODALITÀ DRONE — controllo remoto live dal picking
@@ -5995,7 +5996,8 @@ function queueCapannoneAgentAnnouncement(ann){
   }catch(e){ console.warn('queue backend voice agent', e); }
 }
 
-function trySpeakCapannoneAgentAnnouncement(){
+async function trySpeakCapannoneAgentAnnouncement(){
+  if(_capannoneAgentSpeakingAttempt) return;
   try{
     const ann = _capannoneAgentPendingAnnouncement;
     if(!ann || !ann.text || !ann.speakSeq) return;
@@ -6006,7 +6008,7 @@ function trySpeakCapannoneAgentAnnouncement(){
     // non parla sopra Trova, Drone Mode o una voce già in corso: aspetta e riprova.
     if(selectedVano || tour || droneActive || (typeof Voce !== 'undefined' && Voce.isBusy && Voce.isBusy())){
       if(_capannoneAgentRetryTimer) clearTimeout(_capannoneAgentRetryTimer);
-      _capannoneAgentRetryTimer = setTimeout(trySpeakCapannoneAgentAnnouncement, 1400);
+      _capannoneAgentRetryTimer = setTimeout(()=>{ trySpeakCapannoneAgentAnnouncement(); }, 1400);
       return;
     }
     if(typeof Voce !== 'undefined' && !Voce.abilitata){
@@ -6016,21 +6018,41 @@ function trySpeakCapannoneAgentAnnouncement(){
       return;
     }
 
-    LAST_CAPANNONE_AGENT_SPEAK_SEQ = ann.speakSeq;
-    _capannoneAgentPendingAnnouncement = null;
-    setCloudStatus('UBI IA • annuncio in corso', '#22d3ee');
+    _capannoneAgentSpeakingAttempt = true;
+    setCloudStatus('UBI IA • preparo voce', '#22d3ee');
 
-    const startVoice = () => {
+    const playNow = async ()=>{
       try{
-        Voce.parla(ann.text, {
+        const ok = await Voce.parla(ann.text, {
           priority: ann.priority === 'high' ? 'high' : 'low',
           onDone: () => { try{ Chime.chiusura(); }catch(_){} }
         });
-      }catch(e){ console.warn('backend voice agent play', e); }
+        if(ok === false){
+          // Audio bloccato o endpoint non partito: non consumo speakSeq e ritento più avanti.
+          setCloudStatus('UBI IA • audio non partito, ritento', '#f59e0b');
+          if(_capannoneAgentRetryTimer) clearTimeout(_capannoneAgentRetryTimer);
+          _capannoneAgentRetryTimer = setTimeout(()=>{ trySpeakCapannoneAgentAnnouncement(); }, 5000);
+          return;
+        }
+        LAST_CAPANNONE_AGENT_SPEAK_SEQ = ann.speakSeq;
+        _capannoneAgentPendingAnnouncement = null;
+        setCloudStatus('UBI IA • voce in riproduzione', '#22c55e');
+      }catch(e){
+        console.warn('backend voice agent play', e);
+        setCloudStatus('UBI IA • errore audio', '#ef4444');
+        if(_capannoneAgentRetryTimer) clearTimeout(_capannoneAgentRetryTimer);
+        _capannoneAgentRetryTimer = setTimeout(()=>{ trySpeakCapannoneAgentAnnouncement(); }, 5000);
+      }finally{
+        _capannoneAgentSpeakingAttempt = false;
+      }
     };
-    try{ Chime.apertura(startVoice); }
-    catch(_){ startVoice(); }
-  }catch(e){ console.warn('try backend voice agent', e); }
+
+    try{ Chime.apertura(()=>{ playNow(); }); }
+    catch(_){ playNow(); }
+  }catch(e){
+    _capannoneAgentSpeakingAttempt = false;
+    console.warn('try backend voice agent', e);
+  }
 }
 
 function handleCapannone3dFocusCommand(data){
