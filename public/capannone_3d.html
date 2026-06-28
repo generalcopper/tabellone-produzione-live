@@ -2947,12 +2947,26 @@ function _waitMs(ms){
    Warm-up immediato + load/pageshow/visibility + retry cadenzati. Non scrive dati,
    non usa cache/fallback locali: serve solo a sbloccare l'uscita audio HTML del kiosk. */
 let _kioskAudioLastBlockedAt = 0;
+let _kioskAudioPolicyHintShown = false;
+function showKioskAudioAutoplayHint(reason){
+  try{
+    _kioskAudioPolicyHintShown = true;
+    // Nota importante: nessun codice JavaScript può forzare audio non muto se Edge/Chrome
+    // hanno la policy autoplay bloccata. In kiosk bisogna abilitare la policy browser
+    // (AutoplayAllowed=1) oppure avviare Edge/Chrome con --autoplay-policy=no-user-gesture-required.
+    if(typeof setCloudStatus === 'function'){
+      setCloudStatus('Voce bloccata da Edge • abilita AutoplayAllowed', '#f59e0b');
+    }
+  }catch(_){ }
+}
 function noteKioskAudioBlocked(reason, err){
   try{
     const now = Date.now();
     if(now - _kioskAudioLastBlockedAt < 2500) return;
     _kioskAudioLastBlockedAt = now;
     console.log("Kiosk audio blocked", reason || "audio", err || "");
+    console.log("FIX VOCE KIOSK: abilita la policy Edge/Chrome AutoplayAllowed=1 oppure avvia il kiosk con --autoplay-policy=no-user-gesture-required. Questo non si può bypassare solo da JavaScript.");
+    showKioskAudioAutoplayHint(reason);
   }catch(_){ }
 }
 /* ===== CHIME ANNUNCI — breve segnale acustico prima/dopo la voce =====
@@ -3208,9 +3222,16 @@ const Voce = (function(){
   }
   function ensureAudio(){
     if(!audio){
-      audio=new Audio();
+      // Elemento audio reale nel DOM, non solo new Audio(): in kiosk/Edge è più stabile
+      // quando autoplay è autorizzato da policy o flag di avvio.
+      audio=document.createElement('audio');
       audio.preload="auto";
       audio.autoplay=true;
+      audio.setAttribute('autoplay','');
+      audio.setAttribute('playsinline','');
+      audio.setAttribute('x-webkit-airplay','deny');
+      audio.style.cssText='position:fixed;width:1px;height:1px;opacity:0;pointer-events:none;left:-9999px;top:-9999px;';
+      try{ document.body.appendChild(audio); }catch(_){ }
       // NB: niente crossOrigin forzato. Il server TTS potrebbe non concedere CORS e impostarlo
       // rischierebbe di bloccare la riproduzione. L'AnalyserNode prova comunque a leggere
       // l'ampiezza; se l'audio è cross-origin senza CORS i campioni risultano nulli e le onde
@@ -3230,10 +3251,16 @@ const Voce = (function(){
     a.playbackRate = 1;
     a.muted=false;
     a.src=url;
+    try{ a.load(); }catch(_){ }
     try{
       await a.play();
       unlocked=true;
       pendingPlay=null;
+      try{
+        if(_kioskAudioPolicyHintShown && typeof setCloudStatus === 'function'){
+          setCloudStatus('Voce kiosk attiva', '#22c55e');
+        }
+      }catch(_){ }
       return true;
     }catch(err){
       if(String(err&&err.name)==='NotAllowedError'){
