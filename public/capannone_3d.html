@@ -73,22 +73,10 @@
   /* ---- palette UBI (assistente IA) ---- */
   :root{--ubi:#a855f7;--ubi-bright:#c084fc;--ubi-soft:#d8b4fe;--ubi-deep:#7c3aed;--ubi-glow:168,85,247}
 
-  /* ===== ANGOLI SCHERMO — pulsano a ritmo quando UBI parla ===== */
-  #ubiCorners{position:fixed;inset:0;z-index:55;pointer-events:none;opacity:0;
-    transition:opacity .4s ease}
-  body.ubi-speaking #ubiCorners{opacity:1}
-  #ubiCorners .uc{position:absolute;width:clamp(120px,16vw,260px);height:clamp(120px,16vw,260px);
-    border:0 solid rgba(var(--ubi-glow),.9)}
-  #ubiCorners .uc.tl{top:0;left:0;border-top-width:3px;border-left-width:3px;border-top-left-radius:30px}
-  #ubiCorners .uc.tr{top:0;right:0;border-top-width:3px;border-right-width:3px;border-top-right-radius:30px}
-  #ubiCorners .uc.bl{bottom:0;left:0;border-bottom-width:3px;border-left-width:3px;border-bottom-left-radius:30px}
-  #ubiCorners .uc.br{bottom:0;right:0;border-bottom-width:3px;border-right-width:3px;border-bottom-right-radius:30px}
-  body.ubi-speaking #ubiCorners .uc{animation:ubiCorner 1.15s ease-in-out infinite}
-  body.ubi-speaking #ubiCorners .uc.tr,
-  body.ubi-speaking #ubiCorners .uc.bl{animation-delay:.575s}  /* angoli alternati per effetto "a ritmo" */
-  @keyframes ubiCorner{
-    0%,100%{opacity:.30;filter:drop-shadow(0 0 4px rgba(var(--ubi-glow),.4))}
-    50%{opacity:1;filter:drop-shadow(0 0 22px rgba(var(--ubi-glow),.95))}}
+  /* ===== ONDE PERIMETRALI — corrono lungo tutto il bordo a tempo con la voce di UBI ===== */
+  #ubiWave{position:fixed;inset:0;z-index:55;pointer-events:none;
+    opacity:0;transition:opacity .45s ease;mix-blend-mode:screen;}
+  body.ubi-speaking #ubiWave{opacity:1;}
   .collapse{position:absolute;top:18px;right:18px;width:28px;height:28px;border-radius:10px;
     border:1px solid var(--line);background:rgba(255,255,255,.05);color:var(--muted);cursor:pointer;
     font-size:16px;line-height:1;display:flex;align-items:center;justify-content:center;transition:.2s}
@@ -1146,8 +1134,8 @@
 <body>
 <div id="app"></div>
 
-<!-- UBI PARLA: angoli schermo che pulsano a ritmo (visibili solo con body.ubi-speaking) -->
-<div id="ubiCorners" aria-hidden="true"><i class="uc tl"></i><i class="uc tr"></i><i class="uc bl"></i><i class="uc br"></i></div>
+<!-- UBI PARLA: onde perimetrali sincronizzate con la voce (canvas full-screen) -->
+<canvas id="ubiWave" aria-hidden="true"></canvas>
 
 <!-- MAPPA OFFLINE: fuori orario la scena 3D viene sospesa (GPU a riposo). -->
 <div id="mapOffline" aria-hidden="true">
@@ -3036,6 +3024,158 @@ const Chime = (function(){
   return { apertura, chiusura, _resume(){ const c=_ctx(); if(c){ try{ if(c.state==='suspended') c.resume(); }catch(_){} } } };
 })();
 
+/* ===== UBI WAVE — onde lungo TUTTO il perimetro dello schermo, a tempo con la voce =====
+   Un canvas full-screen disegna 4 onde (una per lato) che corrono lungo i bordi. L'ampiezza
+   è guidata dal livello audio REALE di UBI (AnalyserNode sull'<audio> cloud). Se il server
+   TTS non concede CORS, l'analyser resta muto: si attiva un fallback procedurale così le
+   onde si vedono comunque mentre UBI parla. Nessun impatto sulla riproduzione vocale. */
+const UbiWave = (function(){
+  let canvas=null, ctx=null, raf=0, active=false;
+  let ac=null, analyser=null, srcNode=null, data=null, attachedEl=null;
+  let dpr=1, W=0, H=0;
+  let level=0;            // livello udito (0..1) lisciato
+  let phase=0;           // fase di scorrimento delle onde
+  let usingAnalyser=false;
+  const COL='168,85,247';   // viola UBI
+
+  function _ensureCanvas(){
+    if(canvas) return true;
+    canvas=document.getElementById('ubiWave');
+    if(!canvas) return false;
+    ctx=canvas.getContext('2d');
+    _resize();
+    window.addEventListener('resize', _resize, {passive:true});
+    return true;
+  }
+  function _resize(){
+    if(!canvas) return;
+    dpr=Math.min(2, window.devicePixelRatio||1);
+    W=window.innerWidth; H=window.innerHeight;
+    canvas.width=Math.floor(W*dpr); canvas.height=Math.floor(H*dpr);
+    canvas.style.width=W+'px'; canvas.style.height=H+'px';
+    if(ctx){ ctx.setTransform(dpr,0,0,dpr,0,0); }
+  }
+
+  // collega l'AnalyserNode all'elemento <audio> (una sola volta per elemento).
+  // SICUREZZA VOCE: dirotto l'audio nel grafo Web Audio SOLO se il context è già 'running'
+  // (sbloccato da una gesture). Se è 'suspended', non tocco l'elemento — la voce esce
+  // normalmente e le onde usano il fallback procedurale. Così la voce non rischia il silenzio.
+  function attach(el){
+    if(!el || usingAnalyser) return;
+    try{
+      const AC=window.AudioContext||window.webkitAudioContext;
+      if(!AC) return;
+      if(!ac){ ac=new AC(); }
+      if(ac.state==='suspended'){ try{ ac.resume(); }catch(_){} }
+      if(ac.state!=='running') return;      // non ancora sbloccato: resto sul procedurale
+      if(attachedEl===el) return;
+      try{
+        srcNode=ac.createMediaElementSource(el);
+        analyser=ac.createAnalyser();
+        analyser.fftSize=256; analyser.smoothingTimeConstant=0.75;
+        data=new Uint8Array(analyser.frequencyBinCount);
+        srcNode.connect(analyser);
+        analyser.connect(ac.destination);   // mantengo l'audio udibile
+        attachedEl=el; usingAnalyser=true;
+      }catch(e){
+        usingAnalyser=false;                // già sorgentato o CORS negato → fallback
+      }
+    }catch(_){ usingAnalyser=false; }
+  }
+
+  let _muteFrames=0;
+  function _readLevel(){
+    if(usingAnalyser && analyser && data){
+      analyser.getByteTimeDomainData(data);
+      let sum=0;
+      for(let i=0;i<data.length;i++){ const v=(data[i]-128)/128; sum+=v*v; }
+      const rms=Math.sqrt(sum/data.length);
+      const target=Math.min(1, rms*2.4);
+      if(target>0.012){ _muteFrames=0; level += (target-level)*0.35; return; }
+      // analyser muto (probabile CORS): dopo pochi frame uso il procedurale come riempimento
+      _muteFrames++;
+      if(active && _muteFrames>10){ _proc(); return; }
+      level += (0-level)*0.18;
+      return;
+    }
+    _proc();
+  }
+  // livello procedurale: pseudo-parlato animato finché active (fallback senza analyser)
+  function _proc(){
+    const t=performance.now()/1000;
+    const target = active ? (0.42 + 0.34*Math.abs(Math.sin(t*5.1)) * (0.6+0.4*Math.sin(t*1.7))) : 0;
+    level += (target-level)*0.18;
+  }
+
+  // disegna una banda d'onda lungo un lato.
+  // (ox,oy): origine; (dx,dy): direzione lungo il lato; (nx,ny): normale verso l'interno; len: lunghezza lato
+  function _side(ox,oy,dx,dy,nx,ny,len,amp,k,speed){
+    const steps=Math.max(40, Math.floor(len/9));
+    ctx.beginPath();
+    for(let i=0;i<=steps;i++){
+      const f=i/steps;
+      const along=f*len;
+      const w=Math.sin(f*Math.PI*k + phase*speed) * amp
+            + Math.sin(f*Math.PI*k*2.7 - phase*speed*1.6) * amp*0.35;
+      const px=ox+dx*along + nx*w;
+      const py=oy+dy*along + ny*w;
+      if(i===0) ctx.moveTo(px,py); else ctx.lineTo(px,py);
+    }
+    ctx.stroke();
+  }
+
+  function _draw(){
+    ctx.clearRect(0,0,W,H);
+    const lv=level;
+    if(lv>0.012){
+      const amp=6 + lv*52;                 // ampiezza onda (px) guidata dalla voce
+      const glow=10 + lv*34;
+      const aMain=0.30 + lv*0.60;
+      // due passate: alone largo + linea netta
+      for(let pass=0; pass<2; pass++){
+        const isGlow = pass===0;
+        ctx.lineWidth = isGlow ? (2.5+lv*5) : (1.6+lv*2.2);
+        ctx.strokeStyle = `rgba(${COL},${isGlow? aMain*0.45 : aMain})`;
+        ctx.shadowColor = `rgba(${COL},${0.9})`;
+        ctx.shadowBlur = isGlow ? glow*2.2 : glow;
+        const inset = isGlow ? 3 : 7;      // distanza dal bordo
+        // TOP (→), normale verso il basso
+        _side(0, inset, 1,0, 0,1, W, amp, 9, 1.0);
+        // RIGHT (↓), normale verso sinistra
+        _side(W-inset, 0, 0,1, -1,0, H, amp, 7, 1.18);
+        // BOTTOM (←), normale verso l'alto
+        _side(W, H-inset, -1,0, 0,-1, W, amp, 9, 0.92);
+        // LEFT (↑), normale verso destra
+        _side(inset, H, 0,-1, 1,0, H, amp, 7, 1.32);
+      }
+      ctx.shadowBlur=0;
+    }
+  }
+
+  function _loop(){
+    _readLevel();
+    phase += 0.05 + level*0.10;            // scorre più veloce quando la voce è forte
+    _draw();
+    if(active || level>0.02){
+      raf=requestAnimationFrame(_loop);
+    }else{
+      raf=0; ctx && ctx.clearRect(0,0,W,H);
+    }
+  }
+
+  function setActive(on){
+    if(!_ensureCanvas()) return;
+    active=!!on;
+    if(active){
+      if(ac && ac.state==='suspended'){ try{ ac.resume(); }catch(_){} }
+      if(!raf) raf=requestAnimationFrame(_loop);
+    }
+    // allo spegnimento il loop continua finché level non scende a 0 (dissolvenza onde), poi si ferma da solo
+  }
+
+  return { setActive, attach };
+})();
+
 const Voce = (function(){
   let abilitata = true;
   let audio = null;            // elemento <audio> riutilizzato per l'audio cloud
@@ -3063,13 +3203,18 @@ const Voce = (function(){
 
   function _setUbiSpeaking(on){
     try{ document.body.classList.toggle('ubi-speaking', !!on); }catch(_){}
+    try{ if(typeof UbiWave!=='undefined') UbiWave.setActive(!!on); }catch(_){}
   }
   function ensureAudio(){
     if(!audio){
       audio=new Audio();
       audio.preload="auto";
       audio.autoplay=true;
-      audio.addEventListener('playing', ()=>{ cloudPlaying=true; _setUbiSpeaking(true); });
+      // NB: niente crossOrigin forzato. Il server TTS potrebbe non concedere CORS e impostarlo
+      // rischierebbe di bloccare la riproduzione. L'AnalyserNode prova comunque a leggere
+      // l'ampiezza; se l'audio è cross-origin senza CORS i campioni risultano nulli e le onde
+      // passano automaticamente al fallback procedurale. La voce parte sempre.
+      audio.addEventListener('playing', ()=>{ cloudPlaying=true; _setUbiSpeaking(true); try{ if(typeof UbiWave!=='undefined') UbiWave.attach(audio); }catch(_){} });
       audio.addEventListener('ended',   ()=>{ cloudPlaying=false; pendingPlay=null; _setUbiSpeaking(false); _finish(); });
       audio.addEventListener('pause',   ()=>{ cloudPlaying=false; _setUbiSpeaking(false); });
       audio.addEventListener('error',   ()=>{ cloudPlaying=false; pendingPlay=null; _setUbiSpeaking(false); _finish(); });
