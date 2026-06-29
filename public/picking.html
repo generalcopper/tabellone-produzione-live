@@ -8636,17 +8636,19 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
       `;
     }
 
-function startAllLogs(){
-      startLogsFor("cerea");
-      startLogsFor("concamarise");
+function startAllLogs(modeOrOpts = "full"){
+      const opts = (modeOrOpts && typeof modeOrOpts === "object") ? modeOrOpts : { mode: modeOrOpts };
+      startLogsFor("cerea", opts);
+      startLogsFor("concamarise", opts);
     }
 
     function stopAllLogs(){
       for(const loc of ["cerea","concamarise"]){
         try{ state.logs[loc].unsub && state.logs[loc].unsub(); }catch(_e){}
         state.logs[loc].unsub = null;
+        state.logs[loc].mode = null;
         state.logs[loc].flows = [];
-        state.logs[loc].meta = { count:0, loaded:false, expected:0, seen:0 };
+        state.logs[loc].meta = { count:0, loaded:false, expected:0, seen:0, mode:null };
       }
       if(state.route.view==="location") renderFlowsList();
       if(state.route.view==="home") renderHomeLogsBox();
@@ -8666,11 +8668,14 @@ function startAllLogs(){
       }catch(_e){ return false; }
     }
 
-    function ensureLogsRealtimeStarted(reason=""){
+    function ensureLogsRealtimeStarted(reason="", opts = {}){
       try{
         if(!state.firebase.ok || !state.user?.isWhitelisted) return false;
-        if(!logsRealtimeStarted("cerea")) startLogsFor("cerea");
-        if(!logsRealtimeStarted("concamarise")) startLogsFor("concamarise");
+        const mode = (opts && opts.mode === "fba") ? "fba" : "full";
+        // Picking FBA non deve aspettare i listener Shopify/FBM: parte con una lettura
+        // rapida dei soli flussi recenti. Se poi si apre FBM/Logs/Storico, upgrade a full.
+        startLogsFor("cerea", { mode });
+        startLogsFor("concamarise", { mode });
         if(state.route.view === "home"){
           renderHomePickingBox();
           renderHomePickingHistoryBox();
@@ -9420,10 +9425,22 @@ function startAllLogs(){
       }
     }
 
-    function startLogsFor(loc){
+    function startLogsFor(loc, opts = {}){
       if(!state.firebase.ok || !state.user?.isWhitelisted) return;
       const lg = state.logs[loc];
-      if(lg.unsub) return;
+      const requestedMode = (opts && opts.mode === "fba") ? "fba" : "full";
+
+      if(lg.unsub){
+        if(requestedMode === "full" && lg.mode === "fba"){
+          // Upgrade lazy: da Picking FBA veloce a lettura completa (FBM/Logs/Storico).
+          try{ lg.unsub && lg.unsub(); }catch(_e){}
+          lg.unsub = null;
+          lg.flows = [];
+          lg.meta = { count:0, loaded:false, expected:0, seen:0, mode:requestedMode };
+        }else{
+          return;
+        }
+      }
 
       const api = state.firebase.api;
       const db = state.firebase.db;
@@ -9431,7 +9448,8 @@ function startAllLogs(){
       const maps = { applied:new Map(), shopifySource:new Map(), shopifySourcePlain:new Map(), shopifyFile:new Map(), raw:new Map() };
       const bootExpected = new Set();
       const bootSeen = new Set();
-      lg.meta = { ...(lg.meta || {}), count:0, loaded:false, expected:0, seen:0 };
+      lg.mode = requestedMode;
+      lg.meta = { ...(lg.meta || {}), count:0, loaded:false, expected:0, seen:0, mode:requestedMode };
       const markLogsBootSeen = (key)=>{
         try{
           bootSeen.add(key);
@@ -9499,15 +9517,20 @@ function startAllLogs(){
       };
 
       const unsubs = [];
-      unsubs.push(attach("applied", api.query(colRef, api.orderBy("appliedAtClient","desc"), api.limit(80)), true));
+      const appliedLimit = requestedMode === "fba" ? 120 : 80;
+      unsubs.push(attach("applied", api.query(colRef, api.orderBy("appliedAtClient","desc"), api.limit(appliedLimit)), true));
       // Niente listener generico su updatedAtClient: quel campo cambia a ogni sync/backfill
       // e faceva riscaricare/riordinare troppi log con lo stesso orario.
-      // Per Shopify teniamo query mirate e leggere; il raw è solo salvagente minimo.
-      try{ unsubs.push(attach("shopifySource", api.query(colRef, api.where("source", "==", "shopify_fbm"), api.limit(90)), false)); }catch(_e){}
-      try{ unsubs.push(attach("shopifySourcePlain", api.query(colRef, api.where("source", "==", "shopify"), api.limit(60)), false)); }catch(_e){}
-      try{ unsubs.push(attach("shopifyFile", api.query(colRef, api.where("fileName", "==", "SHOPIFY_FBM"), api.limit(90)), false)); }catch(_e){}
-      try{ unsubs.push(attach("raw", api.query(colRef, api.limit(20)), false)); }catch(_e){}
+      // Modalità FBA veloce: basta appliedAtClient. Non aspetta query Shopify/FBM.
+      if(requestedMode !== "fba"){
+        // Per Shopify teniamo query mirate e leggere; il raw è solo salvagente minimo.
+        try{ unsubs.push(attach("shopifySource", api.query(colRef, api.where("source", "==", "shopify_fbm"), api.limit(90)), false)); }catch(_e){}
+        try{ unsubs.push(attach("shopifySourcePlain", api.query(colRef, api.where("source", "==", "shopify"), api.limit(60)), false)); }catch(_e){}
+        try{ unsubs.push(attach("shopifyFile", api.query(colRef, api.where("fileName", "==", "SHOPIFY_FBM"), api.limit(90)), false)); }catch(_e){}
+        try{ unsubs.push(attach("raw", api.query(colRef, api.limit(20)), false)); }catch(_e){}
+      }
       lg.meta.expected = bootExpected.size;
+      lg.meta.mode = requestedMode;
       lg.meta.loaded = bootExpected.size === 0 ? true : (bootSeen.size >= bootExpected.size);
       checkStartupDataGate("logs_attached_" + loc);
       lg.unsub = ()=>{
@@ -12240,7 +12263,10 @@ function currentInv(){
       }
       state.ui.pickingHomeView = (next === "located" || next === "logs" || next === "pickingFbm" || next === "pickingFba" || next === "pickingHistory") ? next : "noLocation";
       const needsFlowLogs = (state.ui.pickingHomeView === "logs" || state.ui.pickingHomeView === "pickingFbm" || state.ui.pickingHomeView === "pickingFba" || state.ui.pickingHomeView === "pickingHistory");
-      if(needsFlowLogs) ensureLogsRealtimeStarted("picking_" + state.ui.pickingHomeView);
+      if(needsFlowLogs){
+        const logMode = (state.ui.pickingHomeView === "pickingFba") ? "fba" : "full";
+        ensureLogsRealtimeStarted("picking_" + state.ui.pickingHomeView, { mode: logMode });
+      }
       syncPickingHomeView();
       if(isPickingLogsViewActive()) startActivityLogWatch();
       else if(state.activityLogs?.unsubMovements) stopActivityLogWatch({ render:false });
@@ -13590,14 +13616,18 @@ Confermandolo, la transaction cloud scaricherà comunque la quantità richiesta 
       }
 
       const flows = getPickingCandidateFlows();
-      const activeFlows = flows.filter(f=>!pickingFlowStats(f).done);
-      const fbmActiveFlows = activeFlows.filter(f=>isShopifyFbmFlow(f));
-      const fbaActiveFlows = activeFlows.filter(f=>!isShopifyFbmFlow(f));
-      const visibleFbmFlows = fbmActiveFlows;
-      const visibleFbaFlows = fbaActiveFlows.slice(0, 8);
       const currentPickingView = pickingHomeView();
       const showFbaPicking = currentPickingView === "pickingFba";
       const showFbmPicking = !showFbaPicking; // default sicuro: FBM, compatibile con vecchia voce Picking
+      const fbaCandidateFlows = flows.filter(f=>!isShopifyFbmFlow(f));
+      const fbmCandidateFlows = flows.filter(f=>isShopifyFbmFlow(f));
+
+      // FBA deve aprirsi veloce: non calcolo gruppi/posizioni FBM mentre si guarda FBA.
+      const fbaActiveFlows = fbaCandidateFlows.filter(f=>!pickingFlowStats(f).done);
+      const fbmActiveFlows = showFbmPicking ? fbmCandidateFlows.filter(f=>!pickingFlowStats(f).done) : [];
+      const activeFlows = showFbmPicking ? [...fbmActiveFlows, ...fbaActiveFlows] : fbaActiveFlows;
+      const visibleFbmFlows = fbmActiveFlows;
+      const visibleFbaFlows = fbaActiveFlows.slice(0, 8);
 
       function buildFbmPickingSkuGroups(sectionFlows){
         const map = new Map();
@@ -13736,10 +13766,10 @@ Confermandolo, la transaction cloud scaricherà comunque la quantità richiesta 
           </div>`;
       }
 
-      const fbmSkuGroups = buildFbmPickingSkuGroups(fbmActiveFlows);
-      const fbmSkuTotalPieces = fbmSkuGroups.reduce((a,x)=>a + (Number(x.qty)||0), 0);
+      const fbmSkuGroups = showFbmPicking ? buildFbmPickingSkuGroups(fbmActiveFlows) : [];
+      const fbmSkuTotalPieces = showFbmPicking ? fbmSkuGroups.reduce((a,x)=>a + (Number(x.qty)||0), 0) : 0;
       count.textContent = showFbaPicking ? fmtN(fbaActiveFlows.length) : fmtN(fbmSkuGroups.length);
-      setPickingNavCount("pickingFbm", fmtN(fbmSkuGroups.length));
+      setPickingNavCount("pickingFbm", showFbmPicking ? fmtN(fbmSkuGroups.length) : "—");
       setPickingNavCount("pickingFba", fmtN(fbaActiveFlows.length));
 
       const pickingTitleEl = box.querySelector?.(".miniTitle");
@@ -13924,6 +13954,15 @@ function renderHomePickingHistoryBox(){
         setPickingNavCount("pickingHistory", "…");
         histList.innerHTML = `<div class="hint" style="padding:12px">Caricamento storico cloud…</div>`;
         if(histHint) histHint.textContent = "Lettura lazy: i log non bloccano più lo spinner iniziale.";
+        return;
+      }
+
+      const fastFbaOnlyLogs = !!(state.logs?.cerea?.mode === "fba" && state.logs?.concamarise?.mode === "fba");
+      if(fastFbaOnlyLogs && pickingHomeView() !== "pickingHistory"){
+        histCount.textContent = "—";
+        setPickingNavCount("pickingHistory", "—");
+        histList.innerHTML = `<div class="hint" style="padding:12px">Storico non calcolato in modalità FBA veloce.</div>`;
+        if(histHint) histHint.textContent = "Apri Storico prelievi per caricare la lettura completa.";
         return;
       }
 
