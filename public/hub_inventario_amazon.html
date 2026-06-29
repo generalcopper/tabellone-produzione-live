@@ -7117,6 +7117,49 @@ function closeSheet(kind){
       }
     }
 
+    // PDF flow: se lo SKU esiste già in hub inventario, il nome salvato resta la fonte primaria.
+    // Il titolo estratto dal PDF viene usato solo per SKU nuovi/non ancora presenti.
+    function savedTitleForExistingInventorySku(sku, locHint=""){
+      try{
+        const s = toSkuId(sku || "");
+        if(!s) return "";
+        const locs = [];
+        if(locHint === "cerea" || locHint === "concamarise") locs.push(locHint);
+        locs.push("concamarise", "cerea");
+
+        const seen = new Set();
+        for(const loc of locs){
+          if(!loc || seen.has(loc)) continue;
+          seen.add(loc);
+          const items = state.inventory?.[loc]?.items || [];
+          const found = items.find(it => toSkuId(it?.sku || it?.id || "") === s);
+          const title = squashWhitespace(found?.title || found?.name || "");
+          if(title) return title;
+        }
+        return "";
+      }catch(_e){
+        return "";
+      }
+    }
+
+    function preserveExistingInventoryTitleForPdfLine(line, locHint=""){
+      const sku = toSkuId(line?.sku || "");
+      const savedTitle = savedTitleForExistingInventorySku(sku, locHint);
+      const pdfTitle = squashWhitespace(line?.title || "");
+      const finalTitle = savedTitle || pdfTitle || sku;
+      return {
+        ...(line || {}),
+        sku,
+        title: finalTitle,
+        pdfTitle: savedTitle ? (line?.pdfTitle || pdfTitle || "") : (line?.pdfTitle || ""),
+        titleSource: savedTitle ? "inventory_saved" : "pdf"
+      };
+    }
+
+    function preserveExistingInventoryTitlesForPdfLines(lines, locHint=""){
+      return (Array.isArray(lines) ? lines : []).map(line => preserveExistingInventoryTitleForPdfLine(line, locHint));
+    }
+
     function bestInventoryMatch(name, skuGuess){
       const idx = getInvIndexForMatch();
 
@@ -10309,7 +10352,8 @@ async function applyFlow(kind){
       const buckets = { concamarise: [], cerea: [] };
       for(const it of aggregatedAll){
         const target = resolveLocForSku(it.sku);
-        buckets[target].push(it);
+        // Titolo protetto: se lo SKU è già presente, usa il nome salvato in Hub e non quello del PDF.
+        buckets[target].push(preserveExistingInventoryTitleForPdfLine(it, target));
       }
 
       const api = state.firebase.api;
@@ -10413,7 +10457,7 @@ async function applyFlow(kind){
             for(const it of part){
               const sku = toSkuId(it.sku);
               if(!sku) continue;
-              const title = squashWhitespace(it.title||"") || sku;
+              const title = savedTitleForExistingInventorySku(sku, p.loc) || squashWhitespace(it.title||"") || sku;
               const qtyAbs = Math.abs(parseQty(it.qty) || 0);
               if(!qtyAbs) continue;
               const ref = api.doc(db, COL_ROOT, p.loc, SUB_ITEMS, sku);
@@ -10509,7 +10553,7 @@ async function applyFlow(kind){
             for(const it of part){
               const sku = toSkuId(it.sku);
               if(!sku) continue;
-              const title = squashWhitespace(it.title||"") || sku;
+              const title = savedTitleForExistingInventorySku(sku, it.__loc) || squashWhitespace(it.title||"") || sku;
               const refP = api.doc(db, COL_PRODUCTS, sku);
               batchP.set(refP, {
                 sku,
@@ -10564,7 +10608,7 @@ async function applyFlow(kind){
               const sku = toSkuId(x.sku || "");
               const currentItem = invMap.get(sku) || {};
               const productionArea = readProductionAreaFromDoc(currentItem, p.loc);
-              return { sku, title: x.title || currentItem.title || sku, qty: Math.abs(parseQty(x.qty)||0), loc: p.loc, productionArea };
+              return { sku, title: currentItem.title || x.title || sku, qty: Math.abs(parseQty(x.qty)||0), loc: p.loc, productionArea };
             });
           }), { source:"PDF carica", fileName: flow.file?.name || "", flowIds: planChunks.map(p=>p.flowDocId).filter(Boolean) });
         }
@@ -10652,7 +10696,9 @@ async function applyFlow(kind){
         const wfPromise = (kind==="scarica") ? extractWorkflowFromPdf(file) : Promise.resolve(null);
         const res = await extractFromPdf({ file, mode: kind, loc });
 
-        flow.lines = res.lines || [];
+        // Anteprima coerente con la scrittura: SKU già esistenti mostrano il nome salvato in Hub,
+        // non il titolo letto dal PDF.
+        flow.lines = preserveExistingInventoryTitlesForPdfLines(res.lines || [], loc);
 
         const metaFlowId = String(res.flowId || "");
         const metaFlowLabel = String(res.flowLabel || (metaFlowId ? ("ID flusso di lavoro: " + metaFlowId) : ""));
