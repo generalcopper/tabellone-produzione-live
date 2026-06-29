@@ -3168,14 +3168,7 @@ function guessTitleFromRaw(rawText, sku){
 
     
     // --- Auto email sotto-scorta (Firestore Trigger Email) ---
-    const __LS_LOWMAIL_HASH = "amz_inventory_lowmail_hash_v1";
-    const __LS_LOWMAIL_AT = "amz_inventory_lowmail_at_v1";
-    const __LS_LOWMAIL_ID = "amz_inventory_lowmail_docid_v1";
-    const __LS_LOWMAIL_LOCK = "amz_inventory_lowmail_lock_v1";
-    const __LS_LOWMAIL_LOCK_HASH = "amz_inventory_lowmail_lock_hash_v1";
-
-    function __lsGet(k){ try{ return localStorage.getItem(k); }catch(_e){ return null; } }
-    function __lsSet(k,v){ try{ localStorage.setItem(k, String(v)); }catch(_e){} }
+    // Solo cloud: dedupe e ultimo invio sono gestiti da Firestore (/amzInventoryMeta/lowStockEmailState).
 
     function __fmtQty(q){
       const n = Number(q);
@@ -3932,17 +3925,7 @@ ${textLines.join("\n")}
           return;
         }
 
-        // lock anti doppio invio (multi-tab)
         const now = Date.now();
-        const lockAt = Number(__lsGet(__LS_LOWMAIL_LOCK) || 0);
-        const lockHash = String(__lsGet(__LS_LOWMAIL_LOCK_HASH) || "");
-        if(lockAt && (now - lockAt) < (90 * 1000) && lockHash === fingerprint){
-          if(mailLog) mailLog.textContent = "Email automatica: invio già in corso…";
-          return;
-        }
-        __lsSet(__LS_LOWMAIL_LOCK, now);
-        __lsSet(__LS_LOWMAIL_LOCK_HASH, fingerprint);
-
         const payload = __buildLowStockEmailPayload(items);
 
         const api = fb.api;
@@ -4000,23 +3983,12 @@ ${textLines.join("\n")}
           }, { merge:true });
         });
 
-        // memo locale (solo UI)
-        __lsSet(__LS_LOWMAIL_HASH, fingerprint);
-        __lsSet(__LS_LOWMAIL_AT, now);
-        if(enqueued && createdEmailDocId) __lsSet(__LS_LOWMAIL_ID, createdEmailDocId);
-
-        // rilascio lock
-        __lsSet(__LS_LOWMAIL_LOCK, 0);
-        __lsSet(__LS_LOWMAIL_LOCK_HASH, "");
-
         if(mailLog){
           mailLog.textContent = enqueued
             ? `Email automatica inviata/accodata alle ${fmtDate(now)} • ${payload.total} righe.`
             : `Email automatica: nessun invio (stesso stato).`;
         }
       }catch(err){
-        // rilascio lock (in caso di errore)
-        try{ __lsSet(__LS_LOWMAIL_LOCK, 0); __lsSet(__LS_LOWMAIL_LOCK_HASH, ""); }catch(_e){}
         try{
           const mailLog = $("homeLowStockMailLog");
           if(mailLog) mailLog.textContent = "Email automatica: errore in invio (permessi/connessione).";
@@ -4042,7 +4014,7 @@ ${textLines.join("\n")}
       return out;
     }
 
-    // trigger email dopo aggiornamenti reali: locali + realtime Firestore (anche da altri hub), NON all'accesso
+    // trigger email dopo aggiornamenti reali: runtime + realtime Firestore (anche da altri hub), NON all'accesso
     let __lowMailSeq = 0;
     let __lowMailT1 = null;
     let __lowMailT2 = null;
@@ -4349,20 +4321,14 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
         const __FORCE_REDIRECT = __IS_APPLE_MOBILE || __IS_STANDALONE;
 
         async function setBestAuthPersistence(){
-          const ua = navigator.userAgent || "";
-          const isAppleMobile = /iPad|iPhone|iPod/.test(ua) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
-          const candidates = (isAppleMobile
-            ? [authMod.browserLocalPersistence, authMod.indexedDBLocalPersistence]
-            : [authMod.indexedDBLocalPersistence, authMod.browserLocalPersistence]
-          ).filter(Boolean);
-
-          for(const p of candidates){
-            try{
-              await authMod.setPersistence(auth, p);
-              return true;
-            }catch(_e){}
+          // Solo cloud / niente persistenza browser applicativa: sessione Auth in memoria.
+          // Al refresh la sessione viene riverificata da Google/Firebase senza persistenza browser applicativa.
+          try{
+            await authMod.setPersistence(auth, authMod.inMemoryPersistence);
+            return true;
+          }catch(_e){
+            return false;
           }
-          return false;
         }
         try{ await setBestAuthPersistence(); }catch(_e){}
 
@@ -4449,8 +4415,7 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
         // auth state
         state.authGateState = "restoring";
         state.authGateMessage = "Ripristino sessione…";
-        const __hadSession = (()=>{ try{ return localStorage.getItem("amz_inventory_last_authed_v1")==="1"; }catch(_e){ return false; } })();
-        toggleAuthOverlay(__hadSession);
+        toggleAuthOverlay(true);
         syncHeaderSub();
 
         let __authNullTimer = null;
@@ -4481,7 +4446,6 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
               setView("home");
               showToast("Account non abilitato", "Contatta l’admin per l’accesso a questo hub.");
             }
-            try{ localStorage.setItem("amz_inventory_last_authed_v1", "1"); }catch(_e){}
             return;
           }
 
