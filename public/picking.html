@@ -5986,9 +5986,9 @@ function guessTitleFromRaw(rawText, sku){
     function isInitialDataReady(){
       try{
         if(!state.user?.isWhitelisted) return false;
-        const invReady = !!(state.inventory?.cerea?.meta?.loaded && state.inventory?.concamarise?.meta?.loaded);
-        const logsReady = !!(state.logs?.cerea?.meta?.loaded && state.logs?.concamarise?.meta?.loaded);
-        return invReady && logsReady;
+        // Avvio stabile: per mostrare la UI servono solo i 2 snapshot inventario.
+        // I log/flussi sono pesanti e vengono caricati lazy solo quando si apre Picking/Logs/Flussi.
+        return !!(state.inventory?.cerea?.meta?.loaded && state.inventory?.concamarise?.meta?.loaded);
       }catch(_e){
         return false;
       }
@@ -8217,7 +8217,9 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
     function startAllRealtime(){
       startRealtimeFor("cerea");
       startRealtimeFor("concamarise");
-      startAllLogs();
+      // Non agganciare i log all’avvio: Firestore invia sempre lo snapshot iniziale
+      // di ogni listener e sui log questo può significare centinaia di documenti.
+      // Li carichiamo solo quando servono davvero (Picking / Storico / Logs / Flussi).
       // Movimenti prodotto: listener pesanti, avviati solo quando l’utente apre la sezione Logs.
       startLowStockEmailMetaWatch();
       startShopifyFbmSyncMetaWatch();
@@ -8648,6 +8650,37 @@ function startAllLogs(){
       }
       if(state.route.view==="location") renderFlowsList();
       if(state.route.view==="home") renderHomeLogsBox();
+    }
+
+    function logsRealtimeStarted(loc=null){
+      try{
+        if(loc === "cerea" || loc === "concamarise") return !!state.logs?.[loc]?.unsub;
+        return !!(state.logs?.cerea?.unsub || state.logs?.concamarise?.unsub);
+      }catch(_e){ return false; }
+    }
+
+    function logsRealtimeLoaded(loc=null){
+      try{
+        if(loc === "cerea" || loc === "concamarise") return !!state.logs?.[loc]?.meta?.loaded;
+        return !!(state.logs?.cerea?.meta?.loaded && state.logs?.concamarise?.meta?.loaded);
+      }catch(_e){ return false; }
+    }
+
+    function ensureLogsRealtimeStarted(reason=""){
+      try{
+        if(!state.firebase.ok || !state.user?.isWhitelisted) return false;
+        if(!logsRealtimeStarted("cerea")) startLogsFor("cerea");
+        if(!logsRealtimeStarted("concamarise")) startLogsFor("concamarise");
+        if(state.route.view === "home"){
+          renderHomePickingBox();
+          renderHomePickingHistoryBox();
+          renderHomeLogsBox();
+        }
+        return true;
+      }catch(err){
+        console.warn("ensureLogsRealtimeStarted", reason, err);
+        return false;
+      }
     }
 
 
@@ -9244,10 +9277,15 @@ function startAllLogs(){
     function readFlowLogTimestamp(v){
       try{
         if(v === null || v === undefined || v === "") return 0;
-        if(typeof v === "number" && Number.isFinite(v)) return v;
+        if(typeof v === "number" && Number.isFinite(v)){
+          if(v > 1000000000000) return v;
+          if(v > 1000000000) return v * 1000; // supporta timestamp in secondi
+          return v;
+        }
         if(typeof v === "string"){
           const n = Number(v);
-          if(Number.isFinite(n) && n > 1000000000) return n;
+          if(Number.isFinite(n) && n > 1000000000000) return n;
+          if(Number.isFinite(n) && n > 1000000000) return n * 1000; // supporta timestamp in secondi
           const d = Date.parse(v);
           return Number.isFinite(d) ? d : 0;
         }
@@ -9390,7 +9428,7 @@ function startAllLogs(){
       const api = state.firebase.api;
       const db = state.firebase.db;
       const colRef = api.collection(db, COL_ROOT, loc, SUB_LOGS);
-      const maps = { applied:new Map(), updated:new Map(), raw:new Map() };
+      const maps = { applied:new Map(), shopifySource:new Map(), shopifySourcePlain:new Map(), shopifyFile:new Map(), raw:new Map() };
       const bootExpected = new Set();
       const bootSeen = new Set();
       lg.meta = { ...(lg.meta || {}), count:0, loaded:false, expected:0, seen:0 };
@@ -9461,14 +9499,14 @@ function startAllLogs(){
       };
 
       const unsubs = [];
-      unsubs.push(attach("applied", api.query(colRef, api.orderBy("appliedAtClient","desc"), api.limit(180)), true));
-      // Shopify/FBM automatico può essere scritto con updatedAtClient/createdAtClient invece di appliedAtClient.
-      // Limiti più stretti: meno memoria/listener traffic sul kiosk, stessa logica di merge.
-      try{ unsubs.push(attach("updated", api.query(colRef, api.orderBy("updatedAtClient","desc"), api.limit(120)), false)); }catch(_e){}
-      try{ unsubs.push(attach("shopifySource", api.query(colRef, api.where("source", "==", "shopify_fbm"), api.limit(180)), false)); }catch(_e){}
-      try{ unsubs.push(attach("shopifySourcePlain", api.query(colRef, api.where("source", "==", "shopify"), api.limit(120)), false)); }catch(_e){}
-      try{ unsubs.push(attach("shopifyFile", api.query(colRef, api.where("fileName", "==", "SHOPIFY_FBM"), api.limit(180)), false)); }catch(_e){}
-      try{ unsubs.push(attach("raw", api.query(colRef, api.limit(90)), false)); }catch(_e){}
+      unsubs.push(attach("applied", api.query(colRef, api.orderBy("appliedAtClient","desc"), api.limit(80)), true));
+      // Niente listener generico su updatedAtClient: quel campo cambia a ogni sync/backfill
+      // e faceva riscaricare/riordinare troppi log con lo stesso orario.
+      // Per Shopify teniamo query mirate e leggere; il raw è solo salvagente minimo.
+      try{ unsubs.push(attach("shopifySource", api.query(colRef, api.where("source", "==", "shopify_fbm"), api.limit(90)), false)); }catch(_e){}
+      try{ unsubs.push(attach("shopifySourcePlain", api.query(colRef, api.where("source", "==", "shopify"), api.limit(60)), false)); }catch(_e){}
+      try{ unsubs.push(attach("shopifyFile", api.query(colRef, api.where("fileName", "==", "SHOPIFY_FBM"), api.limit(90)), false)); }catch(_e){}
+      try{ unsubs.push(attach("raw", api.query(colRef, api.limit(20)), false)); }catch(_e){}
       lg.meta.expected = bootExpected.size;
       lg.meta.loaded = bootExpected.size === 0 ? true : (bootSeen.size >= bootExpected.size);
       checkStartupDataGate("logs_attached_" + loc);
@@ -10188,6 +10226,22 @@ function startAllLogs(){
         return;
       }
 
+      if(!logsRealtimeStarted()){
+        count.textContent = "—";
+        setPickingNavCount("logs", "—");
+        list.innerHTML = `<div class="terminalEmpty">&gt; log non caricati all’avvio. Apri la sezione Logs per avviare la lettura cloud.</div>`;
+        if(hint) hint.textContent = "Avvio ottimizzato: niente download dei log finché non servono.";
+        return;
+      }
+
+      if(!logsRealtimeLoaded()){
+        count.textContent = "…";
+        setPickingNavCount("logs", "…");
+        list.innerHTML = `<div class="terminalEmpty">&gt; caricamento log cloud…</div>`;
+        if(hint) hint.textContent = "Lettura limitata e mirata: niente listener generico su updatedAtClient.";
+        return;
+      }
+
       const entries = getHomeLogEntries();
       count.textContent = fmtN(entries.length);
       setPickingNavCount("logs", fmtN(entries.length));
@@ -10354,11 +10408,18 @@ function startAllLogs(){
         return;
       }
 
+      ensureLogsRealtimeStarted("flows_modal_render");
+
       const loc = (state.ui.flowsModalLoc==="cerea" || state.ui.flowsModalLoc==="concamarise")
         ? state.ui.flowsModalLoc
         : "concamarise";
 
       const lg = state.logs[loc] || { flows:[] };
+      if(!logsRealtimeLoaded(loc)){
+        hint.textContent = `Caricamento flussi cloud • ${prettyLoc(loc)}…`;
+        list.innerHTML = `<div class="hint">Lettura lazy avviata. I log non vengono più scaricati allo startup.</div>`;
+        return;
+      }
       const flows = lg.flows || [];
 
       hint.textContent = flows.length
@@ -12178,6 +12239,8 @@ function currentInv(){
         return;
       }
       state.ui.pickingHomeView = (next === "located" || next === "logs" || next === "pickingFbm" || next === "pickingFba" || next === "pickingHistory") ? next : "noLocation";
+      const needsFlowLogs = (state.ui.pickingHomeView === "logs" || state.ui.pickingHomeView === "pickingFbm" || state.ui.pickingHomeView === "pickingFba" || state.ui.pickingHomeView === "pickingHistory");
+      if(needsFlowLogs) ensureLogsRealtimeStarted("picking_" + state.ui.pickingHomeView);
       syncPickingHomeView();
       if(isPickingLogsViewActive()) startActivityLogWatch();
       else if(state.activityLogs?.unsubMovements) stopActivityLogWatch({ render:false });
@@ -13504,6 +13567,28 @@ Confermandolo, la transaction cloud scaricherà comunque la quantità richiesta 
         return;
       }
 
+      if(!logsRealtimeStarted()){
+        count.textContent = "—";
+        setPickingNavCount("pickingFbm", "—");
+        setPickingNavCount("pickingFba", "—");
+        list.innerHTML = `<div class="pickingBucketEmpty">Flussi non caricati all’avvio per tenere il Picking stabile. Apri Picking FBM/FBA e li carico dal cloud.</div>`;
+        if(btnPickAll){ btnPickAll.disabled = true; btnPickAll.textContent = "Preleva tutti FBA/PDF"; btnPickAll.title = ""; btnPickAll.style.display = "none"; }
+        if(hint) hint.textContent = "Avvio ottimizzato: i log/flussi non bloccano più lo spinner iniziale.";
+        renderHomePickingHistoryBox();
+        return;
+      }
+
+      if(!logsRealtimeLoaded()){
+        count.textContent = "…";
+        setPickingNavCount("pickingFbm", "…");
+        setPickingNavCount("pickingFba", "…");
+        list.innerHTML = `<div class="pickingBucketEmpty">Caricamento flussi cloud…</div>`;
+        if(btnPickAll){ btnPickAll.disabled = true; btnPickAll.textContent = "Preleva tutti FBA/PDF"; btnPickAll.title = ""; btnPickAll.style.display = "none"; }
+        if(hint) hint.textContent = "Sto leggendo solo i log necessari, senza query generica su updatedAtClient.";
+        renderHomePickingHistoryBox();
+        return;
+      }
+
       const flows = getPickingCandidateFlows();
       const activeFlows = flows.filter(f=>!pickingFlowStats(f).done);
       const fbmActiveFlows = activeFlows.filter(f=>isShopifyFbmFlow(f));
@@ -13823,6 +13908,22 @@ function renderHomePickingHistoryBox(){
         setPickingNavCount("pickingHistory", "—");
         histList.innerHTML = `<div class="hint" style="padding:12px">Accedi per vedere lo storico prelievi.</div>`;
         if(histHint) histHint.textContent = "";
+        return;
+      }
+
+      if(!logsRealtimeStarted()){
+        histCount.textContent = "—";
+        setPickingNavCount("pickingHistory", "—");
+        histList.innerHTML = `<div class="hint" style="padding:12px">Storico non caricato all’avvio per non rallentare il Picking.</div>`;
+        if(histHint) histHint.textContent = "Apri Storico prelievi per caricare i flussi cloud.";
+        return;
+      }
+
+      if(!logsRealtimeLoaded()){
+        histCount.textContent = "…";
+        setPickingNavCount("pickingHistory", "…");
+        histList.innerHTML = `<div class="hint" style="padding:12px">Caricamento storico cloud…</div>`;
+        if(histHint) histHint.textContent = "Lettura lazy: i log non bloccano più lo spinner iniziale.";
         return;
       }
 
@@ -19636,6 +19737,7 @@ async function applyFlow(kind){
       });
 
       $("btnHomeFlowsModal")?.addEventListener("click", ()=>{
+        ensureLogsRealtimeStarted("flows_modal");
         openSheet("flows");
         setFlowsModalLoc(state.ui.flowsModalLoc || "concamarise");
       });
