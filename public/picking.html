@@ -5029,6 +5029,12 @@ Tip:
         cerea: { unsub:null, flows:[], meta:{ count:0, loaded:false, expected:0, seen:0 }, _mergeTimer:null },
         concamarise: { unsub:null, flows:[], meta:{ count:0, loaded:false, expected:0, seen:0 }, _mergeTimer:null }
       },
+      pickingPreview: {
+        fbm: { count:null, loaded:false, loading:false, updatedAtClient:0, source:"" },
+        fba: { count:null, loaded:false, loading:false, updatedAtClient:0, source:"" },
+        busy:false,
+        timer:null
+      },
       activityLogs: {
         unsubMovements: null,
         movements: [],
@@ -6034,6 +6040,8 @@ function guessTitleFromRaw(rawText, sku){
             if(typeof renderHomeDashboard === "function") renderHomeDashboard();
             if(typeof renderHomePickingBox === "function") renderHomePickingBox();
             if(typeof renderHomeLogsBox === "function") renderHomeLogsBox();
+            // Conteggi menu Picking: caricamento leggero in background, dopo UI pronta.
+            if(typeof schedulePickingPreviewCounts === "function") schedulePickingPreviewCounts("startup_ready", { delay: 1800 });
             syncHeaderSub();
             toggleAuthOverlay(false);
           }catch(_e){}
@@ -8230,6 +8238,7 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
 
     function stopAllRealtime(){
       cancelStartupDataGate();
+      resetPickingPreviewCounts();
       resetLowStockRealtimeWatcher();
       stopTwReordersWatch();
       stopTwCompletedAmazonWatch();
@@ -8687,6 +8696,221 @@ function startAllLogs(modeOrOpts = "full"){
         console.warn("ensureLogsRealtimeStarted", reason, err);
         return false;
       }
+    }
+
+
+
+    // Conteggi anteprima menu Picking: numeri sempre visibili senza aprire la vista.
+    // Non avvia i listener pesanti: usa letture one-shot limitate e resta totalmente cloud.
+    function pickingPreviewState(){
+      if(!state.pickingPreview){
+        state.pickingPreview = {
+          fbm: { count:null, loaded:false, loading:false, updatedAtClient:0, source:"" },
+          fba: { count:null, loaded:false, loading:false, updatedAtClient:0, source:"" },
+          busy:false,
+          timer:null
+        };
+      }
+      for(const k of ["fbm", "fba"]){
+        if(!state.pickingPreview[k]) state.pickingPreview[k] = { count:null, loaded:false, loading:false, updatedAtClient:0, source:"" };
+      }
+      return state.pickingPreview;
+    }
+
+    function resetPickingPreviewCounts(){
+      try{
+        const p = pickingPreviewState();
+        if(p.timer) clearTimeout(p.timer);
+        p.timer = null;
+        p.busy = false;
+        p.fbm = { count:null, loaded:false, loading:false, updatedAtClient:0, source:"" };
+        p.fba = { count:null, loaded:false, loading:false, updatedAtClient:0, source:"" };
+        setPickingNavCount("pickingFbm", "—");
+        setPickingNavCount("pickingFba", "—");
+      }catch(_e){}
+    }
+
+    function setPickingPreviewCount(kind, count, source=""){
+      try{
+        const k = kind === "fba" ? "fba" : "fbm";
+        const p = pickingPreviewState();
+        const n = Number(count);
+        p[k].count = Number.isFinite(n) ? Math.max(0, Math.round(n)) : 0;
+        p[k].loaded = true;
+        p[k].loading = false;
+        p[k].updatedAtClient = Date.now();
+        p[k].source = String(source || "");
+        setPickingNavCount(k === "fba" ? "pickingFba" : "pickingFbm", fmtN(p[k].count));
+      }catch(_e){}
+    }
+
+    function setPickingPreviewLoading(kind){
+      try{
+        const k = kind === "fba" ? "fba" : "fbm";
+        const p = pickingPreviewState();
+        if(!p[k].loaded){
+          p[k].loading = true;
+          setPickingNavCount(k === "fba" ? "pickingFba" : "pickingFbm", "…");
+        }
+      }catch(_e){}
+    }
+
+    function applyPickingPreviewNavCounts(fallback="—"){
+      try{
+        const p = pickingPreviewState();
+        const val = (k)=> p[k].loaded ? fmtN(p[k].count || 0) : (p[k].loading ? "…" : fallback);
+        setPickingNavCount("pickingFbm", val("fbm"));
+        setPickingNavCount("pickingFba", val("fba"));
+      }catch(_e){}
+    }
+
+    function pickingCandidateFlowsFromArray(allFlows){
+      const out = [];
+      for(const f0 of (Array.isArray(allFlows) ? allFlows : [])){
+        const f = f0 || {};
+        if(String(f?.kind || "").toLowerCase() !== "scarica") continue;
+        if(f?.voided) continue;
+        if(!isPickingManagedFlow(f)) continue;
+        const lines = Array.isArray(f.lines) ? f.lines.filter(l=>toSkuId(l?.sku || "") && parseQty(l?.qty || 0)) : [];
+        if(!lines.length) continue;
+        out.push({ ...f, location: f.location || "concamarise", lines });
+      }
+      out.sort((a,b)=> (pickingFlowStableBaseTs(b) - pickingFlowStableBaseTs(a)) || String(b.id||"").localeCompare(String(a.id||"")));
+      return out;
+    }
+
+    function countFbmPickingSkuGroupsForPreview(flows){
+      const seen = new Set();
+      for(const flow of (Array.isArray(flows) ? flows : [])){
+        if(!isShopifyFbmFlow(flow)) continue;
+        if(pickingFlowStats(flow).done) continue;
+        const lines = Array.isArray(flow?.lines) ? flow.lines : [];
+        for(const line of lines){
+          const sku = toSkuId(line?.sku || "");
+          const qty = Math.abs(parseQty(line?.qty || 0) || 0);
+          if(!sku || !qty) continue;
+          if(isPickingLinePicked(flow, sku)) continue;
+          seen.add(sku);
+        }
+      }
+      return seen.size;
+    }
+
+    function pickingPreviewCountsFromFlows(flows){
+      const candidates = pickingCandidateFlowsFromArray(flows);
+      const fbmFlows = candidates.filter(f=>isShopifyFbmFlow(f));
+      const fbaFlows = candidates.filter(f=>!isShopifyFbmFlow(f));
+      return {
+        fbm: countFbmPickingSkuGroupsForPreview(fbmFlows),
+        fba: fbaFlows.filter(f=>!pickingFlowStats(f).done).length
+      };
+    }
+
+    function updatePickingPreviewCountsFromCurrentLogs(source="logs"){
+      try{
+        if(!logsRealtimeLoaded()) return;
+        const flows = getPickingCandidateFlows();
+        const modeC = state.logs?.cerea?.mode || state.logs?.cerea?.meta?.mode || "";
+        const modeM = state.logs?.concamarise?.mode || state.logs?.concamarise?.meta?.mode || "";
+        const mode = (modeC && modeC === modeM) ? modeC : "";
+        const counts = pickingPreviewCountsFromFlows(flows);
+        if(mode === "fbm"){
+          setPickingPreviewCount("fbm", counts.fbm, source);
+        }else if(mode === "fba"){
+          setPickingPreviewCount("fba", counts.fba, source);
+        }else if(mode === "full" || !mode){
+          setPickingPreviewCount("fbm", counts.fbm, source);
+          setPickingPreviewCount("fba", counts.fba, source);
+        }
+      }catch(_e){}
+    }
+
+    async function fetchPickingPreviewFlowsForLocMode(loc, mode){
+      const api = state.firebase?.api;
+      const db = state.firebase?.db;
+      if(!api || !db || !api.getDocs) return [];
+      const colRef = api.collection(db, COL_ROOT, loc, SUB_LOGS);
+      const map = new Map();
+      const addSnap = (snap)=>{
+        try{
+          snap.forEach(docSnap=>{
+            const flow = normalizeFlowLogDoc(docSnap, loc);
+            map.set(flow.id, flow);
+          });
+        }catch(_e){}
+      };
+
+      if(mode === "fba"){
+        try{
+          const snap = await api.getDocs(api.query(colRef, api.orderBy("appliedAtClient", "desc"), api.limit(160)));
+          addSnap(snap);
+        }catch(err){ console.warn("preview fba count", loc, err); }
+      }else{
+        const queries = [];
+        try{ queries.push(api.query(colRef, api.where("source", "==", "shopify_fbm"), api.limit(160))); }catch(_e){}
+        try{ queries.push(api.query(colRef, api.where("source", "==", "shopify"), api.limit(120))); }catch(_e){}
+        try{ queries.push(api.query(colRef, api.where("fileName", "==", "SHOPIFY_FBM"), api.limit(160))); }catch(_e){}
+        for(const q of queries){
+          try{ addSnap(await api.getDocs(q)); }catch(err){ console.warn("preview fbm count", loc, err); }
+        }
+      }
+      return Array.from(map.values());
+    }
+
+    async function refreshPickingPreviewCounts(reason="", opts = {}){
+      const p = pickingPreviewState();
+      if(!state.firebase.ok || !state.user?.isWhitelisted) return;
+      if(p.busy){
+        schedulePickingPreviewCounts(reason || "busy_retry", { delay: 1200 });
+        return;
+      }
+
+      try{
+        p.busy = true;
+        updatePickingPreviewCountsFromCurrentLogs("current_" + String(reason || ""));
+
+        const maxAge = Number(opts.maxAgeMs || 45000);
+        const now = Date.now();
+        const need = [];
+        for(const k of ["fbm", "fba"]){
+          const fresh = p[k].loaded && (now - Number(p[k].updatedAtClient || 0) < maxAge);
+          if(!fresh) need.push(k);
+        }
+
+        if(!need.length) return;
+        need.forEach(setPickingPreviewLoading);
+
+        for(const mode of need){
+          const flows = [];
+          for(const loc of ["concamarise", "cerea"]){
+            const part = await fetchPickingPreviewFlowsForLocMode(loc, mode);
+            flows.push(...part);
+          }
+          const counts = pickingPreviewCountsFromFlows(flows);
+          setPickingPreviewCount(mode, counts[mode], "preview_" + String(reason || mode));
+        }
+      }catch(err){
+        console.warn("picking preview counts", err);
+        for(const k of ["fbm", "fba"]){
+          if(p[k]) p[k].loading = false;
+        }
+        applyPickingPreviewNavCounts("—");
+      }finally{
+        p.busy = false;
+      }
+    }
+
+    function schedulePickingPreviewCounts(reason="", opts = {}){
+      try{
+        const p = pickingPreviewState();
+        if(p.timer && !opts.force) return;
+        if(p.timer) clearTimeout(p.timer);
+        const delay = Number.isFinite(Number(opts.delay)) ? Math.max(0, Number(opts.delay)) : 600;
+        p.timer = setTimeout(()=>{
+          p.timer = null;
+          void refreshPickingPreviewCounts(reason, opts);
+        }, delay);
+      }catch(_e){}
     }
 
 
@@ -9479,6 +9703,7 @@ function startAllLogs(modeOrOpts = "full"){
         lg.flows = flows;
         lg.meta.count = flows.length;
         if(bootExpected.size > 0 && bootSeen.size >= bootExpected.size) lg.meta.loaded = true;
+        updatePickingPreviewCountsFromCurrentLogs("logs_" + loc);
         refreshActivityLogSkuWatchers("logs_" + loc);
         renderLogsForLoc(loc);
         checkStartupDataGate("logs_" + loc);
@@ -12275,6 +12500,7 @@ function currentInv(){
       if(needsFlowLogs){
         const logMode = (state.ui.pickingHomeView === "pickingFba") ? "fba" : (state.ui.pickingHomeView === "pickingFbm" ? "fbm" : "full");
         ensureLogsRealtimeStarted("picking_" + state.ui.pickingHomeView, { mode: logMode });
+        schedulePickingPreviewCounts("menu_" + state.ui.pickingHomeView, { delay: (logMode === "full" ? 900 : 1200) });
       }
       syncPickingHomeView();
       if(isPickingLogsViewActive()) startActivityLogWatch();
@@ -13593,8 +13819,7 @@ Confermandolo, la transaction cloud scaricherà comunque la quantità richiesta 
 
       if(!state.user?.isWhitelisted){
         count.textContent = "—";
-        setPickingNavCount("pickingFbm", "—");
-        setPickingNavCount("pickingFba", "—");
+        applyPickingPreviewNavCounts("—");
         list.innerHTML = `<div class="hint">Accedi per vedere il picking.</div>`;
         if(btnPickAll){ btnPickAll.disabled = true; btnPickAll.textContent = "Preleva tutti FBA/PDF"; btnPickAll.title = ""; btnPickAll.style.display = "none"; }
         if(hint) hint.textContent = "";
@@ -13604,8 +13829,8 @@ Confermandolo, la transaction cloud scaricherà comunque la quantità richiesta 
 
       if(!logsRealtimeStarted()){
         count.textContent = "—";
-        setPickingNavCount("pickingFbm", "—");
-        setPickingNavCount("pickingFba", "—");
+        applyPickingPreviewNavCounts("—");
+        schedulePickingPreviewCounts("not_started", { delay: 900 });
         list.innerHTML = `<div class="pickingBucketEmpty">Flussi non caricati all’avvio per tenere il Picking stabile. Apri Picking FBM/FBA e li carico dal cloud.</div>`;
         if(btnPickAll){ btnPickAll.disabled = true; btnPickAll.textContent = "Preleva tutti FBA/PDF"; btnPickAll.title = ""; btnPickAll.style.display = "none"; }
         if(hint) hint.textContent = "Avvio ottimizzato: i log/flussi non bloccano più lo spinner iniziale.";
@@ -13615,8 +13840,10 @@ Confermandolo, la transaction cloud scaricherà comunque la quantità richiesta 
 
       if(!logsRealtimeLoaded()){
         count.textContent = "…";
-        setPickingNavCount("pickingFbm", "…");
-        setPickingNavCount("pickingFba", "…");
+        const currentPickingView = pickingHomeView();
+        if(currentPickingView === "pickingFbm") setPickingPreviewLoading("fbm");
+        else if(currentPickingView === "pickingFba") setPickingPreviewLoading("fba");
+        applyPickingPreviewNavCounts("—");
         list.innerHTML = `<div class="pickingBucketEmpty">Caricamento flussi cloud…</div>`;
         if(btnPickAll){ btnPickAll.disabled = true; btnPickAll.textContent = "Preleva tutti FBA/PDF"; btnPickAll.title = ""; btnPickAll.style.display = "none"; }
         if(hint) hint.textContent = "Sto leggendo solo i log necessari, senza query generica su updatedAtClient.";
@@ -13780,8 +14007,14 @@ Confermandolo, la transaction cloud scaricherà comunque la quantità richiesta 
       const fbmSkuGroups = showFbmPicking ? buildFbmPickingSkuGroups(fbmActiveFlows) : [];
       const fbmSkuTotalPieces = showFbmPicking ? fbmSkuGroups.reduce((a,x)=>a + (Number(x.qty)||0), 0) : 0;
       count.textContent = showFbaPicking ? fmtN(fbaActiveFlows.length) : fmtN(fbmSkuGroups.length);
-      setPickingNavCount("pickingFbm", showFbmPicking ? fmtN(fbmSkuGroups.length) : (fastFbaOnlyLogs ? "—" : fmtN(fbmSkuGroups.length)));
-      setPickingNavCount("pickingFba", showFbaPicking ? fmtN(fbaActiveFlows.length) : (fastFbmOnlyLogs ? "—" : fmtN(fbaActiveFlows.length)));
+      if(showFbmPicking) setPickingPreviewCount("fbm", fbmSkuGroups.length, "active_fbm");
+      if(showFbaPicking) setPickingPreviewCount("fba", fbaActiveFlows.length, "active_fba");
+      if(!showFbmPicking && !pickingPreviewState().fbm.loaded) setPickingPreviewLoading("fbm");
+      if(!showFbaPicking && !pickingPreviewState().fba.loaded) setPickingPreviewLoading("fba");
+      applyPickingPreviewNavCounts("—");
+      if((showFbmPicking && !pickingPreviewState().fba.loaded) || (showFbaPicking && !pickingPreviewState().fbm.loaded)){
+        schedulePickingPreviewCounts("opposite_count_" + currentPickingView, { delay: 900 });
+      }
 
       const pickingTitleEl = box.querySelector?.(".miniTitle");
       const pickingSubEl = box.querySelector?.(".miniSub");
