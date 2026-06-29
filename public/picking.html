@@ -12391,6 +12391,15 @@ function currentInv(){
       }
     }
 
+    function makeForcePickAvailableError(message, data = {}){
+      const err = new Error(message || "Prelievo forzato disponibile.");
+      try{
+        err.forcePickAvailable = true;
+        err.forcePickData = data || {};
+      }catch(_e){}
+      return err;
+    }
+
     function addPickingStockTransactionWrite(tx, api, db, loc, flow, line, direction, opts = {}){
       const sku = toSkuId(line?.sku || opts?.sku || "");
       if(!sku) return null;
@@ -12400,10 +12409,12 @@ function currentInv(){
       const nowClient = Number(opts.nowClient || Date.now());
       const who = opts.who || state.user?.email || state.user?.emailLower || state.user?.uid || "";
       const title = opts.title || pickingLineTitle(line, flow) || sku;
+      const forceNegative = direction > 0 && (opts.forceNegative === true || opts.force === true);
       const cloudItem = { ...(opts.itemData || {}), sku, title: (opts.itemData?.title || title || sku) };
       const beforeQty = stockQtyFromDoc(cloudItem || {});
       const beforeReserved = reservedQtyFromItem(cloudItem || {});
       const beforePending = pendingPickQtyFromItem(cloudItem || {});
+      const shortageQty = Math.max(0, qty - beforeQty);
       const itemRef = api.doc(db, COL_ROOT, loc, SUB_ITEMS, sku);
 
       let delta = 0;
@@ -12416,20 +12427,20 @@ function currentInv(){
       let note = "";
 
       if(direction > 0){
-        if(beforeQty < qty){
-          throw new Error(`${sku}: stock cloud insufficiente (${beforeQty} disponibili, richiesti ${qty}). Operazione bloccata: inventario invariato.`);
+        if(beforeQty < qty && !forceNegative){
+          throw makeForcePickAvailableError(`${sku}: stock cloud insufficiente (${beforeQty} disponibili, richiesti ${qty}). Puoi forzare il prelievo: lo SKU andrà in negativo in inventario.`, { sku, beforeQty, qty, shortageQty });
         }
         allocationResult = consumeRackAllocationsForPicking(cloudItem, qty);
         consumedAllocations = allocationResult.consumedAllocations || [];
-        if((allocationResult.missingQty || 0) > 0){
-          throw new Error(`${sku}: ubicazioni cloud insufficienti per il prelievo (mancano ${allocationResult.missingQty} pz ubicati). Operazione bloccata.`);
+        if((allocationResult.missingQty || 0) > 0 && !forceNegative){
+          throw makeForcePickAvailableError(`${sku}: ubicazioni cloud insufficienti per il prelievo (mancano ${allocationResult.missingQty} pz ubicati). Puoi forzare il prelievo e scaricare comunque inventario.`, { sku, beforeQty, qty, shortageQty, missingRackQty: allocationResult.missingQty || 0 });
         }
         delta = -qty;
         afterQty = beforeQty - qty;
         afterReserved = Math.max(0, beforeReserved - qty);
         afterPending = Math.max(0, beforePending - qty);
-        actionType = "prelievo_picking";
-        note = "Scarico reale da Picking";
+        actionType = forceNegative ? "prelievo_picking_forzato" : "prelievo_picking";
+        note = forceNegative ? "Scarico reale da Picking forzato" : "Scarico reale da Picking";
       }else{
         // Supporto transazionale anche per eventuali annullamenti futuri.
         consumedAllocations = Array.isArray(opts.consumedAllocations) ? opts.consumedAllocations : [];
@@ -12449,11 +12460,13 @@ function currentInv(){
         qty: afterQty,
         reservedQty: afterReserved,
         pendingPickQty: afterPending,
-        reservationStatus: direction > 0 ? "prelevata" : "in_attesa_picking",
+        reservationStatus: direction > 0 ? (forceNegative ? "prelevata_forzata" : "prelevata") : "in_attesa_picking",
         lastPickingFlowId: flow?.id || opts.flowId || "",
         lastPickingAt: api.serverTimestamp(),
         lastPickingAtClient: nowClient,
         lastPickingBy: who,
+        lastPickingForced: forceNegative,
+        lastPickingShortageQty: forceNegative ? shortageQty : 0,
         location: loc,
         updatedAt: api.serverTimestamp(),
         updatedAtClient: nowClient,
@@ -12477,6 +12490,12 @@ function currentInv(){
         flowId: flow?.id || opts.flowId || "",
         flowName: flowDisplayName(flow),
         rackAllocations: consumedAllocations,
+        forced: forceNegative,
+        forceNegative,
+        shortageQty: forceNegative ? shortageQty : 0,
+        missingRackQty: allocationResult.missingQty || 0,
+        beforeQty,
+        afterQty,
         createdAtClient: nowClient
       });
 
@@ -12496,6 +12515,9 @@ function currentInv(){
         cleanLocations: allocationResult.cleanLocations || [],
         consumedAllocations,
         missingRackQty: allocationResult.missingQty || 0,
+        shortageQty,
+        forced: forceNegative,
+        forceNegative,
         position: pickingPositionTextFromCloudItem(cloudItem)
       };
     }
@@ -12516,6 +12538,7 @@ function currentInv(){
       const nowClient = Number(opts.nowClient || Date.now());
       const who = opts.who || state.user?.email || state.user?.emailLower || state.user?.uid || "";
       const bulkId = opts.bulkId || "";
+      const forceNegative = opts.forceNegative === true || opts.force === true;
       const flowRef = api.doc(db, COL_ROOT, l, SUB_LOGS, id);
 
       return await api.runTransaction(db, async (tx)=>{
@@ -12572,11 +12595,11 @@ function currentInv(){
           const title = pickingLineTitle(line, flow);
           const itemSnap = itemSnaps.get(sku);
           const itemData = itemSnap && itemSnap.exists() ? (itemSnap.data() || {}) : {};
-          const stockInfo = addPickingStockTransactionWrite(tx, api, db, l, flow, line, 1, { nowClient, who, title, flowId:id, itemData });
+          const stockInfo = addPickingStockTransactionWrite(tx, api, db, l, flow, line, 1, { nowClient, who, title, flowId:id, itemData, forceNegative });
           if(!stockInfo) continue;
           stockInfos.push(stockInfo);
           const position = stockInfo.position || pickingPositionTextFromCloudItem(itemData) || "—";
-          const rec = { picked:true, status:"prelevato", sku, title, qty, position, rackLocation:position, pickedAllocations: stockInfo.consumedAllocations || [], pickedAtClient:nowClient, pickedBy:who, ...(bulkId ? { bulkId } : {}) };
+          const rec = { picked:true, status:"prelevato", sku, title, qty, position, rackLocation:position, pickedAllocations: stockInfo.consumedAllocations || [], forced:!!stockInfo.forced, forceNegative:!!stockInfo.forceNegative, shortageQty:stockInfo.shortageQty || 0, missingRackQty:stockInfo.missingRackQty || 0, pickedAtClient:nowClient, pickedBy:who, ...(bulkId ? { bulkId } : {}) };
           pickedLines[key] = rec;
           nextPickedMap[key] = rec;
           pieces += qty;
@@ -12590,9 +12613,14 @@ function currentInv(){
           return !!nextPickedMap[k]?.picked;
         });
 
+        const forcedLines = stockInfos.filter(x=>x && x.forced);
+        const shortageLines = stockInfos
+          .filter(x=>x && ((x.shortageQty || 0) > 0 || (x.missingRackQty || 0) > 0))
+          .map(x=>({ sku:x.sku, beforeQty:x.beforeQty, requestedQty:x.qty, afterQty:x.afterQty, shortageQty:x.shortageQty || 0, missingRackQty:x.missingRackQty || 0 }));
+
         const event = mode === "sku"
-          ? { type:"sku", sku:skuList[0], qty:pieces, position:pickedLines[pickingSkuKey(skuList[0])]?.position || "—", stockDelta:-pieces, reservationDelta:-pieces, atClient:nowClient, by:who }
-          : { type:"flow", ...(bulkId ? { bulk:true, bulkId } : {}), skus:skuList, count:skuList.length, pieces, stockDelta:-pieces, reservationDelta:-pieces, atClient:nowClient, by:who };
+          ? { type:"sku", sku:skuList[0], qty:pieces, position:pickedLines[pickingSkuKey(skuList[0])]?.position || "—", stockDelta:-pieces, reservationDelta:-pieces, forced:forcedLines.length > 0, forceNegative:forcedLines.length > 0, shortageLines, atClient:nowClient, by:who }
+          : { type:"flow", ...(bulkId ? { bulk:true, bulkId } : {}), skus:skuList, count:skuList.length, pieces, stockDelta:-pieces, reservationDelta:-pieces, forced:forcedLines.length > 0, forceNegative:forcedLines.length > 0, shortageLines, atClient:nowClient, by:who };
 
         const pickingPatch = {
           status: allPicked ? "prelevato" : "parziale",
@@ -12628,9 +12656,47 @@ function currentInv(){
           skuCount: skuList.length,
           pieces,
           allPicked,
-          stockInfos
+          stockInfos,
+          forced: stockInfos.some(x=>x && x.forced),
+          forceNegative: stockInfos.some(x=>x && x.forceNegative),
+          shortageLines: stockInfos
+            .filter(x=>x && ((x.shortageQty || 0) > 0 || (x.missingRackQty || 0) > 0))
+            .map(x=>({ sku:x.sku, beforeQty:x.beforeQty, requestedQty:x.qty, afterQty:x.afterQty, shortageQty:x.shortageQty || 0, missingRackQty:x.missingRackQty || 0 }))
         };
       });
+    }
+
+    function isForcePickingAvailableError(err){
+      try{
+        if(err && err.forcePickAvailable === true) return true;
+        const msg = String(err?.message || err || "");
+        return /stock cloud insufficiente|ubicazioni cloud insufficienti|forzare il prelievo|prelievo forzato/i.test(msg);
+      }catch(_e){
+        return false;
+      }
+    }
+
+    function forcePickingConfirmText(err, ctx = {}){
+      const msg = String(err?.message || err || "").trim();
+      const title = ctx.title || "Prelievo forzato";
+      const flowName = ctx.flowName ? `
+Flusso: ${ctx.flowName}` : "";
+      const sku = ctx.sku ? `
+SKU: ${ctx.sku}` : "";
+      return `${title}${flowName}${sku}
+
+${msg}
+
+Vuoi FORZARE il prelievo?
+
+Confermandolo, la transaction cloud scaricherà comunque la quantità richiesta e lo SKU potrà andare in negativo in inventario.`;
+    }
+
+    async function retryPickingForceCloudTransaction(loc, flowId, opts = {}, err, ctx = {}){
+      if(!isForcePickingAvailableError(err)) throw err;
+      const ok = confirm(forcePickingConfirmText(err, ctx));
+      if(!ok) return null;
+      return await commitPickingCloudTransaction(loc, flowId, { ...opts, forceNegative:true });
     }
 
     function firstRackLocationCodeFromItem(it){
@@ -13686,9 +13752,19 @@ function renderHomePickingHistoryBox(){
       try{
         const nowClient = Date.now();
         const who = state.user?.email || state.user?.emailLower || state.user?.uid || "";
-        const res = await commitPickingCloudTransaction(l, id, { mode:"sku", sku:s, nowClient, who });
-        showToast("SKU prelevato", `${res.sku || s} • ${res.pieces || qty} pz • cloud OK`, 1800);
-        scheduleLowStockEmailAfterUpdate("picking_sku");
+        let res = null;
+        try{
+          res = await commitPickingCloudTransaction(l, id, { mode:"sku", sku:s, nowClient, who });
+        }catch(err){
+          console.warn("cloud pick sku blocked", err);
+          res = await retryPickingForceCloudTransaction(l, id, { mode:"sku", sku:s, nowClient, who }, err, { title:"Prelievo SKU forzato", flowName:flowDisplayName(flow), sku:s });
+          if(!res){
+            showToast("Prelievo annullato", `${s} non è stato scaricato.`, 1800);
+            return;
+          }
+        }
+        showToast(res.forced ? "SKU prelevato forzato" : "SKU prelevato", `${res.sku || s} • ${res.pieces || qty} pz • cloud OK${res.forced ? " • negativo consentito" : ""}`, res.forced ? 2600 : 1800);
+        scheduleLowStockEmailAfterUpdate(res.forced ? "picking_sku_forzato" : "picking_sku");
         renderHomePickingBox();
         renderHomeLogsBox();
       }catch(err){
@@ -13725,9 +13801,19 @@ function renderHomePickingHistoryBox(){
       try{
         const nowClient = Date.now();
         const who = state.user?.email || state.user?.emailLower || state.user?.uid || "";
-        const res = await commitPickingCloudTransaction(l, id, { mode:"flow", nowClient, who });
-        showToast("Flusso prelevato", `${res.flowName || flowDisplayName(flow)} • ${res.skuCount} SKU • ${res.pieces} pz • cloud OK`, 2200);
-        scheduleLowStockEmailAfterUpdate("picking_flow");
+        let res = null;
+        try{
+          res = await commitPickingCloudTransaction(l, id, { mode:"flow", nowClient, who });
+        }catch(err){
+          console.warn("cloud pick flow blocked", err);
+          res = await retryPickingForceCloudTransaction(l, id, { mode:"flow", nowClient, who }, err, { title:"Prelievo flusso forzato", flowName:flowDisplayName(flow) });
+          if(!res){
+            showToast("Prelievo annullato", `${flowDisplayName(flow)} non è stato scaricato.`, 1800);
+            return;
+          }
+        }
+        showToast(res.forced ? "Flusso prelevato forzato" : "Flusso prelevato", `${res.flowName || flowDisplayName(flow)} • ${res.skuCount} SKU • ${res.pieces} pz • cloud OK${res.forced ? " • negativo consentito" : ""}`, res.forced ? 3000 : 2200);
+        scheduleLowStockEmailAfterUpdate(res.forced ? "picking_flow_forzato" : "picking_flow");
         renderHomePickingBox();
         renderHomeLogsBox();
       }catch(err){
@@ -13763,7 +13849,7 @@ function renderHomePickingHistoryBox(){
         }
       }
 
-      const ok = confirm(`Confermi prelievo di tutti i flussi FBA/PDF?\n\nFlussi: ${activeFlows.length}\nSKU totali: ${totalSku}\nPezzi totali: ${totalPieces}\n\nQuesti flussi scaricano inventario dal Picking. Gli FBM Shopify hanno riquadro separato e scarico Shopify.`);
+      const ok = confirm(`Confermi prelievo di tutti i flussi FBA/PDF?\n\nFlussi: ${activeFlows.length}\nSKU totali: ${totalSku}\nPezzi totali: ${totalPieces}\n\nQuesti flussi scaricano inventario dal Picking. Gli FBM Shopify hanno riquadro separato e scarico Shopify.\n\nSe un flusso non ha inventario sufficiente, ti verrà chiesto se forzarlo e mandare lo SKU in negativo.`);
       if(!ok) return;
 
       const api = state.firebase.api;
@@ -13781,6 +13867,7 @@ function renderHomePickingHistoryBox(){
         let committedFlows = 0;
         let committedSku = 0;
         let committedPieces = 0;
+        let forcedFlows = 0;
         const errors = [];
 
         for(const flow of activeFlows){
@@ -13793,10 +13880,25 @@ function renderHomePickingHistoryBox(){
           try{
             const nowClient = Date.now();
             const who = state.user?.email || state.user?.emailLower || state.user?.uid || "";
-            const res = await commitPickingCloudTransaction(l, id, { mode:"flow", nowClient, who, bulkId });
+            let res = null;
+            try{
+              res = await commitPickingCloudTransaction(l, id, { mode:"flow", nowClient, who, bulkId });
+            }catch(err){
+              const label = flowDisplayName(flow) || id;
+              if(isForcePickingAvailableError(err)){
+                res = await retryPickingForceCloudTransaction(l, id, { mode:"flow", nowClient, who, bulkId }, err, { title:"Prelievo forzato da Preleva tutti", flowName:label });
+                if(!res){
+                  errors.push(`${label}: prelievo forzato annullato`);
+                  continue;
+                }
+              }else{
+                throw err;
+              }
+            }
             committedFlows++;
             committedSku += Number(res?.skuCount || 0);
             committedPieces += Number(res?.pieces || 0);
+            if(res?.forced) forcedFlows++;
           }catch(err){
             const label = flowDisplayName(flow) || id;
             const msg = String(err?.message || err).slice(0, 220);
@@ -13812,11 +13914,11 @@ function renderHomePickingHistoryBox(){
         }
 
         if(errors.length){
-          showToast("Prelievo parziale", `${committedFlows} flussi OK • ${errors.length} bloccati per controllo cloud. ${errors[0] || ""}`.slice(0, 260), 5200);
+          showToast("Prelievo parziale", `${committedFlows} flussi OK${forcedFlows ? ` • ${forcedFlows} forzati` : ""} • ${errors.length} non prelevati. ${errors[0] || ""}`.slice(0, 260), 5600);
         }else{
-          showToast("Tutti i flussi prelevati", `${committedFlows} flussi • ${committedSku} SKU • ${committedPieces} pz • cloud OK`, 2600);
+          showToast(forcedFlows ? "Flussi prelevati forzati" : "Tutti i flussi prelevati", `${committedFlows} flussi • ${committedSku} SKU • ${committedPieces} pz • cloud OK${forcedFlows ? ` • ${forcedFlows} forzati` : ""}`, forcedFlows ? 3400 : 2600);
         }
-        scheduleLowStockEmailAfterUpdate("picking_all_flows");
+        scheduleLowStockEmailAfterUpdate(forcedFlows ? "picking_all_flows_forzato" : "picking_all_flows");
         renderHomePickingBox();
         renderHomeLogsBox();
       }catch(err){
