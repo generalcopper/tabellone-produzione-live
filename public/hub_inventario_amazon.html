@@ -3180,6 +3180,11 @@ function guessTitleFromRaw(rawText, sku){
     // La giacenza fisica resta in qty; la sotto-scorta lavora sulla disponibilità: qty - reservedQty.
     function reservedQtyFromItem(it){
       try{
+        // Gli aggregati SKU (Cerea + Concamarise) sono calcolati in memoria runtime
+        // partendo sempre dagli snapshot Firestore live: nessun salvataggio locale.
+        if(it && it.__isSkuAggregate && Number.isFinite(Number(it.reservedQty))){
+          return Math.max(0, Math.round(Number(it.reservedQty)));
+        }
         const raw = (it && (it.reservedQty ?? it.pendingPickQty ?? it.reservationQty)) ?? 0;
         const n = Number(raw);
         if(!Number.isFinite(n)) return 0;
@@ -3189,21 +3194,26 @@ function guessTitleFromRaw(rawText, sku){
       }
     }
 
-    function lowStockQtyValue(it){
+    function physicalQtyFromItem(it){
       try{
+        if(it && it.__isSkuAggregate && Number.isFinite(Number(it.physicalQty))){
+          return Math.round(Number(it.physicalQty));
+        }
         const q = Number(it && it.qty);
-        const physical = Number.isFinite(q) ? Math.round(q) : 0;
-        const reserved = reservedQtyFromItem(it);
-        return Math.max(0, physical - reserved);
+        return Number.isFinite(q) ? Math.round(q) : 0;
       }catch(_e){
         return 0;
       }
     }
 
-    function physicalQtyFromItem(it){
+    function lowStockQtyValue(it){
       try{
-        const q = Number(it && it.qty);
-        return Number.isFinite(q) ? Math.round(q) : 0;
+        if(it && it.__isSkuAggregate && Number.isFinite(Number(it.availableQty))){
+          return Math.max(0, Math.round(Number(it.availableQty)));
+        }
+        const physical = physicalQtyFromItem(it);
+        const reserved = reservedQtyFromItem(it);
+        return Math.max(0, physical - reserved);
       }catch(_e){
         return 0;
       }
@@ -3213,7 +3223,7 @@ function guessTitleFromRaw(rawText, sku){
       const physical = physicalQtyFromItem(it);
       const reserved = reservedQtyFromItem(it);
       if(reserved <= 0) return "";
-      const available = Math.max(0, physical - reserved);
+      const available = lowStockQtyValue(it);
       return `Disponibile reale: ${available} • Fisica: ${physical} • Prenotati: ${reserved}`;
     }
 
@@ -3658,10 +3668,21 @@ function guessTitleFromRaw(rawText, sku){
     }
 
     function __isLowStockItem(it){
+      try{
+        // Se arriva una riga di una sola sede, prima guardo l'aggregato SKU cloud
+        // (stesso SKU in più sedi = unico articolo con più giacenze).
+        if(it && !it.__isSkuAggregate){
+          const sku = toSkuId(it.sku || it.id || "");
+          const prefLoc = validInventoryLoc(it.loc || it.location || state.route?.loc) ? (it.loc || it.location || state.route.loc) : "";
+          const agg = sku ? getSkuStockAggregate(sku, prefLoc) : null;
+          if(agg && agg.__isSkuAggregate) return __isLowStockItem(agg);
+        }
+      }catch(_e){}
+
       const qty = lowStockQtyValue(it);
       const custom = __getCustomLowStockThreshold(it);
       const th = (custom !== null) ? custom : __lowStockThreshold(it);
-      // soglia personalizzata: sotto scorta quando la giacenza è <= soglia impostata
+      // soglia personalizzata: sotto scorta quando la disponibilità SKU è <= soglia impostata
       if(custom !== null) return qty <= th;
       // fallback storico: 5kg <=20, tutti gli altri <100
       if(__isFiveKgItem(it)) return qty <= th;
@@ -3678,6 +3699,170 @@ function guessTitleFromRaw(rawText, sku){
       const custom = __getCustomLowStockThreshold(it);
       if(custom !== null) return String(custom);
       return __isFiveKgItem(it) ? `≤${LOW_STOCK_5KG}` : `<${LOW_STOCK_DEFAULT}`;
+    }
+
+
+    // --- SKU univoco: scorte aggregate cloud Cerea + Concamarise ---
+    // Lo SKU resta uno solo; le sedi sono giacenze dello stesso SKU.
+    // La sotto-scorta usa sempre: somma fisica di tutte le sedi - prenotati di tutte le sedi.
+    function validInventoryLoc(loc){
+      return loc === "cerea" || loc === "concamarise";
+    }
+
+    function inventoryLocs(){
+      return ["concamarise", "cerea"];
+    }
+
+    function itemUpdatedMillis(it){
+      try{
+        const c = Number(it?.updatedAtClient || it?.lastSeenAtClient || 0);
+        if(Number.isFinite(c) && c > 0) return c;
+        if(it?.updatedAt?.toMillis) return it.updatedAt.toMillis();
+        if(it?.lastSeenAt?.toMillis) return it.lastSeenAt.toMillis();
+        return 0;
+      }catch(_e){ return 0; }
+    }
+
+    function aggregateLocationLine(loc, it){
+      const physical = physicalQtyFromItem(it || {});
+      const reserved = reservedQtyFromItem(it || {});
+      return {
+        loc,
+        item: it || null,
+        sku: toSkuId(it?.sku || it?.id || ""),
+        title: squashWhitespace(it?.title || it?.name || ""),
+        physicalQty: physical,
+        reservedQty: reserved,
+        availableQty: Math.max(0, physical - reserved),
+        rackLocations: readRackLocationsFromDoc(it || {}),
+        updatedAtClient: itemUpdatedMillis(it || {})
+      };
+    }
+
+    function pickAggregateMainLoc(locLines, preferLoc=""){
+      const lines = Array.isArray(locLines) ? locLines.slice() : [];
+      if(!lines.length) return validInventoryLoc(preferLoc) ? preferLoc : "concamarise";
+      if(validInventoryLoc(preferLoc) && lines.some(x=>x.loc === preferLoc)) return preferLoc;
+      lines.sort((a,b)=>{
+        if((b.availableQty||0) !== (a.availableQty||0)) return (b.availableQty||0) - (a.availableQty||0);
+        if((b.physicalQty||0) !== (a.physicalQty||0)) return (b.physicalQty||0) - (a.physicalQty||0);
+        return String(a.loc||"").localeCompare(String(b.loc||""));
+      });
+      return lines[0]?.loc || "concamarise";
+    }
+
+    function buildSkuStockAggregates(opts = {}){
+      const filterLoc = validInventoryLoc(opts?.loc) ? opts.loc : "";
+      const preferLoc = validInventoryLoc(opts?.preferLoc) ? opts.preferLoc : filterLoc;
+      const map = new Map();
+
+      for(const loc of inventoryLocs()){
+        const items = (state.inventory?.[loc]?.items || []);
+        for(const it of items){
+          const sku = toSkuId(it?.sku || it?.id || "");
+          if(!sku) continue;
+
+          const line = aggregateLocationLine(loc, { ...it, sku });
+          const prev = map.get(sku) || {
+            __isSkuAggregate: true,
+            sku,
+            id: sku,
+            title: "",
+            titleNorm: "",
+            qty: 0,
+            physicalQty: 0,
+            reservedQty: 0,
+            availableQty: 0,
+            lowStockThreshold: null,
+            locations: [],
+            locs: [],
+            mainLoc: "",
+            loc: "",
+            reordered: false,
+            reorderStatus: "",
+            reorderedAtClient: 0,
+            __titleUpdatedAt: -1
+          };
+
+          prev.locations.push(line);
+          prev.locs.push(loc);
+          prev.physicalQty += line.physicalQty;
+          prev.reservedQty += line.reservedQty;
+          prev.availableQty = Math.max(0, prev.physicalQty - prev.reservedQty);
+          prev.qty = prev.availableQty;
+
+          const customTh = __getCustomLowStockThreshold(it);
+          if(customTh !== null){
+            prev.lowStockThreshold = (prev.lowStockThreshold === null) ? customTh : Math.max(prev.lowStockThreshold, customTh);
+          }
+
+          const candidateTitle = squashWhitespace(it?.title || it?.name || "");
+          const ts = itemUpdatedMillis(it);
+          if(candidateTitle && (!prev.title || loc === preferLoc || ts > prev.__titleUpdatedAt)){
+            prev.title = candidateTitle;
+            prev.titleNorm = normalizeText(candidateTitle || sku);
+            prev.__titleUpdatedAt = ts;
+          }
+
+          if(__isReorderedItem(it)){
+            prev.reordered = true;
+            prev.reorderStatus = "riordinato";
+            prev.reorderedAtClient = Math.max(prev.reorderedAtClient || 0, Number(it?.reorderedAtClient || 0));
+            prev.reorderedQty = Number.isFinite(Number(it?.reorderedQty)) ? Number(it.reorderedQty) : prev.reorderedQty;
+            prev.reorderedQueueId = it?.reorderedQueueId || prev.reorderedQueueId || "";
+          }
+
+          map.set(sku, prev);
+        }
+      }
+
+      const out = [];
+      for(const agg0 of map.values()){
+        if(filterLoc && !agg0.locs.includes(filterLoc)) continue;
+        const agg = { ...agg0 };
+        delete agg.__titleUpdatedAt;
+        agg.locations = (agg0.locations || []).slice().sort((a,b)=> inventoryLocs().indexOf(a.loc) - inventoryLocs().indexOf(b.loc));
+        agg.mainLoc = pickAggregateMainLoc(agg.locations, preferLoc);
+        agg.loc = agg.mainLoc;
+        if(!agg.title) agg.title = agg.sku;
+        agg.titleNorm = normalizeText(agg.title || agg.sku);
+        out.push(agg);
+      }
+      return out;
+    }
+
+    function getSkuStockAggregate(sku, preferLoc=""){
+      const s = toSkuId(sku || "");
+      if(!s) return null;
+      return buildSkuStockAggregates({ preferLoc }).find(x=>toSkuId(x.sku) === s) || null;
+    }
+
+    function lowStockAggregates(filterLoc=""){
+      return buildSkuStockAggregates({ loc: filterLoc }).filter(agg => __isLowStockItem(agg)).sort((a,b)=>{
+        const qa = lowStockQtyValue(a);
+        const qb = lowStockQtyValue(b);
+        if(qa !== qb) return qa - qb;
+        return String(a.sku || "").localeCompare(String(b.sku || ""));
+      });
+    }
+
+    function skuAggregateLocationsLabel(agg){
+      const lines = Array.isArray(agg?.locations) ? agg.locations : [];
+      if(!lines.length) return "";
+      return lines.map(l=>{
+        const bits = [`${prettyLoc(l.loc)}: disp. ${l.availableQty}`];
+        bits.push(`fis. ${l.physicalQty}`);
+        if(l.reservedQty > 0) bits.push(`pren. ${l.reservedQty}`);
+        return bits.join(" / ");
+      }).join(" • ");
+    }
+
+    function skuAggregateFormulaText(agg){
+      const physical = physicalQtyFromItem(agg);
+      const reserved = reservedQtyFromItem(agg);
+      const available = lowStockQtyValue(agg);
+      const locs = skuAggregateLocationsLabel(agg);
+      return `Totale SKU: disp. ${available} = fisica ${physical} - prenotati ${reserved}${locs ? " • " + locs : ""}`;
     }
 
     function __isReorderedItem(it){
@@ -3708,10 +3893,10 @@ function guessTitleFromRaw(rawText, sku){
 
 
         function __buildLowStockEmailPayload(items){
-      // items: [{ sku, title, qty, loc }]
+      // items: aggregati SKU cloud [{ sku, title, availableQty, physicalQty, reservedQty, locations, mainLoc }]
       const byLoc = { concamarise: [], cerea: [] };
       for(const it of (items||[])){
-        const loc = (it && (it.loc==="cerea" || it.loc==="concamarise")) ? it.loc : "concamarise";
+        const loc = validInventoryLoc(it?.mainLoc) ? it.mainLoc : ((it && validInventoryLoc(it.loc)) ? it.loc : "concamarise");
         byLoc[loc].push(it);
       }
 
@@ -3724,7 +3909,8 @@ function guessTitleFromRaw(rawText, sku){
             const product = main || "(senza nome)";
             const qty = __fmtQty(lowStockQtyValue(it));
             const threshold = __lowStockThresholdShort(it);
-            return { product, qty, threshold };
+            const where = skuAggregateLocationsLabel(it);
+            return { product, qty, threshold, where };
           })
           .sort((a,b)=>{
             const qa = Number(a.qty);
@@ -3745,12 +3931,13 @@ function guessTitleFromRaw(rawText, sku){
 (nessun prodotto sotto soglia)
 `;
         const maxLen = Math.min(46, rows.reduce((m,r)=> Math.max(m, String(r.product||"").length), 0) || 18);
-        const headerLine = `${"Prodotto".padEnd(maxLen, " ")}  |  Scorta  | Soglia`;
-        const sepLine = `${"-".repeat(maxLen)}--|----------|--------`;
+        const headerLine = `${"Prodotto".padEnd(maxLen, " ")}  |  Scorta  | Soglia  | Sedi`;
+        const sepLine = `${"-".repeat(maxLen)}--|----------|---------|------`;
         const textLines = rows.map(r=>{
           const p = String(r.product||"");
           const name = (p.length>maxLen) ? (p.slice(0, Math.max(0, maxLen-1)) + "…") : p;
-          return `${name.padEnd(maxLen, " ")}  |  ${String(r.qty).padStart(6, " ")}  | ${String(r.threshold||"—")}`;
+          const where = r.where ? `  | ${r.where}` : "";
+          return `${name.padEnd(maxLen, " ")}  |  ${String(r.qty).padStart(6, " ")}  | ${String(r.threshold||"—")}${where}`;
         });
         return `${label}:
 ${headerLine}
@@ -3776,6 +3963,7 @@ ${textLines.join("\n")}
           <tr>
             <td style="padding:10px 12px; border-bottom:1px solid #e9eef2; vertical-align:top; font-size:14px; color:#111">
               ${escapeHtml(String(r.product||""))}
+              ${r.where ? `<div style="font-size:12px;color:#667;margin-top:3px">${escapeHtml(String(r.where||""))}</div>` : ""}
             </td>
             <td style="padding:10px 12px; border-bottom:1px solid #e9eef2; vertical-align:top; text-align:right; white-space:nowrap; font-size:14px; font-weight:700; color:#111">
               ${escapeHtml(String(r.qty))}
@@ -3852,18 +4040,22 @@ ${textLines.join("\n")}
         const m = parseTitleMeta(it.title || "");
         const title = (m.main || it.title || sku || "").slice(0, 120);
         const qty = lowStockQtyValue(it);
+        const physicalQty = physicalQtyFromItem(it);
         const reservedQty = reservedQtyFromItem(it);
         const threshold = __lowStockThresholdShort(it);
-        return { sku, title, qty, reservedQty, threshold };
+        const where = skuAggregateLocationsLabel(it);
+        return { sku, title, qty, physicalQty, reservedQty, threshold, where };
       });
       const previewCerea = (cerea || []).slice(0, 250).map(it=>{
         const sku = toSkuId(it.sku || "");
         const m = parseTitleMeta(it.title || "");
         const title = (m.main || it.title || sku || "").slice(0, 120);
         const qty = lowStockQtyValue(it);
+        const physicalQty = physicalQtyFromItem(it);
         const reservedQty = reservedQtyFromItem(it);
         const threshold = __lowStockThresholdShort(it);
-        return { sku, title, qty, reservedQty, threshold };
+        const where = skuAggregateLocationsLabel(it);
+        return { sku, title, qty, physicalQty, reservedQty, threshold, where };
       });
 
       const counts = { concamarise: (concamarise || []).length, cerea: (cerea || []).length };
@@ -3905,15 +4097,15 @@ ${textLines.join("\n")}
           return;
         }
 
-        // fingerprint globale (include loc) per dedupe server-side
+        // fingerprint globale per SKU univoco: include disponibilità totale e dettaglio sedi.
         const list = (items||[]).slice().map(it=>({
-          loc: String(it.loc||""),
           sku: String(toSkuId(it.sku||"")||""),
           qty: lowStockQtyValue(it),
+          physicalQty: physicalQtyFromItem(it),
           reservedQty: reservedQtyFromItem(it),
-          threshold: __lowStockThreshold(it)
+          threshold: __lowStockThreshold(it),
+          locs: Array.isArray(it.locations) ? it.locations.map(x=>`${x.loc}:${x.physicalQty}:${x.reservedQty}`).join("|") : ""
         })).sort((a,b)=>{
-          if(a.loc!==b.loc) return a.loc.localeCompare(b.loc);
           if(a.sku!==b.sku) return a.sku.localeCompare(b.sku);
           if((a.qty||0) !== (b.qty||0)) return (a.qty||0) - (b.qty||0);
           return (a.threshold||0) - (b.threshold||0);
@@ -3997,21 +4189,9 @@ ${textLines.join("\n")}
       }
     }
 
-    // calcola sotto-scorta globale (Cerea + Concamarise)
+    // calcola sotto-scorta globale per SKU univoco (Cerea + Concamarise)
     function __getLowStockBoth(){
-      const out = [];
-      const pushLoc = (loc)=>{
-        const items = (state.inventory[loc] && state.inventory[loc].items) ? state.inventory[loc].items : [];
-        for(const it of items){
-          if(!Number.isFinite(it.qty)) continue;
-          if(!__isLowStockItem(it)) continue;
-          out.push({ ...it, loc });
-        }
-      };
-      pushLoc("cerea");
-      pushLoc("concamarise");
-      out.sort((x,y)=> lowStockQtyValue(x) - lowStockQtyValue(y));
-      return out;
+      return lowStockAggregates();
     }
 
     // trigger email dopo aggiornamenti reali: runtime + realtime Firestore (anche da altri hub), NON all'accesso
@@ -4026,13 +4206,13 @@ ${textLines.join("\n")}
     function __lowStockFingerprintPayload(items){
       try{
         return (items||[]).slice().map(it=>({
-          loc: String(it.loc||""),
           sku: String(toSkuId(it.sku||"")||""),
           qty: lowStockQtyValue(it),
+          physicalQty: physicalQtyFromItem(it),
           reservedQty: reservedQtyFromItem(it),
-          threshold: __lowStockThreshold(it)
+          threshold: __lowStockThreshold(it),
+          locs: Array.isArray(it.locations) ? it.locations.map(x=>`${x.loc}:${x.physicalQty}:${x.reservedQty}`).join("|") : ""
         })).sort((a,b)=>{
-          if(a.loc!==b.loc) return a.loc.localeCompare(b.loc);
           if(a.sku!==b.sku) return a.sku.localeCompare(b.sku);
           if((a.qty||0) !== (b.qty||0)) return (a.qty||0) - (b.qty||0);
           return (a.threshold||0) - (b.threshold||0);
@@ -6205,13 +6385,13 @@ function currentInv(){
         return;
       }
 
-      const low = (allItems || [])
-        .filter(it=> Number.isFinite(it.qty) && __isLowStockItem(it))
-        .sort((a,b)=> (a.qty||0) - (b.qty||0));
-
+      const loc = validInventoryLoc(state.route?.loc) ? state.route.loc : "";
+      const low = lowStockAggregates(loc);
       count.textContent = String(low.length);
 
-      // In modale magazzino: sotto-scorta come PULSANTE (righe visibili solo in HOME)
+      // In modale magazzino: sotto-scorta come PULSANTE (righe visibili solo in HOME).
+      // Il conteggio è per SKU univoco: se lo stesso SKU è a Cerea + Concamarise,
+      // viene contato solo se il totale SKU cloud è sotto soglia.
       if(!low.length){
         list.innerHTML = `
           <button class="btn small lowStockBtn" type="button" data-action="openLocSottoscorta" disabled>
@@ -6226,9 +6406,10 @@ function currentInv(){
         <button class="btn small lowStockBtn" type="button" data-action="openLocSottoscorta">
           Apri sotto scorta (${low.length})
         </button>
-        <div class="hint" style="margin-top:10px">Le righe sotto-scorta seguono la soglia personalizzata per SKU; se vuota resta il fallback automatico.</div>
+        <div class="hint" style="margin-top:10px">Conteggio per SKU univoco: disponibile totale = Cerea + Concamarise - prenotati.</div>
       `;
     }
+
 
     function renderSottoscortaSheet(){
       const list = $("sottoscortaList");
@@ -6241,41 +6422,11 @@ function currentInv(){
         return;
       }
 
+      const filterLoc = validInventoryLoc(state.ui.sottoscortaLoc) ? state.ui.sottoscortaLoc : "";
+      const out = lowStockAggregates(filterLoc);
 
-      const filterLoc = state.ui.sottoscortaLoc || null;
-
-      const out = [];
-      const pushLoc = (loc)=>{
-        const items = (state.inventory[loc] && state.inventory[loc].items) ? state.inventory[loc].items : [];
-        for(const it of items){
-          const qty = lowStockQtyValue(it);
-          if(__isLowStockItem(it)){
-            const sku = toSkuId(it.sku || it.id || "");
-            if(!sku) continue;
-            out.push({ ...it, loc, sku, title: it.title || "", qty, physicalQty: Number.isFinite(Number(it.qty)) ? Math.round(Number(it.qty)) : 0, reservedQty: reservedQtyFromItem(it), lowStockThreshold: it.lowStockThreshold });
-          }
-        }
-      };
-
-      if(filterLoc){
-        pushLoc(filterLoc);
-      }else{
-        pushLoc("concamarise");
-        pushLoc("cerea");
-      }
-
-      out.sort((a,b)=>{
-        const qa = Number.isFinite(a.qty) ? a.qty : 0;
-        const qb = Number.isFinite(b.qty) ? b.qty : 0;
-        if(qa !== qb) return qa - qb;
-        const la = String(a.loc||"");
-        const lb = String(b.loc||"");
-        if(la !== lb) return la.localeCompare(lb);
-        return String(a.sku||"").localeCompare(String(b.sku||""));
-      });
-
-      const scopeLabel = filterLoc ? prettyLoc(filterLoc) : "Concamarise + Cerea";
-      hint.textContent = `Sotto scorta: ${out.length} articoli • ${scopeLabel} • Quantità = disponibile reale (fisica - prenotati). Prenotati = scarichi ID flusso/PDF in attesa picking.`;
+      const scopeLabel = filterLoc ? prettyLoc(filterLoc) : "SKU univoci • Concamarise + Cerea";
+      hint.textContent = `Sotto scorta: ${out.length} SKU • ${scopeLabel} • Calcolo cloud: disponibile totale SKU = fisica Cerea + fisica Concamarise - prenotati totali.`;
 
       if(!out.length){
         list.innerHTML = `<div class="hint">Nessun articolo sotto scorta 🎉</div>`;
@@ -6290,7 +6441,6 @@ function currentInv(){
           <div class="gridCell gridRight">Prenotati</div>
         </div>`;
 
-      // Conteggio riordinati / da riordinare per riga TOTALE
       let cntReordered = 0;
       let cntToReorder = 0;
 
@@ -6301,36 +6451,34 @@ function currentInv(){
         const qty = lowStockQtyValue(it);
         const physicalQty = physicalQtyFromItem(it);
         const reservedQty = reservedQtyFromItem(it);
-        const reservedInfo = reservedFormulaText(it);
+        const reservedInfo = skuAggregateFormulaText(it);
         const badgeClass = qty>0 ? (__isLowStockItem(it) ? "warn" : "ok") : "bad";
         const reservedBadgeClass = reservedQty > 0 ? "warn" : "";
-        const locLabel = escapeHtml(prettyLoc(it.loc));
-        const rackText = rackLocationDisplayFromItem(it);
-        const rackLabel = rackText !== "—" ? ` • Ubicazione: ${escapeHtml(rackText)}` : "";
+        const locLabel = escapeHtml(skuAggregateLocationsLabel(it) || prettyLoc(it.loc));
         const sogliaLabel = escapeHtml(__lowStockThresholdLabel(it));
         const reorderBadge = __reorderedTinyBadge(it);
         const isReord = __isReorderedItem(it);
         if(isReord) cntReordered++; else cntToReorder++;
         const rowExtraCls = isReord ? " reordered" : "";
+        const openLoc = escapeHtml(it.mainLoc || it.loc || "concamarise");
 
         return `
           <div class="row gridRow${rowExtraCls}" role="button" tabindex="0"
-               data-sku="${sku}" data-loc="${escapeHtml(it.loc||"")}" data-action="openSottoscortaItem">
+               data-sku="${sku}" data-loc="${openLoc}" data-action="openSottoscortaItem">
             <div class="gridCell gridSku">${sku}</div>
             <div class="gridCell">
               <div class="gridProdMain">${titleMain}${reorderBadge}</div>
-              <div class="gridProdSub">${locLabel}${rackLabel} • Fisica: ${physicalQty} • Soglia: ${sogliaLabel}${reservedInfo ? ` • ${escapeHtml(reservedInfo)}` : ""}</div>
+              <div class="gridProdSub">${locLabel} • Fisica totale: ${physicalQty} • Soglia: ${sogliaLabel}${reservedInfo ? ` • ${escapeHtml(reservedInfo)}` : ""}</div>
             </div>
             <div class="gridCell gridRight"><span class="badge ${badgeClass}">${qty}</span></div>
             <div class="gridCell gridRight"><span class="badge ${reservedBadgeClass}">${reservedQty}</span></div>
           </div>`;
       });
 
-      // Riga TOTALE evidenziata in fondo
       const totalRow = `
         <div class="row gridTotal" aria-label="Totale sotto scorta">
           <div class="gridTotalLabel">
-            Totale sotto scorta
+            Totale SKU sotto scorta
             <span class="gtChip ok">RIORDINATI: ${cntReordered}</span>
             <span class="gtChip warn">DA RIORDINARE: ${cntToReorder}</span>
           </div>
@@ -6355,12 +6503,13 @@ function currentInv(){
       const inv = state.inventory[loc] || { items:[], meta:{ lastUpdatedAt:null } };
       const items = inv.items || [];
       let pieces = 0;
-      let low = 0;
       for(const it of items){
         const q = Number.isFinite(it.qty) ? it.qty : 0;
         pieces += q;
-        if(__isLowStockItem(it)) low++;
       }
+      // low = SKU univoci sotto-scorta globale presenti in questa sede.
+      // Non conta falsi sotto-scorta locali se lo stesso SKU è coperto dall'altra sede.
+      const low = lowStockAggregates(loc).length;
       return {
         skuCount: items.length,
         pieces,
@@ -6469,8 +6618,9 @@ function currentInv(){
       const sC = invStats("cerea");
       const sM = invStats("concamarise");
 
-      const totalSku = (sC.skuCount || 0) + (sM.skuCount || 0);
-      const totalLow = (sC.low || 0) + (sM.low || 0);
+      const allSkuAggregates = buildSkuStockAggregates();
+      const totalSku = allSkuAggregates.length;
+      const totalLow = __getLowStockBoth().length;
 
       if(tSku) tSku.textContent = fmtN(totalSku);
       if(tLow) tLow.textContent = fmtN(totalLow);
@@ -6494,21 +6644,8 @@ function currentInv(){
       { const el = $("homeConcamariseUpdated"); if(el) el.textContent = sM.updatedAt ? `Aggiornato: ${fmtDate(sM.updatedAt)}` : "In attesa sync…"; }
 
       if(lowList && lowCount){
-        const out = [];
-        const pushLoc = (loc)=>{
-          const items = (state.inventory[loc] && state.inventory[loc].items) ? state.inventory[loc].items : [];
-          for(const it of items){
-            if(!Number.isFinite(it.qty)) continue;
-            if(!__isLowStockItem(it)) continue;
-            out.push({ ...it, loc });
-          }
-        };
-        pushLoc("cerea");
-        pushLoc("concamarise");
-
-        out.sort((x,y)=> lowStockQtyValue(x) - lowStockQtyValue(y));
+        const out = __getLowStockBoth();
         lowCount.textContent = fmtN(out.length);
-
 
         if(!out.length){
           lowList.innerHTML = `<div class="hint">Nessun articolo sotto scorta 🎯</div>`;
@@ -6518,7 +6655,6 @@ function currentInv(){
           return;
         }
 
-        // Conteggio per riga TOTALE
         let cntReordered = 0;
         let cntToReorder = 0;
 
@@ -6529,34 +6665,32 @@ function currentInv(){
           const qty = lowStockQtyValue(it);
           const physicalQty = physicalQtyFromItem(it);
           const reservedQty = reservedQtyFromItem(it);
-          const reservedInfo = reservedFormulaText(it);
+          const reservedInfo = skuAggregateFormulaText(it);
           const badgeClass = qty>0 ? (__isLowStockItem(it) ? "warn" : "ok") : "bad";
           const reservedBadgeClass = reservedQty > 0 ? "warn" : "";
-          const locLabel = escapeHtml(prettyLoc(it.loc));
-          const rackText = rackLocationDisplayFromItem(it);
-          const rackLabel = rackText !== "—" ? ` • Ubicazione: ${escapeHtml(rackText)}` : "";
+          const locLabel = escapeHtml(skuAggregateLocationsLabel(it) || prettyLoc(it.loc));
           const sogliaLabel = escapeHtml(__lowStockThresholdLabel(it));
           const reorderBadge = __reorderedTinyBadge(it);
           const isReord = __isReorderedItem(it);
           if(isReord) cntReordered++; else cntToReorder++;
           const rowExtraCls = isReord ? " reordered" : "";
+          const openLoc = escapeHtml(it.mainLoc || it.loc || "concamarise");
           return `
-            <div class="row gridRow${rowExtraCls}" role="button" tabindex="0" data-sku="${sku}" data-loc="${it.loc}" data-action="openHomeSottoscortaItem">
+            <div class="row gridRow${rowExtraCls}" role="button" tabindex="0" data-sku="${sku}" data-loc="${openLoc}" data-action="openHomeSottoscortaItem">
               <div class="gridCell gridSku">${sku}</div>
               <div class="gridCell">
                 <div class="gridProdMain">${titleMain}${reorderBadge}</div>
-                <div class="gridProdSub">${locLabel}${rackLabel} • Fisica: ${physicalQty} • Soglia: ${sogliaLabel}${reservedInfo ? ` • ${escapeHtml(reservedInfo)}` : ""}</div>
+                <div class="gridProdSub">${locLabel} • Fisica totale: ${physicalQty} • Soglia: ${sogliaLabel}${reservedInfo ? ` • ${escapeHtml(reservedInfo)}` : ""}</div>
               </div>
               <div class="gridCell gridRight"><span class="badge ${badgeClass}">${qty}</span></div>
               <div class="gridCell gridRight"><span class="badge ${reservedBadgeClass}">${reservedQty}</span></div>
             </div>`;
         });
 
-        // Riga TOTALE evidenziata in fondo
         const totalRow = `
           <div class="row gridTotal" aria-label="Totale sotto scorta">
             <div class="gridTotalLabel">
-              Totale sotto scorta
+              Totale SKU sotto scorta
               <span class="gtChip ok">RIORDINATI: ${cntReordered}</span>
               <span class="gtChip warn">DA RIORDINARE: ${cntToReorder}</span>
             </div>
@@ -6565,7 +6699,7 @@ function currentInv(){
 
         lowList.classList.add("cols4");
         lowList.innerHTML = `<div class="row gridHead gridRow"><div class="gridCell">SKU</div><div class="gridCell">Prodotto</div><div class="gridCell gridRight">Disp.</div><div class="gridCell gridRight">Prenotati</div></div>` + rows.join("") + totalRow;
-        if(lowHint) lowHint.textContent = "Disponibile reale = giacenza fisica - prenotati. Prenotati = scarichi ID flusso/PDF in attesa picking. Tocca una riga per aprire la scheda SKU.";
+        if(lowHint) lowHint.textContent = "Disponibile reale per SKU = fisica Cerea + fisica Concamarise - prenotati totali. Tocca una riga per aprire la scheda SKU.";
       }
 
       // log ultimo invio mail sotto scorta (da meta Firestore)
