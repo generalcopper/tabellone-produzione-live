@@ -8671,9 +8671,10 @@ function startAllLogs(modeOrOpts = "full"){
     function ensureLogsRealtimeStarted(reason="", opts = {}){
       try{
         if(!state.firebase.ok || !state.user?.isWhitelisted) return false;
-        const mode = (opts && opts.mode === "fba") ? "fba" : "full";
-        // Picking FBA non deve aspettare i listener Shopify/FBM: parte con una lettura
-        // rapida dei soli flussi recenti. Se poi si apre FBM/Logs/Storico, upgrade a full.
+        const rawMode = opts && opts.mode;
+        const mode = (rawMode === "fba" || rawMode === "fbm") ? rawMode : "full";
+        // Picking FBA/FBM non deve aspettare tutti i listener: parte con una lettura
+        // rapida e mirata. Se poi si apre Logs/Storico/Flussi, upgrade lazy a full.
         startLogsFor("cerea", { mode });
         startLogsFor("concamarise", { mode });
         if(state.route.view === "home"){
@@ -9428,11 +9429,15 @@ function startAllLogs(modeOrOpts = "full"){
     function startLogsFor(loc, opts = {}){
       if(!state.firebase.ok || !state.user?.isWhitelisted) return;
       const lg = state.logs[loc];
-      const requestedMode = (opts && opts.mode === "fba") ? "fba" : "full";
+      const rawMode = opts && opts.mode;
+      const requestedMode = (rawMode === "fba" || rawMode === "fbm") ? rawMode : "full";
 
       if(lg.unsub){
-        if(requestedMode === "full" && lg.mode === "fba"){
-          // Upgrade lazy: da Picking FBA veloce a lettura completa (FBM/Logs/Storico).
+        const currentMode = lg.mode || lg.meta?.mode || "full";
+        const needsRestart = (requestedMode === "full" && currentMode !== "full") ||
+          (requestedMode !== "full" && currentMode !== requestedMode && currentMode !== "full");
+        if(needsRestart){
+          // Upgrade lazy a full oppure cambio veloce FBA ↔ FBM senza tenere query inutili aperte.
           try{ lg.unsub && lg.unsub(); }catch(_e){}
           lg.unsub = null;
           lg.flows = [];
@@ -9518,16 +9523,20 @@ function startAllLogs(modeOrOpts = "full"){
 
       const unsubs = [];
       const appliedLimit = requestedMode === "fba" ? 120 : 80;
-      unsubs.push(attach("applied", api.query(colRef, api.orderBy("appliedAtClient","desc"), api.limit(appliedLimit)), true));
+      if(requestedMode === "fba" || requestedMode === "full"){
+        unsubs.push(attach("applied", api.query(colRef, api.orderBy("appliedAtClient","desc"), api.limit(appliedLimit)), true));
+      }
       // Niente listener generico su updatedAtClient: quel campo cambia a ogni sync/backfill
       // e faceva riscaricare/riordinare troppi log con lo stesso orario.
-      // Modalità FBA veloce: basta appliedAtClient. Non aspetta query Shopify/FBM.
-      if(requestedMode !== "fba"){
-        // Per Shopify teniamo query mirate e leggere; il raw è solo salvagente minimo.
-        try{ unsubs.push(attach("shopifySource", api.query(colRef, api.where("source", "==", "shopify_fbm"), api.limit(90)), false)); }catch(_e){}
-        try{ unsubs.push(attach("shopifySourcePlain", api.query(colRef, api.where("source", "==", "shopify"), api.limit(60)), false)); }catch(_e){}
-        try{ unsubs.push(attach("shopifyFile", api.query(colRef, api.where("fileName", "==", "SHOPIFY_FBM"), api.limit(90)), false)); }catch(_e){}
-        try{ unsubs.push(attach("raw", api.query(colRef, api.limit(20)), false)); }catch(_e){}
+      // Modalità FBA veloce: solo appliedAtClient. Modalità FBM veloce: solo query Shopify.
+      if(requestedMode === "fbm" || requestedMode === "full"){
+        // Per Shopify teniamo query mirate e leggere; il raw resta solo nella modalità full.
+        try{ unsubs.push(attach("shopifySource", api.query(colRef, api.where("source", "==", "shopify_fbm"), api.limit(140)), false)); }catch(_e){}
+        try{ unsubs.push(attach("shopifySourcePlain", api.query(colRef, api.where("source", "==", "shopify"), api.limit(100)), false)); }catch(_e){}
+        try{ unsubs.push(attach("shopifyFile", api.query(colRef, api.where("fileName", "==", "SHOPIFY_FBM"), api.limit(140)), false)); }catch(_e){}
+        if(requestedMode === "full"){
+          try{ unsubs.push(attach("raw", api.query(colRef, api.limit(20)), false)); }catch(_e){}
+        }
       }
       lg.meta.expected = bootExpected.size;
       lg.meta.mode = requestedMode;
@@ -12264,7 +12273,7 @@ function currentInv(){
       state.ui.pickingHomeView = (next === "located" || next === "logs" || next === "pickingFbm" || next === "pickingFba" || next === "pickingHistory") ? next : "noLocation";
       const needsFlowLogs = (state.ui.pickingHomeView === "logs" || state.ui.pickingHomeView === "pickingFbm" || state.ui.pickingHomeView === "pickingFba" || state.ui.pickingHomeView === "pickingHistory");
       if(needsFlowLogs){
-        const logMode = (state.ui.pickingHomeView === "pickingFba") ? "fba" : "full";
+        const logMode = (state.ui.pickingHomeView === "pickingFba") ? "fba" : (state.ui.pickingHomeView === "pickingFbm" ? "fbm" : "full");
         ensureLogsRealtimeStarted("picking_" + state.ui.pickingHomeView, { mode: logMode });
       }
       syncPickingHomeView();
@@ -13619,13 +13628,15 @@ Confermandolo, la transaction cloud scaricherà comunque la quantità richiesta 
       const currentPickingView = pickingHomeView();
       const showFbaPicking = currentPickingView === "pickingFba";
       const showFbmPicking = !showFbaPicking; // default sicuro: FBM, compatibile con vecchia voce Picking
-      const fbaCandidateFlows = flows.filter(f=>!isShopifyFbmFlow(f));
-      const fbmCandidateFlows = flows.filter(f=>isShopifyFbmFlow(f));
+      const fastFbaOnlyLogs = !!(state.logs?.cerea?.mode === "fba" && state.logs?.concamarise?.mode === "fba");
+      const fastFbmOnlyLogs = !!(state.logs?.cerea?.mode === "fbm" && state.logs?.concamarise?.mode === "fbm");
 
-      // FBA deve aprirsi veloce: non calcolo gruppi/posizioni FBM mentre si guarda FBA.
-      const fbaActiveFlows = fbaCandidateFlows.filter(f=>!pickingFlowStats(f).done);
+      // Apertura veloce: mentre guardo FBA non calcolo FBM; mentre guardo FBM non calcolo FBA.
+      const fbaCandidateFlows = showFbaPicking ? flows.filter(f=>!isShopifyFbmFlow(f)) : [];
+      const fbmCandidateFlows = showFbmPicking ? flows.filter(f=>isShopifyFbmFlow(f)) : [];
+      const fbaActiveFlows = showFbaPicking ? fbaCandidateFlows.filter(f=>!pickingFlowStats(f).done) : [];
       const fbmActiveFlows = showFbmPicking ? fbmCandidateFlows.filter(f=>!pickingFlowStats(f).done) : [];
-      const activeFlows = showFbmPicking ? [...fbmActiveFlows, ...fbaActiveFlows] : fbaActiveFlows;
+      const activeFlows = showFbmPicking ? fbmActiveFlows : fbaActiveFlows;
       const visibleFbmFlows = fbmActiveFlows;
       const visibleFbaFlows = fbaActiveFlows.slice(0, 8);
 
@@ -13769,8 +13780,8 @@ Confermandolo, la transaction cloud scaricherà comunque la quantità richiesta 
       const fbmSkuGroups = showFbmPicking ? buildFbmPickingSkuGroups(fbmActiveFlows) : [];
       const fbmSkuTotalPieces = showFbmPicking ? fbmSkuGroups.reduce((a,x)=>a + (Number(x.qty)||0), 0) : 0;
       count.textContent = showFbaPicking ? fmtN(fbaActiveFlows.length) : fmtN(fbmSkuGroups.length);
-      setPickingNavCount("pickingFbm", showFbmPicking ? fmtN(fbmSkuGroups.length) : "—");
-      setPickingNavCount("pickingFba", fmtN(fbaActiveFlows.length));
+      setPickingNavCount("pickingFbm", showFbmPicking ? fmtN(fbmSkuGroups.length) : (fastFbaOnlyLogs ? "—" : fmtN(fbmSkuGroups.length)));
+      setPickingNavCount("pickingFba", showFbaPicking ? fmtN(fbaActiveFlows.length) : (fastFbmOnlyLogs ? "—" : fmtN(fbaActiveFlows.length)));
 
       const pickingTitleEl = box.querySelector?.(".miniTitle");
       const pickingSubEl = box.querySelector?.(".miniSub");
@@ -13958,10 +13969,11 @@ function renderHomePickingHistoryBox(){
       }
 
       const fastFbaOnlyLogs = !!(state.logs?.cerea?.mode === "fba" && state.logs?.concamarise?.mode === "fba");
-      if(fastFbaOnlyLogs && pickingHomeView() !== "pickingHistory"){
+      const fastFbmOnlyLogs = !!(state.logs?.cerea?.mode === "fbm" && state.logs?.concamarise?.mode === "fbm");
+      if((fastFbaOnlyLogs || fastFbmOnlyLogs) && pickingHomeView() !== "pickingHistory"){
         histCount.textContent = "—";
         setPickingNavCount("pickingHistory", "—");
-        histList.innerHTML = `<div class="hint" style="padding:12px">Storico non calcolato in modalità FBA veloce.</div>`;
+        histList.innerHTML = `<div class="hint" style="padding:12px">Storico non calcolato in modalità picking veloce.</div>`;
         if(histHint) histHint.textContent = "Apri Storico prelievi per caricare la lettura completa.";
         return;
       }
