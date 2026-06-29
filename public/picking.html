@@ -12345,6 +12345,294 @@ function currentInv(){
       };
     }
 
+
+
+    // Picking FBA/PDF: commit atomico SOLO CLOUD.
+    // Il vecchio controllo usava lo snapshot già caricato nel browser e poi writeBatch + increment().
+    // Qui invece ogni prelievo rilegge flow + inventario dentro una Firestore transaction:
+    // se la quantità reale cloud non basta, la transaction abortisce e non può creare giacenza negativa.
+    function pickingPositionTextFromCloudItem(it){
+      try{
+        const grouped = new Map();
+        const allocations = readRackAllocationsFromDoc(it || {});
+        for(const a of allocations){
+          const code = normalizeRackLocation(a?.code || "");
+          const qty = Math.round(Number(a?.qty || 0));
+          if(!code) continue;
+          const prev = grouped.get(code) || { code, qty:0 };
+          if(Number.isFinite(qty) && qty > 0) prev.qty += qty;
+          grouped.set(code, prev);
+        }
+        if(!grouped.size){
+          for(const code of readRackLocationsFromDoc(it || {})){
+            const c = normalizeRackLocation(code || "");
+            if(c) grouped.set(c, { code:c, qty:0 });
+          }
+        }
+        const parts = Array.from(grouped.values()).sort((a,b)=>String(a.code).localeCompare(String(b.code)));
+        if(!parts.length) return "—";
+        return parts.map(x=>{
+          const q = (Number.isFinite(Number(x.qty)) && Number(x.qty) > 0) ? ` (${Math.round(Number(x.qty))} pz)` : "";
+          return `${x.code}${q}`;
+        }).join(", ");
+      }catch(_e){
+        return "—";
+      }
+    }
+
+    function pendingPickQtyFromItem(it){
+      try{
+        const raw = it && Object.prototype.hasOwnProperty.call(it, "pendingPickQty") ? it.pendingPickQty : (it?.reservedQty ?? 0);
+        const n = Number(raw);
+        if(!Number.isFinite(n)) return reservedQtyFromItem(it || {});
+        return Math.max(0, Math.round(n));
+      }catch(_e){
+        return 0;
+      }
+    }
+
+    function addPickingStockTransactionWrite(tx, api, db, loc, flow, line, direction, opts = {}){
+      const sku = toSkuId(line?.sku || opts?.sku || "");
+      if(!sku) return null;
+      const qty = Math.abs(parseQty(line?.qty || opts?.qty || 0) || 0);
+      if(!qty) return null;
+
+      const nowClient = Number(opts.nowClient || Date.now());
+      const who = opts.who || state.user?.email || state.user?.emailLower || state.user?.uid || "";
+      const title = opts.title || pickingLineTitle(line, flow) || sku;
+      const cloudItem = { ...(opts.itemData || {}), sku, title: (opts.itemData?.title || title || sku) };
+      const beforeQty = stockQtyFromDoc(cloudItem || {});
+      const beforeReserved = reservedQtyFromItem(cloudItem || {});
+      const beforePending = pendingPickQtyFromItem(cloudItem || {});
+      const itemRef = api.doc(db, COL_ROOT, loc, SUB_ITEMS, sku);
+
+      let delta = 0;
+      let afterQty = beforeQty;
+      let afterReserved = beforeReserved;
+      let afterPending = beforePending;
+      let allocationResult = null;
+      let consumedAllocations = [];
+      let actionType = "";
+      let note = "";
+
+      if(direction > 0){
+        if(beforeQty < qty){
+          throw new Error(`${sku}: stock cloud insufficiente (${beforeQty} disponibili, richiesti ${qty}). Operazione bloccata: inventario invariato.`);
+        }
+        allocationResult = consumeRackAllocationsForPicking(cloudItem, qty);
+        consumedAllocations = allocationResult.consumedAllocations || [];
+        if((allocationResult.missingQty || 0) > 0){
+          throw new Error(`${sku}: ubicazioni cloud insufficienti per il prelievo (mancano ${allocationResult.missingQty} pz ubicati). Operazione bloccata.`);
+        }
+        delta = -qty;
+        afterQty = beforeQty - qty;
+        afterReserved = Math.max(0, beforeReserved - qty);
+        afterPending = Math.max(0, beforePending - qty);
+        actionType = "prelievo_picking";
+        note = "Scarico reale da Picking";
+      }else{
+        // Supporto transazionale anche per eventuali annullamenti futuri.
+        consumedAllocations = Array.isArray(opts.consumedAllocations) ? opts.consumedAllocations : [];
+        allocationResult = restoreRackAllocationsForPicking(cloudItem, consumedAllocations);
+        delta = qty;
+        afterQty = beforeQty + qty;
+        afterReserved = beforeReserved + qty;
+        afterPending = beforePending + qty;
+        actionType = "annulla_prelievo_picking";
+        note = "Annullamento prelievo Picking";
+      }
+
+      const itemPatch = pickingItemPatchFromAllocations({
+        sku,
+        title,
+        titleNorm: normalizeText(title || sku),
+        qty: afterQty,
+        reservedQty: afterReserved,
+        pendingPickQty: afterPending,
+        reservationStatus: direction > 0 ? "prelevata" : "in_attesa_picking",
+        lastPickingFlowId: flow?.id || opts.flowId || "",
+        lastPickingAt: api.serverTimestamp(),
+        lastPickingAtClient: nowClient,
+        lastPickingBy: who,
+        location: loc,
+        updatedAt: api.serverTimestamp(),
+        updatedAtClient: nowClient,
+        updatedBy: who
+      }, allocationResult.nextAllocations || [], allocationResult.cleanLocations || [], afterQty);
+
+      tx.set(itemRef, itemPatch, { merge:true });
+
+      addProductMovementToBatch(tx, api, db, sku, {
+        type: actionType,
+        qtySigned: delta,
+        deltaSigned: delta,
+        reservationQty: direction > 0 ? -qty : qty,
+        reservedQtySigned: direction > 0 ? -qty : qty,
+        fromWarehouse: loc,
+        toWarehouse: loc,
+        location: loc,
+        source: "picking",
+        note: `${note}${flowDisplayName(flow) ? " • " + flowDisplayName(flow) : ""}`,
+        flowKind: "scarica",
+        flowId: flow?.id || opts.flowId || "",
+        flowName: flowDisplayName(flow),
+        rackAllocations: consumedAllocations,
+        createdAtClient: nowClient
+      });
+
+      return {
+        sku,
+        title,
+        qty,
+        delta,
+        beforeQty,
+        afterQty,
+        beforeReserved,
+        afterReserved,
+        beforePending,
+        afterPending,
+        reservedDelta: direction > 0 ? -qty : qty,
+        nextAllocations: allocationResult.nextAllocations || [],
+        cleanLocations: allocationResult.cleanLocations || [],
+        consumedAllocations,
+        missingRackQty: allocationResult.missingQty || 0,
+        position: pickingPositionTextFromCloudItem(cloudItem)
+      };
+    }
+
+    async function commitPickingCloudTransaction(loc, flowId, opts = {}){
+      const api = state.firebase.api;
+      const db = state.firebase.db;
+      if(!api || !db || !api.runTransaction){
+        throw new Error("Firebase transaction non disponibile.");
+      }
+      const l = (loc === "cerea" || loc === "concamarise") ? loc : "concamarise";
+      const id = String(flowId || "").trim();
+      const mode = String(opts.mode || "flow").toLowerCase();
+      const requestedSku = toSkuId(opts.sku || "");
+      if(!id) throw new Error("Flusso non valido.");
+      if(mode === "sku" && !requestedSku) throw new Error("SKU non valido.");
+
+      const nowClient = Number(opts.nowClient || Date.now());
+      const who = opts.who || state.user?.email || state.user?.emailLower || state.user?.uid || "";
+      const bulkId = opts.bulkId || "";
+      const flowRef = api.doc(db, COL_ROOT, l, SUB_LOGS, id);
+
+      return await api.runTransaction(db, async (tx)=>{
+        const flowSnap = await tx.get(flowRef);
+        if(!flowSnap.exists()) throw new Error("Flusso non trovato nel cloud.");
+        const flow = normalizeFlowLogDoc(flowSnap, l);
+        if(String(flow?.kind || "").toLowerCase() !== "scarica"){
+          throw new Error("Questo flusso non è uno scarico prelevabile.");
+        }
+        if(flow?.voided === true) throw new Error("Questo flusso è annullato.");
+        if(isShopifyFbmFlow(flow)){
+          throw new Error("Questo è un flusso Shopify FBM: il picking operativo non deve scalare inventario.");
+        }
+        if(!isPickingManagedFlow(flow)){
+          throw new Error("Flusso non prenotato: questo scarico risulta già applicato con il vecchio metodo.");
+        }
+
+        const validLines = pickingUniqueLines(flow).filter(x=>toSkuId(x?.sku || ""));
+        let linesToPick = [];
+        if(mode === "sku"){
+          const line = validLines.find(x=>toSkuId(x?.sku || "") === requestedSku) || null;
+          if(!line) throw new Error(`${requestedSku}: SKU non presente nel flusso cloud.`);
+          if(isPickingLinePicked(flow, requestedSku)) throw new Error(`${requestedSku}: risulta già prelevato nel cloud.`);
+          linesToPick = [line];
+        }else{
+          linesToPick = validLines.filter(x=>!isPickingLinePicked(flow, toSkuId(x?.sku || "")));
+          if(!linesToPick.length) throw new Error("Questo flusso risulta già prelevato nel cloud.");
+        }
+
+        const itemSnaps = new Map();
+        for(const line of linesToPick){
+          const sku = toSkuId(line?.sku || "");
+          if(!sku || itemSnaps.has(sku)) continue;
+          const itemRef = api.doc(db, COL_ROOT, l, SUB_ITEMS, sku);
+          const itemSnap = await tx.get(itemRef);
+          itemSnaps.set(sku, itemSnap);
+        }
+
+        const pickedLines = {};
+        const nextPickedMap = { ...pickingLineMap(flow) };
+        const skuList = [];
+        const stockInfos = [];
+        let pieces = 0;
+
+        for(const line of linesToPick){
+          const sku = toSkuId(line?.sku || "");
+          if(!sku) continue;
+          const key = pickingSkuKey(sku);
+          if(nextPickedMap[key]?.picked === true || nextPickedMap[key]?.status === "prelevato"){
+            throw new Error(`${sku}: risulta già prelevato nel cloud.`);
+          }
+          const qty = Math.abs(parseQty(line?.qty || 0) || 0);
+          if(!qty) throw new Error(`${sku}: quantità zero nel flusso cloud.`);
+          const title = pickingLineTitle(line, flow);
+          const itemSnap = itemSnaps.get(sku);
+          const itemData = itemSnap && itemSnap.exists() ? (itemSnap.data() || {}) : {};
+          const stockInfo = addPickingStockTransactionWrite(tx, api, db, l, flow, line, 1, { nowClient, who, title, flowId:id, itemData });
+          if(!stockInfo) continue;
+          stockInfos.push(stockInfo);
+          const position = stockInfo.position || pickingPositionTextFromCloudItem(itemData) || "—";
+          const rec = { picked:true, status:"prelevato", sku, title, qty, position, rackLocation:position, pickedAllocations: stockInfo.consumedAllocations || [], pickedAtClient:nowClient, pickedBy:who, ...(bulkId ? { bulkId } : {}) };
+          pickedLines[key] = rec;
+          nextPickedMap[key] = rec;
+          pieces += qty;
+          if(!skuList.includes(sku)) skuList.push(sku);
+        }
+
+        if(!skuList.length) throw new Error("Nessuna riga valida da prelevare nel cloud.");
+
+        const allPicked = validLines.length > 0 && validLines.every(x=>{
+          const k = pickingSkuKey(x.sku);
+          return !!nextPickedMap[k]?.picked;
+        });
+
+        const event = mode === "sku"
+          ? { type:"sku", sku:skuList[0], qty:pieces, position:pickedLines[pickingSkuKey(skuList[0])]?.position || "—", stockDelta:-pieces, reservationDelta:-pieces, atClient:nowClient, by:who }
+          : { type:"flow", ...(bulkId ? { bulk:true, bulkId } : {}), skus:skuList, count:skuList.length, pieces, stockDelta:-pieces, reservationDelta:-pieces, atClient:nowClient, by:who };
+
+        const pickingPatch = {
+          status: allPicked ? "prelevato" : "parziale",
+          managedByPicking:true,
+          pickedLines: mode === "sku" ? { [pickingSkuKey(skuList[0])]: pickedLines[pickingSkuKey(skuList[0])] } : pickedLines,
+          updatedAt: api.serverTimestamp(),
+          updatedAtClient: nowClient,
+          updatedBy: who,
+          events: api.arrayUnion(event),
+          flowPicked: allPicked,
+          flowPickMode: allPicked ? (mode === "sku" ? "sku" : "flow") : "",
+          flowPickGroup: mode !== "sku",
+          ...(mode !== "sku" ? { flowPickedCount:skuList.length, flowPickedSkus:skuList } : {}),
+          flowPickedAt: allPicked ? api.serverTimestamp() : null,
+          flowPickedAtClient: allPicked ? nowClient : null,
+          flowPickedBy: allPicked ? who : "",
+          ...(bulkId ? { bulkPickId:bulkId } : {})
+        };
+
+        tx.set(flowRef, {
+          status: allPicked ? "PICKED" : "PARTIAL_PICKED",
+          reservation: { active: !allPicked, status: allPicked ? "prelevato" : "parziale", pickedAtClient: allPicked ? nowClient : null, updatedAtClient: nowClient, updatedBy: who },
+          picking: pickingPatch
+        }, { merge:true });
+
+        return {
+          flowId:id,
+          loc:l,
+          flowName: flowDisplayName(flow),
+          mode,
+          sku: skuList[0] || "",
+          skuList,
+          skuCount: skuList.length,
+          pieces,
+          allPicked,
+          stockInfos
+        };
+      });
+    }
+
     function firstRackLocationCodeFromItem(it){
       try{
         const allocations = readRackAllocationsFromDoc(it || {});
@@ -13372,6 +13660,7 @@ function renderHomePickingHistoryBox(){
       const l = (loc === "cerea" || loc === "concamarise") ? loc : "concamarise";
       const s = toSkuId(sku || "");
       if(!id || !s){ showToast("Errore", "Flusso o SKU non valido.", 2200); return; }
+
       const flow = (state.logs?.[l]?.flows || []).find(f=>String(f.id||"") === id) || null;
       if(!flow){ showToast("Flusso non trovato", "Riprova tra un attimo.", 2200); return; }
       if(!isPickingManagedFlow(flow)){
@@ -13382,6 +13671,7 @@ function renderHomePickingHistoryBox(){
         await saveShopifyFbmPickingSkuOnly(flow, l, s, opts);
         return;
       }
+
       const line = (flow.lines || []).find(x=>toSkuId(x?.sku || "") === s) || { sku:s, qty:0, title:s };
       if(isPickingLinePicked(flow, s) && !opts.force){ showToast("Già prelevato", `${s} risulta già prelevato.`, 1800); return; }
       const qty = Math.abs(parseQty(line.qty || 0) || 0);
@@ -13392,68 +13682,19 @@ function renderHomePickingHistoryBox(){
         const ok = confirm(`Confermi prelievo SKU?\n\nFlusso: ${flowDisplayName(flow)}\nSKU: ${s}\nPosizione: ${position}\nQuantità: ${qty} pz\n\nLo SKU verrà scaricato adesso dall'inventario.`);
         if(!ok) return;
       }
-      const api = state.firebase.api;
-      const db = state.firebase.db;
-      if(!api || !db){ showToast("Errore", "Firebase non inizializzato.", 2200); return; }
-      const nowClient = Date.now();
-      const who = state.user?.email || state.user?.emailLower || state.user?.uid || "";
-      const key = pickingSkuKey(s);
 
-      const batch = api.writeBatch(db);
-      const stockInfo = addPickingStockWrite(batch, api, db, l, flow, line, 1, { nowClient, who, title, flowId:id });
-      if(!stockInfo){ showToast("Errore", "Riga picking non valida.", 2200); return; }
-
-      const pickedLine = {
-        picked:true,
-        status:"prelevato",
-        sku:s,
-        title,
-        qty,
-        position,
-        rackLocation:position,
-        pickedAllocations: stockInfo.consumedAllocations || [],
-        pickedAtClient:nowClient,
-        pickedBy:who
-      };
-      const pickedMap = { ...pickingLineMap(flow), [key]: pickedLine };
-      const validLines = (flow.lines || []).filter(x=>toSkuId(x?.sku || ""));
-      const allPicked = validLines.length > 0 && validLines.every(x=>{
-        const k = pickingSkuKey(x.sku);
-        return !!pickedMap[k]?.picked;
-      });
-      const event = { type:"sku", sku:s, qty, position, stockDelta:-qty, reservationDelta:-qty, atClient:nowClient, by:who };
-      const ref = api.doc(db, COL_ROOT, l, SUB_LOGS, id);
-      const pickingPatch = {
-        status: allPicked ? "prelevato" : "parziale",
-        managedByPicking:true,
-        pickedLines: { [key]: pickedLine },
-        updatedAt: api.serverTimestamp(),
-        updatedAtClient: nowClient,
-        updatedBy: who,
-        events: api.arrayUnion(event),
-        flowPicked: allPicked,
-        flowPickMode: allPicked ? "sku" : "",
-        flowPickGroup: false,
-        flowPickedAt: allPicked ? api.serverTimestamp() : null,
-        flowPickedAtClient: allPicked ? nowClient : null,
-        flowPickedBy: allPicked ? who : ""
-      };
-      batch.set(ref, {
-        status: allPicked ? "PICKED" : "PARTIAL_PICKED",
-        reservation: { active: !allPicked, status: allPicked ? "prelevato" : "parziale", pickedAtClient: allPicked ? nowClient : null, updatedAtClient: nowClient, updatedBy: who },
-        picking: pickingPatch
-      }, { merge:true });
-
-      await batch.commit();
       try{
-        flow.status = allPicked ? "PICKED" : "PARTIAL_PICKED";
-        flow.reservation = { ...(flow.reservation || {}), active: !allPicked, status: allPicked ? "prelevato" : "parziale", updatedAtClient: nowClient, updatedBy: who };
-        flow.picking = { ...(flow.picking || {}), ...pickingPatch, pickedLines: pickedMap };
-      }catch(_e){}
-      showToast("SKU prelevato", `${s} • ${position} • ${qty} pz`, 1800);
-      scheduleLowStockEmailAfterUpdate("picking_sku");
-      renderHomePickingBox();
-      renderHomeLogsBox();
+        const nowClient = Date.now();
+        const who = state.user?.email || state.user?.emailLower || state.user?.uid || "";
+        const res = await commitPickingCloudTransaction(l, id, { mode:"sku", sku:s, nowClient, who });
+        showToast("SKU prelevato", `${res.sku || s} • ${res.pieces || qty} pz • cloud OK`, 1800);
+        scheduleLowStockEmailAfterUpdate("picking_sku");
+        renderHomePickingBox();
+        renderHomeLogsBox();
+      }catch(err){
+        console.error("cloud pick sku", err);
+        showToast("Prelievo bloccato", String(err?.message || err).slice(0, 260), 3600);
+      }
     }
 
     async function savePickingFlow(flowId, loc){
@@ -13480,76 +13721,20 @@ function renderHomePickingHistoryBox(){
       if(!linesToPick.length){ showToast("Nessuna riga", "Il flusso non contiene SKU da prelevare.", 1800); return; }
       const ok = confirm(`Confermi prelievo intero flusso?\n\n${flowDisplayName(flow)}\nSKU da prelevare: ${linesToPick.length}/${st.total}\n\nLo scarico inventario avverrà adesso.`);
       if(!ok) return;
-      const api = state.firebase.api;
-      const db = state.firebase.db;
-      if(!api || !db){ showToast("Errore", "Firebase non inizializzato.", 2200); return; }
-      const nowClient = Date.now();
-      const who = state.user?.email || state.user?.emailLower || state.user?.uid || "";
-      const pickedLines = {};
-      const nextPickedMap = { ...pickingLineMap(flow) };
-      const skuList = [];
-      const batch = api.writeBatch(db);
-      let pieces = 0;
-
-      for(const line of linesToPick){
-        const sku = toSkuId(line.sku || "");
-        if(!sku) continue;
-        const key = pickingSkuKey(sku);
-        const qty = Math.abs(parseQty(line.qty || 0) || 0);
-        if(!qty) continue;
-        const title = pickingLineTitle(line, flow);
-        const position = pickingLinePositionText(flow, sku);
-        const stockInfo = addPickingStockWrite(batch, api, db, l, flow, line, 1, { nowClient, who, title, flowId:id });
-        if(!stockInfo) continue;
-        const rec = { picked:true, status:"prelevato", sku, title, qty, position, rackLocation:position, pickedAllocations: stockInfo.consumedAllocations || [], pickedAtClient:nowClient, pickedBy:who };
-        pickedLines[key] = rec;
-        nextPickedMap[key] = rec;
-        pieces += qty;
-        if(!skuList.includes(sku)) skuList.push(sku);
-      }
-      if(!skuList.length){ showToast("Nessuna riga", "Il flusso non contiene SKU validi da prelevare.", 1800); return; }
-
-      const allPicked = validLines.length > 0 && validLines.every(x=>{
-        const k = pickingSkuKey(x.sku);
-        return !!nextPickedMap[k]?.picked;
-      });
-      const event = { type:"flow", skus:skuList, count:skuList.length, pieces, stockDelta:-pieces, reservationDelta:-pieces, atClient:nowClient, by:who };
-      const ref = api.doc(db, COL_ROOT, l, SUB_LOGS, id);
-      const pickingPatch = {
-        status: allPicked ? "prelevato" : "parziale",
-        managedByPicking:true,
-        pickedLines,
-        updatedAt: api.serverTimestamp(),
-        updatedAtClient: nowClient,
-        updatedBy: who,
-        events: api.arrayUnion(event),
-        flowPicked: allPicked,
-        flowPickMode:"flow",
-        flowPickGroup:true,
-        flowPickedCount:skuList.length,
-        flowPickedSkus:skuList,
-        flowPickedAt: allPicked ? api.serverTimestamp() : null,
-        flowPickedAtClient: allPicked ? nowClient : null,
-        flowPickedBy: allPicked ? who : ""
-      };
-      batch.set(ref, {
-        status: allPicked ? "PICKED" : "PARTIAL_PICKED",
-        reservation: { active: !allPicked, status: allPicked ? "prelevato" : "parziale", pickedAtClient: allPicked ? nowClient : null, updatedAtClient: nowClient, updatedBy: who },
-        picking: pickingPatch
-      }, { merge:true });
-      await batch.commit();
 
       try{
-        flow.status = allPicked ? "PICKED" : "PARTIAL_PICKED";
-        flow.reservation = { ...(flow.reservation || {}), active: !allPicked, status: allPicked ? "prelevato" : "parziale", updatedAtClient: nowClient, updatedBy: who };
-        flow.picking = { ...(flow.picking || {}), ...pickingPatch, pickedLines: nextPickedMap };
-      }catch(_e){}
-      showToast("Flusso prelevato", `${flowDisplayName(flow)} • ${skuList.length} SKU • ${pieces} pz`, 2000);
-      scheduleLowStockEmailAfterUpdate("picking_flow");
-      renderHomePickingBox();
-      renderHomeLogsBox();
+        const nowClient = Date.now();
+        const who = state.user?.email || state.user?.emailLower || state.user?.uid || "";
+        const res = await commitPickingCloudTransaction(l, id, { mode:"flow", nowClient, who });
+        showToast("Flusso prelevato", `${res.flowName || flowDisplayName(flow)} • ${res.skuCount} SKU • ${res.pieces} pz • cloud OK`, 2200);
+        scheduleLowStockEmailAfterUpdate("picking_flow");
+        renderHomePickingBox();
+        renderHomeLogsBox();
+      }catch(err){
+        console.error("cloud pick flow", err);
+        showToast("Prelievo bloccato", String(err?.message || err).slice(0, 260), 3800);
+      }
     }
-
 
     async function savePickingAllFlows(){
       if(!canUsePickingActions()){
@@ -13583,154 +13768,65 @@ function renderHomePickingHistoryBox(){
 
       const api = state.firebase.api;
       const db = state.firebase.db;
-      if(!api || !db || !api.writeBatch){
-        showToast("Errore", "Firebase non inizializzato.", 2200);
+      if(!api || !db || !api.runTransaction){
+        showToast("Errore", "Firebase transaction non disponibile.", 2200);
         return;
       }
 
-      const nowClient = Date.now();
-      const bulkId = `bulk_pick_${nowClient}`;
-      const who = state.user?.email || state.user?.emailLower || state.user?.uid || "";
+      const bulkId = `bulk_pick_${Date.now()}`;
       const btn = $("btnPickAllFlows");
       if(btn) btn.disabled = true;
 
       try{
-        const runtimePatches = [];
         let committedFlows = 0;
         let committedSku = 0;
         let committedPieces = 0;
+        const errors = [];
 
         for(const flow of activeFlows){
           const id = String(flow?.id || "").trim();
           const l = (flow?.location === "cerea" || flow?.location === "concamarise") ? flow.location : "concamarise";
           if(!id || !isPickingManagedFlow(flow)) continue;
-
-          const validLines = pickingUniqueLines(flow);
-          const linesToPick = validLines.filter(line=>!isPickingLinePicked(flow, toSkuId(line?.sku || "")));
+          const linesToPick = pickingUniqueLines(flow).filter(line=>!isPickingLinePicked(flow, toSkuId(line?.sku || "")));
           if(!linesToPick.length) continue;
 
-          const batch = api.writeBatch(db);
-          const pickedLines = {};
-          const nextPickedMap = { ...pickingLineMap(flow) };
-          const skuList = [];
-          let flowPieces = 0;
-          const flowStockInfos = [];
-
-          for(const line of linesToPick){
-            const sku = toSkuId(line?.sku || "");
-            if(!sku) continue;
-            const key = pickingSkuKey(sku);
-            const qty = Math.abs(parseQty(line?.qty || 0) || 0);
-            if(!qty) continue;
-            const title = pickingLineTitle(line, flow);
-            const position = pickingLinePositionText(flow, sku);
-            const stockInfo = addPickingStockWrite(batch, api, db, l, flow, line, 1, { nowClient, who, title, flowId:id });
-            if(!stockInfo) continue;
-            flowStockInfos.push(stockInfo);
-            const rec = { picked:true, status:"prelevato", sku, title, qty, position, rackLocation:position, pickedAllocations: stockInfo.consumedAllocations || [], pickedAtClient:nowClient, pickedBy:who, bulkId };
-            pickedLines[key] = rec;
-            nextPickedMap[key] = rec;
-            flowPieces += qty;
-            if(!skuList.includes(sku)) skuList.push(sku);
+          try{
+            const nowClient = Date.now();
+            const who = state.user?.email || state.user?.emailLower || state.user?.uid || "";
+            const res = await commitPickingCloudTransaction(l, id, { mode:"flow", nowClient, who, bulkId });
+            committedFlows++;
+            committedSku += Number(res?.skuCount || 0);
+            committedPieces += Number(res?.pieces || 0);
+          }catch(err){
+            const label = flowDisplayName(flow) || id;
+            const msg = String(err?.message || err).slice(0, 220);
+            errors.push(`${label}: ${msg}`);
+            console.warn("cloud pick all flow blocked", id, err);
           }
-
-          if(!skuList.length) continue;
-
-          const allPicked = validLines.length > 0 && validLines.every(x=>{
-            const k = pickingSkuKey(x.sku);
-            return !!nextPickedMap[k]?.picked;
-          });
-          const event = {
-            type:"flow",
-            bulk:true,
-            bulkId,
-            skus:skuList,
-            count:skuList.length,
-            pieces:flowPieces,
-            stockDelta:-flowPieces,
-            reservationDelta:-flowPieces,
-            atClient:nowClient,
-            by:who
-          };
-          const ref = api.doc(db, COL_ROOT, l, SUB_LOGS, id);
-          const pickingPatch = {
-            status: allPicked ? "prelevato" : "parziale",
-            managedByPicking:true,
-            pickedLines,
-            updatedAt: api.serverTimestamp(),
-            updatedAtClient: nowClient,
-            updatedBy: who,
-            events: api.arrayUnion(event),
-            flowPicked: allPicked,
-            flowPickMode:"flow",
-            flowPickGroup:true,
-            flowPickedCount:skuList.length,
-            flowPickedSkus:skuList,
-            flowPickedAt: allPicked ? api.serverTimestamp() : null,
-            flowPickedAtClient: allPicked ? nowClient : null,
-            flowPickedBy: who,
-            bulkPickId: bulkId
-          };
-          batch.set(ref, {
-            status: allPicked ? "PICKED" : "PARTIAL_PICKED",
-            reservation: { active: !allPicked, status: allPicked ? "prelevato" : "parziale", pickedAtClient: allPicked ? nowClient : null, updatedAtClient: nowClient, updatedBy: who },
-            picking: pickingPatch
-          }, { merge:true });
-
-          await batch.commit();
-          for(const info of flowStockInfos){
-            try{
-              const cur = getProductBySku(l, info.sku) || {};
-              const reservedAfter = Math.max(0, reservedQtyFromItem(cur) + (Number(info.reservedDelta) || 0));
-              patchRuntimeInventoryItem(l, info.sku, {
-                title: info.title,
-                qty: info.afterQty,
-                reservedQty: reservedAfter,
-                pendingPickQty: reservedAfter,
-                rackAllocations: info.nextAllocations || [],
-                rackLocations: info.cleanLocations || [],
-                updatedAtClient: nowClient,
-                updatedBy: who,
-                location: l
-              });
-            }catch(_e){}
-          }
-          committedFlows++;
-          committedSku += skuList.length;
-          committedPieces += flowPieces;
-          runtimePatches.push({ loc:l, id, pickingPatch, nextPickedMap, status: allPicked ? "PICKED" : "PARTIAL_PICKED", reservation:{ active:!allPicked, status: allPicked ? "prelevato" : "parziale", updatedAtClient:nowClient, updatedBy:who } });
         }
 
-        if(!runtimePatches.length){
-          showToast("Nessun flusso", "Non ci sono righe valide da prelevare.", 1800);
+        if(committedFlows <= 0){
+          const first = errors[0] || "Nessuna riga valida da prelevare nel cloud.";
+          showToast("Nessun flusso prelevato", first.slice(0, 260), 4200);
           return;
         }
 
-        // UI immediata dopo scrittura cloud riuscita: nessun localStorage, solo stato runtime allineato alla write.
-        for(const patch of runtimePatches){
-          try{
-            const original = (state.logs?.[patch.loc]?.flows || []).find(f=>String(f?.id || "") === patch.id);
-            if(original){
-              original.status = patch.status;
-              original.reservation = { ...(original.reservation || {}), ...patch.reservation };
-              original.picking = { ...(original.picking || {}), ...patch.pickingPatch, pickedLines: patch.nextPickedMap };
-            }
-          }catch(_e){}
+        if(errors.length){
+          showToast("Prelievo parziale", `${committedFlows} flussi OK • ${errors.length} bloccati per controllo cloud. ${errors[0] || ""}`.slice(0, 260), 5200);
+        }else{
+          showToast("Tutti i flussi prelevati", `${committedFlows} flussi • ${committedSku} SKU • ${committedPieces} pz • cloud OK`, 2600);
         }
-
-        showToast("Tutti i flussi prelevati", `${committedFlows} flussi • ${committedSku} SKU • ${committedPieces} pz`, 2400);
         scheduleLowStockEmailAfterUpdate("picking_all_flows");
         renderHomePickingBox();
         renderHomeLogsBox();
       }catch(err){
         console.error("pick all flows", err);
-        showToast("Errore prelievo", String(err?.message || err).slice(0, 240), 3200);
+        showToast("Errore prelievo", String(err?.message || err).slice(0, 260), 3600);
       }finally{
         if(btn) btn.disabled = false;
         renderHomePickingBox();
       }
     }
-
 
 
 
