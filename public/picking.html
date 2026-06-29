@@ -6233,14 +6233,7 @@ function guessTitleFromRaw(rawText, sku){
 
     
     // --- Auto email sotto-scorta (Firestore Trigger Email) ---
-    const __LS_LOWMAIL_HASH = "amz_inventory_lowmail_hash_v1";
-    const __LS_LOWMAIL_AT = "amz_inventory_lowmail_at_v1";
-    const __LS_LOWMAIL_ID = "amz_inventory_lowmail_docid_v1";
-    const __LS_LOWMAIL_LOCK = "amz_inventory_lowmail_lock_v1";
-    const __LS_LOWMAIL_LOCK_HASH = "amz_inventory_lowmail_lock_hash_v1";
-
-    function __lsGet(k){ try{ return localStorage.getItem(k); }catch(_e){ return null; } }
-    function __lsSet(k,v){ try{ localStorage.setItem(k, String(v)); }catch(_e){} }
+    // Solo cloud: dedupe e ultimo invio sono gestiti da Firestore (/amzInventoryMeta/lowStockEmailState).
 
     function __fmtQty(q){
       const n = Number(q);
@@ -7511,16 +7504,7 @@ ${textLines.join("\n")}
           return;
         }
 
-        // lock anti doppio invio (multi-tab)
         const now = Date.now();
-        const lockAt = Number(__lsGet(__LS_LOWMAIL_LOCK) || 0);
-        const lockHash = String(__lsGet(__LS_LOWMAIL_LOCK_HASH) || "");
-        if(lockAt && (now - lockAt) < (90 * 1000) && lockHash === fingerprint){
-          if(mailLog) mailLog.textContent = "Email automatica: invio già in corso…";
-          return;
-        }
-        __lsSet(__LS_LOWMAIL_LOCK, now);
-        __lsSet(__LS_LOWMAIL_LOCK_HASH, fingerprint);
 
         const payload = __buildLowStockEmailPayload(items);
 
@@ -7579,23 +7563,12 @@ ${textLines.join("\n")}
           }, { merge:true });
         });
 
-        // memo locale (solo UI)
-        __lsSet(__LS_LOWMAIL_HASH, fingerprint);
-        __lsSet(__LS_LOWMAIL_AT, now);
-        if(enqueued && createdEmailDocId) __lsSet(__LS_LOWMAIL_ID, createdEmailDocId);
-
-        // rilascio lock
-        __lsSet(__LS_LOWMAIL_LOCK, 0);
-        __lsSet(__LS_LOWMAIL_LOCK_HASH, "");
-
         if(mailLog){
           mailLog.textContent = enqueued
             ? `Email automatica inviata/accodata alle ${fmtDate(now)} • ${payload.total} righe.`
             : `Email automatica: nessun invio (stesso stato).`;
         }
       }catch(err){
-        // rilascio lock (in caso di errore)
-        try{ __lsSet(__LS_LOWMAIL_LOCK, 0); __lsSet(__LS_LOWMAIL_LOCK_HASH, ""); }catch(_e){}
         try{
           const mailLog = $("homeLowStockMailLog");
           if(mailLog) mailLog.textContent = "Email automatica: errore in invio (permessi/connessione).";
@@ -8043,19 +8016,9 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
         try{ await authMod.getRedirectResult(auth); }catch(_e){}
 
         // auth state
-        const __AUTH_ONCE_KEYS = ["gc_webapp_signed_once", "gc_hub_signed_once", "amz_inventory_last_authed_v1"];
-        function __readSignedOnce(){
-          try{
-            return __AUTH_ONCE_KEYS.some((k)=>localStorage.getItem(k) === "1");
-          }catch(_e){
-            return false;
-          }
-        }
-        function __markSignedOnce(){
-          try{
-            __AUTH_ONCE_KEYS.forEach((k)=>localStorage.setItem(k, "1"));
-          }catch(_e){}
-        }
+        // Nessun marker locale: Firebase Auth gestisce solo la sessione; dati app sempre cloud.
+        function __readSignedOnce(){ return true; }
+        function __markSignedOnce(){}
 
         state.authGateState = "restoring";
         state.authGateMessage = "";
@@ -8260,6 +8223,7 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
       startShopifyFbmSyncMetaWatch();
       startTwReordersWatch();
       startTwCompletedAmazonWatch();
+      scheduleCloudReservationReconcile("startup");
     }
 
     function stopAllRealtime(){
@@ -10675,83 +10639,501 @@ function startAllLogs(){
       return !!(flow?.picking?.flowPicked === true || rec.picked === true || rec.status === "prelevato");
     }
 
-    function splitReservationFlowLines(flow, lines){
+        function splitReservationFlowLines(flow, lines){
       const picked = [];
       const unpicked = [];
-      const seen = new Set();
+      const bySku = new Map();
       for(const line of (Array.isArray(lines) ? lines : [])){
         const sku = toSkuId(line?.sku || "");
-        if(!sku || seen.has(sku)) continue;
-        seen.add(sku);
-        (isReservedFlowLinePicked(flow, sku) ? picked : unpicked).push(line);
+        if(!sku) continue;
+        const qty = Math.abs(parseQty(line?.qty || 0) || 0);
+        if(!qty) continue;
+        const prev = bySku.get(sku) || { ...line, sku, qty: 0, title: squashWhitespace(line?.title || "") };
+        prev.qty += qty;
+        if(!prev.title && line?.title) prev.title = squashWhitespace(line.title || "");
+        bySku.set(sku, prev);
+      }
+      for(const line of bySku.values()){
+        (isReservedFlowLinePicked(flow, line.sku) ? picked : unpicked).push(line);
       }
       return { picked, unpicked };
     }
 
-    async function releaseReservationWithLines(loc, flow, lines, opts = {}){
+    
+    // === Flow/Picking sync helpers: unica fonte cloud, nessun fallback locale ===
+    function flowMutationPickedKey(sku){
+      const rawKey = toSkuId(sku || "");
+      return (typeof sanitizeFirestoreDocId === "function" ? sanitizeFirestoreDocId(rawKey, 180) : String(rawKey || "").replace(/[^A-Z0-9_-]+/g, "_").slice(0, 180)) || "SKU";
+    }
+
+    function flowPickedLineRecord(flow, sku){
+      try{
+        const picked = flowReservationPickedMap(flow);
+        return picked[flowMutationPickedKey(sku)] || {};
+      }catch(_e){ return {}; }
+    }
+
+    function flowLineQtyValue(line, rec = null){
+      const q1 = Math.abs(parseQty(rec?.qty ?? rec?.pickedQty ?? rec?.quantity ?? 0) || 0);
+      if(q1) return q1;
+      return Math.abs(parseQty(line?.qty || 0) || 0);
+    }
+
+    function flowDocStatusUpper(flow){
+      return String(flow?.status || flow?.reservation?.status || flow?.picking?.status || "").toUpperCase();
+    }
+
+    function isPickingManagedMutationFlow(flow){
+      try{
+        if(String(flow?.kind || "").toLowerCase() !== "scarica") return false;
+        const p = (flow?.picking && typeof flow.picking === "object") ? flow.picking : {};
+        const picked = flowReservationPickedMap(flow);
+        const st = flowDocStatusUpper(flow);
+        return !!(
+          isReservedScaricaFlow(flow) ||
+          p.managedByPicking === true ||
+          p.flowPicked === true ||
+          Object.keys(picked || {}).length > 0 ||
+          st === "PICKED" ||
+          st === "PARTIAL_PICKED"
+        );
+      }catch(_e){ return false; }
+    }
+
+    function flowStockQtyFromDoc(d){
+      try{
+        if(typeof stockQtyFromDoc === "function") return stockQtyFromDoc(d || {});
+        const n = Number(d?.qty);
+        if(Number.isFinite(n)) return Math.round(n);
+        const p = parseQty(d?.qty || 0);
+        return Number.isFinite(p) ? Math.round(p) : 0;
+      }catch(_e){ return 0; }
+    }
+
+    function flowPendingQtyFromDoc(d){
+      try{
+        if(typeof pendingPickQtyFromItem === "function") return pendingPickQtyFromItem(d || {});
+        const raw = Object.prototype.hasOwnProperty.call(d || {}, "pendingPickQty") ? d.pendingPickQty : (d?.reservedQty ?? 0);
+        const n = Number(raw);
+        if(Number.isFinite(n)) return Math.max(0, Math.round(n));
+        return reservedQtyFromItem(d || {});
+      }catch(_e){ return 0; }
+    }
+
+    function flowNormalizeLotId(v){
+      try{
+        if(typeof normalizeLotId === "function") return normalizeLotId(v || "") || "LOTTO-STORICO";
+      }catch(_e){}
+      const s = String(v || "").trim().toUpperCase().replace(/\s+/g, "");
+      return s || "LOTTO-STORICO";
+    }
+
+    function flowRawRackAllocationsFromDoc(d){
+      try{
+        if(typeof readRackAllocationsFromDoc === "function") return readRackAllocationsFromDoc(d || {});
+      }catch(_e){}
+      return Array.isArray(d?.rackAllocations) ? d.rackAllocations : [];
+    }
+
+    function flowNormalizeRackAllocations(arr){
+      const map = new Map();
+      for(const x0 of (Array.isArray(arr) ? arr : [])){
+        const x = (x0 && typeof x0 === "object") ? x0 : {};
+        const code = normalizeRackLocation(x.code || x.rackLocation || x.location || x.ubicazione || "");
+        if(!code) continue;
+        try{ if(typeof RACK_LOCATION_SET !== "undefined" && RACK_LOCATION_SET.size && !RACK_LOCATION_SET.has(code)) continue; }catch(_e){}
+        const q = Math.max(0, Math.round(Number(x.qty ?? x.quantity ?? x.pieces ?? x.qta ?? 0) || 0));
+        if(q <= 0) continue;
+        const lot = flowNormalizeLotId(x.lot || x.batch || x.batchId || x.lotto || "");
+        const key = `${code}::${lot}`;
+        const prev = map.get(key) || { code, lot, qty:0 };
+        prev.qty += q;
+        map.set(key, prev);
+      }
+      return Array.from(map.values()).sort((a,b)=> a.code.localeCompare(b.code) || a.lot.localeCompare(b.lot));
+    }
+
+    function flowPickedAllocationsFromRecord(rec){
+      const candidates = [rec?.pickedAllocations, rec?.rackAllocations, rec?.consumedAllocations, rec?.allocations];
+      const raw = candidates.find(x => Array.isArray(x)) || [];
+      return flowNormalizeRackAllocations(raw);
+    }
+
+    function flowMergeRackAllocations(current, restore){
+      return flowNormalizeRackAllocations([...(Array.isArray(current) ? current : []), ...(Array.isArray(restore) ? restore : [])]);
+    }
+
+    function flowRackLocationsFromAllocations(allocations, fallback = []){
+      const out = [];
+      const seen = new Set();
+      const push = (codeRaw)=>{
+        const code = normalizeRackLocation(codeRaw || "");
+        if(!code || seen.has(code)) return;
+        try{ if(typeof RACK_LOCATION_SET !== "undefined" && RACK_LOCATION_SET.size && !RACK_LOCATION_SET.has(code)) return; }catch(_e){}
+        seen.add(code);
+        out.push(code);
+      };
+      for(const a of (Array.isArray(allocations) ? allocations : [])) push(a?.code || a?.rackLocation || a?.location || "");
+      for(const code of normalizeRackLocationsList(fallback || [])) push(code);
+      return out;
+    }
+
+    async function rollbackPickedFlowLinesWithCloud(loc, flow, lines, opts = {}){
       const api = state.firebase.api;
       const db = state.firebase.db;
-      if(!api || !db) throw new Error("Firebase non inizializzato.");
+      if(!api || !db || !api.runTransaction) throw new Error("Firebase transaction non disponibile.");
       if(!loc) throw new Error("Location mancante.");
       if(!Array.isArray(lines) || !lines.length) return;
 
-      const nowClient = Date.now();
-      const who = state.user?.emailLower || state.user?.email || "";
-      const flowLabel = opts?.flowName || opts?.flowLabel || flowDisplayName(flow) || opts?.flowId || "";
       const flowId = opts?.flowId || flow?.id || "";
-      const CHUNK = 220;
+      const flowLabel = opts?.flowName || opts?.flowLabel || flowDisplayName(flow) || flowId || "";
+      const nowClient = Date.now();
+      const who = state.user?.emailLower || state.user?.email || state.user?.uid || "";
+      const CHUNK = 80;
 
       for(let i=0; i<lines.length; i+=CHUNK){
         const chunk = lines.slice(i, i+CHUNK);
-        const batch = api.writeBatch(db);
-        for(const l of chunk){
+        await api.runTransaction(db, async (tx)=>{
+          const reads = [];
+          for(const line of chunk){
+            const sku = toSkuId(line?.sku || "");
+            if(!sku) continue;
+            const rec = flowPickedLineRecord(flow, sku);
+            const qty = flowLineQtyValue(line, rec);
+            if(!qty) continue;
+            const itemRef = api.doc(db, COL_ROOT, loc, SUB_ITEMS, sku);
+            const itemSnap = await tx.get(itemRef);
+            reads.push({ line, sku, rec, qty, itemRef, itemSnap });
+          }
+
+          for(const r of reads){
+            const data = r.itemSnap?.exists?.() ? (r.itemSnap.data() || {}) : {};
+            const beforeQty = flowStockQtyFromDoc(data);
+            const beforeReserved = reservedQtyFromItem(data || {});
+            const beforePending = flowPendingQtyFromDoc(data || {});
+            const title = squashWhitespace(data.title || r.line?.title || r.rec?.title || r.sku) || r.sku;
+            const currentAlloc = flowRawRackAllocationsFromDoc(data || {});
+            const restoreAlloc = flowPickedAllocationsFromRecord(r.rec || {});
+            const mergedAlloc = flowMergeRackAllocations(currentAlloc, restoreAlloc);
+            const rackLocations = flowRackLocationsFromAllocations(mergedAlloc, readRackLocationsFromDoc(data || {}));
+            const afterQty = beforeQty + r.qty;
+
+            const patch = {
+              sku: r.sku,
+              title,
+              titleNorm: normalizeText(title || r.sku),
+              qty: afterQty,
+              reservedQty: beforeReserved,
+              pendingPickQty: beforePending,
+              reservationStatus: beforeReserved > 0 || beforePending > 0 ? "in_attesa_picking" : "rilasciata",
+              rackAllocations: mergedAlloc,
+              rackLocations: afterQty > 0 ? rackLocations : [],
+              rackLocation: afterQty > 0 ? (rackLocations[0] || "") : "",
+              lastPickingRollbackFlowId: flowId || "",
+              lastPickingRollbackAt: api.serverTimestamp(),
+              lastPickingRollbackAtClient: nowClient,
+              lastPickingRollbackBy: who,
+              location: loc,
+              updatedAt: api.serverTimestamp(),
+              updatedAtClient: nowClient,
+              updatedBy: who
+            };
+            tx.set(r.itemRef, patch, { merge:true });
+
+            addProductMovementToBatch(tx, api, db, r.sku, {
+              type: "annulla_prelievo_picking",
+              qtySigned: r.qty,
+              deltaSigned: r.qty,
+              reservationQty: 0,
+              reservedQtySigned: 0,
+              fromWarehouse: loc,
+              toWarehouse: loc,
+              location: loc,
+              source: opts?.reason || "rollback_picking_flusso",
+              note: opts?.note || `Rollback prelievo Picking${flowLabel ? " • " + flowLabel : ""}`,
+              flowKind: "scarica",
+              flowId,
+              flowName: flowLabel,
+              rackAllocations: restoreAlloc,
+              createdAtClient: nowClient
+            });
+          }
+        });
+      }
+    }
+
+    async function getFreshFlowForMutation(loc, flowId, fallbackFlow = null){
+      const api = state.firebase.api;
+      const db = state.firebase.db;
+      if(!api || !db || !flowId) return fallbackFlow;
+      try{
+        const ref = api.doc(db, COL_ROOT, loc, SUB_LOGS, flowId);
+        const snap = await api.getDoc(ref);
+        if(!snap.exists()) return null;
+        if(typeof normalizeFlowLogDoc === "function") return normalizeFlowLogDoc(snap, loc);
+        const d = snap.data() || {};
+        return { ...d, id:snap.id, kind:d.kind || "", location:d.location || loc, status:d.status || "", reservation:(d.reservation && typeof d.reservation === "object") ? d.reservation : {}, picking:(d.picking && typeof d.picking === "object") ? d.picking : {}, lines:Array.isArray(d.lines) ? d.lines : [] };
+      }catch(err){
+        console.warn("fresh flow read", err);
+        return fallbackFlow;
+      }
+    }
+
+    function flowStatePatchAfterLines(flow, newLines, opts = {}){
+      const nowClient = Number(opts.nowClient || Date.now());
+      const who = opts.who || state.user?.emailLower || state.user?.email || state.user?.uid || "";
+      const lines = Array.isArray(newLines) ? newLines : [];
+      const totalPieces = lines.reduce((s,l)=> s + Math.abs(parseQty(l?.qty || 0) || 0), 0);
+      const p0 = (flow?.picking && typeof flow.picking === "object") ? flow.picking : {};
+      const r0 = (flow?.reservation && typeof flow.reservation === "object") ? flow.reservation : {};
+      const pickedLines = { ...flowReservationPickedMap(flow) };
+      if(opts.removeSku){
+        delete pickedLines[flowMutationPickedKey(opts.removeSku)];
+      }
+      const unique = [];
+      const seen = new Set();
+      for(const l of lines){
+        const sku = toSkuId(l?.sku || "");
+        if(!sku || seen.has(sku)) continue;
+        seen.add(sku);
+        unique.push(sku);
+      }
+      const allPicked = unique.length > 0 && unique.every(sku=> !!pickedLines[flowMutationPickedKey(sku)]?.picked || pickedLines[flowMutationPickedKey(sku)]?.status === "prelevato");
+      const anyPicked = unique.some(sku=> !!pickedLines[flowMutationPickedKey(sku)]?.picked || pickedLines[flowMutationPickedKey(sku)]?.status === "prelevato");
+      const status = !unique.length ? "EMPTY" : (allPicked ? "PICKED" : (anyPicked ? "PARTIAL_PICKED" : "RESERVED"));
+      const active = unique.length > 0 && !allPicked;
+      return {
+        status,
+        totalLines: lines.length,
+        totalPieces,
+        reservation: { ...r0, active, status: !unique.length ? "vuoto" : (allPicked ? "prelevato" : (anyPicked ? "parziale" : "in_attesa_picking")), totalPieces, updatedAtClient: nowClient, updatedBy: who },
+        picking: { ...p0, managedByPicking:true, pickedLines, status: !unique.length ? "vuoto" : (allPicked ? "prelevato" : (anyPicked ? "parziale" : "da_prelevare")), flowPicked: allPicked, updatedAtClient: nowClient, updatedBy: who, flowPickedAtClient: allPicked ? (p0.flowPickedAtClient || nowClient) : null, flowPickedBy: allPicked ? (p0.flowPickedBy || who) : "" }
+      };
+    }
+
+    function flowVoidedPatch(flow, opts = {}){
+      const nowClient = Number(opts.nowClient || Date.now());
+      const who = opts.who || state.user?.emailLower || state.user?.email || state.user?.uid || "";
+      const p0 = (flow?.picking && typeof flow.picking === "object") ? flow.picking : {};
+      const r0 = (flow?.reservation && typeof flow.reservation === "object") ? flow.reservation : {};
+      return {
+        status: "VOIDED",
+        voided: true,
+        voidedAtClient: nowClient,
+        voidedAt: state.firebase.api.serverTimestamp(),
+        voidedBy: who,
+        reservation: { ...r0, active:false, status:"annullato", updatedAtClient: nowClient, updatedBy: who },
+        picking: { ...p0, status:"annullato", flowPicked:false, updatedAtClient: nowClient, updatedBy: who }
+      };
+    }
+
+        
+
+    function activeReservationExpectedFromFlow(flow){
+      const out = [];
+      try{
+        if(String(flow?.kind || "").toLowerCase() !== "scarica") return out;
+        if(flow?.voided === true) return out;
+        if(!isPickingManagedMutationFlow(flow)) return out;
+        const lines = Array.isArray(flow.lines) ? flow.lines : [];
+        const split = splitReservationFlowLines(flow, lines);
+        for(const l of split.unpicked){
           const sku = toSkuId(l?.sku || "");
-          if(!sku) continue;
-          const title = squashWhitespace(l?.title || "") || sku;
           const qty = Math.abs(parseQty(l?.qty || 0) || 0);
-          if(!qty) continue;
-          const docRef = api.doc(db, COL_ROOT, loc, SUB_ITEMS, sku);
-          batch.set(docRef, {
-            sku,
+          if(sku && qty) out.push({ sku, qty });
+        }
+      }catch(_e){}
+      return out;
+    }
+
+    async function reconcileCloudReservationsForLoc(loc, reason = "reservation_reconcile"){
+      const api = state.firebase?.api;
+      const db = state.firebase?.db;
+      if(!api || !db || !api.getDocs || !api.writeBatch) return { changed:0, expected:0 };
+      if(!state.user?.isAdmin) return { changed:0, expected:0 };
+      if(!(loc === "cerea" || loc === "concamarise")) return { changed:0, expected:0 };
+
+      const expected = new Map();
+      try{
+        const logsRef = api.collection(db, COL_ROOT, loc, SUB_LOGS);
+        const q = api.query(logsRef, api.where("kind", "==", "scarica"), api.limit(1000));
+        const logsSnap = await api.getDocs(q);
+        logsSnap.forEach(docSnap=>{
+          const flow = (typeof normalizeFlowLogDoc === "function") ? normalizeFlowLogDoc(docSnap, loc) : { id:docSnap.id, ...(docSnap.data() || {}) };
+          for(const row of activeReservationExpectedFromFlow(flow)){
+            expected.set(row.sku, (expected.get(row.sku) || 0) + row.qty);
+          }
+        });
+      }catch(err){
+        console.warn("reservation reconcile logs", loc, err);
+        return { changed:0, expected:0, error:String(err?.message || err) };
+      }
+
+      const current = new Map();
+      try{
+        const itemsRef = api.collection(db, COL_ROOT, loc, SUB_ITEMS);
+        const itemsSnap = await api.getDocs(itemsRef);
+        itemsSnap.forEach(docSnap=>{
+          const d = docSnap.data() || {};
+          const sku = toSkuId(d.sku || docSnap.id || "");
+          if(!sku) return;
+          const reserved = reservedQtyFromItem(d || {});
+          const pending = flowPendingQtyFromDoc(d || {});
+          const exp = Math.max(0, Math.round(Number(expected.get(sku) || 0)));
+          if(reserved > 0 || pending > 0 || exp > 0){
+            current.set(sku, { ref: api.doc(db, COL_ROOT, loc, SUB_ITEMS, docSnap.id), data:d, reserved, pending, expected:exp });
+          }
+        });
+      }catch(err){
+        console.warn("reservation reconcile items", loc, err);
+        return { changed:0, expected:expected.size, error:String(err?.message || err) };
+      }
+
+      const writes = [];
+      for(const [sku, row] of current.entries()){
+        if(row.reserved !== row.expected || row.pending !== row.expected){
+          writes.push({ sku, ...row });
+        }
+      }
+
+      let changed = 0;
+      for(let i=0; i<writes.length; i+=450){
+        const part = writes.slice(i, i+450);
+        const batch = api.writeBatch(db);
+        const nowClient = Date.now();
+        const who = state.user?.emailLower || state.user?.email || state.user?.uid || "";
+        for(const row of part){
+          const title = squashWhitespace(row.data?.title || row.sku) || row.sku;
+          batch.set(row.ref, {
+            sku: row.sku,
             title,
-            titleNorm: normalizeText(title || sku),
-            reservedQty: api.increment(-qty),
-            pendingPickQty: api.increment(-qty),
-            reservationStatus: "rilasciata",
-            lastReservationReleaseFlowId: flowId || "",
-            reservationReleasedAt: api.serverTimestamp(),
-            reservationReleasedAtClient: nowClient,
-            reservationReleasedBy: who,
+            titleNorm: normalizeText(title || row.sku),
+            reservedQty: row.expected,
+            pendingPickQty: row.expected,
+            reservationStatus: row.expected > 0 ? "in_attesa_picking" : "rilasciata",
+            reservationReconciledAt: api.serverTimestamp(),
+            reservationReconciledAtClient: nowClient,
+            reservationReconciledBy: who,
+            reservationReconcileReason: String(reason || "reservation_reconcile"),
             location: loc,
             updatedAt: api.serverTimestamp(),
             updatedAtClient: nowClient,
             updatedBy: who
           }, { merge:true });
-
-          addProductMovementToBatch(batch, api, db, sku, {
-            type: "annulla_prenotazione_scarico",
-            qtySigned: 0,
-            deltaSigned: 0,
-            reservationQty: -qty,
-            reservedQtySigned: -qty,
-            fromWarehouse: loc,
-            toWarehouse: loc,
-            source: opts?.reason || "rilascio_prenotazione",
-            note: opts?.note || `Rilascio prenotazione scarico${flowLabel ? " • " + flowLabel : ""}`,
-            flowKind: "scarica",
-            flowId,
-            flowName: flowLabel,
-            createdAtClient: nowClient
-          });
+          changed++;
         }
         await batch.commit();
+      }
+      return { changed, expected: expected.size };
+    }
+
+    function scheduleCloudReservationReconcile(reason = "scheduled"){
+      try{
+        if(!state.user?.isAdmin || !state.user?.isWhitelisted) return;
+        const rs = state.__reservationReconcile || (state.__reservationReconcile = { timer:null, running:false, lastAt:0 });
+        const now = Date.now();
+        const urgent = /delete|undo|remove|manual/i.test(String(reason || ""));
+        if(!urgent && rs.lastAt && (now - rs.lastAt) < 120000) return;
+        if(rs.timer) clearTimeout(rs.timer);
+        rs.timer = setTimeout(async ()=>{
+          if(rs.running) return;
+          rs.running = true;
+          rs.timer = null;
+          try{
+            await reconcileCloudReservationsForLoc("concamarise", reason);
+            await reconcileCloudReservationsForLoc("cerea", reason);
+            rs.lastAt = Date.now();
+          }catch(err){
+            console.warn("reservation reconcile", err);
+          }finally{
+            rs.running = false;
+          }
+        }, urgent ? 350 : 2200);
+      }catch(err){
+        console.warn("schedule reservation reconcile", err);
+      }
+    }
+
+    async function releaseReservationWithLines(loc, flow, lines, opts = {}){
+      const api = state.firebase.api;
+      const db = state.firebase.db;
+      if(!api || !db || !api.runTransaction) throw new Error("Firebase transaction non disponibile.");
+      if(!loc) throw new Error("Location mancante.");
+      if(!Array.isArray(lines) || !lines.length) return;
+
+      const nowClient = Date.now();
+      const who = state.user?.emailLower || state.user?.email || state.user?.uid || "";
+      const flowLabel = opts?.flowName || opts?.flowLabel || flowDisplayName(flow) || opts?.flowId || "";
+      const flowId = opts?.flowId || flow?.id || "";
+      const CHUNK = 160;
+
+      for(let i=0; i<lines.length; i+=CHUNK){
+        const chunk = lines.slice(i, i+CHUNK);
+        await api.runTransaction(db, async (tx)=>{
+          const reads = [];
+          for(const l of chunk){
+            const sku = toSkuId(l?.sku || "");
+            if(!sku) continue;
+            const qty = Math.abs(parseQty(l?.qty || 0) || 0);
+            if(!qty) continue;
+            const docRef = api.doc(db, COL_ROOT, loc, SUB_ITEMS, sku);
+            const snap = await tx.get(docRef);
+            reads.push({ l, sku, qty, docRef, snap });
+          }
+
+          for(const r of reads){
+            const data = r.snap?.exists?.() ? (r.snap.data() || {}) : {};
+            const title = squashWhitespace(data.title || r.l?.title || "") || r.sku;
+            const beforeReserved = reservedQtyFromItem(data || {});
+            const beforePending = flowPendingQtyFromDoc(data || {});
+            const nextReserved = Math.max(0, beforeReserved - r.qty);
+            const nextPending = Math.max(0, beforePending - r.qty);
+            const releasedAll = nextReserved <= 0 && nextPending <= 0;
+
+            tx.set(r.docRef, {
+              sku: r.sku,
+              title,
+              titleNorm: normalizeText(title || r.sku),
+              reservedQty: nextReserved,
+              pendingPickQty: nextPending,
+              reservationStatus: releasedAll ? "rilasciata" : "parziale",
+              lastReservationReleaseFlowId: flowId || "",
+              reservationReleasedAt: api.serverTimestamp(),
+              reservationReleasedAtClient: nowClient,
+              reservationReleasedBy: who,
+              location: loc,
+              updatedAt: api.serverTimestamp(),
+              updatedAtClient: nowClient,
+              updatedBy: who
+            }, { merge:true });
+
+            addProductMovementToBatch(tx, api, db, r.sku, {
+              type: "annulla_prenotazione_scarico",
+              qtySigned: 0,
+              deltaSigned: 0,
+              reservationQty: -Math.min(r.qty, beforeReserved),
+              reservedQtySigned: -Math.min(r.qty, beforeReserved),
+              beforeReservedQty: beforeReserved,
+              afterReservedQty: nextReserved,
+              fromWarehouse: loc,
+              toWarehouse: loc,
+              source: opts?.reason || "rilascio_prenotazione",
+              note: opts?.note || `Rilascio prenotazione scarico${flowLabel ? " • " + flowLabel : ""}`,
+              flowKind: "scarica",
+              flowId,
+              flowName: flowLabel,
+              createdAtClient: nowClient
+            });
+          }
+        });
       }
     }
 
     async function handleUndoFlow(flowId){
       if(!state.user?.isAdmin) return;
       const loc = state.route.loc;
-      const flow = (state.logs[loc]?.flows || []).find(f=>f.id===flowId) || null;
+      const cachedFlow = (state.logs[loc]?.flows || []).find(f=>f.id===flowId) || null;
+      const flow = await getFreshFlowForMutation(loc, flowId, cachedFlow);
       if(!flow) { showToast("Flusso non trovato", "Riprova."); return; }
       if(flow.voided){ showToast("Già annullato", "Questo flusso risulta già annullato."); return; }
 
@@ -10760,13 +11142,13 @@ function startAllLogs(){
 
       try{
         showToast("Operazione in corso", "Sto annullando il flusso…");
-        if(isReservedScaricaFlow(flow)){
+        if(isPickingManagedMutationFlow(flow)){
           const split = splitReservationFlowLines(flow, flow.lines || []);
           if(split.unpicked.length){
             await releaseReservationWithLines(loc, flow, split.unpicked, { reason:"undo_flow_prenotazione", note:`Annullamento prenotazione flusso ${flowDisplayName(flow)}`, flowId: flow.id, flowName: flowDisplayName(flow) });
           }
           if(split.picked.length){
-            await adjustInventoryWithLines(loc, flow.kind, split.picked, -1, { reason:"undo_flow_picking", note:`Ripristino prelievo flusso ${flowDisplayName(flow)}`, flowId: flow.id, flowName: flowDisplayName(flow), comboLines: flow.comboLines || [] });
+            await rollbackPickedFlowLinesWithCloud(loc, flow, split.picked, { reason:"undo_flow_picking", note:`Rollback prelievo Picking da annullamento flusso ${flowDisplayName(flow)}`, flowId: flow.id, flowName: flowDisplayName(flow) });
           }
         }else{
           await adjustInventoryWithLines(loc, flow.kind, flow.lines || [], -1, { reason:"undo_flow", note:`Annullamento flusso ${flowDisplayName(flow)}`, flowId: flow.id, flowName: flowDisplayName(flow), comboLines: flow.comboLines || [] });
@@ -10775,15 +11157,11 @@ function startAllLogs(){
         const api = state.firebase.api;
         const db = state.firebase.db;
         const logRef = api.doc(db, COL_ROOT, loc, SUB_LOGS, flowId);
-        await api.updateDoc(logRef, {
-          voided: true,
-          voidedAtClient: Date.now(),
-          voidedAt: api.serverTimestamp(),
-          voidedBy: state.user?.emailLower || state.user?.email || ""
-        });
+        await api.updateDoc(logRef, flowVoidedPatch(flow, { nowClient: Date.now(), who: state.user?.emailLower || state.user?.email || "" }));
 
         showToast("Flusso annullato", "Inventario ripristinato.");
         scheduleLowStockEmailAfterUpdate("undo_flow");
+        scheduleCloudReservationReconcile("undo_flow");
 
       }catch(err){
         console.warn("undo flow error", err);
@@ -10794,7 +11172,8 @@ function startAllLogs(){
     async function handleDeleteFlow(flowId, { fromList=false, locOverride="" } = {}){
       if(!state.user?.isAdmin) return;
       const loc = (locOverride==="cerea" || locOverride==="concamarise") ? locOverride : state.route.loc;
-      const flow = (state.logs[loc]?.flows || []).find(f=>f.id===flowId) || null;
+      const cachedFlow = (state.logs[loc]?.flows || []).find(f=>f.id===flowId) || null;
+      const flow = await getFreshFlowForMutation(loc, flowId, cachedFlow);
       if(!flow) { showToast("Flusso non trovato", "Riprova."); return; }
 
       const ok = confirm("Eliminare questo flusso?\n\nOperazione sicura: ripristina l'inventario (inverte il flusso) e poi rimuove lo storico.");
@@ -10803,13 +11182,13 @@ function startAllLogs(){
       try{
         showToast("Operazione in corso", "Sto eliminando il flusso…");
         if(!flow.voided){
-          if(isReservedScaricaFlow(flow)){
+          if(isPickingManagedMutationFlow(flow)){
             const split = splitReservationFlowLines(flow, flow.lines || []);
             if(split.unpicked.length){
               await releaseReservationWithLines(loc, flow, split.unpicked, { reason:"delete_flow_prenotazione", note:`Eliminazione prenotazione flusso ${flowDisplayName(flow)}`, flowId: flow.id, flowName: flowDisplayName(flow) });
             }
             if(split.picked.length){
-              await adjustInventoryWithLines(loc, flow.kind, split.picked, -1, { reason:"delete_flow_picking", note:`Ripristino prelievo flusso ${flowDisplayName(flow)}`, flowId: flow.id, flowName: flowDisplayName(flow), comboLines: flow.comboLines || [] });
+              await rollbackPickedFlowLinesWithCloud(loc, flow, split.picked, { reason:"delete_flow_picking", note:`Rollback prelievo Picking da eliminazione flusso ${flowDisplayName(flow)}`, flowId: flow.id, flowName: flowDisplayName(flow) });
             }
           }else{
             await adjustInventoryWithLines(loc, flow.kind, flow.lines || [], -1, { reason:"delete_flow", note:`Eliminazione flusso ${flowDisplayName(flow)}`, flowId: flow.id, flowName: flowDisplayName(flow), comboLines: flow.comboLines || [] });
@@ -10829,6 +11208,7 @@ function startAllLogs(){
 
         showToast("Flusso eliminato", "Inventario ripristinato e storico rimosso.");
         scheduleLowStockEmailAfterUpdate("delete_flow");
+        scheduleCloudReservationReconcile("delete_flow");
 
         // aggiorna liste
         if(state.route.view==="location" && state.route.loc===loc) renderFlowsList();
@@ -10843,14 +11223,23 @@ function startAllLogs(){
     async function handleRemoveLineFromFlow(sku){
       if(!state.user?.isAdmin) return;
       const loc = state.route.loc;
-      const flow = getOpenFlow();
-      if(!loc || !flow) return;
+      const cachedFlow = getOpenFlow();
+      if(!loc || !cachedFlow) return;
+      const flow = await getFreshFlowForMutation(loc, cachedFlow.id, cachedFlow);
+      if(!flow) { showToast("Flusso non trovato", "Riprova."); return; }
       if(flow.voided){
         showToast("Flusso annullato", "Non puoi modificare un flusso già annullato.");
         return;
       }
       const lines = Array.isArray(flow.lines) ? flow.lines : [];
-      const line = lines.find(l=> String(l?.sku||"").trim()===sku) || null;
+      const targetSku = toSkuId(sku || "");
+      const matchedLines = lines.filter(l=> toSkuId(l?.sku || "") === targetSku);
+      const line = matchedLines.length ? matchedLines.reduce((acc, l)=>{
+        const q = Math.abs(parseQty(l?.qty || 0) || 0);
+        acc.qty += q;
+        if(!acc.title && l?.title) acc.title = squashWhitespace(l.title || "");
+        return acc;
+      }, { ...(matchedLines[0] || {}), sku: targetSku, qty: 0, title: squashWhitespace(matchedLines[0]?.title || "") }) : null;
       if(!line){
         showToast("Riga non trovata", "Riprova.");
         return;
@@ -10861,9 +11250,9 @@ function startAllLogs(){
 
       try{
         showToast("Operazione in corso", "Sto eliminando la riga…");
-        if(isReservedScaricaFlow(flow)){
+        if(isPickingManagedMutationFlow(flow)){
           if(isReservedFlowLinePicked(flow, sku)){
-            await adjustInventoryWithLines(loc, flow.kind, [line], -1, { reason:"remove_line_flow_picking", note:`Ripristino riga prelevata dal flusso ${flowDisplayName(flow)}`, flowId: flow.id, flowName: flowDisplayName(flow), comboLines: flow.comboLines || [] });
+            await rollbackPickedFlowLinesWithCloud(loc, flow, [line], { reason:"remove_line_flow_picking", note:`Rollback riga prelevata dal flusso ${flowDisplayName(flow)}`, flowId: flow.id, flowName: flowDisplayName(flow) });
           }else{
             await releaseReservationWithLines(loc, flow, [line], { reason:"remove_line_flow_prenotazione", note:`Rilascio prenotazione riga dal flusso ${flowDisplayName(flow)}`, flowId: flow.id, flowName: flowDisplayName(flow) });
           }
@@ -10871,7 +11260,7 @@ function startAllLogs(){
           await adjustInventoryWithLines(loc, flow.kind, [line], -1, { reason:"remove_line_flow", note:`Eliminazione riga dal flusso ${flowDisplayName(flow)}`, flowId: flow.id, flowName: flowDisplayName(flow), comboLines: flow.comboLines || [] });
         }
 
-        const newLines = lines.filter(l=> String(l?.sku||"").trim()!==sku);
+        const newLines = lines.filter(l=> toSkuId(l?.sku || "") !== targetSku);
         const totalPieces = newLines.reduce((s,l)=> s + parseQty(l?.qty || 0), 0);
         const newComboLines = (Array.isArray(flow.comboLines) ? flow.comboLines : []).filter(c=>{
           const pSku = toSkuId(c?.parentSku || "");
@@ -10886,11 +11275,10 @@ function startAllLogs(){
         const logRef = api.doc(db, COL_ROOT, loc, SUB_LOGS, flow.id);
         await api.updateDoc(logRef, {
           lines: newLines,
-          totalLines: newLines.length,
-          totalPieces: totalPieces,
           comboLines: newComboLines,
           comboApplied: newComboLines.length > 0,
           comboTotalPieces: comboTotalPieces,
+          ...flowStatePatchAfterLines(flow, newLines, { removeSku: sku, nowClient: Date.now(), who: state.user?.emailLower || state.user?.email || "" }),
           updatedAtClient: Date.now(),
           updatedAt: api.serverTimestamp(),
           updatedBy: state.user?.emailLower || state.user?.email || ""
@@ -10898,6 +11286,7 @@ function startAllLogs(){
 
         showToast("Riga eliminata", "Inventario ripristinato.");
         scheduleLowStockEmailAfterUpdate("remove_line_flow");
+        scheduleCloudReservationReconcile("remove_line_flow");
 
       }catch(err){
         console.warn("remove line error", err);
@@ -10913,7 +11302,7 @@ function currentInv(){
 
 
     // Mirror runtime dello stato già confermato da Firestore.
-    // Non usa localStorage: serve solo a rendere immediata la UI tra write cloud riuscita e prossimo snapshot realtime.
+    // Mirror runtime dello stato già confermato da Firestore: serve solo a rendere immediata la UI tra write cloud riuscita e prossimo snapshot realtime.
     function patchRuntimeInventoryItem(loc, sku, patch = {}, opts = {}){
       try{
         if(!(loc === "cerea" || loc === "concamarise")) return;
