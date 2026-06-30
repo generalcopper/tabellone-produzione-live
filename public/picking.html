@@ -12641,7 +12641,8 @@ function currentInv(){
       const rows = out.slice(0, 120).map(it=>{
         const meta = parseTitleMeta(it.title || "");
         const titleMain = meta.main ? escapeHtml(meta.main) : (it.title ? escapeHtml(it.title) : "<span class='muted'>(senza nome)</span>");
-        const sku = escapeHtml(toSkuId(it.sku || it.id || ""));
+        const skuRaw = toSkuId(it.sku || it.id || "");
+        const sku = escapeHtml(skuRaw);
         const locLabel = escapeHtml(prettyLoc(it.loc));
         const remainingQty = Number.isFinite(Number(it.remainingQty)) ? Math.round(Number(it.remainingQty)) : (Number.isFinite(Number(it.qty)) ? Math.round(Number(it.qty)) : 0);
         const totalQty = Number.isFinite(Number(it.totalQty)) ? Math.round(Number(it.totalQty)) : remainingQty;
@@ -13521,7 +13522,7 @@ Confermandolo, la transaction cloud scaricherà comunque la quantità richiesta 
       }
     }
 
-    function findPalletButtonHtml(code, codes){
+    function findPalletButtonHtml(code, codes, productInfo = {}){
       const c = normalizeRackLocation(code || "");
       // lista completa (più posizioni); il primo elemento resta quello principale
       let list = Array.isArray(codes) ? codes.map(x=>normalizeRackLocation(x)).filter(Boolean) : [];
@@ -13532,12 +13533,20 @@ Confermandolo, la transaction cloud scaricherà comunque la quantità richiesta 
       const primary = c || list[0] || "";
       const disabled = primary ? "" : ' disabled aria-disabled="true"';
       const multi = list.length > 1;
-      const title = primary
+      const sku = toSkuId(productInfo?.sku || productInfo?.productSku || "");
+      const rawTitle = squashWhitespace(productInfo?.title || productInfo?.name || productInfo?.productName || "");
+      const titleMeta = parseTitleMeta(rawTitle || sku);
+      const productTitle = squashWhitespace(titleMeta.main || rawTitle || "");
+      const productLabel = [sku, productTitle].filter(Boolean).join(" · ");
+      const baseTitle = primary
         ? (multi ? `Trova ${primary} (+${list.length-1}) in Capannone 3D` : `Trova ${primary} in Capannone 3D`)
         : "SKU non posizionato";
+      const title = productLabel ? `${baseTitle} • ${productLabel}` : baseTitle;
       const codesAttr = list.length ? ` data-codes="${escapeHtml(list.join(","))}"` : "";
+      const skuAttr = sku ? ` data-sku="${escapeHtml(sku)}"` : "";
+      const titleAttr = productTitle ? ` data-title="${escapeHtml(productTitle)}"` : "";
       const label = multi ? `Trova · ${list.length}` : "Trova";
-      return `<button class="btn small pickingFindBtn" type="button" data-action="findPallet" data-code="${escapeHtml(primary)}"${codesAttr} title="${escapeHtml(title)}"${disabled}>${label}</button>`;
+      return `<button class="btn small pickingFindBtn" type="button" data-action="findPallet" data-code="${escapeHtml(primary)}"${codesAttr}${skuAttr}${titleAttr} title="${escapeHtml(title)}"${disabled}>${label}</button>`;
     }
 
     function pickingLineTitle(line, flow){
@@ -13969,7 +13978,7 @@ Confermandolo, la transaction cloud scaricherà comunque la quantità richiesta 
             .slice()
             .sort((a,b)=> (Number(b?.qty||0) - Number(a?.qty||0)))
             .map(p=>p.code);
-          const findBtnHtml = findPalletButtonHtml(group.firstCode || "", groupCodes);
+          const findBtnHtml = findPalletButtonHtml(group.firstCode || "", groupCodes, { sku: group.sku, title: group.title || group.sku });
           return `
             <div class="pickingFlowRow fbmSkuGroupRow">
               <div class="pickingFlowCell gridSku">${escapeHtml(group.sku)}</div>
@@ -14046,7 +14055,7 @@ Confermandolo, la transaction cloud scaricherà comunque la quantità richiesta 
             const picked = isPickingLinePicked(flow, sku);
             const title = pickingLineTitle(line, flow);
             const posHtml = pickingLinePositionHtml(flow, sku);
-            const findBtnHtml = findPalletButtonHtml(firstRackLocationCodeFromPicking(flow, sku), allRackLocationCodesFromPicking(flow, sku));
+            const findBtnHtml = findPalletButtonHtml(firstRackLocationCodeFromPicking(flow, sku), allRackLocationCodesFromPicking(flow, sku), { sku, title: title || sku });
             const statusHtml = picked
               ? `<span class="badge ok">Prelevato</span>`
               : `<button class="btn small amazon" type="button" data-action="pickSku" data-flowid="${escapeHtml(flowId)}" data-loc="${escapeHtml(loc)}" data-sku="${escapeHtml(sku)}">Preleva SKU</button>`;
@@ -15152,7 +15161,7 @@ function renderHomePickingHistoryBox(){
         const totalQty = Number.isFinite(Number(it.totalQty)) ? Math.round(Number(it.totalQty)) : allocatedQty;
         const remainingQty = Number.isFinite(Number(it.remainingQty)) ? Math.round(Number(it.remainingQty)) : 0;
         const rackHtml = rackLocationStackHtml(it);
-        const findBtnHtml = findPalletButtonHtml(firstRackLocationCodeFromItem(it), allRackLocationCodesFromItem(it));
+        const findBtnHtml = findPalletButtonHtml(firstRackLocationCodeFromItem(it), allRackLocationCodesFromItem(it), { sku: skuRaw, title: meta.main || it.title || skuRaw });
         const allocations = readRackAllocationsFromDoc(it || {});
         const lotsLine = allocations.length ? Array.from(new Set(allocations.map(a=>lotLabelFromId(a.lot)))).join(", ") : "";
         const metaLine = [locLabel, lotsLine ? `Lotti: ${lotsLine}` : "", `Totale: ${totalQty}`, remainingQty ? `Da ubicare: ${remainingQty}` : ""].filter(Boolean).join(" • ");
@@ -20528,7 +20537,10 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
           if(findBtn){
             e.preventDefault();
             e.stopPropagation();
-            await openCapannone3dFind(findBtn.getAttribute("data-code") || "", findBtn.getAttribute("data-codes") || "");
+            await openCapannone3dFind(findBtn.getAttribute("data-code") || "", findBtn.getAttribute("data-codes") || "", {
+              sku: findBtn.getAttribute("data-sku") || "",
+              title: findBtn.getAttribute("data-title") || ""
+            });
             return;
           }
           const row = e.target?.closest?.("[data-action='openHomeLocatedItem']");
@@ -20558,7 +20570,10 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
           if(findBtn){
             e.preventDefault();
             e.stopPropagation();
-            await openCapannone3dFind(findBtn.getAttribute("data-code") || "", findBtn.getAttribute("data-codes") || "");
+            await openCapannone3dFind(findBtn.getAttribute("data-code") || "", findBtn.getAttribute("data-codes") || "", {
+              sku: findBtn.getAttribute("data-sku") || "",
+              title: findBtn.getAttribute("data-title") || ""
+            });
             return;
           }
           const btn = e.target?.closest?.("[data-action='refreshShopifyFbm'], [data-action='pickSku'], [data-action='pickFlow'], [data-action='pickAllShopifyFbm'], [data-action='pickAllFbaPdf']");
@@ -20859,6 +20874,27 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
           #trovaMapOverlay .tm-titles{ display:flex; flex-direction:column; min-width:0; flex:1; }
           #trovaMapOverlay .tm-t1{ font-size:10px; font-weight:800; letter-spacing:.18em; text-transform:uppercase; color:var(--tmMuted2); }
           #trovaMapOverlay .tm-t2{ font-size:clamp(14px,4vw,17px); font-weight:700; color:var(--tmText); margin-top:3px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+          #trovaMapOverlay .tm-product{
+            margin-top:7px; display:flex; align-items:center; gap:8px; flex-wrap:wrap;
+            min-width:0; max-width:100%; color:var(--tmText);
+          }
+          #trovaMapOverlay .tm-product[hidden]{ display:none !important; }
+          #trovaMapOverlay .tm-product-label{
+            font-size:9px; font-weight:850; letter-spacing:.13em; text-transform:uppercase;
+            color:var(--tmMuted2); flex:none;
+          }
+          #trovaMapOverlay .tm-product-sku{
+            max-width:180px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+            font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace;
+            font-size:12px; font-weight:850; color:#fff;
+            background:rgba(255,255,255,.10); border:1px solid rgba(255,255,255,.13);
+            border-radius:999px; padding:4px 8px; line-height:1.1;
+          }
+          #trovaMapOverlay .tm-product-name{
+            min-width:0; flex:1 1 220px; max-width:100%;
+            font-size:13px; line-height:1.25; font-weight:650; color:rgba(243,245,248,.88);
+            white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+          }
           #trovaMapOverlay .tm-close{
             flex:none; width:44px; height:44px; border-radius:13px; cursor:pointer;
             border:1px solid var(--tmLine); background:var(--tmCard);
@@ -20956,6 +20992,9 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
           /* mobile: .tm-side è solo un contenitore lineare */
           @media (max-width:839px){
             #trovaMapOverlay .tm-side{ display:contents; }
+            #trovaMapOverlay .tm-product{ max-width:calc(100vw - 112px); }
+            #trovaMapOverlay .tm-product-sku{ max-width:min(160px, 48vw); }
+            #trovaMapOverlay .tm-product-name{ flex-basis:100%; font-size:12.5px; }
           }
 
           /* animazioni evidenza */
@@ -20983,6 +21022,11 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
               <div class="tm-titles">
                 <div class="tm-t1">Posizione bancale · pianta in scala</div>
                 <div class="tm-t2" id="tmTitle">Capannone Concamarise</div>
+                <div class="tm-product" id="tmProduct" hidden>
+                  <span class="tm-product-label">Prodotto</span>
+                  <span class="tm-product-sku" id="tmProductSku">—</span>
+                  <span class="tm-product-name" id="tmProductName">—</span>
+                </div>
               </div>
               <button type="button" class="tm-close" id="tmClose" aria-label="Chiudi">&times;</button>
             </div>
@@ -21031,6 +21075,36 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
       }
 
       function esc(s){ return String(s).replace(/[&<>"]/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[c])); }
+
+      function normalizeTrovaProductInfo(info){
+        try{
+          const obj = (info && typeof info === "object") ? info : {};
+          const sku = toSkuId(obj.sku || obj.productSku || obj.code || "");
+          const rawTitle = squashWhitespace(obj.title || obj.name || obj.productName || "");
+          const meta = parseTitleMeta(rawTitle || sku);
+          const title = squashWhitespace(meta.main || rawTitle || "");
+          return { sku, title };
+        }catch(_e){
+          return { sku:"", title:"" };
+        }
+      }
+
+      function renderTrovaProductInfo(ov, info){
+        try{
+          const box = ov?.querySelector?.("#tmProduct");
+          const skuEl = ov?.querySelector?.("#tmProductSku");
+          const nameEl = ov?.querySelector?.("#tmProductName");
+          if(!box || !skuEl || !nameEl) return;
+          const product = normalizeTrovaProductInfo(info || ov._productInfo || {});
+          ov._productInfo = product;
+          const hasInfo = !!(product.sku || product.title);
+          box.hidden = !hasInfo;
+          if(!hasInfo){ skuEl.textContent = "—"; nameEl.textContent = "—"; return; }
+          skuEl.textContent = product.sku || "SKU —";
+          nameEl.textContent = product.title || "Nome prodotto non disponibile";
+          box.title = [product.sku, product.title].filter(Boolean).join(" · ");
+        }catch(_e){}
+      }
 
       function buildPlanSVG(parsed, positions){
         const NS = "http://www.w3.org/2000/svg";
@@ -21205,12 +21279,13 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
         return `<svg class="tm-elev" viewBox="0 0 ${f(VW)} ${f(VH)}" xmlns="${NS}" role="img" aria-label="Prospetto campata ${esc(parsed.bayCode)}, livello L${parsed.level}">${s}</svg>`;
       }
 
-      function renderMap(parsed, allCodes){
+      function renderMap(parsed, allCodes, productInfo){
         const ov = buildOverlay();
         const wrap = ov.querySelector("#tmPlanWrap");
         const meta = ov.querySelector("#tmMeta");
         const badge = ov.querySelector("#tmBadge");
         const title = ov.querySelector("#tmTitle");
+        renderTrovaProductInfo(ov, productInfo);
 
         // posizioni multiple: parso tutti i codici validi; il primo è il principale.
         let positions = [];
@@ -21281,7 +21356,7 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
             const p = parseLocationCode(code);
             if(!p) return;
             const all = (ov._positions || []).map(x=>x.code);
-            renderMap(p, all);
+            renderMap(p, all, ov._productInfo || {});
           });
         });
       }
@@ -21290,7 +21365,7 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
       // INVARIATO), poi apre la pianta fullscreen.
       if(typeof openCapannone3dFind === "function" && !openCapannone3dFind.__trovaWrapped){
         const original = openCapannone3dFind;
-        openCapannone3dFind = async function(code, codes){
+        openCapannone3dFind = async function(code, codes, productInfo){
           let res;
           try{ res = await original.apply(this, arguments); }
           catch(err){ console.warn("openCapannone3dFind (orig)", err); }
@@ -21310,7 +21385,7 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
               };
               pushCode(parsed.code);
               for(const cc of rawList) pushCode(cc);
-              renderMap(parsed, all);
+              renderMap(parsed, all, productInfo || {});
             }
           }catch(err){ console.warn("trova plan render", err); }
           return res;
