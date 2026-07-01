@@ -12552,6 +12552,47 @@ function currentInv(){
       await flushDroneNativeState({ active:false, lockOn:false });
     }
 
+    function droneNativeStickDelta(stick, ev){
+      const r = stick.getBoundingClientRect();
+      const max = Math.max(20, Math.min(r.width, r.height) * 0.34);
+      const screenDx = ev.clientX - (r.left + r.width / 2);
+      const screenDy = ev.clientY - (r.top + r.height / 2);
+      let dx = screenDx;
+      let dy = screenDy;
+
+      // In portrait il controller viene ruotato via CSS per restare orizzontale.
+      // I pointer event però arrivano sempre nelle coordinate fisiche dello schermo:
+      // senza questa conversione, "destra/sinistra" diventano "su/giù" e le gesture risultano sballate.
+      try{
+        const ctrl = $("droneNativeController");
+        const tr = ctrl ? (window.getComputedStyle(ctrl).transform || "") : "";
+        const Matrix = window.DOMMatrixReadOnly || window.DOMMatrix || window.WebKitCSSMatrix;
+        if(tr && tr !== "none" && Matrix){
+          const m = new Matrix(tr);
+          const a = Number(m.a), b = Number(m.b), c = Number(m.c), d = Number(m.d);
+          const det = a * d - b * c;
+          const hasRotation = Math.abs(b) > 0.01 || Math.abs(c) > 0.01;
+          if(hasRotation && Number.isFinite(det) && Math.abs(det) > 1e-6){
+            dx = ( d * screenDx - c * screenDy) / det;
+            dy = (-b * screenDx + a * screenDy) / det;
+          }
+        }else if(window.matchMedia && window.matchMedia("(orientation: portrait)").matches){
+          // Fallback vecchi WebKit: il CSS portrait usa rotate(90deg).
+          dx = screenDy;
+          dy = -screenDx;
+        }
+      }catch(_e){
+        try{
+          if(window.matchMedia && window.matchMedia("(orientation: portrait)").matches){
+            dx = screenDy;
+            dy = -screenDx;
+          }
+        }catch(__e){}
+      }
+
+      return { dx, dy, max };
+    }
+
     function bindDroneNativeStick(stickId, knobId, side){
       const stick = $(stickId);
       const knob = $(knobId);
@@ -12560,10 +12601,10 @@ function currentInv(){
       let pointerId = null;
       const clamp = (n,a,b)=>Math.max(a,Math.min(b,n));
       const update = (ev)=>{
-        const r = stick.getBoundingClientRect();
-        const max = Math.max(20, Math.min(r.width, r.height) * 0.34);
-        let dx = ev.clientX - (r.left + r.width/2);
-        let dy = ev.clientY - (r.top + r.height/2);
+        const d = droneNativeStickDelta(stick, ev);
+        let dx = d.dx;
+        let dy = d.dy;
+        const max = d.max;
         const len = Math.hypot(dx, dy);
         if(len > max){ dx = dx / len * max; dy = dy / len * max; }
         knob.style.transform = `translate3d(${dx}px, ${dy}px, 0)`;
