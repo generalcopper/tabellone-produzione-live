@@ -4161,6 +4161,10 @@
     }
     /* === /HEADER FISSO NO-SCROLL v20260627 === */
 
+
+    /* Logs rimossi: nessuna UI e nessun listener movimenti dal frontend. */
+    #btnPickingLogs,
+    #homeLogsBox{ display:none !important; }
 </style>
 </head>
 
@@ -4297,13 +4301,6 @@
         </span>
         <span class="pickingNavLabel">Storico prelievi</span>
         <span class="pickingNavCount" id="pickingHistoryNavCount">—</span>
-      </button>
-      <button class="pickingNavBtn" id="btnPickingLogs" type="button" data-picking-view="logs" aria-controls="homeLogsBox" aria-pressed="false">
-        <span class="pickingNavIcon" aria-hidden="true">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
-        </span>
-        <span class="pickingNavLabel">Logs</span>
-        <span class="pickingNavCount" id="pickingLogsNavCount">—</span>
       </button>
       <button class="pickingNavBtn" id="btnPickingDroneMode" type="button" data-picking-view="droneMode" aria-controls="homeDroneModeBox" aria-pressed="false">
         <span class="pickingNavIcon" aria-hidden="true">
@@ -4550,19 +4547,6 @@
             </div>
             <div class="gridTable" id="homePickedHistoryList" style="margin-top:12px;"></div>
             <div class="hint" id="homePickedHistoryHint" style="margin-top:10px"></div>
-          </div>
-
-          <!-- Logs: ultimi movimenti cloud live -->
-          <div class="miniCard pickingSection" id="homeLogsBox">
-            <div class="miniTop">
-              <div>
-                <div class="miniTitle">Logs</div>
-                <div class="miniSub">Terminale cloud live • movimenti, ubicazioni, Tabellone WRITE e flussi PDF</div>
-              </div>
-              <div class="pill" id="homeLogsCount">—</div>
-            </div>
-            <div class="terminalLog" id="homeLogsList" style="margin-top:12px;"></div>
-            <div class="hint" id="homeLogsHint" style="margin-top:10px"></div>
           </div>
 
           <!-- Drone Mode viene aperto come shell fullscreen esterna alla UI Picking. -->
@@ -4999,7 +4983,7 @@ Tip:
 
     // === Backend endpoint (API separata) ===
     const DEFAULT_EXTRACT_ENDPOINT = "https://amz-inventory-backend-537555699968.europe-west1.run.app/extract";
-    const SHOPIFY_FBM_SYNC_ENDPOINT = "https://shopify-fbm-webhook-zxiqbo2osa-ew.a.run.app/sync-now";
+    // Shopify FBM: sync manuale frontend rimosso. La sincronizzazione deve restare lato backend schedulato.
     const CAPANNONE_VOICE_AGENT_URL = "https://us-central1-tabellone-produzione-liv-e313e.cloudfunctions.net/capannoneVoiceAgentNow";
     const UBI_VOICE_DIALOG_URL = "https://us-central1-tabellone-produzione-liv-e313e.cloudfunctions.net/ubiVoiceDialog";
     const CAPANNONE_VOICE_AGENT_DOC_ID = "capannoneVoiceAgent";
@@ -6040,8 +6024,8 @@ function guessTitleFromRaw(rawText, sku){
             if(typeof renderHomeDashboard === "function") renderHomeDashboard();
             if(typeof renderHomePickingBox === "function") renderHomePickingBox();
             if(typeof renderHomeLogsBox === "function") renderHomeLogsBox();
-            // Conteggi menu Picking: caricamento leggero in background, dopo UI pronta.
-            if(typeof schedulePickingPreviewCounts === "function") schedulePickingPreviewCounts("startup_ready", { delay: 1800 });
+            // Conteggi menu Picking: FBM da inventario; FBA resta lazy finché non si apre Picking FBA.
+            if(typeof schedulePickingPreviewCounts === "function") schedulePickingPreviewCounts("startup_ready", { delay: 700, inventoryOnly:true });
             syncHeaderSub();
             toggleAuthOverlay(false);
           }catch(_e){}
@@ -8301,7 +8285,15 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
             titleNorm: d.titleNorm || normalizeText(title || sku),
             qty,
             reservedQty: Number.isFinite(Number(d.reservedQty)) ? Math.max(0, Math.round(Number(d.reservedQty))) : 0,
+            pendingPickQty: Number.isFinite(Number(d.pendingPickQty)) ? Math.max(0, Math.round(Number(d.pendingPickQty))) : 0,
             availableQty: Math.max(0, (Number.isFinite(Number(qty)) ? Math.round(Number(qty)) : 0) - (Number.isFinite(Number(d.reservedQty)) ? Math.max(0, Math.round(Number(d.reservedQty))) : 0)),
+            reservationStatus: d.reservationStatus || "",
+            lastReservationFlowId: d.lastReservationFlowId || "",
+            lastReservationSource: d.lastReservationSource || d.reservationSource || "",
+            lastReservationOrderId: d.lastReservationOrderId || "",
+            lastReservationOrderName: d.lastReservationOrderName || "",
+            generatedFromShopifyFbm: d.generatedFromShopifyFbm === true,
+            firstSeenSource: d.firstSeenSource || "",
             lowStockThreshold: __parseLowStockThresholdValue(d.lowStockThreshold),
             rackLocations: readRackLocationsFromDoc(d),
             rackAllocations: readRackAllocationsFromDoc(d),
@@ -8682,14 +8674,19 @@ function startAllLogs(modeOrOpts = "full"){
         if(!state.firebase.ok || !state.user?.isWhitelisted) return false;
         const rawMode = opts && opts.mode;
         const mode = (rawMode === "fba" || rawMode === "fbm") ? rawMode : "full";
-        // Picking FBA/FBM non deve aspettare tutti i listener: parte con una lettura
-        // rapida e mirata. Se poi si apre Logs/Storico/Flussi, upgrade lazy a full.
+        // FBM non usa più i log: il backend schedulato scrive pendingPickQty/reservedQty
+        // sugli item inventario, quindi la vista si apre subito e non scarica flussi storici.
+        if(mode === "fbm"){
+          updateFbmPreviewFromInventory("ensure_fbm_inventory");
+          if(state.route.view === "home") renderHomePickingBox();
+          return true;
+        }
+        // Picking FBA/Storico: lettura lazy one-shot, mai listener realtime sui log.
         startLogsFor("cerea", { mode });
         startLogsFor("concamarise", { mode });
         if(state.route.view === "home"){
           renderHomePickingBox();
           renderHomePickingHistoryBox();
-          renderHomeLogsBox();
         }
         return true;
       }catch(err){
@@ -8762,6 +8759,244 @@ function startAllLogs(modeOrOpts = "full"){
         setPickingNavCount("pickingFbm", val("fbm"));
         setPickingNavCount("pickingFba", val("fba"));
       }catch(_e){}
+    }
+
+
+    // FBM Shopify veloce: dopo l'allineamento backend lo stato operativo è già
+    // sull'inventario (pendingPickQty/reservedQty). Per aprire Picking FBM non
+    // serve più leggere /logs: niente query pesanti, niente wait su flussi storici.
+    function shopifyFbmPendingQtyFromItem(it){
+      try{
+        const candidates = [it?.pendingPickQty, it?.reservedQty, it?.reservationQty, it?.reserved, it?.pendingQty];
+        let best = 0;
+        for(const v of candidates){
+          const n = Number(v);
+          if(Number.isFinite(n)) best = Math.max(best, Math.round(n));
+        }
+        return Math.max(0, best);
+      }catch(_e){
+        return 0;
+      }
+    }
+
+    function isShopifyFbmPendingInventoryItem(it){
+      try{
+        const pending = shopifyFbmPendingQtyFromItem(it);
+        if(pending <= 0) return false;
+        const src = String(it?.lastReservationSource || it?.reservationSource || it?.firstSeenSource || it?.source || "").toLowerCase();
+        const st = String(it?.reservationStatus || it?.status || "").toLowerCase();
+        const flowId = String(it?.lastReservationFlowId || "").toUpperCase();
+        const orderId = String(it?.lastReservationOrderId || it?.shopifyOrderId || "").trim();
+        const orderName = String(it?.lastReservationOrderName || it?.shopifyOrderName || "").trim();
+        return !!(
+          src.includes("shopify") ||
+          st.includes("shopify") ||
+          flowId.startsWith("SHOPIFY") ||
+          orderId ||
+          orderName ||
+          it?.generatedFromShopifyFbm === true
+        );
+      }catch(_e){
+        return false;
+      }
+    }
+
+    function shopifyFbmInventoryGroups(){
+      const groups = new Map();
+      const locOrder = ["concamarise", "cerea"];
+      for(const loc of locOrder){
+        const items = state.inventory?.[loc]?.items || [];
+        for(const it0 of items){
+          const it = it0 || {};
+          if(!isShopifyFbmPendingInventoryItem(it)) continue;
+          const sku = toSkuId(it.sku || it.id || "");
+          if(!sku) continue;
+          const qty = shopifyFbmPendingQtyFromItem(it);
+          if(qty <= 0) continue;
+          let g = groups.get(sku);
+          if(!g){
+            g = {
+              sku,
+              title:"",
+              qty:0,
+              locs:new Set(),
+              flowIds:new Set(),
+              flowNames:new Set(),
+              positionsMap:new Map(),
+              firstCode:"",
+              latestAt:0,
+              source:"inventory_pending"
+            };
+            groups.set(sku, g);
+          }
+          const title = squashWhitespace(it.title || it.name || sku) || sku;
+          if(!g.title || title.length > g.title.length) g.title = title;
+          g.qty += qty;
+          g.locs.add(loc);
+          const flowId = String(it.lastReservationFlowId || "").trim();
+          const orderName = String(it.lastReservationOrderName || "").trim();
+          if(flowId) g.flowIds.add(flowId);
+          if(orderName) g.flowNames.add(orderName);
+          const ts = Number(it.updatedAtClient || it.lastReservationAtClient || it.reorderedAtClient || 0) || 0;
+          if(ts > g.latestAt) g.latestAt = ts;
+
+          const parts = rackLocationDisplayPartsFromItem(it || {});
+          for(const part of parts){
+            const code = normalizeRackLocation(part?.code || "");
+            if(!code) continue;
+            const prev = g.positionsMap.get(code) || { code, qty:0 };
+            const pQty = Number(part?.qty || 0);
+            if(Number.isFinite(pQty) && pQty > prev.qty) prev.qty = Math.round(pQty);
+            g.positionsMap.set(code, prev);
+            if(!g.firstCode) g.firstCode = code;
+          }
+        }
+      }
+
+      return Array.from(groups.values()).map(g=>{
+        const positions = Array.from(g.positionsMap.values()).sort((a,b)=>String(a.code).localeCompare(String(b.code)));
+        return {
+          sku:g.sku,
+          title:g.title || g.sku,
+          qty:Math.round(g.qty || 0),
+          locs:Array.from(g.locs),
+          flowCount:g.flowIds.size || g.flowNames.size || 0,
+          flowNames:Array.from(g.flowNames),
+          positions,
+          firstCode:g.firstCode || (positions[0]?.code || ""),
+          latestAt:g.latestAt || 0,
+          source:g.source || "inventory_pending"
+        };
+      }).filter(g=>g.sku && g.qty > 0).sort((a,b)=>{
+        const pa = a.positions?.[0]?.code || "";
+        const pb = b.positions?.[0]?.code || "";
+        if(pa && pb && pa !== pb) return pa.localeCompare(pb);
+        if(pa && !pb) return -1;
+        if(!pa && pb) return 1;
+        return String(a.sku).localeCompare(String(b.sku));
+      });
+    }
+
+    function updateFbmPreviewFromInventory(source="inventory_pending"){
+      try{
+        const groups = shopifyFbmInventoryGroups();
+        setPickingPreviewCount("fbm", groups.length, source);
+        return groups;
+      }catch(_e){
+        return [];
+      }
+    }
+
+    function renderFastFbmPickingFromInventory(box, list, count, hint, btnPickAll){
+      try{
+        const groups = updateFbmPreviewFromInventory("inventory_fbm_render");
+        const pickingTitleEl = box?.querySelector?.(".miniTitle");
+        const pickingSubEl = box?.querySelector?.(".miniSub");
+        if(pickingTitleEl) pickingTitleEl.textContent = "Picking FBM";
+        if(pickingSubEl){
+          pickingSubEl.style.display = "none";
+          pickingSubEl.textContent = "";
+        }
+        if(btnPickAll){
+          btnPickAll.disabled = true;
+          btnPickAll.textContent = "Preleva tutti FBA/PDF";
+          btnPickAll.title = "";
+          btnPickAll.style.display = "none";
+        }
+        if(count) count.textContent = fmtN(groups.length);
+        applyPickingPreviewNavCounts("—");
+
+        if(!state.inventory?.cerea?.meta?.loaded || !state.inventory?.concamarise?.meta?.loaded){
+          if(list) list.innerHTML = `<div class="pickingBucketEmpty">Caricamento inventario cloud…</div>`;
+          if(hint) hint.textContent = "FBM legge direttamente pendingPickQty/reservedQty dall'inventario, senza scaricare i log.";
+          renderHomePickingHistoryBox();
+          return true;
+        }
+
+        const positionStackHtml = (group)=>{
+          const parts = Array.isArray(group?.positions) ? group.positions : [];
+          if(!parts.length) return `<span class="badge rackStackEmpty">—</span>`;
+          return `<div class="rackStack">${parts.map(x=>{
+            const code = normalizeRackLocation(x?.code || "");
+            if(!code) return "";
+            const q = Number(x?.qty || 0);
+            const qtyHtml = (Number.isFinite(q) && q > 0)
+              ? `<span class="rackStackQty">${escapeHtml(String(Math.round(q)))} pz</span>`
+              : `<span class="rackStackQty">— pz</span>`;
+            return `<span class="rackStackLine"><span class="rackStackCode">${escapeHtml(code)}</span>${qtyHtml}</span>`;
+          }).join("")}</div>`;
+        };
+
+        const renderTable = ()=>{
+          if(!groups.length) return `<div class="pickingBucketEmpty">Nessun ordine FBM Shopify da preparare.</div>`;
+          const totalPieces = groups.reduce((a,x)=>a + (Number(x.qty)||0), 0);
+          const rows = groups.map(group=>{
+            const locLabel = group.locs.length ? group.locs.map(x=>prettyLoc(x)).join(" + ") : "—";
+            const orderLabel = group.flowCount ? (group.flowCount === 1 ? "1 ordine" : `${group.flowCount} ordini`) : "sync backend";
+            const metaLine = [locLabel, orderLabel].filter(Boolean).join(" • ");
+            const groupCodes = (group.positions || [])
+              .slice()
+              .sort((a,b)=> (Number(b?.qty||0) - Number(a?.qty||0)))
+              .map(p=>p.code);
+            const findBtnHtml = findPalletButtonHtml(group.firstCode || "", groupCodes, { sku: group.sku, title: group.title || group.sku });
+            return `
+              <div class="pickingFlowRow fbmSkuGroupRow">
+                <div class="pickingFlowCell gridSku">${escapeHtml(group.sku)}</div>
+                <div class="pickingFlowCell"><div class="gridProdMain">${escapeHtml(group.title || group.sku)}</div><div class="gridProdSub">${escapeHtml(metaLine)}</div></div>
+                <div class="pickingFlowCell">${positionStackHtml(group)}</div>
+                <div class="pickingFlowCell right"><span class="badge warn">${escapeHtml(String(group.qty))}</span></div>
+                <div class="pickingFlowCell right"><div class="pickingSkuActions">${findBtnHtml}</div></div>
+              </div>`;
+          }).join("");
+          return `
+            <div class="pickingFlowCard pickingFbmSkuGroupCard">
+              <div class="pickingFlowTop">
+                <div style="min-width:0">
+                  <div class="pickingFlowName">SKU</div>
+                  <div class="pickingFlowMeta">${escapeHtml(String(totalPieces))} pz totali • da inventario cloud</div>
+                </div>
+                <div class="pickingFlowActions">
+                  <span class="pickingFlowProgress">${escapeHtml(String(groups.length))} SKU</span>
+                </div>
+              </div>
+              <div class="pickingFlowTable">
+                <div class="pickingFlowRow pickingHead">
+                  <div class="pickingFlowCell">SKU</div>
+                  <div class="pickingFlowCell">Prodotto</div>
+                  <div class="pickingFlowCell">Posizione</div>
+                  <div class="pickingFlowCell right">Q.tà</div>
+                  <div class="pickingFlowCell right">Azioni</div>
+                </div>
+                ${rows}
+              </div>
+            </div>`;
+        };
+
+        if(list){
+          list.innerHTML = `
+            <div class="pickingBucketCard fbm">
+              <div class="pickingBucketTop">
+                <div style="min-width:0">
+                  <div class="pickingBucketTitle">FBM Shopify</div>
+                  <div class="pickingBucketSub">SKU Shopify raggruppati da preparare</div>
+                  <div class="pickingBucketMiniCaption">${escapeHtml(shopifyFbmSyncCaption())}</div>
+                </div>
+                <div class="pickingBucketActions">
+                  <span class="pickingFlowProgress ${groups.length ? "" : "done"}">${escapeHtml(groups.length.toLocaleString("it-IT"))} SKU</span>
+                </div>
+              </div>
+              ${renderTable()}
+            </div>`;
+        }
+        if(hint){
+          hint.textContent = groups.length ? "" : "Nessun SKU FBM da preparare.";
+        }
+        renderHomePickingHistoryBox();
+        return true;
+      }catch(err){
+        console.warn("render fast FBM picking", err);
+        return false;
+      }
     }
 
     function pickingCandidateFlowsFromArray(allFlows){
@@ -8841,15 +9076,19 @@ function startAllLogs(modeOrOpts = "full"){
       };
 
       if(mode === "fba"){
+        // FBA/PDF: prima leggo solo stati operativi; fallback ridotto sui recenti.
+        for(const st of ["RESERVED", "PARTIAL_PICKED"]){
+          try{ addSnap(await api.getDocs(api.query(colRef, api.where("status", "==", st), api.limit(60)))); }catch(_e){}
+        }
         try{
-          const snap = await api.getDocs(api.query(colRef, api.orderBy("appliedAtClient", "desc"), api.limit(160)));
+          const snap = await api.getDocs(api.query(colRef, api.orderBy("appliedAtClient", "desc"), api.limit(40)));
           addSnap(snap);
         }catch(err){ console.warn("preview fba count", loc, err); }
       }else{
         const queries = [];
-        try{ queries.push(api.query(colRef, api.where("source", "==", "shopify_fbm"), api.limit(160))); }catch(_e){}
-        try{ queries.push(api.query(colRef, api.where("source", "==", "shopify"), api.limit(120))); }catch(_e){}
-        try{ queries.push(api.query(colRef, api.where("fileName", "==", "SHOPIFY_FBM"), api.limit(160))); }catch(_e){}
+        try{ queries.push(api.query(colRef, api.where("source", "==", "shopify_fbm"), api.limit(80))); }catch(_e){}
+        try{ queries.push(api.query(colRef, api.where("source", "==", "shopify"), api.limit(60))); }catch(_e){}
+        try{ queries.push(api.query(colRef, api.where("fileName", "==", "SHOPIFY_FBM"), api.limit(80))); }catch(_e){}
         for(const q of queries){
           try{ addSnap(await api.getDocs(q)); }catch(err){ console.warn("preview fbm count", loc, err); }
         }
@@ -8861,20 +9100,30 @@ function startAllLogs(modeOrOpts = "full"){
       const p = pickingPreviewState();
       if(!state.firebase.ok || !state.user?.isWhitelisted) return;
       if(p.busy){
-        schedulePickingPreviewCounts(reason || "busy_retry", { delay: 1200 });
+        schedulePickingPreviewCounts(reason || "busy_retry", { delay: 1200, ...opts });
         return;
       }
 
       try{
         p.busy = true;
+        // FBM: conteggio immediato da inventario. Non fa query /logs.
+        updateFbmPreviewFromInventory("preview_inventory_" + String(reason || ""));
         updatePickingPreviewCountsFromCurrentLogs("current_" + String(reason || ""));
+
+        const view = pickingHomeView();
+        const allowRemote = opts?.includeRemote === true || view === "pickingFba" || view === "pickingHistory";
+        if(opts?.inventoryOnly === true || !allowRemote){
+          applyPickingPreviewNavCounts("—");
+          return;
+        }
 
         const maxAge = Number(opts.maxAgeMs || 45000);
         const now = Date.now();
         const need = [];
-        for(const k of ["fbm", "fba"]){
-          const fresh = p[k].loaded && (now - Number(p[k].updatedAtClient || 0) < maxAge);
-          if(!fresh) need.push(k);
+        // Il remoto serve solo per FBA/PDF. FBM è già coperto da pending inventario.
+        if((view === "pickingFba" || view === "pickingHistory" || opts?.includeFba === true)){
+          const freshFba = p.fba.loaded && (now - Number(p.fba.updatedAtClient || 0) < maxAge);
+          if(!freshFba) need.push("fba");
         }
 
         if(!need.length) return;
@@ -9651,128 +9900,130 @@ function startAllLogs(modeOrOpts = "full"){
     }
 
     function startLogsFor(loc, opts = {}){
-      if(!state.firebase.ok || !state.user?.isWhitelisted) return;
-      const lg = state.logs[loc];
-      const rawMode = opts && opts.mode;
-      const requestedMode = (rawMode === "fba" || rawMode === "fbm") ? rawMode : "full";
+      try{
+        if(!state.firebase.ok || !state.user?.isWhitelisted) return;
+        if(!(loc === "cerea" || loc === "concamarise")) return;
 
-      if(lg.unsub){
-        const currentMode = lg.mode || lg.meta?.mode || "full";
-        const needsRestart = (requestedMode === "full" && currentMode !== "full") ||
-          (requestedMode !== "full" && currentMode !== requestedMode && currentMode !== "full");
-        if(needsRestart){
-          // Upgrade lazy a full oppure cambio veloce FBA ↔ FBM senza tenere query inutili aperte.
-          try{ lg.unsub && lg.unsub(); }catch(_e){}
-          lg.unsub = null;
-          lg.flows = [];
-          lg.meta = { count:0, loaded:false, expected:0, seen:0, mode:requestedMode };
-        }else{
+        const lg = state.logs[loc];
+        const rawMode = opts && opts.mode;
+        const requestedMode = (rawMode === "fba" || rawMode === "fbm") ? rawMode : "full";
+        const now = Date.now();
+        const currentMode = lg.mode || lg.meta?.mode || "";
+        const staleMs = Number(opts?.staleMs || (requestedMode === "full" ? 45000 : 25000));
+        const loadedAt = Number(lg.loadedAtClient || 0) || 0;
+
+        // Nessun listener realtime sui log: il frontend fa una lettura one-shot mirata.
+        // Se è già fresco, non riscarica nulla.
+        if(!opts?.forceReload && lg.meta?.loaded && currentMode === requestedMode && (now - loadedAt) < staleMs){
           return;
         }
-      }
+        if(lg.loading && currentMode === requestedMode) return;
 
-      const api = state.firebase.api;
-      const db = state.firebase.db;
-      const colRef = api.collection(db, COL_ROOT, loc, SUB_LOGS);
-      const maps = { applied:new Map(), shopifySource:new Map(), shopifySourcePlain:new Map(), shopifyFile:new Map(), raw:new Map() };
-      const bootExpected = new Set();
-      const bootSeen = new Set();
-      lg.mode = requestedMode;
-      lg.meta = { ...(lg.meta || {}), count:0, loaded:false, expected:0, seen:0, mode:requestedMode };
-      const markLogsBootSeen = (key)=>{
-        try{
-          bootSeen.add(key);
-          lg.meta.expected = bootExpected.size;
-          lg.meta.seen = bootSeen.size;
-          lg.meta.loaded = bootExpected.size > 0 && bootSeen.size >= bootExpected.size;
-        }catch(_e){}
-      };
-
-      const mergeMapsNow = ()=>{
-        const merged = new Map();
-        for(const m of Object.values(maps)){
-          for(const [id, flow] of m.entries()){
-            const prev = merged.get(id) || {};
-            merged.set(id, { ...prev, ...flow });
-          }
-        }
-        const flows = Array.from(merged.values())
-          .filter(f => f && !f.__invalid)
-          .sort((a,b)=> (flowLogTimestamp(b) - flowLogTimestamp(a)) || String(b.id||"").localeCompare(String(a.id||"")))
-          .slice(0, 1000);
-        lg.flows = flows;
-        lg.meta.count = flows.length;
-        if(bootExpected.size > 0 && bootSeen.size >= bootExpected.size) lg.meta.loaded = true;
-        updatePickingPreviewCountsFromCurrentLogs("logs_" + loc);
-        refreshActivityLogSkuWatchers("logs_" + loc);
-        renderLogsForLoc(loc);
-        checkStartupDataGate("logs_" + loc);
-      };
-
-      // Debounce: i 6 listener producono snapshot ravvicinati (soprattutto all'avvio).
-      // Collasso i merge in uno solo per evitare sort/merge/render ripetuti inutilmente.
-      const mergeMaps = ()=>{
-        try{ if(lg._mergeTimer) clearTimeout(lg._mergeTimer); }catch(_e){}
-        lg._mergeTimer = setTimeout(()=>{ lg._mergeTimer = null; mergeMapsNow(); }, 120);
-      };
-
-      const attach = (key, q, noisy)=>{
-        bootExpected.add(key);
-        lg.meta.expected = bootExpected.size;
-        try{
-        return api.onSnapshot(q, (snap)=>{
-        markLogsBootSeen(key);
-        const m = maps[key] || new Map();
-        m.clear();
-        snap.forEach(docSnap=>{
-          const flow = normalizeFlowLogDoc(docSnap, loc);
-          m.set(flow.id, flow);
-        });
-        maps[key] = m;
-        mergeMaps();
-      }, (err)=>{
-        markLogsBootSeen(key);
-        console.warn(`logs watch ${key} ${loc}`, err);
-        if(noisy) showToast("Errore flussi", err?.message || String(err));
-        if(state.route.view==="home") renderHomeLogsBox();
-        checkStartupDataGate("logs_error_" + loc);
-      });
-        }catch(err){
-          markLogsBootSeen(key);
-          console.warn(`logs watch init ${key} ${loc}`, err);
-          if(noisy) showToast("Errore flussi", err?.message || String(err));
-          checkStartupDataGate("logs_init_error_" + loc);
-          return ()=>{};
-        }
-      };
-
-      const unsubs = [];
-      const appliedLimit = requestedMode === "fba" ? 120 : 80;
-      if(requestedMode === "fba" || requestedMode === "full"){
-        unsubs.push(attach("applied", api.query(colRef, api.orderBy("appliedAtClient","desc"), api.limit(appliedLimit)), true));
-      }
-      // Niente listener generico su updatedAtClient: quel campo cambia a ogni sync/backfill
-      // e faceva riscaricare/riordinare troppi log con lo stesso orario.
-      // Modalità FBA veloce: solo appliedAtClient. Modalità FBM veloce: solo query Shopify.
-      if(requestedMode === "fbm" || requestedMode === "full"){
-        // Per Shopify teniamo query mirate e leggere; il raw resta solo nella modalità full.
-        try{ unsubs.push(attach("shopifySource", api.query(colRef, api.where("source", "==", "shopify_fbm"), api.limit(140)), false)); }catch(_e){}
-        try{ unsubs.push(attach("shopifySourcePlain", api.query(colRef, api.where("source", "==", "shopify"), api.limit(100)), false)); }catch(_e){}
-        try{ unsubs.push(attach("shopifyFile", api.query(colRef, api.where("fileName", "==", "SHOPIFY_FBM"), api.limit(140)), false)); }catch(_e){}
-        if(requestedMode === "full"){
-          try{ unsubs.push(attach("raw", api.query(colRef, api.limit(20)), false)); }catch(_e){}
-        }
-      }
-      lg.meta.expected = bootExpected.size;
-      lg.meta.mode = requestedMode;
-      lg.meta.loaded = bootExpected.size === 0 ? true : (bootSeen.size >= bootExpected.size);
-      checkStartupDataGate("logs_attached_" + loc);
-      lg.unsub = ()=>{
+        try{ lg.unsub && lg.unsub(); }catch(_e){}
         try{ if(lg._mergeTimer){ clearTimeout(lg._mergeTimer); lg._mergeTimer = null; } }catch(_e){}
-        for(const fn of unsubs){ try{ fn && fn(); }catch(_e){} }
-      };
-    }
 
+        const api = state.firebase.api;
+        const db = state.firebase.db;
+        const colRef = api.collection(db, COL_ROOT, loc, SUB_LOGS);
+        const maps = { applied:new Map(), shopifySource:new Map(), shopifySourcePlain:new Map(), shopifyFile:new Map() };
+
+        lg.loading = true;
+        lg.mode = requestedMode;
+        lg.unsub = ()=>{}; // compatibilità con logsRealtimeStarted(), ma non apre socket realtime.
+        lg.flows = [];
+        lg.meta = { count:0, loaded:false, expected:0, seen:0, mode:requestedMode, oneShot:true };
+
+        const addSnap = (key, snap)=>{
+          const m = maps[key] || new Map();
+          try{
+            snap.forEach(docSnap=>{
+              const flow = normalizeFlowLogDoc(docSnap, loc);
+              m.set(flow.id, flow);
+            });
+          }catch(_e){}
+          maps[key] = m;
+        };
+
+        const run = async(key, q)=>{
+          lg.meta.expected++;
+          try{
+            const snap = await api.getDocs(q);
+            addSnap(key, snap);
+          }catch(err){
+            console.warn(`logs one-shot ${key} ${loc}`, err);
+          }finally{
+            lg.meta.seen++;
+          }
+        };
+
+        const tasks = [];
+        if(requestedMode === "fba"){
+          // Lettura operativa FBA/PDF: stati attivi + piccolo fallback recenti.
+          // Evita di scaricare pagine di log Shopify/vecchi flussi quando serve solo il picking.
+          try{ tasks.push(run("statusReserved", api.query(colRef, api.where("status", "==", "RESERVED"), api.limit(60)))); }catch(_e){}
+          try{ tasks.push(run("statusPartial", api.query(colRef, api.where("status", "==", "PARTIAL_PICKED"), api.limit(60)))); }catch(_e){}
+          try{ tasks.push(run("applied", api.query(colRef, api.orderBy("appliedAtClient","desc"), api.limit(40)))); }catch(_e){}
+        }else if(requestedMode === "full"){
+          try{ tasks.push(run("applied", api.query(colRef, api.orderBy("appliedAtClient","desc"), api.limit(100)))); }catch(_e){}
+        }
+
+        if(requestedMode === "fbm" || requestedMode === "full"){
+          // Query Shopify mirate. Niente raw scan e niente updatedAtClient.
+          try{ tasks.push(run("shopifySource", api.query(colRef, api.where("source", "==", "shopify_fbm"), api.limit(80)))); }catch(_e){}
+          try{ tasks.push(run("shopifySourcePlain", api.query(colRef, api.where("source", "==", "shopify"), api.limit(60)))); }catch(_e){}
+          try{ tasks.push(run("shopifyFile", api.query(colRef, api.where("fileName", "==", "SHOPIFY_FBM"), api.limit(80)))); }catch(_e){}
+        }
+
+        if(!tasks.length){
+          lg.loading = false;
+          lg.meta.loaded = true;
+          lg.loadedAtClient = Date.now();
+          renderLogsForLoc(loc);
+          return;
+        }
+
+        Promise.allSettled(tasks).then(()=>{
+          const merged = new Map();
+          for(const m of Object.values(maps)){
+            for(const [id, flow] of m.entries()){
+              const prev = merged.get(id) || {};
+              merged.set(id, { ...prev, ...flow });
+            }
+          }
+
+          const flows = Array.from(merged.values())
+            .filter(f => f && !f.__invalid)
+            .sort((a,b)=> (flowLogTimestamp(b) - flowLogTimestamp(a)) || String(b.id||"").localeCompare(String(a.id||"")))
+            .slice(0, requestedMode === "full" ? 240 : 160);
+
+          lg.flows = flows;
+          lg.meta.count = flows.length;
+          lg.meta.loaded = true;
+          lg.meta.oneShot = true;
+          lg.loadedAtClient = Date.now();
+          lg.loading = false;
+
+          updatePickingPreviewCountsFromCurrentLogs("one_shot_logs_" + loc);
+          renderLogsForLoc(loc);
+          checkStartupDataGate("logs_" + loc);
+        }).catch(err=>{
+          console.warn("logs one-shot batch", loc, err);
+          lg.loading = false;
+          lg.meta.loaded = true;
+          renderLogsForLoc(loc);
+          checkStartupDataGate("logs_error_" + loc);
+        });
+      }catch(err){
+        console.warn("startLogsFor one-shot", loc, err);
+        try{
+          const lg = state.logs?.[loc];
+          if(lg){
+            lg.loading = false;
+            lg.meta = { ...(lg.meta || {}), loaded:true, oneShot:true, error:String(err?.message || err || "") };
+          }
+        }catch(_e){}
+      }
+    }
 
     // --- Logs home: movimenti cloud live + flussi PDF ---
     // Non usa più collectionGroup("movements") ordinata: quella query richiede un indice
@@ -12180,7 +12431,7 @@ function currentInv(){
     function pickingHomeView(){
       const v = state.ui?.pickingHomeView || "noLocation";
       if(v === "picking") return "pickingFbm"; // compatibilità con vecchia voce unica
-      return (v === "located" || v === "logs" || v === "pickingFbm" || v === "pickingFba" || v === "pickingHistory") ? v : "noLocation";
+      return (v === "located" || v === "pickingFbm" || v === "pickingFba" || v === "pickingHistory") ? v : "noLocation";
     }
 
     function ensureDroneModeFrameLoaded(){
@@ -12449,7 +12700,6 @@ function currentInv(){
         { key:"located", box:"homeLocatedBox", active:view === "located" },
         { key:"picking", box:"homePickingBox", active:pickingActive },
         { key:"pickingHistory", box:"homePickingHistoryBox", active:view === "pickingHistory" },
-        { key:"logs", box:"homeLogsBox", active:view === "logs" }
       ];
       const buttons = [
         { key:"noLocation", btn:"btnPickingNoLocation" },
@@ -12457,7 +12707,6 @@ function currentInv(){
         { key:"pickingFbm", btn:"btnPickingFlowFbm" },
         { key:"pickingFba", btn:"btnPickingFlowFba" },
         { key:"pickingHistory", btn:"btnPickingHistory" },
-        { key:"logs", btn:"btnPickingLogs" }
       ];
 
       for(const d of sections){
@@ -12483,8 +12732,8 @@ function currentInv(){
     }
 
     function isPickingLogsViewActive(){
-      try{ return state.route?.view === "home" && pickingHomeView() === "logs"; }
-      catch(_e){ return false; }
+      // Sezione Logs rimossa: il frontend non apre più listener di movimenti.
+      return false;
     }
 
     function setPickingHomeView(view){
@@ -12495,20 +12744,24 @@ function currentInv(){
         void openDroneModeFullscreen();
         return;
       }
-      state.ui.pickingHomeView = (next === "located" || next === "logs" || next === "pickingFbm" || next === "pickingFba" || next === "pickingHistory") ? next : "noLocation";
-      const needsFlowLogs = (state.ui.pickingHomeView === "logs" || state.ui.pickingHomeView === "pickingFbm" || state.ui.pickingHomeView === "pickingFba" || state.ui.pickingHomeView === "pickingHistory");
-      if(needsFlowLogs){
-        const logMode = (state.ui.pickingHomeView === "pickingFba") ? "fba" : (state.ui.pickingHomeView === "pickingFbm" ? "fbm" : "full");
+      state.ui.pickingHomeView = (next === "located" || next === "pickingFbm" || next === "pickingFba" || next === "pickingHistory") ? next : "noLocation";
+      const needsFlowLogs = (state.ui.pickingHomeView === "pickingFba" || state.ui.pickingHomeView === "pickingHistory");
+      if(state.ui.pickingHomeView === "pickingFbm"){
+        // FBM allineato al backend schedulato: il frontend legge i pending dall'inventario,
+        // non apre più letture /logs per mostrare la lista.
+        updateFbmPreviewFromInventory("menu_fbm_inventory");
+        schedulePickingPreviewCounts("menu_pickingFbm", { delay: 250, inventoryOnly:true });
+      }else if(needsFlowLogs){
+        const logMode = (state.ui.pickingHomeView === "pickingFba") ? "fba" : "full";
         ensureLogsRealtimeStarted("picking_" + state.ui.pickingHomeView, { mode: logMode });
-        schedulePickingPreviewCounts("menu_" + state.ui.pickingHomeView, { delay: (logMode === "full" ? 900 : 1200) });
+        schedulePickingPreviewCounts("menu_" + state.ui.pickingHomeView, { delay: (logMode === "full" ? 900 : 700), includeRemote:true });
+      }else if(state.activityLogs?.unsubMovements){
+        stopActivityLogWatch({ render:false });
       }
       syncPickingHomeView();
-      if(isPickingLogsViewActive()) startActivityLogWatch();
-      else if(state.activityLogs?.unsubMovements) stopActivityLogWatch({ render:false });
       if(state.route?.view === "home" && (state.ui.pickingHomeView === "pickingFbm" || state.ui.pickingHomeView === "pickingFba")){
         renderHomePickingBox();
       }
-      if(state.route?.view === "home" && state.ui.pickingHomeView === "logs") renderHomeLogsBox();
       setPickingMobileMenu(false);
     }
 
@@ -13732,87 +13985,18 @@ Confermandolo, la transaction cloud scaricherà comunque la quantità richiesta 
     }
 
     function shopifyFbmSyncRefreshButtonHtml(){
-      const title = "Controlla subito Shopify";
-      return `<button class="btn small shopifySyncBtn" type="button" data-action="refreshShopifyFbm" title="${escapeHtml(title)}" aria-label="${escapeHtml(title)}"><span class="shopifySyncIcon">↻</span></button>`;
+      // Sync manuale rimosso: Shopify viene sincronizzato solo dal backend schedulato.
+      return "";
     }
 
     function setShopifySyncUiBusy(busy){
-      try{
-        const title = "Controlla subito Shopify";
-        // Non usiamo più busy come stato visivo: al click fa un solo giro e stop.
-        if(state.shopifySync) state.shopifySync.busy = false;
-        const buttons = Array.from(document.querySelectorAll('.shopifySyncBtn[data-action="refreshShopifyFbm"]'));
-        for(const btn of buttons){
-          btn.disabled = false;
-          btn.setAttribute("aria-disabled", "false");
-          btn.setAttribute("title", title);
-          btn.setAttribute("aria-label", title);
-
-          if(busy){
-            btn.classList.remove("is-spinning");
-            // forza restart animazione senza re-render della lista
-            void btn.offsetWidth;
-            btn.classList.add("is-spinning");
-            const runId = String(Date.now()) + Math.random().toString(16).slice(2);
-            btn.dataset.spinRun = runId;
-            setTimeout(()=>{
-              try{
-                if(btn.dataset.spinRun === runId){
-                  btn.classList.remove("is-spinning");
-                }
-              }catch(_e){}
-            }, 620);
-          }else{
-            btn.classList.remove("is-spinning");
-          }
-        }
-      }catch(_e){}
+      // Nessun pulsante di sync manuale: manteniamo solo lo stato interno non bloccante.
+      try{ if(state.shopifySync) state.shopifySync.busy = false; }catch(_e){}
     }
 
     async function triggerShopifyFbmManualSync(){
-      if(!state.user?.isWhitelisted){
-        showToast("Accesso richiesto", "Accedi per aggiornare Shopify.", 1800);
-        return;
-      }
-      try{
-        const nowManual = Date.now();
-        if(state.shopifySync?.busy || (nowManual - Number(state.shopifySync?.lastManualAtClient || 0)) < 1800){
-          showToast("Controllo Shopify", "Refresh già inviato, attendi un attimo.", 1200);
-          return;
-        }
-        if(state.shopifySync){
-          state.shopifySync.busy = true;
-          state.shopifySync.lastManualAtClient = nowManual;
-        }
-        setShopifySyncUiBusy(true);
-        showToast("Controllo Shopify", "Refresh inviato.", 900);
-
-        try{
-          fetch(`${SHOPIFY_FBM_SYNC_ENDPOINT}?source=picking_refresh&t=${Date.now()}`, {
-            method:"POST",
-            mode:"no-cors",
-            cache:"no-store",
-            keepalive:true
-          }).catch(()=>{});
-        }catch(_err){
-          // Fallback senza CORS: la GET parte comunque e il backend aggiorna Firestore.
-          try{
-            const img = new Image();
-            img.referrerPolicy = "no-referrer";
-            img.src = `${SHOPIFY_FBM_SYNC_ENDPOINT}?source=picking_refresh_img&t=${Date.now()}`;
-          }catch(_e){}
-        }
-
-        // Il sync continua via backend/Firestore; la UI non resta in loading.
-        setTimeout(()=>{
-          try{ setShopifySyncUiBusy(false); }catch(_e){}
-          try{ if(state.shopifySync) state.shopifySync.busy = false; }catch(_e){}
-        }, 650);
-      }catch(err){
-        setShopifySyncUiBusy(false);
-        try{ if(state.shopifySync) state.shopifySync.busy = false; }catch(_e){}
-        showToast("Errore Shopify", String(err?.message || err).slice(0, 180), 2600);
-      }
+      // Sync manuale rimosso: il frontend visualizza solo lo stato scritto dal backend schedulato.
+      showToast("Sync Shopify automatico", "Il controllo Shopify viene eseguito dal backend a intervalli programmati.", 1800);
     }
 
     function renderHomePickingBox(){
@@ -13834,6 +14018,13 @@ Confermandolo, la transaction cloud scaricherà comunque la quantità richiesta 
         if(hint) hint.textContent = "";
         renderHomePickingHistoryBox();
         return;
+      }
+
+      const currentPickingView = pickingHomeView();
+      const showFbaPicking = currentPickingView === "pickingFba";
+      const showFbmPicking = !showFbaPicking;
+      if(showFbmPicking){
+        if(renderFastFbmPickingFromInventory(box, list, count, hint, btnPickAll)) return;
       }
 
       if(!logsRealtimeStarted()){
@@ -13861,9 +14052,6 @@ Confermandolo, la transaction cloud scaricherà comunque la quantità richiesta 
       }
 
       const flows = getPickingCandidateFlows();
-      const currentPickingView = pickingHomeView();
-      const showFbaPicking = currentPickingView === "pickingFba";
-      const showFbmPicking = !showFbaPicking; // default sicuro: FBM, compatibile con vecchia voce Picking
       const fastFbaOnlyLogs = !!(state.logs?.cerea?.mode === "fba" && state.logs?.concamarise?.mode === "fba");
       const fastFbmOnlyLogs = !!(state.logs?.cerea?.mode === "fbm" && state.logs?.concamarise?.mode === "fbm");
 
@@ -14018,12 +14206,9 @@ Confermandolo, la transaction cloud scaricherà comunque la quantità richiesta 
       count.textContent = showFbaPicking ? fmtN(fbaActiveFlows.length) : fmtN(fbmSkuGroups.length);
       if(showFbmPicking) setPickingPreviewCount("fbm", fbmSkuGroups.length, "active_fbm");
       if(showFbaPicking) setPickingPreviewCount("fba", fbaActiveFlows.length, "active_fba");
-      if(!showFbmPicking && !pickingPreviewState().fbm.loaded) setPickingPreviewLoading("fbm");
-      if(!showFbaPicking && !pickingPreviewState().fba.loaded) setPickingPreviewLoading("fba");
+      if(!showFbmPicking) updateFbmPreviewFromInventory("opposite_inventory");
+      if(!showFbaPicking && !pickingPreviewState().fba.loaded) setPickingNavCount("pickingFba", "—");
       applyPickingPreviewNavCounts("—");
-      if((showFbmPicking && !pickingPreviewState().fba.loaded) || (showFbaPicking && !pickingPreviewState().fbm.loaded)){
-        schedulePickingPreviewCounts("opposite_count_" + currentPickingView, { delay: 900 });
-      }
 
       const pickingTitleEl = box.querySelector?.(".miniTitle");
       const pickingSubEl = box.querySelector?.(".miniSub");
@@ -14125,9 +14310,9 @@ Confermandolo, la transaction cloud scaricherà comunque la quantità richiesta 
           </div>`;
       };
 
-      // Rotellina Shopify sempre visibile: anche quando il picking è vuoto.
-      // FBM non ha più pulsanti di prelievo: lo scarico avviene automaticamente quando Shopify risulta spedito.
-      const fbmAction = `${shopifyFbmSyncRefreshButtonHtml()}`;
+      // FBM: nessun sync manuale dal frontend. Il backend schedulato aggiorna Firestore; qui visualizziamo soltanto.
+      // Lo scarico avviene automaticamente quando Shopify risulta spedito.
+      const fbmAction = "";
       const fbaAction = `<button class="btn primary small" type="button" data-action="pickAllFbaPdf" ${fbaActiveFlows.length ? "" : "disabled"}>Preleva tutti FBA/PDF</button>`;
 
       const bucketsHtml = [];
@@ -20577,14 +20762,10 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
             });
             return;
           }
-          const btn = e.target?.closest?.("[data-action='refreshShopifyFbm'], [data-action='pickSku'], [data-action='pickFlow'], [data-action='pickAllShopifyFbm'], [data-action='pickAllFbaPdf']");
+          const btn = e.target?.closest?.("[data-action='pickSku'], [data-action='pickFlow'], [data-action='pickAllShopifyFbm'], [data-action='pickAllFbaPdf']");
           if(!btn) return;
           e.preventDefault(); e.stopPropagation();
           const action = btn.getAttribute("data-action") || "";
-          if(action === "refreshShopifyFbm"){
-            await withPickingActionLock(["shopifyRefresh"], btn, ()=>triggerShopifyFbmManualSync());
-            return;
-          }
           if(action === "pickAllShopifyFbm"){
             await withPickingActionLock(["pickAllShopifyFbm"], btn, ()=>savePickingAllShopifyFbmFlows());
             return;
