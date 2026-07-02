@@ -3214,6 +3214,48 @@ function guessTitleFromRaw(rawText, sku){
       };
     }
 
+
+    // Campi identità prodotto da preservare nello snapshot runtime.
+    // Firestore resta la fonte dati: qui copiamo solo i campi letti dal cloud dentro state.inventory.items.
+    function productIdentityRuntimeFieldsFromDoc(d){
+      const out = {};
+      try{
+        const copyValue = (v)=>{
+          if(Array.isArray(v)) return v.slice();
+          if(v && typeof v === "object") return { ...v };
+          return v;
+        };
+        const keys = [
+          "asin", "ASIN", "amazonAsin", "productAsin", "asinGroupKey", "skuUnificationAsin",
+          "canonicalSku", "skuGroupCanonical", "masterSku", "parentSku", "aliasOfSku",
+          "skuAliases", "aliasSkus", "linkedSkus", "unifiedSkus", "fbaFbmSkus"
+        ];
+        for(const k of keys){
+          if(d && Object.prototype.hasOwnProperty.call(d, k) && d[k] !== undefined){
+            out[k] = copyValue(d[k]);
+          }
+        }
+        if(d?.skuUnification && typeof d.skuUnification === "object"){
+          out.skuUnification = {
+            ...d.skuUnification,
+            aliases: Array.isArray(d.skuUnification.aliases) ? d.skuUnification.aliases.slice() : d.skuUnification.aliases
+          };
+        }
+        if(d?.asinUnification && typeof d.asinUnification === "object"){
+          out.asinUnification = { ...d.asinUnification };
+        }
+        const normalizedAsin = readAsinFromDoc(d || {});
+        if(normalizedAsin){
+          out.asin = normalizedAsin;
+          out.ASIN = normalizedAsin;
+          out.amazonAsin = normalizedAsin;
+          out.asinGroupKey = normalizedAsin;
+          out.skuUnificationAsin = normalizedAsin;
+        }
+      }catch(_e){}
+      return out;
+    }
+
     // --- Flow dedupe (anti-doppio upload) ---
     function fnv1aHex(str){
       let h = 0x811c9dc5;
@@ -5515,6 +5557,7 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
             reorderedQueueId: d.reorderedQueueId || "",
             reorderedQueueOrderKey: d.reorderedQueueOrderKey || "",
             note: d.note || d.notes || "",
+            ...productIdentityRuntimeFieldsFromDoc(d || {}),
             updatedAt,
             updatedAtClient
           });
