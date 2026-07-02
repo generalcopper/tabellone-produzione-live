@@ -3314,6 +3314,39 @@ function guessTitleFromRaw(rawText, sku){
 
 
 
+    // --- Cache runtime ASIN/SKU/stock (solo memoria runtime, nessun locale) ---
+    // Evita ricostruzioni pesanti durante apertura Articoli e ricerca SKU.
+    let __skuRuntimeCacheVersion = 1;
+    const __skuRuntimeCache = {
+      version: 0,
+      aliasIndex: null,
+      stockAggregatesByKey: new Map(),
+      stockAggregateLookupByKey: new Map(),
+      stockRepresentativesByLoc: new Map()
+    };
+
+    function clearSkuRuntimeCache(reason=""){
+      try{
+        __skuRuntimeCacheVersion++;
+        __skuRuntimeCache.version = 0;
+        __skuRuntimeCache.aliasIndex = null;
+        __skuRuntimeCache.stockAggregatesByKey = new Map();
+        __skuRuntimeCache.stockAggregateLookupByKey = new Map();
+        __skuRuntimeCache.stockRepresentativesByLoc = new Map();
+      }catch(_e){}
+    }
+
+    function getSkuRuntimeCache(){
+      if(__skuRuntimeCache.version !== __skuRuntimeCacheVersion){
+        __skuRuntimeCache.version = __skuRuntimeCacheVersion;
+        __skuRuntimeCache.aliasIndex = null;
+        __skuRuntimeCache.stockAggregatesByKey = new Map();
+        __skuRuntimeCache.stockAggregateLookupByKey = new Map();
+        __skuRuntimeCache.stockRepresentativesByLoc = new Map();
+      }
+      return __skuRuntimeCache;
+    }
+
     // --- Unificazione SKU FBA/FBM (solo cloud) ---
     // Permette di trattare SKU diversi dello stesso prodotto come un unico stock logico.
     // I dati vengono letti/scritti su Firestore: niente localStorage, niente fallback locale.
@@ -3385,7 +3418,7 @@ function guessTitleFromRaw(rawText, sku){
       };
     }
 
-    function buildSkuAliasIndex(){
+    function buildSkuAliasIndexFresh(){
       const parent = new Map();
       const explicitCanonical = new Map();
       const allSkus = new Set();
@@ -3483,6 +3516,12 @@ function guessTitleFromRaw(rawText, sku){
       };
       const isUnified = (sku)=> members(sku).length > 1;
       return { resolve, members, isUnified, groups };
+    }
+
+    function buildSkuAliasIndex(){
+      const cache = getSkuRuntimeCache();
+      if(!cache.aliasIndex) cache.aliasIndex = buildSkuAliasIndexFresh();
+      return cache.aliasIndex;
     }
 
     function resolveSkuAlias(sku){ return buildSkuAliasIndex().resolve(sku); }
@@ -3973,7 +4012,7 @@ function guessTitleFromRaw(rawText, sku){
     }
 
 
-    function stockRepresentativeItemsForLoc(loc){
+    function stockRepresentativeItemsForLocFresh(loc){
       const l = validInventoryLoc(loc) ? loc : "concamarise";
       const items = state.inventory?.[l]?.items || [];
       const aliasIndex = buildSkuAliasIndex();
@@ -3992,6 +4031,15 @@ function guessTitleFromRaw(rawText, sku){
         }
       }
       return Array.from(selected.values()).map(x=>x.it);
+    }
+
+    function stockRepresentativeItemsForLoc(loc){
+      const l = validInventoryLoc(loc) ? loc : "concamarise";
+      const cache = getSkuRuntimeCache();
+      if(!cache.stockRepresentativesByLoc.has(l)){
+        cache.stockRepresentativesByLoc.set(l, stockRepresentativeItemsForLocFresh(l));
+      }
+      return cache.stockRepresentativesByLoc.get(l) || [];
     }
 
     function itemUpdatedMillis(it){
@@ -4037,7 +4085,7 @@ function guessTitleFromRaw(rawText, sku){
       return lines[0]?.loc || "concamarise";
     }
 
-    function buildSkuStockAggregates(opts = {}){
+    function buildSkuStockAggregatesFresh(opts = {}){
       const filterLoc = validInventoryLoc(opts?.loc) ? opts.loc : "";
       const preferLoc = validInventoryLoc(opts?.preferLoc) ? opts.preferLoc : filterLoc;
       const aliasIndex = buildSkuAliasIndex();
@@ -4143,11 +4191,42 @@ function guessTitleFromRaw(rawText, sku){
       return out;
     }
 
+    function buildSkuStockAggregates(opts = {}){
+      const filterLoc = validInventoryLoc(opts?.loc) ? opts.loc : "";
+      const preferLoc = validInventoryLoc(opts?.preferLoc) ? opts.preferLoc : filterLoc;
+      const key = `${filterLoc}@@${preferLoc}`;
+      const cache = getSkuRuntimeCache();
+      if(!cache.stockAggregatesByKey.has(key)){
+        cache.stockAggregatesByKey.set(key, buildSkuStockAggregatesFresh({ loc: filterLoc, preferLoc }));
+      }
+      return cache.stockAggregatesByKey.get(key) || [];
+    }
+
+    function buildSkuStockAggregateLookup(preferLoc=""){
+      const pref = validInventoryLoc(preferLoc) ? preferLoc : "";
+      const key = `lookup@@${pref}`;
+      const cache = getSkuRuntimeCache();
+      if(!cache.stockAggregateLookupByKey.has(key)){
+        const map = new Map();
+        const arr = buildSkuStockAggregates({ preferLoc: pref });
+        for(const agg of arr){
+          const canonical = toSkuId(agg?.sku || agg?.id || "");
+          if(canonical) map.set(canonical, agg);
+          const aliases = Array.isArray(agg?.aliasSkus) ? agg.aliasSkus : [];
+          for(const alias of aliases){
+            const a = toSkuId(alias || "");
+            if(a && !map.has(a)) map.set(a, agg);
+          }
+        }
+        cache.stockAggregateLookupByKey.set(key, map);
+      }
+      return cache.stockAggregateLookupByKey.get(key) || new Map();
+    }
+
     function getSkuStockAggregate(sku, preferLoc=""){
       const s = toSkuId(sku || "");
       if(!s) return null;
-      const canonical = resolveSkuAlias(s) || s;
-      return buildSkuStockAggregates({ preferLoc }).find(x=>toSkuId(x.sku) === canonical || (Array.isArray(x.aliasSkus) && x.aliasSkus.includes(s))) || null;
+      return buildSkuStockAggregateLookup(preferLoc).get(s) || null;
     }
 
     function lowStockAggregates(filterLoc=""){
@@ -5059,6 +5138,7 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
       stopLowStockEmailMetaWatch();
       stopProductComboWatch();
       try{ state.comboCache instanceof Map && state.comboCache.clear(); }catch(_e){}
+      clearSkuRuntimeCache("stop_realtime");
       if(state.mail && state.mail.lowStock){
         state.mail.lowStock.meta = null;
         state.mail.lowStock.error = "";
@@ -5442,6 +5522,7 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
           if(!last || t > last) last = t;
         });
         inv.items = arr;
+        clearSkuRuntimeCache("inventory_snapshot_" + loc);
         try{ if(state.cache) state.cache.invIndexForMatch = null; }catch(_e){}
         inv.meta.count = arr.length;
         inv.meta.lastUpdatedAt = last ? new Date(last) : null;
@@ -10853,6 +10934,7 @@ async function loadProductFromDetails(){
           }
         }
       }catch(_e){}
+      clearSkuRuntimeCache("sku_unification_saved");
       return { canonicalSku: canonical, aliases: list, inventoryDocsUpdated: existing.length };
     }
 
@@ -11349,6 +11431,15 @@ async function saveProductFromDetails(){
 
 
 
+let __productsSheetRenderTimer = null;
+    function scheduleProductsSheetRender(delay=90){
+      try{ if(__productsSheetRenderTimer) clearTimeout(__productsSheetRenderTimer); }catch(_e){}
+      __productsSheetRenderTimer = setTimeout(()=>{
+        __productsSheetRenderTimer = null;
+        renderProductsSheet();
+      }, delay);
+    }
+
 function renderProductsSheet(){
       const list = $("productsList");
       const hint = $("productsHint");
@@ -11357,8 +11448,15 @@ function renderProductsSheet(){
       const inv = currentInv();
       const all = inv.items || [];
       const q = normalizeText(String($("productsSearch")?.value || state.ui.productsSearch || ""));
+      const aliasIndex = buildSkuAliasIndex();
+      const aggregateLookup = buildSkuStockAggregateLookup(state.route.loc);
       const filtered = q
-        ? all.filter(it=> normalizeText(`${it.sku} ${it.title} ${it.titleNorm} ${rackLocationSearchText(it)}`).includes(q))
+        ? all.filter(it=>{
+            const sku = toSkuId(it?.sku || it?.id || "");
+            const aliases = sku ? aliasIndex.members(sku).join(" ") : "";
+            const asin = readAsinFromDoc(it || {});
+            return normalizeText(`${sku} ${aliases} ${asin} ${it.title || ""} ${it.titleNorm || ""} ${rackLocationSearchText(it)}`).includes(q);
+          })
         : all;
 
       const isAdmin = !!state.user?.isAdmin;
@@ -11384,14 +11482,19 @@ function renderProductsSheet(){
         .sort((a,b)=> String(a.sku||"").localeCompare(String(b.sku||"")))
         .map(it=>{
           const sku = toSkuId(it.sku||it.id||"");
-          const qty = Number.isFinite(it.qty) ? it.qty : 0;
-          const meta = parseTitleMeta(it.title || "");
+          const stockAgg = aggregateLookup.get(sku) || it;
+          const qty = stockAgg && stockAgg.__isSkuAggregate ? lowStockQtyValue(stockAgg) : (Number.isFinite(Number(it.qty)) ? Math.round(Number(it.qty)) : 0);
+          const meta = parseTitleMeta(it.title || stockAgg.title || "");
           const titleMain = meta.main ? escapeHtml(meta.main) : (it.title ? escapeHtml(it.title) : "<span class='muted'>(senza nome)</span>");
           const metaSmall = buildMetaSmall(meta);
-          const badgeClass = __isLowStockItem(it) ? (qty>0 ? "warn" : "bad") : "ok";
-          const sogliaSmall = `Soglia: ${__lowStockThresholdLabel(it)}`;
+          const badgeClass = __isLowStockItem(stockAgg || it) ? (qty>0 ? "warn" : "bad") : "ok";
+          const sogliaSmall = `Soglia: ${__lowStockThresholdLabel(stockAgg || it)}`;
           const rackText = rackLocationDisplayFromItem(it);
-        const rackSmall = rackText !== "—" ? `Ubicazione: ${rackText}` : "";
+          const rackSmall = rackText !== "—" ? `Ubicazione: ${rackText}` : "";
+          const aliases = sku ? aliasIndex.members(sku).filter(x=>x && x!==sku) : [];
+          const asinValue = readAsinFromDoc(it || {});
+          const groupSmall = aliases.length ? `Gruppo: ${[sku, ...aliases].join(", ")}` : "";
+          const asinSmall = asinValue ? `ASIN: ${asinValue}` : "";
 
           if(editingSku && editingSku===sku){
             editHtml = `
@@ -11427,7 +11530,7 @@ function renderProductsSheet(){
               <div class="gridCell gridSku">${escapeHtml(sku)}</div>
               <div class="gridCell">
                 <div class="gridProdMain">${titleMain}</div>
-                <div class="gridProdSub">${escapeHtml([metaSmall, rackSmall, sogliaSmall].filter(Boolean).join(" • "))}</div>
+                <div class="gridProdSub">${escapeHtml([metaSmall, asinSmall, rackSmall, sogliaSmall, groupSmall].filter(Boolean).join(" • "))}</div>
               </div>
               <div class="gridCell gridRight"><span class="badge ${badgeClass}">${qty}</span></div>
             </div>`;
@@ -12427,7 +12530,7 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
       // Articoli: search + azioni
       $("productsSearch")?.addEventListener("input", ()=>{
         state.ui.productsSearch = $("productsSearch")?.value || "";
-        renderProductsSheet();
+        scheduleProductsSheetRender(90);
       });
       $("productsList")?.addEventListener("click", (e)=>{
         const row = e.target?.closest?.(".row");
