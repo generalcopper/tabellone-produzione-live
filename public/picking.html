@@ -7351,7 +7351,7 @@ function guessTitleFromRaw(rawText, sku){
 
       const usedCodes = rows.map(x=>x.code).filter(Boolean);
       return `<div class="rackAllocList">${rows.map(x=>{
-        const exclude = usedCodes.filter(code=> code !== x.code);
+        const exclude = []; // consenti riuso/merge di rack già assegnati allo stesso SKU nello stesso magazzino
         const selectHtml = `<select class="input" data-field="allocRackLocation" data-old-code="${escapeHtml(x.code)}" data-lot="${escapeHtml(x.lot)}" ${canEdit ? "" : "disabled"}>${rackLocationSelectOptions(x.code, sku, loc, { hideEmpty:true, exclude })}</select>`;
         const qtyHtml = `<input class="input rackAllocQtyInput" inputmode="numeric" data-field="allocQty" data-old-code="${escapeHtml(x.code)}" data-lot="${escapeHtml(x.lot)}" value="${escapeHtml(String(x.qty))}" ${canEdit ? "" : "disabled"} />`;
         const actionsHtml = canEdit
@@ -7461,10 +7461,8 @@ function guessTitleFromRaw(rawText, sku){
           if(newQty > Math.max(0, lotQty - otherSameLotQty)){
             throw new Error(`Quantità massima disponibile per questo lotto: ${Math.max(0, lotQty - otherSameLotQty)} pz.`);
           }
-          if(newQty > 0 && allocations.some((x, i)=> i !== oldIdx && x.code === newCode)){
-            throw new Error("Questa ubicazione è già presente per questo SKU. Scegli una posizione diversa.");
-          }
-
+          // Se la nuova posizione è già usata dallo stesso SKU, la normalizzazione cloud somma
+          // le quantità sullo stesso code+lot invece di bloccare l'operatore.
           const nextAllocationsRaw = allocations.filter((_, i)=> i !== oldIdx);
           if(newQty > 0){
             nextAllocationsRaw.push({ code:newCode, lot, qty:newQty, movementId:"", movementKey:"", updatedAtClient:nowClient });
@@ -17891,9 +17889,10 @@ function closeSheet(kind){
       const allAllocations = rackAllocationRowsForDetails(it || {});
       const canEdit = canUsePickingActions();
 
-      const pickerExclude = readRackLocationsFromDoc(it || {});
-      const excludeSet = new Set(normalizeRackLocationsList(pickerExclude));
-      const availableCount = RACK_LOCATION_OPTIONS.filter(code => !excludeSet.has(code) && isRackLocationAvailableForItem(code, sku, loc)).length;
+      // Le posizioni già usate dallo stesso SKU nello stesso magazzino restano selezionabili:
+      // nuova produzione libera può essere sommata nello stesso rack.
+      const pickerExclude = [];
+      const availableCount = RACK_LOCATION_OPTIONS.filter(code => isRackLocationAvailableForItem(code, sku, loc)).length;
 
       if(titleEl) titleEl.textContent = titleMain;
       if(sub) sub.textContent = `${sku} • ${prettyLoc(loc)} • Disponibilità: ${totalSkuQty} • Ubicato: ${allAllocatedQty} • Da ubicare: ${allRemainingQty} • Ubicazioni: ${rackText}`;
@@ -17912,10 +17911,10 @@ function closeSheet(kind){
           <div class="pdLine"><div class="pdLabel">Già ubicato lotto</div><div class="pdValue">${escapeHtml(String(allocatedQty))} pz</div></div>
           <div class="pdLine"><div class="pdLabel">Da ubicare lotto</div><div class="pdValue">${escapeHtml(String(remainingQty))} pz</div></div>
           <div class="field" style="margin-top:10px">
-            <label class="fieldLabel">Nuova posizione libera</label>
+            <label class="fieldLabel">Posizione da assegnare</label>
             ${rackLocationPickerHtml([], sku, loc, { multiple:false, disabled: !canEdit, exclude: pickerExclude, hideEmpty:true })}
             <div class="fieldError" data-err="rackLocation" style="display:none;"></div>
-            <div class="hint" style="margin-top:6px">Ubicazioni libere: ${availableCount}/${RACK_LOCATION_OPTIONS.length}. Appena selezioni una posizione parte la conferma browser.</div>
+            <div class="hint" style="margin-top:6px">Posizioni utilizzabili: ${availableCount}/${RACK_LOCATION_OPTIONS.length}. Puoi scegliere anche un rack già assegnato allo stesso SKU: la quantità verrà sommata cloud.</div>
           </div>
         </div>` : `
         <div class="pdSection">
@@ -18070,10 +18069,10 @@ function closeSheet(kind){
         const occ = rackLocationOccupantInfo(code, sku, loc);
         const already = alreadyForSku.has(code);
         const valid = RACK_LOCATION_SET.has(code);
-        const available = valid && !already && !occ && isRackLocationAvailableForItem(code, sku, loc);
-        let reason = "Disponibile";
+        // Già usata dallo stesso SKU = consentita: la quantità residua viene sommata cloud.
+        const available = valid && !occ && isRackLocationAvailableForItem(code, sku, loc);
+        let reason = already ? "Già usata dallo stesso SKU: verrà sommata" : "Disponibile";
         if(!valid) reason = "Non valida";
-        else if(already) reason = "Già usata per questo SKU";
         else if(occ) reason = `Occupata da ${occ.sku}`;
         return { code, level, available, reason, occupant:occ || null, already };
       });
@@ -18119,7 +18118,7 @@ function closeSheet(kind){
           return `<button class="qrRackLevelBtn${cls}" type="button" data-action="qrRackChooseLevel" data-code="${escapeHtml(info.code)}"${disabled}><strong>${escapeHtml(label)}</strong><span>${escapeHtml(info.available ? info.code : info.reason)}</span></button>`;
         }).join("");
         qrRackSetVideoVisible(false);
-        qrRackStatus(free.length ? "Scegli il livello disponibile." : "Nessun livello disponibile per questo QR: posizione occupata o già usata.", free.length ? "ok" : "warn");
+        qrRackStatus(free.length ? "Scegli il livello. Anche se già usato dallo stesso SKU, verrà sommato." : "Nessun livello disponibile per questo QR: posizione occupata da altro SKU.", free.length ? "ok" : "warn");
       }catch(err){
         console.warn("qrRackRenderLevels", err);
         qrRackStatus("Errore lettura livelli QR.", "bad");
@@ -18278,16 +18277,14 @@ function closeSheet(kind){
       }
       if(parsed.finalCode){
         const code = normalizeRackLocation(parsed.finalCode);
-        const it = getProductBySku(s.loc, s.sku) || {};
-        const already = new Set(readRackLocationsFromDoc(it || {})).has(code);
-        if(already || !isRackLocationAvailableForItem(code, s.sku, s.loc)){
+        if(!isRackLocationAvailableForItem(code, s.sku, s.loc)){
           const occ = rackLocationOccupantInfo(code, s.sku, s.loc);
           qrRackSetVideoVisible(false);
           const result = s.overlay?.querySelector?.("[data-qr-result]");
           const levels = s.overlay?.querySelector?.("[data-qr-levels]");
           if(result){
             result.style.display = "";
-            result.innerHTML = `<div class="qrRackResultCode">${escapeHtml(code)}</div><div class="qrRackResultSub">${escapeHtml(already ? "Già usata per questo SKU." : (occ ? `Occupata da ${occ.sku}` : "Non disponibile."))}</div>`;
+            result.innerHTML = `<div class="qrRackResultCode">${escapeHtml(code)}</div><div class="qrRackResultSub">${escapeHtml(occ ? `Occupata da ${occ.sku}` : "Non disponibile.")}</div>`;
           }
           if(levels) levels.innerHTML = "";
           qrRackStatus("Posizione non disponibile. Riavvia scansione o usa Scelta manuale.", "warn");
@@ -18347,8 +18344,8 @@ function closeSheet(kind){
 
       const meta = parseTitleMeta(it.title || "");
       const title = squashWhitespace(meta.main || it.title || sku) || sku;
-      const excluded = readRackLocationsFromDoc(it || {});
-      const availableCount = RACK_LOCATION_OPTIONS.filter(code => !excluded.includes(code) && isRackLocationAvailableForItem(code, sku, loc)).length;
+      const excluded = [];
+      const availableCount = RACK_LOCATION_OPTIONS.filter(code => isRackLocationAvailableForItem(code, sku, loc)).length;
 
       const overlay = document.createElement("div");
       overlay.className = "qrRackOverlay";
@@ -18359,7 +18356,7 @@ function closeSheet(kind){
           <div class="qrRackTop">
             <div style="min-width:0">
               <div class="qrRackTitle">Scansiona QR ubicazione</div>
-              <div class="qrRackSub">QR sulla trave: campata + posto. Dopo scegli il livello libero.</div>
+              <div class="qrRackSub">QR sulla trave: campata + posto. Dopo scegli il livello. Se è già dello stesso SKU, verrà sommato.</div>
             </div>
             <button class="qrRackClose" type="button" data-action="qrRackClose" aria-label="Chiudi scanner">×</button>
           </div>
@@ -18367,7 +18364,7 @@ function closeSheet(kind){
             <div class="qrRackProduct">
               <div class="qrRackProductSku">${escapeHtml(sku)}</div>
               <div class="qrRackProductName">${escapeHtml(title)}</div>
-              <div class="qrRackProductMeta">${escapeHtml(prettyLoc(loc))} • ${escapeHtml(lotLabelFromId(selectedLot))} • da ubicare: ${escapeHtml(String(Math.round(remaining)))} pz • posizioni libere: ${escapeHtml(String(availableCount))}</div>
+              <div class="qrRackProductMeta">${escapeHtml(prettyLoc(loc))} • ${escapeHtml(lotLabelFromId(selectedLot))} • da ubicare: ${escapeHtml(String(Math.round(remaining)))} pz • posizioni utilizzabili: ${escapeHtml(String(availableCount))}</div>
             </div>
             <div class="qrRackVideoBox" data-qr-video-box>
               <video data-qr-video autoplay muted playsinline></video>
@@ -18395,11 +18392,9 @@ function closeSheet(kind){
         if(levelBtn){
           if(levelBtn.disabled || levelBtn.classList.contains("disabled")) return;
           const code = normalizeRackLocation(levelBtn.getAttribute("data-code") || "");
-          const itNow = getProductBySku(loc, sku) || {};
-          const already = new Set(readRackLocationsFromDoc(itNow || {})).has(code);
-          if(already || !isRackLocationAvailableForItem(code, sku, loc)){
+          if(!isRackLocationAvailableForItem(code, sku, loc)){
             const occ = rackLocationOccupantInfo(code, sku, loc);
-            qrRackStatus(already ? "Livello già usato per questo SKU." : (occ ? `Livello occupato da ${occ.sku}.` : "Livello non disponibile."), "warn");
+            qrRackStatus(occ ? `Livello occupato da ${occ.sku}.` : "Livello non disponibile.", "warn");
             qrRackRenderLevels(qrRackBaseFromFinalCode(code));
             return;
           }
@@ -18449,8 +18444,8 @@ function closeSheet(kind){
       const remaining = rackUnallocatedQtyByLotFromDoc(it || {}, selectedLot);
       if(remaining <= 0) return false;
 
-      const excluded = readRackLocationsFromDoc(it || {});
-      const freeCodes = RACK_LOCATION_OPTIONS.filter(code => !excluded.includes(code) && isRackLocationAvailableForItem(code, sku, loc));
+      const excluded = [];
+      const freeCodes = RACK_LOCATION_OPTIONS.filter(code => isRackLocationAvailableForItem(code, sku, loc));
       if(!freeCodes.length){
         showToast("Nessuna ubicazione libera", "Non ci sono posizioni libere disponibili per questo prodotto.", 2600);
         return false;
@@ -18528,7 +18523,6 @@ function closeSheet(kind){
       const qty = lotQty || totalSkuQty;
       const remainingBefore = rackUnallocatedQtyByLotFromDoc(it || {}, lot);
       const existingAllocationsBefore = normalizeRackAllocationsForWrite(readRackAllocationsFromDoc(it || {}));
-      const existingCodesBefore = new Set(existingAllocationsBefore.map(x=>x.code));
       const selected = quickSelectedCode ? [quickSelectedCode] : readLocationOnlySelection();
       const selectedCode = selected[0] || "";
 
@@ -18560,11 +18554,8 @@ function closeSheet(kind){
         showToast("Ubicazione occupata", "Scegli solo ubicazioni libere.", 2400);
         return;
       }
-      if(remainingBefore > 0 && existingCodesBefore.has(selectedCode)){
-        if(!quickMode) setPdFieldError("rackLocation", "Questa posizione è già usata per questo prodotto. Scegli una nuova posizione libera.");
-        showToast("Posizione già usata", "Per la quantità residua scegli un’altra ubicazione.", 2600);
-        return;
-      }
+      // Se selectedCode è già usata dallo stesso SKU nello stesso magazzino, è valida:
+      // la nuova quantità residua verrà sommata nella stessa allocazione cloud (code+lot).
 
       let qtyToAssign = 0;
       if(remainingBefore > RACK_PALLET_CAPACITY){
@@ -18637,7 +18628,7 @@ function closeSheet(kind){
             if(sourceLotQty <= 0) throw new Error("Lotto non trovato o senza disponibilità.");
 
             if(sourceRemaining > 0){
-              if(sourceAllocations.some(x=>x.code === selectedCode)) throw new Error("Questa posizione è già usata per questo prodotto. Scegli una nuova posizione libera.");
+              // stesso SKU + stesso rack consentito: normalizeRackAllocationsForWrite sommerà code+lot.
               if(qtyToAssign > sourceRemaining) throw new Error(`Restano da ubicare ${sourceRemaining} pz in Cerea per questo lotto.`);
               movedQty = qtyToAssign;
               finalRemaining = Math.max(0, sourceRemaining - movedQty);
@@ -18653,9 +18644,7 @@ function closeSheet(kind){
             const destQty = stockQtyFromDoc(destFresh);
             const destAllocations = normalizeRackAllocationsForWrite(readRackAllocationsFromDoc(destFresh));
 
-            if(destAllocations.some(x=>x.code === selectedCode)){
-              throw new Error("Questa posizione è già usata per questo prodotto in Concamarise. Scegli una nuova posizione libera.");
-            }
+            // stesso SKU + stesso rack in Concamarise consentito: viene sommato cloud.
 
             const destCleanAllocations = normalizeRackAllocationsForWrite([
               ...destAllocations,
@@ -18843,7 +18832,7 @@ function closeSheet(kind){
           if(freshLotQty <= 0) throw new Error("Lotto non trovato o senza disponibilità.");
 
           if(freshRemaining > 0){
-            if(freshAllocations.some(x=>x.code === selectedCode)) throw new Error("Questa posizione è già usata per questo prodotto. Scegli una nuova posizione libera.");
+            // stesso SKU + stesso rack consentito: la nuova quantità viene sommata cloud.
             if(qtyToAssign > freshRemaining) throw new Error(`Restano da ubicare ${freshRemaining} pz per questo lotto.`);
             assignedQtyFinal = qtyToAssign;
             cleanAllocations = normalizeRackAllocationsForWrite([
