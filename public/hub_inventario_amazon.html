@@ -4742,6 +4742,7 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
 
     function stopAllRealtime(){
       resetLowStockRealtimeWatcher();
+      resetZeroStockRecovery();
       stopTwReordersWatch();
       stopTwCompletedAmazonWatch();
       for(const loc of ["cerea","concamarise"]){
@@ -4766,6 +4767,324 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
       if(state.route.view==="home") renderHomeDashboard();
       if(state.ui.sheet==="sottoscorta") renderSottoscortaSheet();
       if(state.ui.sheet==="productDetails") renderProductDetailsSheet();
+    }
+
+
+    // --- Recovery SKU a 0 cancellati da versioni precedenti ---
+    // Solo cloud: legge anagrafica globale/movimenti Firestore e ricrea i documenti inventario mancanti a qty 0.
+    let __zeroStockRecoveryTimer = null;
+    let __zeroStockRecoveryDone = false;
+    let __zeroStockRecoveryRunning = false;
+
+    function resetZeroStockRecovery(){
+      try{ if(__zeroStockRecoveryTimer) clearTimeout(__zeroStockRecoveryTimer); }catch(_e){}
+      __zeroStockRecoveryTimer = null;
+      __zeroStockRecoveryDone = false;
+      __zeroStockRecoveryRunning = false;
+    }
+
+    function zeroStockRecoveryAddCandidate(map, raw){
+      try{
+        const sku = toSkuId(raw?.sku || raw?.id || "");
+        const loc = normalizeInventoryLoc(raw?.loc || raw?.location || raw?.lastSeenLocation || "");
+        if(!sku || !loc) return false;
+        const key = `${loc}::${sku}`;
+        const title = squashWhitespace(raw?.title || raw?.name || raw?.productTitle || sku) || sku;
+        const ts = Number(raw?.lastSeenAtClient || raw?.updatedAtClient || raw?.createdAtClient || 0) || 0;
+        const prev = map.get(key);
+        if(!prev || ts >= Number(prev.ts || 0)){
+          map.set(key, {
+            sku,
+            loc,
+            title,
+            titleNorm: normalizeText(title || sku),
+            ts,
+            productionArea: normalizeProductionArea(raw?.productionArea || raw?.areaProduzione || raw?.productionAreaFromProduct || ""),
+            lowStockThreshold: __parseLowStockThresholdValue(raw?.lowStockThreshold),
+            source: raw?.source || "cloud_recovery",
+            sourceKind: raw?.sourceKind || raw?.lastSeenKind || "cloud_recovery"
+          });
+        }
+        return true;
+      }catch(_e){ return false; }
+    }
+
+    function zeroStockRecoveryCandidateLocsFromProductDoc(d){
+      const out = [];
+      const add = (v)=>{
+        const loc = normalizeInventoryLoc(v);
+        if(loc && !out.includes(loc)) out.push(loc);
+      };
+      add(d?.lastSeenLocation);
+      add(d?.lastInventoryLocation);
+      add(d?.location);
+      add(d?.loc);
+      add(d?.warehouse);
+      add(d?.toWarehouse);
+      add(d?.fromWarehouse);
+      for(const k of ["locations", "warehouses", "lastSeenLocations", "inventoryLocations"]){
+        const arr = d && Array.isArray(d[k]) ? d[k] : [];
+        arr.forEach(add);
+      }
+      return out;
+    }
+
+    function zeroStockRecoveryMovementLocs(d){
+      const out = [];
+      const add = (v)=>{
+        const loc = normalizeInventoryLoc(v);
+        if(loc && !out.includes(loc)) out.push(loc);
+      };
+      add(d?.toWarehouse);
+      add(d?.fromWarehouse);
+      add(d?.location);
+      add(d?.loc);
+      add(d?.warehouse);
+      return out;
+    }
+
+    async function collectZeroStockRecoveryCandidates(){
+      const api = state.firebase?.api;
+      const db = state.firebase?.db;
+      const candidates = new Map();
+      if(!api || !db) return candidates;
+
+      // Fonte 1: anagrafica globale prodotti. È la fonte principale perché il bug cancellava solo /amzInventory/{sede}/items/{SKU}.
+      try{
+        const col = api.collection(db, COL_PRODUCTS);
+        const q = api.query(col, api.limit(5000));
+        const snap = await api.getDocs(q);
+        snap.forEach(docSnap=>{
+          const d = docSnap.data() || {};
+          const sku = toSkuId(d.sku || docSnap.id || "");
+          if(!sku) return;
+          if(d.active === false) return;       // cancellazioni manuali volontarie: non ripristinare
+          if(d.renamedTo || d.renamedAt || d.lastSeenKind === "manual_rename") return;
+          const locs = zeroStockRecoveryCandidateLocsFromProductDoc(d);
+          locs.forEach(loc=> zeroStockRecoveryAddCandidate(candidates, {
+            ...d,
+            sku,
+            loc,
+            title: d.title || d.name || sku,
+            source: "amzInventoryProducts",
+            sourceKind: d.lastSeenKind || "product_doc"
+          }));
+        });
+      }catch(err){
+        console.warn("zero-stock recovery product scan skipped:", err);
+      }
+
+      // Fonte 2: ultimi movimenti cloud. Fallback utile se qualche anagrafica globale è incompleta.
+      try{
+        if(api.collectionGroup){
+          const cg = api.collectionGroup(db, SUB_MOVES);
+          const q = api.query(cg, api.orderBy("createdAtClient", "desc"), api.limit(1500));
+          const snap = await api.getDocs(q);
+          snap.forEach(docSnap=>{
+            const d = docSnap.data() || {};
+            const parentSku = docSnap?.ref?.parent?.parent?.id || "";
+            const sku = toSkuId(d.sku || parentSku || "");
+            if(!sku) return;
+            if(String(d.type || "") === "manual_rename") return;
+            const locs = zeroStockRecoveryMovementLocs(d);
+            locs.forEach(loc=> zeroStockRecoveryAddCandidate(candidates, {
+              ...d,
+              sku,
+              loc,
+              title: d.title || d.productTitle || sku,
+              source: "movements",
+              sourceKind: d.type || "movement"
+            }));
+          });
+        }
+      }catch(err){
+        console.warn("zero-stock recovery movement scan skipped:", err);
+      }
+
+      return candidates;
+    }
+
+    function zeroStockRecoveryExistingKeySet(){
+      const set = new Set();
+      for(const loc of ["cerea", "concamarise"]){
+        const items = state.inventory?.[loc]?.items || [];
+        for(const it of items){
+          const sku = toSkuId(it?.sku || it?.id || "");
+          if(sku) set.add(`${loc}::${sku}`);
+        }
+      }
+      return set;
+    }
+
+    async function filterMissingZeroStockCandidates(candidates){
+      const api = state.firebase?.api;
+      const db = state.firebase?.db;
+      if(!api || !db) return [];
+      const existing = zeroStockRecoveryExistingKeySet();
+      const arr = Array.from(candidates.values()).filter(c=> c?.sku && c?.loc && !existing.has(`${c.loc}::${c.sku}`));
+      const missing = [];
+      for(let i=0; i<arr.length; i+=60){
+        const part = arr.slice(i, i+60);
+        await Promise.all(part.map(async c=>{
+          try{
+            const ref = api.doc(db, COL_ROOT, c.loc, SUB_ITEMS, c.sku);
+            const snap = await api.getDoc(ref);
+            if(!snap.exists()) missing.push(c);
+          }catch(_e){}
+        }));
+      }
+      return missing;
+    }
+
+    async function runZeroStockRecovery(reason="startup"){
+      try{
+        if(__zeroStockRecoveryRunning || __zeroStockRecoveryDone) return;
+        if(!state.user?.isAdmin || !state.user?.isWhitelisted) return;
+        if(!(state.inventory?.cerea?.meta?.loaded && state.inventory?.concamarise?.meta?.loaded)) return;
+        const api = state.firebase?.api;
+        const db = state.firebase?.db;
+        if(!api || !db) return;
+
+        __zeroStockRecoveryRunning = true;
+        __zeroStockRecoveryDone = true;
+
+        const candidates = await collectZeroStockRecoveryCandidates();
+        const missing = await filterMissingZeroStockCandidates(candidates);
+        if(!missing.length){
+          try{
+            await api.setDoc(api.doc(db, COL_META, "zeroStockRecoveryState"), {
+              lastRunAt: api.serverTimestamp(),
+              lastRunAtClient: Date.now(),
+              restoredCount: 0,
+              candidateCount: candidates.size,
+              reason: String(reason || "startup"),
+              status: "NO_MISSING_SKU"
+            }, { merge:true });
+          }catch(_e){}
+          return;
+        }
+
+        const nowClient = Date.now();
+        const who = state.user?.emailLower || state.user?.email || state.user?.uid || "";
+        let restored = 0;
+        const restoredPreview = [];
+
+        for(let i=0; i<missing.length; i+=220){
+          const part = missing.slice(i, i+220);
+          const batch = api.writeBatch(db);
+          for(const c of part){
+            const itemRef = api.doc(db, COL_ROOT, c.loc, SUB_ITEMS, c.sku);
+            const productRef = api.doc(db, COL_PRODUCTS, c.sku);
+            const moveRef = api.doc(db, COL_PRODUCTS, c.sku, SUB_MOVES, `zero_stock_recovery_${c.loc}`);
+            const title = squashWhitespace(c.title || c.sku) || c.sku;
+            const itemPatch = {
+              sku: c.sku,
+              title,
+              titleNorm: normalizeText(title || c.sku),
+              qty: 0,
+              stockLots: [],
+              reservedQty: 0,
+              pendingPickQty: 0,
+              availableQty: 0,
+              rackLocation: "",
+              rackLocations: [],
+              rackAllocations: [],
+              zeroStock: true,
+              zeroStockAt: api.serverTimestamp(),
+              zeroStockAtClient: nowClient,
+              zeroStockRecovered: true,
+              zeroStockRecoveredAt: api.serverTimestamp(),
+              zeroStockRecoveredAtClient: nowClient,
+              zeroStockRecoveryReason: "Documento inventario mancante dopo vecchio bug qty 0 in Picking",
+              zeroStockRecoverySource: c.source || "cloud_recovery",
+              location: c.loc,
+              productionArea: normalizeProductionArea(c.productionArea || defaultProductionAreaForLocation(c.loc)),
+              areaProduzione: normalizeProductionArea(c.productionArea || defaultProductionAreaForLocation(c.loc)),
+              updatedAt: api.serverTimestamp(),
+              updatedAtClient: nowClient,
+              updatedBy: who,
+              lastSeenAt: api.serverTimestamp(),
+              lastSeenAtClient: nowClient,
+              lastSeenKind: "zero_stock_recovery"
+            };
+            if(c.lowStockThreshold !== null && c.lowStockThreshold !== undefined) itemPatch.lowStockThreshold = c.lowStockThreshold;
+            batch.set(itemRef, itemPatch, { merge:true });
+            batch.set(productRef, {
+              sku: c.sku,
+              title,
+              titleNorm: normalizeText(title || c.sku),
+              active: true,
+              zeroStockRecovered: true,
+              zeroStockRecoveredAt: api.serverTimestamp(),
+              zeroStockRecoveredAtClient: nowClient,
+              lastSeenAt: api.serverTimestamp(),
+              lastSeenAtClient: nowClient,
+              lastSeenBy: who,
+              lastSeenLocation: c.loc,
+              lastSeenKind: "zero_stock_recovery",
+              recoveredZeroStockLocations: api.arrayUnion ? api.arrayUnion(c.loc) : [c.loc]
+            }, { merge:true });
+            batch.set(moveRef, {
+              type: "zero_stock_recovery",
+              sku: c.sku,
+              qtySigned: 0,
+              deltaSigned: 0,
+              beforeQty: 0,
+              afterQty: 0,
+              fromWarehouse: c.loc,
+              toWarehouse: c.loc,
+              location: c.loc,
+              source: "cloud_recovery",
+              note: "Ripristino documento inventario a quantità 0 dopo vecchio bug Picking",
+              recoveredFrom: c.source || "cloud_recovery",
+              recoveredSourceKind: c.sourceKind || "",
+              locked: true,
+              deleteLocked: true,
+              createdAt: api.serverTimestamp(),
+              createdAtClient: nowClient,
+              createdByUid: state.user?.uid || "",
+              createdByEmail: who
+            }, { merge:true });
+            restored++;
+            if(restoredPreview.length < 30) restoredPreview.push({ sku:c.sku, loc:c.loc, title });
+          }
+          await batch.commit();
+        }
+
+        try{
+          await api.setDoc(api.doc(db, COL_META, "zeroStockRecoveryState"), {
+            lastRunAt: api.serverTimestamp(),
+            lastRunAtClient: nowClient,
+            restoredCount: restored,
+            candidateCount: candidates.size,
+            restoredPreview,
+            reason: String(reason || "startup"),
+            status: "RESTORED",
+            by: who
+          }, { merge:true });
+        }catch(_e){}
+
+        showToast("SKU a 0 recuperati", `${restored} documenti inventario ricreati in cloud a quantità 0.`, 4200);
+      }catch(err){
+        console.warn("zero-stock recovery error:", err);
+        __zeroStockRecoveryDone = true;
+        showToast("Recupero SKU a 0", String(err?.message || err).slice(0, 180), 4200);
+      }finally{
+        __zeroStockRecoveryRunning = false;
+      }
+    }
+
+    function scheduleZeroStockRecovery(reason="startup"){
+      try{
+        if(__zeroStockRecoveryDone || __zeroStockRecoveryRunning) return;
+        if(!state.user?.isAdmin || !state.user?.isWhitelisted) return;
+        if(!(state.inventory?.cerea?.meta?.loaded && state.inventory?.concamarise?.meta?.loaded)) return;
+        if(__zeroStockRecoveryTimer) clearTimeout(__zeroStockRecoveryTimer);
+        __zeroStockRecoveryTimer = setTimeout(()=>{
+          __zeroStockRecoveryTimer = null;
+          void runZeroStockRecovery(reason);
+        }, 900);
+      }catch(_e){}
     }
 
     function startRealtimeFor(loc){
@@ -4839,6 +5158,7 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
 
         triggerLowStockMailFromRealtime("realtime_low_stock_" + loc);
         scheduleTwReordersBackfillFromState("inventory_" + loc);
+        scheduleZeroStockRecovery("inventory_" + loc);
       }, (err)=>{
         console.warn("inventory watch error", err);
         showToast("Permessi insufficienti", err?.message || String(err));
