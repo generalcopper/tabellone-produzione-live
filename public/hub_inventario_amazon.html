@@ -4774,7 +4774,7 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
         snap.forEach(docSnap=>{
           const d = docSnap.data() || {};
           const sku = d.sku || docSnap.id;
-          const qty = Number.isFinite(d.qty) ? d.qty : 0;
+          const qty = stockQtyFromDoc(d || {});
           const title = d.title || d.name || "";
           const updatedAt = d.updatedAt || null;
           const updatedAtClient = d.updatedAtClient || null;
@@ -4784,6 +4784,9 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
             title,
             titleNorm: d.titleNorm || normalizeText(title || sku),
             qty,
+            zeroStock: d.zeroStock === true || qty === 0,
+            zeroStockAt: d.zeroStockAt || null,
+            zeroStockAtClient: Number.isFinite(Number(d.zeroStockAtClient)) ? Number(d.zeroStockAtClient) : null,
             reservedQty: Number.isFinite(Number(d.reservedQty)) ? Math.max(0, Math.round(Number(d.reservedQty))) : 0,
             availableQty: Math.max(0, (Number.isFinite(Number(qty)) ? Math.round(Number(qty)) : 0) - (Number.isFinite(Number(d.reservedQty)) ? Math.max(0, Math.round(Number(d.reservedQty))) : 0)),
             lowStockThreshold: __parseLowStockThresholdValue(d.lowStockThreshold),
@@ -10140,8 +10143,11 @@ async function saveProductFromDetails(){
             note: note || "",
             qty,
             lowStockThreshold: lowStockThreshold,
-            rackLocation: finalRackLocation,
-            rackLocations: finalRackLocations,
+            rackLocation: qty > 0 ? finalRackLocation : "",
+            rackLocations: qty > 0 ? finalRackLocations : [],
+            zeroStock: qty === 0,
+            zeroStockAt: qty === 0 ? api.serverTimestamp() : null,
+            zeroStockAtClient: qty === 0 ? nowClient : null,
             updatedAt: api.serverTimestamp(),
             updatedAtClient: nowClient,
             updatedBy: state.user.email || "",
@@ -10421,27 +10427,27 @@ async function saveProductFromDetails(){
             seenCount: api.increment(1)
           }, { merge:true });
 
-          // aggiorna origine (o elimina se 0)
-          if(remaining === 0){
-            tx.delete(fromRef);
-          }else{
-            tx.set(fromRef, {
-              sku: oldSku,
-              title: finalTitle,
-              titleNorm: normalizeText(finalTitle || oldSku),
-              lowStockThreshold: lowStockThreshold,
-              rackLocation: remainingRackLocation,
-              rackLocations: remainingRackLocations,
-              qty: remaining,
-              updatedAt: api.serverTimestamp(),
-              updatedAtClient: nowClient,
-              updatedBy: who,
-              lastSeenAt: api.serverTimestamp(),
-              lastSeenAtClient: nowClient,
-              lastSeenKind: "manual_move_out",
-              seenCount: api.increment(1)
-            }, { merge:true });
-          }
+          // aggiorna origine: NON eliminare mai il documento se la quantità residua diventa 0.
+          // Lo SKU a 0 deve restare visibile in Hub Inventario Amazon e nello storico cloud.
+          tx.set(fromRef, {
+            sku: oldSku,
+            title: finalTitle,
+            titleNorm: normalizeText(finalTitle || oldSku),
+            lowStockThreshold: lowStockThreshold,
+            rackLocation: remaining > 0 ? remainingRackLocation : "",
+            rackLocations: remaining > 0 ? remainingRackLocations : [],
+            qty: Math.max(0, Math.round(Number(remaining) || 0)),
+            zeroStock: remaining === 0,
+            zeroStockAt: remaining === 0 ? api.serverTimestamp() : null,
+            zeroStockAtClient: remaining === 0 ? nowClient : null,
+            updatedAt: api.serverTimestamp(),
+            updatedAtClient: nowClient,
+            updatedBy: who,
+            lastSeenAt: api.serverTimestamp(),
+            lastSeenAtClient: nowClient,
+            lastSeenKind: "manual_move_out",
+            seenCount: api.increment(1)
+          }, { merge:true });
 
           // Log movimento su anagrafica prodotto: /amzInventoryProducts/{sku}/movements
           const movesCol = api.collection(db, COL_PRODUCTS, oldSku, SUB_MOVES);
@@ -10650,6 +10656,9 @@ function renderProductsSheet(){
             title: finalTitle,
             titleNorm: normalizeText(finalTitle || sku),
             qty,
+            zeroStock: qty === 0,
+            zeroStockAt: qty === 0 ? api.serverTimestamp() : null,
+            zeroStockAtClient: qty === 0 ? nowClient : null,
             updatedAt: api.serverTimestamp(),
             updatedAtClient: nowClient,
             updatedBy: who,
