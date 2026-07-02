@@ -6442,6 +6442,70 @@ function guessTitleFromRaw(rawText, sku){
       return parts.join(" • ");
     }
 
+
+    function normalizeAsin(v){
+      const raw = String(v || "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+      return raw ? raw.slice(0, 10) : "";
+    }
+
+    function readAsinFromDoc(d){
+      try{
+        if(!d || typeof d !== "object") return "";
+        const direct = d.asin ?? d.ASIN ?? d.amazonAsin ?? d.productAsin ?? d.asinGroupKey ?? d.skuUnificationAsin ?? d?.skuUnification?.asin ?? d?.asinUnification?.asin ?? "";
+        const parsed = direct || parseTitleMeta(d.title || d.name || "").asin || "";
+        return normalizeAsin(parsed);
+      }catch(_e){
+        return "";
+      }
+    }
+
+    function readAsinFromLine(line){
+      try{
+        const direct = line?.asin ?? line?.ASIN ?? line?.amazonAsin ?? "";
+        const parsed = direct || parseTitleMeta(line?.title || line?.name || "").asin || "";
+        return normalizeAsin(parsed);
+      }catch(_e){
+        return "";
+      }
+    }
+
+
+    function skusWithSameAsin(asin, selfSku=""){
+      const a = normalizeAsin(asin || "");
+      const out = [];
+      const seen = new Set();
+      const push = (v)=>{
+        const s = toSkuId(v || "");
+        if(!s || seen.has(s)) return;
+        seen.add(s);
+        out.push(s);
+      };
+      push(selfSku);
+      if(!a) return out;
+      try{
+        for(const loc of inventoryLocs()){
+          const items = state.inventory?.[loc]?.items || [];
+          for(const it of items){
+            if(readAsinFromDoc(it || {}) === a) push(it?.sku || it?.id || "");
+          }
+        }
+      }catch(_e){}
+      return out;
+    }
+
+    function asinCloudFields(asin, nowClient, who){
+      const a = normalizeAsin(asin || "");
+      return {
+        asin: a,
+        ASIN: a,
+        amazonAsin: a,
+        asinGroupKey: a,
+        skuUnificationAsin: a,
+        asinUpdatedAtClient: nowClient || Date.now(),
+        asinUpdatedBy: who || ""
+      };
+    }
+
     // --- Flow dedupe (anti-doppio upload) ---
     function fnv1aHex(str){
       let h = 0x811c9dc5;
@@ -6533,19 +6597,25 @@ function guessTitleFromRaw(rawText, sku){
           });
 
           for(const line of (Array.isArray(p?.aggregated) ? p.aggregated : [])){
-            const sku = toSkuId(line?.sku || "");
+            const requestedSku = toSkuId(line?.sku || "");
+            const stockSku = stockSkuForSkuAny(requestedSku, loc) || requestedSku;
             const qtyAbs = Math.abs(parseQty(line?.qty || 0) || 0);
-            if(!sku || !qtyAbs) continue;
+            if(!requestedSku || !stockSku || !qtyAbs) continue;
 
-            const title = squashWhitespace(line?.title || sku) || sku;
-            const hit = bySku.get(sku);
+            const sku = stockSku;
+            const title = savedTitleForExistingInventorySku(requestedSku, loc) || squashWhitespace(line?.title || requestedSku) || requestedSku;
+            const asin = line?.asin || savedAsinForExistingInventorySku(requestedSku, loc) || readAsinFromLine(line || {});
+            const hit = bySku.get(stockSku) || bySku.get(requestedSku);
             if(hit && hit.item){
               const item = hit.item;
               const prevReserved = reservedQtyFromItem(item);
               const prevPending = Number.isFinite(Number(item.pendingPickQty)) ? Math.max(0, Math.round(Number(item.pendingPickQty))) : prevReserved;
-              item.sku = item.sku || sku;
+              item.sku = item.sku || stockSku;
+              item.requestedSku = requestedSku;
+              item.aliasRequestedSku = requestedSku !== stockSku ? requestedSku : "";
+              if(asin){ item.asin = asin; item.ASIN = asin; item.amazonAsin = asin; item.asinGroupKey = asin; item.skuUnificationAsin = asin; }
               item.title = item.title || title;
-              item.titleNorm = item.titleNorm || normalizeText(item.title || sku);
+              item.titleNorm = item.titleNorm || normalizeText(item.title || stockSku);
               item.reservedQty = prevReserved + qtyAbs;
               item.pendingPickQty = prevPending + qtyAbs;
               item.availableQty = lowStockQtyValue(item);
@@ -6556,10 +6626,13 @@ function guessTitleFromRaw(rawText, sku){
               item.location = loc;
             }else{
               const item = {
-                id: sku,
-                sku,
+                id: stockSku,
+                sku: stockSku,
+                requestedSku,
+                aliasRequestedSku: requestedSku !== stockSku ? requestedSku : "",
+                ...(asin ? { asin, ASIN: asin, amazonAsin: asin, asinGroupKey: asin, skuUnificationAsin: asin } : {}),
                 title,
-                titleNorm: normalizeText(title || sku),
+                titleNorm: normalizeText(title || stockSku),
                 qty: 0,
                 reservedQty: qtyAbs,
                 pendingPickQty: qtyAbs,
@@ -6571,7 +6644,8 @@ function guessTitleFromRaw(rawText, sku){
                 location: loc
               };
               inv.items.push(item);
-              bySku.set(sku, { item, idx: inv.items.length - 1 });
+              bySku.set(stockSku, { item, idx: inv.items.length - 1 });
+              if(requestedSku !== stockSku) bySku.set(requestedSku, { item, idx: inv.items.length - 1 });
             }
           }
 
@@ -6588,6 +6662,233 @@ function guessTitleFromRaw(rawText, sku){
       }catch(err){
         console.warn("reservation optimistic update", err);
       }
+    }
+
+
+
+    // --- Unificazione SKU FBA/FBM (solo cloud) ---
+    // Permette di trattare SKU diversi dello stesso prodotto come un unico stock logico.
+    // I dati vengono letti/scritti su Firestore: niente localStorage, niente fallback locale.
+    function normalizeSkuAliases(value, selfSku=""){
+      const out = [];
+      const seen = new Set();
+      const push = (v)=>{
+        const sku = toSkuId((v && typeof v === "object") ? (v.sku || v.id || v.code || v.alias || v.value || "") : v);
+        if(!sku || seen.has(sku)) return;
+        seen.add(sku);
+        out.push(sku);
+      };
+      push(selfSku);
+      if(Array.isArray(value)) value.forEach(push);
+      else String(value || "").split(/[\s,;\n\r]+/g).forEach(push);
+      return out;
+    }
+
+    function readSkuAliasesFromDoc(d, fallbackSku=""){
+      const base = toSkuId(fallbackSku || d?.sku || d?.id || "");
+      const raw = [];
+      const add = (v)=>{
+        if(Array.isArray(v)) raw.push(...v);
+        else if(v) raw.push(v);
+      };
+      add(base);
+      add(d?.canonicalSku);
+      add(d?.skuGroupCanonical);
+      add(d?.masterSku);
+      add(d?.parentSku);
+      add(d?.aliasOfSku);
+      add(d?.skuAliases);
+      add(d?.aliasSkus);
+      add(d?.linkedSkus);
+      add(d?.unifiedSkus);
+      add(d?.fbaFbmSkus);
+      add(d?.skuUnification?.canonicalSku);
+      add(d?.skuUnification?.aliases);
+      return normalizeSkuAliases(raw, base);
+    }
+
+    function readSkuAliasCanonicalFromDoc(d, fallbackSku=""){
+      const base = toSkuId(fallbackSku || d?.sku || d?.id || "");
+      const raw = d?.canonicalSku || d?.skuGroupCanonical || d?.masterSku || d?.parentSku || d?.aliasOfSku || d?.skuUnification?.canonicalSku || "";
+      return toSkuId(raw) || base;
+    }
+
+    function skuUnificationFields(canonicalSku, aliases, nowClient, who){
+      const canonical = toSkuId(canonicalSku || "");
+      const list = normalizeSkuAliases(aliases, canonical);
+      const clean = list.length ? list : (canonical ? [canonical] : []);
+      return {
+        canonicalSku: canonical,
+        skuGroupCanonical: canonical,
+        skuAliases: clean,
+        aliasSkus: clean,
+        linkedSkus: clean,
+        fbaFbmSkus: clean,
+        skuUnification: {
+          canonicalSku: canonical,
+          aliases: clean,
+          version: 1,
+          mode: "same_physical_stock",
+          updatedAtClient: nowClient || Date.now(),
+          updatedBy: who || ""
+        },
+        skuUnificationUpdatedAtClient: nowClient || Date.now(),
+        skuUnificationUpdatedBy: who || ""
+      };
+    }
+
+    function buildSkuAliasIndex(){
+      const parent = new Map();
+      const explicitCanonical = new Map();
+      const allSkus = new Set();
+      const asinGroups = new Map();
+      const find = (x)=>{
+        const s = toSkuId(x || "");
+        if(!s) return "";
+        if(!parent.has(s)) parent.set(s, s);
+        let p = parent.get(s);
+        if(p !== s){ p = find(p); parent.set(s, p); }
+        return p;
+      };
+      const union = (a,b)=>{
+        const ra = find(a), rb = find(b);
+        if(!ra || !rb || ra === rb) return;
+        const root = ra.localeCompare(rb) <= 0 ? ra : rb;
+        const child = root === ra ? rb : ra;
+        parent.set(child, root);
+      };
+      const noteCanonical = (canonical)=>{
+        const c = toSkuId(canonical || "");
+        if(!c) return;
+        const r = find(c);
+        if(r && !explicitCanonical.has(r)) explicitCanonical.set(r, c);
+      };
+      const addGroup = (canonical, aliases)=>{
+        const c = toSkuId(canonical || "");
+        const arr = normalizeSkuAliases(aliases, c);
+        if(c) arr.push(c);
+        const uniq = normalizeSkuAliases(arr);
+        if(!uniq.length) return;
+        uniq.forEach(s=>{ allSkus.add(s); find(s); });
+        const master = c || uniq[0];
+        uniq.forEach(s=> union(master, s));
+        noteCanonical(master);
+      };
+
+      const addAsinSku = (asin, sku)=>{
+        const a = normalizeAsin(asin || "");
+        const s = toSkuId(sku || "");
+        if(!a || !s) return;
+        if(!asinGroups.has(a)) asinGroups.set(a, new Set());
+        asinGroups.get(a).add(s);
+      };
+
+      for(const loc of inventoryLocs()){
+        const items = (state.inventory?.[loc]?.items || []);
+        for(const it of items){
+          const sku = toSkuId(it?.sku || it?.id || "");
+          if(!sku) continue;
+          const canonical = readSkuAliasCanonicalFromDoc(it || {}, sku);
+          const aliases = readSkuAliasesFromDoc(it || {}, sku);
+          addGroup(canonical || sku, aliases);
+          addAsinSku(readAsinFromDoc(it || {}), sku);
+        }
+      }
+
+      for(const members of asinGroups.values()){
+        const arr = normalizeSkuAliases(Array.from(members));
+        if(arr.length > 1) addGroup(arr[0], arr);
+      }
+
+      // riallinea i canonical dopo tutte le union
+      const canonByRoot = new Map();
+      for(const loc of inventoryLocs()){
+        const items = (state.inventory?.[loc]?.items || []);
+        for(const it of items){
+          const sku = toSkuId(it?.sku || it?.id || "");
+          if(!sku) continue;
+          const c = readSkuAliasCanonicalFromDoc(it || {}, sku);
+          const r = find(sku);
+          if(r && c && !canonByRoot.has(r)) canonByRoot.set(r, c);
+        }
+      }
+
+      const groups = new Map();
+      allSkus.forEach(s=>{
+        const r = find(s);
+        const canonical = canonByRoot.get(r) || explicitCanonical.get(r) || r || s;
+        if(!groups.has(canonical)) groups.set(canonical, new Set());
+        groups.get(canonical).add(s);
+      });
+
+      const resolve = (sku)=>{
+        const s = toSkuId(sku || "");
+        if(!s) return "";
+        const r = find(s);
+        return canonByRoot.get(r) || explicitCanonical.get(r) || r || s;
+      };
+      const members = (sku)=>{
+        const canonical = resolve(sku);
+        const set = groups.get(canonical) || new Set([canonical]);
+        const arr = Array.from(set).filter(Boolean).sort((a,b)=> a.localeCompare(b));
+        return canonical ? [canonical, ...arr.filter(x=>x!==canonical)] : arr;
+      };
+      const isUnified = (sku)=> members(sku).length > 1;
+      return { resolve, members, isUnified, groups };
+    }
+
+    function resolveSkuAlias(sku){ return buildSkuAliasIndex().resolve(sku); }
+    function skuAliasMembers(sku){ return buildSkuAliasIndex().members(sku); }
+
+    function skuAliasLabelForItem(it, fallbackSku=""){
+      const sku = toSkuId(fallbackSku || it?.sku || it?.id || "");
+      const aliases = readSkuAliasesFromDoc(it || {}, sku);
+      const canonical = readSkuAliasCanonicalFromDoc(it || {}, sku);
+      const others = aliases.filter(x=>x && x!==sku);
+      if(!others.length) return "Non unificato";
+      return `Principale: ${canonical || sku} • Collegati: ${others.join(", ")}`;
+    }
+
+
+    function validInventoryLoc(loc){
+      return loc === "cerea" || loc === "concamarise";
+    }
+
+    function inventoryLocs(){
+      return ["concamarise", "cerea"];
+    }
+
+
+    function itemUpdatedMillis(it){
+      try{
+        const c = Number(it?.updatedAtClient || it?.lastSeenAtClient || 0);
+        if(Number.isFinite(c) && c > 0) return c;
+        if(it?.updatedAt?.toMillis) return it.updatedAt.toMillis();
+        if(it?.lastSeenAt?.toMillis) return it.lastSeenAt.toMillis();
+        return 0;
+      }catch(_e){ return 0; }
+    }
+
+
+    function stockRepresentativeItemsForLoc(loc){
+      const l = validInventoryLoc(loc) ? loc : "concamarise";
+      const items = state.inventory?.[l]?.items || [];
+      const aliasIndex = buildSkuAliasIndex();
+      const selected = new Map();
+      for(const it of items){
+        const actualSku = toSkuId(it?.sku || it?.id || "");
+        if(!actualSku) continue;
+        const canonicalSku = aliasIndex.resolve(actualSku) || actualSku;
+        const physical = Number.isFinite(Number(it?.qty)) ? Math.round(Number(it.qty)) : stockQtyFromDoc(it || {});
+        const reserved = reservedQtyFromItem(it || {});
+        const updated = itemUpdatedMillis(it || {});
+        const score = Math.max(0, physical) + Math.max(0, reserved);
+        const prev = selected.get(canonicalSku);
+        if(!prev || score > prev.score || (score === prev.score && updated > prev.updated)){
+          selected.set(canonicalSku, { it:{ ...it, sku:actualSku, __canonicalSku: canonicalSku, __aliasSkus: aliasIndex.members(actualSku) }, score, updated });
+        }
+      }
+      return Array.from(selected.values()).map(x=>x.it);
     }
 
     // --- policy sotto-scorta ---
@@ -7276,7 +7577,7 @@ function guessTitleFromRaw(rawText, sku){
       const curLoc = (currentLoc === "cerea" || currentLoc === "concamarise") ? currentLoc : "";
 
       for(const loc of ["concamarise", "cerea"]){
-        const items = (state.inventory?.[loc]?.items || []);
+        const items = stockRepresentativeItemsForLoc(loc);
         for(const it of items){
           if(!isPositiveStockDoc(it || {})) continue;
           const values = readRackLocationsFromDoc(it || {});
@@ -11358,6 +11659,7 @@ function startAllLogs(modeOrOpts = "full"){
       const moveSource = opts?.reason || (Number(direction) < 0 ? "rettifica_flusso" : "flusso");
       const moveNote = opts?.note || flowMovementNote(kind, direction, flowLabel || opts?.flowId || "");
       const storedComboLines = Array.isArray(opts?.comboLines) ? opts.comboLines : [];
+      const idxAdjust = getInvIndexForMatch();
 
       // Batch limits: 2 scritture per riga madre + fino a 3 combo (8 write/riga) => 60 resta sotto 500.
       const CHUNK = 60;
@@ -11367,19 +11669,25 @@ function startAllLogs(modeOrOpts = "full"){
         const parentSkus = [];
 
         for(const l of chunk){
-          const sku = String(l?.sku || "").trim();
-          if(!sku) continue;
-          const title = String(l?.title || "").trim();
+          const requestedSku = toSkuId(l?.sku || "");
+          if(!requestedSku) continue;
+          const stockSku = stockSkuForSkuAny(requestedSku, loc, idxAdjust) || requestedSku;
+          const title = savedTitleForExistingInventorySku(requestedSku, loc) || String(l?.title || "").trim() || requestedSku;
+          const asin = l?.asin || savedAsinForExistingInventorySku(requestedSku, loc) || readAsinFromLine(l || {});
+          const asinPatch = asin ? asinCloudFields(asin, nowClient, who) : {};
           const qty = parseQty(l?.qty || 0);
           if(!qty) continue;
 
-          parentSkus.push(sku);
+          parentSkus.push(requestedSku);
           const delta = mult * qty;
-          const docRef = api.doc(db, COL_ROOT, loc, SUB_ITEMS, sku);
+          const docRef = api.doc(db, COL_ROOT, loc, SUB_ITEMS, stockSku);
           batch.set(docRef, {
-            sku,
-            title: title || sku,
-            titleNorm: normalizeText(title || sku),
+            sku: stockSku,
+            requestedSku,
+            aliasRequestedSku: requestedSku !== stockSku ? requestedSku : "",
+            title: title || stockSku,
+            titleNorm: normalizeText(title || stockSku),
+            ...asinPatch,
             qty: api.increment(delta),
             location: loc,
             updatedAt: api.serverTimestamp(),
@@ -11387,8 +11695,11 @@ function startAllLogs(modeOrOpts = "full"){
             updatedBy: who
           }, { merge:true });
 
-          addProductMovementToBatch(batch, api, db, sku, {
+          addProductMovementToBatch(batch, api, db, stockSku, {
             type: moveType,
+            requestedSku,
+            stockSku,
+            asin,
             qtySigned: delta,
             deltaSigned: delta,
             fromWarehouse: loc,
@@ -11888,19 +12199,23 @@ function startAllLogs(modeOrOpts = "full"){
         const chunk = lines.slice(i, i+CHUNK);
         await api.runTransaction(db, async (tx)=>{
           const reads = [];
+          const idxRel = getInvIndexForMatch();
           for(const l of chunk){
-            const sku = toSkuId(l?.sku || "");
-            if(!sku) continue;
+            const requestedSku = toSkuId(l?.sku || "");
+            if(!requestedSku) continue;
+            const stockSku = stockSkuForSkuAny(requestedSku, loc, idxRel) || requestedSku;
             const qty = Math.abs(parseQty(l?.qty || 0) || 0);
             if(!qty) continue;
-            const docRef = api.doc(db, COL_ROOT, loc, SUB_ITEMS, sku);
+            const docRef = api.doc(db, COL_ROOT, loc, SUB_ITEMS, stockSku);
             const snap = await tx.get(docRef);
-            reads.push({ l, sku, qty, docRef, snap });
+            reads.push({ l, sku:requestedSku, requestedSku, stockSku, qty, docRef, snap });
           }
 
           for(const r of reads){
             const data = r.snap?.exists?.() ? (r.snap.data() || {}) : {};
-            const title = squashWhitespace(data.title || r.l?.title || "") || r.sku;
+            const title = squashWhitespace(data.title || r.l?.title || "") || r.stockSku;
+            const asin = readAsinFromDoc(data || {}) || readAsinFromLine(r.l || {});
+            const asinPatch = asin ? asinCloudFields(asin, nowClient, who) : {};
             const beforeReserved = reservedQtyFromItem(data || {});
             const beforePending = flowPendingQtyFromDoc(data || {});
             const nextReserved = Math.max(0, beforeReserved - r.qty);
@@ -11908,9 +12223,12 @@ function startAllLogs(modeOrOpts = "full"){
             const releasedAll = nextReserved <= 0 && nextPending <= 0;
 
             tx.set(r.docRef, {
-              sku: r.sku,
+              sku: r.stockSku,
+              requestedSku: r.requestedSku,
+              aliasRequestedSku: r.requestedSku !== r.stockSku ? r.requestedSku : "",
               title,
-              titleNorm: normalizeText(title || r.sku),
+              titleNorm: normalizeText(title || r.stockSku),
+              ...asinPatch,
               reservedQty: nextReserved,
               pendingPickQty: nextPending,
               reservationStatus: releasedAll ? "rilasciata" : "parziale",
@@ -11924,8 +12242,11 @@ function startAllLogs(modeOrOpts = "full"){
               updatedBy: who
             }, { merge:true });
 
-            addProductMovementToBatch(tx, api, db, r.sku, {
+            addProductMovementToBatch(tx, api, db, r.stockSku, {
               type: "annulla_prenotazione_scarico",
+              requestedSku: r.requestedSku,
+              stockSku: r.stockSku,
+              asin,
               qtySigned: 0,
               deltaSigned: 0,
               reservationQty: -Math.min(r.qty, beforeReserved),
@@ -12629,7 +12950,7 @@ function currentInv(){
 
     function invStats(loc){
       const inv = state.inventory[loc] || { items:[], meta:{ lastUpdatedAt:null } };
-      const items = inv.items || [];
+      const items = stockRepresentativeItemsForLoc(loc);
       let pieces = 0;
       let low = 0;
       for(const it of items){
@@ -12648,7 +12969,7 @@ function currentInv(){
     function getItemsWithoutRackLocations(){
       const out = [];
       const pushLoc = (loc)=>{
-        const items = (state.inventory?.[loc]?.items || []);
+        const items = stockRepresentativeItemsForLoc(loc);
         for(const it of items){
           const totalQty = stockQtyFromDoc(it || {});
           if(totalQty <= 0) continue;
@@ -13222,7 +13543,7 @@ function currentInv(){
     function getItemsWithRackLocations(){
       const out = [];
       const pushLoc = (loc)=>{
-        const items = (state.inventory?.[loc]?.items || []);
+        const items = stockRepresentativeItemsForLoc(loc);
         for(const it of items){
           const totalQty = stockQtyFromDoc(it || {});
           if(totalQty <= 0) continue;
@@ -13358,7 +13679,7 @@ function currentInv(){
 
     function pickingLineProduct(flow, sku){
       const loc = (flow?.location === "cerea" || flow?.location === "concamarise") ? flow.location : "concamarise";
-      return getProductBySku(loc, sku) || getItemBySkuAny(sku, loc)?.it || null;
+      return getItemBySkuAny(sku, loc)?.it || getProductBySku(loc, sku) || null;
     }
 
     function pickingLinePositionParts(flow, sku){
@@ -13517,20 +13838,25 @@ function currentInv(){
     }
 
     function addPickingStockWrite(batch, api, db, loc, flow, line, direction, opts = {}){
-      const sku = toSkuId(line?.sku || opts?.sku || "");
-      if(!sku) return null;
+      const requestedSku = toSkuId(line?.sku || opts?.sku || "");
+      if(!requestedSku) return null;
+      const stockSku = toSkuId(opts.stockSku || stockSkuForSkuAny(requestedSku, loc) || requestedSku);
+      if(!stockSku) return null;
       const qty = Math.abs(parseQty(line?.qty || opts?.qty || 0) || 0);
       if(!qty) return null;
       const nowClient = Number(opts.nowClient || Date.now());
       const who = opts.who || state.user?.email || state.user?.emailLower || state.user?.uid || "";
-      const title = opts.title || pickingLineTitle(line, flow) || sku;
-      const item = getProductBySku(loc, sku) || getItemBySkuAny(sku, loc)?.it || {};
+      const hit = getItemBySkuAny(requestedSku, loc);
+      const item = opts.itemData || hit?.it || getProductBySku(loc, stockSku) || getProductBySku(loc, requestedSku) || {};
+      const title = opts.title || item?.title || savedTitleForExistingInventorySku(requestedSku, loc) || pickingLineTitle(line, flow) || requestedSku;
+      const asin = opts.asin || readAsinFromDoc(item || {}) || readAsinFromLine(line || {});
+      const asinPatch = asin ? asinCloudFields(asin, nowClient, who) : {};
       const beforeQty = Number.isFinite(Number(item?.qty)) ? Math.round(Number(item.qty)) : 0;
       const beforeReserved = reservedQtyFromItem(item);
       if(direction > 0 && beforeQty < qty){
-        throw new Error(`${sku}: stock insufficiente per il prelievo (${beforeQty} disponibili, richiesti ${qty}).`);
+        throw new Error(`${requestedSku}: stock insufficiente per il prelievo (${beforeQty} disponibili, richiesti ${qty}).`);
       }
-      const itemRef = api.doc(db, COL_ROOT, loc, SUB_ITEMS, sku);
+      const itemRef = api.doc(db, COL_ROOT, loc, SUB_ITEMS, stockSku);
       const delta = direction > 0 ? -qty : qty;
       const reservedDelta = delta;
       let allocationResult = null;
@@ -13542,7 +13868,7 @@ function currentInv(){
         allocationResult = consumeRackAllocationsForPicking(item, qty);
         consumedAllocations = allocationResult.consumedAllocations || [];
         if((allocationResult.missingQty || 0) > 0){
-          throw new Error(`${sku}: ubicazioni insufficienti per il prelievo (mancano ${allocationResult.missingQty} pz ubicati).`);
+          throw new Error(`${requestedSku}: ubicazioni insufficienti per il prelievo (mancano ${allocationResult.missingQty} pz ubicati).`);
         }
       }else{
         consumedAllocations = Array.isArray(opts.consumedAllocations) ? opts.consumedAllocations : [];
@@ -13553,9 +13879,12 @@ function currentInv(){
       const reservedFieldValue = (direction > 0 && beforeReserved <= qty) ? 0 : api.increment(reservedDelta);
       const pendingFieldValue = (direction > 0 && beforeReserved <= qty) ? 0 : api.increment(reservedDelta);
       const itemPatch = pickingItemPatchFromAllocations({
-        sku,
+        sku: stockSku,
+        requestedSku,
+        aliasRequestedSku: requestedSku !== stockSku ? requestedSku : "",
         title,
-        titleNorm: normalizeText(title || sku),
+        titleNorm: normalizeText(title || stockSku),
+        ...asinPatch,
         qty: api.increment(delta),
         reservedQty: reservedFieldValue,
         pendingPickQty: pendingFieldValue,
@@ -13571,8 +13900,11 @@ function currentInv(){
       }, allocationResult.nextAllocations || [], allocationResult.cleanLocations || [], afterQty);
       batch.set(itemRef, itemPatch, { merge:true });
 
-      addProductMovementToBatch(batch, api, db, sku, {
+      addProductMovementToBatch(batch, api, db, stockSku, {
         type: actionType,
+        requestedSku,
+        stockSku,
+        asin,
         qtySigned: delta,
         deltaSigned: delta,
         reservationQty: reservedDelta,
@@ -13590,7 +13922,9 @@ function currentInv(){
       });
 
       return {
-        sku,
+        sku: requestedSku,
+        requestedSku,
+        stockSku,
         title,
         qty,
         delta,
@@ -13661,21 +13995,26 @@ function currentInv(){
     }
 
     function addPickingStockTransactionWrite(tx, api, db, loc, flow, line, direction, opts = {}){
-      const sku = toSkuId(line?.sku || opts?.sku || "");
-      if(!sku) return null;
+      const requestedSku = toSkuId(line?.sku || opts?.sku || "");
+      if(!requestedSku) return null;
+      const stockSku = toSkuId(opts.stockSku || stockSkuForSkuAny(requestedSku, loc) || requestedSku);
+      if(!stockSku) return null;
       const qty = Math.abs(parseQty(line?.qty || opts?.qty || 0) || 0);
       if(!qty) return null;
 
       const nowClient = Number(opts.nowClient || Date.now());
       const who = opts.who || state.user?.email || state.user?.emailLower || state.user?.uid || "";
-      const title = opts.title || pickingLineTitle(line, flow) || sku;
+      const title = opts.title || pickingLineTitle(line, flow) || requestedSku;
       const forceNegative = direction > 0 && (opts.forceNegative === true || opts.force === true);
-      const cloudItem = { ...(opts.itemData || {}), sku, title: (opts.itemData?.title || title || sku) };
+      const itemTitle = opts.itemData?.title || savedTitleForExistingInventorySku(requestedSku, loc) || title || stockSku;
+      const cloudItem = { ...(opts.itemData || {}), sku: stockSku, requestedSku, title: itemTitle };
+      const asin = opts.asin || readAsinFromDoc(cloudItem || {}) || readAsinFromLine(line || {});
+      const asinPatch = asin ? asinCloudFields(asin, nowClient, who) : {};
       const beforeQty = stockQtyFromDoc(cloudItem || {});
       const beforeReserved = reservedQtyFromItem(cloudItem || {});
       const beforePending = pendingPickQtyFromItem(cloudItem || {});
       const shortageQty = Math.max(0, qty - beforeQty);
-      const itemRef = api.doc(db, COL_ROOT, loc, SUB_ITEMS, sku);
+      const itemRef = api.doc(db, COL_ROOT, loc, SUB_ITEMS, stockSku);
 
       let delta = 0;
       let afterQty = beforeQty;
@@ -13688,12 +14027,12 @@ function currentInv(){
 
       if(direction > 0){
         if(beforeQty < qty && !forceNegative){
-          throw makeForcePickAvailableError(`${sku}: stock cloud insufficiente (${beforeQty} disponibili, richiesti ${qty}). Puoi forzare il prelievo: lo SKU andrà in negativo in inventario.`, { sku, beforeQty, qty, shortageQty });
+          throw makeForcePickAvailableError(`${requestedSku}: stock cloud insufficiente (${beforeQty} disponibili, richiesti ${qty}). Puoi forzare il prelievo: lo SKU andrà in negativo in inventario.`, { sku:requestedSku, stockSku, beforeQty, qty, shortageQty });
         }
         allocationResult = consumeRackAllocationsForPicking(cloudItem, qty);
         consumedAllocations = allocationResult.consumedAllocations || [];
         if((allocationResult.missingQty || 0) > 0 && !forceNegative){
-          throw makeForcePickAvailableError(`${sku}: ubicazioni cloud insufficienti per il prelievo (mancano ${allocationResult.missingQty} pz ubicati). Puoi forzare il prelievo e scaricare comunque inventario.`, { sku, beforeQty, qty, shortageQty, missingRackQty: allocationResult.missingQty || 0 });
+          throw makeForcePickAvailableError(`${requestedSku}: ubicazioni cloud insufficienti per il prelievo (mancano ${allocationResult.missingQty} pz ubicati). Puoi forzare il prelievo e scaricare comunque inventario.`, { sku:requestedSku, stockSku, beforeQty, qty, shortageQty, missingRackQty: allocationResult.missingQty || 0 });
         }
         delta = -qty;
         afterQty = beforeQty - qty;
@@ -13714,9 +14053,12 @@ function currentInv(){
       }
 
       const itemPatch = pickingItemPatchFromAllocations({
-        sku,
-        title,
-        titleNorm: normalizeText(title || sku),
+        sku: stockSku,
+        requestedSku,
+        aliasRequestedSku: requestedSku !== stockSku ? requestedSku : "",
+        title: itemTitle,
+        titleNorm: normalizeText(itemTitle || stockSku),
+        ...asinPatch,
         qty: afterQty,
         reservedQty: afterReserved,
         pendingPickQty: afterPending,
@@ -13735,8 +14077,11 @@ function currentInv(){
 
       tx.set(itemRef, itemPatch, { merge:true });
 
-      addProductMovementToBatch(tx, api, db, sku, {
+      addProductMovementToBatch(tx, api, db, stockSku, {
         type: actionType,
+        requestedSku,
+        stockSku,
+        asin,
         qtySigned: delta,
         deltaSigned: delta,
         reservationQty: direction > 0 ? -qty : qty,
@@ -13760,8 +14105,10 @@ function currentInv(){
       });
 
       return {
-        sku,
-        title,
+        sku: requestedSku,
+        requestedSku,
+        stockSku,
+        title: itemTitle,
         qty,
         delta,
         beforeQty,
@@ -13829,12 +14176,14 @@ function currentInv(){
         }
 
         const itemSnaps = new Map();
+        const idxPick = getInvIndexForMatch();
         for(const line of linesToPick){
           const sku = toSkuId(line?.sku || "");
           if(!sku || itemSnaps.has(sku)) continue;
-          const itemRef = api.doc(db, COL_ROOT, l, SUB_ITEMS, sku);
+          const stockSku = stockSkuForSkuAny(sku, l, idxPick) || sku;
+          const itemRef = api.doc(db, COL_ROOT, l, SUB_ITEMS, stockSku);
           const itemSnap = await tx.get(itemRef);
-          itemSnaps.set(sku, itemSnap);
+          itemSnaps.set(sku, { snap:itemSnap, stockSku });
         }
 
         const pickedLines = {};
@@ -13853,13 +14202,15 @@ function currentInv(){
           const qty = Math.abs(parseQty(line?.qty || 0) || 0);
           if(!qty) throw new Error(`${sku}: quantità zero nel flusso cloud.`);
           const title = pickingLineTitle(line, flow);
-          const itemSnap = itemSnaps.get(sku);
+          const itemInfo = itemSnaps.get(sku) || {};
+          const itemSnap = itemInfo.snap;
+          const stockSku = itemInfo.stockSku || stockSkuForSkuAny(sku, l, idxPick) || sku;
           const itemData = itemSnap && itemSnap.exists() ? (itemSnap.data() || {}) : {};
-          const stockInfo = addPickingStockTransactionWrite(tx, api, db, l, flow, line, 1, { nowClient, who, title, flowId:id, itemData, forceNegative });
+          const stockInfo = addPickingStockTransactionWrite(tx, api, db, l, flow, line, 1, { nowClient, who, title, flowId:id, itemData, forceNegative, stockSku });
           if(!stockInfo) continue;
           stockInfos.push(stockInfo);
           const position = stockInfo.position || pickingPositionTextFromCloudItem(itemData) || "—";
-          const rec = { picked:true, status:"prelevato", sku, title, qty, position, rackLocation:position, pickedAllocations: stockInfo.consumedAllocations || [], forced:!!stockInfo.forced, forceNegative:!!stockInfo.forceNegative, shortageQty:stockInfo.shortageQty || 0, missingRackQty:stockInfo.missingRackQty || 0, pickedAtClient:nowClient, pickedBy:who, ...(bulkId ? { bulkId } : {}) };
+          const rec = { picked:true, status:"prelevato", sku, requestedSku:sku, stockSku:stockInfo.stockSku || stockSku, title: stockInfo.title || title, qty, position, rackLocation:position, pickedAllocations: stockInfo.consumedAllocations || [], forced:!!stockInfo.forced, forceNegative:!!stockInfo.forceNegative, shortageQty:stockInfo.shortageQty || 0, missingRackQty:stockInfo.missingRackQty || 0, pickedAtClient:nowClient, pickedBy:who, ...(bulkId ? { bulkId } : {}) };
           pickedLines[key] = rec;
           nextPickedMap[key] = rec;
           pieces += qty;
@@ -13876,7 +14227,7 @@ function currentInv(){
         const forcedLines = stockInfos.filter(x=>x && x.forced);
         const shortageLines = stockInfos
           .filter(x=>x && ((x.shortageQty || 0) > 0 || (x.missingRackQty || 0) > 0))
-          .map(x=>({ sku:x.sku, beforeQty:x.beforeQty, requestedQty:x.qty, afterQty:x.afterQty, shortageQty:x.shortageQty || 0, missingRackQty:x.missingRackQty || 0 }));
+          .map(x=>({ sku:x.sku, requestedSku:x.requestedSku || x.sku, stockSku:x.stockSku || x.sku, beforeQty:x.beforeQty, requestedQty:x.qty, afterQty:x.afterQty, shortageQty:x.shortageQty || 0, missingRackQty:x.missingRackQty || 0 }));
 
         const event = mode === "sku"
           ? { type:"sku", sku:skuList[0], qty:pieces, position:pickedLines[pickingSkuKey(skuList[0])]?.position || "—", stockDelta:-pieces, reservationDelta:-pieces, forced:forcedLines.length > 0, forceNegative:forcedLines.length > 0, shortageLines, atClient:nowClient, by:who }
@@ -13921,7 +14272,7 @@ function currentInv(){
           forceNegative: stockInfos.some(x=>x && x.forceNegative),
           shortageLines: stockInfos
             .filter(x=>x && ((x.shortageQty || 0) > 0 || (x.missingRackQty || 0) > 0))
-            .map(x=>({ sku:x.sku, beforeQty:x.beforeQty, requestedQty:x.qty, afterQty:x.afterQty, shortageQty:x.shortageQty || 0, missingRackQty:x.missingRackQty || 0 }))
+            .map(x=>({ sku:x.sku, requestedSku:x.requestedSku || x.sku, stockSku:x.stockSku || x.sku, beforeQty:x.beforeQty, requestedQty:x.qty, afterQty:x.afterQty, shortageQty:x.shortageQty || 0, missingRackQty:x.missingRackQty || 0 }))
         };
       });
     }
@@ -16254,17 +16605,35 @@ function closeSheet(kind){
       const invCerea = Array.isArray(rInv.items) ? rInv.items : [];
 
       const mapConca = new Map();
+      const stockSkuConca = new Map();
       for(const it of invConca){
         const s = toSkuId(it.sku||it.id||"");
         if(!s) continue;
         if(!mapConca.has(s)) mapConca.set(s, it);
+        if(!stockSkuConca.has(s)) stockSkuConca.set(s, s);
       }
       const mapCerea = new Map();
+      const stockSkuCerea = new Map();
       for(const it of invCerea){
         const s = toSkuId(it.sku||it.id||"");
         if(!s) continue;
         if(!mapCerea.has(s)) mapCerea.set(s, it);
+        if(!stockSkuCerea.has(s)) stockSkuCerea.set(s, s);
       }
+
+      const registerSkuAliasesForIndex = (map, stockMap, item)=>{
+        const actualSku = toSkuId(item?.sku || item?.id || "");
+        if(!actualSku) return;
+        const members = skuAliasMembers(actualSku);
+        for(const alias of members){
+          const a = toSkuId(alias || "");
+          if(!a) continue;
+          if(!map.has(a)) map.set(a, item);
+          if(!stockMap.has(a)) stockMap.set(a, actualSku);
+        }
+      };
+      invConca.forEach(it=>registerSkuAliasesForIndex(mapConca, stockSkuConca, it));
+      invCerea.forEach(it=>registerSkuAliasesForIndex(mapCerea, stockSkuCerea, it));
 
       // lista unica per matching testuale
       const all = [];
@@ -16279,7 +16648,7 @@ function closeSheet(kind){
         all.push({ loc:"cerea", it, sku:s });
       }
 
-      const idx = { key, invConca, invCerea, mapConca, mapCerea, all };
+      const idx = { key, invConca, invCerea, mapConca, mapCerea, stockSkuConca, stockSkuCerea, all };
       state.cache.invIndexForMatch = idx;
       return idx;
     }
@@ -16320,13 +16689,51 @@ function closeSheet(kind){
         const it = idx.mapCerea.get(s) || idx.mapConca.get(s) || null;
         if(!it) return null;
         const loc = idx.mapCerea.has(s) ? "cerea" : "concamarise";
-        return { it, loc };
+        const stockSku = loc === "cerea" ? (idx.stockSkuCerea?.get(s) || toSkuId(it?.sku || it?.id || s)) : (idx.stockSkuConca?.get(s) || toSkuId(it?.sku || it?.id || s));
+        return { it, loc, stockSku };
       }else{
         const it = idx.mapConca.get(s) || idx.mapCerea.get(s) || null;
         if(!it) return null;
         const loc = idx.mapConca.has(s) ? "concamarise" : "cerea";
-        return { it, loc };
+        const stockSku = loc === "cerea" ? (idx.stockSkuCerea?.get(s) || toSkuId(it?.sku || it?.id || s)) : (idx.stockSkuConca?.get(s) || toSkuId(it?.sku || it?.id || s));
+        return { it, loc, stockSku };
       }
+    }
+
+    function stockSkuForSkuAny(sku, locHint="", idx=null){
+      const i = idx || getInvIndexForMatch();
+      const s = toSkuId(sku || "");
+      if(!s) return "";
+      const loc = resolveLocForSkuAny(s, locHint, i);
+      if(loc === "cerea") return i.stockSkuCerea?.get(s) || s;
+      return i.stockSkuConca?.get(s) || s;
+    }
+
+    function savedTitleForExistingInventorySku(sku, locHint=""){
+      try{
+        const s = toSkuId(sku || "");
+        if(!s) return "";
+        const hit = getItemBySkuAny(s, locHint);
+        return squashWhitespace(hit?.it?.title || hit?.it?.name || "");
+      }catch(_e){ return ""; }
+    }
+
+    function savedAsinForExistingInventorySku(sku, locHint=""){
+      try{
+        const s = toSkuId(sku || "");
+        if(!s) return "";
+        const hit = getItemBySkuAny(s, locHint);
+        return readAsinFromDoc(hit?.it || {});
+      }catch(_e){ return ""; }
+    }
+
+    function preserveExistingInventoryTitleForPdfLine(line, locHint=""){
+      const sku = toSkuId(line?.sku || "");
+      const savedTitle = savedTitleForExistingInventorySku(sku, locHint);
+      const savedAsin = savedAsinForExistingInventorySku(sku, locHint);
+      const pdfTitle = squashWhitespace(line?.title || "");
+      const pdfAsin = readAsinFromLine(line || {});
+      return { ...(line || {}), sku, asin: savedAsin || pdfAsin || "", title: savedTitle || pdfTitle || sku, pdfTitle: savedTitle ? (line?.pdfTitle || pdfTitle || "") : (line?.pdfTitle || ""), titleSource: savedTitle ? "inventory_saved" : "pdf" };
     }
 
     function bestInventoryMatch(name, skuGuess){
@@ -16702,9 +17109,11 @@ function closeSheet(kind){
         const loc = locFromLine || resolveLocForSkuAny(sku, locHint, idx);
         const bucket = (loc==="cerea") ? buckets.cerea : buckets.concamarise;
 
-        const prev = bucket.get(sku) || { sku, title: l.title || "", qty: 0 };
+        const asin = readAsinFromLine(l || {});
+        const prev = bucket.get(sku) || { sku, title: l.title || "", asin:"", qty: 0 };
         prev.qty += qty;
         if(!prev.title && l.title) prev.title = l.title;
+        if(!prev.asin && asin) prev.asin = asin;
         bucket.set(sku, prev);
       }
 
@@ -16759,7 +17168,7 @@ function closeSheet(kind){
                 status: "PENDING",
                 totalLines: p.aggregated.length,
                 totalPieces: p.totalPieces,
-                lines: p.aggregated.slice(0, 800).map(x=>({ sku:x.sku, title:x.title||"", qty: Math.abs(parseQty(x.qty)||0) })),
+                lines: p.aggregated.slice(0, 800).map(x=>({ sku:x.sku, title:x.title||"", asin:x.asin || readAsinFromLine(x || {}), qty: Math.abs(parseQty(x.qty)||0) })),
                 workflow: null,
                 workflowId: null,
                 workflowLabel: null
@@ -16790,14 +17199,21 @@ function closeSheet(kind){
           for(const part of chunks){
             const batch = api.writeBatch(db);
             for(const it of part){
-              const sku = toSkuId(it.sku);
-              const title = String(it.title||"").trim();
+              const requestedSku = toSkuId(it.sku);
+              if(!requestedSku) continue;
+              const stockSku = stockSkuForSkuAny(requestedSku, p.loc, idx) || requestedSku;
+              const title = savedTitleForExistingInventorySku(requestedSku, p.loc) || String(it.title||"").trim() || requestedSku;
+              const asin = it.asin || savedAsinForExistingInventorySku(requestedSku, p.loc) || readAsinFromLine(it || {});
+              const asinPatch = asin ? asinCloudFields(asin, tsClient, state.user.email || "") : {};
               const delta = deltaSign * Math.abs(parseQty(it.qty) || 0);
-              const ref = api.doc(db, COL_ROOT, p.loc, SUB_ITEMS, sku);
+              const ref = api.doc(db, COL_ROOT, p.loc, SUB_ITEMS, stockSku);
               batch.set(ref, {
-                sku,
+                sku: stockSku,
+                requestedSku,
+                aliasRequestedSku: requestedSku !== stockSku ? requestedSku : "",
                 title: title || "",
-                titleNorm: normalizeText(title || sku),
+                titleNorm: normalizeText(title || stockSku),
+                ...asinPatch,
                 qty: api.increment(delta),
                 updatedAt: api.serverTimestamp(),
                 updatedAtClient: tsClient,
@@ -16805,10 +17221,13 @@ function closeSheet(kind){
                 location: p.loc
               }, { merge:true });
 
-              addProductMovementToBatch(batch, api, db, sku, {
+              addProductMovementToBatch(batch, api, db, stockSku, {
                 type: "carica",
+                requestedSku,
+                stockSku,
                 qtySigned: delta,
                 deltaSigned: delta,
+                asin,
                 fromWarehouse: p.loc,
                 toWarehouse: p.loc,
                 source: "campo_libero",
@@ -16831,12 +17250,15 @@ function closeSheet(kind){
               const batchP = api.writeBatch(db);
               for(const it of part){
                 const sku = toSkuId(it.sku);
-                const title = String(it.title||"").trim();
+                const title = savedTitleForExistingInventorySku(sku, p.loc) || String(it.title||"").trim();
+                const asin = it.asin || savedAsinForExistingInventorySku(sku, p.loc) || readAsinFromLine(it || {});
+                const asinPatch = asin ? asinCloudFields(asin, tsClient, state.user.email || "") : {};
                 const refP = api.doc(db, COL_PRODUCTS, sku);
                 batchP.set(refP, {
                   sku,
                   title: title || "",
                   titleNorm: normalizeText(title || sku),
+                  ...asinPatch,
                   lastSeenAt: api.serverTimestamp(),
                   lastSeenAtClient: tsClient,
                   lastSeenBy: state.user.email || "",
@@ -20512,45 +20934,30 @@ async function applyFlow(kind){
         const sku = toSkuId(l.sku);
         const qty = parseQty(l.qty);
         if(!sku || !Number.isFinite(qty) || qty===0) continue;
-        const prev = agg.get(sku) || { sku, title:l.title||"", qty:0 };
+        const asin = readAsinFromLine(l || {});
+        const prev = agg.get(sku) || { sku, title:l.title||"", asin:"", qty:0 };
         prev.qty += qty;
         if(!prev.title && l.title) prev.title = l.title;
+        if(!prev.asin && asin) prev.asin = asin;
         agg.set(sku, prev);
       }
       const aggregatedAll = Array.from(agg.values()).filter(x=>x.sku && Number.isFinite(x.qty) && x.qty!==0);
       if(!aggregatedAll.length) return showToast("Nessuna riga valida","");
 
-      // --- routing automatico: usa la "posizione" salvata nell’anagrafica (SKU presente nell’inventario) ---
-      const invConca = state.inventory.concamarise?.items || [];
-      const invCerea = state.inventory.cerea?.items || [];
-      const mapConca = new Map(invConca.map(it => [toSkuId(it.sku||it.id||""), it]));
-      const mapCerea = new Map(invCerea.map(it => [toSkuId(it.sku||it.id||""), it]));
+      // --- routing automatico: SKU diversi con stesso ASIN/manual alias puntano allo stesso stock cloud ---
+      const idxFlow = getInvIndexForMatch();
+      const mapConca = idxFlow.mapConca;
+      const mapCerea = idxFlow.mapCerea;
 
       function resolveLocForSku(sku){
-        const s = toSkuId(sku||"");
-        const inConca = mapConca.has(s);
-        const inCerea = mapCerea.has(s);
-
-        if(inConca && !inCerea) return "concamarise";
-        if(inCerea && !inConca) return "cerea";
-
-        if(inConca && inCerea){
-          // raro: SKU presente su entrambi. Preferisco il contesto corrente, altrimenti Concamarise.
-          if(locHint==="cerea" || locHint==="concamarise") return locHint;
-          const qa = Number.isFinite(mapConca.get(s)?.qty) ? mapConca.get(s).qty : 0;
-          const qb = Number.isFinite(mapCerea.get(s)?.qty) ? mapCerea.get(s).qty : 0;
-          if(qa===0 && qb!==0) return "cerea";
-          return "concamarise";
-        }
-
-        // non esiste anagrafica corrispondente → default Concamarise
-        return "concamarise";
+        return resolveLocForSkuAny(sku, locHint, idxFlow);
       }
 
       const buckets = { concamarise: [], cerea: [] };
       for(const it of aggregatedAll){
         const target = resolveLocForSku(it.sku);
-        buckets[target].push(it);
+        // Titolo protetto: se lo SKU è già presente, usa il nome salvato in Hub e non quello del PDF.
+        buckets[target].push(preserveExistingInventoryTitleForPdfLine(it, target));
       }
 
       const api = state.firebase.api;
@@ -20624,7 +21031,7 @@ async function applyFlow(kind){
                 totalPieces: p.totalPieces,
                 reservation: kind === "scarica" ? { active:true, status:"in_attesa_picking", reservedAtClient: tsClient, reservedBy: state.user.email || "", totalPieces: p.totalPieces } : null,
                 picking: kind === "scarica" ? { status:"da_prelevare", managedByPicking:true, pickedLines:{}, flowPicked:false, updatedAtClient: tsClient, updatedBy: state.user.email || "" } : null,
-                lines: p.aggregated.slice(0, 800).map(x=>({ sku:x.sku, title:x.title||"", qty: Math.abs(parseQty(x.qty)||0) })),
+                lines: p.aggregated.slice(0, 800).map(x=>({ sku:x.sku, title:x.title||"", asin:x.asin || readAsinFromLine(x || {}), qty: Math.abs(parseQty(x.qty)||0) })),
                 comboApplied: kind === "scarica" && Array.isArray(p.comboLines) && p.comboLines.length > 0,
                 comboVersion: 1,
                 comboLines: Array.isArray(p.comboLines) ? p.comboLines.slice(0, 800) : [],
@@ -20652,20 +21059,26 @@ async function applyFlow(kind){
             const batch = api.writeBatch(db);
 
             for(const it of part){
-              const sku = toSkuId(it.sku);
-              if(!sku) continue;
-              const title = squashWhitespace(it.title||"") || sku;
+              const requestedSku = toSkuId(it.sku);
+              if(!requestedSku) continue;
+              const stockSku = stockSkuForSkuAny(requestedSku, p.loc, idxFlow) || requestedSku;
+              const title = savedTitleForExistingInventorySku(requestedSku, p.loc) || squashWhitespace(it.title||"") || requestedSku;
+              const asin = it.asin || savedAsinForExistingInventorySku(requestedSku, p.loc) || readAsinFromLine(it || {});
+              const asinPatch = asin ? asinCloudFields(asin, tsClient, state.user.email || "") : {};
               const qtyAbs = Math.abs(parseQty(it.qty) || 0);
               if(!qtyAbs) continue;
-              const ref = api.doc(db, COL_ROOT, p.loc, SUB_ITEMS, sku);
+              const ref = api.doc(db, COL_ROOT, p.loc, SUB_ITEMS, stockSku);
               const currentMap = p.loc === "concamarise" ? mapConca : mapCerea;
-              const currentItem = currentMap.get(sku) || {};
+              const currentItem = currentMap.get(requestedSku) || currentMap.get(stockSku) || {};
 
               if(kind === "scarica"){
                 batch.set(ref, {
-                  sku,
+                  sku: stockSku,
+                  requestedSku,
+                  aliasRequestedSku: requestedSku !== stockSku ? requestedSku : "",
                   title: title || "",
-                  titleNorm: normalizeText(title || sku),
+                  titleNorm: normalizeText(title || stockSku),
+                  ...asinPatch,
                   reservedQty: api.increment(qtyAbs),
                   pendingPickQty: api.increment(qtyAbs),
                   reservationStatus: "in_attesa_picking",
@@ -20681,8 +21094,11 @@ async function applyFlow(kind){
                   location: p.loc
                 }, { merge:true });
 
-                addProductMovementToBatch(batch, api, db, sku, {
+                addProductMovementToBatch(batch, api, db, stockSku, {
                   type: "prenotazione_scarico",
+                  requestedSku,
+                  stockSku,
+                  asin,
                   qtySigned: 0,
                   deltaSigned: 0,
                   reservationQty: qtyAbs,
@@ -20704,9 +21120,12 @@ async function applyFlow(kind){
                 const afterQty = beforeQty + delta;
                 const rackClearData = afterQty <= 0 ? { rackLocation: "", rackLocations: [], rackAllocations: [] } : {};
                 batch.set(ref, {
-                  sku,
+                  sku: stockSku,
+                  requestedSku,
+                  aliasRequestedSku: requestedSku !== stockSku ? requestedSku : "",
                   title: title || "",
-                  titleNorm: normalizeText(title || sku),
+                  titleNorm: normalizeText(title || stockSku),
+                  ...asinPatch,
                   qty: api.increment(delta),
                   ...rackClearData,
                   updatedAt: api.serverTimestamp(),
@@ -20715,8 +21134,11 @@ async function applyFlow(kind){
                   location: p.loc
                 }, { merge:true });
 
-                addProductMovementToBatch(batch, api, db, sku, {
+                addProductMovementToBatch(batch, api, db, stockSku, {
                   type: "carica",
+                  requestedSku,
+                  stockSku,
+                  asin,
                   qtySigned: delta,
                   deltaSigned: delta,
                   fromWarehouse: p.loc,
@@ -20750,12 +21172,15 @@ async function applyFlow(kind){
             for(const it of part){
               const sku = toSkuId(it.sku);
               if(!sku) continue;
-              const title = squashWhitespace(it.title||"") || sku;
+              const title = savedTitleForExistingInventorySku(sku, it.__loc) || squashWhitespace(it.title||"") || sku;
+              const asin = it.asin || savedAsinForExistingInventorySku(sku, it.__loc) || readAsinFromLine(it || {});
+              const asinPatch = asin ? asinCloudFields(asin, tsClient, state.user?.emailLower || state.user?.email || "") : {};
               const refP = api.doc(db, COL_PRODUCTS, sku);
               batchP.set(refP, {
                 sku,
                 title,
                 titleNorm: normalizeText(title),
+                ...asinPatch,
                 lastSeenAt: api.serverTimestamp(),
                 lastSeenAtClient: tsClient,
                 lastSeenBy: state.user?.emailLower || state.user?.email || "",
@@ -20781,7 +21206,7 @@ async function applyFlow(kind){
                 workflow: flow.workflow || null,
                 workflowId: wfId || null,
                 workflowLabel: wfLabel || null,
-                lines: p.aggregated.slice(0, 800).map(x=>({ sku:x.sku, title:x.title||"", qty: Math.abs(parseQty(x.qty)||0) })),
+                lines: p.aggregated.slice(0, 800).map(x=>({ sku:x.sku, title:x.title||"", asin:x.asin || readAsinFromLine(x || {}), qty: Math.abs(parseQty(x.qty)||0) })),
                 comboApplied: kind === "scarica" && Array.isArray(p.comboLines) && p.comboLines.length > 0,
                 comboVersion: 1,
                 comboLines: Array.isArray(p.comboLines) ? p.comboLines.slice(0, 800) : [],
