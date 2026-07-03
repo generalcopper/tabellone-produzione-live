@@ -7134,6 +7134,64 @@ function guessTitleFromRaw(rawText, sku){
       return Array.from(map.values()).map(x=>({ code:x.code, lot:x.lot, qty:Math.round(x.qty) }));
     }
 
+    function rackAllocationQtyTotal(allocations){
+      try{
+        return (Array.isArray(allocations) ? allocations : []).reduce((sum, x)=>{
+          const q = Number(x?.qty || 0);
+          return sum + (Number.isFinite(q) ? Math.max(0, Math.round(q)) : 0);
+        }, 0);
+      }catch(_e){ return 0; }
+    }
+
+    function sortRackAllocationsForConsumption(allocations){
+      return (Array.isArray(allocations) ? allocations : [])
+        .map(x=>({
+          code: normalizeRackLocation(x?.code || x?.rackLocation || x?.location || ""),
+          lot: normalizeLotId(x?.lot || x?.batch || x?.batchId || x?.lotto || "") || LOT_LEGACY_ID,
+          qty: Math.max(0, Math.round(Number(x?.qty || 0) || 0))
+        }))
+        .filter(x=>x.code && x.qty > 0)
+        .sort((a,b)=>{
+          const la = String(a.lot || "");
+          const lb = String(b.lot || "");
+          if(la !== lb) return la.localeCompare(lb);
+          return String(a.code || "").localeCompare(String(b.code || ""));
+        });
+    }
+
+    function trimRackAllocationsToStockQty(rawAllocations, stockQty){
+      const clean = sortRackAllocationsForConsumption(normalizeRackAllocationsForWrite(rawAllocations));
+      const q = Number.isFinite(Number(stockQty)) ? Math.max(0, Math.round(Number(stockQty))) : 0;
+      if(q <= 0) return [];
+      const total = rackAllocationQtyTotal(clean);
+      if(total <= q) return clean;
+
+      // Se Shopify/altro backend ha già scalato qty ma non rackAllocations,
+      // scarichiamo virtualmente l'eccedenza dalle ubicazioni in ordine FIFO (lotto/codice),
+      // così la quantità mostrata e quella prelevabile non possono restare più alte del cloud.
+      let over = total - q;
+      const next = [];
+      for(const a of clean){
+        if(over > 0){
+          const take = Math.min(a.qty, over);
+          const left = a.qty - take;
+          over -= take;
+          if(left > 0) next.push({ ...a, qty:left });
+        }else{
+          next.push(a);
+        }
+      }
+      return next.filter(x=>x.qty > 0);
+    }
+
+    function rackAllocationsEqual(a, b){
+      try{
+        const aa = sortRackAllocationsForConsumption(a).map(x=>`${x.code}|${x.lot}|${x.qty}`).join(";");
+        const bb = sortRackAllocationsForConsumption(b).map(x=>`${x.code}|${x.lot}|${x.qty}`).join(";");
+        return aa === bb;
+      }catch(_e){ return false; }
+    }
+
     function hasExplicitRackAllocations(d){
       return normalizeRackAllocationsForWrite(rawRackAllocationsFromDoc(d)).length > 0;
     }
@@ -7141,7 +7199,7 @@ function guessTitleFromRaw(rawText, sku){
     function readRackAllocationsFromDoc(d){
       if(d && !isPositiveStockDoc(d)) return [];
       const q = stockQtyFromDoc(d || {});
-      const explicit = normalizeRackAllocationsForWrite(rawRackAllocationsFromDoc(d));
+      const explicit = trimRackAllocationsToStockQty(rawRackAllocationsFromDoc(d), q);
       if(explicit.length) return explicit;
 
       // Compatibilità con dati vecchi: se c'erano solo rackLocation/rackLocations,
@@ -7156,7 +7214,7 @@ function guessTitleFromRaw(rawText, sku){
 
     function readRackLocationsFromDoc(d){
       if(d && !isPositiveStockDoc(d)) return [];
-      const explicit = normalizeRackAllocationsForWrite(rawRackAllocationsFromDoc(d));
+      const explicit = trimRackAllocationsToStockQty(rawRackAllocationsFromDoc(d), stockQtyFromDoc(d || {}));
       if(explicit.length) return explicit.map(x=>x.code);
       const raw = (d && Object.prototype.hasOwnProperty.call(d, "rackLocations"))
         ? d.rackLocations
@@ -7188,7 +7246,7 @@ function guessTitleFromRaw(rawText, sku){
 
     function rackAllocatedQtyByLotFromDoc(d, lot){
       const lotId = normalizeLotId(lot) || LOT_LEGACY_ID;
-      const allocations = normalizeRackAllocationsForWrite(rawRackAllocationsFromDoc(d || {}));
+      const allocations = readRackAllocationsFromDoc(d || {});
       return allocations
         .filter(x=> (normalizeLotId(x.lot) || LOT_LEGACY_ID) === lotId)
         .reduce((a,x)=> a + (Number.isFinite(Number(x.qty)) ? Math.round(Number(x.qty)) : 0), 0);
@@ -7277,7 +7335,7 @@ function guessTitleFromRaw(rawText, sku){
 
     function rackLocationDisplayPartsFromItem(it){
       const d = it || {};
-      const explicit = normalizeRackAllocationsForWrite(rawRackAllocationsFromDoc(d));
+      const explicit = readRackAllocationsFromDoc(d);
       if(explicit.length){
         return explicit
           .slice()
@@ -7557,6 +7615,91 @@ function guessTitleFromRaw(rawText, sku){
       const d = it || {};
       const alloc = readRackAllocationsFromDoc(d).map(x=>`${x.code} ${x.qty}`).join(" ");
       return [readRackLocationsFromDoc(d).join(" "), alloc].filter(Boolean).join(" ");
+    }
+
+    function rackAllocationCloudNormalizePlan(item){
+      try{
+        const d = item || {};
+        const raw = normalizeRackAllocationsForWrite(rawRackAllocationsFromDoc(d));
+        if(!raw.length) return null;
+        const qty = stockQtyFromDoc(d || {});
+        const clean = trimRackAllocationsToStockQty(raw, qty);
+        if(rackAllocationsEqual(raw, clean)) return null;
+        const sku = toSkuId(d.sku || d.id || "");
+        if(!sku) return null;
+        const cleanLocations = normalizeRackLocationsList(clean.map(x=>x.code));
+        return { sku, docId:String(d.id || sku), qty, raw, clean, cleanLocations };
+      }catch(_e){ return null; }
+    }
+
+    function scheduleRackAllocationsCloudNormalize(loc, reason = "rack_allocations_normalize"){
+      try{
+        if(!(loc === "cerea" || loc === "concamarise")) return;
+        if(!state.user?.isAdmin || !state.user?.isWhitelisted) return;
+        const api = state.firebase?.api;
+        const db = state.firebase?.db;
+        if(!api || !db || !api.writeBatch || !api.doc) return;
+
+        const root = state.__rackAllocNormalize || (state.__rackAllocNormalize = {});
+        const slot = root[loc] || (root[loc] = { timer:null, running:false, lastAt:0 });
+        const now = Date.now();
+        if(slot.running) return;
+        if(slot.lastAt && (now - slot.lastAt) < 1800) return;
+        if(slot.timer) clearTimeout(slot.timer);
+
+        slot.timer = setTimeout(async ()=>{
+          slot.timer = null;
+          if(slot.running) return;
+          slot.running = true;
+          try{
+            const items = state.inventory?.[loc]?.items || [];
+            const plans = items.map(rackAllocationCloudNormalizePlan).filter(Boolean).slice(0, 120);
+            if(!plans.length){ slot.lastAt = Date.now(); return; }
+
+            const who = state.user?.emailLower || state.user?.email || state.user?.uid || "";
+            const chunks = [];
+            for(let i=0; i<plans.length; i+=180) chunks.push(plans.slice(i, i+180));
+            for(const chunk of chunks){
+              const batch = api.writeBatch(db);
+              const ts = Date.now();
+              for(const p of chunk){
+                const patch = {
+                  rackAllocations: p.clean,
+                  rackLocations: p.cleanLocations,
+                  rackLocation: p.cleanLocations[0] || "",
+                  rackAllocationNormalizedAt: api.serverTimestamp(),
+                  rackAllocationNormalizedAtClient: ts,
+                  rackAllocationNormalizedBy: who,
+                  rackAllocationNormalizeReason: String(reason || "rack_allocations_normalize"),
+                  lastShopifyEffectivePickNormalize: String(reason || "").toLowerCase().includes("shopify"),
+                  location: loc,
+                  updatedAt: api.serverTimestamp(),
+                  updatedAtClient: ts,
+                  updatedBy: who
+                };
+                batch.set(api.doc(db, COL_ROOT, loc, SUB_ITEMS, p.docId), patch, { merge:true });
+                batch.set(api.doc(db, COL_PRODUCTS, p.sku), {
+                  sku: p.sku,
+                  ...patch,
+                  lastSeenAt: api.serverTimestamp(),
+                  lastSeenAtClient: ts,
+                  lastSeenBy: who,
+                  lastSeenLocation: loc,
+                  lastSeenKind: "rack_allocations_cloud_normalize"
+                }, { merge:true });
+              }
+              await batch.commit();
+            }
+            slot.lastAt = Date.now();
+          }catch(err){
+            console.warn("rack allocations cloud normalize", loc, err);
+          }finally{
+            slot.running = false;
+          }
+        }, 650);
+      }catch(err){
+        console.warn("schedule rack allocation normalize", loc, err);
+      }
     }
 
     function sanitizeRackLocationsForQty(value, qty){
@@ -8882,6 +9025,7 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
         }
 
         triggerLowStockMailFromRealtime("realtime_low_stock_" + loc);
+        scheduleRackAllocationsCloudNormalize(loc, "inventory_snapshot_shopify_effective_pick");
         scheduleTwReordersBackfillFromState("inventory_" + loc);
         refreshActivityLogSkuWatchers("inventory_" + loc);
         checkStartupDataGate("inventory_" + loc);
