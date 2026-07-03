@@ -4732,8 +4732,8 @@ const LogFeed = (()=>{
   function _fromAlerts(){
     const out=[];
     try{
-      if(typeof _incomingData!=='undefined' && _incomingData && _incomingData.active!==false){
-        const ts=Number(_incomingData.createdAtMs||0)||0;
+      if(typeof _incomingData!=='undefined' && _incomingData && typeof _incomingExpiry==='function' && _incomingExpiry()>Date.now()){
+        const ts=Number(_incomingCreatedMs(_incomingData)||_incomingData.createdAtMs||0)||0;
         out.push({ id:`alert:incoming:${_incomingData.ddtNumber||'cerea'}`, ts, tag:'in',
           msg:_line('Carico in arrivo', 'da Cerea', [
             ['ddt', _incomingData.ddtNumber||''],
@@ -4922,6 +4922,20 @@ const LogFeed = (()=>{
   return { refresh, setHidden };
 })();
 
+// un ordine/flusso conta nel cockpit solo se ha almeno una riga SKU realmente pendente.
+// Evita falsi positivi: vecchi flussi FBA/FBM già prelevati o senza righe non accendono
+// più contatori e banner "Full truckload Amazon".
+function _flowHasPendingPickingLines(flow){
+  const lines = Array.isArray(flow && flow.lines) ? flow.lines : [];
+  if(!lines.length) return false;
+  return lines.some(l=>{
+    const sku=_toSkuId(l && l.sku || '');
+    if(!sku) return false;
+    const qty=Math.abs(Math.round(Number(l && l.qty || 0)))||0;
+    if(qty<=0) return false;
+    return !_isLinePicked(flow, (l && l.sku) || sku);
+  });
+}
 // conta gli ORDINI (flussi) ancora da prelevare, divisi per canale FBA/FBM
 function _contaOrdini(){
   let fba=0, fbm=0;
@@ -4931,6 +4945,7 @@ function _contaOrdini(){
       if(String(flow.kind||'').toLowerCase()!=='scarica') continue;
       if(!_isManagedFlow(flow)) continue;
       if(flow?.picking?.flowPicked===true) continue;
+      if(!_flowHasPendingPickingLines(flow)) continue;
       if(_isFbmFlow(flow)) fbm++; else fba++;
     }
   }
@@ -5332,9 +5347,9 @@ const Annunci = (()=>{
   }
 
   function onCarico(info){
-    if(!info || info.active===false) return;
-    const createdMs=_num(info.createdAtMs);
-    const expEffettiva = createdMs>0 ? createdMs + 24*60*60*1000 : _num(info.expiresAtMs);
+    if(!info || _safe(()=>_incomingExpiry()<=Date.now(), true)) return;
+    const createdMs=_num(_incomingCreatedMs(info));
+    const expEffettiva = _incomingExpiry();
     if(expEffettiva && expEffettiva<=Date.now()) return;
     const id=String(info.ddtNumber||info.createdAtMs||'');
     if(!id || id===lastCarico) return;
@@ -5460,8 +5475,46 @@ function maybeSpeakKioskStartup(reason){
 
 /* ===== AVVISO CARICO IN ARRIVO DA CEREA (dura 1 giorno dalla generazione bolla) ===== */
 let _incomingData=null;          // ultimo documento avviso ricevuto da Firestore
+function _incomingMs(v){
+  if(!v) return 0;
+  if(typeof v==='number') return Number.isFinite(v) ? v : 0;
+  if(typeof v==='string'){
+    const n=Number(v); if(Number.isFinite(n) && n>0) return n;
+    const t=Date.parse(v); return Number.isFinite(t) ? t : 0;
+  }
+  if(v instanceof Date) return v.getTime();
+  if(typeof v.toMillis==='function'){
+    const n=Number(v.toMillis()); return Number.isFinite(n) ? n : 0;
+  }
+  if(v.seconds!=null){
+    const n=Number(v.seconds)*1000 + Math.floor(Number(v.nanoseconds||0)/1e6);
+    return Number.isFinite(n) ? n : 0;
+  }
+  return 0;
+}
+function _incomingCreatedMs(d){
+  return _incomingMs(d && (d.createdAtMs || d.createdAtClient || d.createdAt || d.generatedAtMs || d.generatedAt));
+}
+function _incomingExpiresMs(d){
+  return _incomingMs(d && (d.expiresAtMs || d.expiresAtClient || d.expiresAt));
+}
+function _incomingIsClosed(d){
+  const st=String((d && (d.status || d.state || d.phase || d.result)) || '').trim().toLowerCase();
+  return /^(completed|complete|arrived|closed|cancelled|canceled|done|received|scaricato|scaricata|consegnato|consegnata|annullato|annullata|chiuso|chiusa|completato|completata)$/i.test(st);
+}
+function _incomingValidUntil(d){
+  if(!d || d.active !== true || _incomingIsClosed(d)) return 0;
+  const created = _incomingCreatedMs(d);
+  if(created<=0) return 0;                 // niente data creazione valida = niente alert fantasma
+  const HARD_TTL = 24*60*60*1000;           // massimo 24h dalla generazione bolla
+  const cap = created + HARD_TTL;
+  if(Date.now() >= cap) return 0;
+  const exp = _incomingExpiresMs(d);
+  if(exp>0 && exp<=Date.now()) return 0;
+  return (exp>0 && exp<cap) ? exp : cap;
+}
 function setIncomingAlert(d){
-  _incomingData = d || null;
+  _incomingData = _incomingValidUntil(d) ? (d || null) : null;
   // aggiorna subito sottotitolo (numero bolla / articoli / bancali) quando arriva
   const sub=document.getElementById('iaSub');
   if(sub && _incomingData){
@@ -5477,20 +5530,7 @@ function setIncomingAlert(d){
   try{ if(typeof LogFeed!=='undefined') LogFeed.refresh(); }catch(_){}
 }
 function _incomingExpiry(){
-  if(!_incomingData || _incomingData.active===false) return 0;
-  const cr  = Number(_incomingData.createdAtMs||0);
-  const exp = Number(_incomingData.expiresAtMs||0);
-  const HARD_TTL = 24*60*60*1000;   // l'avviso "bilico da Cerea" vive al massimo 24h dalla creazione
-  // tetto difensivo: una volta passate 24h dalla creazione, l'avviso è SEMPRE spento,
-  // anche se expiresAtMs è assente o scritto male (evita avvisi "fantasma" da bolle vecchie).
-  if(cr>0){
-    const cap = cr + HARD_TTL;
-    if(Date.now() >= cap) return 0;          // creato più di 24h fa → spento, punto.
-    // entro le 24h: rispetta expiresAtMs se presente e sensato, altrimenti usa il tetto.
-    return (exp>0 && exp<=cap) ? exp : cap;
-  }
-  // senza createdAtMs ripiego sull'expiresAtMs grezzo (caso limite)
-  return exp>0 ? exp : 0;
+  return _incomingValidUntil(_incomingData);
 }
 function refreshIncomingAlert(){
   const el=document.getElementById('incomingAlert');
