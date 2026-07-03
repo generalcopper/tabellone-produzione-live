@@ -5847,37 +5847,38 @@ function applyFov(){
 }
 // ===== MONITOR PRESTAZIONI + SCALA RISOLUZIONE =====
 // Degrada progressivamente il carico GPU se il framerate resta basso, e RISALE se la
-// macchina regge. I tagli sono in ordine di impatto visivo crescente. Pensato per iGPU
-// deboli (es. Radeon Vega 3 su monitor 4K), dove il vero collo di bottiglia è il
-// FILL-RATE: troppi pixel da disegnare. Per questo ogni gradino abbassa anche il
-// "render cap" = lato lungo massimo del backbuffer WebGL. Renderizziamo a risoluzione
-// ridotta e scaliamo il canvas a schermo pieno via CSS (upscaling gratis del browser).
+// macchina regge. Ora il primo gradino renderizza a piena risoluzione 1920×1080
+// sul kiosk landscape, ma mantiene gli stessi fallback fluidi: se la GPU cala,
+// scende gradualmente a 1760/1600/1440/1280/1152 senza cambiare layout o UI.
 //
-//  step 0: ombre soft 2048 + render 1600px   (qualità massima)
-//  step 1: ombre soft 1280 + render 1600px
-//  step 2: ombre basic 1024 + render 1366px
-//  step 3: ombre basic 512 + render 1280px
-//  step 4: ombre OFF + render 1152px
-//  step 5: ombre OFF + render 1024px          (massima fluidità)
+// Nota: il cap è sul backbuffer reale WebGL, non sul CSS size. Questo evita che
+// schermi HiDPI/Retina moltiplichino i pixel interni e facciano perdere fluidità.
+//
+//  step 0: ombre soft 2048 + render 1920px   (piena 1080p landscape)
+//  step 1: ombre soft 1280 + render 1760px
+//  step 2: ombre basic 1024 + render 1600px  (qualità precedente circa)
+//  step 3: ombre basic 512 + render 1440px
+//  step 4: ombre OFF + render 1280px
+//  step 5: ombre OFF + render 1152px         (massima fluidità)
 let _fpsSamples=0,_fpsSlow=0,_fpsFast=0,_lastNow=0,_perfStep=0;
-const _PR_MAX=Math.min(devicePixelRatio,1.5);
+const _PR_MAX=1;
 const _PERF_STEPS=[
-  { shadow:true,  soft:true,  map:2048, cap:1600 },
-  { shadow:true,  soft:true,  map:1280, cap:1600 },
-  { shadow:true,  soft:false, map:1024, cap:1366 },
-  { shadow:true,  soft:false, map:512,  cap:1280 },
+  { shadow:true,  soft:true,  map:2048, cap:1920 },
+  { shadow:true,  soft:true,  map:1280, cap:1760 },
+  { shadow:true,  soft:false, map:1024, cap:1600 },
+  { shadow:true,  soft:false, map:512,  cap:1440 },
+  { shadow:false, soft:false, map:512,  cap:1280 },
   { shadow:false, soft:false, map:512,  cap:1152 },
-  { shadow:false, soft:false, map:512,  cap:1024 },
 ];
 
 // CAP RISOLUZIONE INTERNA: il backbuffer non supera mai 'cap' px sul lato lungo.
-// A 4K (3840px) con cap 1600 disegnamo ~5× meno pixel → enorme guadagno su Vega 3.
+// Su 1920×1080 step 0 = pixel nativi; se gli FPS scendono, il perfWatch degrada.
 function applyRenderSize(){
   const w=innerWidth, h=innerHeight;
   const long=Math.max(w,h)||1;
-  const cap=_PERF_STEPS[_perfStep] ? _PERF_STEPS[_perfStep].cap : 1600;
-  const scale=Math.min(1, cap/long);          // non ingrandire mai
-  const pr=Math.min(_PR_MAX, devicePixelRatio*scale);
+  const cap=_PERF_STEPS[_perfStep] ? _PERF_STEPS[_perfStep].cap : 1920;
+  const scale=Math.min(1, cap/long);          // non superare mai il cap reale
+  const pr=Math.max(0.45, Math.min(_PR_MAX, scale));
   renderer.setPixelRatio(pr);
   renderer.setSize(w,h,false);                // false = non tocca lo style: canvas resta full-screen
   const cv=renderer.domElement;
@@ -5963,7 +5964,7 @@ const _perfHud=(function(){
       _fps = Math.round(1000*_frames/_acc);
       _frames=0; _acc=0;
       const gpuApprox = Math.max(0, (1000/Math.max(_fps,1)) - _cpuAvg);
-      const stepLbl=['SOFT 2048/1600','SOFT 1280/1600','BASIC 1024/1366','BASIC 512/1280','NO-SH/1152','NO-SH/1024'][_perfStep]||('step '+_perfStep);
+      const stepLbl=['SOFT 2048/1920','SOFT 1280/1760','BASIC 1024/1600','BASIC 512/1440','NO-SH/1280','NO-SH/1152'][_perfStep]||('step '+_perfStep);
       const lineLbl = (typeof lineOn==='function' && lineOn()) ? 'ON' : 'off';
       ensure().textContent =
         `FPS   ${_fps}\n`+
@@ -6190,8 +6191,9 @@ tick._px=tick._py=tick._pz=0; tick._idleAccum=0;
     const bigScreen = Math.max(innerWidth,innerHeight) >= 2560;   // 4K/1440p
     const weak = /vega 3|vega 2|vega 6|radeon\(tm\) graphics|amd radeon graphics|hd graphics|uhd graphics 6|gma|mali|adreno [1-5]/.test(gpu);
     let step = 0;
-    if(weak) step = bigScreen ? 3 : 2;       // iGPU debole: parti ridotto (di più a 4K)
+    if(weak && bigScreen) step = 3;           // iGPU debole su 4K: parti ridotto
     else if(bigScreen) step = 1;             // GPU ok ma 4K: un filo di margine
+    // Su 1920×1080 parto comunque dal gradino massimo: se serve, perfWatch scala giù in automatico.
     if(step>0) _applyPerfStep(step);
   }catch(_){ /* in caso di dubbio resta a qualità piena, il perfWatch correggerà */ }
 })();
