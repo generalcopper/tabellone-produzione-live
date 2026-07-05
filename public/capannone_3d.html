@@ -343,6 +343,8 @@
   #cockpit #ckPageAzienda .ck-amzalert + .ck-amzalert{margin-top:clamp(10px,1.4vh,16px);}
   /* accento "carico Cerea": pallino verde acqua (coerente col toast carico esistente) */
   #cockpit #ckPageAzienda .ck-amzalert--cerea .ck-amzalert-dot{background:#7fe0b0;}
+  #cockpit #ckPageAzienda .ck-amzalert--trash .ck-amzalert-dot{background:#facc15;box-shadow:0 0 12px rgba(250,204,21,.9);}
+  #cockpit #ckPageAzienda .ck-amzalert--trash{border-color:rgba(250,204,21,.30);background:linear-gradient(180deg,rgba(70,55,10,.36),rgba(255,255,255,.045));}
   @keyframes amzAlertIn{from{opacity:0; transform:translateY(6px);} to{opacity:1; transform:none;}}
   @keyframes amzAlertPulse{0%,100%{opacity:1;} 50%{opacity:.35;}}
   /* contatori ordini: "stat" eleganti — etichetta sopra, numero grande, barra colore sotto */
@@ -1285,6 +1287,10 @@
     <div class="ck-amzalert ck-amzalert--cerea" id="ckCereaAlert" hidden aria-hidden="true">
       <span class="ck-amzalert-dot"></span>
       <span class="ck-amzalert-txt"><b>Bilico da Cerea in arrivo</b> · <span id="ckCereaSub">materie prime in entrata</span></span>
+    </div>
+    <div class="ck-amzalert ck-amzalert--trash" id="ckTrashAlert" hidden aria-hidden="true">
+      <span class="ck-amzalert-dot"></span>
+      <span class="ck-amzalert-txt"><b>Promemoria rifiuti</b> · <span id="ckTrashSub">questa sera esposizione raccolta</span></span>
     </div>
   </div>
   <div class="ck-inner ck-board" id="ckPageOperativo">
@@ -6056,6 +6062,37 @@ function ubiNotifIcon(type, priority){
   if(t.includes('sync')) return '✓'; if(t.includes('stock')) return '📉'; if(t.includes('truck')||t.includes('cerea')) return '🚛';
   if(t.includes('trash')||t.includes('waste')||t.includes('immondizia')) return '🗑️'; if(priority==='high') return '⚡'; return '🔔';
 }
+function ubiTrashKindLabel(raw){
+  const k=String(raw||'').toLowerCase();
+  if(k.includes('plastic')||k.includes('pla')) return 'plastica e lattine';
+  if(k.includes('secco')) return 'secco';
+  if(k.includes('carta')) return 'carta e cartone';
+  return String(raw||'raccolta');
+}
+function ubiIsTrashNotification(n){
+  const t=String(n&& (n.type||n.reason||'') || '').toLowerCase();
+  return t.includes('trash') || t.includes('waste') || t.includes('immondizia') || t.includes('rifiut');
+}
+function renderUbiTrashAlert(){
+  const el=document.getElementById('ckTrashAlert'); const sub=document.getElementById('ckTrashSub');
+  if(!el||!sub) return;
+  const now=Date.now();
+  const n=UBI_NOTIFICATIONS.find(x=>{
+    if(!ubiIsTrashNotification(x)) return false;
+    if(String(x.status||'active')==='resolved') return false;
+    const ms=Number(x.updatedAtMs||x.createdAtMs||0);
+    if(ms && now-ms>36*60*60*1000) return false;
+    const p=x.payload||{};
+    const kind=String(p.wasteKind||p.trashKind||x.wasteKind||x.trashKind||x.audioKey||x.text||'').toLowerCase();
+    return kind.includes('carta') || kind.includes('plastic') || kind.includes('pla') || kind.includes('secco');
+  });
+  if(!n){ el.hidden=true; el.setAttribute('aria-hidden','true'); return; }
+  const p=n.payload||{};
+  const kind=ubiTrashKindLabel(p.wasteKind||p.trashKind||n.wasteKind||n.trashKind||n.audioKey||n.text);
+  const date=String(p.collectionDate||n.collectionDate||'');
+  sub.textContent = `questa sera esporre ${kind}${date?` · raccolta ${date}`:''}`;
+  el.hidden=false; el.setAttribute('aria-hidden','false');
+}
 function renderUbiNotificationCenter(){
   const list=document.getElementById('ubiNotifList'); const count=document.getElementById('ubiNotifCount'); const btn=document.getElementById('ubiNotifBtn');
   if(!list||!count||!btn) return;
@@ -6101,7 +6138,7 @@ function subscribeUbiNotifications(fs, db){
     const q=fs.query(ref, fs.orderBy('updatedAtMs','desc'), fs.limit(80));
     fs.onSnapshot(q,(snap)=>{
       const arr=[]; snap.forEach(d=>{ arr.push({id:d.id, ...(d.data()||{})}); });
-      UBI_NOTIFICATIONS=arr; renderUbiNotificationCenter();
+      UBI_NOTIFICATIONS=arr; renderUbiNotificationCenter(); renderUbiTrashAlert();
     },(err)=>{ console.warn('UBI notifications listener',err&&err.code); });
   }catch(e){ console.warn('UBI notifications non attive',e); }
 }
