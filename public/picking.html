@@ -11041,6 +11041,8 @@ function startAllLogs(modeOrOpts = "full"){
         const orderKeyBase = orderName || orderId || "FBM_SENZA_DETTAGLIO_ORDINE";
         const orderKey = hasOrder ? `order::${orderKeyBase}` : `pending::${clean(row.loc || "concamarise")}`;
         const orderLabel = clean(row.orderLabel || orderName || orderId || "Shopify FBM in sospeso");
+        const looksLikeOrderNumber = (v)=> /^#{1,3}\s*\d+\b/i.test(clean(v)) || /^ORD[-\s#]*\d+\b/i.test(clean(v));
+        const orderNumber = orderName || (looksLikeOrderNumber(orderLabel) ? orderLabel : "") || "";
 
         let group = groups.get(orderKey);
         if(!group){
@@ -11050,6 +11052,7 @@ function startAllLogs(modeOrOpts = "full"){
             orderName,
             orderId,
             orderLabel,
+            orderNumber,
             customerName: "",
             locs: new Set(),
             latestAt: 0,
@@ -11060,6 +11063,7 @@ function startAllLogs(modeOrOpts = "full"){
 
         if(orderName && !group.orderName) group.orderName = orderName;
         if(orderId && !group.orderId) group.orderId = orderId;
+        if(orderNumber && !group.orderNumber) group.orderNumber = orderNumber;
         if(orderLabel && (!group.orderLabel || group.orderLabel === "Shopify FBM in sospeso")) group.orderLabel = orderLabel;
         if(!isUnknownCustomer(row.customerName) && isUnknownCustomer(group.customerName)) group.customerName = clean(row.customerName);
         if(row.loc) group.locs.add(row.loc);
@@ -11127,7 +11131,8 @@ function startAllLogs(modeOrOpts = "full"){
           hasOrder: !!group.hasOrder,
           orderName: group.orderName || "",
           orderId: group.orderId || "",
-          orderLabel: group.orderLabel || (group.hasOrder ? (group.orderName || group.orderId || "Ordine Shopify") : "Shopify FBM in sospeso"),
+          orderNumber: group.orderNumber || group.orderName || "",
+          orderLabel: group.orderLabel || (group.hasOrder ? (group.orderNumber || group.orderName || group.orderId || "Ordine Shopify") : "Shopify FBM in sospeso"),
           customerName: group.customerName || "Cliente non disponibile",
           locs: Array.from(group.locs),
           lines,
@@ -11331,9 +11336,14 @@ function startAllLogs(modeOrOpts = "full"){
           };
 
           const cards = orderGroups.map(order=>{
-            const orderMain = order.orderLabel || order.orderName || order.orderId || "Ordine Shopify";
+            const cleanOrderLabel = squashWhitespace(order.orderLabel || "");
+            const cleanOrderNumber = squashWhitespace(order.orderNumber || order.orderName || "");
+            const cleanOrderId = squashWhitespace(order.orderId || "");
+            const orderNumberLabel = cleanOrderNumber || (order.hasOrder ? cleanOrderLabel : "") || cleanOrderId;
+            const orderMain = orderNumberLabel ? `Ordine ${orderNumberLabel}` : (cleanOrderLabel || "Shopify FBM in sospeso");
             const orderSubParts = [];
-            if(order.orderName && order.orderId && order.orderName !== order.orderId) orderSubParts.push(order.orderId);
+            if(orderNumberLabel) orderSubParts.push(`N. ordine: ${orderNumberLabel}`);
+            if(cleanOrderId && cleanOrderId !== orderNumberLabel) orderSubParts.push(`ID Shopify: ${cleanOrderId}`);
             const locLabel = (order.locs || []).map(prettyLoc).filter(Boolean).join(" + ") || "Concamarise";
             orderSubParts.push(locLabel);
             if(!order.hasOrder) orderSubParts.push("dettaglio ordine non disponibile");
