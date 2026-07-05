@@ -10264,16 +10264,69 @@ function startAllLogs(modeOrOpts = "full"){
       }
     }
 
+    function hasStrongShopifyFbmItemSignal(it){
+      try{
+        const d = (it && typeof it === "object") ? it : {};
+        if(isAmazonFbaInventoryPendingItem(d)) return false;
+        if(d.shopify === true || d.generatedFromShopifyFbm === true) return true;
+        const raw = [
+          d.__shopifySource,
+          d.lastReservationSource,
+          d.reservationSource,
+          d.firstSeenSource,
+          d.source,
+          d.origin,
+          d.platform,
+          d.provider,
+          d.reservationStatus,
+          d.status,
+          d.lastReservationFlowId,
+          d.lastReservationFileName,
+          d.workflowId,
+          d.workflowLabel,
+          d.channel,
+          d.salesChannel,
+          d.sales_channel,
+          d.fulfillmentChannel,
+          d.fulfillment_channel,
+          d.fulfillmentService,
+          d.fulfillment_service,
+          d.shopifyOrderId,
+          d.shopifyOrderName
+        ].map(x=>String(x||"").toLowerCase()).join(" ");
+        if(!raw) return false;
+        return !!(
+          raw.includes("shopify_fbm") ||
+          raw.includes("shopify-fbm") ||
+          raw.includes("shopify fbm") ||
+          raw.includes("manual_shopify") ||
+          raw.includes("manual shopify") ||
+          raw.includes("merchant_fulfilled") ||
+          raw.includes("merchant fulfilled") ||
+          raw.includes("fulfilled_by_merchant") ||
+          raw.includes("fulfilled by merchant") ||
+          raw.includes("gid://shopify") ||
+          raw.startsWith("shopify-") ||
+          raw.includes(" shopify-") ||
+          (raw.includes("shopify") && (raw.includes("fbm") || raw.includes("merchant") || raw.includes("manual")))
+        );
+      }catch(_e){
+        return false;
+      }
+    }
+
     function isShopifyFbmPendingInventoryItem(it){
       try{
         const pending = shopifyFbmPendingQtyFromItem(it);
         if(pending <= 0) return false;
 
         // Guard rail forte: gli FBA possono avere pendingPickQty/reservedQty e anche
-        // orderId/orderName generici dopo una prenotazione. Per FBM accettiamo solo
-        // righe Shopify reali, con SKU della riga ordine che combacia con lo SKU inventario.
+        // orderId/orderName generici dopo una prenotazione. Per FBM accettiamo:
+        // 1) righe Shopify reali con SKU combaciante; oppure
+        // 2) una prenotazione item-level con segnale Shopify/FBM esplicito.
         if(isAmazonFbaInventoryPendingItem(it)) return false;
-        return hasValidShopifyFbmOrderSourceForItem(it);
+        if(hasValidShopifyFbmOrderSourceForItem(it)) return true;
+        return hasStrongShopifyFbmItemSignal(it);
       }catch(_e){
         return false;
       }
@@ -10611,8 +10664,31 @@ function startAllLogs(modeOrOpts = "full"){
             if(row) rows.push(row);
           }
         }
-        // Nessun fallback: se non c'è una riga Shopify con SKU combaciante,
-        // non inventiamo una riga ordine. Meglio non mostrare nulla che mischiare FBA/FBM.
+
+        // Fallback controllato: alcuni sync Shopify scrivono la prenotazione sullo SKU
+        // ma non salvano ancora le righe ordine dettagliate. In quel caso mostriamo lo SKU
+        // da preparare senza agganciare riferimenti ordine potenzialmente sbagliati.
+        if(!rows.length && hasStrongShopifyFbmItemSignal(it)){
+          const fallbackKey = [loc, sku, "shopify_fbm_item_pending", pending, titleFallback].join("::");
+          if(!seen.has(fallbackKey)){
+            seen.add(fallbackKey);
+            rows.push({
+              loc,
+              sku,
+              title: titleFallback,
+              qty: Math.round(pending),
+              orderId: "",
+              orderName: "",
+              orderLabel: "Shopify FBM in sospeso",
+              customerName: "Dettaglio cliente non disponibile",
+              positions,
+              codes,
+              firstCode,
+              latestAt: Number(it?.updatedAtClient || it?.lastReservationAtClient || it?.reorderedAtClient || 0) || 0,
+              source: "inventory_item_shopify_fbm_pending"
+            });
+          }
+        }
       }catch(err){ console.warn("shopify fbm order rows", err); }
       return rows;
     }
