@@ -10892,6 +10892,39 @@ function startAllLogs(modeOrOpts = "full"){
       return out;
     }
 
+    function shopifyFbmFallbackOrderInfoFromItem(it){
+      try{
+        const item = (it && typeof it === "object") ? it : {};
+        const nestedOrder = (item.lastReservationOrder && typeof item.lastReservationOrder === "object")
+          ? item.lastReservationOrder
+          : ((item.shopifyOrder && typeof item.shopifyOrder === "object") ? item.shopifyOrder : {});
+
+        const directOrderName = shopifyFbmFirstText(item, [
+          "__orderName", "lastReservationOrderName", "shopifyOrderName", "orderName",
+          "orderNumber", "order_number", "orderLabel", "numeroOrdine", "numero_ordine"
+        ]);
+        const nestedOrderName = shopifyFbmOrderNameFromSource(nestedOrder, {});
+        const orderName = squashWhitespace(directOrderName || nestedOrderName || "");
+
+        const directOrderId = shopifyFbmFirstText(item, [
+          "__orderId", "lastReservationOrderId", "shopifyOrderId", "orderId",
+          "admin_graphql_api_id", "adminGraphqlApiId", "legacyResourceId", "order_id", "id"
+        ]);
+        const nestedOrderId = shopifyFbmOrderIdFromSource(nestedOrder, {});
+        const orderId = squashWhitespace(directOrderId || nestedOrderId || "");
+
+        const customerName = squashWhitespace(
+          shopifyFbmCustomerNameFromSource(nestedOrder, item) ||
+          shopifyFbmFirstText(item, ["lastReservationCustomerName", "shopifyCustomerName", "customerName", "customerDisplayName", "cliente", "customerEmail"]) ||
+          ""
+        );
+
+        return { orderName, orderId, customerName };
+      }catch(_e){
+        return { orderName:"", orderId:"", customerName:"" };
+      }
+    }
+
     function shopifyFbmOrderRowsFromItem(it, loc){
       const rows = [];
       const seen = new Set();
@@ -10954,7 +10987,11 @@ function startAllLogs(modeOrOpts = "full"){
         // ma non salvano ancora le righe ordine dettagliate. In quel caso mostriamo lo SKU
         // da preparare senza agganciare riferimenti ordine potenzialmente sbagliati.
         if(!rows.length && isSafeShopifyFbmItemLevelFallback(it)){
-          const fallbackKey = [loc, sku, "shopify_fbm_item_pending", pending, titleFallback].join("::");
+          const fbInfo = shopifyFbmFallbackOrderInfoFromItem(it);
+          const fallbackOrderName = squashWhitespace(fbInfo.orderName || "");
+          const fallbackOrderId = squashWhitespace(fbInfo.orderId || "");
+          const fallbackCustomer = squashWhitespace(fbInfo.customerName || "");
+          const fallbackKey = [loc, sku, "shopify_fbm_item_pending", fallbackOrderName, fallbackOrderId, pending, titleFallback].join("::");
           if(!seen.has(fallbackKey)){
             seen.add(fallbackKey);
             rows.push({
@@ -10962,10 +10999,10 @@ function startAllLogs(modeOrOpts = "full"){
               sku,
               title: titleFallback,
               qty: Math.round(pending),
-              orderId: "",
-              orderName: "",
-              orderLabel: "Shopify FBM in sospeso",
-              customerName: "Dettaglio cliente non disponibile",
+              orderId: fallbackOrderId,
+              orderName: fallbackOrderName,
+              orderLabel: fallbackOrderName || (fallbackOrderId ? `Ordine ${fallbackOrderId}` : "Shopify FBM in sospeso"),
+              customerName: fallbackCustomer || "Dettaglio cliente non disponibile",
               positions,
               codes,
               firstCode,
