@@ -4564,7 +4564,7 @@
 
 
 
-    /* UBI IA fullscreen push-to-talk: solo cloud, nessun riconoscimento locale */
+    /* UBI IA fullscreen: voce + testo, stessa coda UBI self-hosted */
     .ubiModeFullscreenShell{
       position:fixed;
       inset:0;
@@ -5316,7 +5316,7 @@
       <div class="ubiModeHeader">
         <div class="ubiModeEyebrow">Capannone 3D • UBI locale</div>
         <div class="ubiModeTitle">UBI</div>
-        <div class="ubiModeSub">Scrivi una richiesta operativa. UBI passa dalla coda Firestore, ragiona sull'agente self-hosted e risponde sul Capannone 3D con voce Nicola.</div>
+        <div class="ubiModeSub">Parla oppure scrivi una richiesta operativa. UBI passa dalla coda Firestore, ragiona sull'agente self-hosted e risponde sul Capannone 3D con voce Nicola.</div>
       </div>
 
       <div class="ubiDialogCard" aria-live="polite">
@@ -5327,12 +5327,16 @@
       </div>
 
       <div class="ubiTalkArea">
+        <button class="ubiTalkButton" id="btnUbiTalk" type="button" aria-label="Tieni premuto per parlare con UBI">
+          <span>Parla</span>
+          <small>tieni premuto</small>
+        </button>
         <div class="ubiTextForm">
           <textarea class="ubiTextInput" id="ubiTextPrompt" autocomplete="off" autocorrect="off" autocapitalize="sentences" spellcheck="true" placeholder="Esempio: UBI, cosa devo preparare adesso?"></textarea>
           <button class="ubiSendButton" id="btnUbiSendText" type="button">Invia a UBI</button>
         </div>
-        <div class="ubiStatus" id="ubiStatusText">Pronto. Scrivi una richiesta e inviala all'agente UBI locale.</div>
-        <div class="ubiHint">Picking e Capannone leggono la stessa risposta UBI. Kokoro genera un MP3 live per ogni domanda.</div>
+        <div class="ubiStatus" id="ubiStatusText">Pronto. Tieni premuto Parla oppure scrivi una richiesta.</div>
+        <div class="ubiHint">La voce viene trascritta e inviata alla stessa coda UBI. Kokoro genera un MP3 live per ogni domanda.</div>
       </div>
     </div>
   </div>
@@ -6086,6 +6090,9 @@ Tip:
     let _ubiAudioChunks = [];
     let _ubiRecordTimer = null;
     let _ubiSending = false;
+    let _ubiSpeechRec = null;
+    let _ubiSpeechTranscript = "";
+    let _ubiSpeechCancelled = false;
 
     // === Auth/roles ===
     const ADMIN_EMAILS = ["ludovico@generalcoppersrl.com"];
@@ -6747,7 +6754,7 @@ function guessTitleFromRaw(rawText, sku){
       return { ref, key };
     }
 
-    async function sendUbiTextToCloud(){
+    async function sendUbiTextToCloud(sourceOverride = "picking_ubi_text"){
       const input = ubiTextInput();
       const sendBtn = ubiSendBtn();
       const question = squashWhitespace(input?.value || "");
@@ -6778,7 +6785,7 @@ function guessTitleFromRaw(rawText, sku){
           forceAnnounce: true,
           liveAudio: true,
           expectAudioFormat: "mp3",
-          source: "picking_ubi_text"
+          source: sourceOverride || "picking_ubi_text"
         });
 
         ubiSetStatus("UBI sta ragionando sull'agente locale…");
@@ -6878,7 +6885,7 @@ function guessTitleFromRaw(rawText, sku){
         if(!shell) return;
         document.body.classList.add("ubi-mode-active");
         shell.setAttribute("aria-hidden", "false");
-        ubiSetStatus("Pronto. Scrivi una richiesta e inviala all'agente UBI locale.");
+        ubiSetStatus("Pronto. Tieni premuto Parla oppure scrivi una richiesta.");
         const btn = $("ubiTextPrompt") || ubiTalkBtn();
         setTimeout(()=>{ try{ btn?.focus?.({ preventScroll:true }); }catch(_e){} }, 80);
         try{
@@ -6935,58 +6942,120 @@ function guessTitleFromRaw(rawText, sku){
       });
     }
 
+    function ubiSpeechCtor(){
+      try{ return window.SpeechRecognition || window.webkitSpeechRecognition || null; }
+      catch(_e){ return null; }
+    }
+
     async function startUbiRecording(){
       try{
-        if(_ubiSending || _ubiRecorder) return;
+        if(_ubiSending || _ubiSpeechRec || _ubiRecorder) return;
         if(!state.firebase?.ok || !state.firebase?.auth?.currentUser){
           showToast("UBI non disponibile", "Accesso Firebase non ancora attivo.", 2400);
           ubiSetStatus("Accesso Firebase non ancora attivo.");
           return;
         }
-        if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !window.MediaRecorder){
-          ubiSetStatus("Microfono non disponibile su questo browser. Serve registrazione audio per inviare al cloud.");
-          showToast("Microfono non disponibile", "Il browser non supporta MediaRecorder.", 2600);
+
+        const Ctor = ubiSpeechCtor();
+        if(!Ctor){
+          ubiSetStatus("Riconoscimento vocale non supportato da questo browser. Usa il campo testo.");
+          showToast("Microfono", "Questo browser non supporta SpeechRecognition.", 2600);
           return;
         }
 
-        // Click su "Parla" = interrompi subito l'audio UBI eventualmente in corso sul kiosk.
-        // Non blocco l'apertura del microfono: se la write cloud fallisce, la registrazione parte comunque.
-        void interruptCapannoneUbiSpeech("new_ubi_recording");
+        void interruptCapannoneUbiSpeech("new_ubi_voice_question");
+
+        _ubiSpeechTranscript = "";
+        _ubiSpeechCancelled = false;
+        _ubiRecorder = { kind:"speech_recognition" };
+
+        const rec = new Ctor();
+        _ubiSpeechRec = rec;
+        rec.lang = "it-IT";
+        rec.continuous = true;
+        rec.interimResults = true;
+        rec.maxAlternatives = 1;
 
         ubiSetTranscript("Sto ascoltando…");
         ubiSetReply("—");
-        ubiSetStatus("Registrazione cloud in corso… rilascia per inviare a UBI.");
-        _ubiAudioChunks = [];
-        _ubiAudioStream = await navigator.mediaDevices.getUserMedia({
-          audio: { echoCancellation:true, noiseSuppression:true, autoGainControl:true }
-        });
-        const mimeType = ubiPreferredMimeType();
-        _ubiRecorder = mimeType ? new MediaRecorder(_ubiAudioStream, { mimeType }) : new MediaRecorder(_ubiAudioStream);
-        _ubiRecorder.ondataavailable = (ev)=>{
-          if(ev && ev.data && ev.data.size > 0) _ubiAudioChunks.push(ev.data);
-        };
-        _ubiRecorder.onstop = ()=>{
-          const chunks = _ubiAudioChunks.slice();
-          const mt = (_ubiRecorder && _ubiRecorder.mimeType) || mimeType || "audio/webm";
-          _ubiRecorder = null;
-          try{ _ubiAudioStream?.getTracks?.().forEach(t=>t.stop()); }catch(_e){}
-          _ubiAudioStream = null;
-          if(_ubiRecordTimer){ clearTimeout(_ubiRecordTimer); _ubiRecordTimer = null; }
-          const btn = ubiTalkBtn();
-          if(btn) btn.classList.remove("is-recording");
-          if(!chunks.length){ ubiSetStatus("Audio vuoto. Tieni premuto e parla di nuovo."); return; }
-          const blob = new Blob(chunks, { type: mt });
-          void sendUbiAudioToCloud(blob, mt);
-        };
-        _ubiRecorder.start(120);
+        ubiSetStatus("Sto ascoltando. Rilascia quando hai finito.");
+
         const btn = ubiTalkBtn();
         if(btn) btn.classList.add("is-recording");
-        _ubiRecordTimer = setTimeout(()=>{ stopUbiRecording().catch(()=>{}); }, 14000);
+
+        rec.onresult = (ev)=>{
+          try{
+            let finalText = "";
+            let interimText = "";
+            for(let i = ev.resultIndex || 0; i < ev.results.length; i++){
+              const res = ev.results[i];
+              const txt = squashWhitespace(res?.[0]?.transcript || "");
+              if(!txt) continue;
+              if(res.isFinal) finalText += " " + txt;
+              else interimText += " " + txt;
+            }
+            finalText = squashWhitespace(finalText);
+            interimText = squashWhitespace(interimText);
+            if(finalText){
+              _ubiSpeechTranscript = squashWhitespace((_ubiSpeechTranscript || "") + " " + finalText);
+            }
+            const shown = squashWhitespace([_ubiSpeechTranscript, interimText].filter(Boolean).join(" "));
+            if(shown) ubiSetTranscript(shown);
+          }catch(err){ console.warn("UBI speech result", err); }
+        };
+
+        rec.onerror = (ev)=>{
+          try{
+            const code = String(ev?.error || "errore_microfono");
+            console.warn("UBI speech recognition", ev);
+            if(code === "no-speech") ubiSetStatus("Non ho sentito nulla. Tieni premuto e riprova.");
+            else if(code === "not-allowed" || code === "service-not-allowed") ubiSetStatus("Permesso microfono negato o riconoscimento vocale bloccato dal browser.");
+            else ubiSetStatus("Errore riconoscimento vocale: " + code);
+          }catch(_e){}
+        };
+
+        rec.onend = ()=>{
+          const btn2 = ubiTalkBtn();
+          if(btn2) btn2.classList.remove("is-recording");
+          _ubiSpeechRec = null;
+          _ubiRecorder = null;
+          if(_ubiRecordTimer){ clearTimeout(_ubiRecordTimer); _ubiRecordTimer = null; }
+
+          if(_ubiSpeechCancelled){
+            _ubiSpeechCancelled = false;
+            ubiSetStatus("Registrazione annullata.");
+            return;
+          }
+
+          const question = squashWhitespace(_ubiSpeechTranscript || "");
+          _ubiSpeechTranscript = "";
+          if(!question){
+            ubiSetStatus("Audio vuoto. Tieni premuto e parla di nuovo.");
+            return;
+          }
+
+          const input = ubiTextInput();
+          if(input) input.value = question;
+          ubiSetTranscript(question);
+          ubiSetStatus("Trascrizione pronta. Invio a UBI locale…");
+          void sendUbiTextToCloud("picking_ubi_voice");
+        };
+
+        try{ rec.start(); }
+        catch(err){
+          _ubiSpeechRec = null;
+          _ubiRecorder = null;
+          if(btn) btn.classList.remove("is-recording");
+          throw err;
+        }
+
+        _ubiRecordTimer = setTimeout(()=>{
+          stopUbiRecording().catch(()=>{});
+        }, 14000);
       }catch(err){
-        console.warn("UBI record start", err);
-        try{ _ubiAudioStream?.getTracks?.().forEach(t=>t.stop()); }catch(_e){}
+        console.warn("UBI speech start", err);
+        _ubiSpeechRec = null;
         _ubiRecorder = null;
-        _ubiAudioStream = null;
         if(_ubiRecordTimer){ clearTimeout(_ubiRecordTimer); _ubiRecordTimer = null; }
         const btn = ubiTalkBtn();
         if(btn) btn.classList.remove("is-recording");
@@ -7001,25 +7070,23 @@ function guessTitleFromRaw(rawText, sku){
         if(_ubiRecordTimer){ clearTimeout(_ubiRecordTimer); _ubiRecordTimer = null; }
         const btn = ubiTalkBtn();
         if(btn) btn.classList.remove("is-recording");
-        if(!_ubiRecorder){
-          if(opts.cancel){ try{ _ubiAudioStream?.getTracks?.().forEach(t=>t.stop()); }catch(_e){} _ubiAudioStream = null; }
+
+        if(_ubiSpeechRec){
+          if(opts.cancel){
+            _ubiSpeechCancelled = true;
+            try{ _ubiSpeechRec.abort(); }catch(_e){}
+          }else{
+            ubiSetStatus("Elaboro la trascrizione…");
+            try{ _ubiSpeechRec.stop(); }catch(_e){}
+          }
           return;
         }
-        if(opts.cancel){
-          _ubiAudioChunks = [];
-          try{ _ubiRecorder.onstop = null; _ubiRecorder.stop(); }catch(_e){}
-          try{ _ubiAudioStream?.getTracks?.().forEach(t=>t.stop()); }catch(_e){}
-          _ubiRecorder = null;
-          _ubiAudioStream = null;
-          ubiSetStatus("Registrazione annullata.");
-          return;
-        }
-        if(_ubiRecorder.state !== "inactive"){
-          ubiSetStatus("Invio audio al cloud…");
-          _ubiRecorder.stop();
-        }
+
+        _ubiRecorder = null;
+        try{ _ubiAudioStream?.getTracks?.().forEach(t=>t.stop()); }catch(_e){}
+        _ubiAudioStream = null;
       }catch(err){
-        console.warn("UBI record stop", err);
+        console.warn("UBI speech stop", err);
       }
     }
 
