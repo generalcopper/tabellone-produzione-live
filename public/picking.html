@@ -10268,30 +10268,12 @@ function startAllLogs(modeOrOpts = "full"){
       try{
         const pending = shopifyFbmPendingQtyFromItem(it);
         if(pending <= 0) return false;
-        // Guard rail: gli FBA possono avere orderId/orderName generici dopo la prenotazione.
-        // Questi campi non bastano per considerarli FBM/Shopify.
-        if(isAmazonFbaInventoryPendingItem(it)) return false;
 
-        const src = String(it?.lastReservationSource || it?.reservationSource || it?.firstSeenSource || it?.source || "").toLowerCase();
-        const st = String(it?.reservationStatus || it?.status || "").toLowerCase();
-        const flowId = String(it?.lastReservationFlowId || "").toUpperCase();
-        const shopifyOrderId = String(it?.shopifyOrderId || "").trim();
-        const shopifyOrderName = String(it?.shopifyOrderName || "").trim();
-        const hasShopifyOrderObjects = !!(
-          (Array.isArray(it?.shopifyPendingOrders) && it.shopifyPendingOrders.length) ||
-          (Array.isArray(it?.shopifyOrders) && it.shopifyOrders.length) ||
-          (Array.isArray(it?.shopifyOrderLines) && it.shopifyOrderLines.length) ||
-          (it?.shopifyOrder && typeof it.shopifyOrder === "object")
-        );
-        return !!(
-          src.includes("shopify") ||
-          st.includes("shopify") ||
-          flowId.startsWith("SHOPIFY") ||
-          shopifyOrderId ||
-          shopifyOrderName ||
-          hasShopifyOrderObjects ||
-          it?.generatedFromShopifyFbm === true
-        );
+        // Guard rail forte: gli FBA possono avere pendingPickQty/reservedQty e anche
+        // orderId/orderName generici dopo una prenotazione. Per FBM accettiamo solo
+        // righe Shopify reali, con SKU della riga ordine che combacia con lo SKU inventario.
+        if(isAmazonFbaInventoryPendingItem(it)) return false;
+        return hasValidShopifyFbmOrderSourceForItem(it);
       }catch(_e){
         return false;
       }
@@ -10321,6 +10303,103 @@ function startAllLogs(modeOrOpts = "full"){
       return "";
     }
 
+    function shopifyFbmSourceSku(src){
+      try{
+        const source = (src && typeof src === "object") ? src : {};
+        const direct = shopifyFbmFirstText(source, [
+          "sku", "SKU", "code", "productSku", "product_sku", "variantSku", "variant_sku",
+          "itemSku", "lineSku", "amazonSku", "amazonSKU", "amazonInventorySku", "inventorySku",
+          "sellerSku", "seller_sku"
+        ]);
+        if(direct) return toSkuId(direct);
+        for(const k of ["variant", "product", "item", "lineItem", "line_item"]){
+          const v = source[k];
+          if(v && typeof v === "object"){
+            const nested = shopifyFbmSourceSku(v);
+            if(nested) return nested;
+          }
+        }
+      }catch(_e){}
+      return "";
+    }
+
+    function shopifyFbmHasExplicitSourceSignal(src, parent=null){
+      try{
+        const source = (src && typeof src === "object") ? src : {};
+        const par = (parent && typeof parent === "object") ? parent : {};
+        if(isAmazonFbaInventoryPendingItem(source) || isAmazonFbaInventoryPendingItem(par)) return false;
+        if(source.shopify === true || source.generatedFromShopifyFbm === true || par.shopify === true || par.generatedFromShopifyFbm === true) return true;
+        const raw = [
+          source.__shopifySource, source.source, source.origin, source.platform, source.provider,
+          source.channel, source.salesChannel, source.sales_channel, source.fulfillmentService, source.fulfillment_service,
+          source.shopifyOrderId, source.shopifyOrderName, source.admin_graphql_api_id, source.adminGraphqlApiId,
+          par.__shopifySource, par.source, par.origin, par.platform, par.provider,
+          par.channel, par.salesChannel, par.sales_channel, par.fulfillmentService, par.fulfillment_service,
+          par.shopifyOrderId, par.shopifyOrderName, par.admin_graphql_api_id, par.adminGraphqlApiId
+        ].map(x=>String(x||"").toLowerCase()).join(" ");
+        return !!(
+          raw.includes("shopify") ||
+          raw.includes("shopify_fbm") ||
+          raw.includes("manual_shopify") ||
+          raw.includes("admin_graphql") ||
+          raw.includes("gid://shopify")
+        );
+      }catch(_e){
+        return false;
+      }
+    }
+
+    function shopifyFbmLineQtyStrict(src){
+      try{
+        const source = (src && typeof src === "object") ? src : {};
+        const keys = [
+          "qty", "quantity", "quantityOrdered", "fulfillableQuantity", "fulfillable_quantity",
+          "currentQuantity", "current_quantity", "pieces", "qta", "lineQty", "lineQuantity"
+        ];
+        for(const k of keys){
+          if(Object.prototype.hasOwnProperty.call(source, k)){
+            const n = parseQty(source[k]);
+            if(Number.isFinite(n) && n > 0) return Math.abs(n);
+          }
+        }
+      }catch(_e){}
+      return 0;
+    }
+
+    function shopifyFbmOrderParentData(order){
+      const o = (order && typeof order === "object") ? order : {};
+      const orderId = shopifyFbmFirstText(o, ["orderId", "shopifyOrderId", "admin_graphql_api_id", "adminGraphqlApiId", "id", "legacyResourceId", "order_id"]);
+      const orderName = shopifyFbmFirstText(o, ["orderName", "shopifyOrderName", "name", "orderNumber", "order_number", "orderLabel", "numeroOrdine", "numero_ordine"]);
+      const customerName = shopifyFbmCustomerNameFromSource(o, {});
+      return {
+        __shopifySource: shopifyFbmHasExplicitSourceSignal(o) ? "shopify" : "",
+        orderId,
+        shopifyOrderId: shopifyFbmFirstText(o, ["shopifyOrderId"]) || orderId,
+        orderName,
+        shopifyOrderName: shopifyFbmFirstText(o, ["shopifyOrderName"]) || orderName,
+        customerName,
+        shopifyCustomerName: customerName,
+        source: shopifyFbmFirstText(o, ["source", "origin", "platform", "provider"]) || "shopify"
+      };
+    }
+
+    function hasValidShopifyFbmOrderSourceForItem(it){
+      try{
+        const sku = toSkuId(it?.sku || it?.id || "");
+        if(!sku) return false;
+        const sources = shopifyFbmOrderSourcesFromItem(it);
+        return sources.some(src=>{
+          const srcSku = shopifyFbmSourceSku(src);
+          if(!srcSku || srcSku !== sku) return false;
+          if(!shopifyFbmHasExplicitSourceSignal(src, it)) return false;
+          if(isAmazonFbaInventoryPendingItem(src)) return false;
+          return shopifyFbmLineQtyStrict(src) > 0;
+        });
+      }catch(_e){
+        return false;
+      }
+    }
+
     function shopifyFbmNameFromPerson(value){
       try{
         if(!value) return "";
@@ -10346,7 +10425,7 @@ function startAllLogs(modeOrOpts = "full"){
         const source = (src && typeof src === "object") ? src : {};
         const item = (fallbackItem && typeof fallbackItem === "object") ? fallbackItem : {};
         const direct = shopifyFbmFirstText(source, [
-          "customerName", "shopifyCustomerName", "cliente", "clientName", "buyerName", "recipientName",
+          "__customerName", "customerName", "shopifyCustomerName", "cliente", "clientName", "buyerName", "recipientName",
           "shippingName", "shippingCustomerName", "billingName", "name"
         ]);
         if(direct) return direct;
@@ -10355,7 +10434,7 @@ function startAllLogs(modeOrOpts = "full"){
           if(name) return name;
         }
         const itemDirect = shopifyFbmFirstText(item, [
-          "lastReservationCustomerName", "shopifyCustomerName", "customerName", "customerDisplayName", "cliente", "customerEmail"
+          "__customerName", "lastReservationCustomerName", "shopifyCustomerName", "customerName", "customerDisplayName", "cliente", "customerEmail"
         ]);
         if(itemDirect) return itemDirect;
         for(const k of ["shopifyOrder", "lastReservationOrder", "customer", "shipping_address", "shippingAddress"]){
@@ -10370,16 +10449,16 @@ function startAllLogs(modeOrOpts = "full"){
       const source = (src && typeof src === "object") ? src : {};
       const item = (fallbackItem && typeof fallbackItem === "object") ? fallbackItem : {};
       return shopifyFbmFirstText(source, [
-        "orderId", "shopifyOrderId", "admin_graphql_api_id", "adminGraphqlApiId", "id", "legacyResourceId", "order_id"
-      ]) || shopifyFbmFirstText(item, ["lastReservationOrderId", "shopifyOrderId", "orderId"]);
+        "__orderId", "orderId", "shopifyOrderId", "admin_graphql_api_id", "adminGraphqlApiId", "id", "legacyResourceId", "order_id"
+      ]) || shopifyFbmFirstText(item, ["__orderId", "lastReservationOrderId", "shopifyOrderId", "orderId"]);
     }
 
     function shopifyFbmOrderNameFromSource(src, fallbackItem){
       const source = (src && typeof src === "object") ? src : {};
       const item = (fallbackItem && typeof fallbackItem === "object") ? fallbackItem : {};
       return shopifyFbmFirstText(source, [
-        "orderName", "shopifyOrderName", "name", "orderNumber", "order_number", "orderLabel", "numeroOrdine", "numero_ordine"
-      ]) || shopifyFbmFirstText(item, ["lastReservationOrderName", "shopifyOrderName", "orderName"]);
+        "__orderName", "orderName", "shopifyOrderName", "orderNumber", "order_number", "orderLabel", "numeroOrdine", "numero_ordine"
+      ]) || shopifyFbmFirstText(item, ["__orderName", "lastReservationOrderName", "shopifyOrderName", "orderName"]);
     }
 
     function shopifyFbmTitleFromSource(src, fallbackItem, sku){
@@ -10410,21 +10489,67 @@ function startAllLogs(modeOrOpts = "full"){
 
     function shopifyFbmOrderSourcesFromItem(it){
       const out = [];
-      const push = (x)=>{
-        if(!x) return;
-        if(Array.isArray(x)){ x.forEach(push); return; }
-        if(typeof x === "object") out.push(x);
+      const seen = new Set();
+      const lineKeys = ["line_items", "lineItems", "lines", "items", "orderLines", "shopifyOrderLines", "products", "productLines"];
+
+      const pushLine = (line, parent=null)=>{
+        try{
+          if(!line || typeof line !== "object") return;
+          const parentData = shopifyFbmOrderParentData(parent || {});
+          const merged = { ...parentData, ...line };
+          const sku = shopifyFbmSourceSku(merged);
+          if(!sku) return; // niente SKU riga = non posso abbinarla a un prodotto inventario
+          if(!shopifyFbmHasExplicitSourceSignal(merged, parent || it || {})) return;
+          if(isAmazonFbaInventoryPendingItem(merged)) return;
+          const qty = shopifyFbmLineQtyStrict(merged);
+          if(qty <= 0) return;
+          const oid = shopifyFbmOrderIdFromSource(merged, parent || {});
+          const oname = shopifyFbmOrderNameFromSource(merged, parent || {});
+          const key = [sku, oid, oname, qty, shopifyFbmTitleFromSource(merged, {}, sku)].join("::");
+          if(seen.has(key)) return;
+          seen.add(key);
+          out.push(merged);
+        }catch(_e){}
       };
+
+      const collect = (value, parent=null, generic=false)=>{
+        try{
+          if(!value) return;
+          if(Array.isArray(value)){ value.forEach(v=>collect(v, parent, generic)); return; }
+          if(typeof value !== "object") return;
+          const explicit = shopifyFbmHasExplicitSourceSignal(value, parent || it || {});
+          if(generic && !explicit) return;
+
+          let hadLines = false;
+          for(const k of lineKeys){
+            const arr = value[k];
+            if(Array.isArray(arr) && arr.length){
+              hadLines = true;
+              arr.forEach(line=>pushLine(line, value));
+            }
+          }
+
+          // Se l'oggetto stesso è già una riga Shopify con SKU/qty, usalo.
+          if(shopifyFbmSourceSku(value) && shopifyFbmLineQtyStrict(value) > 0){
+            pushLine(value, parent || it || {});
+          }
+        }catch(_e){}
+      };
+
       try{
-        push(it?.pendingOrders);
-        push(it?.pendingOrderLines);
-        push(it?.shopifyPendingOrders);
-        push(it?.shopifyOrders);
-        push(it?.reservationOrders);
-        push(it?.orderLines);
-        push(it?.shopifyOrderLines);
-        push(it?.shopifyOrder);
-        push(it?.lastReservationOrder);
+        // Fonti Shopify esplicite: accettate, ma solo se contengono righe con SKU e quantità.
+        collect(it?.shopifyPendingOrders, null, false);
+        collect(it?.shopifyOrders, null, false);
+        collect(it?.shopifyOrderLines, null, false);
+        collect(it?.shopifyOrder, null, false);
+
+        // Fonti generiche: usate solo se l'oggetto dichiara Shopify. Niente più abbinamenti
+        // da pendingOrders/reservationOrders/orderLines generici, perché mischiavano FBA e FBM.
+        collect(it?.pendingOrders, null, true);
+        collect(it?.pendingOrderLines, null, true);
+        collect(it?.reservationOrders, null, true);
+        collect(it?.orderLines, null, true);
+        collect(it?.lastReservationOrder, null, true);
       }catch(_e){}
       return out;
     }
@@ -10449,15 +10574,17 @@ function startAllLogs(modeOrOpts = "full"){
 
         const makeRow = (src, forceFallback=false)=>{
           const source = (src && typeof src === "object") ? src : {};
-          const srcSku = toSkuId(source.sku || source.SKU || source.code || source.productSku || source.variantSku || source.amazonSku || source.amazonInventorySku || "");
-          if(srcSku && srcSku !== sku) return null;
-          const qty = shopifyFbmQtyFromSource(source, pending);
+          const srcSku = shopifyFbmSourceSku(source);
+          if(!srcSku || srcSku !== sku) return null;
+          if(!shopifyFbmHasExplicitSourceSignal(source, it)) return null;
+          if(isAmazonFbaInventoryPendingItem(source)) return null;
+          const qty = shopifyFbmLineQtyStrict(source);
           if(!qty) return null;
           const orderId = shopifyFbmOrderIdFromSource(source, it);
           const orderName = shopifyFbmOrderNameFromSource(source, it);
           const customerName = shopifyFbmCustomerNameFromSource(source, it);
-          const title = shopifyFbmTitleFromSource(source, it, sku) || titleFallback;
-          const orderLabel = orderName || orderId || (forceFallback ? "Sync backend" : "Ordine non disponibile");
+          const title = shopifyFbmTitleFromSource(source, {}, sku) || titleFallback;
+          const orderLabel = orderName || orderId || "Ordine Shopify";
           const orderKey = [loc, sku, orderName || "", orderId || "", customerName || "", qty, title].join("::");
           if(seen.has(orderKey)) return null;
           seen.add(orderKey);
@@ -10484,10 +10611,8 @@ function startAllLogs(modeOrOpts = "full"){
             if(row) rows.push(row);
           }
         }
-        if(!rows.length){
-          const row = makeRow({}, true);
-          if(row) rows.push(row);
-        }
+        // Nessun fallback: se non c'è una riga Shopify con SKU combaciante,
+        // non inventiamo una riga ordine. Meglio non mostrare nulla che mischiare FBA/FBM.
       }catch(err){ console.warn("shopify fbm order rows", err); }
       return rows;
     }
@@ -10527,64 +10652,50 @@ function startAllLogs(modeOrOpts = "full"){
 
     function shopifyFbmInventoryGroups(){
       const groups = new Map();
-      const locOrder = ["concamarise", "cerea"];
-      for(const loc of locOrder){
-        const items = state.inventory?.[loc]?.items || [];
-        for(const it0 of items){
-          const it = it0 || {};
-          if(!isShopifyFbmPendingInventoryItem(it)) continue;
-          const sku = toSkuId(it.sku || it.id || "");
-          if(!sku) continue;
-          const qty = shopifyFbmPendingQtyFromItem(it);
-          if(qty <= 0) continue;
-          let g = groups.get(sku);
-          if(!g){
-            g = {
-              sku,
-              title:"",
-              qty:0,
-              locs:new Set(),
-              flowIds:new Set(),
-              flowNames:new Set(),
-              orderKeys:new Set(),
-              customerNames:new Set(),
-              positionsMap:new Map(),
-              firstCode:"",
-              latestAt:0,
-              source:"inventory_pending"
-            };
-            groups.set(sku, g);
-          }
-          const title = squashWhitespace(it.title || it.name || sku) || sku;
-          const meta = parseTitleMeta(title);
-          const cleanTitle = meta.main || title || sku;
-          if(!g.title || cleanTitle.length > g.title.length) g.title = cleanTitle;
-          g.qty += qty;
-          g.locs.add(loc);
-          const flowId = String(it.lastReservationFlowId || "").trim();
-          const orderName = String(it.lastReservationOrderName || "").trim();
-          const orderId = String(it.lastReservationOrderId || "").trim();
-          if(flowId) g.flowIds.add(flowId);
-          if(orderName) g.flowNames.add(orderName);
-          if(orderName || orderId) g.orderKeys.add(orderName || orderId);
-          const rows = shopifyFbmOrderRowsFromItem(it, loc);
-          for(const row of rows){
-            if(row.orderName || row.orderId) g.orderKeys.add(row.orderName || row.orderId);
-            if(row.customerName) g.customerNames.add(row.customerName);
-          }
-          const ts = Number(it.updatedAtClient || it.lastReservationAtClient || it.reorderedAtClient || 0) || 0;
-          if(ts > g.latestAt) g.latestAt = ts;
+      const orderRows = shopifyFbmInventoryOrderRows();
+      for(const row of orderRows){
+        const sku = toSkuId(row?.sku || "");
+        const qty = Math.abs(parseQty(row?.qty || 0) || 0);
+        if(!sku || qty <= 0) continue;
+        let g = groups.get(sku);
+        if(!g){
+          g = {
+            sku,
+            title:"",
+            qty:0,
+            locs:new Set(),
+            flowIds:new Set(),
+            flowNames:new Set(),
+            orderKeys:new Set(),
+            customerNames:new Set(),
+            positionsMap:new Map(),
+            firstCode:"",
+            latestAt:0,
+            source:"shopify_order_lines"
+          };
+          groups.set(sku, g);
+        }
+        const title = squashWhitespace(row.title || sku) || sku;
+        const meta = parseTitleMeta(title);
+        const cleanTitle = meta.main || title || sku;
+        if(!g.title || cleanTitle.length > g.title.length) g.title = cleanTitle;
+        g.qty += qty;
+        if(row.loc) g.locs.add(row.loc);
+        if(row.orderId || row.orderName) g.orderKeys.add(row.orderName || row.orderId);
+        if(row.orderName) g.flowNames.add(row.orderName);
+        if(row.customerName) g.customerNames.add(row.customerName);
+        const ts = Number(row.latestAt || 0) || 0;
+        if(ts > g.latestAt) g.latestAt = ts;
 
-          const parts = rackLocationDisplayPartsFromItem(it || {});
-          for(const part of parts){
-            const code = normalizeRackLocation(part?.code || "");
-            if(!code) continue;
-            const prev = g.positionsMap.get(code) || { code, qty:0 };
-            const pQty = Number(part?.qty || 0);
-            if(Number.isFinite(pQty) && pQty > prev.qty) prev.qty = Math.round(pQty);
-            g.positionsMap.set(code, prev);
-            if(!g.firstCode) g.firstCode = code;
-          }
+        const parts = Array.isArray(row.positions) ? row.positions : [];
+        for(const part of parts){
+          const code = normalizeRackLocation(part?.code || "");
+          if(!code) continue;
+          const prev = g.positionsMap.get(code) || { code, qty:0 };
+          const pQty = Number(part?.qty || 0);
+          if(Number.isFinite(pQty) && pQty > prev.qty) prev.qty = Math.round(pQty);
+          g.positionsMap.set(code, prev);
+          if(!g.firstCode) g.firstCode = code;
         }
       }
 
@@ -10602,7 +10713,7 @@ function startAllLogs(modeOrOpts = "full"){
           positions,
           firstCode:g.firstCode || (positions[0]?.code || ""),
           latestAt:g.latestAt || 0,
-          source:g.source || "inventory_pending"
+          source:g.source || "shopify_order_lines"
         };
       }).filter(g=>g.sku && g.qty > 0).sort((a,b)=>{
         const pa = a.positions?.[0]?.code || "";
