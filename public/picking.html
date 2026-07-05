@@ -9624,6 +9624,7 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
           const updatedAt = d.updatedAt || null;
           const updatedAtClient = d.updatedAtClient || null;
           arr.push({
+            __raw: d,
             id: docSnap.id,
             sku,
             title,
@@ -10185,6 +10186,26 @@ function startAllLogs(modeOrOpts = "full"){
       }
     }
 
+
+
+    function hasAmazonFbaSignalsDeep(value, depth=0, seen=null){
+      try{
+        if(value === null || value === undefined) return false;
+        if(!seen) seen = new Set();
+        if(depth > 4) return false;
+        if(typeof value !== "object") return hasAmazonFbaSignalsFromParts([value]);
+        if(seen.has(value)) return false;
+        seen.add(value);
+        if(Array.isArray(value)) return value.some(v=>hasAmazonFbaSignalsDeep(v, depth + 1, seen));
+        for(const [k, v] of Object.entries(value)){
+          const key = String(k || "");
+          if(hasAmazonFbaSignalsFromParts([key])) return true;
+          if(hasAmazonFbaSignalsDeep(v, depth + 1, seen)) return true;
+        }
+      }catch(_e){}
+      return false;
+    }
+
     function isAmazonFbaFlow(flow){
       try{
         const f = flow || {};
@@ -10236,6 +10257,7 @@ function startAllLogs(modeOrOpts = "full"){
       try{
         const d = it || {};
         if(d.fba === true || d.isFba === true || d.isFBA === true || d.amazonFba === true || d.fulfillmentByAmazon === true) return true;
+        if(hasAmazonFbaSignalsDeep(d.__raw || null)) return true;
         return hasAmazonFbaSignalsFromParts([
           d.lastReservationFlowId,
           d.lastReservationFileName,
@@ -10264,16 +10286,70 @@ function startAllLogs(modeOrOpts = "full"){
       }
     }
 
+    function hasStrongShopifyFbmItemSignal(it){
+      try{
+        const d = (it && typeof it === "object") ? it : {};
+        if(isAmazonFbaInventoryPendingItem(d)) return false;
+        if(d.shopify === true || d.generatedFromShopifyFbm === true) return true;
+        const raw = [
+          d.__shopifySource,
+          d.lastReservationSource,
+          d.reservationSource,
+          d.firstSeenSource,
+          d.source,
+          d.origin,
+          d.platform,
+          d.provider,
+          d.reservationStatus,
+          d.status,
+          d.lastReservationFlowId,
+          d.lastReservationFileName,
+          d.workflowId,
+          d.workflowLabel,
+          d.channel,
+          d.salesChannel,
+          d.sales_channel,
+          d.fulfillmentChannel,
+          d.fulfillment_channel,
+          d.fulfillmentService,
+          d.fulfillment_service,
+          d.shopifyOrderId,
+          d.shopifyOrderName
+        ].map(x=>String(x||"").toLowerCase()).join(" ");
+        if(!raw) return false;
+        return !!(
+          raw.includes("shopify_fbm") ||
+          raw.includes("shopify-fbm") ||
+          raw.includes("shopify fbm") ||
+          raw.includes("manual_shopify") ||
+          raw.includes("manual shopify") ||
+          raw.includes("merchant_fulfilled") ||
+          raw.includes("merchant fulfilled") ||
+          raw.includes("fulfilled_by_merchant") ||
+          raw.includes("fulfilled by merchant") ||
+          raw.includes("gid://shopify") ||
+          raw.startsWith("shopify-") ||
+          raw.includes(" shopify-") ||
+          (raw.includes("shopify") && (raw.includes("fbm") || raw.includes("merchant") || raw.includes("manual")))
+        );
+      }catch(_e){
+        return false;
+      }
+    }
+
     function isShopifyFbmPendingInventoryItem(it){
       try{
         const pending = shopifyFbmPendingQtyFromItem(it);
         if(pending <= 0) return false;
 
         // Guard rail forte: gli FBA possono avere pendingPickQty/reservedQty e anche
-        // orderId/orderName generici dopo una prenotazione. Per FBM accettiamo solo
-        // righe Shopify reali, con SKU della riga ordine che combacia con lo SKU inventario.
+        // orderId/orderName generici dopo una prenotazione. Per FBM accettiamo:
+        // 1) righe Shopify reali con SKU combaciante; oppure
+        // 2) una prenotazione item-level con segnale Shopify/FBM esplicito.
         if(isAmazonFbaInventoryPendingItem(it)) return false;
-        return hasValidShopifyFbmOrderSourceForItem(it);
+        if(hasExplicitMismatchedShopifyOrderDetails(it)) return false;
+        if(hasValidShopifyFbmOrderSourceForItem(it)) return true;
+        return isSafeShopifyFbmItemLevelFallback(it);
       }catch(_e){
         return false;
       }
@@ -10395,6 +10471,129 @@ function startAllLogs(modeOrOpts = "full"){
           if(isAmazonFbaInventoryPendingItem(src)) return false;
           return shopifyFbmLineQtyStrict(src) > 0;
         });
+      }catch(_e){
+        return false;
+      }
+    }
+
+
+    function shopifyFbmOrderLineSkuSummaryForItem(it){
+      const summary = { lineSkuCount:0, matchingSkuCount:0, otherSkuCount:0, otherSkus:new Set(), hasExplicitOrderContainer:false };
+      try{
+        const sku = toSkuId(it?.sku || it?.id || "");
+        const lineKeys = ["line_items", "lineItems", "lines", "items", "orderLines", "shopifyOrderLines", "products", "productLines"];
+        const seen = new Set();
+
+        const recordLine = (line)=>{
+          try{
+            if(!line || typeof line !== "object") return;
+            const srcSku = shopifyFbmSourceSku(line);
+            const qty = shopifyFbmLineQtyStrict(line);
+            if(!srcSku || qty <= 0) return;
+            const key = `${srcSku}::${qty}`;
+            if(seen.has(key)) return;
+            seen.add(key);
+            summary.lineSkuCount++;
+            if(sku && srcSku === sku) summary.matchingSkuCount++;
+            else{
+              summary.otherSkuCount++;
+              summary.otherSkus.add(srcSku);
+            }
+          }catch(_e){}
+        };
+
+        const collect = (value, parent=null, generic=false)=>{
+          try{
+            if(!value) return;
+            if(Array.isArray(value)){ value.forEach(v=>collect(v, parent, generic)); return; }
+            if(typeof value !== "object") return;
+            const explicit = shopifyFbmHasExplicitSourceSignal(value, parent || it || {});
+            if(generic && !explicit) return;
+            if(explicit) summary.hasExplicitOrderContainer = true;
+
+            for(const k of lineKeys){
+              const arr = value[k];
+              if(Array.isArray(arr) && arr.length){
+                if(explicit) summary.hasExplicitOrderContainer = true;
+                arr.forEach(line=>recordLine(line));
+              }
+            }
+
+            // Se il container stesso è una riga ordine, conteggiala.
+            recordLine(value);
+          }catch(_e){}
+        };
+
+        collect(it?.shopifyPendingOrders, null, false);
+        collect(it?.shopifyOrders, null, false);
+        collect(it?.shopifyOrderLines, null, false);
+        collect(it?.shopifyOrder, null, false);
+        collect(it?.pendingOrders, null, true);
+        collect(it?.pendingOrderLines, null, true);
+        collect(it?.reservationOrders, null, true);
+        collect(it?.orderLines, null, true);
+        collect(it?.lastReservationOrder, null, true);
+      }catch(_e){}
+      return summary;
+    }
+
+    function hasExplicitMismatchedShopifyOrderDetails(it){
+      try{
+        const summary = shopifyFbmOrderLineSkuSummaryForItem(it);
+        // Caso critico: il documento inventario ha riferimenti Shopify con righe ordine,
+        // ma nessuna riga ha lo SKU dell'articolo. Questo è esattamente il mix sporco
+        // FBA↔FBM: non devo mostrare il prodotto in Picking FBM.
+        return summary.lineSkuCount > 0 && summary.matchingSkuCount <= 0 && summary.otherSkuCount > 0;
+      }catch(_e){
+        return false;
+      }
+    }
+
+    function isSafeShopifyFbmItemLevelFallback(it){
+      try{
+        if(!hasStrongShopifyFbmItemSignal(it)) return false;
+        if(isAmazonFbaInventoryPendingItem(it)) return false;
+        if(hasExplicitMismatchedShopifyOrderDetails(it)) return false;
+
+        const summary = shopifyFbmOrderLineSkuSummaryForItem(it);
+        // Se ci sono righe ordine esplicite e una combacia, il percorso corretto è la riga ordine reale.
+        // Il fallback serve solo quando il backend ha scritto una prenotazione Shopify sullo SKU
+        // ma non ha ancora salvato line_items leggibili.
+        if(summary.lineSkuCount > 0 && summary.matchingSkuCount > 0) return true;
+        if(summary.lineSkuCount > 0 && summary.matchingSkuCount <= 0) return false;
+
+        const raw = [
+          it?.lastReservationSource,
+          it?.reservationSource,
+          it?.firstSeenSource,
+          it?.source,
+          it?.origin,
+          it?.reservationStatus,
+          it?.status,
+          it?.lastReservationFlowId,
+          it?.lastReservationFileName,
+          it?.workflowId,
+          it?.workflowLabel,
+          it?.channel,
+          it?.fulfillmentChannel,
+          it?.fulfillment_service,
+          it?.fulfillmentService
+        ].map(x=>String(x||"").toLowerCase()).join(" ");
+
+        // Fallback ammesso solo con segnale operativo FBM, non con un generico ordine/ID cliente.
+        return !!(
+          raw.includes("shopify_fbm") ||
+          raw.includes("shopify-fbm") ||
+          raw.includes("shopify fbm") ||
+          raw.includes("merchant_fulfilled") ||
+          raw.includes("merchant fulfilled") ||
+          raw.includes("fulfilled_by_merchant") ||
+          raw.includes("fulfilled by merchant") ||
+          raw.includes("manual_shopify") ||
+          raw.includes("manual shopify") ||
+          String(it?.lastReservationFlowId || "").toUpperCase().startsWith("SHOPIFY-") ||
+          String(it?.lastReservationFileName || "").toUpperCase() === "SHOPIFY_FBM"
+        );
       }catch(_e){
         return false;
       }
@@ -10611,8 +10810,31 @@ function startAllLogs(modeOrOpts = "full"){
             if(row) rows.push(row);
           }
         }
-        // Nessun fallback: se non c'è una riga Shopify con SKU combaciante,
-        // non inventiamo una riga ordine. Meglio non mostrare nulla che mischiare FBA/FBM.
+
+        // Fallback controllato: alcuni sync Shopify scrivono la prenotazione sullo SKU
+        // ma non salvano ancora le righe ordine dettagliate. In quel caso mostriamo lo SKU
+        // da preparare senza agganciare riferimenti ordine potenzialmente sbagliati.
+        if(!rows.length && isSafeShopifyFbmItemLevelFallback(it)){
+          const fallbackKey = [loc, sku, "shopify_fbm_item_pending", pending, titleFallback].join("::");
+          if(!seen.has(fallbackKey)){
+            seen.add(fallbackKey);
+            rows.push({
+              loc,
+              sku,
+              title: titleFallback,
+              qty: Math.round(pending),
+              orderId: "",
+              orderName: "",
+              orderLabel: "Shopify FBM in sospeso",
+              customerName: "Dettaglio cliente non disponibile",
+              positions,
+              codes,
+              firstCode,
+              latestAt: Number(it?.updatedAtClient || it?.lastReservationAtClient || it?.reorderedAtClient || 0) || 0,
+              source: "inventory_item_shopify_fbm_pending"
+            });
+          }
+        }
       }catch(err){ console.warn("shopify fbm order rows", err); }
       return rows;
     }
@@ -14918,18 +15140,42 @@ function currentInv(){
         const fileName = String(flow?.fileName || "").toUpperCase();
         const workflow = String(flow?.workflowId || flow?.workflowLabel || "").toUpperCase();
         const tags = pickingTagList([flow?.tags, shop.tags, flow?.tag, reservation.tags, picking.tags]);
-        const hasShopifyOrderObject = !!(shop.orderId || shop.admin_graphql_api_id || shop.id || shop.name || flow?.shopifyOrderId || flow?.shopifyOrderName);
+        const raw = [
+          src,
+          fileName,
+          workflow,
+          flow?.channel,
+          flow?.fulfillmentChannel,
+          flow?.fulfillment_channel,
+          flow?.fulfillmentService,
+          flow?.fulfillment_service,
+          reservation.channel,
+          reservation.fulfillmentChannel,
+          picking.channel,
+          picking.fulfillmentChannel,
+          shop.fulfillmentChannel,
+          shop.fulfillment_channel
+        ].map(x=>String(x||"").toLowerCase()).join(" ");
+
+        // Niente più classificazione FBM da "src contiene shopify" o dalla sola presenza
+        // di orderId/orderName: questi campi possono restare appesi anche su flussi FBA.
         return !!(
           src === "shopify_fbm" ||
           src.includes("shopify_fbm") ||
-          src.includes("shopify") ||
+          src.includes("shopify-fbm") ||
+          raw.includes("shopify fbm") ||
+          raw.includes("merchant_fulfilled") ||
+          raw.includes("merchant fulfilled") ||
+          raw.includes("fulfilled_by_merchant") ||
+          raw.includes("fulfilled by merchant") ||
+          raw.includes("manual_shopify") ||
+          raw.includes("manual shopify") ||
           fileName === "SHOPIFY_FBM" ||
           workflow.startsWith("SHOPIFY-") ||
-          workflow.includes("SHOPIFY") ||
-          tags.includes("shopify") ||
           tags.includes("shopify_fbm") ||
+          tags.includes("merchant_fulfilled") ||
+          (tags.includes("shopify") && (tags.includes("fbm") || tags.includes("merchant") || tags.includes("manual"))) ||
           (tags.includes("fbm") && !tags.includes("fba")) ||
-          hasShopifyOrderObject ||
           picking.shopifyControlled === true ||
           flow?.shopifyControlled === true ||
           flow?.generatedFromShopifyFbm === true
