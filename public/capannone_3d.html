@@ -5882,7 +5882,7 @@ let _capannoneAgentSpeakingAttempt = false;
    In modalità pack-only non viene mai chiamato un TTS live: niente crediti esterni
    e niente errore 500 quando i crediti finiscono. */
 const UBI_VOICE_PACK_ONLY = true;
-const UBI_VOICE_PACK_BASE = "voice/ubi/v1/";
+const UBI_VOICE_PACK_BASE = "https://storage.googleapis.com/tabellone-produzione-liv-e313e-ubi-voice/voice/ubi/v1/";
 const UBI_VOICE_PACK_EXT = ".m4a";
 const UBI_VOICE_KEY_ALIASES = {
   manual_test: "ubi_online",
@@ -5964,22 +5964,61 @@ function stopUbiPackAudio(){
   setUbiPackSpeaking(false);
 }
 
-async function playUbiPackAudio(url, ann){
+function ubiAudioUrlCandidates(url){
+  const out = [];
+  const push = (v)=>{
+    const s = String(v || "").trim();
+    if(!s || out.includes(s)) return;
+    out.push(s);
+  };
+
+  const src = String(url || "").trim();
+  push(src);
+
+  // Se arriva un path relativo dal backend, forzo il bucket voce UBI.
+  try{
+    if(src && !/^(https?:|blob:|data:)/i.test(src)){
+      const clean = src.replace(/^\/+/, "");
+      const base = UBI_VOICE_PACK_BASE.replace(/\/+$/, "");
+      if(clean.startsWith("voice/ubi/v1/")) push(base + "/" + clean.split("/voice/ubi/v1/").pop());
+      else push(base + "/" + clean.split("/").pop());
+    }
+  }catch(_){ }
+
+  // Fallback codec: alcuni browser/kiosk non amano .m4a via bucket.
+  // Se in futuro carichiamo anche .mp3, il frontend lo prova automaticamente.
+  const snapshot = out.slice();
+  for(const candidate of snapshot){
+    if(/\.m4a(\?|#|$)/i.test(candidate)) push(candidate.replace(/\.m4a(?=\?|#|$)/i, ".mp3"));
+    if(/\.mp3(\?|#|$)/i.test(candidate)) push(candidate.replace(/\.mp3(?=\?|#|$)/i, ".m4a"));
+  }
+
+  return out;
+}
+
+function mediaErrorReason(audio, fallback){
+  try{
+    const err = audio && audio.error;
+    if(!err) return fallback || "audio_error";
+    const codes = { 1:"aborted", 2:"network", 3:"decode", 4:"not_supported" };
+    return codes[err.code] || fallback || "audio_error";
+  }catch(_){
+    return fallback || "audio_error";
+  }
+}
+
+function playUbiPackAudioCandidate(src, ann){
   return new Promise(resolve=>{
     try{
-      const src = String(url || "").trim();
-      if(!src) return resolve({ ok:false, reason:"missing_url" });
-
       const audio = ensureUbiPackAudio();
       stopUbiPackAudio();
 
       let done = false;
-      let started = false;
       const textWords = String(ann && ann.text || "").trim().split(/\s+/).filter(Boolean).length;
       const maxMs = Math.max(3000, Math.min(18000, textWords * 420));
       let safetyTimer = null;
 
-      const finish = (ok, reason)=>{
+      const finish = (ok, reason, errorName)=>{
         if(done) return;
         done = true;
         clearTimeout(safetyTimer);
@@ -5987,12 +6026,12 @@ async function playUbiPackAudio(url, ann){
         audio.onerror = null;
         audio.oncanplaythrough = null;
         _ubiPackPlaying = false;
-        setUbiPackSpeaking(false);
-        resolve({ ok:!!ok, reason:reason || (ok ? "ended" : "error") });
+        if(!ok) setUbiPackSpeaking(false);
+        resolve({ ok:!!ok, reason:reason || (ok ? "ended" : "error"), errorName:errorName || "", url:src });
       };
 
       audio.onended = ()=>finish(true, "ended");
-      audio.onerror = ()=>finish(false, "audio_error");
+      audio.onerror = ()=>finish(false, mediaErrorReason(audio, "audio_error"));
       audio.oncanplaythrough = ()=>{
         try{ if(typeof UbiWave !== "undefined") UbiWave.attach(audio); }catch(_){ }
       };
@@ -6004,29 +6043,43 @@ async function playUbiPackAudio(url, ann){
       const playPromise = audio.play();
       if(playPromise && playPromise.then){
         playPromise.then(()=>{
-          started = true;
           _ubiPackPlaying = true;
           setUbiPackSpeaking(true);
           try{ if(typeof UbiWave !== "undefined") UbiWave.attach(audio); }catch(_){ }
           safetyTimer = setTimeout(()=>finish(true, "safety_timeout"), maxMs);
         }).catch(err=>{
-          _ubiPackPending = { url:src, ann };
-          setUbiPackSpeaking(false);
-          console.warn("UBI voice pack audio non partito", err);
-          resolve({ ok:false, reason:"play_blocked" });
+          finish(false, mediaErrorReason(audio, "play_rejected"), err && (err.name || err.message || String(err)));
         });
       } else {
-        started = true;
         _ubiPackPlaying = true;
         setUbiPackSpeaking(true);
         safetyTimer = setTimeout(()=>finish(true, "safety_timeout"), maxMs);
       }
     }catch(e){
-      console.warn("UBI voice pack error", e);
-      setUbiPackSpeaking(false);
-      resolve({ ok:false, reason:"exception" });
+      resolve({ ok:false, reason:"exception", errorName:e && (e.name || e.message || String(e)), url:src });
     }
   });
+}
+
+async function playUbiPackAudio(url, ann){
+  const candidates = ubiAudioUrlCandidates(url);
+  if(!candidates.length) return { ok:false, reason:"missing_url" };
+
+  let last = null;
+  for(const src of candidates){
+    last = await playUbiPackAudioCandidate(src, ann);
+    if(last && last.ok) return last;
+  }
+
+  _ubiPackPending = { url:candidates[0], ann };
+  setUbiPackSpeaking(false);
+  console.warn("UBI voice pack audio non partito", {
+    reason: last && last.reason,
+    error: last && last.errorName,
+    url: candidates[0],
+    tried: candidates
+  });
+  return last || { ok:false, reason:"all_failed", url:candidates[0] };
 }
 
 async function retryPendingUbiPackAudio(){
