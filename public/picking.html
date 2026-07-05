@@ -4389,6 +4389,145 @@
       .fbmSectionCount{ margin-left: auto !important; }
     }
 
+
+    /* Lista ordini FBM raggruppata per ordine Shopify: widget SKU invariati sopra. */
+    .fbmOrderGroupList{
+      display:flex;
+      flex-direction:column;
+      gap:10px;
+    }
+    .fbmOrderGroupCard{
+      border:1px solid var(--line) !important;
+      background:var(--surface) !important;
+      border-radius:12px !important;
+      overflow:hidden !important;
+      box-shadow:none !important;
+    }
+    .fbmOrderGroupTop{
+      display:grid;
+      grid-template-columns:minmax(0,1fr) auto;
+      gap:12px;
+      align-items:center;
+      padding:12px 14px;
+      background:var(--surface) !important;
+      border-bottom:1px solid var(--line2) !important;
+    }
+    .fbmOrderGroupTitle{
+      font-size:14px;
+      line-height:1.22;
+      font-weight:700;
+      letter-spacing:-.01em;
+      color:var(--ink);
+      overflow-wrap:anywhere;
+    }
+    .fbmOrderGroupMeta{
+      margin-top:3px;
+      font-size:11.5px;
+      line-height:1.28;
+      color:var(--muted);
+      overflow-wrap:anywhere;
+    }
+    .fbmOrderGroupStats{
+      display:flex;
+      align-items:center;
+      justify-content:flex-end;
+      gap:6px;
+      flex-wrap:wrap;
+    }
+    .fbmOrderGroupStats span{
+      display:inline-flex;
+      align-items:center;
+      justify-content:center;
+      padding:3px 9px;
+      border-radius:999px;
+      border:1px solid var(--line);
+      background:var(--surfaceAlt);
+      color:var(--ink2);
+      font-size:11px;
+      line-height:1.15;
+      font-weight:650;
+      white-space:nowrap;
+    }
+    .fbmOrderProductTable{
+      width:100%;
+      background:var(--surface);
+    }
+    .fbmOrderProductHead,
+    .fbmOrderProductRow{
+      display:grid;
+      grid-template-columns:142px minmax(0,1.65fr) 70px minmax(150px,.85fr) 96px;
+      align-items:stretch;
+    }
+    .fbmOrderProductHead{
+      background:var(--surfaceAlt);
+      border-bottom:1px solid var(--line);
+      color:var(--muted);
+      font-size:10.5px;
+      font-weight:650;
+      letter-spacing:.055em;
+      text-transform:uppercase;
+    }
+    .fbmOrderProductRow{
+      min-height:52px;
+      border-top:1px solid var(--line2);
+      background:var(--surface);
+    }
+    .fbmOrderProductRow:first-of-type{
+      border-top:0;
+    }
+    .fbmOrderProductRow:hover{
+      background:var(--surfaceAlt);
+    }
+    .fbmOrderProductCell{
+      min-width:0;
+      padding:10px 12px;
+      display:flex;
+      flex-direction:column;
+      justify-content:center;
+      gap:2px;
+    }
+    .fbmOrderProductCell.right{
+      align-items:flex-end;
+      text-align:right;
+    }
+    .fbmOrderProductCell .rackStack{
+      justify-content:flex-start;
+    }
+    @media(max-width:980px){
+      .fbmOrderGroupTop{
+        grid-template-columns:1fr;
+        align-items:flex-start;
+      }
+      .fbmOrderGroupStats{
+        justify-content:flex-start;
+      }
+      .fbmOrderProductHead{
+        display:none;
+      }
+      .fbmOrderProductRow{
+        display:grid;
+        grid-template-columns:minmax(0,1fr) auto;
+        grid-template-areas:
+          "sku qty"
+          "prod prod"
+          "pos pos"
+          "act act";
+        row-gap:7px;
+        padding:12px;
+        border-top:1px solid var(--line2);
+      }
+      .fbmOrderProductCell{
+        padding:0;
+      }
+      .fbmOrderProductCell:nth-child(1){ grid-area:sku; }
+      .fbmOrderProductCell:nth-child(2){ grid-area:prod; }
+      .fbmOrderProductCell:nth-child(3){ grid-area:qty; align-items:flex-end; }
+      .fbmOrderProductCell:nth-child(4){ grid-area:pos; align-items:flex-start; }
+      .fbmOrderProductCell:nth-child(5){ grid-area:act; align-items:flex-start; text-align:left; }
+      .fbmOrderProductCell.right{ text-align:left; }
+      .fbmOrderProductCell .pickingSkuActions{ justify-content:flex-start !important; }
+    }
+
     /* ============================================================
        ANDROID PERFORMANCE OVERRIDES
        Su Android i backdrop-filter (blur) su elementi sticky/fixed
@@ -10872,6 +11011,141 @@ function startAllLogs(modeOrOpts = "full"){
       });
     }
 
+
+    function shopifyFbmInventoryOrdersGrouped(rowsInput=null){
+      const rows = Array.isArray(rowsInput) ? rowsInput : shopifyFbmInventoryOrderRows();
+      const groups = new Map();
+
+      const clean = (v)=> squashWhitespace(v || "");
+      const isUnknownCustomer = (v)=>{
+        const t = clean(v);
+        return !t || /cliente non disponibile|dettaglio cliente non disponibile/i.test(t);
+      };
+      const betterTitle = (a,b)=>{
+        const aa = clean(a);
+        const bb = clean(b);
+        if(!aa) return bb;
+        if(!bb) return aa;
+        return bb.length > aa.length ? bb : aa;
+      };
+
+      for(const row0 of rows){
+        const row = row0 || {};
+        const sku = toSkuId(row.sku || "");
+        const qty = Math.abs(parseQty(row.qty || 0) || 0);
+        if(!sku || qty <= 0) continue;
+
+        const orderName = clean(row.orderName || "");
+        const orderId = clean(row.orderId || "");
+        const hasOrder = !!(orderName || orderId);
+        const orderKeyBase = orderName || orderId || "FBM_SENZA_DETTAGLIO_ORDINE";
+        const orderKey = hasOrder ? `order::${orderKeyBase}` : `pending::${clean(row.loc || "concamarise")}`;
+        const orderLabel = clean(row.orderLabel || orderName || orderId || "Shopify FBM in sospeso");
+
+        let group = groups.get(orderKey);
+        if(!group){
+          group = {
+            key: orderKey,
+            hasOrder,
+            orderName,
+            orderId,
+            orderLabel,
+            customerName: "",
+            locs: new Set(),
+            latestAt: 0,
+            linesMap: new Map()
+          };
+          groups.set(orderKey, group);
+        }
+
+        if(orderName && !group.orderName) group.orderName = orderName;
+        if(orderId && !group.orderId) group.orderId = orderId;
+        if(orderLabel && (!group.orderLabel || group.orderLabel === "Shopify FBM in sospeso")) group.orderLabel = orderLabel;
+        if(!isUnknownCustomer(row.customerName) && isUnknownCustomer(group.customerName)) group.customerName = clean(row.customerName);
+        if(row.loc) group.locs.add(row.loc);
+        const ts = Number(row.latestAt || 0) || 0;
+        if(ts > group.latestAt) group.latestAt = ts;
+
+        const lineKey = sku;
+        let line = group.linesMap.get(lineKey);
+        if(!line){
+          line = {
+            sku,
+            title: clean(row.title || sku) || sku,
+            qty: 0,
+            positionsMap: new Map(),
+            firstCode: "",
+            locs: new Set(),
+            latestAt: 0
+          };
+          group.linesMap.set(lineKey, line);
+        }
+        line.title = betterTitle(line.title, row.title || sku) || sku;
+        line.qty += qty;
+        if(row.loc) line.locs.add(row.loc);
+        if(ts > line.latestAt) line.latestAt = ts;
+
+        const parts = Array.isArray(row.positions) ? row.positions : [];
+        for(const part of parts){
+          const code = normalizeRackLocation(part?.code || "");
+          if(!code) continue;
+          const prev = line.positionsMap.get(code) || { code, qty:0 };
+          const pQty = Number(part?.qty || 0);
+          if(Number.isFinite(pQty) && pQty > prev.qty) prev.qty = Math.round(pQty);
+          line.positionsMap.set(code, prev);
+          if(!line.firstCode) line.firstCode = code;
+        }
+        const firstCode = normalizeRackLocation(row.firstCode || "");
+        if(firstCode && !line.firstCode) line.firstCode = firstCode;
+      }
+
+      return Array.from(groups.values()).map(group=>{
+        const lines = Array.from(group.linesMap.values()).map(line=>{
+          const positions = Array.from(line.positionsMap.values()).sort((a,b)=>String(a.code).localeCompare(String(b.code)));
+          const codes = positions.map(x=>x.code).filter(Boolean);
+          return {
+            sku: line.sku,
+            title: line.title || line.sku,
+            qty: Math.round(line.qty || 0),
+            positions,
+            codes,
+            firstCode: line.firstCode || (codes[0] || ""),
+            locs: Array.from(line.locs),
+            latestAt: line.latestAt || 0
+          };
+        }).filter(x=>x.sku && x.qty > 0).sort((a,b)=>{
+          const pa = a.positions?.[0]?.code || "";
+          const pb = b.positions?.[0]?.code || "";
+          if(pa && pb && pa !== pb) return pa.localeCompare(pb);
+          if(pa && !pb) return -1;
+          if(!pa && pb) return 1;
+          return String(a.sku).localeCompare(String(b.sku));
+        });
+        const totalQty = lines.reduce((sum,line)=> sum + (Number(line.qty)||0), 0);
+        return {
+          key: group.key,
+          hasOrder: !!group.hasOrder,
+          orderName: group.orderName || "",
+          orderId: group.orderId || "",
+          orderLabel: group.orderLabel || (group.hasOrder ? (group.orderName || group.orderId || "Ordine Shopify") : "Shopify FBM in sospeso"),
+          customerName: group.customerName || "Cliente non disponibile",
+          locs: Array.from(group.locs),
+          lines,
+          totalQty,
+          productCount: lines.length,
+          latestAt: group.latestAt || 0
+        };
+      }).filter(group=>group.lines.length).sort((a,b)=>{
+        if(a.hasOrder !== b.hasOrder) return a.hasOrder ? -1 : 1;
+        const oa = String(a.orderName || a.orderId || a.orderLabel || "");
+        const ob = String(b.orderName || b.orderId || b.orderLabel || "");
+        if(oa && ob && oa !== ob) return oa.localeCompare(ob, "it", { numeric:true, sensitivity:"base" });
+        if(oa && !ob) return -1;
+        if(!oa && ob) return 1;
+        return (b.latestAt || 0) - (a.latestAt || 0);
+      });
+    }
+
     function shopifyFbmInventoryGroups(){
       const groups = new Map();
       const orderRows = shopifyFbmInventoryOrderRows();
@@ -11032,7 +11306,8 @@ function startAllLogs(modeOrOpts = "full"){
         };
 
         const ordersHtml = ()=>{
-          if(!orderRows.length){
+          const orderGroups = shopifyFbmInventoryOrdersGrouped(orderRows);
+          if(!orderGroups.length){
             return `
               <div class="fbmSection orders">
                 <div class="fbmSectionHead">
@@ -11042,40 +11317,63 @@ function startAllLogs(modeOrOpts = "full"){
                 <div class="fbmOrderEmpty">Il backend ha scritto il totale SKU, ma non ha ancora esposto righe ordine/cliente separate.</div>
               </div>`;
           }
-          const rows = orderRows.map(row=>{
-            const orderMain = row.orderName || row.orderId || row.orderLabel || "Ordine non disponibile";
-            const orderSub = row.orderName && row.orderId && row.orderName !== row.orderId ? row.orderId : prettyLoc(row.loc);
-            const customer = row.customerName || "Cliente non disponibile";
-            const codes = (row.codes || []).filter(Boolean);
-            const findBtnHtml = findPalletButtonHtml(row.firstCode || "", codes, { sku: row.sku, title: row.title || row.sku });
+
+          const productLineHtml = (line)=>{
+            const findBtnHtml = findPalletButtonHtml(line.firstCode || "", (line.codes || []).filter(Boolean), { sku: line.sku, title: line.title || line.sku });
             return `
-              <div class="fbmOrderRow">
-                <div class="fbmOrderCell"><div class="fbmOrderMain">${escapeHtml(orderMain)}</div><div class="fbmOrderSub">${escapeHtml(orderSub || "—")}</div></div>
-                <div class="fbmOrderCell"><div class="fbmOrderMain">${escapeHtml(customer)}</div><div class="fbmOrderSub">${escapeHtml(prettyLoc(row.loc))}</div></div>
-                <div class="fbmOrderCell"><div class="fbmOrderMain">${escapeHtml(row.title || row.sku)}</div><div class="fbmOrderSub"><span class="fbmOrderSku">${escapeHtml(row.sku)}</span></div></div>
-                <div class="fbmOrderCell right"><span class="badge warn">${escapeHtml(String(row.qty))}</span></div>
-                <div class="fbmOrderCell">${positionStackHtml(row.positions)}</div>
-                <div class="fbmOrderCell right"><div class="pickingSkuActions">${findBtnHtml}</div></div>
+              <div class="fbmOrderProductRow">
+                <div class="fbmOrderProductCell"><span class="fbmOrderSku">${escapeHtml(line.sku)}</span></div>
+                <div class="fbmOrderProductCell"><div class="fbmOrderMain">${escapeHtml(line.title || line.sku)}</div></div>
+                <div class="fbmOrderProductCell right"><span class="badge warn">${escapeHtml(String(line.qty))}</span></div>
+                <div class="fbmOrderProductCell">${positionStackHtml(line.positions)}</div>
+                <div class="fbmOrderProductCell right"><div class="pickingSkuActions">${findBtnHtml}</div></div>
+              </div>`;
+          };
+
+          const cards = orderGroups.map(order=>{
+            const orderMain = order.orderLabel || order.orderName || order.orderId || "Ordine Shopify";
+            const orderSubParts = [];
+            if(order.orderName && order.orderId && order.orderName !== order.orderId) orderSubParts.push(order.orderId);
+            const locLabel = (order.locs || []).map(prettyLoc).filter(Boolean).join(" + ") || "Concamarise";
+            orderSubParts.push(locLabel);
+            if(!order.hasOrder) orderSubParts.push("dettaglio ordine non disponibile");
+            const customer = order.customerName || "Cliente non disponibile";
+            const productText = `${fmtN(order.productCount)} ${order.productCount === 1 ? "prodotto" : "prodotti"}`;
+            const pieceText = `${fmtN(order.totalQty)} pz`;
+            return `
+              <div class="fbmOrderGroupCard">
+                <div class="fbmOrderGroupTop">
+                  <div class="fbmOrderGroupMain">
+                    <div class="fbmOrderGroupTitle">${escapeHtml(orderMain)}</div>
+                    <div class="fbmOrderGroupMeta">Cliente: ${escapeHtml(customer)}${orderSubParts.length ? ` • ${escapeHtml(orderSubParts.join(" • "))}` : ""}</div>
+                  </div>
+                  <div class="fbmOrderGroupStats">
+                    <span>${escapeHtml(productText)}</span>
+                    <span>${escapeHtml(pieceText)}</span>
+                  </div>
+                </div>
+                <div class="fbmOrderProductTable">
+                  <div class="fbmOrderProductHead" aria-hidden="true">
+                    <div class="fbmOrderProductCell">SKU</div>
+                    <div class="fbmOrderProductCell">Prodotto</div>
+                    <div class="fbmOrderProductCell right">Q.tà</div>
+                    <div class="fbmOrderProductCell">Ubicazione</div>
+                    <div class="fbmOrderProductCell right">Azioni</div>
+                  </div>
+                  ${order.lines.map(productLineHtml).join("")}
+                </div>
               </div>`;
           }).join("");
+
+          const groupedLineCount = orderGroups.reduce((sum,order)=> sum + (Array.isArray(order.lines) ? order.lines.length : 0), 0);
           return `
             <div class="fbmSection orders">
               <div class="fbmSectionHead">
                 <span class="fbmSectionTitle">Lista ordini</span>
                 <span class="fbmSectionRule"></span>
-                <span class="fbmSectionCount">${escapeHtml(String(orderRows.length))} righe</span>
+                <span class="fbmSectionCount">${escapeHtml(String(orderGroups.length))} ordini · ${escapeHtml(String(groupedLineCount))} righe</span>
               </div>
-              <div class="fbmOrderList">
-                <div class="fbmOrderHead" aria-hidden="true">
-                  <div class="fbmOrderCell">Ordine</div>
-                  <div class="fbmOrderCell">Cliente</div>
-                  <div class="fbmOrderCell">Prodotto</div>
-                  <div class="fbmOrderCell right">Q.tà</div>
-                  <div class="fbmOrderCell">Ubicazione</div>
-                  <div class="fbmOrderCell right">Azioni</div>
-                </div>
-                ${rows}
-              </div>
+              <div class="fbmOrderGroupList">${cards}</div>
             </div>`;
         };
 
