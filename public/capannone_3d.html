@@ -5907,6 +5907,142 @@ const UBI_VOICE_KEY_ALIASES = {
 let _ubiPackAudio = null;
 let _ubiPackPending = null;
 let _ubiPackPlaying = false;
+let _ubiPackAudioUnlocked = false;
+let _ubiPackUnlocking = false;
+let _ubiPackUnlockBtn = null;
+let _ubiPackSilentUrl = "";
+
+function makeUbiSilentWavUrl(){
+  try{
+    if(_ubiPackSilentUrl) return _ubiPackSilentUrl;
+    const sampleRate = 24000;
+    const samples = Math.max(1200, Math.floor(sampleRate * 0.08));
+    const dataBytes = samples * 2;
+    const buffer = new ArrayBuffer(44 + dataBytes);
+    const view = new DataView(buffer);
+    const writeStr = (off, str)=>{ for(let i=0;i<str.length;i++) view.setUint8(off+i, str.charCodeAt(i)); };
+    writeStr(0, "RIFF");
+    view.setUint32(4, 36 + dataBytes, true);
+    writeStr(8, "WAVE");
+    writeStr(12, "fmt " );
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true);
+    view.setUint16(22, 1, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * 2, true);
+    view.setUint16(32, 2, true);
+    view.setUint16(34, 16, true);
+    writeStr(36, "data");
+    view.setUint32(40, dataBytes, true);
+    // campioni già a zero = silenzio
+    _ubiPackSilentUrl = URL.createObjectURL(new Blob([buffer], { type:"audio/wav" }));
+    return _ubiPackSilentUrl;
+  }catch(_){
+    return "";
+  }
+}
+
+function ensureUbiAudioUnlockButton(reason){
+  try{
+    if(_ubiPackAudioUnlocked) return null;
+    if(_ubiPackUnlockBtn) return _ubiPackUnlockBtn;
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.id = "ubiAudioUnlockBtn";
+    btn.setAttribute("aria-label", "Attiva voce UBI");
+    btn.innerHTML = '<span style="display:block;font-weight:900;letter-spacing:-.02em">Attiva voce UBI</span><small style="display:block;margin-top:2px;opacity:.78;font-size:11px;font-weight:700">tocca una volta per abilitare audio</small>';
+    btn.style.cssText = [
+      "position:fixed",
+      "right:calc(18px + env(safe-area-inset-right, 0px))",
+      "bottom:calc(18px + env(safe-area-inset-bottom, 0px))",
+      "z-index:2147482999",
+      "border:1px solid rgba(255,255,255,.18)",
+      "border-radius:16px",
+      "padding:12px 16px",
+      "background:linear-gradient(135deg,#f97316 0%,#ea580c 100%)",
+      "color:#fff",
+      "box-shadow:0 16px 38px rgba(249,115,22,.28),0 4px 12px rgba(15,23,42,.18)",
+      "font-family:Inter,-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif",
+      "font-size:13px",
+      "line-height:1.15",
+      "cursor:pointer",
+      "-webkit-tap-highlight-color:transparent",
+      "text-align:left"
+    ].join(";");
+    btn.addEventListener("click", (ev)=>{
+      try{ ev.preventDefault(); ev.stopPropagation(); }catch(_){ }
+      activateUbiAudioFromGesture(true);
+    }, { passive:false });
+    document.body.appendChild(btn);
+    _ubiPackUnlockBtn = btn;
+    return btn;
+  }catch(_){
+    return null;
+  }
+}
+
+function hideUbiAudioUnlockButton(){
+  try{
+    if(_ubiPackUnlockBtn){
+      _ubiPackUnlockBtn.remove();
+      _ubiPackUnlockBtn = null;
+    }
+  }catch(_){ }
+}
+
+function markUbiAudioUnlocked(){
+  _ubiPackAudioUnlocked = true;
+  hideUbiAudioUnlockButton();
+}
+
+function unlockUbiAudioSilentlyFromGesture(){
+  try{
+    if(_ubiPackAudioUnlocked || _ubiPackUnlocking) return;
+    _ubiPackUnlocking = true;
+    const src = makeUbiSilentWavUrl();
+    if(!src){ _ubiPackUnlocking = false; ensureUbiAudioUnlockButton("silent_url_missing"); return; }
+    const a = new Audio();
+    a.setAttribute("playsinline", "");
+    a.volume = 0.001;
+    a.src = src;
+    const pr = a.play();
+    if(pr && pr.then){
+      pr.then(()=>{
+        markUbiAudioUnlocked();
+        _ubiPackUnlocking = false;
+        setTimeout(()=>{ try{ a.pause(); a.removeAttribute("src"); a.load(); }catch(_){ } }, 120);
+      }).catch(()=>{
+        _ubiPackUnlocking = false;
+        ensureUbiAudioUnlockButton("silent_play_rejected");
+      });
+    }else{
+      markUbiAudioUnlocked();
+      _ubiPackUnlocking = false;
+    }
+  }catch(_){
+    _ubiPackUnlocking = false;
+    ensureUbiAudioUnlockButton("unlock_exception");
+  }
+}
+
+function activateUbiAudioFromGesture(retryPending){
+  try{
+    // Se c'è un annuncio in attesa, riprovalo direttamente dentro il gesto utente:
+    // è l'unico modo pulito per superare NotAllowedError sui kiosk/browser moderni.
+    if(_ubiPackPending){
+      retryPendingUbiPackAudio();
+      return;
+    }
+    unlockUbiAudioSilentlyFromGesture();
+  }catch(_){
+    ensureUbiAudioUnlockButton("activation_failed");
+  }
+}
+
+try{
+  if(document.readyState === "loading") document.addEventListener("DOMContentLoaded", ()=>ensureUbiAudioUnlockButton("startup"), { once:true });
+  else setTimeout(()=>ensureUbiAudioUnlockButton("startup"), 0);
+}catch(_){ }
 
 function normalizeUbiVoiceKey(v){
   const raw = String(v || "").trim().toLowerCase();
@@ -6044,6 +6180,7 @@ function playUbiPackAudioCandidate(src, ann){
       if(playPromise && playPromise.then){
         playPromise.then(()=>{
           _ubiPackPlaying = true;
+          markUbiAudioUnlocked();
           setUbiPackSpeaking(true);
           try{ if(typeof UbiWave !== "undefined") UbiWave.attach(audio); }catch(_){ }
           safetyTimer = setTimeout(()=>finish(true, "safety_timeout"), maxMs);
@@ -6073,6 +6210,9 @@ async function playUbiPackAudio(url, ann){
 
   _ubiPackPending = { url:candidates[0], ann };
   setUbiPackSpeaking(false);
+  if(last && (last.errorName === "NotAllowedError" || last.reason === "play_rejected")){
+    ensureUbiAudioUnlockButton("not_allowed");
+  }
   console.warn("UBI voice pack audio non partito", {
     reason: last && last.reason,
     error: last && last.errorName,
@@ -6090,9 +6230,9 @@ async function retryPendingUbiPackAudio(){
     await playUbiPackAudio(p.url, p.ann);
   }catch(_){ }
 }
-window.addEventListener("pointerdown", retryPendingUbiPackAudio, { passive:true, capture:true });
-window.addEventListener("touchstart", retryPendingUbiPackAudio, { passive:true, capture:true });
-window.addEventListener("keydown", retryPendingUbiPackAudio, { capture:true });
+window.addEventListener("pointerdown", ()=>activateUbiAudioFromGesture(true), { passive:true, capture:true });
+window.addEventListener("touchstart", ()=>activateUbiAudioFromGesture(true), { passive:true, capture:true });
+window.addEventListener("keydown", ()=>activateUbiAudioFromGesture(true), { capture:true });
 
 
 
