@@ -4744,10 +4744,59 @@
       line-height:1.35;
       max-width:620px;
     }
+    .ubiTextForm{
+      width:min(760px, 96vw);
+      display:grid;
+      grid-template-columns:minmax(0, 1fr) auto;
+      gap:10px;
+      align-items:stretch;
+    }
+    .ubiTextInput{
+      min-height:58px;
+      max-height:150px;
+      resize:vertical;
+      border-radius:18px;
+      border:1px solid rgba(255,255,255,.14);
+      background:rgba(15,23,42,.62);
+      color:#fff;
+      padding:14px 16px;
+      font:inherit;
+      font-size:15px;
+      line-height:1.35;
+      outline:none;
+      box-shadow:inset 0 1px 0 rgba(255,255,255,.06);
+    }
+    .ubiTextInput::placeholder{ color:rgba(255,255,255,.34); }
+    .ubiTextInput:focus{
+      border-color:rgba(249,115,22,.72);
+      box-shadow:0 0 0 4px rgba(249,115,22,.16), inset 0 1px 0 rgba(255,255,255,.06);
+    }
+    .ubiSendButton{
+      min-width:148px;
+      border-radius:18px;
+      border:1px solid rgba(249,115,22,.88);
+      background:linear-gradient(135deg, #f97316 0%, #ea580c 100%);
+      color:#fff;
+      padding:0 18px;
+      font-size:14px;
+      font-weight:900;
+      letter-spacing:-.02em;
+      cursor:pointer;
+      box-shadow:0 14px 34px rgba(249,115,22,.22);
+      -webkit-tap-highlight-color:transparent;
+    }
+    .ubiSendButton:disabled{
+      opacity:.55;
+      cursor:wait;
+      filter:saturate(.7);
+    }
+    .ubiSendButton:active{ transform:translateY(1px) scale(.99); }
     @media(max-width:760px){
       .ubiModeHeader{ margin-top:54px; }
       .ubiDialogCard{ max-height:36vh; }
       .ubiTalkButton{ width:168px; height:168px; }
+      .ubiTextForm{ grid-template-columns:1fr; }
+      .ubiSendButton{ min-height:48px; width:100%; }
     }
     @media (prefers-reduced-motion: reduce){
       .ubiModeFullscreenShell, .ubiTalkButton.is-recording{ transition:none !important; animation:none !important; }
@@ -5263,27 +5312,27 @@
 
   <div class="ubiModeFullscreenShell" id="ubiModeFullscreenShell" aria-hidden="true">
     <button class="ubiModeClose" id="btnCloseUbiMode" type="button" aria-label="Chiudi UBI">×</button>
-    <div class="ubiModePanel" role="dialog" aria-modal="true" aria-label="UBI IA push to talk">
+    <div class="ubiModePanel" role="dialog" aria-modal="true" aria-label="UBI IA self-hosted">
       <div class="ubiModeHeader">
-        <div class="ubiModeEyebrow">Capannone 3D • voce cloud</div>
+        <div class="ubiModeEyebrow">Capannone 3D • UBI locale</div>
         <div class="ubiModeTitle">UBI</div>
-        <div class="ubiModeSub">Tieni premuto il pulsante, parla, rilascia. L'audio va al backend cloud: UBI capisce, risponde e fa parlare il Capannone 3D.</div>
+        <div class="ubiModeSub">Scrivi una richiesta operativa. UBI passa dalla coda Firestore, ragiona sull'agente self-hosted e risponde sul Capannone 3D con voce Nicola.</div>
       </div>
 
       <div class="ubiDialogCard" aria-live="polite">
-        <div class="ubiLineLabel">Hai detto</div>
+        <div class="ubiLineLabel">Richiesta</div>
         <div class="ubiLineText" id="ubiTranscriptText">—</div>
         <div class="ubiLineLabel">UBI risponde</div>
         <div class="ubiLineText" id="ubiReplyText">—</div>
       </div>
 
       <div class="ubiTalkArea">
-        <button class="ubiTalkButton" id="btnUbiTalk" type="button" aria-label="Tieni premuto per parlare con UBI">
-          <span>Parla</span>
-          <small>tieni premuto</small>
-        </button>
-        <div class="ubiStatus" id="ubiStatusText">Pronto. Nessun riconoscimento locale: tutto passa dal cloud.</div>
-        <div class="ubiHint">Esempio: “D’ora in poi ricordami tutti i giorni a mezzogiorno quanti ordini ci sono da evadere”.</div>
+        <div class="ubiTextForm">
+          <textarea class="ubiTextInput" id="ubiTextPrompt" autocomplete="off" autocorrect="off" autocapitalize="sentences" spellcheck="true" placeholder="Esempio: UBI, cosa devo preparare adesso?"></textarea>
+          <button class="ubiSendButton" id="btnUbiSendText" type="button">Invia a UBI</button>
+        </div>
+        <div class="ubiStatus" id="ubiStatusText">Pronto. Scrivi una richiesta e inviala all'agente UBI locale.</div>
+        <div class="ubiHint">La risposta viene salvata nel centro notifiche e annunciata anche nel Capannone 3D. Per il microfono live serve il modulo STT locale dedicato.</div>
       </div>
     </div>
   </div>
@@ -6615,33 +6664,19 @@ function guessTitleFromRaw(rawText, sku){
         const _nowUbi = Date.now();
         if(_nowUbi - _ubiVoiceAgentLastClickAt < 1800) return;
         _ubiVoiceAgentLastClickAt = _nowUbi;
-        showToast("UBI chiamato", "La voce IA partirà sul Capannone 3D.", 1700);
         setPickingMobileMenu(false);
 
-        if(!state.firebase?.ok || !state.firebase?.auth?.currentUser){
-          showToast("UBI non disponibile", "Accesso Firebase non ancora attivo.", 2400);
-          return;
-        }
-        const token = await state.firebase.auth.currentUser.getIdToken();
-        const res = await fetch(CAPANNONE_VOICE_AGENT_URL, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Authorization": "Bearer " + token
-          },
-          body: JSON.stringify({
-            mode: "periodic",
-            force: true,
-            source: "picking_call_ubi"
-          }),
-          cache: "no-store"
+        await enqueueUbiAgentEventFromPicking({
+          type: "ubi_online",
+          notificationKey: `ubi_call_${_nowUbi}_${Math.random().toString(36).slice(2, 8)}`,
+          priority: "high",
+          text: "UBI online. Operatore Picking pronto a interagire.",
+          audioKey: "ubi_online",
+          source: "picking_call_ubi"
         });
-        const json = await res.json().catch(()=>({}));
-        if(!res.ok || json.ok === false){
-          throw new Error(json.error || ("HTTP " + res.status));
-        }
+        showToast("UBI chiamato", "Richiesta inviata all'agente locale.", 1700);
       }catch(err){
-        console.warn("call UBI voice agent", err);
+        console.warn("call UBI local agent", err);
         showToast("UBI non risponde", String(err?.message || err).slice(0, 160), 2600);
       }
     }
@@ -6661,6 +6696,135 @@ function guessTitleFromRaw(rawText, sku){
       if(el) el.textContent = text || "—";
     }
     function ubiTalkBtn(){ return $("btnUbiTalk"); }
+    function ubiTextInput(){ return $("ubiTextPrompt"); }
+    function ubiSendBtn(){ return $("btnUbiSendText"); }
+
+    function safeUbiEventKey(v){
+      return String(v || "")
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9_-]+/g, "_")
+        .replace(/^_+|_+$/g, "")
+        .slice(0, 120) || ("ubi_" + Date.now());
+    }
+
+    async function enqueueUbiAgentEventFromPicking(payload = {}){
+      const api = state.firebase?.api;
+      const db = state.firebase?.db;
+      if(!api || !db) throw new Error("Firebase non inizializzato");
+      if(!state.firebase?.auth?.currentUser) throw new Error("Accesso Firebase non attivo");
+
+      const now = Date.now();
+      const type = safeUbiEventKey(payload.type || "ubi_question");
+      const key = safeUbiEventKey(payload.notificationKey || `${type}_${now}_${Math.random().toString(36).slice(2, 8)}`);
+      const ref = api.doc(db, "amzInventoryProducts", CAPANNONE_VOICE_AGENT_DOC_ID, "events", key);
+      const user = state.firebase.auth.currentUser || {};
+      const text = squashWhitespace(payload.text || payload.question || "");
+
+      await api.setDoc(ref, {
+        status: "pending",
+        type,
+        notificationKey: key,
+        priority: payload.priority || "high",
+        question: payload.question || text,
+        text,
+        source: payload.source || "picking_ubi_text",
+        byEmail: state.user?.email || state.user?.emailLower || user.email || "",
+        byUid: state.user?.uid || user.uid || "",
+        clientPage: "picking",
+        createdAt: api.serverTimestamp ? api.serverTimestamp() : null,
+        createdAtClient: now,
+        context: payload.context || {
+          pickingView: state.ui?.pickingHomeView || "",
+          routeView: state.route?.view || "",
+          loc: state.route?.loc || ""
+        }
+      }, { merge:true });
+
+      return { ref, key };
+    }
+
+    async function sendUbiTextToCloud(){
+      const input = ubiTextInput();
+      const sendBtn = ubiSendBtn();
+      const question = squashWhitespace(input?.value || "");
+
+      if(!question){
+        ubiSetStatus("Scrivi prima una richiesta per UBI.");
+        try{ input?.focus?.({ preventScroll:true }); }catch(_e){}
+        return;
+      }
+      if(_ubiSending) return;
+
+      let unsub = null;
+      let timer = null;
+      try{
+        _ubiSending = true;
+        if(sendBtn) sendBtn.disabled = true;
+        ubiSetTranscript(question);
+        ubiSetReply("—");
+        ubiSetStatus("Richiesta inviata alla coda UBI…");
+        void interruptCapannoneUbiSpeech("new_ubi_text_question");
+
+        const { ref, key } = await enqueueUbiAgentEventFromPicking({
+          type: "ubi_question",
+          notificationKey: `ubi_question_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+          question,
+          text: question,
+          priority: "high",
+          source: "picking_ubi_text"
+        });
+
+        ubiSetStatus("UBI sta ragionando sull'agente locale…");
+        showToast("UBI", "Richiesta inviata all'agente locale", 1800);
+
+        timer = setTimeout(()=>{
+          try{ if(unsub) unsub(); }catch(_e){}
+          ubiSetStatus("Richiesta inviata. La risposta arriverà nel centro notifiche/capannone.");
+          _ubiSending = false;
+          if(sendBtn) sendBtn.disabled = false;
+        }, 45000);
+
+        unsub = state.firebase.api.onSnapshot(ref, (snap)=>{
+          const d = snap.exists() ? (snap.data() || {}) : {};
+          const st = String(d.status || "");
+          if(st === "processing") ubiSetStatus("UBI sta preparando la risposta…");
+          if(st === "done"){
+            const answer = squashWhitespace(d?.announcement?.text || d?.answer || "Risposta inviata al Capannone 3D.");
+            ubiSetReply(answer);
+            ubiSetStatus("Risposta inviata al Capannone 3D con voce UBI.");
+            try{ if(input) input.value = ""; }catch(_e){}
+            try{ if(timer) clearTimeout(timer); }catch(_e){}
+            try{ if(unsub) unsub(); }catch(_e){}
+            _ubiSending = false;
+            if(sendBtn) sendBtn.disabled = false;
+          }else if(st === "error"){
+            const errMsg = squashWhitespace(d.error || "Errore UBI");
+            ubiSetStatus("Errore UBI: " + errMsg.slice(0, 160));
+            try{ if(timer) clearTimeout(timer); }catch(_e){}
+            try{ if(unsub) unsub(); }catch(_e){}
+            _ubiSending = false;
+            if(sendBtn) sendBtn.disabled = false;
+          }
+        }, (err)=>{
+          console.warn("UBI event watch", err);
+          ubiSetStatus("Richiesta inviata, ma non riesco a seguire lo stato in tempo reale.");
+          try{ if(timer) clearTimeout(timer); }catch(_e){}
+          _ubiSending = false;
+          if(sendBtn) sendBtn.disabled = false;
+        });
+      }catch(err){
+        console.warn("UBI text dialog", err);
+        const msg = String(err?.message || err || "Errore UBI").slice(0, 180);
+        ubiSetStatus("Errore cloud: " + msg);
+        showToast("UBI non risponde", msg, 3000);
+        try{ if(timer) clearTimeout(timer); }catch(_e){}
+        try{ if(unsub) unsub(); }catch(_e){}
+        _ubiSending = false;
+        if(sendBtn) sendBtn.disabled = false;
+      }
+    }
+
 
     // Se UBI sta già parlando sul Capannone 3D, quando l'operatore riclicca "Parla"
     // mando subito un comando cloud di interruzione. Poi la nuova registrazione continua normalmente.
@@ -6706,8 +6870,8 @@ function guessTitleFromRaw(rawText, sku){
         if(!shell) return;
         document.body.classList.add("ubi-mode-active");
         shell.setAttribute("aria-hidden", "false");
-        ubiSetStatus("Pronto. Tieni premuto Parla e rilascia quando hai finito.");
-        const btn = ubiTalkBtn();
+        ubiSetStatus("Pronto. Scrivi una richiesta e inviala all'agente UBI locale.");
+        const btn = $("ubiTextPrompt") || ubiTalkBtn();
         setTimeout(()=>{ try{ btn?.focus?.({ preventScroll:true }); }catch(_e){} }, 80);
         try{
           if(shell.requestFullscreen && !document.fullscreenElement){
@@ -6919,6 +7083,22 @@ function guessTitleFromRaw(rawText, sku){
             if(ev.code === "Space" || ev.code === "Enter"){
               ev.preventDefault();
               void stopUbiRecording();
+            }
+          });
+        }
+        const sendText = ubiSendBtn();
+        if(sendText){
+          sendText.addEventListener("click", (ev)=>{
+            ev.preventDefault();
+            void sendUbiTextToCloud();
+          });
+        }
+        const textInput = ubiTextInput();
+        if(textInput){
+          textInput.addEventListener("keydown", (ev)=>{
+            if((ev.metaKey || ev.ctrlKey) && ev.key === "Enter"){
+              ev.preventDefault();
+              void sendUbiTextToCloud();
             }
           });
         }
