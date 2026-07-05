@@ -10141,21 +10141,155 @@ function startAllLogs(modeOrOpts = "full"){
       }
     }
 
+    function pickingFlatTextParts(value){
+      const out = [];
+      const push = (v)=>{
+        if(v === null || v === undefined) return;
+        if(Array.isArray(v)){ v.forEach(push); return; }
+        if(typeof v === "object") return;
+        const s = String(v || "").trim();
+        if(s) out.push(s);
+      };
+      push(value);
+      return out;
+    }
+
+    function pickingTagList(value){
+      return pickingFlatTextParts(value)
+        .flatMap(v => String(v || "").split(/[;,|]/g))
+        .map(v => String(v || "").trim().toLowerCase())
+        .filter(Boolean);
+    }
+
+    function hasAmazonFbaSignalsFromParts(parts, tags = []){
+      try{
+        const raw = pickingFlatTextParts(parts).join(" ");
+        const upper = raw.toUpperCase();
+        const lower = raw.toLowerCase();
+        const tagList = pickingTagList(tags);
+        if(tagList.some(t => t === "fba" || t === "amazon_fba" || t === "fulfillment_by_amazon" || t === "seller_central")) return true;
+        if(/(^|[^A-Z0-9])FBA[0-9A-Z]{5,}([^A-Z0-9]|$)/.test(upper)) return true;
+        if(/(^|[^A-Z0-9])FBA([^A-Z0-9]|$)/.test(upper)) return true;
+        return !!(
+          lower.includes("fulfillment by amazon") ||
+          lower.includes("amazon fba") ||
+          lower.includes("seller central") ||
+          lower.includes("invia ad amazon") ||
+          lower.includes("inviato ad amazon") ||
+          lower.includes("spedizione fba") ||
+          lower.includes("shipment fba") ||
+          lower.includes("fba inbound")
+        );
+      }catch(_e){
+        return false;
+      }
+    }
+
+    function isAmazonFbaFlow(flow){
+      try{
+        const f = flow || {};
+        const shop = (f.shopify && typeof f.shopify === "object") ? f.shopify : {};
+        const p = (f.picking && typeof f.picking === "object") ? f.picking : {};
+        const r = (f.reservation && typeof f.reservation === "object") ? f.reservation : {};
+        const workflow = (f.workflow && typeof f.workflow === "object") ? f.workflow : {};
+        const shipments = Array.isArray(workflow.shipments) ? workflow.shipments : [];
+        const shipmentParts = shipments.flatMap(x => [x?.code, x?.id, x?.shipmentId, x?.destination]);
+        if(f.fba === true || f.isFba === true || f.isFBA === true || f.amazonFba === true || f.fulfillmentByAmazon === true) return true;
+        return hasAmazonFbaSignalsFromParts([
+          f.id,
+          f.workflowId,
+          f.workflowLabel,
+          workflow.id,
+          workflow.label,
+          f.fileName,
+          f.source,
+          f.channel,
+          f.fulfillmentChannel,
+          f.fulfillment_channel,
+          f.fulfillmentService,
+          f.fulfillment_service,
+          f.fulfillmentType,
+          f.shipmentId,
+          f.shipmentCode,
+          f.fbaShipmentId,
+          f.amazonShipmentId,
+          f.inboundShipmentId,
+          f.orderId,
+          f.orderName,
+          f.name,
+          r.source,
+          r.channel,
+          r.fulfillmentChannel,
+          p.source,
+          p.channel,
+          p.fulfillmentChannel,
+          shop.fulfillmentChannel,
+          shop.fulfillment_channel,
+          ...shipmentParts
+        ], [f.tags, f.tag, shop.tags, r.tags, p.tags]);
+      }catch(_e){
+        return false;
+      }
+    }
+
+    function isAmazonFbaInventoryPendingItem(it){
+      try{
+        const d = it || {};
+        if(d.fba === true || d.isFba === true || d.isFBA === true || d.amazonFba === true || d.fulfillmentByAmazon === true) return true;
+        return hasAmazonFbaSignalsFromParts([
+          d.lastReservationFlowId,
+          d.lastReservationFileName,
+          d.lastReservationSource,
+          d.reservationSource,
+          d.firstSeenSource,
+          d.source,
+          d.reservationStatus,
+          d.status,
+          d.workflowId,
+          d.workflowLabel,
+          d.fulfillmentChannel,
+          d.fulfillment_channel,
+          d.fulfillmentService,
+          d.fulfillment_service,
+          d.shipmentId,
+          d.shipmentCode,
+          d.fbaShipmentId,
+          d.amazonShipmentId,
+          d.inboundShipmentId,
+          d.lastReservationOrderId,
+          d.lastReservationOrderName
+        ], [d.tags, d.tag]);
+      }catch(_e){
+        return false;
+      }
+    }
+
     function isShopifyFbmPendingInventoryItem(it){
       try{
         const pending = shopifyFbmPendingQtyFromItem(it);
         if(pending <= 0) return false;
+        // Guard rail: gli FBA possono avere orderId/orderName generici dopo la prenotazione.
+        // Questi campi non bastano per considerarli FBM/Shopify.
+        if(isAmazonFbaInventoryPendingItem(it)) return false;
+
         const src = String(it?.lastReservationSource || it?.reservationSource || it?.firstSeenSource || it?.source || "").toLowerCase();
         const st = String(it?.reservationStatus || it?.status || "").toLowerCase();
         const flowId = String(it?.lastReservationFlowId || "").toUpperCase();
-        const orderId = String(it?.lastReservationOrderId || it?.shopifyOrderId || "").trim();
-        const orderName = String(it?.lastReservationOrderName || it?.shopifyOrderName || "").trim();
+        const shopifyOrderId = String(it?.shopifyOrderId || "").trim();
+        const shopifyOrderName = String(it?.shopifyOrderName || "").trim();
+        const hasShopifyOrderObjects = !!(
+          (Array.isArray(it?.shopifyPendingOrders) && it.shopifyPendingOrders.length) ||
+          (Array.isArray(it?.shopifyOrders) && it.shopifyOrders.length) ||
+          (Array.isArray(it?.shopifyOrderLines) && it.shopifyOrderLines.length) ||
+          (it?.shopifyOrder && typeof it.shopifyOrder === "object")
+        );
         return !!(
           src.includes("shopify") ||
           st.includes("shopify") ||
           flowId.startsWith("SHOPIFY") ||
-          orderId ||
-          orderName ||
+          shopifyOrderId ||
+          shopifyOrderName ||
+          hasShopifyOrderObjects ||
           it?.generatedFromShopifyFbm === true
         );
       }catch(_e){
@@ -11473,10 +11607,17 @@ function startAllLogs(modeOrOpts = "full"){
       // Timestamp stabile: gli updatedAtClient cambiano a ogni sync Shopify e non devono
       // far "saltare" i flussi o ristampare lo storico come se fossero nuovi.
       const stableTs = readFlowLogTimestamp(d.appliedAtClient) || pickingFlowStableBaseTs(d) || readFlowLogTimestamp(d.createdAtClient) || readFlowLogTimestamp(d.createdAt) || ts;
-      const shopId = String(shop.orderId || shop.admin_graphql_api_id || shop.id || d.shopifyOrderId || d.orderId || d.name || "").trim();
-      const shopName = String(shop.name || d.orderName || d.shopifyOrderName || shopId || "").trim();
       const src = String(d.source || shop.source || "").trim();
-      const looksShopify = !!(shopId || shopName || src.toLowerCase().includes("shopify") || String(d.fileName || "").toUpperCase() === "SHOPIFY_FBM");
+      const srcLower = src.toLowerCase();
+      // Classificazione stretta: orderId/orderName generici non sono segnali Shopify.
+      // Alcuni flussi FBA li hanno e finivano nel ramo FBM.
+      const looksShopify = isShopifyFbmFlow({ ...d, id: docSnap.id, shopify: shop, source: src, fileName: d.fileName });
+      const shopId = looksShopify
+        ? String(shop.orderId || shop.admin_graphql_api_id || shop.id || d.shopifyOrderId || (srcLower.includes("shopify") ? d.orderId : "") || "").trim()
+        : "";
+      const shopName = looksShopify
+        ? String(shop.name || d.shopifyOrderName || (srcLower.includes("shopify") ? d.orderName : "") || shopId || "").trim()
+        : "";
       const workflowId = d.workflowId || ((d.workflow && d.workflow.id) ? d.workflow.id : "") || (looksShopify ? `SHOPIFY-${shopName || shopId || docSnap.id}` : "");
       const workflowLabel = d.workflowLabel || ((d.workflow && d.workflow.label) ? d.workflow.label : "") || (looksShopify ? `Shopify ${shopName || shopId || docSnap.id}` : "");
       const totalPieces = Number.isFinite(Number(d.totalPieces)) ? Number(d.totalPieces) : lines.reduce((a,x)=> a + (Math.abs(parseQty(x.qty)||0)), 0);
@@ -14658,25 +14799,29 @@ function currentInv(){
 
     function isShopifyFbmFlow(flow){
       try{
+        if(isAmazonFbaFlow(flow)) return false;
         const shop = (flow?.shopify && typeof flow.shopify === "object") ? flow.shopify : {};
-        const src = String(flow?.source || shop.source || flow?.reservation?.source || "").toLowerCase();
+        const reservation = (flow?.reservation && typeof flow.reservation === "object") ? flow.reservation : {};
+        const picking = (flow?.picking && typeof flow.picking === "object") ? flow.picking : {};
+        const src = String(flow?.source || shop.source || reservation.source || "").toLowerCase();
         const fileName = String(flow?.fileName || "").toUpperCase();
         const workflow = String(flow?.workflowId || flow?.workflowLabel || "").toUpperCase();
-        const tags = [flow?.tags, shop.tags, flow?.tag]
-          .flatMap(v => Array.isArray(v) ? v : String(v || "").split(","))
-          .map(v => String(v || "").trim().toLowerCase())
-          .filter(Boolean);
+        const tags = pickingTagList([flow?.tags, shop.tags, flow?.tag, reservation.tags, picking.tags]);
+        const hasShopifyOrderObject = !!(shop.orderId || shop.admin_graphql_api_id || shop.id || shop.name || flow?.shopifyOrderId || flow?.shopifyOrderName);
         return !!(
           src === "shopify_fbm" ||
           src.includes("shopify_fbm") ||
           src.includes("shopify") ||
           fileName === "SHOPIFY_FBM" ||
           workflow.startsWith("SHOPIFY-") ||
-          tags.includes("fbm") ||
+          workflow.includes("SHOPIFY") ||
+          tags.includes("shopify") ||
           tags.includes("shopify_fbm") ||
-          !!(shop.orderId || shop.id || shop.name || flow?.shopifyOrderId || flow?.shopifyOrderName) ||
-          flow?.picking?.shopifyControlled === true ||
-          flow?.shopifyControlled === true
+          (tags.includes("fbm") && !tags.includes("fba")) ||
+          hasShopifyOrderObject ||
+          picking.shopifyControlled === true ||
+          flow?.shopifyControlled === true ||
+          flow?.generatedFromShopifyFbm === true
         );
       }catch(_e){
         return false;
