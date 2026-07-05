@@ -5883,6 +5883,7 @@ let _capannoneAgentSpeakingAttempt = false;
    e niente errore 500 quando i crediti finiscono. */
 const UBI_VOICE_PACK_ONLY = true;
 const UBI_VOICE_PACK_BASE = "https://storage.googleapis.com/tabellone-produzione-liv-e313e-ubi-voice/voice/ubi/v1/";
+const UBI_VOICE_REPLIES_BASE = "https://storage.googleapis.com/tabellone-produzione-liv-e313e-ubi-voice/voice/ubi/replies/";
 const UBI_VOICE_PACK_EXT = ".m4a";
 const UBI_VOICE_KEY_ALIASES = {
   manual_test: "ubi_online",
@@ -5950,15 +5951,16 @@ function ensureUbiAudioUnlockButton(reason){
     btn.type = "button";
     btn.id = "ubiAudioUnlockBtn";
     btn.setAttribute("aria-label", "Attiva voce UBI");
-    btn.innerHTML = '<span style="display:block;font-weight:900;letter-spacing:-.02em">Attiva voce UBI</span><small style="display:block;margin-top:2px;opacity:.78;font-size:11px;font-weight:700">tocca una volta per abilitare audio</small>';
+    btn.innerHTML = '<span style="display:block;font-weight:900;letter-spacing:-.02em;font-size:16px">Attiva voce UBI</span><small style="display:block;margin-top:5px;opacity:.82;font-size:12px;font-weight:700;line-height:1.25">Il browser sta bloccando l\'audio automatico.<br>Tocca qui una volta sul Capannone.</small>';
     btn.style.cssText = [
       "position:fixed",
-      "right:calc(18px + env(safe-area-inset-right, 0px))",
-      "bottom:calc(18px + env(safe-area-inset-bottom, 0px))",
+      "left:50%",
+      "top:50%",
+      "transform:translate(-50%,-50%)",
       "z-index:2147482999",
-      "border:1px solid rgba(255,255,255,.18)",
-      "border-radius:16px",
-      "padding:12px 16px",
+      "border:1px solid rgba(255,255,255,.22)",
+      "border-radius:18px",
+      "padding:16px 20px",
       "background:linear-gradient(135deg,#f97316 0%,#ea580c 100%)",
       "color:#fff",
       "box-shadow:0 16px 38px rgba(249,115,22,.28),0 4px 12px rgba(15,23,42,.18)",
@@ -5967,11 +5969,16 @@ function ensureUbiAudioUnlockButton(reason){
       "line-height:1.15",
       "cursor:pointer",
       "-webkit-tap-highlight-color:transparent",
-      "text-align:left"
+      "text-align:center",
+      "min-width:min(360px,86vw)",
+      "max-width:90vw"
     ].join(";");
     btn.addEventListener("click", (ev)=>{
       try{ ev.preventDefault(); ev.stopPropagation(); }catch(_){ }
+      // Il click è il gesto utente che Chrome/Safari richiedono per sbloccare audio.
+      // Prima provo l'annuncio pendente, poi marco lo stato audio come sbloccato se parte.
       activateUbiAudioFromGesture(true);
+      setTimeout(()=>{ try{ if(_ubiPackPending) retryPendingUbiPackAudio(); }catch(_){ } }, 40);
     }, { passive:false });
     document.body.appendChild(btn);
     _ubiPackUnlockBtn = btn;
@@ -6061,7 +6068,8 @@ function capannoneAgentAudioUrl(ann){
     );
     if(!key) return "";
 
-    return UBI_VOICE_PACK_BASE + key + UBI_VOICE_PACK_EXT;
+    const base = key.startsWith("ubi_reply_") ? UBI_VOICE_REPLIES_BASE : UBI_VOICE_PACK_BASE;
+    return base + key + UBI_VOICE_PACK_EXT;
   }catch(_){
     return "";
   }
@@ -6115,9 +6123,25 @@ function ubiAudioUrlCandidates(url){
   try{
     if(src && !/^(https?:|blob:|data:)/i.test(src)){
       const clean = src.replace(/^\/+/, "");
-      const base = UBI_VOICE_PACK_BASE.replace(/\/+$/, "");
-      if(clean.startsWith("voice/ubi/v1/")) push(base + "/" + clean.split("/voice/ubi/v1/").pop());
-      else push(base + "/" + clean.split("/").pop());
+      const v1Base = UBI_VOICE_PACK_BASE.replace(/\/+$/, "");
+      const replyBase = UBI_VOICE_REPLIES_BASE.replace(/\/+$/, "");
+      if(clean.startsWith("voice/ubi/replies/")) push(replyBase + "/" + clean.split("/voice/ubi/replies/").pop());
+      else if(clean.startsWith("voice/ubi/v1/")) push(v1Base + "/" + clean.split("/voice/ubi/v1/").pop());
+      else if(clean.split("/").pop().startsWith("ubi_reply_")) push(replyBase + "/" + clean.split("/").pop());
+      else push(v1Base + "/" + clean.split("/").pop());
+    }
+  }catch(_){ }
+
+  // Fix path dinamici: le risposte libere generate da Kokoro stanno in /voice/ubi/replies,
+  // non in /voice/ubi/v1. Se arriva un audioUrl vecchio o solo audioKey, provo anche il path corretto.
+  try{
+    const snap = out.slice();
+    for(const candidate of snap){
+      const file = candidate.split("/").pop() || "";
+      if(file.startsWith("ubi_reply_")){
+        push(candidate.replace("/voice/ubi/v1/", "/voice/ubi/replies/"));
+        push(UBI_VOICE_REPLIES_BASE.replace(/\/+$/, "") + "/" + file);
+      }
     }
   }catch(_){ }
 
@@ -6208,10 +6232,13 @@ async function playUbiPackAudio(url, ann){
     if(last && last.ok) return last;
   }
 
-  _ubiPackPending = { url:candidates[0], ann };
   setUbiPackSpeaking(false);
   if(last && (last.errorName === "NotAllowedError" || last.reason === "play_rejected")){
+    _ubiPackPending = { url:candidates[0], ann, reason:"not_allowed" };
     ensureUbiAudioUnlockButton("not_allowed");
+  } else {
+    // File mancante/codec/path sbagliato: non tenerlo in retry su ogni click, altrimenti la console esplode.
+    _ubiPackPending = null;
   }
   console.warn("UBI voice pack audio non partito", {
     reason: last && last.reason,
@@ -6231,7 +6258,10 @@ async function retryPendingUbiPackAudio(){
   }catch(_){ }
 }
 window.addEventListener("pointerdown", ()=>activateUbiAudioFromGesture(true), { passive:true, capture:true });
+window.addEventListener("pointerup", ()=>activateUbiAudioFromGesture(true), { passive:true, capture:true });
+window.addEventListener("click", ()=>activateUbiAudioFromGesture(true), { passive:true, capture:true });
 window.addEventListener("touchstart", ()=>activateUbiAudioFromGesture(true), { passive:true, capture:true });
+window.addEventListener("touchend", ()=>activateUbiAudioFromGesture(true), { passive:true, capture:true });
 window.addEventListener("keydown", ()=>activateUbiAudioFromGesture(true), { capture:true });
 
 
@@ -6326,16 +6356,27 @@ function initUbiNotificationCenterUi(){
   },{passive:true});
 }
 function subscribeUbiNotifications(fs, db){
-  try{
-    const ref=fs.collection(db,'amzInventoryProducts',CAPANNONE_VOICE_AGENT_DOC_ID,UBI_NOTIFICATIONS_COLLECTION);
-    const q=fs.query(ref, fs.orderBy('updatedAtMs','desc'), fs.limit(80));
-    fs.onSnapshot(q,(snap)=>{
-      const arr=[]; snap.forEach(d=>{ arr.push({id:d.id, ...(d.data()||{})}); });
-      UBI_NOTIFICATIONS=arr; renderUbiNotificationCenter(); renderUbiTrashAlert();
-    },(err)=>{ console.warn('UBI notifications listener',err&&err.code); });
-  }catch(e){ console.warn('UBI notifications non attive',e); }
+  // Le rules del kiosk leggono il documento principale capannoneVoiceAgent,
+  // ma possono bloccare la subcollection notifications. Per evitare permission-denied,
+  // il centro notifiche viene alimentato da notificationsPreview mirrorato sul documento parent.
+  return;
 }
 initUbiNotificationCenterUi();
+
+function ingestUbiNotificationsFromAgentDoc(data){
+  try{
+    const d = data || {};
+    const preview = Array.isArray(d.notificationsPreview) ? d.notificationsPreview : [];
+    const latest = (d.notificationLatest && typeof d.notificationLatest === "object") ? d.notificationLatest : null;
+    let arr = preview.slice();
+    if(!arr.length && latest) arr = [latest];
+    if(!arr.length) return;
+    UBI_NOTIFICATIONS = arr.map((x, i)=>({ id:x.id || x.notificationKey || `parent_${i}`, ...(x || {}) }));
+    renderUbiNotificationCenter();
+    renderUbiTrashAlert();
+  }catch(e){ console.warn('UBI notifications parent preview error', e); }
+}
+
 
 /* ===================================================================
    MODALITÀ DRONE — controllo remoto live dal picking
@@ -7137,6 +7178,7 @@ function startInventoryRealtime(fs, db){
     fs.onSnapshot(agentRef, (snap)=>{
       if(!snap.exists()) return;
       const data = snap.data() || {};
+      try{ ingestUbiNotificationsFromAgentDoc(data); }catch(_){ }
       const ann = data.announcement || {};
       if(_agentFirstSnap){
         _agentFirstSnap = false;
