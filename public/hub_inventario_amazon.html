@@ -9825,12 +9825,12 @@ function openComboSheet(){
     `;
   }else{
     const rackSelect = canUseMultipleRackLocations ? `
-      <select class="input mono" data-field="rackLocations" multiple size="8" ${canEdit ? "" : "disabled"}>
+      <select class="input mono" data-field="rackLocations" data-initial-rack-locations="${escapeHtml(rackLocations.join(','))}" multiple size="8" ${canEdit ? "" : "disabled"}>
         ${rackLocationSelectOptions(rackLocationValue, sku, loc, { multiple:true })}
       </select>
       ${err("rackLocation")}
     ` : `
-      <select class="input mono" data-field="rackLocation" ${canEdit ? "" : "disabled"}>
+      <select class="input mono" data-field="rackLocation" data-initial-rack-locations="${escapeHtml(rackLocations.join(','))}" ${canEdit ? "" : "disabled"}>
         ${rackLocationSelectOptions(rackLocationValue, sku, loc)}
       </select>
       ${err("rackLocation")}
@@ -9962,6 +9962,8 @@ function setPdFieldError(key, msg){
   const rackLocationsRaw = rackLocationsEl
     ? Array.from(rackLocationsEl.selectedOptions || []).map(opt => opt.value)
     : rackLocationRaw;
+  const rackFieldEl = rackLocationsEl || rackLocationEl;
+  const rackLocationsInitialRaw = rackFieldEl?.dataset?.initialRackLocations || "";
   const noteRaw = (noteEl?.value ?? "");
 
   const qty = parseSignedQtyStrict(qtyRaw);
@@ -9969,11 +9971,35 @@ function setPdFieldError(key, msg){
   const lowStockParsed = parseLowStockThresholdInput(lowStockThresholdRaw);
   const lowStockThreshold = lowStockParsed.ok ? lowStockParsed.value : null;
   const rackLocations = normalizeRackLocationsList(rackLocationsRaw);
+  const rackLocationsInitial = normalizeRackLocationsList(rackLocationsInitialRaw);
   const rackLocation = rackLocations[0] || "";
   const rackLocationOk = isValidRackLocations(rackLocations);
   const note = String(noteRaw).trim();
 
-  return { sku, title, asin, qty, moveQty, lowStockThreshold, lowStockThresholdOk: lowStockParsed.ok, skuAliases, skuAliasesRaw: String(skuAliasesRaw), productionArea, rackLocation, rackLocations, rackLocationOk, note, qtyRaw: String(qtyRaw), moveQtyRaw: String(moveQtyRaw), lowStockThresholdRaw: String(lowStockThresholdRaw), rackLocationRaw: Array.isArray(rackLocationsRaw) ? rackLocationsRaw.join(",") : String(rackLocationsRaw) };
+  return { sku, title, asin, qty, moveQty, lowStockThreshold, lowStockThresholdOk: lowStockParsed.ok, skuAliases, skuAliasesRaw: String(skuAliasesRaw), productionArea, rackLocation, rackLocations, rackLocationsInitial, rackLocationOk, note, qtyRaw: String(qtyRaw), moveQtyRaw: String(moveQtyRaw), lowStockThresholdRaw: String(lowStockThresholdRaw), rackLocationRaw: Array.isArray(rackLocationsRaw) ? rackLocationsRaw.join(",") : String(rackLocationsRaw), rackLocationsInitialRaw: String(rackLocationsInitialRaw) };
+}
+
+function sameNormalizedRackLocations(a, b){
+  const A = normalizeRackLocationsList(a).slice().sort((x,y)=>x.localeCompare(y));
+  const B = normalizeRackLocationsList(b).slice().sort((x,y)=>x.localeCompare(y));
+  if(A.length !== B.length) return false;
+  for(let i=0; i<A.length; i++){
+    if(A[i] !== B[i]) return false;
+  }
+  return true;
+}
+
+function readCurrentRackLocationsForSku(loc, sku){
+  try{
+    const item = getProductBySku(loc, sku);
+    return readRackLocationsFromDoc(item || {});
+  }catch(_e){
+    return [];
+  }
+}
+
+function rackLocationsChangedFromInitial(inputRackLocations, initialRackLocations){
+  return !sameNormalizedRackLocations(inputRackLocations, initialRackLocations);
 }
 
 async function updateProductProductionAreaImmediate(area){
@@ -10992,7 +11018,7 @@ async function saveProductFromDetails(){
 
       const oldSku = toSkuId(state.ui.productDetailsSku||"");
       clearPdFieldErrors();
-      const { sku, title, asin, qty, lowStockThreshold, lowStockThresholdOk, skuAliases, rackLocation, rackLocations, rackLocationOk, note } = readProductDetailsFields();
+      const { sku, title, asin, qty, lowStockThreshold, lowStockThresholdOk, skuAliases, rackLocation, rackLocations, rackLocationsInitial, rackLocationOk, note } = readProductDetailsFields();
 
       if(!oldSku){
         setPdFieldError("sku", "SKU non valido.");
@@ -11019,24 +11045,32 @@ async function saveProductFromDetails(){
         showToast("Errore", "Soglia sottoscorta non valida.", 2200);
         return;
       }
-      if(!rackLocationOk){
+      const currentRackLocations = readCurrentRackLocationsForSku(loc, oldSku);
+      const originalRackLocations = normalizeRackLocationsList(rackLocationsInitial).length ? normalizeRackLocationsList(rackLocationsInitial) : currentRackLocations;
+      const rackChanged = rackLocationsChangedFromInitial(rackLocations, originalRackLocations);
+      const rackLocationsForSave = rackChanged ? normalizeRackLocationsList(rackLocations) : originalRackLocations;
+
+      // Salvataggio anagrafico libero: nome/ASIN/SKU/soglia/note non devono essere bloccati
+      // dal fatto che il prodotto sia ancora "da ubicare". La validazione scaffale parte
+      // solo se l'utente cambia davvero l'ubicazione nel form.
+      if(rackChanged && !rackLocationOk){
         setPdFieldError("rackLocation", "Seleziona ubicazioni valide oppure lascia vuoto.");
         showToast("Errore", "Ubicazione scaffale non valida.", 2200);
         return;
       }
-      if(qty > 0 && Math.abs(qty) <= RACK_PALLET_CAPACITY && normalizeRackLocationsList(rackLocations).length > 1){
+      if(rackChanged && qty > 0 && Math.abs(qty) <= RACK_PALLET_CAPACITY && normalizeRackLocationsList(rackLocationsForSave).length > 1){
         setPdFieldError("rackLocation", `Più ubicazioni sono consentite solo sopra ${RACK_PALLET_CAPACITY} pz.`);
         showToast("Ubicazioni", `Sopra ${RACK_PALLET_CAPACITY} pz puoi assegnare più posti.`, 2600);
         return;
       }
-      if(!areRackLocationsAvailableForItem(rackLocations, oldSku, loc)){
-        const occ = normalizeRackLocationsList(rackLocations).map(code => rackLocationOccupantInfo(code, oldSku, loc)).find(Boolean);
+      if(rackChanged && !areRackLocationsAvailableForItem(rackLocationsForSave, oldSku, loc)){
+        const occ = normalizeRackLocationsList(rackLocationsForSave).map(code => rackLocationOccupantInfo(code, oldSku, loc)).find(Boolean);
         setPdFieldError("rackLocation", occ ? `Ubicazione già occupata da ${occ.sku} (${prettyLoc(occ.loc)}).` : "Ubicazione non disponibile.");
         showToast("Ubicazione occupata", "Scegli solo ubicazioni libere.", 2400);
         return;
       }
 
-      const finalRackLocations = sanitizeRackLocationsForQty(rackLocations, qty);
+      const finalRackLocations = sanitizeRackLocationsForQty(rackLocationsForSave, qty);
       const finalRackLocation = finalRackLocations[0] || "";
       const sameAsinSkus = asin ? skusWithSameAsin(asin, sku) : [];
       const finalSkuAliases = normalizeSkuAliases([...(Array.isArray(skuAliases) ? skuAliases : []), ...sameAsinSkus], sku);
@@ -11046,7 +11080,10 @@ async function saveProductFromDetails(){
         return;
       }
 
-      const okConfirm = confirm(`Confermi modifica cloud per ${oldSku}?\n\nDisponibile: ${qty} pz\nUbicazione: ${rackLocationsLabel(finalRackLocations)}\nASIN: ${asin || "non impostato"}\nSKU unificati: ${finalSkuAliases.length > 1 ? finalSkuAliases.join(", ") : "nessuno"}\n\nNota: gli SKU con lo stesso ASIN vengono trattati come stesso inventario fisico.`);
+      const rackConfirmLabel = finalRackLocations.length
+        ? `${rackLocationsLabel(finalRackLocations)}${rackChanged ? "" : " (invariata)"}`
+        : (rackChanged ? "non assegnata" : "non assegnata / invariata");
+      const okConfirm = confirm(`Confermi modifica cloud per ${oldSku}?\n\nDisponibile: ${qty} pz\nUbicazione: ${rackConfirmLabel}\nASIN: ${asin || "non impostato"}\nSKU unificati: ${finalSkuAliases.length > 1 ? finalSkuAliases.join(", ") : "nessuno"}\n\nNota: puoi salvare l’anagrafica anche se il prodotto è ancora da ubicare.`);
       if(!okConfirm) return;
 
       const api = state.firebase.api;
