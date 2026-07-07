@@ -6664,9 +6664,16 @@ const CONCAMARISE_RIFIUTI_2026_SEED = {
   "2026-12-30": ["CARTA"],
   "2026-12-31": ["SECCO", "PAP"],
 };
-const WASTE_CALENDAR_COLLECTION_PATH = ["amzInventory", "concamarise", "wasteCalendar"];
-const WASTE_CALENDAR_META_PATH = ["amzInventory", "concamarise", "wasteCalendarMeta", "concamarise2026"];
-const WASTE_CALENDAR_VERSION = "esa-com-concamarise-2026-v2-cloud-only";
+// Calendario rifiuti: CLOUD-ONLY.
+// Path scelta: amzInventoryProducts/{wasteCalendar_concamarise_YYYY-MM-DD}
+// Motivo: e' la collezione gia' letta dal kiosk; la vecchia path
+// amzInventory/concamarise/wasteCalendar veniva bloccata dalle rules.
+// La UI NON usa mai CONCAMARISE_RIFIUTI_2026_SEED come fallback: il seed serve solo
+// per trascrivere il calendario in Firestore se le regole consentono la scrittura.
+const WASTE_CALENDAR_COLLECTION_PATH = ["amzInventoryProducts"];
+const WASTE_CALENDAR_DOC_PREFIX = "wasteCalendar_concamarise_";
+const WASTE_CALENDAR_META_DOC_ID = "wasteCalendarMeta_concamarise2026";
+const WASTE_CALENDAR_VERSION = "esa-com-concamarise-2026-v3-amzInventoryProducts-cloud-only";
 let CLOUD_WASTE_CALENDAR = {};          // dateKey -> documento Firestore normalizzato
 let CLOUD_WASTE_CALENDAR_READY = false;
 let _wasteCalendarSeedStarted = false;
@@ -6706,7 +6713,11 @@ function ubiTrashTypesLabel(types){
 }
 function normalizeWasteCalendarDoc(id, data){
   const d=data||{};
-  const dateKey=String(d.dateKey||d.date||id||'').slice(0,10);
+  const docId=String(id||'');
+  const isWasteDoc = d.docType==='wasteCalendar' || d.kind==='wasteCalendar' || docId.startsWith(WASTE_CALENDAR_DOC_PREFIX);
+  if(!isWasteDoc) return null;
+  const fromId = docId.startsWith(WASTE_CALENDAR_DOC_PREFIX) ? docId.slice(WASTE_CALENDAR_DOC_PREFIX.length) : '';
+  const dateKey=String(d.dateKey||d.date||fromId||'').slice(0,10);
   const types=Array.isArray(d.types) ? d.types.map(x=>String(x||'').trim()).filter(Boolean) : [];
   if(!/^\d{4}-\d{2}-\d{2}$/.test(dateKey) || !types.length) return null;
   if(d.active===false || d.enabled===false) return null;
@@ -6730,6 +6741,8 @@ function ubiCloudTrashTomorrow(now=Date.now()){
 function wasteCalendarDocPayload(dateKey, types){
   const t = (Array.isArray(types)?types:[]).map(x=>String(x||'').trim()).filter(Boolean);
   return {
+    docType: 'wasteCalendar',
+    kind: 'wasteCalendar',
     dateKey,
     date: dateKey,
     comune: 'CONCAMARISE',
@@ -6751,19 +6764,6 @@ async function seedConcamariseWasteCalendarToCloud(fs, db){
   if(_wasteCalendarSeedStarted || _wasteCalendarSeedDone) return;
   _wasteCalendarSeedStarted = true;
   try{
-    const metaRef = fs.doc(db, ...WASTE_CALENDAR_META_PATH);
-    const expectedCount = Object.keys(CONCAMARISE_RIFIUTI_2026_SEED).length;
-    try{
-      const metaSnap = await fs.getDoc(metaRef);
-      const meta = metaSnap.exists() ? (metaSnap.data()||{}) : {};
-      if(meta.version === WASTE_CALENDAR_VERSION && Number(meta.count||0) === expectedCount){
-        _wasteCalendarSeedDone = true;
-        return;
-      }
-    }catch(e){
-      // Se la lettura meta e' negata provo comunque a scrivere i giorni: la UI resta cloud-only.
-      console.warn('wasteCalendar meta read', e && e.code);
-    }
     const entries = Object.entries(CONCAMARISE_RIFIUTI_2026_SEED).sort(([a],[b])=>a.localeCompare(b));
     let batch = fs.writeBatch(db);
     let ops = 0;
@@ -6773,14 +6773,17 @@ async function seedConcamariseWasteCalendarToCloud(fs, db){
       ops = 0;
     };
     for(const [dateKey, types] of entries){
-      const ref = fs.doc(db, ...WASTE_CALENDAR_COLLECTION_PATH, dateKey);
+      const ref = fs.doc(db, ...WASTE_CALENDAR_COLLECTION_PATH, WASTE_CALENDAR_DOC_PREFIX + dateKey);
       batch.set(ref, wasteCalendarDocPayload(dateKey, types), { merge:true });
       ops++;
       if(ops>=450) await commit();
     }
+    const metaRef = fs.doc(db, ...WASTE_CALENDAR_COLLECTION_PATH, WASTE_CALENDAR_META_DOC_ID);
     batch.set(metaRef, {
+      docType: 'wasteCalendarMeta',
+      kind: 'wasteCalendarMeta',
       version: WASTE_CALENDAR_VERSION,
-      count: expectedCount,
+      count: entries.length,
       comune: 'CONCAMARISE',
       provider: 'ESA-Com',
       sourceFile: 'CONCAMARISE_ESACOM 2026_web.pdf',
@@ -6792,33 +6795,16 @@ async function seedConcamariseWasteCalendarToCloud(fs, db){
     _wasteCalendarSeedDone = true;
   }catch(e){
     _wasteCalendarSeedStarted = false;
-    console.warn('wasteCalendar seed non riuscito', e && (e.code || e.message || e));
+    console.warn('wasteCalendar cloud seed non riuscito', e && (e.code || e.message || e));
   }
 }
+
 function startWasteCalendarRealtime(fs, db){
-  try{
-    const col = fs.collection(db, ...WASTE_CALENDAR_COLLECTION_PATH);
-    fs.onSnapshot(col, (snap)=>{
-      const map={};
-      snap.forEach(ds=>{
-        const d=normalizeWasteCalendarDoc(ds.id, ds.data()||{});
-        if(d) map[d.dateKey]=d;
-      });
-      CLOUD_WASTE_CALENDAR = map;
-      CLOUD_WASTE_CALENDAR_READY = true;
-      renderUbiTrashAlert();
-    }, (err)=>{
-      CLOUD_WASTE_CALENDAR_READY = false;
-      CLOUD_WASTE_CALENDAR = {};
-      console.warn('wasteCalendar listener', err && err.code);
-      renderUbiTrashAlert();
-    });
-  }catch(e){
-    console.warn('listener wasteCalendar non attivo', e);
-  }
-  // Trascrizione cloud best-effort. Se le regole bloccano la scrittura, non c'e' fallback locale.
+  // Nessun listener separato su path nuove: il calendario viene letto dallo snapshot
+  // gia' autorizzato di amzInventoryProducts. Qui faccio solo la trascrizione cloud.
   seedConcamariseWasteCalendarToCloud(fs, db);
 }
+
 function renderUbiTrashAlert(){
   const el=document.getElementById('ckTrashAlert'); const sub=document.getElementById('ckTrashSub');
   if(!el||!sub) return;
@@ -7803,8 +7789,11 @@ function startInventoryRealtime(fs, db){
     const perCode = {};
     const codeToSku = {};      // codice ubicazione -> sku (per multi-ubicazione)
     const skuAllocs = {};      // sku -> [{code, qty, title}]
+    const wasteMap = {};       // cloud-only: docType wasteCalendar letti da amzInventoryProducts
     snap.forEach(docSnap=>{
       const d = docSnap.data() || {};
+      const wasteDoc = normalizeWasteCalendarDoc(docSnap.id, d);
+      if(wasteDoc){ wasteMap[wasteDoc.dateKey] = wasteDoc; return; }
       const allocs = Array.isArray(d.rackAllocations) ? d.rackAllocations : [];
       const sku = d.sku || docSnap.id;
       const title = d.title || d.name || d.sku || docSnap.id;
@@ -7821,6 +7810,9 @@ function startInventoryRealtime(fs, db){
     });
     CODE_TO_SKU = codeToSku;
     SKU_ALLOCS = skuAllocs;
+    CLOUD_WASTE_CALENDAR = wasteMap;
+    CLOUD_WASTE_CALENDAR_READY = true;
+    renderUbiTrashAlert();
     let changed=false;
     for(const code in VANI_MAP){
       const data = perCode[code];
