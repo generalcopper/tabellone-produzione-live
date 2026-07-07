@@ -11265,7 +11265,7 @@ function startAllLogs(modeOrOpts = "full"){
     }
 
     function shopifyFbmOrderRowsFromItem(it, loc){
-      const rows = [];
+      let rows = [];
       const seen = new Set();
       try{
         const sku = toSkuId(it?.sku || it?.id || "");
@@ -11295,9 +11295,11 @@ function startAllLogs(modeOrOpts = "full"){
           const customerName = shopifyFbmCustomerNameFromSource(source, it);
           const title = shopifyFbmTitleFromSource(source, {}, sku) || titleFallback;
           const orderLabel = orderName || orderId || "Ordine Shopify";
-          const orderKey = [loc, sku, orderName || "", orderId || "", customerName || "", qty, title].join("::");
-          if(seen.has(orderKey)) return null;
-          seen.add(orderKey);
+          const lineId = shopifyFbmFirstText(source, ["lineItemId", "line_item_id", "lineId", "line_id", "admin_graphql_api_id", "adminGraphqlApiId", "id", "variantId", "variant_id"]);
+          const fallbackOrderKey = [loc, "inventory_source", sku, lineId || "", orderName || "", orderId || "", customerName || "", qty, title].join("::");
+          const rowKey = (orderName || orderId) ? [loc, "order", orderName || orderId, sku, lineId || "", qty, title].join("::") : fallbackOrderKey;
+          if(seen.has(rowKey)) return null;
+          seen.add(rowKey);
           return {
             loc,
             sku,
@@ -11306,6 +11308,8 @@ function startAllLogs(modeOrOpts = "full"){
             orderId,
             orderName,
             orderLabel,
+            orderKey: (orderName || orderId) ? "" : fallbackOrderKey,
+            lineKey: lineId || sku,
             customerName,
             positions,
             codes,
@@ -11323,24 +11327,43 @@ function startAllLogs(modeOrOpts = "full"){
         }
 
         // Fallback controllato: alcuni sync Shopify scrivono la prenotazione sullo SKU
-        // ma non salvano ancora le righe ordine dettagliate. In quel caso mostriamo lo SKU
-        // da preparare senza agganciare riferimenti ordine potenzialmente sbagliati.
-        if(!rows.length && isSafeShopifyFbmItemLevelFallback(it)){
+        // ma non salvano ancora tutte le righe ordine dettagliate. La lista ordini NON deve
+        // mai accorpare più ordini in un unico "Shopify FBM in sospeso": ogni fallback ha
+        // una chiave stabile e separata, così i widget SKU restano aggregati ma la lista sotto no.
+        if(rows.length && pending > 0){
+          let remaining = Math.round(pending);
+          const capped = [];
+          for(const row of rows){
+            if(remaining <= 0) break;
+            const q = Math.max(0, Math.round(Number(row.qty || 0) || 0));
+            if(!q) continue;
+            const useQty = Math.min(q, remaining);
+            capped.push({ ...row, qty: useQty });
+            remaining -= useQty;
+          }
+          rows = capped;
+        }
+
+        const alreadyShownQty = rows.reduce((sum,row)=> sum + (Math.max(0, Math.round(Number(row?.qty || 0) || 0))), 0);
+        const missingQty = Math.max(0, Math.round(pending) - alreadyShownQty);
+        if(missingQty > 0 && isSafeShopifyFbmItemLevelFallback(it)){
           const fbInfo = shopifyFbmFallbackOrderInfoFromItem(it);
           const fallbackOrderName = squashWhitespace(fbInfo.orderName || "");
           const fallbackOrderId = squashWhitespace(fbInfo.orderId || "");
           const fallbackCustomer = squashWhitespace(fbInfo.customerName || "");
-          const fallbackKey = [loc, sku, "shopify_fbm_item_pending", fallbackOrderName, fallbackOrderId, pending, titleFallback].join("::");
+          const fallbackKey = [loc, sku, "shopify_fbm_item_pending", fallbackOrderName, fallbackOrderId, missingQty, firstCode || "", titleFallback].join("::");
           if(!seen.has(fallbackKey)){
             seen.add(fallbackKey);
             rows.push({
               loc,
               sku,
               title: titleFallback,
-              qty: Math.round(pending),
+              qty: Math.round(missingQty),
               orderId: fallbackOrderId,
               orderName: fallbackOrderName,
               orderLabel: fallbackOrderName || (fallbackOrderId ? `Ordine ${fallbackOrderId}` : "Shopify FBM in sospeso"),
+              orderKey: fallbackOrderName || fallbackOrderId ? "" : fallbackKey,
+              lineKey: sku,
               customerName: fallbackCustomer || "Dettaglio cliente non disponibile",
               positions,
               codes,
@@ -11365,7 +11388,7 @@ function startAllLogs(modeOrOpts = "full"){
           if(!isShopifyFbmPendingInventoryItem(it)) continue;
           const part = shopifyFbmOrderRowsFromItem(it, loc);
           for(const row of part){
-            const key = [row.loc, row.sku, row.orderName || "", row.orderId || "", row.customerName || "", row.qty, row.title].join("::");
+            const key = [row.loc, row.orderKey || "", row.lineKey || "", row.sku, row.orderName || "", row.orderId || "", row.customerName || "", row.qty, row.title].join("::");
             if(seen.has(key)) continue;
             seen.add(key);
             rows.push(row);
@@ -11414,8 +11437,10 @@ function startAllLogs(modeOrOpts = "full"){
         const orderName = clean(row.orderName || "");
         const orderId = clean(row.orderId || "");
         const hasOrder = !!(orderName || orderId);
-        const orderKeyBase = orderName || orderId || "FBM_SENZA_DETTAGLIO_ORDINE";
-        const orderKey = hasOrder ? `order::${orderKeyBase}` : `pending::${clean(row.loc || "concamarise")}`;
+        const explicitFallbackKey = clean(row.orderKey || row.groupKey || row.flowId || row.lineKey || "");
+        const fallbackKeyBase = explicitFallbackKey || [clean(row.loc || "concamarise"), sku, clean(row.title || ""), qty, clean(row.customerName || ""), normalizeRackLocation(row.firstCode || ""), String(Number(row.latestAt || 0) || 0)].join("::");
+        const orderKeyBase = orderName || orderId || fallbackKeyBase || "FBM_SENZA_DETTAGLIO_ORDINE";
+        const orderKey = hasOrder ? `order::${orderKeyBase}` : `pending::${orderKeyBase}`;
         const orderLabel = clean(row.orderLabel || orderName || orderId || "Shopify FBM in sospeso");
         const looksLikeOrderNumber = (v)=> /^#{1,3}\s*\d+\b/i.test(clean(v)) || /^ORD[-\s#]*\d+\b/i.test(clean(v));
         const orderNumber = orderName || (looksLikeOrderNumber(orderLabel) ? orderLabel : "") || "";
@@ -11602,6 +11627,135 @@ function startAllLogs(modeOrOpts = "full"){
       });
     }
 
+    function shopifyFbmOrderLogStatus(){
+      try{
+        let loaded = true;
+        let loading = false;
+        for(const loc of ["concamarise", "cerea"]){
+          const lg = state.logs?.[loc] || {};
+          const mode = String(lg.mode || lg.meta?.mode || "");
+          const modeOk = (mode === "fbm" || mode === "full");
+          if(lg.loading && modeOk) loading = true;
+          if(!(lg.meta?.loaded && modeOk)) loaded = false;
+        }
+        return { loaded, loading };
+      }catch(_e){
+        return { loaded:false, loading:false };
+      }
+    }
+
+    function ensureShopifyFbmOrderLogsStarted(){
+      try{
+        if(!state.firebase.ok || !state.user?.isWhitelisted) return shopifyFbmOrderLogStatus();
+        const st = shopifyFbmOrderLogStatus();
+        if(st.loaded || st.loading) return st;
+        startLogsFor("concamarise", { mode:"fbm", staleMs:45000 });
+        startLogsFor("cerea", { mode:"fbm", staleMs:45000 });
+        return shopifyFbmOrderLogStatus();
+      }catch(_e){
+        return shopifyFbmOrderLogStatus();
+      }
+    }
+
+    function shopifyFbmActiveOrderFlowsFromLogs(){
+      try{
+        const st = shopifyFbmOrderLogStatus();
+        if(!st.loaded) return [];
+        return getPickingCandidateFlows()
+          .filter(flow => isShopifyFbmFlow(flow))
+          .filter(flow => !pickingFlowStats(flow).done);
+      }catch(_e){
+        return [];
+      }
+    }
+
+    function shopifyFbmOrderRowsFromFlows(flows){
+      const rows = [];
+      const seen = new Set();
+      try{
+        for(const flow0 of (Array.isArray(flows) ? flows : [])){
+          const flow = flow0 || {};
+          if(!isShopifyFbmFlow(flow)) continue;
+          if(pickingFlowStats(flow).done) continue;
+          const loc = (flow.location === "cerea" || flow.location === "concamarise") ? flow.location : "concamarise";
+          const flowId = String(flow.id || flow.workflowId || "").trim();
+          const shop = (flow.shopify && typeof flow.shopify === "object") ? flow.shopify : {};
+          const displayName = squashWhitespace(flowDisplayName(flow) || "");
+
+          let orderId = squashWhitespace(
+            shopifyFbmFirstText(shop, ["orderId", "shopifyOrderId", "admin_graphql_api_id", "adminGraphqlApiId", "id", "legacyResourceId", "order_id"]) ||
+            shopifyFbmFirstText(flow, ["shopifyOrderId", "orderId", "admin_graphql_api_id", "adminGraphqlApiId", "legacyResourceId", "order_id"]) ||
+            flowId
+          );
+          let orderName = squashWhitespace(
+            shopifyFbmFirstText(shop, ["name", "orderName", "shopifyOrderName", "orderNumber", "order_number", "orderLabel", "numeroOrdine", "numero_ordine"]) ||
+            shopifyFbmFirstText(flow, ["shopifyOrderName", "orderName", "orderNumber", "order_number", "orderLabel", "numeroOrdine", "numero_ordine"]) ||
+            ""
+          );
+          let orderLabel = squashWhitespace(orderName || displayName || orderId || "Ordine Shopify");
+          if(!orderName && orderLabel){
+            const stripped = orderLabel.replace(/^shopify\s*/i, "").trim();
+            if(/^#{0,3}\s*\d+\b/.test(stripped) || /^ORD[-\s#]*\d+\b/i.test(stripped)) orderName = stripped;
+          }
+          if(!orderId && flowId) orderId = flowId;
+
+          const customerName = squashWhitespace(
+            shopifyFbmCustomerNameFromSource(shop, flow) ||
+            shopifyFbmFirstText(flow, ["customerName", "shopifyCustomerName", "customerDisplayName", "cliente", "customerEmail"]) ||
+            ""
+          );
+          const flowTs = pickingFlowStableBaseTs(flow) || Number(flow.appliedAtClient || flow.createdAtClient || 0) || flowLogTimestamp(flow) || 0;
+          const lines = Array.isArray(flow.lines) ? flow.lines : [];
+          lines.forEach((line0, idx)=>{
+            const line = line0 || {};
+            const sku = toSkuId(line.sku || line.SKU || "");
+            const qty = Math.abs(parseQty(line.qty || line.quantity || line.qta || 0) || 0);
+            if(!sku || qty <= 0) return;
+            if(isPickingLinePicked(flow, sku)) return;
+            const title = pickingLineTitle(line, flow) || sku;
+            const positions = pickingLinePositionParts(flow, sku).map(p=>({
+              code: normalizeRackLocation(p?.code || ""),
+              qty: Number.isFinite(Number(p?.qty)) ? Math.round(Number(p.qty)) : 0,
+              lot: p?.lot || "",
+              lotLabel: p?.lotLabel || ""
+            })).filter(p=>p.code);
+            const codes = positions.map(p=>p.code).filter(Boolean);
+            const firstCode = codes[0] || "";
+            const lineId = shopifyFbmFirstText(line, ["lineItemId", "line_item_id", "lineId", "line_id", "admin_graphql_api_id", "adminGraphqlApiId", "id", "variantId", "variant_id"]) || String(idx);
+            const rowKey = ["flow", loc, flowId || orderId || orderName || orderLabel, lineId, sku, qty].join("::");
+            if(seen.has(rowKey)) return;
+            seen.add(rowKey);
+            rows.push({
+              loc,
+              sku,
+              title,
+              qty: Math.round(qty),
+              orderId,
+              orderName,
+              orderLabel,
+              orderKey: flowId ? `flow::${flowId}` : (orderName || orderId ? "" : rowKey),
+              lineKey: sku,
+              flowId,
+              customerName,
+              positions,
+              codes,
+              firstCode,
+              latestAt: flowTs,
+              source: "flow_order"
+            });
+          });
+        }
+      }catch(err){ console.warn("shopify fbm flow order rows", err); }
+      return rows.sort((a,b)=>{
+        const oa = String(a.orderName || a.orderId || a.orderLabel || "");
+        const ob = String(b.orderName || b.orderId || b.orderLabel || "");
+        if(oa && ob && oa !== ob) return oa.localeCompare(ob, "it", { numeric:true, sensitivity:"base" });
+        if(oa && !ob) return -1;
+        if(!oa && ob) return 1;
+        return String(a.sku || "").localeCompare(String(b.sku || ""));
+      });
+    }
+
     function updateFbmPreviewFromInventory(source="inventory_pending"){
       try{
         const groups = shopifyFbmInventoryGroups();
@@ -11615,7 +11769,10 @@ function startAllLogs(modeOrOpts = "full"){
     function renderFastFbmPickingFromInventory(box, list, count, hint, btnPickAll){
       try{
         const groups = updateFbmPreviewFromInventory("inventory_fbm_render");
-        const orderRows = shopifyFbmInventoryOrderRows();
+        const orderLogStatus = ensureShopifyFbmOrderLogsStarted();
+        const flowOrderRows = orderLogStatus.loaded ? shopifyFbmOrderRowsFromFlows(shopifyFbmActiveOrderFlowsFromLogs()) : [];
+        const orderRows = flowOrderRows.length ? flowOrderRows : (orderLogStatus.loading ? [] : shopifyFbmInventoryOrderRows());
+        const orderRowsSource = flowOrderRows.length ? "flow_orders" : (orderLogStatus.loading ? "loading_orders" : "inventory_fallback");
         const pickingTitleEl = box?.querySelector?.(".miniTitle");
         const pickingSubEl = box?.querySelector?.(".miniSub");
         if(pickingTitleEl) pickingTitleEl.textContent = "Picking FBM";
@@ -11634,7 +11791,7 @@ function startAllLogs(modeOrOpts = "full"){
 
         if(!state.inventory?.cerea?.meta?.loaded || !state.inventory?.concamarise?.meta?.loaded){
           if(list) list.innerHTML = `<div class="pickingBucketEmpty">Caricamento inventario cloud…</div>`;
-          if(hint) hint.textContent = "FBM legge direttamente pendingPickQty/reservedQty dall'inventario, senza scaricare i log.";
+          if(hint) hint.textContent = "Caricamento inventario cloud per widget SKU e lista ordini FBM.";
           renderHomePickingHistoryBox();
           return true;
         }
@@ -11689,13 +11846,16 @@ function startAllLogs(modeOrOpts = "full"){
         const ordersHtml = ()=>{
           const orderGroups = shopifyFbmInventoryOrdersGrouped(orderRows);
           if(!orderGroups.length){
+            const emptyText = orderRowsSource === "loading_orders"
+              ? "Caricamento lista ordini Shopify FBM dal cloud…"
+              : "Il backend ha scritto il totale SKU, ma non ha ancora esposto righe ordine/cliente separate.";
             return `
               <div class="fbmSection orders">
                 <div class="fbmSectionHead">
                   <span class="fbmSectionTitle">Lista ordini</span>
                   <span class="fbmSectionRule"></span>
                 </div>
-                <div class="fbmOrderEmpty">Il backend ha scritto il totale SKU, ma non ha ancora esposto righe ordine/cliente separate.</div>
+                <div class="fbmOrderEmpty">${escapeHtml(emptyText)}</div>
               </div>`;
           }
 
@@ -15602,8 +15762,7 @@ function currentInv(){
       state.ui.pickingHomeView = (next === "located" || next === "pickingFbm" || next === "pickingFba" || next === "pickingHistory") ? next : "noLocation";
       const needsFlowLogs = (state.ui.pickingHomeView === "pickingFba" || state.ui.pickingHomeView === "pickingHistory");
       if(state.ui.pickingHomeView === "pickingFbm"){
-        // FBM allineato al backend schedulato: il frontend legge i pending dall'inventario,
-        // non apre più letture /logs per mostrare la lista.
+        // FBM: widget SKU immediati da inventario; lista ordini caricata dai flussi Shopify FBM quando si apre la sezione.
         updateFbmPreviewFromInventory("menu_fbm_inventory");
         schedulePickingPreviewCounts("menu_pickingFbm", { delay: 250, inventoryOnly:true });
       }else if(needsFlowLogs){
@@ -16943,7 +17102,12 @@ Confermandolo, la transaction cloud scaricherà comunque la quantità richiesta 
 
       const currentPickingView = pickingHomeView();
       const showFbaPicking = currentPickingView === "pickingFba";
-      const showFbmPicking = !showFbaPicking;
+      const showFbmPicking = currentPickingView === "pickingFbm";
+      if(!showFbmPicking && !showFbaPicking){
+        if(btnPickAll){ btnPickAll.disabled = true; btnPickAll.textContent = "Preleva tutti FBA/PDF"; btnPickAll.title = ""; btnPickAll.style.display = "none"; }
+        renderHomePickingHistoryBox();
+        return;
+      }
       if(showFbmPicking){
         if(renderFastFbmPickingFromInventory(box, list, count, hint, btnPickAll)) return;
       }
