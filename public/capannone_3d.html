@@ -1318,6 +1318,19 @@
     border-top:1px solid rgba(255,255,255,.10) !important;
     padding:clamp(10px,1.4vh,16px) clamp(20px,2vw,34px) !important;
   }
+
+  /* Alert operativi in coda: Full truckload, Cerea e rifiuti non devono sovrapporsi.
+     Restano nella fascia hero, ma ognuno occupa una riga reale della grid. */
+  #cockpit #ckPageAzienda .ck-amzalert{
+    grid-area:auto !important;
+    grid-column:1 / -1 !important;
+    justify-self:stretch !important;
+    align-self:stretch !important;
+  }
+  #cockpit #ckPageAzienda .ck-amzalert[hidden]{display:none !important;}
+  #cockpit #ckPageAzienda .ck-amzalert:not([hidden]){display:flex !important;}
+  #cockpit #ckPageAzienda .ck-amzalert:not([hidden]) + .ck-amzalert:not([hidden]){margin-top:0 !important;}
+  #cockpit #ckPageAzienda .ck-amzalert--trash .ck-amzalert-txt{white-space:normal !important; overflow:visible !important; text-overflow:clip !important; max-height:none !important; text-transform:none !important;}
 </style>
 </head>
 <body>
@@ -5832,7 +5845,7 @@ function tick(now){
   updateTour(now);
   updateIdle(now);
   updateCockpit(now);
-  if(!tick._iaT || now-tick._iaT>5000){ tick._iaT=now; refreshIncomingAlert(); refreshReadyAlert(); }
+  if(!tick._iaT || now-tick._iaT>5000){ tick._iaT=now; refreshIncomingAlert(); refreshReadyAlert(); try{ renderUbiTrashAlert(); }catch(_){ } }
   if(!tick._slT || now-tick._slT>8000){ tick._slT=now; try{ if(typeof LogFeed!=='undefined') LogFeed.refresh(); }catch(_){} }
   // durante un "Trova" (vano selezionato o tour cinematografico in corso) nascondo la striscia
   // log così non copre la vista 3D; lo stato dei log resta intatto e ricompare poi senza glitch.
@@ -6430,37 +6443,126 @@ function ubiNotifIcon(type, priority){
   const t=String(type||'').toLowerCase();
   if(t.includes('fbm')) return '📦'; if(t.includes('fba')) return '🟠'; if(t.includes('sync_error')) return '⚠️';
   if(t.includes('sync')) return '✓'; if(t.includes('stock')) return '📉'; if(t.includes('truck')||t.includes('cerea')) return '🚛';
-  if(t.includes('trash')||t.includes('waste')||t.includes('immondizia')) return '🗑️'; if(priority==='high') return '⚡'; return '🔔';
+  if(t.includes('trash')||t.includes('waste')||t.includes('immondizia')||t.includes('rifiut')||t.includes('spazzatura')) return '🗑️'; if(priority==='high') return '⚡'; return '🔔';
+}
+function ubiTrashTextBlob(n){
+  try{
+    const x=n||{};
+    const p=(x.payload&&typeof x.payload==='object')?x.payload:{};
+    const vals=[];
+    const add=v=>{ if(v!==undefined && v!==null && v!=='') vals.push(String(v)); };
+    ['type','reason','event','kind','category','title','text','message','lastText','audioKey','voiceKey','notificationKey','key','status','state','collectionDate','collectionDateKey','wasteKind','trashKind','wasteType','trashType','wasteCategory','trashCategory'].forEach(k=>add(x[k]));
+    ['type','reason','event','kind','category','title','text','message','lastText','audioKey','voiceKey','collectionDate','collectionDateKey','wasteKind','trashKind','wasteType','trashType','wasteCategory','trashCategory','whenLabel','windowLabel','label'].forEach(k=>add(p[k]));
+    try{ add(JSON.stringify(p)); }catch(_){ }
+    return vals.join(' ').toLowerCase();
+  }catch(_){ return ''; }
 }
 function ubiTrashKindLabel(raw){
   const k=String(raw||'').toLowerCase();
-  if(k.includes('plastic')||k.includes('pla')) return 'plastica e lattine';
-  if(k.includes('secco')) return 'secco';
-  if(k.includes('carta')) return 'carta e cartone';
-  return String(raw||'raccolta');
+  if(k.includes('plastic')||k.includes('plastica')||k.includes('lattin')||k.includes('metall')) return 'plastica e lattine';
+  if(k.includes('secco')||k.includes('indifferenziat')) return 'secco';
+  if(k.includes('carta')||k.includes('cartone')||k.includes('paper')) return 'carta e cartone';
+  if(k.includes('umido')||k.includes('organico')||k.includes('organic')) return 'umido';
+  if(k.includes('vetro')||k.includes('glass')) return 'vetro';
+  return 'rifiuti';
 }
 function ubiIsTrashNotification(n){
-  const t=String(n&& (n.type||n.reason||'') || '').toLowerCase();
-  return t.includes('trash') || t.includes('waste') || t.includes('immondizia') || t.includes('rifiut');
+  const t=ubiTrashTextBlob(n);
+  if(!t) return false;
+  return /\b(trash|waste|immondizia|rifiut\w*|spazzatura|garbage|secco|plastica|plastic\w*|carta|cartone|lattin\w*|umido|organico|vetro)\b/i.test(t);
+}
+function ubiNotifMs(v){
+  try{
+    if(typeof _incomingMs==='function') return _incomingMs(v);
+  }catch(_){ }
+  if(!v) return 0;
+  if(typeof v==='number') return Number.isFinite(v) ? v : 0;
+  if(typeof v==='string'){
+    const n=Number(v); if(Number.isFinite(n) && n>0) return n;
+    const t=Date.parse(v); return Number.isFinite(t) ? t : 0;
+  }
+  if(v instanceof Date) return v.getTime();
+  if(typeof v.toMillis==='function') return Number(v.toMillis())||0;
+  if(v.seconds!=null) return Number(v.seconds)*1000 + Math.floor(Number(v.nanoseconds||0)/1e6);
+  return 0;
+}
+function ubiTrashEventMs(n){
+  const x=n||{}, p=(x.payload&&typeof x.payload==='object')?x.payload:{};
+  const keys=['notifyAtMs','alertAtMs','updatedAtMs','createdAtMs','scheduledForMs','dueAtMs','createdAtClient','updatedAtClient','createdAt','updatedAt'];
+  for(const k of keys){ const ms=ubiNotifMs(x[k] ?? p[k]); if(ms>0) return ms; }
+  return 0;
+}
+function ubiLocalDayStartMs(v){
+  const d = (v instanceof Date) ? v : new Date(Number(v)||0);
+  if(!Number.isFinite(d.getTime())) return 0;
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+}
+function ubiTomorrowStartMs(now=Date.now()){
+  const d=new Date(ubiLocalDayStartMs(now));
+  d.setDate(d.getDate()+1);
+  return d.getTime();
+}
+function ubiParseTrashDateValue(v){
+  if(v===undefined || v===null || v==='') return 0;
+  if(typeof v==='number') return Number.isFinite(v) && v>0 ? ubiLocalDayStartMs(v) : 0;
+  if(v instanceof Date) return ubiLocalDayStartMs(v.getTime());
+  if(typeof v==='object'){
+    if(typeof v.toMillis==='function') return ubiLocalDayStartMs(Number(v.toMillis())||0);
+    if(v.seconds!=null) return ubiLocalDayStartMs(Number(v.seconds)*1000 + Math.floor(Number(v.nanoseconds||0)/1e6));
+  }
+  const s=String(v).trim();
+  let m=s.match(/^(\d{4})[-\/.](\d{1,2})[-\/.](\d{1,2})(?:[T\s].*)?$/);
+  if(m) return new Date(Number(m[1]), Number(m[2])-1, Number(m[3])).getTime();
+  m=s.match(/^(\d{1,2})[-\/.](\d{1,2})[-\/.](\d{4})$/);
+  if(m) return new Date(Number(m[3]), Number(m[2])-1, Number(m[1])).getTime();
+  m=s.match(/^(\d{4})(\d{2})(\d{2})$/);
+  if(m) return new Date(Number(m[1]), Number(m[2])-1, Number(m[3])).getTime();
+  return 0; // niente parsing libero/fallback: serve una data raccolta esplicita
+}
+function ubiTrashCollectionDayMs(n){
+  const x=n||{}, p=(x.payload&&typeof x.payload==='object')?x.payload:{};
+  const keys=['collectionDate','collectionDateKey','pickupDate','pickupDateKey','wasteDate','trashDate','scheduledDate','scheduledForDate','serviceDate','targetDate','date'];
+  for(const k of keys){ const ms=ubiParseTrashDateValue(x[k]); if(ms>0) return ms; }
+  for(const k of keys){ const ms=ubiParseTrashDateValue(p[k]); if(ms>0) return ms; }
+  const sched=(p.schedule&&typeof p.schedule==='object')?p.schedule:((x.schedule&&typeof x.schedule==='object')?x.schedule:null);
+  if(sched){ for(const k of keys){ const ms=ubiParseTrashDateValue(sched[k]); if(ms>0) return ms; } }
+  return 0;
+}
+function ubiTrashExpiresAt(n){
+  const day=ubiTrashCollectionDayMs(n);
+  return day>0 ? day : 0; // scade a mezzanotte del giorno di raccolta: visibile solo il giorno prima
+}
+function ubiTrashActive(n, now=Date.now()){
+  if(!n || !ubiIsTrashNotification(n)) return false;
+  const x=n||{}, p=(x.payload&&typeof x.payload==='object')?x.payload:{};
+  if(x.active===false || p.active===false || x.visible===false || p.visible===false) return false;
+  const status=String(x.status||p.status||x.state||p.state||'active').trim().toLowerCase();
+  if(/^(resolved|closed|cancelled|canceled|done|dismissed|hidden|inactive|expired|archived|annullato|annullata|risolto|risolta|chiuso|chiusa)$/i.test(status)) return false;
+  const collectionDay=ubiTrashCollectionDayMs(n);
+  if(!collectionDay) return false;                 // nessun fallback su createdAt/updatedAt/testo
+  return collectionDay === ubiTomorrowStartMs(now); // SOLO il giorno prima della raccolta
+}
+function ubiTrashCandidateSort(a,b){
+  const ca=ubiTrashCollectionDayMs(a), cb=ubiTrashCollectionDayMs(b);
+  if(cb!==ca) return cb-ca;
+  return (ubiTrashEventMs(b)||0)-(ubiTrashEventMs(a)||0);
 }
 function renderUbiTrashAlert(){
   const el=document.getElementById('ckTrashAlert'); const sub=document.getElementById('ckTrashSub');
   if(!el||!sub) return;
   const now=Date.now();
-  const n=UBI_NOTIFICATIONS.find(x=>{
-    if(!ubiIsTrashNotification(x)) return false;
-    if(String(x.status||'active')==='resolved') return false;
-    const ms=Number(x.updatedAtMs||x.createdAtMs||0);
-    if(ms && now-ms>36*60*60*1000) return false;
-    const p=x.payload||{};
-    const kind=String(p.wasteKind||p.trashKind||x.wasteKind||x.trashKind||x.audioKey||x.text||'').toLowerCase();
-    return kind.includes('carta') || kind.includes('plastic') || kind.includes('pla') || kind.includes('secco');
-  });
+  const candidates=(Array.isArray(UBI_NOTIFICATIONS)?UBI_NOTIFICATIONS:[])
+    .filter(x=>ubiTrashActive(x, now))
+    .sort(ubiTrashCandidateSort);
+  const n=candidates[0]||null;
   if(!n){ el.hidden=true; el.setAttribute('aria-hidden','true'); return; }
-  const p=n.payload||{};
-  const kind=ubiTrashKindLabel(p.wasteKind||p.trashKind||n.wasteKind||n.trashKind||n.audioKey||n.text);
-  const date=String(p.collectionDate||n.collectionDate||'');
-  sub.textContent = `questa sera esporre ${kind}${date?` · raccolta ${date}`:''}`;
+  const p=(n.payload&&typeof n.payload==='object')?n.payload:{};
+  const blob=ubiTrashTextBlob(n);
+  const kind=ubiTrashKindLabel(p.wasteKind||p.trashKind||p.wasteType||p.trashType||p.wasteCategory||p.trashCategory||n.wasteKind||n.trashKind||n.audioKey||n.reason||n.type||n.text||blob);
+  const collectionDay=ubiTrashCollectionDayMs(n);
+  const dateTxt=collectionDay ? new Date(collectionDay).toLocaleDateString('it-IT',{weekday:'long',day:'2-digit',month:'long'}) : '';
+  const custom=String(p.displayText||p.fullText||p.message||p.text||p.lastText||n.displayText||n.fullText||n.message||n.text||n.lastText||'').trim();
+  sub.textContent = custom || `Domani raccolta ${kind}${dateTxt?` · ${dateTxt}`:''} · questa sera esposizione`;
   el.hidden=false; el.setAttribute('aria-hidden','false');
 }
 function renderUbiNotificationCenter(){
@@ -6482,7 +6584,7 @@ function renderUbiNotificationCenter(){
     const audio=n.audioKey||'';
     const dup=Number(n.duplicateCount||n.dedupeCount||0)||0;
     return `<div class="ubiNotifItem ${cls}">`+
-      `<div class="ubiNotifIcon">${ubiNotifIcon(type,pr)}</div>`+
+      `<div class="ubiNotifIcon">${ubiNotifIcon(type+' '+(n.audioKey||'')+' '+(n.text||''),pr)}</div>`+
       `<div class="ubiNotifMain"><div class="ubiNotifTop"><div class="ubiNotifName">${ubiNotifEscape(title)}</div><div class="ubiNotifTime">${ubiNotifTime(n.updatedAtMs||n.createdAtMs)}</div></div>`+
       `<div class="ubiNotifMsg">${ubiNotifEscape(text)}</div>`+
       `<div class="ubiNotifMeta"><span class="ubiNotifTag">${ubiNotifEscape(type)}</span>${key?`<span class="ubiNotifTag">key ${ubiNotifEscape(String(key).slice(0,32))}</span>`:''}${audio?`<span class="ubiNotifTag">audio ${ubiNotifEscape(audio)}</span>`:''}${dup?`<span class="ubiNotifTag">dup ${dup}</span>`:''}</div>`+
@@ -6513,12 +6615,45 @@ initUbiNotificationCenterUi();
 function ingestUbiNotificationsFromAgentDoc(data){
   try{
     const d = data || {};
-    const preview = Array.isArray(d.notificationsPreview) ? d.notificationsPreview : [];
-    const latest = (d.notificationLatest && typeof d.notificationLatest === "object") ? d.notificationLatest : null;
-    let arr = preview.slice();
-    if(!arr.length && latest) arr = [latest];
-    if(!arr.length) return;
-    UBI_NOTIFICATIONS = arr.map((x, i)=>({ id:x.id || x.notificationKey || `parent_${i}`, ...(x || {}) }));
+    const arr = [];
+    let sourceSeen = false;
+    const add = (v, source='parent')=>{
+      if(!v) return;
+      if(Array.isArray(v)){ v.forEach(x=>add(x, source)); return; }
+      if(typeof v !== 'object') return;
+      arr.push({ source, ...(v || {}) });
+    };
+    const pull = k=>{ if(Object.prototype.hasOwnProperty.call(d,k)) sourceSeen = true; add(d[k], k); };
+    ['notificationsPreview','notificationPreview','notifications','recentNotifications','recent','notificationList','alertsPreview','alerts','activeNotifications'].forEach(pull);
+    ['notificationLatest','latestNotification','lastNotification','activeNotification','trashNotification','wasteNotification','currentTrashAlert','trashAlert','wasteAlert'].forEach(pull);
+    const ann = (d.announcement && typeof d.announcement === 'object') ? d.announcement : null;
+    if(ann && ubiIsTrashNotification(ann)){
+      add({
+        id: ann.notificationId || ann.notificationKey || ann.speakSeq || 'current_announcement',
+        type: ann.type || ann.reason || 'trash_reminder',
+        reason: ann.reason || ann.type || '',
+        title: ann.title || 'Promemoria rifiuti',
+        text: ann.text || ann.message || '',
+        message: ann.message || ann.text || '',
+        priority: ann.priority || 'high',
+        audioKey: ann.audioKey || ann.voiceKey || ann.event || '',
+        createdAtMs: Number(ann.createdAtMs || d.updatedAtMs || 0) || 0,
+        updatedAtMs: Number(ann.updatedAtMs || ann.createdAtMs || d.updatedAtMs || 0) || 0,
+        expiresAtMs: ann.expiresAtMs || ann.validUntilMs || ann.showUntilMs || '',
+        payload: ann.payload || {}
+      }, 'announcement');
+    }
+    if(!arr.length && !sourceSeen){
+      renderUbiNotificationCenter();
+      renderUbiTrashAlert();
+      return;
+    }
+    const byId = new Map();
+    arr.forEach((x,i)=>{
+      const id=String(x.id || x.notificationKey || x.key || x.speakSeq || `${x.type||x.reason||'notif'}_${x.createdAtMs||x.updatedAtMs||i}`);
+      byId.set(id, { id, ...(x || {}) });
+    });
+    UBI_NOTIFICATIONS = Array.from(byId.values()).sort((a,b)=>(ubiTrashEventMs(b)||0)-(ubiTrashEventMs(a)||0));
     renderUbiNotificationCenter();
     renderUbiTrashAlert();
   }catch(e){ console.warn('UBI notifications parent preview error', e); }
