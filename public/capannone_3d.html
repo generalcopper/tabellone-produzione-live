@@ -6799,9 +6799,42 @@ async function seedConcamariseWasteCalendarToCloud(fs, db){
 }
 
 function startWasteCalendarRealtime(fs, db){
-  // Nessun listener separato su path nuove: il calendario viene letto dallo snapshot
-  // gia' autorizzato di amzInventoryProducts. Qui faccio solo la trascrizione cloud.
-  seedConcamariseWasteCalendarToCloud(fs, db);
+  // COST SAFE: niente seed automatico e niente lettura della collection intera.
+  // Il kiosk legge SOLO il documento cloud di domani. Il seed manuale resta disponibile
+  // aggiungendo ?seedWasteCalendar=1 all'URL, così non genera centinaia di write a ogni avvio.
+  const allowSeed = /[?&]seedWasteCalendar=1\b/i.test(location.search);
+  if(allowSeed) seedConcamariseWasteCalendarToCloud(fs, db);
+
+  let _lastWasteKey = "";
+  async function loadTomorrowWasteCalendar(){
+    try{
+      const key = ubiDateKeyLocal(ubiTomorrowStartMs(Date.now()));
+      if(!key) return;
+      const ref = fs.doc(db, ...WASTE_CALENDAR_COLLECTION_PATH, WASTE_CALENDAR_DOC_PREFIX + key);
+      const snap = await fs.getDoc(ref);
+      const next = {};
+      if(snap.exists()){
+        const d = normalizeWasteCalendarDoc(snap.id, snap.data() || {});
+        if(d) next[d.dateKey] = d;
+      }
+      CLOUD_WASTE_CALENDAR = next;
+      CLOUD_WASTE_CALENDAR_READY = true;
+      _lastWasteKey = key;
+      renderUbiTrashAlert();
+    }catch(e){
+      CLOUD_WASTE_CALENDAR_READY = true;
+      console.warn('wasteCalendar doc domani non leggibile', e && (e.code || e.message || e));
+      renderUbiTrashAlert();
+    }
+  }
+
+  loadTomorrowWasteCalendar();
+  // Rilegge poco: il documento rilevante cambia solo quando cambia "domani" o se correggiamo il calendario cloud.
+  setInterval(()=>{
+    const key = ubiDateKeyLocal(ubiTomorrowStartMs(Date.now()));
+    if(key !== _lastWasteKey) loadTomorrowWasteCalendar();
+    else loadTomorrowWasteCalendar();
+  }, 60*60*1000);
 }
 
 function renderUbiTrashAlert(){
@@ -7696,6 +7729,20 @@ initKioskSettingsUi();
 })();
 
 // avvia il listener realtime sulle ubicazioni (dopo auth valida)
+/* ===== FIRESTORE COST MODE ==================================================
+   Per ridurre i costi del kiosk:
+   - restano realtime SOLO i documenti piccoli/operativi (Trova, Drone, UBI agent, alert);
+   - le collection grandi vengono lette con getDocs controllato, non con onSnapshot continuo.
+   Per tornare al comportamento legacy aggiungere ?fullRealtime=1 all'URL.
+============================================================================= */
+const FIRESTORE_KIOSK_COST_MODE = !/[?&](fullRealtime|legacyRealtime)=1\b/i.test(location.search);
+const FIRESTORE_PRODUCTS_REFRESH_MS = 60 * 60 * 1000;  // anagrafica/ubicazioni: 60 min
+const FIRESTORE_LOGS_REFRESH_MS = 5 * 60 * 1000;       // flussi picking: 5 min
+const FIRESTORE_ITEMS_REFRESH_MS = 60 * 60 * 1000;     // sotto scorta: 60 min
+const FIRESTORE_LOGS_LIMIT = FIRESTORE_KIOSK_COST_MODE ? 60 : 200;
+const FIRESTORE_ITEMS_LIMIT = FIRESTORE_KIOSK_COST_MODE ? 600 : 2000;
+
+
 function startInventoryRealtime(fs, db){
   setCloudStatus('Lettura ubicazioni…', '#f59e0b');
   // anagrafica prodotti globale: collezione piatta amzInventoryProducts/{sku}
@@ -7783,16 +7830,16 @@ function startInventoryRealtime(fs, db){
   });
 
   const colRef = fs.collection(db, "amzInventoryProducts");
-  fs.onSnapshot(colRef, (snap)=>{
+  function applyProductsSnapshot(snap, modeLabel){
     const perCode = {};
     const codeToSku = {};      // codice ubicazione -> sku (per multi-ubicazione)
     const skuAllocs = {};      // sku -> [{code, qty, title}]
-    const wasteMap = {};       // cloud-only: docType wasteCalendar letti da amzInventoryProducts
     snap.forEach(docSnap=>{
       const d = docSnap.data() || {};
-      const wasteDoc = normalizeWasteCalendarDoc(docSnap.id, d);
-      if(wasteDoc){ wasteMap[wasteDoc.dateKey] = wasteDoc; return; }
+      // COST SAFE: il calendario rifiuti viene letto a parte solo per il giorno di domani.
+      // Qui ignoriamo i documenti tecnici senza rackAllocations per non mischiare funzioni diverse.
       const allocs = Array.isArray(d.rackAllocations) ? d.rackAllocations : [];
+      if(!allocs.length) return;
       const sku = d.sku || docSnap.id;
       const title = d.title || d.name || d.sku || docSnap.id;
       for(const a of allocs){
@@ -7808,9 +7855,6 @@ function startInventoryRealtime(fs, db){
     });
     CODE_TO_SKU = codeToSku;
     SKU_ALLOCS = skuAllocs;
-    CLOUD_WASTE_CALENDAR = wasteMap;
-    CLOUD_WASTE_CALENDAR_READY = true;
-    renderUbiTrashAlert();
     let changed=false;
     for(const code in VANI_MAP){
       const data = perCode[code];
@@ -7818,23 +7862,50 @@ function startInventoryRealtime(fs, db){
     }
     if(changed) requestShadowUpdate(2);   // ricalcola le ombre solo se la merce è cambiata
     const n = Object.keys(perCode).length;
-    setCloudStatus(`Cloud live • ${n} ubicazioni`, '#22c55e');
+    setCloudStatus(`${modeLabel} • ${n} ubicazioni`, '#22c55e');
     // ricalcola l'illuminazione dei bancali da prelevare (le quantità potrebbero essere cambiate)
     aggiornaPrelievi();
-  }, (err)=>{
-    console.error('Firestore error', err);
-    if(err && err.code === 'permission-denied'){
-      setCloudStatus('Permessi mancanti • apri ⚙ UID', '#ef4444');
-      const statusBox = document.getElementById('kioskMiniStatus');
-      if(statusBox) statusBox.textContent = KIOSK_UID ? ('Permission denied. Crea in Firestore kiosks/' + KIOSK_UID + ' e pubblica le regole.') : 'Permission denied. Apri quando l’UID è disponibile.';
-    }else{
-      setCloudStatus('Cloud non raggiungibile', '#ef4444');
+  }
+
+  async function loadProductsOnce(reason='refresh'){
+    if(loadProductsOnce._busy) return;
+    loadProductsOnce._busy = true;
+    try{
+      const snap = await fs.getDocs(colRef);
+      applyProductsSnapshot(snap, FIRESTORE_KIOSK_COST_MODE ? 'Cloud refresh' : 'Cloud live');
+    }catch(err){
+      console.error('Firestore products refresh error', err);
+      if(err && err.code === 'permission-denied'){
+        setCloudStatus('Permessi mancanti • apri ⚙ UID', '#ef4444');
+        const statusBox = document.getElementById('kioskMiniStatus');
+        if(statusBox) statusBox.textContent = KIOSK_UID ? ('Permission denied. Crea in Firestore kiosks/' + KIOSK_UID + ' e pubblica le regole.') : 'Permission denied. Apri quando l’UID è disponibile.';
+      }else{
+        setCloudStatus('Cloud non raggiungibile', '#ef4444');
+      }
+    }finally{
+      loadProductsOnce._busy = false;
     }
-  });
+  }
+
+  if(FIRESTORE_KIOSK_COST_MODE){
+    loadProductsOnce('startup');
+    setInterval(()=>loadProductsOnce('timer'), FIRESTORE_PRODUCTS_REFRESH_MS);
+  }else{
+    fs.onSnapshot(colRef, (snap)=>applyProductsSnapshot(snap, 'Cloud live'), (err)=>{
+      console.error('Firestore error', err);
+      if(err && err.code === 'permission-denied'){
+        setCloudStatus('Permessi mancanti • apri ⚙ UID', '#ef4444');
+        const statusBox = document.getElementById('kioskMiniStatus');
+        if(statusBox) statusBox.textContent = KIOSK_UID ? ('Permission denied. Crea in Firestore kiosks/' + KIOSK_UID + ' e pubblica le regole.') : 'Permission denied. Apri quando l’UID è disponibile.';
+      }else{
+        setCloudStatus('Cloud non raggiungibile', '#ef4444');
+      }
+    });
+  }
 
   // ===== FLUSSI (picking + carichi + movimenti) =====
-  // legge amzInventory/{loc}/logs con DUE query (appliedAtClient e updatedAtClient) e le UNISCE,
-  // come fa picking.html: così compaiono anche carichi/movimenti che hanno solo updatedAtClient.
+  // COST SAFE: le query log non restano in realtime continuo; vengono rilette a intervallo.
+  // I comandi critici restano realtime sui doc piccoli sopra.
   for(const loc of ['concamarise','cerea']){
     try{
       const logsRef = fs.collection(db, "amzInventory", loc, "logs");
@@ -7852,18 +7923,39 @@ function startInventoryRealtime(fs, db){
         aggiornaPrelievi();
         try{ LogFeed.refresh(); }catch(_){}
       };
-      const attach=(key, field)=>{
-        try{
-          const q = fs.query(logsRef, fs.orderBy(field,"desc"), fs.limit(200));
-          fs.onSnapshot(q, (snap)=>{
-            const mp=maps[key]; mp.clear();
-            snap.forEach(ds=>{ mp.set(ds.id, { id:ds.id, ...(ds.data()||{}) }); });
-            merge();
-          }, (err)=>{ console.warn('flussi '+loc+' '+key, err && err.code); });
-        }catch(e){ console.warn('attach flussi '+loc+' '+key, e); }
+      const consume=(key, snap)=>{
+        const mp=maps[key]; mp.clear();
+        snap.forEach(ds=>{ mp.set(ds.id, { id:ds.id, ...(ds.data()||{}) }); });
+        merge();
       };
-      attach('applied','appliedAtClient');
-      attach('updated','updatedAtClient');
+      const loadLogsOnce = async()=>{
+        if(loadLogsOnce._busy) return;
+        loadLogsOnce._busy = true;
+        try{
+          const qa = fs.query(logsRef, fs.orderBy("appliedAtClient","desc"), fs.limit(FIRESTORE_LOGS_LIMIT));
+          const qu = fs.query(logsRef, fs.orderBy("updatedAtClient","desc"), fs.limit(FIRESTORE_LOGS_LIMIT));
+          const [sa, su] = await Promise.all([fs.getDocs(qa), fs.getDocs(qu)]);
+          consume('applied', sa);
+          consume('updated', su);
+        }catch(e){
+          console.warn('refresh flussi '+loc, e && (e.code || e.message || e));
+        }finally{
+          loadLogsOnce._busy = false;
+        }
+      };
+      if(FIRESTORE_KIOSK_COST_MODE){
+        loadLogsOnce();
+        setInterval(loadLogsOnce, FIRESTORE_LOGS_REFRESH_MS);
+      }else{
+        const attach=(key, field)=>{
+          try{
+            const q = fs.query(logsRef, fs.orderBy(field,"desc"), fs.limit(FIRESTORE_LOGS_LIMIT));
+            fs.onSnapshot(q, (snap)=>consume(key, snap), (err)=>{ console.warn('flussi '+loc+' '+key, err && err.code); });
+          }catch(e){ console.warn('attach flussi '+loc+' '+key, e); }
+        };
+        attach('applied','appliedAtClient');
+        attach('updated','updatedAtClient');
+      }
     }catch(e){ console.warn('listener flussi '+loc, e); }
   }
 
@@ -7888,13 +7980,13 @@ function startInventoryRealtime(fs, db){
   }catch(e){ console.warn('listener avviso pronto', e); }
 
   // ===== SOTTO SCORTA (da produrre) — Cerea + Concamarise =====
-  // legge l'anagrafica per magazzino (amzInventory/{loc}/items), calcola gli articoli sotto scorta
-  // e li mostra nella pagina cockpit dedicata; avviso vocale all'ingresso di nuovi sotto scorta.
+  // COST SAFE: sotto scorta non ha bisogno di realtime secondo-per-secondo.
+  // Lettura cloud controllata ogni 15 minuti; legacy realtime con ?fullRealtime=1.
   for(const loc of ['cerea','concamarise']){
     try{
       const itemsRef = fs.collection(db, "amzInventory", loc, "items");
-      const qi = fs.query(itemsRef, fs.limit(2000));
-      fs.onSnapshot(qi, (snap)=>{
+      const qi = fs.query(itemsRef, fs.limit(FIRESTORE_ITEMS_LIMIT));
+      const consumeItems = (snap)=>{
         const docs=[];
         snap.forEach(ds=>{ const d=ds.data()||{}; docs.push({ sku:d.sku||ds.id, ...d }); });
         _ssCompute(loc, docs);
@@ -7907,7 +7999,20 @@ function startInventoryRealtime(fs, db){
           } else { _lastSs=_contaSottoscorta(); }
         }catch(_){}
         try{ if(typeof Annunci!=='undefined') Annunci.onSottoscorta(loc, LOWSTOCK[loc]); }catch(_){}
-      }, (err)=>{ console.warn('sotto scorta '+loc, err && err.code); });
+      };
+      const loadItemsOnce = async()=>{
+        if(loadItemsOnce._busy) return;
+        loadItemsOnce._busy = true;
+        try{ consumeItems(await fs.getDocs(qi)); }
+        catch(e){ console.warn('sotto scorta '+loc, e && (e.code || e.message || e)); }
+        finally{ loadItemsOnce._busy = false; }
+      };
+      if(FIRESTORE_KIOSK_COST_MODE){
+        loadItemsOnce();
+        setInterval(loadItemsOnce, FIRESTORE_ITEMS_REFRESH_MS);
+      }else{
+        fs.onSnapshot(qi, consumeItems, (err)=>{ console.warn('sotto scorta '+loc, err && err.code); });
+      }
     }catch(e){ console.warn('listener sotto scorta '+loc, e); }
   }
 }
