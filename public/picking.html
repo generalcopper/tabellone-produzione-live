@@ -16738,6 +16738,195 @@ Confermandolo, la transaction cloud scaricherà comunque la quantità richiesta 
       return await commitPickingCloudTransaction(loc, flowId, { ...opts, forceNegative:true });
     }
 
+
+    // UI immediata dopo prelievo FBA/PDF: i log di picking sono caricati one-shot
+    // per performance, quindi dopo una transaction cloud aggiorniamo subito lo stato
+    // in memoria. Firestore resta la fonte ufficiale; un refresh one-shot riallinea dopo.
+    function applyPickingCloudResultToLocalState(res, opts = {}){
+      try{
+        if(!res || !res.flowId) return false;
+        const loc = (res.loc === "cerea" || res.loc === "concamarise") ? res.loc : ((opts.loc === "cerea" || opts.loc === "concamarise") ? opts.loc : "concamarise");
+        const flowId = String(res.flowId || opts.flowId || "").trim();
+        const lg = state.logs?.[loc];
+        if(!lg || !Array.isArray(lg.flows) || !flowId) return false;
+
+        const idx = lg.flows.findIndex(f=>String(f?.id || "") === flowId);
+        if(idx < 0) return false;
+
+        const oldFlow = lg.flows[idx] || {};
+        const nowClient = Number(opts.nowClient || res.nowClient || Date.now());
+        const who = opts.who || state.user?.emailLower || state.user?.email || state.user?.uid || "";
+        const stockInfos = Array.isArray(res.stockInfos) ? res.stockInfos : [];
+        const pickedMap = { ...pickingLineMap(oldFlow) };
+        const flowLines = Array.isArray(oldFlow.lines) ? oldFlow.lines : [];
+
+        const infoByRequested = new Map();
+        for(const info of stockInfos){
+          const sku = toSkuId(info?.requestedSku || info?.sku || "");
+          if(sku) infoByRequested.set(sku, info || {});
+        }
+
+        const skuList = Array.isArray(res.skuList) && res.skuList.length
+          ? res.skuList.map(toSkuId).filter(Boolean)
+          : (res.sku ? [toSkuId(res.sku)] : []);
+
+        for(const sku of skuList){
+          if(!sku) continue;
+          const key = pickingSkuKey(sku);
+          const line = flowLines.find(l=>toSkuId(l?.sku || "") === sku) || { sku, qty:0, title:sku };
+          const info = infoByRequested.get(sku) || {};
+          const qty = Math.abs(parseQty(info.qty ?? line.qty ?? 0) || 0);
+          const title = info.title || pickingLineTitle(line, oldFlow) || sku;
+          const position = info.position || pickingPositionTextFromCloudItem({
+            sku: info.stockSku || sku,
+            title,
+            rackAllocations: info.nextAllocations || [],
+            rackLocations: info.cleanLocations || []
+          }) || "—";
+
+          pickedMap[key] = {
+            ...(pickedMap[key] || {}),
+            picked:true,
+            status:"prelevato",
+            sku,
+            requestedSku:sku,
+            stockSku:info.stockSku || sku,
+            title,
+            qty,
+            position,
+            rackLocation:position,
+            pickedAllocations:Array.isArray(info.consumedAllocations) ? info.consumedAllocations : [],
+            forced:!!(info.forced || res.forced),
+            forceNegative:!!(info.forceNegative || res.forceNegative),
+            shortageQty:Number(info.shortageQty || 0) || 0,
+            missingRackQty:Number(info.missingRackQty || 0) || 0,
+            pickedAtClient:nowClient,
+            pickedBy:who
+          };
+        }
+
+        const validLines = pickingUniqueLines({ ...oldFlow, lines:flowLines }).filter(x=>toSkuId(x?.sku || ""));
+        const allPicked = validLines.length > 0 && validLines.every(x=>{
+          const k = pickingSkuKey(x.sku);
+          return !!pickedMap[k]?.picked || pickedMap[k]?.status === "prelevato";
+        });
+        const anyPicked = validLines.some(x=>{
+          const k = pickingSkuKey(x.sku);
+          return !!pickedMap[k]?.picked || pickedMap[k]?.status === "prelevato";
+        });
+
+        const prevPicking = (oldFlow.picking && typeof oldFlow.picking === "object") ? oldFlow.picking : {};
+        const prevReservation = (oldFlow.reservation && typeof oldFlow.reservation === "object") ? oldFlow.reservation : {};
+        const event = {
+          type: String(res.mode || opts.mode || "sku") === "flow" ? "flow" : "sku",
+          sku: skuList[0] || "",
+          skus: skuList,
+          count: skuList.length,
+          pieces: Number(res.pieces || stockInfos.reduce((a,x)=>a + Math.abs(parseQty(x?.qty || 0) || 0), 0)) || 0,
+          forced:!!res.forced,
+          forceNegative:!!res.forceNegative,
+          atClient:nowClient,
+          by:who,
+          optimistic:true
+        };
+
+        const nextFlow = {
+          ...oldFlow,
+          status: allPicked ? "PICKED" : (anyPicked ? "PARTIAL_PICKED" : (oldFlow.status || "RESERVED")),
+          reservation:{
+            ...prevReservation,
+            active: !allPicked,
+            status: allPicked ? "prelevato" : (anyPicked ? "parziale" : (prevReservation.status || "in_attesa_picking")),
+            pickedAtClient: allPicked ? (prevReservation.pickedAtClient || nowClient) : (prevReservation.pickedAtClient || null),
+            updatedAtClient:nowClient,
+            updatedBy:who
+          },
+          picking:{
+            ...prevPicking,
+            managedByPicking:true,
+            status: allPicked ? "prelevato" : (anyPicked ? "parziale" : "da_prelevare"),
+            pickedLines:pickedMap,
+            flowPicked:allPicked,
+            flowPickMode:allPicked ? (String(res.mode || opts.mode || "") === "flow" ? "flow" : "sku") : (prevPicking.flowPickMode || ""),
+            flowPickedAtClient: allPicked ? (prevPicking.flowPickedAtClient || nowClient) : (prevPicking.flowPickedAtClient || null),
+            flowPickedBy: allPicked ? (prevPicking.flowPickedBy || who) : (prevPicking.flowPickedBy || ""),
+            updatedAtClient:nowClient,
+            updatedBy:who,
+            events:[...(Array.isArray(prevPicking.events) ? prevPicking.events : []), event]
+          },
+          updatedAtClient:nowClient
+        };
+
+        lg.flows.splice(idx, 1, nextFlow);
+        lg.meta = { ...(lg.meta || {}), loaded:true, oneShot:true, count:Array.isArray(lg.flows) ? lg.flows.length : (lg.meta?.count || 0) };
+        lg.loadedAtClient = Date.now();
+
+        // Aggiorna anche inventario locale: quantità/ubicazioni cambiano subito nella UI,
+        // poi il listener items confermerà il dato ufficiale dal cloud.
+        for(const info of stockInfos){
+          const stockSku = toSkuId(info?.stockSku || info?.sku || "");
+          if(!stockSku) continue;
+          const inv = state.inventory?.[loc];
+          if(!inv || !Array.isArray(inv.items)) continue;
+          const itemIdx = inv.items.findIndex(it=>toSkuId(it?.sku || it?.id || "") === stockSku);
+          if(itemIdx < 0) continue;
+          const prev = inv.items[itemIdx] || {};
+          const afterQty = Number.isFinite(Number(info.afterQty)) ? Math.round(Number(info.afterQty)) : Math.max(0, (Number(prev.qty || 0) || 0) - (Number(info.qty || 0) || 0));
+          const afterReserved = Number.isFinite(Number(info.afterReserved)) ? Math.max(0, Math.round(Number(info.afterReserved))) : Math.max(0, reservedQtyFromItem(prev) - (Number(info.qty || 0) || 0));
+          const afterPending = Number.isFinite(Number(info.afterPending)) ? Math.max(0, Math.round(Number(info.afterPending))) : Math.max(0, pendingPickQtyFromItem(prev) - (Number(info.qty || 0) || 0));
+          const nextAllocations = Array.isArray(info.nextAllocations) ? info.nextAllocations : readRackAllocationsFromDoc(prev || {});
+          const cleanLocations = normalizeRackLocationsList(Array.isArray(info.cleanLocations) ? info.cleanLocations : nextAllocations.map(x=>x.code));
+          inv.items.splice(itemIdx, 1, {
+            ...prev,
+            qty:afterQty,
+            reservedQty:afterReserved,
+            pendingPickQty:afterPending,
+            availableQty:Math.max(0, afterQty - afterReserved),
+            rackAllocations: afterQty > 0 ? nextAllocations : [],
+            rackLocations: afterQty > 0 ? cleanLocations : [],
+            rackLocation: afterQty > 0 ? (cleanLocations[0] || "") : "",
+            reservationStatus: afterPending > 0 ? "in_attesa_picking" : "prelevata",
+            lastPickingFlowId:flowId,
+            lastPickingAtClient:nowClient,
+            lastPickingBy:who,
+            updatedAtClient:nowClient,
+            location:loc
+          });
+        }
+
+        updatePickingPreviewCountsFromCurrentLogs("local_pick_" + String(res.mode || opts.mode || "sku"));
+        if(typeof renderHomeDashboard === "function") renderHomeDashboard();
+        if(typeof renderInventoryList === "function") renderInventoryList();
+        if(typeof renderProductDetailsSheet === "function" && state.ui?.sheet === "productDetails") renderProductDetailsSheet();
+        return true;
+      }catch(err){
+        console.warn("apply local picking result", err);
+        return false;
+      }
+    }
+
+    function refreshPickingAfterCloudMutation(res, opts = {}){
+      try{
+        applyPickingCloudResultToLocalState(res, opts);
+        renderHomePickingBox();
+        renderHomeLogsBox();
+        const loc = (res?.loc === "cerea" || res?.loc === "concamarise") ? res.loc : ((opts.loc === "cerea" || opts.loc === "concamarise") ? opts.loc : "");
+        const currentView = pickingHomeView();
+        if(loc && (currentView === "pickingFba" || currentView === "pickingHistory")){
+          const bucket = state.__postPickingCloudRefreshTimers || (state.__postPickingCloudRefreshTimers = {});
+          try{ if(bucket[loc]) clearTimeout(bucket[loc]); }catch(_e){}
+          bucket[loc] = setTimeout(()=>{
+            try{
+              bucket[loc] = null;
+              startLogsFor(loc, { mode: currentView === "pickingFba" ? "fba" : "full", forceReload:true, staleMs:0 });
+            }catch(_e){}
+          }, 700);
+        }
+      }catch(err){
+        console.warn("refresh picking after cloud mutation", err);
+      }
+    }
+
     function firstRackLocationCodeFromItem(it){
       try{
         const allocations = readRackAllocationsFromDoc(it || {});
@@ -17818,8 +18007,7 @@ function renderHomePickingHistoryBox(){
         }
         showToast(res.forced ? "SKU prelevato forzato" : "SKU prelevato", `${res.sku || s} • ${res.pieces || qty} pz • cloud OK${res.forced ? " • negativo consentito" : ""}`, res.forced ? 2600 : 1800);
         scheduleLowStockEmailAfterUpdate(res.forced ? "picking_sku_forzato" : "picking_sku");
-        renderHomePickingBox();
-        renderHomeLogsBox();
+        refreshPickingAfterCloudMutation(res, { flow, loc:l, mode:"sku", sku:s, nowClient, who });
       }catch(err){
         console.error("cloud pick sku", err);
         showToast("Prelievo bloccato", String(err?.message || err).slice(0, 260), 3600);
@@ -17867,8 +18055,7 @@ function renderHomePickingHistoryBox(){
         }
         showToast(res.forced ? "Flusso prelevato forzato" : "Flusso prelevato", `${res.flowName || flowDisplayName(flow)} • ${res.skuCount} SKU • ${res.pieces} pz • cloud OK${res.forced ? " • negativo consentito" : ""}`, res.forced ? 3000 : 2200);
         scheduleLowStockEmailAfterUpdate(res.forced ? "picking_flow_forzato" : "picking_flow");
-        renderHomePickingBox();
-        renderHomeLogsBox();
+        refreshPickingAfterCloudMutation(res, { flow, loc:l, mode:"flow", nowClient, who });
       }catch(err){
         console.error("cloud pick flow", err);
         showToast("Prelievo bloccato", String(err?.message || err).slice(0, 260), 3800);
@@ -17952,6 +18139,7 @@ function renderHomePickingHistoryBox(){
             committedSku += Number(res?.skuCount || 0);
             committedPieces += Number(res?.pieces || 0);
             if(res?.forced) forcedFlows++;
+            refreshPickingAfterCloudMutation(res, { flow, loc:l, mode:"flow", nowClient, who });
           }catch(err){
             const label = flowDisplayName(flow) || id;
             const msg = String(err?.message || err).slice(0, 220);
