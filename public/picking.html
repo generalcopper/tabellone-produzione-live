@@ -7833,6 +7833,9 @@ function guessTitleFromRaw(rawText, sku){
       add(d?.masterSku);
       add(d?.parentSku);
       add(d?.aliasOfSku);
+      add(d?.renamedFromSku);
+      add(d?.previousSku);
+      add(d?.oldSku);
       add(d?.skuAliases);
       add(d?.aliasSkus);
       add(d?.linkedSkus);
@@ -15872,6 +15875,226 @@ function currentInv(){
         .map(x=>x.it);
     }
 
+
+
+    async function editHomeLocatedQtyPrompt(skuRaw, locRaw){
+      const sku = toSkuId(skuRaw || "");
+      const loc = (locRaw === "cerea" || locRaw === "concamarise") ? locRaw : state.route.loc;
+
+      if(!canUsePickingActions()){
+        showToast("Permessi", "Utente non abilitato al picking.", 2200);
+        return;
+      }
+      if(!sku || !(loc === "cerea" || loc === "concamarise")){
+        showToast("Errore", "Prodotto o magazzino non valido.", 2200);
+        return;
+      }
+
+      const currentItem = getProductBySku(loc, sku);
+      if(!currentItem){
+        showToast("Errore", "Prodotto non trovato.", 2200);
+        return;
+      }
+
+      const currentAllocated = rackAllocatedQtyFromDoc(currentItem || {});
+      const currentTotal = stockQtyFromDoc(currentItem || {});
+      const currentUnallocated = Math.max(0, currentTotal - currentAllocated);
+      const raw = prompt(
+        `Modifica quantità da scheda Ubicati
+
+SKU: ${sku}
+Magazzino: ${prettyLoc(loc)}
+Quantità ubicata: ${currentAllocated} pz
+Totale attuale: ${currentTotal} pz${currentUnallocated ? `
+Da ubicare attuale: ${currentUnallocated} pz` : ""}
+
+Inserisci la nuova quantità totale dello SKU.
+Il valore non può essere inferiore alla quantità già ubicata.`,
+        String(Math.max(currentAllocated, Math.round(Number(currentTotal) || 0)))
+      );
+      if(raw === null) return;
+
+      const parsed = parseSignedQtyStrict(raw);
+      if(parsed === null || !Number.isFinite(parsed) || parsed < 0){
+        showToast("Quantità non valida", "Inserisci un numero intero positivo o zero.", 2400);
+        return;
+      }
+      if(parsed < currentAllocated){
+        showToast("Quantità bloccata", `Non puoi scendere sotto i ${currentAllocated} pz già ubicati.`, 2800);
+        return;
+      }
+
+      const api = state.firebase.api;
+      const db = state.firebase.db;
+      if(!api || !db || !api.runTransaction){
+        showToast("Errore", "Firebase non inizializzato.", 2200);
+        return;
+      }
+
+      const itemRef = api.doc(db, COL_ROOT, loc, SUB_ITEMS, sku);
+      const productRef = api.doc(db, COL_PRODUCTS, sku);
+      const nowClient = Date.now();
+      const who = state.user?.email || state.user?.emailLower || state.user?.uid || "";
+      const movementId = api.doc(api.collection(db, COL_PRODUCTS, sku, SUB_MOVES)).id;
+
+      let runtimePatch = null;
+      let beforeAllocated = currentAllocated;
+      let beforeUnallocated = currentUnallocated;
+      let afterUnallocated = Math.max(0, parsed - currentAllocated);
+      let beforeTotal = currentTotal;
+      let afterTotal = parsed;
+
+      try{
+        await api.runTransaction(db, async (tx)=>{
+          const snap = await tx.get(itemRef);
+          if(!snap.exists()) throw new Error("Prodotto non trovato.");
+          const fresh = snap.data() || {};
+          const title = squashWhitespace(fresh.title || fresh.name || currentItem.title || sku) || sku;
+          const freshTotal = stockQtyFromDoc(fresh);
+          const allocations = normalizeRackAllocationsForWrite(readRackAllocationsFromDoc(fresh));
+          const allocatedTotal = rackAllocatedQtyFromDoc(fresh);
+          const freshUnallocated = Math.max(0, freshTotal - allocatedTotal);
+          const newTotal = Math.max(0, Math.round(Number(parsed) || 0));
+
+          if(newTotal < allocatedTotal){
+            throw new Error(`Quantità non valida: questo SKU ha già ${allocatedTotal} pz ubicati.`);
+          }
+
+          const newUnallocated = Math.max(0, newTotal - allocatedTotal);
+          const cleanLocations = normalizeRackLocationsList(allocations.map(x=>x.code));
+          const cleanLocation = cleanLocations[0] || "";
+          const preferredLot = normalizeLotId(state.ui.productDetailsLot || fresh.lastProductionLot || "", fresh.lastProductionAtClient || null) || getDefaultLotForItem(fresh || {});
+          const cleanStockLots = buildStockLotsForUnallocatedQty(fresh, newUnallocated, { tsClient:nowClient, source:"quantita_ubicati", refId:movementId, preferredLot });
+          const delta = newTotal - freshTotal;
+
+          beforeAllocated = allocatedTotal;
+          beforeUnallocated = freshUnallocated;
+          afterUnallocated = newUnallocated;
+          beforeTotal = freshTotal;
+          afterTotal = newTotal;
+
+          if(delta === 0 && freshUnallocated === newUnallocated){
+            runtimePatch = {
+              sku,
+              title,
+              qty: freshTotal,
+              stockLots: cleanStockLots,
+              rackLocation: cleanLocation,
+              rackLocations: cleanLocations,
+              rackAllocations: allocations,
+              updatedAtClient: nowClient,
+              updatedBy: who,
+              location: loc
+            };
+            return;
+          }
+
+          tx.set(itemRef, {
+            sku,
+            title,
+            titleNorm: normalizeText(title || sku),
+            qty: newTotal,
+            stockLots: newTotal > 0 ? cleanStockLots : [],
+            rackLocation: cleanLocation,
+            rackLocations: cleanLocations,
+            rackAllocations: allocations,
+            zeroStock: newTotal === 0,
+            zeroStockAt: newTotal === 0 ? api.serverTimestamp() : null,
+            zeroStockAtClient: newTotal === 0 ? nowClient : null,
+            lastLocatedQtyEditId: movementId,
+            updatedAt: api.serverTimestamp(),
+            updatedAtClient: nowClient,
+            updatedBy: who,
+            location: loc
+          }, { merge:true });
+
+          tx.set(productRef, {
+            sku,
+            title,
+            titleNorm: normalizeText(title || sku),
+            rackLocation: cleanLocation,
+            rackLocations: cleanLocations,
+            rackAllocations: allocations,
+            lastLocatedQtyEditId: movementId,
+            lastLocatedQtyBeforeTotal: freshTotal,
+            lastLocatedQtyAfterTotal: newTotal,
+            lastLocatedQtyBeforeUnallocated: freshUnallocated,
+            lastLocatedQtyAfterUnallocated: newUnallocated,
+            lastSeenAt: api.serverTimestamp(),
+            lastSeenAtClient: nowClient,
+            lastSeenBy: who,
+            lastSeenLocation: loc,
+            lastSeenKind: "located_qty_update"
+          }, { merge:true });
+
+          addProductMovementToBatch(tx, api, db, sku, {
+            type: "quantita_ubicati",
+            movementId,
+            movementKey: movementId,
+            writeKey: movementId,
+            qtySigned: delta,
+            deltaSigned: delta,
+            beforeQty: freshTotal,
+            afterQty: newTotal,
+            beforeAllocatedQty: allocatedTotal,
+            afterAllocatedQty: allocatedTotal,
+            beforeUnallocatedQty: freshUnallocated,
+            afterUnallocatedQty: newUnallocated,
+            allocatedQty: allocatedTotal,
+            fromWarehouse: loc,
+            toWarehouse: loc,
+            location: loc,
+            source: "ubicati",
+            note: `Modifica quantità da Ubicati: totale ${freshTotal} → ${newTotal} pz; ubicato invariato ${allocatedTotal} pz`,
+            rackLocation: cleanLocation,
+            rackLocations: cleanLocations,
+            lot: preferredLot,
+            lotLabel: lotLabelFromId(preferredLot),
+            deleteLocked: true,
+            locked: true,
+            createdAtClient: nowClient
+          });
+
+          runtimePatch = {
+            sku,
+            title,
+            qty: newTotal,
+            stockLots: newTotal > 0 ? cleanStockLots : [],
+            rackLocation: cleanLocation,
+            rackLocations: cleanLocations,
+            rackAllocations: allocations,
+            zeroStock: newTotal === 0,
+            zeroStockAtClient: newTotal === 0 ? nowClient : null,
+            updatedAtClient: nowClient,
+            updatedBy: who,
+            location: loc
+          };
+        });
+
+        if(runtimePatch){
+          patchRuntimeInventoryItem(loc, sku, runtimePatch);
+        }
+
+        renderHomeDashboard();
+        renderInventoryList();
+        if(state.ui.sheet === "productDetails") renderProductDetailsSheet();
+        renderHomeLogsBox();
+
+        if(afterTotal === beforeTotal && afterUnallocated === beforeUnallocated){
+          showToast("Quantità invariata", `${sku} resta a ${afterTotal} pz totali.`, 1800);
+        }else if(afterUnallocated > 0){
+          showToast("Quantità aggiornata", `${sku}: ${beforeTotal} → ${afterTotal} pz totali • ${afterUnallocated} pz da ubicare`, 2600);
+          scheduleLowStockEmailAfterUpdate("edit_located_qty");
+        }else{
+          showToast("Quantità aggiornata", `${sku}: ${beforeTotal} → ${afterTotal} pz totali • tutto ubicato`, 2300);
+          scheduleLowStockEmailAfterUpdate("edit_located_qty");
+        }
+      }catch(err){
+        console.error("edit located qty", err);
+        showToast("Errore quantità", String(err?.message || err).slice(0, 220), 3200);
+      }
+    }
+
     function renderHomeNoLocationBox(){
       const list = $("homeNoLocationList");
       const count = $("homeNoLocationCount");
@@ -17072,11 +17295,19 @@ Confermandolo, la transaction cloud scaricherà comunque la quantità richiesta 
     }
 
     function pickingLineTitle(line, flow){
-      const sku = toSkuId(line?.sku || "");
-      const it = pickingLineProduct(flow, sku);
-      const raw = squashWhitespace(line?.title || it?.title || sku);
+      const requestedSku = toSkuId(line?.sku || "");
+      const loc = (flow?.location === "cerea" || flow?.location === "concamarise") ? flow.location : "concamarise";
+      const hit = getItemBySkuAny(requestedSku, loc);
+      const it = hit?.it || null;
+
+      // Picking FBA/PDF: il flusso può essere stato creato giorni prima.
+      // Nome e anagrafica devono quindi arrivare sempre dall'inventario cloud live,
+      // non dal titolo fotografato dentro la riga del PDF/log.
+      const liveRaw = squashWhitespace(it?.title || it?.name || "");
+      const flowRaw = squashWhitespace(line?.title || line?.name || requestedSku);
+      const raw = liveRaw || flowRaw || requestedSku;
       const meta = parseTitleMeta(raw);
-      return meta.main || raw || sku;
+      return meta.main || raw || requestedSku;
     }
 
     function pickingUniqueLines(flow){
@@ -17086,7 +17317,7 @@ Confermandolo, la transaction cloud scaricherà comunque la quantità richiesta 
         const sku = toSkuId(l?.sku || "");
         if(!sku) continue;
         const qty = Math.abs(parseQty(l?.qty || 0) || 0);
-        const title = squashWhitespace(l?.title || l?.name || sku) || sku;
+        const title = pickingLineTitle(l, flow) || sku;
         const prev = map.get(sku);
         if(prev){
           prev.qty = Math.round((Number(prev.qty || 0) + qty) * 1000) / 1000;
@@ -17173,7 +17404,7 @@ Confermandolo, la transaction cloud scaricherà comunque la quantità richiesta 
             flowId: String(flow?.id || ""),
             loc: (flow?.location === "cerea" || flow?.location === "concamarise") ? flow.location : "concamarise",
             sku,
-            title: squashWhitespace(rec.title || pickingLineTitle({ sku }, flow) || sku),
+            title: squashWhitespace(pickingLineTitle({ sku }, flow) || rec.title || sku),
             qty: Number.isFinite(Number(rec.qty)) ? Math.round(Number(rec.qty)) : 0,
             position: squashWhitespace(rec.position || rec.rackLocation || pickingLinePositionText(flow, sku) || "—"),
             at: pickingLineStableClientTs(flow, sku, rec, isShopifyFbmCompletedByShopify(flow)),
@@ -18631,7 +18862,7 @@ function renderHomePickingHistoryBox(){
               <div class="gridProdMain">${titleMain}</div>
               <div class="gridProdSub">${escapeHtml(metaLine)}</div>
             </div>
-            <div class="gridCell gridRight"><span class="badge ok">${escapeHtml(String(allocatedQty))}</span></div>
+            <div class="gridCell gridRight"><button class="badge ok qtyEditBadge" type="button" data-action="editHomeLocatedQty" data-sku="${sku}" data-loc="${escapeHtml(it.loc || "")}" data-current="${escapeHtml(String(allocatedQty))}" data-total="${escapeHtml(String(totalQty))}" title="Modifica quantità totale dello SKU">${escapeHtml(String(allocatedQty))}</button></div>
             <div class="gridCell gridRight">${rackHtml}</div>
             <div class="gridCell gridRight">${findBtnHtml}</div>
           </div>`;
@@ -22848,6 +23079,11 @@ async function saveProductFromDetails(){
             updatedBy: state.user.email || "",
             location: loc
           };
+          if(sku !== oldSku){
+            Object.assign(baseData, skuUnificationFields(sku, [sku, oldSku], nowClient, state.user.email || state.user.emailLower || state.user.uid || ""));
+            baseData.renamedFromSku = oldSku;
+            baseData.previousSku = oldSku;
+          }
 
           if(sku===oldSku){
             tx.set(oldRef, baseData, { merge:true });
@@ -22873,6 +23109,11 @@ async function saveProductFromDetails(){
             lastSeenKind: "manual_edit",
             seenCount: api.increment(1)
           };
+          if(sku !== oldSku){
+            Object.assign(pData, skuUnificationFields(sku, [sku, oldSku], nowClient, state.user.email || state.user.emailLower || state.user.uid || ""));
+            pData.renamedFromSku = oldSku;
+            pData.previousSku = oldSku;
+          }
 
           if(sku===oldSku){
             tx.set(oldP, pData, { merge:true });
@@ -22955,6 +23196,27 @@ async function saveProductFromDetails(){
           });
         });
 
+        try{
+          const nowRuntime = Date.now();
+          const whoRuntime = state.user?.email || state.user?.emailLower || state.user?.uid || "";
+          if(sku !== oldSku){
+            patchRuntimeInventoryItem(loc, oldSku, {}, { remove:true });
+          }
+          patchRuntimeInventoryItem(loc, sku, {
+            sku,
+            title: title || sku,
+            note: note || "",
+            qty,
+            lowStockThreshold,
+            rackLocation: qty > 0 ? finalRackLocation : "",
+            rackLocations: qty > 0 ? finalRackLocations : [],
+            ...(sku !== oldSku ? { ...skuUnificationFields(sku, [sku, oldSku], nowRuntime, whoRuntime), renamedFromSku: oldSku, previousSku: oldSku } : {}),
+            updatedAtClient: nowRuntime,
+            updatedBy: whoRuntime,
+            location: loc
+          });
+        }catch(_e){}
+
         showToast("Salvato", "Prodotto aggiornato.", 1400);
         scheduleLowStockEmailAfterUpdate("product_edit");
 
@@ -22965,6 +23227,8 @@ async function saveProductFromDetails(){
         renderProductDetailsSheet();
         renderProductsSheet();
         renderInventoryList();
+        renderHomeDashboard();
+        renderHomePickingBox();
       }catch(err){
         console.error(err);
         showToast("Errore", String(err?.message || err).slice(0, 200), 2800);
@@ -23359,6 +23623,11 @@ function renderProductsSheet(){
             updatedBy: who,
             location: loc
           };
+          if(sku !== oldSku){
+            Object.assign(baseData, skuUnificationFields(sku, [sku, oldSku], nowClient, who));
+            baseData.renamedFromSku = oldSku;
+            baseData.previousSku = oldSku;
+          }
 
           if(sku===oldSku){
             tx.set(oldRef, baseData, { merge:true });
@@ -23379,6 +23648,11 @@ function renderProductsSheet(){
             active: true,
             seenCount: api.increment(1)
           };
+          if(sku !== oldSku){
+            Object.assign(pData, skuUnificationFields(sku, [sku, oldSku], nowClient, who));
+            pData.renamedFromSku = oldSku;
+            pData.previousSku = oldSku;
+          }
 
           if(sku===oldSku){
             tx.set(oldP, pData, { merge:true });
@@ -23443,11 +23717,30 @@ function renderProductsSheet(){
           });
         });
 
+        try{
+          const nowRuntime = Date.now();
+          const whoRuntime = state.user?.email || state.user?.emailLower || state.user?.uid || "";
+          if(sku !== oldSku){
+            patchRuntimeInventoryItem(loc, oldSku, {}, { remove:true });
+          }
+          patchRuntimeInventoryItem(loc, sku, {
+            sku,
+            title: title || sku,
+            qty,
+            ...(sku !== oldSku ? { ...skuUnificationFields(sku, [sku, oldSku], nowRuntime, whoRuntime), renamedFromSku: oldSku, previousSku: oldSku } : {}),
+            updatedAtClient: nowRuntime,
+            updatedBy: whoRuntime,
+            location: loc
+          });
+        }catch(_e){}
+
         showToast("Salvato", "Prodotto aggiornato e movimento registrato in cloud.", 1600);
         scheduleLowStockEmailAfterUpdate("product_row_edit");
         state.ui.productEditSku = null;
         renderProductsSheet();
         renderInventoryList();
+        renderHomeDashboard();
+        renderHomePickingBox();
       }catch(err){
         console.error(err);
         showToast("Errore", String(err?.message || err).slice(0, 200), 2800);
@@ -24565,6 +24858,15 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
             });
             return;
           }
+          const qtyBtn = e.target?.closest?.("[data-action='editHomeLocatedQty']");
+          if(qtyBtn){
+            e.preventDefault();
+            e.stopPropagation();
+            const sku = qtyBtn.getAttribute("data-sku") || "";
+            const loc = qtyBtn.getAttribute("data-loc") || "";
+            await editHomeLocatedQtyPrompt(sku, loc || state.route.loc);
+            return;
+          }
           const row = e.target?.closest?.("[data-action='openHomeLocatedItem']");
           if(!row) return;
           const sku = row.getAttribute("data-sku") || "";
@@ -24573,7 +24875,7 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
           openProductDetailsSheet(sku);
         });
         homeLocated.addEventListener("keydown", (e)=>{
-          if(e.target?.closest?.("[data-action='findPallet']")) return;
+          if(e.target?.closest?.("[data-action='findPallet'], [data-action='editHomeLocatedQty']")) return;
           if(e.key!=="Enter" && e.key!==" ") return;
           const row = e.target?.closest?.("[data-action='openHomeLocatedItem']");
           if(!row) return;
