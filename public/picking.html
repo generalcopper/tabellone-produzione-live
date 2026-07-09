@@ -7849,7 +7849,37 @@ function guessTitleFromRaw(rawText, sku){
       };
     }
 
+    function inventoryRuntimeCacheKey(extra=""){
+      try{
+        state.cache = state.cache || {};
+        const v = Number(state.cache.inventoryRuntimeVersion || 0) || 0;
+        return `${v}|${String(extra || "")}`;
+      }catch(_e){
+        return `0|${String(extra || "")}`;
+      }
+    }
+
+    function invalidateInventoryRuntimeCaches(reason=""){
+      try{
+        state.cache = state.cache || {};
+        state.cache.inventoryRuntimeVersion = (Number(state.cache.inventoryRuntimeVersion || 0) || 0) + 1;
+        state.cache.skuAliasIndex = null;
+        state.cache.stockRepresentativeItems = null;
+        state.cache.rackUsageIndex = null;
+        state.cache.rackIdentityCache = null;
+        state.cache.rackLocationOptionsHtml = null;
+        state.cache.invIndexForMatch = null;
+        state.cache.inventoryRuntimeInvalidatedBy = String(reason || "");
+      }catch(_e){}
+    }
+
     function buildSkuAliasIndex(){
+      const __aliasCacheKey = inventoryRuntimeCacheKey("sku_alias_index");
+      try{
+        state.cache = state.cache || {};
+        const hit = state.cache.skuAliasIndex;
+        if(hit && hit.key === __aliasCacheKey && hit.value) return hit.value;
+      }catch(_e){}
       const parent = new Map();
       const explicitCanonical = new Map();
       const allSkus = new Set();
@@ -7946,7 +7976,12 @@ function guessTitleFromRaw(rawText, sku){
         return canonical ? [canonical, ...arr.filter(x=>x!==canonical)] : arr;
       };
       const isUnified = (sku)=> members(sku).length > 1;
-      return { resolve, members, isUnified, groups };
+      const __aliasIndex = { resolve, members, isUnified, groups };
+      try{
+        state.cache = state.cache || {};
+        state.cache.skuAliasIndex = { key: __aliasCacheKey, value: __aliasIndex };
+      }catch(_e){}
+      return __aliasIndex;
     }
 
     function resolveSkuAlias(sku){ return buildSkuAliasIndex().resolve(sku); }
@@ -7985,6 +8020,14 @@ function guessTitleFromRaw(rawText, sku){
 
     function stockRepresentativeItemsForLoc(loc){
       const l = validInventoryLoc(loc) ? loc : "concamarise";
+      const __repKey = inventoryRuntimeCacheKey(`stock_rep_${l}`);
+      try{
+        state.cache = state.cache || {};
+        if(!state.cache.stockRepresentativeItems) state.cache.stockRepresentativeItems = new Map();
+        const hit = state.cache.stockRepresentativeItems.get(l);
+        if(hit && hit.key === __repKey && Array.isArray(hit.value)) return hit.value;
+      }catch(_e){}
+
       const items = state.inventory?.[l]?.items || [];
       const aliasIndex = buildSkuAliasIndex();
       const selected = new Map();
@@ -8001,7 +8044,13 @@ function guessTitleFromRaw(rawText, sku){
           selected.set(canonicalSku, { it:{ ...it, sku:actualSku, __canonicalSku: canonicalSku, __aliasSkus: aliasIndex.members(actualSku) }, score, updated });
         }
       }
-      return Array.from(selected.values()).map(x=>x.it);
+      const value = Array.from(selected.values()).map(x=>x.it);
+      try{
+        state.cache = state.cache || {};
+        if(!state.cache.stockRepresentativeItems) state.cache.stockRepresentativeItems = new Map();
+        state.cache.stockRepresentativeItems.set(l, { key: __repKey, value });
+      }catch(_e){}
+      return value;
     }
 
     // --- policy sotto-scorta ---
@@ -8831,8 +8880,14 @@ function guessTitleFromRaw(rawText, sku){
       };
       const base = toSkuId(sku || doc?.sku || doc?.id || "");
       push(base);
-      try{ push(resolveSkuAlias(base)); }catch(_e){}
-      try{ skuAliasMembers(base).forEach(push); }catch(_e){}
+      try{
+        const idx = buildSkuAliasIndex();
+        push(idx.resolve(base));
+        idx.members(base).forEach(push);
+      }catch(_e){
+        try{ push(resolveSkuAlias(base)); }catch(_e2){}
+        try{ skuAliasMembers(base).forEach(push); }catch(_e3){}
+      }
       try{ readSkuAliasesFromDoc(doc || {}, base).forEach(push); }catch(_e){}
       try{ push(readSkuAliasCanonicalFromDoc(doc || {}, base)); }catch(_e){}
       return out;
@@ -8865,100 +8920,237 @@ function guessTitleFromRaw(rawText, sku){
       return out;
     }
 
-    function rackItemMatchesCurrentSkuForReuse(it, currentSku="", currentLoc=""){
-      const curSku = toSkuId(currentSku || "");
-      const itemSku = toSkuId(it?.sku || it?.id || "");
-      if(!curSku || !itemSku) return false;
-      if(curSku === itemSku) return true;
-
-      const curAliases = rackSkuAliasSetForCompare(curSku);
-      const itemAliases = rackSkuAliasSetForCompare(itemSku, it || {});
-      for(const x of curAliases){
-        if(itemAliases.has(x)) return true;
-      }
-
+    function getRackLocationUsageIndex(){
+      const __rackKey = inventoryRuntimeCacheKey("rack_usage_index");
       try{
-        const itemAsin = readAsinFromDoc(it || {});
-        if(itemAsin){
-          for(const doc of rackFindDocsForSkuCompare(curSku, currentLoc)){
-            if(readAsinFromDoc(doc.it || {}) === itemAsin) return true;
-          }
-        }
+        state.cache = state.cache || {};
+        const hit = state.cache.rackUsageIndex;
+        if(hit && hit.key === __rackKey && hit.value) return hit.value;
       }catch(_e){}
 
-      return false;
+      const byCode = new Map();
+      const skuToAsins = new Map();
+      const asinToSkus = new Map();
+      const allItems = [];
+      const aliasIndex = buildSkuAliasIndex();
+      const locs = [];
+      const addLoc = (loc)=>{
+        const l = normalizeInventoryLoc(loc) || loc;
+        if(l && !locs.includes(l)) locs.push(l);
+      };
+      try{ INVENTORY_ALL_CLOUD_LOCS.forEach(addLoc); }catch(_e){}
+      try{ inventoryLocs().forEach(addLoc); }catch(_e){}
+
+      const addAsin = (sku, asin)=>{
+        const s = toSkuId(sku || "");
+        const a = normalizeAsin(asin || "");
+        if(!s || !a) return;
+        if(!skuToAsins.has(s)) skuToAsins.set(s, new Set());
+        skuToAsins.get(s).add(a);
+        if(!asinToSkus.has(a)) asinToSkus.set(a, new Set());
+        asinToSkus.get(a).add(s);
+      };
+
+      for(const loc of locs){
+        const items = state.inventory?.[loc]?.items || [];
+        for(const it of items){
+          if(!it || typeof it !== "object") continue;
+          const sku = toSkuId(it.sku || it.id || "");
+          if(!sku) continue;
+          const asin = readAsinFromDoc(it || {});
+          addAsin(sku, asin);
+          allItems.push({ loc, it, sku, asin });
+        }
+      }
+
+      const membersForSku = (sku, doc=null)=>{
+        const set = new Set();
+        const push = (v)=>{
+          const s = toSkuId(v || "");
+          if(s) set.add(s);
+        };
+        const s = toSkuId(sku || doc?.sku || doc?.id || "");
+        push(s);
+        try{ push(aliasIndex.resolve(s)); }catch(_e){}
+        try{ aliasIndex.members(s).forEach(push); }catch(_e){}
+        try{ readSkuAliasesFromDoc(doc || {}, s).forEach(push); }catch(_e){}
+        try{ push(readSkuAliasCanonicalFromDoc(doc || {}, s)); }catch(_e){}
+        return set;
+      };
+
+      const addOccupant = (code, occ)=>{
+        const c = normalizeRackLocation(code || "");
+        if(!c) return;
+        if(!byCode.has(c)) byCode.set(c, []);
+        byCode.get(c).push(occ);
+      };
+
+      for(const row of allItems){
+        const { loc, it, sku, asin } = row;
+        if(!isPositiveStockDoc(it || {})) continue;
+        const locations = readRackLocationsFromDoc(it || {});
+        if(!locations.length) continue;
+
+        const members = membersForSku(sku, it || {});
+        if(asin && asinToSkus.has(asin)){
+          for(const sameSku of asinToSkus.get(asin)){
+            members.add(sameSku);
+            try{ aliasIndex.members(sameSku).forEach(x=>members.add(x)); }catch(_e){}
+          }
+        }
+
+        const occ = {
+          sku,
+          loc,
+          title: it?.title || "",
+          asin: asin || "",
+          members,
+          item: it
+        };
+        for(const code of locations) addOccupant(code, occ);
+      }
+
+      const value = { byCode, skuToAsins, asinToSkus, builtAtClient:Date.now(), key:__rackKey };
+      try{
+        state.cache = state.cache || {};
+        state.cache.rackUsageIndex = { key: __rackKey, value };
+      }catch(_e){}
+      return value;
     }
 
-    function rackLocationItemsForChecks(loc){
-      const out = [];
-      const seen = new Set();
-      const add = (it, source="")=>{
-        if(!it || typeof it !== "object") return;
-        const sku = toSkuId(it.sku || it.id || "");
-        if(!sku) return;
-        const locKey = String(loc || it.location || it.lastSeenLocation || source || "");
-        const rackKey = readRackLocationsFromDoc(it || {}).join("|");
-        const key = `${locKey}::${sku}::${rackKey}`;
-        if(seen.has(key)) return;
-        seen.add(key);
-        out.push(it);
+    function rackCurrentSkuIdentity(currentSku="", currentLoc="", idx=null){
+      const cacheKey = `${inventoryRuntimeCacheKey("rack_identity")}::${toSkuId(currentSku || "")}::${String(currentLoc || "")}`;
+      try{
+        state.cache = state.cache || {};
+        if(!state.cache.rackIdentityCache) state.cache.rackIdentityCache = new Map();
+        const hit = state.cache.rackIdentityCache.get(cacheKey);
+        if(hit) return hit;
+      }catch(_e){}
+
+      const index = idx || getRackLocationUsageIndex();
+      const aliasIndex = buildSkuAliasIndex();
+      const members = new Set();
+      const asins = new Set();
+      const pushSku = (v)=>{
+        const s = toSkuId(v || "");
+        if(s) members.add(s);
       };
-      try{ (stockRepresentativeItemsForLoc(loc) || []).forEach(it=>add(it, "representative")); }catch(_e){}
-      try{ ((state.inventory?.[loc]?.items) || []).forEach(it=>add(it, "raw")); }catch(_e){}
-      return out;
+      const pushAsin = (v)=>{
+        const a = normalizeAsin(v || "");
+        if(a) asins.add(a);
+      };
+      const base = toSkuId(currentSku || "");
+      pushSku(base);
+      try{ pushSku(aliasIndex.resolve(base)); }catch(_e){}
+      try{ aliasIndex.members(base).forEach(pushSku); }catch(_e){}
+
+      for(const s of Array.from(members)){
+        const skuAsins = index.skuToAsins?.get?.(s);
+        if(skuAsins) skuAsins.forEach(pushAsin);
+        try{
+          for(const doc of rackFindDocsForSkuCompare(s, currentLoc)) pushAsin(readAsinFromDoc(doc.it || {}));
+        }catch(_e){}
+      }
+      for(const a of Array.from(asins)){
+        const skuSet = index.asinToSkus?.get?.(a);
+        if(skuSet){
+          for(const s of skuSet){
+            pushSku(s);
+            try{ aliasIndex.members(s).forEach(pushSku); }catch(_e){}
+          }
+        }
+      }
+
+      const value = { members, asins };
+      try{
+        state.cache = state.cache || {};
+        if(!state.cache.rackIdentityCache) state.cache.rackIdentityCache = new Map();
+        state.cache.rackIdentityCache.set(cacheKey, value);
+      }catch(_e){}
+      return value;
+    }
+
+    function rackOccupantMatchesCurrentSku(occ, currentSku="", currentLoc="", idx=null){
+      try{
+        const curSku = toSkuId(currentSku || "");
+        const occSku = toSkuId(occ?.sku || "");
+        if(!curSku || !occSku) return false;
+        if(curSku === occSku) return true;
+        const index = idx || getRackLocationUsageIndex();
+        const identity = rackCurrentSkuIdentity(curSku, currentLoc, index);
+        if(identity.members?.has?.(occSku)) return true;
+        const occMembers = occ?.members instanceof Set ? occ.members : rackSkuAliasSetForCompare(occSku, occ?.item || null);
+        for(const s of occMembers){
+          if(identity.members.has(s)) return true;
+        }
+        const occAsin = normalizeAsin(occ?.asin || readAsinFromDoc(occ?.item || {}) || "");
+        if(occAsin && identity.asins.has(occAsin)) return true;
+        return false;
+      }catch(_e){
+        return false;
+      }
+    }
+
+    function rackItemMatchesCurrentSkuForReuse(it, currentSku="", currentLoc=""){
+      const itemSku = toSkuId(it?.sku || it?.id || "");
+      if(!itemSku || !toSkuId(currentSku || "")) return false;
+      const idx = getRackLocationUsageIndex();
+      const occ = {
+        sku: itemSku,
+        loc: currentLoc,
+        title: it?.title || "",
+        asin: readAsinFromDoc(it || {}),
+        members: rackSkuAliasSetForCompare(itemSku, it || {}),
+        item: it
+      };
+      return rackOccupantMatchesCurrentSku(occ, currentSku, currentLoc, idx);
+    }
+
+    function rackLocationUseInfo(code, currentSku="", currentLoc=""){
+      const target = normalizeRackLocation(code);
+      if(!target) return { same:false, occupiedBy:null };
+      const idx = getRackLocationUsageIndex();
+      const list = idx.byCode?.get?.(target) || [];
+      let same = false;
+      for(const occ of list){
+        if(rackOccupantMatchesCurrentSku(occ, currentSku, currentLoc, idx)){
+          same = true;
+          continue;
+        }
+        return { same, occupiedBy: { sku:occ.sku, loc:occ.loc, title:occ.title || "" } };
+      }
+      return { same, occupiedBy:null };
     }
 
     function rackLocationIsUsedBySameLogicalSku(code, currentSku="", currentLoc=""){
       const target = normalizeRackLocation(code);
       if(!target || !toSkuId(currentSku || "")) return false;
-      for(const loc of INVENTORY_ALL_CLOUD_LOCS){
-        const items = rackLocationItemsForChecks(loc);
-        for(const it of items){
-          if(!isPositiveStockDoc(it || {})) continue;
-          const values = readRackLocationsFromDoc(it || {});
-          if(!values.includes(target)) continue;
-          if(rackItemMatchesCurrentSkuForReuse(it || {}, currentSku, currentLoc)) return true;
-        }
-      }
-      return false;
+      if(!RACK_LOCATION_SET.has(target)) return false;
+      const info = rackLocationUseInfo(target, currentSku, currentLoc);
+      return !!(info.same && !info.occupiedBy);
     }
 
     function rackLocationOccupantInfo(code, currentSku="", currentLoc=""){
       const target = normalizeRackLocation(code);
       if(!target) return null;
-
-      for(const loc of INVENTORY_ALL_CLOUD_LOCS){
-        const items = rackLocationItemsForChecks(loc);
-        for(const it of items){
-          if(!isPositiveStockDoc(it || {})) continue;
-          const values = readRackLocationsFromDoc(it || {});
-          if(!values.includes(target)) continue;
-
-          const itemSku = toSkuId(it?.sku || it?.id || "");
-
-          // Inventario unico: una posizione già usata dallo stesso SKU logico resta selezionabile.
-          // Valido anche se il documento arriva da ramo legacy o da un alias/ASIN equivalente.
-          if(rackItemMatchesCurrentSkuForReuse(it || {}, currentSku, currentLoc)) continue;
-
-          return { sku:itemSku, loc, title: it?.title || "" };
-        }
-      }
-      return null;
+      const info = rackLocationUseInfo(target, currentSku, currentLoc);
+      return info.occupiedBy || null;
     }
 
     function isRackLocationAvailableForItem(code, currentSku="", currentLoc=""){
       const s = normalizeRackLocation(code);
       if(!s) return true;
       if(!RACK_LOCATION_SET.has(s)) return false;
-      return !rackLocationOccupantInfo(s, currentSku, currentLoc);
+      return !rackLocationUseInfo(s, currentSku, currentLoc).occupiedBy;
     }
 
     function isRackLocationUsableForItem(code, currentSku="", currentLoc=""){
       const s = normalizeRackLocation(code);
       if(!s) return true;
       if(!RACK_LOCATION_SET.has(s)) return false;
-      return rackLocationIsUsedBySameLogicalSku(s, currentSku, currentLoc) || isRackLocationAvailableForItem(s, currentSku, currentLoc);
+      return !rackLocationUseInfo(s, currentSku, currentLoc).occupiedBy;
     }
+
 
     function isValidRackLocation(v){
       const s = normalizeRackLocation(v);
@@ -8981,11 +9173,20 @@ function guessTitleFromRaw(rawText, sku){
     }
 
     function rackLocationSelectOptions(selected, currentSku="", currentLoc="", opts={}){
-      const selectedSet = new Set(normalizeRackLocationsList(selected));
-      const excludedSet = new Set(normalizeRackLocationsList(opts && opts.exclude ? opts.exclude : []));
+      const selectedList = normalizeRackLocationsList(selected);
+      const excludedList = normalizeRackLocationsList(opts && opts.exclude ? opts.exclude : []);
+      const selectedSet = new Set(selectedList);
+      const excludedSet = new Set(excludedList);
       const groups = ["A","B","C","D","E","F"];
       const isMultiple = !!(opts && opts.multiple);
       const hideEmpty = !!(opts && opts.hideEmpty);
+      const __optionsKey = inventoryRuntimeCacheKey(`rack_options|${toSkuId(currentSku || "")}|${String(currentLoc || "")}|${selectedList.join(",")}|${excludedList.join(",")}|${isMultiple ? "m" : "s"}|${hideEmpty ? "h" : "n"}`);
+      try{
+        state.cache = state.cache || {};
+        if(!state.cache.rackLocationOptionsHtml) state.cache.rackLocationOptionsHtml = new Map();
+        const hit = state.cache.rackLocationOptionsHtml.get(__optionsKey);
+        if(typeof hit === "string") return hit;
+      }catch(_e){}
       const out = [];
 
       if(!isMultiple){
@@ -9025,7 +9226,13 @@ function guessTitleFromRaw(rawText, sku){
         out.push(`<option value="" disabled>Nessuna ubicazione libera</option>`);
       }
 
-      return out.join("");
+      const html = out.join("");
+      try{
+        state.cache = state.cache || {};
+        if(!state.cache.rackLocationOptionsHtml) state.cache.rackLocationOptionsHtml = new Map();
+        state.cache.rackLocationOptionsHtml.set(__optionsKey, html);
+      }catch(_e){}
+      return html;
     }
 
 
@@ -10246,7 +10453,7 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
           if(!last || t > last) last = t;
         });
         inv.items = arr;
-        try{ if(state.cache) state.cache.invIndexForMatch = null; }catch(_e){}
+        invalidateInventoryRuntimeCaches("inventory_runtime_change");
         inv.meta.count = arr.length;
         inv.meta.lastUpdatedAt = last ? new Date(last) : null;
         inv.meta.loaded = true;
@@ -15289,7 +15496,7 @@ function currentInv(){
           inv.meta.count = inv.items.length;
           inv.meta.lastUpdatedAt = new Date();
           inv.meta.loaded = true;
-          try{ if(state.cache) state.cache.invIndexForMatch = null; }catch(_e){}
+          invalidateInventoryRuntimeCaches("inventory_runtime_change");
           return;
         }
 
@@ -15337,7 +15544,7 @@ function currentInv(){
         inv.meta.count = inv.items.length;
         inv.meta.lastUpdatedAt = new Date(nowClient);
         inv.meta.loaded = true;
-        try{ if(state.cache) state.cache.invIndexForMatch = null; }catch(_e){}
+        invalidateInventoryRuntimeCaches("inventory_runtime_change");
       }catch(err){
         console.warn("runtime inventory patch skipped", err);
       }
