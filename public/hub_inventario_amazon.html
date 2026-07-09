@@ -3959,6 +3959,26 @@ function guessTitleFromRaw(rawText, sku){
       return list.length > 1 || (Number.isFinite(q) && Math.abs(q) > RACK_PALLET_CAPACITY);
     }
 
+    // I rack fisici sono in Concamarise: se assegno un rack a uno SKU presente a Cerea,
+    // non devo creare una nuova giacenza/carico. Devo trasferire lo stock Cerea → Concamarise.
+    function shouldRackAssignmentMoveToConcamarise(sourceLoc, rackChanged, rackLocations){
+      return String(sourceLoc || "").toLowerCase() === "cerea" && !!rackChanged && normalizeRackLocationsList(rackLocations).length > 0;
+    }
+
+    function mergeRackLocationsUnique(...values){
+      const out = [];
+      const seen = new Set();
+      const push = (v)=>{
+        for(const code of normalizeRackLocationsList(v)){
+          if(!code || seen.has(code)) continue;
+          seen.add(code);
+          out.push(code);
+        }
+      };
+      values.forEach(push);
+      return out;
+    }
+
     function __isFiveKgItem(it){
       try{
         const sku = toSkuId((it && (it.sku || it.id)) ? (it.sku || it.id) : "");
@@ -5168,6 +5188,7 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
     function stopAllRealtime(){
       resetLowStockRealtimeWatcher();
       resetZeroStockRecovery();
+      resetRackDuplicateReconcile();
       stopTwReordersWatch();
       stopTwCompletedAmazonWatch();
       for(const loc of ["cerea","concamarise"]){
@@ -5513,6 +5534,226 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
       }catch(_e){}
     }
 
+    // Auto-heal prudente del bug storico: stesso SKU disponibile sia a Cerea sia a Concamarise
+    // dopo ubicazione su rack. Se lo SKU ha rack a Concamarise e Cerea ha la stessa quantità,
+    // Cerea viene azzerata: il rack è fisicamente Concamarise, quindi non è un secondo stock.
+    let __rackDuplicateReconcileTimer = null;
+    let __rackDuplicateReconcileRunning = false;
+    let __rackDuplicateReconcileDoneKeys = new Set();
+
+    function resetRackDuplicateReconcile(){
+      try{ if(__rackDuplicateReconcileTimer) clearTimeout(__rackDuplicateReconcileTimer); }catch(_e){}
+      __rackDuplicateReconcileTimer = null;
+      __rackDuplicateReconcileRunning = false;
+      __rackDuplicateReconcileDoneKeys = new Set();
+    }
+
+    function collectRackDuplicateCandidates(){
+      const out = [];
+      try{
+        const cereaItems = state.inventory?.cerea?.items || [];
+        const concaItems = state.inventory?.concamarise?.items || [];
+        const concaBySku = new Map();
+        concaItems.forEach(it=>{
+          const sku = toSkuId(it?.sku || it?.id || "");
+          if(sku && !concaBySku.has(sku)) concaBySku.set(sku, it);
+        });
+
+        for(const cerea of cereaItems){
+          const sku = toSkuId(cerea?.sku || cerea?.id || "");
+          if(!sku) continue;
+          const conca = concaBySku.get(sku) || null;
+          const cereaQty = stockQtyFromDoc(cerea || {});
+          const concaQty = conca ? stockQtyFromDoc(conca || {}) : 0;
+          const cereaRacks = readRackLocationsFromDoc(cerea || {});
+          const concaRacks = conca ? readRackLocationsFromDoc(conca || {}) : [];
+
+          // Caso A: duplicato classico. Stessa quantità da entrambe le sedi, rack presente a Concamarise.
+          if(cereaQty > 0 && concaQty > 0 && cereaQty === concaQty && concaRacks.length){
+            out.push({ sku, mode:"duplicate_keep_concamarise", cereaQty, concaQty, cereaRacks, concaRacks });
+            continue;
+          }
+
+          // Caso B: vecchia UI ha salvato un rack direttamente su Cerea. Lo sposto a Concamarise.
+          if(cereaQty > 0 && cereaRacks.length && concaQty <= 0){
+            out.push({ sku, mode:"move_cerea_rack_to_concamarise", cereaQty, concaQty, cereaRacks, concaRacks });
+          }
+        }
+      }catch(_e){}
+      return out;
+    }
+
+    async function runRackDuplicateReconcile(reason="rack_duplicate_reconcile"){
+      if(__rackDuplicateReconcileRunning) return;
+      if(!state.user?.isAdmin || !state.user?.isWhitelisted) return;
+      if(!(state.inventory?.cerea?.meta?.loaded && state.inventory?.concamarise?.meta?.loaded)) return;
+      const api = state.firebase?.api;
+      const db = state.firebase?.db;
+      if(!api || !db || !api.runTransaction) return;
+
+      const candidates = collectRackDuplicateCandidates().filter(c=>{
+        const key = `${c.mode}::${c.sku}`;
+        return c.sku && !__rackDuplicateReconcileDoneKeys.has(key);
+      });
+      if(!candidates.length) return;
+
+      __rackDuplicateReconcileRunning = true;
+      let fixed = 0;
+      const preview = [];
+      try{
+        for(const c of candidates.slice(0, 40)){
+          const key = `${c.mode}::${c.sku}`;
+          const sourceRef = api.doc(db, COL_ROOT, "cerea", SUB_ITEMS, c.sku);
+          const destRef = api.doc(db, COL_ROOT, "concamarise", SUB_ITEMS, c.sku);
+          const productRef = api.doc(db, COL_PRODUCTS, c.sku);
+          const moveRef = api.doc(api.collection(db, COL_PRODUCTS, c.sku, SUB_MOVES));
+
+          await api.runTransaction(db, async(tx)=>{
+            const sCerea = await tx.get(sourceRef);
+            const sConca = await tx.get(destRef);
+            if(!sCerea.exists()) return;
+            const dCerea = sCerea.data() || {};
+            const dConca = sConca.exists() ? (sConca.data() || {}) : {};
+            const qCerea = stockQtyFromDoc(dCerea || {});
+            const qConca = stockQtyFromDoc(dConca || {});
+            const racksCerea = readRackLocationsFromDoc(dCerea || {});
+            const racksConca = readRackLocationsFromDoc(dConca || {});
+            const nowClient = Date.now();
+            const who = state.user?.emailLower || state.user?.email || state.user?.uid || "";
+            const title = squashWhitespace(dConca.title || dCerea.title || c.sku) || c.sku;
+            const threshold = __getCustomLowStockThreshold(dConca) ?? __getCustomLowStockThreshold(dCerea);
+
+            let destQty = qConca;
+            let destRacks = racksConca;
+            let mode = c.mode;
+
+            if(c.mode === "duplicate_keep_concamarise"){
+              if(!(qCerea > 0 && qConca > 0 && qCerea === qConca && racksConca.length)) return;
+              destQty = qConca;
+              destRacks = racksConca;
+            }else if(c.mode === "move_cerea_rack_to_concamarise"){
+              if(!(qCerea > 0 && racksCerea.length && qConca <= 0)) return;
+              destQty = qCerea;
+              destRacks = racksCerea;
+            }else{
+              return;
+            }
+
+            tx.set(destRef, {
+              sku: c.sku,
+              title,
+              titleNorm: normalizeText(title || c.sku),
+              qty: destQty,
+              zeroStock: destQty <= 0,
+              rackLocation: destQty > 0 ? (destRacks[0] || "") : "",
+              rackLocations: destQty > 0 ? destRacks : [],
+              lowStockThreshold: threshold,
+              location: "concamarise",
+              updatedAt: api.serverTimestamp(),
+              updatedAtClient: nowClient,
+              updatedBy: who,
+              lastSeenAt: api.serverTimestamp(),
+              lastSeenAtClient: nowClient,
+              lastSeenKind: mode
+            }, { merge:true });
+
+            tx.set(sourceRef, {
+              sku: c.sku,
+              title,
+              titleNorm: normalizeText(title || c.sku),
+              qty: 0,
+              zeroStock: true,
+              zeroStockAt: api.serverTimestamp(),
+              zeroStockAtClient: nowClient,
+              rackLocation: "",
+              rackLocations: [],
+              lowStockThreshold: threshold,
+              location: "cerea",
+              updatedAt: api.serverTimestamp(),
+              updatedAtClient: nowClient,
+              updatedBy: who,
+              lastSeenAt: api.serverTimestamp(),
+              lastSeenAtClient: nowClient,
+              lastSeenKind: mode + "_source_zero"
+            }, { merge:true });
+
+            tx.set(productRef, {
+              sku: c.sku,
+              title,
+              titleNorm: normalizeText(title || c.sku),
+              rackLocation: destRacks[0] || "",
+              rackLocations: destRacks,
+              lowStockThreshold: threshold,
+              lastSeenAt: api.serverTimestamp(),
+              lastSeenAtClient: nowClient,
+              lastSeenBy: who,
+              lastSeenLocation: "concamarise",
+              lastSeenKind: mode
+            }, { merge:true });
+
+            tx.set(moveRef, {
+              type: "rack_duplicate_reconcile",
+              sku: c.sku,
+              qtySigned: 0,
+              deltaSigned: 0,
+              fromWarehouse: "cerea",
+              toWarehouse: "concamarise",
+              beforeFromQty: qCerea,
+              afterFromQty: 0,
+              beforeToQty: qConca,
+              afterToQty: destQty,
+              rackLocations: destRacks,
+              source: "auto_reconcile",
+              note: mode === "duplicate_keep_concamarise" ? "Correzione duplicato Cerea/Concamarise dopo ubicazione rack" : "Correzione rack salvato su Cerea: stock trasferito a Concamarise",
+              locked: true,
+              deleteLocked: true,
+              reason: String(reason || "rack_duplicate_reconcile"),
+              createdAt: api.serverTimestamp(),
+              createdAtClient: nowClient,
+              createdByUid: state.user?.uid || "",
+              createdByEmail: who
+            }, { merge:true });
+          });
+
+          __rackDuplicateReconcileDoneKeys.add(key);
+          fixed++;
+          if(preview.length < 12) preview.push(c.sku);
+        }
+
+        if(fixed){
+          try{
+            await api.setDoc(api.doc(db, COL_META, "rackDuplicateReconcileState"), {
+              lastRunAt: api.serverTimestamp(),
+              lastRunAtClient: Date.now(),
+              fixedCount: fixed,
+              preview,
+              reason: String(reason || "rack_duplicate_reconcile"),
+              by: state.user?.emailLower || state.user?.email || state.user?.uid || ""
+            }, { merge:true });
+          }catch(_e){}
+          showToast("Duplicati rack corretti", `${fixed} SKU riallineati: Cerea azzerata, Concamarise mantenuta.`, 3600);
+          scheduleLowStockEmailAfterUpdate("rack_duplicate_reconcile", { immediate:true });
+        }
+      }catch(err){
+        console.warn("rack duplicate reconcile", err);
+      }finally{
+        __rackDuplicateReconcileRunning = false;
+      }
+    }
+
+    function scheduleRackDuplicateReconcile(reason="inventory"){
+      try{
+        if(__rackDuplicateReconcileRunning) return;
+        if(!state.user?.isAdmin || !state.user?.isWhitelisted) return;
+        if(!(state.inventory?.cerea?.meta?.loaded && state.inventory?.concamarise?.meta?.loaded)) return;
+        if(__rackDuplicateReconcileTimer) clearTimeout(__rackDuplicateReconcileTimer);
+        __rackDuplicateReconcileTimer = setTimeout(()=>{
+          __rackDuplicateReconcileTimer = null;
+          void runRackDuplicateReconcile(reason);
+        }, 1200);
+      }catch(_e){}
+    }
+
     function startRealtimeFor(loc){
       if(!state.firebase.ok || !state.user?.isWhitelisted) return;
       const inv = state.inventory[loc];
@@ -5587,6 +5828,7 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
         triggerLowStockMailFromRealtime("realtime_low_stock_" + loc);
         scheduleTwReordersBackfillFromState("inventory_" + loc);
         scheduleZeroStockRecovery("inventory_" + loc);
+        scheduleRackDuplicateReconcile("inventory_" + loc);
       }, (err)=>{
         console.warn("inventory watch error", err);
         showToast("Permessi insufficienti", err?.message || String(err));
@@ -11007,6 +11249,194 @@ async function loadProductFromDetails(){
       return { canonicalSku: canonical, aliases: list, inventoryDocsUpdated: existing.length };
     }
 
+    async function saveRackAssignmentMoveToConcamariseFromDetails(payload){
+      const api = state.firebase?.api;
+      const db = state.firebase?.db;
+      if(!api || !db || !api.runTransaction) throw new Error("Firebase non inizializzato.");
+
+      const oldSku = toSkuId(payload?.oldSku || "");
+      const sku = toSkuId(payload?.sku || oldSku);
+      if(!oldSku || !sku) throw new Error("SKU non valido.");
+
+      const sourceLoc = "cerea";
+      const dst = "concamarise";
+      const incomingRackLocations = normalizeRackLocationsList(payload?.rackLocations || []);
+      if(!incomingRackLocations.length) throw new Error("Ubicazione rack mancante.");
+
+      const sourceRef = api.doc(db, COL_ROOT, sourceLoc, SUB_ITEMS, oldSku);
+      const destRef = api.doc(db, COL_ROOT, dst, SUB_ITEMS, sku);
+      const oldP = api.doc(db, COL_PRODUCTS, oldSku);
+      const newP = api.doc(db, COL_PRODUCTS, sku);
+      const comboMap = await fetchComboChildrenMap([oldSku]);
+
+      const res = await api.runTransaction(db, async(tx)=>{
+        const sourceSnap = await tx.get(sourceRef);
+        if(!sourceSnap.exists()) throw new Error("Prodotto non trovato a Cerea.");
+
+        const destSnap = await tx.get(destRef);
+        if(sku !== oldSku && destSnap.exists()) throw new Error("SKU già esistente in Concamarise.");
+        if(sku !== oldSku){
+          const newPSnap = await tx.get(newP);
+          if(newPSnap.exists()) throw new Error("SKU già esistente (anagrafica).");
+        }
+
+        const sourceData = sourceSnap.data() || {};
+        const destData = destSnap.exists() ? (destSnap.data() || {}) : {};
+        const sourceQty = stockQtyFromDoc(sourceData || {});
+        if(sourceQty <= 0) throw new Error("Nessun pezzo disponibile a Cerea da spostare.");
+
+        const destPrevQty = destSnap.exists() ? stockQtyFromDoc(destData || {}) : 0;
+        const destPrevRacks = readRackLocationsFromDoc(destData || {});
+        const duplicateLooksAlreadyCreated = destPrevQty === sourceQty && destPrevRacks.length && sameNormalizedRackLocations(destPrevRacks, incomingRackLocations);
+        const destQty = duplicateLooksAlreadyCreated ? destPrevQty : (destPrevQty + sourceQty);
+        const destRackLocations = sanitizeRackLocationsForQty(mergeRackLocationsUnique(destPrevRacks, incomingRackLocations), destQty);
+        const destRackLocation = destRackLocations[0] || "";
+        const nowClient = Date.now();
+        const who = state.user?.emailLower || state.user?.email || state.user?.uid || "";
+        const finalTitle = squashWhitespace(payload?.title || destData.title || sourceData.title || sourceData.name || sku) || sku;
+        const finalLowStockThreshold = payload?.lowStockThreshold ?? __getCustomLowStockThreshold(destData) ?? __getCustomLowStockThreshold(sourceData);
+        const finalAliases = normalizeSkuAliases(payload?.finalSkuAliases || [], sku);
+        const skuUnificationPatch = skuUnificationFields(sku, finalAliases, nowClient, who);
+        const asin = normalizeAsin(payload?.asin || readAsinFromDoc(destData) || readAsinFromDoc(sourceData) || "");
+        const asinPatch = asinCloudFields(asin, nowClient, who);
+        const productionArea = normalizeProductionArea(payload?.productionArea || readProductionAreaFromDoc(destData, dst) || readProductionAreaFromDoc(sourceData, sourceLoc));
+        const note = String(payload?.note || destData.note || sourceData.note || sourceData.notes || "").trim();
+
+        tx.set(destRef, {
+          sku,
+          title: finalTitle,
+          titleNorm: normalizeText(finalTitle || sku),
+          note,
+          qty: destQty,
+          lowStockThreshold: finalLowStockThreshold,
+          rackLocation: destRackLocation,
+          rackLocations: destRackLocations,
+          zeroStock: destQty <= 0,
+          zeroStockAt: destQty <= 0 ? api.serverTimestamp() : null,
+          zeroStockAtClient: destQty <= 0 ? nowClient : null,
+          productionArea,
+          areaProduzione: productionArea,
+          location: dst,
+          updatedAt: api.serverTimestamp(),
+          updatedAtClient: nowClient,
+          updatedBy: who,
+          lastSeenAt: api.serverTimestamp(),
+          lastSeenAtClient: nowClient,
+          lastSeenKind: duplicateLooksAlreadyCreated ? "rack_assignment_duplicate_resolved" : "rack_assignment_move_in",
+          seenCount: api.increment(1),
+          ...asinPatch,
+          ...skuUnificationPatch
+        }, { merge:true });
+
+        tx.set(sourceRef, {
+          sku: oldSku,
+          title: finalTitle,
+          titleNorm: normalizeText(finalTitle || oldSku),
+          note,
+          qty: 0,
+          lowStockThreshold: finalLowStockThreshold,
+          rackLocation: "",
+          rackLocations: [],
+          zeroStock: true,
+          zeroStockAt: api.serverTimestamp(),
+          zeroStockAtClient: nowClient,
+          productionArea: readProductionAreaFromDoc(sourceData, sourceLoc),
+          areaProduzione: readProductionAreaFromDoc(sourceData, sourceLoc),
+          location: sourceLoc,
+          updatedAt: api.serverTimestamp(),
+          updatedAtClient: nowClient,
+          updatedBy: who,
+          lastSeenAt: api.serverTimestamp(),
+          lastSeenAtClient: nowClient,
+          lastSeenKind: duplicateLooksAlreadyCreated ? "rack_assignment_duplicate_source_zero" : "rack_assignment_move_out",
+          seenCount: api.increment(1),
+          ...asinPatch,
+          ...skuUnificationPatch
+        }, { merge:true });
+
+        const pData = {
+          sku,
+          title: finalTitle,
+          titleNorm: normalizeText(finalTitle || sku),
+          note,
+          lowStockThreshold: finalLowStockThreshold,
+          asin,
+          rackLocation: destRackLocation,
+          rackLocations: destRackLocations,
+          active: true,
+          lastSeenAt: api.serverTimestamp(),
+          lastSeenAtClient: nowClient,
+          lastSeenBy: who,
+          lastSeenLocation: dst,
+          lastSeenKind: duplicateLooksAlreadyCreated ? "rack_assignment_duplicate_resolved" : "rack_assignment_move",
+          seenCount: api.increment(1),
+          ...asinPatch,
+          ...skuUnificationPatch
+        };
+        tx.set(newP, pData, { merge:true });
+        if(sku !== oldSku){
+          tx.set(oldP, {
+            sku: oldSku,
+            active: false,
+            renamedTo: sku,
+            renamedAt: api.serverTimestamp(),
+            renamedAtClient: nowClient,
+            renamedBy: who,
+            lastSeenKind: "rack_assignment_rename_move"
+          }, { merge:true });
+        }
+
+        const moveRef = api.doc(api.collection(db, COL_PRODUCTS, sku, SUB_MOVES));
+        tx.set(moveRef, {
+          type: "move",
+          sku,
+          oldSku,
+          newSku: sku,
+          qtySigned: sourceQty,
+          deltaSigned: 0,
+          fromWarehouse: sourceLoc,
+          toWarehouse: dst,
+          beforeFromQty: sourceQty,
+          afterFromQty: 0,
+          beforeToQty: destPrevQty,
+          afterToQty: destQty,
+          lowStockThreshold: finalLowStockThreshold,
+          rackLocation: destRackLocation,
+          rackLocations: destRackLocations,
+          comboChildSkus: normalizeComboChildren(comboMap.get(oldSku) || [], oldSku).map(c=>c.sku),
+          source: "rack_assignment",
+          note: duplicateLooksAlreadyCreated ? "Ubicazione rack: duplicato già presente in Concamarise, Cerea azzerata" : "Ubicazione rack: trasferimento automatico Cerea → Concamarise",
+          duplicateResolved: duplicateLooksAlreadyCreated,
+          createdAt: api.serverTimestamp(),
+          createdAtClient: nowClient,
+          createdByUid: state.user?.uid || "",
+          createdByEmail: who
+        });
+
+        return { sku, movedQty: sourceQty, destQty, dst, title: finalTitle, duplicateResolved: duplicateLooksAlreadyCreated };
+      });
+
+      try{
+        await saveSkuUnificationCloud(res.sku, payload?.finalSkuAliases || [res.sku], { title: res.title, asin: payload?.asin || "", nowClient: Date.now(), who: state.user?.emailLower || state.user?.email || state.user?.uid || "" });
+      }catch(aliasErr){
+        console.warn("rack assignment sku unification skipped", aliasErr);
+      }
+
+      state.route.loc = "concamarise";
+      state.ui.productDetailsSku = res.sku;
+      state.ui.productDetailsEditMode = false;
+      state.ui.productEditSku = null;
+      clearPdFieldErrors();
+      clearSkuRuntimeCache("rack_assignment_move_to_concamarise");
+      showToast(res.duplicateResolved ? "Duplicato risolto" : "Spostato in Concamarise", `${res.movedQty} pz • Rack ${rackLocationsLabel(incomingRackLocations)} • Totale Concamarise: ${res.destQty}`, 3200);
+      scheduleLowStockEmailAfterUpdate("rack_assignment_move_to_concamarise", { immediate:true });
+      renderProductDetailsSheet();
+      renderProductsSheet();
+      renderInventoryList();
+      renderHomeDashboard();
+      return res;
+    }
+
 async function saveProductFromDetails(){
       const loc = state.route.loc;
       if(!loc) return;
@@ -11077,6 +11507,34 @@ async function saveProductFromDetails(){
       if(finalSkuAliases.length > 40){
         setPdFieldError("skuAliases", "Troppi SKU collegati: tieni il gruppo sotto 40 SKU.");
         showToast("Unificazione SKU", "Troppi SKU collegati.", 2200);
+        return;
+      }
+
+      if(shouldRackAssignmentMoveToConcamarise(loc, rackChanged, finalRackLocations)){
+        const okMove = confirm(`Confermi ubicazione rack per ${oldSku}?
+
+Rack: ${rackLocationsLabel(finalRackLocations)}
+Azione cloud: sposta automaticamente lo stock da Cerea a Concamarise.
+
+Non viene creato un carico: Cerea viene azzerata e Concamarise diventa l'unica disponibilità fisica su rack.`);
+        if(!okMove) return;
+        try{
+          await saveRackAssignmentMoveToConcamariseFromDetails({
+            oldSku,
+            sku,
+            title,
+            asin,
+            qty,
+            lowStockThreshold,
+            finalSkuAliases,
+            rackLocation: finalRackLocation,
+            rackLocations: finalRackLocations,
+            note
+          });
+        }catch(err){
+          console.error(err);
+          showToast("Errore spostamento rack", String(err?.message || err).slice(0, 220), 3200);
+        }
         return;
       }
 
