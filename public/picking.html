@@ -8586,7 +8586,7 @@ function guessTitleFromRaw(rawText, sku){
         showToast("Ubicazione non valida", "Scegli una posizione dalla lista.", 2400);
         return;
       }
-      if(newQty > 0 && newCode !== oldCode && !isRackLocationAvailableForItem(newCode, sku, loc)){
+      if(newQty > 0 && newCode !== oldCode && !rackLocationIsUsedBySameLogicalSku(newCode, sku, loc) && !isRackLocationAvailableForItem(newCode, sku, loc)){
         const occ = rackLocationOccupantInfo(newCode, sku, loc);
         showToast("Ubicazione occupata", occ ? `${newCode} è già occupata da ${occ.sku}.` : "Scegli una posizione libera.", 2800);
         return;
@@ -8823,14 +8823,90 @@ function guessTitleFromRaw(rawText, sku){
       return list;
     }
 
+    function rackSkuAliasSetForCompare(sku, doc = null){
+      const out = new Set();
+      const push = (v)=>{
+        const s = toSkuId(v || "");
+        if(s) out.add(s);
+      };
+      const base = toSkuId(sku || doc?.sku || doc?.id || "");
+      push(base);
+      try{ push(resolveSkuAlias(base)); }catch(_e){}
+      try{ skuAliasMembers(base).forEach(push); }catch(_e){}
+      try{ readSkuAliasesFromDoc(doc || {}, base).forEach(push); }catch(_e){}
+      try{ push(readSkuAliasCanonicalFromDoc(doc || {}, base)); }catch(_e){}
+      return out;
+    }
+
+    function rackFindDocsForSkuCompare(currentSku="", currentLoc=""){
+      const curSku = toSkuId(currentSku || "");
+      const out = [];
+      const seen = new Set();
+      const locs = [];
+      const addLoc = (loc)=>{
+        const l = normalizeInventoryLoc(loc) || loc;
+        if(l && !locs.includes(l)) locs.push(l);
+      };
+      addLoc(currentLoc);
+      try{ INVENTORY_ALL_CLOUD_LOCS.forEach(addLoc); }catch(_e){}
+      try{ inventoryLocs().forEach(addLoc); }catch(_e){}
+      for(const loc of locs){
+        const items = state.inventory?.[loc]?.items || [];
+        for(const it of items){
+          const itemSku = toSkuId(it?.sku || it?.id || "");
+          if(!itemSku || !curSku) continue;
+          if(itemSku !== curSku) continue;
+          const key = `${loc}::${itemSku}`;
+          if(seen.has(key)) continue;
+          seen.add(key);
+          out.push({ loc, it });
+        }
+      }
+      return out;
+    }
+
+    function rackItemMatchesCurrentSkuForReuse(it, currentSku="", currentLoc=""){
+      const curSku = toSkuId(currentSku || "");
+      const itemSku = toSkuId(it?.sku || it?.id || "");
+      if(!curSku || !itemSku) return false;
+      if(curSku === itemSku) return true;
+
+      const curAliases = rackSkuAliasSetForCompare(curSku);
+      const itemAliases = rackSkuAliasSetForCompare(itemSku, it || {});
+      for(const x of curAliases){
+        if(itemAliases.has(x)) return true;
+      }
+
+      try{
+        const itemAsin = readAsinFromDoc(it || {});
+        if(itemAsin){
+          for(const doc of rackFindDocsForSkuCompare(curSku, currentLoc)){
+            if(readAsinFromDoc(doc.it || {}) === itemAsin) return true;
+          }
+        }
+      }catch(_e){}
+
+      return false;
+    }
+
+    function rackLocationIsUsedBySameLogicalSku(code, currentSku="", currentLoc=""){
+      const target = normalizeRackLocation(code);
+      if(!target || !toSkuId(currentSku || "")) return false;
+      for(const loc of INVENTORY_ALL_CLOUD_LOCS){
+        const items = stockRepresentativeItemsForLoc(loc);
+        for(const it of items){
+          if(!isPositiveStockDoc(it || {})) continue;
+          const values = readRackLocationsFromDoc(it || {});
+          if(!values.includes(target)) continue;
+          if(rackItemMatchesCurrentSkuForReuse(it || {}, currentSku, currentLoc)) return true;
+        }
+      }
+      return false;
+    }
+
     function rackLocationOccupantInfo(code, currentSku="", currentLoc=""){
       const target = normalizeRackLocation(code);
       if(!target) return null;
-
-      const curSku = toSkuId(currentSku || "");
-      const curCanonicalSku = curSku
-        ? ((typeof resolveSkuAlias === "function" ? resolveSkuAlias(curSku) : curSku) || curSku)
-        : "";
 
       for(const loc of INVENTORY_ALL_CLOUD_LOCS){
         const items = stockRepresentativeItemsForLoc(loc);
@@ -8840,14 +8916,10 @@ function guessTitleFromRaw(rawText, sku){
           if(!values.includes(target)) continue;
 
           const itemSku = toSkuId(it?.sku || it?.id || "");
-          const itemCanonicalSku = itemSku
-            ? ((typeof resolveSkuAlias === "function" ? resolveSkuAlias(itemSku) : itemSku) || itemSku)
-            : "";
 
           // Inventario unico: una posizione già usata dallo stesso SKU logico resta selezionabile.
-          // Non deve più contare la vecchia sede Cerea/Concamarise, altrimenti lo stesso SKU
-          // migrato/letto da ramo legacy blocca il merge nello stesso rack.
-          if(curSku && (itemSku === curSku || (curCanonicalSku && itemCanonicalSku === curCanonicalSku))) continue;
+          // Valido anche se il documento arriva da ramo legacy o da un alias/ASIN equivalente.
+          if(rackItemMatchesCurrentSkuForReuse(it || {}, currentSku, currentLoc)) continue;
 
           return { sku:itemSku, loc, title: it?.title || "" };
         }
@@ -21246,14 +21318,14 @@ function closeSheet(kind){
       return qrRackFinalCodesFromBase(base).map(code=>{
         const level = (code.match(/-L([123])-/) || [])[1] || "";
         const occ = rackLocationOccupantInfo(code, sku, loc);
-        const already = alreadyForSku.has(code);
+        const already = alreadyForSku.has(code) || rackLocationIsUsedBySameLogicalSku(code, sku, loc);
         const valid = RACK_LOCATION_SET.has(code);
         // Già usata dallo stesso SKU = consentita: la quantità residua viene sommata cloud.
-        const available = valid && !occ && isRackLocationAvailableForItem(code, sku, loc);
+        const available = valid && (already || isRackLocationAvailableForItem(code, sku, loc));
         let reason = already ? "Già usata dallo stesso SKU: verrà sommata" : "Disponibile";
         if(!valid) reason = "Non valida";
-        else if(occ) reason = `Occupata da ${occ.sku}`;
-        return { code, level, available, reason, occupant:occ || null, already };
+        else if(!already && occ) reason = `Occupata da ${occ.sku}`;
+        return { code, level, available, reason, occupant:(!already && occ) ? occ : null, already };
       });
     }
 
@@ -21456,7 +21528,7 @@ function closeSheet(kind){
       }
       if(parsed.finalCode){
         const code = normalizeRackLocation(parsed.finalCode);
-        if(!isRackLocationAvailableForItem(code, s.sku, s.loc)){
+        if(!rackLocationIsUsedBySameLogicalSku(code, s.sku, s.loc) && !isRackLocationAvailableForItem(code, s.sku, s.loc)){
           const occ = rackLocationOccupantInfo(code, s.sku, s.loc);
           qrRackSetVideoVisible(false);
           const result = s.overlay?.querySelector?.("[data-qr-result]");
@@ -21580,7 +21652,7 @@ function closeSheet(kind){
         if(levelBtn){
           if(levelBtn.disabled || levelBtn.classList.contains("disabled")) return;
           const code = normalizeRackLocation(levelBtn.getAttribute("data-code") || "");
-          if(!isRackLocationAvailableForItem(code, sku, loc)){
+          if(!rackLocationIsUsedBySameLogicalSku(code, sku, loc) && !isRackLocationAvailableForItem(code, sku, loc)){
             const occ = rackLocationOccupantInfo(code, sku, loc);
             qrRackStatus(occ ? `Livello occupato da ${occ.sku}.` : "Livello non disponibile.", "warn");
             qrRackRenderLevels(qrRackBaseFromFinalCode(code));
@@ -21599,7 +21671,7 @@ function closeSheet(kind){
           try{ select.value = ""; }catch(_e){}
           return;
         }
-        if(!isRackLocationAvailableForItem(code, sku, loc)){
+        if(!rackLocationIsUsedBySameLogicalSku(code, sku, loc) && !isRackLocationAvailableForItem(code, sku, loc)){
           const occ = rackLocationOccupantInfo(code, sku, loc);
           qrRackStatus(occ ? `${code} occupata da ${occ.sku}. Scegli un altro rack.` : `${code} non disponibile. Scegli un altro rack.`, "warn");
           try{ select.value = ""; }catch(_e){}
@@ -21761,7 +21833,7 @@ function closeSheet(kind){
         showToast("Ubicazione non valida", "Scegli una posizione dalla lista.", 2200);
         return;
       }
-      if(!isRackLocationAvailableForItem(selectedCode, sku, loc)){
+      if(!rackLocationIsUsedBySameLogicalSku(selectedCode, sku, loc) && !isRackLocationAvailableForItem(selectedCode, sku, loc)){
         const occ = rackLocationOccupantInfo(selectedCode, sku, loc);
         if(!quickMode) setPdFieldError("rackLocation", occ ? `Ubicazione già occupata da ${occ.sku} (${prettyLoc(occ.loc)}).` : "Ubicazione non disponibile.");
         showToast("Ubicazione occupata", "Scegli solo ubicazioni libere.", 2400);
@@ -23334,7 +23406,7 @@ async function saveProductFromDetails(){
         showToast("Ubicazioni", `Sopra ${RACK_PALLET_CAPACITY} pz puoi assegnare più posti.`, 2600);
         return;
       }
-      if(!areRackLocationsAvailableForItem(rackLocations, oldSku, loc)){
+      if(!normalizeRackLocationsList(rackLocations).every(code => rackLocationIsUsedBySameLogicalSku(code, oldSku, loc) || isRackLocationAvailableForItem(code, oldSku, loc))){
         const occ = normalizeRackLocationsList(rackLocations).map(code => rackLocationOccupantInfo(code, oldSku, loc)).find(Boolean);
         setPdFieldError("rackLocation", occ ? `Ubicazione già occupata da ${occ.sku} (${prettyLoc(occ.loc)}).` : "Ubicazione non disponibile.");
         showToast("Ubicazione occupata", "Scegli solo ubicazioni libere.", 2400);
