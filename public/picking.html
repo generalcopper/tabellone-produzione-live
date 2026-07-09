@@ -7963,7 +7963,8 @@ function guessTitleFromRaw(rawText, sku){
 
 
     function validInventoryLoc(loc){
-      return String(loc || "").trim().toLowerCase() === INVENTORY_CANONICAL_LOC;
+      const s = String(loc || "").trim().toLowerCase();
+      return s === "unica" || s === INVENTORY_CANONICAL_LOC || normalizeInventoryLoc(s) === INVENTORY_CANONICAL_LOC;
     }
 
     function inventoryLocs(){
@@ -12464,8 +12465,9 @@ function startAllLogs(modeOrOpts = "full"){
         const looksAmazonSku = !!(
           d.amazonInventorySku ||
           d.kind === "amazonSku" ||
-          String(d.inventoryTarget || "") === "amazon_concamarise" ||
-          String(d.amazonInventoryLocation || "") === TW_WRITE_AMZ_TARGET_LOC
+          (String(d.inventoryTarget || "") === "amazon_concamarise" || String(d.inventoryTarget || "") === "amazon_unico" || String(d.inventoryTarget || "") === "amazon") ||
+          String(d.amazonInventoryLocation || "") === TW_WRITE_AMZ_TARGET_LOC ||
+          String(d.amazonInventoryArea || d.inventoryArea || "").toLowerCase() === "unica"
         );
         const looksReorder = !!(
           hay.includes("hub_inventario_amazon_riordino") ||
@@ -12477,7 +12479,7 @@ function startAllLogs(modeOrOpts = "full"){
         if(!looksAmazonSku || !looksReorder) return null;
 
         const locRaw = String(d.hubInventorySourceLocation || d.amazonInventoryLocation || TW_WRITE_AMZ_TARGET_LOC).toLowerCase();
-        const loc = (locRaw === "cerea" || locRaw === "concamarise") ? locRaw : TW_WRITE_AMZ_TARGET_LOC;
+        const loc = normalizeInventoryLoc(locRaw) || TW_WRITE_AMZ_TARGET_LOC;
         const qty = Number(d.qty || d.reorderedQty || d.amazonInventoryQty || 0);
         const createdAtClient = Number(d.createdAtMs || d.createdAtOrigMs || d.reorderedAtClient || 0) || 0;
         return {
@@ -12589,10 +12591,16 @@ function startAllLogs(modeOrOpts = "full"){
         const src = String(d?.source || "").trim().toLowerCase();
         const kind = String(d?.kind || "").trim().toLowerCase();
         const target = String(d?.inventoryTarget || "").trim().toLowerCase();
-        return src === "manual_amazon_concamarise" ||
+        const area = String(d?.amazonInventoryArea || d?.inventoryArea || "").trim().toLowerCase();
+        return src === "manual_amazon_unico" ||
+          src === "manual_amazon" ||
+          src === "manual_amazon_concamarise" ||
           kind === "amazonsku" ||
           kind === "amazon_sku" ||
+          target === "amazon_unico" ||
+          target === "amazon" ||
           target === "amazon_concamarise" ||
+          area === "unica" ||
           !!(d?.amazonInventorySku || d?.amazonInventoryLocation);
       }catch(_e){ return false; }
     }
@@ -12890,10 +12898,10 @@ function startAllLogs(modeOrOpts = "full"){
               workflowId: null,
               workflowLabel: `Tabellone WRITE • ${plan.title}`.slice(0, 180),
               source: "Tabellone WRITE",
-              docType: "PRODUZIONE_WRITE_AMAZON_CONCAMARISE",
+              docType: "PRODUZIONE_WRITE_AMAZON_UNICO",
               twDoneId: plan.doneId,
               sourceLine: TW_WRITE_LINE_BUCKET,
-              origin: "tabellone_write_amazon_concamarise",
+              origin: "tabellone_write_amazon_unico",
               comboApplied: comboLines.length > 0,
               comboVersion: 2,
               comboLines,
@@ -22504,7 +22512,7 @@ function closeSheet(kind){
 
     function normalizeInventoryLoc(v){
       const s = String(v || "").trim().toLowerCase();
-      return (s === "cerea" || s === "concamarise" || s === INVENTORY_CANONICAL_LOC) ? INVENTORY_CANONICAL_LOC : "";
+      return (s === "unica" || s === "cerea" || s === "concamarise" || s === INVENTORY_CANONICAL_LOC) ? INVENTORY_CANONICAL_LOC : "";
     }
 
     function movementTargetLoc(m, fallbackLoc=""){
@@ -23106,10 +23114,13 @@ async function reorderProductToTabelloneWrite(){
     batch.set(ref, {
       queueOrderKey,
       kind: "amazonSku",
-      source: "manual_amazon_concamarise",
+      source: "manual_amazon_unico",
       origin: "hub_inventario_amazon_riordino",
-      inventoryTarget: "amazon_concamarise",
+      inventoryTarget: "amazon_unico",
       amazonInventoryLocation: TW_WRITE_AMZ_TARGET_LOC,
+      amazonInventoryArea: "unica",
+      inventoryArea: "unica",
+      amazonInventoryLocationLabel: INVENTORY_SINGLE_AREA_LABEL,
       amazonInventorySku: sku,
       amazonInventoryTitle: title,
       amazonInventoryUom: "pz",
@@ -23117,7 +23128,7 @@ async function reorderProductToTabelloneWrite(){
       product: title,
       qty: String(qty),
       unit: "pz",
-      format: "SKU Amazon • Concamarise",
+      format: "SKU Amazon • Inventario unico",
       status: "DA PRODURRE",
       rawLine: `AMZ: ${sku} | ${qty}`,
       hubInventorySourceLocation: loc,

@@ -12714,18 +12714,57 @@ const TW_CONCA_WAREHOUSE = "concamarise";
 const TW_CONCA_SOURCE = "Tabellone WRITE";
 const TW_CONCA_DOC_TYPE = "PRODUZIONE_WRITE";
 const TW_AMZ_ROOT = "amzInventory";
+// Inventario Amazon unico: il path cloud resta compatibile con lo storico,
+// ma la logica di sede viene neutralizzata e identificata come area unica.
 const TW_AMZ_LOC = "concamarise";
+const TW_AMZ_AREA = "unica";
+const TW_AMZ_LABEL = "Inventario unico";
 const TW_AMZ_ITEMS_SUB = "items";
 const TW_AMZ_LOGS_SUB = "logs";
 const TW_AMZ_PRODUCTS_COL = "amzInventoryProducts";
 const TW_AMZ_MOVES_SUB = "movements";
 const TW_AMZ_SOURCE = "Tabellone WRITE";
-const TW_AMZ_DOC_TYPE = "PRODUZIONE_WRITE_AMAZON_CONCAMARISE";
+const TW_AMZ_DOC_TYPE = "PRODUZIONE_WRITE_AMAZON_UNICO";
+const TW_AMZ_ORIGIN = "tabellone_write_amazon_unico";
 const TW_AMZ_COMBO_VERSION = 2;
 // Amazon inventory/Combo: da ora la sincronizzazione vera la fa il trigger backend
 // syncTabelloneWriteAmazonCombo su producedDays/linea_liquidi/items/{doneId}.
 // Questo NON tocca PF, Conca/DDT o altri hub: spegne solo il vecchio backfill Amazon lato browser.
 const TW_AMZ_BACKEND_TRIGGER_ONLY = true;
+
+
+function twAmazonLocationLabel(){
+  return String(TW_AMZ_LABEL || "Inventario unico");
+}
+
+function twAmazonInventoryArea(){
+  return String(TW_AMZ_AREA || "unica");
+}
+
+function twAmazonCloudLoc(){
+  // Path tecnico canonico, usato solo per compatibilità Firestore/regole esistenti.
+  return String(TW_AMZ_LOC || "concamarise");
+}
+
+function twAmazonIsLegacyOrUnifiedTarget(v){
+  const s = String(v || "").trim().toLowerCase();
+  return s === "amazon_unico" || s === "amazon" || s === "amazon_concamarise" || s === "amazon_cerea";
+}
+
+function twAmazonIsLegacyOrUnifiedSource(v){
+  const s = String(v || "").trim().toLowerCase();
+  return s === "manual_amazon_unico" || s === "manual_amazon" || s === "manual_amazon_concamarise" || s === "manual_amazon_cerea";
+}
+
+function twAmazonAreaFields(){
+  return {
+    inventoryArea: twAmazonInventoryArea(),
+    amazonInventoryArea: twAmazonInventoryArea(),
+    amazonInventoryLocation: twAmazonCloudLoc(),
+    amazonInventoryLocationLabel: twAmazonLocationLabel(),
+    amazonInventoryLabel: twAmazonLocationLabel()
+  };
+}
 
 function twEnsurePfState(){
   const tw = ensureTabWriteState();
@@ -13035,6 +13074,7 @@ function twConcaMovementDocId(baseId){
 function twBuildConcaInventoryLoadPayload(done, fs){
   try{
     if(!done) return null;
+    if(typeof twIsManualAmazonSkuRow === "function" && twIsManualAmazonSkuRow(done)) return null;
 
     const qtyRaw = twConcaQtyNum(done.qty);
     if(!(qtyRaw > 0)) return null;
@@ -13123,10 +13163,12 @@ function twIsManualAmazonSkuRow(it){
     const src = String(it.source || "").trim().toLowerCase();
     const kind = String(it.kind || "").trim().toLowerCase();
     const target = String(it.inventoryTarget || "").trim().toLowerCase();
-    return src === "manual_amazon_concamarise" ||
+    const area = String(it.amazonInventoryArea || it.inventoryArea || "").trim().toLowerCase();
+    return twAmazonIsLegacyOrUnifiedSource(src) ||
       kind === "amazonsku" ||
       kind === "amazon_sku" ||
-      target === "amazon_concamarise" ||
+      twAmazonIsLegacyOrUnifiedTarget(target) ||
+      area === twAmazonInventoryArea() ||
       !!(it.amazonInventorySku || it.amazonInventoryLocation);
   }catch(_e){
     return false;
@@ -13199,9 +13241,9 @@ function twAmazonCanonicalLabel(it){
 
 function twAmazonStatusText(){
   const amz = twEnsureAmazonState();
-  if(amz.error) return `SKU Amazon Concamarise non disponibili: ${amz.error}`;
-  if(!amz.ready) return "SKU Amazon Concamarise in caricamento…";
-  return `SKU Amazon Concamarise: ${amz.items.length.toLocaleString("it-IT")} prodotti`;
+  if(amz.error) return `SKU Amazon ${twAmazonLocationLabel()} non disponibili: ${amz.error}`;
+  if(!amz.ready) return "SKU Amazon inventario unico in caricamento…";
+  return `SKU Amazon ${twAmazonLocationLabel()}: ${amz.items.length.toLocaleString("it-IT")} prodotti`;
 }
 
 function twCompileStatusText(){
@@ -13427,7 +13469,9 @@ function twAmazonComboLinesFromPlan(plan, children){
     return {
       sku: c.sku,
       title: String(c.title || c.sku || "").trim(),
-      loc: TW_AMZ_LOC,
+      loc: TW_AMZ_AREA,
+      cloudLoc: TW_AMZ_LOC,
+      inventoryArea: TW_AMZ_AREA,
       qtySigned: q,
       deltaSigned: q,
       parentSku: plan?.sku || "",
@@ -13454,7 +13498,9 @@ function twAmazonComboLinesFromDone(done, plan, opts={}){
     return raw.map(x=>({
       sku: String(x?.sku || x?.childSku || "").trim().toUpperCase(),
       title: String(x?.title || x?.name || x?.sku || "").trim(),
-      loc: (String(x?.loc || x?.location || "").trim().toLowerCase() === "cerea") ? "cerea" : TW_AMZ_LOC,
+      loc: TW_AMZ_AREA,
+      cloudLoc: TW_AMZ_LOC,
+      inventoryArea: TW_AMZ_AREA,
       qtySigned: Number(x?.qtySigned ?? x?.deltaSigned ?? 0),
       deltaSigned: Number(x?.deltaSigned ?? x?.qtySigned ?? 0),
       parentSku: String(x?.parentSku || plan?.sku || "").trim().toUpperCase(),
@@ -13488,9 +13534,11 @@ function twAmazonProductMovementPayload(plan, fs, comboLines=[]){
     title: plan.title,
     qtySigned: plan.qty,
     deltaSigned: plan.qty,
-    fromWarehouse: TW_AMZ_LOC,
-    toWarehouse: TW_AMZ_LOC,
-    location: TW_AMZ_LOC,
+    fromWarehouse: TW_AMZ_AREA,
+    toWarehouse: TW_AMZ_AREA,
+    location: TW_AMZ_AREA,
+    cloudInventoryLocation: TW_AMZ_LOC,
+    inventoryArea: TW_AMZ_AREA,
     source: "tabellone_write",
     note: "Carico da Tabellone WRITE",
     flowKind: "tabellone_write",
@@ -13524,7 +13572,8 @@ function twAmazonApplyComboEffects(writer, fs, db, plan, comboLines, opts={}){
     const storedQty = Number(line.qtySigned ?? line.deltaSigned ?? 0);
     if(!Number.isFinite(storedQty) || storedQty === 0) continue;
     const delta = reverse ? -storedQty : storedQty;
-    const loc = (String(line.loc || line.location || "").trim().toLowerCase() === "cerea") ? "cerea" : TW_AMZ_LOC;
+    const loc = TW_AMZ_LOC;
+    const area = TW_AMZ_AREA;
     const title = String(line.title || sku).trim() || sku;
     const itemRef = fs.doc(db, TW_AMZ_ROOT, loc, TW_AMZ_ITEMS_SUB, sku);
     const productRef = fs.doc(db, TW_AMZ_PRODUCTS_COL, sku);
@@ -13536,6 +13585,8 @@ function twAmazonApplyComboEffects(writer, fs, db, plan, comboLines, opts={}){
       titleNorm: twPfNorm(title || sku),
       qty: fs.increment(delta),
       location: loc,
+      inventoryArea: TW_AMZ_AREA,
+      locationLabel: TW_AMZ_LABEL,
       updatedAt: fs.serverTimestamp(),
       updatedAtClient: Date.now(),
       updatedBy: plan.who,
@@ -13553,9 +13604,11 @@ function twAmazonApplyComboEffects(writer, fs, db, plan, comboLines, opts={}){
         title,
         qtySigned: storedQty,
         deltaSigned: storedQty,
-        fromWarehouse: loc,
-        toWarehouse: loc,
-        location: loc,
+        fromWarehouse: area,
+        toWarehouse: area,
+        location: area,
+        cloudInventoryLocation: loc,
+        inventoryArea: area,
         source: "tabellone_write",
         note: line.note || `Scarico combo da Tabellone WRITE • madre: ${plan.sku}`,
         comboParentSkus: [plan.sku],
@@ -13584,6 +13637,8 @@ function twAmazonApplyComboEffects(writer, fs, db, plan, comboLines, opts={}){
       lastSeenAtClient: Date.now(),
       lastSeenBy: plan.who,
       lastSeenLocation: loc,
+      lastSeenInventoryArea: TW_AMZ_AREA,
+      lastSeenLocationLabel: TW_AMZ_LABEL,
       lastSeenKind: reverse ? "tabellone_write_combo_rollback" : "tabellone_write_combo_scarico",
       seenCount: fs.increment(1)
     }, { merge:true });
@@ -13636,6 +13691,8 @@ function twApplyAmazonInventoryBatchWrite(batch, fs, db, done, opts={}){
     titleNorm: twPfNorm(plan.title || plan.sku),
     qty: fs.increment(delta),
     location: TW_AMZ_LOC,
+    inventoryArea: TW_AMZ_AREA,
+    locationLabel: TW_AMZ_LABEL,
     updatedAt: fs.serverTimestamp(),
     updatedAtClient: Date.now(),
     updatedBy: plan.who,
@@ -13672,7 +13729,7 @@ function twApplyAmazonInventoryBatchWrite(batch, fs, db, done, opts={}){
       sourceLine: TW_LINE_BUCKET,
       orderNo: String(done.orderNo || "").trim(),
       customer: String(done.customer || "").trim(),
-      origin: "tabellone_write_amazon_concamarise",
+      origin: TW_AMZ_ORIGIN,
       comboApplied: comboLines.length > 0,
       comboVersion: TW_AMZ_COMBO_VERSION,
       comboLines,
@@ -13687,6 +13744,8 @@ function twApplyAmazonInventoryBatchWrite(batch, fs, db, done, opts={}){
       lastSeenAtClient: Date.now(),
       lastSeenBy: plan.who,
       lastSeenLocation: TW_AMZ_LOC,
+      lastSeenInventoryArea: TW_AMZ_AREA,
+      lastSeenLocationLabel: TW_AMZ_LABEL,
       lastSeenKind: "tabellone_write",
       seenCount: fs.increment(1)
     }, { merge:true });
@@ -13781,6 +13840,8 @@ async function twSyncCompletedAmazonItemsToInventory(items){
             titleNorm: twPfNorm(plan.title || plan.sku),
             qty: fs.increment(plan.qty),
             location: TW_AMZ_LOC,
+            inventoryArea: TW_AMZ_AREA,
+            locationLabel: TW_AMZ_LABEL,
             updatedAt: fs.serverTimestamp(),
             updatedAtClient: Date.now(),
             updatedBy: plan.who,
@@ -13808,7 +13869,7 @@ async function twSyncCompletedAmazonItemsToInventory(items){
             docType: TW_AMZ_DOC_TYPE,
             twDoneId: plan.doneId,
             sourceLine: TW_LINE_BUCKET,
-            origin: "tabellone_write_amazon_concamarise"
+            origin: TW_AMZ_ORIGIN
           }, { merge:true });
         }
 
@@ -13820,6 +13881,8 @@ async function twSyncCompletedAmazonItemsToInventory(items){
           lastSeenAtClient: Date.now(),
           lastSeenBy: plan.who,
           lastSeenLocation: TW_AMZ_LOC,
+          lastSeenInventoryArea: TW_AMZ_AREA,
+          lastSeenLocationLabel: TW_AMZ_LABEL,
           lastSeenKind: "tabellone_write",
           seenCount: fs.increment(1)
         }, { merge:true });
@@ -13847,6 +13910,9 @@ async function twSyncCompletedAmazonItemsToInventory(items){
           amazonInventorySyncedAt: fs.serverTimestamp(),
           amazonInventorySyncedAtMs: Date.now(),
           amazonInventoryLocation: TW_AMZ_LOC,
+          amazonInventoryArea: TW_AMZ_AREA,
+          inventoryArea: TW_AMZ_AREA,
+          amazonInventoryLocationLabel: TW_AMZ_LABEL,
           amazonInventorySku: plan.sku,
           amazonInventoryTitle: plan.title,
           amazonInventoryUom: "pz",
@@ -13904,7 +13970,9 @@ function twStartAmazonWatch(){
           title: String(v.title || v.name || v.product || v.descrizione || "").trim(),
           titleNorm: String(v.titleNorm || "").trim(),
           qty: twPfNum(v.qty),
-          location: TW_AMZ_LOC,
+          location: TW_AMZ_AREA,
+          cloudLocation: TW_AMZ_LOC,
+          inventoryArea: TW_AMZ_AREA,
           updatedAtClient: Number(v.updatedAtClient || 0)
         };
       });
@@ -15016,7 +15084,7 @@ function twCompileInlineRefresh(){
   const chunks = [];
 
   if(amzMatches.length){
-    chunks.push(`<div class="twCompileInlineHead">SKU Hub Inventario Amazon · Concamarise</div>` + amzMatches.map(it => {
+    chunks.push(`<div class="twCompileInlineHead">SKU Hub Inventario Amazon · Inventario unico</div>` + amzMatches.map(it => {
       const label = twAmazonCanonicalLabel(it);
       const meta = [`SKU ${it.sku}`, `Stock ${twPfDisplayQty(it.qty)} pz`].filter(Boolean).join(" • ");
       return `
@@ -15111,7 +15179,7 @@ function twMountPfCompileUi(){
     assist.id = "twCompileInlineAssist";
     assist.className = "twCompileInlineAssist";
     assist.innerHTML = `
-      <div class="muted" id="twCompileInlineHint">PF liquidi magazzino agenti • SKU Amazon Concamarise</div>
+      <div class="muted" id="twCompileInlineHint">PF liquidi magazzino agenti • SKU Amazon inventario unico</div>
       <div id="twCompileInlineResults" class="twCompileInlineResults"></div>
       <div id="twCompileInlineStatus" class="twCompileInlineStatus"></div>
     `;
@@ -16279,7 +16347,7 @@ function twRenderQueue(items){
         <div class="top" style="gap:10px; align-items:flex-start;">
           <div style="min-width:0;">
             <div class="name">${escapeHtml(title)}</div>
-            <div class="sub" style="font-weight:800;">${isAmz ? `SKU: ${escapeHtml(it.amazonInventorySku || it.code || "")} · Hub Amazon Concamarise · ` : ``}Pezzi: ${escapeHtml(qtyTxt)} · Stato: ${escapeHtml(st)} · Creato: ${escapeHtml(created)}</div>
+            <div class="sub" style="font-weight:800;">${isAmz ? `SKU: ${escapeHtml(it.amazonInventorySku || it.code || "")} · Hub Amazon unico · ` : ``}Pezzi: ${escapeHtml(qtyTxt)} · Stato: ${escapeHtml(st)} · Creato: ${escapeHtml(created)}</div>
           </div>
           <div style="display:flex; gap:8px; align-items:center; justify-content:flex-end; flex-wrap:wrap;">
             <button class="btn good" data-tw-act="done" type="button">Completa</button>
@@ -16385,7 +16453,7 @@ function twRenderDoneInto(out, items){
         <div class="top" style="gap:10px; align-items:flex-start;">
           <div style="min-width:0;">
             <div class="name">${escapeHtml(title)}</div>
-            <div class="sub" style="font-weight:800;">${isAmz ? `SKU: ${escapeHtml(it.amazonInventorySku || it.code || "")} · Hub Amazon Concamarise · ` : ``}Pezzi: ${escapeHtml(qtyTxt)} · Completato: ${escapeHtml(twFmtWhen(it.completedAtMs))}${who ? ` · Da: ${escapeHtml(who)}` : ``}</div>
+            <div class="sub" style="font-weight:800;">${isAmz ? `SKU: ${escapeHtml(it.amazonInventorySku || it.code || "")} · Hub Amazon unico · ` : ``}Pezzi: ${escapeHtml(qtyTxt)} · Completato: ${escapeHtml(twFmtWhen(it.completedAtMs))}${who ? ` · Da: ${escapeHtml(who)}` : ``}</div>
           </div>
           <div style="display:flex; gap:8px; align-items:center; justify-content:flex-end; flex-wrap:wrap;">
             <button class="btn ghost" data-tw-act="undo" type="button">Ripristina</button>
@@ -16428,7 +16496,7 @@ function twMagItemText(it){
 function twMagIsAmazon(it){
   const kind = twMagClean(it.kind);
   const src = twMagClean(it.source);
-  return kind === "amazonSku" || src === "manual_amazon_concamarise" || !!twMagClean(it.amazonInventorySku) || twMagClean(it.format).toLowerCase().includes("sku amazon");
+  return kind === "amazonSku" || kind === "amazon_sku" || twAmazonIsLegacyOrUnifiedSource(src) || twAmazonIsLegacyOrUnifiedTarget(twMagClean(it.inventoryTarget)) || !!twMagClean(it.amazonInventorySku) || twMagClean(it.format).toLowerCase().includes("sku amazon");
 }
 function twMagIsPf(it){
   const kind = twMagClean(it.kind);
@@ -16647,6 +16715,8 @@ async function twCompleteJob(){
     if(fb) fb.textContent = "Salvataggio…";
 
     const { id, job } = tw.pendingComplete;
+    const isAmazonJob = twIsManualAmazonSkuRow(job);
+    const isFinishedProductJob = twIsManualFinishedProductRow(job);
     const qtyRaw = String(($("twQtyInput")?.value || "")).trim().replace(",",".");
     const qtyNum = Number(qtyRaw);
     if(!Number.isFinite(qtyNum) || qtyNum <= 0){
@@ -16656,10 +16726,10 @@ async function twCompleteJob(){
       return;
     }
 
-    if(twIsManualFinishedProductRow(job) || twIsManualAmazonSkuRow(job)){
+    if(isFinishedProductJob || isAmazonJob){
       const qtyInt = Math.round(qtyNum);
       if(Math.abs(qtyNum - qtyInt) > 1e-9){
-        if(fb) fb.textContent = twIsManualAmazonSkuRow(job) ? "Per gli SKU Amazon inserisci una quantità intera." : "Per i PF inserisci una quantità intera.";
+        if(fb) fb.textContent = isAmazonJob ? "Per gli SKU Amazon inserisci una quantità intera." : "Per i PF inserisci una quantità intera.";
         $("twQtyInput")?.focus?.();
         $("twQtyInput")?.select?.();
         return;
@@ -16676,29 +16746,32 @@ async function twCompleteJob(){
     const key = String(id);
     const doneDocId = twKeyToDocId(key);
     const label = ((job.product||job.finishedProductName||"") + (job.format ? (" • " + job.format) : "")).trim() || "Completato";
-    const movementId = twIsManualFinishedProductRow(job) ? twPfMovementDocId(doneDocId) : "";
-    const amazonMovementId = twIsManualAmazonSkuRow(job) ? twAmazonMovementDocId(doneDocId) : "";
-    const concaMovementId = twConcaMovementDocId(doneDocId);
+    const movementId = isFinishedProductJob ? twPfMovementDocId(doneDocId) : "";
+    const amazonMovementId = isAmazonJob ? twAmazonMovementDocId(doneDocId) : "";
+    const concaMovementId = isAmazonJob ? "" : twConcaMovementDocId(doneDocId);
     const payload = {
       key,
       label,
-      qty: (twIsManualFinishedProductRow(job) || twIsManualAmazonSkuRow(job)) ? Math.round(qtyNum) : qtyNum,
+      qty: (isFinishedProductJob || isAmazonJob) ? Math.round(qtyNum) : qtyNum,
       unit: job.unit || job.finishedProductUom || "pz",
       product: job.product || job.finishedProductName || "",
       format: job.format || "",
       kind: job.kind || "",
       source: job.source || "",
-      inventoryTarget: job.inventoryTarget || "",
+      inventoryTarget: job.inventoryTarget || (isAmazonJob ? "amazon_unico" : ""),
       finishedProductId: job.finishedProductId || "",
       finishedProductCode: job.finishedProductCode || job.code || "",
       finishedProductName: job.finishedProductName || job.product || "",
       finishedProductUom: job.finishedProductUom || job.unit || job.um || "",
       finishedInventoryMovementId: movementId,
       amazonInventoryMovementId: amazonMovementId,
-      amazonInventoryLocation: job.amazonInventoryLocation || (twIsManualAmazonSkuRow(job) ? TW_AMZ_LOC : ""),
-      amazonInventorySku: job.amazonInventorySku || (twIsManualAmazonSkuRow(job) ? (job.code || "") : ""),
-      amazonInventoryTitle: job.amazonInventoryTitle || (twIsManualAmazonSkuRow(job) ? (job.product || job.label || "") : ""),
-      amazonInventoryUom: job.amazonInventoryUom || (twIsManualAmazonSkuRow(job) ? "pz" : ""),
+      amazonInventoryLocation: job.amazonInventoryLocation || (isAmazonJob ? TW_AMZ_LOC : ""),
+      amazonInventoryArea: job.amazonInventoryArea || (isAmazonJob ? TW_AMZ_AREA : ""),
+      inventoryArea: job.inventoryArea || (isAmazonJob ? TW_AMZ_AREA : ""),
+      amazonInventoryLocationLabel: job.amazonInventoryLocationLabel || (isAmazonJob ? TW_AMZ_LABEL : ""),
+      amazonInventorySku: job.amazonInventorySku || (isAmazonJob ? (job.code || "") : ""),
+      amazonInventoryTitle: job.amazonInventoryTitle || (isAmazonJob ? (job.product || job.label || "") : ""),
+      amazonInventoryUom: job.amazonInventoryUom || (isAmazonJob ? "pz" : ""),
       concaInventoryMovementId: concaMovementId,
       concaInventorySyncedAt: fs.serverTimestamp(),
       concaInventorySyncedAtMs: Date.now(),
@@ -16737,17 +16810,21 @@ async function twCompleteJob(){
       completedLabel: label
     });
 
-    const concaMov = twBuildConcaInventoryLoadPayload({ ...payload, id: doneDocId, key }, fs);
+    const concaMov = isAmazonJob ? null : twBuildConcaInventoryLoadPayload({ ...payload, id: doneDocId, key }, fs);
     if(concaMov){
       batch.set(fs.doc(db, "orgs", TW_HUB_ORG_ID, TW_CONCA_INVENTORY_COLLECTION, concaMov.movementId), concaMov.payload, { merge:true });
     }
 
-    if(twIsManualAmazonSkuRow(job)){
+    if(isAmazonJob){
       const amzSku = String(payload.amazonInventorySku || payload.code || job.amazonInventorySku || job.code || "").trim().toUpperCase();
       const amzTitle = String(payload.amazonInventoryTitle || payload.product || payload.label || job.product || job.label || amzSku || "").trim();
       payload.amazonInventorySku = amzSku;
       payload.amazonInventoryTitle = amzTitle;
       payload.amazonInventoryLocation = TW_AMZ_LOC;
+      payload.amazonInventoryArea = TW_AMZ_AREA;
+      payload.inventoryArea = TW_AMZ_AREA;
+      payload.amazonInventoryLocationLabel = TW_AMZ_LABEL;
+      payload.inventoryTarget = "amazon_unico";
       payload.amazonInventoryUom = "pz";
       payload.amazonInventorySyncMode = "backend_trigger";
       payload.amazonInventoryTriggerPending = true;
@@ -16757,6 +16834,10 @@ async function twCompleteJob(){
         amazonInventorySku: amzSku,
         amazonInventoryTitle: amzTitle,
         amazonInventoryLocation: TW_AMZ_LOC,
+        amazonInventoryArea: TW_AMZ_AREA,
+        inventoryArea: TW_AMZ_AREA,
+        amazonInventoryLocationLabel: TW_AMZ_LABEL,
+        inventoryTarget: "amazon_unico",
         amazonInventoryUom: "pz",
         amazonInventorySyncMode: "backend_trigger",
         amazonInventoryTriggerPending: true,
@@ -17817,9 +17898,9 @@ async function twSendLinesToQueue(){
       const payload = {
         queueOrderKey,
         kind: "amazonSku",
-        source: "manual_amazon_concamarise",
-        inventoryTarget: "amazon_concamarise",
-        amazonInventoryLocation: TW_AMZ_LOC,
+        source: "manual_amazon_unico",
+        inventoryTarget: "amazon_unico",
+        ...twAmazonAreaFields(),
         amazonInventorySku: sku,
         amazonInventoryTitle: title,
         amazonInventoryUom: "pz",
@@ -17827,7 +17908,7 @@ async function twSendLinesToQueue(){
         product: title || sku,
         qty: String(qtyInt),
         unit: "pz",
-        format: "SKU Amazon • Concamarise",
+        format: "SKU Amazon • Inventario unico",
         status: "DA PRODURRE",
         rawLine: `AMZ: ${sku} | ${qtyInt}`,
         createdAt: fs.serverTimestamp(),
