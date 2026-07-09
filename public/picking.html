@@ -5340,6 +5340,11 @@
     /* Logs rimossi: nessuna UI e nessun listener movimenti dal frontend. */
     #btnPickingLogs,
     #homeLogsBox{ display:none !important; }
+
+    /* Inventario unico: nasconde tile legacy Cerea e mostra una sola area operativa. */
+    .homeGrid2 .homeTileWrap:first-child{ display:none !important; }
+    .homeGrid.homeGrid2{ grid-template-columns:1fr !important; }
+    #btnFlowsLocCerea{ display:none !important; }
 </style>
 </head>
 
@@ -5536,7 +5541,7 @@
         <div class="cardHead" style="padding: 14px 4px 10px 4px;">
           <div style="min-width:0">
             <div class="cardTitle" style="font-size:20px; font-weight:700;">Cockpit Inventario</div>
-            <div class="cardSub">Panoramica magazzini Cerea e Concamarise</div>
+            <div class="cardSub">Panoramica inventario unico</div>
           </div>
         </div>
 
@@ -5548,12 +5553,12 @@
                 <div class="kpiWideBlock">
                   <div class="kpiLabel">SKU totali</div>
                   <div class="kpiVal" id="homeTotalSku">—</div>
-                  <div class="kpiSub" id="homeTotalsSub">Cerea: — • Concamarise: —</div>
+                  <div class="kpiSub" id="homeTotalsSub">Inventario unico: —</div>
                 </div>
                 <div class="kpiWideBlock">
                   <div class="kpiLabel">Unità totali</div>
                   <div class="kpiVal" id="homeTotalPieces">—</div>
-                  <div class="kpiSub" id="homePiecesSub">Cerea: — • Concamarise: —</div>
+                  <div class="kpiSub" id="homePiecesSub">Inventario unico: —</div>
                 </div>
                 <div class="kpiWideBlock">
                   <div class="kpiLabel">Sotto scorta</div>
@@ -5604,7 +5609,7 @@
                   </svg>
                 </div>
                 <div class="warehouseText">
-                  <div class="warehouseName">Amazon <span class="whSemi">Concamarise</span></div>
+                  <div class="warehouseName">Amazon <span class="whSemi">Inventario unico</span></div>
                   <div class="warehouseSub" id="homeConcamariseUpdated">—</div>
                   <div class="amzMetaLine" aria-hidden="true">
                     <span class="amzMetaLabel">SKU</span><span class="amzMetaVal" id="homeConcamariseSku">—</span>
@@ -5655,7 +5660,7 @@
             <div class="miniTop">
               <div>
                 <div class="miniTitle">Sotto scorta</div>
-                <div class="miniSub">Soglie personalizzabili per SKU • Cerea + Concamarise</div>
+                <div class="miniSub">Soglie personalizzabili per SKU • inventario unico</div>
               </div>
               <div class="pill warn" id="homeLowStockCount">—</div>
             </div>
@@ -5839,7 +5844,7 @@
 
       <div class="sheetBody">
         <div class="seg" role="tablist" aria-label="Magazzino flussi">
-          <button class="segBtn active" id="btnFlowsLocConcamarise" type="button" role="tab" aria-selected="true">Concamarise</button>
+          <button class="segBtn active" id="btnFlowsLocConcamarise" type="button" role="tab" aria-selected="true">Inventario unico</button>
           <button class="segBtn" id="btnFlowsLocCerea" type="button" role="tab" aria-selected="false">Cerea</button>
         </div>
 
@@ -5965,7 +5970,7 @@ Tip:
       <div class="sheetTop">
         <div style="min-width:0">
           <p class="sheetTitle">Sottoscorta</p>
-          <div class="sheetSub">Tutti i prodotti sotto scorta con soglia personalizzabile per SKU su Concamarise e Cerea.</div>
+          <div class="sheetSub">Tutti i prodotti sotto scorta con soglia personalizzabile per SKU su inventario unico.</div>
         </div>
         <button class="btn" id="btnCloseSottoscorta" type="button">Chiudi</button>
       </div>
@@ -8841,244 +8846,6 @@ function guessTitleFromRaw(rawText, sku){
       }
     }
 
-
-
-    // --- Safe rack relocation reconcile (Cerea -> Concamarise) ---
-    // Corregge SOLO casi sicuri creati da vecchie versioni: stesso SKU duplicato nelle 2 sedi
-    // dopo ubicazione rack, oppure rack salvato su Cerea. Non tocca split legittimi o quantità diverse.
-    let __rackDuplicateReconcileTimer = null;
-    let __rackDuplicateReconcileRunning = false;
-    let __rackDuplicateReconcileDoneKeys = new Set();
-
-    function resetRackDuplicateReconcile(){
-      try{ if(__rackDuplicateReconcileTimer) clearTimeout(__rackDuplicateReconcileTimer); }catch(_e){}
-      __rackDuplicateReconcileTimer = null;
-      __rackDuplicateReconcileRunning = false;
-      __rackDuplicateReconcileDoneKeys = new Set();
-    }
-
-    function itemHasRackAssigned(d){
-      try{
-        return readRackLocationsFromDoc(d || {}).length > 0 || normalizeRackAllocationsForWrite(readRackAllocationsFromDoc(d || {})).length > 0;
-      }catch(_e){ return false; }
-    }
-
-    function collectRackDuplicateCandidates(){
-      const out = [];
-      try{
-        const cereaItems = state.inventory?.cerea?.items || [];
-        const concaItems = state.inventory?.concamarise?.items || [];
-        const concaBySku = new Map();
-        concaItems.forEach(it=>{
-          const sku = toSkuId(it?.sku || it?.id || "");
-          if(sku) concaBySku.set(sku, it);
-        });
-
-        for(const cerea of cereaItems){
-          const sku = toSkuId(cerea?.sku || cerea?.id || "");
-          if(!sku) continue;
-          const conca = concaBySku.get(sku) || null;
-          const cereaQty = stockQtyFromDoc(cerea || {});
-          const concaQty = conca ? stockQtyFromDoc(conca || {}) : 0;
-          const cereaHasRack = itemHasRackAssigned(cerea || {});
-          const concaHasRack = conca ? itemHasRackAssigned(conca || {}) : false;
-
-          // Caso 1: bug classico: stessa quantità in Cerea e Concamarise, rack su Concamarise.
-          // La giacenza giusta è quella ubicata a Concamarise, quindi Cerea va azzerata.
-          if(cereaQty > 0 && concaQty > 0 && cereaQty === concaQty && concaHasRack){
-            out.push({ sku, mode:"duplicate_keep_concamarise" });
-            continue;
-          }
-
-          // Caso 2: vecchia UI ha scritto un rack su Cerea. I rack fisici sono Concamarise:
-          // sposta il documento a Concamarise solo se lì non c'è già stock.
-          if(cereaQty > 0 && cereaHasRack && concaQty <= 0){
-            out.push({ sku, mode:"move_cerea_rack_to_concamarise" });
-          }
-        }
-      }catch(_e){}
-      return out;
-    }
-
-    async function runRackDuplicateReconcile(reason="rack_duplicate_reconcile"){
-      if(__rackDuplicateReconcileRunning) return;
-      if(!state.user?.isWhitelisted && !state.user?.isAdmin && !state.user?.isUser) return;
-      if(!(state.inventory?.cerea?.meta?.loaded && state.inventory?.concamarise?.meta?.loaded)) return;
-      const api = state.firebase?.api;
-      const db = state.firebase?.db;
-      if(!api || !db || !api.runTransaction) return;
-
-      const candidates = collectRackDuplicateCandidates().filter(c=>{
-        const key = `${c.mode}::${c.sku}`;
-        return c.sku && !__rackDuplicateReconcileDoneKeys.has(key);
-      });
-      if(!candidates.length) return;
-
-      __rackDuplicateReconcileRunning = true;
-      let fixed = 0;
-      const preview = [];
-      try{
-        for(const c of candidates.slice(0, 50)){
-          const doneKey = `${c.mode}::${c.sku}`;
-          const sourceRef = api.doc(db, COL_ROOT, "cerea", SUB_ITEMS, c.sku);
-          const destRef = api.doc(db, COL_ROOT, "concamarise", SUB_ITEMS, c.sku);
-          const productRef = api.doc(db, COL_PRODUCTS, c.sku);
-
-          await api.runTransaction(db, async(tx)=>{
-            const sCerea = await tx.get(sourceRef);
-            const sConca = await tx.get(destRef);
-            if(!sCerea.exists()) return;
-            const dCerea = sCerea.data() || {};
-            const dConca = sConca.exists() ? (sConca.data() || {}) : {};
-            const qCerea = stockQtyFromDoc(dCerea || {});
-            const qConca = stockQtyFromDoc(dConca || {});
-            const cereaHasRack = itemHasRackAssigned(dCerea || {});
-            const concaHasRack = itemHasRackAssigned(dConca || {});
-            const nowClient = Date.now();
-            const who = state.user?.emailLower || state.user?.email || state.user?.uid || "";
-            const title = squashWhitespace(dConca.title || dCerea.title || c.sku) || c.sku;
-            const lowStockThreshold = __getCustomLowStockThreshold(dConca) ?? __getCustomLowStockThreshold(dCerea);
-
-            let destQty = qConca;
-            let destRackAllocations = normalizeRackAllocationsForWrite(readRackAllocationsFromDoc(dConca || {}));
-            let destRackLocations = readRackLocationsFromDoc(dConca || {});
-            let destStockLots = readStockLotsFromDoc(dConca || {});
-            let mode = c.mode;
-
-            if(c.mode === "duplicate_keep_concamarise"){
-              if(!(qCerea > 0 && qConca > 0 && qCerea === qConca && concaHasRack)) return;
-              destQty = qConca;
-            }else if(c.mode === "move_cerea_rack_to_concamarise"){
-              if(!(qCerea > 0 && cereaHasRack && qConca <= 0)) return;
-              destQty = qCerea;
-              destRackAllocations = normalizeRackAllocationsForWrite(readRackAllocationsFromDoc(dCerea || {}));
-              destRackLocations = readRackLocationsFromDoc(dCerea || {});
-              destStockLots = readStockLotsFromDoc(dCerea || {});
-            }else{
-              return;
-            }
-
-            const cleanRackLocations = normalizeRackLocationsList(destRackAllocations.length ? destRackAllocations.map(x=>x.code) : destRackLocations);
-            const cleanRackLocation = cleanRackLocations[0] || "";
-
-            const destPatch = {
-              sku: c.sku,
-              title,
-              titleNorm: normalizeText(title || c.sku),
-              qty: destQty,
-              zeroStock: destQty <= 0,
-              rackLocation: destQty > 0 ? cleanRackLocation : "",
-              rackLocations: destQty > 0 ? cleanRackLocations : [],
-              rackAllocations: destQty > 0 ? destRackAllocations : [],
-              stockLots: destQty > 0 ? destStockLots : [],
-              lowStockThreshold,
-              location: "concamarise",
-              updatedAt: api.serverTimestamp(),
-              updatedAtClient: nowClient,
-              updatedBy: who,
-              lastSeenAt: api.serverTimestamp(),
-              lastSeenAtClient: nowClient,
-              lastSeenKind: mode
-            };
-            tx.set(destRef, destPatch, { merge:true });
-
-            tx.set(sourceRef, {
-              sku: c.sku,
-              title,
-              titleNorm: normalizeText(title || c.sku),
-              qty: 0,
-              zeroStock: true,
-              zeroStockAt: api.serverTimestamp(),
-              zeroStockAtClient: nowClient,
-              rackLocation: "",
-              rackLocations: [],
-              rackAllocations: [],
-              stockLots: [],
-              lowStockThreshold,
-              location: "cerea",
-              updatedAt: api.serverTimestamp(),
-              updatedAtClient: nowClient,
-              updatedBy: who,
-              lastSeenAt: api.serverTimestamp(),
-              lastSeenAtClient: nowClient,
-              lastSeenKind: mode + "_source_zero"
-            }, { merge:true });
-
-            tx.set(productRef, {
-              sku: c.sku,
-              title,
-              titleNorm: normalizeText(title || c.sku),
-              rackLocation: destPatch.rackLocation,
-              rackLocations: destPatch.rackLocations,
-              rackAllocations: destPatch.rackAllocations,
-              stockLots: destPatch.stockLots,
-              lowStockThreshold,
-              lastSeenAt: api.serverTimestamp(),
-              lastSeenAtClient: nowClient,
-              lastSeenBy: who,
-              lastSeenLocation: "concamarise",
-              lastSeenKind: mode
-            }, { merge:true });
-
-            addProductMovementToBatch(tx, api, db, c.sku, {
-              type: "rack_duplicate_reconcile",
-              qtySigned: 0,
-              deltaSigned: 0,
-              fromWarehouse: "cerea",
-              toWarehouse: "concamarise",
-              beforeFromQty: qCerea,
-              afterFromQty: 0,
-              beforeToQty: qConca,
-              afterToQty: destQty,
-              rackLocations: destPatch.rackLocations,
-              source: "auto_reconcile",
-              note: mode === "duplicate_keep_concamarise" ? "Correzione duplicato Cerea/Concamarise dopo ubicazione rack" : "Correzione rack salvato su Cerea: stock trasferito a Concamarise",
-              locked: true,
-              deleteLocked: true,
-              reason: String(reason || "rack_duplicate_reconcile"),
-              createdAtClient: nowClient
-            });
-          });
-
-          __rackDuplicateReconcileDoneKeys.add(doneKey);
-          fixed++;
-          if(preview.length < 12) preview.push(c.sku);
-        }
-
-        if(fixed){
-          try{
-            await api.setDoc(api.doc(db, COL_META, "rackDuplicateReconcileState"), {
-              lastRunAt: api.serverTimestamp(),
-              lastRunAtClient: Date.now(),
-              fixedCount: fixed,
-              preview,
-              reason: String(reason || "rack_duplicate_reconcile"),
-              by: state.user?.emailLower || state.user?.email || state.user?.uid || ""
-            }, { merge:true });
-          }catch(_e){}
-          showToast("Duplicati rack corretti", `${fixed} SKU riallineati: Cerea azzerata, Concamarise mantenuta.`, 3600);
-          scheduleLowStockEmailAfterUpdate("rack_duplicate_reconcile", { immediate:true });
-          renderHomeDashboard();
-        }
-      }catch(err){
-        console.warn("rack duplicate reconcile", err);
-      }finally{
-        __rackDuplicateReconcileRunning = false;
-      }
-    }
-
-    function scheduleRackDuplicateReconcile(reason="inventory"){
-      try{
-        if(!state.user?.isWhitelisted && !state.user?.isAdmin && !state.user?.isUser) return;
-        if(!(state.inventory?.cerea?.meta?.loaded && state.inventory?.concamarise?.meta?.loaded)) return;
-        if(__rackDuplicateReconcileRunning) return;
-        if(__rackDuplicateReconcileTimer) clearTimeout(__rackDuplicateReconcileTimer);
-        __rackDuplicateReconcileTimer = setTimeout(()=>{
-          __rackDuplicateReconcileTimer = null;
-          void runRackDuplicateReconcile(reason);
-        }, 900);
-      }catch(_e){}
-    }
     function sanitizeRackLocationsForQty(value, qty){
       const list = normalizeRackLocationsList(value);
       const q = Number.isFinite(Number(qty)) ? Number(qty) : parseSignedQtyStrict(qty);
@@ -9474,7 +9241,7 @@ ${textLines.join("\n")}
         </div>
       `;
 
-      const subject = `Amazon — Sotto scorta inventario (Cerea + Concamarise) • ${total} prodotti`;
+      const subject = `Amazon — Sotto scorta inventario (inventario unico) • ${total} prodotti`;
 
       const concamarise = (byLoc && byLoc.concamarise) ? byLoc.concamarise : [];
       const cerea = (byLoc && byLoc.cerea) ? byLoc.cerea : [];
@@ -9528,10 +9295,10 @@ ${textLines.join("\n")}
           return;
         }
 
-        // invia SOLO quando entrambi i magazzini (Cerea + Concamarise) hanno ricevuto almeno uno snapshot
+        // invia SOLO quando entrambi i magazzini (inventario unico) hanno ricevuto almeno uno snapshot
         const __bothReady = !!(state.inventory?.cerea?.meta?.loaded && state.inventory?.concamarise?.meta?.loaded);
         if(!__bothReady){
-          if(mailLog) mailLog.textContent = "Email automatica: in attesa sync completo (Cerea + Concamarise)…";
+          if(mailLog) mailLog.textContent = "Email automatica: in attesa sync completo (inventario unico)…";
           return;
         }
 
@@ -9633,36 +9400,18 @@ ${textLines.join("\n")}
       }
     }
 
-    // calcola sotto-scorta globale per SKU unico (Cerea + Concamarise).
-    // Se uno SKU è stato ubicato su rack in Concamarise, Cerea a 0 non crea più un falso sottoscorta.
+    // calcola sotto-scorta globale (inventario unico)
     function __getLowStockBoth(){
-      const bySku = new Map();
+      const out = [];
       const pushLoc = (loc)=>{
         const items = (state.inventory[loc] && state.inventory[loc].items) ? state.inventory[loc].items : [];
         for(const it of items){
-          const sku = toSkuId(it?.sku || it?.id || "");
-          if(!sku) continue;
-          const qty = Number.isFinite(Number(it?.qty)) ? Math.round(Number(it.qty)) : stockQtyFromDoc(it || {});
-          const reserved = reservedQtyFromItem(it || {});
-          const cur = bySku.get(sku) || { sku, id:sku, title:"", qty:0, reservedQty:0, loc:"", mainLoc:"", locations:[], lowStockThreshold:null };
-          cur.qty += Number.isFinite(qty) ? qty : 0;
-          cur.reservedQty += Number.isFinite(reserved) ? reserved : 0;
-          cur.locations.push({ loc, qty:Number.isFinite(qty) ? qty : 0, reservedQty:Number.isFinite(reserved) ? reserved : 0 });
-          if(!cur.title && it?.title) cur.title = it.title;
-          const th = __getCustomLowStockThreshold(it || {});
-          if(th !== null) cur.lowStockThreshold = cur.lowStockThreshold === null ? th : Math.max(cur.lowStockThreshold, th);
-          if(!cur.mainLoc || (qty > 0 && (loc === "concamarise" || !cur.locations.some(x=>x.qty>0)))){
-            cur.mainLoc = loc;
-            cur.loc = loc;
-          }
-          bySku.set(sku, cur);
+          if(!Number.isFinite(it.qty)) continue;
+          if(!__isLowStockItem(it)) continue;
+          out.push({ ...it, loc });
         }
       };
-      pushLoc("cerea");
-      pushLoc("concamarise");
-      const out = Array.from(bySku.values())
-        .map(it=>({ ...it, loc: it.mainLoc || it.loc || "concamarise" }))
-        .filter(it=> Number.isFinite(Number(it.qty)) && __isLowStockItem(it));
+      pushLoc(INVENTORY_CANONICAL_LOC);
       out.sort((x,y)=> lowStockQtyValue(x) - lowStockQtyValue(y));
       return out;
     }
@@ -9801,11 +9550,20 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
     const COL_PRODUCTS = "amzInventoryProducts"; // anagrafica prodotti (globale)
     const SUB_MOVES = "movements"; // storico movimenti per prodotto
 
+    // Inventario Amazon unico (cloud).
+    // Compatibilità: il path canonico resta "concamarise" finché Tabellone WRITE non viene patchato,
+    // ma per l'utente non esiste più una sede Cerea/Concamarise: Cerea legacy viene fusa qui.
+    const INVENTORY_CANONICAL_LOC = "concamarise";
+    const INVENTORY_LEGACY_SOURCE_LOCS = ["cerea"];
+    const INVENTORY_ALL_CLOUD_LOCS = [INVENTORY_CANONICAL_LOC, ...INVENTORY_LEGACY_SOURCE_LOCS];
+    const INVENTORY_SINGLE_AREA_LABEL = "Inventario unico";
+
+
     // Tabellone WRITE: stessa coda usata da tabellone_write.html
     const TW_WRITE_LINE_BUCKET = "linea_liquidi";
     const TW_WRITE_QUEUE_META_COL = "meta";
     const TW_WRITE_QUEUE_META_DOC = "queueState";
-    const TW_WRITE_AMZ_TARGET_LOC = "concamarise";
+    const TW_WRITE_AMZ_TARGET_LOC = INVENTORY_CANONICAL_LOC;
     const TW_WRITE_ORDER_KEY_LEN = 16;
     const TW_WRITE_ORDER_BASE = 36n;
     const TW_WRITE_ORDER_STEP = 2821109907456n; // 36^8
@@ -10304,7 +10062,6 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
     function stopAllRealtime(){
       cancelStartupDataGate();
       resetPickingPreviewCounts();
-      resetRackDuplicateReconcile();
       resetLowStockRealtimeWatcher();
       stopTwReordersWatch();
       stopTwCompletedAmazonWatch();
@@ -10435,14 +10192,359 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
 
         triggerLowStockMailFromRealtime("realtime_low_stock_" + loc);
         scheduleRackAllocationsCloudNormalize(loc, "inventory_snapshot_shopify_effective_pick");
-        scheduleRackDuplicateReconcile("inventory_" + loc);
         scheduleTwReordersBackfillFromState("inventory_" + loc);
         refreshActivityLogSkuWatchers("inventory_" + loc);
+        scheduleUnifiedInventoryCloudMerge("inventory_" + loc);
         checkStartupDataGate("inventory_" + loc);
       }, (err)=>{
         console.warn("inventory watch error", err);
         showToast("Permessi insufficienti", err?.message || String(err));
       });
+    }
+
+ 
+
+    // --- Inventario unico: fusione cloud dei vecchi rami sede ---
+    const __unifiedInventoryMergeState = { timer:null, running:false, lastAt:0, touched:new Set() };
+
+    function unifiedInventoryCanonicalLoc(){ return (typeof INVENTORY_CANONICAL_LOC !== "undefined" && INVENTORY_CANONICAL_LOC) ? INVENTORY_CANONICAL_LOC : "concamarise"; }
+    function unifiedInventorySourceLocs(){ return (typeof INVENTORY_LEGACY_SOURCE_LOCS !== "undefined" && Array.isArray(INVENTORY_LEGACY_SOURCE_LOCS)) ? INVENTORY_LEGACY_SOURCE_LOCS.slice() : ["cerea"]; }
+    function unifiedInventoryAllLocs(){ return [unifiedInventoryCanonicalLoc(), ...unifiedInventorySourceLocs()]; }
+
+    function unifiedArray(v){ return Array.isArray(v) ? v : []; }
+    function unifiedDedupeArray(arr){
+      const out = [];
+      const seen = new Set();
+      for(const x of (Array.isArray(arr) ? arr : [])){
+        let key = "";
+        try{ key = JSON.stringify(x); }catch(_e){ key = String(x); }
+        if(seen.has(key)) continue;
+        seen.add(key);
+        out.push(x);
+      }
+      return out;
+    }
+
+    function unifiedRawStockLots(d){
+      try{
+        if(typeof readStockLotsFromDoc === "function"){
+          const lots = readStockLotsFromDoc(d || {});
+          if(Array.isArray(lots) && lots.length) return lots;
+        }
+      }catch(_e){}
+      const raw = [];
+      try{ if(Array.isArray(d?.stockLots)) raw.push(...d.stockLots); }catch(_e){}
+      try{ if(Array.isArray(d?.lots)) raw.push(...d.lots); }catch(_e){}
+      try{ if(Array.isArray(d?.productionLots)) raw.push(...d.productionLots); }catch(_e){}
+      if(raw.length) return raw;
+      const q = stockQtyFromDoc(d || {});
+      if(q > 0){
+        const lot = (typeof LOT_LEGACY_ID !== "undefined" ? LOT_LEGACY_ID : "LOTTO-STORICO");
+        return [{ lot, qty:q, source:"legacy_unified_inventory" }];
+      }
+      return [];
+    }
+
+    function unifiedLotId(v){
+      try{ if(typeof normalizeLotId === "function") return normalizeLotId(v || "") || (typeof LOT_LEGACY_ID !== "undefined" ? LOT_LEGACY_ID : "LOTTO-STORICO"); }catch(_e){}
+      const s = String(v || "").trim().toUpperCase().replace(/\s+/g, "");
+      return s || (typeof LOT_LEGACY_ID !== "undefined" ? LOT_LEGACY_ID : "LOTTO-STORICO");
+    }
+
+    function unifiedMergeStockLots(a, b){
+      const map = new Map();
+      for(const x of [...unifiedRawStockLots(a || {}), ...unifiedRawStockLots(b || {})]){
+        if(!x || typeof x !== "object") continue;
+        const lot = unifiedLotId(x.lot || x.batch || x.batchId || x.lotto || x.id || "");
+        const qtyRaw = x.qty ?? x.quantity ?? x.pieces ?? x.qta ?? 0;
+        const qty = Number.isFinite(Number(qtyRaw)) ? Math.round(Number(qtyRaw)) : parseSignedQtyStrict(qtyRaw);
+        if(!Number.isFinite(qty) || qty <= 0) continue;
+        const prev = map.get(lot) || { lot, qty:0, createdAtClient:0, producedAtClient:0, source:"unified_inventory" };
+        prev.qty += qty;
+        prev.createdAtClient = prev.createdAtClient || Number(x.createdAtClient || x.producedAtClient || 0) || 0;
+        prev.producedAtClient = prev.producedAtClient || Number(x.producedAtClient || x.createdAtClient || 0) || 0;
+        prev.source = String(prev.source || x.source || "unified_inventory");
+        if(x.refId && !prev.refId) prev.refId = String(x.refId || "");
+        map.set(lot, prev);
+      }
+      return Array.from(map.values()).filter(x=>x.qty>0).sort((a,b)=> String(a.lot).localeCompare(String(b.lot)));
+    }
+
+    function unifiedRawRackAllocations(d){
+      try{
+        if(typeof readRackAllocationsFromDoc === "function"){
+          const arr = readRackAllocationsFromDoc(d || {});
+          if(Array.isArray(arr) && arr.length) return arr;
+        }
+      }catch(_e){}
+      try{
+        if(typeof flowRawRackAllocationsFromDoc === "function"){
+          const arr = flowRawRackAllocationsFromDoc(d || {});
+          if(Array.isArray(arr) && arr.length) return arr;
+        }
+      }catch(_e){}
+      const raw = Array.isArray(d?.rackAllocations) ? d.rackAllocations : [];
+      if(raw.length) return raw;
+      const locs = normalizeRackLocationsList(d?.rackLocations || d?.rackLocation || []);
+      const q = stockQtyFromDoc(d || {});
+      const lot = unifiedLotId(d?.lastProductionLot || "");
+      return locs.map((code, idx)=>({ code, lot, qty: idx === 0 ? Math.max(0, q) : 0 })).filter(x=>x.code && x.qty>0);
+    }
+
+    function unifiedNormalizeRackAllocations(arr){
+      try{ if(typeof normalizeRackAllocationsForWrite === "function") return normalizeRackAllocationsForWrite(arr || []); }catch(_e){}
+      try{ if(typeof flowNormalizeRackAllocations === "function") return flowNormalizeRackAllocations(arr || []); }catch(_e){}
+      const map = new Map();
+      for(const x0 of (Array.isArray(arr) ? arr : [])){
+        const x = x0 && typeof x0 === "object" ? x0 : {};
+        const code = normalizeRackLocation(x.code || x.rackLocation || x.location || x.ubicazione || "");
+        if(!code) continue;
+        const lot = unifiedLotId(x.lot || x.batch || x.batchId || x.lotto || "");
+        const q = Math.max(0, Math.round(Number(x.qty ?? x.quantity ?? x.pieces ?? x.qta ?? 0) || 0));
+        if(q <= 0) continue;
+        const key = `${code}::${lot}`;
+        const prev = map.get(key) || { code, lot, qty:0 };
+        prev.qty += q;
+        map.set(key, prev);
+      }
+      return Array.from(map.values()).sort((a,b)=> String(a.code).localeCompare(String(b.code)) || String(a.lot).localeCompare(String(b.lot)));
+    }
+
+    function unifiedMergeRackAllocations(a, b){
+      return unifiedNormalizeRackAllocations([ ...unifiedRawRackAllocations(a || {}), ...unifiedRawRackAllocations(b || {}) ]);
+    }
+
+    function unifiedDocHasLiveContent(d){
+      const q = stockQtyFromDoc(d || {});
+      const reserved = reservedQtyFromItem(d || {});
+      const pending = Number.isFinite(Number(d?.pendingPickQty)) ? Math.max(0, Math.round(Number(d.pendingPickQty))) : 0;
+      const racks = normalizeRackLocationsList(d?.rackLocations || d?.rackLocation || []);
+      const allocs = unifiedRawRackAllocations(d || {});
+      const lots = unifiedRawStockLots(d || {});
+      return q > 0 || reserved > 0 || pending > 0 || racks.length > 0 || allocs.length > 0 || lots.length > 0;
+    }
+
+    function unifiedPickTitle(dest, source, sku){
+      const dt = squashWhitespace(dest?.title || dest?.name || "");
+      const st = squashWhitespace(source?.title || source?.name || "");
+      if(dt && st) return dt.length >= st.length ? dt : st;
+      return dt || st || sku;
+    }
+
+    function unifiedMergeArrayField(key, dest, source){
+      return unifiedDedupeArray([ ...unifiedArray(dest?.[key]), ...unifiedArray(source?.[key]) ]);
+    }
+
+    function unifiedInventoryBuildDestPatch(api, sku, dest, source, sourceLoc, nowClient, who){
+      const title = unifiedPickTitle(dest, source, sku);
+      const sourceQty = stockQtyFromDoc(source || {});
+      const destQty = stockQtyFromDoc(dest || {});
+      const totalQty = Math.max(0, Math.round(sourceQty + destQty));
+      const sourceReserved = reservedQtyFromItem(source || {});
+      const destReserved = reservedQtyFromItem(dest || {});
+      const sourcePending = Number.isFinite(Number(source?.pendingPickQty)) ? Math.max(0, Math.round(Number(source.pendingPickQty))) : 0;
+      const destPending = Number.isFinite(Number(dest?.pendingPickQty)) ? Math.max(0, Math.round(Number(dest.pendingPickQty))) : 0;
+      const rackAllocations = unifiedMergeRackAllocations(dest || {}, source || {});
+      const rackLocations = normalizeRackLocationsList([
+        ...normalizeRackLocationsList(dest?.rackLocations || dest?.rackLocation || []),
+        ...normalizeRackLocationsList(source?.rackLocations || source?.rackLocation || []),
+        ...rackAllocations.map(x=>x.code)
+      ]);
+      const stockLots = unifiedMergeStockLots(dest || {}, source || {});
+      const mergedArrayKeys = [
+        "pendingOrders", "pendingOrderLines", "shopifyPendingOrders", "shopifyOrders", "reservationOrders", "orderLines", "shopifyOrderLines"
+      ];
+      const arrayPatch = {};
+      for(const key of mergedArrayKeys){
+        const merged = unifiedMergeArrayField(key, dest || {}, source || {});
+        if(merged.length) arrayPatch[key] = merged;
+      }
+
+      const identity = (typeof productIdentityRuntimeFieldsFromDoc === "function") ? productIdentityRuntimeFieldsFromDoc({ ...(source || {}), ...(dest || {}) }) : {};
+      const prodArea = (typeof readProductionAreaFromDoc === "function")
+        ? readProductionAreaFromDoc(dest || source || {}, "")
+        : (String((dest?.productionArea ?? dest?.areaProduzione ?? source?.productionArea ?? source?.areaProduzione ?? "") || "").trim().toLowerCase() === "cerea" ? "cerea" : "concamarise");
+      const patch = {
+        ...(identity || {}),
+        ...(arrayPatch || {}),
+        sku,
+        title,
+        titleNorm: normalizeText(title || sku),
+        qty: totalQty,
+        reservedQty: destReserved + sourceReserved,
+        pendingPickQty: destPending + sourcePending,
+        availableQty: Math.max(0, totalQty - (destReserved + sourceReserved)),
+        rackLocation: rackLocations[0] || "",
+        rackLocations,
+        rackAllocations,
+        stockLots: totalQty > 0 ? stockLots : [],
+        zeroStock: totalQty <= 0,
+        zeroStockAt: totalQty <= 0 && api?.serverTimestamp ? api.serverTimestamp() : null,
+        zeroStockAtClient: totalQty <= 0 ? nowClient : null,
+        location: unifiedInventoryCanonicalLoc(),
+        inventoryArea: "unica",
+        unifiedInventory: true,
+        unifiedInventoryCanonicalLoc: unifiedInventoryCanonicalLoc(),
+        legacyMergedFromLocation: sourceLoc,
+        legacyMergedAt: api?.serverTimestamp ? api.serverTimestamp() : null,
+        legacyMergedAtClient: nowClient,
+        legacyMergedBy: who,
+        productionArea: prodArea,
+        areaProduzione: prodArea,
+        updatedAt: api?.serverTimestamp ? api.serverTimestamp() : null,
+        updatedAtClient: nowClient,
+        updatedBy: who
+      };
+      return { patch, totalQty, sourceQty, destQty, reservedTotal: destReserved + sourceReserved, rackLocations };
+    }
+
+    async function runUnifiedInventoryCloudMerge(reason="realtime", opts = {}){
+      try{
+        if(__unifiedInventoryMergeState.running) return;
+        if(!state.firebase?.ok || !state.user?.isWhitelisted) return;
+        const api = state.firebase.api;
+        const db = state.firebase.db;
+        if(!api || !db || !api.runTransaction) return;
+        if(!state.inventory?.[unifiedInventoryCanonicalLoc()]?.meta?.loaded) return;
+        const sourceLocs = unifiedInventorySourceLocs();
+        if(!sourceLocs.every(loc=>state.inventory?.[loc]?.meta?.loaded)) return;
+
+        const onlySku = toSkuId(opts?.onlySku || "");
+        const plans = [];
+        for(const sourceLoc of sourceLocs){
+          const items = state.inventory?.[sourceLoc]?.items || [];
+          for(const it of items){
+            const sku = toSkuId(it?.sku || it?.id || "");
+            if(!sku || (onlySku && sku !== onlySku)) continue;
+            const raw = it?.__raw || it || {};
+            if(raw?.unifiedInventoryArchived === true && stockQtyFromDoc(raw) <= 0) continue;
+            if(!unifiedDocHasLiveContent(raw)) continue;
+            plans.push({ sourceLoc, sku });
+          }
+        }
+        if(!plans.length) return;
+
+        __unifiedInventoryMergeState.running = true;
+        const nowClient = Date.now();
+        const who = state.user?.emailLower || state.user?.email || state.user?.uid || "";
+        let mergedCount = 0;
+        const maxPlans = onlySku ? plans.length : Math.min(plans.length, 120);
+
+        for(const plan of plans.slice(0, maxPlans)){
+          const sourceRef = api.doc(db, COL_ROOT, plan.sourceLoc, SUB_ITEMS, plan.sku);
+          const destRef = api.doc(db, COL_ROOT, unifiedInventoryCanonicalLoc(), SUB_ITEMS, plan.sku);
+          const productRef = api.doc(db, COL_PRODUCTS, plan.sku);
+          await api.runTransaction(db, async (tx)=>{
+            const sourceSnap = await tx.get(sourceRef);
+            const destSnap = await tx.get(destRef);
+            if(!sourceSnap.exists()) return;
+            const source = sourceSnap.data() || {};
+            if(!unifiedDocHasLiveContent(source)) return;
+            const dest = destSnap.exists() ? (destSnap.data() || {}) : {};
+            const built = unifiedInventoryBuildDestPatch(api, plan.sku, dest, source, plan.sourceLoc, Date.now(), who);
+            const title = built.patch.title || plan.sku;
+            tx.set(destRef, built.patch, { merge:true });
+            tx.set(sourceRef, {
+              sku: plan.sku,
+              title,
+              titleNorm: normalizeText(title || plan.sku),
+              qty: 0,
+              reservedQty: 0,
+              pendingPickQty: 0,
+              availableQty: 0,
+              rackLocation: "",
+              rackLocations: [],
+              rackAllocations: [],
+              stockLots: [],
+              zeroStock: true,
+              zeroStockAt: api.serverTimestamp ? api.serverTimestamp() : null,
+              zeroStockAtClient: Date.now(),
+              unifiedInventoryArchived: true,
+              mergedToLocation: unifiedInventoryCanonicalLoc(),
+              mergedToInventoryArea: "unica",
+              mergedAt: api.serverTimestamp ? api.serverTimestamp() : null,
+              mergedAtClient: Date.now(),
+              mergedBy: who,
+              location: unifiedInventoryCanonicalLoc(),
+              updatedAt: api.serverTimestamp ? api.serverTimestamp() : null,
+              updatedAtClient: Date.now(),
+              updatedBy: who
+            }, { merge:true });
+            tx.set(productRef, {
+              sku: plan.sku,
+              title,
+              titleNorm: normalizeText(title || plan.sku),
+              qty: built.totalQty,
+              rackLocation: built.rackLocations[0] || "",
+              rackLocations: built.rackLocations,
+              rackAllocations: built.patch.rackAllocations || [],
+              stockLots: built.patch.stockLots || [],
+              inventoryArea: "unica",
+              unifiedInventory: true,
+              lastSeenAt: api.serverTimestamp ? api.serverTimestamp() : null,
+              lastSeenAtClient: Date.now(),
+              lastSeenBy: who,
+              lastSeenLocation: unifiedInventoryCanonicalLoc(),
+              lastSeenKind: "inventory_unified_merge"
+            }, { merge:true });
+            try{
+              if(typeof addProductMovementToBatch === "function"){
+                addProductMovementToBatch(tx, api, db, plan.sku, {
+                  type:"inventory_unify",
+                  qtySigned:0,
+                  deltaSigned:0,
+                  beforeFromQty: built.sourceQty,
+                  beforeToQty: built.destQty,
+                  afterToQty: built.totalQty,
+                  fromWarehouse: plan.sourceLoc,
+                  toWarehouse: unifiedInventoryCanonicalLoc(),
+                  location: unifiedInventoryCanonicalLoc(),
+                  source:"inventario_unico",
+                  note:`Fusione cloud sede legacy ${plan.sourceLoc} → inventario unico`,
+                  deleteLocked:true,
+                  locked:true,
+                  createdAtClient: Date.now()
+                });
+              }
+            }catch(_e){}
+          });
+          mergedCount++;
+        }
+
+        __unifiedInventoryMergeState.lastAt = Date.now();
+        try{
+          await api.setDoc(api.doc(db, COL_META, "unifiedInventoryMergeState"), {
+            status:"OK",
+            reason:String(reason || ""),
+            mergedCount,
+            candidateCount:plans.length,
+            canonicalLocation: unifiedInventoryCanonicalLoc(),
+            sourceLocations: sourceLocs,
+            updatedAt: api.serverTimestamp ? api.serverTimestamp() : null,
+            updatedAtClient: Date.now(),
+            updatedBy: who
+          }, { merge:true });
+        }catch(_e){}
+        if(mergedCount) showToast("Inventario unico", `${mergedCount} SKU legacy fusi in cloud.`, 2200);
+      }catch(err){
+        console.warn("unified inventory merge", err);
+        try{ showToast("Inventario unico", String(err?.message || err).slice(0, 180), 3200); }catch(_e){}
+      }finally{
+        __unifiedInventoryMergeState.running = false;
+      }
+    }
+
+    function scheduleUnifiedInventoryCloudMerge(reason="realtime", opts = {}){
+      try{
+        if(!state.firebase?.ok || !state.user?.isWhitelisted) return;
+        if(!state.inventory?.[unifiedInventoryCanonicalLoc()]?.meta?.loaded) return;
+        if(!unifiedInventorySourceLocs().every(loc=>state.inventory?.[loc]?.meta?.loaded)) return;
+        if(__unifiedInventoryMergeState.timer) clearTimeout(__unifiedInventoryMergeState.timer);
+        __unifiedInventoryMergeState.timer = setTimeout(()=>{
+          __unifiedInventoryMergeState.timer = null;
+          void runUnifiedInventoryCloudMerge(reason, opts || {});
+        }, opts?.immediate ? 40 : 900);
+      }catch(_e){}
     }
 
     
@@ -15523,8 +15625,7 @@ function currentInv(){
       if(filterLoc){
         pushLoc(filterLoc);
       }else{
-        pushLoc("concamarise");
-        pushLoc("cerea");
+        pushLoc(INVENTORY_CANONICAL_LOC);
       }
 
       out.sort((a,b)=>{
@@ -15537,7 +15638,7 @@ function currentInv(){
         return String(a.sku||"").localeCompare(String(b.sku||""));
       });
 
-      const scopeLabel = filterLoc ? prettyLoc(filterLoc) : "Concamarise + Cerea";
+      const scopeLabel = filterLoc ? prettyLoc(filterLoc) : "Inventario unico";
       hint.textContent = `Sotto scorta: ${out.length} articoli (soglia: ${__lowStockPolicyLabel()}) • ${scopeLabel}`;
 
       if(!out.length){
@@ -15639,8 +15740,7 @@ function currentInv(){
           out.push({ ...it, loc, qty:remainingQty, totalQty, remainingQty, allocatedQty: rackAllocatedQtyFromDoc(it || {}) });
         }
       };
-      pushLoc("concamarise");
-      pushLoc("cerea");
+      pushLoc(INVENTORY_CANONICAL_LOC);
       out.sort((a,b)=>{
         const ta = Number(a.updatedAtClient || 0) || (a.updatedAt?.toMillis?.() || 0);
         const tb = Number(b.updatedAtClient || 0) || (b.updatedAt?.toMillis?.() || 0);
@@ -16434,8 +16534,7 @@ Il valore non può essere inferiore alla quantità già ubicata.`,
           out.push({ ...it, loc, qty:allocatedQty, totalQty, allocatedQty, remainingQty: rackUnallocatedQtyFromDoc(it || {}), rackLocations });
         }
       };
-      pushLoc("concamarise");
-      pushLoc("cerea");
+      pushLoc(INVENTORY_CANONICAL_LOC);
       out.sort((a,b)=>{
         const ra = (a.rackLocations || []).join(",");
         const rb = (b.rackLocations || []).join(",");
@@ -19157,8 +19256,8 @@ function renderHomePickingHistoryBox(){
         if(tSku) tSku.textContent = "—";
         if(tLow) tLow.textContent = "—";
         if(tPieces) tPieces.textContent = "—";
-        if(sub) sub.textContent = "Cerea: — • Concamarise: —";
-        if(piecesSub) piecesSub.textContent = "Cerea: — • Concamarise: —";
+        if(sub) sub.textContent = "Inventario unico: —";
+        if(piecesSub) piecesSub.textContent = "Inventario unico: —";
         if(upd) upd.textContent = "Aggiornato: —";
         if(lowCount) lowCount.textContent = "—";
         if(lowList) lowList.innerHTML = `<div class="hint">Accedi per vedere la sotto-scorta.</div>`;
@@ -19171,17 +19270,18 @@ function renderHomePickingHistoryBox(){
         return;
       }
 
-      const sC = invStats("cerea");
-      const sM = invStats("concamarise");
+      const sC = invStats("cerea"); // legacy: letto solo per fusione cloud, non più come sede UI
+      const sM = invStats(INVENTORY_CANONICAL_LOC);
 
-      const totalSku = (sC.skuCount || 0) + (sM.skuCount || 0);
-      const totalLow = (sC.low || 0) + (sM.low || 0);
+      const totalSku = (sM.skuCount || 0);
+      const totalLow = (sM.low || 0);
+      const totalPieces = (sM.pieces || 0);
 
       if(tSku) tSku.textContent = fmtN(totalSku);
       if(tLow) tLow.textContent = fmtN(totalLow);
-      if(tPieces) tPieces.textContent = fmtN((sC.pieces||0) + (sM.pieces||0));
-      if(sub) sub.textContent = `Cerea: ${fmtN(sC.skuCount)} • Concamarise: ${fmtN(sM.skuCount)}`;
-      if(piecesSub) piecesSub.textContent = `Cerea: ${fmtN(sC.pieces)} • Concamarise: ${fmtN(sM.pieces)}`;
+      if(tPieces) tPieces.textContent = fmtN(totalPieces);
+      if(sub) sub.textContent = `Inventario unico: ${fmtN(totalSku)} SKU`;
+      if(piecesSub) piecesSub.textContent = `Inventario unico: ${fmtN(totalPieces)} pezzi`;
 
       const a = sC.updatedAt ? +new Date(sC.updatedAt) : 0;
       const b = sM.updatedAt ? +new Date(sM.updatedAt) : 0;
@@ -19208,8 +19308,7 @@ function renderHomePickingHistoryBox(){
             out.push({ ...it, loc });
           }
         };
-        pushLoc("cerea");
-        pushLoc("concamarise");
+        pushLoc(INVENTORY_CANONICAL_LOC);
 
         out.sort((x,y)=> lowStockQtyValue(x) - lowStockQtyValue(y));
         lowCount.textContent = fmtN(out.length);
@@ -21016,9 +21115,8 @@ function closeSheet(kind){
       if(titleEl) titleEl.textContent = titleMain;
       if(sub) sub.textContent = `${sku} • ${prettyLoc(loc)} • Disponibilità: ${totalSkuQty} • Ubicato: ${allAllocatedQty} • Da ubicare: ${allRemainingQty} • Ubicazioni: ${rackText}`;
 
-      const cereaTransferNotice = (loc === "cerea") ? " Il prodotto è in Cerea: una nuova ubicazione sposta automaticamente la quantità confermata in Concamarise." : "";
       hint.innerHTML = canEdit
-        ? `Le ubicazioni assegnate sono modificabili riga per riga: posizione e quantità. Le quantità liberate tornano in Da ubicare.${cereaTransferNotice}`
+        ? "Le ubicazioni assegnate sono modificabili riga per riga: posizione e quantità. Le quantità liberate tornano in Da ubicare. Inventario unico attivo: nessuno spostamento sede."
         : "Sola lettura: utente non abilitato al picking.";
 
       const addSectionHtml = remainingQty > 0 ? `
@@ -21642,10 +21740,17 @@ function closeSheet(kind){
     }
 
     async function saveLocationOnlyFromDetails(opts = {}){
-      const loc = state.route.loc;
+      let loc = state.route.loc;
       const sku = toSkuId(state.ui.productDetailsSku || "");
       const quickMode = !!(opts && opts.quick);
       const quickSelectedCode = normalizeRackLocation((opts && opts.rackLocation) ? opts.rackLocation : "");
+      if(loc === "cerea"){
+        // Compatibilità pre-patch: se arriva ancora una scheda legacy Cerea,
+        // prima fonde lo SKU nel documento cloud unico e poi prosegue sul canonico.
+        await runUnifiedInventoryCloudMerge("pre_ubicazione_" + sku, { onlySku:sku, immediate:true });
+        loc = INVENTORY_CANONICAL_LOC;
+        state.route.loc = loc;
+      }
 
       if(!canUsePickingActions()){
         showToast("Permessi", "Utente non abilitato al picking.", 2200);
@@ -21656,7 +21761,7 @@ function closeSheet(kind){
         return;
       }
 
-      const it = getProductBySku(loc, sku);
+      const it = getProductBySku(loc, sku) || getProductBySku("cerea", sku);
       if(!it){
         showToast("Errore", "Prodotto non trovato.", 2200);
         return;
@@ -21743,7 +21848,8 @@ function closeSheet(kind){
       }
 
       try{
-        if(loc === "cerea"){
+        // Inventario unico: il vecchio trasferimento automatico Cerea → Concamarise è disattivato.
+        if(false && loc === "cerea"){
           const sourceLoc = "cerea";
           const destLoc = "concamarise";
           const sourceRef = api.doc(db, COL_ROOT, sourceLoc, SUB_ITEMS, sku);
@@ -22318,8 +22424,6 @@ function closeSheet(kind){
       <button class="btn" data-action="pdCombo" ${canEdit ? "" : "disabled"}>Combo</button>
       <button class="btn amazon" data-action="pdReorder" ${canEdit ? "" : "disabled"}>Riordina</button>
       <button class="btn" data-action="pdCancel" ${canEdit ? "" : "disabled"}>Annulla</button>
-      <button class="btn" data-action="pdMove" data-to="cerea" ${(canEdit && loc!=="cerea") ? "" : "disabled"}>Sposta in Cerea</button>
-      <button class="btn" data-action="pdMove" data-to="concamarise" ${(canEdit && loc!=="concamarise") ? "" : "disabled"}>Sposta in Concamarise</button>
       <button class="btn danger" data-action="pdDelete" ${canEdit ? "" : "disabled"}>Elimina</button>
     `;
   }
@@ -23503,6 +23607,8 @@ async function saveProductFromDetails(){
     }
 
     async function moveProductFromDetails(toLoc){
+      showToast("Sede disattivata", "Inventario unico attivo: lo SKU non si sposta più tra Cerea e Concamarise.", 2600);
+      return;
       const fromLoc = state.route.loc;
       if(!fromLoc) return;
 
@@ -24581,8 +24687,8 @@ async function applyFlow(kind){
 
     // --- bind ---
     function bindUI(){
-      $("btnEnterCerea")?.addEventListener("click", ()=> enterLocation("cerea"));
-      $("btnEnterConcamarise")?.addEventListener("click", ()=> enterLocation("concamarise"));
+      $("btnEnterCerea")?.addEventListener("click", ()=> enterLocation(INVENTORY_CANONICAL_LOC));
+      $("btnEnterConcamarise")?.addEventListener("click", ()=> enterLocation(INVENTORY_CANONICAL_LOC));
 
       $("btnHomeCarica")?.addEventListener("click", ()=>{
         openSheet("carica");
@@ -24599,8 +24705,8 @@ async function applyFlow(kind){
         setFlowsModalLoc(state.ui.flowsModalLoc || "concamarise");
       });
 
-      $("btnFlowsLocConcamarise")?.addEventListener("click", ()=> setFlowsModalLoc("concamarise"));
-      $("btnFlowsLocCerea")?.addEventListener("click", ()=> setFlowsModalLoc("cerea"));
+      $("btnFlowsLocConcamarise")?.addEventListener("click", ()=> setFlowsModalLoc(INVENTORY_CANONICAL_LOC));
+      $("btnFlowsLocCerea")?.addEventListener("click", ()=> setFlowsModalLoc(INVENTORY_CANONICAL_LOC));
 
       $("btnCloseFlows")?.addEventListener("click", ()=> closeSheet("flows"));
       $("sheetFlows")?.addEventListener("click", (e)=>{ if(e.target?.id==="sheetFlows") closeSheet("flows"); });
