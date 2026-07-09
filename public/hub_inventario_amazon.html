@@ -3297,11 +3297,11 @@ function guessTitleFromRaw(rawText, sku){
     function lowStockQtyValue(it){
       try{
         if(it && it.__isSkuAggregate && Number.isFinite(Number(it.availableQty))){
-          return Math.max(0, Math.round(Number(it.availableQty)));
+          return Math.round(Number(it.availableQty));
         }
         const physical = physicalQtyFromItem(it);
         const reserved = reservedQtyFromItem(it);
-        return Math.max(0, physical - reserved);
+        return Math.round(physical - reserved);
       }catch(_e){
         return 0;
       }
@@ -3322,7 +3322,7 @@ function guessTitleFromRaw(rawText, sku){
     function reservedFormulaText(it){
       const physical = physicalQtyFromItem(it);
       const reserved = reservedQtyFromItem(it);
-      const available = Math.max(0, physical - reserved);
+      const available = Math.round(physical - reserved);
       return `Disponibile reale: ${available} = Fisica: ${physical} - Prenotati: ${reserved}`;
     }
 
@@ -4091,7 +4091,7 @@ function guessTitleFromRaw(rawText, sku){
         title: squashWhitespace(it?.title || it?.name || ""),
         physicalQty: physical,
         reservedQty: reserved,
-        availableQty: Math.max(0, physical - reserved),
+        availableQty: Math.round(physical - reserved),
         rackLocations: readRackLocationsFromDoc(it || {}),
         updatedAtClient: itemUpdatedMillis(it || {})
       };
@@ -4173,7 +4173,7 @@ function guessTitleFromRaw(rawText, sku){
         prev.aliasSkus = Array.from(new Set([...(prev.aliasSkus || []), ...aliasIndex.members(actualSku)])).filter(Boolean).sort((a,b)=>a.localeCompare(b));
         prev.physicalQty += line.physicalQty;
         prev.reservedQty += line.reservedQty;
-        prev.availableQty = Math.max(0, prev.physicalQty - prev.reservedQty);
+        prev.availableQty = Math.round(prev.physicalQty - prev.reservedQty);
         prev.qty = prev.availableQty;
 
         const customTh = __getCustomLowStockThreshold(it);
@@ -5535,7 +5535,7 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
             zeroStockAt: d.zeroStockAt || null,
             zeroStockAtClient: Number.isFinite(Number(d.zeroStockAtClient)) ? Number(d.zeroStockAtClient) : null,
             reservedQty: Number.isFinite(Number(d.reservedQty)) ? Math.max(0, Math.round(Number(d.reservedQty))) : 0,
-            availableQty: Math.max(0, (Number.isFinite(Number(qty)) ? Math.round(Number(qty)) : 0) - (Number.isFinite(Number(d.reservedQty)) ? Math.max(0, Math.round(Number(d.reservedQty))) : 0)),
+            availableQty: Math.round((Number.isFinite(Number(qty)) ? Math.round(Number(qty)) : 0) - (Number.isFinite(Number(d.reservedQty)) ? Math.max(0, Math.round(Number(d.reservedQty))) : 0)),
             lowStockThreshold: __parseLowStockThresholdValue(d.lowStockThreshold),
             productionArea: readProductionAreaFromDoc(d, loc),
             areaProduzione: readProductionAreaFromDoc(d, loc),
@@ -5705,7 +5705,7 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
       const racks = normalizeRackLocationsList(d?.rackLocations || d?.rackLocation || []);
       const allocs = unifiedRawRackAllocations(d || {});
       const lots = unifiedRawStockLots(d || {});
-      return q > 0 || reserved > 0 || pending > 0 || racks.length > 0 || allocs.length > 0 || lots.length > 0;
+      return q !== 0 || reserved > 0 || pending > 0 || racks.length > 0 || allocs.length > 0 || lots.length > 0;
     }
 
     function unifiedPickTitle(dest, source, sku){
@@ -5723,7 +5723,7 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
       const title = unifiedPickTitle(dest, source, sku);
       const sourceQty = stockQtyFromDoc(source || {});
       const destQty = stockQtyFromDoc(dest || {});
-      const totalQty = Math.max(0, Math.round(sourceQty + destQty));
+      const totalQty = Math.round(sourceQty + destQty);
       const sourceReserved = reservedQtyFromItem(source || {});
       const destReserved = reservedQtyFromItem(dest || {});
       const sourcePending = Number.isFinite(Number(source?.pendingPickQty)) ? Math.max(0, Math.round(Number(source.pendingPickQty))) : 0;
@@ -5757,14 +5757,14 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
         qty: totalQty,
         reservedQty: destReserved + sourceReserved,
         pendingPickQty: destPending + sourcePending,
-        availableQty: Math.max(0, totalQty - (destReserved + sourceReserved)),
+        availableQty: Math.round(totalQty - (destReserved + sourceReserved)),
         rackLocation: rackLocations[0] || "",
         rackLocations,
         rackAllocations,
         stockLots: totalQty > 0 ? stockLots : [],
-        zeroStock: totalQty <= 0,
-        zeroStockAt: totalQty <= 0 && api?.serverTimestamp ? api.serverTimestamp() : null,
-        zeroStockAtClient: totalQty <= 0 ? nowClient : null,
+        zeroStock: totalQty === 0,
+        zeroStockAt: totalQty === 0 && api?.serverTimestamp ? api.serverTimestamp() : null,
+        zeroStockAtClient: totalQty === 0 ? nowClient : null,
         location: unifiedInventoryCanonicalLoc(),
         inventoryArea: "unica",
         unifiedInventory: true,
@@ -8007,7 +8007,7 @@ function currentInv(){
         <div class="row gridHead gridRow">
           <div class="gridCell">SKU</div>
           <div class="gridCell">Prodotto</div>
-          <div class="gridCell gridRight">Disp.</div>
+          <div class="gridCell gridRight">Fisica</div>
           <div class="gridCell gridRight">Prenotati</div>
         </div>`;
 
@@ -8022,7 +8022,7 @@ function currentInv(){
         const physicalQty = physicalQtyFromItem(it);
         const reservedQty = reservedQtyFromItem(it);
         const reservedInfo = skuAggregateFormulaText(it);
-        const badgeClass = qty>0 ? (__isLowStockItem(it) ? "warn" : "ok") : "bad";
+        const badgeClass = lowStockQtyValue(it) > 0 ? (__isLowStockItem(it) ? "warn" : "ok") : "bad";
         const reservedBadgeClass = reservedQty > 0 ? "warn" : "";
         const locLabel = escapeHtml(skuAggregateLocationsLabel(it) || prettyLoc(it.loc));
         const sogliaLabel = escapeHtml(__lowStockThresholdLabel(it));
@@ -8040,7 +8040,7 @@ function currentInv(){
               <div class="gridProdMain">${titleMain}${reorderBadge}</div>
               <div class="gridProdSub">${locLabel} • Fisica totale: ${physicalQty} • Soglia: ${sogliaLabel}${reservedInfo ? ` • ${escapeHtml(reservedInfo)}` : ""}</div>
             </div>
-            <div class="gridCell gridRight"><span class="badge ${badgeClass}">${qty}</span></div>
+            <div class="gridCell gridRight"><span class="badge ${badgeClass}">${physicalQty}</span></div>
             <div class="gridCell gridRight"><span class="badge ${reservedBadgeClass}">${reservedQty}</span></div>
           </div>`;
       });
@@ -8236,7 +8236,7 @@ function currentInv(){
           const physicalQty = physicalQtyFromItem(it);
           const reservedQty = reservedQtyFromItem(it);
           const reservedInfo = skuAggregateFormulaText(it);
-          const badgeClass = qty>0 ? (__isLowStockItem(it) ? "warn" : "ok") : "bad";
+          const badgeClass = lowStockQtyValue(it) > 0 ? (__isLowStockItem(it) ? "warn" : "ok") : "bad";
           const reservedBadgeClass = reservedQty > 0 ? "warn" : "";
           const locLabel = escapeHtml(skuAggregateLocationsLabel(it) || prettyLoc(it.loc));
           const sogliaLabel = escapeHtml(__lowStockThresholdLabel(it));
@@ -8252,7 +8252,7 @@ function currentInv(){
                 <div class="gridProdMain">${titleMain}${reorderBadge}</div>
                 <div class="gridProdSub">${locLabel} • Fisica totale: ${physicalQty} • Soglia: ${sogliaLabel}${reservedInfo ? ` • ${escapeHtml(reservedInfo)}` : ""}</div>
               </div>
-              <div class="gridCell gridRight"><span class="badge ${badgeClass}">${qty}</span></div>
+              <div class="gridCell gridRight"><span class="badge ${badgeClass}">${physicalQty}</span></div>
               <div class="gridCell gridRight"><span class="badge ${reservedBadgeClass}">${reservedQty}</span></div>
             </div>`;
         });
@@ -8268,8 +8268,8 @@ function currentInv(){
           </div>`;
 
         lowList.classList.add("cols4");
-        lowList.innerHTML = `<div class="row gridHead gridRow"><div class="gridCell">SKU</div><div class="gridCell">Prodotto</div><div class="gridCell gridRight">Disp.</div><div class="gridCell gridRight">Prenotati</div></div>` + rows.join("") + totalRow;
-        if(lowHint) lowHint.textContent = "Disponibile reale per SKU = fisica inventario unico - prenotati totali. Tocca una riga per aprire la scheda SKU.";
+        lowList.innerHTML = `<div class="row gridHead gridRow"><div class="gridCell">SKU</div><div class="gridCell">Prodotto</div><div class="gridCell gridRight">Fisica</div><div class="gridCell gridRight">Prenotati</div></div>` + rows.join("") + totalRow;
+        if(lowHint) lowHint.textContent = "Colonna Fisica = giacenza fisica effettiva anche negativa. Disponibile reale = fisica - prenotati totali. Tocca una riga per aprire la scheda SKU.";
       }
 
       // log ultimo invio mail sotto scorta (da meta Firestore)
@@ -9094,7 +9094,7 @@ function closeSheet(kind){
               <div class="gridProdMain">${titleMain}</div>
               <div class="gridProdSub">${sub}</div>
             </div>
-            <div class="gridCell gridRight"><span class="badge ${badgeClass}">${qty}</span></div>
+            <div class="gridCell gridRight"><span class="badge ${badgeClass}">${physicalQty}</span></div>
           </div>`;
       });
 
@@ -11702,7 +11702,7 @@ function renderProductsSheet(){
                 <div class="gridProdMain">${titleMain}</div>
                 <div class="gridProdSub">${escapeHtml([metaSmall, asinSmall, rackSmall, sogliaSmall, groupSmall].filter(Boolean).join(" • "))}</div>
               </div>
-              <div class="gridCell gridRight"><span class="badge ${badgeClass}">${qty}</span></div>
+              <div class="gridCell gridRight"><span class="badge ${badgeClass}">${physicalQty}</span></div>
             </div>`;
         })
         .filter(Boolean);
