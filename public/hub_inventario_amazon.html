@@ -3541,6 +3541,250 @@ function guessTitleFromRaw(rawText, sku){
     function resolveSkuAlias(sku){ return buildSkuAliasIndex().resolve(sku); }
     function skuAliasMembers(sku){ return buildSkuAliasIndex().members(sku); }
 
+    // --- Stock condiviso per SKU collegati / stesso ASIN ---
+    // Tutti gli alias rappresentano lo stesso stock fisico. Le identità SKU restano separate,
+    // ma quantità, prenotati, lotti e ubicazioni vengono letti da una sola fotografia condivisa.
+    function sharedStockRawDoc(it){
+      return (it && typeof it === "object" && it.__raw && typeof it.__raw === "object") ? it.__raw : (it || {});
+    }
+
+    function sharedStockRevisionInfo(it){
+      const d = sharedStockRawDoc(it);
+      const nums = (keys)=> keys.map(k=>Number(d?.[k] || 0)).filter(n=>Number.isFinite(n) && n>0);
+      const explicitVals = nums([
+        "sharedStockRevisionAtClient", "stockUpdatedAtClient", "lastStockMutationAtClient",
+        "inventoryUpdatedAtClient", "lastInventoryMutationAtClient"
+      ]);
+      const genericVals = nums([
+        "updatedAtClient", "reservedAtClient", "reservationReleasedAtClient",
+        "lastPickingRollbackAtClient", "zeroStockAtClient"
+      ]);
+      try{
+        if(d?.updatedAt?.toMillis) genericVals.push(d.updatedAt.toMillis());
+      }catch(_e){}
+      return {
+        explicit: explicitVals.length ? Math.max(...explicitVals) : 0,
+        generic: genericVals.length ? Math.max(...genericVals) : 0
+      };
+    }
+
+    function sharedStockBootstrapScore(it){
+      try{
+        const d = sharedStockRawDoc(it);
+        const physical = Math.abs(stockQtyFromDoc(d || {}));
+        const reserved = reservedQtyFromItem(d || {});
+        const pendingRaw = Number(d?.pendingPickQty ?? 0);
+        const pending = Number.isFinite(pendingRaw) ? Math.max(0, Math.round(pendingRaw)) : 0;
+        const racks = normalizeRackLocationsList(d?.rackLocations || d?.rackLocation || []).length;
+        const allocations = Array.isArray(d?.rackAllocations) ? d.rackAllocations.length : 0;
+        const lots = Array.isArray(d?.stockLots) ? d.stockLots.length : 0;
+        // Valore assoluto: preserva anche scorte fisiche negative (es. -121) invece di preferire 0.
+        return (physical * 1000000) + ((reserved + pending) * 1000) + (allocations * 10) + lots + racks;
+      }catch(_e){ return 0; }
+    }
+
+    function compareSharedStockSource(a, b, canonicalSku=""){
+      if(!a && !b) return 0;
+      if(a && !b) return 1;
+      if(!a && b) return -1;
+      const ra = sharedStockRevisionInfo(a);
+      const rb = sharedStockRevisionInfo(b);
+      if(ra.explicit !== rb.explicit) return ra.explicit - rb.explicit;
+
+      const sa = sharedStockBootstrapScore(a);
+      const sb = sharedStockBootstrapScore(b);
+      // Nei dati pregressi usa prima l'ultima vera modifica inventario; a parità, preserva
+      // la fotografia con stock/lotti/prenotati più informativa (anche se negativa).
+      if(ra.generic !== rb.generic) return ra.generic - rb.generic;
+      if(sa !== sb) return sa - sb;
+
+      const canonical = toSkuId(canonicalSku || "");
+      const skuA = toSkuId(a?.sku || a?.id || sharedStockRawDoc(a)?.sku || "");
+      const skuB = toSkuId(b?.sku || b?.id || sharedStockRawDoc(b)?.sku || "");
+      if(canonical){
+        if(skuA === canonical && skuB !== canonical) return 1;
+        if(skuB === canonical && skuA !== canonical) return -1;
+      }
+      return skuB.localeCompare(skuA);
+    }
+
+    function pickSharedStockSource(items, canonicalSku=""){
+      let best = null;
+      for(const it of (Array.isArray(items) ? items : [])){
+        if(!best || compareSharedStockSource(it, best, canonicalSku) > 0) best = it;
+      }
+      return best;
+    }
+
+    function sharedStockMutationFields(nowClient, who, reason=""){
+      const ts = Number(nowClient || Date.now());
+      return {
+        sharedStockRevisionAtClient: ts,
+        stockUpdatedAtClient: ts,
+        lastStockMutationAtClient: ts,
+        sharedStockMutationBy: who || "",
+        sharedStockMutationReason: String(reason || "")
+      };
+    }
+
+    function sharedStockSnapshotFromDoc(it){
+      const d = sharedStockRawDoc(it);
+      const qty = stockQtyFromDoc(d || {});
+      const reservedQty = reservedQtyFromItem(d || {});
+      const pendingRaw = Number(d?.pendingPickQty ?? reservedQty);
+      const pendingPickQty = Number.isFinite(pendingRaw) ? Math.max(0, Math.round(pendingRaw)) : reservedQty;
+      const positive = qty > 0;
+      const rackLocations = positive ? normalizeRackLocationsList(d?.rackLocations || d?.rackLocation || []) : [];
+      const rackAllocations = positive && Array.isArray(d?.rackAllocations) ? d.rackAllocations.map(x=>({ ...(x || {}) })) : [];
+      const stockLots = positive && Array.isArray(d?.stockLots) ? d.stockLots.map(x=>({ ...(x || {}) })) : [];
+      return {
+        qty,
+        reservedQty,
+        pendingPickQty,
+        availableQty: Math.round(qty - reservedQty),
+        reservationStatus: String(d?.reservationStatus || ((reservedQty > 0 || pendingPickQty > 0) ? "in_attesa_picking" : "rilasciata")),
+        rackLocation: rackLocations[0] || "",
+        rackLocations,
+        rackAllocations,
+        stockLots,
+        zeroStock: qty === 0,
+        zeroStockAtClient: qty === 0 ? (Number(d?.zeroStockAtClient || 0) || 0) : null
+      };
+    }
+
+    function sharedStockComparable(it){
+      try{ return JSON.stringify(sharedStockSnapshotFromDoc(it)); }
+      catch(_e){ return ""; }
+    }
+
+    const __sharedStockSyncState = { timer:null, running:false, queuedReason:"", lastAt:0 };
+
+    async function syncSharedInventoryGroupCloud(canonicalSku, aliases, reason="shared_stock_sync"){
+      const api = state.firebase?.api;
+      const db = state.firebase?.db;
+      if(!api || !db || !state.user?.isWhitelisted) return { updated:0, found:0 };
+      const canonical = toSkuId(canonicalSku || "");
+      const list = normalizeSkuAliases(aliases, canonical);
+      if(!canonical || list.length < 2) return { updated:0, found:0 };
+
+      const docs = [];
+      for(const loc of inventoryLocs()){
+        const reads = await Promise.all(list.map(async sku=>{
+          try{
+            const ref = api.doc(db, COL_ROOT, loc, SUB_ITEMS, sku);
+            const snap = await api.getDoc(ref);
+            return snap?.exists?.() ? { loc, sku, ref, data:snap.data() || {} } : null;
+          }catch(_e){ return null; }
+        }));
+        docs.push(...reads.filter(Boolean));
+      }
+      if(docs.length < 2) return { updated:0, found:docs.length };
+
+      const source = pickSharedStockSource(docs.map(x=>({ ...x.data, __raw:x.data, sku:x.sku, id:x.sku })), canonical);
+      if(!source) return { updated:0, found:docs.length };
+      const sourceSku = toSkuId(source?.sku || source?.id || canonical) || canonical;
+      const snapshot = sharedStockSnapshotFromDoc(source);
+      const revInfo = sharedStockRevisionInfo(source);
+      const revision = Math.max(revInfo.explicit || 0, revInfo.generic || 0, Date.now());
+      const nowClient = Date.now();
+      const who = state.user?.emailLower || state.user?.email || state.user?.uid || "";
+      const sourceAsin = readAsinFromDoc(source || {});
+      const groupFields = skuUnificationFields(canonical, list, nowClient, who);
+      const asinFields = sourceAsin ? asinCloudFields(sourceAsin, nowClient, who) : {};
+      const sourceComparable = JSON.stringify(snapshot);
+
+      const pending = docs.filter(x=>{
+        const sameStock = sharedStockComparable({ ...x.data, __raw:x.data }) === sourceComparable;
+        const sameCanonical = toSkuId(x.data?.sharedStockCanonicalSku || "") === canonical;
+        const sameAliases = normalizeSkuAliases(x.data?.sharedStockAliases || [], canonical).join("|") === list.join("|");
+        return !(sameStock && sameCanonical && sameAliases);
+      });
+      if(!pending.length) return { updated:0, found:docs.length, sourceSku };
+
+      let updated = 0;
+      for(let i=0; i<pending.length; i+=350){
+        const part = pending.slice(i, i+350);
+        const batch = api.writeBatch(db);
+        for(const x of part){
+          batch.set(x.ref, {
+            ...snapshot,
+            zeroStockAtClient: snapshot.qty === 0 ? (snapshot.zeroStockAtClient || nowClient) : null,
+            zeroStockAt: snapshot.qty === 0 ? api.serverTimestamp() : null,
+            ...groupFields,
+            ...asinFields,
+            sharedStockCanonicalSku: canonical,
+            sharedStockAliases: list,
+            sharedStockSourceSku: sourceSku,
+            sharedStockRevisionAtClient: revision,
+            stockUpdatedAtClient: revision,
+            sharedStockSyncedAt: api.serverTimestamp(),
+            sharedStockSyncedAtClient: nowClient,
+            sharedStockSyncedBy: who,
+            sharedStockSyncReason: String(reason || "shared_stock_sync"),
+            sharedStockSyncVersion: 2
+          }, { merge:true });
+          updated++;
+        }
+        await batch.commit();
+      }
+      clearSkuRuntimeCache("shared_stock_sync");
+      try{ if(state.cache) state.cache.invIndexForMatch = null; }catch(_e){}
+      return { updated, found:docs.length, sourceSku };
+    }
+
+    async function runSharedSkuInventorySync(reason="realtime"){
+      try{
+        if(__sharedStockSyncState.running) return;
+        if(!state.user?.isAdmin || !state.user?.isWhitelisted || !state.firebase?.ok) return;
+        if(!state.inventory?.[INVENTORY_CANONICAL_LOC]?.meta?.loaded) return;
+        __sharedStockSyncState.running = true;
+
+        const aliasIndex = buildSkuAliasIndex();
+        const groups = new Map();
+        for(const loc of inventoryLocs()){
+          for(const it of (state.inventory?.[loc]?.items || [])){
+            const sku = toSkuId(it?.sku || it?.id || "");
+            if(!sku) continue;
+            const canonical = aliasIndex.resolve(sku) || sku;
+            if(!groups.has(canonical)) groups.set(canonical, []);
+            groups.get(canonical).push(it);
+          }
+        }
+
+        let processed = 0;
+        for(const [canonical, items] of groups.entries()){
+          const existingSkus = Array.from(new Set(items.map(x=>toSkuId(x?.sku || x?.id || "")).filter(Boolean)));
+          const members = aliasIndex.members(canonical);
+          if(existingSkus.length < 2 || members.length < 2) continue;
+          const source = pickSharedStockSource(items, canonical);
+          if(!source) continue;
+          const cmp = sharedStockComparable(source);
+          const divergent = items.some(x=> sharedStockComparable(x) !== cmp || toSkuId(sharedStockRawDoc(x)?.sharedStockCanonicalSku || "") !== canonical);
+          if(!divergent) continue;
+          await syncSharedInventoryGroupCloud(canonical, members, reason);
+          processed++;
+          if(processed >= 80) break;
+        }
+        __sharedStockSyncState.lastAt = Date.now();
+      }catch(err){
+        console.warn("shared SKU inventory sync", err);
+      }finally{
+        __sharedStockSyncState.running = false;
+      }
+    }
+
+    function scheduleSharedSkuInventorySync(reason="realtime", opts={}){
+      try{
+        if(!state.user?.isAdmin || !state.user?.isWhitelisted) return;
+        __sharedStockSyncState.queuedReason = String(reason || "realtime");
+        if(__sharedStockSyncState.timer) clearTimeout(__sharedStockSyncState.timer);
+        __sharedStockSyncState.timer = setTimeout(()=>{
+          __sharedStockSyncState.timer = null;
+          void runSharedSkuInventorySync(__sharedStockSyncState.queuedReason || "realtime");
+        }, opts?.immediate ? 80 : 700);
+      }catch(_e){}
+    }
+
     function skuAliasLabelForItem(it, fallbackSku=""){
       const sku = toSkuId(fallbackSku || it?.sku || it?.id || "");
       const aliases = readSkuAliasesFromDoc(it || {}, sku);
@@ -4045,13 +4289,10 @@ function guessTitleFromRaw(rawText, sku){
         const actualSku = toSkuId(it?.sku || it?.id || "");
         if(!actualSku) continue;
         const canonicalSku = aliasIndex.resolve(actualSku) || actualSku;
-        const physical = Number.isFinite(Number(it?.qty)) ? Math.round(Number(it.qty)) : stockQtyFromDoc(it || {});
-        const reserved = reservedQtyFromItem(it || {});
-        const updated = itemUpdatedMillis(it || {});
-        const score = Math.max(0, physical) + Math.max(0, reserved);
+        const candidate = { ...it, sku:actualSku, __canonicalSku: canonicalSku, __aliasSkus: aliasIndex.members(actualSku) };
         const prev = selected.get(canonicalSku);
-        if(!prev || score > prev.score || (score === prev.score && updated > prev.updated)){
-          selected.set(canonicalSku, { it:{ ...it, sku:actualSku, __canonicalSku: canonicalSku, __aliasSkus: aliasIndex.members(actualSku) }, score, updated });
+        if(!prev || compareSharedStockSource(candidate, prev.it, canonicalSku) > 0){
+          selected.set(canonicalSku, { it:candidate });
         }
       }
       return Array.from(selected.values()).map(x=>x.it);
@@ -4126,13 +4367,10 @@ function guessTitleFromRaw(rawText, sku){
           if(!actualSku) continue;
           const sku = aliasIndex.resolve(actualSku) || actualSku;
           const key = `${sku}@@${loc}`;
-          const physical = physicalQtyFromItem(it || {});
-          const reserved = reservedQtyFromItem(it || {});
-          const updated = itemUpdatedMillis(it || {});
-          const score = Math.max(0, physical) + Math.max(0, reserved);
+          const candidate = { ...it, sku:actualSku, __actualSku:actualSku, __canonicalSku:sku };
           const prev = selectedByGroupLoc.get(key);
-          if(!prev || score > prev.score || (score === prev.score && updated > prev.updated)){
-            selectedByGroupLoc.set(key, { loc, it, actualSku, sku, score, updated });
+          if(!prev || compareSharedStockSource(candidate, prev.it, sku) > 0){
+            selectedByGroupLoc.set(key, { loc, it:candidate, actualSku, sku });
           }
         }
       }
@@ -5158,6 +5396,9 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
 
     function stopAllRealtime(){
       resetLowStockRealtimeWatcher();
+      try{ if(__sharedStockSyncState.timer) clearTimeout(__sharedStockSyncState.timer); }catch(_e){}
+      __sharedStockSyncState.timer = null;
+      __sharedStockSyncState.running = false;
       resetZeroStockRecovery();
       stopTwReordersWatch();
       stopTwCompletedAmazonWatch();
@@ -5579,6 +5820,7 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
         triggerLowStockMailFromRealtime("realtime_low_stock_" + loc);
         scheduleTwReordersBackfillFromState("inventory_" + loc);
         scheduleUnifiedInventoryCloudMerge("inventory_" + loc);
+        scheduleSharedSkuInventorySync("inventory_" + loc);
         scheduleZeroStockRecovery("inventory_" + loc);
       }, (err)=>{
         console.warn("inventory watch error", err);
@@ -6519,6 +6761,7 @@ function stopTwReordersWatch(){
           title,
           titleNorm: normalizeText(title || sku),
           qty: api.increment(qtySigned),
+          ...sharedStockMutationFields(nowClient, who, "combo_effect"),
           location: loc,
           updatedAt: api.serverTimestamp(),
           updatedAtClient: Date.now(),
@@ -7204,6 +7447,7 @@ function stopTwReordersWatch(){
             titleNorm: normalizeText(title || stockSku),
             ...asinPatch,
             qty: api.increment(delta),
+            ...sharedStockMutationFields(nowClient, who, "adjust_inventory_flow"),
             location: loc,
             updatedAt: api.serverTimestamp(),
             updatedAtClient: nowClient,
@@ -8339,17 +8583,19 @@ function currentInv(){
         return;
       }
 
+      const aggregateLookup = buildSkuStockAggregateLookup(state.route.loc || "");
       const rows = items.slice(0, 500).map(it=>{
+        const stockAgg = aggregateLookup.get(toSkuId(it.sku || it.id || "")) || it;
         const meta = parseTitleMeta(it.title || "");
         const titleMain = meta.main ? escapeHtml(meta.main) : (it.title ? escapeHtml(it.title) : "<span class='muted'>(senza nome)</span>");
         const metaSmall = buildMetaSmall(meta);
         const sku = escapeHtml(it.sku || it.id || meta.skuInTitle || "");
-        const qty = Number.isFinite(it.qty) ? it.qty : 0;
-        const availableQty = lowStockQtyValue(it);
-        const reservedInfo = lowStockQtyMetaLabel(it);
-        const badgeClass = __isLowStockItem(it) ? (availableQty>0 ? "warn" : "bad") : "ok";
-        const thresholdSmall = `Soglia: ${__lowStockThresholdLabel(it)}`;
-        const rackText = rackLocationDisplayFromItem(it);
+        const qty = physicalQtyFromItem(stockAgg || it);
+        const availableQty = lowStockQtyValue(stockAgg || it);
+        const reservedInfo = lowStockQtyMetaLabel(stockAgg || it);
+        const badgeClass = __isLowStockItem(stockAgg || it) ? (availableQty>0 ? "warn" : "bad") : "ok";
+        const thresholdSmall = `Soglia: ${__lowStockThresholdLabel(stockAgg || it)}`;
+        const rackText = rackLocationDisplayFromItem((stockAgg?.locations?.[0]?.item) || it);
         const rackSmall = rackText !== "—" ? `Ubicazione: ${rackText}` : "";
         const metaLine = [metaSmall, rackSmall, reservedInfo, thresholdSmall].filter(Boolean).join(" • ");
         const metaHtml = metaLine ? `<div class="rowMeta">${escapeHtml(metaLine)}</div>` : ``;
@@ -8726,19 +8972,37 @@ function closeSheet(kind){
         if(!stockSkuCerea.has(s)) stockSkuCerea.set(s, s);
       }
 
-      const registerSkuAliasesForIndex = (map, stockMap, item)=>{
-        const actualSku = toSkuId(item?.sku || item?.id || "");
-        if(!actualSku) return;
-        const members = skuAliasMembers(actualSku);
-        for(const alias of members){
-          const a = toSkuId(alias || "");
-          if(!a) continue;
-          if(!map.has(a)) map.set(a, item);
-          if(!stockMap.has(a)) stockMap.set(a, actualSku);
+      const aliasIndex = buildSkuAliasIndex();
+      const bindSharedStockOwners = (items, map, stockMap)=>{
+        const actualBySku = new Map();
+        const groups = new Map();
+        for(const item of (items || [])){
+          const actualSku = toSkuId(item?.sku || item?.id || "");
+          if(!actualSku) continue;
+          actualBySku.set(actualSku, item);
+          const canonical = aliasIndex.resolve(actualSku) || actualSku;
+          if(!groups.has(canonical)) groups.set(canonical, []);
+          groups.get(canonical).push(item);
+        }
+        for(const [canonical, groupItems] of groups.entries()){
+          const source = pickSharedStockSource(groupItems, canonical) || groupItems[0] || null;
+          const sourceSku = toSkuId(source?.sku || source?.id || "");
+          const sourceComparable = source ? sharedStockComparable(source) : "";
+          const groupAlreadyAligned = !!sourceComparable && groupItems.every(x=> sharedStockComparable(x) === sourceComparable);
+          // Finché i documenti pregressi sono divergenti, scrive sul documento autorevole per non
+          // perdere la quantità corretta. Appena il gruppo è allineato, usa il canonico stabile.
+          const ownerSku = (groupAlreadyAligned && actualBySku.has(canonical)) ? canonical : sourceSku;
+          const ownerItem = actualBySku.get(ownerSku) || source;
+          for(const alias of aliasIndex.members(canonical)){
+            const a = toSkuId(alias || "");
+            if(!a) continue;
+            if(!map.has(a) && ownerItem) map.set(a, actualBySku.get(a) || ownerItem);
+            if(ownerSku) stockMap.set(a, ownerSku); // override intenzionale: mai più alias -> documento separato
+          }
         }
       };
-      invConca.forEach(it=>registerSkuAliasesForIndex(mapConca, stockSkuConca, it));
-      invCerea.forEach(it=>registerSkuAliasesForIndex(mapCerea, stockSkuCerea, it));
+      bindSharedStockOwners(invConca, mapConca, stockSkuConca);
+      bindSharedStockOwners(invCerea, mapCerea, stockSkuCerea);
 
       // lista unica per matching testuale
       const all = [];
@@ -9056,6 +9320,7 @@ function closeSheet(kind){
       if(!list || !hint) return;
 
       const idx = getInvIndexForMatch();
+      const aggregateLookup = buildSkuStockAggregateLookup(state.route.loc || "");
       const q = normalizeText(String($("skuPickSearch")?.value || state.ui.skuPick?.q || ""));
       const filtered = q
         ? idx.all.filter(row => normalizeText(`${row.sku} ${row.it?.title||""} ${row.it?.titleNorm||""} ${rackLocationSearchText(row.it || {})} ${row.loc}`).includes(q))
@@ -9081,8 +9346,10 @@ function closeSheet(kind){
         const titleMain = meta.main ? escapeHtml(meta.main) : (it.title ? escapeHtml(it.title) : "<span class='muted'>(senza nome)</span>");
         const metaSmall = buildMetaSmall(meta);
         const sku = escapeHtml(toSkuId(row.sku || it.sku || ""));
-        const qty = Number.isFinite(row.qty) ? row.qty : (Number.isFinite(it.qty) ? it.qty : 0);
-        const badgeClass = __isLowStockItem({ sku: (row.sku || it.sku || ""), title: (row.title || it.title || ""), qty, lowStockThreshold: it.lowStockThreshold }) ? (qty>0 ? "warn" : "bad") : "ok";
+        const stockAgg = aggregateLookup.get(toSkuId(row.sku || it.sku || "")) || it;
+        const qty = lowStockQtyValue(stockAgg || it);
+        const physicalQty = physicalQtyFromItem(stockAgg || it);
+        const badgeClass = __isLowStockItem(stockAgg || { sku: (row.sku || it.sku || ""), title: (row.title || it.title || ""), qty, lowStockThreshold: it.lowStockThreshold }) ? (qty>0 ? "warn" : "bad") : "ok";
         const locLab = escapeHtml(prettyLoc(row.loc || it.loc || ""));
         const sub = `${locLab}${metaSmall ? " • " + escapeHtml(metaSmall) : ""}`;
 
@@ -9250,6 +9517,7 @@ function closeSheet(kind){
 
       const tsClient = Date.now();
       const deltaSign = 1;
+      const idx = getInvIndexForMatch();
 
       // calcola docId e ref per ogni location
       for(const p of plans){
@@ -9330,6 +9598,7 @@ function closeSheet(kind){
                 titleNorm: normalizeText(title || stockSku),
                 ...asinPatch,
                 qty: api.increment(delta),
+                ...sharedStockMutationFields(tsClient, state.user.email || "", "manual_carica_text"),
                 updatedAt: api.serverTimestamp(),
                 updatedAtClient: tsClient,
                 updatedBy: state.user.email || "",
@@ -9997,28 +10266,33 @@ function openComboSheet(){
   }
 
   const inv = currentInv();
-  const it = (inv?.items || []).find(x => toSkuId(x.sku) === sku) || null;
+  const rawIt = (inv?.items || []).find(x => toSkuId(x.sku) === sku) || null;
+  const stockAgg = getSkuStockAggregate(sku, loc) || null;
+  const it = rawIt || stockAgg;
+  const stockView = stockAgg || rawIt || { qty:0 };
+  const stockLine = Array.isArray(stockAgg?.locations) ? (stockAgg.locations.find(x=>x.loc===loc) || stockAgg.locations[0] || null) : null;
+  const stockDoc = stockLine?.item || rawIt || stockView;
 
-  const titleMain = (it && it.title) ? String(it.title) : sku;
-  const qty = (it && typeof it.qty !== "undefined") ? it.qty : 0;
-  const physicalQty = physicalQtyFromItem(it || { qty });
-  const reservedQty = reservedQtyFromItem(it || {});
-  const availableQty = lowStockQtyValue(it || { qty });
+  const titleMain = (rawIt && rawIt.title) ? String(rawIt.title) : ((it && it.title) ? String(it.title) : sku);
+  const qty = physicalQtyFromItem(stockView);
+  const physicalQty = physicalQtyFromItem(stockView);
+  const reservedQty = reservedQtyFromItem(stockView);
+  const availableQty = lowStockQtyValue(stockView);
   const reservedOriginLabel = reservedQty > 0
     ? "Scarichi ID flusso/PDF in attesa picking"
     : "Nessuna prenotazione attiva";
-  const productionArea = readProductionAreaFromDoc(it || {}, loc);
+  const productionArea = readProductionAreaFromDoc(rawIt || it || {}, loc);
   const productionAreaText = productionAreaLabel(productionArea);
-  const note = (it && (it.note || it.notes)) ? String(it.note || it.notes) : "";
-  const rackLocations = readRackLocationsFromDoc(it || {});
+  const note = (rawIt && (rawIt.note || rawIt.notes)) ? String(rawIt.note || rawIt.notes) : "";
+  const rackLocations = readRackLocationsFromDoc(stockDoc || {});
   const rackLocationValue = rackLocations;
   const rackLocationsText = rackLocationsLabel(rackLocations);
   const canUseMultipleRackLocations = shouldAllowMultipleRackLocations(qty, rackLocations);
-  const lowStockThreshold = __getCustomLowStockThreshold(it);
+  const lowStockThreshold = __getCustomLowStockThreshold(stockAgg || rawIt || it);
   const lowStockThresholdValue = (lowStockThreshold !== null) ? String(lowStockThreshold) : "";
   const lowStockThresholdLabel = __lowStockThresholdLabel(it || { sku, title: titleMain });
-  const asinValue = readAsinFromDoc(it || {});
-  const manualSkuAliases = readSkuAliasesFromDoc(it || {}, sku);
+  const asinValue = readAsinFromDoc(rawIt || it || {});
+  const manualSkuAliases = readSkuAliasesFromDoc(rawIt || it || {}, sku);
   const skuCanonical = resolveSkuAlias(sku) || readSkuAliasCanonicalFromDoc(it || {}, sku) || sku;
   const skuGroupMembers = skuAliasMembers(sku);
   const skuAliasOthers = skuGroupMembers.filter(x=>x && x!==sku);
@@ -10045,7 +10319,7 @@ function openComboSheet(){
     btnToggle.classList.toggle("primary", editMode);
   }
 
-  const when = it?.updatedAtClient ? fmtDate(it.updatedAtClient) : (it?.updatedAt ? fmtDate(it.updatedAt) : "");
+  const when = rawIt?.updatedAtClient ? fmtDate(rawIt.updatedAtClient) : (rawIt?.updatedAt ? fmtDate(rawIt.updatedAt) : "");
 
   const escVal = (value)=> escapeHtml((value === null || value === undefined || value === "") ? "—" : String(value));
   const readField = (label, value, cls="") => `
@@ -10507,6 +10781,7 @@ async function updateProductProductionAreaImmediate(area){
         title: finalTitle,
         titleNorm: normalizeText(finalTitle || s),
         qty: api.increment(Math.round(q)),
+        ...sharedStockMutationFields(nowClient, who, reason || "inventory_delta"),
         location: l,
         updatedAt: api.serverTimestamp(),
         updatedAtClient: nowClient,
@@ -11032,6 +11307,7 @@ async function reorderProductToTabelloneWrite(){
   }
 
   const it = getProductBySku(loc, sku) || getProductBySku("concamarise", sku) || getProductBySku("cerea", sku) || null;
+  const stockAgg = getSkuStockAggregate(sku, loc) || it;
   const title = squashWhitespace(it?.title || $("productDetailsTitle")?.textContent || sku) || sku;
   const raw = prompt(`Quantità da riordinare per:\n${title}\n\nSKU: ${sku}`, "480");
   if(raw === null) return;
@@ -11058,7 +11334,7 @@ async function reorderProductToTabelloneWrite(){
     const ref = api.doc(queueCol);
     const nowClient = Date.now();
     const who = state.user?.email || state.user?.uid || "";
-    const availableQty = Number.isFinite(Number(it?.qty)) ? Math.round(Number(it.qty)) : null;
+    const availableQty = stockAgg ? lowStockQtyValue(stockAgg) : null;
 
     const batch = api.writeBatch(db);
     const itemRef = api.doc(db, COL_ROOT, loc, SUB_ITEMS, sku);
@@ -11143,9 +11419,11 @@ async function loadProductFromDetails(){
         return;
       }
 
-      const itemRef = api.doc(db, COL_ROOT, loc, SUB_ITEMS, sku);
-      const productRef = api.doc(db, COL_PRODUCTS, sku);
-      const comboMap = await fetchComboChildrenMap([sku]);
+      const requestedSku = sku;
+      const stockSku = stockSkuForSkuAny(requestedSku, loc) || requestedSku;
+      const itemRef = api.doc(db, COL_ROOT, loc, SUB_ITEMS, stockSku);
+      const productRef = api.doc(db, COL_PRODUCTS, requestedSku);
+      const comboMap = await fetchComboChildrenMap([requestedSku]);
       const comboChildrenForMove = normalizeComboChildren(comboMap.get(sku) || [], sku);
 
       try{
@@ -11156,17 +11434,20 @@ async function loadProductFromDetails(){
           const data = snap.data() || {};
           const beforeQty = Number.isFinite(data.qty) ? Math.round(data.qty) : (parseSignedQtyStrict(data.qty) || 0);
           const afterQty = beforeQty + qtyToLoad;
-          const title = squashWhitespace(data.title || data.name || sku) || sku;
+          const title = savedTitleForExistingInventorySku(requestedSku, loc) || squashWhitespace(data.title || data.name || requestedSku) || requestedSku;
           const productionArea = readProductionAreaFromDoc(data, loc);
           const nowClient = Date.now();
           const who = state.user?.email || state.user?.uid || "";
 
           const rackClearData = beforeQty <= 0 ? { rackLocation: "", rackLocations: [] } : {};
           tx.set(itemRef, {
-            sku,
+            sku: stockSku,
+            requestedSku,
+            aliasRequestedSku: requestedSku !== stockSku ? requestedSku : "",
             title,
-            titleNorm: normalizeText(title || sku),
+            titleNorm: normalizeText(title || stockSku),
             qty: api.increment(qtyToLoad),
+            ...sharedStockMutationFields(nowClient, who, "product_manual_load"),
             productionArea,
             areaProduzione: productionArea,
             location: loc,
@@ -11181,9 +11462,9 @@ async function loadProductFromDetails(){
           }, { merge:true });
 
           tx.set(productRef, {
-            sku,
+            sku: requestedSku,
             title,
-            titleNorm: normalizeText(title || sku),
+            titleNorm: normalizeText(title || requestedSku),
             productionArea,
             areaProduzione: productionArea,
             lastSeenAt: api.serverTimestamp(),
@@ -11194,10 +11475,12 @@ async function loadProductFromDetails(){
             seenCount: api.increment(1)
           }, { merge:true });
 
-          const moveRef = api.doc(api.collection(db, COL_PRODUCTS, sku, SUB_MOVES));
+          const moveRef = api.doc(api.collection(db, COL_PRODUCTS, stockSku, SUB_MOVES));
           tx.set(moveRef, {
             type: "carica",
-            sku,
+            sku: stockSku,
+            requestedSku,
+            stockSku,
             qtySigned: qtyToLoad,
             beforeQty,
             afterQty,
@@ -11214,7 +11497,7 @@ async function loadProductFromDetails(){
 
           if(comboChildrenForMove.length){
             const comboEffects = buildComboEffectsFromDeltas([{
-              sku,
+              sku: requestedSku,
               title,
               loc,
               qtySigned: -qtyToLoad
@@ -11237,6 +11520,9 @@ async function loadProductFromDetails(){
           return { beforeQty, afterQty, title, productionArea };
         });
 
+        try{
+          await syncSharedInventoryGroupCloud(resolveSkuAlias(requestedSku) || requestedSku, skuAliasMembers(requestedSku), "product_manual_load");
+        }catch(syncErr){ console.warn("shared stock sync manual load", syncErr); }
         showToast("Carico registrato", `+${qtyToLoad} pz • Totale: ${res.afterQty}`, 2200);
         scheduleLowStockEmailAfterUpdate("product_manual_load");
         await enqueueProductionReadyCereaEmail([{ sku, title: res.title, qty: qtyToLoad, loc, productionArea: res.productionArea }], { source:"Scheda prodotto", loc });
@@ -11255,9 +11541,18 @@ async function loadProductFromDetails(){
       const api = state.firebase?.api;
       const db = state.firebase?.db;
       if(!api || !db) throw new Error("Firebase non inizializzato.");
-      const canonical = toSkuId(canonicalSku || "");
-      if(!canonical) throw new Error("SKU principale non valido.");
-      const list = normalizeSkuAliases(aliases, canonical);
+      const requestedCanonical = toSkuId(canonicalSku || "");
+      if(!requestedCanonical) throw new Error("SKU principale non valido.");
+      const preliminary = normalizeSkuAliases(aliases, requestedCanonical);
+      let canonical = requestedCanonical;
+      for(const member of preliminary){
+        const knownCanonical = resolveSkuAlias(member);
+        if(knownCanonical && preliminary.includes(knownCanonical) && skuAliasMembers(member).length > 1){
+          canonical = knownCanonical;
+          break;
+        }
+      }
+      const list = normalizeSkuAliases(preliminary, canonical);
       const nowClient = Number(opts.nowClient || Date.now());
       const who = opts.who || state.user?.emailLower || state.user?.email || state.user?.uid || "";
       const fields = skuUnificationFields(canonical, list, nowClient, who);
@@ -11302,12 +11597,9 @@ async function loadProductFromDetails(){
           batch.set(x.ref, {
             ...fields,
             ...asinFields,
-            updatedAt: api.serverTimestamp(),
-            updatedAtClient: nowClient,
-            updatedBy: who,
-            lastSeenAt: api.serverTimestamp(),
-            lastSeenAtClient: nowClient,
-            lastSeenKind: "sku_unification"
+            skuUnificationSyncedAt: api.serverTimestamp(),
+            skuUnificationSyncedAtClient: nowClient,
+            skuUnificationSyncedBy: who
           }, { merge:true });
         }
         await batch.commit();
@@ -11322,8 +11614,16 @@ async function loadProductFromDetails(){
           }
         }
       }catch(_e){}
+      let stockDocsSynchronized = 0;
+      try{
+        const syncRes = await syncSharedInventoryGroupCloud(canonical, list, "sku_unification_save");
+        stockDocsSynchronized = Number(syncRes?.updated || 0);
+      }catch(syncErr){
+        console.warn("shared stock sync after SKU unification", syncErr);
+      }
       clearSkuRuntimeCache("sku_unification_saved");
-      return { canonicalSku: canonical, aliases: list, inventoryDocsUpdated: existing.length };
+      scheduleSharedSkuInventorySync("sku_unification_saved", { immediate:true });
+      return { canonicalSku: canonical, aliases: list, inventoryDocsUpdated: existing.length, stockDocsSynchronized };
     }
 
 async function saveProductFromDetails(){
@@ -11393,6 +11693,8 @@ async function saveProductFromDetails(){
       const finalRackLocation = finalRackLocations[0] || "";
       const sameAsinSkus = asin ? skusWithSameAsin(asin, sku) : [];
       const finalSkuAliases = normalizeSkuAliases([...(Array.isArray(skuAliases) ? skuAliases : []), ...sameAsinSkus], sku);
+      const knownCanonical = resolveSkuAlias(oldSku) || oldSku;
+      const finalCanonicalSku = (sku === oldSku && finalSkuAliases.includes(knownCanonical)) ? knownCanonical : sku;
       if(finalSkuAliases.length > 40){
         setPdFieldError("skuAliases", "Troppi SKU collegati: tieni il gruppo sotto 40 SKU.");
         showToast("Unificazione SKU", "Troppi SKU collegati.", 2200);
@@ -11402,7 +11704,7 @@ async function saveProductFromDetails(){
       const rackConfirmLabel = finalRackLocations.length
         ? `${rackLocationsLabel(finalRackLocations)}${rackChanged ? "" : " (invariata)"}`
         : (rackChanged ? "non assegnata" : "non assegnata / invariata");
-      const okConfirm = confirm(`Confermi modifica cloud per ${oldSku}?\n\nDisponibile: ${qty} pz\nUbicazione: ${rackConfirmLabel}\nASIN: ${asin || "non impostato"}\nSKU unificati: ${finalSkuAliases.length > 1 ? finalSkuAliases.join(", ") : "nessuno"}\n\nNota: puoi salvare l’anagrafica anche se il prodotto è ancora da ubicare.`);
+      const okConfirm = confirm(`Confermi modifica cloud per ${oldSku}?\n\nGiacenza fisica: ${qty} pz\nUbicazione: ${rackConfirmLabel}\nASIN: ${asin || "non impostato"}\nSKU unificati: ${finalSkuAliases.length > 1 ? finalSkuAliases.join(", ") : "nessuno"}\n\nNota: puoi salvare l’anagrafica anche se il prodotto è ancora da ubicare.`);
       if(!okConfirm) return;
 
       const api = state.firebase.api;
@@ -11410,6 +11712,8 @@ async function saveProductFromDetails(){
 
       const oldRef = api.doc(db, COL_ROOT, loc, SUB_ITEMS, oldSku);
       const newRef = api.doc(db, COL_ROOT, loc, SUB_ITEMS, sku);
+      const stockOwnerSkuBefore = stockSkuForSkuAny(oldSku, loc) || oldSku;
+      const stockOwnerRefBefore = api.doc(db, COL_ROOT, loc, SUB_ITEMS, stockOwnerSkuBefore);
 
       const oldP = api.doc(db, COL_PRODUCTS, oldSku);
       const newP = api.doc(db, COL_PRODUCTS, sku);
@@ -11419,6 +11723,11 @@ async function saveProductFromDetails(){
         await api.runTransaction(db, async (tx)=>{
           const sOld = await tx.get(oldRef);
           if(!sOld.exists()) throw new Error("Prodotto non trovato.");
+          let sharedStockSnap = sOld;
+          if(sku === oldSku && stockOwnerSkuBefore !== oldSku){
+            const ownerSnap = await tx.get(stockOwnerRefBefore);
+            if(ownerSnap.exists()) sharedStockSnap = ownerSnap;
+          }
 
           let pNewSnap = null;
           let siblingSnap = null;
@@ -11437,7 +11746,7 @@ async function saveProductFromDetails(){
 
           const nowClient = Date.now();
           const who = state.user.email || state.user.emailLower || state.user.uid || "";
-          const skuUnificationPatch = skuUnificationFields(sku, finalSkuAliases, nowClient, who);
+          const skuUnificationPatch = skuUnificationFields(finalCanonicalSku, finalSkuAliases, nowClient, who);
           const asinPatch = asinCloudFields(asin, nowClient, who);
           const baseData = {
             sku,
@@ -11454,6 +11763,7 @@ async function saveProductFromDetails(){
             updatedAt: api.serverTimestamp(),
             updatedAtClient: nowClient,
             updatedBy: state.user.email || "",
+            ...sharedStockMutationFields(nowClient, who, "product_manual_edit"),
             location: loc,
             ...asinPatch,
             ...skuUnificationPatch
@@ -11515,8 +11825,8 @@ async function saveProductFromDetails(){
           }
 
           // Log "movimento" (storico prodotto) — include anche modifiche qty/titolo/sku
-          const oldData = sOld.data() || {};
-          const oldQty = (Number.isFinite(oldData.qty) ? Math.round(oldData.qty) : (parseQty(oldData.qty) ?? 0));
+          const oldData = (sku === oldSku && sharedStockSnap?.exists?.()) ? (sharedStockSnap.data() || {}) : (sOld.data() || {});
+          const oldQty = (Number.isFinite(Number(oldData.qty)) ? Math.round(Number(oldData.qty)) : (parseSignedQtyStrict(oldData.qty) ?? parseQty(oldData.qty) ?? 0));
           const deltaSigned = (Number.isFinite(qty) ? qty : 0) - oldQty;
 
           if(sku === oldSku && deltaSigned !== 0){
@@ -11570,7 +11880,7 @@ async function saveProductFromDetails(){
         });
 
         try{
-          await saveSkuUnificationCloud(sku, finalSkuAliases, { title, asin, nowClient: Date.now(), who: state.user?.emailLower || state.user?.email || state.user?.uid || "" });
+          await saveSkuUnificationCloud(finalCanonicalSku, finalSkuAliases, { title, asin, nowClient: Date.now(), who: state.user?.emailLower || state.user?.email || state.user?.uid || "" });
         }catch(aliasErr){
           console.warn("sku unification save skipped", aliasErr);
           showToast("Prodotto salvato", "Attenzione: unificazione SKU non completata.", 2600);
@@ -11653,13 +11963,14 @@ function renderProductsSheet(){
         .map(it=>{
           const sku = toSkuId(it.sku||it.id||"");
           const stockAgg = aggregateLookup.get(sku) || it;
-          const qty = stockAgg && stockAgg.__isSkuAggregate ? lowStockQtyValue(stockAgg) : (Number.isFinite(Number(it.qty)) ? Math.round(Number(it.qty)) : 0);
+          const availableQty = lowStockQtyValue(stockAgg || it);
+          const physicalQty = physicalQtyFromItem(stockAgg || it);
           const meta = parseTitleMeta(it.title || stockAgg.title || "");
           const titleMain = meta.main ? escapeHtml(meta.main) : (it.title ? escapeHtml(it.title) : "<span class='muted'>(senza nome)</span>");
           const metaSmall = buildMetaSmall(meta);
-          const badgeClass = __isLowStockItem(stockAgg || it) ? (qty>0 ? "warn" : "bad") : "ok";
+          const badgeClass = __isLowStockItem(stockAgg || it) ? (availableQty>0 ? "warn" : "bad") : "ok";
           const sogliaSmall = `Soglia: ${__lowStockThresholdLabel(stockAgg || it)}`;
-          const rackText = rackLocationDisplayFromItem(it);
+          const rackText = rackLocationDisplayFromItem((stockAgg?.locations?.[0]?.item) || it);
           const rackSmall = rackText !== "—" ? `Ubicazione: ${rackText}` : "";
           const aliases = sku ? aliasIndex.members(sku).filter(x=>x && x!==sku) : [];
           const asinValue = readAsinFromDoc(it || {});
@@ -11676,7 +11987,7 @@ function renderProductsSheet(){
                   </label>
                   <label class="field">
                     <span class="fieldLabel">Quantità (pz)</span>
-                    <input class="input" data-field="qty" inputmode="numeric" value="${escapeHtml(String(qty))}" ${!isAdmin ? "disabled":""} />
+                    <input class="input" data-field="qty" inputmode="numeric" value="${escapeHtml(String(physicalQty))}" ${!isAdmin ? "disabled":""} />
                   </label>
                   <label class="field" style="grid-column: 1 / -1;">
                     <span class="fieldLabel">Nome prodotto</span>
@@ -11738,6 +12049,8 @@ function renderProductsSheet(){
 
       const oldRef = api.doc(db, COL_ROOT, loc, SUB_ITEMS, oldSku);
       const newRef = api.doc(db, COL_ROOT, loc, SUB_ITEMS, sku);
+      const stockOwnerSkuBefore = stockSkuForSkuAny(oldSku, loc) || oldSku;
+      const stockOwnerRefBefore = api.doc(db, COL_ROOT, loc, SUB_ITEMS, stockOwnerSkuBefore);
 
       const oldP = api.doc(db, COL_PRODUCTS, oldSku);
       const newP = api.doc(db, COL_PRODUCTS, sku);
@@ -11747,6 +12060,11 @@ function renderProductsSheet(){
         await api.runTransaction(db, async (tx)=>{
           const sOld = await tx.get(oldRef);
           if(!sOld.exists()) throw new Error("Prodotto non trovato.");
+          let sharedStockSnap = sOld;
+          if(sku === oldSku && stockOwnerSkuBefore !== oldSku){
+            const ownerSnap = await tx.get(stockOwnerRefBefore);
+            if(ownerSnap.exists()) sharedStockSnap = ownerSnap;
+          }
           if(sku!==oldSku){
             const sNew = await tx.get(newRef);
             if(sNew.exists()) throw new Error("SKU già esistente.");
@@ -11754,8 +12072,8 @@ function renderProductsSheet(){
             if(pNewSnap.exists()) throw new Error("SKU già esistente (anagrafica).");
           }
 
-          const oldData = sOld.data() || {};
-          const oldQty = Number.isFinite(oldData.qty) ? Math.round(oldData.qty) : (parseQty(oldData.qty) ?? 0);
+          const oldData = (sku === oldSku && sharedStockSnap?.exists?.()) ? (sharedStockSnap.data() || {}) : (sOld.data() || {});
+          const oldQty = Number.isFinite(Number(oldData.qty)) ? Math.round(Number(oldData.qty)) : (parseSignedQtyStrict(oldData.qty) ?? parseQty(oldData.qty) ?? 0);
           const finalTitle = title || squashWhitespace(oldData.title || oldData.name || sku) || sku;
           const nowClient = Date.now();
           const who = state.user?.email || state.user?.emailLower || state.user?.uid || "";
@@ -11770,6 +12088,7 @@ function renderProductsSheet(){
             updatedAt: api.serverTimestamp(),
             updatedAtClient: nowClient,
             updatedBy: who,
+            ...sharedStockMutationFields(nowClient, who, "product_row_edit"),
             location: loc
           };
 
@@ -11856,6 +12175,9 @@ function renderProductsSheet(){
           });
         });
 
+        try{
+          await syncSharedInventoryGroupCloud(resolveSkuAlias(sku) || sku, skuAliasMembers(sku), "product_row_edit");
+        }catch(syncErr){ console.warn("shared stock sync row edit", syncErr); }
         showToast("Salvato", "Prodotto aggiornato e movimento registrato in cloud.", 1600);
         scheduleLowStockEmailAfterUpdate("product_row_edit");
         state.ui.productEditSku = null;
@@ -12138,6 +12460,7 @@ async function applyFlow(kind){
                   ...asinPatch,
                   reservedQty: api.increment(qtyAbs),
                   pendingPickQty: api.increment(qtyAbs),
+                  ...sharedStockMutationFields(tsClient, state.user.email || "", "pdf_reservation"),
                   reservationStatus: "in_attesa_picking",
                   lastReservationFlowId: p.flowDocId || wfId || "",
                   lastReservationWorkflowId: wfId || null,
@@ -12184,6 +12507,7 @@ async function applyFlow(kind){
                   titleNorm: normalizeText(title || stockSku),
                   ...asinPatch,
                   qty: api.increment(delta),
+                  ...sharedStockMutationFields(tsClient, state.user.email || "", "pdf_carica"),
                   ...rackClearData,
                   updatedAt: api.serverTimestamp(),
                   updatedAtClient: tsClient,
