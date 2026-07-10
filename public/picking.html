@@ -559,6 +559,8 @@
 
   
 
+  <input id="brtLabelUploadInput" type="file" accept="application/pdf,.pdf" hidden />
+
   <!-- Toast -->
   <div class="toast" id="toast" aria-live="polite" aria-atomic="true">
     <div class="toastCard">
@@ -654,6 +656,7 @@
 
     // === Backend endpoint (API separata) ===
     const DEFAULT_EXTRACT_ENDPOINT = "https://amz-inventory-backend-537555699968.europe-west1.run.app/extract";
+    const BRT_LABEL_PRODUCTS_ENDPOINT = "https://brt-label-products-537555699968.europe-west1.run.app/process";
     // Shopify FBM: sync manuale frontend rimosso. La sincronizzazione deve restare lato backend schedulato.
     const CAPANNONE_VOICE_AGENT_URL = "https://us-central1-tabellone-produzione-liv-e313e.cloudfunctions.net/capannoneVoiceAgentNow";
     const UBI_VOICE_DIALOG_URL = "https://us-central1-tabellone-produzione-liv-e313e.cloudfunctions.net/ubiVoiceDialog";
@@ -986,6 +989,152 @@ function cleanProductMainName(s){
       b.textContent = body || "";
       toast.classList.add("show");
       toastTimer = setTimeout(()=> toast.classList.remove("show"), ms);
+    }
+
+    let __brtLabelUploadBusy = false;
+    let __brtLabelUploadButton = null;
+
+    function setBrtLabelUploadBusy(busy, btn=null){
+      __brtLabelUploadBusy = !!busy;
+      if(btn) __brtLabelUploadButton = btn;
+      const current = (__brtLabelUploadButton && document.contains(__brtLabelUploadButton))
+        ? __brtLabelUploadButton
+        : document.querySelector('[data-action="uploadBrtLabels"]');
+      if(!current) return;
+      current.disabled = !!busy;
+      current.classList.toggle("is-busy", !!busy);
+      const label = current.querySelector("[data-brt-label]");
+      if(label) label.textContent = busy ? "Elaborazione etichette…" : "Carica etichette BRT";
+    }
+
+    function openBrtLabelFilePicker(btn){
+      if(__brtLabelUploadBusy) return;
+      if(pickingHomeView() !== "pickingFbm"){
+        showToast("Etichette BRT", "La funzione è disponibile solo in Picking FBM.", 2400);
+        return;
+      }
+      if(!state.firebase?.auth?.currentUser || !state.user?.isWhitelisted){
+        showToast("Accesso richiesto", "Accedi prima di elaborare le etichette BRT.", 2600);
+        return;
+      }
+      __brtLabelUploadButton = btn || null;
+      const input = $("brtLabelUploadInput");
+      if(!input) return;
+      input.value = "";
+      input.click();
+    }
+
+    function brtOpenPrintWindow(){
+      try{
+        const w = window.open("about:blank", "_blank");
+        if(!w) return null;
+        w.document.open();
+        w.document.write(`<!doctype html><html><head><title>Etichette BRT</title><style>body{margin:0;min-height:100vh;display:grid;place-items:center;font-family:Arial,sans-serif;color:#334155;background:#fff}.box{text-align:center}.spin{width:32px;height:32px;margin:0 auto 14px;border-radius:50%;border:3px solid #e2e8f0;border-top-color:#f97316;animation:s .8s linear infinite}@keyframes s{to{transform:rotate(360deg)}}</style></head><body><div class="box"><div class="spin"></div><div>Preparazione etichette BRT…</div></div></body></html>`);
+        w.document.close();
+        return w;
+      }catch(_e){ return null; }
+    }
+
+    function printBrtPdfBlob(blob, printWindow=null){
+      const url = URL.createObjectURL(blob);
+      let printed = false;
+      const tryPrintWindow = ()=>{
+        if(printed || !printWindow || printWindow.closed) return false;
+        try{
+          printed = true;
+          printWindow.focus();
+          printWindow.print();
+          return true;
+        }catch(_e){
+          printed = false;
+          return false;
+        }
+      };
+
+      if(printWindow && !printWindow.closed){
+        try{
+          printWindow.onload = ()=>setTimeout(tryPrintWindow, 350);
+          printWindow.location.replace(url);
+          setTimeout(()=>{ if(!printed) tryPrintWindow(); }, 2600);
+        }catch(_e){}
+      }else{
+        const frame = document.createElement("iframe");
+        frame.setAttribute("aria-hidden", "true");
+        frame.style.position = "fixed";
+        frame.style.width = "1px";
+        frame.style.height = "1px";
+        frame.style.right = "0";
+        frame.style.bottom = "0";
+        frame.style.opacity = "0";
+        frame.style.pointerEvents = "none";
+        frame.onload = ()=>{
+          setTimeout(()=>{
+            try{ frame.contentWindow?.focus?.(); frame.contentWindow?.print?.(); }catch(_e){}
+          }, 450);
+        };
+        frame.src = url;
+        document.body.appendChild(frame);
+        setTimeout(()=>{ try{ frame.remove(); }catch(_e){} }, 90000);
+      }
+      setTimeout(()=>{ try{ URL.revokeObjectURL(url); }catch(_e){} }, 120000);
+    }
+
+    async function processBrtLabelFile(file){
+      if(__brtLabelUploadBusy || !file) return;
+      const name = String(file.name || "").toLowerCase();
+      if(file.type !== "application/pdf" && !name.endsWith(".pdf")){
+        showToast("File non valido", "Seleziona il PDF delle etichette BRT.", 2800);
+        return;
+      }
+      if(Number(file.size || 0) > 25 * 1024 * 1024){
+        showToast("PDF troppo grande", "Il file supera 25 MB.", 2800);
+        return;
+      }
+
+      const printWindow = brtOpenPrintWindow();
+      setBrtLabelUploadBusy(true);
+      showToast("Etichette BRT", "Lettura etichette e abbinamento prodotti in corso…", 3200);
+      try{
+        const currentUser = state.firebase?.auth?.currentUser;
+        if(!currentUser) throw new Error("Sessione Firebase non attiva.");
+        const token = await currentUser.getIdToken();
+        const body = new FormData();
+        body.append("file", file, file.name || "etichette_brt.pdf");
+
+        const response = await fetch(BRT_LABEL_PRODUCTS_ENDPOINT, {
+          method: "POST",
+          headers: { "Authorization": `Bearer ${token}` },
+          body,
+          cache: "no-store"
+        });
+
+        if(!response.ok){
+          let message = `Errore backend BRT (${response.status}).`;
+          try{
+            const data = await response.json();
+            message = String(data?.message || data?.error || message);
+          }catch(_e){}
+          throw new Error(message);
+        }
+
+        const blob = await response.blob();
+        if(!blob || blob.size < 100 || !String(blob.type || "").includes("pdf")){
+          throw new Error("Il backend non ha restituito un PDF valido.");
+        }
+
+        printBrtPdfBlob(blob, printWindow);
+        const pages = response.headers.get("X-BRT-Pages") || "";
+        showToast("Etichette pronte", pages ? `${pages} etichette abbinate. Apertura stampa…` : "Apertura stampa…", 4200);
+      }catch(err){
+        try{ if(printWindow && !printWindow.closed) printWindow.close(); }catch(_e){}
+        const message = String(err?.message || err || "Errore etichette BRT").slice(0, 320);
+        console.error("BRT label products", err);
+        showToast("Etichette non generate", message, 6500);
+      }finally{
+        setBrtLabelUploadBusy(false);
+        const input = $("brtLabelUploadInput");
+        if(input) input.value = "";
+      }
     }
 
     async function callUbiVoiceAgentFromPicking(){
@@ -5828,6 +5977,12 @@ function readRackPickerSelection(root){
         if(list){
           list.innerHTML = `
             <div class="pickingBucketCard fbm fbmCockpitBucket">
+              <div class="fbmBrtToolbar">
+                <button class="btn amazon small fbmBrtUploadBtn" type="button" data-action="uploadBrtLabels" ${__brtLabelUploadBusy ? "disabled" : ""}>
+                  <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 16V4m0 0-4 4m4-4 4 4M5 14v5h14v-5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  <span data-brt-label>${__brtLabelUploadBusy ? "Elaborazione etichette…" : "Carica etichette BRT"}</span>
+                </button>
+              </div>
               <div class="fbmCockpitSync">${escapeHtml(shopifyFbmSyncCaption())}</div>
               ${cockpitHtml()}
               ${ordersHtml()}
@@ -12033,6 +12188,8 @@ function closeSheet(name,opts={}){
       located?.addEventListener("keydown",e=>{ if(e.key!=="Enter"&&e.key!==" ") return; const row=e.target?.closest?.("[data-action='openHomeLocatedItem']"); if(!row) return; e.preventDefault(); openProductDetailsSheet(row.dataset.sku||""); });
 
       $("homePickingList")?.addEventListener("click",async e=>{
+        const brtUpload=e.target?.closest?.("[data-action='uploadBrtLabels']");
+        if(brtUpload){ e.preventDefault(); e.stopPropagation(); openBrtLabelFilePicker(brtUpload); return; }
         const orderRow=e.target?.closest?.("[data-action='openShopifyOrderDetails']");
         if(orderRow){
           e.preventDefault(); e.stopPropagation();
@@ -12054,6 +12211,10 @@ function closeSheet(name,opts={}){
         if(!orderRow) return;
         e.preventDefault();
         void openShopifyOrderDetailsSheet({ orderId:orderRow.dataset.orderId||"", orderName:orderRow.dataset.orderName||"", customerName:orderRow.dataset.customerName||"", updatedAtClient:Number(orderRow.dataset.orderUpdated||0)||0 });
+      });
+      $("brtLabelUploadInput")?.addEventListener("change", e=>{
+        const file = e.target?.files?.[0] || null;
+        if(file) void processBrtLabelFile(file);
       });
       $("btnPickAllFlows")?.addEventListener("click",async e=>{ e.preventDefault(); await withPickingActionLock(["pickAllFbaPdf"],e.currentTarget,savePickingAllFlows); renderHomePickingBox(); });
       $("homePickedHistoryList")?.addEventListener("click",async e=>{
@@ -13018,6 +13179,15 @@ function closeSheet(name,opts={}){
       white-space:nowrap!important;
     }
   }
+</style>
+
+<style>
+  .fbmBrtToolbar{display:flex;align-items:center;justify-content:flex-end;gap:8px;margin:-2px 0 0;}
+  .fbmBrtUploadBtn{min-height:38px!important;border-radius:9px!important;white-space:nowrap!important;font-weight:650!important;}
+  .fbmBrtUploadBtn svg{width:16px;height:16px;flex:0 0 auto;}
+  .fbmBrtUploadBtn.is-busy svg{animation:brtUploadSpin .85s linear infinite;}
+  @keyframes brtUploadSpin{to{transform:rotate(360deg)}}
+  @media(max-width:760px){.fbmBrtToolbar{justify-content:stretch}.fbmBrtUploadBtn{width:100%!important;}}
 </style>
 
   <!--
