@@ -2603,6 +2603,20 @@ function guessTitleFromRaw(rawText, sku){
         agg.locations = (agg0.locations || []).slice().sort((a,b)=> inventoryLocs().indexOf(a.loc) - inventoryLocs().indexOf(b.loc));
         agg.mainLoc = pickAggregateMainLoc(agg.locations, preferLoc);
         agg.loc = agg.mainLoc;
+
+        // Identità riga coerente: lo SKU mostrato è sempre il canonico e il nome viene preso,
+        // quando disponibile, dallo stesso documento canonico. Lo stock può arrivare da un alias,
+        // ma non deve mai mescolare SKU di una variante con il nome di un'altra sulla stessa riga.
+        const canonicalSku = toSkuId(agg.sku || "");
+        let canonicalItem = null;
+        for(const identityLoc of inventoryLocs()){
+          canonicalItem = (state.inventory?.[identityLoc]?.items || []).find(x=>
+            toSkuId(x?.sku || x?.id || "") === canonicalSku
+          ) || canonicalItem;
+          if(canonicalItem) break;
+        }
+        const canonicalTitle = squashWhitespace(canonicalItem?.title || canonicalItem?.name || "");
+        if(canonicalTitle) agg.title = canonicalTitle;
         if(!agg.title) agg.title = agg.sku;
         agg.titleNorm = normalizeText(agg.title || agg.sku);
         out.push(agg);
@@ -2661,8 +2675,9 @@ function guessTitleFromRaw(rawText, sku){
       const lines = Array.isArray(agg?.locations) ? agg.locations : [];
       if(!lines.length) return "";
       return lines.map(l=>{
-        const skuLabel = (l.actualSku && l.canonicalSku && l.actualSku !== l.canonicalSku) ? ` [${l.actualSku}]` : "";
-        const bits = [`${prettyLoc(l.loc)}${skuLabel}: disp. ${l.availableQty}`];
+        // Non mostrare l'alias sorgente dello stock accanto allo SKU canonico:
+        // in sottoscorta una riga deve avere una sola identità SKU leggibile.
+        const bits = [`${prettyLoc(l.loc)}: disp. ${l.availableQty}`];
         bits.push(`fis. ${l.physicalQty}`);
         if(l.reservedQty > 0) bits.push(`pren. ${l.reservedQty}`);
         return bits.join(" / ");
@@ -2858,20 +2873,191 @@ function guessTitleFromRaw(rawText, sku){
         reorderedCount,
         counts: { unica: total },
         preview: { unica: previewRows },
-        templateVersion: 4
+        templateVersion: 5
       };
+    }
+
+    const LOW_STOCK_MAIL_TEMPLATE_VERSION = 5;
+    const LOW_STOCK_MAIL_OWNER = "hub_inventario_unico_v5";
+
+    // Compatibilità con Picking precedente: quel frontend usa ancora /amzInventoryMeta/lowStockEmailState.hash
+    // con un fingerprint diverso e una grafica email vecchia. L'Hub mantiene quel campo allineato al
+    // fingerprint legacy, mentre usa templateHash per deduplicare la grafica corrente.
+    function __legacyPickingIsLowStockItem(it){
+      try{
+        const qty = lowStockQtyValue(it || {});
+        const custom = __getCustomLowStockThreshold(it || {});
+        const th = (custom !== null) ? custom : __lowStockThreshold(it || {});
+        if(custom !== null) return qty <= th;
+        if(__isFiveKgItem(it || {})) return qty <= th;
+        return qty < th;
+      }catch(_e){ return false; }
+    }
+
+    function __sortLegacyPickingLowStockRows(rows){
+      return (Array.isArray(rows) ? rows : []).sort((a,b)=>{
+        if(a.loc!==b.loc) return a.loc.localeCompare(b.loc);
+        if(a.sku!==b.sku) return a.sku.localeCompare(b.sku);
+        if((a.qty||0)!==(b.qty||0)) return (a.qty||0)-(b.qty||0);
+        return (a.threshold||0)-(b.threshold||0);
+      });
+    }
+
+    function __legacyPickingLowStockFingerprintPayloadFromState(){
+      try{
+        const rows = [];
+        for(const loc of ["cerea", "concamarise"]){
+          const items = state.inventory?.[loc]?.items || [];
+          for(const it of items){
+            if(!Number.isFinite(Number(it?.qty))) continue;
+            if(!__legacyPickingIsLowStockItem(it)) continue;
+            rows.push({
+              loc,
+              sku: String(toSkuId(it?.sku || it?.id || "") || ""),
+              qty: lowStockQtyValue(it),
+              reservedQty: reservedQtyFromItem(it),
+              threshold: __lowStockThreshold(it)
+            });
+          }
+        }
+        return __sortLegacyPickingLowStockRows(rows);
+      }catch(_e){ return []; }
+    }
+
+    // Legge gli stessi due rami e costruisce gli stessi record usati dal Picking precedente.
+    // È intenzionale: anche se l'Hub usa ormai l'inventario unico, il fingerprint deve coincidere
+    // byte-per-byte con quello della vecchia pagina per impedirle di accodare la vecchia grafica.
+    async function __legacyPickingLowStockFingerprintPayloadFromCloud(){
+      const api = state.firebase?.api;
+      const db = state.firebase?.db;
+      if(!api || !db || !api.getDocs) return __legacyPickingLowStockFingerprintPayloadFromState();
+
+      const rows = [];
+      for(const loc of ["cerea", "concamarise"]){
+        try{
+          const colRef = api.collection(db, COL_ROOT, loc, SUB_ITEMS);
+          const q = api.query(colRef, api.orderBy("sku"), api.limit(2000));
+          const snap = await api.getDocs(q);
+          snap.forEach(docSnap=>{
+            const d = docSnap.data() || {};
+            const qty = stockQtyFromDoc(d || {});
+            const title = d.title || d.name || "";
+            const it = {
+              __raw: d,
+              id: docSnap.id,
+              sku: d.sku || docSnap.id,
+              title,
+              titleNorm: d.titleNorm || normalizeText(title || d.sku || docSnap.id),
+              qty,
+              reservedQty: Number.isFinite(Number(d.reservedQty)) ? Math.max(0, Math.round(Number(d.reservedQty))) : 0,
+              pendingPickQty: Number.isFinite(Number(d.pendingPickQty)) ? Math.max(0, Math.round(Number(d.pendingPickQty))) : 0,
+              lowStockThreshold: __parseLowStockThresholdValue(d.lowStockThreshold)
+            };
+            if(!Number.isFinite(Number(it.qty))) return;
+            if(!__legacyPickingIsLowStockItem(it)) return;
+            rows.push({
+              loc,
+              sku: String(toSkuId(it.sku || it.id || "") || ""),
+              qty: lowStockQtyValue(it),
+              reservedQty: reservedQtyFromItem(it),
+              threshold: __lowStockThreshold(it)
+            });
+          });
+        }catch(err){
+          console.warn("legacy low-stock branch read", loc, err);
+          // Se un ramo non è leggibile, usa almeno lo snapshot runtime dello stesso ramo.
+          const fallback = (state.inventory?.[loc]?.items || []);
+          for(const it of fallback){
+            if(!Number.isFinite(Number(it?.qty))) continue;
+            if(!__legacyPickingIsLowStockItem(it)) continue;
+            rows.push({
+              loc,
+              sku: String(toSkuId(it?.sku || it?.id || "") || ""),
+              qty: lowStockQtyValue(it),
+              reservedQty: reservedQtyFromItem(it),
+              threshold: __lowStockThreshold(it)
+            });
+          }
+        }
+      }
+      return __sortLegacyPickingLowStockRows(rows);
+    }
+
+    const __legacyLowStockHashGuard = {
+      running:false,
+      queued:false,
+      lastHash:"",
+      cachedHash:"",
+      cachedAt:0
+    };
+
+    async function __legacyPickingLowStockFingerprintHash({ force=false } = {}){
+      const now = Date.now();
+      if(!force && __legacyLowStockHashGuard.cachedHash && (now - __legacyLowStockHashGuard.cachedAt) < 3000){
+        return __legacyLowStockHashGuard.cachedHash;
+      }
+      const payload = await __legacyPickingLowStockFingerprintPayloadFromCloud();
+      const hash = await stableHashHex(JSON.stringify(payload));
+      if(hash){
+        __legacyLowStockHashGuard.cachedHash = hash;
+        __legacyLowStockHashGuard.cachedAt = Date.now();
+      }
+      return hash;
+    }
+
+    async function syncLegacyLowStockHashGuard(reason="inventory_snapshot"){
+      try{
+        if(__legacyLowStockHashGuard.running){
+          __legacyLowStockHashGuard.queued = true;
+          return;
+        }
+        if(!state.user?.isAdmin || !state.user?.isWhitelisted) return;
+        const fb = state.firebase;
+        if(!fb?.ok || !fb.db || !fb.api?.runTransaction) return;
+        if(!state.inventory?.[INVENTORY_CANONICAL_LOC]?.meta?.loaded) return;
+
+        __legacyLowStockHashGuard.running = true;
+        const legacyHash = await __legacyPickingLowStockFingerprintHash({ force:true });
+        if(!legacyHash) return;
+
+        const api = fb.api;
+        const db = fb.db;
+        const metaRef = api.doc(db, COL_META, DOC_LOWSTOCK_EMAIL_STATE);
+        const nowClient = Date.now();
+        await api.runTransaction(db, async tx=>{
+          const snap = await tx.get(metaRef);
+          const d = snap?.exists?.() ? (snap.data() || {}) : {};
+          if(String(d.hash || "") === legacyHash && String(d.legacyHash || "") === legacyHash) return;
+          tx.set(metaRef, {
+            hash: legacyHash,
+            legacyHash,
+            legacyHashUpdatedAt: api.serverTimestamp(),
+            legacyHashUpdatedAtClient: nowClient,
+            legacyHashUpdatedBy: state.user?.emailLower || state.user?.email || "",
+            legacyHashGuardOwner: LOW_STOCK_MAIL_OWNER,
+            legacyHashGuardReason: String(reason || "inventory_snapshot")
+          }, { merge:true });
+        });
+        __legacyLowStockHashGuard.lastHash = legacyHash;
+      }catch(err){
+        console.warn("legacy low-stock hash guard", err);
+      }finally{
+        __legacyLowStockHashGuard.running = false;
+        if(__legacyLowStockHashGuard.queued){
+          __legacyLowStockHashGuard.queued = false;
+          queueMicrotask(()=>{ void syncLegacyLowStockHashGuard("queued_snapshot"); });
+        }
+      }
     }
 
         async function __enqueueLowStockEmailIfNeeded(items, { reason="" } = {}){
       try{
         const mailLog = $("homeLowStockMailLog");
 
-        // solo Admin: evita invii accidentali da operatori/utenti base
         if(!state.user?.isAdmin){
           if(mailLog) mailLog.textContent = "";
           return;
         }
-
         if(!state.user?.isWhitelisted){
           if(mailLog) mailLog.textContent = "";
           return;
@@ -2883,21 +3069,19 @@ function guessTitleFromRaw(rawText, sku){
           return;
         }
 
-        // Unica fonte valida: snapshot dell'inventario cloud canonico.
         const inventoryReady = !!state.inventory?.[INVENTORY_CANONICAL_LOC]?.meta?.loaded;
         if(!inventoryReady){
           if(mailLog) mailLog.textContent = "Email automatica: in attesa inventario cloud…";
           return;
         }
-
         if(!items || !items.length){
           if(mailLog) mailLog.textContent = "";
           return;
         }
 
-        // Fingerprint dell'inventario unico. La versione forza una sola mail col nuovo formato.
+        // Hash della grafica corrente: identità SKU canonica + quantità condivisa.
         const list = (items||[]).slice().map(it=>({
-          templateVersion: 4,
+          templateVersion: LOW_STOCK_MAIL_TEMPLATE_VERSION,
           sku: String(toSkuId(it.sku||"")||""),
           qty: lowStockQtyValue(it),
           physicalQty: physicalQtyFromItem(it),
@@ -2910,35 +3094,53 @@ function guessTitleFromRaw(rawText, sku){
           return (a.threshold||0) - (b.threshold||0);
         });
 
-        const fingerprint = await stableHashHex(JSON.stringify(list));
-        if(!fingerprint){
+        const templateFingerprint = await stableHashHex(JSON.stringify(list));
+        const legacyFingerprint = await __legacyPickingLowStockFingerprintHash();
+        if(!templateFingerprint || !legacyFingerprint){
           if(mailLog) mailLog.textContent = "";
           return;
         }
 
         const now = Date.now();
         const payload = __buildLowStockEmailPayload(items);
-
         const api = fb.api;
         const db = fb.db;
-
         const metaRef = api.doc(db, COL_META, DOC_LOWSTOCK_EMAIL_STATE);
-        // niente READ su /email (le rules lo vietano): creiamo un doc con ID random dentro la transaction
         let enqueued = false;
+        let repairedLegacyGuard = false;
         let createdEmailDocId = "";
 
         await api.runTransaction(db, async (tx)=>{
           const metaSnap = await tx.get(metaRef);
-          const prevHash = metaSnap?.exists?.() ? String((metaSnap.data()||{}).hash || "") : "";
-          if(prevHash === fingerprint){
-            // stesso stato: niente invio
+          const meta = metaSnap?.exists?.() ? (metaSnap.data() || {}) : {};
+          const prevTemplateHash = String(meta.templateHash || (
+            Number(meta.templateVersion || 0) === LOW_STOCK_MAIL_TEMPLATE_VERSION ? (meta.hash || "") : ""
+          ));
+          const templateAlreadySent = prevTemplateHash === templateFingerprint;
+          const legacyAlreadyGuarded = String(meta.hash || "") === legacyFingerprint;
+
+          // La grafica corrente è già stata inviata: non creare un'altra email.
+          // Se Picking/una vecchia pagina ha riscritto hash, ripristina solo il guard legacy.
+          if(templateAlreadySent){
+            if(!legacyAlreadyGuarded || String(meta.legacyHash || "") !== legacyFingerprint){
+              tx.set(metaRef, {
+                hash: legacyFingerprint,
+                legacyHash: legacyFingerprint,
+                templateHash: templateFingerprint,
+                templateVersion: LOW_STOCK_MAIL_TEMPLATE_VERSION,
+                mailOwner: LOW_STOCK_MAIL_OWNER,
+                legacyHashUpdatedAt: api.serverTimestamp(),
+                legacyHashUpdatedAtClient: now,
+                legacyHashGuardOwner: LOW_STOCK_MAIL_OWNER,
+                legacyHashGuardReason: "repair_after_legacy_frontend"
+              }, { merge:true });
+              repairedLegacyGuard = true;
+            }
             return;
           }
 
-          // nuovo doc email (auto-id) -> solo CREATE, nessuna lettura
           const emailRef = api.doc(api.collection(db, "email"));
           createdEmailDocId = emailRef.id;
-
           tx.set(emailRef, {
             to: ["matteo@generalcoppersrl.com"],
             message: {
@@ -2949,14 +3151,17 @@ function guessTitleFromRaw(rawText, sku){
             createdAt: api.serverTimestamp(),
             createdAtClient: now,
             kind: "auto_low_stock",
+            mailOwner: LOW_STOCK_MAIL_OWNER,
             lowStock: {
               total: payload.total,
               counts: payload.counts || null,
               preview: payload.preview || null,
               toHandleCount: payload.toHandleCount,
               reorderedCount: payload.reorderedCount,
-              templateVersion: payload.templateVersion,
-              hash: fingerprint,
+              templateVersion: LOW_STOCK_MAIL_TEMPLATE_VERSION,
+              templateHash: templateFingerprint,
+              legacyHash: legacyFingerprint,
+              hash: templateFingerprint,
               reason: String(reason||"")
             },
             createdBy: state.user?.emailLower || state.user?.email || "",
@@ -2964,14 +3169,18 @@ function guessTitleFromRaw(rawText, sku){
           });
           enqueued = true;
 
+          // hash resta compatibile con Picking vecchio e lo blocca; templateHash governa la mail nuova.
           tx.set(metaRef, {
-            hash: fingerprint,
+            hash: legacyFingerprint,
+            legacyHash: legacyFingerprint,
+            templateHash: templateFingerprint,
             total: payload.total,
             counts: payload.counts || null,
             preview: payload.preview || null,
             toHandleCount: payload.toHandleCount,
             reorderedCount: payload.reorderedCount,
-            templateVersion: payload.templateVersion,
+            templateVersion: LOW_STOCK_MAIL_TEMPLATE_VERSION,
+            mailOwner: LOW_STOCK_MAIL_OWNER,
             emailDocId: createdEmailDocId,
             sentAt: api.serverTimestamp(),
             sentAtClient: now,
@@ -2980,10 +3189,13 @@ function guessTitleFromRaw(rawText, sku){
           }, { merge:true });
         });
 
+        __legacyLowStockHashGuard.lastHash = legacyFingerprint;
         if(mailLog){
           mailLog.textContent = enqueued
             ? `Email automatica inviata/accodata alle ${fmtDate(now)} • ${payload.total} righe.`
-            : `Email automatica: nessun invio (stesso stato).`;
+            : (repairedLegacyGuard
+              ? "Email automatica: grafica corrente già inviata • blocco vecchia grafica ripristinato."
+              : "Email automatica: nessun invio (stesso stato)." );
         }
       }catch(err){
         try{
@@ -3069,7 +3281,7 @@ function guessTitleFromRaw(rawText, sku){
         // Serve solo a intercettare aggiornamenti arrivati da Firestore (anche altri hub).
         // Non invia nulla sul primo caricamento: il primo snapshot completo diventa baseline.
         if(!state.user?.isAdmin || !state.user?.isWhitelisted) return;
-        if(!(state.inventory?.cerea?.meta?.loaded && state.inventory?.concamarise?.meta?.loaded)) return;
+        if(!state.inventory?.[INVENTORY_CANONICAL_LOC]?.meta?.loaded) return;
 
         const items = __getLowStockBoth();
         const key = __lowStockRealtimeSnapshotKey(items);
@@ -3663,6 +3875,10 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
           renderProductDetailsSheet();
         }
 
+        // Aggiorna subito l'hash compatibile con Picking precedente: evita la seconda email
+        // con grafica vecchia prima che partano i trigger email ritardati.
+        __legacyLowStockHashGuard.cachedAt = 0;
+        void syncLegacyLowStockHashGuard("inventory_" + loc);
         triggerLowStockMailFromRealtime("realtime_low_stock_" + loc);
         scheduleTwReordersBackfillFromState("inventory_" + loc);
         scheduleSharedSkuInventorySync("inventory_" + loc);
@@ -3724,8 +3940,8 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
 
         state.mail.lowStock.unsub = api.onSnapshot(ref, (snap)=>{
           const next = snap.exists() ? snap.data() : null;
-          const prevHash = state.mail.lowStock.meta && state.mail.lowStock.meta.hash ? String(state.mail.lowStock.meta.hash) : "";
-          const nextHash = next && next.hash ? String(next.hash) : "";
+          const prevHash = state.mail.lowStock.meta ? String(state.mail.lowStock.meta.templateHash || state.mail.lowStock.meta.hash || "") : "";
+          const nextHash = next ? String(next.templateHash || next.hash || "") : "";
 
           state.mail.lowStock.meta = next;
 
@@ -3808,7 +4024,7 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
         const api = state.firebase.api;
         const db = state.firebase.db;
 
-        const hash = meta.hash ? String(meta.hash) : "";
+        const hash = meta.templateHash ? String(meta.templateHash) : (meta.hash ? String(meta.hash) : "");
         if(!hash) return;
 
         const docId = meta.emailDocId ? String(meta.emailDocId) : ("auto_low_stock_" + hash.slice(0, 24));
@@ -3870,7 +4086,7 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
       const reason = meta.reason ? String(meta.reason) : "";
       const who = meta.sentBy ? String(meta.sentBy) : "";
       const docId = meta.emailDocId ? String(meta.emailDocId) : "";
-      const hash = meta.hash ? String(meta.hash) : "";
+      const hash = meta.templateHash ? String(meta.templateHash) : (meta.hash ? String(meta.hash) : "");
       const hashShort = hash ? hash.slice(0, 10) : "";
 
       let header = `Ultima mail sotto scorta: <b>${escapeHtml(dt)}</b>`;
