@@ -1369,9 +1369,31 @@ function guessTitleFromRaw(rawText, sku){
       return parts.join(" • ");
     }
 
+    function parseAsinInput(v){
+      const raw = String(v ?? "").trim().toUpperCase();
+      if(!raw) return { ok:true, value:"", raw:"" };
+
+      // Accetta ASIN puro, testo copiato con prefisso "ASIN:" oppure URL Amazon /dp/ASIN.
+      // Non tronca mai silenziosamente: un valore ambiguo resta non valido.
+      const labeled = raw.match(/(?:^|\b)ASIN\s*[:#-]?\s*([A-Z0-9]{10})(?:\b|$)/i);
+      if(labeled?.[1]) return { ok:true, value:String(labeled[1]).toUpperCase(), raw };
+
+      const urlMatch = raw.match(/\/(?:DP|GP\/PRODUCT)\/([A-Z0-9]{10})(?:[/?#]|$)/i);
+      if(urlMatch?.[1]) return { ok:true, value:String(urlMatch[1]).toUpperCase(), raw };
+
+      const compact = raw.replace(/[\s-]+/g, "");
+      if(/^[A-Z0-9]{10}$/.test(compact)) return { ok:true, value:compact, raw };
+
+      const tokens = raw.match(/\b[A-Z0-9]{10}\b/g) || [];
+      const unique = Array.from(new Set(tokens.map(x=>String(x).toUpperCase())));
+      if(unique.length === 1) return { ok:true, value:unique[0], raw };
+
+      return { ok:false, value:"", raw };
+    }
+
     function normalizeAsin(v){
-      const raw = String(v || "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
-      return raw ? raw.slice(0, 10) : "";
+      const parsed = parseAsinInput(v);
+      return parsed.ok ? parsed.value : "";
     }
 
     function readAsinFromDoc(d){
@@ -1418,6 +1440,50 @@ function guessTitleFromRaw(rawText, sku){
       return out;
     }
 
+    async function findCloudSkusWithSameAsin(asin, selfSku=""){
+      const a = normalizeAsin(asin || "");
+      const out = skusWithSameAsin(a, selfSku);
+      const seen = new Set(out.map(x=>toSkuId(x)).filter(Boolean));
+      const push = (v)=>{
+        const sku = toSkuId(v || "");
+        if(!sku || seen.has(sku)) return;
+        seen.add(sku);
+        out.push(sku);
+      };
+      if(!a) return out;
+
+      const api = state.firebase?.api;
+      const db = state.firebase?.db;
+      if(!api || !db || !api.getDocs || !api.where) return out;
+
+      const collections = [api.collection(db, COL_PRODUCTS)];
+      for(const loc of inventoryLocs()){
+        collections.push(api.collection(db, COL_ROOT, loc, SUB_ITEMS));
+      }
+      const fields = ["asin", "ASIN", "amazonAsin", "asinGroupKey", "skuUnificationAsin"];
+
+      const jobs = [];
+      for(const colRef of collections){
+        for(const field of fields){
+          jobs.push((async ()=>{
+            try{
+              const q = api.query(colRef, api.where(field, "==", a), api.limit(200));
+              const snap = await api.getDocs(q);
+              snap.forEach(docSnap=>{
+                const d = docSnap.data() || {};
+                if(readAsinFromDoc(d) === a) push(d.sku || docSnap.id || "");
+              });
+            }catch(err){
+              // Una singola query/collection non deve bloccare il salvataggio delle altre fonti cloud.
+              console.warn("ASIN cloud lookup skipped", field, err);
+            }
+          })());
+        }
+      }
+      await Promise.all(jobs);
+      return out.sort((x,y)=>x.localeCompare(y));
+    }
+
     function asinCloudFields(asin, nowClient, who){
       const a = normalizeAsin(asin || "");
       return {
@@ -1444,7 +1510,8 @@ function guessTitleFromRaw(rawText, sku){
         const keys = [
           "asin", "ASIN", "amazonAsin", "productAsin", "asinGroupKey", "skuUnificationAsin",
           "canonicalSku", "skuGroupCanonical", "masterSku", "parentSku", "aliasOfSku",
-          "skuAliases", "aliasSkus", "linkedSkus", "unifiedSkus", "fbaFbmSkus"
+          "skuAliases", "aliasSkus", "linkedSkus", "unifiedSkus", "fbaFbmSkus",
+          "manualSkuAliases", "manualAliasSkus", "skuUnificationVersion"
         ];
         for(const k of keys){
           if(d && Object.prototype.hasOwnProperty.call(d, k) && d[k] !== undefined){
@@ -1613,7 +1680,7 @@ function guessTitleFromRaw(rawText, sku){
       return out;
     }
 
-    function readSkuAliasesFromDoc(d, fallbackSku=""){
+    function readLegacySkuAliasesFromDoc(d, fallbackSku=""){
       const base = toSkuId(fallbackSku || d?.sku || d?.id || "");
       const raw = [];
       const add = (v)=>{
@@ -1636,16 +1703,52 @@ function guessTitleFromRaw(rawText, sku){
       return normalizeSkuAliases(raw, base);
     }
 
+    function readManualSkuAliasesFromDoc(d, fallbackSku=""){
+      const base = toSkuId(fallbackSku || d?.sku || d?.id || "");
+      const explicit = d?.manualSkuAliases ?? d?.manualAliasSkus ?? d?.skuUnification?.manualAliases;
+      if(explicit !== undefined && explicit !== null){
+        return normalizeSkuAliases(explicit).filter(x=>x && x!==base);
+      }
+
+      const version = Number(d?.skuUnification?.version || d?.skuUnificationVersion || 0);
+      if(version >= 2) return [];
+
+      // Migrazione prudente: nei documenti legacy con ASIN gli alias completi erano generati
+      // automaticamente e non vanno riutilizzati come collegamenti manuali permanenti.
+      if(readAsinFromDoc(d || {})) return [];
+      return readLegacySkuAliasesFromDoc(d || {}, base).filter(x=>x && x!==base);
+    }
+
+    function readSkuAliasesFromDoc(d, fallbackSku=""){
+      const base = toSkuId(fallbackSku || d?.sku || d?.id || "");
+      const version = Number(d?.skuUnification?.version || d?.skuUnificationVersion || 0);
+      if(version < 2) return readLegacySkuAliasesFromDoc(d || {}, base);
+
+      // Dalla v2 gli alias completi sono uno snapshot derivato. Per evitare gruppi ASIN
+      // "incollati" dopo una modifica, l'indice usa solo canonical + alias manuali.
+      const raw = [
+        base,
+        d?.canonicalSku,
+        d?.skuGroupCanonical,
+        d?.skuUnification?.canonicalSku,
+        ...readManualSkuAliasesFromDoc(d || {}, base)
+      ];
+      return normalizeSkuAliases(raw, base);
+    }
+
     function readSkuAliasCanonicalFromDoc(d, fallbackSku=""){
       const base = toSkuId(fallbackSku || d?.sku || d?.id || "");
       const raw = d?.canonicalSku || d?.skuGroupCanonical || d?.masterSku || d?.parentSku || d?.aliasOfSku || d?.skuUnification?.canonicalSku || "";
       return toSkuId(raw) || base;
     }
 
-    function skuUnificationFields(canonicalSku, aliases, nowClient, who){
+    function skuUnificationFields(canonicalSku, aliases, nowClient, who, manualAliases=[]){
       const canonical = toSkuId(canonicalSku || "");
       const list = normalizeSkuAliases(aliases, canonical);
       const clean = list.length ? list : (canonical ? [canonical] : []);
+      // Gruppo manuale simmetrico: contiene anche lo SKU principale/origine.
+      // Così aprendo qualunque membro si vedono gli altri collegamenti manuali.
+      const manual = normalizeSkuAliases(manualAliases).filter(x=>x && clean.includes(x));
       return {
         canonicalSku: canonical,
         skuGroupCanonical: canonical,
@@ -1653,10 +1756,14 @@ function guessTitleFromRaw(rawText, sku){
         aliasSkus: clean,
         linkedSkus: clean,
         fbaFbmSkus: clean,
+        manualSkuAliases: manual,
+        manualAliasSkus: manual,
+        skuUnificationVersion: 2,
         skuUnification: {
           canonicalSku: canonical,
           aliases: clean,
-          version: 1,
+          manualAliases: manual,
+          version: 2,
           mode: "same_physical_stock",
           updatedAtClient: nowClient || Date.now(),
           updatedBy: who || ""
@@ -1913,7 +2020,9 @@ function guessTitleFromRaw(rawText, sku){
       const nowClient = Date.now();
       const who = state.user?.emailLower || state.user?.email || state.user?.uid || "";
       const sourceAsin = readAsinFromDoc(source || {});
-      const groupFields = skuUnificationFields(canonical, list, nowClient, who);
+      const mergedManualAliases = normalizeSkuAliases(docs.flatMap(x=>readManualSkuAliasesFromDoc(x.data || {}, x.sku || "")))
+        .filter(x=>list.includes(x));
+      const groupFields = skuUnificationFields(canonical, list, nowClient, who, mergedManualAliases);
       const asinFields = sourceAsin ? asinCloudFields(sourceAsin, nowClient, who) : {};
       const sourceComparable = JSON.stringify(snapshot);
 
@@ -1935,7 +2044,7 @@ function guessTitleFromRaw(rawText, sku){
             zeroStockAtClient: snapshot.qty === 0 ? (snapshot.zeroStockAtClient || nowClient) : null,
             zeroStockAt: snapshot.qty === 0 ? api.serverTimestamp() : null,
             ...groupFields,
-            ...asinFields,
+            ...(sourceAsin && (!readAsinFromDoc(x.data || {}) || readAsinFromDoc(x.data || {}) === sourceAsin) ? asinFields : {}),
             sharedStockCanonicalSku: canonical,
             sharedStockAliases: list,
             sharedStockSourceSku: sourceSku,
@@ -7057,7 +7166,7 @@ function openComboSheet(){
   const lowStockThresholdValue = (lowStockThreshold !== null) ? String(lowStockThreshold) : "";
   const lowStockThresholdLabel = __lowStockThresholdLabel(it || { sku, title: titleMain });
   const asinValue = readAsinFromDoc(rawIt || it || {});
-  const manualSkuAliases = readSkuAliasesFromDoc(rawIt || it || {}, sku);
+  const manualSkuAliases = readManualSkuAliasesFromDoc(rawIt || it || {}, sku);
   const skuCanonical = resolveSkuAlias(sku) || readSkuAliasCanonicalFromDoc(it || {}, sku) || sku;
   const skuGroupMembers = skuAliasMembers(sku);
   const skuAliasOthers = skuGroupMembers.filter(x=>x && x!==sku);
@@ -7191,7 +7300,7 @@ function openComboSheet(){
           <div class="pdSectionTitle">Dati base</div>
           <div class="pdGrid">
             ${htmlField("SKU", `<input class="input mono" data-field="sku" value="${escapeHtml(sku)}" ${canEdit ? "" : "disabled"} />${err("sku")}`)}
-            ${htmlField("ASIN", `<input class="input mono" data-field="asin" value="${escapeHtml(asinValue)}" placeholder="Es. B0XXXXXXXX" ${canEdit ? "" : "disabled"} />${err("asin")}`)}
+            ${htmlField("ASIN", `<input class="input mono" data-field="asin" value="${escapeHtml(asinValue)}" placeholder="Es. B0XXXXXXXX" maxlength="160" autocomplete="off" autocapitalize="characters" spellcheck="false" ${canEdit ? "" : "disabled"} />${err("asin")}`)}
             ${htmlField("Nome prodotto", `<input class="input" data-field="title" value="${escapeHtml(titleMain)}" ${canEdit ? "" : "disabled"} />${err("title")}`)}
           </div>
         </div>
@@ -7279,7 +7388,8 @@ function setPdFieldError(key, msg){
       const wrap=$("productDetailsContent");
       const sku=toSkuId(wrap?.querySelector?.('[data-field="sku"]')?.value||"");
       const title=squashWhitespace(wrap?.querySelector?.('[data-field="title"]')?.value||"");
-      const asin=normalizeAsin(wrap?.querySelector?.('[data-field="asin"]')?.value||"");
+      const asinInput=parseAsinInput(wrap?.querySelector?.('[data-field="asin"]')?.value||"");
+      const asin=asinInput.ok ? asinInput.value : "";
       const qtyRaw=wrap?.querySelector?.('[data-field="qty"]')?.value??"";
       const thresholdRaw=wrap?.querySelector?.('[data-field="lowStockThreshold"]')?.value??"";
       const aliasesRaw=wrap?.querySelector?.('[data-field="skuAliases"]')?.value??"";
@@ -7288,7 +7398,7 @@ function setPdFieldError(key, msg){
       const qty=parseSignedQtyStrict(qtyRaw);
       const lowStockParsed=parseLowStockThresholdInput(thresholdRaw);
       return {
-        sku,title,asin,qty,
+        sku,title,asin,asinOk:asinInput.ok,asinRaw:asinInput.raw,qty,
         lowStockThreshold:lowStockParsed.ok?lowStockParsed.value:null,
         lowStockThresholdOk:lowStockParsed.ok,
         skuAliases:normalizeSkuAliases(aliasesRaw,sku),
@@ -8237,8 +8347,10 @@ async function loadProductFromDetails(){
       const api = state.firebase?.api;
       const db = state.firebase?.db;
       if(!api || !db) throw new Error("Firebase non inizializzato.");
+
       const requestedCanonical = toSkuId(canonicalSku || "");
       if(!requestedCanonical) throw new Error("SKU principale non valido.");
+
       const preliminary = normalizeSkuAliases(aliases, requestedCanonical);
       let canonical = requestedCanonical;
       for(const member of preliminary){
@@ -8248,55 +8360,106 @@ async function loadProductFromDetails(){
           break;
         }
       }
+
       const list = normalizeSkuAliases(preliminary, canonical);
+      const manualAliases = normalizeSkuAliases(opts.manualAliases || [])
+        .filter(x=>x && list.includes(x));
+      const affected = normalizeSkuAliases(opts.affectedSkus || [])
+        .filter(Boolean);
+      const excluded = affected.filter(x=>!list.includes(x));
+      const editedSku = toSkuId(opts.editedSku || requestedCanonical) || requestedCanonical;
       const nowClient = Number(opts.nowClient || Date.now());
       const who = opts.who || state.user?.emailLower || state.user?.email || state.user?.uid || "";
-      const fields = skuUnificationFields(canonical, list, nowClient, who);
       const asin = normalizeAsin(opts.asin || "");
-      const asinFields = asin ? asinCloudFields(asin, nowClient, who) : {};
       const title = squashWhitespace(opts.title || "");
+      const fields = skuUnificationFields(canonical, list, nowClient, who, manualAliases);
 
-      for(let i=0; i<list.length; i+=350){
-        const part = list.slice(i, i+350);
+      const impacted = Array.from(new Set([...list, ...excluded]));
+      const identityBySku = new Map();
+      const inventoryDocs = [];
+
+      await Promise.all(impacted.map(async sku=>{
+        let productData = {};
+        try{
+          const snap = await api.getDoc(api.doc(db, COL_PRODUCTS, sku));
+          if(snap?.exists?.()) productData = snap.data() || {};
+        }catch(_e){}
+
+        const locDocs = [];
+        for(const loc of inventoryLocs()){
+          try{
+            const ref = api.doc(db, COL_ROOT, loc, SUB_ITEMS, sku);
+            const snap = await api.getDoc(ref);
+            if(snap?.exists?.()){
+              const data = snap.data() || {};
+              locDocs.push({ loc, sku, ref, data });
+              inventoryDocs.push({ loc, sku, ref, data });
+            }
+          }catch(_e){}
+        }
+
+        const merged = { ...(locDocs[0]?.data || {}), ...productData, sku };
+        identityBySku.set(sku, merged);
+      }));
+
+      // Prima migra fuori dal vecchio gruppo gli SKU che non appartengono più al nuovo ASIN/gruppo.
+      for(let i=0; i<excluded.length; i+=300){
+        const part = excluded.slice(i, i+300);
         const batch = api.writeBatch(db);
         for(const sku of part){
-          const refP = api.doc(db, COL_PRODUCTS, sku);
-          batch.set(refP, {
+          const d = identityBySku.get(sku) || { sku };
+          const ownManualOthers = readManualSkuAliasesFromDoc(d, sku).filter(x=>x && x!==editedSku);
+          const ownManualGroup = ownManualOthers.length ? normalizeSkuAliases([...ownManualOthers, sku], sku) : [];
+          const ownAliases = normalizeSkuAliases(ownManualGroup, sku);
+          const ownFields = skuUnificationFields(sku, ownAliases, nowClient, who, ownManualGroup);
+          batch.set(api.doc(db, COL_PRODUCTS, sku), {
             sku,
-            ...(sku === canonical && title ? { title, titleNorm: normalizeText(title) } : {}),
+            ...ownFields,
+            skuUnificationDetachedAt: api.serverTimestamp(),
+            skuUnificationDetachedAtClient: nowClient,
+            skuUnificationDetachedBy: who
+          }, { merge:true });
+          for(const invDoc of inventoryDocs.filter(x=>x.sku===sku)){
+            batch.set(invDoc.ref, {
+              ...ownFields,
+              skuUnificationDetachedAt: api.serverTimestamp(),
+              skuUnificationDetachedAtClient: nowClient,
+              skuUnificationDetachedBy: who
+            }, { merge:true });
+          }
+        }
+        await batch.commit();
+      }
+
+      // Salva il nuovo gruppo. L'ASIN viene scritto sullo SKU modificato e sugli altri membri
+      // solo quando è assente o già uguale: non sovrascrive mai un ASIN differente.
+      for(let i=0; i<list.length; i+=300){
+        const part = list.slice(i, i+300);
+        const batch = api.writeBatch(db);
+        for(const sku of part){
+          const existingAsin = readAsinFromDoc(identityBySku.get(sku) || {});
+          const canReceiveAsin = !!asin && (sku===editedSku || !existingAsin || existingAsin===asin);
+          const asinPatch = canReceiveAsin ? asinCloudFields(asin, nowClient, who) : {};
+          batch.set(api.doc(db, COL_PRODUCTS, sku), {
+            sku,
+            ...(sku === editedSku && title ? { title, titleNorm: normalizeText(title) } : {}),
             ...fields,
-            ...asinFields,
+            ...asinPatch,
             active: true,
             lastSeenAt: api.serverTimestamp(),
             lastSeenAtClient: nowClient,
             lastSeenBy: who,
             lastSeenKind: "sku_unification"
           }, { merge:true });
-        }
-        await batch.commit();
-      }
-
-      const existing = [];
-      for(const loc of inventoryLocs()){
-        for(const sku of list){
-          try{
-            const ref = api.doc(db, COL_ROOT, loc, SUB_ITEMS, sku);
-            const snap = await api.getDoc(ref);
-            if(snap?.exists?.()) existing.push({ loc, sku, ref });
-          }catch(_e){}
-        }
-      }
-      for(let i=0; i<existing.length; i+=350){
-        const part = existing.slice(i, i+350);
-        const batch = api.writeBatch(db);
-        for(const x of part){
-          batch.set(x.ref, {
-            ...fields,
-            ...asinFields,
-            skuUnificationSyncedAt: api.serverTimestamp(),
-            skuUnificationSyncedAtClient: nowClient,
-            skuUnificationSyncedBy: who
-          }, { merge:true });
+          for(const invDoc of inventoryDocs.filter(x=>x.sku===sku)){
+            batch.set(invDoc.ref, {
+              ...fields,
+              ...asinPatch,
+              skuUnificationSyncedAt: api.serverTimestamp(),
+              skuUnificationSyncedAtClient: nowClient,
+              skuUnificationSyncedBy: who
+            }, { merge:true });
+          }
         }
         await batch.commit();
       }
@@ -8305,21 +8468,43 @@ async function loadProductFromDetails(){
         if(typeof patchRuntimeInventoryItem === "function"){
           for(const loc of inventoryLocs()){
             for(const sku of list){
-              patchRuntimeInventoryItem(loc, sku, { ...fields, ...asinFields }, {});
+              const existingAsin = readAsinFromDoc(identityBySku.get(sku) || {});
+              const canReceiveAsin = !!asin && (sku===editedSku || !existingAsin || existingAsin===asin);
+              patchRuntimeInventoryItem(loc, sku, {
+                ...fields,
+                ...(canReceiveAsin ? asinCloudFields(asin, nowClient, who) : {})
+              }, {});
+            }
+            for(const sku of excluded){
+              const d = identityBySku.get(sku) || { sku };
+              const ownManualOthers = readManualSkuAliasesFromDoc(d, sku).filter(x=>x && x!==editedSku);
+              const ownManualGroup = ownManualOthers.length ? normalizeSkuAliases([...ownManualOthers, sku], sku) : [];
+              patchRuntimeInventoryItem(loc, sku, skuUnificationFields(sku, normalizeSkuAliases(ownManualGroup, sku), nowClient, who, ownManualGroup), {});
             }
           }
         }
       }catch(_e){}
+
       let stockDocsSynchronized = 0;
-      try{
-        const syncRes = await syncSharedInventoryGroupCloud(canonical, list, "sku_unification_save");
-        stockDocsSynchronized = Number(syncRes?.updated || 0);
-      }catch(syncErr){
-        console.warn("shared stock sync after SKU unification", syncErr);
+      if(list.length > 1){
+        try{
+          const syncRes = await syncSharedInventoryGroupCloud(canonical, list, "sku_unification_save");
+          stockDocsSynchronized = Number(syncRes?.updated || 0);
+        }catch(syncErr){
+          console.warn("shared stock sync after SKU unification", syncErr);
+        }
       }
+
       clearSkuRuntimeCache("sku_unification_saved");
+      try{ if(state.cache) state.cache.invIndexForMatch = null; }catch(_e){}
       scheduleSharedSkuInventorySync("sku_unification_saved", { immediate:true });
-      return { canonicalSku: canonical, aliases: list, inventoryDocsUpdated: existing.length, stockDocsSynchronized };
+      return {
+        canonicalSku: canonical,
+        aliases: list,
+        detachedAliases: excluded,
+        inventoryDocsUpdated: inventoryDocs.filter(x=>list.includes(x.sku)).length,
+        stockDocsSynchronized
+      };
     }
 
 async function saveProductFromDetails(){
@@ -8333,7 +8518,7 @@ async function saveProductFromDetails(){
 
       const oldSku = toSkuId(state.ui.productDetailsSku||"");
       clearPdFieldErrors();
-      const { sku, title, asin, qty, lowStockThreshold, lowStockThresholdOk, skuAliases, note } = readProductDetailsFields();
+      const { sku, title, asin, asinOk, qty, lowStockThreshold, lowStockThresholdOk, skuAliases, note } = readProductDetailsFields();
 
       if(!oldSku){
         setPdFieldError("sku", "SKU non valido.");
@@ -8350,9 +8535,9 @@ async function saveProductFromDetails(){
         showToast("Errore", "Quantità non valida.", 2200);
         return;
       }
-      if(asin && !/^[A-Z0-9]{10}$/.test(asin)){
-        setPdFieldError("asin", "ASIN non valido: deve essere di 10 caratteri alfanumerici.");
-        showToast("ASIN", "Inserisci un ASIN valido da 10 caratteri oppure lascia vuoto.", 2600);
+      if(!asinOk){
+        setPdFieldError("asin", "ASIN non valido: incolla il codice da 10 caratteri oppure un URL Amazon valido.");
+        showToast("ASIN", "Il valore inserito è ambiguo o non valido. Non è stato troncato.", 2800);
         return;
       }
       if(!lowStockThresholdOk){
@@ -8360,8 +8545,11 @@ async function saveProductFromDetails(){
         showToast("Errore", "Soglia sottoscorta non valida.", 2200);
         return;
       }
-      const sameAsinSkus = asin ? skusWithSameAsin(asin, sku) : [];
-      const finalSkuAliases = normalizeSkuAliases([...(Array.isArray(skuAliases) ? skuAliases : []), ...sameAsinSkus], sku);
+      const previousGroupMembers = skuAliasMembers(oldSku);
+      const manualSkuAliases = normalizeSkuAliases(Array.isArray(skuAliases) ? skuAliases : []).filter(x=>x && x!==sku);
+      const manualSkuGroup = manualSkuAliases.length ? normalizeSkuAliases([...manualSkuAliases, sku], sku) : [];
+      const sameAsinSkus = asin ? await findCloudSkusWithSameAsin(asin, sku) : [sku];
+      const finalSkuAliases = normalizeSkuAliases([...manualSkuGroup, ...sameAsinSkus], sku);
       const knownCanonical = resolveSkuAlias(oldSku) || oldSku;
       const finalCanonicalSku = (sku === oldSku && finalSkuAliases.includes(knownCanonical)) ? knownCanonical : sku;
       if(finalSkuAliases.length > 40){
@@ -8418,7 +8606,7 @@ async function saveProductFromDetails(){
 
           const nowClient = Date.now();
           const who = state.user.email || state.user.emailLower || state.user.uid || "";
-          const skuUnificationPatch = skuUnificationFields(finalCanonicalSku, finalSkuAliases, nowClient, who);
+          const skuUnificationPatch = skuUnificationFields(finalCanonicalSku, finalSkuAliases, nowClient, who, manualSkuGroup);
           const asinPatch = asinCloudFields(asin, nowClient, who);
           const baseData = {
             sku,
@@ -8547,7 +8735,15 @@ async function saveProductFromDetails(){
         });
 
         try{
-          await saveSkuUnificationCloud(finalCanonicalSku, finalSkuAliases, { title, asin, nowClient: Date.now(), who: state.user?.emailLower || state.user?.email || state.user?.uid || "" });
+          await saveSkuUnificationCloud(finalCanonicalSku, finalSkuAliases, {
+            title,
+            asin,
+            manualAliases: manualSkuGroup,
+            affectedSkus: previousGroupMembers,
+            editedSku: sku,
+            nowClient: Date.now(),
+            who: state.user?.emailLower || state.user?.email || state.user?.uid || ""
+          });
         }catch(aliasErr){
           console.warn("sku unification save skipped", aliasErr);
           showToast("Prodotto salvato", "Attenzione: unificazione SKU non completata.", 2600);
@@ -9538,6 +9734,21 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
         if(!sel) return;
         updateProductProductionAreaImmediate(sel.value);
       });
+
+      $("productDetailsContent")?.addEventListener("input", (e)=>{
+        const input = e.target?.closest?.('[data-field="asin"]');
+        if(!input) return;
+        const upper = String(input.value || "").toUpperCase();
+        if(input.value !== upper) input.value = upper;
+        setPdFieldError("asin", "");
+      });
+
+      $("productDetailsContent")?.addEventListener("blur", (e)=>{
+        const input = e.target?.closest?.('[data-field="asin"]');
+        if(!input) return;
+        const parsed = parseAsinInput(input.value || "");
+        if(parsed.ok) input.value = parsed.value;
+      }, true);
 
       $("productDetailsActions")?.addEventListener("click", (e)=>{
         const aEdit = e.target?.closest?.("[data-action='pdEdit']");
