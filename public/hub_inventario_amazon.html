@@ -319,6 +319,59 @@
   }
 </style>
 
+<style id="lowStockFreightUiV3Fix">
+  /* Correzione griglia: neutralizza le grid-area legacy della tabella a 3/4 colonne. */
+  .gridTable.lowStockFreightTable{ overflow-x:auto; overflow-y:hidden; }
+  .gridTable.lowStockFreightTable .row.gridHead.gridRow,
+  .gridTable.lowStockFreightTable .row.gridRow{
+    display:grid !important;
+    grid-template-columns:150px minmax(260px,1fr) 82px 92px 104px 88px 138px !important;
+    grid-template-areas:none !important;
+    min-width:920px;
+  }
+  .gridTable.lowStockFreightTable .row.gridHead.gridRow > .gridCell,
+  .gridTable.lowStockFreightTable .row.gridRow > .gridCell{
+    grid-area:auto !important;
+    min-width:0;
+  }
+  .gridTable.lowStockFreightTable .row.gridHead.gridRow > .gridCell{
+    white-space:nowrap;
+    overflow:hidden;
+    text-overflow:ellipsis;
+  }
+  .gridTable.lowStockFreightTable .row.gridHead.gridRow > .gridCell:nth-child(1),
+  .gridTable.lowStockFreightTable .row.gridRow > .gridCell:nth-child(1){ grid-column:1 !important; }
+  .gridTable.lowStockFreightTable .row.gridHead.gridRow > .gridCell:nth-child(2),
+  .gridTable.lowStockFreightTable .row.gridRow > .gridCell:nth-child(2){ grid-column:2 !important; }
+  .gridTable.lowStockFreightTable .row.gridHead.gridRow > .gridCell:nth-child(3),
+  .gridTable.lowStockFreightTable .row.gridRow > .gridCell:nth-child(3){ grid-column:3 !important; }
+  .gridTable.lowStockFreightTable .row.gridHead.gridRow > .gridCell:nth-child(4),
+  .gridTable.lowStockFreightTable .row.gridRow > .gridCell:nth-child(4){ grid-column:4 !important; }
+  .gridTable.lowStockFreightTable .row.gridHead.gridRow > .gridCell:nth-child(5),
+  .gridTable.lowStockFreightTable .row.gridRow > .gridCell:nth-child(5){ grid-column:5 !important; }
+  .gridTable.lowStockFreightTable .row.gridHead.gridRow > .gridCell:nth-child(6),
+  .gridTable.lowStockFreightTable .row.gridRow > .gridCell:nth-child(6){ grid-column:6 !important; }
+  .gridTable.lowStockFreightTable .row.gridHead.gridRow > .gridCell:nth-child(7),
+  .gridTable.lowStockFreightTable .row.gridRow > .gridCell:nth-child(7){ grid-column:7 !important; }
+
+  @media(max-width:900px){
+    .gridTable.lowStockFreightTable{ overflow-x:hidden; }
+    .gridTable.lowStockFreightTable .row.gridHead.gridRow{ display:none !important; }
+    .gridTable.lowStockFreightTable .row.gridRow{
+      grid-template-columns:repeat(2,minmax(0,1fr)) !important;
+      grid-template-areas:none !important;
+      min-width:0;
+    }
+    .gridTable.lowStockFreightTable .row.gridRow > .gridCell:nth-child(1){ grid-column:1 !important; grid-row:1 !important; }
+    .gridTable.lowStockFreightTable .row.gridRow > .gridCell:nth-child(7){ grid-column:2 !important; grid-row:1 !important; }
+    .gridTable.lowStockFreightTable .row.gridRow > .gridCell:nth-child(2){ grid-column:1 / 3 !important; grid-row:2 !important; }
+    .gridTable.lowStockFreightTable .row.gridRow > .gridCell:nth-child(3){ grid-column:1 !important; grid-row:3 !important; }
+    .gridTable.lowStockFreightTable .row.gridRow > .gridCell:nth-child(4){ grid-column:2 !important; grid-row:3 !important; }
+    .gridTable.lowStockFreightTable .row.gridRow > .gridCell:nth-child(5){ grid-column:1 !important; grid-row:4 !important; }
+    .gridTable.lowStockFreightTable .row.gridRow > .gridCell:nth-child(6){ grid-column:2 !important; grid-row:4 !important; }
+  }
+</style>
+
 </head>
 
 <body>
@@ -918,11 +971,18 @@ Tip:
       },
       comboCache: new Map(),
 
-      // Riordini Tabellone WRITE: lettura cloud live + backfill flag RIORDINATO sui pregressi
+      // Riordini: stato autorevole del ciclo + fallback sulle sole righe confermate dal backend.
       twReorders: {
         unsub: null,
+        queueUnsub: null,
+        lifecycleBySku: new Map(),
+        queueBySku: new Map(),
         bySku: new Map(),
+        lifecycleReady: false,
+        queueReady: false,
         ready: false,
+        lifecycleError: "",
+        queueError: "",
         error: "",
         backfillTimer: null,
         backfilledKeys: new Set()
@@ -5117,66 +5177,172 @@ function startAllLogs(){
       }
     }
 
+    function __reorderLifecyclePriority(lifecycle){
+      try{
+        const episodeId = String(lifecycle?.episodeId || "").trim();
+        const reorderedEpisodeId = String(lifecycle?.reorderedEpisodeId || lifecycle?.latestReorderEpisodeId || "").trim();
+        const currentReordered = lifecycle?.active === true && !!episodeId && reorderedEpisodeId === episodeId;
+        const active = lifecycle?.active === true;
+        return (currentReordered ? 1e15 : 0) + (active ? 1e14 : 0) + __reorderLifecycleTimestamp(lifecycle);
+      }catch(_e){ return 0; }
+    }
+
+    function __bindReorderLifecycle(map, key, lifecycle){
+      try{
+        const skuKey = toSkuId(key || "");
+        if(!skuKey || !(map instanceof Map) || !lifecycle) return;
+        const prev = map.get(skuKey);
+        if(!prev || __reorderLifecyclePriority(lifecycle) >= __reorderLifecyclePriority(prev)) map.set(skuKey, lifecycle);
+      }catch(_e){}
+    }
+
+    function __renderAfterReorderStateChange(){
+      clearSkuRuntimeCache("reorder_state_snapshot");
+      if(state.route.view === "home") renderHomeDashboard();
+      if(state.route.view === "location") renderInventoryList();
+      if(state.ui.sheet === "sottoscorta") renderSottoscortaSheet();
+      if(state.ui.sheet === "productDetails" && !productDetailsHasLiveDraft()) renderProductDetailsSheet();
+    }
+
+    function __mergeReorderStateMaps(){
+      try{
+        if(!state.twReorders) return;
+        const lifecycleMap = state.twReorders.lifecycleBySku instanceof Map ? state.twReorders.lifecycleBySku : new Map();
+        const queueMap = state.twReorders.queueBySku instanceof Map ? state.twReorders.queueBySku : new Map();
+        const merged = new Map();
+
+        for(const [key, lifecycle] of lifecycleMap.entries()) __bindReorderLifecycle(merged, key, lifecycle);
+
+        // Il ciclo cloud è autorevole. Il fallback coda entra solo quando per quello SKU
+        // non esiste alcun documento ciclo leggibile. Accettiamo esclusivamente riordini
+        // confermati dal backend e dotati di episodeId, mai le vecchie righe storiche.
+        for(const [key, lifecycle] of queueMap.entries()){
+          const canonical = toSkuId(lifecycle?.canonicalSku || lifecycle?.sku || key || "");
+          const requested = toSkuId(lifecycle?.requestedSku || key || "");
+          const candidates = [key, canonical, requested].map(x=>toSkuId(x||"")).filter(Boolean);
+          const hasAuthoritative = candidates.some(candidate=>lifecycleMap.has(candidate));
+          if(hasAuthoritative) continue;
+          for(const candidate of candidates) __bindReorderLifecycle(merged, candidate, lifecycle);
+        }
+
+        state.twReorders.bySku = merged;
+        state.twReorders.ready = !!(state.twReorders.lifecycleReady || state.twReorders.queueReady);
+        state.twReorders.error = state.twReorders.lifecycleError && state.twReorders.queueError
+          ? `${state.twReorders.lifecycleError} • ${state.twReorders.queueError}`
+          : "";
+        __renderAfterReorderStateChange();
+      }catch(err){
+        console.warn("merge reorder states", err);
+      }
+    }
+
+    function __queueLifecycleFromDoc(docSnap){
+      try{
+        const d = docSnap?.data?.() || {};
+        if(String(d.reorderCloudStatus || "").toLowerCase() !== "recorded") return null;
+        const episodeId = String(d.reorderLowStockEpisodeId || "").trim();
+        if(!episodeId) return null;
+        const requestedSku = toSkuId(d.amazonInventorySku || d.sku || d.code || "");
+        const canonicalSku = toSkuId(d.reorderCanonicalSku || requestedSku || "");
+        if(!canonicalSku) return null;
+        const at = Math.max(
+          Number(d.reorderRecordedAtClient || 0) || 0,
+          Number(d.createdAtMs || d.createdAtOrigMs || 0) || 0
+        );
+        // Fallback di sicurezza: serve soprattutto quando le regole del nuovo stato ciclo
+        // non sono ancora state pubblicate. Non riattiva riordini backend molto vecchi.
+        const maxAgeMs = 30 * 24 * 60 * 60 * 1000;
+        if(at > 0 && (Date.now() - at) > maxAgeMs) return null;
+        const qtyRaw = Number(d.qty || d.reorderedQty || d.amazonInventoryQty || 0);
+        return {
+          id: docSnap.id,
+          sku: canonicalSku,
+          canonicalSku,
+          requestedSku,
+          aliases: Array.from(new Set([canonicalSku, requestedSku].filter(Boolean))),
+          active: true,
+          episodeId,
+          reordered: true,
+          reorderedEpisodeId: episodeId,
+          latestReorderEventId: String(d.reorderEventId || docSnap.id || ""),
+          latestReorderQueueId: String(docSnap.id || ""),
+          latestReorderQty: Number.isFinite(qtyRaw) ? Math.max(0, Math.round(qtyRaw)) : 0,
+          latestReorderAtClient: at || Date.now(),
+          updatedAtClient: at || Date.now(),
+          reorderCountInEpisode: 1,
+          __queueConfirmedFallback: true
+        };
+      }catch(_e){ return null; }
+    }
+
     function startTwReordersWatch(){
       try{
         if(!state.firebase.ok || !state.user?.isWhitelisted) return;
-        if(state.twReorders?.unsub) return;
         const api = state.firebase.api;
         const db = state.firebase.db;
         if(!api || !db) return;
 
         if(!state.twReorders){
-          state.twReorders = { unsub:null, bySku:new Map(), ready:false, error:"", backfillTimer:null, backfilledKeys:new Set() };
+          state.twReorders = {
+            unsub:null, queueUnsub:null, lifecycleBySku:new Map(), queueBySku:new Map(), bySku:new Map(),
+            lifecycleReady:false, queueReady:false, ready:false, lifecycleError:"", queueError:"", error:"",
+            backfillTimer:null, backfilledKeys:new Set()
+          };
         }
 
-        // Fonte autorevole: stato cloud del ciclo di sottoscorta corrente.
-        // Non leggiamo più vecchi flag inventario o l'intera coda storica.
-        const colRef = api.collection(db, COL_LOW_STOCK_SKU_STATES);
-        const q = api.query(colRef, api.limit(2000));
-        state.twReorders.unsub = api.onSnapshot(q, (snap)=>{
-          const bySku = new Map();
-          const lifecyclePriority = (lifecycle)=>{
-            const episodeId = String(lifecycle?.episodeId || "").trim();
-            const reorderedEpisodeId = String(lifecycle?.reorderedEpisodeId || lifecycle?.latestReorderEpisodeId || "").trim();
-            const currentReordered = lifecycle?.active === true && !!episodeId && reorderedEpisodeId === episodeId;
-            const active = lifecycle?.active === true;
-            return (currentReordered ? 1e15 : 0) + (active ? 1e14 : 0) + __reorderLifecycleTimestamp(lifecycle);
-          };
-          const bindLifecycle = (key, lifecycle)=>{
-            const skuKey = toSkuId(key || "");
-            if(!skuKey) return;
-            const prev = bySku.get(skuKey);
-            if(!prev || lifecyclePriority(lifecycle) >= lifecyclePriority(prev)) bySku.set(skuKey, lifecycle);
-          };
-          snap.forEach((docSnap)=>{
-            const d = docSnap.data() || {};
-            const sku = toSkuId(d.sku || d.canonicalSku || docSnap.id || "");
-            if(!sku) return;
-            const lifecycle = { id:docSnap.id, ...d, sku };
-            bindLifecycle(sku, lifecycle);
-            bindLifecycle(d.canonicalSku, lifecycle);
-            const aliases = Array.isArray(d.aliases) ? d.aliases : [];
-            for(const aliasRaw of aliases) bindLifecycle(aliasRaw, lifecycle);
+        if(!state.twReorders.unsub){
+          const lifecycleCol = api.collection(db, COL_LOW_STOCK_SKU_STATES);
+          const lifecycleQuery = api.query(lifecycleCol, api.limit(2000));
+          state.twReorders.unsub = api.onSnapshot(lifecycleQuery, (snap)=>{
+            const map = new Map();
+            snap.forEach((docSnap)=>{
+              const d = docSnap.data() || {};
+              const sku = toSkuId(d.sku || d.canonicalSku || docSnap.id || "");
+              if(!sku) return;
+              const lifecycle = { id:docSnap.id, ...d, sku };
+              __bindReorderLifecycle(map, sku, lifecycle);
+              __bindReorderLifecycle(map, d.canonicalSku, lifecycle);
+              for(const aliasRaw of (Array.isArray(d.aliases) ? d.aliases : [])) __bindReorderLifecycle(map, aliasRaw, lifecycle);
+            });
+            state.twReorders.lifecycleBySku = map;
+            state.twReorders.lifecycleReady = true;
+            state.twReorders.lifecycleError = "";
+            __mergeReorderStateMaps();
+          }, (err)=>{
+            state.twReorders.lifecycleBySku = new Map();
+            state.twReorders.lifecycleReady = false;
+            state.twReorders.lifecycleError = err?.message || String(err);
+            console.warn("low-stock lifecycle watch error", err);
+            __mergeReorderStateMaps();
           });
+        }
 
-          state.twReorders.bySku = bySku;
-          state.twReorders.ready = true;
-          state.twReorders.error = "";
-          clearSkuRuntimeCache("low_stock_lifecycle_snapshot");
-
-          if(state.route.view === "home") renderHomeDashboard();
-          if(state.route.view === "location") renderInventoryList();
-          if(state.ui.sheet === "sottoscorta") renderSottoscortaSheet();
-          if(state.ui.sheet === "productDetails") renderProductDetailsSheet();
-        }, (err)=>{
-          if(state.twReorders){
-            state.twReorders.error = err?.message || String(err);
-            state.twReorders.ready = false;
-          }
-          console.warn("low-stock lifecycle watch error", err);
-        });
+        if(!state.twReorders.queueUnsub){
+          const queueCol = api.collection(db, "producedDays", TW_WRITE_LINE_BUCKET, "queue");
+          const queueQuery = api.query(queueCol, api.limit(1200));
+          state.twReorders.queueUnsub = api.onSnapshot(queueQuery, (snap)=>{
+            const map = new Map();
+            snap.forEach((docSnap)=>{
+              const lifecycle = __queueLifecycleFromDoc(docSnap);
+              if(!lifecycle) return;
+              __bindReorderLifecycle(map, lifecycle.canonicalSku, lifecycle);
+              __bindReorderLifecycle(map, lifecycle.requestedSku, lifecycle);
+              for(const alias of (Array.isArray(lifecycle.aliases) ? lifecycle.aliases : [])) __bindReorderLifecycle(map, alias, lifecycle);
+            });
+            state.twReorders.queueBySku = map;
+            state.twReorders.queueReady = true;
+            state.twReorders.queueError = "";
+            __mergeReorderStateMaps();
+          }, (err)=>{
+            state.twReorders.queueBySku = new Map();
+            state.twReorders.queueReady = false;
+            state.twReorders.queueError = err?.message || String(err);
+            console.warn("reorder queue confirmation watch error", err);
+            __mergeReorderStateMaps();
+          });
+        }
       }catch(err){
-        console.warn("start low-stock lifecycle watch", err);
+        console.warn("start reorder watches", err);
       }
     }
     
@@ -5228,11 +5394,19 @@ function startAllLogs(){
 
 function stopTwReordersWatch(){
       try{ state.twReorders?.unsub && state.twReorders.unsub(); }catch(_e){}
+      try{ state.twReorders?.queueUnsub && state.twReorders.queueUnsub(); }catch(_e){}
       try{ state.twReorders?.backfillTimer && clearTimeout(state.twReorders.backfillTimer); }catch(_e){}
       if(state.twReorders){
         state.twReorders.unsub = null;
+        state.twReorders.queueUnsub = null;
+        state.twReorders.lifecycleBySku = new Map();
+        state.twReorders.queueBySku = new Map();
         state.twReorders.bySku = new Map();
+        state.twReorders.lifecycleReady = false;
+        state.twReorders.queueReady = false;
         state.twReorders.ready = false;
+        state.twReorders.lifecycleError = "";
+        state.twReorders.queueError = "";
         state.twReorders.error = "";
         state.twReorders.backfillTimer = null;
         state.twReorders.backfilledKeys = new Set();
