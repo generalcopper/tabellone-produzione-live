@@ -2590,180 +2590,167 @@ function guessTitleFromRaw(rawText, sku){
       return __isReorderedItem(it) ? `<span class="reorderedTiny">RIORDINATO</span>` : "";
     }
 
-    function __lowStockPolicyLabel(){
-      return `personalizzata per SKU (fallback: < ${LOW_STOCK_DEFAULT} pz; 5kg ≤ ${LOW_STOCK_5KG} pz)`;
-    }
-
-        function __buildLowStockEmailPayload(items){
-      // items: aggregati SKU cloud [{ sku, title, availableQty, physicalQty, reservedQty, locations, mainLoc }]
-      const byLoc = { concamarise: [], cerea: [] };
-      for(const it of (items||[])){
-        const loc = validInventoryLoc(it?.mainLoc) ? it.mainLoc : ((it && validInventoryLoc(it.loc)) ? it.loc : "concamarise");
-        byLoc[loc].push(it);
-      }
-
-      function toRows(list){
-        return (list||[])
-          .slice()
-          .map(it=>{
-            const meta = parseTitleMeta(it.title || "");
-            const main = (meta && meta.main) ? String(meta.main).trim() : String(it.title||"").trim();
-            const product = main || "(senza nome)";
-            const qty = __fmtQty(lowStockQtyValue(it));
-            const threshold = __lowStockThresholdShort(it);
-            const where = skuAggregateLocationsLabel(it);
-            return { product, qty, threshold, where };
-          })
-          .sort((a,b)=>{
-            const qa = Number(a.qty);
-            const qb = Number(b.qty);
-            if(Number.isFinite(qa) && Number.isFinite(qb) && qa !== qb) return qa - qb;
-            return String(a.product||"").localeCompare(String(b.product||""));
-          });
-      }
-
-      const rowsConca = toRows(byLoc.concamarise);
-      const rowsCerea = toRows(byLoc.cerea);
-
-      const total = rowsConca.length + rowsCerea.length;
-      const stamp = (typeof fmtDate==="function") ? fmtDate(Date.now()) : (new Date().toLocaleString("it-IT"));
-
-      function buildTextSection(label, rows){
-        if(!rows.length) return `${label}:
-(nessun prodotto sotto soglia)
-`;
-        const maxLen = Math.min(46, rows.reduce((m,r)=> Math.max(m, String(r.product||"").length), 0) || 18);
-        const headerLine = `${"Prodotto".padEnd(maxLen, " ")}  |  Scorta  | Soglia  | Sedi`;
-        const sepLine = `${"-".repeat(maxLen)}--|----------|---------|------`;
-        const textLines = rows.map(r=>{
-          const p = String(r.product||"");
-          const name = (p.length>maxLen) ? (p.slice(0, Math.max(0, maxLen-1)) + "…") : p;
-          const where = r.where ? `  | ${r.where}` : "";
-          return `${name.padEnd(maxLen, " ")}  |  ${String(r.qty).padStart(6, " ")}  | ${String(r.threshold||"—")}${where}`;
+    function __buildLowStockEmailPayload(items){
+      // Un solo inventario cloud: nessuna separazione per sede.
+      const rows = (items || [])
+        .slice()
+        .map(it=>{
+          const sku = toSkuId(it?.sku || it?.id || "");
+          const meta = parseTitleMeta(it?.title || "");
+          const product = String(meta?.main || it?.title || sku || "(senza nome)").trim();
+          const physicalQty = physicalQtyFromItem(it);
+          const reservedQty = reservedQtyFromItem(it);
+          const availableQty = lowStockQtyValue(it);
+          const thresholdValue = __lowStockThreshold(it);
+          const thresholdLabel = __lowStockThresholdShort(it);
+          const reordered = __isReorderedItem(it);
+          return {
+            sku,
+            product,
+            physicalQty,
+            reservedQty,
+            availableQty,
+            thresholdValue,
+            thresholdLabel,
+            reordered
+          };
+        })
+        .sort((a,b)=>{
+          if(a.reordered !== b.reordered) return a.reordered ? 1 : -1;
+          if(a.availableQty !== b.availableQty) return a.availableQty - b.availableQty;
+          return String(a.sku || "").localeCompare(String(b.sku || ""));
         });
-        return `${label}:
-${headerLine}
-${sepLine}
-${textLines.join("\n")}
-`;
-      }
 
-      const head = [
-        "Amazon — Alert sotto scorta inventario",
-        `Generato: ${stamp}`,
-        "Azione: avviare produzione / riordino.",
-        "Soglia: " + __lowStockPolicyLabel(),
-        `Totale prodotti: ${total}`,
+      const total = rows.length;
+      const reorderedCount = rows.filter(r=>r.reordered).length;
+      const toHandleCount = Math.max(0, total - reorderedCount);
+      const stamp = (typeof fmtDate === "function") ? fmtDate(Date.now()) : new Date().toLocaleString("it-IT");
+
+      const textRows = rows.map(r=>[
+        `- ${r.sku || "—"}`,
+        r.product,
+        `Disponibile ${__fmtQty(r.availableQty)}`,
+        `Fisica ${__fmtQty(r.physicalQty)}`,
+        `Prenotati ${__fmtQty(r.reservedQty)}`,
+        `Soglia ${r.thresholdLabel || "—"}`,
+        r.reordered ? "RIORDINATO" : "DA GESTIRE"
+      ].join(" | "));
+
+      const textBody = [
+        "AMAZON • SOTTO SCORTA",
+        toHandleCount > 0
+          ? `Azione richiesta: avviare produzione o riordino per ${toHandleCount} SKU.`
+          : "Tutti gli SKU sotto scorta risultano già riordinati.",
+        `SKU sotto scorta: ${total}`,
+        `Già riordinati: ${reorderedCount}`,
+        `Aggiornato: ${stamp}`,
+        "Disponibile = fisica - prenotati.",
         "",
-        buildTextSection("CONCAMARISE", rowsConca),
-        "",
-        buildTextSection("CEREA", rowsCerea)
+        ...textRows
       ].join("\n");
 
-      function buildHtmlTable(rows){
-        const htmlRows = rows.map(r=>`
-          <tr>
-            <td style="padding:10px 12px; border-bottom:1px solid #e9eef2; vertical-align:top; font-size:14px; color:#111">
-              ${escapeHtml(String(r.product||""))}
-              ${r.where ? `<div style="font-size:12px;color:#667;margin-top:3px">${escapeHtml(String(r.where||""))}</div>` : ""}
-            </td>
-            <td style="padding:10px 12px; border-bottom:1px solid #e9eef2; vertical-align:top; text-align:right; white-space:nowrap; font-size:14px; font-weight:700; color:#111">
-              ${escapeHtml(String(r.qty))}
-            </td>
-            <td style="padding:10px 12px; border-bottom:1px solid #e9eef2; vertical-align:top; text-align:right; white-space:nowrap; font-size:14px; color:#111">
-              ${escapeHtml(String(r.threshold || "—"))}
-            </td>
-          </tr>
-        `).join("");
-
+      const htmlRows = rows.map(r=>{
+        const availableColor = r.availableQty <= 0 ? "#b91c1c" : "#b45309";
+        const status = r.reordered
+          ? `<span style="display:inline-block;margin-top:5px;padding:2px 7px;border-radius:999px;background:#f0fdf4;border:1px solid #bbf7d0;color:#15803d;font-size:10px;font-weight:800;letter-spacing:.04em">RIORDINATO</span>`
+          : `<span style="display:inline-block;margin-top:5px;padding:2px 7px;border-radius:999px;background:#fff7ed;border:1px solid #fed7aa;color:#c2410c;font-size:10px;font-weight:800;letter-spacing:.04em">DA GESTIRE</span>`;
         return `
-          <table style="width:100%; border-collapse:collapse; border:1px solid #e9eef2; border-radius:12px; overflow:hidden">
-            <thead>
-              <tr>
-                <th style="text-align:left; padding:10px 12px; font-size:12px; letter-spacing:.04em; text-transform:uppercase; color:#556; background:#fbfcfd; border-bottom:1px solid #e9eef2">
-                  Prodotto
-                </th>
-                <th style="text-align:right; padding:10px 12px; font-size:12px; letter-spacing:.04em; text-transform:uppercase; color:#556; background:#fbfcfd; border-bottom:1px solid #e9eef2; white-space:nowrap">
-                  Scorta
-                </th>
-                <th style="text-align:right; padding:10px 12px; font-size:12px; letter-spacing:.04em; text-transform:uppercase; color:#556; background:#fbfcfd; border-bottom:1px solid #e9eef2; white-space:nowrap">
-                  Soglia
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              ${htmlRows || `
-                <tr>
-                  <td colspan="3" style="padding:12px; font-size:14px; color:#556">Nessun prodotto sotto soglia 🎯</td>
-                </tr>
-              `}
-            </tbody>
-          </table>
-        `;
-      }
+          <tr>
+            <td style="padding:12px;border-bottom:1px solid #eef0f3;vertical-align:top;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;font-weight:700;color:#0369a1;white-space:nowrap">${escapeHtml(r.sku || "—")}</td>
+            <td style="padding:12px;border-bottom:1px solid #eef0f3;vertical-align:top;font-size:13px;line-height:1.35;color:#0f172a;font-weight:650">${escapeHtml(r.product)}<br>${status}</td>
+            <td style="padding:12px;border-bottom:1px solid #eef0f3;vertical-align:top;text-align:right;font-size:13px;color:#334155;white-space:nowrap">${escapeHtml(__fmtQty(r.physicalQty))}</td>
+            <td style="padding:12px;border-bottom:1px solid #eef0f3;vertical-align:top;text-align:right;font-size:13px;color:#334155;white-space:nowrap">${escapeHtml(__fmtQty(r.reservedQty))}</td>
+            <td style="padding:12px;border-bottom:1px solid #eef0f3;vertical-align:top;text-align:right;font-size:15px;font-weight:850;color:${availableColor};white-space:nowrap">${escapeHtml(__fmtQty(r.availableQty))}</td>
+            <td style="padding:12px;border-bottom:1px solid #eef0f3;vertical-align:top;text-align:right;font-size:13px;color:#334155;white-space:nowrap">${escapeHtml(r.thresholdLabel || "—")}</td>
+          </tr>`;
+      }).join("");
+
+      const actionTitle = toHandleCount > 0
+        ? `${toHandleCount} SKU da gestire`
+        : "Tutto già riordinato";
+      const actionCopy = toHandleCount > 0
+        ? "Avvia produzione o riordino per gli articoli indicati come DA GESTIRE."
+        : "Gli articoli sotto scorta risultano già riordinati.";
 
       const htmlBody = `
-        <div style="font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Arial; line-height:1.45; background:#ffffff; padding:0; margin:0">
-          <div style="max-width:720px; margin:0 auto; border:1px solid #e9eef2; border-radius:14px; overflow:hidden">
-            <div style="padding:16px 18px; background:#f6f7f8; border-bottom:1px solid #e9eef2">
-              <div style="font-size:16px; font-weight:800; margin:0 0 4px 0">Amazon • Alert sotto scorta</div>
-              <div style="font-size:13px; color:#556; margin:0">
-                Generato: <b>${escapeHtml(stamp)}</b> • Soglia: <b>${escapeHtml(__lowStockPolicyLabel())}</b> • Prodotti: <b>${total}</b>
+        <div style="margin:0;padding:24px 12px;background:#f6f7f9;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;color:#0f172a;line-height:1.4">
+          <div style="max-width:860px;margin:0 auto;background:#ffffff;border:1px solid #e6e8ec;border-radius:16px;overflow:hidden;box-shadow:0 8px 24px rgba(15,23,42,.07)">
+            <div style="padding:20px 22px;background:#0f172a;border-bottom:4px solid #f97316;color:#ffffff">
+              <div style="font-size:11px;font-weight:800;letter-spacing:.12em;text-transform:uppercase;color:#fdba74">Amazon • Sottoscorta</div>
+              <div style="margin-top:6px;font-size:25px;line-height:1.12;font-weight:850;letter-spacing:-.025em">${escapeHtml(actionTitle)}</div>
+              <div style="margin-top:7px;font-size:14px;color:#cbd5e1">${escapeHtml(actionCopy)}</div>
+            </div>
+
+            <div style="padding:18px 22px 8px">
+              <table role="presentation" style="width:100%;border-collapse:separate;border-spacing:8px 0;margin:0 -8px">
+                <tr>
+                  <td style="width:33.33%;padding:12px;background:#fff7ed;border:1px solid #fed7aa;border-radius:10px">
+                    <div style="font-size:10px;font-weight:800;letter-spacing:.07em;text-transform:uppercase;color:#9a3412">Da gestire</div>
+                    <div style="margin-top:3px;font-size:23px;font-weight:850;color:#c2410c">${toHandleCount}</div>
+                  </td>
+                  <td style="width:33.33%;padding:12px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:10px">
+                    <div style="font-size:10px;font-weight:800;letter-spacing:.07em;text-transform:uppercase;color:#166534">Riordinati</div>
+                    <div style="margin-top:3px;font-size:23px;font-weight:850;color:#15803d">${reorderedCount}</div>
+                  </td>
+                  <td style="width:33.33%;padding:12px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px">
+                    <div style="font-size:10px;font-weight:800;letter-spacing:.07em;text-transform:uppercase;color:#475569">Totale</div>
+                    <div style="margin-top:3px;font-size:23px;font-weight:850;color:#0f172a">${total}</div>
+                  </td>
+                </tr>
+              </table>
+
+              <div style="margin:14px 0 16px;padding:11px 13px;background:#f8fafc;border-left:3px solid #f97316;border-radius:8px;font-size:12px;color:#475569">
+                <b style="color:#0f172a">Disponibile = fisica − prenotati.</b> I prenotati sono pezzi già impegnati ma non ancora prelevati. Aggiornato: ${escapeHtml(stamp)}.
               </div>
             </div>
 
-            <div style="padding:14px 18px">
-              <p style="margin:0 0 12px 0; font-size:14px">
-                Azione consigliata: <b>avviare produzione / riordino</b>.
-              </p>
-
-              <div style="margin:12px 0 8px 0; font-size:13px; font-weight:800; color:#111">Concamarise</div>
-              ${buildHtmlTable(rowsConca)}
-
-              <div style="margin:18px 0 8px 0; font-size:13px; font-weight:800; color:#111">Cerea</div>
-              ${buildHtmlTable(rowsCerea)}
-
-              <div style="margin-top:14px; font-size:12px; color:#667">
-                Nota: righe generate automaticamente dall'hub inventario Amazon.
+            <div style="padding:0 22px 22px">
+              <div style="overflow-x:auto;border:1px solid #e6e8ec;border-radius:12px">
+                <table style="width:100%;min-width:760px;border-collapse:collapse;background:#ffffff">
+                  <thead>
+                    <tr style="background:#f8fafc">
+                      <th style="padding:10px 12px;text-align:left;border-bottom:1px solid #e6e8ec;font-size:10px;font-weight:800;letter-spacing:.07em;text-transform:uppercase;color:#64748b">SKU</th>
+                      <th style="padding:10px 12px;text-align:left;border-bottom:1px solid #e6e8ec;font-size:10px;font-weight:800;letter-spacing:.07em;text-transform:uppercase;color:#64748b">Prodotto</th>
+                      <th style="padding:10px 12px;text-align:right;border-bottom:1px solid #e6e8ec;font-size:10px;font-weight:800;letter-spacing:.07em;text-transform:uppercase;color:#64748b">Fisica</th>
+                      <th style="padding:10px 12px;text-align:right;border-bottom:1px solid #e6e8ec;font-size:10px;font-weight:800;letter-spacing:.07em;text-transform:uppercase;color:#64748b">Prenotati</th>
+                      <th style="padding:10px 12px;text-align:right;border-bottom:1px solid #e6e8ec;font-size:10px;font-weight:800;letter-spacing:.07em;text-transform:uppercase;color:#64748b">Disponibile</th>
+                      <th style="padding:10px 12px;text-align:right;border-bottom:1px solid #e6e8ec;font-size:10px;font-weight:800;letter-spacing:.07em;text-transform:uppercase;color:#64748b">Soglia</th>
+                    </tr>
+                  </thead>
+                  <tbody>${htmlRows}</tbody>
+                </table>
               </div>
+              <div style="margin-top:12px;font-size:11px;color:#94a3b8">Messaggio automatico da Hub Inventario Amazon.</div>
             </div>
           </div>
-        </div>
-      `;
+        </div>`;
 
-      const subject = `Amazon — Sotto scorta inventario (inventario unico) • ${total} prodotti`;
+      const subject = toHandleCount > 0
+        ? `Amazon • Sottoscorta: ${toHandleCount} SKU da gestire`
+        : `Amazon • Sottoscorta: ${total} SKU già riordinati`;
 
-      const concamarise = (byLoc && byLoc.concamarise) ? byLoc.concamarise : [];
-      const cerea = (byLoc && byLoc.cerea) ? byLoc.cerea : [];
+      const previewRows = rows.slice(0, 250).map(r=>({
+        sku: r.sku,
+        title: r.product.slice(0, 120),
+        qty: r.availableQty,
+        availableQty: r.availableQty,
+        physicalQty: r.physicalQty,
+        reservedQty: r.reservedQty,
+        threshold: r.thresholdLabel,
+        reordered: r.reordered
+      }));
 
-      // preview leggero per log UI (evita documenti troppo grossi)
-      const previewConca = (concamarise || []).slice(0, 250).map(it=>{
-        const sku = toSkuId(it.sku || "");
-        const m = parseTitleMeta(it.title || "");
-        const title = (m.main || it.title || sku || "").slice(0, 120);
-        const qty = lowStockQtyValue(it);
-        const physicalQty = physicalQtyFromItem(it);
-        const reservedQty = reservedQtyFromItem(it);
-        const threshold = __lowStockThresholdShort(it);
-        const where = skuAggregateLocationsLabel(it);
-        return { sku, title, qty, physicalQty, reservedQty, threshold, where };
-      });
-      const previewCerea = (cerea || []).slice(0, 250).map(it=>{
-        const sku = toSkuId(it.sku || "");
-        const m = parseTitleMeta(it.title || "");
-        const title = (m.main || it.title || sku || "").slice(0, 120);
-        const qty = lowStockQtyValue(it);
-        const physicalQty = physicalQtyFromItem(it);
-        const reservedQty = reservedQtyFromItem(it);
-        const threshold = __lowStockThresholdShort(it);
-        const where = skuAggregateLocationsLabel(it);
-        return { sku, title, qty, physicalQty, reservedQty, threshold, where };
-      });
-
-      const counts = { concamarise: (concamarise || []).length, cerea: (cerea || []).length };
-      const preview = { concamarise: previewConca, cerea: previewCerea };
-
-      return { subject, text: head, html: htmlBody, total, counts, preview };
+      return {
+        subject,
+        text: textBody,
+        html: htmlBody,
+        total,
+        toHandleCount,
+        reorderedCount,
+        counts: { unica: total },
+        preview: { unica: previewRows },
+        templateVersion: 4
+      };
     }
 
         async function __enqueueLowStockEmailIfNeeded(items, { reason="" } = {}){
@@ -2787,10 +2774,10 @@ ${textLines.join("\n")}
           return;
         }
 
-        // invia SOLO quando entrambi i magazzini (inventario unico) hanno ricevuto almeno uno snapshot
-        const __bothReady = !!(state.inventory?.cerea?.meta?.loaded && state.inventory?.concamarise?.meta?.loaded);
-        if(!__bothReady){
-          if(mailLog) mailLog.textContent = "Email automatica: in attesa sync completo (inventario unico)…";
+        // Unica fonte valida: snapshot dell'inventario cloud canonico.
+        const inventoryReady = !!state.inventory?.[INVENTORY_CANONICAL_LOC]?.meta?.loaded;
+        if(!inventoryReady){
+          if(mailLog) mailLog.textContent = "Email automatica: in attesa inventario cloud…";
           return;
         }
 
@@ -2799,14 +2786,15 @@ ${textLines.join("\n")}
           return;
         }
 
-        // fingerprint globale per SKU univoco: include disponibilità totale e dettaglio sedi.
+        // Fingerprint dell'inventario unico. La versione forza una sola mail col nuovo formato.
         const list = (items||[]).slice().map(it=>({
+          templateVersion: 4,
           sku: String(toSkuId(it.sku||"")||""),
           qty: lowStockQtyValue(it),
           physicalQty: physicalQtyFromItem(it),
           reservedQty: reservedQtyFromItem(it),
           threshold: __lowStockThreshold(it),
-          locs: Array.isArray(it.locations) ? it.locations.map(x=>`${x.loc}:${x.physicalQty}:${x.reservedQty}`).join("|") : ""
+          reordered: __isReorderedItem(it)
         })).sort((a,b)=>{
           if(a.sku!==b.sku) return a.sku.localeCompare(b.sku);
           if((a.qty||0) !== (b.qty||0)) return (a.qty||0) - (b.qty||0);
@@ -2856,6 +2844,9 @@ ${textLines.join("\n")}
               total: payload.total,
               counts: payload.counts || null,
               preview: payload.preview || null,
+              toHandleCount: payload.toHandleCount,
+              reorderedCount: payload.reorderedCount,
+              templateVersion: payload.templateVersion,
               hash: fingerprint,
               reason: String(reason||"")
             },
@@ -2869,6 +2860,9 @@ ${textLines.join("\n")}
             total: payload.total,
             counts: payload.counts || null,
             preview: payload.preview || null,
+            toHandleCount: payload.toHandleCount,
+            reorderedCount: payload.reorderedCount,
+            templateVersion: payload.templateVersion,
             emailDocId: createdEmailDocId,
             sentAt: api.serverTimestamp(),
             sentAtClient: now,
@@ -3664,46 +3658,36 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
     }
 
     function __parseLowStockPreviewFromText(txt){
-      const out = { concamarise: [], cerea: [] };
+      const out = { unica: [] };
       if(!txt) return out;
-      const lines = String(txt).split(/\r?\n/);
-      let section = null;
 
-      for(const raw of lines){
-        const line = String(raw||"").trim();
-        if(!line) continue;
+      for(const raw of String(txt).split(/\r?\n/)){
+        const line = String(raw || "").trim();
+        if(!line.startsWith("- ")) continue;
+        const parts = line.slice(2).split("|").map(x=>x.trim());
+        if(parts.length < 2) continue;
 
-        if(/^CONCAMARISE\b/i.test(line)){ section = "concamarise"; continue; }
-        if(/^CEREA\b/i.test(line)){ section = "cerea"; continue; }
+        const sku = toSkuId(parts[0] || "");
+        const title = String(parts[1] || "").slice(0, 120);
+        const readNumber = (label)=>{
+          const part = parts.find(x=>x.toLowerCase().startsWith(label.toLowerCase()));
+          const m = String(part || "").match(/-?\d+(?:[\.,]\d+)?/);
+          return m ? Number(m[0].replace(",", ".")) : 0;
+        };
+        const thresholdPart = parts.find(x=>x.toLowerCase().startsWith("soglia ")) || "";
+        const status = parts[parts.length - 1] || "";
 
-        if(line.startsWith("•")){
-          if(!section) continue;
-          const s = line.replace(/^•\s*/, "");
-          let title = s;
-          let qty = 0;
-
-          const parts = s.split("—");
-          if(parts.length >= 2){
-            title = parts[0].trim();
-            const rest = parts.slice(1).join("—");
-            const m = rest.match(/(-?\d+(?:[\.,]\d+)?)/);
-            qty = m ? parseFloat(m[1].replace(",", ".")) : 0;
-          }else{
-            const m = s.match(/^(.*)\s+(\d+(?:[\.,]\d+)?)\s*pz\b/i);
-            if(m){
-              title = m[1].trim();
-              qty = parseFloat(m[2].replace(",", "."));
-            }
-          }
-
-          out[section].push({
-            sku: "",
-            title: String(title||"").slice(0, 120),
-            qty: Number.isFinite(qty) ? qty : 0
-          });
-        }
+        out.unica.push({
+          sku,
+          title,
+          qty: readNumber("Disponibile "),
+          availableQty: readNumber("Disponibile "),
+          physicalQty: readNumber("Fisica "),
+          reservedQty: readNumber("Prenotati "),
+          threshold: thresholdPart.replace(/^soglia\s+/i, "") || "—",
+          reordered: /RIORDINATO/i.test(status)
+        });
       }
-
       return out;
     }
 
@@ -3772,12 +3756,8 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
       const sentAt = meta.sentAt || meta.updatedAt || meta.lastSentAt || meta.sentAtClient || null;
       const dt = __fmtTsAny(sentAt);
       const total = Number.isFinite(meta.total) ? meta.total : (Number.isFinite(meta.lastTotal) ? meta.lastTotal : null);
-
-      const counts = meta.counts || meta.lastCounts || null;
-      const pv = meta.preview || meta.lastPreview || null;
-      const cN = (counts && Number.isFinite(counts.concamarise)) ? counts.concamarise : (pv && Array.isArray(pv.concamarise) ? pv.concamarise.length : null);
-      const rN = (counts && Number.isFinite(counts.cerea)) ? counts.cerea : (pv && Array.isArray(pv.cerea) ? pv.cerea.length : null);
-
+      const toHandleCount = Number.isFinite(meta.toHandleCount) ? meta.toHandleCount : null;
+      const reorderedCount = Number.isFinite(meta.reorderedCount) ? meta.reorderedCount : null;
       const reason = meta.reason ? String(meta.reason) : "";
       const who = meta.sentBy ? String(meta.sentBy) : "";
       const docId = meta.emailDocId ? String(meta.emailDocId) : "";
@@ -3785,74 +3765,66 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
       const hashShort = hash ? hash.slice(0, 10) : "";
 
       let header = `Ultima mail sotto scorta: <b>${escapeHtml(dt)}</b>`;
-      if(total!=null) header += ` • Totale <b>${escapeHtml(String(total))}</b>`;
-      if(cN!=null || rN!=null) header += ` • Concamarise ${escapeHtml(String(cN ?? "—"))} / Cerea ${escapeHtml(String(rN ?? "—"))}`;
+      if(total != null) header += ` • SKU <b>${escapeHtml(String(total))}</b>`;
+      if(toHandleCount != null) header += ` • Da gestire <b>${escapeHtml(String(toHandleCount))}</b>`;
+      if(reorderedCount != null) header += ` • Riordinati <b>${escapeHtml(String(reorderedCount))}</b>`;
       if(reason) header += ` • trigger: <span class="mono">${escapeHtml(reason)}</span>`;
       if(hashShort) header += ` • hash ${escapeHtml(hashShort)}`;
       if(who) header += ` • da: <span class="mono">${escapeHtml(who)}</span>`;
       if(docId) header += ` • doc: <span class="mono">${escapeHtml(docId)}</span>`;
-
       el.innerHTML = header;
 
-      // preview: prima dal meta, poi (fallback) dal documento email
-      let preview = pv;
-
+      let preview = meta.preview || meta.lastPreview || null;
       if(!preview){
         const d = state.mail?.lowStock?.emailDoc || null;
         preview = d?.lowStock?.preview || d?.preview || d?.meta?.preview || null;
-        if(!preview && d?.message?.text){
-          preview = __parseLowStockPreviewFromText(d.message.text);
-        }
+        if(!preview && d?.message?.text) preview = __parseLowStockPreviewFromText(d.message.text);
       }
 
-      const havePreview = preview && (Array.isArray(preview.concamarise) || Array.isArray(preview.cerea));
+      // Anche i vecchi snapshot divisi per sede vengono mostrati come inventario unico.
+      const rows = Array.isArray(preview?.unica)
+        ? preview.unica
+        : [
+            ...(Array.isArray(preview?.concamarise) ? preview.concamarise : []),
+            ...(Array.isArray(preview?.cerea) ? preview.cerea : [])
+          ];
 
-      if(!havePreview){
-        // fallback: prova a caricare il doc email dell’ultimo invio (utile dopo refresh)
+      if(!rows.length){
         const busy = !!state.mail?.lowStock?.emailDocBusy;
         const docErr = state.mail?.lowStock?.emailDocError || "";
-
         if(busy){
           el.innerHTML += `<div class="hint" style="margin-top:6px">Caricamento dettagli ultimo invio…</div>`;
         }else if(meta.hash){
           __loadLowStockEmailDocIfNeeded(meta);
           el.innerHTML += `<div class="hint" style="margin-top:6px">Caricamento dettagli ultimo invio…</div>`;
         }
-
-        if(docErr){
-          el.innerHTML += `<div class="hint" style="margin-top:6px">Dettagli email: ${escapeHtml(docErr)}</div>`;
-        }
+        if(docErr) el.innerHTML += `<div class="hint" style="margin-top:6px">Dettagli email: ${escapeHtml(docErr)}</div>`;
         return;
       }
 
-      const renderList = (locLabel, arr)=>{
-        const list = (arr||[]).slice(0, 120).map(it=>{
-          const title = escapeHtml(String(it.title||"").trim() || "(senza nome)");
-          const sku = escapeHtml(toSkuId(it.sku||""));
-          const qty = Number.isFinite(it.qty) ? it.qty : 0;
-          const threshold = it.threshold ? String(it.threshold) : "—";
-          return `<div class="row" style="padding:8px 10px; border-top:1px solid rgba(0,0,0,.06);">
-            <div class="rowMain">
-              <p class="rowTitle" style="font-size:13px">${title}</p>
-              <div class="rowSub"><span class="mono">${sku}</span> · <span class="muted">${escapeHtml(locLabel)}</span> · Soglia: ${escapeHtml(threshold)}</div>
-            </div>
-            <div class="badge warn">${escapeHtml(String(qty))}</div>
-          </div>`;
-        }).join("");
-        return `<div style="margin-top:10px">
-          <div class="miniSub" style="margin:6px 0 6px">${escapeHtml(locLabel)}</div>
-          <div class="list compact" style="border:1px solid rgba(0,0,0,.06)">${list || `<div class="hint">—</div>`}</div>
+      const list = rows.slice(0, 120).map(it=>{
+        const title = escapeHtml(String(it.title || "").trim() || "(senza nome)");
+        const sku = escapeHtml(toSkuId(it.sku || ""));
+        const available = Number.isFinite(Number(it.availableQty)) ? Number(it.availableQty) : (Number.isFinite(Number(it.qty)) ? Number(it.qty) : 0);
+        const physical = Number.isFinite(Number(it.physicalQty)) ? Number(it.physicalQty) : 0;
+        const reserved = Number.isFinite(Number(it.reservedQty)) ? Number(it.reservedQty) : 0;
+        const threshold = it.threshold ? String(it.threshold) : "—";
+        const status = it.reordered ? `<span class="reorderedTiny">RIORDINATO</span>` : "";
+        return `<div class="row" style="padding:8px 10px;border-top:1px solid rgba(0,0,0,.06)">
+          <div class="rowMain">
+            <p class="rowTitle" style="font-size:13px">${title} ${status}</p>
+            <div class="rowSub"><span class="mono">${sku}</span> · Fisica ${escapeHtml(String(physical))} · Prenotati ${escapeHtml(String(reserved))} · Soglia ${escapeHtml(threshold)}</div>
+          </div>
+          <div class="badge warn" title="Disponibile reale">${escapeHtml(String(available))}</div>
         </div>`;
-      };
+      }).join("");
 
       el.innerHTML += `
         <details style="margin-top:8px">
-          <summary style="cursor:pointer">Vedi righe inviate (snapshot)</summary>
-          ${renderList("Concamarise", preview.concamarise)}
-          ${renderList("Cerea", preview.cerea)}
-          <div class="hint" style="margin-top:8px">Nota: questa è la lista fotografata al momento dell’invio.</div>
-        </details>
-      `;
+          <summary style="cursor:pointer">Vedi righe inviate (inventario unico)</summary>
+          <div class="list compact" style="margin-top:8px;border:1px solid rgba(0,0,0,.06)">${list}</div>
+          <div class="hint" style="margin-top:8px">Disponibile = fisica − prenotati. Snapshot al momento dell'invio.</div>
+        </details>`;
     }
 
 function startAllLogs(){
