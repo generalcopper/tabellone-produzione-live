@@ -1933,18 +1933,6 @@
 
           </div>
 
-          <!-- Prodotti da ubicare: arrivano da produzione / carichi cloud e non hanno ancora posti assegnati -->
-          <div class="miniCard" id="homeNoLocationBox">
-            <div class="miniTop">
-              <div>
-                <div class="miniTitle">Da ubicare</div>
-                <div class="miniSub">Prodotti caricati/prodotti senza ubicazione assegnata • cloud live</div>
-              </div>
-              <div class="pill" id="homeNoLocationCount">—</div>
-            </div>
-            <div class="gridTable" id="homeNoLocationList" style="margin-top:12px;"></div>
-            <div class="hint" id="homeNoLocationHint" style="margin-top:10px"></div>
-          </div>
 </div>
       </div>
     </div>
@@ -8345,72 +8333,6 @@ function currentInv(){
       };
     }
 
-    function getItemsWithoutRackLocations(){
-      const out = [];
-      const pushLoc = (loc)=>{
-        const items = stockRepresentativeItemsForLoc(loc);
-        for(const it of items){
-          const q = Number.isFinite(Number(it?.qty)) ? Number(it.qty) : 0;
-          if(q <= 0) continue;
-          if(readRackLocationsFromDoc(it || {}).length) continue;
-          out.push({ ...it, loc, qty:q });
-        }
-      };
-      pushLoc(INVENTORY_CANONICAL_LOC);
-      out.sort((a,b)=>{
-        const ta = Number(a.updatedAtClient || 0) || (a.updatedAt?.toMillis?.() || 0);
-        const tb = Number(b.updatedAtClient || 0) || (b.updatedAt?.toMillis?.() || 0);
-        if(ta !== tb) return tb - ta;
-        return String(a.sku || "").localeCompare(String(b.sku || ""));
-      });
-      return out;
-    }
-
-    function renderHomeNoLocationBox(){
-      const list = $("homeNoLocationList");
-      const count = $("homeNoLocationCount");
-      const hint = $("homeNoLocationHint");
-      if(!list || !count) return;
-
-      if(!state.user?.isWhitelisted){
-        count.textContent = "—";
-        list.innerHTML = `<div class="hint">Accedi per vedere i prodotti da ubicare.</div>`;
-        if(hint) hint.textContent = "";
-        return;
-      }
-
-      const out = getItemsWithoutRackLocations();
-      count.textContent = fmtN(out.length);
-
-      if(!out.length){
-        list.innerHTML = `<div class="hint">Tutti i prodotti con stock positivo hanno già un’ubicazione assegnata.</div>`;
-        if(hint) hint.textContent = "";
-        return;
-      }
-
-      const rows = out.slice(0, 120).map(it=>{
-        const meta = parseTitleMeta(it.title || "");
-        const titleMain = meta.main ? escapeHtml(meta.main) : (it.title ? escapeHtml(it.title) : "<span class='muted'>(senza nome)</span>");
-        const sku = escapeHtml(toSkuId(it.sku || it.id || ""));
-        const locLabel = escapeHtml(prettyLoc(it.loc));
-        const qty = Number.isFinite(Number(it.qty)) ? Number(it.qty) : 0;
-        const when = it.updatedAtClient ? fmtDate(it.updatedAtClient) : (it.updatedAt ? fmtDate(it.updatedAt) : "");
-        const metaLine = [locLabel, when ? `Agg.: ${when}` : "", `Da produzione/carico cloud`].filter(Boolean).join(" • ");
-        return `
-          <div class="row gridRow" role="button" tabindex="0" data-sku="${sku}" data-loc="${escapeHtml(it.loc || "")}" data-action="openHomeNoLocationItem">
-            <div class="gridCell gridSku">${sku}</div>
-            <div class="gridCell">
-              <div class="gridProdMain">${titleMain}</div>
-              <div class="gridProdSub">${escapeHtml(metaLine)}</div>
-            </div>
-            <div class="badge warn">${escapeHtml(String(qty))}</div>
-          </div>`;
-      }).join("");
-
-      list.innerHTML = `<div class="row gridHead gridRow"><div class="gridCell">SKU</div><div class="gridCell">Prodotto</div><div class="gridCell gridRight">Q.tà</div></div>` + rows;
-      if(hint) hint.textContent = `Mostrati ${Math.min(out.length, 120).toLocaleString("it-IT")} di ${out.length.toLocaleString("it-IT")}. Tocca una riga per assegnare l’ubicazione.`;
-    }
-
     function renderHomeDashboard(){
       const tSku = $("homeTotalSku");
       const tLow = $("homeTotalLow");
@@ -8422,10 +8344,8 @@ function currentInv(){
       const lowList = $("homeLowStockList");
       const lowCount = $("homeLowStockCount");
       const lowHint = $("homeLowStockHint");
-      const noLocList = $("homeNoLocationList");
-
       // se non siamo in home, aggiorniamo solo se gli elementi esistono (es: sheet aperti)
-      if(!tSku && !lowList && !noLocList) return;
+      if(!tSku && !lowList) return;
 
       if(!state.user?.isWhitelisted){
         if(tSku) tSku.textContent = "—";
@@ -8437,7 +8357,6 @@ function currentInv(){
         if(lowCount) lowCount.textContent = "—";
         if(lowList) lowList.innerHTML = `<div class="hint">Accedi per vedere la sotto-scorta.</div>`;
         if(lowHint) lowHint.textContent = "";
-        renderHomeNoLocationBox();
         return;
       }
 
@@ -8478,7 +8397,6 @@ function currentInv(){
           lowList.innerHTML = `<div class="hint">Nessun articolo sotto scorta 🎯</div>`;
           if(lowHint) lowHint.textContent = "";
           renderHomeLowStockMailLog();
-          renderHomeNoLocationBox();
           return;
         }
 
@@ -8531,7 +8449,6 @@ function currentInv(){
 
       // log ultimo invio mail sotto scorta (da meta Firestore)
       renderHomeLowStockMailLog();
-      renderHomeNoLocationBox();
     }
 
     // --- inventory render ---
@@ -13166,29 +13083,6 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
           openProductDetailsSheet(sku);
         });
       }
-
-      const homeNoLoc = $("homeNoLocationList");
-      if(homeNoLoc){
-        homeNoLoc.addEventListener("click", (e)=>{
-          const row = e.target?.closest?.("[data-action='openHomeNoLocationItem']");
-          if(!row) return;
-          const sku = row.getAttribute("data-sku") || "";
-          const loc = row.getAttribute("data-loc") || "";
-          if(loc) state.route.loc = loc;
-          openProductDetailsSheet(sku);
-        });
-        homeNoLoc.addEventListener("keydown", (e)=>{
-          if(e.key!=="Enter" && e.key!==" ") return;
-          const row = e.target?.closest?.("[data-action='openHomeNoLocationItem']");
-          if(!row) return;
-          e.preventDefault();
-          const sku = row.getAttribute("data-sku") || "";
-          const loc = row.getAttribute("data-loc") || "";
-          if(loc) state.route.loc = loc;
-          openProductDetailsSheet(sku);
-        });
-      }
-
 
 
       $("invSearch")?.addEventListener("input", ()=> renderInventoryList());
