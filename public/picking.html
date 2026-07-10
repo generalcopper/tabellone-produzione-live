@@ -3510,6 +3510,7 @@ function readRackPickerSelection(root){
             getDoc: fsMod.getDoc,
             getDocFromServer: fsMod.getDocFromServer,
             getDocs: fsMod.getDocs,
+            getDocsFromServer: fsMod.getDocsFromServer,
             setDoc: fsMod.setDoc,
             updateDoc: fsMod.updateDoc,
             serverTimestamp: fsMod.serverTimestamp,
@@ -3790,6 +3791,7 @@ function readRackPickerSelection(root){
       if(inv){ inv.unsub=null; inv.items=[]; inv.meta={count:0,lastUpdatedAt:null,loaded:false}; }
       stopAllLogs();
       stopShopifyFbmSyncMetaWatch();
+      resetShopifyActiveOrdersState();
       if(state.shopifySync){ state.shopifySync.meta=null; state.shopifySync.error=""; state.shopifySync.busy=false; }
       renderHomeDashboard();
       if(state.ui.sheet==="productDetails") renderProductDetailsSheet();
@@ -4978,6 +4980,218 @@ function readRackPickerSelection(root){
     }
 
 
+
+    // Lista FBM esatta: una sola query server sui documenti ordine attivi.
+    // Nessun listener aggiuntivo e nessun fallback dai documenti inventario, che non
+    // possono garantire numero ordine/cliente. La query viene rifatta soltanto quando
+    // il meta sync Shopify risulta più recente della lista già letta.
+    const __shopifyActiveOrdersState = {
+      items: [],
+      loaded: false,
+      loading: false,
+      error: "",
+      loadedAtClient: 0,
+      syncVersion: 0,
+      promise: null
+    };
+
+    function resetShopifyActiveOrdersState(){
+      __shopifyActiveOrdersState.items = [];
+      __shopifyActiveOrdersState.loaded = false;
+      __shopifyActiveOrdersState.loading = false;
+      __shopifyActiveOrdersState.error = "";
+      __shopifyActiveOrdersState.loadedAtClient = 0;
+      __shopifyActiveOrdersState.syncVersion = 0;
+      __shopifyActiveOrdersState.promise = null;
+    }
+
+    function shopifyExactOrderLineRemainingQty(stored){
+      try{
+        const row = (stored && typeof stored === "object") ? stored : {};
+        const reserved = Math.max(0, Math.round(Number(row.reservedQty || 0) || 0));
+        const shipped = Math.max(0, Math.round(Number(row.shippedQty || 0) || 0));
+        const applied = Math.max(0, Math.round(Number(row.inventoryAppliedQty || 0) || 0));
+        return Math.max(0, reserved - Math.max(shipped, applied));
+      }catch(_e){ return 0; }
+    }
+
+    function shopifyExactOrderRowsFromDocs(itemsInput=null){
+      const out = [];
+      try{
+        const items = Array.isArray(itemsInput) ? itemsInput : __shopifyActiveOrdersState.items;
+        for(const root0 of items){
+          const root = (root0 && typeof root0 === "object") ? root0 : {};
+          if(root.active !== true) continue;
+          const d = (root.orderDetails && typeof root.orderDetails === "object") ? root.orderDetails : {};
+          const customer = (d.customer && typeof d.customer === "object") ? d.customer : {};
+          const shipping = (d.shippingAddress && typeof d.shippingAddress === "object") ? d.shippingAddress : {};
+          const orderId = squashWhitespace(root.orderId || d.orderId || root.__docId || "");
+          if(!orderId) continue;
+          const orderName = squashWhitespace(root.orderName || d.orderName || d.orderNumber || "");
+          const customerName = squashWhitespace(root.customerName || customer.name || shipping.name || "") || "Cliente non disponibile";
+          const customerEmail = squashWhitespace(root.customerEmail || customer.email || d.email || "");
+          const customerPhone = squashWhitespace(root.customerPhone || customer.phone || d.phone || shipping.phone || "");
+          const detailVersion = Math.max(
+            Number(root.shopifyUpdatedAtClient || 0) || 0,
+            Number(d.updatedAtClient || 0) || 0,
+            Number(root.detailUpdatedAtClient || 0) || 0
+          );
+          const latestAt = Number(d.createdAtClient || root.shopifyCreatedAtClient || detailVersion || root.createdAtClient || 0) || 0;
+          const loc = (root.location === "cerea" || root.location === "concamarise") ? root.location : INVENTORY_CANONICAL_LOC;
+          const detailLines = Array.isArray(d.lineItems) ? d.lineItems : [];
+          const detailByLineId = new Map();
+          const detailBySku = new Map();
+          for(const line0 of detailLines){
+            const line = (line0 && typeof line0 === "object") ? line0 : {};
+            const lineId = squashWhitespace(line.lineItemId || line.id || "");
+            const sku = toSkuId(line.sku || "");
+            if(lineId) detailByLineId.set(lineId, line);
+            if(sku && !detailBySku.has(sku)) detailBySku.set(sku, line);
+          }
+
+          const grouped = new Map();
+          const storedLines = (root.linesByLineId && typeof root.linesByLineId === "object") ? Object.values(root.linesByLineId) : [];
+          for(const stored0 of storedLines){
+            const stored = (stored0 && typeof stored0 === "object") ? stored0 : {};
+            const sku = toSkuId(stored.sku || "");
+            const qty = shopifyExactOrderLineRemainingQty(stored);
+            if(!sku || qty <= 0) continue;
+            const detailLine = detailByLineId.get(squashWhitespace(stored.lineItemId || "")) || detailBySku.get(sku) || {};
+            const title = squashWhitespace(stored.title || detailLine.title || sku) || sku;
+            const prev = grouped.get(sku) || { sku, title, qty:0 };
+            prev.qty += qty;
+            if(title.length > String(prev.title || "").length) prev.title = title;
+            grouped.set(sku, prev);
+          }
+
+          // Compatibilità per documenti dettaglio completi che non hanno ancora linesByLineId.
+          if(!grouped.size){
+            for(const line0 of detailLines){
+              const line = (line0 && typeof line0 === "object") ? line0 : {};
+              const sku = toSkuId(line.sku || "");
+              const qtyCandidate = line.currentQuantity !== undefined
+                ? line.currentQuantity
+                : (line.fulfillableQuantity !== undefined ? line.fulfillableQuantity : line.quantity);
+              const qty = Math.max(0, Math.round(Number(qtyCandidate || 0) || 0));
+              if(!sku || qty <= 0 || line.requiresShipping === false || line.giftCard === true) continue;
+              const title = squashWhitespace(line.title || sku) || sku;
+              const prev = grouped.get(sku) || { sku, title, qty:0 };
+              prev.qty += qty;
+              if(title.length > String(prev.title || "").length) prev.title = title;
+              grouped.set(sku, prev);
+            }
+          }
+
+          for(const line of grouped.values()){
+            const hit = getItemBySkuAny(line.sku, loc);
+            const item = hit?.it || getProductBySku(loc, line.sku) || null;
+            const positions = item ? rackLocationDisplayPartsFromItem(item).map(part=>({
+              code: normalizeRackLocation(part?.code || ""),
+              qty: Number.isFinite(Number(part?.qty)) ? Math.round(Number(part.qty)) : 0,
+              lot: part?.lot || "",
+              lotLabel: part?.lotLabel || ""
+            })).filter(x=>x.code) : [];
+            const codes = positions.map(x=>x.code).filter(Boolean);
+            out.push({
+              loc,
+              sku: line.sku,
+              title: line.title || line.sku,
+              qty: Math.round(Number(line.qty || 0) || 0),
+              orderId,
+              orderName,
+              orderLabel: orderName || orderId,
+              orderKey: `order::${orderId}`,
+              lineKey: line.sku,
+              customerName,
+              customerEmail,
+              customerPhone,
+              shopifyUpdatedAtClient: detailVersion,
+              positions,
+              codes,
+              firstCode: codes[0] || "",
+              latestAt,
+              source: "shopify_order_document"
+            });
+          }
+        }
+      }catch(err){ console.warn("shopify exact active order rows", err); }
+      return out.sort((a,b)=>{
+        const ta = Number(a.latestAt || 0) || 0;
+        const tb = Number(b.latestAt || 0) || 0;
+        if(ta !== tb) return tb - ta;
+        const oa = String(a.orderName || a.orderId || "");
+        const ob = String(b.orderName || b.orderId || "");
+        if(oa !== ob) return ob.localeCompare(oa, "it", { numeric:true, sensitivity:"base" });
+        return String(a.sku || "").localeCompare(String(b.sku || ""));
+      });
+    }
+
+    async function loadShopifyActiveOrdersExact(opts = {}){
+      if(__shopifyActiveOrdersState.loading && __shopifyActiveOrdersState.promise){
+        return await __shopifyActiveOrdersState.promise;
+      }
+      const syncVersion = shopifyFbmSyncLastCheckTs();
+      const isFresh = __shopifyActiveOrdersState.loaded &&
+        !opts.force &&
+        (__shopifyActiveOrdersState.syncVersion >= syncVersion) &&
+        (Date.now() - __shopifyActiveOrdersState.loadedAtClient < 5 * 60 * 1000);
+      if(isFresh) return __shopifyActiveOrdersState.items;
+
+      __shopifyActiveOrdersState.loading = true;
+      __shopifyActiveOrdersState.error = "";
+      const task = (async()=>{
+        const api = state.firebase?.api;
+        const db = state.firebase?.db;
+        if(!api || !db) throw new Error("Firestore non inizializzato.");
+        const q = api.query(
+          api.collection(db, COL_SHOPIFY_FBM_ORDERS),
+          api.where("active", "==", true),
+          api.limit(250)
+        );
+        const snap = api.getDocsFromServer ? await api.getDocsFromServer(q) : await api.getDocs(q);
+        const items = [];
+        snap.forEach(docSnap=> items.push({ ...(docSnap.data() || {}), __docId:docSnap.id }));
+        items.sort((a,b)=>{
+          const da = a?.orderDetails || {};
+          const dbb = b?.orderDetails || {};
+          const ta = Number(da.createdAtClient || a.shopifyCreatedAtClient || a.createdAtClient || 0) || 0;
+          const tb = Number(dbb.createdAtClient || b.shopifyCreatedAtClient || b.createdAtClient || 0) || 0;
+          return tb - ta;
+        });
+        __shopifyActiveOrdersState.items = items;
+        __shopifyActiveOrdersState.loaded = true;
+        __shopifyActiveOrdersState.loadedAtClient = Date.now();
+        __shopifyActiveOrdersState.syncVersion = Math.max(syncVersion, shopifyFbmSyncLastCheckTs());
+        return items;
+      })();
+      __shopifyActiveOrdersState.promise = task;
+      try{
+        return await task;
+      }catch(err){
+        __shopifyActiveOrdersState.error = String(err?.message || err || "Errore ordini Shopify");
+        throw err;
+      }finally{
+        __shopifyActiveOrdersState.loading = false;
+        __shopifyActiveOrdersState.promise = null;
+      }
+    }
+
+    function ensureShopifyActiveOrdersExact(){
+      const syncVersion = shopifyFbmSyncLastCheckTs();
+      const stale = !__shopifyActiveOrdersState.loaded ||
+        __shopifyActiveOrdersState.syncVersion < syncVersion ||
+        (Date.now() - __shopifyActiveOrdersState.loadedAtClient >= 5 * 60 * 1000);
+      if(stale && !__shopifyActiveOrdersState.loading){
+        void loadShopifyActiveOrdersExact().then(()=>{
+          if(state.route?.view === "home" && pickingHomeView() === "pickingFbm") renderHomePickingBox();
+        }).catch(err=>{
+          console.warn("load exact Shopify FBM orders", err);
+          if(state.route?.view === "home" && pickingHomeView() === "pickingFbm") renderHomePickingBox();
+        });
+      }
+      return __shopifyActiveOrdersState;
+    }
+
     function shopifyOrderDisplayNumber(...values){
       for(const value of values){
         let raw = squashWhitespace(value || "");
@@ -5474,10 +5688,9 @@ function readRackPickerSelection(root){
     function renderFastFbmPickingFromInventory(box, list, count, hint, btnPickAll){
       try{
         const groups = updateFbmPreviewFromInventory("inventory_fbm_render");
-        const orderLogStatus = ensureShopifyFbmOrderLogsStarted();
-        const flowOrderRows = orderLogStatus.loaded ? shopifyFbmOrderRowsFromFlows(shopifyFbmActiveOrderFlowsFromLogs()) : [];
-        const orderRows = flowOrderRows.length ? flowOrderRows : (orderLogStatus.loading ? [] : shopifyFbmInventoryOrderRows());
-        const orderRowsSource = flowOrderRows.length ? "flow_orders" : (orderLogStatus.loading ? "loading_orders" : "inventory_fallback");
+        const exactOrdersState = ensureShopifyActiveOrdersExact();
+        const orderRows = exactOrdersState.loaded ? shopifyExactOrderRowsFromDocs(exactOrdersState.items) : [];
+        const orderRowsSource = exactOrdersState.loading ? "loading_orders" : (exactOrdersState.error ? "orders_error" : "order_documents");
         const pickingTitleEl = box?.querySelector?.(".miniTitle");
         const pickingSubEl = box?.querySelector?.(".miniSub");
         if(pickingTitleEl) pickingTitleEl.textContent = "Picking FBM";
@@ -5557,7 +5770,9 @@ function readRackPickerSelection(root){
           if(!orderGroups.length){
             const emptyText = orderRowsSource === "loading_orders"
               ? "Caricamento lista ordini Shopify FBM dal cloud…"
-              : "Il backend non ha ancora esposto righe ordine e cliente complete.";
+              : (orderRowsSource === "orders_error"
+                ? `Errore lettura ordini Shopify: ${__shopifyActiveOrdersState.error || "dati non disponibili"}`
+                : "Nessun ordine Shopify FBM attivo da preparare.");
             return `
               <div class="fbmSection orders">
                 <div class="fbmSectionHead">
@@ -6050,12 +6265,8 @@ function readRackPickerSelection(root){
           try{ tasks.push(run("applied", api.query(colRef, api.orderBy("appliedAtClient","desc"), api.limit(100)))); }catch(_e){}
         }
 
-        if(requestedMode === "fbm"){
-          // Percorso canonico attuale del backend Shopify: una sola query, massimo 100 documenti.
-          // Evita le tre query sovrapposte precedenti e rende la lista cliente/ordini più rapida ed economica.
-          try{ tasks.push(run("shopifySource", api.query(colRef, api.where("source", "==", "shopify_fbm"), api.limit(100)))); }catch(_e){}
-        }else if(requestedMode === "full"){
-          // Storico completo: mantiene la compatibilità con eventuali documenti legacy.
+        if(requestedMode === "fbm" || requestedMode === "full"){
+          // Query Shopify mirate. Niente raw scan e niente updatedAtClient.
           try{ tasks.push(run("shopifySource", api.query(colRef, api.where("source", "==", "shopify_fbm"), api.limit(80)))); }catch(_e){}
           try{ tasks.push(run("shopifySourcePlain", api.query(colRef, api.where("source", "==", "shopify"), api.limit(60)))); }catch(_e){}
           try{ tasks.push(run("shopifyFile", api.query(colRef, api.where("fileName", "==", "SHOPIFY_FBM"), api.limit(80)))); }catch(_e){}
