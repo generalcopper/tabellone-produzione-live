@@ -2372,15 +2372,53 @@ function guessTitleFromRaw(rawText, sku){
 
     function __getCustomLowStockThreshold(it){
       try{
-        if(!it) return null;
-        const keys = ["lowStockThreshold", "sottoscortaThreshold", "sottoScortaThreshold", "sottoscorta", "sottoScorta"];
-        for(const k of keys){
-          if(Object.prototype.hasOwnProperty.call(it, k)){
-            const n = __parseLowStockThresholdValue(it[k]);
-            if(n !== null) return n;
-          }
-        }
+        if(!it || typeof it !== "object") return null;
+
+        // Unica fonte valida: lowStockThreshold.
+        // I vecchi campi generici "sottoscorta" / "sottoScorta" potevano contenere
+        // quantità o stati runtime e venivano scambiati per una soglia (es. 16 pz).
+        if(!Object.prototype.hasOwnProperty.call(it, "lowStockThreshold")) return null;
+        return __parseLowStockThresholdValue(it.lowStockThreshold);
+      }catch(_e){
         return null;
+      }
+    }
+
+    function __explicitLowStockThresholdInfo(it, canonicalSku=""){
+      try{
+        const d = (it && it.__raw && typeof it.__raw === "object") ? it.__raw : (it || {});
+        const actualSku = toSkuId(it?.sku || it?.id || d?.sku || "");
+        const canonical = toSkuId(canonicalSku || resolveSkuAlias(actualSku) || actualSku);
+        const hasField = Object.prototype.hasOwnProperty.call(d, "lowStockThreshold");
+        const value = hasField ? __parseLowStockThresholdValue(d.lowStockThreshold) : null;
+        const revision = Math.max(
+          Number(d.lowStockThresholdUpdatedAtClient || 0) || 0,
+          Number(d.updatedAtClient || 0) || 0,
+          itemUpdatedMillis(it || {}) || 0
+        );
+        return { actualSku, canonicalSku:canonical, hasField, value, revision, isCanonical:!!actualSku && actualSku === canonical };
+      }catch(_e){
+        return { actualSku:"", canonicalSku:"", hasField:false, value:null, revision:0, isCanonical:false };
+      }
+    }
+
+    function __stableLowStockThresholdFromCandidates(candidates){
+      try{
+        const rows = Array.isArray(candidates) ? candidates.filter(Boolean) : [];
+        if(!rows.length) return null;
+
+        // SKU singolo: usa solo il campo ufficiale; assente/vuoto = automatica.
+        if(rows.length === 1){
+          return rows[0].hasField ? rows[0].value : null;
+        }
+
+        // Gruppo ASIN/alias: una soglia personalizzata è valida solo se TUTTI i documenti
+        // del gruppo la dichiarano con lo stesso valore. Qualsiasi conflitto, campo mancante
+        // o vecchio dato sporco torna in modo sicuro ad "automatica".
+        const customValues = rows.map(r => (r.hasField && r.value !== null) ? Number(r.value) : null);
+        if(customValues.some(v => v === null || !Number.isFinite(v))) return null;
+        const first = customValues[0];
+        return customValues.every(v => v === first) ? first : null;
       }catch(_e){
         return null;
       }
@@ -2507,11 +2545,145 @@ function guessTitleFromRaw(rawText, sku){
       return lines[0]?.loc || "concamarise";
     }
 
+    const __lowStockThresholdRepairState = {
+      timer:null,
+      running:false,
+      queued:false,
+      lastSignature:""
+    };
+
+    function scheduleLowStockThresholdRepair(reason="inventory_snapshot", delay=1200){
+      try{
+        if(!state.user?.isAdmin || !state.user?.isWhitelisted) return;
+        if(__lowStockThresholdRepairState.timer) clearTimeout(__lowStockThresholdRepairState.timer);
+        __lowStockThresholdRepairState.timer = setTimeout(()=>{
+          __lowStockThresholdRepairState.timer = null;
+          void repairLowStockThresholdGroupsCloud(reason);
+        }, Math.max(250, Number(delay || 0)));
+      }catch(_e){}
+    }
+
+    async function repairLowStockThresholdGroupsCloud(reason="inventory_snapshot"){
+      if(__lowStockThresholdRepairState.running){
+        __lowStockThresholdRepairState.queued = true;
+        return;
+      }
+      try{
+        if(!state.user?.isAdmin || !state.user?.isWhitelisted) return;
+        const api = state.firebase?.api;
+        const db = state.firebase?.db;
+        if(!api || !db || !api.writeBatch) return;
+        if(!state.inventory?.[INVENTORY_CANONICAL_LOC]?.meta?.loaded) return;
+
+        __lowStockThresholdRepairState.running = true;
+        const aliasIndex = buildSkuAliasIndex();
+        const groups = new Map();
+        for(const loc of inventoryLocs()){
+          for(const it of (state.inventory?.[loc]?.items || [])){
+            const actualSku = toSkuId(it?.sku || it?.id || "");
+            if(!actualSku) continue;
+            const canonicalSku = aliasIndex.resolve(actualSku) || actualSku;
+            if(!groups.has(canonicalSku)) groups.set(canonicalSku, []);
+            groups.get(canonicalSku).push({ loc, it, actualSku, canonicalSku });
+          }
+        }
+
+        const plans = [];
+        const signatureRows = [];
+        for(const [canonicalSku, rows] of groups.entries()){
+          const infos = rows.map(r=>__explicitLowStockThresholdInfo(r.it, canonicalSku));
+          const stableValue = __stableLowStockThresholdFromCandidates(infos);
+          const members = rows.map(r=>r.actualSku).sort((a,b)=>a.localeCompare(b));
+          signatureRows.push(`${canonicalSku}:${stableValue === null ? "AUTO" : stableValue}:${members.join(",")}`);
+
+          for(const row of rows){
+            const d = (row.it?.__raw && typeof row.it.__raw === "object") ? row.it.__raw : (row.it || {});
+            const hasOfficial = Object.prototype.hasOwnProperty.call(d, "lowStockThreshold");
+            const currentOfficial = hasOfficial ? __parseLowStockThresholdValue(d.lowStockThreshold) : null;
+            const obsoleteKeys = ["sottoscortaThreshold", "sottoScortaThreshold", "sottoscorta", "sottoScorta"];
+            const hasObsolete = obsoleteKeys.some(k=>Object.prototype.hasOwnProperty.call(d, k));
+            const officialMismatch = stableValue === null
+              ? (!hasOfficial || currentOfficial !== null)
+              : (!hasOfficial || currentOfficial !== stableValue);
+            if(officialMismatch || hasObsolete){
+              plans.push({ ...row, stableValue, hasObsolete });
+            }
+          }
+        }
+
+        const signature = signatureRows.sort().join("|");
+        if(!plans.length){
+          __lowStockThresholdRepairState.lastSignature = signature;
+          return;
+        }
+
+        const nowClient = Date.now();
+        const who = state.user?.emailLower || state.user?.email || state.user?.uid || "";
+        const clearObsolete = {};
+        for(const key of ["sottoscortaThreshold", "sottoScortaThreshold", "sottoscorta", "sottoScorta"]){
+          clearObsolete[key] = api.deleteField ? api.deleteField() : null;
+        }
+
+        // Due scritture per SKU (inventario + anagrafica), quindi chunk prudente.
+        for(let i=0; i<plans.length; i+=180){
+          const part = plans.slice(i, i+180);
+          const batch = api.writeBatch(db);
+          for(const plan of part){
+            const patch = {
+              lowStockThreshold: plan.stableValue,
+              lowStockThresholdUpdatedAtClient: nowClient,
+              lowStockThresholdUpdatedBy: who,
+              lowStockThresholdRepairVersion: 2,
+              lowStockThresholdRepairReason: String(reason || "inventory_snapshot"),
+              ...clearObsolete
+            };
+            batch.set(api.doc(db, COL_ROOT, plan.loc, SUB_ITEMS, plan.actualSku), patch, { merge:true });
+            batch.set(api.doc(db, COL_PRODUCTS, plan.actualSku), {
+              sku: plan.actualSku,
+              ...patch
+            }, { merge:true });
+          }
+          await batch.commit();
+        }
+
+        __lowStockThresholdRepairState.lastSignature = signature;
+        clearSkuRuntimeCache("low_stock_threshold_repair");
+        try{ if(state.cache) state.cache.invIndexForMatch = null; }catch(_e){}
+      }catch(err){
+        console.warn("low-stock threshold repair", err);
+      }finally{
+        __lowStockThresholdRepairState.running = false;
+        if(__lowStockThresholdRepairState.queued){
+          __lowStockThresholdRepairState.queued = false;
+          scheduleLowStockThresholdRepair("queued_threshold_repair", 500);
+        }
+      }
+    }
+
     function buildSkuStockAggregatesFresh(opts = {}){
       const filterLoc = validInventoryLoc(opts?.loc) ? opts.loc : "";
       const preferLoc = validInventoryLoc(opts?.preferLoc) ? opts.preferLoc : filterLoc;
       const aliasIndex = buildSkuAliasIndex();
       const map = new Map();
+
+      // Soglia deterministica per gruppo SKU/ASIN, separata dalla sorgente dello stock.
+      // Il documento dello SKU canonico è sempre autorevole, anche quando la soglia è vuota
+      // (vuoto = automatica). In assenza del canonico accettiamo gli alias solo se concordano.
+      const thresholdCandidatesByGroup = new Map();
+      for(const thresholdLoc of inventoryLocs()){
+        for(const thresholdItem of (state.inventory?.[thresholdLoc]?.items || [])){
+          const actualSku = toSkuId(thresholdItem?.sku || thresholdItem?.id || "");
+          if(!actualSku) continue;
+          const canonicalSku = aliasIndex.resolve(actualSku) || actualSku;
+          const info = __explicitLowStockThresholdInfo(thresholdItem, canonicalSku);
+          if(!thresholdCandidatesByGroup.has(canonicalSku)) thresholdCandidatesByGroup.set(canonicalSku, []);
+          thresholdCandidatesByGroup.get(canonicalSku).push(info);
+        }
+      }
+      const stableThresholdByGroup = new Map();
+      for(const [canonicalSku, candidates] of thresholdCandidatesByGroup.entries()){
+        stableThresholdByGroup.set(canonicalSku, __stableLowStockThresholdFromCandidates(candidates));
+      }
 
       // Stesso ASIN / alias = stesso stock fisico.
       // Quindi non sommo due documenti SKU diversi nello stesso magazzino: scelgo un solo doc stock per gruppo+loc
@@ -2551,7 +2723,7 @@ function guessTitleFromRaw(rawText, sku){
           physicalQty: 0,
           reservedQty: 0,
           availableQty: 0,
-          lowStockThreshold: null,
+          lowStockThreshold: stableThresholdByGroup.has(sku) ? stableThresholdByGroup.get(sku) : null,
           locations: [],
           locs: [],
           mainLoc: "",
@@ -2570,11 +2742,6 @@ function guessTitleFromRaw(rawText, sku){
         prev.reservedQty += line.reservedQty;
         prev.availableQty = Math.round(prev.physicalQty - prev.reservedQty);
         prev.qty = prev.availableQty;
-
-        const customTh = __getCustomLowStockThreshold(it);
-        if(customTh !== null){
-          prev.lowStockThreshold = (prev.lowStockThreshold === null) ? customTh : Math.max(prev.lowStockThreshold, customTh);
-        }
 
         const candidateTitle = squashWhitespace(it?.title || it?.name || "");
         const ts = itemUpdatedMillis(it);
@@ -2879,186 +3046,49 @@ function guessTitleFromRaw(rawText, sku){
 
     const LOW_STOCK_MAIL_TEMPLATE_VERSION = 5;
     const LOW_STOCK_MAIL_OWNER = "hub_inventario_unico_v5";
+    const LOW_STOCK_MAIL_SETTLE_MS = 7000;
+    const LOW_STOCK_MAIL_MIN_INTERVAL_MS = 5 * 60 * 1000;
+    const LOW_STOCK_MAIL_DOC_PREFIX = "auto_low_stock_state_v5_";
 
-    // Compatibilità con Picking precedente: quel frontend usa ancora /amzInventoryMeta/lowStockEmailState.hash
-    // con un fingerprint diverso e una grafica email vecchia. L'Hub mantiene quel campo allineato al
-    // fingerprint legacy, mentre usa templateHash per deduplicare la grafica corrente.
-    function __legacyPickingIsLowStockItem(it){
-      try{
-        const qty = lowStockQtyValue(it || {});
-        const custom = __getCustomLowStockThreshold(it || {});
-        const th = (custom !== null) ? custom : __lowStockThreshold(it || {});
-        if(custom !== null) return qty <= th;
-        if(__isFiveKgItem(it || {})) return qty <= th;
-        return qty < th;
-      }catch(_e){ return false; }
-    }
+    // Stato email v5 indipendente: questo Hub non legge e non riscrive più il campo legacy `hash`.
+    // Le vecchie pagine usavano fingerprint diversi sullo stesso campo e potevano innescare un ping-pong.
 
-    function __sortLegacyPickingLowStockRows(rows){
-      return (Array.isArray(rows) ? rows : []).sort((a,b)=>{
-        if(a.loc!==b.loc) return a.loc.localeCompare(b.loc);
-        if(a.sku!==b.sku) return a.sku.localeCompare(b.sku);
-        if((a.qty||0)!==(b.qty||0)) return (a.qty||0)-(b.qty||0);
-        return (a.threshold||0)-(b.threshold||0);
-      });
-    }
-
-    function __legacyPickingLowStockFingerprintPayloadFromState(){
-      try{
-        const rows = [];
-        for(const loc of ["cerea", "concamarise"]){
-          const items = state.inventory?.[loc]?.items || [];
-          for(const it of items){
-            if(!Number.isFinite(Number(it?.qty))) continue;
-            if(!__legacyPickingIsLowStockItem(it)) continue;
-            rows.push({
-              loc,
-              sku: String(toSkuId(it?.sku || it?.id || "") || ""),
-              qty: lowStockQtyValue(it),
-              reservedQty: reservedQtyFromItem(it),
-              threshold: __lowStockThreshold(it)
-            });
-          }
-        }
-        return __sortLegacyPickingLowStockRows(rows);
-      }catch(_e){ return []; }
-    }
-
-    // Legge gli stessi due rami e costruisce gli stessi record usati dal Picking precedente.
-    // È intenzionale: anche se l'Hub usa ormai l'inventario unico, il fingerprint deve coincidere
-    // byte-per-byte con quello della vecchia pagina per impedirle di accodare la vecchia grafica.
-    async function __legacyPickingLowStockFingerprintPayloadFromCloud(){
-      const api = state.firebase?.api;
-      const db = state.firebase?.db;
-      if(!api || !db || !api.getDocs) return __legacyPickingLowStockFingerprintPayloadFromState();
-
-      const rows = [];
-      for(const loc of ["cerea", "concamarise"]){
-        try{
-          const colRef = api.collection(db, COL_ROOT, loc, SUB_ITEMS);
-          const q = api.query(colRef, api.orderBy("sku"), api.limit(2000));
-          const snap = await api.getDocs(q);
-          snap.forEach(docSnap=>{
-            const d = docSnap.data() || {};
-            const qty = stockQtyFromDoc(d || {});
-            const title = d.title || d.name || "";
-            const it = {
-              __raw: d,
-              id: docSnap.id,
-              sku: d.sku || docSnap.id,
-              title,
-              titleNorm: d.titleNorm || normalizeText(title || d.sku || docSnap.id),
-              qty,
-              reservedQty: Number.isFinite(Number(d.reservedQty)) ? Math.max(0, Math.round(Number(d.reservedQty))) : 0,
-              pendingPickQty: Number.isFinite(Number(d.pendingPickQty)) ? Math.max(0, Math.round(Number(d.pendingPickQty))) : 0,
-              lowStockThreshold: __parseLowStockThresholdValue(d.lowStockThreshold)
-            };
-            if(!Number.isFinite(Number(it.qty))) return;
-            if(!__legacyPickingIsLowStockItem(it)) return;
-            rows.push({
-              loc,
-              sku: String(toSkuId(it.sku || it.id || "") || ""),
-              qty: lowStockQtyValue(it),
-              reservedQty: reservedQtyFromItem(it),
-              threshold: __lowStockThreshold(it)
-            });
-          });
-        }catch(err){
-          console.warn("legacy low-stock branch read", loc, err);
-          // Se un ramo non è leggibile, usa almeno lo snapshot runtime dello stesso ramo.
-          const fallback = (state.inventory?.[loc]?.items || []);
-          for(const it of fallback){
-            if(!Number.isFinite(Number(it?.qty))) continue;
-            if(!__legacyPickingIsLowStockItem(it)) continue;
-            rows.push({
-              loc,
-              sku: String(toSkuId(it?.sku || it?.id || "") || ""),
-              qty: lowStockQtyValue(it),
-              reservedQty: reservedQtyFromItem(it),
-              threshold: __lowStockThreshold(it)
-            });
-          }
-        }
-      }
-      return __sortLegacyPickingLowStockRows(rows);
-    }
-
-    const __legacyLowStockHashGuard = {
+    const __lowStockMailDispatch = {
       running:false,
       queued:false,
-      lastHash:"",
-      cachedHash:"",
-      cachedAt:0
+      deferredTimer:null,
+      deferredAt:0,
+      lastReason:""
     };
 
-    async function __legacyPickingLowStockFingerprintHash({ force=false } = {}){
-      const now = Date.now();
-      if(!force && __legacyLowStockHashGuard.cachedHash && (now - __legacyLowStockHashGuard.cachedAt) < 3000){
-        return __legacyLowStockHashGuard.cachedHash;
-      }
-      const payload = await __legacyPickingLowStockFingerprintPayloadFromCloud();
-      const hash = await stableHashHex(JSON.stringify(payload));
-      if(hash){
-        __legacyLowStockHashGuard.cachedHash = hash;
-        __legacyLowStockHashGuard.cachedAt = Date.now();
-      }
-      return hash;
-    }
-
-    async function syncLegacyLowStockHashGuard(reason="inventory_snapshot"){
+    function __scheduleDeferredLowStockEmail(runAtClient, reason="cooldown_pending"){
       try{
-        if(__legacyLowStockHashGuard.running){
-          __legacyLowStockHashGuard.queued = true;
-          return;
-        }
-        if(!state.user?.isAdmin || !state.user?.isWhitelisted) return;
-        const fb = state.firebase;
-        if(!fb?.ok || !fb.db || !fb.api?.runTransaction) return;
-        if(!state.inventory?.[INVENTORY_CANONICAL_LOC]?.meta?.loaded) return;
-
-        __legacyLowStockHashGuard.running = true;
-        const legacyHash = await __legacyPickingLowStockFingerprintHash({ force:true });
-        if(!legacyHash) return;
-
-        const api = fb.api;
-        const db = fb.db;
-        const metaRef = api.doc(db, COL_META, DOC_LOWSTOCK_EMAIL_STATE);
-        const nowClient = Date.now();
-        await api.runTransaction(db, async tx=>{
-          const snap = await tx.get(metaRef);
-          const d = snap?.exists?.() ? (snap.data() || {}) : {};
-          if(String(d.hash || "") === legacyHash && String(d.legacyHash || "") === legacyHash) return;
-          tx.set(metaRef, {
-            hash: legacyHash,
-            legacyHash,
-            legacyHashUpdatedAt: api.serverTimestamp(),
-            legacyHashUpdatedAtClient: nowClient,
-            legacyHashUpdatedBy: state.user?.emailLower || state.user?.email || "",
-            legacyHashGuardOwner: LOW_STOCK_MAIL_OWNER,
-            legacyHashGuardReason: String(reason || "inventory_snapshot")
-          }, { merge:true });
-        });
-        __legacyLowStockHashGuard.lastHash = legacyHash;
-      }catch(err){
-        console.warn("legacy low-stock hash guard", err);
-      }finally{
-        __legacyLowStockHashGuard.running = false;
-        if(__legacyLowStockHashGuard.queued){
-          __legacyLowStockHashGuard.queued = false;
-          queueMicrotask(()=>{ void syncLegacyLowStockHashGuard("queued_snapshot"); });
-        }
-      }
+        const runAt = Number(runAtClient || 0);
+        if(!runAt) return;
+        const delay = Math.max(1200, runAt - Date.now());
+        if(__lowStockMailDispatch.deferredTimer) clearTimeout(__lowStockMailDispatch.deferredTimer);
+        __lowStockMailDispatch.deferredAt = runAt;
+        __lowStockMailDispatch.deferredTimer = setTimeout(()=>{
+          __lowStockMailDispatch.deferredTimer = null;
+          __lowStockMailDispatch.deferredAt = 0;
+          const latest = __getLowStockBoth();
+          if(latest && latest.length) void __enqueueLowStockEmailIfNeeded(latest, { reason });
+        }, delay);
+      }catch(_e){}
     }
 
-        async function __enqueueLowStockEmailIfNeeded(items, { reason="" } = {}){
+    async function __enqueueLowStockEmailIfNeeded(items, { reason="" } = {}){
+      if(__lowStockMailDispatch.running){
+        __lowStockMailDispatch.queued = true;
+        __lowStockMailDispatch.lastReason = String(reason || "queued_update");
+        return;
+      }
+      __lowStockMailDispatch.running = true;
+      __lowStockMailDispatch.lastReason = String(reason || "inventory_update");
       try{
         const mailLog = $("homeLowStockMailLog");
 
-        if(!state.user?.isAdmin){
-          if(mailLog) mailLog.textContent = "";
-          return;
-        }
-        if(!state.user?.isWhitelisted){
+        if(!state.user?.isAdmin || !state.user?.isWhitelisted){
           if(mailLog) mailLog.textContent = "";
           return;
         }
@@ -3079,24 +3109,27 @@ function guessTitleFromRaw(rawText, sku){
           return;
         }
 
-        // Hash della grafica corrente: identità SKU canonica + quantità condivisa.
-        const list = (items||[]).slice().map(it=>({
+        // Impronta stabile: solo dati che cambiano davvero lo stato sotto-scorta.
+        // Titolo, ordine runtime degli alias, timestamp e grafica non partecipano all'hash.
+        const list = (items || []).map(it=>({
           templateVersion: LOW_STOCK_MAIL_TEMPLATE_VERSION,
-          sku: String(toSkuId(it.sku||"")||""),
-          qty: lowStockQtyValue(it),
-          physicalQty: physicalQtyFromItem(it),
-          reservedQty: reservedQtyFromItem(it),
-          threshold: __lowStockThreshold(it),
-          reordered: __isReorderedItem(it)
-        })).sort((a,b)=>{
-          if(a.sku!==b.sku) return a.sku.localeCompare(b.sku);
-          if((a.qty||0) !== (b.qty||0)) return (a.qty||0) - (b.qty||0);
-          return (a.threshold||0) - (b.threshold||0);
+          sku: String(toSkuId(it?.sku || it?.id || "") || ""),
+          availableQty: Math.round(lowStockQtyValue(it)),
+          physicalQty: Math.round(physicalQtyFromItem(it)),
+          reservedQty: Math.round(reservedQtyFromItem(it)),
+          threshold: Math.round(__lowStockThreshold(it)),
+          reordered: __isReorderedItem(it) === true
+        })).filter(x=>x.sku).sort((a,b)=>{
+          if(a.sku !== b.sku) return a.sku.localeCompare(b.sku);
+          if(a.availableQty !== b.availableQty) return a.availableQty - b.availableQty;
+          if(a.physicalQty !== b.physicalQty) return a.physicalQty - b.physicalQty;
+          if(a.reservedQty !== b.reservedQty) return a.reservedQty - b.reservedQty;
+          if(a.threshold !== b.threshold) return a.threshold - b.threshold;
+          return Number(a.reordered) - Number(b.reordered);
         });
 
         const templateFingerprint = await stableHashHex(JSON.stringify(list));
-        const legacyFingerprint = await __legacyPickingLowStockFingerprintHash();
-        if(!templateFingerprint || !legacyFingerprint){
+        if(!templateFingerprint){
           if(mailLog) mailLog.textContent = "";
           return;
         }
@@ -3107,40 +3140,41 @@ function guessTitleFromRaw(rawText, sku){
         const db = fb.db;
         const metaRef = api.doc(db, COL_META, DOC_LOWSTOCK_EMAIL_STATE);
         let enqueued = false;
-        let repairedLegacyGuard = false;
+        let cooldownUntil = 0;
         let createdEmailDocId = "";
+        let nextRevision = 0;
 
         await api.runTransaction(db, async (tx)=>{
           const metaSnap = await tx.get(metaRef);
           const meta = metaSnap?.exists?.() ? (metaSnap.data() || {}) : {};
-          const prevTemplateHash = String(meta.templateHash || (
-            Number(meta.templateVersion || 0) === LOW_STOCK_MAIL_TEMPLATE_VERSION ? (meta.hash || "") : ""
-          ));
-          const templateAlreadySent = prevTemplateHash === templateFingerprint;
-          const legacyAlreadyGuarded = String(meta.hash || "") === legacyFingerprint;
+          const prevTemplateHash = String(meta.lastSentStateHash || meta.templateHash || "");
+          const lastSentAtClient = Number(meta.lastSentAtClient || meta.sentAtClient || 0) || 0;
 
-          // La grafica corrente è già stata inviata: non creare un'altra email.
-          // Se Picking/una vecchia pagina ha riscritto hash, ripristina solo il guard legacy.
-          if(templateAlreadySent){
-            if(!legacyAlreadyGuarded || String(meta.legacyHash || "") !== legacyFingerprint){
-              tx.set(metaRef, {
-                hash: legacyFingerprint,
-                legacyHash: legacyFingerprint,
-                templateHash: templateFingerprint,
-                templateVersion: LOW_STOCK_MAIL_TEMPLATE_VERSION,
-                mailOwner: LOW_STOCK_MAIL_OWNER,
-                legacyHashUpdatedAt: api.serverTimestamp(),
-                legacyHashUpdatedAtClient: now,
-                legacyHashGuardOwner: LOW_STOCK_MAIL_OWNER,
-                legacyHashGuardReason: "repair_after_legacy_frontend"
-              }, { merge:true });
-              repairedLegacyGuard = true;
-            }
+          // Medesimo stato già spedito: zero scritture e zero email.
+          // In particolare NON tocchiamo il vecchio campo `hash`.
+          if(prevTemplateHash === templateFingerprint) return;
+
+          // Blocco cloud anti-raffica. Durante il cooldown salviamo solo lo stato più recente;
+          // alla scadenza verrà rivalutato l'inventario corrente, non uno snapshot vecchio.
+          if(lastSentAtClient > 0 && (now - lastSentAtClient) < LOW_STOCK_MAIL_MIN_INTERVAL_MS){
+            cooldownUntil = lastSentAtClient + LOW_STOCK_MAIL_MIN_INTERVAL_MS;
+            tx.set(metaRef, {
+              pendingStateHash: templateFingerprint,
+              pendingReason: String(reason || "inventory_update"),
+              pendingSeenAtClient: now,
+              pendingAfterClient: cooldownUntil,
+              mailOwner: LOW_STOCK_MAIL_OWNER,
+              templateVersion: LOW_STOCK_MAIL_TEMPLATE_VERSION
+            }, { merge:true });
             return;
           }
 
-          const emailRef = api.doc(api.collection(db, "email"));
-          createdEmailDocId = emailRef.id;
+          // Revisione atomica: due schede simultanee leggono la stessa meta, ma Firestore
+          // ritenta la seconda transaction; al retry trova già lo stato spedito e si ferma.
+          nextRevision = Math.max(0, Math.floor(Number(meta.mailRevision || 0))) + 1;
+          createdEmailDocId = `${LOW_STOCK_MAIL_DOC_PREFIX}${String(nextRevision).padStart(8, "0")}_${templateFingerprint.slice(0, 24)}`;
+          const emailRef = api.doc(db, "email", createdEmailDocId);
+
           tx.set(emailRef, {
             to: ["matteo@generalcoppersrl.com"],
             message: {
@@ -3152,6 +3186,8 @@ function guessTitleFromRaw(rawText, sku){
             createdAtClient: now,
             kind: "auto_low_stock",
             mailOwner: LOW_STOCK_MAIL_OWNER,
+            mailRevision: nextRevision,
+            stateHash: templateFingerprint,
             lowStock: {
               total: payload.total,
               counts: payload.counts || null,
@@ -3160,20 +3196,15 @@ function guessTitleFromRaw(rawText, sku){
               reorderedCount: payload.reorderedCount,
               templateVersion: LOW_STOCK_MAIL_TEMPLATE_VERSION,
               templateHash: templateFingerprint,
-              legacyHash: legacyFingerprint,
-              hash: templateFingerprint,
-              reason: String(reason||"")
+              reason: String(reason || "")
             },
             createdBy: state.user?.emailLower || state.user?.email || "",
             locations: ["unica"]
           });
-          enqueued = true;
 
-          // hash resta compatibile con Picking vecchio e lo blocca; templateHash governa la mail nuova.
           tx.set(metaRef, {
-            hash: legacyFingerprint,
-            legacyHash: legacyFingerprint,
             templateHash: templateFingerprint,
+            lastSentStateHash: templateFingerprint,
             total: payload.total,
             counts: payload.counts || null,
             preview: payload.preview || null,
@@ -3181,20 +3212,30 @@ function guessTitleFromRaw(rawText, sku){
             reorderedCount: payload.reorderedCount,
             templateVersion: LOW_STOCK_MAIL_TEMPLATE_VERSION,
             mailOwner: LOW_STOCK_MAIL_OWNER,
+            mailRevision: nextRevision,
             emailDocId: createdEmailDocId,
             sentAt: api.serverTimestamp(),
             sentAtClient: now,
+            lastSentAtClient: now,
             sentBy: state.user?.emailLower || state.user?.email || "",
-            reason: String(reason||"")
+            reason: String(reason || ""),
+            pendingStateHash: null,
+            pendingReason: null,
+            pendingSeenAtClient: null,
+            pendingAfterClient: null
           }, { merge:true });
+          enqueued = true;
         });
 
-        __legacyLowStockHashGuard.lastHash = legacyFingerprint;
+        if(cooldownUntil){
+          __scheduleDeferredLowStockEmail(cooldownUntil + 1500, "cooldown_latest_state");
+        }
+
         if(mailLog){
           mailLog.textContent = enqueued
-            ? `Email automatica inviata/accodata alle ${fmtDate(now)} • ${payload.total} righe.`
-            : (repairedLegacyGuard
-              ? "Email automatica: grafica corrente già inviata • blocco vecchia grafica ripristinato."
+            ? `Email automatica inviata/accodata alle ${fmtDate(now)} • ${payload.total} righe • rev. ${nextRevision}.`
+            : (cooldownUntil
+              ? `Email automatica: variazione registrata • blocco anti-raffica fino alle ${fmtDate(cooldownUntil)}.`
               : "Email automatica: nessun invio (stesso stato)." );
         }
       }catch(err){
@@ -3203,6 +3244,16 @@ function guessTitleFromRaw(rawText, sku){
           if(mailLog) mailLog.textContent = "Email automatica: errore in invio (permessi/connessione).";
         }catch(_e){}
         console.warn("auto low-stock email error:", err);
+      }finally{
+        __lowStockMailDispatch.running = false;
+        if(__lowStockMailDispatch.queued){
+          __lowStockMailDispatch.queued = false;
+          const queuedReason = __lowStockMailDispatch.lastReason || "queued_update";
+          setTimeout(()=>{
+            const latest = __getLowStockBoth();
+            if(latest && latest.length) void __enqueueLowStockEmailIfNeeded(latest, { reason: queuedReason });
+          }, 1500);
+        }
       }
     }
 
@@ -3214,7 +3265,7 @@ function guessTitleFromRaw(rawText, sku){
     // trigger email dopo aggiornamenti reali: runtime + realtime Firestore (anche da altri hub), NON all'accesso
     let __lowMailSeq = 0;
     let __lowMailT1 = null;
-    let __lowMailT2 = null;
+    let __lowMailT2 = null; // mantenuto per compatibilità, non più usato come secondo invio
 
     let __lowStockRealtimeReady = false;
     let __lowStockRealtimeKey = "";
@@ -3264,6 +3315,7 @@ function guessTitleFromRaw(rawText, sku){
         if(__lowMailT1) clearTimeout(__lowMailT1);
         if(__lowMailT2) clearTimeout(__lowMailT2);
       }catch(_e){}
+      __lowMailT2 = null;
 
       const run = ()=>{
         if(seq !== __lowMailSeq) return;
@@ -3271,9 +3323,8 @@ function guessTitleFromRaw(rawText, sku){
         void __enqueueLowStockEmailIfNeeded(items, { reason: r });
       };
 
-      // 2 tentativi: immediato per snapshot realtime, secondo tentativo dopo assestamento snapshot
-      __lowMailT1 = setTimeout(run, immediate ? 350 : 1600);
-      __lowMailT2 = setTimeout(run, immediate ? 2600 : 6500);
+      // Un solo tentativo, dopo assestamento. Nessun secondo invio automatico.
+      __lowMailT1 = setTimeout(run, immediate ? LOW_STOCK_MAIL_SETTLE_MS : LOW_STOCK_MAIL_SETTLE_MS + 1800);
     }
 
     function triggerLowStockMailFromRealtime(reason){
@@ -3301,14 +3352,16 @@ function guessTitleFromRaw(rawText, sku){
 
         try{ if(__lowStockRealtimeTimer) clearTimeout(__lowStockRealtimeTimer); }catch(_e){}
         const r = String(reason || "realtime_low_stock_update");
+        const expectedKey = key;
         __lowStockRealtimeTimer = setTimeout(()=>{
           const latest = __getLowStockBoth();
           const latestKey = __lowStockRealtimeSnapshotKey(latest);
           if(latestKey) __lowStockRealtimeKey = latestKey;
+          if(latestKey !== expectedKey) return;
           if(latest && latest.length){
             scheduleLowStockEmailAfterUpdate(r, { immediate:true });
           }
-        }, 220);
+        }, LOW_STOCK_MAIL_SETTLE_MS);
       }catch(err){
         console.warn("low-stock realtime trigger error:", err);
       }
@@ -3571,6 +3624,7 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
             writeBatch: fsMod.writeBatch,
             increment: fsMod.increment,
             arrayUnion: fsMod.arrayUnion,
+            deleteField: fsMod.deleteField,
             runTransaction: fsMod.runTransaction,
           }
         };
@@ -3749,6 +3803,18 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
 
     function stopAllRealtime(){
       resetLowStockRealtimeWatcher();
+      try{ if(__lowMailT1) clearTimeout(__lowMailT1); }catch(_e){}
+      try{ if(__lowMailT2) clearTimeout(__lowMailT2); }catch(_e){}
+      __lowMailT1 = null;
+      __lowMailT2 = null;
+      try{ if(__lowStockMailDispatch.deferredTimer) clearTimeout(__lowStockMailDispatch.deferredTimer); }catch(_e){}
+      __lowStockMailDispatch.deferredTimer = null;
+      __lowStockMailDispatch.deferredAt = 0;
+      __lowStockMailDispatch.queued = false;
+      try{ if(__lowStockThresholdRepairState.timer) clearTimeout(__lowStockThresholdRepairState.timer); }catch(_e){}
+      __lowStockThresholdRepairState.timer = null;
+      __lowStockThresholdRepairState.running = false;
+      __lowStockThresholdRepairState.queued = false;
       try{ if(__sharedStockSyncState.timer) clearTimeout(__sharedStockSyncState.timer); }catch(_e){}
       __sharedStockSyncState.timer = null;
       __sharedStockSyncState.running = false;
@@ -3835,6 +3901,8 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
             lastReservationFlowId: d.lastReservationFlowId || "",
             lastReservationFileName: d.lastReservationFileName || "",
             lowStockThreshold: __parseLowStockThresholdValue(d.lowStockThreshold),
+            lowStockThresholdUpdatedAtClient: Number(d.lowStockThresholdUpdatedAtClient || 0) || 0,
+            lowStockThresholdUpdatedBy: d.lowStockThresholdUpdatedBy || "",
             productionArea: readProductionAreaFromDoc(d, loc),
             areaProduzione: readProductionAreaFromDoc(d, loc),
             stockLots: Array.isArray(d.stockLots) ? d.stockLots.map(x=>({ ...(x || {}) })) : [],
@@ -3875,10 +3943,8 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
           renderProductDetailsSheet();
         }
 
-        // Aggiorna subito l'hash compatibile con Picking precedente: evita la seconda email
-        // con grafica vecchia prima che partano i trigger email ritardati.
-        __legacyLowStockHashGuard.cachedAt = 0;
-        void syncLegacyLowStockHashGuard("inventory_" + loc);
+        // Stabilizza e ripulisce le soglie cloud prima che il nuovo stato possa generare una mail.
+        scheduleLowStockThresholdRepair("inventory_" + loc);
         triggerLowStockMailFromRealtime("realtime_low_stock_" + loc);
         scheduleTwReordersBackfillFromState("inventory_" + loc);
         scheduleSharedSkuInventorySync("inventory_" + loc);
@@ -8588,6 +8654,12 @@ async function loadProductFromDetails(){
       const who = opts.who || state.user?.emailLower || state.user?.email || state.user?.uid || "";
       const asin = normalizeAsin(opts.asin || "");
       const title = squashWhitespace(opts.title || "");
+      const hasThreshold = Object.prototype.hasOwnProperty.call(opts || {}, "lowStockThreshold");
+      const thresholdFields = hasThreshold ? {
+        lowStockThreshold: __parseLowStockThresholdValue(opts.lowStockThreshold),
+        lowStockThresholdUpdatedAtClient: nowClient,
+        lowStockThresholdUpdatedBy: who
+      } : {};
       const fields = skuUnificationFields(canonical, list, nowClient, who, manualAliases);
 
       const impacted = Array.from(new Set([...list, ...excluded]));
@@ -8661,6 +8733,7 @@ async function loadProductFromDetails(){
             ...(sku === editedSku && title ? { title, titleNorm: normalizeText(title) } : {}),
             ...fields,
             ...asinPatch,
+            ...thresholdFields,
             active: true,
             lastSeenAt: api.serverTimestamp(),
             lastSeenAtClient: nowClient,
@@ -8671,6 +8744,7 @@ async function loadProductFromDetails(){
             batch.set(invDoc.ref, {
               ...fields,
               ...asinPatch,
+              ...thresholdFields,
               skuUnificationSyncedAt: api.serverTimestamp(),
               skuUnificationSyncedAtClient: nowClient,
               skuUnificationSyncedBy: who
@@ -8688,7 +8762,8 @@ async function loadProductFromDetails(){
               const canReceiveAsin = !!asin && (sku===editedSku || !existingAsin || existingAsin===asin);
               patchRuntimeInventoryItem(loc, sku, {
                 ...fields,
-                ...(canReceiveAsin ? asinCloudFields(asin, nowClient, who) : {})
+                ...(canReceiveAsin ? asinCloudFields(asin, nowClient, who) : {}),
+                ...thresholdFields
               }, {});
             }
             for(const sku of excluded){
@@ -8714,6 +8789,7 @@ async function loadProductFromDetails(){
       clearSkuRuntimeCache("sku_unification_saved");
       try{ if(state.cache) state.cache.invIndexForMatch = null; }catch(_e){}
       scheduleSharedSkuInventorySync("sku_unification_saved", { immediate:true });
+      scheduleLowStockThresholdRepair("sku_unification_saved", 350);
       return {
         canonicalSku: canonical,
         aliases: list,
@@ -8831,6 +8907,8 @@ async function saveProductFromDetails(){
             note: note || "",
             qty,
             lowStockThreshold: lowStockThreshold,
+            lowStockThresholdUpdatedAtClient: nowClient,
+            lowStockThresholdUpdatedBy: who,
             ...opaquePickingLocationPatch,
             zeroStock: qty === 0,
             zeroStockAt: qty === 0 ? api.serverTimestamp() : null,
@@ -8858,6 +8936,8 @@ async function saveProductFromDetails(){
             titleNorm: normalizeText(title || sku),
             note: note || "",
             lowStockThreshold: lowStockThreshold,
+            lowStockThresholdUpdatedAtClient: nowClient,
+            lowStockThresholdUpdatedBy: who,
             asin,
             active: true,
             lastSeenAt: api.serverTimestamp(),
@@ -8877,6 +8957,8 @@ async function saveProductFromDetails(){
             if(siblingRef && siblingSnap && siblingSnap.exists()){
               tx.set(siblingRef, {
                 lowStockThreshold: lowStockThreshold,
+                lowStockThresholdUpdatedAtClient: nowClient,
+                lowStockThresholdUpdatedBy: who,
                 ...asinPatch,
                 updatedAt: api.serverTimestamp(),
                 updatedAtClient: nowClient,
@@ -8954,6 +9036,7 @@ async function saveProductFromDetails(){
           await saveSkuUnificationCloud(finalCanonicalSku, finalSkuAliases, {
             title,
             asin,
+            lowStockThreshold,
             manualAliases: manualSkuGroup,
             affectedSkus: previousGroupMembers,
             editedSku: sku,
