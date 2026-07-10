@@ -2321,14 +2321,23 @@ function cleanProductMainName(s){
     }
 
     function rackLocationStackHtml(it){
-      const parts = rackLocationDisplayPartsFromItem(it);
+      const grouped = new Map();
+      for(const part of rackLocationDisplayPartsFromItem(it)){
+        const code = normalizeRackLocation(part?.code || "");
+        if(!code) continue;
+        const prev = grouped.get(code) || { code, qty:0, hasQty:false };
+        const q = Number(part?.qty);
+        if(Number.isFinite(q) && q > 0){
+          prev.qty += Math.round(q);
+          prev.hasQty = true;
+        }
+        grouped.set(code, prev);
+      }
+      const parts = Array.from(grouped.values()).sort((a,b)=>String(a.code).localeCompare(String(b.code), "it", { numeric:true, sensitivity:"base" }));
       if(!parts.length) return `<span class="badge rackStackEmpty">—</span>`;
       return `<div class="rackStack">${parts.map(x=>{
-        const qtyHtml = (Number.isFinite(Number(x.qty)) && Number(x.qty) > 0)
-          ? `<span class="rackStackQty">${escapeHtml(String(Math.round(Number(x.qty))))} pz</span>`
-          : "";
-        const lotHtml = x.lotLabel ? `<span class="rackStackLot">${escapeHtml(x.lotLabel)}</span>` : "";
-        return `<span class="rackStackLine"><span class="rackStackCode">${escapeHtml(x.code)}</span>${qtyHtml}${lotHtml}</span>`;
+        const qtyHtml = x.hasQty ? `<span class="rackStackQty">${escapeHtml(String(x.qty))} pz</span>` : "";
+        return `<span class="rackStackLine"><span class="rackStackCode">${escapeHtml(x.code)}</span>${qtyHtml}</span>`;
       }).join("")}</div>`;
     }
 
@@ -3834,15 +3843,15 @@ function readRackPickerSelection(root){
 
     function logsRealtimeStarted(loc=null){
       try{
-        if(loc === "cerea" || loc === "concamarise") return !!state.logs?.[loc]?.unsub;
-        return !!(state.logs?.cerea?.unsub || state.logs?.concamarise?.unsub);
+        if(loc === "cerea" || loc === "concamarise") return !!state.logs?.[normalizeInventoryLoc(loc)]?.unsub;
+        return !!state.logs?.[INVENTORY_CANONICAL_LOC]?.unsub;
       }catch(_e){ return false; }
     }
 
     function logsRealtimeLoaded(loc=null){
       try{
-        if(loc === "cerea" || loc === "concamarise") return !!state.logs?.[loc]?.meta?.loaded;
-        return !!(state.logs?.cerea?.meta?.loaded && state.logs?.concamarise?.meta?.loaded);
+        if(loc === "cerea" || loc === "concamarise") return !!state.logs?.[normalizeInventoryLoc(loc)]?.meta?.loaded;
+        return !!state.logs?.[INVENTORY_CANONICAL_LOC]?.meta?.loaded;
       }catch(_e){ return false; }
     }
 
@@ -3859,8 +3868,7 @@ function readRackPickerSelection(root){
           return true;
         }
         // Picking FBA/Storico: lettura lazy one-shot, mai listener realtime sui log.
-        startLogsFor("cerea", { mode });
-        startLogsFor("concamarise", { mode });
+        startLogsFor(INVENTORY_CANONICAL_LOC, { mode });
         if(state.route.view === "home"){
           renderHomePickingBox();
           renderHomePickingHistoryBox();
@@ -4234,21 +4242,30 @@ function readRackPickerSelection(root){
       }
     }
 
-    function shopifyFbmLineQtyStrict(src){
+    function shopifyFbmLineQtyInfo(src){
       try{
         const source = (src && typeof src === "object") ? src : {};
-        const keys = [
-          "qty", "quantity", "quantityOrdered", "fulfillableQuantity", "fulfillable_quantity",
-          "currentQuantity", "current_quantity", "pieces", "qta", "lineQty", "lineQuantity"
+        // Ordine intenzionale: i campi Shopify della singola line-item devono vincere
+        // su qty/pieces, che nei documenti inventario possono contenere il totale SKU prenotato.
+        const groups = [
+          { rank:4, keys:["currentQuantity", "current_quantity"] },
+          { rank:3, keys:["fulfillableQuantity", "fulfillable_quantity"] },
+          { rank:2, keys:["quantity", "quantityOrdered", "lineQuantity", "lineQty"] },
+          { rank:1, keys:["qty", "pieces", "qta"] }
         ];
-        for(const k of keys){
-          if(Object.prototype.hasOwnProperty.call(source, k)){
+        for(const group of groups){
+          for(const k of group.keys){
+            if(!Object.prototype.hasOwnProperty.call(source, k)) continue;
             const n = parseQty(source[k]);
-            if(Number.isFinite(n) && n > 0) return Math.abs(n);
+            if(Number.isFinite(n) && n > 0) return { qty:Math.abs(n), rank:group.rank, key:k };
           }
         }
       }catch(_e){}
-      return 0;
+      return { qty:0, rank:0, key:"" };
+    }
+
+    function shopifyFbmLineQtyStrict(src){
+      return shopifyFbmLineQtyInfo(src).qty;
     }
 
     function shopifyFbmOrderParentData(order){
@@ -4364,11 +4381,10 @@ function readRackPickerSelection(root){
         if(hasExplicitMismatchedShopifyOrderDetails(it)) return false;
 
         const summary = shopifyFbmOrderLineSkuSummaryForItem(it);
-        // Se ci sono righe ordine esplicite e una combacia, il percorso corretto è la riga ordine reale.
-        // Il fallback serve solo quando il backend ha scritto una prenotazione Shopify sullo SKU
-        // ma non ha ancora salvato line_items leggibili.
-        if(summary.lineSkuCount > 0 && summary.matchingSkuCount > 0) return true;
-        if(summary.lineSkuCount > 0 && summary.matchingSkuCount <= 0) return false;
+        // Appena esiste almeno una line-item reale, la lista ordini deve usare esclusivamente
+        // quelle quantità. Il totale pending dello SKU resta nel widget riepilogativo e non
+        // viene mai attribuito all'ultimo ordine conosciuto.
+        if(summary.lineSkuCount > 0) return false;
 
         const raw = [
           it?.lastReservationSource,
@@ -4482,7 +4498,7 @@ function readRackPickerSelection(root){
 
     function shopifyFbmOrderSourcesFromItem(it){
       const out = [];
-      const seen = new Set();
+      const seen = new Map();
       const lineKeys = ["line_items", "lineItems", "lines", "items", "orderLines", "shopifyOrderLines", "products", "productLines"];
 
       const pushLine = (line, parent=null)=>{
@@ -4494,14 +4510,28 @@ function readRackPickerSelection(root){
           if(!sku) return; // niente SKU riga = non posso abbinarla a un prodotto inventario
           if(!shopifyFbmHasExplicitSourceSignal(merged, parent || it || {})) return;
           if(isAmazonFbaInventoryPendingItem(merged)) return;
-          const qty = shopifyFbmLineQtyStrict(merged);
+          const qtyInfo = shopifyFbmLineQtyInfo(merged);
+          const qty = qtyInfo.qty;
           if(qty <= 0) return;
           const oid = shopifyFbmOrderIdFromSource(merged, parent || {});
           const oname = shopifyFbmOrderNameFromSource(merged, parent || {});
-          const key = [sku, oid, oname, qty, shopifyFbmTitleFromSource(merged, {}, sku)].join("::");
-          if(seen.has(key)) return;
-          seen.add(key);
+          const lineId = shopifyFbmFirstText(merged, ["lineItemId", "line_item_id", "lineId", "line_id", "admin_graphql_api_id", "adminGraphqlApiId", "id"]);
+          const variantId = shopifyFbmFirstText(merged, ["variantId", "variant_id", "variantLegacyResourceId"]);
+          const fallbackIdentity = shopifyFbmTitleFromSource(merged, {}, sku);
+          const key = [sku, oid || oname || "NO_ORDER", lineId || variantId || fallbackIdentity || sku].join("::");
+          const prev = seen.get(key);
+          if(prev){
+            // Se la stessa line-item arriva da più campi cloud, conserva la versione
+            // con il segnale quantità più specifico; non sommare mai copie duplicate.
+            if(qtyInfo.rank > prev.rank){
+              out[prev.index] = merged;
+              seen.set(key, { index:prev.index, rank:qtyInfo.rank });
+            }
+            return;
+          }
+          const index = out.length;
           out.push(merged);
+          seen.set(key, { index, rank:qtyInfo.rank });
         }catch(_e){}
       };
 
@@ -4547,39 +4577,6 @@ function readRackPickerSelection(root){
       return out;
     }
 
-    function shopifyFbmFallbackOrderInfoFromItem(it){
-      try{
-        const item = (it && typeof it === "object") ? it : {};
-        const nestedOrder = (item.lastReservationOrder && typeof item.lastReservationOrder === "object")
-          ? item.lastReservationOrder
-          : ((item.shopifyOrder && typeof item.shopifyOrder === "object") ? item.shopifyOrder : {});
-
-        const directOrderName = shopifyFbmFirstText(item, [
-          "__orderName", "lastReservationOrderName", "shopifyOrderName", "orderName",
-          "orderNumber", "order_number", "orderLabel", "numeroOrdine", "numero_ordine"
-        ]);
-        const nestedOrderName = shopifyFbmOrderNameFromSource(nestedOrder, {});
-        const orderName = squashWhitespace(directOrderName || nestedOrderName || "");
-
-        const directOrderId = shopifyFbmFirstText(item, [
-          "__orderId", "lastReservationOrderId", "shopifyOrderId", "orderId",
-          "admin_graphql_api_id", "adminGraphqlApiId", "legacyResourceId", "order_id", "id"
-        ]);
-        const nestedOrderId = shopifyFbmOrderIdFromSource(nestedOrder, {});
-        const orderId = squashWhitespace(directOrderId || nestedOrderId || "");
-
-        const customerName = squashWhitespace(
-          shopifyFbmCustomerNameFromSource(nestedOrder, item) ||
-          shopifyFbmFirstText(item, ["lastReservationCustomerName", "shopifyCustomerName", "customerName", "customerDisplayName", "cliente", "customerEmail"]) ||
-          ""
-        );
-
-        return { orderName, orderId, customerName };
-      }catch(_e){
-        return { orderName:"", orderId:"", customerName:"" };
-      }
-    }
-
     function shopifyFbmOrderRowsFromItem(it, loc){
       let rows = [];
       const seen = new Set();
@@ -4612,8 +4609,10 @@ function readRackPickerSelection(root){
           const title = shopifyFbmTitleFromSource(source, {}, sku) || titleFallback;
           const orderLabel = orderName || orderId || "Ordine Shopify";
           const lineId = shopifyFbmFirstText(source, ["lineItemId", "line_item_id", "lineId", "line_id", "admin_graphql_api_id", "adminGraphqlApiId", "id", "variantId", "variant_id"]);
-          const fallbackOrderKey = [loc, "inventory_source", sku, lineId || "", orderName || "", orderId || "", customerName || "", qty, title].join("::");
-          const rowKey = (orderName || orderId) ? [loc, "order", orderName || orderId, sku, lineId || "", qty, title].join("::") : fallbackOrderKey;
+          const fallbackOrderKey = [loc, "inventory_source", sku, lineId || "", orderName || "", orderId || "", customerName || ""].join("::");
+          const rowKey = (orderName || orderId)
+            ? [loc, "order", orderName || orderId, sku, lineId || sku].join("::")
+            : fallbackOrderKey;
           if(seen.has(rowKey)) return null;
           seen.add(rowKey);
           return {
@@ -4642,10 +4641,8 @@ function readRackPickerSelection(root){
           }
         }
 
-        // Fallback controllato: alcuni sync Shopify scrivono la prenotazione sullo SKU
-        // ma non salvano ancora tutte le righe ordine dettagliate. La lista ordini NON deve
-        // mai accorpare più ordini in un unico "Shopify FBM in sospeso": ogni fallback ha
-        // una chiave stabile e separata, così i widget SKU restano aggregati ma la lista sotto no.
+        // Le righe ordine reali vengono mostrate con la loro quantità esatta.
+        // Il totale pending dello SKU serve solo a non superare il totale prenotato.
         if(rows.length && pending > 0){
           let remaining = Math.round(pending);
           const capped = [];
@@ -4663,11 +4660,7 @@ function readRackPickerSelection(root){
         const alreadyShownQty = rows.reduce((sum,row)=> sum + (Math.max(0, Math.round(Number(row?.qty || 0) || 0))), 0);
         const missingQty = Math.max(0, Math.round(pending) - alreadyShownQty);
         if(missingQty > 0 && isSafeShopifyFbmItemLevelFallback(it)){
-          const fbInfo = shopifyFbmFallbackOrderInfoFromItem(it);
-          const fallbackOrderName = squashWhitespace(fbInfo.orderName || "");
-          const fallbackOrderId = squashWhitespace(fbInfo.orderId || "");
-          const fallbackCustomer = squashWhitespace(fbInfo.customerName || "");
-          const fallbackKey = [loc, sku, "shopify_fbm_item_pending", fallbackOrderName, fallbackOrderId, missingQty, firstCode || "", titleFallback].join("::");
+          const fallbackKey = [loc, sku, "shopify_fbm_item_pending", missingQty, firstCode || "", titleFallback].join("::");
           if(!seen.has(fallbackKey)){
             seen.add(fallbackKey);
             rows.push({
@@ -4675,17 +4668,17 @@ function readRackPickerSelection(root){
               sku,
               title: titleFallback,
               qty: Math.round(missingQty),
-              orderId: fallbackOrderId,
-              orderName: fallbackOrderName,
-              orderLabel: fallbackOrderName || (fallbackOrderId ? `Ordine ${fallbackOrderId}` : "Shopify FBM in sospeso"),
-              orderKey: fallbackOrderName || fallbackOrderId ? "" : fallbackKey,
+              orderId: "",
+              orderName: "",
+              orderLabel: "Shopify FBM in sospeso",
+              orderKey: fallbackKey,
               lineKey: sku,
-              customerName: fallbackCustomer || "Dettaglio cliente non disponibile",
+              customerName: "Dettaglio cliente non disponibile",
               positions,
               codes,
               firstCode,
               latestAt: Number(it?.updatedAtClient || it?.lastReservationAtClient || it?.reorderedAtClient || 0) || 0,
-              source: "inventory_item_shopify_fbm_pending"
+              source: "inventory_item_shopify_fbm_pending_unassigned"
             });
           }
         }
@@ -4964,8 +4957,7 @@ function readRackPickerSelection(root){
         if(!state.firebase.ok || !state.user?.isWhitelisted) return shopifyFbmOrderLogStatus();
         const st = shopifyFbmOrderLogStatus();
         if(st.loaded || st.loading) return st;
-        startLogsFor("concamarise", { mode:"fbm", staleMs:45000 });
-        startLogsFor("cerea", { mode:"fbm", staleMs:45000 });
+        startLogsFor(INVENTORY_CANONICAL_LOC, { mode:"fbm", staleMs:45000 });
         return shopifyFbmOrderLogStatus();
       }catch(_e){
         return shopifyFbmOrderLogStatus();
@@ -5024,7 +5016,7 @@ function readRackPickerSelection(root){
           lines.forEach((line0, idx)=>{
             const line = line0 || {};
             const sku = toSkuId(line.sku || line.SKU || "");
-            const qty = Math.abs(parseQty(line.qty || line.quantity || line.qta || 0) || 0);
+            const qty = Math.abs(shopifyFbmLineQtyStrict(line) || 0);
             if(!sku || qty <= 0) return;
             if(isPickingLinePicked(flow, sku)) return;
             const title = pickingLineTitle(line, flow) || sku;
@@ -5104,24 +5096,28 @@ function readRackPickerSelection(root){
         if(count) count.textContent = fmtN(groups.length);
         applyPickingPreviewNavCounts("—");
 
-        if(!state.inventory?.cerea?.meta?.loaded || !state.inventory?.concamarise?.meta?.loaded){
+        if(!state.inventory?.[INVENTORY_CANONICAL_LOC]?.meta?.loaded){
           if(list) list.innerHTML = `<div class="pickingBucketEmpty">Caricamento inventario cloud…</div>`;
-          if(hint) hint.textContent = "Caricamento inventario cloud per widget SKU e lista ordini FBM.";
+          if(hint) hint.textContent = "Caricamento inventario unico cloud.";
           renderHomePickingHistoryBox();
           return true;
         }
 
         const positionStackHtml = (positions)=>{
-          const parts = Array.isArray(positions) ? positions : [];
+          const grouped = new Map();
+          for(const part of (Array.isArray(positions) ? positions : [])){
+            const code = normalizeRackLocation(part?.code || "");
+            if(!code) continue;
+            const prev = grouped.get(code) || { code, qty:0, hasQty:false };
+            const q = Number(part?.qty);
+            if(Number.isFinite(q) && q > 0){ prev.qty += Math.round(q); prev.hasQty = true; }
+            grouped.set(code, prev);
+          }
+          const parts = Array.from(grouped.values()).sort((a,b)=>String(a.code).localeCompare(String(b.code), "it", { numeric:true, sensitivity:"base" }));
           if(!parts.length) return `<span class="badge rackStackEmpty">—</span>`;
           return `<div class="rackStack">${parts.map(x=>{
-            const code = normalizeRackLocation(x?.code || "");
-            if(!code) return "";
-            const q = Number(x?.qty || 0);
-            const qtyHtml = (Number.isFinite(q) && q > 0)
-              ? `<span class="rackStackQty">${escapeHtml(String(Math.round(q)))} pz</span>`
-              : `<span class="rackStackQty">— pz</span>`;
-            return `<span class="rackStackLine"><span class="rackStackCode">${escapeHtml(code)}</span>${qtyHtml}</span>`;
+            const qtyHtml = x.hasQty ? `<span class="rackStackQty">${escapeHtml(String(x.qty))} pz</span>` : "";
+            return `<span class="rackStackLine"><span class="rackStackCode">${escapeHtml(x.code)}</span>${qtyHtml}</span>`;
           }).join("")}</div>`;
         };
 
@@ -5303,9 +5299,7 @@ function readRackPickerSelection(root){
       try{
         if(!logsRealtimeLoaded()) return;
         const flows = getPickingCandidateFlows();
-        const modeC = state.logs?.cerea?.mode || state.logs?.cerea?.meta?.mode || "";
-        const modeM = state.logs?.concamarise?.mode || state.logs?.concamarise?.meta?.mode || "";
-        const mode = (modeC && modeC === modeM) ? modeC : "";
+        const mode = state.logs?.[INVENTORY_CANONICAL_LOC]?.mode || state.logs?.[INVENTORY_CANONICAL_LOC]?.meta?.mode || "";
         const counts = pickingPreviewCountsFromFlows(flows);
         if(mode === "fbm"){
           setPickingPreviewCount("fbm", counts.fbm, source);
@@ -7219,7 +7213,7 @@ Il valore non può essere inferiore alla quantità già ubicata.`,
               <div class="gridProdMain">${titleMain}</div>
               <div class="gridProdSub">${escapeHtml(metaLine)}</div>
             </div>
-            <div class="gridCell gridRight"><button class="badge warn qtyEditBadge" type="button" data-action="editHomeNoLocationQty" data-sku="${sku}" data-loc="${escapeHtml(it.loc || "")}" data-current="${escapeHtml(String(remainingQty))}" title="Modifica quantità disponibile da ubicare">${escapeHtml(String(remainingQty))}</button></div>
+            <div class="gridCell gridRight"><button class="badge warn qtyEditBadge" type="button" data-action="editHomeNoLocationQty" data-sku="${sku}" data-loc="${escapeHtml(it.loc || "")}" data-current="${escapeHtml(String(remainingQty))}" title="Modifica quantità disponibile da ubicare" aria-label="Modifica quantità disponibile da ubicare">${escapeHtml(String(remainingQty))}</button></div>
             <div class="gridCell gridRight">${rackHtml}</div>
           </div>`;
       }).join("");
@@ -8597,8 +8591,9 @@ Confermandolo, la transaction cloud scaricherà comunque la quantità richiesta 
       }
 
       const flows = getPickingCandidateFlows();
-      const fastFbaOnlyLogs = !!(state.logs?.cerea?.mode === "fba" && state.logs?.concamarise?.mode === "fba");
-      const fastFbmOnlyLogs = !!(state.logs?.cerea?.mode === "fbm" && state.logs?.concamarise?.mode === "fbm");
+      const activeLogMode = state.logs?.[INVENTORY_CANONICAL_LOC]?.mode || state.logs?.[INVENTORY_CANONICAL_LOC]?.meta?.mode || "";
+      const fastFbaOnlyLogs = activeLogMode === "fba";
+      const fastFbmOnlyLogs = activeLogMode === "fbm";
 
       // Apertura veloce: mentre guardo FBA non calcolo FBM; mentre guardo FBM non calcolo FBA.
       const fbaCandidateFlows = showFbaPicking ? flows.filter(f=>!isShopifyFbmFlow(f)) : [];
@@ -8940,8 +8935,9 @@ function renderHomePickingHistoryBox(){
         return;
       }
 
-      const fastFbaOnlyLogs = !!(state.logs?.cerea?.mode === "fba" && state.logs?.concamarise?.mode === "fba");
-      const fastFbmOnlyLogs = !!(state.logs?.cerea?.mode === "fbm" && state.logs?.concamarise?.mode === "fbm");
+      const activeLogMode = state.logs?.[INVENTORY_CANONICAL_LOC]?.mode || state.logs?.[INVENTORY_CANONICAL_LOC]?.meta?.mode || "";
+      const fastFbaOnlyLogs = activeLogMode === "fba";
+      const fastFbmOnlyLogs = activeLogMode === "fbm";
       if((fastFbaOnlyLogs || fastFbmOnlyLogs) && pickingHomeView() !== "pickingHistory"){
         histCount.textContent = "—";
         setPickingNavCount("pickingHistory", "—");
@@ -9883,9 +9879,7 @@ function renderHomePickingHistoryBox(){
         const remainingQty = Number.isFinite(Number(it.remainingQty)) ? Math.round(Number(it.remainingQty)) : 0;
         const rackHtml = rackLocationStackHtml(it);
         const findBtnHtml = findPalletButtonHtml(firstRackLocationCodeFromItem(it), allRackLocationCodesFromItem(it), { sku: skuRaw, title: meta.main || it.title || skuRaw });
-        const allocations = readRackAllocationsFromDoc(it || {});
-        const lotsLine = allocations.length ? Array.from(new Set(allocations.map(a=>lotLabelFromId(a.lot)))).join(", ") : "";
-        const metaLine = [locLabel, lotsLine ? `Lotti: ${lotsLine}` : "", `Totale: ${totalQty}`, remainingQty ? `Da ubicare: ${remainingQty}` : ""].filter(Boolean).join(" • ");
+        const metaLine = [locLabel, `Totale: ${totalQty}`, remainingQty ? `Da ubicare: ${remainingQty}` : ""].filter(Boolean).join(" • ");
         return `
           <div class="row gridRow" role="button" tabindex="0" data-sku="${sku}" data-loc="${escapeHtml(it.loc || "")}" data-action="openHomeLocatedItem">
             <div class="gridCell gridSku">${sku}</div>
@@ -9893,7 +9887,7 @@ function renderHomePickingHistoryBox(){
               <div class="gridProdMain">${titleMain}</div>
               <div class="gridProdSub">${escapeHtml(metaLine)}</div>
             </div>
-            <div class="gridCell gridRight"><button class="badge ok qtyEditBadge" type="button" data-action="editHomeLocatedQty" data-sku="${sku}" data-loc="${escapeHtml(it.loc || "")}" data-current="${escapeHtml(String(allocatedQty))}" data-total="${escapeHtml(String(totalQty))}" title="Modifica quantità totale dello SKU">${escapeHtml(String(allocatedQty))}</button></div>
+            <div class="gridCell gridRight"><button class="badge ok qtyEditBadge" type="button" data-action="editHomeLocatedQty" data-sku="${sku}" data-loc="${escapeHtml(it.loc || "")}" data-current="${escapeHtml(String(allocatedQty))}" data-total="${escapeHtml(String(totalQty))}" title="Modifica quantità totale dello SKU" aria-label="Modifica quantità totale dello SKU">${escapeHtml(String(allocatedQty))}</button></div>
             <div class="gridCell gridRight">${rackHtml}</div>
             <div class="gridCell gridRight">${findBtnHtml}</div>
           </div>`;
@@ -12180,7 +12174,77 @@ function closeSheet(name,opts={}){
     .gridTable .row.gridHead .gridCell + .gridCell,
     .pickingFlowCell + .pickingFlowCell{border-left:0!important;}.gridTable .row.gridRow a,
     .gridTable .row.gridRow .gridCell:first-child a,
-    .pickingFlowRow:not(.pickingHead) a{color:var(--accent)!important;font-weight:700!important;}</style>
+    .pickingFlowRow:not(.pickingHead) a{color:var(--accent)!important;font-weight:700!important;}
+
+  /* Picking operativo: rack puliti e quantità modificabile evidente */
+  .rackStack{
+    width:100%!important;
+    min-width:0!important;
+    display:flex!important;
+    flex-direction:column!important;
+    align-items:stretch!important;
+    justify-content:flex-start!important;
+    gap:5px!important;
+  }
+  .rackStackLine{
+    width:100%!important;
+    min-width:0!important;
+    display:grid!important;
+    grid-template-columns:minmax(0,1fr) auto!important;
+    align-items:center!important;
+    border:1px solid var(--line)!important;
+    background:var(--surface)!important;
+    overflow:hidden!important;
+  }
+  .rackStackCode{
+    min-width:0!important;
+    overflow:hidden!important;
+    text-overflow:ellipsis!important;
+    white-space:nowrap!important;
+    padding:6px 8px!important;
+    border-right:1px solid var(--line)!important;
+    background:var(--surfaceAlt)!important;
+  }
+  .rackStackQty{
+    min-width:62px!important;
+    padding:6px 8px!important;
+    text-align:right!important;
+    white-space:nowrap!important;
+    font-variant-numeric:tabular-nums!important;
+  }
+  .rackStackLot{display:none!important;}
+  .qtyEditBadge{
+    position:relative!important;
+    cursor:pointer!important;
+    pointer-events:auto!important;
+    min-width:72px!important;
+    padding:7px 29px 7px 10px!important;
+    border:1px solid var(--accent)!important;
+    background:var(--accentSoft)!important;
+    color:var(--accentDark)!important;
+    box-shadow:0 0 0 2px rgba(15,112,120,.08)!important;
+    transition:background .14s ease,border-color .14s ease,box-shadow .14s ease,transform .08s ease!important;
+  }
+  .qtyEditBadge::after{
+    content:"✎";
+    position:absolute;
+    right:9px;
+    top:50%;
+    transform:translateY(-50%);
+    font-size:14px;
+    line-height:1;
+    font-weight:800;
+    color:var(--accent)!important;
+  }
+  .qtyEditBadge:hover,
+  .qtyEditBadge:focus-visible{
+    background:#fff!important;
+    border-color:var(--accentHover)!important;
+    box-shadow:0 0 0 3px rgba(15,112,120,.16)!important;
+    outline:none!important;
+  }
+  .qtyEditBadge:active{transform:scale(.97)!important;}
+</style>
 
   <!--
     Firestore data model:
