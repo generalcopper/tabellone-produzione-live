@@ -1551,18 +1551,112 @@ function guessTitleFromRaw(rawText, sku){
       return h.toString(16).padStart(8,"0");
     }
 
+    function sha256HexFallback(str){
+      const s = String(str || "");
+      let bytes = null;
+      try{
+        if(typeof TextEncoder !== "undefined") bytes = new TextEncoder().encode(s);
+      }catch(_e){}
+      if(!bytes){
+        const out = [];
+        for(let i=0; i<s.length; i++){
+          let cp = s.codePointAt(i);
+          if(cp > 0xffff) i++;
+          if(cp <= 0x7f){
+            out.push(cp);
+          }else if(cp <= 0x7ff){
+            out.push(0xc0 | (cp >>> 6), 0x80 | (cp & 0x3f));
+          }else if(cp <= 0xffff){
+            out.push(0xe0 | (cp >>> 12), 0x80 | ((cp >>> 6) & 0x3f), 0x80 | (cp & 0x3f));
+          }else{
+            out.push(0xf0 | (cp >>> 18), 0x80 | ((cp >>> 12) & 0x3f), 0x80 | ((cp >>> 6) & 0x3f), 0x80 | (cp & 0x3f));
+          }
+        }
+        bytes = new Uint8Array(out);
+      }
+
+      const K = new Uint32Array([
+        0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+        0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+        0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+        0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+        0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+        0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+        0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+        0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2
+      ]);
+      const H = new Uint32Array([0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19]);
+      const bitLen = bytes.length * 8;
+      const paddedLen = Math.ceil((bytes.length + 9) / 64) * 64;
+      const data = new Uint8Array(paddedLen);
+      data.set(bytes);
+      data[bytes.length] = 0x80;
+      const hi = Math.floor(bitLen / 0x100000000);
+      const lo = bitLen >>> 0;
+      data[paddedLen-8] = (hi >>> 24) & 0xff;
+      data[paddedLen-7] = (hi >>> 16) & 0xff;
+      data[paddedLen-6] = (hi >>> 8) & 0xff;
+      data[paddedLen-5] = hi & 0xff;
+      data[paddedLen-4] = (lo >>> 24) & 0xff;
+      data[paddedLen-3] = (lo >>> 16) & 0xff;
+      data[paddedLen-2] = (lo >>> 8) & 0xff;
+      data[paddedLen-1] = lo & 0xff;
+
+      const w = new Uint32Array(64);
+      const rotr = (x,n)=> (x >>> n) | (x << (32-n));
+      for(let offset=0; offset<data.length; offset+=64){
+        for(let i=0; i<16; i++){
+          const j = offset + i*4;
+          w[i] = ((data[j] << 24) | (data[j+1] << 16) | (data[j+2] << 8) | data[j+3]) >>> 0;
+        }
+        for(let i=16; i<64; i++){
+          const s0 = (rotr(w[i-15],7) ^ rotr(w[i-15],18) ^ (w[i-15] >>> 3)) >>> 0;
+          const s1 = (rotr(w[i-2],17) ^ rotr(w[i-2],19) ^ (w[i-2] >>> 10)) >>> 0;
+          w[i] = (w[i-16] + s0 + w[i-7] + s1) >>> 0;
+        }
+
+        let a=H[0], b=H[1], c=H[2], d=H[3], e=H[4], f=H[5], g=H[6], h=H[7];
+        for(let i=0; i<64; i++){
+          const S1 = (rotr(e,6) ^ rotr(e,11) ^ rotr(e,25)) >>> 0;
+          const ch = ((e & f) ^ ((~e) & g)) >>> 0;
+          const temp1 = (h + S1 + ch + K[i] + w[i]) >>> 0;
+          const S0 = (rotr(a,2) ^ rotr(a,13) ^ rotr(a,22)) >>> 0;
+          const maj = ((a & b) ^ (a & c) ^ (b & c)) >>> 0;
+          const temp2 = (S0 + maj) >>> 0;
+          h=g; g=f; f=e; e=(d + temp1) >>> 0; d=c; c=b; b=a; a=(temp1 + temp2) >>> 0;
+        }
+        H[0]=(H[0]+a)>>>0; H[1]=(H[1]+b)>>>0; H[2]=(H[2]+c)>>>0; H[3]=(H[3]+d)>>>0;
+        H[4]=(H[4]+e)>>>0; H[5]=(H[5]+f)>>>0; H[6]=(H[6]+g)>>>0; H[7]=(H[7]+h)>>>0;
+      }
+      return Array.from(H).map(x=>x.toString(16).padStart(8,"0")).join("");
+    }
+
     async function stableHashHex(str){
       const s = String(str||"");
       try{
-        if(window.crypto && crypto.subtle && window.TextEncoder){
+        if(window.crypto && crypto.subtle && typeof TextEncoder !== "undefined"){
           const enc = new TextEncoder();
           const buf = enc.encode(s);
           const digest = await crypto.subtle.digest("SHA-256", buf);
           return Array.from(new Uint8Array(digest)).map(b=>b.toString(16).padStart(2,"0")).join("");
         }
       }catch(_e){}
-      // fallback (meno forte ma stabile): FNV-1a
+      // Compatibilità storica flussi/PDF: non cambiare il fallback generale.
       return fnv1aHex(s);
+    }
+
+    async function stableLowStockStateHashHex(str){
+      const s = String(str||"");
+      try{
+        if(window.crypto && crypto.subtle && typeof TextEncoder !== "undefined"){
+          const enc = new TextEncoder();
+          const buf = enc.encode(s);
+          const digest = await crypto.subtle.digest("SHA-256", buf);
+          return Array.from(new Uint8Array(digest)).map(b=>b.toString(16).padStart(2,"0")).join("");
+        }
+      }catch(_e){}
+      // Per le mail lo SHA-256 deve restare identico in ogni browser/sessione.
+      return sha256HexFallback(s);
     }
 
     
@@ -2472,8 +2566,14 @@ function guessTitleFromRaw(rawText, sku){
       return s === "unica" || s === INVENTORY_CANONICAL_LOC || normalizeInventoryLoc(s) === INVENTORY_CANONICAL_LOC;
     }
 
+    // Modalità interna usata soltanto per calcolare l'impronta delle vecchie pagine.
+    // Non modifica l'inventario mostrato e non riattiva Cerea come sede operativa.
+    let __legacyLowStockFingerprintMode = false;
+
     function inventoryLocs(){
-      return [INVENTORY_CANONICAL_LOC];
+      return __legacyLowStockFingerprintMode
+        ? ["cerea", INVENTORY_CANONICAL_LOC]
+        : [INVENTORY_CANONICAL_LOC];
     }
 
     function stockRepresentativeItemsForLocFresh(loc){
@@ -3040,18 +3140,93 @@ function guessTitleFromRaw(rawText, sku){
         reorderedCount,
         counts: { unica: total },
         preview: { unica: previewRows },
-        templateVersion: 5
+        templateVersion: 6,
+        templateFamily: "amazon_inventory_unified"
       };
     }
 
-    const LOW_STOCK_MAIL_TEMPLATE_VERSION = 5;
-    const LOW_STOCK_MAIL_OWNER = "hub_inventario_unico_v5";
+    const LOW_STOCK_MAIL_TEMPLATE_VERSION = 6;
+    const LOW_STOCK_MAIL_OWNER = "hub_inventario_unico_v6";
     const LOW_STOCK_MAIL_SETTLE_MS = 7000;
     const LOW_STOCK_MAIL_MIN_INTERVAL_MS = 5 * 60 * 1000;
-    const LOW_STOCK_MAIL_DOC_PREFIX = "auto_low_stock_state_v5_";
 
-    // Stato email v5 indipendente: questo Hub non legge e non riscrive più il campo legacy `hash`.
-    // Le vecchie pagine usavano fingerprint diversi sullo stesso campo e potevano innescare un ping-pong.
+    // Dedupe permanente: l'ID del documento email dipende esclusivamente dallo stato
+    // della sottoscorta, non dalla grafica, dalla revisione o dall'ordine di esecuzione.
+    const LOW_STOCK_MAIL_STATE_HASH_SCHEMA = "amazon_low_stock_state_v1";
+    const LOW_STOCK_MAIL_DEDUPE_VERSION = 2;
+    const LOW_STOCK_MAIL_DOC_PREFIX = "auto_low_stock_once_v1_";
+
+    // Unica autorità mail: il template v6 è l'unico che può essere accodato da questo Hub.
+    // Il campo legacy `hash` viene mantenuto allineato solo come scudo: impedisce alle vecchie
+    // schede ancora aperte di accodare la grafica separata Cerea / Concamarise.
+
+    function __buildLowStockStateRows(items){
+      return (items || []).map(it=>({
+        sku: String(toSkuId(it?.sku || it?.id || "") || ""),
+        availableQty: Math.round(lowStockQtyValue(it)),
+        physicalQty: Math.round(physicalQtyFromItem(it)),
+        reservedQty: Math.round(reservedQtyFromItem(it)),
+        threshold: Math.round(__lowStockThreshold(it)),
+        reordered: __isReorderedItem(it) === true
+      })).filter(x=>x.sku).sort((a,b)=>{
+        if(a.sku !== b.sku) return a.sku.localeCompare(b.sku);
+        if(a.availableQty !== b.availableQty) return a.availableQty - b.availableQty;
+        if(a.physicalQty !== b.physicalQty) return a.physicalQty - b.physicalQty;
+        if(a.reservedQty !== b.reservedQty) return a.reservedQty - b.reservedQty;
+        if(a.threshold !== b.threshold) return a.threshold - b.threshold;
+        return Number(a.reordered) - Number(b.reordered);
+      });
+    }
+
+    async function __buildLowStockStateHashBundle(items){
+      const rows = __buildLowStockStateRows(items);
+      const canonicalPayload = `${LOW_STOCK_MAIL_STATE_HASH_SCHEMA}\n${JSON.stringify(rows)}`;
+
+      // Compatibilità con le mail v5/v6 già inviate: quelle versioni inserivano
+      // erroneamente la versione grafica dentro l'hash. Le riconosciamo per non
+      // reinviare uno stato storico dopo questa correzione.
+      const legacyPayloads = [5, 6].map(templateVersion => JSON.stringify(
+        rows.map(row=>({ templateVersion, ...row }))
+      ));
+
+      const hashes = await Promise.all([
+        stableLowStockStateHashHex(canonicalPayload),
+        ...legacyPayloads.map(payload=>stableLowStockStateHashHex(payload))
+      ]);
+      const stateHash = String(hashes[0] || "");
+      // Include anche il vecchio fallback FNV usato da versioni precedenti quando
+      // WebCrypto non era disponibile, così lo storico resta riconoscibile.
+      const compatibleHashes = Array.from(new Set([
+        ...hashes.filter(Boolean),
+        fnv1aHex(canonicalPayload),
+        ...legacyPayloads.map(payload=>fnv1aHex(payload))
+      ].filter(Boolean)));
+      return { rows, stateHash, compatibleHashes };
+    }
+
+    async function __findExistingLowStockEmailByStateHashes(hashes){
+      const api = state.firebase?.api;
+      const db = state.firebase?.db;
+      if(!api || !db || !api.getDocs || !api.where || !api.query || !api.limit){
+        throw new Error("Verifica storico email non disponibile.");
+      }
+
+      const unique = Array.from(new Set((hashes || []).map(x=>String(x || "").trim()).filter(Boolean)));
+      for(const hash of unique){
+        const q = api.query(
+          api.collection(db, "email"),
+          api.where("stateHash", "==", hash),
+          api.limit(1)
+        );
+        const snap = await api.getDocs(q);
+        let found = null;
+        snap.forEach(docSnap=>{
+          if(!found) found = { id: docSnap.id, data: docSnap.data() || {}, stateHash: hash };
+        });
+        if(found) return found;
+      }
+      return null;
+    }
 
     const __lowStockMailDispatch = {
       running:false,
@@ -3060,6 +3235,262 @@ function guessTitleFromRaw(rawText, sku){
       deferredAt:0,
       lastReason:""
     };
+
+    const __legacyLowStockShield = {
+      timer:null,
+      running:false,
+      queued:false,
+      cereaItems:null,
+      cereaLoadedAt:0,
+      mode:"",
+      lastHash:"",
+      lastCandidates:null
+    };
+
+    function __legacyShieldItemFromDoc(docSnap){
+      try{
+        const d = docSnap?.data?.() || {};
+        const sku = toSkuId(d.sku || docSnap.id || "");
+        if(!sku) return null;
+        const qty = stockQtyFromDoc(d || {});
+        const title = d.title || d.name || "";
+        return {
+          __raw:d,
+          id:docSnap.id,
+          sku,
+          title,
+          titleNorm:d.titleNorm || normalizeText(title || sku),
+          qty,
+          reservedQty:Number.isFinite(Number(d.reservedQty)) ? Math.max(0, Math.round(Number(d.reservedQty))) : 0,
+          pendingPickQty:Number.isFinite(Number(d.pendingPickQty)) ? Math.max(0, Math.round(Number(d.pendingPickQty))) : 0,
+          availableQty:Math.round(qty - (Number.isFinite(Number(d.reservedQty)) ? Math.max(0, Math.round(Number(d.reservedQty))) : 0)),
+          lowStockThreshold:__parseLowStockThresholdValue(d.lowStockThreshold),
+          reordered:d.reordered === true,
+          reorderStatus:d.reorderStatus || "",
+          updatedAt:d.updatedAt || null,
+          updatedAtClient:d.updatedAtClient || null,
+          ...productIdentityRuntimeFieldsFromDoc(d || {})
+        };
+      }catch(_e){
+        return null;
+      }
+    }
+
+    async function __loadLegacyCereaItemsForMailShield(force=false){
+      try{
+        const now = Date.now();
+        if(!force && Array.isArray(__legacyLowStockShield.cereaItems) && (now - __legacyLowStockShield.cereaLoadedAt) < (10 * 60 * 1000)){
+          return __legacyLowStockShield.cereaItems;
+        }
+        const api = state.firebase?.api;
+        const db = state.firebase?.db;
+        if(!api || !db || !api.getDocs) return [];
+
+        const snap = await api.getDocs(api.collection(db, COL_ROOT, "cerea", SUB_ITEMS));
+        const rows = [];
+        snap.forEach(docSnap=>{
+          const row = __legacyShieldItemFromDoc(docSnap);
+          if(row) rows.push(row);
+        });
+        __legacyLowStockShield.cereaItems = rows;
+        __legacyLowStockShield.cereaLoadedAt = now;
+        return rows;
+      }catch(err){
+        // Il ramo legacy può essere già stato rimosso o non più leggibile: in quel caso
+        // lo scudo usa il solo inventario canonico, senza bloccare la mail v6.
+        console.warn("legacy low-stock shield: Cerea read skipped", err);
+        if(!Array.isArray(__legacyLowStockShield.cereaItems)) __legacyLowStockShield.cereaItems = [];
+        return __legacyLowStockShield.cereaItems;
+      }
+    }
+
+    function __legacyHubFingerprintRows(items){
+      return (items || []).map(it=>({
+        sku:String(toSkuId(it?.sku || it?.id || "") || ""),
+        qty:lowStockQtyValue(it),
+        physicalQty:physicalQtyFromItem(it),
+        reservedQty:reservedQtyFromItem(it),
+        threshold:__lowStockThreshold(it),
+        locs:Array.isArray(it?.locations)
+          ? it.locations.map(x=>`${x.loc}:${x.physicalQty}:${x.reservedQty}`).join("|")
+          : ""
+      })).filter(x=>x.sku).sort((a,b)=>{
+        if(a.sku !== b.sku) return a.sku.localeCompare(b.sku);
+        if((a.qty || 0) !== (b.qty || 0)) return (a.qty || 0) - (b.qty || 0);
+        return (a.threshold || 0) - (b.threshold || 0);
+      });
+    }
+
+    function __legacyPickingFingerprintRows(locs){
+      const out = [];
+      for(const loc of (locs || [])){
+        const rows = state.inventory?.[loc]?.items || [];
+        for(const it of rows){
+          if(!Number.isFinite(Number(it?.qty))) continue;
+          if(!__isLowStockItem(it)) continue;
+          out.push({
+            loc:String(loc || ""),
+            sku:String(toSkuId(it?.sku || it?.id || "") || ""),
+            qty:lowStockQtyValue(it),
+            reservedQty:reservedQtyFromItem(it),
+            threshold:__lowStockThreshold(it)
+          });
+        }
+      }
+      return out.filter(x=>x.sku).sort((a,b)=>{
+        if(a.loc !== b.loc) return a.loc.localeCompare(b.loc);
+        if(a.sku !== b.sku) return a.sku.localeCompare(b.sku);
+        if((a.qty || 0) !== (b.qty || 0)) return (a.qty || 0) - (b.qty || 0);
+        return (a.threshold || 0) - (b.threshold || 0);
+      });
+    }
+
+    async function __computeLegacyLowStockHashCandidates(){
+      const legacyCereaItems = await __loadLegacyCereaItemsForMailShield(false);
+      const invCerea = state.inventory?.cerea;
+      const originalItems = invCerea?.items || [];
+      const originalMeta = invCerea?.meta || { count:0, lastUpdatedAt:null, loaded:false };
+      let hubDualJson = "[]";
+      let pickingDualJson = "[]";
+      let hubUnifiedJson = "[]";
+      let pickingUnifiedJson = "[]";
+
+      // La sostituzione temporanea dello snapshot serve solo a ricostruire l'impronta
+      // usata dalle vecchie pagine. Non lasciamo mai lo state alterato durante un await.
+      try{
+        if(invCerea){
+          invCerea.items = Array.isArray(legacyCereaItems) ? legacyCereaItems : [];
+          invCerea.meta = {
+            ...originalMeta,
+            count:invCerea.items.length,
+            loaded:true
+          };
+        }
+
+        __legacyLowStockFingerprintMode = true;
+        clearSkuRuntimeCache("legacy_mail_hash_dual");
+        const dualAggregates = lowStockAggregates();
+        hubDualJson = JSON.stringify(__legacyHubFingerprintRows(dualAggregates));
+        pickingDualJson = JSON.stringify(__legacyPickingFingerprintRows(["cerea", INVENTORY_CANONICAL_LOC]));
+
+        __legacyLowStockFingerprintMode = false;
+        clearSkuRuntimeCache("legacy_mail_hash_unified");
+        const unifiedAggregates = lowStockAggregates();
+        hubUnifiedJson = JSON.stringify(__legacyHubFingerprintRows(unifiedAggregates));
+        pickingUnifiedJson = JSON.stringify(__legacyPickingFingerprintRows([INVENTORY_CANONICAL_LOC]));
+      }finally{
+        __legacyLowStockFingerprintMode = false;
+        if(invCerea){
+          invCerea.items = originalItems;
+          invCerea.meta = originalMeta;
+        }
+        clearSkuRuntimeCache("legacy_mail_hash_restore");
+      }
+
+      const [hubDual, pickingDual, hubUnified, pickingUnified] = await Promise.all([
+        stableHashHex(hubDualJson),
+        stableHashHex(pickingDualJson),
+        stableHashHex(hubUnifiedJson),
+        stableHashHex(pickingUnifiedJson)
+      ]);
+      return {
+        hub_dual: hubDual,
+        picking_dual: pickingDual,
+        hub_unified: hubUnified,
+        picking_unified: pickingUnified
+      };
+    }
+
+    function __writeLegacyLowStockLocalLock(hash){
+      try{
+        const h = String(hash || "");
+        if(!h) return;
+        // Le vecchie pagine sullo stesso browser rispettano questo lock per 90 secondi.
+        // Lo aggiorniamo prima del loro timer di invio, oltre al blocco cloud su meta.hash.
+        localStorage.setItem("amz_inventory_lowmail_hash_v1", h);
+        localStorage.setItem("amz_inventory_lowmail_at_v1", String(Date.now()));
+        localStorage.setItem("amz_inventory_lowmail_lock_v1", String(Date.now()));
+        localStorage.setItem("amz_inventory_lowmail_lock_hash_v1", h);
+      }catch(_e){}
+    }
+
+    function __chooseLegacyShieldMode(meta, candidates){
+      const currentHash = String(meta?.hash || "");
+      for(const mode of ["hub_dual", "picking_dual", "hub_unified", "picking_unified"]){
+        if(currentHash && candidates?.[mode] && currentHash === candidates[mode]) return mode;
+      }
+
+      const locations = Array.isArray(meta?.locations) ? meta.locations.map(x=>String(x || "").toLowerCase()) : [];
+      const preview = meta?.preview || meta?.lastPreview || null;
+      const hasDualPreview = !!(Array.isArray(preview?.cerea) || Array.isArray(preview?.concamarise));
+      if(locations.includes("cerea") || hasDualPreview) return "hub_dual";
+      if(locations.includes("unica")) return "hub_unified";
+      return __legacyLowStockShield.mode || "hub_dual";
+    }
+
+    async function __syncLegacyLowStockMailShield(reason="inventory_snapshot"){
+      if(__legacyLowStockShield.running){
+        __legacyLowStockShield.queued = true;
+        return __legacyLowStockShield.lastHash || "";
+      }
+      __legacyLowStockShield.running = true;
+      try{
+        if(!state.user?.isAdmin || !state.user?.isWhitelisted) return "";
+        if(!state.inventory?.[INVENTORY_CANONICAL_LOC]?.meta?.loaded) return "";
+        const api = state.firebase?.api;
+        const db = state.firebase?.db;
+        if(!api || !db || !api.getDoc || !api.setDoc) return "";
+
+        const candidates = await __computeLegacyLowStockHashCandidates();
+        __legacyLowStockShield.lastCandidates = candidates;
+        const metaRef = api.doc(db, COL_META, DOC_LOWSTOCK_EMAIL_STATE);
+        const metaSnap = await api.getDoc(metaRef);
+        const meta = metaSnap?.exists?.() ? (metaSnap.data() || {}) : {};
+        const mode = __chooseLegacyShieldMode(meta, candidates);
+        const hash = String(candidates?.[mode] || candidates?.hub_dual || candidates?.hub_unified || "");
+        if(!hash) return "";
+
+        __legacyLowStockShield.mode = mode;
+        __legacyLowStockShield.lastHash = hash;
+        __writeLegacyLowStockLocalLock(hash);
+
+        const currentHash = String(meta.hash || "");
+        const alreadyShielded = currentHash === hash && meta.legacyMailTemplateRetired === true;
+        if(!alreadyShielded){
+          await api.setDoc(metaRef, {
+            hash,
+            legacyMailTemplateRetired:true,
+            legacyMailTemplateName:"cerea_concamarise",
+            legacyMailBlockedBy:LOW_STOCK_MAIL_OWNER,
+            legacyMailShieldMode:mode,
+            legacyMailShieldReason:String(reason || "inventory_snapshot"),
+            legacyMailShieldAt:api.serverTimestamp(),
+            legacyMailShieldAtClient:Date.now()
+          }, { merge:true });
+        }
+        return hash;
+      }catch(err){
+        console.warn("legacy low-stock mail shield", err);
+        return __legacyLowStockShield.lastHash || "";
+      }finally{
+        __legacyLowStockShield.running = false;
+        if(__legacyLowStockShield.queued){
+          __legacyLowStockShield.queued = false;
+          setTimeout(()=>{ void __syncLegacyLowStockMailShield("queued_inventory_snapshot"); }, 350);
+        }
+      }
+    }
+
+    function scheduleLegacyLowStockMailShield(reason="inventory_snapshot", delay=180){
+      try{
+        if(!state.user?.isAdmin || !state.user?.isWhitelisted) return;
+        if(__legacyLowStockShield.timer) clearTimeout(__legacyLowStockShield.timer);
+        __legacyLowStockShield.timer = setTimeout(()=>{
+          __legacyLowStockShield.timer = null;
+          void __syncLegacyLowStockMailShield(reason);
+        }, Math.max(80, Number(delay || 0)));
+      }catch(_e){}
+    }
 
     function __scheduleDeferredLowStockEmail(runAtClient, reason="cooldown_pending"){
       try{
@@ -3109,27 +3540,17 @@ function guessTitleFromRaw(rawText, sku){
           return;
         }
 
-        // Impronta stabile: solo dati che cambiano davvero lo stato sotto-scorta.
-        // Titolo, ordine runtime degli alias, timestamp e grafica non partecipano all'hash.
-        const list = (items || []).map(it=>({
-          templateVersion: LOW_STOCK_MAIL_TEMPLATE_VERSION,
-          sku: String(toSkuId(it?.sku || it?.id || "") || ""),
-          availableQty: Math.round(lowStockQtyValue(it)),
-          physicalQty: Math.round(physicalQtyFromItem(it)),
-          reservedQty: Math.round(reservedQtyFromItem(it)),
-          threshold: Math.round(__lowStockThreshold(it)),
-          reordered: __isReorderedItem(it) === true
-        })).filter(x=>x.sku).sort((a,b)=>{
-          if(a.sku !== b.sku) return a.sku.localeCompare(b.sku);
-          if(a.availableQty !== b.availableQty) return a.availableQty - b.availableQty;
-          if(a.physicalQty !== b.physicalQty) return a.physicalQty - b.physicalQty;
-          if(a.reservedQty !== b.reservedQty) return a.reservedQty - b.reservedQty;
-          if(a.threshold !== b.threshold) return a.threshold - b.threshold;
-          return Number(a.reordered) - Number(b.reordered);
-        });
+        // Prima neutralizza il vecchio mittente Cerea / Concamarise. È solo un blocco
+        // di compatibilità: la mail vera resta esclusivamente quella v6 qui sotto.
+        const legacyShieldHash = await __syncLegacyLowStockMailShield("before_v6_dispatch");
 
-        const templateFingerprint = await stableHashHex(JSON.stringify(list));
-        if(!templateFingerprint){
+        // Hash dello stato reale, indipendente dalla grafica e dalla versione del template.
+        // Stato A -> B -> A produce sempre lo stesso hash A e quindi non può essere reinviato.
+        const hashBundle = await __buildLowStockStateHashBundle(items);
+        const list = hashBundle.rows;
+        const stateHash = hashBundle.stateHash;
+        const compatibleStateHashes = hashBundle.compatibleHashes;
+        if(!stateHash){
           if(mailLog) mailLog.textContent = "";
           return;
         }
@@ -3139,32 +3560,97 @@ function guessTitleFromRaw(rawText, sku){
         const api = fb.api;
         const db = fb.db;
         const metaRef = api.doc(db, COL_META, DOC_LOWSTOCK_EMAIL_STATE);
+        const deterministicEmailDocId = `${LOW_STOCK_MAIL_DOC_PREFIX}${stateHash}`;
+        const deterministicEmailRef = api.doc(db, "email", deterministicEmailDocId);
+
+        // Controlla anche tutto lo storico v5/v6. Se la query non è consentita,
+        // l'invio viene bloccato: meglio perdere una notifica che duplicarne una.
+        let historicalMatch = null;
+        try{
+          historicalMatch = await __findExistingLowStockEmailByStateHashes(compatibleStateHashes);
+        }catch(historyErr){
+          console.warn("low-stock email history verification blocked", historyErr);
+          if(mailLog) mailLog.textContent = "Email automatica bloccata: impossibile verificare lo storico anti-duplicato.";
+          return;
+        }
+        if(historicalMatch){
+          // Migra il riferimento storico al nuovo hash stabile e cancella eventuali
+          // pending obsoleti, senza creare né aggiornare alcun documento email.
+          try{
+            await api.setDoc(metaRef, {
+              templateHash: stateHash,
+              lastSentStateHash: stateHash,
+              currentStateHash: stateHash,
+              emailDocId: historicalMatch.id || null,
+              duplicateBlockedStateHash: stateHash,
+              duplicateBlockedAt: api.serverTimestamp(),
+              duplicateBlockedAtClient: now,
+              dedupeMigratedFromStateHash: historicalMatch.stateHash || null,
+              dedupeVersion: LOW_STOCK_MAIL_DEDUPE_VERSION,
+              stateHashSchema: LOW_STOCK_MAIL_STATE_HASH_SCHEMA,
+              pendingStateHash: null,
+              pendingReason: null,
+              pendingSeenAtClient: null,
+              pendingAfterClient: null
+            }, { merge:true });
+          }catch(metaErr){
+            console.warn("low-stock history meta migration skipped", metaErr);
+          }
+          if(mailLog) mailLog.textContent = `Email automatica: stato già inviato • hash ${stateHash.slice(0, 12)} • nessun reinvio.`;
+          return;
+        }
+
         let enqueued = false;
+        let duplicateBlocked = false;
         let cooldownUntil = 0;
-        let createdEmailDocId = "";
+        let createdEmailDocId = deterministicEmailDocId;
         let nextRevision = 0;
 
         await api.runTransaction(db, async (tx)=>{
+          // Tutte le letture avvengono prima delle scritture: il documento email
+          // deterministico è il lucchetto atomico tra schede/browser simultanei.
           const metaSnap = await tx.get(metaRef);
+          const deterministicEmailSnap = await tx.get(deterministicEmailRef);
           const meta = metaSnap?.exists?.() ? (metaSnap.data() || {}) : {};
           const prevTemplateHash = String(meta.lastSentStateHash || meta.templateHash || "");
           const lastSentAtClient = Number(meta.lastSentAtClient || meta.sentAtClient || 0) || 0;
+          const alreadyKnownByMeta = compatibleStateHashes.includes(prevTemplateHash);
 
-          // Medesimo stato già spedito: zero scritture e zero email.
-          // In particolare NON tocchiamo il vecchio campo `hash`.
-          if(prevTemplateHash === templateFingerprint) return;
+          // Dedupe permanente: stesso stato già accodato in qualunque momento,
+          // anche dopo altri stati intermedi o da un'altra scheda, non viene reinviato.
+          if(deterministicEmailSnap.exists() || alreadyKnownByMeta){
+            duplicateBlocked = true;
+            tx.set(metaRef, {
+              currentStateHash: stateHash,
+              duplicateBlockedStateHash: stateHash,
+              duplicateBlockedAt: api.serverTimestamp(),
+              duplicateBlockedAtClient: now,
+              dedupeVersion: LOW_STOCK_MAIL_DEDUPE_VERSION,
+              stateHashSchema: LOW_STOCK_MAIL_STATE_HASH_SCHEMA,
+              pendingStateHash: null,
+              pendingReason: null,
+              pendingSeenAtClient: null,
+              pendingAfterClient: null
+            }, { merge:true });
+            return;
+          }
 
           // Blocco cloud anti-raffica. Durante il cooldown salviamo solo lo stato più recente;
           // alla scadenza verrà rivalutato l'inventario corrente, non uno snapshot vecchio.
           if(lastSentAtClient > 0 && (now - lastSentAtClient) < LOW_STOCK_MAIL_MIN_INTERVAL_MS){
             cooldownUntil = lastSentAtClient + LOW_STOCK_MAIL_MIN_INTERVAL_MS;
             tx.set(metaRef, {
-              pendingStateHash: templateFingerprint,
+              pendingStateHash: stateHash,
               pendingReason: String(reason || "inventory_update"),
               pendingSeenAtClient: now,
               pendingAfterClient: cooldownUntil,
+              currentStateHash: stateHash,
+              dedupeVersion: LOW_STOCK_MAIL_DEDUPE_VERSION,
+              stateHashSchema: LOW_STOCK_MAIL_STATE_HASH_SCHEMA,
               mailOwner: LOW_STOCK_MAIL_OWNER,
-              templateVersion: LOW_STOCK_MAIL_TEMPLATE_VERSION
+              templateVersion: LOW_STOCK_MAIL_TEMPLATE_VERSION,
+              templateFamily: "amazon_inventory_unified",
+              ...(legacyShieldHash ? { hash: legacyShieldHash } : {})
             }, { merge:true });
             return;
           }
@@ -3172,10 +3658,9 @@ function guessTitleFromRaw(rawText, sku){
           // Revisione atomica: due schede simultanee leggono la stessa meta, ma Firestore
           // ritenta la seconda transaction; al retry trova già lo stato spedito e si ferma.
           nextRevision = Math.max(0, Math.floor(Number(meta.mailRevision || 0))) + 1;
-          createdEmailDocId = `${LOW_STOCK_MAIL_DOC_PREFIX}${String(nextRevision).padStart(8, "0")}_${templateFingerprint.slice(0, 24)}`;
-          const emailRef = api.doc(db, "email", createdEmailDocId);
+          createdEmailDocId = deterministicEmailDocId;
 
-          tx.set(emailRef, {
+          tx.set(deterministicEmailRef, {
             to: ["matteo@generalcoppersrl.com"],
             message: {
               subject: payload.subject,
@@ -3187,7 +3672,14 @@ function guessTitleFromRaw(rawText, sku){
             kind: "auto_low_stock",
             mailOwner: LOW_STOCK_MAIL_OWNER,
             mailRevision: nextRevision,
-            stateHash: templateFingerprint,
+            templateVersion: LOW_STOCK_MAIL_TEMPLATE_VERSION,
+            templateFamily: "amazon_inventory_unified",
+            renderMode: "unified_v6",
+            stateHash: stateHash,
+            stateHashSchema: LOW_STOCK_MAIL_STATE_HASH_SCHEMA,
+            dedupeVersion: LOW_STOCK_MAIL_DEDUPE_VERSION,
+            dedupeMode: "immutable_email_document_id",
+            dedupeKey: createdEmailDocId,
             lowStock: {
               total: payload.total,
               counts: payload.counts || null,
@@ -3195,7 +3687,12 @@ function guessTitleFromRaw(rawText, sku){
               toHandleCount: payload.toHandleCount,
               reorderedCount: payload.reorderedCount,
               templateVersion: LOW_STOCK_MAIL_TEMPLATE_VERSION,
-              templateHash: templateFingerprint,
+              templateFamily: "amazon_inventory_unified",
+              renderMode: "unified_v6",
+              templateHash: stateHash,
+              stateHash: stateHash,
+              stateHashSchema: LOW_STOCK_MAIL_STATE_HASH_SCHEMA,
+              dedupeVersion: LOW_STOCK_MAIL_DEDUPE_VERSION,
               reason: String(reason || "")
             },
             createdBy: state.user?.emailLower || state.user?.email || "",
@@ -3203,16 +3700,23 @@ function guessTitleFromRaw(rawText, sku){
           });
 
           tx.set(metaRef, {
-            templateHash: templateFingerprint,
-            lastSentStateHash: templateFingerprint,
+            templateHash: stateHash,
+            lastSentStateHash: stateHash,
+            currentStateHash: stateHash,
             total: payload.total,
             counts: payload.counts || null,
             preview: payload.preview || null,
             toHandleCount: payload.toHandleCount,
             reorderedCount: payload.reorderedCount,
             templateVersion: LOW_STOCK_MAIL_TEMPLATE_VERSION,
+            templateFamily: "amazon_inventory_unified",
+            renderMode: "unified_v6",
+            stateHashSchema: LOW_STOCK_MAIL_STATE_HASH_SCHEMA,
+            dedupeVersion: LOW_STOCK_MAIL_DEDUPE_VERSION,
+            dedupeMode: "immutable_email_document_id",
             mailOwner: LOW_STOCK_MAIL_OWNER,
             mailRevision: nextRevision,
+            ...(legacyShieldHash ? { hash: legacyShieldHash } : {}),
             emailDocId: createdEmailDocId,
             sentAt: api.serverTimestamp(),
             sentAtClient: now,
@@ -3233,10 +3737,12 @@ function guessTitleFromRaw(rawText, sku){
 
         if(mailLog){
           mailLog.textContent = enqueued
-            ? `Email automatica inviata/accodata alle ${fmtDate(now)} • ${payload.total} righe • rev. ${nextRevision}.`
-            : (cooldownUntil
-              ? `Email automatica: variazione registrata • blocco anti-raffica fino alle ${fmtDate(cooldownUntil)}.`
-              : "Email automatica: nessun invio (stesso stato)." );
+            ? `Email automatica inviata/accodata alle ${fmtDate(now)} • ${payload.total} righe • hash ${stateHash.slice(0, 12)}.`
+            : (duplicateBlocked
+              ? `Email automatica: stato già inviato • hash ${stateHash.slice(0, 12)} • nessun reinvio.`
+              : (cooldownUntil
+                ? `Email automatica: variazione registrata • hash ${stateHash.slice(0, 12)} • blocco anti-raffica fino alle ${fmtDate(cooldownUntil)}.`
+                : "Email automatica: nessun invio."));
         }
       }catch(err){
         try{
@@ -3811,6 +4317,10 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
       __lowStockMailDispatch.deferredTimer = null;
       __lowStockMailDispatch.deferredAt = 0;
       __lowStockMailDispatch.queued = false;
+      try{ if(__legacyLowStockShield.timer) clearTimeout(__legacyLowStockShield.timer); }catch(_e){}
+      __legacyLowStockShield.timer = null;
+      __legacyLowStockShield.running = false;
+      __legacyLowStockShield.queued = false;
       try{ if(__lowStockThresholdRepairState.timer) clearTimeout(__lowStockThresholdRepairState.timer); }catch(_e){}
       __lowStockThresholdRepairState.timer = null;
       __lowStockThresholdRepairState.running = false;
@@ -3943,7 +4453,9 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
           renderProductDetailsSheet();
         }
 
-        // Stabilizza e ripulisce le soglie cloud prima che il nuovo stato possa generare una mail.
+        // Blocca subito i vecchi mittenti prima dei loro timer di invio; poi stabilizza soglie
+        // e valuta l'unica mail ammessa, quella con grafica inventario unico v6.
+        scheduleLegacyLowStockMailShield("inventory_" + loc, 120);
         scheduleLowStockThresholdRepair("inventory_" + loc);
         triggerLowStockMailFromRealtime("realtime_low_stock_" + loc);
         scheduleTwReordersBackfillFromState("inventory_" + loc);
@@ -4006,8 +4518,10 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
 
         state.mail.lowStock.unsub = api.onSnapshot(ref, (snap)=>{
           const next = snap.exists() ? snap.data() : null;
-          const prevHash = state.mail.lowStock.meta ? String(state.mail.lowStock.meta.templateHash || state.mail.lowStock.meta.hash || "") : "";
-          const nextHash = next ? String(next.templateHash || next.hash || "") : "";
+          const prevHash = state.mail.lowStock.meta ? String(state.mail.lowStock.meta.lastSentStateHash || state.mail.lowStock.meta.templateHash || "") : "";
+          const nextHash = next ? String(next.lastSentStateHash || next.templateHash || "") : "";
+          const prevLegacyHash = state.mail.lowStock.meta ? String(state.mail.lowStock.meta.hash || "") : "";
+          const nextLegacyHash = next ? String(next.hash || "") : "";
 
           state.mail.lowStock.meta = next;
 
@@ -4018,6 +4532,11 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
             state.mail.lowStock.emailDocBusy = false;
           }
           state.mail.lowStock.error = "";
+          // Se una vecchia pagina prova ancora a riscrivere il suo hash, impariamo subito
+          // quale impronta usa e la blocchiamo prima della variazione inventario successiva.
+          if(nextLegacyHash && nextLegacyHash !== prevLegacyHash){
+            scheduleLegacyLowStockMailShield("legacy_meta_hash_changed", 90);
+          }
           if(state.route.view === "home") renderHomeLowStockMailLog();
         }, (err)=>{
           state.mail.lowStock.meta = null;
@@ -4090,11 +4609,9 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
         const api = state.firebase.api;
         const db = state.firebase.db;
 
-        const hash = meta.templateHash ? String(meta.templateHash) : (meta.hash ? String(meta.hash) : "");
-        if(!hash) return;
-
-        const docId = meta.emailDocId ? String(meta.emailDocId) : ("auto_low_stock_" + hash.slice(0, 24));
-        if(!docId) return;
+        const hash = String(meta.lastSentStateHash || meta.templateHash || "");
+        const docId = meta.emailDocId ? String(meta.emailDocId) : "";
+        if(!hash || !docId) return;
 
         // già caricato / in errore per lo stesso docId
         if(state.mail.lowStock.emailDocId === docId && (state.mail.lowStock.emailDoc || state.mail.lowStock.emailDocError)) return;
@@ -4152,7 +4669,7 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
       const reason = meta.reason ? String(meta.reason) : "";
       const who = meta.sentBy ? String(meta.sentBy) : "";
       const docId = meta.emailDocId ? String(meta.emailDocId) : "";
-      const hash = meta.templateHash ? String(meta.templateHash) : (meta.hash ? String(meta.hash) : "");
+      const hash = String(meta.lastSentStateHash || meta.templateHash || "");
       const hashShort = hash ? hash.slice(0, 10) : "";
 
       let header = `Ultima mail sotto scorta: <b>${escapeHtml(dt)}</b>`;
@@ -4172,20 +4689,15 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
         if(!preview && d?.message?.text) preview = __parseLowStockPreviewFromText(d.message.text);
       }
 
-      // Anche i vecchi snapshot divisi per sede vengono mostrati come inventario unico.
-      const rows = Array.isArray(preview?.unica)
-        ? preview.unica
-        : [
-            ...(Array.isArray(preview?.concamarise) ? preview.concamarise : []),
-            ...(Array.isArray(preview?.cerea) ? preview.cerea : [])
-          ];
+      // Solo snapshot del template nuovo: nessuna compatibilità grafica Cerea / Concamarise.
+      const rows = Array.isArray(preview?.unica) ? preview.unica : [];
 
       if(!rows.length){
         const busy = !!state.mail?.lowStock?.emailDocBusy;
         const docErr = state.mail?.lowStock?.emailDocError || "";
         if(busy){
           el.innerHTML += `<div class="hint" style="margin-top:6px">Caricamento dettagli ultimo invio…</div>`;
-        }else if(meta.hash){
+        }else if(meta.emailDocId && (meta.lastSentStateHash || meta.templateHash)){
           __loadLowStockEmailDocIfNeeded(meta);
           el.innerHTML += `<div class="hint" style="margin-top:6px">Caricamento dettagli ultimo invio…</div>`;
         }
