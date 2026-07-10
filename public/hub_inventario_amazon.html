@@ -713,8 +713,7 @@ Tip:
       const rec = __stableUiState(el);
       if(!el || !rec || !rec.pending) return false;
       const activeInside = !!(document.activeElement && el.contains(document.activeElement));
-      const pointerHover = !!el.matches?.(":hover");
-      if(rec.pointerInside || rec.focusInside || activeInside || pointerHover) return false;
+      if(rec.pointerInside || rec.focusInside || activeInside) return false;
       const next = rec.pending;
       rec.pending = null;
       if(rec.signature === next.signature) return false;
@@ -746,14 +745,13 @@ Tip:
       __bindStableUiRegion(el);
       const rec = __stableUiState(el);
       const markup = String(html ?? "");
-      const sig = String(signature || markup);
+      const sig = String(signature || ("html:" + fnv1aHex(markup)));
       if(rec.signature === sig){
         rec.pending = null;
         return false;
       }
       const activeInside = !!(document.activeElement && el.contains(document.activeElement));
-      const pointerHover = !!el.matches?.(":hover");
-      const interacting = rec.pointerInside || rec.focusInside || activeInside || pointerHover;
+      const interacting = rec.pointerInside || rec.focusInside || activeInside;
       if(interacting && el.childNodes.length){
         rec.pending = { html:markup, signature:sig };
         return false;
@@ -3214,6 +3212,7 @@ function guessTitleFromRaw(rawText, sku){
 
     const LOW_STOCK_MAIL_TEMPLATE_VERSION = 6;
     const LOW_STOCK_MAIL_OWNER = "hub_inventario_unico_v6";
+    const LOW_STOCK_MAIL_FRONTEND_DISABLED = true; // invio affidato esclusivamente al backend Cloud Functions
     const LOW_STOCK_MAIL_SETTLE_MS = 7000;
     const LOW_STOCK_MAIL_MIN_INTERVAL_MS = 5 * 60 * 1000;
 
@@ -3549,6 +3548,7 @@ function guessTitleFromRaw(rawText, sku){
     }
 
     function scheduleLegacyLowStockMailShield(reason="inventory_snapshot", delay=180){
+      if(LOW_STOCK_MAIL_FRONTEND_DISABLED) return;
       try{
         if(!state.user?.isAdmin || !state.user?.isWhitelisted) return;
         if(__legacyLowStockShield.timer) clearTimeout(__legacyLowStockShield.timer);
@@ -3576,6 +3576,11 @@ function guessTitleFromRaw(rawText, sku){
     }
 
     async function __enqueueLowStockEmailIfNeeded(items, { reason="" } = {}){
+      if(LOW_STOCK_MAIL_FRONTEND_DISABLED){
+        const mailLog = $("homeLowStockMailLog");
+        if(mailLog) mailLog.textContent = "Email sotto scorta gestita dal backend • da info@generalcoppersrl.com a matteo@generalcoppersrl.com.";
+        return;
+      }
       if(__lowStockMailDispatch.running){
         __lowStockMailDispatch.queued = true;
         __lowStockMailDispatch.lastReason = String(reason || "queued_update");
@@ -3878,6 +3883,7 @@ function guessTitleFromRaw(rawText, sku){
     }
 
     function scheduleLowStockEmailAfterUpdate(reason, opts = {}){
+      if(LOW_STOCK_MAIL_FRONTEND_DISABLED) return;
       if(!state.user?.isAdmin) return;
       __lowMailSeq++;
       const seq = __lowMailSeq;
@@ -3901,6 +3907,7 @@ function guessTitleFromRaw(rawText, sku){
     }
 
     function triggerLowStockMailFromRealtime(reason){
+      if(LOW_STOCK_MAIL_FRONTEND_DISABLED) return;
       try{
         // Serve solo a intercettare aggiornamenti arrivati da Firestore (anche altri hub).
         // Non invia nulla sul primo caricamento: il primo snapshot completo diventa baseline.
@@ -4724,7 +4731,7 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
 
       const meta = state.mail?.lowStock?.meta;
       if(!meta){
-        el.innerHTML = `<span class="muted">Log email sotto scorta: nessun invio registrato.</span>`;
+        el.innerHTML = `<span class="muted">Email sotto scorta gestita dal backend • mittente info@generalcoppersrl.com • destinatario matteo@generalcoppersrl.com • nessun invio registrato.</span>`;
         return;
       }
 
@@ -4734,7 +4741,9 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
       const toHandleCount = Number.isFinite(meta.toHandleCount) ? meta.toHandleCount : null;
       const reorderedCount = Number.isFinite(meta.reorderedCount) ? meta.reorderedCount : null;
       const reason = meta.reason ? String(meta.reason) : "";
-      const who = meta.sentBy ? String(meta.sentBy) : "";
+      const processor = String(meta.processor || "backend");
+      const mailFrom = String(meta.mailFrom || "info@generalcoppersrl.com");
+      const mailTo = Array.isArray(meta.mailTo) ? meta.mailTo.join(", ") : String(meta.mailTo || "matteo@generalcoppersrl.com");
       const docId = meta.emailDocId ? String(meta.emailDocId) : "";
       const hash = String(meta.lastSentStateHash || meta.templateHash || "");
       const hashShort = hash ? hash.slice(0, 10) : "";
@@ -4745,7 +4754,9 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
       if(reorderedCount != null) header += ` • Riordinati <b>${escapeHtml(String(reorderedCount))}</b>`;
       if(reason) header += ` • trigger: <span class="mono">${escapeHtml(reason)}</span>`;
       if(hashShort) header += ` • hash ${escapeHtml(hashShort)}`;
-      if(who) header += ` • da: <span class="mono">${escapeHtml(who)}</span>`;
+      header += ` • mittente: <span class="mono">${escapeHtml(mailFrom)}</span>`;
+      header += ` • destinatario: <span class="mono">${escapeHtml(mailTo)}</span>`;
+      header += ` • gestione: <span class="mono">${escapeHtml(processor)}</span>`;
       if(docId) header += ` • doc: <span class="mono">${escapeHtml(docId)}</span>`;
       el.innerHTML = header;
 
@@ -6152,7 +6163,7 @@ function currentInv(){
         </div>`;
 
       const sottoscortaMarkup = `<div class="gridTable cols4">${tableHead}${rows.join("")}${totalRow}</div>`;
-      setStableInteractiveHtml(list, sottoscortaMarkup, "sottoscorta:" + sottoscortaMarkup);
+      setStableInteractiveHtml(list, sottoscortaMarkup, "sottoscorta:" + fnv1aHex(sottoscortaMarkup));
     }
 
     // --- HOME dashboard (mini cockpit + info tiles + lista sotto-scorta) ---
@@ -6284,7 +6295,7 @@ function currentInv(){
 
         lowList.classList.add("cols4");
         const homeLowMarkup = `<div class="row gridHead gridRow"><div class="gridCell">SKU</div><div class="gridCell">Prodotto</div><div class="gridCell gridRight">Fisica</div><div class="gridCell gridRight">Prenotati</div></div>` + rows.join("") + totalRow;
-        setStableInteractiveHtml(lowList, homeLowMarkup, "home-low:" + homeLowMarkup);
+        setStableInteractiveHtml(lowList, homeLowMarkup, "home-low:" + fnv1aHex(homeLowMarkup));
         if(lowHint) lowHint.textContent = "Colonna Fisica = giacenza fisica effettiva anche negativa. Disponibile reale = fisica - prenotati totali. Tocca una riga per aprire la scheda SKU.";
       }
 
@@ -10601,10 +10612,7 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
   if(state.ui.productDetailsEditMode){
     setTimeout(()=>{
       const wrap = $("productDetailsContent");
-      const active = document.activeElement;
-      // Non rubare il focus se l'utente ha già cliccato un campo diverso.
-      if(active && wrap?.contains?.(active) && active.matches?.("input, textarea, select")) return;
-      const first = wrap?.querySelector?.('[data-field="qty"], [data-field="title"], [data-field="sku"]');
+      const first = wrap?.querySelector?.('[data-field="sku"], [data-field="title"], [data-field="qty"]');
       try{ first?.focus?.(); }catch(_e){}
     }, 50);
   }
