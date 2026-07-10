@@ -3026,17 +3026,19 @@ function guessTitleFromRaw(rawText, sku){
 
     function __isReorderedItem(it){
       try{
-        if(!it) return false;
+        if(!it || !(state.twReorders?.bySku instanceof Map)) return false;
         const sku = toSkuId(it.sku || it.id || "");
-        if(sku && state.twReorders?.bySku instanceof Map && state.twReorders.bySku.has(sku)) return true;
-        return !!(
-          it.reordered === true ||
-          String(it.reorderStatus || "").toLowerCase() === "riordinato" ||
-          it.reorderedAtClient ||
-          it.reorderedAt ||
-          it.reorderedQty ||
-          it.reorderedQueueId
-        );
+        const candidates = new Set([sku, resolveSkuAlias(sku)]);
+        for(const alias of (Array.isArray(it.aliasSkus) ? it.aliasSkus : skuAliasMembers(sku))) candidates.add(toSkuId(alias || ""));
+        for(const candidate of candidates){
+          if(!candidate) continue;
+          const lifecycle = state.twReorders.bySku.get(candidate);
+          if(!lifecycle) continue;
+          const episodeId = String(lifecycle.episodeId || "").trim();
+          const reorderedEpisodeId = String(lifecycle.reorderedEpisodeId || lifecycle.latestReorderEpisodeId || "").trim();
+          if(lifecycle.active === true && episodeId && reorderedEpisodeId === episodeId) return true;
+        }
+        return false;
       }catch(_e){
         return false;
       }
@@ -3969,6 +3971,7 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
     // --- Firestore paths ---
     const COL_META = "amzInventoryMeta";
     const DOC_LOWSTOCK_EMAIL_STATE = "lowStockEmailState";
+    const COL_LOW_STOCK_SKU_STATES = "amzInventoryLowStockSkuStates";
     
     const COL_ROOT = "amzInventory";
     const SUB_ITEMS = "items";
@@ -4532,7 +4535,6 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
         scheduleLegacyLowStockMailShield("inventory_" + loc, 120);
         scheduleLowStockThresholdRepair("inventory_" + loc);
         triggerLowStockMailFromRealtime("realtime_low_stock_" + loc);
-        scheduleTwReordersBackfillFromState("inventory_" + loc);
         scheduleSharedSkuInventorySync("inventory_" + loc);
       }, (err)=>{
         console.warn("inventory watch error", err);
@@ -4850,43 +4852,45 @@ function startAllLogs(){
           state.twReorders = { unsub:null, bySku:new Map(), ready:false, error:"", backfillTimer:null, backfilledKeys:new Set() };
         }
 
-        const colRef = api.collection(db, "producedDays", TW_WRITE_LINE_BUCKET, "queue");
-        const q = api.query(colRef, api.limit(1000));
+        // Fonte autorevole: stato cloud del ciclo di sottoscorta corrente.
+        // Non leggiamo più vecchi flag inventario o l'intera coda storica.
+        const colRef = api.collection(db, COL_LOW_STOCK_SKU_STATES);
+        const q = api.query(colRef, api.limit(2000));
         state.twReorders.unsub = api.onSnapshot(q, (snap)=>{
           const bySku = new Map();
-          const markers = [];
           snap.forEach((docSnap)=>{
-            const marker = twQueueReorderMarkerFromDoc(docSnap);
-            if(!marker) return;
-            markers.push(marker);
-            const prev = bySku.get(marker.sku);
-            if(!prev || (marker.createdAtClient || 0) > (prev.createdAtClient || 0)){
-              bySku.set(marker.sku, marker);
+            const d = docSnap.data() || {};
+            const sku = toSkuId(d.sku || d.canonicalSku || docSnap.id || "");
+            if(!sku) return;
+            const lifecycle = { id:docSnap.id, ...d, sku };
+            bySku.set(sku, lifecycle);
+            const aliases = Array.isArray(d.aliases) ? d.aliases : [];
+            for(const aliasRaw of aliases){
+              const alias = toSkuId(aliasRaw || "");
+              if(alias && !bySku.has(alias)) bySku.set(alias, lifecycle);
             }
           });
 
           state.twReorders.bySku = bySku;
           state.twReorders.ready = true;
           state.twReorders.error = "";
+          clearSkuRuntimeCache("low_stock_lifecycle_snapshot");
 
           if(state.route.view === "home") renderHomeDashboard();
           if(state.route.view === "location") renderInventoryList();
           if(state.ui.sheet === "sottoscorta") renderSottoscortaSheet();
           if(state.ui.sheet === "productDetails") renderProductDetailsSheet();
-
-          scheduleTwReordersBackfill(markers, "queue_snapshot");
         }, (err)=>{
           if(state.twReorders){
             state.twReorders.error = err?.message || String(err);
             state.twReorders.ready = false;
           }
-          console.warn("tw reorder watch error", err);
+          console.warn("low-stock lifecycle watch error", err);
         });
       }catch(err){
-        console.warn("startTwReordersWatch", err);
+        console.warn("start low-stock lifecycle watch", err);
       }
     }
-
     
     function readFlowLogTimestamp(v){
       try{
@@ -4982,86 +4986,19 @@ function stopTwReordersWatch(){
 
     
 
-    function scheduleTwReordersBackfillFromState(reason){
-      try{
-        const markers = Array.from((state.twReorders?.bySku instanceof Map) ? state.twReorders.bySku.values() : []);
-        scheduleTwReordersBackfill(markers, reason || "state");
-      }catch(_e){}
+    function scheduleTwReordersBackfillFromState(_reason){
+      // Disabilitato: i vecchi flag non sono più una fonte valida.
+      return;
     }
 
-    function scheduleTwReordersBackfill(markers, reason){
-      try{
-        if(!state.user?.isAdmin || !state.user?.isWhitelisted) return;
-        if(!Array.isArray(markers) || !markers.length) return;
-        if(!(state.inventory?.cerea?.meta?.loaded && state.inventory?.concamarise?.meta?.loaded)) return;
-        if(!state.twReorders) return;
-        if(state.twReorders.backfillTimer) clearTimeout(state.twReorders.backfillTimer);
-        state.twReorders.backfillTimer = setTimeout(()=>{
-          state.twReorders.backfillTimer = null;
-          void backfillTwReorderFlags(markers, reason || "scheduled");
-        }, 800);
-      }catch(err){
-        console.warn("scheduleTwReordersBackfill", err);
-      }
+    function scheduleTwReordersBackfill(_markers, _reason){
+      // Disabilitato: lo stato RIORDINATO è gestito solo dal backend per episodio.
+      return;
     }
 
-    async function backfillTwReorderFlags(markers, reason){
-      try{
-        if(!state.user?.isAdmin || !state.user?.isWhitelisted) return;
-        const api = state.firebase?.api;
-        const db = state.firebase?.db;
-        if(!api || !db) return;
-        if(!Array.isArray(markers) || !markers.length) return;
-
-        const newestBySku = new Map();
-        for(const m of markers){
-          const sku = toSkuId(m?.sku || "");
-          if(!sku) continue;
-          const prev = newestBySku.get(sku);
-          if(!prev || (Number(m.createdAtClient||0) > Number(prev.createdAtClient||0))) newestBySku.set(sku, m);
-        }
-
-        const writes = [];
-        for(const [sku, marker] of newestBySku.entries()){
-          const locCandidates = [marker.loc, "concamarise", "cerea"].filter(Boolean);
-          const locs = Array.from(new Set(locCandidates.filter(x=>x === "cerea" || x === "concamarise")));
-          for(const loc of locs){
-            const item = getProductBySku(loc, sku);
-            if(!item) continue; // non creare documenti inventario nuovi durante il backfill
-            if(__isReorderedItem({ ...item, sku })) continue;
-            const key = `${loc}::${sku}::${marker.id || marker.queueOrderKey || "queue"}`;
-            if(state.twReorders.backfilledKeys?.has(key)) continue;
-            writes.push({ loc, sku, marker, key });
-          }
-        }
-        if(!writes.length) return;
-
-        const chunks = [];
-        for(let i=0; i<writes.length; i+=400) chunks.push(writes.slice(i, i+400));
-
-        for(const chunk of chunks){
-          const batch = api.writeBatch(db);
-          for(const w of chunk){
-            const itemRef = api.doc(db, COL_ROOT, w.loc, SUB_ITEMS, w.sku);
-            batch.set(itemRef, {
-              reordered: true,
-              reorderStatus: "riordinato",
-              reorderedAt: api.serverTimestamp(),
-              reorderedAtClient: Date.now(),
-              reorderedQty: Number.isFinite(Number(w.marker.qty)) ? Number(w.marker.qty) : null,
-              reorderedQueueId: w.marker.id || "",
-              reorderedQueueOrderKey: w.marker.queueOrderKey || "",
-              reorderedByEmail: w.marker.createdByEmail || "",
-              reorderedBackfill: true,
-              reorderedBackfillReason: String(reason || "pregresso")
-            }, { merge:true });
-            try{ state.twReorders.backfilledKeys.add(w.key); }catch(_e){}
-          }
-          await batch.commit();
-        }
-      }catch(err){
-        console.warn("backfillTwReorderFlags", err);
-      }
+    async function backfillTwReorderFlags(_markers, _reason){
+      // Compatibilità: nessuna scrittura legacy.
+      return;
     }
 
     function startLogsFor(loc){
@@ -8954,6 +8891,30 @@ async function hubWriteReserveQueueOrderKeys(count){
   });
 }
 
+async function waitForReorderCloudAck(ref, timeoutMs=45000){
+  const api = state.firebase?.api;
+  if(!api?.onSnapshot || !ref) throw new Error("Conferma cloud non disponibile.");
+  return await new Promise((resolve, reject)=>{
+    let done = false;
+    let unsub = null;
+    const finish = (fn, value)=>{
+      if(done) return;
+      done = true;
+      try{ unsub && unsub(); }catch(_e){}
+      clearTimeout(timer);
+      fn(value);
+    };
+    const timer = setTimeout(()=> finish(reject, new Error("Riga creata, ma conferma backend non ricevuta entro 45 secondi.")), timeoutMs);
+    unsub = api.onSnapshot(ref, (snap)=>{
+      if(!snap.exists()) return;
+      const d = snap.data() || {};
+      const status = String(d.reorderCloudStatus || "").toLowerCase();
+      if(status === "recorded") finish(resolve, d);
+      if(status === "error") finish(reject, new Error(String(d.reorderCloudError || "Errore registrazione riordino cloud.")));
+    }, (err)=> finish(reject, err));
+  });
+}
+
 async function reorderProductToTabelloneWrite(){
   const loc = state.route.loc;
   const sku = toSkuId(state.ui.productDetailsSku || "");
@@ -8963,11 +8924,20 @@ async function reorderProductToTabelloneWrite(){
     showToast("Permessi", "Solo Admin può creare un riordino.", 2200);
     return;
   }
+  if(state.ui.reorderRequestBusy){
+    showToast("Riordino in corso", "Attendi la conferma cloud del riordino precedente.", 2200);
+    return;
+  }
 
   const it = getProductBySku(loc, sku) || getProductBySku("concamarise", sku) || getProductBySku("cerea", sku) || null;
   const stockAgg = getSkuStockAggregate(sku, loc) || it;
-  const title = squashWhitespace(it?.title || $("productDetailsTitle")?.textContent || sku) || sku;
-  const raw = prompt(`Quantità da riordinare per:\n${title}\n\nSKU: ${sku}`, "480");
+  const canonicalSku = resolveSkuAlias(sku) || sku;
+  const aliases = skuAliasMembers(sku);
+  const title = squashWhitespace(it?.title || stockAgg?.title || $("productDetailsTitle")?.textContent || sku) || sku;
+  const raw = prompt(`Quantità da riordinare per:
+${title}
+
+SKU: ${sku}`, "480");
   if(raw === null) return;
 
   const qty = parseSignedQtyStrict(raw);
@@ -8983,21 +8953,22 @@ async function reorderProductToTabelloneWrite(){
     return;
   }
 
+  state.ui.reorderRequestBusy = true;
   try{
     const keys = await hubWriteReserveQueueOrderKeys(1);
     const queueOrderKey = hubWriteNormalizeOrderKey(keys[0] || "");
     if(!queueOrderKey) throw new Error("Ordine coda non assegnato.");
 
+    // Ogni clic crea una nuova riga cloud indipendente: lo stesso SKU può essere
+    // riordinato senza limiti. Il backend crea poi lo storico immutabile e collega
+    // il riordino al ciclo di sottoscorta corrente.
     const queueCol = api.collection(db, "producedDays", TW_WRITE_LINE_BUCKET, "queue");
     const ref = api.doc(queueCol);
     const nowClient = Date.now();
     const who = state.user?.email || state.user?.uid || "";
     const availableQty = stockAgg ? lowStockQtyValue(stockAgg) : null;
 
-    const batch = api.writeBatch(db);
-    const itemRef = api.doc(db, COL_ROOT, loc, SUB_ITEMS, sku);
-
-    batch.set(ref, {
+    await api.setDoc(ref, {
       queueOrderKey,
       kind: "amazonSku",
       source: "manual_amazon_unico",
@@ -9008,6 +8979,8 @@ async function reorderProductToTabelloneWrite(){
       inventoryArea: "unica",
       amazonInventoryLocationLabel: INVENTORY_SINGLE_AREA_LABEL,
       amazonInventorySku: sku,
+      amazonInventoryCanonicalSku: canonicalSku,
+      amazonInventoryAliases: aliases,
       amazonInventoryTitle: title,
       amazonInventoryUom: "pz",
       code: sku,
@@ -9020,6 +8993,8 @@ async function reorderProductToTabelloneWrite(){
       hubInventorySourceLocation: loc,
       hubInventorySourceQty: availableQty,
       note: "Riordino creato da Hub Inventario Amazon",
+      reorderCloudStatus: "pending",
+      reorderRequestVersion: 2,
       createdAt: api.serverTimestamp(),
       createdAtMs: nowClient,
       createdAtOrig: api.serverTimestamp(),
@@ -9028,24 +9003,17 @@ async function reorderProductToTabelloneWrite(){
       createdByEmail: who || null
     }, { merge:true });
 
-    batch.set(itemRef, {
-      reordered: true,
-      reorderStatus: "riordinato",
-      reorderedAt: api.serverTimestamp(),
-      reorderedAtClient: nowClient,
-      reorderedQty: qty,
-      reorderedQueueId: ref.id,
-      reorderedQueueOrderKey: queueOrderKey,
-      reorderedByUid: state.user?.uid || null,
-      reorderedByEmail: who || null
-    }, { merge:true });
-
-    await batch.commit();
-
-    showToast("Riordino creato", `${qty} pz aggiunti alla coda Tabellone WRITE.`, 2600);
+    const ack = await waitForReorderCloudAck(ref);
+    showToast(
+      "Riordino registrato",
+      `${qty} pz inviati a Liquidi Conca • storico cloud ${ack.reorderEventId ? "OK" : "registrato"}.`,
+      3000
+    );
   }catch(err){
     console.error("reorderProductToTabelloneWrite", err);
-    showToast("Errore riordino", String(err?.message || err).slice(0, 220), 3200);
+    showToast("Errore riordino", String(err?.message || err).slice(0, 240), 3600);
+  }finally{
+    state.ui.reorderRequestBusy = false;
   }
 }
 
