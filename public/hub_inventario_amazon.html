@@ -694,6 +694,87 @@ Tip:
     const $ = (id)=> document.getElementById(id);
     const clamp = (n, a, b)=> Math.max(a, Math.min(b, n));
 
+    // --- Stabilità UI realtime ---
+    // Firestore può produrre più snapshot ravvicinati anche quando il contenuto visibile
+    // non cambia. Non ricreiamo il DOM durante hover/focus e non tocchiamo markup identico.
+    const __stableUiRegions = new WeakMap();
+
+    function __stableUiState(el){
+      if(!el) return null;
+      let rec = __stableUiRegions.get(el);
+      if(!rec){
+        rec = { signature:"", pending:null, pointerInside:false, focusInside:false, bound:false };
+        __stableUiRegions.set(el, rec);
+      }
+      return rec;
+    }
+
+    function __flushStableUiRegion(el){
+      const rec = __stableUiState(el);
+      if(!el || !rec || !rec.pending) return false;
+      const activeInside = !!(document.activeElement && el.contains(document.activeElement));
+      const pointerHover = !!el.matches?.(":hover");
+      if(rec.pointerInside || rec.focusInside || activeInside || pointerHover) return false;
+      const next = rec.pending;
+      rec.pending = null;
+      if(rec.signature === next.signature) return false;
+      el.innerHTML = next.html;
+      rec.signature = next.signature;
+      return true;
+    }
+
+    function __bindStableUiRegion(el){
+      const rec = __stableUiState(el);
+      if(!el || !rec || rec.bound) return;
+      rec.bound = true;
+      el.addEventListener("pointerenter", ()=>{ rec.pointerInside = true; }, { passive:true });
+      el.addEventListener("pointerleave", ()=>{
+        rec.pointerInside = false;
+        __flushStableUiRegion(el);
+      }, { passive:true });
+      el.addEventListener("focusin", ()=>{ rec.focusInside = true; });
+      el.addEventListener("focusout", ()=>{
+        setTimeout(()=>{
+          rec.focusInside = !!(document.activeElement && el.contains(document.activeElement));
+          __flushStableUiRegion(el);
+        }, 0);
+      });
+    }
+
+    function setStableInteractiveHtml(el, html, signature=""){
+      if(!el) return false;
+      __bindStableUiRegion(el);
+      const rec = __stableUiState(el);
+      const markup = String(html ?? "");
+      const sig = String(signature || markup);
+      if(rec.signature === sig){
+        rec.pending = null;
+        return false;
+      }
+      const activeInside = !!(document.activeElement && el.contains(document.activeElement));
+      const pointerHover = !!el.matches?.(":hover");
+      const interacting = rec.pointerInside || rec.focusInside || activeInside || pointerHover;
+      if(interacting && el.childNodes.length){
+        rec.pending = { html:markup, signature:sig };
+        return false;
+      }
+      el.innerHTML = markup;
+      rec.signature = sig;
+      rec.pending = null;
+      return true;
+    }
+
+    function productDetailsHasLiveDraft(){
+      try{
+        const content = $("productDetailsContent");
+        return !!(
+          state.ui.productDetailsEditMode &&
+          content &&
+          content.querySelector('[data-field="qty"], [data-field="title"], [data-field="asin"], [data-field="skuAliases"]')
+        );
+      }catch(_e){ return false; }
+    }
+
     // --- iOS Press Effect (CARD / RIGHE / BOTTONI) ---
     // Implementazione con event delegation: niente listener duplicati, niente memory leak.
     (function installPressEffect(){
@@ -1641,21 +1722,7 @@ function guessTitleFromRaw(rawText, sku){
           return Array.from(new Uint8Array(digest)).map(b=>b.toString(16).padStart(2,"0")).join("");
         }
       }catch(_e){}
-      // Compatibilità storica flussi/PDF: non cambiare il fallback generale.
-      return fnv1aHex(s);
-    }
-
-    async function stableLowStockStateHashHex(str){
-      const s = String(str||"");
-      try{
-        if(window.crypto && crypto.subtle && typeof TextEncoder !== "undefined"){
-          const enc = new TextEncoder();
-          const buf = enc.encode(s);
-          const digest = await crypto.subtle.digest("SHA-256", buf);
-          return Array.from(new Uint8Array(digest)).map(b=>b.toString(16).padStart(2,"0")).join("");
-        }
-      }catch(_e){}
-      // Per le mail lo SHA-256 deve restare identico in ogni browser/sessione.
+      // Stesso SHA-256 anche senza WebCrypto: nessun cambio hash tra browser/sessioni.
       return sha256HexFallback(s);
     }
 
@@ -3190,8 +3257,8 @@ function guessTitleFromRaw(rawText, sku){
       ));
 
       const hashes = await Promise.all([
-        stableLowStockStateHashHex(canonicalPayload),
-        ...legacyPayloads.map(payload=>stableLowStockStateHashHex(payload))
+        stableHashHex(canonicalPayload),
+        ...legacyPayloads.map(payload=>stableHashHex(payload))
       ]);
       const stateHash = String(hashes[0] || "");
       // Include anche il vecchio fallback FNV usato da versioni precedenti quando
@@ -6017,7 +6084,7 @@ function currentInv(){
 
       if(!state.user?.isWhitelisted){
         hint.textContent = "Accedi per vedere la sotto-scorta.";
-        list.innerHTML = `<div class="hint">Accesso richiesto.</div>`;
+        setStableInteractiveHtml(list, `<div class="hint">Accesso richiesto.</div>`, "sottoscorta:auth");
         return;
       }
 
@@ -6028,7 +6095,7 @@ function currentInv(){
       hint.textContent = `Sotto scorta: ${out.length} SKU • ${scopeLabel} • Calcolo cloud: disponibile totale SKU = fisica inventario unico - prenotati totali.`;
 
       if(!out.length){
-        list.innerHTML = `<div class="hint">Nessun articolo sotto scorta 🎉</div>`;
+        setStableInteractiveHtml(list, `<div class="hint">Nessun articolo sotto scorta 🎉</div>`, "sottoscorta:empty");
         return;
       }
 
@@ -6084,7 +6151,8 @@ function currentInv(){
           <div class="gridTotalVal"><span class="badge">${out.length}</span></div>
         </div>`;
 
-      list.innerHTML = `<div class="gridTable cols4">${tableHead}${rows.join("")}${totalRow}</div>`;
+      const sottoscortaMarkup = `<div class="gridTable cols4">${tableHead}${rows.join("")}${totalRow}</div>`;
+      setStableInteractiveHtml(list, sottoscortaMarkup, "sottoscorta:" + sottoscortaMarkup);
     }
 
     // --- HOME dashboard (mini cockpit + info tiles + lista sotto-scorta) ---
@@ -6135,7 +6203,7 @@ function currentInv(){
         if(piecesSub) piecesSub.textContent = "Inventario unico: —";
         if(upd) upd.textContent = "Aggiornato: —";
         if(lowCount) lowCount.textContent = "—";
-        if(lowList) lowList.innerHTML = `<div class="hint">Accedi per vedere la sotto-scorta.</div>`;
+        if(lowList) setStableInteractiveHtml(lowList, `<div class="hint">Accedi per vedere la sotto-scorta.</div>`, "home-low:auth");
         if(lowHint) lowHint.textContent = "";
         return;
       }
@@ -6166,7 +6234,7 @@ function currentInv(){
         lowCount.textContent = fmtN(out.length);
 
         if(!out.length){
-          lowList.innerHTML = `<div class="hint">Nessun articolo sotto scorta 🎯</div>`;
+          setStableInteractiveHtml(lowList, `<div class="hint">Nessun articolo sotto scorta 🎯</div>`, "home-low:empty");
           if(lowHint) lowHint.textContent = "";
           renderHomeLowStockMailLog();
           return;
@@ -6215,7 +6283,8 @@ function currentInv(){
           </div>`;
 
         lowList.classList.add("cols4");
-        lowList.innerHTML = `<div class="row gridHead gridRow"><div class="gridCell">SKU</div><div class="gridCell">Prodotto</div><div class="gridCell gridRight">Fisica</div><div class="gridCell gridRight">Prenotati</div></div>` + rows.join("") + totalRow;
+        const homeLowMarkup = `<div class="row gridHead gridRow"><div class="gridCell">SKU</div><div class="gridCell">Prodotto</div><div class="gridCell gridRight">Fisica</div><div class="gridCell gridRight">Prenotati</div></div>` + rows.join("") + totalRow;
+        setStableInteractiveHtml(lowList, homeLowMarkup, "home-low:" + homeLowMarkup);
         if(lowHint) lowHint.textContent = "Colonna Fisica = giacenza fisica effettiva anche negativa. Disponibile reale = fisica - prenotati totali. Tocca una riga per aprire la scheda SKU.";
       }
 
@@ -7910,7 +7979,7 @@ function openComboSheet(){
       }
     }
 
-    function renderProductDetailsSheet(){
+    function renderProductDetailsSheet(opts = {}){
   const loc = state.route.loc;
   const sku = toSkuId(state.ui.productDetailsSku||"");
 
@@ -7922,6 +7991,15 @@ function openComboSheet(){
   const actions = $("productDetailsActions");
 
   if(!hint || !content || !actions) return;
+
+  // Snapshot inventario/combo/riordini: mentre l'utente sta modificando,
+  // non sostituire gli input. La bozza resta intatta fino a Salva/Annulla.
+  if(!opts.force && productDetailsHasLiveDraft()){
+    state.ui.productDetailsRenderPending = true;
+    return;
+  }
+  state.ui.productDetailsRenderPending = false;
+
   hint.textContent = "";
   hint.style.display = "none";
 
@@ -10519,11 +10597,14 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
   }
   state.ui.productDetailsEditMode = !state.ui.productDetailsEditMode;
   clearPdFieldErrors();
-  renderProductDetailsSheet();
+  renderProductDetailsSheet({ force:true });
   if(state.ui.productDetailsEditMode){
     setTimeout(()=>{
       const wrap = $("productDetailsContent");
-      const first = wrap?.querySelector?.('[data-field="sku"], [data-field="title"], [data-field="qty"]');
+      const active = document.activeElement;
+      // Non rubare il focus se l'utente ha già cliccato un campo diverso.
+      if(active && wrap?.contains?.(active) && active.matches?.("input, textarea, select")) return;
+      const first = wrap?.querySelector?.('[data-field="qty"], [data-field="title"], [data-field="sku"]');
       try{ first?.focus?.(); }catch(_e){}
     }, 50);
   }
@@ -10574,13 +10655,13 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
           if(!state.user?.isAdmin) return;
           state.ui.productDetailsEditMode = true;
           clearPdFieldErrors();
-          renderProductDetailsSheet();
+          renderProductDetailsSheet({ force:true });
           return;
         }
         if(aCancel){
           state.ui.productDetailsEditMode = false;
           clearPdFieldErrors();
-          renderProductDetailsSheet();
+          renderProductDetailsSheet({ force:true });
           return;
         }
         if(aLoad){ loadProductFromDetails(); return; }
