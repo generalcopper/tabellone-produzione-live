@@ -5505,6 +5505,7 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
       const api = state.firebase?.api;
       const db = state.firebase?.db;
       const candidates = new Map();
+      const productsWithoutLocation = [];
       if(!api || !db) return candidates;
 
       // Fonte 1: anagrafica globale prodotti. È la fonte principale perché il bug cancellava solo /amzInventory/{sede}/items/{SKU}.
@@ -5519,6 +5520,10 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
           if(d.active === false) return;       // cancellazioni manuali volontarie: non ripristinare
           if(d.renamedTo || d.renamedAt || d.lastSeenKind === "manual_rename") return;
           const locs = zeroStockRecoveryCandidateLocsFromProductDoc(d);
+          if(!locs.length){
+            productsWithoutLocation.push({ sku, title:d.title || d.name || sku, productData:d });
+            return;
+          }
           locs.forEach(loc=> zeroStockRecoveryAddCandidate(candidates, {
             ...d,
             sku,
@@ -5532,31 +5537,39 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
         console.warn("zero-stock recovery product scan skipped:", err);
       }
 
-      // Fonte 2: ultimi movimenti cloud. Fallback utile se qualche anagrafica globale è incompleta.
+      // Fonte 2 mirata: solo prodotti senza sede nell'anagrafica.
+      // Legge una normale sottocollezione per SKU, senza collectionGroup e senza indici aggiuntivi Firebase.
       try{
-        if(api.collectionGroup){
-          const cg = api.collectionGroup(db, SUB_MOVES);
-          const q = api.query(cg, api.orderBy("createdAtClient", "desc"), api.limit(1500));
-          const snap = await api.getDocs(q);
-          snap.forEach(docSnap=>{
-            const d = docSnap.data() || {};
-            const parentSku = docSnap?.ref?.parent?.parent?.id || "";
-            const sku = toSkuId(d.sku || parentSku || "");
-            if(!sku) return;
-            if(String(d.type || "") === "manual_rename") return;
-            const locs = zeroStockRecoveryMovementLocs(d);
-            locs.forEach(loc=> zeroStockRecoveryAddCandidate(candidates, {
-              ...d,
-              sku,
-              loc,
-              title: d.title || d.productTitle || sku,
-              source: "movements",
-              sourceKind: d.type || "movement"
-            }));
-          });
+        const fallbackProducts = productsWithoutLocation.slice(0, 300);
+        const CHUNK = 20;
+        for(let i=0; i<fallbackProducts.length; i+=CHUNK){
+          const part = fallbackProducts.slice(i, i+CHUNK);
+          await Promise.all(part.map(async base=>{
+            try{
+              const movesCol = api.collection(db, COL_PRODUCTS, base.sku, SUB_MOVES);
+              const movesQuery = api.query(movesCol, api.limit(30));
+              const movesSnap = await api.getDocs(movesQuery);
+              movesSnap.forEach(docSnap=>{
+                const d = docSnap.data() || {};
+                if(String(d.type || "") === "manual_rename") return;
+                const locs = zeroStockRecoveryMovementLocs(d);
+                locs.forEach(loc=> zeroStockRecoveryAddCandidate(candidates, {
+                  ...base.productData,
+                  ...d,
+                  sku: base.sku,
+                  loc,
+                  title: d.title || d.productTitle || base.title || base.sku,
+                  source: "movements_per_product",
+                  sourceKind: d.type || "movement"
+                }));
+              });
+            }catch(err){
+              console.warn("zero-stock recovery product movement fallback skipped:", base.sku, err);
+            }
+          }));
         }
       }catch(err){
-        console.warn("zero-stock recovery movement scan skipped:", err);
+        console.warn("zero-stock recovery movement fallback skipped:", err);
       }
 
       return candidates;
