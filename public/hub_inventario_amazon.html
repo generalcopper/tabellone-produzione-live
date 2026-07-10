@@ -4736,19 +4736,28 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
       }
 
       const sentAt = meta.sentAt || meta.updatedAt || meta.lastSentAt || meta.sentAtClient || null;
-      const dt = __fmtTsAny(sentAt);
+      const checkedAt = meta.lastBackendCheckedAt || meta.lastObservedAt || meta.lastBackendEventAt || meta.lastBackendCheckedAtClient || meta.lastObservedAtClient || meta.lastBackendEventAtClient || null;
+      const sentDate = __fmtTsAny(sentAt);
+      const checkedDate = __fmtTsAny(checkedAt);
       const total = Number.isFinite(meta.total) ? meta.total : (Number.isFinite(meta.lastTotal) ? meta.lastTotal : null);
       const toHandleCount = Number.isFinite(meta.toHandleCount) ? meta.toHandleCount : null;
       const reorderedCount = Number.isFinite(meta.reorderedCount) ? meta.reorderedCount : null;
-      const reason = meta.reason ? String(meta.reason) : "";
+      const reason = meta.reason || meta.lastBackendReason ? String(meta.reason || meta.lastBackendReason) : "";
+      const result = String(meta.lastBackendResult || "");
       const processor = String(meta.processor || "backend");
       const mailFrom = String(meta.mailFrom || "info@generalcoppersrl.com");
       const mailTo = Array.isArray(meta.mailTo) ? meta.mailTo.join(", ") : String(meta.mailTo || "matteo@generalcoppersrl.com");
-      const docId = meta.emailDocId ? String(meta.emailDocId) : "";
-      const hash = String(meta.lastSentStateHash || meta.templateHash || "");
+      const hash = String(meta.lastObservedStateHash || meta.currentStateHash || meta.lastSentStateHash || meta.templateHash || "");
       const hashShort = hash ? hash.slice(0, 10) : "";
+      const resultLabel = result === "email_queued" ? "mail accodata"
+        : result === "duplicate_blocked" ? "stato già notificato"
+        : result === "waiting_settle" ? "variazione rilevata, in assestamento"
+        : result === "error" ? "errore backend"
+        : (result || "backend attivo");
 
-      let header = `Ultima mail sotto scorta: <b>${escapeHtml(dt)}</b>`;
+      let header = `Ultima mail sotto scorta: <b>${escapeHtml(sentDate)}</b>`;
+      if(checkedAt) header += ` • Ultimo controllo backend: <b>${escapeHtml(checkedDate)}</b>`;
+      header += ` • Stato: <b>${escapeHtml(resultLabel)}</b>`;
       if(total != null) header += ` • SKU <b>${escapeHtml(String(total))}</b>`;
       if(toHandleCount != null) header += ` • Da gestire <b>${escapeHtml(String(toHandleCount))}</b>`;
       if(reorderedCount != null) header += ` • Riordinati <b>${escapeHtml(String(reorderedCount))}</b>`;
@@ -4757,55 +4766,10 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
       header += ` • mittente: <span class="mono">${escapeHtml(mailFrom)}</span>`;
       header += ` • destinatario: <span class="mono">${escapeHtml(mailTo)}</span>`;
       header += ` • gestione: <span class="mono">${escapeHtml(processor)}</span>`;
-      if(docId) header += ` • doc: <span class="mono">${escapeHtml(docId)}</span>`;
+      if(meta.lastBackendError){
+        header += `<div class="hint" style="margin-top:6px;color:var(--bad)">Errore backend: ${escapeHtml(String(meta.lastBackendError))}</div>`;
+      }
       el.innerHTML = header;
-
-      let preview = meta.preview || meta.lastPreview || null;
-      if(!preview){
-        const d = state.mail?.lowStock?.emailDoc || null;
-        preview = d?.lowStock?.preview || d?.preview || d?.meta?.preview || null;
-        if(!preview && d?.message?.text) preview = __parseLowStockPreviewFromText(d.message.text);
-      }
-
-      // Solo snapshot del template nuovo: nessuna compatibilità grafica Cerea / Concamarise.
-      const rows = Array.isArray(preview?.unica) ? preview.unica : [];
-
-      if(!rows.length){
-        const busy = !!state.mail?.lowStock?.emailDocBusy;
-        const docErr = state.mail?.lowStock?.emailDocError || "";
-        if(busy){
-          el.innerHTML += `<div class="hint" style="margin-top:6px">Caricamento dettagli ultimo invio…</div>`;
-        }else if(meta.emailDocId && (meta.lastSentStateHash || meta.templateHash)){
-          __loadLowStockEmailDocIfNeeded(meta);
-          el.innerHTML += `<div class="hint" style="margin-top:6px">Caricamento dettagli ultimo invio…</div>`;
-        }
-        if(docErr) el.innerHTML += `<div class="hint" style="margin-top:6px">Dettagli email: ${escapeHtml(docErr)}</div>`;
-        return;
-      }
-
-      const list = rows.slice(0, 120).map(it=>{
-        const title = escapeHtml(String(it.title || "").trim() || "(senza nome)");
-        const sku = escapeHtml(toSkuId(it.sku || ""));
-        const available = Number.isFinite(Number(it.availableQty)) ? Number(it.availableQty) : (Number.isFinite(Number(it.qty)) ? Number(it.qty) : 0);
-        const physical = Number.isFinite(Number(it.physicalQty)) ? Number(it.physicalQty) : 0;
-        const reserved = Number.isFinite(Number(it.reservedQty)) ? Number(it.reservedQty) : 0;
-        const threshold = it.threshold ? String(it.threshold) : "—";
-        const status = it.reordered ? `<span class="reorderedTiny">RIORDINATO</span>` : "";
-        return `<div class="row" style="padding:8px 10px;border-top:1px solid rgba(0,0,0,.06)">
-          <div class="rowMain">
-            <p class="rowTitle" style="font-size:13px">${title} ${status}</p>
-            <div class="rowSub"><span class="mono">${sku}</span> · Fisica ${escapeHtml(String(physical))} · Prenotati ${escapeHtml(String(reserved))} · Soglia ${escapeHtml(threshold)}</div>
-          </div>
-          <div class="badge warn" title="Disponibile reale">${escapeHtml(String(available))}</div>
-        </div>`;
-      }).join("");
-
-      el.innerHTML += `
-        <details style="margin-top:8px">
-          <summary style="cursor:pointer">Vedi righe inviate (inventario unico)</summary>
-          <div class="list compact" style="margin-top:8px;border:1px solid rgba(0,0,0,.06)">${list}</div>
-          <div class="hint" style="margin-top:8px">Disponibile = fisica − prenotati. Snapshot al momento dell'invio.</div>
-        </details>`;
     }
 
 function startAllLogs(){
