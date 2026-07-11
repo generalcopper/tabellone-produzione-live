@@ -9727,10 +9727,33 @@ async function reorderProductToTabelloneWrite(){
     return;
   }
 
-  const it = getProductBySku(loc, sku) || getProductBySku("concamarise", sku) || getProductBySku("cerea", sku) || null;
-  const stockAgg = getSkuStockAggregate(sku, loc) || it;
   const canonicalSku = resolveSkuAlias(sku) || sku;
   const aliases = skuAliasMembers(sku);
+  const it = getProductBySku(loc, sku)
+    || getProductBySku(loc, canonicalSku)
+    || getProductBySku("concamarise", sku)
+    || getProductBySku("concamarise", canonicalSku)
+    || getProductBySku("cerea", sku)
+    || getProductBySku("cerea", canonicalSku)
+    || null;
+  const stockAgg = getSkuStockAggregate(sku, loc) || it;
+
+  // Liquidi Conca accetta esclusivamente prodotti con area di produzione Concamarise.
+  // Il controllo avviene prima del prompt e prima di qualsiasi prenotazione/scrittura in coda.
+  if(!it){
+    showToast("Riordino non inviato", "Impossibile verificare l’area di produzione del prodotto.", 3200);
+    return;
+  }
+  const productionArea = readProductionAreaFromDoc(it, loc);
+  if(productionArea !== "concamarise"){
+    showToast(
+      "Riordino non inviato",
+      `${sku} ha area di produzione ${productionAreaLabel(productionArea)} e non può finire in Liquidi Conca.`,
+      3600
+    );
+    return;
+  }
+
   const title = squashWhitespace(it?.title || stockAgg?.title || $("productDetailsTitle")?.textContent || sku) || sku;
   const raw = prompt(`Quantità da riordinare per:
 ${title}
@@ -9776,6 +9799,11 @@ SKU: ${sku}`, "480");
       amazonInventoryArea: "unica",
       inventoryArea: "unica",
       amazonInventoryLocationLabel: INVENTORY_SINGLE_AREA_LABEL,
+      productionArea: "concamarise",
+      areaProduzione: "concamarise",
+      amazonInventoryProductionArea: "concamarise",
+      productionAreaLabel: productionAreaLabel("concamarise"),
+      tabelloneDestination: "liquidi_conca",
       amazonInventorySku: sku,
       amazonInventoryCanonicalSku: canonicalSku,
       amazonInventoryAliases: aliases,
@@ -9790,7 +9818,7 @@ SKU: ${sku}`, "480");
       rawLine: `AMZ: ${sku} | ${qty}`,
       hubInventorySourceLocation: loc,
       hubInventorySourceQty: availableQty,
-      note: "Riordino creato da Hub Inventario Amazon",
+      note: "Riordino creato da Hub Inventario Amazon • Produzione Concamarise • Destinazione Liquidi Conca",
       reorderCloudStatus: "pending",
       reorderRequestVersion: 2,
       createdAt: api.serverTimestamp(),
