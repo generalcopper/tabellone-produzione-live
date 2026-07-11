@@ -3611,6 +3611,116 @@ function guessTitleFromRaw(rawText, sku){
       }catch(_e){ return 0; }
     }
 
+    function __activeLowStockLifecycleForCandidates(candidates, sourceMap=null){
+      try{
+        const map = sourceMap instanceof Map ? sourceMap : null;
+        if(!map) return null;
+        let best = null;
+        for(const candidateRaw of (candidates || [])){
+          const candidate = toSkuId(candidateRaw || "");
+          if(!candidate) continue;
+          const lifecycle = map.get(candidate);
+          if(!lifecycle) continue;
+          const episodeId = String(lifecycle.episodeId || "").trim();
+          if(lifecycle.active !== true || !episodeId) continue;
+          if(!best || __reorderLifecycleTimestamp(lifecycle) >= __reorderLifecycleTimestamp(best)) best = lifecycle;
+        }
+        return best;
+      }catch(_e){ return null; }
+    }
+
+    function __directReorderMarkerLifecycle(it, candidates){
+      try{
+        if(!it) return null;
+
+        // Per gli aggregati possiamo verificare la sottoscorta senza ricorsione.
+        // Sulle singole righe questa funzione viene chiamata anche mentre l'aggregato
+        // è in costruzione, quindi non deve richiamare getSkuStockAggregate().
+        if(it.__isSkuAggregate && !__isLowStockItem(it)) return null;
+
+        const sources = [];
+        const seenObjects = new Set();
+        const pushSource = (value)=>{
+          if(!value || typeof value !== "object" || seenObjects.has(value)) return;
+          seenObjects.add(value);
+          sources.push(value);
+          if(value.__raw && typeof value.__raw === "object" && !seenObjects.has(value.__raw)){
+            seenObjects.add(value.__raw);
+            sources.push(value.__raw);
+          }
+        };
+        pushSource(it);
+        for(const line of (Array.isArray(it.locations) ? it.locations : [])) pushSource(line?.item || line);
+
+        let marker = null;
+        for(const d of sources){
+          const version = Number(d?.directReorderMarkerVersion || 0);
+          const active = d?.directReorderActive === true;
+          const at = Number(d?.directReorderAtClient || d?.reorderedAtClient || 0) || 0;
+          if(version < 1 || !active) continue;
+          if(!marker || at >= marker.at) marker = { d, at };
+        }
+        if(!marker) return null;
+
+        const markerData = marker.d || {};
+        const markerEpisodeId = String(markerData.directReorderEpisodeId || "").trim();
+        const authoritativeMap = state.twReorders?.lifecycleReady === true && state.twReorders?.lifecycleBySku instanceof Map
+          ? state.twReorders.lifecycleBySku
+          : null;
+        const activeAuthoritative = __activeLowStockLifecycleForCandidates(candidates, authoritativeMap);
+
+        // Se il backend ha già un ciclo autorevole, il marcatore Cerea è valido
+        // esclusivamente per quello stesso episodio. Così al ciclo successivo il verde
+        // non resta appiccicato a un vecchio riordino.
+        if(activeAuthoritative){
+          const activeEpisodeId = String(activeAuthoritative.episodeId || "").trim();
+          if(markerEpisodeId && activeEpisodeId && markerEpisodeId !== activeEpisodeId) return null;
+          return {
+            ...activeAuthoritative,
+            reordered: true,
+            reorderedEpisodeId: activeEpisodeId,
+            latestReorderEpisodeId: activeEpisodeId,
+            latestReorderEventId: markerData.directReorderEventId || activeAuthoritative.latestReorderEventId || "",
+            latestReorderQueueId: "",
+            latestReorderQty: Math.max(1, Math.round(Number(markerData.directReorderQty || 1))),
+            latestReorderAtClient: marker.at || __reorderLifecycleTimestamp(activeAuthoritative),
+            updatedAtClient: Math.max(marker.at || 0, Number(activeAuthoritative.updatedAtClient || 0) || 0),
+            reorderCountInEpisode: Math.max(1, Math.round(Number(markerData.directReorderCountInEpisode || 1))),
+            directRecordMode: "inventory_item_movement",
+            tabelloneWriteEnqueued: false
+          };
+        }
+
+        // Se esiste un documento autorevole per lo SKU ma non è attivo, il marcatore
+        // appartiene a un ciclo concluso e non deve più colorare la riga.
+        if(authoritativeMap){
+          const hasAuthoritativeDoc = Array.from(candidates || []).some(candidate=> authoritativeMap.has(toSkuId(candidate || "")));
+          if(hasAuthoritativeDoc) return null;
+        }
+
+        // Fallback per il breve intervallo prima che il backend crei il ciclo.
+        const fallbackEpisodeId = markerEpisodeId || `direct_${toSkuId(it.sku || it.id || "SKU")}_${Math.max(1, marker.at).toString(36)}`;
+        return {
+          sku: toSkuId(it.sku || it.id || ""),
+          canonicalSku: toSkuId(markerData.directReorderCanonicalSku || resolveSkuAlias(it.sku || it.id || "") || it.sku || it.id || ""),
+          aliases: Array.from(candidates || []).map(x=>toSkuId(x || "")).filter(Boolean),
+          active: true,
+          episodeId: fallbackEpisodeId,
+          reordered: true,
+          reorderedEpisodeId: fallbackEpisodeId,
+          latestReorderEpisodeId: fallbackEpisodeId,
+          latestReorderEventId: markerData.directReorderEventId || "",
+          latestReorderQueueId: "",
+          latestReorderQty: Math.max(1, Math.round(Number(markerData.directReorderQty || 1))),
+          latestReorderAtClient: marker.at,
+          updatedAtClient: marker.at,
+          reorderCountInEpisode: Math.max(1, Math.round(Number(markerData.directReorderCountInEpisode || 1))),
+          directRecordMode: "inventory_item_movement",
+          tabelloneWriteEnqueued: false
+        };
+      }catch(_e){ return null; }
+    }
+
     function __currentReorderLifecycle(it){
       try{
         if(!it || !(state.twReorders?.bySku instanceof Map)) return null;
@@ -3628,7 +3738,8 @@ function guessTitleFromRaw(rawText, sku){
           if(!current) continue;
           if(!best || __reorderLifecycleTimestamp(lifecycle) >= __reorderLifecycleTimestamp(best)) best = lifecycle;
         }
-        return best;
+        if(best) return best;
+        return __directReorderMarkerLifecycle(it, candidates);
       }catch(_e){
         return null;
       }
@@ -9090,6 +9201,7 @@ async function updateProductProductionAreaImmediate(area){
         : (typeRaw==="annulla_prelievo_picking") ? "Annulla prelievo"
         : (typeRaw==="combo_scarica") ? "Combo scarico"
         : (typeRaw==="combo_ripristino") ? "Combo ripristino"
+        : (typeRaw==="riordino") ? "Riordino"
         : (typeRaw==="rettifica") ? "Rettifica"
         : (typeRaw==="manual_edit") ? (q !== 0 ? "Rettifica" : "Modifica")
         : (typeRaw==="manual_rename") ? "Rinomina SKU"
@@ -9704,7 +9816,9 @@ function applyReorderAckToRuntime({ requestedSku, canonicalSku, aliases, qty, ac
       reordered: true,
       reorderedEpisodeId: episodeId,
       latestReorderEventId: ack?.reorderEventId || previous.latestReorderEventId || "",
-      latestReorderQueueId: ack?.reorderEventId || previous.latestReorderQueueId || "",
+      latestReorderQueueId: ack?.tabelloneWriteEnqueued === false ? "" : (ack?.reorderEventId || previous.latestReorderQueueId || ""),
+      tabelloneWriteEnqueued: ack?.tabelloneWriteEnqueued !== false,
+      directRecordMode: ack?.recordMode || previous.directRecordMode || "",
       latestReorderQty: Math.max(1, Math.round(Number(qty || previous.latestReorderQty || 1))),
       latestReorderAtClient: nowClient,
       updatedAtClient: nowClient,
@@ -9739,7 +9853,7 @@ function directReorderEpisodeId(previous, canonicalSku, nowClient){
 async function recordReorderCloudOnly({ requestedSku, canonicalSku, aliases, title, qty, productionArea, loc, availableQty }){
   const api = state.firebase?.api;
   const db = state.firebase?.db;
-  if(!api || !db || !api.runTransaction) throw new Error("Registrazione riordino cloud non disponibile.");
+  if(!api || !db || !api.writeBatch) throw new Error("Registrazione riordino cloud non disponibile.");
 
   const requested = toSkuId(requestedSku || "");
   const canonical = toSkuId(canonicalSku || resolveSkuAlias(requested) || requested);
@@ -9747,107 +9861,135 @@ async function recordReorderCloudOnly({ requestedSku, canonicalSku, aliases, tit
   const quantity = Math.max(1, Math.round(Number(qty || 0)));
   if(!requested || !canonical || !quantity) throw new Error("Dati riordino non validi.");
 
-  const eventRef = api.doc(api.collection(db, COL_REORDERS));
-  const lifecycleRef = api.doc(db, COL_LOW_STOCK_SKU_STATES, canonical);
   const nowClient = Date.now();
   const who = state.user?.emailLower || state.user?.email || state.user?.uid || "";
-  const runtimePrevious = state.twReorders?.bySku instanceof Map
+  const members = normalizeSkuAliases([canonical, requested, ...(Array.isArray(aliases) ? aliases : [])], canonical);
+  const activeLifecycle = __activeLowStockLifecycleForCandidates(
+    members,
+    state.twReorders?.lifecycleBySku instanceof Map ? state.twReorders.lifecycleBySku : state.twReorders?.bySku
+  );
+  const runtimePrevious = activeLifecycle || (state.twReorders?.bySku instanceof Map
     ? (state.twReorders.bySku.get(canonical) || state.twReorders.bySku.get(requested) || {})
-    : {};
-  let ack = null;
+    : {});
+  const episodeId = String(activeLifecycle?.episodeId || directReorderEpisodeId(runtimePrevious, canonical, nowClient)).trim();
+  const previousCount = String(runtimePrevious?.episodeId || "") === episodeId
+    ? Math.max(0, Math.round(Number(runtimePrevious?.reorderCountInEpisode || 0)))
+    : 0;
+  const reorderCountInEpisode = previousCount + 1;
+  const eventId = `direct_${canonical.replace(/[^A-Z0-9_-]+/g, "_").slice(0, 80) || "SKU"}_${nowClient.toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+  const finiteAvailableQty = Number.isFinite(Number(availableQty)) ? Math.round(Number(availableQty)) : null;
+  const finalTitle = squashWhitespace(title || canonical) || canonical;
 
-  await api.runTransaction(db, async (tx)=>{
-    const lifecycleSnap = await tx.get(lifecycleRef);
-    const cloudPrevious = lifecycleSnap.exists() ? (lifecycleSnap.data() || {}) : {};
-    const previous = Object.keys(cloudPrevious).length ? cloudPrevious : runtimePrevious;
-    const episodeId = directReorderEpisodeId(previous, canonical, nowClient);
-    const previousEpisodeId = String(previous?.episodeId || "").trim();
-    const sameEpisode = previous?.active === true && previousEpisodeId === episodeId;
-    const reorderCountInEpisode = sameEpisode
-      ? Math.max(0, Math.round(Number(previous?.reorderCountInEpisode || 0))) + 1
-      : 1;
-    const members = normalizeSkuAliases([
-      canonical,
-      requested,
-      ...(Array.isArray(aliases) ? aliases : []),
-      ...(Array.isArray(previous?.aliases) ? previous.aliases : [])
-    ], canonical);
-    const eventId = eventRef.id;
-    const finiteAvailableQty = Number.isFinite(Number(availableQty)) ? Math.round(Number(availableQty)) : null;
+  // Usa esclusivamente percorsi già autorizzati dalle regole dell'Hub:
+  // inventario Amazon + anagrafica/movimenti prodotto. Le collezioni lifecycle/eventi
+  // restano protette e vengono gestite soltanto dal backend.
+  const idx = getInvIndexForMatch();
+  const stockSku = stockSkuForSkuAny(requested, INVENTORY_CANONICAL_LOC, idx) || requested;
+  const inventoryItems = state.inventory?.[INVENTORY_CANONICAL_LOC]?.items || [];
+  const memberSet = new Set([...members, stockSku].map(x=>toSkuId(x || "")).filter(Boolean));
+  const existingTargetSkus = Array.from(new Set(inventoryItems
+    .map(x=>toSkuId(x?.sku || x?.id || ""))
+    .filter(x=>x && memberSet.has(x))));
+  if(!existingTargetSkus.includes(stockSku)) existingTargetSkus.push(stockSku);
 
-    tx.set(eventRef, {
-      eventId,
-      reorderEventId: eventId,
-      kind: "inventory_reorder",
-      status: "recorded",
-      reorderCloudStatus: "recorded",
-      source: "hub_inventario_amazon",
-      origin: "hub_inventario_amazon_riordino",
-      recordMode: "cloud_only_no_tabellone_write",
-      requestedSku: requested,
-      sku: canonical,
-      canonicalSku: canonical,
-      reorderCanonicalSku: canonical,
-      aliases: members,
-      title: squashWhitespace(title || canonical) || canonical,
-      qty: quantity,
-      reorderedQty: quantity,
-      unit: "pz",
-      productionArea: area,
-      areaProduzione: area,
-      inventoryLocation: normalizeInventoryLoc(loc) || INVENTORY_CANONICAL_LOC,
-      availableQty: finiteAvailableQty,
-      lowStockEpisodeId: episodeId,
-      reorderLowStockEpisodeId: episodeId,
-      tabelloneWriteEnqueued: false,
-      tabelloneDestination: null,
-      queueId: null,
-      queueOrderKey: null,
-      reorderRecordedAt: api.serverTimestamp(),
-      reorderRecordedAtClient: nowClient,
-      createdAt: api.serverTimestamp(),
-      createdAtClient: nowClient,
-      createdByUid: state.user?.uid || null,
-      createdByEmail: who || null,
-      version: 1
-    });
+  const markerPatch = {
+    directReorderActive: true,
+    directReorderMarkerVersion: 2,
+    directReorderEpisodeId: episodeId,
+    directReorderEventId: eventId,
+    directReorderCanonicalSku: canonical,
+    directReorderRequestedSku: requested,
+    directReorderAliases: members,
+    directReorderQty: quantity,
+    directReorderAt: api.serverTimestamp(),
+    directReorderAtClient: nowClient,
+    directReorderBy: who || null,
+    directReorderProductionArea: area,
+    directReorderRecordMode: "inventory_item_movement",
+    directReorderCountInEpisode: reorderCountInEpisode,
+    directReorderAvailableQty: finiteAvailableQty,
+    directReorderTabelloneWriteEnqueued: false,
+    directReorderTabelloneDestination: null,
+    // Compatibilità visiva con versioni precedenti, senza affidare a questi flag
+    // la logica del ciclo: il marker versionato sopra resta la fonte fallback.
+    reordered: true,
+    reorderStatus: "riordinato",
+    reorderedAt: api.serverTimestamp(),
+    reorderedAtClient: nowClient,
+    reorderedQty: quantity,
+    reorderedQueueId: "",
+    reorderedQueueOrderKey: "",
+    updatedAt: api.serverTimestamp(),
+    updatedAtClient: nowClient,
+    updatedBy: who || null
+  };
 
-    tx.set(lifecycleRef, {
-      sku: canonical,
-      canonicalSku: canonical,
-      aliases: members,
-      active: true,
-      episodeId,
-      reordered: true,
-      reorderedEpisodeId: episodeId,
-      latestReorderEventId: eventId,
-      latestReorderQueueId: null,
-      latestReorderQty: quantity,
-      latestReorderAt: api.serverTimestamp(),
-      latestReorderAtClient: nowClient,
-      reorderCountInEpisode,
-      lastReorderRequestedSku: requested,
-      lastReorderTitle: squashWhitespace(title || canonical) || canonical,
-      lastReorderProductionArea: area,
-      lastReorderRecordMode: "cloud_only_no_tabellone_write",
-      updatedAt: api.serverTimestamp(),
-      updatedAtClient: nowClient,
-      updatedBy: who || null,
-      lifecycleVersion: Math.max(1, Math.round(Number(previous?.lifecycleVersion || 1)))
+  const batch = api.writeBatch(db);
+  for(const targetSku of existingTargetSkus){
+    batch.set(api.doc(db, COL_ROOT, INVENTORY_CANONICAL_LOC, SUB_ITEMS, targetSku), {
+      sku: targetSku,
+      ...markerPatch
     }, { merge:true });
+  }
 
-    ack = {
-      reorderEventId: eventId,
-      reorderCanonicalSku: canonical,
-      reorderLowStockEpisodeId: episodeId,
-      reorderRecordedAtClient: nowClient,
-      reorderCloudStatus: "recorded",
-      productionArea: area,
-      tabelloneWriteEnqueued: false
-    };
+  batch.set(api.doc(db, COL_PRODUCTS, requested), {
+    sku: requested,
+    title: finalTitle,
+    titleNorm: normalizeText(finalTitle || requested),
+    ...markerPatch,
+    lastSeenAt: api.serverTimestamp(),
+    lastSeenAtClient: nowClient,
+    lastSeenBy: who || null,
+    lastSeenKind: "reorder_cerea_cloud_only"
+  }, { merge:true });
+
+  const moveRef = api.doc(api.collection(db, COL_PRODUCTS, requested, SUB_MOVES));
+  batch.set(moveRef, {
+    sku: requested,
+    canonicalSku: canonical,
+    aliases: members,
+    type: "riordino",
+    kind: "inventory_reorder",
+    status: "recorded",
+    source: "hub_inventario_amazon",
+    origin: "hub_inventario_amazon_riordino",
+    recordMode: "inventory_item_movement",
+    reorderEventId: eventId,
+    lowStockEpisodeId: episodeId,
+    reorderLowStockEpisodeId: episodeId,
+    reorderedQty: quantity,
+    qty: quantity,
+    qtySigned: 0,
+    deltaSigned: 0,
+    unit: "pz",
+    title: finalTitle,
+    productionArea: area,
+    areaProduzione: area,
+    inventoryLocation: INVENTORY_CANONICAL_LOC,
+    availableQty: finiteAvailableQty,
+    tabelloneWriteEnqueued: false,
+    tabelloneDestination: null,
+    note: `Riordino ${quantity} pz registrato per ${productionAreaLabel(area)} • non inviato a Liquidi Conca`,
+    createdAt: api.serverTimestamp(),
+    createdAtClient: nowClient,
+    createdByUid: state.user?.uid || null,
+    createdByEmail: who || null,
+    version: 2
   });
 
-  return ack;
+  await batch.commit();
+  clearSkuRuntimeCache("direct_reorder_cerea");
+
+  return {
+    reorderEventId: eventId,
+    reorderCanonicalSku: canonical,
+    reorderLowStockEpisodeId: episodeId,
+    reorderRecordedAtClient: nowClient,
+    reorderCloudStatus: "recorded",
+    productionArea: area,
+    tabelloneWriteEnqueued: false,
+    recordMode: "inventory_item_movement"
+  };
 }
 
 async function reorderProductToTabelloneWrite(){
@@ -9906,7 +10048,7 @@ SKU: ${sku}`, "480");
   try{
     const availableQty = stockAgg ? lowStockQtyValue(stockAgg) : null;
 
-    // Area Cerea: registra lo storico e lo stato autorevole del ciclo sottoscorta,
+    // Area Cerea: registra il riordino nell'inventario e nello storico movimenti,
     // ma non crea nessuna riga nel Tabellone WRITE / Liquidi Conca.
     if(!sendToTabelloneWrite){
       const ack = await recordReorderCloudOnly({
