@@ -5232,8 +5232,13 @@ function readRackPickerSelection(root){
           }
 
           for(const line of grouped.values()){
-            const hit = getItemBySkuAny(line.sku, loc);
-            const item = hit?.it || getProductBySku(loc, line.sku) || null;
+            const orderedSku = toSkuId(line.sku || "");
+            const hit = getItemBySkuAny(orderedSku, loc);
+            const item = hit?.it || getProductBySku(loc, orderedSku) || null;
+            // Lo SKU dell'ordine può essere un alias FBM dello SKU fisico (es. stesso ASIN).
+            // La lista ordine conserva lo SKU Shopify; il widget usa invece lo SKU reale inventario.
+            const stockSku = toSkuId(hit?.stockSku || item?.sku || item?.id || orderedSku) || orderedSku;
+            const inventoryTitle = squashWhitespace(item?.title || item?.name || "");
             const positions = item ? rackLocationDisplayPartsFromItem(item).map(part=>({
               code: normalizeRackLocation(part?.code || ""),
               qty: Number.isFinite(Number(part?.qty)) ? Math.round(Number(part.qty)) : 0,
@@ -5242,15 +5247,17 @@ function readRackPickerSelection(root){
             })).filter(x=>x.code) : [];
             const codes = positions.map(x=>x.code).filter(Boolean);
             out.push({
-              loc,
-              sku: line.sku,
-              title: line.title || line.sku,
+              loc: hit?.loc || loc,
+              sku: orderedSku,
+              stockSku,
+              inventoryTitle,
+              title: line.title || inventoryTitle || orderedSku,
               qty: Math.round(Number(line.qty || 0) || 0),
               orderId,
               orderName,
               orderLabel: orderName || orderId,
               orderKey: `order::${orderId}`,
-              lineKey: line.sku,
+              lineKey: orderedSku,
               customerName,
               customerEmail,
               customerPhone,
@@ -5615,17 +5622,25 @@ function readRackPickerSelection(root){
       closeSheet("shopifyOrderDetails");
     }
 
-    function shopifyFbmInventoryGroups(){
+    function shopifyFbmInventoryGroups(rowsInput=null){
       const groups = new Map();
-      const orderRows = shopifyFbmInventoryOrderRows();
+      const orderRows = Array.isArray(rowsInput) ? rowsInput : shopifyFbmInventoryOrderRows();
+      const sourceName = Array.isArray(rowsInput) ? "shopify_order_documents" : "shopify_order_lines";
       for(const row of orderRows){
-        const sku = toSkuId(row?.sku || "");
+        const orderedSku = toSkuId(row?.sku || "");
+        if(!orderedSku) continue;
+
+        // Raggruppa sullo SKU fisico inventario, non obbligatoriamente sullo SKU Shopify.
+        // In questo modo gli alias FBM/FBA collegati (anche tramite ASIN) finiscono nello stesso widget.
+        const hit = getItemBySkuAny(orderedSku, row?.loc || INVENTORY_CANONICAL_LOC);
+        const sku = toSkuId(row?.stockSku || hit?.stockSku || hit?.it?.sku || hit?.it?.id || orderedSku) || orderedSku;
         const qty = Math.abs(parseQty(row?.qty || 0) || 0);
         if(!sku || qty <= 0) continue;
         let g = groups.get(sku);
         if(!g){
           g = {
             sku,
+            orderedSkus:new Set(),
             title:"",
             qty:0,
             locs:new Set(),
@@ -5636,23 +5651,34 @@ function readRackPickerSelection(root){
             positionsMap:new Map(),
             firstCode:"",
             latestAt:0,
-            source:"shopify_order_lines"
+            source:sourceName
           };
           groups.set(sku, g);
         }
-        const title = squashWhitespace(row.title || sku) || sku;
+        g.orderedSkus.add(orderedSku);
+        const inventoryTitle = squashWhitespace(row?.inventoryTitle || hit?.it?.title || hit?.it?.name || "");
+        const title = inventoryTitle || squashWhitespace(row.title || sku) || sku;
         const meta = parseTitleMeta(title);
         const cleanTitle = meta.main || title || sku;
         if(!g.title || cleanTitle.length > g.title.length) g.title = cleanTitle;
         g.qty += qty;
-        if(row.loc) g.locs.add(row.loc);
+        const effectiveLoc = hit?.loc || row.loc;
+        if(effectiveLoc) g.locs.add(effectiveLoc);
         if(row.orderId || row.orderName) g.orderKeys.add(row.orderName || row.orderId);
         if(row.orderName) g.flowNames.add(row.orderName);
         if(row.customerName) g.customerNames.add(row.customerName);
         const ts = Number(row.latestAt || 0) || 0;
         if(ts > g.latestAt) g.latestAt = ts;
 
-        const parts = Array.isArray(row.positions) ? row.positions : [];
+        let parts = Array.isArray(row.positions) ? row.positions : [];
+        if(!parts.length && hit?.it){
+          parts = rackLocationDisplayPartsFromItem(hit.it).map(part=>({
+            code: normalizeRackLocation(part?.code || ""),
+            qty: Number.isFinite(Number(part?.qty)) ? Math.round(Number(part.qty)) : 0,
+            lot: part?.lot || "",
+            lotLabel: part?.lotLabel || ""
+          })).filter(part=>part.code);
+        }
         for(const part of parts){
           const code = normalizeRackLocation(part?.code || "");
           if(!code) continue;
@@ -5669,6 +5695,7 @@ function readRackPickerSelection(root){
         const orderCount = g.orderKeys.size || g.flowIds.size || g.flowNames.size || 0;
         return {
           sku:g.sku,
+          orderedSkus:Array.from(g.orderedSkus),
           title:g.title || g.sku,
           qty:Math.round(g.qty || 0),
           locs:Array.from(g.locs),
@@ -5678,7 +5705,7 @@ function readRackPickerSelection(root){
           positions,
           firstCode:g.firstCode || (positions[0]?.code || ""),
           latestAt:g.latestAt || 0,
-          source:g.source || "shopify_order_lines"
+          source:g.source || sourceName
         };
       }).filter(g=>g.sku && g.qty > 0).sort((a,b)=>{
         const pa = a.positions?.[0]?.code || "";
@@ -5826,8 +5853,13 @@ function readRackPickerSelection(root){
 
     function updateFbmPreviewFromInventory(source="inventory_pending"){
       try{
-        const groups = shopifyFbmInventoryGroups();
-        setPickingPreviewCount("fbm", groups.length, source);
+        // Appena i documenti ordine esatti sono disponibili, widget e contatore usano
+        // la stessa identica fonte della lista ordini. L'inventario resta fallback solo
+        // durante il caricamento o in caso di errore della query ordini.
+        const exactReady = __shopifyActiveOrdersState.loaded && !__shopifyActiveOrdersState.error;
+        const rows = exactReady ? shopifyExactOrderRowsFromDocs(__shopifyActiveOrdersState.items) : null;
+        const groups = exactReady ? shopifyFbmInventoryGroups(rows) : shopifyFbmInventoryGroups();
+        setPickingPreviewCount("fbm", groups.length, exactReady ? "exact_orders_" + String(source || "") : source);
         return groups;
       }catch(_e){
         return [];
@@ -5836,9 +5868,9 @@ function readRackPickerSelection(root){
 
     function renderFastFbmPickingFromInventory(box, list, count, hint, btnPickAll){
       try{
-        const groups = updateFbmPreviewFromInventory("inventory_fbm_render");
         const exactOrdersState = ensureShopifyActiveOrdersExact();
         const orderRows = exactOrdersState.loaded ? shopifyExactOrderRowsFromDocs(exactOrdersState.items) : [];
+        const groups = updateFbmPreviewFromInventory("inventory_fbm_render");
         const orderRowsSource = exactOrdersState.loading ? "loading_orders" : (exactOrdersState.error ? "orders_error" : "order_documents");
         const pickingTitleEl = box?.querySelector?.(".miniTitle");
         const pickingSubEl = box?.querySelector?.(".miniSub");
