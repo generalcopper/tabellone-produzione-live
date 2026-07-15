@@ -5492,11 +5492,17 @@ function renderBoard(force){
 function scheduleNameMarquee(root){
   if(!root) return;
   if(root._mqRAF) cancelAnimationFrame(root._mqRAF);
+  if(root._mqRetry){ clearTimeout(root._mqRetry); root._mqRetry=null; }
   // Due frame: il primo applica il nuovo layout, il secondo misura la larghezza reale.
   root._mqRAF=requestAnimationFrame(()=>{
     root._mqRAF=requestAnimationFrame(()=>{
       root._mqRAF=0;
       applyNameMarquee(root);
+      // Secondo controllo breve: intercetta font/layout arrivati qualche istante dopo.
+      root._mqRetry=setTimeout(()=>{
+        root._mqRetry=null;
+        applyNameMarquee(root);
+      },180);
     });
   });
 }
@@ -5510,22 +5516,30 @@ function applyNameMarquee(root){
     el.classList.remove('scroll');
     el.style.removeProperty('--mq-shift');
     el.style.removeProperty('--mq-dur');
-    el.textContent=txt;
+    el.textContent='';
 
-    const available=Math.max(0,el.clientWidth);
-    const natural=Math.max(0,el.scrollWidth);
-    const overflow=natural-available;
-    if(available<=0 || overflow<=2) return;       // ci sta: nessuna animazione
-
+    // Misura il testo con valori sub-pixel reali. clientWidth/scrollWidth arrotondavano
+    // alcuni titoli FBM al limite e una singola riga non riceveva il marquee.
     const span=document.createElement('span');
     span.className='mq';
     span.textContent=txt;
-    el.textContent='';
+    span.style.display='inline-block';
+    span.style.width='max-content';
+    span.style.minWidth='max-content';
+    span.style.whiteSpace='nowrap';
     el.appendChild(span);
-    el.classList.add('scroll');
 
+    const available=Math.max(0,el.getBoundingClientRect().width);
+    const natural=Math.max(0,span.getBoundingClientRect().width);
+    const overflow=natural-available;
+    if(available<=0 || overflow<=0.5){
+      el.textContent=txt;
+      return;                                      // ci sta davvero: nessuna animazione
+    }
+
+    el.classList.add('scroll');
     // Spostamento esatto del testo oltre il bordo, con un piccolo respiro finale.
-    const shift=Math.max(0,span.scrollWidth-available)+24;
+    const shift=Math.max(0,overflow)+24;
     const dur=Math.max(16,Math.round(shift/13));
     el.style.setProperty('--mq-shift',(-shift)+'px');
     el.style.setProperty('--mq-dur',dur+'s');
