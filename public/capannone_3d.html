@@ -2166,6 +2166,40 @@
     scroll-snap-align:start !important;
     scroll-snap-stop:always !important;
   }
+
+  /* ===== COCKPIT — ORA E CONTATORI CON SCALA IDENTICA ===== */
+  #cockpit #ckPageAzienda{
+    --ck-main-number-size:clamp(46px,5.8vw,102px);
+  }
+  #cockpit #ckPageAzienda .ck-meta #ckClock,
+  #cockpit #ckPageAzienda .ck-ord.fbm .ck-ord-n,
+  #cockpit #ckPageAzienda .ck-ord.fba .ck-ord-n{
+    font-family:var(--fids-cond) !important;
+    font-size:var(--ck-main-number-size) !important;
+    font-weight:900 !important;
+    line-height:1 !important;
+    letter-spacing:0 !important;
+    font-variant-numeric:tabular-nums !important;
+    font-feature-settings:"tnum" 1 !important;
+    color:#ffffff !important;
+    -webkit-text-fill-color:#ffffff !important;
+    text-shadow:none !important;
+    transform:none !important;
+  }
+  #cockpit #ckPageAzienda .ck-meta,
+  #cockpit #ckPageAzienda .ck-orders{
+    align-self:stretch !important;
+    align-items:center !important;
+  }
+  #cockpit #ckPageAzienda .ck-meta #ckClock{
+    align-self:center !important;
+  }
+  @media (max-aspect-ratio:9/16){
+    #cockpit #ckPageAzienda{
+      --ck-main-number-size:clamp(38px,7.2vw,72px);
+    }
+  }
+
 </style>
 </head>
 <body>
@@ -5855,9 +5889,9 @@ function _contaOrdini(){
   }
   return {fba, fbm:PICKING_FBM_DIRECT.loaded ? PICKING_FBM_DIRECT.orders : fbmFallback};
 }
-// conta i PRODOTTI (righe/SKU distinti ancora da prelevare) divisi per canale.
-// A differenza di _contaOrdini (che conta i flussi), qui si contano le singole
-// righe-prodotto pendenti: per ogni flusso, gli SKU distinti non ancora prelevati.
+// Conteggi mostrati nel cockpit e negli header delle tabelle:
+// - FBA: numero di prodotti/SKU distinti ancora da preparare;
+// - FBM: totale dei pezzi/articoli ancora da preparare, non numero ordini o SKU.
 function _contaProdottiInCoda(){
   let fba=0, fbmFallback=0;
   for(const loc in FLOWS_BY_LOC){
@@ -5867,20 +5901,25 @@ function _contaProdottiInCoda(){
       if(!_isManagedFlow(flow)) continue;
       if(flow?.picking?.flowPicked===true) continue;
       const lines=Array.isArray(flow.lines)?flow.lines:[];
-      const skuVisti=new Set();
+      const skuVistiFba=new Set();
       for(const l of lines){
         const sku=_toSkuId(l&&l.sku||'');
         if(!sku) continue;
         const qty=Math.abs(Math.round(Number(l&&l.qty||0)))||0;
         if(qty<=0||_isLinePicked(flow,(l&&l.sku)||sku)) continue;
-        skuVisti.add(sku);
+        if(_isFbmFlow(flow)){
+          if(!PICKING_FBM_DIRECT.loaded) fbmFallback+=qty;
+        }else{
+          skuVistiFba.add(sku);
+        }
       }
-      if(_isFbmFlow(flow)){
-        if(!PICKING_FBM_DIRECT.loaded) fbmFallback+=skuVisti.size;
-      }else fba+=skuVisti.size;
+      if(!_isFbmFlow(flow)) fba+=skuVistiFba.size;
     }
   }
-  return {fba, fbm:PICKING_FBM_DIRECT.loaded ? PICKING_FBM_DIRECT.rows.length : fbmFallback};
+  const fbmDiretto=PICKING_FBM_DIRECT.loaded
+    ? PICKING_FBM_DIRECT.rows.reduce((tot,row)=>tot+Math.max(0,Math.round(Number(row&&row.pezzi)||0)),0)
+    : fbmFallback;
+  return {fba, fbm:fbmDiretto};
 }
 function _flowDisplayName(flow){
   const label=(flow&&flow.workflow&&flow.workflow.label)?String(flow.workflow.label):String(flow?.workflowLabel||'');
