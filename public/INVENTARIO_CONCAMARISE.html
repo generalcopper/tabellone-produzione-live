@@ -2998,6 +2998,13 @@
     overscroll-behavior:contain !important;
     -webkit-overflow-scrolling:touch !important;
   }
+  /* Liste lunghe: le righe fuori viewport mantengono lo spazio ma non vengono dipinte finché non servono. */
+  .modal .suggestions.is-open > .suggestion,
+  .modal .suggestions.is-open > .suggestion-line{
+    content-visibility:auto;
+    contain-intrinsic-size:52px;
+  }
+
   /* === FINE OVERRIDE 2026-06 === */
 
 </style><!-- theme-premium-conca -->
@@ -3397,6 +3404,40 @@
     };
 
     const pendingOrphanDdtDeletes = new Set();
+
+    // Cache prestazioni: i dati restano aggiornati in tempo reale tramite onSnapshot,
+    // ma i calcoli derivati vengono ricostruiti una sola volta per ogni variazione cloud.
+    const perfCache = {
+      dataVersion: 0,
+      inventorySnapshotVersion: -1,
+      inventorySnapshot: null,
+      categoryMapVersion: -1,
+      categoryMap: null,
+      productLookupVersion: -1,
+      productLookup: null,
+      loadableProducts: new Map(),
+      loadableProductIndexes: new Map(),
+      commandAnalysisKey: "",
+      commandAnalysis: null,
+      inventoryGroupsVersion: -1,
+      inventoryGroups: null
+    };
+
+    function invalidateInventoryCaches(){
+      perfCache.dataVersion += 1;
+      perfCache.inventorySnapshotVersion = -1;
+      perfCache.inventorySnapshot = null;
+      perfCache.categoryMapVersion = -1;
+      perfCache.categoryMap = null;
+      perfCache.productLookupVersion = -1;
+      perfCache.productLookup = null;
+      perfCache.loadableProducts.clear();
+      perfCache.loadableProductIndexes.clear();
+      perfCache.commandAnalysisKey = "";
+      perfCache.commandAnalysis = null;
+      perfCache.inventoryGroupsVersion = -1;
+      perfCache.inventoryGroups = null;
+    }
 
     const provider = new GoogleAuthProvider();
     provider.setCustomParameters({ prompt: "select_account" });
@@ -4088,6 +4129,10 @@
 
     async function syncTabWriteDoneItemsToConcamarise(items, options = {}){
       if (!(state.user && state.db)) return;
+      if (!state.movementsReady){
+        state.tabWriteConcaSyncQueued = true;
+        return;
+      }
       const sourceItems = Array.isArray(items) ? items : [];
       const valid = sourceItems.filter(item => buildTabWriteConcaMovementPayload(item));
       if (!valid.length) return;
@@ -4181,7 +4226,7 @@
         state.tabWriteConcaSyncBusy = false;
         if (state.tabWriteConcaSyncQueued){
           state.tabWriteConcaSyncQueued = false;
-          setTimeout(() => syncTabWriteDoneItemsToConcamarise(state.tabWriteDoneItems || [], { force:true }), 120);
+          setTimeout(() => syncTabWriteDoneItemsToConcamarise(state.tabWriteDoneItems || []), 120);
         }
       }
     }
@@ -4642,6 +4687,10 @@
 
     async function syncBulkWriteDoneItemsToConcamarise(items, options = {}){
       if (!(state.user && state.db)) return;
+      if (!state.movementsReady){
+        state.bulkWriteConcaSyncQueued = true;
+        return;
+      }
       const sourceItems = Array.isArray(items) ? items : [];
       const valid = sourceItems.filter(item => buildBulkWriteConcaMovementPayload(item));
       if (!valid.length) return;
@@ -4734,7 +4783,7 @@
         state.bulkWriteConcaSyncBusy = false;
         if (state.bulkWriteConcaSyncQueued){
           state.bulkWriteConcaSyncQueued = false;
-          setTimeout(() => syncBulkWriteDoneItemsToConcamarise(state.bulkWriteDoneItems || [], { force:true }), 120);
+          setTimeout(() => syncBulkWriteDoneItemsToConcamarise(state.bulkWriteDoneItems || []), 120);
         }
       }
     }
@@ -5503,6 +5552,9 @@
     }
 
     function buildCategoryMap(){
+      if (perfCache.categoryMap && perfCache.categoryMapVersion === perfCache.dataVersion){
+        return perfCache.categoryMap;
+      }
       const map = new Map();
       for (const cat of (state.categories || [])){
         const key = normalizeCategoryKey(cat?.key || cat?.id || "");
@@ -5514,6 +5566,8 @@
           macro: cleanSpaces(cat?.macro || cat?.macroCategory || cat?.type || cat?.kind || "")
         });
       }
+      perfCache.categoryMap = map;
+      perfCache.categoryMapVersion = perfCache.dataVersion;
       return map;
     }
 
@@ -5532,6 +5586,9 @@
     }
 
     function buildInventorySnapshot(){
+      if (perfCache.inventorySnapshot && perfCache.inventorySnapshotVersion === perfCache.dataVersion){
+        return perfCache.inventorySnapshot;
+      }
       const totalsByCode = new Map();
       const cereaRowsByCode = new Map();
       const concamariseRowsByCode = new Map();
@@ -5654,7 +5711,10 @@
         targetRowsByCode.set(low, byCustomer);
       }
 
-      return { totalsByCode, cereaRowsByCode, concamariseRowsByCode };
+      const snapshot = { totalsByCode, cereaRowsByCode, concamariseRowsByCode };
+      perfCache.inventorySnapshot = snapshot;
+      perfCache.inventorySnapshotVersion = perfCache.dataVersion;
+      return snapshot;
     }
 
     function getResolvedUomForCode(code, product, snapshot){
@@ -5779,6 +5839,9 @@
     }
 
     function buildProductLookupByCode(){
+      if (perfCache.productLookup && perfCache.productLookupVersion === perfCache.dataVersion){
+        return perfCache.productLookup;
+      }
       const map = new Map();
       for (const product of (state.products || [])){
         const code = productCodeFromData(product);
@@ -5789,6 +5852,8 @@
           map.set(low, product);
         }
       }
+      perfCache.productLookup = map;
+      perfCache.productLookupVersion = perfCache.dataVersion;
       return map;
     }
 
@@ -5876,6 +5941,7 @@
       return product?.categoryName || "Articolo";
     }
 
+
     function getMovementBackedCategory(product, categoryMap, fallbackName = "Da movimenti inventario"){
       const category = product ? getProductCategoryInfo(product, categoryMap) : null;
       if (category && category.key) return category;
@@ -5908,6 +5974,11 @@
     function buildLoadableProducts(options = {}){
       const config = transferConfig(options?.direction || state.transferDirection);
       const includeZeroSource = options?.includeZeroSource === true;
+      const cacheKey = `${config.direction}|${includeZeroSource ? 1 : 0}`;
+      const cached = perfCache.loadableProducts.get(cacheKey);
+      if (cached && cached.version === perfCache.dataVersion){
+        return cached.items;
+      }
       const snapshot = buildInventorySnapshot();
       const categoryMap = buildCategoryMap();
       const productsByCode = buildProductLookupByCode();
@@ -6037,16 +6108,72 @@
         return String(a?.code || "").localeCompare(String(b?.code || ""), "it", { sensitivity: "base" });
       });
 
+      perfCache.loadableProducts.set(cacheKey, {
+        version: perfCache.dataVersion,
+        items: list
+      });
       return list;
     }
 
+    function buildLoadableProductIndex(direction = state.transferDirection){
+      const resolvedDirection = direction === TRANSFER_TO_CEREA ? TRANSFER_TO_CEREA : TRANSFER_TO_CONCAMARISE;
+      const cacheKey = resolvedDirection;
+      const cached = perfCache.loadableProductIndexes.get(cacheKey);
+      if (cached && cached.version === perfCache.dataVersion){
+        return cached;
+      }
+
+      const products = buildLoadableProducts({ direction: resolvedDirection });
+      const byCode = new Map();
+      const byExactText = new Map();
+      const searchFieldsByCode = new Map();
+
+      for (const product of products){
+        const codeKey = normalizeInventoryCodeKey(product?.code || product?.codeLower || "");
+        if (codeKey && !byCode.has(codeKey)) byCode.set(codeKey, product);
+
+        const fields = buildProductSearchFields(product);
+        if (codeKey) searchFieldsByCode.set(codeKey, fields);
+        const exactValues = [
+          product?.code,
+          product?.name,
+          product?.alias,
+          product?.searchText,
+          product?.fallbackName
+        ].map(normalizeSearch).filter(Boolean);
+        for (const value of exactValues){
+          if (!byExactText.has(value)) byExactText.set(value, product);
+        }
+      }
+
+      const index = {
+        version: perfCache.dataVersion,
+        direction: resolvedDirection,
+        products,
+        byCode,
+        byExactText,
+        searchFieldsByCode
+      };
+      perfCache.loadableProductIndexes.set(cacheKey, index);
+      return index;
+    }
+
+    function getLoadableProductSearchFields(product){
+      const codeKey = normalizeInventoryCodeKey(product?.code || product?.codeLower || "");
+      const index = buildLoadableProductIndex();
+      return index.searchFieldsByCode.get(codeKey) || buildProductSearchFields(product);
+    }
+
     function getLoadableProductByCode(code){
-      const low = String(code || "").trim().toLowerCase();
+      const low = normalizeInventoryCodeKey(code);
       if (!low) return null;
-      return buildLoadableProducts().find(product => product.codeLower === low) || null;
+      return buildLoadableProductIndex().byCode.get(low) || null;
     }
 
     function buildConcamariseInventoryGroups(){
+      if (perfCache.inventoryGroups && perfCache.inventoryGroupsVersion === perfCache.dataVersion){
+        return perfCache.inventoryGroups;
+      }
       const snapshot = buildInventorySnapshot();
       const categoryMap = buildCategoryMap();
       const productsByCode = buildProductLookupByCode();
@@ -6095,6 +6222,8 @@
         return String(a?.name || "").localeCompare(String(b?.name || ""), "it", { sensitivity: "base" });
       });
 
+      perfCache.inventoryGroups = groups;
+      perfCache.inventoryGroupsVersion = perfCache.dataVersion;
       return groups;
     }
 
@@ -6242,7 +6371,7 @@
       const q = normalizeSearch(query);
       if (!q) return 1;
 
-      const fields = buildProductSearchFields(product);
+      const fields = getLoadableProductSearchFields(product);
       const phrases = [fields.name, fields.alias, fields.search, fields.code, fields.category, fields.extras].filter(Boolean);
       const hay = phrases.join(" ");
       const words = Array.from(new Set(hay.split(" ").filter(Boolean)));
@@ -6353,12 +6482,31 @@
       return getLoadCandidateEntries(query, limit, false).map(entry => entry.product);
     }
 
+    function getTransferCommandAnalysis(){
+      const cacheKey = `${perfCache.dataVersion}|${state.transferDirection}|${state.loadCommand}`;
+      if (perfCache.commandAnalysis && perfCache.commandAnalysisKey === cacheKey){
+        return perfCache.commandAnalysis;
+      }
+
+      const lineItems = buildTransferItemsFromCommand(state.loadCommand);
+      const mergedItems = mergeTransferItems(lineItems);
+      const selectedQtyByCode = new Map();
+      for (const item of mergedItems){
+        const key = normalizeInventoryCodeKey(item?.product?.code || item?.code || "");
+        if (!key) continue;
+        selectedQtyByCode.set(key, safeInt(item?.qty || 0));
+      }
+
+      const analysis = { lineItems, mergedItems, selectedQtyByCode };
+      perfCache.commandAnalysisKey = cacheKey;
+      perfCache.commandAnalysis = analysis;
+      return analysis;
+    }
+
     function getSelectedTransferQtyByCode(code){
       const key = normalizeInventoryCodeKey(code);
       if (!key) return 0;
-      const items = mergeTransferItems(buildTransferItemsFromCommand(state.loadCommand));
-      const found = items.find(item => normalizeInventoryCodeKey(item?.product?.code || item?.code || "") === key);
-      return safeInt(found?.qty || 0);
+      return safeInt(getTransferCommandAnalysis().selectedQtyByCode.get(key) || 0);
     }
 
     function getDefaultToCereaCandidateEntries(){
@@ -6369,13 +6517,14 @@
         if (sourceQty <= 0) return false;
         // Un completato già aggiunto al DDT (presente nel comando) non deve più
         // comparire in lista: restano solo quelli ancora da aggiungere.
-        if (getSelectedTransferQtyByCode(product.code) > 0) return false;
-        return getSelectedTransferQtyByCode(product.code) < sourceQty;
+        const selectedQty = getSelectedTransferQtyByCode(product.code);
+        if (selectedQty > 0) return false;
+        return selectedQty < sourceQty;
       });
       const always = selectable.filter(product => isAlwaysAvailableToCereaProduct(product, TRANSFER_TO_CEREA));
       const regular = selectable.filter(product => !isAlwaysAvailableToCereaProduct(product, TRANSFER_TO_CEREA));
       // Porta a Cerea deve restare la lista dei completati del Tabellone WRITE, più gli articoli sempre disponibili come IBC.
-      const completed = regular.filter(product => product.isTabWriteCompleted && !isAmazonSkuLikeProduct(product));
+      const completed = regular.filter(product => product.isTabWriteCompleted && product.isAmazonSku !== true);
       const base = [...always, ...completed];
       const seen = new Set();
       return base.filter(product => {
@@ -6445,23 +6594,25 @@
       const queryText = normalizeSearch(parts?.productText || parts?.raw || "");
       if (!queryText) return null;
 
-      const all = buildLoadableProducts();
-      for (const product of all){
-        const fields = [product.code, product.name, product.alias, product.searchText, product.fallbackName].map(normalizeSearch).filter(Boolean);
-        if (fields.some(field => field === queryText)) return product;
-      }
+      const index = buildLoadableProductIndex();
+      const exact = index.byExactText.get(queryText);
+      if (exact) return exact;
 
-      const selected = getLoadableProductByCode(state.loadSelectedCode);
+      const selected = index.byCode.get(normalizeInventoryCodeKey(state.loadSelectedCode));
       if (selected){
-        const fields = [selected.code, selected.name, selected.alias, selected.searchText, selected.fallbackName].map(normalizeSearch).filter(Boolean);
-        const compatible = fields.some(field => field === queryText || field.startsWith(queryText) || field.includes(queryText));
+        const fields = getLoadableProductSearchFields(selected);
+        const compatible = [fields.code, fields.name, fields.alias, fields.search, fields.blob]
+          .filter(Boolean)
+          .some(field => field === queryText || field.startsWith(queryText) || field.includes(queryText));
         if (compatible) return selected;
       }
 
       const clearBest = resolveClearBestLoadCandidate(parts?.productText || parts?.raw || "");
       if (clearBest){
-        const fields = [clearBest.code, clearBest.name, clearBest.alias, clearBest.searchText, clearBest.fallbackName].map(normalizeSearch).filter(Boolean);
-        const strong = fields.some(field => field === queryText || field.startsWith(queryText) || field.includes(queryText));
+        const fields = getLoadableProductSearchFields(clearBest);
+        const strong = [fields.code, fields.name, fields.alias, fields.search, fields.blob]
+          .filter(Boolean)
+          .some(field => field === queryText || field.startsWith(queryText) || field.includes(queryText));
         if (strong) return clearBest;
       }
 
@@ -6471,10 +6622,7 @@
     function findExactLoadableProductByText(text){
       const q = normalizeSearch(text);
       if (!q) return null;
-      return buildLoadableProducts().find(product => {
-        const fields = [product.code, product.name, product.alias, product.searchText, product.fallbackName].map(normalizeSearch).filter(Boolean);
-        return fields.includes(q);
-      }) || null;
+      return buildLoadableProductIndex().byExactText.get(q) || null;
     }
 
     function getEffectiveParsedCommand(raw){
@@ -7392,6 +7540,39 @@
       return max;
     }
 
+    function createChunkedBatchWriter(db, maxOps = 430){
+      const operations = [];
+      return {
+        set(ref, payload, options){
+          operations.push({ type: "set", ref, payload, options });
+          return this;
+        },
+        delete(ref){
+          operations.push({ type: "delete", ref });
+          return this;
+        },
+        get size(){
+          return operations.length;
+        },
+        async commitAll(){
+          for (let offset = 0; offset < operations.length; offset += maxOps){
+            const batch = writeBatch(db);
+            const chunk = operations.slice(offset, offset + maxOps);
+            for (const operation of chunk){
+              if (operation.type === "delete"){
+                batch.delete(operation.ref);
+              }else if (operation.options){
+                batch.set(operation.ref, operation.payload, operation.options);
+              }else{
+                batch.set(operation.ref, operation.payload);
+              }
+            }
+            await batch.commit();
+          }
+        }
+      };
+    }
+
     function countTransferMovementSlots(sourceRows, qty){
       let remaining = Math.max(0, safeInt(qty));
       let slots = 0;
@@ -7429,7 +7610,8 @@
       const active = getActiveLoadLineInfo(state.loadCommand);
       const activeParts = active.parts;
       const activeProduct = resolveProductFromParsed(activeParts);
-      const rawItems = buildTransferItemsFromCommand(state.loadCommand);
+      const commandAnalysis = getTransferCommandAnalysis();
+      const rawItems = commandAnalysis.lineItems;
       const reasons = [];
 
       if (!rawItems.length){
@@ -7446,7 +7628,7 @@
         }
       }
 
-      const mergedItems = mergeTransferItems(rawItems);
+      const mergedItems = commandAnalysis.mergedItems;
       for (const item of mergedItems){
         const sourceQty = safeInt(item.product?.sourceQty || 0);
         if (item.qty > sourceQty){
@@ -7663,6 +7845,13 @@
 
     function renderLoadModal(){
       const config = transferConfig();
+      const modalOpen = els.loadModal.classList.contains("is-open");
+      if (!modalOpen){
+        if (els.modalTitle) els.modalTitle.textContent = config.modalTitle;
+        els.btnConfirm.disabled = true;
+        els.btnConfirm.textContent = config.actionLabel;
+        return;
+      }
       const ready = !!(state.user && state.db && state.movementsReady && !state.movementsError);
       const loadableCount = ready ? buildLoadableProducts({ direction: config.direction }).length : 0;
       const validation = getLoadValidation();
@@ -7788,6 +7977,12 @@
         else if (index === 0) classes.push("is-leading");
 
         const categoryStyle = product.categoryColor ? ` style="--cat-color:${escapeHtml(product.categoryColor)}"` : "";
+        const suggestionBadgeLabel = defaultCompletedMode ? getCompletedSuggestionLabel(product) : (product.categoryName || "Articolo");
+        const suggestionBadgeHtml = `
+                  <span class="suggestion-pill is-category"${categoryStyle}>
+                    <span class="suggestion-pill-dot"></span>
+                    ${escapeHtml(suggestionBadgeLabel)}
+                  </span>`;
         const ibcWeightDetail = getIbcWeightDetailLabel(product);
         const qtyDisplay = product.isAlwaysAvailableToCerea === true
           ? (product.requiresManualTransferQty === true ? "Quantità da inserire" : (defaultToCereaMode ? "Sempre disponibile" : "Sempre disponibile"))
@@ -7804,10 +7999,7 @@
               <div class="suggestion-main">
                 <div class="suggestion-title">${escapeHtml(product.name)}</div>
                 <div class="suggestion-meta">
-                  <span class="suggestion-pill is-category"${categoryStyle}>
-                    <span class="suggestion-pill-dot"></span>
-                    ${escapeHtml(defaultCompletedMode ? getCompletedSuggestionLabel(product) : (product.categoryName || "Articolo"))}
-                  </span>
+                  ${suggestionBadgeHtml}
                   <span class="suggestion-pill">${escapeHtml(product.code)}</span>
                 </div>
               </div>
@@ -7818,7 +8010,7 @@
         const canRemoveFromCereaList = config.direction === TRANSFER_TO_CEREA
           && product.isTabWriteCompleted === true
           && product.isAlwaysAvailableToCerea !== true
-          && !isAmazonSkuLikeProduct(product);
+          && product.isAmazonSku !== true;
         if (!canRemoveFromCereaList) return suggestionButton;
         return `
           <div class="suggestion-line">
@@ -7837,6 +8029,25 @@
 
       els.btnConfirm.disabled = !(validation.canSubmit && state.user && state.db && !state.busy);
       els.btnConfirm.textContent = state.busy ? "SALVO…" : config.actionLabel;
+    }
+
+    let scheduledRenderFrame = 0;
+    let scheduledModalRenderFrame = 0;
+
+    function scheduleRender(){
+      if (scheduledRenderFrame) return;
+      scheduledRenderFrame = requestAnimationFrame(() => {
+        scheduledRenderFrame = 0;
+        render();
+      });
+    }
+
+    function scheduleLoadModalRender(){
+      if (scheduledModalRenderFrame) return;
+      scheduledModalRenderFrame = requestAnimationFrame(() => {
+        scheduledModalRenderFrame = 0;
+        renderLoadModal();
+      });
     }
 
     function render(){
@@ -7970,6 +8181,7 @@
       state.loadSelectedCode = "";
       state.loadSuggestionsVisible = false;
       clearInventoryQtyState();
+      invalidateInventoryCaches();
       render();
     }
 
@@ -7999,29 +8211,33 @@
       state.ddtDocumentsError = "";
       state.amazonInventoryError = "";
       clearInventoryQtyState();
+      invalidateInventoryCaches();
 
       if (!(state.user && state.db)){
-        render();
+        scheduleRender();
         return;
       }
 
       state.unsubProducts = onSnapshot(orgCol("products"), (snap) => {
         state.products = snap.docs.map(mapProduct);
+        invalidateInventoryCaches();
         state.productsReady = true;
         state.productsError = "";
         syncLoadSelectionFromCommand();
-        render();
+        scheduleRender();
       }, (err) => {
         console.error("products listener failed", err);
         state.products = [];
+        invalidateInventoryCaches();
         state.productsReady = true;
         state.productsError = humanAuthErr(err);
         showToast(state.productsError, "err");
-        render();
+        scheduleRender();
       });
 
       state.unsubMovements = onSnapshot(orgCol("inventoryMovements"), (snap) => {
         state.movements = snap.docs.map(mapMovement);
+        invalidateInventoryCaches();
         const orphanDdtIds = findOrphanDdtDocumentIdsFromInventoryDocs(snap.docs, state.movements);
         state.ddtDocuments = buildDdtDocumentsFromInventoryDocs(snap.docs, state.movements);
         state.movementsReady = true;
@@ -8036,31 +8252,32 @@
         if ((state.bulkWriteDoneItems || []).length){
           syncBulkWriteDoneItemsToConcamarise(state.bulkWriteDoneItems).catch(err => console.error("bulk write conca resync failed", err));
         }
-        render();
+        scheduleRender();
         if (orphanDdtIds.length) cleanupOrphanDdtDocuments(orphanDdtIds);
       }, (err) => {
         console.error("inventory listener failed", err);
         state.movements = [];
         state.ddtDocuments = [];
+        invalidateInventoryCaches();
         state.movementsReady = true;
         state.ddtDocumentsReady = true;
         state.movementsError = humanAuthErr(err);
         state.ddtDocumentsError = state.movementsError;
         showToast(state.movementsError, "err");
-        render();
+        scheduleRender();
       });
 
       state.unsubAmazonInventory = onSnapshot(collection(state.db, "amzInventory", WAREHOUSE_CONCAMARISE, "items"), (snap) => {
         state.amazonInventoryItems = snap.docs.map(mapAmazonInventoryItem);
         state.amazonInventoryReady = true;
         state.amazonInventoryError = "";
-        render();
+        scheduleRender();
       }, (err) => {
         console.error("amazon inventory reader failed", err);
         state.amazonInventoryItems = [];
         state.amazonInventoryReady = true;
         state.amazonInventoryError = humanAuthErr(err);
-        render();
+        scheduleRender();
       });
 
       state.unsubTabWriteDone = onSnapshot(collection(state.db, "producedDays", TABWRITE_LINE_BUCKET, "items"), (snap) => {
@@ -8094,15 +8311,17 @@
             macro: cleanSpaces(data.macro || data.macroCategory || data.type || data.kind || "")
           };
         });
+        invalidateInventoryCaches();
         state.categoriesReady = true;
         state.categoriesError = "";
-        render();
+        scheduleRender();
       }, (err) => {
         console.error("categories listener failed", err);
         state.categories = [];
+        invalidateInventoryCaches();
         state.categoriesReady = true;
         state.categoriesError = humanAuthErr(err);
-        render();
+        scheduleRender();
       });
 
     }
@@ -8837,7 +9056,7 @@
           throw new Error("Movimenti DDT non calcolabili.");
         }
         const reserved = await reserveDdtProgressive(date, movementSlots);
-        const batch = writeBatch(state.db);
+        const batch = createChunkedBatchWriter(state.db);
         const movementCollection = orgCol("inventoryMovements");
         const ddtRef = doc(movementCollection);
         const bulkDoneIdsToMarkPicked = collectBulkDoneIdsToMarkPickedForTransfer(checkedItems, config);
@@ -9093,7 +9312,7 @@
         }
 
         batch.set(ddtRef, ddtPayload);
-        await batch.commit();
+        await batch.commitAll();
 
         // Bolla Cerea → Conca: segnala al kiosk 3D un carico in arrivo (avviso valido 30 min).
         if (config.direction === TRANSFER_TO_CONCAMARISE){
@@ -9398,13 +9617,13 @@
       state.loadCommand = rawValue;
       state.loadSuggestionsVisible = true;
       syncLoadSelectionFromCommand();
-      renderLoadModal();
+      scheduleLoadModalRender();
     });
 
     els.loadCommand.addEventListener("focus", () => {
       clearTimeout(blurTimer);
       state.loadSuggestionsVisible = true;
-      renderLoadModal();
+      scheduleLoadModalRender();
     });
 
     els.loadCommand.addEventListener("blur", () => {
@@ -9412,7 +9631,7 @@
       blurTimer = setTimeout(() => {
         armedSuggestionCode = "";
         state.loadSuggestionsVisible = false;
-        renderLoadModal();
+        scheduleLoadModalRender();
       }, 120);
     });
 
