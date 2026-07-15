@@ -2373,6 +2373,31 @@
     }
   }
 
+
+  /* ===== BOARD — MARQUEE ORIZZONTALE AFFIDABILE FBM/FBA ===== */
+  @keyframes ckBoardNameMarquee{
+    0%,16%{transform:translate3d(0,0,0);}
+    84%,100%{transform:translate3d(var(--mq-shift,0),0,0);}
+  }
+  #cockpit #ckPageOperativo .ck-bd-name.scroll{
+    text-overflow:clip !important;
+  }
+  #cockpit #ckPageOperativo .ck-bd-name.scroll > .mq{
+    display:inline-block !important;
+    width:max-content !important;
+    min-width:max-content !important;
+    white-space:nowrap !important;
+    padding-right:var(--mq-gap,48px) !important;
+    will-change:transform !important;
+    backface-visibility:hidden !important;
+    animation-name:ckBoardNameMarquee !important;
+    animation-duration:var(--mq-dur,16s) !important;
+    animation-timing-function:ease-in-out !important;
+    animation-iteration-count:infinite !important;
+    animation-direction:alternate !important;
+    animation-play-state:running !important;
+  }
+
 </style>
 </head>
 <body>
@@ -5406,6 +5431,12 @@ function renderBoard(force){
   if(!force && sig===_ckBoardSig) return;
   _ckBoardSig=sig;
 
+  // Prima stabilisco il layout definitivo (una o due colonne), poi misuro i nomi.
+  // In precedenza il marquee FBM poteva essere calcolato sulla larghezza vecchia.
+  const visibleCount=(fbm.length?1:0)+(fba.length?1:0);
+  cols.classList.toggle('single-channel', visibleCount===1);
+  board.classList.toggle('board-empty', visibleCount===0);
+
   const termRow=(cls, name, sku, figVal)=>
     `<div class="ck-bd-row ${cls}">`
       + `<div class="ck-bd-meta">`
@@ -5429,52 +5460,84 @@ function renderBoard(force){
       termRow(channel, escapeHtmlCk(o.nome||o.sku), escapeHtmlCk(o.sku||''), o.pezzi)
     ).join('');
     autoScrollList(list);
-    applyNameMarquee(list);
+    scheduleNameMarquee(list);
   };
 
   renderChannel(fbm, fbmCol, fbmList, document.getElementById('ckBdFbmCount'), 'fbm', cockpitCounts.fbm);
   renderChannel(fba, fbaCol, fbaList, document.getElementById('ckBdFbaCount'), 'fba', cockpitCounts.fba);
-
-  const visibleCount=(fbm.length?1:0)+(fba.length?1:0);
-  cols.classList.toggle('single-channel', visibleCount===1);
-  board.classList.toggle('board-empty', visibleCount===0);
 }
 
 /* ===== MARQUEE nomi prodotto =============================================
    Per ogni .ck-bd-name che sfora la larghezza disponibile, avvolge il testo
    in uno <span class="mq"> che scorre da sinistra a destra e torna, in loop.
    I nomi che ci stanno restano invariati (niente animazione inutile). */
-function applyNameMarquee(root){
+function scheduleNameMarquee(root){
   if(!root) return;
+  if(root._mqRAF) cancelAnimationFrame(root._mqRAF);
+  // Due frame: il primo applica il nuovo layout, il secondo misura la larghezza reale.
+  root._mqRAF=requestAnimationFrame(()=>{
+    root._mqRAF=requestAnimationFrame(()=>{
+      root._mqRAF=0;
+      applyNameMarquee(root);
+    });
+  });
+}
+function applyNameMarquee(root){
+  if(!root || root.hidden || !root.isConnected) return;
   const names=root.querySelectorAll('.ck-bd-name');
   names.forEach(el=>{
-    // reset eventuale stato precedente (il contenuto è appena stato ridisegnato)
+    // Operazione idempotente: niente span .mq annidati dopo font-load, resize o snapshot.
+    const txt=(el.dataset.mqText!=null ? el.dataset.mqText : el.textContent)||'';
+    el.dataset.mqText=txt;
     el.classList.remove('scroll');
-    const overflow = el.scrollWidth - el.clientWidth;
-    if(overflow <= 2) return;                    // ci sta: nessun marquee
-    const txt=el.innerHTML;
-    const shift = overflow + 24;                 // quanto deve scorrere (+ margine)
+    el.style.removeProperty('--mq-shift');
+    el.style.removeProperty('--mq-dur');
+    el.textContent=txt;
+
+    const available=Math.max(0,el.clientWidth);
+    const natural=Math.max(0,el.scrollWidth);
+    const overflow=natural-available;
+    if(available<=0 || overflow<=2) return;       // ci sta: nessuna animazione
+
+    const span=document.createElement('span');
+    span.className='mq';
+    span.textContent=txt;
+    el.textContent='';
+    el.appendChild(span);
     el.classList.add('scroll');
-    el.innerHTML='<span class="mq">'+txt+'</span>';
-    // durata proporzionale alla lunghezza: più lento, ~13px/s, minimo 16s
-    const dur=Math.max(16, Math.round(shift/13));
-    el.style.setProperty('--mq-shift', (-shift)+'px');
-    el.style.setProperty('--mq-dur', dur+'s');
+
+    // Spostamento esatto del testo oltre il bordo, con un piccolo respiro finale.
+    const shift=Math.max(0,span.scrollWidth-available)+24;
+    const dur=Math.max(16,Math.round(shift/13));
+    el.style.setProperty('--mq-shift',(-shift)+'px');
+    el.style.setProperty('--mq-dur',dur+'s');
+    void span.offsetWidth;                         // riavvio affidabile dell'animazione
   });
 }
 
-/* Ricalcolo del marquee dopo il caricamento dei web-font (Barlow/JetBrains):
-   le larghezze cambiano quando il font definitivo sostituisce il fallback,
-   così i nomi lunghi (anche in "Da preparare") attivano correttamente lo scroll. */
+/* Ricalcolo dopo font-load e ogni variazione reale di larghezza delle colonne. */
 (function(){
+  const fbmList=document.getElementById('ckBdFbmList');
+  const fbaList=document.getElementById('ckBdFbaList');
+  const refresh=()=>{
+    scheduleNameMarquee(fbmList);
+    scheduleNameMarquee(fbaList);
+  };
   try{
-    if(document.fonts && document.fonts.ready){
-      document.fonts.ready.then(function(){
-        try{
-          applyNameMarquee(document.getElementById('ckBdFbmList'));
-          applyNameMarquee(document.getElementById('ckBdFbaList'));
-        }catch(_){}
-      });
+    if(document.fonts && document.fonts.ready) document.fonts.ready.then(refresh);
+  }catch(_){}
+  let rz=0;
+  window.addEventListener('resize',()=>{
+    clearTimeout(rz);
+    rz=setTimeout(refresh,120);
+  },{passive:true});
+  try{
+    if(typeof ResizeObserver!=='undefined'){
+      const ro=new ResizeObserver(refresh);
+      const cols=document.getElementById('ckBdCols');
+      if(cols) ro.observe(cols);
+      if(fbmList) ro.observe(fbmList);
+      if(fbaList) ro.observe(fbaList);
     }
   }catch(_){}
 })();
