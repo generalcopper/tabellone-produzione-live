@@ -6396,6 +6396,14 @@ function readRackPickerSelection(root){
         const currentMode = lg.mode || lg.meta?.mode || "";
         const staleMs = Number(opts?.staleMs || (requestedMode === "full" ? 45000 : 25000));
         const loadedAt = Number(lg.loadedAtClient || 0) || 0;
+        const localMutationSeqAtStart = Number(lg.localMutationSeq || 0) || 0;
+        const preserveLoadedFlows = !!(
+          opts?.forceReload &&
+          currentMode === requestedMode &&
+          lg.meta?.loaded &&
+          Array.isArray(lg.flows) &&
+          lg.flows.length
+        );
 
         // Nessun listener realtime sui log: il frontend fa una lettura one-shot mirata.
         // Se è già fresco, non riscarica nulla.
@@ -6415,8 +6423,12 @@ function readRackPickerSelection(root){
         lg.loading = true;
         lg.mode = requestedMode;
         lg.unsub = ()=>{}; // compatibilità con logsRealtimeStarted(), ma non apre socket realtime.
-        lg.flows = [];
-        lg.meta = { count:0, loaded:false, expected:0, seen:0, mode:requestedMode, oneShot:true };
+        // Durante il riallineamento post-prelievo non svuotare i flussi già operativi:
+        // i pulsanti successivi devono restare agganciati allo stesso flow mentre la query è in volo.
+        if(!preserveLoadedFlows) lg.flows = [];
+        lg.meta = preserveLoadedFlows
+          ? { ...(lg.meta || {}), count:lg.flows.length, loaded:true, expected:0, seen:0, mode:requestedMode, oneShot:true, refreshing:true }
+          : { count:0, loaded:false, expected:0, seen:0, mode:requestedMode, oneShot:true, refreshing:true };
 
         const addSnap = (key, snap)=>{
           const m = maps[key] || new Map();
@@ -6481,10 +6493,28 @@ function readRackPickerSelection(root){
             .sort((a,b)=> (flowLogTimestamp(b) - flowLogTimestamp(a)) || String(b.id||"").localeCompare(String(a.id||"")))
             .slice(0, requestedMode === "full" ? 240 : 160);
 
+          // Se nel frattempo è stato prelevato un altro SKU, questa risposta può essere
+          // precedente alla nuova transaction. Non deve sovrascrivere lo stato locale più recente.
+          const localMutationChanged = (Number(lg.localMutationSeq || 0) || 0) !== localMutationSeqAtStart;
+          if(localMutationChanged){
+            lg.meta = { ...(lg.meta || {}), count:Array.isArray(lg.flows) ? lg.flows.length : 0, loaded:true, oneShot:true, mode:requestedMode, refreshing:false };
+            lg.loadedAtClient = Date.now();
+            lg.loading = false;
+            updatePickingPreviewCountsFromCurrentLogs("one_shot_skipped_after_local_pick_" + loc);
+            renderLogsForLoc(loc);
+            checkStartupDataGate("logs_local_newer_" + loc);
+            // Ora che la query vecchia è terminata, avviane una nuova sullo stato cloud finale.
+            setTimeout(()=>{
+              try{ startLogsFor(loc, { mode:requestedMode, forceReload:true, staleMs:0 }); }catch(_e){}
+            }, 120);
+            return;
+          }
+
           lg.flows = flows;
           lg.meta.count = flows.length;
           lg.meta.loaded = true;
           lg.meta.oneShot = true;
+          lg.meta.refreshing = false;
           lg.loadedAtClient = Date.now();
           lg.loading = false;
 
@@ -6495,6 +6525,7 @@ function readRackPickerSelection(root){
           console.warn("logs one-shot batch", loc, err);
           lg.loading = false;
           lg.meta.loaded = true;
+          lg.meta.refreshing = false;
           renderLogsForLoc(loc);
           checkStartupDataGate("logs_error_" + loc);
         });
@@ -8916,6 +8947,9 @@ Confermandolo, la transaction cloud scaricherà comunque la quantità richiesta 
         };
 
         lg.flows.splice(idx, 1, nextFlow);
+        // Versione monotona delle mutazioni locali: impedisce a una query one-shot partita
+        // prima del prelievo successivo di rimettere in memoria uno stato più vecchio.
+        lg.localMutationSeq = (Number(lg.localMutationSeq || 0) || 0) + 1;
         lg.meta = { ...(lg.meta || {}), loaded:true, oneShot:true, count:Array.isArray(lg.flows) ? lg.flows.length : (lg.meta?.count || 0) };
         lg.loadedAtClient = Date.now();
 
@@ -12234,8 +12268,10 @@ function closeSheet(name,opts={}){
         e.preventDefault(); e.stopPropagation(); const a=btn.dataset.action||"", flow=btn.dataset.flowid||"", loc=btn.dataset.loc||INVENTORY_CANONICAL_LOC;
         if(a==="pickAllShopifyFbm") return void await withPickingActionLock([a],btn,savePickingAllShopifyFbmFlows);
         if(a==="pickAllFbaPdf") return void await withPickingActionLock([a],btn,savePickingAllFlows);
-        if(a==="pickSku") return void await withPickingActionLock([a,loc,flow,btn.dataset.sku||""],btn,()=>savePickingSku(flow,loc,btn.dataset.sku||"",{skipConfirm:true}));
-        if(a==="pickFlow") await withPickingActionLock([a,loc,flow],btn,()=>savePickingFlow(flow,loc));
+        // Tutte le scritture FBA sullo stesso flow condividono il medesimo lock:
+        // due SKU cliccati in rapida successione non possono aprire transaction concorrenti.
+        if(a==="pickSku") return void await withPickingActionLock(["pickFbaFlowMutation",loc,flow],btn,()=>savePickingSku(flow,loc,btn.dataset.sku||"",{skipConfirm:true}));
+        if(a==="pickFlow") await withPickingActionLock(["pickFbaFlowMutation",loc,flow],btn,()=>savePickingFlow(flow,loc));
       });
       $("homePickingList")?.addEventListener("keydown", e=>{
         if(e.key!=="Enter" && e.key!==" ") return;
