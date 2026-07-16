@@ -1262,12 +1262,7 @@ Tip:
         backfilledKeys: new Set()
       },
       mail: {
-        lowStock: {
-          unsub:null, meta:null, error:"", emailDocId:"", emailDoc:null, emailDocError:"", emailDocBusy:false,
-          visibleSnapshot:null, visibleSnapshotKey:"", visibleSnapshotUpdatedAtClient:0,
-          pendingVisibleMail:null,
-          authorityReady:false, authorityError:""
-        }
+        lowStock: { unsub:null, meta:null, error:"", emailDocId:"", emailDoc:null, emailDocError:"", emailDocBusy:false }
       }
 
     };
@@ -1280,58 +1275,6 @@ Tip:
     // Firestore può produrre più snapshot ravvicinati anche quando il contenuto visibile
     // non cambia. Non ricreiamo il DOM durante hover/focus e non tocchiamo markup identico.
     const __stableUiRegions = new WeakMap();
-    const __stableUiPendingElements = new Set();
-    const __selectionDeferredRenders = new Map();
-    let __selectionFlushTimer = null;
-
-    function __selectionTouchesElement(el){
-      try{
-        if(!el || typeof window.getSelection !== "function") return false;
-        const sel = window.getSelection();
-        if(!sel || sel.rangeCount < 1 || sel.isCollapsed) return false;
-        const normalizeNode = (node)=> node && node.nodeType === Node.TEXT_NODE ? node.parentNode : node;
-        const anchor = normalizeNode(sel.anchorNode);
-        const focus = normalizeNode(sel.focusNode);
-        if((anchor && el.contains(anchor)) || (focus && el.contains(focus))) return true;
-        for(let i=0; i<sel.rangeCount; i++){
-          const range = sel.getRangeAt(i);
-          const common = normalizeNode(range.commonAncestorContainer);
-          if(common && el.contains(common)) return true;
-          try{ if(range.intersectsNode(el)) return true; }catch(_e){}
-        }
-        return false;
-      }catch(_e){ return false; }
-    }
-
-    function __deferRenderWhileSelecting(key, root, renderFn){
-      try{
-        if(!root || !__selectionTouchesElement(root)) return false;
-        if(typeof renderFn === "function") __selectionDeferredRenders.set(String(key || "render"), renderFn);
-        return true;
-      }catch(_e){ return false; }
-    }
-
-    function __flushSelectionDeferredRenders(){
-      try{
-        const sel = typeof window.getSelection === "function" ? window.getSelection() : null;
-        if(sel && sel.rangeCount && !sel.isCollapsed) return;
-        const pendingElements = Array.from(__stableUiPendingElements);
-        for(const el of pendingElements){
-          try{ __flushStableUiRegion(el); }catch(err){ console.warn("pending stable UI flush", err); }
-        }
-        if(!__selectionDeferredRenders.size) return;
-        const jobs = Array.from(__selectionDeferredRenders.values());
-        __selectionDeferredRenders.clear();
-        requestAnimationFrame(()=>{
-          for(const job of jobs){ try{ job(); }catch(err){ console.warn("deferred render", err); } }
-        });
-      }catch(_e){}
-    }
-
-    document.addEventListener("selectionchange", ()=>{
-      try{ if(__selectionFlushTimer) clearTimeout(__selectionFlushTimer); }catch(_e){}
-      __selectionFlushTimer = setTimeout(__flushSelectionDeferredRenders, 100);
-    }, { passive:true });
 
     function __stableUiState(el){
       if(!el) return null;
@@ -1345,19 +1288,14 @@ Tip:
 
     function __flushStableUiRegion(el){
       const rec = __stableUiState(el);
-      if(!el || !rec || !rec.pending){
-        try{ if(el) __stableUiPendingElements.delete(el); }catch(_e){}
-        return false;
-      }
+      if(!el || !rec || !rec.pending) return false;
       const activeInside = !!(document.activeElement && el.contains(document.activeElement));
-      if(rec.pointerInside || rec.focusInside || activeInside || __selectionTouchesElement(el)) return false;
+      if(rec.pointerInside || rec.focusInside || activeInside) return false;
       const next = rec.pending;
       rec.pending = null;
-      __stableUiPendingElements.delete(el);
       if(rec.signature === next.signature) return false;
       el.innerHTML = next.html;
       rec.signature = next.signature;
-      try{ if(typeof next.onApplied === "function") next.onApplied(); }catch(err){ console.warn("stable UI apply callback", err); }
       return true;
     }
 
@@ -1379,7 +1317,7 @@ Tip:
       });
     }
 
-    function setStableInteractiveHtml(el, html, signature="", onApplied=null){
+    function setStableInteractiveHtml(el, html, signature=""){
       if(!el) return false;
       __bindStableUiRegion(el);
       const rec = __stableUiState(el);
@@ -1387,22 +1325,17 @@ Tip:
       const sig = String(signature || ("html:" + fnv1aHex(markup)));
       if(rec.signature === sig){
         rec.pending = null;
-        __stableUiPendingElements.delete(el);
-        try{ if(typeof onApplied === "function") onApplied(); }catch(err){ console.warn("stable UI same callback", err); }
         return false;
       }
       const activeInside = !!(document.activeElement && el.contains(document.activeElement));
-      const interacting = rec.pointerInside || rec.focusInside || activeInside || __selectionTouchesElement(el);
+      const interacting = rec.pointerInside || rec.focusInside || activeInside;
       if(interacting && el.childNodes.length){
-        rec.pending = { html:markup, signature:sig, onApplied };
-        __stableUiPendingElements.add(el);
+        rec.pending = { html:markup, signature:sig };
         return false;
       }
       el.innerHTML = markup;
       rec.signature = sig;
       rec.pending = null;
-      __stableUiPendingElements.delete(el);
-      try{ if(typeof onApplied === "function") onApplied(); }catch(err){ console.warn("stable UI immediate callback", err); }
       return true;
     }
 
@@ -3837,122 +3770,41 @@ function guessTitleFromRaw(rawText, sku){
       return parts.join(" • ");
     }
 
-    const LOW_STOCK_VISIBLE_SNAPSHOT_KIND = "amazon_low_stock_visible_snapshot_v7";
-
-    function __lowStockVisibleRowsFromItems(items){
-      return (items || []).slice().map(it=>{
-        const sku = toSkuId(it?.sku || it?.id || "");
-        const meta = parseTitleMeta(it?.title || "");
-        const product = String(meta?.main || it?.title || sku || "(senza nome)").trim();
-        const physicalQty = Math.round(physicalQtyFromItem(it));
-        const reservedQty = Math.round(reservedQtyFromItem(it));
-        const availableQty = Math.round(lowStockQtyValue(it));
-        const thresholdValue = Math.round(__lowStockThreshold(it));
-        const thresholdLabel = String(__lowStockThresholdShort(it) || "");
-        const reordered = __isReorderedItem(it) === true;
-        const openLoc = String(it?.mainLoc || it?.loc || INVENTORY_CANONICAL_LOC || "concamarise");
-        return Object.freeze({
-          sku, product, physicalQty, reservedQty, availableQty,
-          thresholdValue, thresholdLabel, reordered, openLoc
-        });
-      }).filter(row=>row.sku).sort((a,b)=>{
-        if(a.availableQty !== b.availableQty) return a.availableQty - b.availableQty;
-        return String(a.sku || "").localeCompare(String(b.sku || ""));
-      });
-    }
-
-    function __lowStockVisibleSnapshotKey(rows){
-      try{
-        return JSON.stringify((rows || []).map(r=>({
-          sku:r.sku,
-          product:r.product,
-          physicalQty:r.physicalQty,
-          reservedQty:r.reservedQty,
-          availableQty:r.availableQty,
-          thresholdValue:r.thresholdValue,
-          thresholdLabel:r.thresholdLabel,
-          reordered:r.reordered === true,
-          openLoc:r.openLoc
-        })));
-      }catch(_e){ return ""; }
-    }
-
-    function __makeLowStockVisibleSnapshot(items, source="runtime", persist=false){
-      const rows = Object.freeze(__lowStockVisibleRowsFromItems(items));
-      const createdAtClient = Date.now();
-      const snapshot = Object.freeze({
-        kind:LOW_STOCK_VISIBLE_SNAPSHOT_KIND,
-        source:String(source || "runtime"),
-        createdAtClient,
-        rows,
-        total:rows.length,
-        key:__lowStockVisibleSnapshotKey(rows)
-      });
-      if(persist && state.mail?.lowStock){
-        state.mail.lowStock.visibleSnapshot = snapshot;
-        state.mail.lowStock.visibleSnapshotKey = snapshot.key;
-        state.mail.lowStock.visibleSnapshotUpdatedAtClient = createdAtClient;
-      }
-      return snapshot;
-    }
-
-    function __ensureLowStockVisibleSnapshot(value, source="runtime", persist=false){
-      if(value && value.kind === LOW_STOCK_VISIBLE_SNAPSHOT_KIND && Array.isArray(value.rows)) return value;
-      return __makeLowStockVisibleSnapshot(Array.isArray(value) ? value : [], source, persist);
-    }
-
-    function __commitLowStockVisibleSnapshot(snapshot){
-      try{
-        if(!snapshot || snapshot.kind !== LOW_STOCK_VISIBLE_SNAPSHOT_KIND || !state.mail?.lowStock) return false;
-        state.mail.lowStock.visibleSnapshot = snapshot;
-        state.mail.lowStock.visibleSnapshotKey = snapshot.key;
-        state.mail.lowStock.visibleSnapshotUpdatedAtClient = snapshot.createdAtClient;
-        const pending = state.mail.lowStock.pendingVisibleMail || null;
-        if(pending && pending.key === snapshot.key){
-          state.mail.lowStock.pendingVisibleMail = null;
-          scheduleLowStockEmailAfterUpdate(pending.reason || "visible_snapshot_committed", {
-            immediate:pending.immediate === true,
-            snapshot
-          });
-        }
-        return true;
-      }catch(_e){ return false; }
-    }
-
-    function __captureCurrentLowStockVisibleSnapshot(source="runtime"){
-      return __makeLowStockVisibleSnapshot(__getLowStockBoth(), source, false);
-    }
-
-    function __queueLowStockMailUntilVisible(snapshot, reason="inventory_update", immediate=false){
-      try{
-        if(!snapshot || snapshot.kind !== LOW_STOCK_VISIBLE_SNAPSHOT_KIND || !snapshot.total) return false;
-        const visible = state.mail?.lowStock?.visibleSnapshot || null;
-        if(visible && visible.key === snapshot.key) return true;
-        if(state.mail?.lowStock){
-          state.mail.lowStock.pendingVisibleMail = {
-            key:snapshot.key,
-            reason:String(reason || "inventory_update"),
-            immediate:immediate === true,
-            queuedAtClient:Date.now()
-          };
-        }
-        // Aggiorna anche la HOME nascosta: la fotografia viene considerata visibile
-        // solo nel callback di setStableInteractiveHtml, mai prima.
-        try{ renderHomeDashboard(); }catch(_e){}
-        return false;
-      }catch(_e){ return false; }
-    }
-
     function __buildLowStockEmailPayload(items){
-      // La mail usa la stessa fotografia immutabile che genera le righe visibili.
-      // Nessuna rilettura o secondo calcolo tra UI e invio.
-      const snapshot = __ensureLowStockVisibleSnapshot(items, "email_payload", false);
-      const rows = snapshot.rows.map(r=>({ ...r }));
+      // Un solo inventario cloud: nessuna separazione per sede.
+      const rows = (items || [])
+        .slice()
+        .map(it=>{
+          const sku = toSkuId(it?.sku || it?.id || "");
+          const meta = parseTitleMeta(it?.title || "");
+          const product = String(meta?.main || it?.title || sku || "(senza nome)").trim();
+          const physicalQty = physicalQtyFromItem(it);
+          const reservedQty = reservedQtyFromItem(it);
+          const availableQty = lowStockQtyValue(it);
+          const thresholdValue = __lowStockThreshold(it);
+          const thresholdLabel = __lowStockThresholdShort(it);
+          const reordered = __isReorderedItem(it);
+          return {
+            sku,
+            product,
+            physicalQty,
+            reservedQty,
+            availableQty,
+            thresholdValue,
+            thresholdLabel,
+            reordered
+          };
+        })
+        .sort((a,b)=>{
+          if(a.reordered !== b.reordered) return a.reordered ? 1 : -1;
+          if(a.availableQty !== b.availableQty) return a.availableQty - b.availableQty;
+          return String(a.sku || "").localeCompare(String(b.sku || ""));
+        });
 
       const total = rows.length;
       const reorderedCount = rows.filter(r=>r.reordered).length;
       const toHandleCount = Math.max(0, total - reorderedCount);
-      const stamp = (typeof fmtDate === "function") ? fmtDate(snapshot.createdAtClient) : new Date(snapshot.createdAtClient).toLocaleString("it-IT");
+      const stamp = (typeof fmtDate === "function") ? fmtDate(Date.now()) : new Date().toLocaleString("it-IT");
 
       const textRows = rows.map(r=>[
         `- ${r.sku || "—"}`,
@@ -4077,19 +3929,16 @@ function guessTitleFromRaw(rawText, sku){
         reorderedCount,
         counts: { unica: total },
         preview: { unica: previewRows },
-        visibleSnapshotKey: snapshot.key,
-        visibleSnapshotAtClient: snapshot.createdAtClient,
-        templateVersion: 7,
-        templateFamily: "amazon_inventory_visible_snapshot"
+        templateVersion: 6,
+        templateFamily: "amazon_inventory_unified"
       };
     }
 
-    const LOW_STOCK_MAIL_TEMPLATE_VERSION = 7;
-    const LOW_STOCK_MAIL_OWNER = "hub_inventario_visible_snapshot_v7";
-    const LOW_STOCK_MAIL_AUTHORITY = "frontend_visible_snapshot_v7";
-    const LOW_STOCK_MAIL_FRONTEND_DISABLED = false;
-    const LOW_STOCK_MAIL_BACKEND_DISABLED = true;
-    // Lo scudo legacy resta attivo per neutralizzare schede vecchie Cerea / Concamarise.
+    const LOW_STOCK_MAIL_TEMPLATE_VERSION = 6;
+    const LOW_STOCK_MAIL_OWNER = "hub_inventario_unico_v6";
+    const LOW_STOCK_MAIL_FRONTEND_DISABLED = true; // invio affidato esclusivamente al backend Cloud Functions
+    // Lo scudo legacy deve restare attivo anche con l'invio frontend spento:
+    // neutralizza le vecchie schede che inviavano ancora la mail separata Cerea / Concamarise.
     const LEGACY_LOW_STOCK_MAIL_SHIELD_ENABLED = true;
     const LOW_STOCK_MAIL_SETTLE_MS = 7000;
     const LOW_STOCK_MAIL_MIN_INTERVAL_MS = 5 * 60 * 1000;
@@ -4100,20 +3949,19 @@ function guessTitleFromRaw(rawText, sku){
     const LOW_STOCK_MAIL_DEDUPE_VERSION = 2;
     const LOW_STOCK_MAIL_DOC_PREFIX = "auto_low_stock_once_v1_";
 
-    // Unica autorità mail: il frontend v7 accoda solo la fotografia esatta della lista visibile.
+    // Unica autorità mail: il template v6 è l'unico che può essere accodato da questo Hub.
     // Il campo legacy `hash` viene mantenuto allineato solo come scudo: impedisce alle vecchie
     // schede ancora aperte di accodare la grafica separata Cerea / Concamarise.
 
     function __buildLowStockStateRows(items){
-      const snapshot = __ensureLowStockVisibleSnapshot(items, "state_hash", false);
-      return snapshot.rows.map(row=>({
-        sku:String(row.sku || ""),
-        availableQty:Math.round(row.availableQty),
-        physicalQty:Math.round(row.physicalQty),
-        reservedQty:Math.round(row.reservedQty),
-        threshold:Math.round(row.thresholdValue),
-        reordered:row.reordered === true
-      })).sort((a,b)=>{
+      return (items || []).map(it=>({
+        sku: String(toSkuId(it?.sku || it?.id || "") || ""),
+        availableQty: Math.round(lowStockQtyValue(it)),
+        physicalQty: Math.round(physicalQtyFromItem(it)),
+        reservedQty: Math.round(reservedQtyFromItem(it)),
+        threshold: Math.round(__lowStockThreshold(it)),
+        reordered: __isReorderedItem(it) === true
+      })).filter(x=>x.sku).sort((a,b)=>{
         if(a.sku !== b.sku) return a.sku.localeCompare(b.sku);
         if(a.availableQty !== b.availableQty) return a.availableQty - b.availableQty;
         if(a.physicalQty !== b.physicalQty) return a.physicalQty - b.physicalQty;
@@ -4373,47 +4221,6 @@ function guessTitleFromRaw(rawText, sku){
       return __legacyLowStockShield.mode || "hub_dual";
     }
 
-    async function __claimFrontendLowStockMailerAuthority(reason="startup"){
-      try{
-        if(!state.user?.isAdmin || !state.user?.isWhitelisted) return false;
-        const api = state.firebase?.api;
-        const db = state.firebase?.db;
-        if(!api || !db || !api.setDoc || !api.getDoc) return false;
-        const metaRef = api.doc(db, COL_META, DOC_LOWSTOCK_EMAIL_STATE);
-        const nowClient = Date.now();
-        await api.setDoc(metaRef, {
-          backendLowStockEmailDisabled:LOW_STOCK_MAIL_BACKEND_DISABLED,
-          lowStockBackendDisabled:LOW_STOCK_MAIL_BACKEND_DISABLED,
-          frontendLowStockEmailDisabled:LOW_STOCK_MAIL_FRONTEND_DISABLED,
-          authoritativeLowStockMailer:LOW_STOCK_MAIL_AUTHORITY,
-          authoritativeLowStockMailOwner:LOW_STOCK_MAIL_OWNER,
-          visibleSnapshotRequired:true,
-          mailerAuthorityVersion:7,
-          mailerAuthorityReason:String(reason || "startup"),
-          mailerAuthorityClaimedAt:api.serverTimestamp(),
-          mailerAuthorityClaimedAtClient:nowClient,
-          mailerAuthorityClaimedBy:state.user?.emailLower || state.user?.email || ""
-        }, { merge:true });
-        const snap = await api.getDoc(metaRef);
-        const meta = snap?.exists?.() ? (snap.data() || {}) : {};
-        const ok = meta.backendLowStockEmailDisabled === true &&
-          meta.frontendLowStockEmailDisabled === false &&
-          String(meta.authoritativeLowStockMailer || "") === LOW_STOCK_MAIL_AUTHORITY;
-        if(state.mail?.lowStock){
-          state.mail.lowStock.authorityReady = ok;
-          state.mail.lowStock.authorityError = ok ? "" : "Autorità mail frontend non confermata dal cloud.";
-        }
-        return ok;
-      }catch(err){
-        if(state.mail?.lowStock){
-          state.mail.lowStock.authorityReady = false;
-          state.mail.lowStock.authorityError = err?.message || String(err);
-        }
-        console.warn("frontend low-stock mail authority", err);
-        return false;
-      }
-    }
-
     async function __syncLegacyLowStockMailShield(reason="inventory_snapshot"){
       if(__legacyLowStockShield.running){
         __legacyLowStockShield.queued = true;
@@ -4448,13 +4255,8 @@ function guessTitleFromRaw(rawText, sku){
             legacyMailTemplateRetired:true,
             legacyMailTemplateName:"cerea_concamarise",
             legacyLowStockEmailDisabled:true,
-            backendLowStockEmailDisabled:LOW_STOCK_MAIL_BACKEND_DISABLED,
-            lowStockBackendDisabled:LOW_STOCK_MAIL_BACKEND_DISABLED,
-            frontendLowStockEmailDisabled:LOW_STOCK_MAIL_FRONTEND_DISABLED,
-            authoritativeLowStockMailer:LOW_STOCK_MAIL_AUTHORITY,
-            authoritativeLowStockMailOwner:LOW_STOCK_MAIL_OWNER,
-            visibleSnapshotRequired:true,
-            legacyBlockedHashes:Object.values(candidates || {}).filter(Boolean),
+            frontendLowStockEmailDisabled:true,
+            authoritativeLowStockMailer:"backend_cloud_functions",
             legacyMailBlockedBy:LOW_STOCK_MAIL_OWNER,
             legacyMailShieldVersion:2,
             legacyMailShieldMode:mode,
@@ -4500,14 +4302,18 @@ function guessTitleFromRaw(rawText, sku){
         __lowStockMailDispatch.deferredTimer = setTimeout(()=>{
           __lowStockMailDispatch.deferredTimer = null;
           __lowStockMailDispatch.deferredAt = 0;
-          const latest = __captureCurrentLowStockVisibleSnapshot("deferred_" + reason);
-          if(latest.total) scheduleLowStockEmailAfterUpdate(reason, { immediate:true, snapshot:latest });
+          const latest = __getLowStockBoth();
+          if(latest && latest.length) void __enqueueLowStockEmailIfNeeded(latest, { reason });
         }, delay);
       }catch(_e){}
     }
 
-    async function __enqueueLowStockEmailIfNeeded(snapshotInput, { reason="" } = {}){
-      if(LOW_STOCK_MAIL_FRONTEND_DISABLED) return;
+    async function __enqueueLowStockEmailIfNeeded(items, { reason="" } = {}){
+      if(LOW_STOCK_MAIL_FRONTEND_DISABLED){
+        const mailLog = $("homeLowStockMailLog");
+        if(mailLog) mailLog.textContent = "Email sotto scorta gestita dal backend • da info@generalcoppersrl.com a matteo@generalcoppersrl.com.";
+        return;
+      }
       if(__lowStockMailDispatch.running){
         __lowStockMailDispatch.queued = true;
         __lowStockMailDispatch.lastReason = String(reason || "queued_update");
@@ -4515,7 +4321,6 @@ function guessTitleFromRaw(rawText, sku){
       }
       __lowStockMailDispatch.running = true;
       __lowStockMailDispatch.lastReason = String(reason || "inventory_update");
-      const snapshot = __ensureLowStockVisibleSnapshot(snapshotInput, "enqueue", false);
       try{
         const mailLog = $("homeLowStockMailLog");
 
@@ -4535,24 +4340,19 @@ function guessTitleFromRaw(rawText, sku){
           if(mailLog) mailLog.textContent = "Email automatica: in attesa inventario cloud…";
           return;
         }
-        if(!snapshot.total){
+        if(!items || !items.length){
           if(mailLog) mailLog.textContent = "";
           return;
         }
 
-        const authorityReady = await __claimFrontendLowStockMailerAuthority("before_frontend_dispatch");
-        if(!authorityReady){
-          if(mailLog) mailLog.textContent = "Email automatica bloccata: backend non risulta disattivato o autorità frontend non confermata.";
-          return;
-        }
-
         // Prima neutralizza il vecchio mittente Cerea / Concamarise. È solo un blocco
-        // di compatibilità: la mail vera resta esclusivamente la fotografia frontend v7 qui sotto.
-        const legacyShieldHash = await __syncLegacyLowStockMailShield("before_v7_frontend_dispatch");
+        // di compatibilità: la mail vera resta esclusivamente quella v6 qui sotto.
+        const legacyShieldHash = await __syncLegacyLowStockMailShield("before_v6_dispatch");
 
         // Hash dello stato reale, indipendente dalla grafica e dalla versione del template.
         // Stato A -> B -> A produce sempre lo stesso hash A e quindi non può essere reinviato.
-        const hashBundle = await __buildLowStockStateHashBundle(snapshot);
+        const hashBundle = await __buildLowStockStateHashBundle(items);
+        const list = hashBundle.rows;
         const stateHash = hashBundle.stateHash;
         const compatibleStateHashes = hashBundle.compatibleHashes;
         if(!stateHash){
@@ -4561,7 +4361,7 @@ function guessTitleFromRaw(rawText, sku){
         }
 
         const now = Date.now();
-        const payload = __buildLowStockEmailPayload(snapshot);
+        const payload = __buildLowStockEmailPayload(items);
         const api = fb.api;
         const db = fb.db;
         const metaRef = api.doc(db, COL_META, DOC_LOWSTOCK_EMAIL_STATE);
@@ -4593,17 +4393,6 @@ function guessTitleFromRaw(rawText, sku){
               dedupeMigratedFromStateHash: historicalMatch.stateHash || null,
               dedupeVersion: LOW_STOCK_MAIL_DEDUPE_VERSION,
               stateHashSchema: LOW_STOCK_MAIL_STATE_HASH_SCHEMA,
-              backendLowStockEmailDisabled:LOW_STOCK_MAIL_BACKEND_DISABLED,
-              lowStockBackendDisabled:LOW_STOCK_MAIL_BACKEND_DISABLED,
-              frontendLowStockEmailDisabled:LOW_STOCK_MAIL_FRONTEND_DISABLED,
-              authoritativeLowStockMailer:LOW_STOCK_MAIL_AUTHORITY,
-              authoritativeLowStockMailOwner:LOW_STOCK_MAIL_OWNER,
-              visibleSnapshotRequired:true,
-              visibleSnapshotKey:snapshot.key,
-              visibleSnapshotAtClient:snapshot.createdAtClient,
-              processor:LOW_STOCK_MAIL_AUTHORITY,
-              lastFrontendResult:"duplicate_blocked",
-              lastFrontendCheckedAtClient:now,
               pendingStateHash: null,
               pendingReason: null,
               pendingSeenAtClient: null,
@@ -4616,19 +4405,8 @@ function guessTitleFromRaw(rawText, sku){
           return;
         }
 
-        const currentSnapshotBeforeSend = __captureCurrentLowStockVisibleSnapshot("before_transaction");
-        const visibleSnapshotBeforeSend = state.mail?.lowStock?.visibleSnapshot || null;
-        if(currentSnapshotBeforeSend.key !== snapshot.key || !visibleSnapshotBeforeSend || visibleSnapshotBeforeSend.key !== snapshot.key){
-          __lowStockMailDispatch.queued = true;
-          __lowStockMailDispatch.lastReason = "snapshot_changed_before_send";
-          __queueLowStockMailUntilVisible(currentSnapshotBeforeSend, "snapshot_changed_before_send", true);
-          if(mailLog) mailLog.textContent = "Email automatica: fotografia cambiata o non ancora visibile, invio rinviato allo stato mostrato più recente.";
-          return;
-        }
-
         let enqueued = false;
         let duplicateBlocked = false;
-        let authorityBlocked = false;
         let cooldownUntil = 0;
         let createdEmailDocId = deterministicEmailDocId;
         let nextRevision = 0;
@@ -4642,13 +4420,6 @@ function guessTitleFromRaw(rawText, sku){
           const prevTemplateHash = String(meta.lastSentStateHash || meta.templateHash || "");
           const lastSentAtClient = Number(meta.lastSentAtClient || meta.sentAtClient || 0) || 0;
           const alreadyKnownByMeta = compatibleStateHashes.includes(prevTemplateHash);
-          const authorityValid = meta.backendLowStockEmailDisabled === true &&
-            meta.frontendLowStockEmailDisabled === false &&
-            String(meta.authoritativeLowStockMailer || "") === LOW_STOCK_MAIL_AUTHORITY;
-          if(!authorityValid){
-            authorityBlocked = true;
-            return;
-          }
 
           // Dedupe permanente: stesso stato già accodato in qualunque momento,
           // anche dopo altri stati intermedi o da un'altra scheda, non viene reinviato.
@@ -4661,17 +4432,6 @@ function guessTitleFromRaw(rawText, sku){
               duplicateBlockedAtClient: now,
               dedupeVersion: LOW_STOCK_MAIL_DEDUPE_VERSION,
               stateHashSchema: LOW_STOCK_MAIL_STATE_HASH_SCHEMA,
-              backendLowStockEmailDisabled:LOW_STOCK_MAIL_BACKEND_DISABLED,
-              lowStockBackendDisabled:LOW_STOCK_MAIL_BACKEND_DISABLED,
-              frontendLowStockEmailDisabled:LOW_STOCK_MAIL_FRONTEND_DISABLED,
-              authoritativeLowStockMailer:LOW_STOCK_MAIL_AUTHORITY,
-              authoritativeLowStockMailOwner:LOW_STOCK_MAIL_OWNER,
-              visibleSnapshotRequired:true,
-              visibleSnapshotKey:snapshot.key,
-              visibleSnapshotAtClient:snapshot.createdAtClient,
-              processor:LOW_STOCK_MAIL_AUTHORITY,
-              lastFrontendResult:"duplicate_blocked",
-              lastFrontendCheckedAtClient:now,
               pendingStateHash: null,
               pendingReason: null,
               pendingSeenAtClient: null,
@@ -4693,19 +4453,8 @@ function guessTitleFromRaw(rawText, sku){
               dedupeVersion: LOW_STOCK_MAIL_DEDUPE_VERSION,
               stateHashSchema: LOW_STOCK_MAIL_STATE_HASH_SCHEMA,
               mailOwner: LOW_STOCK_MAIL_OWNER,
-              backendLowStockEmailDisabled:LOW_STOCK_MAIL_BACKEND_DISABLED,
-              lowStockBackendDisabled:LOW_STOCK_MAIL_BACKEND_DISABLED,
-              frontendLowStockEmailDisabled:LOW_STOCK_MAIL_FRONTEND_DISABLED,
-              authoritativeLowStockMailer:LOW_STOCK_MAIL_AUTHORITY,
-              authoritativeLowStockMailOwner:LOW_STOCK_MAIL_OWNER,
-              visibleSnapshotRequired:true,
-              visibleSnapshotKey:snapshot.key,
-              visibleSnapshotAtClient:snapshot.createdAtClient,
-              processor:LOW_STOCK_MAIL_AUTHORITY,
-              lastFrontendResult:"waiting_settle",
-              lastFrontendCheckedAtClient:now,
               templateVersion: LOW_STOCK_MAIL_TEMPLATE_VERSION,
-              templateFamily: "amazon_inventory_visible_snapshot",
+              templateFamily: "amazon_inventory_unified",
               ...(legacyShieldHash ? { hash: legacyShieldHash } : {})
             }, { merge:true });
             return;
@@ -4728,23 +4477,14 @@ function guessTitleFromRaw(rawText, sku){
             kind: "auto_low_stock",
             mailOwner: LOW_STOCK_MAIL_OWNER,
             mailRevision: nextRevision,
-            backendLowStockEmailDisabled:LOW_STOCK_MAIL_BACKEND_DISABLED,
-            lowStockBackendDisabled:LOW_STOCK_MAIL_BACKEND_DISABLED,
-            frontendLowStockEmailDisabled:LOW_STOCK_MAIL_FRONTEND_DISABLED,
-            authoritativeLowStockMailer:LOW_STOCK_MAIL_AUTHORITY,
-            authoritativeLowStockMailOwner:LOW_STOCK_MAIL_OWNER,
-            visibleSnapshotRequired:true,
             templateVersion: LOW_STOCK_MAIL_TEMPLATE_VERSION,
-            templateFamily: "amazon_inventory_visible_snapshot",
-            renderMode: "visible_snapshot_v7",
+            templateFamily: "amazon_inventory_unified",
+            renderMode: "unified_v6",
             stateHash: stateHash,
             stateHashSchema: LOW_STOCK_MAIL_STATE_HASH_SCHEMA,
             dedupeVersion: LOW_STOCK_MAIL_DEDUPE_VERSION,
             dedupeMode: "immutable_email_document_id",
             dedupeKey: createdEmailDocId,
-            visibleSnapshotKey:snapshot.key,
-            visibleSnapshotAtClient:snapshot.createdAtClient,
-            visibleSnapshotRows:snapshot.rows.slice(0, 250).map(r=>({ ...r })),
             lowStock: {
               total: payload.total,
               counts: payload.counts || null,
@@ -4752,15 +4492,13 @@ function guessTitleFromRaw(rawText, sku){
               toHandleCount: payload.toHandleCount,
               reorderedCount: payload.reorderedCount,
               templateVersion: LOW_STOCK_MAIL_TEMPLATE_VERSION,
-              templateFamily: "amazon_inventory_visible_snapshot",
-              renderMode: "visible_snapshot_v7",
+              templateFamily: "amazon_inventory_unified",
+              renderMode: "unified_v6",
               templateHash: stateHash,
               stateHash: stateHash,
               stateHashSchema: LOW_STOCK_MAIL_STATE_HASH_SCHEMA,
               dedupeVersion: LOW_STOCK_MAIL_DEDUPE_VERSION,
-              reason: String(reason || ""),
-              visibleSnapshotKey:snapshot.key,
-              visibleSnapshotAtClient:snapshot.createdAtClient
+              reason: String(reason || "")
             },
             createdBy: state.user?.emailLower || state.user?.email || "",
             locations: ["unica"]
@@ -4776,26 +4514,13 @@ function guessTitleFromRaw(rawText, sku){
             toHandleCount: payload.toHandleCount,
             reorderedCount: payload.reorderedCount,
             templateVersion: LOW_STOCK_MAIL_TEMPLATE_VERSION,
-            templateFamily: "amazon_inventory_visible_snapshot",
-            renderMode: "visible_snapshot_v7",
+            templateFamily: "amazon_inventory_unified",
+            renderMode: "unified_v6",
             stateHashSchema: LOW_STOCK_MAIL_STATE_HASH_SCHEMA,
             dedupeVersion: LOW_STOCK_MAIL_DEDUPE_VERSION,
             dedupeMode: "immutable_email_document_id",
             mailOwner: LOW_STOCK_MAIL_OWNER,
             mailRevision: nextRevision,
-            backendLowStockEmailDisabled:LOW_STOCK_MAIL_BACKEND_DISABLED,
-            lowStockBackendDisabled:LOW_STOCK_MAIL_BACKEND_DISABLED,
-            frontendLowStockEmailDisabled:LOW_STOCK_MAIL_FRONTEND_DISABLED,
-            authoritativeLowStockMailer:LOW_STOCK_MAIL_AUTHORITY,
-            authoritativeLowStockMailOwner:LOW_STOCK_MAIL_OWNER,
-            visibleSnapshotRequired:true,
-            visibleSnapshotKey:snapshot.key,
-            visibleSnapshotAtClient:snapshot.createdAtClient,
-            visibleSnapshotRows:snapshot.rows.slice(0, 250).map(r=>({ ...r })),
-            processor:LOW_STOCK_MAIL_AUTHORITY,
-            lastFrontendResult:"email_queued",
-            lastFrontendCheckedAt:api.serverTimestamp(),
-            lastFrontendCheckedAtClient:now,
             ...(legacyShieldHash ? { hash: legacyShieldHash } : {}),
             emailDocId: createdEmailDocId,
             sentAt: api.serverTimestamp(),
@@ -4820,11 +4545,9 @@ function guessTitleFromRaw(rawText, sku){
             ? `Email automatica inviata/accodata alle ${fmtDate(now)} • ${payload.total} righe • hash ${stateHash.slice(0, 12)}.`
             : (duplicateBlocked
               ? `Email automatica: stato già inviato • hash ${stateHash.slice(0, 12)} • nessun reinvio.`
-              : (authorityBlocked
-                ? "Email automatica bloccata: autorità frontend non confermata o backend non disattivato."
-                : (cooldownUntil
-                  ? `Email automatica: variazione registrata • hash ${stateHash.slice(0, 12)} • blocco anti-raffica fino alle ${fmtDate(cooldownUntil)}.`
-                  : "Email automatica: nessun invio.")));
+              : (cooldownUntil
+                ? `Email automatica: variazione registrata • hash ${stateHash.slice(0, 12)} • blocco anti-raffica fino alle ${fmtDate(cooldownUntil)}.`
+                : "Email automatica: nessun invio."));
         }
       }catch(err){
         try{
@@ -4838,8 +4561,8 @@ function guessTitleFromRaw(rawText, sku){
           __lowStockMailDispatch.queued = false;
           const queuedReason = __lowStockMailDispatch.lastReason || "queued_update";
           setTimeout(()=>{
-            const latest = __captureCurrentLowStockVisibleSnapshot("queued_" + queuedReason);
-            if(latest.total) scheduleLowStockEmailAfterUpdate(queuedReason, { immediate:true, snapshot:latest });
+            const latest = __getLowStockBoth();
+            if(latest && latest.length) void __enqueueLowStockEmailIfNeeded(latest, { reason: queuedReason });
           }, 1500);
         }
       }
@@ -4861,16 +4584,21 @@ function guessTitleFromRaw(rawText, sku){
 
     function __lowStockFingerprintPayload(items){
       try{
-        const snapshot = __ensureLowStockVisibleSnapshot(items, "fingerprint", false);
-        return snapshot.rows.map(row=>({
-          sku:String(row.sku || ""),
-          qty:row.availableQty,
-          physicalQty:row.physicalQty,
-          reservedQty:row.reservedQty,
-          threshold:row.thresholdValue,
-          reordered:row.reordered === true
-        }));
-      }catch(_e){ return []; }
+        return (items||[]).slice().map(it=>({
+          sku: String(toSkuId(it.sku||"")||""),
+          qty: lowStockQtyValue(it),
+          physicalQty: physicalQtyFromItem(it),
+          reservedQty: reservedQtyFromItem(it),
+          threshold: __lowStockThreshold(it),
+          locs: Array.isArray(it.locations) ? it.locations.map(x=>`${x.loc}:${x.physicalQty}:${x.reservedQty}`).join("|") : ""
+        })).sort((a,b)=>{
+          if(a.sku!==b.sku) return a.sku.localeCompare(b.sku);
+          if((a.qty||0) !== (b.qty||0)) return (a.qty||0) - (b.qty||0);
+          return (a.threshold||0) - (b.threshold||0);
+        });
+      }catch(_e){
+        return [];
+      }
     }
 
     function __lowStockRealtimeSnapshotKey(items){
@@ -4901,20 +4629,10 @@ function guessTitleFromRaw(rawText, sku){
       }catch(_e){}
       __lowMailT2 = null;
 
-      const scheduledSnapshot = (opts?.snapshot && opts.snapshot.kind === LOW_STOCK_VISIBLE_SNAPSHOT_KIND)
-        ? opts.snapshot
-        : __captureCurrentLowStockVisibleSnapshot("scheduled_" + r);
-      if(!scheduledSnapshot.total) return;
-      if(!__queueLowStockMailUntilVisible(scheduledSnapshot, r, immediate)) return;
-      const visibleSnapshot = state.mail?.lowStock?.visibleSnapshot || null;
-      if(!visibleSnapshot || visibleSnapshot.key !== scheduledSnapshot.key) return;
-      const expectedKey = visibleSnapshot.key;
       const run = ()=>{
         if(seq !== __lowMailSeq) return;
-        const latest = __captureCurrentLowStockVisibleSnapshot("scheduled_run_" + r);
-        const visible = state.mail?.lowStock?.visibleSnapshot || null;
-        if(latest.key !== expectedKey || !visible || visible.key !== expectedKey) return;
-        void __enqueueLowStockEmailIfNeeded(visible, { reason: r });
+        const items = __getLowStockBoth();
+        void __enqueueLowStockEmailIfNeeded(items, { reason: r });
       };
 
       // Un solo tentativo, dopo assestamento. Nessun secondo invio automatico.
@@ -4929,8 +4647,8 @@ function guessTitleFromRaw(rawText, sku){
         if(!state.user?.isAdmin || !state.user?.isWhitelisted) return;
         if(!state.inventory?.[INVENTORY_CANONICAL_LOC]?.meta?.loaded) return;
 
-        const snapshot = __captureCurrentLowStockVisibleSnapshot("realtime_" + String(reason || "update"));
-        const key = snapshot.key;
+        const items = __getLowStockBoth();
+        const key = __lowStockRealtimeSnapshotKey(items);
         if(!key) return;
 
         if(!__lowStockRealtimeReady){
@@ -4943,18 +4661,18 @@ function guessTitleFromRaw(rawText, sku){
         __lowStockRealtimeKey = key;
 
         // Se non c'è più nessun prodotto sotto soglia, aggiorno baseline ma non mando mail vuota.
-        if(!snapshot.total) return;
+        if(!items.length) return;
 
         try{ if(__lowStockRealtimeTimer) clearTimeout(__lowStockRealtimeTimer); }catch(_e){}
         const r = String(reason || "realtime_low_stock_update");
         const expectedKey = key;
         __lowStockRealtimeTimer = setTimeout(()=>{
-          const latest = __captureCurrentLowStockVisibleSnapshot("realtime_settled_" + r);
-          const latestKey = latest.key;
+          const latest = __getLowStockBoth();
+          const latestKey = __lowStockRealtimeSnapshotKey(latest);
           if(latestKey) __lowStockRealtimeKey = latestKey;
           if(latestKey !== expectedKey) return;
-          if(latest.total){
-            scheduleLowStockEmailAfterUpdate(r, { immediate:true, snapshot:latest });
+          if(latest && latest.length){
+            scheduleLowStockEmailAfterUpdate(r, { immediate:true });
           }
         }, LOW_STOCK_MAIL_SETTLE_MS);
       }catch(err){
@@ -5093,7 +4811,6 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
     }
 
     function renderWorkflowBox(){
-      if(__deferRenderWhileSelecting("renderWorkflowBox", $("sheetScarica"), ()=>renderWorkflowBox())) return;
       const box = $("workflowBox");
       const folder = $("workflowFolder");
       const title = $("workflowTitle");
@@ -5395,7 +5112,6 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
       startRealtimeFor(INVENTORY_CANONICAL_LOC);
       startAllLogs();
       startLowStockEmailMetaWatch();
-      void __claimFrontendLowStockMailerAuthority("startup");
       startTwReordersWatch();
       scheduleCloudReservationReconcile("startup");
     }
@@ -5440,12 +5156,6 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
         state.mail.lowStock.emailDoc = null;
         state.mail.lowStock.emailDocError = "";
         state.mail.lowStock.emailDocBusy = false;
-        state.mail.lowStock.visibleSnapshot = null;
-        state.mail.lowStock.visibleSnapshotKey = "";
-        state.mail.lowStock.visibleSnapshotUpdatedAtClient = 0;
-        state.mail.lowStock.pendingVisibleMail = null;
-        state.mail.lowStock.authorityReady = false;
-        state.mail.lowStock.authorityError = "";
       }
       if(state.route.view==="location") renderInventoryList();
       if(state.route.view==="home") renderHomeDashboard();
@@ -5625,15 +5335,6 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
           const nextLegacyHash = next ? String(next.hash || "") : "";
 
           state.mail.lowStock.meta = next;
-          const authorityOk = !!next &&
-            next.backendLowStockEmailDisabled === true &&
-            next.frontendLowStockEmailDisabled === false &&
-            String(next.authoritativeLowStockMailer || "") === LOW_STOCK_MAIL_AUTHORITY;
-          state.mail.lowStock.authorityReady = authorityOk;
-          state.mail.lowStock.authorityError = authorityOk ? "" : "Autorità frontend persa o backend non disattivato.";
-          if(next && !authorityOk){
-            setTimeout(()=>{ void __claimFrontendLowStockMailerAuthority("meta_authority_reclaim"); }, 120);
-          }
 
           if(prevHash && nextHash && prevHash !== nextHash){
             state.mail.lowStock.emailDocId = "";
@@ -5751,7 +5452,6 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
     }
 
     function renderHomeLowStockMailLog(){
-      if(__deferRenderWhileSelecting("renderHomeLowStockMailLog", $("homeLowStockMailLog"), ()=>renderHomeLowStockMailLog())) return;
       const el = $("homeLowStockMailLog");
       if(!el) return;
 
@@ -5768,28 +5468,24 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
 
       const meta = state.mail?.lowStock?.meta;
       if(!meta){
-        el.innerHTML = `<span class="muted">Email sotto scorta: autorità frontend • fotografia identica alla lista visibile • backend richiesto disattivato • nessun invio registrato.</span>`;
+        el.innerHTML = `<span class="muted">Email sotto scorta gestita dal backend • mittente info@generalcoppersrl.com • destinatario matteo@generalcoppersrl.com • nessun invio registrato.</span>`;
         return;
       }
 
       const sentAt = meta.sentAt || meta.updatedAt || meta.lastSentAt || meta.sentAtClient || null;
-      const checkedAt = meta.lastFrontendCheckedAt || meta.lastFrontendCheckedAtClient || meta.lastBackendCheckedAt || meta.lastObservedAt || meta.lastBackendEventAt || meta.lastBackendCheckedAtClient || meta.lastObservedAtClient || meta.lastBackendEventAtClient || null;
+      const checkedAt = meta.lastBackendCheckedAt || meta.lastObservedAt || meta.lastBackendEventAt || meta.lastBackendCheckedAtClient || meta.lastObservedAtClient || meta.lastBackendEventAtClient || null;
       const sentDate = __fmtTsAny(sentAt);
       const checkedDate = __fmtTsAny(checkedAt);
       const total = Number.isFinite(meta.total) ? meta.total : (Number.isFinite(meta.lastTotal) ? meta.lastTotal : null);
       const toHandleCount = Number.isFinite(meta.toHandleCount) ? meta.toHandleCount : null;
       const reorderedCount = Number.isFinite(meta.reorderedCount) ? meta.reorderedCount : null;
       const reason = meta.reason || meta.lastBackendReason ? String(meta.reason || meta.lastBackendReason) : "";
-      const result = String(meta.lastFrontendResult || meta.lastBackendResult || "");
-      const processor = String(meta.authoritativeLowStockMailer || meta.processor || LOW_STOCK_MAIL_AUTHORITY);
+      const result = String(meta.lastBackendResult || "");
+      const processor = String(meta.processor || "backend");
       const mailFrom = String(meta.mailFrom || "info@generalcoppersrl.com");
       const mailTo = Array.isArray(meta.mailTo) ? meta.mailTo.join(", ") : String(meta.mailTo || "matteo@generalcoppersrl.com");
       const hash = String(meta.lastObservedStateHash || meta.currentStateHash || meta.lastSentStateHash || meta.templateHash || "");
       const hashShort = hash ? hash.slice(0, 10) : "";
-      const backendCheckedAtClient = Number(meta.lastBackendCheckedAtClient || meta.lastBackendEventAtClient || 0) || 0;
-      const authorityClaimedAtClient = Number(meta.mailerAuthorityClaimedAtClient || 0) || 0;
-      const backendQueuedAfterFrontendAuthority = String(meta.lastBackendResult || "") === "email_queued" &&
-        backendCheckedAtClient > 0 && authorityClaimedAtClient > 0 && backendCheckedAtClient >= authorityClaimedAtClient;
       const resultLabel = result === "email_queued" ? "mail accodata"
         : result === "duplicate_blocked" ? "stato già notificato"
         : result === "waiting_settle" ? "variazione rilevata, in assestamento"
@@ -5797,7 +5493,7 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
         : (result || "backend attivo");
 
       let header = `Ultima mail sotto scorta: <b>${escapeHtml(sentDate)}</b>`;
-      if(checkedAt) header += ` • Ultimo controllo mailer: <b>${escapeHtml(checkedDate)}</b>`;
+      if(checkedAt) header += ` • Ultimo controllo backend: <b>${escapeHtml(checkedDate)}</b>`;
       header += ` • Stato: <b>${escapeHtml(resultLabel)}</b>`;
       if(total != null) header += ` • SKU <b>${escapeHtml(String(total))}</b>`;
       if(toHandleCount != null) header += ` • Da gestire <b>${escapeHtml(String(toHandleCount))}</b>`;
@@ -5807,13 +5503,10 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
       header += ` • mittente: <span class="mono">${escapeHtml(mailFrom)}</span>`;
       header += ` • destinatario: <span class="mono">${escapeHtml(mailTo)}</span>`;
       header += ` • gestione: <span class="mono">${escapeHtml(processor)}</span>`;
-      if(backendQueuedAfterFrontendAuthority){
-        header += `<div class="hint" style="margin-top:6px;color:var(--bad)"><b>Attenzione:</b> il backend ha accodato una mail dopo il passaggio al frontend. Il frontend resta bloccato finché l'autorità cloud non è coerente.</div>`;
-      }
       if(meta.lastBackendError){
         header += `<div class="hint" style="margin-top:6px;color:var(--bad)">Errore backend: ${escapeHtml(String(meta.lastBackendError))}</div>`;
       }
-      setStableInteractiveHtml(el, header, "mail-log:" + fnv1aHex(header));
+      el.innerHTML = header;
     }
 
 function startAllLogs(){
@@ -6229,7 +5922,6 @@ function stopTwReordersWatch(){
     }
 
     function renderFlowsList(){
-      if(__deferRenderWhileSelecting("renderFlowsList", $("viewLocation"), ()=>renderFlowsList())) return;
       const list = $("flowList");
       const hint = $("flowHint");
       if(!list || !hint) return;
@@ -6299,7 +5991,6 @@ function stopTwReordersWatch(){
     }
 
     function renderFlowsModal(){
-      if(__deferRenderWhileSelecting("renderFlowsModal", $("sheetFlows"), ()=>renderFlowsModal())) return;
       const list = $("flowsModalList");
       const hint = $("flowsModalHint");
       if(!list || !hint) return;
@@ -6386,7 +6077,6 @@ function stopTwReordersWatch(){
     }
 
     function renderFlowDetails(){
-      if(__deferRenderWhileSelecting("renderFlowDetails", $("sheetFlow"), ()=>renderFlowDetails())) return;
       const flow = getOpenFlow();
       const titleEl = $("flowTitle");
       const subEl = $("flowSub");
@@ -7123,7 +6813,6 @@ function currentInv(){
     }
 
     function renderLowStockBox(allItems){
-      if(__deferRenderWhileSelecting("renderLowStockBox", $("lowStockBox"), ()=>renderLowStockBox(allItems))) return;
       const box = $("lowStockBox");
       const list = $("lowStockList");
       const count = $("lowStockCount");
@@ -7161,7 +6850,6 @@ function currentInv(){
     }
 
     function renderSottoscortaSheet(){
-      if(__deferRenderWhileSelecting("renderSottoscortaSheet", $("sheetSottoscorta"), ()=>renderSottoscortaSheet())) return;
       const list = $("sottoscortaList");
       const hint = $("sottoscortaHint");
       if(!list || !hint) return;
@@ -7266,7 +6954,6 @@ function currentInv(){
     }
 
     function renderHomeDashboard(){
-      if(__deferRenderWhileSelecting("renderHomeDashboard", $("viewHome"), ()=>renderHomeDashboard())) return;
       const tSku = $("homeTotalSku");
       const tLow = $("homeTotalLow");
       const tPieces = $("homeTotalPieces");
@@ -7296,8 +6983,7 @@ function currentInv(){
       const allSkuAggregates = buildSkuStockAggregates();
       const totalSku = allSkuAggregates.length;
       const totalPieces = allSkuAggregates.reduce((a,it)=> a + physicalQtyFromItem(it || {}), 0);
-      const lowStockSnapshot = __captureCurrentLowStockVisibleSnapshot("home_render");
-      const totalLow = lowStockSnapshot.total;
+      const totalLow = __getLowStockBoth().length;
 
       if(tSku) tSku.textContent = fmtN(totalSku);
       if(tLow) tLow.textContent = fmtN(totalLow);
@@ -7316,16 +7002,11 @@ function currentInv(){
       if(lowList && lowCount){
         lowList.classList.add("lowStockFreightTable");
         lowList.classList.remove("cols4");
-        const out = lowStockSnapshot.rows;
+        const out = __getLowStockBoth();
         lowCount.textContent = fmtN(out.length);
 
         if(!out.length){
-          setStableInteractiveHtml(
-            lowList,
-            `<div class="hint" style="padding:16px">Nessun articolo sotto scorta.</div>`,
-            "home-low:empty",
-            ()=>__commitLowStockVisibleSnapshot(lowStockSnapshot)
-          );
+          setStableInteractiveHtml(lowList, `<div class="hint" style="padding:16px">Nessun articolo sotto scorta.</div>`, "home-low:empty");
           if(lowHint) lowHint.textContent = "";
           renderHomeLowStockMailLog();
           return;
@@ -7334,18 +7015,19 @@ function currentInv(){
         let cntReordered = 0;
         let cntToReorder = 0;
 
-        const rows = out.map(it=>{
-          const titleMain = it.product ? escapeHtml(it.product) : "<span class='muted'>(senza nome)</span>";
-          const sku = escapeHtml(it.sku || "");
-          const physicalQty = it.physicalQty;
-          const reservedQty = it.reservedQty;
-          const availableQty = it.availableQty;
-          const threshold = escapeHtml(it.thresholdLabel || "");
+        const rows = out.slice(0, 80).map(it=>{
+          const meta = parseTitleMeta(it.title || "");
+          const titleMain = meta.main ? escapeHtml(meta.main) : (it.title ? escapeHtml(it.title) : "<span class='muted'>(senza nome)</span>");
+          const sku = escapeHtml(toSkuId(it.sku||""));
+          const physicalQty = physicalQtyFromItem(it);
+          const reservedQty = reservedQtyFromItem(it);
+          const availableQty = lowStockQtyValue(it);
+          const threshold = escapeHtml(__lowStockThresholdShort(it));
           const availableClass = availableQty <= 0 ? "bad" : "warn";
-          const isReord = it.reordered === true;
+          const isReord = __isReorderedItem(it);
           if(isReord) cntReordered++; else cntToReorder++;
           const rowExtraCls = isReord ? " reordered" : " needs-reorder";
-          const openLoc = escapeHtml(it.openLoc || "concamarise");
+          const openLoc = escapeHtml(it.mainLoc || it.loc || "concamarise");
           const statusBanner = isReord
             ? `<span class="lsStatusBanner is-reordered">RIORDINATO</span>`
             : `<span class="lsStatusBanner is-open">DA RIORDINARE</span>`;
@@ -7368,13 +7050,7 @@ function currentInv(){
         const tableHead = `<div class="row gridHead gridRow"><div class="gridCell">SKU</div><div class="gridCell">Prodotto</div><div class="gridCell">Scorte</div><div class="gridCell gridRight">Disponibile</div><div class="gridCell">Stato</div></div>`;
         const summary = `<div class="lowStockFreightSummary" aria-label="Riepilogo sotto scorta"><span>Totale<strong>${out.length}</strong></span><span class="is-warn">Da riordinare<strong>${cntToReorder}</strong></span><span class="is-ok">Riordinati<strong>${cntReordered}</strong></span></div>`;
         const homeLowMarkup = tableHead + rows.join("") + summary;
-        const homeLowSignature = "home-low:" + fnv1aHex(homeLowMarkup);
-        setStableInteractiveHtml(
-          lowList,
-          homeLowMarkup,
-          homeLowSignature,
-          ()=>__commitLowStockVisibleSnapshot(lowStockSnapshot)
-        );
+        setStableInteractiveHtml(lowList, homeLowMarkup, "home-low:" + fnv1aHex(homeLowMarkup));
         if(lowHint) lowHint.textContent = "Tocca una riga per aprire lo SKU. I valori sono letti dal cloud in tempo reale.";
       }
 
@@ -7382,7 +7058,6 @@ function currentInv(){
     }
 
     function renderInventoryList(){
-      if(__deferRenderWhileSelecting("renderInventoryList", $("viewLocation"), ()=>renderInventoryList())) return;
       const list = $("invList");
       const meta = $("invMeta");
       const kSku = $("kpiSku");
@@ -7677,7 +7352,6 @@ function closeSheet(kind){
     }
 
     function renderFlowList(kind){
-      if(__deferRenderWhileSelecting("renderFlowList:" + kind, kind === "scarica" ? $("sheetScarica") : $("sheetCarica"), ()=>renderFlowList(kind))) return;
       const flow = state.flows[kind];
       const list = $(kind + "List");
       const hint = $(kind + "Hint");
@@ -8194,7 +7868,6 @@ function closeSheet(kind){
     }
 
     function renderSkuPickList(){
-      if(__deferRenderWhileSelecting("renderSkuPickList", $("sheetSkuPick"), ()=>renderSkuPickList())) return;
       const list = $("skuPickList");
       const hint = $("skuPickHint");
       if(!list || !hint) return;
@@ -8280,7 +7953,6 @@ function closeSheet(kind){
     }
 
     function renderManualCaricaList(){
-      if(__deferRenderWhileSelecting("renderManualCaricaList", $("sheetCarica"), ()=>renderManualCaricaList())) return;
       const list = $("caricaTextList");
       const hint = $("caricaTextHint");
       const btnApply = $("btnCaricaApplyText");
@@ -8947,7 +8619,6 @@ function openComboSheet(){
     }
 
     function renderComboSheet(){
-      if(__deferRenderWhileSelecting("renderComboSheet", $("sheetCombo"), ()=>renderComboSheet())) return;
       const parentSku = toSkuId(state.combo?.sku || state.ui.productDetailsSku || "");
       const titleEl = $("comboTitle");
       const subEl = $("comboSub");
@@ -9096,7 +8767,6 @@ function openComboSheet(){
     }
 
     function renderProductDetailsSheet(opts = {}){
-      if(__deferRenderWhileSelecting("renderProductDetailsSheet", $("sheetProductDetails"), ()=>renderProductDetailsSheet({ ...opts }))) return;
   const loc = state.route.loc;
   const sku = toSkuId(state.ui.productDetailsSku||"");
 
@@ -9913,7 +9583,6 @@ async function updateProductProductionAreaImmediate(area){
     }
 
     function renderProductDetailsMovements(){
-      if(__deferRenderWhileSelecting("renderProductDetailsMovements", $("sheetProductDetails"), ()=>renderProductDetailsMovements())) return;
       const list = $("pdMovesList");
       const hint = $("pdMovesHint");
       if(!list || !hint) return;
@@ -11067,7 +10736,6 @@ let __productsSheetRenderTimer = null;
     }
 
 function renderProductsSheet(){
-  if(__deferRenderWhileSelecting("renderProductsSheet", $("sheetProducts"), ()=>renderProductsSheet())) return;
       const list = $("productsList");
       const hint = $("productsHint");
       if(!list || !hint) return;
