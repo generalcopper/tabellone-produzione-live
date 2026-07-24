@@ -12070,6 +12070,8 @@ function ensureTabWriteState(){
   tw._queueBootstrapBusy = !!tw._queueBootstrapBusy;
   tw._queueBootstrapDone = !!tw._queueBootstrapDone;
   tw._queueWatchToken = Number(tw._queueWatchToken || 0);
+  tw._queueReady = Boolean(tw._queueReady);
+  tw._doneReady = Boolean(tw._doneReady);
   return tw;
 }
 
@@ -15640,6 +15642,10 @@ async function twSyncOrdersToWriteQueue(){
   if(tw._syncBusy) return;
   tw._syncBusy = true;
   try{
+    // Coda e completati arrivano da due stream distinti. Prima di riconciliare
+    // gli ordini attendo il primo snapshot dei completati, così una riga già
+    // conclusa non può essere ricreata durante il bootstrap.
+    if(!tw._doneReady) return;
     if(!state.firebase?.ok) return;
     const fs = state.firebase.api;
     const db = state.firebase.db;
@@ -16265,23 +16271,135 @@ function twSetCloud(stateName, detail=""){
   }
 }
 
+const __TW_DONE_VIS_CACHE = {
+  doneRef: null,
+  doneIds: new Set(),
+  historyRef: null,
+  concludedLineKeys: new Set()
+};
+
+function twDoneVisibilityIndex(){
+  const tw = ensureTabWriteState();
+  const doneRef = Array.isArray(tw.doneItems) ? tw.doneItems : [];
+  const historyRef = Array.isArray(state.history) ? state.history : [];
+
+  if(__TW_DONE_VIS_CACHE.doneRef !== doneRef){
+    const doneIds = new Set();
+    try{
+      for(const it of doneRef){
+        const id = String(it?.id || it?.key || "").trim();
+        if(id) doneIds.add(id);
+      }
+    }catch(_e){}
+    __TW_DONE_VIS_CACHE.doneRef = doneRef;
+    __TW_DONE_VIS_CACHE.doneIds = doneIds;
+  }
+
+  // Solo le lineKey davvero concluse nello storico Hub. Le chiusure parziali
+  // non sono in concludedLineKeys e quindi non vengono nascoste per errore.
+  if(__TW_DONE_VIS_CACHE.historyRef !== historyRef){
+    const concludedLineKeys = new Set();
+    try{
+      for(const h of historyRef){
+        const keys = Array.isArray(h?.concludedLineKeys) ? h.concludedLineKeys : [];
+        for(const raw of keys){
+          const key = String(raw || "").trim();
+          if(key) concludedLineKeys.add(key);
+        }
+      }
+    }catch(_e){}
+    __TW_DONE_VIS_CACHE.historyRef = historyRef;
+    __TW_DONE_VIS_CACHE.concludedLineKeys = concludedLineKeys;
+  }
+
+  return {
+    doneIds: __TW_DONE_VIS_CACHE.doneIds,
+    localDoneIds: tw.localDoneIds,
+    concludedLineKeys: __TW_DONE_VIS_CACHE.concludedLineKeys
+  };
+}
+
+function twQueueItemAlreadyCompleted(it, index){
+  if(!it) return false;
+  const id = String(it.id || "").trim();
+  if(id && (index?.localDoneIds?.has(id) || index?.doneIds?.has(id))) return true;
+  const lineKey = String(it.lineKey || "").trim();
+  if(lineKey && index?.concludedLineKeys?.has(lineKey)) return true;
+  return false;
+}
+
+function twListRenderSignature(items, mode="queue"){
+  let hash = 2166136261;
+  const feed = (value)=>{
+    const text = String(value == null ? "" : value);
+    for(let i=0;i<text.length;i++){
+      hash ^= text.charCodeAt(i);
+      hash = Math.imul(hash, 16777619);
+    }
+    hash ^= 124;
+    hash = Math.imul(hash, 16777619);
+  };
+
+  const list = Array.isArray(items) ? items : [];
+  feed(mode);
+  feed(twIsCurrentUserAdmin() ? "admin" : "operator");
+  feed(list.length);
+  for(const it of list){
+    feed(it?.id);
+    feed(it?.queueOrderKey);
+    feed(it?.kind);
+    feed(it?.source);
+    feed(it?.orderNo);
+    feed(it?.customer);
+    feed(it?.lineKey);
+    feed(it?.code);
+    feed(it?.product);
+    feed(it?.label);
+    feed(it?.rawLine);
+    feed(it?.format);
+    feed(it?.finishedProductName);
+    feed(it?.finishedProductCode);
+    feed(it?.inventoryTarget);
+    feed(it?.amazonInventorySku);
+    feed(it?.amazonInventoryTitle);
+    feed(it?.qty);
+    feed(it?.unit || it?.um);
+    feed(it?.status);
+    feed(it?.createdAtOrigMs || it?.createdAtMs);
+    if(mode === "done"){
+      feed(it?.completedProductKind);
+      feed(it?.completedProductCode);
+      feed(it?.completedProductName);
+      feed(it?.completedAtMs);
+      feed(it?.completedByName || it?.completedByEmail || it?.createdByEmail);
+    }
+  }
+  return `${mode}_${list.length}_${(hash >>> 0).toString(36)}`;
+}
+
 function twRenderAll(){
   const tw = ensureTabWriteState();
+  const doneIndex = twDoneVisibilityIndex();
+  const holdQueueForDoneBootstrap = Boolean(tw._queueReady && !tw._doneReady);
 
-  const qVis = (tw.queueItems || []).filter(it => !twHideInUi(it) && twAllowInTabWrite(it));
-  const dVis = (tw.doneItems  || []).slice();
+  const qVis = holdQueueForDoneBootstrap ? [] : (tw.queueItems || []).filter(it =>
+    !twHideInUi(it) &&
+    twAllowInTabWrite(it) &&
+    !twQueueItemAlreadyCompleted(it, doneIndex)
+  );
+  const dVis = (tw.doneItems  || []);
 
   const qBadge = $("twQueueBadge");
-  if(qBadge) qBadge.textContent = String(qVis.length || 0);
+  if(qBadge) qBadge.textContent = holdQueueForDoneBootstrap ? "…" : String(qVis.length || 0);
 
   const emptyQ = $("twEmptyQueue");
   const emptyD = $("twEmptyDone");
-  if(emptyQ) emptyQ.style.display = qVis.length ? "none" : "block";
+  if(emptyQ) emptyQ.style.display = holdQueueForDoneBootstrap ? "none" : (qVis.length ? "none" : "block");
   if(emptyD) emptyD.style.display = dVis.length ? "none" : "block";
 
   if(twDragCtx){
     tw._pendingQueueRenderAfterDrag = true;
-  }else{
+  }else if(!holdQueueForDoneBootstrap){
     tw._pendingQueueRenderAfterDrag = false;
     twRenderQueue(qVis);
   }
@@ -16293,8 +16411,8 @@ function twRenderQueue(items){
   if(!out) return;
 
   out.classList.add("twDataTable", "twQueueTable");
-
-  const firstRects = twCaptureRects(out);
+  const renderSig = twListRenderSignature(items, "queue");
+  if(out.__twRenderSignature === renderSig && out.__twRenderedCount === (items?.length || 0)) return;
 
   // reuse nodes to avoid rebinding reorder
   const existing = new Map();
@@ -16389,33 +16507,23 @@ function twRenderQueue(items){
   }
 
   out.replaceChildren(frag);
-  requestAnimationFrame(()=> twPlayFLIP(out, firstRects, 180));
+  out.__twRenderSignature = renderSig;
+  out.__twRenderedCount = items?.length || 0;
 }
 
 
 function twRenderDone(items){
   const safeItems = Array.isArray(items) ? items : [];
 
-  // La lista inline dei completati in Coda WRITE deve restare leggera: il report completo
-  // resta nella pagina "Ordini conclusi" e nell'Excel. Così gli operatori non admin non
-  // renderizzano centinaia/migliaia di righe nascoste ad ogni snapshot Firestore.
-  const inlineLimit = twIsCurrentUserAdmin() ? 160 : 80;
-  const shouldRenderInlineDone = twPageIsActive("coda");
-  const shouldRenderFullDone = twShouldRenderCompletedNow();
-
-  if(shouldRenderInlineDone){
-    const inlineItems = safeItems.slice(0, inlineLimit);
-    twRenderDoneInto($("twDoneList"), inlineItems);
-    const list = $("twDoneList");
-    if(list && safeItems.length > inlineItems.length){
-      const note = document.createElement("div");
-      note.className = "muted";
-      note.style.marginTop = "8px";
-      note.style.fontWeight = "900";
-      note.textContent = `Mostrati ultimi ${inlineItems.length} completati. Apri Ordini conclusi o Excel per il report completo (${safeItems.length}).`;
-      list.appendChild(note);
-    }
+  // I completati nella pagina Coda sono nascosti dalla UI. Non costruiamo più
+  // centinaia di righe invisibili a ogni snapshot Firestore.
+  const inlineList = $("twDoneList");
+  if(inlineList && inlineList.childElementCount){
+    inlineList.replaceChildren();
+    inlineList.__twRenderSignature = "";
+    inlineList.__twRenderedCount = 0;
   }
+  const shouldRenderFullDone = twShouldRenderCompletedNow();
 
   if(shouldRenderFullDone){
     twRenderDoneInto($("completedList"), safeItems);
@@ -16434,8 +16542,8 @@ function twRenderDoneInto(out, items){
   const safeItems = Array.isArray(items) ? items : [];
 
   out.classList.add("twDataTable", "twDoneTable");
-
-  const firstRects = twCaptureRects(out);
+  const renderSig = twListRenderSignature(safeItems, "done");
+  if(out.__twRenderSignature === renderSig && out.__twRenderedCount === safeItems.length) return;
 
   const frag = document.createDocumentFragment();
   const head = document.createElement("div");
@@ -16513,7 +16621,8 @@ function twRenderDoneInto(out, items){
   }
 
   out.replaceChildren(frag);
-  requestAnimationFrame(()=> twPlayFLIP(out, firstRects, 180));
+  out.__twRenderSignature = renderSig;
+  out.__twRenderedCount = safeItems.length;
 }
 
 
@@ -16756,6 +16865,8 @@ async function twCompleteJob(){
 
   const okBtn = $("twQtyOk");
   const fb = $("twQtyFeedback");
+  let optimisticQueueId = "";
+  let optimisticDoneId = "";
   try{
     if(okBtn){ okBtn.disabled = true; okBtn.classList.add("isBusy"); }
     if(fb) fb.textContent = "Salvataggio…";
@@ -16791,6 +16902,17 @@ async function twCompleteJob(){
 
     const key = String(id);
     const doneDocId = twKeyToDocId(key);
+    optimisticQueueId = key;
+    optimisticDoneId = doneDocId;
+
+    // Soppressione ottimistica: la riga sparisce subito e resta esclusa anche se
+    // il listener coda arriva prima del listener completati o dello storico Hub.
+    tw.localDoneIds.add(key);
+    tw.localDoneIds.add(doneDocId);
+    tw.queueItems = (tw.queueItems || []).filter(x => String(x?.id || "") !== key);
+    tw.lastQueueById = new Map((tw.queueItems || []).map(x => [String(x?.id || ""), x]));
+    twScheduleRenderAll("complete_optimistic", 20);
+
     const label = ((job.product||job.finishedProductName||"") + (job.format ? (" • " + job.format) : "")).trim() || "Completato";
     const movementId = isFinishedProductJob ? twPfMovementDocId(doneDocId) : "";
     const amazonMovementId = isAmazonJob ? twAmazonMovementDocId(doneDocId) : "";
@@ -16949,6 +17071,19 @@ async function twCompleteJob(){
     if(fb) fb.textContent = "Salvato e caricato in Inventario Conca ✅";
     setTimeout(()=> twCloseQtyModal(), 250);
   }catch(e){
+    try{
+      const twState = ensureTabWriteState();
+      if(optimisticQueueId) twState.localDoneIds.delete(optimisticQueueId);
+      if(optimisticDoneId) twState.localDoneIds.delete(optimisticDoneId);
+      if(optimisticQueueId && tw.pendingComplete?.job && !(twState.queueItems || []).some(x => String(x?.id || "") === optimisticQueueId)){
+        twState.queueItems = twSortQueueItemsStable([
+          ...(twState.queueItems || []),
+          { ...tw.pendingComplete.job, id: optimisticQueueId }
+        ]);
+        twState.lastQueueById = new Map((twState.queueItems || []).map(x => [String(x?.id || ""), x]));
+      }
+      twScheduleRenderAll("complete_rollback", 20);
+    }catch(_e){}
     console.warn("twCompleteJob error:", e);
     twSetCloud("bad", e?.code || "error");
     if(fb) fb.textContent = "Errore: " + (e?.message || e?.code || "unknown");
@@ -17840,6 +17975,7 @@ async function twUndoCompletato(it){
 // ===== Watchers =====
 function twStartQueueWatch(){
   const tw = ensureTabWriteState();
+  tw._queueReady = false;
   if(!state.firebase?.ok) return;
   const fs = state.firebase.api;
   const db = state.firebase.db;
@@ -17881,28 +18017,33 @@ function twStartQueueWatch(){
       const orderedItems = twSortQueueItemsStable(items);
       tw.queueItems = orderedItems;
       tw.lastQueueById = new Map(orderedItems.map(it=>[it.id, it]));
+      tw._queueReady = true;
       twSetCloud("ok");
       if(twDragCtx){
         tw._pendingQueueRenderAfterDrag = true;
       }else{
         tw._pendingQueueRenderAfterDrag = false;
-        twScheduleRenderAll("queue_snapshot", 70);
+        // Il primo render della coda parte solo quando sono noti anche i completati.
+        if(tw._doneReady) twScheduleRenderAll("queue_snapshot", 35);
       }
       if(twCanManageQueueCloud() && twQueueOrderNeedsRepair(items)){
         try{ twScheduleQueueOrderRepair("snapshot"); }catch(_e){}
       }
-      if(twCanManageQueueCloud()){
+      if(twCanManageQueueCloud() && tw._doneReady){
         try{ twScheduleOrdersSync(); }catch(_e){}
       }
     }, (err)=>{
+      tw._queueReady = true;
       console.warn("tw queue snapshot error:", err);
       twSetCloud("bad", err?.code || "permission-denied");
+      if(tw._doneReady) twScheduleRenderAll("queue_snapshot_error", 35);
     });
   })();
 }
 
 function twStartDoneWatch(){
   const tw = ensureTabWriteState();
+  tw._doneReady = false;
   if(!state.firebase?.ok) return;
   const fs = state.firebase.api;
   const db = state.firebase.db;
@@ -17964,14 +18105,17 @@ function twStartDoneWatch(){
       });
     });
     tw.doneItems = items;
-    twScheduleRenderAll("done_snapshot", 70);
+    tw._doneReady = true;
+    twScheduleRenderAll("done_snapshot", tw._queueReady ? 25 : 60);
     if(twCanManageQueueCloud()){
       try{ twScheduleDoneConcaBackfill(items); }catch(_e){}
       try{ twScheduleDoneAmazonBackfill(items); }catch(_e){}
       try{ twScheduleOrdersSync(); }catch(_e){}
     }
   }, (err)=>{
+    tw._doneReady = true;
     console.warn("tw done snapshot error:", err);
+    twScheduleRenderAll("done_snapshot_error", 35);
   });
 }
 
@@ -18582,8 +18726,9 @@ function ensureTabWriteHome(){
   if(globalThis.__TW_HOME_INIT__) return;
   globalThis.__TW_HOME_INIT__ = true;
 
-  twStartQueueWatch();
+  // Prima i completati, poi la coda: niente flash di righe già concluse.
   twStartDoneWatch();
+  twStartQueueWatch();
   twSetCloud("loading","sync…");
   twRenderAll();
 }
@@ -18606,6 +18751,8 @@ function stopTabWriteHome(){
     state.tabWrite._repairOrderBusy = false;
     state.tabWrite._pendingOrderRepair = false;
     state.tabWrite._pendingQueueRenderAfterDrag = false;
+    state.tabWrite._queueReady = false;
+    state.tabWrite._doneReady = false;
     if(state.tabWrite.pf){
       state.tabWrite.pf.compileItems = [];
       state.tabWrite.pf.selectedKey = "";
@@ -19138,6 +19285,12 @@ body[data-active-page="invio"] #mobileSendCard{
 #tabWriteCard .bd > div:has(#twPdfBtn),
 #tabWriteCard #twEmptyQueue + div{
   display:none!important;
+}
+
+/* Ordini conclusi: il browser disegna solo le righe vicine alla viewport. */
+#completedList .twTableRow{
+  content-visibility:auto;
+  contain-intrinsic-size:76px;
 }
 
 /* Interfaccia piatta: nessuna ombra o animazione hover. */
