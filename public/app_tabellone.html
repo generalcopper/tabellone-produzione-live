@@ -5072,6 +5072,191 @@ const BUCKET = "linea_liquidi";
     });
   }
 
+  function queueTextNorm(value){
+    return String(value == null ? "" : value)
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .toLowerCase()
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function queueJobHasMeaningfulContent(job){
+    if(!job || typeof job !== "object") return false;
+    const product = String(
+      job.product || job.finishedProductName || job.amazonInventoryTitle ||
+      job.label || job.rawLine || job.code || ""
+    ).replace(/\s+/g, " ").trim();
+    return Boolean(product);
+  }
+
+  function queueJobHasCompletedStatus(job){
+    const stateText = queueTextNorm(`${job?.status || ""} ${job?.queueLiveAction || ""}`);
+    return /\b(completato|completata|completed|done|concluso|conclusa|chiuso|chiusa)\b/.test(stateText);
+  }
+
+  function queueJobAlreadyProduced(job){
+    if(!job) return false;
+    const candidates = new Set([
+      job.id,
+      job.key,
+      job.lineKey,
+      job.queueId,
+      job.sourceQueueId,
+      job?._raw?.id,
+      job?._raw?.key,
+      job?._raw?.lineKey,
+      job?._raw?.queueId,
+      job?._raw?.sourceQueueId
+    ].map(v => String(v || "").trim()).filter(Boolean));
+
+    for(const key of candidates){
+      if(producedCloud.has(key)) return true;
+    }
+
+    if(!candidates.size || !producedCloud.size) return false;
+    for(const [docKey, value] of producedCloud.entries()){
+      const producedIds = [
+        docKey,
+        value?.key,
+        value?.queueId,
+        value?.sourceQueueId,
+        value?.lineKey,
+        value?.queueLineId,
+        value?.originalQueueId
+      ];
+      if(producedIds.some(v => candidates.has(String(v || "").trim()))) return true;
+    }
+    return false;
+  }
+
+  function canonicalQueueRowToJob(raw, index){
+    const row = (raw && typeof raw === "object") ? raw : {};
+    const id = String(row.id || row.key || "").trim();
+    const product = String(
+      row.product || row.finishedProductName || row.amazonInventoryTitle ||
+      row.label || row.rawLine || row.code || ""
+    ).replace(/\s+/g, " ").trim();
+    return {
+      ...row,
+      id,
+      key: id,
+      product,
+      format: String(row.format || "").trim(),
+      qty: String(row.qty ?? "").trim(),
+      unit: String(row.unit || row.um || row.finishedProductUom || "").trim(),
+      status: String(row.status || "DA PRODURRE").trim(),
+      queueOrderKey: normalizeCloudOrderKey(row.queueOrderKey || ""),
+      queueOrderIndex: Number.isFinite(Number(row.queueOrderIndex)) ? Number(row.queueOrderIndex) : index,
+      position: Number.isFinite(Number(row.position)) ? Number(row.position) : index,
+      createdAtMs: Number(row.createdAtMs || 0) || 0,
+      createdAtOrigMs: Number(row.createdAtOrigMs || row.createdAtMs || 0) || 0,
+      _canonicalKiosk: true,
+      _raw: { ...row }
+    };
+  }
+
+  function canonicalQueueRowsHash(rows, sourceHash="", revisionMs=0){
+    return stableHash((Array.isArray(rows) ? rows : []).map((row, index) => [
+      row.id,
+      row.queueOrderKey,
+      row.position ?? index,
+      row.product,
+      row.qty,
+      row.unit,
+      row.format,
+      row.status,
+      sourceHash,
+      revisionMs
+    ]));
+  }
+
+  function setCanonicalKioskQueueFromMeta(meta){
+    const v = (meta && typeof meta === "object") ? meta : {};
+    const hasCanonicalRows = Object.prototype.hasOwnProperty.call(v, "kioskQueueRows") && Array.isArray(v.kioskQueueRows);
+    if(!hasCanonicalRows){
+      const changed = canonicalKioskQueueReady;
+      canonicalKioskQueueReady = false;
+      canonicalKioskQueueRows = [];
+      canonicalKioskQueueHash = "";
+      canonicalKioskQueueRevisionMs = 0;
+      return changed;
+    }
+
+    const rawRows = v.kioskQueueRows;
+    const preferredIds = cleanCloudQueueOrderIds(
+      Array.isArray(v.queueOrderIds) && v.queueOrderIds.length
+        ? v.queueOrderIds
+        : (Array.isArray(v.kioskQueueIds) ? v.kioskQueueIds : [])
+    );
+    const rank = new Map(preferredIds.map((id, idx) => [id, idx]));
+    const liveAction = queueTextNorm(v.queueLiveAction || "").replace(/[^a-z0-9]+/g, "_");
+    const removeActionIds = new Set();
+    if(liveAction.includes("completed") || liveAction.includes("deleted") || liveAction.includes("cleanup")){
+      const rawActionIds = Array.isArray(v.queueLiveActionIds)
+        ? v.queueLiveActionIds
+        : [v.queueLiveActionId];
+      rawActionIds.forEach(rawId => {
+        const id = String(rawId || "").trim();
+        if(id) removeActionIds.add(id);
+      });
+    }
+
+    const seen = new Set();
+    const rows = [];
+
+    rawRows.forEach((raw, index) => {
+      const job = canonicalQueueRowToJob(raw, index);
+      if(!job.id || seen.has(job.id) || removeActionIds.has(job.id)) return;
+      if(!queueJobHasMeaningfulContent(job)) return;
+      if(queueJobHasCompletedStatus(job)) return;
+      seen.add(job.id);
+      rows.push(job);
+    });
+
+    rows.sort((a, b) => {
+      const ah = rank.has(a.id);
+      const bh = rank.has(b.id);
+      if(ah && bh && rank.get(a.id) !== rank.get(b.id)) return rank.get(a.id) - rank.get(b.id);
+      if(ah && !bh) return -1;
+      if(!ah && bh) return 1;
+      const ap = Number.isFinite(Number(a.position)) ? Number(a.position) : Number(a.queueOrderIndex || 0);
+      const bp = Number.isFinite(Number(b.position)) ? Number(b.position) : Number(b.queueOrderIndex || 0);
+      if(ap !== bp) return ap - bp;
+      return compareQueueJobsCloud(a, b);
+    });
+
+    const revisionMs = Math.max(
+      Number(v.kioskQueueUpdatedAtMs || 0) || 0,
+      Number(v.queueOrderLastRevisionAtMs || v.queueOrderLastRevisionMs || 0) || 0,
+      Number(v.queueMutationRevisionMs || 0) || 0,
+      Number(v.queueLiveActionAtMs || 0) || 0
+    );
+    const sourceHash = String(v.kioskQueueHash || v.queueOrderHash || "");
+    const nextHash = canonicalQueueRowsHash(rows, sourceHash, revisionMs);
+    const changed = !canonicalKioskQueueReady || nextHash !== canonicalKioskQueueHash;
+
+    canonicalKioskQueueReady = true;
+    canonicalKioskQueueRows = rows;
+    canonicalKioskQueueHash = nextHash;
+    canonicalKioskQueueRevisionMs = revisionMs;
+    return changed;
+  }
+
+  function getAuthoritativeQueueJobs(){
+    if(canonicalKioskQueueReady){
+      const directById = new Map((Array.isArray(lastQueueDocs) ? lastQueueDocs : []).map(job => [String(job?.id || ""), job]));
+      const existingIds = queueDocsReady ? new Set(directById.keys()) : null;
+      return canonicalKioskQueueRows
+        .filter(job => !existingIds || existingIds.has(job.id))
+        .map(job => {
+          const live = directById.get(job.id);
+          return live ? { ...live, ...job, _raw: { ...(live._raw || {}), ...(job._raw || {}) }, _canonicalKiosk:true } : { ...job };
+        });
+    }
+    return applyCloudQueueOrder(Array.isArray(lastQueueDocs) ? lastQueueDocs : []);
+  }
+
   function queueVisibleHash(visibleJobs){
     return stableHash((Array.isArray(visibleJobs) ? visibleJobs : []).map(j => [
       j.id,
@@ -5095,10 +5280,13 @@ const BUCKET = "linea_liquidi";
   }
 
   function renderQueueFromCloudDocs(reason="queue"){
-    const base = Array.isArray(lastQueueDocs) ? lastQueueDocs : [];
-    if(!base.length && reason === "queue_meta") return;
-    const orderedJobs = applyCloudQueueOrder(base);
-    const visibleJobs = filterQueueJobsForBoard(orderedJobs);
+    // Prima fotografia: attendo il meta WRITE. In questo modo il kiosk non
+    // mostra per un istante la raccolta grezza con righe vuote o già concluse.
+    if(!queueMetaResolved) return;
+    if(!canonicalKioskQueueReady && !producedCloudReady) return;
+
+    const authoritativeJobs = getAuthoritativeQueueJobs();
+    const visibleJobs = filterQueueJobsForBoard(authoritativeJobs);
     lastJobs = visibleJobs;
 
     try{ clearQueueBackupNow(); }catch(_){ }
@@ -5110,7 +5298,8 @@ const BUCKET = "linea_liquidi";
         lastHash = h;
         renderSoft(visibleJobs);
       }
-      if(reason === "queue_meta") dbg("OK • ordine cloud live");
+      if(canonicalKioskQueueReady) dbg("OK • coda WRITE canonica live");
+      else if(reason === "queue_meta") dbg("OK • ordine cloud live");
       else dbg("OK • realtime");
     }catch(_){
       renderSoft(visibleJobs);
@@ -5737,8 +5926,10 @@ unmarkProducedCloud(it.key).then(() => {
       producedCloud.clear();
       snap.forEach(d => {
         const v = d.data() || {};
-        if(v?.key) producedCloud.set(v.key, v);
+        const producedKey = String(v?.key || d.id || "").trim();
+        if(producedKey) producedCloud.set(producedKey, v);
       });
+      producedCloudReady = true;
       try{ saveProducedBackupNow(); }catch(_){ }
       renderProducedFromCloud();
 
@@ -5775,6 +5966,13 @@ unmarkProducedCloud(it.key).then(() => {
   let cloudQueueOrderHash = "";
   let cloudQueueOrderRevisionMs = 0;
   let cloudQueueLiveHash = "";
+  let canonicalKioskQueueRows = [];
+  let canonicalKioskQueueReady = false;
+  let canonicalKioskQueueHash = "";
+  let canonicalKioskQueueRevisionMs = 0;
+  let queueMetaResolved = false;
+  let queueDocsReady = false;
+  let producedCloudReady = false;
   const MIN_VISIBLE_QUEUE_QTY = 400;
 
   function parseQueueQtyForVisibility(value){
@@ -5816,16 +6014,30 @@ unmarkProducedCloud(it.key).then(() => {
   }
 
   function shouldShowQueueJob(job){
-    // Righe ripristinate da WRITE: devono rientrare subito nel tabellone,
-    // anche se la quantità è sotto la soglia storica di visualizzazione.
+    if(!queueJobHasMeaningfulContent(job)) return false;
+    if(queueJobHasCompletedStatus(job)) return false;
+    if(queueJobAlreadyProduced(job)) return false;
+
+    // Le righe canoniche sono già filtrate dal Tabellone WRITE: non applico
+    // una seconda soglia che potrebbe eliminare prodotti manuali validi.
+    if(job?._canonicalKiosk) return true;
+
+    // Fallback per installazioni precedenti al feed canonico.
     if(job && (job.restoredFromCompletedAtMs || job.restoreActionAtMs || job.queueLiveAction === "restored")) return true;
     const qty = parseQueueQtyForVisibility(job?.qty);
     if(!Number.isFinite(qty)) return true;
-    return qty >= MIN_VISIBLE_QUEUE_QTY;
+    return qty > MIN_VISIBLE_QUEUE_QTY;
   }
 
   function filterQueueJobsForBoard(jobs){
-    return (Array.isArray(jobs) ? jobs : []).filter(shouldShowQueueJob);
+    const seen = new Set();
+    return (Array.isArray(jobs) ? jobs : []).filter(job => {
+      const id = String(job?.id || job?.key || "").trim();
+      if(!id || seen.has(id)) return false;
+      if(!shouldShowQueueJob(job)) return false;
+      seen.add(id);
+      return true;
+    });
   }
 
   // initFirestoreRealtime(): avviato dopo AUTH
@@ -5838,10 +6050,23 @@ unmarkProducedCloud(it.key).then(() => {
     try{
       _queueMetaUnsub = onSnapshot(queueMetaDoc, (snap) => {
         try{
-          if(!snap.exists()) return;
+          queueMetaResolved = true;
+          if(!snap.exists()){
+            const canonicalChanged = canonicalKioskQueueReady;
+            canonicalKioskQueueReady = false;
+            canonicalKioskQueueRows = [];
+            canonicalKioskQueueHash = "";
+            if(canonicalChanged) lastHash = "";
+            renderQueueFromCloudDocs("queue_meta_missing");
+            return;
+          }
+
           const v = snap.data() || {};
-          const ids = Array.isArray(v.queueOrderIds) ? v.queueOrderIds : [];
+          const ids = Array.isArray(v.kioskQueueIds) && v.kioskQueueIds.length
+            ? v.kioskQueueIds
+            : (Array.isArray(v.queueOrderIds) ? v.queueOrderIds : []);
           const rev = Math.max(
+            Number(v.kioskQueueUpdatedAtMs || 0) || 0,
             Number(v.queueOrderLastRevisionAtMs || v.queueOrderLastRevisionMs || 0) || 0,
             Number(v.queueMutationRevisionMs || 0) || 0,
             Number(v.queueLiveActionAtMs || 0) || 0,
@@ -5850,15 +6075,17 @@ unmarkProducedCloud(it.key).then(() => {
           );
           const liveHash = [
             ids.join("|"),
+            String(v.kioskQueueHash || ""),
             rev,
             String(v.queueLiveAction || ""),
             String(v.queueLiveActionId || ""),
             String(v.queueLiveNonce || "")
           ].join("@");
+          const canonicalChanged = setCanonicalKioskQueueFromMeta(v);
           const orderChanged = setCloudQueueOrderIds(ids, rev);
           const liveChanged = liveHash !== cloudQueueLiveHash;
           if(liveChanged) cloudQueueLiveHash = liveHash;
-          if(orderChanged || liveChanged){
+          if(orderChanged || liveChanged || canonicalChanged){
             lastHash = "";
             renderQueueFromCloudDocs("queue_meta");
             try{ renderProducedFromCloud(); }catch(_){ }
@@ -5866,10 +6093,14 @@ unmarkProducedCloud(it.key).then(() => {
             try{ MobileUI.updateFromJobs(); MobileUI.updateFromProduced(); }catch(_){ }
           }
         }catch(e){
+          queueMetaResolved = true;
           console.log("queue meta snapshot error:", e);
+          try{ renderQueueFromCloudDocs("queue_meta_error"); }catch(_){ }
         }
       }, (err)=>{
+        queueMetaResolved = true;
         console.log("queue meta snapshot error:", err);
+        try{ renderQueueFromCloudDocs("queue_meta_error"); }catch(_){ }
       });
 
       _queueUnsub = onSnapshot(queueCol, (snap) => {
@@ -5896,7 +6127,7 @@ unmarkProducedCloud(it.key).then(() => {
             supplier: (v.supplier || v.fornitore || "").toString().trim(),
             kind: (v.kind || "").toString().trim(),
             source: (v.source || "").toString().trim(),
-            product: (v.product || v.finishedProductName || v.label || v.rawLine || "").toString().trim(),
+            product: (v.product || v.finishedProductName || v.amazonInventoryTitle || v.label || v.rawLine || v.code || "").toString().trim(),
             format: (v.format || "").toString().trim(),
             qty: (v.qty || "").toString().trim(),
             unit: (v.unit || v.finishedProductUom || "").toString().trim(),
@@ -5912,6 +6143,7 @@ unmarkProducedCloud(it.key).then(() => {
         });
 
         lastQueueDocs = jobs;
+        queueDocsReady = true;
 
         // Render usando solo ordine cloud del Tabellone WRITE:
         // 1) queueState.queueOrderIds quando disponibile (broadcast immediato ordine)
@@ -7083,12 +7315,10 @@ doneShareEl?.addEventListener("click", async (ev) => {
     }
 
     if(jobs.length === 0) {
+      // Coda vuota = tabellone vuoto. Non generare righe segnaposto,
+      // perché verrebbero interpretate come un prodotto reale.
       rows.innerHTML = "";
       rowNodes.clear();
-      const el = ensureRowEl();
-      updateRowEl(el, {product:"Nessun dato", qty:"—", unit:"", format:"—", status:"CONTROLLA SHEET"});
-      el.querySelector(".badge").classList.add("todo","blink");
-      rows.appendChild(el);
     }
   
     try{ MobileUI.updateFromJobs(); }catch(_){ }
