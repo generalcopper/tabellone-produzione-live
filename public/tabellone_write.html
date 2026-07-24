@@ -5413,6 +5413,7 @@ async function getAccessByEmail(email){
         scheduleAllowlistRender();
         try{ if(typeof twRenderAll==="function") twRenderAll(); }catch(_e){}
         try{ if(typeof twScheduleOrdersSync==="function") twScheduleOrdersSync(); }catch(_e){}
+        try{ if(typeof twScheduleCanonicalKioskQueuePublish==="function") twScheduleCanonicalKioskQueuePublish("allowlist_snapshot", 15); }catch(_e){}
       }, (err)=>{
         console.warn("allowlist snapshot error", err);
         const code = err?.code || "";
@@ -12072,6 +12073,11 @@ function ensureTabWriteState(){
   tw._queueWatchToken = Number(tw._queueWatchToken || 0);
   tw._queueReady = Boolean(tw._queueReady);
   tw._doneReady = Boolean(tw._doneReady);
+  tw._kioskQueueLastHash = String(tw._kioskQueueLastHash || "");
+  tw._kioskQueuePublishBusy = Boolean(tw._kioskQueuePublishBusy);
+  tw._kioskQueuePublishPending = Boolean(tw._kioskQueuePublishPending);
+  tw._kioskQueueProjectionDirty = Boolean(tw._kioskQueueProjectionDirty);
+  tw._queueGhostCleanupBusy = Boolean(tw._queueGhostCleanupBusy);
   return tw;
 }
 
@@ -12217,6 +12223,240 @@ function twQueueMetaDocRef(){
   return fs.doc(db, "producedDays", TW_LINE_BUCKET, "meta", "queueState");
 }
 
+// Feed canonico per l'app Tabellone Kiosk.
+// La sorgente resta SEMPRE producedDays/linea_liquidi/queue: questa proiezione
+// serve soltanto a consegnare al kiosk la stessa lista, nello stesso ordine,
+// senza documenti vuoti o righe già concluse.
+function twQueueItemHasMeaningfulContent(it){
+  if(!it || typeof it !== "object") return false;
+  const product = String(
+    it.product || it.finishedProductName || it.amazonInventoryTitle ||
+    it.label || it.rawLine || ""
+  ).replace(/\s+/g, " ").trim();
+  const code = String(
+    it.code || it.finishedProductCode || it.amazonInventorySku || ""
+  ).trim();
+  return Boolean(product || code);
+}
+
+function twQueueItemHasCompletedStatus(it){
+  try{
+    const raw = `${it?.status || ""} ${it?.queueLiveAction || ""}`;
+    const s = (typeof norm === "function" ? norm(raw) : raw.toLowerCase()).trim();
+    return /\b(completato|completata|completed|done|concluso|conclusa|chiuso|chiusa)\b/.test(s);
+  }catch(_e){
+    return false;
+  }
+}
+
+function twCanonicalKioskQueueItems(baseItems=null){
+  const tw = ensureTabWriteState();
+  const doneIndex = twDoneVisibilityIndex();
+  const source = Array.isArray(baseItems) ? baseItems : (tw.queueItems || []);
+  const seen = new Set();
+  const out = [];
+  for(const it of source){
+    const id = String(it?.id || "").trim();
+    if(!id || seen.has(id)) continue;
+    seen.add(id);
+    if(!twQueueItemHasMeaningfulContent(it)) continue;
+    if(twQueueItemHasCompletedStatus(it)) continue;
+    if(twQueueItemAlreadyCompleted(it, doneIndex)) continue;
+    if(twHideInUi(it)) continue;
+    if(!twAllowInTabWrite(it)) continue;
+    out.push(it);
+  }
+  return twSortQueueItemsStable(out);
+}
+
+function twCanonicalKioskQueueRows(items){
+  const rows = [];
+  let position = 0;
+  for(const it of (Array.isArray(items) ? items : [])){
+    const id = String(it?.id || "").trim();
+    if(!id) continue;
+    rows.push({
+      position,
+      queueOrderIndex: position++,
+      id,
+      queueOrderKey: twNormalizeOrderKey(it?.queueOrderKey || ""),
+      kind: String(it?.kind || ""),
+      source: String(it?.source || ""),
+      inventoryTarget: String(it?.inventoryTarget || ""),
+      orderKey: String(it?.orderKey || ""),
+      orderNo: String(it?.orderNo || ""),
+      customer: String(it?.customer || ""),
+      lineKey: String(it?.lineKey || ""),
+      code: String(it?.code || it?.finishedProductCode || it?.amazonInventorySku || ""),
+      um: String(it?.um || it?.unit || ""),
+      supplier: String(it?.supplier || ""),
+      product: String(it?.product || it?.finishedProductName || it?.amazonInventoryTitle || it?.label || it?.rawLine || "").replace(/\s+/g, " ").trim().slice(0, 300),
+      qty: String(it?.qty || ""),
+      unit: String(it?.unit || it?.um || it?.finishedProductUom || ""),
+      format: String(it?.format || ""),
+      status: String(it?.status || "DA PRODURRE"),
+      createdAtMs: Number(it?.createdAtOrigMs || it?.createdAtMs || 0) || 0
+    });
+  }
+  return rows;
+}
+
+function twCanonicalKioskQueueHash(rows){
+  const tokens = (Array.isArray(rows) ? rows : []).map(row => [
+    row.id, row.queueOrderKey, row.position, row.kind, row.source,
+    row.orderKey, row.orderNo, row.customer, row.lineKey, row.code,
+    row.product, row.qty, row.unit, row.format, row.status
+  ].join("~"));
+  return twQueueOrderHash(tokens);
+}
+
+let __TW_KIOSK_QUEUE_PUBLISH_T = null;
+function twScheduleCanonicalKioskQueuePublish(reason="queue_snapshot", delay=25){
+  const tw = ensureTabWriteState();
+  tw._kioskQueuePublishReason = String(reason || "queue_snapshot");
+  if(__TW_KIOSK_QUEUE_PUBLISH_T) return;
+  __TW_KIOSK_QUEUE_PUBLISH_T = setTimeout(()=>{
+    __TW_KIOSK_QUEUE_PUBLISH_T = null;
+    twPublishCanonicalKioskQueue(tw._kioskQueuePublishReason || "queue_snapshot");
+  }, Math.max(10, Number(delay) || 25));
+}
+
+async function twPublishCanonicalKioskQueue(reason="queue_snapshot"){
+  const tw = ensureTabWriteState();
+  if(tw._kioskQueuePublishBusy){
+    // Una modifica è arrivata mentre una fotografia precedente era in scrittura.
+    // Non la perdiamo: al termine parte sempre una seconda pubblicazione.
+    tw._kioskQueuePublishPending = true;
+    tw._kioskQueuePublishReason = String(reason || tw._kioskQueuePublishReason || "queue_snapshot");
+    return false;
+  }
+  if(!state.firebase?.ok || !state.user) return false;
+  if(!tw._queueReady || !tw._doneReady) return false;
+  if(!globalThis.__ALLOW_LOADED__) return false;
+  if(state.mobileAllowlist?.error) return false;
+
+  const items = twCanonicalKioskQueueItems();
+  const rows = twCanonicalKioskQueueRows(items);
+  const ids = rows.map(row => row.id);
+  const hash = twCanonicalKioskQueueHash(rows);
+  const forceProjectionRefresh = Boolean(tw._kioskQueueProjectionDirty);
+  if(hash === tw._kioskQueueLastHash && !forceProjectionRefresh) return false;
+
+  const fs = state.firebase.api;
+  const metaRef = twQueueMetaDocRef();
+  if(!fs || !metaRef) return false;
+
+  tw._kioskQueuePublishBusy = true;
+  tw._kioskQueuePublishPending = false;
+  let retryDelay = 20;
+  try{
+    const nowMs = Date.now();
+    await fs.setDoc(metaRef, {
+      queueOrderCloudOnly: true,
+      queueOrderStorage: "firestore",
+      queueOrderVersion: 3,
+      queueOrderIds: ids,
+      queueOrderRows: rows,
+      queueOrderCount: rows.length,
+      queueOrderHash: hash,
+      kioskQueueVersion: 3,
+      kioskQueueSourcePath: `producedDays/${TW_LINE_BUCKET}/queue`,
+      kioskQueueIds: ids,
+      kioskQueueRows: rows,
+      kioskQueueCount: rows.length,
+      kioskQueueHash: hash,
+      kioskQueueUpdatedAt: fs.serverTimestamp(),
+      kioskQueueUpdatedAtMs: nowMs,
+      kioskQueueUpdatedByUid: state.user?.uid || null,
+      kioskQueueUpdatedByEmail: state.user?.email || null,
+      kioskQueueRevisionReason: String(reason || "queue_snapshot")
+    }, { merge:true });
+    tw._kioskQueueLastHash = hash;
+    tw._kioskQueueProjectionDirty = false;
+
+    // Se la coda è cambiata mentre setDoc era in volo, programma subito
+    // la fotografia successiva anziché lasciare nel cloud quella vecchia.
+    const latestRows = twCanonicalKioskQueueRows(twCanonicalKioskQueueItems());
+    const latestHash = twCanonicalKioskQueueHash(latestRows);
+    if(latestHash !== hash) tw._kioskQueuePublishPending = true;
+    return true;
+  }catch(e){
+    console.warn("twPublishCanonicalKioskQueue error:", e);
+    tw._kioskQueueProjectionDirty = true;
+    retryDelay = 750;
+    return false;
+  }finally{
+    tw._kioskQueuePublishBusy = false;
+    if(tw._kioskQueuePublishPending || tw._kioskQueueProjectionDirty){
+      tw._kioskQueuePublishPending = false;
+      twScheduleCanonicalKioskQueuePublish(tw._kioskQueuePublishReason || "queue_tail", retryDelay);
+    }
+  }
+}
+
+function twQueueGhostReason(it, doneIndex){
+  if(!it || !String(it?.id || "").trim()) return "";
+  if(!twQueueItemHasMeaningfulContent(it)) return "empty";
+  if(twQueueItemHasCompletedStatus(it)) return "completed_status";
+  if(twQueueItemAlreadyCompleted(it, doneIndex)) return "already_completed";
+  return "";
+}
+
+let __TW_QUEUE_GHOST_CLEANUP_T = null;
+function twScheduleQueueGhostCleanup(reason="snapshot", delay=60){
+  if(!twCanManageQueueCloud()) return;
+  const tw = ensureTabWriteState();
+  tw._queueGhostCleanupReason = String(reason || "snapshot");
+  if(__TW_QUEUE_GHOST_CLEANUP_T) return;
+  __TW_QUEUE_GHOST_CLEANUP_T = setTimeout(()=>{
+    __TW_QUEUE_GHOST_CLEANUP_T = null;
+    twCleanupQueueGhostRows(tw._queueGhostCleanupReason || "snapshot");
+  }, Math.max(30, Number(delay) || 60));
+}
+
+async function twCleanupQueueGhostRows(reason="snapshot"){
+  const tw = ensureTabWriteState();
+  if(tw._queueGhostCleanupBusy) return false;
+  if(!twCanManageQueueCloud() || !state.firebase?.ok) return false;
+  if(!tw._queueReady || !tw._doneReady) return false;
+
+  const doneIndex = twDoneVisibilityIndex();
+  const stale = [];
+  for(const it of (tw.queueItems || [])){
+    const why = twQueueGhostReason(it, doneIndex);
+    if(why) stale.push({ id:String(it.id || "").trim(), why });
+  }
+  if(!stale.length) return false;
+
+  tw._queueGhostCleanupBusy = true;
+  try{
+    const fs = state.firebase.api;
+    const db = state.firebase.db;
+    const queueCol = fs.collection(db, "producedDays", TW_LINE_BUCKET, "queue");
+    const batch = fs.writeBatch(db);
+    for(const row of stale){
+      batch.delete(fs.doc(queueCol, row.id));
+    }
+    twBatchTouchQueueLive(batch, "kiosk_cleanup", stale.map(row => row.id), {
+      kioskCleanupReason: String(reason || "snapshot"),
+      kioskCleanupRows: stale
+    });
+    await batch.commit();
+
+    const staleIds = new Set(stale.map(row => row.id));
+    tw.queueItems = (tw.queueItems || []).filter(it => !staleIds.has(String(it?.id || "")));
+    tw.lastQueueById = new Map((tw.queueItems || []).map(it => [String(it?.id || ""), it]));
+    twScheduleRenderAll("kiosk_cleanup", 15);
+    twScheduleCanonicalKioskQueuePublish("kiosk_cleanup", 15);
+    return true;
+  }catch(e){
+    console.warn("twCleanupQueueGhostRows error:", e);
+    return false;
+  }finally{
+    tw._queueGhostCleanupBusy = false;
+  }
+}
+
 function twBuildQueueLivePatch(action, ids=[], extra={}){
   const fs = state.firebase?.api || null;
   const nowMs = Number(extra.nowMs || Date.now()) || Date.now();
@@ -12254,6 +12494,7 @@ function twBuildQueueLivePatch(action, ids=[], extra={}){
 
 function twBatchTouchQueueLive(batch, action, ids=[], extra={}){
   try{
+    ensureTabWriteState()._kioskQueueProjectionDirty = true;
     const metaRef = twQueueMetaDocRef();
     if(!batch || !metaRef) return false;
     batch.set(metaRef, twBuildQueueLivePatch(action, ids, extra), { merge:true });
@@ -12266,6 +12507,7 @@ function twBatchTouchQueueLive(batch, action, ids=[], extra={}){
 
 async function twTouchQueueLive(action, ids=[], extra={}){
   try{
+    ensureTabWriteState()._kioskQueueProjectionDirty = true;
     const metaRef = twQueueMetaDocRef();
     if(!metaRef || !state.firebase?.api) return false;
     const fs = state.firebase.api;
@@ -16404,6 +16646,11 @@ function twRenderAll(){
     twRenderQueue(qVis);
   }
   twRenderDone(dVis);
+
+  // Mantiene l'app Kiosk allineata alla Coda WRITE reale, con lo stesso ordine.
+  if(tw._queueReady && tw._doneReady){
+    twScheduleCanonicalKioskQueuePublish("render_live", 20);
+  }
 }
 
 function twRenderQueue(items){
@@ -18031,6 +18278,8 @@ function twStartQueueWatch(){
       }
       if(twCanManageQueueCloud() && tw._doneReady){
         try{ twScheduleOrdersSync(); }catch(_e){}
+        try{ twScheduleQueueGhostCleanup("queue_snapshot", 45); }catch(_e){}
+        try{ twScheduleCanonicalKioskQueuePublish("queue_snapshot", 15); }catch(_e){}
       }
     }, (err)=>{
       tw._queueReady = true;
@@ -18111,6 +18360,8 @@ function twStartDoneWatch(){
       try{ twScheduleDoneConcaBackfill(items); }catch(_e){}
       try{ twScheduleDoneAmazonBackfill(items); }catch(_e){}
       try{ twScheduleOrdersSync(); }catch(_e){}
+      try{ twScheduleQueueGhostCleanup("done_snapshot", 35); }catch(_e){}
+      try{ twScheduleCanonicalKioskQueuePublish("done_snapshot", 10); }catch(_e){}
     }
   }, (err)=>{
     tw._doneReady = true;

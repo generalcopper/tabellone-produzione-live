@@ -2725,7 +2725,13 @@ body:before{
   color:#fff !important;
   text-shadow:0 0 40px rgba(255,178,62,.25) !important;
   padding:clamp(14px,2.4vh,40px) clamp(60px,8vw,160px) clamp(16px,2.6vh,44px) 0 !important;
-}</style>
+}
+/* Queue atomicity patch: the active product text never fades or flashes. */
+.rows > .row:has(.badge.wip) .product{
+  animation:none !important;
+  opacity:1 !important;
+}
+</style>
 
 </head>
 
@@ -5156,7 +5162,7 @@ const BUCKET = "linea_liquidi";
     };
   }
 
-  function canonicalQueueRowsHash(rows, sourceHash="", revisionMs=0){
+  function canonicalQueueRowsHash(rows, sourceHash=""){
     return stableHash((Array.isArray(rows) ? rows : []).map((row, index) => [
       row.id,
       row.queueOrderKey,
@@ -5166,8 +5172,7 @@ const BUCKET = "linea_liquidi";
       row.unit,
       row.format,
       row.status,
-      sourceHash,
-      revisionMs
+      sourceHash
     ]));
   }
 
@@ -5175,86 +5180,111 @@ const BUCKET = "linea_liquidi";
     const v = (meta && typeof meta === "object") ? meta : {};
     const hasCanonicalRows = Object.prototype.hasOwnProperty.call(v, "kioskQueueRows") && Array.isArray(v.kioskQueueRows);
     if(!hasCanonicalRows){
-      const changed = canonicalKioskQueueReady;
+      const changed = canonicalKioskQueueReady || canonicalKioskQueueRows.length > 0;
       canonicalKioskQueueReady = false;
+      canonicalKioskQueueStale = false;
       canonicalKioskQueueRows = [];
       canonicalKioskQueueHash = "";
       canonicalKioskQueueRevisionMs = 0;
+      canonicalKioskQueueMutationMs = 0;
       return changed;
     }
 
-    const rawRows = v.kioskQueueRows;
-    const preferredIds = cleanCloudQueueOrderIds(
-      Array.isArray(v.queueOrderIds) && v.queueOrderIds.length
-        ? v.queueOrderIds
-        : (Array.isArray(v.kioskQueueIds) ? v.kioskQueueIds : [])
+    const projectionMs = Number(v.kioskQueueUpdatedAtMs || 0) || 0;
+    const mutationMs = Math.max(
+      Number(v.queueMutationRevisionMs || 0) || 0,
+      Number(v.queueLiveActionAtMs || 0) || 0,
+      Number(v.queueOrderLastRevisionAtMs || v.queueOrderLastRevisionMs || 0) || 0
     );
-    const rank = new Map(preferredIds.map((id, idx) => [id, idx]));
-    const liveAction = queueTextNorm(v.queueLiveAction || "").replace(/[^a-z0-9]+/g, "_");
-    const removeActionIds = new Set();
-    if(liveAction.includes("completed") || liveAction.includes("deleted") || liveAction.includes("cleanup")){
-      const rawActionIds = Array.isArray(v.queueLiveActionIds)
+
+    // Il documento meta viene aggiornato in due tempi: prima la mutazione della
+    // coda, subito dopo la fotografia kiosk. Se la mutazione è più nuova della
+    // fotografia, NON riapplichiamo mai le righe vecchie.
+    if(mutationMs > projectionMs){
+      canonicalKioskQueueStale = true;
+      canonicalKioskQueueMutationMs = mutationMs;
+
+      const action = queueTextNorm(v.queueLiveAction || "");
+      const destructive = /(completed|complet|done|conclus|chius|deleted|elimin|remove|cleanup|clear|svuota)/.test(action);
+      const rawIds = Array.isArray(v.queueLiveActionIds) && v.queueLiveActionIds.length
         ? v.queueLiveActionIds
         : [v.queueLiveActionId];
-      rawActionIds.forEach(rawId => {
-        const id = String(rawId || "").trim();
-        if(id) removeActionIds.add(id);
-      });
+      const removeIds = new Set(rawIds.map(x => String(x || "").trim()).filter(Boolean));
+
+      if(destructive && removeIds.size && canonicalKioskQueueReady){
+        const nextRows = canonicalKioskQueueRows.filter(row => !removeIds.has(String(row?.id || "")));
+        const nextHash = canonicalQueueRowsHash(nextRows, String(v.kioskQueueHash || "") + "@pending:" + mutationMs);
+        const changed = nextRows.length !== canonicalKioskQueueRows.length || nextHash !== canonicalKioskQueueHash;
+        canonicalKioskQueueRows = nextRows;
+        canonicalKioskQueueHash = nextHash;
+        return changed;
+      }
+      return false;
     }
 
+    const rawRows = v.kioskQueueRows;
+    const projectedIds = new Set(rawRows.map(row => String(row?.id || row?.key || "").trim()).filter(Boolean));
+    for(const [id, removedAtMs] of localQueueTombstones.entries()){
+      const confirmedAbsent = !projectedIds.has(id);
+      const projectionIsNewEnough = projectionMs >= Number(removedAtMs || 0);
+      const tombstoneExpired = (Date.now() - Number(removedAtMs || 0)) > 15000;
+      if(confirmedAbsent || projectionIsNewEnough || tombstoneExpired) localQueueTombstones.delete(id);
+    }
+
+    const preferredIds = cleanCloudQueueOrderIds(
+      Array.isArray(v.kioskQueueIds) && v.kioskQueueIds.length
+        ? v.kioskQueueIds
+        : (Array.isArray(v.queueOrderIds) ? v.queueOrderIds : [])
+    );
+    const rank = new Map(preferredIds.map((id, idx) => [id, idx]));
     const seen = new Set();
     const rows = [];
 
     rawRows.forEach((raw, index) => {
       const job = canonicalQueueRowToJob(raw, index);
-      if(!job.id || seen.has(job.id) || removeActionIds.has(job.id)) return;
+      if(!job.id || seen.has(job.id)) return;
       if(!queueJobHasMeaningfulContent(job)) return;
       if(queueJobHasCompletedStatus(job)) return;
       seen.add(job.id);
       rows.push(job);
     });
 
-    rows.sort((a, b) => {
-      const ah = rank.has(a.id);
-      const bh = rank.has(b.id);
-      if(ah && bh && rank.get(a.id) !== rank.get(b.id)) return rank.get(a.id) - rank.get(b.id);
-      if(ah && !bh) return -1;
-      if(!ah && bh) return 1;
-      const ap = Number.isFinite(Number(a.position)) ? Number(a.position) : Number(a.queueOrderIndex || 0);
-      const bp = Number.isFinite(Number(b.position)) ? Number(b.position) : Number(b.queueOrderIndex || 0);
-      if(ap !== bp) return ap - bp;
-      return compareQueueJobsCloud(a, b);
+    rows.sort((x, y) => {
+      const xh = rank.has(x.id);
+      const yh = rank.has(y.id);
+      if(xh && yh && rank.get(x.id) !== rank.get(y.id)) return rank.get(x.id) - rank.get(y.id);
+      if(xh && !yh) return -1;
+      if(!xh && yh) return 1;
+      const xp = Number.isFinite(Number(x.position)) ? Number(x.position) : Number(x.queueOrderIndex || 0);
+      const yp = Number.isFinite(Number(y.position)) ? Number(y.position) : Number(y.queueOrderIndex || 0);
+      if(xp !== yp) return xp - yp;
+      return compareQueueJobsCloud(x, y);
     });
 
-    const revisionMs = Math.max(
-      Number(v.kioskQueueUpdatedAtMs || 0) || 0,
-      Number(v.queueOrderLastRevisionAtMs || v.queueOrderLastRevisionMs || 0) || 0,
-      Number(v.queueMutationRevisionMs || 0) || 0,
-      Number(v.queueLiveActionAtMs || 0) || 0
-    );
-    const sourceHash = String(v.kioskQueueHash || v.queueOrderHash || "");
-    const nextHash = canonicalQueueRowsHash(rows, sourceHash, revisionMs);
-    const changed = !canonicalKioskQueueReady || nextHash !== canonicalKioskQueueHash;
+    const sourceHash = String(v.kioskQueueHash || "");
+    const nextHash = canonicalQueueRowsHash(rows, sourceHash);
+    const changed = !canonicalKioskQueueReady || canonicalKioskQueueStale || nextHash !== canonicalKioskQueueHash;
 
     canonicalKioskQueueReady = true;
+    canonicalKioskQueueStale = false;
     canonicalKioskQueueRows = rows;
     canonicalKioskQueueHash = nextHash;
-    canonicalKioskQueueRevisionMs = revisionMs;
+    canonicalKioskQueueRevisionMs = projectionMs;
+    canonicalKioskQueueMutationMs = mutationMs;
     return changed;
   }
 
   function getAuthoritativeQueueJobs(){
-    if(canonicalKioskQueueReady){
-      const directById = new Map((Array.isArray(lastQueueDocs) ? lastQueueDocs : []).map(job => [String(job?.id || ""), job]));
-      const existingIds = queueDocsReady ? new Set(directById.keys()) : null;
-      return canonicalKioskQueueRows
-        .filter(job => !existingIds || existingIds.has(job.id))
-        .map(job => {
-          const live = directById.get(job.id);
-          return live ? { ...live, ...job, _raw: { ...(live._raw || {}), ...(job._raw || {}) }, _canonicalKiosk:true } : { ...job };
-        });
-    }
-    return applyCloudQueueOrder(Array.isArray(lastQueueDocs) ? lastQueueDocs : []);
+    if(!canonicalKioskQueueReady) return [];
+    const directById = new Map((Array.isArray(lastQueueDocs) ? lastQueueDocs : []).map(job => [String(job?.id || ""), job]));
+    return canonicalKioskQueueRows
+      .filter(job => !localQueueTombstones.has(String(job?.id || "")))
+      .map(job => {
+        const live = directById.get(job.id);
+        // I documenti queue possono arricchire il payload, ma non possono mai
+        // aggiungere, togliere o riordinare righe rispetto alla fotografia WRITE.
+        return live ? { ...live, ...job, _raw: { ...(live._raw || {}), ...(job._raw || {}) }, _canonicalKiosk:true } : { ...job };
+      });
   }
 
   function queueVisibleHash(visibleJobs){
@@ -5266,24 +5296,25 @@ const BUCKET = "linea_liquidi";
       j.qty,
       j.unit,
       j.status,
-      j.createdAtOrigMs,
-      j.createdAtMs,
-      j.orderUpdatedAtMs,
-      j.restoredFromCompletedAtMs,
-      j.restoreActionAtMs,
-      j.queueLiveAction,
       j.orderNo,
-      j.lineKey,
-      cloudQueueOrderRevisionMs,
-      cloudQueueLiveHash
+      j.lineKey
     ]));
   }
 
   function renderQueueFromCloudDocs(reason="queue"){
-    // Prima fotografia: attendo il meta WRITE. In questo modo il kiosk non
-    // mostra per un istante la raccolta grezza con righe vuote o già concluse.
+    // Il kiosk non ricostruisce più la lista dalla raccolta grezza: visualizza
+    // esclusivamente la fotografia canonica pubblicata dal Tabellone WRITE.
     if(!queueMetaResolved) return;
-    if(!canonicalKioskQueueReady && !producedCloudReady) return;
+    if(!canonicalKioskQueueReady){
+      lastJobs = [];
+      const emptyHash = "write-canonical-empty";
+      if(lastHash !== emptyHash){
+        lastHash = emptyHash;
+        renderSoft([]);
+      }
+      dbg(canonicalKioskQueueStale ? "ATTESA • fotografia WRITE aggiornata" : "ATTESA • coda WRITE canonica");
+      return;
+    }
 
     const authoritativeJobs = getAuthoritativeQueueJobs();
     const visibleJobs = filterQueueJobsForBoard(authoritativeJobs);
@@ -5829,7 +5860,6 @@ unmarkProducedCloud(it.key).then(() => {
       for(let i=0;i<jobs.length;i++){
         const k = makeKey(jobs[i], i);
         if(completed && k === completed) continue;
-        if(producedCloud.has(k)) continue;
         const label = displayJobLabel(jobs[i]);
         if(label) return label;
       }
@@ -5933,10 +5963,9 @@ unmarkProducedCloud(it.key).then(() => {
       try{ saveProducedBackupNow(); }catch(_){ }
       renderProducedFromCloud();
 
-      // Completamenti/ripristini provenienti da WRITE devono riflettersi subito
-      // anche sul tabellone: forzo il ricalcolo della coda corrente dal cloud.
-      try{ lastHash = ""; renderQueueFromCloudDocs("produced_snapshot"); }catch(_){ }
-      applyForcedStatuses();
+      // La coda visibile arriva solo dalla proiezione WRITE. I completati
+      // aggiornano esclusivamente il relativo pannello e gli annunci.
+      try{ MobileUI.updateFromProduced(); }catch(_){ }
       updateAllWipTimers();
     }, (err) => {
       const uid = (auth?.currentUser?.uid || window.__KIOSK_UID || "");
@@ -5970,6 +5999,9 @@ unmarkProducedCloud(it.key).then(() => {
   let canonicalKioskQueueReady = false;
   let canonicalKioskQueueHash = "";
   let canonicalKioskQueueRevisionMs = 0;
+  let canonicalKioskQueueMutationMs = 0;
+  let canonicalKioskQueueStale = false;
+  const localQueueTombstones = new Map();
   let queueMetaResolved = false;
   let queueDocsReady = false;
   let producedCloudReady = false;
@@ -6016,11 +6048,11 @@ unmarkProducedCloud(it.key).then(() => {
   function shouldShowQueueJob(job){
     if(!queueJobHasMeaningfulContent(job)) return false;
     if(queueJobHasCompletedStatus(job)) return false;
-    if(queueJobAlreadyProduced(job)) return false;
 
-    // Le righe canoniche sono già filtrate dal Tabellone WRITE: non applico
-    // una seconda soglia che potrebbe eliminare prodotti manuali validi.
+    // Le righe canoniche sono già filtrate dal Tabellone WRITE. Nessun'altra
+    // raccolta (completati o queue grezza) può modificarne la visibilità.
     if(job?._canonicalKiosk) return true;
+    if(queueJobAlreadyProduced(job)) return false;
 
     // Fallback per installazioni precedenti al feed canonico.
     if(job && (job.restoredFromCompletedAtMs || job.restoreActionAtMs || job.queueLiveAction === "restored")) return true;
@@ -6085,12 +6117,13 @@ unmarkProducedCloud(it.key).then(() => {
           const orderChanged = setCloudQueueOrderIds(ids, rev);
           const liveChanged = liveHash !== cloudQueueLiveHash;
           if(liveChanged) cloudQueueLiveHash = liveHash;
-          if(orderChanged || liveChanged || canonicalChanged){
+          if(canonicalChanged){
             lastHash = "";
             renderQueueFromCloudDocs("queue_meta");
-            try{ renderProducedFromCloud(); }catch(_){ }
-            try{ applyForcedStatuses(); }catch(_){ }
-            try{ MobileUI.updateFromJobs(); MobileUI.updateFromProduced(); }catch(_){ }
+            try{ MobileUI.updateFromJobs(); }catch(_){ }
+          }
+          if(orderChanged || liveChanged){
+            try{ renderProducedFromCloud(); MobileUI.updateFromProduced(); }catch(_){ }
           }
         }catch(e){
           queueMetaResolved = true;
@@ -6127,7 +6160,7 @@ unmarkProducedCloud(it.key).then(() => {
             supplier: (v.supplier || v.fornitore || "").toString().trim(),
             kind: (v.kind || "").toString().trim(),
             source: (v.source || "").toString().trim(),
-            product: (v.product || v.finishedProductName || v.amazonInventoryTitle || v.label || v.rawLine || v.code || "").toString().trim(),
+            product: (v.product || v.finishedProductName || v.label || v.rawLine || "").toString().trim(),
             format: (v.format || "").toString().trim(),
             qty: (v.qty || "").toString().trim(),
             unit: (v.unit || v.finishedProductUom || "").toString().trim(),
@@ -6145,11 +6178,11 @@ unmarkProducedCloud(it.key).then(() => {
         lastQueueDocs = jobs;
         queueDocsReady = true;
 
-        // Render usando solo ordine cloud del Tabellone WRITE:
-        // 1) queueState.queueOrderIds quando disponibile (broadcast immediato ordine)
-        // 2) queueOrderKey sulle righe queue come ordinamento persistente
-        // 3) nessun fallback locale / nessun localStorage per l'ordine coda
-        renderQueueFromCloudDocs("queue_snapshot");
+        // La raccolta queue arricchisce i dati delle righe canoniche, ma non
+        // comanda più la vista: niente render concorrente e niente righe fantasma.
+        if(canonicalKioskQueueReady && !canonicalKioskQueueStale){
+          try{ renderQueueFromCloudDocs("queue_enrichment"); }catch(_){ }
+        }
       }, (err) => {
         console.log("queue snapshot error:", err);
         {
@@ -6168,11 +6201,47 @@ unmarkProducedCloud(it.key).then(() => {
   }
 
   async function removeFromQueueByKey(key){
+    const id = String(key || "").trim();
+    if(!id) return;
+    const removedAtMs = Date.now();
+
+    // Tombstone locale: la riga sparisce nello stesso frame e non può essere
+    // ripescata da uno snapshot precedente mentre il cloud si assesta.
+    localQueueTombstones.set(id, removedAtMs);
     try{
-      const id = String(key || "");
-      if(!id) return;
+      lastHash = "";
+      renderQueueFromCloudDocs("local_remove");
+    }catch(_){ }
+
+    try{
       await deleteDoc(doc(queueCol, id));
+
+      // Segnale best-effort a tutti i kiosk: chi riceve la mutazione prima della
+      // nuova fotografia WRITE elimina subito questo ID senza mostrare il vecchio.
+      try{
+        await setDoc(queueMetaDoc, {
+          queueLiveVersion: 1,
+          queueLiveAction: "completed",
+          queueLiveActionId: id,
+          queueLiveActionIds: [id],
+          queueLiveActionAt: serverTimestamp(),
+          queueLiveActionAtMs: removedAtMs,
+          queueLiveCompletedAtMs: removedAtMs,
+          queueMutationRevisionMs: removedAtMs,
+          queueOrderLastRevisionAt: serverTimestamp(),
+          queueOrderLastRevisionAtMs: removedAtMs,
+          queueOrderLastRevisionReason: "kiosk_completed",
+          queueLiveNonce: String(removedAtMs) + "_" + Math.random().toString(36).slice(2, 8)
+        }, { merge:true });
+      }catch(metaError){
+        console.log("queue meta touch error:", metaError);
+      }
     }catch(e){
+      localQueueTombstones.delete(id);
+      try{
+        lastHash = "";
+        renderQueueFromCloudDocs("local_remove_rollback");
+      }catch(_){ }
       console.log("removeFromQueueByKey error:", e);
     }
   }
@@ -6287,8 +6356,6 @@ let pendingKey = null;
   function showModalForRow(rowEl){
     const key = rowEl.dataset.key;
     if(!key) return;
-    if(producedCloud.has(key)) return;
-
     pendingKey = key;
     pendingLabelStatic = cleanAmazonDisplayLabel(rowEl.dataset.label || "Riga selezionata");
     const sub = document.getElementById("qtyModalSub");
@@ -6334,7 +6401,6 @@ let pendingKey = null;
       for(let i=0;i<lastJobs.length;i++){
         const k = makeKey(lastJobs[i], i);
         if(k === pendingKey) continue;
-        if(producedCloud.has(k)) continue;
         nextKey = k;
         nextLabel = (`${lastJobs[i].product} • ${lastJobs[i].format}`).replace(/\s+/g,' ').trim();
         if(nextLabel) break;
@@ -7216,7 +7282,8 @@ doneShareEl?.addEventListener("click", async (ev) => {
       code: String(job?.code ?? raw.code ?? ""),
       supplier: String(job?.supplier ?? raw.supplier ?? raw.fornitore ?? ""),
       kind: String(job?.kind ?? raw.kind ?? ""),
-      source: String(job?.source ?? raw.source ?? "")
+      source: String(job?.source ?? raw.source ?? ""),
+      _canonicalKiosk: Boolean(job?._canonicalKiosk)
     };
   }
 
@@ -7224,11 +7291,7 @@ doneShareEl?.addEventListener("click", async (ev) => {
       function applyForcedStatuses(){
     if(!lastJobs || !lastJobs.length) return;
 
-    let firstActiveIdx = -1;
-    for(let i=0;i<lastJobs.length;i++){
-      const k = makeKey(lastJobs[i], i);
-      if(!producedCloud.has(k)) { firstActiveIdx = i; break; }
-    }
+    const firstActiveIdx = lastJobs.length ? 0 : -1;
 
     try{
       const firstKey = (firstActiveIdx >= 0) ? makeKey(lastJobs[firstActiveIdx], firstActiveIdx) : null;
@@ -7246,10 +7309,6 @@ doneShareEl?.addEventListener("click", async (ev) => {
       
       el.dataset.label = displayJobLabel(lastJobs[i]);
 
-      if(producedCloud.has(k)){
-        el.style.display = "none";
-        continue;
-      }
       el.style.display = "";
 
       const forcedStatus = (i === firstActiveIdx) ? "IN PRODUZIONE" : "DA PRODURRE";
@@ -7262,11 +7321,7 @@ doneShareEl?.addEventListener("click", async (ev) => {
     const rows = document.getElementById("rows");
     const seen = new Set();
 
-    let firstActiveIdx = -1;
-    for(let i=0;i<jobs.length;i++){
-      const k = makeKey(jobs[i], i);
-      if(!producedCloud.has(k)) { firstActiveIdx = i; break; }
-    }
+    const firstActiveIdx = jobs.length ? 0 : -1;
 
     try{
       const firstKey = (firstActiveIdx >= 0) ? makeKey(jobs[firstActiveIdx], firstActiveIdx) : null;
@@ -7297,11 +7352,7 @@ doneShareEl?.addEventListener("click", async (ev) => {
 
       try{ el.__job = cloneQueueJobForUndo(job); }catch(_){ }
 
-      if(producedCloud.has(key)) {
-        el.style.display = "none";
-      } else {
-        el.style.display = "";
-      }
+      el.style.display = "";
 
       const forcedStatus = (idx === firstActiveIdx) ? "IN PRODUZIONE" : "DA PRODURRE";
       updateRowEl(el, { ...job, status: forcedStatus });
@@ -8033,13 +8084,7 @@ async function refreshWeather(){
       if(!IS_MOBILE || !prodTickerEl) return;
 
       const jobs = Array.isArray(lastJobs) ? lastJobs : [];
-      let pending = 0;
-      try{
-        for(let i=0;i<jobs.length;i++){
-          const k = makeKey(jobs[i], i);
-          if(!producedCloud.has(k)) pending++;
-        }
-      }catch(_){ pending = 0; }
+      const pending = jobs.length;
 
       const doneRows = producedCloud.size || 0;
       const totalMin = pending * 90;
@@ -8090,18 +8135,12 @@ async function refreshWeather(){
         _sheetActiveTimerEl = null;
         // Mostra le righe non completate (a partire dall'attiva)
         const jobs = Array.isArray(lastJobs) ? lastJobs : [];
-        let firstActiveIdx = -1;
-        for(let i=0;i<jobs.length;i++){
-          const k = makeKey(jobs[i], i);
-          if(!producedCloud.has(k)) { firstActiveIdx = i; break; }
-        }
+        const firstActiveIdx = jobs.length ? 0 : -1;
         const activeKey = WIP_STATE?.activeKey || ((firstActiveIdx>=0)?makeKey(jobs[firstActiveIdx], firstActiveIdx):null);
 
         for(let i=0;i<jobs.length;i++){
           const job = jobs[i];
           const key = makeKey(job, i);
-          if(producedCloud.has(key)) continue;
-
           const item = document.createElement("div");
           item.className = "mItem" + ((key === activeKey) ? " active" : "");
 
@@ -8286,11 +8325,7 @@ el.sheetList.appendChild(item);
     function updateFromJobs(){
       const jobs = Array.isArray(lastJobs) ? lastJobs : [];
 
-      let firstActiveIdx = -1;
-      for(let i=0;i<jobs.length;i++){
-        const k = makeKey(jobs[i], i);
-        if(!producedCloud.has(k)) { firstActiveIdx = i; break; }
-      }
+      const firstActiveIdx = jobs.length ? 0 : -1;
       const job = (firstActiveIdx >= 0) ? jobs[firstActiveIdx] : null;
       const key = job ? makeKey(job, firstActiveIdx) : null;
 
@@ -8304,13 +8339,10 @@ el.sheetList.appendChild(item);
         let remUnit = "";
         try{
           for(let i=0;i<jobs.length;i++){
-            const k = makeKey(jobs[i], i);
-            if(!producedCloud.has(k)){
-              remCount++;
-              const n = Number(jobs[i]?.qty || 0);
-              if(Number.isFinite(n)) remQty += n;
-              if(!remUnit) remUnit = String(jobs[i]?.unit || "").trim();
-            }
+            remCount++;
+            const n = Number(jobs[i]?.qty || 0);
+            if(Number.isFinite(n)) remQty += n;
+            if(!remUnit) remUnit = String(jobs[i]?.unit || "").trim();
           }
         }catch(_){}
         setStackedMeta(el.wipSub, q || "—", (job?.format || ""));
