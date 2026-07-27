@@ -3945,7 +3945,7 @@ function guessTitleFromRaw(rawText, sku){
 
     // Dedupe permanente: l'ID del documento email dipende esclusivamente dallo stato
     // della sottoscorta, non dalla grafica, dalla revisione o dall'ordine di esecuzione.
-    const LOW_STOCK_MAIL_STATE_HASH_SCHEMA = "amazon_low_stock_state_v1";
+    const LOW_STOCK_MAIL_STATE_HASH_SCHEMA = "amazon_low_stock_frontend_snapshot_v1";
     const LOW_STOCK_MAIL_DEDUPE_VERSION = 2;
     const LOW_STOCK_MAIL_DOC_PREFIX = "auto_low_stock_once_v1_";
 
@@ -4573,6 +4573,171 @@ function guessTitleFromRaw(rawText, sku){
       return lowStockAggregates();
     }
 
+
+
+    // Fotografia autorevole del frontend: la mail backend usa ESATTAMENTE queste righe.
+    const __frontendLowStockSnapshot = {
+      timer: null,
+      running: false,
+      queued: false,
+      lastPublishedHash: "",
+      publisherVersion: 1
+    };
+
+    function __frontendLowStockSourceClocks(){
+      let inventoryAt = 0;
+      let lifecycleAt = 0;
+      try{
+        for(const loc of inventoryLocs()){
+          for(const it of (state.inventory?.[loc]?.items || [])){
+            inventoryAt = Math.max(inventoryAt, itemUpdatedMillis(it || {}) || 0);
+          }
+        }
+      }catch(_e){}
+      try{
+        if(state.twReorders?.bySku instanceof Map){
+          for(const lifecycle of state.twReorders.bySku.values()){
+            lifecycleAt = Math.max(lifecycleAt, __reorderLifecycleTimestamp(lifecycle) || 0);
+          }
+        }
+      }catch(_e){}
+      return { inventoryAt, lifecycleAt };
+    }
+
+    function __frontendLowStockDisplayRows(items){
+      return (items || []).map(it=>{
+        const sku = toSkuId(it?.sku || it?.id || "");
+        const meta = parseTitleMeta(it?.title || "");
+        const title = squashWhitespace(meta?.main || it?.title || sku) || sku;
+        const physicalQty = physicalQtyFromItem(it);
+        const reservedQty = reservedQtyFromItem(it);
+        const availableQty = lowStockQtyValue(it);
+        const customThreshold = __getCustomLowStockThreshold(it);
+        return {
+          sku,
+          title,
+          physicalQty,
+          reservedQty,
+          availableQty,
+          threshold: __lowStockThreshold(it),
+          thresholdLabel: __lowStockThresholdShort(it),
+          customThreshold,
+          reordered: __isReorderedItem(it) === true,
+          aliases: Array.isArray(it?.aliasSkus) ? it.aliasSkus.map(x=>toSkuId(x)).filter(Boolean) : [sku],
+          sourceSku: toSkuId(it?.sourceSku || sku),
+          sourceUpdateTimeMillis: Number(it?.sourceUpdateTimeMillis || 0) || 0,
+          mainLoc: it?.mainLoc || it?.loc || INVENTORY_CANONICAL_LOC
+        };
+      }).filter(row=>row.sku).sort((a,b)=>{
+        if(a.reordered !== b.reordered) return a.reordered ? 1 : -1;
+        if(a.availableQty !== b.availableQty) return a.availableQty - b.availableQty;
+        return a.sku.localeCompare(b.sku);
+      });
+    }
+
+    async function publishFrontendLowStockSnapshot(reason="frontend_render"){
+      if(__frontendLowStockSnapshot.running){
+        __frontendLowStockSnapshot.queued = true;
+        return;
+      }
+      try{
+        if(!state.user?.isWhitelisted) return;
+        if(!state.inventory?.[INVENTORY_CANONICAL_LOC]?.meta?.loaded) return;
+        const api = state.firebase?.api;
+        const db = state.firebase?.db;
+        if(!api || !db || !api.runTransaction) return;
+
+        __frontendLowStockSnapshot.running = true;
+        const items = __getLowStockBoth();
+        const hashBundle = await __buildLowStockStateHashBundle(items);
+        const rows = __frontendLowStockDisplayRows(items);
+        const viewHash = await stableHashHex(`frontend_low_stock_view_v1\n${JSON.stringify(rows)}`);
+        const reorderedCount = rows.filter(row=>row.reordered).length;
+        const toHandleCount = Math.max(0, rows.length - reorderedCount);
+        const clocks = __frontendLowStockSourceClocks();
+        const nowClient = Date.now();
+        const ref = api.doc(db, COL_META, DOC_LOWSTOCK_FRONTEND_SNAPSHOT);
+        let published = false;
+
+        await api.runTransaction(db, async tx=>{
+          const snap = await tx.get(ref);
+          const current = snap.exists() ? (snap.data() || {}) : {};
+          const currentPublisherVersion = Number(current.publisherVersion || 0);
+          const currentHash = String(current.stateHash || "");
+          const currentViewHash = String(current.viewHash || "");
+          const currentInventoryAt = Number(current.sourceInventoryAtClient || 0) || 0;
+          const currentLifecycleAt = Number(current.sourceLifecycleAtClient || 0) || 0;
+
+          if(currentHash === hashBundle.stateHash && currentViewHash === viewHash && currentPublisherVersion === __frontendLowStockSnapshot.publisherVersion){
+            __frontendLowStockSnapshot.lastPublishedHash = currentHash;
+            return;
+          }
+
+          // Una scheda vecchia non può sovrascrivere una fotografia costruita con
+          // snapshot inventario/ciclo più recenti.
+          if(currentHash && (
+            currentInventoryAt > clocks.inventoryAt ||
+            currentLifecycleAt > clocks.lifecycleAt
+          )) return;
+
+          tx.set(ref, {
+            publisherVersion: __frontendLowStockSnapshot.publisherVersion,
+            sourceMode: "frontend_exact_view",
+            source: "hub_inventario_amazon",
+            stateHashSchema: LOW_STOCK_MAIL_STATE_HASH_SCHEMA,
+            stateHash: hashBundle.stateHash,
+            viewHash,
+            stateRows: hashBundle.rows,
+            rows,
+            total: rows.length,
+            toHandleCount,
+            reorderedCount,
+            counts: { unica: rows.length },
+            generatedAt: api.serverTimestamp(),
+            generatedAtClient: nowClient,
+            generatedBy: state.user?.emailLower || state.user?.email || state.user?.uid || "",
+            reason: String(reason || "frontend_render"),
+            sourceInventoryAtClient: clocks.inventoryAt || 0,
+            sourceLifecycleAtClient: clocks.lifecycleAt || 0,
+            inventoryLocation: INVENTORY_CANONICAL_LOC,
+            frontendPath: location.pathname,
+            frontendTitle: document.title,
+            frontendBuild: "hub_inventario_amazon_frontend_snapshot_v1"
+          }, { merge:false });
+          published = true;
+        });
+
+        if(published){
+          __frontendLowStockSnapshot.lastPublishedHash = hashBundle.stateHash;
+          console.info("Frontend low-stock snapshot published", {
+            total: rows.length,
+            toHandleCount,
+            reorderedCount,
+            hash: hashBundle.stateHash
+          });
+        }
+      }catch(err){
+        console.warn("frontend low-stock snapshot publish", err);
+      }finally{
+        __frontendLowStockSnapshot.running = false;
+        if(__frontendLowStockSnapshot.queued){
+          __frontendLowStockSnapshot.queued = false;
+          setTimeout(()=>{ void publishFrontendLowStockSnapshot("queued_update"); }, 450);
+        }
+      }
+    }
+
+    function scheduleFrontendLowStockSnapshot(reason="frontend_render", delay=450){
+      try{
+        if(!state.user?.isWhitelisted) return;
+        if(__frontendLowStockSnapshot.timer) clearTimeout(__frontendLowStockSnapshot.timer);
+        __frontendLowStockSnapshot.timer = setTimeout(()=>{
+          __frontendLowStockSnapshot.timer = null;
+          void publishFrontendLowStockSnapshot(reason);
+        }, Math.max(120, Number(delay || 0)));
+      }catch(_e){}
+    }
+
     // trigger email dopo aggiornamenti reali: runtime + realtime Firestore (anche da altri hub), NON all'accesso
     let __lowMailSeq = 0;
     let __lowMailT1 = null;
@@ -4702,6 +4867,7 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
     // --- Firestore paths ---
     const COL_META = "amzInventoryMeta";
     const DOC_LOWSTOCK_EMAIL_STATE = "lowStockEmailState";
+    const DOC_LOWSTOCK_FRONTEND_SNAPSHOT = "lowStockFrontendSnapshot";
     const COL_LOW_STOCK_SKU_STATES = "amzInventoryLowStockSkuStates";
     const COL_REORDERS = "amzInventoryReorders";
     
@@ -5134,6 +5300,10 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
       __lowStockThresholdRepairState.timer = null;
       __lowStockThresholdRepairState.running = false;
       __lowStockThresholdRepairState.queued = false;
+      try{ if(__frontendLowStockSnapshot.timer) clearTimeout(__frontendLowStockSnapshot.timer); }catch(_e){}
+      __frontendLowStockSnapshot.timer = null;
+      __frontendLowStockSnapshot.running = false;
+      __frontendLowStockSnapshot.queued = false;
       try{ if(__sharedStockSyncState.timer) clearTimeout(__sharedStockSyncState.timer); }catch(_e){}
       __sharedStockSyncState.timer = null;
       __sharedStockSyncState.running = false;
@@ -5269,6 +5439,7 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
         // Lo scudo legacy è già stato programmato appena completato lo snapshot.
         // Qui proseguono solo stabilizzazione soglie e logica inventario corrente.
         scheduleLowStockThresholdRepair("inventory_" + loc);
+        scheduleFrontendLowStockSnapshot("inventory_" + loc, 320);
         triggerLowStockMailFromRealtime("realtime_low_stock_" + loc);
         scheduleSharedSkuInventorySync("inventory_" + loc);
       }, (err)=>{
@@ -5468,45 +5639,73 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
 
       const meta = state.mail?.lowStock?.meta;
       if(!meta){
-        el.innerHTML = `<span class="muted">Email sotto scorta gestita dal backend • mittente info@generalcoppersrl.com • destinatario matteo@generalcoppersrl.com • nessun invio registrato.</span>`;
+        el.innerHTML = `<span class="muted">In attesa della fotografia esatta del frontend. La mail viene creata solo dalle righe mostrate qui.</span>`;
         return;
       }
 
-      const sentAt = meta.sentAt || meta.updatedAt || meta.lastSentAt || meta.sentAtClient || null;
+      const sentAt = meta.sentAt || meta.lastSentAt || meta.sentAtClient || null;
       const checkedAt = meta.lastBackendCheckedAt || meta.lastObservedAt || meta.lastBackendEventAt || meta.lastBackendCheckedAtClient || meta.lastObservedAtClient || meta.lastBackendEventAtClient || null;
+      const snapshotAt = meta.frontendSnapshotGeneratedAtClient || meta.lastObservedAt || meta.lastObservedAtClient || null;
       const sentDate = __fmtTsAny(sentAt);
       const checkedDate = __fmtTsAny(checkedAt);
-      const total = Number.isFinite(meta.total) ? meta.total : (Number.isFinite(meta.lastTotal) ? meta.lastTotal : null);
-      const toHandleCount = Number.isFinite(meta.toHandleCount) ? meta.toHandleCount : null;
-      const reorderedCount = Number.isFinite(meta.reorderedCount) ? meta.reorderedCount : null;
-      const reason = meta.reason || meta.lastBackendReason ? String(meta.reason || meta.lastBackendReason) : "";
+      const snapshotDate = __fmtTsAny(snapshotAt);
+
+      const observedTotal = Number.isFinite(meta.observedTotal) ? meta.observedTotal : (Number.isFinite(meta.total) ? meta.total : null);
+      const observedToHandle = Number.isFinite(meta.observedToHandleCount) ? meta.observedToHandleCount : (Number.isFinite(meta.toHandleCount) ? meta.toHandleCount : null);
+      const observedReordered = Number.isFinite(meta.observedReorderedCount) ? meta.observedReorderedCount : (Number.isFinite(meta.reorderedCount) ? meta.reorderedCount : null);
+
+      const hasSeparatedSentSnapshot = Number.isFinite(meta.lastSentTotal);
+      const sentTotal = hasSeparatedSentSnapshot ? meta.lastSentTotal : null;
+      const sentToHandle = Number.isFinite(meta.lastSentToHandleCount) ? meta.lastSentToHandleCount : null;
+      const sentReordered = Number.isFinite(meta.lastSentReorderedCount) ? meta.lastSentReorderedCount : null;
+
+      const reason = String(meta.reason || meta.lastBackendReason || "");
       const result = String(meta.lastBackendResult || "");
       const processor = String(meta.processor || "backend");
       const mailFrom = String(meta.mailFrom || "info@generalcoppersrl.com");
       const mailTo = Array.isArray(meta.mailTo) ? meta.mailTo.join(", ") : String(meta.mailTo || "matteo@generalcoppersrl.com");
-      const hash = String(meta.lastObservedStateHash || meta.currentStateHash || meta.lastSentStateHash || meta.templateHash || "");
+      const hash = String(meta.observedStateHash || meta.lastObservedStateHash || meta.currentStateHash || "");
       const hashShort = hash ? hash.slice(0, 10) : "";
-      const resultLabel = result === "email_queued" ? "mail accodata"
-        : result === "duplicate_blocked" ? "stato già notificato"
-        : result === "waiting_settle" ? "variazione rilevata, in assestamento"
+      const resultLabel = result === "email_queued" ? "mail esatta accodata"
+        : result === "duplicate_blocked" ? "fotografia già notificata"
+        : result === "waiting_frontend_snapshot" ? "in attesa fotografia frontend"
+        : result === "no_low_stock" ? "nessuno SKU sotto scorta"
         : result === "error" ? "errore backend"
         : (result || "backend attivo");
 
-      let header = `Ultima mail sotto scorta: <b>${escapeHtml(sentDate)}</b>`;
-      if(checkedAt) header += ` • Ultimo controllo backend: <b>${escapeHtml(checkedDate)}</b>`;
-      header += ` • Stato: <b>${escapeHtml(resultLabel)}</b>`;
-      if(total != null) header += ` • SKU <b>${escapeHtml(String(total))}</b>`;
-      if(toHandleCount != null) header += ` • Da gestire <b>${escapeHtml(String(toHandleCount))}</b>`;
-      if(reorderedCount != null) header += ` • Riordinati <b>${escapeHtml(String(reorderedCount))}</b>`;
-      if(reason) header += ` • trigger: <span class="mono">${escapeHtml(reason)}</span>`;
-      if(hashShort) header += ` • hash ${escapeHtml(hashShort)}`;
-      header += ` • mittente: <span class="mono">${escapeHtml(mailFrom)}</span>`;
-      header += ` • destinatario: <span class="mono">${escapeHtml(mailTo)}</span>`;
-      header += ` • gestione: <span class="mono">${escapeHtml(processor)}</span>`;
-      if(meta.lastBackendError){
-        header += `<div class="hint" style="margin-top:6px;color:var(--bad)">Errore backend: ${escapeHtml(String(meta.lastBackendError))}</div>`;
+      const lines = [];
+      let currentLine = `Fotografia frontend: <b>${observedTotal != null ? escapeHtml(String(observedTotal)) : "—"} SKU</b>`;
+      if(observedToHandle != null) currentLine += ` • Da gestire <b>${escapeHtml(String(observedToHandle))}</b>`;
+      if(observedReordered != null) currentLine += ` • Riordinati <b>${escapeHtml(String(observedReordered))}</b>`;
+      if(snapshotAt) currentLine += ` • Generata: <b>${escapeHtml(snapshotDate)}</b>`;
+      if(hashShort) currentLine += ` • hash ${escapeHtml(hashShort)}`;
+      lines.push(currentLine);
+
+      if(sentAt){
+        let sentLine = `Ultima mail realmente inviata: <b>${escapeHtml(sentDate)}</b>`;
+        if(sentTotal != null){
+          sentLine += ` • SKU <b>${escapeHtml(String(sentTotal))}</b>`;
+          if(sentToHandle != null) sentLine += ` • Da gestire <b>${escapeHtml(String(sentToHandle))}</b>`;
+          if(sentReordered != null) sentLine += ` • Riordinati <b>${escapeHtml(String(sentReordered))}</b>`;
+        }else{
+          sentLine += ` • contenuto storico non separato dalla fotografia corrente`;
+        }
+        lines.push(sentLine);
+      }else{
+        lines.push(`Ultima mail realmente inviata: <b>nessuna</b>`);
       }
-      el.innerHTML = header;
+
+      let backendLine = `Ultimo controllo backend: <b>${escapeHtml(checkedDate)}</b> • Stato: <b>${escapeHtml(resultLabel)}</b>`;
+      if(reason) backendLine += ` • trigger: <span class="mono">${escapeHtml(reason)}</span>`;
+      backendLine += ` • mittente: <span class="mono">${escapeHtml(mailFrom)}</span>`;
+      backendLine += ` • destinatario: <span class="mono">${escapeHtml(mailTo)}</span>`;
+      backendLine += ` • gestione: <span class="mono">${escapeHtml(processor)}</span>`;
+      lines.push(backendLine);
+
+      if(meta.lastBackendError){
+        lines.push(`<span style="color:var(--bad)">Errore backend: ${escapeHtml(String(meta.lastBackendError))}</span>`);
+      }
+      el.innerHTML = lines.join("<br>");
     }
 
 function startAllLogs(){
@@ -5629,6 +5828,7 @@ function startAllLogs(){
           ? `${state.twReorders.lifecycleError} • ${state.twReorders.queueError}`
           : "";
         __renderAfterReorderStateChange();
+        scheduleFrontendLowStockSnapshot("reorder_state_snapshot", 260);
       }catch(err){
         console.warn("merge reorder states", err);
       }
@@ -7008,6 +7208,7 @@ function currentInv(){
         if(!out.length){
           setStableInteractiveHtml(lowList, `<div class="hint" style="padding:16px">Nessun articolo sotto scorta.</div>`, "home-low:empty");
           if(lowHint) lowHint.textContent = "";
+          scheduleFrontendLowStockSnapshot("home_empty_render", 220);
           renderHomeLowStockMailLog();
           return;
         }
@@ -7054,6 +7255,7 @@ function currentInv(){
         if(lowHint) lowHint.textContent = "Tocca una riga per aprire lo SKU. I valori sono letti dal cloud in tempo reale.";
       }
 
+      scheduleFrontendLowStockSnapshot("home_render", 220);
       renderHomeLowStockMailLog();
     }
 
