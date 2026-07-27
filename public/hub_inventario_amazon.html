@@ -1263,6 +1263,9 @@ Tip:
       },
       mail: {
         lowStock: { unsub:null, meta:null, error:"", emailDocId:"", emailDoc:null, emailDocError:"", emailDocBusy:false }
+      },
+      authoritativeLowStock: {
+        unsub:null, loaded:false, rows:[], stateHash:"", updatedAtClient:0, error:""
       }
 
     };
@@ -3571,7 +3574,67 @@ function guessTitleFromRaw(rawText, sku){
       return buildSkuStockAggregateLookup(preferLoc).get(s) || null;
     }
 
+    function authoritativeLowStockItems(){
+      try{
+        if(state.authoritativeLowStock?.loaded !== true) return null;
+        return (state.authoritativeLowStock.rows || []).map(raw=>{
+          const sku = toSkuId(raw?.sku || raw?.id || "");
+          const physicalQty = Math.round(Number(raw?.physicalQty || 0));
+          const reservedQty = Math.max(0, Math.round(Number(raw?.reservedQty || 0)));
+          const availableQty = Math.round(Number.isFinite(Number(raw?.availableQty)) ? Number(raw.availableQty) : (physicalQty - reservedQty));
+          const aliases = Array.isArray(raw?.aliases) ? raw.aliases.map(x=>toSkuId(x)).filter(Boolean) : [sku];
+          const customThreshold = raw?.customThreshold === null || raw?.customThreshold === undefined ? null : Math.max(0, Math.round(Number(raw.customThreshold || 0)));
+          return {
+            __isSkuAggregate:true,
+            __authoritativeLowStock:true,
+            sku,
+            id:sku,
+            title:squashWhitespace(raw?.title || sku) || sku,
+            titleNorm:normalizeText(raw?.title || sku),
+            physicalQty,
+            reservedQty,
+            availableQty,
+            qty:availableQty,
+            lowStockThreshold:customThreshold,
+            threshold:Number(raw?.threshold || 0),
+            thresholdLabel:String(raw?.thresholdLabel || ""),
+            customThreshold,
+            reordered:raw?.reordered === true,
+            aliasSkus:aliases.length ? aliases : [sku],
+            actualSkus:aliases.length ? aliases : [sku],
+            sourceSku:toSkuId(raw?.sourceSku || sku) || sku,
+            sourceUpdateTimeMillis:Number(raw?.sourceUpdateTimeMillis || 0) || 0,
+            mainLoc:raw?.mainLoc || INVENTORY_CANONICAL_LOC,
+            loc:raw?.mainLoc || INVENTORY_CANONICAL_LOC,
+            locs:[raw?.mainLoc || INVENTORY_CANONICAL_LOC],
+            locations:[{
+              loc:raw?.mainLoc || INVENTORY_CANONICAL_LOC,
+              sku,
+              actualSku:sku,
+              canonicalSku:sku,
+              aliasSkus:aliases.length ? aliases : [sku],
+              title:squashWhitespace(raw?.title || sku) || sku,
+              physicalQty,
+              reservedQty,
+              availableQty,
+              updatedAtClient:Number(raw?.sourceUpdateTimeMillis || 0) || 0
+            }]
+          };
+        }).filter(x=>x.sku);
+      }catch(_e){ return null; }
+    }
+
     function lowStockAggregates(filterLoc=""){
+      const authoritative = authoritativeLowStockItems();
+      if(authoritative){
+        return authoritative.slice().sort((a,b)=>{
+          if(a.reordered !== b.reordered) return a.reordered ? 1 : -1;
+          const qa = lowStockQtyValue(a);
+          const qb = lowStockQtyValue(b);
+          if(qa !== qb) return qa - qb;
+          return String(a.sku || "").localeCompare(String(b.sku || ""));
+        });
+      }
       return buildSkuStockAggregates({ loc: filterLoc }).filter(agg => __isLowStockItem(agg)).sort((a,b)=>{
         const qa = lowStockQtyValue(a);
         const qb = lowStockQtyValue(b);
@@ -3746,6 +3809,7 @@ function guessTitleFromRaw(rawText, sku){
     }
 
     function __isReorderedItem(it){
+      if(it && it.__authoritativeLowStock === true) return it.reordered === true;
       return !!__currentReorderLifecycle(it);
     }
 
@@ -4727,15 +4791,9 @@ function guessTitleFromRaw(rawText, sku){
       }
     }
 
-    function scheduleFrontendLowStockSnapshot(reason="frontend_render", delay=450){
-      try{
-        if(!state.user?.isWhitelisted) return;
-        if(__frontendLowStockSnapshot.timer) clearTimeout(__frontendLowStockSnapshot.timer);
-        __frontendLowStockSnapshot.timer = setTimeout(()=>{
-          __frontendLowStockSnapshot.timer = null;
-          void publishFrontendLowStockSnapshot(reason);
-        }, Math.max(120, Number(delay || 0)));
-      }catch(_e){}
+    function scheduleFrontendLowStockSnapshot(_reason="frontend_render", _delay=450){
+      // Disabilitato: la vista sotto scorta viene prodotta dal backend e letta da tutti i dispositivi.
+      return;
     }
 
     // trigger email dopo aggiornamenti reali: runtime + realtime Firestore (anche da altri hub), NON all'accesso
@@ -4868,6 +4926,7 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
     const COL_META = "amzInventoryMeta";
     const DOC_LOWSTOCK_EMAIL_STATE = "lowStockEmailState";
     const DOC_LOWSTOCK_FRONTEND_SNAPSHOT = "lowStockFrontendSnapshot";
+    const DOC_LOWSTOCK_AUTHORITATIVE_VIEW = "lowStockAuthoritativeView";
     const COL_LOW_STOCK_SKU_STATES = "amzInventoryLowStockSkuStates";
     const COL_REORDERS = "amzInventoryReorders";
     
@@ -5278,6 +5337,7 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
       startRealtimeFor(INVENTORY_CANONICAL_LOC);
       startAllLogs();
       startLowStockEmailMetaWatch();
+      startAuthoritativeLowStockWatch();
       startTwReordersWatch();
       scheduleCloudReservationReconcile("startup");
     }
@@ -5316,6 +5376,7 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
       }
       stopAllLogs();
       stopLowStockEmailMetaWatch();
+      stopAuthoritativeLowStockWatch();
       stopProductComboWatch();
       try{ state.comboCache instanceof Map && state.comboCache.clear(); }catch(_e){}
       clearSkuRuntimeCache("stop_realtime");
@@ -5622,90 +5683,55 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
       }
     }
 
+    function startAuthoritativeLowStockWatch(){
+      try{
+        if(!state.firebase.ok || !state.user?.isWhitelisted) return;
+        if(state.authoritativeLowStock?.unsub) return;
+        const api = state.firebase.api;
+        const db = state.firebase.db;
+        const ref = api.doc(db, COL_META, DOC_LOWSTOCK_AUTHORITATIVE_VIEW);
+        state.authoritativeLowStock.unsub = api.onSnapshot(ref, (snap)=>{
+          const d = snap.exists() ? (snap.data() || {}) : {};
+          state.authoritativeLowStock.loaded = snap.exists();
+          state.authoritativeLowStock.rows = Array.isArray(d.rows) ? d.rows.map(x=>({ ...(x || {}) })) : [];
+          state.authoritativeLowStock.stateHash = String(d.stateHash || "");
+          state.authoritativeLowStock.updatedAtClient = Number(d.generatedAtClient || 0) || 0;
+          state.authoritativeLowStock.error = "";
+          if(state.route.view === "home") renderHomeDashboard();
+          if(state.route.view === "location") renderInventoryList();
+          if(state.ui.sheet === "sottoscorta") renderSottoscortaSheet();
+        }, (err)=>{
+          state.authoritativeLowStock.loaded = false;
+          state.authoritativeLowStock.rows = [];
+          state.authoritativeLowStock.error = err?.message || String(err);
+        });
+      }catch(err){
+        state.authoritativeLowStock.error = err?.message || String(err);
+      }
+    }
+
+    function stopAuthoritativeLowStockWatch(){
+      try{ state.authoritativeLowStock?.unsub && state.authoritativeLowStock.unsub(); }catch(_e){}
+      if(state.authoritativeLowStock){
+        state.authoritativeLowStock.unsub = null;
+        state.authoritativeLowStock.loaded = false;
+        state.authoritativeLowStock.rows = [];
+        state.authoritativeLowStock.stateHash = "";
+        state.authoritativeLowStock.updatedAtClient = 0;
+        state.authoritativeLowStock.error = "";
+      }
+    }
+
     function renderHomeLowStockMailLog(){
       const el = $("homeLowStockMailLog");
       if(!el) return;
-
-      if(!state.user?.isWhitelisted){
-        el.textContent = "";
-        return;
-      }
-
-      const err = state.mail?.lowStock?.error;
-      if(err){
-        el.innerHTML = `<span class="muted">Log email sotto scorta: errore (${escapeHtml(err)})</span>`;
-        return;
-      }
-
+      if(!state.user?.isWhitelisted){ el.textContent = ""; return; }
+      const err = state.mail?.lowStock?.error || state.mail?.lowStock?.meta?.lastBackendError;
+      if(err){ el.innerHTML = `<span style="color:var(--bad)">Errore invio mail sotto scorta.</span>`; return; }
       const meta = state.mail?.lowStock?.meta;
-      if(!meta){
-        el.innerHTML = `<span class="muted">In attesa della fotografia esatta del frontend. La mail viene creata solo dalle righe mostrate qui.</span>`;
-        return;
-      }
-
-      const sentAt = meta.sentAt || meta.lastSentAt || meta.sentAtClient || null;
-      const checkedAt = meta.lastBackendCheckedAt || meta.lastObservedAt || meta.lastBackendEventAt || meta.lastBackendCheckedAtClient || meta.lastObservedAtClient || meta.lastBackendEventAtClient || null;
-      const snapshotAt = meta.frontendSnapshotGeneratedAtClient || meta.lastObservedAt || meta.lastObservedAtClient || null;
-      const sentDate = __fmtTsAny(sentAt);
-      const checkedDate = __fmtTsAny(checkedAt);
-      const snapshotDate = __fmtTsAny(snapshotAt);
-
-      const observedTotal = Number.isFinite(meta.observedTotal) ? meta.observedTotal : (Number.isFinite(meta.total) ? meta.total : null);
-      const observedToHandle = Number.isFinite(meta.observedToHandleCount) ? meta.observedToHandleCount : (Number.isFinite(meta.toHandleCount) ? meta.toHandleCount : null);
-      const observedReordered = Number.isFinite(meta.observedReorderedCount) ? meta.observedReorderedCount : (Number.isFinite(meta.reorderedCount) ? meta.reorderedCount : null);
-
-      const hasSeparatedSentSnapshot = Number.isFinite(meta.lastSentTotal);
-      const sentTotal = hasSeparatedSentSnapshot ? meta.lastSentTotal : null;
-      const sentToHandle = Number.isFinite(meta.lastSentToHandleCount) ? meta.lastSentToHandleCount : null;
-      const sentReordered = Number.isFinite(meta.lastSentReorderedCount) ? meta.lastSentReorderedCount : null;
-
-      const reason = String(meta.reason || meta.lastBackendReason || "");
-      const result = String(meta.lastBackendResult || "");
-      const processor = String(meta.processor || "backend");
-      const mailFrom = String(meta.mailFrom || "info@generalcoppersrl.com");
-      const mailTo = Array.isArray(meta.mailTo) ? meta.mailTo.join(", ") : String(meta.mailTo || "matteo@generalcoppersrl.com");
-      const hash = String(meta.observedStateHash || meta.lastObservedStateHash || meta.currentStateHash || "");
-      const hashShort = hash ? hash.slice(0, 10) : "";
-      const resultLabel = result === "email_queued" ? "mail esatta accodata"
-        : result === "duplicate_blocked" ? "fotografia già notificata"
-        : result === "waiting_frontend_snapshot" ? "in attesa fotografia frontend"
-        : result === "no_low_stock" ? "nessuno SKU sotto scorta"
-        : result === "error" ? "errore backend"
-        : (result || "backend attivo");
-
-      const lines = [];
-      let currentLine = `Fotografia frontend: <b>${observedTotal != null ? escapeHtml(String(observedTotal)) : "—"} SKU</b>`;
-      if(observedToHandle != null) currentLine += ` • Da gestire <b>${escapeHtml(String(observedToHandle))}</b>`;
-      if(observedReordered != null) currentLine += ` • Riordinati <b>${escapeHtml(String(observedReordered))}</b>`;
-      if(snapshotAt) currentLine += ` • Generata: <b>${escapeHtml(snapshotDate)}</b>`;
-      if(hashShort) currentLine += ` • hash ${escapeHtml(hashShort)}`;
-      lines.push(currentLine);
-
-      if(sentAt){
-        let sentLine = `Ultima mail realmente inviata: <b>${escapeHtml(sentDate)}</b>`;
-        if(sentTotal != null){
-          sentLine += ` • SKU <b>${escapeHtml(String(sentTotal))}</b>`;
-          if(sentToHandle != null) sentLine += ` • Da gestire <b>${escapeHtml(String(sentToHandle))}</b>`;
-          if(sentReordered != null) sentLine += ` • Riordinati <b>${escapeHtml(String(sentReordered))}</b>`;
-        }else{
-          sentLine += ` • contenuto storico non separato dalla fotografia corrente`;
-        }
-        lines.push(sentLine);
-      }else{
-        lines.push(`Ultima mail realmente inviata: <b>nessuna</b>`);
-      }
-
-      let backendLine = `Ultimo controllo backend: <b>${escapeHtml(checkedDate)}</b> • Stato: <b>${escapeHtml(resultLabel)}</b>`;
-      if(reason) backendLine += ` • trigger: <span class="mono">${escapeHtml(reason)}</span>`;
-      backendLine += ` • mittente: <span class="mono">${escapeHtml(mailFrom)}</span>`;
-      backendLine += ` • destinatario: <span class="mono">${escapeHtml(mailTo)}</span>`;
-      backendLine += ` • gestione: <span class="mono">${escapeHtml(processor)}</span>`;
-      lines.push(backendLine);
-
-      if(meta.lastBackendError){
-        lines.push(`<span style="color:var(--bad)">Errore backend: ${escapeHtml(String(meta.lastBackendError))}</span>`);
-      }
-      el.innerHTML = lines.join("<br>");
+      const sentAt = meta?.sentAt || meta?.lastSentAt || meta?.sentAtClient || null;
+      if(!sentAt){ el.textContent = "Nessuna mail sotto scorta inviata."; return; }
+      el.innerHTML = `Ultima mail sotto scorta: <b>${escapeHtml(__fmtTsAny(sentAt))}</b>`;
     }
 
 function startAllLogs(){
