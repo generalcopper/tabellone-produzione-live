@@ -1265,7 +1265,14 @@ Tip:
         lowStock: { unsub:null, meta:null, error:"", emailDocId:"", emailDoc:null, emailDocError:"", emailDocBusy:false }
       },
       authoritativeLowStock: {
-        unsub:null, loaded:false, rows:[], stateHash:"", updatedAtClient:0, error:""
+        unsub:null,
+        loaded:false,
+        rows:[],
+        stateHash:"",
+        updatedAtClient:0,
+        sourceInventoryAtClient:0,
+        sourceLifecycleAtClient:0,
+        error:""
       }
 
     };
@@ -1274,71 +1281,18 @@ Tip:
     const $ = (id)=> document.getElementById(id);
     const clamp = (n, a, b)=> Math.max(a, Math.min(b, n));
 
-    // --- Stabilità UI realtime ---
-    // Firestore può produrre più snapshot ravvicinati anche quando il contenuto visibile
-    // non cambia. Non ricreiamo il DOM durante hover/focus e non tocchiamo markup identico.
+    // --- UI realtime immediata ---
+    // Nessun buffering durante hover/focus: ogni snapshot cloud aggiorna subito la vista.
     const __stableUiRegions = new WeakMap();
-
-    function __stableUiState(el){
-      if(!el) return null;
-      let rec = __stableUiRegions.get(el);
-      if(!rec){
-        rec = { signature:"", pending:null, pointerInside:false, focusInside:false, bound:false };
-        __stableUiRegions.set(el, rec);
-      }
-      return rec;
-    }
-
-    function __flushStableUiRegion(el){
-      const rec = __stableUiState(el);
-      if(!el || !rec || !rec.pending) return false;
-      const activeInside = !!(document.activeElement && el.contains(document.activeElement));
-      if(rec.pointerInside || rec.focusInside || activeInside) return false;
-      const next = rec.pending;
-      rec.pending = null;
-      if(rec.signature === next.signature) return false;
-      el.innerHTML = next.html;
-      rec.signature = next.signature;
-      return true;
-    }
-
-    function __bindStableUiRegion(el){
-      const rec = __stableUiState(el);
-      if(!el || !rec || rec.bound) return;
-      rec.bound = true;
-      el.addEventListener("pointerenter", ()=>{ rec.pointerInside = true; }, { passive:true });
-      el.addEventListener("pointerleave", ()=>{
-        rec.pointerInside = false;
-        __flushStableUiRegion(el);
-      }, { passive:true });
-      el.addEventListener("focusin", ()=>{ rec.focusInside = true; });
-      el.addEventListener("focusout", ()=>{
-        setTimeout(()=>{
-          rec.focusInside = !!(document.activeElement && el.contains(document.activeElement));
-          __flushStableUiRegion(el);
-        }, 0);
-      });
-    }
 
     function setStableInteractiveHtml(el, html, signature=""){
       if(!el) return false;
-      __bindStableUiRegion(el);
-      const rec = __stableUiState(el);
       const markup = String(html ?? "");
       const sig = String(signature || ("html:" + fnv1aHex(markup)));
-      if(rec.signature === sig){
-        rec.pending = null;
-        return false;
-      }
-      const activeInside = !!(document.activeElement && el.contains(document.activeElement));
-      const interacting = rec.pointerInside || rec.focusInside || activeInside;
-      if(interacting && el.childNodes.length){
-        rec.pending = { html:markup, signature:sig };
-        return false;
-      }
+      const previous = __stableUiRegions.get(el) || "";
+      if(previous === sig) return false;
       el.innerHTML = markup;
-      rec.signature = sig;
-      rec.pending = null;
+      __stableUiRegions.set(el, sig);
       return true;
     }
 
@@ -2622,8 +2576,8 @@ function guessTitleFromRaw(rawText, sku){
     function skuAliasMembers(sku){ return buildSkuAliasIndex().members(sku); }
 
     // --- Stock condiviso per SKU collegati / stesso ASIN ---
-    // Tutti gli alias rappresentano lo stesso stock fisico. Le identità SKU restano separate,
-    // ma quantità, prenotati, lotti e ubicazioni vengono letti da una sola fotografia condivisa.
+    // Il frontend NON ricostruisce lo stock e non sceglie una "fotografia" in base a quantità,
+    // date o completezza del documento. Lo stato autorevole è quello pubblicato nel cloud/backend.
     function sharedStockRawDoc(it){
       return (it && typeof it === "object" && it.__raw && typeof it.__raw === "object") ? it.__raw : (it || {});
     }
@@ -2635,62 +2589,80 @@ function guessTitleFromRaw(rawText, sku){
         "sharedStockRevisionAtClient", "stockUpdatedAtClient", "lastStockMutationAtClient",
         "inventoryUpdatedAtClient", "lastInventoryMutationAtClient"
       ]);
-      const genericVals = nums([
-        "updatedAtClient", "reservedAtClient", "reservationReleasedAtClient",
-        "lastPickingRollbackAtClient", "zeroStockAtClient"
-      ]);
-      try{
-        if(d?.updatedAt?.toMillis) genericVals.push(d.updatedAt.toMillis());
-      }catch(_e){}
       return {
         explicit: explicitVals.length ? Math.max(...explicitVals) : 0,
-        generic: genericVals.length ? Math.max(...genericVals) : 0
+        generic: 0
       };
     }
 
-    function sharedStockBootstrapScore(it){
-      try{
-        const d=sharedStockRawDoc(it);
-        const physical=Math.abs(stockQtyFromDoc(d||{}));
-        const reserved=reservedQtyFromItem(d||{});
-        const pendingRaw=Number(d?.pendingPickQty??0);
-        const pending=Number.isFinite(pendingRaw)?Math.max(0,Math.round(pendingRaw)):0;
-        const lots=Array.isArray(d?.stockLots)?d.stockLots.length:0;
-        return (physical*1000000)+((reserved+pending)*1000)+lots;
-      }catch(_e){ return 0; }
+    function cloudDeclaredSharedStockSourceSku(items, canonicalSku=""){
+      const list = Array.isArray(items) ? items.filter(Boolean) : [];
+      const skus = new Set(list.map(it=>toSkuId(it?.sku || it?.id || sharedStockRawDoc(it)?.sku || "")).filter(Boolean));
+      const declarations = [];
+
+      for(const it of list){
+        const d = sharedStockRawDoc(it);
+        const sourceSku = toSkuId(
+          d?.sharedStockSourceSku ||
+          d?.authoritativeStockSku ||
+          d?.stockOwnerSku ||
+          ""
+        );
+        if(!sourceSku || !skus.has(sourceSku)) continue;
+        declarations.push({
+          sourceSku,
+          revision: Math.max(
+            Number(d?.sharedStockRevisionAtClient || 0) || 0,
+            Number(d?.stockUpdatedAtClient || 0) || 0
+          )
+        });
+      }
+
+      if(declarations.length){
+        const maxRevision = Math.max(...declarations.map(x=>x.revision));
+        const latest = declarations.filter(x=>x.revision === maxRevision);
+        const latestSources = Array.from(new Set(latest.map(x=>x.sourceSku)));
+        if(latestSources.length === 1) return latestSources[0];
+
+        const allSources = Array.from(new Set(declarations.map(x=>x.sourceSku)));
+        if(allSources.length === 1) return allSources[0];
+        return ""; // cloud contraddittorio: il frontend non decide
+      }
+
+      const canonical = toSkuId(canonicalSku || "");
+      if(canonical && skus.has(canonical)) return canonical;
+      if(skus.size === 1) return Array.from(skus)[0];
+      return "";
     }
 
     function compareSharedStockSource(a, b, canonicalSku=""){
       if(!a && !b) return 0;
       if(a && !b) return 1;
       if(!a && b) return -1;
-      const ra = sharedStockRevisionInfo(a);
-      const rb = sharedStockRevisionInfo(b);
-      if(ra.explicit !== rb.explicit) return ra.explicit - rb.explicit;
 
-      const sa = sharedStockBootstrapScore(a);
-      const sb = sharedStockBootstrapScore(b);
-      // Nei dati pregressi usa prima l'ultima vera modifica inventario; a parità, preserva
-      // la fotografia con stock/lotti/prenotati più informativa (anche se negativa).
-      if(ra.generic !== rb.generic) return ra.generic - rb.generic;
-      if(sa !== sb) return sa - sb;
-
-      const canonical = toSkuId(canonicalSku || "");
+      const sourceSku = cloudDeclaredSharedStockSourceSku([a, b], canonicalSku);
       const skuA = toSkuId(a?.sku || a?.id || sharedStockRawDoc(a)?.sku || "");
       const skuB = toSkuId(b?.sku || b?.id || sharedStockRawDoc(b)?.sku || "");
+      if(sourceSku){
+        if(skuA === sourceSku && skuB !== sourceSku) return 1;
+        if(skuB === sourceSku && skuA !== sourceSku) return -1;
+      }
+
+      // Nessun confronto su qty/prenotati/lotti/date. Il fallback è solo stabile e non scrive cloud.
+      const canonical = toSkuId(canonicalSku || "");
       if(canonical){
         if(skuA === canonical && skuB !== canonical) return 1;
         if(skuB === canonical && skuA !== canonical) return -1;
       }
-      return skuB.localeCompare(skuA);
+      return 0;
     }
 
     function pickSharedStockSource(items, canonicalSku=""){
-      let best = null;
-      for(const it of (Array.isArray(items) ? items : [])){
-        if(!best || compareSharedStockSource(it, best, canonicalSku) > 0) best = it;
-      }
-      return best;
+      const list = Array.isArray(items) ? items.filter(Boolean) : [];
+      if(!list.length) return null;
+      const sourceSku = cloudDeclaredSharedStockSourceSku(list, canonicalSku);
+      if(!sourceSku) return list.length === 1 ? list[0] : null;
+      return list.find(it=>toSkuId(it?.sku || it?.id || sharedStockRawDoc(it)?.sku || "") === sourceSku) || null;
     }
 
     function sharedStockMutationFields(nowClient, who, reason=""){
@@ -2729,132 +2701,26 @@ function guessTitleFromRaw(rawText, sku){
 
     const __sharedStockSyncState = { timer:null, running:false, queuedReason:"", lastAt:0 };
 
+    // Lo stock condiviso viene consolidato esclusivamente dal backend.
+    // Il browser non copia qty, prenotati, lotti o stato zero tra SKU collegati.
     async function syncSharedInventoryGroupCloud(canonicalSku, aliases, reason="shared_stock_sync"){
-      const api = state.firebase?.api;
-      const db = state.firebase?.db;
-      if(!api || !db || !state.user?.isWhitelisted) return { updated:0, found:0 };
-      const canonical = toSkuId(canonicalSku || "");
-      const list = normalizeSkuAliases(aliases, canonical);
-      if(!canonical || list.length < 2) return { updated:0, found:0 };
-
-      const docs = [];
-      for(const loc of inventoryLocs()){
-        const reads = await Promise.all(list.map(async sku=>{
-          try{
-            const ref = api.doc(db, COL_ROOT, loc, SUB_ITEMS, sku);
-            const snap = await api.getDoc(ref);
-            return snap?.exists?.() ? { loc, sku, ref, data:snap.data() || {} } : null;
-          }catch(_e){ return null; }
-        }));
-        docs.push(...reads.filter(Boolean));
-      }
-      if(docs.length < 2) return { updated:0, found:docs.length };
-
-      const source = pickSharedStockSource(docs.map(x=>({ ...x.data, __raw:x.data, sku:x.sku, id:x.sku })), canonical);
-      if(!source) return { updated:0, found:docs.length };
-      const sourceSku = toSkuId(source?.sku || source?.id || canonical) || canonical;
-      const snapshot = hubSharedStockWritableSnapshotFromDoc(source);
-      const revInfo = sharedStockRevisionInfo(source);
-      const revision = Math.max(revInfo.explicit || 0, revInfo.generic || 0, Date.now());
-      const nowClient = Date.now();
-      const who = state.user?.emailLower || state.user?.email || state.user?.uid || "";
-      const sourceAsin = readAsinFromDoc(source || {});
-      const mergedManualAliases = normalizeSkuAliases(docs.flatMap(x=>readManualSkuAliasesFromDoc(x.data || {}, x.sku || "")))
-        .filter(x=>list.includes(x));
-      const groupFields = skuUnificationFields(canonical, list, nowClient, who, mergedManualAliases);
-      const asinFields = sourceAsin ? asinCloudFields(sourceAsin, nowClient, who) : {};
-      const sourceComparable = JSON.stringify(snapshot);
-
-      const pending = docs.filter(x=>{
-        const sameStock = sharedStockComparable({ ...x.data, __raw:x.data }) === sourceComparable;
-        const sameCanonical = toSkuId(x.data?.sharedStockCanonicalSku || "") === canonical;
-        const sameAliases = normalizeSkuAliases(x.data?.sharedStockAliases || [], canonical).join("|") === list.join("|");
-        return !(sameStock && sameCanonical && sameAliases);
-      });
-      if(!pending.length) return { updated:0, found:docs.length, sourceSku };
-
-      let updated = 0;
-      for(let i=0; i<pending.length; i+=350){
-        const part = pending.slice(i, i+350);
-        const batch = api.writeBatch(db);
-        for(const x of part){
-          batch.set(x.ref, {
-            ...snapshot,
-            zeroStockAtClient: snapshot.qty === 0 ? (snapshot.zeroStockAtClient || nowClient) : null,
-            zeroStockAt: snapshot.qty === 0 ? api.serverTimestamp() : null,
-            ...groupFields,
-            ...(sourceAsin && (!readAsinFromDoc(x.data || {}) || readAsinFromDoc(x.data || {}) === sourceAsin) ? asinFields : {}),
-            sharedStockCanonicalSku: canonical,
-            sharedStockAliases: list,
-            sharedStockSourceSku: sourceSku,
-            sharedStockRevisionAtClient: revision,
-            stockUpdatedAtClient: revision,
-            sharedStockSyncedAt: api.serverTimestamp(),
-            sharedStockSyncedAtClient: nowClient,
-            sharedStockSyncedBy: who,
-            sharedStockSyncReason: String(reason || "shared_stock_sync"),
-            sharedStockSyncVersion: 2
-          }, { merge:true });
-          updated++;
-        }
-        await batch.commit();
-      }
-      clearSkuRuntimeCache("shared_stock_sync");
-      try{ if(state.cache) state.cache.invIndexForMatch = null; }catch(_e){}
-      return { updated, found:docs.length, sourceSku };
+      return {
+        updated: 0,
+        found: 0,
+        skipped: true,
+        authority: "backend_cloud",
+        canonicalSku: toSkuId(canonicalSku || ""),
+        aliases: normalizeSkuAliases(aliases, canonicalSku)
+      };
     }
 
     async function runSharedSkuInventorySync(reason="realtime"){
-      try{
-        if(__sharedStockSyncState.running) return;
-        if(!state.user?.isAdmin || !state.user?.isWhitelisted || !state.firebase?.ok) return;
-        if(!state.inventory?.[INVENTORY_CANONICAL_LOC]?.meta?.loaded) return;
-        __sharedStockSyncState.running = true;
-
-        const aliasIndex = buildSkuAliasIndex();
-        const groups = new Map();
-        for(const loc of inventoryLocs()){
-          for(const it of (state.inventory?.[loc]?.items || [])){
-            const sku = toSkuId(it?.sku || it?.id || "");
-            if(!sku) continue;
-            const canonical = aliasIndex.resolve(sku) || sku;
-            if(!groups.has(canonical)) groups.set(canonical, []);
-            groups.get(canonical).push(it);
-          }
-        }
-
-        let processed = 0;
-        for(const [canonical, items] of groups.entries()){
-          const existingSkus = Array.from(new Set(items.map(x=>toSkuId(x?.sku || x?.id || "")).filter(Boolean)));
-          const members = aliasIndex.members(canonical);
-          if(existingSkus.length < 2 || members.length < 2) continue;
-          const source = pickSharedStockSource(items, canonical);
-          if(!source) continue;
-          const cmp = sharedStockComparable(source);
-          const divergent = items.some(x=> sharedStockComparable(x) !== cmp || toSkuId(sharedStockRawDoc(x)?.sharedStockCanonicalSku || "") !== canonical);
-          if(!divergent) continue;
-          await syncSharedInventoryGroupCloud(canonical, members, reason);
-          processed++;
-          if(processed >= 80) break;
-        }
-        __sharedStockSyncState.lastAt = Date.now();
-      }catch(err){
-        console.warn("shared SKU inventory sync", err);
-      }finally{
-        __sharedStockSyncState.running = false;
-      }
+      return { updated:0, skipped:true, authority:"backend_cloud", reason:String(reason || "realtime") };
     }
 
     function scheduleSharedSkuInventorySync(reason="realtime", opts={}){
-      try{
-        if(!state.user?.isAdmin || !state.user?.isWhitelisted) return;
-        __sharedStockSyncState.queuedReason = String(reason || "realtime");
-        if(__sharedStockSyncState.timer) clearTimeout(__sharedStockSyncState.timer);
-        __sharedStockSyncState.timer = setTimeout(()=>{
-          __sharedStockSyncState.timer = null;
-          void runSharedSkuInventorySync(__sharedStockSyncState.queuedReason || "realtime");
-        }, opts?.immediate ? 80 : 700);
-      }catch(_e){}
+      // Intenzionalmente disattivato: nessuna riconciliazione stock lato frontend.
+      return;
     }
 
     
@@ -3225,18 +3091,39 @@ function guessTitleFromRaw(rawText, sku){
       const l = validInventoryLoc(loc) ? loc : "concamarise";
       const items = state.inventory?.[l]?.items || [];
       const aliasIndex = buildSkuAliasIndex();
-      const selected = new Map();
+      const groups = new Map();
+
       for(const it of items){
         const actualSku = toSkuId(it?.sku || it?.id || "");
         if(!actualSku) continue;
         const canonicalSku = aliasIndex.resolve(actualSku) || actualSku;
-        const candidate = { ...it, sku:actualSku, __canonicalSku: canonicalSku, __aliasSkus: aliasIndex.members(actualSku) };
-        const prev = selected.get(canonicalSku);
-        if(!prev || compareSharedStockSource(candidate, prev.it, canonicalSku) > 0){
-          selected.set(canonicalSku, { it:candidate });
+        if(!groups.has(canonicalSku)) groups.set(canonicalSku, []);
+        groups.get(canonicalSku).push({ ...it, sku:actualSku });
+      }
+
+      const out = [];
+      for(const [canonicalSku, groupItems] of groups.entries()){
+        const source = pickSharedStockSource(groupItems, canonicalSku);
+        if(source){
+          const sourceSku = toSkuId(source?.sku || source?.id || canonicalSku) || canonicalSku;
+          out.push({
+            ...source,
+            sku:sourceSku,
+            __canonicalSku:canonicalSku,
+            __aliasSkus:aliasIndex.members(canonicalSku),
+            __cloudAuthoritative:true
+          });
+          continue;
+        }
+
+        // Cloud senza proprietario univoco: nessun collasso lato browser.
+        for(const item of groupItems){
+          const actualSku = toSkuId(item?.sku || item?.id || "");
+          if(!actualSku) continue;
+          out.push({ ...item, sku:actualSku, __canonicalSku:actualSku, __aliasSkus:[actualSku], __cloudGroupUnresolved:true });
         }
       }
-      return Array.from(selected.values()).map(x=>x.it);
+      return out;
     }
 
     function stockRepresentativeItemsForLoc(loc){
@@ -3250,6 +3137,8 @@ function guessTitleFromRaw(rawText, sku){
 
     function itemUpdatedMillis(it){
       try{
+        const cloudUpdate = Number(it?.__firestoreUpdateTimeMillis || it?.sourceUpdateTimeMillis || 0);
+        if(Number.isFinite(cloudUpdate) && cloudUpdate > 0) return cloudUpdate;
         const c = Number(it?.updatedAtClient || it?.lastSeenAtClient || 0);
         if(Number.isFinite(c) && c > 0) return c;
         if(it?.updatedAt?.toMillis) return it.updatedAt.toMillis();
@@ -3430,21 +3319,31 @@ function guessTitleFromRaw(rawText, sku){
         stableThresholdByGroup.set(canonicalSku, __stableLowStockThresholdFromCandidates(candidates));
       }
 
-      // Stesso ASIN / alias = stesso stock fisico.
-      // Quindi non sommo due documenti SKU diversi nello stesso magazzino: scelgo un solo doc stock per gruppo+loc
-      // (priorità: quantità fisica più alta, poi aggiornamento più recente) e sommo solo tra Cerea/Concamarise.
+      // Stesso ASIN / alias = stesso stock fisico soltanto quando il cloud dichiara
+      // un proprietario univoco. In caso contrario i documenti restano separati a video.
       const selectedByGroupLoc = new Map();
       for(const loc of inventoryLocs()){
         const items = (state.inventory?.[loc]?.items || []);
+        const groupsForLoc = new Map();
         for(const it of items){
           const actualSku = toSkuId(it?.sku || it?.id || "");
           if(!actualSku) continue;
-          const sku = aliasIndex.resolve(actualSku) || actualSku;
-          const key = `${sku}@@${loc}`;
-          const candidate = { ...it, sku:actualSku, __actualSku:actualSku, __canonicalSku:sku };
-          const prev = selectedByGroupLoc.get(key);
-          if(!prev || compareSharedStockSource(candidate, prev.it, sku) > 0){
-            selectedByGroupLoc.set(key, { loc, it:candidate, actualSku, sku });
+          const canonicalSku = aliasIndex.resolve(actualSku) || actualSku;
+          if(!groupsForLoc.has(canonicalSku)) groupsForLoc.set(canonicalSku, []);
+          groupsForLoc.get(canonicalSku).push({ ...it, sku:actualSku, __actualSku:actualSku, __canonicalSku:canonicalSku });
+        }
+
+        for(const [canonicalSku, groupItems] of groupsForLoc.entries()){
+          const source = pickSharedStockSource(groupItems, canonicalSku);
+          if(source){
+            const actualSku = toSkuId(source?.sku || source?.id || canonicalSku) || canonicalSku;
+            selectedByGroupLoc.set(`${canonicalSku}@@${loc}`, { loc, it:source, actualSku, sku:canonicalSku });
+            continue;
+          }
+          for(const item of groupItems){
+            const actualSku = toSkuId(item?.sku || item?.id || "");
+            if(!actualSku) continue;
+            selectedByGroupLoc.set(`${actualSku}@@${loc}`, { loc, it:item, actualSku, sku:actualSku });
           }
         }
       }
@@ -3574,9 +3473,44 @@ function guessTitleFromRaw(rawText, sku){
       return buildSkuStockAggregateLookup(preferLoc).get(s) || null;
     }
 
+    function liveCloudLowStockSourceClocks(){
+      let inventoryAt = 0;
+      let lifecycleAt = 0;
+      try{
+        for(const loc of inventoryLocs()){
+          for(const it of (state.inventory?.[loc]?.items || [])){
+            inventoryAt = Math.max(inventoryAt, itemUpdatedMillis(it || {}) || 0);
+          }
+        }
+      }catch(_e){}
+      try{
+        if(state.twReorders?.bySku instanceof Map){
+          for(const lifecycle of state.twReorders.bySku.values()){
+            lifecycleAt = Math.max(lifecycleAt, __reorderLifecycleTimestamp(lifecycle) || 0);
+          }
+        }
+      }catch(_e){}
+      return { inventoryAt, lifecycleAt };
+    }
+
+    function authoritativeLowStockIsCurrent(){
+      try{
+        if(state.authoritativeLowStock?.loaded !== true) return false;
+        const live = liveCloudLowStockSourceClocks();
+        const authoritativeInventoryAt = Number(state.authoritativeLowStock.sourceInventoryAtClient || 0) || 0;
+        const authoritativeLifecycleAt = Number(state.authoritativeLowStock.sourceLifecycleAtClient || 0) || 0;
+
+        // Se è già arrivato uno snapshot Firestore più nuovo, non tenere a video
+        // la fotografia backend precedente: usa subito i documenti cloud live.
+        if(live.inventoryAt > 0 && authoritativeInventoryAt > 0 && live.inventoryAt > authoritativeInventoryAt) return false;
+        if(live.lifecycleAt > 0 && authoritativeLifecycleAt > 0 && live.lifecycleAt > authoritativeLifecycleAt) return false;
+        return true;
+      }catch(_e){ return false; }
+    }
+
     function authoritativeLowStockItems(){
       try{
-        if(state.authoritativeLowStock?.loaded !== true) return null;
+        if(!authoritativeLowStockIsCurrent()) return null;
         return (state.authoritativeLowStock.rows || []).map(raw=>{
           const sku = toSkuId(raw?.sku || raw?.id || "");
           const physicalQty = Math.round(Number(raw?.physicalQty || 0));
@@ -3667,6 +3601,7 @@ function guessTitleFromRaw(rawText, sku){
     function __reorderLifecycleTimestamp(lifecycle){
       try{
         return Math.max(
+          Number(lifecycle?.__firestoreUpdateTimeMillis || 0) || 0,
           Number(lifecycle?.latestReorderAtClient || 0) || 0,
           Number(lifecycle?.updatedAtClient || 0) || 0,
           Number(lifecycle?.lastObservedAtClient || 0) || 0
@@ -4258,17 +4193,10 @@ function guessTitleFromRaw(rawText, sku){
       };
     }
 
-    function __writeLegacyLowStockLocalLock(hash){
-      try{
-        const h = String(hash || "");
-        if(!h) return;
-        // Le vecchie pagine sullo stesso browser rispettano questo lock per 90 secondi.
-        // Lo aggiorniamo prima del loro timer di invio, oltre al blocco cloud su meta.hash.
-        localStorage.setItem("amz_inventory_lowmail_hash_v1", h);
-        localStorage.setItem("amz_inventory_lowmail_at_v1", String(Date.now()));
-        localStorage.setItem("amz_inventory_lowmail_lock_v1", String(Date.now()));
-        localStorage.setItem("amz_inventory_lowmail_lock_hash_v1", h);
-      }catch(_e){}
+    function __writeLegacyLowStockLocalLock(_hash){
+      // Disabilitato: nessun dato applicativo viene salvato sul dispositivo.
+      // Dedupe e stato mail sono esclusivamente cloud.
+      return;
     }
 
     function __chooseLegacyShieldMode(meta, candidates){
@@ -5436,6 +5364,8 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
           const updatedAtClient = d.updatedAtClient || null;
           arr.push({
             __raw: d,
+            __firestoreUpdateTimeMillis: Number(docSnap.updateTime?.toMillis?.() || 0) || 0,
+            sourceUpdateTimeMillis: Number(docSnap.updateTime?.toMillis?.() || 0) || 0,
             id: docSnap.id,
             sku,
             title,
@@ -5696,6 +5626,8 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
           state.authoritativeLowStock.rows = Array.isArray(d.rows) ? d.rows.map(x=>({ ...(x || {}) })) : [];
           state.authoritativeLowStock.stateHash = String(d.stateHash || "");
           state.authoritativeLowStock.updatedAtClient = Number(d.generatedAtClient || 0) || 0;
+          state.authoritativeLowStock.sourceInventoryAtClient = Number(d.sourceInventoryAtClient || 0) || 0;
+          state.authoritativeLowStock.sourceLifecycleAtClient = Number(d.sourceLifecycleAtClient || 0) || 0;
           state.authoritativeLowStock.error = "";
           if(state.route.view === "home") renderHomeDashboard();
           if(state.route.view === "location") renderInventoryList();
@@ -5704,6 +5636,9 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
           state.authoritativeLowStock.loaded = false;
           state.authoritativeLowStock.rows = [];
           state.authoritativeLowStock.error = err?.message || String(err);
+          if(state.route.view === "home") renderHomeDashboard();
+          if(state.route.view === "location") renderInventoryList();
+          if(state.ui.sheet === "sottoscorta") renderSottoscortaSheet();
         });
       }catch(err){
         state.authoritativeLowStock.error = err?.message || String(err);
@@ -5718,6 +5653,8 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
         state.authoritativeLowStock.rows = [];
         state.authoritativeLowStock.stateHash = "";
         state.authoritativeLowStock.updatedAtClient = 0;
+        state.authoritativeLowStock.sourceInventoryAtClient = 0;
+        state.authoritativeLowStock.sourceLifecycleAtClient = 0;
         state.authoritativeLowStock.error = "";
       }
     }
@@ -5880,6 +5817,7 @@ function startAllLogs(){
         const qtyRaw = Number(d.qty || d.reorderedQty || d.amazonInventoryQty || 0);
         return {
           id: docSnap.id,
+          __firestoreUpdateTimeMillis: Number(docSnap.updateTime?.toMillis?.() || 0) || 0,
           sku: canonicalSku,
           canonicalSku,
           requestedSku,
@@ -5923,7 +5861,12 @@ function startAllLogs(){
               const d = docSnap.data() || {};
               const sku = toSkuId(d.sku || d.canonicalSku || docSnap.id || "");
               if(!sku) return;
-              const lifecycle = { id:docSnap.id, ...d, sku };
+              const lifecycle = {
+                id:docSnap.id,
+                ...d,
+                sku,
+                __firestoreUpdateTimeMillis: Number(docSnap.updateTime?.toMillis?.() || 0) || 0
+              };
               __bindReorderLifecycle(map, sku, lifecycle);
               __bindReorderLifecycle(map, d.canonicalSku, lifecycle);
               for(const aliasRaw of (Array.isArray(d.aliases) ? d.aliases : [])) __bindReorderLifecycle(map, aliasRaw, lifecycle);
@@ -7769,13 +7712,9 @@ function closeSheet(kind){
           groups.get(canonical).push(item);
         }
         for(const [canonical, groupItems] of groups.entries()){
-          const source = pickSharedStockSource(groupItems, canonical) || groupItems[0] || null;
-          const sourceSku = toSkuId(source?.sku || source?.id || "");
-          const sourceComparable = source ? sharedStockComparable(source) : "";
-          const groupAlreadyAligned = !!sourceComparable && groupItems.every(x=> sharedStockComparable(x) === sourceComparable);
-          // Finché i documenti pregressi sono divergenti, scrive sul documento autorevole per non
-          // perdere la quantità corretta. Appena il gruppo è allineato, usa il canonico stabile.
-          const ownerSku = (groupAlreadyAligned && actualBySku.has(canonical)) ? canonical : sourceSku;
+          const source = pickSharedStockSource(groupItems, canonical);
+          if(!source) continue; // cloud non dichiara un proprietario univoco: nessun remap inventato
+          const ownerSku = toSkuId(source?.sku || source?.id || "");
           const ownerItem = actualBySku.get(ownerSku) || source;
           for(const alias of aliasIndex.members(canonical)){
             const a = toSkuId(alias || "");

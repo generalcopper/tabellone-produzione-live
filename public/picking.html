@@ -2140,108 +2140,77 @@ function cleanProductMainName(s){
       }catch(_e){ return 0; }
     }
 
-    // Se più SKU rappresentano lo stesso stock fisico, Picking deve scegliere due fonti distinte:
-    // 1) la fotografia stock più autorevole; 2) la fotografia ubicazioni più autorevole.
-    // Unificare queste due scelte evita che uno SKU collegato ma privo di rack faccia sparire
-    // l'intero prodotto da Ubicati, senza alterare quantità, prenotazioni o documenti cloud.
-    function pickingSharedStockRevisionInfo(it){
-      try{
-        const d = (it && it.__raw && typeof it.__raw === "object") ? it.__raw : (it || {});
-        const explicitKeys = [
-          "sharedStockRevisionAtClient", "stockUpdatedAtClient", "lastStockMutationAtClient",
-          "inventoryUpdatedAtClient", "lastInventoryMutationAtClient"
-        ];
-        const genericKeys = [
-          "updatedAtClient", "reservedAtClient", "reservationReleasedAtClient",
-          "lastPickingRollbackAtClient", "zeroStockAtClient"
-        ];
-        const explicitVals = explicitKeys.map(k=>Number(d?.[k] || 0)).filter(n=>Number.isFinite(n) && n>0);
-        const genericVals = genericKeys.map(k=>Number(d?.[k] || 0)).filter(n=>Number.isFinite(n) && n>0);
-        try{ if(d?.updatedAt?.toMillis) genericVals.push(d.updatedAt.toMillis()); }catch(_e){}
-        return {
-          explicit: explicitVals.length ? Math.max(...explicitVals) : 0,
-          generic: genericVals.length ? Math.max(...genericVals) : 0
-        };
-      }catch(_e){
-        return { explicit:0, generic:0 };
+    // Gli SKU unificati vengono letti dalla situazione cloud, senza ricostruire una fotografia
+    // in base a quantità, date, lotti o presenza di ubicazioni.
+    function pickingCloudRawDoc(it){
+      return (it && typeof it === "object" && it.__raw && typeof it.__raw === "object") ? it.__raw : (it || {});
+    }
+
+    function pickingCloudDeclaredStockOwnerSku(items, canonicalSku=""){
+      const list = Array.isArray(items) ? items.filter(Boolean) : [];
+      const skus = new Set(list.map(it=>toSkuId(it?.sku || it?.id || pickingCloudRawDoc(it)?.sku || "")).filter(Boolean));
+      const declarations = [];
+
+      for(const it of list){
+        const d = pickingCloudRawDoc(it);
+        const sourceSku = toSkuId(
+          d?.sharedStockSourceSku ||
+          d?.authoritativeStockSku ||
+          d?.stockOwnerSku ||
+          ""
+        );
+        if(!sourceSku || !skus.has(sourceSku)) continue;
+        declarations.push({
+          sourceSku,
+          revision: Math.max(
+            Number(d?.sharedStockRevisionAtClient || 0) || 0,
+            Number(d?.stockUpdatedAtClient || 0) || 0
+          )
+        });
       }
-    }
 
-    function pickingSharedStockInformationScore(it){
-      try{
-        const d = (it && it.__raw && typeof it.__raw === "object") ? it.__raw : (it || {});
-        const physical = Math.abs(stockQtyFromDoc(d || {}));
-        const reserved = reservedQtyFromItem(d || {});
-        const pendingRaw = Number(d?.pendingPickQty ?? reserved);
-        const pending = Number.isFinite(pendingRaw) ? Math.max(0, Math.round(pendingRaw)) : reserved;
-        const lots = Array.isArray(d?.stockLots) ? d.stockLots.length : 0;
-        return (physical * 1000000) + ((reserved + pending) * 1000) + lots;
-      }catch(_e){ return 0; }
-    }
+      if(declarations.length){
+        const maxRevision = Math.max(...declarations.map(x=>x.revision));
+        const latestSources = Array.from(new Set(declarations.filter(x=>x.revision === maxRevision).map(x=>x.sourceSku)));
+        if(latestSources.length === 1) return latestSources[0];
 
-    function comparePickingSharedStockSource(a, b, canonicalSku=""){
-      if(!a && !b) return 0;
-      if(a && !b) return 1;
-      if(!a && b) return -1;
-
-      const ra = pickingSharedStockRevisionInfo(a);
-      const rb = pickingSharedStockRevisionInfo(b);
-      if(ra.explicit !== rb.explicit) return ra.explicit - rb.explicit;
-      if(ra.generic !== rb.generic) return ra.generic - rb.generic;
-
-      const sa = pickingSharedStockInformationScore(a);
-      const sb = pickingSharedStockInformationScore(b);
-      if(sa !== sb) return sa - sb;
+        const allSources = Array.from(new Set(declarations.map(x=>x.sourceSku)));
+        if(allSources.length === 1) return allSources[0];
+        return ""; // cloud non coerente: Picking non sceglie al posto del backend
+      }
 
       const canonical = toSkuId(canonicalSku || "");
-      const skuA = toSkuId(a?.sku || a?.id || "");
-      const skuB = toSkuId(b?.sku || b?.id || "");
-      if(canonical){
-        if(skuA === canonical && skuB !== canonical) return 1;
-        if(skuB === canonical && skuA !== canonical) return -1;
-      }
-      return skuB.localeCompare(skuA);
+      if(canonical && skus.has(canonical)) return canonical;
+      if(skus.size === 1) return Array.from(skus)[0];
+      return "";
     }
 
-    function pickPickingSharedStockSource(items, canonicalSku=""){
-      let best = null;
-      for(const it of (Array.isArray(items) ? items : [])){
-        if(!best || comparePickingSharedStockSource(it, best, canonicalSku) > 0) best = it;
-      }
-      return best;
-    }
-
-    function buildPickingLogicalInventoryItem(groupItems, canonicalSku, aliasIndex){
+    function buildPickingCloudInventoryItem(groupItems, canonicalSku, aliasIndex){
       const candidates = Array.isArray(groupItems) ? groupItems.filter(Boolean) : [];
       if(!candidates.length) return null;
 
       const canonical = toSkuId(canonicalSku || "") || toSkuId(candidates[0]?.sku || candidates[0]?.id || "");
-      const stockSource = pickPickingSharedStockSource(candidates, canonical) || candidates[0];
-      const sharedQty = stockQtyFromDoc(stockSource || {});
+      const ownerSku = pickingCloudDeclaredStockOwnerSku(candidates, canonical);
+      if(!ownerSku) return null;
 
-      // Per confrontare le ubicazioni uso la quantità autorevole del gruppo. In questo modo
-      // un alias momentaneamente non ancora riallineato nello stock non perde un rack valido.
-      // Un'eventuale rimozione esplicita resta comunque prioritaria grazie a rackRevisionAtClient.
-      const rackCandidates = candidates.map(it=>({ ...it, qty:sharedQty }));
-      const rackSource = pickRackGroupSource(rackCandidates, "") || rackCandidates[0] || stockSource;
-      const rackSnapshot = rackGroupSnapshotFromDoc(rackSource || {});
+      const source = candidates.find(it=>toSkuId(it?.sku || it?.id || "") === ownerSku) || null;
+      if(!source) return null;
 
-      const stockSourceSku = toSkuId(stockSource?.sku || stockSource?.id || canonical) || canonical;
-      const rackSourceSku = toSkuId(rackSource?.sku || rackSource?.id || stockSourceSku) || stockSourceSku;
       const aliases = normalizeSkuAliases([
         ...(aliasIndex?.members?.(canonical) || []),
         ...candidates.map(x=>x?.sku || x?.id || "")
       ], canonical);
 
+      // Quantità, prenotati, lotti e ubicazioni provengono dallo stesso documento cloud autorevole.
       return {
-        ...stockSource,
-        ...rackSnapshot,
-        sku: stockSourceSku,
-        __canonicalSku: canonical || stockSourceSku,
+        ...source,
+        sku: ownerSku,
+        __canonicalSku: canonical || ownerSku,
         __aliasSkus: aliases,
-        __stockSourceSku: stockSourceSku,
-        __rackSourceSku: rackSourceSku,
-        __logicalInventoryGroup: true
+        __stockSourceSku: ownerSku,
+        __rackSourceSku: ownerSku,
+        __logicalInventoryGroup: true,
+        __cloudAuthoritative: true
       };
     }
 
@@ -2263,18 +2232,32 @@ function cleanProductMainName(s){
         if(!actualSku) continue;
         const canonicalSku = aliasIndex.resolve(actualSku) || actualSku;
         if(!groups.has(canonicalSku)) groups.set(canonicalSku, []);
-        groups.get(canonicalSku).push({
-          ...it,
-          sku:actualSku,
-          __canonicalSku:canonicalSku,
-          __aliasSkus:aliasIndex.members(actualSku)
-        });
+        groups.get(canonicalSku).push({ ...it, sku:actualSku });
       }
 
       const value = [];
       for(const [canonicalSku, groupItems] of groups.entries()){
-        const logical = buildPickingLogicalInventoryItem(groupItems, canonicalSku, aliasIndex);
-        if(logical) value.push(logical);
+        const logical = buildPickingCloudInventoryItem(groupItems, canonicalSku, aliasIndex);
+        if(logical){
+          value.push(logical);
+          continue;
+        }
+
+        // Nessuna dichiarazione cloud univoca: mostra i documenti così come sono,
+        // senza unire stock o ubicazioni e senza remappare le scritture.
+        for(const item of groupItems){
+          const actualSku = toSkuId(item?.sku || item?.id || "");
+          if(!actualSku) continue;
+          value.push({
+            ...item,
+            sku: actualSku,
+            __canonicalSku: actualSku,
+            __aliasSkus: [actualSku],
+            __stockSourceSku: actualSku,
+            __rackSourceSku: actualSku,
+            __cloudGroupUnresolved: true
+          });
+        }
       }
 
       try{
@@ -3165,50 +3148,13 @@ function cleanProductMainName(s){
     }
 
     async function runRackSkuGroupCloudSync(reason = "inventory_snapshot"){
-      if(__rackSkuGroupSyncState.running || !PICKING_CAPABILITIES.rackWrite) return;
-      if(!state.user?.isAdmin || !state.user?.isWhitelisted || !state.firebase?.ok) return;
-      if(!state.inventory?.[INVENTORY_CANONICAL_LOC]?.meta?.loaded) return;
-      __rackSkuGroupSyncState.running = true;
-      try{
-        const aliasIndex = buildSkuAliasIndex();
-        const groups = new Map();
-        for(const it of (state.inventory?.[INVENTORY_CANONICAL_LOC]?.items || [])){
-          const sku = toSkuId(it?.sku || it?.id || "");
-          if(!sku) continue;
-          const canonical = aliasIndex.resolve(sku) || sku;
-          if(!groups.has(canonical)) groups.set(canonical, []);
-          groups.get(canonical).push(it);
-        }
-        let processed = 0;
-        for(const [canonical, items] of groups.entries()){
-          const members = aliasIndex.members(canonical);
-          if(members.length < 2 || items.length < 2) continue;
-          const source = pickRackGroupSource(items, "");
-          if(!source) continue;
-          const cmp = rackGroupComparable(source);
-          if(!items.some(x=>rackGroupComparable(x) !== cmp)) continue;
-          await syncRackLocationGroupCloud(toSkuId(source?.sku || source?.id || canonical), INVENTORY_CANONICAL_LOC, reason, { preferSource:false });
-          processed++;
-          if(processed >= 60) break;
-        }
-        __rackSkuGroupSyncState.lastAt = Date.now();
-      }catch(err){
-        console.warn("rack SKU group sync", err);
-      }finally{
-        __rackSkuGroupSyncState.running = false;
-      }
+      return { updated:0, skipped:true, reason:String(reason || "inventory_snapshot") };
     }
 
     function scheduleRackSkuGroupCloudSync(reason = "inventory_snapshot", opts = {}){
-      try{
-        if(!PICKING_CAPABILITIES.rackWrite || !state.user?.isAdmin || !state.user?.isWhitelisted) return;
-        __rackSkuGroupSyncState.reason = String(reason || "inventory_snapshot");
-        if(__rackSkuGroupSyncState.timer) clearTimeout(__rackSkuGroupSyncState.timer);
-        __rackSkuGroupSyncState.timer = setTimeout(()=>{
-          __rackSkuGroupSyncState.timer = null;
-          void runRackSkuGroupCloudSync(__rackSkuGroupSyncState.reason);
-        }, opts?.immediate ? 80 : 850);
-      }catch(_e){}
+      // Nessuna propagazione automatica da snapshot: la sorgente rack è certa solo
+      // durante un'azione esplicita dell'operatore (assegna/modifica/rimuovi/trasferisci).
+      return;
     }
 
     
@@ -4102,8 +4048,8 @@ function readRackPickerSelection(root){
         inv.meta={count:arr.length,lastUpdatedAt:last?new Date(last):null,loaded:true};
         renderHomeDashboard();
         if(state.ui.sheet==="productDetails") renderProductDetailsSheet();
-        scheduleRackAllocationsCloudNormalize(loc,"inventory_snapshot");
-        scheduleRackSkuGroupCloudSync("inventory_snapshot");
+        // Lo snapshot realtime è solo lettura: non normalizza né propaga ubicazioni.
+        // Le scritture rack avvengono esclusivamente dopo un'azione esplicita dell'operatore.
         updateFbmPreviewFromInventory("inventory_snapshot");
         checkStartupDataGate("inventory_snapshot");
       },(err)=>{ console.warn("inventory watch error",err); showToast("Permessi insufficienti",err?.message||String(err)); });
