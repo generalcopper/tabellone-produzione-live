@@ -2140,6 +2140,111 @@ function cleanProductMainName(s){
       }catch(_e){ return 0; }
     }
 
+    // Se più SKU rappresentano lo stesso stock fisico, Picking deve scegliere due fonti distinte:
+    // 1) la fotografia stock più autorevole; 2) la fotografia ubicazioni più autorevole.
+    // Unificare queste due scelte evita che uno SKU collegato ma privo di rack faccia sparire
+    // l'intero prodotto da Ubicati, senza alterare quantità, prenotazioni o documenti cloud.
+    function pickingSharedStockRevisionInfo(it){
+      try{
+        const d = (it && it.__raw && typeof it.__raw === "object") ? it.__raw : (it || {});
+        const explicitKeys = [
+          "sharedStockRevisionAtClient", "stockUpdatedAtClient", "lastStockMutationAtClient",
+          "inventoryUpdatedAtClient", "lastInventoryMutationAtClient"
+        ];
+        const genericKeys = [
+          "updatedAtClient", "reservedAtClient", "reservationReleasedAtClient",
+          "lastPickingRollbackAtClient", "zeroStockAtClient"
+        ];
+        const explicitVals = explicitKeys.map(k=>Number(d?.[k] || 0)).filter(n=>Number.isFinite(n) && n>0);
+        const genericVals = genericKeys.map(k=>Number(d?.[k] || 0)).filter(n=>Number.isFinite(n) && n>0);
+        try{ if(d?.updatedAt?.toMillis) genericVals.push(d.updatedAt.toMillis()); }catch(_e){}
+        return {
+          explicit: explicitVals.length ? Math.max(...explicitVals) : 0,
+          generic: genericVals.length ? Math.max(...genericVals) : 0
+        };
+      }catch(_e){
+        return { explicit:0, generic:0 };
+      }
+    }
+
+    function pickingSharedStockInformationScore(it){
+      try{
+        const d = (it && it.__raw && typeof it.__raw === "object") ? it.__raw : (it || {});
+        const physical = Math.abs(stockQtyFromDoc(d || {}));
+        const reserved = reservedQtyFromItem(d || {});
+        const pendingRaw = Number(d?.pendingPickQty ?? reserved);
+        const pending = Number.isFinite(pendingRaw) ? Math.max(0, Math.round(pendingRaw)) : reserved;
+        const lots = Array.isArray(d?.stockLots) ? d.stockLots.length : 0;
+        return (physical * 1000000) + ((reserved + pending) * 1000) + lots;
+      }catch(_e){ return 0; }
+    }
+
+    function comparePickingSharedStockSource(a, b, canonicalSku=""){
+      if(!a && !b) return 0;
+      if(a && !b) return 1;
+      if(!a && b) return -1;
+
+      const ra = pickingSharedStockRevisionInfo(a);
+      const rb = pickingSharedStockRevisionInfo(b);
+      if(ra.explicit !== rb.explicit) return ra.explicit - rb.explicit;
+      if(ra.generic !== rb.generic) return ra.generic - rb.generic;
+
+      const sa = pickingSharedStockInformationScore(a);
+      const sb = pickingSharedStockInformationScore(b);
+      if(sa !== sb) return sa - sb;
+
+      const canonical = toSkuId(canonicalSku || "");
+      const skuA = toSkuId(a?.sku || a?.id || "");
+      const skuB = toSkuId(b?.sku || b?.id || "");
+      if(canonical){
+        if(skuA === canonical && skuB !== canonical) return 1;
+        if(skuB === canonical && skuA !== canonical) return -1;
+      }
+      return skuB.localeCompare(skuA);
+    }
+
+    function pickPickingSharedStockSource(items, canonicalSku=""){
+      let best = null;
+      for(const it of (Array.isArray(items) ? items : [])){
+        if(!best || comparePickingSharedStockSource(it, best, canonicalSku) > 0) best = it;
+      }
+      return best;
+    }
+
+    function buildPickingLogicalInventoryItem(groupItems, canonicalSku, aliasIndex){
+      const candidates = Array.isArray(groupItems) ? groupItems.filter(Boolean) : [];
+      if(!candidates.length) return null;
+
+      const canonical = toSkuId(canonicalSku || "") || toSkuId(candidates[0]?.sku || candidates[0]?.id || "");
+      const stockSource = pickPickingSharedStockSource(candidates, canonical) || candidates[0];
+      const sharedQty = stockQtyFromDoc(stockSource || {});
+
+      // Per confrontare le ubicazioni uso la quantità autorevole del gruppo. In questo modo
+      // un alias momentaneamente non ancora riallineato nello stock non perde un rack valido.
+      // Un'eventuale rimozione esplicita resta comunque prioritaria grazie a rackRevisionAtClient.
+      const rackCandidates = candidates.map(it=>({ ...it, qty:sharedQty }));
+      const rackSource = pickRackGroupSource(rackCandidates, "") || rackCandidates[0] || stockSource;
+      const rackSnapshot = rackGroupSnapshotFromDoc(rackSource || {});
+
+      const stockSourceSku = toSkuId(stockSource?.sku || stockSource?.id || canonical) || canonical;
+      const rackSourceSku = toSkuId(rackSource?.sku || rackSource?.id || stockSourceSku) || stockSourceSku;
+      const aliases = normalizeSkuAliases([
+        ...(aliasIndex?.members?.(canonical) || []),
+        ...candidates.map(x=>x?.sku || x?.id || "")
+      ], canonical);
+
+      return {
+        ...stockSource,
+        ...rackSnapshot,
+        sku: stockSourceSku,
+        __canonicalSku: canonical || stockSourceSku,
+        __aliasSkus: aliases,
+        __stockSourceSku: stockSourceSku,
+        __rackSourceSku: rackSourceSku,
+        __logicalInventoryGroup: true
+      };
+    }
+
     function stockRepresentativeItemsForLoc(loc){
       const l = validInventoryLoc(loc) ? loc : "concamarise";
       const __repKey = inventoryRuntimeCacheKey(`stock_rep_${l}`);
@@ -2152,21 +2257,26 @@ function cleanProductMainName(s){
 
       const items = state.inventory?.[l]?.items || [];
       const aliasIndex = buildSkuAliasIndex();
-      const selected = new Map();
+      const groups = new Map();
       for(const it of items){
         const actualSku = toSkuId(it?.sku || it?.id || "");
         if(!actualSku) continue;
         const canonicalSku = aliasIndex.resolve(actualSku) || actualSku;
-        const physical = Number.isFinite(Number(it?.qty)) ? Math.round(Number(it.qty)) : stockQtyFromDoc(it || {});
-        const reserved = reservedQtyFromItem(it || {});
-        const updated = itemUpdatedMillis(it || {});
-        const score = Math.max(0, physical) + Math.max(0, reserved);
-        const prev = selected.get(canonicalSku);
-        if(!prev || score > prev.score || (score === prev.score && updated > prev.updated)){
-          selected.set(canonicalSku, { it:{ ...it, sku:actualSku, __canonicalSku: canonicalSku, __aliasSkus: aliasIndex.members(actualSku) }, score, updated });
-        }
+        if(!groups.has(canonicalSku)) groups.set(canonicalSku, []);
+        groups.get(canonicalSku).push({
+          ...it,
+          sku:actualSku,
+          __canonicalSku:canonicalSku,
+          __aliasSkus:aliasIndex.members(actualSku)
+        });
       }
-      const value = Array.from(selected.values()).map(x=>x.it);
+
+      const value = [];
+      for(const [canonicalSku, groupItems] of groups.entries()){
+        const logical = buildPickingLogicalInventoryItem(groupItems, canonicalSku, aliasIndex);
+        if(logical) value.push(logical);
+      }
+
       try{
         state.cache = state.cache || {};
         if(!state.cache.stockRepresentativeItems) state.cache.stockRepresentativeItems = new Map();
@@ -7661,6 +7771,12 @@ function readRackPickerSelection(root){
       try{
         const meta = parseTitleMeta(it?.title || "");
         const sku = toSkuId(it?.sku || it?.id || meta.skuInTitle || "");
+        const aliases = normalizeSkuAliases([
+          ...(Array.isArray(it?.__aliasSkus) ? it.__aliasSkus : []),
+          ...(Array.isArray(it?.skuAliases) ? it.skuAliases : []),
+          ...(Array.isArray(it?.aliasSkus) ? it.aliasSkus : []),
+          it?.__canonicalSku || ""
+        ], sku).join(" ");
         const loc = (it?.loc === "cerea" || it?.loc === "concamarise") ? it.loc : "";
         const rackText = rackLocationDisplayFromItem(it || {});
         const rackCodes = readRackLocationsFromDoc(it || {}).join(" ");
@@ -7673,6 +7789,7 @@ function readRackPickerSelection(root){
         return [
           section,
           sku,
+          aliases,
           it?.title || "",
           meta.main || "",
           meta.asin || "",
@@ -8004,8 +8121,10 @@ Il valore non può essere inferiore alla quantità già ubicata.`,
       const rows = out.slice(0, 120).map(it=>{
         const meta = parseTitleMeta(it.title || "");
         const titleMain = meta.main ? escapeHtml(meta.main) : (it.title ? escapeHtml(it.title) : "<span class='muted'>(senza nome)</span>");
-        const skuRaw = toSkuId(it.sku || it.id || "");
+        const skuRaw = toSkuId(it.__stockSourceSku || it.sku || it.id || "");
+        const displaySkuRaw = toSkuId(it.__canonicalSku || skuRaw) || skuRaw;
         const sku = escapeHtml(skuRaw);
+        const displaySku = escapeHtml(displaySkuRaw);
         const locLabel = escapeHtml(prettyLoc(it.loc));
         const remainingQty = Number.isFinite(Number(it.remainingQty)) ? Math.round(Number(it.remainingQty)) : (Number.isFinite(Number(it.qty)) ? Math.round(Number(it.qty)) : 0);
         const totalQty = Number.isFinite(Number(it.totalQty)) ? Math.round(Number(it.totalQty)) : remainingQty;
@@ -8017,7 +8136,7 @@ Il valore non può essere inferiore alla quantità già ubicata.`,
         const metaLine = [locLabel, lotLine, `Totale: ${totalQty}`, allocatedQty ? `Ubicato: ${allocatedQty}` : "", when ? `Agg.: ${when}` : ""].filter(Boolean).join(" • ");
         return `
           <div class="row gridRow" role="button" tabindex="0" data-sku="${sku}" data-loc="${escapeHtml(it.loc || "")}" data-action="openHomeNoLocationItem">
-            <div class="gridCell gridSku">${sku}</div>
+            <div class="gridCell gridSku">${displaySku}</div>
             <div class="gridCell">
               <div class="gridProdMain">${titleMain}</div>
               <div class="gridProdSub">${escapeHtml(metaLine)}</div>
@@ -10683,18 +10802,21 @@ function renderHomePickingHistoryBox(){
       const rows = out.slice(0, 300).map(it=>{
         const meta = parseTitleMeta(it.title || "");
         const titleMain = meta.main ? escapeHtml(meta.main) : (it.title ? escapeHtml(it.title) : "<span class='muted'>(senza nome)</span>");
-        const skuRaw = toSkuId(it.sku || it.id || "");
+        const skuRaw = toSkuId(it.__stockSourceSku || it.sku || it.id || "");
+        const displaySkuRaw = toSkuId(it.__canonicalSku || skuRaw) || skuRaw;
         const sku = escapeHtml(skuRaw);
+        const displaySku = escapeHtml(displaySkuRaw);
         const locLabel = escapeHtml(prettyLoc(it.loc));
         const allocatedQty = Number.isFinite(Number(it.allocatedQty)) ? Math.round(Number(it.allocatedQty)) : (Number.isFinite(Number(it.qty)) ? Math.round(Number(it.qty)) : 0);
         const totalQty = Number.isFinite(Number(it.totalQty)) ? Math.round(Number(it.totalQty)) : allocatedQty;
         const remainingQty = Number.isFinite(Number(it.remainingQty)) ? Math.round(Number(it.remainingQty)) : 0;
         const rackHtml = rackLocationStackHtml(it);
-        const findBtnHtml = findPalletButtonHtml(firstRackLocationCodeFromItem(it), allRackLocationCodesFromItem(it), { sku: skuRaw, title: meta.main || it.title || skuRaw });
+        const rackSkuRaw = toSkuId(it.__rackSourceSku || skuRaw) || skuRaw;
+        const findBtnHtml = findPalletButtonHtml(firstRackLocationCodeFromItem(it), allRackLocationCodesFromItem(it), { sku: displaySkuRaw, title: meta.main || it.title || displaySkuRaw });
         const metaLine = [locLabel, `Totale: ${totalQty}`, remainingQty ? `Da ubicare: ${remainingQty}` : ""].filter(Boolean).join(" • ");
         return `
-          <div class="row gridRow" role="button" tabindex="0" data-sku="${sku}" data-loc="${escapeHtml(it.loc || "")}" data-action="openHomeLocatedItem">
-            <div class="gridCell gridSku">${sku}</div>
+          <div class="row gridRow" role="button" tabindex="0" data-sku="${sku}" data-rack-sku="${escapeHtml(rackSkuRaw)}" data-loc="${escapeHtml(it.loc || "")}" data-action="openHomeLocatedItem">
+            <div class="gridCell gridSku">${displaySku}</div>
             <div class="gridCell">
               <div class="gridProdMain">${titleMain}</div>
               <div class="gridProdSub">${escapeHtml(metaLine)}</div>
@@ -10817,34 +10939,32 @@ function closeSheet(name,opts={}){
 
       const mapConca = new Map();
       const stockSkuConca = new Map();
-      for(const it of invConca){
-        const s = toSkuId(it.sku||it.id||"");
-        if(!s) continue;
-        if(!mapConca.has(s)) mapConca.set(s, it);
-        if(!stockSkuConca.has(s)) stockSkuConca.set(s, s);
-      }
       const mapCerea = new Map();
       const stockSkuCerea = new Map();
-      for(const it of invCerea){
-        const s = toSkuId(it.sku||it.id||"");
-        if(!s) continue;
-        if(!mapCerea.has(s)) mapCerea.set(s, it);
-        if(!stockSkuCerea.has(s)) stockSkuCerea.set(s, s);
-      }
 
-      const registerSkuAliasesForIndex = (map, stockMap, item)=>{
-        const actualSku = toSkuId(item?.sku || item?.id || "");
-        if(!actualSku) return;
-        const members = skuAliasMembers(actualSku);
-        for(const alias of members){
-          const a = toSkuId(alias || "");
-          if(!a) continue;
-          if(!map.has(a)) map.set(a, item);
-          if(!stockMap.has(a)) stockMap.set(a, actualSku);
+      // L'indice operativo usa la stessa vista logica di Ubicati/Da ubicare.
+      // Ogni alias punta alla medesima fotografia stock+rack e tutte le scritture
+      // continuano a usare lo SKU proprietario dello stock (__stockSourceSku).
+      const registerLogicalRepresentativesForIndex = (map, stockMap, representatives)=>{
+        for(const item of (Array.isArray(representatives) ? representatives : [])){
+          const stockSku = toSkuId(item?.__stockSourceSku || item?.sku || item?.id || "");
+          if(!stockSku) continue;
+          const members = normalizeSkuAliases([
+            ...(Array.isArray(item?.__aliasSkus) ? item.__aliasSkus : []),
+            item?.__canonicalSku || "",
+            stockSku
+          ], stockSku);
+          for(const alias of members){
+            const a = toSkuId(alias || "");
+            if(!a) continue;
+            map.set(a, item);
+            stockMap.set(a, stockSku);
+          }
         }
       };
-      invConca.forEach(it=>registerSkuAliasesForIndex(mapConca, stockSkuConca, it));
-      invCerea.forEach(it=>registerSkuAliasesForIndex(mapCerea, stockSkuCerea, it));
+
+      registerLogicalRepresentativesForIndex(mapConca, stockSkuConca, stockRepresentativeItemsForLoc("concamarise"));
+      registerLogicalRepresentativesForIndex(mapCerea, stockSkuCerea, stockRepresentativeItemsForLoc("cerea"));
 
       // lista unica per matching testuale
       const all = [];
@@ -12249,9 +12369,9 @@ function closeSheet(name,opts={}){
         if(find){ e.preventDefault(); e.stopPropagation(); await openCapannone3dFind(find.dataset.code||"",find.dataset.codes||"",{sku:find.dataset.sku||"",title:find.dataset.title||""}); return; }
         const qty=e.target?.closest?.("[data-action='editHomeLocatedQty']");
         if(qty){ e.preventDefault(); e.stopPropagation(); await editHomeLocatedQtyPrompt(qty.dataset.sku||"",INVENTORY_CANONICAL_LOC); return; }
-        const row=e.target?.closest?.("[data-action='openHomeLocatedItem']"); if(row) openProductDetailsSheet(row.dataset.sku||"");
+        const row=e.target?.closest?.("[data-action='openHomeLocatedItem']"); if(row) openProductDetailsSheet(row.dataset.rackSku||row.dataset.sku||"");
       });
-      located?.addEventListener("keydown",e=>{ if(e.key!=="Enter"&&e.key!==" ") return; const row=e.target?.closest?.("[data-action='openHomeLocatedItem']"); if(!row) return; e.preventDefault(); openProductDetailsSheet(row.dataset.sku||""); });
+      located?.addEventListener("keydown",e=>{ if(e.key!=="Enter"&&e.key!==" ") return; const row=e.target?.closest?.("[data-action='openHomeLocatedItem']"); if(!row) return; e.preventDefault(); openProductDetailsSheet(row.dataset.rackSku||row.dataset.sku||""); });
 
       $("homePickingList")?.addEventListener("click",async e=>{
         const brtUpload=e.target?.closest?.("[data-action='uploadBrtLabels']");
