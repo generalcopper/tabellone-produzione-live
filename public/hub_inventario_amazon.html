@@ -1302,7 +1302,7 @@ Tip:
         return !!(
           state.ui.productDetailsEditMode &&
           content &&
-          content.querySelector('[data-field="qty"], [data-field="title"], [data-field="asin"], [data-field="skuAliases"]')
+          content.querySelector('[data-field="qty"], [data-field="title"], [data-field="asin"]')
         );
       }catch(_e){ return false; }
     }
@@ -2439,9 +2439,9 @@ function guessTitleFromRaw(rawText, sku){
       const canonical = toSkuId(canonicalSku || "");
       const list = normalizeSkuAliases(aliases, canonical);
       const clean = list.length ? list : (canonical ? [canonical] : []);
-      // Gruppo manuale simmetrico: contiene anche lo SKU principale/origine.
-      // Così aprendo qualunque membro si vedono gli altri collegamenti manuali.
-      const manual = normalizeSkuAliases(manualAliases).filter(x=>x && clean.includes(x));
+      // Dalla v3 il parent è esclusivamente l'ASIN. I vecchi collegamenti manuali
+      // vengono svuotati al primo salvataggio e non hanno più autorità operativa.
+      const manual = [];
       return {
         canonicalSku: canonical,
         skuGroupCanonical: canonical,
@@ -2451,13 +2451,13 @@ function guessTitleFromRaw(rawText, sku){
         fbaFbmSkus: clean,
         manualSkuAliases: manual,
         manualAliasSkus: manual,
-        skuUnificationVersion: 2,
+        skuUnificationVersion: 3,
         skuUnification: {
           canonicalSku: canonical,
           aliases: clean,
           manualAliases: manual,
-          version: 2,
-          mode: "same_physical_stock",
+          version: 3,
+          mode: "same_asin_shared_stock",
           updatedAtClient: nowClient || Date.now(),
           updatedBy: who || ""
         },
@@ -2468,9 +2468,9 @@ function guessTitleFromRaw(rawText, sku){
 
     function buildSkuAliasIndexFresh(){
       const parent = new Map();
-      const explicitCanonical = new Map();
       const allSkus = new Set();
       const asinGroups = new Map();
+      const itemsBySku = new Map();
       const find = (x)=>{
         const s = toSkuId(x || "");
         if(!s) return "";
@@ -2486,23 +2486,6 @@ function guessTitleFromRaw(rawText, sku){
         const child = root === ra ? rb : ra;
         parent.set(child, root);
       };
-      const noteCanonical = (canonical)=>{
-        const c = toSkuId(canonical || "");
-        if(!c) return;
-        const r = find(c);
-        if(r && !explicitCanonical.has(r)) explicitCanonical.set(r, c);
-      };
-      const addGroup = (canonical, aliases)=>{
-        const c = toSkuId(canonical || "");
-        const arr = normalizeSkuAliases(aliases, c);
-        if(c) arr.push(c);
-        const uniq = normalizeSkuAliases(arr);
-        if(!uniq.length) return;
-        uniq.forEach(s=>{ allSkus.add(s); find(s); });
-        const master = c || uniq[0];
-        uniq.forEach(s=> union(master, s));
-        noteCanonical(master);
-      };
 
       const addAsinSku = (asin, sku)=>{
         const a = normalizeAsin(asin || "");
@@ -2517,35 +2500,45 @@ function guessTitleFromRaw(rawText, sku){
         for(const it of items){
           const sku = toSkuId(it?.sku || it?.id || "");
           if(!sku) continue;
-          const canonical = readSkuAliasCanonicalFromDoc(it || {}, sku);
-          const aliases = readSkuAliasesFromDoc(it || {}, sku);
-          addGroup(canonical || sku, aliases);
+          allSkus.add(sku);
+          find(sku);
+          if(!itemsBySku.has(sku)) itemsBySku.set(sku, it);
           addAsinSku(readAsinFromDoc(it || {}), sku);
         }
       }
 
       for(const members of asinGroups.values()){
-        const arr = normalizeSkuAliases(Array.from(members));
-        if(arr.length > 1) addGroup(arr[0], arr);
+        const arr = normalizeSkuAliases(Array.from(members)).sort((a,b)=>a.localeCompare(b));
+        if(arr.length > 1){
+          const first = arr[0];
+          arr.forEach(sku=>union(first, sku));
+        }
       }
 
-      // riallinea i canonical dopo tutte le union
+      // L'ASIN è l'unico parent logico. Il canonical interno serve solo a indirizzare
+      // lo stock e preferisce il proprietario dichiarato dal cloud; gli alias manuali
+      // o gli snapshot legacy non possono più fondere prodotti privi dello stesso ASIN.
       const canonByRoot = new Map();
-      for(const loc of inventoryLocs()){
-        const items = (state.inventory?.[loc]?.items || []);
-        for(const it of items){
-          const sku = toSkuId(it?.sku || it?.id || "");
-          if(!sku) continue;
-          const c = readSkuAliasCanonicalFromDoc(it || {}, sku);
-          const r = find(sku);
-          if(r && c && !canonByRoot.has(r)) canonByRoot.set(r, c);
-        }
+      for(const members of asinGroups.values()){
+        const arr = normalizeSkuAliases(Array.from(members)).sort((a,b)=>a.localeCompare(b));
+        if(!arr.length) continue;
+        const groupItems = arr.map(sku=>itemsBySku.get(sku)).filter(Boolean);
+        const declaredCanonicals = Array.from(new Set(groupItems
+          .map(item=>readSkuAliasCanonicalFromDoc(item || {}, item?.sku || item?.id || ""))
+          .filter(candidate=>candidate && arr.includes(candidate))));
+        const safeCanonical = declaredCanonicals.length === 1 ? declaredCanonicals[0] : arr[0];
+        const ownerSku = cloudDeclaredSharedStockSourceSku(groupItems, safeCanonical);
+        canonByRoot.set(find(arr[0]), (ownerSku && arr.includes(ownerSku)) ? ownerSku : safeCanonical);
+      }
+      for(const sku of allSkus){
+        const root = find(sku);
+        if(root && !canonByRoot.has(root)) canonByRoot.set(root, sku);
       }
 
       const groups = new Map();
       allSkus.forEach(s=>{
         const r = find(s);
-        const canonical = canonByRoot.get(r) || explicitCanonical.get(r) || r || s;
+        const canonical = canonByRoot.get(r) || r || s;
         if(!groups.has(canonical)) groups.set(canonical, new Set());
         groups.get(canonical).add(s);
       });
@@ -2554,7 +2547,7 @@ function guessTitleFromRaw(rawText, sku){
         const s = toSkuId(sku || "");
         if(!s) return "";
         const r = find(s);
-        return canonByRoot.get(r) || explicitCanonical.get(r) || r || s;
+        return canonByRoot.get(r) || r || s;
       };
       const members = (sku)=>{
         const canonical = resolve(sku);
@@ -3149,7 +3142,10 @@ function guessTitleFromRaw(rawText, sku){
 
     function aggregateLocationLine(loc, it){
       const physical = physicalQtyFromItem(it || {});
-      const reserved = reservedQtyFromItem(it || {});
+      const groupedReservedRaw = Number(it?.__asinGroupReservedQty);
+      const reserved = Number.isFinite(groupedReservedRaw)
+        ? Math.max(0, Math.round(groupedReservedRaw))
+        : reservedQtyFromItem(it || {});
       const actualSku = toSkuId(it?.__actualSku || it?.sku || it?.id || "");
       const canonicalSku = toSkuId(it?.__canonicalSku || resolveSkuAlias(actualSku) || actualSku);
       return {
@@ -3337,7 +3333,28 @@ function guessTitleFromRaw(rawText, sku){
           const source = pickSharedStockSource(groupItems, canonicalSku);
           if(source){
             const actualSku = toSkuId(source?.sku || source?.id || canonicalSku) || canonicalSku;
-            selectedByGroupLoc.set(`${canonicalSku}@@${loc}`, { loc, it:source, actualSku, sku:canonicalSku });
+            // Lo stock fisico proviene una sola volta dal documento proprietario.
+            // Le prenotazioni, invece, appartengono agli SKU figli ordinati: vanno
+            // sommate per ASIN anche quando sono distribuite su documenti differenti.
+            const asinGroupReservedQty = groupItems.reduce((sum,item)=>sum + reservedQtyFromItem(item || {}), 0);
+            const asinGroupPendingPickQty = groupItems.reduce((sum,item)=>{
+              const raw = Number(item?.pendingPickQty ?? item?.reservedQty ?? 0);
+              return sum + (Number.isFinite(raw) ? Math.max(0, Math.round(raw)) : 0);
+            }, 0);
+            selectedByGroupLoc.set(`${canonicalSku}@@${loc}`, {
+              loc,
+              it:{
+                ...source,
+                __asinGroupReservedQty:Math.max(0, Math.round(asinGroupReservedQty)),
+                __asinGroupPendingPickQty:Math.max(0, Math.round(asinGroupPendingPickQty)),
+                __asinGroupReservationSkus:groupItems
+                  .filter(item=>reservedQtyFromItem(item || {}) > 0)
+                  .map(item=>toSkuId(item?.sku || item?.id || ""))
+                  .filter(Boolean)
+              },
+              actualSku,
+              sku:canonicalSku
+            });
             continue;
           }
           for(const item of groupItems){
@@ -3559,16 +3576,9 @@ function guessTitleFromRaw(rawText, sku){
     }
 
     function lowStockAggregates(filterLoc=""){
-      const authoritative = authoritativeLowStockItems();
-      if(authoritative){
-        return authoritative.slice().sort((a,b)=>{
-          if(a.reordered !== b.reordered) return a.reordered ? 1 : -1;
-          const qa = lowStockQtyValue(a);
-          const qb = lowStockQtyValue(b);
-          if(qa !== qb) return qa - qb;
-          return String(a.sku || "").localeCompare(String(b.sku || ""));
-        });
-      }
+      // La vista deve riflettere immediatamente gli stessi documenti Firestore live
+      // usati dalla scheda prodotto. La fotografia backend resta disponibile per mail
+      // e diagnostica, ma non può sovrascrivere giacenza/prenotati correnti a video.
       return buildSkuStockAggregates({ loc: filterLoc }).filter(agg => __isLowStockItem(agg)).sort((a,b)=>{
         const qa = lowStockQtyValue(a);
         const qb = lowStockQtyValue(b);
@@ -6722,30 +6732,11 @@ function stopTwReordersWatch(){
     }
 
     function scheduleCloudReservationReconcile(reason = "scheduled"){
-      try{
-        if(!state.user?.isAdmin || !state.user?.isWhitelisted) return;
-        const rs = state.__reservationReconcile || (state.__reservationReconcile = { timer:null, running:false, lastAt:0 });
-        const now = Date.now();
-        const urgent = /delete|undo|remove|manual/i.test(String(reason || ""));
-        if(!urgent && rs.lastAt && (now - rs.lastAt) < 120000) return;
-        if(rs.timer) clearTimeout(rs.timer);
-        rs.timer = setTimeout(async ()=>{
-          if(rs.running) return;
-          rs.running = true;
-          rs.timer = null;
-          try{
-            await reconcileCloudReservationsForLoc("concamarise", reason);
-            await reconcileCloudReservationsForLoc("cerea", reason);
-            rs.lastAt = Date.now();
-          }catch(err){
-            console.warn("reservation reconcile", err);
-          }finally{
-            rs.running = false;
-          }
-        }, urgent ? 350 : 2200);
-      }catch(err){
-        console.warn("schedule reservation reconcile", err);
-      }
+      // Disattivato intenzionalmente: questa ricostruzione vede solo i flussi PDF/FBA
+      // e non gli ordini FBM gestiti dal backend. Riscrivere il totale reservedQty da
+      // una fonte parziale può cancellare prenotazioni valide di uno SKU figlio.
+      // Caricamento, annullamento e Picking aggiornano già il proprietario cloud corretto.
+      return;
     }
 
     async function releaseReservationWithLines(loc, flow, lines, opts = {}){
@@ -6760,13 +6751,33 @@ function stopTwReordersWatch(){
       const flowLabel = opts?.flowName || opts?.flowLabel || flowDisplayName(flow) || opts?.flowId || "";
       const flowId = opts?.flowId || flow?.id || "";
       const CHUNK = 160;
+      const idxRelease = getInvIndexForMatch();
+      const byStockSku = new Map();
+      for(const line of lines){
+        const requestedSku = toSkuId(line?.sku || "");
+        const qty = Math.abs(parseQty(line?.qty || 0) || 0);
+        if(!requestedSku || !qty) continue;
+        const stockSku = stockSkuForSkuAny(requestedSku, loc, idxRelease) || requestedSku;
+        const prev = byStockSku.get(stockSku) || {
+          sku:stockSku,
+          stockSku,
+          requestedSkus:[],
+          title:squashWhitespace(line?.title || ""),
+          qty:0
+        };
+        prev.qty += qty;
+        if(!prev.requestedSkus.includes(requestedSku)) prev.requestedSkus.push(requestedSku);
+        if(!prev.title && line?.title) prev.title = squashWhitespace(line.title || "");
+        byStockSku.set(stockSku, prev);
+      }
+      const releaseLines = Array.from(byStockSku.values());
 
-      for(let i=0; i<lines.length; i+=CHUNK){
-        const chunk = lines.slice(i, i+CHUNK);
+      for(let i=0; i<releaseLines.length; i+=CHUNK){
+        const chunk = releaseLines.slice(i, i+CHUNK);
         await api.runTransaction(db, async (tx)=>{
           const reads = [];
           for(const l of chunk){
-            const sku = toSkuId(l?.sku || "");
+            const sku = toSkuId(l?.stockSku || l?.sku || "");
             if(!sku) continue;
             const qty = Math.abs(parseQty(l?.qty || 0) || 0);
             if(!qty) continue;
@@ -6807,6 +6818,8 @@ function stopTwReordersWatch(){
               deltaSigned: 0,
               reservationQty: -Math.min(r.qty, beforeReserved),
               reservedQtySigned: -Math.min(r.qty, beforeReserved),
+              requestedSkus: Array.isArray(r.l?.requestedSkus) ? r.l.requestedSkus : [],
+              stockSku: r.sku,
               beforeReservedQty: beforeReserved,
               afterReservedQty: nextReserved,
               fromWarehouse: loc,
@@ -8992,16 +9005,12 @@ function openComboSheet(){
   const lowStockThresholdValue = (lowStockThreshold !== null) ? String(lowStockThreshold) : "";
   const lowStockThresholdLabel = __lowStockThresholdLabel(it || { sku, title: titleMain });
   const asinValue = readAsinFromDoc(rawIt || it || {});
-  const manualSkuAliases = readManualSkuAliasesFromDoc(rawIt || it || {}, sku);
-  const skuCanonical = resolveSkuAlias(sku) || readSkuAliasCanonicalFromDoc(it || {}, sku) || sku;
   const skuGroupMembers = skuAliasMembers(sku);
-  const skuAliasOthers = skuGroupMembers.filter(x=>x && x!==sku);
-  const manualSkuAliasOthers = manualSkuAliases.filter(x=>x && x!==sku);
-  const skuAliasInputValue = manualSkuAliasOthers.join("\n");
-  const skuAliasReadLabel = skuAliasOthers.length ? skuAliasOthers.join(", ") : "—";
-  const manualSkuAliasReadLabel = manualSkuAliasOthers.length ? manualSkuAliasOthers.join(", ") : "—";
-  const asinGroupSuffix = asinValue ? `ASIN: ${asinValue}` : "ASIN non impostato";
-  const skuAliasGroupLabel = skuAliasOthers.length ? `Principale: ${skuCanonical} • ${asinGroupSuffix} • Gruppo: ${skuGroupMembers.join(", ")}` : `Non unificato • ${asinGroupSuffix}`;
+  const skuChildren = asinValue ? skuGroupMembers.filter(Boolean) : [sku];
+  const skuChildrenReadLabel = skuChildren.join(", ");
+  const skuAliasGroupLabel = asinValue
+    ? `Parent ASIN: ${asinValue} • ${skuChildren.length} SKU ${skuChildren.length === 1 ? "figlio" : "figli"}`
+    : "Non unificato • ASIN non impostato";
   startProductComboWatch(sku);
   const comboChildren = getComboChildrenForSku(sku);
   const comboLabel = comboChildren.length ? `Combo ${comboChildren.length}/3` : "Combo —";
@@ -9063,12 +9072,11 @@ function openComboSheet(){
         </div>
 
         <div class="pdSection">
-          <div class="pdSectionTitle">Unificazione SKU FBA/FBM</div>
+          <div class="pdSectionTitle">Unificazione automatica per ASIN</div>
           <div class="pdGrid">
             ${readField("Stato", skuAliasGroupLabel)}
-            ${readField("ASIN", asinValue || "—", asinValue ? "mono" : "")}
-            ${readField("SKU collegati", skuAliasReadLabel, skuAliasOthers.length ? "mono" : "")}
-            ${readField("SKU manuali", manualSkuAliasReadLabel, manualSkuAliasOthers.length ? "mono" : "")}
+            ${readField("Parent ASIN", asinValue || "—", asinValue ? "mono" : "")}
+            ${readField("SKU figli", skuChildrenReadLabel, "mono span2")}
           </div>
         </div>
 
@@ -9132,10 +9140,11 @@ function openComboSheet(){
         </div>
 
         <div class="pdSection">
-          <div class="pdSectionTitle">Unificazione SKU FBA/FBM</div>
+          <div class="pdSectionTitle">Unificazione automatica per ASIN</div>
           <div class="pdGrid">
             ${readField("Stato attuale", skuAliasGroupLabel)}
-            ${htmlField("SKU manuali collegati", `<textarea class="textarea mono" data-field="skuAliases" placeholder="Uno SKU per riga: es. SKU-FBA&#10;SKU-FBM" ${canEdit ? "" : "disabled"}>${escapeHtml(skuAliasInputValue)}</textarea><div class="hint">Automatico: tutti gli SKU con lo stesso ASIN vengono unificati. Manuale: puoi aggiungere altri SKU qui.</div>${err("skuAliases")}`, "span2")}
+            ${readField("Parent ASIN", asinValue || "—", asinValue ? "mono" : "")}
+            ${htmlField("SKU figli", `<div class="pdReadValue mono">${escapeHtml(skuChildrenReadLabel)}</div><div class="hint">L’elenco è automatico: comprende lo SKU della scheda e tutti gli SKU inventario con lo stesso ASIN. Senza ASIN il prodotto resta autonomo.</div>`, "span2")}
           </div>
         </div>
 
@@ -9206,7 +9215,6 @@ function setPdFieldError(key, msg){
       setPdFieldError("sku", "");
       setPdFieldError("qty", "");
       setPdFieldError("lowStockThreshold", "");
-      setPdFieldError("skuAliases", "");
       setPdFieldError("asin", "");
     }
 
@@ -9218,7 +9226,6 @@ function setPdFieldError(key, msg){
       const asin=asinInput.ok ? asinInput.value : "";
       const qtyRaw=wrap?.querySelector?.('[data-field="qty"]')?.value??"";
       const thresholdRaw=wrap?.querySelector?.('[data-field="lowStockThreshold"]')?.value??"";
-      const aliasesRaw=wrap?.querySelector?.('[data-field="skuAliases"]')?.value??"";
       const productionArea=normalizeProductionArea(wrap?.querySelector?.('[data-field="productionAreaImmediate"]')?.value||"");
       const note=String(wrap?.querySelector?.('[data-field="note"]')?.value??"").trim();
       const qty=parseSignedQtyStrict(qtyRaw);
@@ -9227,8 +9234,7 @@ function setPdFieldError(key, msg){
         sku,title,asin,asinOk:asinInput.ok,asinRaw:asinInput.raw,qty,
         lowStockThreshold:lowStockParsed.ok?lowStockParsed.value:null,
         lowStockThresholdOk:lowStockParsed.ok,
-        skuAliases:normalizeSkuAliases(aliasesRaw,sku),
-        skuAliasesRaw:String(aliasesRaw), productionArea, note,
+        productionArea, note,
         qtyRaw:String(qtyRaw), lowStockThresholdRaw:String(thresholdRaw)
       };
     }
@@ -10453,7 +10459,8 @@ async function loadProductFromDetails(){
       const requestedCanonical = toSkuId(canonicalSku || "");
       if(!requestedCanonical) throw new Error("SKU principale non valido.");
 
-      const preliminary = normalizeSkuAliases(aliases, requestedCanonical);
+      const asin = normalizeAsin(opts.asin || "");
+      const preliminary = asin ? normalizeSkuAliases(aliases, requestedCanonical) : [requestedCanonical];
       let canonical = requestedCanonical;
       for(const member of preliminary){
         const knownCanonical = resolveSkuAlias(member);
@@ -10472,7 +10479,6 @@ async function loadProductFromDetails(){
       const editedSku = toSkuId(opts.editedSku || requestedCanonical) || requestedCanonical;
       const nowClient = Number(opts.nowClient || Date.now());
       const who = opts.who || state.user?.emailLower || state.user?.email || state.user?.uid || "";
-      const asin = normalizeAsin(opts.asin || "");
       const title = squashWhitespace(opts.title || "");
       const hasThreshold = Object.prototype.hasOwnProperty.call(opts || {}, "lowStockThreshold");
       const thresholdFields = hasThreshold ? {
@@ -10515,11 +10521,7 @@ async function loadProductFromDetails(){
         const part = excluded.slice(i, i+300);
         const batch = api.writeBatch(db);
         for(const sku of part){
-          const d = identityBySku.get(sku) || { sku };
-          const ownManualOthers = readManualSkuAliasesFromDoc(d, sku).filter(x=>x && x!==editedSku);
-          const ownManualGroup = ownManualOthers.length ? normalizeSkuAliases([...ownManualOthers, sku], sku) : [];
-          const ownAliases = normalizeSkuAliases(ownManualGroup, sku);
-          const ownFields = skuUnificationFields(sku, ownAliases, nowClient, who, ownManualGroup);
+          const ownFields = skuUnificationFields(sku, [sku], nowClient, who, []);
           batch.set(api.doc(db, COL_PRODUCTS, sku), {
             sku,
             ...ownFields,
@@ -10587,10 +10589,7 @@ async function loadProductFromDetails(){
               }, {});
             }
             for(const sku of excluded){
-              const d = identityBySku.get(sku) || { sku };
-              const ownManualOthers = readManualSkuAliasesFromDoc(d, sku).filter(x=>x && x!==editedSku);
-              const ownManualGroup = ownManualOthers.length ? normalizeSkuAliases([...ownManualOthers, sku], sku) : [];
-              patchRuntimeInventoryItem(loc, sku, skuUnificationFields(sku, normalizeSkuAliases(ownManualGroup, sku), nowClient, who, ownManualGroup), {});
+              patchRuntimeInventoryItem(loc, sku, skuUnificationFields(sku, [sku], nowClient, who, []), {});
             }
           }
         }
@@ -10630,7 +10629,7 @@ async function saveProductFromDetails(){
 
       const oldSku = toSkuId(state.ui.productDetailsSku||"");
       clearPdFieldErrors();
-      const { sku, title, asin, asinOk, qty, lowStockThreshold, lowStockThresholdOk, skuAliases, note } = readProductDetailsFields();
+      const { sku, title, asin, asinOk, qty, lowStockThreshold, lowStockThresholdOk, note } = readProductDetailsFields();
 
       if(!oldSku){
         setPdFieldError("sku", "SKU non valido.");
@@ -10658,19 +10657,17 @@ async function saveProductFromDetails(){
         return;
       }
       const previousGroupMembers = skuAliasMembers(oldSku);
-      const manualSkuAliases = normalizeSkuAliases(Array.isArray(skuAliases) ? skuAliases : []).filter(x=>x && x!==sku);
-      const manualSkuGroup = manualSkuAliases.length ? normalizeSkuAliases([...manualSkuAliases, sku], sku) : [];
       const sameAsinSkus = asin ? await findCloudSkusWithSameAsin(asin, sku) : [sku];
-      const finalSkuAliases = normalizeSkuAliases([...manualSkuGroup, ...sameAsinSkus], sku);
+      const finalSkuAliases = asin ? normalizeSkuAliases(sameAsinSkus, sku) : [sku];
       const knownCanonical = resolveSkuAlias(oldSku) || oldSku;
       const finalCanonicalSku = (sku === oldSku && finalSkuAliases.includes(knownCanonical)) ? knownCanonical : sku;
       if(finalSkuAliases.length > 40){
-        setPdFieldError("skuAliases", "Troppi SKU collegati: tieni il gruppo sotto 40 SKU.");
-        showToast("Unificazione SKU", "Troppi SKU collegati.", 2200);
+        setPdFieldError("asin", "Questo ASIN contiene più di 40 SKU figli.");
+        showToast("Unificazione ASIN", "Troppi SKU figli per lo stesso ASIN.", 2200);
         return;
       }
 
-      const okConfirm = confirm(`Confermi modifica cloud per ${oldSku}?\n\nGiacenza fisica: ${qty} pz\nASIN: ${asin || "non impostato"}\nSKU unificati: ${finalSkuAliases.length > 1 ? finalSkuAliases.join(", ") : "nessuno"}`);
+      const okConfirm = confirm(`Confermi modifica cloud per ${oldSku}?\n\nGiacenza fisica: ${qty} pz\nParent ASIN: ${asin || "non impostato"}\nSKU figli: ${asin ? finalSkuAliases.join(", ") : "solo " + sku}`);
       if(!okConfirm) return;
 
       const api = state.firebase.api;
@@ -10718,18 +10715,26 @@ async function saveProductFromDetails(){
 
           const nowClient = Date.now();
           const who = state.user.email || state.user.emailLower || state.user.uid || "";
-          const skuUnificationPatch = skuUnificationFields(finalCanonicalSku, finalSkuAliases, nowClient, who, manualSkuGroup);
+          const skuUnificationPatch = skuUnificationFields(finalCanonicalSku, finalSkuAliases, nowClient, who, []);
           const asinPatch = asinCloudFields(asin, nowClient, who);
-          const baseData = {
+          const baseIdentityData = {
             sku,
             title: title || "",
             titleNorm: normalizeText(title || sku),
             note: note || "",
-            qty,
             lowStockThreshold: lowStockThreshold,
             lowStockThresholdUpdatedAtClient: nowClient,
             lowStockThresholdUpdatedBy: who,
             ...opaquePickingLocationPatch,
+            updatedAt: api.serverTimestamp(),
+            updatedAtClient: nowClient,
+            updatedBy: state.user.email || "",
+            location: loc,
+            ...asinPatch,
+            ...skuUnificationPatch
+          };
+          const stockData = {
+            qty,
             zeroStock: qty === 0,
             zeroStockAt: qty === 0 ? api.serverTimestamp() : null,
             zeroStockAtClient: qty === 0 ? nowClient : null,
@@ -10737,13 +10742,19 @@ async function saveProductFromDetails(){
             updatedAtClient: nowClient,
             updatedBy: state.user.email || "",
             ...sharedStockMutationFields(nowClient, who, "product_manual_edit"),
-            location: loc,
-            ...asinPatch,
-            ...skuUnificationPatch
+            location: loc
           };
+          const baseData = { ...baseIdentityData, ...stockData };
 
           if(sku===oldSku){
-            tx.set(oldRef, baseData, { merge:true });
+            if(stockOwnerSkuBefore !== oldSku && sharedStockSnap?.exists?.()){
+              // Nome/ASIN restano sullo SKU figlio aperto; la quantità fisica viene
+              // modificata esclusivamente sul proprietario cloud condiviso.
+              tx.set(oldRef, baseIdentityData, { merge:true });
+              tx.set(stockOwnerRefBefore, stockData, { merge:true });
+            }else{
+              tx.set(oldRef, baseData, { merge:true });
+            }
           }else{
             tx.set(newRef, baseData, { merge:true });
             tx.delete(oldRef);
@@ -10857,7 +10868,7 @@ async function saveProductFromDetails(){
             title,
             asin,
             lowStockThreshold,
-            manualAliases: manualSkuGroup,
+            manualAliases: [],
             affectedSkus: previousGroupMembers,
             editedSku: sku,
             nowClient: Date.now(),
@@ -11075,10 +11086,16 @@ function renderProductsSheet(){
           const finalTitle = title || squashWhitespace(oldData.title || oldData.name || sku) || sku;
           const nowClient = Date.now();
           const who = state.user?.email || state.user?.emailLower || state.user?.uid || "";
-          const baseData = {
+          const baseIdentityData = {
             sku,
             title: finalTitle,
             titleNorm: normalizeText(finalTitle || sku),
+            updatedAt: api.serverTimestamp(),
+            updatedAtClient: nowClient,
+            updatedBy: who,
+            location: loc
+          };
+          const stockData = {
             qty,
             zeroStock: qty === 0,
             zeroStockAt: qty === 0 ? api.serverTimestamp() : null,
@@ -11089,9 +11106,15 @@ function renderProductsSheet(){
             ...sharedStockMutationFields(nowClient, who, "product_row_edit"),
             location: loc
           };
+          const baseData = { ...baseIdentityData, ...stockData };
 
           if(sku===oldSku){
-            tx.set(oldRef, baseData, { merge:true });
+            if(stockOwnerSkuBefore !== oldSku && sharedStockSnap?.exists?.()){
+              tx.set(oldRef, baseIdentityData, { merge:true });
+              tx.set(stockOwnerRefBefore, stockData, { merge:true });
+            }else{
+              tx.set(oldRef, baseData, { merge:true });
+            }
           }else{
             tx.set(newRef, baseData, { merge:true });
             tx.delete(oldRef);
