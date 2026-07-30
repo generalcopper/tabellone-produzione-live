@@ -16697,7 +16697,13 @@ function twRenderQueue(items){
     const orderLblWithCustomer = it.orderNo ? (`Ord. ${it.orderNo}${it.customer ? " · " + it.customer : ""}`) : "";
     const qtyTxt = (it.qty || "") ? `${it.qty} ${it.unit||""}`.trim() : "—";
 
-    const delBtn = (state.user && state.user.isAdmin) ? `<button class="btn bad" data-tw-act="del" type="button">Elimina</button>` : ``;
+    const delLabel = isOrderRow ? "Rimuovi da WRITE" : "Elimina";
+    const delTitle = isOrderRow
+      ? "Rimuove l’assegnazione dell’ordine da WRITE"
+      : "Elimina questa riga manuale";
+    const delBtn = (state.user && state.user.isAdmin)
+      ? `<button class="btn bad" data-tw-act="del" type="button" title="${escapeHtml(delTitle)}" aria-label="${escapeHtml(delTitle)}">${escapeHtml(delLabel)}</button>`
+      : ``;
 
     if(isOrderRow){
       const prod = twCompactProductName(it.product || it.rawLine || it.label || "—");
@@ -18861,6 +18867,87 @@ async function twPersistQueueOrder(ids, preferredMovedId="", baseOldIds=null){
   }
 }
 
+function twIsManagedOrderQueueRow(it){
+  try{
+    if(!it) return false;
+    const kind = String(it.kind || "").trim();
+    const src = String(it.source || "").trim();
+    const srcLower = src.toLowerCase();
+    const target = String(it.inventoryTarget || "").trim().toLowerCase();
+    if(twIsManualFinishedProductRow(it) || twIsManualAmazonSkuRow(it)) return false;
+    if(srcLower.includes("manual") || target.includes("finished_product") || target.includes("amazon")) return false;
+    return kind === "orderLine" || src === "vai_in_produzione" || Boolean(it.orderNo || it.lineKey);
+  }catch(_e){
+    return false;
+  }
+}
+
+function twResolveManagedOrderKey(it){
+  try{
+    const direct = String(it?.orderKey || "").trim();
+    if(direct) return direct;
+    return twOrderKeyByOrderNo(it?.orderNo || "");
+  }catch(_e){
+    return "";
+  }
+}
+
+function twRemoveOrderKeyFromLocalAllowlist(orderKey){
+  const key = String(orderKey || "").trim();
+  if(!key) return;
+  try{ if(globalThis.__ALLOW_KEYS__ instanceof Set) globalThis.__ALLOW_KEYS__.delete(key); }catch(_e){}
+  try{ if(globalThis.__allowCommitted instanceof Set) globalThis.__allowCommitted.delete(key); }catch(_e){}
+  try{ if(globalThis.__allowDraft instanceof Set) globalThis.__allowDraft.delete(key); }catch(_e){}
+  try{ if(state.mobileAllowlist?.keys instanceof Set) state.mobileAllowlist.keys.delete(key); }catch(_e){}
+  try{ if(state.mobileAllowSelection instanceof Set) state.mobileAllowSelection.delete(key); }catch(_e){}
+  try{ refreshAllowDirtyFlag(); }catch(_e){}
+}
+
+async function twDeleteQueueJob(job){
+  if(!job || !String(job.id || "").trim()) throw new Error("Riga non disponibile");
+  if(!state.firebase?.ok) throw new Error("Firebase non disponibile");
+
+  const fs = state.firebase.api;
+  const db = state.firebase.db;
+  const tw = ensureTabWriteState();
+  const id = String(job.id || "").trim();
+  const queueCol = fs.collection(db, "producedDays", TW_LINE_BUCKET, "queue");
+  const batch = fs.writeBatch(db);
+  const isManagedOrder = twIsManagedOrderQueueRow(job);
+
+  batch.delete(fs.doc(queueCol, id));
+
+  let orderKey = "";
+  if(isManagedOrder){
+    orderKey = twResolveManagedOrderKey(job);
+    if(!orderKey) throw new Error("Chiave ordine non disponibile: rimozione bloccata per sicurezza");
+    if(typeof fs.arrayRemove !== "function") throw new Error("Rimozione ordine non supportata");
+
+    batch.set(mobileAllowlistDoc(fs, db), {
+      keys: fs.arrayRemove(orderKey),
+      updatedAt: fs.serverTimestamp(),
+      updatedBy: state.user?.email || state.user?.fullName || ""
+    }, { merge:true });
+
+    twBatchTouchQueueLive(batch, "order_unassigned", [id], {
+      orderKey,
+      orderNo: String(job.orderNo || "").trim()
+    });
+  }else{
+    twBatchTouchQueueLive(batch, "queue_deleted", [id]);
+  }
+
+  await batch.commit();
+
+  if(isManagedOrder) twRemoveOrderKeyFromLocalAllowlist(orderKey);
+  tw.queueItems = (tw.queueItems || []).filter(it=>String(it?.id || "") !== id);
+  tw.lastQueueById = new Map((tw.queueItems || []).map(it=>[String(it?.id || ""), it]));
+  twScheduleRenderAll(isManagedOrder ? "order_unassigned" : "queue_deleted", 15);
+  twScheduleCanonicalKioskQueuePublish(isManagedOrder ? "order_unassigned" : "queue_deleted", 15);
+
+  return { isManagedOrder, orderKey };
+}
+
 // ===== Wire UI events once =====
 function twBindUiOnce(){
   if(globalThis.__TW_UI_BOUND__) return;
@@ -18912,14 +18999,35 @@ function twBindUiOnce(){
         showToast("Accesso limitato", "Solo admin possono eliminare righe.");
         return;
       }
-      if(!confirm("Eliminare questa riga dalla coda?")) return;
+      if(!job){
+        showToast("Riga non disponibile", "Aggiorna la coda e riprova.");
+        return;
+      }
+      const isManagedOrder = twIsManagedOrderQueueRow(job);
+      if(isManagedOrder){
+        const orderKey = twResolveManagedOrderKey(job);
+        if(!orderKey){
+          alert("Impossibile identificare con sicurezza l’ordine collegato. Nessuna modifica eseguita.");
+          return;
+        }
+        const orderNo = String(job.orderNo || "").trim();
+        const relatedCount = (tw.queueItems || []).filter(it=>
+          twIsManagedOrderQueueRow(it) && twResolveManagedOrderKey(it) === orderKey
+        ).length;
+        const relatedMsg = relatedCount > 1
+          ? ` Tutte le ${relatedCount} righe collegate usciranno dalla coda.`
+          : "";
+        if(!confirm(`Rimuovere l’ordine${orderNo ? " n. " + orderNo : ""} da WRITE?${relatedMsg}`)) return;
+      }else if(!confirm("Eliminare questa riga manuale dalla coda?")){
+        return;
+      }
       try{
-        if(!state.firebase?.ok) throw new Error("Firebase non disponibile");
-        const fs = state.firebase.api;
-        const db = state.firebase.db;
-        const queueCol = fs.collection(db, "producedDays", TW_LINE_BUCKET, "queue");
-        await fs.deleteDoc(fs.doc(queueCol, id));
-        try{ await twTouchQueueLive("queue_deleted", [id]); }catch(_e){}
+        const result = await twDeleteQueueJob(job);
+        if(result.isManagedOrder){
+          showToast("Ordine rimosso da WRITE", "L’assegnazione è stata aggiornata nel cloud.");
+        }else{
+          showToast("Riga eliminata", "La coda è stata aggiornata.");
+        }
       }catch(err){
         alert("Errore eliminazione: " + (err?.message || err?.code || "unknown"));
       }
