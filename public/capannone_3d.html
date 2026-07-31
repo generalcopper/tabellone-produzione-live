@@ -2650,9 +2650,8 @@ const camera=new THREE.PerspectiveCamera(45,1,0.1,1400);
 
 // richiede un singolo ricalcolo delle ombre nel prossimo frame
 let _shadowFrames=0;
-let _shadowTick=0;     // contatore per refresh ombre periodico
 let _lastTickT=null;   // per smoothing camera frame-rate indipendente
-function requestShadowUpdate(n){ _shadowFrames=Math.max(_shadowFrames, n||2); }
+function requestShadowUpdate(n){ _shadowFrames=Math.max(_shadowFrames, n||1); }
 
 // ===== ENVIRONMENT MAP procedurale (riflessi premium su metalli e pavimento) =====
 (function(){
@@ -3890,7 +3889,9 @@ const CARTELLO_COLORI={
       b.userData={liq,cap,capRing,lab,labTop,mats,
         setOpacity:(k)=>{ for(const it of mats){ it.m.opacity=it.base*k; it.m.depthWrite=(k>=0.99); } }
       };
-      b.traverse(o=>{if(o.isMesh)o.castShadow=true;});
+      // Oggetto animato: riceve la luce ma non entra nella shadow map statica.
+      // Evita ombre che avanzano a scatti quando la bottiglia si muove.
+      b.traverse(o=>{if(o.isMesh){o.castShadow=false;o.receiveShadow=true;}});
       return b;
     }
     const NB=16, bottles=[];
@@ -3919,7 +3920,7 @@ const CARTELLO_COLORI={
     })();
     // scatola in uscita verso il pallet (animata)
     const outBox=new THREE.Mesh(new THREE.BoxGeometry(0.4,0.28,0.46),M.box.clone());
-    outBox.material.transparent=true; outBox.castShadow=true; L.add(outBox);
+    outBox.material.transparent=true; outBox.castShadow=false; outBox.receiveShadow=true; L.add(outBox);
 
     // --- OPERAI: MAX 2 ---
     function makeWorker(x,z,rotY,shirt){
@@ -3985,7 +3986,8 @@ const CARTELLO_COLORI={
         armRefs.push({upper,fore,hand,sgn,baseUpperX:-0.35,baseForeX:-0.7});
       }
       w.position.set(x,0,z); w.rotation.y=rotY;
-      w.traverse(o=>{if(o.isMesh){o.castShadow=true;o.receiveShadow=true;}});
+      // L'operaio è animato ogni frame: niente ombra proiettata nella mappa statica.
+      w.traverse(o=>{if(o.isMesh){o.castShadow=false;o.receiveShadow=true;}});
       w.userData={arms:armRefs,legs:legRefs,seed:Math.random()*100};
       return w;
     }
@@ -5527,6 +5529,9 @@ function cinematicTransitionNeedsCut(fromPose,toPose){
 function _requestCameraCollisionCut(){
   _cameraCollisionReset=true;
   _cameraLastSafe=null;
+  // Un eventuale alleggerimento grafico viene applicato qui, nascosto dallo
+  // stacco di regia, mai nel mezzo di una carrellata o di un movimento manuale.
+  try{ if(typeof _commitPendingPerfStep==='function') _commitPendingPerfStep(); }catch(_){}
 }
 function _resolveSweptCamera(x,y,z,cinematic){
   const desired={x,y,z};
@@ -7826,10 +7831,9 @@ function applyFov(){
   camera.updateProjectionMatrix();
 }
 // ===== MONITOR PRESTAZIONI + SCALA RISOLUZIONE =====
-// Degrada progressivamente il carico GPU se il framerate resta basso, e RISALE se la
-// macchina regge. Ora il primo gradino renderizza a piena risoluzione 1920×1080
-// sul kiosk landscape, ma mantiene gli stessi fallback fluidi: se la GPU cala,
-// scende gradualmente a 1760/1600/1440/1280/1152 senza cambiare layout o UI.
+// Degrada progressivamente il carico GPU se il framerate resta basso. Non risale
+// automaticamente: così il profilo raggiunto rimane stabile e non oscilla tra
+// shadow map e risoluzioni diverse. Ogni eventuale cambio avviene durante un cut.
 //
 // Nota: il cap è sul backbuffer reale WebGL, non sul CSS size. Questo evita che
 // schermi HiDPI/Retina moltiplichino i pixel interni e facciano perdere fluidità.
@@ -7840,7 +7844,8 @@ function applyFov(){
 //  step 3: ombre basic 512 + render 1440px
 //  step 4: ombre OFF + render 1280px
 //  step 5: ombre OFF + render 1152px         (massima fluidità)
-let _fpsSamples=0,_fpsSlow=0,_fpsFast=0,_lastNow=0,_perfStep=0;
+let _fpsSamples=0,_fpsSlow=0,_lastNow=0,_perfStep=0,_perfLastChange=performance.now();
+let _pendingPerfStep=null;
 const _PR_MAX=1;
 const _PERF_STEPS=[
   { shadow:true,  soft:true,  map:2048, cap:1920 },
@@ -7884,23 +7889,30 @@ function _applyPerfStep(i){
   }catch(_){}
   applyRenderSize();                          // applica il nuovo render cap
   renderer.shadowMap.needsUpdate=true;
-  requestShadowUpdate(2);
+  requestShadowUpdate(1);
+  _perfLastChange=performance.now();
+}
+function _commitPendingPerfStep(){
+  if(_pendingPerfStep===null) return;
+  const next=_pendingPerfStep;
+  _pendingPerfStep=null;
+  if(next!==_perfStep) _applyPerfStep(next);
 }
 function perfWatch(now){
   if(_lastNow){
     const dt=now-_lastNow;
     if(dt>20) _fpsSlow++;        // >20ms ≈ sotto i 50fps
-    else if(dt<15) _fpsFast++;   // <15ms ≈ sopra i 66fps: margine per risalire
     _fpsSamples++;
   }
   _lastNow=now;
-  if(_fpsSamples>=45){
-    if(_fpsSlow>20 && _perfStep < _PERF_STEPS.length-1){
-      _applyPerfStep(_perfStep+1);          // troppi frame lenti → alleggerisci
-    } else if(_fpsFast>40 && _fpsSlow===0 && _perfStep > 0){
-      _applyPerfStep(_perfStep-1);          // gira liscio e c'è margine → rialza la qualità
+  if(_fpsSamples>=90){
+    // Degrado solo dopo lentezza sostenuta e con un lungo cooldown. Non risalgo
+    // automaticamente: evita il ping-pong tra due profili che riallocava shadow
+    // map e backbuffer producendo scatti e variazioni improvvise di illuminazione.
+    if(_fpsSlow>50 && _perfStep < _PERF_STEPS.length-1 && now-_perfLastChange>12000){
+      _pendingPerfStep=_perfStep+1;
     }
-    _fpsSamples=0; _fpsSlow=0; _fpsFast=0;
+    _fpsSamples=0; _fpsSlow=0;
   }
 }
 
@@ -8148,24 +8160,22 @@ function tick(now){
     for(const w of WALLS){ w.visible=!wallsHidden;
       if(w.visible){w.material.opacity+=(0.92-w.material.opacity)*0.18;w.material.transparent=true;} }
   }
-  // ombre: durante le cinematiche la geometria è statica (si muove solo la camera):
-  // il refresh periodico provocherebbe un hitch ogni N frame. Lo sospendo e tengo
-  // solo i frame esplicitamente richiesti (cambio merce) + refresh per la linea a riposo.
-  _shadowTick=(_shadowTick+1)%30;   // refresh ombre periodico più rado (la linea a riposo
-  const periodicShadow = !inCine && _shadowTick===0;   // si muove lenta: ~ogni mezzo secondo basta)
-  if(_shadowFrames>0 || periodicShadow){ renderer.shadowMap.needsUpdate=true; if(_shadowFrames>0)_shadowFrames--; }
+  // Shadow map realmente statica: viene rigenerata soltanto quando cambia la
+  // geometria del magazzino/inventario o il profilo grafico. Gli oggetti animati
+  // della linea non proiettano ombre, quindi non serve alcun refresh periodico.
+  if(_shadowFrames>0){ renderer.shadowMap.needsUpdate=true; _shadowFrames--; }
   renderer.render(scene,camera);
   _perfHud.end(now);
   requestAnimationFrame(tick);
 }
 requestAnimationFrame(tick);
-requestShadowUpdate(3);   // calcola le ombre della scena statica nei primi frame
+requestShadowUpdate(1);   // un solo calcolo: la scena e la shadow map sono statiche
 tick._px=tick._py=tick._pz=0; tick._idleAccum=0;
 
 // AVVIO PRUDENTE SU HARDWARE DEBOLE: leggo il renderer GPU; se è una iGPU notoriamente
 // lenta (Radeon Vega/AMD entry, Intel HD/UHD basso, schermo 4K) parto già a un gradino
-// di qualità ridotto, così il kiosk non si avvia a scatti. Da lì il perfWatch risale
-// automaticamente se la macchina regge.
+// di qualità ridotto, così il kiosk non si avvia a scatti. Il profilo iniziale
+// rimane stabile; il perfWatch può soltanto alleggerirlo se necessario.
 (function _initialPerfGuess(){
   try{
     const gl=renderer.getContext();
@@ -10029,7 +10039,7 @@ function startInventoryRealtime(fs, db){
       const data = perCode[code];
       if(aggiornaVano(code, data ? data.qty : 0, data ? { title:data.title } : null)) changed=true;
     }
-    if(changed) requestShadowUpdate(2);   // ricalcola le ombre solo se la merce è cambiata
+    if(changed) requestShadowUpdate(1);   // ricalcola una volta solo se la merce è cambiata
     const n = Object.keys(perCode).length;
     setCloudStatus(`${modeLabel} • ${n} ubicazioni`, '#22c55e');
     // ricalcola l'illuminazione dei bancali da prelevare (le quantità potrebbero essere cambiate)
