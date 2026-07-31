@@ -1644,7 +1644,7 @@
     flex:0 0 auto !important; min-width:100% !important;
     will-change:transform;
   }
-  /* quando serve lo scorrimento: la traccia (raddoppiata via JS) scorre a sinistra in loop */
+  /* La traccia viene ripetuta via JS e scorre sempre, anche con un solo avviso. */
   #cockpit #ckPageAzienda .ck-alertbar.scrolling .ck-alertbar-track{
     animation:ckTicker var(--ticker-dur,26s) linear infinite !important;
   }
@@ -6282,19 +6282,21 @@ function applyNameMarquee(root){
 /* ===== TICKER AVVISI — barra unica su una riga, scorrimento orizzontale continuo =====
    Gli avvisi (Full truckload / Cerea / Rifiuti) restano tre <div> indipendenti,
    accesi/spenti dalla logica esistente via attributo [hidden]. Qui li teniamo su
-   un'unica riga dentro #ckAlertBar; se la larghezza totale sfora lo schermo, la
-   traccia viene duplicata e scorre in loop (tipo notiziario). Nessuna modifica
-   alla logica Firebase: osserviamo solo lo stato [hidden] dei tre avvisi. */
+   un'unica riga dentro #ckAlertBar. La sequenza viene ripetuta quanto basta per
+   coprire sempre tutta la barra e trasla in loop anche con un solo avviso.
+   Nessuna modifica alla logica Firebase: osserviamo solo lo stato [hidden]. */
 (function(){
   const bar=document.getElementById('ckAlertBar');
   const track=document.getElementById('ckAlertTrack');
   if(!bar || !track) return;
   const ids=['ckAmzAlert','ckCereaAlert','ckTrashAlert'];
   const alerts=ids.map(id=>document.getElementById(id)).filter(Boolean);
+  let rebuildToken=0;
 
   function visibleAlerts(){ return alerts.filter(a=>!a.hidden); }
 
   function rebuild(){
+    const token=++rebuildToken;
     // rimuovi eventuale clone precedente
     track.querySelectorAll('.ck-alertbar-clone').forEach(n=>n.remove());
     track.style.removeProperty('--ticker-dur');
@@ -6308,42 +6310,46 @@ function applyNameMarquee(root){
     if(vis.length===0){ bar.hidden=true; return; }
     bar.hidden=false;
 
-    // misura: se il contenuto sfora la barra, attiva lo scorrimento
-    // (in doppio giro: cloniamo la sequenza e scorriamo del 50%)
+    // Lo scorrimento è sempre attivo. Ripetiamo la sequenza abbastanza volte
+    // da coprire barra + un intero ciclo: anche un singolo avviso trasla senza
+    // lasciare vuoti e il riavvio del loop coincide con la copia successiva.
     requestAnimationFrame(()=>{
-      const contentW=track.scrollWidth;
+      if(token!==rebuildToken) return;
       const barW=bar.clientWidth;
-      if(contentW > barW + 4){
-        // clona i segmenti visibili per un loop senza stacchi
-        const frag=document.createDocumentFragment();
+      const cycleW=vis.reduce((sum,a)=>sum+a.getBoundingClientRect().width,0);
+      if(barW<=0 || cycleW<=0) return;
+
+      const sequenceCount=Math.max(2,Math.ceil(barW/cycleW)+1);
+      const frag=document.createDocumentFragment();
+      for(let seq=1;seq<sequenceCount;seq++){
         vis.forEach(a=>{
           const c=a.cloneNode(true);
           c.classList.add('ck-alertbar-clone');
           c.removeAttribute('id');
+          c.querySelectorAll('[id]').forEach(n=>n.removeAttribute('id'));
           c.setAttribute('aria-hidden','true');
           c.hidden=false;
           frag.appendChild(c);
         });
-        track.appendChild(frag);
-        // Spostamenti esatti in pixel: il fotogramma finale coincide con la
-        // copia successiva, quindi il riavvio del loop è invisibile e non scatta.
-        const shift=Math.round(contentW*1000)/1000;
-        track.style.setProperty('--ticker-step-1', (-(shift/3))+'px');
-        track.style.setProperty('--ticker-step-2', (-(shift*2/3))+'px');
-        track.style.setProperty('--ticker-step-3', (-shift)+'px');
-        // Movimento tranquillo con tre brevi soste distribuite lungo il giro.
-        const dur=Math.max(28, Math.round(shift/58));
-        track.style.setProperty('--ticker-dur', dur+'s');
-        // forza una ripartenza pulita solo quando cambia davvero il contenuto
-        void track.offsetWidth;
-        bar.classList.add('scrolling');
       }
+      track.appendChild(frag);
+
+      const shift=Math.round(cycleW*1000)/1000;
+      track.style.setProperty('--ticker-step-1', (-(shift/3))+'px');
+      track.style.setProperty('--ticker-step-2', (-(shift*2/3))+'px');
+      track.style.setProperty('--ticker-step-3', (-shift)+'px');
+      const dur=Math.max(28,Math.round(shift/58));
+      track.style.setProperty('--ticker-dur',dur+'s');
+      void track.offsetWidth;
+      bar.classList.add('scrolling');
     });
   }
 
-  // osserva l'accensione/spegnimento dei tre avvisi (attributo hidden)
+  // Ricostruisce anche quando cambia il testo di un avviso già visibile.
   const mo=new MutationObserver(()=>rebuild());
-  alerts.forEach(a=>mo.observe(a, {attributes:true, attributeFilter:['hidden']}));
+  alerts.forEach(a=>mo.observe(a, {
+    attributes:true, attributeFilter:['hidden'], childList:true, subtree:true, characterData:true
+  }));
   // ricalcolo su resize e al caricamento dei font
   let rz; window.addEventListener('resize', ()=>{ clearTimeout(rz); rz=setTimeout(rebuild,180); });
   try{ if(document.fonts && document.fonts.ready) document.fonts.ready.then(rebuild); }catch(_){}
