@@ -2279,9 +2279,9 @@ function cleanProductMainName(s){
 
     function buildRackLocationOptions(){
       const out = [];
-      const addBay = (rack, bay, pallets)=>{
+      const addBay = (rack, bay, pallets, levels=3)=>{
         const b = String(bay).padStart(2, "0");
-        for(let l=1; l<=3; l++){
+        for(let l=1; l<=levels; l++){
           for(let p=1; p<=pallets; p++){
             out.push(`${rack}${b}-L${l}-P${p}`);
           }
@@ -2298,6 +2298,8 @@ function cleanProductMainName(s){
       // E/F: due campate da 3 pallet
       for(let bay=1; bay<=2; bay++) addBay("E", bay, 3);
       for(let bay=1; bay<=2; bay++) addBay("F", bay, 3);
+      // G: solo livello L1; G01/G02 da 3 pallet, G03 da 2 pallet
+      for(let bay=1; bay<=3; bay++) addBay("G", bay, bay===3 ? 2 : 3, 1);
       return out;
     }
     const RACK_LOCATION_OPTIONS = buildRackLocationOptions();
@@ -3438,7 +3440,7 @@ function cleanProductMainName(s){
       const excludedList = normalizeRackLocationsList(opts && opts.exclude ? opts.exclude : []);
       const selectedSet = new Set(selectedList);
       const excludedSet = new Set(excludedList);
-      const groups = ["A","B","C","D","E","F"];
+      const groups = ["A","B","C","D","E","F","G"];
       const isMultiple = !!(opts && opts.multiple);
       const hideEmpty = !!(opts && opts.hideEmpty);
       const __optionsKey = inventoryRuntimeCacheKey(`rack_options|${toSkuId(currentSku || "")}|${String(currentLoc || "")}|${selectedList.join(",")}|${excludedList.join(",")}|${isMultiple ? "m" : "s"}|${hideEmpty ? "h" : "n"}`);
@@ -11187,7 +11189,7 @@ function closeSheet(name,opts={}){
     }
 
     // QR ubicazione: il QR sulla trave identifica campata+posto (es. C02-P1),
-    // poi l'operatore sceglie il livello disponibile L1/L2/L3.
+    // poi l'operatore sceglie uno dei livelli realmente previsti per quella campata.
     let __qrRackScanner = null;
     let __qrRackJsQrPromise = null;
 
@@ -11217,13 +11219,13 @@ function closeSheet(name,opts={}){
 
     function qrRackBaseFromFinalCode(code){
       const c = normalizeRackLocation(code || "");
-      const m = c.match(/^([A-F]\d{2})-L([123])-P([123])$/);
+      const m = c.match(/^([A-G]\d{2})-L([123])-P([123])$/);
       return m ? `${m[1]}-P${m[3]}` : "";
     }
 
     function qrRackFinalCodesFromBase(baseRaw){
       const base = normalizeRackLocation(baseRaw || "").replace(/_/g, "-").replace(/:/g, "-").replace(/\|/g, "-");
-      const m = base.match(/^([A-F]\d{2})-P([123])$/);
+      const m = base.match(/^([A-G]\d{2})-P([123])$/);
       if(!m) return [];
       const bay = m[1];
       const p = m[2];
@@ -11244,31 +11246,31 @@ function closeSheet(name,opts={}){
 
       // Formati accettati:
       // AMZLOC|C02|P1, AMZLOC:C02:P1, C02-P1, C02-L1/L2/L3-P1, C02-L2-P1.
-      let m = t.match(/^AMZLOC[\|:;-]([A-F]\d{2})[\|:;-](P[123])$/i);
+      let m = t.match(/^AMZLOC[\|:;-]([A-G]\d{2})[\|:;-](P[123])$/i);
       if(m){
         const base = `${m[1]}-${m[2]}`;
         return qrRackBaseIsValid(base) ? { ok:true, base } : { ok:false, reason:`Base QR non valida: ${base}` };
       }
 
-      m = t.match(/^([A-F]\d{2})-L([123])-P([123])$/i);
+      m = t.match(/^([A-G]\d{2})-L([123])-P([123])$/i);
       if(m){
         const code = `${m[1]}-L${m[2]}-P${m[3]}`;
         return RACK_LOCATION_SET.has(code) ? { ok:true, finalCode:code, base:qrRackBaseFromFinalCode(code) } : { ok:false, reason:`Ubicazione QR non valida: ${code}` };
       }
 
-      m = t.match(/^([A-F]\d{2})[-_:;|]?(?:L1\/L2\/L3[-_:;|]?)?P([123])$/i);
+      m = t.match(/^([A-G]\d{2})[-_:;|]?(?:L1\/L2\/L3[-_:;|]?)?P([123])$/i);
       if(m){
         const base = `${m[1]}-P${m[2]}`;
         return qrRackBaseIsValid(base) ? { ok:true, base } : { ok:false, reason:`Base QR non valida: ${base}` };
       }
 
       // fallback URL/query: cerca una posizione dentro al testo
-      m = t.match(/([A-F]\d{2})[-_:;|]?(?:L1\/L2\/L3[-_:;|]?)?P([123])/i);
+      m = t.match(/([A-G]\d{2})[-_:;|]?(?:L1\/L2\/L3[-_:;|]?)?P([123])/i);
       if(m){
         const base = `${m[1]}-P${m[2]}`;
         return qrRackBaseIsValid(base) ? { ok:true, base } : { ok:false, reason:`Base QR non valida: ${base}` };
       }
-      m = t.match(/([A-F]\d{2})-L([123])-P([123])/i);
+      m = t.match(/([A-G]\d{2})-L([123])-P([123])/i);
       if(m){
         const code = `${m[1]}-L${m[2]}-P${m[3]}`;
         return RACK_LOCATION_SET.has(code) ? { ok:true, finalCode:code, base:qrRackBaseFromFinalCode(code) } : { ok:false, reason:`Ubicazione QR non valida: ${code}` };
@@ -11325,7 +11327,7 @@ function closeSheet(name,opts={}){
           result.style.display = "";
           result.innerHTML = `
             <div class="qrRackResultCode">${escapeHtml(base)}</div>
-            <div class="qrRackResultSub">QR letto. Scegli il livello fisico realmente occupato dal bancale.</div>`;
+            <div class="qrRackResultSub">QR letto. Scegli il livello disponibile realmente occupato dal bancale.</div>`;
         }
         levels.innerHTML = infos.map(info=>{
           const label = info.level ? `L${info.level}` : "—";
@@ -11334,7 +11336,7 @@ function closeSheet(name,opts={}){
           return `<button class="qrRackLevelBtn${cls}" type="button" data-action="qrRackChooseLevel" data-code="${escapeHtml(info.code)}"${disabled}><strong>${escapeHtml(label)}</strong><span>${escapeHtml(info.available ? info.code : info.reason)}</span></button>`;
         }).join("");
         qrRackSetVideoVisible(false);
-        qrRackStatus(free.length ? "Scegli il livello. Anche se già usato dallo stesso SKU, verrà sommato." : "Nessun livello disponibile per questo QR: posizione occupata da altro SKU.", free.length ? "ok" : "warn");
+        qrRackStatus(free.length ? "Scegli il livello disponibile. Anche se già usato dallo stesso SKU, verrà sommato." : "Nessun livello disponibile per questo QR: posizione occupata da altro SKU.", free.length ? "ok" : "warn");
       }catch(err){
         console.warn("qrRackRenderLevels", err);
         qrRackStatus("Errore lettura livelli QR.", "bad");
@@ -12386,18 +12388,36 @@ function closeSheet(name,opts={}){
       const CUT_X = -(18 + GAP_ - LX/2);          // riferimento soppalco (sinistra)
       const CUT_X_PERIM = (18 + GAP_ - LX/2);     // notch perimetro a destra-fondo (+5.56)
       const SOP = { x0:-(LX/2), x1:-(LX/2-18), z0:-LZ/2, z1:-LZ/2+6 };  // allineato a sinistra
+      // Stanza sotto il soppalco: stessa geometria e stesso mirror del modello 3D.
+      const ROOM_PLAN = (()=>{
+        const th=0.10, W=11.50, D=6.04;
+        const sourceSopX0=LX/2-18;
+        const sourceX0=sourceSopX0+4.20;
+        const sourceIx0=sourceX0+th, sourceIx1=sourceIx0+W;
+        const iz0=-LZ/2+0.02, iz1=iz0+D;
+        const sourceDx0=sourceIx0, sourceDx1=sourceIx0+1.30;
+        return {
+          x0:-(sourceIx1+th), x1:-sourceX0,
+          ix0:-sourceIx1, ix1:-sourceIx0,
+          z0:-LZ/2, z1:iz1+th, iz0, iz1,
+          dx0:-sourceDx1, dx1:-sourceDx0
+        };
+      })();
       const LIQ = { x0:-LX/2, x1:-LX/2+15, z0:LZ/2-3.75, z1:LZ/2 };
 
       // colori cartelli identici al modello 3D (CARTELLO_COLORI)
       const RACK_COLORS = {
         A:["#FFD300","#1A1A1A"], B:["#00C853","#0A2E14"], C:["#FF6D00","#2B1400"],
-        D:["#FF2D87","#2E0014"], E:["#00B0FF","#002233"], F:["#B388FF","#1A0033"]
+        D:["#FF2D87","#2E0014"], E:["#00B0FF","#002233"], F:["#B388FF","#1A0033"],
+        G:["#C6FF00","#1E2600"]
       };
-      const RACK_BAYS = { A:4, B:4, C:4, D:4, E:2, F:2 };
+      const RACK_BAYS = { A:4, B:4, C:4, D:4, E:2, F:2, G:3 };
 
       // quote reali livelli (metri) dal modello 3D
       const LEVEL_Y = [0.0, 2.00, 4.00];   // appoggio pallet L1,L2,L3
       const RACK_TOTH = 5.50;              // altezza totale telaio
+      const G_RACK_TOPH = 2.56;            // sommità reale montanti G nella stanza
+      const G_BEAM_Y = 1.48;               // filo inferiore trave G
       const PAL_H = 0.144;                 // spessore EPAL
       const VANO_H = 1.74;                 // altezza utile vano (VANO_MAXH)
 
@@ -12405,6 +12425,7 @@ function closeSheet(name,opts={}){
         if(rack==="A") return bay===4 ? 2 : 3;
         if(rack==="C") return bay===1 ? 2 : 3;
         if(rack==="D") return bay===4 ? 2 : 3;
+        if(rack==="G") return bay===3 ? 2 : 3;
         return 3;
       }
 
@@ -12419,6 +12440,11 @@ function closeSheet(name,opts={}){
         {id:"B",code:"B02",bay:2,cx:-8.745,cz:-3.975,wx:2.7,wz:1.1,pal:3},
         {id:"B",code:"B03",bay:3,cx:-6.045,cz:-3.975,wx:2.7,wz:1.1,pal:3},
         {id:"B",code:"B04",bay:4,cx:-3.345,cz:-3.975,wx:2.7,wz:1.1,pal:3},
+        // G: dentro la stanza sotto il soppalco. G01 è vicino alla porta,
+        // poi G02 e G03 procedono verso il fondo; esiste esclusivamente L1.
+        {id:"G",code:"G01",bay:1,cx:-3.45,cz:-5.395,wx:2.7,wz:1.1,pal:3},
+        {id:"G",code:"G02",bay:2,cx:-6.15,cz:-5.395,wx:2.7,wz:1.1,pal:3},
+        {id:"G",code:"G03",bay:3,cx:-8.40,cz:-5.395,wx:1.8,wz:1.1,pal:2},
         // C: pianta 2D corretta: la campata corta da 2 pallet (C01) è sul fronte, come D04.
         // Span identico a D (da -12.795 a -2.895): C04/C03/C02 completi, C01 corto sul lato fronte.
         {id:"C",code:"C04",bay:4,cx:-11.445,cz:1.125,wx:2.7,wz:1.1,pal:3},
@@ -12440,12 +12466,13 @@ function closeSheet(name,opts={}){
 
       function parseLocationCode(code){
         const c = normalizeRackLocation(code || "");
-        const m = c.match(/^([A-F])(\d{2})-L(\d)-P(\d+)$/);
+        const m = c.match(/^([A-G])(\d{2})-L(\d)-P(\d+)$/);
         if(!m) return null;
         const rack=m[1], bay=parseInt(m[2],10), level=parseInt(m[3],10), pallet=parseInt(m[4],10);
         const bayCode = `${rack}${String(bay).padStart(2,"0")}`;
         if(!BAY_BY_CODE[bayCode]) return null;
-        if(level < 1 || level > 3) return null;
+        const maxLevel = rack === "G" ? 1 : 3;
+        if(level < 1 || level > maxLevel) return null;
         const maxPallet = palletsForBay(rack, bay);
         if(pallet < 1 || pallet > maxPallet) return null;
         return { code:c, rack, bay, level, pallet, bayCode };
@@ -12761,7 +12788,15 @@ function closeSheet(name,opts={}){
 
         // soppalco (riferimento leggero)
         s += `<rect x="${f(SOP.x0)}" y="${f(SOP.z0)}" width="${f(SOP.x1-SOP.x0)}" height="${f(SOP.z1-SOP.z0)}" fill="rgba(100,116,139,.10)" stroke="rgba(100,116,139,.30)" stroke-width="0.08" stroke-dasharray="0.4 0.3"/>`;
-        s += `<text x="${f((SOP.x0+SOP.x1)/2)}" y="${f((SOP.z0+SOP.z1)/2)}" font-size="0.85" fill="rgba(100,116,139,.65)" text-anchor="middle" dominant-baseline="middle" font-weight="700">SOPPALCO</text>`;
+        s += `<text x="${f((ROOM_PLAN.x1+SOP.x1)/2)}" y="${f((SOP.z0+SOP.z1)/2)}" font-size="0.62" fill="rgba(100,116,139,.65)" text-anchor="middle" dominant-baseline="middle" font-weight="700">SOPPALCO</text>`;
+        // stanza reale sotto il soppalco, compresa l'apertura porta sul lato verso il centro.
+        s += `<rect x="${f(ROOM_PLAN.x0)}" y="${f(ROOM_PLAN.z0)}" width="${f(ROOM_PLAN.x1-ROOM_PLAN.x0)}" height="${f(ROOM_PLAN.z1-ROOM_PLAN.z0)}" fill="rgba(100,116,139,.22)" stroke="rgba(15,23,42,.52)" stroke-width="0.08"/>`;
+        s += `<rect x="${f(ROOM_PLAN.ix0)}" y="${f(ROOM_PLAN.iz0)}" width="${f(ROOM_PLAN.ix1-ROOM_PLAN.ix0)}" height="${f(ROOM_PLAN.iz1-ROOM_PLAN.iz0)}" fill="#ffffff" stroke="rgba(15,23,42,.18)" stroke-width="0.03"/>`;
+        s += `<rect x="${f(ROOM_PLAN.dx0)}" y="${f(ROOM_PLAN.iz1-0.03)}" width="${f(ROOM_PLAN.dx1-ROOM_PLAN.dx0)}" height="${f(ROOM_PLAN.z1-ROOM_PLAN.iz1+0.06)}" fill="#ffffff"/>`;
+        s += `<line x1="${f(ROOM_PLAN.dx0)}" y1="${f(ROOM_PLAN.iz1)}" x2="${f(ROOM_PLAN.dx0)}" y2="${f(ROOM_PLAN.z1)}" stroke="rgba(15,23,42,.52)" stroke-width="0.06"/>`;
+        s += `<line x1="${f(ROOM_PLAN.dx1)}" y1="${f(ROOM_PLAN.iz1)}" x2="${f(ROOM_PLAN.dx1)}" y2="${f(ROOM_PLAN.z1)}" stroke="rgba(15,23,42,.52)" stroke-width="0.06"/>`;
+        s += `<text x="${f((ROOM_PLAN.ix0+ROOM_PLAN.ix1)/2)}" y="${f((ROOM_PLAN.iz0+ROOM_PLAN.iz1)/2)}" font-size="0.62" fill="rgba(71,85,105,.72)" text-anchor="middle" dominant-baseline="middle" font-weight="800">STANZA SOTTO SOPPALCO</text>`;
+        s += `<text x="${f((ROOM_PLAN.dx0+ROOM_PLAN.dx1)/2)}" y="${f(ROOM_PLAN.z1+0.32)}" font-size="0.34" fill="rgba(71,85,105,.68)" text-anchor="middle" font-weight="700">PORTA</text>`;
         // area linea liquidi
         s += `<rect x="${f(LIQ.x0)}" y="${f(LIQ.z0)}" width="${f(LIQ.x1-LIQ.x0)}" height="${f(LIQ.z1-LIQ.z0)}" fill="rgba(30,90,208,.10)" stroke="rgba(30,90,208,.30)" stroke-width="0.08"/>`;
         s += `<text x="${f((LIQ.x0+LIQ.x1)/2)}" y="${f((LIQ.z0+LIQ.z1)/2)}" font-size="0.78" fill="rgba(30,90,208,.7)" text-anchor="middle" dominant-baseline="middle" font-weight="700">LINEA LIQUIDI</text>`;
@@ -12770,7 +12805,7 @@ function closeSheet(name,opts={}){
         const byRack = {};
         for(const b of BAYS){ (byRack[b.id]=byRack[b.id]||[]).push(b); }
 
-        for(const rid of ["A","B","C","D","E","F"]){
+        for(const rid of ["A","B","C","D","E","F","G"]){
           const arr = byRack[rid]; if(!arr) continue;
           const col = RACK_COLORS[rid];
           let mnx=1e9,mxx=-1e9,mnz=1e9,mxz=-1e9;
@@ -12861,11 +12896,16 @@ function closeSheet(name,opts={}){
         const tb = BAY_BY_CODE[parsed.bayCode];
         const palCount = tb ? tb.pal : 3;
         const col = RACK_COLORS[parsed.rack] || ["#f97316","#fff"];
+        const isGroundOnly = parsed.rack === "G";
+        const rackTopH = isGroundOnly ? G_RACK_TOPH : RACK_TOTH;
+        const levelCount = isGroundOnly ? 1 : 3;
+        const levelHeights = isGroundOnly ? [0.0] : LEVEL_Y;
+        const vanoH = isGroundOnly ? G_BEAM_Y : VANO_H;
 
         // viewBox metrico: larghezza = ingombro vano (1 pallet 1.20) + margini; altezza = telaio + quota.
-        const VW = 3.2, VH = RACK_TOTH + 1.9;
+        const VW = 3.2, VH = rackTopH + 1.9;
         // funzioni di proiezione: world height → svgY (invertito, 0 a terra in basso)
-        const groundY = RACK_TOTH + 1.25;     // linea pavimento nello spazio svg
+        const groundY = rackTopH + 1.25;      // linea pavimento nello spazio svg
         const yOf = (h)=> groundY - h;        // altezza reale → y svg
         const cx = 1.3;
         const colW = 1.55;                    // larghezza montanti in vista
@@ -12878,19 +12918,19 @@ function closeSheet(name,opts={}){
         s += `<line x1="${f(0.35)}" y1="${f(groundY)}" x2="${f(x1+0.25)}" y2="${f(groundY)}" stroke="rgba(15,23,42,.55)" stroke-width="0.045"/>`;
         // montanti (2)
         for(const mx of [x0, x1]){
-          s += `<rect x="${f(mx-0.05)}" y="${f(yOf(RACK_TOTH))}" width="0.10" height="${f(RACK_TOTH)}" rx="0.03" fill="rgba(15,23,42,.10)" stroke="rgba(15,23,42,.30)" stroke-width="0.03"/>`;
+          s += `<rect x="${f(mx-0.05)}" y="${f(yOf(rackTopH))}" width="0.10" height="${f(rackTopH)}" rx="0.03" fill="rgba(15,23,42,.10)" stroke="rgba(15,23,42,.30)" stroke-width="0.03"/>`;
         }
         // correnti di livello (a quota LEVEL_Y) + vani
-        for(let lv=1; lv<=3; lv++){
-          const baseY = LEVEL_Y[lv-1];
+        for(let lv=1; lv<=levelCount; lv++){
+          const baseY = levelHeights[lv-1];
           const isTarget = (lv === parsed.level);
           // ripiano/corrente
           const beamY = (lv===1) ? 0 : baseY;
           s += `<rect x="${f(x0)}" y="${f(yOf(beamY)-0.03)}" width="${f(colW)}" height="0.06" fill="rgba(242,106,30,.55)"/>`;
           // vano evidenziato se target
-          const vanoTop = baseY + VANO_H;
+          const vanoTop = baseY + vanoH;
           if(isTarget){
-            s += `<rect class="tm-elevcell" x="${f(x0+0.04)}" y="${f(yOf(vanoTop))}" width="${f(colW-0.08)}" height="${f(VANO_H)}" rx="0.05" fill="${col[0]}" fill-opacity="0.35" stroke="${col[0]}" stroke-width="0.05"/>`;
+            s += `<rect class="tm-elevcell" x="${f(x0+0.04)}" y="${f(yOf(vanoTop))}" width="${f(colW-0.08)}" height="${f(vanoH)}" rx="0.05" fill="${col[0]}" fill-opacity="0.35" stroke="${col[0]}" stroke-width="0.05"/>`;
           }
           // pallet del livello (uno schematico, o evidenzia il target sul livello giusto)
           const palY = (lv===1) ? 0 : baseY;
@@ -12898,7 +12938,7 @@ function closeSheet(name,opts={}){
           s += `<rect x="${f(cx-0.6)}" y="${f(yOf(palY+PAL_H))}" width="1.2" height="${f(PAL_H)}" fill="${isTarget?'#c99a5b':'rgba(201,154,91,.45)'}" stroke="rgba(120,80,40,.5)" stroke-width="0.02"/>`;
           if(isTarget){
             // carico sul pallet target
-            const ch = Math.min(VANO_H-0.2, 1.0);
+            const ch = Math.min(vanoH-0.2, 1.0);
             s += `<rect x="${f(cx-0.52)}" y="${f(yOf(palY+PAL_H+ch))}" width="1.04" height="${f(ch)}" rx="0.04" fill="rgba(198,154,106,.9)" stroke="rgba(120,80,40,.5)" stroke-width="0.02"/>`;
             // pin sopra
             const py = yOf(palY+PAL_H+ch) - 0.15;
@@ -12907,13 +12947,18 @@ function closeSheet(name,opts={}){
             s += `<circle cx="${f(cx)}" cy="${f(py-r*1.55)}" r="${f(r*0.45)}" fill="#fff"/>`;
           }
           // etichetta livello a sinistra
-          const lblY = yOf(baseY + VANO_H/2);
+          const lblY = yOf(baseY + vanoH/2);
           s += `<text x="${f(x0-0.18)}" y="${f(lblY)}" font-size="0.32" fill="${isTarget?col[0]:'rgba(15,23,42,.55)'}" text-anchor="end" dominant-baseline="middle" font-weight="800">L${lv}</text>`;
           // quota in metri a destra
           s += `<text x="${f(x1+0.16)}" y="${f(yOf(baseY))}" font-size="0.26" fill="rgba(15,23,42,.45)" text-anchor="start" dominant-baseline="middle" font-weight="600">${baseY.toFixed(1)} m</text>`;
         }
+        if(isGroundOnly){
+          // La G ha un unico livello a terra e una trave di carico con filo inferiore a 1,48 m.
+          s += `<rect x="${f(x0)}" y="${f(yOf(G_BEAM_Y+0.12))}" width="${f(colW)}" height="0.12" fill="rgba(242,106,30,.72)"/>`;
+          s += `<text x="${f(x1+0.16)}" y="${f(yOf(G_BEAM_Y))}" font-size="0.26" fill="rgba(15,23,42,.45)" text-anchor="start" dominant-baseline="middle" font-weight="600">${G_BEAM_Y.toFixed(2)} m</text>`;
+        }
         // quota sommità telaio (a destra, come le altre quote)
-        s += `<text x="${f(x1+0.16)}" y="${f(yOf(RACK_TOTH))}" font-size="0.26" fill="rgba(15,23,42,.45)" text-anchor="start" dominant-baseline="middle" font-weight="700">${RACK_TOTH.toFixed(1)} m</text>`;
+        s += `<text x="${f(x1+0.16)}" y="${f(yOf(rackTopH))}" font-size="0.26" fill="rgba(15,23,42,.45)" text-anchor="start" dominant-baseline="middle" font-weight="700">${rackTopH.toFixed(isGroundOnly ? 2 : 1)} m</text>`;
 
         return `<svg class="tm-elev" viewBox="0 0 ${f(VW)} ${f(VH)}" xmlns="${NS}" role="img" aria-label="Prospetto campata ${esc(parsed.bayCode)}, livello L${parsed.level}">${s}</svg>`;
       }
@@ -12943,9 +12988,15 @@ function closeSheet(name,opts={}){
         badge.style.background = col[0];
         badge.style.color = col[1];
         const multi = positions.length > 1;
-        title.textContent = multi
-          ? `Concamarise · ${positions.length} posizioni · ${parsed.bayCode}`
-          : `Concamarise · Fila ${parsed.rack} · Campata ${parsed.bayCode}`;
+        if(parsed.rack === "G"){
+          title.textContent = multi
+            ? `Stanza sotto soppalco · ${positions.length} posizioni · ${parsed.bayCode}`
+            : `Stanza sotto soppalco · Campata ${parsed.bayCode}`;
+        }else{
+          title.textContent = multi
+            ? `Concamarise · ${positions.length} posizioni · ${parsed.bayCode}`
+            : `Concamarise · Fila ${parsed.rack} · Campata ${parsed.bayCode}`;
+        }
 
         wrap.innerHTML = buildPlanSVG(parsed, positions);
         const elev = ov.querySelector("#tmElev");

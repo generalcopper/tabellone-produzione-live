@@ -2587,6 +2587,31 @@ const GAP_TEC=1.76, CARTON_TH=0.12;
 // lato corto destro attaccato al muro corto (X=+13.5), profondo 6m verso il centro.
 // lato corto sinistro a X=-4.5, con 1.76m di interspazio verso la parete cartongesso.
 const SOP={x0:LX/2-18, x1:LX/2, z0:-LZ/2, z1:-LZ/2+6, hLow:2.93, hHigh:4.0};
+/* STANZA SOTTO IL SOPPALCO — rilievo 11,50 x 6,04 x 2,97 h (luce netta interna).
+   Vano vuoto ricavato dentro il blocco pieno del soppalco: prende tutta la
+   profondità (dal muro di fondo al bordo verso il centro) e parte a 4,20 m dal
+   lato corto verso l'intercapedine; oltre restano 2,10 m di blocco pieno.
+   Coordinate nel gruppo mirror, come SOP (nel mondo reale la X è specchiata).
+   Altezza a modello 2,93 = piano del soppalco; i 4 cm di scarto rispetto al
+   rilievo restano nello spessore del solaio e non sono percepibili.
+   Per spostarla lungo il soppalco basta cambiare ROOM_ANCHOR. */
+const ROOM=(function(){
+  const th=0.10;                       // spessore pareti
+  const W=11.50, D=6.04;               // luci nette rilevate
+  const ROOM_ANCHOR=SOP.x0+4.20;       // 4,20 m dal lato corto verso l'intercapedine
+  const x0=ROOM_ANCHOR;
+  const ix0=x0+th, ix1=ix0+W;          // luce netta lungo X
+  const iz0=SOP.z0+0.02;               // filo interno muro di fondo (2 cm di stacco)
+  const iz1=iz0+D;                     // parete fronte, verso il centro capannone
+  const dw=1.30, dh=2.11;              // porta: accostata allo spigolo interno
+  return {th, W, D,
+    x0, x1:ix1+th,                     // ingombro esterno lungo X
+    ix0, ix1, iz0, iz1,
+    dw, dh, dx0:ix0, dx1:ix0+dw,       // vano porta (coordinate mirror)
+    z1o:iz1+th,                        // faccia esterna parete fronte
+    h:SOP.hLow,                        // quota del piano soppalco (soffitto strutturale)
+    hCeil:SOP.hLow-0.12};              // intradosso soletta = testa pareti
+})();
 const RACK_D=1.1, LEVEL_H=1.45, BAY=2.7;
 
 const app=document.getElementById('app');
@@ -2706,6 +2731,8 @@ const M={
   glass:new THREE.MeshStandardMaterial({color:0xa8d4e8,roughness:.05,metalness:.2,transparent:true,opacity:.16,side:THREE.DoubleSide}),
   frame:new THREE.MeshStandardMaterial({color:0x3a4048,roughness:.5,metalness:.6}),
   officeFloor:new THREE.MeshStandardMaterial({color:0x5a6270,roughness:.85,side:THREE.DoubleSide}),
+  // stanza sotto il soppalco
+  roomShell:new THREE.MeshStandardMaterial({color:0xffffff,roughness:.10,metalness:.0,transparent:true,opacity:0.0,side:THREE.DoubleSide,depthWrite:false}),
 };
 
 const fixed=new THREE.Group(); scene.add(fixed);
@@ -2794,16 +2821,108 @@ for(const lx of [-8,-2,4,10]){
 
 (function(){
   const g=new THREE.Group();
-  const w=SOP.x1-SOP.x0,d=SOP.z1-SOP.z0,cx=(SOP.x0+SOP.x1)/2,cz=(SOP.z0+SOP.z1)/2;
-  // blocco di cemento pieno: muro chiuso da terra al piano del soppalco
+  const d=SOP.z1-SOP.z0, cz=(SOP.z0+SOP.z1)/2;
+  // blocco di cemento pieno: resta pieno ai due lati della stanza sotto il soppalco.
   // (lo tengo leggermente più basso per non risultare complanare col solaio in testa → niente z-fighting)
-  const block=new THREE.Mesh(new THREE.BoxGeometry(w,SOP.hLow-0.12,d),M.sop);
-  block.position.set(cx,(SOP.hLow-0.12)/2,cz);
-  block.castShadow=true; block.receiveShadow=true; g.add(block);
-  // spessore solaio in testa: poggia sopra il blocco, faccia superiore = piano del soppalco
-  const slab=new THREE.Mesh(new THREE.BoxGeometry(w+0.12,0.24,d+0.12),M.sop);
-  slab.position.set(cx,SOP.hLow-0.12,cz);
-  slab.castShadow=true; slab.receiveShadow=true; g.add(slab);
+  function pieno(bx0,bx1){
+    const bw=bx1-bx0, bcx=(bx0+bx1)/2;
+    if(bw<=0.05) return;
+    const block=new THREE.Mesh(new THREE.BoxGeometry(bw,SOP.hLow-0.12,d),M.sop);
+    block.position.set(bcx,(SOP.hLow-0.12)/2,cz);
+    block.castShadow=true; block.receiveShadow=true; g.add(block);
+    // spessore solaio in testa: poggia sopra il blocco, faccia superiore = piano del soppalco
+    const slab=new THREE.Mesh(new THREE.BoxGeometry(bw+0.12,0.24,d+0.12),M.sop);
+    slab.position.set(bcx,SOP.hLow-0.12,cz);
+    slab.castShadow=true; slab.receiveShadow=true; g.add(slab);
+  }
+  pieno(SOP.x0,ROOM.x0);      // 4,20 m lato intercapedine
+  pieno(ROOM.x1,SOP.x1);      // 2,10 m lato muro corto
+  mirror.add(g);
+})();
+
+/* La stanza è un volume chiuso: la nebbia esponenziale della scena non ha senso
+   al suo interno. Cloni dei materiali con fog disattivato, riusati via cache così
+   non si moltiplicano i programmi shader. */
+const _noFogMats=new Map();
+function noFog(m){
+  let c=_noFogMats.get(m.uuid);
+  if(!c){ c=m.clone(); c.fog=false; _noFogMats.set(m.uuid,c); }
+  return c;
+}
+function killFog(root){
+  root.traverse(o=>{
+    if(!o.isMesh||!o.material) return;
+    o.material = Array.isArray(o.material) ? o.material.map(noFog) : noFog(o.material);
+  });
+}
+
+/* ===== STANZA SOTTO IL SOPPALCO (11,50 x 6,04 x 2,97 h) ====================
+   Vano vuoto: pareti cieche sui tre lati, un'unica porta (1,30 x 2,11) sul
+   fronte verso il centro capannone. Nessun arredo, nessuna vetrata. */
+(function(){
+  const {th,x0,x1,ix0,ix1,iz0,iz1,z1o,h,hCeil}=ROOM;
+  const g=new THREE.Group();
+  const cxI=(ix0+ix1)/2, czI=(iz0+iz1)/2;
+  const zc=(iz1+z1o)/2;                       // centro Z della parete di fronte
+
+  // --- soletta di testa: faccia superiore = piano del soppalco (continuità col blocco pieno)
+  const plate=new THREE.Mesh(new THREE.BoxGeometry(x1-x0,h-hCeil,z1o-SOP.z0),M.sop);
+  plate.position.set((x0+x1)/2,(h+hCeil)/2,(SOP.z0+z1o)/2);
+  plate.castShadow=true; plate.receiveShadow=true; g.add(plate);
+
+  // --- pareti cieche: lato interspazio, lato blocco pieno ---
+  function sideWall(wx0,wx1){
+    const m=new THREE.Mesh(new THREE.BoxGeometry(wx1-wx0,hCeil,z1o-SOP.z0),M.sop);
+    m.position.set((wx0+wx1)/2,hCeil/2,(SOP.z0+z1o)/2);
+    m.castShadow=true; m.receiveShadow=true; g.add(m);
+  }
+  sideWall(x0,ix0); sideWall(ix1,x1);
+  // chiusura sul muro di fondo, trasparente come il fronte: il volume della
+  // stanza resta leggibile anche guardando il capannone da dietro.
+  const back=new THREE.Mesh(new THREE.BoxGeometry(x1-x0,hCeil,iz0-SOP.z0),noFog(M.roomShell));
+  back.position.set((x0+x1)/2,hCeil/2,(SOP.z0+iz0)/2);
+  back.castShadow=false; back.receiveShadow=false; g.add(back);
+
+  // --- parete di fronte a segmenti, unico vuoto per la porta ---
+  // porta 1,30 x 2,11: accostata allo spigolo interno verso l'intercapedine
+  const DOOR_W=ROOM.dw, DOOR_H=ROOM.dh, doorCx=(ROOM.dx0+ROOM.dx1)/2;
+  const dx0=doorCx-DOOR_W/2, dx1=doorCx+DOOR_W/2;
+  // Parete verso il centro capannone resa trasparente sul solo sviluppo della
+  // stanza: da fuori si legge il volume del locale. Niente ombra proiettata.
+  function front(xa,xb,ya,yb){
+    if(xb-xa<0.005||yb-ya<0.005) return;
+    const m=new THREE.Mesh(new THREE.BoxGeometry(xb-xa,yb-ya,th),noFog(M.roomShell));
+    m.position.set((xa+xb)/2,(ya+yb)/2,zc);
+    m.castShadow=false; m.receiveShadow=false; g.add(m);
+  }
+  front(x0,dx0,0,hCeil);            // pieno fino alla porta
+  front(dx0,dx1,DOOR_H,hCeil);      // architrave porta
+  front(dx1,x1,0,hCeil);            // pieno fino al blocco
+
+  // --- finiture interne: nessuna texture dedicata.
+  // Pareti = stesso materiale dei muri del capannone (M.wall), soffitto = intradosso
+  // della soletta, pavimento = quello del capannone lasciato a vista (niente mesh).
+  const yIn1=hCeil-0.006;
+  function liner(w,px,pz,ry){
+    const p=new THREE.Mesh(new THREE.PlaneGeometry(w,yIn1),noFog(M.wall));
+    p.position.set(px,yIn1/2,pz); p.rotation.y=ry; p.receiveShadow=true; g.add(p);
+  }
+  liner(iz1-iz0, ix0+0.006, czI, Math.PI/2);      // lato intercapedine
+  liner(iz1-iz0, ix1-0.006, czI, -Math.PI/2);     // lato muro corto
+  // soffitto e pavimento: stessi materiali di soletta e pavimento capannone, senza nebbia
+  const ceilIn=new THREE.Mesh(new THREE.PlaneGeometry(ix1-ix0,iz1-iz0),noFog(M.sop));
+  ceilIn.rotation.x=Math.PI/2; ceilIn.position.set(cxI,yIn1,czI); g.add(ceilIn);
+  const floorIn=new THREE.Mesh(new THREE.PlaneGeometry(ix1-ix0,iz1-iz0),noFog(M.floor));
+  floorIn.rotation.x=-Math.PI/2; floorIn.position.set(cxI,0.006,czI);
+  floorIn.receiveShadow=true; g.add(floorIn);
+  // Porta: nessun telaio e nessuna anta modellati. Resta solo il vuoto nella
+  // parete (vedi i segmenti front) e il varco nelle collisioni camera.
+
+  // --- luce interna: una sola point light, senza ombre ---
+  const pl=new THREE.PointLight(0xdfeaff,6,10,2.0);
+  pl.position.set(cxI,2.35,czI); pl.castShadow=false; g.add(pl);
+
+  g.traverse(o=>{if(o.isMesh&&o.material===M.sop){o.castShadow=true;o.receiveShadow=true;}});
   mirror.add(g);
 })();
 
@@ -3200,11 +3319,11 @@ function buildBancale({scatolePiene=0, aperta=0, fillFrac=0, restoPz=0, pzPerSca
   return optimizeBancaleGroup(g);
 }
 
-function buildRack({id,x,z,bays,faceDir,empty,alongX,codeBays}){
+function buildRack({id,x,z,bays,faceDir,empty,alongX,codeBays,toth=RACK_TOTH,levels=LEVELS,levelY=LEVEL_Y,beams}){
   const g=new THREE.Group(); g.position.set(x,0,z);
   if(alongX) g.rotation.y=Math.PI/2;             // campate lungo X invece che lungo Z
   const len=bays.reduce((s,b)=>s+b.w,0);
-  const upH=RACK_TOTH+0.2;
+  const upH=toth+0.2;
   // tono leggermente diverso per le nervature → si staccano otticamente (ombre/contrasto)
   const ribMat=M.up.clone(); ribMat.color=M.up.color.clone().offsetHSL(0,0,-0.12); ribMat.metalness=Math.min(1,(M.up.metalness||0.6)+0.1);
   const edgeMat=M.up.clone(); edgeMat.color=M.up.color.clone().offsetHSL(0,0,0.10);
@@ -3254,7 +3373,7 @@ function buildRack({id,x,z,bays,faceDir,empty,alongX,codeBays}){
   }
   // crociere diagonali (zig-zag) su ogni telaio: collegano i 2 montanti lungo la profondità
   const diagN=6;                              // numero di segmenti zig-zag
-  const segH=RACK_TOTH/diagN;
+  const segH=toth/diagN;
   for(const lz of edges){
     for(let s=0;s<diagN;s++){
       const y0=s*segH, y1=(s+1)*segH;
@@ -3267,13 +3386,13 @@ function buildRack({id,x,z,bays,faceDir,empty,alongX,codeBays}){
       diag.castShadow=true; g.add(diag);
     }
     // traversi orizzontali del telaio (sopra e sotto)
-    for(const yy of [0.15, RACK_TOTH-0.1]){
+    for(const yy of [0.15, toth-0.1]){
       const h=new THREE.Mesh(new THREE.BoxGeometry(RACK_DEPTH,0.05,0.05),M.diag);
       h.position.set(0,yy,lz); g.add(h);
     }
   }
-  for(let lv=1;lv<=LEVELS;lv++){
-    const baseY=LEVEL_Y[lv-1];          // quota appoggio pallet
+  for(let lv=1;lv<=levels;lv++){
+    const baseY=levelY[lv-1];           // quota appoggio pallet
     const onBeam=lv>1;                    // L1 a terra: niente corrente sotto
     bays.forEach((b,bi)=>{
       const z0=edges[bi], cz=z0+b.w/2;
@@ -3313,6 +3432,20 @@ function buildRack({id,x,z,bays,faceDir,empty,alongX,codeBays}){
       }
     });
   }
+  // travi di carico aggiuntive: correnti presenti anche dove non c'è un livello
+  // di stoccaggio. La quota indicata è il filo INFERIORE della trave.
+  if(beams&&beams.length){
+    for(const by of beams){
+      bays.forEach((b,bi)=>{
+        const cz=edges[bi]+b.w/2;
+        const beamGeo=new THREE.BoxGeometry(0.07,0.12,b.w);
+        for(const dx of [-RACK_DEPTH/2,RACK_DEPTH/2]){
+          const bm=new THREE.Mesh(beamGeo,M.load);
+          bm.position.set(dx,by+0.06,cz); bm.castShadow=true; g.add(bm);
+        }
+      });
+    }
+  }
   g.userData.id=id; racksGroup.add(g); return g;
 }
 
@@ -3324,6 +3457,7 @@ const RACKS={
   D:[C3,C3,C3,C2],   // 33
   E:[C3,C3],         // 18
   F:[C3,C3],         // 18
+  G:[C3,C3,C2],      // 8 — un solo livello, dentro la stanza sotto il soppalco
 };
 
 // SCAFFALATURE — aggiunte una alla volta nelle posizioni reali rilevate.
@@ -3391,6 +3525,30 @@ const built={};
   built.E=buildRack({id:'E',x:Ecx,z:EFcz,bays:RACKS.E,empty:true});
 }
 
+// --- SCAFFALATURA G (vuota) — dentro la stanza sotto il soppalco ---
+// Struttura identica alle altre: cambiano solo l'altezza montanti e il fatto
+// che c'è un solo livello, a terra. Le travi di carico arancioni restano e partono
+// a 1,48 m. Addossata al muro esterno del soppalco (12 cm di stacco) e con la
+// testata a 24 cm dalla porta.
+{
+  const G_GAP=0.25;                              // franco fino al soffitto della stanza
+  const G_TOTH=ROOM.hCeil-G_GAP-0.20;            // sommità montanti = 2,56 m
+  const G_BEAM_Y=1.48;                           // filo inferiore delle travi
+  const G_LEN=RACKS.G.reduce((s,b)=>s+b.w,0);    // 2,70+2,70+1,80 = 7,20 m di campate
+  const G_UP=0.12;                               // larghezza montante (ingombro oltre le campate)
+  // la stanza vive nel gruppo mirror: qui servono le coordinate del mondo (X specchiata).
+  // Le distanze sono misurate sulla FACCIA ESTERNA dei montanti, non sul loro asse.
+  const Gx1=-ROOM.dx1-0.24;                      // 24 cm dallo stipite della porta
+  const Gcx=Gx1-(G_LEN+G_UP)/2;
+  const Gcz=ROOM.iz1-0.12-(RACK_DEPTH+G_UP)/2;   // 12 cm dal muro esterno del soppalco
+  // Ordine fisico partendo dalla porta: G01 e G02 da 2,70, poi G03 da 1,80 in fondo.
+  // L'array va quindi ribaltato e i codici rimappati, come già fatto per la fila C.
+  const RACKS_G_flip=[...RACKS.G].reverse();
+  built.G=buildRack({id:'G',x:Gcx,z:Gcz,bays:RACKS_G_flip,empty:true,alongX:true,codeBays:[3,2,1],
+                     toth:G_TOTH,levels:1,levelY:[0.0],beams:[G_BEAM_Y]});
+  killFog(built.G);                              // la G è dentro la stanza: niente nebbia
+}
+
 /* ===== CARTELLI IDENTIFICATIVI scaffalature (A–F) =====
    Replica del poster 100×50 cm: fondo giallo #FFD300, bordo scuro #1A1A1A, lettera scura.
    Montati in cima ai montanti ESTERNI lato corsia (verso il centro capannone), ~30 cm
@@ -3416,15 +3574,17 @@ const CARTELLO_COLORI={
   D:['#FF2D87','#2E0014'],   // rosa-magenta / bordeaux
   E:['#00B0FF','#002233'],   // azzurro / blu notte
   F:['#B388FF','#1A0033'],   // viola / viola scuro
+  G:['#C6FF00','#1E2600'],   // lime / verde quasi nero
 };
 (function addCartelli(){
   const SIGN_W=1.0, SIGN_H=0.5, SIGN_T=0.003;  // 100×50 cm, spessore 3 mm
   const GAP=0.30;                               // bordo superiore del cartello 30 cm SOTTO la cima
-  const topY=RACK_TOTH+0.2;                     // sommità montanti (upH)
-  const signCenterY=topY-GAP-SIGN_H/2;          // a filo, sotto la cima del montante
-  for(const id of ['A','B','C','D','E','F']){
+  for(const id of ['A','B','C','D','E','F','G']){
     const grp=built[id]; if(!grp) continue;
     const box=new THREE.Box3().setFromObject(grp);
+    // quota presa dalla fila stessa: la G ha montanti più bassi delle altre
+    const topY=box.max.y;                       // sommità montanti (upH)
+    const signCenterY=topY-GAP-SIGN_H/2;        // a filo, sotto la cima del montante
     const cx=(box.min.x+box.max.x)/2, cz=(box.min.z+box.max.z)/2;
     const lenX=box.max.x-box.min.x, lenZ=box.max.z-box.min.z;
     const alongX = lenX>lenZ;                    // fila sviluppata lungo X o lungo Z
@@ -3462,6 +3622,7 @@ const CARTELLO_COLORI={
     }
     sign.position.set(px, signCenterY, pz);
     sign.castShadow=true;
+    if(id==='G') killFog(sign);                 // dentro la stanza: niente nebbia
     scene.add(sign);
   }
 })();
@@ -5020,7 +5181,7 @@ let tween=null;
    - B → camera a z maggiore (verso la corsia B-C) → 0
    - C → camera a z minore (verso la corsia B-C) → PI
    - D → camera a z maggiore (corsia D verso fronte) → 0 */
-const ROW_THETA={ A:-Math.PI/2, E:-Math.PI/2, F:-Math.PI/2, B:0, C:Math.PI, D:0 };
+const ROW_THETA={ A:-Math.PI/2, E:-Math.PI/2, F:-Math.PI/2, B:0, C:Math.PI, D:0, G:0 };
 function detailTheta(target,vano){
   const row=vano&&vano.row;
   if(row && ROW_THETA[row]!==undefined) return ROW_THETA[row];
@@ -5273,9 +5434,23 @@ function _getCameraStaticBoxes(){
   if(_cameraStaticBoxes) return _cameraStaticBoxes;
   const sopWorldX0=-SOP.x1, sopWorldX1=-SOP.x0;
   const offWorldX0=-SOP.x1, offWorldX1=-(SOP.x1-7.81);
+  // stanza sotto il soppalco: coordinate mondo (X specchiata rispetto a ROOM)
+  const rmX0=-ROOM.x1, rmX1=-ROOM.x0;             // ingombro esterno stanza
+  const rmIX0=-ROOM.ix1, rmIX1=-ROOM.ix0;         // luce netta interna
+  const rmDX0=-ROOM.dx1, rmDX1=-ROOM.dx0;             // vano porta nel mondo
   _cameraStaticBoxes=[
-    // blocco pieno del soppalco
-    _cameraBox(sopWorldX0,sopWorldX1,0,SOP.hLow+0.18,SOP.z0,SOP.z1,'soppalco'),
+    // blocco pieno del soppalco (le due parti ai lati della stanza)
+    _cameraBox(sopWorldX0,-ROOM.x1,0,SOP.hLow+0.18,SOP.z0,SOP.z1,'soppalco'),
+    _cameraBox(-ROOM.x0,sopWorldX1,0,SOP.hLow+0.18,SOP.z0,SOP.z1,'soppalco'),
+    // pareti laterali della stanza
+    _cameraBox(rmX0,rmIX0,0,SOP.hLow+0.18,SOP.z0,ROOM.z1o,'stanza-muro'),
+    _cameraBox(rmIX1,rmX1,0,SOP.hLow+0.18,SOP.z0,ROOM.z1o,'stanza-muro'),
+    // parete di fronte, spezzata sul vano porta
+    _cameraBox(rmX0,rmDX0,0,SOP.hLow+0.18,ROOM.iz1,ROOM.z1o,'stanza-fronte'),
+    _cameraBox(rmDX1,rmX1,0,SOP.hLow+0.18,ROOM.iz1,ROOM.z1o,'stanza-fronte'),
+    _cameraBox(rmDX0,rmDX1,ROOM.dh,SOP.hLow+0.18,ROOM.iz1,ROOM.z1o,'stanza-architrave'),
+    // soletta di testa: impedisce di salire dentro il soppalco dalla stanza
+    _cameraBox(rmIX0,rmIX1,ROOM.hCeil-0.02,SOP.hLow+0.18,SOP.z0,ROOM.iz1,'stanza-soffitto'),
     // ufficio vetrato sopra il soppalco
     _cameraBox(offWorldX0,offWorldX1,SOP.hLow,SOP.hLow+2.76,SOP.z0,SOP.z0+4.70,'ufficio'),
     // scala e corrimano
@@ -9509,6 +9684,7 @@ function aggiornaVano(code, qty, info){
 
     const bancale = buildBancale({ scatolePiene, aperta, fillFrac, restoPz, pzPerScatola:pzScat, tipoTappo, coloreScatola, maxH:VANO_MAXH });
     bancale.rotation.y = Math.PI/2;
+    if(v.row==='G') killFog(bancale);           // dentro la stanza: niente nebbia
     v.obj.add(bancale);
     v._cargo = bancale;
     v.empty = false;
