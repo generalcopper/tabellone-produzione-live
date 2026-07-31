@@ -1949,8 +1949,7 @@
 
 
   /* ===== RIFINITURE FINALI HUD ===== */
-  /* Ticker continuo: tre pause morbide durante il giro; il punto finale è una
-     copia pixel-perfect del punto iniziale, quindi il loop non ha alcuno scatto. */
+  /* Ticker continuo uniforme: nessuna pausa o variazione di velocità durante il giro. */
   #cockpit #ckPageAzienda .ck-alertbar.scrolling .ck-alertbar-track{
     animation-name:ckTickerContinuous !important;
     animation-duration:var(--ticker-dur,34s) !important;
@@ -1960,10 +1959,8 @@
     transform:translate3d(0,0,0);
   }
   @keyframes ckTickerContinuous{
-    0%,6%{transform:translate3d(0,0,0);}
-    31%,36%{transform:translate3d(var(--ticker-step-1,-16.666666%),0,0);}
-    62%,67%{transform:translate3d(var(--ticker-step-2,-33.333333%),0,0);}
-    94%,100%{transform:translate3d(var(--ticker-step-3,-50%),0,0);}
+    from{transform:translate3d(0,0,0);}
+    to{transform:translate3d(var(--ticker-step-3,-50%),0,0);}
   }
 
   /* Logo cockpit: centratura ottica e geometrica rispetto alla fascia header. */
@@ -6292,20 +6289,30 @@ function applyNameMarquee(root){
   const ids=['ckAmzAlert','ckCereaAlert','ckTrashAlert'];
   const alerts=ids.map(id=>document.getElementById(id)).filter(Boolean);
   let rebuildToken=0;
+  let activeSignature='';
 
   function visibleAlerts(){ return alerts.filter(a=>!a.hidden); }
 
-  function rebuild(){
+  function rebuild(force=false){
+    const vis=visibleAlerts();
+    const signature=vis.map(a=>{
+      const txt=String(a.textContent||'').replace(/\s+/g,' ').trim();
+      return `${a.id}|${txt}`;
+    }).join('||');
+
+    // Gli aggiornamenti periodici possono riscrivere gli stessi dati: in quel
+    // caso non tocchiamo il DOM e soprattutto non riavviamo l'animazione.
+    const alreadyStable=vis.length===0 ? bar.hidden : bar.classList.contains('scrolling');
+    if(!force && signature===activeSignature && alreadyStable) return;
+    activeSignature=signature;
+
     const token=++rebuildToken;
     // rimuovi eventuale clone precedente
     track.querySelectorAll('.ck-alertbar-clone').forEach(n=>n.remove());
     track.style.removeProperty('--ticker-dur');
-    track.style.removeProperty('--ticker-step-1');
-    track.style.removeProperty('--ticker-step-2');
     track.style.removeProperty('--ticker-step-3');
     bar.classList.remove('scrolling');
 
-    const vis=visibleAlerts();
     // niente avvisi accesi → nascondi tutta la barra
     if(vis.length===0){ bar.hidden=true; return; }
     bar.hidden=false;
@@ -6335,8 +6342,6 @@ function applyNameMarquee(root){
       track.appendChild(frag);
 
       const shift=Math.round(cycleW*1000)/1000;
-      track.style.setProperty('--ticker-step-1', (-(shift/3))+'px');
-      track.style.setProperty('--ticker-step-2', (-(shift*2/3))+'px');
       track.style.setProperty('--ticker-step-3', (-shift)+'px');
       const dur=Math.max(28,Math.round(shift/58));
       track.style.setProperty('--ticker-dur',dur+'s');
@@ -6351,9 +6356,9 @@ function applyNameMarquee(root){
     attributes:true, attributeFilter:['hidden'], childList:true, subtree:true, characterData:true
   }));
   // ricalcolo su resize e al caricamento dei font
-  let rz; window.addEventListener('resize', ()=>{ clearTimeout(rz); rz=setTimeout(rebuild,180); });
-  try{ if(document.fonts && document.fonts.ready) document.fonts.ready.then(rebuild); }catch(_){}
-  rebuild();
+  let rz; window.addEventListener('resize', ()=>{ clearTimeout(rz); rz=setTimeout(()=>rebuild(true),180); });
+  try{ if(document.fonts && document.fonts.ready) document.fonts.ready.then(()=>rebuild(true)); }catch(_){}
+  rebuild(true);
 })();
 
 /* ===== AUTO-SCROLL liste board ============================================
