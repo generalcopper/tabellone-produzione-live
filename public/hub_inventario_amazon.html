@@ -4582,8 +4582,9 @@ function guessTitleFromRaw(rawText, sku){
       timer: null,
       running: false,
       queued: false,
+      lastReason: "frontend_render",
       lastPublishedHash: "",
-      publisherVersion: 1
+      publisherVersion: 2
     };
 
     function __frontendLowStockSourceClocks(){
@@ -4645,6 +4646,7 @@ function guessTitleFromRaw(rawText, sku){
       try{
         if(!state.user?.isWhitelisted) return;
         if(!state.inventory?.[INVENTORY_CANONICAL_LOC]?.meta?.loaded) return;
+        if(state.twReorders?.ready !== true) return;
         const api = state.firebase?.api;
         const db = state.firebase?.db;
         if(!api || !db || !api.runTransaction) return;
@@ -4704,7 +4706,7 @@ function guessTitleFromRaw(rawText, sku){
             inventoryLocation: INVENTORY_CANONICAL_LOC,
             frontendPath: location.pathname,
             frontendTitle: document.title,
-            frontendBuild: "hub_inventario_amazon_frontend_snapshot_v1"
+            frontendBuild: "hub_inventario_amazon_frontend_snapshot_v2"
           }, { merge:false });
           published = true;
         });
@@ -4729,9 +4731,20 @@ function guessTitleFromRaw(rawText, sku){
       }
     }
 
-    function scheduleFrontendLowStockSnapshot(_reason="frontend_render", _delay=450){
-      // Disabilitato: la vista sotto scorta viene prodotta dal backend e letta da tutti i dispositivi.
-      return;
+    function scheduleFrontendLowStockSnapshot(reason="frontend_render", delay=450){
+      try{
+        if(!state.user?.isWhitelisted) return;
+        __frontendLowStockSnapshot.lastReason = String(reason || "frontend_render");
+        if(__frontendLowStockSnapshot.timer) clearTimeout(__frontendLowStockSnapshot.timer);
+        __frontendLowStockSnapshot.timer = setTimeout(()=>{
+          __frontendLowStockSnapshot.timer = null;
+          if(!state.inventory?.[INVENTORY_CANONICAL_LOC]?.meta?.loaded) return;
+          if(state.twReorders?.ready !== true) return;
+          void publishFrontendLowStockSnapshot(__frontendLowStockSnapshot.lastReason || "frontend_render");
+        }, Math.max(180, Number(delay || 0)));
+      }catch(err){
+        console.warn("frontend low-stock snapshot schedule", err);
+      }
     }
 
     // trigger email dopo aggiornamenti reali: runtime + realtime Firestore (anche da altri hub), NON all'accesso
