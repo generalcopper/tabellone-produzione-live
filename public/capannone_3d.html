@@ -2989,11 +2989,11 @@ function killFog(root){
     m.castShadow=true; m.receiveShadow=true; g.add(m);
   }
   sideWall(x0,ix0); sideWall(ix1,x1);
-  // chiusura sul muro di fondo, trasparente come il fronte: il volume della
-  // stanza resta leggibile anche guardando il capannone da dietro.
-  const back=new THREE.Mesh(new THREE.BoxGeometry(x1-x0,hCeil,iz0-SOP.z0),noFog(M.roomShell));
+  // chiusura sul muro di fondo: piena come il resto del capannone
+  // (il muro perimetrale è nascosto di default, serve una faccia opaca).
+  const back=new THREE.Mesh(new THREE.BoxGeometry(x1-x0,hCeil,iz0-SOP.z0),M.sop);
   back.position.set((x0+x1)/2,hCeil/2,(SOP.z0+iz0)/2);
-  back.castShadow=false; back.receiveShadow=false; g.add(back);
+  back.castShadow=true; back.receiveShadow=true; g.add(back);
 
   // --- parete di fronte a segmenti, unico vuoto per la porta ---
   // porta 1,30 x 2,11: accostata allo spigolo interno verso l'intercapedine
@@ -3019,6 +3019,7 @@ function killFog(root){
     const p=new THREE.Mesh(new THREE.PlaneGeometry(w,yIn1),noFog(M.wall));
     p.position.set(px,yIn1/2,pz); p.rotation.y=ry; p.receiveShadow=true; g.add(p);
   }
+  liner(ix1-ix0, cxI, iz0+0.006, 0);              // lato muro di fondo
   liner(iz1-iz0, ix0+0.006, czI, Math.PI/2);      // lato intercapedine
   liner(iz1-iz0, ix1-0.006, czI, -Math.PI/2);     // lato muro corto
   // soffitto e pavimento: stessi materiali di soletta e pavimento capannone, senza nebbia
@@ -3562,14 +3563,17 @@ function buildRack({id,x,z,bays,faceDir,empty,alongX,codeBays,toth=RACK_TOTH,lev
 }
 
 const C3={w:W3,pal:3}, C2={w:W2,pal:2};
+// Gli array sono in ordine di CODICE, non di posizione: dove la numerazione corre
+// al contrario rispetto all'asse, la fila viene ribaltata in fase di costruzione
+// e i codici rimappati con codeBays.
 const RACKS={
-  A:[C3,C3,C3,C2],   // 33
-  B:[C3,C3,C3,C3],   // 36
-  C:[C2,C3,C3,C3],   // 33
-  D:[C3,C3,C3,C2],   // 33
-  E:[C3,C3],         // 18
-  F:[C3,C3],         // 18
-  G:[C3,C3,C2],      // 8 — un solo livello, dentro la stanza sotto il soppalco
+  A:[C3,C3,C3,C2],       // 33  A01…A04
+  B:[C3,C3,C3,C3],       // 36  B01…B04
+  C:[C3,C2,C3,C3,C3],    // 42  C00 (nuova) + C01 corta + C02…C04
+  D:[C3,C3,C3,C2,C3],    // 42  D01…D04 + D05 (nuova)
+  E:[C3,C3,C2],          // 24  E01, E02 + E03 (nuova, corta)
+  F:[C2,C3,C3],          // 24  F00 (nuova, corta) + F01, F02
+  G:[C3,C3,C2],          // 8 — un solo livello, dentro la stanza sotto il soppalco
 };
 
 // SCAFFALATURE — aggiunte una alla volta nelle posizioni reali rilevate.
@@ -3613,10 +3617,10 @@ const built={};
   const D_ING=RACKS.D.reduce((s,b)=>s+b.w,0)+0.45;
   const Ccx=B_x0+C_ING/2;
   const Dcx=B_x0+D_ING/2;
-  // C specchiata lungo la lunghezza: la campata corta (C01) va dal lato della corsia, adiacente alla D.
-  // Geometria invertita [C3,C3,C3,C2], codici mappati [C04,C03,C02,C01].
+  // C numerata al contrario rispetto a X: procedendo lungo +X si incontrano
+  // C04, C03, C02, C01 (corta) e infine C00, la campata aggiunta in coda alla fila.
   const RACKS_C_flip=[...RACKS.C].reverse();
-  const C_codeBays=[4,3,2,1];
+  const C_codeBays=[4,3,2,1,0];
   built.C=buildRack({id:'C',x:Ccx,z:Ccz,bays:RACKS_C_flip,empty:true,alongX:true,codeBays:C_codeBays});
   built.D=buildRack({id:'D',x:Dcx,z:Dcz,bays:RACKS.D,empty:true,alongX:true});
 }
@@ -3632,8 +3636,11 @@ const built={};
   const Ecx=F_inner-0.20-RACK_DEPTH/2;            // centro E (20cm da F, contrapposta)
   const Az0=CUT_Z+0.10;                            // stessa partenza Z della A
   const EF_ING=RACKS.E.reduce((s,b)=>s+b.w,0)+0.30;
-  const EFcz=Az0+EF_ING/2;
-  built.F=buildRack({id:'F',x:Fcx,z:EFcz,bays:RACKS.F,empty:true});
+  const EFcz=Az0+EF_ING/2;                        // E ed F hanno lo stesso sviluppo
+  // F è numerata al contrario rispetto a Z: lungo +Z si incontrano F02, F01 e poi
+  // F00, la campata corta aggiunta verso il fronte. Stessa tecnica della fila C.
+  const RACKS_F_flip=[...RACKS.F].reverse();
+  built.F=buildRack({id:'F',x:Fcx,z:EFcz,bays:RACKS_F_flip,empty:true,codeBays:[2,1,0]});
   built.E=buildRack({id:'E',x:Ecx,z:EFcz,bays:RACKS.E,empty:true});
 }
 
@@ -3723,10 +3730,10 @@ const CARTELLO_COLORI={
         [faceMat,faceMat,sideMat,sideMat,sideMat,sideMat]);  // poster su ±X
     } else {
       // fila lungo Z: cartello alla TESTATA (estremità Z), incassato nel piano del montante.
-      // default: estremità più vicina al centro; la A va sull'estremità OPPOSTA.
-      const nearZ = (Math.abs(box.min.z) <= Math.abs(box.max.z)) ? box.min.z : box.max.z;
-      const farZ  = (nearZ===box.min.z) ? box.max.z : box.min.z;
-      const zEnd = (id==='A') ? farZ : nearZ;
+      // Le file lungo Z (A, E, F) partono tutte dal ritorno cartongesso e si sviluppano
+      // verso il fronte: la testata leggibile è sempre quella a +Z, mai quella al muro.
+      // (Non usare l'estremità "più vicina all'origine": si ribalta quando la fila cresce.)
+      const zEnd = box.max.z;
       px = cx;
       pz = zEnd + (zEnd<=cz ? -SIGN_T/2 : SIGN_T/2);
       sign=new THREE.Mesh(new THREE.BoxGeometry(SIGN_W,SIGN_H,SIGN_T),
