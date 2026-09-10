@@ -272,6 +272,7 @@
 
 </style>
 <link rel="stylesheet" href="./picking-notifications.css?v=20260907-summary">
+<link rel="stylesheet" href="./picking-bionee-shop.css?v=20260910">
 </head>
 
 <body>
@@ -409,6 +410,10 @@
         <span class="pickingNavLabel">Storico prelievi</span>
         <span class="pickingNavCount" id="pickingHistoryNavCount">—</span>
       </button>
+      <button class="pickingNavBtn" id="btnPickingBioneeShop" type="button" data-picking-view="bioneeShop" aria-controls="homePickingBioneeShopBox" aria-pressed="false">
+        <span class="pickingNavIcon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10h18l-2-6H5l-2 6Z"/><path d="M5 10v10h14V10M9 20v-6h6v6"/></svg></span>
+        <span class="pickingNavLabel">Bionee shop</span>
+      </button>
       <button class="pickingNavBtn" id="btnPickingNotifications" type="button" data-picking-view="notifications" aria-controls="homePickingNotificationsBox" aria-pressed="false" style="display:none">
         <span class="pickingNavIcon" aria-hidden="true">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></svg>
@@ -536,6 +541,8 @@
             <div class="gridTable" id="homePickedHistoryList" style="margin-top:12px;"></div>
             <div class="hint" id="homePickedHistoryHint" style="margin-top:10px"></div>
           </div>
+
+          <div class="miniCard pickingSection" id="homePickingBioneeShopBox" aria-hidden="true"></div>
 
           <div class="miniCard pickingSection" id="homePickingNotificationsBox" aria-hidden="true">
             <div class="miniTop">
@@ -7376,12 +7383,36 @@ function readRackPickerSelection(root){
       }
     }
 
+    let _bioneeShopUi = null, _bioneeShopLoading = null, _bioneeShopUid = "";
+    async function openBioneeShop(){
+      if(!state.user?.isWhitelisted || pickingHomeView() !== "bioneeShop") return;
+      try{
+        const uid = state.firebase.auth?.currentUser?.uid;
+        if(!_bioneeShopLoading) _bioneeShopLoading = import("./picking-bionee-shop.js?v=20260910");
+        const mod = await _bioneeShopLoading;
+        if(uid !== state.firebase.auth?.currentUser?.uid || !state.user?.isWhitelisted || pickingHomeView() !== "bioneeShop") return;
+        if(!_bioneeShopUi) _bioneeShopUi = mod.createBioneeShopMonitor({
+          root: $("homePickingBioneeShopBox"), getFirebase: () => state.firebase,
+          getUser: () => state.firebase.auth?.currentUser,
+          isActive: () => !!state.user?.isWhitelisted && pickingHomeView() === "bioneeShop"
+        });
+        _bioneeShopUi.open();
+      }catch(err){
+        _bioneeShopLoading = null;
+        $("homePickingBioneeShopBox").textContent = "Impossibile caricare Bionee shop. Riapri la sezione.";
+      }
+    }
+
     let _pickingMailUi = null;
     let _pickingMailLoading = null;
     let _pickingMailAuthUid = "";
 
     function syncPickingMailAuth(){
       const uid = state.user?.uid || "";
+      if(uid !== _bioneeShopUid || !state.user?.isWhitelisted){
+        _bioneeShopUi?.reset(); _bioneeShopUid = uid;
+      }
+      if(!state.user?.isWhitelisted && state.ui?.pickingHomeView === "bioneeShop") state.ui.pickingHomeView = "noLocation";
       if(uid !== _pickingMailAuthUid || !state.user?.isAdmin){
         _pickingMailUi?.reset();
         _pickingMailAuthUid = uid;
@@ -7417,7 +7448,7 @@ function readRackPickerSelection(root){
     function pickingHomeView(){
       const v = state.ui?.pickingHomeView || "noLocation";
       if(v === "picking") return "pickingFbm"; // compatibilità con vecchia voce unica
-      return (v === "located" || v === "pickingFbm" || v === "pickingFba" || v === "pickingHistory" || (v === "notifications" && state.user?.isAdmin)) ? v : "noLocation";
+      return (v === "located" || v === "pickingFbm" || v === "pickingFba" || v === "pickingHistory" || (v === "bioneeShop" && state.user?.isWhitelisted) || (v === "notifications" && state.user?.isAdmin)) ? v : "noLocation";
     }
 
     
@@ -7722,6 +7753,7 @@ function readRackPickerSelection(root){
         { key:"located", box:"homeLocatedBox", active:view === "located" },
         { key:"picking", box:"homePickingBox", active:pickingActive },
         { key:"pickingHistory", box:"homePickingHistoryBox", active:view === "pickingHistory" },
+        { key:"bioneeShop", box:"homePickingBioneeShopBox", active:view === "bioneeShop" },
         { key:"notifications", box:"homePickingNotificationsBox", active:view === "notifications" },
       ];
       const buttons = [
@@ -7730,6 +7762,7 @@ function readRackPickerSelection(root){
         { key:"pickingFbm", btn:"btnPickingFlowFbm" },
         { key:"pickingFba", btn:"btnPickingFlowFba" },
         { key:"pickingHistory", btn:"btnPickingHistory" },
+        { key:"bioneeShop", btn:"btnPickingBioneeShop" },
         { key:"notifications", btn:"btnPickingNotifications" },
       ];
 
@@ -7765,7 +7798,9 @@ function readRackPickerSelection(root){
         void openDroneModeFullscreen();
         return;
       }
-      state.ui.pickingHomeView = (next === "located" || next === "pickingFbm" || next === "pickingFba" || next === "pickingHistory" || (next === "notifications" && state.user?.isAdmin)) ? next : "noLocation";
+      state.ui.pickingHomeView = (next === "located" || next === "pickingFbm" || next === "pickingFba" || next === "pickingHistory" || (next === "bioneeShop" && state.user?.isWhitelisted) || (next === "notifications" && state.user?.isAdmin)) ? next : "noLocation";
+      if(state.ui.pickingHomeView === "bioneeShop") void openBioneeShop();
+      else _bioneeShopUi?.close();
       if(state.ui.pickingHomeView === "notifications") void openPickingMail();
       else _pickingMailUi?.close();
       const needsFlowLogs = (state.ui.pickingHomeView === "pickingFba" || state.ui.pickingHomeView === "pickingHistory");
@@ -8670,6 +8705,12 @@ Il valore non può essere inferiore alla quantità già ubicata.`,
       const beforeQty = stockQtyFromDoc(cloudItem || {});
       const beforeReserved = reservedQtyFromItem(cloudItem || {});
       const beforePending = pendingPickQtyFromItem(cloudItem || {});
+      const separateReservation = requestedSku !== stockSku;
+      const reservationItem = separateReservation ? (opts.reservationData || {}) : cloudItem;
+      const beforeReservation = reservedQtyFromItem(reservationItem);
+      const beforeReservationPending = pendingPickQtyFromItem(reservationItem);
+      const afterReservation = direction > 0 ? Math.max(0, beforeReservation - qty) : beforeReservation + qty;
+      const afterReservationPending = direction > 0 ? Math.max(0, beforeReservationPending - qty) : beforeReservationPending + qty;
       const shortageQty = Math.max(0, qty - beforeQty);
       const itemRef = api.doc(db, COL_ROOT, loc, SUB_ITEMS, stockSku);
 
@@ -8693,8 +8734,8 @@ Il valore non può essere inferiore alla quantità già ubicata.`,
         }
         delta = -qty;
         afterQty = beforeQty - qty;
-        afterReserved = Math.max(0, beforeReserved - qty);
-        afterPending = Math.max(0, beforePending - qty);
+        afterReserved = separateReservation ? beforeReserved : afterReservation;
+        afterPending = separateReservation ? beforePending : afterReservationPending;
         actionType = forceNegative ? "prelievo_picking_forzato" : "prelievo_picking";
         note = forceNegative ? "Scarico reale da Picking forzato" : "Scarico reale da Picking";
       }else{
@@ -8703,8 +8744,8 @@ Il valore non può essere inferiore alla quantità già ubicata.`,
         allocationResult = restoreRackAllocationsForPicking(cloudItem, consumedAllocations);
         delta = qty;
         afterQty = beforeQty + qty;
-        afterReserved = beforeReserved + qty;
-        afterPending = beforePending + qty;
+        afterReserved = separateReservation ? beforeReserved : afterReservation;
+        afterPending = separateReservation ? beforePending : afterReservationPending;
         actionType = "annulla_prelievo_picking";
         note = "Annullamento prelievo Picking";
       }
@@ -8733,6 +8774,21 @@ Il valore non può essere inferiore alla quantità già ubicata.`,
       }, allocationResult.nextAllocations || [], allocationResult.cleanLocations || [], afterQty);
 
       tx.set(itemRef, itemPatch, { merge:true });
+      if(separateReservation){
+        tx.set(api.doc(db, COL_ROOT, loc, SUB_ITEMS, requestedSku), {
+          sku:requestedSku, reservedQty:afterReservation, pendingPickQty:afterReservationPending,
+          availableQty:Math.max(0, stockQtyFromDoc(reservationItem) - afterReservation),
+          reservationStatus:afterReservationPending > 0 ? "in_attesa_picking" : "prelevata",
+          lastPickingFlowId:flow?.id || opts.flowId || "", lastPickingAt:api.serverTimestamp(),
+          lastPickingAtClient:nowClient, lastPickingBy:who,
+          updatedAt:api.serverTimestamp(), updatedAtClient:nowClient, updatedBy:who
+        }, {merge:true});
+        addProductMovementToBatch(tx, api, db, requestedSku, {
+          type:"rilascio_prenotazione_alias", requestedSku, stockSku, qtySigned:0, deltaSigned:0,
+          reservedQtySigned:afterReservation - beforeReservation, location:loc, source:"picking",
+          flowId:flow?.id || opts.flowId || "", createdAtClient:nowClient
+        });
+      }
 
       addProductMovementToBatch(tx, api, db, stockSku, {
         type: actionType,
@@ -8741,8 +8797,8 @@ Il valore non può essere inferiore alla quantità già ubicata.`,
         asin,
         qtySigned: delta,
         deltaSigned: delta,
-        reservationQty: direction > 0 ? -qty : qty,
-        reservedQtySigned: direction > 0 ? -qty : qty,
+        reservationQty: separateReservation ? 0 : afterReservation - beforeReservation,
+        reservedQtySigned: separateReservation ? 0 : afterReservation - beforeReservation,
         fromWarehouse: loc,
         toWarehouse: loc,
         location: loc,
@@ -8772,6 +8828,7 @@ Il valore non può essere inferiore alla quantità già ubicata.`,
         afterQty,
         beforeReserved,
         afterReserved,
+        reservationSku:requestedSku, afterReservation, afterReservationPending,
         beforePending,
         afterPending,
         reservedDelta: direction > 0 ? -qty : qty,
@@ -8833,14 +8890,20 @@ Il valore non può essere inferiore alla quantità già ubicata.`,
         }
 
         const itemSnaps = new Map();
+        const workingItems = new Map();
+        const cloudSnaps = new Map();
         const idxPick = getInvIndexForMatch();
         for(const line of linesToPick){
           const sku = toSkuId(line?.sku || "");
           if(!sku || itemSnaps.has(sku)) continue;
           const stockSku = stockSkuForSkuAny(sku, l, idxPick) || sku;
-          const itemRef = api.doc(db, COL_ROOT, l, SUB_ITEMS, stockSku);
-          const itemSnap = await tx.get(itemRef);
-          itemSnaps.set(sku, { snap:itemSnap, stockSku });
+          for(const readSku of new Set([stockSku, sku])){
+            if(cloudSnaps.has(readSku)) continue;
+            const snap = await tx.get(api.doc(db, COL_ROOT, l, SUB_ITEMS, readSku));
+            cloudSnaps.set(readSku, snap);
+            workingItems.set(readSku, snap.exists() ? snap.data() || {} : {});
+          }
+          itemSnaps.set(sku, { snap:cloudSnaps.get(stockSku), stockSku });
         }
 
         const pickedLines = {};
@@ -8862,9 +8925,16 @@ Il valore non può essere inferiore alla quantità già ubicata.`,
           const itemInfo = itemSnaps.get(sku) || {};
           const itemSnap = itemInfo.snap;
           const stockSku = itemInfo.stockSku || stockSkuForSkuAny(sku, l, idxPick) || sku;
-          const itemData = itemSnap && itemSnap.exists() ? (itemSnap.data() || {}) : {};
-          const stockInfo = addPickingStockTransactionWrite(tx, api, db, l, flow, line, 1, { nowClient, who, title, flowId:id, itemData, forceNegative, stockSku });
+          const itemData = workingItems.get(stockSku) || {};
+          const reservationData = workingItems.get(sku) || {};
+          const stockInfo = addPickingStockTransactionWrite(tx, api, db, l, flow, line, 1, { nowClient, who, title, flowId:id, itemData, reservationData, forceNegative, stockSku });
           if(!stockInfo) continue;
+          // Two child SKUs in one flow must consume the owner's stock cumulatively.
+          workingItems.set(stockSku, {...itemData, qty:stockInfo.afterQty, reservedQty:stockInfo.afterReserved,
+            pendingPickQty:stockInfo.afterPending, rackAllocations:stockInfo.nextAllocations,
+            rackLocations:stockInfo.cleanLocations});
+          if(sku !== stockSku) workingItems.set(sku, {...reservationData, reservedQty:stockInfo.afterReservation,
+            pendingPickQty:stockInfo.afterReservationPending});
           stockInfos.push(stockInfo);
           const position = stockInfo.position || pickingPositionTextFromCloudItem(itemData) || "—";
           const rec = { picked:true, status:"prelevato", sku, requestedSku:sku, stockSku:stockInfo.stockSku || stockSku, title: stockInfo.title || title, qty, position, rackLocation:position, pickedAllocations: stockInfo.consumedAllocations || [], forced:!!stockInfo.forced, forceNegative:!!stockInfo.forceNegative, shortageQty:stockInfo.shortageQty || 0, missingRackQty:stockInfo.missingRackQty || 0, pickedAtClient:nowClient, pickedBy:who, ...(bulkId ? { bulkId } : {}) };
@@ -9101,6 +9171,14 @@ Confermandolo, la transaction cloud scaricherà comunque la quantità richiesta 
           if(!inv || !Array.isArray(inv.items)) continue;
           const itemIdx = inv.items.findIndex(it=>toSkuId(it?.sku || it?.id || "") === stockSku);
           if(itemIdx < 0) continue;
+          if(info.reservationSku && info.reservationSku !== stockSku){
+            const reservationIdx = inv.items.findIndex(it => toSkuId(it?.sku || it?.id || "") === info.reservationSku);
+            if(reservationIdx >= 0){
+              const child = inv.items[reservationIdx];
+              inv.items.splice(reservationIdx, 1, {...child, reservedQty:info.afterReservation,
+                pendingPickQty:info.afterReservationPending, availableQty:Math.max(0, stockQtyFromDoc(child) - info.afterReservation)});
+            }
+          }
           const prev = inv.items[itemIdx] || {};
           const afterQty = Number.isFinite(Number(info.afterQty)) ? Math.round(Number(info.afterQty)) : Math.max(0, (Number(prev.qty || 0) || 0) - (Number(info.qty || 0) || 0));
           const afterReserved = Number.isFinite(Number(info.afterReserved)) ? Math.max(0, Math.round(Number(info.afterReserved))) : Math.max(0, reservedQtyFromItem(prev) - (Number(info.qty || 0) || 0));
