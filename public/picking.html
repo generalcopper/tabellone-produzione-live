@@ -1978,29 +1978,9 @@ function cleanProductMainName(s){
     }
 
     function readSkuAliasesFromDoc(d, fallbackSku=""){
-      const base = toSkuId(fallbackSku || d?.sku || d?.id || "");
-      const raw = [];
-      const add = (v)=>{
-        if(Array.isArray(v)) raw.push(...v);
-        else if(v) raw.push(v);
-      };
-      add(base);
-      add(d?.canonicalSku);
-      add(d?.skuGroupCanonical);
-      add(d?.masterSku);
-      add(d?.parentSku);
-      add(d?.aliasOfSku);
-      add(d?.renamedFromSku);
-      add(d?.previousSku);
-      add(d?.oldSku);
-      add(d?.skuAliases);
-      add(d?.aliasSkus);
-      add(d?.linkedSkus);
-      add(d?.unifiedSkus);
-      add(d?.fbaFbmSkus);
-      add(d?.skuUnification?.canonicalSku);
-      add(d?.skuUnification?.aliases);
-      return normalizeSkuAliases(raw, base);
+      const sku = toSkuId(fallbackSku || d?.sku || d?.id || "");
+      // Match Hub: stale alias arrays cannot merge different ASINs.
+      return sku ? buildSkuAliasIndex().members(sku) : [];
     }
 
     function readSkuAliasCanonicalFromDoc(d, fallbackSku=""){
@@ -2036,16 +2016,13 @@ function cleanProductMainName(s){
     }
 
     function buildSkuAliasIndex(){
-      const __aliasCacheKey = inventoryRuntimeCacheKey("sku_alias_index");
-      try{
-        state.cache = state.cache || {};
-        const hit = state.cache.skuAliasIndex;
-        if(hit && hit.key === __aliasCacheKey && hit.value) return hit.value;
-      }catch(_e){}
+      const cacheKey = inventoryRuntimeCacheKey("sku_alias_index");
+      state.cache = state.cache || {};
+      if(state.cache.skuAliasIndex?.key === cacheKey) return state.cache.skuAliasIndex.value;
       const parent = new Map();
-      const explicitCanonical = new Map();
       const allSkus = new Set();
       const asinGroups = new Map();
+      const itemsBySku = new Map();
       const find = (x)=>{
         const s = toSkuId(x || "");
         if(!s) return "";
@@ -2061,23 +2038,6 @@ function cleanProductMainName(s){
         const child = root === ra ? rb : ra;
         parent.set(child, root);
       };
-      const noteCanonical = (canonical)=>{
-        const c = toSkuId(canonical || "");
-        if(!c) return;
-        const r = find(c);
-        if(r && !explicitCanonical.has(r)) explicitCanonical.set(r, c);
-      };
-      const addGroup = (canonical, aliases)=>{
-        const c = toSkuId(canonical || "");
-        const arr = normalizeSkuAliases(aliases, c);
-        if(c) arr.push(c);
-        const uniq = normalizeSkuAliases(arr);
-        if(!uniq.length) return;
-        uniq.forEach(s=>{ allSkus.add(s); find(s); });
-        const master = c || uniq[0];
-        uniq.forEach(s=> union(master, s));
-        noteCanonical(master);
-      };
 
       const addAsinSku = (asin, sku)=>{
         const a = normalizeAsin(asin || "");
@@ -2092,35 +2052,45 @@ function cleanProductMainName(s){
         for(const it of items){
           const sku = toSkuId(it?.sku || it?.id || "");
           if(!sku) continue;
-          const canonical = readSkuAliasCanonicalFromDoc(it || {}, sku);
-          const aliases = readSkuAliasesFromDoc(it || {}, sku);
-          addGroup(canonical || sku, aliases);
+          allSkus.add(sku);
+          find(sku);
+          if(!itemsBySku.has(sku)) itemsBySku.set(sku, it);
           addAsinSku(readAsinFromDoc(it || {}), sku);
         }
       }
 
       for(const members of asinGroups.values()){
-        const arr = normalizeSkuAliases(Array.from(members));
-        if(arr.length > 1) addGroup(arr[0], arr);
+        const arr = normalizeSkuAliases(Array.from(members)).sort((a,b)=>a.localeCompare(b));
+        if(arr.length > 1){
+          const first = arr[0];
+          arr.forEach(sku=>union(first, sku));
+        }
       }
 
-      // riallinea i canonical dopo tutte le union
+      // L'ASIN è l'unico parent logico. Il canonical interno serve solo a indirizzare
+      // lo stock e preferisce il proprietario dichiarato dal cloud; gli alias manuali
+      // o gli snapshot legacy non possono più fondere prodotti privi dello stesso ASIN.
       const canonByRoot = new Map();
-      for(const loc of inventoryLocs()){
-        const items = (state.inventory?.[loc]?.items || []);
-        for(const it of items){
-          const sku = toSkuId(it?.sku || it?.id || "");
-          if(!sku) continue;
-          const c = readSkuAliasCanonicalFromDoc(it || {}, sku);
-          const r = find(sku);
-          if(r && c && !canonByRoot.has(r)) canonByRoot.set(r, c);
-        }
+      for(const members of asinGroups.values()){
+        const arr = normalizeSkuAliases(Array.from(members)).sort((a,b)=>a.localeCompare(b));
+        if(!arr.length) continue;
+        const groupItems = arr.map(sku=>itemsBySku.get(sku)).filter(Boolean);
+        const declaredCanonicals = Array.from(new Set(groupItems
+          .map(item=>readSkuAliasCanonicalFromDoc(item || {}, item?.sku || item?.id || ""))
+          .filter(candidate=>candidate && arr.includes(candidate))));
+        const safeCanonical = declaredCanonicals.length === 1 ? declaredCanonicals[0] : arr[0];
+        const ownerSku = pickingCloudDeclaredStockOwnerSku(groupItems, safeCanonical);
+        canonByRoot.set(find(arr[0]), (ownerSku && arr.includes(ownerSku)) ? ownerSku : safeCanonical);
+      }
+      for(const sku of allSkus){
+        const root = find(sku);
+        if(root && !canonByRoot.has(root)) canonByRoot.set(root, sku);
       }
 
       const groups = new Map();
       allSkus.forEach(s=>{
         const r = find(s);
-        const canonical = canonByRoot.get(r) || explicitCanonical.get(r) || r || s;
+        const canonical = canonByRoot.get(r) || r || s;
         if(!groups.has(canonical)) groups.set(canonical, new Set());
         groups.get(canonical).add(s);
       });
@@ -2129,7 +2099,7 @@ function cleanProductMainName(s){
         const s = toSkuId(sku || "");
         if(!s) return "";
         const r = find(s);
-        return canonByRoot.get(r) || explicitCanonical.get(r) || r || s;
+        return canonByRoot.get(r) || r || s;
       };
       const members = (sku)=>{
         const canonical = resolve(sku);
@@ -2138,12 +2108,9 @@ function cleanProductMainName(s){
         return canonical ? [canonical, ...arr.filter(x=>x!==canonical)] : arr;
       };
       const isUnified = (sku)=> members(sku).length > 1;
-      const __aliasIndex = { resolve, members, isUnified, groups };
-      try{
-        state.cache = state.cache || {};
-        state.cache.skuAliasIndex = { key: __aliasCacheKey, value: __aliasIndex };
-      }catch(_e){}
-      return __aliasIndex;
+      const value = { resolve, members, isUnified, groups };
+      state.cache.skuAliasIndex = {key:cacheKey, value};
+      return value;
     }
 
     function resolveSkuAlias(sku){ return buildSkuAliasIndex().resolve(sku); }
@@ -2982,7 +2949,7 @@ function cleanProductMainName(s){
           slot.running = true;
           try{
             const items = state.inventory?.[loc]?.items || [];
-            const plans = items.map(rackAllocationCloudNormalizePlan).filter(Boolean).slice(0, 120);
+            const plans = stockRepresentativeItemsForLoc(loc).map(rackAllocationCloudNormalizePlan).filter(Boolean).slice(0, 120);
             if(!plans.length){ slot.lastAt = Date.now(); return; }
 
             const who = state.user?.emailLower || state.user?.email || state.user?.uid || "";
@@ -7145,8 +7112,9 @@ function readRackPickerSelection(root){
     }
 
     async function editHomeNoLocationQtyPrompt(skuRaw, locRaw){
-      const sku = toSkuId(skuRaw || "");
+      const requestedSku = toSkuId(skuRaw || "");
       const loc = (locRaw === "cerea" || locRaw === "concamarise") ? locRaw : state.route.loc;
+      const sku = stockSkuForSkuAny(requestedSku, loc) || requestedSku;
 
       if(!canUsePickingActions()){
         showToast("Permessi", "Utente non abilitato al picking.", 2200);
@@ -7244,6 +7212,9 @@ function readRackPickerSelection(root){
             title,
             titleNorm: normalizeText(title || sku),
             qty: safeFinalQty,
+            sharedStockSourceSku:sku, sharedStockCanonicalSku:sku,
+            sharedStockRevisionAtClient:nowClient, stockUpdatedAtClient:nowClient,
+            lastStockMutationAtClient:nowClient,
             stockLots: safeStockLots,
             rackLocation: cleanLocation,
             rackLocations: cleanLocations,
@@ -8580,6 +8551,9 @@ Il valore non può essere inferiore alla quantità già ubicata.`,
         titleNorm: normalizeText(title || stockSku),
         ...asinPatch,
         qty: api.increment(delta),
+        sharedStockSourceSku:stockSku, sharedStockCanonicalSku:stockSku,
+        sharedStockRevisionAtClient:nowClient, stockUpdatedAtClient:nowClient,
+        lastStockMutationAtClient:nowClient,
         reservedQty: reservedFieldValue,
         pendingPickQty: pendingFieldValue,
         reservationStatus: direction > 0 ? "prelevata" : "in_attesa_picking",
@@ -8758,6 +8732,9 @@ Il valore non può essere inferiore alla quantità già ubicata.`,
         titleNorm: normalizeText(itemTitle || stockSku),
         ...asinPatch,
         qty: afterQty,
+        sharedStockSourceSku:stockSku, sharedStockCanonicalSku:stockSku,
+        sharedStockRevisionAtClient:nowClient, stockUpdatedAtClient:nowClient,
+        lastStockMutationAtClient:nowClient,
         reservedQty: afterReserved,
         pendingPickQty: afterPending,
         reservationStatus: direction > 0 ? (forceNegative ? "prelevata_forzata" : "prelevata") : "in_attesa_picking",
