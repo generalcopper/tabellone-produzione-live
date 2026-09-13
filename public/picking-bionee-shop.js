@@ -3,6 +3,8 @@ export function createBioneeShopMonitor({root, getFirebase, getUser, isActive}) 
   const el = (tag, text, cls) => { const n = document.createElement(tag); if (text !== undefined) n.textContent = text; if (cls) n.className = cls; return n; };
   const formatTime = value => value ? new Intl.DateTimeFormat('it-IT', {timeZone:'Europe/Rome', dateStyle:'short', timeStyle:'medium'}).format(new Date(value)) : 'Non ancora disponibile';
   const reasons = {
+    SHOPIFY_INVENTORY_IDENTITY_OR_POLICY_MISMATCH: 'Uno o più prodotti Shopify hanno dati o regole di disponibilità diversi da quelli previsti. Di seguito gli articoli da correggere.',
+    INACTIVE_OR_INVALID_INVENTORY_LEVEL: 'La disponibilità nella sede Shopify non è attiva o non è valida.',
     INVENTORY_SCOPE_REQUIRED: 'Shopify non ha ancora autorizzato l’accesso all’inventario. La sincronizzazione è bloccata.',
     ORDER_RECONCILIATION_INCOMPLETE: 'Riconciliazione ordini da completare. Il controllo verrà ripetuto automaticamente.',
     PICKING_CHANGED_DURING_SYNC: 'L’inventario è cambiato durante il controllo. Verifica al prossimo ciclo.',
@@ -21,6 +23,19 @@ export function createBioneeShopMonitor({root, getFirebase, getUser, isActive}) 
     status.textContent = cached ? 'Connessione assente · dati memorizzati sul dispositivo' : stale ? 'Controllo non aggiornato' : verified ? 'Sincronizzazione verificata' : data.status === 'blocked' ? 'Sincronizzazione bloccata' : 'Sincronizzazione da verificare';
     const reason = reasons[data.reason] || (data.reason ? 'Controllo non completato: ' + data.reason : '');
     if (reason) root.append(el('p', reason, 'bioneeSyncNote'));
+    const fields = {inventoryPolicy: 'Vendita oltre disponibilità', tracked: 'Tracciamento inventario',
+      sku: 'SKU', productId: 'Prodotto', variantId: 'Variante', inventoryItemId: 'Articolo inventario'};
+    const valueLabel = value => value === 'DENY' ? 'disabilitata' : value === 'CONTINUE' ? 'abilitata' :
+      value === true || value === 'true' ? 'attivo' : value === false || value === 'false' ? 'disattivo' : String(value ?? 'assente');
+    for (const issue of Array.isArray(data.details?.issues) ? data.details.issues : []) {
+      root.append(el('p', issue.sku + ' · ' + (fields[issue.field] || issue.field) + ': ' + valueLabel(issue.actual) +
+        ' (previsto: ' + valueLabel(issue.expected) + ').', 'bioneeSyncNote'));
+    }
+    if (data.status === 'blocked' && ['queued', 'already_notified'].includes(data.alert?.status)) {
+      root.append(el('p', 'Avviso predisposto per info@lgtrading.it.', 'bioneeSyncNote'));
+    } else if (data.status === 'blocked' && data.alert?.status === 'error') {
+      root.append(el('p', 'Invio dell’avviso non riuscito. Il sistema riproverà al prossimo controllo.', 'bioneeSyncNote'));
+    }
     const grid = el('dl', undefined, 'bioneeSyncGrid');
     for (const [label,value] of [
       ['Ultimo controllo',formatTime(data.checkedAtClient)], ['Ultimo sync verificato',formatTime(data.lastSuccessfulAtClient)],
