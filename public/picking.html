@@ -270,6 +270,17 @@
   .sodProductCell:nth-child(4){grid-area:price;align-items:flex-start;text-align:left;}
 }
 
+.locatedQtyDialog{width:min(520px,calc(100vw - 28px));max-height:calc(100dvh - 32px);box-sizing:border-box;padding:0;border:1px solid var(--line);border-radius:14px;background:var(--surface);color:var(--ink);box-shadow:0 16px 56px rgba(15,23,42,.25);overflow:auto;overscroll-behavior:contain;}
+.locatedQtyDialog::backdrop{background:rgba(15,23,42,.45);}
+.locatedQtyForm{padding:20px;display:grid;gap:14px;}
+.locatedQtyForm h2{margin:0;font-size:18px;line-height:1.25;}
+.locatedQtyForm p{margin:0;font-size:13px;line-height:1.45;color:var(--muted);overflow-wrap:anywhere;}
+.locatedQtySummary{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px;background:var(--surfaceAlt);border-radius:9px;font-size:14px;}
+.locatedQtySummary strong{white-space:nowrap;font-size:19px;}
+.locatedQtyRow{display:grid;grid-template-columns:minmax(0,1fr) 108px;align-items:center;gap:12px;}
+.locatedQtyRow small{display:block;margin-top:3px;color:var(--muted);}
+.locatedQtyRow .input{width:100%;min-width:0;box-sizing:border-box;font-size:16px;text-align:right;}
+.locatedQtyActions{display:flex;justify-content:flex-end;gap:8px;}
 </style>
 <link rel="stylesheet" href="./picking-notifications.css?v=20260907-summary">
 <link rel="stylesheet" href="./picking-bionee-shop.css?v=20260910">
@@ -7893,10 +7904,116 @@ function readRackPickerSelection(root){
         .map(x=>x.it);
     }
 
-    async function editHomeLocatedQtyPrompt(skuRaw, locRaw){
-      const sku = toSkuId(skuRaw || "");
-      const loc = (locRaw === "cerea" || locRaw === "concamarise") ? locRaw : state.route.loc;
+    function locatedQtySnapshotKey(item){
+      const raw = item?.__raw || item || {};
+      return JSON.stringify({
+        qty: stockQtyFromDoc(item),
+        stockOwner: toSkuId(raw.sharedStockSourceSku || raw.authoritativeStockSku || raw.stockOwnerSku || ""),
+        allocations: sortRackAllocationsForConsumption(readRackAllocationsFromDoc(item)),
+        lots: readStockLotsFromDoc(item).map(x=>({ lot:x.lot, qty:x.qty })).sort((a,b)=>a.lot.localeCompare(b.lot))
+      });
+    }
 
+    function buildLocatedQtyEdit(fresh, requested, opts = {}){
+      const before = normalizeRackAllocationsForWrite(readRackAllocationsFromDoc(fresh));
+      const beforeAllocated = rackAllocatedQtyFromDoc(fresh);
+      const beforeTotal = stockQtyFromDoc(fresh);
+      if(!before.length || rackAllocationQtyTotal(before) !== beforeAllocated){
+        throw new Error("Ubicazioni cambiate o non valide. Riapri la modifica quantità.");
+      }
+      const key = x=>`${x.code}::${x.lot}`;
+      const previous = new Map(before.map(x=>[key(x), x]));
+      const seen = new Set();
+      const changes = [];
+      const next = [];
+      for(const row of requested || []){
+        const rowKey = key(row);
+        const old = previous.get(rowKey);
+        if(!old || seen.has(rowKey)) throw new Error("Ubicazione o lotto non valido.");
+        if(!Number.isSafeInteger(row.qty) || row.qty < 0) throw new Error("Inserisci un numero intero positivo o zero.");
+        seen.add(rowKey);
+        if(row.qty > 0) next.push({ code:old.code, lot:old.lot, qty:row.qty });
+        if(row.qty !== old.qty) changes.push({ code:old.code, lot:old.lot, beforeQty:old.qty, afterQty:row.qty });
+      }
+      if(seen.size !== before.length) throw new Error("Completa le quantità di tutte le ubicazioni.");
+      const afterAllocated = rackAllocationQtyTotal(next);
+      const unallocated = Math.max(0, beforeTotal - beforeAllocated);
+      const afterTotal = afterAllocated + unallocated;
+      if(!Number.isSafeInteger(afterTotal)) throw new Error("Quantità troppo alta.");
+
+      // Prima conserva i pezzi da ubicare di ciascun lotto, poi applica soltanto
+      // le rettifiche delle ubicazioni scelte. Nessuna redistribuzione tra rack.
+      const lots = buildStockLotsForUnallocatedQty(fresh, unallocated, opts);
+      const byLot = new Map(lots.map(x=>[x.lot, { ...x }]));
+      for(const change of changes){
+        const lot = byLot.get(change.lot);
+        if(!lot) throw new Error("Lotto ubicato non trovato.");
+        lot.qty += change.afterQty - change.beforeQty;
+      }
+      const stockLots = Array.from(byLot.values()).filter(x=>x.qty > 0);
+      if(stockLots.reduce((sum,x)=>sum+x.qty,0) !== afterTotal) throw new Error("Totale lotti non coerente.");
+      return { before, allocations:next, stockLots, beforeAllocated, afterAllocated, beforeTotal, afterTotal, unallocated, changes };
+    }
+
+    function requestLocatedQtyEdit(item, sku, loc){
+      const rows = rackAllocationRowsForDetails(item);
+      const allocated = rackAllocatedQtyFromDoc(item);
+      const unallocated = rackUnallocatedQtyFromDoc(item);
+      if(!rows.length || rackAllocationQtyTotal(rows) !== allocated){
+        throw new Error("Ubicazioni non valide. Riapri la scheda del prodotto.");
+      }
+      return new Promise(resolve=>{
+        const dialog = document.createElement("dialog");
+        dialog.className = "locatedQtyDialog";
+        dialog.setAttribute("aria-labelledby", "locatedQtyTitle");
+        dialog.innerHTML = `<form class="locatedQtyForm">
+          <h2 id="locatedQtyTitle">Modifica quantità ubicata</h2>
+          <p>${escapeHtml(sku)} • ${escapeHtml(prettyLoc(loc))}</p>
+          <div class="locatedQtySummary"><span>Quantità ubicata</span><strong data-located-total aria-live="polite">${allocated} pz</strong></div>
+          <p>Correggi i pezzi presenti nelle ubicazioni. La giacenza totale verrà aggiornata della stessa differenza.</p>
+          ${rows.map((row,i)=>`<label class="locatedQtyRow"><span><b>${escapeHtml(row.code)}</b><small>${escapeHtml(lotLabelFromId(row.lot))}</small></span><input class="input" data-located-index="${i}" inputmode="numeric" autocomplete="off" value="${row.qty}" aria-label="Quantità ${escapeHtml(row.code)} • ${escapeHtml(lotLabelFromId(row.lot))}" /></label>`).join("")}
+          <p>Da ubicare: ${unallocated} pz<br>Totale inventario: <strong data-stock-total>${stockQtyFromDoc(item)} pz</strong></p>
+          <p data-qty-error role="alert" hidden>Inserisci un numero intero positivo o zero per ogni ubicazione.</p>
+          <div class="locatedQtyActions"><button class="btn" type="button" data-cancel>Annulla</button><button class="btn primary" type="submit">Salva quantità</button></div>
+        </form>`;
+        const form = dialog.querySelector("form");
+        const inputs = Array.from(dialog.querySelectorAll("[data-located-index]"));
+        const save = dialog.querySelector('[type="submit"]');
+        const read = ()=>rows.map((row,i)=>({ ...row, qty:parseSignedQtyStrict(inputs[i].value) }));
+        const refresh = ()=>{
+          const values = read();
+          const valid = values.every(x=>Number.isSafeInteger(x.qty) && x.qty >= 0) && Number.isSafeInteger(values.reduce((sum,x)=>sum+x.qty,unallocated));
+          const total = valid ? rackAllocationQtyTotal(values) : null;
+          dialog.querySelector("[data-located-total]").textContent = valid ? `${total} pz` : "—";
+          dialog.querySelector("[data-stock-total]").textContent = valid ? `${total + unallocated} pz` : "—";
+          dialog.querySelector("[data-qty-error]").hidden = valid;
+          save.disabled = !valid;
+          return valid;
+        };
+        let result = null;
+        form.addEventListener("input", refresh);
+        form.addEventListener("submit", e=>{
+          e.preventDefault();
+          if(!refresh()) return;
+          result = read();
+          dialog.close();
+        });
+        dialog.querySelector("[data-cancel]").addEventListener("click", ()=>dialog.close());
+        dialog.addEventListener("keydown", e=>e.stopPropagation());
+        dialog.addEventListener("close", ()=>{ dialog.remove(); resolve(result); }, { once:true });
+        document.body.appendChild(dialog);
+        dialog.showModal();
+        inputs[0]?.focus();
+        inputs[0]?.select();
+      });
+    }
+
+    let locatedQtyEditInFlight = false;
+    async function editHomeLocatedQtyPrompt(skuRaw, locRaw){
+      if(locatedQtyEditInFlight) return;
+      const loc = (locRaw === "cerea" || locRaw === "concamarise") ? locRaw : state.route.loc;
+      const requestedSku = toSkuId(skuRaw || "");
+      const sku = stockSkuForSkuAny(requestedSku, loc) || requestedSku;
       if(!canUsePickingActions()){
         showToast("Permessi", "Utente non abilitato al picking.", 2200);
         return;
@@ -7905,41 +8022,11 @@ function readRackPickerSelection(root){
         showToast("Errore", "Prodotto o magazzino non valido.", 2200);
         return;
       }
-
       const currentItem = getProductBySku(loc, sku);
       if(!currentItem){
         showToast("Errore", "Prodotto non trovato.", 2200);
         return;
       }
-
-      const currentAllocated = rackAllocatedQtyFromDoc(currentItem || {});
-      const currentTotal = stockQtyFromDoc(currentItem || {});
-      const currentUnallocated = Math.max(0, currentTotal - currentAllocated);
-      const raw = prompt(
-        `Modifica quantità da scheda Ubicati
-
-SKU: ${sku}
-Inventario: ${prettyLoc(loc)}
-Quantità ubicata: ${currentAllocated} pz
-Totale attuale: ${currentTotal} pz${currentUnallocated ? `
-Da ubicare attuale: ${currentUnallocated} pz` : ""}
-
-Inserisci la nuova quantità totale dello SKU.
-Il valore non può essere inferiore alla quantità già ubicata.`,
-        String(Math.max(currentAllocated, Math.round(Number(currentTotal) || 0)))
-      );
-      if(raw === null) return;
-
-      const parsed = parseSignedQtyStrict(raw);
-      if(parsed === null || !Number.isFinite(parsed) || parsed < 0){
-        showToast("Quantità non valida", "Inserisci un numero intero positivo o zero.", 2400);
-        return;
-      }
-      if(parsed < currentAllocated){
-        showToast("Quantità bloccata", `Non puoi scendere sotto i ${currentAllocated} pz già ubicati.`, 2800);
-        return;
-      }
-
       const api = state.firebase.api;
       const db = state.firebase.db;
       if(!api || !db || !api.runTransaction){
@@ -7947,169 +8034,87 @@ Il valore non può essere inferiore alla quantità già ubicata.`,
         return;
       }
 
-      const itemRef = api.doc(db, COL_ROOT, loc, SUB_ITEMS, sku);
-      const productRef = api.doc(db, COL_PRODUCTS, sku);
-      const nowClient = Date.now();
-      const who = state.user?.email || state.user?.emailLower || state.user?.uid || "";
-      const movementId = api.doc(api.collection(db, COL_PRODUCTS, sku, SUB_MOVES)).id;
-
-      let runtimePatch = null;
-      let beforeAllocated = currentAllocated;
-      let beforeUnallocated = currentUnallocated;
-      let afterUnallocated = Math.max(0, parsed - currentAllocated);
-      let beforeTotal = currentTotal;
-      let afterTotal = parsed;
-
+      locatedQtyEditInFlight = true;
+      const snapshotKey = locatedQtySnapshotKey(currentItem);
+      const userUid = state.user?.uid;
       try{
-        await api.runTransaction(db, async (tx)=>{
+        const requested = await requestLocatedQtyEdit(currentItem, sku, loc);
+        if(requested === null) return;
+        if(!canUsePickingActions() || state.user?.uid !== userUid) throw new Error("Sessione cambiata. Accedi di nuovo.");
+        if(stockSkuForSkuAny(sku, loc) !== sku) throw new Error("Prodotto aggiornato. Riapri la modifica quantità.");
+        const itemRef = api.doc(db, COL_ROOT, loc, SUB_ITEMS, sku);
+        const productRef = api.doc(db, COL_PRODUCTS, sku);
+        const nowClient = Date.now();
+        const who = state.user?.email || state.user?.emailLower || state.user?.uid || "";
+        const movementId = api.doc(api.collection(db, COL_PRODUCTS, sku, SUB_MOVES)).id;
+        let runtimePatch = null;
+        let saved = null;
+
+        await api.runTransaction(db, async tx=>{
           const snap = await tx.get(itemRef);
           if(!snap.exists()) throw new Error("Prodotto non trovato.");
           const fresh = snap.data() || {};
+          if(locatedQtySnapshotKey(fresh) !== snapshotKey){
+            throw new Error("Quantità, lotti o ubicazioni aggiornati durante la modifica. Riapri il popup per usare i valori attuali.");
+          }
+          saved = buildLocatedQtyEdit(fresh, requested, { tsClient:nowClient, source:"quantita_ubicati", refId:movementId });
+          if(!saved.changes.length) return;
           const title = squashWhitespace(fresh.title || fresh.name || currentItem.title || sku) || sku;
-          const freshTotal = stockQtyFromDoc(fresh);
-          const allocations = normalizeRackAllocationsForWrite(readRackAllocationsFromDoc(fresh));
-          const allocatedTotal = rackAllocatedQtyFromDoc(fresh);
-          const freshUnallocated = Math.max(0, freshTotal - allocatedTotal);
-          const newTotal = Math.max(0, Math.round(Number(parsed) || 0));
-
-          if(newTotal < allocatedTotal){
-            throw new Error(`Quantità non valida: questo SKU ha già ${allocatedTotal} pz ubicati.`);
-          }
-
-          const newUnallocated = Math.max(0, newTotal - allocatedTotal);
-          const cleanLocations = normalizeRackLocationsList(allocations.map(x=>x.code));
-          const cleanLocation = cleanLocations[0] || "";
-          const preferredLot = normalizeLotId(state.ui.productDetailsLot || fresh.lastProductionLot || "", fresh.lastProductionAtClient || null) || getDefaultLotForItem(fresh || {});
-          const cleanStockLots = buildStockLotsForUnallocatedQty(fresh, newUnallocated, { tsClient:nowClient, source:"quantita_ubicati", refId:movementId, preferredLot });
-          const delta = newTotal - freshTotal;
-
-          beforeAllocated = allocatedTotal;
-          beforeUnallocated = freshUnallocated;
-          afterUnallocated = newUnallocated;
-          beforeTotal = freshTotal;
-          afterTotal = newTotal;
-
-          if(delta === 0 && freshUnallocated === newUnallocated){
-            runtimePatch = {
-              sku,
-              title,
-              qty: freshTotal,
-              stockLots: cleanStockLots,
-              rackLocation: cleanLocation,
-              rackLocations: cleanLocations,
-              rackAllocations: allocations,
-              updatedAtClient: nowClient,
-              updatedBy: who,
-              location: loc
-            };
-            return;
-          }
-
-          tx.set(itemRef, {
-            sku,
-            title,
-            titleNorm: normalizeText(title || sku),
-            qty: newTotal,
-            stockLots: newTotal > 0 ? cleanStockLots : [],
-            rackLocation: cleanLocation,
-            rackLocations: cleanLocations,
-            rackAllocations: allocations,
-            zeroStock: newTotal === 0,
-            zeroStockAt: newTotal === 0 ? api.serverTimestamp() : null,
-            zeroStockAtClient: newTotal === 0 ? nowClient : null,
-            lastLocatedQtyEditId: movementId,
-            updatedAt: api.serverTimestamp(),
-            updatedAtClient: nowClient,
-            updatedBy: who,
-            location: loc
-          }, { merge:true });
-
-          tx.set(productRef, {
-            sku,
-            title,
-            titleNorm: normalizeText(title || sku),
-            rackLocation: cleanLocation,
-            rackLocations: cleanLocations,
-            rackAllocations: allocations,
-            lastLocatedQtyEditId: movementId,
-            lastLocatedQtyBeforeTotal: freshTotal,
-            lastLocatedQtyAfterTotal: newTotal,
-            lastLocatedQtyBeforeUnallocated: freshUnallocated,
-            lastLocatedQtyAfterUnallocated: newUnallocated,
-            lastSeenAt: api.serverTimestamp(),
-            lastSeenAtClient: nowClient,
-            lastSeenBy: who,
-            lastSeenLocation: loc,
-            lastSeenKind: "located_qty_update"
-          }, { merge:true });
-
-          addProductMovementToBatch(tx, api, db, sku, {
-            type: "quantita_ubicati",
-            movementId,
-            movementKey: movementId,
-            writeKey: movementId,
-            qtySigned: delta,
-            deltaSigned: delta,
-            beforeQty: freshTotal,
-            afterQty: newTotal,
-            beforeAllocatedQty: allocatedTotal,
-            afterAllocatedQty: allocatedTotal,
-            beforeUnallocatedQty: freshUnallocated,
-            afterUnallocatedQty: newUnallocated,
-            allocatedQty: allocatedTotal,
-            fromWarehouse: loc,
-            toWarehouse: loc,
-            location: loc,
-            source: "ubicati",
-            note: `Modifica quantità da Ubicati: totale ${freshTotal} → ${newTotal} pz; ubicato invariato ${allocatedTotal} pz`,
-            rackLocation: cleanLocation,
-            rackLocations: cleanLocations,
-            lot: preferredLot,
-            lotLabel: lotLabelFromId(preferredLot),
-            deleteLocked: true,
-            locked: true,
-            createdAtClient: nowClient
-          });
-
+          const locations = normalizeRackLocationsList(saved.allocations.map(x=>x.code));
+          const racks = { rackLocation:locations[0] || "", rackLocations:locations, rackAllocations:saved.allocations };
           runtimePatch = {
-            sku,
-            title,
-            qty: newTotal,
-            stockLots: newTotal > 0 ? cleanStockLots : [],
-            rackLocation: cleanLocation,
-            rackLocations: cleanLocations,
-            rackAllocations: allocations,
-            zeroStock: newTotal === 0,
-            zeroStockAtClient: newTotal === 0 ? nowClient : null,
-            updatedAtClient: nowClient,
-            updatedBy: who,
-            location: loc
+            sku, title, titleNorm:normalizeText(title || sku), qty:saved.afterTotal,
+            stockLots:saved.stockLots, ...racks,
+            sharedStockSourceSku:sku, sharedStockCanonicalSku:sku,
+            sharedStockRevisionAtClient:nowClient, stockUpdatedAtClient:nowClient, lastStockMutationAtClient:nowClient,
+            rackRevisionAtClient:nowClient, rackUpdatedAtClient:nowClient, lastRackMutationAtClient:nowClient,
+            zeroStock:saved.afterTotal === 0, zeroStockAtClient:saved.afterTotal === 0 ? nowClient : null,
+            lastLocatedQtyEditId:movementId, updatedAtClient:nowClient, updatedBy:who, location:loc
           };
+          tx.set(itemRef, { ...runtimePatch, updatedAt:api.serverTimestamp(), zeroStockAt:saved.afterTotal === 0 ? api.serverTimestamp() : null }, { merge:true });
+          tx.set(productRef, {
+            sku, title, titleNorm:normalizeText(title || sku), ...racks,
+            lastLocatedQtyEditId:movementId,
+            lastLocatedQtyBeforeTotal:saved.beforeTotal, lastLocatedQtyAfterTotal:saved.afterTotal,
+            lastLocatedQtyBeforeAllocated:saved.beforeAllocated, lastLocatedQtyAfterAllocated:saved.afterAllocated,
+            lastLocatedQtyBeforeUnallocated:saved.unallocated, lastLocatedQtyAfterUnallocated:saved.unallocated,
+            lastSeenAt:api.serverTimestamp(), lastSeenAtClient:nowClient, lastSeenBy:who,
+            lastSeenLocation:loc, lastSeenKind:"located_qty_update"
+          }, { merge:true });
+          const changedLots = Array.from(new Set(saved.changes.map(x=>x.lot)));
+          addProductMovementToBatch(tx, api, db, sku, {
+            type:"quantita_ubicati", movementId, movementKey:movementId, writeKey:movementId,
+            qtySigned:saved.afterTotal - saved.beforeTotal, deltaSigned:saved.afterTotal - saved.beforeTotal,
+            beforeQty:saved.beforeTotal, afterQty:saved.afterTotal,
+            beforeAllocatedQty:saved.beforeAllocated, afterAllocatedQty:saved.afterAllocated,
+            beforeUnallocatedQty:saved.unallocated, afterUnallocatedQty:saved.unallocated,
+            allocatedQty:saved.afterAllocated, allocationChanges:saved.changes,
+            lots:changedLots,
+            ...(changedLots.length === 1 ? { lot:changedLots[0], lotLabel:lotLabelFromId(changedLots[0]) } : {}),
+            fromWarehouse:loc, toWarehouse:loc, location:loc, source:"ubicati",
+            note:`Modifica quantità ubicata ${saved.beforeAllocated} → ${saved.afterAllocated} pz; totale ${saved.beforeTotal} → ${saved.afterTotal} pz`,
+            rackLocation:racks.rackLocation, rackLocations:locations,
+            deleteLocked:true, locked:true, createdAtClient:nowClient
+          });
+          runtimePatch = { ...runtimePatch, __raw:{ ...fresh, ...runtimePatch } };
         });
-
-        if(runtimePatch){
-          patchRuntimeInventoryItem(loc, sku, runtimePatch);
-        }
-
+        if(runtimePatch) patchRuntimeInventoryItem(loc, sku, runtimePatch);
         renderHomeDashboard();
-        
         if(state.ui.sheet === "productDetails") renderProductDetailsSheet();
-        
-
-        if(afterTotal === beforeTotal && afterUnallocated === beforeUnallocated){
-          showToast("Quantità invariata", `${sku} resta a ${afterTotal} pz totali.`, 1800);
-        }else if(afterUnallocated > 0){
-          showToast("Quantità aggiornata", `${sku}: ${beforeTotal} → ${afterTotal} pz totali • ${afterUnallocated} pz da ubicare`, 2600);
-          
+        if(!saved.changes.length){
+          showToast("Quantità invariata", `${sku} resta a ${saved.afterAllocated} pz ubicati.`, 1800);
         }else{
-          showToast("Quantità aggiornata", `${sku}: ${beforeTotal} → ${afterTotal} pz totali • tutto ubicato`, 2300);
-          
+          showToast("Quantità aggiornata", `${sku}: ${saved.beforeAllocated} → ${saved.afterAllocated} pz ubicati • totale ${saved.afterTotal} pz`, 2600);
         }
       }catch(err){
         console.error("edit located qty", err);
-        showToast("Errore quantità", String(err?.message || err).slice(0, 220), 3200);
+        renderHomeDashboard();
+        showToast("Errore quantità", String(err?.message || err).slice(0, 220), 5000);
+      }finally{
+        locatedQtyEditInFlight = false;
       }
     }
+
 
     function renderHomeNoLocationBox(){
       const list = $("homeNoLocationList");
@@ -10896,7 +10901,7 @@ function renderHomePickingHistoryBox(){
               <div class="gridProdMain">${titleMain}</div>
               <div class="gridProdSub">${escapeHtml(metaLine)}</div>
             </div>
-            <div class="gridCell gridRight"><button class="badge ok qtyEditBadge" type="button" data-action="editHomeLocatedQty" data-sku="${sku}" data-loc="${escapeHtml(it.loc || "")}" data-current="${escapeHtml(String(allocatedQty))}" data-total="${escapeHtml(String(totalQty))}" title="Modifica quantità totale dello SKU" aria-label="Modifica quantità totale dello SKU">${escapeHtml(String(allocatedQty))}</button></div>
+            <div class="gridCell gridRight"><button class="badge ok qtyEditBadge" type="button" data-action="editHomeLocatedQty" data-sku="${sku}" data-loc="${escapeHtml(it.loc || "")}" data-current="${escapeHtml(String(allocatedQty))}" data-total="${escapeHtml(String(totalQty))}" title="Modifica quantità ubicata" aria-label="Modifica quantità ubicata">${escapeHtml(String(allocatedQty))}</button></div>
             <div class="gridCell gridRight">${rackHtml}</div>
             <div class="gridCell gridRight">${findBtnHtml}</div>
           </div>`;
@@ -12443,10 +12448,10 @@ function closeSheet(name,opts={}){
         const find=e.target?.closest?.("[data-action='findPallet']");
         if(find){ e.preventDefault(); e.stopPropagation(); await openCapannone3dFind(find.dataset.code||"",find.dataset.codes||"",{sku:find.dataset.sku||"",title:find.dataset.title||""}); return; }
         const qty=e.target?.closest?.("[data-action='editHomeLocatedQty']");
-        if(qty){ e.preventDefault(); e.stopPropagation(); await editHomeLocatedQtyPrompt(qty.dataset.sku||"",INVENTORY_CANONICAL_LOC); return; }
+        if(qty){ e.preventDefault(); e.stopPropagation(); await editHomeLocatedQtyPrompt(qty.dataset.sku||"",qty.dataset.loc||INVENTORY_CANONICAL_LOC); return; }
         const row=e.target?.closest?.("[data-action='openHomeLocatedItem']"); if(row) openProductDetailsSheet(row.dataset.rackSku||row.dataset.sku||"");
       });
-      located?.addEventListener("keydown",e=>{ if(e.key!=="Enter"&&e.key!==" ") return; const row=e.target?.closest?.("[data-action='openHomeLocatedItem']"); if(!row) return; e.preventDefault(); openProductDetailsSheet(row.dataset.rackSku||row.dataset.sku||""); });
+      located?.addEventListener("keydown",e=>{ if(e.key!=="Enter"&&e.key!==" ") return; if(e.target?.closest?.("button")) return; const row=e.target?.closest?.("[data-action='openHomeLocatedItem']"); if(!row) return; e.preventDefault(); openProductDetailsSheet(row.dataset.rackSku||row.dataset.sku||""); });
 
       $("homePickingList")?.addEventListener("click",async e=>{
         const brtUpload=e.target?.closest?.("[data-action='uploadBrtLabels']");
