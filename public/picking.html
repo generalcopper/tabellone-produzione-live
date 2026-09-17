@@ -393,6 +393,13 @@
         <span class="pickingNavLabel">Da ubicare</span>
         <span class="pickingNavCount" id="pickingNoLocationNavCount">—</span>
       </button>
+      <button class="pickingNavBtn" id="btnPickingCerea" type="button" data-picking-view="cerea" aria-controls="homeCereaBox" aria-pressed="false">
+        <span class="pickingNavIcon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3 10 9-7 9 7v10H3Z"/><path d="M9 20v-7h6v7"/></svg>
+        </span>
+        <span class="pickingNavLabel">Cerea</span>
+        <span class="pickingNavCount" id="pickingCereaNavCount">—</span>
+      </button>
       <button class="pickingNavBtn" id="btnPickingLocated" type="button" data-picking-view="located" aria-controls="homeLocatedBox" aria-pressed="false">
         <span class="pickingNavIcon" aria-hidden="true">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
@@ -522,6 +529,24 @@
             </div>
             <div class="gridTable cols4" id="homeNoLocationList" style="margin-top:12px;"></div>
             <div class="hint" id="homeNoLocationHint" style="margin-top:10px"></div>
+          </div>
+
+          <div class="miniCard pickingSection" id="homeCereaBox" aria-hidden="true">
+            <div class="miniTop">
+              <div>
+                <div class="miniTitle">Cerea</div>
+                <div class="miniSub">Posizione temporanea • questi prodotti restano anche in Da ubicare</div>
+              </div>
+              <div class="pill" id="homeCereaCount">—</div>
+            </div>
+            <div class="homeSmartSearch">
+              <div class="homeSmartSearchField">
+                <input class="input" id="homeCereaSearch" placeholder="Cerca a Cerea: SKU, prodotto, lotto…" autocomplete="off" spellcheck="false" />
+                <button class="homeSearchClearBtn" id="btnClearHomeCereaSearch" type="button" aria-label="Cancella ricerca Cerea" title="Cancella ricerca" hidden>×</button>
+              </div>
+            </div>
+            <div class="gridTable cols4" id="homeCereaList" style="margin-top:12px;"></div>
+            <div class="hint" id="homeCereaHint" style="margin-top:10px"></div>
           </div>
 
           <!-- Picking: visual flussi da prelevare, separato dagli ID flusso/scarico -->
@@ -2640,6 +2665,43 @@ function cleanProductMainName(s){
 
     
 
+    // Cerea è una posizione temporanea: i suoi pezzi fanno ancora parte del
+    // residuo da ubicare e non occupano un rack fisico né una seconda giacenza.
+    function isCereaLocation(code){
+      return normalizeRackLocation(code) === "CEREA";
+    }
+
+    function readCereaAllocationsFromDoc(d){
+      const stock = Number.isFinite(Number(d?.totalQty)) ? { ...d, qty:Number(d.totalQty) } : (d || {});
+      const raw = Array.isArray(d?.cereaAllocations) ? d.cereaAllocations : (d?.__raw?.cereaAllocations || []);
+      const byLot = new Map();
+      for(const row of Array.isArray(raw) ? raw : []){
+        const qty = Number(row?.qty);
+        const lot = normalizeLotId(row?.lot) || LOT_LEGACY_ID;
+        if(!Number.isSafeInteger(qty) || qty <= 0) continue;
+        byLot.set(lot, (byLot.get(lot) || 0) + qty);
+      }
+      return Array.from(byLot, ([lot, qty])=>({
+        code:"CEREA", lot, qty:Math.min(qty, rackUnallocatedQtyByLotFromDoc(stock, lot))
+      })).filter(row=>row.qty > 0).sort((a,b)=>a.lot.localeCompare(b.lot));
+    }
+
+    function cereaQtyFromDoc(d, lot=""){
+      const selectedLot = normalizeLotId(lot);
+      return readCereaAllocationsFromDoc(d).filter(row=>!selectedLot || row.lot === selectedLot)
+        .reduce((sum,row)=>sum + row.qty, 0);
+    }
+
+    function consumeCereaAllocations(d, lot, qty){
+      const selectedLot = normalizeLotId(lot) || LOT_LEGACY_ID;
+      return readCereaAllocationsFromDoc(d).map(row=>row.lot === selectedLot
+        ? { ...row, qty:Math.max(0, row.qty - qty) } : row).filter(row=>row.qty > 0);
+    }
+
+    function cereaBadgeHtml(qty){
+      return Number(qty) > 0 ? `<span class="cereaBadge" title="${escapeHtml(String(qty))} pz in posizione temporanea, ancora da ubicare">Cerea</span>` : "";
+    }
+
     function rackLocationDisplayPartsFromItem(it){
       const d = it || {};
       const explicit = readRackAllocationsFromDoc(d);
@@ -2718,7 +2780,7 @@ function cleanProductMainName(s){
     }
 
     function rackAllocationsEditorHtml(it, sku, loc, canEdit){
-      const rows = rackAllocationRowsForDetails(it || {});
+      const rows = [...rackAllocationRowsForDetails(it || {}), ...readCereaAllocationsFromDoc(it || {})];
       if(!rows.length){
         return `<div class="movesHint">Nessuna ubicazione assegnata.</div>`;
       }
@@ -2735,7 +2797,7 @@ function cleanProductMainName(s){
           <div class="rackAllocRow" data-old-code="${escapeHtml(x.code)}" data-lot="${escapeHtml(x.lot)}">
             <div class="rackAllocTop">
               <div style="min-width:0">
-                <div class="rackAllocCode">${escapeHtml(x.code)}</div>
+                <div class="rackAllocCode">${isCereaLocation(x.code) ? cereaBadgeHtml(x.qty) + " · temporanea" : escapeHtml(x.code)}</div>
                 <div class="rackAllocMeta">${escapeHtml(lotLabelFromId(x.lot))} • ${escapeHtml(lotDateLabelFromId(x.lot))}</div>
               </div>
               <div class="rackAllocQty">${escapeHtml(String(x.qty))} pz</div>
@@ -2775,17 +2837,17 @@ function cleanProductMainName(s){
         return;
       }
       const { oldCode, lot, newCode } = data;
-      let newQty = Number(data.newQty);
+      let newQty = data.newQty;
       if(!oldCode || !lot){
         showToast("Errore", "Ubicazione originale non valida.", 2200);
         return;
       }
       if(opts.remove === true) newQty = 0;
-      if(newQty === null || !Number.isFinite(newQty) || newQty < 0){
+      if(!Number.isSafeInteger(newQty) || newQty < 0){
         showToast("Quantità non valida", "Inserisci una quantità intera positiva. Usa Rimuovi per azzerare.", 2600);
         return;
       }
-      if(newQty > 0 && (!newCode || !RACK_LOCATION_SET.has(newCode))){
+      if(newQty > 0 && (!newCode || (!RACK_LOCATION_SET.has(newCode) && !isCereaLocation(newCode)))){
         showToast("Ubicazione non valida", "Scegli una posizione dalla lista.", 2400);
         return;
       }
@@ -2813,13 +2875,14 @@ function cleanProductMainName(s){
         const nowClient = Date.now();
         const who = state.user?.email || state.user?.emailLower || state.user?.uid || "";
         let saved = { oldQty:0, newQty, newCode, remainingQty:0 };
+        let runtimePatch = null;
 
         await api.runTransaction(db, async (tx)=>{
           const snap = await tx.get(itemRef);
           if(!snap.exists()) throw new Error("Prodotto non trovato.");
           const fresh = snap.data() || {};
           const title = squashWhitespace(fresh.title || fresh.name || sku) || sku;
-          const allocations = normalizeRackAllocationsForWrite(readRackAllocationsFromDoc(fresh));
+          const allocations = [...normalizeRackAllocationsForWrite(readRackAllocationsFromDoc(fresh)), ...readCereaAllocationsFromDoc(fresh)];
           const oldIdx = allocations.findIndex(x=> x.code === oldCode && (normalizeLotId(x.lot) || LOT_LEGACY_ID) === lot);
           if(oldIdx < 0) throw new Error("Ubicazione non trovata o già modificata.");
 
@@ -2838,12 +2901,21 @@ function cleanProductMainName(s){
           // Se la nuova posizione è già usata dallo stesso SKU, la normalizzazione cloud somma
           // le quantità sullo stesso code+lot invece di bloccare l'operatore.
           const nextAllocationsRaw = allocations.filter((_, i)=> i !== oldIdx);
+          // Il trasferimento parziale da/a Cerea lascia il resto nella posizione
+          // di partenza; la modifica della quantità nella stessa posizione resta esplicita.
+          if(newQty > 0 && newQty < oldQty && newCode !== oldCode && (isCereaLocation(oldCode) || isCereaLocation(newCode))){
+            nextAllocationsRaw.push({ ...oldAlloc, qty:oldQty - newQty });
+          }
           if(newQty > 0){
             nextAllocationsRaw.push({ code:newCode, lot, qty:newQty, movementId:"", movementKey:"", updatedAtClient:nowClient });
           }
           const nextAllocations = normalizeRackAllocationsForWrite(nextAllocationsRaw);
           const cleanLocations = normalizeRackLocationsList(nextAllocations.map(x=>x.code));
           const cleanLocation = cleanLocations[0] || "";
+          const nextCereaAllocations = readCereaAllocationsFromDoc({
+            ...fresh, rackAllocations:nextAllocations, rackLocations:cleanLocations, rackLocation:cleanLocation,
+            cereaAllocations:nextAllocationsRaw.filter(row=>isCereaLocation(row.code))
+          });
           const remainingQty = Math.max(0, lotQty - nextAllocations
             .filter(x=> (normalizeLotId(x.lot) || LOT_LEGACY_ID) === lot)
             .reduce((a,x)=> a + Math.round(Number(x.qty || 0)), 0));
@@ -2855,6 +2927,7 @@ function cleanProductMainName(s){
             rackLocation: cleanLocation,
             rackLocations: cleanLocations,
             rackAllocations: nextAllocations,
+            cereaAllocations: nextCereaAllocations,
             lastRackMovementLot: lot,
             updatedAt: api.serverTimestamp(),
             updatedAtClient: nowClient,
@@ -2869,6 +2942,7 @@ function cleanProductMainName(s){
             rackLocation: cleanLocation,
             rackLocations: cleanLocations,
             rackAllocations: nextAllocations,
+            cereaAllocations: nextCereaAllocations,
             lastRackMovementLot: lot,
             lastSeenAt: api.serverTimestamp(),
             lastSeenAtClient: nowClient,
@@ -2901,8 +2975,15 @@ function cleanProductMainName(s){
           });
 
           saved = { oldQty, newQty, newCode, remainingQty };
+          runtimePatch = {
+            sku, title, qty:stockQtyFromDoc(fresh), stockLots:readStockLotsFromDoc(fresh),
+            rackAllocations:nextAllocations, rackLocations:cleanLocations, rackLocation:cleanLocation,
+            cereaAllocations:nextCereaAllocations, updatedAtClient:nowClient, updatedBy:who, location:loc
+          };
+          runtimePatch.__raw = { ...fresh, ...runtimePatch };
         });
 
+        if(runtimePatch) patchRuntimeInventoryItem(loc, sku, runtimePatch);
         await syncRackLocationGroupCloud(sku, loc, opts.remove === true ? "rack_allocation_remove" : "rack_allocation_edit");
 
         showToast(
@@ -3427,6 +3508,7 @@ function cleanProductMainName(s){
     function isRackLocationAvailableForItem(code, currentSku="", currentLoc=""){
       const s = normalizeRackLocation(code);
       if(!s) return true;
+      if(isCereaLocation(s)) return true;
       if(!RACK_LOCATION_SET.has(s)) return false;
       return !rackLocationUseInfo(s, currentSku, currentLoc).occupiedBy;
     }
@@ -3434,6 +3516,7 @@ function cleanProductMainName(s){
     function isRackLocationUsableForItem(code, currentSku="", currentLoc=""){
       const s = normalizeRackLocation(code);
       if(!s) return true;
+      if(isCereaLocation(s)) return true;
       if(!RACK_LOCATION_SET.has(s)) return false;
       return !rackLocationUseInfo(s, currentSku, currentLoc).occupiedBy;
     }
@@ -3487,7 +3570,12 @@ function cleanProductMainName(s){
         out.push(`</optgroup>`);
       }
 
-      const invalidSelected = Array.from(selectedSet).filter(code => !RACK_LOCATION_SET.has(code));
+      // Sempre in fondo ai rack e condivisibile fra SKU diversi.
+      if(!excludedSet.has("CEREA") || selectedSet.has("CEREA")){
+        out.push(`<optgroup label="Posizione temporanea"><option value="CEREA"${selectedSet.has("CEREA") ? " selected" : ""}>Cerea</option></optgroup>`);
+        visibleCount++;
+      }
+      const invalidSelected = Array.from(selectedSet).filter(code => !RACK_LOCATION_SET.has(code) && !isCereaLocation(code));
       if(invalidSelected.length){
         out.push(`<optgroup label="Attuale non in lista">`);
         for(const code of invalidSelected){
@@ -4050,7 +4138,7 @@ function readRackPickerSelection(root){
             lastReservationOrder:(d.lastReservationOrder&&typeof d.lastReservationOrder==="object")?d.lastReservationOrder:null,
             generatedFromShopifyFbm:d.generatedFromShopifyFbm===true, firstSeenSource:d.firstSeenSource||"",
             rackLocations:readRackLocationsFromDoc(d), rackAllocations:readRackAllocationsFromDoc(d), rackLocation:readRackLocationFromDoc(d),
-            stockLots:readStockLotsFromDoc(d), lastProductionLot:d.lastProductionLot||"", lastProductionAtClient:d.lastProductionAtClient||null,
+            stockLots:readStockLotsFromDoc(d), cereaAllocations:readCereaAllocationsFromDoc(d), lastProductionLot:d.lastProductionLot||"", lastProductionAtClient:d.lastProductionAtClient||null,
             asin:d.asin||d.ASIN||d.amazonAsin||"", ASIN:d.ASIN||d.asin||d.amazonAsin||"", amazonAsin:d.amazonAsin||d.asin||d.ASIN||"",
             canonicalSku:d.canonicalSku||d.skuGroupCanonical||d.masterSku||d.parentSku||d.aliasOfSku||"",
             skuGroupCanonical:d.skuGroupCanonical||d.canonicalSku||"", skuAliases:Array.isArray(d.skuAliases)?d.skuAliases:[],
@@ -7191,6 +7279,9 @@ function readRackPickerSelection(root){
           const cleanLocation = cleanLocations[0] || "";
           const preferredLot = normalizeLotId(state.ui.productDetailsLot || fresh.lastProductionLot || "", fresh.lastProductionAtClient || null) || getDefaultLotForItem(fresh || {});
           const cleanStockLots = buildStockLotsForUnallocatedQty(fresh, newUnallocated, { tsClient:nowClient, source:"quantita_da_ubicare", refId:movementId, preferredLot });
+          const cleanCereaAllocations = readCereaAllocationsFromDoc({
+            ...fresh, qty:finalQty, stockLots:cleanStockLots, cereaAllocations:readCereaAllocationsFromDoc(fresh)
+          });
           const delta = newUnallocated - freshUnallocated;
 
           beforeUnallocated = freshUnallocated;
@@ -7204,6 +7295,7 @@ function readRackPickerSelection(root){
               title,
               qty: freshTotal,
               stockLots: cleanStockLots,
+              cereaAllocations: cleanCereaAllocations,
               rackLocation: cleanLocation,
               rackLocations: cleanLocations,
               rackAllocations: allocations,
@@ -7227,6 +7319,7 @@ function readRackPickerSelection(root){
             sharedStockRevisionAtClient:nowClient, stockUpdatedAtClient:nowClient,
             lastStockMutationAtClient:nowClient,
             stockLots: safeStockLots,
+            cereaAllocations: cleanCereaAllocations,
             rackLocation: cleanLocation,
             rackLocations: cleanLocations,
             rackAllocations: allocations,
@@ -7249,6 +7342,7 @@ function readRackPickerSelection(root){
             rackAllocations: allocations,
             lastNoLocationQtyEditId: movementId,
             lastNoLocationQtyBefore: freshUnallocated,
+            cereaAllocations: cleanCereaAllocations,
             lastNoLocationQtyAfter: newUnallocated,
             lastSeenAt: api.serverTimestamp(),
             lastSeenAtClient: nowClient,
@@ -7288,6 +7382,7 @@ function readRackPickerSelection(root){
             title,
             qty: Math.max(0, Math.round(Number(finalQty) || 0)),
             stockLots: Math.max(0, Math.round(Number(finalQty) || 0)) > 0 ? cleanStockLots : [],
+            cereaAllocations: cleanCereaAllocations,
             rackLocation: cleanLocation,
             rackLocations: cleanLocations,
             rackAllocations: allocations,
@@ -7341,7 +7436,7 @@ function readRackPickerSelection(root){
           if(totalQty <= 0) continue;
           const remainingQty = rackUnallocatedQtyFromDoc(it || {});
           if(remainingQty <= 0) continue;
-          out.push({ ...it, loc, qty:remainingQty, totalQty, remainingQty, allocatedQty: rackAllocatedQtyFromDoc(it || {}) });
+          out.push({ ...it, loc, qty:remainingQty, totalQty, remainingQty, allocatedQty: rackAllocatedQtyFromDoc(it || {}), cereaQty:cereaQtyFromDoc(it) });
         }
       };
       pushLoc(INVENTORY_CANONICAL_LOC);
@@ -7430,7 +7525,7 @@ function readRackPickerSelection(root){
     function pickingHomeView(){
       const v = state.ui?.pickingHomeView || "noLocation";
       if(v === "picking") return "pickingFbm"; // compatibilità con vecchia voce unica
-      return (v === "located" || v === "pickingFbm" || v === "pickingFba" || v === "pickingHistory" || (v === "bioneeShop" && state.user?.isWhitelisted) || (v === "notifications" && state.user?.isAdmin)) ? v : "noLocation";
+      return (v === "cerea" || v === "located" || v === "pickingFbm" || v === "pickingFba" || v === "pickingHistory" || (v === "bioneeShop" && state.user?.isWhitelisted) || (v === "notifications" && state.user?.isAdmin)) ? v : "noLocation";
     }
 
     
@@ -7702,6 +7797,7 @@ function readRackPickerSelection(root){
         ? ["pickingFlowFbmNavCount", "pickingFlowFbaNavCount"]
         : [({
             noLocation: "pickingNoLocationNavCount",
+            cerea: "pickingCereaNavCount",
             located: "pickingLocatedNavCount",
             pickingFbm: "pickingFlowFbmNavCount",
             pickingFba: "pickingFlowFbaNavCount",
@@ -7732,6 +7828,7 @@ function readRackPickerSelection(root){
       const pickingActive = (view === "pickingFbm" || view === "pickingFba");
       const sections = [
         { key:"noLocation", box:"homeNoLocationBox", active:view === "noLocation" },
+        { key:"cerea", box:"homeCereaBox", active:view === "cerea" },
         { key:"located", box:"homeLocatedBox", active:view === "located" },
         { key:"picking", box:"homePickingBox", active:pickingActive },
         { key:"pickingHistory", box:"homePickingHistoryBox", active:view === "pickingHistory" },
@@ -7740,6 +7837,7 @@ function readRackPickerSelection(root){
       ];
       const buttons = [
         { key:"noLocation", btn:"btnPickingNoLocation" },
+        { key:"cerea", btn:"btnPickingCerea" },
         { key:"located", btn:"btnPickingLocated" },
         { key:"pickingFbm", btn:"btnPickingFlowFbm" },
         { key:"pickingFba", btn:"btnPickingFlowFba" },
@@ -7780,7 +7878,7 @@ function readRackPickerSelection(root){
         void openDroneModeFullscreen();
         return;
       }
-      state.ui.pickingHomeView = (next === "located" || next === "pickingFbm" || next === "pickingFba" || next === "pickingHistory" || (next === "bioneeShop" && state.user?.isWhitelisted) || (next === "notifications" && state.user?.isAdmin)) ? next : "noLocation";
+      state.ui.pickingHomeView = (next === "cerea" || next === "located" || next === "pickingFbm" || next === "pickingFba" || next === "pickingHistory" || (next === "bioneeShop" && state.user?.isWhitelisted) || (next === "notifications" && state.user?.isAdmin)) ? next : "noLocation";
       if(state.ui.pickingHomeView === "bioneeShop") void openBioneeShop();
       else _bioneeShopUi?.close();
       if(state.ui.pickingHomeView === "notifications") void openPickingMail();
@@ -7837,6 +7935,7 @@ function readRackPickerSelection(root){
           rackCodes,
           lots,
           allocations,
+          cereaQtyFromDoc(it) > 0 ? `Cerea temporanea ${cereaQtyFromDoc(it)}` : "",
           qtys
         ].filter(Boolean).join(" ");
       }catch(_e){
@@ -8061,7 +8160,7 @@ function readRackPickerSelection(root){
           if(!saved.changes.length) return;
           const title = squashWhitespace(fresh.title || fresh.name || currentItem.title || sku) || sku;
           const locations = normalizeRackLocationsList(saved.allocations.map(x=>x.code));
-          const racks = { rackLocation:locations[0] || "", rackLocations:locations, rackAllocations:saved.allocations };
+          const racks = { rackLocation:locations[0] || "", rackLocations:locations, rackAllocations:saved.allocations, cereaAllocations:readCereaAllocationsFromDoc(fresh) };
           runtimePatch = {
             sku, title, titleNorm:normalizeText(title || sku), qty:saved.afterTotal,
             stockLots:saved.stockLots, ...racks,
@@ -8167,7 +8266,7 @@ function readRackPickerSelection(root){
         const metaLine = [locLabel, lotLine, `Totale: ${totalQty}`, allocatedQty ? `Ubicato: ${allocatedQty}` : "", when ? `Agg.: ${when}` : ""].filter(Boolean).join(" • ");
         return `
           <div class="row gridRow" role="button" tabindex="0" data-sku="${sku}" data-loc="${escapeHtml(it.loc || "")}" data-action="openHomeNoLocationItem">
-            <div class="gridCell gridSku">${displaySku}</div>
+            <div class="gridCell gridSku">${displaySku}${cereaBadgeHtml(it.cereaQty)}</div>
             <div class="gridCell">
               <div class="gridProdMain">${titleMain}</div>
               <div class="gridProdSub">${escapeHtml(metaLine)}</div>
@@ -8183,6 +8282,49 @@ function readRackPickerSelection(root){
           ? `Ricerca attiva: “${q}” • mostrati ${Math.min(out.length, 120).toLocaleString("it-IT")} candidati su ${out.length.toLocaleString("it-IT")} risultati (${all.length.toLocaleString("it-IT")} totali). Tocca una riga per aprire lo scanner QR.`
           : `Mostrati ${Math.min(all.length, 120).toLocaleString("it-IT")} di ${all.length.toLocaleString("it-IT")}. Tocca una riga per aprire lo scanner QR. Dopo aver scelto la posizione, premi OK per ubicare tutti i pezzi oppure Annulla per scegliere quanti ubicarne.`;
       }
+    }
+
+    function getItemsAtCerea(){
+      return stockRepresentativeItemsForLoc(INVENTORY_CANONICAL_LOC)
+        .map(it=>({ ...it, loc:INVENTORY_CANONICAL_LOC, cereaQty:cereaQtyFromDoc(it), remainingQty:rackUnallocatedQtyFromDoc(it) }))
+        .filter(it=>it.cereaQty > 0)
+        .sort((a,b)=>String(a.__canonicalSku || a.sku).localeCompare(String(b.__canonicalSku || b.sku)));
+    }
+
+    function renderHomeCereaBox(){
+      const list = $("homeCereaList"), count = $("homeCereaCount"), hint = $("homeCereaHint");
+      if(!list || !count) return;
+      if(!state.user?.isWhitelisted){
+        count.textContent = "—";
+        setPickingNavCount("cerea", "—");
+        list.innerHTML = `<div class="hint">Accedi per vedere i prodotti a Cerea.</div>`;
+        if(hint) hint.textContent = "";
+        return;
+      }
+      const all = getItemsAtCerea();
+      const q = getHomeSmartSearchValue("homeCereaSearch", "homeCereaSearch");
+      const out = homeSmartCandidates(all, q, "Cerea temporanea da ubicare");
+      count.textContent = q ? `${fmtN(out.length)}/${fmtN(all.length)}` : fmtN(all.length);
+      setPickingNavCount("cerea", count.textContent);
+      if(!out.length){
+        list.innerHTML = `<div class="hint">${all.length ? "Nessun prodotto trovato per questa ricerca." : "Nessun prodotto nella posizione temporanea Cerea."}</div>`;
+        if(hint) hint.textContent = "Scegli Cerea in fondo all’elenco delle posizioni per aggiungere un prodotto.";
+        return;
+      }
+      const rows = out.map(it=>{
+        const sku = toSkuId(it.__stockSourceSku || it.sku || it.id || "");
+        const displaySku = toSkuId(it.__canonicalSku || sku) || sku;
+        const meta = parseTitleMeta(it.title || "");
+        const lots = readCereaAllocationsFromDoc(it).map(row=>`${lotLabelFromId(row.lot)}: ${row.qty} pz`).join(" • ");
+        return `<div class="row gridRow" role="button" tabindex="0" data-action="openHomeCereaItem" data-sku="${escapeHtml(sku)}">
+          <div class="gridCell gridSku">${escapeHtml(displaySku)}${cereaBadgeHtml(it.cereaQty)}</div>
+          <div class="gridCell"><div class="gridProdMain">${escapeHtml(meta.main || it.title || displaySku)}</div><div class="gridProdSub">${escapeHtml(lots)}</div></div>
+          <div class="gridCell gridRight"><span class="badge ok">${fmtN(it.cereaQty)}</span></div>
+          <div class="gridCell gridRight"><span class="badge warn">${fmtN(it.remainingQty)}</span></div>
+        </div>`;
+      }).join("");
+      list.innerHTML = `<div class="row gridHead gridRow"><div class="gridCell">SKU</div><div class="gridCell">Prodotto</div><div class="gridCell gridRight">A Cerea</div><div class="gridCell gridRight">Da ubicare</div></div>` + rows;
+      if(hint) hint.textContent = "I pezzi a Cerea sono già compresi in Da ubicare. Apri un prodotto per scegliere un rack o modificare la posizione temporanea.";
     }
 
     function getItemsWithRackLocations(){
@@ -10917,6 +11059,7 @@ function renderHomePickingHistoryBox(){
 
     function renderHomeDashboard(){
       renderHomeNoLocationBox();
+      renderHomeCereaBox();
       renderHomeLocatedBox();
       syncPickingHomeView();
       const view=pickingHomeView();
@@ -11243,6 +11386,7 @@ function closeSheet(name,opts={}){
       const remainingQty = rackUnallocatedQtyByLotFromDoc(it || {}, selectedLot);
       const allAllocatedQty = rackAllocatedQtyFromDoc(it || {});
       const allRemainingQty = rackUnallocatedQtyFromDoc(it || {});
+      const allCereaQty = cereaQtyFromDoc(it || {});
       const rackText = rackLocationDisplayFromItem(it || {});
       const allAllocations = rackAllocationRowsForDetails(it || {});
       const canEdit = canUsePickingActions();
@@ -11287,6 +11431,7 @@ function closeSheet(name,opts={}){
             <div class="pdLine"><div class="pdLabel">Disponibilità totale</div><div class="pdValue">${escapeHtml(String(totalSkuQty))} pz</div></div>
             <div class="pdLine"><div class="pdLabel">Totale ubicato</div><div class="pdValue">${escapeHtml(String(allAllocatedQty))} pz</div></div>
             <div class="pdLine"><div class="pdLabel">Totale da ubicare</div><div class="pdValue">${escapeHtml(String(allRemainingQty))} pz</div></div>
+            ${allCereaQty > 0 ? `<div class="pdLine"><div class="pdLabel">Di cui a Cerea</div><div class="pdValue">${cereaBadgeHtml(allCereaQty)} ${escapeHtml(String(allCereaQty))} pz · posizione temporanea</div></div>` : ""}
           </div>
 
           <div class="pdSection">
@@ -11723,11 +11868,11 @@ function closeSheet(name,opts={}){
             </div>
             <div class="qrRackSide">
               <div class="qrRackManualCard">
-                <div class="qrRackManualTitle">Scelta rack immediata</div>
-                <div class="qrRackManualHint">Se non vuoi usare il QR, scegli direttamente la posizione. Le posizioni occupate da altri SKU non vengono mostrate.</div>
+                <div class="qrRackManualTitle">Scelta posizione immediata</div>
+                <div class="qrRackManualHint">Scegli un rack libero oppure Cerea, in fondo all’elenco. Cerea è temporanea: i pezzi resteranno anche in Da ubicare.</div>
                 <div class="qrRackManualPicker">
-                  <label class="qrRackManualLabel" for="qrRackManualSelect">Rack disponibile</label>
-                  <select class="input qrRackManualSelect" id="qrRackManualSelect" data-action="qrRackSelectRack" aria-label="Scegli rack da assegnare">
+                  <label class="qrRackManualLabel" for="qrRackManualSelect">Posizione disponibile</label>
+                  <select class="input qrRackManualSelect" id="qrRackManualSelect" data-action="qrRackSelectRack" aria-label="Scegli posizione da assegnare">
                     ${rackLocationSelectOptions([], sku, loc, { hideEmpty:true, exclude: excluded })}
                   </select>
                 </div>
@@ -11765,7 +11910,7 @@ function closeSheet(name,opts={}){
         if(!select) return;
         const code = normalizeRackLocation(select.value || "");
         if(!code) return;
-        if(!RACK_LOCATION_SET.has(code)){
+        if(!RACK_LOCATION_SET.has(code) && !isCereaLocation(code)){
           qrRackStatus("Rack non valido. Scegli una posizione dalla lista.", "bad");
           try{ select.value = ""; }catch(_e){}
           return;
@@ -11835,6 +11980,8 @@ function closeSheet(name,opts={}){
       const existingAllocationsBefore = normalizeRackAllocationsForWrite(readRackAllocationsFromDoc(it || {}));
       const selected = quickSelectedCode ? [quickSelectedCode] : readLocationOnlySelection();
       const selectedCode = selected[0] || "";
+      const assigningCerea = isCereaLocation(selectedCode);
+      const assignableBefore = assigningCerea ? Math.max(0, remainingBefore - cereaQtyFromDoc(it, lot)) : remainingBefore;
 
       if(!quickMode) setPdFieldError("rackLocation", "");
 
@@ -11853,7 +12000,7 @@ function closeSheet(name,opts={}){
         showToast("Una posizione per volta", `Scegli una posizione alla volta: puoi anche assegnare quantità superiori a ${RACK_PALLET_CAPACITY} pz nella stessa posizione.`, 2600);
         return;
       }
-      if(!RACK_LOCATION_SET.has(selectedCode)){
+      if(!RACK_LOCATION_SET.has(selectedCode) && !assigningCerea){
         if(!quickMode) setPdFieldError("rackLocation", "Ubicazione non valida.");
         showToast("Ubicazione non valida", "Scegli una posizione dalla lista.", 2200);
         return;
@@ -11866,22 +12013,27 @@ function closeSheet(name,opts={}){
       }
       // Se selectedCode è già usata dallo stesso SKU nello stesso magazzino, è valida:
       // la nuova quantità residua verrà sommata nella stessa allocazione cloud (code+lot).
+      if(assigningCerea && assignableBefore <= 0){
+        showToast("Cerea", "Tutti i pezzi da ubicare di questo lotto sono già a Cerea.", 2600);
+        if(!quickMode) renderProductDetailsSheet();
+        return;
+      }
 
       let qtyToAssign = 0;
-      if(remainingBefore > 0){
-        const allOk = confirm(`Disponibilità da ubicare: ${remainingBefore} pz.\n\nVuoi spostare tutti i ${remainingBefore} pezzi in ${selectedCode}?\n\nOK: ubica tutti i pezzi.\nAnnulla: scegli quanti pezzi ubicare.`);
+      if(assignableBefore > 0){
+        const allOk = confirm(`Pezzi da assegnare a ${assigningCerea ? "Cerea" : selectedCode}: ${assignableBefore} pz.\n\nVuoi spostare tutti i ${assignableBefore} pezzi in ${assigningCerea ? "Cerea" : selectedCode}?\n\nOK: ubica tutti i pezzi.\nAnnulla: scegli quanti pezzi ubicare.${assigningCerea ? "\n\nCerea è temporanea: i pezzi resteranno in Da ubicare." : ""}`);
         if(allOk){
-          qtyToAssign = remainingBefore;
+          qtyToAssign = assignableBefore;
         }else{
-          const raw = prompt(`Disponibilità da ubicare: ${remainingBefore} pz.\nQuanti pezzi vuoi mettere in ${selectedCode}?\nPuoi inserire anche quantità superiori a ${RACK_PALLET_CAPACITY} pz.\nMassimo disponibile: ${remainingBefore} pz`, String(Math.min(RACK_PALLET_CAPACITY, remainingBefore)));
+          const raw = prompt(`Disponibilità da assegnare: ${assignableBefore} pz.\nQuanti pezzi vuoi mettere in ${assigningCerea ? "Cerea" : selectedCode}?\nPuoi inserire anche quantità superiori a ${RACK_PALLET_CAPACITY} pz.\nMassimo disponibile: ${assignableBefore} pz`, String(Math.min(RACK_PALLET_CAPACITY, assignableBefore)));
           if(raw === null){ if(!quickMode) renderProductDetailsSheet(); return; }
           const parsed = parseSignedQtyStrict(raw);
           if(parsed === null || !Number.isFinite(parsed) || parsed <= 0){
             showToast("Quantità non valida", "Inserisci un numero intero positivo.", 2400);
             return;
           }
-          if(parsed > remainingBefore){
-            showToast("Quantità eccessiva", `Restano da ubicare ${remainingBefore} pz.`, 2600);
+          if(parsed > assignableBefore){
+            showToast("Quantità eccessiva", `Restano da assegnare ${assignableBefore} pz.`, 2600);
             return;
           }
           qtyToAssign = parsed;
@@ -11891,10 +12043,10 @@ function closeSheet(name,opts={}){
         qtyToAssign = qty;
       }
 
-      const remainingAfterPreview = Math.max(0, remainingBefore > 0 ? remainingBefore - qtyToAssign : 0);
+      const remainingAfterPreview = assigningCerea ? remainingBefore : Math.max(0, remainingBefore > 0 ? remainingBefore - qtyToAssign : 0);
       const transferLabel = (loc === "cerea") ? `${prettyLoc(loc)} → ${prettyLoc("concamarise")}` : prettyLoc(loc);
       const remainingLabel = (loc === "cerea") ? "Da ubicare dopo in Cerea" : "Da ubicare dopo";
-      const ok = confirm(`Confermi ubicazione cloud?\n\n${sku}\nLotto: ${lotLabelFromId(lot)} (${lotDateLabelFromId(lot)})\n${transferLabel}\nPosizione: ${selectedCode}\nPezzi in questa posizione: ${qtyToAssign}\n${remainingLabel}: ${remainingAfterPreview}`);
+      const ok = confirm(`Confermi ubicazione cloud?\n\n${sku}\nLotto: ${lotLabelFromId(lot)} (${lotDateLabelFromId(lot)})\n${transferLabel}\nPosizione: ${assigningCerea ? "Cerea (temporanea)" : selectedCode}\nPezzi in questa posizione: ${qtyToAssign}\n${remainingLabel}: ${remainingAfterPreview}${assigningCerea ? "\nI pezzi a Cerea restano da ubicare." : ""}`);
       if(!ok){ if(!quickMode) renderProductDetailsSheet(); return; }
 
       const api = state.firebase.api;
@@ -12137,6 +12289,7 @@ function closeSheet(name,opts={}){
           const freshLotQty = stockLotQtyFromDoc(fresh, lot);
           const freshRemaining = rackUnallocatedQtyByLotFromDoc(fresh, lot);
           let cleanAllocations;
+          let cleanCereaAllocations = readCereaAllocationsFromDoc(fresh);
           let beforeAllocatedQty = rackAllocatedQtyByLotFromDoc(fresh, lot);
           let afterAllocatedQty = beforeAllocatedQty;
 
@@ -12145,7 +12298,14 @@ function closeSheet(name,opts={}){
             throw new Error("Questo lotto è già stato ubicato durante la conferma. Riapri il prodotto per vedere le ubicazioni aggiornate.");
           }
 
-          if(freshRemaining > 0){
+          if(assigningCerea){
+            const freeForCerea = Math.max(0, freshRemaining - cereaQtyFromDoc(fresh, lot));
+            if(qtyToAssign > freeForCerea) throw new Error(`Restano ${freeForCerea} pz da assegnare a Cerea per questo lotto. Riapri il prodotto.`);
+            assignedQtyFinal = qtyToAssign;
+            cleanAllocations = freshAllocations;
+            cleanCereaAllocations = readCereaAllocationsFromDoc({ ...fresh, cereaAllocations:[...cleanCereaAllocations, { lot, qty:qtyToAssign }] });
+            finalRemaining = freshRemaining;
+          }else if(freshRemaining > 0){
             // stesso SKU + stesso rack consentito: la nuova quantità viene sommata cloud.
             if(qtyToAssign > freshRemaining) throw new Error(`Restano da ubicare ${freshRemaining} pz per questo lotto.`);
             assignedQtyFinal = qtyToAssign;
@@ -12169,6 +12329,7 @@ function closeSheet(name,opts={}){
 
           const cleanLocations = normalizeRackLocationsList(cleanAllocations.map(x=>x.code));
           const cleanLocation = cleanLocations[0] || "";
+          if(!assigningCerea) cleanCereaAllocations = consumeCereaAllocations(fresh, lot, assignedQtyFinal);
 
           tx.set(itemRef, {
             sku,
@@ -12177,6 +12338,7 @@ function closeSheet(name,opts={}){
             rackLocation: cleanLocation,
             rackLocations: cleanLocations,
             rackAllocations: cleanAllocations,
+            cereaAllocations: cleanCereaAllocations,
             lastRackMovementId: locationMovementId,
             lastRackMovementKey: locationMovementId,
             lastRackMovementLot: lot,
@@ -12193,6 +12355,7 @@ function closeSheet(name,opts={}){
             rackLocation: cleanLocation,
             rackLocations: cleanLocations,
             rackAllocations: cleanAllocations,
+            cereaAllocations: cleanCereaAllocations,
             lastRackMovementId: locationMovementId,
             lastRackMovementKey: locationMovementId,
             lastRackMovementLot: lot,
@@ -12206,7 +12369,7 @@ function closeSheet(name,opts={}){
           }, { merge:true });
 
           addProductMovementToBatch(tx, api, db, sku, {
-            type: "ubicazione",
+            type: assigningCerea ? "ubicazione_temporanea" : "ubicazione",
             movementId: locationMovementId,
             movementKey: locationMovementId,
             writeKey: locationMovementId,
@@ -12220,7 +12383,7 @@ function closeSheet(name,opts={}){
             toWarehouse: loc,
             location: loc,
             source: "ubicazione",
-            note: `Ubicazione ${selectedCode} • lotto ${lotLabelFromId(lot)}`,
+            note: `Ubicazione ${assigningCerea ? "Cerea temporanea (resta da ubicare)" : selectedCode} • lotto ${lotLabelFromId(lot)}`,
             rackLocation: selectedCode,
             rackLocations: cleanLocations,
             lot,
@@ -12232,6 +12395,7 @@ function closeSheet(name,opts={}){
           runtimePatch = {
             sku, title, qty:freshQty, stockLots:readStockLotsFromDoc(fresh),
             rackAllocations:cleanAllocations, rackLocations:cleanLocations, rackLocation:cleanLocation,
+            cereaAllocations:cleanCereaAllocations,
             lastRackMovementId:locationMovementId, lastRackMovementKey:locationMovementId, lastRackMovementLot:lot,
             updatedAtClient:nowClient, updatedBy:who, location:loc
           };
@@ -12414,6 +12578,34 @@ function closeSheet(name,opts={}){
       });
       syncHomeSearchClearButton("homeNoLocationSearch","btnClearHomeNoLocationSearch");
       syncHomeSearchClearButton("homeLocatedSearch","btnClearHomeLocatedSearch");
+      syncHomeSearchClearButton("homeCereaSearch","btnClearHomeCereaSearch");
+
+      let tCerea=null;
+      $("homeCereaSearch")?.addEventListener("input",()=>{
+        state.ui.homeCereaSearch=$("homeCereaSearch")?.value||"";
+        syncHomeSearchClearButton("homeCereaSearch","btnClearHomeCereaSearch");
+        clearTimeout(tCerea);
+        tCerea=setTimeout(renderHomeCereaBox,80);
+      });
+      $("btnClearHomeCereaSearch")?.addEventListener("click",()=>{
+        const input=$("homeCereaSearch");
+        if(!input) return;
+        input.value="";
+        state.ui.homeCereaSearch="";
+        syncHomeSearchClearButton("homeCereaSearch","btnClearHomeCereaSearch");
+        renderHomeCereaBox();
+        try{ input.focus({preventScroll:true}); }catch(_e){ input.focus(); }
+      });
+      const cereaList=$("homeCereaList");
+      const openCereaItem=e=>{
+        const row=e.target?.closest?.("[data-action='openHomeCereaItem']");
+        if(!row) return;
+        e.preventDefault();
+        state.route.loc=INVENTORY_CANONICAL_LOC;
+        openProductDetailsSheet(row.dataset.sku||"");
+      };
+      cereaList?.addEventListener("click",openCereaItem);
+      cereaList?.addEventListener("keydown",e=>{if(e.key==="Enter" || e.key===" ") openCereaItem(e);});
 
       const noLoc=$("homeNoLocationList");
       noLoc?.addEventListener("click",async e=>{
@@ -13393,6 +13585,26 @@ function closeSheet(name,opts={}){
   }
   .homeSearchClearBtn[hidden]{display:none!important;}
 
+  .cereaBadge{
+    display:inline-flex;
+    align-items:center;
+    align-self:flex-start;
+    width:max-content;
+    padding:3px 7px;
+    margin-top:4px;
+    border:1px solid #86c9a1;
+    border-radius:4px;
+    background:#e7f6ec;
+    color:#176238;
+    font-family:inherit;
+    font-size:10px;
+    font-weight:700;
+    line-height:1.2;
+    letter-spacing:.02em;
+    white-space:nowrap;
+  }
+  #homeCereaBox{margin-top:0;}
+  #homeCereaList{--col-extra:110px;}
   #homeNoLocationList{--col-extra:240px!important;}
   #homeNoLocationList.gridTable.cols4 .row.gridRow,
   #homeNoLocationList.gridTable.cols4 .row.gridHead{
