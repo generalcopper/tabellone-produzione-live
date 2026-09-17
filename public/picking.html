@@ -8181,7 +8181,7 @@ function readRackPickerSelection(root){
       if(hint){
         hint.textContent = q
           ? `Ricerca attiva: “${q}” • mostrati ${Math.min(out.length, 120).toLocaleString("it-IT")} candidati su ${out.length.toLocaleString("it-IT")} risultati (${all.length.toLocaleString("it-IT")} totali). Tocca una riga per aprire lo scanner QR.`
-          : `Mostrati ${Math.min(all.length, 120).toLocaleString("it-IT")} di ${all.length.toLocaleString("it-IT")}. Tocca una riga per aprire lo scanner QR. Se restano più di ${RACK_PALLET_CAPACITY} pz, puoi confermare tutti i pezzi nella stessa posizione oppure scegliere una quantità parziale.`;
+          : `Mostrati ${Math.min(all.length, 120).toLocaleString("it-IT")} di ${all.length.toLocaleString("it-IT")}. Tocca una riga per aprire lo scanner QR. Dopo aver scelto la posizione, premi OK per ubicare tutti i pezzi oppure Annulla per scegliere quanti ubicarne.`;
       }
     }
 
@@ -11868,8 +11868,8 @@ function closeSheet(name,opts={}){
       // la nuova quantità residua verrà sommata nella stessa allocazione cloud (code+lot).
 
       let qtyToAssign = 0;
-      if(remainingBefore > RACK_PALLET_CAPACITY){
-        const allOk = confirm(`Disponibilità da ubicare: ${remainingBefore} pz.\n\nVuoi spostare tutti i ${remainingBefore} pezzi in ${selectedCode}?`);
+      if(remainingBefore > 0){
+        const allOk = confirm(`Disponibilità da ubicare: ${remainingBefore} pz.\n\nVuoi spostare tutti i ${remainingBefore} pezzi in ${selectedCode}?\n\nOK: ubica tutti i pezzi.\nAnnulla: scegli quanti pezzi ubicare.`);
         if(allOk){
           qtyToAssign = remainingBefore;
         }else{
@@ -11886,8 +11886,6 @@ function closeSheet(name,opts={}){
           }
           qtyToAssign = parsed;
         }
-      }else if(remainingBefore > 0){
-        qtyToAssign = remainingBefore;
       }else{
         // Lotto già completamente ubicato: cambio posizione unica e assegno tutta la disponibilità del lotto.
         qtyToAssign = qty;
@@ -12127,6 +12125,7 @@ function closeSheet(name,opts={}){
 
         let finalRemaining = remainingAfterPreview;
         let assignedQtyFinal = qtyToAssign;
+        let runtimePatch = null;
         await api.runTransaction(db, async (tx)=>{
           const snap = await tx.get(itemRef);
           if(!snap.exists()) throw new Error("Prodotto non trovato.");
@@ -12142,6 +12141,9 @@ function closeSheet(name,opts={}){
           let afterAllocatedQty = beforeAllocatedQty;
 
           if(freshLotQty <= 0) throw new Error("Lotto non trovato o senza disponibilità.");
+          if(remainingBefore > 0 && freshRemaining <= 0){
+            throw new Error("Questo lotto è già stato ubicato durante la conferma. Riapri il prodotto per vedere le ubicazioni aggiornate.");
+          }
 
           if(freshRemaining > 0){
             // stesso SKU + stesso rack consentito: la nuova quantità viene sommata cloud.
@@ -12227,41 +12229,20 @@ function closeSheet(name,opts={}){
             locked: true,
             createdAtClient: nowClient
           });
+          runtimePatch = {
+            sku, title, qty:freshQty, stockLots:readStockLotsFromDoc(fresh),
+            rackAllocations:cleanAllocations, rackLocations:cleanLocations, rackLocation:cleanLocation,
+            lastRackMovementId:locationMovementId, lastRackMovementKey:locationMovementId, lastRackMovementLot:lot,
+            updatedAtClient:nowClient, updatedBy:who, location:loc
+          };
+          runtimePatch.__raw = { ...fresh, ...runtimePatch };
         });
 
+        // Mostra l'esito confermato dalla transazione, senza sommare nuovamente
+        // i pezzi se lo snapshot realtime ha già ricevuto la stessa ubicazione.
+        if(runtimePatch) patchRuntimeInventoryItem(loc, sku, runtimePatch);
         await syncRackLocationGroupCloud(sku, loc, "rack_location_assign");
         showToast("Ubicazione salvata", `${sku} → ${selectedCode} • ${assignedQtyFinal} pz${finalRemaining ? ` • restano ${finalRemaining}` : ""}`, 2400);
-        try{
-          const baseRuntime = getProductBySku(loc, sku) || it || {};
-          const freshAllocRuntime = normalizeRackAllocationsForWrite(readRackAllocationsFromDoc(baseRuntime || {}));
-          const hadRemainingRuntime = rackUnallocatedQtyByLotFromDoc(baseRuntime || {}, lot) > 0;
-          let cleanAllocRuntime;
-          if(hadRemainingRuntime){
-            cleanAllocRuntime = normalizeRackAllocationsForWrite([
-              ...freshAllocRuntime,
-              { code:selectedCode, lot, qty:assignedQtyFinal, movementId:locationMovementId, movementKey:locationMovementId, createdAtClient:nowClient }
-            ]);
-          }else{
-            const otherLotAllocRuntime = freshAllocRuntime.filter(x=> (normalizeLotId(x.lot) || LOT_LEGACY_ID) !== lot);
-            cleanAllocRuntime = normalizeRackAllocationsForWrite([
-              ...otherLotAllocRuntime,
-              { code:selectedCode, lot, qty:assignedQtyFinal, movementId:locationMovementId, movementKey:locationMovementId, createdAtClient:nowClient }
-            ]);
-          }
-          const cleanLocsRuntime = normalizeRackLocationsList(cleanAllocRuntime.map(x=>x.code));
-          patchRuntimeInventoryItem(loc, sku, {
-            sku,
-            title,
-            qty: stockQtyFromDoc(baseRuntime || {}),
-            stockLots: readStockLotsFromDoc(baseRuntime || {}),
-            rackAllocations: cleanAllocRuntime,
-            rackLocations: cleanLocsRuntime,
-            rackLocation: cleanLocsRuntime[0] || "",
-            updatedAtClient: nowClient,
-            updatedBy: who,
-            location: loc
-          });
-        }catch(_e){}
         state.ui.productDetailsSku = null;
         state.ui.productDetailsLot = "";
         state.ui.productDetailsEditMode = false;
