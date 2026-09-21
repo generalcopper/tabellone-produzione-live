@@ -2,7 +2,8 @@
 
 const { initializeApp } = require('firebase-admin/app');
 const { getAuth } = require('firebase-admin/auth');
-const { getFirestore } = require('firebase-admin/firestore');
+const { getFirestore, FieldValue } = require('firebase-admin/firestore');
+const { createCereaService } = require('./cerea-service');
 const { onRequest } = require('firebase-functions/v2/https');
 const { onDocumentWritten } = require('firebase-functions/v2/firestore');
 const { onSchedule } = require('firebase-functions/v2/scheduler');
@@ -61,3 +62,9 @@ exports.pickingEmailFbmMorning = onSchedule({
 exports.pickingEmailDelivery = onDocumentWritten({
   ...runtime, document: 'email/{mailId}', retry: true, timeoutSeconds: 420,
 }, event => service.onDelivery(event));
+
+
+const cereaService = createCereaService({db:getFirestore(), timestamp:() => FieldValue.serverTimestamp()});
+exports.pickingAutoCerea = onDocumentWritten({
+  ...runtime, document:'amzInventory/concamarise/items/{sku}', retry:true, timeoutSeconds:60,
+}, event => cereaService.onInventoryWritten(event));

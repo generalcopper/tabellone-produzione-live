@@ -14,3 +14,12 @@ test('Deployment removes per-order FBM and schedules the private morning handler
   assert.equal(schedule.timeZone, 'Europe/Rome');
   assert.equal(functions.pickingEmailFbmMorning.__endpoint.httpsTrigger, undefined);
 });
+
+
+test('Cerea placement is a retryable private inventory trigger', () => {
+  const endpoint=functions.pickingAutoCerea.__endpoint;
+  assert.equal(endpoint.httpsTrigger,undefined);
+  assert.equal(endpoint.eventTrigger.eventType,'google.cloud.firestore.document.v1.written');
+  assert.equal(endpoint.eventTrigger.eventFilterPathPatterns.document,'amzInventory/concamarise/items/{sku}');
+  assert.equal(endpoint.eventTrigger.retry,true);
+});

@@ -113,3 +113,20 @@ I test di integrazione usano solo demo-picking-email-tests. Coprono selezione,
 accessi, riepiloghi manuali, conteggi e dettaglio prodotti, deduplicazione,
 orario italiano, retry e ultimo invio confermato. Nessuna email di prova viene
 spedita ai lavoratori.
+
+
+## Automatic temporary Cerea placement
+
+`pickingAutoCerea` listens to writes on `amzInventory/concamarise/items/{sku}`.
+For items whose production area is Cerea, it assigns all currently unallocated
+pieces to `cereaAllocations`, by lot. They remain in Picking's **Da ubicare**
+and retain its green Cerea badge. Rack transfers reduce the temporary balance.
+
+The transaction reads current stock on every retry and only writes Cerea fields
+on the inventory document and its existing product mirror. It never changes
+stock totals, reservations, rack allocations or authoritative stock timestamps.
+Manual Cerea allocations for other production areas are unaffected.
+
+Deploy only this handler: `firebase deploy --only functions:picking-notifications:pickingAutoCerea --project tabellone-produzione-liv-e313e --non-interactive`.
+Run the backend and Picking contract tests from the repository root with
+`node --test tests/*.test.cjs functions/picking-notifications/*.test.js`.
