@@ -11137,6 +11137,8 @@ async function twSyncOrdersToWriteQueue(){
     // Upserts (new or changed)
     for(const [id, payload] of desired.entries()){
       const prev = existingMap.get(id) || null;
+      // Conserva le correzioni effettuate dall'admin nella coda WRITE.
+      if(prev?.qtyEditedByAdmin) payload.qty = prev.qty;
       // basic diff to avoid loops
       const changed = !prev ||
         String(prev.product||"") !== String(payload.product||"") ||
@@ -11151,6 +11153,16 @@ async function twSyncOrdersToWriteQueue(){
 
       const docRef = fs.doc(queueCol, id);
       const base = { ...payload };
+      if(prev){
+        await fs.runTransaction(db, async(tx)=>{
+          const live = await tx.get(docRef);
+          if(!live.exists()) return;
+          const patch = { ...base };
+          if(live.data()?.qtyEditedByAdmin === true) delete patch.qty;
+          tx.update(docRef, patch);
+        });
+        continue;
+      }
       // createdAt only if missing
       if(!prev){
         base.createdAt = fs.serverTimestamp ? fs.serverTimestamp() : nowIso();
@@ -12219,6 +12231,7 @@ function twStartQueueWatch(){
         supplier: (v.supplier || v.fornitore || "").toString().trim(),
         product: (v.product || v.label || v.rawLine || "").toString().trim(),
         qty: (v.qty || "").toString().trim(),
+        qtyEditedByAdmin: v.qtyEditedByAdmin === true,
         unit: (v.unit || "").toString().trim(),
         format: (v.format || "").toString().trim(),
         status: (v.status || "DA PRODURRE").toString().trim(),

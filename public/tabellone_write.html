@@ -12836,6 +12836,8 @@ function twQueueDocToItem(d){
     supplier: (v.supplier || v.fornitore || "").toString().trim(),
     product: (v.product || v.finishedProductName || v.label || v.rawLine || "").toString().trim(),
     qty: (v.qty || "").toString().trim(),
+    qtyEditedByAdmin: v.qtyEditedByAdmin === true,
+    qtyEditedAtMs: Number(v.qtyEditedAtMs || 0),
     unit: (v.unit || v.finishedProductUom || "").toString().trim(),
     format: (v.format || "").toString().trim(),
     status: (v.status || "DA PRODURRE").toString().trim(),
@@ -16014,6 +16016,8 @@ async function twSyncOrdersToWriteQueue(){
 
     for(const [id, payload] of desired.entries()){
       const prev = existingMap.get(id) || null;
+      // Le correzioni della coda sono indipendenti dalla quantità dell'ordine.
+      if(prev?.qtyEditedByAdmin) payload.qty = prev.qty;
       // basic diff to avoid loops
       const changed = !prev ||
         String(prev.product||"") !== String(payload.product||"") ||
@@ -16028,6 +16032,17 @@ async function twSyncOrdersToWriteQueue(){
 
       const docRef = fs.doc(queueCol, id);
       const base = { ...payload };
+      if(prev){
+        // Rileggi in transazione: un admin può correggere la quantità durante il sync.
+        await fs.runTransaction(db, async(tx)=>{
+          const live = await tx.get(docRef);
+          if(!live.exists()) return;
+          const patch = { ...base };
+          if(live.data()?.qtyEditedByAdmin === true) delete patch.qty;
+          tx.update(docRef, patch);
+        });
+        continue;
+      }
       // createdAt only if missing
       if(!prev){
         const queueOrderKey = reservedOrderKeyById.get(id);
@@ -16696,6 +16711,9 @@ function twRenderQueue(items){
     const orderLbl = it.orderNo ? (`Ord. ${it.orderNo}`) : "";
     const orderLblWithCustomer = it.orderNo ? (`Ord. ${it.orderNo}${it.customer ? " · " + it.customer : ""}`) : "";
     const qtyTxt = (it.qty || "") ? `${it.qty} ${it.unit||""}`.trim() : "—";
+    const qtyCell = twIsCurrentUserAdmin()
+      ? `<button class="twQtyBadge twQtyEdit" data-tw-act="edit_qty" type="button" title="Modifica quantità" aria-label="${escapeHtml(`Modifica quantità: ${qtyTxt}`)}">${escapeHtml(qtyTxt)}</button>`
+      : `<span class="twQtyBadge">${escapeHtml(qtyTxt)}</span>`;
 
     const delLabel = isOrderRow ? "Rimuovi da WRITE" : "Elimina";
     const delTitle = isOrderRow
@@ -16719,7 +16737,7 @@ function twRenderQueue(items){
             <div class="twTablePrimary">${escapeHtml(customerTxt)}</div>
             <div class="sub">Cliente</div>
           </div>
-          <div class="twTableCell twTableQty"><span class="twQtyBadge">${escapeHtml(qtyTxt)}</span></div>
+          <div class="twTableCell twTableQty">${qtyCell}</div>
           <div class="twTableCell twTableActions">
             <button class="btn good" data-tw-act="done" type="button">Completa</button>
             ${delBtn}
@@ -16742,7 +16760,7 @@ function twRenderQueue(items){
             <div class="twTablePrimary">${escapeHtml(st)}</div>
             <div class="sub">${escapeHtml(created ? `Creato: ${created}` : (isAmz ? "Hub Amazon unico" : "In attesa"))}</div>
           </div>
-          <div class="twTableCell twTableQty"><span class="twQtyBadge">${escapeHtml(qtyTxt)}</span></div>
+          <div class="twTableCell twTableQty">${qtyCell}</div>
           <div class="twTableCell twTableActions">
             <button class="btn good" data-tw-act="done" type="button">Completa</button>
             ${delBtn}
@@ -18867,6 +18885,102 @@ async function twPersistQueueOrder(ids, preferredMovedId="", baseOldIds=null){
   }
 }
 
+function twParseQueueQuantity(raw, job){
+  const text = String(raw ?? "").trim();
+  if(!/^\d+(?:[.,]\d{1,3})?$/.test(text)){
+    throw new Error("Inserisci una quantità valida, senza separatori delle migliaia (massimo 3 decimali).");
+  }
+  const qty = Number(text.replace(",", "."));
+  if(!Number.isFinite(qty) || qty <= 0 || qty > Number.MAX_SAFE_INTEGER){
+    throw new Error("Inserisci una quantità maggiore di zero.");
+  }
+  const pieces = twIsManualAmazonSkuRow(job) || twIsManualFinishedProductRow(job) ||
+    twDetectUnitToken("", job?.unit, job?.um) === "pz";
+  if(pieces && !Number.isSafeInteger(qty)){
+    throw new Error("Per le quantità in pezzi inserisci un numero intero.");
+  }
+  return String(qty);
+}
+
+async function twSaveQueueQuantity(job, rawQty){
+  if(!twIsCurrentUserAdmin()) throw new Error("Solo gli amministratori possono modificare la quantità.");
+  if(!state.firebase?.ok) throw new Error("Firebase non disponibile");
+  const id = String(job?.id || "").trim();
+  if(!id) throw new Error("Riga non disponibile. Aggiorna la coda e riprova.");
+  const qty = twParseQueueQuantity(rawQty, job);
+  const fs = state.firebase.api;
+  const db = state.firebase.db;
+  const actorUid = state.user.uid;
+  const email = String(state.user.email || "").trim().toLowerCase();
+  if(!actorUid || !email) throw new Error("Sessione non disponibile. Accedi nuovamente.");
+  const ref = fs.doc(db, "producedDays", TW_LINE_BUCKET, "queue", id);
+  const accessRef = fs.doc(db, USERS_COL, email);
+  const nowMs = Date.now();
+  await fs.runTransaction(db, async(tx)=>{
+    const access = await tx.get(accessRef);
+    const live = await tx.get(ref);
+    if(!twIsCurrentUserAdmin() || state.user?.uid !== actorUid ||
+       !access.exists() || access.data()?.isAdmin !== true || access.data()?.enabled === false){
+      throw new Error("Solo gli amministratori possono modificare la quantità.");
+    }
+    if(!live.exists() || twQueueItemHasCompletedStatus(live.data())){
+      throw new Error("La riga è stata rimossa o completata. Aggiorna la coda.");
+    }
+    const current = live.data();
+    if(String(current.qty ?? "").trim() !== String(job.qty ?? "").trim() ||
+       Number(current.qtyEditedAtMs || 0) !== Number(job.qtyEditedAtMs || 0)){
+      throw new Error("La quantità è cambiata nel frattempo. Riapri la modifica dalla coda aggiornata.");
+    }
+    twParseQueueQuantity(qty, current);
+    tx.update(ref, {
+      qty,
+      qtyEditedByAdmin: true,
+      qtyPrevious: String(current.qty ?? ""),
+      qtyEditedAt: fs.serverTimestamp(),
+      qtyEditedAtMs: nowMs,
+      qtyEditedByUid: actorUid,
+      qtyEditedByEmail: email
+    });
+    twBatchTouchQueueLive(tx, "quantity_edited", [id]);
+  });
+}
+
+async function twEditQueueQuantity(job){
+  if(!twIsCurrentUserAdmin()){
+    showToast("Accesso limitato", "Solo gli amministratori possono modificare la quantità.");
+    return;
+  }
+  if(!job){
+    showToast("Riga non disponibile", "Aggiorna la coda e riprova.");
+    return;
+  }
+  if(twEditQueueQuantity._busy) return;
+  twEditQueueQuantity._busy = true;
+  let saving = false;
+  try{
+    const title = String(job.product || job.label || job.code || "Riga WRITE");
+    const unit = String(job.unit || job.um || "").trim();
+    const input = prompt(`Modifica quantità${unit ? ` (${unit})` : ""}\n${title}\n\nInserisci il nuovo valore senza separatori delle migliaia.`, String(job.qty || ""));
+    if(input === null) return;
+    const qty = twParseQueueQuantity(input, job);
+    if(Number(qty) === Number(String(job.qty || "").replace(",", "."))) return;
+    const hiddenNotice = twHideInUi({ ...job, qty })
+      ? "\n\nCon questa quantità la riga sarà esclusa dalla vista WRITE secondo i filtri attuali."
+      : "";
+    if(!confirm(`Confermi la modifica della quantità?\n${title}\n\nDa ${job.qty} ${unit} a ${qty} ${unit}.${hiddenNotice}`)) return;
+    saving = true;
+    twSetCloud("loading", "salvataggio quantità…");
+    await twSaveQueueQuantity(job, qty);
+    twSetCloud("ok");
+    showToast("Quantità aggiornata", `${qty} ${unit}`.trim());
+  }catch(e){
+    if(saving) twSetCloud("bad", e?.code || "quantity-edit");
+    alert(e?.message || "Impossibile modificare la quantità. Riprova.");
+  }finally{
+    twEditQueueQuantity._busy = false;
+  }
+}
+
 function twIsManagedOrderQueueRow(it){
   try{
     if(!it) return false;
@@ -18990,6 +19104,11 @@ function twBindUiOnce(){
     const tw = ensureTabWriteState();
     const job = (tw.queueItems || []).find(x=>x.id===id) || null;
 
+    if(act === "edit_qty"){
+      e.preventDefault();
+      await twEditQueueQuantity(job);
+      return;
+    }
     if(act === "done" && job){
       twOpenQtyModal(id, job);
       return;
@@ -19485,6 +19604,14 @@ body[data-active-page="invio"] #mobileSendCard{
   font-variant-numeric:tabular-nums!important;
   white-space:nowrap!important;
 }
+.twQtyEdit{
+  font-family:inherit!important;
+  line-height:inherit!important;
+  cursor:pointer;
+  appearance:none;
+}
+.twQtyEdit:hover{border-color:var(--tw-table-accent)!important;background:var(--tw-table-soft)!important;}
+.twQtyEdit:focus-visible{outline:2px solid var(--tw-table-accent);outline-offset:2px;}
 .twTableActions{
   flex-direction:row!important;
   align-items:center!important;
