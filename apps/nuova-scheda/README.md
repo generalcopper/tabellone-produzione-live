@@ -24,13 +24,20 @@ Questo comando pubblica esclusivamente il sito dedicato. La configurazione Hosti
 
 Le personalizzazioni restano disponibili dopo i deploy perché la chiave locale e l'origine pubblica rimangono stabili. L'eliminazione dei dati del sito nel browser elimina anche queste preferenze.
 
-
 ## Interfaccia e micro-estensione Chrome
 
-Misure desktop verificate a 1920 × 916: logo 272 × 92 alla quota 122, barra di ricerca 746 × 48 alla quota 251, tessere 112 × 112, icone circolari 48 × 48 alla quota 333. Font `system-ui`, corrispondente a quello del WebUI di Chrome su Mac. La griglia conserva queste misure anche sulle righe aggiuntive.
+Misure desktop verificate a 1920 × 916: logo 272 × 92 alla quota 122, barra di ricerca 746 × 48 alla quota 251, tessere 112 × 112, icone circolari 48 × 48 alla quota 333. Font `system-ui`, corrispondente al WebUI di Chrome su Mac. La griglia conserva le misure sulle righe aggiuntive.
 
-La cartella `extension` contiene **LG Nuova Scheda**, estensione Manifest V3 che dichiara solo `chrome_url_overrides.newtab`. Non richiede permessi, host permissions, content script o service worker. La pagina locale esegue immediatamente `location.replace('https://lg-nuova-scheda.web.app/')`; il browser mantiene pertanto le personalizzazioni nello stesso localStorage della pagina ospitata.
+L'estensione Manifest V3 **LG Nuova Scheda 1.1.0** include HTML, CSS, JavaScript e icone locali. `chrome_url_overrides.newtab` apre direttamente `newtab.html`, senza redirect o richieste di rete. I nuovi collegamenti personalizzati usano un'iniziale locale. Nessun permesso aggiuntivo, host permission, content script o service worker. La ricerca Google e l'apertura dei siti richiedono Internet.
 
-Installazione: aprire `chrome://extensions`, abilitare Modalità sviluppatore, scegliere Carica estensione non pacchettizzata e selezionare la cartella `extension` (oppure `LGNuovaScheda` nella distribuzione ZIP). Non spostare la cartella dopo il caricamento. Le istruzioni complete sono in `extension/LEGGIMI.txt`.
+Per ricostruire i file dell'estensione dalle sorgenti web condivise:
 
-Verifica del 29 settembre 2026: apertura reale di due pagine `chrome://newtab/` con l'estensione caricata in un profilo Chrome for Testing separato, redirect riuscito e conservazione dello storage della medesima origine. Verificati anche aggiunta, modifica, rimozione e persistenza delle scorciatoie, nessun errore JavaScript e nessuna eccedenza orizzontale a 390 pixel.
+```sh
+python3 apps/nuova-scheda/build-extension.py
+```
+
+Aggiornare il contenuto della stessa cartella già caricata e premere Ricarica in `chrome://extensions`. Per una prima installazione abilitare Modalità sviluppatore, scegliere Carica estensione non pacchettizzata e selezionare la cartella. Le istruzioni sono in `extension/LEGGIMI.txt`.
+
+Le preferenze locali dell'estensione hanno un'origine distinta da quella del sito Firebase. Le personalizzazioni precedenti si trasferiscono dalla pagina online con Personalizza → Esporta scorciatoie, quindi nell'estensione con Personalizza → Importa scorciatoie. L'importazione valida il contenuto e chiede conferma prima di sostituire le preferenze; è disponibile Annulla. Il sito online mantiene i propri dati.
+
+Verifica del 29 settembre 2026 in Chrome for Testing su Mac: apertura nuova scheda con rete disattivata e zero richieste HTTP; icone iniziali disponibili; ricerca navigata all'URL previsto; esportazione web e importazione locale; aggiunta, modifica, rimozione offline, sincronizzazione fra schede, conservazione dopo il riavvio del browser e rifiuto di un'importazione non valida. Nessun errore JavaScript o CSP.

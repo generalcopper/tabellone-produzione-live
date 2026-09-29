@@ -83,6 +83,8 @@ function circle(item) {
   fallback.textContent = item.name.trim().charAt(0).toUpperCase();
   if (item.icon === 'blank') return el;
   if (item.icon === 'test' || item.icon === 'trading') { fallback.textContent = item.icon === 'test' ? 'C' : 'L'; el.append(fallback); return el; }
+  // The packaged page must render without any network request, including custom icons.
+  if (!item.icon && location.protocol === 'chrome-extension:') { el.append(fallback); return el; }
   const img = document.createElement('img');
   img.alt = '';
   img.width = 24;
@@ -208,6 +210,34 @@ $('undo-button').addEventListener('click', () => undoAction?.());
 $('customize-button').addEventListener('click', () => customDialog.showModal());
 $('customize-close').addEventListener('click', () => customDialog.close());
 $('customize-add').addEventListener('click', () => { customDialog.close(); openEditor(); });
+$('export-button').addEventListener('click', () => {
+  const file = new Blob([JSON.stringify({ version:1, shortcuts }, null, 2)], { type:'application/json' });
+  const url = URL.createObjectURL(file);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = 'LGNuovaScheda-scorciatoie.json';
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+});
+$('import-button').addEventListener('click', () => $('import-file').click());
+$('import-file').addEventListener('change', async event => {
+  const input = event.currentTarget;
+  const file = input.files[0];
+  input.value = '';
+  if (!file) return;
+  let next;
+  try {
+    if (file.size > 1024 * 1024) throw new Error('File too large');
+    next = parseState(await file.text());
+  } catch {
+    notify('Il file non contiene scorciatoie valide.');
+    return;
+  }
+  if (!window.confirm('Importare ' + next.length + ' scorciatoie? Le scorciatoie attuali verranno sostituite.')) return;
+  if (save(next, 'Scorciatoie importate.', true)) customDialog.close();
+});
 $('restore-button').addEventListener('click', () => {
   if (window.confirm('Ripristinare le 41 scorciatoie iniziali? Le modifiche personali verranno sostituite.')) {
     if (save(structuredClone(defaults), 'Scorciatoie ripristinate.', true)) customDialog.close();
