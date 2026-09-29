@@ -1,5 +1,7 @@
 import { defaults } from './shortcuts.js';
 import { favicons } from './favicons.js';
+import { bootstrap } from './bootstrap.js';
+import { startShortcutSync, undoShortcutChange } from './shortcut-sync.js';
 
 const key = 'lg-new-tab.shortcuts.v1';
 const $ = (id) => document.getElementById(id);
@@ -16,6 +18,26 @@ let menuId = null;
 let toastTimer;
 let undoAction;
 let recognition;
+
+const shortcutSync=startShortcutSync({
+  initial:shortcuts,
+  onUpdate(values) {
+    try {
+      const next=parseState(JSON.stringify({version:1,shortcuts:values}));
+      if (JSON.stringify(next)===JSON.stringify(shortcuts)) return;
+      localStorage.setItem(key,JSON.stringify({version:1,shortcuts:next}));
+      shortcuts=next;
+      closeMenu();
+      render();
+    } catch { notify('Impossibile aggiornare le scorciatoie su questo browser.'); }
+  },
+  onStatus(status) {
+    const el=$('sync-status');
+    el.hidden=false;
+    el.textContent=status==='pending' ? 'Modifiche salvate su questo Mac. Sincronizzazione in attesa.' :
+      status==='connecting' ? 'Sincronizzazione automatica in corso…' : 'Sincronizzazione automatica con Chrome attiva';
+  }
+});
 
 function normalizeUrl(value) {
   let text = value.trim();
@@ -42,7 +64,19 @@ function parseState(raw) {
 }
 
 function load() {
-  try { return parseState(localStorage.getItem(key)); }
+  try {
+    let existing=localStorage.getItem(key);
+    if (location.protocol==='chrome-extension:' && bootstrap &&
+        localStorage.getItem('lg-new-tab.bootstrap-applied')!==bootstrap.migrationId) {
+      if (bootstrap.mode==='replica' || existing===null) {
+        if (existing!==null) localStorage.setItem('lg-new-tab.before-sync.v1',existing);
+        existing=JSON.stringify({version:1,shortcuts:bootstrap.shortcuts});
+        localStorage.setItem(key,existing);
+      }
+      localStorage.setItem('lg-new-tab.bootstrap-applied',bootstrap.migrationId);
+    }
+    return parseState(existing);
+  }
   catch { return structuredClone(defaults); }
 }
 
@@ -60,9 +94,10 @@ function save(next, message, allowUndo = false) {
   try { localStorage.setItem(key, JSON.stringify({ version:1, shortcuts:next })); }
   catch { notify('Impossibile salvare le modifiche nel browser.'); return false; }
   shortcuts = next;
+  shortcutSync?.save(previous,next);
   closeMenu();
   render();
-  notify(message, allowUndo ? () => save(previous, 'Modifica annullata.') : null);
+  notify(message, allowUndo ? () => save(undoShortcutChange(shortcuts,previous,next), 'Modifica annullata.') : null);
   return true;
 }
 

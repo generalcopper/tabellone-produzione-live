@@ -11,7 +11,7 @@ html = (site / 'index.html').read_text()
 html = html.replace('href="style.css"', 'href="newtab.css"')
 html = html.replace('src="app.js"', 'src="newtab.js"')
 (extension / 'newtab.html').write_text(html)
-for source, target in [('style.css', 'newtab.css'), ('app.js', 'newtab.js'), ('shortcuts.js', 'shortcuts.js'), ('favicons.js', 'favicons.js')]:
+for source, target in [('style.css', 'newtab.css'), ('app.js', 'newtab.js'), ('shortcuts.js', 'shortcuts.js'), ('favicons.js', 'favicons.js'), ('bootstrap.js', 'bootstrap.js'), ('shortcut-sync.js', 'shortcut-sync.js')]:
     shutil.copy2(site / source, extension / target)
 shutil.copytree(site / 'assets', extension / 'assets', dirs_exist_ok=True)
 shutil.copy2(site / 'assets/lg.png', extension / 'icon.png')
