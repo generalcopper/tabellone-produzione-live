@@ -108,7 +108,9 @@ function render() {
     link.setAttribute('aria-label', item.name);
     const label = document.createElement('span');
     label.className = 'shortcut-label';
-    label.textContent = item.name;
+    const title = document.createElement('span');
+    title.textContent = item.name;
+    label.append(title);
     link.append(circle(item), label);
     const more = document.createElement('button');
     more.type = 'button';
@@ -133,7 +135,9 @@ function render() {
   icon.append(svg('plus-icon'));
   const label = document.createElement('span');
   label.className = 'shortcut-label';
-  label.textContent = 'Aggiungi scorciatoia';
+  const title = document.createElement('span');
+  title.textContent = 'Aggiungi scorciatoia';
+  label.append(title);
   add.append(icon, label);
   add.addEventListener('click', () => openEditor());
   tile.append(add);
