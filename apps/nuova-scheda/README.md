@@ -9,7 +9,8 @@ Aspetto basato sullo screenshot fornito il 29 settembre 2026.
 - Salvataggio locale per browser e profilo; sincronizzazione fra le schede della stessa origine.
 - Il menu Personalizza permette di ripristinare le 41 scorciatoie iniziali.
 - Il progetto non raccoglie password e non modifica le impostazioni di Chrome.
-- Le icone iniziali sono locali; per i nuovi collegamenti si richiede la favicon del dominio a Google, senza percorso né parametri dell'URL.
+- Le favicon sono abbinate all'URL della singola pagina, senza riutilizzare gruppi o loghi di altre pagine. Le sorgenti verificate sono documentate in favicon-sources.json.
+- Le pagine senza favicon usano un'iniziale locale. I siti protetti e i nuovi collegamenti nell'estensione possono usare la cache locale delle favicon di Chrome.
 - La ricerca usa Google; microfono tramite Web Speech API del browser, immagini tramite Google Lens.
 
 ## Pubblicazione
@@ -28,7 +29,7 @@ Le personalizzazioni restano disponibili dopo i deploy perché la chiave locale 
 
 Misure desktop verificate a 1920 × 916: logo 272 × 92 alla quota 122, barra di ricerca 746 × 48 alla quota 251, tessere 112 × 112, icone circolari 48 × 48 alla quota 333. Font `system-ui`, corrispondente al WebUI di Chrome su Mac. La griglia conserva le misure sulle righe aggiuntive.
 
-L'estensione Manifest V3 **LG Nuova Scheda 1.1.0** include HTML, CSS, JavaScript e icone locali. `chrome_url_overrides.newtab` apre direttamente `newtab.html`, senza redirect o richieste di rete. I nuovi collegamenti personalizzati usano un'iniziale locale. Nessun permesso aggiuntivo, host permission, content script o service worker. La ricerca Google e l'apertura dei siti richiedono Internet.
+L'estensione Manifest V3 **LG Nuova Scheda 1.2.0** include HTML, CSS, JavaScript e icone locali. `chrome_url_overrides.newtab` apre direttamente `newtab.html`, senza redirect o richieste di rete. I nuovi collegamenti personalizzati usano la favicon già memorizzata da Chrome, oppure un'iniziale locale. L'unico permesso è favicon; nessuna host permission, content script o service worker. La ricerca Google e l'apertura dei siti richiedono Internet.
 
 Per ricostruire i file dell'estensione dalle sorgenti web condivise:
 
@@ -41,3 +42,5 @@ Aggiornare il contenuto della stessa cartella già caricata e premere Ricarica i
 Le preferenze locali dell'estensione hanno un'origine distinta da quella del sito Firebase. Le personalizzazioni precedenti si trasferiscono dalla pagina online con Personalizza → Esporta scorciatoie, quindi nell'estensione con Personalizza → Importa scorciatoie. L'importazione valida il contenuto e chiede conferma prima di sostituire le preferenze; è disponibile Annulla. Il sito online mantiene i propri dati.
 
 Verifica del 29 settembre 2026 in Chrome for Testing su Mac: apertura nuova scheda con rete disattivata e zero richieste HTTP; icone iniziali disponibili; ricerca navigata all'URL previsto; esportazione web e importazione locale; aggiunta, modifica, rimozione offline, sincronizzazione fra schede, conservazione dopo il riavvio del browser e rifiuto di un'importazione non valida. Nessun errore JavaScript o CSP.
+
+Verifica favicon 1.2.0: tutte le 41 scorciatoie confrontate con il catalogo per URL, icone diverse per pagine sullo stesso dominio, cache nativa Chrome verificata con due pagine di prova distinte, apertura offline senza richieste HTTP, conservazione delle personalizzazioni precedenti e nessun errore JavaScript/CSP. Il build produce anche LGNuovaScheda.zip nel sito pubblico.

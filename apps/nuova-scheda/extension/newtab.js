@@ -1,4 +1,5 @@
 import { defaults } from './shortcuts.js';
+import { favicons } from './favicons.js';
 
 const key = 'lg-new-tab.shortcuts.v1';
 const $ = (id) => document.getElementById(id);
@@ -74,6 +75,41 @@ function svg(symbol) {
   return el;
 }
 
+function faviconEntry(value) {
+  const url = new URL(value);
+  // Fragments do not identify a different document; paths and queries always do.
+  url.hash = '';
+  if (url.hostname === 'tabellone-produzione-liv-e313e.web.app') {
+    url.hostname = 'tabellone-produzione-liv-e313e.firebaseapp.com';
+  }
+  return favicons[url.href];
+}
+
+const nativeFavicons = new Map();
+let defaultNativeFavicon;
+function nativeFavicon(value) {
+  if (!globalThis.chrome?.runtime?.getURL || location.protocol !== 'chrome-extension:') return Promise.resolve(null);
+  if (nativeFavicons.has(value)) return nativeFavicons.get(value);
+  const result = new Promise(resolve => {
+    const url = new URL(chrome.runtime.getURL('/_favicon/'));
+    url.searchParams.set('pageUrl', value);
+    url.searchParams.set('size', '32');
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const canvas = document.createElement('canvas');
+        canvas.width = canvas.height = 32;
+        canvas.getContext('2d').drawImage(img, 0, 0, 32, 32);
+        resolve({ src:url.href, fingerprint:canvas.toDataURL() });
+      } catch { resolve(null); }
+    };
+    img.onerror = () => resolve(null);
+    img.src = url.href;
+  });
+  nativeFavicons.set(value, result);
+  return result;
+}
+
 function circle(item) {
   const el = document.createElement('span');
   el.className = 'shortcut-circle';
@@ -81,19 +117,33 @@ function circle(item) {
   const fallback = document.createElement('span');
   fallback.className = 'initial';
   fallback.textContent = item.name.trim().charAt(0).toUpperCase();
-  if (item.icon === 'blank') return el;
-  if (item.icon === 'test' || item.icon === 'trading') { fallback.textContent = item.icon === 'test' ? 'C' : 'L'; el.append(fallback); return el; }
-  // The packaged page must render without any network request, including custom icons.
-  if (!item.icon && location.protocol === 'chrome-extension:') { el.append(fallback); return el; }
-  const img = document.createElement('img');
-  img.alt = '';
-  img.width = 24;
-  img.height = 24;
-  img.decoding = 'async';
-  img.referrerPolicy = 'no-referrer';
-  img.src = item.icon ? 'assets/' + item.icon + '.png' : 'https://www.google.com/s2/favicons?sz=64&domain_url=' + encodeURIComponent(new URL(item.url).origin);
-  img.addEventListener('error', () => img.replaceWith(fallback), { once:true });
-  el.append(img);
+  el.append(fallback);
+  const entry = faviconEntry(item.url);
+  const local = location.protocol === 'chrome-extension:';
+  let imageRequest = 0;
+  function show(src) {
+    const request = ++imageRequest;
+    const img = document.createElement('img');
+    img.alt = '';
+    img.width = img.height = 24;
+    img.decoding = 'async';
+    img.referrerPolicy = 'no-referrer';
+    img.addEventListener('load', () => { if (request === imageRequest) el.replaceChildren(img); }, { once:true });
+    img.src = src;
+  }
+  // Ignore legacy icon groups, including those in existing saved shortcuts.
+  // Verified empty favicons stay empty of other sites' branding.
+  if (entry?.src) show(entry.src);
+  if (local && (!entry || entry.native)) {
+    // Chrome's local favicon cache also covers user-created shortcuts. A cache
+    // miss must not replace a bundled icon or initial with the generic globe.
+    defaultNativeFavicon ||= nativeFavicon('https://lg-new-tab-favicon.invalid/');
+    Promise.all([nativeFavicon(item.url), defaultNativeFavicon]).then(([icon, empty]) => {
+      if (icon && empty && icon.fingerprint !== empty.fingerprint) show(icon.src);
+    });
+  } else if (!local && !entry) {
+    show(new URL('/favicon.ico', item.url).href);
+  }
   return el;
 }
 
