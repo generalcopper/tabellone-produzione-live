@@ -2,6 +2,8 @@
 
 const { FieldValue, Timestamp } = require('firebase-admin/firestore');
 const c = require('./core');
+const w = require('./write-queue');
+const { renderWriteMessage } = require('./write-mail-template');
 const CONFIG = 'pickingEmailConfig/system';
 const RECIPIENTS = 'pickingEmailRecipients';
 const EVENTS = 'pickingEmailEvents';
@@ -181,6 +183,41 @@ function createService({ db, auth, scheduleRetry, logger = console, clock = Date
     return queueNotice({ ...slot, type: 'daily', channel: 'RIEPILOGO', label: 'Riepilogo delle 08:00' });
   }
 
+  async function onWriteWork(event) {
+    const after = event.data?.after, before = event.data?.before;
+    if (!after?.exists) return;
+    const id = event.params.queueId;
+    const work = w.summarize(after.data(), id);
+    // Quantity corrections, drag/reorder and resync are not new production work.
+    if (!work || (before?.exists && w.summarize(before.data(), id))) return;
+    const config = await db.doc(CONFIG).get();
+    const activatedAt = c.millis(config.data()?.writeActivatedAt);
+    const occurredAt = c.millis(after.updateTime) || c.millis(event.time);
+    if (!activatedAt || occurredAt < activatedAt || c.millis(after.createTime) < activatedAt) return;
+    const sourceIncarnation = w.incarnation(after.createTime);
+    return queueNotice({ type: 'write', key: 'WRITE:' + id + ':' + sourceIncarnation,
+      channel: 'WRITE', label: work.title, sourcePath: after.ref.path, sourceId: id,
+      sourceIncarnation, occurredAt });
+  }
+
+  async function readWriteSummary(tx) {
+    const snapshot = await tx.get(db.collection(w.QUEUE));
+    const docs = snapshot.docs.map(doc => ({ id: doc.id, data: doc.data() }));
+    const pending = docs.filter(doc => w.summarize(doc.data, doc.id));
+    const doneIds = new Set(), concludedKeys = new Set();
+    for (let i = 0; i < pending.length; i += 100) {
+      const done = await tx.getAll(...pending.slice(i, i + 100).map(doc => db.doc(w.DONE + '/' + doc.id)));
+      for (const doc of done) if (doc.exists) doneIds.add(doc.id);
+    }
+    const lineKeys = [...new Set(pending.map(doc => doc.data.lineKey).filter(Boolean))];
+    for (let i = 0; i < lineKeys.length; i += 30) {
+      const history = await tx.get(db.collection('liquidProdHistory')
+        .where('concludedLineKeys', 'array-contains-any', lineKeys.slice(i, i + 30)));
+      for (const doc of history.docs) for (const key of doc.data().concludedLineKeys || []) concludedKeys.add(key);
+    }
+    return w.details(docs, doneIds, concludedKeys);
+  }
+
   async function readPendingSummary(transaction = null, detailed = false) {
     const flows = db.collection('amzInventory/concamarise/logs');
     // Legacy reservations and current flows can use different managed/status fields.
@@ -249,30 +286,43 @@ function createService({ db, auth, scheduleRetry, logger = console, clock = Date
         totals: ledger.data().totals || null, summaryCounts: ledger.data().summaryCounts || null, alreadyQueued: true };
       if (!config.exists || !config.data().activatedAt) throw problem(503, 'Servizio in attivazione.');
       if (occurredAt < c.millis(config.data().activatedAt)) return { queuedCount: 0, outcome: 'before_activation' };
+      if (notice.type === 'write' && (!config.data().writeActivatedAt ||
+          occurredAt < c.millis(config.data().writeActivatedAt))) return { queuedCount: 0, outcome: 'before_activation' };
       if (notice.type === 'manual' && now - c.millis(config.data().lastManualAt) < 60000) {
         throw problem(429, 'Un riepilogo è già stato richiesto. Attendi un minuto.');
       }
       const source = notice.sourcePath ? remaining.shift() : null;
-      const current = source ? c.summarizeFba(source.data(), notice.sourceId) : null;
-      const active = (notice.type !== 'fba' || current) && now - occurredAt < 6 * 60 * 60 * 1000;
+      const isWrite = notice.type === 'write';
+      const current = source ? (isWrite ? w.summarize(source.data(), notice.sourceId) :
+        c.summarizeFba(source.data(), notice.sourceId)) : null;
+      let active = (!['fba', 'write'].includes(notice.type) || current) &&
+        (!isWrite || w.incarnation(source?.createTime) === notice.sourceIncarnation) &&
+        now - occurredAt < 6 * 60 * 60 * 1000;
       const recipients = remaining;
-      const eligible = active ? recipients.filter((doc, i) => doc.exists &&
+      let eligible = active ? recipients.filter((doc, i) => doc.exists &&
         doc.data().revision === candidates[i].data().revision &&
         c.selectedForEvent(doc.data(), byUid.get(doc.id), directory, occurredAt)) : [];
       if (notice.type === 'manual' && !eligible.length) throw problem(400, 'Seleziona almeno un utente abilitato.');
-      const details = eligible.length ? await readPendingSummary(tx, true) : null;
-      const totals = details ? { fba: details.fba.orderCount, fbm: details.fbm.orderCount } : null;
-      const summaryCounts = details ? { fbaPieces: details.fba.totalQty, fbaProducts: details.fba.skuCount,
-        fbmOrders: details.fbm.orderCount, fbmPieces: details.fbm.totalQty, fbmProducts: details.fbm.skuCount } : null;
+      const details = eligible.length ? (isWrite ? await readWriteSummary(tx) : await readPendingSummary(tx, true)) : null;
+      if (isWrite && details && !details.products.some(row => row.id === notice.sourceId)) {
+        active = false;
+        eligible = [];
+      }
+      const totals = details ? (isWrite ? { write: details.rowCount } :
+        { fba: details.fba.orderCount, fbm: details.fbm.orderCount }) : null;
+      const summaryCounts = details ? (isWrite ? { writeProducts: details.rowCount, writeQuantities: details.totals } :
+        { fbaPieces: details.fba.totalQty, fbaProducts: details.fba.skuCount,
+          fbmOrders: details.fbm.orderCount, fbmPieces: details.fbm.totalQty, fbmProducts: details.fbm.skuCount }) : null;
       const mailRefs = eligible.map(doc => db.doc('email/' + c.PREFIX + c.hash(eventId + ':' + doc.id)));
       const existing = mailRefs.length ? await tx.getAll(...mailRefs) : [];
       if (existing.some(doc => doc.exists)) throw problem(500, 'Collisione nella coda email.');
       for (let i = 0; i < eligible.length; i++) {
         const recipient = eligible[i], data = recipient.data(), mailRef = mailRefs[i];
         const recipientName = userRow(byUid.get(recipient.id), directory).name;
-        const message = c.buildMessage({ ...notice, details, generatedAt: now, recipientName });
+        const message = isWrite ? renderWriteMessage({ ...notice, details, generatedAt: now, recipientName,
+          url: w.URL, timeZone: c.TIME_ZONE }) : c.buildMessage({ ...notice, details, generatedAt: now, recipientName });
         const mail = {
-          to: data.email, from: c.MAIL_FROM, replyTo: 'info@generalcoppersrl.com',
+          to: data.email, from: isWrite ? w.MAIL_FROM : c.MAIL_FROM, replyTo: 'info@generalcoppersrl.com',
           message, kind: c.KIND,
           picking: { uid: recipient.id, eventId, channel, label: notice.label,
             sourcePath: notice.sourcePath || '', noticeType: notice.type },
@@ -282,7 +332,7 @@ function createService({ db, auth, scheduleRetry, logger = console, clock = Date
         tx.create(db.doc(DELIVERIES + '/' + mailRef.id), {
           uid: recipient.id, email: data.email, recipientRevision: data.revision, eventId,
           channel, label: notice.label, sourcePath: notice.sourcePath || '', sourceId: notice.sourceId || '',
-          noticeType: notice.type,
+          noticeType: notice.type, sourceIncarnation: notice.sourceIncarnation || '',
           occurredAt: Timestamp.fromMillis(occurredAt), createdAt: FieldValue.serverTimestamp(),
           envelopeHash: c.envelopeHash(mail), lastStatus: 'PENDING',
         });
@@ -363,7 +413,12 @@ function createService({ db, auth, scheduleRetry, logger = console, clock = Date
       const recent = clock() - c.millis(data.occurredAt) < 6 * 60 * 60 * 1000;
       const summary = ['manual', 'daily'].includes(data.noticeType);
       // Old per-order FBM messages are not retried after the schedule migration.
-      const pending = recent && (summary || (data.channel === 'FBA' && c.summarizeFba(source?.data(), data.sourceId)));
+      let pending = recent && (summary || (data.channel === 'FBA' && c.summarizeFba(source?.data(), data.sourceId)) ||
+        (data.channel === 'WRITE' && w.summarize(source?.data(), data.sourceId) &&
+          w.incarnation(source?.createTime) === data.sourceIncarnation));
+      if (pending && data.channel === 'WRITE') {
+        pending = (await readWriteSummary(tx)).products.some(row => row.id === data.sourceId);
+      }
       if (!pending || prefs.revision !== data.recipientRevision ||
           !c.selectedForEvent(prefs, user, directory, c.millis(data.occurredAt))) {
         tx.set(ledgerRef, { lastStatus: 'CANCELLED' }, { merge: true });
@@ -376,7 +431,7 @@ function createService({ db, auth, scheduleRetry, logger = console, clock = Date
     });
   }
 
-  return { api, onNewWork, onDaily, onDelivery, retryEmail, listRecipients, verifyAdmin, readPendingSummary };
+  return { api, onNewWork, onWriteWork, onDaily, onDelivery, retryEmail, listRecipients, verifyAdmin, readPendingSummary };
 }
 
 module.exports = { createService, CONFIG, RECIPIENTS, EVENTS, DELIVERIES };

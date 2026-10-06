@@ -49,6 +49,10 @@ exports.pickingEmailFba = onDocumentWritten({
   ...runtime, document: 'amzInventory/concamarise/logs/{flowId}', retry: true, timeoutSeconds: 120,
 }, event => service.onNewWork(event, 'FBA'));
 
+exports.pickingEmailWrite = onDocumentWritten({
+  ...runtime, document: 'producedDays/linea_liquidi/queue/{queueId}', retry: true, timeoutSeconds: 120,
+}, event => service.onWriteWork(event));
+
 exports.pickingEmailFbmMorning = onSchedule({
   ...runtime, schedule: '0 8 * * *', timeZone: TIME_ZONE, timeoutSeconds: 180,
   retryCount: 3, minBackoffSeconds: 60, maxBackoffSeconds: 300, maxRetrySeconds: 3600,

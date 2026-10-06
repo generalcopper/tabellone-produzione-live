@@ -7,6 +7,20 @@ Ultimo accesso indica lastSignInTime, cioè l'ultima autenticazione dell'account
 
 ## Invii
 
+- WRITE: email separata e immediata quando un prodotto nuovo entra in
+  producedDays/linea_liquidi/queue/{queueId}, ai destinatari già abilitati.
+  Oggetto, mittente visualizzato, colori azzurro/grigio chiaro e pulsante
+  sono dedicati alla produzione Write. La tabella numerata include tutta la
+  coda da produrre nell'ordine cloud queueOrderKey, con codice, quantità e unità.
+  La nuova riga è evidenziata. Quantità di unità diverse non vengono sommate.
+  Righe vuote, annullate, a zero, concluse o già nei completati sono escluse.
+  Le piccole quantità dei prodotti manuali restano valide.
+- Amazon e Write generano due email distinte: chiavi evento FBA: e WRITE:,
+  hash SHA-256 indipendenti e registri di consegna separati. Ogni singolo
+  inserimento Write genera il proprio avviso; un caricamento multiplo può
+  generare più avvisi. Correzioni di quantità, riordini e risincronizzazioni
+  non generano nuove email. Una vera rimozione e reinserimento genera un
+  nuovo hash usando createTime del documento, senza riutilizzare quello vecchio.
 - FBA: email all'arrivo di ogni nuovo flusso operativo in
   amzInventory/concamarise/logs/{flowId}. Il registro dell'evento evita duplicati
   per risincronizzazioni, modifiche ordinarie e retry di Eventarc.
@@ -77,11 +91,13 @@ Le esecuzioni fuori orario o troppo vecchie vengono ignorate. Il destinatario
 deve essere già selezionato all'ora prevista; non vengono inviati arretrati.
 
 Il timestamp activatedAt in pickingEmailConfig/system è preservato.
+Il nuovo writeActivatedAt abilita solo gli inserimenti Write successivi
+all'attivazione; non invia arretrati della coda già esistente.
 Per aggiornare questo solo codebase:
 
     firebase deploy --only functions:picking-notifications --project tabellone-produzione-liv-e313e --non-interactive
 
-Funzioni finali: pickingEmailApi, pickingEmailFba, pickingEmailDelivery,
+Funzioni finali: pickingEmailApi, pickingEmailFba, pickingEmailWrite, pickingEmailDelivery,
 pickingEmailFbmMorning. Il vecchio trigger pickingEmailFbm è già stato rimosso.
 Hosting viene pubblicato dal workflow esistente dopo un unico push su main.
 

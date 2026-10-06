@@ -307,4 +307,124 @@ if (process.env.FIRESTORE_EMULATOR_HOST !== '127.0.0.1:8791') {
     assert.equal((await db.doc(RECIPIENTS + '/worker').get()).exists, false);
     assert.equal(tasks.size, 0);
   });
+
+  async function createWrite(id = 'new', extra = {}) {
+    const ref = db.doc('producedDays/linea_liquidi/queue/' + id);
+    const before = await ref.get();
+    await ref.set({ product: 'Prodotto ' + id, code: 'SKU-' + id, qty: '12,5', unit: 'kg',
+      status: 'DA PRODURRE', queueOrderKey: 'B', ...extra });
+    return { data: { before, after: await ref.get() }, params: { queueId: id } };
+  }
+  async function activateWrite() {
+    await db.doc(CONFIG).update({ writeActivatedAt: Timestamp.fromMillis(activatedAt) });
+    await select();
+  }
+
+  test('Write queues immediately for opted-in users, lists production order and deduplicates concurrent delivery', async () => {
+    await activateWrite();
+    await createWrite('first', { queueOrderKey: 'A', qty: 30, unit: 'pz' });
+    const event = await createWrite();
+    await Promise.all([service.onWriteWork(event), service.onWriteWork(event)]);
+    assert.equal((await db.collection('email').get()).size, 1);
+    const mail = (await firstMail()).data();
+    assert.equal(mail.to, worker.email);
+    assert.equal(mail.picking.channel, 'WRITE');
+    assert.equal(mail.picking.noticeType, 'write');
+    assert.ok(mail.message.text.includes('1. Prodotto first'));
+    assert.ok(mail.message.text.includes('2. Prodotto new'));
+    assert.ok(mail.message.text.includes('12,5 kg'));
+    assert.ok(mail.message.html.includes('Incaricato: Worker'));
+    assert.equal((await db.doc(RECIPIENTS + '/worker').get()).data().lastSentAt, undefined);
+    await deliver((await firstMail()).ref, { state: 'SUCCESS', endTime: Timestamp.now(), info: { accepted: [worker.email] } });
+    assert.equal((await db.doc(RECIPIENTS + '/worker').get()).data().lastSentChannel, 'WRITE');
+  });
+
+  test('Amazon and Write are separate emails with different event and delivery hashes even for the same source ID', async () => {
+    await activateWrite();
+    await service.onNewWork(await createWork('shared-id'), 'FBA');
+    await service.onWriteWork(await createWrite('shared-id'));
+    const mails = (await db.collection('email').get()).docs;
+    assert.equal(mails.length, 2);
+    const amazon = mails.find(doc => doc.data().picking.channel === 'FBA');
+    const write = mails.find(doc => doc.data().picking.channel === 'WRITE');
+    assert.ok(amazon && write);
+    assert.notEqual(amazon.id, write.id);
+    assert.notEqual(amazon.data().picking.eventId, write.data().picking.eventId);
+    assert.ok(!amazon.data().message.text.includes('Prodotto shared-id'));
+    assert.ok(!write.data().message.text.includes('Totale FBA'));
+  });
+
+  test('Write corrections, reorder, resync and activation on an existing queue do not send', async () => {
+    await activateWrite();
+    const event = await createWrite();
+    await service.onWriteWork(event);
+    const before = event.data.after;
+    await before.ref.update({ qty: 99, queueOrderKey: 'Z', updatedBy: 'admin' });
+    await service.onWriteWork({ data: { before, after: await before.ref.get() }, params: event.params });
+    assert.equal((await db.collection('email').get()).size, 1);
+    await db.doc(CONFIG).update({ writeActivatedAt: Timestamp.fromMillis(Date.now() + 1000) });
+    await service.onWriteWork(await createWrite('old'));
+    assert.equal((await db.collection('email').get()).size, 1);
+  });
+
+  test('Write respects inactive accounts, disabled subscriptions and later opt-ins', async () => {
+    await db.doc(CONFIG).update({ writeActivatedAt: Timestamp.fromMillis(activatedAt) });
+    const event = await createWrite();
+    await select();
+    await service.onWriteWork(event);
+    assert.equal((await db.collection('email').get()).size, 0);
+    await service.api('Bearer admin-token', { action: 'setRecipient', uid: 'worker', enabled: false, revision: 1 });
+    await service.onWriteWork(await createWrite('disabled-subscription'));
+    assert.equal((await db.collection('email').get()).size, 0);
+    await service.api('Bearer admin-token', { action: 'setRecipient', uid: 'worker', enabled: true, revision: 2 });
+    users.get('worker').disabled = true;
+    await service.onWriteWork(await createWrite('inactive-account'));
+    assert.equal((await db.collection('email').get()).size, 0);
+  });
+
+  test('Write excludes completed history and cancels a source removed before processing', async () => {
+    await activateWrite();
+    await createWrite('done');
+    await db.doc('producedDays/linea_liquidi/items/done').set({ status: 'completed' });
+    await createWrite('concluded', { lineKey: 'line-completed' });
+    await db.doc('liquidProdHistory/history').set({ concludedLineKeys: ['line-completed'] });
+    const event = await createWrite();
+    await service.onWriteWork(event);
+    const message = (await firstMail()).data().message.text;
+    assert.ok(!message.includes('Prodotto done'));
+    assert.ok(!message.includes('Prodotto concluded'));
+    const removed = await createWrite('removed');
+    await removed.data.after.ref.delete();
+    await service.onWriteWork(removed);
+    const alreadyDone = await createWrite('already-done');
+    await db.doc('producedDays/linea_liquidi/items/already-done').set({ status: 'completed' });
+    await service.onWriteWork(alreadyDone);
+    assert.equal((await db.collection('email').get()).size, 1);
+  });
+
+  test('Write notifies when a product is reinserted; stale events cannot notify the new incarnation', async () => {
+    await activateWrite();
+    const first = await createWrite();
+    await service.onWriteWork(first);
+    await first.data.after.ref.delete();
+    const second = await createWrite();
+    await service.onWriteWork(first);
+    await service.onWriteWork(second);
+    assert.equal((await db.collection('email').get()).size, 2);
+    assert.equal((await db.collection(EVENTS).get()).size, 2);
+  });
+
+  test('Write retries a temporary rejection once and stops retrying completed production', async () => {
+    await activateWrite();
+    const event = await createWrite();
+    await service.onWriteWork(event);
+    const mail = await firstMail();
+    await deliver(mail.ref, { state: 'ERROR', attempts: 1, error: '451 temporary failure', endTime: Timestamp.now() });
+    await service.retryEmail({ data: { mailId: mail.id, attempt: 1 } });
+    assert.equal((await mail.ref.get()).data().delivery.state, 'RETRY');
+    await deliver(mail.ref, { state: 'ERROR', attempts: 2, error: '451 temporary failure', endTime: Timestamp.now() });
+    await event.data.after.ref.delete();
+    await service.retryEmail({ data: { mailId: mail.id, attempt: 2 } });
+    assert.equal((await db.doc(DELIVERIES + '/' + mail.id).get()).data().lastStatus, 'CANCELLED');
+  });
 }
