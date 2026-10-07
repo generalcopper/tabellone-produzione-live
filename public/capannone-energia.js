@@ -1,7 +1,7 @@
 
 import { onAuthStateChanged } from "https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js";
 
-const ENDPOINT = "https://crm-api-62sidjxd5a-ew.a.run.app/v1/tabellone/power";
+const ENDPOINT = "https://cedoly-crm-prod.web.app/v1/tabellone/power";
 const CONTRACT_WATTS = 10000;
 const MAX_AGE_MS = 30000;
 const kw = value => value === null ? "—" : new Intl.NumberFormat("it-IT", { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value / 1000);
