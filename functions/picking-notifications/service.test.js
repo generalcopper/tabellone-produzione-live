@@ -311,7 +311,7 @@ if (process.env.FIRESTORE_EMULATOR_HOST !== '127.0.0.1:8791') {
   async function createWrite(id = 'new', extra = {}) {
     const ref = db.doc('producedDays/linea_liquidi/queue/' + id);
     const before = await ref.get();
-    await ref.set({ product: 'Prodotto ' + id, code: 'SKU-' + id, qty: '12,5', unit: 'kg',
+    await ref.set({ kind: 'finishedProduct', product: 'Prodotto ' + id, code: 'SKU-' + id, qty: '12,5', unit: 'kg',
       status: 'DA PRODURRE', queueOrderKey: 'B', ...extra });
     return { data: { before, after: await ref.get() }, params: { queueId: id } };
   }
@@ -333,7 +333,7 @@ if (process.env.FIRESTORE_EMULATOR_HOST !== '127.0.0.1:8791') {
     assert.ok(mail.message.text.includes('1. Prodotto first'));
     assert.ok(mail.message.text.includes('2. Prodotto new'));
     assert.ok(mail.message.text.includes('12,5 kg'));
-    assert.ok(mail.message.html.includes('Incaricato: Worker'));
+    assert.ok(mail.message.html.includes('Linea automatica liquidi'));
     assert.equal((await db.doc(RECIPIENTS + '/worker').get()).data().lastSentAt, undefined);
     await deliver((await firstMail()).ref, { state: 'SUCCESS', endTime: Timestamp.now(), info: { accepted: [worker.email] } });
     assert.equal((await db.doc(RECIPIENTS + '/worker').get()).data().lastSentChannel, 'WRITE');
@@ -354,17 +354,31 @@ if (process.env.FIRESTORE_EMULATOR_HOST !== '127.0.0.1:8791') {
     assert.ok(!write.data().message.text.includes('Totale FBA'));
   });
 
-  test('Write corrections, reorder, resync and activation on an existing queue do not send', async () => {
+  test('Write quantity changes send once with the full current queue; reorder and resync stay silent', async () => {
     await activateWrite();
     const event = await createWrite();
     await service.onWriteWork(event);
-    const before = event.data.after;
+    let before = event.data.after;
     await before.ref.update({ qty: 99, queueOrderKey: 'Z', updatedBy: 'admin' });
+    const change = { data: { before, after: await before.ref.get() }, params: event.params };
+    await Promise.all([service.onWriteWork(change), service.onWriteWork(change)]);
+    let mails = (await db.collection('email').get()).docs;
+    assert.equal(mails.length, 2);
+    const updated = mails.find(doc => doc.data().message.text.includes('99 kg')).data();
+    assert.ok(updated.message.text.includes('99 kg'));
+    assert.ok(!updated.message.text.includes('12,5 kg'));
+    before = await before.ref.get();
+    await before.ref.update({ qty: '99,0', queueOrderKey: 'C', orderUpdatedAtMs: Date.now() });
     await service.onWriteWork({ data: { before, after: await before.ref.get() }, params: event.params });
-    assert.equal((await db.collection('email').get()).size, 1);
+    assert.equal((await db.collection('email').get()).size, 2);
+    // Returning to an earlier quantity is a new revision, not a duplicate.
+    before = await before.ref.get();
+    await before.ref.update({ qty: '12,5' });
+    await service.onWriteWork({ data: { before, after: await before.ref.get() }, params: event.params });
+    assert.equal((await db.collection('email').get()).size, 3);
     await db.doc(CONFIG).update({ writeActivatedAt: Timestamp.fromMillis(Date.now() + 1000) });
     await service.onWriteWork(await createWrite('old'));
-    assert.equal((await db.collection('email').get()).size, 1);
+    assert.equal((await db.collection('email').get()).size, 3);
   });
 
   test('Write respects inactive accounts, disabled subscriptions and later opt-ins', async () => {
@@ -412,6 +426,74 @@ if (process.env.FIRESTORE_EMULATOR_HOST !== '127.0.0.1:8791') {
     await service.onWriteWork(second);
     assert.equal((await db.collection('email').get()).size, 2);
     assert.equal((await db.collection(EVENTS).get()).size, 2);
+  });
+
+  test('Write reads only the visible current queue, respecting order assignments and completion', async () => {
+    await activateWrite();
+    await createWrite('small-hidden', { kind: 'amazonSku', qty: 120 });
+    await createWrite('tank-hidden', { kind: 'amazonSku', product: 'Caolino 5 L', qty: 480 });
+    await createWrite('unassigned', { kind: 'orderLine', orderKey: 'unassigned', qty: 1000 });
+    await createWrite('allowed', { kind: 'orderLine', orderKey: 'allowed', qty: 500 });
+    await db.doc('hub_config/hub_linea_liquidi_mobile_allowlist').set({ keys: ['allowed'] });
+    await createWrite('pf-small', { qty: 25 });
+    const event = await createWrite('visible');
+    await service.onWriteWork(event);
+    const mail = (await firstMail()).data();
+    for (const hidden of ['small-hidden', 'Caolino', 'unassigned']) assert.ok(!mail.message.text.includes(hidden));
+    for (const visible of ['allowed', 'pf-small', 'visible']) assert.ok(mail.message.text.includes('Prodotto ' + visible));
+    const ledger = (await db.collection(EVENTS).get()).docs[0].data();
+    assert.equal(ledger.totals.write, 3);
+    await service.onWriteWork(await createWrite('hidden-trigger', { kind: 'amazonSku', qty: 20 }));
+    assert.equal((await db.collection('email').get()).size, 1);
+  });
+
+  test('Write quantity changes on older documents notify, but obsolete quantities and metadata updates do not', async () => {
+    const event = await createWrite('old');
+    const configTime = event.data.after.createTime.toMillis() + 1;
+    await db.doc(CONFIG).update({ writeActivatedAt: Timestamp.fromMillis(configTime) });
+    await select();
+    const before = await event.data.after.ref.get();
+    await before.ref.update({ qty: 80 });
+    const first = { data: { before, after: await before.ref.get() }, params: event.params };
+    await before.ref.update({ qty: 90 });
+    const second = { data: { before: first.data.after, after: await before.ref.get() }, params: event.params };
+    await service.onWriteWork(first);
+    assert.equal((await db.collection('email').get()).size, 0);
+    // A later reorder must not hide a real quantity change.
+    await before.ref.update({ queueOrderKey: 'Z' });
+    await service.onWriteWork(second);
+    assert.equal((await db.collection('email').get()).size, 1);
+    assert.ok((await firstMail()).data().message.text.includes('90 kg'));
+  });
+
+  test('Write retries rebuild the current queue and keep the delivery hash valid', async () => {
+    await activateWrite();
+    const old = await createWrite('old', { qty: 20 });
+    const event = await createWrite();
+    await service.onWriteWork(event);
+    const mail = await firstMail();
+    await deliver(mail.ref, { state: 'ERROR', attempts: 1, error: '451 temporary failure', endTime: Timestamp.now() });
+    await old.data.after.ref.delete();
+    await createWrite('current', { qty: 80 });
+    await service.retryEmail({ data: { mailId: mail.id, attempt: 1 } });
+    const fresh = (await mail.ref.get()).data();
+    assert.ok(!fresh.message.text.includes('Prodotto old'));
+    assert.ok(fresh.message.text.includes('Prodotto current'));
+    assert.equal((await db.doc(DELIVERIES + '/' + mail.id).get()).data().envelopeHash, c.envelopeHash(fresh));
+    await deliver(mail.ref, { state: 'SUCCESS', attempts: 2, endTime: Timestamp.now(), info: { accepted: [worker.email] } });
+    assert.equal((await db.doc(DELIVERIES + '/' + mail.id).get()).data().lastStatus, 'SUCCESS');
+  });
+
+  test('Write does not retry an obsolete quantity or a source no longer assigned to the line', async () => {
+    await activateWrite();
+    const event = await createWrite();
+    await service.onWriteWork(event);
+    const mail = await firstMail();
+    await deliver(mail.ref, { state: 'ERROR', attempts: 1, error: '451 temporary failure', endTime: Timestamp.now() });
+    await event.data.after.ref.update({ qty: 99 });
+    await service.retryEmail({ data: { mailId: mail.id, attempt: 1 } });
+    assert.equal((await db.doc(DELIVERIES + '/' + mail.id).get()).data().lastStatus, 'CANCELLED');
+    assert.equal((await mail.ref.get()).data().delivery.state, 'ERROR');
   });
 
   test('Write retries a temporary rejection once and stops retrying completed production', async () => {

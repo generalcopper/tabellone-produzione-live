@@ -188,22 +188,30 @@ function createService({ db, auth, scheduleRetry, logger = console, clock = Date
     if (!after?.exists) return;
     const id = event.params.queueId;
     const work = w.summarize(after.data(), id);
-    // Quantity corrections, drag/reorder and resync are not new production work.
-    if (!work || (before?.exists && w.summarize(before.data(), id))) return;
+    const sourceQuantity = w.quantitySignature(after.data());
+    const changeKind = before?.exists ? 'quantity' : 'added';
+    // Reorder, timestamps and resync alone must never send operational emails.
+    if (!work || (before?.exists && w.quantitySignature(before.data()) === sourceQuantity)) return;
     const config = await db.doc(CONFIG).get();
     const activatedAt = c.millis(config.data()?.writeActivatedAt);
     const occurredAt = c.millis(after.updateTime) || c.millis(event.time);
-    if (!activatedAt || occurredAt < activatedAt || c.millis(after.createTime) < activatedAt) return;
+    if (!activatedAt || occurredAt < activatedAt ||
+        (changeKind === 'added' && c.millis(after.createTime) < activatedAt)) return;
     const sourceIncarnation = w.incarnation(after.createTime);
-    return queueNotice({ type: 'write', key: 'WRITE:' + id + ':' + sourceIncarnation,
+    const key = changeKind === 'added' ? 'WRITE:' + id + ':' + sourceIncarnation :
+      'WRITE_QUANTITY:' + id + ':' + sourceIncarnation + ':' + w.incarnation(after.updateTime);
+    return queueNotice({ type: 'write', key,
       channel: 'WRITE', label: work.title, sourcePath: after.ref.path, sourceId: id,
-      sourceIncarnation, occurredAt });
+      sourceIncarnation, sourceQuantity, changeKind, occurredAt });
   }
 
   async function readWriteSummary(tx) {
-    const snapshot = await tx.get(db.collection(w.QUEUE));
+    const [snapshot, allowlist] = await Promise.all([
+      tx.get(db.collection(w.QUEUE)), tx.get(db.doc(w.ALLOWLIST)),
+    ]);
+    const allowedKeys = new Set((allowlist.data()?.keys || []).filter(Boolean).map(String));
     const docs = snapshot.docs.map(doc => ({ id: doc.id, data: doc.data() }));
-    const pending = docs.filter(doc => w.summarize(doc.data, doc.id));
+    const pending = docs.filter(doc => w.summarize(doc.data, doc.id) && w.isAllowed(doc.data, allowedKeys));
     const doneIds = new Set(), concludedKeys = new Set();
     for (let i = 0; i < pending.length; i += 100) {
       const done = await tx.getAll(...pending.slice(i, i + 100).map(doc => db.doc(w.DONE + '/' + doc.id)));
@@ -215,7 +223,7 @@ function createService({ db, auth, scheduleRetry, logger = console, clock = Date
         .where('concludedLineKeys', 'array-contains-any', lineKeys.slice(i, i + 30)));
       for (const doc of history.docs) for (const key of doc.data().concludedLineKeys || []) concludedKeys.add(key);
     }
-    return w.details(docs, doneIds, concludedKeys);
+    return w.details(docs, doneIds, concludedKeys, allowedKeys);
   }
 
   async function readPendingSummary(transaction = null, detailed = false) {
@@ -296,7 +304,8 @@ function createService({ db, auth, scheduleRetry, logger = console, clock = Date
       const current = source ? (isWrite ? w.summarize(source.data(), notice.sourceId) :
         c.summarizeFba(source.data(), notice.sourceId)) : null;
       let active = (!['fba', 'write'].includes(notice.type) || current) &&
-        (!isWrite || w.incarnation(source?.createTime) === notice.sourceIncarnation) &&
+        (!isWrite || (w.incarnation(source?.createTime) === notice.sourceIncarnation &&
+          w.quantitySignature(source?.data()) === notice.sourceQuantity)) &&
         now - occurredAt < 6 * 60 * 60 * 1000;
       const recipients = remaining;
       let eligible = active ? recipients.filter((doc, i) => doc.exists &&
@@ -333,6 +342,7 @@ function createService({ db, auth, scheduleRetry, logger = console, clock = Date
           uid: recipient.id, email: data.email, recipientRevision: data.revision, eventId,
           channel, label: notice.label, sourcePath: notice.sourcePath || '', sourceId: notice.sourceId || '',
           noticeType: notice.type, sourceIncarnation: notice.sourceIncarnation || '',
+          sourceQuantity: notice.sourceQuantity || '', changeKind: notice.changeKind || '',
           occurredAt: Timestamp.fromMillis(occurredAt), createdAt: FieldValue.serverTimestamp(),
           envelopeHash: c.envelopeHash(mail), lastStatus: 'PENDING',
         });
@@ -416,8 +426,11 @@ function createService({ db, auth, scheduleRetry, logger = console, clock = Date
       let pending = recent && (summary || (data.channel === 'FBA' && c.summarizeFba(source?.data(), data.sourceId)) ||
         (data.channel === 'WRITE' && w.summarize(source?.data(), data.sourceId) &&
           w.incarnation(source?.createTime) === data.sourceIncarnation));
+      let writeDetails;
       if (pending && data.channel === 'WRITE') {
-        pending = (await readWriteSummary(tx)).products.some(row => row.id === data.sourceId);
+        writeDetails = await readWriteSummary(tx);
+        pending = writeDetails.products.some(row => row.id === data.sourceId) &&
+          (!data.sourceQuantity || w.quantitySignature(source?.data()) === data.sourceQuantity);
       }
       if (!pending || prefs.revision !== data.recipientRevision ||
           !c.selectedForEvent(prefs, user, directory, c.millis(data.occurredAt))) {
@@ -425,13 +438,21 @@ function createService({ db, auth, scheduleRetry, logger = console, clock = Date
         if (prefs.lastMailId === mailId) tx.set(recipientRef, { lastStatus: 'CANCELLED' }, { merge: true });
         return;
       }
-      tx.update(mailRef, { 'delivery.state': 'RETRY' });
-      tx.set(ledgerRef, { lastStatus: 'RETRY', retriedAt: FieldValue.serverTimestamp() }, { merge: true });
+      // A failed Write message must not retry an old snapshot of the queue.
+      const refreshed = writeDetails ? {
+        from: w.MAIL_FROM,
+        message: renderWriteMessage({ details: writeDetails, sourceId: data.sourceId,
+          changeKind: data.changeKind || 'added', generatedAt: clock(), url: w.URL, timeZone: c.TIME_ZONE }),
+      } : {};
+      tx.update(mailRef, { ...refreshed, 'delivery.state': 'RETRY' });
+      tx.set(ledgerRef, { lastStatus: 'RETRY', retriedAt: FieldValue.serverTimestamp(),
+        ...(writeDetails ? { envelopeHash: c.envelopeHash({ ...mail, ...refreshed }) } : {}),
+      }, { merge: true });
       if (prefs.lastMailId === mailId) tx.set(recipientRef, { lastStatus: 'RETRY' }, { merge: true });
     });
   }
 
-  return { api, onNewWork, onWriteWork, onDaily, onDelivery, retryEmail, listRecipients, verifyAdmin, readPendingSummary };
+  return { api, onNewWork, onWriteWork, onDaily, onDelivery, retryEmail, listRecipients, verifyAdmin, readPendingSummary, readWriteSummary };
 }
 
 module.exports = { createService, CONFIG, RECIPIENTS, EVENTS, DELIVERIES };

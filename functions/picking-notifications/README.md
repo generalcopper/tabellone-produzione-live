@@ -7,20 +7,27 @@ Ultimo accesso indica lastSignInTime, cioè l'ultima autenticazione dell'account
 
 ## Invii
 
-- WRITE: email separata e immediata quando un prodotto nuovo entra in
-  producedDays/linea_liquidi/queue/{queueId}, ai destinatari già abilitati.
-  Oggetto, mittente visualizzato, colori azzurro/grigio chiaro e pulsante
-  sono dedicati alla produzione Write. La tabella numerata include tutta la
-  coda da produrre nell'ordine cloud queueOrderKey, con codice, quantità e unità.
-  La nuova riga è evidenziata. Quantità di unità diverse non vengono sommate.
-  Righe vuote, annullate, a zero, concluse o già nei completati sono escluse.
-  Le piccole quantità dei prodotti manuali restano valide.
-- Amazon e Write generano due email distinte: chiavi evento FBA: e WRITE:,
-  hash SHA-256 indipendenti e registri di consegna separati. Ogni singolo
-  inserimento Write genera il proprio avviso; un caricamento multiplo può
-  generare più avvisi. Correzioni di quantità, riordini e risincronizzazioni
-  non generano nuove email. Una vera rimozione e reinserimento genera un
-  nuovo hash usando createTime del documento, senza riutilizzare quello vecchio.
+- WRITE / linea automatica liquidi: email immediata all'inserimento di una riga
+  visibile in producedDays/linea_liquidi/queue/{queueId} o a una modifica reale
+  della sua quantità/unità. Ricevono solo gli utenti con notifiche già attive.
+  L'email contiene esclusivamente la coda attuale da produrre, nello stesso ordine
+  del tabellone: prodotto, codice e quantità. Non include i riordini nascosti,
+  le taniche/formati 5-10 kg/l o le quantità sotto soglia che la UI esclude.
+  I prodotti finiti manuali mantengono l'esenzione UI dalla soglia. Le righe
+  degli ordini richiedono orderKey nella allowlist della linea; righe completate,
+  annullate, a zero o concluse nello storico sono escluse.
+  I test di contratto confrontano direttamente i filtri con tabellone_write.html.
+- Oggetto WRITE: «Nuovi prodotti in coda · Linea automatica liquidi», anche
+  per le modifiche. Ogni riga indica «Quantità da produrre». Il corpo mostra soltanto
+  l'elenco operativo, il collegamento alla coda e la data di aggiornamento.
+- Amazon e Write restano email separate. Gli inserimenti usano la chiave WRITE:
+  con createTime; le quantità usano WRITE_QUANTITY: con updateTime per distinguere
+  ogni modifica e deduplicare i retry concorrenti. Riordini, metadati e salvataggi
+  della stessa quantità non inviano. Gli eventi con quantità ormai superata non
+  inviano dati vecchi. Una modifica a una riga creata prima dell'attivazione
+  può notificare, mentre l'attivazione da sola non invia arretrati.
+  Nei retry SMTP la coda viene riletta e il contenuto ricostruito; se il prodotto
+  non è più visibile, è completato o la quantità è superata, il retry è annullato.
 - FBA: email all'arrivo di ogni nuovo flusso operativo in
   amzInventory/concamarise/logs/{flowId}. Il registro dell'evento evita duplicati
   per risincronizzazioni, modifiche ordinarie e retry di Eventarc.
@@ -35,7 +42,7 @@ Ultimo accesso indica lastSignInTime, cioè l'ultima autenticazione dell'account
   L'avviso include la procedura per lo stabilimento LG Trading SRL di
   Concamarise. Se ci sono prodotti FBA, l'avviso richiede preparazione prioritaria
   per il carico Amazon, senza inventare una data o un orario di ritiro.
-- Ogni mail indica in alto Incaricato: Nome Cognome. Il nome viene risolto sul
+- Ogni mail Picking Amazon indica in alto Incaricato: Nome Cognome. Il nome viene risolto sul
   server dall'account del singolo destinatario, con gli stessi criteri del
   pannello utenti (Auth, profilo, email in assenza di nome). Il contenuto viene
   generato separatamente per ogni destinatario; il browser non può indicare il
@@ -91,8 +98,8 @@ Le esecuzioni fuori orario o troppo vecchie vengono ignorate. Il destinatario
 deve essere già selezionato all'ora prevista; non vengono inviati arretrati.
 
 Il timestamp activatedAt in pickingEmailConfig/system è preservato.
-Il nuovo writeActivatedAt abilita solo gli inserimenti Write successivi
-all'attivazione; non invia arretrati della coda già esistente.
+writeActivatedAt abilita solo gli eventi Write successivi all'attivazione;
+non invia arretrati della coda già esistente.
 Per aggiornare questo solo codebase:
 
     firebase deploy --only functions:picking-notifications --project tabellone-produzione-liv-e313e --non-interactive
@@ -109,6 +116,7 @@ Con Firestore Emulator attivo esclusivamente su 127.0.0.1:8791:
 
     FIRESTORE_EMULATOR_HOST=127.0.0.1:8791 npm test
 
+Contratto con la UI: node --test tests/write-email-visibility.test.cjs (dalla root).
 I test di integrazione usano solo demo-picking-email-tests. Coprono selezione,
 accessi, riepiloghi manuali, conteggi e dettaglio prodotti, deduplicazione,
 orario italiano, retry e ultimo invio confermato. Nessuna email di prova viene
