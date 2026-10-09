@@ -1,0 +1,1 @@
+if(new URLSearchParams(location.search).get('monitor')==='1'){location.replace('/warehouse-map/capannone_3d.html'+location.search+location.hash);}else{await import("/warehouse-assets/warehouse-BsiLxXZU.js");}
