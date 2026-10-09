@@ -101,7 +101,7 @@ function alertSection(documents, now) {
 }
 
 function createWarehouseMonitor({ db, service, clock = Date.now, logger = console }) {
-  let cached = null, pending = null;
+  let cached = null, pending = null, loggedContent = null;
   let catalogCache = null;
   async function catalog() {
     if (catalogCache && clock() - catalogCache.at < 300000) return catalogCache.value;
@@ -123,7 +123,9 @@ function createWarehouseMonitor({ db, service, clock = Date.now, logger = consol
       const queries = [logs.where('status','in',['RESERVED','PARTIAL_PICKED','PRENOTATO','IN_ATTESA_PICKING']),
         logs.where('reservation.active','==',true),
         logs.where('picking.managedByPicking','==',true).select('kind','status','voided','cancelled','canceled','picking.flowPicked','picking.status')];
-      const snapshots = await Promise.all(queries.map(q => tx.get(q))), found = new Map();
+      const snapshots = [];
+      for(const query of queries) snapshots.push(await tx.get(query));
+      const found = new Map();
       for (const snap of snapshots.slice(0,2)) for (const doc of snap.docs) found.set(doc.id,doc);
       const legacy = snapshots[2].docs.filter(doc => {
         const d = doc.data(), status = String(d.status || d.picking?.status || '').toUpperCase();
@@ -149,7 +151,7 @@ function createWarehouseMonitor({ db, service, clock = Date.now, logger = consol
     // Attach a rejection handler immediately; each dependent section reports its own failure.
     void inventory.catch(()=>{});
     const sections = await Promise.all([
-      guarded('write', async () => writeSection(await db.runTransaction(tx => service.readWriteSummary(tx), { readOnly:true }), clock())),
+      guarded('write', async () => writeSection(await db.runTransaction(async tx => { await tx.get(db.doc(w.ALLOWLIST)); return service.readWriteSummary(tx); }, { readOnly:true }), clock())),
       ...['fbm','fba'].map(id => guarded(id, async () => pickingSection(id,
         await db.runTransaction(tx => readPicking(tx,id), { readOnly:true }), await inventory, clock()))),
       guarded('alerts', async () => {
@@ -166,7 +168,14 @@ function createWarehouseMonitor({ db, service, clock = Date.now, logger = consol
       map=seal({state:'unavailable',source:'amzInventoryProducts/rackAllocations',checkedAt:new Date(clock()).toISOString(),
         expiresAt:new Date(clock()).toISOString(),racks:[]});
     }
-    return seal({ version:1, generatedAt:new Date(clock()).toISOString(), sections, map });
+    const result=seal({ version:1, generatedAt:new Date(clock()).toISOString(), sections, map });
+    const contentHash=hash({sections:sections.map(s=>({id:s.id,state:s.state,rows:s.rows})),map:map.racks});
+    if(contentHash!==loggedContent){
+      logger.info('warehouse_snapshot', {contentSha256:contentHash, receiptSha256:result.sha256,
+        sources:sections.map(s=>({id:s.id,state:s.state,rows:s.rows.length,sha256:s.sha256})),mapState:map.state,racks:map.racks.length});
+      loggedContent=contentHash;
+    }
+    return result;
   }
   return { snapshot:async () => {
     if (cached && clock() - Date.parse(cached.generatedAt) < 20000) return cached;
