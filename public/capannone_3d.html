@@ -1,6 +1,12 @@
 <!DOCTYPE html>
 <html lang="it">
 <head>
+<script>if(new URLSearchParams(location.search).get('monitor')==='1')document.documentElement.classList.add('lg-monitor-embed');</script>
+<style>
+html.lg-monitor-embed,html.lg-monitor-embed body{margin:0;width:100%;height:100%;overflow:hidden;background:#050a10}
+html.lg-monitor-embed body>:not(#app){display:none!important}
+html.lg-monitor-embed #app{position:fixed!important;inset:0!important;filter:none!important;opacity:1!important;pointer-events:none!important}
+</style>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1 1'%3E%3C/svg%3E">
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
@@ -868,6 +874,10 @@
 </script>
 <script type="module">
 import * as THREE from 'three';
+const LG_MONITOR_EMBED = new URLSearchParams(location.search).get('monitor') === '1';
+let lgMonitorVisible = true, lgMonitorLastFrame = 0;
+if(LG_MONITOR_EMBED) window.__lineForceOn = false; // No machine telemetry is implied by the map.
+
 
 const LX=28.40, LZ=21.45, H_LOW=6.14, H_HIGH=7.30, VAULTS=9;
 const GAP_TEC=1.76, CARTON_TH=0.12;
@@ -928,8 +938,8 @@ const scene=new THREE.Scene();
 scene.background=new THREE.Color(0x03060b);          // TWIN OPS: abisso neutro
 scene.fog=new THREE.FogExp2(0x0b111b, 0.0050);
 const renderer=new THREE.WebGLRenderer({antialias:true, powerPreference:'high-performance', stencil:false, premultipliedAlpha:true});
-renderer.setPixelRatio(Math.min(devicePixelRatio,1.5));
-renderer.shadowMap.enabled=true; renderer.shadowMap.type=THREE.PCFSoftShadowMap;
+renderer.setPixelRatio(LG_MONITOR_EMBED ? 1 : Math.min(devicePixelRatio,1.5));
+renderer.shadowMap.enabled=!LG_MONITOR_EMBED; renderer.shadowMap.type=THREE.PCFSoftShadowMap;
 // la scena è quasi statica: le ombre non vanno ricalcolate ogni frame.
 // Le aggiorno solo quando qualcosa cambia (vedi requestShadowUpdate()).
 renderer.shadowMap.autoUpdate=false; renderer.shadowMap.needsUpdate=true;
@@ -6099,6 +6109,7 @@ function setCockpitPage(p){
   _renderDots(_ckPages(), p);
 }
 function updateCockpit(now){
+  if(LG_MONITOR_EMBED) return;
   // al primo avvio il cockpit compare subito; dopo la prima interazione torna ai 30s di inattività
   const delay = _cockpitEverShown ? COCKPIT_DELAY : COCKPIT_DELAY_FIRST;
   const inattivo = !selectedVano && (now-lastInteract >= delay);
@@ -6361,7 +6372,7 @@ const _PERF_STEPS=[
 function applyRenderSize(){
   const w=innerWidth, h=innerHeight;
   const long=Math.max(w,h)||1;
-  const cap=_PERF_STEPS[_perfStep] ? _PERF_STEPS[_perfStep].cap : 1920;
+  const cap=LG_MONITOR_EMBED ? 960 : (_PERF_STEPS[_perfStep] ? _PERF_STEPS[_perfStep].cap : 1920);
   const scale=Math.min(1, cap/long);          // non superare mai il cap reale
   const pr=Math.max(0.45, Math.min(_PR_MAX, scale));
   renderer.setPixelRatio(pr);
@@ -6374,6 +6385,7 @@ addEventListener('resize',resize); addEventListener('orientationchange',resize);
 
 function _applyPerfStep(i){
   i=Math.max(0,Math.min(_PERF_STEPS.length-1,i));
+  if(LG_MONITOR_EMBED) i=4;
   const s=_PERF_STEPS[i]; _perfStep=i;
   // tipo di filtro ombre (richiede needsUpdate per rigenerare la map col nuovo filtro)
   renderer.shadowMap.type = s.soft ? THREE.PCFSoftShadowMap : THREE.BasicShadowMap;
@@ -6497,14 +6509,23 @@ function clampCameraXZ(x,z){
 
 
 function tick(now){
+  if(LG_MONITOR_EMBED) {
+    if(document.hidden || !lgMonitorVisible) { setTimeout(()=>requestAnimationFrame(tick),500); return; }
+    if(now-lgMonitorLastFrame<40) { requestAnimationFrame(tick); return; }
+    lgMonitorLastFrame=now;
+  }
   _perfHud.begin();
-  perfWatch(now);
+  if(!LG_MONITOR_EMBED) perfWatch(now);
   // Mappa sempre online: nessuno stop fuori orario.
   setMapOffline(false);
   if(window.__uFlowUpdate) window.__uFlowUpdate(now);
   if(window.__lineUpdate) window.__lineUpdate(now);
-  updateTour(now);
-  updateIdle(now);
+  if(LG_MONITOR_EMBED){
+    Object.assign(cam,{theta:0.6+now*0.00006,phi:0.72,r:38,tx:0,ty:2.4,tz:0,roll:0,fov:_baseFov});
+  }else{
+    updateTour(now);
+    updateIdle(now);
+  }
   updateCockpit(now);
   if(!tick._iaT || now-tick._iaT>5000){ tick._iaT=now; refreshIncomingAlert(); refreshReadyAlert(); try{ renderUbiTrashAlert(); }catch(_){ } }
   if(!tick._slT || now-tick._slT>8000){ tick._slT=now; try{ if(typeof LogFeed!=='undefined') LogFeed.refresh(); }catch(_){} }
@@ -6695,6 +6716,7 @@ tick._px=tick._py=tick._pz=0; tick._idleAccum=0;
 // senza attendere il timer di inattività. Dopo la prima interazione il comportamento
 // torna normale (riappare dopo 30s di inattività).
 function _showCockpitAtStartup(){
+  if(LG_MONITOR_EMBED) return;
   if(selectedVano || _cockpitOn) return;
   _cockpitOn=true; _cockpitEverShown=true;
   _ckPageStart=performance.now(); setCockpitPage('azienda');
@@ -7050,6 +7072,7 @@ function playUbiPackAudioCandidate(src, ann){
 }
 
 async function playUbiPackAudio(url, ann){
+  if(LG_MONITOR_EMBED) return false;
   const candidates = ubiAudioUrlCandidates(url);
   if(!candidates.length) return { ok:false, reason:"missing_url" };
 
@@ -8664,6 +8687,7 @@ function initKioskSettingsUi(){
 initKioskSettingsUi();
 
 (async function connectCloud(){
+  if(LG_MONITOR_EMBED) return; // Authenticated projection arrives only from Control Center.
   setCloudStatus('Autenticazione…', '#f59e0b');
   try{
     const firebaseConfig = {
@@ -9045,6 +9069,45 @@ function startInventoryRealtime(fs, db){
     }catch(e){ console.warn('listener sotto scorta '+loc, e); }
   }
 }
+// Read-only embedded view: no Firebase sign-in, listeners, controls or write access.
+if(LG_MONITOR_EMBED){
+  const allowedParents = new Set(['https://lg-control-center.web.app','https://lg-control-center.firebaseapp.com']);
+  const canonicalMonitor = value => Array.isArray(value) ? value.map(canonicalMonitor)
+    : value && typeof value==='object' ? Object.fromEntries(Object.keys(value).sort().map(k=>[k,canonicalMonitor(value[k])])) : value;
+  let monitorSequence=0;
+  window.addEventListener('message',async event=>{
+    if(event.source!==parent || !allowedParents.has(event.origin))return;
+    if(event.data?.type==='lg-warehouse-map-visibility'){lgMonitorVisible=event.data.visible===true;return;}
+    if(event.data?.type!=='lg-warehouse-map')return;
+    const snapshot=event.data.snapshot,sequence=++monitorSequence;
+    if(!snapshot || snapshot.state!=='ok' || snapshot.source!=='amzInventoryProducts/rackAllocations'
+      || !Array.isArray(snapshot.racks) || snapshot.racks.length>20000
+      || Date.parse(snapshot.expiresAt)<=Date.now() || !Number.isFinite(Date.parse(snapshot.checkedAt))
+      || Date.parse(snapshot.checkedAt)>Date.now()+30000)return;
+    try{
+      const {sha256,...unsigned}=snapshot;
+      const bytes=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(JSON.stringify(canonicalMonitor(unsigned))));
+      const actual=Array.from(new Uint8Array(bytes),b=>b.toString(16).padStart(2,'0')).join('');
+      if(actual!==sha256 || sequence!==monitorSequence)return;
+      const perCode={};
+      for(const rack of snapshot.racks){
+        const code=String(rack.code||'').trim().toUpperCase(),qty=Number(rack.qty);
+        if(!VANI_MAP[code] || !Number.isFinite(qty) || qty<0)continue;
+        const entry=perCode[code] || {qty:0,title:String(rack.title||rack.sku||'')};
+        entry.qty+=qty;perCode[code]=entry;
+      }
+      let changed=false;
+      for(const code in VANI_MAP){const row=perCode[code];if(aggiornaVano(code,row?row.qty:0,row?{title:row.title}:null))changed=true;}
+      if(changed)requestShadowUpdate(1);
+      parent.postMessage({type:'lg-warehouse-map-applied',sha256},event.origin);
+    }catch(_){parent.postMessage({type:'lg-warehouse-map-error'},event.origin);}
+  });
+  renderer.domElement.addEventListener('webglcontextlost',()=>{
+    for(const origin of allowedParents)parent.postMessage({type:'lg-warehouse-map-error'},origin);
+  });
+  for(const origin of allowedParents)parent.postMessage({type:'lg-warehouse-map-ready'},origin);
+}
+
 </script>
 <script>
 /* =====================================================================
@@ -9060,6 +9123,7 @@ function startInventoryRealtime(fs, db){
    Si ferma quando il cockpit non è a video, in volo drone o con la scheda nascosta.
    ===================================================================== */
 (function twinOpsCore(){
+  if(document.documentElement.classList.contains('lg-monitor-embed')) return;
   'use strict';
   const cv = document.getElementById('hxCore');
   if(!cv || !cv.getContext) return;

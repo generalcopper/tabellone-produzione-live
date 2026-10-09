@@ -29,6 +29,16 @@ const runtime = {
   serviceAccount: '537555699968-compute@developer.gserviceaccount.com',
 };
 
+const warehouse = require('./warehouse-monitor').createWarehouseMonitor({ db: getFirestore(), service, logger });
+exports.warehouseMonitor = onRequest({
+  ...runtime, memory: '512MiB', maxInstances: 2, timeoutSeconds: 60,
+  invoker: ['crm-api@cedoly-crm-prod.iam.gserviceaccount.com'],
+}, async (req, res) => {
+  res.set('Cache-Control', 'private, no-store');
+  if (req.method !== 'GET') return res.status(405).json({ error: 'read_only' });
+  return res.json(await warehouse.snapshot());
+});
+
 exports.pickingEmailApi = onRequest({
   ...runtime, timeoutSeconds: 60,
   cors: ['https://' + PROJECT + '.web.app', 'https://' + PROJECT + '.firebaseapp.com'],
