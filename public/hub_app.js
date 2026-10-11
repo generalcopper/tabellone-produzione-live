@@ -6054,13 +6054,11 @@ function waitForHub(attempt){
     const root = $("viewDaneaDdt");
     if (!root) return;
 
-    // restore prefs (hidden UI) — always auto-load XML when you enter
-    try{
-      const stored = String(localStorage.getItem(LS_URL) || "").trim();
-      const base = stored || DEFAULT_XML_URL_BASE;
-      S.xmlUrl = normalizeDaneaXmlUrl(base);
-      try{ localStorage.setItem(LS_URL, S.xmlUrl); }catch(_){}
-    }catch(_){}
+    // Storage may be denied while the session survives in IndexedDB.
+    let storedUrl = "";
+    try{ storedUrl = String(localStorage.getItem(LS_URL) || "").trim(); }catch(_){}
+    S.xmlUrl = normalizeDaneaXmlUrl(storedUrl || DEFAULT_XML_URL_BASE);
+    try{ localStorage.setItem(LS_URL, S.xmlUrl); }catch(_){}
 
     // restore toggle (default ON)
     try{ setAutoDischarge(__readAutoFromLS()); }catch(_){ }
