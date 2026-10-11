@@ -10,13 +10,8 @@
 <link rel="modulepreload" href="https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js" crossorigin>
 <link rel="modulepreload" href="https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js" crossorigin>
 <link rel="modulepreload" href="https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js" crossorigin>
-<link rel="stylesheet" href="/public1/app.css">
 <link rel="preload" as="image" href="/logo%20general%20copper.png" fetchpriority="high">
-<script src="/public1/app.js" defer></script>
-
-   <!-- iOS Google Auth stabilizer (files in /public1) -->
-<link rel="stylesheet" href="/public1/auth_ios.css?v=5">
-<script defer src="/public1/auth_ios.js?v=5"></script>
+<meta name="hub-release" content="index-startup-2026-10-11">
 
 
 
@@ -1872,28 +1867,59 @@ const btnAbsenceSend = $("btnAbsenceSend");
 
 let _spinnerTimer = null;
 let _pendingAllowSpinner = false;
+let __startupTimer = null;
+let __retryTimer = null;
+let __authVersion = 0;
+let __retryCount = 0;
+let __startupPhase = "pending";
+let __retryCurrentUser = null;
 
 // ruolo corrente (aggiornato in onAuthStateChanged)
 let __isAdmin = false;
 
-// Hint: se l'utente ha già fatto login almeno una volta, su iOS (back/multitasking)
-// preferiamo una rotellina "verifica sessione" invece di far flashare il popup.
-const __signedOnce = (localStorage.getItem("gc_hub_signed_once") === "1");
+// Nessun accesso allo storage prima dell'avvio: può essere disabilitato dal browser.
+setPending(true, { allowSpinner:true });
 
-// Avvio: niente flash. NIENTE rotellina al primo login.
-setPending(true, { allowSpinner: __signedOnce });
+function startupDeadline(promise, milliseconds, label){
+  let timer;
+  const timeout = new Promise((_, reject)=>{
+    timer = setTimeout(()=>reject(Object.assign(new Error(label), {code:"hub/timeout"})), milliseconds);
+  });
+  return Promise.race([promise, timeout]).finally(()=>clearTimeout(timer));
+}
 
-// Failsafe: se qualcosa va storto (iOS cache/redirect), non lasciare schermo bianco
-setTimeout(()=>{
-  if(document.body.classList.contains("authPending")){
-    try{
-      setPending(false);
-      lockPage(true, true);
-      showOverlayState("error");
-      setMsg("Non riesco a verificare la sessione. Ricarica la pagina.");
-    }catch(_e){}
+function showStartupError(error, version=__authVersion){
+  if(version !== __authVersion || __startupPhase === "ready") return;
+  __startupPhase = "error";
+  setPending(false);
+  lockPage(true, true);
+  showOverlayState("error");
+  setMsg(navigator.onLine === false
+    ? "Connessione assente. Controlla la rete e premi Riprova."
+    : "Non riesco a completare la verifica dell’accesso. Premi Riprova.");
+  console.warn("Hub startup", error?.code || error?.message || error);
+  clearTimeout(__retryTimer);
+  if(auth?.currentUser && __retryCurrentUser && navigator.onLine !== false && __retryCount < 2){
+    __retryCount++;
+    __retryTimer = setTimeout(()=>retryStartup(true), 3000);
   }
-}, 8000);
+}
+
+function retryStartup(automatic=false){
+  if(__startupPhase !== "error" || navigator.onLine === false) return;
+  if(!automatic) __retryCount = 0;
+  clearTimeout(__retryTimer);
+  if(auth?.currentUser && __retryCurrentUser){
+    void __retryCurrentUser();
+  }else if(!automatic){
+    location.reload();
+  }
+}
+
+// Riprova deve funzionare anche quando il caricamento dell'SDK fallisce.
+btnReload?.addEventListener("click", ()=>retryStartup());
+window.addEventListener("online", ()=>{ __retryCount = 0; retryStartup(true); });
+window.addEventListener("pageshow", ()=>retryStartup(true));
 
 
 
@@ -1910,8 +1936,12 @@ function setPending(pending, opts){
   if(typeof opts.allowSpinner === "boolean") _pendingAllowSpinner = opts.allowSpinner;
 
   document.body.classList.toggle("authPending", !!pending);
+  document.body.setAttribute("aria-busy", pending ? "true" : "false");
+  clearTimeout(__startupTimer);
 
   if(pending){
+    const version = __authVersion;
+    __startupTimer = setTimeout(()=>showStartupError({code:"hub/timeout"}, version), 12000);
     // blocca l'app ma NON mostrare nessun popup
     lockPage(true, false);
 
@@ -1931,7 +1961,6 @@ function setPending(pending, opts){
     document.body.classList.remove("showSpinner");
   }
 }
-let __loginGateTimer = null;
 
 function setMsg(msg){
   authMsg.textContent = msg || "";
@@ -1971,37 +2000,56 @@ setMsg("");
 // Init Firebase (dynamic import, come negli altri hub)
 let app, auth, db, authMod, fsMod;
 const providerInit = async ()=>{
-  const [{ initializeApp }, _authMod, _fsMod] = await Promise.all([
+  const [{ initializeApp }, _authMod, _fsMod] = await startupDeadline(Promise.all([
     import("https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js"),
     import("https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js"),
     import("https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js"),
-  ]);
+  ]), 10000, "Caricamento Firebase");
   authMod = _authMod;
   fsMod = _fsMod;
 
   app = initializeApp(firebaseConfig);
-  auth = authMod.getAuth(app);
+  const storageAvailable = name=>{
+    try{ window[name].getItem("__gc_hub_session_probe__"); return true; }
+    catch(_error){ return false; }
+  };
+  const localAvailable = storageAvailable("localStorage");
+  const sessionAvailable = storageAvailable("sessionStorage");
+  // Escludi solo gli storage che il browser rifiuta. Firebase mantiene il
+  // proprio fallback IndexedDB/memoria, senza letture non protette all'avvio.
+  auth = authMod.initializeAuth(app, {
+    persistence:[authMod.indexedDBLocalPersistence,
+      localAvailable && authMod.browserLocalPersistence,
+      sessionAvailable && authMod.browserSessionPersistence].filter(Boolean),
+    ...(sessionAvailable ? {popupRedirectResolver:authMod.browserPopupRedirectResolver} : {})
+  });
   db = fsMod.getFirestore(app);
 
-  const authPersistenceReady = Promise.resolve()
-    .then(()=>authMod.setPersistence(auth, authMod.browserLocalPersistence))
-    .catch(()=>{});
+  // Firebase ripristina già la persistenza browser ufficiale. Non migrare lo
+  // storage a ogni apertura né attendere tale migrazione prima del popup.
 
   const googleProvider = new authMod.GoogleAuthProvider();
   try{ googleProvider.setCustomParameters({ prompt: "select_account" }); }catch(_e){}
 
+  let loginBusy = false;
   async function signInWithGoogle(){
+    if(loginBusy) return;
+    loginBusy = true;
+    btnGoogle.disabled = true;
     setMsg("");
     showOverlayState("login");
     try{
-      await authPersistenceReady;
-      await authMod.signInWithPopup(auth, googleProvider);
+      await authMod.signInWithPopup(auth, googleProvider, authMod.browserPopupRedirectResolver);
     }catch(err){
       const code = err?.code || "";
       // fallback redirect se popup bloccato
-      if(code === "auth/popup-blocked" || code === "auth/cancelled-popup-request"){
+      if(code === "auth/popup-closed-by-user" || code === "auth/cancelled-popup-request"){
+        setMsg("Accesso annullato. Puoi riprovare con Google.");
+        return;
+      }
+      if(code === "auth/popup-blocked" && sessionAvailable){
         try{
-          await authMod.signInWithRedirect(auth, googleProvider);
+          await authMod.signInWithRedirect(auth, googleProvider, authMod.browserPopupRedirectResolver);
           return;
         }catch(e2){
           console.error(e2);
@@ -2009,12 +2057,14 @@ const providerInit = async ()=>{
       }
       console.error(err);
       setMsg("Non riesco ad aprire l'accesso Google. Controlla popup/cookie e riprova.");
-      showOverlayState("error");
+      showOverlayState("login");
+    }finally{
+      loginBusy = false;
+      btnGoogle.disabled = false;
     }
   }
 
   btnGoogle?.addEventListener("click", signInWithGoogle);
-  btnReload?.addEventListener("click", ()=>location.reload());
 
 
   // === Modal: Programma un'assenza ===
@@ -2437,236 +2487,148 @@ if(absenceMsg) absenceMsg.textContent = "Richiesta inviata ✅";
   btnSignOut?.addEventListener("click", doSignOut);
   btnSignOutOverlay?.addEventListener("click", doSignOut);
 
-  // helper: leggi access doc (uid o emailLower)
+  // Accesso: letture server in parallelo, senza confondere rete assente e diniego.
   async function getAccess(docId){
+    if(!docId) return null;
     try{
       const ref = fsMod.doc(db, "powderUsers", docId);
-      const snap = await fsMod.getDoc(ref);
-      if(!snap.exists()) return null;
-      const data = snap.data() || {};
-      if(data.enabled === false) return null;
-      return data;
-    }catch(e){
-      // permessi o rete
-      console.warn("getAccess error", e);
-      return null;
-    }
-  }
-
-  // ✅ Bootstrap profilo: crea powderUsers/{uid} al primo login (da invite su powderUsers/{emailLower})
-  // IMPORTANTE: per funzionare, le Firestore Rules devono permettere CREATE su powderUsers/{uid}
-  // (docId == myUid()) SOLO se esiste un invito su powderUsers/{emailLower}.
-  async function ensureUidPowderUser(user){
-    try{
-      const uid = user?.uid || "";
-      const emailLower = String(user?.email || "").trim().toLowerCase();
-      if(!uid || !emailLower) return { ok:false, reason:"missing" };
-
-      const uidRef = fsMod.doc(db, "powderUsers", uid);
-      const invRef = fsMod.doc(db, "powderUsers", emailLower);
-
-      // 1) Leggi invito (emailLower)
-      const invSnap = await fsMod.getDoc(invRef);
-      if(!invSnap.exists()) return { ok:false, reason:"noinvite", emailLower, uid };
-
-      const inv = invSnap.data() || {};
-      if(inv.enabled === false) return { ok:false, reason:"disabled_invite", emailLower, uid };
-
-      // allinea orgId alla stessa regex delle Rules
-      const rawOrg = (typeof inv.orgId === "string") ? inv.orgId.trim() : "";
-      const orgId = (/^[A-Za-z0-9_-]{1,50}$/.test(rawOrg)) ? rawOrg : "default";
-
-      const desired = {
-        emailLower,
-        enabled: true,
-        isAdmin: inv.isAdmin === true,
-        orgId
-      };
-
-      // 2) Controlla UID doc (se esiste ed e' disabilitato -> stop)
-      let uidSnap = null;
-      try{ uidSnap = await fsMod.getDoc(uidRef); }catch(_e){}
-      if(uidSnap && uidSnap.exists()){
-        const cur = uidSnap.data() || {};
-        if(cur.enabled === false) return { ok:false, reason:"disabled_uid", emailLower, uid, existed:true };
-      }
-
-      // 3) Crea o ripara (merge)
-      const stamp = (!uidSnap || !uidSnap.exists())
-        ? { createdAt: fsMod.serverTimestamp() }
-        : { repairedAt: fsMod.serverTimestamp() };
-
-      await fsMod.setDoc(uidRef, { ...desired, ...stamp }, { merge:true });
-
-      return {
-        ok:true,
-        created: (!uidSnap || !uidSnap.exists()),
-        repaired: (uidSnap && uidSnap.exists()),
-        emailLower,
-        uid
-      };
-    }catch(e){
-      const code = String(e?.code || "");
-      if(code === "permission-denied" || code === "PERMISSION_DENIED"){
-        console.warn("ensureUidPowderUser permission-denied", e);
-        return { ok:false, reason:"forbidden", error:e };
-      }
-      console.warn("ensureUidPowderUser error", e);
-      return { ok:false, reason:"error", error: e };
+      const snap = await startupDeadline(fsMod.getDocFromServer(ref), 7000, "Verifica autorizzazioni");
+      return snap.exists() ? (snap.data() || {}) : null;
+    }catch(error){
+      if(String(error?.code || "").toLowerCase().endsWith("permission-denied")) return null;
+      throw error;
     }
   }
 
   async function resolveRole(user){
     const uid = user?.uid || "";
     const emailLower = String(user?.email || "").trim().toLowerCase();
-
-    let data = null;
-    if(uid) data = await getAccess(uid);
-    if(!data && emailLower) data = await getAccess(emailLower);
-
-    if(!data) return { isMember:false, isAdmin:false };
-    return { isMember:true, isAdmin: data.isAdmin === true };
+    const [uidResult, inviteResult] = await Promise.allSettled([getAccess(uid), getAccess(emailLower)]);
+    // Il documento UID può contenere una disabilitazione esplicita: se la sua
+    // lettura è incerta, non autorizzare usando il solo invito.
+    if(uidResult.status === "rejected") throw uidResult.reason;
+    const uidData = uidResult.value;
+    const inviteData = inviteResult.status === "fulfilled" ? inviteResult.value : null;
+    if(uidData?.enabled === false) return {isMember:false,isAdmin:false,reason:"disabled_uid"};
+    const data = uidData || (inviteData?.enabled !== false ? inviteData : null);
+    if(!data && inviteResult.status === "rejected") throw inviteResult.reason;
+    return {isMember:!!data,isAdmin:data?.isAdmin === true,uidData,inviteData};
   }
 
-  // Se siamo arrivati da redirect login (anti-flash) — inizializza PRIMA del listener
-  window.__gc_redirectDone = false;
-  window.__gc_redirectPromise = (async()=>{
-    try{ await authMod.getRedirectResult(auth); }catch(_e){}
-  })().finally(()=>{ window.__gc_redirectDone = true; });
-
-// Auth listener
-  authMod.onAuthStateChanged(auth, async (user)=>{
-    if(!user){
-      __isAdmin = false;
-      try{
-        if(usersModal && usersModal.getAttribute("aria-hidden") === "false") closeUsersModal();
-      }catch(_e){}
-      // non mostrare subito il popup Google: evita flash su iOS (back/multitasking)
-      if(userNameEl) userNameEl.textContent = "—";
-      if(statusTextEl) statusTextEl.textContent = "Non connesso";
-      if(profileUserEl) profileUserEl.textContent = "—";
-      if(profileRoleEl) profileRoleEl.textContent = "—";
-      if(statusDotEl){
-        statusDotEl.classList.remove("online");
-        statusDotEl.classList.add("offline");
-      }
-      if(avatarInitialsEl) avatarInitialsEl.textContent = "GC";
-
-      // Reset tile visibility (in caso di logout / cambio account)
-      applyRoleVisibility(false);
-
-      // Durante la verifica sessione: spinner SOLO se l'utente ha già fatto login almeno una volta
-      setPending(true, { allowSpinner: __signedOnce });
-
-      const gateMs = __signedOnce ? 1100 : 350;
-
-      const showLogin = ()=>{
-        clearTimeout(__loginGateTimer);
-        __loginGateTimer = setTimeout(()=>{
-          if(!auth.currentUser){
-            setPending(false);
-            lockPage(true, true);
-            showOverlayState("login");
-            setMsg("");
-          }
-        }, gateMs);
-      };
-
-      if(window.__gc_redirectDone === false && window.__gc_redirectPromise){
-        window.__gc_redirectPromise.finally(showLogin);
-      }else{
-        showLogin();
-      }
-      return;
+  // L'invito rimane la fonte per inizializzare/riparare il profilo UID.
+  // Riusa le letture già verificate e scrive soltanto se i campi sono cambiati.
+  // La sincronizzazione non trattiene la home quando l'accesso è già valido.
+  async function ensureUidPowderUser(user, access){
+    const uid = user?.uid || "";
+    const emailLower = String(user?.email || "").trim().toLowerCase();
+    const inv = access.inviteData;
+    const current = access.uidData;
+    if(!uid || !emailLower || !inv || inv.enabled === false || current?.enabled === false){
+      return {ok:false,reason:"no_active_invite"};
     }
-
-    // Signed in: ok, mostra l'app
-    clearTimeout(__loginGateTimer);
-    setPending(false);
-// Signed in: check role
-    const displayName = user.displayName || user.email || "Utente";
-    if(userNameEl) userNameEl.textContent = displayName;
-    if(statusTextEl) statusTextEl.textContent = "Connesso";
-    if(statusDotEl){ statusDotEl.classList.add("online"); statusDotEl.classList.remove("offline"); }
-
-    if(profileUserEl) profileUserEl.textContent = (user.email || displayName);
-    if(profileRoleEl) profileRoleEl.textContent = "Verifica…";
-    if(avatarInitialsEl) avatarInitialsEl.textContent = initialsFromName(displayName);
-
-
-
-    // 1) Verifica accesso (anche solo via invito emailLower)
-    const preRole = await resolveRole(user);
-    if(!preRole.isMember){
-      __isAdmin = false;
-      try{ if(usersModal && usersModal.getAttribute("aria-hidden") === "false") closeUsersModal(); }catch(_e){}
-      lockPage(true);
-      showOverlayState("noaccess");
-      const who = (user?.email || "").toLowerCase();
-      setMsg(who ? ("Accesso non autorizzato per: " + who + ". Contatta l’amministratore.")
-                  : "Accesso non autorizzato per questo account. Contatta l’amministratore.");
-      if(profileRoleEl) profileRoleEl.textContent = "No accesso";
-      applyRoleVisibility(false);
-      return;
+    const rawOrg = typeof inv.orgId === "string" ? inv.orgId.trim() : "";
+    const desired = {
+      emailLower, enabled:true, isAdmin:inv.isAdmin === true,
+      orgId:/^[A-Za-z0-9_-]{1,50}$/.test(rawOrg) ? rawOrg : "default"
+    };
+    if(current && Object.entries(desired).every(([key,value])=>current[key] === value)){
+      return {ok:true,changed:false,isAdmin:current.isAdmin === true};
     }
+    if(auth.currentUser?.uid !== uid) return {ok:false,reason:"session_changed"};
+    try{
+      const stamp = current ? {repairedAt:fsMod.serverTimestamp()} : {createdAt:fsMod.serverTimestamp()};
+      await startupDeadline(fsMod.setDoc(fsMod.doc(db,"powderUsers",uid), {...desired,...stamp}, {merge:true}), 7000, "Sincronizzazione profilo");
+      return {ok:true,changed:true,isAdmin:desired.isAdmin};
+    }catch(error){
+      console.warn("Profile bootstrap", error?.code || error?.message);
+      return {ok:false,reason:"sync_failed"};
+    }
+  }
 
-    // 2) Prova a creare/riparare il profilo UID (non blocca se sei gia' autorizzato)
-    const boot = await ensureUidPowderUser(user);
-    if(!boot.ok){
-      // se l'UID e' disabilitato, blocca davvero
-      if(boot.reason === "disabled_uid"){
-        __isAdmin = false;
-        try{ if(usersModal && usersModal.getAttribute("aria-hidden") === "false") closeUsersModal(); }catch(_e){}
-        lockPage(true);
-        showOverlayState("noaccess");
-        setMsg("Account disabilitato. Contatta l’amministratore.");
-        if(profileRoleEl) profileRoleEl.textContent = "Disabilitato";
-        applyRoleVisibility(false);
+  let readyUid = null;
+  async function handleAuthState(user){
+    if(user && readyUid === user.uid && __startupPhase === "ready") return;
+    const version = ++__authVersion;
+    clearTimeout(__retryTimer);
+    readyUid = null;
+    __isAdmin = false;
+    applyRoleVisibility(false);
+    try{
+      if(usersModal && usersModal.getAttribute("aria-hidden") === "false") closeUsersModal();
+      if(absenceModal && absenceModal.getAttribute("aria-hidden") === "false") closeAbsenceModal();
+      if(!user){
+        __startupPhase = "login";
+        setPending(false);
+        if(userNameEl) userNameEl.textContent = "—";
+        if(statusTextEl) statusTextEl.textContent = "Non connesso";
+        if(profileUserEl) profileUserEl.textContent = "—";
+        if(profileRoleEl) profileRoleEl.textContent = "—";
+        if(statusDotEl){statusDotEl.classList.remove("online");statusDotEl.classList.add("offline");}
+        if(avatarInitialsEl) avatarInitialsEl.textContent = "GC";
+        lockPage(true,true);
+        showOverlayState("login");
+        setMsg("");
         return;
       }
 
-      // altrimenti: avviso soft
-      const who = (user?.email || "").toLowerCase();
-      setMsg("Accesso OK" + (who ? (" ("+who+")") : "") + ", ma il profilo UID non è stato inizializzato. Alcune funzioni potrebbero essere limitate. Ricarica o avvisa l’amministratore.");
-    }else{
+      __startupPhase = "checking";
+      setPending(true,{allowSpinner:true});
+      const displayName = user.displayName || user.email || "Utente";
+      if(userNameEl) userNameEl.textContent = displayName;
+      if(profileUserEl) profileUserEl.textContent = user.email || displayName;
+      if(profileRoleEl) profileRoleEl.textContent = "Verifica…";
+      if(statusTextEl) statusTextEl.textContent = "Verifica accesso…";
+      if(avatarInitialsEl) avatarInitialsEl.textContent = initialsFromName(displayName);
+
+      const access = await resolveRole(user);
+      if(version !== __authVersion || auth.currentUser?.uid !== user.uid) return;
+      if(!access.isMember){
+        __startupPhase = "noaccess";
+        setPending(false);
+        lockPage(true,true);
+        showOverlayState("noaccess");
+        setMsg(access.reason === "disabled_uid"
+          ? "Account disabilitato. Contatta l’amministratore."
+          : "Accesso non autorizzato per questo account. Contatta l’amministratore.");
+        if(profileRoleEl) profileRoleEl.textContent = "No accesso";
+        return;
+      }
+
+      __isAdmin = access.isAdmin;
+      __startupPhase = "ready";
+      __retryCount = 0;
+      readyUid = user.uid;
+      applyRoleVisibility(__isAdmin);
+      if(profileRoleEl) profileRoleEl.textContent = __isAdmin ? "Admin" : "Operatore";
+      if(statusTextEl) statusTextEl.textContent = "Connesso";
+      if(statusDotEl){statusDotEl.classList.add("online");statusDotEl.classList.remove("offline");}
+      setPending(false);
+      lockPage(false);
       setMsg("");
+
+      void ensureUidPowderUser(user,access).then(result=>{
+        // Applicare un ruolo aggiornato soltanto dopo conferma della scrittura,
+        // e mai a un altro account arrivato mentre la richiesta era in corso.
+        if(!result.ok || version !== __authVersion || auth.currentUser?.uid !== user.uid || __startupPhase !== "ready") return;
+        __isAdmin = result.isAdmin;
+        applyRoleVisibility(__isAdmin);
+        if(profileRoleEl) profileRoleEl.textContent = __isAdmin ? "Admin" : "Operatore";
+        if(!__isAdmin && usersModal?.getAttribute("aria-hidden") === "false") closeUsersModal();
+      }).catch(error=>console.warn("Profile bootstrap",error?.code || error?.message));
+    }catch(error){
+      showStartupError(error,version);
     }
+  }
 
-    // 3) Ricalcola ruolo (dopo eventuale boot)
-    const role = await resolveRole(user);
-
-
-    // Apply per-user tile visibility (alcune tile possono essere nascoste per specifiche email)
-    // Authorized
-    try{ localStorage.setItem("gc_hub_signed_once","1"); }catch(_e){}
-    __isAdmin = !!role.isAdmin;
-    applyRoleVisibility(__isAdmin);
-    if(!__isAdmin){
-      try{ if(usersModal && usersModal.getAttribute("aria-hidden") === "false") closeUsersModal(); }catch(_e){}
-    }
-    if(profileRoleEl) profileRoleEl.textContent = role.isAdmin ? "Admin" : "Operatore";
-
-    lockPage(false);
-    setMsg("");
-
-
-      });
-
-  
+  __retryCurrentUser = ()=>handleAuthState(auth.currentUser);
+  authMod.onAuthStateChanged(auth,user=>{void handleAuthState(user);},showStartupError);
+  // Il redirect viene gestito in parallelo, senza una seconda attesa davanti alla UI.
+  if(sessionAvailable){
+    void authMod.getRedirectResult(auth,authMod.browserPopupRedirectResolver).catch(error=>console.warn("Google redirect",error?.code || error?.message));
+  }
 };
 
-const __startProviderInit = ()=>providerInit().catch((e)=>{
-  try{ setPending(false); }catch(_e){}
-  console.error(e);
-  setMsg("Errore di inizializzazione. Ricarica la pagina.");
-  showOverlayState("error");
-});
-
-if(document.readyState === "loading"){
-  requestAnimationFrame(__startProviderInit);
-}else{
-  __startProviderInit();
-}
+void providerInit().catch(showStartupError);
 </script><script>
 /* Keep navigation inside standalone/app mode (iOS A2HS + PWA) */
 (function(){
@@ -2699,7 +2661,7 @@ if(document.readyState === "loading"){
 (function(){
   if(!('serviceWorker' in navigator)) return;
   const registerSw = function(){
-    navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(function(){});
+    navigator.serviceWorker.register('/sw.js', { scope: '/', updateViaCache:'none' }).catch(function(){});
   };
   const schedule = function(){
     if('requestIdleCallback' in window){
