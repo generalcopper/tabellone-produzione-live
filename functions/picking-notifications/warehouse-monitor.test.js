@@ -44,6 +44,8 @@ test('Cerea alerts expire, canceled loads do not appear, Rome date drives waste 
   const payload={incoming:{active:true,createdAtMs:now-1000,status:'received'},ready:{active:true,createdAtMs:now-1800001},
     manual:{active:true,text:'Avviso reale'},waste:{active:true,dateKey:'2026-10-10',types:['CARTA'],exposureWindow:'21:00-24:00'}};
   const section=m.alertSection(payload,now);assert.deepEqual(section.rows.map(x=>x.id),['manual','waste']);
+  assert.equal(section.rows[0].level,'info');assert.equal(section.rows[1].level,'warn');
+  const {sha256,...unsigned}=section.rows[0];assert.equal(m.hash(unsigned),sha256);
   const wrong=m.alertSection({...payload,waste:{...payload.waste,dateKey:'2026-10-09'}},now);assert.equal(wrong.rows.length,1);
 });
 test('an unavailable source is never a verified empty queue',()=>{
