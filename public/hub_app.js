@@ -38,11 +38,12 @@ function createInventoryStreams(listen, changed = () => {}) {
       if (!current()) return;
       stop(record);
       record.failed = true;
+      record.errorCode = String(error?.code || "unknown").replace(/^firestore\//, "");
       try { record.error?.(error); } finally {
         changed();
         // Firebase already retries temporary network failures. A terminal listener
         // gets only two retries here, e.g. while a restored token propagates.
-        if (record.attempts < 2) {
+        if (record.attempts < 2 && !["permission-denied", "failed-precondition", "unauthenticated"].includes(record.errorCode)) {
           const delay = [1500, 4000][record.attempts++];
           record.timer = setTimeout(() => { record.timer = null; start(record); }, delay);
         }
@@ -52,6 +53,7 @@ function createInventoryStreams(listen, changed = () => {}) {
       const unsubscribe = listen(record.ref, record.options, snapshot => {
         if (!current()) return;
         record.failed = false;
+        record.errorCode = "";
         record.next(snapshot);
         changed();
       }, fail);
@@ -60,8 +62,8 @@ function createInventoryStreams(listen, changed = () => {}) {
     } catch (error) { fail(error); }
   }
   return {
-    subscribe(ref, next, error, options = {}) {
-      const record = { ref, next, error, options, version: 0, attempts: 0, closed: false, failed: false };
+    subscribe(ref, next, error, options = {}, metadata = {}) {
+      const record = { ref, next, error, options, metadata, errorCode: "", version: 0, attempts: 0, closed: false, failed: false };
       records.add(record);
       start(record);
       return () => { record.closed = true; stop(record); records.delete(record); };
@@ -70,7 +72,7 @@ function createInventoryStreams(listen, changed = () => {}) {
       const next = String(uid || "");
       if (next === session) return;
       session = next;
-      records.forEach(record => { stop(record); record.attempts = 0; record.failed = false; });
+      records.forEach(record => { stop(record); record.attempts = 0; record.failed = false; record.errorCode = ""; });
       window.dispatchEvent(new CustomEvent("HubInventorySession", { detail: { uid: session } }));
       records.forEach(start);
     },
@@ -82,7 +84,10 @@ function createInventoryStreams(listen, changed = () => {}) {
         start(record);
       });
     },
-    hasErrors: () => [...records].some(record => record.failed)
+    hasErrors: () => [...records].some(record => !!record.errorCode),
+    errors: () => [...records].filter(record => record.errorCode).map(record => ({
+      code: record.errorCode, label: record.metadata.label || "Sezioni aggiuntive", scope: record.metadata.scope || "inventory"
+    }))
   };
 }
 
@@ -12333,9 +12338,16 @@ if (adminEmails && adminEmails.size){
         return;
       }
       const values = [...inventoryDataState.values()];
-      if (inventoryStreams.hasErrors() || values.includes("error")) {
+      const errors = inventoryStreams.errors().filter(error => error.scope !== "section");
+      if (errors.length) {
+        const labels = [...new Set(errors.map(error => error.label))].join(", ");
+        const denied = errors.every(error => error.code === "permission-denied" || error.code === "unauthenticated");
+        const configuration = errors.every(error => error.code === "failed-precondition");
         setSyncPill("bad", "Sync: da ripristinare");
-        inventoryStatus("error", "Alcuni dati non si aggiornano. Riprova il collegamento.");
+        inventoryStatus(denied || configuration ? "denied" : "error", denied
+          ? `Accesso ai dati non autorizzato: ${labels}. Verifica l’account utilizzato.`
+          : configuration ? `Configurazione del servizio da verificare: ${labels}.`
+          : `Aggiornamento interrotto: ${labels}. Riprova il collegamento.`);
       } else if (values.length && values.every(value => value === "server")) {
         clearTimeout(inventoryDataTimer);
         inventoryDataSlow = false;
@@ -12363,7 +12375,12 @@ if (adminEmails && adminEmails.size){
         inventoryDataState.set(key, "error");
         error?.(reason);
         updateInventorySyncStatus();
-      }, { includeMetadataChanges: true });
+      }, { includeMetadataChanges: true }, { label: ({
+        suppliers: "Fornitori", products: "Articoli", finishedProducts: "Prodotti finiti",
+        finishedProductCategories: "Categorie prodotti finiti", daneaCompleted: "DDT completati",
+        categories: "Categorie", thresholds: "Soglie scorte", movements: "Movimenti inventario",
+        finishedMovements: "Movimenti prodotti finiti"
+      })[key] || key });
     }
 
     function armInventoryDataTimeout() {
@@ -26827,11 +26844,13 @@ table.dataGrid tbody td{
   const S = {
     ready: false,
     unsub: null,
+    loaded: false,
+    loadError: "",
     items: [],
     keySet: new Set()
   };
   window.addEventListener("HubInventorySession", () => {
-    S.items = []; S.keySet.clear(); renderList();
+    S.items = []; S.keySet.clear(); S.loaded = false; S.loadError = ""; renderList();
   });
 
   const H = () => (globalThis && globalThis.__HUB) ? globalThis.__HUB : null;
@@ -27154,6 +27173,14 @@ table.dataGrid tbody td{
       });
     }
 
+    const importButton = $("btnSupplierInvoicesImport");
+    if (importButton) importButton.disabled = !S.loaded || !!S.loadError;
+    if (S.loadError || !S.loaded) {
+      const message = S.loadError || "Caricamento delle fatture fornitori…";
+      setPill("—"); setListMeta(message);
+      if (tbody) tbody.innerHTML = `<tr><td class="td-muted" colspan="6">${esc(message)}</td></tr>`;
+      return;
+    }
     setPill(arr.length);
     setListMeta(search ? (`Mostrate ${list.length}/${arr.length}`) : (`Totale ${arr.length}`));
 
@@ -27201,12 +27228,18 @@ table.dataGrid tbody td{
             arr.push(Object.assign({ _id: docu.id }, d));
           });
           S.items = arr;
+          S.loaded = true;
+          S.loadError = "";
           S.keySet = new Set(arr.map(x => String(x && (x.key || x.invoiceKey || "") || "").trim()).filter(Boolean));
           renderList();
         },
         (err) => {
           try{ console.warn("supplierInvoices snapshot error", err); }catch(_){}
-        }
+          S.loadError = String(err?.code || "").includes("permission-denied")
+            ? "Fatture fornitori: accesso ai dati non autorizzato. Le altre sezioni restano disponibili."
+            : "Fatture fornitori: caricamento non riuscito. Premi Aggiorna per riprovare.";
+          renderList();
+        }, {}, { label: "Fatture fornitori", scope: "section" }
       );
       return true;
     }catch(e){
@@ -27227,6 +27260,10 @@ table.dataGrid tbody td{
       return;
     }
 
+    if (!S.loaded || S.loadError) {
+      setImportMeta(S.loadError || "Attendi il caricamento delle fatture prima di importare.");
+      return;
+    }
     const inp = $("supplierInvoicesFiles");
     const btn = $("btnSupplierInvoicesImport");
     const resetBtn = $("btnSupplierInvoicesResetFiles");
@@ -27436,7 +27473,9 @@ table.dataGrid tbody td{
     attempt = attempt || 0;
     const h = H();
     if (h && h.FS){
-      refresh();
+      // The registry is loaded on opening its own section, independently of stock.
+      bindEvents();
+      renderList();
       return;
     }
     if (attempt > 200) return;
