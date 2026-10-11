@@ -4,9 +4,107 @@
      * - Fornitori + Prodotti + Movimenti inventario in tempo reale
      ****************************************************************/
     import { initializeApp } from "https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js";
-    import { getAuth, GoogleAuthProvider, signInWithPopup, signInWithRedirect, getRedirectResult, signOut, onAuthStateChanged, setPersistence, browserLocalPersistence } from "https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js";
+    import { initializeAuth, GoogleAuthProvider, signInWithPopup, signInWithRedirect, getRedirectResult, signOut, onAuthStateChanged, indexedDBLocalPersistence, browserLocalPersistence, browserSessionPersistence, browserPopupRedirectResolver } from "https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js";
     import {initializeFirestore, collection, doc, setDoc, addDoc, deleteDoc, onSnapshot, query, orderBy, serverTimestamp, deleteField, getDocs, runTransaction, updateDoc, getDoc} from "https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js";
     import { getStorage, ref as sRef, uploadBytes, getDownloadURL, deleteObject } from "https://www.gstatic.com/firebasejs/12.7.0/firebase-storage.js";
+
+/* START inventory startup helpers */
+function inventoryDeadline(promise, ms, message) {
+  let timer;
+  return Promise.race([
+    Promise.resolve(promise),
+    new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(message)), ms); })
+  ]).finally(() => clearTimeout(timer));
+}
+
+// Module listeners can be registered before Auth restores the session. Start
+// their network requests only after verification; discard callbacks from old sessions.
+function createInventoryStreams(listen, changed = () => {}) {
+  const records = new Set();
+  let session = "";
+  function stop(record) {
+    record.version += 1;
+    clearTimeout(record.timer);
+    record.timer = null;
+    try { record.unsubscribe?.(); } catch (_) {}
+    record.unsubscribe = null;
+  }
+  function start(record) {
+    if (!session || record.closed || record.unsubscribe) return;
+    const version = ++record.version;
+    record.failed = false;
+    const current = () => !record.closed && !!session && version === record.version;
+    const fail = error => {
+      if (!current()) return;
+      stop(record);
+      record.failed = true;
+      try { record.error?.(error); } finally {
+        changed();
+        // Firebase already retries temporary network failures. A terminal listener
+        // gets only two retries here, e.g. while a restored token propagates.
+        if (record.attempts < 2) {
+          const delay = [1500, 4000][record.attempts++];
+          record.timer = setTimeout(() => { record.timer = null; start(record); }, delay);
+        }
+      }
+    };
+    try {
+      const unsubscribe = listen(record.ref, record.options, snapshot => {
+        if (!current()) return;
+        record.failed = false;
+        record.next(snapshot);
+        changed();
+      }, fail);
+      if (current()) record.unsubscribe = unsubscribe;
+      else unsubscribe?.();
+    } catch (error) { fail(error); }
+  }
+  return {
+    subscribe(ref, next, error, options = {}) {
+      const record = { ref, next, error, options, version: 0, attempts: 0, closed: false, failed: false };
+      records.add(record);
+      start(record);
+      return () => { record.closed = true; stop(record); records.delete(record); };
+    },
+    setSession(uid) {
+      const next = String(uid || "");
+      if (next === session) return;
+      session = next;
+      records.forEach(record => { stop(record); record.attempts = 0; record.failed = false; });
+      window.dispatchEvent(new CustomEvent("HubInventorySession", { detail: { uid: session } }));
+      records.forEach(start);
+    },
+    retry(restart = false) {
+      records.forEach(record => {
+        if (!restart && !record.failed) return;
+        stop(record);
+        record.attempts = 0;
+        start(record);
+      });
+    },
+    hasErrors: () => [...records].some(record => record.failed)
+  };
+}
+
+function createInventoryRenderQueue(render, renderAnag) {
+  let timer = null, all = false, anag = false;
+  return (options = {}) => {
+    all = all || !!options.all;
+    anag = anag || !!options.anag;
+    if (timer !== null) return;
+    timer = setTimeout(() => {
+      const drawAll = all, drawAnag = anag;
+      timer = null; all = false; anag = false;
+      if (drawAll) render();
+      if (drawAnag) renderAnag();
+    }, 40);
+  };
+}
+/* END inventory startup helpers */
+
+const inventoryStreams = createInventoryStreams(onSnapshot, () => {
+  window.dispatchEvent(new Event("HubInventorySync"));
+});
 
 /* ============================================================
    MERGED FILE: mainModule.js + hub_bundle.js
@@ -5623,17 +5721,30 @@ function bindEvents(){
     try{ __autoModeKick("xml"); }catch(_){ }
   }
 
+  let xmlRequest = null;
+  let xmlController = null;
+  let xmlGeneration = 0;
   async function fetchNow(force){
+    const H = getHub();
+    if (H?.fb?.sessionPhase !== "signed_in") return;
+    if (xmlRequest) return xmlRequest;
+    const generation = xmlGeneration;
     const url = String(S.xmlUrl || "").trim();
     if (!url) { render(); return; }
 
+    const controller = new AbortController();
+    xmlController = controller;
+    const timer = setTimeout(() => controller.abort(), 12000);
+    const request = (async () => {
     try{
       // NOTE: CORS is handled by the proxy. We never send cookies.
-      const r = await fetch(url, { cache: "no-store", mode: "cors", credentials: "omit" });
+      const r = await fetch(url, { cache: "no-store", mode: "cors", credentials: "omit", signal: controller.signal });
       if (!r.ok) throw new Error("HTTP " + r.status);
       const body = await r.text();
+      if (generation !== xmlGeneration || H.fb.sessionPhase !== "signed_in") return;
       ingestXml(body, !!force);
     }catch(err){
+      if (generation !== xmlGeneration) return;
       console.warn("fetch XML failed", err);
       const msg = String(err && (err.message || err) || "");
       if (/Failed to fetch/i.test(msg) || /CORS/i.test(msg)){
@@ -5646,9 +5757,25 @@ function bindEvents(){
           console.warn("[DANEA] Tipico errore CORS: il proxy deve rispondere con Access-Control-Allow-Origin per " + (location && location.origin ? location.origin : "questa origin") + ".");
         }
       }catch(_){}
-    }
+    }finally{ clearTimeout(timer); }
+    })();
+    xmlRequest = request;
+    try { await request; }
+    finally { if (xmlRequest === request) { xmlRequest = null; xmlController = null; } }
   }
 
+
+  window.addEventListener("HubInventorySession", event => {
+    xmlGeneration += 1;
+    xmlController?.abort(); xmlController = null; xmlRequest = null;
+    S.ddts = []; S.pendingParsed = null; S.lastXmlHash = "";
+    S.completed = []; S.completedMap.clear(); S.cache = []; S.cacheMap.clear(); S.cacheReady = false;
+    S.finished = []; S.fpByCode.clear(); S.fpCats = []; S.fpCatByKey.clear();
+    S.selectedKey = ""; S.selected = null;
+    S.resyncQueue.clear(); clearTimeout(S.resyncTimer); S.resyncTimer = null;
+    render();
+    if (event.detail.uid) fetchNow(false);
+  });
 
   function startPolling(){
     if (S.timer) return;
@@ -5941,7 +6068,7 @@ function waitForHub(attempt){
     bindEvents();
     render();
 
-    // start polling even if not logged
+    // Polling fetches only after the authenticated session is ready
     startPolling();
     fetchNow(false);
 
@@ -6567,8 +6694,6 @@ function renderList(){
   function subscribe(){
     const h = H();
     if (!h || !h.fb || !h.fb.db || !h.FS) return false;
-    // Evita listener Firestore quando non siamo autenticati (altrimenti PERMISSION_DENIED e listener "morto")
-    if (!h.fb.user) return false;
     if (S.unsub.done && S.unsub.cache) return true;
 
     try{
@@ -6646,8 +6771,8 @@ function renderList(){
   function waitForHub(attempt){
     attempt = attempt || 0;
     const h = H();
-    // Aspetta anche l'utente autenticato: altrimenti i listener vanno in PERMISSION_DENIED
-    if (h && h.fb && h.fb.db && h.FS && h.fb.user){
+    // Network subscription is deferred by the shared authenticated stream manager.
+    if (h && h.fb && h.fb.db && h.FS){
       refresh();
       return;
     }
@@ -6685,6 +6810,10 @@ function renderList(){
     ui: {},
     lastFilter: { q:"", kind:"", sort:"deletedDesc" }
   };
+
+  window.addEventListener("HubInventorySession", () => {
+    S.items = []; S.selected.clear(); render();
+  });
 
   function hub(){ return globalThis.__HUB || null; }
 
@@ -7449,6 +7578,11 @@ function renderList(){
 
     unsub:{ cats:null, products:null, finished:null }
   };
+  window.addEventListener("HubInventorySession", () => {
+    S.cats = []; S.products = []; S.finished = [];
+    S.selectedKey = ""; S.selectedFpId = ""; S.draft = null;
+    rebuildMaps(); renderDatalists(); if (isActive()) renderList();
+  });
 
   function H(){ try{ return globalThis.__HUB || null; }catch(_){ return null; } }
   function $(id){ return document.getElementById(id); }
@@ -11217,7 +11351,7 @@ btnBackAnag?.addEventListener("click", (e) => { try{ e.preventDefault(); e.stopP
         globalThis.__HUB.FS = (()=>{
           const FS = {
             collection, doc, setDoc, addDoc, deleteDoc, getDocs,
-            onSnapshot, query, orderBy, serverTimestamp, deleteField, runTransaction
+            onSnapshot: inventoryStreams.subscribe, query, orderBy, serverTimestamp, deleteField, runTransaction
           };
           // opzionali (non far fallire il bridge se non importati)
           try { FS.updateDoc = updateDoc; } catch(_){}
@@ -12179,169 +12313,234 @@ if (adminEmails && adminEmails.size){
 }
 
 
+    // Startup and synchronization are separate: a restored session does not yet
+    // mean that inventory snapshots have arrived from the server.
+    let inventoryAuthVersion = 0;
+    let inventoryAuthTimer = null;
+    let inventoryDataTimer = null;
+    let inventoryDataSlow = false;
+    let inventoryDataStarted = false;
+    let inventoryDataState = new Map();
+    const scheduleInventoryRender = createInventoryRenderQueue(renderAll, renderAnag);
+
+    function inventoryStatus(phase, message) {
+      window.HubInventoryStartup?.set(phase, message);
+    }
+
+    function updateInventorySyncStatus() {
+      if (fb.sessionPhase !== "signed_in" || !inventoryDataStarted) return;
+      if (navigator.onLine === false) {
+        setSyncPill("warn", "Sync: offline");
+        inventoryStatus("offline", "Connessione assente. I dati visualizzati potrebbero non essere aggiornati.");
+        return;
+      }
+      const values = [...inventoryDataState.values()];
+      if (inventoryStreams.hasErrors() || values.includes("error")) {
+        setSyncPill("bad", "Sync: da ripristinare");
+        inventoryStatus("error", "Alcuni dati non si aggiornano. Riprova il collegamento.");
+      } else if (values.length && values.every(value => value === "server")) {
+        clearTimeout(inventoryDataTimer);
+        inventoryDataSlow = false;
+        setSyncPill("ok", "Sync: connesso");
+        inventoryStatus("ready", "Inventario aggiornato");
+      } else {
+        setSyncPill("warn", "Sync: caricamento…");
+        inventoryStatus(inventoryDataSlow ? "error" : "loading",
+          inventoryDataSlow ? "Il caricamento dei dati sta impiegando troppo tempo. Puoi riprovare." : "Caricamento dell’inventario…");
+      }
+    }
+
+    function watchInventoryCollection(key, reference, next, error) {
+      inventoryDataState.set(key, "pending");
+      let received = false;
+      return inventoryStreams.subscribe(reference, snapshot => {
+        inventoryDataState.set(key, snapshot.metadata?.fromCache ? "cache" : "server");
+        // Metadata-only acknowledgements update connectivity without redrawing
+        // all tables and recalculating stock a second time.
+        const metadataOnly = received && typeof snapshot.docChanges === "function" && !snapshot.docChanges().length;
+        received = true;
+        if (!metadataOnly) next(snapshot);
+        updateInventorySyncStatus();
+      }, reason => {
+        inventoryDataState.set(key, "error");
+        error?.(reason);
+        updateInventorySyncStatus();
+      }, { includeMetadataChanges: true });
+    }
+
+    function armInventoryDataTimeout() {
+      clearTimeout(inventoryDataTimer);
+      inventoryDataSlow = false;
+      inventoryDataTimer = setTimeout(() => {
+        inventoryDataSlow = true;
+        updateInventorySyncStatus();
+      }, 12000);
+    }
+
     async function initFirebase() {
       const btnLogin = document.getElementById("btnLoginGoogle");
       const btnLogout = document.getElementById("btnLogout");
       const pillUser = document.getElementById("pillUser");
       const pillUserText = document.getElementById("pillUserText");
+      let loginBusy = false;
+      const storageAvailable = name => {
+        try { window[name].getItem("__hub_inventory_probe__"); return true; } catch (_) { return false; }
+      };
+      const localAvailable = storageAvailable("localStorage");
+      const sessionAvailable = storageAvailable("sessionStorage");
+
+      function authFailed(error) {
+        console.warn("Inventory session unavailable", error);
+        clearTimeout(inventoryAuthTimer);
+        inventoryAuthVersion += 1;
+        fb.sessionPhase = "error";
+        inventoryStreams.setSession("");
+        __hubinvHideGate();
+        setSyncPill("bad", "Sync: accesso da ripristinare");
+        inventoryStatus("error", "Non riesco a ripristinare l’accesso. Controlla la connessione e premi Riprova.");
+      }
+
+      async function handleAuthState(user) {
+        if (user?.uid === fb.user?.uid && fb.sessionPhase === "signed_in") return;
+        const version = ++inventoryAuthVersion;
+        clearTimeout(inventoryAuthTimer);
+        inventoryStreams.setSession("");
+        stopRealtime();
+        window.HubRevenue?.stop?.();
+        fb.user = user || null;
+        fb.isAdmin = false;
+        fb.sessionPhase = user ? "checking" : "signed_out";
+        syncHubBridge();
+        pillUser.style.display = user ? "inline-flex" : "none";
+        pillUserText.textContent = user?.displayName || user?.email || "Utente";
+        btnLogout.style.display = user ? "inline-flex" : "none";
+        __hubinvHideGate();
+
+        if (!user) {
+          setSyncPill("warn", "Sync: accesso richiesto");
+          inventoryStatus("signed_out", "Accedi con Google per caricare e aggiornare l’inventario condiviso.");
+          if (!__hubinvIsAdminRequired()) loadLocalData();
+          scheduleInventoryRender({ all: true, anag: true });
+          return;
+        }
+
+        inventoryStatus("loading", "Ripristino dell’accesso…");
+        try {
+          if (__hubinvIsAdminRequired()) {
+            const allowed = await inventoryDeadline(__hubinvResolveIsAdmin(user), 7000, "Verifica permessi scaduta");
+            if (version !== inventoryAuthVersion || fb.auth.currentUser?.uid !== user.uid) return;
+            if (!allowed) {
+              fb.sessionPhase = "denied";
+              setSyncPill("bad", "Accesso negato");
+              inventoryStatus("denied", "Questo account non ha i permessi per accedere all’inventario.");
+              __hubinvShowGate({ mode: "denied", user });
+              return;
+            }
+            fb.isAdmin = true;
+          }
+          if (version !== inventoryAuthVersion || fb.auth.currentUser?.uid !== user.uid) return;
+          fb.sessionPhase = "signed_in";
+          startRealtime();
+          inventoryStreams.setSession(user.uid);
+          window.HubRevenue?.refresh?.();
+          updateInventorySyncStatus();
+        } catch (error) {
+          if (version === inventoryAuthVersion) authFailed(error);
+        }
+      }
+
+      function retryInventory() {
+        if (!fb.auth || !fb.ready) { location.reload(); return; }
+        if (fb.sessionPhase === "signed_in") {
+          armInventoryDataTimeout();
+          inventoryDataState.forEach((_, key) => inventoryDataState.set(key, "pending"));
+          inventoryStreams.retry(true);
+          updateInventorySyncStatus();
+        } else if (fb.auth.currentUser) {
+          handleAuthState(fb.auth.currentUser);
+        } else if (fb.sessionPhase === "error" || fb.sessionPhase === "restoring") {
+          location.reload();
+        } else {
+          handleAuthState(null);
+        }
+      }
+      window.HubInventoryStartup?.onRetry(retryInventory);
+      window.addEventListener("HubInventorySync", updateInventorySyncStatus);
+      window.addEventListener("offline", updateInventorySyncStatus);
+      window.addEventListener("online", () => {
+        if (fb.sessionPhase === "error" && fb.auth?.currentUser) handleAuthState(fb.auth.currentUser);
+        else { inventoryStreams.retry(); updateInventorySyncStatus(); }
+      });
+      window.addEventListener("pageshow", event => {
+        if (event.persisted) {
+          if (fb.sessionPhase === "error" && fb.auth?.currentUser) handleAuthState(fb.auth.currentUser);
+          else { inventoryStreams.retry(); updateInventorySyncStatus(); }
+        }
+      });
 
       if (!isFirebaseConfigured()) {
-        setSyncPill("warn", "Sync: configura Firebase");
-        // keep login visible as hint (if present), but it won't work
-        btnLogin?.addEventListener("click", () => {
-          openModal("Config mancante", "Manca la FIREBASE_CONFIG nel file. Incolla apiKey, authDomain, projectId, storageBucket, senderId e appId.");
-        });
+        inventoryStatus("error", "Il collegamento all’inventario non è configurato.");
         return;
       }
 
       try {
+        inventoryStatus("loading", "Ripristino dell’accesso…");
+        fb.sessionPhase = "restoring";
+        inventoryAuthTimer = setTimeout(() => authFailed(new Error("Session timeout")), 12000);
         fb.app = initializeApp(FIREBASE_CONFIG);
-        fb.auth = getAuth(fb.app);
-
-        // IMPORTANT: override any pre-existing window.__HUB (legacy scripts) BEFORE the first await,
-        // so other modules won't read a stale/incompatible Firestore reference.
-        try{ syncHubBridge(); }catch(e){ console.warn("syncHubBridge pre-await failed", e); }
-
-        await setPersistence(fb.auth, browserLocalPersistence);
+        fb.auth = initializeAuth(fb.app, {
+          persistence: [indexedDBLocalPersistence, localAvailable && browserLocalPersistence,
+            sessionAvailable && browserSessionPersistence].filter(Boolean),
+          ...(sessionAvailable ? { popupRedirectResolver: browserPopupRedirectResolver } : {})
+        });
         fb.db = initializeFirestore(fb.app, { experimentalAutoDetectLongPolling: true, useFetchStreams: false });
         fb.storage = getStorage(fb.app);
-
-        try{ syncHubBridge(); }catch(e){ console.warn("syncHubBridge call failed", e); }
+        syncHubBridge();
 
         const provider = new GoogleAuthProvider();
         provider.setCustomParameters({ prompt: "select_account" });
-
-        const humanAuthErr = (err) => {
-          const code = String(err?.code || err?.message || "").toLowerCase();
-          const map = {
-            "auth/unauthorized-domain": "Dominio non autorizzato (Firebase Auth → Settings → Authorized domains).",
-            "auth/operation-not-allowed": "Provider Google non abilitato (Firebase Auth → Sign-in method).",
-            "auth/popup-blocked": "Popup bloccato dal browser. Passo al reindirizzamento…",
-            "auth/popup-closed-by-user": "Popup chiuso. Riprova.",
-            "auth/cancelled-popup-request": "Richiesta annullata. Riprova.",
-            "auth/network-request-failed": "Connessione instabile. Riprova tra qualche secondo.",
-            "auth/invalid-api-key": "Config Firebase non valida (apiKey).",
-            "auth/invalid-oauth-client-id": "Client OAuth non valido. Controlla la configurazione Web SDK.",
-            "auth/redirect-cancelled-by-user": "Accesso annullato. Riprova."
-          };
-          for (const k in map) { if (code.includes(k)) return map[k]; }
-          return "Errore accesso. Controlla rete e riprova.";
-        };
-
-        // Completa eventuale login via redirect (iOS / popup bloccati)
-        try { await getRedirectResult(fb.auth); } catch (e) {
-          console.warn("getRedirectResult error", e);
-          // Non blocco l'app, ma mostro un hint.
-          openModal("Accesso", humanAuthErr(e));
-        }
-
-
         btnLogin?.addEventListener("click", async () => {
+          if (loginBusy) return;
+          loginBusy = true;
+          btnLogin.disabled = true;
           try {
-            setSyncPill("warn", "Sync: accesso…");
-            await signInWithPopup(fb.auth, provider);
-          } catch (e) {
-            console.warn("Google popup error", e);
-            const msg = humanAuthErr(e);
-            // Fallback: su iOS / popup bloccati
-            if (String(e?.code || "").includes("popup-blocked") || String(e?.code || "").includes("operation-not-supported-in-this-environment")) {
-              try {
-                await signInWithRedirect(fb.auth, provider);
-                return;
-              } catch (e2) {
-                console.warn("Google redirect error", e2);
-                openModal("Accesso non riuscito", humanAuthErr(e2));
-                setSyncPill("bad", "Sync: errore login");
-                return;
-              }
+            await signInWithPopup(fb.auth, provider, browserPopupRedirectResolver);
+          } catch (error) {
+            const code = String(error?.code || "");
+            if (code === "auth/popup-closed-by-user" || code === "auth/cancelled-popup-request") {
+              inventoryStatus("signed_out", "Accesso annullato. Puoi riprovare con Google.");
+              return;
             }
-            openModal("Accesso non riuscito", msg);
-            setSyncPill("bad", "Sync: errore login");
-          }
+            if (sessionAvailable && (code === "auth/popup-blocked" || code === "auth/operation-not-supported-in-this-environment")) {
+              try { await signInWithRedirect(fb.auth, provider, browserPopupRedirectResolver); return; }
+              catch (redirectError) { console.warn("Google redirect failed", redirectError); }
+            }
+            inventoryStatus("signed_out", "Accesso non riuscito. Controlla la connessione e consenti il popup Google, poi riprova.");
+          } finally { loginBusy = false; btnLogin.disabled = false; }
         });
-btnLogout.addEventListener("click", async () => {
-          try {
-            await signOut(fb.auth);
-          } catch (e) {
-            console.error(e);
-            openModal("Errore", "Non sono riuscito a fare logout.");
-          }
+        btnLogout?.addEventListener("click", async () => {
+          try { await signOut(fb.auth); }
+          catch (error) { openModal("Accesso", "Non riesco a uscire dall’account. Controlla la connessione e riprova."); }
         });
-
-            onAuthStateChanged(fb.auth, async (user) => {
-      fb.user = user || null;
-      try{ fb.isAdmin = false; }catch(_){}
-      try{ syncHubBridge(); }catch(e){ console.warn("syncHubBridge auth refresh failed", e); }
-
-      const requireAdmin = __hubinvIsAdminRequired();
-      if (!requireAdmin) {
-        try{ __hubinvHideGate(); }catch(_){}
-      }
-
-      if (user) {
-        // UI
-        pillUser.style.display = "inline-flex";
-        const label = user.displayName || user.email || "Utente";
-        pillUserText.textContent = label;
-        btnLogin?.style && (btnLogin.style.display = "none");
-        btnLogout.style.display = "none";
-
-        if (requireAdmin) {
-          setSyncPill("warn", "Verifica permessi…");
-          __hubinvShowGate({ mode: "checking", user });
-          const okAdmin = await __hubinvResolveIsAdmin(user);
-          try{ fb.isAdmin = !!okAdmin; }catch(_){}
-          try{ syncHubBridge(); }catch(_){}
-          if (!okAdmin) {
-            setSyncPill("bad", "Accesso negato");
-            stopRealtime();
-            __hubinvShowGate({ mode: "denied", user });
-            return;
-          }
-          __hubinvHideGate();
-        }
-
-        setSyncPill("ok", "Sync: connesso");
-
-        startRealtime();
-
-        // KPI dashboard (Fatturato / Imballaggio più scaricato): aggiorna subito dopo login
-        try{ window.HubRevenue && window.HubRevenue.refresh && window.HubRevenue.refresh(); }catch(_){ }
-        try{ window.HubRevenue && window.HubRevenue.renderHomeCockpit && window.HubRevenue.renderHomeCockpit(); }catch(_){ }
-      } else {
-        pillUser.style.display = "none";
-        btnLogin?.style && (btnLogin.style.display = "inline-flex");
-        btnLogout.style.display = "none";
-
-        // Se questa pagina richiede admin, non attivo il fallback "local-only"
-        if (requireAdmin) {
-          setSyncPill("bad", "Accesso riservato");
-          stopRealtime();
-          __hubinvShowGate({ mode: "login" });
-          return;
-        }
-
-        setSyncPill("warn", "Sync: non connesso");
-
-        stopRealtime();
-        try{ window.HubRevenue && window.HubRevenue.stop && window.HubRevenue.stop(); }catch(_){ }
-        // fallback: local-only
-        loadLocalData();
-        renderAll();
-renderAnag();
-        renderAnag();
-      }
-    });
-
+        // Neither persistence migration nor redirect completion gates the observer.
+        onAuthStateChanged(fb.auth, handleAuthState, authFailed);
         fb.ready = true;
-      } catch (e) {
-        console.error("Firebase init failed", e);
-        setSyncPill("bad", "Sync: init error");
-        openModal("Firebase non configurato", "Ho trovato un problema nel collegamento a Firebase. Controlla la config e i domini autorizzati.");
-      }
+        if (sessionAvailable) getRedirectResult(fb.auth, browserPopupRedirectResolver).catch(error => {
+          console.warn("Redirect result unavailable", error);
+          if (fb.sessionPhase === "signed_out") inventoryStatus("signed_out", "Accesso non completato. Riprova con Google.");
+        });
+      } catch (error) { authFailed(error); }
     }
 
     function stopRealtime() {
+      clearTimeout(inventoryDataTimer);
+      inventoryDataStarted = false;
+      inventoryDataState.clear();
+      state.movements = [];
+      state.thresholds = {};
+      state.productCategories = {};
+      state.productUoms = {};
+      state.productWarehouses = {};
       for (const k of Object.keys(fb.unsub)) {
         try { fb.unsub[k] && fb.unsub[k](); } catch(_){}
         fb.unsub[k] = null;
@@ -12370,13 +12569,14 @@ renderAnag();
 
     function startRealtime() {
       stopRealtime();
+      armInventoryDataTimeout();
 
       // Suppliers
-      fb.unsub.suppliers = onSnapshot(
+      fb.unsub.suppliers = watchInventoryCollection("suppliers",
         query(orgCol("suppliers"), orderBy("nameLower")),
         (snap) => {
           suppliers = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-          renderAnag();
+          scheduleInventoryRender({ anag: true });
         },
         (err) => {
           console.error("suppliers watch error", err);
@@ -12385,12 +12585,12 @@ renderAnag();
       );
 
       // Products
-      fb.unsub.products = onSnapshot(
+      fb.unsub.products = watchInventoryCollection("products",
         query(orgCol("products"), orderBy("nameLower")),
         (snap) => {
           products = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-          renderAll();
-          renderAnag();
+          scheduleInventoryRender({ all: true });
+          scheduleInventoryRender({ anag: true });
 },
         (err) => {
           console.error("products watch error", err);
@@ -12398,12 +12598,12 @@ renderAnag();
         }
       );
       // Finished Products (Anagrafica prodotti finiti)
-      fb.unsub.finishedProducts = onSnapshot(
+      fb.unsub.finishedProducts = watchInventoryCollection("finishedProducts",
         query(orgCol("finishedProducts"), orderBy("nameLower")),
         (snap) => {
           finishedProducts = snap.docs.map(d => ({ id: d.id, ...d.data() }));
           try{ __fpDedupFinishedProducts("realtime"); }catch(_){ }
-          renderAnag();
+          scheduleInventoryRender({ anag: true });
         },
         (err) => {
           console.error("finishedProducts watch error", err);
@@ -12411,7 +12611,7 @@ renderAnag();
       );
 
       // Finished Product Categories (per assegnazione in tab "Prodotti finiti")
-      fb.unsub.finishedProductCategories = onSnapshot(
+      fb.unsub.finishedProductCategories = watchInventoryCollection("finishedProductCategories",
         query(orgCol("finishedProductCategories"), orderBy("nameLower")),
         (snap) => {
           finishedProductCategories = snap.docs.map(d => {
@@ -12425,7 +12625,7 @@ renderAnag();
             return { key, name, ...data };
           }).filter(x => x && x.key);
           finishedProductCategoriesMap = new Map(finishedProductCategories.map(c => [String(c && c.key || "").trim().toLowerCase(), c]));
-          renderAnag();
+          scheduleInventoryRender({ anag: true });
         },
         (err) => {
           console.error("finishedProductCategories watch error", err);
@@ -12433,7 +12633,7 @@ renderAnag();
       );
 
       // DaneaXML: DDT completati (serve per dashboard ticker)
-      fb.unsub.daneaCompleted = onSnapshot(
+      fb.unsub.daneaCompleted = watchInventoryCollection("daneaCompleted",
         query(orgCol("daneaDdtCompleted"), orderBy("date", "desc")),
         (snap) => {
           try{
@@ -12460,7 +12660,7 @@ renderAnag();
             __daneaCompleted = arr;
             __rebuildDaneaCompletedMap();
           }catch(_){ __daneaCompleted = []; __daneaCompletedMap = new Map(); }
-          try{ renderAll(); }catch(_){ }
+          try{ scheduleInventoryRender({ all: true }); }catch(_){ }
         },
         (err) => {
           console.error("daneaDdtCompleted watch error", err);
@@ -12469,7 +12669,7 @@ renderAnag();
 
 
       // Categories
-      fb.unsub.categories = onSnapshot(
+      fb.unsub.categories = watchInventoryCollection("categories",
         query(orgCol("categories"), orderBy("nameLower")),
         (snap) => {
           const list = snap.docs.map(d => {
@@ -12486,14 +12686,14 @@ renderAnag();
             // UI continua a funzionare con i default, ma proviamo anche a seedare sul cloud
             __applyRuntimeCategories(DEFAULT_CATEGORIES.slice());
             try { renderCategoryOptions(); } catch(_){}
-            try { __seedDefaultCategoriesIfEmpty(); } catch(_){}
+            if (!snap.metadata?.fromCache) { try { __seedDefaultCategoriesIfEmpty(); } catch(_){} }
           } else {
             __applyRuntimeCategories(list);
             try { renderCategoryOptions(); } catch(_){}
           }
 
-          renderAll();
-          renderAnag();
+          scheduleInventoryRender({ all: true });
+          scheduleInventoryRender({ anag: true });
         },
         (err) => {
           console.error("categories watch error", err);
@@ -12502,7 +12702,7 @@ renderAnag();
       );
 
       // Thresholds
-      fb.unsub.thresholds = onSnapshot(
+      fb.unsub.thresholds = watchInventoryCollection("thresholds",
         orgCol("thresholds"),
         (snap) => {
           thresholds = {};
@@ -12511,13 +12711,13 @@ renderAnag();
             const n = Number(data.value);
             if (Number.isFinite(n)) thresholds[decodeURIComponent(d.id)] = Math.floor(n);
           });
-          renderAll();
+          scheduleInventoryRender({ all: true });
         },
         (err) => console.warn("thresholds watch error", err)
       );
 
       // Movements (all, ordered by createdAt)
-      fb.unsub.movements = onSnapshot(
+      fb.unsub.movements = watchInventoryCollection("movements",
         query(orgCol("inventoryMovements"), orderBy("createdAt")),
         (snap) => {
           state.movements = snap.docs.map(d => {
@@ -12547,7 +12747,7 @@ renderAnag();
               createdAt: tsToIso(data.createdAt) || data.createdAtIso || ""
             };
           });
-          renderAll();
+          scheduleInventoryRender({ all: true });
         },
         (err) => {
           console.error("movements watch error", err);
@@ -12556,7 +12756,7 @@ renderAnag();
       );
 
       // Finished inventory movements (Prodotti finiti)
-      fb.unsub.finishedMovements = onSnapshot(
+      fb.unsub.finishedMovements = watchInventoryCollection("finishedMovements",
         query(orgCol("finishedInventoryMovements"), orderBy("createdAt")),
         (snap) => {
           state.finishedMovements = snap.docs.map(d => {
@@ -12580,12 +12780,13 @@ renderAnag();
               createdAt: tsToIso(data.createdAt) || data.createdAtIso || ""
             };
           });
-          renderAll();
+          scheduleInventoryRender({ all: true });
         },
         (err) => {
           console.error("finishedMovements watch error", err);
         }
       );
+      inventoryDataStarted = true;
     }
 
     function watchSupplierDocs(supplierId) {
@@ -25761,7 +25962,8 @@ try {
 
     document.getElementById("btnHeaderRefresh").addEventListener("click", () => {
       showToast("Aggiornamento…");
-      renderAll();
+      window.HubInventoryStartup?.retry();
+      scheduleInventoryRender({ all: true, anag: true });
     });
 
     // Quick modal controls
@@ -26630,6 +26832,9 @@ table.dataGrid tbody td{
     items: [],
     keySet: new Set()
   };
+  window.addEventListener("HubInventorySession", () => {
+    S.items = []; S.keySet.clear(); renderList();
+  });
 
   const H = () => (globalThis && globalThis.__HUB) ? globalThis.__HUB : null;
   const $ = (id) => document.getElementById(id);
