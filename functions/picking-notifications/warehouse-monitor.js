@@ -87,7 +87,7 @@ function alertSection(documents, now) {
     sourcePath: 'amzInventory/cerea/kioskAlerts/skuReady' });
   const manual = documents.manual || {};
   if (manual.active === true && c.clean(manual.text)) add({ id: 'manual', title: 'Avviso al personale',
-    detail: c.clean(manual.text, 1200), action: '', level: 'warn', expiresAt: null,
+    detail: c.clean(manual.text, 1200), action: '', level: 'info', expiresAt: null,
     sourcePath: 'amzInventory/concamarise/kioskAlerts/manualAnnouncement' });
   const tomorrow = dateKey(Date.parse(dateKey(now) + 'T12:00:00Z') + 86400000), waste = documents.waste || {};
   if (waste.active !== false && waste.enabled !== false && (waste.dateKey || waste.date) === tomorrow && Array.isArray(waste.types) && waste.types.length) {
