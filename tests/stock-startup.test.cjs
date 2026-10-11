@@ -63,9 +63,9 @@ test('terminal listeners get bounded retries and explicit retry can recover with
   const e = environment(), calls = []; let stopped = 0;
   const streams = e.context.createInventoryStreams((ref, opts, next, error) => { calls.push({ next, error }); return () => stopped++; });
   streams.subscribe('stock', () => {}); streams.setSession('a');
-  calls[0].error({ code: 'permission-denied' }); await e.time.advance(1500);
-  calls[1].error({ code: 'permission-denied' }); await e.time.advance(4000);
-  calls[2].error({ code: 'permission-denied' }); await e.time.advance(60000);
+  calls[0].error({ code: 'unavailable' }); await e.time.advance(1500);
+  calls[1].error({ code: 'unavailable' }); await e.time.advance(4000);
+  calls[2].error({ code: 'unavailable' }); await e.time.advance(60000);
   assert.equal(calls.length, 3); assert.equal(streams.hasErrors(), true);
   streams.retry(); assert.equal(calls.length, 4); calls[3].next({});
   streams.retry(); assert.equal(calls.length, 4); assert.equal(streams.hasErrors(), false);
@@ -169,7 +169,8 @@ test('server data, cached data and failed streams produce distinct visible sync 
   await h.time.advance(50); assert.equal(h.calls.drawn, prior);
   h.context.navigator.onLine = false; h.window.dispatchEvent({ type: 'offline' }); assert.equal(h.status.phase, 'offline');
   h.context.navigator.onLine = true; h.window.dispatchEvent({ type: 'online' }); assert.equal(h.status.phase, 'ready');
-  h.calls.native[0].error({ code: 'permission-denied' }); assert.equal(h.status.phase, 'error');
+  h.calls.native[0].error({ code: 'permission-denied' }); assert.equal(h.status.phase, 'denied');
+  assert.match(h.status.message, /Articoli/);
 });
 
 test('explicit refresh reconnects streams without duplicating active listeners or losing auth', async () => {
@@ -215,4 +216,26 @@ test('Danea retains its default endpoint when browser preferences are unavailabl
     localStorage: { getItem() { throw new Error('Blocked'); }, setItem() { throw new Error('Blocked'); } } });
   vm.runInContext(code, context);
   assert.equal(S.xmlUrl, 'https://example.test/default');
+});
+
+test('permission errors name the affected section and do not retry unchanged authorization', async () => {
+  const h = authHarness({ user }); await flush();
+  h.calls.native.forEach(r => r.next(snapshot()));
+  const count = h.calls.native.length;
+  h.calls.native[1].error({ code: 'permission-denied' });
+  assert.equal(h.status.phase, 'denied');
+  assert.match(h.status.message, /Movimenti inventario/);
+  await h.time.advance(20000); assert.equal(h.calls.native.length, count);
+});
+
+test('an unavailable optional invoice registry does not turn a healthy inventory into a sync error', async () => {
+  const h = authHarness({ user }); await flush();
+  h.calls.native.forEach(r => r.next(snapshot()));
+  assert.equal(h.status.phase, 'ready');
+  vm.runInContext(`inventoryStreams.subscribe('invoices',()=>{},()=>{},{},{label:'Fatture fornitori',scope:'section'});`, h.context);
+  h.calls.native.at(-1).error({ code: 'permission-denied' });
+  assert.equal(h.status.phase, 'ready');
+  const errors = vm.runInContext('inventoryStreams.errors()', h.context);
+  assert.equal(errors[0].label, 'Fatture fornitori');
+  assert.equal(errors[0].code, 'permission-denied');
 });
