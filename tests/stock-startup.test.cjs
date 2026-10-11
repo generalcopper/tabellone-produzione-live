@@ -205,3 +205,14 @@ test('Danea fetches are single-flight, bounded and discarded after a session cha
   resolve({ ok: true, text: async () => 'stale XML' }); await third;
   assert.deepEqual(ingested, []); await e.context.fetchNow(false); assert.equal(calls.length, 2);
 });
+
+test('Danea retains its default endpoint when browser preferences are unavailable', () => {
+  const start = source.indexOf('    // Storage may be denied while the session survives in IndexedDB.');
+  const code = source.slice(start, source.indexOf('    // restore toggle', start));
+  const S = {};
+  const context = vm.createContext({ S, LS_URL: 'test.preference', DEFAULT_XML_URL_BASE: 'https://example.test/default',
+    normalizeDaneaXmlUrl: value => value,
+    localStorage: { getItem() { throw new Error('Blocked'); }, setItem() { throw new Error('Blocked'); } } });
+  vm.runInContext(code, context);
+  assert.equal(S.xmlUrl, 'https://example.test/default');
+});
