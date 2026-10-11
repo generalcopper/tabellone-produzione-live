@@ -37,8 +37,8 @@
   })();
   </script>
 
-  <!-- PDF.js (solo per leggere il blocco "flusso di lavoro" direttamente dal PDF) -->
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.9.155/pdf.min.js"></script>
+  <!-- PDF.js viene caricato solo quando si apre un PDF, senza bloccare l'avvio. -->
+  <meta name="hub-release" content="inventory-startup-2026-10-11" />
 
   <style>:root{--bg:#f6f7f9;--surface:#ffffff;--surfaceAlt:#fafbfc;--card:#ffffff;--ink:#0f172a;--ink2:#1e293b;--muted:#64748b;--muted2:#94a3b8;--line:#e6e8ec;--line2:#eef0f3;--shadow:0 1px 2px rgba(15,23,42,.04), 0 1px 1px rgba(15,23,42,.03);--shadowMd:0 1px 3px rgba(15,23,42,.06), 0 4px 12px rgba(15,23,42,.05);--shadowLg:0 4px 8px rgba(15,23,42,.06), 0 16px 32px rgba(15,23,42,.10);--accent:#f97316;--accentHover:#ea580c;--accentDark:#c2410c;--accentSoft:#fff7ed;--accentSoft2:#ffedd5;--amazon:#f97316;--amazonHover:#ea580c;--amazonDark:#1e293b;--amazonBlue:#0369a1;--amazonBlueDark:#075985;--amazonYellow:#f59e0b;--amazonYellowDark:#d97706;--ok:#15803d;--okBg:#f0fdf4;--okLine:#bbf7d0;--warn:#b45309;--warnBg:#fffbeb;--warnLine:#fde68a;--bad:#b91c1c;--badBg:#fef2f2;--badLine:#fecaca;--info:#0369a1;--infoBg:#f0f9ff;--infoLine:#bae6fd;--safe-top:env(safe-area-inset-top, 0px);--safe-right:env(safe-area-inset-right, 0px);--safe-bot:env(safe-area-inset-bottom, 0px);--safe-left:env(safe-area-inset-left, 0px);--app-height:100vh;}*{box-sizing:border-box;}html, body{height:100%;}html{scroll-behavior:smooth;-webkit-text-size-adjust:100%;}body{margin:0;background:var(--bg);color:var(--ink);font-family:"Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Helvetica, Arial, sans-serif;-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;text-rendering:optimizeLegibility;font-size:14px;line-height:1.5;letter-spacing:-0.005em;-webkit-touch-callout:default;-webkit-user-select:text;user-select:text;}*{scrollbar-width:thin;scrollbar-color:#c9cdd3 transparent;}*::-webkit-scrollbar{width:10px;height:10px;}*::-webkit-scrollbar-track{background:transparent;}*::-webkit-scrollbar-thumb{background:#c9cdd3;border-radius:999px;border:2px solid transparent;background-clip:padding-box;}*::-webkit-scrollbar-thumb:hover{background:#a4abb5;background-clip:padding-box;border:2px solid transparent;}@media (prefers-reduced-motion: reduce){html{scroll-behavior:auto;}}.list .row, .list .row *,
     .gridTable .row, .gridTable .row *,
@@ -1074,9 +1074,10 @@ Tip:
       </div>
 
       <button class="btn primary" id="btnGoogleLoginOverlay" type="button">Accedi con Google</button>
+      <button class="btn" id="btnAuthRetry" type="button" style="display:none">Riprova</button>
 
       <div class="authFoot">
-        Se eri già loggato, la sessione può ripristinarsi lentamente: qui vedi solo la rotellina e poi entri.
+        La sessione viene ripristinata automaticamente. Se la connessione si interrompe, puoi riprovare.
       </div>
     </div>
   </div>
@@ -1212,7 +1213,7 @@ Tip:
 
     const state = {
       user: null,
-      authGateState: "unknown", // unknown | restoring | signed_out | signed_in
+      authGateState: "unknown", // unknown | restoring | signed_out | signed_in | error | blocked
       authGateMessage: "",
       firebase: { ok:false, app:null, auth:null, db:null, api:null, authApi:null },
       route: { view:"home", loc:null },
@@ -1796,12 +1797,15 @@ function guessTitleFromRaw(rawText, sku){
 
       const sp = $("authOverlaySpinner");
       const btn = $("btnGoogleLoginOverlay");
+      const retry = $("btnAuthRetry");
       const msg = $("authOverlayMessage");
 
-      const isRestoring = (state.authGateState === "restoring" || !state.firebase.ok);
+      const isRestoring = (state.authGateState === "restoring" || state.authGateState === "unknown");
 
       if(sp) sp.style.display = isRestoring ? "block" : "none";
-      if(btn) btn.style.display = isRestoring ? "none" : "inline-flex";
+      if(btn) btn.style.display = !isRestoring && state.firebase.ok ? "inline-flex" : "none";
+      if(retry) retry.style.display = state.authGateState === "error" ? "inline-flex" : "none";
+      ov.setAttribute("aria-busy", isRestoring ? "true" : "false");
 
       if(msg){
         const m =
@@ -1834,7 +1838,8 @@ function guessTitleFromRaw(rawText, sku){
       const status = $("authStatus");
       const btnLogin = $("btnGoogleLogin");
 
-      const isAuthed = !!state.user;
+      const isAuthed = !!state.user?.isWhitelisted && state.authGateState === "signed_in";
+      if(btnLogin) btnLogin.disabled = !state.firebase.ok || state.authGateState === "restoring";
       if(isAuthed){
         dot?.classList.add("ok");
         if(status) status.textContent = `${state.user.displayName || state.user.email || "utente"}`;
@@ -4960,15 +4965,23 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
       return { id, created, updated, shipments };
     }
 
+    let __pdfModulePromise = null;
+    function loadPdfLibrary(){
+      if(!__pdfModulePromise){
+        __pdfModulePromise = import("https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.9.155/pdf.min.mjs")
+          .catch(err=>{ __pdfModulePromise = null; throw err; });
+      }
+      return withStartupDeadline(__pdfModulePromise, 8000, "Caricamento lettore PDF");
+    }
+
     async function extractWorkflowFromPdf(file){
       try{
         // preferisci PDF.js (client-side)
         if(!file || !(file instanceof File)) return null;
-        const pdfjs = window.pdfjsLib;
-        if(!pdfjs) return null;
+        const pdfjs = await loadPdfLibrary();
 
         try{
-          pdfjs.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.9.155/pdf.worker.min.js";
+          pdfjs.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.9.155/pdf.worker.min.mjs";
         }catch(_e){}
 
         const ab = await file.arrayBuffer();
@@ -5047,14 +5060,122 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
       folder.addEventListener("keydown", (e)=>{ if(e.key==="Enter" || e.key===" "){ e.preventDefault(); toggle(); } });
     }
 
+    // --- Avvio: ogni attesa di rete ha un limite e un recupero esplicito. ---
+    let __authVersion = 0;
+    let __authWatchdog = null;
+    let __authRetryTimer = null;
+    let __authRetryCount = 0;
+    let __authLoginBusy = false;
+
+    function withStartupDeadline(promise, milliseconds, label){
+      let timer;
+      const timeout = new Promise((_, reject)=>{
+        timer = setTimeout(()=>{
+          const err = new Error(label + ": tempo di attesa superato");
+          err.code = "hub/timeout";
+          reject(err);
+        }, milliseconds);
+      });
+      return Promise.race([promise, timeout]).finally(()=>clearTimeout(timer));
+    }
+
+    function setAuthGate(mode, message=""){
+      state.authGateState = mode;
+      state.authGateMessage = message;
+      toggleAuthOverlay(mode !== "signed_in");
+      syncHeaderSub();
+    }
+
+    function clearAuthStartupTimers(){
+      clearTimeout(__authWatchdog);
+      clearTimeout(__authRetryTimer);
+      __authWatchdog = null;
+      __authRetryTimer = null;
+    }
+
+    function showAuthStartupError(err, version=__authVersion){
+      if(version !== __authVersion || state.authGateState === "signed_in") return;
+      clearAuthStartupTimers();
+      console.warn("Inventory startup", err?.code || err?.message || err);
+      setAuthGate("error", navigator.onLine === false
+        ? "Connessione assente. Controlla la rete e premi Riprova."
+        : "Impossibile completare l’accesso. Controlla la connessione e premi Riprova.");
+      // Solo la verifica dell'utente corrente si ritenta senza ricaricare la pagina.
+      // Mai autorizzare tramite cache o avviare una seconda sessione di sincronizzazione.
+      if(state.firebase.ok && state.firebase.auth?.currentUser && navigator.onLine !== false && __authRetryCount < 2){
+        __authRetryCount++;
+        __authRetryTimer = setTimeout(()=>retryAuthStartup(true), 3000);
+      }
+    }
+
+    function armAuthWatchdog(milliseconds=12000){
+      clearTimeout(__authWatchdog);
+      const version = __authVersion;
+      __authWatchdog = setTimeout(()=>showAuthStartupError({code:"hub/timeout"}, version), milliseconds);
+    }
+
+    function retryAuthStartup(automatic=false){
+      if(state.authGateState !== "error") return;
+      if(navigator.onLine === false){
+        setAuthGate("error", "Connessione assente. Controlla la rete e premi Riprova.");
+        return;
+      }
+      if(!automatic) __authRetryCount = 0;
+      clearAuthStartupTimers();
+      if(state.firebase.ok && state.firebase.auth?.currentUser){
+        void handleAuthState(state.firebase.auth.currentUser);
+      }else if(!automatic){
+        // Ricaricamento solo su richiesta: recupera anche un import SDK fallito.
+        location.reload();
+      }
+    }
+
+    async function handleAuthState(user){
+      const version = ++__authVersion;
+      clearAuthStartupTimers();
+      try{
+        if(!user){
+          state.user = null;
+          stopAllRealtime();
+          setView("home");
+          setAuthGate("signed_out", "Sessione non attiva. Accedi con Google per continuare.");
+          return;
+        }
+        if(state.user?.uid === user.uid && state.user.isWhitelisted && state.authGateState === "signed_in") return;
+        if(state.user) stopAllRealtime();
+        state.user = {
+          uid:user.uid, email:user.email || "", emailLower:(user.email || "").toLowerCase(),
+          displayName:user.displayName || user.email || "Utente", isAdmin:false, isWhitelisted:false
+        };
+        setAuthGate("restoring", "Verifica accesso…");
+        const role = await resolveUserRole(user);
+        // Una risposta vecchia non può riaprire la sessione dopo logout/cambio account.
+        if(version !== __authVersion || state.firebase.auth.currentUser?.uid !== user.uid) return;
+        Object.assign(state.user, role);
+        __authRetryCount = 0;
+        if(role.isWhitelisted){
+          startAllRealtime();
+          setView("home");
+          setAuthGate("signed_in");
+        }else{
+          stopAllRealtime();
+          setView("home");
+          setAuthGate("blocked", "Account non abilitato. Accedi con un account autorizzato o contatta l’admin.");
+        }
+      }catch(err){
+        showAuthStartupError(err, version);
+      }
+    }
+
     // --- Firebase init ---
     async function initFirebase(){
       try{
-        const [{ initializeApp }, authMod, fsMod] = await Promise.all([
+        setAuthGate("restoring", "Ripristino sessione…");
+        const [{ initializeApp }, authMod, fsMod] = await withStartupDeadline(Promise.all([
           import("https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js"),
           import("https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js"),
           import("https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js")
-        ]);
+        ]), 12000, "Caricamento Firebase");
 
         const app = initializeApp(firebaseConfig);
         const auth = authMod.getAuth(app);
@@ -5065,30 +5186,8 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
         const __IS_STANDALONE = (window.matchMedia && window.matchMedia("(display-mode: standalone)").matches) || (navigator.standalone === true);
         const __FORCE_REDIRECT = __IS_APPLE_MOBILE || __IS_STANDALONE;
 
-        async function setBestAuthPersistence(){
-          // I dati applicativi restano solo cloud.
-          // La sessione Firebase Auth invece deve usare la persistenza browser ufficiale,
-          // altrimenti al refresh l'utente viene disconnesso.
-          const candidates = (__IS_APPLE_MOBILE || __IS_STANDALONE)
-            ? [authMod.browserLocalPersistence, authMod.indexedDBLocalPersistence, authMod.browserSessionPersistence]
-            : [authMod.indexedDBLocalPersistence, authMod.browserLocalPersistence, authMod.browserSessionPersistence];
-
-          for(const persistence of candidates.filter(Boolean)){
-            try{
-              await authMod.setPersistence(auth, persistence);
-              return true;
-            }catch(_e){}
-          }
-
-          // Fallback estremo: login valido solo fino al refresh.
-          try{
-            await authMod.setPersistence(auth, authMod.inMemoryPersistence);
-            return true;
-          }catch(_e){
-            return false;
-          }
-        }
-        try{ await setBestAuthPersistence(); }catch(_e){}
+        // getAuth usa già la persistenza browser ufficiale e ripristina la sessione.
+        // Non migrare lo storage a ogni avvio: può bloccarsi prima dell'observer.
 
         const db = fsMod.getFirestore(app);
 
@@ -5104,6 +5203,7 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
             doc: fsMod.doc,
             addDoc: fsMod.addDoc,
             getDoc: fsMod.getDoc,
+            getDocFromServer: fsMod.getDocFromServer,
             getDocs: fsMod.getDocs,
             setDoc: fsMod.setDoc,
             updateDoc: fsMod.updateDoc,
@@ -5127,13 +5227,13 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
         try{ googleProvider.setCustomParameters({ prompt:"select_account" }); }catch(_e){}
 
         async function signInWithGoogle(){
+          if(__authLoginBusy) return;
+          __authLoginBusy = true;
           try{
-            state.authGateState = "restoring";
-            state.authGateMessage = "Apertura accesso Google…";
-            syncHeaderSub();
-            toggleAuthOverlay(true);
+            clearAuthStartupTimers();
+            setAuthGate("restoring", "Apertura accesso Google…");
+            armAuthWatchdog(60000);
 
-            try{ await setBestAuthPersistence(); }catch(_e){}
             try{ googleProvider.setCustomParameters({ prompt:"select_account" }); }catch(_e){}
 
             if(__FORCE_REDIRECT){
@@ -5146,8 +5246,12 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
               return;
             }catch(err){
               const code = String(err?.code || "");
-              const msg = String(err?.message || "").toLowerCase();
-              const popupIssue = code.includes("popup") || msg.includes("popup");
+              if(code === "auth/popup-closed-by-user" || code === "auth/cancelled-popup-request"){
+                clearAuthStartupTimers();
+                setAuthGate("signed_out", "Accesso annullato. Puoi riprovare con Google.");
+                return;
+              }
+              const popupIssue = code === "auth/popup-blocked";
               const notSupported = code.includes("operation-not-supported-in-this-environment") || code.includes("web-storage-unsupported");
               if(popupIssue || notSupported){
                 await authMod.signInWithRedirect(auth, googleProvider);
@@ -5157,132 +5261,58 @@ async function computeFlowDocId({ kind, loc, file, aggregated, workflowId }){
             }
           }catch(err){
             console.warn("google login", err);
-            state.authGateState = "signed_out";
-            state.authGateMessage = "Accesso non riuscito. Riprova.";
-            syncHeaderSub();
-            toggleAuthOverlay(true);
+            clearAuthStartupTimers();
+            setAuthGate("error", "Accesso non riuscito. Riprova con Google.");
             showToast("Accesso non riuscito", err?.message || String(err));
+          }finally{
+            __authLoginBusy = false;
           }
         }
 
         $("btnGoogleLogin")?.addEventListener("click", ()=>signInWithGoogle());
         $("btnGoogleLoginOverlay")?.addEventListener("click", ()=>signInWithGoogle());
 
-        // handle redirect result best-effort
-        try{ await authMod.getRedirectResult(auth); }catch(_e){}
-
-        // auth state
-        state.authGateState = "restoring";
-        state.authGateMessage = "Ripristino sessione…";
-        toggleAuthOverlay(true);
-        syncHeaderSub();
-
-        let __authNullTimer = null;
-
-        authMod.onAuthStateChanged(auth, async user=>{
-          if(user){
-            if(__authNullTimer){ clearTimeout(__authNullTimer); __authNullTimer = null; }
-
-            state.user = {
-              uid: user.uid,
-              email: user.email || "",
-              emailLower: (user.email||"").toLowerCase(),
-              displayName: user.displayName || user.email || "Utente",
-              isAdmin: false,
-              isWhitelisted: null
-            };
-            state.authGateState = "signed_in";
-            state.authGateMessage = "";
-            await resolveUserRole(user);
-            syncHeaderSub();
-            toggleAuthOverlay(false);
-
-            if(state.user.isWhitelisted){
-              startAllRealtime();
-              setView("home");
-            }else{
-              stopAllRealtime();
-              setView("home");
-              showToast("Account non abilitato", "Contatta l’admin per l’accesso a questo hub.");
-            }
-            return;
-          }
-
-          const finalizeSignedOut = ()=>{
-            state.user = null;
-            stopAllRealtime();
-            state.authGateState = "signed_out";
-            state.authGateMessage = "Sessione non attiva. Accedi con Google per continuare.";
-            syncHeaderSub();
-            toggleAuthOverlay(true);
-            setView("home");
-          };
-
-          if(state.authGateState === "restoring"){
-            if(__authNullTimer) clearTimeout(__authNullTimer);
-            __authNullTimer = setTimeout(finalizeSignedOut, 2500);
-          }else{
-            finalizeSignedOut();
-          }
+        // Registrare subito l'observer: il risultato redirect non deve essere
+        // una seconda barriera prima del ripristino della sessione.
+        armAuthWatchdog();
+        authMod.onAuthStateChanged(auth, user=>{ void handleAuthState(user); }, showAuthStartupError);
+        void authMod.getRedirectResult(auth).catch(err=>{
+          console.warn("Google redirect", err?.code || err?.message);
         });
 
       }catch(err){
         console.error("Firebase init error", err);
-        showToast("Errore Firebase", err?.message || String(err));
         state.firebase.ok = false;
-        state.authGateState = "signed_out";
-        state.authGateMessage = "Errore inizializzazione. Ricarica la pagina.";
-        toggleAuthOverlay(true);
-        syncHeaderSub();
+        showAuthStartupError(err);
       }
     }
 
     async function resolveUserRole(authUser){
-      try{
-        if(!state.firebase.ok) return;
-        const api = state.firebase.api;
-        const db = state.firebase.db;
-        const emailLower = (authUser?.email || "").toLowerCase();
-
-        let isAdmin = !!(emailLower && ADMIN_EMAILS.includes(emailLower));
-        let isWhitelisted = false;
-
-        // whitelist: amzInventoryDirectory/{emailLower} + fallback payrollDirectory/{emailLower}
-        const dirs = ["amzInventoryDirectory", "payrollDirectory"];
-        for(const col of dirs){
-          if(!emailLower) continue;
-          try{
-            const snap = await api.getDoc(api.doc(db, col, emailLower));
-            if(snap?.exists()){
-              const d = snap.data() || {};
-              isWhitelisted = (d.enabled !== false);
-              if(isWhitelisted) break;
-            }
-          }catch(_e){}
-        }
-
-        // admin fallback: powderUsers/{uid} or powderUsers/{emailLower}
-        const ids = [authUser?.uid, emailLower].filter(Boolean);
-        for(const id of ids){
-          try{
-            const puSnap = await api.getDoc(api.doc(db, "powderUsers", id));
-            if(puSnap?.exists()){
-              const d = puSnap.data() || {};
-              if(d.isAdmin===true || d.admin===true || d.role==="admin" || (Array.isArray(d.roles) && d.roles.includes("admin"))){
-                isAdmin = true;
-              }
-              break;
-            }
-          }catch(_e){}
-        }
-
-        if(state.user){
-          state.user.isAdmin = !!isAdmin;
-          state.user.isWhitelisted = !!(isWhitelisted || isAdmin);
-        }
-      }catch(err){
-        console.warn("resolveUserRole", err);
+      const api = state.firebase.api;
+      const db = state.firebase.db;
+      const emailLower = (authUser?.email || "").toLowerCase();
+      const dirs = emailLower ? ["amzInventoryDirectory", "payrollDirectory"] : [];
+      const ids = [authUser?.uid, emailLower].filter(Boolean);
+      const refs = [
+        ...dirs.map(col=>api.doc(db, col, emailLower)),
+        ...ids.map(id=>api.doc(db, "powderUsers", id))
+      ];
+      // Stessa whitelist e stessi ruoli, letti in parallelo dal server.
+      // Un problema di rete rimane distinto da un account non abilitato.
+      const results = await Promise.allSettled(refs.map(ref=>
+        withStartupDeadline(api.getDocFromServer(ref), 7000, "Verifica autorizzazioni")
+      ));
+      const snapshots = results.map(result=>result.status === "fulfilled" ? result.value : null);
+      const isWhitelisted = snapshots.slice(0, dirs.length).some(snap=>snap?.exists() && snap.data()?.enabled !== false);
+      let isAdmin = !!(emailLower && ADMIN_EMAILS.includes(emailLower));
+      const adminSnap = snapshots.slice(dirs.length).find(snap=>snap?.exists());
+      if(adminSnap){
+        const d = adminSnap.data() || {};
+        isAdmin = isAdmin || d.isAdmin === true || d.admin === true || d.role === "admin" || (Array.isArray(d.roles) && d.roles.includes("admin"));
       }
+      const failed = results.find(result=>result.status === "rejected" && !String(result.reason?.code || "").endsWith("permission-denied"));
+      if(!isAdmin && !isWhitelisted && failed) throw failed.reason;
+      return {isAdmin:!!isAdmin, isWhitelisted:!!(isWhitelisted || isAdmin)};
     }
 
     // --- realtime inventory watchers ---
@@ -12277,6 +12307,14 @@ $("btnToggleProductDetailsEdit")?.addEventListener("click", ()=>{
     }
 
     // --- boot ---
+    $("btnAuthRetry")?.addEventListener("click", ()=>retryAuthStartup());
+    window.addEventListener("online", ()=>{
+      __authRetryCount = 0;
+      retryAuthStartup(true);
+    });
+    window.addEventListener("pageshow", ()=>{
+      if(state.authGateState === "error") retryAuthStartup(true);
+    });
     setView("home");
     renderInventoryList();
     renderFlowList("carica");
