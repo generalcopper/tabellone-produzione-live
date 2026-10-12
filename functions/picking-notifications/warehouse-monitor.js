@@ -95,7 +95,7 @@ function alertSection(documents, now) {
     const types = waste.types.map(v => labels[String(v).toUpperCase()] || c.clean(v)).join(' + ');
     add({ id: 'waste', title: 'Raccolta rifiuti · domani', detail: types,
       action: 'Esporre questa sera' + (waste.exposureWindow ? ' · ' + c.clean(waste.exposureWindow) : ''),
-      level: 'warn', expiresAt: null, sourcePath: 'amzInventoryProducts/wasteCalendar_concamarise_' + tomorrow });
+      level: 'info', expiresAt: null, sourcePath: 'amzInventoryProducts/wasteCalendar_concamarise_' + tomorrow });
   }
   return section('alerts', rows, { rows: rows.length }, now);
 }
