@@ -34,11 +34,11 @@ export function createILPCockpit(React) {
       return ()=>{active=false;controller?.abort();clearInterval(timer);document.removeEventListener('visibilitychange',visible);};
     },[user]);
     const stale=error||!!data&&Date.parse(data.expiresAt)<now, today=!!data&&data.date===day(now);
+    const employees=data?.companies.reduce((total,company)=>total+company.employees,0);
     return h('section',{className:'ilp-cockpit card', 'aria-label':'Cockpit iLovePaghe'},
       h('div',{className:'ilp-title'},h('div',null,h('h2',null,'iLovePaghe'),h('span',null,'Aziende e cedolini')),h('span',{className:'ilp-badge'+(stale?' ilp-stale':'')},stale?'Da aggiornare':'Sola lettura')),
-      h('div',{className:'ilp-kpis'},h('div',null,h('strong',null,data?number(data.activeCompanies):'—'),h('span',null,'Aziende attive')),h('div',null,h('strong',null,data?number(data.totalEmployees):'—'),h('span',null,'Dipendenti'))),
+      h('div',{className:'ilp-kpis'},h('div',null,h('strong',null,data?number(data.activeCompanies):'—'),h('span',null,'Aziende attive')),h('div',{title:'Dipendenti delle aziende in classifica'},h('strong',null,data?number(employees):'—'),h('span',null,'Dipendenti'))),
       h('div',{className:'ilp-source-note',title:data?.definitions?.employees},data?number(data.activeAccounts)+' abbonamenti attivi · rubrica abilitata':'Collegamento a Firebase…'),
-      data&&data.unassignedEmployees>0&&h('p',{className:'ilp-association'},number(data.unassignedEmployees)+' dipendenti con azienda da associare'),
       h('div',{className:'ilp-table-wrap',tabIndex:0,'aria-label':'Aziende ordinate per numero di dipendenti'},h('table',null,h('thead',null,h('tr',null,h('th',{scope:'col'},'Azienda'),h('th',{scope:'col'},'Dipendenti'))),h('tbody',null,data?.companies.map((c,i)=>h('tr',{key:c.id},h('td',{title:c.name},h('span',{className:'ilp-rank'},i+1),c.name),h('td',null,number(c.employees))))))),
       h('div',{className:'ilp-today-heading'},h('h3',null,'Inviate oggi'),h('strong',null,today?number(data.sentToday):'—')),
       h('p',{className:'ilp-source-note',title:data?.definitions?.sent},today?'Invii riusciti · '+number(data.recipientsToday)+' destinatari':'In attesa dei dati di oggi'),
