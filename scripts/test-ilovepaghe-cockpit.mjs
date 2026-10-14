@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {resolve,extname} from 'node:path';
-const {chromium}=await import(process.env.PLAYWRIGHT_MODULE || 'playwright');
+const {chromium,webkit}=await import(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const original=JSON.parse(await readFile(process.env.ILP_FIXTURE,'utf8')).result;
 const root=resolve('public'),origin='https://tabellone-produzione-liv-e313e.firebaseapp.com';
 const now=Date.now(),iso=d=>new Date(now+d).toISOString();
@@ -21,7 +21,8 @@ let bundle=await readFile(root+'/minimal-originale/warehouse-assets/warehouse-DA
 const mount='(0,u.createRoot)(document.getElementById(`root`)).render((0,H.jsx)(Tl,{}));';
 assert.equal(bundle.split(mount).length,2);
 bundle=bundle.replace(mount,'var __fixtureUser={getIdToken:async()=>"fixture-token"};function __Fixture(){const[n,s]=l.useState('+now+');window.__testTime=s;return(0,H.jsx)(Sl,{...window.__fixture,now:n,ilpUser:__fixtureUser,onRefresh:()=>{},onExit:()=>{}})};(0,u.createRoot)(document.getElementById(`root`)).render((0,H.jsx)(__Fixture,{}));');
-const browser=await chromium.launch({headless:true,channel:'chrome'}),results=[];
+const mobileWebKit=process.env.TEST_BROWSER==='webkit';
+const browser=await (mobileWebKit?webkit.launch({headless:true}):chromium.launch({headless:true,channel:'chrome'})),results=[];
 try {
  for(const scenario of ['normal','alerts','stale','error']) {
   const sec=structuredClone(security),snapshot=structuredClone(data);
@@ -35,11 +36,11 @@ try {
    for(const d of sec.devices)d.expiresAt=iso(-1);
    for(const s of snapshot.services)s.expiresAt=iso(-1);
   }
-  const viewports=scenario==='normal'?[[1100,760],[1440,900],[1920,1080],[3840,2160],[1024,1366],[390,844]]:[[1100,760],[1440,900],[1920,1080]];
+  const viewports=mobileWebKit?(scenario==='normal'?[[320,568],[375,667],[390,844],[430,932],[844,390],[1024,1366],[1920,1080]]:[[375,667],[390,844]]):(scenario==='normal'?[[1100,760],[1440,900],[1920,1080],[3840,2160],[1024,1366],[390,844]]:[[1100,760],[1440,900],[1920,1080]]);
   for(const [width,height] of viewports){
-   const page=await browser.newPage({viewport:{width,height}});let requests=0;const errors=[];
+   const page=await browser.newPage({viewport:{width,height},isMobile:mobileWebKit&&width<1100,hasTouch:mobileWebKit&&width<1100,serviceWorkers:'block'});let requests=0;const errors=[];
    page.on('pageerror',e=>errors.push(e.message));
-   await page.addInitScript(props=>{window.__fixture=props;},{data:snapshot,security:scenario==='error'?null:sec,securityError:scenario==='error'});
+   await page.addInitScript(props=>{window.__fixture=props; if(props.mobileTest){Object.defineProperty(navigator,'standalone',{value:true});Object.defineProperty(document,'fullscreenEnabled',{value:false});}},{data:snapshot,security:scenario==='error'?null:sec,securityError:scenario==='error',mobileTest:mobileWebKit&&width<1100});
    await page.route('**/*',async route=>{
     const url=new URL(route.request().url());
     if(url.pathname==='/v1/control-center/ilovepaghe'){
@@ -84,6 +85,11 @@ try {
     if(layout.fit){assert.ok(layout.scrollHeight<=height+1,JSON.stringify({scenario,width,height,...layout}));assert.deepEqual(layout.out,[]);assert.ok(layout.kpisInside,JSON.stringify({scenario,width,height,...layout}));}
     results.push({scenario,theme,width,height,...layout});
    }
+   if(mobileWebKit&&width<1100){
+    assert.equal(await page.getByRole('button',{name:'Schermo intero',exact:true}).count(),0);
+    const targets=await page.locator('.tools button:visible').evaluateAll(es=>es.map(e=>{const r=e.getBoundingClientRect();return [r.width,r.height]}));
+    assert.ok(targets.every(([w,h])=>w>=44&&h>=44),JSON.stringify(targets));
+   }
    const details=page.getByRole('button',{name:'Tutte le aziende e gli invii di oggi'});
    if(scenario!=='error')assert.ok(await details.isVisible(),'Full company table must remain accessible');
    if(scenario!=='error'&&await details.isVisible()){
@@ -91,6 +97,7 @@ try {
     assert.ok(await page.locator('.ilp-dialog tbody tr').count()>=fixture.companies.length);
     assert.match(await page.locator('.ilp-dialog').textContent(),/Cedolini oggi.*Destinatari oggi/s);
     const first=page.locator('.ilp-dialog tbody tr').first();assert.match(await first.textContent(),new RegExp(fixture.companies[0].name.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')));
+    assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'Dialog must not widen the page');
     await page.getByRole('button',{name:'Chiudi',exact:true}).click();
    }
    // Rotating the display and tab visibility must not make another Firebase request.
@@ -106,4 +113,4 @@ try {
   }
  }
 }finally{await browser.close();}
-console.log(JSON.stringify({result:'passed',headless:true,liveApiCalls:0,employeeCount,viewports:results}));
+console.log(JSON.stringify({result:'passed',browser:mobileWebKit?'WebKit':'Chromium',headless:true,liveApiCalls:0,employeeCount,viewports:results}));
