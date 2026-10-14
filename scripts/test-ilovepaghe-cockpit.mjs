@@ -33,7 +33,8 @@ try {
   await page.goto(origin+'/minimal-originale/capannone_3d.html');
   await page.locator('.ilp-cockpit tbody tr').first().waitFor();
   assert.equal(await page.locator('.ilp-cockpit tbody tr').count(),fixture.companies.length);
-  assert.equal(await page.locator('.ilp-kpis strong').nth(1).textContent(),String(fixture.totalEmployees));
+  assert.equal(await page.locator('.ilp-kpis strong').nth(1).textContent(),String(fixture.companies.reduce((total,company)=>total+company.employees,0)));
+  assert.equal(await page.getByText(/dipendenti con azienda da associare/).count(),0);
   await page.evaluate(()=>document.dispatchEvent(new Event('visibilitychange')));
   const layout=await page.evaluate(()=>{
    const c=document.querySelector('.ilp-cockpit').getBoundingClientRect(),f=document.querySelector('.ilp-footer').getBoundingClientRect();
