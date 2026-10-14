@@ -27,19 +27,19 @@
       <input id="search" type="search" placeholder="Nome prodotto o codice" autocomplete="off">
       <p id="count" aria-live="polite"></p>
       <div id="products"></div><p id="empty" class="empty" hidden>Nessun prodotto trovato.</p>
-      <p class="fine">Registro Bionee aggiornato al 13 ottobre 2026. L’elenco attuale Temu è ancora da incrociare. “Abbinata” indica la corrispondenza documentale, non l’approvazione al caricamento. Le schede informative sono indicate con il loro tipo originale.</p>
+      <p class="fine">Registro Bionee aggiornato al 14 ottobre 2026. PDF archiviati nel Tabellone. L’elenco attuale Temu è ancora da incrociare. “Abbinata” indica la corrispondenza documentale, non l’approvazione al caricamento. Le schede informative sono indicate con il loro tipo originale.</p>
     </section>
     <noscript>Attiva JavaScript per consultare i documenti.</noscript>
   </main>
   <dialog id="preview" aria-labelledby="previewTitle">
     <div class="dialog-head"><strong id="previewTitle"></strong><button class="close" id="closePreview" type="button" aria-label="Chiudi anteprima">×</button></div>
-    <div class="preview-tools"><label for="sourceSelect" id="sourceLabel">Documento</label><select id="sourceSelect"></select><a id="openSource" target="_blank" rel="noopener noreferrer">Apri su Google Drive ↗</a></div>
+    <div class="preview-tools"><label for="sourceSelect" id="sourceLabel">Documento</label><select id="sourceSelect"></select><a id="openSource" download aria-disabled="true">Scarica PDF</a></div>
     <p id="previewNote"></p><iframe id="documentFrame" title="Anteprima documento" referrerpolicy="no-referrer" allow="fullscreen"></iframe>
   </dialog>
   <script type="module">
     const $=id=>document.getElementById(id);
     const labels={collegata:'Collegata',abbinata:'Abbinata',da_verificare:'Da verificare',da_esportare:'PDF da esportare',mancante:'Da reperire'};
-    let products=[],selected=null,authVersion=0;
+    let products=[],selected=null,authVersion=0,documentVersion=0,documentURL=null,documentStorage=null,storageAPI=null;
     function element(tag,text,cls){const n=document.createElement(tag);if(text!==undefined)n.textContent=text;if(cls)n.className=cls;return n;}
     function badge(kind,state){return element('span',kind+': '+labels[state],'state '+(state==='mancante'?'missing':state.startsWith('da_')?'review':''));}
     function render(){
@@ -69,34 +69,60 @@
       $('sourceSelect').replaceChildren();
       selected.sources.forEach((s,i)=>{const option=element('option',(selected.sources.length>1?(i+1)+'. ':'')+s.name);option.value=String(i);$('sourceSelect').append(option);});
       $('sourceSelect').hidden=selected.sources.length===1;$('sourceLabel').hidden=selected.sources.length===1;
-      showSource();$('preview').showModal();
+      $('preview').showModal();showSource();
     }
-    function showSource(){
-      const src=selected.sources[Number($('sourceSelect').value)||0];const url=new URL(src.url);
-      if(url.origin!=='https://drive.google.com'||!/^\/file\/d\/[A-Za-z0-9_-]+\/view$/.test(url.pathname))throw new Error('Riferimento documento non valido');
-      $('openSource').href=url.href;url.pathname=url.pathname.replace(/\/view$/,'/preview');$('documentFrame').src=url.href;
-      $('previewNote').textContent=src.type+' · '+labels[selected.state]+'. '+selected.notes.join(' ');
+    function clearDocument(){
+      ++documentVersion;
+      $('documentFrame').removeAttribute('src');
+      $('openSource').removeAttribute('href');$('openSource').removeAttribute('download');
+      $('openSource').setAttribute('aria-disabled','true');
+      if(documentURL){URL.revokeObjectURL(documentURL);documentURL=null;}
+    }
+    async function showSource(){
+      clearDocument();const version=documentVersion,selection=selected;
+      const src=selection?.sources[Number($('sourceSelect').value)||0];
+      $('previewNote').textContent='Caricamento PDF…';
+      try{
+        if(!src||!/^bionee-documenti\/pdf\/[a-f0-9]{64}\.pdf$/.test(src.storagePath||'')||src.storagePath!==`bionee-documenti/pdf/${src.sha256}.pdf`||!Number.isSafeInteger(src.bytes)||src.bytes<=0)throw new Error('Riferimento PDF non valido.');
+        if(!documentStorage||!storageAPI)throw new Error('Archivio non disponibile. Riapri il Tabellone.');
+        const blob=await storageAPI.getBlob(storageAPI.ref(documentStorage,src.storagePath),src.bytes);
+        if(version!==documentVersion||selected!==selection||!$('preview').open)return;
+        if(blob.size!==src.bytes)throw new Error('PDF incompleto. Riprova.');
+        if((await blob.slice(0,5).text())!=='%PDF-')throw new Error('Il documento non è un PDF valido.');
+        if(version!==documentVersion||selected!==selection||!$('preview').open)return;
+        documentURL=URL.createObjectURL(blob.type==='application/pdf'?blob:new Blob([blob],{type:'application/pdf'}));
+        $('documentFrame').src=documentURL;
+        $('openSource').href=documentURL;$('openSource').download=src.fileName||src.name;
+        $('openSource').removeAttribute('aria-disabled');
+        $('previewNote').textContent=src.type+' · '+labels[selection.state]+'. '+selection.notes.join(' ');
+      }catch(e){
+        if(version!==documentVersion||selected!==selection)return;
+        $('previewNote').textContent=String(e.code||'').includes('unauthorized')?'Accesso al PDF non consentito. Riapri il Tabellone con il tuo account.':(e.message||'PDF non disponibile. Riprova.');
+      }
     }
     $('search').addEventListener('input',render);$('sourceSelect').addEventListener('change',showSource);
     $('closePreview').addEventListener('click',()=>$('preview').close());
-    $('preview').addEventListener('close',()=>{$('documentFrame').removeAttribute('src');selected=null;});
+    $('preview').addEventListener('close',()=>{clearDocument();selected=null;});
+    $('openSource').addEventListener('click',event=>{if(!$('openSource').hasAttribute('href'))event.preventDefault();});
     function accessMessage(message){$('access').hidden=false;$('access').replaceChildren(element('p',message));const a=element('a','Torna al Tabellone');a.href='/index.html';$('access').append(a);}
     const timeout=(promise,ms)=>new Promise((resolve,reject)=>{const id=setTimeout(()=>reject(new Error('Verifica accesso non disponibile. Riprova dalla home.')),ms);promise.then(v=>{clearTimeout(id);resolve(v);},e=>{clearTimeout(id);reject(e);});});
     try{
-      const [appMod,authMod,fs]=await timeout(Promise.all([
+      const [appMod,authMod,fs,storageMod]=await timeout(Promise.all([
         import('https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js'),
         import('https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js'),
-        import('https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js')
+        import('https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js'),
+        import('https://www.gstatic.com/firebasejs/12.7.0/firebase-storage.js')
       ]),12000);
       const app=appMod.getApps()[0]||appMod.initializeApp({apiKey:'AIzaSyBiyB4pilnPpVj8vImD4PI6LF2_RtyDnv4',authDomain:'tabellone-produzione-liv-e313e.firebaseapp.com',projectId:'tabellone-produzione-liv-e313e',storageBucket:'tabellone-produzione-liv-e313e.firebasestorage.app',messagingSenderId:'537555699968',appId:'1:537555699968:web:4d04cb9596b67bfb0e4be5'});
       const auth=authMod.getAuth(app),db=fs.getFirestore(app);
+      storageAPI=storageMod;documentStorage=storageMod.getStorage(app);
       async function access(id){
         if(!id)return null;
         try{const snap=await timeout(fs.getDocFromServer(fs.doc(db,'powderUsers',id)),7000);return snap.exists()?snap.data():null;}
         catch(e){if(String(e.code||'').endsWith('permission-denied'))return null;throw e;}
       }
       authMod.onAuthStateChanged(auth,async user=>{
-        const version=++authVersion;$('app').hidden=true;products=[];$('products').replaceChildren();if($('preview').open)$('preview').close();
+        const version=++authVersion;clearDocument();$('app').hidden=true;products=[];$('products').replaceChildren();if($('preview').open)$('preview').close();
         if(!user){accessMessage('Accedi al Tabellone con il tuo account abituale.');return;}
         try{
           const [uid,invite]=await Promise.allSettled([access(user.uid),access((user.email||'').trim().toLowerCase())]);
