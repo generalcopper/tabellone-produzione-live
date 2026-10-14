@@ -5,25 +5,35 @@ import {securityViewState, securityDetails} from '../public/minimal-originale/wa
 const sha = value => createHash('sha256').update(value).digest('hex');
 const prefix = '/minimal-originale/';
 const manifest = JSON.parse(await readFile('public' + prefix + 'warehouse-release.json','utf8'));
-assert.equal(manifest.layout?.id,'riordinato-2026-10-12','Export rejected: the approved ordered layout must be preserved');
+assert.equal(manifest.layout?.id,'schermo-unico-2026-10-14','Export rejected: the user-approved single-screen layout must be preserved');
 const html = await readFile('public' + prefix + 'capannone_3d.html','utf8');
 const bundle = await readFile('public' + prefix + 'warehouse-assets/warehouse-DAXf6-td.js','utf8');
 const module = await readFile('public' + prefix + 'warehouse-assets/warehouse-wazuh-security.js');
+assert.equal(sha(module),'1e25f2e73be8f421a19c939750086cfd3459aae537e512996a4d207375e2f29e','Verified Wazuh security logic must remain unchanged');
 const head = 'import {securityViewState as qs, securityDetails as Js} from "./warehouse-wazuh-security.js?v=' + sha(module) + '";\n';
 const ilpModule = await readFile('public' + prefix + 'warehouse-assets/warehouse-ilovepaghe.js');
 const ilpHead = 'import {createILPCockpit as __createILPCockpit} from "./warehouse-ilovepaghe.js?v=' + sha(ilpModule) + '";\n';
 assert.ok(bundle.startsWith(ilpHead + head));
-// Remove only the three audited additive hooks; all pre-existing functions remain byte-identical.
+// Remove only the three audited iLovePaghe hooks, then pin the newly approved presentation.
+// The Oct 14 ZIP changes only presentation; authentication, fetches and expiry logic were compared byte-for-byte.
 let original = bundle.slice(ilpHead.length);
 for (const [addition, baseline] of [
  ['var ILPCockpit=__createILPCockpit(l);function Sl({ilpUser:ilpUser=null,now:e,','function Sl({now:e,'],
  ['return(0,H.jsx)(Sl,{ilpUser:e,now:n,','return(0,H.jsx)(Sl,{now:n,'],
  ['(0,H.jsx)(vc,{id:`ilovepaghe`,title:`iLovePaghe`,children:(0,H.jsx)(ILPCockpit,{user:ilpUser,now:e})}),(0,H.jsxs)(vc,{id:`activity`,title:`Attività`,children:','(0,H.jsxs)(vc,{id:`activity`,title:`Attività`,children:']
 ]) { assert.equal(original.split(addition).length,2); original=original.replace(addition,baseline); }
-assert.equal(sha(original.slice(head.length)),'e15bb66569b38fd18e612e21f2cb8a35be73bc04b20b75327bfaa63d764392e7','Ordered layout/presentation differs from approved ZIP');
+assert.equal(sha(original.slice(head.length)),'e10e0ebb8978149e3a21d12b8d3b6b4c60717fd49d35e0f78d76adf47c888cec','Single-screen presentation differs from approved ZIP');
 assert.ok(html.includes('warehouse-DAXf6-td.js?v=' + sha(bundle)));
-assert.ok(html.includes('warehouse-B89y70LQ.css'));
-assert.equal(sha(await readFile('public' + prefix + 'warehouse-assets/warehouse-B89y70LQ.css')),'1f253798bf187cbff1612929ba1a7f92ab510003f23a362f45e38a2533cc3f05');
+assert.ok(html.includes('warehouse-B89y70LQ.css?v=' + sha(await readFile('public' + prefix + 'warehouse-assets/warehouse-B89y70LQ.css'))));
+assert.ok(html.includes('warehouse-ilovepaghe.css?v=' + sha(await readFile('public' + prefix + 'warehouse-assets/warehouse-ilovepaghe.css'))));
+const ilpText = ilpModule.toString();
+const pollingStart = ilpText.indexOf('    React.useEffect(() => {\n      let active');
+const pollingEnd = ilpText.indexOf('    },[user]);') + '    },[user]);'.length;
+assert.ok(pollingStart >= 0 && pollingEnd > pollingStart);
+assert.equal(sha(ilpText.slice(pollingStart,pollingEnd)),'8b91420a53b083251db40db800293e64fe5366ecb4b38b83cadb85726c634ebb','Firebase polling/authentication must remain byte-identical');
+assert.ok(ilpText.includes('const REFRESH = 15 * 60_000;'));
+assert.ok(ilpText.includes('const PAGE_MS = 12_000;'));
+assert.equal(sha(await readFile('public' + prefix + 'warehouse-assets/warehouse-B89y70LQ.css')),'180c132eeef2512d7053b3541bd196cd2f4245d9a610bb13a6fadbf79707194e');
 for (const [path,proof] of Object.entries(manifest.files)) {
   const bytes = await readFile('public' + path);
   assert.equal(bytes.length,proof.size,path + ' size'); assert.equal(sha(bytes),proof.sha256,path + ' hash');
@@ -56,4 +66,4 @@ assert.equal(securityDetails(data,true,now).verified,0);
 assert.equal(securityDetails(data,false,now+60001).verified,0);
 const legacy=structuredClone(data);delete legacy.wazuh;legacy.checks=[];for(const device of legacy.devices)device.checks=[check('firewall')];
 assert.equal(securityDetails(legacy,false,now).state,'ok');
-console.log(JSON.stringify({layout:manifest.layout.id,verifiedFiles:Object.keys(manifest.files).length,presentation:'existing functions byte-identical, with isolated iLovePaghe cockpit',securityCases:8,result:'passed'}));
+console.log(JSON.stringify({layout:manifest.layout.id,verifiedFiles:Object.keys(manifest.files).length,presentation:'user-approved single-screen ZIP; authentication, polling and security preserved',securityCases:8,result:'passed'}));
