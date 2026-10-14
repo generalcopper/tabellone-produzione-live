@@ -67,3 +67,5 @@ assert.equal(securityDetails(data,false,now+60001).verified,0);
 const legacy=structuredClone(data);delete legacy.wazuh;legacy.checks=[];for(const device of legacy.devices)device.checks=[check('firewall')];
 assert.equal(securityDetails(legacy,false,now).state,'ok');
 console.log(JSON.stringify({layout:manifest.layout.id,verifiedFiles:Object.keys(manifest.files).length,presentation:'user-approved single-screen ZIP; authentication, polling and security preserved',securityCases:8,result:'passed'}));
+
+await import('./check-warehouse-webapp.mjs');
