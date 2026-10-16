@@ -1,3 +1,4 @@
+import {restoreBaselinePolling} from './warehouse-poll-compat.mjs';
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {createHash} from 'node:crypto';
@@ -13,10 +14,11 @@ assert.equal(sha(module),'1e25f2e73be8f421a19c939750086cfd3459aae537e512996a4d20
 const head = 'import {securityViewState as qs, securityDetails as Js} from "./warehouse-wazuh-security.js?v=' + sha(module) + '";\n';
 const ilpModule = await readFile('public' + prefix + 'warehouse-assets/warehouse-ilovepaghe.js');
 const ilpHead = 'import {createILPCockpit as __createILPCockpit} from "./warehouse-ilovepaghe.js?v=' + sha(ilpModule) + '";\n';
-assert.ok(bundle.startsWith(ilpHead + head));
+const presentationBundle=await restoreBaselinePolling(bundle);
+assert.ok(presentationBundle.startsWith(ilpHead + head));
 // Remove only the three audited iLovePaghe hooks, then pin the newly approved presentation.
 // The Oct 14 ZIP changes only presentation; authentication, fetches and expiry logic were compared byte-for-byte.
-let original = bundle.slice(ilpHead.length);
+let original = presentationBundle.slice(ilpHead.length);
 for (const [addition, baseline] of [
  ['var ILPCockpit=__createILPCockpit(l);function Sl({ilpUser:ilpUser=null,now:e,','function Sl({now:e,'],
  ['return(0,H.jsx)(Sl,{ilpUser:e,now:n,','return(0,H.jsx)(Sl,{now:n,'],
@@ -69,3 +71,5 @@ assert.equal(securityDetails(legacy,false,now).state,'ok');
 console.log(JSON.stringify({layout:manifest.layout.id,verifiedFiles:Object.keys(manifest.files).length,presentation:'user-approved single-screen ZIP; authentication, polling and security preserved',securityCases:8,result:'passed'}));
 
 await import('./check-warehouse-webapp.mjs');
+
+await import('./test-warehouse-poll-recovery.mjs');
