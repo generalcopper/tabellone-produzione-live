@@ -1,4 +1,4 @@
-import {createAmazonFinance as __createAmazonFinance} from "./warehouse-amazon-finance.js?v=c4a303258f951af8bf24025d19e153d1c23fba95031ccb63dd09284e5397bf79";
+import {createAmazonFinance as __createAmazonFinance} from "./warehouse-amazon-finance.js?v=0c0de70fef4e500d61c88c4505f447a7ca2439560abaf4cc1818cb5ad251a44a";
 import {warehouseBusiness as __amazonBusiness, scopedAmazonHistory as __amazonHistory, salesSeries as __amazonSeries, amazonDayLabel as __amazonDayLabel, amazonDayProof as __amazonDayProof} from "./warehouse-amazon.js?v=8d026a1c482fefb7d13ad43261d39e0ec10f3cff5701b5fd9973d0cacf677d93";
 import {createVehicleCard as __createVehicleCard} from "./warehouse-vehicles.js?v=c8a859bf7c572871692d2e7712224f246f193591f439b10c995182f9af5ed951";
 import {createPolling as __createPolling, authenticatedRead as __authenticatedRead} from "./warehouse-connection.js?v=52cc0d44df64fb67bdd08881c76356423a558a1f3f2bd86409d71ea5df98e387";
