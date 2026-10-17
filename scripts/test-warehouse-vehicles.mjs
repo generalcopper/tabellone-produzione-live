@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {createHash} from 'node:crypto';
-import {createVehicleCard,vehicleSnapshotCurrent,verifyVehicleSnapshot} from '../public/minimal-originale/warehouse-assets/warehouse-vehicles.js';
+import {createVehicleCard,vehicleSnapshotCurrent,verifyVehicleSnapshot,vehicleAnnualPremium} from '../public/minimal-originale/warehouse-assets/warehouse-vehicles.js';
 const now=Date.parse('2026-10-17T10:00:00Z');
 const canonical=x=>Array.isArray(x)?'['+x.map(canonical).join(',')+']':x!==null&&typeof x==='object'?'{'+Object.keys(x).sort().map(k=>JSON.stringify(k)+':'+canonical(x[k])).join(',')+'}':JSON.stringify(x);
 const fixture={version:1,calendarDate:'2026-10-17',generatedAt:new Date(now).toISOString(),expiresAt:new Date(now+600000).toISOString(),documents:[],vehicles:[],monitor:{state:'ok',checkedAt:new Date(now).toISOString()},summary:{vehicles:0,suspended:0,missingInspections:0}};
@@ -24,3 +24,9 @@ const module=await readFile('public/minimal-originale/warehouse-assets/warehouse
 assert.doesNotMatch(module,/localStorage|sessionStorage|indexedDB|sendBeacon|innerHTML|method:\s*['"]POST/);
 const css=await readFile('public/minimal-originale/warehouse-assets/warehouse-vehicles.css','utf8');assert.doesNotMatch(css,/(?:^|[}\n])\s*\.(?:shell|grid|summary|topbar|zone-business|zone-systems)\b/);
 console.log(JSON.stringify({vehicleCard:'passed',hashTampering:'rejected',staleData:'explicit',individualVehicleDetails:true,privateDataCache:false,heroAndHeader:'unchanged'}));
+
+assert.equal(vehicleAnnualPremium({annualPremiumCents:200000,startDate:'2026-01-01',contractEnd:'2027-01-01'}).amountCents,200000);
+assert.equal(vehicleAnnualPremium({annualPremiumCents:null,annualPremiumReference:{kind:'historical',amountCents:200000,from:'2025-07-22',until:'2026-07-22',detail:'Previous annual policy'}}).label,'Contratto precedente 2025–2026');
+assert.equal(vehicleAnnualPremium({annualPremiumCents:null,annualPremiumReference:{kind:'annualized',amountCents:66000,from:'2026-03-31',until:'2026-04-30',detail:'Monthly receipt'}}).label,'Stima da rata · da confermare');
+assert.equal(vehicleAnnualPremium({annualPremiumCents:null}).amountCents,null);
+assert.match(module,/annualValue\(x.policy\)/);assert.match(module,/annualValue\(p\)/);assert.match(module,/annualHistoricalCount/);assert.match(module,/annualEstimatedCount/);

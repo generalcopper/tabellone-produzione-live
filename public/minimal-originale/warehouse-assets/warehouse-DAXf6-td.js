@@ -1,4 +1,4 @@
-import {createVehicleCard as __createVehicleCard} from "./warehouse-vehicles.js?v=1fea64c8095a5d51a2aeba176a5f892c45fa9504b140322089273be5157e1eac";
+import {createVehicleCard as __createVehicleCard} from "./warehouse-vehicles.js?v=c8a859bf7c572871692d2e7712224f246f193591f439b10c995182f9af5ed951";
 import {createPolling as __createPolling, authenticatedRead as __authenticatedRead} from "./warehouse-connection.js?v=52cc0d44df64fb67bdd08881c76356423a558a1f3f2bd86409d71ea5df98e387";
 import {createILPCockpit as __createILPCockpit} from "./warehouse-ilovepaghe.js?v=793cf2cadd0cf9130a4225c5cbecaba55cc4458e9418afbdfd02e83bfcce9302";
 import {securityViewState as qs, securityDetails as Js} from "./warehouse-wazuh-security.js?v=1e25f2e73be8f421a19c939750086cfd3459aae537e512996a4d207375e2f29e";
