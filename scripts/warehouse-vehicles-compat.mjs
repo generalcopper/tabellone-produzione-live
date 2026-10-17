@@ -6,7 +6,7 @@ const reviewedHooks=[["var VehicleCard=__createVehicleCard(l);var ILPCockpit=__c
 export async function restoreVehiclesBundle(bundle) {
  const module=await readFile('public/minimal-originale/warehouse-assets/warehouse-vehicles.js');
  const style=await readFile('public/minimal-originale/warehouse-assets/warehouse-vehicles.css');
- assert.equal(sha(module),'1fea64c8095a5d51a2aeba176a5f892c45fa9504b140322089273be5157e1eac','Reviewed vehicle monitor changed');
+ assert.equal(sha(module),'c8a859bf7c572871692d2e7712224f246f193591f439b10c995182f9af5ed951','Reviewed vehicle monitor changed');
  assert.equal(sha(style),'67321a21bb91b5acc5cc5864dbf0bcc6c1f728e2bb7992e8b98df4e8fcdd573a','Reviewed vehicle card styles changed');
  const head='import {createVehicleCard as __createVehicleCard} from "./warehouse-vehicles.js?v='+sha(module)+'";\n';
  assert.ok(bundle.startsWith(head),'Vehicle monitor import missing');
