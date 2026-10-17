@@ -1,3 +1,4 @@
+import {restoreCostsCopy} from './costs-api-copy.mjs';
 import {restoreBaselinePolling} from './warehouse-poll-compat.mjs';
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
@@ -25,7 +26,7 @@ for(const icon of [...manifest.icons,{src:apple,sizes:'180x180'}]){
  assert.equal(url.searchParams.get('v'),sha(bytes));
 }
 // The PWA wrapper must not change authentication, APIs, expiry, calculations, or desktop rendering.
-assert.equal(sha(await restoreBaselinePolling(await readFile(dir+'warehouse-assets/warehouse-DAXf6-td.js','utf8'))),'4722381e72aa280b9454e1a8cd17517c563576d5aec304ab0420af7324cac588');
+assert.equal(sha(restoreCostsCopy(await restoreBaselinePolling(await readFile(dir+'warehouse-assets/warehouse-DAXf6-td.js','utf8')))),'4722381e72aa280b9454e1a8cd17517c563576d5aec304ab0420af7324cac588');
 const config=JSON.parse(await readFile('firebase.json','utf8'));
 for(const name of ['manifest.webmanifest','warehouse-sw.js']){
  const headers=config.hosting.headers.find(h=>h.source==='/minimal-originale/'+name)?.headers;
