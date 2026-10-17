@@ -1,9 +1,11 @@
+import {restoreAmazonBundle} from './warehouse-amazon-compat.mjs';
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {createHash} from 'node:crypto';
 const sha=x=>createHash('sha256').update(x).digest('hex');
 const reviewedHooks=[["var VehicleCard=__createVehicleCard(l);var ILPCockpit=__createILPCockpit(l);", "var ILPCockpit=__createILPCockpit(l);"], ["(0,H.jsx)(ol,{inventory:t?.inventory,now:e,onProof:h,changed:b.changed[`fba-inventory`]}),(0,H.jsx)(VehicleCard,{user:ilpUser,now:e})]}),(0,H.jsxs)(vc,{id:`systems`", "(0,H.jsx)(ol,{inventory:t?.inventory,now:e,onProof:h,changed:b.changed[`fba-inventory`]})]}),(0,H.jsxs)(vc,{id:`systems`"]];
 export async function restoreVehiclesBundle(bundle) {
+ bundle=await restoreAmazonBundle(bundle);
  const module=await readFile('public/minimal-originale/warehouse-assets/warehouse-vehicles.js');
  const style=await readFile('public/minimal-originale/warehouse-assets/warehouse-vehicles.css');
  assert.equal(sha(module),'c8a859bf7c572871692d2e7712224f246f193591f439b10c995182f9af5ed951','Reviewed vehicle monitor changed');

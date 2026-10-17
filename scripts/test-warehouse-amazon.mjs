@@ -1,0 +1,18 @@
+import assert from 'node:assert/strict';
+import {readFile} from 'node:fs/promises';
+import {warehouseBusiness,scopedAmazonHistory,salesSeries,amazonDayLabel,amazonDayProof} from '../public/minimal-originale/warehouse-assets/warehouse-amazon.js';
+const at='2026-10-18T00:00:00.000Z',today='2026-10-18',date='2026-10-17';
+const row={date,kind:'intraday',observedAt:'2026-10-17T21:59:00.000Z',orderedProductSales:0,unitsOrdered:0,sourceSha256:'a'.repeat(64),sha256:'b'.repeat(64)};
+const continuity={state:'pending',date:today,days:[row],missingDates:['2026-10-16'],provisionalDates:[date],sha256:'c'.repeat(64)};
+const snapshot={date:today,observedAt:at,orderedProductSales:0,unitsOrdered:0};
+const amazon={scope:'global',state:'ok',snapshot,dailyHistory:null,continuity};
+const data={generatedAt:at,services:[{id:'amazon',sales:amazon}],shopify:{state:'ok',date:today,updatedAt:at,today:{date:today,totalSales:0},days:[{date,totalSales:10}]}};
+const b=warehouseBusiness(data,Date.parse(at));assert.equal(b.combined,0);assert.equal(b.points.at(-2).amazon,0);assert.equal(b.points.at(-2).amazonProvisional,true);assert.equal(b.points.at(-2).value,10);
+assert.equal(b.period,null);assert.equal(b.closedDays,0);assert.equal(b.average,null);assert.equal(b.best,null);assert.equal(b.delta,null);assert.equal(b.sourcesFresh,false);
+assert.equal(amazonDayLabel(b.points.at(-2),today),'Amazon provvisorio');assert.match(amazonDayProof(b.points.at(-2)),/SHA-256 b{64}/);
+assert.equal(amazonDayLabel(b.points.at(-3),today),'Amazon in consolidamento');
+const consolidated={scope:'global',observedAt:at,days:[{date,orderedProductSales:123.45}]};
+const history=scopedAmazonHistory(consolidated,'global',continuity);const points=salesSeries(today,history,data.shopify.days,{amazon:0,bionee:0});assert.equal(points.at(-2).amazon,123.45);assert(!points.at(-2).amazonProvisional);
+assert.equal(scopedAmazonHistory(null,'global',{...continuity,state:'invalid'}),null);assert.equal(scopedAmazonHistory(consolidated,'italy',continuity),null);
+const module=await readFile('public/minimal-originale/warehouse-assets/warehouse-amazon.js','utf8');assert.doesNotMatch(module,/fetch\s*\(|localStorage|sessionStorage|indexedDB|innerHTML|setInterval/);
+console.log(JSON.stringify({amazonContinuity:'passed',zero:'real',missing:'pending',provisional:'labelled and excluded from consolidated statistics',extraNetworkRequests:0}));
