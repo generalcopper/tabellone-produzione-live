@@ -1,3 +1,4 @@
+import {restoreVehiclesBundle} from './warehouse-vehicles-compat.mjs';
 import {restoreCostsCopy} from './costs-api-copy.mjs';
 import {restoreBaselinePolling} from './warehouse-poll-compat.mjs';
 import assert from 'node:assert/strict';
@@ -15,7 +16,7 @@ assert.equal(sha(module),'1e25f2e73be8f421a19c939750086cfd3459aae537e512996a4d20
 const head = 'import {securityViewState as qs, securityDetails as Js} from "./warehouse-wazuh-security.js?v=' + sha(module) + '";\n';
 const ilpModule = await readFile('public' + prefix + 'warehouse-assets/warehouse-ilovepaghe.js');
 const ilpHead = 'import {createILPCockpit as __createILPCockpit} from "./warehouse-ilovepaghe.js?v=' + sha(ilpModule) + '";\n';
-const presentationBundle=restoreCostsCopy(await restoreBaselinePolling(bundle));
+const presentationBundle=restoreCostsCopy(await restoreBaselinePolling(await restoreVehiclesBundle(bundle)));
 assert.ok(presentationBundle.startsWith(ilpHead + head));
 // Remove only the three audited iLovePaghe hooks, then pin the newly approved presentation.
 // The Oct 14 ZIP changes only presentation; authentication, fetches and expiry logic were compared byte-for-byte.
@@ -74,3 +75,5 @@ console.log(JSON.stringify({layout:manifest.layout.id,verifiedFiles:Object.keys(
 await import('./check-warehouse-webapp.mjs');
 
 await import('./test-warehouse-poll-recovery.mjs');
+
+await import('./test-warehouse-vehicles.mjs');

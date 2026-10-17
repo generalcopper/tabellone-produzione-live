@@ -1,0 +1,26 @@
+import assert from 'node:assert/strict';
+import {readFile} from 'node:fs/promises';
+import {createHash} from 'node:crypto';
+import {createVehicleCard,vehicleSnapshotCurrent,verifyVehicleSnapshot} from '../public/minimal-originale/warehouse-assets/warehouse-vehicles.js';
+const now=Date.parse('2026-10-17T10:00:00Z');
+const canonical=x=>Array.isArray(x)?'['+x.map(canonical).join(',')+']':x!==null&&typeof x==='object'?'{'+Object.keys(x).sort().map(k=>JSON.stringify(k)+':'+canonical(x[k])).join(',')+'}':JSON.stringify(x);
+const fixture={version:1,calendarDate:'2026-10-17',generatedAt:new Date(now).toISOString(),expiresAt:new Date(now+600000).toISOString(),documents:[],vehicles:[],monitor:{state:'ok',checkedAt:new Date(now).toISOString()},summary:{vehicles:0,suspended:0,missingInspections:0}};
+const signed=x=>({...x,sha256:createHash('sha256').update(canonical(x)).digest('hex')});
+assert.equal(await verifyVehicleSnapshot(signed(fixture),now),true);
+assert.equal(await verifyVehicleSnapshot({...signed(fixture),vehicles:[{}]},now),false);
+assert.equal(await verifyVehicleSnapshot(signed(fixture),now+600001),false);
+assert.equal(vehicleSnapshotCurrent({...fixture,calendarDate:'2026-10-16'},now),false);
+assert.equal(vehicleSnapshotCurrent({...fixture,generatedAt:new Date(now+60000).toISOString()},now),false);
+// Render the actual card with a small element recorder: each vehicle must open its own detail ID.
+const changed=[];let index=0;
+const data={...fixture,vehicles:[{id:'car',name:'Example car',insuranceState:'documented'},{id:'bike',name:'Example bike',insuranceState:'suspended'}],summary:{vehicles:2,suspended:1,missingInspections:2,dueSoon:0,overdue:0}};
+const states=[data,false,false,null];
+const React={Fragment:'fragment',createElement:(type,props,...children)=>({type,props:props||{},children:children.flat(Infinity)}),useEffect:()=>{},useState:initial=>{const slot=index++;return [states[slot]??initial,value=>changed.push([slot,value])];}};
+const tree=createVehicleCard(React)({user:{uid:'example'},now});
+const flatten=x=>x&&typeof x==='object'?[x,...x.children.flatMap(flatten)]:[];
+const buttons=flatten(tree).filter(x=>x.type==='button');
+const car=buttons.find(x=>x.props['aria-label']==='Dettagli Example car');const bike=buttons.find(x=>x.props['aria-label']==='Dettagli Example bike');assert.ok(car&&bike);bike.props.onClick();assert.deepEqual(changed,[[3,'bike'],[2,true]]);
+const module=await readFile('public/minimal-originale/warehouse-assets/warehouse-vehicles.js','utf8');
+assert.doesNotMatch(module,/localStorage|sessionStorage|indexedDB|sendBeacon|innerHTML|method:\s*['"]POST/);
+const css=await readFile('public/minimal-originale/warehouse-assets/warehouse-vehicles.css','utf8');assert.doesNotMatch(css,/(?:^|[}\n])\s*\.(?:shell|grid|summary|topbar|zone-business|zone-systems)\b/);
+console.log(JSON.stringify({vehicleCard:'passed',hashTampering:'rejected',staleData:'explicit',individualVehicleDetails:true,privateDataCache:false,heroAndHeader:'unchanged'}));
