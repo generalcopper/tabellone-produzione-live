@@ -1,9 +1,11 @@
+import {restoreFinanceBundle} from './warehouse-amazon-finance-compat.mjs';
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {createHash} from 'node:crypto';
 const sha=x=>createHash('sha256').update(x).digest('hex');
 const proof=JSON.parse(await readFile(new URL('./warehouse-amazon-baseline.json',import.meta.url),'utf8'));
 export async function restoreAmazonBundle(bundle){
+ bundle=await restoreFinanceBundle(bundle);
  const module=await readFile(new URL('../public/minimal-originale/warehouse-assets/warehouse-amazon.js',import.meta.url));
  assert.equal(sha(module),proof.moduleSha256,'Reviewed Amazon continuity module changed');
  assert.ok(proof.head.includes('?v='+sha(module))&&bundle.startsWith(proof.head),'Amazon receipt module must match its content hash');
