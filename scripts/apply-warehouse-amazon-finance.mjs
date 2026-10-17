@@ -10,7 +10,7 @@ const head='import {createAmazonFinance as __createAmazonFinance} from "./wareho
 const patches=[
  ['var VehicleCard=__createVehicleCard(l);','var AmazonFinanceDialog=__createAmazonFinance(l);var VehicleCard=__createVehicleCard(l);'],
  ['function $c({data:e,now:t,error:n=``,loading:r=!1})','function $c({data:e,now:t,error:n=``,loading:r=!1,onAmazonFinance:__openAmazonFinance=()=>{}})'],
- ['(0,H.jsxs)(`span`,{children:[(0,H.jsx)(`i`,{className:`key amazon`}),c]})','(0,H.jsxs)(`button`,{type:`button`,className:`af-open`,onClick:__openAmazonFinance,title:`Apri costi, commissioni e rimanenze Amazon`,"aria-haspopup":`dialog`,children:[(0,H.jsx)(`i`,{className:`key amazon`}),c]})'],
+ ['(0,H.jsxs)(`span`,{children:[(0,H.jsx)(`i`,{className:`key amazon`}),c]})','(0,H.jsx)(`span`,{children:(0,H.jsxs)(`button`,{type:`button`,className:`af-open`,style:{gap:`inherit`},onClick:__openAmazonFinance,title:`Apri costi, commissioni e rimanenze Amazon`,"aria-haspopup":`dialog`,children:[(0,H.jsx)(`i`,{className:`key amazon`}),c]})})'],
  ['function ol({inventory:e,now:t,onProof:n,changed:r})','function ol({inventory:e,now:t,onProof:n,changed:r,onAmazonFinance:__openAmazonFinance=()=>{}})'],
  ['children:[`Logistica Amazon FBA`,(0,H.jsx)(hc,{at:r,now:t})]','children:[(0,H.jsx)(`button`,{type:`button`,className:`af-open`,onClick:__openAmazonFinance,title:`Apri costi, commissioni e rimanenze Amazon`,"aria-haspopup":`dialog`,children:`Logistica Amazon FBA`}),(0,H.jsx)(hc,{at:r,now:t})]'],
  ['onRefresh:f,onExit:p}){let[m,h]=(0,l.useState)(null)','onRefresh:f,onExit:p}){let[__financeOpen,__setFinanceOpen]=(0,l.useState)(!1);let[m,h]=(0,l.useState)(null)'],
