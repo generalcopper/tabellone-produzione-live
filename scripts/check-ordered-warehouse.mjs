@@ -77,3 +77,5 @@ await import('./check-warehouse-webapp.mjs');
 await import('./test-warehouse-poll-recovery.mjs');
 
 await import('./test-warehouse-vehicles.mjs');
+
+await import('./test-warehouse-amazon.mjs');
