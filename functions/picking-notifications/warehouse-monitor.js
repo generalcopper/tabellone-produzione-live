@@ -100,9 +100,38 @@ function alertSection(documents, now) {
   return section('alerts', rows, { rows: rows.length }, now);
 }
 
+const LEGACY_PICKING_FIELDS = ['kind','status','voided','cancelled','canceled','picking.flowPicked','picking.status'];
+
+// All queries use the caller's read-only transaction. Counts prove that the
+// smaller result covers every managed document not already read or picked.
+// Missing/null/non-boolean legacy fields never silently disappear: if they are
+// not covered by the active queries, retain the original full historical read.
+async function readLegacyPicking(tx, logs, found) {
+  const managed = logs.where('picking.managedByPicking','==',true);
+  try {
+    const [all, complete] = await Promise.all([
+      tx.get(managed.count()), tx.get(managed.where('picking.flowPicked','==',true).count()),
+    ]);
+    const total = all.data().count, picked = complete.data().count;
+    if (Number.isSafeInteger(total) && Number.isSafeInteger(picked) && total >= picked && picked >= 0) {
+      const known = [...found.values()].map(doc=>doc.data().picking)
+        .filter(p=>p?.managedByPicking === true && p.flowPicked !== true);
+      if (total === picked + known.length) return { docs:[], mode:'covered', total, picked };
+      const open = await tx.get(managed.where('picking.flowPicked','==',false).select(...LEGACY_PICKING_FIELDS));
+      const knownLegacy = known.filter(p=>p.flowPicked !== false).length;
+      if (total === picked + open.docs.length + knownLegacy)
+        return { docs:open.docs, mode:'filtered', total, picked, unpicked:open.docs.length };
+    }
+  } catch {
+    // An unavailable aggregate or index cannot turn a source into an empty queue.
+  }
+  return { docs:(await tx.get(managed.select(...LEGACY_PICKING_FIELDS))).docs, mode:'full' };
+}
+
 function createWarehouseMonitor({ db, service, clock = Date.now, logger = console }) {
   let cached = null, pending = null, loggedContent = null;
   let catalogCache = null;
+  const legacyModes = new Map();
   async function catalog() {
     if (catalogCache && clock() - catalogCache.at < 300000) return catalogCache.value;
     const snap = await db.collection('amzInventoryProducts').select('sku','title','name','rackAllocations',
@@ -121,13 +150,18 @@ function createWarehouseMonitor({ db, service, clock = Date.now, logger = consol
     for (const loc of ['concamarise', 'cerea']) {
       const logs = db.collection('amzInventory/' + loc + '/logs');
       const queries = [logs.where('status','in',['RESERVED','PARTIAL_PICKED','PRENOTATO','IN_ATTESA_PICKING']),
-        logs.where('reservation.active','==',true),
-        logs.where('picking.managedByPicking','==',true).select('kind','status','voided','cancelled','canceled','picking.flowPicked','picking.status')];
+        logs.where('reservation.active','==',true)];
       const snapshots = [];
       for(const query of queries) snapshots.push(await tx.get(query));
       const found = new Map();
-      for (const snap of snapshots.slice(0,2)) for (const doc of snap.docs) found.set(doc.id,doc);
-      const legacy = snapshots[2].docs.filter(doc => {
+      for (const snap of snapshots) for (const doc of snap.docs) found.set(doc.id,doc);
+      const legacyRead = await readLegacyPicking(tx,logs,found);
+      if (legacyModes.get(loc) !== legacyRead.mode) {
+        const {docs,...measurement}=legacyRead;
+        logger.info('warehouse_legacy_read_mode',{location:loc,...measurement,documents:docs.length});
+        legacyModes.set(loc,legacyRead.mode);
+      }
+      const legacy = legacyRead.docs.filter(doc => {
         const d = doc.data(), status = String(d.status || d.picking?.status || '').toUpperCase();
         return !found.has(doc.id) && String(d.kind || '').toLowerCase() === 'scarica' && !d.voided && !d.cancelled && !d.canceled &&
           d.picking?.flowPicked !== true && !['PICKED','COMPLETED','CANCELLED','CANCELED','VOIDED'].includes(status);
@@ -183,4 +217,4 @@ function createWarehouseMonitor({ db, service, clock = Date.now, logger = consol
     return pending;
   } };
 }
-module.exports = { canonical, hash, seal, section, writeSection, pickingSection, productCatalog, alertSection, createWarehouseMonitor };
+module.exports = { canonical, hash, seal, section, writeSection, pickingSection, productCatalog, alertSection, readLegacyPicking, createWarehouseMonitor };

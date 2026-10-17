@@ -138,3 +138,28 @@ Manual Cerea allocations for other production areas are unaffected.
 Deploy only this handler: `firebase deploy --only functions:picking-notifications:pickingAutoCerea --project tabellone-produzione-liv-e313e --non-interactive`.
 Run the backend and Picking contract tests from the repository root with
 `node --test tests/*.test.cjs functions/picking-notifications/*.test.js`.
+
+## Warehouse read cost audit (17 October 2026)
+
+The user requested a global cloud cost review and optimization without reducing
+refresh frequency or existing functionality. The warehouse monitor previously
+reread every historical managed picking flow during each FBA refresh.
+
+The FBA monitor now uses two aggregate counts in the same read-only transaction:
+all managed flows and explicitly picked flows. Already fetched active flows are
+included in the coverage proof. If needed, it reads explicitly unpicked flows.
+Only when those sets cover the complete managed collection does it omit the
+historical query. Missing, null or non-boolean legacy flags that are not covered
+by the active queries, inconsistent counts or aggregation errors retain the
+original complete read. Errors in that complete source still mark it unavailable.
+
+The 20-second snapshot cache, five-minute catalog refresh, read-only transaction,
+queue filters, hashes and all email behavior are unchanged. Source documents are
+never migrated or modified. A reopened flow is re-evaluated in the next snapshot.
+`warehouse_legacy_read_mode` logs only when an instance's coverage mode changes.
+
+Deploy only `functions:picking-notifications:warehouseMonitor` after the backend
+and ordered-warehouse checks. Compare old and new source results in a production
+read-only transaction before release; verify the live snapshot and its hashes
+after release. Aggregate counts cost index reads, so the reduction in returned
+documents is not itself an exact bill reduction.
