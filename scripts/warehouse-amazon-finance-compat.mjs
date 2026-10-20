@@ -5,7 +5,7 @@ import {createHash} from 'node:crypto';
 const sha=b=>createHash('sha256').update(b).digest('hex');
 const proof=JSON.parse(await readFile(new URL('./warehouse-amazon-finance-baseline.json',import.meta.url),'utf8'));
 export async function restoreFinanceBundle(bundle){
- bundle=restoreSecurityInventory(bundle);
+ bundle=await restoreSecurityInventory(bundle);
  const module=await readFile(new URL('../public/minimal-originale/warehouse-assets/warehouse-amazon-finance.js',import.meta.url));
  const style=await readFile(new URL('../public/minimal-originale/warehouse-assets/warehouse-amazon-finance.css',import.meta.url));
  assert.equal(sha(module),proof.moduleSha256,'Reviewed financial presentation changed');assert.equal(sha(style),proof.styleSha256,'Reviewed finance styles changed');

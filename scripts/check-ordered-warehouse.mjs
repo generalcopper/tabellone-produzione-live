@@ -81,3 +81,5 @@ await import('./test-warehouse-vehicles.mjs');
 await import('./test-warehouse-amazon.mjs');
 
 await import('./test-warehouse-security-inventory.mjs');
+
+await import("./test-warehouse-service-alerts.mjs");
