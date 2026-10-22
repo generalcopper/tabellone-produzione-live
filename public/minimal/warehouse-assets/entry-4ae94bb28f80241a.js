@@ -1,1 +1,1 @@
-if(new URLSearchParams(location.search).get('monitor')==='1'){location.replace('/warehouse-map/capannone_3d.html'+location.search+location.hash);}else{await import("/minimal/warehouse-assets/warehouse-CDxmWwuL.js?v=b7cb2ec52796b9d1dcd5116022638a7ab65e49db2aa5a91cbb62eb1cf7adb36a");}
+if(new URLSearchParams(location.search).get('monitor')==='1'){location.replace('/warehouse-map/capannone_3d.html'+location.search+location.hash);}else{await import("/minimal/warehouse-assets/warehouse-CDxmWwuL.js?v=power15-20261022");}
