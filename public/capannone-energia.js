@@ -2,7 +2,7 @@
 import { onAuthStateChanged } from "https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js";
 
 const ENDPOINT = "https://cedoly-crm-prod.web.app/v1/tabellone/power";
-const CONTRACT_WATTS = 10000;
+const CONTRACT_WATTS = 15000;
 const MAX_AGE_MS = 30000;
 const kw = value => value === null ? "—" : new Intl.NumberFormat("it-IT", { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value / 1000);
 
@@ -44,8 +44,8 @@ export function mountCapannoneEnergy(auth) {
     el("UsedLabel").textContent = p.exporting ? "IMMESSI" : "UTILIZZATI";
     el("AvailableLabel").textContent = over ? "OLTRE IL CONTRATTO" : "DISPONIBILI";
     el("Gauge").setAttribute("aria-label", p.fresh
-      ? (p.exporting ? "Immissione " : "Prelievo ") + kw(p.watts) + " kW; " + (over ? "oltre il contratto " + kw(p.excess) : "margine " + kw(p.available)) + " kW; contratto 10 kW; lettura " + time
-      : "Potenza non disponibile; contratto 10 kW");
+      ? (p.exporting ? "Immissione " : "Prelievo ") + kw(p.watts) + " kW; " + (over ? "oltre il contratto " + kw(p.excess) : "margine " + kw(p.available)) + " kW; contratto 15 kW; lettura " + time
+      : "Potenza non disponibile; contratto 15 kW");
   }
 
   async function poll() {
