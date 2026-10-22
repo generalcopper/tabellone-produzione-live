@@ -7,3 +7,5 @@ The 13 October Wazuh export accidentally replaced the approved layout. The corre
 Run node scripts/restore-ordered-warehouse.mjs to reproduce the adaptation from the approved git artifact, then node scripts/check-ordered-warehouse.mjs. The deployment workflow requires this check. It rejects replacement with the old layout and validates stale security data.
 
 Existing filenames remain unchanged. The entry and module import include content SHA-256 query parameters so browsers do not reuse previously cached immutable JavaScript after its security-only adaptation. The manifest records current hashes and original layout provenance. Other pages, Amazon pickup banner and backend services are unchanged.
+
+On 22 October 2026 the user set the displayed site contract and all power bars to 15 kW. The two numeric-policy edits in the ordered bundle are isolated by `scripts/warehouse-power-compat.mjs`; reversing them must reproduce the exact prior bundle hash before the existing layout and behavior checks run. Raw signed telemetry and freshness checks remain unchanged.

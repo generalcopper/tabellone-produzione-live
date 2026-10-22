@@ -1,3 +1,4 @@
+import {restorePowerLimit} from './warehouse-power-compat.mjs';
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {createHash} from 'node:crypto';
@@ -8,6 +9,7 @@ export const serviceAlertPatches = [
   ['services:t?.services??[],now:e,onProof:h', 'services:__monitoredServices(t?.services),now:e,onProof:h']
 ];
 export async function restoreServiceAlerts(bundle) {
+  bundle = restorePowerLimit(bundle);
   const module = await readFile(new URL('../public/minimal-originale/warehouse-assets/warehouse-service-alerts.js', import.meta.url));
   assert.equal(sha(module), '5256163147a83ca20e8b41b34b6509f880c301bf9d1fedd084aac5059978dfb8', 'Reviewed Instagram-only display policy changed');
   const head = 'import {monitoredServices as __monitoredServices} from "./warehouse-service-alerts.js?v=' + sha(module) + '";\n';
