@@ -113,8 +113,20 @@ export function createILPCockpit(React) {
 
     // Density: the card always keeps its place in the column. When security or services need more room
     // (open issues), the ranking steps aside first, then the footnotes; everything returns as soon as space frees up.
-    const cardRef = React.useRef(null), listRef = React.useRef(null), fit = useFit();
+    const cardRef = React.useRef(null), listRef = React.useRef(null), platformRef = React.useRef(null), fit = useFit();
     const [level, setLevel] = React.useState(0);
+    // The new KPI row consumes existing ranking space, including in the flowing mobile layout.
+    React.useLayoutEffect(() => {
+      const card=cardRef.current, platforms=platformRef.current;
+      if(!card||!platforms)return;
+      const measure=()=>{
+        card.style.setProperty('--ilp-platform-space',platforms.getBoundingClientRect().height+'px');
+        const row=listRef.current?.querySelector('[data-row]');
+        if(row)card.style.setProperty('--ilp-row-space',row.getBoundingClientRect().height+'px');
+      };
+      measure();const observer=new ResizeObserver(measure);observer.observe(platforms);
+      return()=>observer.disconnect();
+    },[!!data,fit,rows.length]);
     React.useLayoutEffect(() => {
       const el = cardRef.current;
       if (!el || !fit) { setLevel(0); return; }
@@ -159,10 +171,12 @@ export function createILPCockpit(React) {
           h('span',null,'Cedolini inviati oggi'),
           h('strong',null,today?number(data.sentToday):'—'),
           h('small',null,!data?'—':!today?'In attesa dei dati di oggi':sentCompanies?number(data.recipientsToday)+' destinatari · '+number(sentCompanies)+(sentCompanies===1?' azienda':' aziende'):'Nessun invio riuscito oggi'))),
+      data&&h('div',{className:'ilp-kpis ilp-platform-kpis ilp-platforms',ref:platformRef,title:platformsTitle,'aria-label':platformsText+'. '+platformsTitle},
+        ...[['android','Android'],['ios','iOS'],['web','Web']].map(([key,label])=>h('div',{key},h('span',null,label),h('strong',null,number(platforms?.[key]))))),
       h('h4',{className:'subhead'},
         data ? h('button',{type:'button',className:'link',onClick:()=>setDetails(true),'aria-label':'Tutte le aziende e gli invii di oggi'},'Aziende per dipendenti ',h('span',{'aria-hidden':'true'},'↗')) : h('span',null,'Aziende per dipendenti'),
         h('span',null,data?number(data.companies.length)+(data.companies.length===1?' azienda':' aziende')+(pages>1?' · pagina '+(page+1)+' di '+pages:''):'')),
-      h('ol',{className:'ilp-list'+(sentCompanies?' has-sent':''),ref:listRef,'aria-label':'Aziende ordinate per numero di dipendenti'},
+      h('ol',{className:'ilp-list'+(sentCompanies?' has-sent':''),ref:listRef,style:{'--ilp-rows':rows.length},'aria-label':'Aziende ordinate per numero di dipendenti'},
         shown.map((r,i)=>h('li',{className:'ilp-row'+(r.today?' is-sent':''),key:r.id+':'+page,'data-row':true,style:{'--i':i},
             title:r.name+(r.employees===null?'':' · '+number(r.employees)+' dipendenti')+(r.today?' · oggi '+number(r.today.sends)+' cedolini a '+number(r.today.employees)+' dipendenti':'')},
           h('em',null,r.rank),
@@ -172,7 +186,7 @@ export function createILPCockpit(React) {
           h('span',{className:'ilp-sent'},r.today?number(r.today.sends)+' oggi':''))),
         !rows.length&&h('li',{className:'empty'},data?'Nessuna azienda in classifica.':'In attesa dei dati iLovePaghe')),
       h('footer',{className:'card-foot'},
-        h('span',{className:'ilp-platforms'+(stale?' ilp-stale':''),role:stale?'status':undefined,title:platformsTitle,'aria-label':platformsText+'. '+platformsTitle},platformsText),
+        h('span',stale?{className:'ilp-stale',role:'status'}:null,stale?'Ultimo aggiornamento non riuscito · dati dell’ultima lettura':'Firebase · sola lettura · ogni 15 min'),
         h('span',null,'Lettura '+clock(data?.generatedAt))),
       details&&data&&h(Details,{data,rows,employees,today,onClose:()=>setDetails(false)})
     );

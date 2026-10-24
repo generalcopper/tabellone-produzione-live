@@ -62,7 +62,13 @@ try {
    await page.waitForFunction(()=>document.querySelector('.shell'));
    if(scenario!=='error')assert.equal(await page.locator('.ilp-kpis strong').nth(1).textContent(),String(employeeCount));
    else assert.equal(await page.locator('.ilp-kpis strong').nth(1).textContent(),'—');
-   assert.equal(await page.locator('.ilp-platforms').textContent(),['error','platform-error'].includes(scenario)?'Android — · iOS — · Web —':'Android 55 · iOS 28 · Web 86');
+   if(scenario==='error')assert.equal(await page.locator('.ilp-platforms').count(),0);
+   else {
+    assert.deepEqual(await page.locator('.ilp-platforms strong').allTextContents(),scenario==='platform-error'?['—','—','—']:['55','28','86']);
+    assert.deepEqual(await page.locator('.ilp-platforms span').allTextContents(),['Android','iOS','Web']);
+    const sizes=await page.locator('.ilp-kpis strong').evaluateAll(es=>es.map(e=>getComputedStyle(e).fontSize));
+    assert.equal(new Set(sizes).size,1,'All six counters must use the same number size');
+   }
    if(scenario==='normal')assert.ok(await page.locator('.ilp-platforms').isVisible(),'Platform totals must be visible in the existing footer');
    assert.equal(await page.getByText(/dipendenti con azienda da associare/).count(),0);
    assert.equal(await page.locator('.zone-business .volumes').count(),1);
@@ -85,6 +91,7 @@ try {
      return {fit,scrollWidth:document.documentElement.scrollWidth,scrollHeight:document.documentElement.scrollHeight,cardWidth:c.width,cardHeight:c.height,cardClass:card.className,out,kpisInside:kpis.every(r=>r.top>=c.top&&r.bottom<=c.bottom+1),detailsVisible:!!button&&button.getBoundingClientRect().height>0,columns:getComputedStyle(document.querySelector('.grid')).gridTemplateColumns};
     });
     assert.ok(layout.scrollWidth<=width+1,JSON.stringify({scenario,width,height,...layout}));
+    assert.ok(layout.kpisInside,JSON.stringify({scenario,width,height,...layout}));
     if(layout.fit){assert.ok(layout.scrollHeight<=height+1,JSON.stringify({scenario,width,height,...layout}));assert.deepEqual(layout.out,[]);assert.ok(layout.kpisInside,JSON.stringify({scenario,width,height,...layout}));}
     results.push({scenario,theme,width,height,...layout});
    }
