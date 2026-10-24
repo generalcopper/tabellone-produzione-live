@@ -102,6 +102,9 @@ export function createILPCockpit(React) {
       return ()=>{active=false;controller?.abort();clearInterval(timer);document.removeEventListener('visibilitychange',visible);};
     },[user]);
     const stale=error||!!data&&Date.parse(data.expiresAt)<now, today=!!data&&data.date===day(now);
+    const platforms=data?.userPlatforms?.state==='ok'?data.userPlatforms:null;
+    const platformsText='Android '+number(platforms?.android)+' · iOS '+number(platforms?.ios)+' · Web '+number(platforms?.web);
+    const platformsTitle=(stale?'Ultimo aggiornamento non riuscito · dati dell’ultima lettura. ':'')+(platforms?'Utenti per ultima piattaforma rilevata; account demo esclusi. Non rilevata: '+number(platforms.unknown)+'.':'Conteggi per piattaforma non disponibili.')+' Firebase · sola lettura · ogni 15 min';
     const employees=data?.companies.reduce((total,company)=>total+company.employees,0);
     const rows = data ? rowsOf(data, today) : [];
     const sentCompanies = today ? data.todayCompanies.length : 0;
@@ -169,7 +172,7 @@ export function createILPCockpit(React) {
           h('span',{className:'ilp-sent'},r.today?number(r.today.sends)+' oggi':''))),
         !rows.length&&h('li',{className:'empty'},data?'Nessuna azienda in classifica.':'In attesa dei dati iLovePaghe')),
       h('footer',{className:'card-foot'},
-        h('span',stale?{className:'ilp-stale',role:'status'}:null,stale?'Ultimo aggiornamento non riuscito · dati dell’ultima lettura':'Firebase · sola lettura · ogni 15 min'),
+        h('span',{className:'ilp-platforms'+(stale?' ilp-stale':''),role:stale?'status':undefined,title:platformsTitle,'aria-label':platformsText+'. '+platformsTitle},platformsText),
         h('span',null,'Lettura '+clock(data?.generatedAt))),
       details&&data&&h(Details,{data,rows,employees,today,onClose:()=>setDetails(false)})
     );

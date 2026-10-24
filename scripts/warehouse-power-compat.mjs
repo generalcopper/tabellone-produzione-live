@@ -1,3 +1,4 @@
+import {restoreILPCockpitImport} from './warehouse-ilovepaghe-compat.mjs';
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 // 22 October 2026: the user set the displayed site contract and all gauges to 15 kW.
@@ -13,7 +14,7 @@ export const POWER_LIMIT_PATCHES = [
   ]
 ];
 export function restorePowerLimit(bundle) {
-  let original = bundle;
+  let original = restoreILPCockpitImport(bundle);
   for (const [baseline, updated] of POWER_LIMIT_PATCHES) {
     assert.equal(original.split(updated).length, 2, 'Approved 15 kW configuration missing or duplicated');
     original = original.replace(updated, baseline);

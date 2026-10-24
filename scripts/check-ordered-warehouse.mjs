@@ -1,3 +1,4 @@
+import {ILP_BASELINE_HASH} from './warehouse-ilovepaghe-compat.mjs';
 import {restoreVehiclesBundle} from './warehouse-vehicles-compat.mjs';
 import {restoreCostsCopy} from './costs-api-copy.mjs';
 import {restoreBaselinePolling} from './warehouse-poll-compat.mjs';
@@ -15,7 +16,8 @@ const module = await readFile('public' + prefix + 'warehouse-assets/warehouse-wa
 assert.equal(sha(module),'1e25f2e73be8f421a19c939750086cfd3459aae537e512996a4d207375e2f29e','Verified Wazuh security logic must remain unchanged');
 const head = 'import {securityViewState as qs, securityDetails as Js} from "./warehouse-wazuh-security.js?v=' + sha(module) + '";\n';
 const ilpModule = await readFile('public' + prefix + 'warehouse-assets/warehouse-ilovepaghe.js');
-const ilpHead = 'import {createILPCockpit as __createILPCockpit} from "./warehouse-ilovepaghe.js?v=' + sha(ilpModule) + '";\n';
+assert.equal(bundle.split('./warehouse-ilovepaghe.js?v='+sha(ilpModule)).length,2);
+const ilpHead = 'import {createILPCockpit as __createILPCockpit} from "./warehouse-ilovepaghe.js?v=' + ILP_BASELINE_HASH + '";\n';
 const presentationBundle=restoreCostsCopy(await restoreBaselinePolling(await restoreVehiclesBundle(bundle)));
 assert.ok(presentationBundle.startsWith(ilpHead + head));
 // Remove only the three audited iLovePaghe hooks, then pin the newly approved presentation.

@@ -7,7 +7,7 @@ const original=JSON.parse(await readFile(process.env.ILP_FIXTURE,'utf8')).result
 const root=resolve('public'),origin='https://tabellone-produzione-liv-e313e.firebaseapp.com';
 const now=Date.now(),iso=d=>new Date(now+d).toISOString();
 const day=new Intl.DateTimeFormat('en-CA',{timeZone:'Europe/Rome',year:'numeric',month:'2-digit',day:'2-digit'}).format(now);
-const fixture={...original,date:day,generatedAt:iso(-1000),expiresAt:iso(900000)};
+const fixture={...original,date:day,generatedAt:iso(-1000),expiresAt:iso(900000),userPlatforms:{state:'ok',android:55,ios:28,web:86,unknown:97,total:266,excludedDemo:2}};
 const employeeCount=fixture.companies.reduce((n,c)=>n+c.employees,0);
 const check=(id,state='ok')=>({id,label:id,state,detail:'Verifica del parametro completata'});
 const security={state:'ok',generatedAt:iso(-1000),expiresAt:iso(900000),coverage:'Controlli verificati',
@@ -24,7 +24,7 @@ bundle=bundle.replace(mount,'var __fixtureUser={getIdToken:async()=>"fixture-tok
 const mobileWebKit=process.env.TEST_BROWSER==='webkit';
 const browser=await (mobileWebKit?webkit.launch({headless:true}):chromium.launch({headless:true,channel:'chrome'})),results=[];
 try {
- for(const scenario of ['normal','alerts','stale','error']) {
+ for(const scenario of ['normal','alerts','stale','error','platform-error']) {
   const sec=structuredClone(security),snapshot=structuredClone(data);
   if(scenario==='alerts'){
    sec.state='down';
@@ -46,7 +46,7 @@ try {
     if(url.pathname==='/v1/control-center/ilovepaghe'){
      assert.equal(route.request().method(),'GET');
      assert.equal(route.request().headers().authorization,'Bearer fixture-token');requests++;
-     return route.fulfill({status:scenario==='error'?503:200,contentType:'application/json',headers:{'Access-Control-Allow-Origin':'*'},body:JSON.stringify({...fixture,...scenario==='stale'?{expiresAt:iso(-1)}:{}})});
+     return route.fulfill({status:scenario==='error'?503:200,contentType:'application/json',headers:{'Access-Control-Allow-Origin':'*'},body:JSON.stringify({...fixture,...scenario==='stale'?{expiresAt:iso(-1)}:{},...scenario==='platform-error'?{userPlatforms:{state:'unavailable'}}:{}})});
     }
     if(url.origin!==origin)return route.fulfill({status:404,body:''});
     const name=resolve(root,'.'+url.pathname);assert.ok(name.startsWith(root+'/'));
@@ -62,11 +62,14 @@ try {
    await page.waitForFunction(()=>document.querySelector('.shell'));
    if(scenario!=='error')assert.equal(await page.locator('.ilp-kpis strong').nth(1).textContent(),String(employeeCount));
    else assert.equal(await page.locator('.ilp-kpis strong').nth(1).textContent(),'—');
+   assert.equal(await page.locator('.ilp-platforms').textContent(),['error','platform-error'].includes(scenario)?'Android — · iOS — · Web —':'Android 55 · iOS 28 · Web 86');
+   if(scenario==='normal')assert.ok(await page.locator('.ilp-platforms').isVisible(),'Platform totals must be visible in the existing footer');
    assert.equal(await page.getByText(/dipendenti con azienda da associare/).count(),0);
    assert.equal(await page.locator('.zone-business .volumes').count(),1);
    assert.equal(await page.locator('.zone-activity .volumes').count(),0);
    if(scenario==='stale'){
-    assert.equal(await page.locator('.service-tile.tone-unknown').count(),snapshot.services.length);
+    assert.equal(await page.locator('.service-tile.tone-unknown').count(),snapshot.services.filter(s=>s.id!=='instagram').length);
+    assert.equal(await page.locator('.service-tile').filter({hasText:'Instagram'}).count(),0);
     assert.equal(await page.locator('.service-tile.tone-ok').count(),0);
     assert.match(await page.locator('.ilp-cockpit .state').textContent(),/Da aggiornare/);
    }
@@ -79,7 +82,7 @@ try {
      const out=[...document.querySelectorAll('.card')].filter(e=>e.getBoundingClientRect().bottom>innerHeight+1).map(e=>e.className);
      const kpis=[...card.querySelectorAll('.ilp-kpis strong')].map(e=>e.getBoundingClientRect());
      const button=card.querySelector('button[aria-label="Tutte le aziende e gli invii di oggi"]');
-     return {fit,scrollWidth:document.documentElement.scrollWidth,scrollHeight:document.documentElement.scrollHeight,cardHeight:c.height,cardClass:card.className,out,kpisInside:kpis.every(r=>r.top>=c.top&&r.bottom<=c.bottom+1),detailsVisible:!!button&&button.getBoundingClientRect().height>0,columns:getComputedStyle(document.querySelector('.grid')).gridTemplateColumns};
+     return {fit,scrollWidth:document.documentElement.scrollWidth,scrollHeight:document.documentElement.scrollHeight,cardWidth:c.width,cardHeight:c.height,cardClass:card.className,out,kpisInside:kpis.every(r=>r.top>=c.top&&r.bottom<=c.bottom+1),detailsVisible:!!button&&button.getBoundingClientRect().height>0,columns:getComputedStyle(document.querySelector('.grid')).gridTemplateColumns};
     });
     assert.ok(layout.scrollWidth<=width+1,JSON.stringify({scenario,width,height,...layout}));
     if(layout.fit){assert.ok(layout.scrollHeight<=height+1,JSON.stringify({scenario,width,height,...layout}));assert.deepEqual(layout.out,[]);assert.ok(layout.kpisInside,JSON.stringify({scenario,width,height,...layout}));}
