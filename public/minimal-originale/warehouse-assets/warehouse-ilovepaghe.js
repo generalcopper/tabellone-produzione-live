@@ -1,5 +1,6 @@
 // Read-only cockpit mounted by the authenticated, approved warehouse application.
 // React and the current Firebase user are passed by the existing app: no second login.
+import {createLedwallMonitor} from './warehouse-ledwall.js?v=ae9317bfedcbf5fbbff207f94991aaaad632949db0d95adc85fbe104c11761cf';
 const API = 'https://crm-api-62sidjxd5a-ew.a.run.app/v1/control-center/ilovepaghe';
 const REFRESH = 15 * 60_000;
 // Same page rotation as the other monitor lists (queues, FBA stock).
@@ -27,6 +28,7 @@ function rowsOf(data, today) {
 
 export function createILPCockpit(React) {
   const h = React.createElement;
+  const LedwallMonitor = createLedwallMonitor(React);
   const useFit = () => {
     const [fit, setFit] = React.useState(() => typeof window !== 'undefined' && window.matchMedia(FIT).matches);
     React.useEffect(() => {
@@ -110,6 +112,7 @@ export function createILPCockpit(React) {
     const sentCompanies = today ? data.todayCompanies.length : 0;
     const top = Math.max(1, ...rows.map(r => r.employees ?? 0));
     const [details, setDetails] = React.useState(false);
+    const [ledwall, setLedwall] = React.useState(false);
 
     // Density: the card always keeps its place in the column. When security or services need more room
     // (open issues), the ranking steps aside first, then the footnotes; everything returns as soon as space frees up.
@@ -163,7 +166,7 @@ export function createILPCockpit(React) {
     return h('section',{className:'card ilp ilp-cockpit'+levels, ref:cardRef, 'aria-label':'Cockpit iLovePaghe'},
       h('header',{className:'card-head'},
         h('h3',null,'iLovePaghe'),
-        h('div',{className:'card-meta'},h('span',{className:'state tone-'+tone},h('i',{'aria-hidden':'true'}),status))),
+        h('div',{className:'card-meta'},h('button',{type:'button',className:'ilp-ledwall-button',disabled:!user,onClick:()=>setLedwall(true),'aria-label':'Monitoraggio LED wall'},'LED wall'),h('span',{className:'state tone-'+tone},h('i',{'aria-hidden':'true'}),status))),
       h('div',{className:'ilp-kpis'},
         kpi(data?number(data.activeCompanies):'—','Aziende attive',data?number(data.activeAccounts)+' abbonamenti attivi':'Collegamento a Firebase…',data?number(data.activeAccounts)+' abbonamenti attivi · rubrica abilitata':undefined, true),
         kpi(data?number(employees):'—','Dipendenti','aziende in classifica',data?.definitions?.employees ?? 'Dipendenti delle aziende in classifica'),
@@ -188,7 +191,8 @@ export function createILPCockpit(React) {
       h('footer',{className:'card-foot'},
         h('span',stale?{className:'ilp-stale',role:'status'}:null,stale?'Ultimo aggiornamento non riuscito · dati dell’ultima lettura':'Firebase · sola lettura · ogni 15 min'),
         h('span',null,'Lettura '+clock(data?.generatedAt))),
-      details&&data&&h(Details,{data,rows,employees,today,onClose:()=>setDetails(false)})
+      details&&data&&h(Details,{data,rows,employees,today,onClose:()=>setDetails(false)}),
+      ledwall&&h(LedwallMonitor,{user,onClose:()=>setLedwall(false)})
     );
   };
 }
