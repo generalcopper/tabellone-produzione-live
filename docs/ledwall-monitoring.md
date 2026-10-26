@@ -20,3 +20,9 @@ Hosting was cloned from the current live versions. The QR release preserved all 
 - Live six-QR redirect chain, Firestore test events and SHA-256 verification; campaign counters remain zero before campaign start.
 
 The vendor ZIP contains only the six JPEGs, delivery instructions and SHA256SUMS.txt. Images retain their approved artwork apart from the exact QR replacement. Physical LED wall scan distance still requires an on-site check.
+
+## Production evidence · 26 October 2026
+
+All 240 repository assets were downloaded from the live site and compared byte for byte; no differences. Hosting configuration also matches. The two additional Hosting paths are reserved Firebase init resources. The reviewed source is therefore safe to merge through the existing guarded Hosting workflow.
+
+QR Hosting version: `sites/ilovepaghe-ludo-2026/versions/22aad5c27f2801fb`. Monitoring version before repository merge: `sites/tabellone-produzione-liv-e313e/versions/400bcc5d0c9e9d2a`. Six live technical events (one per wall) were verified in the CRM ledger with valid SHA-256 values; campaign and outside-period counters were all zero.
