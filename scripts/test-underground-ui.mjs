@@ -25,8 +25,8 @@ try{
    const path=resolve(root,'.'+url.pathname);assert.ok(path.startsWith(root+'/'));
    try{return route.fulfill({status:200,contentType:{'.html':'text/html','.js':'application/javascript','.css':'text/css','.woff2':'font/woff2','.png':'image/png'}[extname(path)]||'application/octet-stream',body:path.endsWith('warehouse-DAXf6-td.js')?bundle:await readFile(path)});}catch{return route.fulfill({status:404,body:''});}
   });
-  await page.goto(origin+'/minimal-originale/capannone_3d.html');await page.getByText('Servizi operativi',{exact:true}).waitFor();
-  await page.locator('.ug-summary').click();await page.locator('dialog[open]').waitFor();
+  await page.goto(origin+'/minimal-originale/capannone_3d.html');await page.locator('.ug-launch[title="Underground studio · Servizi operativi"]').waitFor();
+  await page.locator('.ug-launch').click();await page.locator('dialog[open]').waitFor();
   assert.ok((await page.locator('.ug-dialog').innerText()).includes('Fatturazione da autorizzare'));
   assert.ok((await page.locator('.ug-dialog').innerText()).includes('Accesso amministratore'));
   const download=page.waitForEvent('download');await page.getByRole('button',{name:'Scarica riepilogo CSV'}).click();assert.equal((await download).suggestedFilename(),'UndergroundStudio-consumi.csv');

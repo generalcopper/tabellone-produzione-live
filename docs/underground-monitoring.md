@@ -9,3 +9,8 @@ Conservati nome file e presentazione approvata. Il ripristino di compatibilità 
 Verifica: controlli ordinati completi, CSV e 6 prove headless (390/1440/1920, chiaro/scuro), accesso autenticato, cambio mese, download e dati scaduti. Nessuna chiamata reale nei test UI.
 
 Riepilogo CSV: comprende anche repository, artifact e cache GitHub con rilevazione e unità, senza inventare costi per valori mancanti. Il sommario specifica Storage, distinto dallo spazio delle immagini di deploy e dal database. Aggiornati i digest di modulo, bundle ed entry per il caching esistente.
+
+
+Correzione richiesta 320707f6-d987-443f-9ce1-cf7e3b82bf5b: eliminata la zona Underground dalla griglia. Il monitor è accessibile esclusivamente dal piccolo pulsante UG dentro la zona iLovePaghe, fuori dal flusso del layout. Le cinque zone, i componenti precedenti e il loro ordine sono ripristinati; le funzioni di monitoraggio restano nel dialogo.
+
+Verifica della correzione: confronto completo con il commit 1f0b572, precedente al monitoraggio. Venti combinazioni fra cinque risoluzioni (390, 1440, 1920, 3440 e 5120 px), due temi e presenza/assenza di avvisi: tutte le coordinate e dimensioni degli elementi precedenti coincidono. Confermati cinque settori, nessun settore aggiuntivo e pulsante contenuto nella zona iLovePaghe. Test del dialogo, autenticazione, cambio mese, CSV e connessione superati.

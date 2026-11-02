@@ -31,10 +31,9 @@ export function createUndergroundMonitor(React){
     const stale=error||!data||Date.parse(data.expiresAt)<=now;
     const issues=(data?.checks??[]).filter(c=>c.state!=='ok');
     const state=stale?'Da verificare':issues.length?issues.length+' avvisi':'Servizi operativi';
-    const storage=data?.metrics?.find(x=>x.id==='storage');
     function exportReport(){if(!data)return;const url=URL.createObjectURL(new Blob([reportCSV(data)],{type:'text/csv;charset=utf-8'}));const a=document.createElement('a');a.href=url;a.download='UndergroundStudio-consumi.csv';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
     return h('div',{className:'ug-monitor'},
-      h('button',{className:'ug-summary',onClick:()=>setOpen(true)},h('strong',null,'Underground studio'),h('span',{className:stale||issues.length?'ug-attention':''},state),h('small',null,storage?.value==null?'Spazio in attesa':number(storage.value/1073741824)+' GiB Storage'),h('small',null,money(data?.cloudCost?.amount,'EUR')+' · mese Google Cloud')),
+      h('button',{type:'button',className:'ug-launch',onClick:()=>setOpen(true),disabled:!user,title:'Underground studio · '+state,'aria-label':'Monitoraggio Underground studio','aria-haspopup':'dialog','aria-expanded':open},'UG'),
       h('dialog',{ref:dialog,className:'ug-dialog',onCancel:()=>setOpen(false)},
         h('header',null,h('div',null,h('h2',null,'Underground studio'),h('p',null,'Controllo '+time(data?.generatedAt))),h('button',{onClick:()=>setOpen(false),'aria-label':'Chiudi'},'×')),
         stale&&h('p',{role:'alert',className:'ug-attention'},'Rilevazione assente o scaduta. I dati conservano il loro ultimo orario.'),
