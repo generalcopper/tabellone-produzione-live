@@ -1,3 +1,4 @@
+import {restoreUndergroundBundle} from './warehouse-underground-compat.mjs';
 import {restoreILPCockpitImport} from './warehouse-ilovepaghe-compat.mjs';
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
@@ -14,6 +15,7 @@ export const POWER_LIMIT_PATCHES = [
   ]
 ];
 export function restorePowerLimit(bundle) {
+  bundle=restoreUndergroundBundle(bundle);
   let original = restoreILPCockpitImport(bundle);
   for (const [baseline, updated] of POWER_LIMIT_PATCHES) {
     assert.equal(original.split(updated).length, 2, 'Approved 15 kW configuration missing or duplicated');

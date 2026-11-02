@@ -1,0 +1,12 @@
+import assert from 'node:assert/strict';
+import {csvRows,reportCSV} from '../public/minimal-originale/warehouse-assets/warehouse-underground.js';
+const data={requestedMonth:'2026-11',cloudCost:{amount:null,currency:'EUR',status:'pending'},github:{billing:{state:'permission_required'}},monthly:{metrics:[]},sharedCosts:{postmark:{detail:'Condiviso'}}};
+assert.equal(csvRows(data)[1][4],'');
+assert.equal(csvRows(data)[2][4],'');
+assert.equal(csvRows(data)[3][6],'non attribuito');
+const available={...data,cloudCost:{amount:0,currency:'EUR',status:'provisional'},github:{observedAt:'2026-11-02T10:00:00Z',billing:{state:'available',items:[{product:'Actions',sku:'Linux',quantity:10,unit:'minutes',net:-1.25}]}}};
+assert.equal(csvRows(available)[1][4],0);
+assert.equal(csvRows(available)[2][5],'USD');
+assert.equal(csvRows(available)[1][5],'EUR');
+assert.ok(reportCSV(available).includes('"-1,25"'));
+console.log(JSON.stringify({undergroundReport:'passed',unknownIsNotZero:true,noCurrencyMix:true,sharedNotAllocated:true,negativeCreditPreserved:true}));
