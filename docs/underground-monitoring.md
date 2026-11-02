@@ -7,3 +7,5 @@ Importi mancanti mai zero, EUR/USD separati, crediti negativi conservati, Postma
 Conservati nome file e presentazione approvata. Il ripristino di compatibilità rimuove soltanto import, inizializzazione e scheda Underground per confrontare tutti i byte rimanenti con gli hash precedenti. Nessuna variazione ai pin di sicurezza, energia, polling e autenticazione.
 
 Verifica: controlli ordinati completi, CSV e 6 prove headless (390/1440/1920, chiaro/scuro), accesso autenticato, cambio mese, download e dati scaduti. Nessuna chiamata reale nei test UI.
+
+Riepilogo CSV: comprende anche repository, artifact e cache GitHub con rilevazione e unità, senza inventare costi per valori mancanti. Il sommario specifica Storage, distinto dallo spazio delle immagini di deploy e dal database. Aggiornati i digest di modulo, bundle ed entry per il caching esistente.

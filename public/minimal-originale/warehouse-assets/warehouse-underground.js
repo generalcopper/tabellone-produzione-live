@@ -10,6 +10,7 @@ export function csvRows(data){
   const git=data.github;
   if(git?.billing?.state==='available')for(const r of git.billing.items)rows.push([month,r.product+' · '+r.sku,r.quantity,r.unit,r.net,'USD','provvisorio','GitHub Billing API',git.observedAt]);
   else rows.push([month,'GitHub','','','','USD',git?.billing?.state??'unavailable','GitHub Billing API',git?.observedAt??'']);
+  for(const [key,label,unit] of [['repositoryKiB','GitHub repository','KiB'],['artifactBytes','GitHub artifact','byte'],['artifactCount','GitHub artifact','elementi'],['cacheBytes','GitHub cache','byte'],['cacheCount','GitHub cache','elementi']])rows.push([month,label,git?.[key]??'',unit,'','',git?.[key]==null?'non disponibile':'misura istantanea','GitHub API',git?.observedAt??'']);
   for(const r of data.monthly?.metrics??[])rows.push([month,r.label,r.value??'',r.unit,'','','consumo tecnico',r.type,r.observedAt??'']);
   for(const [key,item] of Object.entries(data.sharedCosts??{}))rows.push([month,key,'','','','','non attribuito',item.detail,'']);
   return rows;
@@ -33,7 +34,7 @@ export function createUndergroundMonitor(React){
     const storage=data?.metrics?.find(x=>x.id==='storage');
     function exportReport(){if(!data)return;const url=URL.createObjectURL(new Blob([reportCSV(data)],{type:'text/csv;charset=utf-8'}));const a=document.createElement('a');a.href=url;a.download='UndergroundStudio-consumi.csv';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
     return h('div',{className:'ug-monitor'},
-      h('button',{className:'ug-summary',onClick:()=>setOpen(true)},h('strong',null,'Underground studio'),h('span',{className:stale||issues.length?'ug-attention':''},state),h('small',null,storage?.value==null?'Spazio in attesa':number(storage.value/1073741824)+' GiB cloud'),h('small',null,money(data?.cloudCost?.amount,'EUR')+' · mese Google Cloud')),
+      h('button',{className:'ug-summary',onClick:()=>setOpen(true)},h('strong',null,'Underground studio'),h('span',{className:stale||issues.length?'ug-attention':''},state),h('small',null,storage?.value==null?'Spazio in attesa':number(storage.value/1073741824)+' GiB Storage'),h('small',null,money(data?.cloudCost?.amount,'EUR')+' · mese Google Cloud')),
       h('dialog',{ref:dialog,className:'ug-dialog',onCancel:()=>setOpen(false)},
         h('header',null,h('div',null,h('h2',null,'Underground studio'),h('p',null,'Controllo '+time(data?.generatedAt))),h('button',{onClick:()=>setOpen(false),'aria-label':'Chiudi'},'×')),
         stale&&h('p',{role:'alert',className:'ug-attention'},'Rilevazione assente o scaduta. I dati conservano il loro ultimo orario.'),
