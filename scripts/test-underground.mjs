@@ -3,7 +3,9 @@ import {csvRows,reportCSV} from '../public/minimal-originale/warehouse-assets/wa
 const data={requestedMonth:'2026-11',cloudCost:{amount:null,currency:'EUR',status:'pending'},github:{billing:{state:'permission_required'}},monthly:{metrics:[]},sharedCosts:{postmark:{detail:'Condiviso'}}};
 assert.equal(csvRows(data)[1][4],'');
 assert.equal(csvRows(data)[2][4],'');
-assert.equal(csvRows(data)[3][6],'non attribuito');
+assert.equal(csvRows(data).find(r=>r[1]==='postmark')[6],'non attribuito');
+assert.equal(csvRows(data).find(r=>r[1]==='GitHub cache')[2],'');
+assert.equal(csvRows({...data,github:{...data.github,cacheBytes:0}}).find(r=>r[1]==='GitHub cache')[2],0);
 const available={...data,cloudCost:{amount:0,currency:'EUR',status:'provisional'},github:{observedAt:'2026-11-02T10:00:00Z',billing:{state:'available',items:[{product:'Actions',sku:'Linux',quantity:10,unit:'minutes',net:-1.25}]}}};
 assert.equal(csvRows(available)[1][4],0);
 assert.equal(csvRows(available)[2][5],'USD');
