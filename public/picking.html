@@ -25,6 +25,7 @@
 <link rel="modulepreload" href="https://www.gstatic.com/firebasejs/12.7.0/firebase-auth.js" crossorigin>
 <link rel="modulepreload" href="https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js" crossorigin>
 <link rel="stylesheet" href="/public1/app.css">
+<link rel="stylesheet" href="/picking-home.css?v=20261104-home">
 <script src="/public1/app.js" defer></script>
 
   <!-- iOS Google Auth stabilizer (files in /public1) -->
@@ -386,7 +387,11 @@
 
     <nav class="pickingNavGroup" aria-label="Sezioni">
       <div class="pickingNavGroupLabel">Operatività</div>
-      <button class="pickingNavBtn is-active" id="btnPickingNoLocation" type="button" data-picking-view="noLocation" aria-controls="homeNoLocationBox" aria-pressed="true">
+      <button class="pickingNavBtn is-active" id="btnPickingHome" type="button" data-picking-view="home" aria-controls="homeOverviewBox" aria-pressed="true">
+        <span class="pickingNavIcon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3 10 9-7 9 7v10H3Z"/><path d="M9 20v-7h6v7"/></svg></span>
+        <span class="pickingNavLabel">Home</span>
+      </button>
+      <button class="pickingNavBtn" id="btnPickingNoLocation" type="button" data-picking-view="noLocation" aria-controls="homeNoLocationBox" aria-pressed="false">
         <span class="pickingNavIcon" aria-hidden="true">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><path d="M5 12l7 7 7-7"/></svg>
         </span>
@@ -493,6 +498,7 @@
         <div class="cardBody" style="padding: 4px;">
           <div class="pickingLayout" id="pickingLayout" aria-label="Sezioni picking ubicazioni">
             <div class="pickingContent">
+          <section class="pickingSection is-active" id="homeOverviewBox" aria-labelledby="homeOverviewTitle" aria-hidden="false"></section>
           <!-- Prodotti ubicati: prodotti con disponibilità positiva e ubicazione già assegnata -->
           <div class="miniCard pickingSection" id="homeLocatedBox">
             <div class="miniTop">
@@ -513,7 +519,7 @@
           </div>
 
           <!-- Prodotti da ubicare: arrivano da produzione / carichi cloud e non hanno ancora posti assegnati -->
-          <div class="miniCard pickingSection is-active" id="homeNoLocationBox">
+          <div class="miniCard pickingSection" id="homeNoLocationBox" aria-hidden="true">
             <div class="miniTop">
               <div>
                 <div class="miniTitle">Da ubicare</div>
@@ -710,6 +716,8 @@
 
 <!-- fix: Shopify FBM realtime picking visibility v20260621 -->
 <script type="module">
+    import { createPickingHomeDashboard } from "/picking-home.js?v=20261104-home";
+    let pickingHomeDashboard = null;
     // === Firebase config ===
     const firebaseConfig = {
       apiKey: "AIzaSyBiyB4pilnPpVj8vImD4PI6LF2_RtyDnv4",
@@ -774,7 +782,7 @@
         carica: { file:null, lines:[], busy:false, workflow:null },
         scarica: { file:null, lines:[], busy:false, workflow:null }
       },
-      ui: { sheet:null, sheetStack:[], sottoscortaLoc:null, wfOpen:false, flowId:null, flowSearch:"", productsSearch:"", homeLocatedSearch:"", homeNoLocationSearch:"", pickingHomeView:"noLocation", productEditSku:null, productDetailsSku:null, productDetailsLot:"", productDetailsEditMode:false, caricaMode:"pdf", flowsModalLoc:"concamarise", skuPick:{ lineIdx:null, q:"" } },
+      ui: { sheet:null, sheetStack:[], sottoscortaLoc:null, wfOpen:false, flowId:null, flowSearch:"", productsSearch:"", homeLocatedSearch:"", homeNoLocationSearch:"", pickingHomeView:"home", productEditSku:null, productDetailsSku:null, productDetailsLot:"", productDetailsEditMode:false, caricaMode:"pdf", flowsModalLoc:"concamarise", skuPick:{ lineIdx:null, q:"" } },
       manual: { carica:{ text:"", lines:[], busy:false } },
       actionLocks: new Set(),
 
@@ -1781,7 +1789,9 @@ function cleanProductMainName(s){
           state.boot.readyTimer = null;
           state.authGateState = "signed_in";
           renderHomeDashboard();
-          schedulePickingPreviewCounts("startup_ready", { delay:500, inventoryOnly:true });
+          schedulePickingPreviewCounts("startup_ready", pickingHomeView() === "home"
+            ? { delay:500, includeRemote:true, includeFba:true }
+            : { delay:500, inventoryOnly:true });
           syncHeaderSub();
           toggleAuthOverlay(false);
         }, 100);
@@ -4150,14 +4160,14 @@ function readRackPickerSelection(root){
         });
         inv.items=arr;
         invalidateInventoryRuntimeCaches("inventory_runtime_change");
-        inv.meta={count:arr.length,lastUpdatedAt:last?new Date(last):null,loaded:true};
+        inv.meta={count:arr.length,lastUpdatedAt:last?new Date(last):null,loaded:true,fromCache:!!snap.metadata?.fromCache};
         renderHomeDashboard();
         if(state.ui.sheet==="productDetails") renderProductDetailsSheet();
         // Lo snapshot realtime è solo lettura: non normalizza né propaga ubicazioni.
         // Le scritture rack avvengono esclusivamente dopo un'azione esplicita dell'operatore.
         updateFbmPreviewFromInventory("inventory_snapshot");
         checkStartupDataGate("inventory_snapshot");
-      },(err)=>{ console.warn("inventory watch error",err); showToast("Permessi insufficienti",err?.message||String(err)); });
+      },(err)=>{ inv.meta.error=String(err?.message||err); refreshPickingHomeOverview(); console.warn("inventory watch error",err); showToast("Permessi insufficienti",err?.message||String(err)); });
     }
 
  
@@ -4341,6 +4351,7 @@ function readRackPickerSelection(root){
         p[k].updatedAtClient = Date.now();
         p[k].source = String(source || "");
         setPickingNavCount(k === "fba" ? "pickingFba" : "pickingFbm", fmtN(p[k].count));
+        refreshPickingHomeOverview();
       }catch(_e){}
     }
 
@@ -4351,6 +4362,7 @@ function readRackPickerSelection(root){
         if(!p[k].loaded){
           p[k].loading = true;
           setPickingNavCount(k === "fba" ? "pickingFba" : "pickingFbm", "…");
+          refreshPickingHomeOverview();
         }
       }catch(_e){}
     }
@@ -7523,9 +7535,9 @@ function readRackPickerSelection(root){
     }
 
     function pickingHomeView(){
-      const v = state.ui?.pickingHomeView || "noLocation";
+      const v = state.ui?.pickingHomeView || "home";
       if(v === "picking") return "pickingFbm"; // compatibilità con vecchia voce unica
-      return (v === "cerea" || v === "located" || v === "pickingFbm" || v === "pickingFba" || v === "pickingHistory" || (v === "bioneeShop" && state.user?.isWhitelisted) || (v === "notifications" && state.user?.isAdmin)) ? v : "noLocation";
+      return (v === "home" || v === "noLocation" || v === "cerea" || v === "located" || v === "pickingFbm" || v === "pickingFba" || v === "pickingHistory" || (v === "bioneeShop" && state.user?.isWhitelisted) || (v === "notifications" && state.user?.isAdmin)) ? v : "home";
     }
 
     
@@ -7827,6 +7839,7 @@ function readRackPickerSelection(root){
       const view = pickingHomeView();
       const pickingActive = (view === "pickingFbm" || view === "pickingFba");
       const sections = [
+        { key:"home", box:"homeOverviewBox", active:view === "home" },
         { key:"noLocation", box:"homeNoLocationBox", active:view === "noLocation" },
         { key:"cerea", box:"homeCereaBox", active:view === "cerea" },
         { key:"located", box:"homeLocatedBox", active:view === "located" },
@@ -7836,6 +7849,7 @@ function readRackPickerSelection(root){
         { key:"notifications", box:"homePickingNotificationsBox", active:view === "notifications" },
       ];
       const buttons = [
+        { key:"home", btn:"btnPickingHome" },
         { key:"noLocation", btn:"btnPickingNoLocation" },
         { key:"cerea", btn:"btnPickingCerea" },
         { key:"located", btn:"btnPickingLocated" },
@@ -7878,7 +7892,7 @@ function readRackPickerSelection(root){
         void openDroneModeFullscreen();
         return;
       }
-      state.ui.pickingHomeView = (next === "cerea" || next === "located" || next === "pickingFbm" || next === "pickingFba" || next === "pickingHistory" || (next === "bioneeShop" && state.user?.isWhitelisted) || (next === "notifications" && state.user?.isAdmin)) ? next : "noLocation";
+      state.ui.pickingHomeView = (next === "home" || next === "noLocation" || next === "cerea" || next === "located" || next === "pickingFbm" || next === "pickingFba" || next === "pickingHistory" || (next === "bioneeShop" && state.user?.isWhitelisted) || (next === "notifications" && state.user?.isAdmin)) ? next : "home";
       if(state.ui.pickingHomeView === "bioneeShop") void openBioneeShop();
       else _bioneeShopUi?.close();
       if(state.ui.pickingHomeView === "notifications") void openPickingMail();
@@ -7896,6 +7910,7 @@ function readRackPickerSelection(root){
         stopActivityLogWatch({ render:false });
       }
       syncPickingHomeView();
+      if(state.ui.pickingHomeView === "home") pickingHomeDashboard?.activate();
       if(state.route?.view === "home" && (state.ui.pickingHomeView === "pickingFbm" || state.ui.pickingHomeView === "pickingFba")){
         renderHomePickingBox();
       }
@@ -11057,7 +11072,12 @@ function renderHomePickingHistoryBox(){
       }
     }
 
+    function refreshPickingHomeOverview(){
+      pickingHomeDashboard?.scheduleRender();
+    }
+
     function renderHomeDashboard(){
+      refreshPickingHomeOverview();
       renderHomeNoLocationBox();
       renderHomeCereaBox();
       renderHomeLocatedBox();
@@ -13079,10 +13099,10 @@ function closeSheet(name,opts={}){
         }catch(_e){}
       }
 
-      function buildPlanSVG(parsed, positions){
+      function buildPlanSVG(parsed, positions, overview=null){
         const NS = "http://www.w3.org/2000/svg";
         const f = (n)=> (Math.round(n*1000)/1000);
-        const posList = (Array.isArray(positions) && positions.length) ? positions : [parsed];
+        const posList = overview ? [] : ((Array.isArray(positions) && positions.length) ? positions : [parsed]);
         // mappa: bayCode -> set di pallet coinvolti, e quale bay è la principale
         const bayInvolved = new Set(posList.map(p=>p.bayCode));
         let s = "";
@@ -13123,12 +13143,18 @@ function closeSheet(name,opts={}){
 
           for(const b of arr){
             const bx = b.cx - b.wx/2, bz = b.cz - b.wz/2;
-            const isPrimary = (b.code === parsed.bayCode);
-            const isInvolved = bayInvolved.has(b.code);
-            const fill = isInvolved ? col[0] : "rgba(15,23,42,.045)";
-            const stroke = isInvolved ? "rgba(0,0,0,.35)" : "rgba(15,23,42,.28)";
-            const cls = isPrimary ? ' class="tm-targetcell"' : "";
-            const fillOpacity = isInvolved && !isPrimary ? ' fill-opacity="0.55"' : "";
+            const homeBay = overview?.bays.get(b.code);
+            const isPrimary = overview ? b.code === overview.selectedBay : b.code === parsed.bayCode;
+            const isInvolved = overview ? !!homeBay?.occupied : bayInvolved.has(b.code);
+            const fill = overview ? (isPrimary ? "#0f7078" : isInvolved ? "#bfe2de" : "#ffffff") : (isInvolved ? col[0] : "rgba(15,23,42,.045)");
+            const stroke = overview ? (isPrimary || isInvolved ? "#0f7078" : "#94a3b8") : (isInvolved ? "rgba(0,0,0,.35)" : "rgba(15,23,42,.28)");
+            const cls = !overview && isPrimary ? ' class="tm-targetcell"' : "";
+            if(overview){
+              const label = overview.ready ? `Campata ${b.code}, ${homeBay?.occupied || 0} di ${homeBay?.positions.length || 0} postazioni occupate` : `Campata ${b.code}, dati in caricamento`;
+              const dim = overview.searching && !homeBay?.matched ? ' opacity="0.22"' : '';
+              s += `<g data-home-bay="${b.code}" role="button" tabindex="0" aria-pressed="${isPrimary}" aria-label="${esc(label)}"${dim}><title>${esc(label)}</title>`;
+            }
+            const fillOpacity = !overview && isInvolved && !isPrimary ? ' fill-opacity="0.55"' : "";
             s += `<rect${cls} x="${f(bx)}" y="${f(bz)}" width="${f(b.wx)}" height="${f(b.wz)}" rx="0.08" fill="${fill}"${fillOpacity} stroke="${stroke}" stroke-width="${isInvolved?0.14:0.07}"/>`;
             for(let p=1;p<b.pal;p++){
               if(vertical){
@@ -13139,10 +13165,11 @@ function closeSheet(name,opts={}){
                 s += `<line x1="${f(xx)}" y1="${f(bz)}" x2="${f(xx)}" y2="${f(bz+b.wz)}" stroke="rgba(15,23,42,.22)" stroke-width="0.03"/>`;
               }
             }
-            const tcol = isInvolved ? col[1] : "rgba(15,23,42,.55)";
+            const tcol = overview ? (isPrimary ? "#ffffff" : "#23444b") : (isInvolved ? col[1] : "rgba(15,23,42,.55)");
             s += `<text x="${f(b.cx)}" y="${f(b.cz)}" font-size="${vertical?0.42:0.46}" fill="${tcol}" text-anchor="middle" dominant-baseline="middle" font-weight="800" transform="rotate(${vertical?-90:0} ${f(b.cx)} ${f(b.cz)})">${b.code}</text>`;
+            if(overview) s += '</g>';
             // riquadro tratteggiato sul pallet di ogni posizione coinvolta in questa campata
-            if(isInvolved){
+            if(!overview && isInvolved){
               for(const pos of posList){
                 if(pos.bayCode !== b.code) continue;
                 const slot = (vertical ? b.wz : b.wx) / b.pal;
@@ -13185,7 +13212,7 @@ function closeSheet(name,opts={}){
           return g;
         };
         for(const pos of posList){ if(pos.code !== parsed.code) s += pinAt(pos, false); }
-        s += pinAt(parsed, true);
+        if(!overview) s += pinAt(parsed, true);
 
         // scala
         s += `<g opacity="0.8">`;
@@ -13195,7 +13222,7 @@ function closeSheet(name,opts={}){
         s += `<text x="${f(x0+2.9)}" y="${f(z1-0.85)}" font-size="0.55" fill="rgba(15,23,42,.6)" text-anchor="middle" font-weight="700">5 m</text>`;
         s += `</g>`;
 
-        return `<svg class="tm-plan" viewBox="${f(VB.x)} ${f(VB.y)} ${f(VB.w)} ${f(VB.h)}" xmlns="${NS}" role="img" aria-label="Pianta capannone, posizione ${esc(parsed.code)}">${s}</svg>`;
+        return `<svg class="tm-plan" viewBox="${f(VB.x)} ${f(VB.y)} ${f(VB.w)} ${f(VB.h)}" xmlns="${NS}" role="${overview ? "group" : "img"}" aria-label="${overview ? "Mappa interattiva del capannone di Concamarise" : "Pianta capannone, posizione " + esc(parsed.code)}">${s}</svg>`;
       }
 
       // --- prospetto laterale (alzato) della campata target, in scala sull'altezza reale ---
@@ -13359,6 +13386,43 @@ function closeSheet(name,opts={}){
           });
         });
       }
+
+      pickingHomeDashboard = createPickingHomeDashboard({
+        root: $("homeOverviewBox"),
+        locationCodes: RACK_LOCATION_OPTIONS,
+        renderPlan: overview => buildPlanSVG(null, [], overview),
+        navigate: setPickingHomeView,
+        refreshPreview: () => {
+          if(state.user?.isWhitelisted) schedulePickingPreviewCounts("home_overview", { delay:200, includeRemote:true, includeFba:true });
+        },
+        readSnapshot: () => {
+          const inventory = state.inventory[INVENTORY_CANONICAL_LOC];
+          const allowed = !!state.user?.isWhitelisted;
+          return {
+            userId: allowed ? state.user.uid : null, allowed,
+            loaded: !!inventory?.meta?.loaded, fromCache: !!inventory?.meta?.fromCache,
+            error: inventory?.meta?.error || "", online: navigator.onLine !== false,
+            preview: state.pickingPreview,
+            items: allowed && inventory?.meta?.loaded ? stockRepresentativeItemsForLoc(INVENTORY_CANONICAL_LOC).map(it => ({
+              sku: toSkuId(it.__rackSourceSku || it.__stockSourceSku || it.sku || it.id),
+              displaySku: toSkuId(it.__canonicalSku || it.sku), aliases: it.__aliasSkus || [],
+              title: parseTitleMeta(it.title || "").main || it.title || it.sku,
+              total: stockQtyFromDoc(it), allocated: rackAllocatedQtyFromDoc(it), cerea: cereaQtyFromDoc(it),
+              allocations: readRackAllocationsFromDoc(it).map(a => ({...a, lotLabel: lotLabelFromId(a.lot)}))
+            })) : []
+          };
+        },
+        openProduct: ({sku, lot, code}) => {
+          if(!state.user?.isWhitelisted || !getProductBySku(INVENTORY_CANONICAL_LOC, sku)) return;
+          state.ui.productDetailsLot = normalizeLotId(lot || "");
+          openProductDetailsSheet(sku);
+          requestAnimationFrame(() => {
+            const row = Array.from($("productDetailsContent")?.querySelectorAll(".rackAllocRow") || [])
+              .find(el => el.dataset.oldCode === code && el.dataset.lot === lot);
+            if(row){ row.classList.add("ph-target-allocation"); row.scrollIntoView({block:"nearest"}); }
+          });
+        }
+      });
 
       // wrapping non distruttivo: chiama l'originale (comando Firestore al Capannone 3D
       // INVARIATO), poi apre la pianta fullscreen.
