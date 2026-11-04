@@ -3,20 +3,20 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const path = require('node:path');
-const source = fs.readFileSync(path.join(__dirname, '../public/picking.html'), 'utf8');
+const source = fs.readFileSync(path.join(__dirname, '../public/picking.js'), 'utf8');
 function block(start, end) {
   const from = source.indexOf(start), to = source.indexOf(end, from);
   assert(from >= 0 && to > from, start);
   return source.slice(from, to);
 }
 const code = [
-  block('    function parseSignedQtyStrict(', '    // --- title/meta helpers'),
-  block('    function productionLotIdFromTs(', '    function normalizeRackLocation('),
-  block('    function normalizeRackLocation(', '    function rackLocationDisplayPartsFromItem('),
-  block('    function rackAllocationRowsForDetails(', '    function rackAllocationsEditorHtml('),
-  block('    function buildStockLotsForUnallocatedQty(', '    async function editHomeNoLocationQtyPrompt('),
-  block('    function locatedQtySnapshotKey(', '    function renderHomeNoLocationBox('),
-  block('    function getItemsWithRackLocations(', '    // --- Picking visual:')
+  block('function parseSignedQtyStrict(', '// --- title/meta helpers'),
+  block('function productionLotIdFromTs(', 'function normalizeRackLocation('),
+  block('function normalizeRackLocation(', 'function rackLocationDisplayPartsFromItem('),
+  block('function rackAllocationRowsForDetails(', 'function rackAllocationsEditorHtml('),
+  block('function buildStockLotsForUnallocatedQty(', 'async function editHomeNoLocationQtyPrompt('),
+  block('function locatedQtySnapshotKey(', 'function renderHomeNoLocationBox('),
+  block('function getItemsWithRackLocations(', '// --- Picking visual:')
 ].join('\n');
 const a = {code:'A01-L1-P1', lot:'LOTTO-20260901', qty:480};
 const b = {code:'B01-L1-P1', lot:'LOTTO-20260902', qty:300};

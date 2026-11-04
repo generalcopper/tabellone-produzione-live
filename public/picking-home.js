@@ -1,197 +1,309 @@
-// Home reads the same authoritative stock representatives and allocation helpers as Picking.
-// Navigation and product editing are delegated to the existing application.
-const number = value => new Intl.NumberFormat('it-IT').format(value);
-const products = value => number(value) + (value === 1 ? ' prodotto' : ' prodotti');
-const text = value => String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
-const normalized = value => String(value ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
-const quantity = value => Number.isFinite(Number(value)) ? Math.max(0, Math.round(Number(value))) : 0;
+// Home: coda di lavoro, ricerca "dove si trova" e stato del magazzino.
+// Legge gli stessi articoli autoritativi del resto dell'app; le azioni sono delegate a picking.js.
+import {
+  ROW_IDS,
+  buildPlanSVG,
+  buildWarehouseModel,
+  locationLabelHTML,
+  rowSignHTML,
+} from "./picking-map.js?v=45be2460360e";
 
-export function buildHomeModel(items, locationCodes, query = '') {
-  const positions = new Map(locationCodes.map(code => [code, []]));
-  const bays = new Map();
-  for (const code of locationCodes) {
-    const bay = code.split('-')[0];
-    if (!bays.has(bay)) bays.set(bay, {code:bay, positions:[], occupied:0, qty:0, unknown:false, matched:false});
-    bays.get(bay).positions.push(code);
-  }
-  const terms = normalized(query).trim().split(/\s+/).filter(Boolean);
-  const matches = value => terms.every(term => normalized(value).includes(term));
-  const stats = {products:0, total:0, allocated:0, unallocated:0, locatedProducts:0, unlocatedProducts:0, cerea:0, cereaProducts:0, occupied:0, capacity:locationCodes.length};
-  let unlocatedMatches = 0;
-  for (const item of items) {
-    const total = quantity(item.total);
-    if (!total) continue;
-    const allocated = Math.min(total, quantity(item.allocated));
-    const remaining = total - allocated;
-    stats.products++; stats.total += total; stats.allocated += allocated; stats.unallocated += remaining;
-    if (allocated) stats.locatedProducts++;
-    if (remaining) stats.unlocatedProducts++;
-    const cerea = Math.min(remaining, quantity(item.cerea));
-    stats.cerea += cerea;
-    if (cerea) stats.cereaProducts++;
-    const searchable = [item.sku, item.displaySku, item.title, ...(item.aliases || [])].join(' ');
-    if (terms.length && remaining && matches(searchable)) unlocatedMatches++;
-    for (const allocation of item.allocations || []) {
-      const entries = positions.get(allocation.code);
-      const unknown = allocation.legacy === true;
-      const qty = unknown ? null : quantity(allocation.qty);
-      if (!entries || (!unknown && !qty)) continue;
-      entries.push({...allocation, qty, sku:item.sku, displaySku:item.displaySku || item.sku, title:item.title, unknown});
-      const bay = bays.get(allocation.code.split('-')[0]);
-      bay.qty += qty || 0;
-      bay.unknown ||= unknown;
-      if (matches([searchable, allocation.code, allocation.lot, allocation.lotLabel].join(' '))) bay.matched = true;
-    }
-  }
-  for (const [code, entries] of positions) {
-    if (!entries.length) continue;
-    stats.occupied++;
-    bays.get(code.split('-')[0]).occupied++;
-  }
-  for (const bay of bays.values()) {
-    if (matches([bay.code, ...bay.positions].join(' '))) bay.matched = true;
-  }
-  return {stats, positions, bays, unlocatedMatches, searching:terms.length > 0};
-}
+export { buildWarehouseModel as buildHomeModel };
 
-export function createPickingHomeDashboard({root, readSnapshot, locationCodes, renderPlan, openProduct, navigate, refreshPreview}) {
-  let selectedBay = '', level = 'all', query = '', zoom = 1, frame = null;
-  let model = buildHomeModel([], locationCodes);
+const number = (value) => new Intl.NumberFormat("it-IT").format(value);
+const text = (value) =>
+  String(value ?? "").replace(
+    /[&<>"']/g,
+    (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch],
+  );
+const plural = (n, one, many) => `${number(n)} ${n === 1 ? one : many}`;
+const chevron = `<svg class="ico chev" viewBox="0 0 24 24" aria-hidden="true"><path d="m9.5 6 6 6-6 6"/></svg>`;
+
+export function createPickingHomeDashboard({
+  root,
+  readSnapshot,
+  locationCodes,
+  navigate,
+  openProduct,
+  openMap,
+  refreshPreview,
+}) {
+  let query = "";
+  let frame = null;
   let previousUser = null;
-  const byId = id => root.querySelector('#' + id);
-  const metric = (id, label, view) => `<button class="ph-metric" type="button" data-ph-view="${view}"><span class="ph-label">${label}<span aria-hidden="true">↗</span></span><strong id="${id}">—</strong><span class="ph-muted" id="${id}Detail">In caricamento</span></button>`;
   root.innerHTML = `
-    <header class="ph-header"><div><div class="ph-eyebrow">PANORAMICA OPERATIVA</div><h1 id="homeOverviewTitle">Home</h1><p>Prodotti, prelievi e postazioni del magazzino.</p></div><span class="ph-status" id="phStatus" role="status">Caricamento dati…</span></header>
-    <div class="ph-metrics">
-      <div class="ph-metric"><span class="ph-label">Disponibilità totale</span><strong id="phTotal">—</strong><span class="ph-muted" id="phTotalDetail">In caricamento</span></div>
-      ${metric('phLocated', 'Ubicati', 'located')}
-      ${metric('phUnlocated', 'Da ubicare', 'noLocation')}
-      <div class="ph-metric ph-occupancy"><span class="ph-label">Postazioni occupate</span><strong id="phOccupancy">—</strong><span class="ph-muted" id="phOccupancyDetail">In caricamento</span><div class="ph-progress" aria-hidden="true"><span id="phOccupancyBar"></span></div></div>
-    </div>
-    <div class="ph-operations" aria-label="Riepilogo attività">
-      <button type="button" data-ph-view="pickingFbm"><span class="ph-operation-icon">FBM</span><span><b>Picking FBM</b><small id="phFbmDetail">Caricamento…</small></span><strong id="phFbm">—</strong><span aria-hidden="true">›</span></button>
-      <button type="button" data-ph-view="pickingFba"><span class="ph-operation-icon">FBA</span><span><b>Picking FBA</b><small id="phFbaDetail">Caricamento…</small></span><strong id="phFba">—</strong><span aria-hidden="true">›</span></button>
-      <button type="button" data-ph-view="cerea"><span class="ph-operation-icon">C</span><span><b>Cerea</b><small id="phCereaDetail">Posizione temporanea</small></span><strong id="phCerea">—</strong><span aria-hidden="true">›</span></button>
-      <button type="button" data-ph-view="pickingHistory"><span class="ph-operation-icon" aria-hidden="true">↶</span><span><b>Storico prelievi</b><small>Consulta i prelievi effettuati</small></span><span aria-hidden="true">›</span></button>
-    </div>
-    <section class="ph-map-card" aria-labelledby="phMapTitle">
-      <div class="ph-map-header"><div><h2 id="phMapTitle">Mappa del capannone</h2><p>Concamarise · seleziona una campata per vedere cosa contiene.</p></div><div class="ph-legend"><span><i class="ph-dot occupied"></i>Occupata</span><span><i class="ph-dot"></i>Libera</span><span><i class="ph-dot selected"></i>Selezionata</span></div></div>
-      <div class="ph-toolbar"><label class="ph-search"><span class="ph-sr-only">Cerca prodotto o ubicazione nella mappa</span><input id="phSearch" type="search" placeholder="Cerca SKU, prodotto, lotto o ubicazione…" autocomplete="off"></label><label class="ph-bay-select"><span class="ph-sr-only">Seleziona campata</span><select id="phBaySelect"><option value="">Vai alla campata…</option>${[...model.bays.keys()].map(code=>`<option value="${code}">${code}</option>`).join('')}</select></label><div class="ph-zoom"><button type="button" data-ph-zoom="out" aria-label="Riduci mappa">−</button><button type="button" data-ph-zoom="reset" aria-label="Ripristina zoom mappa" id="phZoomValue">100%</button><button type="button" data-ph-zoom="in" aria-label="Ingrandisci mappa">+</button></div></div>
-      <div id="phSearchFeedback" class="ph-search-feedback" role="status"></div>
-      <div class="ph-map-layout"><div class="ph-map-viewport" id="phMapViewport" tabindex="0" aria-label="Planimetria: scorri per esplorare la mappa ingrandita"><div id="phMap" class="ph-map"></div></div><aside class="ph-detail" aria-label="Contenuto della campata"><div id="phBayDetail"></div></aside></div>
-      <footer class="ph-map-footer"><span id="phMapSummary">Caricamento ubicazioni…</span><span>Apri un prodotto per gestire le sue ubicazioni.</span></footer>
-    </section>
-    <div class="ph-bottom"><span>Cerea è compresa nelle quantità da ubicare.</span><button type="button" class="btn" data-ph-view="bioneeShop">Apri Bionee shop <span aria-hidden="true">↗</span></button></div>`;
+    <div class="home">
+      <section class="home-block" aria-labelledby="phTodoTitle">
+        <h2 class="block-title" id="phTodoTitle">Da fare</h2>
+        <div class="todo" id="phTodo">
+          <button type="button" class="todo-row" data-ph-view="noLocation">
+            <span class="todo-icon todo-icon--put" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3.5v11"/><path d="m7.5 10 4.5 4.5 4.5-4.5"/><path d="M4 17.5h16v3H4z"/></svg></span>
+            <span class="todo-main"><b>Da ubicare</b><small id="phUnlocatedDetail">In caricamento</small></span>
+            <strong class="todo-value" id="phUnlocated">—</strong>${chevron}
+          </button>
+          <button type="button" class="todo-row" data-ph-view="pickingFbm">
+            <span class="todo-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 8h14l-1.2 11.5H6.2z"/><path d="M9 8V6.5a3 3 0 0 1 6 0V8"/></svg></span>
+            <span class="todo-main"><b>Picking FBM</b><small id="phFbmDetail">In caricamento</small></span>
+            <strong class="todo-value" id="phFbm">—</strong>${chevron}
+          </button>
+          <button type="button" class="todo-row" data-ph-view="pickingFba">
+            <span class="todo-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3.5 7.5 12 3.5l8.5 4v9L12 20.5l-8.5-4z"/><path d="M3.5 7.5 12 11.5l8.5-4M12 11.5v9"/></svg></span>
+            <span class="todo-main"><b>Picking FBA</b><small id="phFbaDetail">In caricamento</small></span>
+            <strong class="todo-value" id="phFba">—</strong>${chevron}
+          </button>
+          <button type="button" class="todo-row" data-ph-view="cerea">
+            <span class="todo-icon todo-icon--temp" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="14" rx="2" stroke-dasharray="3 2.4"/><path d="M8.5 12h7"/></svg></span>
+            <span class="todo-main"><b>Cerea</b><small id="phCereaDetail">Posizione temporanea</small></span>
+            <strong class="todo-value" id="phCerea">—</strong>${chevron}
+          </button>
+        </div>
+      </section>
 
-  function setText(id, value) { const el = byId(id); if (el && el.textContent !== value) el.textContent = value; }
-  function setMarkup(id, html) {
+      <section class="home-block" aria-labelledby="phFindTitle">
+        <h2 class="block-title" id="phFindTitle">Dove si trova</h2>
+        <label class="search search--lg">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4.5 4.5"/></svg>
+          <span class="sr-only">Cerca un prodotto o una posizione</span>
+          <input id="phSearch" type="search" placeholder="SKU, nome prodotto, lotto o posizione" autocomplete="off" spellcheck="false" enterkeyhint="search">
+          <button type="button" class="search-clear" id="phSearchClear" aria-label="Cancella ricerca" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7l10 10M17 7 7 17"/></svg></button>
+        </label>
+        <div id="phSearchFeedback" class="find-results" role="status"></div>
+      </section>
+
+      <section class="home-block home-block--stock" aria-labelledby="phStockTitle">
+        <div class="block-head">
+          <h2 class="block-title" id="phStockTitle">Giacenza</h2>
+          <span class="block-meta" id="phTotalDetail">In caricamento</span>
+        </div>
+        <div class="stock">
+          <div class="stock-total"><strong id="phTotal">—</strong><span>pezzi disponibili</span></div>
+          <div class="stock-bar" aria-hidden="true"><span class="sb-loc" id="phBarLoc"></span><span class="sb-cerea" id="phBarCerea"></span><span class="sb-unloc" id="phBarUnloc"></span></div>
+          <dl class="stock-legend">
+            <div><dt><i class="sw sw-loc"></i>Ubicati</dt><dd id="phLocated">—</dd><dd class="muted" id="phLocatedDetail"></dd></div>
+            <div><dt><i class="sw sw-unloc"></i>Da ubicare</dt><dd id="phUnlocatedPcs">—</dd><dd class="muted" id="phUnlocatedProducts"></dd></div>
+            <div><dt><i class="sw sw-cerea"></i>Di cui a Cerea</dt><dd id="phCereaPcs">—</dd><dd class="muted" id="phCereaProducts"></dd></div>
+          </dl>
+        </div>
+      </section>
+
+      <section class="home-block home-block--map" aria-labelledby="phMapTitle">
+        <div class="block-head">
+          <h2 class="block-title" id="phMapTitle">Capannone</h2>
+          <button type="button" class="link-btn" data-ph-view="map">Apri mappa${chevron}</button>
+        </div>
+        <div class="home-map">
+          <div class="home-plan" id="phMap" role="group" aria-label="Pianta del capannone: tocca una campata per aprirla sulla mappa"></div>
+          <div class="home-rows">
+            <div class="occupancy"><span>Posti occupati</span><strong id="phOccupancy">—</strong><div class="ph-progress" aria-hidden="true"><span id="phOccupancyBar"></span></div><small id="phOccupancyDetail">In caricamento</small></div>
+            <div class="rowtable" id="phRows"></div>
+          </div>
+        </div>
+      </section>
+
+      <div class="home-foot"><span id="phStatus" class="sr-only" role="status">Caricamento dati…</span><button type="button" class="link-btn" data-ph-view="bioneeShop">Controllo Bionee shop${chevron}</button></div>
+    </div>`;
+  const byId = (id) => root.querySelector("#" + id);
+  const input = byId("phSearch");
+  function setText(id, value) {
     const el = byId(id);
-    if (el._html === html) return;
-    const focused = el.contains(document.activeElement) ? document.activeElement : null;
-    const focusKey = focused?.getAttribute('data-home-bay') || focused?.getAttribute('data-ph-level');
-    el.innerHTML = html; el._html = html;
-    if (focusKey) {
-      for (const button of el.querySelectorAll('[data-home-bay], [data-ph-level]')) {
-        if ((button.dataset.homeBay || button.dataset.phLevel) === focusKey) button.focus({preventScroll:true});
-      }
-    }
+    if (el && el.textContent !== value) el.textContent = value;
   }
-  function renderDetail(ready) {
-    const bay = model.bays.get(selectedBay);
-    if (!ready || !bay) {
-      setMarkup('phBayDetail', `<div class="ph-empty"><span class="ph-empty-icon" aria-hidden="true">⌖</span><h3>${ready ? 'Esplora le postazioni' : 'In attesa dei dati'}</h3><p>${ready ? 'Seleziona una campata nella pianta o nell’elenco. Qui troverai prodotti, quantità e lotti per ogni livello e posto.' : 'Le ubicazioni appariranno appena l’inventario sarà disponibile.'}</p></div>`);
-      return;
-    }
-    const levels = [...new Set(bay.positions.map(code=>code.split('-')[1]))];
-    if (level !== 'all' && !levels.includes(level)) level = 'all';
-    let html = `<div class="ph-detail-heading"><span class="ph-eyebrow">CAMPATA</span><h3>${text(bay.code)}</h3><p>${number(bay.occupied)} di ${bay.positions.length} postazioni occupate · ${bay.unknown ? 'quantità da verificare' : number(bay.qty) + ' pz'}</p></div>`;
-    html += `<div class="ph-levels" role="group" aria-label="Filtra livello">${['all', ...levels].map(key=>`<button type="button" data-ph-level="${key}" aria-pressed="${key === level}">${key === 'all' ? 'Tutti' : key}</button>`).join('')}</div>`;
-    for (const current of levels.filter(key=>level === 'all' || key === level)) {
-      html += `<section class="ph-level"><h4>${text(current)} <span>${current === 'L1' ? 'Piano terra' : current === 'L2' ? 'Secondo livello' : 'Terzo livello'}</span></h4>`;
-      for (const code of bay.positions.filter(value=>value.split('-')[1] === current)) {
-        const entries = model.positions.get(code);
-        html += `<div class="ph-slot${entries.length ? ' is-occupied' : ''}"><div class="ph-slot-heading"><b>${text(code)}</b><span>${entries.length ? 'Occupata' : 'Libera'}</span></div>`;
-        for (const entry of entries) {
-          html += `<button type="button" class="ph-product" data-ph-product="${text(entry.sku)}" data-ph-lot="${text(entry.lot)}" data-ph-code="${text(code)}"><span class="ph-product-title">${text(entry.title || entry.displaySku)}</span><span class="ph-product-meta">${text(entry.displaySku)} · ${text(entry.lotLabel || entry.lot || 'Lotto non indicato')}</span><span class="ph-product-bottom"><strong>${entry.unknown ? 'Quantità da verificare' : number(entry.qty) + ' pz'}</strong><span>Gestisci ubicazione ↗</span></span></button>`;
-        }
-        html += '</div>';
-      }
-      html += '</section>';
-    }
-    setMarkup('phBayDetail', html);
+  function setMarkup(id, markup) {
+    const el = byId(id);
+    if (!el || el._html === markup) return;
+    el.innerHTML = markup;
+    el._html = markup;
+  }
+  function searchResults(model, ready) {
+    if (!model.searching || !ready) return "";
+    const list = model.matchedProducts.slice(0, 8);
+    if (!list.length)
+      return `<p class="find-empty">Nessun prodotto trovato. Controlla lo SKU o prova con una parte del nome.</p>`;
+    const rows = list
+      .map((p) => {
+        const where = p.codes.length
+          ? `<span class="find-locs">${p.codes
+              .slice(0, 4)
+              .map((c) => locationLabelHTML(c, { size: "sm" }))
+              .join(
+                "",
+              )}${p.codes.length > 4 ? `<span class="more">+${p.codes.length - 4}</span>` : ""}</span>`
+          : "";
+        const pending = p.remaining
+          ? `<span class="tag tag--warn">${number(p.remaining)} pz da ubicare</span>`
+          : "";
+        return `<button type="button" class="find-row" data-ph-product="${text(p.sku)}"><span class="find-main"><b>${text(p.title || p.displaySku)}</b><small>${text(p.displaySku)}</small></span><span class="find-where">${where}${pending}</span></button>`;
+      })
+      .join("");
+    const more =
+      model.matchedProducts.length > list.length
+        ? `<p class="find-more">Altri ${number(model.matchedProducts.length - list.length)} risultati.</p>`
+        : "";
+    return `<div class="find-list">${rows}</div>${more}<button type="button" class="btn btn--ghost btn--block" data-ph-mapquery>Mostra sulla mappa</button>`;
+  }
+  function rowsTable(model, ready) {
+    return ROW_IDS.map((id) => {
+      const row = model.rows.get(id);
+      if (!row) return "";
+      const ratio = ready && row.capacity ? row.occupied / row.capacity : 0;
+      return `<button type="button" class="rowtable-row" data-ph-row="${id}">${rowSignHTML(id, "sm")}<span class="rowtable-bar" aria-hidden="true"><span style="width:${(ratio * 100).toFixed(1)}%"></span></span><span class="rowtable-val">${ready ? `${number(row.occupied)}/${number(row.capacity)}` : "—"}</span><span class="sr-only">Fila ${id}</span></button>`;
+    }).join("");
   }
   function render() {
     const snapshot = readSnapshot();
     if (previousUser !== snapshot.userId) {
-      previousUser = snapshot.userId; selectedBay = ''; level = 'all'; query = '';
-      byId('phSearch').value = '';
+      previousUser = snapshot.userId;
+      query = "";
+      input.value = "";
     }
     const ready = snapshot.allowed && snapshot.loaded;
-    model = buildHomeModel(ready ? snapshot.items : [], locationCodes, query);
-    const {stats} = model;
-    if (model.searching && !model.bays.get(selectedBay)?.matched) selectedBay = [...model.bays.values()].find(bay=>bay.matched)?.code || '';
-    byId('phBaySelect').value = selectedBay;
+    const model = buildWarehouseModel(ready ? snapshot.items : [], locationCodes, query);
+    const { stats } = model;
     const stale = !snapshot.online || snapshot.fromCache || snapshot.error;
-    setText('phStatus', !snapshot.allowed ? 'Accedi per vedere il magazzino' : snapshot.error ? 'Aggiornamento non disponibile' : !ready ? 'Caricamento dati…' : stale ? 'Ultimi dati disponibili' : 'Inventario aggiornato');
-    byId('phStatus').classList.toggle('is-live', !!ready && !stale);
-    setText('phTotal', ready ? number(stats.total) + ' pz' : '—');
-    setText('phTotalDetail', ready ? products(stats.products) + ' con disponibilità' : 'In attesa dei dati');
-    setText('phLocated', ready ? number(stats.allocated) + ' pz' : '—');
-    setText('phLocatedDetail', ready ? products(stats.locatedProducts) + ' sulle scaffalature' : 'In attesa dei dati');
-    setText('phUnlocated', ready ? number(stats.unallocated) + ' pz' : '—');
-    setText('phUnlocatedDetail', ready ? products(stats.unlocatedProducts) + ' da sistemare' : 'In attesa dei dati');
-    setText('phOccupancy', ready ? number(stats.occupied) + ' / ' + stats.capacity : '—');
-    setText('phOccupancyDetail', ready ? number(stats.capacity - stats.occupied) + (stats.capacity - stats.occupied === 1 ? ' postazione libera' : ' postazioni libere') : 'In attesa dei dati');
-    byId('phOccupancyBar').style.width = (ready && stats.capacity ? stats.occupied / stats.capacity * 100 : 0) + '%';
-    for (const [key, label, noun] of [['fbm','Fbm','SKU da prelevare'], ['fba','Fba','flussi da prelevare']]) {
+    setText(
+      "phStatus",
+      !snapshot.allowed
+        ? "Accedi per vedere il magazzino"
+        : snapshot.error
+          ? "Aggiornamento non disponibile"
+          : !ready
+            ? "Caricamento dati…"
+            : stale
+              ? "Ultimi dati disponibili"
+              : "Inventario aggiornato",
+    );
+    setText("phTotal", ready ? number(stats.total) : "—");
+    setText(
+      "phTotalDetail",
+      ready ? plural(stats.products, "prodotto", "prodotti") : "In attesa dei dati",
+    );
+    setText("phLocated", ready ? number(stats.allocated) + " pz" : "—");
+    setText("phLocatedDetail", ready ? plural(stats.locatedProducts, "prodotto", "prodotti") : "");
+    setText("phUnlocatedPcs", ready ? number(stats.unallocated) + " pz" : "—");
+    setText(
+      "phUnlocatedProducts",
+      ready ? plural(stats.unlocatedProducts, "prodotto", "prodotti") : "",
+    );
+    setText("phCereaPcs", ready ? number(stats.cerea) + " pz" : "—");
+    setText("phCereaProducts", ready ? plural(stats.cereaProducts, "prodotto", "prodotti") : "");
+    const pct = (v) => (ready && stats.total ? (v / stats.total) * 100 : 0).toFixed(2) + "%";
+    byId("phBarLoc").style.width = pct(stats.allocated);
+    byId("phBarCerea").style.width = pct(stats.cerea);
+    byId("phBarUnloc").style.width = pct(Math.max(0, stats.unallocated - stats.cerea));
+
+    setText("phUnlocated", ready ? number(stats.unallocated) + " pz" : "—");
+    setText(
+      "phUnlocatedDetail",
+      ready
+        ? stats.unlocatedProducts
+          ? plural(stats.unlocatedProducts, "prodotto senza posizione", "prodotti senza posizione")
+          : "Tutto ubicato"
+        : "In attesa dei dati",
+    );
+    byId("phTodo")
+      .querySelector('[data-ph-view="noLocation"]')
+      .classList.toggle("is-due", ready && stats.unallocated > 0);
+    for (const [key, id, noun] of [
+      ["fbm", "Fbm", ["SKU da preparare", "SKU da preparare"]],
+      ["fba", "Fba", ["flusso da prelevare", "flussi da prelevare"]],
+    ]) {
       const preview = snapshot.preview?.[key];
-      setText('ph' + label, ready && preview?.loaded ? number(preview.count) : '—');
-      setText('ph' + label + 'Detail', ready && preview?.loaded ? noun : preview?.loading ? 'Caricamento…' : 'Apri per aggiornare');
+      const loaded = ready && preview?.loaded;
+      setText("ph" + id, loaded ? number(preview.count) : "—");
+      setText(
+        "ph" + id + "Detail",
+        loaded
+          ? preview.count === 1
+            ? noun[0]
+            : noun[1]
+          : preview?.loading
+            ? "Caricamento…"
+            : "Apri per aggiornare",
+      );
+      byId("phTodo")
+        .querySelector(`[data-ph-view="picking${id}"]`)
+        .classList.toggle("is-due", !!loaded && preview.count > 0);
     }
-    setText('phCerea', ready ? number(stats.cerea) + ' pz' : '—');
-    setText('phCereaDetail', ready ? products(stats.cereaProducts) + ' · posizione temporanea' : 'Posizione temporanea');
-    setText('phMapSummary', ready ? `${number(stats.occupied)} ${stats.occupied === 1 ? "postazione occupata" : "postazioni occupate"} · ${number(stats.capacity - stats.occupied)} libere · ${model.bays.size} campate` : 'In attesa delle ubicazioni');
-    const matches = [...model.bays.values()].filter(bay=>bay.matched).length;
-    setText('phSearchFeedback', model.searching && ready ? `${matches ? number(matches) + (matches === 1 ? ' campata trovata' : ' campate trovate') : 'Nessuna campata trovata'}${model.unlocatedMatches ? ' · ' + products(model.unlocatedMatches) + (model.unlocatedMatches === 1 ? ' ha' : ' hanno') + ' quantità ancora da ubicare' : ''}` : '');
-    setMarkup('phMap', renderPlan({bays:model.bays, selectedBay, searching:model.searching, ready}));
-    byId('phMap').style.width = (zoom * 100) + '%';
-    setText('phZoomValue', Math.round(zoom * 100) + '%');
-    renderDetail(ready);
+    setText("phCerea", ready ? number(stats.cerea) + " pz" : "—");
+    setText(
+      "phCereaDetail",
+      ready
+        ? stats.cereaProducts
+          ? plural(
+              stats.cereaProducts,
+              "prodotto in posizione temporanea",
+              "prodotti in posizione temporanea",
+            )
+          : "Nessun prodotto"
+        : "Posizione temporanea",
+    );
+    setText("phOccupancy", ready ? `${number(stats.occupied)} di ${number(stats.capacity)}` : "—");
+    setText(
+      "phOccupancyDetail",
+      ready
+        ? plural(stats.capacity - stats.occupied, "posto libero", "posti liberi")
+        : "In attesa dei dati",
+    );
+    byId("phOccupancyBar").style.width =
+      (ready && stats.capacity ? (stats.occupied / stats.capacity) * 100 : 0) + "%";
+    setMarkup("phRows", rowsTable(model, ready));
+    const planModel = buildWarehouseModel(ready ? snapshot.items : [], locationCodes, "");
+    setMarkup(
+      "phMap",
+      buildPlanSVG({ model: planModel, mode: "browse", ready, interactive: true }),
+    );
+    byId("phSearchClear").hidden = !query;
+    setMarkup("phSearchFeedback", searchResults(model, ready));
   }
   function scheduleRender() {
     if (frame !== null) return;
-    frame = requestAnimationFrame(()=>{frame = null; render();});
-  }
-  function selectBay(code) {
-    if (!model.bays.has(code)) return;
-    selectedBay = code; level = 'all';
-    render();
-    // The contents remain inline, also on narrow screens.
-    if (window.matchMedia('(max-width: 1000px)').matches) byId('phBayDetail').scrollIntoView({block:'nearest'});
-  }
-  root.addEventListener('click', event=>{
-    const target = event.target.closest('[data-ph-view], [data-home-bay], [data-ph-product], [data-ph-level], [data-ph-zoom]');
-    if (!target || !root.contains(target)) return;
-    if (target.dataset.phView) navigate(target.dataset.phView);
-    else if (target.dataset.homeBay) selectBay(target.dataset.homeBay);
-    else if (target.dataset.phProduct) {
-      const snapshot = readSnapshot();
-      if (snapshot.allowed && snapshot.loaded) openProduct({sku:target.dataset.phProduct, lot:target.dataset.phLot, code:target.dataset.phCode});
-    } else if (target.dataset.phLevel) { level = target.dataset.phLevel; renderDetail(true); }
-    else if (target.dataset.phZoom) {
-      zoom = target.dataset.phZoom === 'reset' ? 1 : Math.max(1, Math.min(2.5, zoom + (target.dataset.phZoom === 'in' ? 0.25 : -0.25)));
+    frame = requestAnimationFrame(() => {
+      frame = null;
       render();
+    });
+  }
+  root.addEventListener("click", (event) => {
+    const target = event.target.closest(
+      "[data-ph-view],[data-bay],[data-ph-product],[data-ph-row],[data-ph-mapquery],#phSearchClear",
+    );
+    if (!target || !root.contains(target)) return;
+    const snapshot = readSnapshot();
+    if (target.dataset.phView) navigate(target.dataset.phView);
+    else if (target.dataset.bay) openMap({ bay: target.dataset.bay });
+    else if (target.dataset.phRow) openMap({ row: target.dataset.phRow });
+    else if (target.hasAttribute("data-ph-mapquery")) openMap({ query });
+    else if (target.id === "phSearchClear") {
+      query = "";
+      input.value = "";
+      render();
+      input.focus();
+    } else if (target.dataset.phProduct && snapshot.allowed && snapshot.loaded)
+      openProduct({ sku: target.dataset.phProduct });
+  });
+  root.addEventListener("keydown", (event) => {
+    if (!["Enter", " "].includes(event.key)) return;
+    const bay = event.target.closest("[data-bay]");
+    if (bay) {
+      event.preventDefault();
+      openMap({ bay: bay.dataset.bay });
     }
   });
-  root.addEventListener('keydown', event=>{
-    if (!['Enter', ' '].includes(event.key)) return;
-    const bay = event.target.closest('[data-home-bay]');
-    if (bay) { event.preventDefault(); selectBay(bay.dataset.homeBay); }
+  let t = null;
+  input.addEventListener("input", () => {
+    clearTimeout(t);
+    t = setTimeout(() => {
+      query = input.value;
+      render();
+    }, 120);
   });
-  byId('phSearch').addEventListener('input', event=>{ query = event.target.value; scheduleRender(); });
-  byId('phBaySelect').addEventListener('change', event=>selectBay(event.target.value));
-  window.addEventListener('online', scheduleRender);
-  window.addEventListener('offline', scheduleRender);
+  window.addEventListener("online", scheduleRender);
+  window.addEventListener("offline", scheduleRender);
   render();
-  return {scheduleRender, activate() { scheduleRender(); refreshPreview(); }};
+  return {
+    scheduleRender,
+    activate() {
+      scheduleRender();
+      refreshPreview();
+    },
+  };
 }
