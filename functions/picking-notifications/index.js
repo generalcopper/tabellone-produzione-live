@@ -2,7 +2,7 @@
 
 const { initializeApp } = require('firebase-admin/app');
 const { getAuth } = require('firebase-admin/auth');
-const { getFirestore, FieldValue } = require('firebase-admin/firestore');
+const { getFirestore, FieldValue, Firestore } = require('firebase-admin/firestore');
 const { createCereaService } = require('./cerea-service');
 const { onRequest } = require('firebase-functions/v2/https');
 const { onDocumentWritten } = require('firebase-functions/v2/firestore');
@@ -29,7 +29,10 @@ const runtime = {
   serviceAccount: '537555699968-compute@developer.gserviceaccount.com',
 };
 
-const warehouse = require('./warehouse-monitor').createWarehouseMonitor({ db: getFirestore(), service, logger });
+const warehouse = require('./warehouse-monitor').createRecoveringWarehouseMonitor({logger, createSource:() => {
+  const db = new Firestore({projectId:PROJECT, preferRest:true});
+  return {db, service:createService({db, auth:getAuth(), logger})};
+}});
 exports.warehouseMonitor = onRequest({
   ...runtime, memory: '512MiB', maxInstances: 2, timeoutSeconds: 60,
   invoker: ['crm-api@cedoly-crm-prod.iam.gserviceaccount.com'],

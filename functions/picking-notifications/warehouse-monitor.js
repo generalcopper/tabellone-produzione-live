@@ -128,7 +128,22 @@ async function readLegacyPicking(tx, logs, found) {
   return { docs:(await tx.get(managed.select(...LEGACY_PICKING_FIELDS))).docs, mode:'full' };
 }
 
-function createWarehouseMonitor({ db, service, clock = Date.now, logger = console }) {
+function createWarehouseMonitor({ db, service, clock = Date.now, logger = console, readTimeoutMs = 5500, onReadTimeout = () => {} }) {
+  // Each source has its own deadline. A stalled Firestore read must neither
+  // hold the shared snapshot promise forever nor hide the other live queues.
+  async function readWithinDeadline(id, fn) {
+    let timer;
+    try {
+      return await Promise.race([Promise.resolve().then(fn), new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          const error = Object.assign(new Error('Warehouse source read timed out'), {code:'SOURCE_DEADLINE_EXCEEDED'});
+          logger.error('warehouse_read_timeout', {source:id, timeoutMs:readTimeoutMs});
+          try { onReadTimeout(id); } catch { /* The unavailable projection still has to complete. */ }
+          reject(error);
+        }, readTimeoutMs);
+      })]);
+    } finally { clearTimeout(timer); }
+  }
   let cached = null, pending = null, loggedContent = null;
   let catalogCache = null;
   const legacyModes = new Map();
@@ -172,7 +187,7 @@ function createWarehouseMonitor({ db, service, clock = Date.now, logger = consol
     return result;
   }
   async function guarded(id, fn) {
-    try { return await fn(); } catch (error) {
+    try { return await readWithinDeadline(id, fn); } catch (error) {
       logger.error('warehouse_source_failed', { source: id, code: String(error.code || 'read_failed') });
       return section(id, [], null, clock(), 'unavailable', 'Lettura della fonte non riuscita');
     }
@@ -181,7 +196,7 @@ function createWarehouseMonitor({ db, service, clock = Date.now, logger = consol
     const tomorrow = dateKey(Date.parse(dateKey(clock())+'T12:00:00Z') + 86400000);
     const paths = { incoming:'amzInventory/concamarise/kioskAlerts/incomingFromCerea', ready:'amzInventory/cerea/kioskAlerts/skuReady',
       manual:'amzInventory/concamarise/kioskAlerts/manualAnnouncement', waste:'amzInventoryProducts/wasteCalendar_concamarise_'+tomorrow };
-    const inventory = catalog();
+    const inventory = readWithinDeadline('inventory', catalog);
     // Attach a rejection handler immediately; each dependent section reports its own failure.
     void inventory.catch(()=>{});
     const sections = await Promise.all([
@@ -217,4 +232,26 @@ function createWarehouseMonitor({ db, service, clock = Date.now, logger = consol
     return pending;
   } };
 }
-module.exports = { canonical, hash, seal, section, writeSection, pickingSection, productCatalog, alertSection, readLegacyPicking, createWarehouseMonitor };
+// The monitor owns its read client. Replacing an exhausted reader does not
+// touch the clients used by production, picking writes, or notifications.
+function createRecoveringWarehouseMonitor({createSource, logger = console, ...options}) {
+  let active = null;
+  function source() {
+    if (active) return active;
+    const next = createSource();
+    let retired = false;
+    next.monitor = createWarehouseMonitor({...options, ...next, logger, onReadTimeout: id => {
+      if (retired) return;
+      retired = true;
+      if (active === next) active = null;
+      logger.warn('warehouse_reader_recycled', {source:id});
+      void Promise.resolve().then(() => next.db.terminate?.()).catch(() => {
+        logger.warn('warehouse_reader_cleanup_failed');
+      });
+    }});
+    active = next;
+    return next;
+  }
+  return {snapshot:() => source().monitor.snapshot()};
+}
+module.exports = { canonical, hash, seal, section, writeSection, pickingSection, productCatalog, alertSection, readLegacyPicking, createWarehouseMonitor, createRecoveringWarehouseMonitor };
