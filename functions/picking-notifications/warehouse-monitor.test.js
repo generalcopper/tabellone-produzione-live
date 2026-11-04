@@ -137,3 +137,43 @@ test('a reopened flow is included by the next transaction without a history cach
   f=pickingFixture([row]);result=await m.readLegacyPicking(f.tx,f.logs,f.found);
   assert.equal(result.mode,'filtered');assert.deepEqual(f.remaining(result.docs),['0']);
 });
+
+function recoveryFixture({write=async()=>({products:[],rowCount:0,totals:[]}),catalog=async()=>({docs:[]})}={}) {
+  const query={where(){return this},select(){return this},count(){return {...this,aggregate:true}},get:catalog};
+  const tx={get:async q=>q.aggregate?{data:()=>({count:0})}:{docs:[],data:()=>({keys:[]})},getAll:async()=>[]};
+  let terminated=0;
+  const db={collection:()=>query,doc:()=>({}),runTransaction:async fn=>fn(tx),getAll:async(...refs)=>refs.map(()=>({data:()=>null})),terminate:async()=>{terminated++}};
+  return {db,service:{readWriteSummary:write},terminated:()=>terminated};
+}
+const silentLogger={info(){},warn(){},error(){}};
+test('a stuck Write read cannot hang or invalidate the other queues', {timeout:1000}, async()=>{
+  let calls=0;
+  const f=recoveryFixture({write:()=>{calls++;return new Promise(()=>{})}});
+  const monitor=m.createWarehouseMonitor({...f,logger:silentLogger,clock:()=>now,readTimeoutMs:20});
+  const [a,b]=await Promise.all([monitor.snapshot(),monitor.snapshot()]);
+  assert.equal(calls,1);assert.equal(a,b);
+  assert.equal(a.sections[0].state,'unavailable');assert.equal(a.sections[0].totals,null);
+  assert.deepEqual(a.sections.slice(1).map(s=>s.state),['ok','ok','ok']);
+  const {sha256,...value}=a;assert.equal(m.hash(value),sha256);
+});
+test('a timed-out reader is replaced, and late results cannot overwrite its recovery', {timeout:1000}, async()=>{
+  let finish,created=0;
+  const first=recoveryFixture({write:()=>new Promise(resolve=>{finish=resolve})}),second=recoveryFixture();
+  const monitor=m.createRecoveringWarehouseMonitor({createSource:()=>++created===1?first:second,logger:silentLogger,clock:()=>now,readTimeoutMs:20});
+  const failed=await monitor.snapshot();assert.equal(failed.sections[0].state,'unavailable');
+  const recovered=await monitor.snapshot();assert.equal(created,2);assert.equal(first.terminated(),1);
+  assert.ok(recovered.sections.every(s=>s.state==='ok'));
+  finish({products:[{id:'old',title:'Old result',qty:10,unit:'pz',sku:'old'}],rowCount:1,totals:[]});
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal((await monitor.snapshot()).sha256,recovered.sha256);
+  assert.equal(second.terminated(),0);
+});
+test('a stuck catalog keeps Write and alerts available and recycles only one reader', {timeout:1000}, async()=>{
+  let created=0;
+  const first=recoveryFixture({catalog:()=>new Promise(()=>{})}),second=recoveryFixture();
+  const monitor=m.createRecoveringWarehouseMonitor({createSource:()=>++created===1?first:second,logger:silentLogger,clock:()=>now,readTimeoutMs:20});
+  const failed=await monitor.snapshot();
+  assert.deepEqual(failed.sections.map(s=>s.state),['ok','unavailable','unavailable','ok']);
+  assert.equal(failed.map.state,'unavailable');assert.equal(first.terminated(),1);
+  assert.ok((await monitor.snapshot()).sections.every(s=>s.state==='ok'));assert.equal(created,2);
+});
