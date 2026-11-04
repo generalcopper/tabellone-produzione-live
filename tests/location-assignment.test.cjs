@@ -3,20 +3,20 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const path = require('node:path');
-const source = fs.readFileSync(path.join(__dirname, '../public/picking.html'), 'utf8');
+const source = fs.readFileSync(path.join(__dirname, '../public/picking.js'), 'utf8');
 function block(start, end) {
   const from = source.indexOf(start), to = source.indexOf(end, from);
   assert(from >= 0 && to > from, start);
   return source.slice(from, to);
 }
 const code = [
-  block('    function parseSignedQtyStrict(', '    // --- title/meta helpers'),
-  block('    function productionLotIdFromTs(', '    function rackLocationDisplayPartsFromItem('),
-  block('    async function saveRackAllocationFromDetails(', '    function rackAllocationCloudNormalizePlan('),
-  block('    function buildStockLotsForUnallocatedQty(', '    function getItemsWithoutRackLocations('),
-  block('    function getItemsWithoutRackLocations(', '    function getHomeSmartSearchValue('),
-  block('    function getItemsAtCerea(', '    // --- Picking visual:'),
-  block('    async function saveLocationOnlyFromDetails(', '    function renderProductDetailsSheet(')
+  block('function parseSignedQtyStrict(', '// --- title/meta helpers'),
+  block('function productionLotIdFromTs(', 'function rackLocationDisplayPartsFromItem('),
+  block('async function saveRackAllocationFromDetails(', 'function rackAllocationCloudNormalizePlan('),
+  block('function buildStockLotsForUnallocatedQty(', 'function getItemsWithoutRackLocations('),
+  block('function getItemsWithoutRackLocations(', 'function getHomeSmartSearchValue('),
+  block('function getItemsAtCerea(', '// --- Picking visual:'),
+  block('async function saveLocationOnlyFromDetails(', 'function renderProductDetailsSheet(')
 ].join('\n');
 const rack = 'A01-L1-P1', otherRack = 'B01-L1-P1', lot = 'LOTTO-20260917';
 function item(qty, allocations = []) {
@@ -24,7 +24,7 @@ function item(qty, allocations = []) {
     stockLots:[{lot, qty}], rackAllocations:allocations,
     rackLocations:allocations.map(x=>x.code), rackLocation:allocations[0]?.code || ''};
 }
-function fixture({doc = item(120), cloud = doc, answers = [false, true], input = '40',
+function fixture({doc = item(120), cloud = doc, answers = [true], input = '40',
   liveSnapshot = false, retry, quick = false, selectedCode = rack} = {}) {
   let runtime = structuredClone(doc);
   const itemPath = 'amzInventory/concamarise/items/SKU';
@@ -38,6 +38,7 @@ function fixture({doc = item(120), cloud = doc, answers = [false, true], input =
     state:{route:{loc:'concamarise'}, user:{uid:'operator'},
       ui:{productDetailsSku:'SKU', productDetailsLot:lot}, firebase:{}},
     toSkuId:x=>String(x || '').toUpperCase(), getProductBySku:()=>runtime,
+    locationLabelHTML:x=>String(x),
     stockRepresentativeItemsForLoc:()=>[runtime],
     stockSkuForSkuAny:x=>x,
     escapeHtml:x=>String(x).replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch])),
@@ -45,8 +46,8 @@ function fixture({doc = item(120), cloud = doc, answers = [false, true], input =
     readLocationOnlySelection:()=>[selectedCode], setPdFieldError(){},
     squashWhitespace:x=>x, normalizeText:x=>x, prettyLoc:x=>x,
     renderProductDetailsSheet(){}, renderHomeDashboard(){}, removeMobileQuickRackSelector(){}, closeSheet(){},
-    confirm:message=>{dialogs.push({type:'confirm', message}); return answers[nextAnswer++] ?? false;},
-    prompt:(message, value)=>{dialogs.push({type:'prompt', message, value}); return input;},
+    uiConfirm:async options=>{dialogs.push({type:'confirm', message:typeof options==='string' ? options : options.message}); return answers[nextAnswer++] ?? false;},
+    uiQuantity:async options=>{dialogs.push({type:'prompt', message:options.message, value:String(options.value)}); return input === 'all' ? String(options.max) : input;},
     showToast:(...args)=>toasts.push(args),
     syncRackLocationGroupCloud:async()=>{},
     patchRuntimeInventoryItem:(_loc,_sku,patch)=>{patches.push(structuredClone(patch)); runtime={...runtime,...structuredClone(patch)};},
@@ -81,11 +82,11 @@ function fixture({doc = item(120), cloud = doc, answers = [false, true], input =
 
 for(const qty of [1,120,480,481,1000]) {
   for(const quick of [false,true]) {
-    test(`Annulla offers a partial quantity for ${qty} pieces (${quick ? 'QR' : 'details'})`,async()=>{
+    test(`Choosing a partial quantity assigns ${qty} pieces (${quick ? 'QR' : 'details'})`,async()=>{
       const assigned=Math.min(qty,40), f=fixture({doc:item(qty),input:String(assigned),quick});
       await f.run();
-      assert.deepEqual(f.dialogs.map(x=>x.type),['confirm','prompt','confirm']);
-      assert.equal(f.dialogs[1].value,String(Math.min(480,qty)));
+      assert.deepEqual(f.dialogs.map(x=>x.type),['prompt','confirm']);
+      assert.equal(f.dialogs[0].value,String(qty));
       assert.equal(f.cloud().rackAllocations[0].qty,assigned);
       assert.equal(f.ctx.rackUnallocatedQtyFromDoc(f.cloud()),qty-assigned);
       assert.equal(f.ctx.rackUnallocatedQtyFromDoc(f.runtime()),qty-assigned);
@@ -97,15 +98,15 @@ for(const qty of [1,120,480,481,1000]) {
     });
   }
 }
-test('OK assigns all pieces without a quantity prompt',async()=>{
+test('Choosing Tutti assigns all pieces after the quantity step and confirmation',async()=>{
   for(const qty of [120,480,800]) {
-    const f=fixture({doc:item(qty),answers:[true,true]}); await f.run();
-    assert.deepEqual(f.dialogs.map(x=>x.type),['confirm','confirm']);
+    const f=fixture({doc:item(qty),answers:[true],input:'all'}); await f.run();
+    assert.deepEqual(f.dialogs.map(x=>x.type),['prompt','confirm']);
     assert.equal(f.cloud().rackAllocations[0].qty,qty);
   }
 });
 test('canceling the quantity prompt or final confirmation does not change inventory',async()=>{
-  for(const options of [{input:null},{answers:[false,false]},{answers:[true,false]}]) {
+  for(const options of [{input:null},{answers:[false]}]) {
     const f=fixture(options); await f.run();
     assert.equal(f.writes.length,0); assert.equal(f.patches.length,0);
   }
@@ -158,20 +159,20 @@ for(const quick of [false,true]) {
     assert.equal(f.ctx.getItemsWithRackLocations().length,0);
     assert.equal(f.store.get('amzInventoryProducts/SKU').cereaAllocations[0].qty,40);
     assert.equal(f.store.get('amzInventoryProducts/SKU/movements/assign-1').deltaSigned,0);
-    assert.match(f.ctx.cereaBadgeHtml(40),/>Cerea</);
+    assert.match(f.ctx.cereaBadgeHtml(40),/>A Cerea 40 pz</);
   });
 }
 test('Cerea is persistent after reloading the cloud document',async()=>{
-  const f=fixture({selectedCode:'CEREA',answers:[true,true]}); await f.run();
+  const f=fixture({selectedCode:'CEREA',answers:[true],input:'all'}); await f.run();
   const reloaded=fixture({doc:structuredClone(f.cloud())});
   assert.equal(reloaded.ctx.getItemsAtCerea()[0].cereaQty,120);
   assert.equal(reloaded.ctx.getItemsWithoutRackLocations()[0].remainingQty,120);
 });
 test('assigning Cerea again adds only unmarked stock and never counts the same pieces twice',async()=>{
   const doc={...item(120),cereaAllocations:[{lot,qty:80}]};
-  const f=fixture({doc,selectedCode:'CEREA',answers:[true,true]}); await f.run();
+  const f=fixture({doc,selectedCode:'CEREA',answers:[true],input:'all'}); await f.run();
   assert.equal(f.ctx.cereaQtyFromDoc(f.cloud()),120);
-  const again=fixture({doc:f.cloud(),selectedCode:'CEREA',answers:[true,true]}); await again.run();
+  const again=fixture({doc:f.cloud(),selectedCode:'CEREA',answers:[true],input:'all'}); await again.run();
   assert.equal(again.writes.length,0); assert.equal(again.ctx.cereaQtyFromDoc(again.cloud()),120);
 });
 test('assigning a rack consumes Cerea first and keeps the remaining temporary pieces visible',async()=>{
@@ -184,7 +185,7 @@ test('assigning a rack consumes Cerea first and keeps the remaining temporary pi
   assert.equal(f.ctx.getItemsWithRackLocations()[0].allocatedQty,40);
 });
 test('completing rack assignment clears Cerea and the Da ubicare row',async()=>{
-  const f=fixture({doc:{...item(120),cereaAllocations:[{lot,qty:120}]},answers:[true,true]}); await f.run();
+  const f=fixture({doc:{...item(120),cereaAllocations:[{lot,qty:120}]},answers:[true],input:'all'}); await f.run();
   assert.equal(f.cloud().cereaAllocations.length,0);
   assert.equal(f.ctx.getItemsAtCerea().length,0);
   assert.equal(f.ctx.getItemsWithoutRackLocations().length,0);
@@ -250,7 +251,7 @@ test('partial transfers in the allocation editor preserve the pieces left at the
 test('Cerea remains selectable after all racks for multiple different SKUs',()=>{
   const f=fixture();
   Object.assign(f.ctx,{inventoryRuntimeCacheKey:x=>x,RACK_LOCATION_OPTIONS:[rack,otherRack],rackLocationUseInfo:()=>({occupiedBy:{sku:'OTHER'}})});
-  vm.runInContext(block('    function isRackLocationAvailableForItem(', 'function readRackPickerSelection('),f.ctx);
+  vm.runInContext(block('function isRackLocationAvailableForItem(', 'function readRackPickerSelection('),f.ctx);
   for(const sku of ['SKU','OTHER']) {
     assert.equal(f.ctx.isRackLocationUsableForItem('CEREA',sku,'concamarise'),true);
     assert.equal(f.ctx.isRackLocationUsableForItem(rack,sku,'concamarise'),false);
@@ -276,7 +277,8 @@ test('Cerea navigation, quantities, badge and search agree with Da ubicare',()=>
   const node=id=>{
     if(!nodes.has(id)) {
       const classes=new Set();
-      nodes.set(id,{innerHTML:'',textContent:'',value:'',attrs:{},
+      nodes.set(id,{innerHTML:'',textContent:'',value:'',attrs:{},dataset:{},
+        removeAttribute(k){delete this.attrs[k];},
         setAttribute(k,v){this.attrs[k]=v;},
         classList:{add:x=>classes.add(x),remove:x=>classes.delete(x),contains:x=>classes.has(x),
           toggle:(x,on)=>on ? classes.add(x) : classes.delete(x)}});
@@ -284,23 +286,32 @@ test('Cerea navigation, quantities, badge and search agree with Da ubicare',()=>
     return nodes.get(id);
   };
   f.ctx.state.user.isWhitelisted=true;
-  Object.assign(f.ctx,{$:node,window:{matchMedia:()=>({matches:false})},document:{body:node('body')},
+  Object.assign(f.ctx,{$:node,window:{matchMedia:()=>({matches:false}),scrollTo(){}},document:{body:node('body'),querySelectorAll(selector){
+      const key=selector.match(/data-nav-count="([^"]+)"/)?.[1];
+      if(key)return [node(({cerea:'pickingCereaNavCount',noLocation:'pickingNoLocationNavCount'})[key] || key)];
+      if(selector.includes('.nav-item'))return [node('btnPickingCerea'),node('btnPickingNoLocation')];
+      return [];
+    }},
+    PICKING_VIEW_TITLES:{cerea:'Cerea',noLocation:'Da ubicare'},ICON:{put:'',edit:''},
+    inventoryReady:()=>true,fmtN:String,uiEmpty:x=>x,uiLotText:x=>x,setNavBadge(){},syncNavBadges(){},
     _bioneeShopUi:null,_pickingMailUi:null,parseTitleMeta:x=>({main:x}),normalizeSkuAliases:x=>x.filter(Boolean),
     normalizeText:x=>String(x).toLowerCase(),rackLocationDisplayFromItem:()=>'',rackLocationStackHtml:()=>'',fmtDate:()=>''});
   vm.runInContext([
-    block('    function getHomeSmartSearchValue(', '    let _bioneeShopUi'),
-    block('    function pickingHomeView(', '    const DRONE_NATIVE_COL'),
-    block('    function setPickingNavCount(', '    function locatedQtySnapshotKey('),
-    block('    function renderHomeNoLocationBox(', '    function getItemsAtCerea(')
+    block('function getHomeSmartSearchValue(', 'let _bioneeShopUi'),
+    block('function pickingHomeView(', 'const DRONE_NATIVE_COL'),
+    block('function setPickingNavCount(', 'function locatedQtySnapshotKey('),
+    block('function renderHomeNoLocationBox(', 'function getItemsAtCerea(')
   ].join('\n'),f.ctx);
+  node('btnPickingCerea').dataset.pickingView='cerea';
+  node('btnPickingNoLocation').dataset.pickingView='noLocation';
   f.ctx.setPickingHomeView('cerea');
   assert.equal(f.ctx.pickingHomeView(),'cerea');
-  assert.equal(node('btnPickingCerea').attrs['aria-pressed'],'true');
+  assert.equal(node('btnPickingCerea').attrs['aria-current'],'page');
   assert.equal(node('homeCereaBox').attrs['aria-hidden'],'false');
   assert.equal(node('homeNoLocationBox').attrs['aria-hidden'],'true');
   f.ctx.renderHomeCereaBox(); f.ctx.renderHomeNoLocationBox();
   assert.match(node('homeCereaList').innerHTML,/data-sku="SKU"/);
-  assert.match(node('homeNoLocationList').innerHTML,/class="cereaBadge"[^>]*>Cerea</);
+  assert.match(node('homeNoLocationList').innerHTML,/class="tag tag--cerea"[^>]*>A Cerea 80 pz</);
   assert.match(node('homeNoLocationList').innerHTML,/data-current="120"/);
   assert.equal(node('pickingCereaNavCount').textContent,'1');
   node('homeCereaSearch').value='missing'; f.ctx.renderHomeCereaBox();

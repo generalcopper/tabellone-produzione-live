@@ -1,6 +1,6 @@
 const {test}=require('node:test');const assert=require('node:assert/strict');const fs=require('node:fs');const vm=require('node:vm');const path=require('node:path');
-const source=fs.readFileSync(path.join(__dirname,'../public/picking.html'),'utf8');
-const start=source.indexOf('    function addPickingStockTransactionWrite('),end=source.indexOf('    function isForcePickingAvailableError(',start);
+const source=fs.readFileSync(path.join(__dirname,'../public/picking.js'),'utf8');
+const start=source.indexOf('function addPickingStockTransactionWrite('),end=source.indexOf('function isForcePickingAvailableError(',start);
 assert(start>0&&end>start);
 function fixture(lines, inventory){
  const store=new Map(Object.entries(inventory).map(([sku,d])=>['amzInventory/concamarise/items/'+sku,{sku,...d}]));

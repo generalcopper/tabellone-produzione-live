@@ -4,18 +4,18 @@ const fs=require('node:fs');
 const vm=require('node:vm');
 const path=require('node:path');
 const hub=fs.readFileSync(path.join(__dirname,'../public/hub_inventario_amazon.html'),'utf8');
-const picking=fs.readFileSync(path.join(__dirname,'../public/picking.html'),'utf8');
+const picking=fs.readFileSync(path.join(__dirname,'../public/picking.js'),'utf8');
 function block(source,start,end){return source.slice(source.indexOf(start),source.indexOf(end,source.indexOf(start)));}
 function context(items){
  const ctx={state:{inventory:{concamarise:{items}},cache:{}},Date,
  toSkuId:x=>String(x||'').trim().toUpperCase(),normalizeAsin:x=>String(x||'').toUpperCase(),
  inventoryLocs:()=>['concamarise'],readAsinFromDoc:x=>x.asin||'',inventoryRuntimeCacheKey:()=>1};
  vm.createContext(ctx);
- vm.runInContext(block(picking,'    function normalizeSkuAliases(','    function readSkuAliasesFromDoc(')+
- block(picking,'    function readSkuAliasCanonicalFromDoc(','    function inventoryRuntimeCacheKey(')+
- block(picking,'    function pickingCloudRawDoc(','    function buildPickingCloudInventoryItem(')+
- block(picking,'    function buildSkuAliasIndex(){','    function resolveSkuAlias(')+
- block(hub,'    function sharedStockMutationFields(','    function sharedStockSnapshotFromDoc('),ctx);
+ vm.runInContext(block(picking,'function normalizeSkuAliases(','function readSkuAliasesFromDoc(')+
+ block(picking,'function readSkuAliasCanonicalFromDoc(','function inventoryRuntimeCacheKey(')+
+ block(picking,'function pickingCloudRawDoc(','function buildPickingCloudInventoryItem(')+
+ block(picking,'function buildSkuAliasIndex() {','function resolveSkuAlias(')+
+ block(hub,'function sharedStockMutationFields(','function sharedStockSnapshotFromDoc('),ctx);
  return ctx;
 }
 test('Picking follows the same ASIN and owner as Hub, ignoring stale aliases from a different product',()=>{
