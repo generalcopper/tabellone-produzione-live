@@ -19,7 +19,7 @@ restoreUpsBundle(bundle);
 assert.ok(bundle.includes('security:15e3},co='));
 assert.ok(bundle.includes('power:5e3,business:3e4,security:15e3'));
 const start=bundle.indexOf('function ll({data:'),end=bundle.indexOf('function ul(',start);
-const render=vm.runInNewContext(bundle.slice(start,end)+';ll',{Js:securityDetails,H:{jsx:(type,props)=>({type,props}),jsxs:(type,props)=>({type,props})},_c:'card',gc:'badge',Us:{ok:'Tutto OK'},__SR:'row',__SW:()=> 'ok',z:x=>x,xc:{arrow:'>'},mc:'proof',sl:''});
+const render=vm.runInNewContext(bundle.slice(start,end)+';ll',{AlarmControl:'alarm',Js:securityDetails,H:{jsx:(type,props)=>({type,props}),jsxs:(type,props)=>({type,props})},_c:'card',gc:'badge',Us:{ok:'Tutto OK'},__SR:'row',__SW:()=> 'ok',z:x=>x,xc:{arrow:'>'},mc:'proof',sl:''});
 const card=render({data,error:false,now}),list=card.props.children[0];
 assert.equal(list.props.children[0].props.name,'UPS · NUC Forex');
 assert.equal(list.props.children[0].props.count,'Rete presente');

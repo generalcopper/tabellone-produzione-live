@@ -1,3 +1,4 @@
+import {restoreAlarmBundle} from './warehouse-alarm-compat.mjs';
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 // Explicit 7 November request: add fast UPS power monitoring inside Security.
@@ -21,6 +22,7 @@ export const upsPatches = [
   ]
 ];
 export function restoreUpsBundle(bundle){
+ bundle=restoreAlarmBundle(bundle);
  if(!bundle.includes('name:`UPS · NUC Forex`'))return bundle;
  let restored=bundle;
  for(const [before,after] of upsPatches){assert.equal(restored.split(after).length,2,'UPS hook missing or duplicated');restored=restored.replace(after,before);}
