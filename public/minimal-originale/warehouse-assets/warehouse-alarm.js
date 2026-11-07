@@ -15,6 +15,11 @@ export function alarmView(data,error,now=Date.now()){
   short:!fresh?'Da verificare':active?'IN CORSO':SHORT[mode]??'Stato incerto',
   canControl:fresh&&!!mode&&['normal','alarm'].includes(m.alarm)&&data.controlsEnabled===true&&!pending};
 }
+export function historyLabel(entry){
+ if(entry.kind==='command')return (ACTIONS[entry.mode]??'Comando')+' · '+(RESULTS[entry.status]??'Da verificare');
+ if(entry.connected===false)return 'Centralina non raggiungibile';
+ return (MODE_LABELS[entry.mode]??'Stato non disponibile')+(entry.alarm==='alarm'?' · ALLARME IN CORSO':'')+(entry.tamper===true?' · MANOMISSIONE':'');
+}
 export function prepareCommand(data,target,now=Date.now(),id=crypto.randomUUID()){
  const view=alarmView(data,false,now);
  if(!view.canControl||!Object.hasOwn(ACTIONS,target)||target===view.mode)throw Error('alarm_unavailable');
@@ -79,7 +84,7 @@ export function createAlarmControl(React){
     notice&&h('p',{className:'alarm-note',role:'status'},notice),
     cmd&&h('p',{className:'alarm-command',role:'status'},RESULTS[cmd.status]??'Stato comando da verificare'),
     h('section',null,h('h3',null,'Attività recente'),h('p',{className:'alarm-note'},'Eventi rilevati dal collegamento locale; lo storico parte dalla sua attivazione.'),
-     h('ol',{className:'alarm-history'},...(data?.history??[]).slice(0,12).map((entry,index)=>h('li',{key:entry.at+'-'+index},h('time',null,at(entry.at)),h('span',null,entry.kind==='command'?(ACTIONS[entry.mode]??'Comando')+' · '+(RESULTS[entry.status]??'Da verificare'):entry.connected===false?'Centralina non raggiungibile':(MODE_LABELS[entry.mode]??'Stato non disponibile')+(entry.alarm==='alarm'?' · ALLARME IN CORSO':''))))),
+     h('ol',{className:'alarm-history'},...(data?.history??[]).slice(0,12).map((entry,index)=>h('li',{key:entry.at+'-'+index},h('time',null,at(entry.at)),h('span',null,historyLabel(entry))))),
      !(data?.history?.length)&&h('p',null,'Nessun evento acquisito.')),
     h('footer',null,h('span',null,'Collegamento locale tramite Mac mini'),h('button',{type:'button',onClick:()=>void loadRef.current(true),disabled:busy},'Aggiorna'))
    ));
