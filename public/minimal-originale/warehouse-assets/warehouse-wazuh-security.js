@@ -5,13 +5,14 @@ const snapshotFresh = (data, error, now) => !!data && !error && future(data.expi
   && Number.isFinite(Date.parse(data.generatedAt)) && Date.parse(data.generatedAt) <= now + 10000;
 const hasWazuh = data => !!data?.wazuh || [...(data?.checks ?? []), ...(data?.devices ?? []).flatMap(device => device.checks)].some(check => check.id.startsWith('wazuh-'));
 const wazuhFresh = (data, now) => !!data?.wazuh && future(data.wazuh.expiresAt, now);
-const current = (check, data, now) => !check.id.startsWith('wazuh-') || wazuhFresh(data, now);
+const current = (check, data, now) => check.id === 'ups-power' ? future(check.expiresAt, now) : !check.id.startsWith('wazuh-') || wazuhFresh(data, now);
 
 export function securityViewState(data, error, now) {
   if (!snapshotFresh(data, error, now)) return 'unknown';
   if (data.devices.some(device => !future(device.expiresAt, now)) || (hasWazuh(data) && !wazuhFresh(data, now))) {
     return data.state === 'down' ? 'down' : 'unknown';
   }
+  if ((data.checks ?? []).some(check => check.id === 'ups-power' && !current(check,data,now))) return data.state === 'down' ? 'down' : 'unknown';
   return data.state;
 }
 
@@ -30,12 +31,15 @@ export function securityDetails(data, error, now) {
   });
   const general = (data?.checks ?? []).map(check => project(check, live));
   const all = [...devices.flatMap(device => device.checks), ...general];
+  const ups = general.find(check => check.id === 'ups-power') ?? null;
+  const upsLive = !!ups && live && current(ups,data,now);
+  const upsCount = !upsLive ? 'Da verificare' : ups.detail.startsWith('Corrente assente') ? 'Su batteria' : ups.detail.startsWith('Corrente presente') ? 'Rete presente' : ups.detail.startsWith('UPS non rilevato') ? 'USB assente' : 'Da verificare';
   const mail = data?.notifications;
   const notifications = {state: live ? mail?.state ?? 'unknown' : 'unknown',
     active: live && mail?.state === 'ok', recipient: mail?.recipient ?? null, checkedAt: mail?.checkedAt ?? null};
   const coverage = (data?.wazuh
     ? (live && wazuhFresh(data, now) ? 'Wazuh: ' + data.wazuh.connected + '/' + data.wazuh.total + ' dispositivi collegati. ' : 'Wazuh: riepilogo da aggiornare. ')
     : '') + (data?.coverage ?? '');
-  return {state, live, devices, general, verified: all.filter(check => check.state === 'ok').length,
+  return {state, live, devices, general:general.filter(check => check.id !== 'ups-power'), ups, upsLive, upsCount, verified: all.filter(check => check.state === 'ok').length,
     total: all.length, notifications, coverage: coverage || null, generatedAt: data?.generatedAt ?? null, expiresAt: data?.expiresAt ?? null};
 }

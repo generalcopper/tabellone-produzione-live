@@ -1,5 +1,7 @@
+import {restoreUpsBundle} from './warehouse-ups-compat.mjs';
 import assert from 'node:assert/strict';
 export function restoreUndergroundBundle(bundle){
+ bundle=restoreUpsBundle(bundle);
  const head="import {createUndergroundMonitor as __createUndergroundMonitor} from \"./warehouse-underground.js?v=246b49628013e009246c87373dd85fa08e70a67dc77d9f7228a161d03d202168\";\n";
  if(!bundle.startsWith(head)){assert.ok(!bundle.includes("__createUndergroundMonitor"));return bundle;}
  assert.ok(bundle.startsWith(head));
