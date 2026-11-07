@@ -92,3 +92,5 @@ await import('./test-warehouse-power-imports.mjs');
 await import('./test-underground.mjs');
 
 await import('./test-warehouse-ups.mjs');
+
+await import('./test-warehouse-alarm.mjs');
