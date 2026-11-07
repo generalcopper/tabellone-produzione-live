@@ -14,8 +14,8 @@ assert.equal(manifest.layout?.id,'schermo-unico-2026-10-14','Export rejected: th
 const html = await readFile('public' + prefix + 'capannone_3d.html','utf8');
 const bundle = await readFile('public' + prefix + 'warehouse-assets/warehouse-DAXf6-td.js','utf8');
 const module = await readFile('public' + prefix + 'warehouse-assets/warehouse-wazuh-security.js');
-assert.equal(sha(module),'1e25f2e73be8f421a19c939750086cfd3459aae537e512996a4d207375e2f29e','Verified Wazuh security logic must remain unchanged');
-const head = 'import {securityViewState as qs, securityDetails as Js} from "./warehouse-wazuh-security.js?v=' + sha(module) + '";\n';
+assert.equal(sha(module),'26f5f10677b3addf6aacc7d3deeb5eb7038492c4363f6acad5c1f89f0cfafa2d','Reviewed Wazuh and UPS freshness logic must remain unchanged');
+const head = 'import {securityViewState as qs, securityDetails as Js} from "./warehouse-wazuh-security.js?v=' + '1e25f2e73be8f421a19c939750086cfd3459aae537e512996a4d207375e2f29e' + '";\n';
 const ilpModule = await readFile('public' + prefix + 'warehouse-assets/warehouse-ilovepaghe.js');
 assert.equal(bundle.split('./warehouse-ilovepaghe.js?v='+sha(ilpModule)).length,2);
 const ilpHead = 'import {createILPCockpit as __createILPCockpit} from "./warehouse-ilovepaghe.js?v=' + ILP_BASELINE_HASH + '";\n';
@@ -90,3 +90,5 @@ await import("./test-warehouse-service-alerts.mjs");
 await import('./test-warehouse-power-imports.mjs');
 
 await import('./test-underground.mjs');
+
+await import('./test-warehouse-ups.mjs');
