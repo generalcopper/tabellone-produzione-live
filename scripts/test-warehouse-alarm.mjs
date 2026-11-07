@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {createHash} from 'node:crypto';
 import vm from 'node:vm';
-import {alarmView,prepareCommand,createAlarmControl} from '../public/minimal-originale/warehouse-assets/warehouse-alarm.js';
+import {alarmView,prepareCommand,createAlarmControl,historyLabel} from '../public/minimal-originale/warehouse-assets/warehouse-alarm.js';
 import {restoreAlarmBundle,ALARM_BASELINE} from './warehouse-alarm-compat.mjs';
 import {securityDetails} from '../public/minimal-originale/warehouse-assets/warehouse-wazuh-security.js';
 const now=Date.now(),at=n=>new Date(now+n).toISOString(),id='f49cc7ca-3d57-4c61-8647-927a9b362534';
@@ -42,3 +42,7 @@ for(const button of find(initial,n=>n.props?.className==='alarm-actions').props.
 const source=await readFile(new URL('../public/minimal-originale/warehouse-assets/warehouse-alarm.js',import.meta.url),'utf8');
 assert.ok(!/localKey|clientSecret|dangerouslySetInnerHTML|localStorage/.test(source));
 console.log(JSON.stringify({check:'warehouse_alarm',status:'passed',cases:'freshness, active alarm, guarded commands, unavailable data, identity handoff, disabled initial controls, exact approved-layout restoration'}));
+
+assert.match(historyLabel({kind:'state',connected:true,mode:'home',alarm:'normal',tamper:true}),/MANOMISSIONE/);
+assert.equal(historyLabel({kind:'state',connected:false,mode:null}),'Centralina non raggiungibile');
+assert.match(historyLabel({kind:'command',mode:'arm',status:'confirmed'}),/Stato confermato/);
