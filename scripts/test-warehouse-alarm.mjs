@@ -7,7 +7,7 @@ import {restoreAlarmBundle,ALARM_BASELINE} from './warehouse-alarm-compat.mjs';
 import {securityDetails} from '../public/minimal-originale/warehouse-assets/warehouse-wazuh-security.js';
 const now=Date.now(),at=n=>new Date(now+n).toISOString(),id='f49cc7ca-3d57-4c61-8647-927a9b362534';
 const data={version:1,source:'local',enabled:true,fresh:true,controlsEnabled:true,observedAt:at(-1000),expiresAt:at(44000),metrics:{connected:true,mode:'home',alarm:'normal',battery:100,charging:true,sim:'sim_card_no',tamper:null},history:[]};
-assert.equal(alarmView(data,false,now).label,'Inserito parziale');
+assert.equal(alarmView(data,false,now).label,'Inserito · Solo porte');
 assert.equal(alarmView(data,false,now).canControl,true);
 assert.equal(alarmView({...data,metrics:{...data.metrics,alarm:'alarm'}},false,now).label,'ALLARME IN CORSO');
 assert.equal(alarmView({...data,metrics:{...data.metrics,tamper:true}},false,now).active,true);
@@ -44,5 +44,5 @@ assert.ok(!/localKey|clientSecret|dangerouslySetInnerHTML|localStorage/.test(sou
 console.log(JSON.stringify({check:'warehouse_alarm',status:'passed',cases:'freshness, active alarm, guarded commands, unavailable data, identity handoff, disabled initial controls, exact approved-layout restoration'}));
 
 assert.match(historyLabel({kind:'state',connected:true,mode:'home',alarm:'normal',tamper:true}),/MANOMISSIONE/);
-assert.equal(historyLabel({kind:'state',connected:false,mode:null}),'Centralina non raggiungibile');
+assert.equal(historyLabel({kind:'state',connected:false,mode:null}),'Collegamento con la centralina perso');
 assert.match(historyLabel({kind:'command',mode:'arm',status:'confirmed'}),/Stato confermato/);
