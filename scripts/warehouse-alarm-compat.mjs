@@ -1,3 +1,4 @@
+import {restoreOperationalPolicy} from './warehouse-operational-compat.mjs';
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 // Authorized 7 November alarm integration: remove only the three audited hooks.
@@ -18,6 +19,7 @@ export const alarmPatches=[
   ]
 ];
 export function restoreAlarmBundle(bundle){
+ bundle=restoreOperationalPolicy(bundle);
  const match=bundle.match(/^import \{createAlarmControl as __createAlarmControl\} from "\.\/warehouse-alarm\.js\?v=[a-f0-9]{64}";\n/);
  if(!match)return bundle;
  let result=bundle.slice(match[0].length);
