@@ -1,0 +1,762 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() { return request.auth != null; }
+    function hasEmail() { return signedIn() && request.auth.token.email != null; }
+    function myUid() { return signedIn() ? request.auth.uid : ""; }
+    function myEmailLower() { return hasEmail() ? request.auth.token.email.lower() : ""; }
+
+    function hasAccess(docId) {
+      return exists(/databases/$(database)/documents/powderUsers/$(docId));
+    }
+    function access(docId) {
+      return get(/databases/$(database)/documents/powderUsers/$(docId)).data;
+    }
+
+    // enabled mancante -> considerato abilitato
+    function isEnabledAccess(docId) {
+      return hasAccess(docId) && access(docId).enabled != false;
+    }
+
+    function isMember() {
+      return signedIn() && (
+        isEnabledAccess(myUid()) ||
+        (hasEmail() && isEnabledAccess(myEmailLower()))
+      );
+    }
+
+    function isAdmin() {
+      return signedIn() && (
+        (isEnabledAccess(myUid()) && access(myUid()).isAdmin == true) ||
+        (hasEmail() && isEnabledAccess(myEmailLower()) && access(myEmailLower()).isAdmin == true)
+      );
+    }
+    
+    function isKiosk() {
+  return signedIn();
+}
+
+// =======================
+// AMAZON / CAPANNONE / UBI ACCESS
+// =======================
+
+function isOwnerAmzEmail() {
+  return hasEmail() && (
+    myEmailLower() == "ludovico@generalcoppersrl.com" ||
+    myEmailLower() == "ludovicogiarola@gmail.com"
+  );
+}
+
+function hasAmzDirectory(docId) {
+  return exists(/databases/$(database)/documents/amzInventoryDirectory/$(docId));
+}
+
+function amzDirectory(docId) {
+  return get(/databases/$(database)/documents/amzInventoryDirectory/$(docId)).data;
+}
+
+function isEnabledAmzDirectory(docId) {
+  return hasAmzDirectory(docId) && amzDirectory(docId).enabled != false;
+}
+
+function isAmzInventoryMember() {
+  return signedIn() && (
+    isMember() ||
+    isOwnerAmzEmail() ||
+    isEnabledAmzDirectory(myUid()) ||
+    (hasEmail() && isEnabledAmzDirectory(myEmailLower()))
+  );
+}
+
+function isAmzInventoryAdmin() {
+  return signedIn() && (
+    isAdmin() ||
+    isOwnerAmzEmail() ||
+    (
+      isEnabledAmzDirectory(myUid()) &&
+      amzDirectory(myUid()).isAdmin == true
+    ) ||
+    (
+      hasEmail() &&
+      isEnabledAmzDirectory(myEmailLower()) &&
+      amzDirectory(myEmailLower()).isAdmin == true
+    )
+  );
+}
+
+function canReadAmzKiosk() {
+  return request.auth != null;
+}
+
+// Directory accessi inventario Amazon / Picking
+match /amzInventoryDirectory/{docId} {
+  allow read: if isAmzInventoryAdmin() || (
+    signedIn() && (
+      docId == myUid() ||
+      (hasEmail() && docId == myEmailLower())
+    )
+  );
+
+  allow create, update, delete: if isAmzInventoryAdmin();
+}
+
+// Inventario fisico letto da Capannone 3D e Picking
+match /amzInventory/{loc}/items/{sku} {
+  allow read: if canReadAmzKiosk();
+  allow create, update: if isAmzInventoryMember();
+  allow delete: if isAmzInventoryAdmin();
+}
+
+// Completamento FBA/PDF: gli operatori aggiornano solo lo stato del prelievo.
+// Annullamenti, cancellazioni e modifica delle righe restano riservati agli admin.
+function canCompleteFbaPicking() {
+  let before = resource.data;
+  let after = request.resource.data;
+  let previousPicking = before.get('picking', {});
+  let picking = after.get('picking', {});
+  let reservation = after.get('reservation', {});
+  let completed = after.get('status', '') == 'PICKED';
+  return isAmzInventoryMember()
+    && before.get('kind', '').lower() == 'scarica'
+    && before.get('voided', false) != true
+    && before.get('cancelled', false) != true
+    && before.get('canceled', false) != true
+    && before.get('status', '').upper() in [
+      '', 'RESERVED', 'PRENOTATO', 'IN_ATTESA_PICKING', 'PARTIAL_PICKED'
+    ]
+    && (
+      previousPicking.get('managedByPicking', false) == true ||
+      before.get('reservation', {}).get('active', false) == true ||
+      before.get('status', '').upper() in ['RESERVED', 'PRENOTATO', 'IN_ATTESA_PICKING']
+    )
+    && previousPicking.get('shopifyControlled', false) != true
+    && !before.get('source', '').lower().matches('.*shopify.*')
+    && !before.get('fileName', '').lower().matches('.*shopify.*')
+    && after.diff(before).affectedKeys().hasOnly(['status', 'reservation', 'picking'])
+    && picking.diff(previousPicking).affectedKeys().hasOnly([
+      'status', 'managedByPicking', 'pickedLines', 'updatedAt', 'updatedAtClient',
+      'updatedBy', 'events', 'flowPicked', 'flowPickMode', 'flowPickGroup',
+      'flowPickedCount', 'flowPickedSkus', 'flowPickedAt', 'flowPickedAtClient',
+      'flowPickedBy', 'bulkPickId'
+    ])
+    && reservation.diff(before.get('reservation', {})).affectedKeys().hasOnly([
+      'active', 'status', 'pickedAtClient', 'updatedAtClient', 'updatedBy'
+    ])
+    && after.get('status', '') in ['PICKED', 'PARTIAL_PICKED']
+    && picking.get('managedByPicking', false) == true
+    && picking.get('flowPicked', null) == completed
+    && picking.get('status', '') == (completed ? 'prelevato' : 'parziale')
+    && reservation.get('active', null) == !completed
+    && reservation.get('status', '') == (completed ? 'prelevato' : 'parziale')
+    && (
+      picking.get('updatedBy', '') == myUid() ||
+      (hasEmail() && picking.get('updatedBy', '') in [myEmailLower(), request.auth.token.email])
+    )
+    && reservation.get('updatedBy', '') == picking.get('updatedBy', '')
+    && picking.get('flowPickedBy', '') == (completed ? picking.get('updatedBy', '') : '');
+}
+
+// Flussi picking / carichi / scarichi letti da Capannone 3D
+match /amzInventory/{loc}/logs/{id} {
+  allow read: if canReadAmzKiosk();
+  allow create: if isAmzInventoryMember();
+  allow update: if isAmzInventoryAdmin() || canCompleteFbaPicking();
+  allow delete: if isAmzInventoryAdmin();
+}
+
+// Alert kiosk: carico in arrivo, SKU pronto, ecc.
+match /amzInventory/{loc}/kioskAlerts/{alertId} {
+  allow read: if canReadAmzKiosk();
+  allow create, update, delete: if isAmzInventoryMember();
+}
+
+// Annuncio manuale
+match /amzInventory/concamarise/kioskAlerts/manualAnnouncement {
+  allow read, write: if true;
+}
+
+// Storico dell’annuncio manuale
+match /amzInventory/concamarise/kioskAlerts/manualAnnouncement/history/{eventId} {
+  allow read, write: if true;
+}
+
+// Documento principale UBI / focus / drone / prodotti
+match /amzInventoryProducts/{docId} {
+  allow read: if canReadAmzKiosk();
+  allow create, update: if isAmzInventoryMember();
+  allow delete: if isAmzInventoryAdmin();
+}
+
+// Coda domande UBI da Picking
+match /amzInventoryProducts/{docId}/events/{eventId} {
+  allow read: if isAmzInventoryMember();
+  allow create, update: if isAmzInventoryMember();
+  allow delete: if isAmzInventoryAdmin();
+}
+
+// Centro notifiche UBI, se qualche frontend lo legge ancora direttamente
+match /amzInventoryProducts/{docId}/notifications/{notificationId} {
+  allow read: if canReadAmzKiosk();
+  allow create, update, delete: if isAmzInventoryAdmin();
+}
+
+// Movimenti prodotto
+match /amzInventoryProducts/{sku}/movements/{moveId} {
+  allow read: if canReadAmzKiosk();
+  allow create: if isAmzInventoryMember();
+  allow update, delete: if isAmzInventoryAdmin();
+}
+
+// CollectionGroup movements per log picking/capannone
+match /{path=**}/movements/{moveId} {
+  allow read: if canReadAmzKiosk();
+}
+
+
+
+
+// --- Access list / ruoli ---
+match /powderUsers/{docId} {
+
+  // lettura invariata
+  allow read: if isAdmin() || (signedIn() && (
+    docId == myUid() || (hasEmail() && docId == myEmailLower())
+  ));
+
+  function inviteRef() {
+    return /databases/$(database)/documents/powderUsers/$(myEmailLower());
+  }
+  function inviteExists() {
+    return hasEmail() && exists(inviteRef());
+  }
+  function invite() {
+    return get(inviteRef()).data;
+  }
+  function inviteEnabled() {
+    return inviteExists() && invite().enabled != false;
+  }
+  function inviteIsAdmin() {
+    return invite().isAdmin == true;
+  }
+  function inviteOrgId() {
+    return (invite().orgId is string && invite().orgId.matches("^[A-Za-z0-9_-]{1,50}$"))
+      ? invite().orgId
+      : "default";
+  }
+
+  // ✅ Admin tutto
+  // ✅ Utente: create/update SOLO il suo doc UID, SOLO se invitato via emailLower
+  allow create, update: if isAdmin() || (
+    signedIn()
+    && docId == myUid()
+    && inviteEnabled()
+
+    // coerenza anti-furbo
+    && request.resource.data.emailLower == myEmailLower()
+    && request.resource.data.enabled == true
+    && request.resource.data.isAdmin == inviteIsAdmin()
+    && request.resource.data.orgId == inviteOrgId()
+  );
+
+  allow delete: if isAdmin();
+}
+
+
+
+
+
+
+    // --- CONFIG HUB (QUI sta il fix per "Invio ordini a mobile") ---
+    match /hub_config/{docId} {
+  allow read: if isMember() || isKiosk();
+  allow create, update, delete: if isAdmin();
+}
+
+    // --- Alert operatori ---
+    match /hub_alerts/{docId} {
+  allow read: if isMember() || isKiosk();
+  allow create, update, delete: if isAdmin();
+}
+
+    // --- Produzione (live) ---
+    match /powderProductions/{id} {
+      allow read: if isMember() || (resource.data.active == true);
+      allow create, update: if isMember();
+      allow delete: if isAdmin();
+    }
+
+    // --- Storico conclusi ---
+    match /powderProdHistory/{id} {
+      allow read: if isMember();
+      allow create, update: if isMember();
+      allow delete: if isAdmin();
+    }
+
+    // --- Annullamenti / abort ---
+    match /powderProdAborts/{id} {
+      allow create: if isMember();
+      allow read, update, delete: if isAdmin();
+    }
+
+    // --- Segnalazioni problemi ---
+    match /powderProdIssues/{id} {
+      allow create: if isMember();
+      allow read, update, delete: if isAdmin();
+    }
+
+    // --- Richieste assenza ---
+    match /powderAbsenceRequests/{id} {
+      allow create: if isMember();
+      allow read, update, delete: if isAdmin();
+    }
+
+    // --- Notifiche (usate anche per “richiesta assenza” verso admin) ---
+    match /powderNotifications/{id} {
+      allow read: if isMember();
+      allow create: if isMember();
+      allow update, delete: if isAdmin();
+    }
+
+    // --- Action log (scrive chiunque, legge solo admin) ---
+    match /powderActionLogs/{id} {
+      allow create: if isMember();
+      allow read, update, delete: if isAdmin();
+    }
+
+    // --- Classifica / stats operatori ---
+    match /operatorStats/{uid} {
+      allow read: if isAdmin();
+      allow create, update: if isMember() && (uid == myUid() || isAdmin());
+      allow delete: if isAdmin();
+    }
+
+    // --- Push tokens ---
+    match /powderPushTokens/{id} {
+      allow create, update: if isMember() && request.resource.data.uid == myUid();
+      allow read: if isAdmin();
+      allow delete: if isMember() && (resource.data.uid == myUid() || isAdmin());
+    }
+
+
+
+    // --- HUB INVENTARIO (stessa logica Member/Admin di powderUsers) ---
+    match /orgs/{orgId}/suppliers/{id} {
+      allow read: if isMember();
+      allow create, update, delete: if isAdmin();
+    }
+
+    match /orgs/{orgId}/thresholds/{id} {
+      allow read: if isMember();
+      allow create, update, delete: if isAdmin();
+    }
+
+    match /orgs/{orgId}/products/{id} {
+      allow read: if isMember();
+      allow create, update, delete: if isAdmin();
+    }
+
+    match /orgs/{orgId}/inventoryMovements/{id} {
+      allow read: if isMember();
+      allow create: if isMember();
+      allow update, delete: if isAdmin();
+    }
+
+    match /orgs/{orgId}/inventory/{id} {
+      allow read: if isMember();
+      allow create, update, delete: if isAdmin();
+    }
+    match /orgs/{orgId}/inventory/{id} {
+  allow read: if isMember();
+  allow create, update, delete: if isAdmin();
+}
+
+// ✅ MOVIMENTI INVENTARIO PRODOTTI FINITI (sede unica)
+// Usato da realtime watcher finishedMovements + rettifiche + scarico DDT
+match /orgs/{orgId}/finishedInventoryMovements/{mvId} {
+  allow read: if isMember();
+  allow create: if isMember();
+  allow update, delete: if isAdmin();
+}
+
+
+
+// ✅ AGGIUNGI QUESTO BLOCCO QUI (finishedProducts)
+match /orgs/{orgId}/finishedProducts/{fpId} {
+  allow read: if isMember();
+  allow create, update, delete: if isAdmin();
+}
+
+// ✅ CATEGORIE PRODOTTI FINITI (NUOVA SEZIONE)
+match /orgs/{orgId}/finishedProductCategories/{catId} {
+  allow read: if isMember();
+  allow create, update, delete: if isAdmin();
+}
+
+
+// --- DDT Danea (Scarica Flussi) ---
+match /orgs/{orgId}/daneaDdts/{ddtId} {
+  allow read: if isMember();
+  allow create, update, delete: if isAdmin();   // se vuoi import solo admin
+}
+
+// completati (serve per evitare "Missing or insufficient permissions")
+match /orgs/{orgId}/daneaDdtCompleted/{docId} {
+  allow read: if isMember();
+  allow create, update, delete: if isMember(); // se chiunque può segnare completato
+}
+
+// trash (serve per evitare "Missing or insufficient permissions")
+match /orgs/{orgId}/trash/{docId} {
+  allow read, create, update, delete: if isMember();
+}
+
+    
+// --- KIOSK whitelist ---
+match /kiosks/{uid} {
+  allow read: if isAdmin() || (signedIn() && uid == myUid());
+  allow create, update, delete: if isAdmin();
+}
+
+    
+
+// --- TABELLONE WRITE (linea_liquidi) ---
+match /producedDays/linea_liquidi/{docPath=**} {
+  // chiunque (anche non autenticato) può LEGGERE
+  allow read: if true;
+
+  // scrittura solo membri
+  allow create, update, delete: if isMember();
+}
+
+
+
+
+// --- BULK PRODUZIONI: QUEUE ---
+match /producedDays/bulk_produzioni/queue/{docId} {
+  allow read: if isMember() || isKiosk();
+  allow create, update, delete: if isMember();
+}
+
+// --- BULK PRODUZIONI: COMPLETATI (items) ---
+match /producedDays/bulk_produzioni/items/{docId} {
+  allow read: if isMember() || isKiosk();
+  allow create, update, delete: if isMember();
+}
+
+// --- BULK PRODUZIONI: formulas SOLO ADMIN ---
+match /producedDays/bulk_produzioni/formulas/{docId} {
+  allow read, write: if isAdmin();
+}
+
+// --- AMAZON INVENTORY (hub inventario amz) ---
+match /amzInventory/{loc}/items/{sku} {
+  allow read: if isMember() || isKiosk();
+  allow create, update: if isMember();
+  allow delete: if isAdmin();
+}
+
+match /amzInventory/{loc}/logs/{id} {
+  allow read: if isMember() || isKiosk();
+  allow create: if isMember();
+  allow update, delete: if isAdmin();
+}
+
+// --- AMAZON INVENTORY KIOSK ALERTS ---
+match /amzInventory/{loc}/kioskAlerts/{alertId} {
+  allow read: if isMember() || isKiosk();
+  allow create, update, delete: if isMember();
+}
+
+
+match /producedDays/{bucket}/{docPath=**} {
+  allow read: if isMember();
+  allow create, update: if isMember() && bucket != "bulk_produzioni";
+  allow delete: if isAdmin();
+}
+
+
+// --- AMAZON INVENTORY PRODUCTS (anagrafica globale) ---
+// --- AMAZON INVENTORY PRODUCTS (anagrafica globale) ---
+
+
+
+// --- LINEA LIQUIDI (live) ---
+match /liquidProductions/{id} {
+  allow read: if isMember();
+  allow create, update: if isMember();
+  allow delete: if isAdmin();
+}
+
+// --- LINEA LIQUIDI: Storico conclusi ---
+match /liquidProdHistory/{id} {
+  allow read: if isMember();
+  allow create, update: if isMember();
+  allow delete: if isAdmin();
+}
+
+// --- LINEA LIQUIDI: Annullamenti / abort ---
+match /liquidProdAborts/{id} {
+  allow create: if isMember();
+  allow read, update, delete: if isAdmin();
+}
+
+// --- LINEA LIQUIDI: Segnalazioni problemi ---
+match /liquidProdIssues/{id} {
+  allow create: if isMember();
+  allow read, update, delete: if isAdmin();
+}
+
+// --- LINEA LIQUIDI: Richieste assenza ---
+match /liquidAbsenceRequests/{id} {
+  allow create: if isMember();
+  allow read, update, delete: if isAdmin();
+}
+
+// --- LINEA LIQUIDI: Notifiche ---
+match /liquidNotifications/{id} {
+  allow read: if isMember();
+  allow create: if isMember();
+  allow update, delete: if isAdmin();
+}
+
+// --- LINEA LIQUIDI: Action log (scrive chiunque, legge solo admin) ---
+match /liquidActionLogs/{id} {
+  allow create: if isMember();
+  allow read, update, delete: if isAdmin();
+}
+
+// --- LINEA LIQUIDI: Push tokens ---
+match /liquidPushTokens/{id} {
+  allow create, update: if isMember() && request.resource.data.uid == myUid();
+  allow read: if isAdmin();
+  allow delete: if isMember() && (resource.data.uid == myUid() || isAdmin());
+}
+
+// --- AMAZON INVENTORY PRODUCTS (anagrafica globale) ---
+match /amzInventoryProducts/{sku} {
+  allow read: if isMember() || isKiosk();
+  allow create, update: if isMember();
+  allow delete: if isAdmin();
+}
+
+// --- MOVIMENTI PRODOTTO (storico) ---
+match /amzInventoryProducts/{sku}/movements/{moveId} {
+  allow read: if isMember() || isKiosk();
+  allow create: if isMember();
+  allow update, delete: if isAdmin();
+}
+
+// --- MOVIMENTI PRODOTTO - collectionGroup("movements") per Logs Picking ---
+match /{path=**}/movements/{moveId} {
+  allow read: if isMember() || isKiosk();
+}
+
+
+
+// =======================
+// PAYROLL - RULES DEFINITIVE
+// =======================
+
+function isPayrollAdmin() {
+  return hasEmail() && (
+    myEmailLower() == "ludovico@generalcoppersrl.com" ||
+    myEmailLower() == "eugenia@generalcoppersrl.com"
+  );
+}
+
+// Supporta subject sia in root "subject" che in "message.subject" (extension mail)
+function reqSubject() {
+  return (request.resource.data.message is map && request.resource.data.message.subject is string)
+    ? request.resource.data.message.subject
+    : ((request.resource.data.subject is string) ? request.resource.data.subject : "");
+}
+
+function resSubject() {
+  return (resource.data.message is map && resource.data.message.subject is string)
+    ? resource.data.message.subject
+    : ((resource.data.subject is string) ? resource.data.subject : "");
+}
+
+// Accetta: "[PAYROLL]..." oppure "Busta paga..." oppure "Buste paga..."
+function isPayrollSubject(s) {
+  return (s is string) && s.matches("^(\\[PAYROLL\\]|Busta paga|Buste paga).*");
+}
+
+// --- Directory dipendenti (whitelist) ---
+match /payrollDirectory/{emailLower} {
+  // gestione solo admin payroll
+  allow create, update, delete: if isPayrollAdmin();
+
+  // lettura: admin payroll, oppure dipendente che legge la sua entry se abilitata
+  allow read: if isPayrollAdmin()
+    || (hasEmail() && emailLower == myEmailLower() && resource.data.enabled != false);
+}
+
+// --- Documenti buste paga ---
+match /payrollDocs/{docId} {
+  // crea/aggiorna/cancella solo admin payroll
+  allow create, update, delete: if isPayrollAdmin();
+
+  // legge: admin payroll oppure proprietario (per emailLower o uid)
+  allow read: if isPayrollAdmin() || (signedIn() && (
+    (resource.data.emailLower is string && hasEmail() && resource.data.emailLower == myEmailLower()) ||
+    (resource.data.uid is string && resource.data.uid == myUid())
+  ));
+}
+
+// (Se usi anche la vecchia collection /payrolls, stessa identica logica)
+match /payrolls/{docId} {
+  allow create, update, delete: if isPayrollAdmin();
+  allow read: if isPayrollAdmin() || (signedIn() && (
+    (resource.data.emailLower is string && hasEmail() && resource.data.emailLower == myEmailLower()) ||
+    (resource.data.uid is string && resource.data.uid == myUid())
+  ));
+}
+
+// --- Logs invii / ingest (solo admin payroll) ---
+match /payrollSendLogs/{id} {
+  allow read, create, update, delete: if isPayrollAdmin();
+}
+
+match /payrollSendLogIndex/{id} {
+  allow read, create, update, delete: if isPayrollAdmin();
+}
+
+match /payrollIngestLogs/{id} {
+  allow read, create, update, delete: if isPayrollAdmin();
+}
+
+// --- Indice per utente (se lo usi) ---
+match /payrollIndex/{emailLower} {
+  allow write: if isPayrollAdmin();
+  allow read: if isPayrollAdmin() || (hasEmail() && myEmailLower() == emailLower);
+}
+
+// --- Coda invio email ---
+match /email/{id} {
+
+  // ✅ Payroll: SOLO admin payroll e SOLO subject payroll
+  // ✅ Non-payroll: resta consentito ai member solo verso matteo
+  allow create: if
+    (isPayrollAdmin() && isPayrollSubject(reqSubject()))
+    ||
+    (isMember() && (
+      (request.resource.data.to is string &&
+        request.resource.data.to == "matteo@generalcoppersrl.com")
+      ||
+      (request.resource.data.to is list &&
+        request.resource.data.to.size() == 1 &&
+        request.resource.data.to[0] == "matteo@generalcoppersrl.com")
+    ));
+
+  // Per vedere lo stato "OK/ERRORE" delle mail payroll (solo admin payroll)
+  allow read: if isPayrollAdmin() && isPayrollSubject(resSubject());
+
+  allow update: if false;
+  allow delete: if isPayrollAdmin();
+}
+
+match /orgs/{orgId}/categories/{id} {
+  allow read: if isMember();
+  allow create, update, delete: if isAdmin();
+}
+
+// --- PAGHEIA BILLING (stato abbonamento utente) ---
+match /pagheiaSubscriptions/{uid} {
+
+  // l’utente può leggere SOLO il suo documento
+  allow read: if signedIn() && uid == myUid();
+
+  // scritture vietate dal client (le fa il backend / webhook Stripe con Admin SDK)
+  allow create, update, delete: if false;
+}
+
+// --- AMAZON FBM ORDERS (SP-API sync) ---
+match /amazonOrders/{orderId} {
+  // serve get + list (query)
+  allow read: if isMember();           
+  allow create, update, delete: if false;
+}
+
+// --- META SYNC (integrations/amazonSpapi) ---
+match /integrations/{docId} {
+  // leggiamo solo questo doc
+  allow read: if isMember() && docId == "amazonSpapi";
+  allow create, update, delete: if false;
+}
+
+
+
+// --- SHOPIFY FBM ORDERS ---
+// Contiene anche dati personali cliente: accesso solo agli operatori
+// abilitati all’inventario Amazon/Picking, non a qualunque utente autenticato.
+match /shopifyFbmOrders/{orderId} {
+  // Consente sia la query della lista sia il get del dettaglio al clic.
+  allow read: if isAmzInventoryMember();
+
+  // Il frontend non deve mai modificare gli ordini.
+  // Il backend Cloud Run usa Admin SDK e non è limitato da queste regole.
+  allow create, update, delete: if false;
+}
+
+// --- AMAZON INVENTORY META ---
+match /amzInventoryMeta/{docId} {
+
+  // Documenti letti dal frontend Amazon su qualsiasi dispositivo autenticato
+  allow read: if isAmzInventoryAdmin() || (
+    canReadAmzKiosk() && (
+      docId == "shopifyFbmSync" ||
+      docId == "lowStockEmailState" ||
+      docId == "lowStockAuthoritativeView" ||
+      docId == "lowStockFrontendSnapshot"
+    )
+  );
+
+  // Log mail legacy: scrittura riservata agli admin Amazon.
+  // Fotografia sottoscorta: contiene esattamente le righe mostrate dal frontend.
+  allow create, update: if
+    (isAmzInventoryAdmin() && docId == "lowStockEmailState") ||
+    (
+      isAmzInventoryMember() &&
+      docId == "lowStockFrontendSnapshot" &&
+      request.resource.data.publisherVersion == 2 &&
+      request.resource.data.sourceMode == "frontend_exact_view" &&
+      request.resource.data.source == "hub_inventario_amazon" &&
+      request.resource.data.rows is list &&
+      request.resource.data.stateRows is list &&
+      request.resource.data.total is int &&
+      request.resource.data.total >= 0 &&
+      request.resource.data.total <= 2000 &&
+      request.resource.data.total == request.resource.data.rows.size() &&
+      request.resource.data.total == request.resource.data.stateRows.size()
+    );
+
+  allow delete: if isAmzInventoryAdmin();
+}
+
+// --- STATO CICLO SOTTOSCORTA AMAZON ---
+match /amzInventoryLowStockSkuStates/{sku} {
+  allow read: if canReadAmzKiosk();
+  allow create, update, delete: if false;
+}
+
+// --- EVENTI RIORDINO AMAZON ---
+match /amzInventoryReorders/{reorderId} {
+  allow read: if canReadAmzKiosk();
+  allow create, update, delete: if false;
+}
+
+// --- EVENTI RIORDINO AMAZON ---
+// Stato cloud dei riordini; nessuna scrittura diretta dal browser.
+match /amzInventoryReorders/{reorderId} {
+  allow read: if isAmzInventoryMember();
+  allow create, update, delete: if false;
+}
+
+    // --- Default deny ---
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
