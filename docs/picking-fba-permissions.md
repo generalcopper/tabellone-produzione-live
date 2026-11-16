@@ -45,3 +45,14 @@ demo-picking-permissions e security/firestore.rules. Eseguire:
 Il test accetta solo localhost/127.0.0.1 e resetta esclusivamente il database
 locale demo-picking-permissions. Per riprodurre il blocco precedente impostare
 anche PICKING_RULES_FILE al relativo snapshot e PICKING_EXPECT_LEGACY_DENIAL=1.
+
+## Pubblicazione verificata
+
+Ruleset: projects/tabellone-produzione-liv-e313e/rulesets/9c30cd74-829d-408d-916b-6e9e4d4cc29e
+
+Release aggiornata: 2026-11-16T12:08:51.177072Z
+
+SHA-256 delle regole pubblicate: b8fac74c8a81a30fd520b30c1bd76809897150c64c2a69cfd89664f508f76143
+
+Compilazione Firebase senza errori o avvisi; rilettura della release e confronto
+integrale del contenuto completati. Hosting non ridistribuito.
