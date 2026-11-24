@@ -69,8 +69,8 @@ test('concurrent polling and begin create a single dispatch; completion is idemp
   assert.equal((await poll()).jobs.length, 0);
   assert.equal((await db.doc('email/' + id).get()).data().message.text, 'Only test data');
 });
-test('disabling email, employee or changing phone after claim cancels dispatch', async () => {
-  for (const change of ['email', 'employee', 'phone']) {
+test('disabling employee or changing phone after claim cancels dispatch', async () => {
+  for (const change of ['employee', 'phone']) {
     await db.doc('pickingEmailRecipients/worker').update({ enabled: true });
     await db.doc('powderUsers/worker').update({ enabled: true });
     await db.doc(RECIPIENTS + '/worker').update({ revision: 1 });
@@ -120,4 +120,28 @@ test('cancelling operational FBA work between claim and begin prevents dispatch'
   await notice('fba', { sourcePath, noticeType: 'fba' });
   const job = (await poll()).jobs[0]; assert.ok(job);
   assert.equal((await service.worker({ action: 'begin', ...job })).cancelled, true);
+});
+
+test('email flag is independent from WhatsApp and direct producer jobs need no email ledger', async () => {
+  await db.doc('pickingEmailRecipients/worker').update({ enabled: false });
+  await db.doc(RECIPIENTS + '/worker').update({ accountEmail: 'worker@example.com' });
+  await db.doc(DELIVERIES + '/direct').set({ producer: 2, kind: 'notice', status: 'PENDING', uid: 'worker',
+    phone: '+393331234567', revision: 1, noticeType: 'manual', sourcePath: '', text: 'Test only',
+    occurredAt: T.now(), expiresAt: T.fromMillis(Date.now() + 60000) });
+  const job = (await poll()).jobs[0]; assert.equal(job.id, 'direct');
+  assert.equal((await service.worker({ action: 'begin', ...job })).text, 'Test only');
+});
+test('read receipts are authenticated, monotonic, and apply only to the latest message', async () => {
+  await notice('receipt'); const job = (await poll()).jobs[0];
+  await service.worker({ action: 'begin', ...job });
+  await service.worker({ action: 'complete', ...job, outcome: 'SENT', messageId: 'msg-1' });
+  const deliveredAt = Date.now(), readAt = deliveredAt + 10;
+  const receipt = { action: 'receipt', ...job, messageId: 'msg-1', ack: 3, deliveredAt, readAt };
+  await assert.rejects(service.worker({ ...receipt, token: '00000000-0000-0000-0000-000000000000' }), e => e.status === 409);
+  await service.worker(receipt);
+  await service.worker({ ...receipt, ack: 2 });
+  assert.equal((await db.doc(RECIPIENTS + '/worker').get()).data().lastReadAt.toMillis(), readAt);
+  await db.doc(RECIPIENTS + '/worker').update({ lastMessageId: 'newer', lastReadAt: F.delete() });
+  await service.worker(receipt);
+  assert.equal((await db.doc(RECIPIENTS + '/worker').get()).data().lastReadAt, undefined);
 });

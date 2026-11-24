@@ -41,6 +41,7 @@ function createService({ db, auth, clock = Date.now }) {
     users: recipients.docs.map(doc => { const d = doc.data(); return {
       uid: doc.id, phone: d.phone || '', enabled: d.enabled === true, revision: d.revision || 0,
       lastStatus: d.lastStatus || '', lastSentAt: p.millis(d.lastSentAt), lastChannel: d.lastChannel || '',
+      lastDeliveredAt: p.millis(d.lastDeliveredAt), lastReadAt: p.millis(d.lastReadAt),
     }; }) };
   }
   async function setRecipient(actor, input) {
@@ -56,9 +57,6 @@ function createService({ db, auth, clock = Date.now }) {
       const [snap, email] = await tx.getAll(ref, db.doc(EMAIL_RECIPIENTS + '/' + uid));
       const previous = snap.data() || {};
       if ((previous.revision || 0) !== revision) throw problem(409, 'Dati cambiati. Premi Aggiorna.');
-      if (enabled && (!email.data()?.enabled || email.data().email !== p.email(a.user.email))) {
-        throw problem(400, 'Attiva prima gli avvisi email per questo dipendente.');
-      }
       const newIndex = phone ? db.doc('pickingWhatsAppPhones/' + p.hash(phone)) : null;
       const oldIndex = previous.phone ? db.doc('pickingWhatsAppPhones/' + p.hash(previous.phone)) : null;
       const indexes = await Promise.all([newIndex ? tx.get(newIndex) : null, oldIndex ? tx.get(oldIndex) : null]);
@@ -67,7 +65,7 @@ function createService({ db, auth, clock = Date.now }) {
       }
       if (oldIndex && indexes[1]?.data()?.uid === uid && (!enabled || previous.phone !== phone)) tx.delete(oldIndex);
       if (enabled) tx.set(newIndex, { uid });
-      tx.set(ref, { phone, enabled, revision: revision + 1, updatedAt: F.serverTimestamp(), updatedByUid: actor.uid,
+      tx.set(ref, { phone, enabled, ...(enabled ? { accountEmail: p.email(a.user.email) } : {}), revision: revision + 1, updatedAt: F.serverTimestamp(), updatedByUid: actor.uid,
         ...(enabled && (!previous.enabled || previous.phone !== phone) ? { enabledAt: F.serverTimestamp() } : {}) }, { merge: true });
     });
     return status();
@@ -146,9 +144,9 @@ function createService({ db, auth, clock = Date.now }) {
   }
   async function sourceValid(id, delivery) {
     if (delivery.kind === 'test') return true;
-    const ledger = await db.doc('pickingEmailDeliveries/' + id).get();
-    if (!ledger.exists || ledger.data().uid !== delivery.uid) return false;
-    const d = ledger.data();
+    const ledger = delivery.producer === 2 ? null : await db.doc('pickingEmailDeliveries/' + id).get();
+    if (ledger && (!ledger.exists || ledger.data().uid !== delivery.uid)) return false;
+    const d = delivery.producer === 2 ? delivery : ledger.data();
     if (['CANCELLED', 'UNKNOWN'].includes(d.lastStatus)) return false;
     if (!d.sourcePath) return ['manual', 'daily'].includes(d.noticeType);
     if (!(d.sourcePath.startsWith('amzInventory/concamarise/logs/') || d.sourcePath.startsWith(w.QUEUE + '/'))) return false;
@@ -238,13 +236,35 @@ function createService({ db, auth, clock = Date.now }) {
         throw problem(409, 'Esito non applicabile.');
       }
       const recipientRef = db.doc(RECIPIENTS + '/' + d.uid), recipient = await tx.get(recipientRef);
+      const sentAt = body.sentAt && Number.isFinite(body.sentAt) && body.sentAt >= p.millis(d.startedAt) - 60000 && body.sentAt <= clock() + 60000 ? T.fromMillis(body.sentAt) : F.serverTimestamp();
       tx.update(ref, { status: body.outcome, updatedAt: F.serverTimestamp(), text: F.delete(),
-        ...(body.outcome === 'SENT' ? { messageId: body.messageId, sentAt: F.serverTimestamp() } : {}) });
-      if (recipient.exists && p.millis(recipient.data().lastOccurredAt) <= p.millis(d.occurredAt)) tx.set(recipientRef, {
+        ...(body.outcome === 'SENT' ? { messageId: body.messageId, sentAt } : {}) });
+      if (recipient.exists && recipient.data().revision === d.revision && recipient.data().phone === d.phone && p.millis(recipient.data().lastOccurredAt) <= p.millis(d.occurredAt)) tx.set(recipientRef, {
         lastStatus: body.outcome, lastOccurredAt: d.occurredAt, lastChannel: d.channel,
-        ...(body.outcome === 'SENT' ? { lastSentAt: F.serverTimestamp() } : {}),
+        ...(body.outcome === 'SENT' ? { lastSentAt: sentAt, lastMessageId: body.messageId, lastDeliveredAt: F.delete(), lastReadAt: F.delete() } : {}),
       }, { merge: true });
       if (body.outcome === 'SENT' && d.kind === 'test') tx.set(db.doc(CONFIG), { lastTestSentAt: F.serverTimestamp() }, { merge: true });
+    });
+    return { ok: true };
+  }
+  async function receipt(body) {
+    if (![2, 3].includes(body.ack) || typeof body.messageId !== 'string' || body.messageId.length > 180 ||
+        !Number.isFinite(body.deliveredAt) || body.deliveredAt <= 0 || body.deliveredAt > clock() + 60000 ||
+        (body.ack === 3 && (!Number.isFinite(body.readAt) || body.readAt < body.deliveredAt || body.readAt > clock() + 60000))) {
+      throw problem(400, 'Conferma non valida.');
+    }
+    const ref = db.doc(DELIVERIES + '/' + body.id);
+    await db.runTransaction(async tx => {
+      const snap = await tx.get(ref), d = snap.data();
+      if (!d || d.token !== body.token || d.status !== 'SENT' || d.messageId !== body.messageId ||
+          body.deliveredAt < p.millis(d.startedAt) - 60000) throw problem(409, 'Conferma non applicabile.');
+      const recipientRef = db.doc(RECIPIENTS + '/' + d.uid), recipient = await tx.get(recipientRef), r = recipient.data();
+      const deliveredAt = d.deliveredAt || T.fromMillis(body.deliveredAt);
+      const readAt = d.readAt || (body.ack === 3 ? T.fromMillis(body.readAt) : null);
+      tx.update(ref, { deliveredAt, ...(readAt ? { readAt } : {}), receiptReportedAt: F.serverTimestamp() });
+      if (r?.lastMessageId === body.messageId && r?.phone === d.phone && r?.revision === d.revision) {
+        tx.set(recipientRef, { lastDeliveredAt: deliveredAt, ...(readAt ? { lastReadAt: readAt } : {}) }, { merge: true });
+      }
     });
     return { ok: true };
   }
@@ -254,6 +274,7 @@ function createService({ db, auth, clock = Date.now }) {
     if (!validId(body.id) || !/^[a-f0-9-]{36}$/.test(body.token || '')) throw problem(400, 'Invio non valido.');
     if (body.action === 'begin') return begin(body);
     if (body.action === 'complete') return complete(body);
+    if (body.action === 'receipt') return receipt(body);
     throw problem(400, 'Richiesta non valida.');
   }
   return { admin, worker, status };

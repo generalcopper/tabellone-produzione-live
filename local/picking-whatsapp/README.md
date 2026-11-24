@@ -1,8 +1,11 @@
 # Picking WhatsApp sul NUC
 
-Installazione del 24 novembre 2026. Il motore locale è acceso in stato `UNPAIRED`.
-Gli avvisi automatici sono disattivati fino a collegamento del telefono e prova.
-Nessun messaggio WhatsApp reale è stato inviato durante il collaudo.
+Installazione del 24 novembre 2026. WhatsApp Business è collegato al NUC e il
+motore è in stato `READY`, anche dopo il riavvio del solo servizio Picking.
+La sessione è stata abbinata dall’Android, mostrando il QR sul MacBook.
+Prova reale inviata e consegnata al destinatario concordato alle 20:06
+del 24/11/2026 (Europe/Rome); ricezione confermata dal titolare.
+Avvisi automatici attivati alle 20:07. Nessun arretrato recuperato.
 
 ## Componenti
 
@@ -19,21 +22,32 @@ Nessun messaggio WhatsApp reale è stato inviato durante il collaudo.
   browser e sospende gli invii. Il profilo Chrome è separato da quelli esistenti.
 - API separata `pickingWhatsAppApi`, codebase `picking-whatsapp`, progetto
   `tabellone-produzione-liv-e313e`, regione `europe-west1`, Node 22, minInstances 0.
-  Le funzioni email esistenti non sono state ridistribuite.
+  Sono aggiornate soltanto pickingEmailApi, pickingEmailFba, pickingEmailWrite,
+  pickingEmailFbmMorning e pickingEmailDelivery per gestire i due canali.
+  warehouseMonitor e pickingAutoCerea non sono ridistribuite.
 - Nessuna porta di ascolto sul NUC, nessun cambiamento a firewall, VM Forex,
   VM Wazuh o agent Wazuh. Nessun workflow GitHub eseguito.
 
 ## Flusso e controlli
 
-Il worker legge tramite l'API autenticata i nuovi registri `pickingEmailDeliveries`:
-FBA, Write, riepilogo quotidiano e riepilogo manuale. La coda email resta il flusso
-originario. WhatsApp è un canale aggiuntivo per i dipendenti che hanno email
-attive, account abilitato, numero valido e opzione WhatsApp salvata.
+I produttori degli avvisi FBA, Write e riepilogo creano le code dei canali
+selezionati. Email e WhatsApp sono indipendenti: la sola selezione WhatsApp non
+crea un’email. Il lettore dei registri email precedenti rimane compatibile con
+lo stesso ID deterministico, impedendo duplicati durante il rilascio.
 
-La schermata Notifiche di Picking permette numero con prefisso internazionale,
-attivazione per dipendente, salvataggio esplicito, prova e pausa generale.
-Lo stesso numero non può essere attivo su due dipendenti. Il server ricontrolla
-account, selezione, revisione del numero e validità dell'avviso prima dell'invio.
+La schermata Notifiche contiene un unico elenco con flag Email e WhatsApp.
+Toccando nome o riga si apre il dialogo con email e telefono e il pulsante Salva.
+L’email di notifica è distinta dall’email di accesso Firebase; il login non viene
+modificato. Il salvataggio dei due contatti è atomico e controlla entrambe le
+revisioni. Lo stesso numero non può essere attivo su due dipendenti.
+Non sono presenti pulsanti di prova. L’API amministrativa conserva la prova
+interna per il collaudo. Il riepilogo manuale esistente resta disponibile.
+
+Le didascalie indicano l’ultimo invio. Consegna e lettura WhatsApp compaiono solo
+quando arriva una conferma del messaggio effettivamente inviato. L’orario della
+lettura è quello di ricezione della conferma; se questa manca, la UI lo indica.
+Le conferme sono persistenti nel registro locale e applicate soltanto all’ultimo
+messaggio del numero/revisione correnti. Non vengono elaborati altri messaggi.
 
 L'attivazione generale richiede una prova inviata. Ogni attivazione riparte dal
 momento attuale: niente arretrati. Un avviso scade dopo 15 minuti. La perdita di
@@ -73,7 +87,8 @@ e le risorse del NUC restano normali consumi dell'infrastruttura.
    **WhatsApp Business → Dispositivi collegati → Collega un dispositivo**.
    Il tentativo dura cinque minuti; il QR viene eliminato dopo il collegamento.
 4. Verificare `READY` in `data\status.json`. In Picking salvare il numero del
-   destinatario di prova concordato e premere **Invia prova**.
+   destinatario di prova concordato. Eseguire una prova tramite l’API amministrativa
+   autenticata (`sendTest` con requestId stabile), senza aggiungere pulsanti alla UI.
 5. Controllare il messaggio sul telefono, quindi attivare gli avvisi WhatsApp.
 
 La SIM serve per la registrazione sul telefono. Il collegamento al NUC avviene
@@ -88,7 +103,8 @@ motore non elabora domande o messaggi in ingresso.
 - `data\session`: sessione WhatsApp privata, mai pubblicare o includere nello ZIP.
 - `data\probe-result.json`: prova Chrome con sandbox attiva, LocalService e limiti.
 
-Per mettere in pausa solo gli invii usare il pulsante in Picking. Per sospendere
+Per mettere in pausa tutti gli invii usare l’API amministrativa autenticata
+`setEnabled: false`; i flag di Picking controllano i singoli dipendenti. Per sospendere
 anche il browser creare il file `data\pause`; rimuoverlo per consentire la ripresa.
 Per manutenzione completa disabilitare **questa sola attività** Windows e poi
 fermarla; il controllo ogni cinque minuti altrimenti può riavviarla.
@@ -101,15 +117,19 @@ come parte della manutenzione del worker senza verificare gli altri servizi.
 
 ## Verifiche e rilascio
 
-- 13 test backend passati con Firestore Emulator su `127.0.0.1:8794`, progetto
+- 15 test backend WhatsApp passati con Firestore Emulator su `127.0.0.1:8794`, progetto
   fittizio `demo-picking-whatsapp-tests`; nessun dato operativo nei test.
-- 5 test del worker passati anche sul NUC: deduplicazione, invio ambiguo,
-  annullamento, numero non registrato e persistenza dopo riavvio.
-- Test UI headless: mobile 390 px, salvataggio, blocco prima del pairing,
-  invio email indipendente, pulizia al logout, modulo WhatsApp non raggiungibile.
+- 86 test del backend notifiche passati nell’emulatore separato sulla porta 8791:
+  invii email esistenti, canali indipendenti, contatti atomici e protezione da
+  conferme tardive dirette a contatti precedenti.
+- 6 test del worker passati anche sul NUC: deduplicazione, invio ambiguo,
+  annullamento, numero non registrato, persistenza dopo riavvio e conferme di lettura.
+- Test UI headless: lista unica, due flag indipendenti, dialogo contatti,
+  salvataggio e ricaricamento, conflitti di modifica, riepilogo WhatsApp-only,
+  conferme effettive, mobile 390 px e pulizia dei contatti al logout.
 - Chrome avviato con successo come LocalService senza disabilitare la sandbox.
 - QR di collegamento generato sul NUC con il fix ufficiale per il nuovo login.
-  Associazione del telefono e invio reale ancora da completare.
+  Associazione completata; sessione recuperata dopo riavvio del worker.
 - API pubblica senza credenziali: HTTP 401. Worker autenticato: risposta corretta.
 - Audit delle dipendenze installate del worker (`--omit=dev --omit=optional`)
   e del backend (`--omit=dev`): zero vulnerabilità note al controllo del 24/11/2026.
@@ -120,16 +140,17 @@ come parte della manutenzione del worker senza verificare gli altri servizi.
 
 Hosting è stato rilasciato clonando la versione corrente, modificando solo
 `picking.html`, `picking.js`, `picking-notifications.js`, `picking-notifications.css`
-e aggiungendo `picking-whatsapp.js`. Gli altri **252 file** e la configurazione
+e `picking-whatsapp.js` (compatibilità con le pagine già aperte). Gli altri **252 file** e la configurazione
 hosting sono stati preservati e confrontati prima del rilascio. Hash dei cinque
 file pubblici verificati dopo il rilascio. Le versioni degli asset cambiano per
 aggiornare correttamente anche la cache PWA.
 
-Versione hosting precedente: `9bd53dc99a1f48a2`.
-Versione con WhatsApp: `cedab8518d2d13f1`.
+Versione hosting precedente alla prima integrazione: `9bd53dc99a1f48a2`.
+Prima integrazione: `cedab8518d2d13f1`.
+Lista unica e contatti indipendenti: `7bbecfe4f4a36a76`.
 I dettagli del rilascio sono in `reports/hosting-release.json` sul Mac mini.
 
 Per un rollback dell'interfaccia ripubblicare la versione precedente, poi
 sospendere solo l'attività WhatsApp. Le email e i servizi Forex/Wazuh non
-dipendono dal nuovo worker. Il pairing e l'invio reale restano da collaudare con
-il telefono del titolare: i test software non sostituiscono questa prova.
+dipendono dal nuovo worker. Il registro del collaudo reale è conservato nelle collezioni riservate del
+servizio, senza telefoni o contenuti dei messaggi in Git.

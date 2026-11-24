@@ -37,10 +37,6 @@ def prepare():
             raise RuntimeError('Live source differs from baseline: ' + name)
     public = ROOT / 'public'
     module = public / 'picking-notifications.js'
-    text = module.read_text()
-    text, count = re.subn(r'picking-whatsapp\.js\?v=[a-z0-9]+', 'picking-whatsapp.js?v=' + digest((public / 'picking-whatsapp.js').read_bytes())[:12], text)
-    if count != 1: raise RuntimeError('Missing optional module import')
-    module.write_text(text)
     picking = public / 'picking.js'
     text, count = re.subn(r'picking-notifications\.js\?v=[a-z0-9]+', 'picking-notifications.js?v=' + digest(module.read_bytes())[:12], picking.read_text())
     if count != 1: raise RuntimeError('Missing notifications import')
@@ -79,7 +75,7 @@ def deploy():
     api.call('PATCH', BASE + version + '?updateMask=status', {'status': 'FINALIZED'})
     current = api.call('GET', BASE + 'sites/' + PROJECT + '/releases?pageSize=1')['releases'][0]['version']['name']
     if current != live: raise RuntimeError('Live version changed during preparation; retry from the new live version')
-    release = api.call('POST', BASE + 'sites/' + PROJECT + '/releases?versionName=' + version, {'message': 'Picking WhatsApp: isolated NUC worker and employee phone settings'})
+    release = api.call('POST', BASE + 'sites/' + PROJECT + '/releases?versionName=' + version, {'message': 'Picking: unified recipients, independent email/WhatsApp and delivery receipts'})
     report = {'previousVersion': live, 'version': version, 'changedFiles': TARGETS, 'preservedFileCount': len(before) - len(set(before) & set(hashes)), 'release': release}
     (HERE / 'reports').mkdir(exist_ok=True)
     (HERE / 'reports/hosting-release.json').write_text(json.dumps(report, indent=2))

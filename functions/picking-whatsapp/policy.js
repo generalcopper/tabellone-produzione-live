@@ -28,10 +28,9 @@ function textFor(mail) {
     '\n\nElenco completo e aggiornato: ' + link;
 }
 function eligible(settings, emailSettings, user, directory, occurredAt, activatedAt) {
-  return settings?.enabled === true && phone(settings.phone) === settings.phone &&
-    c.millis(settings.enabledAt) > 0 && c.millis(settings.enabledAt) <= occurredAt &&
-    activatedAt > 0 && occurredAt >= activatedAt &&
-    c.selectedForEvent(emailSettings, user, directory, occurredAt) &&
-    !!user?.metadata?.lastSignInTime;
+  return activatedAt > 0 && occurredAt >= activatedAt && c.selectedForWhatsApp({ ...settings,
+    accountEmail: settings?.accountEmail || emailSettings?.accountEmail || emailSettings?.email,
+  }, user, directory, occurredAt);
 }
+
 module.exports = { ...c, TTL, phone, signature, authorized, textFor, eligible };

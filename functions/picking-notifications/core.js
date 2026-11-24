@@ -139,7 +139,28 @@ function newWork(before, after, id, channel, occurredAt, activatedAt, sourceCrea
 function selectedForEvent(recipient, user, directory, occurredAt) {
   return recipient?.enabled === true && millis(recipient.enabledAt) <= occurredAt &&
     millis(recipient.enabledAt) > 0 && accessFor(user, directory).member &&
-    user.emailVerified === true && email(user.email) === recipient.email;
+    user.emailVerified === true && validEmail(recipient.email) &&
+    email(user.email) === email(recipient.accountEmail || recipient.email);
+}
+
+function notificationPhone(value) {
+  if (typeof value !== 'string' || value.length > 40) return '';
+  let p = value.trim().replace(/[ ().-]/g, '');
+  if (p.startsWith('00')) p = '+' + p.slice(2);
+  if (/^3\d{8,9}$/.test(p)) p = '+39' + p;
+  return /^\+[1-9]\d{7,14}$/.test(p) ? p : '';
+}
+function selectedForWhatsApp(recipient, user, directory, occurredAt) {
+  return recipient?.enabled === true && notificationPhone(recipient.phone) === recipient.phone &&
+    !!recipient.phone && millis(recipient.enabledAt) > 0 && millis(recipient.enabledAt) <= occurredAt &&
+    accessFor(user, directory).member && user.emailVerified === true && !!user.metadata?.lastSignInTime &&
+    email(user.email) === email(recipient.accountEmail);
+}
+function whatsAppText(message, channel) {
+  const full = 'LG Trading · ' + clean(message.subject, 160) + '\n\n' + String(message.text || '').replace(/\r/g, '').trim();
+  const link = channel === 'WRITE' ? 'https://' + PROJECT + '.firebaseapp.com/tabellone_write.html' : URL;
+  return full.length <= 3900 ? full : full.slice(0, 3600).replace(/\n[^\n]*$/, '') +
+    '\n\nElenco completo e aggiornato: ' + link;
 }
 
 function pendingTotals(fbaDocs, fbmDocs) {
@@ -229,5 +250,5 @@ function retryDelay(delivery) {
 }
 
 module.exports = { PROJECT, REGION, URL, PREFIX, KIND, TIME_ZONE, MAIL_FROM, clean, skuKey, productTitle, email, hash, validEmail, millis, number,
-  isEnabled, accessFor, summarizeFba, summarizeFbm, newWork, selectedForEvent, buildMessage,
+  notificationPhone, selectedForWhatsApp, whatsAppText, isEnabled, accessFor, summarizeFba, summarizeFbm, newWork, selectedForEvent, buildMessage,
   pendingTotals, pendingDetails, dailySlot, envelopeHash, deliveryOutcome, retryDelay };

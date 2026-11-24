@@ -74,6 +74,11 @@ async function connect(explicitPairing) {
       if (client !== current || Date.now() > pairUntil) removeQr();
     } catch (_) { log('qr_render_failed'); }
   });
+  current.on('message_ack', (message, ack) => {
+    if (client === current && message?.fromMe && message.id?._serialized) {
+      journal.receipt(message.id._serialized, ack);
+    }
+  });
   current.on('ready', () => {
     if (client !== current) return;
     initialized = true; state = 'READY'; failures = 0; removeQr(); log('whatsapp_ready'); status();
@@ -102,7 +107,7 @@ async function connect(explicitPairing) {
 async function reports() {
   for (const row of journal.reports()) {
     try {
-      await api({ action: 'complete', id: row.id, token: row.token, outcome: row.outcome, messageId: row.message_id || '' });
+      await api({ action: 'complete', id: row.id, token: row.token, outcome: row.outcome, messageId: row.message_id || '', ...(row.outcome === 'SENT' ? { sentAt: row.updated } : {}) });
       journal.acknowledged(row.id);
     } catch (e) {
       // A lost lease or an already cancelled item cannot safely be retransmitted.
@@ -110,6 +115,17 @@ async function reports() {
       else throw e;
     }
   }
+  for (const row of journal.receiptReports()) {
+    try {
+      await api({ action: 'receipt', id: row.id, token: row.token, messageId: row.message_id,
+        ack: row.ack, deliveredAt: row.delivered_at, ...(row.read_at ? { readAt: row.read_at } : {}) });
+      journal.receiptAcknowledged(row.message_id, row.ack);
+    } catch (e) {
+      if ([404, 409].includes(e.status)) journal.receiptAcknowledged(row.message_id, row.ack);
+      else throw e;
+    }
+  }
+
 }
 async function tick() {
   const underPressure = os.freemem() < 2 * 1024 ** 3 || fs.existsSync(paused);

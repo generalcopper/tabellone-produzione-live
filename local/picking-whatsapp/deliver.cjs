@@ -18,7 +18,10 @@ async function deliver({ job, journal, provider, api, onTimeout = async () => {}
     journal.sending(job.id);
     // No retry around sendMessage: a rejected promise can still mean WhatsApp accepted it.
     const sent = await bounded(provider.sendMessage(number._serialized, payload.text, { sendSeen: false, linkPreview: false }), 60000);
-    if (sent?.id?._serialized) journal.outcome(job.id, 'SENT', sent.id._serialized);
+    if (sent?.id?._serialized) {
+      journal.outcome(job.id, 'SENT', sent.id._serialized);
+      journal.receipt?.(sent.id._serialized, sent.ack);
+    }
     else journal.outcome(job.id, 'UNKNOWN');
   } catch (error) { journal.outcome(job.id, 'UNKNOWN'); if (error.providerTimeout) await onTimeout(); }
 }

@@ -4,6 +4,7 @@ class Journal {
   constructor(file) {
     this.db = new DatabaseSync(file);
     this.db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS sends (id TEXT PRIMARY KEY, token TEXT NOT NULL, stage TEXT NOT NULL, outcome TEXT, message_id TEXT, updated INTEGER NOT NULL)');
+    this.db.exec('CREATE TABLE IF NOT EXISTS receipts (message_id TEXT PRIMARY KEY, ack INTEGER NOT NULL, delivered_at INTEGER NOT NULL, read_at INTEGER, reported_ack INTEGER NOT NULL DEFAULT 0)');
   }
   reserve(id, token) {
     // An id already reserved is never transmitted again, including after a crash.
@@ -18,7 +19,21 @@ class Journal {
     this.db.prepare("UPDATE sends SET stage='REPORT',outcome='UNKNOWN' WHERE stage IN ('RESERVED','SENDING')").run();
   }
   reports() { return this.db.prepare("SELECT * FROM sends WHERE stage='REPORT' ORDER BY updated LIMIT 50").all(); }
-  prune() { this.db.prepare("DELETE FROM sends WHERE stage='DONE' AND updated < ?").run(Date.now() - 90 * 86400000); }
+  receipt(messageId, ack, at = Date.now()) {
+    if (![2, 3].includes(ack) || !this.db.prepare("SELECT 1 FROM sends WHERE message_id=? AND outcome='SENT'").get(messageId)) return false;
+    this.db.prepare(`INSERT INTO receipts (message_id,ack,delivered_at,read_at) VALUES (?,?,?,?)
+      ON CONFLICT(message_id) DO UPDATE SET ack=MAX(ack,excluded.ack),
+      read_at=COALESCE(read_at,excluded.read_at)`).run(messageId, ack, at, ack === 3 ? at : null);
+    return true;
+  }
+  receiptReports() {
+    return this.db.prepare(`SELECT s.id,s.token,r.* FROM receipts r JOIN sends s ON s.message_id=r.message_id
+      WHERE r.reported_ack < r.ack AND s.stage='DONE' ORDER BY r.delivered_at LIMIT 50`).all();
+  }
+  receiptAcknowledged(messageId, ack) {
+    this.db.prepare('UPDATE receipts SET reported_ack=MAX(reported_ack,?) WHERE message_id=?').run(ack, messageId);
+  }
+  prune() { this.db.prepare("DELETE FROM sends WHERE stage='DONE' AND updated < ?").run(Date.now() - 90 * 86400000); this.db.exec('DELETE FROM receipts WHERE NOT EXISTS (SELECT 1 FROM sends WHERE sends.message_id=receipts.message_id)'); }
   close() { this.db.close(); }
 }
 module.exports = { Journal };

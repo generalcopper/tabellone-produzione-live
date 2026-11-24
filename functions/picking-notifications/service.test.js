@@ -78,6 +78,69 @@ if (process.env.FIRESTORE_EMULATOR_HOST !== '127.0.0.1:8791') {
     return event;
   }
 
+  async function configure(patch = {}) {
+    return service.api('Bearer admin-token', { action: 'saveRecipient', uid: 'worker', enabled: false,
+      whatsappEnabled: true, email: 'notices@example.com', phone: '333 1234567', revision: 0, whatsappRevision: 0, ...patch });
+  }
+  test('contacts save atomically, normalize phone, preserve login and survive list reload', async () => {
+    await configure();
+    const row = (await service.api('Bearer admin-token', { action: 'list' })).users.find(x => x.uid === 'worker');
+    assert.equal(row.email, 'notices@example.com'); assert.equal(row.loginEmail, worker.email);
+    assert.equal(row.whatsapp.phone, '+393331234567'); assert.equal(row.whatsapp.enabled, true);
+    assert.equal(row.enabled, false); assert.equal(users.get('worker').email, worker.email);
+    await assert.rejects(configure({ email: 'other@example.com' }), e => e.status === 409);
+    assert.equal((await db.doc(RECIPIENTS + '/worker').get()).data().email, 'notices@example.com');
+  });
+  test('duplicate enabled phone and invalid email reject the entire contact save', async () => {
+    await configure();
+    await assert.rejects(configure({ uid: 'admin', email: 'admin@example.com' }), e => e.status === 409);
+    assert.equal((await db.doc(RECIPIENTS + '/admin').get()).exists, false);
+    await assert.rejects(configure({ email: 'bad@', revision: 1, whatsappRevision: 1 }), e => e.status === 400);
+    assert.equal((await db.doc('pickingWhatsAppRecipients/worker').get()).data().revision, 1);
+  });
+  test('a late delivery to a replaced email cannot mark the new contact as sent', async () => {
+    await configure({ enabled: true });
+    await service.onNewWork(await createWork(), 'FBA');
+    const mail = await firstMail();
+    await configure({ enabled: true, email: 'replacement@example.com', revision: 1, whatsappRevision: 1 });
+    await deliver(mail.ref, { state: 'SUCCESS', attempts: 1, endTime: Timestamp.now(), info: { accepted: ['notices@example.com'] } });
+    const recipient = (await db.doc(RECIPIENTS + '/worker').get()).data();
+    assert.equal(recipient.email, 'replacement@example.com');
+    assert.equal(recipient.lastSentAt, undefined); assert.equal(recipient.lastStatus, '');
+    assert.equal((await db.doc(DELIVERIES + '/' + mail.id).get()).data().lastStatus, 'SUCCESS');
+  });
+  test('WhatsApp-only FBA notification creates no email and concurrent events stay deduplicated', async () => {
+    await configure();
+    await db.doc('pickingWhatsAppConfig/system').set({ enabled: true, activatedAt: Timestamp.fromMillis(activatedAt) });
+    const event = await createWork();
+    await Promise.all([service.onNewWork(event, 'FBA'), service.onNewWork(event, 'FBA')]);
+    assert.equal((await db.collection('email').get()).size, 0);
+    const jobs = await db.collection('pickingWhatsAppDeliveries').get(); assert.equal(jobs.size, 1);
+    assert.equal(jobs.docs[0].data().producer, 2); assert.match(jobs.docs[0].data().text, /FBA/);
+  });
+  test('both channels use saved contacts and a later Auth email change blocks both', async () => {
+    await configure({ enabled: true });
+    await db.doc('pickingWhatsAppConfig/system').set({ enabled: true, activatedAt: Timestamp.fromMillis(activatedAt) });
+    await service.onNewWork(await createWork('first'), 'FBA');
+    assert.equal((await firstMail()).data().to, 'notices@example.com');
+    assert.equal((await db.collection('pickingWhatsAppDeliveries').get()).size, 1);
+    users.get('worker').email = 'changed@example.com';
+    await service.onNewWork(await createWork('later'), 'FBA');
+    assert.equal((await db.collection('email').get()).size, 1);
+    assert.equal((await db.collection('pickingWhatsAppDeliveries').get()).size, 1);
+  });
+  test('WhatsApp global pause and activation cutoff leave email sending intact', async () => {
+    await configure({ enabled: true });
+    await db.doc('pickingWhatsAppConfig/system').set({ enabled: false, activatedAt: Timestamp.fromMillis(activatedAt) });
+    await service.onNewWork(await createWork('paused'), 'FBA');
+    assert.equal((await db.collection('email').get()).size, 1);
+    assert.equal((await db.collection('pickingWhatsAppDeliveries').get()).size, 0);
+    const event = await createWork('older');
+    await db.doc('pickingWhatsAppConfig/system').update({ enabled: true, activatedAt: Timestamp.fromMillis(Date.now() + 1000) });
+    await service.onNewWork(event, 'FBA');
+    assert.equal((await db.collection('pickingWhatsAppDeliveries').get()).size, 0);
+  });
+
   test('API blocks absent/invalid credentials and operators, regardless of supplied admin UID', async () => {
     for (const bearer of ['', 'Bearer invalid']) {
       await assert.rejects(service.api(bearer, { action: 'list' }), error => error.status === 401);

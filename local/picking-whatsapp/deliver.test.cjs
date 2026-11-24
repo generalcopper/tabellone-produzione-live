@@ -39,3 +39,15 @@ test('process restart preserves deduplication and ambiguous dispatch state', asy
   j = new Journal(file); j.recover(); assert.equal(j.reports()[0].outcome, 'UNKNOWN'); assert.equal(j.reserve(job.id, 'new-token'), false);
   j.close(); fs.rmSync(dir, { recursive: true });
 });
+
+test('receipts ignore unrelated chats and persist across restart without losing a newer read event', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'picking-receipt-')), file = path.join(dir, 'journal.sqlite');
+  let j = new Journal(file); assert.equal(j.receipt('unrelated', 3), false);
+  j.reserve('known', 'token'); j.outcome('known', 'SENT', 'msg'); j.acknowledged('known');
+  j.receipt('msg', 2, 1000); j.receipt('msg', 3, 1100); j.receiptAcknowledged('msg', 2); j.close();
+  j = new Journal(file); const r = j.receiptReports()[0];
+  assert.equal(r.ack, 3); assert.equal(r.delivered_at, 1000); assert.equal(r.read_at, 1100);
+  j.receipt('msg', 2, 1200); assert.equal(j.receiptReports()[0].read_at, 1100);
+  j.receiptAcknowledged('msg', 3); assert.equal(j.receiptReports().length, 0);
+  j.close(); fs.rmSync(dir, { recursive: true });
+});
