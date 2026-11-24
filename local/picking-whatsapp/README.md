@@ -201,3 +201,18 @@ Il primo contatto resta con sola consegna, senza attribuire una lettura non
 comunicata da WhatsApp. La guida ufficiale indica che al primo messaggio la
 ricevuta può non essere inviata: https://faq.whatsapp.com/665923838265756/
 Forex e Wazuh verificati attivi, con uptime delle VM preservato.
+
+## Collaudo operativo dei modelli separati — 24/11/2026
+
+Pubblicati pickingWhatsAppApi e i quattro produttori pickingEmailApi,
+pickingEmailFba, pickingEmailWrite, pickingEmailFbmMorning. Nessun rilascio hosting,
+workflow GitHub o riavvio del NUC. Il ritocco dei nomi commerciali mantiene
+formato, SKU e quantità: sette test del formatter passati dopo l'ultimo ritocco.
+Le descrizioni dei prodotti archiviate non vengono modificate.
+
+Richiesta unica `oneoff_write_20261124_models_v1`: due destinatari WhatsApp già
+abilitati, due invii confermati `SENT` tra le 20:50 e le 20:51 Europe/Rome.
+La marcatura `NUOVO` riguarda l'ultimo prodotto ancora in coda; nessuna modifica
+ai documenti di produzione, nessuna email e nessuna nuova selezione destinatari.
+Il riepilogo del server è stato letto soltanto per verificare questo collaudo;
+non sono stati introdotti controlli periodici aggiuntivi.
