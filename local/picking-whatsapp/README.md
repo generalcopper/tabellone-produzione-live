@@ -177,3 +177,11 @@ Il controllo interroga WhatsApp dal NUC; non aggiunge polling Firestore.
 L’API riceve una conferma solo se lo stato locale non è già stato confermato.
 Le informazioni `getInfo()` sono verificate sull’ID del messaggio e sulle date;
 nessuna lettura viene dedotta dalla sola consegna o da un testo del destinatario.
+
+Collaudo reale concluso alle 20:24 del 24/11/2026: dopo la risposta del
+titolare nella chat, il secondo messaggio ha ricevuto ACK 3, riportato una sola
+volta al cloud. Picking mostra «Ultimo invio 24/11, 20:23 · Letto 24/11, 20:23».
+Il primo contatto resta con sola consegna, senza attribuire una lettura non
+comunicata da WhatsApp. La guida ufficiale indica che al primo messaggio la
+ricevuta può non essere inviata: https://faq.whatsapp.com/665923838265756/
+Forex e Wazuh verificati attivi, con uptime delle VM preservato.
