@@ -3,7 +3,14 @@
 const MAX_LENGTH = 6000;
 const plain = value => String(value ?? '').replace(/(?:https?:\/\/|www\.)\S+/gi, '')
   .replace(/[\x00-\x1f\x7f]/g, ' ').replace(/\s+/g, ' ').trim();
-const title = value => { const s = plain(value).replace(/[*~`]/g, ''); return s.length > 150 ? s.slice(0, 149).trimEnd() + '…' : s; };
+const title = value => {
+  let s = plain(value).replace(/[*~`]/g, '');
+  // Remove catalogue prose only after an identifiable pack size. Decimal commas
+  // are not separators; the untouched SKU and exact work quantity remain below.
+  const separator = s.search(/\s*(?:\||[–—]|,\s+(?=[A-Za-zÀ-ÖØ-öø-ÿ])|\(\s*Contiene\b)/i);
+  if (separator > 0 && /\b\d+(?:[.,]\d+)?\s*(?:kg|ml|lt|l|g)\b/i.test(s.slice(0, separator))) s = s.slice(0, separator).trim();
+  return s.length > 150 ? s.slice(0, 149).trimEnd() + '…' : s;
+};
 const number = value => new Intl.NumberFormat('it-IT', { maximumFractionDigits: 3, useGrouping: true }).format(value);
 const quantity = row => (row.qty === null ? plain(row.qtyText) : number(row.qty)) + (row.unit ? ' ' + plain(row.unit) : '');
 

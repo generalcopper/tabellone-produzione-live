@@ -52,3 +52,16 @@ test('legacy fallback removes links and navigation instructions but retains prod
   const text = legacyWhatsApp({ text: 'LINEA AUTOMATICA LIQUIDI\nDa produrre, in ordine di coda:\n1. Neem — 12,5 kg\nApri la coda di produzione: https://example.test\nhttps://example.test\n2. Caolino — 20 kg' }, 'WRITE');
   assert.match(text, /12,5 kg/); assert.match(text, /20 kg/); assert.doesNotMatch(text, /https?:|example\.test|Apri\b/i);
 });
+test('commercial prose is shortened after the pack size without losing decimal sizes, SKU or quantities', () => {
+  const products = [
+    { id: 'a', title: 'Combi Spray 1 lt | Con Olio di Neem e Sapone Molle | Naturale', sku: 'COMBI', qty: 1000, unit: 'pz' },
+    { id: 'b', title: 'Concime 2,5 kg, Naturale per piante', sku: 'CONCIME', qty: 12.5, unit: 'kg' },
+    { id: 'c', title: 'Rame Zolfo Spray 750 ml – Pronto all’uso', sku: 'RAME', qty: 480, unit: 'pz' },
+    { id: 'd', title: 'CUPROZOLFO FLOW -FLACONE 1 KG(Contiene 16% Cu)', sku: 'CUPRO', qty: 700, unit: 'kg' },
+  ];
+  const text = renderWhatsApp({ type: 'write', sourceId: 'a', details: { products } });
+  for (const name of ['*Combi Spray 1 lt*', '*Concime 2,5 kg*', '*Rame Zolfo Spray 750 ml*', '*CUPROZOLFO FLOW -FLACONE 1 KG*']) assert.ok(text.includes(name));
+  assert.match(text, /\*1\.000 pz\* · \*NUOVO\*/); assert.match(text, /\*12,5 kg\*/);
+  for (const row of products) assert.ok(text.includes('Codice: ' + row.sku));
+  assert.doesNotMatch(text, /Con Olio|Naturale|Pronto|Contiene/);
+});
