@@ -120,6 +120,7 @@ function createService({ db, auth, clock = Date.now }) {
     const prepared = [];
     for (const doc of docs) {
       const d = doc.data(), occurredAt = p.millis(d.occurredAt);
+      if (d.whatsappProducer === 2) continue;
       if (!validId(d.uid) || clock() - occurredAt > p.TTL || occurredAt < activatedAt ||
           !['fba', 'write', 'manual', 'daily'].includes(d.noticeType) || !doc.id.startsWith(p.PREFIX)) continue;
       const [a, r, e, mail] = await Promise.all([account(d.uid), db.doc(RECIPIENTS + '/' + d.uid).get(),

@@ -5,82 +5,97 @@ const plain = value => String(value ?? '').replace(/(?:https?:\/\/|www\.)\S+/gi,
   .replace(/[\x00-\x1f\x7f]/g, ' ').replace(/\s+/g, ' ').trim();
 const title = value => { const s = plain(value).replace(/[*~`]/g, ''); return s.length > 150 ? s.slice(0, 149).trimEnd() + '…' : s; };
 const number = value => new Intl.NumberFormat('it-IT', { maximumFractionDigits: 3, useGrouping: true }).format(value);
-const count = (n, one, many) => number(n) + ' ' + (n === 1 ? one : many);
 const quantity = row => (row.qty === null ? plain(row.qtyText) : number(row.qty)) + (row.unit ? ' ' + plain(row.unit) : '');
-const stamp = value => new Intl.DateTimeFormat('it-IT', { timeZone: 'Europe/Rome', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }).format(new Date(value));
 
-// Keep complete product blocks and truthful totals. Large lists share the space
-// between channels; no product, quantity or reference is cut halfway through.
-function pack(header, sections) {
-  const used = sections.map(s => s.rows.length);
+// Whole blocks only. The affected item must remain visible even in a long queue;
+// its original number and the gaps preserve the actual production order.
+function pack(header, rows, requiredIndex = -1) {
+  const selected = new Set(requiredIndex >= 0 && requiredIndex < rows.length ? [requiredIndex] : []);
   function compose() {
-    return [header, ...sections.map((s, i) => [s.heading, ...s.rows.slice(0, used[i]),
-      ...(used[i] < s.rows.length ? [(s.rows.length - used[i] === 1 ? 'Altra ' : 'Altre ') + count(s.rows.length - used[i], 'riga', 'righe') + ' in attesa.'] : [])
-    ].filter(Boolean).join('\n\n'))].filter(Boolean).join('\n\n');
+    const blocks = [header]; let omitted = 0;
+    for (let i = 0; i < rows.length; i++) {
+      if (!selected.has(i)) { omitted++; continue; }
+      if (omitted) { blocks.push('… ' + omitted + ' voci non riportate.'); omitted = 0; }
+      blocks.push(rows[i]);
+    }
+    if (omitted) blocks.push('… ' + omitted + ' voci non riportate.');
+    return blocks.filter(Boolean).join('\n\n');
   }
-  let text = compose();
-  if (text.length <= MAX_LENGTH) return text;
-  used.fill(0);
-  const stopped = new Set();
-  for (;;) {
-    let added = false;
-    sections.forEach((s, i) => {
-      if (stopped.has(i) || used[i] >= s.rows.length) return;
-      used[i]++;
-      if (compose().length > MAX_LENGTH) { used[i]--; stopped.add(i); }
-      else added = true;
-    });
-    if (!added) return compose();
+  for (let i = 0; i < rows.length; i++) {
+    if (selected.has(i)) continue;
+    selected.add(i);
+    if (compose().length > MAX_LENGTH) { selected.delete(i); break; }
   }
+  return compose();
 }
 
-function productBlock(row, channel) {
+function isNewReference(ref, sourceId, label) {
+  return sourceId ? ref.key === 'FBA:' + sourceId : !!label && ref.label === label;
+}
+function fbaBlock(row, options) {
+  const fresh = options.type === 'fba' && (row.references || []).some(r => isNewReference(r, options.sourceId, options.label));
   const refs = (row.references || []).filter(r => plain(r.label) && r.label !== 'Preparazione FBA');
-  return ['• *' + title(row.title || row.sku) + '* — *' + number(row.qty) + ' pz*',
+  return ['• *' + title(row.title || row.sku) + '* — *' + number(row.qty) + ' pz*' + (fresh ? ' · *NUOVO*' : ''),
     ...(row.sku ? ['  SKU: ' + plain(row.sku)] : []),
-    ...refs.slice(0, 8).map(r => '  ' + (channel === 'FBA' ? 'Sped. ' : 'Ordine ') + plain(r.label) + ': ' + number(r.qty) + ' pz'),
+    ...refs.slice(0, 8).map(r => '  ' + plain(r.label) + ': ' + number(r.qty) + ' pz' +
+      (fresh && isNewReference(r, options.sourceId, options.label) ? ' · NUOVO' : '')),
     ...(refs.length > 8 ? ['  Altri ' + (refs.length - 8) + ' riferimenti.'] : []),
   ].join('\n');
 }
-
-function renderWhatsApp({ type = 'manual', label = '', channel, details, sourceId, changeKind = 'added', generatedAt = Date.now() }) {
-  if (channel === 'WRITE' || type === 'write') {
-    const rows = details.products, affected = rows.findIndex(r => r.id === sourceId);
-    const changed = changeKind === 'quantity';
-    const header = ['*LG Trading · Linea automatica liquidi*',
-      '*' + (changed ? 'Quantità aggiornata' : 'Nuovo prodotto in coda') + '*', stamp(generatedAt)];
-    if (affected >= 0) {
-      const row = rows[affected];
-      header.push('', '*' + title(row.title || row.sku) + '*',
-        'Quantità da produrre: *' + quantity(row) + '*',
-        ...(row.sku ? ['Codice: ' + plain(row.sku)] : []),
-        'Posizione in coda: *' + (affected + 1) + '*');
+function fbmBlocks(products) {
+  const orders = new Map(), unassigned = [];
+  for (const row of products) {
+    const refs = (row.references || []).filter(r => plain(r.label));
+    if (!refs.length) unassigned.push(row);
+    for (const ref of refs) {
+      const key = ref.key || ref.label;
+      if (!orders.has(key)) orders.set(key, { label: plain(ref.label), rows: [] });
+      orders.get(key).rows.push({ ...row, qty: ref.qty });
     }
-    const totals = (details.totals || []).map(r => quantity(r)).join(' · ');
-    header.push('', '*Totale in coda:* ' + count(rows.length, 'riga', 'righe') + (totals ? ' · ' + totals : ''));
-    return pack(header.join('\n'), [{ heading: '*Da produrre, in ordine di coda*', rows: rows.map((r, i) =>
-      (i + 1) + '. *' + title(r.title || r.sku) + '* — *' + quantity(r) + '*' +
-      (i === affected ? ' · ' + (changed ? 'QUANTITÀ AGGIORNATA' : 'NUOVO') : '') +
-      (r.sku ? '\n   Codice: ' + plain(r.sku) : '')) }]);
   }
-  const { fba, fbm } = details;
-  const heading = type === 'fba' ? 'FBA · Nuova preparazione' : type === 'daily' ? 'Riepilogo delle 08:00' : 'Riepilogo lavori in attesa';
-  const header = ['*LG Trading · Picking Concamarise*', '*' + heading + '*', stamp(generatedAt),
-    ...(type === 'fba' && plain(label) && label !== 'Preparazione FBA' ? ['', 'Nuova spedizione: *' + title(label) + '*'] : []), '',
-    '*FBA:* ' + count(fba.totalQty, 'pezzo', 'pezzi') + ' · ' + count(fba.skuCount, 'prodotto', 'prodotti'),
-    '*FBM:* ' + count(fbm.orderCount, 'ordine', 'ordini') + ' · ' + count(fbm.totalQty, 'pezzo', 'pezzi') + ' · ' + count(fbm.skuCount, 'prodotto', 'prodotti'),
-    ...(!fba.totalQty && !fbm.totalQty ? ['', 'Nessun lavoro in attesa.'] : [])];
-  const sections = [];
-  if (fba.products.length) {
-    const products = [...fba.products];
-    if (type === 'fba') products.sort((a, b) => Number(b.references?.some(r => r.label === label)) - Number(a.references?.some(r => r.label === label)));
-    sections.push({ heading: '*FBA da preparare · PRIORITÀ*', rows: products.map(r => productBlock(r, 'FBA')) });
-  }
-  if (fbm.products.length) sections.push({ heading: '*FBM da preparare*', rows: fbm.products.map(r => productBlock(r, 'FBM')) });
-  return pack(header.join('\n'), sections);
+  const productLine = row => '• *' + title(row.title || row.sku) + '* — *' + number(row.qty) + ' pz*' +
+    (row.sku ? '\n  SKU: ' + plain(row.sku) : '');
+  return [...orders.values()].flatMap(order => {
+    const heading = '*Ordine ' + order.label + '*', blocks = [];
+    let block = heading;
+    for (const row of order.rows) {
+      const line = productLine(row);
+      if (block.length + line.length > 4500) { blocks.push(block); block = heading; }
+      block += '\n' + line;
+    }
+    blocks.push(block);
+    return blocks;
+  }).concat(unassigned.map(productLine));
 }
 
-// Compatibility for a message queued by a previous email producer during rollout.
+function renderWhatsApp(options) {
+  const { type, details, sourceId, changeKind = 'added' } = options;
+  const channel = options.channel === 'RIEPILOGO' ? '' : options.channel || (type === 'write' ? 'WRITE' : type === 'fba' ? 'FBA' : '');
+  if (channel === 'WRITE') {
+    const rows = details.products, affected = rows.findIndex(r => r.id === sourceId);
+    const marker = changeKind === 'quantity' ? 'QUANTITÀ AGGIORNATA' : 'NUOVO';
+    return pack('*Linea liquidi · Da produrre*', rows.map((r, i) =>
+      (i + 1) + '. *' + title(r.title || r.sku) + '* — *' + quantity(r) + '*' +
+      (i === affected ? ' · *' + marker + '*' : '') +
+      (r.sku ? '\n   Codice: ' + plain(r.sku) : '')), affected);
+  }
+  if (channel === 'FBA') {
+    const rows = [...details.fba.products];
+    if (type === 'fba') rows.sort((a, b) => Number(b.references?.some(r => isNewReference(r, sourceId, options.label))) -
+      Number(a.references?.some(r => isNewReference(r, sourceId, options.label))));
+    return pack('*FBA da preparare*', rows.map(row => fbaBlock(row, options)));
+  }
+  if (channel === 'FBM') return pack('*Ordini FBM da preparare*', fbmBlocks(details.fbm.products));
+  throw new Error('Specificare un solo modello WhatsApp: FBA, FBM o WRITE.');
+}
+
+function renderWhatsAppNotices(options) {
+  const channels = options.type === 'write' ? ['WRITE'] : options.type === 'fba' ? ['FBA'] :
+    ['FBA', 'FBM'].filter(channel => options.details[channel.toLowerCase()].products.length);
+  return channels.map(channel => ({ channel, text: renderWhatsApp({ ...options, channel }) }));
+}
+
+// Compatibility only for notices queued by the previous email producer.
 function legacyWhatsApp(message, channel) {
   const raw = typeof message?.text === 'string' ? message.text.replace(/\r/g, '') : '';
   if (!raw.trim()) return '';
@@ -88,8 +103,7 @@ function legacyWhatsApp(message, channel) {
   const lines = (start >= 0 ? raw.slice(start) : raw).split('\n').filter(line =>
     !/^\s*(?:Apri\b|PROCEDURA\b|\d+\. (?:Aprire|Prelevare|Raggruppare|Preparare|Registrare)\b)/i.test(line))
     .map(plain).filter(Boolean);
-  const header = '*LG Trading · ' + (channel === 'WRITE' ? 'Linea automatica liquidi' : 'Picking Concamarise') + '*';
-  return pack(header, [{ heading: '', rows: lines }]);
+  return pack(channel === 'WRITE' ? '*Linea liquidi · Da produrre*' : '*Da preparare*', lines);
 }
 
-module.exports = { renderWhatsApp, legacyWhatsApp, MAX_LENGTH };
+module.exports = { renderWhatsApp, renderWhatsAppNotices, legacyWhatsApp, MAX_LENGTH };

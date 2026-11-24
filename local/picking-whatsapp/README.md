@@ -158,15 +158,31 @@ servizio, senza telefoni o contenuti dei messaggi in Git.
 
 ## Formato operativo WhatsApp e letture
 
-Gli avvisi WhatsApp sono prodotti direttamente dai dati delle notifiche.
-FBA: nuova spedizione, totali FBA/FBM separati, priorità, prodotto, SKU, pezzi e
-ripartizione per spedizione/ordine. Riepilogo delle 08:00: stesse sezioni con il
-titolo del riepilogo. Write: prodotto aggiunto o quantità attuale modificata,
-posizione e ordine di coda, codici e quantità con unità/decimali conservati.
-Non sono inclusi link, inviti ad aprire l’app o istruzioni generiche.
-I blocchi prodotto restano interi entro 6000 caratteri; eventuali righe escluse
-sono conteggiate e i totali restano completi. Il prodotto Write che ha causato
-l’avviso resta sempre evidenziato, anche quando è in fondo a una coda lunga.
+Gli avvisi WhatsApp usano tre modelli distinti: `FBA da preparare`,
+`Ordini FBM da preparare` e `Linea liquidi · Da produrre`. Ogni messaggio
+contiene una sola categoria. FBA conserva prodotto, SKU, quantità e ripartizione
+per spedizione; FBM raggruppa i prodotti sotto ciascun ordine; la linea liquidi
+mantiene l'ordine numerato della coda, quantità e unità esatte. `NUOVO` compare
+accanto al prodotto aggiunto; le modifiche sono indicate come `QUANTITÀ AGGIORNATA`.
+Non si ripetono azienda, sede, data, totali, prodotto in apertura o istruzioni.
+Non sono inclusi link o inviti ad aprire l'app. Le categorie vuote restano silenziose.
+Un riepilogo con FBA e FBM genera due avvisi distinti con ID deterministici;
+l'email esistente resta singola. I registri del nuovo produttore sono marcati
+per impedire che il vecchio importatore generi un riepilogo WhatsApp aggiuntivo.
+I blocchi restano interi entro 6000 caratteri; gli elementi non riportati sono
+conteggiati. La riga Write interessata e il suo numero reale sono sempre inclusi,
+anche in una coda lunga. Nessun cambiamento a frequenze di polling o letture.
+
+L'API amministrativa offre `previewWriteNotice` e `sendWriteNotice` per un
+avviso unico del prodotto pendente inserito più di recente. Verifica la versione
+del prodotto, i destinatari già abilitati e la disponibilità del worker; non
+modifica la coda né seleziona nuovi destinatari. Il requestId stabile impedisce
+reinoltri anche dopo una risposta persa. Invio esclusivamente WhatsApp, massimo
+una nuova richiesta al minuto, nessun pulsante di prova aggiunto all'interfaccia.
+
+Collaudo del 24/11/2026: 98 test notifiche e 16 test backend WhatsApp passati.
+Inclusi separazione categorie, invii concorrenti, blocco del vecchio importatore,
+selezione vuota e sorgente modificata, assenza di mutazioni alla coda di produzione.
 
 Le ricevute arrivano normalmente tramite evento WhatsApp. Un controllo di
 recupero locale legge solo gli ID effettivamente inviati, ancora senza lettura,

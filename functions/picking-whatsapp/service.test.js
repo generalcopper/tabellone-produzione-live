@@ -114,6 +114,12 @@ test('tampered mail envelope and pre-selection mail cannot be sent', async () =>
   await db.doc(RECIPIENTS + '/worker').update({ enabledAt: T.now() });
   assert.equal((await poll()).jobs.length, 0);
 });
+test('new channel-separated producer ledgers cannot be imported again as a combined WhatsApp', async () => {
+  await notice('direct-producer', { whatsappProducer: 2 });
+  assert.equal((await poll()).jobs.length, 0);
+  assert.equal((await db.collection(DELIVERIES).get()).size, 0);
+  assert.ok((await db.doc(CONFIG).get()).data().cursor);
+});
 test('cancelling operational FBA work between claim and begin prevents dispatch', async () => {
   const sourcePath = 'amzInventory/concamarise/logs/fba-test';
   await db.doc(sourcePath).set({ kind: 'scarica', status: 'CANCELLED', fileName: 'FBA123456', lines: [{ sku: 'SKU', qty: 4 }] });

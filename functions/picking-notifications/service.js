@@ -4,6 +4,7 @@ const { FieldValue, Timestamp } = require('firebase-admin/firestore');
 const c = require('./core');
 const w = require('./write-queue');
 const { renderWriteMessage } = require('./write-mail-template');
+const { renderWhatsAppNotices } = require('./whatsapp-template');
 const CONFIG = 'pickingEmailConfig/system';
 const RECIPIENTS = 'pickingEmailRecipients';
 const EVENTS = 'pickingEmailEvents';
@@ -211,6 +212,37 @@ function createService({ db, auth, scheduleRetry, logger = console, clock = Date
     if (body.action === 'status') return status();
     if (body.action === 'setRecipient') return setRecipient(actor, body);
     if (body.action === 'saveRecipient') return saveRecipient(actor, body);
+    if (body.action === 'previewWriteNotice') {
+      const result = await db.runTransaction(async tx => {
+        const details = await readWriteSummary(tx);
+        if (!details.products.length) throw problem(400, 'Nessun prodotto da produrre.');
+        const sources = [];
+        for (let i = 0; i < details.products.length; i += 100) sources.push(...await tx.getAll(
+          ...details.products.slice(i, i + 100).map(row => db.doc(w.QUEUE + '/' + row.id))));
+        const source = sources.filter(s => s.exists).sort((a, b) => c.millis(b.createTime) - c.millis(a.createTime))[0];
+        if (!source) throw problem(409, 'Coda modificata. Riprova.');
+        const product = details.products.find(row => row.id === source.id);
+        return { sourceId: source.id, sourceIncarnation: w.incarnation(source.createTime),
+          sourceQuantity: w.quantitySignature(source.data()), product,
+          text: c.renderWhatsApp({ type: 'write', channel: 'WRITE', changeKind: 'added', sourceId: source.id, details, generatedAt: clock() }) };
+      }, { readOnly: true });
+      return { ...result, ...(await listRecipients()) };
+    }
+    if (body.action === 'sendWriteNotice') {
+      if (typeof body.requestId !== 'string' || !/^[a-zA-Z0-9_-]{16,100}$/.test(body.requestId) || typeof body.sourceId !== 'string' ||
+          !/^[^/\x00-\x1f]{1,1500}$/.test(body.sourceId) || ['.', '..'].includes(body.sourceId) ||
+          typeof body.sourceIncarnation !== 'string' || body.sourceIncarnation.length > 80 ||
+          typeof body.sourceQuantity !== 'string' || body.sourceQuantity.length > 400) throw problem(400, 'Avviso non valido.');
+      const config = (await db.doc(WA_CONFIG).get()).data();
+      if (!config?.enabled || config.state !== 'READY' || clock() - c.millis(config.heartbeatAt) > 420000) {
+        throw problem(409, 'WhatsApp non disponibile per questo invio.');
+      }
+      const result = await queueNotice({ type: 'write', key: 'MANUAL_WRITE:' + actor.uid + ':' + body.requestId,
+        channel: 'WRITE', label: 'Avviso manuale nuovo prodotto', sourcePath: w.QUEUE + '/' + body.sourceId,
+        sourceId: body.sourceId, sourceIncarnation: body.sourceIncarnation, sourceQuantity: body.sourceQuantity,
+        changeKind: 'added', occurredAt: clock(), actorUid: actor.uid, whatsappOnly: true });
+      return { ...result, ...(await status()) };
+    }
     if (body.action === 'sendSummary') {
       if (typeof body.requestId !== 'string' || !/^[a-zA-Z0-9_-]{16,100}$/.test(body.requestId)) {
         throw problem(400, 'Richiesta di invio non valida.');
@@ -341,7 +373,7 @@ function createService({ db, auth, scheduleRetry, logger = console, clock = Date
     const { occurredAt, channel } = notice;
     const eventId = c.hash(notice.key), eventRef = db.doc(EVENTS + '/' + eventId);
     const [selected, selectedWa] = await Promise.all([
-      db.collection(RECIPIENTS).where('enabled', '==', true).get(),
+      notice.whatsappOnly ? Promise.resolve({ docs: [] }) : db.collection(RECIPIENTS).where('enabled', '==', true).get(),
       db.collection(WA_RECIPIENTS).where('enabled', '==', true).get(),
     ]);
     const ids = [...new Set([...selected.docs, ...selectedWa.docs].map(d => d.id))];
@@ -380,6 +412,9 @@ function createService({ db, auth, scheduleRetry, logger = console, clock = Date
         doc.data().revision === candidates[i].data().revision &&
         c.selectedForEvent(doc.data(), byUid.get(doc.id), directory, occurredAt)) : [];
       const wc = waConfig.data() || {};
+      if (notice.whatsappOnly && now - c.millis(wc.lastManualWriteAt) < 60000) {
+        throw problem(429, 'Avviso già richiesto. Attendi un minuto.');
+      }
       let waEligible = active && wc.enabled === true && c.millis(wc.activatedAt) > 0 &&
         occurredAt >= c.millis(wc.activatedAt) && now - occurredAt < 15 * 60000 ? waDocs.filter((doc, i) =>
           doc.exists && doc.data().revision === waCandidates[i].data().revision &&
@@ -387,14 +422,21 @@ function createService({ db, auth, scheduleRetry, logger = console, clock = Date
       if (notice.type === 'manual' && !eligible.length && !waEligible.length) throw problem(400, 'Seleziona almeno un utente abilitato.');
       const details = eligible.length || waEligible.length ? (isWrite ? await readWriteSummary(tx) : await readPendingSummary(tx, true)) : null;
       if (isWrite && details && !details.products.some(row => row.id === notice.sourceId)) { active = false; eligible = []; waEligible = []; }
+      if (notice.whatsappOnly && !active) throw problem(409, 'Il prodotto è stato modificato o non è più da produrre.');
+      if (notice.whatsappOnly && !waEligible.length) throw problem(400, 'Nessun destinatario WhatsApp abilitato.');
       const totals = details ? (isWrite ? { write: details.rowCount } :
         { fba: details.fba.orderCount, fbm: details.fbm.orderCount }) : null;
       const summaryCounts = details ? (isWrite ? { writeProducts: details.rowCount, writeQuantities: details.totals } :
         { fbaPieces: details.fba.totalQty, fbaProducts: details.fba.skuCount,
           fbmOrders: details.fbm.orderCount, fbmPieces: details.fbm.totalQty, fbmProducts: details.fbm.skuCount }) : null;
+      const waMessages = details && waEligible.length ? renderWhatsAppNotices({ ...notice, details, generatedAt: now }) : [];
+      if (!waMessages.length) waEligible = [];
       const deliveryId = uid => c.PREFIX + c.hash(eventId + ':' + uid);
       const mailRefs = eligible.map(doc => db.doc('email/' + deliveryId(doc.id)));
-      const waRefs = waEligible.map(doc => db.doc(WA_DELIVERIES + '/' + deliveryId(doc.id)));
+      const waJobs = waEligible.flatMap(recipient => waMessages.map((message, i) => ({ recipient, message,
+        ref: db.doc(WA_DELIVERIES + '/' + (i === 0 ? deliveryId(recipient.id) :
+          c.PREFIX + c.hash(eventId + ':' + recipient.id + ':' + message.channel))) })));
+      const waRefs = waJobs.map(job => job.ref);
       const existing = mailRefs.length + waRefs.length ? await tx.getAll(...mailRefs, ...waRefs) : [];
       if (existing.some(doc => doc.exists)) throw problem(500, 'Collisione nella coda notifiche.');
       const metadata = { eventId, channel, label: notice.label, sourcePath: notice.sourcePath || '', sourceId: notice.sourceId || '',
@@ -418,16 +460,16 @@ function createService({ db, auth, scheduleRetry, logger = console, clock = Date
             sourcePath: notice.sourcePath || '', noticeType: notice.type }, createdAt: FieldValue.serverTimestamp() };
         tx.create(mailRef, mail);
         tx.create(db.doc(DELIVERIES + '/' + mailRef.id), { ...metadata, uid: recipient.id, email: data.email,
-          recipientRevision: data.revision, envelopeHash: c.envelopeHash(mail), lastStatus: 'PENDING' });
+          recipientRevision: data.revision, envelopeHash: c.envelopeHash(mail), lastStatus: 'PENDING', whatsappProducer: 2 });
         if (occurredAt >= c.millis(data.lastQueuedAt)) tx.set(recipient.ref, {
           lastQueuedAt: Timestamp.fromMillis(occurredAt), lastMailId: mailRef.id, lastStatus: 'PENDING',
         }, { merge: true });
       }
-      for (let i = 0; i < waEligible.length; i++) {
-        const recipient = waEligible[i], data = recipient.data();
-        tx.create(waRefs[i], { ...metadata, producer: 2, uid: recipient.id, phone: data.phone,
+      for (const { recipient, message, ref } of waJobs) {
+        const data = recipient.data();
+        tx.create(ref, { ...metadata, channel: message.channel, producer: 2, uid: recipient.id, phone: data.phone,
           revision: data.revision, kind: 'notice', status: 'PENDING',
-          text: c.renderWhatsApp({ ...notice, details, generatedAt: now }), expiresAt: Timestamp.fromMillis(occurredAt + 15 * 60000) });
+          text: message.text, expiresAt: Timestamp.fromMillis(occurredAt + 15 * 60000) });
       }
       const recipients = [...new Set([...eligible, ...waEligible].map(doc => doc.id))];
       tx.create(eventRef, { key: notice.key, channel, sourcePath: notice.sourcePath || '',
@@ -436,6 +478,7 @@ function createService({ db, auth, scheduleRetry, logger = console, clock = Date
         recipientUids: recipients, emailRecipientUids: eligible.map(d => d.id), whatsappRecipientUids: waEligible.map(d => d.id),
         outcome: !active ? 'no_longer_pending' : recipients.length ? 'queued' : 'no_selected_recipients' });
       if (notice.type === 'manual') tx.update(db.doc(CONFIG), { lastManualAt: FieldValue.serverTimestamp() });
+      if (notice.whatsappOnly) tx.update(db.doc(WA_CONFIG), { lastManualWriteAt: FieldValue.serverTimestamp() });
       return { queuedCount: recipients.length, totals, summaryCounts, alreadyQueued: false };
     });
   }

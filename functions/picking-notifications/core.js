@@ -181,7 +181,7 @@ function pendingDetails(fbaDocs, fbmDocs) {
       const product = products.get(sku) || { sku, title: '', qty: 0, references: new Map() };
       if (!product.title && line.title) product.title = line.title;
       product.qty += line.qty;
-      const reference = product.references.get(work.key) || { label: work.label, qty: 0 };
+      const reference = product.references.get(work.key) || { key: work.key, label: work.label, qty: 0 };
       reference.qty += line.qty;
       product.references.set(work.key, reference);
       products.set(sku, product);
