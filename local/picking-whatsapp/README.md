@@ -119,10 +119,10 @@ come parte della manutenzione del worker senza verificare gli altri servizi.
 
 - 15 test backend WhatsApp passati con Firestore Emulator su `127.0.0.1:8794`, progetto
   fittizio `demo-picking-whatsapp-tests`; nessun dato operativo nei test.
-- 86 test del backend notifiche passati nell’emulatore separato sulla porta 8791:
+- 92 test del backend notifiche passati nell’emulatore separato sulla porta 8791:
   invii email esistenti, canali indipendenti, contatti atomici e protezione da
   conferme tardive dirette a contatti precedenti.
-- 6 test del worker passati anche sul NUC: deduplicazione, invio ambiguo,
+- 10 test del worker passati anche sul NUC: deduplicazione, invio ambiguo,
   annullamento, numero non registrato, persistenza dopo riavvio e conferme di lettura.
 - Test UI headless: lista unica, due flag indipendenti, dialogo contatti,
   salvataggio e ricaricamento, conflitti di modifica, riepilogo WhatsApp-only,
@@ -148,9 +148,32 @@ aggiornare correttamente anche la cache PWA.
 Versione hosting precedente alla prima integrazione: `9bd53dc99a1f48a2`.
 Prima integrazione: `cedab8518d2d13f1`.
 Lista unica e contatti indipendenti: `7bbecfe4f4a36a76`.
+Ultima versione con dicitura ricevute aggiornata: `35be964dabb09fb6`.
 I dettagli del rilascio sono in `reports/hosting-release.json` sul Mac mini.
 
 Per un rollback dell'interfaccia ripubblicare la versione precedente, poi
 sospendere solo l'attività WhatsApp. Le email e i servizi Forex/Wazuh non
 dipendono dal nuovo worker. Il registro del collaudo reale è conservato nelle collezioni riservate del
 servizio, senza telefoni o contenuti dei messaggi in Git.
+
+## Formato operativo WhatsApp e letture
+
+Gli avvisi WhatsApp sono prodotti direttamente dai dati delle notifiche.
+FBA: nuova spedizione, totali FBA/FBM separati, priorità, prodotto, SKU, pezzi e
+ripartizione per spedizione/ordine. Riepilogo delle 08:00: stesse sezioni con il
+titolo del riepilogo. Write: prodotto aggiunto o quantità attuale modificata,
+posizione e ordine di coda, codici e quantità con unità/decimali conservati.
+Non sono inclusi link, inviti ad aprire l’app o istruzioni generiche.
+I blocchi prodotto restano interi entro 6000 caratteri; eventuali righe escluse
+sono conteggiate e i totali restano completi. Il prodotto Write che ha causato
+l’avviso resta sempre evidenziato, anche quando è in fondo a una coda lunga.
+
+Le ricevute arrivano normalmente tramite evento WhatsApp. Un controllo di
+recupero locale legge solo gli ID effettivamente inviati, ancora senza lettura,
+con massimo due messaggi per ciclo. Intervalli: un minuto nei primi 5 minuti,
+5 minuti entro un’ora, 30 minuti entro 24 ore, 6 ore entro 7 giorni, poi una
+volta al giorno fino a 30 giorni. Dopo la lettura i controlli cessano.
+Il controllo interroga WhatsApp dal NUC; non aggiunge polling Firestore.
+L’API riceve una conferma solo se lo stato locale non è già stato confermato.
+Le informazioni `getInfo()` sono verificate sull’ID del messaggio e sulle date;
+nessuna lettura viene dedotta dalla sola consegna o da un testo del destinatario.

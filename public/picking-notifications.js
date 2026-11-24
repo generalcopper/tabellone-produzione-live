@@ -63,7 +63,7 @@ export function createPickingNotifications({ root, getUser, isActive }) {
     row.emailLog.textContent = 'Email · ' + (u.lastSentAt ? 'Ultimo invio ' + time(u.lastSentAt) : 'Nessun invio');
     row.waLog.textContent = 'WhatsApp · ' + (w.lastSentAt ? 'Ultimo invio ' + time(w.lastSentAt) : 'Nessun invio') +
       (w.lastSentAt ? (w.lastReadAt ? ' · Letto ' + time(w.lastReadAt) : w.lastDeliveredAt ? ' · Consegnato · Lettura non confermata' : ' · Lettura non confermata') : '');
-    row.waLog.title = w.lastReadAt ? 'Orario in cui è stata ricevuta la conferma di lettura.' : '';
+    row.waLog.title = w.lastReadAt ? 'Conferma di lettura comunicata da WhatsApp.' : '';
     const labels = { PENDING: 'Invio in attesa', PROCESSING: 'Invio in corso', RETRY: 'Invio in attesa', ERROR: 'Invio non riuscito', UNKNOWN: 'Esito da verificare', REJECTED: 'Numero non disponibile su WhatsApp' };
     row.detail.textContent = row.saving ? 'Salvataggio…' : u.reason || labels[w.lastStatus] || labels[u.lastStatus] || '';
     row.detail.classList.toggle('pickingMailError', !u.reason && ['ERROR', 'UNKNOWN', 'REJECTED'].some(s => [u.lastStatus, w.lastStatus].includes(s)));

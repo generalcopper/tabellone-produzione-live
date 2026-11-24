@@ -21,7 +21,7 @@ test('ordinary role/admin aliases cannot escalate privileges; disabled UID overr
   assert.equal(p.accessFor(user, [{ id: 'u', data: { role: 'admin', admin: true } }]).admin, false);
   assert.equal(p.accessFor(user, [{ id: 'u', data: { disabled: true } }, { id: user.email, data: { enabled: true, isAdmin: true } }]).member, false);
 });
-test('long messages keep a link to the current operational list', () => {
+test('legacy messages remain bounded without links or generic app instructions', () => {
   const text = p.textFor({ message: { subject: 'Test', text: 'Test\n'.repeat(2000) }, picking: { channel: 'WRITE' } });
-  assert.ok(text.length < 4000); assert.ok(text.endsWith('/tabellone_write.html'));
+  assert.ok(text.length <= 6000); assert.doesNotMatch(text, /https?:|www\.|Apri\b/i);
 });

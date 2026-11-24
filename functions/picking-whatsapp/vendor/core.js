@@ -2,6 +2,7 @@
 
 const { createHash } = require('node:crypto');
 const { renderMessage } = require('./mail-template');
+const { renderWhatsApp, legacyWhatsApp } = require('./whatsapp-template');
 const PROJECT = 'tabellone-produzione-liv-e313e';
 const REGION = 'europe-west1';
 const URL = 'https://' + PROJECT + '.web.app/picking.html';
@@ -157,10 +158,7 @@ function selectedForWhatsApp(recipient, user, directory, occurredAt) {
     email(user.email) === email(recipient.accountEmail);
 }
 function whatsAppText(message, channel) {
-  const full = 'LG Trading · ' + clean(message.subject, 160) + '\n\n' + String(message.text || '').replace(/\r/g, '').trim();
-  const link = channel === 'WRITE' ? 'https://' + PROJECT + '.firebaseapp.com/tabellone_write.html' : URL;
-  return full.length <= 3900 ? full : full.slice(0, 3600).replace(/\n[^\n]*$/, '') +
-    '\n\nElenco completo e aggiornato: ' + link;
+  return legacyWhatsApp(message, channel);
 }
 
 function pendingTotals(fbaDocs, fbmDocs) {
@@ -250,5 +248,5 @@ function retryDelay(delivery) {
 }
 
 module.exports = { PROJECT, REGION, URL, PREFIX, KIND, TIME_ZONE, MAIL_FROM, clean, skuKey, productTitle, email, hash, validEmail, millis, number,
-  notificationPhone, selectedForWhatsApp, whatsAppText, isEnabled, accessFor, summarizeFba, summarizeFbm, newWork, selectedForEvent, buildMessage,
+  notificationPhone, selectedForWhatsApp, whatsAppText, renderWhatsApp, isEnabled, accessFor, summarizeFba, summarizeFbm, newWork, selectedForEvent, buildMessage,
   pendingTotals, pendingDetails, dailySlot, envelopeHash, deliveryOutcome, retryDelay };

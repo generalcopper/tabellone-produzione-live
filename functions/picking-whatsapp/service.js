@@ -101,7 +101,7 @@ function createService({ db, auth, clock = Date.now }) {
         if (!p.eligible(r, email.data(), a.user, a.directory, now, 1)) throw problem(400, 'Destinatario non abilitato.');
         if (now - p.millis(c.lastTestQueuedAt) < 60000) throw problem(429, 'Attendi un minuto prima di un’altra prova.');
         tx.create(ref, { kind: 'test', status: 'PENDING', uid: body.uid, phone: r.phone, revision: r.revision,
-          text: 'LG Trading · Prova notifiche Picking\n\nIl collegamento WhatsApp funziona. Gli avvisi operativi verranno inviati a questo numero dopo l’attivazione.\n' + p.URL,
+          text: '*LG Trading · Prova notifiche Picking*\n\nCollegamento WhatsApp operativo.',
           channel: 'PROVA', occurredAt: T.fromMillis(now), expiresAt: T.fromMillis(now + p.TTL), createdAt: F.serverTimestamp() });
         tx.set(db.doc(CONFIG), { lastTestQueuedAt: F.serverTimestamp() }, { merge: true });
       });
@@ -259,7 +259,7 @@ function createService({ db, auth, clock = Date.now }) {
       if (!d || d.token !== body.token || d.status !== 'SENT' || d.messageId !== body.messageId ||
           body.deliveredAt < p.millis(d.startedAt) - 60000) throw problem(409, 'Conferma non applicabile.');
       const recipientRef = db.doc(RECIPIENTS + '/' + d.uid), recipient = await tx.get(recipientRef), r = recipient.data();
-      const deliveredAt = d.deliveredAt || T.fromMillis(body.deliveredAt);
+      const deliveredAt = T.fromMillis(Math.min(p.millis(d.deliveredAt) || Infinity, body.deliveredAt));
       const readAt = d.readAt || (body.ack === 3 ? T.fromMillis(body.readAt) : null);
       tx.update(ref, { deliveredAt, ...(readAt ? { readAt } : {}), receiptReportedAt: F.serverTimestamp() });
       if (r?.lastMessageId === body.messageId && r?.phone === d.phone && r?.revision === d.revision) {

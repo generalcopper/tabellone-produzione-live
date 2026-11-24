@@ -18,14 +18,7 @@ function authorized(key, timestamp, supplied, raw, now = Date.now()) {
   return timingSafeEqual(Buffer.from(signature(key, timestamp, raw), 'hex'), Buffer.from(supplied, 'hex'));
 }
 function textFor(mail) {
-  const subject = c.clean(mail.message?.subject, 160);
-  const body = typeof mail.message?.text === 'string' ? mail.message.text.replace(/\r/g, '').trim() : '';
-  if (!body) return '';
-  const link = mail.picking?.channel === 'WRITE'
-    ? 'https://' + c.PROJECT + '.firebaseapp.com/tabellone_write.html' : c.URL;
-  const full = 'LG Trading · ' + subject + '\n\n' + body;
-  return full.length <= 3900 ? full : full.slice(0, 3600).replace(/\n[^\n]*$/, '') +
-    '\n\nElenco completo e aggiornato: ' + link;
+  return c.whatsAppText(mail.message, mail.picking?.channel);
 }
 function eligible(settings, emailSettings, user, directory, occurredAt, activatedAt) {
   return activatedAt > 0 && occurredAt >= activatedAt && c.selectedForWhatsApp({ ...settings,

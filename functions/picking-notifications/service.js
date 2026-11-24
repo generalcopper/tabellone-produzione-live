@@ -427,7 +427,7 @@ function createService({ db, auth, scheduleRetry, logger = console, clock = Date
         const recipient = waEligible[i], data = recipient.data();
         tx.create(waRefs[i], { ...metadata, producer: 2, uid: recipient.id, phone: data.phone,
           revision: data.revision, kind: 'notice', status: 'PENDING',
-          text: c.whatsAppText(messageFor(recipient.id), channel), expiresAt: Timestamp.fromMillis(occurredAt + 15 * 60000) });
+          text: c.renderWhatsApp({ ...notice, details, generatedAt: now }), expiresAt: Timestamp.fromMillis(occurredAt + 15 * 60000) });
       }
       const recipients = [...new Set([...eligible, ...waEligible].map(doc => doc.id))];
       tx.create(eventRef, { key: notice.key, channel, sourcePath: notice.sourcePath || '',

@@ -5,6 +5,7 @@ const os = require('node:os');
 const { createHmac } = require('node:crypto');
 const { Journal } = require('./journal.cjs');
 const { deliver } = require('./deliver.cjs');
+const { reconcile } = require('./receipts.cjs');
 const root = process.env.PICKING_WA_ROOT || __dirname;
 const data = path.join(root, 'data');
 fs.mkdirSync(data, { recursive: true });
@@ -17,6 +18,7 @@ const journal = new Journal(path.join(data, 'outbox.sqlite'));
 journal.recover();
 let client = null, state = 'UNPAIRED', stopping = false, nextConnect = 0, failures = 0;
 let lastSuccess = 0, lastMaintenance = 0, pairUntil = 0, initialized = false;
+let lastReceiptCheck = 0;
 const qrFile = path.join(data, 'pairing.png');
 const statusFile = path.join(data, 'status.json');
 const logFile = path.join(data, 'events.log');
@@ -147,6 +149,13 @@ async function tick() {
     for (const job of (result.jobs || []).slice(0, 1)) await deliver({ job, journal, provider: client, api,
       onTimeout: async () => { nextConnect = Date.now() + 120000; await disconnect('DISCONNECTED'); } });
     await reports();
+    if (Date.now() - lastReceiptCheck > 60000 && state === 'READY' && client) {
+      lastReceiptCheck = Date.now();
+      const recovered = await reconcile({ journal, provider: client,
+        onTimeout: async () => { nextConnect = Date.now() + 60000; await disconnect('DISCONNECTED'); } });
+      if (recovered) log('read_receipt_recovered');
+      await reports();
+    }
   }
   if (Date.now() - lastMaintenance > 86400000) { journal.prune(); lastMaintenance = Date.now(); }
   status();

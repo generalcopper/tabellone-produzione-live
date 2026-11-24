@@ -138,9 +138,11 @@ test('read receipts are authenticated, monotonic, and apply only to the latest m
   const deliveredAt = Date.now(), readAt = deliveredAt + 10;
   const receipt = { action: 'receipt', ...job, messageId: 'msg-1', ack: 3, deliveredAt, readAt };
   await assert.rejects(service.worker({ ...receipt, token: '00000000-0000-0000-0000-000000000000' }), e => e.status === 409);
+  await service.worker({ ...receipt, ack: 2, deliveredAt: deliveredAt + 20 });
   await service.worker(receipt);
   await service.worker({ ...receipt, ack: 2 });
   assert.equal((await db.doc(RECIPIENTS + '/worker').get()).data().lastReadAt.toMillis(), readAt);
+  assert.equal((await db.doc(RECIPIENTS + '/worker').get()).data().lastDeliveredAt.toMillis(), deliveredAt);
   await db.doc(RECIPIENTS + '/worker').update({ lastMessageId: 'newer', lastReadAt: F.delete() });
   await service.worker(receipt);
   assert.equal((await db.doc(RECIPIENTS + '/worker').get()).data().lastReadAt, undefined);
