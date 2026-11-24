@@ -8102,7 +8102,7 @@ async function openPickingMail() {
   if (!state.user?.isAdmin || pickingHomeView() !== "notifications") return;
   try {
     if (!_pickingMailLoading)
-      _pickingMailLoading = import("./picking-notifications.js?v=c131b87dce47");
+      _pickingMailLoading = import("./picking-notifications.js?v=cf211ad4ab08");
     const mod = await _pickingMailLoading;
     if (!state.user?.isAdmin || pickingHomeView() !== "notifications") return;
     if (!_pickingMailUi)

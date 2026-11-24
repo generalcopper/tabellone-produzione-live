@@ -1,4 +1,16 @@
 export function createPickingNotifications({ root, getUser, isActive }) {
+  const whatsApp = {
+    instance: null, users: [],
+    setUsers(users) { this.users = users; this.instance?.setUsers(users); },
+    refresh(quiet) { return this.instance?.refresh(quiet); },
+    reset() { this.users = []; this.instance?.reset(); },
+  };
+  // WhatsApp is optional: its loading must not block the existing email panel.
+  import('./picking-whatsapp.js?v=be3a5d34459e').then(({ createPickingWhatsApp }) => {
+    whatsApp.instance = createPickingWhatsApp({ root, getUser, isActive });
+    whatsApp.instance.setUsers(whatsApp.users);
+    void whatsApp.refresh();
+  }).catch(() => { /* Email remains available if the optional module cannot load. */ });
   const endpoint =
     "https://europe-west1-tabellone-produzione-liv-e313e.cloudfunctions.net/pickingEmailApi";
   const rows = new Map();
@@ -104,6 +116,7 @@ export function createPickingNotifications({ root, getUser, isActive }) {
   }
 
   function draw(users) {
+    whatsApp.setUsers(users);
     rows.clear();
     list.replaceChildren();
     if (!users.length) {
@@ -183,6 +196,7 @@ export function createPickingNotifications({ root, getUser, isActive }) {
       const result = await request({ action: "list" });
       if (expectedSession !== session) return;
       draw(result.users || []);
+      void whatsApp.refresh();
       setFeedback(
         result.ready ? "Le modifiche si salvano automaticamente." : "Servizio in attivazione.",
       );
@@ -199,6 +213,7 @@ export function createPickingNotifications({ root, getUser, isActive }) {
 
   async function updateStatus() {
     if (!isActive() || document.hidden || loading) return;
+    void whatsApp.refresh(true);
     const expectedSession = session;
     try {
       const result = await request({ action: "status" });
@@ -270,6 +285,7 @@ export function createPickingNotifications({ root, getUser, isActive }) {
       timer = null;
     },
     reset() {
+      whatsApp.reset();
       session++;
       this.close();
       loading = false;
