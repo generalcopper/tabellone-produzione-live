@@ -13,6 +13,34 @@ const title = value => {
 };
 const number = value => new Intl.NumberFormat('it-IT', { maximumFractionDigits: 3, useGrouping: true }).format(value);
 const quantity = row => (row.qty === null ? plain(row.qtyText) : number(row.qty)) + (row.unit ? ' ' + plain(row.unit) : '');
+const count = (value, singular, plural) => number(value) + ' ' + (value === 1 ? singular : plural);
+const overview = (heading, parts) => heading + '\nTotale: *' + parts.join(' · ') + '*';
+function summaryUnit(value) {
+  const unit = plain(value).toLowerCase().replace(/\.$/, '');
+  if (/^(?:pz|pezzo|pezzi|pc|pcs|nr|n|numero)$/.test(unit)) return 'pz';
+  if (/^(?:kg|kgs|kilo|chilogrammo|chilogrammi|kilogrammo|kilogrammi)$/.test(unit)) return 'kg';
+  if (/^(?:l|lt|litro|litri)$/.test(unit)) return 'l';
+  if (/^(?:g|gr|grammo|grammi)$/.test(unit)) return 'g';
+  return unit || 'unità';
+}
+function writeOverview(rows) {
+  const products = new Set(), orders = new Set(), totals = new Map();
+  let undefinedQuantity = 0;
+  for (const row of rows) {
+    products.add(row.sku ? 'sku:' + plain(row.sku).toUpperCase() :
+      row.title ? 'title:' + plain(row.title).toLowerCase() : 'row:' + row.id);
+    if (plain(row.orderNo)) orders.add(plain(row.orderNo).toUpperCase());
+    if (!Number.isFinite(row.qty)) { undefinedQuantity++; continue; }
+    const unit = summaryUnit(row.unit);
+    totals.set(unit, (totals.get(unit) || 0) + row.qty);
+  }
+  return overview('*Linea liquidi · Da produrre*', [
+    ...(orders.size ? [count(orders.size, 'ordine', 'ordini')] : []),
+    count(products.size, 'prodotto', 'prodotti'),
+    ...[...totals].map(([unit, qty]) => number(qty) + ' ' + unit),
+    ...(undefinedQuantity ? [number(undefinedQuantity) + ' quantità da definire'] : []),
+  ]);
+}
 
 // Whole blocks only. The affected item must remain visible even in a long queue;
 // its original number and the gaps preserve the actual production order.
@@ -81,7 +109,7 @@ function renderWhatsApp(options) {
   if (channel === 'WRITE') {
     const rows = details.products, affected = rows.findIndex(r => r.id === sourceId);
     const marker = changeKind === 'quantity' ? 'QUANTITÀ AGGIORNATA' : 'NUOVO';
-    return pack('*Linea liquidi · Da produrre*', rows.map((r, i) =>
+    return pack(writeOverview(rows), rows.map((r, i) =>
       (i + 1) + '. *' + title(r.title || r.sku) + '* — *' + quantity(r) + '*' +
       (i === affected ? ' · *' + marker + '*' : '') +
       (r.sku ? '\n   Codice: ' + plain(r.sku) : '')), affected);
@@ -90,9 +118,11 @@ function renderWhatsApp(options) {
     const rows = [...details.fba.products];
     if (type === 'fba') rows.sort((a, b) => Number(b.references?.some(r => isNewReference(r, sourceId, options.label))) -
       Number(a.references?.some(r => isNewReference(r, sourceId, options.label))));
-    return pack('*FBA da preparare*', rows.map(row => fbaBlock(row, options)));
+    return pack(overview('*FBA da preparare*', [count(details.fba.orderCount, 'preparazione', 'preparazioni'),
+      count(details.fba.skuCount, 'prodotto', 'prodotti'), number(details.fba.totalQty) + ' pz']), rows.map(row => fbaBlock(row, options)));
   }
-  if (channel === 'FBM') return pack('*Ordini FBM da preparare*', fbmBlocks(details.fbm.products));
+  if (channel === 'FBM') return pack(overview('*Ordini FBM da preparare*', [count(details.fbm.orderCount, 'ordine', 'ordini'),
+    count(details.fbm.skuCount, 'prodotto', 'prodotti'), number(details.fbm.totalQty) + ' pz']), fbmBlocks(details.fbm.products));
   throw new Error('Specificare un solo modello WhatsApp: FBA, FBM o WRITE.');
 }
 

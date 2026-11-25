@@ -164,7 +164,7 @@ contiene una sola categoria. FBA conserva prodotto, SKU, quantità e ripartizion
 per spedizione; FBM raggruppa i prodotti sotto ciascun ordine; la linea liquidi
 mantiene l'ordine numerato della coda, quantità e unità esatte. `NUOVO` compare
 accanto al prodotto aggiunto; le modifiche sono indicate come `QUANTITÀ AGGIORNATA`.
-Non si ripetono azienda, sede, data, totali, prodotto in apertura o istruzioni.
+Non si ripetono azienda, sede, data, prodotto in apertura o istruzioni.
 Non sono inclusi link o inviti ad aprire l'app. Le categorie vuote restano silenziose.
 Un riepilogo con FBA e FBM genera due avvisi distinti con ID deterministici;
 l'email esistente resta singola. I registri del nuovo produttore sono marcati
@@ -216,3 +216,19 @@ La marcatura `NUOVO` riguarda l'ultimo prodotto ancora in coda; nessuna modifica
 ai documenti di produzione, nessuna email e nessuna nuova selezione destinatari.
 Il riepilogo del server è stato letto soltanto per verificare questo collaudo;
 non sono stati introdotti controlli periodici aggiuntivi.
+
+## Panoramica iniziale — 25/11/2026
+
+Prima della lista ogni modello mostra una sola riga di totali: FBM usa ordini,
+prodotti distinti e pezzi; FBA usa preparazioni, prodotti distinti e pezzi.
+Il numero FBA indica preparazioni, non il numero di spedizioni fisiche incluse
+nei singoli flussi. La linea liquidi usa prodotti distinti, gli eventuali numeri
+ordine disponibili e quantità raggruppate per unità. Le sigle equivalenti
+(nr/pz, KG/kg, l/lt) sono uniformate soltanto nel totale; kg, pezzi e litri
+restano separati. Le quantità da definire sono segnalate senza inventare valori.
+
+I totali includono tutta la lista, anche se alcuni blocchi non entrano nel limite
+WhatsApp; le righe originali, l'ordine di coda e il marcatore NUOVO non cambiano.
+Calcolo locale al formatter sui dati già caricati: nessuna lettura Firestore,
+frequenza di polling o messaggio di prova aggiuntivo. Otto test del formatter
+passati, compresi unità miste, prodotti/ordini duplicati e liste abbreviate.
