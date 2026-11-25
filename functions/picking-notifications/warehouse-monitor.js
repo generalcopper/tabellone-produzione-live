@@ -5,6 +5,7 @@
 const { createHash } = require('node:crypto');
 const c = require('./core');
 const w = require('./write-queue');
+const {whatsappStatus} = require('./warehouse-services');
 const canonical = value => Array.isArray(value) ? value.map(canonical) : value && typeof value === 'object'
   ? Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])])) : value;
 const hash = value => createHash('sha256').update(JSON.stringify(canonical(value))).digest('hex');
@@ -145,7 +146,17 @@ function createWarehouseMonitor({ db, service, clock = Date.now, logger = consol
     } finally { clearTimeout(timer); }
   }
   let cached = null, pending = null, loggedContent = null;
-  let catalogCache = null;
+  let catalogCache = null, serviceCache = null;
+  async function localServices() {
+    if (serviceCache && clock() - serviceCache.at < 60000) return serviceCache.value;
+    let config = null;
+    try {
+      const result = await readWithinDeadline('whatsapp', () => db.getAll(db.doc('pickingWhatsAppConfig/system')));
+      config = result[0]?.data() || null;
+    } catch { /* The source remains unknown, without blocking operational queues. */ }
+    const value = [seal(whatsappStatus(config, clock()))];
+    serviceCache = {at:clock(),value}; return value;
+  }
   const legacyModes = new Map();
   async function catalog() {
     if (catalogCache && clock() - catalogCache.at < 300000) return catalogCache.value;
@@ -196,6 +207,7 @@ function createWarehouseMonitor({ db, service, clock = Date.now, logger = consol
     const tomorrow = dateKey(Date.parse(dateKey(clock())+'T12:00:00Z') + 86400000);
     const paths = { incoming:'amzInventory/concamarise/kioskAlerts/incomingFromCerea', ready:'amzInventory/cerea/kioskAlerts/skuReady',
       manual:'amzInventory/concamarise/kioskAlerts/manualAnnouncement', waste:'amzInventoryProducts/wasteCalendar_concamarise_'+tomorrow };
+    const services = localServices();
     const inventory = readWithinDeadline('inventory', catalog);
     // Attach a rejection handler immediately; each dependent section reports its own failure.
     void inventory.catch(()=>{});
@@ -217,7 +229,7 @@ function createWarehouseMonitor({ db, service, clock = Date.now, logger = consol
       map=seal({state:'unavailable',source:'amzInventoryProducts/rackAllocations',checkedAt:new Date(clock()).toISOString(),
         expiresAt:new Date(clock()).toISOString(),racks:[]});
     }
-    const result=seal({ version:1, generatedAt:new Date(clock()).toISOString(), sections, map });
+    const result=seal({ version:1, generatedAt:new Date(clock()).toISOString(), sections, map, operationalServices:await services });
     const contentHash=hash({sections:sections.map(s=>({id:s.id,state:s.state,rows:s.rows})),map:map.racks});
     if(contentHash!==loggedContent){
       logger.info('warehouse_snapshot', {contentSha256:contentHash, receiptSha256:result.sha256,

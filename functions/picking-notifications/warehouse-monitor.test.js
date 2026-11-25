@@ -177,3 +177,21 @@ test('a stuck catalog keeps Write and alerts available and recycles only one rea
   assert.equal(failed.map.state,'unavailable');assert.equal(first.terminated(),1);
   assert.ok((await monitor.snapshot()).sections.every(s=>s.state==='ok'));assert.equal(created,2);
 });
+
+test('WhatsApp reuses one minimal status read per minute across dashboard snapshots',async()=>{
+  let t=now,reads=0;
+  const f=recoveryFixture(),original=f.db.getAll;
+  f.db.doc=path=>({path});
+  f.db.getAll=async(...refs)=>{
+    if(refs.length===1 && refs[0].path==='pickingWhatsAppConfig/system'){
+      reads++;return [{data:()=>({state:'READY',enabled:true,heartbeatAt:now})}];
+    }
+    return original(...refs);
+  };
+  const monitor=m.createWarehouseMonitor({...f,clock:()=>t,logger:silentLogger});
+  const a=await monitor.snapshot();assert.equal(a.operationalServices[0].state,'ok');assert.equal(reads,1);
+  t+=20001;await monitor.snapshot();assert.equal(reads,1);
+  t+=40000;const b=await monitor.snapshot();assert.equal(reads,2);
+  assert.equal(b.operationalServices[0].observedAt,new Date(now).toISOString());
+  assert.ok(b.sections.every(s=>s.state==='ok'));
+});
